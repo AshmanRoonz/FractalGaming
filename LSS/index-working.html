@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.40';
+const LSS_BUILD = '36.43';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 
@@ -14839,6 +14839,24 @@ function spawnPelletBurst(origin, dir, distance) {
   const partCount = 48;
   const palette = [0xeeffee, 0xaaffbb, 0x66ff88, 0x44ff66, 0x22cc44, 0xddffdd];
   const baseSpeed = Math.min(3500, Math.max(1500, (distance || 800) * 2.5));
+  // (v36.41) SLAYER'S PRIMARY IS THE ONE WEAPON WITH NO GEOMETRY. Every other
+  // loadout's main gun leaves a tracer mesh, a Projectile, or a lightning tube
+  // downrange; the Shotgun's ENTIRE downrange visual is these 48 additive
+  // points per pellet. That makes it the only primary that can be erased by
+  // the two things the VR path does to the particle system and nothing else:
+  //   1. updateParticles wipes game.particles wholesale at VR throttle tier 3
+  //      ('Max FPS'), so Slayer alone fires nothing visible at all there;
+  //   2. renderFrame's XR branch is a BARE renderer.render — no renderPostFX,
+  //      i.e. no bloom — and in the hub it additionally runs ACES at exposure
+  //      0.95 (_lssHubDirectTonemap). Small additive sparks are exactly the
+  //      visual that lives or dies on bloom.
+  // So the pellets are flagged ESSENTIAL (updateParticles keeps these through
+  // the tier-3 wipe, the same contract spawnLightningBolt's `essential` arg
+  // already uses) and, in VR only, drawn bigger/longer so they read without
+  // the bloom that is not coming. Flat screen is byte-identical to v36.40.
+  const _vrFx = (typeof isXRPresenting === 'function') && isXRPresenting();
+  const _szK = _vrFx ? 1.9 : 1.0;      // no bloom in VR -> the spark must BE the glow
+  const _lifeK = _vrFx ? 1.35 : 1.0;   // and hang around long enough to register
   for (let p = 0; p < partCount; p++) {
     _pelletWobble.set(
       (Math.random() - 0.5) * 0.20,
@@ -14856,10 +14874,11 @@ function spawnPelletBurst(origin, dir, distance) {
     game.particles.push({
       position: origin.clone().add(_pelletJitter),
       velocity: v,
-      life: 0.50 + Math.random() * 0.35,
-      maxLife: 0.85,
+      life: (0.50 + Math.random() * 0.35) * _lifeK,
+      maxLife: 0.85 * _lifeK,
       color: palette[Math.floor(Math.random() * palette.length)],
-      size: 3.4 + Math.random() * 2.8,
+      size: (3.4 + Math.random() * 2.8) * _szK,
+      ess: 1,
     });
   }
   // Brighter Slayer-green muzzle flash : intensity 1.6 -> 2.4,
@@ -21486,8 +21505,12 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       sh.uniforms.uClipAtlas = clipAtlas;
       sh.uniforms.uClipSpacing = (m._clipSpacingU || (m._clipSpacingU = { value: 16.0 }));
       sh.uniforms.uClipOrigin = m._clipOrigin || (m._clipOrigin = { value: new THREE.Vector2() });   
-      sh.uniforms.uClipSkirt = (window.__clipSkirtU || (window.__clipSkirtU = { value: 1.0 }));   
-      sh.uniforms.uClipMorph = (window.__clipMorphU || (window.__clipMorphU = { value: 1.0 }));   
+      sh.uniforms.uClipSkirt = (window.__clipSkirtU || (window.__clipSkirtU = { value: 1.0 }));
+      sh.uniforms.uClipMorph = (window.__clipMorphU || (window.__clipMorphU = { value: 1.0 }));
+      // (v36.43) The geomorph anchor. Fed from _clipUpdate with the SAME (px,pz)
+      // the ring centres snap around, so the morph ramp is a continuous function
+      // of the eye instead of a step function of the snapped mesh centre.
+      sh.uniforms.uClipEye = (window.__clipEyeU || (window.__clipEyeU = { value: new THREE.Vector2(0, 0) }));
       // (v35.11) Geomorph band retune. The old band ((rd-48)/16 -> 1.0 at the
       // window edge 64) finished 4 cells TOO LATE: the parent ring's inner
       // hole edge sits at child-cell radius N/2-4 (=60), so in the 60..64
@@ -21500,11 +21523,58 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // the always-moving LOD morph ("mountains changing as you fly") is
       // half as fast per meter travelled and much less noticeable.
       // Live A/B: __clipMorph(0|1), __clipSkirt(0..1). Same fetch count.
+      //
+      // ⚠ (v36.43) THE TWO INVARIANTS THAT MAKE A SNAP INVISIBLE. Everything a
+      // clipmap vertex computes must be a function of its WORLD position, never
+      // of its index inside the mesh — because the mesh teleports 2 cells every
+      // time the centre re-snaps and the same world point lands on a different
+      // index. v35.11 got the geometry right (the atlas is toroidal and world-
+      // keyed, the coarse lattice is world-keyed because gIx is always even) but
+      // left TWO index-anchored terms, and both were measured flickering:
+      //
+      //  1. `_rd` was `max(|_fi-64|,|_fj-64|)` — the distance from the MESH
+      //     CENTRE. A snap moves it by exactly 2 cells, so `_gm` at a fixed
+      //     world point jumped 2/28 = 7.14% in ONE frame and then sat still for
+      //     the next 7 (measured, L0 at 4 u/frame: 17.53 u of vertical step on
+      //     the snap frame, 0.00 u on every other frame; L4 up to 95 u). That is
+      //     the hub's "mountain geometry flickers" — a sawtooth at 12-25 Hz in
+      //     normal flight. Now `_eo` re-centres `_rd` on `uClipEye`, so the ramp
+      //     is continuous in the eye: 2.36 u EVERY frame, snap frames measured
+      //     indistinguishable from non-snap frames.
+      //  2. The morph TARGET was a BILINEAR interpolation of the parent lattice.
+      //     The parent does not draw a bilinear patch — it draws two triangles
+      //     split on the c10-c01 anti-diagonal (see _clipGeo / _swBuildShell /
+      //     _stGroundYGrid, all the same convention). Bilinear and triangle-
+      //     linear agree on the lattice LINES and differ inside the cell by
+      //     twist/4, so the fully-morphed child never actually matched the
+      //     parent: measured seam error 1.8 u mean / 150 u max at L0/L1 rising
+      //     to 17 u mean / 534 u max at L4/L5. The seam is the child's window
+      //     edge and it TELEPORTS a whole snap step, so peaks sitting on it
+      //     popped. The target is now the parent's own triangle plane through
+      //     (h00,h10,h01) — `_wx,_wz` are only ever 0 or 0.5, so `_wx+_wz<=1`
+      //     always and the h11 triangle is unreachable: ONE FEWER FETCH, and the
+      //     child's fully-morphed surface is bit-identical to the parent's
+      //     rasterised surface (measured seam error 0.000 at all five seams).
+      //
+      // Band bounds follow from those two, with the eye as the origin:
+      //   start  = N/4 + 1 = 33 — must clear (a) this level's own hole edge,
+      //            hole/2 = 30 own-cells from the centre, <= 31 from the eye,
+      //            and (b) the CHILD's window edge, N/4 = 32 own-cells from the
+      //            child centre, <= 32.5 from the eye. Morphing before either
+      //            would open a crack on the inner side.
+      //   end    = (N/2-4) - 2 = 58 — the PARENT's hole edge is `hole` = 60
+      //            own-cells from the parent centre and the parent centre can
+      //            sit 2 own-cells off the eye, so 58 is the earliest the
+      //            parent can start drawing. Must be COMPLETE by then.
+      // Measured: start 32 leaves 0.013-0.234 u of residual seam error, start 33
+      // gives exactly 0.000. If _clipGeo's hole inset (the `-4`) changes, `_cme`
+      // moves with it; if _CLIP_N changes, both move.
       const _cn = _CLIP_N.toFixed(1), _cr = (_CLIP_N + 1).toFixed(1);
       const _chn = (_CLIP_N * 0.5).toFixed(1);            // window half-width (64)
-      const _cms = (_CLIP_N * 0.25).toFixed(1);           // morph band start (32)
-      const _cmw = (_CLIP_N * 0.25 - 4).toFixed(1);       // band width: ends at N/2-4 (28)
-      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*128.0,_fj=uv.y*128.0;\n if((_fj<0.5||_fj>127.5)&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x);}else if((_fi<0.5||_fi>127.5)&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x);}\n float _rd=max(abs(_fi-'+_chn+'),abs(_fj-'+_chn+'));float _gm=clamp((_rd-'+_cms+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/129.0)).x;float _h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/129.0)).x;float _h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/129.0)).x;float _h11=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je+2.0)+uClipOrigin+0.5)/129.0)).x;_ch=mix(_ch,mix(mix(_h00,_h10,_wx),mix(_h01,_h11,_wx),_wz),_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/128.0,1.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/128.0,0.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/128.0,1.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/128.0,0.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _spanX=(min(uv.x+1.0/128.0,1.0)-max(uv.x-1.0/128.0,0.0))*128.0*uClipSpacing; float _spanZ=(min(uv.y+1.0/128.0,1.0)-max(uv.y-1.0/128.0,0.0))*128.0*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));');   
+      const _cms = (_CLIP_N * 0.25 + 1);                  // morph band start, from the EYE (33)
+      const _cme = (_CLIP_N * 0.5 - 4 - 2);               // morph complete, from the EYE (58)
+      const _cmsS = _cms.toFixed(1), _cmw = (_cme - _cms).toFixed(1);   // width 25
+      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform vec2 uClipEye;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*128.0,_fj=uv.y*128.0;\n if((_fj<0.5||_fj>127.5)&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x);}else if((_fi<0.5||_fi>127.5)&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x);}\n vec2 _eo=(vec2(modelMatrix[3][0],modelMatrix[3][2])-uClipEye)/uClipSpacing;float _rd=max(abs(_fi-'+_chn+'+_eo.x),abs(_fj-'+_chn+'+_eo.y));float _gm=clamp((_rd-'+_cmsS+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/129.0)).x;float _h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/129.0)).x;float _h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/129.0)).x;_ch=mix(_ch,_h00+(_h10-_h00)*_wx+(_h01-_h00)*_wz,_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/128.0,1.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/128.0,0.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/128.0,1.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/128.0,0.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _spanX=(min(uv.x+1.0/128.0,1.0)-max(uv.x-1.0/128.0,0.0))*128.0*uClipSpacing; float _spanZ=(min(uv.y+1.0/128.0,1.0)-max(uv.y-1.0/128.0,0.0))*128.0*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));');   
     } else {
       sh.vertexShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
@@ -23023,17 +23093,34 @@ function _swWaterReflectShader() {
         uMaskTex: { value: null }, uFoamGain: { value: 1 }, uReliefScale: { value: 28.0 }, uReliefShade: { value: 0.7 },   
         uSnellTint: { value: new THREE.Color(0x9fd0e6) }, uDeepTint: { value: new THREE.Color(0x0a3a44) }, uSubmerge: { value: 0 }, uEye: { value: new THREE.Vector3() }, uReflLive: { value: 1 }, uFlipFace: { value: 0 },   
         uShallowTint: { value: new THREE.Color(0x2e7a6a) }, uShoreSoft: { value: 0.05 }, uFoamThresh: { value: 0.18 },
+        // (v36.42) uReflWorld = the WORLD -> reflection-UV matrix, captured in the SAME
+        // instant as the render target it addresses (see _swBuildHubWater's onBeforeRender
+        // wrapper). uReflWorldOn is 0 until the first reflection render has happened, so
+        // the original object-space path covers the first frames after a hub build.
+        uReflWorld: { value: new THREE.Matrix4() }, uReflWorldOn: { value: 0 },
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 } },
     ]),
     vertexShader: [
       'uniform mat4 textureMatrix;',
+      'uniform mat4 uReflWorld; uniform float uReflWorldOn;',
       'varying vec4 vUv;', 'varying vec3 vWP;', '#include <fog_pars_vertex>',
       'void main(){',
       // FLAT surface (no vertex displacement) : a height-displaced surface makes the flat
       // mirror projection slide up/down as a unit. Waves come from the fragment ripple
       // NORMALS distorting the reflection UV instead — the standard real-time-water trick.
       '  vWP = (modelMatrix * vec4(position,1.0)).xyz;',
-      '  vUv = textureMatrix * vec4(position,1.0);',
+      // (v36.42) SAMPLE THE MIRROR FROM **WORLD** SPACE, NOT OBJECT SPACE.
+      // three's Reflector bakes `scope.matrixWorld` into `textureMatrix`, so
+      // `textureMatrix * position` is only right while the plane has not moved since the
+      // reflection was rendered. This plane is re-centred on the CAMERA every frame while
+      // the reflection RT is refreshed only every 3rd (the perf throttle) — so on the two
+      // skipped frames the mapping was `bias*P*V * M_atRender * inverse(M_now)`, i.e. the
+      // whole reflection slid by exactly the camera's travel since the last update and
+      // snapped back on every refresh (measured: up to 18 RT px ~ 57 screen px at 864 u/s).
+      // uReflWorld is `textureMatrix * inverse(matrixWorld)` CAPTURED AT RENDER TIME, so it
+      // addresses the RT it was born with no matter how far the plane has since slid, and
+      // no matter whether the mirror's onBeforeRender ran before or after this draw.
+      '  vUv = mix(textureMatrix * vec4(position,1.0), uReflWorld * vec4(vWP,1.0), uReflWorldOn);',
       '  vec4 mvPosition = modelViewMatrix * vec4(position,1.0);',
       '  gl_Position = projectionMatrix * mvPosition;',
       '  #include <fog_vertex>',
@@ -23858,13 +23945,22 @@ function _swRippleTick(dt) {
       
       
       
+      // (v36.42) Take the MATCHED pair straight off the mirror : `w._reflWorld` is the
+      // world->UV matrix captured in the same instant as the RT contents (see the
+      // onBeforeRender wrapper in _swBuildHubWater). The old line rebuilt it here as
+      // `textureMatrix * inverse(matrixWorld)` with a matrixWorld from THIS frame and a
+      // textureMatrix from the last reflection render up to 3 frames ago — and because
+      // this tick runs BEFORE renderFrame, on a refresh frame the disp mesh got fresh RT
+      // contents addressed by a 3-frame-old matrix. `_reflWorld` is immune to both the
+      // throttle cadence and to whether the mirror's onBeforeRender runs before or after
+      // this mesh is drawn. `_reflWorldN` is 0 until the first real reflection render.
       const wm = w && w.material && w.material.uniforms;
-      if (wm && wm.tDiffuse && wm.textureMatrix) {
+      if (wm && wm.tDiffuse && w._reflWorldN > 0) {
         du.tDiffuse.value = wm.tDiffuse.value;
-        if (w._invMW) du.uReflMatrix.value.copy(wm.textureMatrix.value).multiply(w._invMW);
-        du.uReflLive.value = _vrR ? 0.0 : 1.0;                                 
+        du.uReflMatrix.value.copy(w._reflWorld);
+        du.uReflLive.value = _vrR ? 0.0 : 1.0;
       } else {
-        du.uReflLive.value = 0.0;                                             
+        du.uReflLive.value = 0.0;
       }
       du.uReflMix.value = (W2.reflMix != null) ? W2.reflMix : 1.0;            
       du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 1.0; 
@@ -24765,18 +24861,63 @@ function _swBuildHubWater(T) {
     };
     const _reflOBR = mesh.onBeforeRender;
     mesh._reflFrame = 0;
+    // (v36.42) MOVEMENT-AWARE THROTTLE. The v34 throttle was a flat 1-in-3, which is right
+    // when you are parked and wrong when you are moving : the RT is then up to 2 frames old,
+    // and the reflection of NEAR water (the parallax-heaviest part) lags by a measured 36 RT
+    // px at 864 u/s — plus, on a fast turn, water that has just entered view samples off the
+    // edge of a render target aimed 2 frames ago and smears against the clamp.
+    // So : never more often than every other frame (a hard cost ceiling), never less often
+    // than every third (the shipped cadence, unchanged when you are slow), and inside that
+    // band refresh early only once the eye has actually moved/turned enough to show.
+    // Cost, measured at the city stand-off with EXT_disjoint_timer_query_webgl2: the pass is
+    // 0.74 ms GPU (it was 0.92 ms before the disp plane came out of it), so the fast-motion
+    // cadence is 0.37 ms/frame vs 0.31 ms/frame for v36.41's flat 1-in-3 — +0.9% of the
+    // 6.94 ms budget, and CHEAPER than v36.41 whenever you are not sprinting.
+    mesh._reflGap = 99;
+    const _reflEyeP = new THREE.Vector3(), _reflEyeQ = new THREE.Quaternion();
+    const _reflNowP = new THREE.Vector3(), _reflNowQ = new THREE.Quaternion(), _reflNowS = new THREE.Vector3();
+    // (v36.42) the matched pair : the world->UV matrix that belongs to whatever is CURRENTLY
+    // in the reflection RT. Captured at the bottom of the wrapper, only on frames where the
+    // Reflector actually re-rendered. _reflWorldN counts captures (diagnostics/`__reflProbe`).
+    mesh._reflWorld = new THREE.Matrix4();
+    mesh._reflWorldN = 0;
+    const _reflInvScratch = new THREE.Matrix4();
+    const _reflNrm = new THREE.Vector3(), _reflRot = new THREE.Matrix4();
+    const _reflRP = new THREE.Vector3(), _reflCP = new THREE.Vector3();
     mesh.onBeforeRender = function (rnd, scn, cam, geo2, mat2, grp) {
-      if (game && game._reflBenchOff) return;   
-      
-      
-      
-      
-      if ((typeof isXRPresenting === 'function') && isXRPresenting()) return; this._reflFrame = (this._reflFrame + 1) % 3;
-      if (this._reflFrame !== 0) return;   
-      
-      
-      
-      
+      if (game && game._reflBenchOff) return;
+
+
+
+
+      if ((typeof isXRPresenting === 'function') && isXRPresenting()) return;
+      this._reflFrame = (this._reflFrame + 1) % 3;
+      // (v36.42) gap-based cadence, live-tunable via window.__water.{reflGapMin,reflGapMax,
+      // reflMove,reflTurn}. reflGapMin 1 restores an every-frame mirror, reflGapMin =
+      // reflGapMax = 3 restores the exact v36.41 flat 1-in-3 for an A/B.
+      {
+        const _WK = window.__water || {};
+        const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : 2;   // hard cost ceiling
+        const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : 3;   // shipped cadence
+        this._reflGap++;
+        let _go = (this._reflGap >= _gMax);
+        if (!_go && this._reflGap >= _gMin) {
+          cam.matrixWorld.decompose(_reflNowP, _reflNowQ, _reflNowS);
+          // eye TRANSLATION is what moves a planar reflection (the mirrored image at a
+          // surface point depends on eye position, not on where you are looking) ...
+          if (_reflNowP.distanceToSquared(_reflEyeP) > ((_WK.reflMove != null ? _WK.reflMove : 6) ** 2)) _go = true;
+          // ... and eye ROTATION is what walks water off the edge of the last RT, because
+          // the RT only ever covered the frustum it was rendered for. 3e-5 on 1-|dot| is
+          // ~1.0 degrees between refreshes; measured, that leaves gentle aiming (<=33 deg/s)
+          // on the cheap 1-in-3 cadence and only spends the extra render on a real turn.
+          else if (1 - Math.abs(_reflNowQ.dot(_reflEyeQ)) > (_WK.reflTurn != null ? _WK.reflTurn : 3e-5)) _go = true;
+        }
+        if (!_go) return;
+      }
+
+
+
+
       const ship = (typeof player !== 'undefined' && player) ? player.mesh : null;
       const _rwl = game._hubWater ? game._hubWater.userData.WL : -1e9;
       const _rab = (player && player.position) ? (player.position.y - _rwl) : 1e9;
@@ -24792,9 +24933,55 @@ function _swBuildHubWater(T) {
       const _shieldsWas = _shields.map(function (m) { return m.visible; });
       for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = false;
       _reflSkipSet = _shields;
-      if (_showShip) ship.traverse(_shipReflOverride);   
+      if (_showShip) ship.traverse(_shipReflOverride);
+      // ─────────────────────────────────────────────────────────────────────────────────
+      // (v36.42) NO WATER IN THE WATER'S OWN REFLECTION.
+      // three's Reflector hides ITSELF for the pass (`scope.visible = false`) — but the
+      // v33.69 DISPLACED surface (`_hubWaterDisp`, the mesh that is actually the visible
+      // water on flatscreen since __waterDisp defaults to 1) is a SEPARATE object, so it
+      // was still in the reflection render list. Two failures at once:
+      //   1. TEXTURE FEEDBACK. Its `tDiffuse` IS this render target — it was sampling the
+      //      very buffer being written. Undefined by spec; in practice it painted the
+      //      previous reflection back into the new one, one bounce stale.
+      //   2. A horizontal SHEET across the mirror. The virtual camera sits under the water
+      //      looking up, so the sheet covered the reflected world with "reflected water".
+      // Measured live at the hub lake: the white "clouds on the lake" were the lake
+      // reflecting ITSELF reflecting the sky; hiding it brought back the real terrain +
+      // rainbow reflection, and dropped the reflection pass from 2,867,540 to 1,687,892
+      // triangles (the disp plane is 768x768 = 1,179,648 of them) at 98 draws either way.
+      // The main render list was already built by projectObject before any of these draws,
+      // so toggling `visible` here can never hide them from the MAIN pass.
+      const _wD = _hubWaterDisp, _wO = game._hubWaterOverlay, _wU = game._hubWaterUnder;
+      const _wDv = !!(_wD && _wD.visible), _wOv = !!(_wO && _wO.visible), _wUv = !!(_wU && _wU.visible);
+      if (_wDv) _wD.visible = false;
+      if (_wOv) _wO.visible = false;
+      if (_wUv) _wU.visible = false;
       try { _reflOBR.call(this, rnd, scn, cam, geo2, mat2, grp); }
-      finally { if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis; }
+      finally {
+        if (_wDv) _wD.visible = true;
+        if (_wOv) _wO.visible = true;
+        if (_wUv) _wU.visible = true;
+        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
+      }
+      // (v36.42) Capture the world->UV matrix that matches what we just rendered. Only when
+      // the Reflector really re-rendered : it BAILS on `view.dot(normal) > 0` (camera behind
+      // the plane = submerged), leaving both the RT and textureMatrix stale, and re-deriving
+      // the matrix from a fresh matrixWorld against a stale RT is precisely the bug above.
+      // Same facing test as three's, so the two can never disagree.
+      _reflNrm.set(0, 0, 1).applyMatrix4(_reflRot.extractRotation(this.matrixWorld));
+      _reflRP.setFromMatrixPosition(this.matrixWorld);
+      _reflCP.setFromMatrixPosition(cam.matrixWorld);
+      if (_reflRP.sub(_reflCP).dot(_reflNrm) <= 0) {
+        this._reflWorld.copy(this.material.uniforms.textureMatrix.value)
+          .multiply(_reflInvScratch.copy(this.matrixWorld).invert());
+        this._reflWorldN++;
+        const _ru = this.material.uniforms;
+        if (_ru.uReflWorld) { _ru.uReflWorld.value.copy(this._reflWorld); _ru.uReflWorldOn.value = 1; }
+        // The cadence clock only restarts on a REAL refresh — a facing-away bail must never
+        // look like an update, or surfacing would resume from a stale gap and eye pose.
+        this._reflGap = 0;
+        cam.matrixWorld.decompose(_reflEyeP, _reflEyeQ, _reflNowS);
+      }
     };
     
     const undMat = new THREE.MeshBasicMaterial({ color: 0x12455a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });   
@@ -24847,6 +25034,87 @@ function _swBuildHubWater(T) {
 window.__refl = function (on) {
   game._reflBenchOff = (on === false);
   return game._reflBenchOff ? 'reflector RT render: SKIPPED' : 'reflector RT render: ON';
+};
+// ───────────────────────────────────────────────────────────────────────────
+// (v36.42) REFLECTION CORRECTNESS PROBE — the headset-less/eyeball-less check for
+// "is the mirror addressing the buffer it actually rendered?".
+//
+// It rebuilds three's Reflector math for the CURRENT camera (the ideal, zero-lag
+// world->UV matrix) and reports, in reflection-RT PIXELS, how far the matrix the
+// water is actually sampling with lands from it, at a few distances straight
+// ahead on the water plane:
+//
+//   mismatchPx : live matrix vs the matrix that MATCHES the RT contents. This is
+//                the v36.42 bug — it must be 0.00 now, at any speed. It used to
+//                reach 18 px at 864 u/s (~57 screen px) and snap back every 3rd
+//                frame, which is the judder the owner reported.
+//   stalePx    : matched matrix vs ideal — the HONEST residual of the 1-in-3
+//                throttle (the reflection is 0-2 frames old). Nonzero while
+//                moving, by design; that is what the perf win costs.
+//
+// Usage from the hub, over water:  __reflProbe()   ->  one sample
+//                                  __reflProbe(90) ->  worst case over 90 frames
+// ───────────────────────────────────────────────────────────────────────────
+window.__reflProbe = function (frames) {
+  const w = game && game._hubWater;
+  if (!w || !w.material || !w.material.uniforms || !w.material.uniforms.textureMatrix) return 'no hub water (enter freeflight)';
+  const T = THREE;
+  const _ideal = function () {
+    const rwp = new T.Vector3().setFromMatrixPosition(w.matrixWorld);
+    const cwp = new T.Vector3().setFromMatrixPosition(camera.matrixWorld);
+    const rot = new T.Matrix4().extractRotation(w.matrixWorld);
+    const nrm = new T.Vector3(0, 0, 1).applyMatrix4(rot);
+    const view = new T.Vector3().subVectors(rwp, cwp);
+    if (view.dot(nrm) > 0) return null;
+    view.reflect(nrm).negate().add(rwp);
+    const crot = new T.Matrix4().extractRotation(camera.matrixWorld);
+    const look = new T.Vector3(0, 0, -1).applyMatrix4(crot).add(cwp);
+    const tgt = new T.Vector3().subVectors(rwp, look).reflect(nrm).negate().add(rwp);
+    const vc = new T.PerspectiveCamera();
+    vc.position.copy(view);
+    vc.up.set(0, 1, 0).applyMatrix4(crot).reflect(nrm);
+    vc.lookAt(tgt); vc.updateMatrixWorld();
+    vc.projectionMatrix.copy(camera.projectionMatrix);
+    return new T.Matrix4().set(0.5, 0, 0, 0.5, 0, 0.5, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0, 1)
+      .multiply(vc.projectionMatrix).multiply(vc.matrixWorldInverse);
+  };
+  const rt = w.getRenderTarget ? w.getRenderTarget() : null;
+  const RW = rt ? rt.width : 400, RH = rt ? rt.height : 256;
+  const _sample = function () {
+    const ideal = _ideal(); if (!ideal) return null;
+    const u = w.material.uniforms;
+    // what the water is REALLY sampling with, on either shader path
+    const live = (u.uReflWorldOn && u.uReflWorldOn.value > 0.5)
+      ? u.uReflWorld.value
+      : new T.Matrix4().copy(u.textureMatrix.value).multiply(new T.Matrix4().copy(w.matrixWorld).invert());
+    const matched = w._reflWorld || live;
+    const WL = w.userData.WL, cx = camera.position.x, cz = camera.position.z;
+    const fwd = new T.Vector3(0, 0, -1).applyQuaternion(camera.quaternion); fwd.y = 0;
+    if (fwd.lengthSq() < 1e-6) fwd.set(0, 0, -1); fwd.normalize();
+    const uv = (M, p) => { const v = p.clone().applyMatrix4(M); return [v.x / v.w, v.y / v.w]; };
+    const out = {};
+    for (const d of [300, 1000, 2500]) {
+      const p = new T.Vector4(cx + fwd.x * d, WL, cz + fwd.z * d, 1);
+      const a = uv(live, p), b = uv(matched, p), c = uv(ideal, p);
+      out['d' + d] = {
+        mismatchPx: +Math.hypot((a[0] - b[0]) * RW, (a[1] - b[1]) * RH).toFixed(2),
+        stalePx: +Math.hypot((b[0] - c[0]) * RW, (b[1] - c[1]) * RH).toFixed(2),
+      };
+    }
+    return out;
+  };
+  if (!frames) return { rt: RW + 'x' + RH, worldPath: !!(w.material.uniforms.uReflWorldOn && w.material.uniforms.uReflWorldOn.value > 0.5), captures: w._reflWorldN || 0, px: _sample() };
+  const N = Math.max(1, frames | 0);
+  return new Promise((res) => {
+    const acc = {}; let n = 0, ticks = 0;
+    const tick = () => {
+      const s = _sample();
+      if (s) { for (const k in s) { const a = acc[k] || (acc[k] = { mismatchPx: 0, stalePx: 0 }); a.mismatchPx = Math.max(a.mismatchPx, s[k].mismatchPx); a.stalePx = Math.max(a.stalePx, s[k].stalePx); } n++; }
+      if (++ticks < N) requestAnimationFrame(tick);
+      else res({ rt: RW + 'x' + RH, samples: n, worstPx: acc });
+    };
+    requestAnimationFrame(tick);
+  });
 };
 
 
@@ -25154,17 +25422,20 @@ function _swUpdateHubWater() {
   // color (colorWrite=false) so the flat mirror isn't drawn (it would poke through wave troughs). onBeforeRender
   // still fires with colorWrite=false (r165 renderObject calls it before the colorWrite gate), so the RT stays
   // fresh at no extra render cost. When SUBMERGED or in VR, fall through to the normal flat-water path (its
-  // from-below Snell window / cheap VR water still render). Cache inverse(matrixWorld) for the disp projection.
+  // from-below Snell window / cheap VR water still render).
+  // (v36.42) The `w._invMW` cache that used to live here is GONE. Inverting THIS frame's
+  // matrixWorld and pairing it with a textureMatrix from the last reflection render (up to
+  // 3 frames back, because of the throttle) is what made the reflection slide with the
+  // camera. The mirror now captures `w._reflWorld` at render time instead — see the
+  // onBeforeRender wrapper in _swBuildHubWater.
   if (typeof window !== 'undefined' && window.__waterDisp && !game._swSubmerged &&
       !((typeof isXRPresenting === 'function') && isXRPresenting())) {
     const WLd = w.userData.WL;
     w.visible = true;
-    w.frustumCulled = false;   
+    w.frustumCulled = false;
     if (w.material) w.material.colorWrite = false;
     w.position.set(camera.position.x, WLd, camera.position.z);
     w.updateMatrix(); w.updateMatrixWorld(true);
-    if (!w._invMW) w._invMW = new THREE.Matrix4();
-    w._invMW.copy(w.matrixWorld).invert();   
     return;
   }
   if (w.material && w.material.colorWrite === false) w.material.colorWrite = true;   
@@ -28460,6 +28731,83 @@ window.__smoothTerrain = function (on) { const u = (window.__smoothClipU || (win
 window.__terrainDetail = function (v) { const u = (window.__terrainDetailU || (window.__terrainDetailU = { value: 1.0 })); if (v === undefined) return u.value; u.value = Math.max(0.0, v); return u.value; };
 window.__terrainAO  = function (v) { const u = (window.__terrainAOU  || (window.__terrainAOU  = { value: 0.55 })); if (v === undefined) return u.value; u.value = Math.max(0, Math.min(2, v)); return u.value; };
 window.__terrainSat = function (v) { const u = (window.__terrainSatU || (window.__terrainSatU = { value: 0.40 })); if (v === undefined) return u.value; u.value = Math.max(0, Math.min(1, v)); return u.value; };
+// (v36.43) The two live clipmap A/B knobs the map has always documented but that
+// only ever existed as raw uniform objects. __clipMorph(0) = geomorph off (hard
+// LOD steps, for seeing where the rings are), __clipSkirt(0) = skirt walls off.
+window.__clipMorph = function (v) { const u = (window.__clipMorphU || (window.__clipMorphU = { value: 1.0 })); if (v === undefined) return u.value; u.value = Math.max(0, Math.min(1, +v)); return u.value; };
+window.__clipSkirt = function (v) { const u = (window.__clipSkirtU || (window.__clipSkirtU = { value: 1.0 })); if (v === undefined) return u.value; u.value = Math.max(0, Math.min(1, +v)); return u.value; };
+
+// (v36.43) __clipSeam() — the eyeball-free clipmap correctness check, the twin of
+// __reflProbe. Re-implements the clipmap VERTEX SHADER in JS from the live height
+// atlases and the live ring centres, then reports, per LOD seam:
+//   seamMeanU / seamMaxU  the height disagreement between the fine level's fully-
+//                         morphed surface and the coarse level's rasterised
+//                         surface, sampled over the annulus where BOTH really
+//                         draw. MUST BE 0 — that is what makes the seam (which
+//                         teleports a whole snap step every re-snap) invisible.
+//                         v36.42 measured 1.83 u mean / 150 u max at L0/L1 up to
+//                         17.06 / 534 at L4/L5.
+//   morphSpanU            the largest |coarse - fine| anywhere in this level's
+//                         band = the full vertical travel of the geomorph.
+//   uPerFrame576          how far a vertex moves in ONE frame at 576 u/s, 144 Hz
+//                         — the smooth, every-frame cost of the geomorph now.
+//   v3642SnapStepU        what the SAME vertex used to jump in a SINGLE frame,
+//                         once per snap, with nothing in between (morphSpan *
+//                         2/28). That sawtooth was the reported flicker.
+window.__clipSeam = function () {
+  if (!_clipmap.on || !_clipmap.levels) return '[clipSeam] clipmap is off (hub free-flight only)';
+  const N = _CLIP_N, R = N + 1, H2 = N * 0.5;
+  const eye = (window.__clipEyeU && window.__clipEyeU.value) || { x: 0, y: 0 };
+  const bandS = N * 0.25 + 1, bandE = N * 0.5 - 6, bandW = bandE - bandS;
+  const lev = (k) => {
+    const L = _clipmap.levels[k], d = L.data, ox = L.mat._clipOrigin.value.x, oz = L.mat._clipOrigin.value.y;
+    const T = (i, j) => d[((((j + oz) % R) + R) % R) * R + ((((i + ox) % R) + R) % R)];
+    const eox = (L.cx - eye.x) / L.spacing, eoz = (L.cz - eye.y) / L.spacing;
+    const H = (i, j) => {
+      let fine = T(i, j);
+      if ((j < 0.5 || j > N - 0.5) && (i % 2) === 1) fine = 0.5 * (T(i - 1, j) + T(i + 1, j));
+      else if ((i < 0.5 || i > N - 0.5) && (j % 2) === 1) fine = 0.5 * (T(i, j - 1) + T(i, j + 1));
+      const rd = Math.max(Math.abs(i - H2 + eox), Math.abs(j - H2 + eoz));
+      const gm = Math.min(1, Math.max(0, (rd - bandS) / bandW));
+      if (gm <= 0) return { h: fine, gm: 0, span: 0 };
+      const ie = Math.floor(i / 2) * 2, je = Math.floor(j / 2) * 2, wx = (i - ie) * 0.5, wz = (j - je) * 0.5;
+      const h00 = T(ie, je), tgt = h00 + (T(ie + 2, je) - h00) * wx + (T(ie, je + 2) - h00) * wz;
+      return { h: fine + (tgt - fine) * gm, gm: gm, span: Math.abs(tgt - fine) };
+    };
+    // rasterised surface at an arbitrary world XZ, on the SAME c10-c01 anti-diagonal split
+    const at = (x, z) => {
+      const fi = (x - L.cx) / L.spacing + H2, fj = (z - L.cz) / L.spacing + H2;
+      if (fi < 0 || fi > N || fj < 0 || fj > N) return null;
+      const i0 = Math.min(N - 1, Math.floor(fi)), j0 = Math.min(N - 1, Math.floor(fj));
+      const u = fi - i0, v = fj - j0;
+      const a = H(i0, j0).h, b = H(i0 + 1, j0).h, c = H(i0, j0 + 1).h, e = H(i0 + 1, j0 + 1).h;
+      return (u + v <= 1) ? a + (b - a) * u + (c - a) * v : e + (c - e) * (1 - u) + (b - e) * (1 - v);
+    };
+    return { L: L, H: H, at: at };
+  };
+  const rows = [];
+  for (let k = 0; k < _CLIP_LEVELS - 1; k++) {
+    const F = lev(k), C = lev(k + 1), sp = F.L.spacing;
+    const half = H2 * sp, holeHalf = (N * 0.5 - 4) * 0.5 * C.L.spacing;
+    let n = 0, sum = 0, mx = 0;
+    for (let x = F.L.cx - half; x <= F.L.cx + half; x += sp * 0.5)
+      for (let z = F.L.cz - half; z <= F.L.cz + half; z += sp * 0.5) {
+        if (Math.max(Math.abs(x - C.L.cx), Math.abs(z - C.L.cz)) < holeHalf - 1e-6) continue;
+        const a = F.at(x, z), b = C.at(x, z);
+        if (a === null || b === null) continue;
+        const D = Math.abs(a - b); sum += D; n++; if (D > mx) mx = D;
+      }
+    let span = 0;
+    for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) { const s = F.H(i, j); if (s.gm > 0 && s.span > span) span = s.span; }
+    rows.push({ seam: k + '/' + (k + 1), spacing: sp, samples: n,
+      seamMeanU: +(sum / Math.max(1, n)).toFixed(4), seamMaxU: +mx.toFixed(3),
+      morphSpanU: +span.toFixed(1),
+      uPerFrame576: +(span / (bandW * sp) * 4).toFixed(3),
+      v3642SnapStepU: +(span * 2 / 28).toFixed(2) });
+  }
+  try { console.table(rows); } catch (_) {}
+  return rows;
+};
 
 // (S3) FULL bake : fill the whole atlas under the TOROIDAL invariant — texel (gx mod R, gz mod R)
 // always holds the carved height at GLOBAL cell (gx,gz), independent of where the window sits. Used
@@ -28546,7 +28894,18 @@ function _clipBuild() {
 // it itself, one level per frame, via _clipEnableSliced.
 // ⚠ `_clipmap.enabling` makes gameLoop stand down while that runs. Without it
 // gameLoop re-enters every frame (on is still false) and redoes the whole bake.
+// (v36.43) THE GEOMORPH ANCHOR. `uClipEye` must be the SAME point the ring
+// centres snap around (the player, or the camera during the intro cinematic —
+// see gameLoop's `_fX/_fZ`), because the band bounds are proved against
+// |eye - centre| <= spacing. Set it from inside _clipUpdate/_clipEnableLevel
+// rather than from gameLoop so it can never drift out of step with a centre:
+// __clipTest's own follow loop and the staged enable go through here too.
+function _clipEyeSet(x, z) {
+  const u = (window.__clipEyeU || (window.__clipEyeU = { value: new THREE.Vector2(0, 0) }));
+  u.value.set(x, z);
+}
 function _clipEnableLevel(L, fx, fz) {
+  _clipEyeSet(fx, fz);
   const _st = 2 * L.spacing;
   L.cx = Math.round(fx / _st) * _st; L.cz = Math.round(fz / _st) * _st;
   _clipBakeLevel(L);
@@ -28599,6 +28958,7 @@ async function _clipEnableSliced(fx, fz) {
 // vertex lines), re-bake + reposition when the snapped centre changes (usually only L0 moves).
 function _clipUpdate(px, pz) {
   if (!_clipmap.on || !_clipmap.levels) return;
+  _clipEyeSet(px, pz);   // (v36.43) every frame, not just on a snap — the morph ramp is continuous in this
   const N = _CLIP_N;
   for (const L of _clipmap.levels) {
     const stp = 2 * L.spacing;
@@ -45827,11 +46187,26 @@ function _pVel(x, y, z) { return { x: x || 0, y: y || 0, z: z || 0 }; }
 function updateParticles(dt) {
   const _vrTier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
   if (_vrTier >= 3) {
-    game.particles.length = 0;
-    _ptsGeo.setDrawRange(0, 0);
-    _particlePoints.visible = false;
+    // (v36.41) 'Max FPS' used to `game.particles.length = 0` and hide the point
+    // cloud outright. That is defensible for ambience — and fatal for SLAYER,
+    // whose primary has NO other visual (see spawnPelletBurst): the one mode
+    // meant to strip decoration was deleting a weapon. Keep the particles that
+    // carry weapon feedback (`ess`) and drop the rest, so the mode still pays
+    // ~nothing (a shotgun blast is 48 points for half a second) but a Slayer
+    // can still see where their shot went. Splash drops stay fully stripped.
+    let _k = 0;
+    for (let i = 0; i < game.particles.length; i++) {
+      const _p = game.particles[i];
+      if (_p.ess) game.particles[_k++] = _p;
+    }
+    game.particles.length = _k;
     if (typeof _splGeo !== 'undefined') { _splGeo.setDrawRange(0, 0); _splashPts.visible = false; }
-    return;
+    if (_k === 0) {
+      _ptsGeo.setDrawRange(0, 0);
+      _particlePoints.visible = false;
+      return;
+    }
+    // fall through and draw the survivors through the normal path below
   }
   // Cap particle count: cull oldest when over budget (quality-aware)
   const _pCap = _particleCap();
@@ -59819,6 +60194,62 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
   if (player.loadoutKey === 'TRACKER') {
     const halfW = W / 2, halfH = H / 2;
     const _tp = (_hudSharedTail._p = _hudSharedTail._p || new THREE.Vector3());
+    // (v36.41) VR LOCK-RING PROJECTION. On a flat screen the HUD canvas IS the
+    // viewport, so NDC -> canvas px lands the ring exactly on the target (
+    // measured: drawn === truth to 0.1px). In VR that same canvas is a TEXTURE
+    // on _xrEnsureHudMesh's PlaneGeometry(2.0, 1.125) parked 2m in front of
+    // xrDolly and scaled by input.vrHudScale — a quad that subtends far less
+    // than the camera frustum. Reusing the flat NDC mapping therefore equates
+    // two different angular scales and drags every ring toward the view centre:
+    // measured on the VR code path at fov 120 / vrHudScale 1.5, a target 10 deg
+    // off-axis drew at 2.46 deg (7.5 deg error), 20 -> 5.07 (14.9), 30 -> 8.00
+    // (22.0). Only dead-centre was right, which is exactly "the locks are off
+    // place". Fix: stop projecting, and INTERSECT the eye->target ray with the
+    // HUD quad, then convert the hit point to canvas px. Exact for any plane
+    // size / distance / scale, and it also picks up the head-translation
+    // parallax the flat path cannot express (the quad is 2m away, the target
+    // hundreds of units — leaning 20cm swings the correct canvas point by ~6
+    // deg). Flat screen keeps the original two lines untouched.
+    const _vrRing = (typeof isXRPresenting === 'function') && isXRPresenting();
+    let _hpW = 0, _hpH = 0, _hpZ = -2, _eyeX = 0, _eyeY = 0, _eyeZ = 0;
+    let _vmv = null;
+    if (_vrRing) {
+      // Plane metrics straight off the mesh so a geometry/placement change can
+      // never desync the rings; the SCALE is read the way renderFrame's XR
+      // branch writes it (same clamp), so dragging the slider is exact rather
+      // than one frame late.
+      const _hm = (typeof xrHudMesh !== 'undefined') ? xrHudMesh : null;
+      const _gp = (_hm && _hm.geometry && _hm.geometry.parameters) ? _hm.geometry.parameters : null;
+      const _hs = (typeof input !== 'undefined' && input && typeof input.vrHudScale === 'number')
+        ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 1.5;
+      _hpW = (_gp && _gp.width ? _gp.width : 2.0) * _hs;
+      _hpH = (_gp && _gp.height ? _gp.height : 1.125) * _hs;
+      _hpZ = _hm ? _hm.position.z : -2.0;
+      // "Dolly space" = the pose _xrSyncDollyBeforeRender is about to lift off
+      // the camera onto xrDolly. Composed here rather than read off
+      // camera.matrixWorldInverse because at this point in the frame the dolly
+      // is still the identity _xrResetDollyAtFrameStart left it as, and the
+      // camera's world matrix is only incidentally fresh.
+      _vmv = (_hudSharedTail._m = _hudSharedTail._m || new THREE.Matrix4());
+      const _one = (_hudSharedTail._one = _hudSharedTail._one || new THREE.Vector3(1, 1, 1));
+      _vmv.compose(camera.position, camera.quaternion, _one).invert();
+      // Cyclopean eye, in that same dolly space. renderer.xr's per-view cameras
+      // carry the head pose in REFERENCE space, which is exactly dolly-local.
+      // One ring on one shared quad cannot be right for both eyes at once (the
+      // quad is at 2m, the target at infinity), so the midpoint is the honest
+      // compromise; without a session the array is empty and the eye is the
+      // dolly origin, which is the ideal case anyway.
+      try {
+        const _xc = (renderer.xr && renderer.xr.getCamera) ? renderer.xr.getCamera() : null;
+        const _cams = _xc && _xc.cameras;
+        if (_cams && _cams.length) {
+          for (let _ci = 0; _ci < _cams.length; _ci++) {
+            _eyeX += _cams[_ci].position.x; _eyeY += _cams[_ci].position.y; _eyeZ += _cams[_ci].position.z;
+          }
+          _eyeX /= _cams.length; _eyeY /= _cams.length; _eyeZ /= _cams.length;
+        }
+      } catch (_) {}
+    }
     // (v35.96) Lock rings draw over MONSTERS too: candidates are enemy ships
     // plus alive leviathans carrying a lock id — same rings, same lock data.
     const _lockCands = (_hudSharedTail._c = _hudSharedTail._c || []);
@@ -59835,10 +60266,21 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
     for (const bot of _lockCands) {
       const locks = player.trackerLocks[bot.id] || 0;
       if (locks <= 0) continue;
-      _tp.copy(bot.position).project(camera);
-      if (_tp.z > 1) continue;
-      const sx = (_tp.x * halfW) + halfW;
-      const sy = -(_tp.y * halfH) + halfH;
+      let sx, sy;
+      if (_vrRing) {
+        _tp.copy(bot.position).applyMatrix4(_vmv);          // -> dolly space
+        const _dz = _tp.z - _eyeZ;
+        if (_dz > -1e-4) continue;                          // behind the eye
+        const _u = (_hpZ - _eyeZ) / _dz;                    // ray param onto the quad
+        if (!(_u > 0)) continue;
+        sx = ((_eyeX + (_tp.x - _eyeX) * _u) / _hpW + 0.5) * W;
+        sy = (0.5 - (_eyeY + (_tp.y - _eyeY) * _u) / _hpH) * H;
+      } else {
+        _tp.copy(bot.position).project(camera);
+        if (_tp.z > 1) continue;
+        sx = (_tp.x * halfW) + halfW;
+        sy = -(_tp.y * halfH) + halfH;
+      }
       if (sx < -100 || sx > W + 100 || sy < -100 || sy > H + 100) continue;
 
       const baseR = 30;
@@ -59897,6 +60339,66 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
     ctx.beginPath(); ctx.arc(cx, cy, _HL.health.r * vmin, 0, Math.PI * 2); ctx.stroke();
   }
 }
+
+// (v36.41) HEADSET-LESS TEST HOOK for the TRACKER lock rings. There is no way
+// to eyeball a VR-only projection without a headset, which is how the v36.41
+// bug survived: the flat path is provably exact, so nothing on screen ever
+// looked wrong. This replays BOTH mappings for a target `deg` degrees off the
+// nose at `dist` units and reports where the ring lands, in the only unit that
+// matters — the ANGLE the player sees it at, versus the angle the target is
+// actually at. `window.__lockRingProbe()` sweeps a default spread.
+//   window.__lockRingProbe()                 -> [{offAxisDeg, drawnAtDeg, errDeg}, ...]
+//   window.__lockRingProbe([10, 25], 1200)   -> same for a custom spread/range
+// Runs on a flat screen too: it computes the VR numbers from the same plane
+// metrics the XR branch uses, so a regression shows up without entering VR.
+try {
+  window.__lockRingProbe = function (degs, dist) {
+    const _out = [];
+    const _ds = Array.isArray(degs) ? degs : [0, 5, 10, 20, 30];
+    const _r = (typeof dist === 'number' && dist > 0) ? dist : 900;
+    const W = window.innerWidth, H = window.innerHeight;
+    const _hm = (typeof xrHudMesh !== 'undefined') ? xrHudMesh : null;
+    const _gp = (_hm && _hm.geometry && _hm.geometry.parameters) ? _hm.geometry.parameters : null;
+    const _hs = (typeof input !== 'undefined' && input && typeof input.vrHudScale === 'number')
+      ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 1.5;
+    const _pw = (_gp && _gp.width ? _gp.width : 2.0) * _hs;
+    const _ph = (_gp && _gp.height ? _gp.height : 1.125) * _hs;
+    const _pz = _hm ? _hm.position.z : -2.0;
+    const _v = new THREE.Vector3(), _one = new THREE.Vector3(1, 1, 1);
+    const _m = new THREE.Matrix4().compose(camera.position, camera.quaternion, _one);
+    for (const d of _ds) {
+      const a = d * Math.PI / 180;
+      // target straight out the nose, swung `d` degrees to the right
+      _v.set(Math.sin(a) * _r, 0, -Math.cos(a) * _r);
+      const lx = _v.x, ly = _v.y, lz = _v.z;
+      // --- what the FIXED VR path draws: ray -> quad -> canvas px ---
+      const u = _pz / lz;
+      const vrX = ((lx * u) / _pw + 0.5) * W;
+      const vrY = (0.5 - (ly * u) / _ph) * H;
+      // --- what the OLD (flat NDC) mapping drew, for comparison ---
+      const _w = _v.clone().applyMatrix4(_m).project(camera);
+      const oldX = (_w.x * W / 2) + W / 2;
+      const oldY = -(_w.y * H / 2) + H / 2;
+      // canvas px -> the angle the player actually sees that px at on the quad
+      const ang = (px, py) => {
+        const qx = (px / W - 0.5) * _pw, qy = (0.5 - py / H) * _ph;
+        return { x: Math.atan2(qx, -_pz) * 180 / Math.PI, y: Math.atan2(qy, -_pz) * 180 / Math.PI };
+      };
+      const _fx = ang(vrX, vrY), _ox = ang(oldX, oldY);
+      _out.push({
+        offAxisDeg: d,
+        fixedCanvasPx: [+vrX.toFixed(1), +vrY.toFixed(1)],
+        fixedDrawnAtDeg: +_fx.x.toFixed(2),
+        fixedErrDeg: +Math.abs(_fx.x - d).toFixed(3),
+        oldCanvasPx: [+oldX.toFixed(1), +oldY.toFixed(1)],
+        oldDrawnAtDeg: +_ox.x.toFixed(2),
+        oldErrDeg: +Math.abs(_ox.x - d).toFixed(2),
+      });
+    }
+    return { vrHudScale: _hs, quadW: _pw, quadH: _ph, quadZ: _pz, dist: _r,
+      presenting: (typeof isXRPresenting === 'function') && isXRPresenting(), rows: _out };
+  };
+} catch (_) {}
 
 function drawCircumpunctHUD() {
   if (!player.chassis) return;
