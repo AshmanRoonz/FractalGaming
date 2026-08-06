@@ -123,6 +123,10 @@ CREATE TABLE IF NOT EXISTS match_participants (
   is_winner      INTEGER NOT NULL DEFAULT 0,
   signature      TEXT,
   reported_at    INTEGER NOT NULL,
+  -- (migration 005) Generic per-participant score for modes that are not
+  -- ranked on kills — endless writes distance travelled here. NULL for PvP.
+  score          INTEGER,
+  survived_sec   REAL,
   PRIMARY KEY (match_id, discord_id, reported_by)
 );
 
@@ -166,3 +170,23 @@ CREATE TABLE IF NOT EXISTS player_loadout_stats (
 
 CREATE INDEX IF NOT EXISTS idx_pls_player  ON player_loadout_stats(discord_id);
 CREATE INDEX IF NOT EXISTS idx_pls_loadout ON player_loadout_stats(loadout_key);
+
+CREATE INDEX IF NOT EXISTS idx_mp_score ON match_participants(score DESC);
+
+-- ----------------------------------------------------------------------
+-- (migration 005) Per-player cross-device state: aegis ranks + the ACCOUNT
+-- subset of settings. Device-level settings (quality, touch, audio latency,
+-- VR perf) stay in localStorage on purpose — a Quest and a desktop need
+-- different ones. aegis_json is merged by MAX per rank on write so progress
+-- is monotonic and a second device or an offline session cannot roll it back.
+-- Both columns are opaque JSON: the game owns their shape, the Worker only
+-- merges aegis and stores prefs.
+-- ----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS player_state (
+  discord_id   TEXT PRIMARY KEY,
+  aegis_json   TEXT NOT NULL DEFAULT '{}',
+  prefs_json   TEXT NOT NULL DEFAULT '{}',
+  updated_at   INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_player_state_updated ON player_state(updated_at);

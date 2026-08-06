@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.49';
+const LSS_BUILD = '36.50';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -6601,6 +6601,179 @@ function stopRoomHeartbeat() {
   }
 }
 
+// (v36.50) ENDLESS RESULTS REACH THE LEADERBOARD.
+// postMatchResultToBackend has exactly ONE call site, inside the branch gated
+// on ROUNDS_TO_WIN / the assault ledger — so classic and assault posted and
+// endless never did. Endless also cannot reuse that payload: it is ranked on
+// DISTANCE, which had no column until migration 005 added
+// match_participants.score.
+//
+// Posts the HUMAN ONLY. Endless bots are transient ambush waves, and the
+// backend's consensus rule expects each human reporter to cover every
+// participant — listing waves would bloat the report for no gain. One human,
+// one report, participant_count 1 → validates immediately (verified against
+// tryValidateMatch's single-reporter path).
+//
+// ⚠ Fire-and-forget and idempotent: run._posted guards re-entry because the
+// run-over branch is inside an update tick that keeps running while the
+// 6-second RUN OVER banner counts down.
+async function postEndlessRunToBackend(run) {
+  try {
+    if (!run || run._posted) return;
+    run._posted = true;
+    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    const me    = (typeof discordCurrentUser  === 'function') && discordCurrentUser();
+    if (!token || !me || !me.id) return;    // signed out: local best only
+
+    const diff = (typeof _getStoredDifficulty === 'function') ? _getStoredDifficulty() : 'hard';
+    const endedAt   = Date.now();
+    const startedAt = run.startedAt || (endedAt - 1000);
+    const durSec    = Math.max(0, (endedAt - startedAt) / 1000);
+
+    const payload = {
+      match_id:     'endless_' + me.id + '_' + startedAt,
+      started_at:   startedAt,
+      ended_at:     endedAt,
+      map_key:      'endless_' + diff,
+      mode:         'endless',
+      winning_team: null,
+      duration_sec: durSec,
+      participants: [{
+        discord_id:   me.id,
+        team:         (player && player.team) || LSS.TEAM_FLEET_A,
+        loadout_key:  (player && player.loadoutKey) || 'unknown',
+        kills:        (player && player.kills)  || 0,
+        deaths:       (player && player.deaths) || 0,
+        damage_dealt: Math.floor((player && player.damageDealt) || 0),
+        damage_taken: Math.floor((player && player.damageTaken) || 0),
+        is_mvp:       0,
+        is_winner:    0,          // endless has no win condition — you die
+        score:        Math.round(run.dist || 0),   // metres travelled = the rank
+        survived_sec: durSec,
+      }],
+    };
+
+    const res = await fetch(LSS_API_BASE + '/match', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) console.warn('[lss-backend] endless POST failed', res.status);
+    else console.log('[lss-backend] endless run posted ; dist=' + Math.round(run.dist || 0));
+  } catch (err) {
+    console.warn('[lss-backend] endless POST threw', err);
+  }
+}
+
+// (v36.50) CROSS-DEVICE ACCOUNT STATE — aegis ranks + the account subset of
+// settings. Everything used to live in localStorage, so a new browser or a
+// headset started you from zero.
+//
+// ⚠ SPLIT BY DESIGN (owner's call): only preferences that describe the PLAYER
+// travel with the account. Settings that describe the DEVICE — quality, touch
+// controls, audio latency, VR perf mode — deliberately stay local, because a
+// Quest and a desktop need different ones and syncing them would fight the
+// player on every switch.
+const _LSS_ACCOUNT_PREF_KEYS = ['lss_ship_skin', 'lss_perk_id', 'lss_camp_difficulty'];
+
+function _lssCollectAccountPrefs() {
+  const out = {};
+  for (const k of _LSS_ACCOUNT_PREF_KEYS) {
+    try { const v = localStorage.getItem(k); if (v != null) out[k] = v; } catch (_) {}
+  }
+  return out;
+}
+
+// Pull on sign-in, MERGE (never overwrite), then push the merged result back so
+// whatever this device earned offline is preserved server-side too.
+async function lssPullAccountState() {
+  try {
+    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    if (!token) return null;
+    const res = await fetch(LSS_API_BASE + '/me/state', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!res.ok) return null;
+    const remote = await res.json();
+
+    // AEGIS: highest-per-rank wins, so neither side can lose a level.
+    let local = {};
+    try { local = JSON.parse(localStorage.getItem('lss_aegis') || '{}') || {}; } catch (_) {}
+    const merged = {};
+    for (const k of new Set([...Object.keys(local), ...Object.keys(remote.aegis || {})])) {
+      const a = Number(local[k]) || 0, b = Number((remote.aegis || {})[k]) || 0;
+      const m = Math.max(a, b);
+      if (m > 0) merged[k] = m;
+    }
+    try { localStorage.setItem('lss_aegis', JSON.stringify(merged)); } catch (_) {}
+    // game._aegis is read live during play; refresh it or the merge only
+    // takes effect after a reload.
+    try { if (typeof game !== 'undefined' && game) game._aegis = merged; } catch (_) {}
+
+    // PREFS: remote wins on pull (it is the account's last intent), but only
+    // for the account subset — device keys are never touched.
+    for (const k of _LSS_ACCOUNT_PREF_KEYS) {
+      const v = (remote.prefs || {})[k];
+      if (v != null) { try { localStorage.setItem(k, String(v)); } catch (_) {} }
+    }
+
+    // Push the merge back so the server holds the union too.
+    await lssPushAccountState();
+    console.log('[lss-backend] account state synced ; aegis ranks=' + Object.keys(merged).length);
+    return merged;
+  } catch (err) {
+    console.warn('[lss-backend] state pull failed', err);
+    return null;
+  }
+}
+
+// Debounced so a burst of aegis level-ups during a run collapses into one PUT.
+let _lssStatePushTimer = null;
+function lssPushAccountStateSoon(delayMs) {
+  try { clearTimeout(_lssStatePushTimer); } catch (_) {}
+  _lssStatePushTimer = setTimeout(() => { lssPushAccountState(); }, delayMs == null ? 4000 : delayMs);
+}
+
+async function lssPushAccountState() {
+  try {
+    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    if (!token) return;
+    let aegis = {};
+    try { aegis = JSON.parse(localStorage.getItem('lss_aegis') || '{}') || {}; } catch (_) {}
+    const res = await fetch(LSS_API_BASE + '/me/state', {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aegis, prefs: _lssCollectAccountPrefs() }),
+    });
+    if (!res.ok) { console.warn('[lss-backend] state push failed', res.status); return; }
+    // Adopt the server's merged view — it may hold a higher rank from another
+    // device, and this is the round-trip that makes "highest wins" converge.
+    const merged = await res.json().catch(() => null);
+    if (merged && merged.aegis) {
+      try { localStorage.setItem('lss_aegis', JSON.stringify(merged.aegis)); } catch (_) {}
+      try { if (typeof game !== 'undefined' && game) game._aegis = merged.aegis; } catch (_) {}
+    }
+  } catch (err) {
+    console.warn('[lss-backend] state push threw', err);
+  }
+}
+try {
+  window.lssPullAccountState = lssPullAccountState;
+  window.lssPushAccountState = lssPushAccountState;
+} catch (_) {}
+
+// Pull on every sign-in, and once at load if a session is already cached (the
+// OAuth callback lands on a fresh page load, so the listener alone would miss
+// the very sign-in that just happened).
+try {
+  if (window.LSS_AUTH && typeof window.LSS_AUTH.onChange === 'function') {
+    window.LSS_AUTH.onChange(() => {
+      try { if (window.LSS_AUTH.isSignedIn()) lssPullAccountState(); } catch (_) {}
+    });
+  }
+  if (window.LSS_AUTH && window.LSS_AUTH.isSignedIn && window.LSS_AUTH.isSignedIn()) {
+    lssPullAccountState();
+  }
+} catch (_) {}
+
 async function postMatchResultToBackend() {
   const token = discordCurrentToken();
   if (!token) {
@@ -7922,6 +8095,15 @@ const EndlessMode = {
             const best = parseFloat(localStorage.getItem('lss_endless_best_' + (typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard')) || '0');
             if (run.dist > best) localStorage.setItem('lss_endless_best_' + (typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard'), String(run.dist));
           } catch (_) {}
+          // (v36.50) Endless now reaches the leaderboard. Fire-and-forget, and
+          // self-guarded against re-entry — this branch runs inside the update
+          // tick that keeps ticking through the RUN OVER banner. A signed-out
+          // player just keeps the localStorage best above.
+          try { if (typeof postEndlessRunToBackend === 'function') postEndlessRunToBackend(run); } catch (_) {}
+          // Aegis earned during the run is worth pushing immediately rather
+          // than on the next debounce — the run is over and the player may
+          // close the tab on the banner.
+          try { if (typeof lssPushAccountState === 'function') lssPushAccountState(); } catch (_) {}
         } else {
           try {
             // Capture where you died BEFORE respawnPlayer() teleports you to a
@@ -27077,6 +27259,12 @@ function _aegisLoad() {
 }
 function _aegisSave() {
   try { localStorage.setItem('lss_aegis', JSON.stringify(game._aegis || {})); } catch (_) {}
+  // (v36.50) Mirror to the account so ranks follow the player across devices.
+  // DEBOUNCED: this is called on every rank change, and a bolt pickup streak
+  // fires several in a row — one PUT per level-up would be a request storm.
+  // No-op when signed out. The server merges by MAX, so a lost push costs
+  // nothing permanent; the next one carries the same (or higher) numbers.
+  try { if (typeof lssPushAccountStateSoon === 'function') lssPushAccountStateSoon(); } catch (_) {}
 }
 function _aegisShipState() {
   const key = (typeof player !== 'undefined' && player.loadoutKey) || 'VORTEX';
@@ -73294,6 +73482,9 @@ function _lssGenEndlessLevel(base) {
   const run = game.endlessRun = {
     gen, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
     over: false, overT: 0, lastHall: { x: 0, y: 80, z: 0 }, _hudTxt: '',
+    // (v36.50) Wall-clock run start. The backend wants started_at/duration for
+    // the endless board, and a run has no match timer to derive it from.
+    startedAt: Date.now(),
   };
   const nodes = [{ x: 0, y: 0, z: 0 }];
   const rooms = [{ id: 'spawn', team: 'A', x: 0, y: 0, z: 0, r: SU * 3.2 }];

@@ -20,6 +20,21 @@
 //   - CORS allowlist driven by env.ALLOWED_ORIGINS (comma-separated).
 
 const DISCORD_API = 'https://discord.com/api/v10';
+// (migration 005) The game modes the leaderboard can be segmented by. Kept in
+// ONE place because it is consumed twice — validating the client's declared
+// mode on POST /match, and whitelisting ?gamemode on GET /leaderboard. When
+// they drifted apart before, a mode could be stored but never queryable.
+// endless + campaign are PvE: they post with a single human participant and
+// are ranked on `score`, not wins.
+const GAME_MODES = new Set(['classic', 'race', 'assault', 'endless', 'campaign']);
+// Modes ranked by score (distance / run length) rather than kills or wins.
+const SCORE_RANKED_MODES = new Set(['endless']);
+// Cap on a single reported score, so a fat-fingered or forged client can't
+// park itself at the top of the board forever. Endless distance is metres;
+// the longest legitimate run measured so far is ~53 km before the route
+// re-anchors, so 10 million is loose enough to never bite a real player and
+// tight enough to keep Number.MAX_SAFE_INTEGER off the board.
+const MAX_REPORTED_SCORE = 10_000_000;
 const LEADERBOARD_TTL_SEC = 60;       // KV cache TTL for top-N
 const ROOM_TTL_SEC        = 90;       // KV TTL for room heartbeats
 const RECENT_ROOM_WINDOW_MS = 75_000; // older rooms filtered out of /rooms
@@ -52,7 +67,10 @@ function corsHeaders(env, origin) {
   const allow   = allowed.includes(origin) ? origin : (allowed[0] || '*');
   return {
     'Access-Control-Allow-Origin':  allow,
-    'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+    // PUT added for /me/state (migration 005). A method missing here fails the
+    // browser preflight, so the route 404s from the page's point of view while
+    // curl works fine — worth checking first if a new route "does nothing".
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
     'Access-Control-Allow-Headers': 'Authorization, Content-Type',
     'Access-Control-Max-Age':       '86400',
     'Vary': 'Origin',
@@ -359,8 +377,11 @@ async function handlePostMatch(request, env, origin) {
   // Game mode (migration 004): trust the client's declared mode when it's a
   // known value (v34.82+ clients send it) ; otherwise infer from the map_key
   // prefix, which is unambiguous (race_/assault_ maps only run in their mode).
+  // (migration 005) endless + campaign joined the list. They are PvE/solo, so
+  // they can never reach consensus the way a PvP match does — see the
+  // single-human short-circuit in tryValidateMatch.
   const gmRaw = String(body.mode || '').toLowerCase();
-  const gameMode = (gmRaw === 'classic' || gmRaw === 'race' || gmRaw === 'assault') ? gmRaw
+  const gameMode = GAME_MODES.has(gmRaw) ? gmRaw
     : String(body.map_key).startsWith('race_')    ? 'race'
     : String(body.map_key).startsWith('assault_') ? 'assault'
     : 'classic';
@@ -391,8 +412,8 @@ async function handlePostMatch(request, env, origin) {
       INSERT INTO match_participants (
         match_id, discord_id, reported_by, team, loadout_key,
         kills, deaths, damage_dealt, damage_taken,
-        is_mvp, is_winner, signature, reported_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        is_mvp, is_winner, signature, reported_at, score, survived_sec
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(match_id, discord_id, reported_by) DO UPDATE SET
         team         = excluded.team,
         loadout_key  = excluded.loadout_key,
@@ -403,7 +424,9 @@ async function handlePostMatch(request, env, origin) {
         is_mvp       = excluded.is_mvp,
         is_winner    = excluded.is_winner,
         signature    = excluded.signature,
-        reported_at  = excluded.reported_at
+        reported_at  = excluded.reported_at,
+        score        = excluded.score,
+        survived_sec = excluded.survived_sec
     `).bind(
       String(body.match_id),
       String(p.discord_id),
@@ -418,6 +441,12 @@ async function handlePostMatch(request, env, origin) {
       p.is_winner ? 1 : 0,
       p.signature || null,
       now,
+      // Clamp rather than reject: a bad score should not throw away an
+      // otherwise-valid match report (kills/deaths/damage still count).
+      p.score == null || !Number.isFinite(Number(p.score)) ? null
+        : Math.max(0, Math.min(MAX_REPORTED_SCORE, Math.floor(Number(p.score)))),
+      p.survived_sec == null || !Number.isFinite(Number(p.survived_sec)) ? null
+        : Math.max(0, Number(p.survived_sec)),
     ).run();
   }
 
@@ -467,9 +496,12 @@ async function handleGetLeaderboard(request, env, origin) {
   // mode = multiplayer (default) | solo | combined.
   const modeRaw  = (url.searchParams.get('mode') || 'multiplayer').toLowerCase();
   const mode     = (modeRaw === 'solo' || modeRaw === 'combined') ? modeRaw : 'multiplayer';
-  // gamemode = all (default) | classic | race | assault (migration 004).
+  // gamemode = all (default) | classic | race | assault | endless | campaign.
+  // (migration 005) Whitelist comes from the SAME GAME_MODES set POST /match
+  // validates against — when these were two separate literals, a mode could be
+  // stored and then be unqueryable.
   const gmParam  = (url.searchParams.get('gamemode') || 'all').toLowerCase();
-  const gamemode = (gmParam === 'classic' || gmParam === 'race' || gmParam === 'assault') ? gmParam : 'all';
+  const gamemode = GAME_MODES.has(gmParam) ? gmParam : 'all';
 
   const cacheKey = `leaderboard:${mode}:${gamemode}:${slice}:${sort}:${loadout}:${map}:${limit}`;
   const cached   = await env.CACHE.get(cacheKey, 'json');
@@ -481,12 +513,21 @@ async function handleGetLeaderboard(request, env, origin) {
   // /player recent-matches convention, so multi-reporter matches don't
   // double-count. The KV cache absorbs the query cost.
   if (gamemode !== 'all') {
+    // (migration 005) Endless is ranked on distance, not kills — a board that
+    // sorted it by wins would rank every run equally at zero. Score-ranked
+    // modes therefore DEFAULT to score and tiebreak on it, while still
+    // honouring an explicit ?sort for anyone who wants kills on an endless
+    // board. best_score_ is a MAX (your best run), not a SUM: totalling runs
+    // would reward grinding short ones over one deep run.
+    const scoreRanked = SCORE_RANKED_MODES.has(gamemode);
     const aggSortCol = ({
       wins:    'wins_',
       kills:   'kills_',
       matches: 'matches_',
       damage:  'damage_',
-    })[sort] || 'wins_';
+      score:   'best_score_',
+    })[sort] || (scoreRanked ? 'best_score_' : 'wins_');
+    const tieCol = scoreRanked ? 'best_score_' : 'kills_';
     const modeClause = (mode === 'combined') ? '' : 'AND m.mode = ?';
     const stmt = env.DB.prepare(`
       SELECT p.discord_id, p.username, p.display_name, p.avatar_hash,
@@ -500,13 +541,15 @@ async function handleGetLeaderboard(request, env, origin) {
              MAX(mp.deaths)       AS max_deaths_,
              MIN(mp.deaths)       AS min_deaths_,
              MAX(mp.damage_dealt) AS max_damage_,
-             MIN(mp.damage_dealt) AS min_damage_
+             MIN(mp.damage_dealt) AS min_damage_,
+             MAX(mp.score)        AS best_score_,
+             MAX(mp.survived_sec) AS best_survived_
       FROM matches m
       JOIN match_participants mp ON mp.match_id = m.id AND mp.reported_by = mp.discord_id
       JOIN players p ON p.discord_id = mp.discord_id
       WHERE m.validated = 1 AND m.game_mode = ? ${modeClause}
       GROUP BY mp.discord_id
-      ORDER BY ${aggSortCol} DESC, kills_ DESC
+      ORDER BY ${aggSortCol} DESC, ${tieCol} DESC
       LIMIT ?
     `);
     const bound = (mode === 'combined')
@@ -688,6 +731,10 @@ async function handleDeleteMe(request, env, origin) {
   // achievements + per-loadout aggregates. Keep matches themselves
   // (immutable historical records) but our user no longer appears in
   // them. Player leaderboard rank vanishes.
+  // (migration 005) player_state holds aegis + prefs — it must be scrubbed too,
+  // or "delete my data" would leave the account's progression behind and a
+  // re-signin would silently restore it.
+  await env.DB.prepare('DELETE FROM player_state          WHERE discord_id = ?').bind(user.id).run();
   await env.DB.prepare('DELETE FROM player_loadout_stats WHERE discord_id = ?').bind(user.id).run();
   await env.DB.prepare('DELETE FROM achievements           WHERE discord_id = ?').bind(user.id).run();
   await env.DB.prepare('DELETE FROM match_participants    WHERE discord_id = ? OR reported_by = ?').bind(user.id, user.id).run();
@@ -697,6 +744,94 @@ async function handleDeleteMe(request, env, origin) {
 }
 
 // ---------- Helpers --------------------------------------------------
+
+// ---------- Routes: GET/PUT /me/state --------------------------------
+// (migration 005) Cross-device aegis ranks + the ACCOUNT subset of settings.
+// Both blobs are opaque to the Worker — the game owns their shape — so
+// gameplay iteration never needs a schema change here.
+
+const STATE_MAX_JSON_BYTES = 16 * 1024;   // per blob; generous vs actual (~1 KB)
+
+function _parseStateJson(s, fallback) {
+  try {
+    const v = JSON.parse(s || '');
+    return (v && typeof v === 'object' && !Array.isArray(v)) ? v : fallback;
+  } catch (_) { return fallback; }
+}
+
+// Aegis merges by MAX per rank (owner's choice). Progress is monotonic, so a
+// second device or an offline session can never roll a level back, and there
+// is never a conflict to prompt about. Values are coerced to finite
+// non-negative integers so a malformed client can't write NaN/Infinity/strings
+// into a field the game later does arithmetic on.
+function _mergeAegis(oldA, newA) {
+  const out = {};
+  for (const k of new Set([...Object.keys(oldA || {}), ...Object.keys(newA || {})])) {
+    const a = Number(oldA && oldA[k]); const b = Number(newA && newA[k]);
+    const av = Number.isFinite(a) ? Math.max(0, Math.floor(a)) : 0;
+    const bv = Number.isFinite(b) ? Math.max(0, Math.floor(b)) : 0;
+    const m = Math.max(av, bv);
+    if (m > 0) out[k] = m;
+  }
+  return out;
+}
+
+async function handleGetMyState(request, env, origin) {
+  const user = await requireAuth(request);
+  await upsertPlayer(env, user);
+  const row = await env.DB.prepare(
+    'SELECT aegis_json, prefs_json, updated_at FROM player_state WHERE discord_id = ?'
+  ).bind(user.id).first();
+  return jsonResponse(200, {
+    aegis:      _parseStateJson(row && row.aegis_json, {}),
+    prefs:      _parseStateJson(row && row.prefs_json, {}),
+    updated_at: (row && row.updated_at) || 0,
+  }, env, origin);
+}
+
+async function handlePutMyState(request, env, origin) {
+  const user = await requireAuth(request);
+  const body = await request.json().catch(() => null);
+  if (!body || typeof body !== 'object') throw new ApiError(400, 'bad_body');
+
+  const incomingAegis = (body.aegis && typeof body.aegis === 'object' && !Array.isArray(body.aegis)) ? body.aegis : null;
+  const incomingPrefs = (body.prefs && typeof body.prefs === 'object' && !Array.isArray(body.prefs)) ? body.prefs : null;
+  if (!incomingAegis && !incomingPrefs) throw new ApiError(400, 'nothing_to_write');
+
+  await upsertPlayer(env, user);
+  const row = await env.DB.prepare(
+    'SELECT aegis_json, prefs_json FROM player_state WHERE discord_id = ?'
+  ).bind(user.id).first();
+
+  const curAegis = _parseStateJson(row && row.aegis_json, {});
+  const curPrefs = _parseStateJson(row && row.prefs_json, {});
+
+  const nextAegis = incomingAegis ? _mergeAegis(curAegis, incomingAegis) : curAegis;
+  // Prefs shallow-merge with the incoming winning, so a device can update one
+  // setting without clobbering the rest — a whole-object replace would let an
+  // older client wipe prefs it does not know about yet.
+  const nextPrefs = incomingPrefs ? { ...curPrefs, ...incomingPrefs } : curPrefs;
+
+  const aegisStr = JSON.stringify(nextAegis);
+  const prefsStr = JSON.stringify(nextPrefs);
+  if (aegisStr.length > STATE_MAX_JSON_BYTES || prefsStr.length > STATE_MAX_JSON_BYTES) {
+    throw new ApiError(413, 'state_too_large');
+  }
+
+  const now = Date.now();
+  await env.DB.prepare(`
+    INSERT INTO player_state (discord_id, aegis_json, prefs_json, updated_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(discord_id) DO UPDATE SET
+      aegis_json = excluded.aegis_json,
+      prefs_json = excluded.prefs_json,
+      updated_at = excluded.updated_at
+  `).bind(user.id, aegisStr, prefsStr, now).run();
+
+  // Echo the MERGED result so the client can adopt it directly — that is what
+  // makes "highest wins" work without a second round-trip after a local win.
+  return jsonResponse(200, { ok: true, aegis: nextAegis, prefs: nextPrefs, updated_at: now }, env, origin);
+}
 
 async function fetchPlayersById(env, ids) {
   if (!ids.length) return {};
@@ -753,6 +888,12 @@ function decoratePlayerStats(p) {
     min_deaths:  p.min_deaths_ == null ? null : p.min_deaths_,
     max_damage:  p.max_damage_ || 0,
     min_damage:  p.min_damage_ == null ? null : p.min_damage_,
+    // (migration 005) Score-ranked modes (endless) carry the player's BEST
+    // run, not a sum — this is what the endless board actually sorts on.
+    // null on the players-table path and on every PvP mode, which is how the
+    // UI knows whether to show a score column at all.
+    best_score:    p.best_score_    == null ? null : p.best_score_,
+    best_survived: p.best_survived_ == null ? null : Math.round(p.best_survived_),
   };
 }
 
@@ -1266,6 +1407,8 @@ export default {
       }
       if (request.method === 'GET'    && path === '/rooms')        return await handleGetRooms(env, origin);
       if (request.method === 'DELETE' && path === '/me')           return await handleDeleteMe(request, env, origin);
+      if (request.method === 'GET'    && path === '/me/state')     return await handleGetMyState(request, env, origin);
+      if (request.method === 'PUT'    && path === '/me/state')     return await handlePutMyState(request, env, origin);
 
       // (v15 lobby) Stub routes ; replace bodies in step 3.
       if (request.method === 'POST' && path === '/lobby/heartbeat') return await handleLobbyHeartbeat(request, env, origin);

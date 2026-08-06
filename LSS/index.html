@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.49';
+const LSS_BUILD = '36.50';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -5944,6 +5944,140 @@ function stopRoomHeartbeat() {
   }
 }
 
+async function postEndlessRunToBackend(run) {
+  try {
+    if (!run || run._posted) return;
+    run._posted = true;
+    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    const me    = (typeof discordCurrentUser  === 'function') && discordCurrentUser();
+    if (!token || !me || !me.id) return;    // signed out: local best only
+
+    const diff = (typeof _getStoredDifficulty === 'function') ? _getStoredDifficulty() : 'hard';
+    const endedAt   = Date.now();
+    const startedAt = run.startedAt || (endedAt - 1000);
+    const durSec    = Math.max(0, (endedAt - startedAt) / 1000);
+
+    const payload = {
+      match_id:     'endless_' + me.id + '_' + startedAt,
+      started_at:   startedAt,
+      ended_at:     endedAt,
+      map_key:      'endless_' + diff,
+      mode:         'endless',
+      winning_team: null,
+      duration_sec: durSec,
+      participants: [{
+        discord_id:   me.id,
+        team:         (player && player.team) || LSS.TEAM_FLEET_A,
+        loadout_key:  (player && player.loadoutKey) || 'unknown',
+        kills:        (player && player.kills)  || 0,
+        deaths:       (player && player.deaths) || 0,
+        damage_dealt: Math.floor((player && player.damageDealt) || 0),
+        damage_taken: Math.floor((player && player.damageTaken) || 0),
+        is_mvp:       0,
+        is_winner:    0,          // endless has no win condition — you die
+        score:        Math.round(run.dist || 0),   // metres travelled = the rank
+        survived_sec: durSec,
+      }],
+    };
+
+    const res = await fetch(LSS_API_BASE + '/match', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) console.warn('[lss-backend] endless POST failed', res.status);
+    else console.log('[lss-backend] endless run posted ; dist=' + Math.round(run.dist || 0));
+  } catch (err) {
+    console.warn('[lss-backend] endless POST threw', err);
+  }
+}
+
+const _LSS_ACCOUNT_PREF_KEYS = ['lss_ship_skin', 'lss_perk_id', 'lss_camp_difficulty'];
+
+function _lssCollectAccountPrefs() {
+  const out = {};
+  for (const k of _LSS_ACCOUNT_PREF_KEYS) {
+    try { const v = localStorage.getItem(k); if (v != null) out[k] = v; } catch (_) {}
+  }
+  return out;
+}
+
+async function lssPullAccountState() {
+  try {
+    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    if (!token) return null;
+    const res = await fetch(LSS_API_BASE + '/me/state', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!res.ok) return null;
+    const remote = await res.json();
+
+    let local = {};
+    try { local = JSON.parse(localStorage.getItem('lss_aegis') || '{}') || {}; } catch (_) {}
+    const merged = {};
+    for (const k of new Set([...Object.keys(local), ...Object.keys(remote.aegis || {})])) {
+      const a = Number(local[k]) || 0, b = Number((remote.aegis || {})[k]) || 0;
+      const m = Math.max(a, b);
+      if (m > 0) merged[k] = m;
+    }
+    try { localStorage.setItem('lss_aegis', JSON.stringify(merged)); } catch (_) {}
+    try { if (typeof game !== 'undefined' && game) game._aegis = merged; } catch (_) {}
+
+    for (const k of _LSS_ACCOUNT_PREF_KEYS) {
+      const v = (remote.prefs || {})[k];
+      if (v != null) { try { localStorage.setItem(k, String(v)); } catch (_) {} }
+    }
+
+    await lssPushAccountState();
+    console.log('[lss-backend] account state synced ; aegis ranks=' + Object.keys(merged).length);
+    return merged;
+  } catch (err) {
+    console.warn('[lss-backend] state pull failed', err);
+    return null;
+  }
+}
+
+let _lssStatePushTimer = null;
+function lssPushAccountStateSoon(delayMs) {
+  try { clearTimeout(_lssStatePushTimer); } catch (_) {}
+  _lssStatePushTimer = setTimeout(() => { lssPushAccountState(); }, delayMs == null ? 4000 : delayMs);
+}
+
+async function lssPushAccountState() {
+  try {
+    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    if (!token) return;
+    let aegis = {};
+    try { aegis = JSON.parse(localStorage.getItem('lss_aegis') || '{}') || {}; } catch (_) {}
+    const res = await fetch(LSS_API_BASE + '/me/state', {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ aegis, prefs: _lssCollectAccountPrefs() }),
+    });
+    if (!res.ok) { console.warn('[lss-backend] state push failed', res.status); return; }
+    const merged = await res.json().catch(() => null);
+    if (merged && merged.aegis) {
+      try { localStorage.setItem('lss_aegis', JSON.stringify(merged.aegis)); } catch (_) {}
+      try { if (typeof game !== 'undefined' && game) game._aegis = merged.aegis; } catch (_) {}
+    }
+  } catch (err) {
+    console.warn('[lss-backend] state push threw', err);
+  }
+}
+try {
+  window.lssPullAccountState = lssPullAccountState;
+  window.lssPushAccountState = lssPushAccountState;
+} catch (_) {}
+
+try {
+  if (window.LSS_AUTH && typeof window.LSS_AUTH.onChange === 'function') {
+    window.LSS_AUTH.onChange(() => {
+      try { if (window.LSS_AUTH.isSignedIn()) lssPullAccountState(); } catch (_) {}
+    });
+  }
+  if (window.LSS_AUTH && window.LSS_AUTH.isSignedIn && window.LSS_AUTH.isSignedIn()) {
+    lssPullAccountState();
+  }
+} catch (_) {}
+
 async function postMatchResultToBackend() {
   const token = discordCurrentToken();
   if (!token) {
@@ -6839,6 +6973,8 @@ const EndlessMode = {
             const best = parseFloat(localStorage.getItem('lss_endless_best_' + (typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard')) || '0');
             if (run.dist > best) localStorage.setItem('lss_endless_best_' + (typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard'), String(run.dist));
           } catch (_) {}
+          try { if (typeof postEndlessRunToBackend === 'function') postEndlessRunToBackend(run); } catch (_) {}
+          try { if (typeof lssPushAccountState === 'function') lssPushAccountState(); } catch (_) {}
         } else {
           try {
             const dpx = player.position.x, dpy = player.position.y, dpz = player.position.z;
@@ -21831,6 +21967,7 @@ function _aegisLoad() {
 }
 function _aegisSave() {
   try { localStorage.setItem('lss_aegis', JSON.stringify(game._aegis || {})); } catch (_) {}
+  try { if (typeof lssPushAccountStateSoon === 'function') lssPushAccountStateSoon(); } catch (_) {}
 }
 function _aegisShipState() {
   const key = (typeof player !== 'undefined' && player.loadoutKey) || 'VORTEX';
@@ -57000,6 +57137,7 @@ function _lssGenEndlessLevel(base) {
   const run = game.endlessRun = {
     gen, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
     over: false, overT: 0, lastHall: { x: 0, y: 80, z: 0 }, _hudTxt: '',
+    startedAt: Date.now(),
   };
   const nodes = [{ x: 0, y: 0, z: 0 }];
   const rooms = [{ id: 'spawn', team: 'A', x: 0, y: 0, z: 0, r: SU * 3.2 }];
