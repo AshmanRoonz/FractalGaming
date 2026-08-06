@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.47';
+const LSS_BUILD = '36.44';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 
@@ -21535,24 +21535,6 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // the ring centres snap around, so the morph ramp is a continuous function
       // of the eye instead of a step function of the snapped mesh centre.
       sh.uniforms.uClipEye = (window.__clipEyeU || (window.__clipEyeU = { value: new THREE.Vector2(0, 0) }));
-      // (v36.45) THE PARENT ATLAS. The morph target used to be reconstructed
-      // from THIS level's atlas at even indices, which only equals the parent's
-      // surface while every level samples a shared world point identically —
-      // true for a point sample, false the moment a level gets its own sampling
-      // FOOTPRINT (see _CLIP_PEAK). Reading the parent's atlas directly makes
-      // the seam exact by construction instead of by coincidence, and frees
-      // each level to filter its own heights. Addressing is toroidal on the
-      // GLOBAL cell index exactly like uClipOrigin: a fine even index _ie maps
-      // to parent cell (gIx + _ie)/2, so uClipOriginP carries (gIx/2) mod R and
-      // the shader adds _ie*0.5. gIx is always even (cx is a multiple of
-      // 2*spacing), so that halving is exact.
-      // uClipHasParent is 0 for the coarsest level (no parent) AND until the
-      // parent's texture exists, so a staged _clipEnableSliced can never morph
-      // toward an unbaked all-zero atlas — it falls back to the old own-even-
-      // cells path, which is what shipped before this change.
-      sh.uniforms.uClipAtlasP = m._clipAtlasP || (m._clipAtlasP = { value: null });
-      sh.uniforms.uClipOriginP = m._clipOriginP || (m._clipOriginP = { value: new THREE.Vector2() });
-      sh.uniforms.uClipHasParent = m._clipHasParentU || (m._clipHasParentU = { value: 0 });
       // (v35.11) Geomorph band retune. The old band ((rd-48)/16 -> 1.0 at the
       // window edge 64) finished 4 cells TOO LATE: the parent ring's inner
       // hole edge sits at child-cell radius N/2-4 (=60), so in the 60..64
@@ -21616,7 +21598,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       const _cms = (_CLIP_N * 0.25 + 1);                  // morph band start, from the EYE (33)
       const _cme = (_CLIP_N * 0.5 - 4 - 2);               // morph complete, from the EYE (58)
       const _cmsS = _cms.toFixed(1), _cmw = (_cme - _cms).toFixed(1);   // width 25
-      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform sampler2D uClipAtlasP;\nuniform vec2 uClipOriginP;\nuniform float uClipHasParent;\nuniform vec2 uClipEye;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*128.0,_fj=uv.y*128.0;\n if((_fj<0.5||_fj>127.5)&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x);}else if((_fi<0.5||_fi>127.5)&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x);}\n vec2 _eo=(vec2(modelMatrix[3][0],modelMatrix[3][2])-uClipEye)/uClipSpacing;float _rd=max(abs(_fi-'+_chn+'+_eo.x),abs(_fj-'+_chn+'+_eo.y));float _gm=clamp((_rd-'+_cmsS+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00,_h10,_h01;if(uClipHasParent>0.5){vec2 _pb=vec2(_ie*0.5,_je*0.5)+uClipOriginP+0.5;_h00=texture2D(uClipAtlasP,fract(_pb/129.0)).x;_h10=texture2D(uClipAtlasP,fract((_pb+vec2(1.0,0.0))/129.0)).x;_h01=texture2D(uClipAtlasP,fract((_pb+vec2(0.0,1.0))/129.0)).x;}else{_h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/129.0)).x;_h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/129.0)).x;_h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/129.0)).x;}_ch=mix(_ch,_h00+(_h10-_h00)*_wx+(_h01-_h00)*_wz,_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/128.0,1.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/128.0,0.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/128.0,1.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/128.0,0.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _spanX=(min(uv.x+1.0/128.0,1.0)-max(uv.x-1.0/128.0,0.0))*128.0*uClipSpacing; float _spanZ=(min(uv.y+1.0/128.0,1.0)-max(uv.y-1.0/128.0,0.0))*128.0*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));');   
+      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform vec2 uClipEye;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*128.0,_fj=uv.y*128.0;\n if((_fj<0.5||_fj>127.5)&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x);}else if((_fi<0.5||_fi>127.5)&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x);}\n vec2 _eo=(vec2(modelMatrix[3][0],modelMatrix[3][2])-uClipEye)/uClipSpacing;float _rd=max(abs(_fi-'+_chn+'+_eo.x),abs(_fj-'+_chn+'+_eo.y));float _gm=clamp((_rd-'+_cmsS+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/129.0)).x;float _h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/129.0)).x;float _h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/129.0)).x;_ch=mix(_ch,_h00+(_h10-_h00)*_wx+(_h01-_h00)*_wz,_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/128.0,1.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/128.0,0.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/128.0,1.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/128.0,0.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _spanX=(min(uv.x+1.0/128.0,1.0)-max(uv.x-1.0/128.0,0.0))*128.0*uClipSpacing; float _spanZ=(min(uv.y+1.0/128.0,1.0)-max(uv.y-1.0/128.0,0.0))*128.0*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));');   
     } else {
       sh.vertexShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
@@ -28761,13 +28743,9 @@ function _clipGeo(hole) {
 function _clipMat() {
   const m = new THREE.MeshStandardMaterial({ flatShading: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
   m.envMapIntensity = 0.12;
-  m._clipAtlas = { value: null };
-  m._clipOrigin = { value: new THREE.Vector2(0, 0) };
-  m._clipSpacingU = { value: 16.0 };
-  // (v36.45) parent-atlas morph target — see _clipWireParents.
-  m._clipAtlasP = { value: null };
-  m._clipOriginP = { value: new THREE.Vector2(0, 0) };
-  m._clipHasParentU = { value: 0 };
+  m._clipAtlas = { value: null };                 
+  m._clipOrigin = { value: new THREE.Vector2(0, 0) };   
+  m._clipSpacingU = { value: 16.0 };   
   _swPatchTerrainMat(m, false, m._clipAtlas);     
   return m;
 }
@@ -28808,13 +28786,6 @@ window.__clipSeam = function () {
   const lev = (k) => {
     const L = _clipmap.levels[k], d = L.data, ox = L.mat._clipOrigin.value.x, oz = L.mat._clipOrigin.value.y;
     const T = (i, j) => d[((((j + oz) % R) + R) % R) * R + ((((i + ox) % R) + R) % R)];
-    // (v36.45) mirror the VS's parent-atlas morph target. Addressed on the
-    // GLOBAL parent cell index, which is what _clipBakeLevel writes and what
-    // uClipOriginP + _ie*0.5 resolves to in the shader. If this drifts from the
-    // shader the whole probe silently reports the wrong seam.
-    const P = _clipmap.levels[k + 1];
-    const hasP = !!(P && P.tex && L.mat._clipHasParentU.value > 0.5);
-    const TP = (gx, gz) => P.data[(((gz % R) + R) % R) * R + (((gx % R) + R) % R)];
     const eox = (L.cx - eye.x) / L.spacing, eoz = (L.cz - eye.y) / L.spacing;
     const H = (i, j) => {
       let fine = T(i, j);
@@ -28824,14 +28795,7 @@ window.__clipSeam = function () {
       const gm = Math.min(1, Math.max(0, (rd - bandS) / bandW));
       if (gm <= 0) return { h: fine, gm: 0, span: 0 };
       const ie = Math.floor(i / 2) * 2, je = Math.floor(j / 2) * 2, wx = (i - ie) * 0.5, wz = (j - je) * 0.5;
-      let h00, h10, h01;
-      if (hasP) {
-        const gpx = (L.gIx + ie) / 2, gpz = (L.gIz + je) / 2;
-        h00 = TP(gpx, gpz); h10 = TP(gpx + 1, gpz); h01 = TP(gpx, gpz + 1);
-      } else {
-        h00 = T(ie, je); h10 = T(ie + 2, je); h01 = T(ie, je + 2);
-      }
-      const tgt = h00 + (h10 - h00) * wx + (h01 - h00) * wz;
+      const h00 = T(ie, je), tgt = h00 + (T(ie + 2, je) - h00) * wx + (T(ie, je + 2) - h00) * wz;
       return { h: fine + (tgt - fine) * gm, gm: gm, span: Math.abs(tgt - fine) };
     };
     // rasterised surface at an arbitrary world XZ, on the SAME c10-c01 anti-diagonal split
@@ -28857,18 +28821,11 @@ window.__clipSeam = function () {
         if (a === null || b === null) continue;
         const D = Math.abs(a - b); sum += D; n++; if (D > mx) mx = D;
       }
-    // (v36.45) max span is one worst cell and is dominated by a single
-    // overshoot; the mean/p95 are what "how much does the ground move as I
-    // approach" actually feels like, so report all three.
-    let span = 0; const spans = [];
-    for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) { const s = F.H(i, j); if (s.gm > 0) { spans.push(s.span); if (s.span > span) span = s.span; } }
-    spans.sort((a, b) => a - b);
-    const spanMean = spans.length ? spans.reduce((a, b) => a + b, 0) / spans.length : 0;
-    const spanP95 = spans.length ? spans[Math.floor(spans.length * 0.95)] : 0;
+    let span = 0;
+    for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) { const s = F.H(i, j); if (s.gm > 0 && s.span > span) span = s.span; }
     rows.push({ seam: k + '/' + (k + 1), spacing: sp, samples: n,
       seamMeanU: +(sum / Math.max(1, n)).toFixed(4), seamMaxU: +mx.toFixed(3),
       morphSpanU: +span.toFixed(1),
-      morphMeanU: +spanMean.toFixed(2), morphP95U: +spanP95.toFixed(1),
       uPerFrame576: +(span / (bandW * sp) * 4).toFixed(3),
       v3642SnapStepU: +(span * 2 / 28).toFixed(2) });
   }
@@ -28880,114 +28837,13 @@ window.__clipSeam = function () {
 // always holds the carved height at GLOBAL cell (gx,gz), independent of where the window sits. Used
 // on first show + on a >1-level jump. The VS reads texel (gI+i) mod R for vert i, so the window can
 // slide by re-baking only its leading edge (see _clipBakeEdge).
-// (v36.45) PEAK-PRESERVING COARSE BAKE — "some spikes literally grow as I
-// approach them" (owner).
-//
-// Every atlas texel was ONE point sample of the continuous terrain at that
-// level's spacing. L5 samples every 512 u, so any spire narrower than 512 u is
-// hit at a random point on its flank — or missed entirely — and only reappears
-// as finer levels take over. That is not a bug in the morph: __clipSeam reports
-// seamMaxU 0 (v36.43 closed the seams) while morphSpanU — the vertical travel
-// between a level's coarse and fine representation of the same ground — still
-// measured 444 u at the NEAREST ring (L0/L1) and 1922 u at L4/L5. A 444 u rise
-// spread smoothly over the approach is exactly "the spike grows".
-//
-// Fix: give each texel a FOOTPRINT instead of a point. Sample k*k points across
-// the cell and keep `mean + (max-mean)*mix` — pure max would dilate the whole
-// heightfield (valleys inflate as much as ridges, terrain reads bloated); pure
-// mean is the correct low-pass but sits BELOW the point sample at a peak, which
-// makes the growth worse. The blend keeps silhouettes without fattening flat
-// ground, where max ~= mean ~= point and the result is unchanged by construction.
-//
-// `foot` scales the footprint past one cell. It exists because of how the VS
-// builds its morph target: `_h00/_h10/_h01` are read from THIS level's atlas at
-// EVEN indices, so a level's even cells double as the parent lattice and ought
-// to stand for a 2*sp footprint while the odd cells stand for sp. One texel
-// cannot be both, so `foot` biases every cell slightly wide and shrinks the
-// even-vs-odd discrepancy that the morph animates.
-//
-// k = 1 reproduces the old point sample EXACTLY (offset 0, mean == max), so
-// __clipPeak.on = 0 is a bit-identical A/B, and L0 is deliberately never
-// touched — it IS the fine reference every coarser level is trying to match.
-// ⚠ THIS ONLY WORKS BECAUSE THE MORPH TARGET READS THE PARENT'S ATLAS
-// (uClipAtlasP, same version). A per-level footprint is fundamentally
-// incompatible with the pre-v36.45 target, which rebuilt the parent from THIS
-// level's own EVEN cells and so assumed `level k's atlas at world W == level
-// k+1's atlas at world W` — true for a point sample, false the instant a level
-// filters its own heights (k's even cells carry sp*foot where k+1 carries
-// 2*sp*foot at the very same points). Measured on the first cut, before the
-// parent-atlas change: seamMaxU went 0 -> 430 / 382 / 628 / 1040 / 860. Do not
-// reintroduce a footprint on the own-even-cells path; the recursion does not
-// close (making even cells borrow the parent's footprint just moves the same
-// contradiction up one level).
-//
-// TUNING, swept live with __peakSweep against __clipSeam (seamMaxU stayed 0 at
-// every setting — the parent-atlas target makes the seam exact by construction,
-// so tuning can only trade morph travel, never correctness):
-//   mix 0.65 / foot 1.35  worse on typical travel everywhere (L0/L1 mean
-//                         4.4 -> 17.1) — over-inflates, broadening spires into
-//                         plateaus instead of reproducing them.
-//   k 2                   far ring collapses (L4/L5 max 1666 -> 2206). k=3 is
-//                         the cheapest that holds.
-//   mix 0.18              marginally better p95, worse worst-case spire.
-// SHIPPED k 3 / mix 0.25 / foot 1.0, vs the v36.44 point sample:
-//   morphSpanU (worst spire travel)  L0/L1 455->276  L1/L2 537->305
-//                                    L2/L3 856->604  L3/L4 763->463
-//                                    L4/L5 1922->1660      = -14% to -43%
-//   morphP95U  (typical travel)      improves at the three COARSEST seams
-//                                    (176->131, 232->148, 315->218) and gets
-//                                    modestly worse at the two finest, where
-//                                    the absolute numbers are small (L0/L1
-//                                    21.6->40.5 against a 276 u max).
-// foot > 1 reaches outside the cell and was a clear loss; keep it at 1.0.
-//
-// ⚠ SHIPPED OFF ON COST, NOT ON CORRECTNESS — flip `on:1` to get everything
-// above. k=3 is 9 height samples per texel instead of 1, and every level holds
-// the same (_CLIP_N+1)^2 texels, so the FULL bake scales with however many
-// levels use it. Measured, same vantage, 200-frame probe with a forced
-// all-levels rebake mid-probe:
-//   peak OFF  p50 6.9  p95 8.5  max  329.6 ms
-//   peak ON   p50 7.0  p95 8.4  max 1877.8 ms   (5.7x, ~313 ms per level)
-// STEADY FLIGHT IS FREE (p50/p95 identical) because normal travel only ever
-// runs _clipBakeEdge, whose cost is the leading edge, not the atlas. The whole
-// regression is the full bake: on a zone-rift traverse _clipEnableSliced does
-// one level per frame, so this would turn 6 x 55 ms into 6 x 313 ms and put
-// back exactly the class of freeze v36.26/v36.27 removed.
-// Sub-samples cannot be shared between texels (at foot 1.0 the k*k grids tile
-// into one uniform sp/3 lattice with no overlap), so 9x is inherent to k=3.
-// TO SHIP THIS: move the atlas bake onto the existing terrain WORKER (there is
-// already a worker copy of the sandwich terrain math that must stay identical),
-// or slice _clipBakeLevel by row bands across frames instead of by whole level.
-// Either makes the cost invisible; neither is a tuning change.
-const _CLIP_PEAK = { on: 0, k: 3, mix: 0.25, foot: 1.0, minLevel: 1 };
-try { window.__clipPeak = _CLIP_PEAK; } catch (_) {}
-
-function _clipCellH(wx, wz, sp, T, lvl) {
-  const P = _CLIP_PEAK;
-  const k = (P.on && lvl >= P.minLevel) ? Math.max(1, P.k | 0) : 1;
-  if (k <= 1) return _stGroundYCarved(wx, wz, T);
-  const ext = sp * P.foot;
-  let mx = -Infinity, sum = 0;
-  for (let j = 0; j < k; j++) {
-    const oz = ((j + 0.5) / k - 0.5) * ext;
-    for (let i = 0; i < k; i++) {
-      const ox = ((i + 0.5) / k - 0.5) * ext;
-      const h = _stGroundYCarved(wx + ox, wz + oz, T);
-      if (h > mx) mx = h;
-      sum += h;
-    }
-  }
-  const mean = sum / (k * k);
-  return mean + (mx - mean) * P.mix;
-}
-
 function _clipBakeLevel(L) {
   const T = game.sandwichTerrain; if (!T) return;
   const N = _CLIP_N, R = N + 1, sp = L.spacing;
-  L.gIx = Math.round(L.cx / sp) - N / 2; L.gIz = Math.round(L.cz / sp) - N / 2;
+  L.gIx = Math.round(L.cx / sp) - N / 2; L.gIz = Math.round(L.cz / sp) - N / 2;   
   const d = L.data;
   for (let jj = 0; jj <= N; jj++) { const gz = L.gIz + jj, trow = (((gz % R) + R) % R) * R, wz = gz * sp;
-    for (let ii = 0; ii <= N; ii++) { const gx = L.gIx + ii; d[trow + (((gx % R) + R) % R)] = _clipCellH(gx * sp, wz, sp, T, L.k); } }
+    for (let ii = 0; ii <= N; ii++) { const gx = L.gIx + ii; d[trow + (((gx % R) + R) % R)] = _stGroundYCarved(gx * sp, wz, T); } }
   if (!L.tex) {
     L.tex = new THREE.DataTexture(d, R, R, THREE.RedFormat, THREE.FloatType);
     L.tex.minFilter = L.tex.magFilter = THREE.NearestFilter;   
@@ -28995,34 +28851,7 @@ function _clipBakeLevel(L) {
     L.mat._clipAtlas.value = L.tex;
   }
   L.mat._clipOrigin.value.set(((L.gIx % R) + R) % R, ((L.gIz % R) + R) % R);
-  _clipOriginP(L);
-  _clipWireParents();
   L.tex.needsUpdate = true;
-}
-
-// (v36.45) The parent-lattice origin for THIS level: fine even index _ie maps to
-// parent cell (gIx + _ie)/2, so the shader adds _ie*0.5 to (gIx/2) mod R. gIx is
-// always even (cx is a multiple of 2*spacing) so the halving is exact — but it
-// is halved BEFORE the modulo, because (gIx mod R)/2 is not (gIx/2) mod R.
-function _clipOriginP(L) {
-  const R = _CLIP_N + 1;
-  const hx = L.gIx / 2, hz = L.gIz / 2;
-  L.mat._clipOriginP.value.set(((hx % R) + R) % R, ((hz % R) + R) % R);
-}
-
-// (v36.45) Point every level at its parent's texture, and only claim a parent
-// once that texture actually exists — during a staged _clipEnableSliced a level
-// can be baked before its parent, and morphing toward a fresh all-zero
-// Float32Array would collapse the ring to y=0. Until then uClipHasParent stays 0
-// and the level uses the pre-v36.45 own-even-cells target. The coarsest level
-// has no parent at all and keeps that path permanently.
-function _clipWireParents() {
-  const Ls = _clipmap.levels; if (!Ls) return;
-  for (let k = 0; k < Ls.length; k++) {
-    const P = Ls[k + 1];
-    Ls[k].mat._clipAtlasP.value = (P && P.tex) ? P.tex : Ls[k].tex;
-    Ls[k].mat._clipHasParentU.value = (P && P.tex) ? 1 : 0;
-  }
 }
 
 // (S3) INCREMENTAL bake : after the centre snaps, re-sample ONLY the newly-revealed columns + rows
@@ -29032,18 +28861,13 @@ function _clipWireParents() {
 function _clipBakeEdge(L, ogx, ogz) {
   const T = game.sandwichTerrain; if (!T) return;
   const N = _CLIP_N, R = N + 1, sp = L.spacing, d = L.data, ngx = L.gIx, ngz = L.gIz;
-  // ⚠ (v36.45) MUST use the same _clipCellH as _clipBakeLevel. These texels sit
-  // in the same toroidal atlas as ones baked by the full path, so a mismatch
-  // would put point-sampled columns next to footprint-sampled ones and rebuild
-  // the exact leading-edge seam this atlas exists to avoid.
-  for (let gx = ngx; gx <= ngx + N; gx++) { if (gx > ogx && gx < ogx + N) continue;
+  for (let gx = ngx; gx <= ngx + N; gx++) { if (gx > ogx && gx < ogx + N) continue;   
     const tcol = ((gx % R) + R) % R, wx = gx * sp;
-    for (let jj = 0; jj <= N; jj++) { const gz = ngz + jj; d[(((gz % R) + R) % R) * R + tcol] = _clipCellH(wx, gz * sp, sp, T, L.k); } }
-  for (let gz = ngz; gz <= ngz + N; gz++) { if (gz > ogz && gz < ogz + N) continue;
+    for (let jj = 0; jj <= N; jj++) { const gz = ngz + jj; d[(((gz % R) + R) % R) * R + tcol] = _stGroundYCarved(wx, gz * sp, T); } }
+  for (let gz = ngz; gz <= ngz + N; gz++) { if (gz > ogz && gz < ogz + N) continue;   
     const trow = (((gz % R) + R) % R) * R, wz = gz * sp;
-    for (let ii = 0; ii <= N; ii++) { const gx = ngx + ii; d[trow + (((gx % R) + R) % R)] = _clipCellH(gx * sp, wz, sp, T, L.k); } }
+    for (let ii = 0; ii <= N; ii++) { const gx = ngx + ii; d[trow + (((gx % R) + R) % R)] = _stGroundYCarved(gx * sp, wz, T); } }
   L.mat._clipOrigin.value.set(((ngx % R) + R) % R, ((ngz % R) + R) % R);
-  _clipOriginP(L);
   L.tex.needsUpdate = true;
 }
 
@@ -29072,28 +28896,7 @@ function _clipBuild() {
     // The hub's flicker was the unsnapped shadow window all along (fixed in
     // _wxFrame); the ring-overlap surfaces are morph-identical and resolve
     // fine with the gentle offsets.
-    // (v36.47) UNITS DOUBLED — this is the owner's "only some of the faces, like
-    // the faces aren't covering enough, so they shimmer and flicker".
-    // Adjacent levels OVERLAP by 4 child cells (the parent ring's hole edge sits
-    // at child radius N/2-4 = 60, the child's window edge at 64) and inside that
-    // annulus the child has already morphed FULLY, so since v36.43 the two
-    // surfaces are exactly coplanar (`__clipSeam` seamMaxU 0) and separated only
-    // by this offset. -1..-6 units was too thin to hold at mid range, so the two
-    // traded the depth test per pixel — and because each level builds `vSN` from
-    // its OWN atlas, the winner also changes the SHADING, which is why it reads
-    // as patches of face shimmering rather than as depth noise.
-    // Measured, STATIONARY camera, two frames, hard-flipped px of 288,800
-    // (median of 6-8; a stationary camera is the honest probe here — with a thin
-    // offset ANY frame-to-frame change re-rolls the tie, so the flips show up
-    // even with the camera parked, and a moving-camera number is swamped by
-    // weather/day-cycle drift):
-    //   mid-range terrain   -1.0/x1 1260  ->  -1.0/x2 490   (-61%)
-    // ⚠ FACTOR STAYS -1.0. v35.13 raised it to -2 with x3 units and the CITY PAD
-    // began to flicker (the clipmap won ties against the nearly-coplanar city
-    // ground plane); v35.14 reverted it. Re-measured that exact risk here:
-    //   city pad, same probe  -1.0/x1 2049 · -1.5/x4 2927 (REGRESSES) · -1.0/x2 1667 (safe)
-    // -1.5/x4 buys a bit more terrain (357) and is NOT worth reopening v35.13.
-    mat.polygonOffset = true; mat.polygonOffsetFactor = -1.0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k) * 2;
+    mat.polygonOffset = true; mat.polygonOffsetFactor = -1.0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k);
     const mesh = new THREE.Mesh(k === 0 ? _clipmap.solidGeo : _clipmap.ringGeo, mat);
     mesh.receiveShadow = true;
     mesh.scale.set(spacing, 1, spacing);

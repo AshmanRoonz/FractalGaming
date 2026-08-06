@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.43';
+const LSS_BUILD = '36.47';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 try { document.title = 'Last Ship Sailing v' + LSS_BUILD; } catch (_) {}
 
@@ -16562,12 +16562,22 @@ function renderPostFX() {
 const _xrHudUpdateEveryN = 2;
 let _xrHudUploadCounter = 0;
 let _xrAuxUploadCounter = 0;
+function _xrTrackerLocksLive() {
+  if (typeof player === 'undefined' || !player || player.loadoutKey !== 'TRACKER') return false;
+  const L = player.trackerLocks;
+  if (!L) return false;
+  for (const k in L) { if (L[k] > 0) return true; }
+  return false;
+}
 function _xrHudUpdateCadence() {
   const tier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
-  if (tier >= 3) return 6;
-  if (tier >= 2) return 4;
-  if (tier >= 1) return 3;
-  return _xrHudUpdateEveryN;
+  let n;
+  if (tier >= 3) n = 6;
+  else if (tier >= 2) n = 4;
+  else if (tier >= 1) n = 3;
+  else n = _xrHudUpdateEveryN;
+  if (n > 1 && _xrTrackerLocksLive()) n = (tier >= 3) ? 2 : 1;
+  return n;
 }
 function _shouldUseCineFXFrame() {
   if (!cineFX.enabled || !cineFX.composer) return false;
@@ -17482,12 +17492,15 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       sh.uniforms.uClipSkirt = (window.__clipSkirtU || (window.__clipSkirtU = { value: 1.0 }));
       sh.uniforms.uClipMorph = (window.__clipMorphU || (window.__clipMorphU = { value: 1.0 }));
       sh.uniforms.uClipEye = (window.__clipEyeU || (window.__clipEyeU = { value: new THREE.Vector2(0, 0) }));
+      sh.uniforms.uClipAtlasP = m._clipAtlasP || (m._clipAtlasP = { value: null });
+      sh.uniforms.uClipOriginP = m._clipOriginP || (m._clipOriginP = { value: new THREE.Vector2() });
+      sh.uniforms.uClipHasParent = m._clipHasParentU || (m._clipHasParentU = { value: 0 });
       const _cn = _CLIP_N.toFixed(1), _cr = (_CLIP_N + 1).toFixed(1);
       const _chn = (_CLIP_N * 0.5).toFixed(1);            // window half-width (64)
       const _cms = (_CLIP_N * 0.25 + 1);                  // morph band start, from the EYE (33)
       const _cme = (_CLIP_N * 0.5 - 4 - 2);               // morph complete, from the EYE (58)
       const _cmsS = _cms.toFixed(1), _cmw = (_cme - _cms).toFixed(1);   // width 25
-      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform vec2 uClipEye;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*128.0,_fj=uv.y*128.0;\n if((_fj<0.5||_fj>127.5)&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x);}else if((_fi<0.5||_fi>127.5)&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x);}\n vec2 _eo=(vec2(modelMatrix[3][0],modelMatrix[3][2])-uClipEye)/uClipSpacing;float _rd=max(abs(_fi-'+_chn+'+_eo.x),abs(_fj-'+_chn+'+_eo.y));float _gm=clamp((_rd-'+_cmsS+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/129.0)).x;float _h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/129.0)).x;float _h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/129.0)).x;_ch=mix(_ch,_h00+(_h10-_h00)*_wx+(_h01-_h00)*_wz,_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/128.0,1.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/128.0,0.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/128.0,1.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/128.0,0.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _spanX=(min(uv.x+1.0/128.0,1.0)-max(uv.x-1.0/128.0,0.0))*128.0*uClipSpacing; float _spanZ=(min(uv.y+1.0/128.0,1.0)-max(uv.y-1.0/128.0,0.0))*128.0*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));');   
+      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform sampler2D uClipAtlasP;\nuniform vec2 uClipOriginP;\nuniform float uClipHasParent;\nuniform vec2 uClipEye;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*128.0,_fj=uv.y*128.0;\n if((_fj<0.5||_fj>127.5)&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x);}else if((_fi<0.5||_fi>127.5)&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x);}\n vec2 _eo=(vec2(modelMatrix[3][0],modelMatrix[3][2])-uClipEye)/uClipSpacing;float _rd=max(abs(_fi-'+_chn+'+_eo.x),abs(_fj-'+_chn+'+_eo.y));float _gm=clamp((_rd-'+_cmsS+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00,_h10,_h01;if(uClipHasParent>0.5){vec2 _pb=vec2(_ie*0.5,_je*0.5)+uClipOriginP+0.5;_h00=texture2D(uClipAtlasP,fract(_pb/129.0)).x;_h10=texture2D(uClipAtlasP,fract((_pb+vec2(1.0,0.0))/129.0)).x;_h01=texture2D(uClipAtlasP,fract((_pb+vec2(0.0,1.0))/129.0)).x;}else{_h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/129.0)).x;_h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/129.0)).x;_h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/129.0)).x;}_ch=mix(_ch,_h00+(_h10-_h00)*_wx+(_h01-_h00)*_wz,_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/128.0,1.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/128.0,0.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/128.0,1.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/128.0,0.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _spanX=(min(uv.x+1.0/128.0,1.0)-max(uv.x-1.0/128.0,0.0))*128.0*uClipSpacing; float _spanZ=(min(uv.y+1.0/128.0,1.0)-max(uv.y-1.0/128.0,0.0))*128.0*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));');   
     } else {
       sh.vertexShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=position.y; vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
@@ -23193,9 +23206,12 @@ function _clipGeo(hole) {
 function _clipMat() {
   const m = new THREE.MeshStandardMaterial({ flatShading: true, roughness: 1.0, metalness: 0.0, side: THREE.FrontSide });
   m.envMapIntensity = 0.12;
-  m._clipAtlas = { value: null };                 
-  m._clipOrigin = { value: new THREE.Vector2(0, 0) };   
-  m._clipSpacingU = { value: 16.0 };   
+  m._clipAtlas = { value: null };
+  m._clipOrigin = { value: new THREE.Vector2(0, 0) };
+  m._clipSpacingU = { value: 16.0 };
+  m._clipAtlasP = { value: null };
+  m._clipOriginP = { value: new THREE.Vector2(0, 0) };
+  m._clipHasParentU = { value: 0 };
   _swPatchTerrainMat(m, false, m._clipAtlas);     
   return m;
 }
@@ -23214,6 +23230,9 @@ window.__clipSeam = function () {
   const lev = (k) => {
     const L = _clipmap.levels[k], d = L.data, ox = L.mat._clipOrigin.value.x, oz = L.mat._clipOrigin.value.y;
     const T = (i, j) => d[((((j + oz) % R) + R) % R) * R + ((((i + ox) % R) + R) % R)];
+    const P = _clipmap.levels[k + 1];
+    const hasP = !!(P && P.tex && L.mat._clipHasParentU.value > 0.5);
+    const TP = (gx, gz) => P.data[(((gz % R) + R) % R) * R + (((gx % R) + R) % R)];
     const eox = (L.cx - eye.x) / L.spacing, eoz = (L.cz - eye.y) / L.spacing;
     const H = (i, j) => {
       let fine = T(i, j);
@@ -23223,7 +23242,14 @@ window.__clipSeam = function () {
       const gm = Math.min(1, Math.max(0, (rd - bandS) / bandW));
       if (gm <= 0) return { h: fine, gm: 0, span: 0 };
       const ie = Math.floor(i / 2) * 2, je = Math.floor(j / 2) * 2, wx = (i - ie) * 0.5, wz = (j - je) * 0.5;
-      const h00 = T(ie, je), tgt = h00 + (T(ie + 2, je) - h00) * wx + (T(ie, je + 2) - h00) * wz;
+      let h00, h10, h01;
+      if (hasP) {
+        const gpx = (L.gIx + ie) / 2, gpz = (L.gIz + je) / 2;
+        h00 = TP(gpx, gpz); h10 = TP(gpx + 1, gpz); h01 = TP(gpx, gpz + 1);
+      } else {
+        h00 = T(ie, je); h10 = T(ie + 2, je); h01 = T(ie, je + 2);
+      }
+      const tgt = h00 + (h10 - h00) * wx + (h01 - h00) * wz;
       return { h: fine + (tgt - fine) * gm, gm: gm, span: Math.abs(tgt - fine) };
     };
     const at = (x, z) => {
@@ -23248,11 +23274,15 @@ window.__clipSeam = function () {
         if (a === null || b === null) continue;
         const D = Math.abs(a - b); sum += D; n++; if (D > mx) mx = D;
       }
-    let span = 0;
-    for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) { const s = F.H(i, j); if (s.gm > 0 && s.span > span) span = s.span; }
+    let span = 0; const spans = [];
+    for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) { const s = F.H(i, j); if (s.gm > 0) { spans.push(s.span); if (s.span > span) span = s.span; } }
+    spans.sort((a, b) => a - b);
+    const spanMean = spans.length ? spans.reduce((a, b) => a + b, 0) / spans.length : 0;
+    const spanP95 = spans.length ? spans[Math.floor(spans.length * 0.95)] : 0;
     rows.push({ seam: k + '/' + (k + 1), spacing: sp, samples: n,
       seamMeanU: +(sum / Math.max(1, n)).toFixed(4), seamMaxU: +mx.toFixed(3),
       morphSpanU: +span.toFixed(1),
+      morphMeanU: +spanMean.toFixed(2), morphP95U: +spanP95.toFixed(1),
       uPerFrame576: +(span / (bandW * sp) * 4).toFixed(3),
       v3642SnapStepU: +(span * 2 / 28).toFixed(2) });
   }
@@ -23260,13 +23290,35 @@ window.__clipSeam = function () {
   return rows;
 };
 
+const _CLIP_PEAK = { on: 0, k: 3, mix: 0.25, foot: 1.0, minLevel: 1 };
+try { window.__clipPeak = _CLIP_PEAK; } catch (_) {}
+
+function _clipCellH(wx, wz, sp, T, lvl) {
+  const P = _CLIP_PEAK;
+  const k = (P.on && lvl >= P.minLevel) ? Math.max(1, P.k | 0) : 1;
+  if (k <= 1) return _stGroundYCarved(wx, wz, T);
+  const ext = sp * P.foot;
+  let mx = -Infinity, sum = 0;
+  for (let j = 0; j < k; j++) {
+    const oz = ((j + 0.5) / k - 0.5) * ext;
+    for (let i = 0; i < k; i++) {
+      const ox = ((i + 0.5) / k - 0.5) * ext;
+      const h = _stGroundYCarved(wx + ox, wz + oz, T);
+      if (h > mx) mx = h;
+      sum += h;
+    }
+  }
+  const mean = sum / (k * k);
+  return mean + (mx - mean) * P.mix;
+}
+
 function _clipBakeLevel(L) {
   const T = game.sandwichTerrain; if (!T) return;
   const N = _CLIP_N, R = N + 1, sp = L.spacing;
-  L.gIx = Math.round(L.cx / sp) - N / 2; L.gIz = Math.round(L.cz / sp) - N / 2;   
+  L.gIx = Math.round(L.cx / sp) - N / 2; L.gIz = Math.round(L.cz / sp) - N / 2;
   const d = L.data;
   for (let jj = 0; jj <= N; jj++) { const gz = L.gIz + jj, trow = (((gz % R) + R) % R) * R, wz = gz * sp;
-    for (let ii = 0; ii <= N; ii++) { const gx = L.gIx + ii; d[trow + (((gx % R) + R) % R)] = _stGroundYCarved(gx * sp, wz, T); } }
+    for (let ii = 0; ii <= N; ii++) { const gx = L.gIx + ii; d[trow + (((gx % R) + R) % R)] = _clipCellH(gx * sp, wz, sp, T, L.k); } }
   if (!L.tex) {
     L.tex = new THREE.DataTexture(d, R, R, THREE.RedFormat, THREE.FloatType);
     L.tex.minFilter = L.tex.magFilter = THREE.NearestFilter;   
@@ -23274,19 +23326,37 @@ function _clipBakeLevel(L) {
     L.mat._clipAtlas.value = L.tex;
   }
   L.mat._clipOrigin.value.set(((L.gIx % R) + R) % R, ((L.gIz % R) + R) % R);
+  _clipOriginP(L);
+  _clipWireParents();
   L.tex.needsUpdate = true;
+}
+
+function _clipOriginP(L) {
+  const R = _CLIP_N + 1;
+  const hx = L.gIx / 2, hz = L.gIz / 2;
+  L.mat._clipOriginP.value.set(((hx % R) + R) % R, ((hz % R) + R) % R);
+}
+
+function _clipWireParents() {
+  const Ls = _clipmap.levels; if (!Ls) return;
+  for (let k = 0; k < Ls.length; k++) {
+    const P = Ls[k + 1];
+    Ls[k].mat._clipAtlasP.value = (P && P.tex) ? P.tex : Ls[k].tex;
+    Ls[k].mat._clipHasParentU.value = (P && P.tex) ? 1 : 0;
+  }
 }
 
 function _clipBakeEdge(L, ogx, ogz) {
   const T = game.sandwichTerrain; if (!T) return;
   const N = _CLIP_N, R = N + 1, sp = L.spacing, d = L.data, ngx = L.gIx, ngz = L.gIz;
-  for (let gx = ngx; gx <= ngx + N; gx++) { if (gx > ogx && gx < ogx + N) continue;   
+  for (let gx = ngx; gx <= ngx + N; gx++) { if (gx > ogx && gx < ogx + N) continue;
     const tcol = ((gx % R) + R) % R, wx = gx * sp;
-    for (let jj = 0; jj <= N; jj++) { const gz = ngz + jj; d[(((gz % R) + R) % R) * R + tcol] = _stGroundYCarved(wx, gz * sp, T); } }
-  for (let gz = ngz; gz <= ngz + N; gz++) { if (gz > ogz && gz < ogz + N) continue;   
+    for (let jj = 0; jj <= N; jj++) { const gz = ngz + jj; d[(((gz % R) + R) % R) * R + tcol] = _clipCellH(wx, gz * sp, sp, T, L.k); } }
+  for (let gz = ngz; gz <= ngz + N; gz++) { if (gz > ogz && gz < ogz + N) continue;
     const trow = (((gz % R) + R) % R) * R, wz = gz * sp;
-    for (let ii = 0; ii <= N; ii++) { const gx = ngx + ii; d[trow + (((gx % R) + R) % R)] = _stGroundYCarved(gx * sp, wz, T); } }
+    for (let ii = 0; ii <= N; ii++) { const gx = ngx + ii; d[trow + (((gx % R) + R) % R)] = _clipCellH(gx * sp, wz, sp, T, L.k); } }
   L.mat._clipOrigin.value.set(((ngx % R) + R) % R, ((ngz % R) + R) % R);
+  _clipOriginP(L);
   L.tex.needsUpdate = true;
 }
 
@@ -23308,7 +23378,7 @@ function _clipBuild() {
     const spacing = _CLIP_M0 * Math.pow(2, k);
     const mat = _clipMat();
     if (mat._clipSpacingU) mat._clipSpacingU.value = spacing;   
-    mat.polygonOffset = true; mat.polygonOffsetFactor = -1.0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k);
+    mat.polygonOffset = true; mat.polygonOffsetFactor = -1.0; mat.polygonOffsetUnits = -(_CLIP_LEVELS - k) * 2;
     const mesh = new THREE.Mesh(k === 0 ? _clipmap.solidGeo : _clipmap.ringGeo, mat);
     mesh.receiveShadow = true;
     mesh.scale.set(spacing, 1, spacing);
@@ -46570,6 +46640,7 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
     const _tp = (_hudSharedTail._p = _hudSharedTail._p || new THREE.Vector3());
     const _vrRing = (typeof isXRPresenting === 'function') && isXRPresenting();
     let _hpW = 0, _hpH = 0, _hpZ = -2, _eyeX = 0, _eyeY = 0, _eyeZ = 0;
+    let _ringK = 1, _ringA = 0.5;
     let _vmv = null;
     if (_vrRing) {
       const _hm = (typeof xrHudMesh !== 'undefined') ? xrHudMesh : null;
@@ -46592,6 +46663,10 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
           _eyeX /= _cams.length; _eyeY /= _cams.length; _eyeZ /= _cams.length;
         }
       } catch (_) {}
+      const _rdist = Math.abs(_hpZ - _eyeZ) || 2.0;
+      const _vrDeg = 2 * Math.atan((_hpH * 0.5) / _rdist) * 180 / Math.PI;
+      if (_vrDeg > 0.001) _ringK = Math.max(1, Math.min(3, 90 / _vrDeg));
+      _ringA = 0.85;
     }
     const _lockCands = (_hudSharedTail._c = _hudSharedTail._c || []);
     _lockCands.length = 0;
@@ -46624,20 +46699,20 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
       }
       if (sx < -100 || sx > W + 100 || sy < -100 || sy > H + 100) continue;
 
-      const baseR = 30;
-      const lockAlpha = locks >= 3 ? (0.7 + Math.sin(t * 8) * 0.3) : 0.5;
+      const baseR = 30 * _ringK;
+      const lockAlpha = locks >= 3 ? (0.7 + Math.sin(t * 8) * 0.3) : _ringA;
       const lockColor = 'rgba(255,170,0,' + lockAlpha + ')';
       const fullLockColor = 'rgba(255,80,0,' + lockAlpha + ')';
 
       ctx.fillStyle = locks >= 3 ? fullLockColor : lockColor;
-      ctx.beginPath(); ctx.arc(sx, sy, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx, sy, 3 * _ringK, 0, Math.PI * 2); ctx.fill();
 
       for (let ring = 0; ring < locks; ring++) {
         const ringR = baseR * (0.5 + ring * 0.4);
         const ringRotation = t * (2 + ring) * (ring % 2 === 0 ? 1 : -1);
         const dashLen = ring === 2 ? 0 : 0.15;
         ctx.strokeStyle = ring === 2 && locks >= 3 ? fullLockColor : lockColor;
-        ctx.lineWidth = ring === 2 && locks >= 3 ? 2.5 : 1.5;
+        ctx.lineWidth = (ring === 2 && locks >= 3 ? 2.5 : 1.5) * _ringK;
         if (dashLen > 0) {
           const gapStart = ringRotation % (Math.PI * 2);
           const gapSize = dashLen * Math.PI * 2;
@@ -46648,7 +46723,7 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
           ctx.beginPath(); ctx.arc(sx, sy, ringR, 0, Math.PI * 2); ctx.stroke();
         }
         if (ring < 2) {
-          const tickLen = 6;
+          const tickLen = 6 * _ringK;
           for (let ti = 0; ti < 4; ti++) {
             const ta = ringRotation + (ti / 4) * Math.PI * 2;
             const _c = Math.cos(ta), _s = Math.sin(ta);
@@ -46661,9 +46736,9 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
       }
       if (locks >= 3) {
         ctx.fillStyle = fullLockColor;
-        hudFont('bold 10px Courier New');
+        hudFont('bold ' + Math.round(10 * _ringK) + 'px Courier New');
         ctx.textAlign = 'center';
-        ctx.fillText('LOCKED', sx, sy + baseR * 1.8 + 8);
+        ctx.fillText('LOCKED', sx, sy + baseR * 1.8 + 8 * _ringK);
       }
     }
   }
