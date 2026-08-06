@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.53';
+const LSS_BUILD = '36.55';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -4473,10 +4473,18 @@ const PILOT_PERKS = {
   shield: {
     id: 'shield',
     name: 'Emergency Recharge',
-    desc: 'Avoid damage for 5s and your shield instantly recharges to full. Rewards breaking contact and re-engaging.',
+    desc: 'Avoid damage for 5s: shield snaps to full, then an overshield layer charges up on top. Taking a hit interrupts the charge — but once it completes, this overshield does not decay.',
     icon: '⛨',
     color: 0xaaccff,
     shieldRefillAfter: 5,
+    // (v36.53b) Fraction of maxShield banked as OVERSHIELD alongside the
+    // refill. 0.5 is the same ceiling a stasis field charges to, which is what
+    // the HUD's overshield arc is calibrated against (overFrac = os /
+    // (maxShield * 0.5)) — so a full grant reads as a full arc rather than a
+    // permanently half-filled one. Self-limiting by design: overshield decays
+    // at 3%/s outside a stasis field (~17 s to bleed a full bank), so this
+    // rewards disengaging and RETURNING, not sitting out of the fight.
+    overShieldFrac: 0.5,
   },
   dash: {
     id: 'dash',
@@ -49796,6 +49804,7 @@ function commitLoadout(key) {
   player.shield = ch.maxShield;
   player.maxShield = ch.maxShield;
   player.overShield = 0; // (v36.12) fresh loadout starts without the stasis bonus layer
+  player._perkOsLocked = false;   // (v36.55) see death path
   player.coreMeter = 0;
   player.shipState = 'spawning';
   player.spawnProtection = LSS.SPAWN_PROTECTION;
@@ -49845,6 +49854,9 @@ function commitLoadout(key) {
     // effect (_tickPerkEffects). Clear its cue state so a fresh commit cannot
     // inherit the previous round's "already fired" flag and stay silent.
     player._perkRefillArmed = false;
+    // ⚠ Must clear too, or switching AWAY from this perk mid-session would
+    // leave a locked bank that never decays for any other perk.
+    player._perkOsLocked = false;
     if (_perk.dashBonus) {
       player.maxDashes += _perk.dashBonus;
       player.dashCharges = player.maxDashes;
@@ -50822,6 +50834,7 @@ window.__playerTakeDamage = playerTakeDamage;
 function playerDie(attacker) {
   player.health = 0;
   player.overShield = 0; // (v36.12) death drops the stasis bonus layer
+  player._perkOsLocked = false;   // (v36.55) stale lock would freeze a later stasis bank
   player.shipState = 'dead';
   player.doomed = false;
   player.doomTimer = 0;
@@ -50914,6 +50927,7 @@ function respawnPlayer() {
   player.health = ch.maxHealth;
   player.shield = ch.maxShield;
   player.overShield = 0; // (v36.12) respawn starts without the stasis bonus layer
+  player._perkOsLocked = false;   // (v36.55) see death path
   player.shipState = 'spawning';
   player.spawnProtection = LSS.SPAWN_PROTECTION;
   player.doomed = false;
@@ -51017,19 +51031,44 @@ function _tickPerkEffects(dt) {
   // full the condition stays true every frame, and re-running it would spam the
   // cue. Re-arms the moment the shield drops below max again.
   if (p.shieldRefillAfter && player.maxShield > 0 && player.shipState !== 'dead') {
+    // ⚠ _perkRefillArmed gates the WHOLE GRANT, not just the cue. Overshield
+    // DECAYS (3%/s, updatePlayerStasis), so a "top up whenever below target"
+    // test would re-grant every frame and cancel the decay outright — turning
+    // a recovery burst into a permanent 1.5x shield. Grant exactly ONCE per
+    // quiet period; taking any damage re-arms it.
+    // Requires lastDamageTime > 0 so it responds to actually having been
+    // attacked — no free layer for spawning and sitting still.
+    const hurt  = (player.lastDamageTime || 0) > 0;
     const quiet = (game.time - (player.lastDamageTime || 0)) >= p.shieldRefillAfter;
-    if (player.shield < player.maxShield) {
-      if (quiet) {
-        player.shield = player.maxShield;
-        if (!player._perkRefillArmed) {
-          player._perkRefillArmed = true;
-          // Sound only, no banner. This can fire every time you break contact
-          // for 5s — a full-screen banner at that cadence reads as spam, and
-          // the shield arc visibly snapping to full is already the strong cue.
-          try { if (typeof playSound === 'function') playSound('shield_recharge'); } catch (_) {}
-        }
-      } else {
-        player._perkRefillArmed = false;   // took a hit — re-arm the cue
+    if (!quiet) {
+      // ANY hit interrupts. Clearing _perkOsLocked here is what makes the
+      // no-decay promise conditional on finishing the charge: a bank that was
+      // locked starts bleeding again the moment you are hit, and a partial
+      // charge decays normally because it never locked in the first place.
+      player._perkRefillArmed = false;
+      player._perkOsLocked = false;
+    } else if (hurt) {
+      if (!player._perkRefillArmed) {
+        player._perkRefillArmed = true;
+        player.shield = player.maxShield;   // the shield half IS instant
+        // Sound only, no banner. This fires every time you break contact for
+        // 5s — a banner at that cadence reads as spam, and the shield arc
+        // snapping to full plus the overshield band filling is already a
+        // strong cue.
+        try { if (typeof playSound === 'function') playSound('shield_recharge'); } catch (_) {}
+      }
+      // --- overshield charges GRADUALLY, at the stasis field's own rate ---
+      // Rate is derived from game.playerStasisDuration rather than a private
+      // constant so retuning the field carries over and the two keep feeling
+      // the same (maxShield/3 per second -> a 0.5x cap fills in ~1.5s).
+      const cap = player.maxShield * (p.overShieldFrac || 0);
+      if (cap > 0 && (player.overShield || 0) < cap) {
+        const rate = player.maxShield / (game.playerStasisDuration || 3);
+        player.overShield = Math.min(cap, (player.overShield || 0) + rate * dt);
+        // Locks only on COMPLETION — that is the whole bargain.
+        if (player.overShield >= cap - 1e-3) player._perkOsLocked = true;
+      } else if (cap > 0) {
+        player._perkOsLocked = true;   // already at/over cap (e.g. via stasis)
       }
     }
   }
@@ -58386,6 +58425,7 @@ function returnToRootMenu(opts) {
     if (player.maxHealth) player.health = player.maxHealth;
     if (player.maxShield) player.shield = player.maxShield;
     player.overShield = 0; // (v36.12) teardown clears the stasis bonus layer
+    player._perkOsLocked = false;   // (v36.55) see death path
   }
   // Release pointer lock if combat had it ; otherwise the lobby reads as
   // a frozen view because the cursor's still trapped in the canvas.
@@ -72481,7 +72521,12 @@ function updatePlayerStasis(dt) {
     // bank gone in ~17s). Ticked here because this runs every playing frame
     // (gameLoop calls it unconditionally); inside a field the charge branch
     // below owns the value instead.
-    if (player.overShield > 0 && player.maxShield > 0) {
+    // (v36.55) Emergency Recharge holds its bank. _perkOsLocked is set only
+    // when that perk's overshield charge RUNS TO COMPLETION, and any hit clears
+    // it (_tickPerkEffects), so an interrupted charge still bleeds normally and
+    // a locked bank starts bleeding again the moment contact resumes. Stasis
+    // overshield is unaffected — nothing else ever sets the flag.
+    if (player.overShield > 0 && player.maxShield > 0 && !player._perkOsLocked) {
       player.overShield = Math.max(0, player.overShield - player.maxShield * 0.03 * dt);
     }
     return;

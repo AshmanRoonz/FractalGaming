@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.53';
+const LSS_BUILD = '36.55';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -4279,10 +4279,11 @@ const PILOT_PERKS = {
   shield: {
     id: 'shield',
     name: 'Emergency Recharge',
-    desc: 'Avoid damage for 5s and your shield instantly recharges to full. Rewards breaking contact and re-engaging.',
+    desc: 'Avoid damage for 5s: shield snaps to full, then an overshield layer charges up on top. Taking a hit interrupts the charge — but once it completes, this overshield does not decay.',
     icon: '⛨',
     color: 0xaaccff,
     shieldRefillAfter: 5,
+    overShieldFrac: 0.5,
   },
   dash: {
     id: 'dash',
@@ -38908,6 +38909,7 @@ function commitLoadout(key) {
   player.shield = ch.maxShield;
   player.maxShield = ch.maxShield;
   player.overShield = 0; // (v36.12) fresh loadout starts without the stasis bonus layer
+  player._perkOsLocked = false;   // (v36.55) see death path
   player.coreMeter = 0;
   player.shipState = 'spawning';
   player.spawnProtection = LSS.SPAWN_PROTECTION;
@@ -38930,6 +38932,7 @@ function commitLoadout(key) {
   player._lastCorePctForCloak = 0;
   if (_perk) {
     player._perkRefillArmed = false;
+    player._perkOsLocked = false;
     if (_perk.dashBonus) {
       player.maxDashes += _perk.dashBonus;
       player.dashCharges = player.maxDashes;
@@ -39556,6 +39559,7 @@ window.__playerTakeDamage = playerTakeDamage;
 function playerDie(attacker) {
   player.health = 0;
   player.overShield = 0; // (v36.12) death drops the stasis bonus layer
+  player._perkOsLocked = false;   // (v36.55) stale lock would freeze a later stasis bank
   player.shipState = 'dead';
   player.doomed = false;
   player.doomTimer = 0;
@@ -39619,6 +39623,7 @@ function respawnPlayer() {
   player.health = ch.maxHealth;
   player.shield = ch.maxShield;
   player.overShield = 0; // (v36.12) respawn starts without the stasis bonus layer
+  player._perkOsLocked = false;   // (v36.55) see death path
   player.shipState = 'spawning';
   player.spawnProtection = LSS.SPAWN_PROTECTION;
   player.doomed = false;
@@ -39688,16 +39693,24 @@ function _tickPerkEffects(dt) {
     }
   }
   if (p.shieldRefillAfter && player.maxShield > 0 && player.shipState !== 'dead') {
+    const hurt  = (player.lastDamageTime || 0) > 0;
     const quiet = (game.time - (player.lastDamageTime || 0)) >= p.shieldRefillAfter;
-    if (player.shield < player.maxShield) {
-      if (quiet) {
-        player.shield = player.maxShield;
-        if (!player._perkRefillArmed) {
-          player._perkRefillArmed = true;
-          try { if (typeof playSound === 'function') playSound('shield_recharge'); } catch (_) {}
-        }
-      } else {
-        player._perkRefillArmed = false;   // took a hit — re-arm the cue
+    if (!quiet) {
+      player._perkRefillArmed = false;
+      player._perkOsLocked = false;
+    } else if (hurt) {
+      if (!player._perkRefillArmed) {
+        player._perkRefillArmed = true;
+        player.shield = player.maxShield;   // the shield half IS instant
+        try { if (typeof playSound === 'function') playSound('shield_recharge'); } catch (_) {}
+      }
+      const cap = player.maxShield * (p.overShieldFrac || 0);
+      if (cap > 0 && (player.overShield || 0) < cap) {
+        const rate = player.maxShield / (game.playerStasisDuration || 3);
+        player.overShield = Math.min(cap, (player.overShield || 0) + rate * dt);
+        if (player.overShield >= cap - 1e-3) player._perkOsLocked = true;
+      } else if (cap > 0) {
+        player._perkOsLocked = true;   // already at/over cap (e.g. via stasis)
       }
     }
   }
@@ -45197,6 +45210,7 @@ function returnToRootMenu(opts) {
     if (player.maxHealth) player.health = player.maxHealth;
     if (player.maxShield) player.shield = player.maxShield;
     player.overShield = 0; // (v36.12) teardown clears the stasis bonus layer
+    player._perkOsLocked = false;   // (v36.55) see death path
   }
   if (document.exitPointerLock) {
     try { document.exitPointerLock(); } catch (_) {}
@@ -56353,7 +56367,7 @@ function enterStasis(field) {
 
 function updatePlayerStasis(dt) {
   if (!game.playerInStasis) {
-    if (player.overShield > 0 && player.maxShield > 0) {
+    if (player.overShield > 0 && player.maxShield > 0 && !player._perkOsLocked) {
       player.overShield = Math.max(0, player.overShield - player.maxShield * 0.03 * dt);
     }
     return;
