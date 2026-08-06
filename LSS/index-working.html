@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.52';
+const LSS_BUILD = '36.53';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -4463,13 +4463,20 @@ const PILOT_PERKS = {
     icon: '◉',
     color: 0x66ddff,
   },
+  // (v36.53) WAS 'Reinforced Shield' (+1000 flat max shield). Now a
+  // disengage-and-recover perk: break contact for 5s and the shield snaps back
+  // to full. Rewards repositioning instead of raising a static number.
+  // ⚠ THE ID STAYS 'shield'. It is what is written to localStorage
+  // ('lss_perk_id') and now synced to the account (v36.50) — renaming it would
+  // orphan every existing player's saved choice and silently drop them to the
+  // default perk.
   shield: {
     id: 'shield',
-    name: 'Reinforced Shield',
-    desc: '+1000 max shield HP. Tanks more burst damage before your hull is exposed.',
+    name: 'Emergency Recharge',
+    desc: 'Avoid damage for 5s and your shield instantly recharges to full. Rewards breaking contact and re-engaging.',
     icon: '⛨',
     color: 0xaaccff,
-    shieldBonus: 1000,
+    shieldRefillAfter: 5,
   },
   dash: {
     id: 'dash',
@@ -49834,10 +49841,10 @@ function commitLoadout(key) {
   player.perkCloakTimer = 0;
   player._lastCorePctForCloak = 0;
   if (_perk) {
-    if (_perk.shieldBonus) {
-      player.maxShield += _perk.shieldBonus;
-      player.shield = player.maxShield;
-    }
+    // (v36.53) Emergency Recharge has no commit-time grant — it is a per-frame
+    // effect (_tickPerkEffects). Clear its cue state so a fresh commit cannot
+    // inherit the previous round's "already fired" flag and stay silent.
+    player._perkRefillArmed = false;
     if (_perk.dashBonus) {
       player.maxDashes += _perk.dashBonus;
       player.dashCharges = player.maxDashes;
@@ -50996,6 +51003,34 @@ function _tickPerkEffects(dt) {
     const cap = player.maxHealth * (p.overhealMult || 1.0);
     if (player.health < cap) {
       player.health = Math.min(cap, player.health + p.regenPerSec * player.maxHealth * dt);
+    }
+  }
+  // --- (v36.53) Emergency Recharge : go `shieldRefillAfter` seconds without
+  // taking damage and the shield snaps back to full.
+  // Uses player.lastDamageTime, which playerTakeDamage stamps with game.time on
+  // EVERY damage source — so chip damage, DoT and collisions all reset the
+  // window, not just direct fire.
+  // ⚠ Deliberately does NOT touch player.overShield. Overshield is banked on
+  // top of max by stasis fields and is meant to be spent; refilling to
+  // maxShield must not overwrite or top up that separate pool.
+  // ⚠ Fires only on a rising edge (_perkRefillArmed): while the shield sits
+  // full the condition stays true every frame, and re-running it would spam the
+  // cue. Re-arms the moment the shield drops below max again.
+  if (p.shieldRefillAfter && player.maxShield > 0 && player.shipState !== 'dead') {
+    const quiet = (game.time - (player.lastDamageTime || 0)) >= p.shieldRefillAfter;
+    if (player.shield < player.maxShield) {
+      if (quiet) {
+        player.shield = player.maxShield;
+        if (!player._perkRefillArmed) {
+          player._perkRefillArmed = true;
+          // Sound only, no banner. This can fire every time you break contact
+          // for 5s — a full-screen banner at that cadence reads as spam, and
+          // the shield arc visibly snapping to full is already the strong cue.
+          try { if (typeof playSound === 'function') playSound('shield_recharge'); } catch (_) {}
+        }
+      } else {
+        player._perkRefillArmed = false;   // took a hit — re-arm the cue
+      }
     }
   }
   // --- Auto Cloak : (cloak 2026-05 retune) Fires when the core meter
