@@ -764,14 +764,30 @@ function _parseStateJson(s, fallback) {
 // is never a conflict to prompt about. Values are coerced to finite
 // non-negative integers so a malformed client can't write NaN/Infinity/strings
 // into a field the game later does arithmetic on.
+// ⚠ SHAPE: lss_aegis is keyed BY SHIP and each value is an OBJECT, not a
+// number — { "VORTEX": { "xp": 5000 }, "SLAYER": { "xp": 1200 } }. The v36.50
+// first cut assumed { rankId: number }, so Number({xp:5000}) was NaN, every key
+// was dropped, and a sign-in wrote {} over the player's real XP. Merge PER SHIP
+// on xp, and carry the rest of the richer side's fields so a future field added
+// to that object is not silently discarded by an older client.
 function _mergeAegis(oldA, newA) {
   const out = {};
   for (const k of new Set([...Object.keys(oldA || {}), ...Object.keys(newA || {})])) {
-    const a = Number(oldA && oldA[k]); const b = Number(newA && newA[k]);
-    const av = Number.isFinite(a) ? Math.max(0, Math.floor(a)) : 0;
-    const bv = Number.isFinite(b) ? Math.max(0, Math.floor(b)) : 0;
-    const m = Math.max(av, bv);
-    if (m > 0) out[k] = m;
+    const a = (oldA && oldA[k]) || null;
+    const b = (newA && newA[k]) || null;
+    // Tolerate a bare number too, in case an older/other client wrote one.
+    const xpOf = (v) => {
+      const n = (v && typeof v === 'object') ? Number(v.xp) : Number(v);
+      return Number.isFinite(n) ? Math.max(0, n) : 0;
+    };
+    const ax = xpOf(a), bx = xpOf(b);
+    const xp = Math.max(ax, bx);
+    // Union BOTH sides' fields (higher-xp side wins conflicts) rather than
+    // taking only the richer one — otherwise a field that exists solely on the
+    // lower-xp side is silently dropped by the sync.
+    const lo = ((bx >= ax ? a : b) && typeof (bx >= ax ? a : b) === 'object') ? (bx >= ax ? a : b) : {};
+    const hi = ((bx >= ax ? b : a) && typeof (bx >= ax ? b : a) === 'object') ? (bx >= ax ? b : a) : {};
+    out[k] = { ...lo, ...hi, xp };
   }
   return out;
 }

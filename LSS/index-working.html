@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.50';
+const LSS_BUILD = '36.52';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -6694,14 +6694,31 @@ async function lssPullAccountState() {
     if (!res.ok) return null;
     const remote = await res.json();
 
-    // AEGIS: highest-per-rank wins, so neither side can lose a level.
+    // AEGIS: highest wins, so neither side can lose progress.
+    // ⚠ SHAPE: lss_aegis is keyed BY SHIP and each value is an OBJECT —
+    // { "VORTEX": { "xp": 5000 }, ... } (see _aegisShipState). The v36.50 first
+    // cut treated the values as plain numbers, so Number({xp:5000}) was NaN,
+    // every key was dropped, and this line wrote {} over the player's real XP.
+    // Merge PER SHIP on xp and keep the richer side's other fields.
     let local = {};
     try { local = JSON.parse(localStorage.getItem('lss_aegis') || '{}') || {}; } catch (_) {}
+    const rem = (remote && remote.aegis) || {};
+    const xpOf = (v) => { const n = (v && typeof v === 'object') ? Number(v.xp) : Number(v); return Number.isFinite(n) ? Math.max(0, n) : 0; };
     const merged = {};
-    for (const k of new Set([...Object.keys(local), ...Object.keys(remote.aegis || {})])) {
-      const a = Number(local[k]) || 0, b = Number((remote.aegis || {})[k]) || 0;
-      const m = Math.max(a, b);
-      if (m > 0) merged[k] = m;
+    for (const k of new Set([...Object.keys(local), ...Object.keys(rem)])) {
+      const a = local[k], b = rem[k];
+      const ax = xpOf(a), bx = xpOf(b);
+      // Union both sides' fields; higher-xp side wins conflicts.
+      const lo = ((bx >= ax ? a : b) && typeof (bx >= ax ? a : b) === 'object') ? (bx >= ax ? a : b) : {};
+      const hi = ((bx >= ax ? b : a) && typeof (bx >= ax ? b : a) === 'object') ? (bx >= ax ? b : a) : {};
+      merged[k] = { ...lo, ...hi, xp: Math.max(ax, bx) };
+    }
+    // BELT AND BRACES: never let a sync empty a non-empty local store. If the
+    // merge somehow produces nothing while local had data, keep local and bail
+    // — a failed sync must never be able to destroy progression.
+    if (Object.keys(merged).length === 0 && Object.keys(local).length > 0) {
+      console.warn('[lss-backend] merge produced empty aegis ; keeping local');
+      return local;
     }
     try { localStorage.setItem('lss_aegis', JSON.stringify(merged)); } catch (_) {}
     // game._aegis is read live during play; refresh it or the merge only
@@ -6747,7 +6764,9 @@ async function lssPushAccountState() {
     // Adopt the server's merged view — it may hold a higher rank from another
     // device, and this is the round-trip that makes "highest wins" converge.
     const merged = await res.json().catch(() => null);
-    if (merged && merged.aegis) {
+    // Same guard as the pull path: adopting the server's view must never be
+    // able to empty a non-empty local store.
+    if (merged && merged.aegis && !(Object.keys(merged.aegis).length === 0 && Object.keys(aegis).length > 0)) {
       try { localStorage.setItem('lss_aegis', JSON.stringify(merged.aegis)); } catch (_) {}
       try { if (typeof game !== 'undefined' && game) game._aegis = merged.aegis; } catch (_) {}
     }
@@ -7984,10 +8003,29 @@ function _endlessLivesFor(d) { return d === 'easy' ? 3 : d === 'medium' ? 2 : 1;
 // off the lane and chasing fleeing motes. Speed x1.30 (455 from base 350) stays
 // UNDER the hoard bot's shipped 1.33 boost (`_campTuneHoardBot`) — the same rail
 // v35.90 used to justify L5's 1.20 — so hostiles can still run you down.
-const _EAEGIS_MAX = 10;
-const _EAEGIS_DMG = [0, 0.06, 0.12, 0.18, 0.24, 0.30, 0.35, 0.39, 0.42, 0.44, 0.45];
-const _EAEGIS_SPD = [0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.23, 0.255, 0.275, 0.29, 0.30];
-const _EAEGIS_REG = [0, 0.003, 0.006, 0.009, 0.012, 0.015, 0.017, 0.0185, 0.0195, 0.0205, 0.021];
+// (v36.52) RAISED 10 -> 20 SO ENDLESS UNLOCKS THE REAL ABILITIES.
+// Owner: "the point is the ships get more powerful with the aegis abilities...
+// it should unlock up to level 20, all the abilities." Expedition's AEGIS is an
+// XP ladder to rank 20 whose 2/5/8/11/14/17/20 steps grant actual per-ship
+// ABILITIES (_aegisShipUpgrades / _aegisDmgOut) — extra dash charge, doubled
+// clip, Dreadnaught, Apex Ship. Endless had a SEPARATE 0..10 ladder that only
+// scaled damage/speed/regen and unlocked none of them, so the two systems
+// shared a name and a HUD label while meaning different things.
+//
+// ⚠ THE STAT CURVES DELIBERATELY HOLD FLAT FROM L10 TO L20. The taper above
+// exists to keep speed at x1.30, UNDER the hoard bot's shipped 1.33 boost
+// (`_campTuneHoardBot`) so hostiles can still run you down — extending the
+// ramp would break that rail. L11-L20 therefore buy ABILITIES, not raw stats,
+// which is exactly what was asked for. Index 20 is the last entry; every read
+// is `_EAEGIS_x[lvl] || 0` so an out-of-range level degrades to 0 rather than
+// NaN-ing a chassis clone.
+const _EAEGIS_MAX = 20;
+const _EAEGIS_DMG = [0, 0.06, 0.12, 0.18, 0.24, 0.30, 0.35, 0.39, 0.42, 0.44, 0.45,
+                     0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45, 0.45];
+const _EAEGIS_SPD = [0, 0.04, 0.08, 0.12, 0.16, 0.20, 0.23, 0.255, 0.275, 0.29, 0.30,
+                     0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30, 0.30];
+const _EAEGIS_REG = [0, 0.003, 0.006, 0.009, 0.012, 0.015, 0.017, 0.0185, 0.0195, 0.0205, 0.021,
+                     0.021, 0.021, 0.021, 0.021, 0.021, 0.021, 0.021, 0.021, 0.021, 0.021];
 // A bolt at TRUE max must still pay. Ladder (see the collect body in `_aegis`):
 //   1. lvl < MAX                    -> rank up (unchanged)
 //   2. lvl = MAX, lives < livesMax  -> +1 LIFE
@@ -8686,8 +8724,39 @@ const EndlessMode = {
         a.curCh = null; a.baseCh = null;
       }
     } catch (_) {}
+    // (v36.52) Apply the shared aegis ABILITY unlocks for the new rank. The
+    // speed clone above is the generic ramp; this is what makes L11-L20 worth
+    // reaching now that the ladder runs to 20.
+    try { this._aegisApplyAbilities(run); } catch (_) {}
     if (up) { try { if (typeof playSound === 'function') playSound('upgrade_core'); } catch (_) {} }
     a.flashT = 1.2;
+  },
+  // (v36.52) Endless's half of the shared aegis ability system.
+  // ⚠ Split by IDEMPOTENCY, because this runs on every level-up mid-flight
+  // while expedition only ever calls _aegisApply right after a chassis reset:
+  //   - the +max-health / +max-shield tiers and BLASTER's Dreadnaught shield
+  //     are `+=` and are granted ONCE each, tracked on a._absDone;
+  //   - everything in _aegisShipUpgrades derives from a base value, so it is
+  //     re-applied every time (skipAdditive tells it to leave the one `+=` to
+  //     us) — which is what keeps the clip/dash/energy unlocks correct after
+  //     respawnPlayer or a mid-run ship change rebuilds those from the chassis.
+  // Teardown resets a._absDone with the rest of the run, so a new run starts
+  // clean; nothing here touches persistent expedition XP.
+  _aegisApplyAbilities(run) {
+    const a = run && run.aegis; if (!a) return;
+    if (typeof player === 'undefined' || !player || !player.loadoutKey) return;
+    const lvl = a.lvl || 0;
+    a._absDone = a._absDone || {};
+    if (lvl >= 5 && !a._absDone.h5) {
+      player.maxHealth += 2500; player.health += 2500; a._absDone.h5 = 1;
+    }
+    if (lvl >= 14 && !a._absDone.s14) {
+      player.maxShield += 2500; player.shield += 2500; a._absDone.s14 = 1;
+    }
+    if (lvl >= 20 && !a._absDone.b20 && player.loadoutKey === 'BLASTER') {
+      player.maxShield += 1000; player.shield += 1000; a._absDone.b20 = 1;
+    }
+    try { _aegisShipUpgrades(true); } catch (_) {}
   },
   _spawnWave(run) {
     run.waveN++;
@@ -9049,6 +9118,20 @@ if (typeof window !== 'undefined') window.__endlessTick = function (dt) {
 // (v35.90) AEGIS SURGE debug view: rank, buff multipliers, live bolt census
 // + per-bolt distance-to-spine (min over the seg window's xz projections —
 // the off-line placement guarantee is >=420u, so offSpineMin < 400 is a bug).
+// (v36.52) Set the endless aegis rank directly. Reaching L20 legitimately is
+// ~20 bolts (~200 km of flying), so every check of the ability unlocks —
+// balance passes included — needs this. Drives the REAL _aegisSetLvl path, so
+// the speed clone and the ability grants behave exactly as they do in play.
+if (typeof window !== 'undefined') window.__endlessSetAegis = function (lvl) {
+  try {
+    const run = game.endlessRun; if (!run) return 'no endless run';
+    GameModes.endless._aegisSetLvl(run, Math.max(0, Math.min(_EAEGIS_MAX, lvl | 0)));
+    const a = run.aegis;
+    return { lvl: a.lvl, max: _EAEGIS_MAX, granted: Object.keys(a._absDone || {}),
+             maxHealth: player.maxHealth, maxShield: player.maxShield, maxDashes: player.maxDashes,
+             maxClip: player.maxClip, speed: player.chassis && player.chassis.flightSpeed };
+  } catch (e) { return String(e && e.stack || e); }
+};
 if (typeof window !== 'undefined') window.__endlessAegis = function () {
   try {
     const run = game.endlessRun; if (!run) return null;
@@ -27327,12 +27410,38 @@ AEGIS.LIVE = {
   VORTEX: [2, 8, 11, 17, 20], PYRO: [2, 8, 11, 17, 20], PUNCTURE: [2, 8, 11, 17, 20],
   SLAYER: [2, 8, 11, 17, 20], TRACKER: [2, 8, 11, 17, 20], BLASTER: [2, 8, 11, 17, 20], SYPHON: [2, 8, 11, 17, 20],
 };
-function _aegisUpFor(rank) {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return false;
-  try { return AEGIS.rankFromXp(_aegisShipState().xp).rank >= rank; } catch (_) { return false; }
+// (v36.52) THE EFFECTIVE AEGIS RANK, WHICHEVER MODE GRANTS IT.
+// Returns -1 where aegis abilities do not apply at all, so callers can gate on
+// `>= 0` instead of re-testing LSS.MODE in five places (which is how endless
+// ended up unlocking none of them).
+//   expedition/freeflight : the persistent per-ship XP ladder (0..20)
+//   endless               : the per-RUN bolt ladder (0.._EAEGIS_MAX, now 20)
+// Endless ranks are deliberately NOT persistent — they are earned per run and
+// die with it; only expedition XP is saved (and now synced, see v36.50).
+function _aegisAbilityRank() {
+  if (typeof LSS === 'undefined') return -1;
+  if (LSS.MODE === 'endless') {
+    try {
+      const a = (typeof game !== 'undefined' && game.endlessRun) ? game.endlessRun.aegis : null;
+      return a ? (a.lvl || 0) : -1;
+    } catch (_) { return -1; }
+  }
+  if (LSS.MODE === 'freeflight') {
+    try { return AEGIS.rankFromXp(_aegisShipState().xp).rank; } catch (_) { return -1; }
+  }
+  return -1;
 }
-function _aegisShipUpgrades() {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
+function _aegisUpFor(rank) {
+  const r = _aegisAbilityRank();
+  return r >= 0 && r >= rank;
+}
+// (v36.52) Runs in expedition AND endless — see _aegisAbilityRank.
+// `skipAdditive` is for callers that re-apply this mid-run (endless levels up
+// while flying, expedition only ever calls it right after a chassis reset).
+// Everything here except the BLASTER shield grant DERIVES from a base value,
+// so it is idempotent and safe to re-run; that one is a `+=` and would stack.
+function _aegisShipUpgrades(skipAdditive) {
+  if (_aegisAbilityRank() < 0) return;
   const k = player.loadoutKey;
   if (k === 'VORTEX') {
     // Rank 8 Energy Storage / rank 17 Energy Regen.
@@ -27361,10 +27470,13 @@ function _aegisShipUpgrades() {
     // Rank 20 Dreadnaught: all pilot-kit stat bonuses at once (+1000 shield,
     // +1 dash; the +10% damage part lives in _aegisDmgOut).
     if (_aegisUpFor(20)) {
-      player.maxShield += 1000; player.shield += 1000;
+      // Dash is a SETTER (derived from the chassis) so it re-applies safely;
+      // the shield is a `+=` and is skipped when the caller re-applies mid-run,
+      // which grants it exactly once instead of stacking per level-up.
       const chD = (player.chassis && player.chassis.maxDashes) || player.maxDashes || 3;
       player.maxDashes = chD + 1;
       player.dashCharges = player.maxDashes;
+      if (!skipAdditive) { player.maxShield += 1000; player.shield += 1000; }
     }
   } else if (k === 'SYPHON') {
     // Rank 20 Apex Ship: starts each spawn with the Core already 60% charged.
@@ -27374,7 +27486,12 @@ function _aegisShipUpgrades() {
 // Player-outgoing damage tweaks + on-hit effects. Called from Bot.takeDamage
 // when the attacker is the player; returns the (possibly boosted) amount.
 function _aegisDmgOut(amount, bot) {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return amount;
+  // (v36.52) Endless too — its bolt ladder now grants the same abilities, so
+  // the per-ship damage riders (Roaring Flames, Zapper, Hot Streak, ...) have
+  // to fire there as well or half of each unlock would silently do nothing.
+  // This stacks ON TOP of endless's own _EAEGIS_DMG curve, which is the point:
+  // the curve is the generic ramp, these are the abilities.
+  if (_aegisAbilityRank() < 0) return amount;
   const k = player.loadoutKey;
   if (k === 'PYRO' && _aegisUpFor(11)) amount *= 1.25;                     // Roaring Flames
   if (k === 'PYRO' && _aegisUpFor(8))                                      // Hot Streak (dmg -> Core)
