@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.69';
+const LSS_BUILD = '36.70';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -8184,6 +8184,19 @@ const EndlessMode = {
         try { if (run.aegis) run.aegis.seen = {}; } catch (_) {}
         if (run.lives <= 0) {
           run.over = true; run.overT = 0;
+          // (v36.70) ⚠ DISCHARGE THE SURGE HERE, AT THE RUN-OVER ITSELF — not
+          // only via teardown. Solo reaches teardown through returnToRootMenu
+          // after the 6 s banner, but CO-OP deliberately SKIPS that return (the
+          // out-of-lives player stays in-world spectating while teammates fly
+          // on), so `_aegisSetLvl(run, 0)` never ran for them: the cloned
+          // chassis stayed installed, `a.lvl` stayed maxed, and because
+          // `game.endlessRun` is still non-null `_endlessAegisDmgOut` kept
+          // multiplying and `_aegisAbilityRank()` kept reporting the endless
+          // rank — for as long as they spectated. The run is OVER; the ranks
+          // die with it, which is the whole contract of a per-run ladder.
+          // Idempotent: _aegisSetLvl early-returns when lvl is already 0, so
+          // teardown's later call is a clean no-op.
+          try { this._aegisSetLvl(run, 0); } catch (_) {}
           try { if (window.Overlays && Overlays.banner) Overlays.banner('RUN OVER', (run.dist / 1000).toFixed(2) + ' km'); } catch (_) {}
           try {
             const best = parseFloat(localStorage.getItem('lss_endless_best_' + (typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard')) || '0');
@@ -8778,6 +8791,24 @@ const EndlessMode = {
         // (never clobber a chassis someone else installed since).
         if (a.curCh && player.chassis === a.curCh && a.baseCh) player.chassis = a.baseCh;
         a.curCh = null; a.baseCh = null;
+        // (v36.70) ⚠ AND GIVE BACK THE ADDITIVE GRANTS. `_aegisApplyAbilities`
+        // hands out `maxHealth += 2500` at lvl 5 and `maxShield += 2500` at
+        // lvl 14 behind one-shot `_absDone` flags, and NOTHING ever subtracted
+        // them: teardown restored the chassis clone and walked away, leaving an
+        // inflated `player.maxHealth`/`maxShield` on the singleton. It only
+        // LOOKED correct because the next `commitLoadout` happens to overwrite
+        // both from the chassis — a distant coincidence, not a reset, and any
+        // path reaching a new run without a fresh commit carried them straight
+        // in. Clearing `_absDone` too, so the NEXT run re-grants at lvl 5/14
+        // instead of finding the flags already set and silently skipping.
+        try {
+          const d = a._absDone;
+          if (d) {
+            if (d.h5) { player.maxHealth -= 2500; if (player.health > player.maxHealth) player.health = player.maxHealth; }
+            if (d.s14) { player.maxShield -= 2500; if (player.shield > player.maxShield) player.shield = player.maxShield; }
+          }
+          a._absDone = {};
+        } catch (_) {}
       }
     } catch (_) {}
     // (v36.52) Apply the shared aegis ABILITY unlocks for the new rank. The
@@ -27419,7 +27450,8 @@ function _aegisShipState() {
 // and the D-pad live swap (cycleHubShip). respawnPlayer does NOT reset
 // maxHealth/maxShield, so the death path only tops health up to the maxes.
 function _aegisApply() {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
+  // (v36.70) `_aegisSoloOnly` — a shared EXHIBITION room is also 'freeflight'.
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || !_aegisSoloOnly()) return;
   const st = _aegisShipState();
   const r = AEGIS.rankFromXp(st.xp).rank;
   if (r >= 5)  { player.maxHealth += 2500; player.health += 2500; }
@@ -27427,7 +27459,10 @@ function _aegisApply() {
   try { if (typeof _aegisShipUpgrades === 'function') _aegisShipUpgrades(); } catch (_) {}
 }
 function _aegisAwardXp(amount) {
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
+  // (v36.70) Solo-gated with the perks themselves: XP must not be farmable in a
+  // shared room either, or the ladder would still be fed by PvP kills whose
+  // perks were switched off.
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || !_aegisSoloOnly()) return;
   const st = _aegisShipState();
   const before = AEGIS.rankFromXp(st.xp).rank;
   st.xp += amount;
@@ -27463,7 +27498,8 @@ function _aegisAwardKill() { _aegisAwardXp(AEGIS.XP_PER_KILL); }
 // Stat effects live in _aegisShipUpgrades (ABSOLUTE assignments so repeated
 // applies — spawn, D-pad swap, mid-flight rank-up — never stack); event
 // effects hook Bot.takeDamage/Bot.die/dash/core/sonar/railgun sites and gate
-// on _aegisUpFor (freeflight-only, so MP balance is untouched). AEGIS.LIVE
+// on _aegisUpFor (SOLO freeflight only — see _aegisSoloOnly; before v36.70
+// this said "MP balance is untouched" and nothing enforced it). AEGIS.LIVE
 // drives the panel's (SOON) markers; unlisted ranks are design-only for now.
 AEGIS.LIVE = {
   VORTEX: [2, 8, 11, 17, 20], PYRO: [2, 8, 11, 17, 20], PUNCTURE: [2, 8, 11, 17, 20],
@@ -27477,6 +27513,22 @@ AEGIS.LIVE = {
 //   endless               : the per-RUN bolt ladder (0.._EAEGIS_MAX, now 20)
 // Endless ranks are deliberately NOT persistent — they are earned per run and
 // die with it; only expedition XP is saved (and now synced, see v36.50).
+// (v36.70) ⚠ THE SOLO GATE. `LSS.MODE === 'freeflight'` IS NOT "solo exhibition".
+// `startFreeFlight()` sets MODE = 'freeflight' and THEN branches into the hosted
+// room path, and the drop-in joiner sets it too — so a shared EXHIBITION room is
+// also 'freeflight'. Without this check a rank-20 grinder carried +2500 hull,
+// +2500 shield, doubled clip, doubled missiles, x1.5 dash damage, x2 core
+// duration and all five pilot perks into PvP against peers who had none. The
+// comment above AEGIS.LIVE has claimed "freeflight-only, so MP balance is
+// untouched" since v34.94 — that was the INTENT, but MP *is* freeflight, so
+// nothing ever enforced it. This is the enforcement.
+//   ⚠ ENDLESS IS DELIBERATELY EXEMPT. Its ranks are the per-RUN bolt ladder,
+// earned inside the run by everyone present and destroyed with it — no
+// persistent advantage crosses into a co-op endless room, so gating it would
+// only break co-op endless for no balance gain.
+function _aegisSoloOnly() {
+  try { return !(typeof net !== 'undefined' && net && net.active); } catch (_) { return true; }
+}
 function _aegisAbilityRank() {
   if (typeof LSS === 'undefined') return -1;
   if (LSS.MODE === 'endless') {
@@ -27485,7 +27537,7 @@ function _aegisAbilityRank() {
       return a ? (a.lvl || 0) : -1;
     } catch (_) { return -1; }
   }
-  if (LSS.MODE === 'freeflight') {
+  if (LSS.MODE === 'freeflight' && _aegisSoloOnly()) {
     try { return AEGIS.rankFromXp(_aegisShipState().xp).rank; } catch (_) { return -1; }
   }
   return -1;
@@ -52453,8 +52505,14 @@ function respawnPlayer() {
   game.playerInStasis = false;
   game.playerRootTimer = 0; 
   const ch = player.chassis;
-  player.health = ch.maxHealth;
-  player.shield = ch.maxShield;
+  // (v36.70) ⚠ Heal to the PLAYER's max, not the chassis'. Aegis rank 5 (+2500
+  // hull) and rank 14 (+2500 shield) raise `player.maxHealth`/`maxShield` above
+  // the chassis figures; healing to `ch.*` meant a ranked pilot respawned up to
+  // 2500 hull AND 2500 shield below their real maximum, every death, with no way
+  // to recover it — the two universal ranks silently half-failing right where
+  // they matter most. Same fallback shape as the maxDashes line below.
+  player.health = player.maxHealth || ch.maxHealth;
+  player.shield = (player.maxShield != null) ? player.maxShield : ch.maxShield;
   player.overShield = 0; // (v36.12) respawn starts without the stasis bonus layer
   player._perkOsLocked = false;   // (v36.55) see death path
   player.shipState = 'spawning';
