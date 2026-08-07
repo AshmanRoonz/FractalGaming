@@ -87,6 +87,16 @@ The FULL `_swPatchTerrainMat` texture treatment below remains the upgrade path.
      volume, damage system, collision — much bigger). Recommend visual-only first.
 
 ### Slice 4 — routing (makes bots USE the space)
+**(v36.61) SHIPPED.** `_arenaNav*` + the `_arenaVia` hook in `Bot.update`; offline gate
+`tools/arena_nav_check.cjs`; live A/B flag `window.__arenaNav`; debug `window.__spireNav()`.
+Measured 0/5 → 3/5 full three-storey descents, zero rock frames. Full entry with all the
+traps in `lss.map.md` PART 7 → The Spire → v36.61. Point 9 below is CLOSED: verified
+`_campHoardTerrainNav` is a double no-op on the spire (it early-returns on null
+`sandwichTerrain`, and its call gate matches no classic arena match) — so it cannot climb
+wrongly here. ⚠ That stops being true the moment slice 5 blends the arena into endless.
+**The one thing slice 4 could not fix:** the DREADNOUGHT's `c*` of 139 u against a 146 u
+ring makes it marginal on this map independent of routing — a map/scale decision, not a
+nav bug.
 8. SDF clearance tells a bot "not that way", never "go through *that* shaft to reach the floor
    above". Steering alone presses against a slab forever. Add a small graph: floors are nodes,
    shafts and the helical ramp are edges. Handful of nodes, not a navmesh.

@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.60';
+const LSS_BUILD = '36.62';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -24561,6 +24561,119 @@ function _arenaBuildMesh(G, key, level) {
   _arenaMesh.url = null;
   if (!_arenaMesh.workers.length) { console.warn('[spire] no mesh workers spawned (collision-only world)'); _arenaDisposeMesh(); }
 }
+const _AR_SECTORS = 8;
+const _AR_TOL_MIN = 90, _AR_TOL_MAX = 170;
+const _AR_REVALIDATE = 1.0;
+const _arNavTmp = { x: 0, y: 0, z: 0, r: 0 };
+function _arenaNavStorey(y, G) {
+  const fy = G.floorY;
+  let b = 0;
+  for (let i = 0; i < fy.length; i++) if (y > fy[i]) b = i + 1;
+  return b;
+}
+function _arenaNavMinClr(bot) {
+  const ch = bot.chassis || {};
+  const collR = (ch.hullLength || 100) * 0.5;
+  const acc = ch.acceleration || 800;
+  return collR * 2.5 * (1 - Math.sqrt(Math.max(0, Math.min(1, acc / 12000))));
+}
+function _arenaNavHole(x, z, j, G) {
+  return _ARENA_FIELD.floorHole(x, z, j, G);
+}
+function _arenaNavBlocked(x0, y0, z0, x1, y1, z1, G) {
+  const s0 = _arenaNavStorey(y0, G), s1 = _arenaNavStorey(y1, G);
+  if (s0 === s1) return -1;
+  const lo = Math.min(s0, s1), hi = Math.max(s0, s1);
+  const dy = y1 - y0;
+  if (Math.abs(dy) < 1e-3) return -1;
+  const up = (s1 > s0);
+  for (let n = 0; n < hi - lo; n++) {
+    const j = up ? (lo + n) : (hi - 1 - n);
+    const fy = G.floorY[j];
+    const t = (fy - y0) / dy;
+    if (t < 0 || t > 1) continue;
+    const cx = x0 + (x1 - x0) * t, cz = z0 + (z1 - z0) * t;
+    if (_arenaNavHole(cx, cz, j, G) >= 0) return j;
+  }
+  return -1;
+}
+function _arenaNavThroatClr(x, z, fy, G) {
+  let worst = 1e9;
+  for (let k = -2; k <= 2; k++) {
+    const d = _ARENA_FIELD.eval(x, fy + k * (G.slabT * 1.1), z, G);
+    if (-d < worst) worst = -d;
+  }
+  return worst;
+}
+function _arenaNavPickThroat(bot, j, gx, gy, gz, G, minClr, out) {
+  const fy = G.floorY[j];
+  const px = bot.position.x, py = bot.position.y, pz = bot.position.z;
+  let bestCost = Infinity, bestX = 0, bestZ = 0, bestR = 0, found = false;
+  const nsh = G.shafts | 0;
+  for (let h = 0; h < nsh; h++) {
+    const a = (h / nsh) * 6.2831853 + j * 0.9 + G.satPhase;
+    const mx = Math.cos(a) * G.shaftR, mz = Math.sin(a) * G.shaftR;
+    if (_arenaNavThroatClr(mx, mz, fy, G) < minClr) continue;
+    const c = Math.hypot(mx - px, fy - py, mz - pz) + Math.hypot(gx - mx, gy - fy, gz - mz);
+    if (c < bestCost) { bestCost = c; bestX = mx; bestZ = mz; bestR = G.shaftRad; found = true; }
+  }
+  if (minClr + 20 <= G.ringW) {
+    for (let s = 0; s < _AR_SECTORS; s++) {
+      const a = (s / _AR_SECTORS) * 6.2831853;
+      const mx = Math.cos(a) * G.ringR, mz = Math.sin(a) * G.ringR;
+      if (_arenaNavThroatClr(mx, mz, fy, G) < minClr) continue;
+      const c = Math.hypot(mx - px, fy - py, mz - pz) + Math.hypot(gx - mx, gy - fy, gz - mz);
+      if (c < bestCost) { bestCost = c; bestX = mx; bestZ = mz; bestR = G.ringW; found = true; }
+    }
+  }
+  if (!found) return false;
+  out.x = bestX; out.z = bestZ; out.y = fy; out.r = bestR;
+  return true;
+}
+function _arenaNavUpdate(bot, gx, gy, gz, dt, G) {
+  const p = bot.position;
+  if (!bot._arenaWay) bot._arenaWay = new THREE.Vector3();
+  bot._arenaT = (bot._arenaT || 0) - dt;
+  const slab = _arenaNavBlocked(p.x, p.y, p.z, gx, gy, gz, G);
+  if (slab < 0) {
+    if (bot._arenaOn) { bot._arenaOn = false; bot._arenaSlab = -1; }
+    return false;
+  }
+  const minClr = _arenaNavMinClr(bot);
+  if (!bot._arenaOn || bot._arenaSlab !== slab || bot._arenaT <= 0) {
+    if (!_arenaNavPickThroat(bot, slab, gx, gy, gz, G, minClr, _arNavTmp)) {
+      bot._arenaOn = false; bot._arenaSlab = -1;
+      return false;
+    }
+    bot._arenaOn = true;
+    bot._arenaSlab = slab;
+    bot._arenaMx = _arNavTmp.x; bot._arenaMz = _arNavTmp.z; bot._arenaMy = _arNavTmp.y;
+    bot._arenaTol = Math.max(_AR_TOL_MIN, Math.min(_AR_TOL_MAX, (_arNavTmp.r || 150) * 0.6));
+    bot._arenaThru = false;
+    bot._arenaT = _AR_REVALIDATE;
+  }
+  const dxz = Math.hypot(bot._arenaMx - p.x, bot._arenaMz - p.z);
+  if (dxz <= bot._arenaTol) bot._arenaThru = true;
+  const goingUp = (gy > p.y);
+  const lip = G.slabT * 2.2;
+  const wy = bot._arenaMy + (bot._arenaThru ? (goingUp ? lip : -lip)
+                                            : (goingUp ? -lip : lip));
+  bot._arenaWay.set(bot._arenaMx, wy, bot._arenaMz);
+  return true;
+}
+if (typeof window !== 'undefined') {
+  window.__spireNav = () => {
+    let engaged = 0, tot = 0;
+    try {
+      for (const e of game.entities) { if (!e || !e.position) continue; tot++; if (e._arenaOn) engaged++; }
+    } catch (_) {}
+    return { on: window.__arenaNav !== false, arena: !!(game.arenaField && game.arenaField.ON),
+             engaged, bots: tot,
+             detail: (game.entities || []).filter(e => e && e._arenaOn)
+               .map(e => ({ id: e.id, slab: e._arenaSlab, mouth: [Math.round(e._arenaMx), Math.round(e._arenaMz)] })) };
+  };
+}
+
 if (typeof window !== 'undefined') window.__spireMesh = () => ({
   key: _arenaMesh.key, building: _arenaMesh.building,
   chunks: _arenaMesh.chunksDone + '/' + _arenaMesh.chunksTotal,
@@ -26696,6 +26809,7 @@ class Bot {
     }
 
     let _raceWaypoint = null;
+    let _arenaVia = null;
     if (LSS.MODE !== 'race' && game.state === 'playing' &&
         game.championField && game.championField.alive && game.championField.position) {
       if (game.championField.claimedBy !== this) {
@@ -26787,6 +26901,21 @@ class Bot {
       _raceWaypoint = this.aiTarget;
     }
 
+    const _afN = game.arenaField;
+    if (_afN && _afN.ON && _afN.G && _afN.G.floorY && _afN.G.floorY.length &&
+        game.state === 'playing' && !this.aiRetreating &&
+        (typeof window === 'undefined' || window.__arenaNav !== false) &&
+        typeof _arenaNavUpdate === 'function') {
+      const _dst = _raceWaypoint ? this.aiTarget
+                 : ((this.combatTarget && this.combatTarget.position)
+                     ? this.combatTarget.position : this.aiTarget);
+      if (_dst && _arenaNavUpdate(this, _dst.x, _dst.y, _dst.z, dt, _afN.G)) {
+        _arenaVia = this._arenaWay;
+      }
+    } else if (this._arenaOn) {
+      this._arenaOn = false; this._arenaSlab = -1;
+    }
+
     this.aiStrafeTimer -= dt;
     if (this.aiStrafeTimer <= 0) {
       this.aiStrafe = Math.random() < 0.5;
@@ -26795,8 +26924,9 @@ class Bot {
     }
 
     let moveDir = this._tempVec3c.copy(this.aiWanderDir);
-    if (_raceWaypoint && this.aiTarget) {
-      moveDir = this._tempVec3a.subVectors(this.aiTarget, this.position);
+    if (_arenaVia || (_raceWaypoint && this.aiTarget)) {
+      const _goal = _arenaVia || this.aiTarget;
+      moveDir = this._tempVec3a.subVectors(_goal, this.position);
       const _rd = moveDir.length();
       if (_rd > 0.001) moveDir.multiplyScalar(1 / _rd);
       this.targetDir.lerp(moveDir, dt * 2);
@@ -26841,7 +26971,7 @@ class Bot {
       }
     }
 
-    if (!_raceWaypoint) {
+    if (!_raceWaypoint && !_arenaVia) {
       this.targetDir.lerp(moveDir, dt * 2);
       this.targetDir.normalize();
     }
@@ -33535,7 +33665,11 @@ function _monNearestZapTarget(fromPos) {
   return best ? { ship: best, dist: bestD, kind: bestKind } : null;
 }
 
-function _monNearestShip(fromPos, requireOutside) {
+function _monBotPrey() {
+  return (typeof LSS !== 'undefined') && LSS.MODE === 'classic';
+}
+
+function _monNearestShip(fromPos, requireOutside, includeBots) {
   const a = _monsterArenaInfo();
   const R = _monsterArenaRadius() + 150;
   let bestPos = null, bestD = Infinity, bestLocal = false;
@@ -33554,13 +33688,21 @@ function _monNearestShip(fromPos, requireOutside) {
       if (d < bestD) { bestD = d; bestPos = np.position; bestLocal = false; }
     }
   }
+  if (includeBots && typeof game !== 'undefined' && game && game.entities) {
+    for (const b of game.entities) {
+      if (!b || !b.alive || !b.position) continue;
+      if (requireOutside && b.position.distanceTo(a.center) <= R) continue;
+      const d = fromPos.distanceTo(b.position);
+      if (d < bestD) { bestD = d; bestPos = b.position; bestLocal = false; }
+    }
+  }
   return bestPos ? { pos: bestPos, dist: bestD, isLocal: bestLocal } : null;
 }
 
 
 
 
-const MONSTER_EDGE_NEAR = 0.78;   
+const MONSTER_EDGE_NEAR = 0.78;
 function _monNearestEdgeShip(fromPos) {
   const a = _monsterArenaInfo();
   const Rbase = _monsterArenaRadius();
@@ -33900,7 +34042,7 @@ class OutskirtsMonster {
       this.aggro = true;
       this._deAggroT = 0;
     } else if (this.aggro) {
-      tgt = _monNearestShip(this.position, false);  
+      tgt = _monNearestShip(this.position, false, _monBotPrey());
       if (!tgt || tgt.dist > MONSTER_ZAP_RANGE * 1.6) {
         this._deAggroT += dt;
         if (this._deAggroT > 12) this.aggro = false;
