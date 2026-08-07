@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.67';
+const LSS_BUILD = '36.69';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -4516,6 +4516,47 @@ const PILOT_PERKS = {
 };
 // Default perk if the player hasn't picked one yet (or localStorage missing).
 const PILOT_PERK_DEFAULT = 'shield';
+
+// (v36.68) BLASTER Aegis 20 "Dreadnaught Cyborg" — "Blaster is equipped with
+// all of the pilot perks at once."
+//
+// The pilot-perk system is ENTIRELY data-driven: every consumer resolves
+// PILOT_PERKS[player.perkId] into a bag and then branches on which FIELDS are
+// present (dashBonus / regenPerSec / shieldRefillAfter / cloakDuration...),
+// plus one id check for Outline Optics. So "all five at once" is not five
+// special cases bolted onto five subsystems — it is ONE merged bag handed to
+// those same consumers, and every perk keeps working through its own code.
+//
+// ⚠ The merge is by FIELD NAME and no two perks currently declare the same
+// field, so it is collision-free. If a future perk reuses one (a second
+// `dashBonus`, say) the later key in PILOT_PERKS would silently win — add an
+// explicit max()/sum rule here rather than trusting key order.
+//
+// ⚠ The old implementation granted "+1 dash, +1000 shield, +10% damage". Two
+// of those were wrong: +1000 shield was the pre-v36.53 Reinforced Shield perk,
+// DELETED from PILOT_PERKS in that build, so it granted a perk that no longer
+// exists; and nothing in the spec mentions damage at all.
+let _perkAllBag = null;
+function _perkEffectiveBag() {
+  if (typeof PILOT_PERKS === 'undefined' || !PILOT_PERKS) return null;
+  const sel = (typeof player !== 'undefined' && player) ? (PILOT_PERKS[player.perkId] || null) : null;
+  if (!(typeof player !== 'undefined' && player && player.loadoutKey === 'BLASTER' &&
+        typeof _aegisUpFor === 'function' && _aegisUpFor(20))) return sel;
+  if (!_perkAllBag) {
+    // `outlineAll` stands in for the id check, because the bag cannot BE all
+    // five ids at once. Built lazily and cached — PILOT_PERKS is a frozen
+    // literal, so one build per session is enough.
+    _perkAllBag = { id: '_all', name: 'Dreadnaught Cyborg', icon: '◈', color: 0xffcc66, outlineAll: true };
+    for (const k of Object.keys(PILOT_PERKS)) {
+      const pk = PILOT_PERKS[k];
+      for (const f of Object.keys(pk)) {
+        if (f === 'id' || f === 'name' || f === 'desc' || f === 'icon' || f === 'color') continue;
+        _perkAllBag[f] = pk[f];
+      }
+    }
+  }
+  return _perkAllBag;
+}
 
 // ---- SHIP SKINS (v36.31) ----
 // A skin is a TABLE OF MATERIAL PARAMETERS, not an asset. buildModelShipMesh
@@ -8768,9 +8809,12 @@ const EndlessMode = {
     if (lvl >= 14 && !a._absDone.s14) {
       player.maxShield += 2500; player.shield += 2500; a._absDone.s14 = 1;
     }
-    if (lvl >= 20 && !a._absDone.b20 && player.loadoutKey === 'BLASTER') {
-      player.maxShield += 1000; player.shield += 1000; a._absDone.b20 = 1;
-    }
+    // ⚠ (v36.68) The BLASTER lvl-20 `+1000 maxShield` grant that used to sit
+    // here is GONE. It was a SECOND, independent copy of the old Dreadnaught
+    // Cyborg stand-in — one in _aegisShipUpgrades, one here — so an endless
+    // BLASTER got +2000. Both were re-granting 'Reinforced Shield', a pilot
+    // perk DELETED from PILOT_PERKS in v36.53. The real perk now flows through
+    // _perkEffectiveBag(), which needs no grant on this path at all.
     try { _aegisShipUpgrades(true); } catch (_) {}
   },
   _spawnWave(run) {
@@ -11819,9 +11863,9 @@ function broadcastPlayerState(dt) {
   // Spawn-protection seconds remaining.
   s.spawnProt = Math.max(0, Math.round((player.spawnProtection || 0) * 10) / 10);
   // Auto Cloak perk : opacity-driving bit.
-  s.cloak = !!(player.perkCloakActive
-            && PILOT_PERKS[player.perkId]
-            && PILOT_PERKS[player.perkId].cloakDuration);
+  // (v36.68) via the effective bag so a Dreadnaught-Cyborg BLASTER, whose
+  // selected perkId may be any of the five, still broadcasts its cloak.
+  s.cloak = !!(player.perkCloakActive && (_perkEffectiveBag() || {}).cloakDuration);
   // (v30.67) Vortex Shield soak level 0-9 ; peers draw warning arcs from it.
   s.va = (player.loadoutKey === 'VORTEX' && typeof _vortexChargeFrac === 'function')
     ? Math.round(_vortexChargeFrac() * 9) : 0;
@@ -27450,6 +27494,15 @@ function _aegisUpFor(rank) {
   const r = _aegisAbilityRank();
   return r >= 0 && r >= rank;
 }
+// (v36.68) Shared aegis constants. TRACKER 8 "Sonar Weak Points" and 17
+// "Signal Strength" both act on a REVEALED WINDOW rather than on the
+// permanent lock marks — see the stamp sites in the sonar_pulse branch.
+const TRACKER_SONAR_LIT_SEC = 8.0;
+const TRACKER_SONAR_DOT_DPS = 200;
+// Is this target currently lit by a Sonar Pulse?
+function _aegisSonarLit(t) {
+  return !!(t && (t._sonarLitT || 0) > (game ? game.time : 0));
+}
 // (v36.52) Runs in expedition AND endless — see _aegisAbilityRank.
 // `skipAdditive` is for callers that re-apply this mid-run (endless levels up
 // while flying, expedition only ever calls it right after a chassis reset).
@@ -27470,28 +27523,39 @@ function _aegisShipUpgrades(skipAdditive) {
     if (player.clipAmmo > player.maxClip) player.clipAmmo = player.maxClip;
     else if (_aegisUpFor(11)) player.clipAmmo = player.maxClip;
   } else if (k === 'PYRO') {
-    // Rank 2 Double Threat / rank 17 Triple Threat: extra launcher shots
-    // before the reload.
+    // ⚠ (v36.68) Ranks 2 "Double Threat" / 17 "Triple Threat" USED to add +1/+2
+    // to maxClip. That is a bigger MAGAZINE, not a burst — still one bolt per
+    // trigger pull, just more pulls before the reload. The real burst now lives
+    // in the fire gate (`_pyroBurstN` / `_PYRO_BURST_GAP` in updateShooting).
+    // Restore the stock clip in case a stale bumped value is still on the ship.
     const base = (player.loadout && player.loadout.weapon && player.loadout.weapon.clipSize) || player.maxClip;
-    player.maxClip = base + (_aegisUpFor(17) ? 2 : (_aegisUpFor(2) ? 1 : 0));
+    player.maxClip = base;
     if (player.clipAmmo > player.maxClip) player.clipAmmo = player.maxClip;
   } else if (k === 'SLAYER') {
-    // Rank 8 Ghost in the Machine: an extra dash charge.
-    const chD = (player.chassis && player.chassis.maxDashes) || player.maxDashes || 3;
-    player.maxDashes = chD + (_aegisUpFor(8) ? 1 : 0);
-    if (player.dashCharges > player.maxDashes) player.dashCharges = player.maxDashes;
-    else if (_aegisUpFor(8)) player.dashCharges = player.maxDashes;
+    // (v36.68) Rank 8 "Ghost in the Machine" gives TELEPORT two charges — see
+    // the charge path in activateAbility. It used to add a chassis DASH charge
+    // here, which is a different ability from the one the perk names.
+    // ⚠ Removing that IS a visible change: the dash pip row drops from 4 back
+    // to the chassis 3. That is what the corrected spec asks for; flagged so
+    // it is a decision and not a surprise.
+    player.trapCharges = player.maxTrapCharges;
   } else if (k === 'BLASTER') {
-    // Rank 20 Dreadnaught: all pilot-kit stat bonuses at once (+1000 shield,
-    // +1 dash; the +10% damage part lives in _aegisDmgOut).
+    // (v36.68) Rank 20 Dreadnaught Cyborg needs NOTHING here. It is expressed
+    // entirely through `_perkEffectiveBag()` (see PILOT_PERKS), which hands the
+    // merged five-perk bag to the perk consumers so each perk runs through its
+    // own existing code path — dash bonus, nano regen, emergency recharge, auto
+    // cloak and outline optics all included.
+    //
+    // The ONE exception is Extra Dash: `maxDashes` is a commit-time `+=`, not a
+    // per-frame read, so a BLASTER who reaches rank 20 MID-RUN would not see it
+    // until the next commit. Top it up here — as a chassis-DERIVED setter with
+    // a `<` guard, so it is idempotent under the repeated `_aegisShipUpgrades`
+    // calls and a no-op right after a commit already applied it.
     if (_aegisUpFor(20)) {
-      // Dash is a SETTER (derived from the chassis) so it re-applies safely;
-      // the shield is a `+=` and is skipped when the caller re-applies mid-run,
-      // which grants it exactly once instead of stacking per level-up.
-      const chD = (player.chassis && player.chassis.maxDashes) || player.maxDashes || 3;
-      player.maxDashes = chD + 1;
-      player.dashCharges = player.maxDashes;
-      if (!skipAdditive) { player.maxShield += 1000; player.shield += 1000; }
+      const _bag = (typeof _perkEffectiveBag === 'function') ? _perkEffectiveBag() : null;
+      const _chD = (player.chassis && player.chassis.maxDashes) || 3;
+      const _wantD = _chD + ((_bag && _bag.dashBonus) || 0);
+      if (player.maxDashes < _wantD) { player.maxDashes = _wantD; player.dashCharges = player.maxDashes; }
     }
   } else if (k === 'SYPHON') {
     // (v36.67) Rank 20 Apex Ship — "Rocket Salvo shoots double the missiles."
@@ -27519,20 +27583,32 @@ function _aegisDmgOut(amount, bot) {
   if (k === 'PYRO' && _aegisUpFor(8))                                      // Hot Streak (dmg -> Core)
     player.coreMeter = Math.min(100, (player.coreMeter || 0) + amount / 150);
   if (k === 'SYPHON' && _aegisUpFor(17)) amount *= 1.2;                    // Zapper: Critical Hit
-  if (k === 'SYPHON' && _aegisUpFor(8)) amount *= 1.1;                     // Sniper Config (focus)
-  if (k === 'PUNCTURE' && _aegisUpFor(17)) amount *= 1.15;                 // Railgun: Critical Hit
-  if (k === 'VORTEX' && _aegisUpFor(2)) amount *= 1.15;                    // Split Shot Power
-  if (k === 'VORTEX' && _aegisUpFor(11)) amount *= 1.15;                   // Laser Shot Power
-  if (k === 'TRACKER' && _aegisUpFor(2)) amount *= 1.15;                   // Splasher Rounds
   if (k === 'SLAYER' && _aegisUpFor(2) && player.dashActive) amount *= 1.5; // Dash Mastery
-  if (k === 'BLASTER' && _aegisUpFor(8) && bot && bot.maxHealth > 0 &&
-      (bot.health / bot.maxHealth) < 0.3) amount *= 1.5;                   // Executioner (finisher)
-  if (k === 'BLASTER' && _aegisUpFor(17)) amount *= 1.2;                   // Drill Shot
-  if (k === 'BLASTER' && _aegisUpFor(20)) amount *= 1.1;                   // Dreadnaught (part)
-  if (k === 'TRACKER' && _aegisUpFor(8) && bot && bot.id != null &&
-      player.trackerLocks && player.trackerLocks[bot.id]) amount *= 1.25;  // Sonar Weak Points
-  if (k === 'SYPHON' && _aegisUpFor(2))                                    // Energized Zapper (Lv2 at 11)
-    player.shield = Math.min(player.maxShield, player.shield + player.maxShield * (_aegisUpFor(11) ? 0.02 : 0.01));
+  // ⚠⚠ (v36.68) EVERYTHING ELSE THAT USED TO LIVE HERE HAS MOVED TO ITS OWN
+  // WEAPON. This function is called from ONE place per target class and is
+  // handed only a NUMBER — it cannot tell a Laser from a hip-fire shot, a
+  // thermite bolt from a gas cloud, or a Zapper hit from a rocket. So every
+  // perk whose text names a specific WEAPON was, in practice, "+15% to
+  // everything this ship does": you unlocked "Laser Power" and your main gun
+  // quietly got better while the Laser did not change. That is the single
+  // biggest reason the trees read as "wrong and not working".
+  // Moved out, and where each one now lives:
+  //   VORTEX 2  Zoom Power        -> fireHitscan, inside the ADS branch
+  //   VORTEX 11 Laser Power       -> executeAbility's Laser damage
+  //   PUNCTURE 17 Railgun Crit    -> fireHitscan railgun multiplier + pierce ramp
+  //   TRACKER 2 Splasher Rounds   -> fireProjectile splash RADIUS (not damage)
+  //   BLASTER 8 Executioner       -> firePowerShot close branch (width + x2)
+  //   BLASTER 17 Drill Shot       -> firePowerShot long branch (per-pierce ramp)
+  //   BLASTER 20                  -> deleted; NO pilot perk grants flat damage,
+  //                                  so that +10% was fabricated
+  //   SYPHON 8                    -> was a +10% placeholder for a perk that is
+  //                                  now chain lightning; the placeholder is gone
+  // ⚠ Do NOT add a new blanket multiplier here for a perk that names a
+  // weapon. If you cannot tell WHICH weapon dealt the damage at this point,
+  // this is the wrong place for the perk.
+  if (k === 'TRACKER' && _aegisUpFor(8) && _aegisSonarLit(bot)) amount *= 1.25;  // Sonar Weak Points
+  if (k === 'SYPHON' && _aegisUpFor(2) && !player._szChaining)              // Energized Zapper: 1% shield
+    player.shield = Math.min(player.maxShield, player.shield + player.maxShield * 0.01);
   if (k === 'SLAYER' && _aegisUpFor(20) && player.coreActive)              // Blademaster (shield gen)
     player.shield = Math.min(player.maxShield, player.shield + amount * 0.15);
   return amount;
@@ -36634,6 +36710,34 @@ function spawnPyroFlame(pos) {
 // bonfire that hurt your own side and paid them for it. Only first ignition
 // transfers — a re-contact refreshing an existing burn leaves ownership alone,
 // so a cloud can't ping-pong between sides.
+// (v36.68) PYRO 20 "Explosive Gas" — "Igniting an Explosive Gas triggers an
+// initial explosion dealing extra damage." Fired at the moment a cloud FIRST
+// lights, which is what the perk actually describes.
+function _pyroGasIgniteBlast(pos) {
+  if (typeof player === 'undefined' || !player) return;
+  if (player.loadoutKey !== 'PYRO') return;
+  if (typeof _aegisUpFor !== 'function' || !_aegisUpFor(20)) return;
+  const _p = pos.clone ? pos.clone() : new THREE.Vector3(pos.x, pos.y, pos.z);
+  try { if (typeof spawnExplosion === 'function') spawnExplosion(_p, 45); } catch (_) {}
+  try {
+    const _R = 480;
+    for (const b of game.entities) {
+      if (!b || !b.alive || b.team === player.team || !b.takeDamage || !b.position) continue;
+      const _d = b.position.distanceTo(_p);
+      if (_d > _R) continue;
+      b.takeDamage(900 * (1 - (_d / _R) * 0.6), 'player', _p);
+    }
+    if (game.monsters) {
+      for (const m of game.monsters) {
+        if (!m || !m.alive || !m.position || !m.takeDamage) continue;
+        if (m.position.distanceTo(_p) > _R + (m.collisionRadius || 0)) continue;
+        m.takeDamage(900, 'player', _p);
+      }
+    }
+  } catch (_) {}
+  try { if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', _p); } catch (_) {}
+}
+
 function igniteNearbyGas(pos, radius, igniter, igniterTeam) {
   for (const eff of game.worldEffects) {
     if (eff.type !== 'incendiary_gas') continue;
@@ -36650,6 +36754,9 @@ function igniteNearbyGas(pos, radius, igniter, igniterTeam) {
       // MeshBasicMaterial fallback retained for safety in case any legacy
       // gas cloud is still alive without uniforms.
       eff.ignited = true;
+      // (v36.68) PYRO 20: the blast fires HERE, on first ignition, and only
+      // for a cloud the player owns.
+      if (eff.owner === 'player') { try { _pyroGasIgniteBlast(eff.position); } catch (_) {} }
       eff.igniteTimer = eff.igniteDuration;
       // Lock the outer lifetime to igniteDuration so the burn lasts
       // the full 10 s no matter how late the gas was lit.
@@ -51250,7 +51357,8 @@ function commitLoadout(key) {
       player.perkId = (stored && PILOT_PERKS[stored]) ? stored : PILOT_PERK_DEFAULT;
     } catch (_) { player.perkId = PILOT_PERK_DEFAULT; }
   }
-  const _perk = PILOT_PERKS[player.perkId];
+  // (v36.68) Effective bag, not the raw table — BLASTER at Aegis 20 gets all five.
+  const _perk = _perkEffectiveBag();
   // (cloak 2026-05) ALWAYS clear cloak fields on every commit, before the
   // perk-specific branch decides what to seed them with. The previous
   // version only reset perkCloakActive when the NEW perk was cloak, so if
@@ -51331,6 +51439,9 @@ function commitLoadout(key) {
   player.blasterSwitchTimer = 0;
   player.thermalShieldHP = player.thermalShieldMaxHP; 
   player.trapCharges = player.maxTrapCharges; 
+  // (v36.68) Never carry a PYRO burst remainder across a commit/respawn — it
+  // would fire the previous life's leftover bolts into the new one's first frames.
+  player._pyroBurstLeft = 0; player._pyroBurstT = 0;
   player.trapCooldownTimer = 0;
   player.syphonTier = 0;
   player.syphonDmgMult = 1.0;
@@ -52384,6 +52495,9 @@ function respawnPlayer() {
   player.gunShieldHP = 0; player.gunShieldTimer = 0;
   player.thermalShieldHP = player.thermalShieldMaxHP; 
   player.trapCharges = player.maxTrapCharges; 
+  // (v36.68) Never carry a PYRO burst remainder across a commit/respawn — it
+  // would fire the previous life's leftover bolts into the new one's first frames.
+  player._pyroBurstLeft = 0; player._pyroBurstT = 0;
   player.trapCooldownTimer = 0;
   player.abilityActive = [false, false, false];
   player.abilityTimers = [0, 0, 0];
@@ -52426,7 +52540,7 @@ const _mvClampMax = new THREE.Vector3();
 // Tick perk effects each frame. Called from the gameLoop's
 // post-movement section after the player has lived through this frame.
 function _tickPerkEffects(dt) {
-  const p = PILOT_PERKS[player.perkId];
+  const p = _perkEffectiveBag();
   if (!p) return;
   // --- Nano Repair : steady HP regen, can over-heal past max up to
   // overhealMult × maxHealth. The cap prevents infinite stacking on long
@@ -52540,7 +52654,7 @@ function _tickPerkEffects(dt) {
   // perk is off or the ship dies. Walls naturally occlude the outline
   // (depthTest stays on); transparent clouds skip the depth buffer so
   // outlined ships read clearly through them. ---
-  const _outlineActive = (p.id === 'outline');
+  const _outlineActive = (p.id === 'outline' || !!p.outlineAll);
   if (_outlineActive || _tickPerkEffects._outlineWasActive) {
     _tickOutlineOptics(_outlineActive);
   }
@@ -53284,8 +53398,14 @@ function updatePlayerMovement(dt) {
     }
   }
 
-  // Pyro Explosive Gas charge regen (mirrors the dash charge system)
-  if (player.loadoutKey === 'PYRO' && player.trapCooldownTimer > 0) {
+  // Charge regen for the charge-based abilities: PYRO's Explosive Gas, and
+  // (v36.68) SLAYER's Teleport at Aegis 8 / PUNCTURE's Stasis Trap at Aegis 11.
+  // All three ride the SAME trapCharges counter — safe only because they are
+  // three different ships, so no loadout ever wants two of them at once.
+  if ((player.loadoutKey === 'PYRO' ||
+       (player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(8)) ||
+       (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(11))) &&
+      player.trapCooldownTimer > 0) {
     player.trapCooldownTimer -= dt;
     if (player.trapCooldownTimer <= 0 && player.trapCharges < player.maxTrapCharges) {
       player.trapCharges++;
@@ -53782,6 +53902,24 @@ function updateWeapon(dt) {
   }
 
   player.fireTimer -= dt;
+
+  // (v36.68) PYRO burst remainder — bolts 2 and 3 of a Double/Triple Threat
+  // pull. ⚠ This MUST drain ahead of the reload gate below: if the pull empties
+  // the clip, the gate calls startReload() and a remainder living after it
+  // would be swallowed, silently costing the perk its last bolt.
+  if (player._pyroBurstLeft > 0) {
+    player._pyroBurstT -= dt;
+    while (player._pyroBurstLeft > 0 && player._pyroBurstT <= 0) {
+      if (player.clipAmmo <= 0) { player._pyroBurstLeft = 0; break; }
+      fireWeapon();
+      player.isFiring = true; player.fireFlashTimer = 0.12;
+      player.clipAmmo--;
+      player._pyroBurstLeft--;
+      player._pyroBurstT += _PYRO_BURST_GAP;
+      if (player.clipAmmo <= 0) { player._pyroBurstLeft = 0; startReload(); }
+    }
+  }
+
   // Block firing during Blaster mode switch transition
   if (player.blasterSwitchTimer > 0) firing = false;
   if (firing && player.fireTimer <= 0) {
@@ -53793,6 +53931,11 @@ function updateWeapon(dt) {
     player.fireTimer = w.fireRate;
     if (!smartCoreActive) {
       player.clipAmmo--;
+      // Arm the burst BEFORE the reload check — a pull that starts on the last
+      // round still owes its remaining bolts, and the drain above stops itself
+      // once the clip is dry.
+      const _pbN = _pyroBurstN();
+      if (_pbN > 1) { player._pyroBurstLeft = _pbN - 1; player._pyroBurstT = _PYRO_BURST_GAP; }
       if (player.clipAmmo <= 0 && w.clipSize < 999) startReload();
     }
   }
@@ -53802,6 +53945,28 @@ function updateWeapon(dt) {
   if (reloadPressed && player.clipAmmo < player.maxClip && !player.reloading && w.clipSize < 999) {
     startReload();
   }
+}
+
+// (v36.68) PYRO Aegis 2 "Double Threat" (two fast consecutive thermite bolts
+// per trigger pull) and 17 "Triple Threat" (three).
+const _PYRO_BURST_GAP = 0.11;   // seconds between bolts inside one pull
+function _pyroBurstN() {
+  if (typeof player === 'undefined' || !player || player.loadoutKey !== 'PYRO') return 1;
+  if (typeof _aegisUpFor !== 'function') return 1;
+  return _aegisUpFor(17) ? 3 : (_aegisUpFor(2) ? 2 : 1);
+}
+// CREATIVE CALL, flagged so it reads as a decision and not an oversight: taken
+// literally, 3 bolts at the unchanged 1.2 s fire rate is a flat 3x DPS — far
+// outside the 20-60% band every other Aegis perk lives in, and it would make
+// Triple Threat the only correct pick in the game. So the bolts are real (you
+// fire two/three, each with its own splash and its own thermite ignition — the
+// feel the perk describes) but the per-pull TOTAL lands at 1.45x / 1.75x and is
+// split across them. Thermite's per-bolt splash means it still hits noticeably
+// harder than the raw number suggests.
+const _PYRO_BURST_TOTAL = [1, 1, 1.45, 1.75];
+function _pyroBoltMult() {
+  const n = _pyroBurstN();
+  return (_PYRO_BURST_TOTAL[n] || 1) / n;
 }
 
 function startReload() {
@@ -54212,6 +54377,14 @@ function fireHitscan(origin, dir, w) {
       const hitDist = h.proj;
       const rangeFalloff = 0.7 + 0.3 * Math.max(0, 1 - hitDist / w.range);
       let finalDmg = w.damage * rangeFalloff * chargeMul;
+      // (v36.68) PUNCTURE 17 "Railgun: Critical Hit" — "...and a multiplier
+      // for piercing through multiple enemies." pierceHits is ALREADY sorted
+      // front-to-back on the line above, so `i` IS the drill depth: the first
+      // target takes the flat 1.25, and each body the beam punches through
+      // adds another 25%. Rewards lining enemies up, which is the fantasy.
+      if (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(17)) {
+        finalDmg *= 1.25 * (1 + i * 0.25);
+      }
       if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
       if (player.syphonArcRounds && bot.shield > 0) finalDmg *= 1.5;
       const hadShield = bot.shield > 0;
@@ -54281,10 +54454,18 @@ function fireHitscan(origin, dir, w) {
     // VORTEX ADS: 1.75x damage while aiming (drains energy pool)
     if (player.loadoutKey === 'VORTEX' && player.vortexAdsActive) {
       finalDmg *= 1.75;
+      // (v36.68) AEGIS 2 "Zoom Power" — "Zoomed in shots deal more damage."
+      // ⚠ Belongs HERE, inside the ADS branch, not in _aegisDmgOut: that
+      // function only sees a number and boosted every Vortex hit, zoomed or
+      // not, which is precisely the opposite of what the perk says.
+      if (typeof _aegisUpFor === 'function' && _aegisUpFor(2)) finalDmg *= 1.30;
     }
     // Puncture Railgun charge: up to 4x at full charge. (v30.72) Consumed
     // at fire time, hit or miss ; this just applies the multiplier.
     finalDmg *= _railShotMul;
+    // (v36.68) PUNCTURE 17 "Railgun: Critical Hit" — flat increase; the
+    // pierce multiplier half is applied per-target in the pierce loop below.
+    if (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(17)) finalDmg *= 1.25;
     // Syphon upgrade tier damage multiplier (Tier 3 XO-16 Accelerator: +25%)
     if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
     // Syphon Arc Rounds (Tier 1): +50% damage vs shielded targets, Plasma Shields, Body Shields
@@ -54314,6 +54495,13 @@ function fireHitscan(origin, dir, w) {
     spawnExplosion(hitPoint, 8);
     // Hull-burst cloud removed (perf). Shielded hits get the ripple shader.
     if (!hadShield) spawnImpactSparks(hitPoint, 4);
+    // (v36.68) SYPHON 8 "Zapper: Electric Zapper" — the charge jumps from the
+    // enemy hit to nearby enemies. Brand-new: rank 8 used to be "Sniper
+    // Config" and was implemented as a flat +10% in _aegisDmgOut.
+    if (player.loadoutKey === 'SYPHON' && typeof _syphonChainZap === 'function' &&
+        typeof _aegisUpFor === 'function' && _aegisUpFor(8)) {
+      _syphonChainZap(bestHit, hitPoint, finalDmg);
+    }
 
     // VORTEX specific hit effects: electrical sparks
     if (player.loadoutKey === 'VORTEX') {
@@ -54339,6 +54527,50 @@ function fireHitscan(origin, dir, w) {
   }
 }
 
+// (v36.68) SYPHON 8 "Zapper: Electric Zapper" — "Zapper gets an electric
+// charge and jumps from enemies hit to close by enemies."
+// Walks up to _SZ_MAX_JUMPS hops, each to the nearest un-zapped enemy within
+// _SZ_RANGE of the previous link, losing _SZ_FALLOFF of the damage per hop.
+// ⚠ `player._szChaining` is raised for the duration: SYPHON 2 "Energized
+// Zapper" grants 1% shield PER HIT inside _aegisDmgOut, and without the guard
+// a 3-hop chain would silently quadruple that ship's shield gain per trigger
+// pull. The guard reads `!player._szChaining`, which is safely `!undefined`
+// for every ship that never chains.
+const _SZ_MAX_JUMPS = 3, _SZ_RANGE = 900, _SZ_FALLOFF = 0.55;
+const _szSeen = [];
+function _syphonChainZap(firstTarget, fromPoint, baseDmg) {
+  _szSeen.length = 0;
+  _szSeen.push(firstTarget);
+  let src = firstTarget, srcPt = fromPoint, dmg = baseDmg * _SZ_FALLOFF;
+  player._szChaining = true;
+  try {
+    for (let hop = 0; hop < _SZ_MAX_JUMPS; hop++) {
+      let best = null, bestD = _SZ_RANGE;
+      for (const b of game.entities) {
+        if (!b || !b.alive || b.team === player.team || !b.position) continue;
+        if (_szSeen.indexOf(b) !== -1) continue;
+        const d = b.position.distanceTo(src.position);
+        if (d < bestD) { bestD = d; best = b; }
+      }
+      if (!best) break;
+      const toPt = best.position.clone();
+      const dealt = best.takeDamage(dmg, 'player', toPt);
+      if (dealt > 0) {
+        player.damageDealt += dealt;
+        player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+      }
+      // Read as ARC, not as a second gunshot: a thin bright tracer between
+      // the two hulls plus a small spark pop at the far end.
+      try { if (typeof spawnTracer === 'function') spawnTracer(srcPt, toPt, 0x66ddff, 0.5); } catch (_) {}
+      try { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(toPt, 5); } catch (_) {}
+      try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(toPt, 0x66ddff, 3.0, 520, 0.16); } catch (_) {}
+      _szSeen.push(best);
+      src = best; srcPt = toPt; dmg *= _SZ_FALLOFF;
+    }
+  } catch (_) {}
+  player._szChaining = false;
+}
+
 function fireProjectile(origin, dir, w) {
   const vel = dir.clone().multiplyScalar(w.projSpeed);
   // Class-tied tint: Pyro = red, Tracker = orange. Anyone else falls back
@@ -54346,7 +54578,20 @@ function fireProjectile(origin, dir, w) {
   const projColor = (player.loadoutKey === 'PYRO')    ? LSS.CLASS_COLORS.PYRO
                   : (player.loadoutKey === 'TRACKER') ? LSS.CLASS_COLORS.TRACKER
                   : LSS.CLASS_COLORS.TRACKER;
-  const proj = new Projectile(origin, vel, w.damage, w.splash, 'player', projColor);
+  // (v36.68) TRACKER 2 "Splasher Rounds" — "Tracking bolt rounds deal damage
+  // over a LARGER AREA." That is a RADIUS change, not a damage change; it used
+  // to be a blanket +15% damage in _aegisDmgOut, which is a different perk
+  // entirely and also applied to the rockets and the core.
+  // ⚠⚠ NEVER write `w.splash`. `w` IS `player.weapon`, a LIVE REFERENCE into
+  // the LOADOUTS table (assigned, not cloned), so mutating it would
+  // permanently enlarge TRACKER's splash for every ship, mode and match for
+  // the rest of the session. Compute into a local and pass it.
+  let _splash = w.splash;
+  if (player.loadoutKey === 'TRACKER' && typeof _aegisUpFor === 'function' && _aegisUpFor(2)) _splash *= 1.6;
+  // (v36.68) PYRO burst bolts split the per-pull total — see _pyroBoltMult.
+  let _projDmg = w.damage;
+  if (player.loadoutKey === 'PYRO' && typeof _pyroBoltMult === 'function') _projDmg *= _pyroBoltMult();
+  const proj = new Projectile(origin, vel, _projDmg, _splash, 'player', projColor);
   // Pyro projectiles are fire sources (ignite gas clouds on pass-through)
   if (player.loadoutKey === 'PYRO') {
     proj.isFireSource = true;
@@ -54534,7 +54779,23 @@ function activateAbility(slot) {
   const ability = player.abilities[slot];
 
   // Explosive Gas (Pyro): charge-based gating instead of cooldown gating
-  const isTrapCharges = (ability.name === 'Explosive Gas' && player.loadoutKey === 'PYRO');
+  // (v36.68) The CHARGE path now serves two abilities. SLAYER 8 "Ghost in the
+  // Machine" — "Teleport has two charges" — reuses PYRO's charge machinery
+  // wholesale: `trapCharges`/`maxTrapCharges` (already 2 for every ship) and
+  // `trapChargeCooldown` are unused by SLAYER, so no new per-player state is
+  // needed and every existing consumer (spend, regen, HUD) already works.
+  // ⚠ The old implementation granted +1 CHASSIS DASH, which is a different
+  // ability from the one the perk names.
+  const _tpCharged = (ability.name === 'Teleport' && player.loadoutKey === 'SLAYER' &&
+                      typeof _aegisUpFor === 'function' && _aegisUpFor(8));
+  // (v36.68) PUNCTURE 11 "Trap Mastery" — "Puncture has two charges of Stasis
+  // Traps." Same reuse: PUNCTURE never touches trapCharges otherwise. The old
+  // implementation halved the ability COOLDOWN, which is not a charge (you
+  // still could not place two traps back to back).
+  const _stCharged = (ability.name === 'Stasis Trap' && player.loadoutKey === 'PUNCTURE' &&
+                      typeof _aegisUpFor === 'function' && _aegisUpFor(11));
+  const isTrapCharges = (ability.name === 'Explosive Gas' && player.loadoutKey === 'PYRO') ||
+                        _tpCharged || _stCharged;
   if (isTrapCharges) {
     if ((player.trapCharges || 0) <= 0) return;
   } else {
@@ -54629,11 +54890,10 @@ function activateAbility(slot) {
     let cd = ability.cooldown;
     // Syphon tier 3: 30% cooldown reduction
     if (player.syphonCooldownMult < 1) cd *= player.syphonCooldownMult;
-    // (v34.98) PUNCTURE Trap Mastery (Aegis 11, hub-only): two charges of
-    // Tether Traps — on the single-slot cooldown system this is a halved
-    // Stasis Trap cooldown (double trap uptime).
-    if (ability.name === 'Stasis Trap' && player.loadoutKey === 'PUNCTURE' &&
-        typeof _aegisUpFor === 'function' && _aegisUpFor(11)) cd *= 0.5;
+    // ⚠ (v36.68) The old PUNCTURE 11 "halved cooldown" stand-in is GONE — the
+    // Stasis Trap now takes the real charge path above (`_stCharged`), so it
+    // never reaches this branch. A halved cooldown is not two charges: it
+    // never let you place two traps back to back, which is the whole point.
     player.abilityCooldowns[slot] = cd;
   }
 }
@@ -54866,6 +55126,14 @@ function executeAbility(slot, ability) {
         }
       }
 
+      // (v36.68) VORTEX 11 "Laser Power" — "Laser deals additional damage."
+      // ⚠ This is the LASER's own damage, applied at the three places the beam
+      // resolves (ships / obstacles / leviathans). It used to be a blanket
+      // +15% in _aegisDmgOut, which boosted the Energy Blaster and left the
+      // Laser itself untouched — i.e. the perk buffed everything EXCEPT the
+      // thing it names. The 2400 was a hardcoded literal at all three sites.
+      const _vlDmg = 2400 * ((typeof _aegisUpFor === 'function' && _aegisUpFor(11)) ? 1.35 : 1);
+
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
         const toBot = new THREE.Vector3().subVectors(bot.position, player.position);
@@ -54880,7 +55148,7 @@ function executeAbility(slot, ability) {
           const hitPoint = (_len > 0.001)
             ? bot.position.clone().add(_toClosest.multiplyScalar(_surfR / _len))
             : bot.position.clone();
-          const dealt = bot.takeDamage(2400, 'player', hitPoint);
+          const dealt = bot.takeDamage(_vlDmg, 'player', hitPoint);
           if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
           spawnExplosion(hitPoint, 60);
           if (typeof spawnHullBurst === 'function') {
@@ -54918,7 +55186,7 @@ function executeAbility(slot, ability) {
           const _objR = obst.collisionRadius || 60;
           if (_objClosest.distanceTo(obst.position) < _objR) {
             const _hitPt = _objClosest.clone();
-            const _dealt = obst.takeDamage(2400);
+            const _dealt = obst.takeDamage(_vlDmg);
             if (_dealt > 0) {
               player.damageDealt += _dealt;
               player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
@@ -54940,7 +55208,7 @@ function executeAbility(slot, ability) {
           if (_mProj < 0 || _mProj > range) continue;
           const _mClosest = player.position.clone().add(forward.clone().multiplyScalar(_mProj));
           if (_mClosest.distanceTo(mon.position) < mon.collisionRadius) {
-            const _md = mon.takeDamage(2400, 'player', _mClosest);
+            const _md = mon.takeDamage(_vlDmg, 'player', _mClosest);
             if (_md > 0) { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); showHitMarker(); }
             spawnExplosion(_mClosest, 60);
             spawnDynamicLight(_mClosest, 0xeebbff, 6.0, 900, 0.45);
@@ -55108,11 +55376,11 @@ function executeAbility(slot, ability) {
         // burst doesn't double-fire on the same target.
         delete player.trackerLocks[target.id];
       }
-      // (v34.99) TRACKER Salvo Core Barrage (Aegis 20, hub): ~50% more missiles.
-      if (player.loadoutKey === 'TRACKER' && typeof _aegisUpFor === 'function' && _aegisUpFor(20) && _trQueue.length) {
-        const _extraN = Math.ceil(_trQueue.length / 2);
-        for (let _x = 0; _x < _extraN; _x++) _trQueue.push(Object.assign({}, _trQueue[_x % _trQueue.length]));
-      }
+      // ⚠ (v36.68) The Aegis-20 volley boost that USED to live here is gone.
+      // The perk reads "Mega Tracker Rockets fires more missiles" — that is the
+      // CORE, not this ability. Boosting the ability made rank 20 buff a thing
+      // the perk never names while leaving its actual subject untouched. Both
+      // halves now live in the core (activateCore + the per-tick spawner).
       _enqueueStaggeredRocketSalvo(player, _trQueue, 0.035);
       player.trackerLockedTarget = null;
     }
@@ -55221,6 +55489,37 @@ function executeAbility(slot, ability) {
         } catch (e) {}
         // Heal player
         player.shield = Math.min(player.maxShield, player.shield + 800);
+        // (v36.68) SYPHON 11 "Energy Syphon Lv2" — "gives nearby friendly
+        // Ships shield too."
+        // ⚠ DESIGN NOTE: as literally written this perk is INERT IN SOLO, by
+        // construction — bots are not spawned in freeflight/endless, endless
+        // waves are all on the enemy fleet, and freeflight multiplayer is a
+        // true FFA where every peer gets a unique team id, so `team ===
+        // player.team` can never match. It could only ever fire in co-op
+        // endless. A rank-11 unlock that does nothing in the modes the owner
+        // actually plays is the same class of bug as the rest of this pass,
+        // so it gets a FALLBACK rather than a dead branch: share the surplus
+        // with real allies when there are any, and bank it as OVERSHIELD on
+        // yourself when you are flying alone. Either way the perk always pays.
+        if (typeof _aegisUpFor === 'function' && _aegisUpFor(11)) {
+          let _shared = 0;
+          try {
+            for (const a of game.entities) {
+              if (!a || !a.alive || a === player || a.team !== player.team || !a.position) continue;
+              if (a.position.distanceTo(player.position) > 2200) continue;
+              const _mx = a.maxShield || 0;
+              if (_mx > 0) { a.shield = Math.min(_mx, (a.shield || 0) + 400); _shared++; }
+            }
+          } catch (_) {}
+          if (_shared === 0) {
+            // Flying solo: the drained charge has nowhere to go but the
+            // OVERSHIELD layer (the v36.12 mechanic — spills over max, bleeds
+            // off outside a stasis field), so the perk reads as "you keep the
+            // surplus" instead of silently doing nothing.
+            const _osCap = (player.maxShield || 0) * 0.5;
+            player.overShield = Math.min(_osCap, (player.overShield || 0) + 400);
+          }
+        }
 
         // Siphon conduit: stack of huge lightning bolts at multiple
         // colors and offsets, plus a wide blue-glow halo of soft particles
@@ -55428,7 +55727,9 @@ function executeAbility(slot, ability) {
         // hub map is built with `FOOT: null` (it streams endlessly, so it has no
         // footprint) — meaning the hub has no ground clamp for the player at all
         // and nothing was there to undo the hop.
-        let dashLen = _teleportClampLen(dashStart, moveDir, 400);
+        // (v36.68) SLAYER 17 "Wraith" — Teleport travels further.
+        const _tpReach = (typeof _aegisUpFor === 'function' && _aegisUpFor(17)) ? 640 : 400;
+        let dashLen = _teleportClampLen(dashStart, moveDir, _tpReach);
         // Blocked almost immediately means you aimed into the ground. Rather
         // than eat the cooldown for nothing, skim: retry with the vertical
         // component removed, so the blink carries you ALONG the surface instead
@@ -55437,7 +55738,7 @@ function executeAbility(slot, ability) {
           const flat = new THREE.Vector3(moveDir.x, 0, moveDir.z);
           if (flat.lengthSq() > 1e-6) {
             flat.normalize();
-            const flatLen = _teleportClampLen(dashStart, flat, 400);
+            const flatLen = _teleportClampLen(dashStart, flat, _tpReach);
             if (flatLen > dashLen) { moveDir = flat; dashLen = flatLen; }
           }
         }
@@ -55615,17 +55916,12 @@ function executeAbility(slot, ability) {
     else if (ability.name === 'Explosive Gas') {
       const trapPos = player.position.clone().add(forward.clone().multiplyScalar(400));
       spawnIncendiaryGas(trapPos, 'player', player.team, net.myPeerId, ++net.effectIdCounter, true);
-      // (v34.99) PYRO Explosive Barrels (Aegis 20, hub): the trap ignites
-      // with an initial blast.
-      if (player.loadoutKey === 'PYRO' && typeof _aegisUpFor === 'function' && _aegisUpFor(20)) {
-        try { if (typeof spawnExplosion === 'function') spawnExplosion(trapPos.clone(), 1.4); } catch (_) {}
-        try {
-          for (const b of game.entities) {
-            if (b && b.alive && b.team !== player.team && b.takeDamage && b.position &&
-                b.position.distanceTo(trapPos) < 420) b.takeDamage(900, 'player');
-          }
-        } catch (_) {}
-      }
+      // ⚠ (v36.68) The rank-20 blast USED TO FIRE HERE, at DEPLOY. The perk
+      // says "IGNITING an Explosive Gas triggers an initial explosion" — the
+      // cloud is spawned un-ignited, so this was the wrong moment entirely
+      // (and at spawnExplosion(pos, 1.4) against a house range of 25-50 it was
+      // invisible anyway, so it almost certainly was never once seen). It now
+      // lives in _pyroGasIgniteBlast, called from the real first-ignition site.
       // Whoosh ignition stinger so the trap deployment reads
       // distinct from ordinary projectile fire.
       try {
@@ -55708,7 +56004,14 @@ function firePowerShot() {
     // Close-range Charge Shot: shotgun blast (12 pellets, wide spread, knockback)
     const range = 1200;
     const pelletCount = 12;
-    const spreadAngle = 0.12;
+    // (v36.68) BLASTER 8 "Executioner" — "Close-range Charge Shot is WIDER and
+    // does DOUBLE damage." Replaces the old implementation entirely, which was
+    // a +50% finisher against targets already under 30% health (that was the
+    // pre-rewrite "bypasses Doomed State" design, and it lived in
+    // _aegisDmgOut where it also boosted the Gatling and the long-range shot).
+    const _execUp = (player.loadoutKey === 'BLASTER' && typeof _aegisUpFor === 'function' && _aegisUpFor(8));
+    const _execDmg = _execUp ? 2 : 1;
+    const spreadAngle = _execUp ? 0.20 : 0.12;
     for (let p = 0; p < pelletCount; p++) {
       const pelletDir = forward.clone();
       pelletDir.x += (Math.random() - 0.5) * spreadAngle;
@@ -55740,7 +56043,7 @@ function firePowerShot() {
         if (proj < 0 || proj > range) continue;
         const closest = player.position.clone().add(pelletDir.clone().multiplyScalar(proj));
         if (closest.distanceTo(bot.position) < bot.chassis.hullLength * 1.2) {
-          const dealt = bot.takeDamage(270, 'player', closest);
+          const dealt = bot.takeDamage(270 * _execDmg, 'player', closest);
           if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
           if (bot.velocity) bot.velocity.add(pelletDir.clone().multiplyScalar(400));
           // Surface-clamped, smaller burst at the actual hit point.
@@ -55765,7 +56068,7 @@ function firePowerShot() {
           const _objClosest = player.position.clone().add(pelletDir.clone().multiplyScalar(_objProj));
           const _objR = obst.collisionRadius || 60;
           if (_objClosest.distanceTo(obst.position) < _objR) {
-            const _dealt = obst.takeDamage(270);
+            const _dealt = obst.takeDamage(270 * _execDmg);
             if (_dealt > 0) {
               player.damageDealt += _dealt;
               player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
@@ -55784,7 +56087,7 @@ function firePowerShot() {
           if (_mProj < 0 || _mProj > range) continue;
           const _mClosest = player.position.clone().add(pelletDir.clone().multiplyScalar(_mProj));
           if (_mClosest.distanceTo(mon.position) < mon.collisionRadius) {
-            const _md = mon.takeDamage(270, 'player', _mClosest);
+            const _md = mon.takeDamage(270 * _execDmg, 'player', _mClosest);
             if (_md > 0) { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); showHitMarker(); }
             spawnExplosion(_mClosest, 5);
           }
@@ -55819,6 +56122,15 @@ function firePowerShot() {
         color: 0xaaeeff,
       });
     }
+    // (v36.68) BLASTER 17 "Drill Shot" — "Long-range Charge Shot deals MORE
+    // DAMAGE EACH TIME IT PIERCES." ⚠ That is unimplementable as written
+    // without an ordering pass: `game.entities` order is arbitrary, so the
+    // beam had no notion of which ship it hit first. Collect the hits, SORT
+    // them front-to-back along the beam, then apply the ramp by depth.
+    // (The old implementation was a flat +20% in _aegisDmgOut, which also
+    // boosted the Gatling and the close-range shot — neither of which this
+    // perk names.)
+    const _csHits = [];
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === player.team) continue;
       const toBot = new THREE.Vector3().subVectors(bot.position, player.position);
@@ -55826,17 +56138,24 @@ function firePowerShot() {
       if (proj < 0 || proj > range) continue;
       const closest = player.position.clone().add(forward.clone().multiplyScalar(proj));
       if (closest.distanceTo(bot.position) < bot.chassis.hullLength * 1.0) {
-        const dealt = bot.takeDamage(3200, 'player', closest);
-        if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
-        // Surface-clamped, smaller burst at the actual hit point.
-        const _surfR = bot.chassis.hullLength * 0.5;
-        const _toHit = closest.clone().sub(bot.position);
-        const _len = _toHit.length();
-        const _exPos = (_len > 0.001)
-          ? bot.position.clone().add(_toHit.multiplyScalar(_surfR / _len))
-          : bot.position.clone();
-        spawnExplosion(_exPos, 8);
+        _csHits.push({ bot, proj, closest });
       }
+    }
+    _csHits.sort((a, b) => a.proj - b.proj);
+    const _drillUp = (player.loadoutKey === 'BLASTER' && typeof _aegisUpFor === 'function' && _aegisUpFor(17));
+    for (let ci = 0; ci < _csHits.length; ci++) {
+      const bot = _csHits[ci].bot, closest = _csHits[ci].closest;
+      const _drillMul = _drillUp ? (1 + ci * 0.35) : 1;
+      const dealt = bot.takeDamage(3200 * _drillMul, 'player', closest);
+      if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
+      // Surface-clamped, smaller burst at the actual hit point.
+      const _surfR = bot.chassis.hullLength * 0.5;
+      const _toHit = closest.clone().sub(bot.position);
+      const _len = _toHit.length();
+      const _exPos = (_len > 0.001)
+        ? bot.position.clone().add(_toHit.multiplyScalar(_surfR / _len))
+        : bot.position.clone();
+      spawnExplosion(_exPos, _drillUp ? 8 + ci * 4 : 8);
     }
     // Piercing shot also tears through any rocks in its line.
     // Full 3200 dmg per rock since the shot pierces all enemies + obstacles.
@@ -56025,7 +56344,11 @@ function activateCore() {
     try { playSound('salvo_core_burst'); } catch (_) {}
     // Fire initial burst; more spawn per tick in updateAbilities.
     const _mtrLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER || null;
-    for (let m = 0; m < 8; m++) {
+    // (v36.68) TRACKER Aegis 20 "Mega Tracker Rockets" — the core fires more
+    // missiles. Both the opening burst AND the sustained per-tick spawn scale,
+    // otherwise a +50% opener is swamped by 3 s of unchanged trickle.
+    const _mtrN = (typeof _aegisUpFor === 'function' && _aegisUpFor(20)) ? 12 : 8;
+    for (let m = 0; m < _mtrN; m++) {
       const spread = new THREE.Vector3((Math.random()-0.5)*0.3, (Math.random()-0.5)*0.3, 0);
       let _mtrOrigin = player.position.clone();
       if (_mtrLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
@@ -56691,6 +57014,32 @@ const SONAR_PULSE_DURATION = 1.2;
 
 
 const SONAR_PULSE_MAX_RADIUS = 3000;
+// (v36.68) TRACKER 17 "Signal Strength" — "Sonar Pulse's lock causes damage
+// over time." Burns everything currently lit by a pulse. Ticked once per
+// frame from the main loop; no per-frame allocation, and it self-gates so it
+// costs one predicate on every other ship.
+function _tickTrackerSonarDOT(dt) {
+  if (typeof player === 'undefined' || !player) return;
+  if (player.loadoutKey !== 'TRACKER') return;
+  if (typeof _aegisUpFor !== 'function' || !_aegisUpFor(17)) return;
+  if (!game || game.state !== 'playing') return;
+  const _d = TRACKER_SONAR_DOT_DPS * dt;
+  try {
+    for (const b of game.entities) {
+      if (!b || !b.alive || b.team === player.team) continue;
+      if (!_aegisSonarLit(b)) continue;
+      if (b.takeDamage) b.takeDamage(_d, 'player', b.position);
+    }
+    if (game.monsters) {
+      for (const m of game.monsters) {
+        if (!m || !m.alive) continue;
+        if (!_aegisSonarLit(m)) continue;
+        if (m.takeDamage) m.takeDamage(_d, 'player', m.position);
+      }
+    }
+  } catch (_) {}
+}
+
 function _spawnSonarPulse(pos, owner) {
   const geo = new THREE.SphereGeometry(1, 24, 16);
   const mat = new THREE.MeshBasicMaterial({
@@ -56709,9 +57058,13 @@ function _spawnSonarPulse(pos, owner) {
   mesh.scale.setScalar(0.01);
   mesh.renderOrder = 2;
   scene.add(mesh);
-  // (v34.94) TRACKER Signal Strength (Aegis 17): the player's pulses last 2x.
-  const _sDur = SONAR_PULSE_DURATION *
-    ((owner === player && player.loadoutKey === 'TRACKER' && typeof _aegisUpFor === 'function' && _aegisUpFor(17)) ? 2 : 1);
+  // ⚠ (v36.68) THE OLD RANK-17 DURATION DOUBLING IS GONE, AND IT WAS A NO-OP.
+  // The sweep computes `radius = (elapsed / duration) * maxRadius`, so doubling
+  // the duration only HALVED THE SWEEP SPEED — the wave still reached exactly
+  // the same 3000 u and caught exactly the same targets, just slower. The perk
+  // is now "Sonar Pulse's lock causes damage over time" (see
+  // _tickTrackerSonarDOT), which is what the corrected spec asks for.
+  const _sDur = SONAR_PULSE_DURATION;
   game.worldEffects.push({
     type: 'sonar_pulse',
     position: pos.clone(),
@@ -57606,18 +57959,43 @@ function updateWorldEffects(dt) {
         // immobilization is enforced by game.playerRootTimer in
         // updatePlayerMovement ; zeroing velocity here is belt-and-braces.
         if (eff.rootTarget.velocity) eff.rootTarget.velocity.set(0, 0, 0);
-        if (eff.rootTimer <= 0) {
-          eff.timer = 0;
-          // (v34.98) PUNCTURE Explosive Traps (Aegis 2, hub-only): the
-          // player's Tether Traps explode when the root breaks.
-          if (eff.owner === 'player' && player.loadoutKey === 'PUNCTURE' &&
-              typeof _aegisUpFor === 'function' && _aegisUpFor(2)) {
-            try { if (typeof spawnExplosion === 'function') spawnExplosion(eff.position.clone(), 1.6); } catch (_) {}
-            try {
-              if (eff.rootTarget && eff.rootTarget !== player && eff.rootTarget.takeDamage) eff.rootTarget.takeDamage(1200, 'player');
-            } catch (_) {}
-            try { if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', eff.position.clone()); } catch (_) {}
-          }
+      }
+      // ⚠ (v36.68) THE TRAP BREAKS WHEN THE ROOT ENDS FOR *ANY* REASON.
+      // PUNCTURE 2 "Stasis Traps explode when they break" used to live INSIDE
+      // the `triggered && _rootAlive` branch above, so it could only ever fire
+      // on clean timer expiry. Root-a-target-then-kill-it is THE standard
+      // Puncture pattern, and in that case `_rootAlive` goes false, the branch
+      // is skipped, and the trap never detonates — it just sat inert for the
+      // rest of its life. (That inert-trap state is a base-game bug too, not
+      // only a perk bug: the trap could catch nothing else either.)
+      if (eff.triggered && !eff._broke && (eff.rootTimer <= 0 || !_rootAlive)) {
+        eff._broke = true;
+        eff.timer = 0;
+        if (eff.owner === 'player' && player.loadoutKey === 'PUNCTURE' &&
+            typeof _aegisUpFor === 'function' && _aegisUpFor(2)) {
+          const _bp = eff.position.clone();
+          // Size 1.6 was invisible — the house range for a real blast is
+          // 25-50. And an "explosion" should hit whoever is standing in it,
+          // not only the one ship that happened to be tethered.
+          try { if (typeof spawnExplosion === 'function') spawnExplosion(_bp, 45); } catch (_) {}
+          try {
+            const _R = 520;
+            for (const _b of game.entities) {
+              if (!_b || !_b.alive || _b.team === player.team || !_b.position) continue;
+              const _d = _b.position.distanceTo(_bp);
+              if (_d > _R) continue;
+              const _fall = 1 - (_d / _R) * 0.6;          // 100% at centre, 40% at the rim
+              if (_b.takeDamage) _b.takeDamage(1200 * _fall, 'player', _bp);
+            }
+            if (game.monsters) {
+              for (const _m of game.monsters) {
+                if (!_m || !_m.alive || !_m.position) continue;
+                if (_m.position.distanceTo(_bp) > _R + (_m.collisionRadius || 0)) continue;
+                if (_m.takeDamage) _m.takeDamage(1200, 'player', _bp);
+              }
+            }
+          } catch (_) {}
+          try { if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', _bp); } catch (_) {}
         }
       }
       // ---- Visible effects so the trap reads as an active ensnare ----
@@ -57696,6 +58074,14 @@ function updateWorldEffects(dt) {
           const prevLocks = player.trackerLocks[bot.id] || 0;
           player.trackerLocks[bot.id] = Math.min(3, prevLocks + 1);
           eff.locked.add(bot.id);
+          // (v36.68) TRACKER 8 "Sonar Weak Points" + 17 "Signal Strength" both
+          // key off a REVEALED window, not off the permanent lock marks. Stamp
+          // when this target stops being lit. ⚠ trackerLocks NEVER expire (they
+          // are consumed by firing), so gating the +25% on them meant
+          // "everything you have ever sonar-pinged takes +25% for the rest of
+          // the round" — the perk read as a passive global buff and Sonar Pulse
+          // itself felt pointless to press.
+          bot._sonarLitT = game.time + TRACKER_SONAR_LIT_SEC;
           if (player.trackerLocks[bot.id] > prevLocks) {
             try { playSound('sonar_ping_' + player.trackerLocks[bot.id]); } catch (_) {}
           }
@@ -57714,6 +58100,7 @@ function updateWorldEffects(dt) {
             const prevLocks = player.trackerLocks[mon.id] || 0;
             player.trackerLocks[mon.id] = Math.min(3, prevLocks + 1);
             eff.locked.add(mon.id);
+            mon._sonarLitT = game.time + TRACKER_SONAR_LIT_SEC;   // (v36.68) leviathans get lit too
             if (player.trackerLocks[mon.id] > prevLocks) {
               try { playSound('sonar_ping_' + player.trackerLocks[mon.id]); } catch (_) {}
             }
@@ -58479,7 +58866,10 @@ function updateAbilities(dt) {
     // Same quarter-speed as the initial burst so the per-tick spawns
     // herd cleanly with the rest of the swarm.
     else if (coreName === 'Mega Tracker Rockets') {
-      if (Math.random() < dt * 10) {
+      // (v36.68) Aegis 20 lifts the sustained spawn rate by the same 50% as the
+      // opening burst: 10/s -> 15/s over the core's 3 s window.
+      const _mtrRate = (player.loadoutKey === 'TRACKER' && typeof _aegisUpFor === 'function' && _aegisUpFor(20)) ? 15 : 10;
+      if (Math.random() < dt * _mtrRate) {
         const aimDir = _abTmpA.copy(forward);
         aimDir.x += (Math.random() - 0.5) * 0.25;
         aimDir.y += (Math.random() - 0.5) * 0.25;
@@ -58711,8 +59101,10 @@ function dash() {
   player.velocity.copy(dashDir.clone().multiplyScalar(ch.dashSpeed));
   player.dashActive = true;
   player.dashTimer = ch.dashDuration;
-  // (v34.94) SLAYER Wraith (Aegis 17): Phase Dash travels further.
-  if (player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(17)) player.dashTimer *= 1.5;
+  // ⚠ (v36.68) SLAYER 17 "Wraith" NO LONGER LIVES HERE. The corrected spec
+  // says "TELEPORT travels further"; this is the chassis DASH, a different
+  // ability entirely, so the perk was lengthening the wrong thing. It now
+  // scales the Teleport hop distance in executeAbility.
   player.dashCharges--;
   player.shipState = 'dashing';
   if (player.dashCooldownTimer <= 0) player.dashCooldownTimer = ch.dashCooldown;
@@ -61730,8 +62122,7 @@ function _hlNanoSpan(ctx, r, p, f0, f1, col, lw, alpha) {
 }
 
 function _hlNanoOverlay(ctx, r, p) {
-  const perk = (typeof PILOT_PERKS !== 'undefined' && player && player.perkId)
-    ? PILOT_PERKS[player.perkId] : null;
+  const perk = (typeof _perkEffectiveBag === 'function') ? _perkEffectiveBag() : null;
   if (!perk || !perk.regenPerSec || !(player.maxHealth > 0) || player.shipState === 'dead') return;
   const max = player.maxHealth;
   const h = Math.max(0, player.health);
@@ -64712,7 +65103,11 @@ function updateAbilityHUD() {
 
     // PYRO Explosive Gas: charge-based (mirrors dash charges).
     // Bar fills with the regen progress of the next charge; text shows current charge count.
-    if (player.loadoutKey === 'PYRO' && ability.name === 'Explosive Gas') {
+    if ((player.loadoutKey === 'PYRO' && ability.name === 'Explosive Gas') ||
+        (player.loadoutKey === 'SLAYER' && ability.name === 'Teleport' &&
+         typeof _aegisUpFor === 'function' && _aegisUpFor(8)) ||
+        (player.loadoutKey === 'PUNCTURE' && ability.name === 'Stasis Trap' &&
+         typeof _aegisUpFor === 'function' && _aegisUpFor(11))) {
       const charges = player.trapCharges || 0;
       const maxCharges = player.maxTrapCharges || 2;
       if (charges >= maxCharges) {
@@ -77957,6 +78352,9 @@ function gameLoop(timestamp) {
   // (v36.64) The Spire's shaft cloud columns: disturb on contact, settle
   // otherwise. No-op on every other map (the list is null).
   if (typeof _arenaCloudTick === 'function') { try { _arenaCloudTick(dt); } catch (_) {} }
+  // (v36.68) TRACKER 17 Signal Strength: burn sonar-lit targets. Self-gates
+  // on ship + rank, so it is one predicate for everyone else.
+  if (typeof _tickTrackerSonarDOT === 'function') { try { _tickTrackerSonarDOT(dt); } catch (_) {} }
   __pmark('dots');
   tickScanlineTexture();
   tickEnergyShields(dt);

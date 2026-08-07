@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.67';
+const LSS_BUILD = '36.69';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -4314,6 +4314,25 @@ const PILOT_PERKS = {
   },
 };
 const PILOT_PERK_DEFAULT = 'shield';
+
+let _perkAllBag = null;
+function _perkEffectiveBag() {
+  if (typeof PILOT_PERKS === 'undefined' || !PILOT_PERKS) return null;
+  const sel = (typeof player !== 'undefined' && player) ? (PILOT_PERKS[player.perkId] || null) : null;
+  if (!(typeof player !== 'undefined' && player && player.loadoutKey === 'BLASTER' &&
+        typeof _aegisUpFor === 'function' && _aegisUpFor(20))) return sel;
+  if (!_perkAllBag) {
+    _perkAllBag = { id: '_all', name: 'Dreadnaught Cyborg', icon: '◈', color: 0xffcc66, outlineAll: true };
+    for (const k of Object.keys(PILOT_PERKS)) {
+      const pk = PILOT_PERKS[k];
+      for (const f of Object.keys(pk)) {
+        if (f === 'id' || f === 'name' || f === 'desc' || f === 'icon' || f === 'color') continue;
+        _perkAllBag[f] = pk[f];
+      }
+    }
+  }
+  return _perkAllBag;
+}
 
 const SHIP_SKINS = {
   factory: {
@@ -7424,9 +7443,6 @@ const EndlessMode = {
     if (lvl >= 14 && !a._absDone.s14) {
       player.maxShield += 2500; player.shield += 2500; a._absDone.s14 = 1;
     }
-    if (lvl >= 20 && !a._absDone.b20 && player.loadoutKey === 'BLASTER') {
-      player.maxShield += 1000; player.shield += 1000; a._absDone.b20 = 1;
-    }
     try { _aegisShipUpgrades(true); } catch (_) {}
   },
   _spawnWave(run) {
@@ -9759,9 +9775,7 @@ function broadcastPlayerState(dt) {
        player.abilities[1].name === 'Fire Shield'))
   );
   s.spawnProt = Math.max(0, Math.round((player.spawnProtection || 0) * 10) / 10);
-  s.cloak = !!(player.perkCloakActive
-            && PILOT_PERKS[player.perkId]
-            && PILOT_PERKS[player.perkId].cloakDuration);
+  s.cloak = !!(player.perkCloakActive && (_perkEffectiveBag() || {}).cloakDuration);
   s.va = (player.loadoutKey === 'VORTEX' && typeof _vortexChargeFrac === 'function')
     ? Math.round(_vortexChargeFrac() * 9) : 0;
 
@@ -22074,6 +22088,11 @@ function _aegisUpFor(rank) {
   const r = _aegisAbilityRank();
   return r >= 0 && r >= rank;
 }
+const TRACKER_SONAR_LIT_SEC = 8.0;
+const TRACKER_SONAR_DOT_DPS = 200;
+function _aegisSonarLit(t) {
+  return !!(t && (t._sonarLitT || 0) > (game ? game.time : 0));
+}
 function _aegisShipUpgrades(skipAdditive) {
   if (_aegisAbilityRank() < 0) return;
   const k = player.loadoutKey;
@@ -22088,19 +22107,16 @@ function _aegisShipUpgrades(skipAdditive) {
     else if (_aegisUpFor(11)) player.clipAmmo = player.maxClip;
   } else if (k === 'PYRO') {
     const base = (player.loadout && player.loadout.weapon && player.loadout.weapon.clipSize) || player.maxClip;
-    player.maxClip = base + (_aegisUpFor(17) ? 2 : (_aegisUpFor(2) ? 1 : 0));
+    player.maxClip = base;
     if (player.clipAmmo > player.maxClip) player.clipAmmo = player.maxClip;
   } else if (k === 'SLAYER') {
-    const chD = (player.chassis && player.chassis.maxDashes) || player.maxDashes || 3;
-    player.maxDashes = chD + (_aegisUpFor(8) ? 1 : 0);
-    if (player.dashCharges > player.maxDashes) player.dashCharges = player.maxDashes;
-    else if (_aegisUpFor(8)) player.dashCharges = player.maxDashes;
+    player.trapCharges = player.maxTrapCharges;
   } else if (k === 'BLASTER') {
     if (_aegisUpFor(20)) {
-      const chD = (player.chassis && player.chassis.maxDashes) || player.maxDashes || 3;
-      player.maxDashes = chD + 1;
-      player.dashCharges = player.maxDashes;
-      if (!skipAdditive) { player.maxShield += 1000; player.shield += 1000; }
+      const _bag = (typeof _perkEffectiveBag === 'function') ? _perkEffectiveBag() : null;
+      const _chD = (player.chassis && player.chassis.maxDashes) || 3;
+      const _wantD = _chD + ((_bag && _bag.dashBonus) || 0);
+      if (player.maxDashes < _wantD) { player.maxDashes = _wantD; player.dashCharges = player.maxDashes; }
     }
   } else if (k === 'SYPHON') {
     player.syphonMissileRacks = _aegisUpFor(20);
@@ -22113,20 +22129,10 @@ function _aegisDmgOut(amount, bot) {
   if (k === 'PYRO' && _aegisUpFor(8))                                      // Hot Streak (dmg -> Core)
     player.coreMeter = Math.min(100, (player.coreMeter || 0) + amount / 150);
   if (k === 'SYPHON' && _aegisUpFor(17)) amount *= 1.2;                    // Zapper: Critical Hit
-  if (k === 'SYPHON' && _aegisUpFor(8)) amount *= 1.1;                     // Sniper Config (focus)
-  if (k === 'PUNCTURE' && _aegisUpFor(17)) amount *= 1.15;                 // Railgun: Critical Hit
-  if (k === 'VORTEX' && _aegisUpFor(2)) amount *= 1.15;                    // Split Shot Power
-  if (k === 'VORTEX' && _aegisUpFor(11)) amount *= 1.15;                   // Laser Shot Power
-  if (k === 'TRACKER' && _aegisUpFor(2)) amount *= 1.15;                   // Splasher Rounds
   if (k === 'SLAYER' && _aegisUpFor(2) && player.dashActive) amount *= 1.5; // Dash Mastery
-  if (k === 'BLASTER' && _aegisUpFor(8) && bot && bot.maxHealth > 0 &&
-      (bot.health / bot.maxHealth) < 0.3) amount *= 1.5;                   // Executioner (finisher)
-  if (k === 'BLASTER' && _aegisUpFor(17)) amount *= 1.2;                   // Drill Shot
-  if (k === 'BLASTER' && _aegisUpFor(20)) amount *= 1.1;                   // Dreadnaught (part)
-  if (k === 'TRACKER' && _aegisUpFor(8) && bot && bot.id != null &&
-      player.trackerLocks && player.trackerLocks[bot.id]) amount *= 1.25;  // Sonar Weak Points
-  if (k === 'SYPHON' && _aegisUpFor(2))                                    // Energized Zapper (Lv2 at 11)
-    player.shield = Math.min(player.maxShield, player.shield + player.maxShield * (_aegisUpFor(11) ? 0.02 : 0.01));
+  if (k === 'TRACKER' && _aegisUpFor(8) && _aegisSonarLit(bot)) amount *= 1.25;  // Sonar Weak Points
+  if (k === 'SYPHON' && _aegisUpFor(2) && !player._szChaining)              // Energized Zapper: 1% shield
+    player.shield = Math.min(player.maxShield, player.shield + player.maxShield * 0.01);
   if (k === 'SLAYER' && _aegisUpFor(20) && player.coreActive)              // Blademaster (shield gen)
     player.shield = Math.min(player.maxShield, player.shield + amount * 0.15);
   return amount;
@@ -28909,6 +28915,31 @@ function spawnPyroFlame(pos) {
   eff.fireMeshes = _spawnFireCloudCluster(pos, { count: 3, radius: 48, alpha: 0.55 });
 }
 
+function _pyroGasIgniteBlast(pos) {
+  if (typeof player === 'undefined' || !player) return;
+  if (player.loadoutKey !== 'PYRO') return;
+  if (typeof _aegisUpFor !== 'function' || !_aegisUpFor(20)) return;
+  const _p = pos.clone ? pos.clone() : new THREE.Vector3(pos.x, pos.y, pos.z);
+  try { if (typeof spawnExplosion === 'function') spawnExplosion(_p, 45); } catch (_) {}
+  try {
+    const _R = 480;
+    for (const b of game.entities) {
+      if (!b || !b.alive || b.team === player.team || !b.takeDamage || !b.position) continue;
+      const _d = b.position.distanceTo(_p);
+      if (_d > _R) continue;
+      b.takeDamage(900 * (1 - (_d / _R) * 0.6), 'player', _p);
+    }
+    if (game.monsters) {
+      for (const m of game.monsters) {
+        if (!m || !m.alive || !m.position || !m.takeDamage) continue;
+        if (m.position.distanceTo(_p) > _R + (m.collisionRadius || 0)) continue;
+        m.takeDamage(900, 'player', _p);
+      }
+    }
+  } catch (_) {}
+  try { if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', _p); } catch (_) {}
+}
+
 function igniteNearbyGas(pos, radius, igniter, igniterTeam) {
   for (const eff of game.worldEffects) {
     if (eff.type !== 'incendiary_gas') continue;
@@ -28920,6 +28951,7 @@ function igniteNearbyGas(pos, radius, igniter, igniterTeam) {
         if (igniterTeam != null) eff.team = igniterTeam;
       }
       eff.ignited = true;
+      if (eff.owner === 'player') { try { _pyroGasIgniteBlast(eff.position); } catch (_) {} }
       eff.igniteTimer = eff.igniteDuration;
       eff.timer = Math.max(eff.timer, eff.igniteDuration);
       if (eff.mesh && eff.mesh.material) {
@@ -39941,7 +39973,7 @@ function commitLoadout(key) {
       player.perkId = (stored && PILOT_PERKS[stored]) ? stored : PILOT_PERK_DEFAULT;
     } catch (_) { player.perkId = PILOT_PERK_DEFAULT; }
   }
-  const _perk = PILOT_PERKS[player.perkId];
+  const _perk = _perkEffectiveBag();
   player.perkCloakActive = false;
   player.perkCloakActiveTimer = 0;
   player.perkCloakTimer = 0;
@@ -39997,6 +40029,7 @@ function commitLoadout(key) {
   player.blasterSwitchTimer = 0;
   player.thermalShieldHP = player.thermalShieldMaxHP; 
   player.trapCharges = player.maxTrapCharges; 
+  player._pyroBurstLeft = 0; player._pyroBurstT = 0;
   player.trapCooldownTimer = 0;
   player.syphonTier = 0;
   player.syphonDmgMult = 1.0;
@@ -40673,6 +40706,7 @@ function respawnPlayer() {
   player.gunShieldHP = 0; player.gunShieldTimer = 0;
   player.thermalShieldHP = player.thermalShieldMaxHP; 
   player.trapCharges = player.maxTrapCharges; 
+  player._pyroBurstLeft = 0; player._pyroBurstT = 0;
   player.trapCooldownTimer = 0;
   player.abilityActive = [false, false, false];
   player.abilityTimers = [0, 0, 0];
@@ -40700,7 +40734,7 @@ const _mvClampMin = new THREE.Vector3();
 const _mvClampMax = new THREE.Vector3();
 
 function _tickPerkEffects(dt) {
-  const p = PILOT_PERKS[player.perkId];
+  const p = _perkEffectiveBag();
   if (!p) return;
   if (p.regenPerSec && player.maxHealth > 0) {
     const cap = player.maxHealth * (p.overhealMult || 1.0);
@@ -40760,7 +40794,7 @@ function _tickPerkEffects(dt) {
       player._lastCorePctForCloak = corePct;
     }
   }
-  const _outlineActive = (p.id === 'outline');
+  const _outlineActive = (p.id === 'outline' || !!p.outlineAll);
   if (_outlineActive || _tickPerkEffects._outlineWasActive) {
     _tickOutlineOptics(_outlineActive);
   }
@@ -41363,7 +41397,10 @@ function updatePlayerMovement(dt) {
     }
   }
 
-  if (player.loadoutKey === 'PYRO' && player.trapCooldownTimer > 0) {
+  if ((player.loadoutKey === 'PYRO' ||
+       (player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(8)) ||
+       (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(11))) &&
+      player.trapCooldownTimer > 0) {
     player.trapCooldownTimer -= dt;
     if (player.trapCooldownTimer <= 0 && player.trapCharges < player.maxTrapCharges) {
       player.trapCharges++;
@@ -41677,6 +41714,20 @@ function updateWeapon(dt) {
   }
 
   player.fireTimer -= dt;
+
+  if (player._pyroBurstLeft > 0) {
+    player._pyroBurstT -= dt;
+    while (player._pyroBurstLeft > 0 && player._pyroBurstT <= 0) {
+      if (player.clipAmmo <= 0) { player._pyroBurstLeft = 0; break; }
+      fireWeapon();
+      player.isFiring = true; player.fireFlashTimer = 0.12;
+      player.clipAmmo--;
+      player._pyroBurstLeft--;
+      player._pyroBurstT += _PYRO_BURST_GAP;
+      if (player.clipAmmo <= 0) { player._pyroBurstLeft = 0; startReload(); }
+    }
+  }
+
   if (player.blasterSwitchTimer > 0) firing = false;
   if (firing && player.fireTimer <= 0) {
     const smartCoreActive = player.coreActive && player.loadoutKey === 'BLASTER';
@@ -41686,6 +41737,8 @@ function updateWeapon(dt) {
     player.fireTimer = w.fireRate;
     if (!smartCoreActive) {
       player.clipAmmo--;
+      const _pbN = _pyroBurstN();
+      if (_pbN > 1) { player._pyroBurstLeft = _pbN - 1; player._pyroBurstT = _PYRO_BURST_GAP; }
       if (player.clipAmmo <= 0 && w.clipSize < 999) startReload();
     }
   }
@@ -41694,6 +41747,18 @@ function updateWeapon(dt) {
   if (reloadPressed && player.clipAmmo < player.maxClip && !player.reloading && w.clipSize < 999) {
     startReload();
   }
+}
+
+const _PYRO_BURST_GAP = 0.11;   // seconds between bolts inside one pull
+function _pyroBurstN() {
+  if (typeof player === 'undefined' || !player || player.loadoutKey !== 'PYRO') return 1;
+  if (typeof _aegisUpFor !== 'function') return 1;
+  return _aegisUpFor(17) ? 3 : (_aegisUpFor(2) ? 2 : 1);
+}
+const _PYRO_BURST_TOTAL = [1, 1, 1.45, 1.75];
+function _pyroBoltMult() {
+  const n = _pyroBurstN();
+  return (_PYRO_BURST_TOTAL[n] || 1) / n;
 }
 
 function startReload() {
@@ -41999,6 +42064,9 @@ function fireHitscan(origin, dir, w) {
       const hitDist = h.proj;
       const rangeFalloff = 0.7 + 0.3 * Math.max(0, 1 - hitDist / w.range);
       let finalDmg = w.damage * rangeFalloff * chargeMul;
+      if (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(17)) {
+        finalDmg *= 1.25 * (1 + i * 0.25);
+      }
       if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
       if (player.syphonArcRounds && bot.shield > 0) finalDmg *= 1.5;
       const hadShield = bot.shield > 0;
@@ -42063,8 +42131,10 @@ function fireHitscan(origin, dir, w) {
     let finalDmg = w.damage * rangeFalloff;
     if (player.loadoutKey === 'VORTEX' && player.vortexAdsActive) {
       finalDmg *= 1.75;
+      if (typeof _aegisUpFor === 'function' && _aegisUpFor(2)) finalDmg *= 1.30;
     }
     finalDmg *= _railShotMul;
+    if (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(17)) finalDmg *= 1.25;
     if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
     if (player.syphonArcRounds && bestHit.shield > 0) finalDmg *= 1.5;
 
@@ -42084,6 +42154,10 @@ function fireHitscan(origin, dir, w) {
     }
     spawnExplosion(hitPoint, 8);
     if (!hadShield) spawnImpactSparks(hitPoint, 4);
+    if (player.loadoutKey === 'SYPHON' && typeof _syphonChainZap === 'function' &&
+        typeof _aegisUpFor === 'function' && _aegisUpFor(8)) {
+      _syphonChainZap(bestHit, hitPoint, finalDmg);
+    }
 
     if (player.loadoutKey === 'VORTEX') {
       for (let i = 0; i < 3; i++) {
@@ -42108,12 +42182,49 @@ function fireHitscan(origin, dir, w) {
   }
 }
 
+const _SZ_MAX_JUMPS = 3, _SZ_RANGE = 900, _SZ_FALLOFF = 0.55;
+const _szSeen = [];
+function _syphonChainZap(firstTarget, fromPoint, baseDmg) {
+  _szSeen.length = 0;
+  _szSeen.push(firstTarget);
+  let src = firstTarget, srcPt = fromPoint, dmg = baseDmg * _SZ_FALLOFF;
+  player._szChaining = true;
+  try {
+    for (let hop = 0; hop < _SZ_MAX_JUMPS; hop++) {
+      let best = null, bestD = _SZ_RANGE;
+      for (const b of game.entities) {
+        if (!b || !b.alive || b.team === player.team || !b.position) continue;
+        if (_szSeen.indexOf(b) !== -1) continue;
+        const d = b.position.distanceTo(src.position);
+        if (d < bestD) { bestD = d; best = b; }
+      }
+      if (!best) break;
+      const toPt = best.position.clone();
+      const dealt = best.takeDamage(dmg, 'player', toPt);
+      if (dealt > 0) {
+        player.damageDealt += dealt;
+        player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+      }
+      try { if (typeof spawnTracer === 'function') spawnTracer(srcPt, toPt, 0x66ddff, 0.5); } catch (_) {}
+      try { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(toPt, 5); } catch (_) {}
+      try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(toPt, 0x66ddff, 3.0, 520, 0.16); } catch (_) {}
+      _szSeen.push(best);
+      src = best; srcPt = toPt; dmg *= _SZ_FALLOFF;
+    }
+  } catch (_) {}
+  player._szChaining = false;
+}
+
 function fireProjectile(origin, dir, w) {
   const vel = dir.clone().multiplyScalar(w.projSpeed);
   const projColor = (player.loadoutKey === 'PYRO')    ? LSS.CLASS_COLORS.PYRO
                   : (player.loadoutKey === 'TRACKER') ? LSS.CLASS_COLORS.TRACKER
                   : LSS.CLASS_COLORS.TRACKER;
-  const proj = new Projectile(origin, vel, w.damage, w.splash, 'player', projColor);
+  let _splash = w.splash;
+  if (player.loadoutKey === 'TRACKER' && typeof _aegisUpFor === 'function' && _aegisUpFor(2)) _splash *= 1.6;
+  let _projDmg = w.damage;
+  if (player.loadoutKey === 'PYRO' && typeof _pyroBoltMult === 'function') _projDmg *= _pyroBoltMult();
+  const proj = new Projectile(origin, vel, _projDmg, _splash, 'player', projColor);
   if (player.loadoutKey === 'PYRO') {
     proj.isFireSource = true;
     proj.isPyroThermite = true;
@@ -42267,7 +42378,12 @@ function activateAbility(slot) {
 
   const ability = player.abilities[slot];
 
-  const isTrapCharges = (ability.name === 'Explosive Gas' && player.loadoutKey === 'PYRO');
+  const _tpCharged = (ability.name === 'Teleport' && player.loadoutKey === 'SLAYER' &&
+                      typeof _aegisUpFor === 'function' && _aegisUpFor(8));
+  const _stCharged = (ability.name === 'Stasis Trap' && player.loadoutKey === 'PUNCTURE' &&
+                      typeof _aegisUpFor === 'function' && _aegisUpFor(11));
+  const isTrapCharges = (ability.name === 'Explosive Gas' && player.loadoutKey === 'PYRO') ||
+                        _tpCharged || _stCharged;
   if (isTrapCharges) {
     if ((player.trapCharges || 0) <= 0) return;
   } else {
@@ -42329,8 +42445,6 @@ function activateAbility(slot) {
   } else if (ability.cooldown > 0) {
     let cd = ability.cooldown;
     if (player.syphonCooldownMult < 1) cd *= player.syphonCooldownMult;
-    if (ability.name === 'Stasis Trap' && player.loadoutKey === 'PUNCTURE' &&
-        typeof _aegisUpFor === 'function' && _aegisUpFor(11)) cd *= 0.5;
     player.abilityCooldowns[slot] = cd;
   }
 }
@@ -42490,6 +42604,8 @@ function executeAbility(slot, ability) {
         }
       }
 
+      const _vlDmg = 2400 * ((typeof _aegisUpFor === 'function' && _aegisUpFor(11)) ? 1.35 : 1);
+
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
         const toBot = new THREE.Vector3().subVectors(bot.position, player.position);
@@ -42504,7 +42620,7 @@ function executeAbility(slot, ability) {
           const hitPoint = (_len > 0.001)
             ? bot.position.clone().add(_toClosest.multiplyScalar(_surfR / _len))
             : bot.position.clone();
-          const dealt = bot.takeDamage(2400, 'player', hitPoint);
+          const dealt = bot.takeDamage(_vlDmg, 'player', hitPoint);
           if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
           spawnExplosion(hitPoint, 60);
           if (typeof spawnHullBurst === 'function') {
@@ -42537,7 +42653,7 @@ function executeAbility(slot, ability) {
           const _objR = obst.collisionRadius || 60;
           if (_objClosest.distanceTo(obst.position) < _objR) {
             const _hitPt = _objClosest.clone();
-            const _dealt = obst.takeDamage(2400);
+            const _dealt = obst.takeDamage(_vlDmg);
             if (_dealt > 0) {
               player.damageDealt += _dealt;
               player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
@@ -42556,7 +42672,7 @@ function executeAbility(slot, ability) {
           if (_mProj < 0 || _mProj > range) continue;
           const _mClosest = player.position.clone().add(forward.clone().multiplyScalar(_mProj));
           if (_mClosest.distanceTo(mon.position) < mon.collisionRadius) {
-            const _md = mon.takeDamage(2400, 'player', _mClosest);
+            const _md = mon.takeDamage(_vlDmg, 'player', _mClosest);
             if (_md > 0) { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); showHitMarker(); }
             spawnExplosion(_mClosest, 60);
             spawnDynamicLight(_mClosest, 0xeebbff, 6.0, 900, 0.45);
@@ -42682,10 +42798,6 @@ function executeAbility(slot, ability) {
         }
         delete player.trackerLocks[target.id];
       }
-      if (player.loadoutKey === 'TRACKER' && typeof _aegisUpFor === 'function' && _aegisUpFor(20) && _trQueue.length) {
-        const _extraN = Math.ceil(_trQueue.length / 2);
-        for (let _x = 0; _x < _extraN; _x++) _trQueue.push(Object.assign({}, _trQueue[_x % _trQueue.length]));
-      }
       _enqueueStaggeredRocketSalvo(player, _trQueue, 0.035);
       player.trackerLockedTarget = null;
     }
@@ -42772,6 +42884,21 @@ function executeAbility(slot, ability) {
           else playSound('stun');
         } catch (e) {}
         player.shield = Math.min(player.maxShield, player.shield + 800);
+        if (typeof _aegisUpFor === 'function' && _aegisUpFor(11)) {
+          let _shared = 0;
+          try {
+            for (const a of game.entities) {
+              if (!a || !a.alive || a === player || a.team !== player.team || !a.position) continue;
+              if (a.position.distanceTo(player.position) > 2200) continue;
+              const _mx = a.maxShield || 0;
+              if (_mx > 0) { a.shield = Math.min(_mx, (a.shield || 0) + 400); _shared++; }
+            }
+          } catch (_) {}
+          if (_shared === 0) {
+            const _osCap = (player.maxShield || 0) * 0.5;
+            player.overShield = Math.min(_osCap, (player.overShield || 0) + 400);
+          }
+        }
 
         const siphonOrigin = (typeof getPlayerForwardOrigin === 'function')
           ? getPlayerForwardOrigin(forward, 90, new THREE.Vector3())
@@ -42919,12 +43046,13 @@ function executeAbility(slot, ability) {
         let moveDir = player.velocity.clone().normalize();
         player.phaseInvulnTimer = 0.3;
         const dashStart = player.position.clone();
-        let dashLen = _teleportClampLen(dashStart, moveDir, 400);
+        const _tpReach = (typeof _aegisUpFor === 'function' && _aegisUpFor(17)) ? 640 : 400;
+        let dashLen = _teleportClampLen(dashStart, moveDir, _tpReach);
         if (dashLen < 80) {
           const flat = new THREE.Vector3(moveDir.x, 0, moveDir.z);
           if (flat.lengthSq() > 1e-6) {
             flat.normalize();
-            const flatLen = _teleportClampLen(dashStart, flat, 400);
+            const flatLen = _teleportClampLen(dashStart, flat, _tpReach);
             if (flatLen > dashLen) { moveDir = flat; dashLen = flatLen; }
           }
         }
@@ -43072,15 +43200,6 @@ function executeAbility(slot, ability) {
     else if (ability.name === 'Explosive Gas') {
       const trapPos = player.position.clone().add(forward.clone().multiplyScalar(400));
       spawnIncendiaryGas(trapPos, 'player', player.team, net.myPeerId, ++net.effectIdCounter, true);
-      if (player.loadoutKey === 'PYRO' && typeof _aegisUpFor === 'function' && _aegisUpFor(20)) {
-        try { if (typeof spawnExplosion === 'function') spawnExplosion(trapPos.clone(), 1.4); } catch (_) {}
-        try {
-          for (const b of game.entities) {
-            if (b && b.alive && b.team !== player.team && b.takeDamage && b.position &&
-                b.position.distanceTo(trapPos) < 420) b.takeDamage(900, 'player');
-          }
-        } catch (_) {}
-      }
       try {
         if (typeof playSpatialSound === 'function') playSpatialSound('incendiary_ignite', trapPos.clone());
         else playSound('incendiary_ignite');
@@ -43148,7 +43267,9 @@ function firePowerShot() {
   if (player.blasterMode === 'close') {
     const range = 1200;
     const pelletCount = 12;
-    const spreadAngle = 0.12;
+    const _execUp = (player.loadoutKey === 'BLASTER' && typeof _aegisUpFor === 'function' && _aegisUpFor(8));
+    const _execDmg = _execUp ? 2 : 1;
+    const spreadAngle = _execUp ? 0.20 : 0.12;
     for (let p = 0; p < pelletCount; p++) {
       const pelletDir = forward.clone();
       pelletDir.x += (Math.random() - 0.5) * spreadAngle;
@@ -43176,7 +43297,7 @@ function firePowerShot() {
         if (proj < 0 || proj > range) continue;
         const closest = player.position.clone().add(pelletDir.clone().multiplyScalar(proj));
         if (closest.distanceTo(bot.position) < bot.chassis.hullLength * 1.2) {
-          const dealt = bot.takeDamage(270, 'player', closest);
+          const dealt = bot.takeDamage(270 * _execDmg, 'player', closest);
           if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
           if (bot.velocity) bot.velocity.add(pelletDir.clone().multiplyScalar(400));
           const _surfR = bot.chassis.hullLength * 0.5;
@@ -43197,7 +43318,7 @@ function firePowerShot() {
           const _objClosest = player.position.clone().add(pelletDir.clone().multiplyScalar(_objProj));
           const _objR = obst.collisionRadius || 60;
           if (_objClosest.distanceTo(obst.position) < _objR) {
-            const _dealt = obst.takeDamage(270);
+            const _dealt = obst.takeDamage(270 * _execDmg);
             if (_dealt > 0) {
               player.damageDealt += _dealt;
               player.coreMeter = Math.min(100, player.coreMeter + _dealt / 100);
@@ -43214,7 +43335,7 @@ function firePowerShot() {
           if (_mProj < 0 || _mProj > range) continue;
           const _mClosest = player.position.clone().add(pelletDir.clone().multiplyScalar(_mProj));
           if (_mClosest.distanceTo(mon.position) < mon.collisionRadius) {
-            const _md = mon.takeDamage(270, 'player', _mClosest);
+            const _md = mon.takeDamage(270 * _execDmg, 'player', _mClosest);
             if (_md > 0) { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); showHitMarker(); }
             spawnExplosion(_mClosest, 5);
           }
@@ -43245,6 +43366,7 @@ function firePowerShot() {
         color: 0xaaeeff,
       });
     }
+    const _csHits = [];
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === player.team) continue;
       const toBot = new THREE.Vector3().subVectors(bot.position, player.position);
@@ -43252,16 +43374,23 @@ function firePowerShot() {
       if (proj < 0 || proj > range) continue;
       const closest = player.position.clone().add(forward.clone().multiplyScalar(proj));
       if (closest.distanceTo(bot.position) < bot.chassis.hullLength * 1.0) {
-        const dealt = bot.takeDamage(3200, 'player', closest);
-        if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
-        const _surfR = bot.chassis.hullLength * 0.5;
-        const _toHit = closest.clone().sub(bot.position);
-        const _len = _toHit.length();
-        const _exPos = (_len > 0.001)
-          ? bot.position.clone().add(_toHit.multiplyScalar(_surfR / _len))
-          : bot.position.clone();
-        spawnExplosion(_exPos, 8);
+        _csHits.push({ bot, proj, closest });
       }
+    }
+    _csHits.sort((a, b) => a.proj - b.proj);
+    const _drillUp = (player.loadoutKey === 'BLASTER' && typeof _aegisUpFor === 'function' && _aegisUpFor(17));
+    for (let ci = 0; ci < _csHits.length; ci++) {
+      const bot = _csHits[ci].bot, closest = _csHits[ci].closest;
+      const _drillMul = _drillUp ? (1 + ci * 0.35) : 1;
+      const dealt = bot.takeDamage(3200 * _drillMul, 'player', closest);
+      if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); showHitMarker(); }
+      const _surfR = bot.chassis.hullLength * 0.5;
+      const _toHit = closest.clone().sub(bot.position);
+      const _len = _toHit.length();
+      const _exPos = (_len > 0.001)
+        ? bot.position.clone().add(_toHit.multiplyScalar(_surfR / _len))
+        : bot.position.clone();
+      spawnExplosion(_exPos, _drillUp ? 8 + ci * 4 : 8);
     }
     if (game.dynamicObjects && game.dynamicObjects.length) {
       for (const obst of game.dynamicObjects) {
@@ -43398,7 +43527,8 @@ function activateCore() {
   else if (coreName === 'Mega Tracker Rockets') {
     try { playSound('salvo_core_burst'); } catch (_) {}
     const _mtrLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER || null;
-    for (let m = 0; m < 8; m++) {
+    const _mtrN = (typeof _aegisUpFor === 'function' && _aegisUpFor(20)) ? 12 : 8;
+    for (let m = 0; m < _mtrN; m++) {
       const spread = new THREE.Vector3((Math.random()-0.5)*0.3, (Math.random()-0.5)*0.3, 0);
       let _mtrOrigin = player.position.clone();
       if (_mtrLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
@@ -43953,6 +44083,28 @@ const SONAR_PULSE_DURATION = 1.2;
 
 
 const SONAR_PULSE_MAX_RADIUS = 3000;
+function _tickTrackerSonarDOT(dt) {
+  if (typeof player === 'undefined' || !player) return;
+  if (player.loadoutKey !== 'TRACKER') return;
+  if (typeof _aegisUpFor !== 'function' || !_aegisUpFor(17)) return;
+  if (!game || game.state !== 'playing') return;
+  const _d = TRACKER_SONAR_DOT_DPS * dt;
+  try {
+    for (const b of game.entities) {
+      if (!b || !b.alive || b.team === player.team) continue;
+      if (!_aegisSonarLit(b)) continue;
+      if (b.takeDamage) b.takeDamage(_d, 'player', b.position);
+    }
+    if (game.monsters) {
+      for (const m of game.monsters) {
+        if (!m || !m.alive) continue;
+        if (!_aegisSonarLit(m)) continue;
+        if (m.takeDamage) m.takeDamage(_d, 'player', m.position);
+      }
+    }
+  } catch (_) {}
+}
+
 function _spawnSonarPulse(pos, owner) {
   const geo = new THREE.SphereGeometry(1, 24, 16);
   const mat = new THREE.MeshBasicMaterial({
@@ -43968,8 +44120,7 @@ function _spawnSonarPulse(pos, owner) {
   mesh.scale.setScalar(0.01);
   mesh.renderOrder = 2;
   scene.add(mesh);
-  const _sDur = SONAR_PULSE_DURATION *
-    ((owner === player && player.loadoutKey === 'TRACKER' && typeof _aegisUpFor === 'function' && _aegisUpFor(17)) ? 2 : 1);
+  const _sDur = SONAR_PULSE_DURATION;
   game.worldEffects.push({
     type: 'sonar_pulse',
     position: pos.clone(),
@@ -44665,16 +44816,32 @@ function updateWorldEffects(dt) {
       if (eff.triggered && _rootAlive) {
         eff.rootTimer -= dt;
         if (eff.rootTarget.velocity) eff.rootTarget.velocity.set(0, 0, 0);
-        if (eff.rootTimer <= 0) {
-          eff.timer = 0;
-          if (eff.owner === 'player' && player.loadoutKey === 'PUNCTURE' &&
-              typeof _aegisUpFor === 'function' && _aegisUpFor(2)) {
-            try { if (typeof spawnExplosion === 'function') spawnExplosion(eff.position.clone(), 1.6); } catch (_) {}
-            try {
-              if (eff.rootTarget && eff.rootTarget !== player && eff.rootTarget.takeDamage) eff.rootTarget.takeDamage(1200, 'player');
-            } catch (_) {}
-            try { if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', eff.position.clone()); } catch (_) {}
-          }
+      }
+      if (eff.triggered && !eff._broke && (eff.rootTimer <= 0 || !_rootAlive)) {
+        eff._broke = true;
+        eff.timer = 0;
+        if (eff.owner === 'player' && player.loadoutKey === 'PUNCTURE' &&
+            typeof _aegisUpFor === 'function' && _aegisUpFor(2)) {
+          const _bp = eff.position.clone();
+          try { if (typeof spawnExplosion === 'function') spawnExplosion(_bp, 45); } catch (_) {}
+          try {
+            const _R = 520;
+            for (const _b of game.entities) {
+              if (!_b || !_b.alive || _b.team === player.team || !_b.position) continue;
+              const _d = _b.position.distanceTo(_bp);
+              if (_d > _R) continue;
+              const _fall = 1 - (_d / _R) * 0.6;          // 100% at centre, 40% at the rim
+              if (_b.takeDamage) _b.takeDamage(1200 * _fall, 'player', _bp);
+            }
+            if (game.monsters) {
+              for (const _m of game.monsters) {
+                if (!_m || !_m.alive || !_m.position) continue;
+                if (_m.position.distanceTo(_bp) > _R + (_m.collisionRadius || 0)) continue;
+                if (_m.takeDamage) _m.takeDamage(1200, 'player', _bp);
+              }
+            }
+          } catch (_) {}
+          try { if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', _bp); } catch (_) {}
         }
       }
       if (eff.mesh) {
@@ -44731,6 +44898,7 @@ function updateWorldEffects(dt) {
           const prevLocks = player.trackerLocks[bot.id] || 0;
           player.trackerLocks[bot.id] = Math.min(3, prevLocks + 1);
           eff.locked.add(bot.id);
+          bot._sonarLitT = game.time + TRACKER_SONAR_LIT_SEC;
           if (player.trackerLocks[bot.id] > prevLocks) {
             try { playSound('sonar_ping_' + player.trackerLocks[bot.id]); } catch (_) {}
           }
@@ -44745,6 +44913,7 @@ function updateWorldEffects(dt) {
             const prevLocks = player.trackerLocks[mon.id] || 0;
             player.trackerLocks[mon.id] = Math.min(3, prevLocks + 1);
             eff.locked.add(mon.id);
+            mon._sonarLitT = game.time + TRACKER_SONAR_LIT_SEC;   // (v36.68) leviathans get lit too
             if (player.trackerLocks[mon.id] > prevLocks) {
               try { playSound('sonar_ping_' + player.trackerLocks[mon.id]); } catch (_) {}
             }
@@ -45319,7 +45488,8 @@ function updateAbilities(dt) {
       }
     }
     else if (coreName === 'Mega Tracker Rockets') {
-      if (Math.random() < dt * 10) {
+      const _mtrRate = (player.loadoutKey === 'TRACKER' && typeof _aegisUpFor === 'function' && _aegisUpFor(20)) ? 15 : 10;
+      if (Math.random() < dt * _mtrRate) {
         const aimDir = _abTmpA.copy(forward);
         aimDir.x += (Math.random() - 0.5) * 0.25;
         aimDir.y += (Math.random() - 0.5) * 0.25;
@@ -45500,7 +45670,6 @@ function dash() {
   player.velocity.copy(dashDir.clone().multiplyScalar(ch.dashSpeed));
   player.dashActive = true;
   player.dashTimer = ch.dashDuration;
-  if (player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(17)) player.dashTimer *= 1.5;
   player.dashCharges--;
   player.shipState = 'dashing';
   if (player.dashCooldownTimer <= 0) player.dashCooldownTimer = ch.dashCooldown;
@@ -47513,8 +47682,7 @@ function _hlNanoSpan(ctx, r, p, f0, f1, col, lw, alpha) {
 }
 
 function _hlNanoOverlay(ctx, r, p) {
-  const perk = (typeof PILOT_PERKS !== 'undefined' && player && player.perkId)
-    ? PILOT_PERKS[player.perkId] : null;
+  const perk = (typeof _perkEffectiveBag === 'function') ? _perkEffectiveBag() : null;
   if (!perk || !perk.regenPerSec || !(player.maxHealth > 0) || player.shipState === 'dead') return;
   const max = player.maxHealth;
   const h = Math.max(0, player.health);
@@ -49654,7 +49822,11 @@ function updateAbilityHUD() {
       }
     }
 
-    if (player.loadoutKey === 'PYRO' && ability.name === 'Explosive Gas') {
+    if ((player.loadoutKey === 'PYRO' && ability.name === 'Explosive Gas') ||
+        (player.loadoutKey === 'SLAYER' && ability.name === 'Teleport' &&
+         typeof _aegisUpFor === 'function' && _aegisUpFor(8)) ||
+        (player.loadoutKey === 'PUNCTURE' && ability.name === 'Stasis Trap' &&
+         typeof _aegisUpFor === 'function' && _aegisUpFor(11))) {
       const charges = player.trapCharges || 0;
       const maxCharges = player.maxTrapCharges || 2;
       if (charges >= maxCharges) {
@@ -60481,6 +60653,7 @@ function gameLoop(timestamp) {
   __pmark('smokeLights+cloudDots');
   if (_vrThrottleTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   if (typeof _arenaCloudTick === 'function') { try { _arenaCloudTick(dt); } catch (_) {} }
+  if (typeof _tickTrackerSonarDOT === 'function') { try { _tickTrackerSonarDOT(dt); } catch (_) {} }
   __pmark('dots');
   tickScanlineTexture();
   tickEnergyShields(dt);
