@@ -1,0 +1,625 @@
+<meta charset="utf-8">
+<title>The Spire — multi-floor volumetric arena</title>
+<style>
+  html,body{margin:0;height:100%;background:#04060b;color:#cfe6ff;
+            font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;overflow:hidden}
+  canvas{display:block}
+  #hud{position:fixed;top:8px;left:8px;z-index:10;background:rgba(4,8,16,.78);
+       border:1px solid #17304d;border-radius:6px;padding:8px 10px;min-width:250px;
+       pointer-events:none;white-space:pre}
+  #hud b{color:#6ff}
+  #help{position:fixed;bottom:8px;left:8px;z-index:10;background:rgba(4,8,16,.78);
+        border:1px solid #17304d;border-radius:6px;padding:8px 10px;color:#7f9dbb}
+  #panel{position:fixed;top:8px;right:8px;z-index:10;background:rgba(4,8,16,.85);
+         border:1px solid #17304d;border-radius:6px;padding:8px 10px;width:238px}
+  #panel h4{margin:0 0 6px;color:#6ff;font-size:11px;letter-spacing:.08em}
+  #panel label{display:flex;justify-content:space-between;gap:6px;margin:3px 0;color:#9fc}
+  #panel input[type=range]{width:110px}
+  #panel button{width:100%;margin-top:7px;background:#16324f;color:#cfe6ff;
+                border:1px solid #2b5a86;border-radius:4px;padding:5px;cursor:pointer;font:inherit}
+  #panel button:hover{background:#1d4368}
+  #load{position:fixed;inset:0;z-index:40;background:#04060b;display:flex;
+        flex-direction:column;align-items:center;justify-content:center;gap:14px}
+  #load h1{margin:0;font-size:20px;letter-spacing:.34em;color:#8fdcff;font-weight:500}
+  #bar{width:340px;height:5px;background:#12233a;border-radius:3px;overflow:hidden}
+  #bar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#2b6ea8,#7fe6ff)}
+  #load p{margin:0;color:#5d7c99}
+</style>
+
+<div id="load"><h1>THE SPIRE</h1><div id="bar"><i></i></div><p id="loadTxt">building arena…</p></div>
+<div id="hud">…</div>
+<div id="help">click to capture mouse · <b>WASD</b> fly · <b>R/F</b> up/down · <b>Q/E</b> roll · <b>Shift</b> boost</div>
+<div id="panel" autocomplete="off">
+  <h4>THE SPIRE — ARENA</h4>
+  <label>mode <select id="mode" autocomplete="off">
+    <option value="holo">holo (wire+shell)</option>
+    <option value="wire">wire only</option>
+    <option value="solid">solid</option></select></label>
+  <label>spikes <input id="spike" type="range" min="0" max="150" step="10" value="100" autocomplete="off"><span id="spikeV">100</span></label>
+  <label>floors <input id="floors" type="range" min="2" max="4" step="1" value="3" autocomplete="off"><span id="floorsV">3</span></label>
+  <label>collide <input id="coll" type="checkbox" checked autocomplete="off"></label>
+  <button id="rebuild">rebuild</button>
+  <button id="reseed">new seed</button>
+  <button id="respawn">respawn</button>
+</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// =====================================================================
+// THE SPIRE — a BOUNDED, FULLY PREBUILT volumetric arena.
+//
+// The cavern prototype streams because it is endless. An arena is not: it
+// has a known extent, so the entire thing is meshed ONCE behind a loading
+// bar and never touched again. That removes the whole class of problems the
+// cavern lab spent its time on — pop-in, eviction, "it forgets what's
+// loaded", per-chunk fade — because after load there is no streaming at all.
+//
+// SHAPE (owner brief): multiple FLOORS rather than one, CENTRAL COLUMNS, and
+// the spiky cavern read from the game's existing caverns, mixed with the
+// smooth dissolved rooms from the Fractal Deep.
+// =====================================================================
+
+const FIELD_SRC = `{
+  hash(x, y, z) {
+    let h = x * 374761393 + y * 668265263 + z * 1442695040888963407;
+    h = (h ^ (h >>> 13)) * 1274126177;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  },
+  noise(x, y, z) {
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xf = x - xi, yf = y - yi, zf = z - zi;
+    const u = xf*xf*(3-2*xf), v = yf*yf*(3-2*yf), w = zf*zf*(3-2*zf);
+    const H = this.hash;
+    const c000=H(xi,yi,zi), c100=H(xi+1,yi,zi), c010=H(xi,yi+1,zi), c110=H(xi+1,yi+1,zi);
+    const c001=H(xi,yi,zi+1), c101=H(xi+1,yi,zi+1), c011=H(xi,yi+1,zi+1), c111=H(xi+1,yi+1,zi+1);
+    const x00=c000+(c100-c000)*u, x10=c010+(c110-c010)*u;
+    const x01=c001+(c101-c001)*u, x11=c011+(c111-c011)*u;
+    const y0=x00+(x10-x00)*v, y1=x01+(x11-x01)*v;
+    return (y0+(y1-y0)*w)*2-1;
+  },
+  smin(a, b, k) {
+    const h = Math.max(0, Math.min(1, 0.5 + 0.5*(b-a)/k));
+    return b + (a-b)*h - k*h*(1-h);
+  },
+  smax(a, b, k) { return -this.smin(-a, -b, k); },
+
+  // --- SPIKES: the stalactite/stalagmite read from the game's caverns.
+  // Domain repetition again — one cone evaluated in a folded tile becomes a
+  // whole forest of them. Per-tile hash jitters position, height and radius so
+  // it never reads as a grid, which is what killed the first version.
+  // dir = +1 growing UP from the plane (stalagmite), -1 hanging DOWN.
+  // Where a floor slab is MISSING. Negative = hole (shaft or the annular gap
+  // around the spire). Shared by the slab carve and the spike root test, so
+  // the two can never disagree about where floor exists.
+  floorHole(px, pz, f, g) {
+    let hole = 1e9;
+    for (let h = 0; h < g.shafts; h++) {
+      const a = (h / g.shafts) * 6.2831853 + f * 0.9 + g.satPhase;
+      const hx = Math.cos(a) * g.shaftR, hz = Math.sin(a) * g.shaftR;
+      const hd = Math.sqrt((px-hx)*(px-hx) + (pz-hz)*(pz-hz)) - g.shaftRad;
+      if (hd < hole) hole = hd;
+    }
+    const rxz = Math.sqrt(px*px + pz*pz);
+    const ring = Math.abs(rxz - g.ringR) - g.ringW;
+    return this.smin(hole, ring, 30);
+  },
+
+  // ⚠ rootTest: a spike must GROW FROM SOMETHING. Without it, spikes anchor to
+  // the floor PLANE at every (x,z) — including where that floor has been
+  // punched away by a shaft or by the annular gap around the spire — and you
+  // get stalactites hanging in mid-air beside the columns, which is exactly
+  // what the owner spotted. Tested at the TILE ANCHOR, not the sample point,
+  // so a whole spike is kept or dropped as a unit instead of being sliced.
+  spikes(px, py, pz, planeY, dir, sp, cfg, rootTest) {
+    if (cfg.amt <= 0) return 1e9;
+    const ix = Math.round(px / sp), iz = Math.round(pz / sp);
+    let best = 1e9;
+    // 3x3 tiles, because a jittered cone can lean into a neighbouring tile and
+    // testing only the home tile shears their tips off.
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+      const cx = ix + a, cz = iz + b;
+      const h1 = this.hash(cx, 17, cz), h2 = this.hash(cx, 41, cz), h3 = this.hash(cx, 73, cz);
+      if (h3 > cfg.density) continue;                       // gaps in the forest
+      const ox = cx * sp + (h1 - 0.5) * sp * 0.55;
+      const oz = cz * sp + (h2 - 0.5) * sp * 0.55;
+      // The root must be in rock. Margin > 0 keeps spikes off the very lip of
+      // a shaft, where half a cone would overhang the drop.
+      if (rootTest && !rootTest(ox, oz)) continue;
+      const len = cfg.len * (0.45 + h1 * 1.05) * cfg.amt;
+      const rad = cfg.rad * (0.6 + h2 * 0.75);
+      const t = (py - planeY) * dir;                        // 0 at the root
+      if (t < -rad || t > len) continue;
+      const rr = rad * Math.max(0, 1 - t / len);            // cone taper
+      const dx = px - ox, dz = pz - oz;
+      const d = Math.sqrt(dx*dx + dz*dz) - rr;
+      // cap the cone at its root plane so it does not extend past the rock
+      const dd = Math.max(d, -t - rad);
+      if (dd < best) best = dd;
+    }
+    return best;
+  },
+
+  // ================= HELICAL PASSAGE =================
+  // A heightfield is y = f(x,z): one value per column, which is why it cannot
+  // do overhangs. Rotating the domain to r = f(theta, y) has the SAME limit —
+  // one radius per (theta, y) — so I claimed a spiral could not bore through
+  // the spire. That was wrong.
+  //
+  // theta is only single-valued if you WRAP it. On a helix the same point in
+  // space sits at many UNWRAPPED angles, one per turn, so evaluating the same
+  // 2D function across several windings yields several surfaces at the same
+  // (theta, y). The spiral is precisely what restores the missing dimension:
+  // the ramp passes over itself, and a passage can run under the one above it.
+  //
+  // Cost is turns*2+1 evaluations of a closed form — no volume, no extra
+  // primitives, and it still LODs and collides like a heightfield because at
+  // any winding it is one.
+  helix(px, py, pz, H) {
+    const r = Math.sqrt(px*px + pz*pz);
+    const th = Math.atan2(pz, px);
+    const dr = r - H.radius;
+    let best = 1e9;
+    for (let n = -H.turns; n <= H.turns; n++) {
+      const thn = th + n * 6.2831853;
+      const ySurf = H.y0 + H.pitch * (thn / 6.2831853);
+      const dy = py - ySurf;
+      // Rectangular bore: a flat-floored ramp reads better to fly than a round
+      // tube, and the flat floor is what makes it usable as ground.
+      const d = Math.max(Math.abs(dy) - H.half, Math.abs(dr) - H.wide);
+      if (d < best) best = d;
+    }
+    return best;
+  },
+
+  // ================= THE ARENA =================
+  // Negative = open. Built by carving a bounded volume, then ADDING rock back
+  // as floors, columns and spikes. Reading it top to bottom is reading the
+  // level design.
+  eval(px, py, pz, g) {
+    const rxz = Math.sqrt(px*px + pz*pz);
+
+    // 1. THE VOLUME. A cylinder capped top and bottom — the arena's extent.
+    //    Everything after this only ever ADDS rock inside it.
+    let d = Math.max(rxz - g.R, Math.abs(py) - g.H);
+    // Break up the perimeter so it does not read as a machined tube.
+    d += this.noise(px*0.004, py*0.006, pz*0.004) * 46
+       + this.noise(px*0.011, py*0.014, pz*0.011) * 16;
+
+    // 2. CENTRAL COLUMN(S). One fat spire on the axis plus a ring of
+    //    satellites — cover, sightline breaks, and something to orbit.
+    let col = rxz - g.colR;
+    col -= Math.abs(this.noise(px*0.010, py*0.008, pz*0.010)) * 34;   // ragged, not a pipe
+    for (let i = 0; i < g.sat; i++) {
+      const a = (i / g.sat) * 6.2831853 + g.satPhase;
+      const sx = Math.cos(a) * g.satR, sz = Math.sin(a) * g.satR;
+      const sd = Math.sqrt((px-sx)*(px-sx) + (pz-sz)*(pz-sz)) - g.satRad
+               - Math.abs(this.noise(px*0.013, py*0.010, pz*0.013)) * 22;
+      col = this.smin(col, sd, 60);
+    }
+    d = this.smax(d, -col, 40);
+
+    // 3. FLOORS. Slabs of rock at each level, each punched with SHAFTS so the
+    //    space is genuinely 3D — you can drop through, not just circle one
+    //    plane. Shaft angles rotate per floor so no two line up vertically:
+    //    a straight drop from top to bottom would trivialise the arena.
+    for (let f = 0; f < g.floorY.length; f++) {
+      const fy = g.floorY[f];
+      let slab = Math.abs(py - fy) - g.slabT;
+      slab -= this.noise(px*0.006, fy*0.1, pz*0.006) * 16;    // uneven ground
+      // shafts
+      const hole = this.floorHole(px, pz, f, g);
+      slab = this.smax(slab, -hole, 26);
+      d = this.smax(d, -slab, 30);
+    }
+
+    // 3b. THE HELICAL RAMP. Carved as OPEN space after the floors and columns,
+    //     so it bores straight through both — a spiral route linking every
+    //     storey, wrapping the spire. This is the piece that proves the point:
+    //     it passes over itself, which a single-valued heightfield cannot do.
+    if (g.helix) {
+      const hx = this.helix(px, py, pz, g.helix);
+      d = this.smin(d, hx, 26);
+    }
+
+    // 4. SPIKES. Stalagmites up from every floor, stalactites down from the
+    //    underside of the floor above — so each storey reads as a cavern
+    //    rather than as a parking level.
+    if (g.spikeAmt > 0) {
+      const cfg = { amt: g.spikeAmt, len: 150, rad: 26, density: 0.62 };
+      let sp = 1e9;
+      for (let f = 0; f < g.floorY.length; f++) {
+        const solidFloor = (ox2, oz2) => this.floorHole(ox2, oz2, f, g) > 26;
+        const up = this.spikes(px, py, pz, g.floorY[f] + g.slabT, 1, 118, cfg, solidFloor);
+        if (up < sp) sp = up;
+        const dn = this.spikes(px, py, pz, g.floorY[f] - g.slabT, -1, 132, cfg, solidFloor);
+        if (dn < sp) sp = dn;
+      }
+      // ceiling + floor of the arena itself
+      const inRim = (ox2, oz2) => Math.sqrt(ox2*ox2 + oz2*oz2) < g.R - 40;
+      const top = this.spikes(px, py, pz, g.H, -1, 150, { amt: g.spikeAmt, len: 260, rad: 34, density: 0.5 }, inRim);
+      if (top < sp) sp = top;
+      const bot = this.spikes(px, py, pz, -g.H, 1, 150, { amt: g.spikeAmt, len: 230, rad: 32, density: 0.5 }, inRim);
+      if (bot < sp) sp = bot;
+      d = this.smax(d, -sp, 14);
+    }
+
+    // 5. Surface grain.
+    d += this.noise(px*0.05, py*0.05, pz*0.05) * 3.4;
+    return d;
+  },
+
+  grad(px, py, pz, g, eps) {
+    const e = eps || 3.0;
+    const gx = this.eval(px+e,py,pz,g) - this.eval(px-e,py,pz,g);
+    const gy = this.eval(px,py+e,pz,g) - this.eval(px,py-e,pz,g);
+    const gz = this.eval(px,py,pz+e,g) - this.eval(px,py,pz-e,g);
+    const l = Math.hypot(gx,gy,gz) || 1;
+    return [gx/l, gy/l, gz/l];
+  },
+
+  // Per-vertex look. Deliberately LOW frequency — vertices are ~10 u apart, so
+  // anything finer is unrepresentable and just costs bake time. Height drives
+  // the palette so each storey reads differently and you can tell what level
+  // you are on from the rock alone.
+  shade(px, py, pz, g) {
+    const rxz = Math.sqrt(px*px + pz*pz);
+    const lvl = (py + g.H) / (2 * g.H);                 // 0 bottom .. 1 top
+    const warm = [0.52, 0.40, 0.30], cool = [0.30, 0.40, 0.55];
+    const broad = this.noise(px*0.004, py*0.004, pz*0.004);
+    let r = warm[0] + (cool[0]-warm[0])*lvl;
+    let gg = warm[1] + (cool[1]-warm[1])*lvl;
+    let b = warm[2] + (cool[2]-warm[2])*lvl;
+    const lum = 1 + broad*0.20;
+    // The columns glow: they are the landmark, so they get the emissive.
+    const nearCol = Math.max(0, 1 - Math.abs(rxz - g.colR) / 190);
+    const vein = Math.pow(Math.max(0, 1 - Math.abs(this.noise(px*0.012, py*0.02, pz*0.012))), 6);
+    // Column glow is a LANDMARK cue, not a light source — 1.5 blew the spire
+    // to pure white in solid mode and ate all its shape.
+    return [r*lum, gg*lum, b*lum, 0.92, vein * (0.10 + nearCol * 0.35)];
+  }
+}`;
+const FIELD = (new Function('return (' + FIELD_SRC + ')'))();
+
+// ---------------------------------------------------------------------
+// ARENA PARAMETERS
+// ---------------------------------------------------------------------
+function buildArena(seed, floors, spikeAmt) {
+  const R = 1150, H = 780;
+  const fy = [];
+  // Floors evenly spaced, none flush with the caps (you want headroom above
+  // the top floor and space under the bottom one).
+  for (let i = 0; i < floors; i++) {
+    fy.push(-H * 0.55 + (i / Math.max(1, floors - 1)) * H * 1.10);
+  }
+  return {
+    R, H, floorY: fy, slabT: 34,
+    colR: 210, sat: 3, satR: 620, satRad: 118, satPhase: (seed % 100) / 100 * 6.28,
+    shafts: 4, shaftR: 830, shaftRad: 118,
+    ringR: 360, ringW: 74,
+    spikeAmt,
+    // Pitch is set from the floor spacing so the ramp DELIVERS you to a floor
+    // rather than to a random height — the geometry has to serve the layout.
+    helix: { radius: 330, y0: -H * 0.55, pitch: (H * 1.10) / Math.max(1, floors - 1) * 1.0,
+             half: 46, wide: 96, turns: 3 },
+    seed,
+  };
+}
+
+const WORKER_SRC = `
+const FIELD = ${FIELD_SRC};
+let G = null;
+self.onmessage = (e) => {
+  const m = e.data;
+  if (m.cmd === 'init') { G = m.g; return; }
+  if (m.cmd === 'chunk') { self.postMessage(mesh(m)); return; }
+};
+function mesh(m) {
+  const N = m.cells, size = m.size, ox = m.ox, oy = m.oy, oz = m.oz;
+  const cell = size / N, t0 = performance.now();
+  const S = N + 2;
+  const val = new Float32Array(S*S*S);
+  let si = 0;
+  for (let k = -1; k <= N; k++) { const wz = oz + k*cell;
+    for (let j = -1; j <= N; j++) { const wy = oy + j*cell;
+      for (let i = -1; i <= N; i++) val[si++] = FIELD.eval(ox + i*cell, wy, wz, G); } }
+  const AT = (i,j,k) => val[((k+1)*S + (j+1))*S + (i+1)];
+  const C = N + 1;
+  const vidx = new Int32Array(C*C*C).fill(-1);
+  const VI = (i,j,k) => ((k+1)*C + (j+1))*C + (i+1);
+  const pos = [], nrm = [], col = [], mat = [];
+  const EDGES = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
+  for (let k = -1; k < N; k++) for (let j = -1; j < N; j++) for (let i = -1; i < N; i++) {
+    const c = [AT(i,j,k),AT(i+1,j,k),AT(i,j+1,k),AT(i+1,j+1,k),
+               AT(i,j,k+1),AT(i+1,j,k+1),AT(i,j+1,k+1),AT(i+1,j+1,k+1)];
+    let neg = 0; for (let q=0;q<8;q++) if (c[q] < 0) neg++;
+    if (neg === 0 || neg === 8) continue;
+    let sx=0, sy=0, sz=0, n=0;
+    for (const [a,b] of EDGES) {
+      const va=c[a], vb=c[b];
+      if ((va<0) === (vb<0)) continue;
+      const t = va/(va-vb);
+      const ax=a&1, ay=(a>>1)&1, az=(a>>2)&1, bx=b&1, by=(b>>1)&1, bz=(b>>2)&1;
+      sx += ax+(bx-ax)*t; sy += ay+(by-ay)*t; sz += az+(bz-az)*t; n++;
+    }
+    sx/=n; sy/=n; sz/=n;
+    const wx = ox+(i+sx)*cell, wy = oy+(j+sy)*cell, wz = oz+(k+sz)*cell;
+    vidx[VI(i,j,k)] = pos.length/3;
+    pos.push(wx, wy, wz);
+    const gr = FIELD.grad(wx, wy, wz, G, cell);
+    nrm.push(-gr[0], -gr[1], -gr[2]);
+    const sh = FIELD.shade(wx, wy, wz, G);
+    col.push(sh[0], sh[1], sh[2]);
+    mat.push(sh[3], sh[4]);
+  }
+  const idx = [];
+  const quad = (a,b,c2,d,flip) => { if (a<0||b<0||c2<0||d<0) return;
+    if (flip) idx.push(a,c2,b,b,c2,d); else idx.push(a,b,c2,b,d,c2); };
+  for (let k=0;k<N;k++) for (let j=0;j<N;j++) for (let i=0;i<N;i++) {
+    const v0 = AT(i,j,k);
+    if ((v0<0) !== (AT(i+1,j,k)<0)) quad(vidx[VI(i,j-1,k-1)],vidx[VI(i,j,k-1)],vidx[VI(i,j-1,k)],vidx[VI(i,j,k)], v0<0);
+    if ((v0<0) !== (AT(i,j+1,k)<0)) quad(vidx[VI(i-1,j,k-1)],vidx[VI(i-1,j,k)],vidx[VI(i,j,k-1)],vidx[VI(i,j,k)], v0<0);
+    if ((v0<0) !== (AT(i,j,k+1)<0)) quad(vidx[VI(i-1,j-1,k)],vidx[VI(i,j-1,k)],vidx[VI(i-1,j,k)],vidx[VI(i,j,k)], v0<0);
+  }
+  if (!idx.length) return { key:m.key, empty:true, ms:performance.now()-t0 };
+  return { key:m.key, empty:false,
+    pos:new Float32Array(pos), nrm:new Float32Array(nrm),
+    col:new Float32Array(col), mat:new Float32Array(mat),
+    idx:(pos.length/3 > 65535) ? new Uint32Array(idx) : new Uint16Array(idx),
+    tris:idx.length/3, ms:performance.now()-t0 };
+}`;
+
+// ---------------------------------------------------------------------
+// SCENE
+// ---------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x04060b, 0.00052);
+const camera = new THREE.PerspectiveCamera(80, innerWidth/innerHeight, 1, 9000);
+scene.add(new THREE.AmbientLight(0x223349, 0.7));
+const lamp = new THREE.PointLight(0xffe8c8, 520, 3200, 1.0);
+lamp.position.set(60, -40, 20); camera.add(lamp); scene.add(camera);
+// A cold uplight from the pit and a warm one from above give the storeys
+// different moods without another light per floor.
+const up = new THREE.PointLight(0x4488cc, 900, 4000, 1.0); up.position.set(0,-760,0); scene.add(up);
+const dn = new THREE.PointLight(0xffb070, 900, 4000, 1.0); dn.position.set(0, 760,0); scene.add(dn);
+
+const FOG_RGB = new THREE.Color(0x04060b);
+function makeSolidMat() {
+  const m = new THREE.MeshStandardMaterial({ color:0xffffff, roughness:0.94, metalness:0.03, vertexColors:true });
+  m.onBeforeCompile = (sh) => {
+    sh.vertexShader = 'attribute vec2 aMat;\nvarying vec2 vMat;\n' +
+      sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n vMat = aMat;');
+    sh.fragmentShader = 'varying vec2 vMat;\n' + sh.fragmentShader
+      .replace('#include <roughnessmap_fragment>', '#include <roughnessmap_fragment>\n roughnessFactor = vMat.x;')
+      .replace('#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+         totalEmissiveRadiance += vec3(0.40,0.80,1.0) * vMat.y * 0.7;`);
+  };
+  return m;
+}
+const shellMat = new THREE.MeshBasicMaterial({ color: 0x05080e });
+shellMat.polygonOffset = true; shellMat.polygonOffsetFactor = 1; shellMat.polygonOffsetUnits = 1;
+function makeWireMat() {
+  const m = new THREE.MeshBasicMaterial({ wireframe:true, vertexColors:true });
+  m.onBeforeCompile = (sh) => {
+    sh.vertexShader = 'attribute vec2 aMat;\nvarying vec2 vMat;\n' +
+      sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n vMat = aMat;');
+    sh.fragmentShader = 'varying vec2 vMat;\n' + sh.fragmentShader
+      .replace('#include <dithering_fragment>',
+        `#include <dithering_fragment>
+         gl_FragColor.rgb = gl_FragColor.rgb * 1.3 + vec3(0.40,0.90,1.0) * vMat.y * 3.4;`);
+  };
+  return m;
+}
+const wireMat = makeWireMat();
+const solidMat = makeSolidMat();
+
+const STATE = { mode:'holo', seed:7, floors:3, spikes:1, collide:true };
+const CHUNK = 300, CELLS = 30;
+let G = buildArena(STATE.seed, STATE.floors, STATE.spikes);
+const meshes = [];
+let totalTris = 0, buildMs = 0;
+
+const NWORK = Math.max(2, Math.min(8, (navigator.hardwareConcurrency||4) - 2));
+let workers = [];
+
+function chunkList() {
+  const list = [];
+  const nx = Math.ceil((G.R + 140) / CHUNK), ny = Math.ceil((G.H + 320) / CHUNK);
+  for (let k = -nx; k <= nx; k++) for (let j = -ny; j <= ny; j++) for (let i = -nx; i <= nx; i++) {
+    // Skip chunks entirely outside the arena cylinder — a bounded world means
+    // we can know that up front instead of discovering it by meshing nothing.
+    const cx = (i+0.5)*CHUNK, cz = (k+0.5)*CHUNK;
+    if (Math.hypot(cx, cz) - CHUNK > G.R + 190) continue;
+    list.push({ i, j, k });
+  }
+  return list;
+}
+
+function buildAll(done) {
+  for (const m of meshes) { scene.remove(m); if (m.geometry) m.geometry.dispose(); }
+  meshes.length = 0; totalTris = 0;
+  for (const w of workers) w.terminate();
+  workers = [];
+  const url = URL.createObjectURL(new Blob([WORKER_SRC], { type:'text/javascript' }));
+  const list = chunkList();
+  let issued = 0, finished = 0;
+  const t0 = performance.now();
+  const bar = document.querySelector('#bar i'), txt = document.getElementById('loadTxt');
+
+  const onDone = (r) => {
+    finished++;
+    if (bar) bar.style.width = (finished / list.length * 100).toFixed(1) + '%';
+    if (txt) txt.textContent = 'meshing ' + finished + ' / ' + list.length + ' chunks';
+    if (!r.empty) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(r.pos, 3));
+      geo.setAttribute('normal', new THREE.BufferAttribute(r.nrm, 3));
+      geo.setAttribute('color', new THREE.BufferAttribute(r.col, 3));
+      geo.setAttribute('aMat', new THREE.BufferAttribute(r.mat, 2));
+      geo.setIndex(new THREE.BufferAttribute(r.idx, 1));
+      geo.computeBoundingSphere();
+      totalTris += r.tris;
+      const solid = new THREE.Mesh(geo, solidMat);
+      const shell = new THREE.Mesh(geo, shellMat);
+      const wire  = new THREE.Mesh(geo, wireMat);
+      for (const mm of [solid, shell, wire]) { scene.add(mm); meshes.push(mm); }
+      solid.userData.role = 'solid'; shell.userData.role = 'shell'; wire.userData.role = 'wire';
+    }
+    if (finished === list.length) {
+      buildMs = performance.now() - t0;
+      applyMode();
+      done && done();
+    }
+  };
+
+  for (let n = 0; n < NWORK; n++) {
+    const w = new Worker(url);
+    w.onmessage = (e) => {
+      onDone(e.data);
+      if (issued < list.length) {
+        const c = list[issued++];
+        w.postMessage({ cmd:'chunk', key:issued, cells:CELLS, size:CHUNK,
+                        ox:c.i*CHUNK, oy:c.j*CHUNK, oz:c.k*CHUNK });
+      }
+    };
+    w.postMessage({ cmd:'init', g:G });
+    workers.push(w);
+  }
+  // prime each worker
+  for (const w of workers) {
+    if (issued >= list.length) break;
+    const c = list[issued++];
+    w.postMessage({ cmd:'chunk', key:issued, cells:CELLS, size:CHUNK,
+                    ox:c.i*CHUNK, oy:c.j*CHUNK, oz:c.k*CHUNK });
+  }
+}
+
+function applyMode() {
+  for (const m of meshes) {
+    const r = m.userData.role;
+    m.visible = (STATE.mode === 'solid') ? (r === 'solid')
+              : (STATE.mode === 'wire')  ? (r === 'wire')
+              : (r === 'shell' || r === 'wire');
+  }
+}
+
+// ---------------------------------------------------------------------
+// FLIGHT + COLLISION (field-based, same as the cavern lab)
+// ---------------------------------------------------------------------
+const vel = new THREE.Vector3(); const keys = Object.create(null);
+addEventListener('keydown', e => keys[e.code] = true);
+addEventListener('keyup',   e => keys[e.code] = false);
+renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  const q = new THREE.Quaternion();
+  q.setFromAxisAngle(new THREE.Vector3(0,1,0), -e.movementX*0.0022);
+  camera.quaternion.multiplyQuaternions(q, camera.quaternion);
+  q.setFromAxisAngle(new THREE.Vector3(1,0,0), -e.movementY*0.0022);
+  camera.quaternion.multiply(q);
+});
+const SHIP_R = 24;
+function spawn() {
+  // On the top floor, out near the rim, looking in at the spire.
+  const y = G.floorY[G.floorY.length-1] + 150;
+  camera.position.set(G.R*0.62, y, 0);
+  camera.quaternion.identity(); camera.lookAt(0, y, 0);
+  vel.set(0,0,0);
+}
+function flight(dt) {
+  const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+  const rgt = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion);
+  const upv = new THREE.Vector3(0,1,0).applyQuaternion(camera.quaternion);
+  const A = 2200 * ((keys['ShiftLeft']||keys['ShiftRight']) ? 2.6 : 1);
+  const acc = new THREE.Vector3();
+  if (keys['KeyW']) acc.addScaledVector(fwd, A);
+  if (keys['KeyS']) acc.addScaledVector(fwd, -A);
+  if (keys['KeyD']) acc.addScaledVector(rgt, A);
+  if (keys['KeyA']) acc.addScaledVector(rgt, -A);
+  if (keys['KeyR']) acc.addScaledVector(upv, A);
+  if (keys['KeyF']) acc.addScaledVector(upv, -A);
+  if (keys['KeyQ'] || keys['KeyE']) {
+    const q = new THREE.Quaternion();
+    q.setFromAxisAngle(new THREE.Vector3(0,0,1), (keys['KeyQ']?1:-1)*1.7*dt);
+    camera.quaternion.multiply(q);
+  }
+  vel.addScaledVector(acc, dt);
+  vel.multiplyScalar(Math.pow(0.06, dt));
+  camera.position.addScaledVector(vel, dt);
+  if (!STATE.collide) return;
+  for (let it = 0; it < 4; it++) {
+    const p = camera.position;
+    const d = FIELD.eval(p.x, p.y, p.z, G);
+    if (d < -SHIP_R) break;
+    const g = FIELD.grad(p.x, p.y, p.z, G, 3.0);
+    const push = (d + SHIP_R) * 1.05;
+    p.x -= g[0]*push; p.y -= g[1]*push; p.z -= g[2]*push;
+    const vd = vel.x*g[0] + vel.y*g[1] + vel.z*g[2];
+    if (vd > 0) { vel.x -= g[0]*vd; vel.y -= g[1]*vd; vel.z -= g[2]*vd; }
+  }
+}
+
+// ---------------------------------------------------------------------
+const hud = document.getElementById('hud');
+let frames = 0, fps = 0, acc = 0, worst = 0, last = performance.now();
+function loop() {
+  requestAnimationFrame(loop);
+  const now = performance.now(); let dt = (now-last)/1000; last = now;
+  if (dt > 0.25) dt = 0.25;
+  if (dt*1000 > worst) worst = dt*1000;
+  flight(dt);
+  renderer.render(scene, camera);
+  frames++; acc += dt;
+  if (acc >= 0.5) {
+    fps = Math.round(frames/acc); frames = 0; acc = 0;
+    const p = camera.position;
+    const d = FIELD.eval(p.x, p.y, p.z, G);
+    let floor = '—';
+    for (let i = 0; i < G.floorY.length; i++) if (p.y > G.floorY[i] - 20) floor = 'L' + (i+1);
+    hud.innerHTML =
+      `<b>${fps} fps</b>   worst ${worst.toFixed(1)} ms\n` +
+      `tris ${(totalTris/1000).toFixed(1)}k · ${meshes.length/3|0} chunks\n` +
+      `build ${(buildMs/1000).toFixed(2)} s (prebuilt, no streaming)\n` +
+      `pos ${p.x.toFixed(0)},${p.y.toFixed(0)},${p.z.toFixed(0)}  ${floor}\n` +
+      `field ${d.toFixed(1)} ${d<0?'(open)':'(ROCK)'}`;
+    worst = 0;
+  }
+}
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+document.getElementById('mode').onchange = e => { STATE.mode = e.target.value; applyMode(); };
+document.getElementById('coll').onchange = e => STATE.collide = e.target.checked;
+const sBind = (id, vid, k, scale) => {
+  const el = document.getElementById(id), o = document.getElementById(vid);
+  el.oninput = () => { o.textContent = el.value; STATE[k] = +el.value * (scale||1); };
+};
+sBind('spike','spikeV','spikes',0.01);
+sBind('floors','floorsV','floors',1);
+const rebuild = () => {
+  document.getElementById('load').style.display = 'flex';
+  G = buildArena(STATE.seed, STATE.floors, STATE.spikes);
+  buildAll(() => { document.getElementById('load').style.display = 'none'; spawn(); });
+};
+document.getElementById('rebuild').onclick = rebuild;
+document.getElementById('reseed').onclick = () => { STATE.seed = (Math.random()*1e6)|0; rebuild(); };
+document.getElementById('respawn').onclick = spawn;
+
+window.__spire = { STATE, get G(){return G;}, FIELD, camera, renderer, scene, meshes,
+  at:(x,y,z)=>FIELD.eval(x,y,z,G),
+  stats:()=>({ fps, tris:totalTris, chunks:meshes.length/3|0, buildMs }) };
+
+buildAll(() => { document.getElementById('load').style.display = 'none'; spawn(); });
+loop();
+</script>

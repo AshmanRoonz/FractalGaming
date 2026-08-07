@@ -1,0 +1,1698 @@
+<meta charset="utf-8">
+<title>The Fractal Deep — volumetric cavern prototype</title>
+<style>
+  html,body{margin:0;height:100%;background:#05070c;color:#cfe6ff;
+            font:12px/1.45 ui-monospace,Menlo,Consolas,monospace;overflow:hidden}
+  canvas{display:block}
+  #hud{position:fixed;top:8px;left:8px;z-index:10;background:rgba(4,8,16,.78);
+       border:1px solid #17304d;border-radius:6px;padding:8px 10px;min-width:250px;
+       pointer-events:none;white-space:pre}
+  #hud b{color:#6ff}
+  #help{position:fixed;bottom:8px;left:8px;z-index:10;background:rgba(4,8,16,.78);
+        border:1px solid #17304d;border-radius:6px;padding:8px 10px;color:#7f9dbb}
+  #panel{position:fixed;top:8px;right:8px;z-index:10;background:rgba(4,8,16,.85);
+         border:1px solid #17304d;border-radius:6px;padding:8px 10px;width:236px}
+  #panel h4{margin:0 0 6px;color:#6ff;font-size:11px;letter-spacing:.08em}
+  #panel label{display:flex;justify-content:space-between;gap:6px;margin:3px 0;color:#9fc}
+  #panel input[type=range]{width:112px}
+  #panel button{width:100%;margin-top:7px;background:#16324f;color:#cfe6ff;
+                border:1px solid #2b5a86;border-radius:4px;padding:5px;cursor:pointer;font:inherit}
+  #panel button:hover{background:#1d4368}
+  .warn{color:#ffb454}
+  #stall{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:20;
+         background:rgba(20,6,6,.9);border:1px solid #6d2020;border-radius:6px;
+         padding:10px 14px;color:#ff9a9a;display:none}
+</style>
+
+<div id="hud">booting…</div>
+<div id="help">click to capture mouse · <b>WASD</b> fly · <b>R/F</b> up/down · <b>Q/E</b> roll · <b>Shift</b> boost · <b>Esc</b> release</div>
+<div id="panel" autocomplete="off">
+  <h4>THE FRACTAL DEEP</h4>
+  <label>mode <select id="mode" autocomplete="off"><option value="holo">holo (wire+shell)</option><option value="wire">wire only</option><option value="solid">solid</option></select></label>
+  <label>chunk cells <input id="cells" type="range" autocomplete="off" min="12" max="56" step="4" value="32"><span id="cellsV">32</span></label>
+  <label>view chunks <input id="view" type="range" autocomplete="off" min="1" max="5" step="1" value="3"><span id="viewV">3</span></label>
+  <label>warp <input id="warp" type="range" autocomplete="off" min="0" max="120" step="5" value="40"><span id="warpV">40</span></label>
+  <label>rough <input id="rough" type="range" autocomplete="off" min="0" max="40" step="2" value="14"><span id="roughV">14</span></label>
+  <label>collide <input id="coll" type="checkbox" autocomplete="off" checked></label>
+  <label>style <input id="style" type="range" autocomplete="off" min="0" max="200" step="10" value="100"><span id="styleV">100</span></label>
+  <button id="reseed">new seed</button>
+  <button id="respawn">respawn at start</button>
+  <button id="gallery">gallery: every type ▸</button>
+</div>
+<div id="stall"></div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js" } }
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// =====================================================================
+// THE FRACTAL DEEP — chunked SDF cavern, surface-nets meshed in a worker.
+//
+// The question this prototype exists to answer, and nothing else:
+//   Can we mesh, light and collide a chunked signed-distance cavern at
+//   144 fps, with no seams and no hitching, while flying through it?
+//
+// Deliberately NOT here (each is a separate hard problem, and bolting them
+// on now would obscure the answer above):
+//   - LOD. Volumetric LOD changes TOPOLOGY between levels (a thin arch
+//     simply does not exist at 8^3), so there is nothing to smoothly morph
+//     between the way a heightfield morphs vertex heights. That is what
+//     Transvoxel/Dual Contouring exist to manage. Prove single-resolution
+//     streaming first.
+//   - Destruction, decoration, monsters, gameplay volumes.
+// =====================================================================
+
+
+// ---------------------------------------------------------------------
+// (1) THE FIELD — ONE SOURCE OF TRUTH, SHARED BY WORKER AND MAIN THREAD.
+//
+// ⚠ THIS IS THE WHOLE REASON IT IS A STRING. The mesher runs in a worker
+// and collision runs on the main thread, so the field has to exist in two
+// realms. The game already carries this hazard: its terrain math is
+// TRIPLICATED (worker copy / main copy / collision worldSDF) with a
+// hand-maintained "MUST stay identical" comment, and drift there is a
+// whole class of bug. Defining it once and injecting the same text into
+// both makes divergence structurally impossible rather than a discipline
+// problem. Keep it dependency-free (no closures over outer scope) so it
+// can be Function()-constructed on either side.
+// ---------------------------------------------------------------------
+const FIELD_SRC = `{
+  // --- cheap deterministic 3D value noise -------------------------
+  hash(x, y, z) {
+    let h = x * 374761393 + y * 668265263 + z * 1442695040888963407;
+    h = (h ^ (h >>> 13)) * 1274126177;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  },
+  noise(x, y, z) {
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xf = x - xi, yf = y - yi, zf = z - zi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf);
+    const H = this.hash;
+    const c000 = H(xi, yi, zi),         c100 = H(xi + 1, yi, zi);
+    const c010 = H(xi, yi + 1, zi),     c110 = H(xi + 1, yi + 1, zi);
+    const c001 = H(xi, yi, zi + 1),     c101 = H(xi + 1, yi, zi + 1);
+    const c011 = H(xi, yi + 1, zi + 1), c111 = H(xi + 1, yi + 1, zi + 1);
+    const x00 = c000 + (c100 - c000) * u, x10 = c010 + (c110 - c010) * u;
+    const x01 = c001 + (c101 - c001) * u, x11 = c011 + (c111 - c011) * u;
+    const y0 = x00 + (x10 - x00) * v,     y1 = x01 + (x11 - x01) * v;
+    return (y0 + (y1 - y0) * w) * 2 - 1;
+  },
+
+  // --- primitives --------------------------------------------------
+  // Signed distance to a sphere: negative inside (= open cavern).
+  sphere(px, py, pz, c, r) {
+    const dx = px - c[0], dy = py - c[1], dz = pz - c[2];
+    return Math.sqrt(dx * dx + dy * dy + dz * dz) - r;
+  },
+
+  // ROOM SHAPES. All of these are "scale the query point, evaluate the simple
+  // shape, scale the distance back" — the standard way to get an anisotropic
+  // SDF without writing a new closed form per shape.
+  // ⚠ Scale back by the MINIMUM axis scale, never the average. Multiplying by
+  // anything larger overestimates the distance, which breaks the Lipschitz
+  // property the mesher's zero-crossing search relies on and punches holes in
+  // the surface at grazing angles.
+  room(px, py, pz, c) {
+    const s = c.s || [1, 1, 1];
+    // ⚠ USE THE PROPER ELLIPSOID DISTANCE, NOT (|p/s| - r) * min(s).
+    // The crude version is Lipschitz-safe but under-estimates savagely on a
+    // stretched room: a Rift (r 170, s [3.2,1.5,0.32]) reports ~45 at a point
+    // 456 u away. The mesher tolerates that, but the primitive CULL does not —
+    // a chunk just outside the cull radius drops a room that still visibly
+    // influences the field there, so the two sides of that boundary compute
+    // different surfaces and the mesh tears. Cost 186 interior holes; isolating
+    // it took one A/B (isotropic rooms -> 0 holes).
+    // iq's ellipsoid: exact for spheres, a tight bound otherwise.
+    const rx = c.r * s[0], ry = c.r * s[1], rz = c.r * s[2];
+    const qx = px - c.p[0], qy = py - c.p[1], qz = pz - c.p[2];
+    const k0 = Math.sqrt((qx / rx) * (qx / rx) + (qy / ry) * (qy / ry) + (qz / rz) * (qz / rz));
+    const k1 = Math.sqrt((qx / (rx * rx)) * (qx / (rx * rx))
+                       + (qy / (ry * ry)) * (qy / (ry * ry))
+                       + (qz / (rz * rz)) * (qz / (rz * rz)));
+    let d = k1 > 0 ? k0 * (k0 - 1) / k1 : -c.r;
+
+    // CORE: a solid island left standing in the middle of the volume. Cover to
+    // fight around, and the "chamber inside a chamber" read.
+    if (c.core > 0) {
+      const ix = px - c.p[0], iy = py - c.p[1], iz = pz - c.p[2];
+      const di = Math.sqrt(ix * ix + iy * iy + iz * iz) - c.r * c.core;
+      d = Math.max(d, -di);          // subtract the island from the room
+    }
+    // PILLARS: domain repetition. Instead of placing N columns by hand, fold
+    // space into a repeating tile and evaluate ONE column — the SDF renders an
+    // unbounded field of them for the cost of a single primitive. Subtracted,
+    // so they are rock left standing: cover to fight around, and the strongest
+    // gameplay shape here.
+    // ⚠ Safe against the spatial index because subtraction only ever ADDS rock,
+    // and only inside the room's own bound — it cannot extend the primitive's
+    // reach, so the cull radius stays valid.
+    if (c.pillars > 0) {
+      const per = c.pillarSpace || 95;
+      const qx = px - c.p[0], qz = pz - c.p[2];
+      const mx = qx - per * Math.round(qx / per);
+      const mz = qz - per * Math.round(qz / per);
+      d = Math.max(d, -(Math.sqrt(mx * mx + mz * mz) - c.pillars));
+    }
+
+    // RIBS: N-FOLD RADIAL SYMMETRY. Fold the angle into a single wedge and
+    // evaluate ONE buttress — the SDF mirrors it around the room for free.
+    // This is the cheapest way to get something that reads as BUILT rather
+    // than eroded: the eye finds the repeat instantly and infers a rule.
+    if (c.ribs > 1) {
+      const qx = px - c.p[0], qz = pz - c.p[2];
+      const seg = 6.2831853 / c.ribs;
+      let ang = Math.atan2(qz, qx);
+      ang = ang - seg * Math.round(ang / seg);          // one wedge
+      const rad = Math.sqrt(qx * qx + qz * qz);
+      const off = Math.sin(ang) * rad;                  // distance off the rib plane
+      const rib = Math.max(Math.abs(off) - (c.ribW || 16), (c.ribIn || 0) - rad);
+      d = Math.max(d, -rib);
+    }
+
+    // LATTICE: a RECURSIVE cross grid — the Menger construction. Each octave
+    // repeats at a third of the period, so the same rule reads at three scales
+    // at once: that self-similarity is the "logic" the eye is looking for, and
+    // it is the one pattern that stays interesting as you fly toward it.
+    // Cost is 'lattice' octaves of cheap box math, no extra primitives.
+    // (NOTE: no backticks in here — FIELD_SRC is a template literal and a
+    //  stray backtick terminates it, which is a silent, confusing break.)
+    if (c.lattice > 0) {
+      let per = c.latticeSize || 150, best = 1e9;
+      const qx = px - c.p[0], qy = py - c.p[1], qz = pz - c.p[2];
+      for (let it = 0; it < c.lattice; it++) {
+        const mx = qx - per * Math.round(qx / per);
+        const my = qy - per * Math.round(qy / per);
+        const mz = qz - per * Math.round(qz / per);
+        const t = per * (c.latticeT || 0.17);
+        const bx = Math.max(Math.abs(my), Math.abs(mz)) - t;
+        const by = Math.max(Math.abs(mx), Math.abs(mz)) - t;
+        const bz = Math.max(Math.abs(mx), Math.abs(my)) - t;
+        const cr = Math.min(bx, Math.min(by, bz));
+        if (cr < best) best = cr;
+        per /= 3;
+      }
+      d = Math.max(d, -best);
+    }
+
+    // SHELF: a solid slab across the room — a floor, or a mezzanine you can
+    // fight over and under. Turns one volume into two connected ones.
+    if (c.shelf > 0) {
+      const qy = py - c.p[1] - (c.shelfY || 0);
+      d = Math.max(d, -(Math.abs(qy) - c.shelf));
+    }
+
+    // TWIST: rotate the room about Y as a function of height. A cathedral
+    // becomes a helical shaft; combined with anisotropy it reads as a
+    // corkscrewing gallery rather than a stretched ball.
+    // (Applied to the SAMPLE, so it costs one rotation and no extra geometry.)
+
+    // CRYSTAL: high-frequency angular bite out of the walls — facets instead
+    // of the smooth organic default.
+    if (c.facet > 0) {
+      const f = this.noise(px * 0.05, py * 0.05, pz * 0.05);
+      d += (f > 0 ? f * f : -f * f) * c.facet * 26;
+    }
+    return d;
+  },
+  // Capsule = a thickened line segment. This is how a 1D graph edge
+  // becomes a 3D passage: distance to the nearest point on the segment,
+  // minus the radius. Radius lerps along the segment so trunks taper
+  // into tributaries.
+  // PASSAGE. A thickened line segment — how a 1D graph edge becomes a 3D
+  // passage. Everything past the plain round bore is shaping the CROSS-SECTION
+  // in the segment's own frame (t.u / t.v, precomputed perpendicular axes):
+  //   su/sv  ellipse — sv<su gives a wide flat gallery, su<sv a tall slot
+  //   rib    radius pulses along the length: bulges and pinch points
+  //   twist  rotates the cross-section along the run, so a slot corkscrews
+  capsule(px, py, pz, t) {
+    const a = t.a, b = t.b;
+    const ax = px - a[0], ay = py - a[1], az = pz - a[2];
+    const bx = b[0] - a[0], by = b[1] - a[1], bz = b[2] - a[2];
+    const bb = bx * bx + by * by + bz * bz;
+    let h = bb > 0 ? (ax * bx + ay * by + az * bz) / bb : 0;
+    h = h < 0 ? 0 : (h > 1 ? 1 : h);
+    const dx = ax - bx * h, dy = ay - by * h, dz = az - bz * h;
+
+    let r = t.ra + (t.rb - t.ra) * h;
+    if (t.rib) r *= 1 + t.rib * Math.sin(h * (t.ribN || 6) * 6.2831853);
+
+    const su = t.su || 1, sv = t.sv || 1;
+    if (su === 1 && sv === 1 && !t.twist) {
+      return Math.sqrt(dx * dx + dy * dy + dz * dz) - r;   // plain bore, fast path
+    }
+    // Decompose the offset into the segment's own frame so the cross-section
+    // can be shaped independently of the axis.
+    const u = t.u, v = t.v;
+    let du = dx * u[0] + dy * u[1] + dz * u[2];
+    let dv = dx * v[0] + dy * v[1] + dz * v[2];
+    if (t.twist) {
+      const ang = t.twist * h, cs = Math.cos(ang), sn = Math.sin(ang);
+      const nu = du * cs - dv * sn; dv = du * sn + dv * cs; du = nu;
+    }
+    // Axial component: whatever is left after removing the in-frame part.
+    const da2 = Math.max(0, dx * dx + dy * dy + dz * dz - du * du - dv * dv);
+    const k = Math.min(1, Math.min(su, sv));
+    return (Math.sqrt(da2 + (du / su) * (du / su) + (dv / sv) * (dv / sv)) - r) * k;
+  },
+  // Polynomial smooth-min. A hard Math.min would leave a visible crease
+  // where a tunnel meets a chamber; this blends them into an organic
+  // throat over distance k.
+  smin(a, b, k) {
+    const h = Math.max(0, Math.min(1, 0.5 + 0.5 * (b - a) / k));
+    return b + (a - b) * h - k * h * (1 - h);
+  },
+
+  // --- the cavern ---------------------------------------------------
+  // Returns < 0 inside open space, > 0 inside rock, ~0 at the wall.
+  // g = { chambers, tunnels, blend, warp, rough }
+  eval(px, py, pz, g) {
+    // DOMAIN WARP: bend the coordinate system itself before sampling, so
+    // tunnels twist and chambers fold instead of reading as clean pipes
+    // joined to clean spheres. Cheapest possible version — one noise
+    // lookup per axis at a low frequency.
+    if (g.warp > 0) {
+      const s = 0.0021;
+      const wx = this.noise(px * s, py * s, pz * s);
+      const wy = this.noise(py * s + 31.7, pz * s, px * s);
+      const wz = this.noise(pz * s + 71.3, px * s, py * s);
+      px += wx * g.warp; py += wy * g.warp; pz += wz * g.warp;
+    }
+
+    // WORLD-KEYED PRIMITIVE INDEX. The set of primitives evaluated depends
+    // ONLY on where you are sampling — never on which chunk is asking — so
+    // every chunk computes an identical field and seams are impossible by
+    // construction. See buildIndex for why the lists are provably lossless.
+    let ch = g.chambers, tu = g.tunnels;
+    const ix = g.idx;
+    if (ix) {
+      const gx = Math.floor((px - ix.min[0]) / ix.cell);
+      const gy = Math.floor((py - ix.min[1]) / ix.cell);
+      const gz = Math.floor((pz - ix.min[2]) / ix.cell);
+      if (gx >= 0 && gy >= 0 && gz >= 0 && gx < ix.dim[0] && gy < ix.dim[1] && gz < ix.dim[2]) {
+        const L = ix.lists[(gz * ix.dim[1] + gy) * ix.dim[0] + gx];
+        ch = L.ch; tu = L.tu;
+      }
+      // Outside the grid: fall through to the full set. Rare, and safe.
+    }
+
+    let d = 1e9;
+    for (let i = 0; i < ch.length; i++) {
+      d = this.smin(d, this.room(px, py, pz, ch[i]), g.blend);
+    }
+    for (let i = 0; i < tu.length; i++) {
+      d = this.smin(d, this.capsule(px, py, pz, tu[i]), g.blend);
+    }
+
+    // ================= EMERGENT PATTERN, FROM CAUSE =================
+    // Caves are patterned because of PROCESS, not because someone drew a
+    // grid. Everything below is a cause; the pattern is what falls out.
+
+    // BEDDING PLANES. Limestone is deposited in layers, and dissolution runs
+    // preferentially ALONG them — so passages widen at particular heights and
+    // the same horizontal notches appear on every wall in the system. This is
+    // the single most recognisable signature of a real cave, and because it is
+    // keyed to WORLD Y it unifies the whole map: one rule, visible everywhere,
+    // never repeating identically because the rock it cuts is different.
+    // Subtracting only WIDENS where a cave already is — deep rock has a huge d
+    // and a 20 u notch cannot open it — so this cannot punch voids in solid.
+    if (g.bed > 0) {
+      const wob = this.noise(px * 0.0009, 0, pz * 0.0009) * 26;   // beds are not perfectly level
+      const t = (py + wob) * g.bedFreq;
+      const band = Math.abs(t - Math.round(t)) * 2;               // 0 at a plane, 1 between
+      d -= g.bed * (1 - band * band) * (1 - band * band);
+    }
+
+    // VADOSE INCISION (the keyhole). While a passage is full of water it
+    // dissolves a round tube; once the water table drops the stream runs free
+    // along the floor and CUTS DOWN, leaving a narrow slot under a round
+    // ceiling. Real caves are full of this cross-section, and it reads as
+    // history rather than decoration.
+    if (g.vadose > 0) {
+      const wob = this.noise(px * 0.0016, 0, pz * 0.0016) * 40;
+      const below = (py + wob) - g.vadoseY;                 // metres below the old water table
+      if (below < 0) {
+        const slot = Math.min(1, -below / 240);
+        d -= g.vadose * slot * Math.exp(-Math.abs(d) * 0.006);
+      }
+    }
+
+    // SURFACE DETAIL. Added AFTER the union so it perturbs the wall rather
+    // than the topology — the graph decides where the cavern is, the noise
+    // decides what the rock looks like.
+    if (g.rough > 0) {
+      const n = this.noise(px * 0.012, py * 0.012, pz * 0.012) * 0.60
+              + this.noise(px * 0.031, py * 0.031, pz * 0.031) * 0.28
+              + this.noise(px * 0.074, py * 0.074, pz * 0.074) * 0.12;
+      d += n * g.rough;
+    }
+    return d;
+  },
+
+  // ===================================================================
+  // SHADE — THE SECOND FIELD. Colour and roughness as VOLUMETRIC LAYERS,
+  // sampled exactly like the collision field, evaluated once per VERTEX in
+  // the worker and baked into the mesh.
+  //
+  // WHY, versus doing this in the fragment shader:
+  //   - COST. Per-pixel 3D value noise (several octaves plus pow() for veins
+  //     and sparkle) is paid for every fragment, every frame, forever. Here it
+  //     is paid ONCE per vertex, off the main thread, and never again. At this
+  //     mesh density vertices are ~14 u apart — about a texel grid — so the
+  //     resolution barely changes while the cost collapses.
+  //   - QUALITY. Because it is amortised, it can afford octaves and domain
+  //     warping that would be unthinkable per-pixel.
+  //   - COHERENCE. This is the real reason. The colour banding uses the SAME
+  //     bedFreq as the GEOMETRY's bedding planes, so the visible strata line up
+  //     with the physical notches they came from, instead of being unrelated
+  //     stripes painted over unrelated dents.
+  // Returns [r, g, b, roughness, emissive].
+  // ===================================================================
+  // ⚠ KEEP THIS CHEAP AND LOW-FREQUENCY ONLY.
+  // Vertices are ~14 u apart, so anything with detail finer than that is both
+  // WASTED (it cannot be represented) and EXPENSIVE (it is paid per vertex at
+  // bake time). The first cut ran 4-octave domain-warped fbm here and produced
+  // muddy rock at 48 ms/chunk — worst of both worlds. Fine grain now comes from
+  // a triplanar TEXTURE in the fragment shader, where detail is free and
+  // resolution is the texture's, not the mesh's.
+  // This function is only for what genuinely varies slowly: which room you are
+  // in, the bedding band, and the emissive seams.
+  shade(px, py, pz, g, st) {
+    // STRATA — locked to the geometry's bedding planes, so the visible band
+    // lines up with the physical notch it came from. Two noise calls, not
+    // twenty: this varies over ~190 u and vertices are 14 u apart.
+    const bw = this.noise(px * 0.0009, 0, pz * 0.0009) * 26;
+    const t = (py + bw) * (g.bedFreq || 1 / 190);
+    const band = Math.abs(t - Math.round(t)) * 2;
+    const strat = 1 - band;
+
+    // One broad mottle so neighbouring rooms of the same type are not clones.
+    const broad = this.noise(px * 0.0035, py * 0.0035, pz * 0.0035);
+
+    // VEINS — ridged, low frequency; the thin bright seams are then sharpened
+    // per-pixel by the detail texture rather than resolved here.
+    const v = 1 - Math.abs(this.noise(px * 0.010, py * 0.015, pz * 0.010));
+    const vein = Math.pow(Math.max(0, v), 6);
+
+    const lum = 1 + broad * 0.16 + (strat - 0.5) * 0.5 * st[4];
+    return [
+      Math.max(0, Math.min(1.4, st[0] * lum)),
+      Math.max(0, Math.min(1.4, st[1] * lum)),
+      Math.max(0, Math.min(1.4, st[2] * lum)),
+      Math.max(0.05, Math.min(1, st[3] * (1 + (1 - strat) * 0.12))),
+      vein * st[6],
+    ];
+  },
+
+  // The primitives local to a world point, straight off the world-keyed index.
+  // Exposed so the MESHER can pick a vertex's owning primitive from exactly the
+  // same set eval() blends — if these ever diverged, a vertex could be painted
+  // by a room that does not actually shape it.
+  localSet(px, py, pz, g) {
+    const ix = g.idx;
+    if (ix) {
+      const gx = Math.floor((px - ix.min[0]) / ix.cell);
+      const gy = Math.floor((py - ix.min[1]) / ix.cell);
+      const gz = Math.floor((pz - ix.min[2]) / ix.cell);
+      if (gx >= 0 && gy >= 0 && gz >= 0 && gx < ix.dim[0] && gy < ix.dim[1] && gz < ix.dim[2]) {
+        return ix.lists[(gz * ix.dim[1] + gy) * ix.dim[0] + gx];
+      }
+    }
+    return { ch: g.chambers, tu: g.tunnels };
+  },
+
+  // Gradient by central difference — the wall normal, used for collision
+  // response. eps is in world units and wants to be a touch larger than
+  // the finest noise wavelength or it reads the roughness instead of the
+  // wall.
+  grad(px, py, pz, g, eps) {
+    const e = eps || 2.0;
+    const gx = this.eval(px + e, py, pz, g) - this.eval(px - e, py, pz, g);
+    const gy = this.eval(px, py + e, pz, g) - this.eval(px, py - e, pz, g);
+    const gz = this.eval(px, py, pz + e, g) - this.eval(px, py, pz - e, g);
+    const l = Math.hypot(gx, gy, gz) || 1;
+    return [gx / l, gy / l, gz / l];
+  }
+}`;
+
+const FIELD = (new Function('return (' + FIELD_SRC + ')'))();
+
+
+// ---------------------------------------------------------------------
+// (2) THE SKELETON — points -> lines -> branching graph.
+//
+// Generated ONCE on the main thread from a seed and shipped to the worker,
+// so both realms agree by construction. This is the part that decides
+// whether the space PLAYS well; the field only decides how it looks.
+// ---------------------------------------------------------------------
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+
+// ---------------------------------------------------------------------
+// ROOM + PASSAGE VOCABULARY.
+//
+// This is the "game design first, noise second" half. The graph decides
+// where the space is and what each node is FOR; the field only decides how
+// the rock looks. Every entry is pure shape parameters — no new SDF code
+// per type — so adding a room type is a table row, not a shader change.
+//
+// s   = per-axis scale (anisotropy). [1,1,1] is a plain sphere.
+// core= fraction of the radius left as a SOLID island in the middle (cover).
+// facet = angular high-frequency bite; 0 organic, 1 crystalline.
+// ---------------------------------------------------------------------
+const ROOM_TYPES = {
+  blob:      { name: 'Blob',       s: [1, 1, 1],      r: [150, 260], core: 0,   facet: 0 },
+  hall:      { name: 'Hall',       s: [1.9, 0.55, 1.9], r: [200, 300], core: 0, facet: 0 },
+  cathedral: { name: 'Cathedral',  s: [0.85, 2.6, 0.85], r: [150, 210], core: 0, facet: 0 },
+  rift:      { name: 'Rift',       s: [3.2, 1.5, 0.32], r: [140, 200], core: 0, facet: 0 },
+  arena:     { name: 'Arena',      s: [1.5, 0.9, 1.5], r: [230, 320], core: 0.42, facet: 0 },
+  crystal:   { name: 'Crystal',    s: [1.1, 1.2, 1.1], r: [170, 250], core: 0,   facet: 1 },
+  shaft:     { name: 'Shaft',      s: [0.5, 3.4, 0.5], r: [120, 170], core: 0,   facet: 0 },
+  nest:      { name: 'Nest',       s: [1.3, 0.8, 1.3], r: [150, 210], core: 0.55, facet: 0.45 },
+  // --- structural operators, not just reshaped balls ---
+  forest:    { name: 'Forest',     s: [1.8, 0.8, 1.8], r: [240, 330], core: 0, facet: 0,
+               pillars: 34, pillarSpace: 118 },
+  colonnade: { name: 'Colonnade',  s: [2.6, 0.7, 1.0], r: [200, 270], core: 0, facet: 0,
+               pillars: 26, pillarSpace: 92 },
+  gallery2:  { name: 'Tiered',     s: [1.7, 1.5, 1.7], r: [210, 290], core: 0, facet: 0,
+               shelf: 22, shelfY: -25 },
+  basilica:  { name: 'Basilica',   s: [1.5, 1.9, 1.5], r: [200, 275], core: 0.3, facet: 0,
+               pillars: 22, pillarSpace: 130, shelf: 18, shelfY: -70 },
+  geode:     { name: 'Geode',      s: [1.2, 1.1, 1.2], r: [190, 260], core: 0.34, facet: 1.5 },
+};
+// su/sv shape the cross-section, rib pulses the radius, twist corkscrews it.
+const PASS_TYPES = {
+  bore:    { name: 'Bore',    su: 1,   sv: 1,   rib: 0,    twist: 0 },
+  slot:    { name: 'Slot',    su: 0.4, sv: 1.7, rib: 0,    twist: 0 },
+  gallery: { name: 'Gallery', su: 2.0, sv: 0.45, rib: 0,   twist: 0 },
+  ribbed:  { name: 'Ribbed',  su: 1,   sv: 1,   rib: 0.34, twist: 0, ribN: 7 },
+  gullet:  { name: 'Gullet',  su: 1.2, sv: 0.9, rib: 0.5,  twist: 0, ribN: 3 },
+  helix:   { name: 'Helix',   su: 0.5, sv: 1.5, rib: 0.12, twist: 5.6, ribN: 4 },
+  capillary:{ name: 'Capillary', su: 0.75, sv: 0.75, rib: 0.2, twist: 2.0, ribN: 9 },
+};
+
+// ---------------------------------------------------------------------
+// ROOM STYLES — per-room LOOK, on ONE shader program.
+//
+// ⚠ NOT a material per room type. A chunk routinely spans several rooms, so
+// per-mesh materials cannot express it — and streaming a chunk containing a
+// type you have not seen yet would compile a program MID-FLIGHT. That is the
+// first-sight hitch the game's skin system exists to avoid (its whole design
+// is "every skin field is a uniform, never a #define, so a skin can never fork
+// a program"). Same discipline here.
+//
+// ⚠ AND NOT a discrete style ID per vertex either. A triangle straddling two
+// rooms interpolates its attributes, so an id blending from 2 to 9 would sweep
+// through every id between them and paint garbage. Instead each style is a
+// POINT IN A CONTINUOUS PARAMETER SPACE — interpolating any two styles is
+// therefore always a valid style, and room boundaries cross-fade for free.
+//
+//   col            albedo
+//   rough          surface roughness
+//   strata         horizontal banding strength (sedimentary read)
+//   sparkle        fine crystalline glint
+//   glow           emissive vein strength
+// ---------------------------------------------------------------------
+const STYLES = {
+  blob:      { col: [0.42, 0.44, 0.47], rough: 0.95, strata: 0.15, sparkle: 0.0,  glow: 0.00 },
+  hall:      { col: [0.56, 0.50, 0.40], rough: 0.92, strata: 0.70, sparkle: 0.0,  glow: 0.00 },
+  cathedral: { col: [0.26, 0.27, 0.32], rough: 0.88, strata: 0.85, sparkle: 0.05, glow: 0.02 },
+  rift:      { col: [0.20, 0.21, 0.26], rough: 0.80, strata: 0.35, sparkle: 0.10, glow: 0.55 },
+  arena:     { col: [0.50, 0.34, 0.28], rough: 0.94, strata: 0.30, sparkle: 0.0,  glow: 0.00 },
+  crystal:   { col: [0.40, 0.62, 0.72], rough: 0.35, strata: 0.05, sparkle: 1.00, glow: 0.30 },
+  shaft:     { col: [0.24, 0.26, 0.28], rough: 0.97, strata: 0.45, sparkle: 0.0,  glow: 0.00 },
+  nest:      { col: [0.44, 0.36, 0.24], rough: 0.96, strata: 0.10, sparkle: 0.0,  glow: 0.22 },
+  forest:    { col: [0.60, 0.58, 0.52], rough: 0.90, strata: 0.60, sparkle: 0.03, glow: 0.00 },
+  colonnade: { col: [0.58, 0.52, 0.44], rough: 0.89, strata: 0.75, sparkle: 0.0,  glow: 0.00 },
+  gallery2:  { col: [0.38, 0.42, 0.48], rough: 0.93, strata: 0.55, sparkle: 0.02, glow: 0.00 },
+  basilica:  { col: [0.58, 0.48, 0.32], rough: 0.86, strata: 0.65, sparkle: 0.08, glow: 0.12 },
+  geode:     { col: [0.44, 0.34, 0.60], rough: 0.30, strata: 0.05, sparkle: 1.00, glow: 0.65 },
+  // Passages read slightly darker and damper than the rooms they connect, so
+  // arriving somewhere feels like arriving.
+  _pass:     { col: [0.32, 0.34, 0.37], rough: 0.97, strata: 0.25, sparkle: 0.0,  glow: 0.00 },
+};
+// ---------------------------------------------------------------------
+// REGIONS — the answer to "looks too random".
+//
+// Picking a room type uniformly at random from the whole pool means a Geode
+// sits next to an Arena sits next to a Rift, every material change is a
+// surprise, and nowhere feels like anywhere. Real cave systems have ZONES: a
+// limestone stretch, a crystal stretch, a volcanic stretch.
+//
+// So the graph is cut into CONTIGUOUS regions. A region owns:
+//   rooms/passes  which types may appear at all — coherence by restriction
+//   tint          a colour grade over every style in it, so the whole stretch
+//                 reads as one material world even across different room types
+//   glow/rough    mood bias
+// Branches INHERIT their parent's region, so a side passage belongs to the
+// place it leaves from rather than teleporting you to a different world.
+//
+// The payoff is navigational: when the rock changes, you have gone somewhere.
+// ---------------------------------------------------------------------
+const REGIONS = [
+  { name: 'Limestone Reach', tint: [1.12, 1.06, 0.92], glow: 0.4, rough: 1.0,
+    rooms: ['hall', 'colonnade', 'forest', 'gallery2', 'blob'],
+    passes: ['bore', 'gallery', 'ribbed'] },
+  { name: 'The Fault', tint: [0.80, 0.86, 1.05], glow: 1.0, rough: 0.95,
+    rooms: ['rift', 'shaft', 'cathedral', 'gallery2'],
+    passes: ['slot', 'helix', 'bore'] },
+  { name: 'Crystal Deeps', tint: [0.86, 1.00, 1.18], glow: 1.6, rough: 0.8,
+    rooms: ['crystal', 'geode', 'cathedral', 'nest'],
+    passes: ['capillary', 'helix', 'slot'] },
+  { name: 'Ember Hollows', tint: [1.20, 0.88, 0.74], glow: 1.1, rough: 1.05,
+    rooms: ['arena', 'basilica', 'blob', 'forest'],
+    passes: ['bore', 'gullet', 'ribbed'] },
+  { name: 'The Warrens', tint: [1.05, 0.94, 0.80], glow: 0.7, rough: 1.1,
+    rooms: ['nest', 'forest', 'blob', 'gallery2'],
+    passes: ['capillary', 'ribbed', 'gullet'] },
+];
+
+function styleVec(kind, isPass, region) {
+  const S = (isPass ? STYLES._pass : STYLES[kind]) || STYLES.blob;
+  const R = region || { tint: [1, 1, 1], glow: 1, rough: 1 };
+  return [
+    Math.min(1, S.col[0] * R.tint[0]),
+    Math.min(1, S.col[1] * R.tint[1]),
+    Math.min(1, S.col[2] * R.tint[2]),
+    Math.max(0.05, Math.min(1, S.rough * R.rough)),
+    S.strata, S.sparkle,
+    S.glow * R.glow,
+  ];
+}
+
+// A tunnel needs two axes perpendicular to its own direction to shape the
+// cross-section in. Any consistent pair works; pick the world axis least
+// aligned with the run so the cross product never degenerates.
+function frameFor(a, b) {
+  let dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
+  const L = Math.hypot(dx, dy, dz) || 1; dx /= L; dy /= L; dz /= L;
+  const ax = Math.abs(dx), ay = Math.abs(dy), az = Math.abs(dz);
+  const up = (ay <= ax && ay <= az) ? [0, 1, 0] : (ax <= az ? [1, 0, 0] : [0, 0, 1]);
+  let ux = dy * up[2] - dz * up[1], uy = dz * up[0] - dx * up[2], uz = dx * up[1] - dy * up[0];
+  const ul = Math.hypot(ux, uy, uz) || 1; ux /= ul; uy /= ul; uz /= ul;
+  const vx = dy * uz - dz * uy, vy = dz * ux - dx * uz, vz = dx * uy - dy * ux;
+  return { u: [ux, uy, uz], v: [vx, vy, vz] };
+}
+
+function makeRoom(p, kind, scale, rnd, region) {
+  const T = ROOM_TYPES[kind];
+  const r = (T.r[0] + rnd() * (T.r[1] - T.r[0])) * (scale || 1);
+  return { p, kind, r, s: T.s.slice(), core: T.core, facet: T.facet,
+           pillars: T.pillars || 0, pillarSpace: T.pillarSpace || 95,
+           shelf: T.shelf || 0, shelfY: T.shelfY || 0,
+           region: region ? region.name : null, st: styleVec(kind, false, region) };
+}
+function makePass(a, b, ra, rb, kind, region) {
+  const T = PASS_TYPES[kind], f = frameFor(a, b);
+  return { a, b, ra, rb, kind, su: T.su, sv: T.sv, rib: T.rib, ribN: T.ribN || 6,
+           twist: T.twist, u: f.u, v: f.v,
+           region: region ? region.name : null, st: styleVec(kind, true, region) };
+}
+
+function buildGraph(seed) {
+  const rnd = mulberry32(seed);
+  const chambers = [], tunnels = [];
+  const R = (lo, hi) => lo + rnd() * (hi - lo);
+
+  // Trunk: a wandering spine of chambers. Steps are biased along +X so the
+  // space has a readable "deeper in" direction instead of a ball of rooms.
+  const pick = (arr) => arr[Math.floor(rnd() * arr.length) % arr.length];
+  // Contiguous region bands along the spine — a stretch of the cave belongs to
+  // one place, so material changes mark travel instead of flickering per room.
+  const regOrder = REGIONS.slice().sort(() => rnd() - 0.5);
+  const regionAt = (i, n) => regOrder[Math.min(regOrder.length - 1,
+                              Math.floor(i / n * regOrder.length))];
+  // Trunk rooms are the big readable spaces; tributaries get the tighter ones.
+  const TRUNK_ROOMS = ['blob', 'hall', 'arena', 'cathedral', 'rift', 'crystal',
+                       'forest', 'colonnade', 'basilica', 'gallery2'];
+  const LEAF_ROOMS  = ['blob', 'shaft', 'nest', 'crystal', 'rift', 'geode', 'gallery2'];
+  const TRUNK_PASS  = ['bore', 'bore', 'gallery', 'ribbed', 'slot'];
+  const LEAF_PASS   = ['slot', 'helix', 'capillary', 'gullet', 'ribbed'];
+
+  // JOINT SETS. Rock fractures along a FEW preferred orientations and water
+  // exploits those fractures — which is why a real cave survey looks reasoned
+  // rather than scribbled: passages share a handful of bearings and meet at
+  // consistent angles. Two near-orthogonal sets plus a diagonal is the classic.
+  // ⚠ This is the single biggest "no logic" fix. A fresh random yaw per segment
+  // is precisely what makes a tunnel network read as noise — no amount of
+  // surface detail rescues it, because the eye reads the NETWORK first.
+  const jointA = rnd() * Math.PI;
+  const JOINTS = [jointA, jointA + Math.PI / 2, jointA + Math.PI / 4];
+  const snapYaw = (want) => {
+    let best = JOINTS[0], bd = 9;
+    for (const j of JOINTS) for (const s of [j, j + Math.PI]) {
+      const dd = Math.abs(Math.atan2(Math.sin(want - s), Math.cos(want - s)));
+      if (dd < bd) { bd = dd; best = s; }
+    }
+    return best + R(-0.16, 0.16);        // joints are planes, not laser lines
+  };
+
+  const NODES = 14;
+  let x = 0, y = 0, z = 0;
+  const spine = [];
+  for (let i = 0; i < NODES; i++) {
+    // Chamber 0 is always a plain blob: it is the spawn, and spawning inside a
+    // 3.4x-tall shaft or a 0.32-thin rift is disorienting before you have any
+    // bearings.
+    const RG = regionAt(i, NODES);
+    spine.push(makeRoom([x, y, z], i === 0 ? 'blob' : pick(RG.rooms), 1, rnd, RG));
+    const len = R(320, 520);
+    // Water runs DOWNHILL — a net descent gives the system a direction, so
+    // "deeper" means something instead of it being a ball of rooms on one level.
+    const yaw = snapYaw(rnd() * Math.PI * 2);
+    const pitch = R(-0.42, 0.10);
+    x += Math.cos(pitch) * Math.cos(yaw) * len;
+    y += Math.sin(pitch) * len;
+    z += Math.cos(pitch) * Math.sin(yaw) * len;
+  }
+  chambers.push(...spine);
+  for (let i = 0; i < spine.length - 1; i++) {
+    const RG = regionAt(i, NODES);
+    tunnels.push(makePass(spine[i].p, spine[i + 1].p, R(70, 105), R(70, 105), pick(RG.passes), RG));
+  }
+
+  // Branches: tributaries off the spine, radius tapering by depth
+  // (r_n = r0 * q^n, q ~ 0.7) so the space reads as a hierarchy rather
+  // than a uniform mesh of same-size pipes.
+  const branch = (fromIdx, depth) => {
+    if (depth > 2) return;
+    const base = chambers[fromIdx];
+    const n = depth === 1 ? 2 : 1;
+    for (let k = 0; k < n; k++) {
+      const len = R(260, 430) * Math.pow(0.8, depth);
+      const yaw = snapYaw(rnd() * Math.PI * 2), pitch = R(-0.9, 0.5);
+      const p = [
+        base.p[0] + Math.cos(pitch) * Math.cos(yaw) * len,
+        base.p[1] + Math.sin(pitch) * len,
+        base.p[2] + Math.cos(pitch) * Math.sin(yaw) * len,
+      ];
+      const RG = REGIONS.find(r => r.name === base.region) || regOrder[0];
+      const c = makeRoom(p, pick(RG.rooms), Math.pow(0.72, depth) * R(0.85, 1.15), rnd, RG);
+      c.depth = depth;
+      chambers.push(c);
+      const rad = 95 * Math.pow(0.7, depth);
+      tunnels.push(makePass(base.p, p, rad * R(0.9, 1.2), rad * R(0.6, 0.95), pick(RG.passes), RG));
+      if (rnd() < 0.62) branch(chambers.length - 1, depth + 1);
+    }
+  };
+  for (let i = 1; i < spine.length - 1; i++) if (rnd() < 0.8) branch(i, 1);
+
+  // LOOPS. Without these the graph is a tree and every fight is a
+  // dead-end retreat; a few cross-links make the space navigable in more
+  // than one direction. Only link chambers that are near each other, or
+  // the "shortcut" is a 2 km straight pipe through solid rock.
+  let loops = 0;
+  for (let i = 0; i < chambers.length && loops < 5; i++) {
+    for (let j = i + 3; j < chambers.length && loops < 5; j++) {
+      const a = chambers[i].p, b = chambers[j].p;
+      const dist = Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+      if (dist > 300 && dist < 700 && rnd() < 0.35) {
+        // Loops read best as tight secondary routes, not second highways.
+        const RG = REGIONS.find(r => r.name === chambers[i].region) || regOrder[0];
+        tunnels.push(makePass(a, b, 62, 62, pick(['slot', 'capillary', 'helix']), RG));
+        loops++;
+      }
+    }
+  }
+
+  return buildIndex({ chambers, tunnels, blend: 90, warp: 40, rough: 14, loops,
+                      bed: 26, bedFreq: 1 / 190, vadose: 34, vadoseY: -140,
+                      joints: JOINTS.map(j => +(j * 180 / Math.PI).toFixed(0)) });
+}
+
+// ---------------------------------------------------------------------
+// WORLD-KEYED PRIMITIVE INDEX — the lossless replacement for per-chunk culling.
+//
+// WHY IT IS EXACT, not an approximation:
+//   smin(a, b, k) = b + (a-b)*h - k*h*(1-h)  with  h = clamp(0.5 + 0.5*(b-a)/k)
+// When (b - a) >= k, h saturates at 1 and the expression collapses to exactly
+// `a`. So any primitive whose distance exceeds the running minimum by k or more
+// contributes NOTHING — dropping it changes the field by zero, not by a little.
+//
+// Per grid cell: find the nearest primitive bound `m`, then keep every
+// primitive whose bound is within m + k + 2*diag. Inside the cell the field can
+// be no smaller than (m - diag), so anything past that threshold can never come
+// within k of the minimum anywhere in the cell.
+//
+// ⚠ The list is keyed by the CELL, i.e. by world position. That is the whole
+// point — a chunk-keyed list is what tore the mesh (see cullDISABLED).
+// ---------------------------------------------------------------------
+function buildIndex(g, cellSize) {
+  // Smaller cells tighten the kept list sharply: the safety term is 2*diag,
+  // so halving the cell roughly halves the slack. 180 measured best here —
+  // below that the precompute starts to cost more than it saves.
+  const CELL = cellSize || 180;
+  const pts = [];
+  const bound = [];   // {c: centre, r: bounding radius, room?, i}
+  g.chambers.forEach((c, i) => {
+    const smax = Math.max(c.s[0], Math.max(c.s[1], c.s[2]));
+    bound.push({ c: c.p, r: c.r * smax + (c.facet ? c.facet * 26 : 0), room: true, i });
+    pts.push(c.p);
+  });
+  g.tunnels.forEach((t, i) => {
+    const mid = [(t.a[0] + t.b[0]) / 2, (t.a[1] + t.b[1]) / 2, (t.a[2] + t.b[2]) / 2];
+    const half = Math.hypot(t.b[0] - t.a[0], t.b[1] - t.a[1], t.b[2] - t.a[2]) / 2;
+    const pmax = Math.max(t.su || 1, t.sv || 1) * (1 + (t.rib || 0));
+    bound.push({ c: mid, r: half + Math.max(t.ra, t.rb) * pmax, room: false, i });
+    pts.push(t.a, t.b);
+  });
+
+  // Grid covers the graph plus the distance the field can reach outside it.
+  // ⚠ include the process terms: bedding + vadose incision push the surface
+  // outward too, and an index that ignores them drops primitives that still
+  // shape the wall (the same class of bug as the anisotropy cull).
+  const reach = g.blend * 2 + g.warp + g.rough * 2 + (g.bed || 0) + (g.vadose || 0) + 600;
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const p of pts) for (let a = 0; a < 3; a++) {
+    if (p[a] < lo[a]) lo[a] = p[a];
+    if (p[a] > hi[a]) hi[a] = p[a];
+  }
+  const min = lo.map((v, a) => v - reach - hi[a] * 0);
+  for (let a = 0; a < 3; a++) min[a] = lo[a] - reach;
+  const dim = [0, 0, 0];
+  for (let a = 0; a < 3; a++) dim[a] = Math.max(1, Math.ceil((hi[a] + reach - min[a]) / CELL));
+
+  const diag = CELL * 0.8661;
+  const lists = new Array(dim[0] * dim[1] * dim[2]);
+  let total = 0;
+  for (let k = 0; k < dim[2]; k++)
+  for (let j = 0; j < dim[1]; j++)
+  for (let i = 0; i < dim[0]; i++) {
+    const cx = min[0] + (i + 0.5) * CELL, cy = min[1] + (j + 0.5) * CELL, cz = min[2] + (k + 0.5) * CELL;
+    let nearest = Infinity;
+    const ds = new Array(bound.length);
+    for (let b = 0; b < bound.length; b++) {
+      const B = bound[b];
+      const d = Math.hypot(B.c[0] - cx, B.c[1] - cy, B.c[2] - cz) - B.r;
+      ds[b] = d;
+      if (d < nearest) nearest = d;
+    }
+    const keep = nearest + g.blend + (g.bed || 0) + (g.vadose || 0) + 2 * diag;
+    const ch = [], tu = [];
+    for (let b = 0; b < bound.length; b++) {
+      if (ds[b] > keep) continue;
+      if (bound[b].room) ch.push(g.chambers[bound[b].i]); else tu.push(g.tunnels[bound[b].i]);
+    }
+    total += ch.length + tu.length;
+    lists[(k * dim[1] + j) * dim[0] + i] = { ch, tu };
+  }
+  g.idx = { min, cell: CELL, dim, lists };
+  g.idxAvg = total / lists.length;
+  return g;
+}
+
+// GALLERY: every room type in a row, every passage type in a second row,
+// each joined to plain blobs at both ends so the passage shape is what you
+// are actually looking at. This is the difference between "explore variety"
+// and "fly around hoping to stumble on a Cathedral".
+function buildGallery() {
+  const rnd = mulberry32(99);
+  const chambers = [], tunnels = [], labels = [];
+  const SP = 900;
+  const rooms = Object.keys(ROOM_TYPES);
+  rooms.forEach((k, i) => {
+    const p = [i * SP, 0, 0];
+    chambers.push(makeRoom(p, k, 1.15, rnd, null));
+    labels.push({ p, text: ROOM_TYPES[k].name });
+    // a short neutral bore linking the row so you can fly straight down it
+    if (i > 0) tunnels.push(makePass([(i - 1) * SP, 0, 0], p, 70, 70, 'bore'));
+  });
+  const passes = Object.keys(PASS_TYPES);
+  passes.forEach((k, i) => {
+    const a = [i * SP, 0, -1100], b = [i * SP + SP * 0.78, 0, -1100];
+    chambers.push(makeRoom(a, 'blob', 0.62, rnd, null));
+    chambers.push(makeRoom(b, 'blob', 0.62, rnd, null));
+    tunnels.push(makePass(a, b, 95, 95, k));
+    labels.push({ p: [(a[0] + b[0]) / 2, 0, -1100], text: PASS_TYPES[k].name });
+  });
+  // link the two rows so it is one connected space
+  tunnels.push(makePass([0, 0, 0], [0, 0, -1100], 80, 80, 'bore'));
+  return buildIndex({ chambers, tunnels, blend: 70, warp: 18, rough: 10, loops: 0, labels, gallery: true,
+                      bed: 0, bedFreq: 1 / 190, vadose: 0, vadoseY: -140 });
+}
+
+
+// ---------------------------------------------------------------------
+// (3) THE MESHER — SURFACE NETS, in a worker.
+//
+// Surface nets rather than marching cubes on purpose: no 256-entry
+// triangle table, it is naturally watertight/manifold, and it produces
+// better-shaped triangles (marching cubes loves slivers, which make poor
+// collision geometry). One vertex per sign-changing cell, placed at the
+// average of that cell's edge crossings; quads join the four cells around
+// every sign-changing grid edge.
+//
+// ⚠ SEAMS ARE AN OWNERSHIP PROBLEM, NOT A GEOMETRY PROBLEM. Two adjacent
+// chunks agree on the surface automatically because they sample the SAME
+// world coordinates with the SAME deterministic field — but a quad
+// straddling the boundary belongs to neither unless you say so. Rule
+// here: a chunk samples a one-cell APRON on its low side (cell indices
+// -1..N-1) and emits a quad only for edges whose owning corner is in
+// [0,N). Every edge in the world is then owned by exactly one chunk —
+// no gaps, no double-drawn quads.
+// ---------------------------------------------------------------------
+const WORKER_SRC = `
+const FIELD = ${FIELD_SRC};
+let G = null;
+
+self.onmessage = (e) => {
+  const m = e.data;
+  if (m.cmd === 'init') { G = m.graph; return; }
+  if (m.cmd === 'chunk') { self.postMessage(mesh(m), []); return; }
+};
+
+// ⚠⚠ CULLING PER-CHUNK MAKES THE FIELD CHUNK-DEPENDENT, AND THAT IS EXACTLY
+// WHAT CREATES SEAMS. Two chunks either side of a boundary that disagree about
+// which primitives are in scope compute DIFFERENT surfaces at the same world
+// point, and the mesh tears. It is the same failure the game's clipmap hit when
+// each LOD level got its own sampling footprint.
+//
+// This bit hard: typed rooms shipped 500 interior holes. Widening the cull
+// radius for anisotropy took it to 186; swapping in a tighter ellipsoid
+// distance took it to 432. Both were treating the symptom — with smooth-min
+// blending, a primitive's INFLUENCE is not bounded by its geometric distance,
+// so no distance-based radius is provably safe.
+//
+// So: no culling. The field is now identical everywhere by construction, which
+// is the invariant the whole design rests on. Measured cost of dropping it at
+// this graph size (45 primitives) is small — see avgMeshMs in the HUD.
+// ⚠ THE SCALABLE FIX IS A WORLD-KEYED SPATIAL INDEX (a grid or BVH over the
+// primitives, queried by world position), NOT a per-chunk list. That keeps the
+// evaluated set a pure function of WHERE you sample, never of which chunk is
+// asking. Do that before the graph grows past a few hundred primitives.
+function cullDISABLED(ox, oy, oz, size, pad) {
+  const cx = ox + size * 0.5, cy = oy + size * 0.5, cz = oz + size * 0.5;
+  const rad = size * 0.8661 + pad;
+  const ch = [], tu = [];
+  for (const c of G.chambers) {
+    const d = Math.hypot(c.p[0] - cx, c.p[1] - cy, c.p[2] - cz);
+    // ⚠ ANISOTROPY MUST BE IN THE CULL RADIUS. A Rift is r=170 scaled
+    // [3.2,1.5,0.32] — it reaches 544 u along x, not 170. Culling on r alone
+    // meant a near chunk kept the room while its neighbour dropped it, so the
+    // two computed DIFFERENT fields either side of a shared boundary and the
+    // surface tore. Cost 500 interior holes the moment typed rooms landed;
+    // caught by manifoldProbe, invisible from most camera angles.
+    const smax = Math.max(c.s[0], Math.max(c.s[1], c.s[2]));
+    const reach = c.r * smax + (c.facet ? c.facet * 26 : 0);
+    if (d < rad + reach) ch.push(c);
+  }
+  for (const t of G.tunnels) {
+    // distance from the chunk centre to the segment
+    const ax = cx - t.a[0], ay = cy - t.a[1], az = cz - t.a[2];
+    const bx = t.b[0] - t.a[0], by = t.b[1] - t.a[1], bz = t.b[2] - t.a[2];
+    const bb = bx*bx + by*by + bz*bz;
+    let h = bb > 0 ? (ax*bx + ay*by + az*bz) / bb : 0;
+    h = h < 0 ? 0 : (h > 1 ? 1 : h);
+    const dx = ax - bx*h, dy = ay - by*h, dz = az - bz*h;
+    const d = Math.sqrt(dx*dx + dy*dy + dz*dz);
+    // Same hazard on passages: a Gallery is 2.0x wide, a Slot 1.7x tall, and
+    // rib pulses the radius up by (1+rib).
+    const pmax = Math.max(t.su || 1, t.sv || 1) * (1 + (t.rib || 0));
+    if (d < rad + Math.max(t.ra, t.rb) * pmax) tu.push(t);
+  }
+  return { chambers: ch, tunnels: tu, blend: G.blend, warp: G.warp, rough: G.rough };
+}
+
+function mesh(m) {
+  const N = m.cells, size = m.size, ox = m.ox, oy = m.oy, oz = m.oz;
+  const cell = size / N;
+  const t0 = performance.now();
+
+  // The blend + warp + roughness all push the surface away from the raw
+  // primitives, so the cull has to be padded by how far they can reach or
+  // walls vanish at chunk edges.
+  // The FULL primitive set, always — see the note on cullDISABLED above.
+  const g = G;
+
+  // Corner grid spans -1 .. N inclusive => N+2 per axis (the low apron).
+  const S = N + 2;
+  const val = new Float32Array(S * S * S);
+  let si = 0;
+  for (let k = -1; k <= N; k++) {
+    const wz = oz + k * cell;
+    for (let j = -1; j <= N; j++) {
+      const wy = oy + j * cell;
+      for (let i = -1; i <= N; i++) {
+        val[si++] = FIELD.eval(ox + i * cell, wy, wz, g);
+      }
+    }
+  }
+  const AT = (i, j, k) => val[((k + 1) * S + (j + 1)) * S + (i + 1)];
+
+  // One vertex per sign-changing cell, for cells -1 .. N-1.
+  const C = N + 1;
+  const vidx = new Int32Array(C * C * C).fill(-1);
+  const VI = (i, j, k) => ((k + 1) * C + (j + 1)) * C + (i + 1);
+  const pos = [], nrm = [], col = [], mat = [];
+  const EDGES = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
+
+  for (let k = -1; k < N; k++)
+  for (let j = -1; j < N; j++)
+  for (let i = -1; i < N; i++) {
+    const c = [
+      AT(i,j,k),     AT(i+1,j,k),   AT(i,j+1,k),   AT(i+1,j+1,k),
+      AT(i,j,k+1),   AT(i+1,j,k+1), AT(i,j+1,k+1), AT(i+1,j+1,k+1),
+    ];
+    let neg = 0;
+    for (let q = 0; q < 8; q++) if (c[q] < 0) neg++;
+    if (neg === 0 || neg === 8) continue;   // wholly rock or wholly open
+
+    let sx = 0, sy = 0, sz = 0, n = 0;
+    for (const [a, b] of EDGES) {
+      const va = c[a], vb = c[b];
+      if ((va < 0) === (vb < 0)) continue;
+      const t = va / (va - vb);                 // zero crossing along the edge
+      const ax = a & 1, ay = (a >> 1) & 1, az = (a >> 2) & 1;
+      const bx = b & 1, by = (b >> 1) & 1, bz = (b >> 2) & 1;
+      sx += ax + (bx - ax) * t; sy += ay + (by - ay) * t; sz += az + (bz - az) * t;
+      n++;
+    }
+    sx /= n; sy /= n; sz /= n;
+    vidx[VI(i,j,k)] = pos.length / 3;
+    pos.push(ox + (i + sx) * cell, oy + (j + sy) * cell, oz + (k + sz) * cell);
+    // Normal straight from the field gradient — smooth and exact, no
+    // per-face averaging pass needed.
+    // ⚠ NEGATED. The gradient points toward INCREASING field, i.e. INTO the
+    // rock; the face you see from inside the cavern points the other way.
+    // Un-negated this lights every wall from behind and the cave reads pitch
+    // black even with the lamp working.
+    const gr = FIELD.grad(ox + (i + sx) * cell, oy + (j + sy) * cell, oz + (k + sz) * cell, g, cell);
+    nrm.push(-gr[0], -gr[1], -gr[2]);
+
+    // STYLE: whichever primitive actually owns this vertex. Nearest wins —
+    // the same primitive the smooth-min is favouring here — so a wall takes
+    // the look of the room it belongs to, and vertices near a junction come
+    // out mixed because neighbouring vertices pick different owners and the
+    // rasteriser interpolates between them. That is the cross-fade, for free.
+    const wx = ox + (i + sx) * cell, wy = oy + (j + sy) * cell, wz = oz + (k + sz) * cell;
+    // ⚠ CHEAP ownership test on purpose — plain centre/segment distance minus
+    // radius, NOT the full SDF. Picking which room a vertex belongs to does not
+    // need ellipsoid, pillar, facet or twist math, and running the real thing
+    // per vertex was half the bake cost for zero visible benefit.
+    let best = null, bestD = 1e18;
+    const gl2 = FIELD.localSet(wx, wy, wz, g);
+    for (let q = 0; q < gl2.ch.length; q++) {
+      const c2 = gl2.ch[q];
+      const sm = Math.max(c2.s[0], Math.max(c2.s[1], c2.s[2]));
+      const dd = Math.hypot(wx - c2.p[0], wy - c2.p[1], wz - c2.p[2]) - c2.r * sm;
+      if (dd < bestD) { bestD = dd; best = c2; }
+    }
+    for (let q = 0; q < gl2.tu.length; q++) {
+      const t2 = gl2.tu[q];
+      const ax = wx - t2.a[0], ay = wy - t2.a[1], az = wz - t2.a[2];
+      const bx = t2.b[0] - t2.a[0], by = t2.b[1] - t2.a[1], bz = t2.b[2] - t2.a[2];
+      const bb = bx * bx + by * by + bz * bz;
+      let hh = bb > 0 ? (ax * bx + ay * by + az * bz) / bb : 0;
+      hh = hh < 0 ? 0 : (hh > 1 ? 1 : hh);
+      const ex = ax - bx * hh, ey = ay - by * hh, ez = az - bz * hh;
+      const dd = Math.sqrt(ex * ex + ey * ey + ez * ez) - Math.max(t2.ra, t2.rb);
+      if (dd < bestD) { bestD = dd; best = t2; }
+    }
+    const st = (best && best.st) || [0.42, 0.44, 0.47, 0.95, 0.15, 0, 0];
+    // Bake the SECOND FIELD here — colour/roughness/emissive as data, not as
+    // per-pixel shader work. See FIELD.shade.
+    const sh = FIELD.shade(wx, wy, wz, g, st);
+    col.push(sh[0], sh[1], sh[2]);
+    mat.push(sh[3], sh[4]);
+  }
+
+  // Quads. OWNERSHIP: only edges whose base corner is in [0,N).
+  const idx = [];
+  const quad = (a, b, c, d, flip) => {
+    if (a < 0 || b < 0 || c < 0 || d < 0) return;
+    if (flip) idx.push(a, c, b, b, c, d); else idx.push(a, b, c, b, d, c);
+  };
+  for (let k = 0; k < N; k++)
+  for (let j = 0; j < N; j++)
+  for (let i = 0; i < N; i++) {
+    const v0 = AT(i, j, k);
+    // edge +X: the four cells around it differ in j and k
+    if (i < N && (v0 < 0) !== (AT(i+1,j,k) < 0)) {
+      quad(vidx[VI(i,j-1,k-1)], vidx[VI(i,j,k-1)], vidx[VI(i,j-1,k)], vidx[VI(i,j,k)], v0 < 0);
+    }
+    if (j < N && (v0 < 0) !== (AT(i,j+1,k) < 0)) {
+      quad(vidx[VI(i-1,j,k-1)], vidx[VI(i-1,j,k)], vidx[VI(i,j,k-1)], vidx[VI(i,j,k)], v0 < 0);
+    }
+    if (k < N && (v0 < 0) !== (AT(i,j,k+1) < 0)) {
+      quad(vidx[VI(i-1,j-1,k)], vidx[VI(i,j-1,k)], vidx[VI(i-1,j,k)], vidx[VI(i,j,k)], v0 < 0);
+    }
+  }
+
+  if (!idx.length) return { key: m.key, empty: true, ms: performance.now() - t0, samples: S*S*S };
+
+  const P = new Float32Array(pos), Nn = new Float32Array(nrm);
+  const Cc = new Float32Array(col), Mm = new Float32Array(mat);
+  const I = (pos.length / 3 > 65535) ? new Uint32Array(idx) : new Uint16Array(idx);
+  return { key: m.key, empty: false, pos: P, nrm: Nn, col: Cc, mat: Mm, idx: I,
+           tris: idx.length / 3, ms: performance.now() - t0, samples: S*S*S };
+}
+`;
+
+
+// ---------------------------------------------------------------------
+// (4) SCENE + CHUNK STREAMING
+// ---------------------------------------------------------------------
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x05070c, 0.00055);
+const camera = new THREE.PerspectiveCamera(78, innerWidth / innerHeight, 1, 8000);
+
+scene.add(new THREE.AmbientLight(0x22304a, 0.55));
+// ⚠ PHYSICAL LIGHT UNITS. three r165 dropped useLegacyLights, so intensity is
+// candela and range falls off as 1/d^decay. At this scale (chamber walls are
+// 150-260 u out) an "ordinary looking" intensity of ~3 delivers 3/131^1.4 ≈
+// 0.003 — a pitch-black cave that looks like a broken mesh. The game hit this
+// exact trap and settled on candela-scale 2200 with decay 1 for its headlight;
+// same reasoning here.
+// Sized for THIS scale: with decay 1 the illumination at distance d is
+// intensity/d, so ~380 gives ≈1.9 on a 200 u chamber wall and ≈0.5 at 800 u
+// down a tunnel — lit near, falling into dark depth. (The game's headlight
+// uses 2200 because it lights walls hundreds-to-thousands of units out;
+// copying that number here blows the near walls to pure white.)
+const headlamp = new THREE.PointLight(0xffe6c2, 900, 3000, 1.0);
+// ⚠ OFFSET FROM THE EYE ON PURPOSE. A lamp exactly at the camera lights every
+// surface along the view vector, so N·L is ~1 everywhere and the cave reads as
+// a flat grey wash with no shape at all — it looks broken even when the mesh is
+// perfect. Pushing it down/right of the eye reintroduces the shading gradient
+// that tells you where the walls actually are.
+headlamp.position.set(60, -45, 20);
+camera.add(headlamp);
+scene.add(camera);
+const fill = new THREE.DirectionalLight(0x4d7fb8, 0.5);
+fill.position.set(0.4, 1, 0.25);
+scene.add(fill);
+
+// FADE-IN. A chunk arriving at full brightness reads as a hard pop — the
+// owner's "black to colored immediately". Each chunk gets its own material
+// clone carrying a uFade uniform and ramps 0->1 over FADE_SEC, mixing from the
+// FOG colour so a new chunk emerges out of the same darkness the distance
+// already fades into.
+// ⚠ Fading via material.opacity would need transparent:true, which puts solid
+// rock into the sorted transparent pass and produces depth artefacts where
+// chunks overlap. Mixing toward fog in the fragment shader keeps everything
+// opaque and correctly depth-sorted.
+// The clones all share ONE program: three keys its program cache on
+// onBeforeCompile.toString(), which is identical across clones, so this costs
+// uniforms and not shader compiles.
+const FADE_SEC = 0.42;
+const FOG_RGB = new THREE.Color(0x05070c);
+
+// ---------------------------------------------------------------------
+// DETAIL TEXTURE — where the fine grain comes from now.
+//
+// Generated once into a canvas (so the lab stays a single file with no
+// assets), then TRIPLANAR-mapped in the fragment shader. This is the right
+// home for high-frequency detail:
+//   - resolution is the TEXTURE's, not the mesh's, so it does not blur out
+//     the way per-vertex baking did at 14 u spacing;
+//   - cost is a texture fetch, not a noise evaluation, so it does not blow up
+//     per-pixel the way procedural fbm did.
+// Triplanar rather than UVs because this geometry has no sensible unwrap —
+// marching a field gives you positions and normals, never a UV chart.
+// ⚠ MUST TILE SEAMLESSLY: sampled by world position, so any seam would repeat
+// across the entire cave on a fixed grid and read as a wallpaper join.
+// Built by wrapping the noise lattice modulo the texture size.
+function makeDetailTexture(size) {
+  const N = size || 256;
+  const cv = document.createElement('canvas'); cv.width = cv.height = N;
+  const ctx = cv.getContext('2d');
+  const img = ctx.createImageData(N, N);
+  const H = (x, y) => {
+    let h = (x & 1023) * 374761393 + (y & 1023) * 668265263;
+    h = (h ^ (h >>> 13)) * 1274126177;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  };
+  // Value noise on a lattice that WRAPS at `per`, so every octave tiles.
+  const oct = (x, y, per) => {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = x - xi, yf = y - yi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    const w = (a, b) => H(((a % per) + per) % per, ((b % per) + per) % per);
+    const a = w(xi, yi), b = w(xi + 1, yi), c = w(xi, yi + 1), d = w(xi + 1, yi + 1);
+    return (a + (b - a) * u) + ((c + (d - c) * u) - (a + (b - a) * u)) * v;
+  };
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    let f = 0, amp = 1, per = 8, tot = 0;
+    for (let o = 0; o < 5; o++) {
+      f += oct(x / N * per, y / N * per, per) * amp;
+      tot += amp; amp *= 0.55; per *= 2;
+    }
+    f /= tot;
+    // Ridged variant in the green channel gives the shader a second, more
+    // crack-like signal to mix in without a second texture fetch.
+    const r = 1 - Math.abs(f * 2 - 1);
+    const i = (y * N + x) * 4;
+    img.data[i] = Math.max(0, Math.min(255, f * 255)) | 0;
+    img.data[i + 1] = Math.max(0, Math.min(255, r * r * 255)) | 0;
+    img.data[i + 2] = 128; img.data[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.anisotropy = 8;
+  return tex;
+}
+const DETAIL_TEX = makeDetailTexture(256);
+function makeRockMat() {
+  const m = new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.94, metalness: 0.04, flatShading: false,
+    vertexColors: true,                       // albedo comes from the style
+  });
+  m._fadeU = { value: 0 };
+  m._styleU = { value: 1 };                   // global style strength, live knob
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uFade = m._fadeU;
+    sh.uniforms.uStyle = m._styleU;
+    sh.uniforms.uFogRGB = { value: FOG_RGB };
+    // aMat = (roughness, strata, sparkle, glow) — one interpolated vec4 that
+    // carries the entire per-room look. Everything below is driven by it, so
+    // there is ONE program for every room type in the world and no possible
+    // compile hitch when a new type streams in.
+    // ⚠ THE FRAGMENT SHADER DOES NO PROCEDURAL WORK ANY MORE.
+    // Every noise octave, the strata, the veins and the mineral patches are
+    // BAKED PER VERTEX by FIELD.shade in the worker (see the note there). What
+    // is left is two interpolated values and a lerp — so this costs about what
+    // a plain MeshStandardMaterial costs, and the look no longer scales with
+    // pixel count. uStyle just fades the baked colour back toward flat rock,
+    // which is why it can still be a live knob with zero shader cost.
+    sh.vertexShader = 'attribute vec2 aMat;\nvarying vec2 vMat;\n' +
+      sh.vertexShader.replace('#include <begin_vertex>',
+        `#include <begin_vertex>
+         vMat = aMat;`);
+    sh.fragmentShader =
+      'uniform float uFade;\nuniform float uStyle;\nuniform vec3 uFogRGB;\nvarying vec2 vMat;\n' +
+      sh.fragmentShader
+      .replace('#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+         roughnessFactor = mix(roughnessFactor, vMat.x, uStyle);`)
+      .replace('#include <color_fragment>',
+        `#include <color_fragment>
+         // uStyle 0 -> neutral grey rock, for judging geometry without paint.
+         diffuseColor.rgb = mix(vec3(0.42, 0.44, 0.47), diffuseColor.rgb, uStyle);`)
+      .replace('#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+         totalEmissiveRadiance += vec3(0.35, 0.85, 0.70) * vMat.y * uStyle * 2.2;
+         float _d = clamp(length(vViewPosition) / 2600.0, 0.0, 1.0);
+         totalEmissiveRadiance += vec3(0.05, 0.10, 0.18) * _d * _d;`)
+      .replace('#include <dithering_fragment>',
+        `#include <dithering_fragment>
+         gl_FragColor.rgb = mix(uFogRGB, gl_FragColor.rgb, uFade);`);
+  };
+  return m;
+}
+// ---------------------------------------------------------------------
+// HOLO MODE — solid dark shell + glowing wireframe over it.
+//
+// Straight `material.wireframe = true` looks great and runs fast, but it is
+// see-through: with no depth occlusion you read every chunk in the world at
+// once and the space stops being legible (and, in a game, stops hiding
+// anything). So draw BOTH — a very cheap dark solid that writes depth, and the
+// wire on top of it. You keep the look and the speed, and get occlusion back.
+//
+// The wire carries the SAME baked vertex colour and emissive as the solid, so
+// the glowing seams the owner liked show up as bright lines rather than as a
+// wash — which is exactly why they read better in wireframe in the first place:
+// the glow was being spread over a filled triangle instead of concentrated on
+// an edge.
+function makeShellMat() {
+  const m = new THREE.MeshBasicMaterial({ color: 0x05080e });
+  m.polygonOffset = true; m.polygonOffsetFactor = 1; m.polygonOffsetUnits = 1;
+  return m;
+}
+function makeWireMat() {
+  const m = new THREE.MeshBasicMaterial({ wireframe: true, vertexColors: true });
+  m._fadeU = { value: 0 };
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uFade = m._fadeU;
+    sh.vertexShader = 'attribute vec2 aMat;\nvarying float vEm;\n' +
+      sh.vertexShader.replace('#include <begin_vertex>',
+        '#include <begin_vertex>\n vEm = aMat.y;');
+    sh.fragmentShader = 'uniform float uFade;\nvarying float vEm;\n' + sh.fragmentShader
+      .replace('#include <dithering_fragment>',
+        `#include <dithering_fragment>
+         gl_FragColor.rgb = gl_FragColor.rgb * 1.35 + vec3(0.35,0.95,0.80) * vEm * 3.0;
+         gl_FragColor.rgb *= uFade;`);
+  };
+  return m;
+}
+
+// Kept only so the wireframe checkbox has something to toggle globally.
+const rockMat = makeRockMat();
+const STATE = {
+  seed: 1337, cells: 32, size: 340, view: 3,
+  collide: true, gallery: false, style: 1, mode: 'holo',
+};
+let graph = buildGraph(STATE.seed);
+
+const chunks = new Map();          // key -> {mesh, state}
+const pending = new Map();         // key -> true
+let builtTotal = 0, meshMsTotal = 0, lastMeshMs = 0;
+
+// ⚠ WORKER POOL, NOT ONE WORKER. A single worker at ~17 ms/chunk fills a
+// 120-chunk ring in ~2 s, which reads exactly like the owner's "I turn around
+// and it forgets what's loaded" — the chunks were never built yet, not evicted.
+// Meshing is pure CPU with no shared state, so it parallelises perfectly.
+// Leave a core for the main thread and the compositor.
+const NWORK = Math.max(2, Math.min(8, (navigator.hardwareConcurrency || 4) - 2));
+let workers = [], inflight = 0;
+const MAXFLIGHT = NWORK * 2;       // keep every worker fed without a deep queue
+
+function startWorkers() {
+  for (const w of workers) w.terminate();
+  workers = [];
+  const url = URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }));
+  for (let n = 0; n < NWORK; n++) {
+    const w = new Worker(url);
+    w.onmessage = (e) => {
+      const r = e.data;
+      inflight--;
+      pending.delete(r.key);
+      builtTotal++; meshMsTotal += r.ms; lastMeshMs = r.ms;
+      if (r.empty) { chunks.set(r.key, { mesh: null }); return; }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(r.pos, 3));
+      geo.setAttribute('normal', new THREE.BufferAttribute(r.nrm, 3));
+      geo.setAttribute('color', new THREE.BufferAttribute(r.col, 3));
+      geo.setAttribute('aMat', new THREE.BufferAttribute(r.mat, 2));
+      geo.setIndex(new THREE.BufferAttribute(r.idx, 1));
+      geo.computeBoundingSphere();
+      const mat = makeRockMat();
+      mat._styleU.value = (STATE.style == null ? 1 : STATE.style);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.frustumCulled = true;
+      scene.add(mesh);
+      // Shell + wire share the SAME geometry — no extra memory, and the wire
+      // inherits the baked colour/emissive so glow lands on the lines.
+      const shellMat = makeShellMat();
+      const shell = new THREE.Mesh(geo, shellMat);
+      shell.frustumCulled = true; scene.add(shell);
+      const wireMat = makeWireMat();
+      const wire = new THREE.Mesh(geo, wireMat);
+      wire.frustumCulled = true; scene.add(wire);
+      const c = { mesh, shell, wire, tris: r.tris, mat, shellMat, wireMat, fade: 0 };
+      applyMode(c);
+      chunks.set(r.key, c);
+    };
+    w.postMessage({ cmd: 'init', graph });
+    workers.push(w);
+  }
+}
+startWorkers();
+let rr = 0;
+const nextWorker = () => workers[(rr++) % workers.length];
+
+// ⚠ EVICTION HYSTERESIS. Chunks cost ~17 ms each to build, so throwing one
+// away the instant it leaves the request ring and rebuilding it when you turn
+// back is the worst trade available. Hold a generous shell beyond the ring;
+// geometry is cheap to keep and expensive to recreate.
+const KEEP_EXTRA = 3.2;
+
+// Which of the three meshes a chunk shows. Geometry is shared, so switching
+// mode costs three boolean writes — no rebuild, no re-upload.
+function applyMode(c) {
+  const m = STATE.mode;
+  if (c.mesh)  c.mesh.visible  = (m === 'solid');
+  if (c.shell) c.shell.visible = (m === 'holo');
+  if (c.wire)  c.wire.visible  = (m === 'holo' || m === 'wire');
+}
+function disposeChunk(c) {
+  if (c.mesh)  { scene.remove(c.mesh); }
+  if (c.shell) { scene.remove(c.shell); }
+  if (c.wire)  { scene.remove(c.wire); }
+  if (c.mesh && c.mesh.geometry) c.mesh.geometry.dispose();   // shared by all three
+  if (c.mat) c.mat.dispose();
+  if (c.shellMat) c.shellMat.dispose();
+  if (c.wireMat) c.wireMat.dispose();
+}
+
+const key = (i, j, k) => i + ',' + j + ',' + k;
+
+function streamChunks() {
+  const S = STATE.size;
+  const ci = Math.floor(camera.position.x / S);
+  const cj = Math.floor(camera.position.y / S);
+  const ck = Math.floor(camera.position.z / S);
+  const V = STATE.view;
+
+  // Request near-to-far so the space in front of you resolves first.
+  const want = [];
+  for (let k = ck - V; k <= ck + V; k++)
+  for (let j = cj - V; j <= cj + V; j++)
+  for (let i = ci - V; i <= ci + V; i++) {
+    const d = Math.hypot(i - ci, j - cj, k - ck);
+    if (d > V + 0.5) continue;
+    want.push({ i, j, k, d, key: key(i, j, k) });
+  }
+  want.sort((a, b) => a.d - b.d);
+
+  const wanted = new Set(want.map(w => w.key));
+  for (const w of want) {
+    if (chunks.has(w.key) || pending.has(w.key)) continue;
+    if (inflight >= MAXFLIGHT) break;
+    pending.set(w.key, true); inflight++;
+    nextWorker().postMessage({ cmd: 'chunk', key: w.key, cells: STATE.cells, size: S,
+                               ox: w.i * S, oy: w.j * S, oz: w.k * S });
+  }
+  // Evict anything outside the ring (+1 hysteresis so a chunk on the
+  // boundary does not thrash build/dispose as you drift across it).
+  for (const [k2, c] of chunks) {
+    if (wanted.has(k2)) continue;
+    const [a, b, cc] = k2.split(',').map(Number);
+    if (Math.hypot(a - ci, b - cj, cc - ck) < V + KEEP_EXTRA) continue;
+    if (c.mesh) { disposeChunk(c); }
+    chunks.delete(k2);
+  }
+}
+
+function rebuildAll() {
+  for (const [, c] of chunks) if (c.mesh) { disposeChunk(c); }
+  chunks.clear(); pending.clear(); inflight = 0;
+  builtTotal = 0; meshMsTotal = 0;
+  startWorkers();
+}
+
+
+// ---------------------------------------------------------------------
+// (5) 6DOF FLIGHT + FIELD COLLISION
+//
+// Collision is FIELD-BASED, not mesh-based: sample the SDF at the ship
+// and push out along the gradient. No collision meshes to build, keep in
+// sync, or rebuild when a chunk streams — and it works even where the
+// visual chunk has not arrived yet, which is exactly where mesh collision
+// would drop you through the world.
+// ---------------------------------------------------------------------
+const vel = new THREE.Vector3();
+const keys = Object.create(null);
+addEventListener('keydown', e => { keys[e.code] = true; });
+addEventListener('keyup',   e => { keys[e.code] = false; });
+renderer.domElement.addEventListener('click', () => renderer.domElement.requestPointerLock());
+addEventListener('mousemove', (e) => {
+  if (document.pointerLockElement !== renderer.domElement) return;
+  const q = new THREE.Quaternion();
+  q.setFromAxisAngle(new THREE.Vector3(0, 1, 0), -e.movementX * 0.0022);
+  camera.quaternion.multiplyQuaternions(q, camera.quaternion);
+  q.setFromAxisAngle(new THREE.Vector3(1, 0, 0), -e.movementY * 0.0022);
+  camera.quaternion.multiply(q);
+});
+
+const SHIP_R = 26;
+let stuckFrames = 0;
+
+function spawnAtStart() {
+  const c = graph.chambers[0];
+  camera.position.set(c.p[0], c.p[1], c.p[2]);
+  camera.quaternion.identity();
+  vel.set(0, 0, 0);
+}
+spawnAtStart();
+
+function flight(dt) {
+  const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+  const boost = keys['ShiftLeft'] || keys['ShiftRight'] ? 2.6 : 1;
+  const A = 2400 * boost;
+  const acc = new THREE.Vector3();
+  if (keys['KeyW']) acc.addScaledVector(fwd, A);
+  if (keys['KeyS']) acc.addScaledVector(fwd, -A);
+  if (keys['KeyD']) acc.addScaledVector(right, A);
+  if (keys['KeyA']) acc.addScaledVector(right, -A);
+  if (keys['KeyR']) acc.addScaledVector(up, A);
+  if (keys['KeyF']) acc.addScaledVector(up, -A);
+  if (keys['KeyQ'] || keys['KeyE']) {
+    const q = new THREE.Quaternion();
+    q.setFromAxisAngle(new THREE.Vector3(0, 0, 1), (keys['KeyQ'] ? 1 : -1) * 1.7 * dt);
+    camera.quaternion.multiply(q);
+  }
+  vel.addScaledVector(acc, dt);
+  vel.multiplyScalar(Math.pow(0.06, dt));       // drag
+  camera.position.addScaledVector(vel, dt);
+
+  if (!STATE.collide) { stuckFrames = 0; return; }
+  // Push out of rock. Iterate a couple of times: one step can leave you
+  // inside a concave junction where two walls meet.
+  let inside = 0;
+  for (let it = 0; it < 3; it++) {
+    const d = FIELD.eval(camera.position.x, camera.position.y, camera.position.z, graph);
+    if (d < -SHIP_R) break;
+    inside++;
+    const g = FIELD.grad(camera.position.x, camera.position.y, camera.position.z, graph, 3.0);
+    const push = (d + SHIP_R) * 1.05;
+    camera.position.x -= g[0] * push;
+    camera.position.y -= g[1] * push;
+    camera.position.z -= g[2] * push;
+    // Kill the into-wall component of velocity so you slide instead of
+    // sticking, and do not accumulate speed grinding along rock.
+    const vd = vel.x * g[0] + vel.y * g[1] + vel.z * g[2];
+    if (vd > 0) { vel.x -= g[0] * vd; vel.y -= g[1] * vd; vel.z -= g[2] * vd; }
+  }
+  stuckFrames = inside ? stuckFrames + 1 : 0;
+}
+
+
+// ---------------------------------------------------------------------
+// (6) HUD / knobs / loop
+// ---------------------------------------------------------------------
+const hud = document.getElementById('hud');
+const stall = document.getElementById('stall');
+let frames = 0, fps = 0, acc = 0, worstFrame = 0, lastT = performance.now();
+
+function loop() {
+  requestAnimationFrame(loop);
+  const now = performance.now();
+  let dt = (now - lastT) / 1000; lastT = now;
+  if (dt > 0.25) dt = 0.25;
+  const frameMs = dt * 1000;
+  if (frameMs > worstFrame) worstFrame = frameMs;
+
+  flight(dt);
+  streamChunks();
+  // Ramp each freshly-built chunk out of the fog colour. Cheap: one uniform
+  // write per fading chunk, and finished chunks drop out of the loop.
+  for (const [, c] of chunks) {
+    if (!c.mat || c.fade >= 1) continue;
+    c.fade = Math.min(1, c.fade + dt / FADE_SEC);
+    c.mat._fadeU.value = c.fade;
+    if (c.wireMat) c.wireMat._fadeU.value = c.fade;
+  }
+  renderer.render(scene, camera);
+
+  frames++; acc += dt;
+  if (acc >= 0.5) {
+    fps = Math.round(frames / acc); frames = 0; acc = 0;
+    let tris = 0, live = 0;
+    for (const [, c] of chunks) if (c.mesh) { live++; tris += c.tris || 0; }
+    const d = FIELD.eval(camera.position.x, camera.position.y, camera.position.z, graph);
+    hud.innerHTML =
+      `<b>${fps} fps</b>   worst ${worstFrame.toFixed(1)} ms\n` +
+      `chunks ${live} live · ${pending.size} queued · ${inflight} inflight\n` +
+      `tris ${(tris / 1000).toFixed(1)}k   built ${builtTotal}\n` +
+      `mesh ${lastMeshMs.toFixed(1)} ms last · ${(meshMsTotal / Math.max(1, builtTotal)).toFixed(1)} avg\n` +
+      `pos ${camera.position.x.toFixed(0)},${camera.position.y.toFixed(0)},${camera.position.z.toFixed(0)}\n` +
+      `field ${d.toFixed(1)} ${d < 0 ? '(open)' : '<span class="warn">(ROCK)</span>'}\n` +
+      `graph ${graph.chambers.length} chambers · ${graph.tunnels.length} tunnels · ${graph.loops} loops\n` +
+      `<b>${whereAmI()}</b>`;
+    worstFrame = 0;
+    stall.style.display = stuckFrames > 30 ? 'block' : 'none';
+    if (stuckFrames > 30) stall.textContent = 'STUCK — collision cannot resolve. Press "respawn at start".';
+  }
+}
+loop();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ⚠ Browsers RESTORE form control values across a reload, which silently
+// overrode the intended defaults (the cells slider came back at 56 and chunk
+// went to 195k samples / 677 ms). Push our defaults into the DOM at startup so
+// the code is the source of truth, not the previous session.
+for (const [id, vid, v] of [['cells','cellsV',STATE.cells], ['view','viewV',STATE.view],
+                            ['warp','warpV',STATE.warp==null?40:STATE.warp],
+                            ['rough','roughV',STATE.rough==null?14:STATE.rough],
+                            ['style','styleV',100]]) {
+  const el = document.getElementById(id); if (!el) continue;
+  el.value = v; const o = document.getElementById(vid); if (o) o.textContent = v;
+}
+{ const el = document.getElementById('mode'); if (el) el.value = STATE.mode; }
+
+const bind = (id, vid, k, after) => {
+  const el = document.getElementById(id), out = document.getElementById(vid);
+  el.oninput = () => { STATE[k] = +el.value; out.textContent = el.value; if (after) after(); };
+};
+bind('cells', 'cellsV', 'cells', rebuildAll);
+bind('view',  'viewV',  'view');
+bind('warp',  'warpV',  'warp',  () => { graph.warp = STATE.warp; buildIndex(graph); rebuildAll(); });
+bind('rough', 'roughV', 'rough', () => { graph.rough = STATE.rough; buildIndex(graph); rebuildAll(); });
+// Live style strength: 0 = plain grey rock everywhere (useful for judging the
+// GEOMETRY without the paint), 100 = as authored, 200 = exaggerated for tuning.
+// One uniform per chunk material — no rebuild, no recompile.
+{
+  const el = document.getElementById('style'), out = document.getElementById('styleV');
+  el.oninput = () => {
+    out.textContent = el.value;
+    STATE.style = +el.value / 100;
+    for (const [, c] of chunks) if (c.mat) c.mat._styleU.value = STATE.style;
+  };
+}
+document.getElementById('coll').onchange = e => STATE.collide = e.target.checked;
+document.getElementById('mode').onchange = e => {
+  STATE.mode = e.target.value;
+  for (const [, c] of chunks) applyMode(c);
+};
+document.getElementById('reseed').onclick = () => {
+  STATE.seed = (Math.random() * 1e9) | 0;
+  graph = buildGraph(STATE.seed);
+  graph.warp = STATE.warp; graph.rough = STATE.rough;
+  rebuildAll(); spawnAtStart();
+};
+document.getElementById('respawn').onclick = spawnAtStart;
+document.getElementById('gallery').onclick = () => {
+  STATE.gallery = !STATE.gallery;
+  graph = STATE.gallery ? buildGallery() : buildGraph(STATE.seed);
+  if (!STATE.gallery) { graph.warp = STATE.warp; graph.rough = STATE.rough; }
+  document.getElementById('gallery').textContent =
+    STATE.gallery ? '◂ back to cave' : 'gallery: every type ▸';
+  rebuildAll(); spawnAtStart();
+};
+
+// Which room / passage am I in? Nearest-primitive lookup, refreshed with the
+// HUD rather than per-frame — it is a readout, not a gameplay input.
+function whereAmI() {
+  const p = camera.position;
+  let bestR = null, bestRd = 1e9, bestT = null, bestTd = 1e9;
+  for (const c of graph.chambers) {
+    const d = Math.hypot(p.x - c.p[0], p.y - c.p[1], p.z - c.p[2]) - c.r;
+    if (d < bestRd) { bestRd = d; bestR = c; }
+  }
+  for (const t of graph.tunnels) {
+    const ax = p.x - t.a[0], ay = p.y - t.a[1], az = p.z - t.a[2];
+    const bx = t.b[0] - t.a[0], by = t.b[1] - t.a[1], bz = t.b[2] - t.a[2];
+    const bb = bx * bx + by * by + bz * bz;
+    let h = bb > 0 ? (ax * bx + ay * by + az * bz) / bb : 0;
+    h = h < 0 ? 0 : (h > 1 ? 1 : h);
+    const dx = ax - bx * h, dy = ay - by * h, dz = az - bz * h;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz) - (t.ra + (t.rb - t.ra) * h);
+    if (d < bestTd) { bestTd = d; bestT = t; }
+  }
+  const inRoom = bestRd <= bestTd;
+  const k = inRoom ? (bestR && bestR.kind) : (bestT && bestT.kind);
+  const nm = inRoom ? (ROOM_TYPES[k] && ROOM_TYPES[k].name) : (PASS_TYPES[k] && PASS_TYPES[k].name);
+  return (inRoom ? 'room ' : 'passage ') + (nm || '?');
+}
+
+// Console handles, same convention as the game's __* tuners.
+window.__deep = {
+  STATE, get graph() { return graph; }, FIELD,
+  scene, camera, renderer, rockMat, chunks,
+  ROOM_TYPES, PASS_TYPES, buildIndex,
+  // Swap in a mutated graph and rebuild — for isolating which shape feature
+  // costs manifoldness.
+  setGraph(g) { graph = buildIndex(g); rebuildAll(); },
+  at: (x, y, z) => FIELD.eval(x, y, z, graph),
+  reseed: (s) => { STATE.seed = s; graph = buildGraph(s); graph.warp = STATE.warp;
+                   graph.rough = STATE.rough; rebuildAll(); spawnAtStart(); },
+  // SEAM AUDIT — a real manifold check across the whole loaded region.
+  //
+  // A closed surface has every edge shared by exactly TWO triangles. Build one
+  // edge map over ALL loaded chunks in world space: if the cross-chunk
+  // ownership rule is right, chunk A's boundary triangles pair with chunk B's
+  // and the only unpaired edges are on the OUTER rim of the loaded region
+  // (where the neighbour simply is not built yet). A seam or a hole shows up
+  // as unpaired edges deep inside the region.
+  //
+  // ⚠ Positions are quantised before hashing. Two chunks compute the same
+  // boundary vertex from the same field samples, but through different
+  // arithmetic order, so they can differ in the last float bit — an exact
+  // key would report every shared edge as a hole.
+  manifoldProbe() {
+    const edges = new Map();
+    const Q = 1e3;                       // ~0.001 u quantisation
+    const k3 = (x, y, z) => Math.round(x * Q) + '_' + Math.round(y * Q) + '_' + Math.round(z * Q);
+    let tris = 0, meshes = 0;
+    // Track the loaded region so rim edges can be excluded from the verdict.
+    let minX = 1e9, minY = 1e9, minZ = 1e9, maxX = -1e9, maxY = -1e9, maxZ = -1e9;
+    for (const [, c] of chunks) {
+      if (!c.mesh) continue;
+      meshes++;
+      const p = c.mesh.geometry.getAttribute('position').array;
+      const ix = c.mesh.geometry.getIndex().array;
+      for (let t = 0; t < ix.length; t += 3) {
+        tris++;
+        const K = [];
+        for (let e = 0; e < 3; e++) {
+          const a = ix[t + e] * 3;
+          if (p[a] < minX) minX = p[a];   if (p[a] > maxX) maxX = p[a];
+          if (p[a+1] < minY) minY = p[a+1]; if (p[a+1] > maxY) maxY = p[a+1];
+          if (p[a+2] < minZ) minZ = p[a+2]; if (p[a+2] > maxZ) maxZ = p[a+2];
+          K.push(k3(p[a], p[a + 1], p[a + 2]));
+        }
+        for (let e = 0; e < 3; e++) {
+          const u = K[e], v = K[(e + 1) % 3];
+          const key = u < v ? u + '|' + v : v + '|' + u;
+          edges.set(key, (edges.get(key) || 0) + 1);
+        }
+      }
+    }
+    // ⚠ MULTIPLICITY IS THE WHOLE STORY, and the two failures look identical
+    // if you only count "not 2":
+    //   n == 1  a genuine HOLE — you can see through the world here. Fatal.
+    //   n >= 3  an over-connected PINCH — the surface is still closed, two
+    //           sheets just share a vertex. Invisible in play.
+    // Naive surface nets emits exactly ONE vertex per cell, so a cell the
+    // surface passes through twice welds both sheets and produces n == 4.
+    // That is a known limitation with a known fix (manifold dual contouring
+    // splits such cells into several vertices) — but it is NOT a seam and
+    // must not be reported as one.
+    let paired = 0, holes = 0, pinches = 0, rim = 0;
+    const M = STATE.size * 0.55;          // rim band = anything near the region edge
+    for (const [key, n] of edges) {
+      if (n === 2) { paired++; continue; }
+      const [x, y, z] = key.split('|')[0].split('_').map(v => +v / Q);
+      const onRim = x < minX + M || x > maxX - M || y < minY + M || y > maxY - M ||
+                    z < minZ + M || z > maxZ - M;
+      // ⚠ THE BOUNDING-BOX RIM TEST IS NOT ENOUGH. A winding cave leaves plenty
+      // of UNBUILT chunks in the middle of the box, and an edge facing one is a
+      // legitimate open boundary, not a hole. Reported 964 false holes the
+      // moment the joint-set generator made the cave elongated and sparse.
+      // The honest test is per-edge: is the chunk on the other side actually
+      // built? Only then is an unpaired edge a real defect.
+      const S = STATE.size;
+      const ci2 = Math.floor(x / S), cj2 = Math.floor(y / S), ck2 = Math.floor(z / S);
+      let openNeighbour = false;
+      for (let a = -1; a <= 1 && !openNeighbour; a++)
+      for (let b = -1; b <= 1 && !openNeighbour; b++)
+      for (let c2 = -1; c2 <= 1 && !openNeighbour; c2++) {
+        if (!a && !b && !c2) continue;
+        if (!chunks.has((ci2 + a) + ',' + (cj2 + b) + ',' + (ck2 + c2))) openNeighbour = true;
+      }
+      if (onRim || openNeighbour) { rim++; continue; }
+      if (n === 1) holes++; else pinches++;
+    }
+    return { meshes, tris, edges: edges.size, paired, rimEdges: rim,
+             interiorHoles: holes, interiorPinches: pinches,
+             verdict: holes === 0
+               ? ('NO SEAMS — surface closed across chunk boundaries'
+                  + (pinches ? ' (' + pinches + ' non-manifold pinch points, cosmetic)' : ''))
+               : ('HOLES: ' + holes + ' interior unpaired edges — chunk ownership is wrong') };
+  },
+  stats() {
+    let tris = 0, live = 0;
+    for (const [, c] of chunks) if (c.mesh) { live++; tris += c.tris || 0; }
+    return { fps, live, tris, builtTotal, avgMeshMs: meshMsTotal / Math.max(1, builtTotal) };
+  },
+};
+</script>
