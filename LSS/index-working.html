@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.62';
+const LSS_BUILD = '36.65';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -30165,7 +30165,7 @@ const _ARENA_FIELD_SRC = `{
     // bioluminescent patches (the material tints this band's glow violet).
     if (g.mystBand === band) {
       const spot = Math.pow(Math.max(0, 1 - Math.abs(this.noise(px*0.02, py*0.02, pz*0.02))), 8);
-      glow = Math.max(glow, spot * 0.55);
+      glow = Math.max(glow, spot * 0.42);
     }
     if (g.lavaY !== undefined && py < g.lavaY + 160) {
       // Basalt darkening approaching the lava band, then the lake itself:
@@ -30227,7 +30227,11 @@ function _arenaBuildParams(a, rooms) {
   const themes = [
     [0.21, 0.15, 0.13],
     [0.44, 0.34, 0.20],
-    [0.19, 0.33, 0.17],
+    // (v36.64) The mystical storey was a lurid yellow-green carrying a neon
+    // grape glow, and the two clashed hard (owner: "it looks tacky"). Now a
+    // DEEPER, BLUE-SHIFTED moss — it sits under an aqua bioluminescence
+    // instead of fighting a purple one.
+    [0.15, 0.27, 0.24],
     [0.68, 0.74, 0.82],
   ].slice(0, floors + 1);
   while (themes.length < floors + 1) themes.push(themes[themes.length - 1]);
@@ -30281,6 +30285,9 @@ const _arenaMesh = {
   // url: the worker blob URL (revoked in dispose — abort paths must not
   // leak it) ; hud: cached #map-gen-hud element while we own its text.
   t0: 0, url: null, hud: null,
+  // (v36.64) GasCloud handles for the shaft cloud columns — they hold slots
+  // in the shared billboard cloud system, so they need explicit release.
+  clouds: null,
 };
 function _arenaMeshCells() {
   // Quest/mobile: coarser cells (fewer evals AND fewer tris). Desktop 24
@@ -30312,15 +30319,35 @@ function _arenaMakeMaterial() {
   // instead of cyan. Set from G.floorY around G.mystBand per build.
   m._uMystLo = { value: 1e9 };
   m._uMystHi = { value: 1e9 };
+  // (v36.65) MINERAL FLECKS — amethyst in the mystical band, gold in the
+  // bronze band. Band range set per build from G.floorY.
+  m._uBronzeLo = { value: 1e9 };
+  m._uBronzeHi = { value: 1e9 };
   m.onBeforeCompile = (sh) => {
     sh.uniforms.uArenaLavaY = m._uLavaY;
     sh.uniforms.uArenaMystLo = m._uMystLo;
     sh.uniforms.uArenaMystHi = m._uMystHi;
+    sh.uniforms.uArenaBronzeLo = m._uBronzeLo;
+    sh.uniforms.uArenaBronzeHi = m._uBronzeHi;
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying float vAWy;')
-      .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vAWy = position.y;');
+      .replace('#include <common>', '#include <common>\nvarying float vAWy;\nvarying vec3 vAWP;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vAWy = position.y;\n  vAWP = position;');
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying float vAWy;\nuniform float uArenaLavaY;\nuniform float uArenaMystLo;\nuniform float uArenaMystHi;')
+      .replace('#include <common>', '#include <common>\nvarying float vAWy;\nvarying vec3 vAWP;\n' +
+        'uniform float uArenaLavaY;\nuniform float uArenaMystLo;\nuniform float uArenaMystHi;\n' +
+        'uniform float uArenaBronzeLo;\nuniform float uArenaBronzeHi;\n' +
+        // ⚠ Flecks are computed PER-FRAGMENT from world position, not baked
+        // per-vertex: mesh vertices are ~25 u apart, so a vertex-colour
+        // fleck would be a 25 u blotch. A cell hash at ~3 u gives real
+        // mineral specks. Identity matrices make object space world space.
+        'float _arFleck(vec3 p, float freq){\n' +
+        '  vec3 c = floor(p * freq);\n' +
+        '  float h = fract(sin(dot(c, vec3(127.1, 311.7, 74.7))) * 43758.5453);\n' +
+        // ⚠ RARITY IS THE WHOLE LOOK. The first cut used a 0.982 threshold
+        // (~1.8% of cells) over two octaves and read as dense magenta
+        // confetti covering the walls. A fleck is a GLINT: ~0.3% of cells.
+        '  return smoothstep(0.9968, 0.9998, h);\n' +
+        '}\n')
       .replace('#include <color_fragment>',
         '#include <color_fragment>\n  diffuseColor.a = 1.0;')
       .replace('#include <emissivemap_fragment>',
@@ -30328,10 +30355,22 @@ function _arenaMakeMaterial() {
         '  #ifdef USE_COLOR_ALPHA\n' +
         '  vec3 _aTint; float _aBoost;\n' +
         '  if (vAWy < uArenaLavaY + 160.0) { _aTint = vec3(1.0, 0.30, 0.05); _aBoost = 1.25; }\n' +
-        '  else if (vAWy > uArenaMystLo && vAWy < uArenaMystHi) { _aTint = vec3(0.62, 0.40, 1.0); _aBoost = 0.95; }\n' +
+        '  else if (vAWy > uArenaMystLo && vAWy < uArenaMystHi) { _aTint = vec3(0.40, 0.90, 0.80); _aBoost = 0.72; }\n' +
         '  else { _aTint = vec3(0.40, 0.80, 1.0); _aBoost = 0.7; }\n' +
         '  totalEmissiveRadiance += _aTint * vColor.a * _aBoost;\n' +
-        '  #endif');
+        '  #endif\n' +
+        // (v36.65) MINERAL FLECKS in the rock (owner: "purple amethyst
+        // flecks in the walls on the mystical level.. yellow/gold flecks on
+        // the bronze layer"). Two frequencies so the specks read as a
+        // scatter of crystal sizes rather than a regular grid, and they
+        // only exist inside their own storey band.
+        '  if (vAWy > uArenaMystLo && vAWy < uArenaMystHi) {\n' +
+        '    float f = _arFleck(vAWP, 0.26) + _arFleck(vAWP + 41.7, 0.13) * 0.6;\n' +
+        '    totalEmissiveRadiance += vec3(0.46, 0.12, 1.0) * f * 0.85;\n' +
+        '  } else if (vAWy > uArenaBronzeLo && vAWy < uArenaBronzeHi) {\n' +
+        '    float f = _arFleck(vAWP + 13.3, 0.29) + _arFleck(vAWP + 77.1, 0.15) * 0.6;\n' +
+        '    totalEmissiveRadiance += vec3(1.0, 0.72, 0.10) * f * 0.80;\n' +
+        '  }');
   };
   _arenaMat = m;
   return m;
@@ -30342,6 +30381,194 @@ function _arenaMakeMaterial() {
 // every mushroom roots on real rock. Two draw calls (stems + caps), added
 // to the arena group — disposal and round-cache ride along for free.
 let _arenaShroomMats = null;
+// (v36.63, slice 5a) WATERFALLS — owner: "we could even add a little water
+// fall in some of them, flowing from top to bottom". Falls drop through the
+// SHAFT bores, storey to storey, so they read as the reason the shafts are
+// there. Placement is a pure hash of (seed, slab, shaft) — deterministic,
+// peer-identical, zero rng draws — and every fall is validated against the
+// live field so one can never hang inside rock.
+// Visual only: no collision, no gameplay. Lives in the arena mesh group, so
+// the round-cache and _arenaDisposeMesh handle it for free.
+// ⚠ Animated WITHOUT a central per-frame tick: each mesh sets its own
+// uniform in onBeforeRender (three.js calls it per visible mesh per frame),
+// so nothing has to be wired into gameLoop and a culled fall costs nothing.
+// (v36.64, slice 5a) CLOUD COLUMNS — owner: "i actually don't like the
+// water... instead, maybe a column of clouds just waiting to be disturbed".
+// Each chosen shaft bore is packed with a vertical stack of GasClouds that
+// hang perfectly still until a ship flies through, then billow out of the
+// way and slowly settle back. They fill the bore rim to rim, so the shafts
+// read as choked with fog rather than as empty holes — and diving one is
+// now a thing you can SEE happen.
+//
+// Built on the game's own cloud system (the owner's "clouds we funnily
+// named dots"): GasCloud claims slots in the shared GPU-instanced
+// billboardCloudSystem (8192 slots, drift animated in the vertex shader),
+// and it already ships a full disturbance API — applyWake for the push,
+// tickWake for the relax-and-settle. Nothing new had to be invented.
+//
+// ⚠ These are NOT children of the arena group. They hold slots in a shared
+// system, so _arenaDisposeMesh must release them explicitly (see
+// _arenaMesh.clouds) or the slots leak for the page lifetime.
+const _AR_CLOUD_WAKE_R = 520;      // how close a ship has to be to disturb
+// Pure placement hash — deterministic, peer-identical, zero rng draws.
+function _arenaFallHash(a, b, c) {
+  let h = (a * 374761393 + b * 668265263 + c * 1442695040888963407) >>> 0;
+  h = ((h ^ (h >>> 13)) * 1274126177) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+}
+function _arenaBuildCloudColumns(G, group) {
+  if (!G.floorY || G.floorY.length < 1) return 0;
+  if (typeof GasCloud !== 'function' || typeof billboardCloudSystem === 'undefined') return 0;
+  if (!_arenaMesh.clouds) _arenaMesh.clouds = [];
+  const nsh = G.shafts | 0;
+  // The column fills the bore (the same "touch the edges" rule the water
+  // used) so the shaft reads as plugged with fog, not as a hole with a
+  // decoration in it.
+  const rad = G.shaftRad * 0.72;
+  let made = 0;
+  for (let j = G.floorY.length - 1; j >= 0; j--) {
+    for (let h = 0; h < nsh; h++) {
+      // Measured at seed 7 (gate/fill sweep): 0.75/0.72 -> 6 columns, 34
+      // puffs = 340 of the cloud system's 8192 slots, spread over all three
+      // storeys with two in the lava band. Wider fill rejects bores (the
+      // rim-graze rule), a tighter gate leaves whole storeys empty.
+      if (_arenaFallHash(G.seed | 0, j + 3, h + 7) > 0.95) continue;
+      const a = (h / nsh) * 6.2831853 + j * 0.9 + G.satPhase;
+      const mx = Math.cos(a) * G.shaftR, mz = Math.sin(a) * G.shaftR;
+      const yTop = G.floorY[j] + G.slabT * 1.15;
+      const yBot = (j > 0) ? G.floorY[j - 1] + G.slabT * 3.0 : -G.H + 140;
+      const span = yTop - yBot;
+      if (span < 200) continue;
+      // Axis properly open, rim allowed to graze — the same two-threshold
+      // rule the bore-filling water needed (demanding real clearance at the
+      // rim contradicts filling the hole and rejects nearly every bore).
+      let clear = true;
+      for (let k = 0; k <= 6 && clear; k++) {
+        const y = yBot + (span * k) / 6;
+        if (_ARENA_FIELD.eval(mx, y, mz, G) > -60) { clear = false; break; }
+        for (let e = 0; e < 4; e++) {
+          const ea = e * 1.5707963;
+          if (_ARENA_FIELD.eval(mx + Math.cos(ea) * rad * 0.8, y, mz + Math.sin(ea) * rad * 0.8, G) > 0) { clear = false; break; }
+        }
+      }
+      if (!clear) continue;
+      // Stack puffs up the bore, each one its own GasCloud so a ship
+      // disturbs only the part of the column it actually passes through.
+      const step = rad * 0.52;
+      const n = Math.max(3, Math.min(16, Math.round(span / step)));
+      // Storey tint: the lava band glows warm, the mystical storey violet,
+      // everything else pale cold cavern fog.
+      for (let i = 0; i < n; i++) {
+        const y = yBot + span * ((i + 0.5) / n);
+        // (v36.64) EACH LAYER GETS ITS OWN CLOUD COLOUR (owner: "each layer
+        // should have its colors of clouds to correspond"). The tint comes
+        // from the SAME `G.themes` palette the rock is shaded with, so a
+        // column always matches the storey it hangs in.
+        // ⚠ SATURATE, NEVER LIFT TOWARD WHITE. The billboard cloud system
+        // renders ADDITIVE (`game.cloudBlend` default 'additive', brightness
+        // 1.1), and additive blending only shows a HUE when the channels
+        // differ — a colour lifted toward white has near-equal channels and
+        // saturates the framebuffer to pure white. The first cut lifted 62%
+        // toward white and the owner's report was exactly that: "all them
+        // are white". So: normalise the theme to full chroma (max channel =
+        // 1, hue preserved) and push saturation past it.
+        let band = 0;
+        for (let b = 0; b < G.floorY.length; b++) if (y > G.floorY[b]) band = b + 1;
+        let col = new THREE.Color(0.62, 0.80, 1.0);
+        if (G.themes && G.themes[band]) {
+          const t = G.themes[band];
+          const mxc = Math.max(t[0], t[1], t[2]) || 1;
+          let cr = t[0] / mxc, cg = t[1] / mxc, cb = t[2] / mxc;
+          const lum = (cr + cg + cb) / 3, S = 1.45;
+          cr = Math.max(0, Math.min(1, lum + (cr - lum) * S));
+          cg = Math.max(0, Math.min(1, lum + (cg - lum) * S));
+          cb = Math.max(0, Math.min(1, lum + (cb - lum) * S));
+          col = new THREE.Color(cr, cg, cb);
+        }
+        // Two layers whose LIGHT, not just their rock, defines them: the
+        // lava band burns ember, the mystical storey glows bioluminescent —
+        // their fog carries that instead of the rock tint.
+        // (v36.65) RED, not ember-orange (owner: "red clouds on the lava
+        // level") — pushed hard into red so additive blending still lands
+        // red rather than drifting orange over the warm rock.
+        if (G.lavaY !== undefined && y < G.lavaY + 420) col = new THREE.Color(1.0, 0.13, 0.06);
+        else if (G.mystBand !== undefined && band === G.mystBand) col = new THREE.Color(0.36, 0.92, 0.82);
+        const c = new GasCloud(billboardCloudSystem, new THREE.Vector3(mx, y, mz), {
+          boundsRadius: rad * 0.95,
+          spriteScale: rad * 1.65,
+          spriteScaleVar: 0.40,
+          alpha: 0.52,
+          color: col,
+          colorJitter: 0.07,
+          segments: 16,
+        });
+        _arenaMesh.clouds.push(c);
+      }
+      made++;
+    }
+  }
+  return made;
+}
+// Per-frame: disturb on contact, relax otherwise. Called from gameLoop
+// beside updateDots. ⚠ Distance-gated FIRST — tickWake writes every slot,
+// so a column nobody is near must cost one distance test, not a write.
+function _arenaCloudTick(dt) {
+  const list = _arenaMesh.clouds;
+  if (!list || !list.length) return;
+  // Gather the ships once, not per cloud.
+  const ships = _arCloudShips;
+  ships.length = 0;
+  try {
+    if (player && player.position && player.shipState !== 'dead' && player.shipState !== 'spawning') ships.push(player);
+    if (game.entities) for (const b of game.entities) { if (b && b.alive && b.position) ships.push(b); }
+  } catch (_) {}
+  const R2 = _AR_CLOUD_WAKE_R * _AR_CLOUD_WAKE_R;
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    if (!c || !c.position) continue;
+    let hit = null, bestD2 = R2;
+    for (let s = 0; s < ships.length; s++) {
+      const sp = ships[s].position;
+      const dx = sp.x - c.position.x, dy = sp.y - c.position.y, dz = sp.z - c.position.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < bestD2) { bestD2 = d2; hit = ships[s]; }
+    }
+    if (hit) {
+      const v = hit.velocity;
+      try {
+        c.applyWake(hit.position.x, hit.position.y, hit.position.z,
+                    v ? v.x : 0, v ? v.y : 0, v ? v.z : 0,
+                    1.5, _AR_CLOUD_WAKE_R, dt);
+      } catch (_) {}
+    } else if (!c._wantSlotWrite || c._wantSlotWrite()) {
+      // Only tick a cloud that is still settling — a fully-settled column
+      // needs no per-frame slot writes at all.
+      try { c.tickWake(dt); } catch (_) {}
+      continue;
+    } else { continue; }
+    try { c.tickWake(dt); } catch (_) {}
+  }
+}
+const _arCloudShips = [];
+if (typeof window !== 'undefined') window.__spireClouds = () => {
+  const l = _arenaMesh.clouds || [];
+  let disturbed = 0, maxOff = 0, sumOff = 0, slots = 0;
+  for (const c of l) {
+    if (!c || !c.slots) continue;
+    let m = 0;
+    for (const s of c.slots) {
+      slots++;
+      const d = Math.hypot(s.wakeOff.x, s.wakeOff.y, s.wakeOff.z);
+      sumOff += d; if (d > m) m = d;
+    }
+    if (m > 1) disturbed++;
+    if (m > maxOff) maxOff = m;
+  }
+  return { puffs: l.length, slots, disturbed,
+           maxWakeOffset: +maxOff.toFixed(1),
+           meanWakeOffset: +(slots ? sumOff / slots : 0).toFixed(2) };
+};
+
 function _arenaScatterShrooms(G, group) {
   if (G.mystBand == null || G.mystBand < 1 || G.mystBand > G.floorY.length - 1) return;
   const yFloor = G.floorY[G.mystBand - 1] + G.slabT;   // storey floor slab top
@@ -30375,8 +30602,12 @@ function _arenaScatterShrooms(G, group) {
   if (!spots.length) return;
   if (!_arenaShroomMats) {
     _arenaShroomMats = {
-      stem: new THREE.MeshStandardMaterial({ color: 0xcfc8b8, roughness: 0.85, emissive: 0x2a2440, emissiveIntensity: 0.35 }),
-      cap: new THREE.MeshStandardMaterial({ color: 0x4a2f6e, roughness: 0.6, emissive: 0x8a55ff, emissiveIntensity: 1.1 }),
+      // (v36.64) Retuned off the neon-grape palette (owner: "tacky"). Caps
+      // are a deep teal body under a soft MINT bioluminescence at ~2/3 the
+      // old intensity, so they glow rather than shout, and they agree with
+      // the storey's aqua glow instead of clashing with it.
+      stem: new THREE.MeshStandardMaterial({ color: 0xc8c6bb, roughness: 0.85, emissive: 0x1d3a35, emissiveIntensity: 0.35 }),
+      cap: new THREE.MeshStandardMaterial({ color: 0x2f5f58, roughness: 0.6, emissive: 0x5fd8c2, emissiveIntensity: 0.72 }),
       stemGeo: new THREE.CylinderGeometry(4.5, 8, 1, 5),
       capGeo: new THREE.SphereGeometry(1, 8, 5, 0, Math.PI * 2, 0, Math.PI * 0.5),
     };
@@ -30474,6 +30705,13 @@ function _arenaDisposeMesh() {
   // the whole worker-source string) per abort.
   if (_arenaMesh.url) { try { URL.revokeObjectURL(_arenaMesh.url); } catch (_) {} _arenaMesh.url = null; }
   if (_arenaMesh.hud) { try { _arenaMesh.hud.style.display = 'none'; } catch (_) {} _arenaMesh.hud = null; }
+  // (v36.63) Waterfall mist lives in the SHARED billboardCloudSystem, not in
+  // the arena group — removing the group would leak its slots forever, so
+  // release them explicitly here.
+  if (_arenaMesh.clouds) {
+    for (const c of _arenaMesh.clouds) { try { if (c && c.dispose) c.dispose(); } catch (_) {} }
+    _arenaMesh.clouds = null;
+  }
   if (_arenaMesh.group) {
     try { if (_arenaMesh.group.parent) scene.remove(_arenaMesh.group); } catch (_) {}
     _arenaMesh.group.traverse((n) => { if (n.isMesh && n.geometry) { try { n.geometry.dispose(); } catch (_) {} } });
@@ -30562,6 +30800,12 @@ function _arenaBuildMesh(G, key, level) {
     mat._uMystLo.value = G.floorY[G.mystBand - 1];
     mat._uMystHi.value = (G.mystBand < G.floorY.length) ? G.floorY[G.mystBand] : G.H;
   } else { mat._uMystLo.value = 1e9; mat._uMystHi.value = 1e9; }
+  // (v36.65) Band 1 = the bronze/gold-mine storey — between the lowest two
+  // floors — carries the gold flecks.
+  if (G.floorY.length >= 2) {
+    mat._uBronzeLo.value = G.floorY[0];
+    mat._uBronzeHi.value = G.floorY[1];
+  } else { mat._uBronzeLo.value = 1e9; mat._uBronzeHi.value = 1e9; }
   const mergeRegion = (r) => {
     let nv = 0, ni = 0;
     for (const p of r.parts) { nv += p.pos.length / 3; ni += p.idx.length; }
@@ -30644,6 +30888,13 @@ function _arenaBuildMesh(G, key, level) {
           const _nSh = _arenaScatterShrooms(G, _arenaMesh.group);
           if (_nSh) console.log('[spire] planted ' + _nSh + ' mushrooms on the mystical storey');
         } catch (e) { console.warn('[spire] mushroom scatter failed:', e); }
+        // (v36.63) Waterfalls down the shafts — same slot as the mushrooms:
+        // after the rock exists, still inside the loading window.
+        try {
+          const _nF = _arenaBuildCloudColumns(G, _arenaMesh.group);
+          if (_nF) console.log('[spire] ' + _nF + ' cloud columns packed into the shafts (' +
+                               (_arenaMesh.clouds ? _arenaMesh.clouds.length : 0) + ' puffs)');
+        } catch (e) { console.warn('[spire] cloud column build failed:', e); }
         console.log('[spire] arena meshed: ' + (_arenaMesh.tris / 1000).toFixed(0) + 'k tris in ' + _arenaMesh.ms + 'ms (' + _arenaMesh.chunksTotal + ' chunks)');
       } else {
         dispatch(w);
@@ -77655,6 +77906,9 @@ function gameLoop(timestamp) {
   }
   __pmark('smokeLights+cloudDots');
   if (_vrThrottleTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
+  // (v36.64) The Spire's shaft cloud columns: disturb on contact, settle
+  // otherwise. No-op on every other map (the list is null).
+  if (typeof _arenaCloudTick === 'function') { try { _arenaCloudTick(dt); } catch (_) {} }
   __pmark('dots');
   tickScanlineTexture();
   tickEnergyShields(dt);

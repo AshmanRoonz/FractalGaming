@@ -130,11 +130,13 @@ Do this **only after a single arena is proven**.
    staged swap into the spire map, exit at a matching hole; (b) FULL — true SDF blending where
    the hub's carved ground opens into the arena volume (the v34.65 pillar/carve unioning shows
    the pattern). Rung (a) ships the FEELING with today's tech.
-3. **Waterfalls:** *"we could even add a little water fall in some of them, flowing from top
-   to bottom."* Sheets falling through the shafts/annular gap, storey to storey, pooling on
-   slab tops — the hub water/ripple systems (PART 8) and the god-ray canvas technique are the
-   ingredient shelf. Visual-only first; a candidate v1 is 2-3 shaft waterfalls with splash
-   pools on the slab below, lit by the storey's theme glow.
+3. **(v36.64) SHIPPED as slice 5a — CLOUD COLUMNS, not waterfalls.** A full waterfall pass was
+   built (v36.63) and then REJECTED by the owner: *"i actually don't like the water... instead,
+   maybe a column of clouds just waiting to be disturbed."* The shafts are now packed with
+   `GasCloud` columns that hang still, billow when a ship flies through, and settle back —
+   tinted per storey from the same theme palette the rock uses. `_arenaBuildCloudColumns` /
+   `_arenaCloudTick`; full entry + traps in `lss.map.md` PART 7 v36.64. Original ask:
+   *"we could even add a little water fall in some of them, flowing from top to bottom."*
 
 ---
 
