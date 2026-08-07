@@ -108,6 +108,13 @@ Do this **only after a single arena is proven**.
   ships spawned pinned — see lss.map.md PART 7, the containment-band trap). At the same cell size
   that is **8× the meshing volume** of the lab numbers above — which makes the bake-to-GLB route
   effectively mandatory, not just recommended. Budget accordingly in slice 2.
+- **(v36.58) OWNER DECISION: NO GLB — slice 2 shipped as RUNTIME PROCEDURAL** ("i'd rather not
+  use GLB's for this, i prefer procedural seeds"). The build cost is handled instead by: 25u cells
+  (CELLS 24 per 600u chunk, ~926k tris), 8 workers, a helix-bounded vertical cull, and a
+  warmup→playing gate that holds round 1 until the mesh completes (~16 s desktop first build,
+  cached across rounds). Full entry: lss.map.md PART 7 → The Spire → v36.58. If build time ever
+  needs to shrink further, optimize the FIELD (it is the shared string, so collision speeds up
+  too) — not a second geometry pipeline.
 - **Build time.** Lab takes **~27 s**. This **violates the loading contract** (everything must be
   done before the cinematic starts — see `lss.map.md` PART on the loading contract). Two routes:
   - reduce density → ~5 s → may fit inside the existing loading block, or

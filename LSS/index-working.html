@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.57';
+const LSS_BUILD = '36.58';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -30105,6 +30105,316 @@ if (typeof window !== 'undefined') window.__spireArena = {
   G: () => game.arenaField && game.arenaField.G,
   params: _arenaBuildParams,
 };
+
+// =====================================================================
+// THE SPIRE — slice 2: runtime PROCEDURAL mesh (v36.58).
+// Owner's call: NO baked GLB — the arena is generated from the seed at
+// load, every time, from the SAME `_ARENA_FIELD_SRC` string the collision
+// branch evaluates (one source, two realms — the worker below interpolates
+// the string, never a copy). Lab-pattern chunked surface-nets in N blob
+// workers ; chunk results merge into ~1800u REGION meshes (frustum culling
+// with few draw calls) that appear progressively during the PREPARING
+// ARENA / warmup window. The finished group is CACHED by params key —
+// round 2+ rebuilds reattach it instantly, so the field is only ever
+// meshed once per map entry. Collision never touches any of this ; a
+// worker failure degrades to the slice-1 invisible-but-flyable world.
+const _arenaMesh = {
+  key: null, group: null, building: false,
+  chunksDone: 0, chunksTotal: 0, tris: 0, ms: 0,
+  workers: [], regions: null,
+  // t0: build start (the warmup->playing gate's wedge cap reads it) ;
+  // url: the worker blob URL (revoked in dispose — abort paths must not
+  // leak it) ; hud: cached #map-gen-hud element while we own its text.
+  t0: 0, url: null, hud: null,
+};
+function _arenaMeshCells() {
+  // Quest/mobile: coarser cells (fewer evals AND fewer tris). Desktop 24
+  // -> 25u cells (~0.8M tris at scale 2) ; mobile 14 -> ~43u (~0.3M).
+  const mob = (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
+              (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE);
+  return mob ? 14 : 24;
+}
+// One shared material. Vertex COLOR is vec4: rgb = albedo from shade(),
+// A = vein-emissive strength (the cyan landmark glow on the columns).
+// ⚠ vec4 colors flip on USE_COLOR_ALPHA, which multiplies diffuseColor.a
+// by vColor.a — with postFX rendering into an RGBA target a fractional
+// alpha could leak into the composite, so it is forced back to 1.0.
+let _arenaMat = null;
+function _arenaMakeMaterial() {
+  if (_arenaMat) return _arenaMat;
+  const m = new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.93, metalness: 0.03,
+    vertexColors: true, dithering: true,
+  });
+  m.onBeforeCompile = (sh) => {
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <color_fragment>',
+        '#include <color_fragment>\n  diffuseColor.a = 1.0;')
+      .replace('#include <emissivemap_fragment>',
+        '#include <emissivemap_fragment>\n' +
+        '  #ifdef USE_COLOR_ALPHA\n' +
+        '  totalEmissiveRadiance += vec3(0.40, 0.80, 1.0) * vColor.a * 0.7;\n' +
+        '  #endif');
+  };
+  _arenaMat = m;
+  return m;
+}
+// Worker source: the field string + the lab's surface-nets mesher.
+// ⚠ NO backticks / dollar-brace inside the literal below.
+function _arenaMeshWorkerSrc() {
+  return 'const FIELD = ' + _ARENA_FIELD_SRC + ';\n' + `
+let G = null;
+self.onmessage = (e) => {
+  const m = e.data;
+  if (m.cmd === 'init') { G = m.g; return; }
+  if (m.cmd === 'chunk') {
+    const r = mesh(m);
+    if (r.empty) self.postMessage(r);
+    else self.postMessage(r, [r.pos.buffer, r.nrm.buffer, r.col.buffer, r.idx.buffer]);
+  }
+};
+function mesh(m) {
+  const N = m.cells, size = m.size, ox = m.ox, oy = m.oy, oz = m.oz;
+  const cell = size / N;
+  const S = N + 2;
+  const val = new Float32Array(S*S*S);
+  let si = 0;
+  for (let k = -1; k <= N; k++) { const wz = oz + k*cell;
+    for (let j = -1; j <= N; j++) { const wy = oy + j*cell;
+      for (let i = -1; i <= N; i++) val[si++] = FIELD.eval(ox + i*cell, wy, wz, G); } }
+  const AT = (i,j,k) => val[((k+1)*S + (j+1))*S + (i+1)];
+  const C = N + 1;
+  const vidx = new Int32Array(C*C*C).fill(-1);
+  const VI = (i,j,k) => ((k+1)*C + (j+1))*C + (i+1);
+  const pos = [], nrm = [], col = [];
+  const EDGES = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
+  for (let k = -1; k < N; k++) for (let j = -1; j < N; j++) for (let i = -1; i < N; i++) {
+    const c = [AT(i,j,k),AT(i+1,j,k),AT(i,j+1,k),AT(i+1,j+1,k),
+               AT(i,j,k+1),AT(i+1,j,k+1),AT(i,j+1,k+1),AT(i+1,j+1,k+1)];
+    let neg = 0; for (let q=0;q<8;q++) if (c[q] < 0) neg++;
+    if (neg === 0 || neg === 8) continue;
+    let sx=0, sy=0, sz=0, n=0;
+    for (const ed of EDGES) {
+      const va=c[ed[0]], vb=c[ed[1]];
+      if ((va<0) === (vb<0)) continue;
+      const t = va/(va-vb);
+      const a=ed[0], b=ed[1];
+      const ax=a&1, ay=(a>>1)&1, az=(a>>2)&1, bx=b&1, by=(b>>1)&1, bz=(b>>2)&1;
+      sx += ax+(bx-ax)*t; sy += ay+(by-ay)*t; sz += az+(bz-az)*t; n++;
+    }
+    sx/=n; sy/=n; sz/=n;
+    const wx = ox+(i+sx)*cell, wy = oy+(j+sy)*cell, wz = oz+(k+sz)*cell;
+    vidx[VI(i,j,k)] = pos.length/3;
+    pos.push(wx, wy, wz);
+    const gr = FIELD.grad(wx, wy, wz, G, cell);
+    nrm.push(-gr[0], -gr[1], -gr[2]);
+    const sh = FIELD.shade(wx, wy, wz, G);
+    col.push(Math.min(1, sh[0]), Math.min(1, sh[1]), Math.min(1, sh[2]), Math.min(1, sh[4]));
+  }
+  const idx = [];
+  const quad = (a,b,c2,d,flip) => { if (a<0||b<0||c2<0||d<0) return;
+    if (flip) idx.push(a,c2,b,b,c2,d); else idx.push(a,b,c2,b,d,c2); };
+  for (let k=0;k<N;k++) for (let j=0;j<N;j++) for (let i=0;i<N;i++) {
+    const v0 = AT(i,j,k);
+    if ((v0<0) !== (AT(i+1,j,k)<0)) quad(vidx[VI(i,j-1,k-1)],vidx[VI(i,j,k-1)],vidx[VI(i,j-1,k)],vidx[VI(i,j,k)], v0<0);
+    if ((v0<0) !== (AT(i,j+1,k)<0)) quad(vidx[VI(i-1,j,k-1)],vidx[VI(i-1,j,k)],vidx[VI(i,j,k-1)],vidx[VI(i,j,k)], v0<0);
+    if ((v0<0) !== (AT(i,j,k+1)<0)) quad(vidx[VI(i-1,j-1,k)],vidx[VI(i,j-1,k)],vidx[VI(i-1,j,k)],vidx[VI(i,j,k)], v0<0);
+  }
+  if (!idx.length) return { key:m.key, region:m.region, empty:true };
+  return { key:m.key, region:m.region, empty:false,
+    pos:new Float32Array(pos), nrm:new Float32Array(nrm), col:new Float32Array(col),
+    idx:new Uint32Array(idx), tris:idx.length/3 };
+}`;
+}
+function _arenaDisposeMesh() {
+  for (const w of _arenaMesh.workers) { try { w.terminate(); } catch (_) {} }
+  _arenaMesh.workers = [];
+  // (v36.58 review) The blob URL must die on EVERY teardown path, not just
+  // build completion — a mid-build map switch was leaking one URL (pinning
+  // the whole worker-source string) per abort.
+  if (_arenaMesh.url) { try { URL.revokeObjectURL(_arenaMesh.url); } catch (_) {} _arenaMesh.url = null; }
+  if (_arenaMesh.hud) { try { _arenaMesh.hud.style.display = 'none'; } catch (_) {} _arenaMesh.hud = null; }
+  if (_arenaMesh.group) {
+    try { if (_arenaMesh.group.parent) scene.remove(_arenaMesh.group); } catch (_) {}
+    _arenaMesh.group.traverse((n) => { if (n.isMesh && n.geometry) { try { n.geometry.dispose(); } catch (_) {} } });
+  }
+  _arenaMesh.group = null; _arenaMesh.key = null; _arenaMesh.building = false;
+  _arenaMesh.chunksDone = 0; _arenaMesh.chunksTotal = 0; _arenaMesh.tris = 0; _arenaMesh.regions = null;
+}
+// Called from buildRoomGraphLevel for arena levels. Reattaches the cached
+// group when the params match ; otherwise disposes and rebuilds.
+function _arenaEnsureMesh(level) {
+  const key = JSON.stringify(level.arena) + '|c' + _arenaMeshCells();
+  if (_arenaMesh.key === key && _arenaMesh.group) {
+    if (!_arenaMesh.group.parent) scene.add(_arenaMesh.group);
+    return;
+  }
+  _arenaDisposeMesh();
+  _arenaBuildMesh(_arenaBuildParams(level.arena), key, level);
+}
+function _arenaBuildMesh(G, key, level) {
+  const CHUNK = 600, CELLS = _arenaMeshCells(), REGION = 3;
+  const t0 = performance.now();
+  const nx = Math.ceil((G.R + 140) / CHUNK), ny = Math.ceil((G.H + 320) / CHUNK);
+  // (v36.58 review) Vertical cull. ⚠ Bounded by the HELIX extent, NOT by H:
+  // the helical bore is smin-carved into solid rock and pokes BEYOND the
+  // volume caps (measured: real flyable tube at y -2400..-1800). Culling by
+  // H alone deletes real geometry and desyncs mesh from collision.
+  const _hx = G.helix;
+  const _hxTop = _hx ? _hx.y0 + (_hx.turns + 0.5) * _hx.pitch + _hx.half + 60 : -Infinity;
+  const _hxBot = _hx ? _hx.y0 - (_hx.turns + 0.5) * _hx.pitch - _hx.half - 60 : Infinity;
+  const _yMax = Math.max(G.H + 90, _hxTop), _yMin = Math.min(-G.H - 90, _hxBot);
+  const jobs = [];
+  for (let k = -nx; k <= nx; k++) for (let j = -ny; j <= ny; j++) for (let i = -nx; i <= nx; i++) {
+    // Cull chunks entirely outside the arena cylinder — a bounded world
+    // means we can know that up front (lab logic, scaled bounds).
+    const cx = (i + 0.5) * CHUNK, cz = (k + 0.5) * CHUNK;
+    if (Math.hypot(cx, cz) - CHUNK > G.R + 190) continue;
+    if (j * CHUNK > _yMax || (j + 1) * CHUNK < _yMin) continue;
+    const region = Math.floor((i + nx) / REGION) + ',' + Math.floor((j + ny) / REGION) + ',' + Math.floor((k + nx) / REGION);
+    jobs.push({ i, j, k, region });
+  }
+  // (v36.58 review) Nearest-spawn-first: rock materialises around the
+  // players in the first seconds of the build instead of in grid order.
+  const _anchors = [];
+  if (level && Array.isArray(level.rooms)) {
+    for (const rm of level.rooms) if (rm && rm.team) _anchors.push(rm);
+  }
+  if (!_anchors.length) _anchors.push({ x: 0, y: G.floorY[G.floorY.length - 1] + 150, z: 0 });
+  const _jobDist = (jb) => {
+    const jx = (jb.i + 0.5) * CHUNK, jy = (jb.j + 0.5) * CHUNK, jz = (jb.k + 0.5) * CHUNK;
+    let best = Infinity;
+    for (const a of _anchors) {
+      const d = Math.hypot(jx - a.x, jy - a.y, jz - a.z);
+      if (d < best) best = d;
+    }
+    return best;
+  };
+  for (const jb of jobs) jb.d = _jobDist(jb);
+  jobs.sort((a, b) => a.d - b.d);
+  // Per-region accumulation: a region merges into ONE mesh the moment its
+  // last chunk lands (a few ms each), so the build never takes one big
+  // main-thread hit and rock appears progressively during the countdown.
+  const regions = new Map();
+  for (const jb of jobs) {
+    let r = regions.get(jb.region);
+    if (!r) regions.set(jb.region, r = { expected: 0, done: 0, parts: [] });
+    r.expected++;
+  }
+  _arenaMesh.key = key;
+  _arenaMesh.building = true;
+  _arenaMesh.t0 = t0;
+  _arenaMesh.chunksTotal = jobs.length;
+  _arenaMesh.regions = regions;
+  _arenaMesh.group = new THREE.Group();
+  _arenaMesh.group.name = 'spireArenaMesh';
+  _arenaMesh.group.matrixAutoUpdate = false;
+  scene.add(_arenaMesh.group);
+  // Progress readout on the existing map-gen HUD (the warmup->playing gate
+  // can hold the round start on this build — the player must see why).
+  try {
+    _arenaMesh.hud = document.getElementById('map-gen-hud');
+    if (_arenaMesh.hud) { _arenaMesh.hud.textContent = 'GENERATING ARENA'; _arenaMesh.hud.style.display = 'block'; }
+  } catch (_) {}
+  const mat = _arenaMakeMaterial();
+  const mergeRegion = (r) => {
+    let nv = 0, ni = 0;
+    for (const p of r.parts) { nv += p.pos.length / 3; ni += p.idx.length; }
+    if (!ni) return;
+    const pos = new Float32Array(nv * 3), nrm = new Float32Array(nv * 3), col = new Float32Array(nv * 4);
+    const idx = (nv > 65535) ? new Uint32Array(ni) : new Uint16Array(ni);
+    let vo = 0, io = 0;
+    for (const p of r.parts) {
+      pos.set(p.pos, vo * 3); nrm.set(p.nrm, vo * 3); col.set(p.col, vo * 4);
+      for (let x = 0; x < p.idx.length; x++) idx[io + x] = p.idx[x] + vo;
+      vo += p.pos.length / 3; io += p.idx.length;
+    }
+    r.parts = null;
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(col, 4));
+    geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    geo.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.matrixAutoUpdate = false;
+    if (_arenaMesh.key === key && _arenaMesh.group) _arenaMesh.group.add(mesh);
+    else geo.dispose();
+  };
+  // (v36.58 review) EVERY failure path below tears the whole build down via
+  // _arenaDisposeMesh — a failed build must never stay cached under its key
+  // (it was being treated as success and reattached, holed or empty, every
+  // later round). Dispose nulls the key, so the NEXT round's
+  // _arenaEnsureMesh rebuilds cleanly ; this round degrades to the slice-1
+  // invisible-but-flyable world (collision is main-thread field eval and
+  // never depends on any of this).
+  let url = null;
+  try { url = URL.createObjectURL(new Blob([_arenaMeshWorkerSrc()], { type: 'text/javascript' })); }
+  catch (e) { console.warn('[spire] mesh worker blob failed (collision-only world):', e); _arenaDisposeMesh(); return; }
+  _arenaMesh.url = url;
+  const NW = Math.max(2, Math.min(8, ((navigator.hardwareConcurrency || 4) - 2)));
+  let issued = 0;
+  const dispatch = (w) => {
+    if (issued >= jobs.length) return;
+    const c = jobs[issued++];
+    w.postMessage({ cmd: 'chunk', key: c.i + ',' + c.j + ',' + c.k, region: c.region,
+                    cells: CELLS, size: CHUNK, ox: c.i * CHUNK, oy: c.j * CHUNK, oz: c.k * CHUNK });
+  };
+  const _fail = (what) => (e) => {
+    // A dead/erroring worker cannot tell us WHICH chunk it lost — its region
+    // would never complete and the stalled build would be cached forever.
+    // Abort the whole mesh ; next round rebuilds from scratch.
+    console.warn('[spire] mesh worker ' + what + ' — arena mesh aborted, next round rebuilds:', e && (e.message || e));
+    if (_arenaMesh.key === key) _arenaDisposeMesh();
+  };
+  for (let n = 0; n < NW; n++) {
+    let w;
+    try { w = new Worker(url); }
+    catch (e) { console.warn('[spire] mesh worker spawn failed:', e); continue; }
+    w.onerror = _fail('error');
+    w.onmessageerror = _fail('message error');
+    w.onmessage = (ev) => {
+      const r = ev.data;
+      // Stale guard: a newer build/dispose owns the slot now.
+      if (_arenaMesh.key !== key) return;
+      _arenaMesh.chunksDone++;
+      if (_arenaMesh.hud && (_arenaMesh.chunksDone & 15) === 0) {
+        _arenaMesh.hud.textContent = 'GENERATING ARENA · ' + Math.round(_arenaMesh.chunksDone / _arenaMesh.chunksTotal * 100) + '%';
+      }
+      const reg = _arenaMesh.regions && _arenaMesh.regions.get(r.region);
+      if (reg) {
+        reg.done++;
+        if (!r.empty) { reg.parts.push(r); _arenaMesh.tris += r.tris; }
+        if (reg.done === reg.expected && reg.parts) mergeRegion(reg);
+      }
+      if (_arenaMesh.chunksDone >= _arenaMesh.chunksTotal) {
+        _arenaMesh.building = false;
+        _arenaMesh.ms = Math.round(performance.now() - t0);
+        for (const wk of _arenaMesh.workers) { try { wk.terminate(); } catch (_) {} }
+        _arenaMesh.workers = [];
+        if (_arenaMesh.hud) { try { _arenaMesh.hud.style.display = 'none'; } catch (_) {} _arenaMesh.hud = null; }
+        console.log('[spire] arena meshed: ' + (_arenaMesh.tris / 1000).toFixed(0) + 'k tris in ' + _arenaMesh.ms + 'ms (' + _arenaMesh.chunksTotal + ' chunks)');
+      } else {
+        dispatch(w);
+      }
+    };
+    w.postMessage({ cmd: 'init', g: G });
+    _arenaMesh.workers.push(w);
+    // prime with two jobs so a fast chunk never starves the pipe
+    dispatch(w); dispatch(w);
+  }
+  // (v36.58 review) Workers hold their own reference to the script once
+  // constructed — revoke NOW so no abort path can leak the blob URL.
+  try { URL.revokeObjectURL(url); } catch (_) {}
+  _arenaMesh.url = null;
+  if (!_arenaMesh.workers.length) { console.warn('[spire] no mesh workers spawned (collision-only world)'); _arenaDisposeMesh(); }
+}
+if (typeof window !== 'undefined') window.__spireMesh = () => ({
+  key: _arenaMesh.key, building: _arenaMesh.building,
+  chunks: _arenaMesh.chunksDone + '/' + _arenaMesh.chunksTotal,
+  meshes: _arenaMesh.group ? _arenaMesh.group.children.length : 0,
+  tris: _arenaMesh.tris, ms: _arenaMesh.ms,
+});
 
 const _SDF_BLEND_REACH = 135;
 function worldSDF(px,py,pz) {
@@ -57656,7 +57966,17 @@ function updateRoundSystem(dt) {
     // normally covers this — but freeflight/testMode force `warmupTimer` to 0
     // every frame, and a mode that reaches here without the picker (or with it
     // hidden early) would otherwise flip to 'playing' with the arena half-built.
-    if (game.warmupTimer <= 0 && !selectActive && !game._swapStaging && !game._rrStaging) {
+    // (v36.58) The volumetric-arena runtime mesh build (The Spire) is the same
+    // loading-contract case: measured ~15 s wall at 8 workers and ~45 s on a
+    // 4-core machine for the first build of a map — without this gate round 1
+    // starts against invisible-but-collidable rock. Round 2+ never gates (the
+    // mesh is cached per params key). The 60 s cap is a wedge guard: a killed
+    // worker aborts the build via _arenaDisposeMesh (clearing `building`), but
+    // if anything ever leaves the flag stuck the match must still start.
+    // ⚠ Co-op caveat: each client gates on its OWN build, so a slow machine
+    // enters 'playing' late against the shared round clock — accepted v1.
+    if (game.warmupTimer <= 0 && !selectActive && !game._swapStaging && !game._rrStaging &&
+        !(game.arenaField && _arenaMesh.building && (performance.now() - _arenaMesh.t0) < 60000)) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
       // (v35.06) Orientation unlock removed (locking is gone entirely —
@@ -74262,6 +74582,10 @@ function buildRoomGraphLevel(level) {
   // rebuild start clean ; set again below only when the level carries an
   // arena block (The Spire).
   game.arenaField = null;
+  // (v36.58) Building a NON-arena map tears the cached arena mesh down.
+  // Arena builds keep the cache — _arenaEnsureMesh below reattaches it, so
+  // round 2+ never re-mesh (the field is static per map).
+  if (!(level && level.arena)) { try { _arenaDisposeMesh(); } catch (_) {} }
   // Bump the build sequence so any in-flight overlay
   // IIFE from a prior call knows its captured state is stale and
   // can bail out instead of re-adding old wall meshes to the scene.
@@ -74683,12 +75007,17 @@ function buildRoomGraphLevel(level) {
   const finalGridRes = (typeof getVRLevelGridRes === 'function') ? getVRLevelGridRes(96) : 96;
   const previewGridRes = Math.min(48, finalGridRes);
 
-  // (v36.56) Arena mode, slice 1: NO geometry at all — the world is the
-  // invisible collision field. ⚠ Deliberately NOT folded into the sandwich
-  // skip below: slice 2 replaces THIS branch with the arena worker dispatch
-  // (the arena, unlike sandwich, DOES march cubes — the plan's trap).
+  // (v36.58) Arena mode, slice 2: the world is meshed at RUNTIME from the
+  // seed (owner's call — procedural, no baked assets) by the dedicated
+  // arena workers in _arenaBuildMesh, NOT by game.levelWorker (whose
+  // createMeshFromPositions callback is a no-op stub). Cached per params
+  // key, so this is instant on round 2+.
   if (game.arenaField) {
-    if (mapGenHud) mapGenHud.style.display = 'none';
+    try { _arenaEnsureMesh(level); }
+    catch (e) { console.warn('[spire] mesh build failed (collision-only world):', e); }
+    // The mesher owns #map-gen-hud while building (GENERATING ARENA · N%) —
+    // only hide it when the cache made this a no-op rebuild.
+    if (mapGenHud && !_arenaMesh.building) mapGenHud.style.display = 'none';
   }
   // Sandwich terrain mode: NO cosmic tube walls at all. The map is just the
   // pathway skeleton (carve + spawn/champion); the world is the streamed
