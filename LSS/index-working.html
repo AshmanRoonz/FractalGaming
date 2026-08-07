@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.59';
+const LSS_BUILD = '36.60';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -30161,6 +30161,12 @@ const _ARENA_FIELD_SRC = `{
     let gg = cA[1] + (cB[1]-cA[1])*w;
     let b = cA[2] + (cB[2]-cA[2])*w;
     let glow = vein * (0.10 + nearCol * 0.35);
+    // (v36.60) Fungal glow spots on the mystical storey — small bright
+    // bioluminescent patches (the material tints this band's glow violet).
+    if (g.mystBand === band) {
+      const spot = Math.pow(Math.max(0, 1 - Math.abs(this.noise(px*0.02, py*0.02, pz*0.02))), 8);
+      glow = Math.max(glow, spot * 0.55);
+    }
     if (g.lavaY !== undefined && py < g.lavaY + 160) {
       // Basalt darkening approaching the lava band, then the lake itself:
       // strong glow on the lowest surfaces, crack veins on nearby walls.
@@ -30211,16 +30217,21 @@ function _arenaBuildParams(a, rooms) {
     for (const rm of rooms) if (rm && rm.r) _clear.push({ x: rm.x, z: rm.z, r: rm.r * 0.7 + 130 * S });
   }
   // Per-storey theme palettes, bottom-up, floors+1 bands (approximations of
-  // the game themes: volcanic basalt (lava band), gold-mine bronze, crystal
-  // cavern blue, snow white-blue). Owner slice-3 direction; the full
-  // textured `_swPatchTerrainMat` treatment stays a future upgrade.
+  // the game themes: volcanic basalt (lava band), gold-mine bronze, MOSSY
+  // MYSTICAL (v36.60, owner: "grassy/trees and/or mystical/mushroom level
+  // ... below the snowy level"), snow white-blue). mystBand marks the mossy
+  // storey: shade() adds fungal glow spots there, the material tints its
+  // glow violet, and _arenaScatterShrooms plants instanced mushrooms on its
+  // floor. The full textured `_swPatchTerrainMat` treatment stays a future
+  // upgrade.
   const themes = [
     [0.21, 0.15, 0.13],
     [0.44, 0.34, 0.20],
-    [0.30, 0.36, 0.56],
+    [0.19, 0.33, 0.17],
     [0.68, 0.74, 0.82],
   ].slice(0, floors + 1);
   while (themes.length < floors + 1) themes.push(themes[themes.length - 1]);
+  const mystBand = Math.min(floors - 1, 2);
   return {
     R, H, floorY: fy, slabT: 34 * S,
     colR: 210 * S, sat: 3, satR: 620 * S, satRad: 118 * S, satPhase: (seed % 100) / 100 * 6.28,
@@ -30232,6 +30243,7 @@ function _arenaBuildParams(a, rooms) {
     spikeScale: S,
     pillars: { sp: 420 * S, density: 0.34, rad: 82 * S, waist: 0.45, clear: _clear },
     themes,
+    mystBand,
     lavaY: -H + 150 * S,
     // Pitch derives from the floor spacing so the ramp DELIVERS you to a
     // floor rather than to a random height.
@@ -30295,25 +30307,97 @@ function _arenaMakeMaterial() {
   // Meshes/group carry identity matrices, so object-space position.y IS
   // world y. _arenaBuildMesh sets the uniform from G.lavaY per build.
   m._uLavaY = { value: -1e9 };
+  // (v36.60) The mystical storey's glow band: alpha-glow inside
+  // [uArenaMystLo, uArenaMystHi] renders VIOLET (fungal bioluminescence)
+  // instead of cyan. Set from G.floorY around G.mystBand per build.
+  m._uMystLo = { value: 1e9 };
+  m._uMystHi = { value: 1e9 };
   m.onBeforeCompile = (sh) => {
     sh.uniforms.uArenaLavaY = m._uLavaY;
+    sh.uniforms.uArenaMystLo = m._uMystLo;
+    sh.uniforms.uArenaMystHi = m._uMystHi;
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', '#include <common>\nvarying float vAWy;')
       .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vAWy = position.y;');
     sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', '#include <common>\nvarying float vAWy;\nuniform float uArenaLavaY;')
+      .replace('#include <common>', '#include <common>\nvarying float vAWy;\nuniform float uArenaLavaY;\nuniform float uArenaMystLo;\nuniform float uArenaMystHi;')
       .replace('#include <color_fragment>',
         '#include <color_fragment>\n  diffuseColor.a = 1.0;')
       .replace('#include <emissivemap_fragment>',
         '#include <emissivemap_fragment>\n' +
         '  #ifdef USE_COLOR_ALPHA\n' +
-        '  vec3 _aTint = (vAWy < uArenaLavaY + 160.0) ? vec3(1.0, 0.30, 0.05) : vec3(0.40, 0.80, 1.0);\n' +
-        '  float _aBoost = (vAWy < uArenaLavaY + 160.0) ? 1.25 : 0.7;\n' +
+        '  vec3 _aTint; float _aBoost;\n' +
+        '  if (vAWy < uArenaLavaY + 160.0) { _aTint = vec3(1.0, 0.30, 0.05); _aBoost = 1.25; }\n' +
+        '  else if (vAWy > uArenaMystLo && vAWy < uArenaMystHi) { _aTint = vec3(0.62, 0.40, 1.0); _aBoost = 0.95; }\n' +
+        '  else { _aTint = vec3(0.40, 0.80, 1.0); _aBoost = 0.7; }\n' +
         '  totalEmissiveRadiance += _aTint * vColor.a * _aBoost;\n' +
         '  #endif');
   };
   _arenaMat = m;
   return m;
+}
+// (v36.60) Instanced bioluminescent mushrooms on the mystical storey's
+// floor (owner: "mystical/mushroom level"). Deterministic (seeded PRNG),
+// surface-found by bisecting the FIELD down onto the storey's slab top, so
+// every mushroom roots on real rock. Two draw calls (stems + caps), added
+// to the arena group — disposal and round-cache ride along for free.
+let _arenaShroomMats = null;
+function _arenaScatterShrooms(G, group) {
+  if (G.mystBand == null || G.mystBand < 1 || G.mystBand > G.floorY.length - 1) return;
+  const yFloor = G.floorY[G.mystBand - 1] + G.slabT;   // storey floor slab top
+  const rng = (() => { let s = (G.seed * 2654435761 ^ 0x9E3779B9) >>> 0;
+    return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; })();
+  const spots = [];
+  for (let c = 0; c < 46 && spots.length < 150; c++) {
+    // cluster anchor in the storey annulus, clear of spire and rim
+    const th = rng() * Math.PI * 2;
+    const rr = 620 + rng() * (G.R - 900);
+    const ax = Math.cos(th) * rr, az = Math.sin(th) * rr;
+    const n = 2 + (rng() * 5 | 0);
+    for (let i = 0; i < n && spots.length < 150; i++) {
+      const x = ax + (rng() - 0.5) * 170, z = az + (rng() - 0.5) * 170;
+      // find the slab-top surface: march down from open air, then bisect
+      let yHi = yFloor + 320, yLo = yFloor - 60;
+      if (_ARENA_FIELD.eval(x, yHi, z, G) >= 0) continue;      // start must be open
+      let hit = null;
+      for (let y = yHi; y > yLo; y -= 26) {
+        if (_ARENA_FIELD.eval(x, y, z, G) >= 0) { hit = y; break; }
+      }
+      if (hit === null) continue;                               // shaft/hole — no floor here
+      let a = hit, b = hit + 26;
+      for (let it = 0; it < 5; it++) { const mid = (a + b) / 2;
+        if (_ARENA_FIELD.eval(x, mid, z, G) >= 0) a = mid; else b = mid; }
+      const ys = (a + b) / 2;
+      if (ys < yFloor - 40 || ys > yFloor + 240) continue;      // not this storey's floor
+      spots.push({ x, y: ys, z, s: 0.6 + rng() * 1.1, r: rng() });
+    }
+  }
+  if (!spots.length) return;
+  if (!_arenaShroomMats) {
+    _arenaShroomMats = {
+      stem: new THREE.MeshStandardMaterial({ color: 0xcfc8b8, roughness: 0.85, emissive: 0x2a2440, emissiveIntensity: 0.35 }),
+      cap: new THREE.MeshStandardMaterial({ color: 0x4a2f6e, roughness: 0.6, emissive: 0x8a55ff, emissiveIntensity: 1.1 }),
+      stemGeo: new THREE.CylinderGeometry(4.5, 8, 1, 5),
+      capGeo: new THREE.SphereGeometry(1, 8, 5, 0, Math.PI * 2, 0, Math.PI * 0.5),
+    };
+  }
+  const M = _arenaShroomMats;
+  const stems = new THREE.InstancedMesh(M.stemGeo, M.stem, spots.length);
+  const caps = new THREE.InstancedMesh(M.capGeo, M.cap, spots.length);
+  const mtx = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), pos = new THREE.Vector3();
+  for (let i = 0; i < spots.length; i++) {
+    const sp = spots[i];
+    const h = (26 + sp.r * 52) * sp.s;                          // stem height
+    const cr = (15 + sp.r * 21) * sp.s;                         // cap radius
+    pos.set(sp.x, sp.y + h * 0.5, sp.z); sc.set(sp.s, h, sp.s);
+    mtx.compose(pos, q, sc); stems.setMatrixAt(i, mtx);
+    pos.set(sp.x, sp.y + h, sp.z); sc.set(cr, cr * 0.62, cr);
+    mtx.compose(pos, q, sc); caps.setMatrixAt(i, mtx);
+  }
+  stems.instanceMatrix.needsUpdate = true; caps.instanceMatrix.needsUpdate = true;
+  stems.matrixAutoUpdate = false; caps.matrixAutoUpdate = false;
+  group.add(stems); group.add(caps);
+  return spots.length;
 }
 // Worker source: the field string + the lab's surface-nets mesher.
 // ⚠ NO backticks / dollar-brace inside the literal below.
@@ -30474,6 +30558,10 @@ function _arenaBuildMesh(G, key, level) {
   } catch (_) {}
   const mat = _arenaMakeMaterial();
   mat._uLavaY.value = (G.lavaY !== undefined) ? G.lavaY : -1e9;
+  if (G.mystBand != null && G.mystBand >= 1 && G.mystBand <= G.floorY.length) {
+    mat._uMystLo.value = G.floorY[G.mystBand - 1];
+    mat._uMystHi.value = (G.mystBand < G.floorY.length) ? G.floorY[G.mystBand] : G.H;
+  } else { mat._uMystLo.value = 1e9; mat._uMystHi.value = 1e9; }
   const mergeRegion = (r) => {
     let nv = 0, ni = 0;
     for (const p of r.parts) { nv += p.pos.length / 3; ni += p.idx.length; }
@@ -30550,6 +30638,12 @@ function _arenaBuildMesh(G, key, level) {
         for (const wk of _arenaMesh.workers) { try { wk.terminate(); } catch (_) {} }
         _arenaMesh.workers = [];
         if (_arenaMesh.hud) { try { _arenaMesh.hud.style.display = 'none'; } catch (_) {} _arenaMesh.hud = null; }
+        // (v36.60) Mystical-storey mushrooms, planted once the rock exists
+        // (still inside the loading window ; ~30 ms of field bisection).
+        try {
+          const _nSh = _arenaScatterShrooms(G, _arenaMesh.group);
+          if (_nSh) console.log('[spire] planted ' + _nSh + ' mushrooms on the mystical storey');
+        } catch (e) { console.warn('[spire] mushroom scatter failed:', e); }
         console.log('[spire] arena meshed: ' + (_arenaMesh.tris / 1000).toFixed(0) + 'k tris in ' + _arenaMesh.ms + 'ms (' + _arenaMesh.chunksTotal + ' chunks)');
       } else {
         dispatch(w);

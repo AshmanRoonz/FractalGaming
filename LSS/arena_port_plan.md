@@ -100,6 +100,32 @@ This is **the one genuinely new thing**: `worldSDF` currently picks *one* world 
 means a region-weighted mix of arena field and sandwich terrain rather than a branch.
 Do this **only after a single arena is proven**.
 
+**(v36.60) THE OWNER'S CONNECTION DESIGN — capture, verbatim intent, three pieces:**
+1. **Endless ↔ spire:** *"the two styles could somehow connect to each other to form a
+   continuous endless path... perhaps the two plane world could connect/entering in from the
+   bottom or top of the spiral, and then exiting on the other side to reconnect."* The endless
+   two-plane cavern route flows INTO the arena at one end of the helix, the pilot climbs (or
+   descends) the spiral through the storeys, and the route resumes out the other end. Mechanism
+   sketch: the arena becomes a HALL-class node in the endless route generator — the route's
+   carve cylinders smin into the arena volume at two portal mouths anchored to the helix's y0
+   and top winding (the helix bore already pokes past the caps — those existing tunnel stubs
+   ARE natural portal anchors). worldSDF blends by region weight near the portals (the slice-5
+   mix), pure arena inside, pure sandwich outside. The endless route's shared-rng discipline
+   (v35.85: route stream vs cosmetic stream) must treat the arena as ONE deterministic segment.
+2. **Overworld ↔ spire:** *"these new spiral/spire map could be a way to connect the overworld
+   to the caverns... holes that go down."* Holes punched in the hub heightfield open into the
+   arena's top cap (the shafts/annular gap are ready-made vertical throats); the bottom exits
+   into the cavern layer. Two implementation rungs: (a) NEAR-TERM — dress the existing
+   zone-rift staged-swap traverse (`_hzEnterCavern` machinery) as a hole: fly into the pit,
+   staged swap into the spire map, exit at a matching hole; (b) FULL — true SDF blending where
+   the hub's carved ground opens into the arena volume (the v34.65 pillar/carve unioning shows
+   the pattern). Rung (a) ships the FEELING with today's tech.
+3. **Waterfalls:** *"we could even add a little water fall in some of them, flowing from top
+   to bottom."* Sheets falling through the shafts/annular gap, storey to storey, pooling on
+   slab tops — the hub water/ripple systems (PART 8) and the god-ray canvas technique are the
+   ingredient shelf. Visual-only first; a candidate v1 is 2-3 shaft waterfalls with splash
+   pools on the slab below, lit by the storey's theme glow.
+
 ---
 
 ## 3. Budget constraints (these will bite)

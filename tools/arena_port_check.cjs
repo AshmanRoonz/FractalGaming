@@ -60,7 +60,7 @@ const fail = (msg) => { fails++; console.log('FAIL: ' + msg); };
 // spikeScale stays: at scale 1 it is 1 and `150*1` is bitwise `150`.
 const G_lab = buildArena(7, 3, 1.0);
 const G_port = _arenaBuildParams({ seed: 7, floors: 3, spikeAmt: 1.0 });
-delete G_port.pillars; delete G_port.themes; delete G_port.lavaY;
+delete G_port.pillars; delete G_port.themes; delete G_port.lavaY; delete G_port.mystBand;
 const jb0 = JSON.stringify(G_port);
 const G_cmp = JSON.parse(jb0); delete G_cmp.spikeScale;
 const ja = JSON.stringify(G_lab), jb = JSON.stringify(G_cmp);
