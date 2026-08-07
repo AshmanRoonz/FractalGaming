@@ -73,6 +73,10 @@ Independently testable: fly it, hit walls, watch bots avoid them, nothing render
    It computes `vWPos`/`vWY` itself, so it should work on arbitrary geometry — verify, don't assume.
 
 ### Slice 3 — per-floor themes
+**(v36.59) SHIPPED at palette level:** per-storey vertex-color palettes (basalt/bronze/crystal/
+snow) with blended 80u midline crossings, lava-lake + crack-vein emissive on the bottom band
+(visual-only — the hazard question stays open), scaled spikes + floor-to-ceiling pillars.
+The FULL `_swPatchTerrainMat` texture treatment below remains the upgrade path.
 7. Each floor gets one of the existing texture themes, **lava on the bottom** (owner's call).
    The lab already drives palette by height in `shade()`; swap the warm→cool lerp for discrete
    per-floor themes with **blended transition bands (~80u)** near each slab — hard theme

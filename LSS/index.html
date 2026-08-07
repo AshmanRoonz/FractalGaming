@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.58';
+const LSS_BUILD = '36.59';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -23943,6 +23943,45 @@ const _ARENA_FIELD_SRC = `{
     return best;
   },
 
+  // FLOOR-TO-CEILING PILLARS (v36.59). Sparse hourglass columns: wide at
+  // both rooted ends, waisted mid-gap — the "spikes meeting top to bottom"
+  // read at deliberate scale. One tile grid per gap (salt keys the gap so
+  // no two gaps share placement) ; P.clear carries room keepout circles so
+  // a pillar can never grow through a spawn/nav pocket.
+  pillarField(px, py, pz, yBot, yTop, g, salt, rootTest) {
+    const P = g.pillars;
+    const sp = P.sp;
+    const ix = Math.round(px / sp), iz = Math.round(pz / sp);
+    const gap = yTop - yBot;
+    let best = 1e9;
+    for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) {
+      const cx = ix + a, cz = iz + b;
+      const h1 = this.hash(cx, salt, cz), h2 = this.hash(cx, salt + 13, cz), h3 = this.hash(cx, salt + 29, cz);
+      if (h3 > P.density) continue;
+      const ox = cx * sp + (h1 - 0.5) * sp * 0.5;
+      const oz = cz * sp + (h2 - 0.5) * sp * 0.5;
+      if (rootTest && !rootTest(ox, oz)) continue;
+      if (P.clear) {
+        let blocked = false;
+        for (let q = 0; q < P.clear.length; q++) {
+          const c = P.clear[q];
+          const ddx = ox - c.x, ddz = oz - c.z;
+          if (ddx*ddx + ddz*ddz < c.r * c.r) { blocked = true; break; }
+        }
+        if (blocked) continue;
+      }
+      const u = (py - yBot) / gap;
+      if (u < -0.1 || u > 1.1) continue;
+      const rad = P.rad * (0.7 + h1 * 0.6);
+      const w = Math.abs(u * 2 - 1);
+      const rr = rad * (P.waist + (1 - P.waist) * w * w);
+      const dx = px - ox, dz = pz - oz;
+      const dd = Math.sqrt(dx*dx + dz*dz) - rr;
+      if (dd < best) best = dd;
+    }
+    return best;
+  },
+
   // HELICAL PASSAGE. theta is only single-valued if you WRAP it: on a helix
   // the same point in space sits at many UNWRAPPED angles, one per turn, so
   // evaluating the same 2D function across several windings yields several
@@ -24010,23 +24049,57 @@ const _ARENA_FIELD_SRC = `{
     }
 
     // 4. SPIKES — stalagmites up from every floor, stalactites down from the
-    //    floor above, so each storey reads as a cavern.
+    //    floor above, so each storey reads as a cavern. g.spikeScale scales
+    //    length/radius/tile-spacing with the arena (v36.59 — at scale 2 the
+    //    unscaled lab constants read as gravel: "on the floors, they are
+    //    tiny"). Absent (the lab, scale 1) it is 1 and this is byte-for-byte
+    //    the lab's math.
     if (g.spikeAmt > 0) {
-      const cfg = { amt: g.spikeAmt, len: 150, rad: 26, density: 0.62 };
+      const ss = g.spikeScale || 1;
+      const cfg = { amt: g.spikeAmt, len: 150*ss, rad: 26*ss, density: 0.62 };
       let sp = 1e9;
       for (let f = 0; f < g.floorY.length; f++) {
         const solidFloor = (ox2, oz2) => this.floorHole(ox2, oz2, f, g) > 26;
-        const up = this.spikes(px, py, pz, g.floorY[f] + g.slabT, 1, 118, cfg, solidFloor);
+        const up = this.spikes(px, py, pz, g.floorY[f] + g.slabT, 1, 118*ss, cfg, solidFloor);
         if (up < sp) sp = up;
-        const dn = this.spikes(px, py, pz, g.floorY[f] - g.slabT, -1, 132, cfg, solidFloor);
+        const dn = this.spikes(px, py, pz, g.floorY[f] - g.slabT, -1, 132*ss, cfg, solidFloor);
         if (dn < sp) sp = dn;
       }
       const inRim = (ox2, oz2) => Math.sqrt(ox2*ox2 + oz2*oz2) < g.R - 40;
-      const top = this.spikes(px, py, pz, g.H, -1, 150, { amt: g.spikeAmt, len: 260, rad: 34, density: 0.5 }, inRim);
+      const top = this.spikes(px, py, pz, g.H, -1, 150*ss, { amt: g.spikeAmt, len: 260*ss, rad: 34*ss, density: 0.5 }, inRim);
       if (top < sp) sp = top;
-      const bot = this.spikes(px, py, pz, -g.H, 1, 150, { amt: g.spikeAmt, len: 230, rad: 32, density: 0.5 }, inRim);
+      const bot = this.spikes(px, py, pz, -g.H, 1, 150*ss, { amt: g.spikeAmt, len: 230*ss, rad: 32*ss, density: 0.5 }, inRim);
       if (bot < sp) sp = bot;
       d = this.smax(d, -sp, 14);
+    }
+
+    // 4b. PILLARS (v36.59, owner: "some should meet top to bottom to make
+    //     pillars in some places") — sparse waisted rock columns between
+    //     every pair of facing surfaces (cap to floor, floor to floor,
+    //     floor to cap). Skipped when g.pillars is absent (the lab).
+    if (g.pillars) {
+      let pd = 1e9;
+      const nfl = g.floorY.length;
+      for (let f = -1; f < nfl; f++) {
+        const yBot = (f < 0) ? -g.H : g.floorY[f] + g.slabT;
+        const yTop = (f + 1 < nfl) ? g.floorY[f + 1] - g.slabT : g.H;
+        // A pillar only exists inside its own gap band — this early-out is
+        // what keeps the pillar pass near-free (one gap per sample).
+        if (py < yBot - 60 || py > yTop + 60) continue;
+        const below = f, above = f + 1;
+        const rt = (ox2, oz2) => {
+          // Both ends must root in ROCK: rim margin, and never over a
+          // shaft/ring hole in either bounding slab (floorHole is the
+          // shared oracle, so carve and root can never disagree).
+          if (Math.sqrt(ox2*ox2 + oz2*oz2) > g.R - 80) return false;
+          if (below >= 0 && this.floorHole(ox2, oz2, below, g) <= 40) return false;
+          if (above < nfl && this.floorHole(ox2, oz2, above, g) <= 40) return false;
+          return true;
+        };
+        const pf = this.pillarField(px, py, pz, yBot, yTop, g, 211 + f * 37, rt);
+        if (pf < pd) pd = pf;
+      }
+      d = this.smax(d, -pd, 24);
     }
 
     // 5. Surface grain.
@@ -24045,26 +24118,71 @@ const _ARENA_FIELD_SRC = `{
     return [gx/l, gy/l, gz/l];
   },
 
-  // Per-vertex look (slice 2 uses this ; kept in the string so the realms
-  // can never diverge). Deliberately LOW frequency — vertices are ~10u
-  // apart. Height drives the palette so each storey reads differently.
+  // Per-vertex look (the mesher uses this ; kept in the string so the
+  // realms can never diverge). Deliberately LOW frequency — vertices are
+  // cell-scale apart.
+  // (v36.59) PER-STOREY THEMES + LAVA (owner: "the various floors could be
+  // made of our various themes/map styles with the bottom as lava").
+  // g.themes = one [r,g,b] per storey band, bottom-up (floors+1 bands,
+  // bands split at the slab midlines, blended over ~80u so the change
+  // happens inside the slab thickness, never mid-wall). Below g.lavaY the
+  // rock darkens to basalt and the ALPHA channel (emissive strength, the
+  // material tints it orange under lavaY, cyan above) carries a lava-lake
+  // glow on the lowest surfaces plus crack veins on the walls.
+  // With g.themes absent this is byte-for-byte the lab's warm-to-cool ramp.
   shade(px, py, pz, g) {
     const rxz = Math.sqrt(px*px + pz*pz);
-    const lvl = (py + g.H) / (2 * g.H);
-    const warm = [0.52, 0.40, 0.30], cool = [0.30, 0.40, 0.55];
     const broad = this.noise(px*0.004, py*0.004, pz*0.004);
-    let r = warm[0] + (cool[0]-warm[0])*lvl;
-    let gg = warm[1] + (cool[1]-warm[1])*lvl;
-    let b = warm[2] + (cool[2]-warm[2])*lvl;
     const lum = 1 + broad*0.20;
     const nearCol = Math.max(0, 1 - Math.abs(rxz - g.colR) / 190);
     const vein = Math.pow(Math.max(0, 1 - Math.abs(this.noise(px*0.012, py*0.02, pz*0.012))), 6);
-    return [r*lum, gg*lum, b*lum, 0.92, vein * (0.10 + nearCol * 0.35)];
+    if (!g.themes) {
+      const lvl = (py + g.H) / (2 * g.H);
+      const warm = [0.52, 0.40, 0.30], cool = [0.30, 0.40, 0.55];
+      let r = warm[0] + (cool[0]-warm[0])*lvl;
+      let gg = warm[1] + (cool[1]-warm[1])*lvl;
+      let b = warm[2] + (cool[2]-warm[2])*lvl;
+      return [r*lum, gg*lum, b*lum, 0.92, vein * (0.10 + nearCol * 0.35)];
+    }
+    // Storey band index + a CONTINUOUS 80u half-weight crossing at each
+    // slab midline: the neighbour theme's weight ramps 0 -> 0.5 approaching
+    // the midline from either side, so both sides meet at the average and
+    // the change lives inside the slab rock, never as a hard line mid-wall.
+    const T = g.themes, nT = T.length;
+    let band = 0;
+    for (let i = 0; i < g.floorY.length; i++) if (py > g.floorY[i]) band = i + 1;
+    if (band >= nT) band = nT - 1;
+    let other = band, w = 0;
+    if (band < g.floorY.length) {
+      const dUp = g.floorY[band] - py;
+      if (dUp < 80) { w = 0.5 * (1 - dUp / 80); other = (band + 1 < nT) ? band + 1 : band; }
+    }
+    if (band > 0) {
+      const dDn = py - g.floorY[band - 1];
+      if (dDn < 80) { w = 0.5 * (1 - dDn / 80); other = band - 1; }
+    }
+    const cA = T[band], cB = T[other];
+    let r = cA[0] + (cB[0]-cA[0])*w;
+    let gg = cA[1] + (cB[1]-cA[1])*w;
+    let b = cA[2] + (cB[2]-cA[2])*w;
+    let glow = vein * (0.10 + nearCol * 0.35);
+    if (g.lavaY !== undefined && py < g.lavaY + 160) {
+      // Basalt darkening approaching the lava band, then the lake itself:
+      // strong glow on the lowest surfaces, crack veins on nearby walls.
+      const sink = Math.max(0, Math.min(1, (g.lavaY - py) / 160));
+      r = r + (0.16 - r) * sink * 0.8;
+      gg = gg + (0.11 - gg) * sink * 0.8;
+      b = b + (0.10 - b) * sink * 0.8;
+      const crack = Math.pow(Math.max(0, 1 - Math.abs(this.noise(px*0.008, py*0.008, pz*0.008))), 5);
+      const lake = Math.max(0, Math.min(1, (g.lavaY - 40 - py) / 90));
+      glow = Math.min(1, lake * (0.55 + 0.45 * crack) + sink * crack * 0.55);
+    }
+    return [r*lum, gg*lum, b*lum, 0.92, glow];
   }
 }`;
 const _ARENA_FIELD = (new Function('return (' + _ARENA_FIELD_SRC + ')'))();
 
-function _arenaBuildParams(a) {
+function _arenaBuildParams(a, rooms) {
   a = a || {};
   const seed   = (a.seed != null ? a.seed : 7) | 0;
   const floors = Math.max(2, (a.floors != null ? a.floors : 3) | 0);
@@ -24075,12 +24193,27 @@ function _arenaBuildParams(a) {
   for (let i = 0; i < floors; i++) {
     fy.push(-H * 0.55 + (i / Math.max(1, floors - 1)) * H * 1.10);
   }
+  const _clear = [];
+  if (Array.isArray(rooms)) {
+    for (const rm of rooms) if (rm && rm.r) _clear.push({ x: rm.x, z: rm.z, r: rm.r * 0.7 + 130 * S });
+  }
+  const themes = [
+    [0.21, 0.15, 0.13],
+    [0.44, 0.34, 0.20],
+    [0.30, 0.36, 0.56],
+    [0.68, 0.74, 0.82],
+  ].slice(0, floors + 1);
+  while (themes.length < floors + 1) themes.push(themes[themes.length - 1]);
   return {
     R, H, floorY: fy, slabT: 34 * S,
     colR: 210 * S, sat: 3, satR: 620 * S, satRad: 118 * S, satPhase: (seed % 100) / 100 * 6.28,
     shafts: 4, shaftR: 830 * S, shaftRad: 118 * S,
     ringR: 360 * S, ringW: 74 * S,
     spikeAmt,
+    spikeScale: S,
+    pillars: { sp: 420 * S, density: 0.34, rad: 82 * S, waist: 0.45, clear: _clear },
+    themes,
+    lavaY: -H + 150 * S,
     helix: { radius: 330 * S, y0: -H * 0.55, pitch: (H * 1.10) / Math.max(1, floors - 1),
              half: 46 * S, wide: 96 * S, turns: 3 },
     seed,
@@ -24112,14 +24245,22 @@ function _arenaMakeMaterial() {
     color: 0xffffff, roughness: 0.93, metalness: 0.03,
     vertexColors: true, dithering: true,
   });
+  m._uLavaY = { value: -1e9 };
   m.onBeforeCompile = (sh) => {
+    sh.uniforms.uArenaLavaY = m._uLavaY;
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying float vAWy;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n  vAWy = position.y;');
     sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vAWy;\nuniform float uArenaLavaY;')
       .replace('#include <color_fragment>',
         '#include <color_fragment>\n  diffuseColor.a = 1.0;')
       .replace('#include <emissivemap_fragment>',
         '#include <emissivemap_fragment>\n' +
         '  #ifdef USE_COLOR_ALPHA\n' +
-        '  totalEmissiveRadiance += vec3(0.40, 0.80, 1.0) * vColor.a * 0.7;\n' +
+        '  vec3 _aTint = (vAWy < uArenaLavaY + 160.0) ? vec3(1.0, 0.30, 0.05) : vec3(0.40, 0.80, 1.0);\n' +
+        '  float _aBoost = (vAWy < uArenaLavaY + 160.0) ? 1.25 : 0.7;\n' +
+        '  totalEmissiveRadiance += _aTint * vColor.a * _aBoost;\n' +
         '  #endif');
   };
   _arenaMat = m;
@@ -24209,7 +24350,7 @@ function _arenaEnsureMesh(level) {
     return;
   }
   _arenaDisposeMesh();
-  _arenaBuildMesh(_arenaBuildParams(level.arena), key, level);
+  _arenaBuildMesh(_arenaBuildParams(level.arena, level.rooms), key, level);
 }
 function _arenaBuildMesh(G, key, level) {
   const CHUNK = 600, CELLS = _arenaMeshCells(), REGION = 3;
@@ -24263,6 +24404,7 @@ function _arenaBuildMesh(G, key, level) {
     if (_arenaMesh.hud) { _arenaMesh.hud.textContent = 'GENERATING ARENA'; _arenaMesh.hud.style.display = 'block'; }
   } catch (_) {}
   const mat = _arenaMakeMaterial();
+  mat._uLavaY.value = (G.lavaY !== undefined) ? G.lavaY : -1e9;
   const mergeRegion = (r) => {
     let nv = 0, ni = 0;
     for (const p of r.parts) { nv += p.pos.length / 3; ni += p.idx.length; }
@@ -35834,6 +35976,17 @@ async function _prebakeWorldForLaunch() {
     rep.ms.terrain = Math.round(_pbNow() - _tB);
     rep.ch1 = _cnt(); rep.tb1 = _tb();
 
+    const _tB2 = _pbNow();
+    if (game.arenaField && _arenaMesh.building) {
+      while (_arenaMesh.building && (_pbNow() - _tB2) < 60000) {
+        _pbSub('generating arena · ' + Math.round(_arenaMesh.chunksDone / Math.max(1, _arenaMesh.chunksTotal) * 100) + '%');
+        await _warmupYield();
+      }
+      if (_arenaMesh.building) rep.capped = 'arena';
+    }
+    rep.ms.arena = Math.round(_pbNow() - _tB2);
+    const _bt0 = t0 + rep.ms.arena;
+
     const _tC = _pbNow();
     _pbSub('compiling effects');
     try { if (typeof _warmRealCombatFX === 'function') _warmRealCombatFX(); } catch (_) {}
@@ -35842,16 +35995,16 @@ async function _prebakeWorldForLaunch() {
 
     const _tE = _pbNow();
     _pbSub('priming ships');
-    try { rep.ent = await _primeEntityModels(_entPrimePlan(), t0, _ENT_PRIME_MAX_MS); } catch (_) {}
+    try { rep.ent = await _primeEntityModels(_entPrimePlan(), _bt0, _ENT_PRIME_MAX_MS); } catch (_) {}
     rep.ms.ent = Math.round(_pbNow() - _tE);
 
     const _tM = _pbNow();
     _pbSub('waking the leviathans');
-    try { rep.mon = await _primeMonsterModels(t0, _MON_PRIME_MAX_MS); } catch (_) {}
+    try { rep.mon = await _primeMonsterModels(_bt0, _MON_PRIME_MAX_MS); } catch (_) {}
     rep.ms.mon = Math.round(_pbNow() - _tM);
 
     const _tD = _pbNow();
-    if (_pbNow() - t0 < _PREBAKE_MAX_MS) {
+    if (_pbNow() - _bt0 < _PREBAKE_MAX_MS) {
       _pbSub('priming the GPU');
       rep.gpuPasses = await _prebakeGpuPrime();
     } else if (!rep.capped) rep.capped = 'gpu-skipped';
@@ -57019,12 +57172,12 @@ const MAP_DATA = {
     ],
     arena: { seed: 7, floors: 3, spikeAmt: 1.0, scale: 2 },
     rooms: [
-      { id: 'spawn_a', team: 'A',  x: -1356, y: 1190, z:  200, r: 300 },
-      { id: 'spawn_b', team: 'B',  x:  1126, y: 1200, z: -170, r: 300 },
-      { id: 'mid_high', team: null, champion: true, x: 360, y: 400, z: 1606, r: 280 },
-      { id: 'mid_east', team: null, x:  985, y:  430, z: -725, r: 280 },
-      { id: 'mid_low',  team: null, x: -1116, y: -430, z: -490, r: 280 },
-      { id: 'pit',      team: null, x:  616, y: -1160, z: -404, r: 260 },
+      { id: 'spawn_a', team: 'A',  x: -1316, y: 1280, z:  280, r: 300 },
+      { id: 'spawn_b', team: 'B',  x:  1326, y: 1260, z:  -50, r: 300 },
+      { id: 'mid_high', team: null, champion: true, x: -80, y: 430, z: 1726, r: 280 },
+      { id: 'mid_east', team: null, x: 1225, y:  460, z: -805, r: 280 },
+      { id: 'mid_low',  team: null, x: -636, y: -400, z: -450, r: 280 },
+      { id: 'pit',      team: null, x:  736, y: -1250, z: -524, r: 260 },
     ],
     tunnels: []
   },
@@ -58146,7 +58299,7 @@ function buildRoomGraphLevel(level) {
 
   if (game.sandwichTerrainEnabled === undefined) game.sandwichTerrainEnabled = true;
   if (level && level.arena) {
-    game.arenaField = { ON: true, G: _arenaBuildParams(level.arena) };
+    game.arenaField = { ON: true, G: _arenaBuildParams(level.arena, level.rooms) };
     game.sandwichTerrain = null;
   }
   else if (game.sandwichTerrainEnabled) {

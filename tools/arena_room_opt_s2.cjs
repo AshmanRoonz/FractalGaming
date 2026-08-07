@@ -14,7 +14,17 @@ function extract(hay, s0, e0) {
 const F = (new Function('return ({' + extract(game, 'const _ARENA_FIELD_SRC = `{', '\n}`;') + '\n})'))();
 const build = (new Function('return (function _arenaBuildParams' +
   extract(game, 'function _arenaBuildParams', '\n}\n') + '\n})'))();
-const G = build({ seed: 7, floors: 3, spikeAmt: 1.0, scale: 2 });
+// (v36.59) rooms feed the pillar keepouts — pass the CURRENT MAP_DATA
+// coords, exactly as buildRoomGraphLevel does. Keep in step with the map.
+const SPIRE_ROOMS = [
+  { x: -1316, y: 1280, z: 280, r: 300 },
+  { x: 1326, y: 1260, z: -50, r: 300 },
+  { x: -80, y: 430, z: 1726, r: 280 },
+  { x: 1225, y: 460, z: -805, r: 280 },
+  { x: -636, y: -400, z: -450, r: 280 },
+  { x: 736, y: -1250, z: -524, r: 260 },
+];
+const G = build({ seed: 7, floors: 3, spikeAmt: 1.0, scale: 2 }, SPIRE_ROOMS);
 console.log('params: R ' + G.R + ' H ' + G.H + ' floors ' + JSON.stringify(G.floorY));
 
 function ballStats(cx, cy, cz, r) {
@@ -46,9 +56,9 @@ function optimise(name, cx, cy, cz, r, box, ybox) {
 }
 // Initial guesses = 2x the scale-1 optimised centres; new mid_east in the
 // third satellite gap (325.2 deg) on storey 3.
-optimise('spawn_a ', -1276, 1240, 200, 300, 280, 140);
-optimise('spawn_b ', 1326, 1280, -50, 300, 280, 140);
-optimise('mid_high', 200, 390, 1446, 280, 280, 140);
-optimise('mid_east', 985, 390, -685, 280, 280, 140);
-optimise('mid_low ', -836, -350, -610, 280, 280, 140);
-optimise('pit     ', 736, -1260, -484, 260, 280, 140);
+optimise('spawn_a ', -1316, 1280, 280, 300, 280, 140);
+optimise('spawn_b ', 1326, 1260, -50, 300, 280, 140);
+optimise('mid_high', -80, 430, 1726, 280, 280, 140);
+optimise('mid_east', 1225, 460, -805, 280, 280, 140);
+optimise('mid_low ', -636, -400, -450, 280, 280, 140);
+optimise('pit     ', 736, -1250, -524, 260, 280, 140);

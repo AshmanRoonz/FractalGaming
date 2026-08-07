@@ -53,11 +53,19 @@ let fails = 0;
 const fail = (msg) => { fails++; console.log('FAIL: ' + msg); };
 
 // --- 3. params parity ---
+// (v36.59) The game's params now carry ADDITIVE features the lab never had
+// (pillars, themes, lavaY, spikeScale, room keepouts). Parity is against the
+// BASE field: strip the additive keys — with them absent the field string's
+// new branches are skipped and the math must be byte-for-byte the lab's.
+// spikeScale stays: at scale 1 it is 1 and `150*1` is bitwise `150`.
 const G_lab = buildArena(7, 3, 1.0);
 const G_port = _arenaBuildParams({ seed: 7, floors: 3, spikeAmt: 1.0 });
-const ja = JSON.stringify(G_lab), jb = JSON.stringify(G_port);
+delete G_port.pillars; delete G_port.themes; delete G_port.lavaY;
+const jb0 = JSON.stringify(G_port);
+const G_cmp = JSON.parse(jb0); delete G_cmp.spikeScale;
+const ja = JSON.stringify(G_lab), jb = JSON.stringify(G_cmp);
 if (ja !== jb) fail('params mismatch\n lab: ' + ja + '\nport: ' + jb);
-else console.log('params: identical for seed 7 / floors 3 / spike 1.0');
+else console.log('params: identical (minus additive keys) for seed 7 / floors 3 / spike 1.0');
 
 // --- 2. field parity, deterministic dense sample ---
 let rngState = 12345;
@@ -123,16 +131,44 @@ console.log('grad/shade: spot-checked 200 points');
 // --- 4c. MAP_DATA.spire rooms: openness of the spawn/nav spheres ---
 // ⚠ These rooms live in the SCALE-2 field (arena.scale 2 in MAP_DATA —
 // load-bearing, see the MAP_DATA comment). G2 below must match the map's
-// arena block.
-const G2 = _arenaBuildParams({ seed: 7, floors: 3, spikeAmt: 1.0, scale: 2 });
+// arena block — INCLUDING the rooms argument (v36.59: rooms feed the
+// pillar keepouts, exactly as buildRoomGraphLevel passes level.rooms).
+const SPIRE_ROOMS = [
+  { id: 'spawn_a', team: 'A', x: -1316, y: 1280, z: 280, r: 300 },
+  { id: 'spawn_b', team: 'B', x: 1326, y: 1260, z: -50, r: 300 },
+  { id: 'mid_high', x: -80, y: 430, z: 1726, r: 280, champion: true },
+  { id: 'mid_east', x: 1225, y: 460, z: -805, r: 280 },
+  { id: 'mid_low', x: -636, y: -400, z: -450, r: 280 },
+  { id: 'pit', x: 736, y: -1250, z: -524, r: 260 },
+];
+const G2 = _arenaBuildParams({ seed: 7, floors: 3, spikeAmt: 1.0, scale: 2 }, SPIRE_ROOMS);
+// (v36.59) Pillar-presence probe: the full field must contain rock at some
+// mid-gap points that the pillar-less field reports as open air.
+{
+  const G2np = JSON.parse(JSON.stringify(G2)); delete G2np.pillars;
+  let pillarHits = 0, probes = 0;
+  for (let gi = -1; gi < G2.floorY.length; gi++) {
+    const yBot = (gi < 0) ? -G2.H : G2.floorY[gi] + G2.slabT;
+    const yTop = (gi + 1 < G2.floorY.length) ? G2.floorY[gi + 1] - G2.slabT : G2.H;
+    const yMid = (yBot + yTop) / 2;
+    for (let x = -2000; x <= 2000; x += 80) for (let z = -2000; z <= 2000; z += 80) {
+      probes++;
+      if (FIELD_PORT.eval(x, yMid, z, G2) >= 0 && FIELD_PORT.eval(x, yMid, z, G2np) < 0) pillarHits++;
+    }
+  }
+  // Presence assertion, not a tuning gate: ~8 pillars/gap x 4 gaps at waist
+  // radius ~50-95u over an 80u probe grid lands in the dozens.
+  if (pillarHits < 40) fail('pillar probe: only ' + pillarHits + ' mid-gap samples turned rock');
+  else console.log('pillar probe: ' + pillarHits + ' mid-gap samples are pillar rock (' + probes + ' probed)');
+}
 {
   const rooms = [
-    { id: 'spawn_a', x: -1356, y: 1190, z: 200, r: 300 },
-    { id: 'spawn_b', x: 1126, y: 1200, z: -170, r: 300 },
-    { id: 'mid_high', x: 360, y: 400, z: 1606, r: 280, champion: true },
-    { id: 'mid_east', x: 985, y: 430, z: -725, r: 280 },
-    { id: 'mid_low', x: -1116, y: -430, z: -490, r: 280 },
-    { id: 'pit', x: 616, y: -1160, z: -404, r: 260 },
+    { id: 'spawn_a', x: -1316, y: 1280, z: 280, r: 300 },
+    { id: 'spawn_b', x: 1326, y: 1260, z: -50, r: 300 },
+    { id: 'mid_high', x: -80, y: 430, z: 1726, r: 280, champion: true },
+    { id: 'mid_east', x: 1225, y: 460, z: -805, r: 280 },
+    { id: 'mid_low', x: -636, y: -400, z: -450, r: 280 },
+    { id: 'pit', x: 736, y: -1250, z: -524, r: 260 },
   ];
   // rooms must match MAP_DATA.spire in index-working.html — cross-check:
   const mapBlock = extract(game, "spire: {", "\n  },");
