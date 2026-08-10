@@ -164,6 +164,17 @@
   .srow .pts{margin-left:auto; font-weight:800; color:var(--lime)}
   .srow.me{background:rgba(255,61,138,.08)}
 
+  /* battle */
+  .vsgrid{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:12px 0}
+  .vsname{font-weight:800; color:var(--cyan)}
+  .vsname.win{color:var(--lime); text-shadow:0 0 12px rgba(182,255,61,.6)}
+  .tcard.picked{outline:3px solid var(--lime)}
+  .tcard .stq{padding:0 10px 8px; font-size:12px}
+  .tcard .stq .hl{color:var(--lime); font-size:16px}
+  .bstat.sel{background:var(--amber); border-color:var(--amber); color:#140a1c}
+  .forfeit{background:rgba(255,61,138,.1); border:1px dashed var(--hot); border-radius:12px;
+    padding:10px 14px; font-size:13px; margin:12px 0; text-align:center}
+
   .wait{color:var(--dim); font-size:13px; text-align:center; margin:14px 0}
   .note{background:var(--panel); border:1px solid var(--edge); border-radius:12px; padding:10px 14px; font-size:12px; color:var(--dim); line-height:1.5; margin:12px 0}
   footer{position:fixed; bottom:0; left:0; right:0; text-align:center; padding:8px; font-size:10px; color:var(--dim);
@@ -209,6 +220,7 @@
     <div id="players"></div>
     <button id="btn-invite" class="ghost">📨 SHARE INVITE LINK</button>
     <button id="btn-deal" style="display:none">🃏 DEAL ROUND <span id="dealnum">1</span></button>
+    <button id="btn-battle-lobby" class="ghost" style="display:none">⚔ CARD BATTLE (LAST NIGHT'S DECKS)</button>
     <div class="wait" id="lobbywait" style="display:none"></div>
     <div id="lobbyboard"></div>
   </section>
@@ -217,7 +229,7 @@
   <section class="scr" id="scr-prompt">
     <div class="rlabel">ROUND <span id="prnum">1</span> — YOUR MISSION</div>
     <div class="promptcard"><div class="p" id="prompttext"></div></div>
-    <div class="rlabel">GET SNEAKY…</div>
+    <div class="rlabel">SCATTER — SPLIT UP, PHONES OUT.<br>NOBODY CAN TELL WHO'S SHOOTING WHAT.</div>
   </section>
 
   <!-- ============ SNAP ============ -->
@@ -267,7 +279,30 @@
     <label>SCOREBOARD</label>
     <div class="sboard" id="scoreboard"></div>
     <button id="btn-next" style="display:none">🃏 DEAL ROUND <span id="nextnum">2</span></button>
+    <button id="btn-battle" class="ghost" style="display:none">⚔ PART 2: CARD BATTLE</button>
     <div class="wait" id="revealwait" style="display:none"></div>
+  </section>
+
+  <!-- ============ BATTLE (part 2: the cards fight) ============ -->
+  <section class="scr" id="scr-battle">
+    <div class="rlabel">PART 2 · DUEL <span id="btidx">1</span> / <span id="bttotal">1</span></div>
+    <h1 id="btvs" style="font-size:20px"></h1>
+    <div id="btstage"></div>
+    <div id="btpick" style="display:none">
+      <label id="btpicklabel">PICK YOUR CHAMPION</label>
+      <div class="cardgrid" id="bthand"></div>
+      <div id="btstats" style="display:none">
+        <label>CALL THE STAT</label>
+        <div style="display:flex; gap:8px">
+          <button class="small ghost bstat" data-i="0">🔥 CHAOS</button>
+          <button class="small ghost bstat" data-i="1">✨ VIBE</button>
+          <button class="small ghost bstat" data-i="2">😈 MENACE</button>
+        </div>
+      </div>
+      <button id="btn-block" disabled>LOCK IT IN</button>
+    </div>
+    <button id="btn-bnext" style="display:none">NEXT DUEL ⚔</button>
+    <button id="btn-bend" class="ghost" style="display:none">BACK TO THE TABLE</button>
   </section>
 
   <!-- ============ DECK ============ -->
@@ -276,8 +311,10 @@
     <p class="sub">Every card this phone has witnessed. The souvenir nobody planned.</p>
     <div class="row">
       <button id="btn-back" class="ghost">← BACK</button>
-      <button id="btn-export" class="ghost">⬇ EXPORT JSON</button>
+      <button id="btn-export" class="ghost">⬇ EXPORT</button>
+      <button id="btn-import" class="ghost">⬆ IMPORT</button>
     </div>
+    <input type="file" id="deckimport" accept="application/json,.json" style="display:none">
     <div class="cardgrid" id="deckgrid"></div>
   </section>
 </main>
@@ -482,7 +519,12 @@ async function join(code,name){
   const [sendSync,onSync]=room.makeAction('sync');
   const [sendCatch,onCatch]=room.makeAction('catch');
   const [sendCVote,onCVote]=room.makeAction('cvote');
-  Object.assign(N,{sendHello,sendPhase,sendCard,sendDeal,sendSubs,sendVote,sendRvl,sendSync,sendCatch,sendCVote});
+  const [sendBStart,onBStart]=room.makeAction('bstart');
+  const [sendBPick,onBPick]=room.makeAction('bpick');
+  const [sendBRes,onBRes]=room.makeAction('bres');
+  const [sendBEnd,onBEnd]=room.makeAction('bend');
+  Object.assign(N,{sendHello,sendPhase,sendCard,sendDeal,sendSubs,sendVote,sendRvl,sendSync,sendCatch,sendCVote,
+    sendBStart,sendBPick,sendBRes,sendBEnd});
 
   onHello((d,id)=>{ if(!d||typeof d!=='object') return;
     const fresh=!S.names[id];
@@ -525,6 +567,11 @@ async function join(code,name){
     $('btn-nay').onclick=()=>{ catchReg.recordVote(d.id,S.selfId,false,meta); N.sendCVote({id:d.id,valid:false}); $('banner').classList.remove('on'); };
   });
   onCVote((d,id)=>{ if(!d||!d.id) return; catchReg.recordVote(d.id,id,d.valid); });
+
+  onBStart((d,id)=>{ if(!d||!Array.isArray(d.pairs)||id!==crownId()) return; applyBStart(d); });
+  onBPick((d,id)=>{ if(!d||!B.on||crownId()!==S.selfId) return; collectBPick(id,d); });
+  onBRes((d,id)=>{ if(!d||id!==crownId()) return; applyBRes(d); });
+  onBEnd((d,id)=>{ if(id!==crownId()) return; applyBEnd(); });
 
   room.onPeerJoin(id=>{
     sendHello({name,jt:S.joinT},id);
@@ -569,6 +616,8 @@ function renderPlayers(){
   if(S.phase==='LOBBY'){
     const mine=dealerFor(1)===S.selfId;
     $('btn-deal').style.display=mine?'':'none'; $('dealnum').textContent='1';
+    // returning night: same code, old decks -> the crown can go straight to part 2
+    $('btn-battle-lobby').style.display=mine&&loadDeck().length?'':'none';
     $('lobbywait').style.display=mine?'none':'';
     $('lobbywait').textContent=`waiting for 👑 ${nameOf(dealerFor(1))} to deal…`;
   }
@@ -894,6 +943,7 @@ function applyReveal(msg){
   $('scoreboard').innerHTML=scoreboardRows();
   const nxt=msg.round+1, mine=dealerFor(nxt)===S.selfId;
   $('btn-next').style.display=mine?'':'none'; $('nextnum').textContent=nxt;
+  $('btn-battle').style.display=crownId()===S.selfId?'':'none';
   $('revealwait').style.display=mine?'none':'';
   $('revealwait').textContent=`👑 ${nameOf(dealerFor(nxt))} deals round ${nxt}…`;
   $('btn-next').onclick=()=>startRound(nxt);
@@ -907,14 +957,169 @@ function scoreboardRows(){
 }
 function scoreboardHtml(){ return `<label>SCORES</label><div class="sboard">${scoreboardRows()}</div>`; }
 
+// ---------- BATTLE (part 2: the deck fights) --------------------------------
+// The crown pairs up the table; each duel, the challenger picks a champion
+// card from their DECK and calls the stat, the defender picks a card blind.
+// Cards travel WITH the pick (title/stats/thumb), so a legend from a night
+// your phone never saw still renders for everyone. Winner +2, loser gets a
+// seeded IRL forfeit involving the winning object. Old decks = returning
+// legends: play the same code next party night and tonight's cards come back.
+const FORFEITS=[
+  'must fetch the winning object and salute it',
+  'must speak AS their losing object for 30 seconds',
+  'must hold the winning object aloft and apologize to it',
+  'must reenact the winning photo, dramatically',
+  'must keep the winning card as their phone wallpaper tonight',
+  "gets a forfeit of the table's choosing — be merciful",
+];
+const crownId=()=>dealerFor(Math.max(1,S.round));
+const B={on:false,pairs:[],idx:0,picks:{},myPick:null,myStat:null,locked:false,res:null};
+const myHand=()=>loadDeck().filter(c=>c.a===nameOf(S.selfId)).slice(-12).reverse();
+
+function startBattle(){ // crown only
+  const ids=shuffled(allIds(),(Math.random()*4294967295)>>>0);
+  const pairs=[]; for(let i=0;i+1<ids.length;i+=2) pairs.push([ids[i],ids[i+1]]);
+  if(!pairs.length){ toast('need at least 2 players at the table'); return; }
+  if(ids.length%2) toast(`odd table — <b>${esc(nameOf(ids[ids.length-1]))}</b> heckles from the sidelines`);
+  const msg={pairs,idx:0};
+  S.net.sendBStart(msg); applyBStart(msg);
+}
+function applyBStart(d){
+  B.on=true; B.pairs=d.pairs; B.idx=d.idx|0;
+  B.picks={}; B.myPick=null; B.myStat=null; B.locked=false; B.res=null;
+  S.phase='BATTLE';
+  renderBattle(); show('scr-battle');
+}
+function collectBPick(id,p){ // crown side
+  const pair=B.pairs[B.idx]; if(!pair||!pair.includes(id)||B.picks[id]) return;
+  B.picks[id]=p;
+  if(pair.every(pid=>B.picks[pid])) resolveDuel();
+}
+function cleanBCard(c){
+  if(!c||typeof c!=='object') return null;
+  return {id:String(c.id||''), t:String(c.t||'UNTITLED').slice(0,40),
+    s:(Array.isArray(c.s)?c.s:[0,0,0]).slice(0,3).map(v=>Math.max(0,Math.min(10,v|0))),
+    img:(typeof c.img==='string'&&c.img.startsWith('data:image/')&&c.img.length<=200000)?c.img:null};
+}
+function resolveDuel(){ // crown computes; everyone applies
+  const [a,b]=B.pairs[B.idx];
+  const pa=B.picks[a]||{}, pb=B.picks[b]||{};
+  const ca=cleanBCard(pa.card), cb=cleanBCard(pb.card);
+  const stat=Math.max(0,Math.min(2,(pa.stat|0)));
+  const va=ca?ca.s[stat]:-1, vb=cb?cb.s[stat]:-1;
+  const win=va>vb?a:vb>va?b:null;
+  const msg={idx:B.idx,a,b,ca,cb,stat,win,f:(Math.random()*FORFEITS.length)|0};
+  S.net.sendBRes(msg); applyBRes(msg);
+}
+function applyBRes(d){
+  if(!B.on||d.idx!==B.idx||B.res) return;
+  B.res=d;
+  if(d.win) bumpScore(d.win,2,0);
+  renderBattle();
+}
+function applyBEnd(){
+  B.on=false;
+  S.phase='REVEAL';
+  $('scoreboard').innerHTML=scoreboardRows();
+  renderHud(); show(S.round>0?'scr-reveal':'scr-lobby'); renderPlayers();
+}
+const STATNAMES=['🔥 CHAOS','✨ VIBE','😈 MENACE'];
+function bcardHtml(c,statIdx,winner){
+  if(!c) return `<div class="tcard"><div class="ttl">NO CARD — forfeited</div></div>`;
+  const img=c.img?`<img src="${c.img}" alt="">`:'';
+  return `<div class="tcard ${rarityClass(c.s)}">${winner?'<span class="win">🏆</span>':''}${img}
+    <div class="ttl">${esc(c.t)}</div>
+    <div class="stq">${STATNAMES[statIdx]}: <span class="hl">${c.s[statIdx]}</span></div>
+    <div class="st">${statLine(c.s)}</div></div>`;
+}
+function renderBattle(){
+  const pair=B.pairs[B.idx]||[];
+  const [a,b]=pair;
+  $('btidx').textContent=B.idx+1; $('bttotal').textContent=B.pairs.length;
+  $('btvs').innerHTML=`<span class="vsname${B.res&&B.res.win===a?' win':''}">${esc(nameOf(a))}</span>
+    <span style="color:var(--hot)"> ⚔ </span>
+    <span class="vsname${B.res&&B.res.win===b?' win':''}">${esc(nameOf(b))}</span>`;
+  const stage=$('btstage'), pick=$('btpick');
+  const crown=crownId()===S.selfId;
+  $('btn-bnext').style.display='none'; $('btn-bend').style.display='none';
+  if(B.res){
+    pick.style.display='none';
+    const r=B.res;
+    const wn=r.win?nameOf(r.win):null, ln=r.win?nameOf(r.win===r.a?r.b:r.a):null;
+    stage.innerHTML=`<div class="vsgrid">${bcardHtml(r.ca,r.stat,r.win===r.a)}${bcardHtml(r.cb,r.stat,r.win===r.b)}</div>
+      <div class="rlabel" style="text-align:center">${STATNAMES[r.stat]} WAS CALLED</div>
+      ${r.win
+        ? `<div class="forfeit">🏆 <b>${esc(wn)}</b> takes it (+2) — <b>${esc(ln)}</b> ${esc(FORFEITS[r.f%FORFEITS.length])}</div>`
+        : `<div class="forfeit">DEAD TIE — the objects stare at each other. nobody scores.</div>`}`;
+    if(crown){
+      if(B.idx+1<B.pairs.length) $('btn-bnext').style.display='';
+      else $('btn-bend').style.display='';
+    }
+    return;
+  }
+  const duelist=pair.includes(S.selfId);
+  if(duelist&&!B.locked){
+    const hand=myHand();
+    if(!hand.length){ // nothing to your name -> auto-forfeit
+      B.locked=true;
+      const p={none:true};
+      if(crown) collectBPick(S.selfId,p); else S.net.sendBPick(p,crownId());
+      stage.innerHTML=`<p class="wait">no cards to your name yet — you forfeit this one. go make a legend next round.</p>`;
+      pick.style.display='none'; return;
+    }
+    stage.innerHTML='';
+    pick.style.display='';
+    const chal=S.selfId===a;
+    $('btpicklabel').textContent=chal?'PICK YOUR CHAMPION (YOU CALL THE STAT)':'PICK YOUR CHAMPION (STAT UNKNOWN…)';
+    $('btstats').style.display=chal?'':'none';
+    const g=$('bthand'); g.innerHTML='';
+    for(const c of hand){
+      const el=document.createElement('div');
+      el.className='tcard '+rarityClass(c.s)+(B.myPick===c?' picked':'');
+      el.innerHTML=`${c.img?`<img src="${c.img}" alt="">`:''}<div class="ttl">${esc(c.t)}</div><div class="st">${statLine(c.s)}</div>`;
+      el.onclick=()=>{ B.myPick=c; renderBattle(); };
+      g.appendChild(el);
+    }
+    document.querySelectorAll('.bstat').forEach(btn=>{
+      btn.classList.toggle('sel',+btn.dataset.i===B.myStat);
+      btn.onclick=()=>{ B.myStat=+btn.dataset.i; renderBattle(); };
+    });
+    $('btn-block').disabled=!(B.myPick&&(!chal||B.myStat!==null));
+    $('btn-block').onclick=()=>{
+      if(!B.myPick) return;
+      B.locked=true;
+      const p={card:{id:B.myPick.id||('legacy-'+B.myPick.d),t:B.myPick.t,s:B.myPick.s,img:B.myPick.img}};
+      if(chal) p.stat=B.myStat;
+      if(crown) collectBPick(S.selfId,p); else S.net.sendBPick(p,crownId());
+      renderBattle();
+    };
+    return;
+  }
+  pick.style.display='none';
+  stage.innerHTML=`<p class="wait">${duelist?'champion locked — ':''}waiting for the duelists to choose…</p>`;
+}
+$('btn-bnext').onclick=()=>{ const msg={pairs:B.pairs,idx:B.idx+1}; S.net.sendBStart(msg); applyBStart(msg); };
+$('btn-bend').onclick=()=>{ S.net.sendBEnd({}); applyBEnd(); };
+$('btn-battle').onclick=startBattle;
+$('btn-battle-lobby').onclick=startBattle;
+
 // ---------- DECK (localStorage souvenir) ------------------------------------
 const DECK_KEY='tl_deck_v1';
 function loadDeck(){ try{ return JSON.parse(localStorage.getItem(DECK_KEY))||[]; }catch(_){ return []; } }
-async function saveToDeck(card,r){
+let deckWrites=Promise.resolve();
+function saveToDeck(card,r){ // serialize: concurrent saves would clobber each other's read-modify-write
+  deckWrites=deckWrites.then(()=>_saveToDeck(card,r)).catch(()=>{});
+  return deckWrites;
+}
+async function _saveToDeck(card,r){
   try{
-    const img=await thumb(card.blob,380);
+    // deterministic id (code+seed+cid): identical on every phone that night,
+    // unique across nights — dedupes re-saves and keys battle picks
+    const id=S.code+'-'+(S.seed>>>0).toString(36)+'-'+r.cid;
     const deck=loadDeck();
-    deck.push({t:card.title,s:card.s,a:nameOf(r.author),p:S.prompt,c:S.code,w:!!r.win,d:Date.now(),img});
+    if(deck.some(c=>c.id===id)) return;
+    const img=await thumb(card.blob,380);
+    deck.push({id,t:card.title,s:card.s,a:nameOf(r.author),p:S.prompt,c:S.code,w:!!r.win,d:Date.now(),img});
     while(deck.length>120) deck.shift();
     localStorage.setItem(DECK_KEY,JSON.stringify(deck));
   }catch(_){/* storage full — the party outgrew the phone */}
@@ -949,6 +1154,29 @@ $('btn-export').onclick=()=>{
   const a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([localStorage.getItem(DECK_KEY)||'[]'],{type:'application/json'}));
   a.download='table-legends-deck.json'; a.click();
+};
+$('btn-import').onclick=()=>$('deckimport').click();
+$('deckimport').onchange=async e=>{
+  const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return;
+  try{
+    const incoming=JSON.parse(await f.text());
+    if(!Array.isArray(incoming)) throw 0;
+    const deck=loadDeck();
+    const seen=new Set(deck.map(c=>c.id||('legacy-'+c.d)));
+    let added=0;
+    for(const raw of incoming){
+      const c=cleanBCard(raw); if(!c||!c.img) continue;
+      const id=c.id||('legacy-'+(+raw.d||0));
+      if(seen.has(id)) continue; seen.add(id);
+      deck.push({id,t:c.t,s:c.s,a:String(raw.a||'???').slice(0,14),
+        p:String(raw.p||'').slice(0,80),c:String(raw.c||'').slice(0,12),w:!!raw.w,d:+raw.d||Date.now(),img:c.img});
+      added++;
+    }
+    while(deck.length>120) deck.shift();
+    localStorage.setItem(DECK_KEY,JSON.stringify(deck));
+    toast(added?`<b>${added}</b> legend${added>1?'s':''} joined your deck`:'nothing new in that deck');
+    $('hud-deck').click();
+  }catch(_){ toast('that file is not a deck'); }
 };
 </script>
 </body>
