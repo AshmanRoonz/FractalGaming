@@ -1,0 +1,1183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>TABLE LEGENDS // party photo card game</title>
+<!--
+  TABLE LEGENDS — a hybrid in-person / on-phone party card game.
+
+  The loop: everyone gets the same absurd prompt ("something that could kill
+  you"), sneaks a photo of a real object in the room, titles it, and spends a
+  stat budget on it. The DEALER (rotating crown) collects the submissions like
+  a dead drop, shuffles them with a shared seed, and re-broadcasts them with
+  the authors stripped — so the mesh never leaks who made what. Then everyone
+  votes: guess each card's author, star a favorite. Reveal, score, rotate the
+  crown, next round. Cards persist to a local DECK — the party's souvenir.
+
+  Transport: trystero (nostr strategy) — same pattern as goopling.html.
+  Consensus: trystero-consensus (inlined; MIT, by Ashman Roonz)
+             https://github.com/AshmanRoonz/trystero-consensus
+             - electProposer / rotation -> the dealer crown, self-heals on churn
+             - createConvergentState    -> owner-free score consensus (max-merge)
+             - createVoteRegister       -> quorum-voted "CAUGHT!" (catch someone
+                                           sneaking their photo, the room votes)
+
+  Single file. No build. No backend. Scoring:
+    +2 per player who guessed you WRONG (bluff)     +3 your card wins the star
+    +1 per author you guessed right                 +1 dealer's house cut
+    CAUGHT sneaking a photo (room-confirmed): -1 you, +1 the spotter
+-->
+<style>
+  :root{
+    --bg:#0b0710; --panel:#171021; --panel2:#1f1530; --edge:#332347;
+    --hot:#ff3d8a; --amber:#ffb020; --cyan:#2fe0e8; --lime:#b6ff3d; --vio:#9d6bff;
+    --txt:#f2e9ff; --dim:#8d7fa8;
+    --sans:'Avenir Next','Segoe UI',system-ui,sans-serif;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%}
+  body{
+    background:
+      radial-gradient(900px 420px at 85% -10%, rgba(255,61,138,.14), transparent 60%),
+      radial-gradient(700px 400px at 0% 110%, rgba(157,107,255,.12), transparent 60%),
+      var(--bg);
+    color:var(--txt); font-family:var(--sans); font-size:15px;
+    display:flex; flex-direction:column; min-height:100dvh; overflow-x:hidden;
+  }
+  header{
+    display:flex; align-items:center; gap:10px; padding:10px 14px;
+    border-bottom:1px solid var(--edge); position:sticky; top:0; z-index:20;
+    background:rgba(11,7,16,.92); backdrop-filter:blur(6px);
+  }
+  .logo{font-weight:800; letter-spacing:2px; font-size:15px}
+  .logo .a{color:var(--amber); text-shadow:0 0 12px rgba(255,176,32,.6)}
+  .logo .b{color:var(--hot); text-shadow:0 0 12px rgba(255,61,138,.6)}
+  #hud{margin-left:auto; display:flex; gap:8px; align-items:center; font-size:12px}
+  .chip{background:var(--panel); border:1px solid var(--edge); border-radius:20px; padding:4px 10px; color:var(--dim); white-space:nowrap}
+  .chip b{color:var(--txt)}
+  .chip.deck{cursor:pointer; color:var(--cyan); border-color:rgba(47,224,232,.4)}
+  main{flex:1; width:100%; max-width:560px; margin:0 auto; padding:16px 14px 80px}
+  .scr{display:none}
+  .scr.on{display:block; animation:pop .25s ease}
+  @keyframes pop{from{opacity:0; transform:translateY(8px)}to{opacity:1}}
+
+  h1{font-size:26px; font-weight:800; letter-spacing:1px; margin:8px 0 4px}
+  .sub{color:var(--dim); font-size:13px; margin-bottom:18px; line-height:1.5}
+  label{display:block; font-size:11px; letter-spacing:2px; color:var(--dim); margin:14px 0 6px}
+  input[type=text]{
+    width:100%; font-size:16px; font-family:var(--sans); color:var(--txt);
+    background:var(--panel); border:1px solid var(--edge); border-radius:10px; padding:12px 14px; outline:none;
+  }
+  input[type=text]:focus{border-color:var(--hot)}
+  button{
+    font-family:var(--sans); font-weight:700; font-size:15px; letter-spacing:.5px;
+    color:#140a1c; background:linear-gradient(135deg,var(--amber),var(--hot));
+    border:none; border-radius:12px; padding:14px 18px; cursor:pointer; width:100%;
+    margin-top:12px; transition:transform .1s, filter .15s;
+  }
+  button:active{transform:scale(.97)}
+  button:disabled{filter:grayscale(.8) brightness(.6); cursor:default}
+  button.ghost{background:transparent; color:var(--cyan); border:1px solid var(--cyan); font-weight:600}
+  button.small{width:auto; padding:8px 14px; font-size:13px; margin:0}
+  .row{display:flex; gap:10px}
+  .row>*{flex:1}
+
+  /* players */
+  #players,#playersR{display:flex; flex-wrap:wrap; gap:8px; margin:10px 0}
+  .pchip{display:flex; align-items:center; gap:6px; background:var(--panel2); border:1px solid var(--edge);
+    border-radius:20px; padding:6px 12px; font-size:13px}
+  .pchip .crown{filter:drop-shadow(0 0 6px rgba(255,176,32,.8))}
+  .pchip .spot{background:none; border:none; padding:0 0 0 4px; margin:0; width:auto; font-size:15px; cursor:pointer}
+
+  /* prompt splash */
+  #scr-prompt{text-align:center; padding-top:8vh}
+  .promptcard{
+    background:linear-gradient(160deg,var(--panel2),var(--panel)); border:1px solid var(--edge);
+    border-radius:18px; padding:34px 22px; margin:20px 0; box-shadow:0 20px 60px rgba(0,0,0,.5);
+  }
+  .promptcard .p{font-size:24px; font-weight:800; line-height:1.3; color:var(--amber); text-shadow:0 0 20px rgba(255,176,32,.35)}
+  .rlabel{font-size:11px; letter-spacing:3px; color:var(--dim)}
+
+  /* timer */
+  .timer{height:6px; background:var(--panel); border-radius:3px; overflow:hidden; margin:10px 0}
+  .timer i{display:block; height:100%; background:linear-gradient(90deg,var(--cyan),var(--hot)); transition:width .5s linear}
+
+  /* snap */
+  #photolabel{display:block; border:2px dashed var(--edge); border-radius:16px; padding:20px; text-align:center; cursor:pointer; margin:12px 0; color:var(--dim)}
+  #photolabel.has{border-style:solid; border-color:var(--lime); padding:0; overflow:hidden}
+  #photolabel img{width:100%; display:block; border-radius:14px}
+  #photoinput{display:none}
+  .stats{margin:14px 0}
+  .stat{display:flex; align-items:center; gap:10px; margin:8px 0}
+  .stat .nm{width:88px; font-size:13px; font-weight:700; letter-spacing:1px}
+  .stat .bar{flex:1; height:14px; background:var(--panel); border-radius:7px; overflow:hidden}
+  .stat .bar i{display:block; height:100%; transition:width .15s}
+  .stat.s0 .bar i{background:var(--hot)} .stat.s1 .bar i{background:var(--cyan)} .stat.s2 .bar i{background:var(--vio)}
+  .stat button{width:34px; height:34px; padding:0; margin:0; font-size:18px; border-radius:8px; background:var(--panel2); color:var(--txt); border:1px solid var(--edge)}
+  #pool{font-size:12px; color:var(--dim); text-align:right}
+  #pool b{color:var(--lime); font-size:15px}
+
+  /* cards */
+  .cardgrid{display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:12px; margin:12px 0}
+  .tcard{
+    background:linear-gradient(165deg,var(--panel2),var(--panel)); border:2px solid var(--edge);
+    border-radius:14px; overflow:hidden; position:relative;
+  }
+  .tcard.rare{border-color:var(--amber)}
+  .tcard.holo{border-color:transparent; background-clip:padding-box}
+  .tcard.holo::before{
+    content:''; position:absolute; inset:-2px; z-index:-1; border-radius:14px;
+    background:linear-gradient(120deg,var(--hot),var(--amber),var(--lime),var(--cyan),var(--vio),var(--hot));
+    background-size:300% 300%; animation:holo 3s linear infinite;
+  }
+  @keyframes holo{0%{background-position:0% 50%}100%{background-position:300% 50%}}
+  .tcard img{width:100%; aspect-ratio:1; object-fit:cover; display:block}
+  .tcard .ttl{font-weight:800; font-size:13px; padding:8px 10px 4px; line-height:1.25; min-height:38px}
+  .tcard .st{display:flex; gap:6px; padding:0 10px 8px; font-size:11px; color:var(--dim)}
+  .tcard .st b{color:var(--txt)}
+  .tcard .badge{position:absolute; top:6px; left:6px; background:rgba(11,7,16,.85); border-radius:8px; padding:3px 8px; font-size:11px; font-weight:700}
+  .tcard .win{position:absolute; top:6px; right:6px; font-size:20px; filter:drop-shadow(0 0 8px rgba(255,176,32,.9))}
+  .tcard .who{padding:6px 10px 10px; font-size:12px; border-top:1px dashed var(--edge)}
+  .tcard .who .an{color:var(--lime); font-weight:700}
+  .guessrow{display:flex; flex-wrap:wrap; gap:5px; padding:6px 8px 10px; border-top:1px dashed var(--edge)}
+  .gchip{background:var(--panel); border:1px solid var(--edge); border-radius:14px; padding:4px 9px; font-size:11px; cursor:pointer; color:var(--dim)}
+  .gchip.sel{background:var(--hot); border-color:var(--hot); color:#140a1c; font-weight:700}
+  .favebtn{position:absolute; top:6px; right:6px; background:rgba(11,7,16,.85); border:1px solid var(--edge);
+    width:34px; height:34px; padding:0; margin:0; border-radius:50%; font-size:16px; line-height:1}
+  .favebtn.sel{background:var(--amber); border-color:var(--amber)}
+
+  /* banners & toasts */
+  #banner{position:fixed; left:12px; right:12px; bottom:76px; z-index:60; background:var(--panel2);
+    border:1px solid var(--hot); border-radius:14px; padding:12px 14px; display:none; box-shadow:0 10px 40px rgba(0,0,0,.6)}
+  #banner.on{display:block; animation:pop .2s ease}
+  #banner .q{font-size:14px; margin-bottom:8px}
+  #toasts{position:fixed; top:56px; left:0; right:0; z-index:70; display:flex; flex-direction:column; align-items:center; gap:6px; pointer-events:none}
+  .toast{background:rgba(23,16,33,.95); border:1px solid var(--edge); border-radius:20px; padding:8px 16px; font-size:13px; animation:pop .2s ease}
+  .toast b{color:var(--amber)}
+
+  /* scoreboard */
+  .sboard{margin:14px 0; border:1px solid var(--edge); border-radius:14px; overflow:hidden}
+  .srow{display:flex; align-items:center; gap:10px; padding:9px 14px; border-bottom:1px solid var(--edge); font-size:14px}
+  .srow:last-child{border-bottom:none}
+  .srow .pos{width:22px; color:var(--dim); font-size:12px}
+  .srow .pts{margin-left:auto; font-weight:800; color:var(--lime)}
+  .srow.me{background:rgba(255,61,138,.08)}
+
+  /* battle */
+  .vsgrid{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:12px 0}
+  .vsname{font-weight:800; color:var(--cyan)}
+  .vsname.win{color:var(--lime); text-shadow:0 0 12px rgba(182,255,61,.6)}
+  .tcard.picked{outline:3px solid var(--lime)}
+  .tcard .stq{padding:0 10px 8px; font-size:12px}
+  .tcard .stq .hl{color:var(--lime); font-size:16px}
+  .bstat.sel{background:var(--amber); border-color:var(--amber); color:#140a1c}
+  .forfeit{background:rgba(255,61,138,.1); border:1px dashed var(--hot); border-radius:12px;
+    padding:10px 14px; font-size:13px; margin:12px 0; text-align:center}
+
+  .wait{color:var(--dim); font-size:13px; text-align:center; margin:14px 0}
+  .note{background:var(--panel); border:1px solid var(--edge); border-radius:12px; padding:10px 14px; font-size:12px; color:var(--dim); line-height:1.5; margin:12px 0}
+  footer{position:fixed; bottom:0; left:0; right:0; text-align:center; padding:8px; font-size:10px; color:var(--dim);
+    background:rgba(11,7,16,.9); border-top:1px solid var(--edge); z-index:20}
+  footer a{color:var(--cyan); text-decoration:none}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo"><span class="a">TABLE</span> <span class="b">LEGENDS</span></div>
+  <div id="hud">
+    <span class="chip" id="hud-room" style="display:none">⬡ <b id="hud-code"></b></span>
+    <span class="chip" id="hud-score" style="display:none">★ <b id="hud-pts">0</b></span>
+    <span class="chip deck" id="hud-deck">🃏 DECK</span>
+  </div>
+</header>
+
+<main>
+  <!-- ============ LOBBY / JOIN ============ -->
+  <section class="scr on" id="scr-join">
+    <h1>Turn the party<br>into a card game.</h1>
+    <p class="sub">Same prompt for everyone. Sneak a photo of a real thing in the room, title it,
+      stat it. The dealer shuffles the cards in anonymously — then everyone guesses who made what.</p>
+    <label>YOUR NAME</label>
+    <input type="text" id="nameinput" maxlength="14" placeholder="e.g. CHAOS DAD">
+    <label>PARTY CODE</label>
+    <input type="text" id="codeinput" maxlength="12" placeholder="e.g. TACO99" autocapitalize="characters">
+    <div class="row">
+      <button id="btn-join">JOIN PARTY</button>
+      <button id="btn-new" class="ghost">NEW PARTY</button>
+    </div>
+    <div class="note">Serverless: phones connect directly over WebRTC (trystero mesh).
+      The crown 👑 rotates every round — the dealer collects cards like a dead drop and
+      re-deals them with authors stripped, so nobody's phone leaks who made what.</div>
+  </section>
+
+  <!-- ============ PARTY LOBBY ============ -->
+  <section class="scr" id="scr-lobby">
+    <h1 id="lobbytitle">The table is set.</h1>
+    <p class="sub">Get everyone in, then the dealer deals. Tap the room chip up top any time to copy the invite.</p>
+    <label>AT THE TABLE</label>
+    <div id="players"></div>
+    <button id="btn-invite" class="ghost">📨 SHARE INVITE LINK</button>
+    <button id="btn-deal" style="display:none">🃏 DEAL ROUND <span id="dealnum">1</span></button>
+    <button id="btn-battle-lobby" class="ghost" style="display:none">⚔ CARD BATTLE (LAST NIGHT'S DECKS)</button>
+    <div class="wait" id="lobbywait" style="display:none"></div>
+    <div id="lobbyboard"></div>
+  </section>
+
+  <!-- ============ PROMPT SPLASH ============ -->
+  <section class="scr" id="scr-prompt">
+    <div class="rlabel">ROUND <span id="prnum">1</span> — YOUR MISSION</div>
+    <div class="promptcard"><div class="p" id="prompttext"></div></div>
+    <div class="rlabel">SCATTER — SPLIT UP, PHONES OUT.<br>NOBODY CAN TELL WHO'S SHOOTING WHAT.</div>
+  </section>
+
+  <!-- ============ SNAP ============ -->
+  <section class="scr" id="scr-snap">
+    <div class="rlabel">ROUND <span id="snnum">1</span> · PHOTOGRAPH:</div>
+    <h1 id="snapprompt" style="font-size:19px; color:var(--amber)"></h1>
+    <div class="timer"><i id="snaptimer"></i></div>
+    <div id="spectate" class="note" style="display:none">You joined mid-round — you're dealt in next round. Watch the chaos.</div>
+    <div id="snapui">
+      <label for="photoinput" id="photolabel">📸 TAP TO SHOOT THE OBJECT<br><small>don't get caught…</small></label>
+      <input type="file" id="photoinput" accept="image/*" capture="environment">
+      <label>CARD TITLE</label>
+      <input type="text" id="titleinput" maxlength="40" placeholder="THE UNBLINKING DISC OF FATE">
+      <div class="stats">
+        <div id="pool">SPEND <b id="poolleft">10</b> POINTS</div>
+        <div class="stat s0"><span class="nm">🔥 CHAOS</span><button data-s="0" data-d="-1">–</button><div class="bar"><i></i></div><button data-s="0" data-d="1">+</button></div>
+        <div class="stat s1"><span class="nm">✨ VIBE</span><button data-s="1" data-d="-1">–</button><div class="bar"><i></i></div><button data-s="1" data-d="1">+</button></div>
+        <div class="stat s2"><span class="nm">😈 MENACE</span><button data-s="2" data-d="-1">–</button><div class="bar"><i></i></div><button data-s="2" data-d="1">+</button></div>
+      </div>
+      <button id="btn-submit" disabled>SLIDE IT TO THE DEALER</button>
+    </div>
+    <div class="wait" id="snapwait" style="display:none"></div>
+    <div id="catchzone" style="display:none">
+      <label>SEE SOMEONE SNEAKING A PHOTO? BUST THEM 👀</label>
+      <div id="catchlist" style="display:flex; flex-wrap:wrap; gap:8px"></div>
+    </div>
+  </section>
+
+  <!-- ============ VOTE ============ -->
+  <section class="scr" id="scr-vote">
+    <div class="rlabel">ROUND <span id="vtnum">1</span> · THE DEAL</div>
+    <h1 style="font-size:19px">Who made what?</h1>
+    <p class="sub">Tap a name under each card to accuse. Star ⭐ the card that best nails:
+      <b style="color:var(--amber)" id="voteprompt"></b></p>
+    <div class="timer"><i id="votetimer"></i></div>
+    <div id="dealernote" class="note" style="display:none">You dealt this round — you know who's who, so no guessing for you. Star a favorite; you take the house cut (+1).</div>
+    <div class="cardgrid" id="votegrid"></div>
+    <button id="btn-vote">LOCK IN VOTES</button>
+    <div class="wait" id="votewait" style="display:none"></div>
+  </section>
+
+  <!-- ============ REVEAL ============ -->
+  <section class="scr" id="scr-reveal">
+    <div class="rlabel">ROUND <span id="rvnum">1</span> · THE TRUTH</div>
+    <h1 style="font-size:19px">Cards on the table.</h1>
+    <div class="cardgrid" id="revealgrid"></div>
+    <label>SCOREBOARD</label>
+    <div class="sboard" id="scoreboard"></div>
+    <button id="btn-next" style="display:none">🃏 DEAL ROUND <span id="nextnum">2</span></button>
+    <button id="btn-battle" class="ghost" style="display:none">⚔ PART 2: CARD BATTLE</button>
+    <div class="wait" id="revealwait" style="display:none"></div>
+  </section>
+
+  <!-- ============ BATTLE (part 2: the cards fight) ============ -->
+  <section class="scr" id="scr-battle">
+    <div class="rlabel">PART 2 · DUEL <span id="btidx">1</span> / <span id="bttotal">1</span></div>
+    <h1 id="btvs" style="font-size:20px"></h1>
+    <div id="btstage"></div>
+    <div id="btpick" style="display:none">
+      <label id="btpicklabel">PICK YOUR CHAMPION</label>
+      <div class="cardgrid" id="bthand"></div>
+      <div id="btstats" style="display:none">
+        <label>CALL THE STAT</label>
+        <div style="display:flex; gap:8px">
+          <button class="small ghost bstat" data-i="0">🔥 CHAOS</button>
+          <button class="small ghost bstat" data-i="1">✨ VIBE</button>
+          <button class="small ghost bstat" data-i="2">😈 MENACE</button>
+        </div>
+      </div>
+      <button id="btn-block" disabled>LOCK IT IN</button>
+    </div>
+    <button id="btn-bnext" style="display:none">NEXT DUEL ⚔</button>
+    <button id="btn-bend" class="ghost" style="display:none">BACK TO THE TABLE</button>
+  </section>
+
+  <!-- ============ DECK ============ -->
+  <section class="scr" id="scr-deck">
+    <h1>The party's deck.</h1>
+    <p class="sub">Every card this phone has witnessed. The souvenir nobody planned.</p>
+    <div class="row">
+      <button id="btn-back" class="ghost">← BACK</button>
+      <button id="btn-export" class="ghost">⬇ EXPORT</button>
+      <button id="btn-import" class="ghost">⬆ IMPORT</button>
+    </div>
+    <input type="file" id="deckimport" accept="application/json,.json" style="display:none">
+    <div class="cardgrid" id="deckgrid"></div>
+  </section>
+</main>
+
+<div id="banner">
+  <div class="q" id="bannerq"></div>
+  <div class="row">
+    <button class="small" id="btn-yea">👀 SAW IT</button>
+    <button class="small ghost" id="btn-nay">NOPE</button>
+  </div>
+</div>
+<div id="toasts"></div>
+
+<footer>TABLE LEGENDS · consensus by <a href="https://github.com/AshmanRoonz/trystero-consensus">trystero-consensus</a> · fractalreality.ca</footer>
+
+<script type="module">
+// ---------- tiny utils ------------------------------------------------------
+const $=id=>document.getElementById(id);
+const now=()=>Date.now();
+function toast(html){ const t=document.createElement('div'); t.className='toast'; t.innerHTML=html;
+  $('toasts').appendChild(t); setTimeout(()=>t.remove(),3200); }
+function esc(s){ return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// deterministic RNG (same family as goopling / the meta-generator)
+function hashU(n){ n>>>=0; n=(Math.imul(n,747796405)+2891336453)>>>0; n=(Math.imul((n>>>((n>>>28)+4))^n,277803737))>>>0; return ((n>>>22)^n)>>>0; }
+function makeRng(seed){ let s=seed>>>0; const nx=()=>{ s=(Math.imul(s,1664525)+1013904223)>>>0; return (hashU(s)&0xffffff)/16777215; };
+  return { nx, i:n=>Math.min(n-1,(nx()*n)|0) }; }
+function shuffled(arr,seed){ const R=makeRng(seed),a=arr.slice();
+  for(let i=a.length-1;i>0;i--){ const j=R.i(i+1); const t=a[i]; a[i]=a[j]; a[j]=t; } return a; }
+
+// ---------- trystero-consensus helpers (inlined; MIT, by Ashman Roonz) ------
+// https://github.com/AshmanRoonz/trystero-consensus
+function electProposer(selfId,peerIds,{compare}={}){ const cmp=compare||((a,b)=>(a<b?-1:a>b?1:0));
+  return [selfId,...peerIds].sort(cmp)[0]; }
+const _convReducers={ average:v=>v.reduce((a,b)=>a+b,0)/v.length,
+  max:v=>v.reduce((a,b)=>(b>a?b:a),v[0]), min:v=>v.reduce((a,b)=>(b<a?b:a),v[0]),
+  latest:v=>v[v.length-1] };
+function createConvergentState({fields,staleMs=2000,nowFn=()=>performance.now()}={}){
+  if(!fields||typeof fields!=='object') throw new Error('createConvergentState requires a `fields` map');
+  const peers=new Map();
+  const reducerFor=r=>typeof r==='function'?r:_convReducers[r];
+  const isLive=(snap,at)=>at-snap.at<=staleMs;
+  return {
+    ingest(peerId,values,at=nowFn()){ peers.set(peerId,{values:values||{},at}); return this; },
+    drop(peerId){ peers.delete(peerId); return this; },
+    contributors(at=nowFn()){ const live=[]; for(const [pid,snap] of peers) if(isLive(snap,at)) live.push(pid); return live; },
+    merge(local,at=nowFn()){ const out={};
+      for(const field of Object.keys(fields)){ const reduce=reducerFor(fields[field]); const values=[];
+        if(local[field]!==undefined&&local[field]!==null) values.push(local[field]);
+        for(const snap of peers.values()){ if(!isLive(snap,at)) continue;
+          const v=snap.values[field]; if(v!==undefined&&v!==null) values.push(v); }
+        out[field]=values.length>=2?reduce(values):local[field]; }
+      return out; },
+    prune(at=nowFn()){ for(const [pid,snap] of peers) if(!isLive(snap,at)) peers.delete(pid); return this; }
+  };
+}
+function createVoteRegister({getPeerCount,quorum,timeoutMs=3000,onResolved}={}){
+  if(typeof getPeerCount!=='function') throw new Error('createVoteRegister requires a `getPeerCount` function');
+  const pending=new Map();
+  const majority=(yes,no,total)=>{ const needed=Math.ceil(total/2);
+    if(yes>=needed) return 'confirmed'; if(no>=needed) return 'rejected'; return null; };
+  const decide=quorum||majority;
+  const tally=e=>{ let yes=0,no=0; for(const v of e.votes.values()) v?yes++:no++; return {yes,no}; };
+  function open(claimId,meta=null){ if(pending.has(claimId)) return;
+    const entry={meta,votes:new Map(),timer:null};
+    if(timeoutMs>0) entry.timer=setTimeout(()=>resolve(claimId,'timeout'),timeoutMs);
+    pending.set(claimId,entry); }
+  function resolve(claimId,outcome){ const entry=pending.get(claimId); if(!entry) return;
+    if(entry.timer!=null) clearTimeout(entry.timer); pending.delete(claimId);
+    if(onResolved) onResolved(claimId,outcome,{...tally(entry),meta:entry.meta}); }
+  function recordVote(claimId,voterId,valid,meta=null){
+    if(!pending.has(claimId)) open(claimId,meta);
+    const entry=pending.get(claimId); entry.votes.set(voterId,!!valid);
+    const total=getPeerCount()+1; const {yes,no}=tally(entry);
+    const outcome=decide(yes,no,total,entry);
+    if(outcome==='confirmed'||outcome==='rejected') resolve(claimId,outcome); }
+  return {open,recordVote,has:id=>pending.has(id)};
+}
+
+// ---------- prompts ---------------------------------------------------------
+const PROMPTS=[
+  'something that could kill you','the oldest thing in this room',
+  'something the host regrets buying','evidence of a crime',
+  'the most cursed object within reach','something that has seen too much',
+  'an object with main character energy','the cheapest thing pretending to be expensive',
+  "something you'd grab in a fire (wrong answers only)",'a weapon for the coming uprising',
+  'something that smells stronger than it looks','the last thing an intruder would see',
+  'an ancient relic of a forgotten civilization','something that is definitely haunted',
+  "this room's natural predator","a gift you'd give your worst enemy",
+  'something owned by a wizard','the real host of this party',
+  'an item of immense forbidden power','something that would survive the apocalypse',
+  'the saddest object here','something that is judging you right now',
+  'a delicacy on another planet','the first thing aliens would abduct',
+  'something with a dark secret','an object that peaked in high school',
+  "this room's weakest link",'something worth exactly one dollar',
+  'a future museum exhibit','something that knows what it did',
+  'the most illegal-looking legal thing here','something that wants to go home',
+  'proof that we live in a simulation','the best hiding spot for a secret',
+  'something your grandma would confiscate','an object plotting against its owner',
+];
+
+// ---------- state -----------------------------------------------------------
+const CODE_CHARS='ABCDEFGHJKMNPQRSTVWXYZ23456789';
+const genCode=n=>{ let s=''; for(let i=0;i<n;i++) s+=CODE_CHARS[(Math.random()*CODE_CHARS.length)|0]; return s; };
+const sanitize=s=>String(s||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,12);
+
+const S={
+  on:false, code:null, room:null, selfId:null, joinT:0,
+  phase:'JOIN', round:0, seed:0, pi:-1, prompt:'', deadline:0,
+  players:[],                 // ids locked in for the current round
+  names:{},                   // id -> {name, jt}
+  scores:{},                  // id -> {pts, pen}  (both forward-only; max-merged)
+  myCard:null,                // {buf, blobUrl, title, s:[c,v,m], round, bytes}
+  submitted:new Set(),        // who's handed in (from dealer's subs broadcasts)
+  collected:new Map(),        // DEALER: authorId -> {buf, title, s}
+  cardAuthor:{},              // DEALER: cid -> authorId
+  votes:new Map(),            // DEALER: voterId -> {fave, guesses}
+  order:[],                   // cids in dealt order
+  dealt:new Map(),            // cid -> {url, blob, title, s, mine}
+  myVote:null, voteLocked:false, dealing:false, revealed:false,
+  usedPrompts:new Set(),
+  net:{sendHello:null,sendPhase:null,sendCard:null,sendDeal:null,sendSubs:null,
+       sendVote:null,sendRvl:null,sendSync:null,sendCatch:null,sendCVote:null},
+};
+const peerIds=()=>S.room?Object.keys(S.room.getPeers()):[];
+const allIds=()=>[S.selfId,...peerIds()].sort();
+const dealerFor=r=>{ const ids=allIds(); return ids[(Math.max(1,r)-1)%ids.length]; };
+const iDeal=r=>dealerFor(r)===S.selfId;
+const nameOf=id=>{ const n=S.names[id]&&S.names[id].name; return n||('GUEST·'+String(id).slice(0,4).toUpperCase()); };
+const scoreOf=id=>{ const s=S.scores[id]||{pts:0,pen:0}; return (s.pts|0)-(s.pen|0); };
+function bumpScore(id,pts,pen){ const s=S.scores[id]||(S.scores[id]={pts:0,pen:0});
+  s.pts=Math.max(s.pts,(s.pts|0)+(pts|0)); if(pen) s.pen=(s.pen|0)+(pen|0); renderHud(); }
+
+// convergent score consensus: per-player {pts,pen} are forward-only, so an
+// elementwise MAX merge lets whoever saw a reveal pull the whole mesh forward.
+const mergeScoreMaps=values=>{ const out={};
+  for(const v of values){ if(!v||typeof v!=='object') continue;
+    for(const k of Object.keys(v)){ const o=out[k]||(out[k]={pts:0,pen:0});
+      o.pts=Math.max(o.pts,(v[k].pts|0)); o.pen=Math.max(o.pen,(v[k].pen|0)); } }
+  return out; };
+const conv=createConvergentState({fields:{scores:mergeScoreMaps},staleMs:6000});
+
+// quorum-voted CAUGHT!: the room confirms you were seen sneaking your photo
+let activeCatch=null;
+const catchReg=createVoteRegister({
+  getPeerCount:()=>peerIds().length, timeoutMs:15000,
+  quorum:(yes,no,total)=>{ const need=Math.floor(total/2)+1;
+    if(yes>=need) return 'confirmed'; if(no>=Math.ceil(total/2)) return 'rejected'; return null; },
+  onResolved:(id,outcome,{meta})=>{
+    $('banner').classList.remove('on'); activeCatch=null;
+    if(!meta) return;
+    if(outcome==='confirmed'){
+      bumpScore(meta.by,1,0); bumpScore(meta.target,0,1);
+      toast(`👀 <b>${esc(nameOf(meta.target))}</b> was CAUGHT! −1 · <b>${esc(nameOf(meta.by))}</b> +1`);
+    } else toast(`the room says <b>${esc(nameOf(meta.target))}</b> walks free`);
+  }
+});
+
+// ---------- screens ---------------------------------------------------------
+function show(id){ document.querySelectorAll('.scr').forEach(s=>s.classList.remove('on'));
+  $(id).classList.add('on'); window.scrollTo(0,0); }
+function renderHud(){
+  if(S.on){ $('hud-room').style.display=''; $('hud-code').textContent=S.code;
+    $('hud-score').style.display=''; $('hud-pts').textContent=scoreOf(S.selfId); }
+}
+$('hud-room').onclick=copyInvite;
+
+// ---------- join ------------------------------------------------------------
+$('nameinput').value=localStorage.getItem('tl_name')||'';
+const hashCode=sanitize(location.hash.replace('#',''));
+if(hashCode) $('codeinput').value=hashCode;
+$('btn-new').onclick=()=>{ $('codeinput').value=genCode(6); $('btn-join').click(); };
+$('btn-join').onclick=async()=>{
+  const name=($('nameinput').value||'').trim().slice(0,14);
+  const code=sanitize($('codeinput').value);
+  if(!name){ toast('name yourself first'); $('nameinput').focus(); return; }
+  if(!code){ toast('need a party code'); $('codeinput').focus(); return; }
+  localStorage.setItem('tl_name',name);
+  $('btn-join').disabled=true; $('btn-join').textContent='CONNECTING…';
+  const ok=await join(code,name);
+  $('btn-join').disabled=false; $('btn-join').textContent='JOIN PARTY';
+  if(!ok) toast('could not reach the mesh — try again');
+};
+
+async function join(code,name){
+  let T;
+  try{ T=await import('https://esm.sh/trystero@0.22.0/nostr'); }
+  catch(_){ return false; }
+  S.room=T.joinRoom({appId:'tablelegends-v1'},'tl-'+code);
+  S.selfId=T.selfId; S.code=code; S.on=true; S.joinT=now();
+  S.names[S.selfId]={name,jt:S.joinT};
+  S.scores[S.selfId]=S.scores[S.selfId]||{pts:0,pen:0};
+  history.replaceState(null,'','#'+code);
+  const room=S.room, N=S.net;
+  const [sendHello,onHello]=room.makeAction('hello');
+  const [sendPhase,onPhase]=room.makeAction('phase');
+  const [sendCard,onCard]=room.makeAction('card');
+  const [sendDeal,onDeal]=room.makeAction('deal');
+  const [sendSubs,onSubs]=room.makeAction('subs');
+  const [sendVote,onVote]=room.makeAction('vote');
+  const [sendRvl,onRvl]=room.makeAction('rvl');
+  const [sendSync,onSync]=room.makeAction('sync');
+  const [sendCatch,onCatch]=room.makeAction('catch');
+  const [sendCVote,onCVote]=room.makeAction('cvote');
+  const [sendBStart,onBStart]=room.makeAction('bstart');
+  const [sendBPick,onBPick]=room.makeAction('bpick');
+  const [sendBRes,onBRes]=room.makeAction('bres');
+  const [sendBEnd,onBEnd]=room.makeAction('bend');
+  Object.assign(N,{sendHello,sendPhase,sendCard,sendDeal,sendSubs,sendVote,sendRvl,sendSync,sendCatch,sendCVote,
+    sendBStart,sendBPick,sendBRes,sendBEnd});
+
+  onHello((d,id)=>{ if(!d||typeof d!=='object') return;
+    const fresh=!S.names[id];
+    S.names[id]={name:String(d.name||'').slice(0,14)||nameOf(id), jt:+d.jt||now()};
+    if(fresh) toast(`<b>${esc(nameOf(id))}</b> pulled up a chair`);
+    renderPlayers(); });
+
+  onPhase((d,id)=>{ if(!d||typeof d!=='object') return;
+    if(id!==dealerFor(d.round)&&id!==electProposer(S.selfId,peerIds())){
+      console.warn('phase from non-dealer',id,d); return; }
+    applyPhase(d); });
+
+  onCard((buf,id,meta)=>{ // dealer's dead drop
+    if(!meta||meta.round!==S.round||!iDeal(S.round)) return;
+    collectCard(id,buf,meta); });
+
+  onDeal((buf,id,meta)=>{ if(!meta||id!==dealerFor(meta.round)) return; receiveDeal(buf,meta); });
+
+  onSubs((d,id)=>{ if(!d||d.round!==S.round||id!==dealerFor(S.round)) return;
+    S.submitted=new Set(d.ids||[]); renderSnapWait(); });
+
+  onVote((d,id)=>{ if(!d||d.round!==S.round||!iDeal(S.round)) return; collectVote(id,d); });
+
+  onRvl((d,id)=>{ if(!d||id!==dealerFor(d.round)) return; applyReveal(d); });
+
+  onSync((d,id)=>{ if(!d||typeof d!=='object') return; conv.ingest(id,{scores:d.scores}); });
+
+  onCatch((d,id)=>{ if(!d||!d.id||!d.target) return;
+    const meta={by:id,target:d.target};
+    catchReg.open(d.id,meta);
+    if(id===S.selfId) return;
+    if(d.target===S.selfId){ // the accused votes NAY automatically
+      catchReg.recordVote(d.id,S.selfId,false,meta); N.sendCVote({id:d.id,valid:false});
+      toast(`<b>${esc(nameOf(id))}</b> says they CAUGHT you 👀`); return; }
+    if(activeCatch) return;
+    activeCatch=d.id;
+    $('bannerq').innerHTML=`<b>${esc(nameOf(id))}</b> claims they caught <b>${esc(nameOf(d.target))}</b> sneaking a photo. Did you see it?`;
+    $('banner').classList.add('on');
+    $('btn-yea').onclick=()=>{ catchReg.recordVote(d.id,S.selfId,true,meta); N.sendCVote({id:d.id,valid:true}); $('banner').classList.remove('on'); };
+    $('btn-nay').onclick=()=>{ catchReg.recordVote(d.id,S.selfId,false,meta); N.sendCVote({id:d.id,valid:false}); $('banner').classList.remove('on'); };
+  });
+  onCVote((d,id)=>{ if(!d||!d.id) return; catchReg.recordVote(d.id,id,d.valid); });
+
+  onBStart((d,id)=>{ if(!d||!Array.isArray(d.pairs)||id!==crownId()) return; applyBStart(d); });
+  onBPick((d,id)=>{ if(!d||!B.on||crownId()!==S.selfId) return; collectBPick(id,d); });
+  onBRes((d,id)=>{ if(!d||id!==crownId()) return; applyBRes(d); });
+  onBEnd((d,id)=>{ if(id!==crownId()) return; applyBEnd(); });
+
+  room.onPeerJoin(id=>{
+    sendHello({name,jt:S.joinT},id);
+    sendSync({scores:S.scores},id);
+    // current dealer replays phase so a latecomer lands on the right screen
+    if(S.phase!=='LOBBY'&&S.phase!=='JOIN'&&iDeal(S.round))
+      sendPhase(phaseMsg(S.phase,{cids:S.order}),id);
+    renderPlayers(); });
+  room.onPeerLeave(id=>{
+    toast(`<b>${esc(nameOf(id))}</b> left the table`);
+    conv.drop(id); renderPlayers();
+    // dealer vanished mid-round: the rotation self-heals; the new dealer
+    // restarts the round (submissions lived only on the old dealer's phone)
+    if(S.phase!=='LOBBY'&&S.phase!=='REVEAL'&&!S.revealed){
+      const d=dealerFor(S.round);
+      if(d===S.selfId&&!S.wasDealer){ toast('the dealer bailed — you have the crown now 👑'); startRound(S.round); }
+    }
+    S.wasDealer=iDeal(S.round);
+  });
+
+  sendHello({name,jt:S.joinT});
+  setInterval(()=>{ if(!S.on) return;
+    N.sendSync({scores:S.scores});
+    const m=conv.merge({scores:S.scores}); if(m.scores) S.scores=m.scores;
+    renderHud(); },2000);
+  setInterval(tickDealer,500);
+  setInterval(tickTimers,400);
+
+  S.phase='LOBBY'; renderHud(); renderPlayers(); show('scr-lobby');
+  return true;
+}
+
+// ---------- lobby -----------------------------------------------------------
+function renderPlayers(){
+  if(!S.on) return;
+  const ids=allIds();
+  const html=ids.map(id=>{
+    const crown=id===dealerFor(Math.max(1,S.round||1))?'<span class="crown">👑</span>':'';
+    return `<span class="pchip">${crown}${esc(nameOf(id))}${id===S.selfId?' <small>(you)</small>':''}</span>`;
+  }).join('');
+  $('players').innerHTML=html;
+  if(S.phase==='LOBBY'){
+    const mine=dealerFor(1)===S.selfId;
+    $('btn-deal').style.display=mine?'':'none'; $('dealnum').textContent='1';
+    // returning night: same code, old decks -> the crown can go straight to part 2
+    $('btn-battle-lobby').style.display=mine&&loadDeck().length?'':'none';
+    $('lobbywait').style.display=mine?'none':'';
+    $('lobbywait').textContent=`waiting for 👑 ${nameOf(dealerFor(1))} to deal…`;
+  }
+  $('lobbyboard').innerHTML=ids.length>1?scoreboardHtml():'';
+  renderCatchList();
+}
+function copyInvite(){
+  const url=location.origin+location.pathname+'#'+S.code;
+  if(navigator.share) navigator.share({title:'TABLE LEGENDS',text:'join the card game: '+S.code,url}).catch(()=>{});
+  else{ navigator.clipboard&&navigator.clipboard.writeText(url); toast('invite link copied'); }
+}
+$('btn-invite').onclick=copyInvite;
+$('btn-deal').onclick=()=>startRound(1);
+
+// ---------- phase machine ---------------------------------------------------
+function phaseMsg(ph,extra){ return Object.assign(
+  {ph, round:S.round, seed:S.seed, pi:S.pi, deadline:S.deadline, players:S.players},
+  extra||{}); }
+function broadcastPhase(ph,extra){
+  const msg=phaseMsg(ph,extra);
+  S.net.sendPhase(msg); applyPhase(msg);
+}
+function pickPrompt(seed){
+  const open=PROMPTS.map((_,i)=>i).filter(i=>!S.usedPrompts.has(i));
+  const pool=open.length?open:PROMPTS.map((_,i)=>i);
+  return pool[makeRng(seed).i(pool.length)];
+}
+function startRound(r){ // dealer only
+  S.round=r; S.seed=(Math.random()*4294967295)>>>0; S.pi=pickPrompt(S.seed);
+  S.players=allIds(); S.deadline=now()+4500; S.wasDealer=true;
+  broadcastPhase('PROMPT');
+}
+function resetRoundState(){
+  S.collected.clear(); S.votes.clear(); S.submitted.clear();
+  for(const d of S.dealt.values()) if(d.url) URL.revokeObjectURL(d.url);
+  S.dealt.clear(); S.order=[]; S.cardAuthor={};
+  S.myVote=null; S.voteLocked=false; S.dealing=false; S.revealed=false;
+}
+function applyPhase(msg){
+  const newRound=msg.round!==S.round||msg.ph==='PROMPT';
+  S.round=msg.round; S.seed=msg.seed; S.pi=msg.pi;
+  S.prompt=PROMPTS[msg.pi]||'something legendary';
+  S.deadline=msg.deadline; if(Array.isArray(msg.players)&&msg.players.length) S.players=msg.players;
+  S.usedPrompts.add(msg.pi);
+  const prev=S.phase; S.phase=msg.ph;
+  if(msg.ph==='PROMPT'){
+    resetRoundState(); S.myCard=null;
+    $('prnum').textContent=S.round; $('prompttext').textContent=S.prompt;
+    show('scr-prompt');
+  }
+  if(msg.ph==='SNAP'){
+    if(prev!=='SNAP'){ setupSnapUi(); show('scr-snap'); }
+    // dealer restarted the round under a new crown? re-slide the same card in
+    if(S.myCard&&S.myCard.round===S.round&&!S.submitted.has(S.selfId)&&!iDeal(S.round)&&S.myCard.sent)
+      sendMyCard();
+  }
+  if(msg.ph==='VOTE'){
+    if(Array.isArray(msg.cids)) S.order=msg.cids;
+    setupVoteUi(); show('scr-vote');
+  }
+  if(msg.ph==='REVEAL'){ /* rendered by applyReveal */ }
+  renderPlayers();
+}
+
+// dealer's engine: advance phases on deadline or completion
+function tickDealer(){
+  if(!S.on||!iDeal(S.round)||S.round<1) return;
+  const t=now();
+  if(S.phase==='PROMPT'&&t>=S.deadline){
+    S.deadline=now()+120000; broadcastPhase('SNAP');
+  } else if(S.phase==='SNAP'){
+    const expected=S.players.filter(id=>id===S.selfId||peerIds().includes(id));
+    const done=expected.every(id=>S.collected.has(id));
+    if((done&&expected.length)||t>=S.deadline) dealCards();
+  } else if(S.phase==='VOTE'){
+    const expected=S.players.filter(id=>id===S.selfId||peerIds().includes(id));
+    const done=expected.every(id=>S.votes.has(id));
+    if((done&&expected.length)||t>=S.deadline) doReveal();
+  }
+}
+function tickTimers(){
+  const span=S.phase==='SNAP'?120000:S.phase==='VOTE'?75000:4500;
+  const left=Math.max(0,S.deadline-now());
+  const pct=Math.min(100,100*left/span);
+  if(S.phase==='SNAP') $('snaptimer').style.width=pct+'%';
+  if(S.phase==='VOTE') $('votetimer').style.width=pct+'%';
+}
+
+// ---------- SNAP ------------------------------------------------------------
+let statVals=[3,4,3]; const POOL=10;
+function renderStats(){
+  const used=statVals[0]+statVals[1]+statVals[2];
+  $('poolleft').textContent=POOL-used;
+  document.querySelectorAll('.stat').forEach((el,i)=>{
+    el.querySelector('.bar i').style.width=(statVals[i]*10)+'%'; });
+  syncSubmitBtn();
+}
+document.querySelectorAll('.stat button').forEach(b=>b.onclick=()=>{
+  const i=+b.dataset.s, d=+b.dataset.d;
+  const used=statVals[0]+statVals[1]+statVals[2];
+  if(d>0&&used>=POOL) return; if(d<0&&statVals[i]<=0) return;
+  statVals[i]=Math.max(0,Math.min(10,statVals[i]+d)); renderStats();
+});
+function setupSnapUi(){
+  $('snnum').textContent=S.round; $('snapprompt').textContent=S.prompt;
+  const playing=S.players.includes(S.selfId);
+  $('spectate').style.display=playing?'none':'';
+  $('snapui').style.display=playing?'':'none';
+  $('snapwait').style.display='none';
+  $('photolabel').classList.remove('has');
+  $('photolabel').innerHTML='📸 TAP TO SHOOT THE OBJECT<br><small>don\'t get caught…</small>';
+  $('titleinput').value=''; statVals=[3,4,3]; renderStats();
+  renderCatchList(); renderSnapWait();
+}
+$('photoinput').onchange=async e=>{
+  const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return;
+  try{
+    const shot=await processPhoto(f);
+    S.myCard={buf:shot.buf, blob:shot.blob, blobUrl:shot.url, title:'', s:statVals.slice(),
+              round:S.round, bytes:shot.buf.byteLength, sent:false};
+    $('photolabel').classList.add('has');
+    $('photolabel').innerHTML=`<img src="${shot.url}" alt="your shot">`;
+  }catch(_){ toast('could not read that photo'); }
+  syncSubmitBtn();
+};
+$('titleinput').oninput=syncSubmitBtn;
+function syncSubmitBtn(){
+  const used=statVals[0]+statVals[1]+statVals[2];
+  $('btn-submit').disabled=!(S.myCard&&S.myCard.round===S.round&&
+    $('titleinput').value.trim().length>=2&&used===POOL&&!S.myCard.sent);
+}
+async function processPhoto(file){
+  const url0=URL.createObjectURL(file);
+  const img=await new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=rej; i.src=url0; });
+  const sc=Math.min(1,720/Math.max(img.width,img.height));
+  const w=Math.max(1,Math.round(img.width*sc)),h=Math.max(1,Math.round(img.height*sc));
+  const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
+  cv.getContext('2d').drawImage(img,0,0,w,h);
+  URL.revokeObjectURL(url0);
+  const blob=await new Promise(r=>cv.toBlob(r,'image/jpeg',.72));
+  return {blob, buf:await blob.arrayBuffer(), url:URL.createObjectURL(blob)};
+}
+$('btn-submit').onclick=()=>{
+  if(!S.myCard) return;
+  S.myCard.title=$('titleinput').value.trim().slice(0,40).toUpperCase();
+  S.myCard.s=statVals.slice(); S.myCard.sent=true;
+  sendMyCard();
+  $('snapui').style.display='none'; $('snapwait').style.display='';
+  renderSnapWait();
+};
+function sendMyCard(){
+  const meta={round:S.myCard.round,title:S.myCard.title,s:S.myCard.s};
+  if(iDeal(S.round)) collectCard(S.selfId,S.myCard.buf,meta);
+  else S.net.sendCard(S.myCard.buf,dealerFor(S.round),meta).catch(()=>{});
+}
+function collectCard(id,buf,meta){ // dealer side
+  if(S.collected.has(id)) return;
+  S.collected.set(id,{buf,title:String(meta.title||'UNTITLED').slice(0,40),
+    s:(Array.isArray(meta.s)?meta.s:[3,4,3]).slice(0,3).map(v=>Math.max(0,Math.min(10,v|0)))});
+  S.submitted.add(id);
+  S.net.sendSubs({round:S.round,ids:[...S.submitted]});
+  renderSnapWait();
+}
+function renderSnapWait(){
+  const total=S.players.length,got=S.submitted.size;
+  const names=[...S.submitted].map(nameOf).map(esc).join(', ');
+  const el=$('snapwait');
+  el.textContent='';
+  el.innerHTML=`${got}/${total} cards with the dealer${names?' — '+names:''}`;
+  if($('snapui').style.display==='none') el.style.display='';
+}
+function renderCatchList(){
+  const zone=$('catchzone');
+  const others=S.players.filter(id=>id!==S.selfId&&peerIds().includes(id));
+  const showIt=S.phase==='SNAP'&&allIds().length>=3&&others.length;
+  zone.style.display=showIt?'':'none';
+  if(!showIt) return;
+  $('catchlist').innerHTML='';
+  for(const id of others){
+    const b=document.createElement('button'); b.className='small ghost';
+    b.textContent='👀 '+nameOf(id);
+    b.onclick=()=>{
+      if(activeCatch){ toast('a bust is already being voted on'); return; }
+      const cid=S.selfId+'-c'+((Math.random()*1e6)|0);
+      activeCatch=cid;
+      const meta={by:S.selfId,target:id};
+      catchReg.open(cid,meta);
+      catchReg.recordVote(cid,S.selfId,true,meta);
+      S.net.sendCatch({id:cid,target:id});
+      S.net.sendCVote({id:cid,valid:true});
+      toast(`you called out <b>${esc(nameOf(id))}</b> — the room votes`);
+    };
+    $('catchlist').appendChild(b);
+  }
+}
+
+// ---------- DEAL (dealer shuffles + re-broadcasts, authors stripped) --------
+async function dealCards(){
+  if(S.dealing) return; S.dealing=true;
+  const entries=[...S.collected.entries()];
+  if(!entries.length){ toast('nobody slid a card in — re-dealing'); S.dealing=false; startRound(S.round); return; }
+  const order=shuffled(entries,S.seed^0x9e3779);
+  const cids=[];
+  for(let i=0;i<order.length;i++){
+    const [aid,c]=order[i]; const cid='r'+S.round+'c'+i;
+    S.cardAuthor[cid]=aid; cids.push(cid);
+    receiveDeal(c.buf,{cid,round:S.round,title:c.title,s:c.s});
+    try{ await S.net.sendDeal(c.buf,null,{cid,round:S.round,title:c.title,s:c.s}); }catch(_){}
+  }
+  S.deadline=now()+75000;
+  broadcastPhase('VOTE',{cids});
+}
+function receiveDeal(buf,meta){
+  if(S.dealt.has(meta.cid)) return;
+  const blob=new Blob([buf],{type:'image/jpeg'});
+  const mine=!!(S.myCard&&S.myCard.round===meta.round&&
+    S.myCard.title===meta.title&&S.myCard.bytes===buf.byteLength);
+  S.dealt.set(meta.cid,{url:URL.createObjectURL(blob),blob,
+    title:String(meta.title||'UNTITLED').slice(0,40),
+    s:(Array.isArray(meta.s)?meta.s:[0,0,0]),mine});
+  if(S.phase==='VOTE') renderVoteGrid();
+}
+
+// ---------- VOTE ------------------------------------------------------------
+function rarityClass(s){ const mx=Math.max(...s); return mx>=8?'holo':mx>=6?'rare':''; }
+function statLine(s){ return `<span>🔥<b>${s[0]}</b></span><span>✨<b>${s[1]}</b></span><span>😈<b>${s[2]}</b></span>`; }
+function setupVoteUi(){
+  $('vtnum').textContent=S.round; $('voteprompt').textContent=S.prompt;
+  $('dealernote').style.display=iDeal(S.round)?'':'none';
+  $('votewait').style.display='none'; $('btn-vote').style.display='';
+  S.myVote={fave:null,guesses:{}}; S.voteLocked=false;
+  renderVoteGrid();
+}
+function renderVoteGrid(){
+  const g=$('votegrid'); g.innerHTML='';
+  const dealer=iDeal(S.round);
+  const suspects=S.players.filter(id=>id!==S.selfId);
+  for(const cid of S.order){
+    const c=S.dealt.get(cid);
+    const el=document.createElement('div');
+    if(!c){ el.className='tcard'; el.innerHTML='<div class="ttl">…card incoming…</div>'; g.appendChild(el); continue; }
+    el.className='tcard '+rarityClass(c.s);
+    let inner=`<img src="${c.url}" alt=""><div class="ttl">${esc(c.title)}</div><div class="st">${statLine(c.s)}</div>`;
+    if(c.mine) inner=`<span class="badge">YOURS</span>`+inner;
+    el.innerHTML=inner;
+    if(!c.mine&&!S.voteLocked){
+      const fb=document.createElement('button'); fb.className='favebtn'+(S.myVote.fave===cid?' sel':''); fb.textContent='⭐';
+      fb.onclick=()=>{ S.myVote.fave=S.myVote.fave===cid?null:cid; renderVoteGrid(); };
+      el.appendChild(fb);
+      if(!dealer){
+        const row=document.createElement('div'); row.className='guessrow';
+        for(const id of suspects){
+          const ch=document.createElement('span');
+          ch.className='gchip'+(S.myVote.guesses[cid]===id?' sel':'');
+          ch.textContent=nameOf(id);
+          ch.onclick=()=>{ S.myVote.guesses[cid]=S.myVote.guesses[cid]===id?undefined:id; renderVoteGrid(); };
+          row.appendChild(ch);
+        }
+        el.appendChild(row);
+      }
+    }
+    g.appendChild(el);
+  }
+}
+$('btn-vote').onclick=()=>{
+  if(S.voteLocked||!S.myVote) return;
+  S.voteLocked=true;
+  const v={round:S.round,fave:S.myVote.fave,
+    guesses:Object.fromEntries(Object.entries(S.myVote.guesses).filter(([,g])=>g))};
+  if(iDeal(S.round)) collectVote(S.selfId,v);
+  else S.net.sendVote(v,dealerFor(S.round));
+  $('btn-vote').style.display='none'; $('votewait').style.display='';
+  $('votewait').textContent='votes locked — waiting on the table…';
+};
+function collectVote(id,v){ if(!S.votes.has(id)) S.votes.set(id,v); }
+
+// ---------- REVEAL ----------------------------------------------------------
+function doReveal(){ // dealer computes; everyone applies
+  if(S.revealed) return;
+  const delta={}; const D=id=>delta[id]||(delta[id]={pts:0});
+  const faveCount={};
+  for(const [vid,v] of S.votes){
+    if(v.fave&&S.cardAuthor[v.fave]&&S.cardAuthor[v.fave]!==vid)
+      faveCount[v.fave]=(faveCount[v.fave]||0)+1;
+  }
+  const maxFave=Math.max(0,...Object.values(faveCount));
+  const results=[];
+  for(const cid of S.order){
+    const author=S.cardAuthor[cid]; if(!author) continue;
+    const ok=[],wrong=[];
+    for(const [vid,v] of S.votes){
+      if(vid===author||vid===S.selfId) continue; // dealer never guesses
+      const g=v.guesses&&v.guesses[cid]; if(!g) continue;
+      (g===author?ok:wrong).push(vid);
+    }
+    D(author).pts+=wrong.length*2;
+    for(const w of ok) D(w).pts+=1;
+    const win=maxFave>0&&(faveCount[cid]||0)===maxFave;
+    if(win) D(author).pts+=3;
+    results.push({cid,author,fv:faveCount[cid]||0,win,ok});
+  }
+  D(S.selfId).pts+=1; // house cut
+  for(const id of Object.keys(delta)) bumpScore(id,delta[id].pts,0);
+  const msg={round:S.round,results,totals:S.scores};
+  S.net.sendRvl(msg); applyReveal(msg);
+}
+function applyReveal(msg){
+  if(S.revealed&&msg.round===S.round) return;
+  S.revealed=true; S.phase='REVEAL';
+  S.scores=mergeScoreMaps([S.scores,msg.totals||{}]);
+  $('rvnum').textContent=msg.round;
+  const g=$('revealgrid'); g.innerHTML='';
+  for(const r of msg.results||[]){
+    const c=S.dealt.get(r.cid); if(!c) continue;
+    const el=document.createElement('div'); el.className='tcard '+rarityClass(c.s);
+    el.innerHTML=`${r.win?'<span class="win">🏆</span>':''}<img src="${c.url}" alt="">
+      <div class="ttl">${esc(c.title)}</div><div class="st">${statLine(c.s)}</div>
+      <div class="who">by <span class="an">${esc(nameOf(r.author))}</span>
+      ${r.fv?` · ⭐${r.fv}`:''}${r.ok&&r.ok.length?`<br><small>sniffed out by ${r.ok.map(nameOf).map(esc).join(', ')}</small>`:'<br><small>fooled everyone</small>'}</div>`;
+    g.appendChild(el);
+    saveToDeck(c,r);
+  }
+  $('scoreboard').innerHTML=scoreboardRows();
+  const nxt=msg.round+1, mine=dealerFor(nxt)===S.selfId;
+  $('btn-next').style.display=mine?'':'none'; $('nextnum').textContent=nxt;
+  $('btn-battle').style.display=crownId()===S.selfId?'':'none';
+  $('revealwait').style.display=mine?'none':'';
+  $('revealwait').textContent=`👑 ${nameOf(dealerFor(nxt))} deals round ${nxt}…`;
+  $('btn-next').onclick=()=>startRound(nxt);
+  renderHud(); show('scr-reveal');
+}
+function scoreboardRows(){
+  const ids=[...new Set([...allIds(),...Object.keys(S.scores)])];
+  ids.sort((a,b)=>scoreOf(b)-scoreOf(a));
+  return ids.map((id,i)=>`<div class="srow${id===S.selfId?' me':''}">
+    <span class="pos">${i+1}</span>${esc(nameOf(id))}<span class="pts">${scoreOf(id)}</span></div>`).join('');
+}
+function scoreboardHtml(){ return `<label>SCORES</label><div class="sboard">${scoreboardRows()}</div>`; }
+
+// ---------- BATTLE (part 2: the deck fights) --------------------------------
+// The crown pairs up the table; each duel, the challenger picks a champion
+// card from their DECK and calls the stat, the defender picks a card blind.
+// Cards travel WITH the pick (title/stats/thumb), so a legend from a night
+// your phone never saw still renders for everyone. Winner +2, loser gets a
+// seeded IRL forfeit involving the winning object. Old decks = returning
+// legends: play the same code next party night and tonight's cards come back.
+const FORFEITS=[
+  'must fetch the winning object and salute it',
+  'must speak AS their losing object for 30 seconds',
+  'must hold the winning object aloft and apologize to it',
+  'must reenact the winning photo, dramatically',
+  'must keep the winning card as their phone wallpaper tonight',
+  "gets a forfeit of the table's choosing — be merciful",
+];
+const crownId=()=>dealerFor(Math.max(1,S.round));
+const B={on:false,pairs:[],idx:0,picks:{},myPick:null,myStat:null,locked:false,res:null};
+const myHand=()=>loadDeck().filter(c=>c.a===nameOf(S.selfId)).slice(-12).reverse();
+
+function startBattle(){ // crown only
+  const ids=shuffled(allIds(),(Math.random()*4294967295)>>>0);
+  const pairs=[]; for(let i=0;i+1<ids.length;i+=2) pairs.push([ids[i],ids[i+1]]);
+  if(!pairs.length){ toast('need at least 2 players at the table'); return; }
+  if(ids.length%2) toast(`odd table — <b>${esc(nameOf(ids[ids.length-1]))}</b> heckles from the sidelines`);
+  const msg={pairs,idx:0};
+  S.net.sendBStart(msg); applyBStart(msg);
+}
+function applyBStart(d){
+  B.on=true; B.pairs=d.pairs; B.idx=d.idx|0;
+  B.picks={}; B.myPick=null; B.myStat=null; B.locked=false; B.res=null;
+  S.phase='BATTLE';
+  renderBattle(); show('scr-battle');
+}
+function collectBPick(id,p){ // crown side
+  const pair=B.pairs[B.idx]; if(!pair||!pair.includes(id)||B.picks[id]) return;
+  B.picks[id]=p;
+  if(pair.every(pid=>B.picks[pid])) resolveDuel();
+}
+function cleanBCard(c){
+  if(!c||typeof c!=='object') return null;
+  return {id:String(c.id||''), t:String(c.t||'UNTITLED').slice(0,40),
+    s:(Array.isArray(c.s)?c.s:[0,0,0]).slice(0,3).map(v=>Math.max(0,Math.min(10,v|0))),
+    img:(typeof c.img==='string'&&c.img.startsWith('data:image/')&&c.img.length<=200000)?c.img:null};
+}
+function resolveDuel(){ // crown computes; everyone applies
+  const [a,b]=B.pairs[B.idx];
+  const pa=B.picks[a]||{}, pb=B.picks[b]||{};
+  const ca=cleanBCard(pa.card), cb=cleanBCard(pb.card);
+  const stat=Math.max(0,Math.min(2,(pa.stat|0)));
+  const va=ca?ca.s[stat]:-1, vb=cb?cb.s[stat]:-1;
+  const win=va>vb?a:vb>va?b:null;
+  const msg={idx:B.idx,a,b,ca,cb,stat,win,f:(Math.random()*FORFEITS.length)|0};
+  S.net.sendBRes(msg); applyBRes(msg);
+}
+function applyBRes(d){
+  if(!B.on||d.idx!==B.idx||B.res) return;
+  B.res=d;
+  if(d.win) bumpScore(d.win,2,0);
+  renderBattle();
+}
+function applyBEnd(){
+  B.on=false;
+  S.phase='REVEAL';
+  $('scoreboard').innerHTML=scoreboardRows();
+  renderHud(); show(S.round>0?'scr-reveal':'scr-lobby'); renderPlayers();
+}
+const STATNAMES=['🔥 CHAOS','✨ VIBE','😈 MENACE'];
+function bcardHtml(c,statIdx,winner){
+  if(!c) return `<div class="tcard"><div class="ttl">NO CARD — forfeited</div></div>`;
+  const img=c.img?`<img src="${c.img}" alt="">`:'';
+  return `<div class="tcard ${rarityClass(c.s)}">${winner?'<span class="win">🏆</span>':''}${img}
+    <div class="ttl">${esc(c.t)}</div>
+    <div class="stq">${STATNAMES[statIdx]}: <span class="hl">${c.s[statIdx]}</span></div>
+    <div class="st">${statLine(c.s)}</div></div>`;
+}
+function renderBattle(){
+  const pair=B.pairs[B.idx]||[];
+  const [a,b]=pair;
+  $('btidx').textContent=B.idx+1; $('bttotal').textContent=B.pairs.length;
+  $('btvs').innerHTML=`<span class="vsname${B.res&&B.res.win===a?' win':''}">${esc(nameOf(a))}</span>
+    <span style="color:var(--hot)"> ⚔ </span>
+    <span class="vsname${B.res&&B.res.win===b?' win':''}">${esc(nameOf(b))}</span>`;
+  const stage=$('btstage'), pick=$('btpick');
+  const crown=crownId()===S.selfId;
+  $('btn-bnext').style.display='none'; $('btn-bend').style.display='none';
+  if(B.res){
+    pick.style.display='none';
+    const r=B.res;
+    const wn=r.win?nameOf(r.win):null, ln=r.win?nameOf(r.win===r.a?r.b:r.a):null;
+    stage.innerHTML=`<div class="vsgrid">${bcardHtml(r.ca,r.stat,r.win===r.a)}${bcardHtml(r.cb,r.stat,r.win===r.b)}</div>
+      <div class="rlabel" style="text-align:center">${STATNAMES[r.stat]} WAS CALLED</div>
+      ${r.win
+        ? `<div class="forfeit">🏆 <b>${esc(wn)}</b> takes it (+2) — <b>${esc(ln)}</b> ${esc(FORFEITS[r.f%FORFEITS.length])}</div>`
+        : `<div class="forfeit">DEAD TIE — the objects stare at each other. nobody scores.</div>`}`;
+    if(crown){
+      if(B.idx+1<B.pairs.length) $('btn-bnext').style.display='';
+      else $('btn-bend').style.display='';
+    }
+    return;
+  }
+  const duelist=pair.includes(S.selfId);
+  if(duelist&&!B.locked){
+    const hand=myHand();
+    if(!hand.length){ // nothing to your name -> auto-forfeit
+      B.locked=true;
+      const p={none:true};
+      if(crown) collectBPick(S.selfId,p); else S.net.sendBPick(p,crownId());
+      stage.innerHTML=`<p class="wait">no cards to your name yet — you forfeit this one. go make a legend next round.</p>`;
+      pick.style.display='none'; return;
+    }
+    stage.innerHTML='';
+    pick.style.display='';
+    const chal=S.selfId===a;
+    $('btpicklabel').textContent=chal?'PICK YOUR CHAMPION (YOU CALL THE STAT)':'PICK YOUR CHAMPION (STAT UNKNOWN…)';
+    $('btstats').style.display=chal?'':'none';
+    const g=$('bthand'); g.innerHTML='';
+    for(const c of hand){
+      const el=document.createElement('div');
+      el.className='tcard '+rarityClass(c.s)+(B.myPick===c?' picked':'');
+      el.innerHTML=`${c.img?`<img src="${c.img}" alt="">`:''}<div class="ttl">${esc(c.t)}</div><div class="st">${statLine(c.s)}</div>`;
+      el.onclick=()=>{ B.myPick=c; renderBattle(); };
+      g.appendChild(el);
+    }
+    document.querySelectorAll('.bstat').forEach(btn=>{
+      btn.classList.toggle('sel',+btn.dataset.i===B.myStat);
+      btn.onclick=()=>{ B.myStat=+btn.dataset.i; renderBattle(); };
+    });
+    $('btn-block').disabled=!(B.myPick&&(!chal||B.myStat!==null));
+    $('btn-block').onclick=()=>{
+      if(!B.myPick) return;
+      B.locked=true;
+      const p={card:{id:B.myPick.id||('legacy-'+B.myPick.d),t:B.myPick.t,s:B.myPick.s,img:B.myPick.img}};
+      if(chal) p.stat=B.myStat;
+      if(crown) collectBPick(S.selfId,p); else S.net.sendBPick(p,crownId());
+      renderBattle();
+    };
+    return;
+  }
+  pick.style.display='none';
+  stage.innerHTML=`<p class="wait">${duelist?'champion locked — ':''}waiting for the duelists to choose…</p>`;
+}
+$('btn-bnext').onclick=()=>{ const msg={pairs:B.pairs,idx:B.idx+1}; S.net.sendBStart(msg); applyBStart(msg); };
+$('btn-bend').onclick=()=>{ S.net.sendBEnd({}); applyBEnd(); };
+$('btn-battle').onclick=startBattle;
+$('btn-battle-lobby').onclick=startBattle;
+
+// ---------- DECK (localStorage souvenir) ------------------------------------
+const DECK_KEY='tl_deck_v1';
+function loadDeck(){ try{ return JSON.parse(localStorage.getItem(DECK_KEY))||[]; }catch(_){ return []; } }
+let deckWrites=Promise.resolve();
+function saveToDeck(card,r){ // serialize: concurrent saves would clobber each other's read-modify-write
+  deckWrites=deckWrites.then(()=>_saveToDeck(card,r)).catch(()=>{});
+  return deckWrites;
+}
+async function _saveToDeck(card,r){
+  try{
+    // deterministic id (code+seed+cid): identical on every phone that night,
+    // unique across nights — dedupes re-saves and keys battle picks
+    const id=S.code+'-'+(S.seed>>>0).toString(36)+'-'+r.cid;
+    const deck=loadDeck();
+    if(deck.some(c=>c.id===id)) return;
+    const img=await thumb(card.blob,380);
+    deck.push({id,t:card.title,s:card.s,a:nameOf(r.author),p:S.prompt,c:S.code,w:!!r.win,d:Date.now(),img});
+    while(deck.length>120) deck.shift();
+    localStorage.setItem(DECK_KEY,JSON.stringify(deck));
+  }catch(_){/* storage full — the party outgrew the phone */}
+}
+function thumb(blob,max){
+  return new Promise((res,rej)=>{
+    const url=URL.createObjectURL(blob); const i=new Image();
+    i.onload=()=>{ const sc=Math.min(1,max/Math.max(i.width,i.height));
+      const cv=document.createElement('canvas');
+      cv.width=Math.max(1,Math.round(i.width*sc)); cv.height=Math.max(1,Math.round(i.height*sc));
+      cv.getContext('2d').drawImage(i,0,0,cv.width,cv.height);
+      URL.revokeObjectURL(url); res(cv.toDataURL('image/jpeg',.62)); };
+    i.onerror=rej; i.src=url;
+  });
+}
+let backScr='scr-join';
+$('hud-deck').onclick=()=>{
+  backScr=document.querySelector('.scr.on').id;
+  const deck=loadDeck(); const g=$('deckgrid'); g.innerHTML='';
+  if(!deck.length) g.innerHTML='<p class="sub">no legends yet — go play a round.</p>';
+  for(const c of deck.slice().reverse()){
+    const el=document.createElement('div'); el.className='tcard '+rarityClass(c.s);
+    el.innerHTML=`${c.w?'<span class="win">🏆</span>':''}<img src="${c.img}" alt="">
+      <div class="ttl">${esc(c.t)}</div><div class="st">${statLine(c.s)}</div>
+      <div class="who">by <span class="an">${esc(c.a)}</span><br><small>${esc(c.p)}</small></div>`;
+    g.appendChild(el);
+  }
+  show('scr-deck');
+};
+$('btn-back').onclick=()=>show(backScr);
+$('btn-export').onclick=()=>{
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([localStorage.getItem(DECK_KEY)||'[]'],{type:'application/json'}));
+  a.download='table-legends-deck.json'; a.click();
+};
+$('btn-import').onclick=()=>$('deckimport').click();
+$('deckimport').onchange=async e=>{
+  const f=e.target.files&&e.target.files[0]; e.target.value=''; if(!f) return;
+  try{
+    const incoming=JSON.parse(await f.text());
+    if(!Array.isArray(incoming)) throw 0;
+    const deck=loadDeck();
+    const seen=new Set(deck.map(c=>c.id||('legacy-'+c.d)));
+    let added=0;
+    for(const raw of incoming){
+      const c=cleanBCard(raw); if(!c||!c.img) continue;
+      const id=c.id||('legacy-'+(+raw.d||0));
+      if(seen.has(id)) continue; seen.add(id);
+      deck.push({id,t:c.t,s:c.s,a:String(raw.a||'???').slice(0,14),
+        p:String(raw.p||'').slice(0,80),c:String(raw.c||'').slice(0,12),w:!!raw.w,d:+raw.d||Date.now(),img:c.img});
+      added++;
+    }
+    while(deck.length>120) deck.shift();
+    localStorage.setItem(DECK_KEY,JSON.stringify(deck));
+    toast(added?`<b>${added}</b> legend${added>1?'s':''} joined your deck`:'nothing new in that deck');
+    $('hud-deck').click();
+  }catch(_){ toast('that file is not a deck'); }
+};
+</script>
+</body>
+</html>
