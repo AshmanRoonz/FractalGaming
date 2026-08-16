@@ -2,9 +2,10 @@
 
 Mirrors the LSS/ directory (the site root since the v36.09 restructure) into
 a staging dir (robocopy /MIR = incremental, fast after the first run),
-excluding dev-only weight (old_versions, old_plans, __pycache__), then runs
-`wrangler pages deploy`. Cloudflare dedupes uploads by content hash, so only
-changed files transfer on repeat deploys.
+excluding dev-only weight (old_versions, old_plans, __pycache__), then copies
+the repo-root extras that also live on the public site (see EXTRA_* below) and
+runs `wrangler pages deploy`. Cloudflare dedupes uploads by content hash, so
+only changed files transfer on repeat deploys.
 
 Usage:  py -3.11 tools/deploy_cf.py            (deploys)
         py -3.11 tools/deploy_cf.py --stage    (staging copy only, no upload)
@@ -26,6 +27,18 @@ EXCLUDE_DIRS = [".git", ".claude", "backups", "old_versions", "old_plans",
 # (/MIR means robocopy also DELETES them from the staging dir on the next run.)
 EXCLUDE_FILES = ["index-working.html", "lss.map.md"]
 
+# (2026-08-16) LINK ROT FIX. The v36.09 restructure made LSS/ the deploy root,
+# which silently took labs/ and the standalone root games OFF the live site.
+# That is not a quiet 404: the Pages project answers every unknown path with
+# index.html (200), so fractalreality.ca's ~40 lss.fractalreality.ca/labs/*.html
+# links, the game's own in-HUD goopling.html link, and every old
+# ashmanroonz.github.io/FractalGaming/... URL (GitHub 301s them here via the
+# root CNAME) all started loading LSS instead of the page they asked for.
+# These extras get staged NEXT TO LSS/ so those URLs resolve again — nothing
+# moves in the repo, the layout documented in lss.map.md stays as it is.
+EXTRA_DIRS = ["labs"]                        # repo-root dir -> /<name>/ on the site
+EXTRA_FILES = ["goopling.html", "table_legends.html", "baseball_blitz.html"]
+
 def run(cmd, ok_codes=(0,)):
     print(">", " ".join(cmd))
     r = subprocess.run(cmd, shell=False)
@@ -40,6 +53,13 @@ for d in EXCLUDE_DIRS:
 xf = []
 for f in EXCLUDE_FILES:
     xf += ["/XF", os.path.join(SRC, f)]
+# The extras are absent from SRC, so /MIR's purge would delete them from STAGE
+# on every run (then the extras pass below re-copies them — churn, and a window
+# where the staging dir is wrong). Exclude their DEST paths from the mirror.
+for d in EXTRA_DIRS:
+    xd += ["/XD", os.path.join(STAGE, d)]
+for f in EXTRA_FILES:
+    xf += ["/XF", os.path.join(STAGE, f)]
 run(["robocopy", SRC, STAGE, "/MIR", "/NFL", "/NDL", "/NJH", "/NP"] + xd + xf,
     ok_codes=(0, 1, 2, 3, 4, 5, 6, 7))
 # ⚠ /MIR does NOT purge these. Its purge only removes dest files that are ABSENT
@@ -51,6 +71,23 @@ for f in EXCLUDE_FILES:
     if os.path.exists(p):
         os.remove(p)
         print("purged from staging:", f)
+
+# Repo-root extras -> staging root. Each EXTRA_DIRS entry gets its own /MIR
+# (safe: it owns its subdir). The loose files are copied WITHOUT /MIR — a /MIR
+# rooted at REPO would mirror the whole repository over the staging dir and
+# purge everything LSS just wrote. Dropping a name from EXTRA_FILES later
+# leaves its stale copy in STAGE (it is /XF-excluded above, so nothing purges
+# it); delete it by hand or wipe the staging dir.
+for d in EXTRA_DIRS:
+    xdd = []
+    for x in EXCLUDE_DIRS:
+        xdd += ["/XD", os.path.join(REPO, d, x)]
+    run(["robocopy", os.path.join(REPO, d), os.path.join(STAGE, d),
+         "/MIR", "/NFL", "/NDL", "/NJH", "/NP"] + xdd,
+        ok_codes=(0, 1, 2, 3, 4, 5, 6, 7))
+if EXTRA_FILES:
+    run(["robocopy", REPO, STAGE] + EXTRA_FILES + ["/NFL", "/NDL", "/NJH", "/NP"],
+        ok_codes=(0, 1, 2, 3, 4, 5, 6, 7))
 print("staged ->", STAGE)
 
 if "--stage" not in sys.argv:
