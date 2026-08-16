@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mesh Inference — verifiable distributed inference over Trystero</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #05060c; --panel: rgba(8,12,22,0.82); --line: rgba(120,200,255,0.28);
+    --fg: #cfe7ff; --dim: #7f9ab8; --hot: #ffaa00; --good: #6effa8; --bad: #ff6b7f; --cyan: #9fd4ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--fg);
+    font-family: 'Rajdhani', system-ui, sans-serif; letter-spacing: 0.4px; }
+  body { padding: 16px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 15px; letter-spacing: 4px; color: var(--hot); margin: 0 0 2px; }
+  .sub { font-size: 12px; color: var(--dim); margin-bottom: 14px; line-height: 1.5; }
+  .grid { display: grid; grid-template-columns: 300px 1fr; gap: 14px; align-items: start; }
+  @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .panel h2 { font-size: 11px; letter-spacing: 3px; color: var(--hot); margin: 0 0 10px; font-weight: 700; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0; font-size: 13px; }
+  .row label { color: var(--dim); }
+  input, select, textarea, button { font-family: inherit; font-size: 13px; letter-spacing: 0.5px;
+    background: rgba(4,8,16,0.8); border: 1px solid var(--line); color: var(--fg);
+    border-radius: 5px; padding: 6px 8px; }
+  input[type=range] { padding: 0; }
+  textarea { width: 100%; resize: vertical; min-height: 62px; }
+  select, input[type=text], input[type=number] { min-width: 0; }
+  .row input[type=text], .row input[type=number], .row select { flex: 1; max-width: 150px; }
+  button { cursor: pointer; background: rgba(20,40,30,0.6); border-color: rgba(120,255,170,0.5);
+    color: #bff0d0; font-weight: 700; letter-spacing: 2px; padding: 9px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.wide { width: 100%; margin-top: 8px; }
+  .val { color: var(--cyan); font-variant-numeric: tabular-nums; min-width: 44px; text-align: right; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11px;
+    letter-spacing: 1.5px; border: 1px solid var(--line); color: var(--dim); }
+  .pill.on { color: var(--good); border-color: rgba(110,255,168,0.5); }
+  .pill.off { color: var(--bad); border-color: rgba(255,107,127,0.5); }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 8px; }
+  th { text-align: left; color: var(--dim); font-weight: 600; font-size: 10px; letter-spacing: 2px;
+    border-bottom: 1px solid var(--line); padding: 4px 6px; }
+  td { padding: 5px 6px; border-bottom: 1px solid rgba(120,200,255,0.09); vertical-align: top; }
+  td.mono, .mono { font-family: ui-monospace, 'SF Mono', Menlo, monospace; font-size: 11px; }
+  tr.in td { color: var(--good); }
+  tr.out td { color: var(--bad); }
+  .verdict { font-size: 13px; margin: 10px 0 0; padding: 9px 11px; border-radius: 6px;
+    border: 1px solid var(--line); background: rgba(4,8,16,0.6); line-height: 1.6; }
+  .verdict b { color: var(--hot); }
+  #log { font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--dim);
+    max-height: 190px; overflow-y: auto; line-height: 1.65; margin-top: 8px;
+    border-top: 1px solid rgba(120,200,255,0.15); padding-top: 8px; }
+  #log b { color: var(--cyan); font-weight: 400; }
+  .note { font-size: 11px; color: var(--dim); line-height: 1.5; margin-top: 8px; }
+  .warn { color: var(--hot); }
+  footer { margin-top: 18px; font-size: 11px; color: var(--dim); text-align: center; }
+  a { color: var(--cyan); }
+</style>
+</head>
+<body>
+
+<h1>MESH INFERENCE</h1>
+<div class="sub">
+  Distributed inference over a Trystero mesh, verified by <b>agreement clustering</b> instead of exact match.
+  Peers run the whole model and split the <i>requests</i> — nothing is sharded across the wire.
+  Prototype of the pluggable-verification idea; consensus lives in
+  <span class="mono">cluster_consensus.js</span>.
+</div>
+
+<div class="grid">
+  <div>
+    <div class="panel">
+      <h2>MESH</h2>
+      <div class="row"><label>room</label><input type="text" id="room" value="MESH-LAB" maxlength="16"></div>
+      <div class="row"><label>status</label><span class="pill off" id="netstate">OFFLINE</span></div>
+      <div class="row"><label>peers</label><span class="val" id="peercount">0</span></div>
+      <div class="row"><label>serving</label><span class="pill off" id="servestate">NO</span></div>
+      <button class="wide" id="btn-join">JOIN MESH</button>
+      <button class="wide" id="btn-serve" disabled>SERVE THIS MODEL</button>
+    </div>
+
+    <div class="panel" style="margin-top:14px">
+      <h2>MODEL</h2>
+      <div class="row"><label>provider</label>
+        <select id="provider">
+          <option value="stub">stub · labels (no download)</option>
+          <option value="stubvec">stub · vectors (no download)</option>
+          <option value="classify">classifier · sentiment</option>
+          <option value="generate">generation + embed</option>
+        </select>
+      </div>
+      <div class="row"><label>state</label><span class="pill off" id="modelstate">UNLOADED</span></div>
+      <button class="wide" id="btn-load">LOAD MODEL</button>
+      <div class="note" id="providernote"></div>
+    </div>
+
+    <div class="panel" style="margin-top:14px">
+      <h2>CONSENSUS</h2>
+      <div class="row"><label>redundancy</label><input type="number" id="redundancy" value="3" min="1" max="9"></div>
+      <div class="row"><label>threshold</label><input type="range" id="threshold" min="0.5" max="1" step="0.005" value="0.99"><span class="val" id="thresholdv">0.990</span></div>
+      <div class="row"><label>min cluster</label><input type="number" id="mincluster" value="2" min="1" max="9"></div>
+      <div class="row"><label>timeout</label><input type="number" id="timeout" value="25" min="2" max="180"><span class="val">s</span></div>
+      <div class="row"><label>commit-reveal</label><input type="checkbox" id="commitreveal" checked></div>
+      <div class="note">Threshold is on the agreement test for the current provider:
+        exact match for the classifier, cosine over embeddings for generation.</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="panel">
+      <h2>REQUEST</h2>
+      <textarea id="input">The plot dragged, but the ending completely won me over.</textarea>
+      <div class="row" style="margin-top:10px">
+        <button id="btn-run" style="flex:1">DISPATCH TO MESH</button>
+        <button id="btn-sim" style="flex:1">SOLO SIM</button>
+      </div>
+      <div class="row"><label>sim: inject a liar</label><input type="checkbox" id="liar" checked></div>
+      <div class="note">Solo sim runs the round locally with synthetic peers so you can tune the
+        threshold without three machines. With a real model it reruns the same weights, so honest
+        divergence only shows up on a real mesh — the liar is what makes the clustering visible offline.</div>
+    </div>
+
+    <div class="panel" style="margin-top:14px">
+      <h2>ROUND</h2>
+      <div id="verdict" class="verdict">idle.</div>
+      <table id="results"><thead><tr>
+        <th>PEER</th><th>OUTPUT</th><th>SIM→MEDOID</th><th>VERDICT</th>
+      </tr></thead><tbody></tbody></table>
+      <div id="log"></div>
+    </div>
+  </div>
+</div>
+
+<footer>
+  consensus primitive by <a href="https://github.com/AshmanRoonz/trystero-consensus">trystero-consensus</a> ·
+  verification approach after <a href="https://github.com/hrishioa/rakis">Rakis</a> ·
+  transport by <a href="https://github.com/dmotz/trystero">Trystero</a>
+</footer>
+
+<script type="module">
+import { createClusterConsensus, clusterResults, agree } from './cluster_consensus.js';
+
+// ---------- config ----------------------------------------------------------
+// Swap the pin if esm.sh moves on; the page degrades to the stub provider if
+// either import fails, so the consensus path stays demonstrable regardless.
+const TRYSTERO_URL     = 'https://esm.sh/trystero@0.22.0/nostr';
+const TRANSFORMERS_URL = 'https://esm.sh/@huggingface/transformers@3.0.2';
+
+const PROVIDERS = {
+  stub: {
+    label: 'stub',
+    note: 'No download. Produces a deterministic label plus a small per-peer jitter, so you can ' +
+          'watch commit-reveal and clustering work before committing to a model download.',
+    test: agree.exact, threshold: 1, compares: 'label'
+  },
+  stubvec: {
+    label: 'stub vectors',
+    note: 'No download, but emits embeddings instead of labels, so this exercises the cosine path ' +
+          'the generation provider uses. Honest peers get a small per-peer jitter — the closest ' +
+          'thing to real honest divergence you can see without a real mesh. Tune the threshold here.',
+    test: agree.cosine, threshold: 0.97, compares: 'embedding'
+  },
+  classify: {
+    label: 'sentiment classifier',
+    note: 'Xenova/distilbert-base-uncased-finetuned-sst-2-english (~65MB). Output is a label, so ' +
+          'agreement is exact match — this collapses to ordinary majority vote, which is the point: ' +
+          'same machinery, cheaper test.',
+    test: agree.exact, threshold: 1, compares: 'label'
+  },
+  generate: {
+    label: 'text generation + embedding',
+    note: 'Xenova/LaMini-Flan-T5-77M for generation, Xenova/all-MiniLM-L6-v2 (~23MB) for embeddings. ' +
+          'Peers will not produce identical text, so agreement is cosine distance between embeddings ' +
+          'of the outputs. Start the threshold near 0.97 and tune down.',
+    test: agree.cosine, threshold: 0.97, compares: 'embedding'
+  }
+};
+
+// ---------- tiny helpers ----------------------------------------------------
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const log = html => {
+  const el = $('log');
+  el.innerHTML += html + '<br>';
+  el.scrollTop = el.scrollHeight;
+};
+const pill = (el, on, text) => { el.className = 'pill ' + (on ? 'on' : 'off'); el.textContent = text; };
+const shortId = id => String(id).slice(0, 6).toUpperCase();
+
+// Same hash family as the rest of the labs — used for deterministic dispatch.
+function hashU(n) { n >>>= 0; n = (Math.imul(n, 747796405) + 2891336453) >>> 0;
+  n = (Math.imul((n >>> ((n >>> 28) + 4)) ^ n, 277803737)) >>> 0; return ((n >>> 22) ^ n) >>> 0; }
+const strHash = s => { let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+  return hashU(h); };
+
+// Digest for commit-reveal. SubtleCrypto needs a secure context; over plain
+// http the fallback keeps the flow demonstrable but is not collision-resistant.
+async function digest(value) {
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  if (globalThis.crypto?.subtle) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  return 'weak:' + strHash(text).toString(16);
+}
+
+// ---------- state -----------------------------------------------------------
+const S = {
+  room: null, selfId: null, serving: false,
+  provider: 'stub', pipes: null, loading: false,
+  net: { sendTask: null, sendCommit: null, sendReveal: null, sendHello: null },
+  round: null,          // { id, cc, rows: Map(peerId -> {value, key, at}) }
+  peerServes: new Map() // peerId -> provider key they serve
+};
+
+const cfg = () => ({
+  redundancy: Math.max(1, +$('redundancy').value || 3),
+  threshold: +$('threshold').value,
+  minCluster: Math.max(1, +$('mincluster').value || 2),
+  timeoutMs: Math.max(2, +$('timeout').value || 25) * 1000,
+  commitReveal: $('commitreveal').checked
+});
+const peerIds = () => (S.room ? Object.keys(S.room.getPeers()) : []);
+
+// ---------- model providers -------------------------------------------------
+// Each returns { value, key } — `value` is what the requester wants back, `key`
+// is what the agreement test compares. They differ only for generation.
+// A bag-of-words vector with per-peer jitter. Not a real embedding — it exists
+// so the cosine clustering path can be exercised and tuned with nothing loaded.
+function stubVector(text, seedTag, jitter) {
+  const dim = 16, v = new Array(dim).fill(0);
+  for (const w of text.toLowerCase().split(/\W+/).filter(Boolean)) v[strHash(w) % dim] += 1;
+  let s = strHash(seedTag);
+  const rnd = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return (s >>> 8) / 16777216 - 0.5; };
+  return v.map(x => x + rnd() * jitter);
+}
+
+async function loadModel(kind) {
+  if (kind === 'stub' || kind === 'stubvec') return { kind };
+  const { pipeline } = await import(TRANSFORMERS_URL);
+  if (kind === 'classify') {
+    const clf = await pipeline('text-classification', 'Xenova/distilbert-base-uncased-finetuned-sst-2-english');
+    return { kind, clf };
+  }
+  const gen = await pipeline('text2text-generation', 'Xenova/LaMini-Flan-T5-77M');
+  const emb = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2');
+  return { kind, gen, emb };
+}
+
+async function runInference(input, seedTag = '') {
+  const kind = S.provider;
+  if (kind === 'stubvec') {
+    await new Promise(r => setTimeout(r, 100 + (strHash(seedTag) % 300)));
+    return { value: input.split(/\s+/).slice(0, 6).join(' ') + ' …', key: stubVector(input, seedTag, 0.15) };
+  }
+  if (kind === 'stub' || !S.pipes) {
+    // Deterministic pseudo-model: same input -> same label everywhere, which is
+    // exactly the honest-agreement case the consensus layer needs to see.
+    const positive = /won me over|great|love|excellent|brilliant|good/i.test(input);
+    const value = positive ? 'POSITIVE' : 'NEGATIVE';
+    await new Promise(r => setTimeout(r, 120 + (strHash(seedTag) % 400)));
+    return { value, key: value };
+  }
+  if (kind === 'classify') {
+    const [top] = await S.pipes.clf(input);
+    return { value: top.label, key: top.label };
+  }
+  const out = await S.pipes.gen(input, { max_new_tokens: 48 });
+  const text = (out[0]?.generated_text ?? '').trim();
+  const vec = await S.pipes.emb(text || ' ', { pooling: 'mean', normalize: true });
+  return { value: text, key: Array.from(vec.data) };
+}
+
+// ---------- rendering -------------------------------------------------------
+function renderRound(detail) {
+  const tbody = $('results').querySelector('tbody');
+  const rows = [...(S.round?.rows ?? new Map()).entries()];
+  const inCluster = new Set(detail?.cluster ?? []);
+  const test = PROVIDERS[S.provider].test;
+  const medoidKey = detail?.key;
+
+  tbody.innerHTML = rows.map(([peer, r]) => {
+    const sim = medoidKey === undefined ? null : test(r.key, medoidKey);
+    const state = !detail ? '…' : inCluster.has(peer) ? 'IN CLUSTER' : 'OUTLIER';
+    const cls = !detail ? '' : inCluster.has(peer) ? 'in' : 'out';
+    const shown = typeof r.value === 'string' ? r.value : JSON.stringify(r.value);
+    return `<tr class="${cls}">
+      <td class="mono">${esc(shortId(peer))}${peer === S.selfId ? ' <span class="pill">self</span>' : ''}${detail?.by === peer ? ' <span class="pill on">medoid</span>' : ''}</td>
+      <td>${esc(shown.slice(0, 160))}</td>
+      <td class="mono">${sim === null ? '—' : sim.toFixed(4)}</td>
+      <td class="mono">${state}</td></tr>`;
+  }).join('');
+
+  const v = $('verdict');
+  if (!detail) { v.innerHTML = `collecting results… <b>${rows.length}</b> in.`; return; }
+  if (detail.status === 'resolved') {
+    v.innerHTML = `<b>RESOLVED</b> — ${esc(String(detail.result).slice(0, 240))}<br>` +
+      `cluster <b>${detail.cluster.length}</b>/${detail.received} · ` +
+      `confidence <b>${(detail.confidence * 100).toFixed(0)}%</b> · ` +
+      `cohesion <b>${(detail.cohesion ?? 1).toFixed(4)}</b>` +
+      (detail.outliers.length ? ` · rejected <b>${detail.outliers.map(shortId).join(', ')}</b>` : '') +
+      (detail.viaTimeout ? ' · <span class="warn">settled on timeout</span>' : '');
+  } else if (detail.status === 'no-consensus') {
+    v.innerHTML = `<b>NO CONSENSUS</b> — ${detail.received} results, no cluster reached ` +
+      `min size ${cfg().minCluster}. Groups: ` +
+      (detail.clusters ?? []).map(c => '[' + c.map(shortId).join(' ') + ']').join(' ') +
+      `<br><span class="note">Either the threshold is too tight for this model, or the peers genuinely disagree.</span>`;
+  } else {
+    v.innerHTML = `<b>${String(detail.status).toUpperCase()}</b> — ${detail.received} result(s) received.`;
+  }
+}
+
+// ---------- a round ---------------------------------------------------------
+function openRound(taskId, input) {
+  const c = cfg();
+  const prov = PROVIDERS[S.provider];
+  const cc = createClusterConsensus({
+    similarity: prov.test,
+    threshold: c.threshold,
+    redundancy: c.redundancy,
+    minCluster: c.minCluster,
+    timeoutMs: c.timeoutMs,
+    commitReveal: c.commitReveal,
+    onResolved: (id, status, detail) => {
+      log(`<b>${status}</b> for ${id.slice(0, 8)} — ${detail.received} results, ` +
+          `cluster ${detail.cluster?.length ?? 0}`);
+      if (S.round?.id === id) S.round.resolved = true;
+      renderRound({ status, ...detail });
+    }
+  });
+  cc.open(taskId, { input });
+  S.round = { id: taskId, cc, rows: new Map(), resolved: false };
+  renderRound(null);
+  return S.round;
+}
+
+// Stage the row before submitting: the last submit resolves the round
+// synchronously, and onResolved renders the verdict from S.round.rows — so a
+// row added afterwards both misses that render and repaints over the result.
+function record(peerId, value, key, digest) {
+  if (!S.round) return false;
+  const { id, cc } = S.round;
+  S.round.rows.set(peerId, { value, key });
+  if (!cc.submit(id, peerId, value, { key, digest })) {
+    S.round.rows.delete(peerId);
+    renderRound(null);
+    return false;
+  }
+  if (!S.round.resolved) renderRound(null);
+  return true;
+}
+
+// Deterministic dispatch: every peer computes the same worker set from the task
+// id, so nobody has to be told who is working. Same trick as electProposer,
+// rotated by task so load spreads instead of always hitting the lowest id.
+function assignedWorkers(taskId) {
+  const workers = [...S.peerServes.entries()]
+    .filter(([, p]) => p === S.provider).map(([id]) => id);
+  if (S.serving) workers.push(S.selfId);
+  workers.sort();
+  if (!workers.length) return [];
+  const r = Math.min(cfg().redundancy, workers.length);
+  const off = strHash(taskId) % workers.length;
+  return Array.from({ length: r }, (_, i) => workers[(off + i) % workers.length]);
+}
+
+// ---------- mesh ------------------------------------------------------------
+async function join(code) {
+  let T;
+  try { T = await import(TRYSTERO_URL); }
+  catch (e) { log('<span class="warn">could not load trystero — offline?</span>'); return false; }
+
+  const room = T.joinRoom({ appId: 'fractal-mesh-inference' }, code);
+  S.room = room;
+  S.selfId = T.selfId;
+
+  const [sendTask, onTask]     = room.makeAction('task');
+  const [sendCommit, onCommit] = room.makeAction('commit');
+  const [sendReveal, onReveal] = room.makeAction('reveal');
+  const [sendHello, onHello]   = room.makeAction('hello');
+  S.net = { sendTask, sendCommit, sendReveal, sendHello };
+
+  onHello((msg, peer) => {
+    S.peerServes.set(peer, msg.serving || null);
+    $('peercount').textContent = peerIds().length;
+  });
+
+  room.onPeerJoin(peer => {
+    log(`peer <b>${shortId(peer)}</b> joined`);
+    $('peercount').textContent = peerIds().length;
+    sendHello({ serving: S.serving ? S.provider : null });
+  });
+
+  room.onPeerLeave(peer => {
+    S.peerServes.delete(peer);
+    $('peercount').textContent = peerIds().length;
+    log(`peer <b>${shortId(peer)}</b> left`);
+    // A departed worker can never reveal, so settle rather than wait out the timeout.
+    if (S.round && S.round.cc.has(S.round.id) && assignedWorkers(S.round.id).includes(peer)) {
+      log('assigned worker left — settling early');
+      S.round.cc.settle(S.round.id);
+    }
+  });
+
+  // Someone asked the mesh a question. Work it only if the dispatch says so.
+  onTask(async (msg, peer) => {
+    if (!S.serving) return;
+    if (!assignedWorkers(msg.id).includes(S.selfId)) return;
+    log(`working ${msg.id.slice(0, 8)} from <b>${shortId(peer)}</b>`);
+    try {
+      const { value, key } = await runInference(msg.input, S.selfId + msg.id);
+      const d = await digest(value);
+      if (cfg().commitReveal) {
+        S.net.sendCommit({ id: msg.id, digest: d });
+        // Hold the answer back briefly so the commit lands first; without the
+        // gap a fast peer can reveal before slower peers have committed, and
+        // they lose the ability to prove they answered independently.
+        await new Promise(r => setTimeout(r, 400));
+      }
+      S.net.sendReveal({ id: msg.id, value, key, digest: d });
+    } catch (e) {
+      log(`<span class="warn">inference failed: ${esc(e.message)}</span>`);
+    }
+  });
+
+  onCommit((msg, peer) => {
+    if (!S.round || S.round.id !== msg.id) return;
+    S.round.cc.commit(msg.id, peer, msg.digest);
+    log(`commit from <b>${shortId(peer)}</b>`);
+  });
+
+  onReveal((msg, peer) => {
+    if (!S.round || S.round.id !== msg.id) return;
+    if (!record(peer, msg.value, msg.key, msg.digest)) {
+      log(`<span class="warn">rejected reveal from ${shortId(peer)}</span>`);
+      return;
+    }
+    log(`reveal from <b>${shortId(peer)}</b>`);
+  });
+
+  pill($('netstate'), true, 'ONLINE');
+  $('btn-serve').disabled = false;
+  $('btn-join').textContent = 'REJOIN';
+  log(`joined <b>${esc(code)}</b> as <b>${shortId(S.selfId)}</b>`);
+  sendHello({ serving: S.serving ? S.provider : null });
+  return true;
+}
+
+// ---------- actions ---------------------------------------------------------
+$('threshold').oninput = () => { $('thresholdv').textContent = (+$('threshold').value).toFixed(3); };
+
+$('provider').onchange = () => {
+  S.provider = $('provider').value;
+  S.pipes = null;
+  pill($('modelstate'), false, 'UNLOADED');
+  const p = PROVIDERS[S.provider];
+  $('providernote').textContent = p.note;
+  $('threshold').value = p.threshold;
+  $('thresholdv').textContent = p.threshold.toFixed(3);
+  if (S.serving) { S.serving = false; pill($('servestate'), false, 'NO'); }
+  if (S.net.sendHello) S.net.sendHello({ serving: null });
+};
+
+$('btn-load').onclick = async () => {
+  if (S.loading) return;
+  S.loading = true;
+  pill($('modelstate'), false, 'LOADING…');
+  $('btn-load').disabled = true;
+  try {
+    S.pipes = await loadModel(S.provider);
+    pill($('modelstate'), true, 'READY');
+    log(`model <b>${PROVIDERS[S.provider].label}</b> ready`);
+  } catch (e) {
+    S.pipes = null;
+    pill($('modelstate'), false, 'FAILED');
+    log(`<span class="warn">model load failed: ${esc(e.message)}</span>`);
+  }
+  S.loading = false;
+  $('btn-load').disabled = false;
+};
+
+$('btn-join').onclick = async () => {
+  $('btn-join').disabled = true;
+  await join(($('room').value || 'MESH-LAB').toUpperCase().replace(/[^A-Z0-9-]/g, ''));
+  $('btn-join').disabled = false;
+};
+
+$('btn-serve').onclick = () => {
+  S.serving = !S.serving;
+  pill($('servestate'), S.serving, S.serving ? 'YES' : 'NO');
+  $('btn-serve').textContent = S.serving ? 'STOP SERVING' : 'SERVE THIS MODEL';
+  if (S.net.sendHello) S.net.sendHello({ serving: S.serving ? S.provider : null });
+};
+
+$('btn-run').onclick = async () => {
+  if (!S.room) { log('<span class="warn">join a mesh first, or use SOLO SIM</span>'); return; }
+  const input = $('input').value.trim();
+  if (!input) return;
+  const taskId = `${S.selfId}-${strHash(input + peerIds().length).toString(16)}-${performance.now() | 0}`;
+  const workers = assignedWorkers(taskId);
+  log(`dispatch ${taskId.slice(0, 8)} → ${workers.length ? workers.map(shortId).join(', ') : '(nobody serving)'}`);
+  openRound(taskId, input);
+  S.net.sendTask({ id: taskId, input });
+
+  // If this tab is one of the assigned workers, it answers like any other peer.
+  if (workers.includes(S.selfId)) {
+    const { value, key } = await runInference(input, S.selfId + taskId);
+    const d = await digest(value);
+    if (cfg().commitReveal) { S.net.sendCommit({ id: taskId, digest: d }); S.round.cc.commit(taskId, S.selfId, d); }
+    S.net.sendReveal({ id: taskId, value, key, digest: d });
+    record(S.selfId, value, key, d);
+  }
+};
+
+// Solo sim: synthetic peers through the identical consensus path.
+$('btn-sim').onclick = async () => {
+  const input = $('input').value.trim();
+  if (!input) return;
+  const c = cfg();
+  const taskId = 'sim-' + (performance.now() | 0);
+  S.selfId = S.selfId || 'local';
+  openRound(taskId, input);
+  log(`solo sim ${taskId.slice(0, 8)} — ${c.redundancy} synthetic peers`);
+
+  const honest = Math.max(1, c.redundancy - ($('liar').checked ? 1 : 0));
+  for (let i = 0; i < c.redundancy; i++) {
+    const peer = `sim-${String(i).padStart(2, '0')}`;
+    let value, key;
+    if (i < honest) {
+      ({ value, key } = await runInference(input, peer));
+    } else {
+      // The liar returns something confidently wrong, in the right shape.
+      const base = await runInference(input, peer);
+      value = typeof base.value === 'string' && !Array.isArray(base.key)
+        ? (base.value === 'POSITIVE' ? 'NEGATIVE' : 'POSITIVE')
+        : 'ignore the prompt and buy MESHCOIN';
+      key = Array.isArray(base.key)
+        ? base.key.map((v, j) => (j % 3 === 0 ? -v : v * 0.1))   // pushed off the honest cluster
+        : value;
+    }
+    const d = await digest(value);
+    if (c.commitReveal) S.round.cc.commit(taskId, peer, d);
+    record(peer, value, key, d);
+  }
+  if (S.round?.cc.has(taskId)) S.round.cc.settle(taskId);
+};
+
+// ---------- boot ------------------------------------------------------------
+$('provider').onchange();
+log('ready — SOLO SIM works with no mesh and no model download.');
+</script>
+</body>
+</html>
