@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.72';
+const LSS_BUILD = '36.73';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -54039,15 +54039,28 @@ function _lssApplyShipRig(dt) {
         const D = _dC;
         const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
         const _mDolly = L / Math.max(1, L - D);
-        const _mFov = Math.max(1, _mTot / _mDolly);
-        camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mFov) * 180 / Math.PI;
+        // (v36.73) THIRD PERSON = PURE DOLLY, no FOV residual. The v36.71
+        // push-out compensation (mesh pushed away by the FOV factor) only
+        // preserved the ship's angular SIZE approximately — fov narrowing
+        // scales screen positions by the tan-ratio, so the off-center ship
+        // also slid toward the frame edge, and the combination read as "the
+        // ship shrinks when zooming" (owner report). A rigid camera+mesh
+        // dolly is artifact-free by construction: identical cam->ship
+        // transform + identical fov = the ship is pixel-identical zoomed or
+        // not. The cost is far-range magnification in 3rd person only
+        // (M = L/(L-D), ~1.2x at 3km); FIRST person keeps the full hybrid —
+        // the painted cockpit is screen-space, so there's nothing to warp.
+        const _z3p = !!(game.thirdPerson && player.mesh && player.mesh.visible);
+        const _mFov = _z3p ? 1 : Math.max(1, _mTot / _mDolly);
+        if (_mFov > 1.0001) {
+          camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mFov) * 180 / Math.PI;
+        } else {
+          camera.fov = _zBase;
+        }
         camera.updateProjectionMatrix();
         camera.position.addScaledVector(_tpDir, D);
-        if (game.thirdPerson && player.mesh && player.mesh.visible) {
+        if (_z3p) {
           player.mesh.position.addScaledVector(_tpDir, D);
-          if (_mFov > 1.0001) {
-            player.mesh.position.sub(camera.position).multiplyScalar(_mFov).add(camera.position);
-          }
         }
         game._adsDolly = D;
       } else if (game._adsDolly || camera.fov !== _zBase) {
@@ -78802,24 +78815,22 @@ function gameLoop(timestamp) {
     // third-person / death cam, and other peers see them on our broadcast
     // position via their NetworkPlayer iteration).
     if (_vrThrottleTier < 2) emitDamageState(player, dt);
-    // Spawn-protection bubble on the local player too (visible in death cam / third-person).
-    // (v33.55) Reset the base shield bubble to 0 EVERY frame so it never latches "always on"
-    // in 3rd person. The old code used Math.max and only touched intensity while
-    // spawnProtection>0, so the spawn bubble pinned intensity at 1.0 forever (the "shield
-    // always showing" bug in campaign/MP chase view). Now ONLY the CURRENT spawn protection
-    // lights the generic bubble ; actual hits still flash WHERE they land via spawnShieldHit
-    // -> recordShieldHit (the shader adds the ripple alpha INDEPENDENTLY of intensity, and
-    // the discard test passes when a ripple is active, so the localized ripple renders even
-    // at intensity 0). Mirrors the NetworkPlayer/bot path (~L8086). Free-flight has no spawn
-    // protection so it stays 0.
+    // (v36.73) Spawn-protection bubble on the LOCAL player's own ship:
+    // REMOVED per owner ("starting a match in third person shows the shield
+    // for a second — it shouldn't show it at all"). This block used to light
+    // the generic blue wraparound from player.spawnProtection (~3s fade at
+    // every match start / respawn). Peers and bots still light THEIR bubbles
+    // (the NetworkPlayer path keys off s.spawnProt), so "protected, don't
+    // waste shots" still reads in multiplayer — only your own chase-cam view
+    // is clean. ⚠ The every-frame ZERO is kept from v33.55: without it,
+    // anything that ever writes intensity (legacy paths, the STRYDER nemesis
+    // dome writer) latches the bubble on forever in 3rd person. Hit ripples
+    // are unaffected: recordShieldHit's ripple alpha renders independently of
+    // intensity, so shield hits still flash where they land.
     if (player.mesh && player.mesh.userData && player.mesh.userData.shieldMesh) {
       const m = player.mesh.userData.shieldMesh.material;
-      let _shieldFrac = 0;
-      if (LSS.MODE !== 'freeflight' && player.spawnProtection > 0) {
-        _shieldFrac = Math.min(1, player.spawnProtection / (LSS.SPAWN_PROTECTION || 3));
-      }
-      if (m.uniforms && m.uniforms.intensity) m.uniforms.intensity.value = 1.0 * _shieldFrac;
-      else if ('opacity' in m) m.opacity = 0.30 * _shieldFrac;
+      if (m.uniforms && m.uniforms.intensity) m.uniforms.intensity.value = 0;
+      else if ('opacity' in m) m.opacity = 0;
     }
     // Heat-trail blur on the player too (visible in third-person / death cam)
     if (_vrThrottleTier < 1 && !player.doomed && player.velocity && typeof spawnHeatTrail === 'function') {
