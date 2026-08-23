@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.71';
+const LSS_BUILD = '36.72';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -54022,7 +54022,21 @@ function _lssApplyShipRig(dt) {
         let L = 3400;
         try { if (typeof raycastLevel === 'function') L = raycastLevel(camera.position, _tpDir, 3400); } catch (_) {}
         L = Math.max(120, L);
-        const D = z * Math.min((Z.frac != null ? Z.frac : 0.55) * L, (Z.dMax != null ? Z.dMax : 420));
+        // (v36.72) SPRUNG DOLLY. The dolly used to follow the raw per-frame
+        // raycast — sweep the crosshair across a nearby peak and L collapses,
+        // so the camera got yanked back the same frame (the "pushed back at
+        // mountain peaks" glitch), then sprang forward again as the aim
+        // cleared. The dolly target now eases: shrink at dt*10 (responsive,
+        // no wall-clip in practice), grow at dt*3.5 (the boom's own ease-out
+        // feel); a hard L-60 floor still snaps instantly so genuinely close
+        // geometry can never end up behind the camera. The FOV residual reads
+        // the SPRUNG value, so total magnification stays constant and both
+        // position and FOV glide through peak sweeps instead of popping.
+        const _dT = z * Math.min((Z.frac != null ? Z.frac : 0.55) * L, (Z.dMax != null ? Z.dMax : 420));
+        let _dC = game._adsDolly || 0;
+        _dC = _dC + (_dT - _dC) * Math.min(1, (dt || 0.016) * (_dT < _dC ? 10 : 3.5));
+        _dC = Math.min(_dC, Math.max(0, L - 60));
+        const D = _dC;
         const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
         const _mDolly = L / Math.max(1, L - D);
         const _mFov = Math.max(1, _mTot / _mDolly);
@@ -79615,6 +79629,26 @@ function _audioDrySink() {
   if (_bakeDest) return _bakeDest;
   return audio._spatialSink || audio.dryGain || audio.masterGain;
 }
+// (v36.72) Wet-send target for SPATIAL sounds. The convolver's output is
+// bus-level and UNPANNED — so a full-level reverb send on a spatial sound
+// buried the HRTF lateralization under center-channel wash (the "is spatial
+// audio even working?" complaint: only the dry tap went through the panner
+// while the whole pre-gain signal also arrived dead-center via the reverb).
+// Spatial sounds now send at 0.35 through this shared attenuator, keeping
+// room glue without drowning the pan; the extra-long reverb send is skipped
+// entirely while a panner is active (see the four send sites). Live tune:
+// window.__spatialWet (0 = fully dry spatial sounds, 1 = old behavior).
+function _audioSpatialWetSink() {
+  if (!audio._spatialWet && audio.ctx && audio.convolver) {
+    audio._spatialWet = audio.ctx.createGain();
+    audio._spatialWet.gain.value = 0.35;
+    audio._spatialWet.connect(audio.convolver);
+  }
+  if (audio._spatialWet && typeof window !== 'undefined' && typeof window.__spatialWet === 'number') {
+    audio._spatialWet.gain.value = window.__spatialWet;
+  }
+  return audio._spatialWet || audio.convolver;
+}
 
 function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envelope) {
   const ctx = _audioTargetCtx();
@@ -79675,8 +79709,9 @@ function triChord(freqs, wave, vol, dur, rampFreqs, rampTime, startOffset, envel
     // from prior shots covers the gap so it's not perceptually missing.
     const drySink = _audioDrySink();
     gain.connect(drySink);
-    if (!_bakeCtx && !stressed && audio.convolver) gain.connect(audio.convolver);
-    if (!_bakeCtx && !stressed && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+    // (v36.72) Spatial sounds duck the unpanned reverb send (see _audioSpatialWetSink).
+    if (!_bakeCtx && !stressed && audio.convolver) gain.connect(audio._spatialSink ? _audioSpatialWetSink() : audio.convolver);
+    if (!_bakeCtx && !stressed && !audio._spatialSink && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
     osc.start(now); osc.stop(now + dur + 0.01);
     if (chorusOsc) { chorusOsc.start(now); chorusOsc.stop(now + dur + 0.01); }
   });
@@ -79713,8 +79748,9 @@ function playNoiseBurst(duration, volume, startTime, filterFreq, filterQ) {
   // Route to dry + reverb (dry routes through spatial panner if active)
   const drySink = _audioDrySink();
   gain.connect(drySink);
-  if (!_bakeCtx && !lean && audio.convolver) gain.connect(audio.convolver);
-  if (!_bakeCtx && !lean && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+  // (v36.72) Spatial sounds duck the unpanned reverb send (see _audioSpatialWetSink).
+  if (!_bakeCtx && !lean && audio.convolver) gain.connect(audio._spatialSink ? _audioSpatialWetSink() : audio.convolver);
+  if (!_bakeCtx && !lean && !audio._spatialSink && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
   const maxOffset = Math.max(0, buf.duration - duration - 0.005);
   const offset = maxOffset > 0 ? Math.random() * maxOffset : 0;
   src.start(startTime, offset, duration);
@@ -85169,8 +85205,9 @@ function _runLabNoiseLayer(layer, atOffsetSec, volMul) {
   const drySink = _audioDrySink();
   gain.connect(drySink);
   // Skip reverb sends under load to recover audio thread CPU.
-  if (!_bakeCtx && !_audioStressed && audio.convolver) gain.connect(audio.convolver);
-  if (!_bakeCtx && !_audioStressed && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+  // (v36.72) Spatial sounds duck the unpanned reverb send (see _audioSpatialWetSink).
+  if (!_bakeCtx && !_audioStressed && audio.convolver) gain.connect(audio._spatialSink ? _audioSpatialWetSink() : audio.convolver);
+  if (!_bakeCtx && !_audioStressed && !audio._spatialSink && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
   src.start(startTime);
 }
 
@@ -85420,9 +85457,12 @@ function _playBakedSound(type) {
   src.connect(gain);
   gain.connect(_audioDrySink());
   // Reverb at playback, not in the buffer — see the bake note above.
+  // (v36.72) Spatial sounds duck the unpanned reverb send (see
+  // _audioSpatialWetSink) — this is the HOT path for spatial one-shots
+  // (explosions etc. play baked), so it mattered most here.
   const lean = (typeof _audioLeanMode === 'function') ? _audioLeanMode() : _audioStressed;
-  if (!lean && audio.convolver) gain.connect(audio.convolver);
-  if (!lean && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
+  if (!lean && audio.convolver) gain.connect(audio._spatialSink ? _audioSpatialWetSink() : audio.convolver);
+  if (!lean && !audio._spatialSink && audio._extraReverbSend) gain.connect(audio._extraReverbSend);
   src.start();
   return true;
 }
@@ -86378,18 +86418,38 @@ const _spatialPool = [];
 const _SPATIAL_POOL_MAX = 32;
 function _acquireSpatialTriple(ctx) {
   if (_spatialPool.length) return _spatialPool.pop();
+  const panner = ctx.createPanner();
+  // (v36.72) Force mono input: since the v35.69 bake, one-shots play as
+  // pre-rendered STEREO buffers; a stereo input to an HRTF panner is dual-
+  // convolved with an azimuth spread instead of relocated as a point source.
+  // Mono-downmix first = true point source (also halves the convolution).
+  panner.channelCount = 1;
+  panner.channelCountMode = 'explicit';
   return {
-    panner: ctx.createPanner(),
+    panner,
     occl: ctx.createBiquadFilter(),
     occlGain: ctx.createGain(),
+    // (v36.72) ⭐ AZIMUTH TILT — the audible half of "explosions on my left
+    // should sound left". Measured with a stereo probe on the master output:
+    // a hard-side EXPLOSION through the HRTF panner lands at only ~1.2x L/R
+    // RMS — not a bug, physics: the recipe's energy is low-frequency rumble,
+    // and low frequencies barely shadow around a head, so HRTF's level cue is
+    // inherently tiny there (a mid-rich sawtooth probe images 2.2x through
+    // the SAME chain; saturation/hiCut/reverb-wash were measured and are NOT
+    // the limiter). Games solve this by EXAGGERATING: a StereoPanner after
+    // the panner adds a plain level tilt by source azimuth, giving LF booms
+    // the ear-to-ear read HRTF can't. Strength: window.__spatialTilt
+    // (default 0.55, 0 = physically-pure HRTF only).
+    tilt: ctx.createStereoPanner(),
   };
 }
 function _releaseSpatialTriple(triple) {
   if (!triple) return;
-  const { panner, occl, occlGain } = triple;
+  const { panner, occl, occlGain, tilt } = triple;
   try { panner.disconnect(); } catch (e) {}
   try { occl.disconnect(); } catch (e) {}
   try { occlGain.disconnect(); } catch (e) {}
+  try { if (tilt) tilt.disconnect(); } catch (e) {}
   // Clear any pending automation so a reused node doesn't inherit stale values.
   const now = (audio && audio.ctx) ? audio.ctx.currentTime : 0;
   try { panner.positionX.cancelScheduledValues(now); } catch (e) {}
@@ -86398,6 +86458,7 @@ function _releaseSpatialTriple(triple) {
   try { occl.frequency.cancelScheduledValues(now); } catch (e) {}
   try { occl.Q.cancelScheduledValues(now); } catch (e) {}
   try { occlGain.gain.cancelScheduledValues(now); } catch (e) {}
+  try { if (tilt) tilt.pan.cancelScheduledValues(now); } catch (e) {}
   if (_spatialPool.length < _SPATIAL_POOL_MAX) _spatialPool.push(triple);
 }
 // ── (v36.71) PER-FRAME LISTENER TRACKING ─────────────────────────────────────
@@ -86490,6 +86551,8 @@ function _flybyEnsureVoice(ctx) {
   g.gain.value = 0;
   const pan = ctx.createPanner();
   pan.panningModel = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 'equalpower' : 'HRTF';
+  pan.channelCount = 1;             // point-source panning (see _acquireSpatialTriple)
+  pan.channelCountMode = 'explicit';
   pan.distanceModel = 'inverse';
   pan.refDistance = 130;
   pan.maxDistance = 1700;
@@ -86597,6 +86660,37 @@ function _audioSpatialFrame(dt) {
   _flybyTick(dt);
 }
 
+// (v36.72) Audible spatial smoke test: window.__spatialTest() plays 8 pings
+// orbiting the camera — FRONT, FRONT-RIGHT, RIGHT, BACK-RIGHT, BACK,
+// BACK-LEFT, LEFT, FRONT-LEFT — 0.55s apart at 420u, logging each direction.
+// Wear headphones. If the pings audibly circle your head, panning works and
+// any remaining doubt is about MIX SHARE (see _audioSpatialWetSink / the
+// __spatialWet knob), not the panner. If they all sound centered, something
+// in the chain is collapsing to mono — report which. Optional args:
+// __spatialTest(distanceUnits, recipeName).
+if (typeof window !== 'undefined') window.__spatialTest = function (dist, type) {
+  try {
+    if (!audio.initialized) return 'audio not initialized — click into the game first';
+    const d = (typeof dist === 'number' && dist > 50) ? dist : 420;
+    const snd = type || 'firework_pop';
+    const names = ['FRONT', 'FRONT-RIGHT', 'RIGHT', 'BACK-RIGHT', 'BACK', 'BACK-LEFT', 'LEFT', 'FRONT-LEFT'];
+    let k = 0;
+    const step = () => {
+      try {
+        const ang = k * Math.PI / 4;
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+        const pos = camera.position.clone().addScaledVector(fwd, Math.cos(ang) * d).addScaledVector(right, Math.sin(ang) * d);
+        console.log('[spatialTest] ' + (k + 1) + '/8 ' + names[k]);
+        playSpatialSound(snd, pos, { refDistance: 200, maxDistance: 6000 });
+      } catch (e) { console.warn('[spatialTest]', e); }
+      if (++k < 8) window.setTimeout(step, 550);
+    };
+    step();
+    return 'playing 8 pings orbiting you (wear headphones)';
+  } catch (e) { return 'ERR ' + e; }
+};
+
 // HRTF body renamed to _playSpatialSoundHRTF; the public
 // playSpatialSound below dispatches between this (stereo / headphones)
 // and _playSpatialSound51 (real 5.1 surround output).
@@ -86669,9 +86763,28 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
     occl.frequency.setValueAtTime(cutoff, t);
     occl.Q.setValueAtTime(0.707, t);
     occlGain.gain.setValueAtTime(occludedGain, t);
+    // (v36.72) Azimuth tilt (rationale in _acquireSpatialTriple): a plain L/R
+    // level lean by where the source sits relative to the camera, layered on
+    // top of the HRTF so low-frequency booms still read directionally.
+    // sin(azimuth) = normalized right-axis component of the offset. Spawn-
+    // time only — the panner still owns true position/rotation; the tilt is
+    // seasoning, not the position. Guarded for pool triples minted before
+    // this field existed.
+    let _tilt = triple.tilt;
+    if (!_tilt) { try { _tilt = triple.tilt = audio.ctx.createStereoPanner(); } catch (_) {} }
+    if (_tilt) {
+      const _tk = (typeof window !== 'undefined' && typeof window.__spatialTilt === 'number') ? window.__spatialTilt : 0.55;
+      let _sinAz = 0;
+      if (distToSource > 1 && _tk) {
+        _spatialDir.set(1, 0, 0).applyQuaternion(camera.quaternion);
+        _sinAz = (_spatialRelPos.x * _spatialDir.x + _spatialRelPos.y * _spatialDir.y + _spatialRelPos.z * _spatialDir.z) / distToSource;
+      }
+      _tilt.pan.setValueAtTime(Math.max(-0.85, Math.min(0.85, _sinAz * _tk)), t);
+    }
     panner.connect(occl);
     occl.connect(occlGain);
-    occlGain.connect(audio.sfxBus || audio.masterGain);
+    if (_tilt) { occlGain.connect(_tilt); _tilt.connect(audio.sfxBus || audio.masterGain); }
+    else occlGain.connect(audio.sfxBus || audio.masterGain);
     audio._spatialSink = panner;
     playSound(type);
     audio._spatialSink = null;
