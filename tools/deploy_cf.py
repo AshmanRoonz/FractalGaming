@@ -10,7 +10,7 @@ only changed files transfer on repeat deploys.
 Usage:  py -3.11 tools/deploy_cf.py            (deploys)
         py -3.11 tools/deploy_cf.py --stage    (staging copy only, no upload)
 """
-import subprocess, sys, os
+import subprocess, sys, os, shutil
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(REPO, "LSS")          # site root: LSS/ is what deploys
@@ -91,8 +91,12 @@ if EXTRA_FILES:
 print("staged ->", STAGE)
 
 if "--stage" not in sys.argv:
-    run(["wrangler.cmd" if os.name == "nt" else "wrangler",
-         "pages", "deploy", STAGE,
-         "--project-name", PROJECT, "--branch", "main",
-         "--commit-dirty=true"])
+    # (2026-08-23) wrangler is no longer globally installed on this machine;
+    # fall back to `npx --yes wrangler` (uses the npm cache, auth comes from
+    # the saved wrangler OAuth config either way).
+    wr = shutil.which("wrangler.cmd" if os.name == "nt" else "wrangler")
+    cmd = [wr] if wr else [shutil.which("npx.cmd" if os.name == "nt" else "npx") or "npx", "--yes", "wrangler"]
+    run(cmd + ["pages", "deploy", STAGE,
+               "--project-name", PROJECT, "--branch", "main",
+               "--commit-dirty=true"])
     print("deployed. Preview: https://lss-61y.pages.dev")
