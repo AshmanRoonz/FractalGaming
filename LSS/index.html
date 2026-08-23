@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.75';
+const LSS_BUILD = '36.76';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -41028,14 +41028,19 @@ function _setPlayerShipOpacity(opacity) {
 const _cinematic = {
   active: false,
   startMs: 0,
-  duration: 6.0,      
+  duration: 6.0,
   camPos:    new THREE.Vector3(),
   camTarget: new THREE.Vector3(),
   baseY:     0,
-  ships: null,        
+  ships: null,
   after: null,
   watchdog: null,
 };
+const _cineP = new THREE.Vector3();
+const _cineOff = new THREE.Vector3();
+const _cineQ = new THREE.Quaternion();
+const _cineMQ = new THREE.Quaternion();
+const _cineFlipY = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
 
 function _lssClearCinematicWatchdog() {
   if (_cinematic.watchdog) {
@@ -41316,6 +41321,25 @@ function _lssUpdateSpectatorCinematic() {
     _cinematic.camPos.z + swayZ * sway
   );
   camera.lookAt(_cinematic.camTarget);
+  const _bIn = elapsed - (_cinematic.duration - 1.4);
+  if (_bIn > 0 && typeof player !== 'undefined' && player && player.position && player.euler) {
+    let b = Math.min(1, _bIn / 1.4);
+    b = b * b * (3 - 2 * b);
+    _cineQ.setFromEuler(player.euler);
+    _cineP.copy(player.position);
+    if (game && game.thirdPerson) {
+      _cineOff.set(0, 42, 150).applyQuaternion(_cineQ);
+      _cineP.add(_cineOff);
+    }
+    camera.position.lerp(_cineP, b);
+    camera.quaternion.slerp(_cineQ, b);
+    const _s0 = (_cinematic.ships && _cinematic.ships.length && _cinematic.ships[0].isPlayer) ? _cinematic.ships[0] : null;
+    if (_s0 && _s0.mesh) {
+      _cineMQ.copy(_cineQ).multiply(_cineFlipY);
+      _s0.mesh.position.lerp(player.position, b);
+      _s0.mesh.quaternion.slerp(_cineMQ, b);
+    }
+  }
   return true;
 }
 
@@ -49731,16 +49755,24 @@ function updateMinimap() {
   }
 
 
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'endless' && game.endlessRun && game.endlessRun.segs && game.endlessRun.segs.length) {
-    const _erun = game.endlessRun;
-    let _etx = null, _etz = null, _eidx = 0;
-    for (let i = 0; i < _erun.segs.length; i++) { if (_erun.segs[i].gid === _erun.progGid) { _eidx = i; break; } }
-    for (let k = _eidx; k < _erun.segs.length; k++) {
-      const b = _erun.segs[k].b;
-      const ddx = b.x - ccx, ddz = b.z - ccz;
-      if (ddx * ddx + ddz * ddz > 600 * 600) { _etx = b.x; _etz = b.z; break; }
+  {
+    let _etx = null, _etz = null;
+    const _navMode = (typeof LSS !== 'undefined') ? LSS.MODE : null;
+    if (_navMode === 'endless' && game.endlessRun && game.endlessRun.segs && game.endlessRun.segs.length) {
+      const _erun = game.endlessRun;
+      let _eidx = 0;
+      for (let i = 0; i < _erun.segs.length; i++) { if (_erun.segs[i].gid === _erun.progGid) { _eidx = i; break; } }
+      for (let k = _eidx; k < _erun.segs.length; k++) {
+        const b = _erun.segs[k].b;
+        const ddx = b.x - ccx, ddz = b.z - ccz;
+        if (ddx * ddx + ddz * ddz > 600 * 600) { _etx = b.x; _etz = b.z; break; }
+      }
+      if (_etx === null && _erun.gen) { _etx = _erun.gen.x; _etz = _erun.gen.z; }
+    } else if (_navMode === 'campaign' && game.campaign && !game.bossPortal &&
+               typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
+      const _cdx = 0 - ccx, _cdz = CAMPAIGN_LEG_HALF_Z - ccz;
+      if (_cdx * _cdx + _cdz * _cdz > 2200 * 2200) { _etx = 0; _etz = CAMPAIGN_LEG_HALF_Z; }
     }
-    if (_etx === null && _erun.gen) { _etx = _erun.gen.x; _etz = _erun.gen.z; }
     if (_etx !== null) {
       const p = _plot(_etx, _etz);
       const _ep = 0.66 + Math.sin((game.time || 0) * 3) * 0.28;
