@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.73';
+const LSS_BUILD = '36.74';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -20611,6 +20611,11 @@ function renderPostFX() {
   // 1. Render scene to offscreen target
   renderer.setRenderTarget(postFX.rtScene);
   renderer.render(scene, camera);
+  // (v36.74) ADS ship overlay: while third-person zoom is engaged the ship
+  // lives on layer 5 (skipped by the pass above) and is drawn here from the
+  // un-zoomed camera into the SAME target — before post, so bloom/grade/fog
+  // feedback treat the hull exactly like everything else.
+  if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
 
   if (lowQuality) {
     // Low-quality path: skip the 3 bloom passes. Composite still runs so the
@@ -20821,6 +20826,8 @@ function renderFrame() {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
     renderer.setRenderTarget(null);
     renderer.render(scene, camera);
+    // (v36.74) ADS ship overlay on the potato direct path too (see renderPostFX).
+    if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
     return;
   }
   renderPostFX();
@@ -20852,6 +20859,17 @@ scene.add(dirLight3);
 // vertical gradient to ship hulls that the directionals miss.
 const hemiLight = new THREE.HemisphereLight(0x6688cc, 0x224466, 0.4);
 scene.add(hemiLight);
+// (v36.74) The five combat lights also carry LAYER 5 — the ADS ship-overlay
+// pass (see _adsOverlayRender) renders the player's ship through a camera
+// that sees only layer 5, and three.js includes a light in a pass only if it
+// shares a layer with the CAMERA. Without these the ship would go black the
+// moment third-person zoom engages. Layer 0 membership is untouched, so the
+// normal world pass is byte-identical.
+ambientLight.layers.enable(5);
+dirLight.layers.enable(5);
+dirLight2.layers.enable(5);
+dirLight3.layers.enable(5);
+hemiLight.layers.enable(5);
 // (v34.13 realism) HUB-ONLY dimensional lighting : the flat 0.85 ambient is the #1 "it's a game" tell.
 // Drop ambient, raise the sun (dirLight) + the sky-fill hemisphere (tinted to the daylight sky so shadowed
 // faces read sky-blue not black) = real directional light + soft sky bounce. Saved/restored so combat rooms are
@@ -54017,7 +54035,27 @@ function _lssApplyShipRig(dt) {
     const _zBase = (typeof input !== 'undefined' && input && typeof input.fovDeg === 'number') ? input.fovDeg : 90;
     if (!_zVr) {
       const z = game._adsZoom;
-      if (z > 0) {
+      const _z3p = !!(game.thirdPerson && player && player.mesh && player.mesh.visible);
+      if (z > 0 && _z3p) {
+        // (v36.74) THIRD PERSON: the camera does not move AT ALL and the mesh
+        // is never displaced. Every camera/mesh-motion variant failed an
+        // owner test: FOV-only swelled the ship (pre-v36.71), dolly+push-out
+        // slid/shrank it (v36.71), and the rigid dolly+ride kept it screen-
+        // perfect but visibly TRAVELLED it ~420u through the world (v36.73
+        // report: "it looks like the ship is travelling forward"). So: the
+        // WORLD zooms via FOV on the main camera, and the ship is drawn by a
+        // second, un-zoomed camera in its own pass (_adsOverlayRender below)
+        // — pixel-identical, at its true world position, nothing travels.
+        // The overlay swaps the ship subtree onto layer 5 so the zoomed
+        // world pass skips it; the combat lights carry layer 5 too.
+        game._adsDolly = 0;
+        const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
+        camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mTot) * 180 / Math.PI;
+        camera.updateProjectionMatrix();
+      } else if (z > 0) {
+        // FIRST PERSON: dolly+FOV hybrid, sprung (v36.72). The painted
+        // cockpit is screen-space, so the forward dolly costs nothing and
+        // buys real parallax; the FOV residual covers far-range sniping.
         _tpDir.set(0, 0, -1).applyQuaternion(camera.quaternion);
         let L = 3400;
         try { if (typeof raycastLevel === 'function') L = raycastLevel(camera.position, _tpDir, 3400); } catch (_) {}
@@ -54036,33 +54074,16 @@ function _lssApplyShipRig(dt) {
         let _dC = game._adsDolly || 0;
         _dC = _dC + (_dT - _dC) * Math.min(1, (dt || 0.016) * (_dT < _dC ? 10 : 3.5));
         _dC = Math.min(_dC, Math.max(0, L - 60));
-        const D = _dC;
         const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
-        const _mDolly = L / Math.max(1, L - D);
-        // (v36.73) THIRD PERSON = PURE DOLLY, no FOV residual. The v36.71
-        // push-out compensation (mesh pushed away by the FOV factor) only
-        // preserved the ship's angular SIZE approximately — fov narrowing
-        // scales screen positions by the tan-ratio, so the off-center ship
-        // also slid toward the frame edge, and the combination read as "the
-        // ship shrinks when zooming" (owner report). A rigid camera+mesh
-        // dolly is artifact-free by construction: identical cam->ship
-        // transform + identical fov = the ship is pixel-identical zoomed or
-        // not. The cost is far-range magnification in 3rd person only
-        // (M = L/(L-D), ~1.2x at 3km); FIRST person keeps the full hybrid —
-        // the painted cockpit is screen-space, so there's nothing to warp.
-        const _z3p = !!(game.thirdPerson && player.mesh && player.mesh.visible);
-        const _mFov = _z3p ? 1 : Math.max(1, _mTot / _mDolly);
+        const _mFov = Math.max(1, _mTot / (L / Math.max(1, L - _dC)));
         if (_mFov > 1.0001) {
           camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mFov) * 180 / Math.PI;
         } else {
           camera.fov = _zBase;
         }
         camera.updateProjectionMatrix();
-        camera.position.addScaledVector(_tpDir, D);
-        if (_z3p) {
-          player.mesh.position.addScaledVector(_tpDir, D);
-        }
-        game._adsDolly = D;
+        camera.position.addScaledVector(_tpDir, _dC);
+        game._adsDolly = _dC;
       } else if (game._adsDolly || camera.fov !== _zBase) {
         // Released: restore the settings FOV exactly once, then stop touching
         // the projection (the settings slider owns camera.fov outside zoom).
@@ -54070,8 +54091,67 @@ function _lssApplyShipRig(dt) {
         camera.updateProjectionMatrix();
         game._adsDolly = 0;
       }
+      // Ship-overlay layer state: on while third-person zoom is engaged;
+      // also restores layer 0 on release and across a mid-zoom mesh rebuild.
+      if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p);
     }
   }
+}
+
+// ── (v36.74) ADS SHIP OVERLAY ────────────────────────────────────────────────
+// While third-person zoom is active the player's ship subtree lives on LAYER
+// 5: the main (FOV-zoomed) world pass skips it, and _adsOverlayRender draws
+// JUST the ship from a second camera at the same position with the UN-zoomed
+// fov — so the ship stays pixel-identical at its true world position while
+// the world magnifies behind it. The five combat lights carry layer 5
+// (enabled at creation next to renderFrame) so the overlay pass lights the
+// hull identically; pooled muzzle-flash point lights don't, which is
+// imperceptible at ADS ranges. Deactivation — and a mid-zoom mesh rebuild
+// (ship swap / respawn) — restores layer 0 on the exact subtree that was
+// moved, tracked via game._adsOvMesh. Render call sites: the postFX scene
+// pass and the potato direct pass in renderFrame/renderPostFX.
+function _adsShipOverlaySet(on) {
+  const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
+  if (on && mesh) {
+    if (game._adsOvMesh && game._adsOvMesh !== mesh) {
+      try { game._adsOvMesh.traverse((o) => { o.layers.set(0); }); } catch (_) {}
+      game._adsOvOn = false;
+    }
+    if (!game._adsOvOn) {
+      try { mesh.traverse((o) => { o.layers.set(5); }); } catch (_) {}
+      game._adsOvMesh = mesh;
+      game._adsOvOn = true;
+    }
+  } else if (game._adsOvOn) {
+    if (game._adsOvMesh) { try { game._adsOvMesh.traverse((o) => { o.layers.set(0); }); } catch (_) {} }
+    game._adsOvMesh = null;
+    game._adsOvOn = false;
+  }
+}
+let _adsOvCam = null;
+function _adsOverlayRender() {
+  try {
+    if (!game || !game._adsOvOn || typeof renderer === 'undefined' || !renderer) return;
+    if (!_adsOvCam) {
+      _adsOvCam = new THREE.PerspectiveCamera(90, 1, 1, 100);
+      _adsOvCam.layers.set(5);
+    }
+    _adsOvCam.fov = (typeof input !== 'undefined' && input && typeof input.fovDeg === 'number') ? input.fovDeg : 90;
+    _adsOvCam.aspect = camera.aspect;
+    _adsOvCam.near = camera.near;
+    _adsOvCam.far = camera.far;
+    _adsOvCam.position.copy(camera.position);
+    _adsOvCam.quaternion.copy(camera.quaternion);
+    _adsOvCam.updateProjectionMatrix();
+    _adsOvCam.updateMatrixWorld(true);
+    // Depth is cleared so the hull always draws over the zoomed world — the
+    // chase boom already guarantees nothing sits between camera and ship.
+    const _prevAC = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.clearDepth();
+    renderer.render(scene, _adsOvCam);
+    renderer.autoClear = _prevAC;
+  } catch (_) {}
 }
 
 // ---- WEAPON FIRING ----

@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.73';
+const LSS_BUILD = '36.74';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -16736,6 +16736,7 @@ function renderPostFX() {
 
   renderer.setRenderTarget(postFX.rtScene);
   renderer.render(scene, camera);
+  if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
 
   if (lowQuality) {
     postFX.compositeMat.uniforms.tScene.value = postFX.rtScene.texture;
@@ -16890,6 +16891,7 @@ function renderFrame() {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) {
     renderer.setRenderTarget(null);
     renderer.render(scene, camera);
+    if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
     return;
   }
   renderPostFX();
@@ -16909,6 +16911,11 @@ scene.add(dirLight3);
 
 const hemiLight = new THREE.HemisphereLight(0x6688cc, 0x224466, 0.4);
 scene.add(hemiLight);
+ambientLight.layers.enable(5);
+dirLight.layers.enable(5);
+dirLight2.layers.enable(5);
+dirLight3.layers.enable(5);
+hemiLight.layers.enable(5);
 function _lssApplyHubLighting(on) {
   if (game._swSavedLights === undefined) {
     game._swSavedLights = { amb: ambientLight.intensity, key: dirLight.intensity, keyCol: dirLight.color.getHex(), fill: dirLight2.intensity, rim: dirLight3.intensity, hemi: hemiLight.intensity, hSky: hemiLight.color.getHex(), hGnd: hemiLight.groundColor.getHex() };
@@ -41722,7 +41729,13 @@ function _lssApplyShipRig(dt) {
     const _zBase = (typeof input !== 'undefined' && input && typeof input.fovDeg === 'number') ? input.fovDeg : 90;
     if (!_zVr) {
       const z = game._adsZoom;
-      if (z > 0) {
+      const _z3p = !!(game.thirdPerson && player && player.mesh && player.mesh.visible);
+      if (z > 0 && _z3p) {
+        game._adsDolly = 0;
+        const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
+        camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mTot) * 180 / Math.PI;
+        camera.updateProjectionMatrix();
+      } else if (z > 0) {
         _tpDir.set(0, 0, -1).applyQuaternion(camera.quaternion);
         let L = 3400;
         try { if (typeof raycastLevel === 'function') L = raycastLevel(camera.position, _tpDir, 3400); } catch (_) {}
@@ -41731,29 +41744,66 @@ function _lssApplyShipRig(dt) {
         let _dC = game._adsDolly || 0;
         _dC = _dC + (_dT - _dC) * Math.min(1, (dt || 0.016) * (_dT < _dC ? 10 : 3.5));
         _dC = Math.min(_dC, Math.max(0, L - 60));
-        const D = _dC;
         const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
-        const _mDolly = L / Math.max(1, L - D);
-        const _z3p = !!(game.thirdPerson && player.mesh && player.mesh.visible);
-        const _mFov = _z3p ? 1 : Math.max(1, _mTot / _mDolly);
+        const _mFov = Math.max(1, _mTot / (L / Math.max(1, L - _dC)));
         if (_mFov > 1.0001) {
           camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mFov) * 180 / Math.PI;
         } else {
           camera.fov = _zBase;
         }
         camera.updateProjectionMatrix();
-        camera.position.addScaledVector(_tpDir, D);
-        if (_z3p) {
-          player.mesh.position.addScaledVector(_tpDir, D);
-        }
-        game._adsDolly = D;
+        camera.position.addScaledVector(_tpDir, _dC);
+        game._adsDolly = _dC;
       } else if (game._adsDolly || camera.fov !== _zBase) {
         camera.fov = _zBase;
         camera.updateProjectionMatrix();
         game._adsDolly = 0;
       }
+      if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p);
     }
   }
+}
+
+function _adsShipOverlaySet(on) {
+  const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
+  if (on && mesh) {
+    if (game._adsOvMesh && game._adsOvMesh !== mesh) {
+      try { game._adsOvMesh.traverse((o) => { o.layers.set(0); }); } catch (_) {}
+      game._adsOvOn = false;
+    }
+    if (!game._adsOvOn) {
+      try { mesh.traverse((o) => { o.layers.set(5); }); } catch (_) {}
+      game._adsOvMesh = mesh;
+      game._adsOvOn = true;
+    }
+  } else if (game._adsOvOn) {
+    if (game._adsOvMesh) { try { game._adsOvMesh.traverse((o) => { o.layers.set(0); }); } catch (_) {} }
+    game._adsOvMesh = null;
+    game._adsOvOn = false;
+  }
+}
+let _adsOvCam = null;
+function _adsOverlayRender() {
+  try {
+    if (!game || !game._adsOvOn || typeof renderer === 'undefined' || !renderer) return;
+    if (!_adsOvCam) {
+      _adsOvCam = new THREE.PerspectiveCamera(90, 1, 1, 100);
+      _adsOvCam.layers.set(5);
+    }
+    _adsOvCam.fov = (typeof input !== 'undefined' && input && typeof input.fovDeg === 'number') ? input.fovDeg : 90;
+    _adsOvCam.aspect = camera.aspect;
+    _adsOvCam.near = camera.near;
+    _adsOvCam.far = camera.far;
+    _adsOvCam.position.copy(camera.position);
+    _adsOvCam.quaternion.copy(camera.quaternion);
+    _adsOvCam.updateProjectionMatrix();
+    _adsOvCam.updateMatrixWorld(true);
+    const _prevAC = renderer.autoClear;
+    renderer.autoClear = false;
+    renderer.clearDepth();
+    renderer.render(scene, _adsOvCam);
+    renderer.autoClear = _prevAC;
+  } catch (_) {}
 }
 
 
