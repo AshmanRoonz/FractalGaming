@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.70';
+const LSS_BUILD = '36.71';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -12467,6 +12467,17 @@ function handleNetEvent(evt, fromPeerId) {
           spawnTracer(_bfA, _bfB, _col, 0.8);
         }
         if (fb) { fb.isFiring = true; fb.fireFlashTimer = 0.15; }
+        // (v36.71) Incoming-fire audio on the PROXY side too, so co-op
+        // clients hear the wave's shots the same way the bot authority does
+        // (same protections as the authority-side call in fireAtShip:
+        // skippable types + min-gap + the 1800u relevance gate).
+        // Kill switch: window.__enemyFireSfx = false.
+        if ((typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
+            typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+            player.position && player.position.distanceToSquared(_bfA) < 1800 * 1800) {
+          playSpatialSound(_mode === 'spread' ? 'fire_spread' : (_mode === 'projectile' ? 'fire_projectile' : 'fire_hitscan'),
+            _bfA, { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 });
+        }
       } catch (_) {}
     }
     return;
@@ -12760,6 +12771,19 @@ function handleNetEvent(evt, fromPeerId) {
         emitChassisMuzzleFlash(peer.loadoutKey, from, dir);
       }
     }
+    // (v36.71) Incoming-fire audio for PEER shots — same hole as bot fire:
+    // the tracer render had no sound at all. Positional from the muzzle;
+    // Puncture peers get the railgun report so the spiral has its voice.
+    // Same overload layers as the bot site (skippable + min-gap + 1800u).
+    // Kill switch: window.__enemyFireSfx = false.
+    if ((typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
+        typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+        player.position && player.position.distanceToSquared(from) < 1800 * 1800) {
+      try {
+        playSpatialSound(_shooterLoadout === 'PUNCTURE' ? 'fire_railgun' : 'fire_hitscan', from,
+          { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 });
+      } catch (_) {}
+    }
     return;
   }
   // Shotgun pellet burst from a peer's spread weapon. Renders as a
@@ -12777,6 +12801,13 @@ function handleNetEvent(evt, fromPeerId) {
       }
     }
     spawnPelletBurst(origin, dir, evt.range || 600);
+    // (v36.71) Peer spread-weapon report — positional, same protections as
+    // the fire_tracer site above. Kill switch: window.__enemyFireSfx = false.
+    if ((typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
+        typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+        player.position && player.position.distanceToSquared(origin) < 1800 * 1800) {
+      try { playSpatialSound('fire_spread', origin, { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 }); } catch (_) {}
+    }
     return;
   }
   // Branching lightning bolt from a peer (Energy Syphon, Stun Bolt
@@ -13635,10 +13666,15 @@ function _getVortexCoreBeamGeometry() {
 // the player. Wider at impact, narrower near the player so the core
 // reads as a "death ray cone" instead of a uniform tube. Shared with
 // the peer-side render so both shooter and remote see the same shape.
+// (v36.71) Bottom radius 0.25 -> 0.03: at 0.25 the ship end was still ~24u
+// fat (BEAM_RADIUS 95), and with the far end 3000u away perspective shrank
+// the wide end so much the whole thing read as a uniform cylinder from the
+// cockpit. 0.03 (~3u at the ship) makes a true pencil point at the hull that
+// visibly flares outward — sharp end at the ship, per owner direction.
 let _VORTEX_CORE_BEAM_CONE_GEO = null;
 function _getVortexCoreBeamConeGeometry() {
   if (_VORTEX_CORE_BEAM_CONE_GEO) return _VORTEX_CORE_BEAM_CONE_GEO;
-  _VORTEX_CORE_BEAM_CONE_GEO = new THREE.CylinderGeometry(1.0, 0.25, 1, 24, 1, true);
+  _VORTEX_CORE_BEAM_CONE_GEO = new THREE.CylinderGeometry(1.0, 0.03, 1, 24, 1, true);
   return _VORTEX_CORE_BEAM_CONE_GEO;
 }
 
@@ -35165,6 +35201,23 @@ class Bot {
       }
     }
 
+    // (v36.71) Incoming-fire audio: enemy shots were completely SILENT — the
+    // tracer/muzzle VFX above had no sound at all, so you could not hear that
+    // (or from where) you were being shot. One positional one-shot per landed
+    // volley from the real muzzle. Overload protection is layered: the types
+    // are in _AUDIO_SKIPPABLE (voice budget prunes them first), playSound's
+    // per-type min-gap caps the rate, refDistance 130 keeps them well under
+    // your own fire, and the 1800u gate skips shots too far to matter.
+    // Kill switch: window.__enemyFireSfx = false.
+    if ((typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
+        typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+        player.position && player.position.distanceToSquared(fireOrigin) < 1800 * 1800) {
+      try {
+        playSpatialSound(weapon.mode === 'spread' ? 'fire_spread' : 'fire_hitscan', fireOrigin,
+          { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 });
+      } catch (_) {}
+    }
+
     if (_tgtIsPlayer) {
       // (v36.00) hitOpts: the muzzle position + weapon color drive the
       // player-impact laser splash + correct-side shield ripple (hitscan has
@@ -43158,6 +43211,61 @@ function _facePlayerAtEnemy() {
   } catch (_) {}
 }
 
+// (v36.71) RACE : aim the spawn-in at the first gate instead of the enemy
+// fleet. On Pole Position `_facePlayerAtEnemy` pointed you at the ADJACENT
+// spawn room (the "enemy centroid" is the other fleet, ~365u away) while the
+// course ran off the other way. The target is read from the tunnel graph —
+// the tunnel leaving your team's spawn room ends at the gate room (room_1),
+// which is the authored first ring; nearest-ring would be wrong (room_12 is
+// geometrically closer to the spawns than the gate). MAP_DATA is used
+// directly because the RaceRing objects spawn lazily at state==='playing',
+// after both spawn paths run. Overrides whatever _facePlayerAtEnemy set, so
+// call it right after. Also primes the parallax-spring history so the yaw
+// snap doesn't read as a one-frame camera lurch.
+function _faceRaceFirstRing() {
+  try {
+    if (typeof LSS === 'undefined' || LSS.MODE !== 'race') return;
+    if (typeof player === 'undefined' || !player || !player.euler || !player.position) return;
+    if (!game || game.selectedMap !== 'race_pole_position') return;
+    const map = (typeof MAP_DATA !== 'undefined') ? MAP_DATA.race_pole_position : null;
+    if (!map || !Array.isArray(map.rooms)) return;
+    const _teamCode = (player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
+    const teamRoom = map.rooms.find(r => r && r.team === _teamCode);
+    let tgt = null;
+    if (teamRoom && Array.isArray(map.tunnels)) {
+      const _rr = (teamRoom.r || 300) * 1.2;
+      const _near = (p) => {
+        const dx = p.x - teamRoom.x, dy = p.y - teamRoom.y, dz = p.z - teamRoom.z;
+        return dx * dx + dy * dy + dz * dz < _rr * _rr;
+      };
+      for (const t of map.tunnels) {
+        if (!t || !Array.isArray(t.path) || t.path.length < 2) continue;
+        const p0 = t.path[0], p1 = t.path[t.path.length - 1];
+        if (_near(p0) && !_near(p1)) { tgt = p1; break; }
+        if (_near(p1) && !_near(p0)) { tgt = p0; break; }
+      }
+    }
+    if (!tgt) {
+      // Fallback: nearest ringed (team-null, non-champion) room.
+      let bestD = Infinity;
+      for (const r of map.rooms) {
+        if (!r || r.champion || r.team) continue;
+        const dx = r.x - player.position.x, dy = r.y - player.position.y, dz = r.z - player.position.z;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d < bestD) { bestD = d; tgt = r; }
+      }
+    }
+    if (!tgt) return;
+    const dx = player.position.x - tgt.x, dz = player.position.z - tgt.z;
+    if (dx * dx + dz * dz > 1) {
+      player.euler.y = Math.atan2(dx, dz);
+      player.euler.x = 0;
+      game._parPrevYaw = player.euler.y;
+      game._parPrevPitch = player.euler.x;
+    }
+  } catch (_) {}
+}
+
 class OutskirtsMonster {
   constructor(def, homeDir) {
     this.def = def;
@@ -44454,7 +44562,13 @@ function _spawnPoleRings() {
     const finPos = fin ? new THREE.Vector3(fin.x, fin.y, fin.z) : null;
     game.poleRings = [];
     for (const r of map.rooms) {
-      if (!r || r.champion) continue;   
+      if (!r || r.champion) continue;
+      // (v36.71) No ring at the starting line: the two spawn rooms sit inside
+      // their own ring's capture sphere (dia 510 -> capture r 229 vs spawn
+      // jitter ~210+40), so players claimed a "checkpoint" on frame 1 without
+      // flying anywhere. Team rooms carry no ring; the first real gate is
+      // room_1, ~2500u out from either spawn.
+      if (r.team) continue;
       const pos = new THREE.Vector3(r.x, r.y, r.z);
       const dia = Math.min((r.r || 300) * 1.7, 560);
       const ring = new RaceRing(pos, dia);
@@ -44624,6 +44738,25 @@ function updateMonsters(dt) {
   // corridor fight — no outskirts to wander, and the field objective already
   // owns the bots' attention.
   if (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'assault')) return;
+  // (v36.71) Per-map opt-out: MAP_DATA.<key>.noMonsters (The Spire). The Spire
+  // is a volumetric arena whose rooms are spawn/nav bubbles, not carve data —
+  // so _monNearestSeedDist read almost the whole playfield as "outside" and
+  // the 5 s summon warped leviathans INTO the arena continuously. Rather than
+  // special-case the distance test, the map opts out of beasts entirely.
+  // Sits BEFORE the lazy init so a fresh Spire match never parses the six
+  // 20-45 MB GLBs at all.
+  if (typeof MAP_DATA !== 'undefined' && game.selectedMap && MAP_DATA[game.selectedMap] && MAP_DATA[game.selectedMap].noMonsters) {
+    // A previous map's beasts may still be live (init is match-global): push
+    // them through the shared reset ONCE — rehome + hide every mesh, assets
+    // stay warm — then stand down while this map is selected. Without this,
+    // an already-summoned leviathan would freeze mid-air on map switch.
+    if (_monstersInit && game.monsters && updateMonsters._noMonKey !== game.selectedMap) {
+      updateMonsters._noMonKey = game.selectedMap;
+      try { _monsterRoundReset(); } catch (_) {}
+    }
+    return;
+  }
+  updateMonsters._noMonKey = null;
   if (!_monstersInit) {
     // Deferred init: GLB parsing runs on the main thread, and kicking it
     // off during the round-open seconds was measured as a dip to ~48 fps
@@ -46910,9 +47043,13 @@ function _monPrimeWanted() {
     if (typeof MONSTER_DEFS === 'undefined' || typeof OutskirtsMonster === 'undefined') return false;
     if (typeof THREE === 'undefined' || typeof THREE.GLTFLoader === 'undefined') return false;
     if (typeof scene === 'undefined' || !scene) return false;
-    // The three early-outs updateMonsters takes before it would ever init.
+    // The early-outs updateMonsters takes before it would ever init.
     if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return false;
     if (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'assault')) return false;
+    // (v36.71) Per-map opt-out mirrors updateMonsters (The Spire): don't spend
+    // prebake budget parsing six 20-45 MB GLBs the map will never show.
+    // game.selectedMap is readable at prebake time (same stage reads it above).
+    if (typeof MAP_DATA !== 'undefined' && game.selectedMap && MAP_DATA[game.selectedMap] && MAP_DATA[game.selectedMap].noMonsters) return false;
     // XR owns its own budget (same rule as _primeEntityModels).
     if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return false;
   } catch (_) { return false; }
@@ -47679,7 +47816,14 @@ function spawnTracer(from, to, color, widthScale) {
   // barrel tips stay locked to the cockpit art (fixed screen pixels) while
   // the convergence point tracks the world target.
   const camDist = (typeof camera !== 'undefined' && camera) ? from.distanceTo(camera.position) : 9999;
-  if (camDist < 80) {
+  // (v36.71) `&& !thirdPerson`: the ADS dolly can carry the camera forward
+  // past the ship, putting a third-person camera within 80u of the muzzle —
+  // which flipped these shots into the painted-cockpit split mid-zoom. The
+  // distance test alone was only ever a proxy for "this shot came from the
+  // first-person camera" (first person keeps camDist ~60 even while zoomed,
+  // because `from` is projected FROM the dollied camera; bot/peer shots stay
+  // far beyond 80 in every view).
+  if (camDist < 80 && (typeof game === 'undefined' || !game || !game.thirdPerson)) {
     // Camera-local basis for building muzzle world positions from screen-space
     // pixel targets. The two muzzle origins project to a fixed pair of screen
     // pixels that line up with the painted barrel tips on every ship's
@@ -51637,6 +51781,8 @@ function commitLoadout(key) {
       // (v31.20) Bots exist now ; aim the player at the enemy fleet so the
       // spawn-in faces the fight (was facing a default way, had to turn).
       if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
+      // (v36.71) Race overrides that: face the first gate, not the rival fleet.
+      if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
     };
     let roundSeed = 1;
     if ((net.active || (typeof LSS !== 'undefined' && LSS.MODE === 'campaign')) && typeof net.worldSeed === 'number') {
@@ -51692,6 +51838,11 @@ function commitLoadout(key) {
     // Between-rounds swap: place player at their team's spawn; the map is already
     // built from the round-end transition; scores/round counter are preserved.
     player.position.copy(getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A')));
+    // (v36.71) Race runs every round on the same course: re-aim each round's
+    // spawn at the first gate (this path never called the facing helpers, so
+    // round 2+ left you pointing wherever round 1 ended). Race-gated inside
+    // the helper; other modes keep their historical between-round behavior.
+    if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
   }
 
   // Announce our loadout to peers. (v10) Include Discord identity
@@ -52576,6 +52727,8 @@ function respawnPlayer() {
   // level pitch. (Camera = setFromEuler(player.euler), YXZ ; forward at
   // yaw y is (-sin y, 0, -cos y), so y = atan2(px-cx, pz-cz) aims at center.)
   if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
+  // (v36.71) Race overrides that: face the first gate, not the rival fleet.
+  if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
 }
 
 // ---- PLAYER MOVEMENT ----
@@ -53823,6 +53976,75 @@ function _lssApplyShipRig(dt) {
       camera.rotateZ(-game._tpBank * (window.__fpBank != null ? window.__fpBank : 0.5));
     }
   }
+
+  // ── (v36.71) ADS ZOOM = HYBRID DOLLY ──────────────────────────────────────
+  // Replaces the pure-FOV ADS bend (was: lerp camera.fov -> 65 in
+  // updateWeapon). Owner direction: "zoom should move the view cam forward
+  // rather than changing the POV angle — done tricky, so it doesn't look like
+  // the cam is moving and we stay in our ship."
+  //
+  // HOW: while aiming, the camera physically advances along the view ray
+  // (true dolly = real parallax, no lens warp), clamped to __zoom.frac of the
+  // distance to whatever terrain the ray hits (one raycastLevel per zoomed
+  // frame — the same trace the chase boom uses) and to __zoom.dMax absolute.
+  // At range a legal dolly can't reach sniper magnification, so the REMAINDER
+  // comes from a residual FOV narrow:
+  //   M_total = 1 + z*(mMax-1) ; M_dolly = L/(L-D) ; M_fov = M_total/M_dolly
+  // Near targets get ~pure dolly; at 3 km it's mostly FOV — but TOTAL
+  // magnification stays constant, so sniping feel doesn't drift with range.
+  //
+  // THE TRICK (third person): the ship mesh is counter-displaced so it stays
+  // EXACTLY where it was on screen — it rides the dolly (+viewDir*D keeps the
+  // camera->ship geometry identical) and is then pushed out along the
+  // camera->ship ray by M_fov (angular size ~ 1/distance, so the push exactly
+  // cancels the residual FOV swell). Net effect: the world zooms, the ship
+  // doesn't move a pixel — "we stay in our ship". Visual-only displacement:
+  // player.position, hitboxes, net broadcasts and what peers see are all
+  // untouched (peers render the ship from network state, not this mesh).
+  //
+  // VR skips everything (the headset owns the projection; the old FOV bend
+  // was already bypassed there, see the note in updateWeapon). Live tuning:
+  // window.__zoom = {mMax, dMax, frac, rate} — mMax 1 = pure dolly (weak at
+  // range), dMax 0 = pure FOV (the old behavior, ship swell and all).
+  {
+    const _zVr = (typeof isXRPresenting === 'function') && isXRPresenting();
+    const Z = window.__zoom || (window.__zoom = { mMax: 2.4, dMax: 420, frac: 0.55, rate: 12 });
+    const _zAim = !!(typeof input !== 'undefined' && input &&
+                     (input.rightMouseDown || input.gpAltFire || input.touchAltFire));
+    const _zk = Math.min(1, (dt || 0.016) * (Z.rate || 12));
+    game._adsZoom = (game._adsZoom || 0) + ((_zAim ? 1 : 0) - (game._adsZoom || 0)) * _zk;
+    if (game._adsZoom < 0.002) game._adsZoom = 0;
+    const _zBase = (typeof input !== 'undefined' && input && typeof input.fovDeg === 'number') ? input.fovDeg : 90;
+    if (!_zVr) {
+      const z = game._adsZoom;
+      if (z > 0) {
+        _tpDir.set(0, 0, -1).applyQuaternion(camera.quaternion);
+        let L = 3400;
+        try { if (typeof raycastLevel === 'function') L = raycastLevel(camera.position, _tpDir, 3400); } catch (_) {}
+        L = Math.max(120, L);
+        const D = z * Math.min((Z.frac != null ? Z.frac : 0.55) * L, (Z.dMax != null ? Z.dMax : 420));
+        const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
+        const _mDolly = L / Math.max(1, L - D);
+        const _mFov = Math.max(1, _mTot / _mDolly);
+        camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mFov) * 180 / Math.PI;
+        camera.updateProjectionMatrix();
+        camera.position.addScaledVector(_tpDir, D);
+        if (game.thirdPerson && player.mesh && player.mesh.visible) {
+          player.mesh.position.addScaledVector(_tpDir, D);
+          if (_mFov > 1.0001) {
+            player.mesh.position.sub(camera.position).multiplyScalar(_mFov).add(camera.position);
+          }
+        }
+        game._adsDolly = D;
+      } else if (game._adsDolly || camera.fov !== _zBase) {
+        // Released: restore the settings FOV exactly once, then stop touching
+        // the projection (the settings slider owns camera.fov outside zoom).
+        camera.fov = _zBase;
+        camera.updateProjectionMatrix();
+        game._adsDolly = 0;
+      }
+    }
+  }
 }
 
 // ---- WEAPON FIRING ----
@@ -53912,30 +54134,11 @@ function updateWeapon(dt) {
     }
   }
 
-  // ADS zoom (FOV change). (v18VR 2026-05-22 round 11) Skipped in VR.
-  // The WebXR compositor uses the headset's projection matrices from
-  // the XR view ; camera.fov + camera.updateProjectionMatrix() are
-  // effectively ignored for stereo render. Running the lerp anyway
-  // produced no visible zoom but left players (correctly) wondering
-  // whether the system was stuck mid-zoom. The gameplay flags that
-  // actually depend on alt-fire — player.vortexAdsActive (damage
-  // bonus while ADS) and player.railgunCharge (sniper charge meter
-  // for Puncture) — are derived from `aiming` above, so they still
-  // fire normally on the XR controller's left-trigger input. Only
-  // the cosmetic FOV bend is bypassed here.
-  if (!(typeof isXRPresenting === 'function' && isXRPresenting())) {
-    const baseFov = (typeof input !== 'undefined' && typeof input.fovDeg === 'number')
-      ? input.fovDeg : 90;
-    let targetFov = baseFov;
-    if (aiming) {
-      // Unified ADS : every ship targets 65 regardless of class.
-      // Per-class overrides removed (was PUNCTURE=40 / VORTEX=55 / else=65)
-      // so all loadouts feel the same when sighting in.
-      targetFov = 65;
-    }
-    camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12);
-    camera.updateProjectionMatrix();
-  }
+  // (v36.71) The FOV lerp that lived here (base -> 65 at dt*12) is GONE —
+  // ADS is now the hybrid dolly at the end of _lssApplyShipRig, which must
+  // run AFTER the chase boom places the camera each frame (the old pure-FOV
+  // bend could run anywhere because it never touched camera.position).
+  // `aiming` above still drives every gameplay flag exactly as before.
 
   // Spinup
   let firing = input.mouseDown || _kbActionHeld('fire') || input.gpFire || input.touchFire;
@@ -56370,6 +56573,10 @@ function activateCore() {
     // Speed boost is handled in updateAbilities; initial rocket volley
     player.velocity.add(forward.clone().multiplyScalar(600));
     try { playSound('barrage_core_thrust'); } catch (_) {}
+    // (v36.71) Arm the deterministic missile dump (fired in updateAbilities):
+    // 15 rockets at 0.2 s spacing = all away inside 3 s of the 5 s core.
+    player._pbFired = 0;
+    player._pbAcc = 0;
   }
   // SLAYER: Mega Stun Bolt (charged AoE shockwave + sustained Stun Bolt Flurry over 5s)
   else if (coreName === 'Mega Stun Bolt') {
@@ -58836,15 +59043,26 @@ function updateAbilities(dt) {
         }
       }
     }
-    // PUNCTURE Mega Barrage: speed boost + rockets every 0.5s
+    // PUNCTURE Mega Barrage: speed boost (full core duration) + missile dump.
+    // (v36.71) Cadence rebuilt per owner: was a Poisson gate (Math.random() <
+    // dt*3 — ~15 launches sprinkled loosely across the whole 5 s window); now
+    // a deterministic accumulator fires all 15 inside the first 3 s at a fixed
+    // 0.2 s spacing, so the core lands like Syphon's Rocket Salvo — one
+    // committed burst instead of a drizzle. One launch max per frame (the
+    // accumulator carries hitch remainders, so a dropped frame delays a rocket
+    // rather than skipping it — and the _abTmpA scratch is never shared
+    // between two spawns in one frame). Counters armed at core activation.
     else if (coreName === 'Mega Barrage') {
       // Speed boost
       const curSpeed = player.velocity.length();
       if (curSpeed < player.chassis.flightSpeed * 2) {
         player.velocity.addScaledVector(forward, 200 * dt);
       }
-      // Fire rockets periodically (Puncture Mega Barrage)
-      if (Math.random() < dt * 3) {
+      const _pbTotal = 15, _pbGap = 0.2;
+      if ((player._pbFired || 0) < _pbTotal &&
+          ((player._pbAcc = (player._pbAcc || 0) + dt) >= _pbGap)) {
+        player._pbAcc -= _pbGap;
+        player._pbFired = (player._pbFired || 0) + 1;
         // Per-missile audio so the barrage isn't silent
         // between the activation thrust roar and the impact / explosion
         // bookends. Short pitch-varied tube thump + whoosh + chirp.
@@ -58878,6 +59096,11 @@ function updateAbilities(dt) {
         proj.sizeMult = 2;
         proj.removeHaze();
         game.projectiles.push(proj);
+        // (v36.71) Peers see the barrage now: the receive path has decorated
+        // incoming PUNCTURE ability projectiles all along, but the send was
+        // never wired (every other core/salvo broadcasts). ~15 packets/core,
+        // same cosmetic fire-and-forget channel Syphon's salvo uses.
+        try { if (typeof broadcastAbilityProjectile === 'function') broadcastAbilityProjectile(proj); } catch (_) {}
       }
     }
     // SLAYER Mega Stun Bolt: two damage sources, both running for the
@@ -64821,6 +65044,37 @@ function updateMinimap() {
   // (v35.43) Map-name label REMOVED from the radar per user. `game.mapWord` is
   // still maintained (set on level load, preserved across the save/restore in
   // the map-gen path) — this was just its only reader.
+
+  // (v36.71) ENDLESS: route-direction indicator — a pulsing gold double-chevron
+  // pointing along the run's spine (the direction you should be flying). Target
+  // = the first segment end >600u ahead, scanning forward from the segment the
+  // progress tracker has you locked to (run.progGid); falls back to the
+  // generator frontier when tracking is lost. Drawn at the plotted (edge-
+  // clamped) waypoint, rotated to the outbound bearing. Gold + hollow so it
+  // can't be confused with the solid red hostile arrows or the cyan/violet
+  // portal chevrons (see the v36.38 visual grammar note above).
+  if (typeof LSS !== 'undefined' && LSS.MODE === 'endless' && game.endlessRun && game.endlessRun.segs && game.endlessRun.segs.length) {
+    const _erun = game.endlessRun;
+    let _etx = null, _etz = null, _eidx = 0;
+    for (let i = 0; i < _erun.segs.length; i++) { if (_erun.segs[i].gid === _erun.progGid) { _eidx = i; break; } }
+    for (let k = _eidx; k < _erun.segs.length; k++) {
+      const b = _erun.segs[k].b;
+      const ddx = b.x - ccx, ddz = b.z - ccz;
+      if (ddx * ddx + ddz * ddz > 600 * 600) { _etx = b.x; _etz = b.z; break; }
+    }
+    if (_etx === null && _erun.gen) { _etx = _erun.gen.x; _etz = _erun.gen.z; }
+    if (_etx !== null) {
+      const p = _plot(_etx, _etz);
+      const _ep = 0.66 + Math.sin((game.time || 0) * 3) * 0.28;
+      ctx.strokeStyle = 'rgba(255,210,77,' + _ep + ')';
+      ctx.lineWidth = 1.6;
+      const _eang = Math.atan2(p.y - cy, p.x - cx);
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(_eang);
+      ctx.beginPath(); ctx.moveTo(-1.2, -4.4); ctx.lineTo(4.4, 0); ctx.lineTo(-1.2, 4.4); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-5.6, -4.4); ctx.lineTo(0, 0); ctx.lineTo(-5.6, 4.4); ctx.stroke();
+      ctx.restore();
+    }
+  }
 
   // (v36.38) Park this frame's projector so headless verification can ask where
   // an arbitrary world point plotted (window.__mmProbe / __mmPortalProbe below)
@@ -74624,6 +74878,12 @@ const MAP_DATA = {
     thumb: 'map_thumbs/spire.png',
     description: 'Three storeys of cavern around a ragged central spire. Shafts drop between floors; a helical ramp winds the column.',
     defaultTheme: 'Crystal Cavern',
+    // (v36.71) No outskirts leviathans here: the arena is volumetric (rooms
+    // are spawn/nav bubbles, not carve data), so the "outside the level"
+    // distance test the summoner uses reads most of the playfield as outside
+    // and beasts kept warping in mid-arena. Read by updateMonsters +
+    // _monPrimeWanted.
+    noMonsters: true,
     // Cool crystal blues rising storey by storey, warm ember tone for the
     // pit (the future lava floor, slice 3).
     palette: [
@@ -78644,6 +78904,10 @@ function gameLoop(timestamp) {
     updateMinimap();
     if (_xrPresentingForOverlays && _xrMinimapTex && _mm.lastTick !== _mmPrev) _xrMinimapTex.needsUpdate = true;
   }
+  // (v36.71) Spatial-audio frame tick: the Web Audio listener follows the
+  // camera (world-space panning — tails rotate correctly as you turn) and
+  // the missile flyby/doppler voices track their projectiles.
+  if (typeof _audioSpatialFrame === 'function') { try { _audioSpatialFrame(dt); } catch (_) {} }
   updateHUD();
   if (!_xrPresentingForOverlays && _vrPerfTier < 1) updateEnemyHealthBars();
   __pmark('fx+hud+minimap'); 
@@ -85452,7 +85716,7 @@ function _startRailgunChargeSound(initialCharge) {
   const now = ctx.currentTime;
   const c0 = Math.min(1, Math.max(0, initialCharge || 0));
   const attack   = 0.228;
-  const finalVol = 0.415 * 0.39;          
+  const finalVol = 0.415 * 0.39 * 0.5;    // (v36.71) charge whine cut 50% per owner — fire/release sound untouched
   const spacing  = 0.035;
   const oscs  = [];
   const gains = [];
@@ -86136,6 +86400,203 @@ function _releaseSpatialTriple(triple) {
   try { occlGain.gain.cancelScheduledValues(now); } catch (e) {}
   if (_spatialPool.length < _SPATIAL_POOL_MAX) _spatialPool.push(triple);
 }
+// ── (v36.71) PER-FRAME LISTENER TRACKING ─────────────────────────────────────
+// The AudioContext listener used to sit at its default (origin, facing -Z)
+// forever, with every spatial sound baked into listener-local coordinates at
+// spawn — so tails never rotated with the ship. The listener now follows the
+// camera each frame and panners hold WORLD coordinates (see the v36.71 note
+// in _playSpatialSoundHRTF). Called from the game loop next to updateMinimap,
+// and defensively at the top of playSpatialSound so a spatial one-shot can
+// never fire against a stale/origin listener even if a state skips the loop
+// hook. AudioParam path glides at tau 0.02 (no zipper); Firefox falls back to
+// the legacy setPosition/setOrientation setters (it has panner.positionX but
+// historically not listener.positionX).
+const _alFwd = new THREE.Vector3();
+const _alUp = new THREE.Vector3();
+let _alMode = 0;   // 0 = undetected, 1 = AudioParam, 2 = setPosition fallback
+function _audioUpdateListener() {
+  if (!audio.initialized || !audio.ctx || typeof camera === 'undefined' || !camera) return;
+  const l = audio.ctx.listener;
+  if (!l) return;
+  camera.getWorldPosition(_spatialCamPos);
+  _alFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  _alUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  const t = audio.ctx.currentTime;
+  if (_alMode === 0) _alMode = (l.positionX && l.positionX.setTargetAtTime) ? 1 : 2;
+  try {
+    if (_alMode === 1) {
+      const TAU = 0.02;
+      l.positionX.setTargetAtTime(_spatialCamPos.x, t, TAU);
+      l.positionY.setTargetAtTime(_spatialCamPos.y, t, TAU);
+      l.positionZ.setTargetAtTime(_spatialCamPos.z, t, TAU);
+      l.forwardX.setTargetAtTime(_alFwd.x, t, TAU);
+      l.forwardY.setTargetAtTime(_alFwd.y, t, TAU);
+      l.forwardZ.setTargetAtTime(_alFwd.z, t, TAU);
+      l.upX.setTargetAtTime(_alUp.x, t, TAU);
+      l.upY.setTargetAtTime(_alUp.y, t, TAU);
+      l.upZ.setTargetAtTime(_alUp.z, t, TAU);
+    } else {
+      l.setPosition(_spatialCamPos.x, _spatialCamPos.y, _spatialCamPos.z);
+      l.setOrientation(_alFwd.x, _alFwd.y, _alFwd.z, _alUp.x, _alUp.y, _alUp.z);
+    }
+  } catch (_) {}
+}
+
+// ── (v36.71) MISSILE FLYBY + DOPPLER ─────────────────────────────────────────
+// "Missiles going by" had no sound at all — launch and impact were bookends
+// with silence between — and nothing anywhere pitch-shifted by relative
+// velocity. A tiny pool of looping noise voices rides the nearest few
+// smoke-trailed projectiles (missiles/rockets — deliberately NOT every laser
+// bolt): shared white-noise loop -> bandpass -> gain -> per-voice panner,
+// playbackRate driven by the classic doppler ratio c/(c - closing) against
+// the listener (player velocity included, so flying alongside a missile
+// doesn't shift it). World-space panner positions glide every frame, so with
+// the live listener above the whoosh genuinely sweeps ear-to-ear as one
+// crosses you.
+// Budget: 3 voices desktop / 2 mobile, HRTF desktop only (equalpower on
+// mobile keeps always-on convolution off the phone audio thread — chosen at
+// voice creation, never mid-session, per the v32.90 "no character switching"
+// rule). Potato skips entirely. Every write is setTargetAtTime (no zipper),
+// and each tick re-arms a dead-man fade to silence at t+0.35 — if the loop
+// stops mid-whoosh (hidden tab, teardown), voices silence themselves in ~½ s
+// instead of looping forever. Kill switch: window.__flyby = false ; trim:
+// window.__flybyVol (default 1).
+let _flybyNoiseBuf = null;
+function _flybyNoise(ctx) {
+  if (_flybyNoiseBuf && _flybyNoiseBuf.sampleRate === ctx.sampleRate) return _flybyNoiseBuf;
+  const n = Math.max(1, Math.floor(ctx.sampleRate * 1.0));
+  const b = ctx.createBuffer(1, n, ctx.sampleRate);
+  const d = b.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  _flybyNoiseBuf = b;
+  return b;
+}
+const _flybyVoices = [];
+const _flybyScratch = new THREE.Vector3();
+function _flybyRelease(v) {
+  if (!v) return;
+  try { if (v.src) { v.src.stop(); v.src.disconnect(); } } catch (_) {}
+  v.src = null;
+  try { v.pan.disconnect(); } catch (_) {}
+  v.proj = null;
+}
+function _flybyEnsureVoice(ctx) {
+  for (let i = 0; i < _flybyVoices.length; i++) if (!_flybyVoices[i].proj) return _flybyVoices[i];
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = 700;
+  bp.Q.value = 0.9;
+  const g = ctx.createGain();
+  g.gain.value = 0;
+  const pan = ctx.createPanner();
+  pan.panningModel = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 'equalpower' : 'HRTF';
+  pan.distanceModel = 'inverse';
+  pan.refDistance = 130;
+  pan.maxDistance = 1700;
+  pan.rolloffFactor = 1.2;
+  bp.connect(g); g.connect(pan);
+  const v = { bp, g, pan, src: null, proj: null };
+  _flybyVoices.push(v);
+  return v;
+}
+function _flybyAssign(v, proj) {
+  const ctx = audio.ctx;
+  const t = ctx.currentTime;
+  if (v.src) _flybyRelease(v);
+  v.proj = proj;
+  const src = ctx.createBufferSource();
+  src.buffer = _flybyNoise(ctx);
+  src.loop = true;
+  src.connect(v.bp);
+  v.pan.connect(audio.sfxBus || audio.masterGain);
+  v.g.gain.cancelScheduledValues(t);
+  v.g.gain.setValueAtTime(0.0001, t);
+  src.start(t, Math.random() * 0.9);
+  v.src = src;
+}
+function _flybyTick(dt) {
+  if (!audio.initialized || !audio.ctx) return;
+  const ctx = audio.ctx;
+  const t = ctx.currentTime;
+  const _on = (typeof window === 'undefined' || window.__flyby !== false) &&
+    !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+  const projs = (_on && typeof game !== 'undefined' && game && game.projectiles &&
+                 (game.state === 'playing' || game.state === 'warmup')) ? game.projectiles : null;
+  const maxV = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 2 : 3;
+  // Nearest few whooshable projectiles (smokeTrail = missiles/rockets only).
+  let c0 = null, c1 = null, c2 = null, d0 = Infinity, d1 = Infinity, d2 = Infinity;
+  if (projs && projs.length && typeof camera !== 'undefined' && camera) {
+    camera.getWorldPosition(_spatialCamPos);
+    const R2 = 800 * 800;
+    for (let i = 0; i < projs.length; i++) {
+      const p = projs[i];
+      if (!p || p.alive === false || !p.smokeTrail || !p.position || !p.velocity) continue;
+      // Own missiles get a longer grace so the launch sound owns the first
+      // beat and a point-blank whoosh doesn't blast the muzzle in your face.
+      if ((p.age || 0) < ((p.owner === 'player') ? 0.5 : 0.15)) continue;
+      const dx = p.position.x - _spatialCamPos.x, dy = p.position.y - _spatialCamPos.y, dz = p.position.z - _spatialCamPos.z;
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d > R2) continue;
+      if (d < d0) { c2 = c1; d2 = d1; c1 = c0; d1 = d0; c0 = p; d0 = d; }
+      else if (d < d1) { c2 = c1; d2 = d1; c1 = p; d1 = d; }
+      else if (d < d2) { c2 = p; d2 = d; }
+    }
+  }
+  const picks = [c0, c1, c2];
+  if (maxV < 3) picks[2] = null;
+  // Keep voices whose projectile is still picked; free the rest.
+  for (let i = 0; i < _flybyVoices.length; i++) {
+    const v = _flybyVoices[i];
+    if (!v.proj) continue;
+    let keep = false;
+    for (let k = 0; k < picks.length; k++) if (picks[k] === v.proj) { picks[k] = null; keep = true; break; }
+    if (!keep) _flybyRelease(v);
+  }
+  // Assign remaining picks to free voices. The pool can never grow past maxV:
+  // picks is capped at maxV entries and freed voices are reused first.
+  for (let k = 0; k < picks.length; k++) {
+    if (!picks[k]) continue;
+    const v = _flybyEnsureVoice(ctx);
+    if (!v || v.proj) break;
+    try { _flybyAssign(v, picks[k]); } catch (_) { _flybyRelease(v); }
+  }
+  // Drive live voices: world position, doppler pitch, gain + dead-man fade.
+  const C_SOUND = 3400;
+  const _vol = (typeof window !== 'undefined' && typeof window.__flybyVol === 'number') ? window.__flybyVol : 1;
+  for (let i = 0; i < _flybyVoices.length; i++) {
+    const v = _flybyVoices[i];
+    if (!v.proj || !v.src) continue;
+    const p = v.proj;
+    _flybyScratch.set(_spatialCamPos.x - p.position.x, _spatialCamPos.y - p.position.y, _spatialCamPos.z - p.position.z);
+    const dist = Math.max(1, _flybyScratch.length());
+    _flybyScratch.multiplyScalar(1 / dist);
+    let closing = p.velocity.dot(_flybyScratch);
+    if (typeof player !== 'undefined' && player && player.velocity) closing -= player.velocity.dot(_flybyScratch);
+    closing = Math.max(-2400, Math.min(2400, closing));
+    const rate = Math.max(0.62, Math.min(1.6, C_SOUND / (C_SOUND - closing)));
+    try {
+      v.src.playbackRate.setTargetAtTime(rate, t, 0.06);
+      v.bp.frequency.setTargetAtTime(Math.min(2200, 620 * rate + 240 * Math.min(1, 260 / dist)), t, 0.08);
+      if (v.pan.positionX && v.pan.positionX.setTargetAtTime) {
+        v.pan.positionX.setTargetAtTime(p.position.x, t, 0.04);
+        v.pan.positionY.setTargetAtTime(p.position.y, t, 0.04);
+        v.pan.positionZ.setTargetAtTime(p.position.z, t, 0.04);
+      } else {
+        v.pan.setPosition(p.position.x, p.position.y, p.position.z);
+      }
+      const gT = 0.5 * _vol * Math.max(0.35, Math.min(1, p.velocity.length() / 1100));
+      v.g.gain.cancelScheduledValues(t);
+      v.g.gain.setTargetAtTime(gT, t, 0.05);
+      v.g.gain.setTargetAtTime(0, t + 0.35, 0.12);
+    } catch (_) {}
+  }
+}
+// One call per rendered frame from the game loop (next to updateMinimap).
+function _audioSpatialFrame(dt) {
+  _audioUpdateListener();
+  _flybyTick(dt);
+}
+
 // HRTF body renamed to _playSpatialSoundHRTF; the public
 // playSpatialSound below dispatches between this (stereo / headphones)
 // and _playSpatialSound51 (real 5.1 surround output).
@@ -86166,18 +86627,21 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
     panner.refDistance = (opts && opts.refDistance) || 250;
     panner.maxDistance = (opts && opts.maxDistance) || 8000;
     panner.rolloffFactor = (opts && opts.rolloffFactor) || 1.0;
-    // Compute listener-relative position (camera at origin, looking -Z in local space).
+    // (v36.71) WORLD-SPACE PANNING. This used to bake a listener-LOCAL
+    // position (camera-inverse transform at spawn) against the default
+    // origin-pinned listener — correct for the first instant, but a sound's
+    // tail stayed welded to your head as you turned: rotate 180° mid-boom and
+    // the blast stayed in the same ear. The listener now tracks the camera
+    // every frame (_audioUpdateListener, called from the game loop), so
+    // panners take RAW WORLD coordinates and rotation/movement during the
+    // tail pans correctly for free. Distance attenuation is identical:
+    // |world - listener| is exactly the length the local bake produced.
     camera.getWorldPosition(_spatialCamPos);
-    _spatialRelPos.subVectors(worldPos, _spatialCamPos);
-    const distToSource = _spatialRelPos.length();
-    _spatialInvQuat.copy(camera.quaternion).invert();
-    _spatialRelPos.applyQuaternion(_spatialInvQuat);
+    const distToSource = _spatialRelPos.subVectors(worldPos, _spatialCamPos).length();
     const t = audio.ctx.currentTime;
-    // Web Audio listener looks down -Z by default; Three.js camera looks down -Z; after
-    // inverse-camera-rotation our local -Z matches the listener's forward.
-    panner.positionX.setValueAtTime(_spatialRelPos.x, t);
-    panner.positionY.setValueAtTime(_spatialRelPos.y, t);
-    panner.positionZ.setValueAtTime(_spatialRelPos.z, t);
+    panner.positionX.setValueAtTime(worldPos.x, t);
+    panner.positionY.setValueAtTime(worldPos.y, t);
+    panner.positionZ.setValueAtTime(worldPos.z, t);
     // Occlusion lowpass: raycast camera -> source against level meshes. If occluded,
     // drop cutoff so high freqs get eaten by the wall. Also drop gain slightly.
     occl.type = 'lowpass';
@@ -86424,6 +86888,11 @@ function playSpatialSound(type, worldPos, opts) {
   // one call site. try/finally because the HRTF path can throw on a bad
   // worldPos — a leaked depth would silently mark every later local sound as
   // remote, which is the same class of bug in reverse.
+  // (v36.71) Panners hold WORLD coordinates now, so the listener must be
+  // camera-synced before any spatial spawn. The game loop does this every
+  // frame; this defensive call covers any state that fires a spatial sound
+  // without the loop hook having run (costs 9 param writes, min-gap bounded).
+  if (typeof _audioUpdateListener === 'function') { try { _audioUpdateListener(); } catch (_) {} }
   _audioSpatialDepth++;
   try {
     if (audio && audio._is51) return _playSpatialSound51(type, worldPos, opts);
@@ -88171,12 +88640,12 @@ enterStasis = function(field) {
   playSound('stasis');
 };
 
-const _origSpawnExplosion = spawnExplosion;
-spawnExplosion = function(pos, size) {
-  _origSpawnExplosion(pos, size);
-  // HRTF-positioned boom so you hear it in 3D; falls back to flat routing if anything fails.
-  if (size > 30) playSpatialSound('explosion', pos);
-};
+// (v36.71) The spawnExplosion audio override that lived here is GONE. It
+// re-fired playSpatialSound('explosion', pos) for size > 30 — but the base
+// spawnExplosion has spatialized every explosion itself for ages, with
+// size-scaled refDistance/maxDistance; this second call used the DEFAULT
+// falloff (250/8000), so big booms double-triggered with two different
+// distance curves and only the global explosion min-gap was hiding it.
 
 // ---- SCOREBOARD OVERLAY (Tab key) ----
 
@@ -88233,8 +88702,10 @@ function updateScoreboard() {
   sb.classList.add('visible');
 
   // (v34.82) Mode-coherent scoreboard.
-  // - campaign / freeflight: PLAYERS ONLY (the campaign hoard put 50+ enemy
-  //   rows on the board and overflowed it — kills are what matters).
+  // - campaign / freeflight / endless: PLAYERS ONLY (the campaign hoard put
+  //   50+ enemy rows on the board and overflowed it — kills are what matters.
+  //   v36.71: endless joined this branch — wave bots were accumulating as a
+  //   FLEET B corpse pile all run; enemy ships don't belong on the board).
   // - classic / race / assault: fleets, with connected humans merged INTO
   //   their fleet section (was a trailing [NET] list), YOU pinned in YOUR
   //   fleet (was always Fleet A), assault corpse-pile hidden (reinforcement
@@ -88255,9 +88726,11 @@ function updateScoreboard() {
   let html = '<h2>SCOREBOARD</h2>';
   html += '<div class="sb-header-row"><div class="sb-name sb-stat-header">SHIP</div><div class="sb-stat-header">STATUS</div><div class="sb-stat-header">KILLS</div><div class="sb-stat-header">DAMAGE</div></div>';
 
-  if (_sbMode === 'campaign' || _sbMode === 'freeflight') {
-    html += '<div class="sb-team-header sb-team-a">PILOTS' +
-            (_sbMode === 'campaign' ? ' — WAVE ' + (game.currentRound || 1) : '') + '</div>';
+  if (_sbMode === 'campaign' || _sbMode === 'freeflight' || _sbMode === 'endless') {
+    let _sbHdrX = '';
+    if (_sbMode === 'campaign') _sbHdrX = ' — WAVE ' + (game.currentRound || 1);
+    else if (_sbMode === 'endless' && game.endlessRun) _sbHdrX = ' — ' + (game.endlessRun.dist / 1000).toFixed(2) + ' KM';
+    html += '<div class="sb-team-header sb-team-a">PILOTS' + _sbHdrX + '</div>';
     const prows = [{ n: _youName, s: pStatus, k: player.kills || 0, d: player.damageDealt || 0, me: true }];
     for (const np of net.networkPlayers) {
       prows.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, d: np.damageDealt || 0, me: false });

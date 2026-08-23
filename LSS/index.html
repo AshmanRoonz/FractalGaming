@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.70';
+const LSS_BUILD = '36.71';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -10227,6 +10227,12 @@ function handleNetEvent(evt, fromPeerId) {
           spawnTracer(_bfA, _bfB, _col, 0.8);
         }
         if (fb) { fb.isFiring = true; fb.fireFlashTimer = 0.15; }
+        if ((typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
+            typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+            player.position && player.position.distanceToSquared(_bfA) < 1800 * 1800) {
+          playSpatialSound(_mode === 'spread' ? 'fire_spread' : (_mode === 'projectile' ? 'fire_projectile' : 'fire_hitscan'),
+            _bfA, { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 });
+        }
       } catch (_) {}
     }
     return;
@@ -10442,6 +10448,14 @@ function handleNetEvent(evt, fromPeerId) {
         emitChassisMuzzleFlash(peer.loadoutKey, from, dir);
       }
     }
+    if ((typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
+        typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+        player.position && player.position.distanceToSquared(from) < 1800 * 1800) {
+      try {
+        playSpatialSound(_shooterLoadout === 'PUNCTURE' ? 'fire_railgun' : 'fire_hitscan', from,
+          { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 });
+      } catch (_) {}
+    }
     return;
   }
   if (evt.type === 'pellet_burst' && typeof evt.ox === 'number') {
@@ -10456,6 +10470,11 @@ function handleNetEvent(evt, fromPeerId) {
       }
     }
     spawnPelletBurst(origin, dir, evt.range || 600);
+    if ((typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
+        typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+        player.position && player.position.distanceToSquared(origin) < 1800 * 1800) {
+      try { playSpatialSound('fire_spread', origin, { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 }); } catch (_) {}
+    }
     return;
   }
   if (evt.type === 'lightning' && typeof evt.ox === 'number') {
@@ -11123,7 +11142,7 @@ function _getVortexCoreBeamGeometry() {
 let _VORTEX_CORE_BEAM_CONE_GEO = null;
 function _getVortexCoreBeamConeGeometry() {
   if (_VORTEX_CORE_BEAM_CONE_GEO) return _VORTEX_CORE_BEAM_CONE_GEO;
-  _VORTEX_CORE_BEAM_CONE_GEO = new THREE.CylinderGeometry(1.0, 0.25, 1, 24, 1, true);
+  _VORTEX_CORE_BEAM_CONE_GEO = new THREE.CylinderGeometry(1.0, 0.03, 1, 24, 1, true);
   return _VORTEX_CORE_BEAM_CONE_GEO;
 }
 
@@ -27707,6 +27726,15 @@ class Bot {
       }
     }
 
+    if ((typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
+        typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+        player.position && player.position.distanceToSquared(fireOrigin) < 1800 * 1800) {
+      try {
+        playSpatialSound(weapon.mode === 'spread' ? 'fire_spread' : 'fire_hitscan', fireOrigin,
+          { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 });
+      } catch (_) {}
+    }
+
     if (_tgtIsPlayer) {
       playerTakeDamage(damage, this, null, { splashFrom: fireOrigin, splashColor: flashColor });
       if (this.loadoutKey === 'TRACKER') {
@@ -33965,6 +33993,49 @@ function _facePlayerAtEnemy() {
   } catch (_) {}
 }
 
+function _faceRaceFirstRing() {
+  try {
+    if (typeof LSS === 'undefined' || LSS.MODE !== 'race') return;
+    if (typeof player === 'undefined' || !player || !player.euler || !player.position) return;
+    if (!game || game.selectedMap !== 'race_pole_position') return;
+    const map = (typeof MAP_DATA !== 'undefined') ? MAP_DATA.race_pole_position : null;
+    if (!map || !Array.isArray(map.rooms)) return;
+    const _teamCode = (player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
+    const teamRoom = map.rooms.find(r => r && r.team === _teamCode);
+    let tgt = null;
+    if (teamRoom && Array.isArray(map.tunnels)) {
+      const _rr = (teamRoom.r || 300) * 1.2;
+      const _near = (p) => {
+        const dx = p.x - teamRoom.x, dy = p.y - teamRoom.y, dz = p.z - teamRoom.z;
+        return dx * dx + dy * dy + dz * dz < _rr * _rr;
+      };
+      for (const t of map.tunnels) {
+        if (!t || !Array.isArray(t.path) || t.path.length < 2) continue;
+        const p0 = t.path[0], p1 = t.path[t.path.length - 1];
+        if (_near(p0) && !_near(p1)) { tgt = p1; break; }
+        if (_near(p1) && !_near(p0)) { tgt = p0; break; }
+      }
+    }
+    if (!tgt) {
+      let bestD = Infinity;
+      for (const r of map.rooms) {
+        if (!r || r.champion || r.team) continue;
+        const dx = r.x - player.position.x, dy = r.y - player.position.y, dz = r.z - player.position.z;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d < bestD) { bestD = d; tgt = r; }
+      }
+    }
+    if (!tgt) return;
+    const dx = player.position.x - tgt.x, dz = player.position.z - tgt.z;
+    if (dx * dx + dz * dz > 1) {
+      player.euler.y = Math.atan2(dx, dz);
+      player.euler.x = 0;
+      game._parPrevYaw = player.euler.y;
+      game._parPrevPitch = player.euler.x;
+    }
+  } catch (_) {}
+}
+
 class OutskirtsMonster {
   constructor(def, homeDir) {
     this.def = def;
@@ -34984,7 +35055,8 @@ function _spawnPoleRings() {
     const finPos = fin ? new THREE.Vector3(fin.x, fin.y, fin.z) : null;
     game.poleRings = [];
     for (const r of map.rooms) {
-      if (!r || r.champion) continue;   
+      if (!r || r.champion) continue;
+      if (r.team) continue;
       const pos = new THREE.Vector3(r.x, r.y, r.z);
       const dia = Math.min((r.r || 300) * 1.7, 560);
       const ring = new RaceRing(pos, dia);
@@ -35127,6 +35199,14 @@ function updateMonsters(dt) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   if (!game || (game.state !== 'playing' && game.state !== 'warmup' && game.state !== 'roundEnd')) return;
   if (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'assault')) return;
+  if (typeof MAP_DATA !== 'undefined' && game.selectedMap && MAP_DATA[game.selectedMap] && MAP_DATA[game.selectedMap].noMonsters) {
+    if (_monstersInit && game.monsters && updateMonsters._noMonKey !== game.selectedMap) {
+      updateMonsters._noMonKey = game.selectedMap;
+      try { _monsterRoundReset(); } catch (_) {}
+    }
+    return;
+  }
+  updateMonsters._noMonKey = null;
   if (!_monstersInit) {
     if (game.state !== 'playing') return;
     updateMonsters._delayT = (updateMonsters._delayT || 0) + dt;
@@ -36620,6 +36700,7 @@ function _monPrimeWanted() {
     if (typeof scene === 'undefined' || !scene) return false;
     if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return false;
     if (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'assault')) return false;
+    if (typeof MAP_DATA !== 'undefined' && game.selectedMap && MAP_DATA[game.selectedMap] && MAP_DATA[game.selectedMap].noMonsters) return false;
     if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return false;
   } catch (_) { return false; }
   return true;
@@ -37094,7 +37175,7 @@ function spawnTracer(from, to, color, widthScale) {
   color = color || 0xffff00;
   const wScale = (typeof widthScale === 'number' && widthScale > 0) ? widthScale : 1.0;
   const camDist = (typeof camera !== 'undefined' && camera) ? from.distanceTo(camera.position) : 9999;
-  if (camDist < 80) {
+  if (camDist < 80 && (typeof game === 'undefined' || !game || !game.thirdPerson)) {
     const q = camera.quaternion;
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
     const up = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
@@ -40122,6 +40203,7 @@ function commitLoadout(key) {
 
       if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();
       if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
+      if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
     };
     let roundSeed = 1;
     if ((net.active || (typeof LSS !== 'undefined' && LSS.MODE === 'campaign')) && typeof net.worldSeed === 'number') {
@@ -40159,6 +40241,7 @@ function commitLoadout(key) {
     startAmbientBed();
   } else {
     player.position.copy(getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A')));
+    if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
   }
 
   if (net.active && net.sendLoadout) {
@@ -40731,6 +40814,7 @@ function respawnPlayer() {
   }
   player.position.copy(sp);
   if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
+  if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
 }
 
 
@@ -41626,6 +41710,44 @@ function _lssApplyShipRig(dt) {
       camera.rotateZ(-game._tpBank * (window.__fpBank != null ? window.__fpBank : 0.5));
     }
   }
+
+  {
+    const _zVr = (typeof isXRPresenting === 'function') && isXRPresenting();
+    const Z = window.__zoom || (window.__zoom = { mMax: 2.4, dMax: 420, frac: 0.55, rate: 12 });
+    const _zAim = !!(typeof input !== 'undefined' && input &&
+                     (input.rightMouseDown || input.gpAltFire || input.touchAltFire));
+    const _zk = Math.min(1, (dt || 0.016) * (Z.rate || 12));
+    game._adsZoom = (game._adsZoom || 0) + ((_zAim ? 1 : 0) - (game._adsZoom || 0)) * _zk;
+    if (game._adsZoom < 0.002) game._adsZoom = 0;
+    const _zBase = (typeof input !== 'undefined' && input && typeof input.fovDeg === 'number') ? input.fovDeg : 90;
+    if (!_zVr) {
+      const z = game._adsZoom;
+      if (z > 0) {
+        _tpDir.set(0, 0, -1).applyQuaternion(camera.quaternion);
+        let L = 3400;
+        try { if (typeof raycastLevel === 'function') L = raycastLevel(camera.position, _tpDir, 3400); } catch (_) {}
+        L = Math.max(120, L);
+        const D = z * Math.min((Z.frac != null ? Z.frac : 0.55) * L, (Z.dMax != null ? Z.dMax : 420));
+        const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
+        const _mDolly = L / Math.max(1, L - D);
+        const _mFov = Math.max(1, _mTot / _mDolly);
+        camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mFov) * 180 / Math.PI;
+        camera.updateProjectionMatrix();
+        camera.position.addScaledVector(_tpDir, D);
+        if (game.thirdPerson && player.mesh && player.mesh.visible) {
+          player.mesh.position.addScaledVector(_tpDir, D);
+          if (_mFov > 1.0001) {
+            player.mesh.position.sub(camera.position).multiplyScalar(_mFov).add(camera.position);
+          }
+        }
+        game._adsDolly = D;
+      } else if (game._adsDolly || camera.fov !== _zBase) {
+        camera.fov = _zBase;
+        camera.updateProjectionMatrix();
+        game._adsDolly = 0;
+      }
+    }
+  }
 }
 
 
@@ -41698,16 +41820,6 @@ function updateWeapon(dt) {
     }
   }
 
-  if (!(typeof isXRPresenting === 'function' && isXRPresenting())) {
-    const baseFov = (typeof input !== 'undefined' && typeof input.fovDeg === 'number')
-      ? input.fovDeg : 90;
-    let targetFov = baseFov;
-    if (aiming) {
-      targetFov = 65;
-    }
-    camera.fov += (targetFov - camera.fov) * Math.min(1, dt * 12);
-    camera.updateProjectionMatrix();
-  }
 
   let firing = input.mouseDown || _kbActionHeld('fire') || input.gpFire || input.touchFire;
   if (firing && player.coreActive && player.loadoutKey === 'VORTEX' &&
@@ -43523,6 +43635,8 @@ function activateCore() {
   else if (coreName === 'Mega Barrage') {
     player.velocity.add(forward.clone().multiplyScalar(600));
     try { playSound('barrage_core_thrust'); } catch (_) {}
+    player._pbFired = 0;
+    player._pbAcc = 0;
   }
   else if (coreName === 'Mega Stun Bolt') {
     try { playSound('sword_core_swing'); } catch (_) {}
@@ -45449,7 +45563,11 @@ function updateAbilities(dt) {
       if (curSpeed < player.chassis.flightSpeed * 2) {
         player.velocity.addScaledVector(forward, 200 * dt);
       }
-      if (Math.random() < dt * 3) {
+      const _pbTotal = 15, _pbGap = 0.2;
+      if ((player._pbFired || 0) < _pbTotal &&
+          ((player._pbAcc = (player._pbAcc || 0) + dt) >= _pbGap)) {
+        player._pbAcc -= _pbGap;
+        player._pbFired = (player._pbFired || 0) + 1;
         try { playSound('barrage_missile_pop'); } catch (_) {}
         let _pbOrigin = player.position;
         const _pbLaunchers = _PLAYER_LAUNCHER_FRACS.PUNCTURE;
@@ -45469,6 +45587,7 @@ function updateAbilities(dt) {
         proj.sizeMult = 2;
         proj.removeHaze();
         game.projectiles.push(proj);
+        try { if (typeof broadcastAbilityProjectile === 'function') broadcastAbilityProjectile(proj); } catch (_) {}
       }
     }
     else if (coreName === 'Mega Stun Bolt') {
@@ -49556,6 +49675,29 @@ function updateMinimap() {
     }
   }
 
+
+  if (typeof LSS !== 'undefined' && LSS.MODE === 'endless' && game.endlessRun && game.endlessRun.segs && game.endlessRun.segs.length) {
+    const _erun = game.endlessRun;
+    let _etx = null, _etz = null, _eidx = 0;
+    for (let i = 0; i < _erun.segs.length; i++) { if (_erun.segs[i].gid === _erun.progGid) { _eidx = i; break; } }
+    for (let k = _eidx; k < _erun.segs.length; k++) {
+      const b = _erun.segs[k].b;
+      const ddx = b.x - ccx, ddz = b.z - ccz;
+      if (ddx * ddx + ddz * ddz > 600 * 600) { _etx = b.x; _etz = b.z; break; }
+    }
+    if (_etx === null && _erun.gen) { _etx = _erun.gen.x; _etz = _erun.gen.z; }
+    if (_etx !== null) {
+      const p = _plot(_etx, _etz);
+      const _ep = 0.66 + Math.sin((game.time || 0) * 3) * 0.28;
+      ctx.strokeStyle = 'rgba(255,210,77,' + _ep + ')';
+      ctx.lineWidth = 1.6;
+      const _eang = Math.atan2(p.y - cy, p.x - cx);
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(_eang);
+      ctx.beginPath(); ctx.moveTo(-1.2, -4.4); ctx.lineTo(4.4, 0); ctx.lineTo(-1.2, 4.4); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(-5.6, -4.4); ctx.lineTo(0, 0); ctx.lineTo(-5.6, 4.4); ctx.stroke();
+      ctx.restore();
+    }
+  }
 
   _mm._plot = _plot; _mm._yaw = _mmYaw; _mm._range = _mmR;
 }
@@ -57731,6 +57873,7 @@ const MAP_DATA = {
     thumb: 'map_thumbs/spire.png',
     description: 'Three storeys of cavern around a ragged central spire. Shafts drop between floors; a helical ramp winds the column.',
     defaultTheme: 'Crystal Cavern',
+    noMonsters: true,
     palette: [
       0x452a20, 0x1a2848, 0x241d3f, 0x1d2f4a, 0x312447, 0x203a52, 0x3a2d55, 0x27354f
     ],
@@ -60823,6 +60966,7 @@ function gameLoop(timestamp) {
     updateMinimap();
     if (_xrPresentingForOverlays && _xrMinimapTex && _mm.lastTick !== _mmPrev) _xrMinimapTex.needsUpdate = true;
   }
+  if (typeof _audioSpatialFrame === 'function') { try { _audioSpatialFrame(dt); } catch (_) {} }
   updateHUD();
   if (!_xrPresentingForOverlays && _vrPerfTier < 1) updateEnemyHealthBars();
   __pmark('fx+hud+minimap'); 
@@ -67249,7 +67393,7 @@ function _startRailgunChargeSound(initialCharge) {
   const now = ctx.currentTime;
   const c0 = Math.min(1, Math.max(0, initialCharge || 0));
   const attack   = 0.228;
-  const finalVol = 0.415 * 0.39;          
+  const finalVol = 0.415 * 0.39 * 0.5;    // (v36.71) charge whine cut 50% per owner — fire/release sound untouched
   const spacing  = 0.035;
   const oscs  = [];
   const gains = [];
@@ -67740,6 +67884,165 @@ function _releaseSpatialTriple(triple) {
   try { occlGain.gain.cancelScheduledValues(now); } catch (e) {}
   if (_spatialPool.length < _SPATIAL_POOL_MAX) _spatialPool.push(triple);
 }
+const _alFwd = new THREE.Vector3();
+const _alUp = new THREE.Vector3();
+let _alMode = 0;   // 0 = undetected, 1 = AudioParam, 2 = setPosition fallback
+function _audioUpdateListener() {
+  if (!audio.initialized || !audio.ctx || typeof camera === 'undefined' || !camera) return;
+  const l = audio.ctx.listener;
+  if (!l) return;
+  camera.getWorldPosition(_spatialCamPos);
+  _alFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  _alUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  const t = audio.ctx.currentTime;
+  if (_alMode === 0) _alMode = (l.positionX && l.positionX.setTargetAtTime) ? 1 : 2;
+  try {
+    if (_alMode === 1) {
+      const TAU = 0.02;
+      l.positionX.setTargetAtTime(_spatialCamPos.x, t, TAU);
+      l.positionY.setTargetAtTime(_spatialCamPos.y, t, TAU);
+      l.positionZ.setTargetAtTime(_spatialCamPos.z, t, TAU);
+      l.forwardX.setTargetAtTime(_alFwd.x, t, TAU);
+      l.forwardY.setTargetAtTime(_alFwd.y, t, TAU);
+      l.forwardZ.setTargetAtTime(_alFwd.z, t, TAU);
+      l.upX.setTargetAtTime(_alUp.x, t, TAU);
+      l.upY.setTargetAtTime(_alUp.y, t, TAU);
+      l.upZ.setTargetAtTime(_alUp.z, t, TAU);
+    } else {
+      l.setPosition(_spatialCamPos.x, _spatialCamPos.y, _spatialCamPos.z);
+      l.setOrientation(_alFwd.x, _alFwd.y, _alFwd.z, _alUp.x, _alUp.y, _alUp.z);
+    }
+  } catch (_) {}
+}
+
+let _flybyNoiseBuf = null;
+function _flybyNoise(ctx) {
+  if (_flybyNoiseBuf && _flybyNoiseBuf.sampleRate === ctx.sampleRate) return _flybyNoiseBuf;
+  const n = Math.max(1, Math.floor(ctx.sampleRate * 1.0));
+  const b = ctx.createBuffer(1, n, ctx.sampleRate);
+  const d = b.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = Math.random() * 2 - 1;
+  _flybyNoiseBuf = b;
+  return b;
+}
+const _flybyVoices = [];
+const _flybyScratch = new THREE.Vector3();
+function _flybyRelease(v) {
+  if (!v) return;
+  try { if (v.src) { v.src.stop(); v.src.disconnect(); } } catch (_) {}
+  v.src = null;
+  try { v.pan.disconnect(); } catch (_) {}
+  v.proj = null;
+}
+function _flybyEnsureVoice(ctx) {
+  for (let i = 0; i < _flybyVoices.length; i++) if (!_flybyVoices[i].proj) return _flybyVoices[i];
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = 700;
+  bp.Q.value = 0.9;
+  const g = ctx.createGain();
+  g.gain.value = 0;
+  const pan = ctx.createPanner();
+  pan.panningModel = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 'equalpower' : 'HRTF';
+  pan.distanceModel = 'inverse';
+  pan.refDistance = 130;
+  pan.maxDistance = 1700;
+  pan.rolloffFactor = 1.2;
+  bp.connect(g); g.connect(pan);
+  const v = { bp, g, pan, src: null, proj: null };
+  _flybyVoices.push(v);
+  return v;
+}
+function _flybyAssign(v, proj) {
+  const ctx = audio.ctx;
+  const t = ctx.currentTime;
+  if (v.src) _flybyRelease(v);
+  v.proj = proj;
+  const src = ctx.createBufferSource();
+  src.buffer = _flybyNoise(ctx);
+  src.loop = true;
+  src.connect(v.bp);
+  v.pan.connect(audio.sfxBus || audio.masterGain);
+  v.g.gain.cancelScheduledValues(t);
+  v.g.gain.setValueAtTime(0.0001, t);
+  src.start(t, Math.random() * 0.9);
+  v.src = src;
+}
+function _flybyTick(dt) {
+  if (!audio.initialized || !audio.ctx) return;
+  const ctx = audio.ctx;
+  const t = ctx.currentTime;
+  const _on = (typeof window === 'undefined' || window.__flyby !== false) &&
+    !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+  const projs = (_on && typeof game !== 'undefined' && game && game.projectiles &&
+                 (game.state === 'playing' || game.state === 'warmup')) ? game.projectiles : null;
+  const maxV = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 2 : 3;
+  let c0 = null, c1 = null, c2 = null, d0 = Infinity, d1 = Infinity, d2 = Infinity;
+  if (projs && projs.length && typeof camera !== 'undefined' && camera) {
+    camera.getWorldPosition(_spatialCamPos);
+    const R2 = 800 * 800;
+    for (let i = 0; i < projs.length; i++) {
+      const p = projs[i];
+      if (!p || p.alive === false || !p.smokeTrail || !p.position || !p.velocity) continue;
+      if ((p.age || 0) < ((p.owner === 'player') ? 0.5 : 0.15)) continue;
+      const dx = p.position.x - _spatialCamPos.x, dy = p.position.y - _spatialCamPos.y, dz = p.position.z - _spatialCamPos.z;
+      const d = dx * dx + dy * dy + dz * dz;
+      if (d > R2) continue;
+      if (d < d0) { c2 = c1; d2 = d1; c1 = c0; d1 = d0; c0 = p; d0 = d; }
+      else if (d < d1) { c2 = c1; d2 = d1; c1 = p; d1 = d; }
+      else if (d < d2) { c2 = p; d2 = d; }
+    }
+  }
+  const picks = [c0, c1, c2];
+  if (maxV < 3) picks[2] = null;
+  for (let i = 0; i < _flybyVoices.length; i++) {
+    const v = _flybyVoices[i];
+    if (!v.proj) continue;
+    let keep = false;
+    for (let k = 0; k < picks.length; k++) if (picks[k] === v.proj) { picks[k] = null; keep = true; break; }
+    if (!keep) _flybyRelease(v);
+  }
+  for (let k = 0; k < picks.length; k++) {
+    if (!picks[k]) continue;
+    const v = _flybyEnsureVoice(ctx);
+    if (!v || v.proj) break;
+    try { _flybyAssign(v, picks[k]); } catch (_) { _flybyRelease(v); }
+  }
+  const C_SOUND = 3400;
+  const _vol = (typeof window !== 'undefined' && typeof window.__flybyVol === 'number') ? window.__flybyVol : 1;
+  for (let i = 0; i < _flybyVoices.length; i++) {
+    const v = _flybyVoices[i];
+    if (!v.proj || !v.src) continue;
+    const p = v.proj;
+    _flybyScratch.set(_spatialCamPos.x - p.position.x, _spatialCamPos.y - p.position.y, _spatialCamPos.z - p.position.z);
+    const dist = Math.max(1, _flybyScratch.length());
+    _flybyScratch.multiplyScalar(1 / dist);
+    let closing = p.velocity.dot(_flybyScratch);
+    if (typeof player !== 'undefined' && player && player.velocity) closing -= player.velocity.dot(_flybyScratch);
+    closing = Math.max(-2400, Math.min(2400, closing));
+    const rate = Math.max(0.62, Math.min(1.6, C_SOUND / (C_SOUND - closing)));
+    try {
+      v.src.playbackRate.setTargetAtTime(rate, t, 0.06);
+      v.bp.frequency.setTargetAtTime(Math.min(2200, 620 * rate + 240 * Math.min(1, 260 / dist)), t, 0.08);
+      if (v.pan.positionX && v.pan.positionX.setTargetAtTime) {
+        v.pan.positionX.setTargetAtTime(p.position.x, t, 0.04);
+        v.pan.positionY.setTargetAtTime(p.position.y, t, 0.04);
+        v.pan.positionZ.setTargetAtTime(p.position.z, t, 0.04);
+      } else {
+        v.pan.setPosition(p.position.x, p.position.y, p.position.z);
+      }
+      const gT = 0.5 * _vol * Math.max(0.35, Math.min(1, p.velocity.length() / 1100));
+      v.g.gain.cancelScheduledValues(t);
+      v.g.gain.setTargetAtTime(gT, t, 0.05);
+      v.g.gain.setTargetAtTime(0, t + 0.35, 0.12);
+    } catch (_) {}
+  }
+}
+function _audioSpatialFrame(dt) {
+  _audioUpdateListener();
+  _flybyTick(dt);
+}
+
 function _playSpatialSoundHRTF(type, worldPos, opts) {
   if (!audio.initialized || !audio.ctx) return;
   if (!worldPos || !camera) return playSound(type);
@@ -67752,14 +68055,11 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
     panner.maxDistance = (opts && opts.maxDistance) || 8000;
     panner.rolloffFactor = (opts && opts.rolloffFactor) || 1.0;
     camera.getWorldPosition(_spatialCamPos);
-    _spatialRelPos.subVectors(worldPos, _spatialCamPos);
-    const distToSource = _spatialRelPos.length();
-    _spatialInvQuat.copy(camera.quaternion).invert();
-    _spatialRelPos.applyQuaternion(_spatialInvQuat);
+    const distToSource = _spatialRelPos.subVectors(worldPos, _spatialCamPos).length();
     const t = audio.ctx.currentTime;
-    panner.positionX.setValueAtTime(_spatialRelPos.x, t);
-    panner.positionY.setValueAtTime(_spatialRelPos.y, t);
-    panner.positionZ.setValueAtTime(_spatialRelPos.z, t);
+    panner.positionX.setValueAtTime(worldPos.x, t);
+    panner.positionY.setValueAtTime(worldPos.y, t);
+    panner.positionZ.setValueAtTime(worldPos.z, t);
     occl.type = 'lowpass';
     let cutoff = 18000;
     let occludedGain = 1.0;
@@ -67967,6 +68267,7 @@ function _playSpatialSound51(type, worldPos, opts) {
 function playSpatialSound(type, worldPos, opts) {
   if (_loadingAudioHold && !_AUDIO_HOLD_PASS[type]) { _audioHoldHeldSounds++; return; }
   if (typeof _audioPeekSoundAllowed === 'function' && !_audioPeekSoundAllowed(type)) return;
+  if (typeof _audioUpdateListener === 'function') { try { _audioUpdateListener(); } catch (_) {} }
   _audioSpatialDepth++;
   try {
     if (audio && audio._is51) return _playSpatialSound51(type, worldPos, opts);
@@ -69432,11 +69733,6 @@ enterStasis = function(field) {
   playSound('stasis');
 };
 
-const _origSpawnExplosion = spawnExplosion;
-spawnExplosion = function(pos, size) {
-  _origSpawnExplosion(pos, size);
-  if (size > 30) playSpatialSound('explosion', pos);
-};
 
 
 const scoreboardCSS = document.createElement('style');
@@ -69499,9 +69795,11 @@ function updateScoreboard() {
   let html = '<h2>SCOREBOARD</h2>';
   html += '<div class="sb-header-row"><div class="sb-name sb-stat-header">SHIP</div><div class="sb-stat-header">STATUS</div><div class="sb-stat-header">KILLS</div><div class="sb-stat-header">DAMAGE</div></div>';
 
-  if (_sbMode === 'campaign' || _sbMode === 'freeflight') {
-    html += '<div class="sb-team-header sb-team-a">PILOTS' +
-            (_sbMode === 'campaign' ? ' — WAVE ' + (game.currentRound || 1) : '') + '</div>';
+  if (_sbMode === 'campaign' || _sbMode === 'freeflight' || _sbMode === 'endless') {
+    let _sbHdrX = '';
+    if (_sbMode === 'campaign') _sbHdrX = ' — WAVE ' + (game.currentRound || 1);
+    else if (_sbMode === 'endless' && game.endlessRun) _sbHdrX = ' — ' + (game.endlessRun.dist / 1000).toFixed(2) + ' KM';
+    html += '<div class="sb-team-header sb-team-a">PILOTS' + _sbHdrX + '</div>';
     const prows = [{ n: _youName, s: pStatus, k: player.kills || 0, d: player.damageDealt || 0, me: true }];
     for (const np of net.networkPlayers) {
       prows.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, d: np.damageDealt || 0, me: false });
