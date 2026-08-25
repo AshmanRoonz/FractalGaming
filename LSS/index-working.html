@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.76';
+const LSS_BUILD = '36.77';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -54034,38 +54034,36 @@ function _lssApplyShipRig(dt) {
     }
   }
 
-  // ── (v36.71) ADS ZOOM = HYBRID DOLLY ──────────────────────────────────────
-  // Replaces the pure-FOV ADS bend (was: lerp camera.fov -> 65 in
-  // updateWeapon). Owner direction: "zoom should move the view cam forward
-  // rather than changing the POV angle — done tricky, so it doesn't look like
-  // the cam is moving and we stay in our ship."
+  // ── (v36.77) ADS ZOOM — THREE SELECTABLE MODES ────────────────────────────
+  // The zoom went through four implementations this cycle (pure FOV → dolly+
+  // push-out → rigid dolly+ride → FOV+ship-overlay) and the owner's verdict
+  // on the final pair was "doesn't feel right in first person OR third
+  // person... maybe the way we had it was better". Feel is empirical, so the
+  // method is now a LIVE-SWITCHABLE knob instead of a hard choice —
+  // window.__zoom.mode, switch mid-match from the console:
   //
-  // HOW: while aiming, the camera physically advances along the view ray
-  // (true dolly = real parallax, no lens warp), clamped to __zoom.frac of the
-  // distance to whatever terrain the ray hits (one raycastLevel per zoomed
-  // frame — the same trace the chase boom uses) and to __zoom.dMax absolute.
-  // At range a legal dolly can't reach sniper magnification, so the REMAINDER
-  // comes from a residual FOV narrow:
-  //   M_total = 1 + z*(mMax-1) ; M_dolly = L/(L-D) ; M_fov = M_total/M_dolly
-  // Near targets get ~pure dolly; at 3 km it's mostly FOV — but TOTAL
-  // magnification stays constant, so sniping feel doesn't drift with range.
+  //   'classic' (DEFAULT) — the exact pre-v36.71 ADS: a plain FOV spring
+  //       toward 65° while aiming, back to the settings fov on release.
+  //       No camera motion, no overlay. The ship swells on screen in third
+  //       person — that is the classic look, quirks and all (including the
+  //       fixed 65° target, which slightly WIDENS for players whose base
+  //       fov slider sits below 65).
+  //   'steady'  — classic FOV optics in BOTH views, but third person draws
+  //       the ship through the un-zoomed second camera (layer-5 overlay) so
+  //       the hull doesn't swell. First person is pure FOV — no dolly.
+  //       This is "classic but the ship holds still"; it was never shipped
+  //       as its own mode before (v36.76 always paired the overlay with the
+  //       first-person dolly), so it hasn't actually been felt yet.
+  //   'hybrid'  — the v36.76 behavior: sprung dolly+FOV in first person,
+  //       FOV+overlay in third.
   //
-  // THE TRICK (third person): the ship mesh is counter-displaced so it stays
-  // EXACTLY where it was on screen — it rides the dolly (+viewDir*D keeps the
-  // camera->ship geometry identical) and is then pushed out along the
-  // camera->ship ray by M_fov (angular size ~ 1/distance, so the push exactly
-  // cancels the residual FOV swell). Net effect: the world zooms, the ship
-  // doesn't move a pixel — "we stay in our ship". Visual-only displacement:
-  // player.position, hitboxes, net broadcasts and what peers see are all
-  // untouched (peers render the ship from network state, not this mesh).
-  //
-  // VR skips everything (the headset owns the projection; the old FOV bend
-  // was already bypassed there, see the note in updateWeapon). Live tuning:
-  // window.__zoom = {mMax, dMax, frac, rate} — mMax 1 = pure dolly (weak at
-  // range), dMax 0 = pure FOV (the old behavior, ship swell and all).
+  // VR skips everything (the headset owns the projection). Other knobs
+  // (mMax/dMax/frac/rate) only affect 'steady'/'hybrid'; classic reproduces
+  // the original 65°@dt*12 lerp byte-for-byte.
   {
     const _zVr = (typeof isXRPresenting === 'function') && isXRPresenting();
-    const Z = window.__zoom || (window.__zoom = { mMax: 2.4, dMax: 420, frac: 0.55, rate: 12 });
+    const Z = window.__zoom || (window.__zoom = { mode: 'classic', mMax: 2.4, dMax: 420, frac: 0.55, rate: 12 });
+    const _zm = (Z.mode === 'steady' || Z.mode === 'hybrid') ? Z.mode : 'classic';
     const _zAim = !!(typeof input !== 'undefined' && input &&
                      (input.rightMouseDown || input.gpAltFire || input.touchAltFire));
     const _zk = Math.min(1, (dt || 0.016) * (Z.rate || 12));
@@ -54075,40 +54073,37 @@ function _lssApplyShipRig(dt) {
     if (!_zVr) {
       const z = game._adsZoom;
       const _z3p = !!(game.thirdPerson && player && player.mesh && player.mesh.visible);
-      if (z > 0 && _z3p) {
-        // (v36.74) THIRD PERSON: the camera does not move AT ALL and the mesh
-        // is never displaced. Every camera/mesh-motion variant failed an
-        // owner test: FOV-only swelled the ship (pre-v36.71), dolly+push-out
-        // slid/shrank it (v36.71), and the rigid dolly+ride kept it screen-
-        // perfect but visibly TRAVELLED it ~420u through the world (v36.73
-        // report: "it looks like the ship is travelling forward"). So: the
-        // WORLD zooms via FOV on the main camera, and the ship is drawn by a
-        // second, un-zoomed camera in its own pass (_adsOverlayRender below)
-        // — pixel-identical, at its true world position, nothing travels.
-        // The overlay swaps the ship subtree onto layer 5 so the zoomed
-        // world pass skips it; the combat lights carry layer 5 too.
+      if (_zm === 'classic') {
+        // EXACT pre-v36.71 ADS (the block that lived in updateWeapon):
+        // spring camera.fov toward 65 while aiming, back to base on release.
+        const _ct = _zAim ? 65 : _zBase;
+        camera.fov += (_ct - camera.fov) * Math.min(1, (dt || 0.016) * 12);
+        camera.updateProjectionMatrix();
+        game._adsDolly = 0;
+        if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(false);
+      } else {
+      if (z > 0 && (_z3p || _zm === 'steady')) {
+        // FOV zoom with NO camera motion. In third person the ship subtree
+        // is drawn by the un-zoomed second camera (_adsOverlayRender below,
+        // layer 5) so the hull doesn't swell — every camera/mesh-motion
+        // variant failed an owner test (FOV-only swelled it, dolly+push-out
+        // slid/shrank it, rigid dolly+ride visibly travelled it through the
+        // world). In 'steady' first person this branch is just pure FOV.
         game._adsDolly = 0;
         const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
         camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mTot) * 180 / Math.PI;
         camera.updateProjectionMatrix();
       } else if (z > 0) {
-        // FIRST PERSON: dolly+FOV hybrid, sprung (v36.72). The painted
+        // 'hybrid' FIRST PERSON: sprung dolly+FOV (v36.72). The painted
         // cockpit is screen-space, so the forward dolly costs nothing and
         // buys real parallax; the FOV residual covers far-range sniping.
+        // Dolly target eases (shrink dt*10, grow dt*3.5) with a hard L-60
+        // clip floor — see the v36.72 notes; raw per-frame raycast tracking
+        // caused the "pushed back at mountain peaks" glitch.
         _tpDir.set(0, 0, -1).applyQuaternion(camera.quaternion);
         let L = 3400;
         try { if (typeof raycastLevel === 'function') L = raycastLevel(camera.position, _tpDir, 3400); } catch (_) {}
         L = Math.max(120, L);
-        // (v36.72) SPRUNG DOLLY. The dolly used to follow the raw per-frame
-        // raycast — sweep the crosshair across a nearby peak and L collapses,
-        // so the camera got yanked back the same frame (the "pushed back at
-        // mountain peaks" glitch), then sprang forward again as the aim
-        // cleared. The dolly target now eases: shrink at dt*10 (responsive,
-        // no wall-clip in practice), grow at dt*3.5 (the boom's own ease-out
-        // feel); a hard L-60 floor still snaps instantly so genuinely close
-        // geometry can never end up behind the camera. The FOV residual reads
-        // the SPRUNG value, so total magnification stays constant and both
-        // position and FOV glide through peak sweeps instead of popping.
         const _dT = z * Math.min((Z.frac != null ? Z.frac : 0.55) * L, (Z.dMax != null ? Z.dMax : 420));
         let _dC = game._adsDolly || 0;
         _dC = _dC + (_dT - _dC) * Math.min(1, (dt || 0.016) * (_dT < _dC ? 10 : 3.5));
@@ -54131,8 +54126,10 @@ function _lssApplyShipRig(dt) {
         game._adsDolly = 0;
       }
       // Ship-overlay layer state: on while third-person zoom is engaged;
-      // also restores layer 0 on release and across a mid-zoom mesh rebuild.
+      // also restores layer 0 on release, across a mid-zoom mesh rebuild,
+      // and when the mode is live-switched away from an overlay mode.
       if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p);
+      }
     }
   }
 }
