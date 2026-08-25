@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.78';
+const LSS_BUILD = '36.79';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -86703,11 +86703,18 @@ function _flybyEnsureVoice(ctx) {
   _flybyVoices.push(v);
   return v;
 }
-function _flybyAssign(v, proj) {
+function _flybyAssign(v, emitter, kind) {
   const ctx = audio.ctx;
   const t = ctx.currentTime;
   if (v.src) _flybyRelease(v);
-  v.proj = proj;
+  v.proj = emitter;
+  v.kind = kind || 0;
+  // (v36.79) Per-kind voicing: ships (kind 1) are bigger, louder emitters
+  // than missiles — carry farther, and a broader band reads as engine
+  // rumble instead of a whistle.
+  v.pan.refDistance = (v.kind === 1) ? 200 : 130;
+  v.pan.maxDistance = (v.kind === 1) ? 2000 : 1700;
+  try { v.bp.Q.value = (v.kind === 1) ? 0.7 : 0.9; } catch (_) {}
   const src = ctx.createBufferSource();
   src.buffer = _flybyNoise(ctx);
   src.loop = true;
@@ -86718,53 +86725,98 @@ function _flybyAssign(v, proj) {
   src.start(t, Math.random() * 0.9);
   v.src = src;
 }
+// (v36.79) Fixed top-4 candidate slots, reused every tick (no per-frame
+// allocation). Score = distSq / range^2 so missiles (range 800) and ships
+// (range 1100) compete fairly for the voice budget.
+const _flybyCand = [
+  { o: null, s: 0, k: 0 }, { o: null, s: 0, k: 0 },
+  { o: null, s: 0, k: 0 }, { o: null, s: 0, k: 0 },
+];
 function _flybyTick(dt) {
   if (!audio.initialized || !audio.ctx) return;
   const ctx = audio.ctx;
   const t = ctx.currentTime;
   const _on = (typeof window === 'undefined' || window.__flyby !== false) &&
     !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
-  const projs = (_on && typeof game !== 'undefined' && game && game.projectiles &&
-                 (game.state === 'playing' || game.state === 'warmup')) ? game.projectiles : null;
-  const maxV = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 2 : 3;
-  // Nearest few whooshable projectiles (smokeTrail = missiles/rockets only).
-  let c0 = null, c1 = null, c2 = null, d0 = Infinity, d1 = Infinity, d2 = Infinity;
-  if (projs && projs.length && typeof camera !== 'undefined' && camera) {
+  const _live = _on && typeof game !== 'undefined' && game &&
+    (game.state === 'playing' || game.state === 'warmup') &&
+    typeof camera !== 'undefined' && camera;
+  const maxV = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 2 : 4;
+  let candN = 0;
+  const offer = (o, s, k) => {
+    let i = candN;
+    if (i >= maxV) { if (s >= _flybyCand[maxV - 1].s) return; i = maxV - 1; } else candN++;
+    while (i > 0 && _flybyCand[i - 1].s > s) {
+      _flybyCand[i].o = _flybyCand[i - 1].o; _flybyCand[i].s = _flybyCand[i - 1].s; _flybyCand[i].k = _flybyCand[i - 1].k;
+      i--;
+    }
+    _flybyCand[i].o = o; _flybyCand[i].s = s; _flybyCand[i].k = k;
+  };
+  if (_live) {
     camera.getWorldPosition(_spatialCamPos);
-    const R2 = 800 * 800;
-    for (let i = 0; i < projs.length; i++) {
-      const p = projs[i];
-      if (!p || p.alive === false || !p.smokeTrail || !p.position || !p.velocity) continue;
-      // Own missiles get a longer grace so the launch sound owns the first
-      // beat and a point-blank whoosh doesn't blast the muzzle in your face.
-      if ((p.age || 0) < ((p.owner === 'player') ? 0.5 : 0.15)) continue;
-      const dx = p.position.x - _spatialCamPos.x, dy = p.position.y - _spatialCamPos.y, dz = p.position.z - _spatialCamPos.z;
-      const d = dx * dx + dy * dy + dz * dz;
-      if (d > R2) continue;
-      if (d < d0) { c2 = c1; d2 = d1; c1 = c0; d1 = d0; c0 = p; d0 = d; }
-      else if (d < d1) { c2 = c1; d2 = d1; c1 = p; d1 = d; }
-      else if (d < d2) { c2 = p; d2 = d; }
+    // MISSILES (smokeTrail projectiles), range 800. Own missiles get a
+    // longer grace so the launch sound owns the first beat and a point-
+    // blank whoosh doesn't blast the muzzle in your face.
+    const projs = game.projectiles;
+    if (projs && projs.length) {
+      const R2 = 800 * 800;
+      for (let i = 0; i < projs.length; i++) {
+        const p = projs[i];
+        if (!p || p.alive === false || !p.smokeTrail || !p.position || !p.velocity) continue;
+        if ((p.age || 0) < ((p.owner === 'player') ? 0.5 : 0.15)) continue;
+        const dx = p.position.x - _spatialCamPos.x, dy = p.position.y - _spatialCamPos.y, dz = p.position.z - _spatialCamPos.z;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d > R2) continue;
+        offer(p, d / R2, 0);
+      }
+    }
+    // (v36.79) SHIPS — bots + hub traffic (game.entities) and connected
+    // peers ("I don't seem to be hearing other ships fly by me" — they had
+    // no engine audio at all). Range 1100. Loudness rides RELATIVE speed in
+    // the drive loop, so a parked freighter idles near-silent while a
+    // strafing bot roars past with the doppler sweep. velocity.isVector3
+    // guards out pseudo-entities carrying POJO velocities.
+    const R2S = 1100 * 1100;
+    const ents = game.entities;
+    if (ents && ents.length) {
+      for (let i = 0; i < ents.length; i++) {
+        const e = ents[i];
+        if (!e || !e.alive || !e.position || !e.velocity || !e.velocity.isVector3) continue;
+        const dx = e.position.x - _spatialCamPos.x, dy = e.position.y - _spatialCamPos.y, dz = e.position.z - _spatialCamPos.z;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d > R2S) continue;
+        offer(e, d / R2S, 1);
+      }
+    }
+    if (typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) {
+      for (let i = 0; i < net.networkPlayers.length; i++) {
+        const e = net.networkPlayers[i];
+        if (!e || !e.alive || !e.position || !e.velocity || !e.velocity.isVector3) continue;
+        const dx = e.position.x - _spatialCamPos.x, dy = e.position.y - _spatialCamPos.y, dz = e.position.z - _spatialCamPos.z;
+        const d = dx * dx + dy * dy + dz * dz;
+        if (d > R2S) continue;
+        offer(e, d / R2S, 1);
+      }
     }
   }
-  const picks = [c0, c1, c2];
-  if (maxV < 3) picks[2] = null;
-  // Keep voices whose projectile is still picked; free the rest.
+  // Keep voices whose emitter is still picked; free the rest.
   for (let i = 0; i < _flybyVoices.length; i++) {
     const v = _flybyVoices[i];
     if (!v.proj) continue;
     let keep = false;
-    for (let k = 0; k < picks.length; k++) if (picks[k] === v.proj) { picks[k] = null; keep = true; break; }
+    for (let k = 0; k < candN; k++) if (_flybyCand[k].o === v.proj) { _flybyCand[k].o = null; keep = true; break; }
     if (!keep) _flybyRelease(v);
   }
   // Assign remaining picks to free voices. The pool can never grow past maxV:
-  // picks is capped at maxV entries and freed voices are reused first.
-  for (let k = 0; k < picks.length; k++) {
-    if (!picks[k]) continue;
+  // candN is capped at maxV and freed voices are reused first.
+  for (let k = 0; k < candN; k++) {
+    if (!_flybyCand[k].o) continue;
     const v = _flybyEnsureVoice(ctx);
     if (!v || v.proj) break;
-    try { _flybyAssign(v, picks[k]); } catch (_) { _flybyRelease(v); }
+    try { _flybyAssign(v, _flybyCand[k].o, _flybyCand[k].k); } catch (_) { _flybyRelease(v); }
   }
-  // Drive live voices: world position, doppler pitch, gain + dead-man fade.
+  // Drive live voices: world position, doppler pitch, per-kind timbre/gain
+  // + dead-man fade.
   const C_SOUND = 3400;
   const _vol = (typeof window !== 'undefined' && typeof window.__flybyVol === 'number') ? window.__flybyVol : 1;
   for (let i = 0; i < _flybyVoices.length; i++) {
@@ -86775,12 +86827,27 @@ function _flybyTick(dt) {
     const dist = Math.max(1, _flybyScratch.length());
     _flybyScratch.multiplyScalar(1 / dist);
     let closing = p.velocity.dot(_flybyScratch);
-    if (typeof player !== 'undefined' && player && player.velocity) closing -= player.velocity.dot(_flybyScratch);
+    let relX = p.velocity.x, relY = p.velocity.y, relZ = p.velocity.z;
+    if (typeof player !== 'undefined' && player && player.velocity) {
+      closing -= player.velocity.dot(_flybyScratch);
+      relX -= player.velocity.x; relY -= player.velocity.y; relZ -= player.velocity.z;
+    }
     closing = Math.max(-2400, Math.min(2400, closing));
     const rate = Math.max(0.62, Math.min(1.6, C_SOUND / (C_SOUND - closing)));
     try {
       v.src.playbackRate.setTargetAtTime(rate, t, 0.06);
-      v.bp.frequency.setTargetAtTime(Math.min(2200, 620 * rate + 240 * Math.min(1, 260 / dist)), t, 0.08);
+      let gT;
+      if (v.kind === 1) {
+        // Ship engine: lower, broader rumble; loudness ~ how fast it moves
+        // RELATIVE to you (a wingman matching your vector stays quiet, a
+        // crossing bot roars), with a small idle floor for close presence.
+        const relSpd = Math.sqrt(relX * relX + relY * relY + relZ * relZ);
+        v.bp.frequency.setTargetAtTime(Math.min(1600, 380 * rate + 180 * Math.min(1, 300 / dist)), t, 0.08);
+        gT = 0.55 * _vol * Math.max(0.12, Math.min(1, relSpd / 950));
+      } else {
+        v.bp.frequency.setTargetAtTime(Math.min(2200, 620 * rate + 240 * Math.min(1, 260 / dist)), t, 0.08);
+        gT = 0.5 * _vol * Math.max(0.35, Math.min(1, p.velocity.length() / 1100));
+      }
       if (v.pan.positionX && v.pan.positionX.setTargetAtTime) {
         v.pan.positionX.setTargetAtTime(p.position.x, t, 0.04);
         v.pan.positionY.setTargetAtTime(p.position.y, t, 0.04);
@@ -86788,7 +86855,6 @@ function _flybyTick(dt) {
       } else {
         v.pan.setPosition(p.position.x, p.position.y, p.position.z);
       }
-      const gT = 0.5 * _vol * Math.max(0.35, Math.min(1, p.velocity.length() / 1100));
       v.g.gain.cancelScheduledValues(t);
       v.g.gain.setTargetAtTime(gT, t, 0.05);
       v.g.gain.setTargetAtTime(0, t + 0.35, 0.12);
@@ -86800,6 +86866,21 @@ function _audioSpatialFrame(dt) {
   _audioUpdateListener();
   _flybyTick(dt);
 }
+// (v36.79) Live probe: window.__flybyDbg() -> the active flyby voices
+// (kind + distance), for verifying by console what the ears report.
+if (typeof window !== 'undefined') window.__flybyDbg = function () {
+  try {
+    const out = [];
+    for (let i = 0; i < _flybyVoices.length; i++) {
+      const v = _flybyVoices[i];
+      if (!v.proj || !v.src) continue;
+      let d = -1;
+      try { camera.getWorldPosition(_spatialCamPos); d = Math.round(_spatialCamPos.distanceTo(v.proj.position)); } catch (_) {}
+      out.push((v.kind === 1 ? 'ship' : 'missile') + '@' + d + 'u');
+    }
+    return out.length ? out : 'no active flyby voices';
+  } catch (e) { return 'ERR ' + e; }
+};
 
 // (v36.72) Audible spatial smoke test: window.__spatialTest() plays 8 pings
 // orbiting the camera — FRONT, FRONT-RIGHT, RIGHT, BACK-RIGHT, BACK,
