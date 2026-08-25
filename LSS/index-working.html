@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.82';
+const LSS_BUILD = '36.83';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -86692,8 +86692,6 @@ function _flybyRelease(v) {
   v.src = null;
   try { v.pan.disconnect(); } catch (_) {}
   v.proj = null;
-  v.oneShot = false;
-  v.endT = 0;
 }
 function _flybyEnsureVoice(ctx) {
   for (let i = 0; i < _flybyVoices.length; i++) if (!_flybyVoices[i].proj) return _flybyVoices[i];
@@ -86716,71 +86714,81 @@ function _flybyEnsureVoice(ctx) {
   _flybyVoices.push(v);
   return v;
 }
-// ── (v36.82) SHIP FLYBY = THE GAME'S OWN THROTTLE SOUND ──────────────────────
-// Owner, after rejecting a synthetic engine loop: "there's literally a
-// specific sound the engine makes... check what sound is made when throttle
-// up" — that's the 'dash' recipe ("thruster burst, rising whoosh"). A ship
-// pass now plays a baked 'dash' TAKE (the exact waveform your own throttle
-// makes) as a ONE-SHOT through the tracked flyby panner: position glides
-// with the ship every frame and playbackRate carries the doppler sweep, with
-// a per-hull pitch offset so simultaneous passers don't play in unison.
-// One burst per pass — a per-emitter cooldown stops a circling bot from
-// machine-gunning the sound; the voice self-releases when the take ends.
-// Requires the bake to be ready (it runs behind the loading screen); until
-// then ship passes are simply silent, missiles unaffected.
+// ── (v36.83) SHIP FLYBY = THE PHI-CASCADE, the ship's actual voice ───────────
+// Owner (after two wrong guesses): "when the ship moves, it makes a sound
+// with layers, golden ratio i think" — that's the PHI-CASCADE ambient bed
+// above (startAmbientBed: "Ship ambient sound", 6 layers at 69Hz·PHI^(i-3),
+// LFO shimmer at PHI/PHI^i, base winds 69->144Hz with speed "like an engine
+// spooling"). Other ships now hum with the SAME cascade: a mono render of
+// the exact layer architecture (binaural L/R split dropped — a positional
+// point source can't hard-pan; the HRTF panner owns placement), baked once
+// into a seamless loop. Per-frame the voice's playbackRate = doppler ×
+// wind-up from THAT ship's own speed (mirroring the bed's spool, compressed
+// so stacking with doppler can't chipmunk) and loudness keys to its speed —
+// a parked hull is silent, a ship under way hums, a fast passer sweeps
+// through with the doppler bend. This is deliberately the sound the OWNER's
+// ship already makes, so the fleet finally speaks one language.
+let _shipPhiBuf = null, _shipPhiPending = false;
+function _shipPhiLoop(ctx) {
+  if (_shipPhiBuf && _shipPhiBuf.sampleRate === ctx.sampleRate) return _shipPhiBuf;
+  if (_shipPhiPending) return null;
+  _shipPhiPending = true;
+  try {
+    const sr = ctx.sampleRate, LOOP = 4.0, PAD = 0.5;
+    const off = new OfflineAudioContext(1, Math.ceil(sr * (LOOP + PAD)), sr);
+    for (let i = 0; i < PHI_LAYERS; i++) {
+      const f = PHI_REST_BASE * Math.pow(PHI, i - 3);
+      const lv = 0.5 / PHI_LAYERS;
+      const o = off.createOscillator(); o.type = 'sine'; o.frequency.value = f;
+      const g = off.createGain(); g.gain.value = lv;
+      const lfo = off.createOscillator(); lfo.type = 'sine';
+      lfo.frequency.value = PHI / Math.pow(PHI, i);
+      const lg = off.createGain(); lg.gain.value = lv * 0.5;
+      lfo.connect(lg); lg.connect(g.gain);
+      o.connect(g); g.connect(off.destination);
+      o.start(0); lfo.start(0);
+    }
+    off.startRendering().then((rendered) => {
+      const n = Math.floor(sr * LOOP), x = Math.floor(sr * PAD);
+      const out = ctx.createBuffer(1, n, sr);
+      const d = out.getChannelData(0), s = rendered.getChannelData(0);
+      for (let i = 0; i < n; i++) d[i] = s[i];
+      for (let i = 0; i < x; i++) {
+        const u = i / x, a = Math.sin(u * Math.PI / 2), b = Math.cos(u * Math.PI / 2);
+        d[i] = d[i] * a + s[n + i] * b;
+      }
+      _shipPhiBuf = out;
+    }).catch(() => { _shipPhiPending = false; });
+  } catch (_) { _shipPhiPending = false; }
+  return _shipPhiBuf;
+}
 function _flybyAssign(v, emitter, kind) {
   const ctx = audio.ctx;
   const t = ctx.currentTime;
   if (v.src) _flybyRelease(v);
   v.proj = emitter;
   v.kind = kind || 0;
-  v.oneShot = false;
-  v.endT = 0;
   v.pan.refDistance = (v.kind === 1) ? 200 : 130;
   v.pan.maxDistance = (v.kind === 1) ? 1900 : 1700;
   const src = ctx.createBufferSource();
   if (v.kind === 1) {
-    const takes = (typeof _AUDIO_BAKE !== 'undefined' && _AUDIO_BAKE.buf) ? _AUDIO_BAKE.buf['dash'] : null;
-    if (!takes || !takes.length) { v.proj = null; return; }
-    src.buffer = takes[(Math.random() * takes.length) | 0];
-    src.loop = false;
-    v.oneShot = true;
-    // Worst-case end (doppler floor 0.62 stretches the take ~1.61x).
-    v.endT = t + src.buffer.duration * 1.8 + 0.2;
-    try { v.bp.type = 'lowpass'; v.bp.frequency.value = 3800; v.bp.Q.value = 0.5; } catch (_) {}
-    // Cooldown so this hull can't re-trigger the burst for a bit.
-    try { emitter._flybyCd = t + 2.6; } catch (_) {}
-    // Level set ONCE from the pass speed — the take carries its own designed
-    // envelope, so the drive loop leaves one-shot gains alone.
-    let _lvl = 0.55;
-    try {
-      const _pvv = (typeof player !== 'undefined' && player && player.velocity) ? player.velocity : null;
-      const _rx = emitter.velocity.x - (_pvv ? _pvv.x : 0);
-      const _ry = emitter.velocity.y - (_pvv ? _pvv.y : 0);
-      const _rz = emitter.velocity.z - (_pvv ? _pvv.z : 0);
-      const _rs = Math.sqrt(_rx * _rx + _ry * _ry + _rz * _rz);
-      const _fv = (typeof window !== 'undefined' && typeof window.__flybyVol === 'number') ? window.__flybyVol : 1;
-      _lvl = 0.55 * _fv * Math.max(0.2, Math.min(1, (_rs - 260) / 800));
-    } catch (_) {}
-    v.g.gain.cancelScheduledValues(t);
-    v.g.gain.setValueAtTime(_lvl, t);
-    v.pitchMul = 0.88 + (((emitter && typeof emitter.id === 'number') ? emitter.id : 3) % 8) * 0.04;
-    src.connect(v.bp);
-    v.pan.connect(audio.sfxBus || audio.masterGain);
-    src.start(t, 0);
-    v.src = src;
-    return;
+    src.buffer = _shipPhiLoop(ctx);
+    if (!src.buffer) { v.proj = null; return; }
+    // Near-transparent cap; the cascade is pre-voiced. Subtle per-hull pitch
+    // only — big offsets would break the cascade's harmonic identity.
+    try { v.bp.type = 'lowpass'; v.bp.frequency.value = 3200; v.bp.Q.value = 0.5; } catch (_) {}
+    v.pitchMul = 0.96 + (((emitter && typeof emitter.id === 'number') ? emitter.id : 2) % 5) * 0.02;
+  } else {
+    src.buffer = _flybyNoise(ctx);
+    try { v.bp.type = 'bandpass'; v.bp.frequency.value = 700; v.bp.Q.value = 0.9; } catch (_) {}
+    v.pitchMul = 1;
   }
-  // Missile whistle (looping noise) path.
-  src.buffer = _flybyNoise(ctx);
   src.loop = true;
-  try { v.bp.type = 'bandpass'; v.bp.frequency.value = 700; v.bp.Q.value = 0.9; } catch (_) {}
-  v.pitchMul = 1;
   src.connect(v.bp);
   v.pan.connect(audio.sfxBus || audio.masterGain);
   v.g.gain.cancelScheduledValues(t);
   v.g.gain.setValueAtTime(0.0001, t);
-  src.start(t, Math.random() * 0.9);
+  src.start(t, Math.random() * (src.buffer.duration * 0.9));
   v.src = src;
 }
 // (v36.79) Fixed top-4 candidate slots, reused every tick (no per-frame
@@ -86828,25 +86836,21 @@ function _flybyTick(dt) {
         offer(p, d / R2, 0);
       }
     }
-    // (v36.82) SHIPS — bots + hub traffic (game.entities) and connected
-    // peers. A qualifying PASS (relative speed vs the player > 340, within
-    // 900u, per-hull cooldown clear) fires ONE baked 'dash' throttle-burst
-    // through the tracked panner (see _flybyAssign) — the game's own
-    // throttle-up sound, per owner. Formation wingmen, parked freighters and
-    // slow drift never trigger. Kill switch: window.__shipFlyby = false.
-    // velocity.isVector3 guards out pseudo-entities with POJO velocities.
-    if ((typeof window === 'undefined' || window.__shipFlyby !== false) &&
-        typeof player !== 'undefined' && player && player.velocity) {
+    // (v36.83) SHIPS — bots + hub traffic (game.entities) and connected
+    // peers hum the phi-cascade (the ship's own engine voice, see
+    // _flybyAssign) while MOVING within 900u. Eligibility keys to the ship's
+    // OWN speed — matching the bed's design ("modulates with player speed"):
+    // a parked hull is silent, motion hums, speed spools the pitch. Kill
+    // switch: window.__shipFlyby = false. velocity.isVector3 guards out
+    // pseudo-entities with POJO velocities.
+    if (typeof window === 'undefined' || window.__shipFlyby !== false) {
       const R2S = 900 * 900;
-      const _pv = player.velocity;
       const _shipOffer = (e) => {
         if (!e || !e.alive || e === player || !e.position || !e.velocity || !e.velocity.isVector3) return;
-        if ((e._flybyCd || 0) > t) return;
+        if (e.velocity.lengthSq() < 140 * 140) return;
         const dx = e.position.x - _spatialCamPos.x, dy = e.position.y - _spatialCamPos.y, dz = e.position.z - _spatialCamPos.z;
         const d = dx * dx + dy * dy + dz * dz;
         if (d > R2S) return;
-        const rx = e.velocity.x - _pv.x, ry = e.velocity.y - _pv.y, rz = e.velocity.z - _pv.z;
-        if (rx * rx + ry * ry + rz * rz < 340 * 340) return;
         offer(e, d / R2S, 1);
       };
       const ents = game.entities;
@@ -86856,17 +86860,10 @@ function _flybyTick(dt) {
       }
     }
   }
-  // Keep voices whose emitter is still picked; free the rest. ⚠ One-shot
-  // ship bursts live until their take ends — their emitter is cooldown-
-  // excluded from the candidate list, so they must NOT be freed for failing
-  // to be re-picked.
+  // Keep voices whose emitter is still picked; free the rest.
   for (let i = 0; i < _flybyVoices.length; i++) {
     const v = _flybyVoices[i];
     if (!v.proj) continue;
-    if (v.oneShot) {
-      if (t > v.endT) _flybyRelease(v);
-      continue;
-    }
     let keep = false;
     for (let k = 0; k < candN; k++) if (_flybyCand[k].o === v.proj) { _flybyCand[k].o = null; keep = true; break; }
     if (!keep) _flybyRelease(v);
@@ -86897,7 +86894,12 @@ function _flybyTick(dt) {
     closing = Math.max(-2400, Math.min(2400, closing));
     const rate = Math.max(0.62, Math.min(1.6, C_SOUND / (C_SOUND - closing)));
     try {
-      v.src.playbackRate.setTargetAtTime(rate * (v.pitchMul || 1), t, 0.06);
+      // (v36.83) Ships spool the cascade with their OWN speed (mirrors the
+      // bed's 69->144Hz wind-up, compressed so stacking with the doppler
+      // rate can't chipmunk); missiles play straight.
+      const _spd = p.velocity.length();
+      const _wind = (v.kind === 1) ? (0.8 + 0.5 * Math.min(1, _spd / 900)) : 1;
+      v.src.playbackRate.setTargetAtTime(rate * _wind * (v.pitchMul || 1), t, 0.08);
       if (v.pan.positionX && v.pan.positionX.setTargetAtTime) {
         v.pan.positionX.setTargetAtTime(p.position.x, t, 0.04);
         v.pan.positionY.setTargetAtTime(p.position.y, t, 0.04);
@@ -86905,18 +86907,20 @@ function _flybyTick(dt) {
       } else {
         v.pan.setPosition(p.position.x, p.position.y, p.position.z);
       }
-      if (!v.oneShot) {
-        // Looping missile whistle: band sweep + speed gain + dead-man fade
-        // (re-armed every tick; lands only if ticks stop, so a stopped loop
-        // can't whistle forever). One-shot dash bursts skip all of this —
-        // their level was set at assign, the take's own envelope does the
-        // rest, and a one-shot ends by itself even if ticks stop.
+      let gT;
+      if (v.kind === 1) {
+        // Loudness ~ the ship's own speed (parked = silent; the eligibility
+        // gate releases sub-140 hulls next tick). Filter stays static.
+        gT = 0.55 * _vol * Math.max(0, Math.min(1, (_spd - 140) / 650));
+      } else {
         v.bp.frequency.setTargetAtTime(Math.min(2200, 620 * rate + 240 * Math.min(1, 260 / dist)), t, 0.08);
-        const gT = 0.5 * _vol * Math.max(0.35, Math.min(1, p.velocity.length() / 1100));
-        v.g.gain.cancelScheduledValues(t);
-        v.g.gain.setTargetAtTime(gT, t, 0.05);
-        v.g.gain.setTargetAtTime(0, t + 0.35, 0.12);
+        gT = 0.5 * _vol * Math.max(0.35, Math.min(1, _spd / 1100));
       }
+      // Dead-man fade re-armed every tick: lands only if ticks stop, so a
+      // stopped loop can't hum forever.
+      v.g.gain.cancelScheduledValues(t);
+      v.g.gain.setTargetAtTime(gT, t, 0.05);
+      v.g.gain.setTargetAtTime(0, t + 0.35, 0.12);
     } catch (_) {}
   }
 }
