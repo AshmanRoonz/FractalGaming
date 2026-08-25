@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.83';
+const LSS_BUILD = '36.84';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -28264,8 +28264,24 @@ function _hcTrafficUpdate(dt) {
     // Keep the combat entity riding the scheduled position so weapons can
     // hit it wherever it is (parked, cruising, descending).
     if (s.ent) {
+      // (v36.84) REAL velocity from the scheduled position delta (this used
+      // to zero it every frame). Two consumers: the phi-cascade engine hum
+      // (city ships were silent — a zeroed velocity never passed the moving-
+      // ship gate) and the ram pass's closing speed, whose comment already
+      // claimed "moving traffic that flies into YOU counts" while the zeroed
+      // velocity said otherwise. Teleport-sized jumps (warp seg swaps) clamp
+      // to zero so a segment change can't read as a 20,000 u/s ram or a hum
+      // spike.
+      const _tdx = s.holder.position.x - s.ent.position.x;
+      const _tdy = s.holder.position.y - s.ent.position.y;
+      const _tdz = s.holder.position.z - s.ent.position.z;
+      const _tin = 1 / Math.max(1e-3, dt || 0.016);
+      if ((_tdx * _tdx + _tdy * _tdy + _tdz * _tdz) * _tin * _tin < 800 * 800) {
+        s.ent.velocity.set(_tdx * _tin, _tdy * _tin, _tdz * _tin);
+      } else {
+        s.ent.velocity.set(0, 0, 0);
+      }
       s.ent.position.copy(s.holder.position);
-      s.ent.velocity.set(0, 0, 0);
     }
     // one sphere collider per visible ship (parked ships block their pad)
     _HC_TRAF.obbs.push({ x: st.pos.x, y: st.pos.y + 20, z: st.pos.z, r: 62 * ((s.ent && s.ent.trafClass && s.ent.trafClass.scale) || 1), ent: s.ent });
@@ -86768,7 +86784,7 @@ function _flybyAssign(v, emitter, kind) {
   if (v.src) _flybyRelease(v);
   v.proj = emitter;
   v.kind = kind || 0;
-  v.pan.refDistance = (v.kind === 1) ? 200 : 130;
+  v.pan.refDistance = (v.kind === 1) ? 260 : 130;   // (v36.84) ships carry louder/farther
   v.pan.maxDistance = (v.kind === 1) ? 1900 : 1700;
   const src = ctx.createBufferSource();
   if (v.kind === 1) {
@@ -86777,7 +86793,12 @@ function _flybyAssign(v, emitter, kind) {
     // Near-transparent cap; the cascade is pre-voiced. Subtle per-hull pitch
     // only — big offsets would break the cascade's harmonic identity.
     try { v.bp.type = 'lowpass'; v.bp.frequency.value = 3200; v.bp.Q.value = 0.5; } catch (_) {}
-    v.pitchMul = 0.96 + (((emitter && typeof emitter.id === 'number') ? emitter.id : 2) % 5) * 0.02;
+    // Per-hull pitch seed: numeric bot ids directly; string ids (hub traffic
+    // 'hubtraf_N') hash from the tail so each freighter gets its own voice.
+    let _seed = 2;
+    if (emitter && typeof emitter.id === 'number') _seed = emitter.id;
+    else if (emitter && typeof emitter.id === 'string' && emitter.id.length) _seed = emitter.id.charCodeAt(emitter.id.length - 1) + emitter.id.length;
+    v.pitchMul = 0.96 + (_seed % 5) * 0.02;
   } else {
     src.buffer = _flybyNoise(ctx);
     try { v.bp.type = 'bandpass'; v.bp.frequency.value = 700; v.bp.Q.value = 0.9; } catch (_) {}
@@ -86847,7 +86868,10 @@ function _flybyTick(dt) {
       const R2S = 900 * 900;
       const _shipOffer = (e) => {
         if (!e || !e.alive || e === player || !e.position || !e.velocity || !e.velocity.isVector3) return;
-        if (e.velocity.lengthSq() < 140 * 140) return;
+        // (v36.84) Gate 140 -> 90 so slow city freighters hum too (their
+        // cruise speeds sit under combat speeds); the gain curve keeps slow
+        // = quiet.
+        if (e.velocity.lengthSq() < 90 * 90) return;
         const dx = e.position.x - _spatialCamPos.x, dy = e.position.y - _spatialCamPos.y, dz = e.position.z - _spatialCamPos.z;
         const d = dx * dx + dy * dy + dz * dz;
         if (d > R2S) return;
@@ -86910,8 +86934,9 @@ function _flybyTick(dt) {
       let gT;
       if (v.kind === 1) {
         // Loudness ~ the ship's own speed (parked = silent; the eligibility
-        // gate releases sub-140 hulls next tick). Filter stays static.
-        gT = 0.55 * _vol * Math.max(0, Math.min(1, (_spd - 140) / 650));
+        // gate releases sub-90 hulls next tick). Filter stays static.
+        // (v36.84) Louder per owner: base 0.55 -> 0.9, full by ~510 speed.
+        gT = 0.9 * _vol * Math.max(0, Math.min(1, (_spd - 90) / 420));
       } else {
         v.bp.frequency.setTargetAtTime(Math.min(2200, 620 * rate + 240 * Math.min(1, 260 / dist)), t, 0.08);
         gT = 0.5 * _vol * Math.max(0.35, Math.min(1, _spd / 1100));
