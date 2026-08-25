@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.86';
+const LSS_BUILD = '36.87';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -21577,9 +21577,14 @@ function _stSmooth(e0,e1,x){const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0)));retur
 // Strongest route influence at (x,z): returns its 0..1 weight and the route's
 // height there (room centre y, or interpolated tunnel y). Wider blend = roomier.
 function _stRouteAt(x,z,T){
-  const soft=T.CLEAR_SOFT||300; let o=0, ty=T.YMID;
+  const soft=T.CLEAR_SOFT||300; let o=0, ty=T.YMID, drop=0, rise=0;
   const S=game.levelSpheres||[];
-  for(let i=0;i<S.length;i++){const s=S[i];const d=Math.hypot(x-s.cx,z-s.cz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o){o=e;ty=s.cy;}}
+  // (v36.87) Tie-break at EQUAL openness: prefer the sphere with the larger
+  // per-shape carve — the vault chamber shares its center with the hall that
+  // sited it, both reach e=1 there, and first-found order let the hall's
+  // default-height carve win over the chamber's tall one. Existing shapes
+  // all carry drop+rise 0, so the tie-break never fires among them.
+  for(let i=0;i<S.length;i++){const s=S[i];const d=Math.hypot(x-s.cx,z-s.cz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o||(e===o&&((s.drop||0)+(s.rise||0))>(drop+rise))){o=e;ty=s.cy;drop=s.drop||0;rise=s.rise||0;}}
   const C=game.levelCylinders||[];
   for(let i=0;i<C.length;i++){const c=C[i];
     const dx=c.bx-c.ax,dz=c.bz-c.az,l2=dx*dx+dz*dz;
@@ -21590,8 +21595,13 @@ function _stRouteAt(x,z,T){
     // flattening it to a constant-profile tube. Endless lanes use ~0.42;
     // every existing map leaves w unset -> behaviour identical.
     const e=(1-_stSmooth(c.r,c.r+soft,d))*(c.w!=null?c.w:1);
-    if(e>o){o=e;ty=c.ay+(c.by-c.ay)*t;}}
-  return {o,ty};
+    if(e>o){o=e;ty=c.ay+(c.by-c.ay)*t;drop=0;rise=0;}}
+  // (v36.87) drop/rise: optional PER-SPHERE carve heights (0 = the map-wide
+  // ARENA_DROP/ARENA_RISE defaults). The Spire-vault cavity needs a chamber
+  // far taller than a normal hall pocket — a multi-storey structure has to
+  // fit inside the opened space or collision opens rock the shells still
+  // render. Every existing shape leaves them unset -> behaviour identical.
+  return {o,ty,drop,rise};
 }
 // Kept for callers that only want the openness weight.
 function _stCarveOpenness(x,z,T){ return _stRouteAt(x,z,T).o; }
@@ -21610,7 +21620,7 @@ function _stGroundYCarvedBase(x,z,T){
   const mid=(g+_stCeilY(x,z,T))*0.5;
   const g2=g+(mid-g)*PINCH*(1-ro);
   if(ro<=0) return g2;
-  const floor=r.ty-(T.ARENA_DROP||320);   
+  const floor=r.ty-(r.drop||T.ARENA_DROP||320);
   return g2+(floor-g2)*ro;
 }
 function _stCeilYCarvedBase(x,z,T){
@@ -21621,7 +21631,7 @@ function _stCeilYCarvedBase(x,z,T){
   const mid=(_stGroundY(x,z,T)+c)*0.5;
   const c2=c+(mid-c)*PINCH*(1-ro);
   if(ro<=0) return c2;
-  const roof=r.ty+(T.ARENA_RISE||420);
+  const roof=r.ty+(r.rise||T.ARENA_RISE||420);
   return c2+(roof-c2)*ro;
 }
 // ---- (v34.65) PILLAR KARST FIELD — "The Colonnade" terrain style ----
@@ -21701,8 +21711,8 @@ function _stGapSDFCarved(px,py,pz,T){
   let g2=g+(mid-g)*pw;
   let c2=c+(mid-c)*pw;
   if(ro>0){
-    g2=g2+((r.ty-(T.ARENA_DROP||320))-g2)*ro;
-    c2=c2+((r.ty+(T.ARENA_RISE||420))-c2)*ro;
+    g2=g2+((r.ty-(r.drop||T.ARENA_DROP||320))-g2)*ro;
+    c2=c2+((r.ty+(r.rise||T.ARENA_RISE||420))-c2)*ro;
   }
   // Pillar fuse — the SAME adjustment the carved-surface wrappers apply, so
   // collision matches the rendered columns exactly.
@@ -31036,7 +31046,85 @@ function _arenaEnsureMesh(level) {
   _arenaDisposeMesh();
   _arenaBuildMesh(_arenaBuildParams(level.arena, level.rooms), key, level);
 }
-function _arenaBuildMesh(G, key, level) {
+
+// ── (v36.87) SPIRE VAULTS — a multi-storey structure ON the route ────────────
+// Owner, after the terraced decks: "it's definitely nothing like spire...
+// there's still just one plane." Correct — a heightfield sandwich is
+// single-storey by construction. TRUE stacked floors need the Spire's
+// volumetric arena field, so the routes now EMBED one: a bounded arena-field
+// structure (3 storeys, shafts, ring gap, the helix ramp — the whole Spire
+// kit, same _ARENA_FIELD source) placed at a landmark site. Endless gets one
+// at the first hall past gid 3 (~8-15km in); every campaign leg gets one
+// mid-leg. ONE vault per world for now — the mesh pipeline (_arenaMesh) is a
+// singleton; lifting it to N structures is the known follow-up.
+//
+// HOW IT COMPOSES with the sandwich:
+//   CAVITY  — one giant carve sphere with per-sphere drop/rise (v36.87
+//             _stRouteAt fields) opens a chamber tall enough to contain
+//             every storey + the helix bore. Mesh shells and collision both
+//             derive from the same carved fns, so they agree.
+//   ROCK    — worldSDF's sandwich branch INTERSECTS the vault field inside
+//             its envelope (max(sandwich, vault)): the vault can only add
+//             rock into space the cavity opened, so collision can never
+//             open rock the shells still render.
+//   MESH    — the Spire's chunked surface-nets build, offset to the site
+//             (opts.offset), quiet (no HUD takeover). Storeys, mushrooms,
+//             cloud columns ride along for free.
+// Deterministic: seed = worldSeed ^ gid hash (endless) / worldSeed (campaign)
+// — co-op peers derive identical vaults with zero route-stream draws.
+function _lssVaultG(seed) {
+  const G = _arenaBuildParams({ seed: seed | 0, floors: 3, spikeAmt: 0.7, scale: 1.0 }, []);
+  // Tame the helix for embedding: 2 turns keeps the bore inside a chamber
+  // the cavity carve can actually contain.
+  if (G.helix) G.helix.turns = 2;
+  return G;
+}
+function _lssVaultEnv(G) {
+  const hx = G.helix;
+  const hxTop = hx ? hx.y0 + (hx.turns + 0.5) * hx.pitch + hx.half + 60 : 0;
+  const hxBot = hx ? hx.y0 - (hx.turns + 0.5) * hx.pitch - hx.half - 60 : 0;
+  return {
+    r: Math.max(G.R, Math.abs(hxTop), Math.abs(hxBot)) + 250,
+    drop: Math.abs(hxBot) + 150,
+    rise: Math.max(G.H + 90, hxTop) + 180,
+  };
+}
+function _lssVaultRegister(x, y, z, seed, opts) {
+  if (game._lssVault) return;
+  try {
+    const G = _lssVaultG(seed);
+    const env = _lssVaultEnv(G);
+    game._lssVault = { x, y, z, G, env: env.r };
+    // Cavity sphere — skipped when the site already rides as a level ROOM
+    // (the endless seeded-stretch path adds it at gen time so the initial
+    // bake digs the chamber).
+    if (!opts || !opts.noSphere) {
+      game.levelSpheres.push({ cx: x, cy: y, cz: z, r: env.r * 0.92, drop: env.drop, rise: env.rise });
+    }
+    // Rebake any already-baked chunks the cavity touches (streamed chunks
+    // bake later and read the sphere naturally).
+    try {
+      if (typeof _swInvalidateChunksInRect === 'function') {
+        const rr = env.r + ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
+        _swInvalidateChunksInRect(x - rr, x + rr, z - rr, z + rr);
+      }
+    } catch (_) {}
+    _arenaDisposeMesh();
+    _arenaBuildMesh(G, 'vault|' + (seed | 0) + '|c' + _arenaMeshCells(), null, { offset: { x, y, z }, quiet: true });
+    console.log('[vault] registered at (' + Math.round(x) + ',' + Math.round(y) + ',' + Math.round(z) + ') seed ' + (seed | 0));
+  } catch (e) {
+    game._lssVault = null;
+    console.warn('[vault] register failed:', e && e.message);
+  }
+}
+// Debug probe: window.__vault() -> site + mesh progress.
+if (typeof window !== 'undefined') window.__vault = function () {
+  const v = game._lssVault;
+  if (!v) return 'no vault';
+  return { x: Math.round(v.x), y: Math.round(v.y), z: Math.round(v.z), env: Math.round(v.env),
+    meshDone: _arenaMesh.chunksDone, meshTotal: _arenaMesh.chunksTotal, tris: _arenaMesh.tris };
+};
+function _arenaBuildMesh(G, key, level, opts) {
   const CHUNK = 600, CELLS = _arenaMeshCells(), REGION = 3;
   const t0 = performance.now();
   const nx = Math.ceil((G.R + 140) / CHUNK), ny = Math.ceil((G.H + 320) / CHUNK);
@@ -31093,12 +31181,25 @@ function _arenaBuildMesh(G, key, level) {
   _arenaMesh.group = new THREE.Group();
   _arenaMesh.group.name = 'spireArenaMesh';
   _arenaMesh.group.matrixAutoUpdate = false;
+  // (v36.87) Vault builds place the whole group at a WORLD OFFSET. The
+  // meshes stay in field-local coordinates (the storey shader bands and
+  // mineral flecks key off local position, which is exactly right for an
+  // embedded structure) — only the group moves. Spire passes no offset and
+  // keeps its identity matrix.
+  if (opts && opts.offset) {
+    _arenaMesh.group.position.set(opts.offset.x, opts.offset.y, opts.offset.z);
+  }
+  _arenaMesh.group.updateMatrix();
   scene.add(_arenaMesh.group);
   // Progress readout on the existing map-gen HUD (the warmup->playing gate
   // can hold the round start on this build — the player must see why).
+  // (v36.87) Vault builds run mid-flight behind the scenes: opts.quiet
+  // skips the HUD takeover entirely.
   try {
-    _arenaMesh.hud = document.getElementById('map-gen-hud');
-    if (_arenaMesh.hud) { _arenaMesh.hud.textContent = 'GENERATING ARENA'; _arenaMesh.hud.style.display = 'block'; }
+    if (!opts || !opts.quiet) {
+      _arenaMesh.hud = document.getElementById('map-gen-hud');
+      if (_arenaMesh.hud) { _arenaMesh.hud.textContent = 'GENERATING ARENA'; _arenaMesh.hud.style.display = 'block'; }
+    }
   } catch (_) {}
   const mat = _arenaMakeMaterial();
   mat._uLavaY.value = (G.lavaY !== undefined) ? G.lavaY : -1e9;
@@ -31446,7 +31547,27 @@ function worldSDF(px,py,pz) {
     // open-air steps advance at most 220u (rays can't skip a pillar), and
     // contact pushes resolve in <=90u nudges, so hits slide laterally like
     // a normal wall instead of teleporting vertically.
-    const _f = _stGapSDFCarved(px,py,pz,_stT);
+    let _f = _stGapSDFCarved(px,py,pz,_stT);
+    // (v36.87) SPIRE VAULT: inside the vault's envelope, INTERSECT the
+    // arena field (evaluated in the vault's local frame) with the sandwich —
+    // the vault adds its storeys/columns as rock into the cavity the carve
+    // opened, and its shafts/ring/helix stay open. The envelope weight
+    // fades the field to "no opinion" (fully open) at the edge, so there is
+    // never a seam wall. Sphere pre-check keeps this free away from the
+    // vault.
+    const _vlt = game._lssVault;
+    if (_vlt) {
+      const vdx = px - _vlt.x, vdy = py - _vlt.y, vdz = pz - _vlt.z;
+      const vrr = _vlt.env + 240;
+      const vd2 = vdx * vdx + vdy * vdy + vdz * vdz;
+      if (vd2 < vrr * vrr) {
+        const vw = Math.max(0, Math.min(1, (_vlt.env - Math.sqrt(vd2)) / 240));
+        if (vw > 0) {
+          const dvf = _ARENA_FIELD.eval(vdx, vdy, vdz, _vlt.G);
+          _f = Math.max(_f, dvf * vw + (-600) * (1 - vw));
+        }
+      }
+    }
     // (v31.09) Open cap 220 -> 300 : wall massifs are far wider than 300u
     // so rays can't skip them ; ~25% fewer SDF samples crossing big open
     // volumes (phone CPU relief).
@@ -75860,6 +75981,15 @@ function _lssEndlessApplySeg(run, s) {
     len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
     cyl, sph, spur,
   });
+  // (v36.87) SPIRE VAULT site: the first hall past gid 3 (~8-15km in)
+  // becomes the run's multi-storey vault (see _lssVaultRegister). Both
+  // co-op peers apply the same segs in gid order, and the seed is a pure
+  // worldSeed^gid hash — identical vault everywhere, no stream draws.
+  if (s.hall && s.gid >= 3 && !game._lssVault && typeof _lssVaultRegister === 'function') {
+    const hc = s.hp || s.b;
+    const _vseed = ((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ ((s.gid * 2654435761) >>> 0)) >>> 0;
+    _lssVaultRegister(hc.x, hc.y, hc.z, _vseed);
+  }
   // (v35.84) Rebake any already-baked chunk this new geometry carves (the
   // append-tear guard — see _swInvalidateChunksInRect). Influence is 2D x/z,
   // reach = shape r + CLEAR_SOFT (_stRouteAt); +90 covers the spur (r 300 can
@@ -76180,10 +76310,25 @@ function _lssGenEndlessLevel(base) {
   };
   const nodes = [{ x: 0, y: 0, z: 0 }];
   const rooms = [{ id: 'spawn', team: 'A', x: 0, y: 0, z: 0, r: SU * 3.2 }];
+  game._lssVaultPending = null;
   for (let i = 0; i < 8; i++) {
     const s = _lssEndlessNextSeg(run);
     nodes.push(s.b);
     if (s.hall) rooms.push({ id: 'hall' + s.gid, team: null, x: s.b.x, y: s.b.y, z: s.b.z, r: s.hallR });
+    // (v36.87) SPIRE VAULT site in the SEEDED stretch: the first hall past
+    // gid 3 carries the run's multi-storey vault. Its chamber rides as a
+    // level room (drop/rise = the tall carve) so the initial bake digs it;
+    // the field/mesh register at build tail via game._lssVaultPending
+    // (levelSpheres doesn't exist yet at gen time). Runs whose seeds put no
+    // hall in gid 3-7 fall back to the runtime ApplySeg hook.
+    if (s.hall && s.gid >= 3 && !game._lssVaultPending && typeof _lssVaultG === 'function') {
+      const _vseed = (((seed >>> 0) ^ ((s.gid * 2654435761) >>> 0)) >>> 0);
+      const _vG = _lssVaultG(_vseed);
+      const _vE = _lssVaultEnv(_vG);
+      rooms.push({ id: 'vault' + s.gid, team: null, x: s.b.x, y: s.b.y, z: s.b.z,
+                   r: _vE.r * 0.92, drop: _vE.drop, rise: _vE.rise });
+      game._lssVaultPending = { x: s.b.x, y: s.b.y, z: s.b.z, seed: _vseed };
+    }
     run.segs.push({
       gid: s.gid, a: s.a, b: s.b, hall: s.hall,
       len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
@@ -76438,6 +76583,11 @@ function buildRoomGraphLevel(level) {
   // Arena builds keep the cache — _arenaEnsureMesh below reattaches it, so
   // round 2+ never re-mesh (the field is static per map).
   if (!(level && level.arena)) { try { _arenaDisposeMesh(); } catch (_) {} }
+  // (v36.87) The Spire-vault registry dies with every rebuild; vault worlds
+  // (endless / campaign legs) re-register during their own build. The mesh
+  // itself went down with _arenaDisposeMesh above (vault keys never match
+  // the spire cache, so arena maps rebuild theirs via ensure as before).
+  game._lssVault = null;
   // Bump the build sequence so any in-flight overlay
   // IIFE from a prior call knows its captured state is stale and
   // can bail out instead of re-adding old wall meshes to the scene.
@@ -76619,7 +76769,10 @@ function buildRoomGraphLevel(level) {
   // --- POPULATE SDF DATA (must happen BEFORE marching cubes) ---
   game.sdfSmoothK = 45;
   for (const rm of rooms) {
-    game.levelSpheres.push({ cx: rm.x, cy: rm.y, cz: rm.z, r: rm.r });
+    // (v36.87) drop/rise ride through when a room carries them (the endless
+    // vault chamber room needs a far taller carve than the map defaults —
+    // see _stRouteAt). Absent on every normal room.
+    game.levelSpheres.push({ cx: rm.x, cy: rm.y, cz: rm.z, r: rm.r, drop: rm.drop || 0, rise: rm.rise || 0 });
   }
   for (const seg of cylSegs) {
     // (v35.81) Carry the tunnel's optional carve weight (endless lanes, w 0.15)
@@ -76885,6 +77038,30 @@ function buildRoomGraphLevel(level) {
   // mountains. Skip the marching-cubes wall mesh entirely.
   else if (game.sandwichTerrain && game.sandwichTerrain.ON) {
     if (mapGenHud) mapGenHud.style.display = 'none';
+    // (v36.87) SPIRE VAULT registration at build tail (levelSpheres + the
+    // terrain config exist now):
+    //  - ENDLESS: the gen-time pick stashed a pending site (its chamber
+    //    already rides as a level room — register field + mesh only).
+    //  - CAMPAIGN: every leg embeds one vault mid-leg, seeded from the
+    //    worldSeed (deterministic across peers), sitting on the local
+    //    terraced deck via _stVDrift.
+    try {
+      if (game._lssVaultPending && typeof _lssVaultRegister === 'function') {
+        const p = game._lssVaultPending;
+        game._lssVaultPending = null;
+        _lssVaultRegister(p.x, p.y, p.z, p.seed, { noSphere: true });
+      } else if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && level && level._previewJourney &&
+                 !game._lssVault && typeof _lssVaultRegister === 'function') {
+        const ws = ((typeof net !== 'undefined' && net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0;
+        const h1 = ((ws * 2654435761) >>> 0) / 4294967295;
+        const h2 = ((((ws ^ 0x9E3779B9) >>> 0) * 2246822519) >>> 0) / 4294967295;
+        const vx = (h1 - 0.5) * 2600;
+        const vz = 1600 + h2 * 2600;
+        let vy = 0;
+        try { vy = _stVDrift(vx, vz, game.sandwichTerrain); } catch (_) {}
+        _lssVaultRegister(vx, vy, vz, (ws ^ 0x5A17) >>> 0);
+      }
+    } catch (e) { console.warn('[vault] build-tail registration failed:', e && e.message); }
   }
   // Worker available and enabled
   else if (game.levelWorker && typeof(game.levelWorker) !== 'string') {
