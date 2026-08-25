@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.85';
+const LSS_BUILD = '36.86';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -17126,7 +17126,22 @@ function _stVDrift(x,z,T){
   if(T.VD_FADE_O){ e*=Math.max(0,Math.min(1,(Math.hypot(x,z)-T.VD_FADE_O)/(T.VD_FADE_W||4000))); }
   if(T.VD_FADE_Z){ e*=Math.max(0,Math.min(1,(T.VD_FADE_Z+(T.VD_FADE_W||4000)-Math.abs(z))/(T.VD_FADE_W||4000))); }
   if(e<=0) return 0;
-  return a*e*_stFbm(x+7000,z-7000,2,T.VD_FREQ||0.00009,91.0);
+  const n=a*_stFbm(x+7000,z-7000,2,T.VD_FREQ||0.00009,91.0);
+  // (v36.86) TERRACED LEVELS. Smooth drift moved the whole slab but from
+  // inside an enclosed crack a gentle grade is imperceptible — "it's all
+  // just 1 level" (owner). With VD_STEP set, the drift QUANTIZES into
+  // discrete altitude decks (multiples of VD_STEP) joined by short steep
+  // risers — the hub strata bench/cliff riser curve (pow 7: flat deck for
+  // ~40% of the band, then the whole level change in a short horizontal
+  // run). Both sheets step together, so the open crack RAMPS up each cliff
+  // face and stays flyable everywhere (zero-g); the endless lane crossing a
+  // riser becomes a carved ramp to the next deck. VD_STEP absent = the
+  // original smooth drift.
+  const st=T.VD_STEP||0;
+  if(!(st>0)) return n*e;
+  const t=n/st, fl=Math.floor(t), fr=t-fl;
+  const s=fr<0.5 ? 0.5*Math.pow(2*fr,7) : 1-0.5*Math.pow(2*(1-fr),7);
+  return (fl+s)*st*e;
 }
 function _stGroundY(x,z,T){
   const wx=x+T.WARP*_stNoise2(x*T.WARP_FREQ,z*T.WARP_FREQ);
@@ -17393,7 +17408,12 @@ function _stVDrift(x,z,T){
   if(T.VD_FADE_O){ e*=Math.max(0,Math.min(1,(Math.hypot(x,z)-T.VD_FADE_O)/(T.VD_FADE_W||4000))); }
   if(T.VD_FADE_Z){ e*=Math.max(0,Math.min(1,(T.VD_FADE_Z+(T.VD_FADE_W||4000)-Math.abs(z))/(T.VD_FADE_W||4000))); }
   if(e<=0) return 0;
-  return a*e*_stFbm(x+7000,z-7000,2,T.VD_FREQ||0.00009,91.0);
+  const n=a*_stFbm(x+7000,z-7000,2,T.VD_FREQ||0.00009,91.0);
+  const st=T.VD_STEP||0;
+  if(!(st>0)) return n*e;
+  const t=n/st, fl=Math.floor(t), fr=t-fl;
+  const s=fr<0.5 ? 0.5*Math.pow(2*fr,7) : 1-0.5*Math.pow(2*(1-fr),7);
+  return (fl+s)*st*e;
 }
 function _stGroundY(x,z,T){
   const wx=x+T.WARP*_stNoise2(x*T.WARP_FREQ,z*T.WARP_FREQ);
@@ -58410,7 +58430,7 @@ const CAMPAIGN_LEG_MAP = {
   defaultTheme: 'Rocky',
   _previewJourney: true,
   palette: [0x1a2440, 0x202a48, 0x18203a, 0x241c40, 0x1c2848, 0x182038, 0x202848, 0x1a2240],
-  terrain: { vDrift: 1200, vDriftFreq: 0.00008, vFadeZ: 12500, vFadeW: 4200 },
+  terrain: { vDrift: 1800, vDriftFreq: 0.00008, vFadeZ: 12500, vFadeW: 4200, vStep: 750 },
   rooms: [
     { id: 'spawn', team: 'A',  x: 0, y: 0, z: -CAMPAIGN_LEG_HALF_Z, r: SU * 4.0 },
     { id: 'boss',  team: null, x: 0, y: 0, z:  CAMPAIGN_LEG_HALF_Z, r: SU * 4.5, champion: true },
@@ -58424,7 +58444,7 @@ MAP_DATA.endless_caverns = {
   defaultTheme: 'Rocky',
   description: 'A cavern without end. Fly as far as you can on the lives you chose.',
   procedural: 'endless',
-  terrain: { wallPinch: 0.24, vDrift: 1300, vDriftFreq: 0.00009, vFadeO: 9000, vFadeW: 8000 },
+  terrain: { wallPinch: 0.24, vDrift: 2000, vDriftFreq: 0.00009, vFadeO: 9000, vFadeW: 8000, vStep: 800 },
   palette: [0x1c2434, 0x28324a, 0x1a2030, 0x242c44, 0x202840, 0x182238, 0x2a3448, 0x1e2636],
   rooms: [
     { id: 'spawn', team: 'A', x: 0, y: 0, z: 0, r: SU * 3.2 },
@@ -58433,12 +58453,15 @@ MAP_DATA.endless_caverns = {
   tunnels: [{ r: 400, path: [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 9000 }] }],
 };
 
-const _LSS_ENDLESS_VDRIFT = { a: 1300, f: 0.00009, fadeO: 9000, fadeW: 8000 };
+const _LSS_ENDLESS_VDRIFT = { a: 2000, f: 0.00009, fadeO: 9000, fadeW: 8000, step: 800 };
 function _lssEndlessDriftY(x, z) {
   const V = _LSS_ENDLESS_VDRIFT;
   const e = Math.max(0, Math.min(1, (Math.hypot(x, z) - V.fadeO) / V.fadeW));
   if (e <= 0) return 0;
-  return V.a * e * _stFbm(x + 7000, z - 7000, 2, V.f, 91.0);
+  const n = V.a * _stFbm(x + 7000, z - 7000, 2, V.f, 91.0);
+  const t = n / V.step, fl = Math.floor(t), fr = t - fl;
+  const s = fr < 0.5 ? 0.5 * Math.pow(2 * fr, 7) : 1 - 0.5 * Math.pow(2 * (1 - fr), 7);
+  return (fl + s) * V.step * e;
 }
 function _lssEndlessNextSeg(run) {
   const g = run.gen, rand = g.rand;
@@ -59213,6 +59236,7 @@ function buildRoomGraphLevel(level) {
       VD_FADE_O: (_tOv && typeof _tOv.vFadeO === 'number') ? _tOv.vFadeO : 0,
       VD_FADE_Z: (_tOv && typeof _tOv.vFadeZ === 'number') ? _tOv.vFadeZ : 0,
       VD_FADE_W: (_tOv && typeof _tOv.vFadeW === 'number') ? _tOv.vFadeW : 4000,
+      VD_STEP: (_tOv && typeof _tOv.vStep === 'number') ? _tOv.vStep : 0,
       PILLARS: _pillars,
       CLEAR_SOFT: 120,          
       ARENA_DROP: 640,          
