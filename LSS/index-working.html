@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.80';
+const LSS_BUILD = '36.81';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -54175,19 +54175,30 @@ function _adsOverlayRender() {
     _adsOvCam.quaternion.copy(camera.quaternion);
     _adsOvCam.updateProjectionMatrix();
     _adsOvCam.updateMatrixWorld(true);
-    // ⚠ Depth is deliberately NOT cleared (v36.75 whiteout fix): the legacy
-    // postFX composite computes FOG / godrays / aerial from this target's
-    // depth buffer — clearing it made the whole frame read "infinitely far"
-    // = max fog = the zoomed screen went white with only the ship crisp.
-    // No clear is also CORRECT rendering: both cameras share position,
-    // orientation, near and far (fov does not enter the projection's z row),
-    // so depth values are directly comparable — the hull depth-tests against
-    // the zoomed world, drawing over farther geometry and correctly hiding
-    // behind anything nearer.
+    // ⚠⚠ (v36.81) THE REAL WHITEOUT MECHANISM — scene.background. three.js
+    // renderer.render() paints scene.background at the start of EVERY pass
+    // REGARDLESS of autoClear, so on maps that set a background color this
+    // overlay pass repainted the whole already-rendered world with flat
+    // background before drawing the ship: white world, crisp hull. Maps with
+    // background = null (the hub — its sky is a camera-pinned dome) never
+    // showed it, which is why v36.75's clearDepth removal "fixed" it in hub
+    // tests while the pale arenas stayed broken (the depth theory there was
+    // wrong: the post chain has no depth texture at all; live-verified by
+    // rendering this pass with ZERO layer-5 objects — the frame still went
+    // white). Fix: background is nulled around the pass. finally-restored so
+    // a throw can never leak a null background or autoClear=false into the
+    // main loop. Depth still deliberately not cleared: same pose + near/far
+    // means the hull depth-tests correctly against the zoomed world.
     const _prevAC = renderer.autoClear;
-    renderer.autoClear = false;
-    renderer.render(scene, _adsOvCam);
-    renderer.autoClear = _prevAC;
+    const _prevBG = scene.background;
+    try {
+      renderer.autoClear = false;
+      scene.background = null;
+      renderer.render(scene, _adsOvCam);
+    } finally {
+      renderer.autoClear = _prevAC;
+      scene.background = _prevBG;
+    }
   } catch (_) {}
 }
 
