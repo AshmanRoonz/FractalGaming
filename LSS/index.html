@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.91';
+const LSS_BUILD = '36.92';
 if (typeof location !== 'undefined' && /[?&]ribbon/.test(location.search)) window.__ribbon = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -24242,13 +24242,15 @@ const _ARENA_FIELD_SRC = `{
 const _ARENA_FIELD = (new Function('return (' + _ARENA_FIELD_SRC + ')'))();
 
 const _RIBBON_P = {
-  gapHalf: 560,     // half-gap between the two faces (pre-relief)
-  width: 1500,      // lateral half-width of the corridor
-  faceAmp: 360,     // relief amplitude on the two faces
-  faceFreq: 1 / 760,
-  wallAmp: 300,     // relief on the lateral walls
-  wallFreq: 1 / 900,
-  grain: 14,        // fine rock grain
+  gapHalf: 620,      // half-gap between the two faces (pre-relief)
+  faceAmp: 950,      // relief amplitude — sandwich-scale mountains
+  faceFreq: 1 / 980,
+  attNear: 0.35,     // relief attenuation on the route spine (guaranteed lane)
+  attNearR: 900,     // full lane clearance radius
+  attFarR: 2400,     // full mountains beyond this lateral distance
+  taperStart: 5200,  // gap starts thinning this far off the spine...
+  taperRate: 0.25,   // ...and seals ~2.5km later. Geology, not a wall.
+  grain: 14,         // fine rock grain
 };
 const _RIBBON_FIELD_SRC = `{
   hash(x, y) {
@@ -24272,59 +24274,66 @@ const _RIBBON_FIELD_SRC = `{
     }
     return s / tot;
   },
-  // Nearest route segment + parameter t. Coarse bounding-sphere reject,
-  // then exact point-segment projection.
-  proj(px, py, pz, S) {
+  // THE FIELD. Positive = rock, negative = open (sandwich convention).
+  // (v36.92) UNION over every in-reach segment's INFINITE slab — no
+  // lateral wall term at all. Each segment contributes "open within the
+  // gap around my tilted mid-plane"; min() unions them, so where a flat
+  // stretch and an on-edge stretch pass near each other their slabs merge
+  // into bigger caverns. Off the spine the relief grows to full
+  // sandwich-scale mountains (which naturally pinch and pillar), and far
+  // out the gap thins to sealed — geology, never a wall.
+  eval(px, py, pz, S) {
     const segs = S.segs, P = S.p;
-    const reach = P.width + P.gapHalf + P.faceAmp + 1500;
-    let bi = -1, bd2 = Infinity, bt = 0;
+    const REACH = P.taperStart + P.gapHalf / P.taperRate + 900;
+    let f = 2000;
     for (let i = 0; i < segs.length; i++) {
       const s = segs[i];
       const dx0 = px - s.mx, dy0 = py - s.my, dz0 = pz - s.mz;
-      const br = s.half + reach;
+      const br = s.half + REACH;
       if (dx0 * dx0 + dy0 * dy0 + dz0 * dz0 > br * br) continue;
       const apx = px - s.ax, apy = py - s.ay, apz = pz - s.az;
       let t = (apx * s.abx + apy * s.aby + apz * s.abz) / s.len2;
       t = t < 0 ? 0 : (t > 1 ? 1 : t);
-      const dxx = apx - s.abx * t, dyy = apy - s.aby * t, dzz = apz - s.abz * t;
-      const d2 = dxx * dxx + dyy * dyy + dzz * dzz;
-      if (d2 < bd2) { bd2 = d2; bi = i; bt = t; }
+      let nx = s.nax + (s.nbx - s.nax) * t, ny = s.nay + (s.nby - s.nay) * t, nz = s.naz + (s.nbz - s.naz) * t;
+      let bx = s.bax + (s.bbx - s.bax) * t, by = s.bay + (s.bby - s.bay) * t, bz = s.baz + (s.bbz - s.baz) * t;
+      const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+      const bl = Math.sqrt(bx * bx + by * by + bz * bz) || 1;
+      nx /= nl; ny /= nl; nz /= nl; bx /= bl; by /= bl; bz /= bl;
+      const qx = px - (s.ax + s.abx * t), qy = py - (s.ay + s.aby * t), qz = pz - (s.az + s.abz * t);
+      const w = qx * nx + qy * ny + qz * nz;   // across the gap (the sandwich axis)
+      const v = qx * bx + qy * by + qz * bz;   // lateral, unbounded
+      const u = s.u0 + s.len * t;              // arclength along the route
+      let gap = P.gapHalf;
+      // Hall bulge: the gap swells into a gallery around hall segments.
+      if (s.ha > 0) {
+        const hd = (u - s.hu) / 950;
+        gap += s.ha * Math.exp(-hd * hd) * 0.4;
+      }
+      // Spawn easing: the first stretch is calm and roomy.
+      if (u < 2600) gap += (1 - u / 2600) * 160;
+      const av = Math.abs(v);
+      // Far-lateral thinning: the slab gradually seals kilometres off the
+      // spine instead of meeting a wall.
+      if (av > P.taperStart) gap -= (av - P.taperStart) * P.taperRate;
+      const base = Math.abs(w) - gap;
+      // This segment cannot beat the current best even with max relief.
+      if (base - P.faceAmp - 80 > f) continue;
+      let fSeg;
+      if (gap < 120) {
+        fSeg = base;
+      } else {
+        const ramp = u < 400 ? 0 : (u > 2000 ? 1 : (u - 400) / 1600);
+        // Relief attenuated on the lane (guaranteed passage), full
+        // mountains off it — the classic sandwich look, orientation-free.
+        const attL = av <= P.attNearR ? 0 : (av >= P.attFarR ? 1 : (av - P.attNearR) / (P.attFarR - P.attNearR));
+        const att = (P.attNear + (1 - P.attNear) * attL) * ramp;
+        const relF = this.fbm2(u + 913, v, 2, P.faceFreq, 37) * P.faceAmp * att;
+        const relC = this.fbm2(u - 557, v, 2, P.faceFreq, 91) * P.faceAmp * att;
+        fSeg = Math.max((relF - gap) - w, w - (gap - relC));
+      }
+      if (fSeg < f) f = fSeg;
     }
-    return bi < 0 ? null : { s: segs[bi], t: bt };
-  },
-  // THE FIELD. Positive = rock, negative = open corridor (matches the
-  // sandwich convention). Reading eval() top to bottom is reading the
-  // corridor's anatomy.
-  eval(px, py, pz, S) {
-    const pr = this.proj(px, py, pz, S);
-    if (!pr) return 2000;
-    const s = pr.s, t = pr.t, P = S.p;
-    let nx = s.nax + (s.nbx - s.nax) * t, ny = s.nay + (s.nby - s.nay) * t, nz = s.naz + (s.nbz - s.naz) * t;
-    let bx = s.bax + (s.bbx - s.bax) * t, by = s.bay + (s.bby - s.bay) * t, bz = s.baz + (s.bbz - s.baz) * t;
-    const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
-    const bl = Math.sqrt(bx * bx + by * by + bz * bz) || 1;
-    nx /= nl; ny /= nl; nz /= nl; bx /= bl; by /= bl; bz /= bl;
-    const qx = px - (s.ax + s.abx * t), qy = py - (s.ay + s.aby * t), qz = pz - (s.az + s.abz * t);
-    const w = qx * nx + qy * ny + qz * nz;   // across the gap (the sandwich axis)
-    const v = qx * bx + qy * by + qz * bz;   // lateral
-    const u = s.u0 + s.len * t;              // arclength along the route
-    let wid = P.width, gap = P.gapHalf;
-    // Hall bulge: the corridor swells into a gallery around hall segments.
-    if (s.ha > 0) {
-      const hd = (u - s.hu) / 950;
-      const bump = s.ha * Math.exp(-hd * hd);
-      wid += bump; gap += bump * 0.35;
-    }
-    // Spawn easing: the first stretch is calm, wide and smooth.
-    if (u < 2600) { const e0 = 1 - u / 2600; wid += e0 * 500; gap += e0 * 160; }
-    const ramp = u < 400 ? 0 : (u > 2000 ? 1 : (u - 400) / 1600);
-    const relF = this.fbm2(u + 913, v, 2, P.faceFreq, 37) * P.faceAmp * ramp;
-    const relC = this.fbm2(u - 557, v, 2, P.faceFreq, 91) * P.faceAmp * ramp;
-    const fGap = Math.max((relF - gap) - w, w - (gap - relC));
-    const relW = this.fbm2(u + 313, w, 2, P.wallFreq, 53) * P.wallAmp * ramp;
-    const fSide = Math.abs(v) - (wid - relW);
-    let f = Math.max(fGap, fSide);
-    f += this.noise2(u * 0.045, (v + w * 0.7) * 0.045) * P.grain;
+    if (f < 600) f += this.noise2((px + py) * 0.045, (pz - py) * 0.045) * P.grain;
     return f;
   },
   grad(px, py, pz, S, eps) {
@@ -24374,8 +24383,8 @@ function mesh(m, S) {
   for (let k = 0; k < 9; k++) {
     const fx = (k & 1) ? size : 0, fy = (k & 2) ? size : 0, fz = (k & 4) ? size : 0;
     const d = FIELD.eval(ox + (k === 8 ? size * 0.5 : fx), oy + (k === 8 ? size * 0.5 : fy), oz + (k === 8 ? size * 0.5 : fz), S);
-    if (d > -940) allOpen = false;
-    if (d < 940) allSolid = false;
+    if (d > -1400) allOpen = false;
+    if (d < 1400) allSolid = false;
   }
   if (allOpen || allSolid) return { key: m.key, empty: true };
   const SS = N + 2;
@@ -24478,14 +24487,8 @@ function _rbnReceive(r) {
   const mesh = new THREE.Mesh(geo, _rbn.mat);
   mesh.matrixAutoUpdate = false;
   _rbn.group.add(mesh);
-  _rbn.chunks.set(r.key, { mesh, cx: pend.cx, cy: pend.cy, cz: pend.cz });
+  _rbn.chunks.set(r.key, { mesh, tris: r.tris, cx: pend.cx, cy: pend.cy, cz: pend.cz });
   _rbn.tris += r.tris;
-}
-function _rbnAxisDist(x, y, z, s) {
-  const apx = x - s.ax, apy = y - s.ay, apz = z - s.az;
-  let t = (apx * s.abx + apy * s.aby + apz * s.abz) / s.len2;
-  t = t < 0 ? 0 : (t > 1 ? 1 : t);
-  return Math.hypot(apx - s.abx * t, apy - s.aby * t, apz - s.abz * t);
 }
 function _rbnTick(dt) {
   if (!_rbn.on || !game.ribbonWorld || !game._rbnSegs || typeof player === 'undefined' || !player || !player.position) return;
@@ -24493,7 +24496,7 @@ function _rbnTick(dt) {
   const now = performance.now();
   if (now - _rbn.lastScan > 380) {
     _rbn.lastScan = now;
-    const CH = 600, SCAN_R = 5200, AX_R = 2380, PAD = 2400;
+    const CH = 600, SCAN_R = 4600;
     const segs = game._rbnSegs;
     if (segs.length > 6) {
       let cut = 0;
@@ -24502,26 +24505,24 @@ function _rbnTick(dt) {
       if (cut > 0) segs.splice(0, cut);
     }
     const wanted = new Map();
-    for (const s of segs) {
-      if (_rbnAxisDist(px, py, pz, s) - s.half > SCAN_R + PAD) continue;
-      const x0 = Math.floor((Math.min(s.ax, s.bx) - PAD) / CH), x1 = Math.floor((Math.max(s.ax, s.bx) + PAD) / CH);
-      const y0 = Math.floor((Math.min(s.ay, s.by) - PAD) / CH), y1 = Math.floor((Math.max(s.ay, s.by) + PAD) / CH);
-      const z0 = Math.floor((Math.min(s.az, s.bz) - PAD) / CH), z1 = Math.floor((Math.max(s.az, s.bz) + PAD) / CH);
-      for (let i = x0; i <= x1; i++) for (let j = y0; j <= y1; j++) for (let k = z0; k <= z1; k++) {
-        const cx = (i + 0.5) * CH, cy = (j + 0.5) * CH, cz = (k + 0.5) * CH;
-        const dp = Math.hypot(cx - px, cy - py, cz - pz);
-        if (dp > SCAN_R) continue;
-        if (_rbnAxisDist(cx, cy, cz, s) > AX_R) continue;
-        const key = i + ',' + j + ',' + k;
-        const prev = wanted.get(key);
-        if (prev === undefined || dp < prev) wanted.set(key, dp);
-      }
+    _rbnQ.segs = segs;
+    const i0 = Math.floor((px - SCAN_R) / CH), i1 = Math.floor((px + SCAN_R) / CH);
+    const j0 = Math.floor((py - SCAN_R) / CH), j1 = Math.floor((py + SCAN_R) / CH);
+    const k0 = Math.floor((pz - SCAN_R) / CH), k1 = Math.floor((pz + SCAN_R) / CH);
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) for (let k = k0; k <= k1; k++) {
+      const cx = (i + 0.5) * CH, cy = (j + 0.5) * CH, cz = (k + 0.5) * CH;
+      const dp = Math.hypot(cx - px, cy - py, cz - pz);
+      if (dp > SCAN_R) continue;
+      const fd = _RIBBON_FIELD.eval(cx, cy, cz, _rbnQ);
+      if (fd > 1600 || fd < -1600) continue;
+      wanted.set(i + ',' + j + ',' + k, dp);
     }
     for (const [key, ent] of _rbn.chunks) {
       if (wanted.has(key)) continue;
       if (Math.hypot(ent.cx - px, ent.cy - py, ent.cz - pz) > 6500) {
         if (ent.mesh) {
           try { _rbn.group.remove(ent.mesh); ent.mesh.geometry.dispose(); } catch (_) {}
+          _rbn.tris -= ent.tris || 0;
         }
         _rbn.chunks.delete(key);
       }
@@ -59529,6 +59530,10 @@ function buildRoomGraphLevel(level) {
   if (game.sandwichTerrainEnabled === undefined) game.sandwichTerrainEnabled = true;
   if (level && level.arena) {
     game.arenaField = { ON: true, G: _arenaBuildParams(level.arena, level.rooms) };
+    game.sandwichTerrain = null;
+  }
+  else if (level && level.ribbon) {
+    game.arenaField = null;
     game.sandwichTerrain = null;
   }
   else if (game.sandwichTerrainEnabled) {
