@@ -4213,7 +4213,10 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.90';
+const LSS_BUILD = '36.91';
+// (v36.91) RIBBON WORLD feel-test opt-in: ?ribbon in the URL (or set
+// window.__ribbon = true in the console) before launching ENDLESS.
+if (typeof location !== 'undefined' && /[?&]ribbon/.test(location.search)) window.__ribbon = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -9161,7 +9164,9 @@ function startEndless() {
   game.testMode = false;
   game.raceNoTimer = true;
   game.currentRound = 1;
-  game.selectedMap = 'endless_caverns';
+  // (v36.91) RIBBON WORLD feel-test: window.__ribbon (or ?ribbon in the
+  // URL) routes endless into the winding-corridor world.
+  game.selectedMap = (typeof window !== 'undefined' && window.__ribbon) ? 'endless_ribbon' : 'endless_caverns';
   let _code = '';
   try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
   if ((net.active && net.room) || _code) {
@@ -30401,6 +30406,361 @@ const _ARENA_FIELD_SRC = `{
 // site ships no CSP (_headers is Cache-Control only), so this is safe.
 const _ARENA_FIELD = (new Function('return (' + _ARENA_FIELD_SRC + ')'))();
 
+// ══════════════════════════════════════════════════════════════════════════
+// (v36.91) RIBBON WORLD — feel-test. The owner's reframe after the whole
+// v36.85-89 verticality arc died: "what if the sandwich was not always on
+// the same axis... they could randomly twist so they're vertically
+// parallel, bend downward and upward... winding and turning."
+//
+// THE MODEL: the world is solid rock everywhere except ONE winding ribbon
+// of open corridor around the endless route. Locally it is still the
+// sandwich — two parallel faces ~1120u apart with terrain relief on both —
+// but the pair's orientation is free: it ROLLS around the direction of
+// travel (flat floor/ceiling -> banked -> on-edge canyon walls) and
+// PITCHES into sustained dives and climbs. There is no "around": the
+// corridor is the world. This is a world-representation change, not an
+// object, which is why it can't be a heightfield (a vertical wall is not
+// y = f(x,z)): collision is a direct field over the route's frames, and
+// rendering is a streamed ring of surface-nets chunks (the machinery the
+// cavern work proved at ~500k tris mid-flight).
+//
+// Route frames: each segment carries rotation-minimizing node frames
+// (normal N = the sandwich axis, binormal B = lateral) built by parallel
+// transport in _lssEndlessNextSeg — pure route state, deterministic from
+// the seed. The field lerps node frames along each segment, so the
+// corridor bends and twists smoothly with zero seams at nodes.
+// ══════════════════════════════════════════════════════════════════════════
+const _RIBBON_P = {
+  gapHalf: 560,     // half-gap between the two faces (pre-relief)
+  width: 1500,      // lateral half-width of the corridor
+  faceAmp: 360,     // relief amplitude on the two faces
+  faceFreq: 1 / 760,
+  wallAmp: 300,     // relief on the lateral walls
+  wallFreq: 1 / 900,
+  grain: 14,        // fine rock grain
+};
+// One source of truth for collision (main thread) and the mesh workers.
+// ⚠ NO backticks / dollar-brace inside the literal below.
+const _RIBBON_FIELD_SRC = `{
+  hash(x, y) {
+    let h = x * 374761393 + y * 668265263;
+    h = (h ^ (h >>> 13)) * 1274126177;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  },
+  noise2(x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    const xf = x - xi, yf = y - yi;
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    const H = this.hash;
+    const a = H(xi, yi), b = H(xi + 1, yi), c = H(xi, yi + 1), d = H(xi + 1, yi + 1);
+    return (a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v) * 2 - 1;
+  },
+  fbm2(x, y, oct, f, off) {
+    let s = 0, amp = 1, tot = 0, ff = f;
+    for (let i = 0; i < oct; i++) {
+      s += this.noise2(x * ff + off * (i + 1) * 17.31, y * ff - off * (i + 1) * 9.17) * amp;
+      tot += amp; amp *= 0.5; ff *= 2.13;
+    }
+    return s / tot;
+  },
+  // Nearest route segment + parameter t. Coarse bounding-sphere reject,
+  // then exact point-segment projection.
+  proj(px, py, pz, S) {
+    const segs = S.segs, P = S.p;
+    const reach = P.width + P.gapHalf + P.faceAmp + 1500;
+    let bi = -1, bd2 = Infinity, bt = 0;
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      const dx0 = px - s.mx, dy0 = py - s.my, dz0 = pz - s.mz;
+      const br = s.half + reach;
+      if (dx0 * dx0 + dy0 * dy0 + dz0 * dz0 > br * br) continue;
+      const apx = px - s.ax, apy = py - s.ay, apz = pz - s.az;
+      let t = (apx * s.abx + apy * s.aby + apz * s.abz) / s.len2;
+      t = t < 0 ? 0 : (t > 1 ? 1 : t);
+      const dxx = apx - s.abx * t, dyy = apy - s.aby * t, dzz = apz - s.abz * t;
+      const d2 = dxx * dxx + dyy * dyy + dzz * dzz;
+      if (d2 < bd2) { bd2 = d2; bi = i; bt = t; }
+    }
+    return bi < 0 ? null : { s: segs[bi], t: bt };
+  },
+  // THE FIELD. Positive = rock, negative = open corridor (matches the
+  // sandwich convention). Reading eval() top to bottom is reading the
+  // corridor's anatomy.
+  eval(px, py, pz, S) {
+    const pr = this.proj(px, py, pz, S);
+    if (!pr) return 2000;
+    const s = pr.s, t = pr.t, P = S.p;
+    let nx = s.nax + (s.nbx - s.nax) * t, ny = s.nay + (s.nby - s.nay) * t, nz = s.naz + (s.nbz - s.naz) * t;
+    let bx = s.bax + (s.bbx - s.bax) * t, by = s.bay + (s.bby - s.bay) * t, bz = s.baz + (s.bbz - s.baz) * t;
+    const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+    const bl = Math.sqrt(bx * bx + by * by + bz * bz) || 1;
+    nx /= nl; ny /= nl; nz /= nl; bx /= bl; by /= bl; bz /= bl;
+    const qx = px - (s.ax + s.abx * t), qy = py - (s.ay + s.aby * t), qz = pz - (s.az + s.abz * t);
+    const w = qx * nx + qy * ny + qz * nz;   // across the gap (the sandwich axis)
+    const v = qx * bx + qy * by + qz * bz;   // lateral
+    const u = s.u0 + s.len * t;              // arclength along the route
+    let wid = P.width, gap = P.gapHalf;
+    // Hall bulge: the corridor swells into a gallery around hall segments.
+    if (s.ha > 0) {
+      const hd = (u - s.hu) / 950;
+      const bump = s.ha * Math.exp(-hd * hd);
+      wid += bump; gap += bump * 0.35;
+    }
+    // Spawn easing: the first stretch is calm, wide and smooth.
+    if (u < 2600) { const e0 = 1 - u / 2600; wid += e0 * 500; gap += e0 * 160; }
+    const ramp = u < 400 ? 0 : (u > 2000 ? 1 : (u - 400) / 1600);
+    const relF = this.fbm2(u + 913, v, 2, P.faceFreq, 37) * P.faceAmp * ramp;
+    const relC = this.fbm2(u - 557, v, 2, P.faceFreq, 91) * P.faceAmp * ramp;
+    const fGap = Math.max((relF - gap) - w, w - (gap - relC));
+    const relW = this.fbm2(u + 313, w, 2, P.wallFreq, 53) * P.wallAmp * ramp;
+    const fSide = Math.abs(v) - (wid - relW);
+    let f = Math.max(fGap, fSide);
+    f += this.noise2(u * 0.045, (v + w * 0.7) * 0.045) * P.grain;
+    return f;
+  },
+  grad(px, py, pz, S, eps) {
+    const e = eps || 3.0;
+    const gx = this.eval(px + e, py, pz, S) - this.eval(px - e, py, pz, S);
+    const gy = this.eval(px, py + e, pz, S) - this.eval(px, py - e, pz, S);
+    const gz = this.eval(px, py, pz + e, S) - this.eval(px, py, pz - e, S);
+    const l = Math.hypot(gx, gy, gz) || 1;
+    return [gx / l, gy / l, gz / l];
+  },
+  // Per-vertex look, oriented by the OUTWARD surface normal: up-facing
+  // surfaces read as floor (warm), down-facing as ceiling (cool slate),
+  // steep as wall — so a twisted section recolors itself correctly.
+  shade(px, py, pz, S, nx, ny, nz) {
+    const mott = this.noise2((px + pz) * 0.0042, py * 0.0042);
+    let r, g2, b;
+    if (ny > 0.35) { r = 0.35; g2 = 0.30; b = 0.25; }
+    else if (ny < -0.35) { r = 0.23; g2 = 0.25; b = 0.30; }
+    else { r = 0.29; g2 = 0.285; b = 0.29; }
+    const l = 1 + mott * 0.24;
+    const vein = Math.pow(Math.max(0, 1 - Math.abs(this.noise2(px * 0.012 + 31, (py + pz) * 0.012))), 6);
+    return [r * l, g2 * l, b * l, 0.92, Math.min(1, vein * 0.16)];
+  }
+}`;
+const _RIBBON_FIELD = (new Function('return (' + _RIBBON_FIELD_SRC + ')'))();
+// Persistent query wrapper (worldSDF is the hottest path in the game — no
+// per-call allocation).
+const _rbnQ = { segs: null, p: _RIBBON_P };
+
+// ── The streamed chunk ring ────────────────────────────────────────────────
+const _rbn = { on: false, group: null, mat: null, workers: [], next: 0,
+               chunks: new Map(), pending: new Map(), queue: [],
+               lastScan: 0, tris: 0 };
+function _rbnWorkerSrc() {
+  return 'const FIELD = ' + _RIBBON_FIELD_SRC + ';\n' + `
+self.onmessage = (e) => {
+  const m = e.data;
+  if (m.cmd !== 'chunk') return;
+  const S = { segs: m.segs, p: m.p };
+  const r = mesh(m, S);
+  if (r.empty) self.postMessage(r);
+  else self.postMessage(r, [r.pos.buffer, r.nrm.buffer, r.col.buffer, r.idx.buffer]);
+};
+function mesh(m, S) {
+  const N = m.cells, size = m.size, ox = m.ox, oy = m.oy, oz = m.oz;
+  const cell = size / N;
+  // 9-point early-out: a chunk deep inside open corridor or deep inside
+  // rock has no surface — skip the full sample grid.
+  let allOpen = true, allSolid = true;
+  for (let k = 0; k < 9; k++) {
+    const fx = (k & 1) ? size : 0, fy = (k & 2) ? size : 0, fz = (k & 4) ? size : 0;
+    const d = FIELD.eval(ox + (k === 8 ? size * 0.5 : fx), oy + (k === 8 ? size * 0.5 : fy), oz + (k === 8 ? size * 0.5 : fz), S);
+    if (d > -940) allOpen = false;
+    if (d < 940) allSolid = false;
+  }
+  if (allOpen || allSolid) return { key: m.key, empty: true };
+  const SS = N + 2;
+  const val = new Float32Array(SS * SS * SS);
+  let si = 0;
+  for (let k = -1; k <= N; k++) { const wz = oz + k * cell;
+    for (let j = -1; j <= N; j++) { const wy = oy + j * cell;
+      for (let i = -1; i <= N; i++) val[si++] = FIELD.eval(ox + i * cell, wy, wz, S); } }
+  const AT = (i, j, k) => val[((k + 1) * SS + (j + 1)) * SS + (i + 1)];
+  const C = N + 1;
+  const vidx = new Int32Array(C * C * C).fill(-1);
+  const VI = (i, j, k) => ((k + 1) * C + (j + 1)) * C + (i + 1);
+  const pos = [], nrm = [], col = [];
+  const EDGES = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
+  for (let k = -1; k < N; k++) for (let j = -1; j < N; j++) for (let i = -1; i < N; i++) {
+    const c = [AT(i,j,k),AT(i+1,j,k),AT(i,j+1,k),AT(i+1,j+1,k),
+               AT(i,j,k+1),AT(i+1,j,k+1),AT(i,j+1,k+1),AT(i+1,j+1,k+1)];
+    let neg = 0; for (let q = 0; q < 8; q++) if (c[q] < 0) neg++;
+    if (neg === 0 || neg === 8) continue;
+    let sx = 0, sy = 0, sz = 0, n = 0;
+    for (const ed of EDGES) {
+      const va = c[ed[0]], vb = c[ed[1]];
+      if ((va < 0) === (vb < 0)) continue;
+      const t = va / (va - vb);
+      const a = ed[0], b = ed[1];
+      const ax = a & 1, ay = (a >> 1) & 1, az = (a >> 2) & 1, bx = b & 1, by = (b >> 1) & 1, bz = (b >> 2) & 1;
+      sx += ax + (bx - ax) * t; sy += ay + (by - ay) * t; sz += az + (bz - az) * t; n++;
+    }
+    sx /= n; sy /= n; sz /= n;
+    const wx = ox + (i + sx) * cell, wy = oy + (j + sy) * cell, wz = oz + (k + sz) * cell;
+    vidx[VI(i, j, k)] = pos.length / 3;
+    pos.push(wx, wy, wz);
+    const gr = FIELD.grad(wx, wy, wz, S, cell);
+    nrm.push(-gr[0], -gr[1], -gr[2]);
+    const sh = FIELD.shade(wx, wy, wz, S, -gr[0], -gr[1], -gr[2]);
+    col.push(Math.min(1, sh[0]), Math.min(1, sh[1]), Math.min(1, sh[2]), Math.min(1, sh[4]));
+  }
+  const idx = [];
+  const quad = (a, b, c2, d, flip) => { if (a < 0 || b < 0 || c2 < 0 || d < 0) return;
+    if (flip) idx.push(a, c2, b, b, c2, d); else idx.push(a, b, c2, b, d, c2); };
+  for (let k = 0; k < N; k++) for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const v0 = AT(i, j, k);
+    if ((v0 < 0) !== (AT(i + 1, j, k) < 0)) quad(vidx[VI(i, j - 1, k - 1)], vidx[VI(i, j, k - 1)], vidx[VI(i, j - 1, k)], vidx[VI(i, j, k)], v0 < 0);
+    if ((v0 < 0) !== (AT(i, j + 1, k) < 0)) quad(vidx[VI(i - 1, j, k - 1)], vidx[VI(i - 1, j, k)], vidx[VI(i, j, k - 1)], vidx[VI(i, j, k)], v0 < 0);
+    if ((v0 < 0) !== (AT(i, j, k + 1) < 0)) quad(vidx[VI(i - 1, j - 1, k)], vidx[VI(i, j - 1, k)], vidx[VI(i - 1, j, k)], vidx[VI(i, j, k)], v0 < 0);
+  }
+  if (!idx.length) return { key: m.key, empty: true };
+  return { key: m.key, empty: false,
+    pos: new Float32Array(pos), nrm: new Float32Array(nrm), col: new Float32Array(col),
+    idx: new Uint32Array(idx), tris: idx.length / 3 };
+}`;
+}
+function _rbnDispose() {
+  for (const w of _rbn.workers) { try { w.terminate(); } catch (_) {} }
+  _rbn.workers = [];
+  if (_rbn.group) {
+    try { if (_rbn.group.parent) scene.remove(_rbn.group); } catch (_) {}
+    _rbn.group.traverse((n) => { if (n.isMesh && n.geometry) { try { n.geometry.dispose(); } catch (_) {} } });
+  }
+  _rbn.group = null; _rbn.chunks.clear(); _rbn.pending.clear();
+  _rbn.queue = []; _rbn.on = false; _rbn.tris = 0;
+}
+function _rbnInit() {
+  _rbnDispose();
+  _rbn.group = new THREE.Group();
+  _rbn.group.name = 'ribbonWorld';
+  _rbn.group.matrixAutoUpdate = false;
+  _rbn.group.updateMatrix();
+  scene.add(_rbn.group);
+  _rbn.mat = _arenaMakeMaterial();
+  _rbn.mat._uLavaY.value = -1e9;
+  _rbn.mat._uMystLo.value = 1e9; _rbn.mat._uMystHi.value = 1e9;
+  _rbn.mat._uBronzeLo.value = 1e9; _rbn.mat._uBronzeHi.value = 1e9;
+  let url = null;
+  try { url = URL.createObjectURL(new Blob([_rbnWorkerSrc()], { type: 'text/javascript' })); }
+  catch (e) { console.warn('[ribbon] worker blob failed (collision-only world):', e); return; }
+  const NW = Math.max(2, Math.min(5, (navigator.hardwareConcurrency || 4) - 3));
+  for (let n = 0; n < NW; n++) {
+    let w;
+    try { w = new Worker(url); } catch (e) { console.warn('[ribbon] worker spawn failed:', e); continue; }
+    w.onerror = (e) => console.warn('[ribbon] worker error:', e && (e.message || e));
+    w.onmessage = (ev) => _rbnReceive(ev.data);
+    _rbn.workers.push(w);
+  }
+  try { URL.revokeObjectURL(url); } catch (_) {}
+  _rbn.on = _rbn.workers.length > 0;
+  console.log('[ribbon] streamer up: ' + _rbn.workers.length + ' workers');
+}
+function _rbnReceive(r) {
+  const pend = _rbn.pending.get(r.key);
+  _rbn.pending.delete(r.key);
+  if (!_rbn.on || !pend) return;
+  if (r.empty) { _rbn.chunks.set(r.key, { mesh: null, cx: pend.cx, cy: pend.cy, cz: pend.cz }); return; }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(r.pos, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(r.nrm, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(r.col, 4));
+  geo.setIndex(new THREE.BufferAttribute(r.idx, 1));
+  geo.computeBoundingSphere();
+  const mesh = new THREE.Mesh(geo, _rbn.mat);
+  mesh.matrixAutoUpdate = false;
+  _rbn.group.add(mesh);
+  _rbn.chunks.set(r.key, { mesh, cx: pend.cx, cy: pend.cy, cz: pend.cz });
+  _rbn.tris += r.tris;
+}
+// Distance from a point to a frame record's axis segment (scan helper).
+function _rbnAxisDist(x, y, z, s) {
+  const apx = x - s.ax, apy = y - s.ay, apz = z - s.az;
+  let t = (apx * s.abx + apy * s.aby + apz * s.abz) / s.len2;
+  t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  return Math.hypot(apx - s.abx * t, apy - s.aby * t, apz - s.abz * t);
+}
+function _rbnTick(dt) {
+  if (!_rbn.on || !game.ribbonWorld || !game._rbnSegs || typeof player === 'undefined' || !player || !player.position) return;
+  const px = player.position.x, py = player.position.y, pz = player.position.z;
+  const now = performance.now();
+  if (now - _rbn.lastScan > 380) {
+    _rbn.lastScan = now;
+    const CH = 600, SCAN_R = 5200, AX_R = 2380, PAD = 2400;
+    // Record prune: the corridor collapses far behind, like the classic
+    // route pruner. One-way — endless is forward-driven.
+    const segs = game._rbnSegs;
+    if (segs.length > 6) {
+      let cut = 0;
+      while (cut < segs.length - 6 &&
+             Math.hypot(segs[cut].bx - px, segs[cut].by - py, segs[cut].bz - pz) > 16000) cut++;
+      if (cut > 0) segs.splice(0, cut);
+    }
+    const wanted = new Map();
+    for (const s of segs) {
+      if (_rbnAxisDist(px, py, pz, s) - s.half > SCAN_R + PAD) continue;
+      const x0 = Math.floor((Math.min(s.ax, s.bx) - PAD) / CH), x1 = Math.floor((Math.max(s.ax, s.bx) + PAD) / CH);
+      const y0 = Math.floor((Math.min(s.ay, s.by) - PAD) / CH), y1 = Math.floor((Math.max(s.ay, s.by) + PAD) / CH);
+      const z0 = Math.floor((Math.min(s.az, s.bz) - PAD) / CH), z1 = Math.floor((Math.max(s.az, s.bz) + PAD) / CH);
+      for (let i = x0; i <= x1; i++) for (let j = y0; j <= y1; j++) for (let k = z0; k <= z1; k++) {
+        const cx = (i + 0.5) * CH, cy = (j + 0.5) * CH, cz = (k + 0.5) * CH;
+        const dp = Math.hypot(cx - px, cy - py, cz - pz);
+        if (dp > SCAN_R) continue;
+        if (_rbnAxisDist(cx, cy, cz, s) > AX_R) continue;
+        const key = i + ',' + j + ',' + k;
+        const prev = wanted.get(key);
+        if (prev === undefined || dp < prev) wanted.set(key, dp);
+      }
+    }
+    for (const [key, ent] of _rbn.chunks) {
+      if (wanted.has(key)) continue;
+      if (Math.hypot(ent.cx - px, ent.cy - py, ent.cz - pz) > 6500) {
+        if (ent.mesh) {
+          try { _rbn.group.remove(ent.mesh); ent.mesh.geometry.dispose(); } catch (_) {}
+        }
+        _rbn.chunks.delete(key);
+      }
+    }
+    _rbn.queue = [];
+    for (const [key, dp] of wanted) {
+      if (_rbn.chunks.has(key) || _rbn.pending.has(key)) continue;
+      _rbn.queue.push({ key, dp });
+    }
+    _rbn.queue.sort((a, b) => a.dp - b.dp);
+    if (_rbn.queue.length > 240) _rbn.queue.length = 240;
+  }
+  // Dispatch: keep each worker ~2 jobs deep.
+  const CH = 600;
+  const cap = _rbn.workers.length * 2;
+  while (_rbn.queue.length && _rbn.pending.size < cap) {
+    const job = _rbn.queue.shift();
+    const parts = job.key.split(',');
+    const i = +parts[0], j = +parts[1], k = +parts[2];
+    _rbn.pending.set(job.key, { cx: (i + 0.5) * CH, cy: (j + 0.5) * CH, cz: (k + 0.5) * CH });
+    const w = _rbn.workers[_rbn.next++ % _rbn.workers.length];
+    const cells = Math.min(44, (typeof _arenaMeshCells === 'function' ? _arenaMeshCells() : 44));
+    w.postMessage({ cmd: 'chunk', key: job.key, cells, size: CH,
+                    ox: i * CH, oy: j * CH, oz: k * CH,
+                    segs: game._rbnSegs, p: _RIBBON_P });
+  }
+}
+// Debug probes: __rbn() = streamer state; __rbnSDF(x,y,z) = the composed
+// ribbon field (negative = open corridor).
+if (typeof window !== 'undefined') {
+  window.__rbn = function () {
+    return { on: _rbn.on, segs: game._rbnSegs ? game._rbnSegs.length : 0,
+             chunks: _rbn.chunks.size, pending: _rbn.pending.size,
+             queued: _rbn.queue.length, tris: Math.round(_rbn.tris / 1000) + 'k' };
+  };
+  window.__rbnSDF = function (x, y, z) {
+    if (!game._rbnSegs) return null;
+    _rbnQ.segs = game._rbnSegs;
+    return _RIBBON_FIELD.eval(x, y, z, _rbnQ);
+  };
+}
+
 // Arena params from a MAP_DATA <key>.arena block. Pure + deterministic
 // (seed lives in MAP_DATA, shared by every peer — no Math.random, no
 // per-round reroll: the arena is STATIC, which is what makes the slice-3
@@ -31338,6 +31698,15 @@ if (typeof window !== 'undefined') window.__spireMesh = () => ({
 const _SDF_BLEND_REACH = 135;
 function worldSDF(px,py,pz) {
   if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) return -10000;
+  // (v36.91) RIBBON WORLD: the world IS the winding corridor field. Sits
+  // before every other branch; same clamps as the sandwich (open steps
+  // <= 300u so rays can't skip walls, rock capped at 90 so embedded
+  // contacts resolve in small nudges).
+  if (game.ribbonWorld && game._rbnSegs) {
+    _rbnQ.segs = game._rbnSegs;
+    const _fr = _RIBBON_FIELD.eval(px, py, pz, _rbnQ);
+    return _fr > 0 ? Math.min(_fr, 90) : Math.max(_fr, -300);
+  }
   // (v36.56) Volumetric arena mode (The Spire): the world IS the arena field —
   // no tube walls, no sandwich mountains. Must sit BEFORE the sandwich branch:
   // an arena map leaves game.sandwichTerrain null, but if both were ever set
@@ -75653,6 +76022,17 @@ MAP_DATA.endless_caverns = {
 // peer regardless of when each client extends (co-op, v35.85). Bounded wander: beyond 42k
 // from origin the heading steers home, keeping runs inside the freeflight-size
 // 10x arena bound (float32-safe; score is arc length, not displacement).
+// (v36.91) RIBBON WORLD feel-test map: same endless generator, but the
+// world is the winding/twisting corridor field instead of the sandwich.
+// Selected by startEndless when window.__ribbon is set (or ?ribbon in the
+// URL). terrain undefined = no sandwich config ever engages.
+MAP_DATA.endless_ribbon = {
+  ...MAP_DATA.endless_caverns,
+  name: 'The Winding Deep',
+  description: 'Feel-test: the endless corridor twists, banks and dives through solid rock.',
+  ribbon: true,
+  terrain: undefined,
+};
 function _lssEndlessNextSeg(run) {
   const g = run.gen, rand = g.rand;
   const kindRoll = rand();
@@ -75708,6 +76088,35 @@ function _lssEndlessNextSeg(run) {
   // (v35.73) More vertical drama + varied lane width: narrow squeezes to
   // broad galleries instead of one constant-radius hallway.
   g.y = Math.max(-260, Math.min(260, g.y + (rand() - 0.5) * 340));
+  // ── (v36.91) RIBBON WORLD: pitch + roll route state ──────────────────────
+  // The corridor's frame ROLLS around the direction of travel (0 = flat
+  // sandwich, ±90° = on-edge canyon) and PITCHES into sustained dives and
+  // climbs. run.ribbon comes from the map key, so co-op peers agree on the
+  // draw sequence; all draws below are fixed-order (v35.85 rule).
+  if (run.ribbon) {
+    if (g._u === undefined) {
+      g._u = 0; g._pitch = 0; g._pitchT = 0; g._pitchHold = 0;
+      g._roll = 0; g._rollT = 0; g._rollHold = 0; g._rollPrev = 0;
+      g._nN = { x: 0, y: 1, z: 0 }; g._nodeF = null;
+    }
+    if (--g._pitchHold <= 0) {
+      g._pitchT = (rand() - 0.5) * 1.0;
+      g._pitchHold = 2 + Math.floor(rand() * 3);
+    }
+    if (--g._rollHold <= 0) {
+      const rr = rand();
+      g._rollT = rr < 0.42 ? 0 : (rr < 0.62 ? (rand() < 0.5 ? 0.785 : -0.785)
+                                            : (rand() < 0.5 ? 1.5708 : -1.5708));
+      g._rollHold = 2 + Math.floor(rand() * 4);
+    }
+    // First ~3km flies calm and flat; altitude homing keeps the dive/climb
+    // budget bounded without ever hard-clamping mid-run.
+    if (g._u < 3000) { g._pitchT = 0; g._rollT = 0; }
+    g._pitchT -= Math.max(-0.3, Math.min(0.3, g.y / 5200 * 0.35));
+    g._pitch += Math.max(-0.22, Math.min(0.22, g._pitchT - g._pitch));
+    g._roll += Math.max(-0.42, Math.min(0.42, g._rollT - g._roll));
+    g.y = a.y + len * Math.max(-0.55, Math.min(0.55, g._pitch));
+  }
   const b = { x: g.x, y: g.y, z: g.z };
   const r = 280 + rand() * 500;
   const hallR = hall ? (800 + rand() * 800) : 0;
@@ -75719,12 +76128,63 @@ function _lssEndlessNextSeg(run) {
     const off = 800 + rand() * 700;
     hp = { x: b.x + Math.cos(g.heading) * off * sgn, y: b.y + (rand() - 0.5) * 200, z: b.z - Math.sin(g.heading) * off * sgn };
   }
+  // (v36.91) RIBBON WORLD: build this segment's frame record — parallel-
+  // transport the running normal onto the new tangent (rotation-minimizing,
+  // stable through steep pitch), then apply the roll delta around it. The
+  // a-node frame is the previous segment's b-node frame, so the field is
+  // seamless at nodes. Pure route state, no draws.
+  if (run.ribbon && game._rbnSegs) {
+    const dx = b.x - a.x, dy = b.y - a.y, dz = b.z - a.z;
+    const sl = Math.hypot(dx, dy, dz) || 1;
+    const tx = dx / sl, ty = dy / sl, tz = dz / sl;
+    const g0 = g._nN;
+    let pnx = g0.x - tx * (g0.x * tx + g0.y * ty + g0.z * tz);
+    let pny = g0.y - ty * (g0.x * tx + g0.y * ty + g0.z * tz);
+    let pnz = g0.z - tz * (g0.x * tx + g0.y * ty + g0.z * tz);
+    let pl = Math.hypot(pnx, pny, pnz);
+    if (pl < 0.1) { pnx = -tz; pny = 0; pnz = tx; pl = Math.hypot(pnx, pny, pnz) || 1; }
+    pnx /= pl; pny /= pl; pnz /= pl;
+    const dphi = g._roll - g._rollPrev;
+    g._rollPrev = g._roll;
+    const cxr = ty * pnz - tz * pny, cyr = tz * pnx - tx * pnz, czr = tx * pny - ty * pnx;
+    const cd = Math.cos(dphi), sd = Math.sin(dphi);
+    let n2x = pnx * cd + cxr * sd, n2y = pny * cd + cyr * sd, n2z = pnz * cd + czr * sd;
+    const n2l = Math.hypot(n2x, n2y, n2z) || 1;
+    n2x /= n2l; n2y /= n2l; n2z /= n2l;
+    const b2x = ty * n2z - tz * n2y, b2y = tz * n2x - tx * n2z, b2z = tx * n2y - ty * n2x;
+    const naF = g._nodeF || { nx: n2x, ny: n2y, nz: n2z, bx: b2x, by: b2y, bz: b2z };
+    game._rbnSegs.push({
+      ax: a.x, ay: a.y, az: a.z, bx: b.x, by: b.y, bz: b.z,
+      abx: dx, aby: dy, abz: dz, len: sl, len2: sl * sl, half: sl * 0.5,
+      mx: (a.x + b.x) * 0.5, my: (a.y + b.y) * 0.5, mz: (a.z + b.z) * 0.5,
+      u0: g._u,
+      nax: naF.nx, nay: naF.ny, naz: naF.nz, bax: naF.bx, bay: naF.by, baz: naF.bz,
+      nbx: n2x, nby: n2y, nbz: n2z, bbx: b2x, bby: b2y, bbz: b2z,
+      hu: hall ? g._u + sl : -1, ha: hall ? hallR * 0.9 : 0,
+      gid: g.nextGid,
+    });
+    g._nodeF = { nx: n2x, ny: n2y, nz: n2z, bx: b2x, by: b2y, bz: b2z };
+    g._nN = { x: n2x, y: n2y, z: n2z };
+    g._u += sl;
+  }
   return { a, b, r, hall, hallR, hp, gid: g.nextGid++ };
 }
 
 // Append one generated segment to the LIVE route arrays (mirrors the shapes
 // buildRoomGraphLevel derives from rooms/tunnels).
 function _lssEndlessApplySeg(run, s) {
+  // (v36.91) Ribbon runs: the corridor field IS the world — no heightfield
+  // shapes to push, nothing to rebake (the frame record was appended by
+  // NextSeg itself). Bolts still ride the route.
+  if (run.ribbon) {
+    run.segs.push({
+      gid: s.gid, a: s.a, b: s.b, hall: s.hall,
+      len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
+      cyl: null, sph: null,
+    });
+    try { if (typeof _lssEndlessBolts === 'function') _lssEndlessBolts(run, run.segs[run.segs.length - 1]); } catch (_) {}
+    return;
+  }
   // w 0.42: partial carve — the lane GUARANTEES passage but keeps the ridged
   // relief, so the corridor reads as cavern, not subway (v35.73).
   const cyl = { ax: s.a.x, ay: s.a.y, az: s.a.z, bx: s.b.x, by: s.b.y, bz: s.b.z, r: s.r, w: 0.15 };
@@ -76055,13 +76515,19 @@ function _lssGenEndlessLevel(base) {
   const rand = mulberry32((seed ^ 0x9D2C5680) >>> 0);
   const cos = mulberry32((seed ^ 0x41C64E6D) >>> 0);
   const gen = { rand, cos, x: 0, y: 0, z: 0, heading: rand() * Math.PI * 2, sinceHall: 0, nextGid: 0 };
+  // (v36.91) RIBBON WORLD comes from the MAP key (endless_ribbon.ribbon), so
+  // co-op peers derive the same mode — and therefore the same route-stream
+  // draw sequence — from the shared map, not from a local flag.
+  const ribbon = !!(base && base.ribbon);
   const run = game.endlessRun = {
-    gen, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
+    gen, ribbon, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
     over: false, overT: 0, lastHall: { x: 0, y: 80, z: 0 }, _hudTxt: '',
     // (v36.50) Wall-clock run start. The backend wants started_at/duration for
     // the endless board, and a run has no match timer to derive it from.
     startedAt: Date.now(),
   };
+  game.ribbonWorld = ribbon;
+  game._rbnSegs = ribbon ? [] : null;
   const nodes = [{ x: 0, y: 0, z: 0 }];
   const rooms = [{ id: 'spawn', team: 'A', x: 0, y: 0, z: 0, r: SU * 3.2 }];
   for (let i = 0; i < 8; i++) {
@@ -76073,6 +76539,16 @@ function _lssGenEndlessLevel(base) {
       len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
       cyl: null, sph: null,
     });
+  }
+  if (ribbon) {
+    // The ribbon field is the world: no sandwich terrain, no carve tunnels,
+    // no cosmic tube walls. Only the spawn room survives (spawn placement).
+    return {
+      name: base.name, description: base.description, defaultTheme: base.defaultTheme,
+      procedural: 'endless', ribbon: true,
+      terrain: null, palette: base.palette, _biomeOverride: 'rocky',
+      rooms: [rooms[0]], tunnels: [],
+    };
   }
   return {
     name: base.name, description: base.description, defaultTheme: base.defaultTheme,
@@ -76322,6 +76798,11 @@ function buildRoomGraphLevel(level) {
   // Arena builds keep the cache — _arenaEnsureMesh below reattaches it, so
   // round 2+ never re-mesh (the field is static per map).
   if (!(level && level.arena)) { try { _arenaDisposeMesh(); } catch (_) {} }
+  // (v36.91) The ribbon streamer dies with every rebuild; ribbon maps
+  // re-init at build tail (the endless generator re-sets the flag).
+  try { if (typeof _rbnDispose === 'function') _rbnDispose(); } catch (_) {}
+  game.ribbonWorld = false;
+  game._rbnSegs = null;
   // Bump the build sequence so any in-flight overlay
   // IIFE from a prior call knows its captured state is stale and
   // can bail out instead of re-adding old wall meshes to the scene.
@@ -76462,7 +76943,9 @@ function buildRoomGraphLevel(level) {
   }
   // (v35.71) ENDLESS: seed the run + grow the first stretch of route.
   if (level && level.procedural === 'endless' && typeof _lssGenEndlessLevel === 'function') {
-    try { level = _lssGenEndlessLevel(MAP_DATA.endless_caverns || level); }
+    // (v36.91) Ribbon endless passes ITS OWN map entry through (base.ribbon
+    // drives the mode); classic endless keeps the endless_caverns base.
+    try { level = _lssGenEndlessLevel((level && level.ribbon) ? level : (MAP_DATA.endless_caverns || level)); }
     catch (e) { console.warn('[endless] generate failed, using static fallback:', e); game.endlessRun = null; }
   }
   // Nuke old geometry
@@ -76758,6 +77241,12 @@ function buildRoomGraphLevel(level) {
   // Sandwich terrain mode: NO cosmic tube walls at all. The map is just the
   // pathway skeleton (carve + spawn/champion); the world is the streamed
   // mountains. Skip the marching-cubes wall mesh entirely.
+  else if (game.ribbonWorld) {
+    // (v36.91) RIBBON WORLD: the streamed corridor mesher renders the
+    // world; no cosmic tube walls, no sandwich mountains.
+    if (mapGenHud) mapGenHud.style.display = 'none';
+    try { _rbnInit(); } catch (e) { console.warn('[ribbon] init failed:', e); }
+  }
   else if (game.sandwichTerrain && game.sandwichTerrain.ON) {
     if (mapGenHud) mapGenHud.style.display = 'none';
   }
@@ -79090,6 +79579,8 @@ function gameLoop(timestamp) {
   // camera (world-space panning — tails rotate correctly as you turn) and
   // the missile flyby/doppler voices track their projectiles.
   if (typeof _audioSpatialFrame === 'function') { try { _audioSpatialFrame(dt); } catch (_) {} }
+  // (v36.91) Ribbon-world chunk streamer (no-op outside ribbon runs).
+  if (typeof _rbnTick === 'function') { try { _rbnTick(dt); } catch (_) {} }
   updateHUD();
   if (!_xrPresentingForOverlays && _vrPerfTier < 1) updateEnemyHealthBars();
   __pmark('fx+hud+minimap'); 
