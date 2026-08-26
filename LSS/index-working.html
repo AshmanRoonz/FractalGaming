@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.88';
+const LSS_BUILD = '36.89';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -30494,6 +30494,201 @@ const _ARENA_FIELD_SRC = `{
 // site ships no CSP (_headers is Cache-Control only), so this is safe.
 const _ARENA_FIELD = (new Function('return (' + _ARENA_FIELD_SRC + ')'))();
 
+// ── (v36.89) THE CAVERN FIELD — natural volumetric transition caves ─────────
+// The owner's correction to v36.87/88: NO architecture on the routes — "i
+// don't want the spire map in endless or campaign... i want verticality,
+// volumetric caverns". This is the arena field's natural sibling: a seeded
+// BOULDER of solid rock pocked with a true 3D cave network — stacked
+// galleries, winding link bores, a vertical chimney — the thing the
+// heightfield sandwich structurally cannot be (one open interval per
+// column). The boulder OVERFILLS its carved cavity (carveR < R), so its
+// rock welds seamlessly into the surrounding mountain: no silhouette, no
+// floating object — the only visible surfaces are cave interiors.
+// Convention matches the arena field: positive = rock, negative = open.
+// Same self-contained-string pattern: one source of truth for the
+// collision realm and the surface-nets mesh workers.
+// ⚠ NO backticks / dollar-brace inside the literal below.
+const _CAVERN_FIELD_SRC = `{
+  hash(x, y, z) {
+    let h = x * 374761393 + y * 668265263 + z * 1442695040888963407;
+    h = (h ^ (h >>> 13)) * 1274126177;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  },
+  noise(x, y, z) {
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xf = x - xi, yf = y - yi, zf = z - zi;
+    const u = xf*xf*(3-2*xf), v = yf*yf*(3-2*yf), w = zf*zf*(3-2*zf);
+    const H = this.hash;
+    const c000=H(xi,yi,zi), c100=H(xi+1,yi,zi), c010=H(xi,yi+1,zi), c110=H(xi+1,yi+1,zi);
+    const c001=H(xi,yi,zi+1), c101=H(xi+1,yi,zi+1), c011=H(xi,yi+1,zi+1), c111=H(xi+1,yi+1,zi+1);
+    const x00=c000+(c100-c000)*u, x10=c010+(c110-c010)*u;
+    const x01=c001+(c101-c001)*u, x11=c011+(c111-c011)*u;
+    const y0=x00+(x10-x00)*v, y1=x01+(x11-x01)*v;
+    return (y0+(y1-y0)*w)*2-1;
+  },
+  smin(a, b, k) {
+    const h = Math.max(0, Math.min(1, 0.5 + 0.5*(b-a)/k));
+    return b + (a-b)*h - k*h*(1-h);
+  },
+  smax(a, b, k) { return -this.smin(-a, -b, k); },
+  cap(px, py, pz, l) {
+    const abx = l.bx - l.ax, aby = l.by - l.ay, abz = l.bz - l.az;
+    const apx = px - l.ax, apy = py - l.ay, apz = pz - l.az;
+    const t = Math.max(0, Math.min(1, (apx*abx + apy*aby + apz*abz) / (abx*abx + aby*aby + abz*abz || 1)));
+    const dx = apx - abx*t, dy = apy - aby*t, dz = apz - abz*t;
+    return Math.sqrt(dx*dx + dy*dy + dz*dz) - l.r;
+  },
+  // THE CAVERN. A solid rock PLUG filling the whole deck gap inside its
+  // footprint — the sandwich ENDS at this massif; the smin-carved cave
+  // network is the only way through. (The compose may only ADD rock, which
+  // is exactly what a plug is: no carved cavity to fly around, no floating
+  // object — v36.89's boulder-in-a-cutout was trivially bypassable.)
+  // Reading eval() top to bottom is reading the cave system.
+  eval(px, py, pz, g) {
+    // 1. THE PLUG — solid cylinder massif (positive inside), craggy face.
+    //    Its caps bury into the two heightfield sheets; beyond its radius
+    //    the field reports open and the sandwich rules.
+    const r2 = Math.sqrt(px*px + pz*pz);
+    let d = Math.min(g.R - r2, g.H - Math.abs(py));
+    d += this.noise(px*0.0022, py*0.0022, pz*0.0022) * 90;
+    // 2. GALLERIES — noise-deformed chambers stacked across the vertical
+    //    span; the smin union melts overlapping ones into organic halls.
+    const ch = g.chambers;
+    for (let i = 0; i < ch.length; i++) {
+      const c = ch[i];
+      const dx = px - c.x, dy = py - c.y, dz = pz - c.z;
+      d = this.smin(d, Math.sqrt(dx*dx + dy*dy + dz*dz) - c.r, 90);
+    }
+    // 3. BORES — winding link tunnels, the two deck mouths, the chimney.
+    const ln = g.links;
+    for (let i = 0; i < ln.length; i++) {
+      d = this.smin(d, this.cap(px, py, pz, ln[i]), 55);
+    }
+    // 4. ROCK GRAIN — three octaves of wall displacement. Bore radii stay
+    //    comfortably above the summed amplitude, so passages never pinch.
+    d += this.noise(px*0.0035, py*0.0035, pz*0.0035) * 52
+       + this.noise(px*0.009,  py*0.009,  pz*0.009)  * 20
+       + this.noise(px*0.045,  py*0.045,  pz*0.045)  * 4;
+    return d;
+  },
+  grad(px, py, pz, g, eps) {
+    const e = eps || 3.0;
+    const gx = this.eval(px+e,py,pz,g) - this.eval(px-e,py,pz,g);
+    const gy = this.eval(px,py+e,pz,g) - this.eval(px,py-e,pz,g);
+    const gz = this.eval(px,py,pz+e,g) - this.eval(px,py,pz-e,g);
+    const l = Math.hypot(gx,gy,gz) || 1;
+    return [gx/l, gy/l, gz/l];
+  },
+  // Natural rock look: seeded base tone, low-frequency strata banding,
+  // depth darkening, sparse crystal glints (the shared arena material
+  // tints the glow channel cyan — cold mineral light in a dark cave).
+  shade(px, py, pz, g) {
+    const broad = this.noise(px*0.004, py*0.004, pz*0.004);
+    const lum = 1 + broad * 0.24;
+    const t = g.tone;
+    const strat = this.noise(px*0.0016, py*0.006, pz*0.0016) * 0.16;
+    let r = t[0] + strat, gg = t[1] + strat * 0.8, b = t[2] + strat * 0.6;
+    const dk = Math.max(0, Math.min(1, (g.H - py) / (2 * g.H))) * 0.22;
+    r -= dk * 0.5; gg -= dk * 0.5; b -= dk * 0.4;
+    const spot = Math.pow(Math.max(0, 1 - Math.abs(this.noise(px*0.02, py*0.02, pz*0.02))), 9);
+    const vein = Math.pow(Math.max(0, 1 - Math.abs(this.noise(px*0.012, py*0.02, pz*0.012))), 6);
+    const glow = Math.min(1, spot * 0.5 + vein * 0.08);
+    return [Math.max(0.04, r*lum), Math.max(0.04, gg*lum), Math.max(0.04, b*lum), 0.92, glow];
+  }
+}`;
+const _CAVERN_FIELD = (new Function('return (' + _CAVERN_FIELD_SRC + ')'))();
+
+// Cavern params: pure + deterministic from (seed, heading, dHalf). heading
+// orients the two mouths along the route; dHalf = signed half-gap between
+// the two deck midlines in LOCAL y (entrance mouth at -dHalf, exit at
+// +dHalf). All rnd draws happen in FIXED order — same seed, same cave on
+// every peer. Carries R/H/floorY so _arenaBuildMesh needs no changes.
+function _cavernBuildParams(seed, heading, dHalf) {
+  const rnd = mulberry32((seed >>> 0) || 1);
+  const R = 2100 + rnd() * 400;   // plug footprint radius
+  const yIn = -dHalf, yOut = dHalf;
+  // Plug half-height: buries its caps into both sheets across both decks,
+  // tall enough for TWO cave storeys with a real rock floor between them
+  // (stack spacing = sum of radii + ~250; merged storeys read as one blob).
+  const VH = Math.max(Math.abs(yIn), Math.abs(yOut)) + 1300 + rnd() * 180;
+  const SPAN = VH - 420;          // chamber vertical reach (stays inside the plug)
+  const sh = Math.sin(heading || 0), chd = Math.cos(heading || 0);
+  const px = chd, pz = -sh;   // perpendicular to the route
+  const chambers = [];
+  const C = (x, y, z, r) => {
+    const c = { x, y: Math.max(-SPAN, Math.min(SPAN, y)), z, r };
+    chambers.push(c); return c;
+  };
+  // The spine galleries: entrance-side, heart, exit-side. chambers[0] and
+  // chambers[2] are load-bearing — the route's mouth stub cylinders aim at
+  // them (see ApplySeg), so the heightfield bore and the field bore always
+  // share a line.
+  const c1 = C(-sh * R * 0.55 + px * (rnd() - 0.5) * R * 0.25, yIn + (rnd() - 0.5) * 180,
+               -chd * R * 0.55 + pz * (rnd() - 0.5) * R * 0.25, 430 + rnd() * 240);
+  const heartY = (yIn + yOut) / 2 + (rnd() - 0.5) * SPAN * 0.75;
+  const c2 = C(px * (rnd() - 0.5) * R * 0.45, heartY, pz * (rnd() - 0.5) * R * 0.45, 540 + rnd() * 160);
+  const c3 = C(sh * R * 0.55 + px * (rnd() - 0.5) * R * 0.25, yOut + (rnd() - 0.5) * 180,
+               chd * R * 0.55 + pz * (rnd() - 0.5) * R * 0.25, 430 + rnd() * 240);
+  // Side grottos — the volumetric read: chambers ABOVE chambers, reachable,
+  // not on the mandatory path. The first two are DELIBERATELY stacked over
+  // the heart and the entrance gallery (rock floor between the storeys);
+  // the chimney pass below then links the tallest stack with a climbable
+  // shaft. The rest scatter free.
+  {
+    const r0 = 400 + rnd() * 160;
+    C(c2.x + (rnd() - 0.5) * 320, c2.y + (c2.y <= (yIn + yOut) / 2 ? 1 : -1) * (c2.r + r0 + 240 + rnd() * 140),
+      c2.z + (rnd() - 0.5) * 320, r0);
+    const r1 = 380 + rnd() * 140;
+    C(c1.x + (rnd() - 0.5) * 320, c1.y + (c1.y <= 0 ? 1 : -1) * (c1.r + r1 + 230 + rnd() * 120),
+      c1.z + (rnd() - 0.5) * 320, r1);
+  }
+  const nG = 1 + Math.floor(rnd() * 3);
+  for (let i = 0; i < nG; i++) {
+    const a = rnd() * 6.2831853, rad = R * (0.24 + rnd() * 0.34);
+    C(Math.cos(a) * rad, (rnd() * 2 - 1) * SPAN * 0.85, Math.sin(a) * rad, 340 + rnd() * 300);
+  }
+  const links = [];
+  const mIn  = { x: -sh * (R + 260), y: yIn,  z: -chd * (R + 260) };
+  const mOut = { x:  sh * (R + 260), y: yOut, z:  chd * (R + 260) };
+  const L = (a, b, r) => links.push({ ax: a.x, ay: a.y, az: a.z, bx: b.x, by: b.y, bz: b.z, r });
+  // The guaranteed spine: mouth -> c1 -> heart -> c3 -> mouth.
+  L(mIn, c1, 250 + rnd() * 50);
+  L(c1, c2, 240 + rnd() * 60);
+  L(c2, c3, 240 + rnd() * 60);
+  L(c3, mOut, 250 + rnd() * 50);
+  // Every grotto hooks to its nearest earlier chamber (all reachable).
+  for (let i = 3; i < chambers.length; i++) {
+    let bi = 0, bd = Infinity;
+    for (let q2 = 0; q2 < i; q2++) {
+      const o = chambers[q2];
+      const dd = Math.hypot(chambers[i].x - o.x, chambers[i].y - o.y, chambers[i].z - o.z);
+      if (dd < bd) { bd = dd; bi = q2; }
+    }
+    L(chambers[i], chambers[bi], 210 + rnd() * 60);
+  }
+  // One vertical chimney: heart to whichever grotto sits farthest above or
+  // below it — a straight climbable shaft through the rock.
+  let far = null, fd = 0;
+  for (let i = 3; i < chambers.length; i++) {
+    const dy = Math.abs(chambers[i].y - c2.y);
+    if (dy > fd) { fd = dy; far = chambers[i]; }
+  }
+  if (far && fd > 420) {
+    // Narrow shaft (well under the grotto radius): the pierced rock floor
+    // around it is what makes the storeys READ as storeys.
+    links.push({ ax: (c2.x + far.x) / 2, ay: Math.min(c2.y, far.y), az: (c2.z + far.z) / 2,
+                 bx: (c2.x + far.x) / 2, by: Math.max(c2.y, far.y), bz: (c2.z + far.z) / 2, r: 150 + rnd() * 40 });
+  }
+  // Muted near-neutral rock tones — they must sit comfortably inside ANY
+  // biome palette (a warm sandstone read as an alien object in the snow).
+  const tones = [[0.30,0.28,0.26],[0.27,0.28,0.31],[0.25,0.27,0.25],[0.32,0.30,0.27]];
+  const tone = tones[Math.floor(rnd() * tones.length) % tones.length];
+  return { kind: 'cavern', R, H: VH, tone, chambers, links,
+           // _arenaBuildMesh compat: floorY anchors the job sort and (length
+           // 1) keeps the bronze-fleck band off; no lavaY / mystBand / helix.
+           floorY: [Math.min(yIn, yOut)] };
+}
+
 // Arena params from a MAP_DATA <key>.arena block. Pure + deterministic
 // (seed lives in MAP_DATA, shared by every peer — no Math.random, no
 // per-round reroll: the arena is STATIC, which is what makes the slice-3
@@ -30949,11 +31144,15 @@ function _arenaScatterShrooms(G, group) {
 // Worker source: the field string + the lab's surface-nets mesher.
 // ⚠ NO backticks / dollar-brace inside the literal below.
 function _arenaMeshWorkerSrc() {
-  return 'const FIELD = ' + _ARENA_FIELD_SRC + ';\n' + `
+  // (v36.89) Two field realms share one mesher: the arena (The Spire) and
+  // the natural cavern (deck junctions). init picks by G.kind.
+  return 'const AR_FIELD = ' + _ARENA_FIELD_SRC + ';\n' +
+         'const CAV_FIELD = ' + _CAVERN_FIELD_SRC + ';\n' +
+         'let FIELD = AR_FIELD;\n' + `
 let G = null;
 self.onmessage = (e) => {
   const m = e.data;
-  if (m.cmd === 'init') { G = m.g; return; }
+  if (m.cmd === 'init') { G = m.g; FIELD = (G && G.kind === 'cavern') ? CAV_FIELD : AR_FIELD; return; }
   if (m.cmd === 'chunk') {
     const r = mesh(m);
     if (r.empty) self.postMessage(r);
@@ -31048,57 +31247,50 @@ function _arenaEnsureMesh(level) {
   _arenaBuildMesh(_arenaBuildParams(level.arena, level.rooms), key, level);
 }
 
-// ── (v36.88) DECK JUNCTIONS — "the sandwich comes to an end at something ─────
-// like the spire map, which transitions to another sandwich at a lower or
-// higher altitude" (owner's exact picture, after rejecting: smooth drift =
-// invisible, terraces = still one plane, a floating vault = a diorama).
+// ── (v36.89) DECK JUNCTIONS — natural volumetric transition caverns ─────────
+// "i don't want the spire map in endless or campaign... i want verticality,
+// volumetric caverns" (the owner's correction to v36.88's arena-structure
+// junctions — an architectural building planted in the route read as the
+// Spire shoved into a cutout, not as terrain).
 //
 // THE MODEL: the terraced decks (v36.86) give every route stretch ONE flat
 // altitude. When the endless route reaches a deck boundary, the slab ENDS —
-// and carved into that cliff sits a JUNCTION: a bounded two-storey arena-
-// field structure (same _ARENA_FIELD source as The Spire) whose floors sit
-// EXACTLY on the two deck altitudes it joins (floor spacing tuned to the
-// 800u deck step). The incoming lane arrives on one storey, the outgoing
-// lane leaves on the other; shaft bores + a one-turn helix connect them.
-// You fly INTO the structure, climb or dive a deck, and fly OUT into the
-// next sandwich. Junctions recur every few km — the mesh pipeline was
-// lifted to per-build state (opts.state) so several can be live, built
-// lazily as they approach and disposed as they fall behind.
+// and carved into that cliff is a natural CAVE SYSTEM (_CAVERN_FIELD): a
+// boulder of rock welded into the mountain, hollowed with stacked
+// galleries, winding bores and a vertical chimney. One mouth opens at each
+// deck's altitude. You fly INTO the mountainside, climb or dive through
+// the caves, and fly OUT into the next sandwich. Junctions recur every few
+// km — the mesh pipeline is per-build state (opts.state) so several can be
+// live, built lazily as they approach and disposed as they fall behind.
 // Deterministic: seed = worldSeed ^ junction-ordinal hash; the route
 // crossing point comes from pure deck-function bisection (no stream draws).
-function _lssJunctionG(seed) {
-  // floors 2 + scale chosen so floor spacing == the 800u deck step:
-  // spacing = H*1.10/(floors-1), H = 780*scale -> scale = 800/1.10/780.
-  const G = _arenaBuildParams({ seed: seed | 0, floors: 2, spikeAmt: 0.6, scale: 0.9324 }, []);
-  if (G.helix) G.helix.turns = 1;   // one turn = exactly one deck per winding
-  return G;
-}
-function _lssJunctionEnv(G) {
-  const hx = G.helix;
-  const hxTop = hx ? hx.y0 + (hx.turns + 0.5) * hx.pitch + hx.half + 60 : 0;
-  const hxBot = hx ? hx.y0 - (hx.turns + 0.5) * hx.pitch - hx.half - 60 : 0;
-  return {
-    r: Math.max(G.R, Math.abs(hxTop), Math.abs(hxBot)) + 250,
-    drop: Math.abs(hxBot) + 150,
-    rise: Math.max(G.H + 90, hxTop) + 180,
-  };
+function _lssJunctionG(seed, heading, dHalf) {
+  return _cavernBuildParams(seed | 0, heading || 0, (dHalf === undefined || dHalf === null) ? 400 : dHalf);
 }
 // Register one junction: chamber carve + collision record. The MESH is
 // lazy — _lssJunctionTick builds it as the ship approaches.
 function _lssJunctionRegister(x, y, z, seed, opts) {
   try {
-    const G = _lssJunctionG(seed);
-    const env = _lssJunctionEnv(G);
+    const G = _lssJunctionG(seed, opts && opts.heading, opts && opts.dHalf);
+    const env = Math.hypot(G.R, G.H) + 60;
     if (!game._lssJunctions) game._lssJunctions = [];
-    const j = { x, y, z, seed: seed | 0, G, env: env.r, state: null,
-                key: 'junction|' + (seed | 0) + '|c' + _arenaMeshCells() };
+    const j = { x, y, z, seed: seed | 0, G, env, state: null,
+                key: 'cavern|' + (seed | 0) + '|c' + _arenaMeshCells() };
     game._lssJunctions.push(j);
-    // noSphere: the SEEDED path already carries the chamber as a level room
-    // (baked into levelSpheres by the graph build) — don't double-push it.
-    if (!(opts && opts.noSphere)) game.levelSpheres.push({ cx: x, cy: y, cz: z, r: env.r * 0.92, drop: env.drop, rise: env.rise });
+    // ONE full-height heightfield clearance across the plug's footprint.
+    // Per-gallery pockets CANNOT work: _stRouteAt keeps a single winner
+    // per column, so two stacked pockets fight and one cave gets sealed
+    // (measured: the heart pocket's ceil +76 vs the grotto's needed +1000).
+    // Clearing everything is safe precisely BECAUSE of the plug: compose =
+    // max(heightfield, field), so the field's solid massif fills the whole
+    // cleared space with rock except its cave network — there is nothing
+    // to fly around. Radius stays 420 inside the plug edge so the carve's
+    // soft fade ring never escapes the rock (plug face noise is ±90).
+    game.levelSpheres.push({ cx: x, cy: y, cz: z, r: G.R - 420,
+                             drop: G.H - 100, rise: G.H - 100 });
     try {
       if (typeof _swInvalidateChunksInRect === 'function') {
-        const rr = env.r + ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
+        const rr = env + ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
         _swInvalidateChunksInRect(x - rr, x + rr, z - rr, z + rr);
       }
     } catch (_) {}
@@ -31115,13 +31307,13 @@ function _lssJunctionTick() {
   for (let i = J.length - 1; i >= 0; i--) {
     const j = J[i];
     const d = Math.hypot(j.x - px, j.z - pz);
-    if (!j.state && d < 6500) {
+    if (!j.state && d < 7200) {
       j.state = { key: null, group: null, building: false, chunksDone: 0, chunksTotal: 0,
                   tris: 0, ms: 0, workers: [], regions: null, t0: 0, url: null, hud: null, clouds: null };
       try {
         _arenaBuildMesh(j.G, j.key, null, { state: j.state, offset: { x: j.x, y: j.y, z: j.z }, quiet: true, lite: true });
       } catch (e) { console.warn('[junction] mesh build failed:', e && e.message); j.state = null; }
-    } else if (j.state && d > 9500) {
+    } else if (j.state && d > 9800) {
       try { _arenaDisposeMesh(j.state); } catch (_) {}
       j.state = null;
     }
@@ -31133,13 +31325,27 @@ function _lssJunctionTick() {
     }
   }
 }
-// Debug probe: window.__junctions() -> registered junctions + mesh states.
-if (typeof window !== 'undefined') window.__junctions = function () {
-  const J = game._lssJunctions;
-  if (!J || !J.length) return 'no junctions';
-  return J.map(j => ({ x: Math.round(j.x), y: Math.round(j.y), z: Math.round(j.z), env: Math.round(j.env),
-    mesh: j.state ? (j.state.building ? (j.state.chunksDone + '/' + j.state.chunksTotal) : (Math.round(j.state.tris / 1000) + 'k tris')) : 'lazy' }));
-};
+// Debug probes: window.__junctions() -> registered junctions + mesh states;
+// __junctionTick() drives the lazy-mesh lifecycle by hand (headless test
+// panes freeze rAF, so the game loop never calls it there); __cavSDF(x,y,z)
+// samples the composed world SDF (negative = open air) for volumetric
+// transects.
+if (typeof window !== 'undefined') {
+  window.__junctions = function () {
+    const J = game._lssJunctions;
+    if (!J || !J.length) return 'no junctions';
+    return J.map(j => ({ x: Math.round(j.x), y: Math.round(j.y), z: Math.round(j.z), env: Math.round(j.env),
+      mesh: j.state ? (j.state.building ? (j.state.chunksDone + '/' + j.state.chunksTotal) : (Math.round(j.state.tris / 1000) + 'k tris')) : 'lazy' }));
+  };
+  window.__junctionTick = function () { return _lssJunctionTick(); };
+  window.__cavSDF = function (x, y, z) { return worldSDF(x, y, z); };
+  window.__endlessExtend = function (n) {
+    const run = game.endlessRun;
+    if (!run) return 'no endless run';
+    for (let i = 0; i < (n || 1); i++) _lssEndlessApplySeg(run, _lssEndlessNextSeg(run));
+    return run.segs.length;
+  };
+}
 
 function _arenaBuildMesh(G, key, level, opts) {
   // (v36.88) M = the mesh-state object this build owns. The Spire passes
@@ -31589,7 +31795,9 @@ function worldSDF(px,py,pz) {
         if (vd2 >= vrr * vrr) continue;
         const vw = Math.max(0, Math.min(1, (_jn.env - Math.sqrt(vd2)) / 240));
         if (vw > 0) {
-          const dvf = _ARENA_FIELD.eval(vdx, vdy, vdz, _jn.G);
+          const dvf = (_jn.G && _jn.G.kind === 'cavern')
+            ? _CAVERN_FIELD.eval(vdx, vdy, vdz, _jn.G)
+            : _ARENA_FIELD.eval(vdx, vdy, vdz, _jn.G);
           _f = Math.max(_f, dvf * vw + (-600) * (1 - vw));
         }
       }
@@ -76023,14 +76231,18 @@ function _lssEndlessNextSeg(run) {
         const cx = a.x + (g.x - a.x) * tc, cz = a.z + (g.z - a.z) * tc;
         const ws = (typeof net !== 'undefined' && net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED;
         const seed = (((ws >>> 0) ^ ((g.nextGid * 2654435761) >>> 0)) >>> 0);
-        const jG = _lssJunctionG(seed);
-        const gap = jG.R + 260;
+        // Provisional G just for its radius (R is the FIRST rnd draw, so it
+        // is identical whatever dHalf the final build gets).
+        const gap = _lssJunctionG(seed, g.heading, 400).R + 260;
         const sh = Math.sin(g.heading), ch = Math.cos(g.heading);
         jDeckA = g.deck;
         let deckB = _lssEndlessDeckIdx(cx + sh * gap, cz + ch * gap);
         if (deckB === jDeckA) deckB = jDeckA + (newIdx > jDeckA ? 1 : -1);
-        jRec = { x: cx, y: (jDeckA + deckB) / 2 * _VD.step * _lssEndlessDeckEnv(cx, cz),
-                 z: cz, seed, deckA: jDeckA, deckB };
+        const envC = _lssEndlessDeckEnv(cx, cz);
+        jRec = { x: cx, y: (jDeckA + deckB) / 2 * _VD.step * envC,
+                 z: cz, seed, deckA: jDeckA, deckB,
+                 heading: g.heading,
+                 dHalf: (deckB - jDeckA) / 2 * _VD.step * envC };
         jEnt = { x: cx - sh * gap, z: cz - ch * gap };
         jExit = { x: cx + sh * gap, z: cz + ch * gap };
         g.x = jExit.x; g.z = jExit.z;
@@ -76069,7 +76281,15 @@ function _lssEndlessNextSeg(run) {
 function _lssEndlessApplySeg(run, s) {
   // w 0.42: partial carve — the lane GUARANTEES passage but keeps the ridged
   // relief, so the corridor reads as cavern, not subway (v35.73).
-  const cyl = { ax: s.a.x, ay: s.a.y, az: s.a.z, bx: s.b.x, by: s.b.y, bz: s.b.z, r: s.r, w: 0.15 };
+  // (v36.89) Junction hops carve FULL (w 1): near a deck boundary the
+  // deck-locked lane leaves the local terrain gap (wide risers drop the
+  // midline early — measured ceil 557 under a lane at 800), and the 0.15
+  // partial carve leaves the bore buried. The compose can't help: the
+  // cavern field only ADDS rock into opened space, never opens rock.
+  // Junction hops also bore TIGHT (r 360, well under the mouth collar's 640)
+  // so the cleared tube walls are always rock, never an exposed shell.
+  const cyl = { ax: s.a.x, ay: s.a.y, az: s.a.z, bx: s.b.x, by: s.b.y, bz: s.b.z,
+                r: s.junction ? 360 : s.r, w: s.junction ? 1 : 0.15 };
   game.levelCylinders.push(cyl);
   let sph = null, spur = null;
   if (s.hall) {
@@ -76088,11 +76308,24 @@ function _lssEndlessApplySeg(run, s) {
   });
   // (v36.88) DECK JUNCTION registration: the generator marks segments that
   // ended at a deck boundary (s.junction — the crossing point + the two
-  // deck levels). Register the structure here on the APPLY path — both
-  // co-op peers apply the same segs in gid order with worldSeed^gid seeds,
-  // so every client builds the identical junction.
+  // deck levels). Register the cavern here on the APPLY path — both co-op
+  // peers apply the same segs in gid order with worldSeed^gid seeds, so
+  // every client builds the identical cave system.
   if (s.junction && typeof _lssJunctionRegister === 'function') {
-    _lssJunctionRegister(s.junction.x, s.junction.y, s.junction.z, s.junction.seed);
+    const jn = s.junction;
+    const j = _lssJunctionRegister(jn.x, jn.y, jn.z, jn.seed, { heading: jn.heading, dHalf: jn.dHalf });
+    // MOUTH STUBS (see the seeded-loop twin): heightfield bores along the
+    // field's own entrance/exit capsule lines, so the cave mouths stay
+    // open through the compose's envelope fade.
+    if (j && j.G && j.G.chambers) {
+      const c1 = j.G.chambers[0], c3 = j.G.chambers[2];
+      game.levelCylinders.push({ ax: s.b.x, ay: s.b.y, az: s.b.z,
+                                 bx: jn.x + c1.x, by: jn.y + c1.y, bz: jn.z + c1.z, r: 360, w: 1 });
+      if (s.exit) {
+        game.levelCylinders.push({ ax: jn.x + c3.x, ay: jn.y + c3.y, az: jn.z + c3.z,
+                                   bx: s.exit.x, by: s.exit.y, bz: s.exit.z, r: 360, w: 1 });
+      }
+    }
   }
   // (v35.84) Rebake any already-baked chunk this new geometry carves (the
   // append-tear guard — see _swInvalidateChunksInRect). Influence is 2D x/z,
@@ -76421,21 +76654,35 @@ function _lssGenEndlessLevel(base) {
     const s = _lssEndlessNextSeg(run);
     _tunnelPath.push(s.b);
     if (s.hall) rooms.push({ id: 'hall' + s.gid, team: null, x: s.b.x, y: s.b.y, z: s.b.z, r: s.hallR });
-    // (v36.88) DECK JUNCTION in the SEEDED stretch: the segment ended at a
-    // deck boundary. Its chamber rides as a level room (drop/rise = the
-    // tall carve, dug by the initial bake); the field/mesh registration is
-    // deferred to build tail via game._lssJunctionSeeds (levelSpheres does
-    // not exist yet at gen time). The tunnel POLYLINE splits here — one
-    // path ends at the entrance, the next begins at the exit — so no lane
-    // carves straight through the structure's floors.
+    // (v36.88) DECK JUNCTION in the SEEDED stretch: registration (which
+    // pushes the per-gallery pockets + per-link bores) is deferred to
+    // build tail via game._lssJunctionSeeds — levelSpheres doesn't exist
+    // yet at gen time, and junctions sit ≥17km out, far beyond the
+    // synchronous spawn-core bake, so the deferred carve always lands
+    // before their chunks stream in. NO room here: a room sphere would
+    // carve a void through the plug (rooms always carve; the plug must
+    // stay solid). The tunnel POLYLINE splits here — one path ends at the
+    // entrance, the next begins at the exit — so no lane carves straight
+    // through the massif.
     if (s.junction && typeof _lssJunctionG === 'function') {
       const jn = s.junction;
-      const _jG = _lssJunctionG(jn.seed);
-      const _jE = _lssJunctionEnv(_jG);
-      rooms.push({ id: 'junction' + s.gid, team: null, x: jn.x, y: jn.y, z: jn.z,
-                   r: _jE.r * 0.92, drop: _jE.drop, rise: _jE.rise });
+      const _jG = _lssJunctionG(jn.seed, jn.heading, jn.dHalf);
       game._lssJunctionSeeds.push(jn);
-      _tunnels.push({ r: 400, w: 0.15, path: _tunnelPath });
+      // MOUTH BORES: the heightfield bore must follow the SAME line as the
+      // field's mouth capsule (entrance -> first gallery, last gallery ->
+      // exit) or the compose seals the cave mouths — the field can only ADD
+      // rock into opened space, never open heightfield rock. Full carve
+      // (w 1): near the boundary the deck-locked lane leaves the local
+      // terrain gap (wide risers), and the 0.15 partial carve leaves the
+      // bore buried. The main lane path ends at a; the whole junction hop
+      // (a -> entrance -> first gallery) is one full-carve bore.
+      const _c1 = _jG.chambers[0], _c3 = _jG.chambers[2];
+      _tunnelPath.pop();   // b was pushed at loop top; it belongs to the bore
+      if (_tunnelPath.length >= 2) _tunnels.push({ r: 400, w: 0.15, path: _tunnelPath });
+      _tunnels.push({ r: 360, w: 1, path: [ { x: s.a.x, y: s.a.y, z: s.a.z }, { x: s.b.x, y: s.b.y, z: s.b.z },
+                                            { x: jn.x + _c1.x, y: jn.y + _c1.y, z: jn.z + _c1.z } ] });
+      _tunnels.push({ r: 360, w: 1, path: [ { x: jn.x + _c3.x, y: jn.y + _c3.y, z: jn.z + _c3.z },
+                                            { x: s.exit.x, y: s.exit.y, z: s.exit.z } ] });
       _tunnelPath = [{ x: s.exit.x, y: s.exit.y, z: s.exit.z }];
     }
     run.segs.push({
@@ -77156,13 +77403,13 @@ function buildRoomGraphLevel(level) {
     if (mapGenHud) mapGenHud.style.display = 'none';
     // (v36.88) DECK JUNCTION registration at build tail (levelSpheres + the
     // terrain config exist now): the seeded gen loop stashed each junction
-    // site (its chamber already rides as a level room — register field +
-    // lazy mesh only). Runtime segments register directly in ApplySeg.
+    // site; registration pushes the pocket/bore carves + the field record.
+    // Runtime segments register directly in ApplySeg.
     try {
       if (game._lssJunctionSeeds && game._lssJunctionSeeds.length && typeof _lssJunctionRegister === 'function') {
         const seeds = game._lssJunctionSeeds;
         game._lssJunctionSeeds = null;
-        for (const p of seeds) _lssJunctionRegister(p.x, p.y, p.z, p.seed, { noSphere: true });
+        for (const p of seeds) _lssJunctionRegister(p.x, p.y, p.z, p.seed, { heading: p.heading, dHalf: p.dHalf });
       }
     } catch (e) { console.warn('[junction] build-tail registration failed:', e && e.message); }
   }

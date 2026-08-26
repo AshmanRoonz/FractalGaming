@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.88';
+const LSS_BUILD = '36.89';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -24298,6 +24298,160 @@ const _ARENA_FIELD_SRC = `{
 }`;
 const _ARENA_FIELD = (new Function('return (' + _ARENA_FIELD_SRC + ')'))();
 
+const _CAVERN_FIELD_SRC = `{
+  hash(x, y, z) {
+    let h = x * 374761393 + y * 668265263 + z * 1442695040888963407;
+    h = (h ^ (h >>> 13)) * 1274126177;
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
+  },
+  noise(x, y, z) {
+    const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+    const xf = x - xi, yf = y - yi, zf = z - zi;
+    const u = xf*xf*(3-2*xf), v = yf*yf*(3-2*yf), w = zf*zf*(3-2*zf);
+    const H = this.hash;
+    const c000=H(xi,yi,zi), c100=H(xi+1,yi,zi), c010=H(xi,yi+1,zi), c110=H(xi+1,yi+1,zi);
+    const c001=H(xi,yi,zi+1), c101=H(xi+1,yi,zi+1), c011=H(xi,yi+1,zi+1), c111=H(xi+1,yi+1,zi+1);
+    const x00=c000+(c100-c000)*u, x10=c010+(c110-c010)*u;
+    const x01=c001+(c101-c001)*u, x11=c011+(c111-c011)*u;
+    const y0=x00+(x10-x00)*v, y1=x01+(x11-x01)*v;
+    return (y0+(y1-y0)*w)*2-1;
+  },
+  smin(a, b, k) {
+    const h = Math.max(0, Math.min(1, 0.5 + 0.5*(b-a)/k));
+    return b + (a-b)*h - k*h*(1-h);
+  },
+  smax(a, b, k) { return -this.smin(-a, -b, k); },
+  cap(px, py, pz, l) {
+    const abx = l.bx - l.ax, aby = l.by - l.ay, abz = l.bz - l.az;
+    const apx = px - l.ax, apy = py - l.ay, apz = pz - l.az;
+    const t = Math.max(0, Math.min(1, (apx*abx + apy*aby + apz*abz) / (abx*abx + aby*aby + abz*abz || 1)));
+    const dx = apx - abx*t, dy = apy - aby*t, dz = apz - abz*t;
+    return Math.sqrt(dx*dx + dy*dy + dz*dz) - l.r;
+  },
+  // THE CAVERN. A solid rock PLUG filling the whole deck gap inside its
+  // footprint — the sandwich ENDS at this massif; the smin-carved cave
+  // network is the only way through. (The compose may only ADD rock, which
+  // is exactly what a plug is: no carved cavity to fly around, no floating
+  // object — v36.89's boulder-in-a-cutout was trivially bypassable.)
+  // Reading eval() top to bottom is reading the cave system.
+  eval(px, py, pz, g) {
+    // 1. THE PLUG — solid cylinder massif (positive inside), craggy face.
+    //    Its caps bury into the two heightfield sheets; beyond its radius
+    //    the field reports open and the sandwich rules.
+    const r2 = Math.sqrt(px*px + pz*pz);
+    let d = Math.min(g.R - r2, g.H - Math.abs(py));
+    d += this.noise(px*0.0022, py*0.0022, pz*0.0022) * 90;
+    // 2. GALLERIES — noise-deformed chambers stacked across the vertical
+    //    span; the smin union melts overlapping ones into organic halls.
+    const ch = g.chambers;
+    for (let i = 0; i < ch.length; i++) {
+      const c = ch[i];
+      const dx = px - c.x, dy = py - c.y, dz = pz - c.z;
+      d = this.smin(d, Math.sqrt(dx*dx + dy*dy + dz*dz) - c.r, 90);
+    }
+    // 3. BORES — winding link tunnels, the two deck mouths, the chimney.
+    const ln = g.links;
+    for (let i = 0; i < ln.length; i++) {
+      d = this.smin(d, this.cap(px, py, pz, ln[i]), 55);
+    }
+    // 4. ROCK GRAIN — three octaves of wall displacement. Bore radii stay
+    //    comfortably above the summed amplitude, so passages never pinch.
+    d += this.noise(px*0.0035, py*0.0035, pz*0.0035) * 52
+       + this.noise(px*0.009,  py*0.009,  pz*0.009)  * 20
+       + this.noise(px*0.045,  py*0.045,  pz*0.045)  * 4;
+    return d;
+  },
+  grad(px, py, pz, g, eps) {
+    const e = eps || 3.0;
+    const gx = this.eval(px+e,py,pz,g) - this.eval(px-e,py,pz,g);
+    const gy = this.eval(px,py+e,pz,g) - this.eval(px,py-e,pz,g);
+    const gz = this.eval(px,py,pz+e,g) - this.eval(px,py,pz-e,g);
+    const l = Math.hypot(gx,gy,gz) || 1;
+    return [gx/l, gy/l, gz/l];
+  },
+  // Natural rock look: seeded base tone, low-frequency strata banding,
+  // depth darkening, sparse crystal glints (the shared arena material
+  // tints the glow channel cyan — cold mineral light in a dark cave).
+  shade(px, py, pz, g) {
+    const broad = this.noise(px*0.004, py*0.004, pz*0.004);
+    const lum = 1 + broad * 0.24;
+    const t = g.tone;
+    const strat = this.noise(px*0.0016, py*0.006, pz*0.0016) * 0.16;
+    let r = t[0] + strat, gg = t[1] + strat * 0.8, b = t[2] + strat * 0.6;
+    const dk = Math.max(0, Math.min(1, (g.H - py) / (2 * g.H))) * 0.22;
+    r -= dk * 0.5; gg -= dk * 0.5; b -= dk * 0.4;
+    const spot = Math.pow(Math.max(0, 1 - Math.abs(this.noise(px*0.02, py*0.02, pz*0.02))), 9);
+    const vein = Math.pow(Math.max(0, 1 - Math.abs(this.noise(px*0.012, py*0.02, pz*0.012))), 6);
+    const glow = Math.min(1, spot * 0.5 + vein * 0.08);
+    return [Math.max(0.04, r*lum), Math.max(0.04, gg*lum), Math.max(0.04, b*lum), 0.92, glow];
+  }
+}`;
+const _CAVERN_FIELD = (new Function('return (' + _CAVERN_FIELD_SRC + ')'))();
+
+function _cavernBuildParams(seed, heading, dHalf) {
+  const rnd = mulberry32((seed >>> 0) || 1);
+  const R = 2100 + rnd() * 400;   // plug footprint radius
+  const yIn = -dHalf, yOut = dHalf;
+  const VH = Math.max(Math.abs(yIn), Math.abs(yOut)) + 1300 + rnd() * 180;
+  const SPAN = VH - 420;          // chamber vertical reach (stays inside the plug)
+  const sh = Math.sin(heading || 0), chd = Math.cos(heading || 0);
+  const px = chd, pz = -sh;   // perpendicular to the route
+  const chambers = [];
+  const C = (x, y, z, r) => {
+    const c = { x, y: Math.max(-SPAN, Math.min(SPAN, y)), z, r };
+    chambers.push(c); return c;
+  };
+  const c1 = C(-sh * R * 0.55 + px * (rnd() - 0.5) * R * 0.25, yIn + (rnd() - 0.5) * 180,
+               -chd * R * 0.55 + pz * (rnd() - 0.5) * R * 0.25, 430 + rnd() * 240);
+  const heartY = (yIn + yOut) / 2 + (rnd() - 0.5) * SPAN * 0.75;
+  const c2 = C(px * (rnd() - 0.5) * R * 0.45, heartY, pz * (rnd() - 0.5) * R * 0.45, 540 + rnd() * 160);
+  const c3 = C(sh * R * 0.55 + px * (rnd() - 0.5) * R * 0.25, yOut + (rnd() - 0.5) * 180,
+               chd * R * 0.55 + pz * (rnd() - 0.5) * R * 0.25, 430 + rnd() * 240);
+  {
+    const r0 = 400 + rnd() * 160;
+    C(c2.x + (rnd() - 0.5) * 320, c2.y + (c2.y <= (yIn + yOut) / 2 ? 1 : -1) * (c2.r + r0 + 240 + rnd() * 140),
+      c2.z + (rnd() - 0.5) * 320, r0);
+    const r1 = 380 + rnd() * 140;
+    C(c1.x + (rnd() - 0.5) * 320, c1.y + (c1.y <= 0 ? 1 : -1) * (c1.r + r1 + 230 + rnd() * 120),
+      c1.z + (rnd() - 0.5) * 320, r1);
+  }
+  const nG = 1 + Math.floor(rnd() * 3);
+  for (let i = 0; i < nG; i++) {
+    const a = rnd() * 6.2831853, rad = R * (0.24 + rnd() * 0.34);
+    C(Math.cos(a) * rad, (rnd() * 2 - 1) * SPAN * 0.85, Math.sin(a) * rad, 340 + rnd() * 300);
+  }
+  const links = [];
+  const mIn  = { x: -sh * (R + 260), y: yIn,  z: -chd * (R + 260) };
+  const mOut = { x:  sh * (R + 260), y: yOut, z:  chd * (R + 260) };
+  const L = (a, b, r) => links.push({ ax: a.x, ay: a.y, az: a.z, bx: b.x, by: b.y, bz: b.z, r });
+  L(mIn, c1, 250 + rnd() * 50);
+  L(c1, c2, 240 + rnd() * 60);
+  L(c2, c3, 240 + rnd() * 60);
+  L(c3, mOut, 250 + rnd() * 50);
+  for (let i = 3; i < chambers.length; i++) {
+    let bi = 0, bd = Infinity;
+    for (let q2 = 0; q2 < i; q2++) {
+      const o = chambers[q2];
+      const dd = Math.hypot(chambers[i].x - o.x, chambers[i].y - o.y, chambers[i].z - o.z);
+      if (dd < bd) { bd = dd; bi = q2; }
+    }
+    L(chambers[i], chambers[bi], 210 + rnd() * 60);
+  }
+  let far = null, fd = 0;
+  for (let i = 3; i < chambers.length; i++) {
+    const dy = Math.abs(chambers[i].y - c2.y);
+    if (dy > fd) { fd = dy; far = chambers[i]; }
+  }
+  if (far && fd > 420) {
+    links.push({ ax: (c2.x + far.x) / 2, ay: Math.min(c2.y, far.y), az: (c2.z + far.z) / 2,
+                 bx: (c2.x + far.x) / 2, by: Math.max(c2.y, far.y), bz: (c2.z + far.z) / 2, r: 150 + rnd() * 40 });
+  }
+  const tones = [[0.30,0.28,0.26],[0.27,0.28,0.31],[0.25,0.27,0.25],[0.32,0.30,0.27]];
+  const tone = tones[Math.floor(rnd() * tones.length) % tones.length];
+  return { kind: 'cavern', R, H: VH, tone, chambers, links,
+           floorY: [Math.min(yIn, yOut)] };
+}
+
 function _arenaBuildParams(a, rooms) {
   a = a || {};
   const seed   = (a.seed != null ? a.seed : 7) | 0;
@@ -24588,11 +24742,13 @@ function _arenaScatterShrooms(G, group) {
   return spots.length;
 }
 function _arenaMeshWorkerSrc() {
-  return 'const FIELD = ' + _ARENA_FIELD_SRC + ';\n' + `
+  return 'const AR_FIELD = ' + _ARENA_FIELD_SRC + ';\n' +
+         'const CAV_FIELD = ' + _CAVERN_FIELD_SRC + ';\n' +
+         'let FIELD = AR_FIELD;\n' + `
 let G = null;
 self.onmessage = (e) => {
   const m = e.data;
-  if (m.cmd === 'init') { G = m.g; return; }
+  if (m.cmd === 'init') { G = m.g; FIELD = (G && G.kind === 'cavern') ? CAV_FIELD : AR_FIELD; return; }
   if (m.cmd === 'chunk') {
     const r = mesh(m);
     if (r.empty) self.postMessage(r);
@@ -24679,33 +24835,22 @@ function _arenaEnsureMesh(level) {
   _arenaBuildMesh(_arenaBuildParams(level.arena, level.rooms), key, level);
 }
 
-function _lssJunctionG(seed) {
-  const G = _arenaBuildParams({ seed: seed | 0, floors: 2, spikeAmt: 0.6, scale: 0.9324 }, []);
-  if (G.helix) G.helix.turns = 1;   // one turn = exactly one deck per winding
-  return G;
-}
-function _lssJunctionEnv(G) {
-  const hx = G.helix;
-  const hxTop = hx ? hx.y0 + (hx.turns + 0.5) * hx.pitch + hx.half + 60 : 0;
-  const hxBot = hx ? hx.y0 - (hx.turns + 0.5) * hx.pitch - hx.half - 60 : 0;
-  return {
-    r: Math.max(G.R, Math.abs(hxTop), Math.abs(hxBot)) + 250,
-    drop: Math.abs(hxBot) + 150,
-    rise: Math.max(G.H + 90, hxTop) + 180,
-  };
+function _lssJunctionG(seed, heading, dHalf) {
+  return _cavernBuildParams(seed | 0, heading || 0, (dHalf === undefined || dHalf === null) ? 400 : dHalf);
 }
 function _lssJunctionRegister(x, y, z, seed, opts) {
   try {
-    const G = _lssJunctionG(seed);
-    const env = _lssJunctionEnv(G);
+    const G = _lssJunctionG(seed, opts && opts.heading, opts && opts.dHalf);
+    const env = Math.hypot(G.R, G.H) + 60;
     if (!game._lssJunctions) game._lssJunctions = [];
-    const j = { x, y, z, seed: seed | 0, G, env: env.r, state: null,
-                key: 'junction|' + (seed | 0) + '|c' + _arenaMeshCells() };
+    const j = { x, y, z, seed: seed | 0, G, env, state: null,
+                key: 'cavern|' + (seed | 0) + '|c' + _arenaMeshCells() };
     game._lssJunctions.push(j);
-    if (!(opts && opts.noSphere)) game.levelSpheres.push({ cx: x, cy: y, cz: z, r: env.r * 0.92, drop: env.drop, rise: env.rise });
+    game.levelSpheres.push({ cx: x, cy: y, cz: z, r: G.R - 420,
+                             drop: G.H - 100, rise: G.H - 100 });
     try {
       if (typeof _swInvalidateChunksInRect === 'function') {
-        const rr = env.r + ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
+        const rr = env + ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
         _swInvalidateChunksInRect(x - rr, x + rr, z - rr, z + rr);
       }
     } catch (_) {}
@@ -24720,13 +24865,13 @@ function _lssJunctionTick() {
   for (let i = J.length - 1; i >= 0; i--) {
     const j = J[i];
     const d = Math.hypot(j.x - px, j.z - pz);
-    if (!j.state && d < 6500) {
+    if (!j.state && d < 7200) {
       j.state = { key: null, group: null, building: false, chunksDone: 0, chunksTotal: 0,
                   tris: 0, ms: 0, workers: [], regions: null, t0: 0, url: null, hud: null, clouds: null };
       try {
         _arenaBuildMesh(j.G, j.key, null, { state: j.state, offset: { x: j.x, y: j.y, z: j.z }, quiet: true, lite: true });
       } catch (e) { console.warn('[junction] mesh build failed:', e && e.message); j.state = null; }
-    } else if (j.state && d > 9500) {
+    } else if (j.state && d > 9800) {
       try { _arenaDisposeMesh(j.state); } catch (_) {}
       j.state = null;
     }
@@ -24736,12 +24881,22 @@ function _lssJunctionTick() {
     }
   }
 }
-if (typeof window !== 'undefined') window.__junctions = function () {
-  const J = game._lssJunctions;
-  if (!J || !J.length) return 'no junctions';
-  return J.map(j => ({ x: Math.round(j.x), y: Math.round(j.y), z: Math.round(j.z), env: Math.round(j.env),
-    mesh: j.state ? (j.state.building ? (j.state.chunksDone + '/' + j.state.chunksTotal) : (Math.round(j.state.tris / 1000) + 'k tris')) : 'lazy' }));
-};
+if (typeof window !== 'undefined') {
+  window.__junctions = function () {
+    const J = game._lssJunctions;
+    if (!J || !J.length) return 'no junctions';
+    return J.map(j => ({ x: Math.round(j.x), y: Math.round(j.y), z: Math.round(j.z), env: Math.round(j.env),
+      mesh: j.state ? (j.state.building ? (j.state.chunksDone + '/' + j.state.chunksTotal) : (Math.round(j.state.tris / 1000) + 'k tris')) : 'lazy' }));
+  };
+  window.__junctionTick = function () { return _lssJunctionTick(); };
+  window.__cavSDF = function (x, y, z) { return worldSDF(x, y, z); };
+  window.__endlessExtend = function (n) {
+    const run = game.endlessRun;
+    if (!run) return 'no endless run';
+    for (let i = 0; i < (n || 1); i++) _lssEndlessApplySeg(run, _lssEndlessNextSeg(run));
+    return run.segs.length;
+  };
+}
 
 function _arenaBuildMesh(G, key, level, opts) {
   const M = (opts && opts.state) || _arenaMesh;
@@ -25041,7 +25196,9 @@ function worldSDF(px,py,pz) {
         if (vd2 >= vrr * vrr) continue;
         const vw = Math.max(0, Math.min(1, (_jn.env - Math.sqrt(vd2)) / 240));
         if (vw > 0) {
-          const dvf = _ARENA_FIELD.eval(vdx, vdy, vdz, _jn.G);
+          const dvf = (_jn.G && _jn.G.kind === 'cavern')
+            ? _CAVERN_FIELD.eval(vdx, vdy, vdz, _jn.G)
+            : _ARENA_FIELD.eval(vdx, vdy, vdz, _jn.G);
           _f = Math.max(_f, dvf * vw + (-600) * (1 - vw));
         }
       }
@@ -58630,14 +58787,16 @@ function _lssEndlessNextSeg(run) {
         const cx = a.x + (g.x - a.x) * tc, cz = a.z + (g.z - a.z) * tc;
         const ws = (typeof net !== 'undefined' && net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED;
         const seed = (((ws >>> 0) ^ ((g.nextGid * 2654435761) >>> 0)) >>> 0);
-        const jG = _lssJunctionG(seed);
-        const gap = jG.R + 260;
+        const gap = _lssJunctionG(seed, g.heading, 400).R + 260;
         const sh = Math.sin(g.heading), ch = Math.cos(g.heading);
         jDeckA = g.deck;
         let deckB = _lssEndlessDeckIdx(cx + sh * gap, cz + ch * gap);
         if (deckB === jDeckA) deckB = jDeckA + (newIdx > jDeckA ? 1 : -1);
-        jRec = { x: cx, y: (jDeckA + deckB) / 2 * _VD.step * _lssEndlessDeckEnv(cx, cz),
-                 z: cz, seed, deckA: jDeckA, deckB };
+        const envC = _lssEndlessDeckEnv(cx, cz);
+        jRec = { x: cx, y: (jDeckA + deckB) / 2 * _VD.step * envC,
+                 z: cz, seed, deckA: jDeckA, deckB,
+                 heading: g.heading,
+                 dHalf: (deckB - jDeckA) / 2 * _VD.step * envC };
         jEnt = { x: cx - sh * gap, z: cz - ch * gap };
         jExit = { x: cx + sh * gap, z: cz + ch * gap };
         g.x = jExit.x; g.z = jExit.z;
@@ -58664,7 +58823,8 @@ function _lssEndlessNextSeg(run) {
 }
 
 function _lssEndlessApplySeg(run, s) {
-  const cyl = { ax: s.a.x, ay: s.a.y, az: s.a.z, bx: s.b.x, by: s.b.y, bz: s.b.z, r: s.r, w: 0.15 };
+  const cyl = { ax: s.a.x, ay: s.a.y, az: s.a.z, bx: s.b.x, by: s.b.y, bz: s.b.z,
+                r: s.junction ? 360 : s.r, w: s.junction ? 1 : 0.15 };
   game.levelCylinders.push(cyl);
   let sph = null, spur = null;
   if (s.hall) {
@@ -58682,7 +58842,17 @@ function _lssEndlessApplySeg(run, s) {
     cyl, sph, spur,
   });
   if (s.junction && typeof _lssJunctionRegister === 'function') {
-    _lssJunctionRegister(s.junction.x, s.junction.y, s.junction.z, s.junction.seed);
+    const jn = s.junction;
+    const j = _lssJunctionRegister(jn.x, jn.y, jn.z, jn.seed, { heading: jn.heading, dHalf: jn.dHalf });
+    if (j && j.G && j.G.chambers) {
+      const c1 = j.G.chambers[0], c3 = j.G.chambers[2];
+      game.levelCylinders.push({ ax: s.b.x, ay: s.b.y, az: s.b.z,
+                                 bx: jn.x + c1.x, by: jn.y + c1.y, bz: jn.z + c1.z, r: 360, w: 1 });
+      if (s.exit) {
+        game.levelCylinders.push({ ax: jn.x + c3.x, ay: jn.y + c3.y, az: jn.z + c3.z,
+                                   bx: s.exit.x, by: s.exit.y, bz: s.exit.z, r: 360, w: 1 });
+      }
+    }
   }
   try {
     if (!window.__endlessNoRebake) {
@@ -58918,12 +59088,15 @@ function _lssGenEndlessLevel(base) {
     if (s.hall) rooms.push({ id: 'hall' + s.gid, team: null, x: s.b.x, y: s.b.y, z: s.b.z, r: s.hallR });
     if (s.junction && typeof _lssJunctionG === 'function') {
       const jn = s.junction;
-      const _jG = _lssJunctionG(jn.seed);
-      const _jE = _lssJunctionEnv(_jG);
-      rooms.push({ id: 'junction' + s.gid, team: null, x: jn.x, y: jn.y, z: jn.z,
-                   r: _jE.r * 0.92, drop: _jE.drop, rise: _jE.rise });
+      const _jG = _lssJunctionG(jn.seed, jn.heading, jn.dHalf);
       game._lssJunctionSeeds.push(jn);
-      _tunnels.push({ r: 400, w: 0.15, path: _tunnelPath });
+      const _c1 = _jG.chambers[0], _c3 = _jG.chambers[2];
+      _tunnelPath.pop();   // b was pushed at loop top; it belongs to the bore
+      if (_tunnelPath.length >= 2) _tunnels.push({ r: 400, w: 0.15, path: _tunnelPath });
+      _tunnels.push({ r: 360, w: 1, path: [ { x: s.a.x, y: s.a.y, z: s.a.z }, { x: s.b.x, y: s.b.y, z: s.b.z },
+                                            { x: jn.x + _c1.x, y: jn.y + _c1.y, z: jn.z + _c1.z } ] });
+      _tunnels.push({ r: 360, w: 1, path: [ { x: jn.x + _c3.x, y: jn.y + _c3.y, z: jn.z + _c3.z },
+                                            { x: s.exit.x, y: s.exit.y, z: s.exit.z } ] });
       _tunnelPath = [{ x: s.exit.x, y: s.exit.y, z: s.exit.z }];
     }
     run.segs.push({
@@ -59455,7 +59628,7 @@ function buildRoomGraphLevel(level) {
       if (game._lssJunctionSeeds && game._lssJunctionSeeds.length && typeof _lssJunctionRegister === 'function') {
         const seeds = game._lssJunctionSeeds;
         game._lssJunctionSeeds = null;
-        for (const p of seeds) _lssJunctionRegister(p.x, p.y, p.z, p.seed, { noSphere: true });
+        for (const p of seeds) _lssJunctionRegister(p.x, p.y, p.z, p.seed, { heading: p.heading, dHalf: p.dHalf });
       }
     } catch (e) { console.warn('[junction] build-tail registration failed:', e && e.message); }
   }
