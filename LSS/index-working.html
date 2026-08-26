@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.97';
+const LSS_BUILD = '36.98';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -8445,6 +8445,24 @@ const EndlessMode = {
     const v = player.velocity;
     if (v && Math.hypot(v.x, v.z) > 30) hd = Math.atan2(v.x, v.z);
     else if (run.aegis && run.aegis.fwd && Math.hypot(run.aegis.fwd.x, run.aegis.fwd.z) > 0.2) hd = Math.atan2(run.aegis.fwd.x, run.aegis.fwd.z);
+    // (v36.98) BENT SANDWICH: the generator's x/y/z are FLAT-space coords.
+    // The classic code seeded them from the player's WORLD position — in
+    // bend mode that planted the new route in the wrong space entirely
+    // (the owner's 'cavern shifts -> white void, geometry far away').
+    // Re-anchor BOTH spaces: the flat route at the player's flat image,
+    // the world spine at the player, pitch reset to level. In a vertical
+    // dive the horizontal velocity is ~0 and its heading is noise — fall
+    // back to the route's last heading.
+    const bendMode = !!(run.bend && game._bendSegs && game._bendSegs.length);
+    let fq = null;
+    if (bendMode) {
+      const q = _bendUnmap(p.x, p.y, p.z);
+      fq = { x: q.x, y: q.y, z: q.z };
+      if (v && Math.hypot(v.x, v.z) <= 30) {
+        const lb = game._bendSegs[game._bendSegs.length - 1];
+        hd = Math.atan2(lb.hx, lb.hz);
+      }
+    }
     const soft = ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
     for (let i = 0; i < run.segs.length; i++) {
       const s0 = run.segs[i];
@@ -8454,9 +8472,13 @@ const EndlessMode = {
       if (s0.sph) { const j = game.levelSpheres.indexOf(s0.sph); if (j >= 0) game.levelSpheres.splice(j, 1); }
       try {
         if (!window.__endlessNoRebake) {
+          // (v36.98) Rebake rects come from the CARVE SHAPES (flat space);
+          // in bend mode s0.a/s0.b are world coords and would miss.
+          const rax = s0.cyl ? s0.cyl.ax : s0.a.x, raz = s0.cyl ? s0.cyl.az : s0.a.z;
+          const rbx = s0.cyl ? s0.cyl.bx : s0.b.x, rbz = s0.cyl ? s0.cyl.bz : s0.b.z;
           const cr = (s0.cyl ? s0.cyl.r : 400) + soft;
-          let minX = Math.min(s0.a.x, s0.b.x) - cr, maxX = Math.max(s0.a.x, s0.b.x) + cr;
-          let minZ = Math.min(s0.a.z, s0.b.z) - cr, maxZ = Math.max(s0.a.z, s0.b.z) + cr;
+          let minX = Math.min(rax, rbx) - cr, maxX = Math.max(rax, rbx) + cr;
+          let minZ = Math.min(raz, rbz) - cr, maxZ = Math.max(raz, rbz) + cr;
           if (s0.sph) {
             const rr = s0.sph.r + soft;
             minX = Math.min(minX, s0.sph.cx - rr); maxX = Math.max(maxX, s0.sph.cx + rr);
@@ -8475,9 +8497,20 @@ const EndlessMode = {
       const chord = Math.hypot(p.x - run.lostX, p.y - run.lostY, p.z - run.lostZ);
       run.dist += Math.min(chord, 600 * run.lostT);
     }
-    g.x = p.x + Math.sin(hd) * 2600;
-    g.z = p.z + Math.cos(hd) * 2600;
-    g.y = Math.max(-260, Math.min(260, p.y));
+    if (bendMode) {
+      g.x = fq.x + Math.sin(hd) * 2600;
+      g.z = fq.z + Math.cos(hd) * 2600;
+      g.y = Math.max(-260, Math.min(260, fq.y));
+      g._wx = p.x + Math.sin(hd) * 2600;
+      g._wy = p.y;
+      g._wz = p.z + Math.cos(hd) * 2600;
+      // Level and calm for the first two fresh segments, then pitch resumes.
+      g._th = 0; g._thT = 0; g._thPrev = 0; g._thHold = 2;
+    } else {
+      g.x = p.x + Math.sin(hd) * 2600;
+      g.z = p.z + Math.cos(hd) * 2600;
+      g.y = Math.max(-260, Math.min(260, p.y));
+    }
     g.heading = hd; g.sinceHall = 0;
     for (let i = 0; i < 8; i++) { try { _lssEndlessApplySeg(run, _lssEndlessNextSeg(run)); } catch (_) {} }
     run.progGid = -1; run.progT = 0; run.lostT = 0; run.farT = 0;
@@ -31563,6 +31596,9 @@ if (typeof window !== 'undefined') {
     const q = _bendUnmap(x, y, z);
     return { x: q.x, y: q.y, z: q.z };   // copy — _bendUnmap returns a scratch
   };
+  // Headless test handle: EndlessMode internals (reanchor etc.) — panes
+  // with frozen rAF can't trip the natural triggers.
+  window.__endless = function () { return (typeof EndlessMode !== 'undefined') ? EndlessMode : null; };
   // Round-trip validation: worst |U(W(q)) - q| over samples along the
   // route at several lateral/vertical offsets. Anything under ~10u means
   // collision and the bent meshes agree.
