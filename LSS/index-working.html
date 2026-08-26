@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.99';
+const LSS_BUILD = '37.00';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -8941,14 +8941,60 @@ const EndlessMode = {
     if (run.dist >= run.nextBiomeAt) {
       run.nextBiomeAt = run.dist + 9000 + run.gen.cos() * 6000;
       const order = ['rocky', 'snow', 'volcanic', 'goldmine', 'grassy'];
+      const prevBiome = T.biome;
       run.biomeIdx = (run.biomeIdx + 1) % order.length;
+      // (v37.00) GRADUAL TRANSITIONS (owner: "always gradual"):
+      // 1. TEMPORAL — snapshot the lerpable atmosphere (fog, background,
+      //    biome uniforms), apply the new biome's targets, rewind, then
+      //    lerp over ~2.6km of flying (the tween block below).
+      //    _swSyncFX here also fixes a real bug: stretch switches never
+      //    flipped the biome uniforms at all (uGold/uLava stayed at their
+      //    map-init values for the whole run).
+      // 2. SPATIAL — game._swPalXf crossfades the BAKED vertex palettes
+      //    along the travel heading (old biome behind, new ahead), and the
+      //    blend band ahead is invalidated so it rebakes blended.
+      const _atmoFrom = (typeof _swAtmoSnap === 'function') ? _swAtmoSnap({}) : null;
       T.biome = order[run.biomeIdx];
       // (stage 3b) Some rocky/snow stretches roll STORMY: ambient lightning
       // instead of god rays. Visual-only — no owned light state is touched
       // (the sentinel rule), so the weather system stays authoritative.
       run.stormy = (T.biome === 'rocky' || T.biome === 'snow') && run.gen.cos() < 0.35;
       try { if (typeof _swApplyAtmosphere === 'function') _swApplyAtmosphere(); } catch (_) {}
+      try { if (typeof _swSyncFX === 'function') _swSyncFX(); } catch (_) {}
+      if (_atmoFrom) {
+        try {
+          const _atmoTo = _swAtmoSnap({});
+          _swAtmoApply(_atmoFrom);
+          run.atmoXf = { from: _atmoFrom, to: _atmoTo, d0: run.dist, len: 2600 };
+        } catch (_) { run.atmoXf = null; }
+      }
+      try {
+        let axp = player.position.x, azp = player.position.z;
+        if (game.bendWorld && game._bendSegs && typeof _bendUnmap === 'function') {
+          const q = _bendUnmap(player.position.x, player.position.y, player.position.z);
+          axp = q.x; azp = q.z;
+        }
+        const hh = run.gen.heading || 0;
+        game._swPalXf = { from: prevBiome, ax: axp, az: azp, hx: Math.sin(hh), hz: Math.cos(hh) };
+        // Rebake the blend band (1.4-4km ahead) so already-baked chunks
+        // there pick up the crossfaded palette; far enough out that the
+        // budgeted rebake hides in fog.
+        if (typeof _swInvalidateChunksInRect === 'function' && !window.__endlessNoRebake) {
+          const ex1 = axp + Math.sin(hh) * 1400, ez1 = azp + Math.cos(hh) * 1400;
+          const ex2 = axp + Math.sin(hh) * 4000, ez2 = azp + Math.cos(hh) * 4000;
+          const pad = 5600;
+          _swInvalidateChunksInRect(Math.min(ex1, ex2) - pad, Math.max(ex1, ex2) + pad,
+                                    Math.min(ez1, ez2) - pad, Math.max(ez1, ez2) + pad);
+        }
+      } catch (_) {}
       try { if (window.Overlays && Overlays.banner) Overlays.banner(run.stormy ? 'STORM REACH' : (T.biome.toUpperCase() + ' REACH'), run.stormy ? 'the dark crackles' : 'the cavern changes'); } catch (_) {}
+    }
+    // (v37.00) Advance the atmosphere tween off actual distance flown.
+    if (run.atmoXf) {
+      const X = run.atmoXf;
+      let m = (run.dist - X.d0) / X.len;
+      if (m >= 1) { try { _swAtmoApply(X.to); } catch (_) {} run.atmoXf = null; }
+      else if (m > 0) { m = m * m * (3 - 2 * m); try { _swAtmoLerp(X.from, X.to, m); } catch (_) {} }
     }
     // God rays: pooled additive shafts hung under ceiling cracks (a HIGH carved
     // ceiling = the pinch crack), calm biomes only, cylindrical-billboarded.
@@ -21791,11 +21837,24 @@ function _stPatch(x, z) {
 }
 // Ground colour. Grassy biome varies by a patch noise (rock -> moss -> grass) so
 // the ground isn't uniform, with snow caps at altitude. Other biomes: height ramp.
-function _swColGround(x, z, wy, T, out) {
-  const P = _swPal(T), sl = (T && T.snowLine) || 0.72;
+// (v37.00) GRADUAL BIOME TRANSITIONS — owner: "sometimes the transition of
+// biomes is abrupt... let's make them always gradual." The endless stretch
+// switch sets game._swPalXf = { from, ax, az, hx, hz }: baked vertex
+// palettes CROSSFADE spatially along the travel heading over ~2.4km (old
+// biome behind the anchor, new ahead, both evaluated + lerped inside the
+// band), instead of jumping at a chunk-bake seam.
+function _swPalXfMix(x, z) {
+  const X = game._swPalXf;
+  if (!X) return 1;
+  const d = (x - X.ax) * X.hx + (z - X.az) * X.hz;
+  const m = (d - 600) / 2400;
+  return m < 0 ? 0 : (m > 1 ? 1 : m);
+}
+function _swColGroundB(x, z, wy, T, bio, out) {
+  const P = _SW_BIOMES[bio] || _SW_BIOMES.grassy, sl = (T && T.snowLine) || 0.72;
   const lo = T.YMID - T.AMP * 0.5, hi = T.YMID + T.AMP * 0.4;
   let t = (wy - lo) / (hi - lo); t = t < 0 ? 0 : (t > 1 ? 1 : t);
-  if (T.biome === 'grassy') {
+  if (bio === 'grassy') {
     const pc = _stPatch(x, z);
     if (pc < 0.40) out.copy(_SW_cA.set(P.rock)).lerp(_SW_cB.set(P.moss), pc / 0.40);
     else if (pc < 0.68) out.copy(_SW_cA.set(P.moss)).lerp(_SW_cB.set(P.gMid), (pc - 0.40) / 0.28);
@@ -21808,12 +21867,39 @@ function _swColGround(x, z, wy, T, out) {
   else out.copy(_SW_cA.set(P.gHi)).lerp(_SW_cB.set(P.gSnow), (t - sl) / Math.max(0.01, 1 - sl));
   return out;
 }
+const _swXfC = new THREE.Color();
+function _swColGround(x, z, wy, T, out) {
+  const X = game._swPalXf;
+  if (X && X.from !== T.biome) {
+    const m = _swPalXfMix(x, z);
+    if (m <= 0) return _swColGroundB(x, z, wy, T, X.from, out);
+    if (m < 1) {
+      _swColGroundB(x, z, wy, T, X.from, _swXfC);
+      _swColGroundB(x, z, wy, T, T.biome, out);
+      return out.lerp(_swXfC, 1 - m);
+    }
+  }
+  return _swColGroundB(x, z, wy, T, T.biome, out);
+}
 // Ceiling colour: hanging tips (low) lighter, base (high) darker grey rock.
-function _swColCeil(wy, T, out) {
-  const P = _swPal(T);
+function _swColCeilB(wy, T, bio, out) {
+  const P = _SW_BIOMES[bio] || _SW_BIOMES.grassy;
   const lo = T.YMID - T.AMP * 0.3, hi = T.YCEIL;
   let t = (wy - lo) / (hi - lo); t = t < 0 ? 0 : (t > 1 ? 1 : t);
   return out.copy(_SW_cA.set(P.cHi)).lerp(_SW_cB.set(P.cLo), t);
+}
+function _swColCeil(x, z, wy, T, out) {
+  const X = game._swPalXf;
+  if (X && X.from !== T.biome) {
+    const m = _swPalXfMix(x, z);
+    if (m <= 0) return _swColCeilB(wy, T, X.from, out);
+    if (m < 1) {
+      _swColCeilB(wy, T, X.from, _swXfC);
+      _swColCeilB(wy, T, T.biome, out);
+      return out.lerp(_swXfC, 1 - m);
+    }
+  }
+  return _swColCeilB(wy, T, T.biome, out);
 }
 
 // One height-field shell (ground or ceiling) over a single chunk's footprint.
@@ -21951,6 +22037,39 @@ function _swSyncFX() {
   _swU.uTreeFadeA.value = _swTV * _SW_CHUNK * 0.52;
   _swU.uTreeFadeB.value = _swTV * _SW_CHUNK * 0.76;
 }
+// ── (v37.00) Atmosphere tween — the temporal half of gradual biome
+// transitions. The endless stretch switch snapshots the lerpable set
+// (fog color/density, background, the biome uniforms), applies the new
+// biome's targets, rewinds, and then lerps toward them over ~2.6km of
+// actual flying (EndlessMode._world drives it off run.dist). The shader's
+// biome gates were softened (>0.02 + strength multipliers) so a lerped
+// uGold/uLava fades in instead of popping at 0.5.
+const _SW_ATMO_NUMS = ['uLava','uRocky','uGold','uCrystal','uMossy','uGlitch','uStrata','uRim',
+                       'uAerial','uAerialStart','uAerialFar','uSnowRough','uLavaGlow'];
+const _SW_ATMO_COLS = ['uColGrass','uColRock','uColSnow','uColMoss','uAerialColor'];
+function _swAtmoSnap(out) {
+  out.fog = (scene.fog && scene.fog.color) ? { r: scene.fog.color.r, g: scene.fog.color.g, b: scene.fog.color.b, d: scene.fog.density || 0 } : null;
+  out.bg = (scene.background && scene.background.isColor) ? { r: scene.background.r, g: scene.background.g, b: scene.background.b } : null;
+  out.n = {}; for (const k of _SW_ATMO_NUMS) out.n[k] = _swU[k] ? _swU[k].value : 0;
+  out.c = {}; for (const k of _SW_ATMO_COLS) { const u = _swU[k]; out.c[k] = u ? { r: u.value.r, g: u.value.g, b: u.value.b } : null; }
+  return out;
+}
+function _swAtmoLerp(a, b, m) {
+  const im = 1 - m;
+  if (a.fog && b.fog && scene.fog && scene.fog.color) {
+    scene.fog.color.setRGB(a.fog.r * im + b.fog.r * m, a.fog.g * im + b.fog.g * m, a.fog.b * im + b.fog.b * m);
+    if (scene.fog.density !== undefined) scene.fog.density = a.fog.d * im + b.fog.d * m;
+  }
+  if (a.bg && b.bg && scene.background && scene.background.isColor) {
+    scene.background.setRGB(a.bg.r * im + b.bg.r * m, a.bg.g * im + b.bg.g * m, a.bg.b * im + b.bg.b * m);
+  }
+  for (const k of _SW_ATMO_NUMS) { if (_swU[k]) _swU[k].value = a.n[k] * im + b.n[k] * m; }
+  for (const k of _SW_ATMO_COLS) {
+    const u = _swU[k], ca = a.c[k], cb = b.c[k];
+    if (u && ca && cb) u.value.setRGB(ca.r * im + cb.r * m, ca.g * im + cb.g * m, ca.b * im + cb.b * m);
+  }
+}
+function _swAtmoApply(s) { _swAtmoLerp(s, s, 0); }
 function _swPatchTerrainMat(m, isCeil, clipAtlas) {
   m.onBeforeCompile = (sh) => {
     sh.uniforms.uTime=_swU.uTime; sh.uniforms.uYMid=_swU.uYMid; sh.uniforms.uAMP=_swU.uAMP;
@@ -22118,7 +22237,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _rsl=uSnow+_snowWander(vWPos.xz)*uSnowVary;\n float _snow=smoothstep(_rsl,_rsl+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
-      '#include <emissivemap_fragment>\n if(uLava>0.5 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float pool=(1.0-smoothstep(0.04,0.17,_h)); float poolN=_tvn(vWPos.xz*0.012)*0.6+_tvn(vWPos.xz*0.03+vec2(9.0,4.0))*0.4; float poolMask=smoothstep(0.12,0.5,0.5+0.5*poolN); float poolGlow=pool*poolMask;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips+poolGlow*1.15,0.0,1.7)*_pulse;\n vec3 lavaCol=mix(vec3(1.2,0.08,0.0),vec3(1.7,0.5,0.08),smoothstep(0.0,0.08,_h)); float emInt=glow*mix(0.78,1.0,smoothstep(0.0,0.08,_h)); totalEmissiveRadiance+=lavaCol*emInt*uLavaGlow;\n }\n if(uRocky>0.5 && uCeil<0.5){ vec3 ffn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos))); float ffl=clamp((abs(ffn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); float fA=_tvn(vWPos.xz*0.02)*0.55+_tvn(vWPos.xz*0.05+vec2(19.0,7.0))*0.30+_tvn(vWPos.xz*0.11+vec2(3.0,11.0))*0.15; float fung=smoothstep(0.60,0.78,0.5+0.5*fA); float spore=smoothstep(0.82,0.97,0.5+0.5*_tvn(vWPos.xz*0.6)); float breathe=0.6+0.4*sin(uTime*0.7+fA*6.0+vWPos.x*0.012); vec3 glowCol=mix(vec3(0.16,0.95,0.55),vec3(0.20,0.70,1.0),0.5+0.5*_tvn(vWPos.xz*0.03)); float fglow=fung*(0.18+spore*1.2)*breathe*(1.0-ffl); totalEmissiveRadiance+=glowCol*fglow; }if(uGold>0.5){vec3 gfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float gfl=clamp((abs(gfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float gA=_tvn(vWPos.xz*0.016+vec2(vWPos.y*0.05,3.0))*0.55+_tvn(vWPos.xz*0.044+vec2(17.0,9.0))*0.30+_tvn(vWPos.xz*0.11+vec2(5.0,13.0))*0.15;float vein=smoothstep(0.56,0.72,0.5+0.5*gA);float glint=smoothstep(0.86,0.985,0.5+0.5*_tvn(vWPos.xz*0.9+vec2(vWPos.y*0.2,0.0)));float shimmer=0.82+0.18*sin(uTime*1.1+gA*7.0+vWPos.y*0.03);vec3 goldCol=mix(vec3(1.0,0.72,0.18),vec3(1.5,1.18,0.6),0.4+0.6*glint);float gglow=(vein*0.30+glint*1.2*vein)*shimmer*(1.0-gfl*0.7);totalEmissiveRadiance+=goldCol*gglow*uGold;}if(uCrystal>0.5){vec3 cfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float cfl=clamp((abs(cfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float cA=_tvn(vWPos.xz*0.02+vec2(vWPos.y*0.06,4.0))*0.5+_tvn(vWPos.xz*0.05+vec2(13.0,17.0))*0.3+_tvn(vWPos.xz*0.12+vec2(5.0,9.0))*0.2;float cryst=smoothstep(0.62,0.82,0.5+0.5*cA);float facet=smoothstep(0.80,0.97,0.5+0.5*_tvn(vWPos.xz*0.7+vec2(vWPos.y*0.15,0.0)));float twinkle=0.6+0.4*sin(uTime*1.6+cA*9.0+vWPos.y*0.04);vec3 crysCol=mix(vec3(0.25,0.85,1.2),vec3(0.7,0.4,1.3),0.5+0.5*sin(uTime*0.5+cA*4.0+vWPos.x*0.01));float cglow=(cryst*0.30+facet*1.3*cryst)*twinkle*(1.0-cfl*0.6);totalEmissiveRadiance+=crysCol*cglow*uCrystal;}\n if(uGlitch>0.5 && uCeil>0.5){ float gz=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); float scan=step(0.92,fract(vWPos.y*0.04+uTime*1.5)); totalEmissiveRadiance+=vec3(0.45,0.12,0.85)*scan*step(0.45,gz)*0.7; }');
+      '#include <emissivemap_fragment>\n if(uLava>0.02 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float pool=(1.0-smoothstep(0.04,0.17,_h)); float poolN=_tvn(vWPos.xz*0.012)*0.6+_tvn(vWPos.xz*0.03+vec2(9.0,4.0))*0.4; float poolMask=smoothstep(0.12,0.5,0.5+0.5*poolN); float poolGlow=pool*poolMask;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips+poolGlow*1.15,0.0,1.7)*_pulse;\n vec3 lavaCol=mix(vec3(1.2,0.08,0.0),vec3(1.7,0.5,0.08),smoothstep(0.0,0.08,_h)); float emInt=glow*mix(0.78,1.0,smoothstep(0.0,0.08,_h)); totalEmissiveRadiance+=lavaCol*emInt*uLavaGlow*clamp(uLava,0.0,1.0);\n }\n if(uRocky>0.02 && uCeil<0.5){ vec3 ffn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos))); float ffl=clamp((abs(ffn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); float fA=_tvn(vWPos.xz*0.02)*0.55+_tvn(vWPos.xz*0.05+vec2(19.0,7.0))*0.30+_tvn(vWPos.xz*0.11+vec2(3.0,11.0))*0.15; float fung=smoothstep(0.60,0.78,0.5+0.5*fA); float spore=smoothstep(0.82,0.97,0.5+0.5*_tvn(vWPos.xz*0.6)); float breathe=0.6+0.4*sin(uTime*0.7+fA*6.0+vWPos.x*0.012); vec3 glowCol=mix(vec3(0.16,0.95,0.55),vec3(0.20,0.70,1.0),0.5+0.5*_tvn(vWPos.xz*0.03)); float fglow=fung*(0.18+spore*1.2)*breathe*(1.0-ffl); totalEmissiveRadiance+=glowCol*fglow*clamp(uRocky,0.0,1.0); }if(uGold>0.02){vec3 gfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float gfl=clamp((abs(gfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float gA=_tvn(vWPos.xz*0.016+vec2(vWPos.y*0.05,3.0))*0.55+_tvn(vWPos.xz*0.044+vec2(17.0,9.0))*0.30+_tvn(vWPos.xz*0.11+vec2(5.0,13.0))*0.15;float vein=smoothstep(0.56,0.72,0.5+0.5*gA);float glint=smoothstep(0.86,0.985,0.5+0.5*_tvn(vWPos.xz*0.9+vec2(vWPos.y*0.2,0.0)));float shimmer=0.82+0.18*sin(uTime*1.1+gA*7.0+vWPos.y*0.03);vec3 goldCol=mix(vec3(1.0,0.72,0.18),vec3(1.5,1.18,0.6),0.4+0.6*glint);float gglow=(vein*0.30+glint*1.2*vein)*shimmer*(1.0-gfl*0.7);totalEmissiveRadiance+=goldCol*gglow*uGold;}if(uCrystal>0.02){vec3 cfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float cfl=clamp((abs(cfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float cA=_tvn(vWPos.xz*0.02+vec2(vWPos.y*0.06,4.0))*0.5+_tvn(vWPos.xz*0.05+vec2(13.0,17.0))*0.3+_tvn(vWPos.xz*0.12+vec2(5.0,9.0))*0.2;float cryst=smoothstep(0.62,0.82,0.5+0.5*cA);float facet=smoothstep(0.80,0.97,0.5+0.5*_tvn(vWPos.xz*0.7+vec2(vWPos.y*0.15,0.0)));float twinkle=0.6+0.4*sin(uTime*1.6+cA*9.0+vWPos.y*0.04);vec3 crysCol=mix(vec3(0.25,0.85,1.2),vec3(0.7,0.4,1.3),0.5+0.5*sin(uTime*0.5+cA*4.0+vWPos.x*0.01));float cglow=(cryst*0.30+facet*1.3*cryst)*twinkle*(1.0-cfl*0.6);totalEmissiveRadiance+=crysCol*cglow*uCrystal;}\n if(uGlitch>0.5 && uCeil>0.5){ float gz=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); float scan=step(0.92,fract(vWPos.y*0.04+uTime*1.5)); totalEmissiveRadiance+=vec3(0.45,0.12,0.85)*scan*step(0.45,gz)*0.7; }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <normal_fragment_begin>','#include <normal_fragment_begin>\n if(uCeil<0.5 && uSmooth>0.5){ vec3 _bn=normalize(vSN); float _dC=length(uCam.xz-vWPos.xz); float _ds=uDetail*(1.0-smoothstep(900.0,2600.0,_dC)); if(_ds>0.001){ float _e=2.5; float _d0=_detN(vWPos.xz); float _gx=_detN(vWPos.xz+vec2(_e,0.0))-_d0; float _gz=_detN(vWPos.xz+vec2(0.0,_e))-_d0; _bn=normalize(_bn - vec3(_gx,0.0,_gz)*(_ds*3.0/_e)); } normal = normalize((viewMatrix * vec4(_bn,0.0)).xyz); }');
   };
   return m;
@@ -22734,7 +22853,7 @@ function _swBuildShell(x0, z0, isCeil, T) {
         y += ((y + _other) * 0.5 - y) * _pinch;
       }
       verts[p] = x; verts[p + 1] = y; verts[p + 2] = z;
-      if (isCeil) _swColCeil(y, T, _SW_tmpC); else _swColGround(x, z, y, T, _SW_tmpC);
+      if (isCeil) _swColCeil(x, z, y, T, _SW_tmpC); else _swColGround(x, z, y, T, _SW_tmpC);
       cols[p] = _SW_tmpC.r; cols[p + 1] = _SW_tmpC.g; cols[p + 2] = _SW_tmpC.b;
       p += 3;
     }
@@ -76734,6 +76853,8 @@ function buildRoomGraphLevel(level) {
   // (v36.96) Bend state dies with every rebuild; the endless generator
   // re-arms it for bend maps.
   try { if (typeof _bendReset === 'function') _bendReset(); } catch (_) {}
+  // (v37.00) So does the biome palette crossfade anchor.
+  game._swPalXf = null;
   // Bump the build sequence so any in-flight overlay
   // IIFE from a prior call knows its captured state is stale and
   // can bail out instead of re-adding old wall meshes to the scene.
