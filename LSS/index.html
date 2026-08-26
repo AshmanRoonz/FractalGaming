@@ -4139,7 +4139,8 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.95';
+const LSS_BUILD = '36.96';
+if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -7707,7 +7708,7 @@ function startEndless() {
   game.testMode = false;
   game.raceNoTimer = true;
   game.currentRound = 1;
-  game.selectedMap = 'endless_caverns';
+  game.selectedMap = (typeof window !== 'undefined' && window.__bend) ? 'endless_bend' : 'endless_caverns';
   let _code = '';
   try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
   if ((net.active && net.room) || _code) {
@@ -18181,6 +18182,9 @@ function _swBuildShell(x0, z0, isCeil, T) {
       if (isCeil) { idx.push(a, b, c, b, d, c); } else { idx.push(a, c, b, b, c, d); }
     }
   }
+  if (game.bendWorld && game._bendSegs && game._bendSegs.length && typeof _bendVerts === 'function') {
+    _bendVerts(verts);
+  }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
@@ -24888,8 +24892,91 @@ if (typeof window !== 'undefined') window.__spireMesh = () => ({
 });
 
 const _SDF_BLEND_REACH = 135;
+function _bendReset() { game.bendWorld = false; game._bendSegs = null; }
+function _bendPushSeg(rec) {
+  if (!game._bendSegs) game._bendSegs = [];
+  const c = Math.cos(rec.th), s = Math.sin(rec.th);
+  rec.ax_ = rec.hx * c; rec.ay_ = s; rec.az_ = rec.hz * c;   // pitched axis A
+  rec.nx_ = -rec.hx * s; rec.ny_ = c; rec.nz_ = -rec.hz * s; // pitched up N
+  rec.px_ = rec.hz; rec.pz_ = -rec.hx;                       // horizontal perp P
+  rec.wmx = (rec.wax + rec.wbx) * 0.5; rec.wmy = (rec.way + rec.wby) * 0.5; rec.wmz = (rec.waz + rec.wbz) * 0.5;
+  rec.fmx = (rec.fax + rec.fbx) * 0.5; rec.fmz = (rec.faz + rec.fbz) * 0.5;
+  rec.half = rec.len * 0.5;
+  game._bendSegs.push(rec);
+}
+function _bendUnmap(px, py, pz) {
+  const segs = game._bendSegs;
+  if (!segs || !segs.length) return { x: px, y: py, z: pz };
+  let sx = 0, sy = 0, sz = 0, sw = 0;
+  let fbQ = null, fbD = Infinity;
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const dmx = px - s.wmx, dmy = py - s.wmy, dmz = pz - s.wmz;
+    const cd2 = dmx * dmx + dmy * dmy + dmz * dmz;
+    const dx = px - s.wax, dy = py - s.way, dz = pz - s.waz;
+    let t = dx * s.ax_ + dy * s.ay_ + dz * s.az_;
+    t = t < 0 ? 0 : (t > s.len ? s.len : t);
+    const v = dx * s.px_ + dz * s.pz_;
+    const w = dx * s.nx_ + dy * s.ny_ + dz * s.nz_;
+    const ex = dx - s.ax_ * t, ey = dy - s.ay_ * t, ez = dz - s.az_ * t;
+    const r2 = ex * ex + ey * ey + ez * ez;
+    const qx = s.fax + s.hx * t + s.px_ * v;
+    const qz = s.faz + s.hz * t + s.pz_ * v;
+    if (r2 < fbD) { fbD = r2; fbQ = { x: qx, y: w, z: qz }; }
+    if (cd2 > (s.half + 12000) * (s.half + 12000)) continue;
+    const wgt = 1 / ((r2 + 2500) * (r2 + 2500));
+    sx += qx * wgt; sy += w * wgt; sz += qz * wgt; sw += wgt;
+  }
+  if (sw <= 0) return fbQ || { x: px, y: py, z: pz };
+  return { x: sx / sw, y: sy / sw, z: sz / sw };
+}
+function _bendMapPoint(qx, qy, qz) {
+  const segs = game._bendSegs;
+  if (!segs || !segs.length) return { x: qx, y: qy, z: qz };
+  let sx = 0, sy = 0, sz = 0, sw = 0;
+  let fbP = null, fbD = Infinity;
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const dmx = qx - s.fmx, dmz = qz - s.fmz;
+    const cd2 = dmx * dmx + dmz * dmz;
+    const dx = qx - s.fax, dz = qz - s.faz;
+    let t = dx * s.hx + dz * s.hz;
+    t = t < 0 ? 0 : (t > s.len ? s.len : t);
+    const v = dx * s.px_ + dz * s.pz_;
+    const ex = dx - s.hx * t, ez = dz - s.hz * t;
+    const r2 = ex * ex + ez * ez;
+    const wx = s.wax + s.ax_ * t + s.px_ * v + s.nx_ * qy;
+    const wy = s.way + s.ay_ * t + s.ny_ * qy;
+    const wz = s.waz + s.az_ * t + s.pz_ * v + s.nz_ * qy;
+    if (r2 < fbD) { fbD = r2; fbP = { x: wx, y: wy, z: wz }; }
+    if (cd2 > (s.half + 12000) * (s.half + 12000)) continue;
+    const wgt = 1 / ((r2 + 2500) * (r2 + 2500));
+    sx += wx * wgt; sy += wy * wgt; sz += wz * wgt; sw += wgt;
+  }
+  if (sw <= 0) return fbP || { x: qx, y: qy, z: qz };
+  return { x: sx / sw, y: sy / sw, z: sz / sw };
+}
+function _bendVerts(verts) {
+  for (let i = 0; i < verts.length; i += 3) {
+    const p = _bendMapPoint(verts[i], verts[i + 1], verts[i + 2]);
+    verts[i] = p.x; verts[i + 1] = p.y; verts[i + 2] = p.z;
+  }
+}
+if (typeof window !== 'undefined') {
+  window.__bendDbg = function () {
+    const B = game._bendSegs;
+    if (!B || !B.length) return 'bend off';
+    return { segs: B.length, lastPitchDeg: Math.round(B[B.length - 1].th * 57.3),
+             spineY: Math.round(B[B.length - 1].wby) };
+  };
+  window.__bendFlat = function (x, y, z) { return _bendUnmap(x, y, z); };
+}
 function worldSDF(px,py,pz) {
   if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) return -10000;
+  if (game.bendWorld && game._bendSegs && game._bendSegs.length) {
+    const _bq = _bendUnmap(px, py, pz);
+    px = _bq.x; py = _bq.y; pz = _bq.z;
+  }
   const _af = game.arenaField;
   if (_af && _af.ON) {
     const _fa = _ARENA_FIELD.eval(px, py, pz, _af.G);
@@ -41589,7 +41676,7 @@ function updatePlayerMovement(dt) {
   }
 
   const _swT = game.sandwichTerrain;
-  if (_swT && _swT.ON && (_swT.FOOT || _swT.ENDLESS) && typeof _swWallDist === 'function') {
+  if (!game.bendWorld && _swT && _swT.ON && (_swT.FOOT || _swT.ENDLESS) && typeof _swWallDist === 'function') {
     if (_swT.FOOT) {
     const W = _swWallDist();
     const F = _swT.FOOT;
@@ -58394,6 +58481,11 @@ MAP_DATA.endless_caverns = {
   tunnels: [{ r: 400, path: [{ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 9000 }] }],
 };
 
+MAP_DATA.endless_bend = {
+  ...MAP_DATA.endless_caverns,
+  name: 'ENDLESS ; The Long Dark (bent)',
+  bend: true,
+};
 function _lssEndlessNextSeg(run) {
   const g = run.gen, rand = g.rand;
   const kindRoll = rand();
@@ -58445,19 +58537,50 @@ function _lssEndlessNextSeg(run) {
     const off = 800 + rand() * 700;
     hp = { x: b.x + Math.cos(g.heading) * off * sgn, y: b.y + (rand() - 0.5) * 200, z: b.z - Math.sin(g.heading) * off * sgn };
   }
+  if (run.bend) {
+    if (g._bu === undefined) {
+      g._bu = 0; g._th = 0; g._thT = 0; g._thHold = 0;
+      g._wx = 0; g._wy = 0; g._wz = 0;
+    }
+    if (--g._thHold <= 0) {
+      const tr = rand();
+      g._thT = tr < 0.40 ? 0 : (tr < 0.65 ? (rand() < 0.5 ? 0.45 : -0.45)
+             : (tr < 0.85 ? (rand() < 0.5 ? 0.9 : -0.9)
+                          : (rand() < 0.5 ? 1.4 : -1.4)));
+      g._thHold = 2 + Math.floor(rand() * 3);
+    }
+    if (g._bu < 3500) g._thT = 0;
+    g._thT -= Math.max(-0.4, Math.min(0.4, g._wy / 9000 * 0.5));
+    g._th += Math.max(-0.30, Math.min(0.30, g._thT - g._th));
+    const th = Math.max(-1.5, Math.min(1.5, g._th));
+    const wa = { x: g._wx, y: g._wy, z: g._wz };
+    const shh = Math.sin(g.heading), chh = Math.cos(g.heading);
+    g._wx += shh * len * Math.cos(th);
+    g._wz += chh * len * Math.cos(th);
+    g._wy += len * Math.sin(th);
+    g._bu += len;
+    _bendPushSeg({ fax: a.x, faz: a.z, fbx: b.x, fbz: b.z,
+                   wax: wa.x, way: wa.y, waz: wa.z, wbx: g._wx, wby: g._wy, wbz: g._wz,
+                   th, hx: shh, hz: chh, len });
+    const wA = _bendMapPoint(a.x, a.y, a.z);
+    const wB = _bendMapPoint(b.x, b.y, b.z);
+    const wHp = hp ? _bendMapPoint(hp.x, hp.y, hp.z) : null;
+    return { a: wA, b: wB, fa: a, fb: b, r, hall, hallR, hp: wHp, fhp: hp, gid: g.nextGid++ };
+  }
   return { a, b, r, hall, hallR, hp, gid: g.nextGid++ };
 }
 
 function _lssEndlessApplySeg(run, s) {
-  const cyl = { ax: s.a.x, ay: s.a.y, az: s.a.z, bx: s.b.x, by: s.b.y, bz: s.b.z, r: s.r, w: 0.15 };
+  const ca = s.fa || s.a, cb = s.fb || s.b;
+  const hcF = s.fa ? (s.fhp || s.fb) : (s.hp || s.b);
+  const cyl = { ax: ca.x, ay: ca.y, az: ca.z, bx: cb.x, by: cb.y, bz: cb.z, r: s.r, w: 0.15 };
   game.levelCylinders.push(cyl);
   let sph = null, spur = null;
   if (s.hall) {
-    const hc = s.hp || s.b;
-    sph = { cx: hc.x, cy: hc.y, cz: hc.z, r: s.hallR };
+    sph = { cx: hcF.x, cy: hcF.y, cz: hcF.z, r: s.hallR };
     game.levelSpheres.push(sph);
-    if (s.hp) {
-      spur = { ax: s.b.x, ay: s.b.y, az: s.b.z, bx: hc.x, by: hc.y, bz: hc.z, r: 300 };
+    if (s.fa ? s.fhp : s.hp) {
+      spur = { ax: cb.x, ay: cb.y, az: cb.z, bx: hcF.x, by: hcF.y, bz: hcF.z, r: 300 };
       game.levelCylinders.push(spur);
     }
   }
@@ -58470,8 +58593,8 @@ function _lssEndlessApplySeg(run, s) {
     if (!window.__endlessNoRebake) {
       const soft = ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
       const cr = s.r + soft;
-      let minX = Math.min(s.a.x, s.b.x) - cr, maxX = Math.max(s.a.x, s.b.x) + cr;
-      let minZ = Math.min(s.a.z, s.b.z) - cr, maxZ = Math.max(s.a.z, s.b.z) + cr;
+      let minX = Math.min(ca.x, cb.x) - cr, maxX = Math.max(ca.x, cb.x) + cr;
+      let minZ = Math.min(ca.z, cb.z) - cr, maxZ = Math.max(ca.z, cb.z) + cr;
       if (sph) {
         const rr = sph.r + soft;
         minX = Math.min(minX, sph.cx - rr); maxX = Math.max(maxX, sph.cx + rr);
@@ -58684,17 +58807,21 @@ function _lssGenEndlessLevel(base) {
   const rand = mulberry32((seed ^ 0x9D2C5680) >>> 0);
   const cos = mulberry32((seed ^ 0x41C64E6D) >>> 0);
   const gen = { rand, cos, x: 0, y: 0, z: 0, heading: rand() * Math.PI * 2, sinceHall: 0, nextGid: 0 };
+  const bend = !!(base && base.bend);
   const run = game.endlessRun = {
-    gen, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
+    gen, bend, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
     over: false, overT: 0, lastHall: { x: 0, y: 80, z: 0 }, _hudTxt: '',
     startedAt: Date.now(),
   };
+  game.bendWorld = bend;
+  game._bendSegs = bend ? [] : null;
   const nodes = [{ x: 0, y: 0, z: 0 }];
   const rooms = [{ id: 'spawn', team: 'A', x: 0, y: 0, z: 0, r: SU * 3.2 }];
   for (let i = 0; i < 8; i++) {
     const s = _lssEndlessNextSeg(run);
-    nodes.push(s.b);
-    if (s.hall) rooms.push({ id: 'hall' + s.gid, team: null, x: s.b.x, y: s.b.y, z: s.b.z, r: s.hallR });
+    const cb = s.fb || s.b;
+    nodes.push(cb);
+    if (s.hall) rooms.push({ id: 'hall' + s.gid, team: null, x: cb.x, y: cb.y, z: cb.z, r: s.hallR });
     run.segs.push({
       gid: s.gid, a: s.a, b: s.b, hall: s.hall,
       len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
@@ -58703,7 +58830,7 @@ function _lssGenEndlessLevel(base) {
   }
   return {
     name: base.name, description: base.description, defaultTheme: base.defaultTheme,
-    procedural: 'endless',
+    procedural: 'endless', bend,
     terrain: base.terrain, palette: base.palette, _biomeOverride: 'rocky',
     rooms, tunnels: [{ r: 400, w: 0.15, path: nodes }],
   };
@@ -58885,6 +59012,7 @@ function buildRoomGraphLevel(level) {
   game.sandwichTerrain = null;
   game.arenaField = null;
   if (!(level && level.arena)) { try { _arenaDisposeMesh(); } catch (_) {} }
+  try { if (typeof _bendReset === 'function') _bendReset(); } catch (_) {}
   game._buildSeq = (game._buildSeq | 0) + 1;
   try {
     if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps._refineInterval) {
@@ -58985,7 +59113,7 @@ function buildRoomGraphLevel(level) {
     catch (e) { console.warn('[shifting-deep] generate failed, using static fallback:', e); }
   }
   if (level && level.procedural === 'endless' && typeof _lssGenEndlessLevel === 'function') {
-    try { level = _lssGenEndlessLevel(MAP_DATA.endless_caverns || level); }
+    try { level = _lssGenEndlessLevel((level && level.bend) ? level : (MAP_DATA.endless_caverns || level)); }
     catch (e) { console.warn('[endless] generate failed, using static fallback:', e); game.endlessRun = null; }
   }
   for (const m of game.mapMeshes) { if (m.parent) scene.remove(m); }
@@ -60870,9 +60998,13 @@ function gameLoop(timestamp) {
     try {
       _swU.uTime.value += dt;
       const _cineActive = (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
-      const _fX = _cineActive ? camera.position.x : player.position.x;
-      const _fZ = _cineActive ? camera.position.z : player.position.z;
+      let _fX = _cineActive ? camera.position.x : player.position.x;
+      let _fZ = _cineActive ? camera.position.z : player.position.z;
       _swU.uCam.value.set(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
+      if (game.bendWorld && game._bendSegs && game._bendSegs.length) {
+        const _bq = _bendUnmap(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
+        _fX = _bq.x; _fZ = _bq.z;
+      }
       if (game._clipWantHub && !_clipmap.enabling) {   // (v36.27) enabling: _clipEnableSliced owns it
         if (!_clipmap.on) {
           try { _clipEnableNow(_fX, _fZ); } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }
