@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.92';
+const LSS_BUILD = '36.93';
 if (typeof location !== 'undefined' && /[?&]ribbon/.test(location.search)) window.__ribbon = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -24251,6 +24251,8 @@ const _RIBBON_P = {
   taperStart: 5200,  // gap starts thinning this far off the spine...
   taperRate: 0.25,   // ...and seals ~2.5km later. Geology, not a wall.
   grain: 14,         // fine rock grain
+  fogColor: 0x0c1014,
+  fogDensity: 0.00040,
 };
 const _RIBBON_FIELD_SRC = `{
   hash(x, y) {
@@ -24446,6 +24448,8 @@ function _rbnDispose() {
   }
   _rbn.group = null; _rbn.chunks.clear(); _rbn.pending.clear();
   _rbn.queue = []; _rbn.on = false; _rbn.tris = 0;
+  try { if (typeof _skyDome !== 'undefined' && _skyDome) _skyDome.visible = true; } catch (_) {}
+  _rbn.fog = null; _rbn.fogColor = null;
 }
 function _rbnInit() {
   _rbnDispose();
@@ -24471,6 +24475,13 @@ function _rbnInit() {
   }
   try { URL.revokeObjectURL(url); } catch (_) {}
   _rbn.on = _rbn.workers.length > 0;
+  try {
+    _rbn.fogColor = new THREE.Color(_RIBBON_P.fogColor);
+    _rbn.fog = new THREE.FogExp2(_rbn.fogColor, _RIBBON_P.fogDensity);
+    scene.background = _rbn.fogColor;
+    scene.fog = _rbn.fog;
+    if (typeof _skyDome !== 'undefined' && _skyDome) _skyDome.visible = false;
+  } catch (e) { console.warn('[ribbon] atmosphere failed:', e); }
   console.log('[ribbon] streamer up: ' + _rbn.workers.length + ' workers');
 }
 function _rbnReceive(r) {
@@ -24496,6 +24507,14 @@ function _rbnTick(dt) {
   const now = performance.now();
   if (now - _rbn.lastScan > 380) {
     _rbn.lastScan = now;
+    if (_rbn.fog) {
+      try {
+        if (scene.fog !== _rbn.fog) { scene.fog = _rbn.fog; scene.background = _rbn.fogColor; }
+        _rbn.fog.density = _RIBBON_P.fogDensity;
+        _rbn.fogColor.setHex(_RIBBON_P.fogColor);
+        if (typeof _skyDome !== 'undefined' && _skyDome && _skyDome.visible) _skyDome.visible = false;
+      } catch (_) {}
+    }
     const CH = 600, SCAN_R = 4600;
     const segs = game._rbnSegs;
     if (segs.length > 6) {
@@ -24560,6 +24579,7 @@ if (typeof window !== 'undefined') {
     _rbnQ.segs = game._rbnSegs;
     return _RIBBON_FIELD.eval(x, y, z, _rbnQ);
   };
+  window.__ribbonP = _RIBBON_P;
 }
 
 function _arenaBuildParams(a, rooms) {
@@ -58100,6 +58120,7 @@ const _FOG_CENTRAL_MULT = 2.6;
 const _FOG_TUNNEL_MULT = 1.4;   
 function updateRoomFog(dt) {
   if (game.sandwichTerrain && game.sandwichTerrain.ON) return;
+  if (game.ribbonWorld) return;
   if (!scene.fog || !player || !player.position) return;
   if (!game.currentLevel || !Array.isArray(game.currentLevel.rooms)) return;
   const cadence = (typeof isXRPresenting === 'function' && isXRPresenting() && typeof getVRCadence === 'function')
