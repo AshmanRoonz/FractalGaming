@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.87';
+const LSS_BUILD = '36.88';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 // (v36.49) The tab title is just the game name — no version. The build is
 // already on screen (bottom-right readout) so stamping it here only duplicated
@@ -31013,27 +31013,28 @@ function mesh(m) {
     idx:new Uint32Array(idx), tris:idx.length/3 };
 }`;
 }
-function _arenaDisposeMesh() {
-  for (const w of _arenaMesh.workers) { try { w.terminate(); } catch (_) {} }
-  _arenaMesh.workers = [];
+function _arenaDisposeMesh(Mx) {
+  const M = Mx || _arenaMesh;
+  for (const w of M.workers) { try { w.terminate(); } catch (_) {} }
+  M.workers = [];
   // (v36.58 review) The blob URL must die on EVERY teardown path, not just
   // build completion — a mid-build map switch was leaking one URL (pinning
   // the whole worker-source string) per abort.
-  if (_arenaMesh.url) { try { URL.revokeObjectURL(_arenaMesh.url); } catch (_) {} _arenaMesh.url = null; }
-  if (_arenaMesh.hud) { try { _arenaMesh.hud.style.display = 'none'; } catch (_) {} _arenaMesh.hud = null; }
+  if (M.url) { try { URL.revokeObjectURL(M.url); } catch (_) {} M.url = null; }
+  if (M.hud) { try { M.hud.style.display = 'none'; } catch (_) {} M.hud = null; }
   // (v36.63) Waterfall mist lives in the SHARED billboardCloudSystem, not in
   // the arena group — removing the group would leak its slots forever, so
   // release them explicitly here.
-  if (_arenaMesh.clouds) {
-    for (const c of _arenaMesh.clouds) { try { if (c && c.dispose) c.dispose(); } catch (_) {} }
-    _arenaMesh.clouds = null;
+  if (M.clouds) {
+    for (const c of M.clouds) { try { if (c && c.dispose) c.dispose(); } catch (_) {} }
+    M.clouds = null;
   }
-  if (_arenaMesh.group) {
-    try { if (_arenaMesh.group.parent) scene.remove(_arenaMesh.group); } catch (_) {}
-    _arenaMesh.group.traverse((n) => { if (n.isMesh && n.geometry) { try { n.geometry.dispose(); } catch (_) {} } });
+  if (M.group) {
+    try { if (M.group.parent) scene.remove(M.group); } catch (_) {}
+    M.group.traverse((n) => { if (n.isMesh && n.geometry) { try { n.geometry.dispose(); } catch (_) {} } });
   }
-  _arenaMesh.group = null; _arenaMesh.key = null; _arenaMesh.building = false;
-  _arenaMesh.chunksDone = 0; _arenaMesh.chunksTotal = 0; _arenaMesh.tris = 0; _arenaMesh.regions = null;
+  M.group = null; M.key = null; M.building = false;
+  M.chunksDone = 0; M.chunksTotal = 0; M.tris = 0; M.regions = null;
 }
 // Called from buildRoomGraphLevel for arena levels. Reattaches the cached
 // group when the params match ; otherwise disposes and rebuilds.
@@ -31047,39 +31048,32 @@ function _arenaEnsureMesh(level) {
   _arenaBuildMesh(_arenaBuildParams(level.arena, level.rooms), key, level);
 }
 
-// ── (v36.87) SPIRE VAULTS — a multi-storey structure ON the route ────────────
-// Owner, after the terraced decks: "it's definitely nothing like spire...
-// there's still just one plane." Correct — a heightfield sandwich is
-// single-storey by construction. TRUE stacked floors need the Spire's
-// volumetric arena field, so the routes now EMBED one: a bounded arena-field
-// structure (3 storeys, shafts, ring gap, the helix ramp — the whole Spire
-// kit, same _ARENA_FIELD source) placed at a landmark site. Endless gets one
-// at the first hall past gid 3 (~8-15km in); every campaign leg gets one
-// mid-leg. ONE vault per world for now — the mesh pipeline (_arenaMesh) is a
-// singleton; lifting it to N structures is the known follow-up.
+// ── (v36.88) DECK JUNCTIONS — "the sandwich comes to an end at something ─────
+// like the spire map, which transitions to another sandwich at a lower or
+// higher altitude" (owner's exact picture, after rejecting: smooth drift =
+// invisible, terraces = still one plane, a floating vault = a diorama).
 //
-// HOW IT COMPOSES with the sandwich:
-//   CAVITY  — one giant carve sphere with per-sphere drop/rise (v36.87
-//             _stRouteAt fields) opens a chamber tall enough to contain
-//             every storey + the helix bore. Mesh shells and collision both
-//             derive from the same carved fns, so they agree.
-//   ROCK    — worldSDF's sandwich branch INTERSECTS the vault field inside
-//             its envelope (max(sandwich, vault)): the vault can only add
-//             rock into space the cavity opened, so collision can never
-//             open rock the shells still render.
-//   MESH    — the Spire's chunked surface-nets build, offset to the site
-//             (opts.offset), quiet (no HUD takeover). Storeys, mushrooms,
-//             cloud columns ride along for free.
-// Deterministic: seed = worldSeed ^ gid hash (endless) / worldSeed (campaign)
-// — co-op peers derive identical vaults with zero route-stream draws.
-function _lssVaultG(seed) {
-  const G = _arenaBuildParams({ seed: seed | 0, floors: 3, spikeAmt: 0.7, scale: 1.0 }, []);
-  // Tame the helix for embedding: 2 turns keeps the bore inside a chamber
-  // the cavity carve can actually contain.
-  if (G.helix) G.helix.turns = 2;
+// THE MODEL: the terraced decks (v36.86) give every route stretch ONE flat
+// altitude. When the endless route reaches a deck boundary, the slab ENDS —
+// and carved into that cliff sits a JUNCTION: a bounded two-storey arena-
+// field structure (same _ARENA_FIELD source as The Spire) whose floors sit
+// EXACTLY on the two deck altitudes it joins (floor spacing tuned to the
+// 800u deck step). The incoming lane arrives on one storey, the outgoing
+// lane leaves on the other; shaft bores + a one-turn helix connect them.
+// You fly INTO the structure, climb or dive a deck, and fly OUT into the
+// next sandwich. Junctions recur every few km — the mesh pipeline was
+// lifted to per-build state (opts.state) so several can be live, built
+// lazily as they approach and disposed as they fall behind.
+// Deterministic: seed = worldSeed ^ junction-ordinal hash; the route
+// crossing point comes from pure deck-function bisection (no stream draws).
+function _lssJunctionG(seed) {
+  // floors 2 + scale chosen so floor spacing == the 800u deck step:
+  // spacing = H*1.10/(floors-1), H = 780*scale -> scale = 800/1.10/780.
+  const G = _arenaBuildParams({ seed: seed | 0, floors: 2, spikeAmt: 0.6, scale: 0.9324 }, []);
+  if (G.helix) G.helix.turns = 1;   // one turn = exactly one deck per winding
   return G;
 }
-function _lssVaultEnv(G) {
+function _lssJunctionEnv(G) {
   const hx = G.helix;
   const hxTop = hx ? hx.y0 + (hx.turns + 0.5) * hx.pitch + hx.half + 60 : 0;
   const hxBot = hx ? hx.y0 - (hx.turns + 0.5) * hx.pitch - hx.half - 60 : 0;
@@ -31089,42 +31083,70 @@ function _lssVaultEnv(G) {
     rise: Math.max(G.H + 90, hxTop) + 180,
   };
 }
-function _lssVaultRegister(x, y, z, seed, opts) {
-  if (game._lssVault) return;
+// Register one junction: chamber carve + collision record. The MESH is
+// lazy — _lssJunctionTick builds it as the ship approaches.
+function _lssJunctionRegister(x, y, z, seed, opts) {
   try {
-    const G = _lssVaultG(seed);
-    const env = _lssVaultEnv(G);
-    game._lssVault = { x, y, z, G, env: env.r };
-    // Cavity sphere — skipped when the site already rides as a level ROOM
-    // (the endless seeded-stretch path adds it at gen time so the initial
-    // bake digs the chamber).
-    if (!opts || !opts.noSphere) {
-      game.levelSpheres.push({ cx: x, cy: y, cz: z, r: env.r * 0.92, drop: env.drop, rise: env.rise });
-    }
-    // Rebake any already-baked chunks the cavity touches (streamed chunks
-    // bake later and read the sphere naturally).
+    const G = _lssJunctionG(seed);
+    const env = _lssJunctionEnv(G);
+    if (!game._lssJunctions) game._lssJunctions = [];
+    const j = { x, y, z, seed: seed | 0, G, env: env.r, state: null,
+                key: 'junction|' + (seed | 0) + '|c' + _arenaMeshCells() };
+    game._lssJunctions.push(j);
+    // noSphere: the SEEDED path already carries the chamber as a level room
+    // (baked into levelSpheres by the graph build) — don't double-push it.
+    if (!(opts && opts.noSphere)) game.levelSpheres.push({ cx: x, cy: y, cz: z, r: env.r * 0.92, drop: env.drop, rise: env.rise });
     try {
       if (typeof _swInvalidateChunksInRect === 'function') {
         const rr = env.r + ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
         _swInvalidateChunksInRect(x - rr, x + rr, z - rr, z + rr);
       }
     } catch (_) {}
-    _arenaDisposeMesh();
-    _arenaBuildMesh(G, 'vault|' + (seed | 0) + '|c' + _arenaMeshCells(), null, { offset: { x, y, z }, quiet: true });
-    console.log('[vault] registered at (' + Math.round(x) + ',' + Math.round(y) + ',' + Math.round(z) + ') seed ' + (seed | 0));
-  } catch (e) {
-    game._lssVault = null;
-    console.warn('[vault] register failed:', e && e.message);
+    console.log('[junction] registered at (' + Math.round(x) + ',' + Math.round(y) + ',' + Math.round(z) + ') seed ' + (seed | 0));
+    return j;
+  } catch (e) { console.warn('[junction] register failed:', e && e.message); return null; }
+}
+// Lazy mesh lifecycle + record pruning. Called once per frame from the
+// game loop (cheap: a few distance checks).
+function _lssJunctionTick() {
+  const J = game._lssJunctions;
+  if (!J || !J.length || typeof player === 'undefined' || !player || !player.position) return;
+  const px = player.position.x, pz = player.position.z;
+  for (let i = J.length - 1; i >= 0; i--) {
+    const j = J[i];
+    const d = Math.hypot(j.x - px, j.z - pz);
+    if (!j.state && d < 6500) {
+      j.state = { key: null, group: null, building: false, chunksDone: 0, chunksTotal: 0,
+                  tris: 0, ms: 0, workers: [], regions: null, t0: 0, url: null, hud: null, clouds: null };
+      try {
+        _arenaBuildMesh(j.G, j.key, null, { state: j.state, offset: { x: j.x, y: j.y, z: j.z }, quiet: true, lite: true });
+      } catch (e) { console.warn('[junction] mesh build failed:', e && e.message); j.state = null; }
+    } else if (j.state && d > 9500) {
+      try { _arenaDisposeMesh(j.state); } catch (_) {}
+      j.state = null;
+    }
+    // Record prune: far behind the run (the route pruner clears its carve
+    // shapes on the same order of distance).
+    if (d > 16000) {
+      if (j.state) { try { _arenaDisposeMesh(j.state); } catch (_) {} }
+      J.splice(i, 1);
+    }
   }
 }
-// Debug probe: window.__vault() -> site + mesh progress.
-if (typeof window !== 'undefined') window.__vault = function () {
-  const v = game._lssVault;
-  if (!v) return 'no vault';
-  return { x: Math.round(v.x), y: Math.round(v.y), z: Math.round(v.z), env: Math.round(v.env),
-    meshDone: _arenaMesh.chunksDone, meshTotal: _arenaMesh.chunksTotal, tris: _arenaMesh.tris };
+// Debug probe: window.__junctions() -> registered junctions + mesh states.
+if (typeof window !== 'undefined') window.__junctions = function () {
+  const J = game._lssJunctions;
+  if (!J || !J.length) return 'no junctions';
+  return J.map(j => ({ x: Math.round(j.x), y: Math.round(j.y), z: Math.round(j.z), env: Math.round(j.env),
+    mesh: j.state ? (j.state.building ? (j.state.chunksDone + '/' + j.state.chunksTotal) : (Math.round(j.state.tris / 1000) + 'k tris')) : 'lazy' }));
 };
+
 function _arenaBuildMesh(G, key, level, opts) {
+  // (v36.88) M = the mesh-state object this build owns. The Spire passes
+  // nothing and keeps the historical singleton; junction builds pass their
+  // own state via opts.state so several structures can be live at once
+  // (each with its own workers, group, key and disposal).
+  const M = (opts && opts.state) || _arenaMesh;
   const CHUNK = 600, CELLS = _arenaMeshCells(), REGION = 3;
   const t0 = performance.now();
   const nx = Math.ceil((G.R + 140) / CHUNK), ny = Math.ceil((G.H + 320) / CHUNK);
@@ -31173,32 +31195,32 @@ function _arenaBuildMesh(G, key, level, opts) {
     if (!r) regions.set(jb.region, r = { expected: 0, done: 0, parts: [] });
     r.expected++;
   }
-  _arenaMesh.key = key;
-  _arenaMesh.building = true;
-  _arenaMesh.t0 = t0;
-  _arenaMesh.chunksTotal = jobs.length;
-  _arenaMesh.regions = regions;
-  _arenaMesh.group = new THREE.Group();
-  _arenaMesh.group.name = 'spireArenaMesh';
-  _arenaMesh.group.matrixAutoUpdate = false;
+  M.key = key;
+  M.building = true;
+  M.t0 = t0;
+  M.chunksTotal = jobs.length;
+  M.regions = regions;
+  M.group = new THREE.Group();
+  M.group.name = 'spireArenaMesh';
+  M.group.matrixAutoUpdate = false;
   // (v36.87) Vault builds place the whole group at a WORLD OFFSET. The
   // meshes stay in field-local coordinates (the storey shader bands and
   // mineral flecks key off local position, which is exactly right for an
   // embedded structure) — only the group moves. Spire passes no offset and
   // keeps its identity matrix.
   if (opts && opts.offset) {
-    _arenaMesh.group.position.set(opts.offset.x, opts.offset.y, opts.offset.z);
+    M.group.position.set(opts.offset.x, opts.offset.y, opts.offset.z);
   }
-  _arenaMesh.group.updateMatrix();
-  scene.add(_arenaMesh.group);
+  M.group.updateMatrix();
+  scene.add(M.group);
   // Progress readout on the existing map-gen HUD (the warmup->playing gate
   // can hold the round start on this build — the player must see why).
   // (v36.87) Vault builds run mid-flight behind the scenes: opts.quiet
   // skips the HUD takeover entirely.
   try {
     if (!opts || !opts.quiet) {
-      _arenaMesh.hud = document.getElementById('map-gen-hud');
-      if (_arenaMesh.hud) { _arenaMesh.hud.textContent = 'GENERATING ARENA'; _arenaMesh.hud.style.display = 'block'; }
+      M.hud = document.getElementById('map-gen-hud');
+      if (M.hud) { M.hud.textContent = 'GENERATING ARENA'; M.hud.style.display = 'block'; }
     }
   } catch (_) {}
   const mat = _arenaMakeMaterial();
@@ -31234,7 +31256,7 @@ function _arenaBuildMesh(G, key, level, opts) {
     geo.computeBoundingSphere();
     const mesh = new THREE.Mesh(geo, mat);
     mesh.matrixAutoUpdate = false;
-    if (_arenaMesh.key === key && _arenaMesh.group) _arenaMesh.group.add(mesh);
+    if (M.key === key && M.group) M.group.add(mesh);
     else geo.dispose();
   };
   // (v36.58 review) EVERY failure path below tears the whole build down via
@@ -31247,7 +31269,7 @@ function _arenaBuildMesh(G, key, level, opts) {
   let url = null;
   try { url = URL.createObjectURL(new Blob([_arenaMeshWorkerSrc()], { type: 'text/javascript' })); }
   catch (e) { console.warn('[spire] mesh worker blob failed (collision-only world):', e); _arenaDisposeMesh(); return; }
-  _arenaMesh.url = url;
+  M.url = url;
   const NW = Math.max(2, Math.min(8, ((navigator.hardwareConcurrency || 4) - 2)));
   let issued = 0;
   const dispatch = (w) => {
@@ -31261,7 +31283,7 @@ function _arenaBuildMesh(G, key, level, opts) {
     // would never complete and the stalled build would be cached forever.
     // Abort the whole mesh ; next round rebuilds from scratch.
     console.warn('[spire] mesh worker ' + what + ' — arena mesh aborted, next round rebuilds:', e && (e.message || e));
-    if (_arenaMesh.key === key) _arenaDisposeMesh();
+    if (M.key === key) _arenaDisposeMesh(M);
   };
   for (let n = 0; n < NW; n++) {
     let w;
@@ -31272,51 +31294,53 @@ function _arenaBuildMesh(G, key, level, opts) {
     w.onmessage = (ev) => {
       const r = ev.data;
       // Stale guard: a newer build/dispose owns the slot now.
-      if (_arenaMesh.key !== key) return;
-      _arenaMesh.chunksDone++;
-      if (_arenaMesh.hud && (_arenaMesh.chunksDone & 15) === 0) {
-        _arenaMesh.hud.textContent = 'GENERATING ARENA · ' + Math.round(_arenaMesh.chunksDone / _arenaMesh.chunksTotal * 100) + '%';
+      if (M.key !== key) return;
+      M.chunksDone++;
+      if (M.hud && (M.chunksDone & 15) === 0) {
+        M.hud.textContent = 'GENERATING ARENA · ' + Math.round(M.chunksDone / M.chunksTotal * 100) + '%';
       }
-      const reg = _arenaMesh.regions && _arenaMesh.regions.get(r.region);
+      const reg = M.regions && M.regions.get(r.region);
       if (reg) {
         reg.done++;
-        if (!r.empty) { reg.parts.push(r); _arenaMesh.tris += r.tris; }
+        if (!r.empty) { reg.parts.push(r); M.tris += r.tris; }
         if (reg.done === reg.expected && reg.parts) mergeRegion(reg);
       }
-      if (_arenaMesh.chunksDone >= _arenaMesh.chunksTotal) {
-        _arenaMesh.building = false;
-        _arenaMesh.ms = Math.round(performance.now() - t0);
-        for (const wk of _arenaMesh.workers) { try { wk.terminate(); } catch (_) {} }
-        _arenaMesh.workers = [];
-        if (_arenaMesh.hud) { try { _arenaMesh.hud.style.display = 'none'; } catch (_) {} _arenaMesh.hud = null; }
+      if (M.chunksDone >= M.chunksTotal) {
+        M.building = false;
+        M.ms = Math.round(performance.now() - t0);
+        for (const wk of M.workers) { try { wk.terminate(); } catch (_) {} }
+        M.workers = [];
+        if (M.hud) { try { M.hud.style.display = 'none'; } catch (_) {} M.hud = null; }
         // (v36.60) Mystical-storey mushrooms, planted once the rock exists
         // (still inside the loading window ; ~30 ms of field bisection).
         try {
-          const _nSh = _arenaScatterShrooms(G, _arenaMesh.group);
+          if (opts && opts.lite) throw { _skip: true };
+          const _nSh = _arenaScatterShrooms(G, M.group);
           if (_nSh) console.log('[spire] planted ' + _nSh + ' mushrooms on the mystical storey');
-        } catch (e) { console.warn('[spire] mushroom scatter failed:', e); }
+        } catch (e) { if (!e || !e._skip) console.warn('[spire] mushroom scatter failed:', e); }
         // (v36.63) Waterfalls down the shafts — same slot as the mushrooms:
         // after the rock exists, still inside the loading window.
         try {
-          const _nF = _arenaBuildCloudColumns(G, _arenaMesh.group);
+          if (opts && opts.lite) throw { _skip: true };
+          const _nF = _arenaBuildCloudColumns(G, M.group);
           if (_nF) console.log('[spire] ' + _nF + ' cloud columns packed into the shafts (' +
-                               (_arenaMesh.clouds ? _arenaMesh.clouds.length : 0) + ' puffs)');
-        } catch (e) { console.warn('[spire] cloud column build failed:', e); }
-        console.log('[spire] arena meshed: ' + (_arenaMesh.tris / 1000).toFixed(0) + 'k tris in ' + _arenaMesh.ms + 'ms (' + _arenaMesh.chunksTotal + ' chunks)');
+                               (M.clouds ? M.clouds.length : 0) + ' puffs)');
+        } catch (e) { if (!e || !e._skip) console.warn('[spire] cloud column build failed:', e); }
+        console.log('[spire] arena meshed: ' + (M.tris / 1000).toFixed(0) + 'k tris in ' + M.ms + 'ms (' + M.chunksTotal + ' chunks)');
       } else {
         dispatch(w);
       }
     };
     w.postMessage({ cmd: 'init', g: G });
-    _arenaMesh.workers.push(w);
+    M.workers.push(w);
     // prime with two jobs so a fast chunk never starves the pipe
     dispatch(w); dispatch(w);
   }
   // (v36.58 review) Workers hold their own reference to the script once
   // constructed — revoke NOW so no abort path can leak the blob URL.
   try { URL.revokeObjectURL(url); } catch (_) {}
-  _arenaMesh.url = null;
-  if (!_arenaMesh.workers.length) { console.warn('[spire] no mesh workers spawned (collision-only world)'); _arenaDisposeMesh(); }
+  M.url = null;
+  if (!M.workers.length) { console.warn('[spire] no mesh workers spawned (collision-only world)'); _arenaDisposeMesh(M); }
 }
 // =====================================================================
 // THE SPIRE — VERTICAL ROUTER (v36.61, slice 4: "make bots USE the space").
@@ -31548,22 +31572,24 @@ function worldSDF(px,py,pz) {
     // contact pushes resolve in <=90u nudges, so hits slide laterally like
     // a normal wall instead of teleporting vertically.
     let _f = _stGapSDFCarved(px,py,pz,_stT);
-    // (v36.87) SPIRE VAULT: inside the vault's envelope, INTERSECT the
-    // arena field (evaluated in the vault's local frame) with the sandwich —
-    // the vault adds its storeys/columns as rock into the cavity the carve
-    // opened, and its shafts/ring/helix stay open. The envelope weight
-    // fades the field to "no opinion" (fully open) at the edge, so there is
-    // never a seam wall. Sphere pre-check keeps this free away from the
-    // vault.
-    const _vlt = game._lssVault;
-    if (_vlt) {
-      const vdx = px - _vlt.x, vdy = py - _vlt.y, vdz = pz - _vlt.z;
-      const vrr = _vlt.env + 240;
-      const vd2 = vdx * vdx + vdy * vdy + vdz * vdz;
-      if (vd2 < vrr * vrr) {
-        const vw = Math.max(0, Math.min(1, (_vlt.env - Math.sqrt(vd2)) / 240));
+    // (v36.88) DECK JUNCTIONS: inside a junction's envelope, INTERSECT the
+    // arena field (evaluated in that junction's local frame) with the
+    // sandwich — the structure adds its storeys/columns as rock into the
+    // cavity the carve opened, and its shafts/ring/helix stay open. The
+    // envelope weight fades the field to "no opinion" (fully open) at the
+    // edge, so there is never a seam wall. Sphere pre-checks keep this
+    // free away from junctions.
+    const _jns = game._lssJunctions;
+    if (_jns && _jns.length) {
+      for (let _ji = 0; _ji < _jns.length; _ji++) {
+        const _jn = _jns[_ji];
+        const vdx = px - _jn.x, vdy = py - _jn.y, vdz = pz - _jn.z;
+        const vrr = _jn.env + 240;
+        const vd2 = vdx * vdx + vdy * vdy + vdz * vdz;
+        if (vd2 >= vrr * vrr) continue;
+        const vw = Math.max(0, Math.min(1, (_jn.env - Math.sqrt(vd2)) / 240));
         if (vw > 0) {
-          const dvf = _ARENA_FIELD.eval(vdx, vdy, vdz, _vlt.G);
+          const dvf = _ARENA_FIELD.eval(vdx, vdy, vdz, _jn.G);
           _f = Math.max(_f, dvf * vw + (-600) * (1 - vw));
         }
       }
@@ -75888,6 +75914,19 @@ function _lssEndlessDriftY(x, z) {
   const s = fr < 0.5 ? 0.5 * Math.pow(2 * fr, 7) : 1 - 0.5 * Math.pow(2 * (1 - fr), 7);
   return (fl + s) * V.step * e;
 }
+// (v36.88) Deck helpers for the route: the fade envelope and the PLATEAU
+// index at a point — Math.round(t) is exactly the deck the terrace's
+// bench/riser curve settles onto (fl + (fr>=0.5)), so lane and terrain can
+// never disagree about which deck a plateau is.
+function _lssEndlessDeckEnv(x, z) {
+  const V = _LSS_ENDLESS_VDRIFT;
+  return Math.max(0, Math.min(1, (Math.hypot(x, z) - V.fadeO) / V.fadeW));
+}
+function _lssEndlessDeckIdx(x, z) {
+  const V = _LSS_ENDLESS_VDRIFT;
+  const n = V.a * _stFbm(x + 7000, z - 7000, 2, V.f, 91.0);
+  return Math.round(n / V.step);
+}
 function _lssEndlessNextSeg(run) {
   const g = run.gen, rand = g.rand;
   const kindRoll = rand();
@@ -75926,7 +75965,18 @@ function _lssEndlessNextSeg(run) {
   }
   g.heading += turn;
   const len = 2200 + rand() * 1400;
-  const a = { x: g.x, y: g.y + _lssEndlessDriftY(g.x, g.z), z: g.z };
+  // (v36.88) DECK-LOCKED LANE: while the route rides a terrace deck the
+  // midline is EXACTLY deck*step*env — long perfectly-level runs "between
+  // the sandwich" — and in the spawn fade zone it follows the terraced
+  // drift as before. g.deck is pure route state (adopted from the deck
+  // function, changed only here), and this whole block adds ZERO rand()
+  // draws, so co-op peers stay byte-identical (the v35.85 rule).
+  const _VD = _LSS_ENDLESS_VDRIFT;
+  const _laneY = (dk, x, z) => (dk === null || dk === undefined)
+    ? _lssEndlessDriftY(x, z)
+    : dk * _VD.step * _lssEndlessDeckEnv(x, z);
+  if (g.deck === undefined) g.deck = null;
+  const a = { x: g.x, y: g.y + _laneY(g.deck, g.x, g.z), z: g.z };
   g.x += Math.sin(g.heading) * len;
   g.z += Math.cos(g.heading) * len;
   // (v36.06) Record the real endpoint's cell in the visited set (r1..r3 =
@@ -75940,12 +75990,64 @@ function _lssEndlessNextSeg(run) {
       if (vis.fifo.length > 256) delete vis.n[vis.fifo.shift()];
     }
   }
+  // (v36.88) DECK JUNCTIONS — when the candidate endpoint lands on a
+  // DIFFERENT deck, the slab ends: bisect the exact boundary crossing on
+  // a->candidate and plant a two-storey arena-field structure in the cliff
+  // (floors at local -400/+400 == the two deck midlines). This segment
+  // stops at the structure's ENTRANCE; the route resumes at its EXIT on
+  // the other deck — you fly in on one storey, climb or dive through the
+  // shafts/helix, and fly out into the next sandwich. Pure bisection on
+  // the deck function + a worldSeed^gid hash seed: no stream draws.
+  let jRec = null, jEnt = null, jExit = null, jDeckA = null;
+  {
+    const envB = _lssEndlessDeckEnv(g.x, g.z);
+    if (envB < 0.95) {
+      g.deck = null;
+    } else if (g.deck === null) {
+      g.deck = _lssEndlessDeckIdx(g.x, g.z);
+    } else {
+      const newIdx = _lssEndlessDeckIdx(g.x, g.z);
+      // Pacing: a junction only when the route has flown ≥9km since the
+      // last one — nearer boundary crossings stay plain carved ramps (the
+      // v36.86 riser behavior), so junctions read as landmarks, not fences.
+      const _spaced = !g.lastJ || Math.hypot(g.x - g.lastJ.x, g.z - g.lastJ.z) > 9000;
+      if (newIdx !== g.deck && !(_spaced && typeof _lssJunctionG === 'function')) {
+        g.deck = newIdx;
+      } else if (newIdx !== g.deck) {
+        let t0 = 0, t1 = 1;
+        for (let bi = 0; bi < 24; bi++) {
+          const tm = (t0 + t1) / 2;
+          if (_lssEndlessDeckIdx(a.x + (g.x - a.x) * tm, a.z + (g.z - a.z) * tm) === g.deck) t0 = tm; else t1 = tm;
+        }
+        const tc = (t0 + t1) / 2;
+        const cx = a.x + (g.x - a.x) * tc, cz = a.z + (g.z - a.z) * tc;
+        const ws = (typeof net !== 'undefined' && net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED;
+        const seed = (((ws >>> 0) ^ ((g.nextGid * 2654435761) >>> 0)) >>> 0);
+        const jG = _lssJunctionG(seed);
+        const gap = jG.R + 260;
+        const sh = Math.sin(g.heading), ch = Math.cos(g.heading);
+        jDeckA = g.deck;
+        let deckB = _lssEndlessDeckIdx(cx + sh * gap, cz + ch * gap);
+        if (deckB === jDeckA) deckB = jDeckA + (newIdx > jDeckA ? 1 : -1);
+        jRec = { x: cx, y: (jDeckA + deckB) / 2 * _VD.step * _lssEndlessDeckEnv(cx, cz),
+                 z: cz, seed, deckA: jDeckA, deckB };
+        jEnt = { x: cx - sh * gap, z: cz - ch * gap };
+        jExit = { x: cx + sh * gap, z: cz + ch * gap };
+        g.x = jExit.x; g.z = jExit.z;
+        g.deck = deckB;
+        g.lastJ = { x: cx, z: cz };
+      }
+    }
+  }
   // (v35.73) More vertical drama + varied lane width: narrow squeezes to
   // broad galleries instead of one constant-radius hallway.
   // (v36.85) g.y is the WANDER component; the big verticality comes from the
   // midline drift added at emission (the terrain rides the same curve).
   g.y = Math.max(-260, Math.min(260, g.y + (rand() - 0.5) * 340));
-  const b = { x: g.x, y: g.y + _lssEndlessDriftY(g.x, g.z), z: g.z };
+  const b = jRec
+    ? { x: jEnt.x, y: g.y + jDeckA * _VD.step * _lssEndlessDeckEnv(jEnt.x, jEnt.z), z: jEnt.z }
+    : { x: g.x, y: g.y + _laneY(g.deck, g.x, g.z), z: g.z };
+  if (jRec) jExit = { x: jExit.x, y: g.y + _laneY(g.deck, jExit.x, jExit.z), z: jExit.z };
   const r = 280 + rand() * 500;
   const hallR = hall ? (800 + rand() * 800) : 0;
   // 40% of halls hang OFF the lane (side chamber + spur) — something to
@@ -75956,7 +76058,10 @@ function _lssEndlessNextSeg(run) {
     const off = 800 + rand() * 700;
     hp = { x: b.x + Math.cos(g.heading) * off * sgn, y: b.y + (rand() - 0.5) * 200, z: b.z - Math.sin(g.heading) * off * sgn };
   }
-  return { a, b, r, hall, hallR, hp, gid: g.nextGid++ };
+  // Junction segments carry no hall (the chamber IS the landmark); the
+  // hall/spur draws above still ran, so the stream count is unchanged.
+  if (jRec) { hall = false; hp = null; }
+  return { a, b, r, hall, hallR, hp, gid: g.nextGid++, junction: jRec, exit: jExit };
 }
 
 // Append one generated segment to the LIVE route arrays (mirrors the shapes
@@ -75981,14 +76086,13 @@ function _lssEndlessApplySeg(run, s) {
     len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
     cyl, sph, spur,
   });
-  // (v36.87) SPIRE VAULT site: the first hall past gid 3 (~8-15km in)
-  // becomes the run's multi-storey vault (see _lssVaultRegister). Both
-  // co-op peers apply the same segs in gid order, and the seed is a pure
-  // worldSeed^gid hash — identical vault everywhere, no stream draws.
-  if (s.hall && s.gid >= 3 && !game._lssVault && typeof _lssVaultRegister === 'function') {
-    const hc = s.hp || s.b;
-    const _vseed = ((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ ((s.gid * 2654435761) >>> 0)) >>> 0;
-    _lssVaultRegister(hc.x, hc.y, hc.z, _vseed);
+  // (v36.88) DECK JUNCTION registration: the generator marks segments that
+  // ended at a deck boundary (s.junction — the crossing point + the two
+  // deck levels). Register the structure here on the APPLY path — both
+  // co-op peers apply the same segs in gid order with worldSeed^gid seeds,
+  // so every client builds the identical junction.
+  if (s.junction && typeof _lssJunctionRegister === 'function') {
+    _lssJunctionRegister(s.junction.x, s.junction.y, s.junction.z, s.junction.seed);
   }
   // (v35.84) Rebake any already-baked chunk this new geometry carves (the
   // append-tear guard — see _swInvalidateChunksInRect). Influence is 2D x/z,
@@ -76310,24 +76414,29 @@ function _lssGenEndlessLevel(base) {
   };
   const nodes = [{ x: 0, y: 0, z: 0 }];
   const rooms = [{ id: 'spawn', team: 'A', x: 0, y: 0, z: 0, r: SU * 3.2 }];
-  game._lssVaultPending = null;
+  game._lssJunctionSeeds = [];
+  let _tunnelPath = nodes;   // current polyline; junctions split it
+  const _tunnels = [];
   for (let i = 0; i < 8; i++) {
     const s = _lssEndlessNextSeg(run);
-    nodes.push(s.b);
+    _tunnelPath.push(s.b);
     if (s.hall) rooms.push({ id: 'hall' + s.gid, team: null, x: s.b.x, y: s.b.y, z: s.b.z, r: s.hallR });
-    // (v36.87) SPIRE VAULT site in the SEEDED stretch: the first hall past
-    // gid 3 carries the run's multi-storey vault. Its chamber rides as a
-    // level room (drop/rise = the tall carve) so the initial bake digs it;
-    // the field/mesh register at build tail via game._lssVaultPending
-    // (levelSpheres doesn't exist yet at gen time). Runs whose seeds put no
-    // hall in gid 3-7 fall back to the runtime ApplySeg hook.
-    if (s.hall && s.gid >= 3 && !game._lssVaultPending && typeof _lssVaultG === 'function') {
-      const _vseed = (((seed >>> 0) ^ ((s.gid * 2654435761) >>> 0)) >>> 0);
-      const _vG = _lssVaultG(_vseed);
-      const _vE = _lssVaultEnv(_vG);
-      rooms.push({ id: 'vault' + s.gid, team: null, x: s.b.x, y: s.b.y, z: s.b.z,
-                   r: _vE.r * 0.92, drop: _vE.drop, rise: _vE.rise });
-      game._lssVaultPending = { x: s.b.x, y: s.b.y, z: s.b.z, seed: _vseed };
+    // (v36.88) DECK JUNCTION in the SEEDED stretch: the segment ended at a
+    // deck boundary. Its chamber rides as a level room (drop/rise = the
+    // tall carve, dug by the initial bake); the field/mesh registration is
+    // deferred to build tail via game._lssJunctionSeeds (levelSpheres does
+    // not exist yet at gen time). The tunnel POLYLINE splits here — one
+    // path ends at the entrance, the next begins at the exit — so no lane
+    // carves straight through the structure's floors.
+    if (s.junction && typeof _lssJunctionG === 'function') {
+      const jn = s.junction;
+      const _jG = _lssJunctionG(jn.seed);
+      const _jE = _lssJunctionEnv(_jG);
+      rooms.push({ id: 'junction' + s.gid, team: null, x: jn.x, y: jn.y, z: jn.z,
+                   r: _jE.r * 0.92, drop: _jE.drop, rise: _jE.rise });
+      game._lssJunctionSeeds.push(jn);
+      _tunnels.push({ r: 400, w: 0.15, path: _tunnelPath });
+      _tunnelPath = [{ x: s.exit.x, y: s.exit.y, z: s.exit.z }];
     }
     run.segs.push({
       gid: s.gid, a: s.a, b: s.b, hall: s.hall,
@@ -76335,6 +76444,7 @@ function _lssGenEndlessLevel(base) {
       cyl: null, sph: null,
     });
   }
+  _tunnels.push({ r: 400, w: 0.15, path: _tunnelPath });
   return {
     name: base.name, description: base.description, defaultTheme: base.defaultTheme,
     // Keep the procedural tag: the sandwich config keys _isEndless off it
@@ -76346,7 +76456,7 @@ function _lssGenEndlessLevel(base) {
     // cylinders BEFORE the mode hook runs, so a missing weight baked the spawn
     // core at full carve (w 1) while every streamed chunk used 0.15 — a ~100u
     // heightfield step (open sky tear) along the core boundary at x/z ±1800.
-    rooms, tunnels: [{ r: 400, w: 0.15, path: nodes }],
+    rooms, tunnels: _tunnels,
   };
 }
 // (v32.86) THE THEMED JOURNEY : each biome becomes its own campaign leg so the run
@@ -76583,11 +76693,17 @@ function buildRoomGraphLevel(level) {
   // Arena builds keep the cache — _arenaEnsureMesh below reattaches it, so
   // round 2+ never re-mesh (the field is static per map).
   if (!(level && level.arena)) { try { _arenaDisposeMesh(); } catch (_) {} }
-  // (v36.87) The Spire-vault registry dies with every rebuild; vault worlds
-  // (endless / campaign legs) re-register during their own build. The mesh
-  // itself went down with _arenaDisposeMesh above (vault keys never match
-  // the spire cache, so arena maps rebuild theirs via ensure as before).
-  game._lssVault = null;
+  // (v36.88) The deck-junction registry dies with every rebuild — dispose
+  // any live junction meshes (they have their own per-build state, not the
+  // _arenaMesh singleton) and clear the list; junction worlds (endless)
+  // re-register during their own build.
+  if (game._lssJunctions && game._lssJunctions.length) {
+    for (const _j of game._lssJunctions) {
+      if (_j.state) { try { _arenaDisposeMesh(_j.state); } catch (_) {} }
+    }
+  }
+  game._lssJunctions = [];
+  game._lssJunctionSeeds = null;
   // Bump the build sequence so any in-flight overlay
   // IIFE from a prior call knows its captured state is stale and
   // can bail out instead of re-adding old wall meshes to the scene.
@@ -77038,30 +77154,17 @@ function buildRoomGraphLevel(level) {
   // mountains. Skip the marching-cubes wall mesh entirely.
   else if (game.sandwichTerrain && game.sandwichTerrain.ON) {
     if (mapGenHud) mapGenHud.style.display = 'none';
-    // (v36.87) SPIRE VAULT registration at build tail (levelSpheres + the
-    // terrain config exist now):
-    //  - ENDLESS: the gen-time pick stashed a pending site (its chamber
-    //    already rides as a level room — register field + mesh only).
-    //  - CAMPAIGN: every leg embeds one vault mid-leg, seeded from the
-    //    worldSeed (deterministic across peers), sitting on the local
-    //    terraced deck via _stVDrift.
+    // (v36.88) DECK JUNCTION registration at build tail (levelSpheres + the
+    // terrain config exist now): the seeded gen loop stashed each junction
+    // site (its chamber already rides as a level room — register field +
+    // lazy mesh only). Runtime segments register directly in ApplySeg.
     try {
-      if (game._lssVaultPending && typeof _lssVaultRegister === 'function') {
-        const p = game._lssVaultPending;
-        game._lssVaultPending = null;
-        _lssVaultRegister(p.x, p.y, p.z, p.seed, { noSphere: true });
-      } else if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && level && level._previewJourney &&
-                 !game._lssVault && typeof _lssVaultRegister === 'function') {
-        const ws = ((typeof net !== 'undefined' && net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0;
-        const h1 = ((ws * 2654435761) >>> 0) / 4294967295;
-        const h2 = ((((ws ^ 0x9E3779B9) >>> 0) * 2246822519) >>> 0) / 4294967295;
-        const vx = (h1 - 0.5) * 2600;
-        const vz = 1600 + h2 * 2600;
-        let vy = 0;
-        try { vy = _stVDrift(vx, vz, game.sandwichTerrain); } catch (_) {}
-        _lssVaultRegister(vx, vy, vz, (ws ^ 0x5A17) >>> 0);
+      if (game._lssJunctionSeeds && game._lssJunctionSeeds.length && typeof _lssJunctionRegister === 'function') {
+        const seeds = game._lssJunctionSeeds;
+        game._lssJunctionSeeds = null;
+        for (const p of seeds) _lssJunctionRegister(p.x, p.y, p.z, p.seed, { noSphere: true });
       }
-    } catch (e) { console.warn('[vault] build-tail registration failed:', e && e.message); }
+    } catch (e) { console.warn('[junction] build-tail registration failed:', e && e.message); }
   }
   // Worker available and enabled
   else if (game.levelWorker && typeof(game.levelWorker) !== 'string') {
@@ -79392,6 +79495,9 @@ function gameLoop(timestamp) {
   // camera (world-space panning — tails rotate correctly as you turn) and
   // the missile flyby/doppler voices track their projectiles.
   if (typeof _audioSpatialFrame === 'function') { try { _audioSpatialFrame(dt); } catch (_) {} }
+  // (v36.88) Deck-junction lazy mesh lifecycle (build approaching, dispose
+  // passed) — a few distance checks per frame, no-op without junctions.
+  if (typeof _lssJunctionTick === 'function') { try { _lssJunctionTick(); } catch (_) {} }
   updateHUD();
   if (!_xrPresentingForOverlays && _vrPerfTier < 1) updateEnemyHealthBars();
   __pmark('fx+hud+minimap'); 

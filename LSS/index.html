@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.87';
+const LSS_BUILD = '36.88';
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
@@ -24652,21 +24652,22 @@ function mesh(m) {
     idx:new Uint32Array(idx), tris:idx.length/3 };
 }`;
 }
-function _arenaDisposeMesh() {
-  for (const w of _arenaMesh.workers) { try { w.terminate(); } catch (_) {} }
-  _arenaMesh.workers = [];
-  if (_arenaMesh.url) { try { URL.revokeObjectURL(_arenaMesh.url); } catch (_) {} _arenaMesh.url = null; }
-  if (_arenaMesh.hud) { try { _arenaMesh.hud.style.display = 'none'; } catch (_) {} _arenaMesh.hud = null; }
-  if (_arenaMesh.clouds) {
-    for (const c of _arenaMesh.clouds) { try { if (c && c.dispose) c.dispose(); } catch (_) {} }
-    _arenaMesh.clouds = null;
+function _arenaDisposeMesh(Mx) {
+  const M = Mx || _arenaMesh;
+  for (const w of M.workers) { try { w.terminate(); } catch (_) {} }
+  M.workers = [];
+  if (M.url) { try { URL.revokeObjectURL(M.url); } catch (_) {} M.url = null; }
+  if (M.hud) { try { M.hud.style.display = 'none'; } catch (_) {} M.hud = null; }
+  if (M.clouds) {
+    for (const c of M.clouds) { try { if (c && c.dispose) c.dispose(); } catch (_) {} }
+    M.clouds = null;
   }
-  if (_arenaMesh.group) {
-    try { if (_arenaMesh.group.parent) scene.remove(_arenaMesh.group); } catch (_) {}
-    _arenaMesh.group.traverse((n) => { if (n.isMesh && n.geometry) { try { n.geometry.dispose(); } catch (_) {} } });
+  if (M.group) {
+    try { if (M.group.parent) scene.remove(M.group); } catch (_) {}
+    M.group.traverse((n) => { if (n.isMesh && n.geometry) { try { n.geometry.dispose(); } catch (_) {} } });
   }
-  _arenaMesh.group = null; _arenaMesh.key = null; _arenaMesh.building = false;
-  _arenaMesh.chunksDone = 0; _arenaMesh.chunksTotal = 0; _arenaMesh.tris = 0; _arenaMesh.regions = null;
+  M.group = null; M.key = null; M.building = false;
+  M.chunksDone = 0; M.chunksTotal = 0; M.tris = 0; M.regions = null;
 }
 function _arenaEnsureMesh(level) {
   const key = JSON.stringify(level.arena) + '|c' + _arenaMeshCells();
@@ -24678,12 +24679,12 @@ function _arenaEnsureMesh(level) {
   _arenaBuildMesh(_arenaBuildParams(level.arena, level.rooms), key, level);
 }
 
-function _lssVaultG(seed) {
-  const G = _arenaBuildParams({ seed: seed | 0, floors: 3, spikeAmt: 0.7, scale: 1.0 }, []);
-  if (G.helix) G.helix.turns = 2;
+function _lssJunctionG(seed) {
+  const G = _arenaBuildParams({ seed: seed | 0, floors: 2, spikeAmt: 0.6, scale: 0.9324 }, []);
+  if (G.helix) G.helix.turns = 1;   // one turn = exactly one deck per winding
   return G;
 }
-function _lssVaultEnv(G) {
+function _lssJunctionEnv(G) {
   const hx = G.helix;
   const hxTop = hx ? hx.y0 + (hx.turns + 0.5) * hx.pitch + hx.half + 60 : 0;
   const hxBot = hx ? hx.y0 - (hx.turns + 0.5) * hx.pitch - hx.half - 60 : 0;
@@ -24693,36 +24694,57 @@ function _lssVaultEnv(G) {
     rise: Math.max(G.H + 90, hxTop) + 180,
   };
 }
-function _lssVaultRegister(x, y, z, seed, opts) {
-  if (game._lssVault) return;
+function _lssJunctionRegister(x, y, z, seed, opts) {
   try {
-    const G = _lssVaultG(seed);
-    const env = _lssVaultEnv(G);
-    game._lssVault = { x, y, z, G, env: env.r };
-    if (!opts || !opts.noSphere) {
-      game.levelSpheres.push({ cx: x, cy: y, cz: z, r: env.r * 0.92, drop: env.drop, rise: env.rise });
-    }
+    const G = _lssJunctionG(seed);
+    const env = _lssJunctionEnv(G);
+    if (!game._lssJunctions) game._lssJunctions = [];
+    const j = { x, y, z, seed: seed | 0, G, env: env.r, state: null,
+                key: 'junction|' + (seed | 0) + '|c' + _arenaMeshCells() };
+    game._lssJunctions.push(j);
+    if (!(opts && opts.noSphere)) game.levelSpheres.push({ cx: x, cy: y, cz: z, r: env.r * 0.92, drop: env.drop, rise: env.rise });
     try {
       if (typeof _swInvalidateChunksInRect === 'function') {
         const rr = env.r + ((game.sandwichTerrain && game.sandwichTerrain.CLEAR_SOFT) || 300) + 90;
         _swInvalidateChunksInRect(x - rr, x + rr, z - rr, z + rr);
       }
     } catch (_) {}
-    _arenaDisposeMesh();
-    _arenaBuildMesh(G, 'vault|' + (seed | 0) + '|c' + _arenaMeshCells(), null, { offset: { x, y, z }, quiet: true });
-    console.log('[vault] registered at (' + Math.round(x) + ',' + Math.round(y) + ',' + Math.round(z) + ') seed ' + (seed | 0));
-  } catch (e) {
-    game._lssVault = null;
-    console.warn('[vault] register failed:', e && e.message);
+    console.log('[junction] registered at (' + Math.round(x) + ',' + Math.round(y) + ',' + Math.round(z) + ') seed ' + (seed | 0));
+    return j;
+  } catch (e) { console.warn('[junction] register failed:', e && e.message); return null; }
+}
+function _lssJunctionTick() {
+  const J = game._lssJunctions;
+  if (!J || !J.length || typeof player === 'undefined' || !player || !player.position) return;
+  const px = player.position.x, pz = player.position.z;
+  for (let i = J.length - 1; i >= 0; i--) {
+    const j = J[i];
+    const d = Math.hypot(j.x - px, j.z - pz);
+    if (!j.state && d < 6500) {
+      j.state = { key: null, group: null, building: false, chunksDone: 0, chunksTotal: 0,
+                  tris: 0, ms: 0, workers: [], regions: null, t0: 0, url: null, hud: null, clouds: null };
+      try {
+        _arenaBuildMesh(j.G, j.key, null, { state: j.state, offset: { x: j.x, y: j.y, z: j.z }, quiet: true, lite: true });
+      } catch (e) { console.warn('[junction] mesh build failed:', e && e.message); j.state = null; }
+    } else if (j.state && d > 9500) {
+      try { _arenaDisposeMesh(j.state); } catch (_) {}
+      j.state = null;
+    }
+    if (d > 16000) {
+      if (j.state) { try { _arenaDisposeMesh(j.state); } catch (_) {} }
+      J.splice(i, 1);
+    }
   }
 }
-if (typeof window !== 'undefined') window.__vault = function () {
-  const v = game._lssVault;
-  if (!v) return 'no vault';
-  return { x: Math.round(v.x), y: Math.round(v.y), z: Math.round(v.z), env: Math.round(v.env),
-    meshDone: _arenaMesh.chunksDone, meshTotal: _arenaMesh.chunksTotal, tris: _arenaMesh.tris };
+if (typeof window !== 'undefined') window.__junctions = function () {
+  const J = game._lssJunctions;
+  if (!J || !J.length) return 'no junctions';
+  return J.map(j => ({ x: Math.round(j.x), y: Math.round(j.y), z: Math.round(j.z), env: Math.round(j.env),
+    mesh: j.state ? (j.state.building ? (j.state.chunksDone + '/' + j.state.chunksTotal) : (Math.round(j.state.tris / 1000) + 'k tris')) : 'lazy' }));
 };
+
 function _arenaBuildMesh(G, key, level, opts) {
+  const M = (opts && opts.state) || _arenaMesh;
   const CHUNK = 600, CELLS = _arenaMeshCells(), REGION = 3;
   const t0 = performance.now();
   const nx = Math.ceil((G.R + 140) / CHUNK), ny = Math.ceil((G.H + 320) / CHUNK);
@@ -24760,23 +24782,23 @@ function _arenaBuildMesh(G, key, level, opts) {
     if (!r) regions.set(jb.region, r = { expected: 0, done: 0, parts: [] });
     r.expected++;
   }
-  _arenaMesh.key = key;
-  _arenaMesh.building = true;
-  _arenaMesh.t0 = t0;
-  _arenaMesh.chunksTotal = jobs.length;
-  _arenaMesh.regions = regions;
-  _arenaMesh.group = new THREE.Group();
-  _arenaMesh.group.name = 'spireArenaMesh';
-  _arenaMesh.group.matrixAutoUpdate = false;
+  M.key = key;
+  M.building = true;
+  M.t0 = t0;
+  M.chunksTotal = jobs.length;
+  M.regions = regions;
+  M.group = new THREE.Group();
+  M.group.name = 'spireArenaMesh';
+  M.group.matrixAutoUpdate = false;
   if (opts && opts.offset) {
-    _arenaMesh.group.position.set(opts.offset.x, opts.offset.y, opts.offset.z);
+    M.group.position.set(opts.offset.x, opts.offset.y, opts.offset.z);
   }
-  _arenaMesh.group.updateMatrix();
-  scene.add(_arenaMesh.group);
+  M.group.updateMatrix();
+  scene.add(M.group);
   try {
     if (!opts || !opts.quiet) {
-      _arenaMesh.hud = document.getElementById('map-gen-hud');
-      if (_arenaMesh.hud) { _arenaMesh.hud.textContent = 'GENERATING ARENA'; _arenaMesh.hud.style.display = 'block'; }
+      M.hud = document.getElementById('map-gen-hud');
+      if (M.hud) { M.hud.textContent = 'GENERATING ARENA'; M.hud.style.display = 'block'; }
     }
   } catch (_) {}
   const mat = _arenaMakeMaterial();
@@ -24810,13 +24832,13 @@ function _arenaBuildMesh(G, key, level, opts) {
     geo.computeBoundingSphere();
     const mesh = new THREE.Mesh(geo, mat);
     mesh.matrixAutoUpdate = false;
-    if (_arenaMesh.key === key && _arenaMesh.group) _arenaMesh.group.add(mesh);
+    if (M.key === key && M.group) M.group.add(mesh);
     else geo.dispose();
   };
   let url = null;
   try { url = URL.createObjectURL(new Blob([_arenaMeshWorkerSrc()], { type: 'text/javascript' })); }
   catch (e) { console.warn('[spire] mesh worker blob failed (collision-only world):', e); _arenaDisposeMesh(); return; }
-  _arenaMesh.url = url;
+  M.url = url;
   const NW = Math.max(2, Math.min(8, ((navigator.hardwareConcurrency || 4) - 2)));
   let issued = 0;
   const dispatch = (w) => {
@@ -24827,7 +24849,7 @@ function _arenaBuildMesh(G, key, level, opts) {
   };
   const _fail = (what) => (e) => {
     console.warn('[spire] mesh worker ' + what + ' — arena mesh aborted, next round rebuilds:', e && (e.message || e));
-    if (_arenaMesh.key === key) _arenaDisposeMesh();
+    if (M.key === key) _arenaDisposeMesh(M);
   };
   for (let n = 0; n < NW; n++) {
     let w;
@@ -24837,44 +24859,46 @@ function _arenaBuildMesh(G, key, level, opts) {
     w.onmessageerror = _fail('message error');
     w.onmessage = (ev) => {
       const r = ev.data;
-      if (_arenaMesh.key !== key) return;
-      _arenaMesh.chunksDone++;
-      if (_arenaMesh.hud && (_arenaMesh.chunksDone & 15) === 0) {
-        _arenaMesh.hud.textContent = 'GENERATING ARENA · ' + Math.round(_arenaMesh.chunksDone / _arenaMesh.chunksTotal * 100) + '%';
+      if (M.key !== key) return;
+      M.chunksDone++;
+      if (M.hud && (M.chunksDone & 15) === 0) {
+        M.hud.textContent = 'GENERATING ARENA · ' + Math.round(M.chunksDone / M.chunksTotal * 100) + '%';
       }
-      const reg = _arenaMesh.regions && _arenaMesh.regions.get(r.region);
+      const reg = M.regions && M.regions.get(r.region);
       if (reg) {
         reg.done++;
-        if (!r.empty) { reg.parts.push(r); _arenaMesh.tris += r.tris; }
+        if (!r.empty) { reg.parts.push(r); M.tris += r.tris; }
         if (reg.done === reg.expected && reg.parts) mergeRegion(reg);
       }
-      if (_arenaMesh.chunksDone >= _arenaMesh.chunksTotal) {
-        _arenaMesh.building = false;
-        _arenaMesh.ms = Math.round(performance.now() - t0);
-        for (const wk of _arenaMesh.workers) { try { wk.terminate(); } catch (_) {} }
-        _arenaMesh.workers = [];
-        if (_arenaMesh.hud) { try { _arenaMesh.hud.style.display = 'none'; } catch (_) {} _arenaMesh.hud = null; }
+      if (M.chunksDone >= M.chunksTotal) {
+        M.building = false;
+        M.ms = Math.round(performance.now() - t0);
+        for (const wk of M.workers) { try { wk.terminate(); } catch (_) {} }
+        M.workers = [];
+        if (M.hud) { try { M.hud.style.display = 'none'; } catch (_) {} M.hud = null; }
         try {
-          const _nSh = _arenaScatterShrooms(G, _arenaMesh.group);
+          if (opts && opts.lite) throw { _skip: true };
+          const _nSh = _arenaScatterShrooms(G, M.group);
           if (_nSh) console.log('[spire] planted ' + _nSh + ' mushrooms on the mystical storey');
-        } catch (e) { console.warn('[spire] mushroom scatter failed:', e); }
+        } catch (e) { if (!e || !e._skip) console.warn('[spire] mushroom scatter failed:', e); }
         try {
-          const _nF = _arenaBuildCloudColumns(G, _arenaMesh.group);
+          if (opts && opts.lite) throw { _skip: true };
+          const _nF = _arenaBuildCloudColumns(G, M.group);
           if (_nF) console.log('[spire] ' + _nF + ' cloud columns packed into the shafts (' +
-                               (_arenaMesh.clouds ? _arenaMesh.clouds.length : 0) + ' puffs)');
-        } catch (e) { console.warn('[spire] cloud column build failed:', e); }
-        console.log('[spire] arena meshed: ' + (_arenaMesh.tris / 1000).toFixed(0) + 'k tris in ' + _arenaMesh.ms + 'ms (' + _arenaMesh.chunksTotal + ' chunks)');
+                               (M.clouds ? M.clouds.length : 0) + ' puffs)');
+        } catch (e) { if (!e || !e._skip) console.warn('[spire] cloud column build failed:', e); }
+        console.log('[spire] arena meshed: ' + (M.tris / 1000).toFixed(0) + 'k tris in ' + M.ms + 'ms (' + M.chunksTotal + ' chunks)');
       } else {
         dispatch(w);
       }
     };
     w.postMessage({ cmd: 'init', g: G });
-    _arenaMesh.workers.push(w);
+    M.workers.push(w);
     dispatch(w); dispatch(w);
   }
   try { URL.revokeObjectURL(url); } catch (_) {}
-  _arenaMesh.url = null;
-  if (!_arenaMesh.workers.length) { console.warn('[spire] no mesh workers spawned (collision-only world)'); _arenaDisposeMesh(); }
+  M.url = null;
+  if (!M.workers.length) { console.warn('[spire] no mesh workers spawned (collision-only world)'); _arenaDisposeMesh(M); }
 }
 const _AR_SECTORS = 8;
 const _AR_TOL_MIN = 90, _AR_TOL_MAX = 170;
@@ -25007,15 +25031,17 @@ function worldSDF(px,py,pz) {
   const _stT = game.sandwichTerrain;
   if (_stT && _stT.ON) {
     let _f = _stGapSDFCarved(px,py,pz,_stT);
-    const _vlt = game._lssVault;
-    if (_vlt) {
-      const vdx = px - _vlt.x, vdy = py - _vlt.y, vdz = pz - _vlt.z;
-      const vrr = _vlt.env + 240;
-      const vd2 = vdx * vdx + vdy * vdy + vdz * vdz;
-      if (vd2 < vrr * vrr) {
-        const vw = Math.max(0, Math.min(1, (_vlt.env - Math.sqrt(vd2)) / 240));
+    const _jns = game._lssJunctions;
+    if (_jns && _jns.length) {
+      for (let _ji = 0; _ji < _jns.length; _ji++) {
+        const _jn = _jns[_ji];
+        const vdx = px - _jn.x, vdy = py - _jn.y, vdz = pz - _jn.z;
+        const vrr = _jn.env + 240;
+        const vd2 = vdx * vdx + vdy * vdy + vdz * vdz;
+        if (vd2 >= vrr * vrr) continue;
+        const vw = Math.max(0, Math.min(1, (_jn.env - Math.sqrt(vd2)) / 240));
         if (vw > 0) {
-          const dvf = _ARENA_FIELD.eval(vdx, vdy, vdz, _vlt.G);
+          const dvf = _ARENA_FIELD.eval(vdx, vdy, vdz, _jn.G);
           _f = Math.max(_f, dvf * vw + (-600) * (1 - vw));
         }
       }
@@ -58527,6 +58553,15 @@ function _lssEndlessDriftY(x, z) {
   const s = fr < 0.5 ? 0.5 * Math.pow(2 * fr, 7) : 1 - 0.5 * Math.pow(2 * (1 - fr), 7);
   return (fl + s) * V.step * e;
 }
+function _lssEndlessDeckEnv(x, z) {
+  const V = _LSS_ENDLESS_VDRIFT;
+  return Math.max(0, Math.min(1, (Math.hypot(x, z) - V.fadeO) / V.fadeW));
+}
+function _lssEndlessDeckIdx(x, z) {
+  const V = _LSS_ENDLESS_VDRIFT;
+  const n = V.a * _stFbm(x + 7000, z - 7000, 2, V.f, 91.0);
+  return Math.round(n / V.step);
+}
 function _lssEndlessNextSeg(run) {
   const g = run.gen, rand = g.rand;
   const kindRoll = rand();
@@ -58557,7 +58592,12 @@ function _lssEndlessNextSeg(run) {
   }
   g.heading += turn;
   const len = 2200 + rand() * 1400;
-  const a = { x: g.x, y: g.y + _lssEndlessDriftY(g.x, g.z), z: g.z };
+  const _VD = _LSS_ENDLESS_VDRIFT;
+  const _laneY = (dk, x, z) => (dk === null || dk === undefined)
+    ? _lssEndlessDriftY(x, z)
+    : dk * _VD.step * _lssEndlessDeckEnv(x, z);
+  if (g.deck === undefined) g.deck = null;
+  const a = { x: g.x, y: g.y + _laneY(g.deck, g.x, g.z), z: g.z };
   g.x += Math.sin(g.heading) * len;
   g.z += Math.cos(g.heading) * len;
   {
@@ -58568,8 +58608,49 @@ function _lssEndlessNextSeg(run) {
       if (vis.fifo.length > 256) delete vis.n[vis.fifo.shift()];
     }
   }
+  let jRec = null, jEnt = null, jExit = null, jDeckA = null;
+  {
+    const envB = _lssEndlessDeckEnv(g.x, g.z);
+    if (envB < 0.95) {
+      g.deck = null;
+    } else if (g.deck === null) {
+      g.deck = _lssEndlessDeckIdx(g.x, g.z);
+    } else {
+      const newIdx = _lssEndlessDeckIdx(g.x, g.z);
+      const _spaced = !g.lastJ || Math.hypot(g.x - g.lastJ.x, g.z - g.lastJ.z) > 9000;
+      if (newIdx !== g.deck && !(_spaced && typeof _lssJunctionG === 'function')) {
+        g.deck = newIdx;
+      } else if (newIdx !== g.deck) {
+        let t0 = 0, t1 = 1;
+        for (let bi = 0; bi < 24; bi++) {
+          const tm = (t0 + t1) / 2;
+          if (_lssEndlessDeckIdx(a.x + (g.x - a.x) * tm, a.z + (g.z - a.z) * tm) === g.deck) t0 = tm; else t1 = tm;
+        }
+        const tc = (t0 + t1) / 2;
+        const cx = a.x + (g.x - a.x) * tc, cz = a.z + (g.z - a.z) * tc;
+        const ws = (typeof net !== 'undefined' && net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED;
+        const seed = (((ws >>> 0) ^ ((g.nextGid * 2654435761) >>> 0)) >>> 0);
+        const jG = _lssJunctionG(seed);
+        const gap = jG.R + 260;
+        const sh = Math.sin(g.heading), ch = Math.cos(g.heading);
+        jDeckA = g.deck;
+        let deckB = _lssEndlessDeckIdx(cx + sh * gap, cz + ch * gap);
+        if (deckB === jDeckA) deckB = jDeckA + (newIdx > jDeckA ? 1 : -1);
+        jRec = { x: cx, y: (jDeckA + deckB) / 2 * _VD.step * _lssEndlessDeckEnv(cx, cz),
+                 z: cz, seed, deckA: jDeckA, deckB };
+        jEnt = { x: cx - sh * gap, z: cz - ch * gap };
+        jExit = { x: cx + sh * gap, z: cz + ch * gap };
+        g.x = jExit.x; g.z = jExit.z;
+        g.deck = deckB;
+        g.lastJ = { x: cx, z: cz };
+      }
+    }
+  }
   g.y = Math.max(-260, Math.min(260, g.y + (rand() - 0.5) * 340));
-  const b = { x: g.x, y: g.y + _lssEndlessDriftY(g.x, g.z), z: g.z };
+  const b = jRec
+    ? { x: jEnt.x, y: g.y + jDeckA * _VD.step * _lssEndlessDeckEnv(jEnt.x, jEnt.z), z: jEnt.z }
+    : { x: g.x, y: g.y + _laneY(g.deck, g.x, g.z), z: g.z };
+  if (jRec) jExit = { x: jExit.x, y: g.y + _laneY(g.deck, jExit.x, jExit.z), z: jExit.z };
   const r = 280 + rand() * 500;
   const hallR = hall ? (800 + rand() * 800) : 0;
   let hp = null;
@@ -58578,7 +58659,8 @@ function _lssEndlessNextSeg(run) {
     const off = 800 + rand() * 700;
     hp = { x: b.x + Math.cos(g.heading) * off * sgn, y: b.y + (rand() - 0.5) * 200, z: b.z - Math.sin(g.heading) * off * sgn };
   }
-  return { a, b, r, hall, hallR, hp, gid: g.nextGid++ };
+  if (jRec) { hall = false; hp = null; }
+  return { a, b, r, hall, hallR, hp, gid: g.nextGid++, junction: jRec, exit: jExit };
 }
 
 function _lssEndlessApplySeg(run, s) {
@@ -58599,10 +58681,8 @@ function _lssEndlessApplySeg(run, s) {
     len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
     cyl, sph, spur,
   });
-  if (s.hall && s.gid >= 3 && !game._lssVault && typeof _lssVaultRegister === 'function') {
-    const hc = s.hp || s.b;
-    const _vseed = ((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ ((s.gid * 2654435761) >>> 0)) >>> 0;
-    _lssVaultRegister(hc.x, hc.y, hc.z, _vseed);
+  if (s.junction && typeof _lssJunctionRegister === 'function') {
+    _lssJunctionRegister(s.junction.x, s.junction.y, s.junction.z, s.junction.seed);
   }
   try {
     if (!window.__endlessNoRebake) {
@@ -58829,18 +58909,22 @@ function _lssGenEndlessLevel(base) {
   };
   const nodes = [{ x: 0, y: 0, z: 0 }];
   const rooms = [{ id: 'spawn', team: 'A', x: 0, y: 0, z: 0, r: SU * 3.2 }];
-  game._lssVaultPending = null;
+  game._lssJunctionSeeds = [];
+  let _tunnelPath = nodes;   // current polyline; junctions split it
+  const _tunnels = [];
   for (let i = 0; i < 8; i++) {
     const s = _lssEndlessNextSeg(run);
-    nodes.push(s.b);
+    _tunnelPath.push(s.b);
     if (s.hall) rooms.push({ id: 'hall' + s.gid, team: null, x: s.b.x, y: s.b.y, z: s.b.z, r: s.hallR });
-    if (s.hall && s.gid >= 3 && !game._lssVaultPending && typeof _lssVaultG === 'function') {
-      const _vseed = (((seed >>> 0) ^ ((s.gid * 2654435761) >>> 0)) >>> 0);
-      const _vG = _lssVaultG(_vseed);
-      const _vE = _lssVaultEnv(_vG);
-      rooms.push({ id: 'vault' + s.gid, team: null, x: s.b.x, y: s.b.y, z: s.b.z,
-                   r: _vE.r * 0.92, drop: _vE.drop, rise: _vE.rise });
-      game._lssVaultPending = { x: s.b.x, y: s.b.y, z: s.b.z, seed: _vseed };
+    if (s.junction && typeof _lssJunctionG === 'function') {
+      const jn = s.junction;
+      const _jG = _lssJunctionG(jn.seed);
+      const _jE = _lssJunctionEnv(_jG);
+      rooms.push({ id: 'junction' + s.gid, team: null, x: jn.x, y: jn.y, z: jn.z,
+                   r: _jE.r * 0.92, drop: _jE.drop, rise: _jE.rise });
+      game._lssJunctionSeeds.push(jn);
+      _tunnels.push({ r: 400, w: 0.15, path: _tunnelPath });
+      _tunnelPath = [{ x: s.exit.x, y: s.exit.y, z: s.exit.z }];
     }
     run.segs.push({
       gid: s.gid, a: s.a, b: s.b, hall: s.hall,
@@ -58848,11 +58932,12 @@ function _lssGenEndlessLevel(base) {
       cyl: null, sph: null,
     });
   }
+  _tunnels.push({ r: 400, w: 0.15, path: _tunnelPath });
   return {
     name: base.name, description: base.description, defaultTheme: base.defaultTheme,
     procedural: 'endless',
     terrain: base.terrain, palette: base.palette, _biomeOverride: 'rocky',
-    rooms, tunnels: [{ r: 400, w: 0.15, path: nodes }],
+    rooms, tunnels: _tunnels,
   };
 }
 MAP_DATA.camp_grassy      = { ...CAMPAIGN_LEG_MAP, name: 'Verdant Pass',          description: 'Rolling green highlands under an open sky.',                 defaultTheme: 'Grassy',            palette: [0x33571f,0x4d7a33,0x7b7a5a,0x5fae4e,0x3f5e26,0x2c3f18,0x6f6552,0x4d7a33] };
@@ -59032,7 +59117,13 @@ function buildRoomGraphLevel(level) {
   game.sandwichTerrain = null;
   game.arenaField = null;
   if (!(level && level.arena)) { try { _arenaDisposeMesh(); } catch (_) {} }
-  game._lssVault = null;
+  if (game._lssJunctions && game._lssJunctions.length) {
+    for (const _j of game._lssJunctions) {
+      if (_j.state) { try { _arenaDisposeMesh(_j.state); } catch (_) {} }
+    }
+  }
+  game._lssJunctions = [];
+  game._lssJunctionSeeds = null;
   game._buildSeq = (game._buildSeq | 0) + 1;
   try {
     if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps._refineInterval) {
@@ -59361,22 +59452,12 @@ function buildRoomGraphLevel(level) {
   else if (game.sandwichTerrain && game.sandwichTerrain.ON) {
     if (mapGenHud) mapGenHud.style.display = 'none';
     try {
-      if (game._lssVaultPending && typeof _lssVaultRegister === 'function') {
-        const p = game._lssVaultPending;
-        game._lssVaultPending = null;
-        _lssVaultRegister(p.x, p.y, p.z, p.seed, { noSphere: true });
-      } else if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && level && level._previewJourney &&
-                 !game._lssVault && typeof _lssVaultRegister === 'function') {
-        const ws = ((typeof net !== 'undefined' && net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0;
-        const h1 = ((ws * 2654435761) >>> 0) / 4294967295;
-        const h2 = ((((ws ^ 0x9E3779B9) >>> 0) * 2246822519) >>> 0) / 4294967295;
-        const vx = (h1 - 0.5) * 2600;
-        const vz = 1600 + h2 * 2600;
-        let vy = 0;
-        try { vy = _stVDrift(vx, vz, game.sandwichTerrain); } catch (_) {}
-        _lssVaultRegister(vx, vy, vz, (ws ^ 0x5A17) >>> 0);
+      if (game._lssJunctionSeeds && game._lssJunctionSeeds.length && typeof _lssJunctionRegister === 'function') {
+        const seeds = game._lssJunctionSeeds;
+        game._lssJunctionSeeds = null;
+        for (const p of seeds) _lssJunctionRegister(p.x, p.y, p.z, p.seed, { noSphere: true });
       }
-    } catch (e) { console.warn('[vault] build-tail registration failed:', e && e.message); }
+    } catch (e) { console.warn('[junction] build-tail registration failed:', e && e.message); }
   }
   else if (game.levelWorker && typeof(game.levelWorker) !== 'string') {
     game.levelWorker.onmessage = (e) => {
@@ -61244,6 +61325,7 @@ function gameLoop(timestamp) {
     if (_xrPresentingForOverlays && _xrMinimapTex && _mm.lastTick !== _mmPrev) _xrMinimapTex.needsUpdate = true;
   }
   if (typeof _audioSpatialFrame === 'function') { try { _audioSpatialFrame(dt); } catch (_) {} }
+  if (typeof _lssJunctionTick === 'function') { try { _lssJunctionTick(); } catch (_) {} }
   updateHUD();
   if (!_xrPresentingForOverlays && _vrPerfTier < 1) updateEnemyHealthBars();
   __pmark('fx+hud+minimap'); 
