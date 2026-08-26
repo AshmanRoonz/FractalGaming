@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.93';
+const LSS_BUILD = '36.94';
 // (v36.91) RIBBON WORLD feel-test opt-in: ?ribbon in the URL (or set
 // window.__ribbon = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]ribbon/.test(location.search)) window.__ribbon = true;
@@ -30445,12 +30445,6 @@ const _RIBBON_P = {
   taperStart: 5200,  // gap starts thinning this far off the spine...
   taperRate: 0.25,   // ...and seals ~2.5km later. Geology, not a wall.
   grain: 14,         // fine rock grain
-  // (v36.93) Cavern atmosphere — without the sandwich's _swApplyAtmosphere
-  // the raw theme sky (bright clouds) pours in past the stream radius and
-  // "ruined the whole cavern look" (owner). Fog fades everything to dark
-  // before the streamed rock runs out.
-  fogColor: 0x0c1014,
-  fogDensity: 0.00040,
 };
 // One source of truth for collision (main thread) and the mesh workers.
 // ⚠ NO backticks / dollar-brace inside the literal below.
@@ -30651,10 +30645,6 @@ function _rbnDispose() {
   }
   _rbn.group = null; _rbn.chunks.clear(); _rbn.pending.clear();
   _rbn.queue = []; _rbn.on = false; _rbn.tris = 0;
-  // Give the sky dome back to whatever map builds next (its theme pass
-  // restyles it anyway).
-  try { if (typeof _skyDome !== 'undefined' && _skyDome) _skyDome.visible = true; } catch (_) {}
-  _rbn.fog = null; _rbn.fogColor = null;
 }
 function _rbnInit() {
   _rbnDispose();
@@ -30680,19 +30670,6 @@ function _rbnInit() {
   }
   try { URL.revokeObjectURL(url); } catch (_) {}
   _rbn.on = _rbn.workers.length > 0;
-  // Enclosed-cavern atmosphere: dark background (kills the theme skybox)
-  // + fog that reaches full occlusion just inside the stream radius, so
-  // the world always ends in darkness, never in clouds. _rbnTick
-  // re-asserts these in case a later theme pass stomps them.
-  try {
-    _rbn.fogColor = new THREE.Color(_RIBBON_P.fogColor);
-    _rbn.fog = new THREE.FogExp2(_rbn.fogColor, _RIBBON_P.fogDensity);
-    scene.background = _rbn.fogColor;
-    scene.fog = _rbn.fog;
-    // The equirect sky renders as a DOME MESH (v30.58), not
-    // scene.background — the bright clouds behind the rock edge were it.
-    if (typeof _skyDome !== 'undefined' && _skyDome) _skyDome.visible = false;
-  } catch (e) { console.warn('[ribbon] atmosphere failed:', e); }
   console.log('[ribbon] streamer up: ' + _rbn.workers.length + ' workers');
 }
 function _rbnReceive(r) {
@@ -30718,16 +30695,6 @@ function _rbnTick(dt) {
   const now = performance.now();
   if (now - _rbn.lastScan > 380) {
     _rbn.lastScan = now;
-    // Re-assert the cavern atmosphere if a theme/FX pass replaced it or
-    // mutated its values in place (identity survives, color/density don't).
-    if (_rbn.fog) {
-      try {
-        if (scene.fog !== _rbn.fog) { scene.fog = _rbn.fog; scene.background = _rbn.fogColor; }
-        _rbn.fog.density = _RIBBON_P.fogDensity;
-        _rbn.fogColor.setHex(_RIBBON_P.fogColor);
-        if (typeof _skyDome !== 'undefined' && _skyDome && _skyDome.visible) _skyDome.visible = false;
-      } catch (_) {}
-    }
     const CH = 600, SCAN_R = 4600;
     // Record prune: the world collapses far behind, like the classic
     // route pruner. One-way — endless is forward-driven.
@@ -30801,9 +30768,6 @@ if (typeof window !== 'undefined') {
     _rbnQ.segs = game._rbnSegs;
     return _RIBBON_FIELD.eval(x, y, z, _rbnQ);
   };
-  // Live tuning: the tick re-asserts fog from these every 380ms, so e.g.
-  // __ribbonP.fogDensity = 0.0003 takes effect immediately in-run.
-  window.__ribbonP = _RIBBON_P;
 }
 
 // Arena params from a MAP_DATA <key>.arena block. Pure + deterministic
@@ -75197,9 +75161,6 @@ const _FOG_TUNNEL_MULT = 1.4;
 function updateRoomFog(dt) {
   // Sandwich terrain owns the fog/atmosphere when active ; don't fight it.
   if (game.sandwichTerrain && game.sandwichTerrain.ON) return;
-  // (v36.93) The ribbon world owns its enclosed-cavern fog the same way —
-  // this lerp was dragging it down to the cosmic-map baseline every frame.
-  if (game.ribbonWorld) return;
   if (!scene.fog || !player || !player.position) return;
   if (!game.currentLevel || !Array.isArray(game.currentLevel.rooms)) return;
   const cadence = (typeof isXRPresenting === 'function' && isXRPresenting() && typeof getVRCadence === 'function')
