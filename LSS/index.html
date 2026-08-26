@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '36.96';
+const LSS_BUILD = '36.97';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -24904,57 +24904,138 @@ function _bendPushSeg(rec) {
   rec.half = rec.len * 0.5;
   game._bendSegs.push(rec);
 }
-function _bendUnmap(px, py, pz) {
-  const segs = game._bendSegs;
-  if (!segs || !segs.length) return { x: px, y: py, z: pz };
-  let sx = 0, sy = 0, sz = 0, sw = 0;
-  let fbQ = null, fbD = Infinity;
-  for (let i = 0; i < segs.length; i++) {
-    const s = segs[i];
-    const dmx = px - s.wmx, dmy = py - s.wmy, dmz = pz - s.wmz;
-    const cd2 = dmx * dmx + dmy * dmy + dmz * dmz;
-    const dx = px - s.wax, dy = py - s.way, dz = pz - s.waz;
-    let t = dx * s.ax_ + dy * s.ay_ + dz * s.az_;
-    t = t < 0 ? 0 : (t > s.len ? s.len : t);
-    const v = dx * s.px_ + dz * s.pz_;
-    const w = dx * s.nx_ + dy * s.ny_ + dz * s.nz_;
-    const ex = dx - s.ax_ * t, ey = dy - s.ay_ * t, ez = dz - s.az_ * t;
-    const r2 = ex * ex + ey * ey + ez * ez;
-    const qx = s.fax + s.hx * t + s.px_ * v;
-    const qz = s.faz + s.hz * t + s.pz_ * v;
-    if (r2 < fbD) { fbD = r2; fbQ = { x: qx, y: w, z: qz }; }
-    if (cd2 > (s.half + 12000) * (s.half + 12000)) continue;
-    const wgt = 1 / ((r2 + 2500) * (r2 + 2500));
-    sx += qx * wgt; sy += w * wgt; sz += qz * wgt; sw += wgt;
-  }
-  if (sw <= 0) return fbQ || { x: px, y: py, z: pz };
-  return { x: sx / sw, y: sy / sw, z: sz / sw };
-}
+const _BEND_R = 4200;
+const _BEND_R2 = _BEND_R * _BEND_R;
+const _bendW = { x: 0, y: 0, z: 0, ax: 0, ay: 0, az: 0, nx: 0, ny: 0, nz: 0, px: 0, py: 0, pz: 0 };
+const _bendQ2 = { x: 0, y: 0, z: 0 };
 function _bendMapPoint(qx, qy, qz) {
+  const R = _bendW;
   const segs = game._bendSegs;
-  if (!segs || !segs.length) return { x: qx, y: qy, z: qz };
+  if (!segs || !segs.length) {
+    R.x = qx; R.y = qy; R.z = qz;
+    R.ax = 0; R.ay = 0; R.az = 1; R.nx = 0; R.ny = 1; R.nz = 0; R.px = 1; R.py = 0; R.pz = 0;
+    return R;
+  }
   let sx = 0, sy = 0, sz = 0, sw = 0;
-  let fbP = null, fbD = Infinity;
+  let aax = 0, aay = 0, aaz = 0, anx = 0, any_ = 0, anz = 0;
+  let fb = -1, fbD = Infinity, fbX = 0, fbY = 0, fbZ = 0;
   for (let i = 0; i < segs.length; i++) {
     const s = segs[i];
     const dmx = qx - s.fmx, dmz = qz - s.fmz;
-    const cd2 = dmx * dmx + dmz * dmz;
+    const br = s.half + _BEND_R + 100;
+    if (dmx * dmx + dmz * dmz > br * br) continue;
     const dx = qx - s.fax, dz = qz - s.faz;
-    let t = dx * s.hx + dz * s.hz;
-    t = t < 0 ? 0 : (t > s.len ? s.len : t);
+    const tRaw = dx * s.hx + dz * s.hz;
     const v = dx * s.px_ + dz * s.pz_;
-    const ex = dx - s.hx * t, ez = dz - s.hz * t;
+    const wx = s.wax + s.ax_ * tRaw + s.px_ * v + s.nx_ * qy;
+    const wy = s.way + s.ay_ * tRaw + s.ny_ * qy;
+    const wz = s.waz + s.az_ * tRaw + s.pz_ * v + s.nz_ * qy;
+    const tC = tRaw < 0 ? 0 : (tRaw > s.len ? s.len : tRaw);
+    const ex = dx - s.hx * tC, ez = dz - s.hz * tC;
     const r2 = ex * ex + ez * ez;
-    const wx = s.wax + s.ax_ * t + s.px_ * v + s.nx_ * qy;
-    const wy = s.way + s.ay_ * t + s.ny_ * qy;
-    const wz = s.waz + s.az_ * t + s.pz_ * v + s.nz_ * qy;
-    if (r2 < fbD) { fbD = r2; fbP = { x: wx, y: wy, z: wz }; }
-    if (cd2 > (s.half + 12000) * (s.half + 12000)) continue;
-    const wgt = 1 / ((r2 + 2500) * (r2 + 2500));
+    if (r2 < fbD) { fbD = r2; fb = i; fbX = wx; fbY = wy; fbZ = wz; }
+    if (r2 >= _BEND_R2) continue;
+    const u1 = 1 - r2 / _BEND_R2;
+    const wgt = u1 * u1;
     sx += wx * wgt; sy += wy * wgt; sz += wz * wgt; sw += wgt;
+    aax += s.ax_ * wgt; aay += s.ay_ * wgt; aaz += s.az_ * wgt;
+    anx += s.nx_ * wgt; any_ += s.ny_ * wgt; anz += s.nz_ * wgt;
   }
-  if (sw <= 0) return fbP || { x: qx, y: qy, z: qz };
-  return { x: sx / sw, y: sy / sw, z: sz / sw };
+  if (sw <= 0) {
+    if (fb < 0) {
+      for (let i = 0; i < segs.length; i++) {
+        const s = segs[i];
+        const dx = qx - s.fax, dz = qz - s.faz;
+        const tRaw = dx * s.hx + dz * s.hz;
+        const tC = tRaw < 0 ? 0 : (tRaw > s.len ? s.len : tRaw);
+        const ex = dx - s.hx * tC, ez = dz - s.hz * tC;
+        const r2 = ex * ex + ez * ez;
+        if (r2 < fbD) {
+          fbD = r2; fb = i;
+          const v = dx * s.px_ + dz * s.pz_;
+          fbX = s.wax + s.ax_ * tRaw + s.px_ * v + s.nx_ * qy;
+          fbY = s.way + s.ay_ * tRaw + s.ny_ * qy;
+          fbZ = s.waz + s.az_ * tRaw + s.pz_ * v + s.nz_ * qy;
+        }
+      }
+    }
+    const s = segs[fb];
+    R.x = fbX; R.y = fbY; R.z = fbZ;
+    R.ax = s.ax_; R.ay = s.ay_; R.az = s.az_;
+    R.nx = s.nx_; R.ny = s.ny_; R.nz = s.nz_;
+    R.px = s.px_; R.py = 0; R.pz = s.pz_;
+    return R;
+  }
+  const al = Math.hypot(aax, aay, aaz) || 1;
+  const nl = Math.hypot(anx, any_, anz) || 1;
+  R.x = sx / sw; R.y = sy / sw; R.z = sz / sw;
+  R.ax = aax / al; R.ay = aay / al; R.az = aaz / al;
+  R.nx = anx / nl; R.ny = any_ / nl; R.nz = anz / nl;
+  R.px = R.ay * R.nz - R.az * R.ny;
+  R.py = R.az * R.nx - R.ax * R.nz;
+  R.pz = R.ax * R.ny - R.ay * R.nx;
+  return R;
+}
+function _bendUnmap(px, py, pz) {
+  const segs = game._bendSegs;
+  const Q = _bendQ2;
+  if (!segs || !segs.length) { Q.x = px; Q.y = py; Q.z = pz; return Q; }
+  let sx = 0, sy = 0, sz = 0, sw = 0;
+  let fb = -1, fbD = Infinity, fbX = 0, fbY = 0, fbZ = 0;
+  for (let i = 0; i < segs.length; i++) {
+    const s = segs[i];
+    const dmx = px - s.wmx, dmy = py - s.wmy, dmz = pz - s.wmz;
+    const br = s.half + _BEND_R + 100;
+    if (dmx * dmx + dmy * dmy + dmz * dmz > br * br) continue;
+    const dx = px - s.wax, dy = py - s.way, dz = pz - s.waz;
+    const tRaw = dx * s.ax_ + dy * s.ay_ + dz * s.az_;
+    const v = dx * s.px_ + dz * s.pz_;
+    const w = dx * s.nx_ + dy * s.ny_ + dz * s.nz_;
+    const qx = s.fax + s.hx * tRaw + s.px_ * v;
+    const qz = s.faz + s.hz * tRaw + s.pz_ * v;
+    const tC = tRaw < 0 ? 0 : (tRaw > s.len ? s.len : tRaw);
+    const ex = dx - s.ax_ * tC, ey = dy - s.ay_ * tC, ez = dz - s.az_ * tC;
+    const r2 = ex * ex + ey * ey + ez * ez;
+    if (r2 < fbD) { fbD = r2; fb = i; fbX = qx; fbY = w; fbZ = qz; }
+    if (r2 >= _BEND_R2) continue;
+    const u1 = 1 - r2 / _BEND_R2;
+    const wgt = u1 * u1;
+    sx += qx * wgt; sy += w * wgt; sz += qz * wgt; sw += wgt;
+  }
+  if (sw <= 0) {
+    if (fb < 0) {
+      for (let i = 0; i < segs.length; i++) {
+        const s = segs[i];
+        const dx = px - s.wax, dy = py - s.way, dz = pz - s.waz;
+        const tRaw = dx * s.ax_ + dy * s.ay_ + dz * s.az_;
+        const tC = tRaw < 0 ? 0 : (tRaw > s.len ? s.len : tRaw);
+        const ex = dx - s.ax_ * tC, ey = dy - s.ay_ * tC, ez = dz - s.az_ * tC;
+        const r2 = ex * ex + ey * ey + ez * ez;
+        if (r2 < fbD) {
+          fbD = r2; fb = i;
+          const v = dx * s.px_ + dz * s.pz_;
+          fbX = s.fax + s.hx * tRaw + s.px_ * v;
+          fbY = dx * s.nx_ + dy * s.ny_ + dz * s.nz_;
+          fbZ = s.faz + s.hz * tRaw + s.pz_ * v;
+        }
+      }
+    }
+    Q.x = fbX; Q.y = fbY; Q.z = fbZ;
+    return Q;
+  }
+  let qx = sx / sw, qy = sy / sw, qz = sz / sw;
+  const F = _bendMapPoint(qx, qy, qz);
+  const rx = px - F.x, ry = py - F.y, rz = pz - F.z;
+  const rA = rx * F.ax + ry * F.ay + rz * F.az;
+  const rN = rx * F.nx + ry * F.ny + rz * F.nz;
+  const rP = rx * F.px + ry * F.py + rz * F.pz;
+  let hx2 = F.ax, hz2 = F.az;
+  const hl2 = Math.hypot(hx2, hz2) || 1; hx2 /= hl2; hz2 /= hl2;
+  qx += rA * hx2 + rP * hz2;
+  qy += rN;
+  qz += rA * hz2 - rP * hx2;
+  Q.x = qx; Q.y = qy; Q.z = qz;
+  return Q;
 }
 function _bendVerts(verts) {
   for (let i = 0; i < verts.length; i += 3) {
@@ -24969,7 +25050,32 @@ if (typeof window !== 'undefined') {
     return { segs: B.length, lastPitchDeg: Math.round(B[B.length - 1].th * 57.3),
              spineY: Math.round(B[B.length - 1].wby) };
   };
-  window.__bendFlat = function (x, y, z) { return _bendUnmap(x, y, z); };
+  window.__bendFlat = function (x, y, z) {
+    const q = _bendUnmap(x, y, z);
+    return { x: q.x, y: q.y, z: q.z };   // copy — _bendUnmap returns a scratch
+  };
+  window.__bendCheck = function (n) {
+    const B = game._bendSegs;
+    if (!B || !B.length) return 'bend off';
+    let worst = 0, worstAt = null;
+    const N = n || 60;
+    const offs = [[0, 0], [900, 400], [-900, -400], [2600, 900], [-2600, -900], [3800, 1400]];
+    for (let i = 0; i < N; i++) {
+      const s = B[Math.floor(i * B.length / N)];
+      const t = ((i * 0.37) % 1) * s.len;
+      for (const off of offs) {
+        const qx = s.fax + s.hx * t + s.px_ * off[0];
+        const qy = off[1];
+        const qz = s.faz + s.hz * t + s.pz_ * off[0];
+        const F = _bendMapPoint(qx, qy, qz);
+        const wx = F.x, wy = F.y, wz = F.z;
+        const Q = _bendUnmap(wx, wy, wz);
+        const e = Math.hypot(Q.x - qx, Q.y - qy, Q.z - qz);
+        if (e > worst) { worst = e; worstAt = { rec: Math.floor(i * B.length / N), lat: off[0], vert: off[1] }; }
+      }
+    }
+    return { worstErr: +worst.toFixed(1), worstAt };
+  };
 }
 function worldSDF(px,py,pz) {
   if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) return -10000;
@@ -58539,7 +58645,7 @@ function _lssEndlessNextSeg(run) {
   }
   if (run.bend) {
     if (g._bu === undefined) {
-      g._bu = 0; g._th = 0; g._thT = 0; g._thHold = 0;
+      g._bu = 0; g._th = 0; g._thT = 0; g._thHold = 0; g._thPrev = 0;
       g._wx = 0; g._wy = 0; g._wz = 0;
     }
     if (--g._thHold <= 0) {
@@ -58552,19 +58658,31 @@ function _lssEndlessNextSeg(run) {
     if (g._bu < 3500) g._thT = 0;
     g._thT -= Math.max(-0.4, Math.min(0.4, g._wy / 9000 * 0.5));
     g._th += Math.max(-0.30, Math.min(0.30, g._thT - g._th));
-    const th = Math.max(-1.5, Math.min(1.5, g._th));
-    const wa = { x: g._wx, y: g._wy, z: g._wz };
+    const thNew = Math.max(-1.5, Math.min(1.5, g._th));
     const shh = Math.sin(g.heading), chh = Math.cos(g.heading);
-    g._wx += shh * len * Math.cos(th);
-    g._wz += chh * len * Math.cos(th);
-    g._wy += len * Math.sin(th);
+    const nSub = Math.max(1, Math.round(len / 800));
+    let fx = a.x, fz = a.z;
+    for (let si = 0; si < nSub; si++) {
+      const thI = g._thPrev + (thNew - g._thPrev) * ((si + 0.5) / nSub);
+      const sl = len / nSub;
+      const wax = g._wx, way = g._wy, waz = g._wz;
+      g._wx += shh * sl * Math.cos(thI);
+      g._wz += chh * sl * Math.cos(thI);
+      g._wy += sl * Math.sin(thI);
+      const fx2 = fx + shh * sl, fz2 = fz + chh * sl;
+      _bendPushSeg({ fax: fx, faz: fz, fbx: fx2, fbz: fz2,
+                     wax, way, waz, wbx: g._wx, wby: g._wy, wbz: g._wz,
+                     th: thI, hx: shh, hz: chh, len: sl });
+      fx = fx2; fz = fz2;
+    }
+    g._thPrev = thNew;
     g._bu += len;
-    _bendPushSeg({ fax: a.x, faz: a.z, fbx: b.x, fbz: b.z,
-                   wax: wa.x, way: wa.y, waz: wa.z, wbx: g._wx, wby: g._wy, wbz: g._wz,
-                   th, hx: shh, hz: chh, len });
-    const wA = _bendMapPoint(a.x, a.y, a.z);
-    const wB = _bendMapPoint(b.x, b.y, b.z);
-    const wHp = hp ? _bendMapPoint(hp.x, hp.y, hp.z) : null;
+    const rA = _bendMapPoint(a.x, a.y, a.z);
+    const wA = { x: rA.x, y: rA.y, z: rA.z };
+    const rB = _bendMapPoint(b.x, b.y, b.z);
+    const wB = { x: rB.x, y: rB.y, z: rB.z };
+    let wHp = null;
+    if (hp) { const rH = _bendMapPoint(hp.x, hp.y, hp.z); wHp = { x: rH.x, y: rH.y, z: rH.z }; }
     return { a: wA, b: wB, fa: a, fb: b, r, hall, hallR, hp: wHp, fhp: hp, gid: g.nextGid++ };
   }
   return { a, b, r, hall, hallR, hp, gid: g.nextGid++ };
@@ -58573,6 +58691,14 @@ function _lssEndlessNextSeg(run) {
 function _lssEndlessApplySeg(run, s) {
   const ca = s.fa || s.a, cb = s.fb || s.b;
   const hcF = s.fa ? (s.fhp || s.fb) : (s.hp || s.b);
+  if (run.bend && game._bendSegs && typeof player !== 'undefined' && player && player.position) {
+    const B = game._bendSegs;
+    const ppx = player.position.x, ppy = player.position.y, ppz = player.position.z;
+    let cut = 0;
+    while (cut < B.length - 24 &&
+           Math.hypot(B[cut].wmx - ppx, B[cut].wmy - ppy, B[cut].wmz - ppz) > 18000) cut++;
+    if (cut > 0) B.splice(0, cut);
+  }
   const cyl = { ax: ca.x, ay: ca.y, az: ca.z, bx: cb.x, by: cb.y, bz: cb.z, r: s.r, w: 0.15 };
   game.levelCylinders.push(cyl);
   let sph = null, spur = null;
@@ -58595,6 +58721,7 @@ function _lssEndlessApplySeg(run, s) {
       const cr = s.r + soft;
       let minX = Math.min(ca.x, cb.x) - cr, maxX = Math.max(ca.x, cb.x) + cr;
       let minZ = Math.min(ca.z, cb.z) - cr, maxZ = Math.max(ca.z, cb.z) + cr;
+      if (run.bend) { minX -= _BEND_R; maxX += _BEND_R; minZ -= _BEND_R; maxZ += _BEND_R; }
       if (sph) {
         const rr = sph.r + soft;
         minX = Math.min(minX, sph.cx - rr); maxX = Math.max(maxX, sph.cx + rr);
