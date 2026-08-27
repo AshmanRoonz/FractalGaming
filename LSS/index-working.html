@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.04';
+const LSS_BUILD = '37.05';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -35198,6 +35198,16 @@ class Bot {
       // Three rockets in a tight cone toward the target. Rocket Salvo
       // (SYPHON) shares the recipe with its own color.
       const _rkColor = (ability.name === 'Rocket Salvo') ? LSS.CLASS_COLORS.SYPHON : LSS.CLASS_COLORS.TRACKER;
+      // (v37.05) TRACKER bot rockets actually TRACK (owner: "tracker as a
+      // bot had a lock on me, but his missiles don't actually track, they
+      // just fly in a line"). Same rule as the player's own missiles:
+      // homing requires the FULL lock — the 3 marks that flip the HUD to
+      // ENEMY LOCKED-ON. Partial/no lock keeps the old straight rockets,
+      // so the warning pips are the real tell. Bot-vs-bot has no lock
+      // bookkeeping and homes outright (invisible to the player, keeps
+      // bot fights honest). Rocket Salvo (SYPHON) stays dumbfire.
+      const _rkHome = (ability.name === 'Tracker Rockets') &&
+        (tgt !== player || (player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3));
       for (let i = 0; i < 3; i++) {
         const vel = this._tempVec3b.set(
           aim.x + (Math.random()-0.5)*0.10,
@@ -35207,6 +35217,7 @@ class Bot {
         const proj = new Projectile(this.position, vel, 1100, 100, 'bot', _rkColor);
         proj.smokeTrail = true;
         proj.ownerTeam = this.team; proj.ownerRef = this;
+        if (_rkHome) { proj.tracking = true; proj.trackTarget = tgt; }
         proj.removeHaze();
         game.projectiles.push(proj);
       }
@@ -36313,7 +36324,12 @@ class Projectile {
     // Homing missiles (Descent 3 style two-tier tracking)
     // Close range: aggressive tracking (loose FOV constraint)
     // Far range: tighter FOV, gentler turns (can be dodged at distance)
-    if (this.tracking && this.trackTarget && this.trackTarget.alive) {
+    // (v37.05) `.alive !== false` + shipState: the PLAYER object carries no
+    // `alive` field (only shipState), so the old truthy check silently
+    // disabled homing whenever the target was the player — bots and
+    // monsters (alive: true) were the only things missiles ever chased.
+    if (this.tracking && this.trackTarget && this.trackTarget.alive !== false &&
+        this.trackTarget.shipState !== 'dead' && this.trackTarget.position) {
       const toTarget = _projToTarget.subVectors(this.trackTarget.position, this.position);
       const dist = toTarget.length();
       const toTargetDir = toTarget.normalize();
