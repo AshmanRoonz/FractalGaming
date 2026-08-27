@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.03';
+const LSS_BUILD = '37.04';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -44860,42 +44860,18 @@ function _releaseVortexShieldBurst(playBurstSound) {
   if (playBurstSound !== false) playBurstSound = true;
   const stored = player.vortexStored;
   const fwd = _abForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-  const BURST_R = 2800;
-  const burstRadiusSq = BURST_R * BURST_R;
+  const R2 = 2800 * 2800;
   const px = player.position.x, py = player.position.y, pz = player.position.z;
-  const _vxHit = (tgt, d2) => {
-    const d = Math.sqrt(d2);
-    const fall = 1 - 0.5 * Math.max(0, (d - 400) / (BURST_R - 400));
-    return { dmg: stored * fall, d };
-  };
-  const _vxFx = (pos) => {
-    try {
-      if (typeof spawnLightningBolt === 'function') {
-        spawnLightningBolt(_abTmpA.copy(player.position).addScaledVector(fwd, 60).clone(), pos.clone(), 0x66ddff, 0.45, 5, 3);
-      }
-      spawnExplosion(pos.clone(), 34);
-    } catch (_) {}
-  };
+  let best = null, bestDot = 0.35, bestIsMon = false;
   if (game && game.entities) {
     for (const bot of game.entities) {
       if (!bot || !bot.alive || bot.team === player.team || !bot.position) continue;
-      const dx = bot.position.x - px;
-      const dy = bot.position.y - py;
-      const dz = bot.position.z - pz;
+      const dx = bot.position.x - px, dy = bot.position.y - py, dz = bot.position.z - pz;
       const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 >= burstRadiusSq || d2 <= 0.0001) continue;
+      if (d2 >= R2 || d2 <= 0.0001) continue;
       const inv = 1 / Math.sqrt(d2);
-      const facingDot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
-      if (facingDot > 0.2) {
-        const hit = _vxHit(bot, d2);
-        const dealt = bot.takeDamage(hit.dmg, 'player');
-        if (dealt > 0) {
-          player.damageDealt += dealt;
-          player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
-          showHitMarker();
-          _vxFx(bot.position);
-        }
-      }
+      const dot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
+      if (dot > bestDot) { bestDot = dot; best = bot; bestIsMon = false; }
     }
   }
   if (game && game.monsters) {
@@ -44903,22 +44879,31 @@ function _releaseVortexShieldBurst(playBurstSound) {
       if (!mon || !mon.alive || !mon.mesh || !mon.position) continue;
       const dx = mon.position.x - px, dy = mon.position.y - py, dz = mon.position.z - pz;
       const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 >= burstRadiusSq || d2 <= 0.0001) continue;
+      if (d2 >= R2 || d2 <= 0.0001) continue;
       const inv = 1 / Math.sqrt(d2);
-      const facingDot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
-      if (facingDot > 0.2) {
-        const hit = _vxHit(mon, d2);
-        const dealt = mon.takeDamage(hit.dmg, 'player', mon.position);
-        if (dealt > 0) {
-          player.damageDealt += dealt;
-          player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);   // see the ship branch above
-          showHitMarker();
-          _vxFx(mon.position);
-        }
-      }
+      const dot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
+      if (dot > bestDot) { bestDot = dot; best = mon; bestIsMon = true; }
     }
   }
-  spawnExplosion(_abTmpA.copy(player.position).addScaledVector(fwd, 100), 30);
+  if (best) {
+    const dealt = bestIsMon ? best.takeDamage(stored, 'player', best.position)
+                            : best.takeDamage(stored, 'player');
+    if (dealt > 0) {
+      player.damageDealt += dealt;
+      player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+      showHitMarker();
+    }
+    try {
+      const from = _abTmpA.copy(player.position).addScaledVector(fwd, 60);
+      if (typeof spawnLightningBolt === 'function') {
+        spawnLightningBolt(from.clone(), best.position.clone(), 0xbb55ff, 0.5, 4, 4, true);
+        spawnLightningBolt(from.clone(), best.position.clone(), 0x7722cc, 0.35, 3, 2, true);
+      }
+      spawnExplosion(best.position.clone(), 44);
+    } catch (_) {}
+  } else {
+    spawnExplosion(_abTmpA.copy(player.position).addScaledVector(fwd, 100), 26);
+  }
   if (playBurstSound) {
     try { playSound('vortex_reflect'); } catch (_) {}
   }

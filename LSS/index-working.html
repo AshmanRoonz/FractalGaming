@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.03';
+const LSS_BUILD = '37.04';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -58180,82 +58180,65 @@ function _releaseVortexShieldBurst(playBurstSound) {
   if (playBurstSound !== false) playBurstSound = true;
   const stored = player.vortexStored;
   const fwd = _abForward.set(0, 0, -1).applyQuaternion(camera.quaternion);
-  // (v37.01) SEND IT BACK — the burst reached only 300u, so a leviathan or
-  // city gunship shooting you from afar could never be hit by its own
-  // returned damage, and the burst FX spawned 100u off the nose ("the
-  // explosion is only a few feet away" — the owner, exactly). The return
-  // cone now reaches 2800u (the traffic engagement range) with a gentle
-  // falloff (full inside 400u, 50% at max range), and every victim gets a
-  // vortex arc from the ship + an explosion AT the victim, so the damage
-  // visibly travels back to whoever sent it.
-  const BURST_R = 2800;
-  const burstRadiusSq = BURST_R * BURST_R;
+  // (v37.04) AIMED REDIRECT (owner: "have the release send a purple arc of
+  // lightning to whatever ship it's released back onto... so i could
+  // collect damage from blaster, and then send it to slayer if i want").
+  // The release picks ONE target — the enemy best aligned with the
+  // crosshair within 2800u — and delivers the FULL absorbed damage down a
+  // purple lightning arc. No cone, no falloff, no splitting: what you
+  // caught goes where you point it. With no target in the aim cone the
+  // charge dissipates as a fizzle at the nose.
+  const R2 = 2800 * 2800;
   const px = player.position.x, py = player.position.y, pz = player.position.z;
-  const _vxHit = (tgt, d2) => {
-    const d = Math.sqrt(d2);
-    const fall = 1 - 0.5 * Math.max(0, (d - 400) / (BURST_R - 400));
-    return { dmg: stored * fall, d };
-  };
-  const _vxFx = (pos) => {
-    try {
-      if (typeof spawnLightningBolt === 'function') {
-        spawnLightningBolt(_abTmpA.copy(player.position).addScaledVector(fwd, 60).clone(), pos.clone(), 0x66ddff, 0.45, 5, 3);
-      }
-      spawnExplosion(pos.clone(), 34);
-    } catch (_) {}
-  };
+  let best = null, bestDot = 0.35, bestIsMon = false;
   if (game && game.entities) {
     for (const bot of game.entities) {
       if (!bot || !bot.alive || bot.team === player.team || !bot.position) continue;
-      const dx = bot.position.x - px;
-      const dy = bot.position.y - py;
-      const dz = bot.position.z - pz;
+      const dx = bot.position.x - px, dy = bot.position.y - py, dz = bot.position.z - pz;
       const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 >= burstRadiusSq || d2 <= 0.0001) continue;
+      if (d2 >= R2 || d2 <= 0.0001) continue;
       const inv = 1 / Math.sqrt(d2);
-      const facingDot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
-      if (facingDot > 0.2) {
-        const hit = _vxHit(bot, d2);
-        const dealt = bot.takeDamage(hit.dmg, 'player');
-        // (v35.60) Grant core. This was the ONLY player damage path in the file
-        // that credited damageDealt but not coreMeter, and it is the mechanic by
-        // which Vortex Shield is supposed to earn core — soak incoming fire,
-        // return it on release. Without it the shield earned core from nothing
-        // at all once the free per-tap bonus was removed. `dealt / 100` is the
-        // standard rate for instant damage (Fire Shield's cone uses /200 because
-        // it is continuous DPS).
-        if (dealt > 0) {
-          player.damageDealt += dealt;
-          player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
-          showHitMarker();
-          _vxFx(bot.position);
-        }
-      }
+      const dot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
+      if (dot > bestDot) { bestDot = dot; best = bot; bestIsMon = false; }
     }
   }
-  // (monster coverage) The returned burst also hits leviathans / the boss in
-  // the forward cone. mon.takeDamage self-routes the co-op mon_dmg forward.
   if (game && game.monsters) {
     for (const mon of game.monsters) {
       if (!mon || !mon.alive || !mon.mesh || !mon.position) continue;
       const dx = mon.position.x - px, dy = mon.position.y - py, dz = mon.position.z - pz;
       const d2 = dx * dx + dy * dy + dz * dz;
-      if (d2 >= burstRadiusSq || d2 <= 0.0001) continue;
+      if (d2 >= R2 || d2 <= 0.0001) continue;
       const inv = 1 / Math.sqrt(d2);
-      const facingDot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
-      if (facingDot > 0.2) {
-        const hit = _vxHit(mon, d2);
-        const dealt = mon.takeDamage(hit.dmg, 'player', mon.position);
-        if (dealt > 0) {
-          player.damageDealt += dealt;
-          player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);   // see the ship branch above
-          showHitMarker();
-          _vxFx(mon.position);
-        }
-      }
+      const dot = fwd.x * dx * inv + fwd.y * dy * inv + fwd.z * dz * inv;
+      if (dot > bestDot) { bestDot = dot; best = mon; bestIsMon = true; }
     }
   }
-  spawnExplosion(_abTmpA.copy(player.position).addScaledVector(fwd, 100), 30);
+  if (best) {
+    const dealt = bestIsMon ? best.takeDamage(stored, 'player', best.position)
+                            : best.takeDamage(stored, 'player');
+    // (v35.60) Grant core. This is the mechanic by which Vortex Shield
+    // earns core — soak incoming fire, return it on release. `dealt / 100`
+    // is the standard rate for instant damage.
+    if (dealt > 0) {
+      player.damageDealt += dealt;
+      player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+      showHitMarker();
+    }
+    // The PURPLE ARC — two overlaid strokes (bright core + dark violet
+    // halo) from the nose to the victim, plus the impact burst at them.
+    // `essential: true`: this IS the read that your stored damage landed.
+    try {
+      const from = _abTmpA.copy(player.position).addScaledVector(fwd, 60);
+      if (typeof spawnLightningBolt === 'function') {
+        spawnLightningBolt(from.clone(), best.position.clone(), 0xbb55ff, 0.5, 4, 4, true);
+        spawnLightningBolt(from.clone(), best.position.clone(), 0x7722cc, 0.35, 3, 2, true);
+      }
+      spawnExplosion(best.position.clone(), 44);
+    } catch (_) {}
+  } else {
+    // Nothing under the crosshair: the charge dissipates.
+    spawnExplosion(_abTmpA.copy(player.position).addScaledVector(fwd, 100), 26);
+  }
   if (playBurstSound) {
     try { playSound('vortex_reflect'); } catch (_) {}
   }
