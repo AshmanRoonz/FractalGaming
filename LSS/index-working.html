@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.11';
+const LSS_BUILD = '37.12';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -7767,8 +7767,9 @@ const CampaignMode = {
                 if (nextLeg && nextLeg.key && MAP_DATA[nextLeg.key]) {
                   if (!Array.isArray(c.unlockedLegs)) c.unlockedLegs = ['camp_approach'];
                   if (c.unlockedLegs.indexOf(nextLeg.key) === -1) c.unlockedLegs.push(nextLeg.key);
-                  try { const _pl = _campLoadLegs(); if (_pl.indexOf(nextLeg.key) === -1) { _pl.push(nextLeg.key); _campSaveLegs(_pl); } } catch (_) {}   
-                  game.selectedMap = nextLeg.key;   
+                  try { const _pl = _campLoadLegs(); if (_pl.indexOf(nextLeg.key) === -1) { _pl.push(nextLeg.key); _campSaveLegs(_pl); } } catch (_) {}
+                  game.selectedMap = nextLeg.key;
+                  try { _campSaveLast(nextLeg.key); } catch (_) {}
                   
                   
                   
@@ -7971,8 +7972,23 @@ const FreeFlightMode = {
     try { if (window.Overlays) Overlays.banner('THE RIFT', 'Into the corrupted simulation...'); } catch (_) {}
     try { LSS.MODE = 'campaign'; } catch (_) {}
     try { if (typeof _clearBossPortal === 'function') _clearBossPortal(); } catch (_) {}   
-    try { if (typeof _campInitState === 'function') _campInitState(); } catch (_) {}        
-    try { const _nd = MAP_DATA['camp_approach']; if (_nd && _nd.defaultTheme && typeof applyMapPreset === 'function') applyMapPreset(_nd.defaultTheme); } catch (_) {}
+    try { if (typeof _campInitState === 'function') _campInitState(); } catch (_) {}
+    // (v37.12) RESUME: the rift sends you back to the leg you were LAST in (owner: "when i
+    // go back through the portal from the overworld, it should send me to the leg i was in
+    // last"). _campInitState just reset to camp_approach/sceneIndex 0; if a valid saved leg
+    // exists AND is unlocked, retarget selectedMap + sceneIndex at it before the roundEnd
+    // rebuild constructs the world — the exact fields the proven portal-advance and picker
+    // paths set. Fresh players (nothing saved) still start at The Approach.
+    try {
+      const _last = _campLoadLast();
+      const _c0 = game.campaign;
+      if (_last && _c0 && Array.isArray(_c0.unlockedLegs) && _c0.unlockedLegs.indexOf(_last) >= 0 && typeof CAMPAIGN_LEGS !== 'undefined') {
+        const _li = CAMPAIGN_LEGS.findIndex((l) => l && l.key === _last);
+        if (_li >= 0) { _c0.sceneIndex = _li; game.selectedMap = _last; }
+      }
+      _campSaveLast(game.selectedMap);
+    } catch (_) {}
+    try { const _nd = MAP_DATA[game.selectedMap]; if (_nd && _nd.defaultTheme && typeof applyMapPreset === 'function') applyMapPreset(_nd.defaultTheme); } catch (_) {}
     // (v33.02) Free-flight lets you fly ANY of the 7 ships, but the campaign must start
     // on a campaign-VALID ship (VORTEX by default, until you unlock more by beating bosses).
     // If the hub ship isn't in the campaign roster, force it before the rebuild's
@@ -10061,6 +10077,23 @@ function _campSaveLegs(legs) {
     const arr = Array.isArray(legs) ? legs.filter((k) => typeof k === 'string' && k.indexOf('camp_') === 0) : [];
     localStorage.setItem('lss_campaign_legs', JSON.stringify(arr));
   } catch (_) {}
+}
+
+// (v37.12) RESUME POINT. lss_campaign_last remembers the leg the player was LAST in, so the
+// hub rift returns them there instead of always restarting at The Approach. Saved wherever a
+// leg becomes the active scene (portal advance, picker confirm, rift entry). Validated vs
+// MAP_DATA + CAMPAIGN_LEGS on load; fresh players have nothing stored -> null -> Approach.
+function _campSaveLast(key) {
+  try { if (typeof key === 'string' && key.indexOf('camp_') === 0) localStorage.setItem('lss_campaign_last', key); } catch (_) {}
+}
+function _campLoadLast() {
+  try {
+    const k = localStorage.getItem('lss_campaign_last');
+    if (typeof k === 'string' && k.indexOf('camp_') === 0 &&
+        (typeof MAP_DATA === 'undefined' || MAP_DATA[k]) &&
+        (typeof CAMPAIGN_LEGS === 'undefined' || CAMPAIGN_LEGS.some((l) => l && l.key === k))) return k;
+  } catch (_) {}
+  return null;
 }
 
 // (v32.96) Boss-defeat ship unlock : each time a campaign boss is KILLED, earn the
@@ -52004,6 +52037,7 @@ function commitLoadout(key) {
       if (!game.campaign) game.campaign = { sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel', unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY', unlockedLegs: (function () { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); })(), nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false }, waveCount: 3, _ended: false, _needFirstWave: false, difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()) };
       // sceneIndex = this leg's position in CAMPAIGN_LEGS so per-leg intro video + boss voice match.
       try { if (typeof CAMPAIGN_LEGS !== 'undefined') { const _li = CAMPAIGN_LEGS.findIndex(l => l && l.key === _selLvl); if (_li >= 0) game.campaign.sceneIndex = _li; } } catch (_) {}
+      try { _campSaveLast(_selLvl); } catch (_) {}   // (v37.12) picker choice = the new resume point
       game._campJourney = true; game._campRiftArmed = true; game._campFinale = false;
       game._campFinaleShown = false; game._campFinalVideo = 0;
       game._campReentry = false; game._campReentryShown = false;
