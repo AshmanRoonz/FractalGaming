@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.10';
+const LSS_BUILD = '37.11';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -9861,30 +9861,40 @@ function _campSpawnEscort(boss, n) {
   n = Math.min(n, keys.length);
   Promise.all(keys.slice(0, n).map((k) => loadHoardModel(k))).then((protos) => {
     if (!game.campaign) return;
+    // (v37.11) STAGGERED SPAWN — cloning a 20-45MB GLB scene graph is a
+    // multi-ms synchronous main-thread job, and doing the Nemesis + escort
+    // in ONE tick right as the player reaches the arena was the "slight
+    // hitch when i reached the summoner area". One clone per ~140ms
+    // spreads the cost invisibly (they spawn 500u out in formation);
+    // FormationDirector engages after the last one lands.
     const bots = [];
-    for (let i = 0; i < n; i++) {
-      if (!protos[i]) continue;
-      const ang = (i / n) * Math.PI * 2;
-      const slot = new THREE.Vector3(
-        boss.position.x + Math.cos(ang) * 500, boss.position.y, boss.position.z + Math.sin(ang) * 500
-      );
-      const bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, _campNextBotId(), keys[i]);
-      bot.position.copy(slot);
-      if (bot.mesh) bot.mesh.position.copy(slot);
-      bot._formationTarget = slot.clone();
-      bot._formationActive = true;
-      if (keys[i] === NEMESIS_SHIP) {
-        _campMarkNemesis(bot);
-        c._nemesisBot = bot;
-        c.nemesis.seen = true;
-        c.nemesis.alive = true;
-      } else {
-        _campTuneHoardBot(bot, keys[i]);
+    const _spawnOne = (i) => {
+      if (!game.campaign || game.campaign !== c) return;
+      if (protos[i]) {
+        const ang = (i / n) * Math.PI * 2;
+        const slot = new THREE.Vector3(
+          boss.position.x + Math.cos(ang) * 500, boss.position.y, boss.position.z + Math.sin(ang) * 500
+        );
+        const bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, _campNextBotId(), keys[i]);
+        bot.position.copy(slot);
+        if (bot.mesh) bot.mesh.position.copy(slot);
+        bot._formationTarget = slot.clone();
+        bot._formationActive = true;
+        if (keys[i] === NEMESIS_SHIP) {
+          _campMarkNemesis(bot);
+          c._nemesisBot = bot;
+          c.nemesis.seen = true;
+          c.nemesis.alive = true;
+        } else {
+          _campTuneHoardBot(bot, keys[i]);
+        }
+        game.entities.push(bot);
+        bots.push(bot);
       }
-      game.entities.push(bot);
-      bots.push(bot);
-    }
-    FormationDirector.set(bots, boss.position.clone(), 500);
+      if (i + 1 < n) setTimeout(() => _spawnOne(i + 1), 140);
+      else if (bots.length) FormationDirector.set(bots, boss.position.clone(), 500);
+    };
+    _spawnOne(0);
   }).catch(() => {});
 }
 
@@ -9944,15 +9954,34 @@ function warpOutFx(pos, radius) {
 }
 if (typeof window !== 'undefined') window.warpOutFx = warpOutFx;
 
+// (v37.11) The Summoner is MORTAL only on the final leg (The Broken
+// Simulation). Everywhere else the story armor holds: HP floors at the
+// doomed threshold, die() refuses, executions skip him — he shields up
+// and escapes through the portal (owner: "it should be able to escape
+// each level through the portal before i am able to kill it... until the
+// last level").
+function _campNemesisMortal() {
+  try {
+    const c = game.campaign;
+    if (!c || typeof CAMPAIGN_LEGS === 'undefined') return false;
+    const leg = CAMPAIGN_LEGS[c.sceneIndex || 0];
+    return !!(leg && leg.key === 'camp_brokensim');
+  } catch (_) { return false; }
+}
 // Brand a hoard Bot as the Nemesis : elevated HP so it survives to flee, plus a
 // distinct silver-violet fresnel rim so the recurring villain reads at a glance.
 function _campMarkNemesis(bot) {
   if (!bot) return;
   bot.isNemesis = true;
-  _campSetShipName(bot, NEMESIS_SHIP);   
-  _campGiveTeleport(bot);                
-  _campBoostSpeed(bot, 1.33);            
-  bot.maxHealth = (bot.maxHealth || 1000) * 2.5;   
+  _campSetShipName(bot, NEMESIS_SHIP);
+  _campGiveTeleport(bot);
+  _campBoostSpeed(bot, 1.33);
+  // (v37.11) WAY more hitpoints (owner) — the old x2.5 doomed him in
+  // seconds against an upgraded player, and one contact fake-executed the
+  // flee before it started. x9 keeps the duel alive long enough that the
+  // portal escape plays out; the finale runs x5 so the last stand is a
+  // real fight but a winnable one.
+  bot.maxHealth = (bot.maxHealth || 1000) * (_campNemesisMortal() ? 5 : 9);
   bot.health = bot.maxHealth;
   try {
     if (bot.mesh && typeof _addBasicRim === 'function') {
@@ -35795,7 +35824,9 @@ class Bot {
     // still flips this.doomed = true, and the death check can never fire on him. His
     // visible invincibility shield is driven per-frame in the render loop ; here we
     // just ripple it on each blocked shot once shielded.
-    if (this.isNemesis) {
+    // (v37.11) ...except on the FINAL leg, where the Summoner is mortal
+    // and dies like anyone (the last stand).
+    if (this.isNemesis && !(typeof _campNemesisMortal === 'function' && _campNemesisMortal())) {
       const _nemFloor = this.maxHealth * (LSS.DOOMED_HEALTH_PCT || 0.15);
       if (this.health < _nemFloor) this.health = _nemFloor;
       if (this.doomed) {
@@ -35822,7 +35853,7 @@ class Bot {
     // shield-up + portal-flee takes over. He only leaves via _campNemesisEscape, which
     // sets alive=false directly (not through die()). The takeDamage floor (~20630) is
     // the first line of defence ; this is the catch-all backstop.
-    if (this.isNemesis && this.alive) {
+    if (this.isNemesis && this.alive && !(typeof _campNemesisMortal === 'function' && _campNemesisMortal())) {
       this.health = Math.max(this.health, this.maxHealth * (LSS.DOOMED_HEALTH_PCT || 0.15));
       this.doomed = true;
       return;
@@ -75413,6 +75444,13 @@ function checkExecutions(dt) {
 
   for (const bot of game.entities) {
     if (!bot.alive || bot.team === player.team) continue;
+    // (v37.11) The Summoner cannot be executed while story-armored (every
+    // leg but the finale): his HP floor made the ram-execute a FAKE kill —
+    // full explosion + '[EXEC]' kill feed + marker while he silently
+    // survived at 15% ("the summoner's ship dies so easily" — it never
+    // actually died, it just looked executed). On the final leg he dooms
+    // and executes like anyone.
+    if (bot.isNemesis && !(typeof _campNemesisMortal === 'function' && _campNemesisMortal())) continue;
 
     const dist = player.position.distanceTo(bot.position);
 
@@ -79557,7 +79595,8 @@ function gameLoop(timestamp) {
     // he's unkillable (see Bot.takeDamage), so light up his energy-shield bubble —
     // a pulsing silver-violet dome that reads as "you can't kill me, I'm leaving".
     // Every ship already carries mesh.userData.shieldMesh (invisible at intensity 0).
-    if (bot.isNemesis && bot.doomed && bot.mesh && bot.mesh.userData && bot.mesh.userData.shieldMesh) {
+    if (bot.isNemesis && bot.doomed && !(typeof _campNemesisMortal === 'function' && _campNemesisMortal()) &&
+        bot.mesh && bot.mesh.userData && bot.mesh.userData.shieldMesh) {
       const _sm = bot.mesh.userData.shieldMesh.material;
       if (_sm && _sm.uniforms) {
         if (_sm.uniforms.shieldColor && _sm.uniforms.shieldColor.value && _sm.uniforms.shieldColor.value.setHex) {
