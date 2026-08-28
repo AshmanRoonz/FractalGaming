@@ -4139,7 +4139,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.19';
+const LSS_BUILD = '37.20';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13969,17 +13969,28 @@ document.body.appendChild(renderer.domElement);
 
 (function () {
   try {
-    if (!/[?&]hitch=1/.test(location.search)) return;
+    if (/[?&]hitch=0/.test(location.search)) { console.log('[hitch] recorder disabled by ?hitch=0'); return; }
     if (typeof renderer === 'undefined' || !renderer) return;
-    const H = { log: [], newMats: [], seen: new Set(), watchUntil: 0, last: 0, heapLast: 0, progLast: 0 };
+    const LS_KEY = 'lss_hitch_log';
+    const H = { log: [], newMats: [], seen: new Set(), watchUntil: 0, last: 0, heapLast: 0, progLast: 0, ovEl: null, saveTimer: 0 };
     window.__hitchLog = H.log;
     const origRBD = renderer.renderBufferDirect.bind(renderer);
     renderer.renderBufferDirect = function (cam, sc, geo, mat, obj, grp) {
-      if (mat && !H.seen.has(mat.uuid)) {
+      if (H.watchUntil !== 0 && mat && !H.seen.has(mat.uuid)) {
         H.seen.add(mat.uuid);
+        if (H.seen.size > 20000) H.seen.clear();   // hours-long-session bound
         H.newMats.push((mat.name || mat.type || '?') + (mat.map ? '+map' : ''));
       }
       return origRBD(cam, sc, geo, mat, obj, grp);
+    };
+    const persist = () => {
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify({
+          build: (typeof LSS_BUILD !== 'undefined') ? LSS_BUILD : '?',
+          when: Date.now(),
+          entries: H.log.slice(-40),
+        }));
+      } catch (_) {}
     };
     const tick = () => {
       requestAnimationFrame(tick);
@@ -13987,10 +13998,11 @@ document.body.appendChild(renderer.domElement);
       const gap = now - H.last; H.last = now;
       const heap = (performance.memory && performance.memory.usedJSHeapSize) || 0;
       const progs = renderer.info.programs ? renderer.info.programs.length : 0;
-      const ov = document.getElementById('lss-loading-overlay');
-      const ovUp = !!(ov && ov.classList.contains('active'));
+      if (!H.ovEl) H.ovEl = document.getElementById('lss-loading-overlay');
+      const ovUp = !!(H.ovEl && H.ovEl.classList.contains('active'));
       if (ovUp) H.watchUntil = now + 30000;
-      if (gap > 100 && gap < 5 * 60 * 1000 && now < H.watchUntil) {
+      else if (H.watchUntil !== 0 && now >= H.watchUntil) H.watchUntil = 0;   // window closed -> per-draw fast path
+      if (gap > 100 && gap < 5 * 60 * 1000 && H.watchUntil !== 0) {
         const entry = {
           t: Math.round(now), gap: Math.round(gap),
           state: (typeof game !== 'undefined' && game && game.state) || '?',
@@ -14004,16 +14016,33 @@ document.body.appendChild(renderer.domElement);
         console.warn('[hitch] ' + entry.gap + 'ms @' + entry.state + (entry.covered ? ' (covered by overlay)' : ' *** VISIBLE ***') +
           ' progsD=' + entry.progsDelta + ' heapD=' + entry.heapDeltaMB + 'MB' +
           (entry.newMats.length ? ' firstDraws: ' + entry.newMats.join(', ') : ' (no new materials)'));
+        clearTimeout(H.saveTimer);
+        H.saveTimer = setTimeout(persist, 1200);
       }
       H.newMats.length = 0;
       H.heapLast = heap; H.progLast = progs;
     };
     requestAnimationFrame(tick);
     window.__hitchReport = function () {
-      console.table(H.log.map((e) => ({ gap: e.gap, state: e.state, covered: e.covered, progsD: e.progsDelta, heapMB: e.heapDeltaMB, firstDraws: e.newMats.join(',').slice(0, 60) })));
-      return H.log.length + ' hitches logged (window: 30s after each loading-overlay drop)';
+      const rows = (e) => ({ gap: e.gap, state: e.state, covered: e.covered, progsD: e.progsDelta, heapMB: e.heapDeltaMB, firstDraws: e.newMats.join(',').slice(0, 60) });
+      console.log('— this session —');
+      console.table(H.log.map(rows));
+      try {
+        const prev = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+        if (prev && prev.entries) {
+          console.log('— persisted (build ' + prev.build + ', ' + new Date(prev.when).toLocaleString() + ') —');
+          console.table(prev.entries.map(rows));
+        }
+      } catch (_) {}
+      return H.log.length + ' hitches this session (watch window: 30s after each loading-overlay drop)';
     };
-    console.log('[hitch] recorder armed — frames >100ms within 30s of an overlay drop are logged; __hitchReport() to dump');
+    try {
+      const prev = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+      if (prev && prev.entries && prev.entries.some((e) => !e.covered)) {
+        console.log('[hitch] previous session (' + new Date(prev.when).toLocaleString() + ', build ' + prev.build + ') recorded ' +
+          prev.entries.filter((e) => !e.covered).length + ' visible hitch(es) — __hitchReport() to view');
+      }
+    } catch (_) {}
   } catch (e) { try { console.warn('[hitch] recorder failed to arm:', e); } catch (_) {} }
 })();
 

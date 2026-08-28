@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.19';
+const LSS_BUILD = '37.20';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -17266,34 +17266,49 @@ document.body.appendChild(renderer.domElement);
 })();
 
 // =====================================================================
-// ---- (v37.18) ?hitch=1 — MATCH-START HITCH FLIGHT RECORDER ----------
+// ---- (v37.18-20) MATCH-START HITCH FLIGHT RECORDER (black box) ------
 // =====================================================================
 // The owner's "huge hitch, twice, at elimination start on battery" class:
-// frame stalls in the visible window right after the loading overlay drops,
-// with the three.js program count FLAT (so not shader compiles) — ANGLE-side
-// first-draw staging that only crosses the felt threshold on battery-clocked
-// GPUs, and whose exact trigger is map/mode dependent. Synthetic solo runs
-// could not pin the culprit (it shrinks to noise on wall power), so this
-// recorder instruments the REAL occurrence: with ?hitch=1 in the URL, every
-// frame gap >100 ms that lands within 30 s of an overlay drop is logged with
-// the program-count delta, the material names that FIRST DREW in that frame,
-// and the heap delta (GC fingerprint). Zero cost without the URL param (the
-// renderBufferDirect patch is only installed when armed). Read the log live
-// in the console, or call window.__hitchReport() and screenshot it.
+// frame stalls in the 30 s after the loading overlay drops. Root causes so
+// far (GPU-service trace, 2026-08-27): ANGLE parallel-compile queue joins
+// (now drained behind the overlay), draw-time re-specializations (Points
+// combo closed v37.19), and first major GCs colliding with battery-throttled
+// cores (heapDelta −10..−14 MB signature). The residue is map/mode dependent
+// and invisible on wall power, so it can only be caught in REAL play.
+// (v37.20) Therefore ALWAYS-ON — the owner just plays; every hitch in the
+// watch window is logged AND persisted to localStorage ('lss_hitch_log'), to
+// be read AFTER the fact (__hitchReport(), or Claude pulls it from the
+// browser). Nobody has to watch the console mid-match. ?hitch=0 disables.
+// Steady-state cost is engineered to ~zero: outside the watch window the
+// per-draw hook is ONE number compare (no Set work, no allocation), the rAF
+// tick is a few reads, and the localStorage write is debounced 1.2 s so it
+// never lands inside the bad frame itself.
 (function () {
   try {
-    if (!/[?&]hitch=1/.test(location.search)) return;
+    if (/[?&]hitch=0/.test(location.search)) { console.log('[hitch] recorder disabled by ?hitch=0'); return; }
     if (typeof renderer === 'undefined' || !renderer) return;
-    const H = { log: [], newMats: [], seen: new Set(), watchUntil: 0, last: 0, heapLast: 0, progLast: 0 };
+    const LS_KEY = 'lss_hitch_log';
+    const H = { log: [], newMats: [], seen: new Set(), watchUntil: 0, last: 0, heapLast: 0, progLast: 0, ovEl: null, saveTimer: 0 };
     window.__hitchLog = H.log;
     const origRBD = renderer.renderBufferDirect.bind(renderer);
     renderer.renderBufferDirect = function (cam, sc, geo, mat, obj, grp) {
-      if (mat && !H.seen.has(mat.uuid)) {
+      // Fast path: outside the watch window this is a single compare per draw.
+      if (H.watchUntil !== 0 && mat && !H.seen.has(mat.uuid)) {
         H.seen.add(mat.uuid);
+        if (H.seen.size > 20000) H.seen.clear();   // hours-long-session bound
         // Only the CURRENT frame's new materials matter; the rAF tick drains this.
         H.newMats.push((mat.name || mat.type || '?') + (mat.map ? '+map' : ''));
       }
       return origRBD(cam, sc, geo, mat, obj, grp);
+    };
+    const persist = () => {
+      try {
+        localStorage.setItem(LS_KEY, JSON.stringify({
+          build: (typeof LSS_BUILD !== 'undefined') ? LSS_BUILD : '?',
+          when: Date.now(),
+          entries: H.log.slice(-40),
+        }));
+      } catch (_) {}
     };
     const tick = () => {
       requestAnimationFrame(tick);
@@ -17302,11 +17317,13 @@ document.body.appendChild(renderer.domElement);
       const heap = (performance.memory && performance.memory.usedJSHeapSize) || 0;
       const progs = renderer.info.programs ? renderer.info.programs.length : 0;
       // (re)arm the 30 s watch window whenever the loading overlay is active,
-      // so the window starts counting from the moment it drops.
-      const ov = document.getElementById('lss-loading-overlay');
-      const ovUp = !!(ov && ov.classList.contains('active'));
+      // so the window starts counting from the moment it drops. The element is
+      // static in the markup — look it up once.
+      if (!H.ovEl) H.ovEl = document.getElementById('lss-loading-overlay');
+      const ovUp = !!(H.ovEl && H.ovEl.classList.contains('active'));
       if (ovUp) H.watchUntil = now + 30000;
-      if (gap > 100 && gap < 5 * 60 * 1000 && now < H.watchUntil) {
+      else if (H.watchUntil !== 0 && now >= H.watchUntil) H.watchUntil = 0;   // window closed -> per-draw fast path
+      if (gap > 100 && gap < 5 * 60 * 1000 && H.watchUntil !== 0) {
         const entry = {
           t: Math.round(now), gap: Math.round(gap),
           state: (typeof game !== 'undefined' && game && game.state) || '?',
@@ -17323,16 +17340,34 @@ document.body.appendChild(renderer.domElement);
         console.warn('[hitch] ' + entry.gap + 'ms @' + entry.state + (entry.covered ? ' (covered by overlay)' : ' *** VISIBLE ***') +
           ' progsD=' + entry.progsDelta + ' heapD=' + entry.heapDeltaMB + 'MB' +
           (entry.newMats.length ? ' firstDraws: ' + entry.newMats.join(', ') : ' (no new materials)'));
+        clearTimeout(H.saveTimer);
+        H.saveTimer = setTimeout(persist, 1200);
       }
       H.newMats.length = 0;
       H.heapLast = heap; H.progLast = progs;
     };
     requestAnimationFrame(tick);
     window.__hitchReport = function () {
-      console.table(H.log.map((e) => ({ gap: e.gap, state: e.state, covered: e.covered, progsD: e.progsDelta, heapMB: e.heapDeltaMB, firstDraws: e.newMats.join(',').slice(0, 60) })));
-      return H.log.length + ' hitches logged (window: 30s after each loading-overlay drop)';
+      const rows = (e) => ({ gap: e.gap, state: e.state, covered: e.covered, progsD: e.progsDelta, heapMB: e.heapDeltaMB, firstDraws: e.newMats.join(',').slice(0, 60) });
+      console.log('— this session —');
+      console.table(H.log.map(rows));
+      try {
+        const prev = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+        if (prev && prev.entries) {
+          console.log('— persisted (build ' + prev.build + ', ' + new Date(prev.when).toLocaleString() + ') —');
+          console.table(prev.entries.map(rows));
+        }
+      } catch (_) {}
+      return H.log.length + ' hitches this session (watch window: 30s after each loading-overlay drop)';
     };
-    console.log('[hitch] recorder armed — frames >100ms within 30s of an overlay drop are logged; __hitchReport() to dump');
+    // Surface last session's black box once per boot, quietly.
+    try {
+      const prev = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+      if (prev && prev.entries && prev.entries.some((e) => !e.covered)) {
+        console.log('[hitch] previous session (' + new Date(prev.when).toLocaleString() + ', build ' + prev.build + ') recorded ' +
+          prev.entries.filter((e) => !e.covered).length + ' visible hitch(es) — __hitchReport() to view');
+      }
+    } catch (_) {}
   } catch (e) { try { console.warn('[hitch] recorder failed to arm:', e); } catch (_) {} }
 })();
 
