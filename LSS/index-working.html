@@ -4213,7 +4213,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.14';
+const LSS_BUILD = '37.19';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -13452,7 +13452,60 @@ function _makeFireCloudMaterial(o){o=o||{};return new THREE.ShaderMaterial({tran
 // (fire eats clouds) Fire pulls nearby ambient gas in and consumes it at the
 // bright core (eat radius < visual radius hides the removal). Client-side, reads
 // synced fire + seed-built gas, so it is consistent in multiplayer.
-function _fireEatClouds(dt){if(typeof game==="undefined"||!game||!game.worldEffects)return;const we=game.worldEffects;const fires=[];for(const e of we){if(!e||!e.position)continue;if(e.type==="pyro_flame")fires.push([e.position.x,e.position.y,e.position.z,(e.radius||60)*1.8]);else if(e.type==="explFireCloud")fires.push([e.position.x,e.position.y,e.position.z,(e._explSize||20)*2.8]);else if(e.type==="firewall"&&e.direction&&e.length){const len=e.length,dir=e.direction,seg=Math.max(1,Math.floor(len/160));for(let i=0;i<=seg;i++){const t=i/seg;fires.push([e.position.x+dir.x*len*t,e.position.y+dir.y*len*t,e.position.z+dir.z*len*t,250])}}else if(e.type==="incendiary_gas"&&e.ignited)fires.push([e.position.x,e.position.y,e.position.z,(e.radius||350)*0.85])}if(!fires.length)return;const eat=(gc,onDisp)=>{if(!gc||!gc.position)return;const px=gc.position.x,py=gc.position.y,pz=gc.position.z;const cloudR=(gc.boundsRadius||40);let bf=null,bsurf=Infinity;for(const f of fires){const dx=f[0]-px,dy=f[1]-py,dz=f[2]-pz;const cd=Math.sqrt(dx*dx+dy*dy+dz*dz);const surf=cd-cloudR;const infl=f[3]*2.6;if(surf<infl&&surf<bsurf){bsurf=surf;bf=f}}if(!bf)return;const fr=bf[3];if(bsurf<fr*0.6){try{if(gc.dispose)gc.dispose()}catch(_){}if(onDisp)onDisp();return}if(gc.applyWake)gc.applyWake(bf[0],bf[1],bf[2],0,0,0,1.6,fr*2.2,dt)};if(game.detachedGasPockets){const gp=game.detachedGasPockets;for(let di=gp.length-1;di>=0;di--){const p=gp[di];eat(p&&p.gasCloud,()=>{const last=gp.length-1;if(di!==last)gp[di]=gp[last];gp.pop()})}}if(game.clusters){for(const cl of game.clusters){if(!cl||!cl.children)continue;for(const c of cl.children){const gc=c&&c._atomSmoke;if(gc){eat(gc,()=>{c._atomSmoke=null})}}}}}
+// (v37.17) De-churned: ran every frame and measured ~7% of all combat
+// allocation churn. The garbage was a fresh `fires` array of per-source
+// [x,y,z,r] arrays each frame, a fresh `eat` closure each frame, a fresh
+// onDisp closure PER POCKET per frame (~130), and for..of array iterators in
+// the ~130-calls-per-frame inner loop. Now: one module-scope flat quad buffer
+// reused across frames (never shrinks; bounded by peak fire count), index
+// loops, and _fecEat RETURNS whether it disposed the cloud so the two callers
+// clean up inline instead of via callbacks. Behavior is unchanged: cleanup
+// still runs even when gc.dispose() throws (the try/catch swallows first).
+const _fecFires=[]; let _fecN=0;
+function _fecPush(x,y,z,r){const b=_fecN*4;_fecFires[b]=x;_fecFires[b+1]=y;_fecFires[b+2]=z;_fecFires[b+3]=r;_fecN++;}
+function _fecEat(gc,dt){
+  if(!gc||!gc.position)return false;
+  const px=gc.position.x,py=gc.position.y,pz=gc.position.z;
+  const cloudR=(gc.boundsRadius||40);
+  let bi=-1,bsurf=Infinity;
+  for(let i=0;i<_fecN;i++){const b=i*4;const dx=_fecFires[b]-px,dy=_fecFires[b+1]-py,dz=_fecFires[b+2]-pz;const cd=Math.sqrt(dx*dx+dy*dy+dz*dz);const surf=cd-cloudR;const infl=_fecFires[b+3]*2.6;if(surf<infl&&surf<bsurf){bsurf=surf;bi=b}}
+  if(bi<0)return false;
+  const fr=_fecFires[bi+3];
+  if(bsurf<fr*0.6){try{if(gc.dispose)gc.dispose()}catch(_){}return true}
+  if(gc.applyWake)gc.applyWake(_fecFires[bi],_fecFires[bi+1],_fecFires[bi+2],0,0,0,1.6,fr*2.2,dt);
+  return false;
+}
+function _fireEatClouds(dt){
+  if(typeof game==="undefined"||!game||!game.worldEffects)return;
+  const we=game.worldEffects;
+  _fecN=0;
+  for(let wi=0;wi<we.length;wi++){const e=we[wi];
+    if(!e||!e.position)continue;
+    if(e.type==="pyro_flame")_fecPush(e.position.x,e.position.y,e.position.z,(e.radius||60)*1.8);
+    else if(e.type==="explFireCloud")_fecPush(e.position.x,e.position.y,e.position.z,(e._explSize||20)*2.8);
+    else if(e.type==="firewall"&&e.direction&&e.length){const len=e.length,dir=e.direction,seg=Math.max(1,Math.floor(len/160));for(let i=0;i<=seg;i++){const t=i/seg;_fecPush(e.position.x+dir.x*len*t,e.position.y+dir.y*len*t,e.position.z+dir.z*len*t,250)}}
+    else if(e.type==="incendiary_gas"&&e.ignited)_fecPush(e.position.x,e.position.y,e.position.z,(e.radius||350)*0.85)
+  }
+  if(!_fecN)return;
+  if(game.detachedGasPockets){
+    const gp=game.detachedGasPockets;
+    for(let di=gp.length-1;di>=0;di--){
+      const p=gp[di];
+      if(_fecEat(p&&p.gasCloud,dt)){const last=gp.length-1;if(di!==last)gp[di]=gp[last];gp.pop()}
+    }
+  }
+  if(game.clusters){
+    const cls=game.clusters;
+    for(let ci=0;ci<cls.length;ci++){const cl=cls[ci];
+      if(!cl||!cl.children)continue;
+      const ch=cl.children;
+      for(let cj=0;cj<ch.length;cj++){const c=ch[cj];
+        const gc=c&&c._atomSmoke;
+        if(gc&&_fecEat(gc,dt))c._atomSmoke=null;
+      }
+    }
+  }
+}
 function _makeGasCloudMaterial(initialColor, baseAlpha, radius) {
   return new THREE.ShaderMaterial({
     uniforms: {
@@ -17210,6 +17263,77 @@ document.body.appendChild(renderer.domElement);
   } catch (e) {
     console.warn('[v8VR GPU] diagnostic failed:', e);
   }
+})();
+
+// =====================================================================
+// ---- (v37.18) ?hitch=1 — MATCH-START HITCH FLIGHT RECORDER ----------
+// =====================================================================
+// The owner's "huge hitch, twice, at elimination start on battery" class:
+// frame stalls in the visible window right after the loading overlay drops,
+// with the three.js program count FLAT (so not shader compiles) — ANGLE-side
+// first-draw staging that only crosses the felt threshold on battery-clocked
+// GPUs, and whose exact trigger is map/mode dependent. Synthetic solo runs
+// could not pin the culprit (it shrinks to noise on wall power), so this
+// recorder instruments the REAL occurrence: with ?hitch=1 in the URL, every
+// frame gap >100 ms that lands within 30 s of an overlay drop is logged with
+// the program-count delta, the material names that FIRST DREW in that frame,
+// and the heap delta (GC fingerprint). Zero cost without the URL param (the
+// renderBufferDirect patch is only installed when armed). Read the log live
+// in the console, or call window.__hitchReport() and screenshot it.
+(function () {
+  try {
+    if (!/[?&]hitch=1/.test(location.search)) return;
+    if (typeof renderer === 'undefined' || !renderer) return;
+    const H = { log: [], newMats: [], seen: new Set(), watchUntil: 0, last: 0, heapLast: 0, progLast: 0 };
+    window.__hitchLog = H.log;
+    const origRBD = renderer.renderBufferDirect.bind(renderer);
+    renderer.renderBufferDirect = function (cam, sc, geo, mat, obj, grp) {
+      if (mat && !H.seen.has(mat.uuid)) {
+        H.seen.add(mat.uuid);
+        // Only the CURRENT frame's new materials matter; the rAF tick drains this.
+        H.newMats.push((mat.name || mat.type || '?') + (mat.map ? '+map' : ''));
+      }
+      return origRBD(cam, sc, geo, mat, obj, grp);
+    };
+    const tick = () => {
+      requestAnimationFrame(tick);
+      const now = performance.now();
+      const gap = now - H.last; H.last = now;
+      const heap = (performance.memory && performance.memory.usedJSHeapSize) || 0;
+      const progs = renderer.info.programs ? renderer.info.programs.length : 0;
+      // (re)arm the 30 s watch window whenever the loading overlay is active,
+      // so the window starts counting from the moment it drops.
+      const ov = document.getElementById('lss-loading-overlay');
+      const ovUp = !!(ov && ov.classList.contains('active'));
+      if (ovUp) H.watchUntil = now + 30000;
+      if (gap > 100 && gap < 5 * 60 * 1000 && now < H.watchUntil) {
+        const entry = {
+          t: Math.round(now), gap: Math.round(gap),
+          state: (typeof game !== 'undefined' && game && game.state) || '?',
+          // covered=1 means the loading overlay was on screen for this stall —
+          // that is the DESIGNED place to pay compile cost. covered=0 entries
+          // are the felt hitches; those are the bug reports.
+          covered: ovUp ? 1 : 0,
+          progsDelta: progs - H.progLast,
+          heapDeltaMB: +((heap - H.heapLast) / 1e6).toFixed(1),
+          newMats: H.newMats.slice(0, 10),
+        };
+        H.log.push(entry);
+        if (H.log.length > 60) H.log.shift();
+        console.warn('[hitch] ' + entry.gap + 'ms @' + entry.state + (entry.covered ? ' (covered by overlay)' : ' *** VISIBLE ***') +
+          ' progsD=' + entry.progsDelta + ' heapD=' + entry.heapDeltaMB + 'MB' +
+          (entry.newMats.length ? ' firstDraws: ' + entry.newMats.join(', ') : ' (no new materials)'));
+      }
+      H.newMats.length = 0;
+      H.heapLast = heap; H.progLast = progs;
+    };
+    requestAnimationFrame(tick);
+    window.__hitchReport = function () {
+      console.table(H.log.map((e) => ({ gap: e.gap, state: e.state, covered: e.covered, progsD: e.progsDelta, heapMB: e.heapDeltaMB, firstDraws: e.newMats.join(',').slice(0, 60) })));
+      return H.log.length + ' hitches logged (window: 30s after each loading-overlay drop)';
+    };
+    console.log('[hitch] recorder armed — frames >100ms within 30s of an overlay drop are logged; __hitchReport() to dump');
+  } catch (e) { try { console.warn('[hitch] recorder failed to arm:', e); } catch (_) {} }
 })();
 
 // =====================================================================
@@ -21666,22 +21790,36 @@ function _stGapSDF(px,py,pz,T){
 function _stSmooth(e0,e1,x){const t=Math.max(0,Math.min(1,(x-e0)/(e1-e0)));return t*t*(3-2*t);}
 // Strongest route influence at (x,z): returns its 0..1 weight and the route's
 // height there (room centre y, or interpolated tunnel y). Wider blend = roomier.
+// (v37.16) De-churned: this runs per collision query, per sdfNormal
+// finite-difference tap and per ship-label raycast step, and its frame
+// measured ~10% of all combat allocation churn. The allocators were NOT the
+// obvious {o,ty} literal (V8 escape-analyzes that away) but (a) the `|| []`
+// fallbacks minting a fresh empty array per call whenever a level lacks
+// spheres or cylinders, and (b) Math.hypot, whose variadic arguments allocate
+// and which V8 executes ~10x slower than sqrt(x*x+z*z) — game coords stay
+// well under overflow range, so sqrt is exact here. Result still goes through
+// a module scratch (callers all read o/ty before any re-entrant call —
+// _stGroundY/_stCeilY/_stPillarAt never call back into this). Do NOT store
+// the returned object — copy the fields out.
+const _ST_EMPTY=[];
+const _stRouteScratch={o:0,ty:0};
 function _stRouteAt(x,z,T){
   const soft=T.CLEAR_SOFT||300; let o=0, ty=T.YMID;
-  const S=game.levelSpheres||[];
-  for(let i=0;i<S.length;i++){const s=S[i];const d=Math.hypot(x-s.cx,z-s.cz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o){o=e;ty=s.cy;}}
-  const C=game.levelCylinders||[];
+  const S=game.levelSpheres||_ST_EMPTY;
+  for(let i=0;i<S.length;i++){const s=S[i];const dsx=x-s.cx,dsz=z-s.cz;const d=Math.sqrt(dsx*dsx+dsz*dsz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o){o=e;ty=s.cy;}}
+  const C=game.levelCylinders||_ST_EMPTY;
   for(let i=0;i<C.length;i++){const c=C[i];
     const dx=c.bx-c.ax,dz=c.bz-c.az,l2=dx*dx+dz*dz;
     let t=l2>0?((x-c.ax)*dx+(z-c.az)*dz)/l2:0; t=t<0?0:(t>1?1:t);
-    const cx=c.ax+dx*t,cz=c.az+dz*t,d=Math.hypot(x-cx,z-cz);
+    const cx=c.ax+dx*t,cz=c.az+dz*t,dqx=x-cx,dqz=z-cz,d=Math.sqrt(dqx*dqx+dqz*dqz);
     // (v35.73) Optional per-cylinder carve WEIGHT (c.w, default 1): a partial
     // lane keeps the natural ridged relief inside the corridor instead of
     // flattening it to a constant-profile tube. Endless lanes use ~0.42;
     // every existing map leaves w unset -> behaviour identical.
     const e=(1-_stSmooth(c.r,c.r+soft,d))*(c.w!=null?c.w:1);
     if(e>o){o=e;ty=c.ay+(c.by-c.ay)*t;}}
-  return {o,ty};
+  _stRouteScratch.o=o; _stRouteScratch.ty=ty;
+  return _stRouteScratch;
 }
 // Kept for callers that only want the openness weight.
 function _stCarveOpenness(x,z,T){ return _stRouteAt(x,z,T).o; }
@@ -43241,20 +43379,33 @@ const _gasClusterChemBuckets = new Map();
 function _gasBucketCoord(v, cell) {
   return Math.floor(v / cell);
 }
+// (v37.15) Packed-SMI bucket key. The old string key (`ix + '|' + iy + '|' + iz`)
+// was allocated on EVERY lookup — the neighbor scans in updateGasChemistry do 27
+// lookups per pocket per tick over ~130 pockets in two passes, which the heap
+// profiler measured at ~31% of all combat allocation churn. The packed key maxes
+// at 2^30-1 so it stays a V8 SMI and Map.get/set never box it. ±512 cells covers
+// ±102,400u at the 200u cell size; farther coords WRAP via the mask, which can
+// only co-bucket far-apart pockets — the d2 > RADIUS_SQ guard in the scans keeps
+// that correct (it just wastes one distance check on the rare wrapped pair).
 function _gasBucketKey(ix, iy, iz) {
-  return ix + '|' + iy + '|' + iz;
+  return (ix + 512 & 1023) + ((iy + 512 & 1023) << 10) + ((iz + 512 & 1023) << 20);
 }
+// Bucket arrays are pooled: the builders run every chemistry tick, and clearing
+// the map used to orphan every array for the GC. Reset empties + parks them.
+const _gasBucketPool = [];
+function _gasBucketRecycle(bucket) { bucket.length = 0; _gasBucketPool.push(bucket); }
+function _gasBucketsReset(map) { map.forEach(_gasBucketRecycle); map.clear(); }
 function _gasBucketAdd(map, ix, iy, iz, item) {
   const key = _gasBucketKey(ix, iy, iz);
   let bucket = map.get(key);
   if (!bucket) {
-    bucket = [];
+    bucket = _gasBucketPool.length > 0 ? _gasBucketPool.pop() : [];
     map.set(key, bucket);
   }
   bucket.push(item);
 }
 function _buildGasPocketChemBuckets(pockets, cell) {
-  _gasPocketChemBuckets.clear();
+  _gasBucketsReset(_gasPocketChemBuckets);
   for (let i = 0; i < pockets.length; i++) {
     const p = pockets[i];
     const pos = _gasPocketCenter(p);
@@ -43274,7 +43425,7 @@ function _buildGasPocketChemBuckets(pockets, cell) {
   }
 }
 function _buildGasClusterChemBuckets(clusters, cell) {
-  _gasClusterChemBuckets.clear();
+  _gasBucketsReset(_gasClusterChemBuckets);
   if (!clusters || clusters.length === 0) return;
   for (let k = 0; k < clusters.length; k++) {
     const cl = clusters[k];
@@ -47076,6 +47227,32 @@ function _warmRealCombatFX() {
     W(() => { if (typeof spawnSiphonHelix === 'function') spawnSiphonHelix(fp, fp2, 0x88ddff, 0.05); });
     W(() => { if (typeof v8SpawnDebris === 'function') v8SpawnDebris(fp, 6, 1, 80); });
     W(() => { if (typeof v8SpawnSparks === 'function') v8SpawnSparks(fp, 6, 1, 80, 0xff8822, 0xfff8a0); });
+    // (v37.19) THE POINTS DRAW. Every particle-producing spawn above lands in
+    // game.particles, but the shared Points cloud only fills its buffers in
+    // updateParticles — a gameLoop system that has NOT run between these spawns
+    // and the renders below. So the warm renders drew an EMPTY Points object
+    // and the first real shot of combat did the first-ever point-sprite draw:
+    // on ANGLE/D3D11 point rendering takes a geometry-shader-augmented
+    // executable, i.e. a cold draw-time re-specialization — the residual
+    // battery match-start stall class from the GPU trace. Two subtleties:
+    // (a) the v37.09 player-relative particle cull (14 km box) erases anything
+    // parked at fp (50 km down) before it can draw, so these seed particles
+    // sit 9 km BELOW the player — inside the cull box, outside any normal
+    // sightline, depth-occluded by terrain, alive 0.3 s; (b) updateParticles
+    // is called directly so the buffers are full for THIS tick's warm renders.
+    W(() => {
+      if (!game.particles || typeof updateParticles !== 'function' ||
+          typeof player === 'undefined' || !player || !player.position) return;
+      const _pp = player.position;
+      for (let i = 0; i < 4; i++) {
+        game.particles.push({
+          position: new THREE.Vector3(_pp.x + i * 7, _pp.y - 9000, _pp.z + i * 5),
+          velocity: { x: 0, y: 0, z: 0 },
+          life: 0.3, maxLife: 0.3, size: 4, color: 0xffffff, ess: true,
+        });
+      }
+      updateParticles(0.016);
+    });
     // The warm meshes sit far off-screen and several are frustumCulled, so a
     // plain render would cull them and never issue the draw that forces the
     // final link + GPU buffer upload. Uncull just the meshes we added so the
@@ -47289,6 +47466,44 @@ async function _prebakeWorldForLaunch() {
       rep.gpuPasses = await _prebakeGpuPrime();
     } else if (!rep.capped) rep.capped = 'gpu-skipped';
     rep.ms.gpu = Math.round(_pbNow() - _tD);
+
+    // ---- E. (v37.18) ANGLE COMPILE-QUEUE DRAIN — the battery match-start
+    // hitch, root-caused by a GPU-service trace: with KHR_parallel_shader_
+    // compile, every compile the phases above ISSUE returns immediately and
+    // ANGLE grinds the real D3D work on worker threads (measured: 58.7 s of
+    // ANGLEPlatformImpl::RunWorkerTask across 1,044 tasks on battery-clocked
+    // silicon, single tasks up to 3.7 s). The overlay used to drop when the
+    // CALLS finished, and every first-use in the countdown / first combat
+    // seconds then JOINED an unfinished compile (GetProgramiv blocking up to
+    // 1.4 s, command-buffer flushes queueing 1.8 s behind the workers) — the
+    // owner's "huge hitch, twice, at the start of the match on battery; tiny
+    // on power" (wall clocks fit the queue inside the loading screen; battery
+    // does not). So: hold the overlay until every known program reports
+    // COMPLETION_STATUS_KHR — a spec-guaranteed NON-blocking poll — with a
+    // ceiling in the arena-wait spirit. Warm cache / wall power completes in
+    // ~a frame, so the common case pays nothing. Programs created after this
+    // (per-map stragglers) still join lazily — the point is the BULK queue.
+    const _tDr = _pbNow();
+    try {
+      const _gl = renderer.getContext();
+      const _pcExt = _gl.getExtension('KHR_parallel_shader_compile');
+      const _plist = renderer.info && renderer.info.programs;
+      if (_pcExt && _plist && _plist.length) {
+        for (;;) {
+          let _pending = 0;
+          for (const _pw of _plist) {
+            try {
+              if (_pw.program && !_gl.getProgramParameter(_pw.program, _pcExt.COMPLETION_STATUS_KHR)) _pending++;
+            } catch (_) {}
+          }
+          if (_pending === 0) break;
+          if (_pbNow() - _tDr > 45000) { if (!rep.capped) rep.capped = 'compile-drain'; break; }
+          _pbSub('compiling shaders · ' + (_plist.length - _pending) + '/' + _plist.length);
+          await _warmupYield();
+        }
+      }
+    } catch (_) {}
+    rep.ms.drain = Math.round(_pbNow() - _tDr);
   } catch (e) {
     console.warn('[prebake] failed (launching anyway):', e);
     rep.error = String((e && e.message) || e);
