@@ -473,20 +473,18 @@ body.lss-thirdperson #ability-overlay-frame { display: none !important; }
   flex-direction: column; align-items: stretch; justify-content: flex-start;
   color: #fff; cursor: default; padding: 0;
 }
-/* (v37.22) Hangar backdrop. Image + scrim live on .active (not the base rule)
-   so the 2.1 MB PNG is only fetched the first time the picker actually opens.
-   The scrim keeps header/chips/panels readable: strong fade top and bottom,
-   the hangar clearly visible through the middle where the hero ship floats
-   (the preview canvas is alpha:true, so the ship renders straight over it).
-   ⚠ #ship-select.lss-launching's `background: transparent` (below) has equal
-   specificity and MUST stay later in the file so the countdown still wins. */
-#ship-select.active {
-  display: flex;
-  background:
-    linear-gradient(180deg, rgba(5,5,15,0.80) 0%, rgba(5,5,15,0.34) 26%, rgba(5,5,15,0.28) 60%, rgba(5,5,15,0.82) 100%),
-    url('hangar.png') center / cover no-repeat,
-    rgba(5,5,15,0.95);
+#ship-select.active { display: flex; }
+/* (v37.23) The hangar image + scrim render from #ship-select-bg (a canvas
+   baked once at boot — see the markup note), NOT from a CSS background: the
+   v37.22 CSS url() version re-decoded the PNG on the between-rounds picker
+   re-show and stalled the final-kill moment 1.2 s. object-fit gives the same
+   cover behavior; the scrim gradient is baked into the canvas pixels. */
+#ship-select-bg {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; z-index: 0; pointer-events: none;
 }
+/* The countdown strips the picker to transparent — the hangar must go too. */
+#ship-select.lss-launching > #ship-select-bg { display: none !important; }
 /* (v36.21) LAUNCHING STATE. Between "PREPARING ARENA" lifting and finishLaunch,
    #ship-select is still `.active` on purpose — #ship-select-countdown is its
    CHILD, so the 3-2-1 dies if you display:none the parent (that is the v36.19
@@ -3746,6 +3744,16 @@ body.vr-active #camp-video { display: none !important; }
 </style>
 
 <div id="ship-select">
+  <!-- (v37.23) Hangar backdrop CANVAS. v37.22 put hangar.png in this panel's
+       CSS background, and the between-rounds picker re-show forced a fresh
+       image decode + raster at the exact round-end beat — measured as a 1183 ms
+       stall on the final kill vs 173 ms with the image disabled. The image and
+       its readability scrim are now baked ONCE at boot into this canvas (see
+       the loader IIFE by the GPU diagnostic); the canvas owns its pixels, so
+       nothing is ever re-decoded and the picker re-show just composites an
+       existing layer. Same z plane as the preview stage but earlier in the DOM,
+       so it paints beneath everything. -->
+  <canvas id="ship-select-bg"></canvas>
   <div id="ship-select-header" style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
     <div>
       <h1>LAST SHIP SAILING</h1>
@@ -4152,7 +4160,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.22';
+const LSS_BUILD = '37.23';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13978,6 +13986,30 @@ document.body.appendChild(renderer.domElement);
   } catch (e) {
     console.warn('[v8VR GPU] diagnostic failed:', e);
   }
+})();
+
+(function () {
+  try {
+    const cv = document.getElementById('ship-select-bg');
+    if (!cv) return;
+    const img = new Image();
+    img.decoding = 'async';
+    img.onload = function () {
+      try {
+        cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+        const ctx = cv.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const g = ctx.createLinearGradient(0, 0, 0, cv.height);
+        g.addColorStop(0.00, 'rgba(5,5,15,0.80)');
+        g.addColorStop(0.26, 'rgba(5,5,15,0.34)');
+        g.addColorStop(0.60, 'rgba(5,5,15,0.28)');
+        g.addColorStop(1.00, 'rgba(5,5,15,0.82)');
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, cv.width, cv.height);
+      } catch (_) {}
+    };
+    img.src = 'hangar.png';
+  } catch (_) {}
 })();
 
 
