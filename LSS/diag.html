@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSS Browser Diagnostic</title>
+<style>
+  body { background: #0a0e1a; color: #cfe3ff; font-family: Consolas, monospace; padding: 18px; margin: 0; }
+  h1 { color: #ffaa00; font-size: 20px; letter-spacing: 2px; margin: 0 0 4px; }
+  .sub { color: #6f87a8; font-size: 12px; margin-bottom: 14px; }
+  .card { background: rgba(20,30,50,0.6); border: 1px solid rgba(100,160,255,0.25); border-radius: 8px; padding: 12px 14px; margin-bottom: 12px; }
+  .card h2 { font-size: 13px; color: #7dc4ff; letter-spacing: 1px; margin: 0 0 8px; }
+  .big { font-size: 26px; color: #fff; }
+  .row { display: flex; justify-content: space-between; font-size: 13px; padding: 1px 0; }
+  .warn { color: #ff8866; font-weight: bold; }
+  .ok { color: #7dffa8; }
+  #summary { font-size: 15px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<h1>LSS BROWSER DIAGNOSTIC</h1>
+<div class="sub" id="meta">running…</div>
+<div class="card"><h2>THIS BROWSER</h2><div id="browser">…</div></div>
+<div class="card"><h2>LSS SAVED DATA (localStorage — names and sizes only)</h2><div id="storage">…</div></div>
+<div class="card"><h2>SHADER COMPILE SPEED</h2><div id="shader">…</div></div>
+<div class="card"><h2>BIG IMAGE DECODE (hangar.png)</h2><div id="decode">…</div></div>
+<div class="card"><h2>SUMMARY — screenshot this whole page</h2><div id="summary">…</div></div>
+<script>
+(async function () {
+  const $ = (id) => document.getElementById(id);
+  const fmt = (n) => n >= 1048576 ? (n / 1048576).toFixed(2) + ' MB' : n >= 1024 ? (n / 1024).toFixed(1) + ' KB' : n + ' B';
+  $('meta').textContent = new Date().toLocaleString() + ' — ' + location.host;
+
+  // browser + gpu
+  let gpu = '?';
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl2') || c.getContext('webgl');
+    const d = gl.getExtension('WEBGL_debug_renderer_info');
+    gpu = d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+  } catch (e) {}
+  let quota = '';
+  try { const est = await navigator.storage.estimate(); quota = 'origin storage used ' + fmt(est.usage || 0) + ' of ' + fmt(est.quota || 0); } catch (e) {}
+  $('browser').innerHTML = '<div class="row"><span>UA</span><span>' + navigator.userAgent.replace(/Mozilla\/5\.0 \([^)]*\) /, '').slice(0, 90) + '</span></div>' +
+    '<div class="row"><span>GPU</span><span>' + String(gpu).slice(0, 80) + '</span></div>' +
+    '<div class="row"><span>Cores</span><span>' + navigator.hardwareConcurrency + '</span></div>' +
+    (quota ? '<div class="row"><span>Quota</span><span>' + quota + '</span></div>' : '');
+
+  // localStorage inventory (names + sizes only; values never shown)
+  let rows = '', total = 0, biggest = null;
+  try {
+    const items = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      const sz = (localStorage.getItem(k) || '').length * 2; // UTF-16 bytes
+      items.push([k, sz]); total += sz;
+    }
+    items.sort((a, b) => b[1] - a[1]);
+    if (items.length) biggest = items[0];
+    for (const [k, sz] of items) {
+      rows += '<div class="row"><span>' + k + '</span><span class="' + (sz > 200 * 1024 ? 'warn' : '') + '">' + fmt(sz) + '</span></div>';
+    }
+    rows += '<div class="row" style="border-top:1px solid #345;margin-top:4px;padding-top:4px"><span>TOTAL (' + items.length + ' keys)</span><span class="big" style="font-size:16px">' + fmt(total) + '</span></div>';
+  } catch (e) { rows = 'localStorage unreadable: ' + e.message; }
+  $('storage').innerHTML = rows || '(empty — fresh browser profile)';
+
+  // shader compile bench: 10 unique nontrivial programs (defeats caches -> raw
+  // driver speed), then the same 10 sources again (cache-assisted).
+  const bench = (gl, salt) => {
+    const t0 = performance.now();
+    for (let i = 0; i < 10; i++) {
+      const vs = gl.createShader(gl.VERTEX_SHADER);
+      gl.shaderSource(vs, 'attribute vec4 p; varying vec2 v; void main(){ v = p.xy * ' + (1.0 + i + salt).toFixed(3) + '; gl_Position = p; }');
+      gl.compileShader(vs);
+      const fs = gl.createShader(gl.FRAGMENT_SHADER);
+      let body = 'precision highp float; varying vec2 v; void main(){ float a = 0.0;';
+      for (let o = 0; o < 24; o++) body += ' a += sin(v.x * ' + (o + 1 + i * 24 + salt * 240).toFixed(2) + ' + cos(v.y * ' + (o * 3.7 + i + salt).toFixed(2) + ' + a));';
+      body += ' gl_FragColor = vec4(fract(a), fract(a * 1.7), fract(a * 2.3), 1.0); }';
+      gl.shaderSource(fs, body);
+      gl.compileShader(fs);
+      const pr = gl.createProgram();
+      gl.attachShader(pr, vs); gl.attachShader(pr, fs); gl.linkProgram(pr);
+      gl.getProgramParameter(pr, gl.LINK_STATUS); // force the join
+      gl.deleteProgram(pr); gl.deleteShader(vs); gl.deleteShader(fs);
+    }
+    return performance.now() - t0;
+  };
+  let sh = '';
+  let coldMs = 0, warmMs = 0;
+  try {
+    const c2 = document.createElement('canvas');
+    const gl2 = c2.getContext('webgl2');
+    coldMs = bench(gl2, Math.floor(Math.random() * 1000)); // unique sources
+    const salt2 = Math.floor(Math.random() * 1000) + 2000;
+    bench(gl2, salt2);                    // prime these sources
+    warmMs = bench(gl2, salt2);           // same sources again -> cache path
+    sh = '<div class="row"><span>10 fresh programs (raw driver speed)</span><span class="big" style="font-size:18px">' + coldMs.toFixed(0) + ' ms</span></div>' +
+         '<div class="row"><span>same 10 again (cache-assisted)</span><span>' + warmMs.toFixed(0) + ' ms</span></div>';
+  } catch (e) { sh = 'bench failed: ' + e.message; }
+  $('shader').innerHTML = sh;
+
+  // hangar decode bench
+  let dec = '';
+  let decodeMs = 0;
+  try {
+    const r = await fetch('hangar.png', { cache: 'no-store' });
+    const blob = await r.blob();
+    const t0 = performance.now();
+    const bm = await createImageBitmap(blob);
+    decodeMs = performance.now() - t0;
+    dec = '<div class="row"><span>decode ' + bm.width + 'x' + bm.height + ' (' + fmt(blob.size) + ' file)</span><span class="big" style="font-size:18px">' + decodeMs.toFixed(0) + ' ms</span></div>';
+    bm.close();
+  } catch (e) { dec = 'decode bench failed: ' + e.message; }
+  $('decode').innerHTML = dec;
+
+  // summary
+  const verdictBits = [];
+  verdictBits.push('LSS storage total: <b>' + fmt(total) + '</b>' + (biggest ? ' (biggest: ' + biggest[0] + ' ' + fmt(biggest[1]) + ')' : ''));
+  verdictBits.push('Raw shader compile: <b>' + coldMs.toFixed(0) + ' ms</b> / cache-assisted: ' + warmMs.toFixed(0) + ' ms');
+  verdictBits.push('Image decode: <b>' + decodeMs.toFixed(0) + ' ms</b>');
+  verdictBits.push('<span class="' + (total > 500 * 1024 ? 'warn' : 'ok') + '">' + (total > 500 * 1024 ? 'Storage is LARGE for this origin — likely suspect.' : 'Storage looks normal.') + '</span>');
+  $('summary').innerHTML = verdictBits.join('<br>');
+  $('meta').textContent += ' — done';
+})();
+</script>
+</body>
+</html>
