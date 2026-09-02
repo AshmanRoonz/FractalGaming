@@ -802,6 +802,19 @@ def process(ship):
     r2 = ring(0.66, -D)
     tub_faces, vrings = B.loft([r0, r1, r2], region='metal', inward_center=tub_center)
     floor_faces = B.cap(vrings[-1], region='trim', inward_center=tub_center)
+    # canopy RIM RAIL: a square-section tube riding just inside the glass edge, so the glass
+    # boundary reads as a frame from the seat instead of a raw hull cut, and the canopy gets a
+    # defined outline from outside.
+    rail_pts = ring(0.988, -0.02 * Hc, zfrac_of_rim=1.0)
+    rt = 0.03 * Wc
+    for a, b in zip(rail_pts, rail_pts[1:] + rail_pts[:1]):
+        dv = b - a
+        ln = dv.length
+        if ln < 1e-6:
+            continue
+        yaw = math.atan2(dv.y, dv.x)
+        pitch = -math.asin(max(-1.0, min(1.0, dv.z / ln)))
+        B.box((a + b) / 2, (ln * 1.06, rt, rt), rot=(0, pitch, yaw), region='trim')
 
     # ---------------- furniture (local coords) ------------------------------------------------
     # The pilot sits just behind the canopy APEX so the helmet stays under the glass: profile the
@@ -877,6 +890,15 @@ def process(ship):
     edge_c = Vector((dx, 0, -0.32 * D)) + Vector((-math.cos(tilt), 0, -math.sin(tilt))) * (0.09 * Lc) \
         + Vector((-math.sin(tilt), 0, math.cos(tilt))) * (0.17 * D)
     B.box(edge_c, (0.010 * Lc, 0.60 * Wc, 0.018 * D), rot=(0, tilt, 0), region='glow')
+    # glareshield hood over the dash's far edge (short, so it never hides the screens from the seat)
+    hood_c = Vector((dx, 0, -0.32 * D)) + Vector((math.cos(tilt), 0, math.sin(tilt))) * (0.06 * Lc) \
+        + Vector((-math.sin(tilt), 0, math.cos(tilt))) * (0.21 * D)
+    B.box(hood_c, (0.07 * Lc, 0.76 * Wc, 0.014 * D), rot=(0, tilt + math.radians(6), 0), region='trim', bevel=bv * 0.2)
+    # centre pedestal between the knees with its own small screen, and a throttle lever on the left console
+    B.box((sx + 0.13 * Lc, 0, -0.50 * D), (0.16 * Lc, 0.10 * Wc, 0.14 * D), region='metal', bevel=bv * 0.3)
+    B.box((sx + 0.13 * Lc, 0, -0.425 * D), (0.10 * Lc, 0.07 * Wc, 0.012 * D), region='screen')
+    B.box((sx + 0.10 * Lc, 0.36 * Wc, -0.29 * D), (0.012 * Lc, 0.02 * Wc, 0.10 * D), rot=(0, math.radians(-25), 0), region='trim')
+    B.box((sx + 0.10 * Lc - 0.02 * Lc, 0.36 * Wc, -0.245 * D), (0.03 * Lc, 0.035 * Wc, 0.02 * D), region='seat')
     # side consoles with buttons + a small screen each
     for sgn in (1, -1):
         cx_, cy_ = 0.04 * Lc, sgn * 0.36 * Wc
@@ -901,10 +923,11 @@ def process(ship):
         B.box((sx + 0.10 * Lc, sgn * 0.08 * Wc, -0.46 * D), (0.22 * Lc, 0.09 * Wc, 0.10 * D), region='suit', bevel=bv * 0.3)  # thighs
     # canopy struts: arcs following the glass, offset inward (ccl = canopy centres RELATIVE
     # to the canopy origin, i.e. the same frame the furniture is placed in)
-    # front strut = windscreen frame near the canopy's FRONT end (from the eye it projects low,
-    # framing the view instead of barring it at eye level) ; rear strut behind the head.
+    # one strut = the roll bar behind the head (unseen from the seat, a bar across the glass from
+    # outside). A front strut was tried at eye level (barred the view) and at the nose end
+    # (the narrowing glass made it a jagged crown) ; the rim rail frames the windscreen instead.
     strut_faces = []
-    for xs in (0.40 * Lc, sx - 0.17 * Lc):
+    for xs in (sx - 0.17 * Lc,):
         selm = np.abs(ccl[:, 0] - xs) < 0.05 * Lc
         if selm.sum() < 6:
             continue
