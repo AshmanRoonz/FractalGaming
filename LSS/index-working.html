@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.29';
+const LSS_BUILD = '37.30';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4315,7 +4315,10 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // (v37.28) 37.27 -> 37.28: canopy rim rail, glareshield hood, centre pedestal +
 // throttle in every interior ; the jagged front strut is gone (the rail frames
 // the windscreen), only the roll bar behind the head remains.
-const _MODELS_VERSION = '37.28';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+// (v37.30) 37.28 -> 37.30: every hull material now carries an emissive map
+// baked from its painted class-colour light strips (HULL LIGHTS in
+// tools/blender/ship_cockpit.py). Gated in-game by input.hullGlow.
+const _MODELS_VERSION = '37.30';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -5209,6 +5212,9 @@ const input = {
   // at the `cockpit1` eye marker) instead of the PNG cockpit frames. Settings
   // checkbox, persisted ; window.__cockpit.on = true/false overrides live.
   cockpit3d: true,
+  // (v37.30) Hull light strips glow (emissive map baked from the painted
+  // class-colour strips). Off = the classic 4% team-tint emissive.
+  hullGlow: true,
   // (v36.03) Under-hull headlight beam (SpotLight at the red/green nav-orb
   // group, aimed with the nose). ON by default — it is what makes the
   // zone-rift caverns and the endless deeps readable. Persisted.
@@ -33884,7 +33890,16 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
         // that the team-tint emissive above would otherwise throw away. Only
         // materials that actually ship an emissive MAP take this path, so the
         // hull keeps its subtle team tint exactly as before.
-        if (m && m.emissiveMap) {
+        // (v37.30) ...and the HULL carries one too now: its painted class-colour
+        // light strips baked to an emissive map by tools/blender/ship_cockpit.py,
+        // so ships read in dark arenas instead of being black blobs with engine
+        // orbs. Settings > "Hull lights" (input.hullGlow, default on) gates the
+        // hull map ; off = the pre-v37.30 4% team-tint emissive. The cockpit
+        // interior keeps its map regardless. Takes effect on the next ship build.
+        const _keepEmis = m && m.emissiveMap && (
+          (m.name === 'cockpit_interior') ||
+          !(typeof input !== 'undefined' && input && input.hullGlow === false));
+        if (_keepEmis) {
           params.emissiveMap = m.emissiveMap;
           params.emissive = new THREE.Color(0xffffff);
           params.emissiveIntensity = (typeof m.emissiveIntensity === 'number') ? m.emissiveIntensity : 1.0;
@@ -69598,6 +69613,7 @@ function _refreshSettingsValues() {
   setChk('set-vr-strip-fx', input.vrStripFx);
   setChk('set-show-fps', input.showFps);
   setChk('set-cockpit3d', input.cockpit3d !== false);
+  setChk('set-hull-glow', input.hullGlow !== false);
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
   {
     // (v36.19) buildSettingsPage writes overlay.innerHTML once and is gated by
@@ -69892,6 +69908,13 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">On: first person looks out from the pilot's seat of the modelled cockpit. Off: the classic painted cockpit frame.</label>
+      </div>
+      <div class="setting-row">
+        <label>Hull Lights</label>
+        <input type="checkbox" id="set-hull-glow" ${input.hullGlow !== false ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">The painted light strips on every hull glow in the dark. Applies to ships built after the change (next launch / respawn).</label>
       </div>
       <div class="setting-row">
         <label>HUD Gauge Labels</label>
@@ -71328,6 +71351,11 @@ function buildSettingsPage() {
     input.cockpit3d = !!cockpitChk.checked;
     saveSettings();
   });
+  const hullGlowChk = overlay.querySelector('#set-hull-glow');
+  if (hullGlowChk) hullGlowChk.addEventListener('change', () => {
+    input.hullGlow = !!hullGlowChk.checked;
+    saveSettings();
+  });
   // (v37.08) Ship Headlight checkbox removed from settings (owner call) —
   // the headlight is always on (input.headlight default true); the
   // __headlight(0|1) console hook remains for debugging.
@@ -72051,6 +72079,7 @@ function saveSettings() {
       vrStripFx: !!input.vrStripFx,
       showFps: !!input.showFps,
       cockpit3d: input.cockpit3d !== false,
+      hullGlow: input.hullGlow !== false,
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
       clipRec: !!input.clipRec,
@@ -73925,6 +73954,7 @@ function loadSettings() {
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
     if (typeof data.cockpit3d === 'boolean') input.cockpit3d = data.cockpit3d;
+    if (typeof data.hullGlow === 'boolean') input.hullGlow = data.hullGlow;
     // (v37.08) headlight is no longer a setting (owner call): the saved key
     // is deliberately IGNORED so anyone who unchecked it historically gets
     // the always-on default back. __headlight(0|1) remains for debugging.

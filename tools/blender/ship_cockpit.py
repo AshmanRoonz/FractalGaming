@@ -72,6 +72,15 @@ CANOPY = {
     'pyro': {'R': 0.20, 'sat': 0.28, 'mode': 'union', 'min_comp': 20, 'hue_tol': 0.08},
 }
 GLASS_ALPHA = 0.38
+# Hull light-strip emissive mask knobs (see HULL LIGHTS below): pixels more saturated than
+# `sat`, brighter than `val`, within `hue_tol` (0..1 hue space) of the class colour.
+HULL_GLOW = {
+    'default': {'sat': 0.45, 'val': 0.50, 'hue_tol': 0.10, 'strength': 1.0},
+    'vortex': {'sat': 0.45, 'val': 0.50, 'hue_tol': 0.14, 'strength': 1.0},    # purple AND blue strips
+    'puncture': {'sat': 0.55, 'val': 0.60, 'hue_tol': 0.07, 'strength': 0.8},  # gold panels are paint, not lights
+    'tracker': {'sat': 0.55, 'val': 0.55, 'hue_tol': 0.07, 'strength': 0.9},
+    'slayer': {'sat': 0.40, 'val': 0.45, 'hue_tol': 0.22, 'strength': 1.0},   # strips are yellow-green, not the class green
+}
 
 # atlas regions (u0, v0, u1, v1) ; 'tile' regions repeat across a surface, 'fit' regions are
 # stretched onto one face (screens, glow strips, visor)
@@ -1001,6 +1010,49 @@ def process(ship):
     gi = len(me.materials) - 1
     me.update()
 
+    # ---------------- HULL LIGHTS: emissive map from the painted class-colour strips ----------
+    # Every hull carries painted light strips / vents in its class colour that never emitted ;
+    # in dark arenas the ships were black blobs with engine orbs. Mask = saturated, bright
+    # pixels within a hue window of the class colour ; emissive = the pixel colour there,
+    # feathered. The glass material deliberately gets NO emissive (its faces share this
+    # texture). In-game buildModelShipMesh keeps emissiveMap ; input.hullGlow gates it.
+    tr, tg, tb = tint
+    tmx, tmn = max(tint), min(tint)
+    tdl = max(tmx - tmn, 1e-6)
+    if tmx == tr:
+        thue = ((tg - tb) / tdl) % 6
+    elif tmx == tg:
+        thue = (tb - tr) / tdl + 2
+    else:
+        thue = (tr - tg) / tdl + 4
+    thue /= 6.0
+    rgb = px[:, :, :3]
+    pmx = rgb.max(2)
+    pmn = rgb.min(2)
+    psat = np.where(pmx > 1e-4, (pmx - pmn) / np.maximum(pmx, 1e-4), 0)
+    pdl = np.maximum(pmx - pmn, 1e-6)
+    phue = np.where(pmx == rgb[:, :, 0], ((rgb[:, :, 1] - rgb[:, :, 2]) / pdl) % 6,
+                    np.where(pmx == rgb[:, :, 1], (rgb[:, :, 2] - rgb[:, :, 0]) / pdl + 2, (rgb[:, :, 0] - rgb[:, :, 1]) / pdl + 4)) / 6.0
+    dh = np.abs(phue - thue)
+    dh = np.minimum(dh, 1 - dh)
+    hp = HULL_GLOW.get(ship, HULL_GLOW['default'])
+    m1 = np.clip((psat - hp['sat']) / 0.15, 0, 1) * np.clip((pmx - hp['val']) / 0.15, 0, 1) * np.clip((hp['hue_tol'] - dh) / 0.04, 0, 1)
+    hull_emis = np.zeros_like(px)
+    hull_emis[:, :, :3] = rgb * m1[:, :, None] * hp['strength']
+    hull_emis[:, :, 3] = 1.0
+    rep['hull_glow'] = {'pixels_pct': round(float(100 * (m1 > 0.5).mean()), 2), 'params': hp}
+    he_img = bpy.data.images.new(f'{ship}_hullemis', W, H, alpha=True)
+    he_img.pixels.foreach_set(hull_emis.ravel())
+    he_path = os.path.join(ATLAS_DIR, f'{ship}_hullemis.png')
+    he_img.filepath_raw = he_path
+    he_img.file_format = 'PNG'
+    he_img.save()
+    he_img.pack()
+    h_bsdf = mat0.node_tree.nodes.get('Principled BSDF') or next(n for n in mat0.node_tree.nodes if n.type == 'BSDF_PRINCIPLED')
+    h_tex = new_image_node(mat0.node_tree, he_img)
+    mat0.node_tree.links.new(h_tex.outputs['Color'], h_bsdf.inputs['Emission Color'])
+    h_bsdf.inputs['Emission Strength'].default_value = 1.0
+
     # eye marker
     eye_world = B.to_world(head + Vector((0.3 * hr, 0, 0)))
     markers['cockpit1'].location = eye_world
@@ -1050,6 +1102,16 @@ def process(ship):
             sc.render.filepath = os.path.join(REPORT_DIR, f'{ship}_{name}.png')
             bpy.ops.render.render(write_still=True)
         shot('front34_close', c0w + fwd * L * 0.50 + right * L * 0.32 + up * L * 0.28, c0w, lens=55)
+        # night: world + lights down, so only the emissive strips / cockpit glow read
+        _bg_save = tuple(bgn.inputs[0].default_value)
+        _en_save = [(o, o.data.energy) for o in lights]
+        bgn.inputs[0].default_value = (0.01, 0.012, 0.02, 1)
+        for o, e in _en_save:
+            o.data.energy = e * 0.06
+        shot('night', ctr + fwd * L * 0.9 + right * L * 0.7 + up * L * 0.5, ctr, lens=40)
+        bgn.inputs[0].default_value = _bg_save
+        for o, e in _en_save:
+            o.data.energy = e
         shot('top_close', c0w + up * L * 0.55 + fwd * L * 0.05, c0w, lens=55)
         side_loc = c0w + right * L * 0.9 + up * L * 0.22
         shot('cutaway', side_loc, c0w, lens=50, clip_start=(side_loc - c0w).length - Wc * 0.02)
