@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.28';
+const LSS_BUILD = '37.29';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -34475,7 +34475,12 @@ function _dimHullMat(hullM, dim) {
     hullM.userData._baseEmissiveI = hullM.emissiveIntensity;
   }
   hullM.color.copy(hullM.userData._baseHullColor).multiplyScalar(dim);
-  hullM.emissiveIntensity = hullM.userData._baseEmissiveI * dim;
+  // (v37.29) x _cockpitPulse: the first-person cockpit rig publishes its
+  // lights pulse (muzzle flash / core / railgun charge) on the interior
+  // material as a factor, because THIS line owns emissiveIntensity every frame
+  // and would otherwise stomp a direct write. 1 (or absent) = no pulse.
+  hullM.emissiveIntensity = hullM.userData._baseEmissiveI * dim
+    * ((hullM.userData._cockpitPulse != null) ? hullM.userData._cockpitPulse : 1);
 }
 function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
   if (!mesh || !mesh.userData) return;
@@ -54693,6 +54698,7 @@ function updatePlayerMovement(dt) {
 // persisted) is the player-facing switch ; window.__cockpit = { on: false }
 // overrides it live for A/B feel checks without touching saved settings.
 const _cpEyeW = new THREE.Vector3();
+const _cpFwd = new THREE.Vector3();
 function _cockpit3dWanted() {
   const W = window.__cockpit;
   if (W && typeof W.on === 'boolean') return W.on;
@@ -54850,11 +54856,48 @@ function _lssApplyShipRig(dt) {
           game._cockpit3dLive = true;
           try { document.body.classList.add('lss-cockpit3d'); } catch (_) {}
         }
+        // (v37.29) COCKPIT FEEL. The painted frames carried the per-shot recoil
+        // kick (gunRecoilL/R on the gun layer) and the gun-cycle flash ; the 3D
+        // cockpit gets the same beats in 3D: the eye kicks back and dips a
+        // touch on each shot (window.__cockpit.kick, world units, default 1.0
+        // = ~1% of a hull), and the interior's emissive atlas pulses — screens
+        // and strips brighten on the muzzle flash, throb while the core is
+        // active, and swell with the Puncture railgun charge. Uniform writes
+        // only ; nothing is allocated per frame.
+        const _W = window.__cockpit || {};
+        const _kick = (typeof _W.kick === 'number') ? _W.kick : 1.0;
+        const _rc = Math.max(player.gunRecoilL || 0, player.gunRecoilR || 0);
+        if (_rc > 0 && _kick > 0) {
+          _cpFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+          camera.position.addScaledVector(_cpFwd, -_rc * _kick);
+          camera.position.y -= _rc * _kick * 0.25;
+        }
+        if (game._cockpitIntMesh !== player.mesh) {
+          game._cockpitIntMesh = player.mesh;
+          game._cockpitIntMat = null;
+          try {
+            const _imo = player.mesh.getObjectByName('cockpit_interior');
+            if (_imo && _imo.material && !Array.isArray(_imo.material)) game._cockpitIntMat = _imo.material;
+          } catch (_) {}
+        }
+        const _im = game._cockpitIntMat;
+        if (_im && _im.emissiveMap) {
+          // published as a FACTOR: animateShipMesh owns emissiveIntensity
+          // (doomed-state dim) and multiplies this in every frame.
+          let _f = 1;
+          const _mf = (player.muzzleFlashTimer || 0) / 0.08;
+          if (_mf > 0) _f += 0.7 * Math.min(1, _mf);
+          if (player.coreActive) _f += 0.5 + 0.35 * Math.sin((game.time || 0) * 14);
+          if (typeof player.railgunCharge === 'number' && player.railgunCharge > 0.02) _f += 0.9 * Math.min(1, player.railgunCharge);
+          _im.userData._cockpitPulse = _f;
+        }
       } else {
         if (player.mesh.visible) player.mesh.visible = false;
         if (game._cockpit3dLive) {
           game._cockpit3dLive = false;
           try { document.body.classList.remove('lss-cockpit3d'); } catch (_) {}
+          const _im = game._cockpitIntMat;
+          if (_im && _im.userData) _im.userData._cockpitPulse = 1;
         }
       }
     }
