@@ -7,7 +7,7 @@ Run from the REPO ROOT:
     "C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background \
         --python tools/blender/ship_cleanup.py -- [--in DIR] [--out DIR] [--report DIR] [--ships a,b] [--render]
 
-Defaults:  --in assets_base/ships   --out assets_src/ships   --report tools/blender/reports
+Defaults:  --in assets_base/ships   --out tools/blender/work/clean   --report tools/blender/reports
 
 Per ship:
   1. import (merge_vertices) and flatten the node hierarchy ; the gun*/thruster*/cockpit*
@@ -52,7 +52,7 @@ def opt(name, default):
 
 
 IN_DIR = os.path.join(REPO, opt('--in', 'assets_base/ships'))
-OUT_DIR = os.path.join(REPO, opt('--out', 'assets_src/ships'))
+OUT_DIR = os.path.join(REPO, opt('--out', 'tools/blender/work/clean'))
 REPORT_DIR = os.path.join(REPO, opt('--report', 'tools/blender/reports'))
 SHIPS = opt('--ships', ','.join(SHIPS_ALL)).split(',')
 RENDER = '--render' in argv

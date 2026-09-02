@@ -30,10 +30,16 @@ for ships (see `OVERRIDES` in `compress_glb.mjs`) — simplifying twice would de
 
 ```bash
 "C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/ship_cleanup.py -- --render
-"C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/verify_culled.py
+"C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/verify_culled.py -- --after tools/blender/work/clean
 python tools/blender/verify_culled_diff.py
+"C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/ship_cockpit.py -- --render
 node tools/compress_glb.mjs --only ships
 ```
+
+Chain: `assets_base/ships` → `ship_cleanup.py` → `tools/blender/work/clean` (gitignored) →
+`ship_cockpit.py` → `assets_src/ships` (gitignored) → `compress_glb.mjs` → `LSS/ships`.
+Renders and JSON reports land in `tools/blender/reports/` (gitignored); look at the
+`_sheet_*.png` contact sheets there after a run.
 
 Then bump `_MODELS_VERSION` in `LSS/index-working.html` (NOT `LSS_BUILD` — see the ASSET
 CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
@@ -52,7 +58,20 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
   `thruster*` / `cockpit1` markers.
 - `verify_culled.py` + `verify_culled_diff.py` — renders before/after with backface culling
   ON and a transparent film from six vantages, then diffs the alpha: every enclosed
-  transparent pixel is a hole the player could see through. `NEW` must be 0.
+  transparent pixel is a hole the player could see through. `NEW` must be 0. (Compare the
+  cleaned hulls, not the cockpit builds: transparent glass shows up as alpha too.)
+- `ship_cockpit.py` — **stage 2**. Per hull: finds the painted canopy faces (texture
+  saturation near `cockpit1`, largest component, or `union` of same-hue components for split
+  windows — PYRO), folds enclosed frame slivers in, and gives them a second material
+  `canopy_glass` = the hull texture at alpha 0.38, alphaMode BLEND, single-sided (culls from
+  inside, so the pilot sees a clear view). Flips inward-pointing glass faces. Carves hull
+  faces inside the tub footprint plus buried inner-shell faces around the cockpit. Builds ONE
+  interior mesh with ONE material from a generated 512² atlas (+ emissive atlas): a tub lofted
+  from the real canopy rim (convex-hull fallback), seat, wrap-around dash with three screens,
+  glow strip, side consoles with buttons, rear bulkhead, two canopy struts, seated pilot.
+  Everything is sized from the canopy (Lc × Wc × Hc) and the tub depth is capped by the hull.
+  Moves `cockpit1` to the pilot's eye. Knobs: `CANOPY` (per-ship detection), `ACCENT`
+  (= LSS.CLASS_COLORS), `GLASS_ALPHA`, the `REG` atlas layout.
 
 ## Rules that bit us
 
