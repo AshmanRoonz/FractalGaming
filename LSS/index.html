@@ -26645,6 +26645,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
         };
         if (m && m.map) params.map = m.map;
         if (m && m.vertexColors) params.vertexColors = true;
+        if (m && m.name) params.name = m.name;
         const _keepEmis = m && m.emissiveMap && (
           (m.name === 'cockpit_interior') ||
           !(typeof input !== 'undefined' && input && input.hullGlow === false));
@@ -26654,6 +26655,15 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
           params.emissiveIntensity = (typeof m.emissiveIntensity === 'number') ? m.emissiveIntensity : 1.0;
         }
         params.color = (m && m.color) ? m.color.clone() : new THREE.Color(0xbfc4d2);
+        if (m && ((typeof m.name === 'string' && m.name.indexOf('cockpit') === 0) || m.normalMap || m.roughnessMap || m.metalnessMap)) {
+          if (m.normalMap) { params.normalMap = m.normalMap; params.normalScale = (m.normalScale ? m.normalScale.clone() : new THREE.Vector2(1, 1)); }
+          if (m.roughnessMap) { params.roughnessMap = m.roughnessMap; params.roughness = 1.0; }
+          else params.roughness = (typeof m.roughness === 'number') ? m.roughness : 0.6;
+          if (m.metalnessMap) { params.metalnessMap = m.metalnessMap; params.metalness = 1.0; }
+          else params.metalness = (typeof m.metalness === 'number') ? Math.min(0.6, m.metalness) : 0.25;
+          if (m.aoMap) { params.aoMap = m.aoMap; params.aoMapIntensity = (typeof m.aoMapIntensity === 'number') ? m.aoMapIntensity : 1.0; }
+          params.envMapIntensity = 0.45;
+        }
         if (m && m.name === 'canopy_glass') {
           params.metalness = 0.0;
           params.roughness = 0.10;
@@ -42185,6 +42195,15 @@ function updatePlayerMovement(dt) {
 }
 const _cpEyeW = new THREE.Vector3();
 const _cpFwd = new THREE.Vector3();
+const _cpUp = new THREE.Vector3();
+function _lssCockpitLights() {
+  if (typeof scene === 'undefined' || !scene) return null;
+  const key = new THREE.PointLight(0xffe2c4, 0, 160, 2);
+  const fill = new THREE.PointLight(0xa9c6ff, 0, 160, 2);
+  key.name = 'cockpitKey'; fill.name = 'cockpitFill';
+  scene.add(key); scene.add(fill);
+  return { key, fill };
+}
 function _cockpit3dWanted() {
   const W = window.__cockpit;
   if (W && typeof W.on === 'boolean') return W.on;
@@ -42290,9 +42309,29 @@ function _lssApplyShipRig(dt) {
           game._cockpitIntMesh = player.mesh;
           game._cockpitIntMat = null;
           try {
-            const _imo = player.mesh.getObjectByName('cockpit_interior');
-            if (_imo && _imo.material && !Array.isArray(_imo.material)) game._cockpitIntMat = _imo.material;
+            player.mesh.traverse(o => {
+              if (game._cockpitIntMat || !o.isMesh) return;
+              const ms = Array.isArray(o.material) ? o.material : [o.material];
+              for (const mm of ms) if (mm && mm.name === 'cockpit_interior' && mm.emissiveMap) { game._cockpitIntMat = mm; break; }
+            });
           } catch (_) {}
+        }
+        {
+          const _lr = game._cockpitLights || (game._cockpitLights = _lssCockpitLights());
+          if (_lr) {
+            const _lk = (_W.light || {});
+            const _keyI = (typeof _lk.key === 'number') ? _lk.key : 700;    // candela ; 55 was invisible next to the 2.3 sun, 4000 whitewashed
+            const _fillI = (typeof _lk.fill === 'number') ? _lk.fill : 280;
+            const _dist = (typeof _lk.dist === 'number') ? _lk.dist : 160;
+            _cpFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+            _cpUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+            _lr.key.position.copy(_cpEyeW).addScaledVector(_cpFwd, 9).addScaledVector(_cpUp, -5);
+            _lr.fill.position.copy(_cpEyeW).addScaledVector(_cpFwd, -6).addScaledVector(_cpUp, 8);
+            _lr.key.distance = _dist; _lr.fill.distance = _dist;
+            const _kk = Math.min(1, (dt || 0.016) * 6);
+            _lr.key.intensity += (_keyI - _lr.key.intensity) * _kk;
+            _lr.fill.intensity += (_fillI - _lr.fill.intensity) * _kk;
+          }
         }
         const _im = game._cockpitIntMat;
         if (_im && _im.emissiveMap) {
@@ -42310,6 +42349,12 @@ function _lssApplyShipRig(dt) {
           try { document.body.classList.remove('lss-cockpit3d'); } catch (_) {}
           const _im = game._cockpitIntMat;
           if (_im && _im.userData) _im.userData._cockpitPulse = 1;
+        }
+        if (game._cockpitLights) {
+          const _lr = game._cockpitLights;
+          const _kk = Math.min(1, (dt || 0.016) * 6);
+          _lr.key.intensity += (0 - _lr.key.intensity) * _kk;
+          _lr.fill.intensity += (0 - _lr.fill.intensity) * _kk;
         }
       }
     }

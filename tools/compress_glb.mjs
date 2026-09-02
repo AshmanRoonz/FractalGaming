@@ -213,8 +213,19 @@ const RECIPES = {
     const steps = [dedup(), prune({ keepLeaves: true }), dequantize(), weld()];
     if (ratio < 1) steps.push(simplify({ simplifier: MeshoptSimplifier, ratio, error: 0.001 }));
     steps.push(quantize(Q), webp());
+    // (v37.37) The Meshy v2 hulls ship real PBR maps (2k normal + metallicRoughness
+    // PNGs = 7 MB raw). Colour stays 2k ; the data maps go to 1k WebP q85, which
+    // is invisible at hull scale and takes a hull from ~10 MB to ~4 MB.
+    steps.push(textureCompress({
+      encoder: sharp, targetFormat: 'webp', quality: 88, formats: /^image\/(png|jpeg|webp)$/,
+      slots: /baseColorTexture/,
+    }));
+    steps.push(textureCompress({
+      encoder: sharp, targetFormat: 'webp', quality: 85, formats: /^image\/(png|jpeg|webp)$/,
+      slots: /normalTexture|metallicRoughnessTexture|occlusionTexture/, resize: [1024, 1024],
+    }));
     await doc.transform(...steps);
-    return ratio < 1 ? `simplify ${ratio} + requantize (JPEG kept)` : 'weld + quantize only, no simplify (Blender-authored hull)';
+    return ratio < 1 ? `simplify ${ratio} + requantize (JPEG kept)` : 'weld + quantize only, no simplify (Blender-authored hull) ; PBR data maps 1k';
   },
 
   // 2-5k tris carrying 3 MB of PNG. Pure texture bloat. EVERY slot is kept —

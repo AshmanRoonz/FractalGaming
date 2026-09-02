@@ -54,6 +54,7 @@ ATLAS_DIR = os.path.join(REPO, 'tools/blender/work/atlas')
 SHIPS = opt('--ships', ','.join(SHIPS_ALL)).split(',')
 RENDER = '--render' in argv
 LINING = '--no-lining' not in argv     # inner lining pass (diagnostics: see the raw holes)
+OPEN_SHIPS = set(x for x in opt('--open', '').split(',') if x)   # hulls with an OPEN cockpit cavity: a glass dome is built over the rim
 COAMING = '--no-coaming' not in argv   # tub-top-to-glass wall (diagnostics)
 EXPORT = '--no-export' not in argv
 for d in (OUT_DIR, REPORT_DIR, ATLAS_DIR):
@@ -73,6 +74,12 @@ CANOPY = {
     'default': {'R': 0.16, 'sat': 0.30, 'mode': 'largest', 'min_comp': 30, 'hue_tol': 0.06},
     'pyro': {'R': 0.20, 'sat': 0.28, 'mode': 'union', 'min_comp': 20, 'hue_tol': 0.08},
 }
+# OPEN-COCKPIT hulls (Meshy v2 fleet): the cavity is found with downward rays on a grid
+# around cockpit1, its rim becomes the canopy outline and a lofted glass DOME is joined
+# into the hull as the canopy faces. win = search window (of L), depth = how far below
+# the rim a cell must sit to be cavity (of L), dome_h = dome height as a fraction of the
+# rim width, apex_fwd = apex offset along the rim length (0 = centre, + = forward).
+OPEN_CFG = {'default': {'win': 0.30, 'depth': 0.035, 'dome_h': 0.30, 'apex_fwd': 0.10, 'n_theta': 64, 'rings': 8}}
 EMIS_FILL = 1.5            # interior fill light (LINEAR multiplier on the base tile) baked into the emissive
                            # atlas. 3.0 flattened the cockpit into a grey box (owner: 'worse from inside');
                            # 1.5 keeps the dark, moody v37.34 look with shadowed panels just readable
@@ -486,6 +493,154 @@ def inside_votes(bvh, p, eps):
     return odd
 
 
+def build_open_canopy(hull, cp, L, prm, rep):
+    """Find the open cockpit cavity around cp, loft a glass dome over its rim and JOIN it into
+    the hull (dome faces land at the end of the polygon list). Returns the dome face count."""
+    from mathutils.bvhtree import BVHTree
+    me = hull.data
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    bvh = BVHTree.FromBMesh(bm, epsilon=0.0)
+    bm.free()
+    top = max((hull.matrix_world @ Vector(c)).z for c in hull.bound_box)
+    n = 96
+    half = prm['win'] * L
+    xs = np.linspace(cp.x - half, cp.x + half, n)
+    ys = np.linspace(cp.y - half, cp.y + half, n)
+    zh = np.full((n, n), np.nan, np.float32)
+    down = Vector((0, 0, -1))
+    for j, y in enumerate(ys):
+        for i, x in enumerate(xs):
+            h = bvh.ray_cast(Vector((float(x), float(y), top + 0.5 * L)), down)
+            if h[0] is not None:
+                zh[j, i] = h[0].z
+    have = ~np.isnan(zh)
+    ref1 = float(np.nanpercentile(zh, 80))
+    cav = have & (zh < ref1 - prm['depth'] * L)
+    # connected cavity components (4-neighbour) ; take the one nearest the marker
+    lab = np.zeros((n, n), np.int32)
+    comps = []
+    for j in range(n):
+        for i in range(n):
+            if cav[j, i] and lab[j, i] == 0:
+                cid = len(comps) + 1
+                stack = [(j, i)]
+                cells = []
+                lab[j, i] = cid
+                while stack:
+                    a, b = stack.pop()
+                    cells.append((a, b))
+                    for da, db in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        a2, b2 = a + da, b + db
+                        if 0 <= a2 < n and 0 <= b2 < n and cav[a2, b2] and lab[a2, b2] == 0:
+                            lab[a2, b2] = cid
+                            stack.append((a2, b2))
+                comps.append(cells)
+    if not comps:
+        raise RuntimeError('open canopy: no cavity found around cockpit1')
+    ci, cj = int(np.argmin(np.abs(xs - cp.x))), int(np.argmin(np.abs(ys - cp.y)))
+    cell = (xs[1] - xs[0])
+
+    def comp_score(cells):
+        arr = np.array(cells)
+        dmin = np.min(np.hypot(arr[:, 0] - cj, arr[:, 1] - ci)) * cell
+        return (dmin > 0.12 * L, -len(cells))          # near ones first, then the biggest
+
+    comps.sort(key=comp_score)
+    cells = comps[0]
+    cav[:] = False
+    for a, b in cells:
+        cav[a, b] = True
+    # rim ring: cells outside the cavity touching it
+    ring = np.zeros((n, n), bool)
+    for a, b in cells:
+        for da, db in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+            a2, b2 = a + da, b + db
+            if 0 <= a2 < n and 0 <= b2 < n and not cav[a2, b2] and have[a2, b2]:
+                ring[a2, b2] = True
+    rj, ri = np.nonzero(ring)
+    rp = np.stack([xs[ri], ys[rj], zh[rj, ri]], 1)
+    cx, cy = float(np.mean(xs[[b for a, b in cells]])), float(np.mean(ys[[a for a, b in cells]]))
+    cy = float(cp.y)                                   # the cockpit sits on the symmetry plane
+    N = prm['n_theta']
+    ang = np.arctan2(rp[:, 1] - cy, rp[:, 0] - cx)
+    rad = np.hypot(rp[:, 0] - cx, rp[:, 1] - cy)
+    bins = ((ang + np.pi) / (2 * np.pi) * N).astype(int) % N
+    rmax = np.full(N, np.nan)
+    zat = np.full(N, np.nan)
+    for b_ in range(N):
+        m_ = bins == b_
+        if m_.any():
+            k_ = int(np.argmax(rad[m_]))
+            rmax[b_] = rad[m_][k_]
+            zat[b_] = rp[m_][k_, 2]
+    idx = np.arange(N)
+    good = ~np.isnan(rmax)
+    rmax = np.interp(idx, idx[good], rmax[good], period=N)
+    zat = np.interp(idx, idx[good], zat[good], period=N)
+    for _ in range(2):
+        rmax = (np.roll(rmax, 1) + rmax + np.roll(rmax, -1)) / 3.0
+        zat = (np.roll(zat, 1) + zat + np.roll(zat, -1)) / 3.0
+    mir = (N - 1 - idx) % N                            # theta pairs with -theta (bin symmetry)
+    rmax = 0.5 * (rmax + rmax[mir])
+    zat = 0.5 * (zat + zat[mir])
+    theta = (idx + 0.5) / N * 2 * np.pi - np.pi
+    base = np.stack([cx + rmax * np.cos(theta), cy + rmax * np.sin(theta), zat], 1)
+    rim_w = float(rmax[np.abs(np.sin(theta)) > 0.7].mean() * 2) if (np.abs(np.sin(theta)) > 0.7).any() else float(rmax.mean() * 2)
+    rim_l = float(rmax[np.abs(np.cos(theta)) > 0.7].mean() * 2) if (np.abs(np.cos(theta)) > 0.7).any() else float(rmax.mean() * 2)
+    Hd = prm['dome_h'] * rim_w
+    apex = Vector((cx - prm['apex_fwd'] * rim_l, cy, float(zat.max()) + Hd))   # forward is -X
+    # loft: rings from the rim (t=0) to the apex (t=1)
+    M = prm['rings']
+    dm = bmesh.new()
+    rings = []
+    for k in range(M):
+        t = k / M
+        rr = math.cos(t * math.pi / 2) ** 0.85
+        zz = math.sin(t * math.pi / 2)
+        ring_v = []
+        for i_ in range(N):
+            bx, by, bz = base[i_]
+            px = apex.x + (bx - apex.x) * rr
+            py = apex.y + (by - apex.y) * rr
+            pz = bz + (apex.z - bz) * zz
+            ring_v.append(dm.verts.new((px, py, pz)))
+        rings.append(ring_v)
+    top_v = dm.verts.new(apex)
+    for k in range(M - 1):
+        for i_ in range(N):
+            a, b = rings[k][i_], rings[k][(i_ + 1) % N]
+            c, d_ = rings[k + 1][(i_ + 1) % N], rings[k + 1][i_]
+            try:
+                dm.faces.new((a, b, c, d_))
+            except ValueError:
+                pass
+    for i_ in range(N):
+        try:
+            dm.faces.new((rings[M - 1][i_], rings[M - 1][(i_ + 1) % N], top_v))
+        except ValueError:
+            pass
+    bmesh.ops.recalc_face_normals(dm, faces=dm.faces[:])
+    dmesh = bpy.data.meshes.new('dome')
+    dm.to_mesh(dmesh)
+    n_faces = len(dmesh.polygons)
+    dm.free()
+    dmesh.uv_layers.new(name=me.uv_layers.active.name if me.uv_layers.active else 'UVMap')
+    for mtl in me.materials:
+        dmesh.materials.append(mtl)
+    dobj = bpy.data.objects.new('dome', dmesh)
+    bpy.context.scene.collection.objects.link(dobj)
+    bpy.ops.object.select_all(action='DESELECT')
+    dobj.select_set(True)
+    hull.select_set(True)
+    bpy.context.view_layer.objects.active = hull
+    bpy.ops.object.join()
+    rep['open_canopy'] = {'cavity_cells': len(cells), 'rim_w': round(rim_w, 3), 'rim_l': round(rim_l, 3),
+                          'dome_h': round(Hd, 3), 'apex': [round(float(x), 3) for x in apex], 'dome_faces': n_faces,
+                          'ref_z': round(ref1, 3), 'rim_z': [round(float(zat.min()), 3), round(float(zat.max()), 3)]}
+    return n_faces
+
+
 def new_image_node(nt, img):
     n = nt.nodes.new('ShaderNodeTexImage')
     n.image = img
@@ -533,6 +688,18 @@ def process(ship):
     right = Vector((0, 1, 0))
     frame = Matrix([[fwd.x, right.x, 0, 0], [fwd.y, right.y, 0, 0], [fwd.z, right.z, 1, 0], [0, 0, 0, 1]])
     cp = markers['cockpit1'].matrix_world.translation.copy()
+    n_dome = 0
+    if ship in OPEN_SHIPS:
+        oprm = dict(OPEN_CFG['default'])
+        oprm.update(OPEN_CFG.get(ship, {}))
+        n_dome = build_open_canopy(hull, cp, L, oprm, rep)
+        me = hull.data
+        bb = [Vector(c) for c in hull.bound_box]
+        lo = Vector([min(v[i] for v in bb) for i in range(3)])
+        hi = Vector([max(v[i] for v in bb) for i in range(3)])
+        L = max(hi - lo)
+        ctr = (lo + hi) / 2
+        cp = Vector(rep['open_canopy']['apex']) - Vector((0, 0, 0.3 * rep['open_canopy']['dome_h']))
 
     # ---------------- canopy faces --------------------------------------------------------
     prm = dict(CANOPY['default'])
@@ -575,6 +742,10 @@ def process(ship):
     d = np.linalg.norm(cen - np.array(cp), axis=1)
     R = prm['R'] * L
     seed = (d < R) & (sat > prm['sat']) & (mx > 0.10) & (nrm[:, 2] > -0.05)
+    if n_dome:                                   # open cockpit: the joined dome IS the canopy
+        seed = np.zeros(nP, bool)
+        seed[nP - n_dome:] = True
+        R = max(R, float(np.linalg.norm(cen[seed] - np.array(cp), axis=1).max()) * 1.05)
     edge_faces = {}
     for p in me.polygons:
         if seed[p.index]:
@@ -647,6 +818,8 @@ def process(ship):
     # only islands near the marker count (internal plates elsewhere are disconnected too) ;
     # they get the glass MATERIAL but never drive the cockpit dimensions or the rim.
     islands = noncan & ~reach & (d < R)
+    if n_dome:
+        islands[:] = False                       # a multi-shell Meshy hull has no 'enclosed' islands, only separate parts
     # ALL enclosed islands become glass. Keeping the dark ones opaque (painted frame bars)
     # was tried: the paint's frame lines are far finer than the mesh triangles, so they came
     # out as random black shards across the pane. A clean tinted pane wins.
@@ -692,6 +865,16 @@ def process(ship):
     # windows (PYRO) must not drive it, and it can never reach the hull's underside.
     D = min(max(0.55 * Wc, 0.9 * Hc), 1.4 * Hc)
     D = min(D, 0.85 * max(0.02 * L, zmin - lo.z))
+    # ...and by the hull skin right under the seat (engine pods hang far below a thin fuselage)
+    _vz = np.empty(len(me.vertices) * 3, np.float32)
+    me.vertices.foreach_get('co', _vz)
+    _vz = _vz.reshape(-1, 3)
+    _cw = B.to_world(Vector((0, 0, 0)))
+    _near = (np.abs(_vz[:, 0] - _cw.x) < 0.12 * L) & (np.abs(_vz[:, 1] - _cw.y) < 0.35 * Wc)
+    if _near.any():
+        _floor = float(_vz[_near][:, 2].min())
+        D = min(D, 0.8 * max(0.02 * L, zmin - _floor))
+        rep['tub_floor_cap'] = round(_floor, 3)
     rep['canopy'].update({'Lc': round(Lc, 3), 'Wc': round(Wc, 3), 'Hc': round(Hc, 3), 'D': round(D, 3)})
 
     # ---------------- rim: POLAR OUTLINE of the glass ---------------------------------------
@@ -1523,6 +1706,8 @@ def process(ship):
     _g = np.array(tint, np.float32)
     _grey = float(_g.mean())
     _gc = np.clip((_g * 0.75 + _grey * 0.25) * 0.85, 0, 1)
+    if n_dome:                                   # a generated dome: dark smoked glass with a hint of the class colour
+        _gc = np.clip(_g * 0.22 + 0.05, 0, 1)
     gb.inputs['Base Color'].default_value = (float(_gc[0]), float(_gc[1]), float(_gc[2]), 1.0)
     gb.inputs['Alpha'].default_value = GLASS_ALPHA
     gb.inputs['Roughness'].default_value = 0.08
