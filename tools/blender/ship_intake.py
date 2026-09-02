@@ -209,10 +209,68 @@ elif gn:
 for k in list(markers):
     if k.startswith('gun'):
         markers[k][0] -= 0.01 * L
-# eye seed: the canopy apex - highest point on the centre strip in the front 60%
-strip = (np.abs(v[:, 1]) < 0.12 * W) & (v[:, 0] < lo[0] + 0.60 * L)
-top = v[strip][np.argmax(v[strip][:, 2])] if strip.any() else np.array([lo[0] + 0.3 * L, 0, hi[2]])
-markers['cockpit1'] = [float(top[0]), 0.0, float(top[2]) - 0.01 * L]
+# eye seed. First choice: the PAINTED canopy - Meshy paints a dark, matte tinted glass on a
+# closed bulge (and the open cavities read dark too): the largest cluster of dark,
+# unsaturated, upward faces in the front 65% near the centreline. Fallback: the highest
+# point on the centre strip in the front 60% (fails when the spine or tail is taller).
+def face_paint(me):
+    mat0 = me.materials[0]
+    img = next((n.image for n in mat0.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image), None)
+    if img is None or not me.uv_layers.active:
+        return None, None, None
+    Wi, Hi = img.size
+    px = np.empty(Wi * Hi * 4, np.float32)
+    img.pixels.foreach_get(px)
+    px = px.reshape(Hi, Wi, 4)
+    n_ = len(me.polygons)
+    ls = np.empty(n_, np.int32)
+    lt = np.empty(n_, np.int32)
+    me.polygons.foreach_get('loop_start', ls)
+    me.polygons.foreach_get('loop_total', lt)
+    uvs = np.empty(len(me.loops) * 2, np.float32)
+    me.uv_layers.active.data.foreach_get('uv', uvs)
+    uvs = uvs.reshape(-1, 2)
+    cum = np.cumsum(uvs, axis=0)
+    cs = np.concatenate([[0.0], cum[:, 0]])
+    ct = np.concatenate([[0.0], cum[:, 1]])
+    fu = (cs[ls + lt] - cs[ls]) / lt
+    fv = (ct[ls + lt] - ct[ls]) / lt
+    ix = (np.mod(fu, 1.0) * Wi).astype(int).clip(0, Wi - 1)
+    iy = (np.mod(fv, 1.0) * Hi).astype(int).clip(0, Hi - 1)
+    col = px[iy, ix, :3]
+    mx = col.max(1)
+    mn = col.min(1)
+    sat = np.where(mx > 1e-4, (mx - mn) / np.maximum(mx, 1e-4), 0)
+    r_, g_, b_ = col[:, 0], col[:, 1], col[:, 2]
+    dlt = np.maximum(mx - mn, 1e-6)
+    hue = np.where(mx == r_, ((g_ - b_) / dlt) % 6, np.where(mx == g_, (b_ - r_) / dlt + 2, (r_ - g_) / dlt + 4)) / 6.0
+    return mx, sat, hue
+
+
+val, sat, hue = face_paint(me)
+cockpit = None
+if val is not None:
+    hull_val = float(np.median(val))
+    if OVR.get('canopy_hue') is not None:
+        # chroma-keyed canopy (the refine painted it a colour the hull never wears)
+        dh = np.abs(hue - float(OVR['canopy_hue']))
+        dh = np.minimum(dh, 1 - dh)
+        dark = (dh < 0.08) & (sat > 0.45) & (val > 0.30) & (nrm[:, 2] > 0.0) & (np.abs(cen[:, 1]) < 0.25 * W)
+    else:
+        dark = (val < min(0.32, 0.55 * hull_val)) & (sat < 0.40) & (nrm[:, 2] > 0.25) & (cen[:, 0] < lo[0] + 0.65 * L) & (np.abs(cen[:, 1]) < 0.18 * W)
+    cl = [c for c in clusters(dark, 0.06 * L) if c['a'] > 0.0015 * L * L]
+    if cl:
+        c0 = cl[0]['c']
+        under = (np.abs(v[:, 0] - c0[0]) < 0.05 * L) & (np.abs(v[:, 1] - c0[1]) < 0.05 * W)
+        ztop = float(v[under][:, 2].max()) if under.any() else float(c0[2])
+        cockpit = [float(c0[0]), 0.0, ztop - 0.01 * L]
+        rep['cockpit_by_paint'] = {'cluster_area': round(cl[0]['a'], 4), 'faces': cl[0]['n'], 'hull_val': round(hull_val, 3)}
+if cockpit is None:
+    strip = (np.abs(v[:, 1]) < 0.12 * W) & (v[:, 0] < lo[0] + 0.60 * L)
+    top = v[strip][np.argmax(v[strip][:, 2])] if strip.any() else np.array([lo[0] + 0.3 * L, 0, hi[2]])
+    cockpit = [float(top[0]), 0.0, float(top[2]) - 0.01 * L]
+    rep['cockpit_by_paint'] = None
+markers['cockpit1'] = cockpit
 for k, p in (OVR.get('markers') or {}).items():
     markers[k] = [float(x) for x in p]
 rep['markers'] = {k: [round(x, 3) for x in p] for k, p in markers.items()}

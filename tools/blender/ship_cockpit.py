@@ -55,6 +55,8 @@ SHIPS = opt('--ships', ','.join(SHIPS_ALL)).split(',')
 RENDER = '--render' in argv
 LINING = '--no-lining' not in argv     # inner lining pass (diagnostics: see the raw holes)
 OPEN_SHIPS = set(x for x in opt('--open', '').split(',') if x)   # hulls with an OPEN cockpit cavity: a glass dome is built over the rim
+CUT_SHIPS = set(x for x in opt('--cut', '').split(',') if x)     # hulls with a CLOSED canopy bulge: cut it out first, then treat as open
+OPEN_SHIPS |= CUT_SHIPS
 COAMING = '--no-coaming' not in argv   # tub-top-to-glass wall (diagnostics)
 EXPORT = '--no-export' not in argv
 for d in (OUT_DIR, REPORT_DIR, ATLAS_DIR):
@@ -79,7 +81,15 @@ CANOPY = {
 # into the hull as the canopy faces. win = search window (of L), depth = how far below
 # the rim a cell must sit to be cavity (of L), dome_h = dome height as a fraction of the
 # rim width, apex_fwd = apex offset along the rim length (0 = centre, + = forward).
-OPEN_CFG = {'default': {'win': 0.30, 'depth': 0.035, 'dome_h': 0.30, 'apex_fwd': 0.10, 'n_theta': 64, 'rings': 8}}
+OPEN_CFG = {'default': {'win': 0.30, 'depth': 0.035, 'method': 'pct', 'local_r': 0.06, 'adapt_frac': 0.5, 'dome_h': 0.30, 'apex_fwd': 0.10, 'n_theta': 64, 'rings': 8},
+            'vortex': {'method': 'adapt', 'depth': 0.02}}
+# CLOSED canopies (Meshy painted a dark tinted bulge): the bulge faces are found and DELETED,
+# then the open-cockpit dome replaces them - one canopy look across the fleet. 'dark' mode =
+# dark, unsaturated, upward-ish faces near cockpit1 (light hulls) ; 'geo' mode = an ellipse
+# footprint (ell_a x ell_b of L) above cockpit1.z - dz (dark hulls, where paint can't tell).
+CUT_CFG = {'default': {'mode': 'dark', 'R': 0.30, 'val': 0.32, 'sat': 0.40, 'nz': -0.15,
+                       'ell_a': 0.14, 'ell_b': 0.085, 'dz': 0.07, 'min_faces': 40},
+           'pyro': {'mode': 'hue', 'hue': 0.50, 'hue_tol': 0.08}}     # refined with a BRIGHT CYAN canopy as the chroma key
 EMIS_FILL = 1.5            # interior fill light (LINEAR multiplier on the base tile) baked into the emissive
                            # atlas. 3.0 flattened the cockpit into a grey box (owner: 'worse from inside');
                            # 1.5 keeps the dark, moody v37.34 look with shadowed panels just readable
@@ -493,6 +503,139 @@ def inside_votes(bvh, p, eps):
     return odd
 
 
+def cut_canopy_bulge(hull, cp, L, prm, rep):
+    """Delete the closed canopy bulge around cp so the open-cockpit dome can replace it."""
+    me = hull.data
+    nP = len(me.polygons)
+    cen = np.empty(nP * 3, np.float32)
+    me.polygons.foreach_get('center', cen)
+    cen = cen.reshape(-1, 3)
+    nrm = np.empty(nP * 3, np.float32)
+    me.polygons.foreach_get('normal', nrm)
+    nrm = nrm.reshape(-1, 3)
+    d = np.linalg.norm(cen - np.array(cp), axis=1)
+    if prm['mode'] == 'dark':
+        mat0 = me.materials[0]
+        img = next(n.image for n in mat0.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image)
+        W, H = img.size
+        px = np.empty(W * H * 4, np.float32)
+        img.pixels.foreach_get(px)
+        px = px.reshape(H, W, 4)
+        ls = np.empty(nP, np.int32)
+        lt = np.empty(nP, np.int32)
+        me.polygons.foreach_get('loop_start', ls)
+        me.polygons.foreach_get('loop_total', lt)
+        uvs = np.empty(len(me.loops) * 2, np.float32)
+        me.uv_layers.active.data.foreach_get('uv', uvs)
+        uvs = uvs.reshape(-1, 2)
+        cum = np.cumsum(uvs, axis=0)
+        cs = np.concatenate([[0.0], cum[:, 0]])
+        ct = np.concatenate([[0.0], cum[:, 1]])
+        fu = (cs[ls + lt] - cs[ls]) / lt
+        fv = (ct[ls + lt] - ct[ls]) / lt
+        ix = (np.mod(fu, 1.0) * W).astype(int).clip(0, W - 1)
+        iy = (np.mod(fv, 1.0) * H).astype(int).clip(0, H - 1)
+        col = px[iy, ix, :3]
+        mx = col.max(1)
+        mn = col.min(1)
+        sat = np.where(mx > 1e-4, (mx - mn) / np.maximum(mx, 1e-4), 0)
+        hull_val = float(np.median(mx))
+        seed = (d < prm['R'] * L) & (mx < min(prm['val'], 0.55 * hull_val)) & (sat < prm['sat']) & (nrm[:, 2] > prm['nz'])
+        rep['cut_hull_val'] = round(hull_val, 3)
+    elif prm['mode'] == 'hue':
+        # CHROMA KEY: the refine was prompted to paint the canopy a colour the hull never
+        # wears (Pyro: bright cyan on red) ; the canopy is then the saturated patch of that hue
+        mat0 = me.materials[0]
+        img = next(n.image for n in mat0.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image)
+        W, H = img.size
+        px = np.empty(W * H * 4, np.float32)
+        img.pixels.foreach_get(px)
+        px = px.reshape(H, W, 4)
+        ls = np.empty(nP, np.int32)
+        lt = np.empty(nP, np.int32)
+        me.polygons.foreach_get('loop_start', ls)
+        me.polygons.foreach_get('loop_total', lt)
+        uvs = np.empty(len(me.loops) * 2, np.float32)
+        me.uv_layers.active.data.foreach_get('uv', uvs)
+        uvs = uvs.reshape(-1, 2)
+        cum = np.cumsum(uvs, axis=0)
+        cs = np.concatenate([[0.0], cum[:, 0]])
+        ct = np.concatenate([[0.0], cum[:, 1]])
+        fu = (cs[ls + lt] - cs[ls]) / lt
+        fv = (ct[ls + lt] - ct[ls]) / lt
+        ix = (np.mod(fu, 1.0) * W).astype(int).clip(0, W - 1)
+        iy = (np.mod(fv, 1.0) * H).astype(int).clip(0, H - 1)
+        col = px[iy, ix, :3]
+        mx = col.max(1)
+        mn = col.min(1)
+        sat = np.where(mx > 1e-4, (mx - mn) / np.maximum(mx, 1e-4), 0)
+        r_, g_, b_ = col[:, 0], col[:, 1], col[:, 2]
+        dlt = np.maximum(mx - mn, 1e-6)
+        hue = np.where(mx == r_, ((g_ - b_) / dlt) % 6, np.where(mx == g_, (b_ - r_) / dlt + 2, (r_ - g_) / dlt + 4)) / 6.0
+        dh = np.abs(hue - prm['hue'])
+        dh = np.minimum(dh, 1 - dh)
+        seed = (d < prm['R'] * L) & (dh < prm.get('hue_tol', 0.08)) & (sat > prm.get('key_sat', 0.45)) & (mx > prm.get('key_val', 0.30)) & (nrm[:, 2] > prm['nz'])
+    else:
+        ex = (cen[:, 0] - cp.x) / (prm['ell_a'] * L)
+        ey = (cen[:, 1] - cp.y) / (prm['ell_b'] * L)
+        seed = (ex * ex + ey * ey < 1.0) & (cen[:, 2] > cp.z - prm['dz'] * L) & (nrm[:, 2] > prm['nz'])
+    # SPATIAL clusters of the seed faces (a remeshed Meshy hull is thousands of separate
+    # shells, so shared-edge components split the painted canopy into confetti) ; keep the
+    # biggest cluster near the marker, then take every seed face within its footprint.
+    area = np.empty(nP, np.float32)
+    me.polygons.foreach_get('area', area)
+    sidx = np.nonzero(seed)[0]
+    sidx = sidx[np.argsort(-area[sidx])]
+    comps = []
+    for i in sidx:
+        c = cen[i]
+        for cl in comps:
+            if np.linalg.norm(cl['c'] - c) < 0.08 * L:
+                w = cl['a'] + area[i]
+                cl['c'] = (cl['c'] * cl['a'] + c * area[i]) / w
+                cl['a'] = w
+                cl['m'].append(int(i))
+                break
+        else:
+            comps.append({'c': c.copy(), 'a': float(area[i]), 'm': [int(i)]})
+    if not comps:
+        raise RuntimeError('cut: no canopy bulge faces found')
+    comps.sort(key=lambda cl: (float(np.linalg.norm(cl['c'] - np.array(cp))) > 0.12 * L, -cl['a']))
+    best = comps[0]
+    cut = np.zeros(nP, bool)
+    cut[best['m']] = True
+    if prm['mode'] == 'hue':                     # a chroma key is unambiguous: every keyed cluster near the main one is canopy
+        for cl in comps[1:]:
+            if np.linalg.norm(cl['c'] - best['c']) < 0.25 * L:
+                cut[cl['m']] = True
+    # footprint: the cluster's members' extent, padded ; every seed face inside it goes too
+    mem = cen[best['m']]
+    lo_, hi_ = mem.min(0) - 0.02 * L, mem.max(0) + 0.02 * L
+    inside = seed & np.all((cen >= lo_) & (cen <= hi_), axis=1)
+    cut |= inside
+    if cut.sum() < prm['min_faces']:
+        raise RuntimeError(f'cut: canopy bulge too small ({int(cut.sum())} faces)')
+    comps = [cl['m'] for cl in comps]
+    for coll in (me.vertices, me.edges):
+        coll.foreach_set('select', np.zeros(len(coll), bool))
+    me.polygons.foreach_set('select', cut)
+    bpy.context.tool_settings.mesh_select_mode = (False, False, True)
+    bpy.context.view_layer.objects.active = hull
+    hull.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    try:
+        bpy.ops.mesh.delete(type='FACE')
+    finally:
+        bpy.ops.object.mode_set(mode='OBJECT')
+    me.update()
+    cc = cen[cut].mean(0)
+    base_z = float(cen[cut][:, 2].min())
+    rep['_cut_centres'] = cen[cut].copy()
+    rep['cut_canopy'] = {'mode': prm['mode'], 'faces_cut': int(cut.sum()), 'components': [len(c) for c in comps[:5]],
+                         'centre': [round(float(x), 3) for x in cc], 'base_z': round(base_z, 3)}
+    return Vector((float(cc[0]), float(cp.y), float(cc[2]))), base_z
+
+
 def build_open_canopy(hull, cp, L, prm, rep):
     """Find the open cockpit cavity around cp, loft a glass dome over its rim and JOIN it into
     the hull (dome faces land at the end of the polygon list). Returns the dome face count."""
@@ -515,8 +658,77 @@ def build_open_canopy(hull, cp, L, prm, rep):
             if h[0] is not None:
                 zh[j, i] = h[0].z
     have = ~np.isnan(zh)
-    ref1 = float(np.nanpercentile(zh, 80))
-    cav = have & (zh < ref1 - prm['depth'] * L)
+    if prm.get('cut_centres') is not None:
+        # a cut canopy: the hole IS the footprint of the faces we deleted (a depth test fails
+        # both ways - the deck sits at the bulge's base, and Meshy models a shallow interior
+        # blob right under the glass)
+        from mathutils.kdtree import KDTree as _KDc
+        ccs = np.asarray(prm['cut_centres'], np.float32)
+        kdc = _KDc(len(ccs))
+        for i_, c_ in enumerate(ccs):
+            kdc.insert(Vector((float(c_[0]), float(c_[1]), 0.0)), i_)
+        kdc.balance()
+        cell0 = float(xs[1] - xs[0])
+        cav = np.zeros((n, n), bool)
+        for j, y in enumerate(ys):
+            for i, x in enumerate(xs):
+                if kdc.find(Vector((float(x), float(y), 0.0)))[2] < 1.6 * cell0:
+                    cav[j, i] = True
+        cav &= have
+        ref1 = float(prm['cut_base_z'])
+    elif prm.get('method', 'pct') == 'adapt':
+        # ADAPT (thin deltas - Vortex): a cell is cavity when the highest surface within
+        # local_r stands above it by half of the deepest drop found near the marker. The
+        # window-wide percentile below reads a flat wing top as cavity on such a hull.
+        gx, gy = np.meshgrid(xs, ys)
+        rr = np.hypot(gx - cp.x, gy - cp.y)
+        cell0 = float(xs[1] - xs[0])
+        k = max(1, int(round(prm.get('local_r', 0.06) * L / cell0)))
+        zf = np.where(have, zh, -1e9)
+        zmax = zf.copy()
+        for sh_ in range(1, k + 1):
+            zmax[:, sh_:] = np.maximum(zmax[:, sh_:], zf[:, :-sh_])
+            zmax[:, :-sh_] = np.maximum(zmax[:, :-sh_], zf[:, sh_:])
+        z2 = zmax.copy()
+        for sh_ in range(1, k + 1):
+            z2[sh_:, :] = np.maximum(z2[sh_:, :], zmax[:-sh_, :])
+            z2[:-sh_, :] = np.maximum(z2[:-sh_, :], zmax[sh_:, :])
+        dd = z2 - zh
+        near_ = have & (rr < 0.12 * L)
+        dmax = float(np.percentile(dd[near_], 98)) if near_.any() else 0.0
+        thr = max(prm['depth'] * L, prm.get('adapt_frac', 0.5) * dmax)
+        cav = have & (dd > thr) & (rr < 0.24 * L)
+        ref1 = float(np.nanmedian(np.where(cav, z2, np.nan))) if cav.any() else float(np.nanpercentile(zh, 80))
+        rep['cavity_thr'] = {'method': 'adapt', 'dmax': round(dmax, 3), 'thr': round(thr, 3)}
+    else:
+        # PCT (default): the deck reference is the window's 80th percentile height and cavity
+        # is anything `depth` below it, within reach of the marker. Right for a fuselage pit
+        # (Slayer, Puncture) ; wrong for a thin delta whose wings sit below the spine.
+        gx, gy = np.meshgrid(xs, ys)
+        rr = np.hypot(gx - cp.x, gy - cp.y)
+        ref1 = float(np.nanpercentile(zh, 80))
+        cav = have & (zh < ref1 - prm['depth'] * L) & (rr < 0.30 * L)
+        rep['cavity_thr'] = {'method': 'pct', 'ref': round(ref1, 3), 'depth': round(prm['depth'] * L, 3)}
+    # diagnostic: the height grid (dark = low) with the cavity mask in red and the marker in yellow
+    try:
+        _z = np.where(have, zh, np.nan)
+        _lo, _hi = float(np.nanmin(_z)), float(np.nanmax(_z))
+        _g = np.clip((_z - _lo) / max(1e-6, _hi - _lo), 0, 1)
+        _img = np.zeros((n, n, 4), np.float32)
+        _img[..., 0] = _img[..., 1] = _img[..., 2] = np.nan_to_num(_g)
+        _img[..., 3] = 1.0
+        _img[cav, 0] = 1.0
+        _img[cav, 1] *= 0.4
+        _img[cav, 2] *= 0.4
+        ci_, cj_ = int(np.argmin(np.abs(xs - cp.x))), int(np.argmin(np.abs(ys - cp.y)))
+        _img[max(0, cj_ - 1):cj_ + 2, max(0, ci_ - 1):ci_ + 2] = (1, 1, 0, 1)
+        _im = bpy.data.images.new('cavity_dbg', n, n, alpha=True)
+        _im.pixels.foreach_set(_img.ravel())
+        _im.filepath_raw = os.path.join(REPORT_DIR, f'{rep["ship"]}_cavity.png')
+        _im.file_format = 'PNG'
+        _im.save()
+    except Exception as _e:
+        print('cavity dbg failed', _e)
     # connected cavity components (4-neighbour) ; take the one nearest the marker
     lab = np.zeros((n, n), np.int32)
     comps = []
@@ -689,9 +901,18 @@ def process(ship):
     frame = Matrix([[fwd.x, right.x, 0, 0], [fwd.y, right.y, 0, 0], [fwd.z, right.z, 1, 0], [0, 0, 0, 1]])
     cp = markers['cockpit1'].matrix_world.translation.copy()
     n_dome = 0
+    if ship in CUT_SHIPS:
+        cprm = dict(CUT_CFG['default'])
+        cprm.update(CUT_CFG.get(ship, {}))
+        cp, cut_base_z = cut_canopy_bulge(hull, cp, L, cprm, rep)    # the cavity search starts from the cut's centre
+        me = hull.data
+    else:
+        cut_base_z = None
     if ship in OPEN_SHIPS:
         oprm = dict(OPEN_CFG['default'])
         oprm.update(OPEN_CFG.get(ship, {}))
+        oprm['cut_base_z'] = cut_base_z
+        oprm['cut_centres'] = rep.pop('_cut_centres', None)
         n_dome = build_open_canopy(hull, cp, L, oprm, rep)
         me = hull.data
         bb = [Vector(c) for c in hull.bound_box]

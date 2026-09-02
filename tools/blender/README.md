@@ -134,6 +134,59 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
      the pilot's head. Inside the canopy zone a gap is left as SKY (Puncture has a real hole
      above the head; any pane that close filled a quarter of the view).
 
+## The Meshy v2 fleet (v37.37+)
+
+The seven hulls are being remade from Meshy AI text-to-3D (owner's call: the old hulls were
+lumpy Meshy exports with painted canopies, the root cause of the "C+" cockpits). New chain:
+
+```bash
+python tools/meshy/meshy.py balance                     # key in tools/meshy/.key (gitignored) or MESHY_API_KEY
+python tools/meshy/fleet.py preview <ship> b            # 20 credits: clay geometry, prompt from FLEET[ship]['geo']
+python tools/meshy/fleet.py refine  <ship> ship_<ship>_b # 10 credits: PBR 2k textures, FLEET[ship]['paint']
+blender --background --python tools/blender/candidate_views.py -- --slugs ship_<ship>_b_refined   # judge sheet
+python tools/blender/fleet_v2.py [--ships a,b] [--render]   # intake -> cockpit stage -> compress -> manifest
+```
+
+`tools/blender/intake/fleet.json` maps each ship to its chosen candidate folder and a mode:
+`open` (the model has a real cockpit cavity) or `cut` (a closed canopy bulge). Candidates
+live in `assets_base/cockpits/candidates/<slug>/` (gitignored, regenerable from the task ids
+in their JSON); chosen hulls land in `assets_base/ships_v2/` after intake.
+
+- `ship_intake.py` — one Meshy GLB → one canonical hull: joins the parts, finds the forward
+  axis by MIRROR SYMMETRY (the wingspan is often longer than the fuselage, so "long axis"
+  is wrong), the tail by outward-facing nozzle area, centres and scales to length 2.0, and
+  places the markers from geometry: thrusters = rear-facing face clusters, guns = forward-
+  facing clusters at the nose, cockpit1 = the painted canopy (largest dark, matte, upward
+  patch in the front 65% — the "highest point" rule fails when the spine is taller).
+  Overrides in `tools/blender/intake/<ship>.json` (`flip_forward`, `yaw_deg`, `markers`).
+  `--render` draws the markers (red guns, blue thrusters, yellow eye).
+- **Do not run `ship_cleanup.py` / `ship_symmetry.py` on v2 hulls.** A remeshed Meshy hull is
+  thousands of overlapping shells; the debris rule deleted 60% of the Slayer. Their mirror
+  error is ~0.1% of the width already.
+- `ship_cockpit.py --open a,b --cut c,d`: OPEN = the cavity is found with downward rays on a
+  grid around cockpit1, its rim becomes the canopy outline and a lofted glass DOME
+  (`OPEN_CFG`: dome_h of rim width, apex_fwd) is joined into the hull as the canopy faces;
+  everything downstream (tub, eye, rail, coaming, lining, see-through map) runs unchanged.
+  Cavity `method` per ship: `pct` (default — cells `depth` below the window's 80th
+  percentile height; right for a fuselage pit: Slayer, Puncture) or `adapt` (cells below
+  the local maximum within `local_r` by `adapt_frac` of the deepest drop near the marker;
+  the only rule that finds a thin delta's slot without eating its wing top: Vortex). Judge
+  with `<ship>_cavity.png` (height grid, red = cavity, yellow = marker). Enclosure and
+  morphology variants were tried and starve wide pits — leave the two methods alone.
+  CUT = the painted bulge is found and DELETED, then the hole's footprint is the cavity.
+  `CUT_CFG` modes: 'dark' (dark + matte + upward faces near cockpit1, spatially clustered —
+  shared-edge components are confetti on these meshes; needs a hull lighter than its
+  canopy), 'hue' (CHROMA KEY: prompt the refine to paint the canopy a colour the hull never
+  wears — Pyro's cyan on red — and key on that hue; also give the intake
+  `intake/<ship>.json` `canopy_hue` so cockpit1 lands on it), 'geo' (an ellipse footprint).
+  Meshy's own cavity interior is a smooth lumpy blob with a stretched texture — the tub
+  carve replaces it. Islands are off in these modes.
+- Textures: the refine GLB embeds JPEG 2k base/normal/metallicRoughness; `compress_glb.mjs`
+  ship recipe now converts JPEG too (base 2k WebP q88, data maps 1k WebP q85): ~10 MB → ~3 MB.
+- In-game (v37.37): materials that ship a normal/roughness/metalness map keep them (old
+  hulls have none), the cockpit rig adds two point lights (`window.__cockpit.light`), and
+  the interior material is found by NAME (two-primitive interiors since v37.36).
+
 ## What the game does with it (index-working.html)
 
 - `_lssApplyShipRig`, first-person branch: with Settings > "3D Cockpit" on, the ship mesh
