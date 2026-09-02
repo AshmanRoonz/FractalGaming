@@ -100,7 +100,8 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
   (instrument stack for a high eye, Pyro), the `REG` atlas layout, `EMIS_FILL` (the
   interior fill light baked into the emissive atlas, a LINEAR multiplier on the tile — the
   atlas pixels are raw bytes the game decodes as sRGB, so a 0.14 tile is 1.5% linear light
-  and any sRGB-space "floor" stays black on surfaces the sun never reaches).
+  and any sRGB-space "floor" stays black on surfaces the sun never reaches; 1.5 keeps the
+  dark v37.34 mood, 3.0 flattened the cockpit into a grey box).
   **Holes.** The hull is single-sided in the game, so any hull face the seat sees from its
   back is a window onto the sky. Two closers, both measured by the SEE-THROUGH MAP
   (`<ship>_seethrough.png`, equirectangular from the eye: blue glass, green interior, grey
@@ -110,14 +111,28 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
      that leaves a slot straight into the fuselage void. Per rim angle a wall rises from the
      tub top to just under the lowest glass at that angle (outer 25% of the canopy radius),
      so slit windows are never covered.
-  2. **Inner lining** — a 240×120 ray fan from the eye with the game's culling (helmet,
-     glass and anything inside the camera near plane — `L/150`, one game unit — passed
-     through) collects every hull face still reached from behind; those faces, grown by the
-     fan's cell size at their distance, get an inner shell (vertices pushed 1% of the width
-     inward along the vertex normals, shared between plates so creases don't crack) with a
-     single-sided skirt around the outline. Rounds repeat until the fan is clean. Vortex:
-     47 coaming faces + ~600 plates; without the coaming the same job took 30 000 plates of
-     tail interior. `--no-lining` shows the raw holes.
+  2. **Canopy-zone holes become glass.** A 360×240 ray fan from the eye with the game's
+     culling (helmet, glass and anything inside the camera near plane — `L/150`, one game
+     unit — passed through) collects every hull face still reached from behind. A hole
+     inside the canopy's own footprint (above its lowest point, within its length and
+     width) is turned into a pane, oriented away from the eye like the other panes. The
+     v37.34 cockpits the owner liked were in effect full greenhouses: the painted frame
+     areas between the windows were see-through and read as open sky, with the thin rim
+     rail as the frame; plating them (grey tile, then the hull's own paint) put dark shards
+     into that view ("worse from inside"). Pyro: 713 frame faces → glass.
+  3. **Inner lining** for holes below the rim (fuselage, nose skin under the dash): those
+     faces, grown by the fan's cell size at their distance, get an inner shell (vertices
+     pushed 1% of the width inward along the vertex normals, shared between plates so
+     creases don't crack) with a single-sided skirt around the outline; the plates live in
+     the interior mesh but wear the HULL material with the hull face's own UVs (second
+     material slot), so what little of them is visible looks like that ship. Rounds repeat
+     until the fan is clean. Without the coaming Vortex needed 30 000 plates of tail
+     interior; with it ~300. `--no-lining` / `--no-coaming` show the raw holes.
+     Cracks (rays that leave the hull with nothing beyond) get a small plate at the
+     parity-vote crossing, sized by the crack's cross-section only — the crossings scatter
+     ALONG the ray, and that depth noise once sized a 6 cm plate for a hairline 4 cm from
+     the pilot's head. Inside the canopy zone a gap is left as SKY (Puncture has a real hole
+     above the head; any pane that close filled a quarter of the view).
 
 ## What the game does with it (index-working.html)
 

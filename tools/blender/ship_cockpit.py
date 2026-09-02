@@ -54,6 +54,7 @@ ATLAS_DIR = os.path.join(REPO, 'tools/blender/work/atlas')
 SHIPS = opt('--ships', ','.join(SHIPS_ALL)).split(',')
 RENDER = '--render' in argv
 LINING = '--no-lining' not in argv     # inner lining pass (diagnostics: see the raw holes)
+COAMING = '--no-coaming' not in argv   # tub-top-to-glass wall (diagnostics)
 EXPORT = '--no-export' not in argv
 for d in (OUT_DIR, REPORT_DIR, ATLAS_DIR):
     os.makedirs(d, exist_ok=True)
@@ -72,7 +73,9 @@ CANOPY = {
     'default': {'R': 0.16, 'sat': 0.30, 'mode': 'largest', 'min_comp': 30, 'hue_tol': 0.06},
     'pyro': {'R': 0.20, 'sat': 0.28, 'mode': 'union', 'min_comp': 20, 'hue_tol': 0.08},
 }
-EMIS_FILL = 3.0            # interior fill light (LINEAR multiplier on the base tile) baked into the emissive atlas
+EMIS_FILL = 1.5            # interior fill light (LINEAR multiplier on the base tile) baked into the emissive
+                           # atlas. 3.0 flattened the cockpit into a grey box (owner: 'worse from inside');
+                           # 1.5 keeps the dark, moody v37.34 look with shadowed panels just readable
 GLASS_ALPHA = 0.35
 # ships whose canopy rim rail should follow the WHOLE glass outline (tall greenhouse slit)
 RAIL_FULL = {'pyro'}
@@ -101,6 +104,7 @@ REG = {
 }
 REG_ID = {k: i for i, k in enumerate(REG)}
 REG_NAME = {i: k for k, i in REG_ID.items()}
+REG_HULL = 99        # interior faces that wear the HULL material with the hull's own UVs (inner lining)
 
 
 # ================================================================== atlas ==
@@ -411,6 +415,8 @@ class Builder:
                         lo_[i] = min(lo_[i], p[i])
                         hi_[i] = max(hi_[i], p[i])
         for f in self.bm.faces:
+            if f[self.reg] == REG_HULL:
+                continue                        # UVs copied from the hull face at creation
             region = REG_NAME[f[self.reg]]
             kind = REG[region][4]
             g = f[self.grp]
@@ -1097,9 +1103,9 @@ def process(ship):
         cm_top.append(Vector((xy_[0], xy_[1], float(zlo[i_]) - 0.01 * Hc)))
     cm_gap = np.array([cm_top[i_].z - r0[i_].z for i_ in range(N)])
     cm_h = 0
-    for i_ in range(N):
+    for i_ in (range(N) if COAMING else ()):
         j_ = (i_ + 1) % N
-        if max(cm_gap[i_], cm_gap[j_]) < 0.02 * Hc:
+        if max(cm_gap[i_], cm_gap[j_]) < 0.002 * Hc:      # even a sliver: grazing rays over the dash slip through it
             continue
         ta, tb = r0[i_], r0[j_]
         ca = Vector((cm_top[i_].x, cm_top[i_].y, max(cm_top[i_].z, ta.z + 0.002 * Hc)))
@@ -1149,7 +1155,7 @@ def process(ship):
         for v_ in vs_:
             v2f.setdefault(v_, []).append(fi_)
     eps_l = 1e-4 * L
-    LIN_NY, LIN_NP = 240, 120
+    LIN_NY, LIN_NP = 360, 240          # 1 x 0.75 deg cells: the dash-top slit hid between 1.5 deg rows
     F3l = frame.to_3x3()
     lin_dirs = []
     for j_ in range(LIN_NP):
@@ -1236,6 +1242,21 @@ def process(ship):
     shell_off = 0.01 * Wc
     shell_v = {}
     hull_v = {}
+    # the plates wear the HULL material with the hull face's own UVs, so the inside of a
+    # window frame shows that ship's paint and panel lines instead of a flat grey tile
+    # (v37.35's grey plates read as shards - owner: "worse from inside")
+    huv = np.empty(len(me.loops) * 2, np.float32)
+    me.uv_layers.active.data.foreach_get('uv', huv)
+    huv = huv.reshape(-1, 2)
+    lstart = np.empty(nPh, np.int32)
+    me.polygons.foreach_get('loop_start', lstart)
+    poly_uvs = [[Vector(huv[lstart[fi_] + k_]) for k_ in range(len(poly_vs[fi_]))] for fi_ in range(nPh)]
+
+    def _hull_face(f_, uvs_):
+        f_[B.reg] = REG_HULL
+        f_.material_index = 1
+        for l_, uv_ in zip(f_.loops, uvs_):
+            l_[B.uv].uv = uv_
 
     def _sv(vi):
         v = shell_v.get(vi)
@@ -1252,6 +1273,7 @@ def process(ship):
     skirt_done = set()
     crack_centres = []
     crack_patches = 0
+    zone_gaps = 0
     # a fan cell is ~1.5 deg: at distance d the rays are 0.026 d apart and the hull triangles in
     # between are never hit, so every hit face grows by that radius (plus one ring) via a KD
     # tree of face centres ; more rounds catch what is still reachable
@@ -1264,12 +1286,57 @@ def process(ship):
         kdH.insert(Vector(cenH[fi_]), fi_)
     kdH.balance()
     cell_ang = math.radians(360.0 / LIN_NY)
+    # CANOPY-ZONE holes become GLASS, not plates. The v37.34 cockpits the owner liked were in
+    # effect full greenhouses: the painted frame areas between the windows were see-through
+    # from the seat and read as open sky, with the thin rim rail as the frame. Plating them
+    # (grey tile, then the hull's own paint) put dark shards into that view - "worse from
+    # inside". So a hole that sits inside the canopy's own footprint (above its lowest point,
+    # within its length/width) is turned into a pane: sealed by design, open by design, and
+    # from outside the canopy becomes the greenhouse it already looked like from the seat.
+    # Holes below the rim (fuselage, nose skin under the dash) still get the coaming + plates.
+    _cx0, _cx1 = float(ccl[:, 0].min()), float(ccl[:, 0].max())
+
+    def _zone_pt(pw_):
+        pl_ = B.to_local(Vector(pw_))
+        return (0.0 < pl_.z < 1.05 * Hc) and (_cx0 - 0.05 * Lc <= pl_.x <= _cx1 + 0.05 * Lc) and (abs(pl_.y) <= 0.55 * Wc)
+
+    def _in_canopy_zone(fi_):
+        return _zone_pt(cenH[fi_])
+
+    glass_conv = 0
     for _round in range(6 if LINING else 0):
         B.bm.normal_update()                    # FromBMesh ray hits report the STORED face normal
         holes, fan_cnt = _fan_holes(_BVH3.FromBMesh(B.bm, epsilon=0.0))
         rep.setdefault('lining_fan', []).append({'holes_rays': fan_cnt['hole'], 'hole_faces': len(holes),
                                                   'already_lined': len(set(holes) & lined_set)})
         new_h = set(holes) - lined_set
+        to_glass = {f_ for f_ in new_h if _in_canopy_zone(f_)}
+        if to_glass:
+            mi_now = np.empty(nPh, np.int32)
+            me.polygons.foreach_get('material_index', mi_now)
+            gidx_ = np.fromiter(to_glass, np.int64)
+            mi_now[gidx_] = gslot0
+            me.polygons.foreach_set('material_index', mi_now)
+            cen_now = np.empty(nPh * 3, np.float32)
+            me.polygons.foreach_get('center', cen_now)
+            nrm_now = np.empty(nPh * 3, np.float32)
+            me.polygons.foreach_get('normal', nrm_now)
+            fe_ = np.zeros(nPh, bool)
+            fe_[gidx_] = True
+            fe_ &= ((np.array(eye_w0) - cen_now.reshape(-1, 3)) * nrm_now.reshape(-1, 3)).sum(1) > 0
+            if fe_.any():                        # panes face away from the eye (cull from inside)
+                set_select_mode('FACE')
+                select_faces(fe_)
+                edit_op(lambda: bpy.ops.mesh.flip_normals())
+            me.update()
+            me.polygons.foreach_get('material_index', miH)
+            hb_ = bmesh.new()
+            hb_.from_mesh(me)
+            hull_bvh0 = _BVH3.FromBMesh(hb_, epsilon=0.0)
+            hb_.free()
+            glass_conv += len(to_glass)
+            lined_set |= to_glass
+            new_h -= to_glass
         # CRACK PATCHES: a ray that leaves the hull with nothing beyond went through a crack
         # in the skin (the cleanup zipper closes most). Nothing to copy there, so a small plate
         # perpendicular to the ray sits where it crossed the skin (the point along the ray
@@ -1313,16 +1380,25 @@ def process(ship):
             pc_ = sum((m_[0] for m_ in cl_), Vector()) / len(cl_)
             dw_ = sum((m_[1] for m_ in cl_), Vector()).normalized()
             t_ = sum(m_[2] for m_ in cl_) / len(cl_)
-            spread_ = max((m_[0] - pc_).length for m_ in cl_)
+            # the crack's cross-section only: the parity crossings scatter ALONG the ray (a crack
+            # makes the votes unstable), and that depth noise once sized a 6 cm plate for a
+            # hairline 11 cm from the head
+            spread_ = max(((m_[0] - pc_) - dw_ * (m_[0] - pc_).dot(dw_)).length for m_ in cl_)
             if any((pc_ - c_).length < 0.03 * Wc for c_ in crack_centres):
                 continue
             crack_centres.append(pc_)
+            if _zone_pt(pc_):
+                # a gap in the canopy shell (Puncture: a real hole 4 cm above the pilot's head)
+                # stays SKY: from the seat it reads exactly like the 35% glass around it, and
+                # any pane that close filled a quarter of the view (black, then pale)
+                zone_gaps += 1
+                continue
             u_ = dw_.cross(Vector((0, 0, 1)))
             if u_.length < 1e-6:
                 u_ = dw_.cross(Vector((0, 1, 0)))
             u_.normalize()
             v_ = dw_.cross(u_).normalized()
-            hs_ = max(0.012 * Wc, 0.9 * cell_ang * t_ + spread_)
+            hs_ = min(0.03 * Wc, max(0.004 * Wc, 0.6 * cell_ang * t_ * math.sqrt(len(cl_)) + spread_))
             vs_ = [B.bm.verts.new(pc_ + u_ * hs_ + v_ * hs_), B.bm.verts.new(pc_ - u_ * hs_ + v_ * hs_),
                    B.bm.verts.new(pc_ - u_ * hs_ - v_ * hs_), B.bm.verts.new(pc_ + u_ * hs_ - v_ * hs_)]
             n_ = (vs_[1].co - vs_[0].co).cross(vs_[2].co - vs_[0].co)
@@ -1337,9 +1413,11 @@ def process(ship):
             lining_faces.append(f_)
             new_patches += 1
         crack_patches += new_patches
-        if not new_h and not new_patches:
+        if not new_h and not new_patches and not to_glass:
             break
         lin_rounds += 1
+        if not new_h:
+            continue
         grow = set(new_h)
         for fi_ in new_h:
             for v_ in poly_vs[fi_]:
@@ -1353,7 +1431,7 @@ def process(ship):
                 f_ = B.bm.faces.new([_sv(vi) for vi in reversed(poly_vs[fi_])])
             except ValueError:
                 continue
-            f_[B.reg] = REG_ID['metal']
+            _hull_face(f_, list(reversed(poly_uvs[fi_])))
             f_.smooth = True
             lining_faces.append(f_)
             lined += 1
@@ -1373,15 +1451,22 @@ def process(ship):
                 # single-sided, facing the eye (a coincident double-sided pair fools the ray
                 # probes: the tree answers either quad first and the step past it skips both)
                 order = [_hv(va), _hv(vb), _sv(vb), _sv(va)]
+                # the skirt wears the hull UVs of its edge (both ends), from the one lined face
+                lf_ = next(g_ for g_ in shared if g_ in lined_set)
+                pvs_ = poly_vs[lf_]
+                ua_ = poly_uvs[lf_][pvs_.index(va)]
+                ub_ = poly_uvs[lf_][pvs_.index(vb)]
+                uvq_ = [ua_, ub_, ub_, ua_]
                 pa, pb, pc = order[0].co, order[1].co, order[2].co
                 qn = (pb - pa).cross(pc - pa)
                 if qn.dot(Vector(eye_w0) - pa) < 0:
                     order.reverse()
+                    uvq_.reverse()
                 try:
                     q_ = B.bm.faces.new(order)
                 except ValueError:
                     continue
-                q_[B.reg] = REG_ID['metal']
+                _hull_face(q_, uvq_)
                 q_.smooth = False
                 lining_faces.append(q_)
                 skirts += 1
@@ -1389,6 +1474,8 @@ def process(ship):
     rep['lining_skirts'] = skirts
     rep['lining_rounds'] = lin_rounds
     rep['crack_patches'] = crack_patches
+    rep['canopy_gaps_left_open'] = zone_gaps
+    rep['holes_to_glass'] = glass_conv
 
     # UVs: box projection everywhere, then continuous UVs on the tub walls
     B.assign_uvs(tile_len=0.30 * Wc)
@@ -1422,6 +1509,7 @@ def process(ship):
     bsdf.inputs['Metallic'].default_value = 0.25
     imat.use_backface_culling = True
     imesh.materials.append(imat)
+    imesh.materials.append(mat0)        # slot 1: the inner lining wears the hull's own material
     # glass: same hull texture, blended
     # FLAT tinted glass, no texture: the hull JPEG paints a fake interior, glare streaks and
     # frame bars into the canopy, and at 38% alpha all of that overlaid the real 3D interior
