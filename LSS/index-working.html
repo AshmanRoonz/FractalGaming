@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.26';
+const LSS_BUILD = '37.27';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4308,7 +4308,11 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // `cockpit_interior` (one 512^2 atlas + emissive atlas, ~1.4k faces: tub, seat,
 // dash with screens, consoles, struts, seated pilot). `cockpit1` is now the
 // pilot's EYE point. Built by tools/blender/ship_cockpit.py.
-const _MODELS_VERSION = '37.25';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+// (v37.27) 37.25 -> 37.27: the pilot's seat / eye is now placed by a ray-fan
+// "most open forward view" search per hull (SLAYER's slot canopy went from
+// a slit to 72% open, PUNCTURE and BLASTER sit higher). Interiors + eye
+// markers moved in every ship GLB.
+const _MODELS_VERSION = '37.27';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -48327,6 +48331,25 @@ function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
   if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) {
     return null;
   }
+  // (v37.27) 3D COCKPIT live: the painted frame these fractions were measured
+  // on is not on screen, so answer with the GLB gun marker on the same SIDE of
+  // the screen instead (fracX left of centre -> the leftmost barrel, right ->
+  // the rightmost ; single-barrel hulls get their one marker). Every
+  // screen-anchored weapon / ability origin (Vortex laser, Tracker + Pyro
+  // bolts, core cannons, mortar, pulse) lands on a real barrel with no
+  // per-caller change.
+  if (typeof game !== 'undefined' && game && game._cockpit3dLive && player.mesh && player.mesh.userData) {
+    const _nodes = player.mesh.userData.muzzleNodes;
+    if (_nodes && _nodes.length) {
+      let _best = null, _bestX = 0;
+      for (let i = 0; i < _nodes.length; i++) {
+        const _wp = _nodes[i].getWorldPosition(new THREE.Vector3());
+        const _sx = _wp.clone().project(camera).x;
+        if (_best === null || (fracX < 0.5 ? _sx < _bestX : _sx > _bestX)) { _best = _wp; _bestX = _sx; }
+      }
+      return _best;
+    }
+  }
   fwdOff = (typeof fwdOff === 'number') ? fwdOff : 60;
   // Compose the directional shift applied to the gun-layer so the
   // computed muzzle world point tracks the visibly-shifted painted
@@ -48613,12 +48636,43 @@ function _spawnRailgunSpiral(from, to, color) {
   }
 }
 
+const _cpTracerTmp = new THREE.Vector3();
 function spawnTracer(from, to, color, widthScale) {
   color = color || 0xffff00;
   // Per-call width multiplier so rapid-fire weapons (chaingun, Predator
   // Cannon) can pass a smaller value (~0.55) and stop their long-lived haze
   // layers from stacking into a thick 2D streak across the screen.
   const wScale = (typeof widthScale === 'number' && widthScale > 0) ? widthScale : 1.0;
+  // (v37.27) 3D COCKPIT live: a player-side shot leaves a real GLB gun marker
+  // as ONE tracer. The split screen-fraction pair below was tuned to the
+  // painted frames (which are off), and a tracer starting at player.position
+  // would begin BEHIND the eye — the camera sits ~40u ahead at the cockpit1
+  // marker — and paint its tube through the interior. "Player-side" = the
+  // origin is at player.position, at the camera, or already at one of our
+  // barrels ; bot and peer shots never originate at any of those.
+  if (typeof game !== 'undefined' && game && game._cockpit3dLive && !game.thirdPerson &&
+      typeof player !== 'undefined' && player && player.mesh && player.mesh.userData && player.position) {
+    const _nodes = player.mesh.userData.muzzleNodes;
+    if (_nodes && _nodes.length) {
+      const _nearPlayer = from.distanceTo(player.position) < 4 ||
+        (typeof camera !== 'undefined' && camera && from.distanceTo(camera.position) < 4);
+      let _atBarrel = false;
+      if (!_nearPlayer) {
+        for (let i = 0; i < _nodes.length && !_atBarrel; i++) {
+          if (from.distanceTo(_nodes[i].getWorldPosition(_cpTracerTmp)) < 4) _atBarrel = true;
+        }
+      }
+      if (_nearPlayer || _atBarrel) {
+        let _o = from;
+        if (_nearPlayer) {
+          player._muzzleShot = (player._muzzleShot | 0) + 1;
+          _o = _nodes[player._muzzleShot % _nodes.length].getWorldPosition(new THREE.Vector3());
+        }
+        _spawnSingleTracer(_o, to, color, 1.0 * wScale, 0.30);
+        return;
+      }
+    }
+  }
   // Player-side shots: split into two tracers that originate at the left
   // and right painted barrel tips and converge on the target. With the camera
   // sitting right at player.position, a single centered tracer paints its
@@ -55293,7 +55347,10 @@ function fireWeapon() {
   // Mirrors how bots/peers already originate fire at shipMuzzleWorld() (v32.21).
   let _hitOrigin = origin;
   let _hitForward = forward;
-  if (game.thirdPerson && player.mesh && typeof shipMuzzleWorld === 'function') {
+  // (v37.27) The 3D cockpit takes the same GLB-marker path as third person:
+  // the barrels the pilot sees past the canopy are where the shots and the
+  // muzzle flash come from, re-aimed to converge on the reticle.
+  if ((game.thirdPerson || game._cockpit3dLive) && player.mesh && typeof shipMuzzleWorld === 'function') {
     const _mn = player.mesh.userData && player.mesh.userData.muzzleNodes;
     if (_mn && _mn.length) {
       player._muzzleShot = (player._muzzleShot | 0) + 1;
@@ -55307,7 +55364,7 @@ function fireWeapon() {
   let _fwDir = _hitForward;
   // (v30.86) TRACKER + PYRO 1st-person : the bolt leaves the painted BARREL MOUTH and
   // converges on the crosshair. Skipped in 3rd person (the GLB markers above win).
-  if (!game.thirdPerson && w.mode === 'projectile' &&
+  if (!game.thirdPerson && !game._cockpit3dLive && w.mode === 'projectile' &&
       (player.loadoutKey === 'TRACKER' || player.loadoutKey === 'PYRO') &&
       typeof _computeScreenMuzzleWorld === 'function' && _PLAYER_MAIN_MUZZLE_FRAC[player.loadoutKey]) {
     const _mf = _PLAYER_MAIN_MUZZLE_FRAC[player.loadoutKey];

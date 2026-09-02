@@ -214,7 +214,9 @@ def build_atlas(ship, tint, size=512):
     yy, xx = np.mgrid[0:q, 0:q]
     glow *= (0.75 + 0.25 * np.sin(yy / q * math.pi))[:, :, None]
     put(base, REG['glow'], np.clip(glow, 0, 1))
-    put(emis, REG['glow'], np.clip(glow, 0, 1))
+    # glow strips sit right under the pilot's eye on the closer seats ; 60% keeps them as an
+    # accent rather than a light bar across the bottom of the view
+    put(emis, REG['glow'], np.clip(glow * 0.6, 0, 1))
     suit = np.ones((q, q, 3), np.float32) * np.array((0.07, 0.07, 0.08), np.float32)
     suit *= (0.9 + 0.2 * pnoise(q, q, 6, seed + 11))[:, :, None]
     band = (np.abs(yy - q * 0.5) < 5)
@@ -226,6 +228,13 @@ def build_atlas(ship, tint, size=512):
     visor = visor + streak * 0.45
     put(base, REG['visor'], np.clip(visor, 0, 1))
     put(emis, REG['visor'], np.clip(np.array(tint, np.float32)[None, None, :] * 0.25 * grad, 0, 1))
+    # emissive FLOOR on the structural regions: the cockpit sits in the hull's own shadow in
+    # combat and read near-black under ambient alone ; a faint self-light (~14% of base)
+    # keeps panels legible without competing with the screens / glow strips.
+    for rname in ('metal', 'trim', 'seat', 'suit'):
+        u0, v0, u1, v1 = REG[rname][:4]
+        x0, x1, y0, y1 = int(u0 * size), int(u1 * size), int(v0 * size), int(v1 * size)
+        emis[y0:y1, x0:x1, :3] = np.maximum(emis[y0:y1, x0:x1, :3], base[y0:y1, x0:x1, :3] * 0.14)
     paths = []
     for name, arr in (('int', base), ('emis', emis)):
         img = bpy.data.images.new(f'{ship}_{name}', size, size, alpha=True)
@@ -807,14 +816,45 @@ def process(ship):
     prof = np.array(prof)
     xa = float(((xb[:-1] + xb[1:]) / 2)[int(np.argmax(prof))])
     z_apex = float(prof.max())
-    sx = max(-0.30 * Lc, min(0.05 * Lc, xa - 0.06 * Lc))     # seat x, clamped to the tub
     hr = 0.075 * Wc
-    # glass height directly over the head
-    m_ = strip & (np.abs(ccl[:, 0] - (sx - 0.03 * Lc)) < 0.08 * Lc)
-    z_over_head = float(ccl[m_, 2].max()) if m_.any() else z_apex
-    eye_z = min(0.62 * Hc, z_over_head - 1.7 * hr)
-    rep['pilot'] = {'seat_x': round(sx, 3), 'apex_x': round(xa, 3), 'z_apex': round(z_apex, 3),
-                    'z_over_head': round(z_over_head, 3), 'eye_z': round(eye_z, 3)}
+
+    def glass_top(x):
+        i = int(np.clip((x - xb[0]) / max(1e-9, xb[-1] - xb[0]) * 14, 0, 13))
+        return float(prof[i]) if prof[i] > 0 else z_apex
+
+    # ---- EYE PLACEMENT = the most OPEN forward view --------------------------------------
+    # Recessed canopies (SLAYER's slot between two hull ridges, PUNCTURE's gun spine beside
+    # the seat) wall the pilot in when the head sits low. Cast a fan of rays (yaw ±65°,
+    # pitch −18..+28°) from candidate eye points against the NON-glass hull and keep the
+    # candidate that sees the most sky/world, with the helmet still under the glass.
+    from mathutils.bvhtree import BVHTree as _BVH
+    bmv = bmesh.new()
+    bmv.from_mesh(me)
+    gslot = len(me.materials)
+    _verts = [v.co.copy() for v in bmv.verts]
+    _polys = [[v.index for v in f.verts] for f in bmv.faces if f.material_index != gslot]
+    bvh_view = _BVH.FromPolygons(_verts, _polys, all_triangles=False, epsilon=0.0)
+    bmv.free()
+    yaws = np.radians(np.linspace(-65, 65, 14))
+    pitches = np.radians(np.linspace(-18, 28, 7))
+    F3 = frame.to_3x3()
+    dirs_w = [F3 @ Vector((math.cos(p) * math.cos(y), math.cos(p) * math.sin(y), math.sin(p))) for p in pitches for y in yaws]
+    far = 2.5 * Lc
+    best = None
+    for xc in np.linspace(-0.33 * Lc, 0.02 * Lc, 8):
+        zcap = glass_top(xc) - 1.7 * hr
+        for zf in (0.35, 0.55, 0.75, 0.92):
+            zc = min(zcap, max(0.12 * Hc, zf * Hc))
+            eye_w = B.to_world(Vector((xc, 0, zc)))
+            open_n = sum(1 for dw in dirs_w if bvh_view.ray_cast(eye_w, dw, far)[0] is None)
+            score = open_n / len(dirs_w) - 0.04 * abs(xc / Lc)
+            if best is None or score > best[0] + 1e-9:
+                best = (score, float(xc), float(zc), open_n)
+    eye_x, eye_z = best[1], best[2]
+    sx = eye_x + 0.03 * Lc                                    # head sits 0.03 Lc behind the seat centre
+    rep['pilot'] = {'seat_x': round(sx, 3), 'eye_x': round(eye_x, 3), 'eye_z': round(eye_z, 3),
+                    'apex_x': round(xa, 3), 'z_apex': round(z_apex, 3),
+                    'open_frac': round(best[3] / len(dirs_w), 3), 'glass_top_at_eye': round(glass_top(eye_x), 3)}
     bv = 0.06 * min(Wc, D)          # bevel radius
     B.box((sx, 0, -0.56 * D), (0.24 * Lc, 0.36 * Wc, 0.09 * D), region='seat', bevel=bv)              # pan
     B.box((sx - 0.12 * Lc, 0, -0.30 * D), (0.05 * Lc, 0.36 * Wc, 0.50 * D), rot=(0, math.radians(-12), 0), region='seat', bevel=bv * 0.6)  # backrest
@@ -836,7 +876,7 @@ def process(ship):
     # glow strip along the dash front edge
     edge_c = Vector((dx, 0, -0.32 * D)) + Vector((-math.cos(tilt), 0, -math.sin(tilt))) * (0.09 * Lc) \
         + Vector((-math.sin(tilt), 0, math.cos(tilt))) * (0.17 * D)
-    B.box(edge_c, (0.012 * Lc, 0.66 * Wc, 0.03 * D), rot=(0, tilt, 0), region='glow')
+    B.box(edge_c, (0.010 * Lc, 0.60 * Wc, 0.018 * D), rot=(0, tilt, 0), region='glow')
     # side consoles with buttons + a small screen each
     for sgn in (1, -1):
         cx_, cy_ = 0.04 * Lc, sgn * 0.36 * Wc
@@ -861,8 +901,10 @@ def process(ship):
         B.box((sx + 0.10 * Lc, sgn * 0.08 * Wc, -0.46 * D), (0.22 * Lc, 0.09 * Wc, 0.10 * D), region='suit', bevel=bv * 0.3)  # thighs
     # canopy struts: arcs following the glass, offset inward (ccl = canopy centres RELATIVE
     # to the canopy origin, i.e. the same frame the furniture is placed in)
+    # front strut = windscreen frame near the canopy's FRONT end (from the eye it projects low,
+    # framing the view instead of barring it at eye level) ; rear strut behind the head.
     strut_faces = []
-    for xs in (sx + 0.26 * Lc, sx - 0.17 * Lc):
+    for xs in (0.40 * Lc, sx - 0.17 * Lc):
         selm = np.abs(ccl[:, 0] - xs) < 0.05 * Lc
         if selm.sum() < 6:
             continue

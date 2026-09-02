@@ -4167,12 +4167,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.26';
+const LSS_BUILD = '37.27';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '37.25';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.27';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -37489,6 +37489,18 @@ function _computeScreenMuzzleWorld(fracX, fracY, fwdOff) {
   if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) {
     return null;
   }
+  if (typeof game !== 'undefined' && game && game._cockpit3dLive && player.mesh && player.mesh.userData) {
+    const _nodes = player.mesh.userData.muzzleNodes;
+    if (_nodes && _nodes.length) {
+      let _best = null, _bestX = 0;
+      for (let i = 0; i < _nodes.length; i++) {
+        const _wp = _nodes[i].getWorldPosition(new THREE.Vector3());
+        const _sx = _wp.clone().project(camera).x;
+        if (_best === null || (fracX < 0.5 ? _sx < _bestX : _sx > _bestX)) { _best = _wp; _bestX = _sx; }
+      }
+      return _best;
+    }
+  }
   fwdOff = (typeof fwdOff === 'number') ? fwdOff : 60;
   if (typeof _overlayShift === 'object' && _overlayShift) {
     fracX += _overlayShift.x / 100;
@@ -37689,9 +37701,33 @@ function _spawnRailgunSpiral(from, to, color) {
   }
 }
 
+const _cpTracerTmp = new THREE.Vector3();
 function spawnTracer(from, to, color, widthScale) {
   color = color || 0xffff00;
   const wScale = (typeof widthScale === 'number' && widthScale > 0) ? widthScale : 1.0;
+  if (typeof game !== 'undefined' && game && game._cockpit3dLive && !game.thirdPerson &&
+      typeof player !== 'undefined' && player && player.mesh && player.mesh.userData && player.position) {
+    const _nodes = player.mesh.userData.muzzleNodes;
+    if (_nodes && _nodes.length) {
+      const _nearPlayer = from.distanceTo(player.position) < 4 ||
+        (typeof camera !== 'undefined' && camera && from.distanceTo(camera.position) < 4);
+      let _atBarrel = false;
+      if (!_nearPlayer) {
+        for (let i = 0; i < _nodes.length && !_atBarrel; i++) {
+          if (from.distanceTo(_nodes[i].getWorldPosition(_cpTracerTmp)) < 4) _atBarrel = true;
+        }
+      }
+      if (_nearPlayer || _atBarrel) {
+        let _o = from;
+        if (_nearPlayer) {
+          player._muzzleShot = (player._muzzleShot | 0) + 1;
+          _o = _nodes[player._muzzleShot % _nodes.length].getWorldPosition(new THREE.Vector3());
+        }
+        _spawnSingleTracer(_o, to, color, 1.0 * wScale, 0.30);
+        return;
+      }
+    }
+  }
   const camDist = (typeof camera !== 'undefined' && camera) ? from.distanceTo(camera.position) : 9999;
   if (camDist < 80 && (typeof game === 'undefined' || !game || !game.thirdPerson)) {
     const q = camera.quaternion;
@@ -42544,7 +42580,7 @@ function fireWeapon() {
 
   let _hitOrigin = origin;
   let _hitForward = forward;
-  if (game.thirdPerson && player.mesh && typeof shipMuzzleWorld === 'function') {
+  if ((game.thirdPerson || game._cockpit3dLive) && player.mesh && typeof shipMuzzleWorld === 'function') {
     const _mn = player.mesh.userData && player.mesh.userData.muzzleNodes;
     if (_mn && _mn.length) {
       player._muzzleShot = (player._muzzleShot | 0) + 1;
@@ -42556,7 +42592,7 @@ function fireWeapon() {
 
   let _fwOrigin = _hitOrigin;
   let _fwDir = _hitForward;
-  if (!game.thirdPerson && w.mode === 'projectile' &&
+  if (!game.thirdPerson && !game._cockpit3dLive && w.mode === 'projectile' &&
       (player.loadoutKey === 'TRACKER' || player.loadoutKey === 'PYRO') &&
       typeof _computeScreenMuzzleWorld === 'function' && _PLAYER_MAIN_MUZZLE_FRAC[player.loadoutKey]) {
     const _mf = _PLAYER_MAIN_MUZZLE_FRAC[player.loadoutKey];
