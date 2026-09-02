@@ -91,8 +91,13 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
   strut either barred the view or turned into a jagged crown). Also bakes a HULL emissive
   map from the painted class-colour light strips (`HULL_GLOW` per-ship sat/val/hue
   knobs; judge with the `<ship>_night.png` render). Moves `cockpit1` to the pilot's eye.
-  Knobs: `CANOPY` (per-ship detection), `ACCENT` (= LSS.CLASS_COLORS), `GLASS_ALPHA`,
-  `HULL_GLOW`, the `REG` atlas layout.
+  The glass is a FLAT tint (the hull texture paints a fake interior and glare into the
+  canopy; at 35% alpha that read as a veil, worst on Puncture); all enclosed paint islands
+  are folded into the pane (keeping the dark ones opaque made black shards, the paint's
+  frame lines are finer than the triangles); panes are oriented against the eye so none can
+  face the pilot. Knobs: `CANOPY` (per-ship detection), `ACCENT` (= LSS.CLASS_COLORS),
+  `GLASS_ALPHA`, `HULL_GLOW`, `RAIL_FULL` (full thin window frame, Pyro), `TALL_DASH`
+  (instrument stack for a high eye, Pyro), the `REG` atlas layout.
 
 ## What the game does with it (index-working.html)
 

@@ -71,7 +71,11 @@ CANOPY = {
     'default': {'R': 0.16, 'sat': 0.30, 'mode': 'largest', 'min_comp': 30, 'hue_tol': 0.06},
     'pyro': {'R': 0.20, 'sat': 0.28, 'mode': 'union', 'min_comp': 20, 'hue_tol': 0.08},
 }
-GLASS_ALPHA = 0.38
+GLASS_ALPHA = 0.35
+# ships whose canopy rim rail should follow the WHOLE glass outline (tall greenhouse slit)
+RAIL_FULL = {'pyro'}
+# ships whose dash grows into a tall instrument stack (eye high above the rim in a greenhouse)
+TALL_DASH = {'pyro'}
 # Hull light-strip emissive mask knobs (see HULL LIGHTS below): pixels more saturated than
 # `sat`, brighter than `val`, within `hue_tol` (0..1 hue space) of the class colour.
 HULL_GLOW = {
@@ -600,7 +604,11 @@ def process(ship):
     # only islands near the marker count (internal plates elsewhere are disconnected too) ;
     # they get the glass MATERIAL but never drive the cockpit dimensions or the rim.
     islands = noncan & ~reach & (d < R)
+    # ALL enclosed islands become glass. Keeping the dark ones opaque (painted frame bars)
+    # was tried: the paint's frame lines are far finer than the mesh triangles, so they came
+    # out as random black shards across the pane. A clean tinted pane wins.
     glass_faces = canopy | islands
+    _isl_opaque = 0
     # MIRROR the glass region across the hull's symmetry plane (y = ctr.y after
     # ship_symmetry.py): a face whose mirrored centre lands on a glass face is glass too, so
     # both canopy edges match from the seat even where the texture threshold caught only
@@ -619,7 +627,7 @@ def process(ship):
             glass_faces[fi] = True
             added += 1
     rep['glass_mirrored_in'] = int(added)
-    rep['canopy'] = {'faces': int(canopy.sum()), 'islands_folded_in': int(islands.sum()),
+    rep['canopy'] = {'faces': int(canopy.sum()), 'islands_folded_in': int(islands.sum()), 'islands_kept_opaque': _isl_opaque,
                      'components': [len(c) for c in comps[:6]], 'params': prm}
     if canopy.sum() < 20:
         raise RuntimeError(f'{ship}: canopy detection failed ({canopy.sum()} faces)')
@@ -818,9 +826,15 @@ def process(ship):
     # defined outline from outside.
     rail_pts = ring(0.988, -0.02 * Hc, zfrac_of_rim=1.0)
     rt = 0.03 * Wc
-    rail_zmax = 0.35 * Hc     # only frame the LOW glass edge: on a slit window (PYRO) or ridged
-    for a, b in zip(rail_pts, rail_pts[1:] + rail_pts[:1]):   # glass (SLAYER) the edge climbs into
-        dv = b - a                                              # arches around the pilot's head
+    # Only frame the LOW glass edge by default: on ridged glass (SLAYER) the edge climbs into
+    # arches around the pilot's head. A tall greenhouse slit (PYRO) is the exception - there
+    # the full outline IS the window frame, drawn thinner so it reads as mullions, not pipes.
+    rail_full = ship in RAIL_FULL
+    rail_zmax = Hc * 10 if rail_full else 0.35 * Hc
+    if rail_full:
+        rt *= 0.6
+    for a, b in zip(rail_pts, rail_pts[1:] + rail_pts[:1]):
+        dv = b - a
         ln = dv.length
         if ln < 1e-6 or max(a.z, b.z) > rail_zmax:
             continue
@@ -880,31 +894,69 @@ def process(ship):
     rep['pilot'] = {'seat_x': round(sx, 3), 'eye_x': round(eye_x, 3), 'eye_z': round(eye_z, 3),
                     'apex_x': round(xa, 3), 'z_apex': round(z_apex, 3),
                     'open_frac': round(best[3] / len(dirs_w), 3), 'glass_top_at_eye': round(glass_top(eye_x), 3)}
+    # ---- glass orientation against the EYE: from the seat no pane may face the pilot -------------
+    # (the earlier flip used the tub centre ; a windscreen pane far down the nose can pass that test
+    #  and still face the eye, showing as a translucent band across the view - Puncture had two)
+    _eye_w = B.to_world(Vector((eye_x, 0, eye_z)))
+    nP = len(me.polygons)
+    cen3 = np.empty(nP * 3, np.float32)
+    me.polygons.foreach_get('center', cen3)
+    cen3 = cen3.reshape(-1, 3)
+    nrm3 = np.empty(nP * 3, np.float32)
+    me.polygons.foreach_get('normal', nrm3)
+    nrm3 = nrm3.reshape(-1, 3)
+    mi3 = np.empty(nP, np.int32)
+    me.polygons.foreach_get('material_index', mi3)
+    faces_eye = (mi3 == len(me.materials)) & (((np.array(_eye_w) - cen3) * nrm3).sum(1) > 0)
+    rep['glass_flipped_vs_eye'] = int(faces_eye.sum())
+    if faces_eye.any():
+        set_select_mode('FACE')
+        select_faces(faces_eye)
+        edit_op(lambda: bpy.ops.mesh.flip_normals())
+        me.update()
     bv = 0.06 * min(Wc, D)          # bevel radius
     B.box((sx, 0, -0.56 * D), (0.24 * Lc, 0.36 * Wc, 0.09 * D), region='seat', bevel=bv)              # pan
     B.box((sx - 0.12 * Lc, 0, -0.30 * D), (0.05 * Lc, 0.36 * Wc, 0.50 * D), rot=(0, math.radians(-12), 0), region='seat', bevel=bv * 0.6)  # backrest
     B.box((sx - 0.13 * Lc, 0, 0.02 * D), (0.05 * Lc, 0.16 * Wc, 0.14 * D), rot=(0, math.radians(-12), 0), region='seat', bevel=bv * 0.5)  # headrest
     B.box((sx - 0.02 * Lc, 0.20 * Wc, -0.42 * D), (0.22 * Lc, 0.04 * Wc, 0.16 * D), region='trim', bevel=bv * 0.3)   # armrests
     B.box((sx - 0.02 * Lc, -0.20 * Wc, -0.42 * D), (0.22 * Lc, 0.04 * Wc, 0.16 * D), region='trim', bevel=bv * 0.3)
-    # dash: main slab tilted toward the pilot + two angled wings
+    # dash: main slab tilted toward the pilot + two angled wings. On a tall greenhouse window
+    # (TALL_DASH) the eye sits high above the rim and a bubble-canopy dash ends up far below
+    # the sightline, so the slab grows upward into an instrument STACK with a second and third
+    # row of screens on its face - the bomber-cockpit look the window asks for.
     dx = 0.30 * Lc
-    B.box((dx, 0, -0.32 * D), (0.18 * Lc, 0.70 * Wc, 0.36 * D), rot=(0, math.radians(18), 0), region='metal', bevel=bv * 0.5)
-    for sgn in (1, -1):
-        B.box((dx - 0.09 * Lc, sgn * 0.40 * Wc, -0.34 * D), (0.16 * Lc, 0.12 * Wc, 0.30 * D),
-              rot=(0, math.radians(16), sgn * math.radians(-32)), region='metal', bevel=bv * 0.4)
-    # screens: thin plates lying on the tilted dash top (surface normal tilted 18 deg toward pilot)
     tilt = math.radians(18)
-    top_c = Vector((dx, 0, -0.32 * D)) + Vector((-math.sin(tilt), 0, math.cos(tilt))) * (0.18 * D)
+    tall = ship in TALL_DASH
+    dash_bot = -0.50 * D
+    dash_top = (0.50 * eye_z) if tall else (-0.14 * D)
+    dash_h = dash_top - dash_bot
+    dash_cz = 0.5 * (dash_top + dash_bot)
+    dash_c = Vector((dx, 0, dash_cz))
+    n_top = Vector((-math.sin(tilt), 0, math.cos(tilt)))     # slab top-face normal (toward pilot)
+    n_front = Vector((-math.cos(tilt), 0, -math.sin(tilt)))  # slab face toward the pilot
+    B.box(dash_c, (0.18 * Lc, 0.70 * Wc, dash_h), rot=(0, tilt, 0), region='metal', bevel=bv * 0.5)
+    for sgn in (1, -1):
+        B.box((dx - 0.09 * Lc, sgn * 0.40 * Wc, dash_cz - 0.02 * D), (0.16 * Lc, 0.12 * Wc, dash_h * 0.85),
+              rot=(0, math.radians(16), sgn * math.radians(-32)), region='metal', bevel=bv * 0.4)
+    # screens: thin plates lying on the tilted top
+    top_c = dash_c + n_top * (dash_h / 2)
     for i, yy in enumerate((-0.22, 0.0, 0.22)):
-        c = top_c + Vector((0, yy * Wc, 0)) + Vector((-math.sin(tilt), 0, math.cos(tilt))) * (0.006 * D)
+        c = top_c + Vector((0, yy * Wc, 0)) + n_top * (0.006 * D)
         B.box(c, (0.11 * Lc, 0.18 * Wc, 0.012 * D), rot=(0, tilt, 0), region='screen')
-    # glow strip along the dash front edge
-    edge_c = Vector((dx, 0, -0.32 * D)) + Vector((-math.cos(tilt), 0, -math.sin(tilt))) * (0.09 * Lc) \
-        + Vector((-math.sin(tilt), 0, math.cos(tilt))) * (0.17 * D)
+    if tall:
+        # instrument stack: two more rows on the face of the slab
+        for zf in (0.28, -0.08):
+            for yy in (-0.22, 0.0, 0.22):
+                c = dash_c + n_front * (0.09 * Lc + 0.006 * D) + Vector((0, yy * Wc, 0)) + n_top * (zf * dash_h)
+                B.box(c, (0.012 * D, 0.18 * Wc, 0.16 * dash_h), rot=(0, tilt, 0), region='screen')
+        for yy in (-0.33, 0.33):
+            c = dash_c + n_front * (0.09 * Lc + 0.006 * D) + Vector((0, yy * Wc, 0)) + n_top * (0.10 * dash_h)
+            B.box(c, (0.012 * D, 0.05 * Wc, 0.5 * dash_h), rot=(0, tilt, 0), region='glow')
+    # glow strip along the dash's top-front edge
+    edge_c = dash_c + n_front * (0.09 * Lc) + n_top * (dash_h / 2 - 0.01 * D)
     B.box(edge_c, (0.010 * Lc, 0.60 * Wc, 0.018 * D), rot=(0, tilt, 0), region='glow')
     # glareshield hood over the dash's far edge (short, so it never hides the screens from the seat)
-    hood_c = Vector((dx, 0, -0.32 * D)) + Vector((math.cos(tilt), 0, math.sin(tilt))) * (0.06 * Lc) \
-        + Vector((-math.sin(tilt), 0, math.cos(tilt))) * (0.21 * D)
+    hood_c = dash_c + Vector((math.cos(tilt), 0, math.sin(tilt))) * (0.06 * Lc) + n_top * (dash_h / 2 + 0.03 * D)
     B.box(hood_c, (0.07 * Lc, 0.76 * Wc, 0.014 * D), rot=(0, tilt + math.radians(6), 0), region='trim', bevel=bv * 0.2)
     # centre pedestal between the knees with its own small screen, and a throttle lever on the left console
     B.box((sx + 0.13 * Lc, 0, -0.50 * D), (0.16 * Lc, 0.10 * Wc, 0.14 * D), region='metal', bevel=bv * 0.3)
@@ -997,15 +1049,23 @@ def process(ship):
     imat.use_backface_culling = True
     imesh.materials.append(imat)
     # glass: same hull texture, blended
+    # FLAT tinted glass, no texture: the hull JPEG paints a fake interior, glare streaks and
+    # frame bars into the canopy, and at 38% alpha all of that overlaid the real 3D interior
+    # as a veil (worst on Puncture's heavy gold paint). The tint is the mean painted glass
+    # colour, desaturated and darkened a touch ; in-game buildModelShipMesh makes this
+    # material glossy and reflective (see canopy_glass there).
     glass = bpy.data.materials.new('canopy_glass')
     glass.use_nodes = True
     gt = glass.node_tree
     gb = gt.nodes['Principled BSDF']
-    gtex = new_image_node(gt, img)
-    gt.links.new(gtex.outputs['Color'], gb.inputs['Base Color'])
+    _g = np.array(tint, np.float32)
+    _grey = float(_g.mean())
+    _gc = np.clip((_g * 0.75 + _grey * 0.25) * 0.85, 0, 1)
+    gb.inputs['Base Color'].default_value = (float(_gc[0]), float(_gc[1]), float(_gc[2]), 1.0)
     gb.inputs['Alpha'].default_value = GLASS_ALPHA
-    gb.inputs['Roughness'].default_value = 0.12
+    gb.inputs['Roughness'].default_value = 0.08
     gb.inputs['Metallic'].default_value = 0.0
+    gb.inputs['Specular IOR Level'].default_value = 0.8
     glass.blend_method = 'BLEND'
     glass.show_transparent_back = False
     glass.use_backface_culling = True
