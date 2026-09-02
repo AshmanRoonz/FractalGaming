@@ -601,6 +601,24 @@ def process(ship):
     # they get the glass MATERIAL but never drive the cockpit dimensions or the rim.
     islands = noncan & ~reach & (d < R)
     glass_faces = canopy | islands
+    # MIRROR the glass region across the hull's symmetry plane (y = ctr.y after
+    # ship_symmetry.py): a face whose mirrored centre lands on a glass face is glass too, so
+    # both canopy edges match from the seat even where the texture threshold caught only
+    # one side.
+    from mathutils.kdtree import KDTree as _KD
+    gidx0 = np.nonzero(glass_faces)[0]
+    kd0 = _KD(len(gidx0))
+    for k_, gi_ in enumerate(gidx0):
+        kd0.insert(Vector(cen[gi_]), k_)
+    kd0.balance()
+    fsz = np.sqrt(np.maximum(1e-12, np.array([p.area for p in me.polygons])))
+    added = 0
+    for fi in np.nonzero(~glass_faces & (d < R * 1.3))[0]:
+        m_c = Vector((cen[fi][0], 2 * ctr.y - cen[fi][1], cen[fi][2]))
+        if kd0.find(m_c)[2] < 0.9 * max(fsz[fi], 0.004 * L):
+            glass_faces[fi] = True
+            added += 1
+    rep['glass_mirrored_in'] = int(added)
     rep['canopy'] = {'faces': int(canopy.sum()), 'islands_folded_in': int(islands.sum()),
                      'components': [len(c) for c in comps[:6]], 'params': prm}
     if canopy.sum() < 20:
@@ -609,7 +627,10 @@ def process(ship):
     # canopy frame in ship-local coords
     inv = frame.transposed()
     ccw = np.array([inv @ Vector(c) for c in cen[canopy]])   # local (fwd, right, up) of canopy face centres
-    cf0, cr0 = float(ccw[:, 0].mean()), float(ccw[:, 1].mean())
+    # the cockpit sits exactly on the hull's symmetry plane (y = bbox centre after
+    # ship_symmetry.py re-centres the hull), not on the centroid of the detected glass faces,
+    # which is biased toward whichever side the texture threshold caught more of
+    cf0, cr0 = float(ccw[:, 0].mean()), float(ctr.y)
     zmin, zmax = float(ccw[:, 2].min()), float(ccw[:, 2].max())
     Lc = float(ccw[:, 0].max() - ccw[:, 0].min())
     Wc = float(ccw[:, 1].max() - ccw[:, 1].min())
@@ -660,6 +681,10 @@ def process(ship):
     for _ in range(2):
         rmax = (np.roll(rmax, 1) + rmax + np.roll(rmax, -1)) / 3.0
         zat = (np.roll(zat, 1) + zat + np.roll(zat, -1)) / 3.0
+    # mirror-symmetric outline: bin b (angle theta) pairs with the bin at -theta
+    mir = (N - 1 - idx) % N
+    rmax = 0.5 * (rmax + rmax[mir])
+    zat = 0.5 * (zat + zat[mir])
     theta = (idx + 0.5) / N * 2 * np.pi - np.pi
     rim_rs = np.stack([rmax * np.cos(theta), rmax * np.sin(theta), zat], 1)   # CCW by construction
     rep['rim_verts'] = N

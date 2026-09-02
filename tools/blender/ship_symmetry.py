@@ -53,10 +53,13 @@ PASSES = int(opt('--passes', '3'))
 # PYRO keeps the default: its right pod is ~2x the left one - an obvious one-sided feature
 # (owner's rule: those are design, not wobble). A 9% window half-moved the small pod
 # toward the big one's mirror, which looked worse than either.
-SYM_THRESH = {'default': 0.035}
-# Vertices within this radius (fraction of width) of an UNPAIRED gun marker are never moved:
-# that is the one-sided weapon itself (Puncture's railgun, Tracker's boom).
-PROTECT_R = {'default': 0.16, 'pyro': 0.0}
+SYM_THRESH = {'default': 0.035, 'puncture': 0.05, 'tracker': 0.06}
+# The one-sided weapon (Puncture's railgun, Tracker's boom) is protected as the CONNECTED
+# region of high mirror error that contains the unpaired gun marker: flood-fill over mesh
+# edges from the marker's nearest vertex while the error stays above PROTECT_ERR of the
+# width. That shields the whole boom, root included, without a radius that also freezes
+# the nose tip next to it. PYRO's marker sits on its small pod ; the pods differ by design.
+PROTECT_ERR = 0.02
 THRESH_FRAC = float(opt('--thresh', '0'))          # >0 overrides SYM_THRESH
 for d in (OUT_DIR, REPORT_DIR):
     os.makedirs(d, exist_ok=True)
@@ -234,13 +237,27 @@ def process(ship):
 
     if FIX:
         thresh = (THRESH_FRAC if THRESH_FRAC > 0 else SYM_THRESH.get(ship, SYM_THRESH['default'])) * W
-        # protect the one-sided weapon around any UNPAIRED gun marker
+        # protect the one-sided weapon: the connected high-error region holding the marker
         protect = np.zeros(n_v, bool)
-        pr = PROTECT_R.get(ship, PROTECT_R['default']) * W
         gun_names = [k for k in markers if k.startswith('gun')]
-        if len(gun_names) == 1 and pr > 0:
+        if len(gun_names) == 1:
             g = np.array(markers[gun_names[0]].matrix_world.translation)
-            protect = np.linalg.norm(V - g, axis=1) < pr
+            start = int(np.argmin(np.linalg.norm(V - g, axis=1)))
+            hi_err = err > PROTECT_ERR * W
+            bmp = bmesh.new()
+            bmp.from_mesh(me)
+            bmp.verts.ensure_lookup_table()
+            if hi_err[start]:
+                stack = [start]
+                protect[start] = True
+                while stack:
+                    vi = stack.pop()
+                    for e_ in bmp.verts[vi].link_edges:
+                        o_ = e_.other_vert(bmp.verts[vi]).index
+                        if hi_err[o_] and not protect[o_]:
+                            protect[o_] = True
+                            stack.append(o_)
+            bmp.free()
         moved_total = np.zeros(n_v, bool)
         for p in range(PASSES):
             bm = bmesh.new()
