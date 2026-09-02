@@ -70,8 +70,28 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
   from the real canopy rim (convex-hull fallback), seat, wrap-around dash with three screens,
   glow strip, side consoles with buttons, rear bulkhead, two canopy struts, seated pilot.
   Everything is sized from the canopy (Lc × Wc × Hc) and the tub depth is capped by the hull.
-  Moves `cockpit1` to the pilot's eye. Knobs: `CANOPY` (per-ship detection), `ACCENT`
-  (= LSS.CLASS_COLORS), `GLASS_ALPHA`, the `REG` atlas layout.
+  The seat / eye is placed by a ray-fan search (yaw ±65°, pitch −18..+28° against the
+  non-glass hull) for the most open forward view with the helmet under the glass; the
+  canopy gets a rim rail; only the roll bar behind the head remains as a strut (a front
+  strut either barred the view or turned into a jagged crown). Also bakes a HULL emissive
+  map from the painted class-colour light strips (`HULL_GLOW` per-ship sat/val/hue
+  knobs; judge with the `<ship>_night.png` render). Moves `cockpit1` to the pilot's eye.
+  Knobs: `CANOPY` (per-ship detection), `ACCENT` (= LSS.CLASS_COLORS), `GLASS_ALPHA`,
+  `HULL_GLOW`, the `REG` atlas layout.
+
+## What the game does with it (index-working.html)
+
+- `_lssApplyShipRig`, first-person branch: with Settings > "3D Cockpit" on, the ship mesh
+  stays visible and the camera sits at `cockpit1`; `body.lss-cockpit3d` hides the PNG
+  frames; the eye kicks on recoil and the interior emissive pulses on fire / core /
+  railgun charge (published as `userData._cockpitPulse`, multiplied in by
+  `animateShipMesh`, which owns `emissiveIntensity`). `window.__cockpit = { on, kick }`
+  overrides live.
+- Fire: with the cockpit live the shots and muzzle flash leave the GLB gun markers
+  (`_computeScreenMuzzleWorld` answers the marker on the same screen side; `spawnTracer`
+  draws one tracer from the barrel).
+- `buildModelShipMesh` keeps `emissiveMap` (cockpit always; hull behind Settings > "Hull
+  Lights").
 
 ## Rules that bit us
 
