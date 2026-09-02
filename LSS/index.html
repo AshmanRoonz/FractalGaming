@@ -383,6 +383,13 @@ body.lss-thirdperson #cockpit-frame,
 body.lss-thirdperson #gun-layer,
 body.lss-thirdperson #core-overlay-frame,
 body.lss-thirdperson #ability-overlay-frame { display: none !important; }
+/* (v37.26) 3D cockpit live in first person: the painted PNG frames come off
+   (the modelled interior + glass canopy in the GLB replaces them). The class
+   is owned by _lssApplyShipRig. */
+body.lss-cockpit3d #cockpit-frame,
+body.lss-cockpit3d #gun-layer,
+body.lss-cockpit3d #core-overlay-frame,
+body.lss-cockpit3d #ability-overlay-frame { display: none !important; }
 #round-timer {
   font-family: 'Orbitron', sans-serif; font-size: 34px; font-weight: 700;
   letter-spacing: 2px;
@@ -4160,7 +4167,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.25';
+const LSS_BUILD = '37.26';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -4762,6 +4769,7 @@ const input = {
   vrPerfMode: 'standard',
   vrStripFx: false,
   showFps: false,
+  cockpit3d: true,
   headlight: true,
   hudGaugeLabels: true,
   clipRec: false,
@@ -26635,6 +26643,11 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
         };
         if (m && m.map) params.map = m.map;
         if (m && m.vertexColors) params.vertexColors = true;
+        if (m && m.emissiveMap) {
+          params.emissiveMap = m.emissiveMap;
+          params.emissive = new THREE.Color(0xffffff);
+          params.emissiveIntensity = (typeof m.emissiveIntensity === 'number') ? m.emissiveIntensity : 1.0;
+        }
         params.color = (m && m.color) ? m.color.clone() : new THREE.Color(0xbfc4d2);
         const mat = new THREE.MeshStandardMaterial(params);
         if (!params.transparent) hullMats.push(mat);
@@ -42122,6 +42135,12 @@ function updatePlayerMovement(dt) {
   camera.position.copy(player.position);
   _lssApplyShipRig(dt);
 }
+const _cpEyeW = new THREE.Vector3();
+function _cockpit3dWanted() {
+  const W = window.__cockpit;
+  if (W && typeof W.on === 'boolean') return W.on;
+  return !(typeof input !== 'undefined' && input && input.cockpit3d === false);
+}
 function _lssApplyShipRig(dt) {
   {
     const P = window.__par || (window.__par = { on: true, gain: 0, circle: 110, dot: 0.35, ship: 34, shipMax: 64, spring: 7 });
@@ -42187,8 +42206,31 @@ function _lssApplyShipRig(dt) {
         if (_hl > _circ) { _hx *= _circ / _hl; _hy *= _circ / _hl; }
         game._hudTgtX = _hx * _pAct; game._hudTgtY = _hy * _pAct;
       }
-    } else if (player.mesh.visible) {
-      player.mesh.visible = false;
+    } else {
+      let _eye = null;
+      if (_cockpit3dWanted() && !_vrNow) {
+        if (game._cockpitEyeMesh !== player.mesh) {
+          game._cockpitEyeMesh = player.mesh;
+          try { game._cockpitEye = player.mesh.getObjectByName('cockpit1') || null; } catch (_) { game._cockpitEye = null; }
+        }
+        _eye = game._cockpitEye;
+      }
+      if (_eye) {
+        if (!player.mesh.visible) player.mesh.visible = true;
+        player.mesh.updateMatrixWorld(true);
+        _eye.getWorldPosition(_cpEyeW);
+        camera.position.copy(_cpEyeW);
+        if (!game._cockpit3dLive) {
+          game._cockpit3dLive = true;
+          try { document.body.classList.add('lss-cockpit3d'); } catch (_) {}
+        }
+      } else {
+        if (player.mesh.visible) player.mesh.visible = false;
+        if (game._cockpit3dLive) {
+          game._cockpit3dLive = false;
+          try { document.body.classList.remove('lss-cockpit3d'); } catch (_) {}
+        }
+      }
     }
     {
       const _pP2 = window.__par || {};
@@ -52796,6 +52838,7 @@ function _refreshSettingsValues() {
   }
   setChk('set-vr-strip-fx', input.vrStripFx);
   setChk('set-show-fps', input.showFps);
+  setChk('set-cockpit3d', input.cockpit3d !== false);
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
   {
     const _fs = (typeof input.hudScale === 'number') ? input.hudScale : 1;
@@ -53061,6 +53104,13 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Show FPS Counter</label>
         <input type="checkbox" id="set-show-fps" ${input.showFps ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>3D Cockpit (first person)</label>
+        <input type="checkbox" id="set-cockpit3d" ${input.cockpit3d !== false ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">On: first person looks out from the pilot's seat of the modelled cockpit. Off: the classic painted cockpit frame.</label>
       </div>
       <div class="setting-row">
         <label>HUD Gauge Labels</label>
@@ -54380,6 +54430,11 @@ function buildSettingsPage() {
     input.showFps = !!showFpsChk.checked;
     saveSettings();
   });
+  const cockpitChk = overlay.querySelector('#set-cockpit3d');
+  if (cockpitChk) cockpitChk.addEventListener('change', () => {
+    input.cockpit3d = !!cockpitChk.checked;
+    saveSettings();
+  });
   const gaugeLabelChk = overlay.querySelector('#set-hud-gauge-labels');
   if (gaugeLabelChk) gaugeLabelChk.addEventListener('change', () => {
     input.hudGaugeLabels = !!gaugeLabelChk.checked;
@@ -54993,6 +55048,7 @@ function saveSettings() {
       vrPerfMode: input.vrPerfMode || 'standard',
       vrStripFx: !!input.vrStripFx,
       showFps: !!input.showFps,
+      cockpit3d: input.cockpit3d !== false,
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
       clipRec: !!input.clipRec,
@@ -56801,6 +56857,7 @@ function loadSettings() {
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
+    if (typeof data.cockpit3d === 'boolean') input.cockpit3d = data.cockpit3d;
     if (typeof data.hudGaugeLabels === 'boolean') input.hudGaugeLabels = data.hudGaugeLabels;
     if (typeof data.hudScale === 'number' && isFinite(data.hudScale)) {
       input.hudScale = Math.max(0.75, Math.min(1.75, data.hudScale));

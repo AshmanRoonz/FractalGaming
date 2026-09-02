@@ -383,6 +383,13 @@ body.lss-thirdperson #cockpit-frame,
 body.lss-thirdperson #gun-layer,
 body.lss-thirdperson #core-overlay-frame,
 body.lss-thirdperson #ability-overlay-frame { display: none !important; }
+/* (v37.26) 3D cockpit live in first person: the painted PNG frames come off
+   (the modelled interior + glass canopy in the GLB replaces them). The class
+   is owned by _lssApplyShipRig. */
+body.lss-cockpit3d #cockpit-frame,
+body.lss-cockpit3d #gun-layer,
+body.lss-cockpit3d #core-overlay-frame,
+body.lss-cockpit3d #ability-overlay-frame { display: none !important; }
 #round-timer {
   font-family: 'Orbitron', sans-serif; font-size: 34px; font-weight: 700;
   letter-spacing: 2px;
@@ -4234,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.25';
+const LSS_BUILD = '37.26';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -5191,6 +5198,10 @@ const input = {
   vrStripFx: false,
   // Top-right FPS readout toggle. Persisted ; updated each gameLoop tick.
   showFps: false,
+  // (v37.26) First-person 3D cockpit (the GLB interior + glass canopy, camera
+  // at the `cockpit1` eye marker) instead of the PNG cockpit frames. Settings
+  // checkbox, persisted ; window.__cockpit.on = true/false overrides live.
+  cockpit3d: true,
   // (v36.03) Under-hull headlight beam (SpotLight at the red/green nav-orb
   // group, aimed with the nose). ON by default — it is what makes the
   // zone-rift caverns and the endless deeps readable. Persisted.
@@ -33860,6 +33871,17 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
         };
         if (m && m.map) params.map = m.map;
         if (m && m.vertexColors) params.vertexColors = true;
+        // (v37.26) Authored emissive survives the rebuild. The cockpit interior
+        // (v37.25 GLBs, material `cockpit_interior`) carries an emissive atlas —
+        // screens, glow strips, console buttons in the ship's class colour —
+        // that the team-tint emissive above would otherwise throw away. Only
+        // materials that actually ship an emissive MAP take this path, so the
+        // hull keeps its subtle team tint exactly as before.
+        if (m && m.emissiveMap) {
+          params.emissiveMap = m.emissiveMap;
+          params.emissive = new THREE.Color(0xffffff);
+          params.emissiveIntensity = (typeof m.emissiveIntensity === 'number') ? m.emissiveIntensity : 1.0;
+        }
         params.color = (m && m.color) ? m.color.clone() : new THREE.Color(0xbfc4d2);
         const mat = new THREE.MeshStandardMaterial(params);
         if (!params.transparent) hullMats.push(mat);
@@ -54608,6 +54630,17 @@ function updatePlayerMovement(dt) {
 // (v33.96) Extracted from updatePlayerMovement so the WARMUP / locked-camera states can ALSO run the 3rd-person
 // chase rig — no first-person camera flash during the launch 3-2-1 (the camera stays 3rd-person from the
 // cinematic straight through to control, instead of popping to first-person then switching).
+// (v37.26) 3D COCKPIT knob. The ship GLBs carry a modelled interior + glass
+// canopy since v37.25 (tools/blender/ship_cockpit.py) and their `cockpit1`
+// marker is the pilot's EYE point. Settings > "3D cockpit" (input.cockpit3d,
+// persisted) is the player-facing switch ; window.__cockpit = { on: false }
+// overrides it live for A/B feel checks without touching saved settings.
+const _cpEyeW = new THREE.Vector3();
+function _cockpit3dWanted() {
+  const W = window.__cockpit;
+  if (W && typeof W.on === 'boolean') return W.on;
+  return !(typeof input !== 'undefined' && input && input.cockpit3d === false);
+}
 function _lssApplyShipRig(dt) {
   // (v35.00) THIRD-PERSON PARALLAX: smoothed look-rates drive three screen
   // layers at different magnitudes — the HUD rings (most), the DOM crosshair
@@ -54727,8 +54760,46 @@ function _lssApplyShipRig(dt) {
         if (_hl > _circ) { _hx *= _circ / _hl; _hy *= _circ / _hl; }
         game._hudTgtX = _hx * _pAct; game._hudTgtY = _hy * _pAct;
       }
-    } else if (player.mesh.visible) {
-      player.mesh.visible = false;
+    } else {
+      // (v37.26) FIRST PERSON, 3D COCKPIT. With the knob on the ship mesh stays
+      // VISIBLE and the camera sits at the GLB's `cockpit1` marker — the pilot's
+      // eye inside the modelled interior — so the player looks out through the
+      // glass past the dash, consoles and canopy struts. It works because of
+      // how the v37.25 hulls are built: the canopy is single-sided (culls away
+      // from inside = clear view), the interior tub is opaque (hides the hull's
+      // inner faces) and the helmet is a back face around the eye. The mesh
+      // already tracks camera.quaternion + bank above, so the cockpit turns
+      // with the view exactly as the hull does in third person. Physics,
+      // collision and weapons still use player.position ; only the camera
+      // moves (~35u forward, a few units up on a corvette).
+      // Off, VR (the headset owns the camera), or a hull without the marker
+      // (procedural fallback ship) = pre-v37.26 behaviour: mesh hidden, camera
+      // at player.position, PNG frames drawn. body.lss-cockpit3d hides the
+      // PNG cockpit/gun/ability/core frames while the 3D cockpit is live.
+      let _eye = null;
+      if (_cockpit3dWanted() && !_vrNow) {
+        if (game._cockpitEyeMesh !== player.mesh) {
+          game._cockpitEyeMesh = player.mesh;
+          try { game._cockpitEye = player.mesh.getObjectByName('cockpit1') || null; } catch (_) { game._cockpitEye = null; }
+        }
+        _eye = game._cockpitEye;
+      }
+      if (_eye) {
+        if (!player.mesh.visible) player.mesh.visible = true;
+        player.mesh.updateMatrixWorld(true);
+        _eye.getWorldPosition(_cpEyeW);
+        camera.position.copy(_cpEyeW);
+        if (!game._cockpit3dLive) {
+          game._cockpit3dLive = true;
+          try { document.body.classList.add('lss-cockpit3d'); } catch (_) {}
+        }
+      } else {
+        if (player.mesh.visible) player.mesh.visible = false;
+        if (game._cockpit3dLive) {
+          game._cockpit3dLive = false;
+          try { document.body.classList.remove('lss-cockpit3d'); } catch (_) {}
+        }
+      }
     }
     // Spring the HUD/crosshair layers toward this frame's target (0 in first
     // person / VR / at rest, so everything settles back to dead center).
@@ -69423,6 +69494,7 @@ function _refreshSettingsValues() {
   }
   setChk('set-vr-strip-fx', input.vrStripFx);
   setChk('set-show-fps', input.showFps);
+  setChk('set-cockpit3d', input.cockpit3d !== false);
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
   {
     // (v36.19) buildSettingsPage writes overlay.innerHTML once and is gated by
@@ -69710,6 +69782,13 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Show FPS Counter</label>
         <input type="checkbox" id="set-show-fps" ${input.showFps ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>3D Cockpit (first person)</label>
+        <input type="checkbox" id="set-cockpit3d" ${input.cockpit3d !== false ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">On: first person looks out from the pilot's seat of the modelled cockpit. Off: the classic painted cockpit frame.</label>
       </div>
       <div class="setting-row">
         <label>HUD Gauge Labels</label>
@@ -71139,6 +71218,13 @@ function buildSettingsPage() {
     input.showFps = !!showFpsChk.checked;
     saveSettings();
   });
+  // (v37.26) 3D cockpit switch ; _lssApplyShipRig reads input.cockpit3d every
+  // frame, so the change is live without a restart or a view toggle.
+  const cockpitChk = overlay.querySelector('#set-cockpit3d');
+  if (cockpitChk) cockpitChk.addEventListener('change', () => {
+    input.cockpit3d = !!cockpitChk.checked;
+    saveSettings();
+  });
   // (v37.08) Ship Headlight checkbox removed from settings (owner call) —
   // the headlight is always on (input.headlight default true); the
   // __headlight(0|1) console hook remains for debugging.
@@ -71861,6 +71947,7 @@ function saveSettings() {
       vrPerfMode: input.vrPerfMode || 'standard',
       vrStripFx: !!input.vrStripFx,
       showFps: !!input.showFps,
+      cockpit3d: input.cockpit3d !== false,
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
       clipRec: !!input.clipRec,
@@ -73734,6 +73821,7 @@ function loadSettings() {
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
+    if (typeof data.cockpit3d === 'boolean') input.cockpit3d = data.cockpit3d;
     // (v37.08) headlight is no longer a setting (owner call): the saved key
     // is deliberately IGNORED so anyone who unchecked it historically gets
     // the always-on default back. __headlight(0|1) remains for debugging.
