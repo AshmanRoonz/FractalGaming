@@ -97,7 +97,27 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
   frame lines are finer than the triangles); panes are oriented against the eye so none can
   face the pilot. Knobs: `CANOPY` (per-ship detection), `ACCENT` (= LSS.CLASS_COLORS),
   `GLASS_ALPHA`, `HULL_GLOW`, `RAIL_FULL` (full thin window frame, Pyro), `TALL_DASH`
-  (instrument stack for a high eye, Pyro), the `REG` atlas layout.
+  (instrument stack for a high eye, Pyro), the `REG` atlas layout, `EMIS_FILL` (the
+  interior fill light baked into the emissive atlas, a LINEAR multiplier on the tile — the
+  atlas pixels are raw bytes the game decodes as sRGB, so a 0.14 tile is 1.5% linear light
+  and any sRGB-space "floor" stays black on surfaces the sun never reaches).
+  **Holes.** The hull is single-sided in the game, so any hull face the seat sees from its
+  back is a window onto the sky. Two closers, both measured by the SEE-THROUGH MAP
+  (`<ship>_seethrough.png`, equirectangular from the eye: blue glass, green interior, grey
+  hull, RED hole; `see_through.hole_pct_of_sphere` in the JSON — the target is 0):
+  1. **Coaming** — the tub top is capped at 0.30 Hc so it stays a basin, but where the
+     glass edge sits higher (Vortex's bubble on its raised fairing: 0.66 Hc behind the seat)
+     that leaves a slot straight into the fuselage void. Per rim angle a wall rises from the
+     tub top to just under the lowest glass at that angle (outer 25% of the canopy radius),
+     so slit windows are never covered.
+  2. **Inner lining** — a 240×120 ray fan from the eye with the game's culling (helmet,
+     glass and anything inside the camera near plane — `L/150`, one game unit — passed
+     through) collects every hull face still reached from behind; those faces, grown by the
+     fan's cell size at their distance, get an inner shell (vertices pushed 1% of the width
+     inward along the vertex normals, shared between plates so creases don't crack) with a
+     single-sided skirt around the outline. Rounds repeat until the fan is clean. Vortex:
+     47 coaming faces + ~600 plates; without the coaming the same job took 30 000 plates of
+     tail interior. `--no-lining` shows the raw holes.
 
 ## What the game does with it (index-working.html)
 
@@ -105,8 +125,11 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
   stays visible and the camera sits at `cockpit1`; `body.lss-cockpit3d` hides the PNG
   frames; the eye kicks on recoil and the interior emissive pulses on fire / core /
   railgun charge (published as `userData._cockpitPulse`, multiplied in by
-  `animateShipMesh`, which owns `emissiveIntensity`). `window.__cockpit = { on, kick }`
-  overrides live.
+  `animateShipMesh`, which owns `emissiveIntensity`). `window.__cockpit = { on, kick,
+  recoilMul }` overrides live: `kick` (default 0.35 world units) is the eye's per-shot
+  kick-back, `recoilMul` (default 0.4) scales the per-shot pitch kick and screen shake
+  while the cockpit is live (v37.35: "less screen/ship shake"); the painted frames keep
+  their original feel.
 - Fire: with the cockpit live the shots and muzzle flash leave the GLB gun markers
   (`_computeScreenMuzzleWorld` answers the marker on the same screen side; `spawnTracer`
   draws one tracer from the barrel).
@@ -123,6 +146,14 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
   emissive maps authored in Blender show only on the ship-select stage and hub traffic.
 - **bmesh face order after `to_mesh()` is not creation order** — tag `material_index` on
   the `BMFace`, never by index range.
+- **`BVHTree.FromBMesh(...).ray_cast` reports the STORED face normal**, not a geometric
+  one. Faces made with `bm.faces.new` carry a zero normal until `bm.normal_update()`, and
+  then read as solid from both sides — the first lining pass lined nothing because the
+  helmet "blocked" every ray. Update normals before building a tree.
+- **Coincident double-sided quads fool ray probes**: the tree answers either quad first,
+  and stepping past the hit skips both. Make sealing geometry single-sided, facing the eye.
+- **A ray fan only finds the faces it hits.** At 1.5° cells the tail triangles sit between
+  rays, so line by a radius scaled with distance (`1.6 × cell × distance`), then re-fan.
 - Import with `merge_vertices=True` for real topology counts; the default import splits at
   UV seams and reports thousands of fake "loose parts".
 - Forward axis = mean(gun markers) − mean(thruster markers); glTF space round-trips when

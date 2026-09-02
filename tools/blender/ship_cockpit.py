@@ -53,6 +53,7 @@ REPORT_DIR = os.path.join(REPO, 'tools/blender/reports/cockpit')
 ATLAS_DIR = os.path.join(REPO, 'tools/blender/work/atlas')
 SHIPS = opt('--ships', ','.join(SHIPS_ALL)).split(',')
 RENDER = '--render' in argv
+LINING = '--no-lining' not in argv     # inner lining pass (diagnostics: see the raw holes)
 EXPORT = '--no-export' not in argv
 for d in (OUT_DIR, REPORT_DIR, ATLAS_DIR):
     os.makedirs(d, exist_ok=True)
@@ -71,6 +72,7 @@ CANOPY = {
     'default': {'R': 0.16, 'sat': 0.30, 'mode': 'largest', 'min_comp': 30, 'hue_tol': 0.06},
     'pyro': {'R': 0.20, 'sat': 0.28, 'mode': 'union', 'min_comp': 20, 'hue_tol': 0.08},
 }
+EMIS_FILL = 3.0            # interior fill light (LINEAR multiplier on the base tile) baked into the emissive atlas
 GLASS_ALPHA = 0.35
 # ships whose canopy rim rail should follow the WHOLE glass outline (tall greenhouse slit)
 RAIL_FULL = {'pyro'}
@@ -90,7 +92,10 @@ HULL_GLOW = {
 # stretched onto one face (screens, glow strips, visor)
 REG = {
     'metal': (0.00, 0.00, 0.50, 0.50, 'tile'), 'trim': (0.00, 0.50, 0.50, 1.00, 'tile'),
-    'seat': (0.50, 0.00, 1.00, 0.50, 'tile'), 'screen': (0.50, 0.50, 0.75, 0.75, 'fit'),
+    'seat': (0.50, 0.00, 1.00, 0.50, 'tile'),
+    # four distinct instrument tiles in the old screen quadrant: radar / bars / attitude / log
+    'screen': (0.50, 0.50, 0.625, 0.625, 'fit'), 'scrB': (0.625, 0.50, 0.75, 0.625, 'fit'),
+    'scrC': (0.50, 0.625, 0.625, 0.75, 'fit'), 'scrD': (0.625, 0.625, 0.75, 0.75, 'fit'),
     'glow': (0.75, 0.50, 1.00, 0.75, 'fit'), 'suit': (0.50, 0.75, 0.75, 1.00, 'tile'),
     'visor': (0.75, 0.75, 1.00, 1.00, 'fit'),
 }
@@ -157,36 +162,55 @@ def panel_tile(size, base, cell, seed, line_dark=0.55, rivets=True):
     return np.clip(img, 0, 1)
 
 
-def screen_tile(size, tint, seed):
-    """Dark screen with UI glyphs. Returns (base, emissive)."""
+def screen_tile(size, tint, seed, kind='radar'):
+    """Dark instrument screen with UI glyphs. kind: radar / bars / attitude / log.
+    Returns (base, emissive)."""
     y, x = np.mgrid[0:size, 0:size]
     base = np.ones((size, size, 3), np.float32) * np.array((0.02, 0.03, 0.05), np.float32)
     glyph = np.zeros((size, size), np.float32)
-    b = 4
-    glyph[(x >= b) & (x < size - b) & (y >= b) & (y < size - b) & ((x < b + 2) | (x >= size - b - 2) | (y < b + 2) | (y >= size - b - 2))] = 0.9
-    # bar chart, lower left
+    b = max(2, size // 32)
+    glyph[(x >= b) & (x < size - b) & (y >= b) & (y < size - b) & ((x < b + 1) | (x >= size - b - 1) | (y < b + 1) | (y >= size - b - 1))] = 0.9
     rng = np.random.default_rng(seed)
-    for i in range(8):
-        hgt = int(rng.integers(6, 34))
-        xs0 = 10 + i * 7
-        glyph[(x >= xs0) & (x < xs0 + 4) & (y >= size - 12 - hgt) & (y < size - 12)] = 0.75
-    # radar circle, upper right
-    cx, cy, r = size * 0.72, size * 0.30, size * 0.17
-    d = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-    glyph[np.abs(d - r) < 1.2] = 0.9
-    glyph[np.abs(d - r * 0.5) < 0.8] = 0.5
-    glyph[(np.abs(x - cx) < 0.7) & (d < r)] = 0.35
-    glyph[(np.abs(y - cy) < 0.7) & (d < r)] = 0.35
-    # text dashes, upper left
-    for row in range(5):
-        yy = 14 + row * 7
-        xx = 10
-        while xx < size * 0.5:
-            w = int(rng.integers(3, 12))
-            glyph[(y >= yy) & (y < yy + 2) & (x >= xx) & (x < xx + w)] = 0.6 + 0.3 * rng.random()
-            xx += w + 4
-    # horizontal scanlines
-    glyph[(y % 4 == 0)] *= 0.7
+    cx, cy = size * 0.5, size * 0.5
+    if kind == 'radar':
+        r = size * 0.38
+        d = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+        for rr, w_ in ((r, 1.0), (r * 0.66, 0.5), (r * 0.33, 0.4)):
+            glyph[np.abs(d - rr) < max(0.6, size / 100)] = w_
+        glyph[(np.abs(x - cx) < 0.6) & (d < r)] = 0.35
+        glyph[(np.abs(y - cy) < 0.6) & (d < r)] = 0.35
+        ang = np.arctan2(y - cy, x - cx)
+        sweep = ((ang - 0.9) % (2 * math.pi)) / (2 * math.pi)
+        glyph = np.maximum(glyph, np.where(d < r, (1 - sweep) ** 6 * 0.7, 0))
+        for _ in range(5):
+            bx, by = rng.uniform(-r * 0.8, r * 0.8, 2)
+            glyph[(x - (cx + bx)) ** 2 + (y - (cy + by)) ** 2 < (size * 0.03) ** 2] = 1.0
+    elif kind == 'bars':
+        n = 7
+        for i in range(n):
+            hgt = int(rng.integers(size * 0.12, size * 0.6))
+            xs0 = int(b + 3 + i * (size - 2 * b - 6) / n)
+            wdt = max(2, int((size - 2 * b - 6) / n) - 2)
+            glyph[(x >= xs0) & (x < xs0 + wdt) & (y >= size - b - 4 - hgt) & (y < size - b - 4)] = 0.8
+        glyph[(y == int(size * 0.2)) & (x > b + 2) & (x < size - b - 2)] = 0.5
+    elif kind == 'attitude':
+        # pitch ladder with a tilted horizon
+        tl = math.radians(8)
+        for k in range(-3, 4):
+            yy = y - cy - k * size * 0.12 - (x - cx) * math.tan(tl)
+            span = size * (0.32 if k == 0 else 0.16)
+            glyph[(np.abs(yy) < max(0.7, size / 90)) & (np.abs(x - cx) < span)] = 0.9 if k == 0 else 0.5
+        glyph[(np.abs(x - cx) < max(0.7, size / 90)) & (np.abs(y - cy) < size * 0.05)] = 1.0
+        glyph[(np.abs(y - cy) < max(0.7, size / 90)) & (np.abs(x - cx) < size * 0.08)] = 1.0
+    else:  # log
+        for row in range(int(size * 0.7 / 6)):
+            yy = b + 3 + row * 6
+            xx = b + 3
+            while xx < size * 0.8:
+                w_ = int(rng.integers(2, 9))
+                glyph[(y >= yy) & (y < yy + 2) & (x >= xx) & (x < xx + w_)] = 0.45 + 0.45 * rng.random()
+                xx += w_ + 3
+    glyph[(y % 4 == 0)] *= 0.75
     t = np.array(tint, np.float32)
     base = base + glyph[:, :, None] * t[None, None, :] * 0.55
     emis = glyph[:, :, None] * t[None, None, :]
@@ -220,9 +244,10 @@ def build_atlas(ship, tint, size=512):
     stripe = (np.abs(x - h * 0.5) < 6)
     seat[stripe] = seat[stripe] * 0.4 + np.array(tint, np.float32) * 0.45
     put(base, REG['seat'], np.clip(seat, 0, 1))
-    sb, se = screen_tile(q, tint, seed + 9)
-    put(base, REG['screen'], sb)
-    put(emis, REG['screen'], se)
+    for rname, kind in (('screen', 'radar'), ('scrB', 'bars'), ('scrC', 'attitude'), ('scrD', 'log')):
+        sb, se = screen_tile(q // 2, tint, seed + 9, kind)
+        put(base, REG[rname], sb)
+        put(emis, REG[rname], se)
     glow = np.ones((q, q, 3), np.float32) * np.array(tint, np.float32)
     yy, xx = np.mgrid[0:q, 0:q]
     glow *= (0.75 + 0.25 * np.sin(yy / q * math.pi))[:, :, None]
@@ -241,13 +266,25 @@ def build_atlas(ship, tint, size=512):
     visor = visor + streak * 0.45
     put(base, REG['visor'], np.clip(visor, 0, 1))
     put(emis, REG['visor'], np.clip(np.array(tint, np.float32)[None, None, :] * 0.25 * grad, 0, 1))
-    # emissive FLOOR on the structural regions: the cockpit sits in the hull's own shadow in
-    # combat and read near-black under ambient alone ; a faint self-light (~14% of base)
-    # keeps panels legible without competing with the screens / glow strips.
+    # emissive FILL on the structural regions: the cockpit sits in the hull's own shadow in
+    # combat, and the rim rail / inner canopy frame face the pilot, never the sun, so they
+    # read as pure black shards against the sky under ambient alone. The atlas pixels are
+    # written as raw BYTES that the game decodes as sRGB (a 0.14 tile is 1.5% linear light),
+    # so the fill is defined in LINEAR light: the tile lit by a light of strength EMIS_FILL,
+    # re-encoded to sRGB. (v37.35: an sRGB-space "floor" of 0.14..0.8 of base all stayed
+    # black - 0.8 x 0.13 = 0.10 sRGB = 1% linear.)
+    def _lin(c):
+        return np.where(c > 0.04045, ((c + 0.055) / 1.055) ** 2.4, c / 12.92)
+
+    def _srgb(l):
+        l = np.clip(l, 0.0, 1.0)
+        return np.where(l > 0.0031308, 1.055 * np.power(l, 1.0 / 2.4) - 0.055, 12.92 * l)
+
     for rname in ('metal', 'trim', 'seat', 'suit'):
         u0, v0, u1, v1 = REG[rname][:4]
         x0, x1, y0, y1 = int(u0 * size), int(u1 * size), int(v0 * size), int(v1 * size)
-        emis[y0:y1, x0:x1, :3] = np.maximum(emis[y0:y1, x0:x1, :3], base[y0:y1, x0:x1, :3] * 0.14)
+        fill = _srgb(_lin(base[y0:y1, x0:x1, :3]) * EMIS_FILL)
+        emis[y0:y1, x0:x1, :3] = np.maximum(emis[y0:y1, x0:x1, :3], fill)
     paths = []
     for name, arr in (('int', base), ('emis', emis)):
         img = bpy.data.images.new(f'{ship}_{name}', size, size, alpha=True)
@@ -940,15 +977,15 @@ def process(ship):
               rot=(0, math.radians(16), sgn * math.radians(-32)), region='metal', bevel=bv * 0.4)
     # screens: thin plates lying on the tilted top
     top_c = dash_c + n_top * (dash_h / 2)
-    for i, yy in enumerate((-0.22, 0.0, 0.22)):
+    for i, (yy, rg) in enumerate(((-0.22, 'scrB'), (0.0, 'screen'), (0.22, 'scrC'))):
         c = top_c + Vector((0, yy * Wc, 0)) + n_top * (0.006 * D)
-        B.box(c, (0.11 * Lc, 0.18 * Wc, 0.012 * D), rot=(0, tilt, 0), region='screen')
+        B.box(c, (0.11 * Lc, 0.18 * Wc, 0.012 * D), rot=(0, tilt, 0), region=rg)
     if tall:
         # instrument stack: two more rows on the face of the slab
-        for zf in (0.28, -0.08):
-            for yy in (-0.22, 0.0, 0.22):
+        for zf, rgs in ((0.28, ('scrD', 'scrC', 'scrB')), (-0.08, ('screen', 'scrD', 'screen'))):
+            for yy, rg in zip((-0.22, 0.0, 0.22), rgs):
                 c = dash_c + n_front * (0.09 * Lc + 0.006 * D) + Vector((0, yy * Wc, 0)) + n_top * (zf * dash_h)
-                B.box(c, (0.012 * D, 0.18 * Wc, 0.16 * dash_h), rot=(0, tilt, 0), region='screen')
+                B.box(c, (0.012 * D, 0.18 * Wc, 0.16 * dash_h), rot=(0, tilt, 0), region=rg)
         for yy in (-0.33, 0.33):
             c = dash_c + n_front * (0.09 * Lc + 0.006 * D) + Vector((0, yy * Wc, 0)) + n_top * (0.10 * dash_h)
             B.box(c, (0.012 * D, 0.05 * Wc, 0.5 * dash_h), rot=(0, tilt, 0), region='glow')
@@ -960,16 +997,29 @@ def process(ship):
     B.box(hood_c, (0.07 * Lc, 0.76 * Wc, 0.014 * D), rot=(0, tilt + math.radians(6), 0), region='trim', bevel=bv * 0.2)
     # centre pedestal between the knees with its own small screen, and a throttle lever on the left console
     B.box((sx + 0.13 * Lc, 0, -0.50 * D), (0.16 * Lc, 0.10 * Wc, 0.14 * D), region='metal', bevel=bv * 0.3)
-    B.box((sx + 0.13 * Lc, 0, -0.425 * D), (0.10 * Lc, 0.07 * Wc, 0.012 * D), region='screen')
+    B.box((sx + 0.13 * Lc, 0, -0.425 * D), (0.10 * Lc, 0.07 * Wc, 0.012 * D), region='scrD')
     B.box((sx + 0.10 * Lc, 0.36 * Wc, -0.29 * D), (0.012 * Lc, 0.02 * Wc, 0.10 * D), rot=(0, math.radians(-25), 0), region='trim')
     B.box((sx + 0.10 * Lc - 0.02 * Lc, 0.36 * Wc, -0.245 * D), (0.03 * Lc, 0.035 * Wc, 0.02 * D), region='seat')
-    # side consoles with buttons + a small screen each
+    # side consoles with buttons, switch rows + a small screen each
     for sgn in (1, -1):
         cx_, cy_ = 0.04 * Lc, sgn * 0.36 * Wc
         B.box((cx_, cy_, -0.40 * D), (0.36 * Lc, 0.11 * Wc, 0.14 * D), region='metal', bevel=bv * 0.4)
-        B.box((cx_ + 0.08 * Lc, cy_, -0.325 * D), (0.12 * Lc, 0.08 * Wc, 0.012 * D), region='screen')
+        B.box((cx_ + 0.08 * Lc, cy_, -0.325 * D), (0.12 * Lc, 0.08 * Wc, 0.012 * D), region='scrD')
         for k in range(4):
             B.box((cx_ - 0.10 * Lc + k * 0.045 * Lc, cy_, -0.325 * D), (0.025 * Lc, 0.04 * Wc, 0.012 * D), region='glow')
+        # two rows of toggle switches along the outer edge, every third one lit
+        for k in range(6):
+            for rr, yo in ((0, 0.035), (1, -0.035)):
+                lit = ((k + rr) % 3 == 0)
+                B.box((cx_ - 0.15 * Lc + k * 0.05 * Lc, cy_ + sgn * yo * Wc, -0.322 * D),
+                      (0.014 * Lc, 0.012 * Wc, 0.016 * D), region='glow' if lit else 'trim')
+    # control stick on the pedestal: column leaning back toward the pilot, grip on top
+    B.box((sx + 0.15 * Lc, 0, -0.30 * D), (0.014 * Lc, 0.012 * Wc, 0.26 * D), rot=(0, math.radians(-12), 0), region='trim')
+    B.box((sx + 0.125 * Lc, 0, -0.17 * D), (0.03 * Lc, 0.03 * Wc, 0.06 * D), rot=(0, math.radians(-12), 0), region='seat', bevel=bv * 0.3)
+    B.box((sx + 0.12 * Lc, 0, -0.145 * D), (0.012 * Lc, 0.012 * Wc, 0.008 * D), rot=(0, math.radians(-12), 0), region='glow')
+    # harness straps down the backrest
+    for yo in (0.09, -0.09):
+        B.box((sx - 0.115 * Lc, yo * Wc, -0.30 * D), (0.008 * Lc, 0.05 * Wc, 0.46 * D), rot=(0, math.radians(-12), 0), region='suit')
     # rear bulkhead + details
     B.box((-0.38 * Lc, 0, -0.40 * D), (0.04 * Lc, 0.62 * Wc, 0.55 * D), region='trim', bevel=bv * 0.3)
     B.box((-0.355 * Lc, 0.20 * Wc, -0.25 * D), (0.03 * Lc, 0.12 * Wc, 0.16 * D), region='metal')
@@ -1017,10 +1067,334 @@ def process(ship):
             strut_faces += list(B.box(mid, (0.022 * Wc, ln * 1.03, 0.022 * Wc), rot=(roll, 0, 0), region='trim'))
     rep['struts_faces'] = len(strut_faces)
 
+    # ---------------- COAMING: seal the tub top to the bottom of the glass -----------------------
+    # The tub top is capped at 0.30 Hc so it stays a basin, but where the glass edge sits higher
+    # (a bubble on a raised fairing behind the seat, a slit window's sill) a slot is left between
+    # the tub top and the glass through which the seat looks straight into the fuselage void.
+    # Per rim angle: a wall from the tub top up to just under the LOWEST glass at that angle
+    # (the outer 25% of the canopy radius there), so no window is covered.
+    ang_c = np.arctan2(cv[:, 1], cv[:, 0])
+    rad_c = np.hypot(cv[:, 0], cv[:, 1])
+    bins_c = ((ang_c + np.pi) / (2 * np.pi) * N).astype(int) % N
+    zlo = np.full(N, np.nan)
+    for b_ in range(N):
+        m_ = (bins_c == b_) & (rad_c >= 0.75 * rmax[b_])
+        if m_.any():
+            zlo[b_] = float(cv[m_][:, 2].min())
+    good_c = ~np.isnan(zlo)
+    idx_c = np.arange(N)
+    if good_c.sum() >= 8:
+        zlo = np.interp(idx_c, idx_c[good_c], zlo[good_c], period=N)
+    else:
+        zlo = np.where(np.isnan(zlo), zat, zlo)
+    zlo = np.minimum(zlo, zat)
+    zlo = 0.5 * (zlo + zlo[mir])
+    zlo = (np.roll(zlo, 1) + zlo + np.roll(zlo, -1)) / 3.0
+    coaming_faces = []
+    cm_top = []
+    for i_ in range(N):
+        xy_ = rc + (rim_rs[i_, :2] - rc) * 0.985
+        cm_top.append(Vector((xy_[0], xy_[1], float(zlo[i_]) - 0.01 * Hc)))
+    cm_gap = np.array([cm_top[i_].z - r0[i_].z for i_ in range(N)])
+    cm_h = 0
+    for i_ in range(N):
+        j_ = (i_ + 1) % N
+        if max(cm_gap[i_], cm_gap[j_]) < 0.02 * Hc:
+            continue
+        ta, tb = r0[i_], r0[j_]
+        ca = Vector((cm_top[i_].x, cm_top[i_].y, max(cm_top[i_].z, ta.z + 0.002 * Hc)))
+        cb = Vector((cm_top[j_].x, cm_top[j_].y, max(cm_top[j_].z, tb.z + 0.002 * Hc)))
+        vs_ = [B.bm.verts.new(B.to_world(q_)) for q_ in (ta, tb, cb, ca)]
+        n_ = (vs_[1].co - vs_[0].co).cross(vs_[2].co - vs_[0].co)
+        cen_ = sum((v_.co for v_ in vs_), Vector()) / 4.0
+        if n_.dot(B.to_world(tub_center) - cen_) < 0:
+            vs_.reverse()
+        try:
+            f_ = B.bm.faces.new(vs_)
+        except ValueError:
+            continue
+        f_[B.reg] = REG_ID['metal']
+        f_.smooth = True
+        coaming_faces.append(f_)
+        cm_h = max(cm_h, float(max(cm_gap[i_], cm_gap[j_])))
+    rep['coaming'] = {'faces': len(coaming_faces), 'max_height_Hc': round(cm_h / Hc, 3)}
+
+    # ---------------- INNER LINING: no hull face may be seen from behind ------------------------
+    # In the game the hull is single-sided, so any hull face the seat looks at from its back
+    # side is see-through (the rear of the fuselage, Pyro's window frame, the sides beside the
+    # tub). A ray fan from the eye (helmet and glass passed through, exactly like the game's
+    # culling) collects every hull face it reaches from behind; each gets an inward-facing
+    # copy pushed 1% of the width inward, in the panel material, plus its 1-ring neighbours.
+    # Rounds repeat with the new plates in place until the fan finds nothing new. From outside
+    # the plates sit inside the hull skin.
+    from mathutils.bvhtree import BVHTree as _BVH3
+    hbm0 = bmesh.new()
+    hbm0.from_mesh(me)
+    hull_bvh0 = _BVH3.FromBMesh(hbm0, epsilon=0.0)
+    hbm0.free()
+    eye_w0 = B.to_world(head + Vector((0.3 * hr, 0, 0)))
+    nPh = len(me.polygons)
+    nrmH = np.empty(nPh * 3, np.float32)
+    me.polygons.foreach_get('normal', nrmH)
+    nrmH = nrmH.reshape(-1, 3)
+    miH = np.empty(nPh, np.int32)
+    me.polygons.foreach_get('material_index', miH)
+    gslot0 = len(me.materials)
+    vco_h = np.empty(len(me.vertices) * 3, np.float32)
+    me.vertices.foreach_get('co', vco_h)
+    vco_h = vco_h.reshape(-1, 3)
+    poly_vs = [tuple(pg.vertices) for pg in me.polygons]
+    v2f = {}
+    for fi_, vs_ in enumerate(poly_vs):
+        for v_ in vs_:
+            v2f.setdefault(v_, []).append(fi_)
+    eps_l = 1e-4 * L
+    LIN_NY, LIN_NP = 240, 120
+    F3l = frame.to_3x3()
+    lin_dirs = []
+    for j_ in range(LIN_NP):
+        pt_ = math.radians(-90.0 + 180.0 * (j_ + 0.5) / LIN_NP)
+        for i_ in range(LIN_NY):
+            yw_ = math.radians(-180.0 + 360.0 * (i_ + 0.5) / LIN_NY)
+            lin_dirs.append(F3l @ Vector((math.cos(pt_) * math.cos(yw_), math.cos(pt_) * math.sin(yw_), math.sin(pt_))))
+
+    NEAR_CLIP = L / 150.0          # the game camera near plane (1 unit at ~hullLength/longest*1.55)
+    # classes: 0 solid hull, 1 interior, 2 glass/outside, 3 HOLE (hull back face), 4 nothing hit
+
+    def _walk(dw_, int_bvh):
+        """One ray from the eye with the game's culling: interior back faces (the helmet around
+        the eye), glass and anything inside the camera near plane are passed through.
+        Returns (cls, hull face index or -1, travelled distance, passed_near)."""
+        o_ = Vector(eye_w0)
+        seen_g = False
+        near_ = False
+        trav = 0.0
+        for _ in range(24):
+            hh = hull_bvh0.ray_cast(o_, dw_)
+            hi = int_bvh.ray_cast(o_, dw_)
+            dh = hh[3] if hh[0] is not None else 1e9
+            di = hi[3] if hi[0] is not None else 1e9
+            if dh >= 1e9 and di >= 1e9:
+                return (2 if seen_g else 4), -1, trav, near_
+            if di < dh:
+                if hi[1].dot(dw_) > 0:
+                    o_ = hi[0] + dw_ * eps_l
+                    trav += di + eps_l
+                    continue
+                return 1, -1, trav + di, near_
+            if miH[hh[2]] == gslot0:
+                o_ = hh[0] + dw_ * eps_l
+                trav += dh + eps_l
+                seen_g = True
+                continue
+            if hh[1].dot(dw_) > 0:
+                if trav + dh < NEAR_CLIP:
+                    o_ = hh[0] + dw_ * eps_l
+                    trav += dh + eps_l
+                    near_ = True
+                    continue
+                return 3, int(hh[2]), trav + dh, near_
+            return (2 if seen_g else 0), int(hh[2]), trav + dh, near_
+        return 4, -1, trav, near_
+
+    fan_out_dirs = []                               # rays that left the hull through a crack
+
+    def _fan_holes(int_bvh):
+        holes = {}                                  # hull face -> nearest hit distance
+        cnt = {'outside': 0, 'interior': 0, 'glass_out': 0, 'hull': 0, 'hole': 0, 'near': 0}
+        names = {0: 'hull', 1: 'interior', 2: 'glass_out', 3: 'hole', 4: 'outside'}
+        del fan_out_dirs[:]
+        for dw_ in lin_dirs:
+            cls_, fi_, tr_, near_ = _walk(dw_, int_bvh)
+            cnt[names[cls_]] += 1
+            if near_:
+                cnt['near'] += 1
+            if cls_ == 3:
+                holes[fi_] = min(tr_, holes.get(fi_, 1e9))
+            elif cls_ == 4:
+                fan_out_dirs.append(dw_)
+        return holes, cnt
+
+    lined = 0
+    lined_set = set()
+    lin_rounds = 0
+    lining_faces = []
+    skirts = 0
+    _tubset = set(tub_faces)
+    _floorset = set(floor_faces)
+    # the parts are wound consistently only by the recalc below; the fan needs the helmet
+    # wound outward now (from inside it is a back face to pass through, not a wall)
+    _cmset = set(coaming_faces)
+    bmesh.ops.recalc_face_normals(B.bm, faces=[f for f in B.bm.faces if f not in _tubset and f not in _floorset and f not in _cmset])
+    # inner shell: hull vertices pushed inward along their (averaged) vertex normals and SHARED
+    # between plates, so neighbouring plates meet with no crack at creases ; the outline of the
+    # lined region gets a double-sided skirt back to the hull surface so no grazing ray slips
+    # between the shell edge and the skin. From outside all of it is inside the hull.
+    vnH = np.empty(len(me.vertices) * 3, np.float32)
+    me.vertices.foreach_get('normal', vnH)
+    vnH = vnH.reshape(-1, 3)
+    shell_off = 0.01 * Wc
+    shell_v = {}
+    hull_v = {}
+
+    def _sv(vi):
+        v = shell_v.get(vi)
+        if v is None:
+            v = shell_v[vi] = B.bm.verts.new(Vector(vco_h[vi]) - Vector(vnH[vi]) * shell_off)
+        return v
+
+    def _hv(vi):
+        v = hull_v.get(vi)
+        if v is None:
+            v = hull_v[vi] = B.bm.verts.new(Vector(vco_h[vi]))
+        return v
+
+    skirt_done = set()
+    crack_centres = []
+    crack_patches = 0
+    # a fan cell is ~1.5 deg: at distance d the rays are 0.026 d apart and the hull triangles in
+    # between are never hit, so every hit face grows by that radius (plus one ring) via a KD
+    # tree of face centres ; more rounds catch what is still reachable
+    cenH = np.empty(nPh * 3, np.float32)
+    me.polygons.foreach_get('center', cenH)
+    cenH = cenH.reshape(-1, 3)
+    from mathutils.kdtree import KDTree as _KD
+    kdH = _KD(nPh)
+    for fi_ in range(nPh):
+        kdH.insert(Vector(cenH[fi_]), fi_)
+    kdH.balance()
+    cell_ang = math.radians(360.0 / LIN_NY)
+    for _round in range(6 if LINING else 0):
+        B.bm.normal_update()                    # FromBMesh ray hits report the STORED face normal
+        holes, fan_cnt = _fan_holes(_BVH3.FromBMesh(B.bm, epsilon=0.0))
+        rep.setdefault('lining_fan', []).append({'holes_rays': fan_cnt['hole'], 'hole_faces': len(holes),
+                                                  'already_lined': len(set(holes) & lined_set)})
+        new_h = set(holes) - lined_set
+        # CRACK PATCHES: a ray that leaves the hull with nothing beyond went through a crack
+        # in the skin (the cleanup zipper closes most). Nothing to copy there, so a small plate
+        # perpendicular to the ray sits where it crossed the skin (the point along the ray
+        # nearest to a hull face centre), single-sided towards the eye.
+        new_patches = 0
+        # crossing points, clustered: one plate per crack, sized to the crack's angular extent
+        # (a lone ray = one 1.5 deg cell) - a big plate reads as a black square in the sky
+        xs_ = []
+        half_dirs = len(DIRS) / 2.0
+        for dw_ in fan_out_dirs:
+            # the crossing is where the ray's point leaves the hull's volume (parity votes):
+            # coarse march, then bisection. (Nearest-face-centre sampling put the plate beside
+            # the pilot's face wherever the skin runs close to the helmet.)
+            t_in, t_out = None, None
+            t_prev = 0.02 * L
+            for t_ in np.arange(0.02 * L, 1.5 * L, 0.01 * L):
+                p_ = Vector(eye_w0) + dw_ * float(t_)
+                if inside_votes(hull_bvh0, p_, eps_l) < half_dirs:
+                    t_in, t_out = t_prev, float(t_)
+                    break
+                t_prev = float(t_)
+            if t_out is None:
+                continue
+            for _ in range(6):
+                tm_ = 0.5 * (t_in + t_out)
+                if inside_votes(hull_bvh0, Vector(eye_w0) + dw_ * tm_, eps_l) < half_dirs:
+                    t_out = tm_
+                else:
+                    t_in = tm_
+            best_t = 0.5 * (t_in + t_out)
+            xs_.append((Vector(eye_w0) + dw_ * best_t, dw_, best_t))
+        clusters_ = []
+        for pc_, dw_, t_ in xs_:
+            for cl_ in clusters_:
+                if (pc_ - cl_[0][0]).length < 0.05 * Wc:
+                    cl_.append((pc_, dw_, t_))
+                    break
+            else:
+                clusters_.append([(pc_, dw_, t_)])
+        for cl_ in clusters_:
+            pc_ = sum((m_[0] for m_ in cl_), Vector()) / len(cl_)
+            dw_ = sum((m_[1] for m_ in cl_), Vector()).normalized()
+            t_ = sum(m_[2] for m_ in cl_) / len(cl_)
+            spread_ = max((m_[0] - pc_).length for m_ in cl_)
+            if any((pc_ - c_).length < 0.03 * Wc for c_ in crack_centres):
+                continue
+            crack_centres.append(pc_)
+            u_ = dw_.cross(Vector((0, 0, 1)))
+            if u_.length < 1e-6:
+                u_ = dw_.cross(Vector((0, 1, 0)))
+            u_.normalize()
+            v_ = dw_.cross(u_).normalized()
+            hs_ = max(0.012 * Wc, 0.9 * cell_ang * t_ + spread_)
+            vs_ = [B.bm.verts.new(pc_ + u_ * hs_ + v_ * hs_), B.bm.verts.new(pc_ - u_ * hs_ + v_ * hs_),
+                   B.bm.verts.new(pc_ - u_ * hs_ - v_ * hs_), B.bm.verts.new(pc_ + u_ * hs_ - v_ * hs_)]
+            n_ = (vs_[1].co - vs_[0].co).cross(vs_[2].co - vs_[0].co)
+            if n_.dot(-dw_) < 0:
+                vs_.reverse()
+            try:
+                f_ = B.bm.faces.new(vs_)
+            except ValueError:
+                continue
+            f_[B.reg] = REG_ID['metal']
+            f_.smooth = False
+            lining_faces.append(f_)
+            new_patches += 1
+        crack_patches += new_patches
+        if not new_h and not new_patches:
+            break
+        lin_rounds += 1
+        grow = set(new_h)
+        for fi_ in new_h:
+            for v_ in poly_vs[fi_]:
+                grow.update(v2f[v_])
+            r_ = max(1.6 * cell_ang * holes[fi_], 0.02 * Wc)
+            for (_co, idx_, _d) in kdH.find_range(Vector(cenH[fi_]), r_):
+                grow.add(idx_)
+        grow = {f_ for f_ in grow if miH[f_] != gslot0} - lined_set
+        for fi_ in grow:
+            try:
+                f_ = B.bm.faces.new([_sv(vi) for vi in reversed(poly_vs[fi_])])
+            except ValueError:
+                continue
+            f_[B.reg] = REG_ID['metal']
+            f_.smooth = True
+            lining_faces.append(f_)
+            lined += 1
+        lined_set |= grow
+        # skirt along the outline of the lined region (edges with exactly one lined face)
+        for fi_ in lined_set:
+            vs_ = poly_vs[fi_]
+            for k_ in range(len(vs_)):
+                va, vb = vs_[k_], vs_[(k_ + 1) % len(vs_)]
+                key = (va, vb) if va < vb else (vb, va)
+                if key in skirt_done:
+                    continue
+                shared = [g_ for g_ in v2f[va] if vb in poly_vs[g_]]
+                if sum(1 for g_ in shared if g_ in lined_set) != 1:
+                    continue
+                skirt_done.add(key)
+                # single-sided, facing the eye (a coincident double-sided pair fools the ray
+                # probes: the tree answers either quad first and the step past it skips both)
+                order = [_hv(va), _hv(vb), _sv(vb), _sv(va)]
+                pa, pb, pc = order[0].co, order[1].co, order[2].co
+                qn = (pb - pa).cross(pc - pa)
+                if qn.dot(Vector(eye_w0) - pa) < 0:
+                    order.reverse()
+                try:
+                    q_ = B.bm.faces.new(order)
+                except ValueError:
+                    continue
+                q_[B.reg] = REG_ID['metal']
+                q_.smooth = False
+                lining_faces.append(q_)
+                skirts += 1
+    rep['lining_faces'] = lined
+    rep['lining_skirts'] = skirts
+    rep['lining_rounds'] = lin_rounds
+    rep['crack_patches'] = crack_patches
+
     # UVs: box projection everywhere, then continuous UVs on the tub walls
     B.assign_uvs(tile_len=0.30 * Wc)
     B.tub_uvs(tub_faces, N, 2)
-    bmesh.ops.recalc_face_normals(B.bm, faces=[f for f in B.bm.faces if f not in set(tub_faces) and f not in set(floor_faces)])
+    _skip_recalc = set(tub_faces) | set(floor_faces) | set(lining_faces) | set(coaming_faces)
+    bmesh.ops.recalc_face_normals(B.bm, faces=[f for f in B.bm.faces if f not in _skip_recalc])
     imesh = bpy.data.meshes.new('cockpit_interior')
     B.bm.to_mesh(imesh)
     B.bm.free()
@@ -1121,6 +1495,48 @@ def process(ship):
     markers['cockpit1'].location = eye_world
     rep['eye_world'] = [round(float(x), 4) for x in eye_world]
 
+    # ---------------- SEE-THROUGH MAP from the eye ---------------------------------------------
+    # What the seat sees with the game's culling: rays in every direction from the eye ; back
+    # faces of the interior (the helmet around the eye) and glass are passed through ; a
+    # non-glass hull BACK face reached first = a hole the pilot looks out through. Writes an
+    # equirectangular map (yaw across, pitch down) : grey hull, green interior, blue glass,
+    # RED hole.
+    ibm = bmesh.new()
+    ibm.from_mesh(imesh)
+    int_bvh = _BVH3.FromBMesh(ibm, epsilon=0.0)
+    ibm.free()
+    NA, NB = 120, 60
+    smap = np.zeros((NB, NA), np.uint8)
+    hole_list = []
+    near_cnt = 0
+    F3 = frame.to_3x3()
+    for j, pitch in enumerate(np.linspace(math.pi / 2, -math.pi / 2, NB)):
+        for i, yaw in enumerate(np.linspace(-math.pi, math.pi, NA, endpoint=False)):
+            dw = F3 @ Vector((math.cos(pitch) * math.cos(yaw), math.cos(pitch) * math.sin(yaw), math.sin(pitch)))
+            cls, fi_hit, trav, near_hit = _walk(dw, int_bvh)
+            if cls == 3 and len(hole_list) < 40:
+                hole_list.append([round(math.degrees(yaw)), round(math.degrees(pitch)), round(float(trav), 4),
+                                  fi_hit, fi_hit in lined_set])
+            if near_hit and cls != 3:
+                near_cnt += 1
+            smap[j, i] = cls
+    # the same fan the lining used, on the final mesh: must agree with the lining's last round
+    _hf, _cf = _fan_holes(int_bvh)
+    rep['lining_fan_final'] = _cf
+    hole_pct = 100.0 * float((smap == 3).mean())
+    rep['see_through'] = {'hole_pct_of_sphere': round(hole_pct, 2), 'glass_pct': round(100.0 * float((smap == 2).mean()), 1),
+                          'interior_pct': round(100.0 * float((smap == 1).mean()), 1), 'hull_pct': round(100.0 * float((smap == 0).mean()), 1),
+                          'near_clip_pct': round(100.0 * near_cnt / (NA * NB), 2), 'holes_sample': hole_list}
+    pal = np.array([[70, 70, 78], [40, 170, 60], [60, 110, 230], [255, 30, 30], [0, 0, 0]], np.float32) / 255.0
+    rgba = np.ones((NB, NA, 4), np.float32)
+    rgba[:, :, :3] = pal[smap]
+    simg = bpy.data.images.new(f'{ship}_seethrough', NA, NB, alpha=True)
+    simg.pixels.foreach_set(rgba[::-1].ravel())     # blender images are bottom-up
+    simg.filepath_raw = os.path.join(REPORT_DIR, f'{ship}_seethrough.png')
+    simg.file_format = 'PNG'
+    simg.save()
+    bpy.data.images.remove(simg)
+
     # ---------------- renders ---------------------------------------------------------------
     if RENDER:
         sc.render.engine = 'BLENDER_EEVEE'
@@ -1182,6 +1598,7 @@ def process(ship):
         mat0.use_backface_culling = True
         shot('pilotpov', eye_world, eye_world + fwd, lens=16)
         shot('pilotpov_down', eye_world, eye_world + fwd * 0.6 - up * 0.5, lens=16)
+        shot('pilotpov_back', eye_world, eye_world - fwd - up * 0.15, lens=16)
         mat0.use_backface_culling = False
         # interior only
         hull.hide_render = True

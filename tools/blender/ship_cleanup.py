@@ -444,6 +444,19 @@ def process(name):
         me.edges.foreach_set('select', sel_e)
         edit_op(hull, lambda: bpy.ops.mesh.fill_holes(sides=16))
     me.update()
+    # CRACK ZIPPER: hairline cracks are two boundary chains running side by side, not closed
+    # loops, so the loop filler never sees them. Merging boundary vertices that sit within
+    # 0.4% of the hull length of each other zips them shut ; interior verts are untouched, and
+    # the two sides of a real opening (a nozzle) are far further apart than that.
+    bmz = fresh_bm(me)
+    bverts = [v for v in bmz.verts if any(e.is_boundary for e in v.link_edges)]
+    nb0 = len(bverts)
+    bmesh.ops.remove_doubles(bmz, verts=bverts, dist=0.004 * L)
+    zipped = nb0 - sum(1 for v in bmz.verts if any(e.is_boundary for e in v.link_edges))
+    bmz.to_mesh(me)
+    bmz.free()
+    me.update()
+    rep['crack_zipper'] = {'boundary_verts_before': nb0, 'verts_merged': int(zipped)}
     rep['after'] = {'verts': len(me.vertices), 'faces': len(me.polygons), 'custom_normals': me.has_custom_normals,
                     'normal_fingerprint': normal_deviation(me)}
     bm4 = fresh_bm(me)
