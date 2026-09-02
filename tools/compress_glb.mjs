@@ -18,6 +18,14 @@
  * GLBs into LSS/. Re-run it whenever the art changes: drop the new GLB into
  * assets_src/ at the same relative path and run the command above.
  *
+ * (v37.24) The June drop is no longer on this machine. For the SEVEN SHIPS the
+ * chain is now:   assets_base/ships/  (frozen v37.23 hulls, == git f6260f2)
+ *              -> tools/blender/ship_cleanup.py  (headless Blender 4.1, bpy)
+ *              -> assets_src/ships/  (float32 Blender export, the new source)
+ *              -> this script with simplify OFF (OVERRIDES) -> LSS/ships/
+ * See tools/blender/README.md. Only the files present under assets_src/ are
+ * rebuilt, so running this with just ships/ in there touches nothing else.
+ *
  * ---------------------------------------------------------------------------
  * NO RUNTIME DECODER IS REQUIRED — AND THAT IS DELIBERATE
  * ---------------------------------------------------------------------------
@@ -101,7 +109,11 @@ const ONLY = (() => { const i = process.argv.indexOf('--only'); return i > 0 ? p
 // ---------------------------------------------------------------- settings --
 // Bump this when the recipe changes, so `_MODELS_VERSION` in index-working.html
 // can be bumped alongside it and players actually get the new bytes.
-const RECIPE_VERSION = '1.0';
+// (v37.24) 1.0 -> 1.1: ship hulls are now AUTHORED in Blender (tools/blender/),
+// starting from the already-simplified v37.23 hulls frozen in assets_base/ships.
+// assets_src/ships holds the Blender output (float32, unquantized) and the ship
+// recipe must NOT simplify it again — see OVERRIDES.
+const RECIPE_VERSION = '1.1';
 
 const Q = { quantizePosition: 14, quantizeNormal: 10, quantizeTexcoord: 12 };
 const WEBP_Q = 90;
@@ -139,7 +151,17 @@ const DEAD = new Set([
 // or override any recipe knob. Empty today — every file passed visual review.
 //   e.g. 'ships/pyro.glb': { simplify: 0.35 },
 //        'objects/hoard/disco.glb': { skip: true },
-const OVERRIDES = {};
+const OVERRIDES = {
+  // (v37.24) The seven ship hulls in assets_src/ are written by
+  // tools/blender/ship_cleanup.py (and later the cockpit script) FROM the
+  // v36.29 meshopt-simplified hulls — the June originals are not on disk any
+  // more. Running simplify(0.5) on them again would decimate twice
+  // (~58k -> ~29k tris) and bring back the surface wobble the 0.5 pass was
+  // tuned to avoid. simplify: 1.0 skips the simplifier ; weld + quantize still
+  // run, which is what recovers the byte size the float32 Blender export lost.
+  ...Object.fromEntries(['blaster', 'puncture', 'pyro', 'slayer', 'syphon', 'tracker', 'vortex'].map((s) =>
+    [`ships/${s}.glb`, { simplify: 1.0, reason: 'Blender-authored from the already-simplified hull' }])),
+};
 
 // ------------------------------------------------------------- categories --
 function categoryOf(rel) {
@@ -184,12 +206,15 @@ const RECIPES = {
   // at all, so there is nothing to drop. dequantize->weld->simplify->requantize
   // is the only lever that beats the stride-8 penalty (see trap 2).
   ship: async (doc, o) => {
-    await doc.transform(
-      dedup(), prune({ keepLeaves: true }), dequantize(), weld(),
-      simplify({ simplifier: MeshoptSimplifier, ratio: o.simplify ?? SHIP_SIMPLIFY, error: 0.001 }),
-      quantize(Q), webp(),
-    );
-    return `simplify ${o.simplify ?? SHIP_SIMPLIFY} + requantize (JPEG kept)`;
+    const ratio = o.simplify ?? SHIP_SIMPLIFY;
+    // (v37.24) ratio >= 1 means "already simplified upstream" (see OVERRIDES):
+    // the simplifier is skipped outright rather than asked for a 1.0 ratio, so
+    // an authored hull round-trips with its triangles untouched.
+    const steps = [dedup(), prune({ keepLeaves: true }), dequantize(), weld()];
+    if (ratio < 1) steps.push(simplify({ simplifier: MeshoptSimplifier, ratio, error: 0.001 }));
+    steps.push(quantize(Q), webp());
+    await doc.transform(...steps);
+    return ratio < 1 ? `simplify ${ratio} + requantize (JPEG kept)` : 'weld + quantize only, no simplify (Blender-authored hull)';
   },
 
   // 2-5k tris carrying 3 MB of PNG. Pure texture bloat. EVERY slot is kept —
