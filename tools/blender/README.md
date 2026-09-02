@@ -32,12 +32,19 @@ for ships (see `OVERRIDES` in `compress_glb.mjs`) — simplifying twice would de
 "C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/ship_cleanup.py -- --render
 "C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/verify_culled.py -- --after tools/blender/work/clean
 python tools/blender/verify_culled_diff.py
+"C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/ship_symmetry.py -- --fix --render
 "C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/ship_cockpit.py -- --render
 node tools/compress_glb.mjs --only ships
 ```
 
-Chain: `assets_base/ships` → `ship_cleanup.py` → `tools/blender/work/clean` (gitignored) →
-`ship_cockpit.py` → `assets_src/ships` (gitignored) → `compress_glb.mjs` → `LSS/ships`.
+Chain: `assets_base/ships` → `ship_cleanup.py` → `tools/blender/work/clean` →
+`ship_symmetry.py --fix` → `tools/blender/work/sym` → `ship_cockpit.py` → `assets_src/ships`
+(all three gitignored) → `compress_glb.mjs` → `LSS/ships`.
+
+**Ship axes are canonical**: every hull faces −X in Blender space with +Y to the pilot's
+right and the symmetry plane at y = 0 (after `ship_symmetry.py`). Never derive forward
+from the gun markers — a single one-sided gun skews it by up to 24° (Pyro) and that yawed
+every cockpit built in that frame.
 Renders and JSON reports land in `tools/blender/reports/` (gitignored); look at the
 `_sheet_*.png` contact sheets there after a run.
 
@@ -60,6 +67,14 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
   ON and a transparent film from six vantages, then diffs the alpha: every enclosed
   transparent pixel is a hole the player could see through. `NEW` must be 0. (Compare the
   cleaned hulls, not the cockpit builds: transparent glass shows up as alpha too.)
+- `ship_symmetry.py` — **symmetry pass**. Measures left/right asymmetry (distance from each
+  vertex's mirror image to the real hull, as a % of width) with a heat-map render, and with
+  `--fix` symmetrizes by surface averaging: a vertex moves halfway to its counterpart on
+  the other side when that counterpart is within `SYM_THRESH` (3.5% of width); anything
+  further apart is a deliberate one-sided feature (railgun, gun boom, Pyro's mismatched
+  pods) and stays, plus a `PROTECT_R` radius around an unpaired gun marker. Marker pairs
+  snap to exact mirrors. Custom normals are kept. The hull is re-centred on its true plane.
+  Judge with `reports/symmetry/_sheet_*.png` (blue = symmetric, red = ≥3% off).
 - `ship_cockpit.py` — **stage 2**. Per hull: finds the painted canopy faces (texture
   saturation near `cockpit1`, largest component, or `union` of same-hue components for split
   windows — PYRO), folds enclosed frame slivers in, and gives them a second material

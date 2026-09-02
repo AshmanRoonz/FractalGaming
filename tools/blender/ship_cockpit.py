@@ -47,7 +47,7 @@ def opt(name, default):
     return argv[argv.index(name) + 1] if name in argv else default
 
 
-IN_DIR = os.path.join(REPO, opt('--in', 'tools/blender/work/clean'))
+IN_DIR = os.path.join(REPO, opt('--in', 'tools/blender/work/sym'))
 OUT_DIR = os.path.join(REPO, opt('--out', 'assets_src/ships'))
 REPORT_DIR = os.path.join(REPO, 'tools/blender/reports/cockpit')
 ATLAS_DIR = os.path.join(REPO, 'tools/blender/work/atlas')
@@ -476,13 +476,14 @@ def process(ship):
     hi = Vector([max(v[i] for v in bb) for i in range(3)])
     L = max(hi - lo)
     ctr = (lo + hi) / 2
-    guns = [v.matrix_world.translation for k, v in markers.items() if k.startswith('gun')]
-    thr = [v.matrix_world.translation for k, v in markers.items() if k.startswith('thruster')]
-    fwd = sum(guns, Vector()) / len(guns) - sum(thr, Vector()) / len(thr)
-    fwd.z = 0
-    fwd.normalize()
+    # CANONICAL ship axes: every hull faces -X in Blender space (same faceRotY in the game
+    # for all seven ; the four mirror-perfect hulls confirm it). Deriving forward from the
+    # gun markers skewed the frame by up to 24 deg on single-gun hulls (Pyro / Tracker /
+    # Puncture) and yawed their whole cockpit inside the hull. ship_symmetry.py re-centres
+    # the hull on its true symmetry plane, so right = +Y is exact after that stage.
+    fwd = Vector((-1, 0, 0))
     up = Vector((0, 0, 1))
-    right = fwd.cross(up).normalized()
+    right = Vector((0, 1, 0))
     frame = Matrix([[fwd.x, right.x, 0, 0], [fwd.y, right.y, 0, 0], [fwd.z, right.z, 1, 0], [0, 0, 0, 1]])
     cp = markers['cockpit1'].matrix_world.translation.copy()
 
@@ -621,82 +622,58 @@ def process(ship):
     D = min(D, 0.85 * max(0.02 * L, zmin - lo.z))
     rep['canopy'].update({'Lc': round(Lc, 3), 'Wc': round(Wc, 3), 'Hc': round(Hc, 3), 'D': round(D, 3)})
 
-    # ---------------- rim loop (boundary of the canopy face set) -------------------------------
-    bedges = [e for e, fs in all_edge_faces.items() if sum(1 for q in fs if canopy[q]) == 1]
-    v_adj = {}
-    for e in bedges:
-        v_adj.setdefault(e[0], []).append(e[1])
-        v_adj.setdefault(e[1], []).append(e[0])
+    # ---------------- rim: POLAR OUTLINE of the glass ---------------------------------------
+    # For each angle around the canopy centre take the farthest canopy VERTEX (max radius),
+    # interpolate empty bins circularly, smooth. Every canopy here is star-shaped from its
+    # centre, concave or not, and unlike a boundary-edge walk this can never pick an inner
+    # island loop (the Blaster rail once traced a frame island and cut across the glass).
     vco = np.empty(len(me.vertices) * 3, np.float32)
     me.vertices.foreach_get('co', vco)
     vco = vco.reshape(-1, 3)
-    best = []
-    seenv = set()
-    for start in v_adj:
-        if start in seenv or len(v_adj[start]) != 2:
-            continue
-        loop = [start]
-        seenv.add(start)
-        prev, cur = None, start
-        ok = True
-        while True:
-            nxts = [n for n in v_adj[cur] if n != prev]
-            if not nxts or len(v_adj[cur]) != 2:
-                ok = False
-                break
-            nxt = nxts[0]
-            if nxt == start:
-                break
-            if nxt in seenv:
-                ok = False
-                break
-            seenv.add(nxt)
-            loop.append(nxt)
-            prev, cur = cur, nxt
-        if ok and len(loop) > len(best):
-            best = loop
-    rim = [B.to_local(Vector(vco[i])) for i in best]
-    rep['rim_verts'] = len(rim)
-    if len(rim) < 12:
-        # fallback: convex hull of the canopy face centres (monotone chain) — follows the
-        # glass footprint far better than an ellipse when the boundary walk hits a pinch.
-        ccl0 = ccw - np.array([cf0, cr0, zmin])
-        pts2 = sorted({(round(float(p[0]), 5), round(float(p[1]), 5), float(p[2])) for p in ccl0})
-
-        def cross(o, a, b):
-            return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
-        lower, upper = [], []
-        for p in pts2:
-            while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
-                lower.pop()
-            lower.append(p)
-        for p in reversed(pts2):
-            while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
-                upper.pop()
-            upper.append(p)
-        hull_pts = lower[:-1] + upper[:-1]
-        rim = [Vector((p[0], p[1], min(p[2], 0.15 * Hc))) for p in hull_pts]
-        rep['rim_fallback'] = 'convex_hull'
-    # resample the rim to a fixed count so the tub quads are even
+    cvidx = set()
+    for p in me.polygons:
+        if canopy[p.index]:
+            cvidx.update(p.vertices)
+    cvidx = np.array(sorted(cvidx), np.int64)
+    cv = (vco[cvidx] - np.array(B.to_world(Vector((0, 0, 0))))) @ np.array(frame.to_3x3())
     N = 64
-    rim_np = np.array([[p.x, p.y, p.z] for p in rim])
-    seg = np.linalg.norm(np.roll(rim_np, -1, 0) - rim_np, axis=1)
-    cum_s = np.concatenate([[0], np.cumsum(seg)])
-    total = cum_s[-1]
-    t = np.linspace(0, total, N, endpoint=False)
-    closed = np.vstack([rim_np, rim_np[:1]])
-    rim_rs = np.stack([np.interp(t, cum_s, closed[:, k]) for k in range(3)], 1)
-    # orientation: make it counter-clockwise seen from above (consistent quad winding)
-    area = 0.5 * np.sum(rim_rs[:, 0] * np.roll(rim_rs[:, 1], -1) - np.roll(rim_rs[:, 0], -1) * rim_rs[:, 1])
-    if area < 0:
-        rim_rs = rim_rs[::-1].copy()
+    ang = np.arctan2(cv[:, 1], cv[:, 0])
+    rad = np.hypot(cv[:, 0], cv[:, 1])
+    bins = ((ang + np.pi) / (2 * np.pi) * N).astype(int) % N
+    rmax = np.full(N, np.nan)
+    zat = np.full(N, np.nan)
+    for b_ in range(N):
+        m_ = bins == b_
+        if m_.any():
+            k_ = int(np.argmax(rad[m_]))
+            rmax[b_] = rad[m_][k_]
+            zat[b_] = cv[m_][k_, 2]
+    idx = np.arange(N)
+    good = ~np.isnan(rmax)
+    rep['rim_bins_filled'] = int(good.sum())
+    if good.sum() < 8:
+        rmax = np.where(np.isnan(rmax), 0.5 * min(Lc, Wc), rmax)
+        zat = np.where(np.isnan(zat), 0.0, zat)
+        good = np.ones(N, bool)
+    rmax = np.interp(idx, idx[good], rmax[good], period=N)
+    zat = np.interp(idx, idx[good], zat[good], period=N)
+    for _ in range(2):
+        rmax = (np.roll(rmax, 1) + rmax + np.roll(rmax, -1)) / 3.0
+        zat = (np.roll(zat, 1) + zat + np.roll(zat, -1)) / 3.0
+    theta = (idx + 0.5) / N * 2 * np.pi - np.pi
+    rim_rs = np.stack([rmax * np.cos(theta), rmax * np.sin(theta), zat], 1)   # CCW by construction
+    rep['rim_verts'] = N
     rc = rim_rs[:, :2].mean(0)
 
-    def ring(shrink, z, zfrac_of_rim=0.0):
+    def ring(shrink, z, zfrac_of_rim=0.0, zcap=None):
+        # zcap: the TUB must stay a basin - on a vertical slit window (PYRO) the glass edge
+        # climbs to the canopy top and a tub lofted from it walls the pilot in. The rail
+        # (zcap=None) still follows the true glass edge.
         pts = []
         for p in rim_rs:
             xy = rc + (p[:2] - rc) * shrink
-            pts.append(Vector((xy[0], xy[1], p[2] * zfrac_of_rim + z)))
+            zr = p[2] if zcap is None else min(p[2], zcap)
+            pts.append(Vector((xy[0], xy[1], zr * zfrac_of_rim + z)))
         return pts
 
     tub_center = Vector((rc[0], rc[1], -0.45 * D))
@@ -806,7 +783,7 @@ def process(ship):
     me.update()
     nP = len(me.polygons)
 
-    r0 = ring(0.975, -0.015 * Hc, zfrac_of_rim=1.0)
+    r0 = ring(0.975, -0.015 * Hc, zfrac_of_rim=1.0, zcap=0.30 * Hc)
     r1 = ring(0.90, -0.50 * D)
     r2 = ring(0.66, -D)
     tub_faces, vrings = B.loft([r0, r1, r2], region='metal', inward_center=tub_center)
@@ -816,10 +793,11 @@ def process(ship):
     # defined outline from outside.
     rail_pts = ring(0.988, -0.02 * Hc, zfrac_of_rim=1.0)
     rt = 0.03 * Wc
-    for a, b in zip(rail_pts, rail_pts[1:] + rail_pts[:1]):
-        dv = b - a
+    rail_zmax = 0.35 * Hc     # only frame the LOW glass edge: on a slit window (PYRO) or ridged
+    for a, b in zip(rail_pts, rail_pts[1:] + rail_pts[:1]):   # glass (SLAYER) the edge climbs into
+        dv = b - a                                              # arches around the pilot's head
         ln = dv.length
-        if ln < 1e-6:
+        if ln < 1e-6 or max(a.z, b.z) > rail_zmax:
             continue
         yaw = math.atan2(dv.y, dv.x)
         pitch = -math.asin(max(-1.0, min(1.0, dv.z / ln)))
