@@ -4170,7 +4170,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.79';
+const LSS_BUILD = '37.80';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6490,7 +6490,8 @@ async function startOpenSolo() {
       try {
         net.sendEvent({ type: 'open_solo_start', host: net.myPeerId,
           seed: net.worldSeed >>> 0,
-          mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic' });
+          mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
+          cyber: !!(game._cyber && game._cyber.armed) });   // (v37.80)
       } catch (_) {}
     }
     const ls = document.getElementById('lobby-status');
@@ -6540,7 +6541,8 @@ function _setEliminationBots(on, broadcast) {
       if (on) {
         net.sendEvent({ type: 'open_solo_start', host: net.myPeerId,
           seed: (net.worldSeed >>> 0),
-          mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic' });
+          mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
+          cyber: !!(game._cyber && game._cyber.armed) });   // (v37.80)
       } else {
         net.sendEvent({ type: 'elim_bots_off', host: net.myPeerId });
       }
@@ -6968,7 +6970,7 @@ const FreeFlightMode = {
     try { if (this._warpPre && !this._enteringCampaign && window.Overlays && Overlays.warp) Overlays.warp(false); this._warpPre = false; } catch (_) {}
     try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.freeflight = false; game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false; } catch (_) {}   
     try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   
-    try { game._cyber = null; if (typeof _carrierClear === 'function') _carrierClear(); } catch (_) {}   // (v37.76)
+    try { game._cyber = null; net.cyber = false; if (typeof _carrierClear === 'function') _carrierClear(); } catch (_) {}   // (v37.76/80)
     try { game.thirdPerson = false; document.body.classList.remove('lss-thirdperson'); if (player.mesh) player.mesh.visible = false; } catch (_) {}   
     try { if (typeof _clearBossPortal === 'function') _clearBossPortal(); } catch (_) {}   
     try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}   
@@ -8619,7 +8621,8 @@ async function _startHostedMode() {
     net.solo = false;
     net.worldSeed = (Math.random() * 0xffffffff) >>> 0;
     if (net.peers && net.peers.size > 0 && net.sendEvent) {
-      try { net.sendEvent({ type: 'open_solo_start', host: net.myPeerId, seed: net.worldSeed >>> 0, mode: _mode }); } catch (_) {}
+      try { net.sendEvent({ type: 'open_solo_start', host: net.myPeerId, seed: net.worldSeed >>> 0, mode: _mode,
+                            cyber: !!(game._cyber && game._cyber.armed) }); } catch (_) {}   // (v37.80)
     }
     const ls = document.getElementById('lobby-status');
     if (ls) { ls.textContent = 'ROOM ' + (net.roomCode || '') + ' — CHALLENGERS CAN DROP IN'; ls.style.color = '#7dffa8'; }
@@ -10283,11 +10286,11 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'bot_roster' && Array.isArray(evt.bots)) {
-    if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }
+    if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }
     return;
   }
   if (evt.type === 'bot_state' && Array.isArray(evt.m)) {
-    if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) {
+    if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) {
       for (const r of evt.m) {
         if (!Array.isArray(r) || r.length < 7) continue;
         const b = _botProxyById(r[0]);
@@ -10385,6 +10388,12 @@ function handleNetEvent(evt, fromPeerId) {
     try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
     if (evt.seed != null) net.worldSeed = evt.seed >>> 0;
     try { if (evt.mode) _applyModeClientSetup(evt.mode); } catch (_) {}
+    try {
+      if (evt.cyber) {
+        net.cyber = true;
+        game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false };
+      }
+    } catch (_) {}
     try { if (typeof assignTeamFromPeerOrder === 'function') assignTeamFromPeerOrder(); } catch (_) {}
     try {
       const ls = document.getElementById('lobby-status');
@@ -10486,6 +10495,22 @@ function handleNetEvent(evt, fromPeerId) {
     if (game.championShell && game.championShell.alive) {
       try { game.championShell.die(false); } catch (_) {}
     }
+    return;
+  }
+  if (evt.type === 'cyber_start') {
+    const C = game._cyber;
+    if (C && !C.authority) {
+      C.teamA = (LSS.TEAM_FLEET_A != null) ? LSS.TEAM_FLEET_A : 2;
+      C.teamB = (LSS.TEAM_FLEET_B != null) ? LSS.TEAM_FLEET_B : 3;
+      C.sector = evt.sector | 0;
+      C.started = true;
+      try { _cyberApplyStart(evt.sector | 0, evt.t, evt.fx, evt.fy, evt.fz); } catch (_) {}
+    }
+    return;
+  }
+  if (evt.type === 'cyber_end') {
+    const C = game._cyber;
+    if (C) { try { _cyberEnd(C, evt.title || 'MATCH OVER', evt.sub || '', true); } catch (_) {} }
     return;
   }
   if (evt.type === 'stasis_spawn' && typeof evt.fieldId === 'number') {
@@ -23604,7 +23629,27 @@ const CYBER = {
 };
 function startCyberpunkCity() {
   game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false };
-  startFreeFlight();
+  try { net.cyber = true; } catch (_) {}     // (v37.80) marks the ROOM, so peers and the bot
+  startFreeFlight();                          //          roster authority both behave
+}
+function _cyberAuthority() {
+  return (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
+}
+function _cyberApplyStart(sector, routeT, fx, fy, fz) {
+  const C = game._cyber;
+  if (!C) return;
+  try { _carrierSpawn({ sector: sector }); } catch (_) {}
+  try { if (_carrier.ent) _carrier.ent.team = C.teamA; } catch (_) {}
+  if (typeof routeT === 'number' && isFinite(routeT)) _carrier.t = routeT;
+  if (typeof fx === 'number' && typeof StasisField === 'function') {
+    try {
+      const f = new StasisField(new THREE.Vector3(fx, fy, fz), true);
+      if (Array.isArray(game.stasisFields)) game.stasisFields.push(f);
+      game.championField = f;
+      game.championSpawned = true;
+      C.field = f;
+    } catch (_) {}
+  }
 }
 if (typeof window !== 'undefined') window.startCyberpunkCity = startCyberpunkCity;
 function _cyberSpawnField() {
@@ -23642,6 +23687,15 @@ function _cyberCityPoint(i) {
   const r = 500 + Math.random() * 900;
   return c.add(new THREE.Vector3(Math.cos(a) * r, 120 + Math.random() * 320, Math.sin(a) * r));
 }
+function _cyberTeamForPeer(id, C) {
+  const A = C ? C.teamA : LSS.TEAM_FLEET_A, B = C ? C.teamB : LSS.TEAM_FLEET_B;
+  try {
+    if (!net.active || !net.myPeerId) return A;
+    const ids = [net.myPeerId, ...(typeof nonJudgePeerIds === 'function' ? nonJudgePeerIds() : [])].sort();
+    const i = Math.max(0, ids.indexOf(id));
+    return (i % 2 === 0) ? A : B;
+  } catch (_) { return A; }
+}
 function _cyberSpawnBots(C) {
   const K = window.__cyber || (window.__cyber = {});
   const nA = (K.attackers != null) ? K.attackers : CYBER.attackers;
@@ -23675,9 +23729,13 @@ function _cyberReviveBots(C, dt) {
     if (b.mesh) { b.mesh.position.copy(sp); if (!b.mesh.parent) scene.add(b.mesh); }
   }
 }
-function _cyberEnd(C, title, sub) {
+function _cyberEnd(C, title, sub, fromNet) {
   if (C.over) return;
+  if (!fromNet && net.active && !C.authority) return;
   C.over = true;
+  if (!fromNet && net.active && net.sendEvent) {
+    try { net.sendEvent({ type: 'cyber_end', title: title, sub: sub }); } catch (_) {}
+  }
   try { if (window.Overlays && Overlays.banner) Overlays.banner(title, sub); } catch (_) {}
   try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
   setTimeout(() => { try { if (typeof returnToRootMenu === 'function') returnToRootMenu(); } catch (_) {} }, 7000);
@@ -23729,11 +23787,25 @@ function _cyberFrame(dt) {
     C.started = true;
     C.teamA = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_A != null) ? LSS.TEAM_FLEET_A : 2;
     C.teamB = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_B != null) ? LSS.TEAM_FLEET_B : 3;
-    try { player.team = C.teamA; } catch (_) {}          // the player attacks, from the deck
-    try { _carrierSpawn(); } catch (_) {}
-    try { if (_carrier.ent) _carrier.ent.team = C.teamA; } catch (_) {}   // its guns answer defenders only
-    try { C.field = _cyberSpawnField(); } catch (_) {}
-    try { _cyberSpawnBots(C); } catch (e) { console.warn('[cyber] bots:', e); }
+    C.authority = _cyberAuthority();
+    if (net.active && !C.authority) {
+      try { player.team = _cyberTeamForPeer(net.myPeerId, C); } catch (_) { player.team = C.teamA; }
+    } else {
+      try { player.team = (net.active ? _cyberTeamForPeer(net.myPeerId, C) : C.teamA); } catch (_) { player.team = C.teamA; }
+      const _sector = Math.floor(Math.random() * 6);
+      _cyberApplyStart(_sector, 0);
+      try { C.field = _cyberSpawnField(); } catch (_) {}
+      try { _cyberSpawnBots(C); } catch (e) { console.warn('[cyber] bots:', e); }
+      if (net.active && net.sendEvent && C.field) {
+        try {
+          net.sendEvent({
+            type: 'cyber_start', sector: _sector, t: 0,
+            fx: C.field.position.x, fy: C.field.position.y, fz: C.field.position.z,
+          });
+        } catch (_) {}
+      }
+      C.sector = _sector;
+    }
     C.placeT = 2.5;   // the free-flight spawn lands after this frame ; hold the deck briefly
     try {
       if (window.Overlays && Overlays.banner) Overlays.banner('CYBERPUNK CITY', 'take the field in the city');
@@ -23753,6 +23825,7 @@ function _cyberFrame(dt) {
     } catch (_) {}
   }
   if (C.over) return;
+  if (net.active && !C.authority) return;     // (v37.80) a joiner mirrors; it does not adjudicate
   try { _cyberReviveBots(C, dt || 0.016); } catch (_) {}
   C._cityT = (C._cityT || 0) - (dt || 0.016);
   if (C._cityT <= 0) { C._cityT = 1.0; try { _cyberCityDefence(C); } catch (_) {} }
@@ -41728,7 +41801,7 @@ const _bfD = new THREE.Vector3();
 
 function _botNetSync(dt) {
   if (!net || !net.active || !net.sendEvent) return;
-  if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;
+  if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;   // (v37.80) cyber is authority-owned too
   _botNetSync._t = (_botNetSync._t || 0) - dt;
   if (_botNetSync._t > 0) return;
   _botNetSync._t = 0.12;
@@ -41744,7 +41817,7 @@ function _botNetSync(dt) {
 
 function _botSendRoster() {
   if (!net || !net.active || !net.sendEvent) return;
-  if ((net.campaign || net.endless) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;
+  if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;   // (v37.80) cyber is authority-owned too
   const bots = [];
   for (const b of game.entities) {
     if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
