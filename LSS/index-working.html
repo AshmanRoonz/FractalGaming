@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.69';
+const LSS_BUILD = '37.70';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -54382,11 +54382,27 @@ function _lssStartSpectatorCinematic() {
     if (s.engineFx) for (const e of s.engineFx) e.o.visible = false;
   }
 
-  // Camera : sit slightly ahead of the lineup, looking back at it. Frame
-  // the team in the lower half with a small downward tilt.
-  const camAhead   = Math.max(280, roomR * 0.65);
-  const camHeight  = lineY + 50;
+  // Camera : (v37.70) a CLOSE ORBIT across the front of the lineup instead of a fixed stand-off.
+  // The radius follows the line's own width so a full team still reads, but it is capped - with
+  // seven ships the sweep passes the middle of the line close up rather than backing off until
+  // everything fits, which is what made the ships look small. Knobs: window.__cine.
+  const _CN = window.__cine || (window.__cine = {});
+  const _lineHalf = (NS > 1) ? (SPACING * (NS - 1) * 0.5) : 0;
+  const camAhead = Math.max((_CN.min != null) ? _CN.min : 150,
+                   Math.min((_CN.max != null) ? _CN.max : 420,
+                            _lineHalf * ((_CN.spread != null) ? _CN.spread : 0.70) + ((_CN.pad != null) ? _CN.pad : 130)));
+  const camHeight  = lineY + ((_CN.height != null) ? _CN.height : 26);
   const lookHeight = lineY + 10;
+  _cinematic.orbitR = camAhead;
+  _cinematic.orbitY = camHeight;
+  _cinematic.orbitCX = lineCenterX;
+  _cinematic.orbitCZ = lineCenterZ;
+  // sweep an arc centred on the lineup's FRONT, so the ships always face the lens (orbiting to the
+  // side would just line them up behind each other)
+  _cinematic.orbitA0 = Math.atan2(fwdZ, fwdX);
+  _cinematic.orbitArc = (_CN.arc != null) ? _CN.arc : Math.PI * 0.5;
+  _cinematic.fovCine = (_CN.fov != null) ? _CN.fov : 65;
+  _cinematic.fov0 = (typeof camera !== 'undefined' && camera) ? camera.fov : 75;
   _cinematic.camPos.set(
     lineCenterX + fwdX * camAhead,
     camHeight,
@@ -54439,6 +54455,13 @@ function _lssShipEngineFX(mesh) {
 function _lssEndSpectatorCinematic() {
   _lssClearCinematicWatchdog();
   _cinematic.active = false;
+  // (v37.70) the cinematic lens never outlives the cinematic, whichever path ended it
+  try {
+    if (_cinematic.fov0 && typeof camera !== 'undefined' && camera && camera.fov !== _cinematic.fov0) {
+      camera.fov = _cinematic.fov0;
+      camera.updateProjectionMatrix();
+    }
+  } catch (_) {}
   if (_cinematic.ships) {
     for (let i = 0; i < _cinematic.ships.length; i++) {
       const s = _cinematic.ships[i];
@@ -54505,15 +54528,34 @@ function _lssUpdateSpectatorCinematic() {
   // Sway laterally relative to the lineup (along the stored side basis)
   // instead of always on the world X axis, so the framing slides parallel
   // to the team line regardless of the room's world orientation.
-  const sway = Math.sin(elapsed * 0.6) * 80.0;
-  const swayX = (typeof _cinematic.swayX === 'number') ? _cinematic.swayX : 1;
-  const swayZ = (typeof _cinematic.swayZ === 'number') ? _cinematic.swayZ : 0;
-  camera.position.set(
-    _cinematic.camPos.x + swayX * sway,
-    _cinematic.baseY,
-    _cinematic.camPos.z + swayZ * sway
-  );
-  camera.lookAt(_cinematic.camTarget);
+  if (_cinematic.orbitR) {
+    // (v37.70) orbit the lineup's front arc with a gentle push-in, and shoot it on a NARROW lens:
+    // the gameplay camera is 120 degrees, which is most of why the ships read small and far.
+    const _dur = Math.max(0.1, _cinematic.duration || 6.0);
+    const _u = Math.min(1, elapsed / _dur);
+    const _ang = _cinematic.orbitA0 + _cinematic.orbitArc * (_u - 0.5);
+    const _r = _cinematic.orbitR * (1.22 - 0.30 * _u);
+    camera.position.set(
+      _cinematic.orbitCX + Math.cos(_ang) * _r,
+      _cinematic.orbitY + Math.sin(elapsed * 0.7) * 7,
+      _cinematic.orbitCZ + Math.sin(_ang) * _r
+    );
+    camera.lookAt(_cinematic.camTarget);
+    if (_cinematic.fovCine && camera.fov !== _cinematic.fovCine) {
+      camera.fov = _cinematic.fovCine;
+      camera.updateProjectionMatrix();
+    }
+  } else {
+    const sway = Math.sin(elapsed * 0.6) * 80.0;
+    const swayX = (typeof _cinematic.swayX === 'number') ? _cinematic.swayX : 1;
+    const swayZ = (typeof _cinematic.swayZ === 'number') ? _cinematic.swayZ : 0;
+    camera.position.set(
+      _cinematic.camPos.x + swayX * sway,
+      _cinematic.baseY,
+      _cinematic.camPos.z + swayZ * sway
+    );
+    camera.lookAt(_cinematic.camTarget);
+  }
   // (v36.76) ARRIVAL BLEND — no more cold cut (owner: "zoom into the ship we
   // are in"). Over the final BLEND seconds the camera eases from the lineup
   // shot into the EXACT pose the gameplay camera takes on the next frame:
@@ -54544,6 +54586,12 @@ function _lssUpdateSpectatorCinematic() {
     _cineP.add(_cineOff);
     camera.position.lerp(_cineP, b);
     camera.quaternion.slerp(_cineQ, b);
+    // (v37.70) ...and the lens comes back to the gameplay one on the same ease, so the cut lands
+    // on the exact pose AND the exact field of view the rig is about to use.
+    if (_cinematic.fovCine && _cinematic.fov0) {
+      const _f = _cinematic.fovCine + (_cinematic.fov0 - _cinematic.fovCine) * b;
+      if (Math.abs(camera.fov - _f) > 0.01) { camera.fov = _f; camera.updateProjectionMatrix(); }
+    }
     const _s0 = (_cinematic.ships && _cinematic.ships.length && _cinematic.ships[0].isPlayer) ? _cinematic.ships[0] : null;
     if (_s0 && _s0.mesh) {
       // Mesh convention matches the rig: quaternion = camera quat, then a

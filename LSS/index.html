@@ -4167,7 +4167,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.69';
+const LSS_BUILD = '37.70';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -41920,9 +41920,21 @@ function _lssStartSpectatorCinematic() {
     if (s.engineFx) for (const e of s.engineFx) e.o.visible = false;
   }
 
-  const camAhead   = Math.max(280, roomR * 0.65);
-  const camHeight  = lineY + 50;
+  const _CN = window.__cine || (window.__cine = {});
+  const _lineHalf = (NS > 1) ? (SPACING * (NS - 1) * 0.5) : 0;
+  const camAhead = Math.max((_CN.min != null) ? _CN.min : 150,
+                   Math.min((_CN.max != null) ? _CN.max : 420,
+                            _lineHalf * ((_CN.spread != null) ? _CN.spread : 0.70) + ((_CN.pad != null) ? _CN.pad : 130)));
+  const camHeight  = lineY + ((_CN.height != null) ? _CN.height : 26);
   const lookHeight = lineY + 10;
+  _cinematic.orbitR = camAhead;
+  _cinematic.orbitY = camHeight;
+  _cinematic.orbitCX = lineCenterX;
+  _cinematic.orbitCZ = lineCenterZ;
+  _cinematic.orbitA0 = Math.atan2(fwdZ, fwdX);
+  _cinematic.orbitArc = (_CN.arc != null) ? _CN.arc : Math.PI * 0.5;
+  _cinematic.fovCine = (_CN.fov != null) ? _CN.fov : 65;
+  _cinematic.fov0 = (typeof camera !== 'undefined' && camera) ? camera.fov : 75;
   _cinematic.camPos.set(
     lineCenterX + fwdX * camAhead,
     camHeight,
@@ -41968,6 +41980,12 @@ function _lssShipEngineFX(mesh) {
 function _lssEndSpectatorCinematic() {
   _lssClearCinematicWatchdog();
   _cinematic.active = false;
+  try {
+    if (_cinematic.fov0 && typeof camera !== 'undefined' && camera && camera.fov !== _cinematic.fov0) {
+      camera.fov = _cinematic.fov0;
+      camera.updateProjectionMatrix();
+    }
+  } catch (_) {}
   if (_cinematic.ships) {
     for (let i = 0; i < _cinematic.ships.length; i++) {
       const s = _cinematic.ships[i];
@@ -42019,15 +42037,32 @@ function _lssUpdateSpectatorCinematic() {
       if (s.engineFx) for (const e of s.engineFx) e.o.visible = false;
     }
   }
-  const sway = Math.sin(elapsed * 0.6) * 80.0;
-  const swayX = (typeof _cinematic.swayX === 'number') ? _cinematic.swayX : 1;
-  const swayZ = (typeof _cinematic.swayZ === 'number') ? _cinematic.swayZ : 0;
-  camera.position.set(
-    _cinematic.camPos.x + swayX * sway,
-    _cinematic.baseY,
-    _cinematic.camPos.z + swayZ * sway
-  );
-  camera.lookAt(_cinematic.camTarget);
+  if (_cinematic.orbitR) {
+    const _dur = Math.max(0.1, _cinematic.duration || 6.0);
+    const _u = Math.min(1, elapsed / _dur);
+    const _ang = _cinematic.orbitA0 + _cinematic.orbitArc * (_u - 0.5);
+    const _r = _cinematic.orbitR * (1.22 - 0.30 * _u);
+    camera.position.set(
+      _cinematic.orbitCX + Math.cos(_ang) * _r,
+      _cinematic.orbitY + Math.sin(elapsed * 0.7) * 7,
+      _cinematic.orbitCZ + Math.sin(_ang) * _r
+    );
+    camera.lookAt(_cinematic.camTarget);
+    if (_cinematic.fovCine && camera.fov !== _cinematic.fovCine) {
+      camera.fov = _cinematic.fovCine;
+      camera.updateProjectionMatrix();
+    }
+  } else {
+    const sway = Math.sin(elapsed * 0.6) * 80.0;
+    const swayX = (typeof _cinematic.swayX === 'number') ? _cinematic.swayX : 1;
+    const swayZ = (typeof _cinematic.swayZ === 'number') ? _cinematic.swayZ : 0;
+    camera.position.set(
+      _cinematic.camPos.x + swayX * sway,
+      _cinematic.baseY,
+      _cinematic.camPos.z + swayZ * sway
+    );
+    camera.lookAt(_cinematic.camTarget);
+  }
   const _bIn = elapsed - (_cinematic.duration - 1.4);
   if (_bIn > 0 && typeof player !== 'undefined' && player && player.position && player.euler) {
     let b = Math.min(1, _bIn / 1.4);
@@ -42038,6 +42073,10 @@ function _lssUpdateSpectatorCinematic() {
     _cineP.add(_cineOff);
     camera.position.lerp(_cineP, b);
     camera.quaternion.slerp(_cineQ, b);
+    if (_cinematic.fovCine && _cinematic.fov0) {
+      const _f = _cinematic.fovCine + (_cinematic.fov0 - _cinematic.fovCine) * b;
+      if (Math.abs(camera.fov - _f) > 0.01) { camera.fov = _f; camera.updateProjectionMatrix(); }
+    }
     const _s0 = (_cinematic.ships && _cinematic.ships.length && _cinematic.ships[0].isPlayer) ? _cinematic.ships[0] : null;
     if (_s0 && _s0.mesh) {
       _cineMQ.copy(_cineQ).multiply(_cineFlipY);
