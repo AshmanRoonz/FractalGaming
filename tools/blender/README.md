@@ -444,3 +444,44 @@ removal is 13 Python rays per face (hours on a million faces — use LOOSE_PARTS
 collapse spends the budget on curves) now runs inside `ship_remesh.py` by default (`--pkg ''` for
 the plain collapse), together with larger UV islands (80°, tighter pack: 55% coverage instead of
 36%) — the remeshed Pyro is now close to the original's crispness with clean geometry.
+
+### v37.59 — bare hulls with the owner's glass (the cabin is opt-in)
+
+Owner: *"if you used my original glb's then why are your cockpits inside there? we should be starting
+fresh, with just the glass installed."* `ship_original.py` no longer builds the procedural cabin
+unless `--interior` is passed: the default output is the clean hull + `canopy_glass` cut along the
+owner's outlines + markers + the eye (`cockpit1`) placed by the open-view scan. Classification of
+the cut faces (v37.58): a face inside the outline that faces the camera but is hidden only by other
+glass (the canopy's own bulge at grazing angles) is a candidate, confirmed when it lies in the glass
+fringe ; then a CLOSE pass fills faces with glass on two of their edges (one-face cracks, notches)
+without moving the straight outer edges.
+
+### v37.60 — "parts of the hull missing" (owner) : what it was
+
+Three separate causes, none of them the glass itself (a probe with the glass painted opaque green
+from four angles showed it confined to the outlines): (1) the outline cuts add faces, so hulls that
+arrived at exactly the 150k budget went just over it and `ship_original.py` DECIMATED the region
+within 0.35 L of the eye by half — Vortex, Tracker, Slayer and Blaster lost 16–36k faces of cockpit-
+area detail (fix: the budget check has 10% slack) ; (2) the inner-skin pass also removed exterior
+faces in the Pyro's deep grooves (fix: it is opt-in, `--strip-inner`, default off — hulls stay
+complete as in v37.54) ; (3) the hidden-behind-glass rule turned a patch of the Tracker's BELLY into
+glass — it sat in the fringe of a thin hull, seen through the canopy from above (fix: candidates must
+face like the pane, normal within ~78° of the glass's mean normal).
+
+### v37.60b — the Vortex floor under the window (owner: "still has a bit of cut out on the hull under the window")
+
+The hidden-behind-glass rule also needs its candidates to look out at OPEN AIR (`escapes(fi)`, the
+surround fill's test): the hull's own inner skin under the canopy faces up like the pane and sits in
+the fringe, so 296 floor faces on the Vortex had become glass and from the seat the floor under the
+window was see-through. Far-half pane faces (what the rule is for) escape ; interior faces' normal
+rays end inside the hull. Vortex trapped glass 296 -> 37, additions 640 -> 421. Probe:
+`escape_probe.py` in the session scratchpad (glass faces whose normal ray hits the mesh).
+
+### v37.61 — GHOST SEAT VIEW (game side, not the pipeline)
+
+Owner: "what we did with the leviathans to make them ghost looking... we should try that with the
+ships for what they look like from the inside". `_addGhostHull` in index-working.html clones the
+monsters' `_addSpectralGhost` treatment onto the player's hull materials while the 3D cockpit is
+live (abs(N.V) fresnel so the inner skin reads like the outer, canopy glass untouched, restored on
+leaving the seat). Knobs `window.__cockpit.ghost = { on, core 0.30, rim 0.62, mix 0.35, tint
+0x8ad8ff, flicker 1 }` + `__ghostHullRefresh()` to re-apply after a change.

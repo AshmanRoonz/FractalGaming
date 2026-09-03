@@ -51,6 +51,7 @@ SAMPLES = int(opt('--samples', '4'))
 BAKE_NORMAL = '--no-normal' not in argv
 RENDER = '--render' in argv
 EXPORT = '--no-export' not in argv
+STRIP_INNER = '--strip-inner' in argv
 PKG = opt('--pkg', os.path.join(REPO, 'tools', 'blender', 'vendor', 'blender-model-optimizer'))   # Hinneman/blender-model-optimizer (vendored, MIT): its decimate_single ; --pkg '' = plain collapse
 _opt_geometry = None
 if PKG and os.path.isdir(os.path.join(PKG, 'blender_model_optimizer')):
@@ -135,8 +136,14 @@ def remove_inner_skin(obj, L):
     bvh = BVHTree.FromObject(obj, dg)
     me = obj.data
     nP = len(me.polygons)
-    dirs14 = [Vector(v).normalized() for v in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
-                                               (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1), (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1))]
+    # 64 directions on a Fibonacci sphere: 14 axis/diagonal directions were too coarse - exterior
+    # faces inside gun cages, intakes and wing roots counted as hidden and were deleted (v37.59)
+    dirs14 = []
+    ga = math.pi * (3.0 - math.sqrt(5.0))
+    for i in range(64):
+        y = 1.0 - 2.0 * (i + 0.5) / 64
+        r = math.sqrt(max(0.0, 1.0 - y * y))
+        dirs14.append(Vector((math.cos(ga * i) * r, y, math.sin(ga * i) * r)))
     eps = 0.0008 * L
     far = 3.0 * L
     kill = np.zeros(nP, bool)
@@ -315,10 +322,13 @@ def process(ship):
         mod.symmetry_axis = 'Y'
         bpy.ops.object.modifier_apply(modifier=mod.name)
         rep['decimate'] = 'blender collapse (Y symmetry)'
-    # INNER SKIN: faces no external viewpoint can see
-    t1 = time.time()
-    n_kill, n_before = remove_inner_skin(clean, L)
-    rep['inner_skin'] = {'removed': n_kill, 'of': n_before, 'seconds': round(time.time() - t1, 1)}
+    # INNER SKIN removal is OPT-IN (--strip-inner): on the Pyro it also took exterior faces in deep
+    # grooves (owner: 'parts of pyro's hull missing'). The faces under each glass pane are removed
+    # by ship_original.py instead, which is all the seat view needed.
+    if STRIP_INNER:
+        t1 = time.time()
+        n_kill, n_before = remove_inner_skin(clean, L)
+        rep['inner_skin'] = {'removed': n_kill, 'of': n_before, 'seconds': round(time.time() - t1, 1)}
     # second pass down to the budget, now spent on the outside only
     n_tri2 = sum(len(pg.vertices) - 2 for pg in clean.data.polygons)
     if n_tri2 > TARGET * 1.05:

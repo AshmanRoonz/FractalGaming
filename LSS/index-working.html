@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.54';
+const LSS_BUILD = '37.61';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4335,7 +4335,7 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // (v37.35) 37.34 -> 37.35: INNER LINING closes every see-through hull face around
 // the seat, crack zipper in the cleanup stage, four distinct instrument tiles,
 // control stick, console switch rows, harness straps.
-const _MODELS_VERSION = '37.54';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.61';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -54798,6 +54798,7 @@ function _lssCockpitOff(dt) {
   // (v37.41) the port/starboard running-light orbs sit under the nose ; the old opaque hulls
   // hid them from the seat, the see-through pits of the original hulls do not -> first-person hides them
   try { const _rl = player && player.mesh && player.mesh.userData && player.mesh.userData.runningLight; if (_rl && !_rl.visible) _rl.visible = true; } catch (_) {}
+  try { _ghostHullRestore(player && player.mesh); } catch (_) {}   // (v37.61) painted hull again for the chase view
 }
 function _lssCockpitLights() {
   if (typeof scene === 'undefined' || !scene) return null;
@@ -54807,6 +54808,96 @@ function _lssCockpitLights() {
   scene.add(key); scene.add(fill);
   return { key, fill };
 }
+// (v37.61) GHOST SEAT VIEW. Owner: "what we did with the leviathans to make them ghost
+// looking... we should try that with the ships for what they look like from the inside".
+// While the 3D cockpit is live the player's own hull swaps to spectral clones in the
+// _addSpectralGhost mould (fresnel-driven translucency + tinted rim, ~7 Hz flicker, scanline
+// drift) — with abs(N.V) so the INNER skin the pilot actually looks at reads like the outer
+// one — and the canopy glass keeps its own material. Restored the frame the seat is left, so
+// the chase view and every other ship keep the painted hull. Behind window.__cockpit.ghost =
+// { on, core, rim, tint, mix, flicker } (on by default while the owner judges it).
+const _ghostHullTimeU = { value: 0 };
+function _ghostHullTint() {
+  const G = window.__cockpit && window.__cockpit.ghost;
+  if (G && G.tint != null) return G.tint;
+  try {
+    const L = (typeof LOADOUTS !== 'undefined' && LOADOUTS) ? LOADOUTS[player.loadoutKey] : null;
+    if (L && L.color != null) return L.color;
+  } catch (_) {}
+  return 0x8ad8ff;
+}
+function _ghostHullKnobs() {
+  const G = (window.__cockpit && window.__cockpit.ghost) || {};
+  return {
+    on: G.on !== false,
+    core: (typeof G.core === 'number') ? G.core : 0.30,
+    rim: (typeof G.rim === 'number') ? G.rim : 0.62,
+    mix: (typeof G.mix === 'number') ? G.mix : 0.35,
+    flicker: (typeof G.flicker === 'number') ? G.flicker : 1,
+    tint: _ghostHullTint()
+  };
+}
+function _addGhostHull(mat, K) {
+  mat.transparent = true;
+  mat.depthWrite = false;      // x-ray layering: the far wall glows through the near one
+  mat.side = THREE.DoubleSide;
+  const U = {
+    uGhTint: { value: new THREE.Color(K.tint) }, uGhTime: _ghostHullTimeU,
+    uGhCore: { value: K.core }, uGhRim: { value: K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }
+  };
+  mat.userData._ghostU = U;
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, U);
+    shader.vertexShader = 'varying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <project_vertex>',
+      '#include <project_vertex>\n  vGhN = normalize(normalMatrix * normal);\n  vGhV = normalize(-mvPosition.xyz);'
+    );
+    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <opaque_fragment>',
+      '#include <opaque_fragment>\n' +
+      '  { vec3 ghN = normalize(vGhN); vec3 ghV = normalize(vGhV);\n' +
+      '    float ghFres = pow(1.0 - clamp(abs(dot(ghN, ghV)), 0.0, 1.0), 2.0);\n' +
+      '    float ghFlick = 1.0 - uGhFlick * 0.08 * (1.0 - sin(uGhTime * 44.0) * (0.55 + 0.45 * sin(uGhTime * 9.7)));\n' +
+      '    float ghScan = 1.0 - uGhFlick * 0.05 * (1.0 - sin(gl_FragCoord.y * 0.28 - uGhTime * 14.0));\n' +
+      '    gl_FragColor.rgb = mix(gl_FragColor.rgb, uGhTint * 0.55, uGhMix);\n' +
+      '    gl_FragColor.rgb += uGhTint * ghFres * (1.15 + 0.25 * uGhFlick * sin(uGhTime * 38.0));\n' +
+      '    gl_FragColor.a = clamp((uGhCore + uGhRim * ghFres) * ghFlick * ghScan, 0.0, 0.92); }'
+    );
+  };
+  mat.customProgramCacheKey = () => 'ghostHull';
+  mat.needsUpdate = true;
+  return mat;
+}
+// swap the hull materials of the player's mesh for ghost clones (idempotent per mesh) ; the
+// running-light orbs, plumes, frame strips and anything already transparent (the canopy) stay
+function _ghostHullApply(mesh) {
+  if (!mesh || mesh.userData._ghostOn) return;
+  const K = _ghostHullKnobs();
+  mesh.userData._ghostOn = true;
+  mesh.traverse(o => {
+    if (!o.isMesh || !o.material) return;
+    if (o.userData && (o.userData.isPlume || o.userData.isRunningLight || o.userData._cockpitFrame)) return;
+    const arr = Array.isArray(o.material);
+    const ms = arr ? o.material : [o.material];
+    const out = ms.map(m => (!m || m.transparent || m.name === 'canopy_glass') ? m : _addGhostHull(m.clone(), K));
+    if (out.some((m, i) => m !== ms[i])) { o.userData._ghostOrig = o.material; o.material = arr ? out : out[0]; }
+  });
+}
+function _ghostHullRestore(mesh) {
+  if (!mesh || !mesh.userData._ghostOn) return;
+  mesh.userData._ghostOn = false;
+  mesh.traverse(o => {
+    if (!o.isMesh || !o.userData._ghostOrig) return;
+    const cur = Array.isArray(o.material) ? o.material : [o.material];
+    o.material = o.userData._ghostOrig;
+    delete o.userData._ghostOrig;
+    for (const m of cur) if (m && m.userData && m.userData._ghostU) m.dispose();
+  });
+}
+// live re-tune: window.__cockpit.ghost = {...}; __ghostHullRefresh()
+window.__ghostHullRefresh = function () { try { _ghostHullRestore(player && player.mesh); } catch (_) {} };
 function _cockpit3dWanted() {
   const W = window.__cockpit;
   if (W && typeof W.on === 'boolean') return W.on;
@@ -55014,6 +55105,9 @@ function _lssApplyShipRig(dt) {
         }
         if (game._cockpitFrameObjs) for (const _fo of game._cockpitFrameObjs) if (!_fo.visible) _fo.visible = true;
         try { const _rl = player.mesh && player.mesh.userData && player.mesh.userData.runningLight; if (_rl && _rl.visible) _rl.visible = false; } catch (_) {}
+        // (v37.61) ghost hull from the seat (see _addGhostHull) ; one shared clock for the flicker
+        _ghostHullTimeU.value += (dt || 0.016);
+        try { if (_ghostHullKnobs().on) _ghostHullApply(player.mesh); else _ghostHullRestore(player.mesh); } catch (_) {}
         // (v37.37) COCKPIT LIGHT RIG. The interior faces the pilot, never the
         // sun, so under the scene's three directionals + weak hemi it read as
         // black shards. Two point lights ride the eye while the cockpit is live:
