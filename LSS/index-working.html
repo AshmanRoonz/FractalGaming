@@ -4251,7 +4251,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.93';
+const LSS_BUILD = '37.94';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -29705,6 +29705,7 @@ function _carrierEngineStop() {
   } catch (_) {}
 }
 function _carrierClear(keepSound) {
+  try { _carrierChargeEnd(); } catch (_) {}
   // (v37.91) a placeholder->model swap is not the carrier leaving; stopping and restarting the
   // engine there is what the owner heard cut out and come back mid-cinematic
   if (!keepSound) { try { _carrierEngineStop(); } catch (_) {} }
@@ -29912,12 +29913,57 @@ function _carrierRayDist(origin, dir, maxDist) {
 // (v37.77) THE GUNS. Slayer-green lightning from whichever of the marked mounts is nearest to the
 // target, at anything hostile that comes inside range. window.__carrier.zapTest = true counts the
 // local player as hostile, which is the only way to see it before the mode has two teams.
+// (v37.94) The mount that is about to fire: a growing orb and a rising whine, so the bolt is
+// announced instead of arriving out of nowhere. Additive, no light, torn down on fire.
+function _carrierChargeStart(gun, dur) {
+  _carrierChargeEnd();
+  try {
+    const r = (_carrier.size ? _carrier.size.y : 548) * 0.035;
+    const col = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66;
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(r, 12, 10),
+      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.85,
+                                    blending: THREE.AdditiveBlending, depthWrite: false })
+    );
+    gun.getWorldPosition(m.position);
+    m.scale.setScalar(0.25);
+    m.renderOrder = 3;
+    scene.add(m);
+    _carrier.chargeFx = { m, gun, t: 0, dur: dur };
+    gun.getWorldPosition(_ccW);
+    if (typeof playSpatialSound === 'function') playSpatialSound('railgun_charge', _ccW.clone());
+    else if (typeof playSound === 'function') playSound('railgun_charge');
+  } catch (_) { _carrier.chargeFx = null; }
+}
+function _carrierChargeTick(dt) {
+  const F = _carrier.chargeFx;
+  if (!F) return;
+  try {
+    F.t += (dt || 0.016);
+    const u = Math.min(1, F.t / Math.max(0.05, F.dur));
+    F.gun.getWorldPosition(F.m.position);            // the mount is moving with the hull
+    F.m.scale.setScalar(0.25 + u * u * 1.35);
+    F.m.material.opacity = 0.35 + 0.6 * u;
+  } catch (_) {}
+}
+function _carrierChargeEnd() {
+  const F = _carrier.chargeFx;
+  _carrier.chargeFx = null;
+  if (!F) return;
+  try {
+    scene.remove(F.m);
+    if (F.m.geometry) F.m.geometry.dispose();
+    if (F.m.material) F.m.material.dispose();
+  } catch (_) {}
+}
 function _carrierGuns(dt) {
-  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive) return;
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive) { _carrierChargeEnd(); return; }
   if (!_carrier.guns.length || typeof spawnLightningBolt !== 'function') return;
   const K = _carrierKnobs();
+  _carrierChargeTick(dt);
   _carrier.zapT = (_carrier.zapT || 0) - (dt || 0.016);
-  if (_carrier.zapT > 0) return;
+  const lead = (K.charge != null) ? K.charge : 0.55;    // how long the wind-up runs
+  if (_carrier.zapT > lead) { _carrierChargeEnd(); return; }
   const range = (K.zapRange != null) ? K.zapRange : CARRIER.zapRange;
   let best = null, bestD = range;
   const consider = (c) => {
@@ -29933,14 +29979,22 @@ function _carrierGuns(dt) {
       consider(e);
     }
   }
-  if (!best) return;
-  _carrier.zapT = (K.zapEvery != null) ? K.zapEvery : CARRIER.zapEvery;
+  // Nothing in range: hold the clock AT the wind-up threshold rather than letting it run on
+  // into the negative, or the first ship to wander into range gets shot with no warning at all.
+  if (!best) { _carrierChargeEnd(); if (_carrier.zapT < lead) _carrier.zapT = lead; return; }
   let gun = _carrier.guns[0], gd = Infinity;
   for (const g of _carrier.guns) {
     g.getWorldPosition(_ccW);
     const d = _ccW.distanceToSquared(best.position);
     if (d < gd) { gd = d; gun = g; }
   }
+  // still winding up: light the mount that will fire and hold
+  if (_carrier.zapT > 0) {
+    if (!_carrier.chargeFx || _carrier.chargeFx.gun !== gun) _carrierChargeStart(gun, lead);
+    return;
+  }
+  _carrier.zapT = (K.zapEvery != null) ? K.zapEvery : CARRIER.zapEvery;
+  _carrierChargeEnd();
   gun.getWorldPosition(_ccW);
   const col = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66;
   try { spawnLightningBolt(_ccW.clone(), best.position.clone(), col, 0.22, 3, 2.6, true); _carrier.zaps = (_carrier.zaps | 0) + 1; }
@@ -30018,6 +30072,7 @@ if (typeof window !== 'undefined') {
     zaps: _carrier.zaps | 0, gunErr: _carrier._gunErr || null, boltErr: _carrier._boltErr || null,
     zapT: +(_carrier.zapT || 0).toFixed(2),
     engineSnd: !!_carrier.snd,
+    charging: !!_carrier.chargeFx,
     body: _carrier.body ? (_carrier.body.nx + 'x' + _carrier.body.nz + ' hull map') : 'box only',
     size: _carrier.size ? _carrier.size.toArray().map(Math.round) : null,
   });
@@ -30045,6 +30100,43 @@ const CYBER = {
 };
 // (v37.91) fetch the hull NOW, while the player is still on ship select
 function _cyberPrefetch() { try { _carrierPreload(); } catch (_) {} }
+// (v37.94) Decide WHERE the match is and stand the player there before the world is prebaked.
+// Until this existed the mode placed you only when its lineup ran - after free flight had spawned
+// you at the hub's default point and after the world had been baked around THAT point. So the first
+// frames drawn were the hub spawn, and the zone morph (a pure function of position) then had a
+// portal's distance to travel, which is the biome sliding around under the countdown.
+function _cyberPrePlace() {
+  const C = (typeof game !== 'undefined' && game) ? game._cyber : null;
+  if (!C || !C.armed || C.started || C.prePlaced) return;
+  try {
+    C.teamA = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_A != null) ? LSS.TEAM_FLEET_A : 2;
+    C.teamB = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_B != null) ? LSS.TEAM_FLEET_B : 3;
+    C.authority = _cyberAuthority();
+    let team = C.teamA;
+    try { team = (net.active ? _cyberTeamForPeer(net.myPeerId, C) : C.teamA); } catch (_) {}
+    player.team = team;
+    if (team === C.teamA) {
+      // the attackers' side: the carrier's launch ring. A joiner has no sector yet and waits for
+      // the authority's cyber_start, so it stands off the city instead.
+      if (C.sector == null && (!net.active || C.authority)) C.sector = Math.floor(Math.random() * 6);
+      if (C.sector != null) {
+        const P = _carrierPortal(C.sector);
+        if (P && P.pos) {
+          player.position.set(P.pos.x, (CARRIER.alt || 1200) + 120, P.pos.z);
+          if (player.velocity) player.velocity.set(0, 0, 0);
+          C.prePlaced = true;
+          return;
+        }
+      }
+    }
+    // the defenders' side (and the joiner): over the city, where their objective is
+    if (typeof HUB_CITY !== 'undefined' && HUB_CITY) {
+      player.position.set(HUB_CITY.x + 1400, (HUB_CITY.padY || 300) + 900, HUB_CITY.z + 1400);
+      if (player.velocity) player.velocity.set(0, 0, 0);
+      C.prePlaced = true;
+    }
+  } catch (e) { console.warn('[cyber] preplace:', e); }
+}
 function startCyberpunkCity() {
   _cyberPrefetch();
   game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false };
@@ -30352,7 +30444,9 @@ function _cyberSetup(C) {
       try { player.team = _cyberTeamForPeer(net.myPeerId, C); } catch (_) { player.team = C.teamA; }
     } else {
       try { player.team = (net.active ? _cyberTeamForPeer(net.myPeerId, C) : C.teamA); } catch (_) { player.team = C.teamA; }
-      const _sector = Math.floor(Math.random() * 6);
+      // (v37.94) the sector may already be chosen - _cyberPrePlace picks it before the world is
+      // baked, so that the bake happens where the match is. Never re-roll it here.
+      const _sector = (C.sector != null) ? C.sector : Math.floor(Math.random() * 6);
       _cyberApplyStart(_sector, 0);
       try { C.field = _cyberSpawnField(); } catch (_) {}
       try { _cyberSpawnBots(C); } catch (e) { console.warn('[cyber] bots:', e); }
@@ -49014,6 +49108,9 @@ function _pbSub(txt) {
 }
 async function _prebakeWorldForLaunch() {
   if (_PREBAKE.on) return _PREBAKE.last;
+  // (v37.94) CYBERPUNK CITY stands the player where the match actually is FIRST, so everything
+  // below bakes around the carrier's launch ring or the city instead of the hub's default spawn.
+  try { if (typeof _cyberPrePlace === 'function') _cyberPrePlace(); } catch (_) {}
   _PREBAKE.on = true;
   game._worldPrebaking = true;
   const t0 = _pbNow();
@@ -82027,7 +82124,18 @@ function gameLoop(timestamp) {
       // Zone morph BEFORE the city frame (whose neon proximity lerp rebases on
       // the live zone fog) and BEFORE weather (whose dome/clouds inherit the
       // zone-blended fog colour on the same frame).
-      try { _hubZoneTick(_fX, _fZ, dt); } catch (_) {}
+      // (v37.94) CYBERPUNK CITY pins the zone morph to the CITY. The morph is a pure function of
+      // where you are, and this mode flies you 20,000 units from a portal ring to the city - so the
+      // look kept sliding for the whole approach, which the owner reads as the biome changing under
+      // the match. The objective is the city and the mode is named for it, so the city's own light
+      // holds from the launch ring to the target. window.__cyber.zonePin = false restores the
+      // travelling look.
+      try {
+        const _zc = (game._cyber && game._cyber.armed && (!window.__cyber || window.__cyber.zonePin !== false) &&
+                     typeof HUB_CITY !== 'undefined' && HUB_CITY);
+        if (_zc) _hubZoneTick(HUB_CITY.x, HUB_CITY.z, dt);
+        else _hubZoneTick(_fX, _fZ, dt);
+      } catch (_) {}
       __pmark('hub:zone');
       try { _hubCityFrame(dt); } catch (_) {}
       try { _carrierFrame(dt); } catch (_) {}   // (v37.72) no-op until a carrier is spawned
