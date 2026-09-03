@@ -4251,7 +4251,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.90';
+const LSS_BUILD = '37.92';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -29484,6 +29484,7 @@ function _carrierAttach(root, sector) {
     _carrier.half = _carrier.size.clone().multiplyScalar(0.5);
     _carrier.ctr = _bb2.getCenter(new THREE.Vector3()).sub(root.position);
     _carrier.bound = _carrier.half.length() + _carrier.ctr.length();
+    _carrierBuildBody(root);
   }
   scene.add(root);
   _carrierHarvest(root);
@@ -29580,34 +29581,52 @@ function _carrierAttach(root, sector) {
   try { _carrierEngineStart(); } catch (_) {}
   return _carrier.ent;
 }
-function _carrierSpawn(opts) {
-  opts = opts || {};
-  _carrierClear();
-  const sector = (typeof opts.sector === 'number') ? opts.sector : undefined;
-  if (opts.placeholder === true || typeof THREE.GLTFLoader === 'undefined') {
-    return _carrierAttach(_carrierPlaceholder(), sector);
-  }
-  if (_carrier.proto) return _carrierAttach(_carrier.proto.clone(true), sector);
-  if (_carrier.loading) return null;
+// (v37.91) ONE loader with callbacks, so the model can be fetched BEFORE anything needs it and a
+// second request while the first is in flight waits instead of starting its own.
+function _carrierLoadProto(then) {
+  if (_carrier.proto) { if (then) { try { then(); } catch (_) {} } return; }
+  if (typeof THREE.GLTFLoader === 'undefined') return;
+  _carrier.protoCbs = _carrier.protoCbs || [];
+  if (then) _carrier.protoCbs.push(then);
+  if (_carrier.loading) return;
   _carrier.loading = true;
-  // fly the placeholder immediately so the route is live while the model streams in
-  _carrierAttach(_carrierPlaceholder(), sector);
   const url = MONSTER_BASE_URL + CARRIER.file + _MODEL_CACHE_BUST;
   try {
     new THREE.GLTFLoader().load(url, gltf => {
       _carrier.loading = false;
       _carrier.proto = gltf.scene;
-      const keep = _carrier.sector;
-      const t = _carrier.t;
-      _carrierClear();
-      _carrierAttach(_carrier.proto.clone(true), keep);
-      _carrier.t = t;   // keep its place on the route across the swap
-      console.log('[carrier] loaded', url, 'spawns', _carrier.spawns.length, 'guns', _carrier.guns.length);
+      console.log('[carrier] loaded', url);
+      const cbs = _carrier.protoCbs || [];
+      _carrier.protoCbs = [];
+      for (const c of cbs) { try { c(); } catch (_) {} }
     }, undefined, err => {
       _carrier.loading = false;
+      _carrier.protoCbs = [];
       console.warn('[carrier] no model yet at', url, '- flying the placeholder', err && err.message ? err.message : '');
     });
   } catch (e) { _carrier.loading = false; }
+}
+// Called when the mode is CHOSEN. Ship select plus the free-flight world preload is many seconds of
+// cover, so by the time the launch lineup runs the real hull is in - which is the whole point: a
+// hull that swaps mid-cinematic takes the deck (and the ships parked on it) with it.
+function _carrierPreload() { _carrierLoadProto(null); }
+function _carrierSpawn(opts) {
+  opts = opts || {};
+  _carrierClear(true);           // a respawn is a swap, not a farewell: the engine keeps running
+  const sector = (typeof opts.sector === 'number') ? opts.sector : undefined;
+  if (opts.placeholder === true || typeof THREE.GLTFLoader === 'undefined') {
+    return _carrierAttach(_carrierPlaceholder(), sector);
+  }
+  if (_carrier.proto) return _carrierAttach(_carrier.proto.clone(true), sector);
+  // not in yet: fly the placeholder so the route is live, and take the real hull when it lands
+  _carrierAttach(_carrierPlaceholder(), sector);
+  _carrierLoadProto(() => {
+    const keep = _carrier.sector;
+    const t = _carrier.t;
+    _carrierClear(true);
+    _carrierAttach(_carrier.proto.clone(true), keep);
+    _carrier.t = t;   // keep its place on the route across the swap
+  });
   return _carrier.ent;
 }
 // (v37.85) ENGINE RUMBLE. There is no continuous engine loop anywhere in the ship audio - it is
@@ -29685,8 +29704,10 @@ function _carrierEngineStop() {
     }, 700);
   } catch (_) {}
 }
-function _carrierClear() {
-  try { _carrierEngineStop(); } catch (_) {}
+function _carrierClear(keepSound) {
+  // (v37.91) a placeholder->model swap is not the carrier leaving; stopping and restarting the
+  // engine there is what the owner heard cut out and come back mid-cinematic
+  if (!keepSound) { try { _carrierEngineStop(); } catch (_) {} }
   if (_carrier.obj) { try { scene.remove(_carrier.obj); } catch (_) {} }
   if (_carrier.ent && game && Array.isArray(game.entities)) {
     const i = game.entities.indexOf(_carrier.ent);
@@ -29744,6 +29765,9 @@ function _carrierFrame(dt) {
 // radius, and pushed out along the shallowest axis - which also means a ship dropping onto the deck
 // is pushed UP onto it rather than through it. Called from resolveCollision, so bots and the player
 // both obey it.
+// (v37.91) who is currently INSIDE the hull, keyed by the position vector the collider is handed
+// (ships spawned on the deck). Cleared the moment they are outside it - see _carrierCollide.
+const _carrierInside = new WeakSet();
 const _ccP = new THREE.Vector3(), _ccN = new THREE.Vector3(), _ccQ = new THREE.Quaternion();
 const _ccW = new THREE.Vector3();
 function _carrierCollide(pos, velocity, radius) {
@@ -29751,30 +29775,100 @@ function _carrierCollide(pos, velocity, radius) {
   const o = _carrier.obj;
   const dx = pos.x - o.position.x, dy = pos.y - o.position.y, dz = pos.z - o.position.z;
   const R = _carrier.bound + radius;
-  if (dx * dx + dy * dy + dz * dz > R * R) return;          // broad phase
+  if (dx * dx + dy * dy + dz * dz > R * R) { _carrierInside.delete(pos); return; }   // broad phase
   _ccQ.copy(o.quaternion).invert();
-  _ccP.set(dx, dy, dz).applyQuaternion(_ccQ).sub(_carrier.ctr);
-  const hx = _carrier.half.x + radius, hy = _carrier.half.y + radius, hz = _carrier.half.z + radius;
-  const ax = Math.abs(_ccP.x), ay = Math.abs(_ccP.y), az = Math.abs(_ccP.z);
-  if (ax > hx || ay > hy || az > hz) return;                 // outside the box
-  const px = hx - ax, py = hy - ay, pz = hz - az;            // penetration per axis
-  // (v37.90) THE DECK IS A SURFACE YOU PARK ON. This is one coarse OBB round the whole hull, so a
-  // ship sitting on the deck is inside it by construction - and pushing those out flung the
-  // attacker ~230 units up off the deck the instant the launch hold released. Only the SHELL
-  // pushes: anything arriving from outside is caught within a few units of a face at ship speeds
-  // (900 u/s is 15 units a frame), long before it is this deep.
-  const _shell = Math.min(_carrier.half.x, _carrier.half.y, _carrier.half.z) * 0.45 + radius;
-  if (px > _shell && py > _shell && pz > _shell) return;
-  const sx = _ccP.x < 0 ? -1 : 1, sy = _ccP.y < 0 ? -1 : 1, sz = _ccP.z < 0 ? -1 : 1;
-  if (py <= px && py <= pz) { _ccP.y = sy * hy; _ccN.set(0, sy, 0); }
-  else if (px <= pz)        { _ccP.x = sx * hx; _ccN.set(sx, 0, 0); }
-  else                      { _ccP.z = sz * hz; _ccN.set(0, 0, sz); }
-  pos.copy(_ccP.add(_carrier.ctr).applyQuaternion(o.quaternion).add(o.position));
+  _ccP.set(dx, dy, dz).applyQuaternion(_ccQ);
+  // (v37.92) the hull's own cross-section at this point along its length, not one box round the
+  // lot: the bow taper is real, and a ship parked on the DECK is simply outside the body.
+  const S = _carrierBodyAt(_ccP.x, _ccP.z);
+  let xLo, xHi, yLo, yHi, zLo, zHi;
+  if (S) {
+    xLo = S.xLo - radius; xHi = S.xHi + radius;
+    yLo = S.yLo - radius; yHi = S.yHi + radius;
+    zLo = S.zLo - radius; zHi = S.zHi + radius;
+  } else if (_carrier.body) {
+    _carrierInside.delete(pos); return;                      // open air beside or beyond the hull
+  } else {
+    xLo = _carrier.ctr.x - _carrier.half.x - radius; xHi = _carrier.ctr.x + _carrier.half.x + radius;
+    yLo = _carrier.ctr.y - _carrier.half.y - radius; yHi = _carrier.ctr.y + _carrier.half.y + radius;
+    zLo = _carrier.ctr.z - _carrier.half.z - radius; zHi = _carrier.ctr.z + _carrier.half.z + radius;
+  }
+  if (_ccP.x < xLo || _ccP.x > xHi || _ccP.y < yLo || _ccP.y > yHi || _ccP.z < zLo || _ccP.z > zHi) {
+    _carrierInside.delete(pos); return;                      // outside the hull
+  }
+  // penetration to each face of the cross-section, and the way out of each
+  const pxL = _ccP.x - xLo, pxH = xHi - _ccP.x;
+  const pyL = _ccP.y - yLo, pyH = yHi - _ccP.y;
+  const pzL = _ccP.z - zLo, pzH = zHi - _ccP.z;
+  // Anything that was already inside when it was first seen there is free to LEAVE - the attackers
+  // spawn on the deck and the odd hull can end up in the hangar - but the moment it is out, the
+  // hull is solid to it again.
+  if (_carrierInside.has(pos)) return;
+  const px = Math.min(pxL, pxH), py = Math.min(pyL, pyH), pz = Math.min(pzL, pzH);
+  let n;
+  if (py <= px && py <= pz) { if (pyL <= pyH) { _ccP.y = yLo; n = -1; } else { _ccP.y = yHi; n = 1; } _ccN.set(0, n, 0); }
+  else if (px <= pz)        { if (pxL <= pxH) { _ccP.x = xLo; n = -1; } else { _ccP.x = xHi; n = 1; } _ccN.set(n, 0, 0); }
+  else                      { if (pzL <= pzH) { _ccP.z = zLo; n = -1; } else { _ccP.z = zHi; n = 1; } _ccN.set(0, 0, n); }
+  pos.copy(_ccP.applyQuaternion(o.quaternion).add(o.position));
   if (velocity) {
     _ccN.applyQuaternion(o.quaternion);
     const vn = velocity.dot(_ccN);
     if (vn < 0) velocity.addScaledVector(_ccN, -vn);          // cancel the inward component only
   }
+}
+// (v37.92) THE HULL MEASURES ITSELF. One box round a wedge is solid air off the bow and stern and
+// swallows the whole deck; this bins the model's own vertices into slices along its length and
+// keeps each slice's real cross-section, giving a swept profile that follows the shape you can see.
+// Measured in the SAME frame as the bounding box above - root-local, scale applied, before the
+// route quaternion - so the collider's existing world->local transform serves it unchanged.
+// A top-down map: the hull's length x beam divided into cells, each keeping the real min and max
+// height of the geometry standing in it. Empty cells are empty - which is the whole point, because
+// it means open deck beside the superstructure is open, and the bow taper is a taper.
+const CARRIER_NX = 40, CARRIER_NZ = 20;
+function _carrierBuildBody(root) {
+  _carrier.body = null;
+  try {
+    const nx = CARRIER_NX, nz = CARRIER_NZ;
+    const x0 = _carrier.ctr.x - _carrier.half.x, dx = (_carrier.half.x * 2) / nx;
+    const z0 = _carrier.ctr.z - _carrier.half.z, dz = (_carrier.half.z * 2) / nz;
+    if (!(dx > 0) || !(dz > 0)) return;
+    const lo = new Float32Array(nx * nz).fill(1e9);
+    const hi = new Float32Array(nx * nz).fill(-1e9);
+    const v = new THREE.Vector3();
+    const org = root.position;
+    let seen = 0;
+    root.updateMatrixWorld(true);
+    root.traverse(o => {
+      if (!o.isMesh || !o.geometry || !o.geometry.attributes || !o.geometry.attributes.position) return;
+      const pos = o.geometry.attributes.position, m = o.matrixWorld;
+      for (let k = 0; k < pos.count; k++) {
+        v.fromBufferAttribute(pos, k).applyMatrix4(m).sub(org);
+        let i = Math.floor((v.x - x0) / dx); if (i < 0) i = 0; else if (i >= nx) i = nx - 1;
+        let j = Math.floor((v.z - z0) / dz); if (j < 0) j = 0; else if (j >= nz) j = nz - 1;
+        const c = i * nz + j;
+        if (v.y < lo[c]) lo[c] = v.y;
+        if (v.y > hi[c]) hi[c] = v.y;
+        seen++;
+      }
+    });
+    if (!seen) return;
+    _carrier.body = { nx, nz, x0, z0, dx, dz, lo, hi,
+                      xLo: x0, xHi: x0 + dx * nx, zLo: z0, zHi: z0 + dz * nz };
+  } catch (e) { _carrier.body = null; }
+}
+// The hull cell under a local point, or null where the hull is not.
+const _cbBox = { yLo: 0, yHi: 0, xLo: 0, xHi: 0, zLo: 0, zHi: 0 };
+function _carrierBodyAt(lx, lz) {
+  const B = _carrier.body;
+  if (!B || lx < B.xLo || lx > B.xHi || lz < B.zLo || lz > B.zHi) return null;
+  let i = Math.floor((lx - B.x0) / B.dx); if (i < 0) i = 0; else if (i >= B.nx) i = B.nx - 1;
+  let j = Math.floor((lz - B.z0) / B.dz); if (j < 0) j = 0; else if (j >= B.nz) j = B.nz - 1;
+  const c = i * B.nz + j;
+  if (B.lo[c] > B.hi[c]) return null;                       // open air
+  _cbBox.yLo = B.lo[c]; _cbBox.yHi = B.hi[c];
+  _cbBox.xLo = B.x0 + i * B.dx; _cbBox.xHi = _cbBox.xLo + B.dx;
+  _cbBox.zLo = B.z0 + j * B.dz; _cbBox.zHi = _cbBox.zLo + B.dz;
+  return _cbBox;
 }
 // (v37.85) Does this point sit inside the hull? The same oriented box the movement collider uses -
 // a world-aligned box on a 1367-unit hull that turns to face its route would swallow shots hundreds
@@ -29787,8 +29881,12 @@ function _carrierBlocks(pt, pad) {
   const R = _carrier.bound + (pad || 0);
   if (dx * dx + dy * dy + dz * dz > R * R) return false;
   _cbQ.copy(o.quaternion).invert();
-  _cbP.set(dx, dy, dz).applyQuaternion(_cbQ).sub(_carrier.ctr);
+  _cbP.set(dx, dy, dz).applyQuaternion(_cbQ);
   const g = pad || 0;
+  const S = _carrierBodyAt(_cbP.x, _cbP.z);
+  if (S) return _cbP.y >= S.yLo - g && _cbP.y <= S.yHi + g;
+  if (_carrier.body) return false;                          // measured hull: open air is open
+  _cbP.sub(_carrier.ctr);      // no measured body yet (placeholder): the coarse box stands in
   return Math.abs(_cbP.x) <= _carrier.half.x + g &&
          Math.abs(_cbP.y) <= _carrier.half.y + g &&
          Math.abs(_cbP.z) <= _carrier.half.z + g;
@@ -29797,8 +29895,13 @@ function _carrierBlocks(pt, pad) {
 // only needs to know it stopped, and the step is a fraction of the smallest half-extent.
 function _carrierRayDist(origin, dir, maxDist) {
   if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive || !_carrier.half) return -1;
-  const step = Math.max(40, Math.min(_carrier.half.x, _carrier.half.y, _carrier.half.z) * 0.6);
-  const lim = Math.min(maxDist, _carrier.obj.position.distanceTo(origin) + _carrier.bound + step);
+  // broad phase: how close does this ray ever come to the hull's sphere?
+  _cbP.copy(_carrier.obj.position).sub(origin);
+  const along = _cbP.dot(dir);
+  if (along < -_carrier.bound || along > maxDist + _carrier.bound) return -1;
+  if (_cbP.lengthSq() - along * along > _carrier.bound * _carrier.bound) return -1;
+  const step = 45;      // (v37.92) fine enough for the measured cross-sections
+  const lim = Math.min(maxDist, along + _carrier.bound + step);
   for (let d = 0; d <= lim; d += step) {
     _cbP.copy(dir).multiplyScalar(d).add(origin);
     if (_carrierBlocks(_cbP, 0)) return d;
@@ -29893,6 +29996,7 @@ if (typeof window !== 'undefined') {
     zaps: _carrier.zaps | 0, gunErr: _carrier._gunErr || null, boltErr: _carrier._boltErr || null,
     zapT: +(_carrier.zapT || 0).toFixed(2),
     engineSnd: !!_carrier.snd,
+    body: _carrier.body ? (_carrier.body.nx + 'x' + _carrier.body.nz + ' hull map') : 'box only',
     size: _carrier.size ? _carrier.size.toArray().map(Math.round) : null,
   });
 }
@@ -29917,7 +30021,10 @@ const CYBER = {
   capture: 12,        // seconds an attacker must hold the field to win
   botShips: ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'],
 };
+// (v37.91) fetch the hull NOW, while the player is still on ship select
+function _cyberPrefetch() { try { _carrierPreload(); } catch (_) {} }
 function startCyberpunkCity() {
+  _cyberPrefetch();
   game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false };
   try { net.cyber = true; } catch (_) {}     // (v37.80) marks the ROOM, so peers and the bot
   startFreeFlight();                          //          roster authority both behave
@@ -30107,8 +30214,8 @@ function _cyberCinematic(C) {
   if (typeof _cinematic === 'undefined' || !_cinematic || !_carrier.obj) return false;
   if (player.team !== C.teamA) return false;          // defenders are already in the city
   const list = [];
-  if (player && player.mesh) list.push({ mesh: player.mesh, isPlayer: true });
-  for (const b of C.bots) if (b && b._cyberAttacker && b.mesh) list.push({ mesh: b.mesh, isPlayer: false });
+  if (player && player.mesh) list.push({ mesh: player.mesh, isPlayer: true, ent: null });
+  for (const b of C.bots) if (b && b._cyberAttacker && b.mesh) list.push({ mesh: b.mesh, isPlayer: false, ent: b });
   if (!list.length) return false;
   const heading = _carrier.dir.clone();
   // same mesh convention the rig uses: aim -Z down the heading
@@ -30121,13 +30228,13 @@ function _cyberCinematic(C) {
     const sh = rec.mesh.userData && rec.mesh.userData.shieldMesh;
     const fx = (typeof _lssShipEngineFX === 'function') ? _lssShipEngineFX(rec.mesh) : [];
     _cinematic.ships.push({
-      mesh: rec.mesh, isPlayer: rec.isPlayer,
+      mesh: rec.mesh, isPlayer: rec.isPlayer, deckIdx: i, ent: rec.ent || null,
       // (v37.88) restore TO the deck pose, not to wherever the ship stood before the lineup: the
       // teardown copies origPos back onto the mesh, and the old spawn is a long way from here
       origPos: new THREE.Vector3(p.x, p.y + 30, p.z), origQuat: q.clone(), origVisible: rec.mesh.visible,
       shield: sh || null, origShieldVisible: sh ? sh.visible : null,
       engineFx: fx.map(o => ({ o, v: o.visible })),
-      pos: { x: p.x, y: p.y + 30, z: p.z }, quat: q,
+      pos: { x: p.x, y: p.y + 70, z: p.z }, quat: q,
     });
   }
   for (const sp of _cinematic.ships) {
@@ -30167,13 +30274,34 @@ function _cyberCinematic(C) {
 // lineup ended the camera snapped back to that spawn, the 3-2-1 ran there, and the mode's deck
 // assert hauled you back to the carrier a second later. That round trip is the glitch. Writing the
 // real position here - and holding it through warmup - means there is nowhere else to snap to.
+// (v37.91) The lineup parks ships at world points read off the deck ONCE. If the hull swaps under
+// them - the placeholder giving way to the real model - or the carrier moves, they are left hanging
+// in the sky beside it and snap on later (owner: "it's not on the carrier, then it warps"). Re-read
+// the live markers every frame instead; it is three getWorldPosition calls.
+function _cyberLineupTrack(C) {
+  if (typeof _cinematic === 'undefined' || !_cinematic || !_cinematic.active || !_cinematic.ships) return;
+  if (!_carrier.obj || !_carrier.dir) return;
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, -1), _carrier.dir.clone().negate());
+  for (const sp of _cinematic.ships) {
+    if (sp.deckIdx == null) continue;
+    const d = _carrierDeckPoint(sp.deckIdx);
+    if (!d) continue;
+    sp.pos.x = d.x; sp.pos.y = d.y + 70; sp.pos.z = d.z;
+    sp.quat.copy(q);
+    sp.origPos.set(d.x, d.y + 70, d.z);
+    sp.origQuat.copy(q);
+    // the bots' own positions too, so they do not snap when the lineup lets go
+    if (sp.ent && sp.ent.position) { sp.ent.position.set(d.x, d.y + 70, d.z); if (sp.ent.velocity) sp.ent.velocity.set(0, 0, 0); }
+  }
+}
 function _cyberDeckPlace(C) {
+  try { _cyberLineupTrack(C); } catch (_) {}
   if (!C || !C.started || player.team !== C.teamA) return false;
   try {
     const d = _carrierDeckPoint(0);
     if (!d) return false;
     player.position.copy(d);
-    player.position.y += 40;
+    player.position.y += 70;
     player.velocity.set(0, 0, 0);
     // (v37.89) ...and FACING the way the lineup drew it. The cinematic poses the MESH; the real
     // heading was still the free-flight spawn's, so the moment the rig took over the hull swung
@@ -30243,7 +30371,7 @@ function _cyberFrame(dt) {
     C.placeT -= (dt || 0.016);
     try {
       const d = _carrierDeckPoint(0);
-      if (d) { player.position.copy(d); player.position.y += 40; player.velocity.set(0, 0, 0); }
+      if (d) { player.position.copy(d); player.position.y += 70; player.velocity.set(0, 0, 0); }
     } catch (_) {}
   }
   if (_carrier.dead && !C.lost) {
@@ -39544,11 +39672,20 @@ function _shipLightsFrame() {
       // Apex at the under-hull nav-orb where the player's real SpotLight
       // mounts; hoard hulls carry no runningLight — hang the apex just
       // under the hull center like the head fallback does.
-      if (ud.runningLight) ud.runningLight.getWorldPosition(m.position);
+      if (e.isCarrier && typeof _carrier !== 'undefined' && _carrier.dir && _carrier.half) {
+        // (v37.91) THE CARRIER'S NOSE IS -X, not -Z. getWorldDirection below returns the mesh's
+        // -Z, which is every fighter's nose but is square off the beam on a hull built to the
+        // pipeline's axis convention - the owner saw its headlight firing off the side. Its route
+        // heading is the bow, and on a 1367-unit hull the apex belongs at the bow too, not 18
+        // units under the middle.
+        S._d.copy(_carrier.dir);
+        m.position.copy(e.position).addScaledVector(S._d, _carrier.half.x * 0.92);
+        m.position.y -= 30;
+      } else if (ud.runningLight) ud.runningLight.getWorldPosition(m.position);
       else { m.position.copy(e.position); m.position.y -= 18; }
       // Billboard-free: the cone is rotationally symmetric, so aligning
       // geometry +Z with the ship's world nose axis is the whole job.
-      e.mesh.getWorldDirection(S._d);
+      if (!(e.isCarrier && typeof _carrier !== 'undefined' && _carrier.dir)) e.mesh.getWorldDirection(S._d);
       m.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
       m.scale.set(cR, cR, cLen);
     }
