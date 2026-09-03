@@ -368,7 +368,11 @@ jagged"*): every outline edge together with the camera you drew it from spans a 
 `replay_fills` bisects the front-facing faces near that edge with it (`bmesh.ops.bisect_plane` on a
 working subset, mirrored outlines replayed with the mirrored camera), then the pieces inside the
 polygon, front-facing and unoccluded from that camera, become glass — so the glass edge IS the line
-you drew. Brush marks (no outline) are matched by centroid, whole triangles. The report shows
+you drew. Brush marks (no outline) are matched by centroid, whole triangles. A per-ship
+`tools/blender/marks/<ship>_adjust.json` with `{"level_bottom": true}` (or a Blender z = the editor's
+'up' value) makes the glass's LOWER edge a level line: the outline's bottom points are pushed below,
+a horizontal plane at that height cuts the hull, and faces under it are excluded (Syphon, v37.58 —
+the owner could not click the right spot for a level edge). The report shows
 `fill_ops` / `fill_cuts` / `cut_faces`, or `marks_matched` / `marks_missed` for brush files. The report
 shows `marks_matched` / `marks_missed` ; a miss count in the thousands means the wrong file.
 Technically: the editor makes the hull non-indexed, tints marked triangles through

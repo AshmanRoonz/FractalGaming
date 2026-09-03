@@ -214,6 +214,10 @@ def load_marks(ship):
         e = mk['cockpit'][0]
         eye = Vector((e[0], -e[2], e[1]))
     g2b = lambda q: Vector((q[0], -q[2], q[1]))
+    # optional tools/blender/marks/<ship>_adjust.json: {"level_bottom": true | <z>} makes the glass's
+    # lower edge a LEVEL line (a horizontal cut plane at the lowest outline point, or at z)
+    adj_path = os.path.join(MARKS_DIR, f'{ship}_adjust.json')
+    adjust = json.load(open(adj_path, encoding='utf-8')) if os.path.exists(adj_path) else {}
     markers = {}
     for kind in ('gun', 'thruster', 'cockpit'):
         if mk.get(kind):
@@ -236,10 +240,19 @@ def load_marks(ship):
             span = 2.0 * max(ext, 1e-6)
             side = 1.0 if sum(q[ax] for q in pts) >= 0 else -1.0
             pts = [Vector([(q[i] if i != ax else (q[i] if abs(q[i]) > 0.02 * span else -side * 0.02 * span)) for i in range(3)]) for q in pts]
-        fills.append({'cam': cam, 'points': pts, 'erase': bool(op.get('erase'))})
+        level_z = None
+        lb = adjust.get('level_bottom')
+        if lb is not None and lb is not False:
+            zs = [q.z for q in pts]
+            level_z = float(lb) if not isinstance(lb, bool) else min(zs)
+            zr = max(zs) - min(zs)
+            # points near the bottom drop well below the level so the polygon covers it ; the
+            # horizontal cut and the z >= level test then draw the lower edge
+            pts = [Vector((q.x, q.y, (level_z - 0.5 * zr) if q.z < level_z + 0.35 * zr else q.z)) for q in pts]
+        fills.append({'cam': cam, 'points': pts, 'erase': bool(op.get('erase')), 'level_z': level_z})
         if mirror:
             mv = lambda v: Vector([(-v[i] if i == ax else v[i]) for i in range(3)])
-            fills.append({'cam': mv(cam), 'points': [mv(q) for q in pts], 'erase': bool(op.get('erase'))})
+            fills.append({'cam': mv(cam), 'points': [mv(q) for q in pts], 'erase': bool(op.get('erase')), 'level_z': level_z})
     return {'centroids': cen_b, 'eye': eye, 'tris': j.get('tris'), 'path': path, 'fills': fills, 'markers': markers}
 
 
@@ -334,6 +347,21 @@ def replay_fills(me, fills, L, rep):
                 if isinstance(g, bmesh.types.BMEdge) and g.is_valid:
                     for f in g.link_faces:
                         subset.add(f)
+        level_z = op.get('level_z')
+        if level_z is not None:
+            # a LEVEL lower edge: one horizontal plane through the whole working subset
+            cand = [f for f in subset if f.is_valid]
+            if cand:
+                verts = {v for f in cand for v in f.verts}
+                edges = {e for f in cand for e in f.edges}
+                ret = bmesh.ops.bisect_plane(bm, geom=list(verts) + list(edges) + cand, dist=1e-5 * L,
+                                             plane_co=Vector((0, 0, level_z)), plane_no=Vector((0, 0, 1)),
+                                             use_snap_center=False, clear_outer=False, clear_inner=False)
+                n_cuts += 1
+                subset = {f for f in subset if f.is_valid}
+                for g in ret['geom']:
+                    if isinstance(g, bmesh.types.BMFace) and g.is_valid:
+                        subset.add(g)
         bm.normal_update()
         bvh = BVHTree.FromBMesh(bm)
         val = 0 if op['erase'] else 1
@@ -343,6 +371,8 @@ def replay_fills(me, fills, L, rep):
             c = f.calc_center_median()
             q = p2(c)
             if q is None or not inpoly(q) or f.normal.dot(C - c) <= 0:
+                continue
+            if level_z is not None and c.z < level_z - 1e-5 * L:
                 continue
             d = c - C
             dist = d.length
