@@ -1004,7 +1004,7 @@ def process(ship):
         on_dash(-0.42 * wd + k * 0.12 * wd, -0.080 * Lc, (0.05 * wd, 0.014 * Lc), 'glow' if k % 2 == 0 else 'trim')
     for sgn in (1, -1):
         on_dash(sgn * 0.30 * wd, 0.082 * Lc, (0.30 * wd, 0.008 * Lc), 'glow')
-    B.box(Vector((x_d - 0.03 * Lc, 0.0, -0.055 * Lc)), (0.14 * Lc, 1.08 * wd, 0.012 * Lc), region='trim', bevel=0.002 * Lc)   # glare shield
+    # (v37.53) no glare shield: from the seat it read as a wide flat upper deck across the front
     # CANOPY ARCHES: a mullion over the glass ahead and a roll bar behind the head, each a chain of
     # short tubes riding just under the glass surface - the window gets a 3D frame again.
     for xa in (0.12 * Lc, -0.10 * Lc):
@@ -1024,10 +1024,8 @@ def process(ship):
             B.box(Vector((xa, 0.0, zc)), (0.035 * Lc, 0.7 * w, 0.018 * Lc), region='trim', bevel=0.002 * Lc)
             for k in range(5):
                 B.box(Vector((xa, -0.28 * w + k * 0.14 * w, zc - 0.012 * Lc)), (0.012 * Lc, 0.05 * w, 0.010 * Lc), region='glow' if k % 2 == 0 else 'seat')
-    # HUD combiner: a faintly tinted glass plate standing on the glare shield
+    # (v37.53) no HUD combiner plate either: "it shouldn't have that upper deck part and square"
     Bh = Builder(frame, origin_local)
-    Bh.box(Vector((x_d - 0.05 * Lc, 0.0, -0.01 * Lc)), (0.003 * Lc, 0.16 * wd, 0.06 * Lc), rot=(0, math.radians(-12), 0), region='visor')
-    B.box(Vector((x_d - 0.05 * Lc, 0.0, -0.045 * Lc)), (0.02 * Lc, 0.17 * wd, 0.012 * Lc), region='trim', bevel=0.002 * Lc)   # its mount
     Bh.assign_uvs(tile_len=0.30 * Wc)
     bmesh.ops.recalc_face_normals(Bh.bm, faces=list(Bh.bm.faces))
     # control stick between the knees, throttle on the left sill
