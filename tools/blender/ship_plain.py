@@ -52,6 +52,9 @@ TARGET = int(opt('--target', '60000'))     # triangle budget per hull (150k was 
 TEX = int(opt('--tex', '2048'))            # baked atlas size (the normal map is baked at half)
 SAMPLES = int(opt('--samples', '4'))       # Cycles bake samples ; the bake is flat colour, 4 is plenty
 BAKE = '--nobake' not in argv              # bake a fresh skin onto the decimated hull
+NO_EYE = '--no-eye' in argv                # keep cockpit1 exactly where it was authored
+                                           # (the carrier marks its DECK SPAWNS with cockpit<n>;
+                                           #  moving cockpit1 to the hull centre is a fighter rule)
 SHARP_DEG = float(opt('--sharp', '32'))    # edges sharper than this stay hard after decimation
 RENDER = '--render' in argv
 EXPORT = '--no-export' not in argv
@@ -375,7 +378,7 @@ def process(ship):
         bpy.data.objects.remove(hi, do_unlink=True)
         hi = None
     step('seat eye')
-    cock = next((e for e in empties if e.name.lower() == 'cockpit1'), None)
+    cock = None if NO_EYE else next((e for e in empties if e.name.lower() == 'cockpit1'), None)
     if cock is not None:
         eye = seat_eye(obj, cock.matrix_world.translation.copy(), L, rep)
         adj_path = os.path.join(REPO, 'tools', 'blender', 'marks', ship + '_eye.json')

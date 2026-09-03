@@ -2700,6 +2700,9 @@ body.vr-active #camp-video { display: none !important; }
           <button id="btn-endless" onclick="startEndless()" type="button" title="Endless — a cavern without end; fly as far as your lives allow">
             ENDLESS
           </button>
+          <button id="btn-cyberpunk" onclick="startCyberpunkCity()" type="button" title="Cyberpunk City — fly in from a carrier and take the champion field in the city">
+            CYBERPUNK CITY
+          </button>
           <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;">
             <button id="btn-freeflight" onclick="startFreeFlight()" type="button" title="Exhibition — patrol the open mossy overworld (the campaign hub)" style="
                     flex:1 1 0;min-height:54px;
@@ -4167,12 +4170,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.74';
+const LSS_BUILD = '37.77';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '37.73';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.75';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -6965,6 +6968,7 @@ const FreeFlightMode = {
     try { if (this._warpPre && !this._enteringCampaign && window.Overlays && Overlays.warp) Overlays.warp(false); this._warpPre = false; } catch (_) {}
     try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.freeflight = false; game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false; } catch (_) {}   
     try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   
+    try { game._cyber = null; if (typeof _carrierClear === 'function') _carrierClear(); } catch (_) {}   // (v37.76)
     try { game.thirdPerson = false; document.body.classList.remove('lss-thirdperson'); if (player.mesh) player.mesh.visible = false; } catch (_) {}   
     try { if (typeof _clearBossPortal === 'function') _clearBossPortal(); } catch (_) {}   
     try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}   
@@ -23221,6 +23225,10 @@ const CARRIER = {
   edge: 900,          // how far OUTSIDE the city radius the carrier parks
   arrive: null,       // absolute stop distance from the city centre ; overrides `edge`
   clearance: 450,     // minimum height above the ground along the route
+  zapRange: 1600,     // the guns answer anything hostile inside this
+  zapEvery: 0.7,      // seconds between bolts
+  zapDamage: 550,
+  glow: 0.10,         // engine orb radius as a fraction of hull height (548 -> ~55 units)
 };
 const _carrier = {
   obj: null, ent: null, proto: null, loading: false,
@@ -23276,7 +23284,7 @@ function _carrierHarvest(root) {
   _carrier.thrusters.length = 0;
   root.traverse(o => {
     const n = o.name || '';
-    if (/^spawn\d+$/i.test(n)) _carrier.spawns.push(o);
+    if (/^(spawn|cockpit)\d+$/i.test(n)) _carrier.spawns.push(o);
     else if (/^gun\d+$/i.test(n)) _carrier.guns.push(o);
     else if (/^thruster\d+$/i.test(n)) _carrier.thrusters.push(o);
   });
@@ -23326,9 +23334,31 @@ function _carrierAttach(root, sector) {
     const _bb2 = new THREE.Box3().setFromObject(root);
     _carrier.size = _bb2.getSize(new THREE.Vector3());
     _carrier.localTop = _bb2.max.y - root.position.y;
+    _carrier.half = _carrier.size.clone().multiplyScalar(0.5);
+    _carrier.ctr = _bb2.getCenter(new THREE.Vector3()).sub(root.position);
+    _carrier.bound = _carrier.half.length() + _carrier.ctr.length();
   }
   scene.add(root);
   _carrierHarvest(root);
+  _carrier.glows = [];
+  if (_carrier.thrusters.length) {
+    root.updateMatrixWorld(true);
+    const _ws = _carrier.thrusters[0].getWorldScale(new THREE.Vector3());
+    const _inv = 1 / Math.max(1e-6, _ws.x);
+    const _r = (_carrier.size ? _carrier.size.y : 548) * ((_carrierKnobs().glow != null) ? _carrierKnobs().glow : CARRIER.glow);
+    if (!_carrierAttach._geo) _carrierAttach._geo = new THREE.SphereGeometry(1, 14, 10);
+    for (const t of _carrier.thrusters) {
+      const m = new THREE.Mesh(_carrierAttach._geo, new THREE.MeshBasicMaterial({
+        color: 0x8fe6ff, transparent: true, opacity: 0.9, depthWrite: false,
+        blending: THREE.AdditiveBlending, fog: false,
+      }));
+      m.scale.setScalar(_r * _inv);
+      m.renderOrder = 3;
+      m.userData._carrierGlowBase = _r * _inv;
+      t.add(m);
+      _carrier.glows.push(m);
+    }
+  }
   const from = _carrierPortal(sector);
   _carrier.from.copy(from.pos);
   _carrier.sector = from.sector;
@@ -23448,8 +23478,83 @@ function _carrierFrame(dt) {
       if (isFinite(next)) { _carrier.rideY = next; o.position.y = next; }
     }
   }
+  if (_carrier.glows && _carrier.glows.length) {
+    const pulse = 1 + 0.14 * Math.sin(_carrier.t * 2.2);
+    for (const m of _carrier.glows) {
+      m.scale.setScalar((m.userData._carrierGlowBase || 1) * pulse);
+      m.material.opacity = 0.78 + 0.18 * Math.sin(_carrier.t * 3.1);
+    }
+  }
+  try { _carrierGuns(dt); } catch (e) { if (!_carrier._gunErr) { _carrier._gunErr = String((e && e.message) || e); console.warn('[carrier] guns threw:', e); } }
   _carrier.ent.velocity.copy(_carrier.dir).multiplyScalar(travelled < _carrier.dist ? _carrierSpeed() : 0);
   _carrier.ent.position.copy(o.position);
+}
+const _ccP = new THREE.Vector3(), _ccN = new THREE.Vector3(), _ccQ = new THREE.Quaternion();
+const _ccW = new THREE.Vector3();
+function _carrierCollide(pos, velocity, radius) {
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive || !_carrier.half) return;
+  const o = _carrier.obj;
+  const dx = pos.x - o.position.x, dy = pos.y - o.position.y, dz = pos.z - o.position.z;
+  const R = _carrier.bound + radius;
+  if (dx * dx + dy * dy + dz * dz > R * R) return;          // broad phase
+  _ccQ.copy(o.quaternion).invert();
+  _ccP.set(dx, dy, dz).applyQuaternion(_ccQ).sub(_carrier.ctr);
+  const hx = _carrier.half.x + radius, hy = _carrier.half.y + radius, hz = _carrier.half.z + radius;
+  const ax = Math.abs(_ccP.x), ay = Math.abs(_ccP.y), az = Math.abs(_ccP.z);
+  if (ax > hx || ay > hy || az > hz) return;                 // outside the box
+  const px = hx - ax, py = hy - ay, pz = hz - az;            // penetration per axis
+  const sx = _ccP.x < 0 ? -1 : 1, sy = _ccP.y < 0 ? -1 : 1, sz = _ccP.z < 0 ? -1 : 1;
+  if (py <= px && py <= pz) { _ccP.y = sy * hy; _ccN.set(0, sy, 0); }
+  else if (px <= pz)        { _ccP.x = sx * hx; _ccN.set(sx, 0, 0); }
+  else                      { _ccP.z = sz * hz; _ccN.set(0, 0, sz); }
+  pos.copy(_ccP.add(_carrier.ctr).applyQuaternion(o.quaternion).add(o.position));
+  if (velocity) {
+    _ccN.applyQuaternion(o.quaternion);
+    const vn = velocity.dot(_ccN);
+    if (vn < 0) velocity.addScaledVector(_ccN, -vn);          // cancel the inward component only
+  }
+}
+function _carrierGuns(dt) {
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive) return;
+  if (!_carrier.guns.length || typeof spawnLightningBolt !== 'function') return;
+  const K = _carrierKnobs();
+  _carrier.zapT = (_carrier.zapT || 0) - (dt || 0.016);
+  if (_carrier.zapT > 0) return;
+  const range = (K.zapRange != null) ? K.zapRange : CARRIER.zapRange;
+  let best = null, bestD = range;
+  const consider = (c) => {
+    if (!c || !c.position) return;
+    const d = c.position.distanceTo(_carrier.obj.position);
+    if (d < bestD) { bestD = d; best = c; }
+  };
+  if (K.zapTest && typeof player !== 'undefined' && player && player.shipState !== 'dead') consider(player);
+  if (game && Array.isArray(game.entities)) {
+    for (const e of game.entities) {
+      if (!e || !e.alive || e.isCarrier) continue;
+      if (e.team === _carrier.ent.team) continue;
+      consider(e);
+    }
+  }
+  if (!best) return;
+  _carrier.zapT = (K.zapEvery != null) ? K.zapEvery : CARRIER.zapEvery;
+  let gun = _carrier.guns[0], gd = Infinity;
+  for (const g of _carrier.guns) {
+    g.getWorldPosition(_ccW);
+    const d = _ccW.distanceToSquared(best.position);
+    if (d < gd) { gd = d; gun = g; }
+  }
+  gun.getWorldPosition(_ccW);
+  const col = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66;
+  try { spawnLightningBolt(_ccW.clone(), best.position.clone(), col, 0.22, 3, 2.6, true); _carrier.zaps = (_carrier.zaps | 0) + 1; }
+  catch (e) { if (!_carrier._boltErr) { _carrier._boltErr = String((e && e.message) || e); console.warn('[carrier] bolt threw:', e); } }
+  const dmg = (K.zapDamage != null) ? K.zapDamage : CARRIER.zapDamage;
+  try {
+    if (typeof player !== 'undefined' && best === player) {
+      if (typeof playerTakeDamage === 'function') playerTakeDamage(dmg, _carrier.ent);
+    } else if (typeof best.takeDamage === 'function') {
+      best.takeDamage(dmg, _carrier.ent);
+    }
+  } catch (_) {}
 }
 function _carrierDeckPoint(i, out) {
   out = out || new THREE.Vector3();
@@ -23485,8 +23590,69 @@ if (typeof window !== 'undefined') {
     health: _carrier.ent ? Math.round(_carrier.ent.health) : null,
     spawns: _carrier.spawns.length, guns: _carrier.guns.length, thrusters: _carrier.thrusters.length,
     deckFrom: _carrier.spawns.length ? 'markers' : 'hull top (no spawn markers yet)',
+    zaps: _carrier.zaps | 0, gunErr: _carrier._gunErr || null, boltErr: _carrier._boltErr || null,
+    zapT: +(_carrier.zapT || 0).toFixed(2),
     size: _carrier.size ? _carrier.size.toArray().map(Math.round) : null,
   });
+}
+function startCyberpunkCity() {
+  game._cyber = { armed: true, started: false, lost: false };
+  startFreeFlight();
+}
+if (typeof window !== 'undefined') window.startCyberpunkCity = startCyberpunkCity;
+function _cyberSpawnField() {
+  if (typeof StasisField !== 'function' || typeof HUB_CITY === 'undefined') return null;
+  const R = (HUB_CITY.genome && HUB_CITY.genome.radius) ? HUB_CITY.genome.radius : 7500;
+  const K = window.__cyber || (window.__cyber = {});
+  const up = new THREE.Vector3(0, 1, 0), dn = new THREE.Vector3(0, -1, 0);
+  let pos = null;
+  for (let tries = 0; tries < 16 && !pos; tries++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = R * (0.2 + 0.6 * Math.random());
+    const c = new THREE.Vector3(HUB_CITY.x + Math.cos(a) * r,
+                                HUB_CITY.padY + ((K.fieldY != null) ? K.fieldY : 300),
+                                HUB_CITY.z + Math.sin(a) * r);
+    let clear = true;
+    try {
+      if (typeof _hubCityRayHit === 'function') {
+        const a1 = _hubCityRayHit(c, up, 220), a2 = _hubCityRayHit(c, dn, 220);
+        if ((a1 && a1 < 220) || (a2 && a2 < 220)) clear = false;
+      }
+    } catch (_) {}
+    if (clear) pos = c;
+  }
+  if (!pos) pos = new THREE.Vector3(HUB_CITY.x, HUB_CITY.padY + 400, HUB_CITY.z);
+  const f = new StasisField(pos, true);
+  if (Array.isArray(game.stasisFields)) game.stasisFields.push(f);
+  game.championField = f;
+  game.championSpawned = true;
+  return f;
+}
+function _cyberFrame(dt) {
+  const C = game._cyber;
+  if (!C || !C.armed || game.state !== 'playing') return;
+  if (!C.started) {
+    C.started = true;
+    try { _carrierSpawn(); } catch (_) {}
+    try { C.field = _cyberSpawnField(); } catch (_) {}
+    C.placeT = 2.5;   // the free-flight spawn lands after this frame ; hold the deck briefly
+    try {
+      if (window.Overlays && Overlays.banner) Overlays.banner('CYBERPUNK CITY', 'take the field in the city');
+    } catch (_) {}
+  }
+  if (C.placeT > 0) {
+    C.placeT -= (dt || 0.016);
+    try {
+      const d = _carrierDeckPoint(0);
+      if (d) { player.position.copy(d); player.position.y += 40; player.velocity.set(0, 0, 0); }
+    } catch (_) {}
+  }
+  if (_carrier.dead && !C.lost) {
+    C.lost = true;
+    try {
+      if (window.Overlays && Overlays.banner) Overlays.banner('CARRIER LOST', 'no more deck spawns');
+    } catch (_) {}
+  }
 }
 function _hubCityFrame(dt) {
   if (!game.hubCity) {
@@ -25907,6 +26073,7 @@ function resolveCollision(pos, velocity, radius, entity) {
 
 
   if (game.hubCity) _hubCityCollide(pos, velocity, radius);
+  if (_carrier.obj) _carrierCollide(pos, velocity, radius);   // (v37.77) the flying carrier is solid
 
   const CONTAIN_RANGE = radius * 2.5;
   const CONTAIN_STRENGTH = 12000;
@@ -41820,6 +41987,13 @@ function respawnPlayer() {
   let sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'));
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
     sp = new THREE.Vector3(0, 0, -CAMPAIGN_LEG_HALF_Z);
+  }
+  if (game._cyber && game._cyber.armed) {
+    try {
+      player._cyberDeck = (player._cyberDeck | 0) + 1;
+      const _d = _carrierDeckPoint(player._cyberDeck);
+      if (_d) { sp = _d.clone(); sp.y += 40; }
+    } catch (_) {}
   }
   player.position.copy(sp);
   if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
@@ -62357,6 +62531,7 @@ function gameLoop(timestamp) {
       __pmark('hub:zone');
       try { _hubCityFrame(dt); } catch (_) {}
       try { _carrierFrame(dt); } catch (_) {}   // (v37.72) no-op until a carrier is spawned
+      try { _cyberFrame(dt); } catch (_) {}     // (v37.76) no-op unless CYBERPUNK CITY is running
       __pmark('hub:city');
       try { _wxFrame(dt); } catch (_) {}
       try { _hzDuskLights(); } catch (_) {}
