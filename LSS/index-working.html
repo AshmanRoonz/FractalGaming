@@ -4251,7 +4251,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.83';
+const LSS_BUILD = '37.84';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -12907,6 +12907,16 @@ function handleNetEvent(evt, fromPeerId) {
   }
   // Stasis owner spawned a field; mirror it at the broadcast position
   // with the broadcast netId so pickups can target it across peers.
+  // (v37.84) The hub city's traffic clock, plus any freighter that has left its schedule to chase
+  // someone. Ships still on schedule are derived from the clock and cost nothing to send.
+  if (evt.type === 'city_state') {
+    try {
+      net.cityT = evt.t;
+      net.cityTAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      if (typeof _hcApplyNetState === 'function') _hcApplyNetState(evt.s);
+    } catch (_) {}
+    return;
+  }
   // (v37.80) CYBERPUNK CITY: the authority's launch portal, route clock and objective.
   if (evt.type === 'cyber_start') {
     const C = game._cyber;
@@ -28566,6 +28576,58 @@ if (typeof window !== 'undefined') {
 // `lift` = how far this ship's hull hangs below its origin, measured per model
 // at spawn (see _hcTrafficInit). Defaults to the old fixed 56 for any caller
 // that doesn't pass one.
+// (v37.84) THE TRAFFIC CLOCK. The schedule below is a pure function of (pad, index, t, seed), so
+// every client already computes the same city - as long as they agree on t. They did not: t was
+// game.time, which starts when that client's session does. The authority publishes its clock and
+// everyone else runs on it, which alone puts the whole city back in step.
+function _hcTrafClock() {
+  try {
+    if (net && net.active && net.cityT != null && net.cityTAt != null) {
+      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      return net.cityT + (now - net.cityTAt) / 1000;
+    }
+  } catch (_) {}
+  return (typeof game !== 'undefined' && game.time) ? game.time : 0;
+}
+function _hcTrafIsProxy() {
+  try {
+    return !!(net && net.active && typeof amStasisOwner === 'function' && !amStasisOwner());
+  } catch (_) { return false; }
+}
+// The authority publishes the clock, and the ships that have left their schedule to chase someone.
+// Everything still on schedule needs no bytes at all - the receiver derives it.
+function _hcNetSync(dt) {
+  try {
+    if (!net || !net.active || !net.sendEvent) return;
+    if (typeof amStasisOwner === 'function' && !amStasisOwner()) return;
+    const hot = [];
+    for (let i = 0; i < _HC_TRAF.ships.length; i++) {
+      const sh = _HC_TRAF.ships[i];
+      if (!sh || !sh.ent || !sh.ent.aggro || !sh.ent.alive) continue;
+      hot.push([i, Math.round(sh.ent.position.x), Math.round(sh.ent.position.y), Math.round(sh.ent.position.z),
+                Math.round(sh.ent.health)]);
+    }
+    _hcNetSync._t = (_hcNetSync._t || 0) - (dt || 0.016);
+    if (_hcNetSync._t > 0) return;
+    _hcNetSync._t = hot.length ? 0.15 : 1.0;      // idle city = one keep-alive a second
+    net.sendEvent({ type: 'city_state', t: +((game.time || 0).toFixed(2)), s: hot });
+  } catch (_) {}
+}
+// Receiver side: remember where the authority says its chasing ships are.
+function _hcApplyNetState(rows) {
+  if (!_HC_TRAF.ships || !_HC_TRAF.ships.length) return;
+  for (const sh of _HC_TRAF.ships) if (sh && sh.ent) sh.ent._netPos = null;
+  if (!Array.isArray(rows)) return;
+  for (const r of rows) {
+    const sh = _HC_TRAF.ships[r[0] | 0];
+    if (!sh || !sh.ent) continue;
+    sh.ent._netPos = sh.ent._netPos || new THREE.Vector3();
+    sh.ent._netPos.set(r[1], r[2], r[3]);
+    sh.ent.health = r[4];
+    sh.ent.aggro = true;
+    sh.ent.alive = r[4] > 0;
+  }
+}
 function _hcPadSched(pad, i, t, lift) {
   const h = _stHash2(i * 7.13, HUB_CITY.genome.seed * 0.001);
   const h2 = _stHash2(i * 3.71, 9.2);
@@ -28806,7 +28868,9 @@ function _hcTrafficInit(city, group) {
 function _hcTrafficUpdate(dt) {
   if (!_HC_TRAF.ready) return;
   dt = (typeof dt === 'number' && dt > 0) ? Math.min(dt, 0.1) : 1 / 60;
-  const t = game.time || 0;
+  const t = _hcTrafClock();                    // (v37.84) shared across the room
+  const _trafProxy = _hcTrafIsProxy();         // (v37.84) the authority owns the chasing ships
+  try { _hcNetSync(dt); } catch (_) {}
   const px = player && player.position ? player.position.x : HUB_CITY.x;
   const pz = player && player.position ? player.position.z : HUB_CITY.z;
   const nearR = HUB_CITY.genome.radius + 3500;
@@ -28849,6 +28913,22 @@ function _hcTrafficUpdate(dt) {
     // back nonstop. Range-kept seek with a standoff so it strafes, not rams.
     if (s.ent && s.ent.aggro && s.ent.alive) {
       const e = s.ent;
+      // (v37.84) On a peer the chase belongs to the authority: follow its broadcast instead of
+      // flying our own copy at our own player, which is what made the same ship appear in two
+      // different places - or in only one of them.
+      if (_trafProxy) {
+        if (e._netPos) {
+          e.position.copy(e._netPos);
+          s.holder.visible = true;
+          s.holder.position.copy(e.position);
+          _HC_TRAF.obbs.push({ x: e.position.x, y: e.position.y + 20, z: e.position.z,
+                               r: 62 * ((e.trafClass && e.trafClass.scale) || 1), ent: e });
+        } else {
+          s.holder.visible = false;
+        }
+        s.lastSeg = st.seg;
+        continue;
+      }
       const P = player.position;
       const dx = P.x - e.position.x, dy = P.y - e.position.y, dz = P.z - e.position.z;
       const d = Math.max(1, Math.sqrt(dx * dx + dy * dy + dz * dz));
@@ -67735,8 +67815,21 @@ function updateMinimap() {
       const isEnemy = (_localTeam == null) || (np.team !== _localTeam);
       const p = _plot(np.position.x, np.position.z);
       if (p.off) { _mmArrow(p, isEnemy ? ENEMY_COL : FRIEND_COL); continue; }
-      ctx.fillStyle = isEnemy ? ENEMY_COL : FRIEND_COL;
-      ctx.fillRect(p.x - 2, p.y - 2, 3, 3);
+      // (v37.84) A HUMAN reads as a diamond with a dot in it (owner's call); bots stay plain
+      // squares. Same friend/enemy colour, so the glyph carries "who" and the colour carries
+      // "whose side" without either doing both jobs.
+      const _col = isEnemy ? ENEMY_COL : FRIEND_COL;
+      ctx.strokeStyle = _col;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y - 4.5); ctx.lineTo(p.x + 4.5, p.y);
+      ctx.lineTo(p.x, p.y + 4.5); ctx.lineTo(p.x - 4.5, p.y);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fillStyle = _col;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 1.5, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 

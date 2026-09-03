@@ -4177,7 +4177,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.83';
+const LSS_BUILD = '37.84';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10502,6 +10502,14 @@ function handleNetEvent(evt, fromPeerId) {
     if (game.championShell && game.championShell.alive) {
       try { game.championShell.die(false); } catch (_) {}
     }
+    return;
+  }
+  if (evt.type === 'city_state') {
+    try {
+      net.cityT = evt.t;
+      net.cityTAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      if (typeof _hcApplyNetState === 'function') _hcApplyNetState(evt.s);
+    } catch (_) {}
     return;
   }
   if (evt.type === 'cyber_start') {
@@ -22769,6 +22777,51 @@ if (typeof window !== 'undefined') {
   setInterval(() => { try { _aegisMenuRefresh(); } catch (_) {} }, 2500);
 }
 
+function _hcTrafClock() {
+  try {
+    if (net && net.active && net.cityT != null && net.cityTAt != null) {
+      const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      return net.cityT + (now - net.cityTAt) / 1000;
+    }
+  } catch (_) {}
+  return (typeof game !== 'undefined' && game.time) ? game.time : 0;
+}
+function _hcTrafIsProxy() {
+  try {
+    return !!(net && net.active && typeof amStasisOwner === 'function' && !amStasisOwner());
+  } catch (_) { return false; }
+}
+function _hcNetSync(dt) {
+  try {
+    if (!net || !net.active || !net.sendEvent) return;
+    if (typeof amStasisOwner === 'function' && !amStasisOwner()) return;
+    const hot = [];
+    for (let i = 0; i < _HC_TRAF.ships.length; i++) {
+      const sh = _HC_TRAF.ships[i];
+      if (!sh || !sh.ent || !sh.ent.aggro || !sh.ent.alive) continue;
+      hot.push([i, Math.round(sh.ent.position.x), Math.round(sh.ent.position.y), Math.round(sh.ent.position.z),
+                Math.round(sh.ent.health)]);
+    }
+    _hcNetSync._t = (_hcNetSync._t || 0) - (dt || 0.016);
+    if (_hcNetSync._t > 0) return;
+    _hcNetSync._t = hot.length ? 0.15 : 1.0;      // idle city = one keep-alive a second
+    net.sendEvent({ type: 'city_state', t: +((game.time || 0).toFixed(2)), s: hot });
+  } catch (_) {}
+}
+function _hcApplyNetState(rows) {
+  if (!_HC_TRAF.ships || !_HC_TRAF.ships.length) return;
+  for (const sh of _HC_TRAF.ships) if (sh && sh.ent) sh.ent._netPos = null;
+  if (!Array.isArray(rows)) return;
+  for (const r of rows) {
+    const sh = _HC_TRAF.ships[r[0] | 0];
+    if (!sh || !sh.ent) continue;
+    sh.ent._netPos = sh.ent._netPos || new THREE.Vector3();
+    sh.ent._netPos.set(r[1], r[2], r[3]);
+    sh.ent.health = r[4];
+    sh.ent.aggro = true;
+    sh.ent.alive = r[4] > 0;
+  }
+}
 function _hcPadSched(pad, i, t, lift) {
   const h = _stHash2(i * 7.13, HUB_CITY.genome.seed * 0.001);
   const h2 = _stHash2(i * 3.71, 9.2);
@@ -22914,7 +22967,9 @@ function _hcTrafficInit(city, group) {
 function _hcTrafficUpdate(dt) {
   if (!_HC_TRAF.ready) return;
   dt = (typeof dt === 'number' && dt > 0) ? Math.min(dt, 0.1) : 1 / 60;
-  const t = game.time || 0;
+  const t = _hcTrafClock();                    // (v37.84) shared across the room
+  const _trafProxy = _hcTrafIsProxy();         // (v37.84) the authority owns the chasing ships
+  try { _hcNetSync(dt); } catch (_) {}
   const px = player && player.position ? player.position.x : HUB_CITY.x;
   const pz = player && player.position ? player.position.z : HUB_CITY.z;
   const nearR = HUB_CITY.genome.radius + 3500;
@@ -22938,6 +22993,19 @@ function _hcTrafficUpdate(dt) {
     }
     if (s.ent && s.ent.aggro && s.ent.alive) {
       const e = s.ent;
+      if (_trafProxy) {
+        if (e._netPos) {
+          e.position.copy(e._netPos);
+          s.holder.visible = true;
+          s.holder.position.copy(e.position);
+          _HC_TRAF.obbs.push({ x: e.position.x, y: e.position.y + 20, z: e.position.z,
+                               r: 62 * ((e.trafClass && e.trafClass.scale) || 1), ent: e });
+        } else {
+          s.holder.visible = false;
+        }
+        s.lastSeg = st.seg;
+        continue;
+      }
       const P = player.position;
       const dx = P.x - e.position.x, dy = P.y - e.position.y, dz = P.z - e.position.z;
       const d = Math.max(1, Math.sqrt(dx * dx + dy * dy + dz * dz));
@@ -51570,8 +51638,18 @@ function updateMinimap() {
       const isEnemy = (_localTeam == null) || (np.team !== _localTeam);
       const p = _plot(np.position.x, np.position.z);
       if (p.off) { _mmArrow(p, isEnemy ? ENEMY_COL : FRIEND_COL); continue; }
-      ctx.fillStyle = isEnemy ? ENEMY_COL : FRIEND_COL;
-      ctx.fillRect(p.x - 2, p.y - 2, 3, 3);
+      const _col = isEnemy ? ENEMY_COL : FRIEND_COL;
+      ctx.strokeStyle = _col;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y - 4.5); ctx.lineTo(p.x + 4.5, p.y);
+      ctx.lineTo(p.x, p.y + 4.5); ctx.lineTo(p.x - 4.5, p.y);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fillStyle = _col;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 1.5, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 
