@@ -4167,12 +4167,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.38';
+const LSS_BUILD = '37.39';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '37.38';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.39';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -26647,7 +26647,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
         if (m && m.vertexColors) params.vertexColors = true;
         if (m && m.name) params.name = m.name;
         const _keepEmis = m && m.emissiveMap && (
-          (m.name === 'cockpit_interior') ||
+          (typeof m.name === 'string' && m.name.indexOf('cockpit') === 0) ||
           !(typeof input !== 'undefined' && input && input.hullGlow === false));
         if (_keepEmis) {
           params.emissiveMap = m.emissiveMap;
@@ -26676,6 +26676,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
       });
       child.material = newMats.length === 1 ? newMats[0] : newMats;
       child.castShadow = true; child.receiveShadow = false;
+      if (child.name && child.name.indexOf('cockpit_frame') === 0) { child.visible = false; child.castShadow = false; child.userData._cockpitFrame = true; }
       
       
       
@@ -42196,6 +42197,21 @@ function updatePlayerMovement(dt) {
 const _cpEyeW = new THREE.Vector3();
 const _cpFwd = new THREE.Vector3();
 const _cpUp = new THREE.Vector3();
+function _lssCockpitOff(dt) {
+  if (game._cockpit3dLive) {
+    game._cockpit3dLive = false;
+    try { document.body.classList.remove('lss-cockpit3d'); } catch (_) {}
+    const _im = game._cockpitIntMat;
+    if (_im && _im.userData) _im.userData._cockpitPulse = 1;
+  }
+  if (game._cockpitLights) {
+    const _lr = game._cockpitLights;
+    const _kk = Math.min(1, (dt || 0.016) * 6);
+    _lr.key.intensity += (0 - _lr.key.intensity) * _kk;
+    _lr.fill.intensity += (0 - _lr.fill.intensity) * _kk;
+  }
+  if (game._cockpitFrameObjs) for (const _fo of game._cockpitFrameObjs) if (_fo.visible) _fo.visible = false;
+}
 function _lssCockpitLights() {
   if (typeof scene === 'undefined' || !scene) return null;
   const key = new THREE.PointLight(0xffe2c4, 0, 160, 2);
@@ -42253,6 +42269,7 @@ function _lssApplyShipRig(dt) {
     player.mesh.rotateZ(game._tpBank);
     const _vrNow = (typeof isXRPresenting === 'function') && isXRPresenting();
     if (game.thirdPerson && !_vrNow) {
+      _lssCockpitOff(dt);   // (v37.39) the chase view is never a live cockpit: strips off, lights down
       const _pP = window.__par || {};
       const _pAct = (_pP.on !== false) ? 1 : 0;
       const _pS = (_pP.ship != null) ? _pP.ship : 26;
@@ -42308,6 +42325,8 @@ function _lssApplyShipRig(dt) {
         if (game._cockpitIntMesh !== player.mesh) {
           game._cockpitIntMesh = player.mesh;
           game._cockpitIntMat = null;
+          game._cockpitFrameObjs = [];
+          try { player.mesh.traverse(o => { if (o.userData && o.userData._cockpitFrame) game._cockpitFrameObjs.push(o); }); } catch (_) {}
           try {
             player.mesh.traverse(o => {
               if (game._cockpitIntMat || !o.isMesh) return;
@@ -42316,6 +42335,7 @@ function _lssApplyShipRig(dt) {
             });
           } catch (_) {}
         }
+        if (game._cockpitFrameObjs) for (const _fo of game._cockpitFrameObjs) if (!_fo.visible) _fo.visible = true;
         {
           const _lr = game._cockpitLights || (game._cockpitLights = _lssCockpitLights());
           if (_lr) {
@@ -42344,18 +42364,7 @@ function _lssApplyShipRig(dt) {
         }
       } else {
         if (player.mesh.visible) player.mesh.visible = false;
-        if (game._cockpit3dLive) {
-          game._cockpit3dLive = false;
-          try { document.body.classList.remove('lss-cockpit3d'); } catch (_) {}
-          const _im = game._cockpitIntMat;
-          if (_im && _im.userData) _im.userData._cockpitPulse = 1;
-        }
-        if (game._cockpitLights) {
-          const _lr = game._cockpitLights;
-          const _kk = Math.min(1, (dt || 0.016) * 6);
-          _lr.key.intensity += (0 - _lr.key.intensity) * _kk;
-          _lr.fill.intensity += (0 - _lr.fill.intensity) * _kk;
-        }
+        _lssCockpitOff(dt);
       }
     }
     {

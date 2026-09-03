@@ -90,6 +90,34 @@ OPEN_CFG = {'default': {'win': 0.30, 'depth': 0.035, 'method': 'pct', 'local_r':
 CUT_CFG = {'default': {'mode': 'dark', 'R': 0.30, 'val': 0.32, 'sat': 0.40, 'nz': -0.15,
                        'ell_a': 0.14, 'ell_b': 0.085, 'dz': 0.07, 'min_faces': 40},
            'pyro': {'mode': 'hue', 'hue': 0.50, 'hue_tol': 0.08}}     # refined with a BRIGHT CYAN canopy as the chroma key
+# FRAME ART BILLBOARD (v37.39). The owner's painted cockpit overlays (LSS/frames/<Ship>/
+# frame_<SHIP>.png, 1536x1024 RGBA: dark hard-surface panelling, hexagonal centre display,
+# class-colour glowing instruments, top canopy rail, side pillars) ARE the target look.
+# They ride in 3D on a cylinder band around the pilot's eye: the PNG's horizontal extent
+# maps to +-FRAME_HFOV/2 degrees of yaw, its vertical extent to +-45 deg of pitch (the game
+# camera is 90 deg vertical), alpha keeps the view through the glass. Radius FRAME_R of Lc:
+# inside the dash so the painted dashboard is what the seat sees. An emissive map keeps the
+# instruments lit ; the mask is saturation x value so dark metal stays dark.
+FRAME_ART = True
+FRAME_VFOV = 120.0         # the overlay filled the screen: the owner plays at fovDeg 120 (vertical), so the
+FRAME_HFOV = 144.0         # PNG spans +-60 deg of pitch and, at 16:9, +-72 deg of yaw. At 90 deg the dash and
+                           # rail strips are simply cropped at the screen edges (still there, a touch larger).
+FRAME_EMIS_GAIN = 0.9      # the art as emissive (self-lit painting) ; FRAME_LIT = how much scene light adds on top
+FRAME_LIT = 0.25
+# The PNG is cut into STRIPS by its own alpha (dashboard at the bottom, canopy rail at the top,
+# pillars at the sides where the art has them). Each strip keeps the overlay's screen angles
+# (pitch -45..+45 over the PNG height, yaw +-HFOV/2 over its width) so the artist's composition
+# is exact at the default eye, but sits at its OWN depth (fraction of Lc): dashboard close in
+# front of the pilot (inside the procedural dash, which it hides), rail out at the canopy
+# front, pillars between - so the head parallaxes against real structure.
+FRAME_R = {'dash': 0.27, 'top': 0.60, 'side': 0.48}
+FRAME_PNG = {sh: f'LSS/frames/{sh.capitalize()}/frame_{sh.upper()}.png'
+             for sh in ('vortex', 'pyro', 'puncture', 'slayer', 'tracker', 'blaster', 'syphon')}
+# COMPACT COCKPIT (v37.39, owner: "a lot of wasted space in the cockpits"). The tub follows
+# the canopy outline, so a wide canopy left the pilot in an empty box: a shallower pit, side
+# consoles from the armrests out to the walls and the full tub length, a raised deck with
+# pedals in the footwell, avionics racks behind the seat, ribs along the walls.
+COMPACT_DEPTH = 0.75       # tub depth multiplier (1.0 = the v37.36 pit)
 EMIS_FILL = 1.5            # interior fill light (LINEAR multiplier on the base tile) baked into the emissive
                            # atlas. 3.0 flattened the cockpit into a grey box (owner: 'worse from inside');
                            # 1.5 keeps the dark, moody v37.34 look with shadowed panels just readable
@@ -636,6 +664,116 @@ def cut_canopy_bulge(hull, cp, L, prm, rep):
     return Vector((float(cc[0]), float(cp.y), float(cc[2]))), base_z
 
 
+def build_frame_billboard(ship, B, eye_local, Lc, rep):
+    """The painted frame PNG as depth-sorted strips around the eye (own object + material)."""
+    src = os.path.join(REPO, FRAME_PNG[ship])
+    img = bpy.data.images.load(src)
+    W, H = img.size
+    px = np.empty(W * H * 4, np.float32)
+    img.pixels.foreach_get(px)
+    px = px.reshape(H, W, 4)                      # row 0 = bottom of the picture (Blender)
+    rgb = px[..., :3]
+    a = px[..., 3:4]
+    mx = rgb.max(2)
+    mn = rgb.min(2)
+    sat = np.where(mx > 1e-4, (mx - mn) / np.maximum(mx, 1e-4), 0)
+    # the painting carries its own lighting: render it mostly SELF-LIT (emissive = the art,
+    # base colour dimmed) so it reads like the overlay did instead of sun + emissive doubling
+    # up and blowing out the centre display
+    emis = np.concatenate([rgb * FRAME_EMIS_GAIN, a], 2).clip(0, 1)
+    eimg = bpy.data.images.new(f'{ship}_frame_emis', W, H, alpha=True)
+    eimg.pixels.foreach_set(emis.astype(np.float32).ravel())
+    eimg.filepath_raw = os.path.join(ATLAS_DIR, f'{ship}_frame_emis.png')
+    eimg.file_format = 'PNG'
+    eimg.save()
+    eimg.pack()
+    img.pack()
+    # strips from the alpha: row / column coverage
+    op = (px[..., 3] > 0.5)
+    row_cov = op.mean(1)                          # per row (bottom -> top)
+    col_cov = op[int(0.30 * H):int(0.70 * H)].mean(0)   # per column, middle rows only
+    j = 0
+    while j < H and row_cov[j] > 0.15:
+        j += 1
+    v_dash = j / H                                # dashboard strip = rows [0, v_dash)
+    j = H - 1
+    while j >= 0 and row_cov[j] > 0.15:
+        j -= 1
+    v_top = (j + 1) / H                           # rail strip = rows [v_top, 1)
+    i = 0
+    while i < W and col_cov[i] > 0.5:
+        i += 1
+    u_left = i / W
+    i = W - 1
+    while i >= 0 and col_cov[i] > 0.5:
+        i -= 1
+    u_right = (i + 1) / W
+    strips = []
+    if v_dash > 0.02:
+        strips.append(('dash', 0.0, 1.0, 0.0, min(0.6, v_dash + 0.01)))
+    if v_top < 0.98:
+        strips.append(('top', 0.0, 1.0, max(0.4, v_top - 0.01), 1.0))
+    if u_left > 0.02:
+        strips.append(('side', 0.0, min(0.35, u_left + 0.01), 0.0, 1.0))
+    if u_right < 0.98:
+        strips.append(('side', max(0.65, u_right - 0.01), 1.0, 0.0, 1.0))
+    rep['frame_art'] = {'png': FRAME_PNG[ship], 'size': [W, H], 'v_dash': round(v_dash, 3), 'v_top': round(v_top, 3),
+                        'u_left': round(u_left, 3), 'u_right': round(u_right, 3), 'strips': [st[0] for st in strips]}
+    h = math.radians(FRAME_HFOV / 2)
+    bm = bmesh.new()
+    uvl = bm.loops.layers.uv.new('UVMap')
+    for name, u0, u1, v0, v1 in strips:
+        R = FRAME_R[name] * Lc
+        NU = max(4, int(48 * (u1 - u0)))
+        NV = max(2, int(12 * (v1 - v0)))
+        grid = []
+        for jj in range(NV + 1):
+            vv = v0 + (v1 - v0) * jj / NV
+            z = R * math.tan(math.radians(-FRAME_VFOV / 2 + FRAME_VFOV * vv))
+            row = []
+            for ii in range(NU + 1):
+                uu = u0 + (u1 - u0) * ii / NU
+                yaw = -h + 2 * h * uu
+                p_ = Vector((eye_local.x + R * math.cos(yaw), eye_local.y + R * math.sin(yaw), eye_local.z + z))
+                row.append((bm.verts.new(B.to_world(p_)), uu, vv))
+            grid.append(row)
+        for jj in range(NV):
+            for ii in range(NU):
+                a_, b_, c_, d_ = grid[jj][ii], grid[jj][ii + 1], grid[jj + 1][ii + 1], grid[jj + 1][ii]
+                try:
+                    f = bm.faces.new((a_[0], b_[0], c_[0], d_[0]))     # wound to face the eye
+                except ValueError:
+                    continue
+                for l, (v0_, uu, vv) in zip(f.loops, (a_, b_, c_, d_)):
+                    l[uvl].uv = (uu, vv)
+    fmesh = bpy.data.meshes.new('cockpit_frame')
+    bm.to_mesh(fmesh)
+    bm.free()
+    fmat = bpy.data.materials.new('cockpit_frame')
+    fmat.use_nodes = True
+    nt = fmat.node_tree
+    bsdf = nt.nodes['Principled BSDF']
+    tex = new_image_node(nt, img)
+    mixn = nt.nodes.new('ShaderNodeMixRGB')          # base colour = art x FRAME_LIT (exported as the material's base factor)
+    mixn.blend_type = 'MULTIPLY'
+    mixn.inputs['Fac'].default_value = 1.0
+    mixn.inputs['Color2'].default_value = (FRAME_LIT, FRAME_LIT, FRAME_LIT, 1.0)
+    nt.links.new(tex.outputs['Color'], mixn.inputs['Color1'])
+    nt.links.new(mixn.outputs['Color'], bsdf.inputs['Base Color'])
+    nt.links.new(tex.outputs['Alpha'], bsdf.inputs['Alpha'])
+    etex = new_image_node(nt, eimg)
+    nt.links.new(etex.outputs['Color'], bsdf.inputs['Emission Color'])
+    bsdf.inputs['Emission Strength'].default_value = 1.0
+    bsdf.inputs['Roughness'].default_value = 0.7
+    bsdf.inputs['Metallic'].default_value = 0.0
+    fmat.blend_method = 'BLEND'
+    fmat.use_backface_culling = True
+    fmesh.materials.append(fmat)
+    fobj = bpy.data.objects.new('cockpit_frame', fmesh)
+    bpy.context.scene.collection.objects.link(fobj)
+    return fobj
+
+
 def build_open_canopy(hull, cp, L, prm, rep):
     """Find the open cockpit cavity around cp, loft a glass dome over its rim and JOIN it into
     the hull (dome faces land at the end of the polygon list). Returns the dome face count."""
@@ -1096,6 +1234,7 @@ def process(ship):
         _floor = float(_vz[_near][:, 2].min())
         D = min(D, 0.8 * max(0.02 * L, zmin - _floor))
         rep['tub_floor_cap'] = round(_floor, 3)
+    D *= COMPACT_DEPTH
     rep['canopy'].update({'Lc': round(Lc, 3), 'Wc': round(Wc, 3), 'Hc': round(Hc, 3), 'D': round(D, 3)})
 
     # ---------------- rim: POLAR OUTLINE of the glass ---------------------------------------
@@ -1410,19 +1549,34 @@ def process(ship):
     B.box((sx + 0.13 * Lc, 0, -0.425 * D), (0.10 * Lc, 0.07 * Wc, 0.012 * D), region='scrD')
     B.box((sx + 0.10 * Lc, 0.36 * Wc, -0.29 * D), (0.012 * Lc, 0.02 * Wc, 0.10 * D), rot=(0, math.radians(-25), 0), region='trim')
     B.box((sx + 0.10 * Lc - 0.02 * Lc, 0.36 * Wc, -0.245 * D), (0.03 * Lc, 0.035 * Wc, 0.02 * D), region='seat')
-    # side consoles with buttons, switch rows + a small screen each
+    # side consoles: SILLS from the armrest out to the tub wall and the whole tub length, at
+    # elbow height - no empty floor beside the seat. Screens, keypads, two switch rows and a
+    # row of rotary knobs on each ; a raised lip along the inner edge.
     for sgn in (1, -1):
-        cx_, cy_ = 0.04 * Lc, sgn * 0.36 * Wc
-        B.box((cx_, cy_, -0.40 * D), (0.36 * Lc, 0.11 * Wc, 0.14 * D), region='metal', bevel=bv * 0.4)
-        B.box((cx_ + 0.08 * Lc, cy_, -0.325 * D), (0.12 * Lc, 0.08 * Wc, 0.012 * D), region='scrD')
+        cx_, cy_ = -0.02 * Lc, sgn * 0.345 * Wc
+        B.box((cx_, cy_, -0.40 * D), (0.60 * Lc, 0.31 * Wc, 0.14 * D), region='metal', bevel=bv * 0.4)   # sill
+        B.box((cx_, sgn * 0.20 * Wc, -0.33 * D), (0.60 * Lc, 0.02 * Wc, 0.03 * D), region='trim')         # inner lip
+        B.box((cx_ + 0.12 * Lc, cy_, -0.325 * D), (0.14 * Lc, 0.11 * Wc, 0.012 * D), region='scrD')       # screen
+        B.box((cx_ - 0.16 * Lc, cy_, -0.325 * D), (0.10 * Lc, 0.11 * Wc, 0.012 * D), region='screen')     # screen 2
         for k in range(4):
-            B.box((cx_ - 0.10 * Lc + k * 0.045 * Lc, cy_, -0.325 * D), (0.025 * Lc, 0.04 * Wc, 0.012 * D), region='glow')
+            B.box((cx_ - 0.02 * Lc + k * 0.04 * Lc, cy_ - sgn * 0.06 * Wc, -0.325 * D), (0.025 * Lc, 0.04 * Wc, 0.012 * D), region='glow')
         # two rows of toggle switches along the outer edge, every third one lit
-        for k in range(6):
-            for rr, yo in ((0, 0.035), (1, -0.035)):
+        for k in range(9):
+            for rr, yo in ((0, 0.10), (1, 0.13)):
                 lit = ((k + rr) % 3 == 0)
-                B.box((cx_ - 0.15 * Lc + k * 0.05 * Lc, cy_ + sgn * yo * Wc, -0.322 * D),
+                B.box((cx_ - 0.24 * Lc + k * 0.05 * Lc, cy_ + sgn * yo * Wc, -0.322 * D),
                       (0.014 * Lc, 0.012 * Wc, 0.016 * D), region='glow' if lit else 'trim')
+        # rotary knobs along the inner edge, behind the elbow
+        for k in range(5):
+            B.box((cx_ - 0.26 * Lc + k * 0.03 * Lc, cy_ - sgn * 0.11 * Wc, -0.318 * D), (0.016 * Lc, 0.025 * Wc, 0.024 * D), region='trim', bevel=bv * 0.3)
+    # footwell: a raised grating deck between the consoles, rudder pedals at its far end
+    B.box((0.12 * Lc, 0, -0.86 * D), (0.46 * Lc, 0.38 * Wc, 0.05 * D), region='trim', bevel=bv * 0.2)
+    for sgn in (1, -1):
+        B.box((0.30 * Lc, sgn * 0.07 * Wc, -0.78 * D), (0.05 * Lc, 0.07 * Wc, 0.10 * D), rot=(0, math.radians(-30), 0), region='seat', bevel=bv * 0.3)
+    # ribs along the tub walls (frames from the floor to just under the rim)
+    for xr in (-0.22, 0.0, 0.22):
+        for sgn in (1, -1):
+            B.box((xr * Lc, sgn * 0.475 * Wc, -0.52 * D), (0.03 * Lc, 0.03 * Wc, 0.92 * D), region='metal', bevel=bv * 0.2)
     # control stick on the pedestal: column leaning back toward the pilot, grip on top
     B.box((sx + 0.15 * Lc, 0, -0.30 * D), (0.014 * Lc, 0.012 * Wc, 0.26 * D), rot=(0, math.radians(-12), 0), region='trim')
     B.box((sx + 0.125 * Lc, 0, -0.17 * D), (0.03 * Lc, 0.03 * Wc, 0.06 * D), rot=(0, math.radians(-12), 0), region='seat', bevel=bv * 0.3)
@@ -1430,11 +1584,16 @@ def process(ship):
     # harness straps down the backrest
     for yo in (0.09, -0.09):
         B.box((sx - 0.115 * Lc, yo * Wc, -0.30 * D), (0.008 * Lc, 0.05 * Wc, 0.46 * D), rot=(0, math.radians(-12), 0), region='suit')
-    # rear bulkhead + details
-    B.box((-0.38 * Lc, 0, -0.40 * D), (0.04 * Lc, 0.62 * Wc, 0.55 * D), region='trim', bevel=bv * 0.3)
-    B.box((-0.355 * Lc, 0.20 * Wc, -0.25 * D), (0.03 * Lc, 0.12 * Wc, 0.16 * D), region='metal')
-    B.box((-0.355 * Lc, -0.20 * Wc, -0.25 * D), (0.03 * Lc, 0.12 * Wc, 0.16 * D), region='metal')
-    B.box((-0.355 * Lc, 0, -0.62 * D), (0.03 * Lc, 0.40 * Wc, 0.05 * D), region='glow')
+    # rear bulkhead right behind the seat, with avionics racks filling the gap to it
+    bx = min(-0.26 * Lc, sx - 0.20 * Lc)
+    B.box((bx, 0, -0.40 * D), (0.04 * Lc, 0.70 * Wc, 0.55 * D), region='trim', bevel=bv * 0.3)
+    B.box((bx + 0.025 * Lc, 0.22 * Wc, -0.30 * D), (0.03 * Lc, 0.14 * Wc, 0.22 * D), region='metal')
+    B.box((bx + 0.025 * Lc, -0.22 * Wc, -0.30 * D), (0.03 * Lc, 0.14 * Wc, 0.22 * D), region='metal')
+    B.box((bx + 0.025 * Lc, 0, -0.62 * D), (0.03 * Lc, 0.44 * Wc, 0.05 * D), region='glow')
+    for sgn in (1, -1):                                   # racks between the seat back and the bulkhead
+        B.box(((bx + sx - 0.14 * Lc) / 2, sgn * 0.30 * Wc, -0.50 * D), (max(0.02 * Lc, sx - 0.14 * Lc - bx - 0.02 * Lc), 0.16 * Wc, 0.30 * D), region='metal', bevel=bv * 0.3)
+        for k in range(3):
+            B.box(((bx + sx - 0.14 * Lc) / 2, sgn * 0.30 * Wc, -0.60 * D + k * 0.09 * D), (max(0.02 * Lc, sx - 0.14 * Lc - bx - 0.02 * Lc) + 0.004 * Lc, 0.12 * Wc, 0.012 * D), region='glow' if k == 1 else 'trim')
     # pilot
     head = Vector((sx - 0.03 * Lc, 0, eye_z))
     helmet = B.sphere(head, hr, region='suit')
@@ -1987,6 +2146,8 @@ def process(ship):
     # eye marker
     eye_world = B.to_world(head + Vector((0.3 * hr, 0, 0)))
     markers['cockpit1'].location = eye_world
+    if FRAME_ART and ship in FRAME_PNG and os.path.exists(os.path.join(REPO, FRAME_PNG[ship])):
+        build_frame_billboard(ship, B, head + Vector((0.3 * hr, 0, 0)), Lc, rep)
     rep['eye_world'] = [round(float(x), 4) for x in eye_world]
 
     # ---------------- SEE-THROUGH MAP from the eye ---------------------------------------------

@@ -134,7 +134,35 @@ CONTENT VERSIONS comment there) and run `python strip.py` from the repo root.
      the pilot's head. Inside the canopy zone a gap is left as SKY (Puncture has a real hole
      above the head; any pane that close filled a quarter of the view).
 
-## The Meshy v2 fleet (v37.37+)
+## The frame art in 3D (v37.39) — the owner's target look
+
+`LSS/frames/<Ship>/frame_<SHIP>.png` are the painted 2D cockpit overlays (1536×1024 RGBA:
+dark hard-surface panelling, a hexagonal centre display, class-colour glowing instruments,
+a top canopy rail, side pillars on Pyro/Blaster). The owner pointed at them as the reference,
+so `ship_cockpit.py` now puts the painting itself in the cockpit: `build_frame_billboard`
+cuts the PNG into strips by its own alpha (dashboard at the bottom, rail at the top, pillars
+where the sides are opaque) and hangs each strip on a cylinder segment around the pilot's
+eye at its own depth (`FRAME_R`: dashboard 0.27 Lc — inside the procedural dash, which it
+hides — rail 0.60 Lc, pillars 0.48 Lc), keeping the overlay's screen angles (`FRAME_VFOV`
+120 = the owner's fovDeg, `FRAME_HFOV` 144 for 16:9) so the artist's composition is exact
+at the default eye and parallaxes with the head. The material is mostly self-lit (emissive =
+art × `FRAME_EMIS_GAIN`, base × `FRAME_LIT`) so it reads like the overlay instead of sun +
+emissive blowing out the centre display. In-game the `cockpit_frame` node is a FIRST-PERSON
+element: hidden on every ship by default, shown only while this player's cockpit is live
+(`_lssCockpitOff` in the third-person and no-cockpit branches) — a rail strip 60° above a
+low canopy would otherwise float over the hull in the chase view.
+
+The same build made the tub COMPACT (owner: "a lot of wasted space"): `COMPACT_DEPTH` 0.75,
+side consoles from the armrests out to the walls and the full tub length (screens, keypads,
+two switch rows, rotary knobs, an inner lip), a raised deck with rudder pedals in the
+footwell, avionics racks between the seat back and a closer bulkhead, ribs along the walls.
+
+## The Meshy v2 fleet (v37.37+) — built, then REVERTED (v37.38)
+
+The owner's verdict in the game: "the ships look like shit now", and no more Meshy credits.
+The seven refined GLBs stay under `assets_base/cockpits/candidates` and the chain below
+still works, but the game ships the original hulls. Kept for reference:
+
 
 The seven hulls are being remade from Meshy AI text-to-3D (owner's call: the old hulls were
 lumpy Meshy exports with painted canopies, the root cause of the "C+" cockpits). New chain:

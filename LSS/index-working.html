@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.38';
+const LSS_BUILD = '37.39';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4335,7 +4335,7 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // (v37.35) 37.34 -> 37.35: INNER LINING closes every see-through hull face around
 // the seat, crack zipper in the cleanup stage, four distinct instrument tiles,
 // control stick, console switch rows, harness straps.
-const _MODELS_VERSION = '37.38';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.39';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -33919,7 +33919,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
         // hull map ; off = the pre-v37.30 4% team-tint emissive. The cockpit
         // interior keeps its map regardless. Takes effect on the next ship build.
         const _keepEmis = m && m.emissiveMap && (
-          (m.name === 'cockpit_interior') ||
+          (typeof m.name === 'string' && m.name.indexOf('cockpit') === 0) ||
           !(typeof input !== 'undefined' && input && input.hullGlow === false));
         if (_keepEmis) {
           params.emissiveMap = m.emissiveMap;
@@ -33962,6 +33962,10 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
       });
       child.material = newMats.length === 1 ? newMats[0] : newMats;
       child.castShadow = true; child.receiveShadow = false;
+      // (v37.39) the painted FRAME ART strips (cockpit_frame) are a first-person
+      // element like the PNG overlay they replace: hidden on every ship by
+      // default, the rig shows them only while THIS player's cockpit is live.
+      if (child.name && child.name.indexOf('cockpit_frame') === 0) { child.visible = false; child.castShadow = false; child.userData._cockpitFrame = true; }
       
       
       
@@ -54769,6 +54773,24 @@ const _cpUp = new THREE.Vector3();
 // (v37.37) cockpit light rig: two point lights that live in the scene from
 // the first call on (intensity 0 while the cockpit is not live). Returns
 // null until the scene exists.
+// (v37.39) everything the live cockpit switched on, switched off: PNG-frame class,
+// emissive pulse, rig lights (ramped), painted frame strips. Called from the
+// third-person branch AND the no-cockpit branch of the rig.
+function _lssCockpitOff(dt) {
+  if (game._cockpit3dLive) {
+    game._cockpit3dLive = false;
+    try { document.body.classList.remove('lss-cockpit3d'); } catch (_) {}
+    const _im = game._cockpitIntMat;
+    if (_im && _im.userData) _im.userData._cockpitPulse = 1;
+  }
+  if (game._cockpitLights) {
+    const _lr = game._cockpitLights;
+    const _kk = Math.min(1, (dt || 0.016) * 6);
+    _lr.key.intensity += (0 - _lr.key.intensity) * _kk;
+    _lr.fill.intensity += (0 - _lr.fill.intensity) * _kk;
+  }
+  if (game._cockpitFrameObjs) for (const _fo of game._cockpitFrameObjs) if (_fo.visible) _fo.visible = false;
+}
 function _lssCockpitLights() {
   if (typeof scene === 'undefined' || !scene) return null;
   const key = new THREE.PointLight(0xffe2c4, 0, 160, 2);
@@ -54875,6 +54897,7 @@ function _lssApplyShipRig(dt) {
     // xrDolly and teleports the headset back = a broken/nauseating view. _vrNow gates 3rd-person off.
     const _vrNow = (typeof isXRPresenting === 'function') && isXRPresenting();
     if (game.thirdPerson && !_vrNow) {
+      _lssCockpitOff(dt);   // (v37.39) the chase view is never a live cockpit: strips off, lights down
       // (v35.00) Parallax boom: camera slides opposite the turn so the SHIP
       // leads into it on screen (vertical at half strength).
       const _pP = window.__par || {};
@@ -54967,6 +54990,8 @@ function _lssApplyShipRig(dt) {
         if (game._cockpitIntMesh !== player.mesh) {
           game._cockpitIntMesh = player.mesh;
           game._cockpitIntMat = null;
+          game._cockpitFrameObjs = [];
+          try { player.mesh.traverse(o => { if (o.userData && o.userData._cockpitFrame) game._cockpitFrameObjs.push(o); }); } catch (_) {}
           try {
             // (v37.37) the interior is a two-primitive mesh since v37.36 (atlas +
             // hull-look lining), so GLTFLoader hands back a Group named
@@ -54979,6 +55004,7 @@ function _lssApplyShipRig(dt) {
             });
           } catch (_) {}
         }
+        if (game._cockpitFrameObjs) for (const _fo of game._cockpitFrameObjs) if (!_fo.visible) _fo.visible = true;
         // (v37.37) COCKPIT LIGHT RIG. The interior faces the pilot, never the
         // sun, so under the scene's three directionals + weak hemi it read as
         // black shards. Two point lights ride the eye while the cockpit is live:
@@ -55017,18 +55043,7 @@ function _lssApplyShipRig(dt) {
         }
       } else {
         if (player.mesh.visible) player.mesh.visible = false;
-        if (game._cockpit3dLive) {
-          game._cockpit3dLive = false;
-          try { document.body.classList.remove('lss-cockpit3d'); } catch (_) {}
-          const _im = game._cockpitIntMat;
-          if (_im && _im.userData) _im.userData._cockpitPulse = 1;
-        }
-        if (game._cockpitLights) {
-          const _lr = game._cockpitLights;
-          const _kk = Math.min(1, (dt || 0.016) * 6);
-          _lr.key.intensity += (0 - _lr.key.intensity) * _kk;
-          _lr.fill.intensity += (0 - _lr.fill.intensity) * _kk;
-        }
+        _lssCockpitOff(dt);
       }
     }
     // Spring the HUD/crosshair layers toward this frame's target (0 in first
