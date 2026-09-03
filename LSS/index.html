@@ -4167,7 +4167,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.71';
+const LSS_BUILD = '37.72';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23209,6 +23209,218 @@ function _hubCityDispose() {
   } catch (_) {}
 }
 
+const CARRIER = {
+  file: 'Carrier.glb',
+  frac: 0.5,          // of CHASSIS.DREADNOUGHT.flightSpeed (250) -> 125 u/s
+  hp: 400000,
+  alt: 1200,          // cruise height above the city pad
+  scale: 1.0,         // explicit: the carrier never goes through the ship fit-to-chassis path
+  box: [900, 200, 2400],   // placeholder footprint (w, h, l) until the GLB lands
+  arrive: 1500,       // stop this far short of the city centre
+};
+const _carrier = {
+  obj: null, ent: null, proto: null, loading: false,
+  t: 0, dist: 0, sector: null, dead: false,
+  from: new THREE.Vector3(), to: new THREE.Vector3(), dir: new THREE.Vector3(),
+  spawns: [], guns: [], thrusters: [],
+};
+function _carrierKnobs() {
+  const K = window.__carrier || (window.__carrier = {});
+  return K;
+}
+function _carrierSpeed() {
+  const K = _carrierKnobs();
+  if (typeof K.speed === 'number') return K.speed;
+  const base = (typeof CHASSIS !== 'undefined' && CHASSIS.DREADNOUGHT) ? CHASSIS.DREADNOUGHT.flightSpeed : 250;
+  return base * ((typeof K.frac === 'number') ? K.frac : CARRIER.frac);
+}
+function _carrierPortal(idx) {
+  const P = (typeof _HZ_CAVERN !== 'undefined' && _HZ_CAVERN) ? _HZ_CAVERN.portals : null;
+  if (P && P.length) {
+    const i = (typeof idx === 'number') ? ((idx % P.length) + P.length) % P.length : Math.floor(Math.random() * P.length);
+    const zp = P[i];
+    if (zp && zp.pos) return { pos: zp.pos.clone(), sector: (zp.sector != null) ? zp.sector : i };
+  }
+  const n = 6;
+  const i = (typeof idx === 'number') ? ((idx % n) + n) % n : Math.floor(Math.random() * n);
+  const a = (i / n) * Math.PI * 2;
+  const D = (typeof _HZ_CAVERN !== 'undefined' && _HZ_CAVERN.DIST) ? _HZ_CAVERN.DIST : 21500;
+  const A = (typeof _HZ_CAVERN !== 'undefined' && _HZ_CAVERN.ALT) ? _HZ_CAVERN.ALT : 1400;
+  const C = (typeof HUB_CITY !== 'undefined' && HUB_CITY) ? HUB_CITY : { x: 11000, z: -11000 };
+  return { pos: new THREE.Vector3(C.x + Math.cos(a) * D, A, C.z + Math.sin(a) * D), sector: i };
+}
+function _carrierCityPoint() {
+  const C = (typeof HUB_CITY !== 'undefined' && HUB_CITY) ? HUB_CITY : null;
+  const cx = C ? C.x : 11000, cz = C ? C.z : -11000;
+  const pad = C ? (C.padY || 0) : 0;
+  return new THREE.Vector3(cx, pad + ((_carrierKnobs().alt != null) ? _carrierKnobs().alt : CARRIER.alt), cz);
+}
+function _carrierHarvest(root) {
+  _carrier.spawns.length = 0;
+  _carrier.guns.length = 0;
+  _carrier.thrusters.length = 0;
+  root.traverse(o => {
+    const n = o.name || '';
+    if (/^spawn\d+$/i.test(n)) _carrier.spawns.push(o);
+    else if (/^gun\d+$/i.test(n)) _carrier.guns.push(o);
+    else if (/^thruster\d+$/i.test(n)) _carrier.thrusters.push(o);
+  });
+  const byName = (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true });
+  _carrier.spawns.sort(byName); _carrier.guns.sort(byName); _carrier.thrusters.sort(byName);
+}
+function _carrierPlaceholder() {
+  const K = _carrierKnobs();
+  const B = K.box || CARRIER.box;
+  const g = new THREE.Group();
+  const hull = new THREE.Mesh(
+    new THREE.BoxGeometry(B[0], B[1], B[2]),
+    new THREE.MeshStandardMaterial({ color: 0x39424e, roughness: 0.75, metalness: 0.35 })
+  );
+  const deck = new THREE.Mesh(
+    new THREE.BoxGeometry(B[0] * 0.72, B[1] * 0.10, B[2] * 0.92),
+    new THREE.MeshStandardMaterial({ color: 0x2b3138, roughness: 0.9, metalness: 0.1 })
+  );
+  deck.position.y = B[1] * 0.55;
+  g.add(hull); g.add(deck);
+  for (let i = 0; i < 4; i++) {
+    const e = new THREE.Object3D();
+    e.name = 'spawn' + (i + 1);
+    e.position.set((i % 2 ? 1 : -1) * B[0] * 0.22, B[1] * 0.62, (i < 2 ? 1 : -1) * B[2] * 0.22);
+    g.add(e);
+  }
+  g.userData._carrierPlaceholder = true;
+  return g;
+}
+function _carrierAttach(root, sector) {
+  _carrier.obj = root;
+  root.scale.setScalar((_carrierKnobs().scale != null) ? _carrierKnobs().scale : CARRIER.scale);
+  scene.add(root);
+  _carrierHarvest(root);
+  const from = _carrierPortal(sector);
+  _carrier.from.copy(from.pos);
+  _carrier.sector = from.sector;
+  _carrier.to.copy(_carrierCityPoint());
+  _carrier.dir.copy(_carrier.to).sub(_carrier.from);
+  _carrier.dist = Math.max(1, _carrier.dir.length() - ((_carrierKnobs().arrive != null) ? _carrierKnobs().arrive : CARRIER.arrive));
+  _carrier.dir.normalize();
+  _carrier.t = 0;
+  _carrier.dead = false;
+  root.position.copy(_carrier.from);
+  root.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), _carrier.dir);
+  const hp = (_carrierKnobs().hp != null) ? _carrierKnobs().hp : CARRIER.hp;
+  const B = _carrierKnobs().box || CARRIER.box;
+  _carrier.ent = {
+    isCarrier: true, alive: true, id: 'carrier',
+    health: hp, maxHealth: hp,
+    position: root.position.clone(),
+    velocity: new THREE.Vector3(),
+    team: 9200, name: 'CARRIER', loadout: { name: 'CARRIER' },
+    chassis: { hullWidth: B[0], hullHeight: B[1], hullLength: B[2], hullRadius: B[2] * 0.5 },
+    kills: 0, deaths: 0, damageDealt: 0,
+    mesh: root,
+    update() {},
+    takeDamage(amount, attacker) {
+      if (!this.alive || !this.mesh || !this.mesh.visible) return 0;
+      if (attacker === this || (attacker && attacker.owner === this)) return 0;
+      const applied = Math.min(Math.max(0, this.health), Math.max(0, amount || 0));
+      this.health = Math.max(0, this.health - Math.max(0, amount || 0));
+      if (this.health <= 0) {
+        this.alive = false;
+        this.deaths++;
+        _carrier.dead = true;   // the mode reads this: no more attacker spawns
+        try {
+          if (typeof spawnExplosion === 'function') {
+            const L = (this.chassis && this.chassis.hullLength) || 2400;
+            spawnExplosion(this.position.clone(), L * 0.25);
+            const f = new THREE.Vector3(0, 0, 1).applyQuaternion(this.mesh.quaternion);
+            for (let k = -1; k <= 1; k += 2) {
+              spawnExplosion(this.position.clone().addScaledVector(f, k * L * 0.35), L * 0.18);
+            }
+          }
+        } catch (_) {}
+        this.mesh.visible = false;
+      }
+      return applied;
+    },
+  };
+  if (game && Array.isArray(game.entities)) game.entities.push(_carrier.ent);
+  return _carrier.ent;
+}
+function _carrierSpawn(opts) {
+  opts = opts || {};
+  _carrierClear();
+  const sector = (typeof opts.sector === 'number') ? opts.sector : undefined;
+  if (opts.placeholder === true || typeof THREE.GLTFLoader === 'undefined') {
+    return _carrierAttach(_carrierPlaceholder(), sector);
+  }
+  if (_carrier.proto) return _carrierAttach(_carrier.proto.clone(true), sector);
+  if (_carrier.loading) return null;
+  _carrier.loading = true;
+  _carrierAttach(_carrierPlaceholder(), sector);
+  const url = MONSTER_BASE_URL + CARRIER.file + _MODEL_CACHE_BUST;
+  try {
+    new THREE.GLTFLoader().load(url, gltf => {
+      _carrier.loading = false;
+      _carrier.proto = gltf.scene;
+      const keep = _carrier.sector;
+      const t = _carrier.t;
+      _carrierClear();
+      _carrierAttach(_carrier.proto.clone(true), keep);
+      _carrier.t = t;   // keep its place on the route across the swap
+      console.log('[carrier] loaded', url, 'spawns', _carrier.spawns.length, 'guns', _carrier.guns.length);
+    }, undefined, err => {
+      _carrier.loading = false;
+      console.warn('[carrier] no model yet at', url, '- flying the placeholder', err && err.message ? err.message : '');
+    });
+  } catch (e) { _carrier.loading = false; }
+  return _carrier.ent;
+}
+function _carrierClear() {
+  if (_carrier.obj) { try { scene.remove(_carrier.obj); } catch (_) {} }
+  if (_carrier.ent && game && Array.isArray(game.entities)) {
+    const i = game.entities.indexOf(_carrier.ent);
+    if (i >= 0) game.entities.splice(i, 1);
+  }
+  _carrier.obj = null; _carrier.ent = null;
+  _carrier.spawns.length = 0; _carrier.guns.length = 0; _carrier.thrusters.length = 0;
+}
+function _carrierFrame(dt) {
+  if (!_carrier.obj || !_carrier.ent) return;
+  if (!_carrier.ent.alive) return;
+  _carrier.t += (dt || 0.016);
+  const travelled = Math.min(_carrier.dist, _carrierSpeed() * _carrier.t);
+  const o = _carrier.obj;
+  o.position.copy(_carrier.from).addScaledVector(_carrier.dir, travelled);
+  _carrier.ent.velocity.copy(_carrier.dir).multiplyScalar(travelled < _carrier.dist ? _carrierSpeed() : 0);
+  _carrier.ent.position.copy(o.position);
+}
+function _carrierDeckPoint(i, out) {
+  out = out || new THREE.Vector3();
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive) return null;
+  const n = _carrier.spawns.length;
+  if (!n) return out.copy(_carrier.obj.position);
+  const k = ((i | 0) % n + n) % n;
+  _carrier.obj.updateMatrixWorld(true);
+  return _carrier.spawns[k].getWorldPosition(out);
+}
+if (typeof window !== 'undefined') {
+  window.__carrier = window.__carrier || {};
+  window.__carrier.spawn = (o) => _carrierSpawn(o);
+  window.__carrier.clear = () => _carrierClear();
+  window.__carrier.kill = () => (_carrier.ent ? _carrier.ent.takeDamage(1e9, null) : 0);
+  window.__carrier.deck = (i) => { const v = _carrierDeckPoint(i || 0); return v ? v.toArray().map(Math.round) : null; };
+  window.__carrier.info = () => ({
+    alive: !!(_carrier.ent && _carrier.ent.alive), dead: _carrier.dead,
+    model: _carrier.obj ? (_carrier.obj.userData._carrierPlaceholder ? 'placeholder' : 'Carrier.glb') : 'none',
+    sector: _carrier.sector, speed: Math.round(_carrierSpeed()),
+    t: +_carrier.t.toFixed(1), dist: Math.round(_carrier.dist),
+    travelled: Math.round(Math.min(_carrier.dist, _carrierSpeed() * _carrier.t)),
+    etaSec: Math.max(0, Math.round((_carrier.dist - _carrierSpeed() * _carrier.t) / Math.max(1, _carrierSpeed()))),
+    pos: _carrier.obj ? _carrier.obj.position.toArray().map(Math.round) : null,
+    health: _carrier.ent ? Math.round(_carrier.ent.health) : null,
+    spawns: _carrier.spawns.length, guns: _carrier.guns.length, thrusters: _carrier.thrusters.length,
+  });
+}
 function _hubCityFrame(dt) {
   if (!game.hubCity) {
     if (game._swapStaging) return;   // (v36.27) the staged swap owns the city build
@@ -25716,6 +25928,7 @@ function resolveShipShipCollisions(dt) {
   for (const bot of game.entities) {
     if (!bot.alive || !bot.chassis) continue;
     if (bot.isHubTraffic) continue;
+    if (bot.isCarrier) continue;
     const s = _shipCollisionSlot(shipCount++);
     s.pos = bot.position;
     s.vel = bot.velocity;
@@ -62076,6 +62289,7 @@ function gameLoop(timestamp) {
       try { _hubZoneTick(_fX, _fZ, dt); } catch (_) {}
       __pmark('hub:zone');
       try { _hubCityFrame(dt); } catch (_) {}
+      try { _carrierFrame(dt); } catch (_) {}   // (v37.72) no-op until a carrier is spawned
       __pmark('hub:city');
       try { _wxFrame(dt); } catch (_) {}
       try { _hzDuskLights(); } catch (_) {}
