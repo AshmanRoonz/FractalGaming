@@ -4177,7 +4177,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.94';
+const LSS_BUILD = '37.96';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -12721,14 +12721,15 @@ function _blasterCoreVolley(dir) {
 const _bcgPos = new THREE.Vector3(), _bcgTmp = new THREE.Vector3(), _bcgFwd = new THREE.Vector3();
 const _bcgSpawn = [];
 const _bcgQuat = new THREE.Quaternion();
-function _blasterChargeGlow(t) {
+function _blasterChargeGlow(t, tintOverride) {
   const mesh = player.mesh;
   const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
   if (!nodes || !nodes.length) return;
   const K = window.__blasterCharge || (window.__blasterCharge = {});
   const hull = (player.chassis && player.chassis.hullLength) || 60;
-  const tint = (window.__blasterCharge && window.__blasterCharge.tint != null)
-    ? window.__blasterCharge.tint : 0x00d8ff;
+  const tint = (tintOverride != null) ? tintOverride
+    : ((window.__blasterCharge && window.__blasterCharge.tint != null)
+        ? window.__blasterCharge.tint : 0x00d8ff);
   const col = new THREE.Color(tint);
   if (!player._bcgTubes || player._bcgTubes.length !== nodes.length) {
     if (player._bcgTubes) for (const m of player._bcgTubes) { scene.remove(m); m.material.dispose(); }
@@ -12787,6 +12788,18 @@ function _blasterChargeGlowOff() {
 function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
   if (!pos || !dir) return;
   const flashColor = chassisFlashColor(loadoutKey);
+
+  if (!(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) {
+    try {
+      const fm = _acquireExplosionMesh('flash');
+      fm.position.copy(pos).addScaledVector(dir, 1.5);
+      fm.scale.setScalar(2.6);
+      fm.material.color.setHex(flashColor);
+      fm.material.opacity = 1;
+      game.effects.push({ mesh: fm, lifetime: 0.055, age: 0, type: 'explosionFlash',
+                          pooled: true, baseScale: 2.6, billboard: true });
+    } catch (_) {}
+  }
 
   if (typeof spawnDynamicLight === 'function') {
     spawnDynamicLight(pos, flashColor, 1.4, 90, 0.25);
@@ -23327,8 +23340,8 @@ const CARRIER = {
   arrive: null,       // absolute stop distance from the city centre ; overrides `edge`
   clearance: 450,     // minimum height above the ground along the route
   zapRange: 1600,     // the guns answer anything hostile inside this
-  zapEvery: 0.7,      // seconds between bolts
-  zapDamage: 200,     // (v37.78) was 550 - ~285 dps deters, 785 deleted a dreadnought in 9 s
+  zapEvery: 2.6,      // (v37.96) quiet beat AFTER a shot, not the whole cycle      // seconds between bolts
+  zapDamage: 4000,    // (v37.96) a fully charged railgun (1000 base x the 4x charge cap): one shot ends a city hull     // (v37.78) was 550 - ~285 dps deters, 785 deleted a dreadnought in 9 s
   glow: 0.08,         // engine orb radius as a fraction of hull height (v37.81: -20%, owner)
 };
 const _carrier = {
@@ -23794,24 +23807,48 @@ function _carrierRayDist(origin, dir, maxDist) {
   }
   return -1;
 }
-function _carrierChargeStart(gun, dur) {
+function _carrierClusterFor(gun) {
+  const K = _carrierKnobs();
+  const R = (K.cluster != null) ? K.cluster : 420;
+  const out = [];
+  gun.getWorldPosition(_ccW);
+  const anchor = _ccW.clone();
+  for (const g of _carrier.guns) {
+    g.getWorldPosition(_ccW);
+    if (_ccW.distanceTo(anchor) <= R) out.push(g);
+  }
+  return out.length ? out : [gun];
+}
+function _carrierChargeStart(cluster, dur) {
   _carrierChargeEnd();
   try {
     const r = (_carrier.size ? _carrier.size.y : 548) * 0.035;
     const col = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66;
-    const m = new THREE.Mesh(
-      new THREE.SphereGeometry(r, 12, 10),
-      new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.85,
-                                    blending: THREE.AdditiveBlending, depthWrite: false })
-    );
-    gun.getWorldPosition(m.position);
-    m.scale.setScalar(0.25);
-    m.renderOrder = 3;
-    scene.add(m);
-    _carrier.chargeFx = { m, gun, t: 0, dur: dur };
-    gun.getWorldPosition(_ccW);
-    if (typeof playSpatialSound === 'function') playSpatialSound('railgun_charge', _ccW.clone());
-    else if (typeof playSound === 'function') playSound('railgun_charge');
+    if (!_carrierChargeStart._geo) _carrierChargeStart._geo = new THREE.SphereGeometry(r, 12, 10);
+    const orbs = [];
+    const mid = new THREE.Vector3();
+    for (const g of cluster) {
+      const m = new THREE.Mesh(_carrierChargeStart._geo, new THREE.MeshBasicMaterial({
+        color: col, transparent: true, opacity: 0.85,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }));
+      g.getWorldPosition(m.position);
+      mid.add(m.position);
+      m.scale.setScalar(0.25);
+      m.renderOrder = 3;
+      scene.add(m);
+      orbs.push({ m, g });
+    }
+    mid.multiplyScalar(1 / Math.max(1, cluster.length));
+    _carrier.chargeFx = { orbs, t: 0, dur: dur, snd: null };
+    try {
+      const near = (typeof player !== 'undefined' && player && player.position)
+        ? player.position.distanceTo(mid) : 1e9;
+      if (near < ((_carrierKnobs().sndRange != null) ? _carrierKnobs().sndRange : 6000) &&
+          typeof _startRailgunChargeSound === 'function') {
+        _carrier.chargeFx.snd = _startRailgunChargeSound(0);
+      }
+    } catch (_) {}
   } catch (_) { _carrier.chargeFx = null; }
 }
 function _carrierChargeTick(dt) {
@@ -23820,9 +23857,12 @@ function _carrierChargeTick(dt) {
   try {
     F.t += (dt || 0.016);
     const u = Math.min(1, F.t / Math.max(0.05, F.dur));
-    F.gun.getWorldPosition(F.m.position);            // the mount is moving with the hull
-    F.m.scale.setScalar(0.25 + u * u * 1.35);
-    F.m.material.opacity = 0.35 + 0.6 * u;
+    for (const o of F.orbs) {
+      o.g.getWorldPosition(o.m.position);          // the mounts move with the hull
+      o.m.scale.setScalar(0.25 + u * u * 1.35);
+      o.m.material.opacity = 0.35 + 0.6 * u;
+    }
+    if (F.snd && typeof F.snd.set === 'function') F.snd.set(u);
   } catch (_) {}
 }
 function _carrierChargeEnd() {
@@ -23830,20 +23870,59 @@ function _carrierChargeEnd() {
   _carrier.chargeFx = null;
   if (!F) return;
   try {
-    scene.remove(F.m);
-    if (F.m.geometry) F.m.geometry.dispose();
-    if (F.m.material) F.m.material.dispose();
+    for (const o of F.orbs) {
+      scene.remove(o.m);
+      if (o.m.material) o.m.material.dispose();
+    }
+    if (F.snd && typeof _stopRailgunChargeSound === 'function') _stopRailgunChargeSound(F.snd);
   } catch (_) {}
 }
 function _carrierGuns(dt) {
-  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive) { _carrierChargeEnd(); return; }
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive) { _carrierChargeEnd(); _carrier.zapTgt = null; return; }
   if (!_carrier.guns.length || typeof spawnLightningBolt !== 'function') return;
   const K = _carrierKnobs();
-  _carrierChargeTick(dt);
-  _carrier.zapT = (_carrier.zapT || 0) - (dt || 0.016);
-  const lead = (K.charge != null) ? K.charge : 0.55;    // how long the wind-up runs
-  if (_carrier.zapT > lead) { _carrierChargeEnd(); return; }
+  const step = dt || 0.016;
   const range = (K.zapRange != null) ? K.zapRange : CARRIER.zapRange;
+  const charge = (K.charge != null) ? K.charge : 1.6;
+
+  if (_carrier.zapT > 0) { _carrier.zapT -= step; return; }
+
+  const inRange = (c) => c && c.position && c.position.distanceTo(_carrier.obj.position) <= range;
+
+  if (_carrier.chargeFx) {
+    const tgt = _carrier.zapTgt;
+    const stillThere = tgt && (tgt === player ? player.shipState !== 'dead' : tgt.alive) && inRange(tgt);
+    if (!stillThere) {
+      _carrierChargeEnd();
+      _carrier.zapTgt = null;
+      _carrier.zapT = 0.35;                  // brief re-arm so it cannot instantly re-trigger
+      return;
+    }
+    _carrierChargeTick(step);
+    if (_carrier.chargeFx.t < charge) return;       // discharge only at the END of the charge
+
+    const cluster = _carrier.chargeFx.orbs.map(o => o.g);
+    const col = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66;
+    for (const g of cluster) {
+      g.getWorldPosition(_ccW);
+      try { spawnLightningBolt(_ccW.clone(), tgt.position.clone(), col, 0.28, 3, 2.6, true); }
+      catch (e) { if (!_carrier._boltErr) { _carrier._boltErr = String((e && e.message) || e); console.warn('[carrier] bolt threw:', e); } }
+    }
+    _carrier.zaps = (_carrier.zaps | 0) + 1;
+    _carrierChargeEnd();
+    _carrier.zapTgt = null;
+    _carrier.zapT = (K.zapEvery != null) ? K.zapEvery : CARRIER.zapEvery;
+    const dmg = (K.zapDamage != null) ? K.zapDamage : CARRIER.zapDamage;
+    try {
+      if (typeof player !== 'undefined' && tgt === player) {
+        if (typeof playerTakeDamage === 'function') playerTakeDamage(dmg, _carrier.ent);
+      } else if (typeof tgt.takeDamage === 'function') {
+        tgt.takeDamage(dmg, _carrier.ent);
+      }
+    } catch (_) {}
+    return;
+  }
+
   let best = null, bestD = range;
   const consider = (c) => {
     if (!c || !c.position) return;
@@ -23858,31 +23937,15 @@ function _carrierGuns(dt) {
       consider(e);
     }
   }
-  if (!best) { _carrierChargeEnd(); if (_carrier.zapT < lead) _carrier.zapT = lead; return; }
+  if (!best) { _carrier.zapTgt = null; return; }     // nothing in range: silent
   let gun = _carrier.guns[0], gd = Infinity;
   for (const g of _carrier.guns) {
     g.getWorldPosition(_ccW);
     const d = _ccW.distanceToSquared(best.position);
     if (d < gd) { gd = d; gun = g; }
   }
-  if (_carrier.zapT > 0) {
-    if (!_carrier.chargeFx || _carrier.chargeFx.gun !== gun) _carrierChargeStart(gun, lead);
-    return;
-  }
-  _carrier.zapT = (K.zapEvery != null) ? K.zapEvery : CARRIER.zapEvery;
-  _carrierChargeEnd();
-  gun.getWorldPosition(_ccW);
-  const col = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66;
-  try { spawnLightningBolt(_ccW.clone(), best.position.clone(), col, 0.22, 3, 2.6, true); _carrier.zaps = (_carrier.zaps | 0) + 1; }
-  catch (e) { if (!_carrier._boltErr) { _carrier._boltErr = String((e && e.message) || e); console.warn('[carrier] bolt threw:', e); } }
-  const dmg = (K.zapDamage != null) ? K.zapDamage : CARRIER.zapDamage;
-  try {
-    if (typeof player !== 'undefined' && best === player) {
-      if (typeof playerTakeDamage === 'function') playerTakeDamage(dmg, _carrier.ent);
-    } else if (typeof best.takeDamage === 'function') {
-      best.takeDamage(dmg, _carrier.ent);
-    }
-  } catch (_) {}
+  _carrier.zapTgt = best;
+  _carrierChargeStart(_carrierClusterFor(gun), charge);
 }
 function _carrierDeckPoint(i, out) {
   out = out || new THREE.Vector3();
@@ -23937,7 +24000,7 @@ if (typeof window !== 'undefined') {
     zaps: _carrier.zaps | 0, gunErr: _carrier._gunErr || null, boltErr: _carrier._boltErr || null,
     zapT: +(_carrier.zapT || 0).toFixed(2),
     engineSnd: !!_carrier.snd,
-    charging: !!_carrier.chargeFx,
+    charging: _carrier.chargeFx ? (_carrier.chargeFx.orbs.length + ' mounts @' + _carrier.chargeFx.t.toFixed(2)) : false,
     body: _carrier.body ? (_carrier.body.nx + 'x' + _carrier.body.nz + ' hull map') : 'box only',
     size: _carrier.size ? _carrier.size.toArray().map(Math.round) : null,
   });
@@ -29483,6 +29546,10 @@ class Bot {
     const flashColor = (typeof chassisFlashColor === 'function')
       ? chassisFlashColor(this.loadout.name)
       : 0xffdd44;
+    if (typeof emitChassisMuzzleFlash === 'function' && typeof camera !== 'undefined' && camera &&
+        this.position.distanceToSquared(camera.position) < 2600 * 2600) {
+      try { emitChassisMuzzleFlash(this.loadout.name, fireOrigin, fireDir); } catch (_) {}
+    }
 
     if (weapon.mode === 'hitscan') {
       const isChaingunBot = (weapon.fireRate <= 0.10);
@@ -39909,6 +39976,18 @@ function updateEffects(dt) {
       e.mesh.material.opacity = 0.85 * (1 - t * t);
       if (e.billboard) e.mesh.lookAt(camera.position);
     }
+    else if (e.type === 'hitFire') {
+      const base = e.baseScale || 1;
+      const flick = 0.82 + 0.34 * Math.sin(e.age * 42 + base);
+      const sc = base * (1 + t * 0.55) * flick;
+      e.mesh.scale.set(sc, sc, sc);
+      if (e.follow && e.follow.position && e.foff) {
+        e.mesh.position.copy(e.follow.position).add(e.foff);
+      }
+      e.mesh.position.y += t * 0.9;
+      if (e.tint) e.mesh.material.color.copy(e.tint).multiplyScalar(1 + 0.7 * (1 - t));
+      e.mesh.material.opacity = 0.9 * (1 - t * t);
+    }
     else if (e.type === 'shockwave') {
       const base = e.baseScale || 1;
       const ringScale = (1 + t * (e.maxSize || 5)) * base;
@@ -40797,6 +40876,40 @@ function showDirectionalDamage(attacker, projectile) {
   el.classList.add('pulse');
 }
 
+function spawnHitFire(pos, colorHex, ent, scale) {
+  if (!pos || !game || !game.effects) return;
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+  try {
+    const now = (game.time || 0);
+    if (ent) {
+      if (ent._hitFireT && now - ent._hitFireT < 0.18) return;
+      ent._hitFireT = now;
+    }
+    const col = new THREE.Color((colorHex != null) ? colorHex : 0xff9944);
+    const base = (scale || 1) * 5.5;
+    const m = _acquireExplosionMesh('fire');
+    m.position.copy(pos);
+    m.scale.setScalar(base);
+    m.material.color.copy(col);
+    m.material.opacity = 0.9;
+    game.effects.push({
+      mesh: m, lifetime: 0.5 + Math.random() * 0.3, age: 0, type: 'hitFire', pooled: true,
+      baseScale: base, tint: col.clone(),
+      follow: (ent && ent.position) ? ent : null,
+      foff: (ent && ent.position) ? pos.clone().sub(ent.position) : null,
+    });
+    for (let i = 0; i < 4; i++) {
+      game.particles.push({
+        position: pos.clone(),
+        velocity: _pVel((Math.random() - 0.5) * 60, 30 + Math.random() * 80, (Math.random() - 0.5) * 60),
+        life: 0.2 + Math.random() * 0.25,
+        maxLife: 0.45,
+        color: col.getHex(),
+        size: 1 + Math.random() * 1.3,
+      });
+    }
+  } catch (_) {}
+}
 function spawnImpactSparks(pos, count) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   count = count || 6;
@@ -44513,6 +44626,9 @@ function fireHitscan(origin, dir, w) {
         player.damageDealt += dealt;
         player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
         showHitMarker();
+        if (typeof spawnHitFire === 'function' && typeof chassisFlashColor === 'function') {
+          spawnHitFire(hitPoint, chassisFlashColor(player.loadoutKey), bot, 1.15);
+        }
       }
       const _puncChargeBoost = Math.min(1.6, 1.0 + (chargeMul - 1.0) * 0.5); 
       spawnExplosion(hitPoint, 50 * _puncChargeBoost);
@@ -44580,8 +44696,11 @@ function fireHitscan(origin, dir, w) {
     const dealt = bestHit.takeDamage(finalDmg, 'player', hitPoint);
     if (dealt > 0) {
       player.damageDealt += dealt;
-      player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); 
+      player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
       showHitMarker();
+      if (typeof spawnHitFire === 'function' && typeof chassisFlashColor === 'function') {
+        spawnHitFire(hitPoint, chassisFlashColor(player.loadoutKey), bestHit, 1);
+      }
     }
     spawnExplosion(hitPoint, 8);
     if (!hadShield) spawnImpactSparks(hitPoint, 4);
@@ -48115,6 +48234,10 @@ function updateAbilities(dt) {
     if (player.powerShotCharge >= 1.0) {
       firePowerShot();
     }
+  } else if (player.loadoutKey === 'PUNCTURE' && (player.railgunCharge || 0) > 0.02) {
+    const _pt = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.PUNCTURE != null)
+      ? LSS.CLASS_COLORS.PUNCTURE : 0xffee44;
+    try { _blasterChargeGlow(Math.min(1, player.railgunCharge), _pt); } catch (_) {}
   } else if (player._bcgOn) {
     try { _blasterChargeGlowOff(); } catch (_) {}
   }
