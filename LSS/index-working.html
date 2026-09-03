@@ -4251,7 +4251,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.98';
+const LSS_BUILD = '37.99';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -30054,7 +30054,11 @@ function _carrierGuns(dt) {
     const col = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66;
     for (const g of cluster) {
       g.getWorldPosition(_ccW);
-      try { spawnLightningBolt(_ccW.clone(), tgt.position.clone(), col, 0.28, 3, 2.6, true); }
+      // (v37.99) Slayer's core arc, and it HANGS: full green for a second where it struck, then
+      // fades. window.__carrier.boltHold / boltFade tune it.
+      const _bh = (K.boltHold != null) ? K.boltHold : 1.0;
+      const _bf = (K.boltFade != null) ? K.boltFade : 0.55;
+      try { spawnLightningBolt(_ccW.clone(), tgt.position.clone(), col, _bh + _bf, 3, 4, true, _bh); }
       catch (e) { if (!_carrier._boltErr) { _carrier._boltErr = String((e && e.message) || e); console.warn('[carrier] bolt threw:', e); } }
     }
     _carrier.zaps = (_carrier.zaps | 0) + 1;
@@ -50696,7 +50700,10 @@ const _lbFStep = new THREE.Vector3();
 // is rewritten to use the recursive-midpoint path generator above + a custom
 // tube geometry + a ShaderMaterial halo+core pair. One mesh-pair (halo+core)
 // per spawn ; geometry is rebuilt each spawn and disposed on release.
-function spawnLightningBolt(from, to, color, lifetime, branches, thickness, essential) {
+// (v37.99) `hold` keeps the arc at full brightness for that many seconds before the fade begins,
+// so a bolt can hang in the air where it struck instead of blinking out. lifetime is the whole
+// life, hold included.
+function spawnLightningBolt(from, to, color, lifetime, branches, thickness, essential, hold) {
   // Strip-FX gate. Covers Stun Bolt, Mega
   // Stun Bolt arcs, Syphon drain conduits, plasma shield crackle, etc.
   // `essential` bypasses the gate ; used for gameplay-critical
@@ -50763,12 +50770,15 @@ function spawnLightningBolt(from, to, color, lifetime, branches, thickness, esse
     type: 'lightning',
     _haloOp0: 0.55,
     _coreOp0: 0.95,
+    _hold: (hold > 0) ? Math.min(hold, lifetime * 0.95) : 0,
   });
 
   // Dynamic light at the midpoint of the main path (gameplay-feel ; gas
   // pockets and walls near the bolt light up briefly).
   const boltMid = mainPath[Math.floor(mainPath.length / 2)];
-  if (typeof spawnDynamicLight === 'function') spawnDynamicLight(boltMid, color, 2.0, 400, lifetime);
+  // the LIGHT is the strike, not the afterimage: a held bolt keeps its glow but stops lighting the
+  // world for the whole second it hangs there
+  if (typeof spawnDynamicLight === 'function') spawnDynamicLight(boltMid, color, 2.0, 400, Math.min(lifetime, 0.4));
 }
 
 // (v27) Twisting-helix Energy Syphon visual. Built in the same style as
@@ -51962,7 +51972,10 @@ function updateEffects(dt) {
       if (e.matB0) e.matB0.opacity = (e._backOp || 0.55) * ease;
     }
     else if (e.type === 'lightning') {
-      const k = Math.max(0, 1 - t);
+      // (v37.99) hold at full, THEN fade over what is left
+      const k = e._hold
+        ? ((e.age <= e._hold) ? 1 : Math.max(0, 1 - (e.age - e._hold) / Math.max(0.001, e.lifetime - e._hold)))
+        : Math.max(0, 1 - t);
       const slot = e.poolSlot;
       if (slot && slot.haloMat && slot.haloMat.uniforms) {
         slot.haloMat.uniforms.uOpacity.value = (e._haloOp0 || 0.55) * k;
