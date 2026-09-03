@@ -17,7 +17,11 @@ SRC = os.path.join(REPO, "LSS")          # site root: LSS/ is what deploys
 STAGE = os.path.join(os.path.dirname(REPO), "FractalGaming_deploy")
 PROJECT = "lss"
 EXCLUDE_DIRS = [".git", ".claude", "backups", "old_versions", "old_plans",
-                "__pycache__", "node_modules"]
+                "__pycache__", "node_modules",
+                # (v37.67) the hi-poly ship SOURCES (~195 MB) lived in LSS/ships_original and
+                # then in a hand-made "New folder" - both inside the site root, both would have
+                # uploaded. They now live in assets_base/ships_original ; these stay as a guard.
+                "ships_original", "New folder"]
 # Dev-only files that live in LSS/ but have no business on the live site.
 # index-working.html is the commented SOURCE (4.2 MB) that strip.py turns into
 # the shipped index.html; lss.map.md is the internal architecture map. Together

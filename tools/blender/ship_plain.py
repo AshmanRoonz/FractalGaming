@@ -6,7 +6,7 @@ all / let's do this for all the ships".
 
 So this replaces the remesh + glass chain with one short stage:
 
-    LSS/ships_original/<Ship>.glb          the hi-poly export, marker nodes already inside
+    assets_base/ships_original/<Ship>.glb  the hi-poly export, marker nodes already inside
       -> join + apply transforms, weld exact duplicates
       -> planar pre-pass + collapse decimate to --target triangles (UV seams protected: the
          original texture is kept as it is, nothing is re-baked)
@@ -44,7 +44,7 @@ def opt(k, d=''):
 
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-ORIG_DIR = os.path.join(REPO, opt('--orig', 'LSS/ships_original'))
+ORIG_DIR = os.path.join(REPO, opt('--orig', 'assets_base/ships_original'))
 OUT_DIR = os.path.join(REPO, opt('--out', 'assets_src/ships'))
 REPORT = os.path.join(REPO, 'tools', 'blender', 'reports', 'plain')
 SHIPS = [s for s in opt('--ships', 'vortex,pyro,puncture,slayer,tracker,blaster,syphon').split(',') if s]

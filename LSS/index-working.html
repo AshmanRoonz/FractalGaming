@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.66';
+const LSS_BUILD = '37.67';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4335,7 +4335,7 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // (v37.35) 37.34 -> 37.35: INNER LINING closes every see-through hull face around
 // the seat, crack zipper in the cleanup stage, four distinct instrument tiles,
 // control stick, console switch rows, harness straps.
-const _MODELS_VERSION = '37.66';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.67';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -5233,7 +5233,7 @@ const input = {
   // class-colour strips). Off = the classic 4% team-tint emissive.
   hullGlow: true,
   // (v37.31) 3D cockpit while presenting in VR. Experimental, default off.
-  cockpitVR: false,
+  cockpitVR: true,     // (v37.67) ON by default: the ghost shell IS the VR seat view now
   // (v36.03) Under-hull headlight beam (SpotLight at the red/green nav-orb
   // group, aimed with the nose). ON by default — it is what makes the
   // zone-rift caverns and the endless deeps readable. Persisted.
@@ -13925,6 +13925,42 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
 }
 
 let _VORTEX_CORE_BEAM_GEO = null;
+// (v37.67) THE Y. Owner: "for vortex, make the laser shot come from the weapons but form a Y with
+// the two weapons into one beam, in front of the ship, and then the core can be the same Y shape
+// but much thicker". Two arms leave the real gun markers and meet at a JOINT a fixed distance
+// ahead of the ship ; the stem carries on from there. Damage is untouched - it stays on the centre
+// aim ray, as it always was. Knobs: window.__vortexY = { on, join, arm }.
+const _vyGunA = new THREE.Vector3(), _vyGunB = new THREE.Vector3();
+const _vyDir = new THREE.Vector3(), _vyJoint = new THREE.Vector3();
+function _vortexYKnobs() {
+  const K = window.__vortexY || (window.__vortexY = {});
+  return {
+    on: K.on !== false,
+    // The gun markers are only ~19 units apart on a corvette, so the arms have to be THIN or they
+    // merge into one ball at the nose. Fractions of each stem's own radius: the ability's stem is
+    // 4 units, the core's is 95.
+    join: (K.join != null) ? K.join : 300,          // how far ahead of the ship the arms meet
+    armAbility: (K.armAbility != null) ? K.armAbility : 0.85,
+    armCore: (K.armCore != null) ? K.armCore : 0.15,
+  };
+}
+function _vortexGunPair(outA, outB) {
+  const nodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
+  if (!nodes || nodes.length < 2 || !player.mesh.visible) return false;
+  nodes[0].getWorldPosition(outA);
+  nodes[1].getWorldPosition(outB);
+  return true;
+}
+// span a unit-Y beam mesh from `from` to `to` at `radius`
+function _vortexSpan(mesh, from, to, radius) {
+  _vyDir.copy(to).sub(from);
+  const len = _vyDir.length() || 1;
+  _vyDir.multiplyScalar(1 / len);
+  mesh.position.copy(from).addScaledVector(_vyDir, len * 0.5);
+  mesh.quaternion.setFromUnitVectors(_mvUp, _vyDir);
+  mesh.scale.set(radius, len, radius);
+  return len;
+}
 function _getVortexCoreBeamGeometry() {
   if (_VORTEX_CORE_BEAM_GEO) return _VORTEX_CORE_BEAM_GEO;
   // Open-ended cylinder along Y, length 1, radius 1. Per-frame we scale Y
@@ -15601,6 +15637,43 @@ function chassisFlashColor(key) {
 // iteration, so reuse is byte-identical and drops the per-shot spread allocs
 // (fires every primary shot; BLASTER/Gatling fires fast).
 const _muzzleSpread = new THREE.Vector3();
+// (v37.67) BLASTER CORE VOLLEY. Owner: "when blaster's core is active, make those weapons get
+// really bright and fire from those new locations instead of any old ones the core fired from".
+// Every barrel on the hull lights white-hot for the duration, on top of the normal chassis flash at
+// whichever barrel actually fired this shot. The core runs at a 0.05 s fire rate, so this is kept
+// to a couple of sparks a barrel plus one strong light every third shot - the light pool is what
+// costs, not the particles. Knobs: window.__blasterCore = { sparks, size, light, every }.
+const _bcvPos = new THREE.Vector3();
+const _bcvVel = new THREE.Vector3();
+function _blasterCoreVolley(dir) {
+  const nodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
+  if (!nodes || !nodes.length || !dir) return;
+  const K = window.__blasterCore || (window.__blasterCore = {});
+  const sparks = (K.sparks != null) ? K.sparks : 2;
+  const size = (K.size != null) ? K.size : 3.2;
+  const tint = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.BLASTER : 0x44eeff;
+  for (let n = 0; n < nodes.length; n++) {
+    nodes[n].getWorldPosition(_bcvPos);
+    for (let i = 0; i < sparks; i++) {
+      _bcvVel.set((Math.random() - 0.5) * 0.22, (Math.random() - 0.5) * 0.22, (Math.random() - 0.5) * 0.22)
+             .add(dir).normalize().multiplyScalar(120 + Math.random() * 90);
+      game.particles.push({
+        position: _bcvPos.clone(),
+        velocity: _bcvVel.clone(),
+        life: 0.06 + Math.random() * 0.06,
+        maxLife: 0.12,
+        // white-hot at the mouth, class cyan on the trailing spark
+        color: (i === 0) ? 0xffffff : tint,
+        size: size * (i === 0 ? 1.35 : 1.0),
+      });
+    }
+  }
+  player._bcvTick = ((player._bcvTick | 0) + 1) % Math.max(1, (K.every != null) ? K.every : 3);
+  if (player._bcvTick === 0 && typeof spawnDynamicLight === 'function') {
+    nodes[0].getWorldPosition(_bcvPos);
+    spawnDynamicLight(_bcvPos, 0xffffff, (K.light != null) ? K.light : 4.0, 320, 0.14);
+  }
+}
 function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
   if (!pos || !dir) return;
   const flashColor = chassisFlashColor(loadoutKey);
@@ -49302,6 +49375,13 @@ const _ptsMat = new THREE.ShaderMaterial({
   depthTest: true,
 });
 const _particlePoints = new THREE.Points(_ptsGeo, _ptsMat);
+// (v37.67) ABOVE THE WATER. Owner: "the water messes with the weapons muzzle fire visibility in
+// first person view, and it also messes with slayer's shotgun pellets". Both are particles, and
+// the shared Points cloud had no renderOrder = 0 - the same slot the hub water sits in (see the
+// v33.17 note there). Two transparent objects at the same renderOrder sort by distance, and the
+// water plane FOLLOWS the ship, so it tied with a muzzle flash a few metres away and won the toss
+// about half the time. 3 puts every particle above the water and below the skydome (4).
+_particlePoints.renderOrder = 3;
 _particlePoints.frustumCulled = false;   
 _particlePoints.matrixAutoUpdate = false; 
 _particlePoints.visible = false;
@@ -53595,6 +53675,7 @@ function playerDie(attacker) {
   player.coreTimer = 0;
   player._laserCoreArcTimer = 0;
   if (player._vortexCoreBeam) player._vortexCoreBeam.visible = false;
+  if (player._vortexCoreArms) for (const _a of player._vortexCoreArms) _a.visible = false;
   for (let we = game.worldEffects.length - 1; we >= 0; we--) {
     const eff = game.worldEffects[we];
     if (!eff || eff.type !== 'firewall') continue;
@@ -55286,10 +55367,13 @@ function _lssApplyShipRig(dt) {
         on: true, persp: 1400, base: 11, pitch: -0.40, bank: 0.55, yaw: 16, max: 24,
       });
       let _rx = 0, _ry = 0, _rz = 0;
-      // Third person only. In first person the ring sits against the painted
-      // cockpit frame, and a ring that tilts inside a frame that cannot is the
-      // one place this effect reads as a bug rather than depth.
-      if (H3.on !== false && game.thirdPerson && !_vrNow) {
+      // (v37.67) Third person AND the 3D cockpit. The old first-person exclusion was about the
+      // PAINTED cockpit frame - a ring that tilts inside a frame that cannot read as a bug - and
+      // those frames are hidden while the 3D cockpit is live, so the ring can bank with the ship
+      // exactly as it does in the chase view (owner: "make the HUD follow/rotate with the cockpit,
+      // like how it moves in 3rd person view... could probably just copy that over to first person
+      // view"). Still off in VR, where the headset owns the view.
+      if (H3.on !== false && (game.thirdPerson || game._cockpit3dLive) && !_vrNow) {
         const _dg = 180 / Math.PI;
         const _mx = (H3.max != null) ? H3.max : 24;
         _rx = (H3.base || 0) + (player.euler ? player.euler.x : 0) * _dg * (H3.pitch || 0);
@@ -55740,7 +55824,11 @@ function fireWeapon() {
   // (v37.27) The 3D cockpit takes the same GLB-marker path as third person:
   // the barrels the pilot sees past the canopy are where the shots and the
   // muzzle flash come from, re-aimed to converge on the reticle.
-  if ((game.thirdPerson || game._cockpit3dLive) && player.mesh && typeof shipMuzzleWorld === 'function') {
+  // (v37.67) ... and the BLASTER's core fires from its barrels in EVERY view: the owner added six
+  // more gun markers to the hull for it (gun1..gun8, two pods of four), and the core is the moment
+  // they should all be alight.
+  const _blasterCore = !!(player.coreActive && player.loadoutKey === 'BLASTER');
+  if ((game.thirdPerson || game._cockpit3dLive || _blasterCore) && player.mesh && typeof shipMuzzleWorld === 'function') {
     const _mn = player.mesh.userData && player.mesh.userData.muzzleNodes;
     if (_mn && _mn.length) {
       player._muzzleShot = (player._muzzleShot | 0) + 1;
@@ -55769,6 +55857,7 @@ function fireWeapon() {
   // distinctly. Receivers spawn the matching flash via the fire_tracer /
   // network projectile receive paths below.
   emitChassisMuzzleFlash(player.loadoutKey, _fwOrigin, _fwDir);
+  if (_blasterCore) _blasterCoreVolley(_fwDir);
 
   if (w.mode === 'hitscan') fireHitscan(_hitOrigin, _hitForward, w);
   else if (w.mode === 'projectile') fireProjectile(_fwOrigin, _fwDir, w);
@@ -56747,12 +56836,20 @@ function executeAbility(slot, ability) {
       // painted laserfire_VORTEX.png emitter (61%, 40% ; measured by Ashman on
       // the FIRING frame), converging on the crosshair. Damage stays on the
       // center aim ray.
-      const _vlGp2 = (typeof _computeScreenMuzzleWorld === 'function')
-        ? _computeScreenMuzzleWorld(0.61, 0.40) : null;
-      const _vlOrigin = _vlGp2 ? _vlGp2.clone() : player.position.clone();
-      const _vlDir = _vlGp2
-        ? player.position.clone().addScaledVector(forward, 1400).sub(_vlGp2).normalize()
-        : forward.clone();
+      // (v37.67) the stem of the Y starts at the JOINT ahead of the ship ; the arms below run to it
+      // from the two gun markers. Without markers (procedural hull) this falls back to the v30.88
+      // painted-emitter anchor.
+      const _vyK = _vortexYKnobs();
+      const _vyPair = _vyK.on && _vortexGunPair(_vyGunA, _vyGunB);
+      const _vlGp2 = _vyPair ? null : ((typeof _computeScreenMuzzleWorld === 'function')
+        ? _computeScreenMuzzleWorld(0.61, 0.40) : null);
+      const _vlOrigin = _vyPair
+        ? player.position.clone().addScaledVector(forward, _vyK.join)
+        : (_vlGp2 ? _vlGp2.clone() : player.position.clone());
+      const _vlDir = _vyPair
+        ? forward.clone()
+        : (_vlGp2 ? player.position.clone().addScaledVector(forward, 1400).sub(_vlGp2).normalize()
+                  : forward.clone());
       const beamEnd = _vlOrigin.clone().addScaledVector(_vlDir, range);
       // (v33.88) splash the lake where the VORTEX laser ability crosses the surface (hub) — this beam was never wired to the water
       if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { _swWaterCrossSplash(_vlOrigin.x, _vlOrigin.y, _vlOrigin.z, beamEnd.x, beamEnd.y, beamEnd.z, 110, 0.12); } catch (_) {} }
@@ -56791,6 +56888,21 @@ function executeAbility(slot, ability) {
       _beamBack.frustumCulled = false;
       beamMesh.add(_beamBack);
       scene.add(beamMesh);
+      // the two arms: same shader, same lifetime, their own effect entries so the shared
+      // 'vortexLaserBeam' fade + dispose path carries them for free
+      if (_vyPair) {
+        for (const _gun of [_vyGunA, _vyGunB]) {
+          const _armMat = _makeFXMaterial('core_beam');
+          const _armR = BEAM_RADIUS * _vyK.armAbility;
+          if (_armMat.uniforms.uPosScale) _armMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _armR);
+          const _armMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _armMat);
+          _vortexSpan(_armMesh, _vlOrigin, _gun, _armR);   // opaque +Y end at the joint
+          _armMesh.frustumCulled = false;
+          _armMesh.renderOrder = 2;
+          scene.add(_armMesh);
+          game.effects.push({ mesh: _armMesh, type: 'vortexLaserBeam', age: 0, lifetime: beamLife });
+        }
+      }
       game.effects.push({
         mesh: beamMesh,
         type: 'vortexLaserBeam',
@@ -60370,11 +60482,42 @@ function updateAbilities(dt) {
       // scale Y to the full range and X/Z to the beam radius. BEAM_RADIUS
       // controls the visible thickness ; bumped up for "epic" mass.
       const BEAM_RADIUS = 95;
-      const mid = _abProbeMid.copy(player.position).addScaledVector(forward, range * 0.5);
+      // (v37.67) the same Y as the Laser ability, much thicker: the stem starts at the joint ahead
+      // of the ship and two heavy arms run back to the gun markers.
+      const _vyKc = _vortexYKnobs();
+      const _vyPairC = _vyKc.on && _vortexGunPair(_vyGunA, _vyGunB);
+      const _stemFrom = _vyPairC ? _vyJoint.copy(player.position).addScaledVector(forward, _vyKc.join)
+                                 : _vyJoint.copy(player.position);
+      const _stemLen = _vyPairC ? Math.max(1, range - _vyKc.join) : range;
+      const mid = _abProbeMid.copy(_stemFrom).addScaledVector(forward, _stemLen * 0.5);
       beam.position.copy(mid);
       beam.quaternion.setFromUnitVectors(_mvUp, forward);
-      beam.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
+      beam.scale.set(BEAM_RADIUS, _stemLen, BEAM_RADIUS);
       beam.visible = true;
+      if (_vyPairC) {
+        if (!player._vortexCoreArms) {
+          player._vortexCoreArms = [0, 1].map(() => {
+            // a straight cylinder, not the death-ray cone: an arm is short and must not flare
+            const m = new THREE.Mesh(_getVortexCoreBeamGeometry(), _makeFXMaterial('core_beam'));
+            if (m.material.uniforms.uPosScale) m.material.uniforms.uPosScale.value = 1.0 / Math.max(1, 95 * 0.15);
+            m.frustumCulled = false;
+            m.renderOrder = 2;
+            scene.add(m);
+            return m;
+          });
+        }
+        const _armR = BEAM_RADIUS * _vyKc.armCore;
+        _vortexSpan(player._vortexCoreArms[0], _stemFrom, _vyGunA, _armR);
+        _vortexSpan(player._vortexCoreArms[1], _stemFrom, _vyGunB, _armR);
+        for (const _a of player._vortexCoreArms) {
+          _a.visible = true;
+          if (_a.material && _a.material.uniforms && _a.material.uniforms.uIntensity && beam.material.uniforms.uIntensity) {
+            _a.material.uniforms.uIntensity.value = beam.material.uniforms.uIntensity.value;
+          }
+        }
+      } else if (player._vortexCoreArms) {
+        for (const _a of player._vortexCoreArms) _a.visible = false;
+      }
       // LayeredFX 'core_beam' preset ; uTime is auto-ticked by
       // _layeredFXTick. Drive uIntensity for the breathing pulse.
       if (beam.material && beam.material.uniforms && beam.material.uniforms.uIntensity) {
@@ -60756,7 +60899,10 @@ function updateAbilities(dt) {
   if (player._vortexCoreBeam) {
     const _coreName = (player.loadout && player.loadout.core) ? player.loadout.core.name : '';
     const isFiringLaserCore = player.coreActive && _coreName === 'Mega Laser';
-    if (!isFiringLaserCore) player._vortexCoreBeam.visible = false;
+    if (!isFiringLaserCore) {
+      player._vortexCoreBeam.visible = false;
+      if (player._vortexCoreArms) for (const _a of player._vortexCoreArms) _a.visible = false;
+    }
   }
 
   // (v36.19) The WORLD EFFECTS UPDATE loop that used to live here is now
@@ -72430,6 +72576,7 @@ function saveSettings() {
       cockpit3d: input.cockpit3d !== false,
       hullGlow: input.hullGlow !== false,
       cockpitVR: input.cockpitVR === true,
+      cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
       clipRec: !!input.clipRec,
@@ -74306,6 +74453,10 @@ function loadSettings() {
     if (typeof data.cockpit3d === 'boolean') input.cockpit3d = data.cockpit3d;
     if (typeof data.hullGlow === 'boolean') input.hullGlow = data.hullGlow;
     if (typeof data.cockpitVR === 'boolean') input.cockpitVR = data.cockpitVR;
+    // (v37.67) ONE-TIME MIGRATION. The 3D cockpit in VR was opt-in while the seat view was an
+    // opaque hull you could not see out of. The ghost shell makes it the whole point of VR, so a
+    // save that predates this flag gets it switched ON once ; after that the checkbox rules.
+    if (!data.cockpitVRv2) input.cockpitVR = true;
     // (v37.08) headlight is no longer a setting (owner call): the saved key
     // is deliberately IGNORED so anyone who unchecked it historically gets
     // the always-on default back. __headlight(0|1) remains for debugging.

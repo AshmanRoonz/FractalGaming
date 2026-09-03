@@ -4167,12 +4167,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.66';
+const LSS_BUILD = '37.67';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '37.66';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.67';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -4771,7 +4771,7 @@ const input = {
   showFps: false,
   cockpit3d: true,
   hullGlow: true,
-  cockpitVR: false,
+  cockpitVR: true,     // (v37.67) ON by default: the ghost shell IS the VR seat view now
   headlight: true,
   hudGaugeLabels: true,
   clipRec: false,
@@ -11284,6 +11284,33 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
 }
 
 let _VORTEX_CORE_BEAM_GEO = null;
+const _vyGunA = new THREE.Vector3(), _vyGunB = new THREE.Vector3();
+const _vyDir = new THREE.Vector3(), _vyJoint = new THREE.Vector3();
+function _vortexYKnobs() {
+  const K = window.__vortexY || (window.__vortexY = {});
+  return {
+    on: K.on !== false,
+    join: (K.join != null) ? K.join : 300,          // how far ahead of the ship the arms meet
+    armAbility: (K.armAbility != null) ? K.armAbility : 0.85,
+    armCore: (K.armCore != null) ? K.armCore : 0.15,
+  };
+}
+function _vortexGunPair(outA, outB) {
+  const nodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
+  if (!nodes || nodes.length < 2 || !player.mesh.visible) return false;
+  nodes[0].getWorldPosition(outA);
+  nodes[1].getWorldPosition(outB);
+  return true;
+}
+function _vortexSpan(mesh, from, to, radius) {
+  _vyDir.copy(to).sub(from);
+  const len = _vyDir.length() || 1;
+  _vyDir.multiplyScalar(1 / len);
+  mesh.position.copy(from).addScaledVector(_vyDir, len * 0.5);
+  mesh.quaternion.setFromUnitVectors(_mvUp, _vyDir);
+  mesh.scale.set(radius, len, radius);
+  return len;
+}
 function _getVortexCoreBeamGeometry() {
   if (_VORTEX_CORE_BEAM_GEO) return _VORTEX_CORE_BEAM_GEO;
   _VORTEX_CORE_BEAM_GEO = new THREE.CylinderGeometry(1, 1, 1, 24, 1, true);
@@ -12617,6 +12644,36 @@ function chassisFlashColor(key) {
 }
 
 const _muzzleSpread = new THREE.Vector3();
+const _bcvPos = new THREE.Vector3();
+const _bcvVel = new THREE.Vector3();
+function _blasterCoreVolley(dir) {
+  const nodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
+  if (!nodes || !nodes.length || !dir) return;
+  const K = window.__blasterCore || (window.__blasterCore = {});
+  const sparks = (K.sparks != null) ? K.sparks : 2;
+  const size = (K.size != null) ? K.size : 3.2;
+  const tint = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.BLASTER : 0x44eeff;
+  for (let n = 0; n < nodes.length; n++) {
+    nodes[n].getWorldPosition(_bcvPos);
+    for (let i = 0; i < sparks; i++) {
+      _bcvVel.set((Math.random() - 0.5) * 0.22, (Math.random() - 0.5) * 0.22, (Math.random() - 0.5) * 0.22)
+             .add(dir).normalize().multiplyScalar(120 + Math.random() * 90);
+      game.particles.push({
+        position: _bcvPos.clone(),
+        velocity: _bcvVel.clone(),
+        life: 0.06 + Math.random() * 0.06,
+        maxLife: 0.12,
+        color: (i === 0) ? 0xffffff : tint,
+        size: size * (i === 0 ? 1.35 : 1.0),
+      });
+    }
+  }
+  player._bcvTick = ((player._bcvTick | 0) + 1) % Math.max(1, (K.every != null) ? K.every : 3);
+  if (player._bcvTick === 0 && typeof spawnDynamicLight === 'function') {
+    nodes[0].getWorldPosition(_bcvPos);
+    spawnDynamicLight(_bcvPos, 0xffffff, (K.light != null) ? K.light : 4.0, 320, 0.14);
+  }
+}
 function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
   if (!pos || !dir) return;
   const flashColor = chassisFlashColor(loadoutKey);
@@ -38138,6 +38195,7 @@ const _ptsMat = new THREE.ShaderMaterial({
   depthTest: true,
 });
 const _particlePoints = new THREE.Points(_ptsGeo, _ptsMat);
+_particlePoints.renderOrder = 3;
 _particlePoints.frustumCulled = false;   
 _particlePoints.matrixAutoUpdate = false; 
 _particlePoints.visible = false;
@@ -41329,6 +41387,7 @@ function playerDie(attacker) {
   player.coreTimer = 0;
   player._laserCoreArcTimer = 0;
   if (player._vortexCoreBeam) player._vortexCoreBeam.visible = false;
+  if (player._vortexCoreArms) for (const _a of player._vortexCoreArms) _a.visible = false;
   for (let we = game.worldEffects.length - 1; we >= 0; we--) {
     const eff = game.worldEffects[we];
     if (!eff || eff.type !== 'firewall') continue;
@@ -42527,7 +42586,7 @@ function _lssApplyShipRig(dt) {
         on: true, persp: 1400, base: 11, pitch: -0.40, bank: 0.55, yaw: 16, max: 24,
       });
       let _rx = 0, _ry = 0, _rz = 0;
-      if (H3.on !== false && game.thirdPerson && !_vrNow) {
+      if (H3.on !== false && (game.thirdPerson || game._cockpit3dLive) && !_vrNow) {
         const _dg = 180 / Math.PI;
         const _mx = (H3.max != null) ? H3.max : 24;
         _rx = (H3.base || 0) + (player.euler ? player.euler.x : 0) * _dg * (H3.pitch || 0);
@@ -42827,7 +42886,8 @@ function fireWeapon() {
 
   let _hitOrigin = origin;
   let _hitForward = forward;
-  if ((game.thirdPerson || game._cockpit3dLive) && player.mesh && typeof shipMuzzleWorld === 'function') {
+  const _blasterCore = !!(player.coreActive && player.loadoutKey === 'BLASTER');
+  if ((game.thirdPerson || game._cockpit3dLive || _blasterCore) && player.mesh && typeof shipMuzzleWorld === 'function') {
     const _mn = player.mesh.userData && player.mesh.userData.muzzleNodes;
     if (_mn && _mn.length) {
       player._muzzleShot = (player._muzzleShot | 0) + 1;
@@ -42851,6 +42911,7 @@ function fireWeapon() {
   }
 
   emitChassisMuzzleFlash(player.loadoutKey, _fwOrigin, _fwDir);
+  if (_blasterCore) _blasterCoreVolley(_fwDir);
 
   if (w.mode === 'hitscan') fireHitscan(_hitOrigin, _hitForward, w);
   else if (w.mode === 'projectile') fireProjectile(_fwOrigin, _fwDir, w);
@@ -43559,12 +43620,17 @@ function executeAbility(slot, ability) {
   if (ability.type === 'offensive') {
     if (ability.name === 'Laser') {
       const range = 2500;
-      const _vlGp2 = (typeof _computeScreenMuzzleWorld === 'function')
-        ? _computeScreenMuzzleWorld(0.61, 0.40) : null;
-      const _vlOrigin = _vlGp2 ? _vlGp2.clone() : player.position.clone();
-      const _vlDir = _vlGp2
-        ? player.position.clone().addScaledVector(forward, 1400).sub(_vlGp2).normalize()
-        : forward.clone();
+      const _vyK = _vortexYKnobs();
+      const _vyPair = _vyK.on && _vortexGunPair(_vyGunA, _vyGunB);
+      const _vlGp2 = _vyPair ? null : ((typeof _computeScreenMuzzleWorld === 'function')
+        ? _computeScreenMuzzleWorld(0.61, 0.40) : null);
+      const _vlOrigin = _vyPair
+        ? player.position.clone().addScaledVector(forward, _vyK.join)
+        : (_vlGp2 ? _vlGp2.clone() : player.position.clone());
+      const _vlDir = _vyPair
+        ? forward.clone()
+        : (_vlGp2 ? player.position.clone().addScaledVector(forward, 1400).sub(_vlGp2).normalize()
+                  : forward.clone());
       const beamEnd = _vlOrigin.clone().addScaledVector(_vlDir, range);
       if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { _swWaterCrossSplash(_vlOrigin.x, _vlOrigin.y, _vlOrigin.z, beamEnd.x, beamEnd.y, beamEnd.z, 110, 0.12); } catch (_) {} }
       const BEAM_RADIUS = 4; 
@@ -43590,6 +43656,19 @@ function executeAbility(slot, ability) {
       _beamBack.frustumCulled = false;
       beamMesh.add(_beamBack);
       scene.add(beamMesh);
+      if (_vyPair) {
+        for (const _gun of [_vyGunA, _vyGunB]) {
+          const _armMat = _makeFXMaterial('core_beam');
+          const _armR = BEAM_RADIUS * _vyK.armAbility;
+          if (_armMat.uniforms.uPosScale) _armMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _armR);
+          const _armMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _armMat);
+          _vortexSpan(_armMesh, _vlOrigin, _gun, _armR);   // opaque +Y end at the joint
+          _armMesh.frustumCulled = false;
+          _armMesh.renderOrder = 2;
+          scene.add(_armMesh);
+          game.effects.push({ mesh: _armMesh, type: 'vortexLaserBeam', age: 0, lifetime: beamLife });
+        }
+      }
       game.effects.push({
         mesh: beamMesh,
         type: 'vortexLaserBeam',
@@ -46354,11 +46433,39 @@ function updateAbilities(dt) {
       }
       const beam = player._vortexCoreBeam;
       const BEAM_RADIUS = 95;
-      const mid = _abProbeMid.copy(player.position).addScaledVector(forward, range * 0.5);
+      const _vyKc = _vortexYKnobs();
+      const _vyPairC = _vyKc.on && _vortexGunPair(_vyGunA, _vyGunB);
+      const _stemFrom = _vyPairC ? _vyJoint.copy(player.position).addScaledVector(forward, _vyKc.join)
+                                 : _vyJoint.copy(player.position);
+      const _stemLen = _vyPairC ? Math.max(1, range - _vyKc.join) : range;
+      const mid = _abProbeMid.copy(_stemFrom).addScaledVector(forward, _stemLen * 0.5);
       beam.position.copy(mid);
       beam.quaternion.setFromUnitVectors(_mvUp, forward);
-      beam.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
+      beam.scale.set(BEAM_RADIUS, _stemLen, BEAM_RADIUS);
       beam.visible = true;
+      if (_vyPairC) {
+        if (!player._vortexCoreArms) {
+          player._vortexCoreArms = [0, 1].map(() => {
+            const m = new THREE.Mesh(_getVortexCoreBeamGeometry(), _makeFXMaterial('core_beam'));
+            if (m.material.uniforms.uPosScale) m.material.uniforms.uPosScale.value = 1.0 / Math.max(1, 95 * 0.15);
+            m.frustumCulled = false;
+            m.renderOrder = 2;
+            scene.add(m);
+            return m;
+          });
+        }
+        const _armR = BEAM_RADIUS * _vyKc.armCore;
+        _vortexSpan(player._vortexCoreArms[0], _stemFrom, _vyGunA, _armR);
+        _vortexSpan(player._vortexCoreArms[1], _stemFrom, _vyGunB, _armR);
+        for (const _a of player._vortexCoreArms) {
+          _a.visible = true;
+          if (_a.material && _a.material.uniforms && _a.material.uniforms.uIntensity && beam.material.uniforms.uIntensity) {
+            _a.material.uniforms.uIntensity.value = beam.material.uniforms.uIntensity.value;
+          }
+        }
+      } else if (player._vortexCoreArms) {
+        for (const _a of player._vortexCoreArms) _a.visible = false;
+      }
       if (beam.material && beam.material.uniforms && beam.material.uniforms.uIntensity) {
         const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
         beam.material.uniforms.uIntensity.value = breath;
@@ -46640,7 +46747,10 @@ function updateAbilities(dt) {
   if (player._vortexCoreBeam) {
     const _coreName = (player.loadout && player.loadout.core) ? player.loadout.core.name : '';
     const isFiringLaserCore = player.coreActive && _coreName === 'Mega Laser';
-    if (!isFiringLaserCore) player._vortexCoreBeam.visible = false;
+    if (!isFiringLaserCore) {
+      player._vortexCoreBeam.visible = false;
+      if (player._vortexCoreArms) for (const _a of player._vortexCoreArms) _a.visible = false;
+    }
   }
 
 
@@ -55362,6 +55472,7 @@ function saveSettings() {
       cockpit3d: input.cockpit3d !== false,
       hullGlow: input.hullGlow !== false,
       cockpitVR: input.cockpitVR === true,
+      cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
       clipRec: !!input.clipRec,
@@ -57173,6 +57284,7 @@ function loadSettings() {
     if (typeof data.cockpit3d === 'boolean') input.cockpit3d = data.cockpit3d;
     if (typeof data.hullGlow === 'boolean') input.hullGlow = data.hullGlow;
     if (typeof data.cockpitVR === 'boolean') input.cockpitVR = data.cockpitVR;
+    if (!data.cockpitVRv2) input.cockpitVR = true;
     if (typeof data.hudGaugeLabels === 'boolean') input.hudGaugeLabels = data.hudGaugeLabels;
     if (typeof data.hudScale === 'number' && isFinite(data.hudScale)) {
       input.hudScale = Math.max(0.75, Math.min(1.75, data.hudScale));

@@ -596,3 +596,17 @@ ghost mode" then "a bit more transparent would be better".
 Ghost materials are now built ONCE per hull and cached (the reflection pass swaps them out and back
 every time it runs; cloning per swap would churn all frame). Knobs, all live:
 `window.__cockpit.ghost = { on, core, rim, mix, glow, flicker, tint, order }`.
+
+### v37.67 — the Blaster's eight barrels, and where the sources live
+
+The owner re-exported `Blaster.glb` with six more gun markers (gun1..gun8, two pods of four at the
+wing roots) and dropped it over `LSS/ships/blaster.glb`. Rebuilt through `ship_plain.py`: 929k tris
+in, 60k out, all eight markers carried through, 2.72 MB shipped. The game picks them up with no
+change - `muzzleNodes` collects every `gun<n>` node - so normal fire now cycles all eight barrels,
+and the CORE fires from them in every view with a white-hot volley at each (see `_blasterCoreVolley`
+in index-working.html, knobs `window.__blasterCore`).
+
+**The hi-poly sources moved to `assets_base/ships_original/`** (they were in `LSS/`, which is the
+DEPLOY ROOT - 195 MB that `tools/deploy_cf.py` would have uploaded to the live site ; the folder had
+also been renamed by hand to "New folder"). `ship_plain.py --orig` defaults there now, and the
+deploy script excludes both old names as a guard.
