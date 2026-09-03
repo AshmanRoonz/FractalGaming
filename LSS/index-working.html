@@ -4268,7 +4268,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.00';
+const LSS_BUILD = '38.01';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -29793,12 +29793,13 @@ function _carrierClear(keepSound) {
 // the hill. Sampled at the BOW and STERN as well as the middle: 1367 units of hull can have its
 // nose in a ridge while its centre is over the valley.
 const _crP = new THREE.Vector3();
+const _CR_DOWN = new THREE.Vector3(0, -1, 0);
 function _carrierRide(dt, snap) {
   const o = _carrier.obj;
   if (!o) return;
   let gy = null;
   try {
-    const T = game.sandwichTerrain;
+    const T = game.sandwichTerrain;   // eslint-disable-line
     if (T && typeof _stGroundYCarved === 'function') {
       const half = (_carrier.half ? _carrier.half.x : 680) * 0.92;
       for (let i = -1; i <= 1; i++) {
@@ -29808,13 +29809,70 @@ function _carrierRide(dt, snap) {
       }
     }
   } catch (_) {}
+  // (v38.01) ...and whatever the CITY has built there. Terrain height says nothing about a tower,
+  // and the carrier now flies right over the city to reach the objective. Sampled on a slower
+  // clock than the terrain - three rays, and a hull moving 125 u/s covers 25 units between them.
+  try {
+    if (game.hubCity && typeof _hubCityRayHit === 'function') {
+      _carrier._cityT = (_carrier._cityT || 0) - (dt || 0.016);
+      if (_carrier._cityT <= 0 || _carrier._cityTop == null) {
+        _carrier._cityT = 0.2;
+        const half = (_carrier.half ? _carrier.half.x : 680) * 0.92;
+        const TOP = o.position.y + 4000;
+        let top = null;
+        for (let i = -1; i <= 1; i++) {
+          _crP.copy(o.position).addScaledVector(_carrier.dir, half * i);
+          _crP.y = TOP;
+          const hit = _hubCityRayHit(_crP, _CR_DOWN, 9000);
+          if (typeof hit === 'number' && hit < 9000) {
+            const y = TOP - hit;
+            if (top == null || y > top) top = y;
+          }
+        }
+        _carrier._cityTop = top;
+      }
+      if (typeof _carrier._cityTop === 'number' && (gy == null || _carrier._cityTop > gy)) gy = _carrier._cityTop;
+    }
+  } catch (_) {}
   if (typeof gy !== 'number' || !isFinite(gy)) return;
   const K = _carrierKnobs();
   const _cl = (typeof K.clearance === 'number') ? K.clearance : CARRIER.clearance;
-  const want = Math.max(o.position.y, gy + _cl);
-  const next = (snap || _carrier.rideY == null) ? want
-             : _carrier.rideY + (want - _carrier.rideY) * Math.min(1, (dt || 0.016) * 0.8);
+  // (v38.01) It rides AT the clearance rather than ratcheting up to the highest thing it ever
+  // crossed - climb hard over a tower, then settle back down over the far side, so it arrives
+  // hovering above the objective instead of parked at the altitude of the tallest spire on route.
+  const want = gy + _cl;
+  const cur = (_carrier.rideY == null) ? o.position.y : _carrier.rideY;
+  const rate = (want > cur) ? 2.2 : 0.45;        // rise quickly, come down slowly
+  const next = (snap || _carrier.rideY == null) ? Math.max(o.position.y, want)
+             : cur + (want - cur) * Math.min(1, (dt || 0.016) * rate);
   if (isFinite(next)) { _carrier.rideY = next; o.position.y = next; if (_carrier.ent) _carrier.ent.position.copy(o.position); }
+}
+// (v38.01) Point the hull down its route. Its NOSE is -X, the same canonical axis the ship GLBs
+// use; see the note at the attach site.
+function _carrierFaceRoute() {
+  const o = _carrier.obj;
+  if (!o || !_carrier.dir) return;
+  o.quaternion.setFromUnitVectors(new THREE.Vector3(-1, 0, 0), _carrier.dir);
+  const _yd = _carrierKnobs().yawDeg;
+  if (typeof _yd === 'number' && _yd) o.rotateY(_yd * Math.PI / 180);
+}
+// Re-aim in flight, from wherever it is now. The carrier used to fly at the city CENTRE and stop a
+// city radius short of it, so it never actually reached the fight; this lets the mode hand it the
+// objective once the objective exists. Continuous by construction: `from` becomes the current
+// position and the clock restarts, so nothing jumps.
+function _carrierAimAt(pos) {
+  const o = _carrier.obj;
+  if (!o || !pos) return false;
+  _carrier.from.copy(o.position);
+  _carrier.to.set(pos.x, o.position.y, pos.z);      // the ride owns altitude
+  _carrier.dir.copy(_carrier.to).sub(_carrier.from);
+  const len = _carrier.dir.length();
+  if (!(len > 1)) return false;
+  _carrier.dir.multiplyScalar(1 / len);
+  _carrier.dist = len;
+  _carrier.t = 0;
+  _carrierFaceRoute();
+  return true;
 }
 function _carrierFrame(dt) {
   if (!_carrier.obj || !_carrier.ent) return;
@@ -30712,6 +30770,12 @@ function _cyberFrame(dt) {
     } else {
       game.championField = C.field;                 // keep the HUD's handle pointed at it
       game.championSpawned = true;
+    }
+    // (v38.01) FLY TO THE OBJECTIVE. The route was laid at the city centre and stopped a city
+    // radius short of it, so the carrier never actually arrived anywhere. Aim it at the field the
+    // first time the field exists and let it fly the whole way, over the towers.
+    if (C.field && C.field.position && !C._aimedAtField && _carrier.obj && _carrier.ent && _carrier.ent.alive) {
+      try { if (_carrierAimAt(C.field.position)) C._aimedAtField = true; } catch (_) {}
     }
   }
   C._cityT = (C._cityT || 0) - (dt || 0.016);
@@ -78120,7 +78184,25 @@ function updateStasisFields(dt) {
         const dz = field.position.z - ship.position.z;
         const d2 = dx*dx + dy*dy + dz*dz;
         const r2 = field.radius * field.radius;
-        if (d2 >= r2 || d2 < 1) return;
+        if (d2 < 1) return;
+        // (v38.01) THE APPROACH BAND. Inside the radius is the capture pull below, untouched. This
+        // is the gentle tug OUTSIDE it - strongest at the rim, gone by the end of its reach - so a
+        // ship passing near the objective leans toward it without anyone losing the controls.
+        if (d2 >= r2) {
+          const FM = (typeof window !== 'undefined' && window.__fieldMag) ? window.__fieldMag : null;
+          if (FM && FM.on === false) return;
+          const reach = (FM && FM.reach != null) ? FM.reach : 900;
+          const rim = field.radius + reach;
+          if (d2 > rim * rim) return;
+          const dd = Math.sqrt(d2);
+          const u = 1 - (dd - field.radius) / reach;
+          const km = ((FM && FM.mag != null) ? FM.mag : 34) * u * u * dt;
+          const invm = 1 / dd;
+          ship.velocity.x += dx * invm * km;
+          ship.velocity.y += dy * invm * km;
+          ship.velocity.z += dz * invm * km;
+          return;
+        }
         const d = Math.sqrt(d2);
         const distRatio = d / field.radius;  
         
