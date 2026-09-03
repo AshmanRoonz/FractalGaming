@@ -160,11 +160,17 @@ const OVERRIDES = {
   // run, which is what recovers the byte size the float32 Blender export lost.
   ...Object.fromEntries(['blaster', 'puncture', 'pyro', 'slayer', 'syphon', 'tracker', 'vortex'].map((s) =>
     [`ships/${s}.glb`, { simplify: 1.0, reason: 'Blender-authored from the already-simplified hull' }])),
+  // (v37.73) the flying carrier: 565k triangles decimated to 120k in Blender with its own UVs and
+  // all three maps kept. Simplifying again would decimate twice.
+  'objects/carrier.glb': { simplify: 1.0, reason: 'Blender-decimated capital hull' },
 };
 
 // ------------------------------------------------------------- categories --
 function categoryOf(rel) {
   if (rel.startsWith('ships/')) return 'ship';
+  // (v37.73) the flying carrier is a Blender-authored hull like the ships (weld + quantize,
+  // no re-simplify via OVERRIDES) ; it only lives under objects/ because it is not a loadout.
+  if (rel === 'objects/carrier.glb') return 'ship';
   if (rel.startsWith('objects/hoard/')) return 'hoard';
   if (rel === 'objects/Sphere.glb') return 'shell';
   if (rel.startsWith('rings/')) return 'ring';

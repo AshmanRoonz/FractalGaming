@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.72';
+const LSS_BUILD = '37.73';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4335,7 +4335,7 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // (v37.35) 37.34 -> 37.35: INNER LINING closes every see-through hull face around
 // the seat, crack zipper in the cleanup stage, four distinct instrument tiles,
 // control stick, console switch rows, harness straps.
-const _MODELS_VERSION = '37.67';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.73';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -29208,12 +29208,19 @@ function _hubCityDispose() {
 // Console: window.__carrier.spawn() / .kill() / .clear() / .info() ; .frac and .speed tune the
 // cruise (frac is a multiple of a dreadnought's flight speed, 0.5 by the owner's spec).
 const CARRIER = {
-  file: 'Carrier.glb',
+  file: 'carrier.glb',
   frac: 0.5,          // of CHASSIS.DREADNOUGHT.flightSpeed (250) -> 125 u/s
   hp: 400000,
   alt: 1200,          // cruise height above the city pad
-  scale: 1.0,         // explicit: the carrier never goes through the ship fit-to-chassis path
-  box: [900, 200, 2400],   // placeholder footprint (w, h, l) until the GLB lands
+  // (v37.73) SIZED AGAINST THE BLASTER, not by a raw multiplier (owner: "it needs to be like 6x the
+  // size of blaster"). The GLB arrives normalised to ~1.9 units like the ship hulls, so a scale of 1
+  // would be a speck; the model is measured on load and scaled until its longest axis is this many
+  // Blasters long. A Blaster is hullLength 140 * scaleMult 1.05 * VISUAL_SCALE_BOOST 1.55 = ~228
+  // world units, so 6x is ~1370.
+  xBlaster: 6,
+  length: null,       // computed from xBlaster ; set it directly to override
+  scale: null,        // set from `length` at load ; the carrier never uses the ship fit path
+  box: [900, 200, 2400],   // placeholder footprint (w, h, l), also the fallback deck extent
   arrive: 1500,       // stop this far short of the city centre
 };
 const _carrier = {
@@ -29225,6 +29232,19 @@ const _carrier = {
 function _carrierKnobs() {
   const K = window.__carrier || (window.__carrier = {});
   return K;
+}
+// How long the hull is in world units: a multiple of a BLASTER's in-world length, which is what
+// the owner sizes it against. Set window.__carrier.length to override with an absolute number.
+function _carrierLength() {
+  const K = _carrierKnobs();
+  if (typeof K.length === 'number') return K.length;
+  let blaster = 228;
+  try {
+    const ch = CHASSIS[LOADOUTS.BLASTER.chassis];
+    const sm = (SHIP_MODELS.BLASTER && SHIP_MODELS.BLASTER.scaleMult) || 1;
+    blaster = ch.hullLength * sm * VISUAL_SCALE_BOOST;
+  } catch (_) {}
+  return blaster * ((typeof K.xBlaster === 'number') ? K.xBlaster : CARRIER.xBlaster);
 }
 function _carrierSpeed() {
   const K = _carrierKnobs();
@@ -29301,7 +29321,27 @@ function _carrierPlaceholder() {
 }
 function _carrierAttach(root, sector) {
   _carrier.obj = root;
-  root.scale.setScalar((_carrierKnobs().scale != null) ? _carrierKnobs().scale : CARRIER.scale);
+  // (v37.73) fit to a real world LENGTH. The placeholder is already built in world units, so only a
+  // loaded model is measured and rescaled.
+  const K0 = _carrierKnobs();
+  if (root.userData._carrierPlaceholder) {
+    root.scale.setScalar(1);
+  } else if (typeof K0.scale === 'number') {
+    root.scale.setScalar(K0.scale);
+  } else {
+    root.scale.setScalar(1);
+    root.updateMatrixWorld(true);
+    const _bb = new THREE.Box3().setFromObject(root);
+    const _sz = _bb.getSize(new THREE.Vector3());
+    const _longest = Math.max(_sz.x, _sz.y, _sz.z) || 1;
+    root.scale.setScalar(_carrierLength() / _longest);
+  }
+  root.updateMatrixWorld(true);
+  {
+    const _bb2 = new THREE.Box3().setFromObject(root);
+    _carrier.size = _bb2.getSize(new THREE.Vector3());
+    _carrier.localTop = _bb2.max.y - root.position.y;
+  }
   scene.add(root);
   _carrierHarvest(root);
   const from = _carrierPortal(sector);
@@ -29314,11 +29354,19 @@ function _carrierAttach(root, sector) {
   _carrier.t = 0;
   _carrier.dead = false;
   root.position.copy(_carrier.from);
-  root.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), _carrier.dir);
+  // (v37.73) The hull's NOSE is -X, the same canonical axis the ship GLBs use (measured: the
+  // carrier's longest bbox axis is X, 1367 of 1367/548/816). Aiming +Z down the route flew it
+  // sideways. window.__carrier.yawDeg adds a spin if a future export faces another way.
+  root.quaternion.setFromUnitVectors(new THREE.Vector3(-1, 0, 0), _carrier.dir);
+  {
+    const _yd = _carrierKnobs().yawDeg;
+    if (typeof _yd === 'number' && _yd) root.rotateY(_yd * Math.PI / 180);
+  }
   // the damageable entity: the same surface the hub freighters expose (v34.87), which is all the
   // projectile hit tests, the tracker lock and the health bar need
   const hp = (_carrierKnobs().hp != null) ? _carrierKnobs().hp : CARRIER.hp;
-  const B = _carrierKnobs().box || CARRIER.box;
+  const _S = _carrier.size;
+  const B = _S ? [_S.x, _S.y, _S.z] : (_carrierKnobs().box || CARRIER.box);
   _carrier.ent = {
     isCarrier: true, alive: true, id: 'carrier',
     health: hp, maxHealth: hp,
@@ -29412,7 +29460,18 @@ function _carrierDeckPoint(i, out) {
   out = out || new THREE.Vector3();
   if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive) return null;
   const n = _carrier.spawns.length;
-  if (!n) return out.copy(_carrier.obj.position);
+  if (!n) {
+    // (v37.73) No spawn markers on the model yet: spread the points along the hull's own top
+    // surface so the mode is playable before the markers are placed. Replaced the moment any
+    // spawn1..spawnN empty exists in the GLB.
+    const S = _carrier.size || new THREE.Vector3(1367, 548, 816);
+    const lane = ((i | 0) % 4);
+    // along the hull is local X (the nose is -X), across it is local Z
+    const _lx = ((lane < 2) ? -1 : 1) * S.x * 0.16;
+    const _lz = ((lane % 2) ? 1 : -1) * S.z * 0.14;
+    out.set(_lx, (_carrier.localTop != null) ? _carrier.localTop + 25 : S.y * 0.6, _lz);
+    return out.applyQuaternion(_carrier.obj.quaternion).add(_carrier.obj.position);
+  }
   const k = ((i | 0) % n + n) % n;
   _carrier.obj.updateMatrixWorld(true);
   return _carrier.spawns[k].getWorldPosition(out);
@@ -29433,6 +29492,8 @@ if (typeof window !== 'undefined') {
     pos: _carrier.obj ? _carrier.obj.position.toArray().map(Math.round) : null,
     health: _carrier.ent ? Math.round(_carrier.ent.health) : null,
     spawns: _carrier.spawns.length, guns: _carrier.guns.length, thrusters: _carrier.thrusters.length,
+    deckFrom: _carrier.spawns.length ? 'markers' : 'hull top (no spawn markers yet)',
+    size: _carrier.size ? _carrier.size.toArray().map(Math.round) : null,
   });
 }
 function _hubCityFrame(dt) {
