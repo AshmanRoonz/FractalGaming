@@ -4198,7 +4198,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.21';
+const LSS_BUILD = '38.22';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -44090,6 +44090,206 @@ function _lssCockpitLights() {
   return { key, fill };
 }
 const _ghostHullTimeU = { value: 0 };
+const _GHOST_LAB_ROWS = [
+  { k: 'core',      lo: 0,    hi: 0.60, st: 0.005, d: 0.09,  t: 'flat panels - how solid the hull skin reads' },
+  { k: 'rim',       lo: 0,    hi: 1.50, st: 0.01,  d: 0.44,  t: 'edges - how hard a crease catches the light' },
+  { k: 'mix',       lo: 0,    hi: 1.00, st: 0.01,  d: 0.30,  t: 'how far the shell pulls toward its tint' },
+  { k: 'glow',      lo: 0,    hi: 3.00, st: 0.01,  d: 0.85,  t: 'additive rim - what makes it dominate a dark view' },
+  { k: 'flicker',   lo: 0,    hi: 1.00, st: 0.01,  d: 0.25,  t: 'hologram jitter - 0 is perfectly steady' },
+  { k: 'glassCore', lo: 0,    hi: 0.60, st: 0.005, d: 0.10,  t: 'canopy zone: panels' },
+  { k: 'glassRim',  lo: 0,    hi: 1.50, st: 0.01,  d: 0.30,  t: 'canopy zone: edges' },
+  { k: 'order',     lo: 0,    hi: 5000, st: 100,   d: 4000,  t: 'draw order - above water and city glass at 4000' },
+];
+const _GHOST_LAB_EYE = [
+  { k: 'fwd',   lo: -60, hi: 60, st: 1, d: 0, t: 'seat forward / back, in game units' },
+  { k: 'up',    lo: -40, hi: 40, st: 1, d: 0, t: 'seat up / down' },
+  { k: 'right', lo: -40, hi: 40, st: 1, d: 0, t: 'seat left / right' },
+];
+let _ghostLabEl = null;
+function _ghostLabCfg() {
+  const W = (window.__cockpit = window.__cockpit || {});
+  W.ghost = W.ghost || {};
+  W.eye = W.eye || {};
+  return W;
+}
+function _ghostLabExport() {
+  const W = _ghostLabCfg(), G = W.ghost, E = W.eye;
+  const hex = (v) => '0x' + ((v >>> 0) & 0xffffff).toString(16).padStart(6, '0');
+  const out = {
+    ship: (typeof player !== 'undefined' && player && player.loadoutKey) || null,
+    ghost: {
+      on: G.on !== false,
+      tint: (G.tint != null) ? hex(G.tint) : null,   // null = follow the ship's class colour
+    },
+    eye: {},
+  };
+  for (const r of _GHOST_LAB_ROWS) out.ghost[r.k] = (typeof G[r.k] === 'number') ? +G[r.k].toFixed(4) : r.d;
+  for (const r of _GHOST_LAB_EYE) out.eye[r.k] = (typeof E[r.k] === 'number') ? +E[r.k].toFixed(2) : r.d;
+  return out;
+}
+function _ghostLabClose() {
+  if (_ghostLabEl && _ghostLabEl.parentNode) _ghostLabEl.parentNode.removeChild(_ghostLabEl);
+  _ghostLabEl = null;
+}
+function _ghostLabOpen() {
+  if (_ghostLabEl) { _ghostLabClose(); return; }
+  const W = _ghostLabCfg();
+  const el = document.createElement('div');
+  _ghostLabEl = el;
+  el.id = 'ghost-lab';
+  el.style.cssText = [
+    'position:fixed', 'top:12px', 'left:12px', 'z-index:99999',
+    'width:320px', 'max-height:calc(100vh - 24px)', 'overflow-y:auto',
+    'background:rgba(8,14,22,0.90)', 'border:1px solid rgba(120,220,255,0.45)',
+    'border-radius:10px', 'padding:12px 14px 14px',
+    'font:11px/1.45 "Courier New",monospace', 'color:#cfe9ff',
+    'box-shadow:0 8px 40px rgba(0,0,0,0.6)', 'backdrop-filter:blur(3px)',
+  ].join(';');
+  ['keydown', 'keyup', 'keypress'].forEach(t => el.addEventListener(t, e => e.stopPropagation()));
+  el.addEventListener('mousedown', e => e.stopPropagation());
+  el.addEventListener('wheel', e => e.stopPropagation());
+
+  const h = document.createElement('div');
+  h.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:8px';
+  h.innerHTML = '<span style="letter-spacing:3px;color:#8ad8ff;font-weight:bold">GHOST LAB</span>';
+  const x = document.createElement('button');
+  x.textContent = 'close';
+  x.style.cssText = 'background:rgba(255,80,80,0.18);color:#ff9a9a;border:1px solid rgba(255,110,110,0.5);border-radius:5px;padding:2px 9px;cursor:pointer;font:10px "Courier New",monospace';
+  x.onclick = _ghostLabClose;
+  h.appendChild(x);
+  el.appendChild(h);
+
+  const note = document.createElement('div');
+  note.style.cssText = 'color:rgba(200,230,255,0.5);margin-bottom:10px';
+  note.textContent = 'first person + 3D cockpit to see it. every knob lands next frame.';
+  el.appendChild(note);
+
+  const mkRow = (store, r, after) => {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'margin-bottom:9px';
+    const lab = document.createElement('div');
+    lab.style.cssText = 'display:flex;justify-content:space-between;color:#bfe4ff';
+    const val = document.createElement('span');
+    val.style.color = '#ffd27a';
+    const cur = (typeof store[r.k] === 'number') ? store[r.k] : r.d;
+    val.textContent = (r.st < 1) ? cur.toFixed(3) : String(Math.round(cur));
+    lab.innerHTML = '<span>' + r.k + '</span>';
+    lab.appendChild(val);
+    const sl = document.createElement('input');
+    sl.type = 'range'; sl.min = r.lo; sl.max = r.hi; sl.step = r.st; sl.value = cur;
+    sl.style.cssText = 'width:100%;margin:3px 0 1px;accent-color:#8ad8ff';
+    sl.oninput = () => {
+      const v = parseFloat(sl.value);
+      store[r.k] = v;
+      val.textContent = (r.st < 1) ? v.toFixed(3) : String(Math.round(v));
+      if (after) after();
+    };
+    const tip = document.createElement('div');
+    tip.style.cssText = 'color:rgba(190,220,255,0.42);font-size:10px';
+    tip.textContent = r.t;
+    wrap.appendChild(lab); wrap.appendChild(sl); wrap.appendChild(tip);
+    el.appendChild(wrap);
+    return { sl, val, row: r };
+  };
+
+  const ctrls = [];
+  const top = document.createElement('div');
+  top.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:10px';
+  const onBtn = document.createElement('button');
+  const paintOn = () => {
+    const isOn = W.ghost.on !== false;
+    onBtn.textContent = isOn ? 'shell ON' : 'shell OFF';
+    onBtn.style.background = isOn ? 'rgba(120,255,170,0.16)' : 'rgba(255,255,255,0.07)';
+    onBtn.style.color = isOn ? '#7dffa8' : '#9fb4c8';
+  };
+  onBtn.style.cssText = 'border:1px solid rgba(120,220,255,0.4);border-radius:5px;padding:3px 10px;cursor:pointer;font:10px "Courier New",monospace';
+  onBtn.onclick = () => { W.ghost.on = (W.ghost.on === false); paintOn(); };
+  paintOn();
+  const col = document.createElement('input');
+  col.type = 'color';
+  col.style.cssText = 'width:36px;height:24px;background:none;border:1px solid rgba(120,220,255,0.4);border-radius:5px;cursor:pointer';
+  const liveTint = () => {
+    try { return (typeof _ghostHullTint === 'function') ? _ghostHullTint() : 0x8ad8ff; } catch (_) { return 0x8ad8ff; }
+  };
+  col.value = '#' + ((liveTint() >>> 0) & 0xffffff).toString(16).padStart(6, '0');
+  col.oninput = () => { W.ghost.tint = parseInt(col.value.slice(1), 16); };
+  const themeBtn = document.createElement('button');
+  themeBtn.textContent = 'ship theme';
+  themeBtn.title = 'follow the hull’s own class colour';
+  themeBtn.style.cssText = 'border:1px solid rgba(120,220,255,0.4);border-radius:5px;padding:3px 8px;cursor:pointer;font:10px "Courier New",monospace;background:rgba(255,255,255,0.06);color:#bfe4ff';
+  themeBtn.onclick = () => {
+    delete W.ghost.tint;
+    col.value = '#' + ((liveTint() >>> 0) & 0xffffff).toString(16).padStart(6, '0');
+  };
+  top.appendChild(onBtn); top.appendChild(col); top.appendChild(themeBtn);
+  el.appendChild(top);
+
+  for (const r of _GHOST_LAB_ROWS) ctrls.push(mkRow(W.ghost, r));
+
+  const eh = document.createElement('div');
+  eh.style.cssText = 'margin:12px 0 7px;letter-spacing:2px;color:#8ad8ff';
+  eh.textContent = 'SEAT';
+  el.appendChild(eh);
+  for (const r of _GHOST_LAB_EYE) ctrls.push(mkRow(W.eye, r));
+
+  const bar = document.createElement('div');
+  bar.style.cssText = 'display:flex;gap:6px;margin-top:12px';
+  const mkBtn = (label, fn, tint) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = 'flex:1;border:1px solid ' + tint + ';border-radius:5px;padding:5px 0;cursor:pointer;' +
+      'font:10px "Courier New",monospace;background:rgba(255,255,255,0.06);color:#dff0ff';
+    b.onclick = fn;
+    bar.appendChild(b);
+    return b;
+  };
+  const out = document.createElement('textarea');
+  out.readOnly = true;
+  out.style.cssText = 'width:100%;height:120px;margin-top:9px;background:rgba(0,0,0,0.45);color:#a8e6ff;' +
+    'border:1px solid rgba(120,220,255,0.25);border-radius:6px;font:10px/1.4 "Courier New",monospace;padding:6px;resize:vertical';
+  const refreshOut = () => { out.value = JSON.stringify(_ghostLabExport(), null, 2); };
+  mkBtn('copy json', () => {
+    refreshOut();
+    try { navigator.clipboard.writeText(out.value); } catch (_) { out.select(); document.execCommand('copy'); }
+    out.style.borderColor = 'rgba(120,255,170,0.7)';
+    setTimeout(() => { out.style.borderColor = 'rgba(120,220,255,0.25)'; }, 500);
+  }, 'rgba(120,220,255,0.4)');
+  mkBtn('download', () => {
+    refreshOut();
+    try {
+      const blob = new Blob([out.value], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'ghost_' + ((_ghostLabExport().ship || 'ship').toLowerCase()) + '.json';
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    } catch (_) {}
+  }, 'rgba(120,220,255,0.4)');
+  mkBtn('reset', () => {
+    for (const r of _GHOST_LAB_ROWS) W.ghost[r.k] = r.d;
+    for (const r of _GHOST_LAB_EYE) W.eye[r.k] = r.d;
+    delete W.ghost.tint;
+    W.ghost.on = true;
+    for (const c of ctrls) {
+      const store = (_GHOST_LAB_EYE.indexOf(c.row) >= 0) ? W.eye : W.ghost;
+      c.sl.value = store[c.row.k];
+      c.val.textContent = (c.row.st < 1) ? (+store[c.row.k]).toFixed(3) : String(Math.round(store[c.row.k]));
+    }
+    col.value = '#' + ((liveTint() >>> 0) & 0xffffff).toString(16).padStart(6, '0');
+    paintOn(); refreshOut();
+  }, 'rgba(255,180,90,0.45)');
+  el.appendChild(bar);
+  el.appendChild(out);
+  refreshOut();
+  document.body.appendChild(el);
+  return 'ghost lab open - fly first person to judge it';
+}
+if (typeof window !== 'undefined') {
+  window.__ghostLab = function (open) {
+    if (open === false) { _ghostLabClose(); return 'closed'; }
+    return _ghostLabOpen();
+  };
+}
 function _ghostHullTint() {
   const G = window.__cockpit && window.__cockpit.ghost;
   if (G && G.tint != null) return G.tint;
