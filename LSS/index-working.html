@@ -4272,7 +4272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.06';
+const LSS_BUILD = '38.07';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -24310,7 +24310,7 @@ function _swWaterReflectShader() {
       { color: { value: null }, tDiffuse: { value: null }, textureMatrix: { value: null },
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() }, uFade: { value: 1 },   
         uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 }, uRippleScale: { value: 0 },   
-        uMaskTex: { value: null }, uFoamGain: { value: 1 }, uReliefScale: { value: 28.0 }, uReliefShade: { value: 0.7 },   
+        uMaskTex: { value: null }, uFoamGain: { value: 1 }, uFoamLit: { value: 1 }, uReliefScale: { value: 28.0 }, uReliefShade: { value: 0.7 },   
         uSnellTint: { value: new THREE.Color(0x9fd0e6) }, uDeepTint: { value: new THREE.Color(0x0a3a44) }, uSubmerge: { value: 0 }, uEye: { value: new THREE.Vector3() }, uReflLive: { value: 1 }, uFlipFace: { value: 0 },   
         uShallowTint: { value: new THREE.Color(0x2e7a6a) }, uShoreSoft: { value: 0.05 }, uFoamThresh: { value: 0.18 },
         // (v36.42) uReflWorld = the WORLD -> reflection-UV matrix, captured in the SAME
@@ -24351,7 +24351,7 @@ function _swWaterReflectShader() {
       'uniform vec3 color;', 'uniform sampler2D tDiffuse;', 'uniform float uTime;', 'uniform vec3 uCam;', 'uniform float uFade;',
       'uniform float uWHorizStr;', 'uniform float uWHorizA;', 'uniform float uWHorizB;',
       'uniform sampler2D uRippleTex;', 'uniform vec2 uRippleCenter;', 'uniform float uRippleBounds;', 'uniform float uRippleScale;',
-      'uniform sampler2D uMaskTex; uniform float uFoamGain; uniform float uReliefScale; uniform float uReliefShade;',   
+      'uniform sampler2D uMaskTex; uniform float uFoamGain; uniform float uFoamLit; uniform float uReliefScale; uniform float uReliefShade;',   
       'uniform vec3 uSnellTint; uniform vec3 uDeepTint; uniform float uSubmerge; uniform vec3 uEye; uniform float uReflLive; uniform float uFlipFace;',   
       'uniform vec3 uShallowTint; uniform float uShoreSoft; uniform float uFoamThresh;',   
       'varying vec4 vUv;', 'varying vec3 vWP;', '#include <fog_pars_fragment>',
@@ -24461,7 +24461,16 @@ function _swWaterReflectShader() {
       '  float _eF = max(exp(1.4) - log(1.0 + (1.0 - min(crestE*14.0,1.0))*2.5) - 1.0, 0.0);',   
       '  float _eS = max(exp(crestE*10.0) - log(1.0 + (1.0 - min(crestE*10.0,1.0))*5.0) - 1.0, 0.0);',   
       '  vec3 _foamC = mix(vec3(0.50,0.66,0.74), vec3(0.86,0.94,1.0), clamp(caustic, 0.0, 1.0));',
-      '  vec3 _dist  = (_eF*_foamC + _eS*vec3(0.95,0.98,1.0)) / (_eF + _eS + 1e-4);',   
+      '  vec3 _dist  = (_eF*_foamC + _eS*vec3(0.95,0.98,1.0)) / (_eF + _eS + 1e-4);',
+      // (v38.07) FOAM IS LIT. The palette above is a fixed near-white, so a breaking crest stayed
+      // blazing white however dark the scene was - which is the owner's "weird white arcs" and the
+      // white-looking reflection, both of them foam reading as a light source of its own at night.
+      // The zone system already drives scene fog to the sky's own colour, so that is the light
+      // level to borrow: full brightness in daylight (the clamp saturates, so daytime water is
+      // untouched), dimmed and tinted toward the night sky after dark.
+      '  float _flit = clamp(dot(fogColor, vec3(0.299,0.587,0.114)) * 1.7, 0.22, 1.0);',
+      '  _flit = mix(1.0, _flit, uFoamLit);',
+      '  _dist = mix(_dist * _flit, fogColor, 0.20 * (1.0 - _flit));',   
       '  outc = mix(outc, _dist, clamp(foam * 0.5 * caustic, 0.0, 0.85));',   
       '  outc = max(outc, vec3(0.035, 0.09, 0.12));',   
       
@@ -26704,7 +26713,10 @@ function _swUpdateHubWater() {
     // (v33.68) live depth-look knobs : shoreSoft = soft-shoreline band width (mask.g units, 0=hard line) ; shallowTint = shallow-water colour
     if (w.material.uniforms.uShoreSoft && _W.shoreSoft !== undefined) w.material.uniforms.uShoreSoft.value = _W.shoreSoft;
     if (w.material.uniforms.uShallowTint && _W.shallowTint !== undefined) w.material.uniforms.uShallowTint.value.set(_W.shallowTint);
-    if (w.material.uniforms.uFoamThresh && _W.foamThresh !== undefined) w.material.uniforms.uFoamThresh.value = _W.foamThresh;   
+    if (w.material.uniforms.uFoamThresh && _W.foamThresh !== undefined) w.material.uniforms.uFoamThresh.value = _W.foamThresh;
+    // (v38.07) foamLit: 1 = foam takes the scene's own light level (default), 0 = the old
+    // fixed near-white that stayed blazing after dark
+    if (w.material.uniforms.uFoamLit && _W.foamLit !== undefined) w.material.uniforms.uFoamLit.value = _W.foamLit;   
   }
   // (v33.12) CROSSFADE the planar mirror (above) and the translucent underside (below)
   // across a band around WL instead of a hard pop at the exact surface — crossing the
