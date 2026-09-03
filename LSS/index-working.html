@@ -4272,7 +4272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.11';
+const LSS_BUILD = '38.13';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -25224,10 +25224,27 @@ function _swRippleTick(dt) {
       }
       du.uReflMix.value = (W2.reflMix != null) ? W2.reflMix : 1.0;            
       du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 1.0; 
-      du.uReflBright.value = (W2.reflBright != null) ? W2.reflBright : 2.4;   
+      // (v38.12) THE REFLECTION FOLLOWS THE SKY'S LIGHT. These two are the white the owner has
+      // been circling, and they live on the DISPLACED sheet - the surface you actually see - not on
+      // the Reflector plane every earlier attempt was poking. uReflBright multiplies the mirror by
+      // 2.4 and uReflFloor lifts it to a minimum of 0.24 grey; both were tuned against a daylight
+      // sky, where the post chain's grade pulls them back down. At night nothing pulls them back,
+      // so the water ends up brighter than the sky it is mirroring - a pale sheet that swallows the
+      // true reflection, arcing along the ripple window's edge because that is where the mask data
+      // changes. Scaled by the same sky luminance the foam and the fallback sky already use:
+      // saturates before any daytime sky, so daylight water is untouched.
+      const _wlit = (function () {
+        try {
+          const c = scene.fog && scene.fog.color;
+          if (!c) return 1;
+          const l = c.r * 0.299 + c.g * 0.587 + c.b * 0.114;
+          return Math.max(0.10, Math.min(1, Math.pow(Math.max(l * 1.35, 0), 1.6)));
+        } catch (_) { return 1; }
+      })();
+      du.uReflBright.value = ((W2.reflBright != null) ? W2.reflBright : 2.4) * (0.42 + 0.58 * _wlit);   
       du.uGrazeClear.value = (W2.grazeClear != null) ? W2.grazeClear : 0.7;   
       du.uGrazeAlpha.value = (W2.grazeAlpha != null) ? W2.grazeAlpha : 0.45;  
-      du.uReflFloor.value = (W2.reflFloor != null) ? W2.reflFloor : 0.24;      
+      du.uReflFloor.value = ((W2.reflFloor != null) ? W2.reflFloor : 0.24) * _wlit;      
       du.uFoamLod.value = (W2.foamLod != null) ? W2.foamLod : 0.30;            
       du.uMaskTex.value = R.maskTex;                                          
       du.uFarMaskTex.value = R.farTex;                                        
@@ -26747,7 +26764,22 @@ function _swUpdateHubWater() {
     if (w.material.uniforms.uFoamThresh && _W.foamThresh !== undefined) w.material.uniforms.uFoamThresh.value = _W.foamThresh;
     // (v38.07) foamLit: 1 = foam takes the scene's own light level (default), 0 = the old
     // fixed near-white that stayed blazing after dark
-    if (w.material.uniforms.uFoamLit && _W.foamLit !== undefined) w.material.uniforms.uFoamLit.value = _W.foamLit;   
+    if (w.material.uniforms.uFoamLit && _W.foamLit !== undefined) w.material.uniforms.uFoamLit.value = _W.foamLit;
+    // (v38.12) A BISECT SWITCH THAT ACTUALLY STICKS. Every uniform above is rewritten from here
+    // every frame, so poking one from a console lasts exactly one frame - which is why chasing the
+    // white patches by hand kept giving contradictory answers. These overrides are applied LAST, so
+    // they hold: window.__waterDbg = { foam:0 } / { relief:0 } / { shade:0 } / { refl:0 } /
+    // { color:0xff0000 }, and delete window.__waterDbg to go back to normal.
+    const _D = (typeof window !== 'undefined') ? window.__waterDbg : null;
+    if (_D) {
+      const U = w.material.uniforms;
+      if (_D.foam   != null && U.uFoamGain)    U.uFoamGain.value = _D.foam;
+      if (_D.relief != null && U.uReliefScale) U.uReliefScale.value = _D.relief;
+      if (_D.shade  != null && U.uReliefShade) U.uReliefShade.value = _D.shade;
+      if (_D.refl   != null && U.uReflLive)    U.uReflLive.value = _D.refl;
+      if (_D.foamLit != null && U.uFoamLit)    U.uFoamLit.value = _D.foamLit;
+      if (_D.color  != null && U.color)        U.color.value.set(_D.color);
+    }   
   }
   // (v33.12) CROSSFADE the planar mirror (above) and the translucent underside (below)
   // across a band around WL instead of a hard pop at the exact surface — crossing the
