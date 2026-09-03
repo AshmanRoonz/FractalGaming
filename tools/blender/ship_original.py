@@ -59,6 +59,9 @@ DARK_FILL = 0.20           # panes painted darker than this may join the glass (
 GROW_R = 0.03              # of L: neighbourhood radius of the surrounded-growth
 SURROUND_F = 0.35          # a candidate joins when its glass neighbours' mean sits within this fraction of GROW_R
 SURROUND_N = 8             # ... and there are at least this many glass faces in its 27-cell block
+SHELL_VOTE_IN = 0.5        # a loose part with at least this fraction of glass faces becomes glass whole
+SHELL_VOTE_OUT = 0.12      # ... with less than this loses its stray glass faces
+SHELL_VOTE_MAX = 20000     # parts bigger than this (a fuselage holding the canopy) keep the face-level result
 ADJ_R = 0.012              # of L: a tinted (seed) face touching glass this closely joins outright
 REF_DIR = os.path.join(REPO, 'tools', 'blender', 'work', 'ref')   # old-chain hulls (LSS/ships at v37.39/40) = the canopy reference
 REF_TOL = 0.007            # of L: an original face this close to the reference glass surface IS canopy
@@ -493,6 +496,21 @@ def process(ship):
             if escapes(fi):
                 glass[fi] = True
     rep['glass']['smoothed'] = True
+    # SHELL VOTE (owner: "if you use the original GLB files, it might be easier to find the lines for
+    # the actual cockpit glass"): the canopy panes are their own loose parts in the original, so the
+    # glass edge should follow the model's part lines, not the face-by-face transfer. A part that is
+    # mostly glass becomes glass whole ; a small part with only stray glass faces loses them. Huge
+    # parts (a fuselage that includes the canopy) keep the face-level result.
+    g_per = np.bincount(flab[glass], minlength=n_shells)
+    fr_sh = g_per / np.maximum(shell_n, 1)
+    whole = (fr_sh >= SHELL_VOTE_IN) & (shell_n <= SHELL_VOTE_MAX)
+    drop = (g_per > 0) & (fr_sh < SHELL_VOTE_OUT) & (shell_n <= SHELL_VOTE_MAX)
+    added = whole[flab] & ~glass
+    removed = drop[flab] & glass
+    glass[added] = True
+    glass[removed] = False
+    rep['glass']['shell_vote'] = {'added': int(added.sum()), 'removed': int(removed.sum()),
+                                  'whole_shells': int(whole.sum()), 'dropped_shells': int(drop.sum())}
     n_glass = int(glass.sum())
     rep['glass']['faces'] = n_glass
     rep['glass']['shells_touched'] = int((np.bincount(flab[glass], minlength=n_shells) > 0).sum())
@@ -879,8 +897,8 @@ def process(ship):
 
     # roughness / metallic per atlas region (R = AO 1, G = roughness, B = metallic) so the screens
     # read as glass and the panels as metal instead of one flat finish
-    ORM = {'metal': (0.55, 0.85), 'trim': (0.45, 0.60), 'seat': (0.90, 0.00), 'screen': (0.12, 0.0), 'scrB': (0.12, 0.0),
-           'scrC': (0.12, 0.0), 'scrD': (0.12, 0.0), 'glow': (0.30, 0.0), 'suit': (0.80, 0.0), 'visor': (0.05, 0.0)}
+    ORM = {'metal': (0.60, 0.80), 'trim': (0.55, 0.35), 'seat': (0.90, 0.00), 'screen': (0.28, 0.0), 'scrB': (0.28, 0.0),
+           'scrC': (0.28, 0.0), 'scrD': (0.28, 0.0), 'glow': (0.35, 0.0), 'suit': (0.80, 0.0), 'visor': (0.08, 0.0)}   # v37.46: the arch read as chrome, the displays glinted
     orm = np.ones((512, 512, 4), np.float32)
     for rname, (rg, mt) in ORM.items():
         u0, v0, u1, v1 = REG[rname][:4]

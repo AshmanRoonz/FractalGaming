@@ -313,7 +313,11 @@ edge to the skin above it so the boundary is never in view from the seat, arches
 TUBES (bevelled segment boxes spiked at the joints), the eye sits 55% back along the canopy (rearmost-on-
 ties made long canopies read as corridors), panel at 0.22 Lc, control stick, throttle, HUD combiner glass
 (faint), overhead switch strip under the roll bar, and an ORM map on the interior atlas (glossy screens,
-metal panels, matte seat) → decimate (`--target 150000` triangles ; shells within 0.35 L of the eye keep up to 60%
+metal panels, matte seat). v37.46 (owner: *"if you use the original GLB files, it might be easier to find
+the lines for the actual cockpit glass"*): SHELL VOTE — the canopy panes are their own loose parts in the
+original, so after the face-level selection a part with ≥ 50% glass faces becomes glass whole and a small
+part with < 12% loses its strays ; the glass edge follows the model's part lines (parts over 20k faces keep
+the face-level result). Arch/rail metal dulled (trim metallic 0.35), display roughness 0.28 → decimate (`--target 150000` triangles ; shells within 0.35 L of the eye keep up to 60%
 of the budget at ratio ≤ 0.5, the rest fills it, `delimit={'MATERIAL'}` so nothing collapses
 across the glass border) → export.
 
