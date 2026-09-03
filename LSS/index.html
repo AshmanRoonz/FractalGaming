@@ -4177,7 +4177,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.84';
+const LSS_BUILD = '37.87';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23518,6 +23518,7 @@ function _carrierAttach(root, sector) {
   };
   if (_carrier.team != null) _carrier.ent.team = _carrier.team;
   if (game && Array.isArray(game.entities)) game.entities.push(_carrier.ent);
+  try { _carrierEngineStart(); } catch (_) {}
   return _carrier.ent;
 }
 function _carrierSpawn(opts) {
@@ -23549,7 +23550,76 @@ function _carrierSpawn(opts) {
   } catch (e) { _carrier.loading = false; }
   return _carrier.ent;
 }
+function _carrierEngineStart() {
+  try {
+    if (_carrier.snd || typeof audio === 'undefined' || !audio || !audio.ctx) return;
+    const ctx = audio.ctx, now = ctx.currentTime;
+    const K = _carrierKnobs();
+    const o1 = ctx.createOscillator(); o1.type = 'sawtooth'; o1.frequency.value = 38;
+    const o2 = ctx.createOscillator(); o2.type = 'triangle'; o2.frequency.value = 57;
+    const g1 = ctx.createGain(); g1.gain.value = 0.45;
+    const g2 = ctx.createGain(); g2.gain.value = 0.30;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 430; lp.Q.value = 0.7;
+    const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, now);
+    const pan = ctx.createPanner();
+    pan.panningModel = 'HRTF';
+    pan.distanceModel = 'inverse';
+    pan.refDistance = 900;      // a capital ship carries a long way
+    pan.maxDistance = 26000;
+    pan.rolloffFactor = 0.85;
+    o1.connect(g1); g1.connect(lp);
+    o2.connect(g2); g2.connect(lp);
+    let noise = null;
+    if (typeof _audioSharedNoiseBuffer === 'function') {
+      noise = ctx.createBufferSource();
+      noise.buffer = _audioSharedNoiseBuffer(ctx, 1.0);
+      noise.loop = true;
+      const nbp = ctx.createBiquadFilter(); nbp.type = 'bandpass'; nbp.frequency.value = 165; nbp.Q.value = 0.6;
+      const ng = ctx.createGain(); ng.gain.value = 0.16;
+      noise.connect(nbp); nbp.connect(ng); ng.connect(lp);
+    }
+    lp.connect(g); g.connect(pan);
+    pan.connect(audio.sfxBus || audio.masterGain || ctx.destination);
+    o1.start(now); o2.start(now); if (noise) noise.start(now);
+    g.gain.linearRampToValueAtTime((K.vol != null) ? K.vol : 0.45, now + 1.5);
+    _carrier.snd = { o1, o2, noise, g, pan, lp };
+  } catch (_) { _carrier.snd = null; }
+}
+function _carrierEngineTick() {
+  const S = _carrier.snd;
+  if (!S || !_carrier.obj) return;
+  try {
+    const p = _carrier.obj.position;
+    if (S.pan.positionX) {
+      const t = audio.ctx.currentTime;
+      S.pan.positionX.setValueAtTime(p.x, t);
+      S.pan.positionY.setValueAtTime(p.y, t);
+      S.pan.positionZ.setValueAtTime(p.z, t);
+    } else if (S.pan.setPosition) {
+      S.pan.setPosition(p.x, p.y, p.z);
+    }
+    const K = _carrierKnobs();
+    const want = (_carrier.ent && _carrier.ent.alive) ? ((K.vol != null) ? K.vol : 0.45) : 0;
+    if (Math.abs(S.g.gain.value - want) > 0.01) {
+      S.g.gain.setTargetAtTime(want, audio.ctx.currentTime, 0.4);
+    }
+  } catch (_) {}
+}
+function _carrierEngineStop() {
+  const S = _carrier.snd;
+  _carrier.snd = null;
+  if (!S) return;
+  try {
+    const t = audio.ctx.currentTime;
+    S.g.gain.setTargetAtTime(0.0001, t, 0.15);
+    setTimeout(() => {
+      try { S.o1.stop(); S.o2.stop(); if (S.noise) S.noise.stop(); } catch (_) {}
+      try { S.g.disconnect(); S.pan.disconnect(); S.lp.disconnect(); } catch (_) {}
+    }, 700);
+  } catch (_) {}
+}
 function _carrierClear() {
+  try { _carrierEngineStop(); } catch (_) {}
   if (_carrier.obj) { try { scene.remove(_carrier.obj); } catch (_) {} }
   if (_carrier.ent && game && Array.isArray(game.entities)) {
     const i = game.entities.indexOf(_carrier.ent);
@@ -23588,6 +23658,7 @@ function _carrierFrame(dt) {
       m.material.opacity = 0.78 + 0.18 * Math.sin(_carrier.t * 3.1);
     }
   }
+  try { _carrierEngineTick(); } catch (_) {}
   try { _carrierGuns(dt); } catch (e) { if (!_carrier._gunErr) { _carrier._gunErr = String((e && e.message) || e); console.warn('[carrier] guns threw:', e); } }
   _carrier.ent.velocity.copy(_carrier.dir).multiplyScalar(travelled < _carrier.dist ? _carrierSpeed() : 0);
   _carrier.ent.position.copy(o.position);
@@ -23616,6 +23687,30 @@ function _carrierCollide(pos, velocity, radius) {
     const vn = velocity.dot(_ccN);
     if (vn < 0) velocity.addScaledVector(_ccN, -vn);          // cancel the inward component only
   }
+}
+const _cbP = new THREE.Vector3(), _cbQ = new THREE.Quaternion();
+function _carrierBlocks(pt, pad) {
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive || !_carrier.half || !pt) return false;
+  const o = _carrier.obj;
+  const dx = pt.x - o.position.x, dy = pt.y - o.position.y, dz = pt.z - o.position.z;
+  const R = _carrier.bound + (pad || 0);
+  if (dx * dx + dy * dy + dz * dz > R * R) return false;
+  _cbQ.copy(o.quaternion).invert();
+  _cbP.set(dx, dy, dz).applyQuaternion(_cbQ).sub(_carrier.ctr);
+  const g = pad || 0;
+  return Math.abs(_cbP.x) <= _carrier.half.x + g &&
+         Math.abs(_cbP.y) <= _carrier.half.y + g &&
+         Math.abs(_cbP.z) <= _carrier.half.z + g;
+}
+function _carrierRayDist(origin, dir, maxDist) {
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive || !_carrier.half) return -1;
+  const step = Math.max(40, Math.min(_carrier.half.x, _carrier.half.y, _carrier.half.z) * 0.6);
+  const lim = Math.min(maxDist, _carrier.obj.position.distanceTo(origin) + _carrier.bound + step);
+  for (let d = 0; d <= lim; d += step) {
+    _cbP.copy(dir).multiplyScalar(d).add(origin);
+    if (_carrierBlocks(_cbP, 0)) return d;
+  }
+  return -1;
 }
 function _carrierGuns(dt) {
   if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive) return;
@@ -23695,6 +23790,7 @@ if (typeof window !== 'undefined') {
     deckFrom: _carrier.spawns.length ? 'markers' : 'hull top (no spawn markers yet)',
     zaps: _carrier.zaps | 0, gunErr: _carrier._gunErr || null, boltErr: _carrier._boltErr || null,
     zapT: +(_carrier.zapT || 0).toFixed(2),
+    engineSnd: !!_carrier.snd,
     size: _carrier.size ? _carrier.size.toArray().map(Math.round) : null,
   });
 }
@@ -23920,10 +24016,9 @@ function _cyberCinematic(C) {
   try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
   return true;
 }
-function _cyberFrame(dt) {
-  const C = game._cyber;
-  if (!C || !C.armed || game.state !== 'playing') return;
-  if (!C.started) {
+function _cyberSetup(C) {
+  if (!C || C.started) return;
+  {
     C.started = true;
     C.teamA = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_A != null) ? LSS.TEAM_FLEET_A : 2;
     C.teamB = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_B != null) ? LSS.TEAM_FLEET_B : 3;
@@ -23950,8 +24045,12 @@ function _cyberFrame(dt) {
     try {
       if (window.Overlays && Overlays.banner) Overlays.banner('CYBERPUNK CITY', 'take the field in the city');
     } catch (_) {}
-    try { _cyberCinematic(C); } catch (e) { console.warn('[cyber] cinematic:', e); }
   }
+}
+function _cyberFrame(dt) {
+  const C = game._cyber;
+  if (!C || !C.armed || game.state !== 'playing') return;
+  if (!C.started) _cyberSetup(C);
   if (C.placeT > 0) {
     C.placeT -= (dt || 0.016);
     try {
@@ -26744,6 +26843,10 @@ function raycastLevel(origin, dir, maxDist, coarse) {
   }
 
   
+  if (typeof _carrierRayDist === 'function') {
+    const _cd2 = _carrierRayDist(origin, dir, nearest);
+    if (_cd2 >= 0 && _cd2 < nearest) nearest = _cd2;
+  }
   if (game.hubCity && typeof _hubCityRayHit === 'function') {
     const cd = _hubCityRayHit(origin, dir, nearest);
     if (cd < nearest) nearest = cd;
@@ -30019,6 +30122,14 @@ class Projectile {
       }
     }
 
+    if (this.alive && typeof _carrierBlocks === 'function' && _carrierBlocks(this.position, 0)) {
+      try {
+        if (typeof spawnImpactSparks === 'function') spawnImpactSparks(this.position.clone(), 6);
+        else if (typeof spawnExplosion === 'function' && (this.splash || 0) > 0) spawnExplosion(this.position.clone(), 18);
+      } catch (_) {}
+      this.alive = false;
+      return;
+    }
     if (this.owner === 'player') {
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
@@ -42663,7 +42774,10 @@ function _lssEnsureCinematicStyles() {
 function _lssStartSpectatorCinematic() {
   if (typeof LSS !== 'undefined' && LSS.MODE === 'race') return false;
   if (typeof game !== 'undefined' && game && game._campJourney) return false;   
-  if (typeof game !== 'undefined' && game && game._cyber && game._cyber.armed) return false;
+  if (typeof game !== 'undefined' && game && game._cyber && game._cyber.armed) {
+    try { _cyberSetup(game._cyber); } catch (e) { console.warn('[cyber] setup:', e); }
+    try { return !!_cyberCinematic(game._cyber); } catch (e) { console.warn('[cyber] cinematic:', e); return false; }
+  }
   if (typeof game === 'undefined' || !game) return false;
   if (!Array.isArray(game.sdfRoomData) || game.sdfRoomData.length === 0) return false;
   try { _setArenaGridVisible(false); } catch (_) {}   

@@ -4251,7 +4251,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.84';
+const LSS_BUILD = '37.87';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -29577,6 +29577,7 @@ function _carrierAttach(root, sector) {
   // is remembered on _carrier and re-applied on every attach.
   if (_carrier.team != null) _carrier.ent.team = _carrier.team;
   if (game && Array.isArray(game.entities)) game.entities.push(_carrier.ent);
+  try { _carrierEngineStart(); } catch (_) {}
   return _carrier.ent;
 }
 function _carrierSpawn(opts) {
@@ -29609,7 +29610,82 @@ function _carrierSpawn(opts) {
   } catch (e) { _carrier.loading = false; }
   return _carrier.ent;
 }
+// (v37.85) ENGINE RUMBLE. There is no continuous engine loop anywhere in the ship audio - it is
+// one-shots plus a flyby pool - so the carrier gets its own small graph: two detuned low
+// oscillators and band-passed noise through a lowpass, into a WORLD-positioned panner (the listener
+// is camera-synced every frame since v36.71). Base gain sits well above ship-scale sounds, which is
+// the owner's ask; window.__carrier.vol tunes it, 0 silences it.
+function _carrierEngineStart() {
+  try {
+    if (_carrier.snd || typeof audio === 'undefined' || !audio || !audio.ctx) return;
+    const ctx = audio.ctx, now = ctx.currentTime;
+    const K = _carrierKnobs();
+    const o1 = ctx.createOscillator(); o1.type = 'sawtooth'; o1.frequency.value = 38;
+    const o2 = ctx.createOscillator(); o2.type = 'triangle'; o2.frequency.value = 57;
+    // per-source levels: measured, the three at unity summed past full scale on their own
+    const g1 = ctx.createGain(); g1.gain.value = 0.45;
+    const g2 = ctx.createGain(); g2.gain.value = 0.30;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 430; lp.Q.value = 0.7;
+    const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, now);
+    const pan = ctx.createPanner();
+    pan.panningModel = 'HRTF';
+    pan.distanceModel = 'inverse';
+    pan.refDistance = 900;      // a capital ship carries a long way
+    pan.maxDistance = 26000;
+    pan.rolloffFactor = 0.85;
+    o1.connect(g1); g1.connect(lp);
+    o2.connect(g2); g2.connect(lp);
+    let noise = null;
+    if (typeof _audioSharedNoiseBuffer === 'function') {
+      noise = ctx.createBufferSource();
+      noise.buffer = _audioSharedNoiseBuffer(ctx, 1.0);
+      noise.loop = true;
+      const nbp = ctx.createBiquadFilter(); nbp.type = 'bandpass'; nbp.frequency.value = 165; nbp.Q.value = 0.6;
+      const ng = ctx.createGain(); ng.gain.value = 0.16;
+      noise.connect(nbp); nbp.connect(ng); ng.connect(lp);
+    }
+    lp.connect(g); g.connect(pan);
+    pan.connect(audio.sfxBus || audio.masterGain || ctx.destination);
+    o1.start(now); o2.start(now); if (noise) noise.start(now);
+    g.gain.linearRampToValueAtTime((K.vol != null) ? K.vol : 0.45, now + 1.5);
+    _carrier.snd = { o1, o2, noise, g, pan, lp };
+  } catch (_) { _carrier.snd = null; }
+}
+function _carrierEngineTick() {
+  const S = _carrier.snd;
+  if (!S || !_carrier.obj) return;
+  try {
+    const p = _carrier.obj.position;
+    if (S.pan.positionX) {
+      const t = audio.ctx.currentTime;
+      S.pan.positionX.setValueAtTime(p.x, t);
+      S.pan.positionY.setValueAtTime(p.y, t);
+      S.pan.positionZ.setValueAtTime(p.z, t);
+    } else if (S.pan.setPosition) {
+      S.pan.setPosition(p.x, p.y, p.z);
+    }
+    const K = _carrierKnobs();
+    const want = (_carrier.ent && _carrier.ent.alive) ? ((K.vol != null) ? K.vol : 0.45) : 0;
+    if (Math.abs(S.g.gain.value - want) > 0.01) {
+      S.g.gain.setTargetAtTime(want, audio.ctx.currentTime, 0.4);
+    }
+  } catch (_) {}
+}
+function _carrierEngineStop() {
+  const S = _carrier.snd;
+  _carrier.snd = null;
+  if (!S) return;
+  try {
+    const t = audio.ctx.currentTime;
+    S.g.gain.setTargetAtTime(0.0001, t, 0.15);
+    setTimeout(() => {
+      try { S.o1.stop(); S.o2.stop(); if (S.noise) S.noise.stop(); } catch (_) {}
+      try { S.g.disconnect(); S.pan.disconnect(); S.lp.disconnect(); } catch (_) {}
+    }, 700);
+  } catch (_) {}
+}
 function _carrierClear() {
+  try { _carrierEngineStop(); } catch (_) {}
   if (_carrier.obj) { try { scene.remove(_carrier.obj); } catch (_) {} }
   if (_carrier.ent && game && Array.isArray(game.entities)) {
     const i = game.entities.indexOf(_carrier.ent);
@@ -29656,6 +29732,7 @@ function _carrierFrame(dt) {
       m.material.opacity = 0.78 + 0.18 * Math.sin(_carrier.t * 3.1);
     }
   }
+  try { _carrierEngineTick(); } catch (_) {}
   try { _carrierGuns(dt); } catch (e) { if (!_carrier._gunErr) { _carrier._gunErr = String((e && e.message) || e); console.warn('[carrier] guns threw:', e); } }
   _carrier.ent.velocity.copy(_carrier.dir).multiplyScalar(travelled < _carrier.dist ? _carrierSpeed() : 0);
   _carrier.ent.position.copy(o.position);
@@ -29690,6 +29767,35 @@ function _carrierCollide(pos, velocity, radius) {
     const vn = velocity.dot(_ccN);
     if (vn < 0) velocity.addScaledVector(_ccN, -vn);          // cancel the inward component only
   }
+}
+// (v37.85) Does this point sit inside the hull? The same oriented box the movement collider uses -
+// a world-aligned box on a 1367-unit hull that turns to face its route would swallow shots hundreds
+// of units clear of it.
+const _cbP = new THREE.Vector3(), _cbQ = new THREE.Quaternion();
+function _carrierBlocks(pt, pad) {
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive || !_carrier.half || !pt) return false;
+  const o = _carrier.obj;
+  const dx = pt.x - o.position.x, dy = pt.y - o.position.y, dz = pt.z - o.position.z;
+  const R = _carrier.bound + (pad || 0);
+  if (dx * dx + dy * dy + dz * dz > R * R) return false;
+  _cbQ.copy(o.quaternion).invert();
+  _cbP.set(dx, dy, dz).applyQuaternion(_cbQ).sub(_carrier.ctr);
+  const g = pad || 0;
+  return Math.abs(_cbP.x) <= _carrier.half.x + g &&
+         Math.abs(_cbP.y) <= _carrier.half.y + g &&
+         Math.abs(_cbP.z) <= _carrier.half.z + g;
+}
+// Distance along a ray to the hull, or -1. Walked in steps rather than solved analytically: a beam
+// only needs to know it stopped, and the step is a fraction of the smallest half-extent.
+function _carrierRayDist(origin, dir, maxDist) {
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive || !_carrier.half) return -1;
+  const step = Math.max(40, Math.min(_carrier.half.x, _carrier.half.y, _carrier.half.z) * 0.6);
+  const lim = Math.min(maxDist, _carrier.obj.position.distanceTo(origin) + _carrier.bound + step);
+  for (let d = 0; d <= lim; d += step) {
+    _cbP.copy(dir).multiplyScalar(d).add(origin);
+    if (_carrierBlocks(_cbP, 0)) return d;
+  }
+  return -1;
 }
 // (v37.77) THE GUNS. Slayer-green lightning from whichever of the marked mounts is nearest to the
 // target, at anything hostile that comes inside range. window.__carrier.zapTest = true counts the
@@ -29778,6 +29884,7 @@ if (typeof window !== 'undefined') {
     deckFrom: _carrier.spawns.length ? 'markers' : 'hull top (no spawn markers yet)',
     zaps: _carrier.zaps | 0, gunErr: _carrier._gunErr || null, boltErr: _carrier._boltErr || null,
     zapT: +(_carrier.zapT || 0).toFixed(2),
+    engineSnd: !!_carrier.snd,
     size: _carrier.size ? _carrier.size.toArray().map(Math.round) : null,
   });
 }
@@ -30042,10 +30149,12 @@ function _cyberCinematic(C) {
   try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
   return true;
 }
-function _cyberFrame(dt) {
-  const C = game._cyber;
-  if (!C || !C.armed || game.state !== 'playing') return;
-  if (!C.started) {
+// (v37.85) Building the match is its own step so it can run from the CINEMATIC hook - which fires
+// before the countdown - instead of the first 'playing' frame, which is after it. Idempotent: the
+// second caller sees C.started and does nothing.
+function _cyberSetup(C) {
+  if (!C || C.started) return;
+  {
     C.started = true;
     C.teamA = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_A != null) ? LSS.TEAM_FLEET_A : 2;
     C.teamB = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_B != null) ? LSS.TEAM_FLEET_B : 3;
@@ -30076,9 +30185,12 @@ function _cyberFrame(dt) {
     try {
       if (window.Overlays && Overlays.banner) Overlays.banner('CYBERPUNK CITY', 'take the field in the city');
     } catch (_) {}
-    // the attackers' launch lineup, once the deck and the wing exist
-    try { _cyberCinematic(C); } catch (e) { console.warn('[cyber] cinematic:', e); }
   }
+}
+function _cyberFrame(dt) {
+  const C = game._cyber;
+  if (!C || !C.armed || game.state !== 'playing') return;
+  if (!C.started) _cyberSetup(C);
   // (v37.76b) The mode's own spawn has to win over free flight's, which places the player on the
   // frame after 'playing' begins - so the deck is re-asserted for a couple of seconds rather than
   // written once and overwritten.
@@ -33767,6 +33879,11 @@ function raycastLevel(origin, dir, maxDist, coarse) {
   }
 
   
+  // (v37.85) ...and the flying carrier is a wall to beams as well as to bullets.
+  if (typeof _carrierRayDist === 'function') {
+    const _cd2 = _carrierRayDist(origin, dir, nearest);
+    if (_cd2 >= 0 && _cd2 < nearest) nearest = _cd2;
+  }
   if (game.hubCity && typeof _hubCityRayHit === 'function') {
     const cd = _hubCityRayHit(origin, dir, nearest);
     if (cd < nearest) nearest = cd;
@@ -38308,6 +38425,17 @@ class Projectile {
       }
     }
 
+    // (v37.85) THE CARRIER STOPS BULLETS. Blocking is separate from damage: the loops below skip
+    // anything on your own team, so your own carrier was a ghost to your guns. A shot that enters
+    // the hull ends there ; whether it hurts it is the entity loops' business, not the wall's.
+    if (this.alive && typeof _carrierBlocks === 'function' && _carrierBlocks(this.position, 0)) {
+      try {
+        if (typeof spawnImpactSparks === 'function') spawnImpactSparks(this.position.clone(), 6);
+        else if (typeof spawnExplosion === 'function' && (this.splash || 0) > 0) spawnExplosion(this.position.clone(), 18);
+      } catch (_) {}
+      this.alive = false;
+      return;
+    }
     if (this.owner === 'player') {
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === player.team) continue;
@@ -55282,10 +55410,14 @@ function _lssStartSpectatorCinematic() {
   // camera pose) without leaking strategic info.
   if (typeof LSS !== 'undefined' && LSS.MODE === 'race') return false;
   if (typeof game !== 'undefined' && game && game._campJourney) return false;   
-  // (v37.83) CYBERPUNK CITY runs its OWN lineup - the three attackers on the carrier's deck, once
-  // the carrier and the wing exist. This arena lineup would otherwise play first with the solo ship
-  // in it, giving two cinematics back to back (owner: "why are there two cinematics?").
-  if (typeof game !== 'undefined' && game && game._cyber && game._cyber.armed) return false;
+  // (v37.83) CYBERPUNK CITY runs its OWN lineup - the three attackers on the carrier's deck. The
+  // arena lineup below needs sdfRoomData and would decline in the overworld anyway; what matters is
+  // that the mode BUILDS ITSELF and plays its lineup HERE, on the hook that runs before the 3-2-1,
+  // rather than on its first 'playing' frame, which is after it (owner: the countdown came first).
+  if (typeof game !== 'undefined' && game && game._cyber && game._cyber.armed) {
+    try { _cyberSetup(game._cyber); } catch (e) { console.warn('[cyber] setup:', e); }
+    try { return !!_cyberCinematic(game._cyber); } catch (e) { console.warn('[cyber] cinematic:', e); return false; }
+  }
   if (typeof game === 'undefined' || !game) return false;
   if (!Array.isArray(game.sdfRoomData) || game.sdfRoomData.length === 0) return false;
   try { _setArenaGridVisible(false); } catch (_) {}   
