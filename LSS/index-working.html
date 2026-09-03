@@ -4272,7 +4272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.20';
+const LSS_BUILD = '38.21';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -24192,6 +24192,14 @@ if (typeof window !== 'undefined') window.__dbg = {
 
 // (v38.16) Which sandwich maps get water, and how deep. The hub has its own sea (the mossy
 // branch); Broken Simulation is a failing simulation with an open sky and gets none.
+// (v38.21) Cavern water on a small machine: present, but still. window.__cavernWater.cheap
+// forces it either way (true = always cheap, false = never), for A/B on a desktop.
+function _cavernWaterCheap(T) {
+  const K = (typeof window !== 'undefined' && window.__cavernWater) ? window.__cavernWater : null;
+  if (K && typeof K.cheap === 'boolean') return K.cheap && _swCavernWaterWanted(T);
+  if (!_swCavernWaterWanted(T)) return false;
+  return (typeof _fxSmallDevice === 'function') && _fxSmallDevice();
+}
 function _swCavernWaterWanted(T) {
   if (!T || !T.ON || T.YFLOOR == null) return false;
   if (T.biome === 'mossy' || T.biome === 'brokensim') return false;
@@ -25227,7 +25235,8 @@ function _swRippleTick(dt) {
   }
   // (v33.69) PHASE 1 displaced-water surface — feed it the SAME sim, follow the ship, A/B against the Reflector.
   // Default OFF (window.__waterDisp). When ON : show the displaced mesh + hide the flat Reflector water.
-  if (typeof window !== 'undefined' && window.__waterDisp) {
+  if (typeof window !== 'undefined' && window.__waterDisp &&
+      !((typeof _cavernWaterCheap === 'function') && _cavernWaterCheap(game.sandwichTerrain))) {
     const WL2 = w ? w.userData.WL : (game._hubWaterWL || 0);
     const dm = _swBuildHubWaterDispGet(WL2);
     if (dm) {
@@ -26150,9 +26159,17 @@ function _swBuildHubWater(T) {
   // ripple simulation is initialised on this branch, so switching it off left the cavern with a
   // dead flat sheet - owner: "no life to the water, it doesn't reflect or move". It is the same
   // pass the hub already pays for, quality-gated the same way.
+  // (v38.21) ...but not on a phone or in a headset. The cavern water added three real costs at
+  // once down there - an extra full scene render for the mirror, the GPU ripple sim, and the
+  // 24576-unit displaced sheet at 768x768 segments (1.2M triangles) - and the owner measured the
+  // result: fine on PC, slow on Quest and on the phone. The cheap branch below is a plain plane
+  // with a vertex swell, so those machines still get water in their caverns, just still water.
+  // (Owner: "maybe it should not ripple or reflect on slower hardware".)
+  const _cavSmall = _cavernWaterCheap(T);
   const _canReflect = (typeof THREE.Reflector === 'function')
     && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())
-    && !(window.__cavernWater && window.__cavernWater.reflect === false);   
+    && !(window.__cavernWater && window.__cavernWater.reflect === false)
+    && !_cavSmall;   
   let mesh;
   if (_canReflect) {
     const dpr = (renderer && renderer.getPixelRatio) ? renderer.getPixelRatio() : 1;
