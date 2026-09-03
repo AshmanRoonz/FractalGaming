@@ -4177,7 +4177,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.92';
+const LSS_BUILD = '37.93';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23673,6 +23673,7 @@ function _carrierFrame(dt) {
   _carrier.ent.position.copy(o.position);
 }
 const _carrierInside = new WeakSet();
+const _cbSeg = new THREE.Vector3();
 const _ccP = new THREE.Vector3(), _ccN = new THREE.Vector3(), _ccQ = new THREE.Quaternion();
 const _ccW = new THREE.Vector3();
 function _carrierCollide(pos, velocity, radius) {
@@ -23849,6 +23850,22 @@ function _carrierDeckPoint(i, out) {
   const k = ((i | 0) % n + n) % n;
   _carrier.obj.updateMatrixWorld(true);
   return _carrier.spawns[k].getWorldPosition(out);
+}
+const _cdP = new THREE.Vector3(), _cdQ = new THREE.Quaternion();
+function _carrierDeckSpot(i, out) {
+  const d = _carrierDeckPoint(i, out);
+  if (!d) return null;
+  const o = _carrier.obj;
+  if (!o || !_carrier.body) { d.y += 70; return d; }
+  _cdQ.copy(o.quaternion).invert();
+  _cdP.copy(d).sub(o.position).applyQuaternion(_cdQ);
+  const S = _carrierBodyAt(_cdP.x, _cdP.z);
+  const top = (S ? S.yHi : _cdP.y) + 95;      // a hull radius (~50) and room to breathe
+  if (_cdP.y < top) {
+    _cdP.y = top;
+    d.copy(_cdP.applyQuaternion(o.quaternion).add(o.position));
+  }
+  return d;
 }
 if (typeof window !== 'undefined') {
   window.__carrier = window.__carrier || {};
@@ -24059,7 +24076,7 @@ function _cyberCinematic(C) {
   const n = Math.min(3, list.length);
   for (let i = 0; i < n; i++) {
     const rec = list[i];
-    const p = _carrierDeckPoint(i) || _carrier.obj.position.clone();
+    const p = _carrierDeckSpot(i) || _carrier.obj.position.clone();
     const sh = rec.mesh.userData && rec.mesh.userData.shieldMesh;
     const fx = (typeof _lssShipEngineFX === 'function') ? _lssShipEngineFX(rec.mesh) : [];
     _cinematic.ships.push({
@@ -24067,7 +24084,7 @@ function _cyberCinematic(C) {
       origPos: new THREE.Vector3(p.x, p.y + 30, p.z), origQuat: q.clone(), origVisible: rec.mesh.visible,
       shield: sh || null, origShieldVisible: sh ? sh.visible : null,
       engineFx: fx.map(o => ({ o, v: o.visible })),
-      pos: { x: p.x, y: p.y + 70, z: p.z }, quat: q,
+      pos: { x: p.x, y: p.y, z: p.z }, quat: q,
     });
   }
   for (const sp of _cinematic.ships) {
@@ -24105,23 +24122,22 @@ function _cyberLineupTrack(C) {
   const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, -1), _carrier.dir.clone().negate());
   for (const sp of _cinematic.ships) {
     if (sp.deckIdx == null) continue;
-    const d = _carrierDeckPoint(sp.deckIdx);
+    const d = _carrierDeckSpot(sp.deckIdx);
     if (!d) continue;
-    sp.pos.x = d.x; sp.pos.y = d.y + 70; sp.pos.z = d.z;
+    sp.pos.x = d.x; sp.pos.y = d.y; sp.pos.z = d.z;
     sp.quat.copy(q);
-    sp.origPos.set(d.x, d.y + 70, d.z);
+    sp.origPos.copy(d);
     sp.origQuat.copy(q);
-    if (sp.ent && sp.ent.position) { sp.ent.position.set(d.x, d.y + 70, d.z); if (sp.ent.velocity) sp.ent.velocity.set(0, 0, 0); }
+    if (sp.ent && sp.ent.position) { sp.ent.position.copy(d); if (sp.ent.velocity) sp.ent.velocity.set(0, 0, 0); }
   }
 }
 function _cyberDeckPlace(C) {
   try { _cyberLineupTrack(C); } catch (_) {}
   if (!C || !C.started || player.team !== C.teamA) return false;
   try {
-    const d = _carrierDeckPoint(0);
+    const d = _carrierDeckSpot(0);
     if (!d) return false;
     player.position.copy(d);
-    player.position.y += 70;
     player.velocity.set(0, 0, 0);
     if (_carrier.dir && _carrier.dir.lengthSq() > 0.5 && player.euler) {
       const h = _carrier.dir;
@@ -24173,11 +24189,9 @@ function _cyberFrame(dt) {
   }
   if (!C.started) _cyberSetup(C);
   if (C.placeT > 0) {
-    C.placeT -= (dt || 0.016);
-    try {
-      const d = _carrierDeckPoint(0);
-      if (d) { player.position.copy(d); player.position.y += 70; player.velocity.set(0, 0, 0); }
-    } catch (_) {}
+    let _held = false;
+    try { _held = _cyberDeckPlace(C); } catch (_) {}
+    if (_held) C.placeT -= (dt || 0.016);
   }
   if (_carrier.dead && !C.lost) {
     C.lost = true;
@@ -30243,13 +30257,24 @@ class Projectile {
       }
     }
 
-    if (this.alive && typeof _carrierBlocks === 'function' && _carrierBlocks(this.position, 0)) {
-      try {
-        if (typeof spawnImpactSparks === 'function') spawnImpactSparks(this.position.clone(), 6);
-        else if (typeof spawnExplosion === 'function' && (this.splash || 0) > 0) spawnExplosion(this.position.clone(), 18);
-      } catch (_) {}
-      this.alive = false;
-      return;
+    if (this.alive && typeof _carrierBlocks === 'function') {
+      let _hit = _carrierBlocks(this.position, 0) ? 0 : -1;
+      if (_hit < 0 && prevPos && typeof _carrierRayDist === 'function') {
+        _cbSeg.subVectors(this.position, prevPos);
+        const _segLen = _cbSeg.length();
+        if (_segLen > 1) _hit = _carrierRayDist(prevPos, _cbSeg.multiplyScalar(1 / _segLen), _segLen);
+      }
+      if (_hit >= 0) {
+        const _at = (_hit > 0 && prevPos)
+          ? new THREE.Vector3().subVectors(this.position, prevPos).normalize().multiplyScalar(_hit).add(prevPos)
+          : this.position.clone();
+        this.position.copy(_at);
+        if (this.mesh) this.mesh.position.copy(_at);
+        try { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_at.clone(), 6); } catch (_) {}
+        try { this.spawnImpactExplosion(_at); } catch (_) {}
+        this.destroy();
+        return;
+      }
     }
     if (this.owner === 'player') {
       for (const bot of game.entities) {

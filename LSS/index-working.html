@@ -4251,7 +4251,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.92';
+const LSS_BUILD = '37.93';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -29768,6 +29768,7 @@ function _carrierFrame(dt) {
 // (v37.91) who is currently INSIDE the hull, keyed by the position vector the collider is handed
 // (ships spawned on the deck). Cleared the moment they are outside it - see _carrierCollide.
 const _carrierInside = new WeakSet();
+const _cbSeg = new THREE.Vector3();
 const _ccP = new THREE.Vector3(), _ccN = new THREE.Vector3(), _ccQ = new THREE.Quaternion();
 const _ccW = new THREE.Vector3();
 function _carrierCollide(pos, velocity, radius) {
@@ -29974,6 +29975,27 @@ function _carrierDeckPoint(i, out) {
   const k = ((i | 0) % n + n) % n;
   _carrier.obj.updateMatrixWorld(true);
   return _carrier.spawns[k].getWorldPosition(out);
+}
+// (v37.93) Where a ship can actually SIT on the deck. The markers are on the plating, and the
+// collider inflates the hull by the ship's own radius - so a fixed offset over the marker put the
+// attacker inside the collision surface, where the hull is not solid to it: stuck to the carrier,
+// able to fly through it, and unable to get back that close once out. Ask the hull map how tall the
+// hull is at that spot instead, and sit a ship clear of it.
+const _cdP = new THREE.Vector3(), _cdQ = new THREE.Quaternion();
+function _carrierDeckSpot(i, out) {
+  const d = _carrierDeckPoint(i, out);
+  if (!d) return null;
+  const o = _carrier.obj;
+  if (!o || !_carrier.body) { d.y += 70; return d; }
+  _cdQ.copy(o.quaternion).invert();
+  _cdP.copy(d).sub(o.position).applyQuaternion(_cdQ);
+  const S = _carrierBodyAt(_cdP.x, _cdP.z);
+  const top = (S ? S.yHi : _cdP.y) + 95;      // a hull radius (~50) and room to breathe
+  if (_cdP.y < top) {
+    _cdP.y = top;
+    d.copy(_cdP.applyQuaternion(o.quaternion).add(o.position));
+  }
+  return d;
 }
 if (typeof window !== 'undefined') {
   window.__carrier = window.__carrier || {};
@@ -30224,7 +30246,7 @@ function _cyberCinematic(C) {
   const n = Math.min(3, list.length);
   for (let i = 0; i < n; i++) {
     const rec = list[i];
-    const p = _carrierDeckPoint(i) || _carrier.obj.position.clone();
+    const p = _carrierDeckSpot(i) || _carrier.obj.position.clone();
     const sh = rec.mesh.userData && rec.mesh.userData.shieldMesh;
     const fx = (typeof _lssShipEngineFX === 'function') ? _lssShipEngineFX(rec.mesh) : [];
     _cinematic.ships.push({
@@ -30234,7 +30256,7 @@ function _cyberCinematic(C) {
       origPos: new THREE.Vector3(p.x, p.y + 30, p.z), origQuat: q.clone(), origVisible: rec.mesh.visible,
       shield: sh || null, origShieldVisible: sh ? sh.visible : null,
       engineFx: fx.map(o => ({ o, v: o.visible })),
-      pos: { x: p.x, y: p.y + 70, z: p.z }, quat: q,
+      pos: { x: p.x, y: p.y, z: p.z }, quat: q,
     });
   }
   for (const sp of _cinematic.ships) {
@@ -30284,24 +30306,23 @@ function _cyberLineupTrack(C) {
   const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, -1), _carrier.dir.clone().negate());
   for (const sp of _cinematic.ships) {
     if (sp.deckIdx == null) continue;
-    const d = _carrierDeckPoint(sp.deckIdx);
+    const d = _carrierDeckSpot(sp.deckIdx);
     if (!d) continue;
-    sp.pos.x = d.x; sp.pos.y = d.y + 70; sp.pos.z = d.z;
+    sp.pos.x = d.x; sp.pos.y = d.y; sp.pos.z = d.z;
     sp.quat.copy(q);
-    sp.origPos.set(d.x, d.y + 70, d.z);
+    sp.origPos.copy(d);
     sp.origQuat.copy(q);
     // the bots' own positions too, so they do not snap when the lineup lets go
-    if (sp.ent && sp.ent.position) { sp.ent.position.set(d.x, d.y + 70, d.z); if (sp.ent.velocity) sp.ent.velocity.set(0, 0, 0); }
+    if (sp.ent && sp.ent.position) { sp.ent.position.copy(d); if (sp.ent.velocity) sp.ent.velocity.set(0, 0, 0); }
   }
 }
 function _cyberDeckPlace(C) {
   try { _cyberLineupTrack(C); } catch (_) {}
   if (!C || !C.started || player.team !== C.teamA) return false;
   try {
-    const d = _carrierDeckPoint(0);
+    const d = _carrierDeckSpot(0);
     if (!d) return false;
     player.position.copy(d);
-    player.position.y += 70;
     player.velocity.set(0, 0, 0);
     // (v37.89) ...and FACING the way the lineup drew it. The cinematic poses the MESH; the real
     // heading was still the free-flight spawn's, so the moment the rig took over the hull swung
@@ -30368,11 +30389,12 @@ function _cyberFrame(dt) {
   // frame after 'playing' begins - so the deck is re-asserted for a couple of seconds rather than
   // written once and overwritten.
   if (C.placeT > 0) {
-    C.placeT -= (dt || 0.016);
-    try {
-      const d = _carrierDeckPoint(0);
-      if (d) { player.position.copy(d); player.position.y += 70; player.velocity.set(0, 0, 0); }
-    } catch (_) {}
+    // (v37.93) count down only while the placement is LANDING. It used to run the clock whether or
+    // not the carrier was ready, so a couple of unlucky frames left free flight's own spawn
+    // standing - a different portal ring, a different biome from the one the lineup just showed.
+    let _held = false;
+    try { _held = _cyberDeckPlace(C); } catch (_) {}
+    if (_held) C.placeT -= (dt || 0.016);
   }
   if (_carrier.dead && !C.lost) {
     C.lost = true;
@@ -38604,13 +38626,27 @@ class Projectile {
     // (v37.85) THE CARRIER STOPS BULLETS. Blocking is separate from damage: the loops below skip
     // anything on your own team, so your own carrier was a ghost to your guns. A shot that enters
     // the hull ends there ; whether it hurts it is the entity loops' business, not the wall's.
-    if (this.alive && typeof _carrierBlocks === 'function' && _carrierBlocks(this.position, 0)) {
-      try {
-        if (typeof spawnImpactSparks === 'function') spawnImpactSparks(this.position.clone(), 6);
-        else if (typeof spawnExplosion === 'function' && (this.splash || 0) > 0) spawnExplosion(this.position.clone(), 18);
-      } catch (_) {}
-      this.alive = false;
-      return;
+    if (this.alive && typeof _carrierBlocks === 'function') {
+      // (v37.93) SWEPT, and it DESTROYS. Testing only where the shot is now missed glancing hits -
+      // 3000 u/s is 50 units a frame against ~34-unit map cells - and setting alive = false without
+      // destroy() left the mesh in the scene, which is why rockets piled up hanging at the hull.
+      let _hit = _carrierBlocks(this.position, 0) ? 0 : -1;
+      if (_hit < 0 && prevPos && typeof _carrierRayDist === 'function') {
+        _cbSeg.subVectors(this.position, prevPos);
+        const _segLen = _cbSeg.length();
+        if (_segLen > 1) _hit = _carrierRayDist(prevPos, _cbSeg.multiplyScalar(1 / _segLen), _segLen);
+      }
+      if (_hit >= 0) {
+        const _at = (_hit > 0 && prevPos)
+          ? new THREE.Vector3().subVectors(this.position, prevPos).normalize().multiplyScalar(_hit).add(prevPos)
+          : this.position.clone();
+        this.position.copy(_at);
+        if (this.mesh) this.mesh.position.copy(_at);
+        try { if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_at.clone(), 6); } catch (_) {}
+        try { this.spawnImpactExplosion(_at); } catch (_) {}
+        this.destroy();
+        return;
+      }
     }
     if (this.owner === 'player') {
       for (const bot of game.entities) {
