@@ -3546,7 +3546,7 @@ body.vr-active #camp-video { display: none !important; }
 
 /* (v35.20) #lobby-room-join-btn joins this group so CREATE / JOIN reads as one
    of the menu entries rather than a boxed form button. */
-#btn-solo, #btn-campaign, #btn-endless, #btn-freeflight, #btn-howto, #btn-join, #btn-race, #btn-assault, #lobby-room-join-btn {
+#btn-solo, #btn-campaign, #btn-endless, #btn-cyberpunk, #btn-freeflight, #btn-howto, #btn-join, #btn-race, #btn-assault, #lobby-room-join-btn {
   background: transparent !important; border: none !important;
   border-radius: 0 !important; box-shadow: none !important;
   min-height: 0 !important; padding: 7px 0 !important; margin: 0 !important;
@@ -3597,6 +3597,13 @@ body.vr-active #camp-video { display: none !important; }
 #btn-endless:hover {
   color: #ffb391 !important; transform: translateX(12px);
   text-shadow: 0 0 24px rgba(255,138,92,0.7);
+  background: transparent !important; border: none !important;
+}
+/* (v37.81) CYBERPUNK CITY takes the city's own counter-neon, the rose against its ice-cyan. */
+#btn-cyberpunk { color: #f06cff !important; }
+#btn-cyberpunk:hover {
+  color: #ffa8ff !important; transform: translateX(12px);
+  text-shadow: 0 0 24px rgba(240,108,255,0.7);
   background: transparent !important; border: none !important;
 }
 #btn-freeflight { color: #5fd39a !important; }
@@ -4170,7 +4177,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.80';
+const LSS_BUILD = '37.82';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -19100,6 +19107,7 @@ function _hzPortalsFrame(dt) {
   const T = game.sandwichTerrain;
   if (!T || !T.ON || T.biome !== 'mossy') return;
   if (net && net.active) { _hzPortalsDispose(); return; }   // solo-only, like the rift
+  if (game._cyber && game._cyber.armed) { _hzPortalsDispose(); return; }
   if (game.state !== 'playing') return;
   if (_HZ_CAVERN._returnPos && player && player.position) {
     player.position.copy(_HZ_CAVERN._returnPos);
@@ -23253,7 +23261,7 @@ const CARRIER = {
   zapRange: 1600,     // the guns answer anything hostile inside this
   zapEvery: 0.7,      // seconds between bolts
   zapDamage: 200,     // (v37.78) was 550 - ~285 dps deters, 785 deleted a dreadnought in 9 s
-  glow: 0.10,         // engine orb radius as a fraction of hull height (548 -> ~55 units)
+  glow: 0.08,         // engine orb radius as a fraction of hull height (v37.81: -20%, owner)
 };
 const _carrier = {
   obj: null, ent: null, proto: null, loading: false,
@@ -23484,6 +23492,7 @@ function _carrierClear() {
 function _carrierFrame(dt) {
   if (!_carrier.obj || !_carrier.ent) return;
   if (!_carrier.ent.alive) return;
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
   _carrier.t += (dt || 0.016);
   const travelled = Math.min(_carrier.dist, _carrierSpeed() * _carrier.t);
   const o = _carrier.obj;
@@ -23621,8 +23630,9 @@ if (typeof window !== 'undefined') {
   });
 }
 const CYBER = {
-  attackers: 3,       // bots flying in from the carrier alongside the player
-  defenders: 4,       // bots holding the city
+  team: 3,
+  attackers: null,    // null = fill the team around the humans ; a number forces a bot count
+  defenders: null,
   respawn: 6,         // seconds before a downed bot returns
   capture: 12,        // seconds an attacker must hold the field to win
   botShips: ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'],
@@ -23698,8 +23708,16 @@ function _cyberTeamForPeer(id, C) {
 }
 function _cyberSpawnBots(C) {
   const K = window.__cyber || (window.__cyber = {});
-  const nA = (K.attackers != null) ? K.attackers : CYBER.attackers;
-  const nD = (K.defenders != null) ? K.defenders : CYBER.defenders;
+  const team = (K.team != null) ? K.team : CYBER.team;
+  let humanA = 0, humanD = 0;
+  try {
+    if (net.active) {
+      const ids = [net.myPeerId, ...(typeof nonJudgePeerIds === 'function' ? nonJudgePeerIds() : [])].sort();
+      for (const id of ids) (_cyberTeamForPeer(id, C) === C.teamA ? humanA++ : humanD++);
+    } else { humanA = 1; }
+  } catch (_) { humanA = 1; }
+  const nA = (K.attackers != null) ? K.attackers : Math.max(0, team - humanA);
+  const nD = (K.defenders != null) ? K.defenders : Math.max(0, team - humanD);
   let id = 9300;
   const make = (team, atk, i) => {
     let b = null;
@@ -23780,6 +23798,59 @@ function _cyberCityDefence(C) {
     else if (!e._dmgLog) { e.aggro = false; }   // one that was actually shot stays angry
   }
 }
+function _cyberCinematic(C) {
+  if (typeof _cinematic === 'undefined' || !_cinematic || !_carrier.obj) return false;
+  if (player.team !== C.teamA) return false;          // defenders are already in the city
+  const list = [];
+  if (player && player.mesh) list.push({ mesh: player.mesh, isPlayer: true });
+  for (const b of C.bots) if (b && b._cyberAttacker && b.mesh) list.push({ mesh: b.mesh, isPlayer: false });
+  if (!list.length) return false;
+  const heading = _carrier.dir.clone();
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, -1), heading.clone().negate());
+  _cinematic.ships = [];
+  const n = Math.min(3, list.length);
+  for (let i = 0; i < n; i++) {
+    const rec = list[i];
+    const p = _carrierDeckPoint(i) || _carrier.obj.position.clone();
+    const sh = rec.mesh.userData && rec.mesh.userData.shieldMesh;
+    const fx = (typeof _lssShipEngineFX === 'function') ? _lssShipEngineFX(rec.mesh) : [];
+    _cinematic.ships.push({
+      mesh: rec.mesh, isPlayer: rec.isPlayer,
+      origPos: rec.mesh.position.clone(), origQuat: rec.mesh.quaternion.clone(), origVisible: rec.mesh.visible,
+      shield: sh || null, origShieldVisible: sh ? sh.visible : null,
+      engineFx: fx.map(o => ({ o, v: o.visible })),
+      pos: { x: p.x, y: p.y + 30, z: p.z }, quat: q,
+    });
+  }
+  for (const sp of _cinematic.ships) {
+    sp.mesh.visible = true;
+    sp.mesh.position.set(sp.pos.x, sp.pos.y, sp.pos.z);
+    sp.mesh.quaternion.copy(sp.quat);
+    if (sp.shield) sp.shield.visible = false;
+    if (sp.engineFx) for (const e of sp.engineFx) e.o.visible = false;
+  }
+  const P = _carrier.obj.position;
+  const L = _carrier.size ? _carrier.size.x : 1367;
+  const CN = window.__cine || (window.__cine = {});
+  _cinematic.orbitR = L * ((CN.carrierR != null) ? CN.carrierR : 1.15);
+  _cinematic.orbitY = P.y + L * 0.20;
+  _cinematic.orbitCX = P.x;
+  _cinematic.orbitCZ = P.z;
+  _cinematic.orbitA0 = Math.atan2(heading.z, heading.x);
+  _cinematic.orbitArc = (CN.arc != null) ? CN.arc : Math.PI * 0.5;
+  _cinematic.fovCine = (CN.fov != null) ? CN.fov : 65;
+  _cinematic.fov0 = (typeof camera !== 'undefined' && camera) ? camera.fov : 75;
+  _cinematic.camTarget.set(P.x, P.y + L * 0.04, P.z);
+  _cinematic.camPos.set(P.x, _cinematic.orbitY, P.z);
+  _cinematic.baseY = _cinematic.orbitY;
+  _cinematic.duration = (CN.dur != null) ? CN.dur : 7.0;
+  _cinematic.startMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  _cinematic.after = null;
+  _cinematic.active = true;
+  try { _lssEnsureCinematicStyles(); document.body.classList.add('lss-cinematic-active'); } catch (_) {}
+  try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
+  return true;
+}
 function _cyberFrame(dt) {
   const C = game._cyber;
   if (!C || !C.armed || game.state !== 'playing') return;
@@ -23810,6 +23881,7 @@ function _cyberFrame(dt) {
     try {
       if (window.Overlays && Overlays.banner) Overlays.banner('CYBERPUNK CITY', 'take the field in the city');
     } catch (_) {}
+    try { _cyberCinematic(C); } catch (e) { console.warn('[cyber] cinematic:', e); }
   }
   if (C.placeT > 0) {
     C.placeT -= (dt || 0.016);
