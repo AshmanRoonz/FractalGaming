@@ -4198,7 +4198,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.14';
+const LSS_BUILD = '38.15';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -19496,6 +19496,7 @@ const _swRipple = {
 const _SW_RIPPLE_FRAG = [
   '#include <common>',               
   'uniform float viscosity;',
+  'uniform float uWaveC2;',   // (v38.15) wave speed squared - was the literal 0.05
   'uniform vec4 uSeeds[8];',         
   'uniform int uSeedCount;',
   'uniform sampler2D uMaskTex;',     
@@ -19511,7 +19512,7 @@ const _SW_RIPPLE_FRAG = [
   '  float s = (texture2D(uMaskTex, uv + vec2(0.0, -cellSize.y)).x < 0.5) ? hC : texture2D(heightmap, suv + vec2(0.0, -cellSize.y)).x;',
   '  float e = (texture2D(uMaskTex, uv + vec2( cellSize.x, 0.0)).x < 0.5) ? hC : texture2D(heightmap, suv + vec2( cellSize.x, 0.0)).x;',
   '  float w = (texture2D(uMaskTex, uv + vec2(-cellSize.x, 0.0)).x < 0.5) ? hC : texture2D(heightmap, suv + vec2(-cellSize.x, 0.0)).x;',
-  '  float nh = (2.0 * hC - h.y + 0.05 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
+  '  float nh = (2.0 * hC - h.y + uWaveC2 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
   '  vec2 wpos = (uv - 0.5) * BOUNDS;',
   '  for (int i = 0; i < 8; i++){',
   '    if (i >= uSeedCount) break;',
@@ -19539,7 +19540,8 @@ function _swRippleInit() {
     v.material.defines = v.material.defines || {};
     v.material.defines.BOUNDS = _SW_RIPPLE_BOUNDS.toFixed(1);
     const seeds = []; for (let i = 0; i < 8; i++) seeds.push(new THREE.Vector4(0, 0, 1, 0));
-    v.material.uniforms.viscosity = { value: 0.972 };    
+    v.material.uniforms.viscosity = { value: 0.9885 };   // (v38.15) 0.972 -> longer-lived energy
+    v.material.uniforms.uWaveC2 = { value: 0.16 };       // (v38.15) 0.05 -> ripples that travel    
     v.material.uniforms.uSeeds = { value: seeds };
     v.material.uniforms.uSeedCount = { value: 0 };
     v.material.uniforms.uScroll = { value: new THREE.Vector2(0, 0) };   
@@ -19788,7 +19790,15 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL) {
 }
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
-  if (game._xrBlurred) return;   
+  if (game._xrBlurred) return;
+  try {
+    const _W3 = window.__water;
+    if (_W3 && R.heightVar && R.heightVar.material && R.heightVar.material.uniforms) {
+      const _u = R.heightVar.material.uniforms;
+      if (_W3.waveC2 != null && _u.uWaveC2) _u.uWaveC2.value = _W3.waveC2;
+      if (_W3.visc != null && _u.viscosity) _u.viscosity.value = _W3.visc;
+    }
+  } catch (_) {}   
   
   if (!player || !player.position) return;
   const _cineW = (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);

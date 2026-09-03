@@ -4272,7 +4272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.14';
+const LSS_BUILD = '38.15';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -24563,6 +24563,7 @@ const _swRipple = {
 const _SW_RIPPLE_FRAG = [
   '#include <common>',               
   'uniform float viscosity;',
+  'uniform float uWaveC2;',   // (v38.15) wave speed squared - was the literal 0.05
   'uniform vec4 uSeeds[8];',         
   'uniform int uSeedCount;',
   'uniform sampler2D uMaskTex;',     
@@ -24585,7 +24586,13 @@ const _SW_RIPPLE_FRAG = [
   // (v33.24) discrete wave equation in explicit Courant form. `(n+s+e+w)*0.5 - h.y` was C2=0.5 —
   // the 2D stability LIMIT = MAX propagation speed (ripples raced out unrealistically fast). Drop
   // the wave-speed^2 to 0.13 so ripples spread at a believable pace (prev height in .y ; well stable).
-  '  float nh = (2.0 * hC - h.y + 0.05 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
+  // (v38.15) MORE ENERGY THROUGH THE BODY. C2 was a hard 0.05 against a stability limit of 0.5,
+  // so a ripple crawled and was damped to nothing within a few hundred units - the cymatic
+  // interference the shoreline reflection is set up to produce never had the reach to form. It is a
+  // uniform now (window.__water.waveC2), defaulting well under the limit but three times what it
+  // was, and viscosity is nearer 1 so the energy survives long enough to come back off a shore and
+  // meet itself.
+  '  float nh = (2.0 * hC - h.y + uWaveC2 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
   '  vec2 wpos = (uv - 0.5) * BOUNDS;',
   '  for (int i = 0; i < 8; i++){',
   '    if (i >= uSeedCount) break;',
@@ -24621,7 +24628,8 @@ function _swRippleInit() {
     v.material.defines = v.material.defines || {};
     v.material.defines.BOUNDS = _SW_RIPPLE_BOUNDS.toFixed(1);
     const seeds = []; for (let i = 0; i < 8; i++) seeds.push(new THREE.Vector4(0, 0, 1, 0));
-    v.material.uniforms.viscosity = { value: 0.972 };    
+    v.material.uniforms.viscosity = { value: 0.9885 };   // (v38.15) 0.972 -> longer-lived energy
+    v.material.uniforms.uWaveC2 = { value: 0.16 };       // (v38.15) 0.05 -> ripples that travel    
     v.material.uniforms.uSeeds = { value: seeds };
     v.material.uniforms.uSeedCount = { value: 0 };
     v.material.uniforms.uScroll = { value: new THREE.Vector2(0, 0) };   
@@ -24924,7 +24932,18 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL) {
 // Per-frame driver — runs in the master tick BEFORE renderer.render.
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
-  if (game._xrBlurred) return;   
+  if (game._xrBlurred) return;
+  // (v38.15) live A/B for the two that decide how far a ripple carries. The shipped feel is
+  // waveC2 0.16 / visc 0.9885 ; window.__water = { waveC2: 0.05, visc: 0.972 } is the old water
+  // exactly, so the change can be judged against it without a rebuild.
+  try {
+    const _W3 = window.__water;
+    if (_W3 && R.heightVar && R.heightVar.material && R.heightVar.material.uniforms) {
+      const _u = R.heightVar.material.uniforms;
+      if (_W3.waveC2 != null && _u.uWaveC2) _u.uWaveC2.value = _W3.waveC2;
+      if (_W3.visc != null && _u.viscosity) _u.viscosity.value = _W3.visc;
+    }
+  } catch (_) {}   
   
   if (!player || !player.position) return;
   // (v33.98) during the intro cinematic the ship is FROZEN at spawn while the camera flies — track the CAMERA
