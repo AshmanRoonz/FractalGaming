@@ -108,6 +108,25 @@
     </div>
 
     <div class="section">
+      <h2>Glass Paint</h2>
+      <button id="btn-paint" disabled>Paint Glass: OFF</button>
+      <p class="hint">Select the hull surface, toggle on, then <b>left-drag</b> to paint the canopy glass green. <b>Right-drag</b> orbits, wheel zooms, <b>Shift</b> erases, <b>[ ]</b> change the brush. Mirror paints both sides at once. Export writes <code>&lt;ship&gt;_glass.json</code>; put it in <code>tools/blender/marks/</code> (or use Save to pipeline while <code>python tools/glb_editor_server.py</code> runs) and the cockpit pipeline uses exactly these faces as the window.</p>
+      <label>Brush <span id="paint-radius-val">3%</span>
+        <input type="range" id="paint-radius" min="0.5" max="12" step="0.5" value="3">
+      </label>
+      <label><input type="checkbox" id="paint-mirror" checked> Mirror across
+        <select id="paint-axis"><option value="z" selected>Z (ship left/right)</option><option value="x">X</option><option value="y">Y</option></select>
+      </label>
+      <label><input type="checkbox" id="paint-front" checked> Front-facing faces only</label>
+      <div id="paint-info" class="hint">No marks.</div>
+      <button id="btn-paint-clear" disabled>Clear marks</button>
+      <button id="btn-paint-export" disabled>Export marks JSON</button>
+      <button id="btn-paint-save" disabled>Save to pipeline (needs server)</button>
+      <button id="btn-paint-load" disabled>Load marks JSON</button>
+      <input type="file" id="paint-load-input" accept=".json" style="display:none">
+    </div>
+
+    <div class="section">
       <h2>Color</h2>
       <input type="color" id="color-picker" value="#ffffff">
       <label>Metalness <span id="metal-val">0.0</span>
@@ -591,7 +610,7 @@ function clearScene() {
   rebuildLists();
 }
 
-function loadGLB(arrayBuffer, name) {
+let loadGLB = function loadGLB(arrayBuffer, name) {
   clearScene();
   const loader = new GLTFLoader();
   loader.parse(arrayBuffer, '', (gltf) => {
@@ -651,7 +670,7 @@ function loadGLB(arrayBuffer, name) {
     console.error(err);
     showStatus('Failed to load GLB: ' + err.message, 4000);
   });
-}
+};
 
 function convertMaterial(src) {
   // Use MeshStandardMaterial so PBR properties survive export
@@ -894,7 +913,276 @@ document.getElementById('btn-save').addEventListener('click', () => {
   }, { binary: true, embedImages: true });
 });
 
+// =============================================================== GLASS PAINT ==
+// Paint the canopy glass straight onto the hull (the cockpit pipeline could never find it
+// reliably on these multi-shell AI hulls ; the owner can, in a minute). The selected mesh is
+// made non-indexed so every triangle owns its 3 vertices ; a per-vertex `mark` attribute tints
+// painted triangles green through onBeforeCompile ; picking is a GPU id pass (triangle index
+// encoded as colour, read back for the 1 pixel under the cursor) so a million-triangle hull
+// paints at full speed. The brush marks every triangle whose centroid lies within the radius
+// of the picked triangle's centroid (uniform grid), optionally mirrored across an axis and
+// limited to faces that face the camera.
+const paint = { on: false, mesh: null, n: 0, mark: null, cen: null, nrm: null, grid: null, cell: 1, gmin: null, gdim: null,
+                markAttr: null, pickMesh: null, pickScene: null, pickRT: null, painting: false, erase: false, radiusPct: 3,
+                fileName: 'model' };
+const paintBtn = document.getElementById('btn-paint');
+const paintInfo = document.getElementById('paint-info');
+
+function paintTarget() {
+  if (selectedMesh && selectedMesh.isMesh) return selectedMesh;
+  let best = null, bestN = 0;                       // the biggest surface = the hull
+  for (const m of meshes) { const n = m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count; if (n > bestN) { bestN = n; best = m; } }
+  return best;
+}
+
+function paintPrepare(mesh) {
+  if (paint.mesh === mesh) return;
+  paintRelease();
+  let g = mesh.geometry;
+  if (g.index) { const ng = g.toNonIndexed(); g.dispose(); g = ng; mesh.geometry = g; }
+  const pos = g.attributes.position.array;
+  const nv = g.attributes.position.count;
+  const n = nv / 3;
+  const cen = new Float32Array(n * 3), nrm = new Float32Array(n * 3), fid = new Float32Array(nv), mark = new Float32Array(nv);
+  const bmin = [Infinity, Infinity, Infinity], bmax = [-Infinity, -Infinity, -Infinity];
+  for (let t = 0; t < n; t++) {
+    const i0 = 9 * t;
+    const ax = pos[i0], ay = pos[i0 + 1], az = pos[i0 + 2], bx = pos[i0 + 3], by = pos[i0 + 4], bz = pos[i0 + 5], cx = pos[i0 + 6], cy = pos[i0 + 7], cz = pos[i0 + 8];
+    const mx = (ax + bx + cx) / 3, my = (ay + by + cy) / 3, mz = (az + bz + cz) / 3;
+    cen[3 * t] = mx; cen[3 * t + 1] = my; cen[3 * t + 2] = mz;
+    const ux = bx - ax, uy = by - ay, uz = bz - az, vx = cx - ax, vy = cy - ay, vz = cz - az;
+    let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    const l = Math.hypot(nx, ny, nz) || 1; nrm[3 * t] = nx / l; nrm[3 * t + 1] = ny / l; nrm[3 * t + 2] = nz / l;
+    fid[3 * t] = fid[3 * t + 1] = fid[3 * t + 2] = t;
+    if (mx < bmin[0]) bmin[0] = mx; if (my < bmin[1]) bmin[1] = my; if (mz < bmin[2]) bmin[2] = mz;
+    if (mx > bmax[0]) bmax[0] = mx; if (my > bmax[1]) bmax[1] = my; if (mz > bmax[2]) bmax[2] = mz;
+  }
+  // uniform grid over the centroids (cell = 1/48 of the longest side)
+  const ext = Math.max(bmax[0] - bmin[0], bmax[1] - bmin[1], bmax[2] - bmin[2]) || 1;
+  const cell = ext / 48;
+  const gdim = [0, 1, 2].map(i => Math.floor((bmax[i] - bmin[i]) / cell) + 2);
+  const counts = new Int32Array(gdim[0] * gdim[1] * gdim[2] + 1);
+  const key = (t) => { const ix = Math.floor((cen[3 * t] - bmin[0]) / cell), iy = Math.floor((cen[3 * t + 1] - bmin[1]) / cell), iz = Math.floor((cen[3 * t + 2] - bmin[2]) / cell); return (ix * gdim[1] + iy) * gdim[2] + iz; };
+  for (let t = 0; t < n; t++) counts[key(t) + 1]++;
+  for (let i = 1; i < counts.length; i++) counts[i] += counts[i - 1];
+  const items = new Int32Array(n), fill = counts.slice(0, counts.length - 1);
+  for (let t = 0; t < n; t++) items[fill[key(t)]++] = t;
+  g.setAttribute('fid', new THREE.BufferAttribute(fid, 1));
+  const markAttr = new THREE.BufferAttribute(mark, 1);
+  markAttr.setUsage(THREE.DynamicDrawUsage);
+  g.setAttribute('mark', markAttr);
+  // green tint through the material
+  const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  for (const m of mats) {
+    m.onBeforeCompile = (sh) => {
+      sh.vertexShader = 'attribute float mark;\nvarying float vMark;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\nvMark = mark;');
+      sh.fragmentShader = 'varying float vMark;\n' + sh.fragmentShader
+        .replace('#include <color_fragment>', '#include <color_fragment>\ndiffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.25, 1.0, 0.35), vMark * 0.7);')
+        .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\ntotalEmissiveRadiance += vec3(0.04, 0.30, 0.08) * vMark;');
+    };
+    m.customProgramCacheKey = () => 'glasspaint';
+    m.needsUpdate = true;
+  }
+  // GPU id picking
+  const pickMat = new THREE.ShaderMaterial({
+    vertexShader: 'attribute float fid;\nvarying float vId;\nvoid main(){ vId = fid; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: 'varying float vId;\nvoid main(){ float id = floor(vId + 0.5); float r = mod(id, 256.0); float g = mod(floor(id / 256.0), 256.0); float b = floor(id / 65536.0); gl_FragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0); }',
+    side: THREE.FrontSide,
+  });
+  const pickMesh = new THREE.Mesh(g, pickMat);
+  pickMesh.matrixAutoUpdate = false;
+  const pickScene = new THREE.Scene();
+  pickScene.background = new THREE.Color(0xffffff);
+  pickScene.add(pickMesh);
+  const pickRT = new THREE.WebGLRenderTarget(1, 1, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+  Object.assign(paint, { mesh, n, mark, cen, nrm, grid: { counts, items }, cell, gmin: bmin, gdim, markAttr, pickMesh, pickScene, pickRT });
+  paintUpdateInfo();
+}
+
+function paintRelease() {
+  if (!paint.mesh) return;
+  const mats = Array.isArray(paint.mesh.material) ? paint.mesh.material : [paint.mesh.material];
+  for (const m of mats) { m.onBeforeCompile = () => {}; m.customProgramCacheKey = () => ''; m.needsUpdate = true; }
+  if (paint.pickRT) paint.pickRT.dispose();
+  Object.assign(paint, { mesh: null, n: 0, mark: null, cen: null, nrm: null, grid: null, markAttr: null, pickMesh: null, pickScene: null, pickRT: null });
+}
+
+function paintPick(clientX, clientY) {
+  const rect = renderer.domElement.getBoundingClientRect();
+  const dpr = renderer.getPixelRatio();
+  const x = (clientX - rect.left) * dpr, y = (clientY - rect.top) * dpr;
+  const W = rect.width * dpr, H = rect.height * dpr;
+  paint.mesh.updateWorldMatrix(true, false);
+  paint.pickMesh.matrix.copy(paint.mesh.matrixWorld);
+  camera.setViewOffset(W, H, x, y, 1, 1);
+  const prev = renderer.getRenderTarget();
+  renderer.setRenderTarget(paint.pickRT);
+  renderer.render(paint.pickScene, camera);
+  const px = new Uint8Array(4);
+  renderer.readRenderTargetPixels(paint.pickRT, 0, 0, 1, 1, px);
+  renderer.setRenderTarget(prev);
+  camera.clearViewOffset();
+  const id = px[0] + px[1] * 256 + px[2] * 65536;
+  return (id >= paint.n) ? -1 : id;
+}
+
+function paintBrushAt(cx, cy, cz, r, erase, camDir, frontOnly) {
+  const { cen, nrm, grid, cell, gmin, gdim, mark } = paint;
+  const r2 = r * r;
+  const lo = [0, 1, 2].map(i => Math.max(0, Math.floor(([cx, cy, cz][i] - r - gmin[i]) / cell)));
+  const hi = [0, 1, 2].map(i => Math.min(gdim[i] - 1, Math.floor(([cx, cy, cz][i] + r - gmin[i]) / cell)));
+  let changed = 0;
+  for (let ix = lo[0]; ix <= hi[0]; ix++) for (let iy = lo[1]; iy <= hi[1]; iy++) for (let iz = lo[2]; iz <= hi[2]; iz++) {
+    const k = (ix * gdim[1] + iy) * gdim[2] + iz;
+    for (let j = grid.counts[k]; j < grid.counts[k + 1]; j++) {
+      const t = grid.items[j];
+      const dx = cen[3 * t] - cx, dy = cen[3 * t + 1] - cy, dz = cen[3 * t + 2] - cz;
+      if (dx * dx + dy * dy + dz * dz > r2) continue;
+      if (frontOnly && (nrm[3 * t] * camDir[0] + nrm[3 * t + 1] * camDir[1] + nrm[3 * t + 2] * camDir[2]) > 0) continue;
+      const v = erase ? 0 : 1;
+      if (mark[3 * t] !== v) { mark[3 * t] = mark[3 * t + 1] = mark[3 * t + 2] = v; changed++; }
+    }
+  }
+  return changed;
+}
+
+function paintStroke(clientX, clientY) {
+  if (!paint.mesh) return;
+  const id = paintPick(clientX, clientY);
+  if (id < 0) return;
+  const c = paint.cen;
+  const r = paint.radiusPct / 100 * (Math.max(...paint.gdim) * paint.cell);
+  const camDirW = camera.getWorldDirection(new THREE.Vector3());
+  const camDirL = camDirW.clone().applyMatrix3(new THREE.Matrix3().setFromMatrix4(paint.mesh.matrixWorld).invert()).normalize();
+  const front = document.getElementById('paint-front').checked;
+  const cd = [camDirL.x, camDirL.y, camDirL.z];
+  let changed = paintBrushAt(c[3 * id], c[3 * id + 1], c[3 * id + 2], r, paint.erase, cd, front);
+  if (document.getElementById('paint-mirror').checked) {
+    const ax = document.getElementById('paint-axis').value;
+    const m = [c[3 * id], c[3 * id + 1], c[3 * id + 2]];
+    const md = cd.slice();
+    if (ax === 'x') { m[0] = -m[0]; md[0] = -md[0]; } else if (ax === 'y') { m[1] = -m[1]; md[1] = -md[1]; } else { m[2] = -m[2]; md[2] = -md[2]; }
+    changed += paintBrushAt(m[0], m[1], m[2], r, paint.erase, md, front);
+  }
+  if (changed) { paint.markAttr.needsUpdate = true; paintUpdateInfo(); }
+}
+
+function paintUpdateInfo() {
+  if (!paint.mark) { paintInfo.textContent = 'No marks.'; return; }
+  let n = 0; for (let t = 0; t < paint.n; t++) if (paint.mark[3 * t] > 0.5) n++;
+  paintInfo.textContent = n ? `${n.toLocaleString()} of ${paint.n.toLocaleString()} triangles marked as glass` : 'No marks.';
+  document.getElementById('btn-paint-clear').disabled = !n;
+  document.getElementById('btn-paint-export').disabled = !n;
+  document.getElementById('btn-paint-save').disabled = !n;
+}
+
+function setPaintMode(on) {
+  if (on && !loadedRoot) return;
+  if (on) {
+    const t = paintTarget();
+    if (!t) { showStatus('No surface to paint', 3000); return; }
+    setPlaceMode(null);
+    paintPrepare(t);
+    controls.mouseButtons = { LEFT: -1, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+    showStatus('Paint Glass ON: left-drag paints, right-drag orbits, Shift erases, [ ] brush size', 5000);
+  } else {
+    controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+    paint.painting = false;
+  }
+  paint.on = on;
+  paintBtn.textContent = 'Paint Glass: ' + (on ? 'ON' : 'OFF');
+  paintBtn.classList.toggle('primary', on);
+  document.getElementById('btn-paint-load').disabled = !loadedRoot;
+}
+
+function paintMarksJSON() {
+  const ids = [];
+  for (let t = 0; t < paint.n; t++) if (paint.mark[3 * t] > 0.5) ids.push(t);
+  const cen = paint.cen;
+  const centroids = ids.map(t => [+cen[3 * t].toFixed(5), +cen[3 * t + 1].toFixed(5), +cen[3 * t + 2].toFixed(5)]);
+  const markerOut = (list) => list.map(o => { const p = o.position; return [+p.x.toFixed(5), +p.y.toFixed(5), +p.z.toFixed(5)]; });
+  return { version: 1, file: paint.fileName, mesh: paint.mesh.name || '', tris: paint.n, marked: ids, centroids,
+           coords: 'glTF local space of the mesh (three.js) ; Blender = (x, -z, y)',
+           markers: { cockpit: markerOut(cockpitMarkers), gun: markerOut(gunMarkers), thruster: markerOut(thrusterMarkers) } };
+}
+
+function paintShipName() {
+  return (paint.fileName || 'model').replace(/\.glb$/i, '').toLowerCase();
+}
+
+paintBtn.addEventListener('click', () => setPaintMode(!paint.on));
+document.getElementById('paint-radius').addEventListener('input', (e) => { paint.radiusPct = +e.target.value; document.getElementById('paint-radius-val').textContent = paint.radiusPct + '%'; });
+document.getElementById('btn-paint-clear').addEventListener('click', () => { if (!paint.mark) return; paint.mark.fill(0); paint.markAttr.needsUpdate = true; paintUpdateInfo(); });
+document.getElementById('btn-paint-export').addEventListener('click', () => {
+  if (!paint.mark) return;
+  const blob = new Blob([JSON.stringify(paintMarksJSON())], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = paintShipName() + '_glass.json';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+  showStatus('Exported ' + a.download + ' - move it to tools/blender/marks/');
+});
+document.getElementById('btn-paint-save').addEventListener('click', async () => {
+  if (!paint.mark) return;
+  try {
+    const r = await fetch('/save-marks?name=' + encodeURIComponent(paintShipName() + '_glass.json'), { method: 'POST', body: JSON.stringify(paintMarksJSON()), headers: { 'Content-Type': 'application/json' } });
+    showStatus(r.ok ? ('Saved to pipeline: ' + await r.text()) : ('Save failed: ' + r.status), 4000);
+  } catch (e) { showStatus('No pipeline server - run: python tools/glb_editor_server.py  (or use Export)', 5000); }
+});
+document.getElementById('btn-paint-load').addEventListener('click', () => document.getElementById('paint-load-input').click());
+document.getElementById('paint-load-input').addEventListener('change', (e) => {
+  const f = e.target.files[0]; if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    try {
+      const j = JSON.parse(rd.result);
+      if (!paint.on) setPaintMode(true);
+      if (!paint.mark) return;
+      if (j.tris !== paint.n) showStatus(`Marks were made on a ${j.tris} triangle mesh; this one has ${paint.n}`, 5000);
+      paint.mark.fill(0);
+      for (const t of j.marked) if (t < paint.n) paint.mark[3 * t] = paint.mark[3 * t + 1] = paint.mark[3 * t + 2] = 1;
+      paint.markAttr.needsUpdate = true; paintUpdateInfo();
+    } catch (err) { showStatus('Bad marks file: ' + err.message, 4000); }
+  };
+  rd.readAsText(f);
+  e.target.value = '';
+});
+window.addEventListener('keydown', (e) => {
+  if (!paint.on) return;
+  if (e.key === '[') { paint.radiusPct = Math.max(0.5, paint.radiusPct - 0.5); document.getElementById('paint-radius').value = paint.radiusPct; document.getElementById('paint-radius-val').textContent = paint.radiusPct + '%'; }
+  if (e.key === ']') { paint.radiusPct = Math.min(12, paint.radiusPct + 0.5); document.getElementById('paint-radius').value = paint.radiusPct; document.getElementById('paint-radius-val').textContent = paint.radiusPct + '%'; }
+  if (e.key === 'Escape') setPaintMode(false);
+});
+function paintBindPointer() {
+  const el = renderer.domElement;
+  el.addEventListener('pointerdown', (e) => {
+    if (!paint.on || e.button !== 0) return;
+    paint.painting = true; paint.erase = e.shiftKey;
+    el.setPointerCapture(e.pointerId);
+    paintStroke(e.clientX, e.clientY);
+  });
+  el.addEventListener('pointermove', (e) => { if (paint.painting) paintStroke(e.clientX, e.clientY); });
+  const stop = () => { paint.painting = false; };
+  el.addEventListener('pointerup', stop);
+  el.addEventListener('pointercancel', stop);
+}
+
+// hook: remember the file name for the export, enable the button, allow ?load=<url> for testing
+const _origLoadGLB = loadGLB;
+loadGLB = function (arrayBuffer, name) {
+  paintRelease(); paint.on = false; paintBtn.textContent = 'Paint Glass: OFF'; paintBtn.classList.remove('primary');
+  _origLoadGLB(arrayBuffer, name);
+  paint.fileName = name || 'model';
+  setTimeout(() => { paintBtn.disabled = !loadedRoot; document.getElementById('btn-paint-load').disabled = !loadedRoot; }, 50);
+};
+
 init();
+paintBindPointer();
+window.__glbEditor = { paint, paintStroke, setPaintMode, paintMarksJSON, get camera() { return camera; }, get meshes() { return meshes; }, get renderer() { return renderer; } };   // debug / scripted tests
+(async () => {
+  const u = new URLSearchParams(location.search).get('load');
+  if (!u) return;
+  try { const r = await fetch(u); const buf = await r.arrayBuffer(); loadGLB(buf, u.split('/').pop()); } catch (e) { showStatus('Could not load ' + u, 4000); }
+})();
 </script>
 </body>
 </html>

@@ -65,6 +65,8 @@ SHELL_VOTE_MAX = 20000     # parts bigger than this (a fuselage holding the cano
 ADJ_R = 0.012              # of L: a tinted (seed) face touching glass this closely joins outright
 REF_DIR = os.path.join(REPO, 'tools', 'blender', 'work', 'ref')   # old-chain hulls (LSS/ships at v37.39/40) = the canopy reference
 REF_TOL = 0.007            # of L: an original face this close to the reference glass surface IS canopy
+MARKS_DIR = os.path.join(REPO, 'tools', 'blender', 'marks')   # <ship>_glass.json painted in tools/glb_editor.html (owner's marks win)
+MARK_TOL = 0.004           # of L: a painted centroid must land this close to a face centre
 REF_COMMIT = '5491ffb'     # v37.39: the last old-chain fleet in git (LSS/ships/<ship>.glb) - the reference is re-fetched from here when work/ref is empty
 ISLAND_MAX = 1500          # loose shells up to this many faces, lying wholly in the glass fringe, become glass (Puncture's dark decal is ~1000)
 GLASS_CFG = {
@@ -193,6 +195,25 @@ def import_glb(path, **kw):
     bpy.ops.import_scene.gltf(filepath=path, **kw)
     new = [o for o in bpy.data.objects if o not in before]
     return [o for o in new if o.type == 'MESH'], [o for o in new if o.type == 'EMPTY']
+
+
+def load_marks(ship):
+    """The owner's painted glass from tools/glb_editor.html: face centroids in glTF local space
+    (three.js) -> Blender (x, -z, y). None when no file exists."""
+    path = os.path.join(MARKS_DIR, f'{ship}_glass.json')
+    if not os.path.exists(path):
+        return None
+    j = json.load(open(path, encoding='utf-8'))
+    c = np.array(j.get('centroids', []), np.float32)
+    if len(c) == 0:
+        return None
+    cen_b = np.stack([c[:, 0], -c[:, 2], c[:, 1]], 1)
+    mk = j.get('markers', {}) or {}
+    eye = None
+    if mk.get('cockpit'):
+        e = mk['cockpit'][0]
+        eye = Vector((e[0], -e[2], e[1]))
+    return {'centroids': cen_b, 'eye': eye, 'tris': j.get('tris'), 'path': path}
 
 
 def load_reference_glass(ship):
@@ -370,21 +391,50 @@ def process(ship):
     # surface, facing the same way, is canopy - bars and streaked panes included. No paint rule
     # survived these hulls: Vortex's canopy and fuselage share one purple, Pyro's bars and hull
     # one black, and every growth heuristic leaked over the nose.
-    ref = load_reference_glass(ship)
-    if ref is None:
-        raise RuntimeError(f'{ship}: no reference glass in {REF_DIR} (copy LSS/ships/<ship>.glb of the old chain there)')
-    bvh_ref = BVHTree.FromPolygons(ref[0], ref[1])
+    marks = load_marks(ship)
     glass = np.zeros(nP, bool)
     near_idx = np.nonzero(d < R * 1.6)[0]
-    tol = REF_TOL * L
-    for fi in near_idx:
-        fi = int(fi)
-        loc, n_, idx_, dist = bvh_ref.find_nearest(Vector(cen[fi]), tol * 3)
-        if loc is not None and dist < tol and abs(n_.dot(Vector(nrm[fi]))) > 0.4:
-            glass[fi] = True
-    rep['glass'].update({'ref_polys': len(ref[1]), 'ref_components': ref[2], 'transferred': int(glass.sum())})
-    if int(glass.sum()) < 10:
-        raise RuntimeError(f'{ship}: reference glass transferred {int(glass.sum())} faces - frame mismatch?')
+    if marks is not None:
+        # OWNER'S MARKS (tools/glb_editor.html, Paint Glass): match every painted centroid to the
+        # nearest face centre. The editor works on the same file in the same triangle order, so
+        # this is exact up to float noise ; matching by position also survives any reordering.
+        from mathutils.kdtree import KDTree as _KDT
+        kd_all = _KDT(nP)
+        for i_ in range(nP):
+            kd_all.insert(Vector(cen[i_]), i_)
+        kd_all.balance()
+        tol = MARK_TOL * L
+        missed = 0
+        for c_ in marks['centroids']:
+            co, i_, dist = kd_all.find(Vector(c_))
+            if co is not None and dist < tol:
+                glass[i_] = True
+            else:
+                missed += 1
+        rep['glass'].update({'marks': os.path.relpath(marks['path'], REPO), 'marks_painted': int(len(marks['centroids'])),
+                             'marks_matched': int(glass.sum()), 'marks_missed': missed})
+        if int(glass.sum()) < 10:
+            raise RuntimeError(f'{ship}: the painted marks matched {int(glass.sum())} faces - wrong file or coordinates?')
+        near_idx = np.nonzero(d < R * 1.6)[0]
+    else:
+        ref = load_reference_glass(ship)
+        if ref is None:
+            raise RuntimeError(f'{ship}: no reference glass in {REF_DIR} (copy LSS/ships/<ship>.glb of the old chain there)')
+        bvh_ref = BVHTree.FromPolygons(ref[0], ref[1])
+        tol = REF_TOL * L
+        for fi in near_idx:
+            fi = int(fi)
+            loc, n_, idx_, dist = bvh_ref.find_nearest(Vector(cen[fi]), tol * 3)
+            if loc is not None and dist < tol and abs(n_.dot(Vector(nrm[fi]))) > 0.4:
+                glass[fi] = True
+        rep['glass'].update({'ref_polys': len(ref[1]), 'ref_components': ref[2], 'transferred': int(glass.sum())})
+        if int(glass.sum()) < 10:
+            raise RuntimeError(f'{ship}: reference glass transferred {int(glass.sum())} faces - frame mismatch?')
+    # painted faces may sit further from the frozen marker than the heuristics assumed
+    if marks is not None and glass.any():
+        gc_ = cen[glass]
+        R = max(R, float(np.linalg.norm(gc_ - np.array(cp, np.float32), axis=1).max()) * 1.15)
+        near_idx = np.nonzero(d < R * 1.6)[0]
     cxy = cen[glass][:, :2].mean(0)
 
     def escapes(fi, sign=1.0, reach=0.5):
@@ -432,7 +482,7 @@ def process(ship):
     grid_g = Grid(r_g)
     grown = 0
     it = 0
-    changed = True
+    changed = marks is None
     while changed and it < 12:
         changed = False
         it += 1
@@ -473,7 +523,7 @@ def process(ship):
     # reaches beyond the fringe stay (they are hull).
     ng = fringe()
     in_fr = np.bincount(flab[glass | ng], minlength=n_shells)
-    sh_ok = (in_fr == shell_n) & (shell_n <= ISLAND_MAX) & (in_fr > 0)
+    sh_ok = (in_fr == shell_n) & (shell_n <= ISLAND_MAX) & (in_fr > 0) & (marks is None)   # painted marks are the truth
     isl = sh_ok[flab] & ~glass
     islands = int(isl.sum())
     glass |= isl
@@ -482,7 +532,7 @@ def process(ship):
     # ripped apart"): along the rim, glass and opaque triangles alternated. Erode glass faces with
     # few glass neighbours, close opaque outer-skin faces with mostly glass around them.
     tot_g, _ = grid_g.stats(np.ones(len(near_idx), bool))
-    for _pass in range(2):
+    for _pass in range(0 if marks is not None else 2):
         gm = glass[near_idx]
         cnt_g, _ = grid_g.stats(gm)
         frac = cnt_g / np.maximum(tot_g, 1)
@@ -503,8 +553,8 @@ def process(ship):
     # parts (a fuselage that includes the canopy) keep the face-level result.
     g_per = np.bincount(flab[glass], minlength=n_shells)
     fr_sh = g_per / np.maximum(shell_n, 1)
-    whole = (fr_sh >= SHELL_VOTE_IN) & (shell_n <= SHELL_VOTE_MAX)
-    drop = (g_per > 0) & (fr_sh < SHELL_VOTE_OUT) & (shell_n <= SHELL_VOTE_MAX)
+    whole = (fr_sh >= SHELL_VOTE_IN) & (shell_n <= SHELL_VOTE_MAX) & (marks is None)
+    drop = (g_per > 0) & (fr_sh < SHELL_VOTE_OUT) & (shell_n <= SHELL_VOTE_MAX) & (marks is None)
     added = whole[flab] & ~glass
     removed = drop[flab] & glass
     glass[added] = True
@@ -609,7 +659,15 @@ def process(ship):
             # a seat needs a floor: candidates hanging in a void (or below the pit) lose 0.5
             sc0 = open_score(e) - (0.0 if fl is not None and e.z - fl < 0.5 * L else 0.5)
             cands.append((sc0, x, e, gz))
-    if cands:
+    if marks is not None and marks.get('eye') is not None:
+        eye_world = Vector(marks['eye'])
+        gz = glass_z_at(eye_world.x, eye_world.y)
+        glass_z_eye = gz if gz is not None else float(g_hi[2])
+        if eye_world.z > glass_z_eye - EYE_UNDER[0] * L:
+            eye_world.z = glass_z_eye - EYE_UNDER[0] * L
+        sc_ = open_score(eye_world)
+        eye_src = 'editor_cockpit_marker'
+    elif cands:
         best = max(c[0] for c in cands)
         x_target = float(g_lo[0]) + 0.55 * Lc          # (v37.45) rearmost-on-ties put the panel far away on long canopies
         sc_, x, eye_world, glass_z_eye = min((c for c in cands if c[0] >= best - 0.03), key=lambda c: abs(c[1] - x_target))

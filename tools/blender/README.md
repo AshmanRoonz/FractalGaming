@@ -337,3 +337,29 @@ Frame art (v37.41): ONE continuous band instead of cut strips — the owner saw 
 ("it looks cut up on the frame"). A single grid covers the whole PNG and only its radius varies,
 blended smoothly (dash rows close, rail rows far, pillar columns between) ; fully transparent
 cells are skipped.
+
+## Painting the glass yourself (v37.47) — `tools/glb_editor.html` → Paint Glass
+
+The one thing the pipeline could never do reliably on these multi-shell AI hulls is know where the
+window is. The owner can, in a minute: the GLB editor has a **Paint Glass** section.
+
+1. `python tools/glb_editor_server.py` and open <http://localhost:8098/tools/glb_editor.html>
+   (or open the file directly and use Export instead of Save).
+2. **Open GLB** → `LSS/ships_original/<Ship>.glb` (the hi-poly original ; it loads in ~10 s).
+3. Click **Paint Glass: OFF** to turn it on. **Left-drag** paints green, **right-drag** orbits,
+   wheel zooms, **Shift** erases, **[ ]** change the brush. *Mirror* paints both sides at once
+   (axis Z = the ship's left/right). *Front-facing only* keeps the brush off the inside.
+4. Optional: **Place Cockpit** and click where the pilot's eye should be — the pipeline uses it.
+5. **Save to pipeline** writes `tools/blender/marks/<ship>_glass.json` (or **Export** and move
+   the download there). **Load marks JSON** resumes a previous session.
+6. Rebuild: `blender --background --python tools/blender/ship_original.py -- --ships <ship>`
+   then `node tools/compress_glb.mjs --only ships`.
+
+With a marks file present the pipeline uses exactly those triangles as the window (matched by
+centroid, so triangle order does not matter), adds only the shell's inner layer, and skips the
+reference transfer, the surround fill, the boundary smoothing and the shell vote. The report
+shows `marks_matched` / `marks_missed` ; a miss count in the thousands means the wrong file.
+Technically: the editor makes the hull non-indexed, tints marked triangles through
+`onBeforeCompile`, picks with a GPU id pass (triangle index encoded as colour, one pixel read
+back) so a million-triangle hull paints at full speed, and brushes by centroid distance on a
+uniform grid.
