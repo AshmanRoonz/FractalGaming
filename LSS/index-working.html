@@ -4268,7 +4268,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.01';
+const LSS_BUILD = '38.02';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -10600,6 +10600,9 @@ function _ssModeLabel() {
     }
     el.innerHTML = name + (sub ? '<small>' + sub + '</small>' : '');
     el.classList.add('on');
+    // (v38.02) no hub progression in this mode, so no rank button either
+    const ag = document.getElementById('btn-aegis-select');
+    if (ag) ag.style.display = (typeof _aegisModeAllowed === 'function' && !_aegisModeAllowed()) ? 'none' : '';
   } catch (_) {}
 }
 function _shipSelectSetLaunching(on) {
@@ -28258,6 +28261,7 @@ function _aegisShipState() {
 function _aegisApply() {
   // (v36.70) `_aegisSoloOnly` — a shared EXHIBITION room is also 'freeflight'.
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || !_aegisSoloOnly()) return;
+  if (!_aegisModeAllowed()) return;
   const st = _aegisShipState();
   const r = AEGIS.rankFromXp(st.xp).rank;
   if (r >= 5)  { player.maxHealth += 2500; player.health += 2500; }
@@ -28269,6 +28273,7 @@ function _aegisAwardXp(amount) {
   // shared room either, or the ladder would still be fed by PvP kills whose
   // perks were switched off.
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || !_aegisSoloOnly()) return;
+  if (!_aegisModeAllowed()) return;
   const st = _aegisShipState();
   const before = AEGIS.rankFromXp(st.xp).rank;
   st.xp += amount;
@@ -28335,8 +28340,16 @@ AEGIS.LIVE = {
 function _aegisSoloOnly() {
   try { return !(typeof net !== 'undefined' && net && net.active); } catch (_) { return true; }
 }
+// (v38.02) CYBERPUNK CITY is a 3v3 match that happens to run on the free-flight path, so every
+// hub-progression gate keyed on MODE === 'freeflight' was quietly true inside it. Owner: "aegis
+// rank should not be a thing in cyberpunk city game mode" - no perks, no XP, no rank button.
+function _aegisModeAllowed() {
+  try { if (game && game._cyber && game._cyber.armed) return false; } catch (_) {}
+  return true;
+}
 function _aegisAbilityRank() {
   if (typeof LSS === 'undefined') return -1;
+  if (!_aegisModeAllowed()) return -1;
   if (LSS.MODE === 'endless') {
     try {
       const a = (typeof game !== 'undefined' && game.endlessRun) ? game.endlessRun.aegis : null;
@@ -38291,7 +38304,20 @@ class Projectile {
 
     // --- Enhanced multi-segment ribbon trail (per-vertex color gradient) ---
     this.trailColor = color || 0xffaa00;
-    const trailSegs = 28; 
+    // (v38.02) Every rocket builds its own ribbon trail geometry. One is nothing; forty at once is
+    // what makes a phone or a headset stutter deep in the city. Past a load threshold the newest
+    // trails are built SHORT - ordinary play is untouched, and only a swarm degrades.
+    let trailSegs = 28;
+    {
+      const _live = (game && game.projectiles) ? game.projectiles.length : 0;
+      const _mob = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ||
+                   (typeof isXRPresenting === 'function' && isXRPresenting());
+      const _K = (typeof window !== 'undefined' && window.__trailBudget) ? window.__trailBudget : null;
+      const _soft = (_K && _K.soft != null) ? _K.soft : (_mob ? 14 : 30);
+      const _hard = (_K && _K.hard != null) ? _K.hard : (_mob ? 26 : 55);
+      if (_live > _hard) trailSegs = 6;
+      else if (_live > _soft) trailSegs = 14;
+    }
     this.trailSegs = trailSegs;
     this.trailPositions = new Float32Array(trailSegs * 3);
     for (let i = 0; i < trailSegs; i++) {
@@ -82079,7 +82105,9 @@ function updateEnemyHealthBars() {
     // the digitize-in animation re-runs cleanly when the cloak ends.
     if (ent._cloaked) { ent._labelSpotTime = null; return; }
     const dist = player.position.distanceTo(ent.position);
-    if (dist > 3500) { ent._labelSpotTime = null; return; }
+    // (v38.02) A capital ship is legible from a great deal further away than a fighter, and the
+    // player needs to be able to read its health from outside its guns' reach.
+    if (dist > (ent.isCarrier ? 30000 : 3500)) { ent._labelSpotTime = null; return; }
     // Anchor the callout's target bracket AT the ship (not below
     // it). The diagonal line + text peel to the upper-right (or upper-
     // left when flipped), so the bracket reads as a target reticle on
@@ -82095,7 +82123,10 @@ function updateEnemyHealthBars() {
     // LOS gate (cached at ~15 Hz, same as the legacy bar code).
     if (ent._hbLosTime == null || now - ent._hbLosTime >= HBAR_LOS_INTERVAL) {
       const toEnt = _hbTmpA.subVectors(ent.position, player.position).normalize();
-      const wallDist = raycastLevel(player.position, toEnt, dist + 50, true);
+      // (v38.02) ...and it must not block its OWN callout. v37.85 taught raycastLevel about the
+      // carrier so shots would stop at it; this test then found the hull between the player and
+      // the hull, marked it occluded, and the carrier never got a tag at all.
+      const wallDist = raycastLevel(player.position, toEnt, dist + 50, true, !!ent.isCarrier);
       ent._hbLosBlocked = (wallDist < dist - 30) || _losBlockedByClusters(player.position, toEnt, dist);
       ent._hbLosTime = now;
     }
@@ -82104,7 +82135,11 @@ function updateEnemyHealthBars() {
     if (ent._labelSpotTime == null) ent._labelSpotTime = now;
     const isEnemy = _localTeam == null || ent.team !== _localTeam;
     // Color carries the friend/enemy reading ; show just the chassis name.
-    const fullText = (ent.loadout.name || '?').toUpperCase();
+    let fullText = (ent.loadout.name || '?').toUpperCase();
+    // (v38.02) the carrier wears its condition: name plus a live percentage
+    if (ent.isCarrier && ent.maxHealth > 0) {
+      fullText += '  ' + Math.max(0, Math.ceil((ent.health / ent.maxHealth) * 100)) + '%';
+    }
     // Digitize-in: reveal characters over 0.45s, then hold full string.
     const age = now - ent._labelSpotTime;
     let visText;
@@ -82893,7 +82928,8 @@ function gameLoop(timestamp) {
 const audio = {
   ctx: null,
   masterGain: null,
-  masterComp: null,     
+  masterComp: null,
+  masterLimit: null,    // (v38.02) brickwall after the glue compressor
   sfxBus: null,         
   reverbGain: null,     
   dryGain: null,        
@@ -83052,7 +83088,18 @@ function initAudio() {
     audio.masterComp.ratio.value = 2.5;
     audio.masterComp.attack.value = 0.005;
     audio.masterComp.release.value = 0.280;
-    audio.masterComp.connect(audio.hiCut);
+    // (v38.02) BRICKWALL. The compressor above is a 2.5:1 glue stage - it shapes the mix, it does
+    // not stop it leaving the rails, and a wall of rocket detonations is exactly the transient it
+    // lets through (owner: "sound distorted once with many many rockets flying at me"). This is
+    // the thing that clips, instead of the DAC: inaudible until the mix would have gone over.
+    audio.masterLimit = audio.ctx.createDynamicsCompressor();
+    audio.masterLimit.threshold.value = -1.5;
+    audio.masterLimit.knee.value = 0;
+    audio.masterLimit.ratio.value = 20;
+    audio.masterLimit.attack.value = 0.001;
+    audio.masterLimit.release.value = 0.06;
+    audio.masterComp.connect(audio.masterLimit);
+    audio.masterLimit.connect(audio.hiCut);
 
     // Master output. Base 0.75 multiplied by userVol.master so the user
     // slider scales the bus cleanly. Direct path into the compressor ; no

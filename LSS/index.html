@@ -4194,7 +4194,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.01';
+const LSS_BUILD = '38.02';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -8780,6 +8780,8 @@ function _ssModeLabel() {
     }
     el.innerHTML = name + (sub ? '<small>' + sub + '</small>' : '');
     el.classList.add('on');
+    const ag = document.getElementById('btn-aegis-select');
+    if (ag) ag.style.display = (typeof _aegisModeAllowed === 'function' && !_aegisModeAllowed()) ? 'none' : '';
   } catch (_) {}
 }
 function _shipSelectSetLaunching(on) {
@@ -22575,6 +22577,7 @@ function _aegisShipState() {
 }
 function _aegisApply() {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || !_aegisSoloOnly()) return;
+  if (!_aegisModeAllowed()) return;
   const st = _aegisShipState();
   const r = AEGIS.rankFromXp(st.xp).rank;
   if (r >= 5)  { player.maxHealth += 2500; player.health += 2500; }
@@ -22583,6 +22586,7 @@ function _aegisApply() {
 }
 function _aegisAwardXp(amount) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight' || !_aegisSoloOnly()) return;
+  if (!_aegisModeAllowed()) return;
   const st = _aegisShipState();
   const before = AEGIS.rankFromXp(st.xp).rank;
   st.xp += amount;
@@ -22619,8 +22623,13 @@ AEGIS.LIVE = {
 function _aegisSoloOnly() {
   try { return !(typeof net !== 'undefined' && net && net.active); } catch (_) { return true; }
 }
+function _aegisModeAllowed() {
+  try { if (game && game._cyber && game._cyber.armed) return false; } catch (_) {}
+  return true;
+}
 function _aegisAbilityRank() {
   if (typeof LSS === 'undefined') return -1;
+  if (!_aegisModeAllowed()) return -1;
   if (LSS.MODE === 'endless') {
     try {
       const a = (typeof game !== 'undefined' && game.endlessRun) ? game.endlessRun.aegis : null;
@@ -30040,7 +30049,17 @@ class Projectile {
     scene.add(this.mesh);
 
     this.trailColor = color || 0xffaa00;
-    const trailSegs = 28; 
+    let trailSegs = 28;
+    {
+      const _live = (game && game.projectiles) ? game.projectiles.length : 0;
+      const _mob = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ||
+                   (typeof isXRPresenting === 'function' && isXRPresenting());
+      const _K = (typeof window !== 'undefined' && window.__trailBudget) ? window.__trailBudget : null;
+      const _soft = (_K && _K.soft != null) ? _K.soft : (_mob ? 14 : 30);
+      const _hard = (_K && _K.hard != null) ? _K.hard : (_mob ? 26 : 55);
+      if (_live > _hard) trailSegs = 6;
+      else if (_live > _soft) trailSegs = 14;
+    }
     this.trailSegs = trailSegs;
     this.trailPositions = new Float32Array(trailSegs * 3);
     for (let i = 0; i < trailSegs; i++) {
@@ -63299,7 +63318,7 @@ function updateEnemyHealthBars() {
     }
     if (ent._cloaked) { ent._labelSpotTime = null; return; }
     const dist = player.position.distanceTo(ent.position);
-    if (dist > 3500) { ent._labelSpotTime = null; return; }
+    if (dist > (ent.isCarrier ? 30000 : 3500)) { ent._labelSpotTime = null; return; }
     const wp = _hbTmpA.copy(ent.position);
     const proj = _hbTmpB.copy(wp).project(camera);
     if (proj.z > 1) { ent._labelSpotTime = null; return; }
@@ -63310,14 +63329,17 @@ function updateEnemyHealthBars() {
     }
     if (ent._hbLosTime == null || now - ent._hbLosTime >= HBAR_LOS_INTERVAL) {
       const toEnt = _hbTmpA.subVectors(ent.position, player.position).normalize();
-      const wallDist = raycastLevel(player.position, toEnt, dist + 50, true);
+      const wallDist = raycastLevel(player.position, toEnt, dist + 50, true, !!ent.isCarrier);
       ent._hbLosBlocked = (wallDist < dist - 30) || _losBlockedByClusters(player.position, toEnt, dist);
       ent._hbLosTime = now;
     }
     if (ent._hbLosBlocked) { ent._labelSpotTime = null; return; }
     if (ent._labelSpotTime == null) ent._labelSpotTime = now;
     const isEnemy = _localTeam == null || ent.team !== _localTeam;
-    const fullText = (ent.loadout.name || '?').toUpperCase();
+    let fullText = (ent.loadout.name || '?').toUpperCase();
+    if (ent.isCarrier && ent.maxHealth > 0) {
+      fullText += '  ' + Math.max(0, Math.ceil((ent.health / ent.maxHealth) * 100)) + '%';
+    }
     const age = now - ent._labelSpotTime;
     let visText;
     if (age < 0.45) {
@@ -63861,7 +63883,8 @@ function gameLoop(timestamp) {
 const audio = {
   ctx: null,
   masterGain: null,
-  masterComp: null,     
+  masterComp: null,
+  masterLimit: null,    // (v38.02) brickwall after the glue compressor
   sfxBus: null,         
   reverbGain: null,     
   dryGain: null,        
@@ -63972,7 +63995,14 @@ function initAudio() {
     audio.masterComp.ratio.value = 2.5;
     audio.masterComp.attack.value = 0.005;
     audio.masterComp.release.value = 0.280;
-    audio.masterComp.connect(audio.hiCut);
+    audio.masterLimit = audio.ctx.createDynamicsCompressor();
+    audio.masterLimit.threshold.value = -1.5;
+    audio.masterLimit.knee.value = 0;
+    audio.masterLimit.ratio.value = 20;
+    audio.masterLimit.attack.value = 0.001;
+    audio.masterLimit.release.value = 0.06;
+    audio.masterComp.connect(audio.masterLimit);
+    audio.masterLimit.connect(audio.hiCut);
 
     audio.masterGain = audio.ctx.createGain();
     audio.masterGain.gain.value = 0.85 * audio.userVol.master;
