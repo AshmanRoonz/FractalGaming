@@ -69,7 +69,7 @@ GLASS_CFG = {
     'pyro': {'R': 0.22, 'sat': 0.28, 'hue_tol': 0.12},
     'slayer': {'sat': 0.25, 'hue_tol': 0.22},      # its pane streaks are yellow-green, not the class green (see HULL_GLOW)
 }
-HOLO_ALPHA = 0.72
+HOLO_ALPHA = 0.22          # the HUD combiner glass: barely there
 # The library's interior atlas bakes an emissive FILL of EMIS_FILL x the base tile (1.5, tuned for the
 # old enclosed tub with no light at all). Under a clear canopy the sun comes in and the cockpit light
 # rig rides the eye, so at 1.5 (x1.5 emission strength) the tub walls glowed a flat pale grey that no
@@ -122,6 +122,67 @@ def face_paint(me, px):
     dlt = np.maximum(mx - mn, 1e-6)
     hue = np.where(mx == r_, ((g_ - b_) / dlt) % 6, np.where(mx == g_, (b_ - r_) / dlt + 2, (r_ - g_) / dlt + 4)) / 6.0
     return mx, sat, hue
+
+
+def cyl(B, p0, p1, r, region, n=10):
+    """a capped cylinder from p0 to p1 (local points) via the Builder's loft"""
+    p0 = Vector(p0)
+    p1 = Vector(p1)
+    ax = (p1 - p0)
+    if ax.length < 1e-9:
+        return []
+    ax.normalize()
+    ref = Vector((0, 0, 1)) if abs(ax.z) < 0.9 else Vector((1, 0, 0))
+    u = ax.cross(ref).normalized()
+    v = ax.cross(u).normalized()
+    rings = []
+    for pc in (p0, p1):
+        rings.append([pc + (u * math.cos(2 * math.pi * k / n) + v * math.sin(2 * math.pi * k / n)) * r for k in range(n)])
+    faces, vr = B.loft(rings, region=region, inward_center=None, smooth=True)
+    mid = (p0 + p1) / 2
+    for f in faces:
+        f.normal_update()
+        if f.normal.dot(f.calc_center_median() - B.to_world(mid)) < 0:
+            f.normal_flip()
+    for vring, sign in ((vr[0], -1), (vr[1], 1)):
+        try:
+            cap = B.bm.faces.new(vring)
+            cap.normal_update()
+            if cap.normal.dot(B.frame.to_3x3() @ (ax * sign)) < 0:
+                cap.normal_flip()
+            B.tag([cap], region)
+            faces.append(cap)
+        except ValueError:
+            pass
+    return faces
+
+
+def tube(B, pts, r, region, n=8, closed=False):
+    """a smooth tube along a polyline of local points (rings perpendicular to the local tangent)"""
+    pts = [Vector(p) for p in pts]
+    if closed:
+        pts = pts + [pts[0]]
+    if len(pts) < 2:
+        return []
+    rings = []
+    up = Vector((0, 0, 1))
+    for i, pc in enumerate(pts):
+        t = (pts[min(i + 1, len(pts) - 1)] - pts[max(i - 1, 0)])
+        if t.length < 1e-9:
+            t = Vector((1, 0, 0))
+        t.normalize()
+        ref = up if abs(t.dot(up)) < 0.9 else Vector((1, 0, 0))
+        u = t.cross(ref).normalized()
+        v = t.cross(u).normalized()
+        rings.append([pc + (u * math.cos(2 * math.pi * k / n) + v * math.sin(2 * math.pi * k / n)) * r for k in range(n)])
+    faces, vr = B.loft(rings, region=region, inward_center=None, smooth=True)
+    for idx, f in enumerate(faces):
+        i = idx // n
+        c = B.to_world((pts[i] + pts[min(i + 1, len(pts) - 1)]) / 2)
+        f.normal_update()
+        if f.normal.dot(f.calc_center_median() - c) < 0:
+            f.normal_flip()
+    return faces
 
 
 def import_glb(path, **kw):
@@ -414,6 +475,24 @@ def process(ship):
     islands = int(isl.sum())
     glass |= isl
     rep['glass']['islands'] = islands
+    # BOUNDARY SMOOTHING (owner: "the cockpit glass looks like it's tearing into the frame...
+    # ripped apart"): along the rim, glass and opaque triangles alternated. Erode glass faces with
+    # few glass neighbours, close opaque outer-skin faces with mostly glass around them.
+    tot_g, _ = grid_g.stats(np.ones(len(near_idx), bool))
+    for _pass in range(2):
+        gm = glass[near_idx]
+        cnt_g, _ = grid_g.stats(gm)
+        frac = cnt_g / np.maximum(tot_g, 1)
+        erode = gm & (frac < 0.22)
+        glass[near_idx[erode]] = False
+        gm = glass[near_idx]
+        cnt_g, _ = grid_g.stats(gm)
+        frac = cnt_g / np.maximum(tot_g, 1)
+        for k_ in np.nonzero(~gm & (frac > 0.62))[0]:
+            fi = int(near_idx[k_])
+            if escapes(fi):
+                glass[fi] = True
+    rep['glass']['smoothed'] = True
     n_glass = int(glass.sum())
     rep['glass']['faces'] = n_glass
     rep['glass']['shells_touched'] = int((np.bincount(flab[glass], minlength=n_shells) > 0).sum())
@@ -514,7 +593,8 @@ def process(ship):
             cands.append((sc0, x, e, gz))
     if cands:
         best = max(c[0] for c in cands)
-        sc_, x, eye_world, glass_z_eye = max((c for c in cands if c[0] >= best - 0.03), key=lambda c: c[1])
+        x_target = float(g_lo[0]) + 0.55 * Lc          # (v37.45) rearmost-on-ties put the panel far away on long canopies
+        sc_, x, eye_world, glass_z_eye = min((c for c in cands if c[0] >= best - 0.03), key=lambda c: abs(c[1] - x_target))
         eye_src = 'scan'
     else:
         sc_, eye_world, glass_z_eye, eye_src = 0.0, Vector(cp), float(g_hi[2]), 'frozen_marker'
@@ -624,6 +704,15 @@ def process(ship):
     # coaming ledge: from the wall top out past the glass rim, facing up
     outer = [Vector((c_loc.x + 1.06 * prof_raw[k] * math.cos(thetas[k]), 1.06 * prof_raw[k] * math.sin(thetas[k]), top[k].z)) for k in range(NA)]
     coam_faces, _ = B.loft([top, outer], region='trim', inward_center=Vector((c_loc.x, 0.0, 5.0 * Lc)), smooth=False)
+    # window-sill LIP: from the ledge's outer edge up to whatever skin is above it, facing the pilot,
+    # so the ragged glass boundary just outside the tub is never in view from the seat
+    lip_top = []
+    for k in range(NA):
+        w_ = B.to_world(outer[k])
+        hits = down_hits(w_.x, w_.y)
+        zs = (hits[0][0] - eye_z) if hits else outer[k].z
+        lip_top.append(Vector((outer[k].x, outer[k].y, max(outer[k].z + 0.004 * Lc, zs - 0.003 * L))))
+    lip_faces, _ = B.loft([outer, lip_top], region='metal', inward_center=tub_center, smooth=False)
     w = float(min(prof_t[(NA * 3) // 4], prof_t[NA // 4]))     # half-width at the sides (+-90 deg)
     rep['tub'] = {'z_floor': round(z_floor, 4), 'half_width': round(w, 4), 'rim_mean': round(float(prof_t.mean()), 4),
                   'wall_top_z': [round(float(v), 3) for v in (z_lo_g.min(), z_lo_g.max())]}
@@ -657,7 +746,7 @@ def process(ship):
     k0 = int(((0.0 + math.pi) / (2 * math.pi)) * NA) % NA
     x_front = c_loc.x + prof_t[k0]
     # (v37.43 in-game: at 0.36 Lc the panel was a small far box and the cabin read as a corridor)
-    x_d = min(0.26 * Lc, x_front - 0.05 * Lc)
+    x_d = min(0.22 * Lc, x_front - 0.05 * Lc)
     wd = max(min(1.5 * w, 0.55 * Lc), 0.34 * Lc)
     tilt = math.radians(22)
     n_d = Vector((-math.cos(tilt), 0.0, math.sin(tilt)))      # the tilted face's normal (toward the eye)
@@ -679,7 +768,7 @@ def process(ship):
     B.box(Vector((x_d - 0.03 * Lc, 0.0, -0.055 * Lc)), (0.14 * Lc, 1.08 * wd, 0.012 * Lc), region='trim', bevel=0.002 * Lc)   # glare shield
     # CANOPY ARCHES: a mullion over the glass ahead and a roll bar behind the head, each a chain of
     # short tubes riding just under the glass surface - the window gets a 3D frame again.
-    for xa in (0.15 * Lc, -0.11 * Lc):
+    for xa in (0.12 * Lc, -0.10 * Lc):
         pts = []
         for j in range(17):
             y_ = -1.05 * w + 2.10 * w * j / 16
@@ -688,25 +777,32 @@ def process(ship):
             if gz is None:
                 continue
             pts.append(Vector((xa, y_, gz - eye_z - 0.006 * L)))
-        for a_, b_ in zip(pts, pts[1:]):
-            dv = b_ - a_
-            ln = dv.length
-            if ln < 1e-6:
-                continue
-            roll = math.atan2(dv.z, dv.y)
-            B.box((a_ + b_) / 2, (0.018 * Lc, ln * 1.08, 0.018 * Lc), rot=(roll, 0, 0), region='trim')
+        if len(pts) >= 3:
+            tube(B, pts, 0.007 * Lc, 'trim', n=8)
+        if xa < 0 and len(pts) > 4:
+            # overhead switch strip hanging under the roll bar, in the top of the 120-degree view
+            zc = min(pt.z for pt in pts[len(pts) // 3: 2 * len(pts) // 3]) - 0.02 * Lc
+            B.box(Vector((xa, 0.0, zc)), (0.035 * Lc, 0.7 * w, 0.018 * Lc), region='trim', bevel=0.002 * Lc)
+            for k in range(5):
+                B.box(Vector((xa, -0.28 * w + k * 0.14 * w, zc - 0.012 * Lc)), (0.012 * Lc, 0.05 * w, 0.010 * Lc), region='glow' if k % 2 == 0 else 'seat')
+    # HUD combiner: a faintly tinted glass plate standing on the glare shield
+    Bh = Builder(frame, origin_local)
+    Bh.box(Vector((x_d - 0.05 * Lc, 0.0, -0.01 * Lc)), (0.003 * Lc, 0.16 * wd, 0.06 * Lc), rot=(0, math.radians(-12), 0), region='visor')
+    B.box(Vector((x_d - 0.05 * Lc, 0.0, -0.045 * Lc)), (0.02 * Lc, 0.17 * wd, 0.012 * Lc), region='trim', bevel=0.002 * Lc)   # its mount
+    Bh.assign_uvs(tile_len=0.30 * Wc)
+    bmesh.ops.recalc_face_normals(Bh.bm, faces=list(Bh.bm.faces))
+    # control stick between the knees, throttle on the left sill
+    stick_base = Vector((0.11 * Lc, 0.0, z_floor + 0.035 * Lc))
+    stick_top = Vector((0.09 * Lc, 0.0, -0.20 * Lc))
+    cyl(B, stick_base + Vector((0, 0, -0.01 * Lc)), stick_base + Vector((0, 0, 0.012 * Lc)), 0.035 * Lc, 'trim')
+    cyl(B, stick_base, stick_top, 0.008 * Lc, 'metal')
+    B.box(stick_top + Vector((-0.005 * Lc, 0.0, 0.03 * Lc)), (0.028 * Lc, 0.026 * Lc, 0.075 * Lc), rot=(0, math.radians(-12), 0), region='seat', bevel=0.005 * Lc)
+    B.box(stick_top + Vector((-0.017 * Lc, 0.0, 0.062 * Lc)), (0.008 * Lc, 0.010 * Lc, 0.010 * Lc), region='glow')
+    thr = Vector((0.0, -(w - sw / 2 - 0.004 * L), -0.108 * Lc))
+    B.box(thr + Vector((0, 0, 0.004 * Lc)), (0.14 * Lc, 0.016 * Lc, 0.006 * Lc), region='seat')                       # slot
+    B.box(thr + Vector((0.02 * Lc, 0, 0.028 * Lc)), (0.045 * Lc, 0.030 * Lc, 0.040 * Lc), region='seat', bevel=0.004 * Lc)   # grip
     # RIM RAIL: a square tube along the outer edge of the coaming, so the window has an outline
-    rt = 0.02 * Lc
-    for k in range(NA):
-        a_ = outer[k] + Vector((0, 0, rt * 0.5))
-        b_ = outer[(k + 1) % NA] + Vector((0, 0, rt * 0.5))
-        dv = b_ - a_
-        ln = dv.length
-        if ln < 1e-6:
-            continue
-        yaw = math.atan2(dv.y, dv.x)
-        pitch = -math.asin(max(-1.0, min(1.0, dv.z / ln)))
-        B.box((a_ + b_) / 2, (ln * 1.06, rt, rt), rot=(0, pitch, yaw), region='trim')
+    tube(B, [Vector((pt.x, pt.y, pt.z + 0.008 * Lc)) for pt in lip_top], 0.008 * Lc, 'trim', n=8, closed=True)
     # ribs along the walls, deck grating, pedals
     for xr in (-0.22, 0.02, 0.26):
         for sgn in (1, -1):
@@ -728,15 +824,16 @@ def process(ship):
     seat_built = True
     B.assign_uvs(tile_len=0.30 * Wc)
     B.tub_uvs(tub_faces, NA, 3)
-    _skip = set(tub_faces) | set(floor_faces) | set(coam_faces)
+    _skip = set(tub_faces) | set(floor_faces) | set(coam_faces) | set(lip_faces)
     bmesh.ops.recalc_face_normals(B.bm, faces=[f for f in B.bm.faces if f not in _skip])
     imesh = bpy.data.meshes.new('cockpit_interior')
     B.bm.to_mesh(imesh)
     B.bm.free()
     iobj = bpy.data.objects.new('cockpit_interior', imesh)
     sc.collection.objects.link(iobj)
-    # (the two floating holo billboards of the first v37.41 cut are gone: they read as signs in the sky)
-    hmesh = bpy.data.meshes.new('cockpit_holo')
+    hmesh = bpy.data.meshes.new('cockpit_holo')          # the HUD combiner glass (translucent material)
+    Bh.bm.to_mesh(hmesh)
+    Bh.bm.free()
     hobj = bpy.data.objects.new('cockpit_holo', hmesh)
     sc.collection.objects.link(hobj)
     rep['interior'] = {'seat': seat_built, 'tub_faces': len(tub_faces), 'interior_faces': len(imesh.polygons)}
@@ -780,6 +877,23 @@ def process(ship):
     int_img.pack()
     emis_img.pack()
 
+    # roughness / metallic per atlas region (R = AO 1, G = roughness, B = metallic) so the screens
+    # read as glass and the panels as metal instead of one flat finish
+    ORM = {'metal': (0.55, 0.85), 'trim': (0.45, 0.60), 'seat': (0.90, 0.00), 'screen': (0.12, 0.0), 'scrB': (0.12, 0.0),
+           'scrC': (0.12, 0.0), 'scrD': (0.12, 0.0), 'glow': (0.30, 0.0), 'suit': (0.80, 0.0), 'visor': (0.05, 0.0)}
+    orm = np.ones((512, 512, 4), np.float32)
+    for rname, (rg, mt) in ORM.items():
+        u0, v0, u1, v1 = REG[rname][:4]
+        orm[int(v0 * 512):int(v1 * 512), int(u0 * 512):int(u1 * 512), 1] = rg
+        orm[int(v0 * 512):int(v1 * 512), int(u0 * 512):int(u1 * 512), 2] = mt
+    orm_img = bpy.data.images.new(f'{ship}_orm', 512, 512, alpha=True)
+    orm_img.pixels.foreach_set(orm.ravel())
+    orm_img.filepath_raw = os.path.join(ATLAS_DIR, f'{ship}_orm.png')
+    orm_img.file_format = 'PNG'
+    orm_img.save()
+    orm_img.pack()
+    orm_img.colorspace_settings.name = 'Non-Color'
+
     def atlas_material(name, alpha=None, emis_strength=1.5):
         m = bpy.data.materials.new(name)
         m.use_nodes = True
@@ -790,8 +904,11 @@ def process(ship):
         e_ = new_image_node(nt_, emis_img)
         nt_.links.new(e_.outputs['Color'], b_.inputs['Emission Color'])
         b_.inputs['Emission Strength'].default_value = emis_strength
-        b_.inputs['Roughness'].default_value = 0.7
-        b_.inputs['Metallic'].default_value = 0.25
+        o_ = new_image_node(nt_, orm_img)
+        sep = nt_.nodes.new('ShaderNodeSeparateColor')
+        nt_.links.new(o_.outputs['Color'], sep.inputs['Color'])
+        nt_.links.new(sep.outputs['Green'], b_.inputs['Roughness'])
+        nt_.links.new(sep.outputs['Blue'], b_.inputs['Metallic'])
         if alpha is not None:
             b_.inputs['Alpha'].default_value = alpha
             m.blend_method = 'BLEND'
@@ -799,7 +916,7 @@ def process(ship):
         m.use_backface_culling = True
         return m
     imesh.materials.append(atlas_material('cockpit_interior', emis_strength=1.0))
-    hmesh.materials.append(atlas_material('cockpit_holo', alpha=HOLO_ALPHA, emis_strength=2.2))
+    hmesh.materials.append(atlas_material('cockpit_holo', alpha=HOLO_ALPHA, emis_strength=0.6))
 
     # ---------------- 7. decimate to the budget -----------------------------------------------
     n_in = len(me.polygons)

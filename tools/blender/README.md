@@ -306,7 +306,14 @@ FILL (1.5×, for the old lightless tub) made these walls glow flat pale grey und
 chain overrides `EMIS_FILL = 0.35` and emission strength 1.0. v37.44 (in-game the cabin read as a long
 corridor): panel at 0.26 Lc and ≥ 0.34 Lc wide, sills end at it, MFDs at 0.20 Lc, plus CANOPY ARCHES —
 a mullion 0.15 Lc ahead and a roll bar 0.11 Lc behind the head, chains of tubes riding just under the
-glass surface, so the window is framed in 3D → decimate (`--target 150000` triangles ; shells within 0.35 L of the eye keep up to 60%
+glass surface, so the window is framed in 3D. v37.45 (owner: *"the cockpit glass looks like it's tearing
+into the frame... ripped apart"*): the glass BOUNDARY is smoothed (erode glass faces with < 22% glass in
+their neighbourhood, close outer-skin faces with > 62%), a window-sill LIP rises from the coaming's outer
+edge to the skin above it so the boundary is never in view from the seat, arches and rim rail are smooth
+TUBES (bevelled segment boxes spiked at the joints), the eye sits 55% back along the canopy (rearmost-on-
+ties made long canopies read as corridors), panel at 0.22 Lc, control stick, throttle, HUD combiner glass
+(faint), overhead switch strip under the roll bar, and an ORM map on the interior atlas (glossy screens,
+metal panels, matte seat) → decimate (`--target 150000` triangles ; shells within 0.35 L of the eye keep up to 60%
 of the budget at ratio ≤ 0.5, the rest fills it, `delimit={'MATERIAL'}` so nothing collapses
 across the glass border) → export.
 
