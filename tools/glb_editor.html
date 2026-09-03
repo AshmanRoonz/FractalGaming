@@ -111,6 +111,11 @@
       <h2>Glass Paint</h2>
       <button id="btn-paint" disabled>Paint Glass: OFF</button>
       <p class="hint">Select the hull surface, toggle on, then <b>left-drag</b> to paint the canopy glass green. <b>Right-drag</b> orbits, wheel zooms, <b>Shift</b> erases, <b>[ ]</b> change the brush. Mirror paints both sides at once. Export writes <code>&lt;ship&gt;_glass.json</code>; put it in <code>tools/blender/marks/</code> (or use Save to pipeline while <code>python tools/glb_editor_server.py</code> runs) and the cockpit pipeline uses exactly these faces as the window.</p>
+      <label>Tool
+        <select id="paint-tool"><option value="outline" selected>Outline: click points, Enter fills</option><option value="brush">Brush: drag to paint</option></select>
+      </label>
+      <p class="hint" id="paint-tool-hint"><b>Outline:</b> click on the hull to drop points joined by straight lines. <b>Enter</b> (or double-click) closes the shape and marks every visible triangle inside it, <b>Shift+Enter</b> erases inside, <b>Backspace</b> removes the last point, <b>Esc</b> cancels the outline. Right-drag orbits between clicks.</p>
+      <button id="btn-paint-fill" disabled>Fill outline (Enter)</button>
       <label>Brush <span id="paint-radius-val">3%</span>
         <input type="range" id="paint-radius" min="0.5" max="12" step="0.5" value="3">
       </label>
@@ -275,6 +280,7 @@ function animate() {
   const _dt = _animClock.getDelta();
   if (_mixer) _mixer.update(_dt);
   renderer.render(scene, camera);
+  if (typeof outlineUpdate === 'function') outlineUpdate();
 }
 
 // ---- Animation playback (verify rigged GLBs from Meshy etc.) ----
@@ -1083,11 +1089,13 @@ function setPaintMode(on) {
     if (!t) { showStatus('No surface to paint', 3000); return; }
     setPlaceMode(null);
     paintPrepare(t);
+    outlineEnsureSvg();
     controls.mouseButtons = { LEFT: -1, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
     showStatus('Paint Glass ON: left-drag paints, right-drag orbits, Shift erases, [ ] brush size', 5000);
   } else {
     controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
     paint.painting = false;
+    outlineClear();
   }
   paint.on = on;
   paintBtn.textContent = 'Paint Glass: ' + (on ? 'ON' : 'OFF');
@@ -1150,15 +1158,24 @@ window.addEventListener('keydown', (e) => {
   if (!paint.on) return;
   if (e.key === '[') { paint.radiusPct = Math.max(0.5, paint.radiusPct - 0.5); document.getElementById('paint-radius').value = paint.radiusPct; document.getElementById('paint-radius-val').textContent = paint.radiusPct + '%'; }
   if (e.key === ']') { paint.radiusPct = Math.min(12, paint.radiusPct + 0.5); document.getElementById('paint-radius').value = paint.radiusPct; document.getElementById('paint-radius-val').textContent = paint.radiusPct + '%'; }
-  if (e.key === 'Escape') setPaintMode(false);
+  if (e.key === 'Escape' && !(paintTool() === 'outline' && outline.pts.length)) setPaintMode(false);
 });
 function paintBindPointer() {
   const el = renderer.domElement;
   el.addEventListener('pointerdown', (e) => {
     if (!paint.on || e.button !== 0) return;
+    if (paintTool() === 'outline') {
+      outlineEnsureSvg();
+      outlineAddPoint(e.clientX, e.clientY);
+      return;
+    }
     paint.painting = true; paint.erase = e.shiftKey;
     el.setPointerCapture(e.pointerId);
     paintStroke(e.clientX, e.clientY);
+  });
+  el.addEventListener('dblclick', (e) => {
+    if (!paint.on || paintTool() !== 'outline') return;
+    if (outline.pts.length >= 4) { outline.pts.pop(); outlineFill(e.shiftKey); }   // the double-click added a duplicate point
   });
   el.addEventListener('pointermove', (e) => { if (paint.painting) paintStroke(e.clientX, e.clientY); });
   const stop = () => { paint.painting = false; };
@@ -1175,9 +1192,172 @@ loadGLB = function (arrayBuffer, name) {
   setTimeout(() => { paintBtn.disabled = !loadedRoot; document.getElementById('btn-paint-load').disabled = !loadedRoot; }, 50);
 };
 
+// ---- OUTLINE tool: straight lines from point to point, fill the enclosed visible surface ----
+// (owner: "i want to be able to draw straight lines from one point to the next, instead of paint")
+// Points are hull positions (picked), so the polygon re-projects when the camera moves. Fill
+// renders the id pass over the whole view: every triangle whose pixels land inside the polygon
+// is marked (the exact visible surface) ; triangles too small for a pixel are added when their
+// centroid projects inside and sits no deeper than the visible surface around it.
+const outline = { pts: [], svg: null };
+function paintTool() { return document.getElementById('paint-tool').value; }
+function outlineEnsureSvg() {
+  if (outline.svg) return outline.svg;
+  viewer.style.position = viewer.style.position || 'relative';
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;';
+  viewer.appendChild(svg);
+  outline.svg = svg;
+  return svg;
+}
+function outlineProject(v) {
+  const r = renderer.domElement.getBoundingClientRect();
+  const p = v.clone().applyMatrix4(paint.mesh.matrixWorld).project(camera);
+  return [(p.x + 1) / 2 * r.width, (1 - p.y) / 2 * r.height, p.z];
+}
+function outlineUpdate() {
+  if (!outline.svg) return;
+  const svg = outline.svg;
+  while (svg.firstChild) svg.removeChild(svg.firstChild);
+  if (!paint.on || !paint.mesh || paintTool() !== 'outline' || !outline.pts.length) return;
+  const pts = outline.pts.map(outlineProject);
+  const path = document.createElementNS('http://www.w3.org/2000/svg', 'polyline');
+  path.setAttribute('points', pts.map(p => p[0] + ',' + p[1]).join(' '));
+  path.setAttribute('style', 'fill:none;stroke:#33ff66;stroke-width:2;stroke-dasharray:6 4');
+  svg.appendChild(path);
+  if (pts.length > 2) {
+    const close = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    close.setAttribute('x1', pts[pts.length - 1][0]); close.setAttribute('y1', pts[pts.length - 1][1]);
+    close.setAttribute('x2', pts[0][0]); close.setAttribute('y2', pts[0][1]);
+    close.setAttribute('style', 'stroke:#33ff66;stroke-width:1;stroke-dasharray:2 4;opacity:0.6');
+    svg.appendChild(close);
+  }
+  pts.forEach((p, i) => {
+    const c = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+    c.setAttribute('cx', p[0]); c.setAttribute('cy', p[1]); c.setAttribute('r', i === 0 ? 6 : 4);
+    c.setAttribute('style', 'fill:' + (i === 0 ? '#ffffff' : '#33ff66') + ';stroke:#000;stroke-width:1');
+    svg.appendChild(c);
+  });
+}
+function outlineAddPoint(clientX, clientY) {
+  if (!paint.mesh) return;
+  const id = paintPick(clientX, clientY);
+  if (id < 0) { showStatus('Click on the hull', 1500); return; }
+  const c = paint.cen;
+  outline.pts.push(new (camera.position.constructor)(c[3 * id], c[3 * id + 1], c[3 * id + 2]));
+  document.getElementById('btn-paint-fill').disabled = outline.pts.length < 3;
+  showStatus(`${outline.pts.length} point${outline.pts.length === 1 ? '' : 's'} - Enter fills, Backspace undoes`, 1500);
+}
+function outlineClear() {
+  outline.pts.length = 0;
+  document.getElementById('btn-paint-fill').disabled = true;
+  outlineUpdate();
+}
+function pointInPoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i][0], yi = poly[i][1], xj = poly[j][0], yj = poly[j][1];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+function outlineFill(erase) {
+  if (!paint.mesh || outline.pts.length < 3) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  const SS = 2;                                                    // supersample the id pass
+  const W = Math.floor(r.width * SS), H = Math.floor(r.height * SS);
+  const poly = outline.pts.map(v => { const p = outlineProject(v); return [p[0] * SS, p[1] * SS]; });
+  // full-view id pass
+  const rt = new THREE.WebGLRenderTarget(W, H, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
+  paint.mesh.updateWorldMatrix(true, false);
+  paint.pickMesh.matrix.copy(paint.mesh.matrixWorld);
+  const prev = renderer.getRenderTarget();
+  const prevPR = renderer.getPixelRatio();
+  renderer.setRenderTarget(rt);
+  renderer.render(paint.pickScene, camera);
+  const buf = new Uint8Array(W * H * 4);
+  renderer.readRenderTargetPixels(rt, 0, 0, W, H, buf);
+  renderer.setRenderTarget(prev);
+  rt.dispose();
+  const n = paint.n, cen = paint.cen, nrm = paint.nrm, mark = paint.mark;
+  const xs = poly.map(p => p[0]), ys = poly.map(p => p[1]);
+  const x0 = Math.max(0, Math.floor(Math.min(...xs))), x1 = Math.min(W - 1, Math.ceil(Math.max(...xs)));
+  const y0 = Math.max(0, Math.floor(Math.min(...ys))), y1 = Math.min(H - 1, Math.ceil(Math.max(...ys)));
+  // the id buffer is bottom-up ; polygon y is top-down
+  const idAt = (x, yTop) => { const i = ((H - 1 - yTop) * W + x) * 4; const id = buf[i] + buf[i + 1] * 256 + buf[i + 2] * 65536; return id < n ? id : -1; };
+  const inside = new Uint8Array(W * H);
+  const visible = new Uint8Array(n);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    if (!pointInPoly(x + 0.5, y + 0.5, poly)) continue;
+    inside[y * W + x] = 1;
+    const id = idAt(x, y);
+    if (id >= 0) visible[id] = 1;
+  }
+  // depth helpers (view space) for the sub-pixel triangles
+  const mv = new THREE.Matrix4().multiplyMatrices(camera.matrixWorldInverse, paint.mesh.matrixWorld);
+  const e = mv.elements;
+  const depthOf = (t) => -(e[2] * cen[3 * t] + e[6] * cen[3 * t + 1] + e[10] * cen[3 * t + 2] + e[14]);
+  const camDirL = camera.getWorldDirection(new THREE.Vector3()).applyMatrix3(new THREE.Matrix3().setFromMatrix4(paint.mesh.matrixWorld).invert()).normalize();
+  const front = document.getElementById('paint-front').checked;
+  const ext = Math.max(...paint.gdim) * paint.cell;
+  const tol = 0.015 * ext;
+  const proj = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, mv);
+  const pe = proj.elements;
+  const v = 1;
+  let changed = 0;
+  const val = erase ? 0 : 1;
+  for (let t = 0; t < n; t++) {
+    let hit = visible[t] === 1;
+    if (!hit) {
+      if (front && (nrm[3 * t] * camDirL.x + nrm[3 * t + 1] * camDirL.y + nrm[3 * t + 2] * camDirL.z) > 0) continue;
+      const cx = cen[3 * t], cy = cen[3 * t + 1], cz = cen[3 * t + 2];
+      const w = pe[3] * cx + pe[7] * cy + pe[11] * cz + pe[15];
+      if (w <= 0) continue;
+      const sx = ((pe[0] * cx + pe[4] * cy + pe[8] * cz + pe[12]) / w + 1) / 2 * W;
+      const sy = (1 - (pe[1] * cx + pe[5] * cy + pe[9] * cz + pe[13]) / w) / 2 * H;
+      const px = Math.floor(sx), py = Math.floor(sy);
+      if (px < x0 || px > x1 || py < y0 || py > y1 || !inside[py * W + px]) continue;
+      // no deeper than the visible surface around it
+      let dmin = Infinity;
+      for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
+        const qx = px + dx, qy = py + dy;
+        if (qx < 0 || qy < 0 || qx >= W || qy >= H) continue;
+        const id = idAt(qx, qy);
+        if (id >= 0) { const d = depthOf(id); if (d < dmin) dmin = d; }
+      }
+      if (dmin === Infinity || depthOf(t) > dmin + tol) continue;
+      hit = true;
+    }
+    if (hit && mark[3 * t] !== val) { mark[3 * t] = mark[3 * t + 1] = mark[3 * t + 2] = val; changed++; }
+  }
+  // mirror: the marked set reflected across the axis, by centroid proximity
+  if (document.getElementById('paint-mirror').checked && changed) {
+    const ax = document.getElementById('paint-axis').value;
+    const rr = paint.cell * 0.75;
+    const snapshot = [];
+    for (let t = 0; t < n; t++) if (mark[3 * t] === val && visible[t] === 1) snapshot.push(t);
+    for (const t of snapshot) {
+      const m = [cen[3 * t], cen[3 * t + 1], cen[3 * t + 2]];
+      if (ax === 'x') m[0] = -m[0]; else if (ax === 'y') m[1] = -m[1]; else m[2] = -m[2];
+      changed += paintBrushAt(m[0], m[1], m[2], rr, erase, [0, 0, 0], false);
+    }
+  }
+  paint.markAttr.needsUpdate = true;
+  paintUpdateInfo();
+  showStatus(`${erase ? 'Erased' : 'Marked'} ${changed.toLocaleString()} triangles inside the outline`, 3000);
+  outlineClear();
+}
+document.getElementById('paint-tool').addEventListener('change', () => { outlineClear(); });
+document.getElementById('btn-paint-fill').addEventListener('click', () => outlineFill(false));
+window.addEventListener('keydown', (e) => {
+  if (!paint.on || paintTool() !== 'outline') return;
+  if (e.key === 'Enter') { e.preventDefault(); outlineFill(e.shiftKey); }
+  else if (e.key === 'Backspace') { e.preventDefault(); outline.pts.pop(); document.getElementById('btn-paint-fill').disabled = outline.pts.length < 3; }
+  else if (e.key === 'Escape') { outlineClear(); }
+});
+
+window.__glbEditor = { paint, paintStroke, setPaintMode, paintMarksJSON, outline, outlineAddPoint, outlineFill, get camera() { return camera; }, get meshes() { return meshes; }, get renderer() { return renderer; } };   // debug / scripted tests
 init();
 paintBindPointer();
-window.__glbEditor = { paint, paintStroke, setPaintMode, paintMarksJSON, get camera() { return camera; }, get meshes() { return meshes; }, get renderer() { return renderer; } };   // debug / scripted tests
 (async () => {
   const u = new URLSearchParams(location.search).get('load');
   if (!u) return;

@@ -346,9 +346,15 @@ window is. The owner can, in a minute: the GLB editor has a **Paint Glass** sect
 1. `python tools/glb_editor_server.py` and open <http://localhost:8098/tools/glb_editor.html>
    (or open the file directly and use Export instead of Save).
 2. **Open GLB** → `LSS/ships_original/<Ship>.glb` (the hi-poly original ; it loads in ~10 s).
-3. Click **Paint Glass: OFF** to turn it on. **Left-drag** paints green, **right-drag** orbits,
-   wheel zooms, **Shift** erases, **[ ]** change the brush. *Mirror* paints both sides at once
-   (axis Z = the ship's left/right). *Front-facing only* keeps the brush off the inside.
+3. Click **Paint Glass: OFF** to turn it on. Default tool = **Outline** (owner: "straight lines from
+   one point to the next"): click on the hull to drop points joined by straight lines, **Enter** or
+   double-click closes the shape and marks every visible triangle inside it, **Shift+Enter** erases
+   inside, **Backspace** removes the last point, **Esc** cancels. Switch the Tool to **Brush** to
+   drag-paint instead (**Shift** erases, **[ ]** resize). **Right-drag** orbits, wheel zooms, in both.
+   *Mirror* applies both sides at once (axis Z = the ship's left/right). *Front-facing only* keeps
+   the inside of the hull out of it. The outline fill renders the id pass over the whole view, so
+   only the surface you can see inside the shape is marked (sub-pixel triangles are added when their
+   centroid lies inside and no deeper than the visible surface around it).
 4. Optional: **Place Cockpit** and click where the pilot's eye should be — the pipeline uses it.
 5. **Save to pipeline** writes `tools/blender/marks/<ship>_glass.json` (or **Export** and move
    the download there). **Load marks JSON** resumes a previous session.
