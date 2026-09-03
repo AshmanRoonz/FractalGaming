@@ -4177,7 +4177,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.88';
+const LSS_BUILD = '37.90';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23553,13 +23553,17 @@ function _carrierSpawn(opts) {
 function _carrierEngineStart() {
   try {
     if (_carrier.snd || typeof audio === 'undefined' || !audio || !audio.ctx) return;
-    const ctx = audio.ctx, now = ctx.currentTime;
+    const ctx = audio.ctx;
+    const buf = (typeof _shipPhiLoop === 'function') ? _shipPhiLoop(ctx) : null;
+    if (!buf) { _carrier.sndWait = true; return; }   // still rendering offline; the tick retries
+    _carrier.sndWait = false;
+    const now = ctx.currentTime;
     const K = _carrierKnobs();
-    const o1 = ctx.createOscillator(); o1.type = 'sawtooth'; o1.frequency.value = 38;
-    const o2 = ctx.createOscillator(); o2.type = 'triangle'; o2.frequency.value = 57;
-    const g1 = ctx.createGain(); g1.gain.value = 0.45;
-    const g2 = ctx.createGain(); g2.gain.value = 0.30;
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 430; lp.Q.value = 0.7;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.loop = true;
+    src.playbackRate.value = (K.pitch != null) ? K.pitch : (1 / (PHI * PHI));
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 1200; lp.Q.value = 0.4;
     const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, now);
     const pan = ctx.createPanner();
     pan.panningModel = 'HRTF';
@@ -23567,26 +23571,16 @@ function _carrierEngineStart() {
     pan.refDistance = 900;      // a capital ship carries a long way
     pan.maxDistance = 26000;
     pan.rolloffFactor = 0.85;
-    o1.connect(g1); g1.connect(lp);
-    o2.connect(g2); g2.connect(lp);
-    let noise = null;
-    if (typeof _audioSharedNoiseBuffer === 'function') {
-      noise = ctx.createBufferSource();
-      noise.buffer = _audioSharedNoiseBuffer(ctx, 1.0);
-      noise.loop = true;
-      const nbp = ctx.createBiquadFilter(); nbp.type = 'bandpass'; nbp.frequency.value = 165; nbp.Q.value = 0.6;
-      const ng = ctx.createGain(); ng.gain.value = 0.16;
-      noise.connect(nbp); nbp.connect(ng); ng.connect(lp);
-    }
-    lp.connect(g); g.connect(pan);
+    src.connect(lp); lp.connect(g); g.connect(pan);
     pan.connect(audio.sfxBus || audio.masterGain || ctx.destination);
-    o1.start(now); o2.start(now); if (noise) noise.start(now);
-    g.gain.linearRampToValueAtTime((K.vol != null) ? K.vol : 0.45, now + 1.5);
-    _carrier.snd = { o1, o2, noise, g, pan, lp };
+    src.start(now, Math.random() * buf.duration * 0.9);
+    g.gain.linearRampToValueAtTime((K.vol != null) ? K.vol : 1.8, now + 1.5);
+    _carrier.snd = { src, g, pan, lp };
   } catch (_) { _carrier.snd = null; }
 }
 function _carrierEngineTick() {
   const S = _carrier.snd;
+  if (!S && _carrier.sndWait) { try { _carrierEngineStart(); } catch (_) {} return; }
   if (!S || !_carrier.obj) return;
   try {
     const p = _carrier.obj.position;
@@ -23599,7 +23593,7 @@ function _carrierEngineTick() {
       S.pan.setPosition(p.x, p.y, p.z);
     }
     const K = _carrierKnobs();
-    const want = (_carrier.ent && _carrier.ent.alive) ? ((K.vol != null) ? K.vol : 0.45) : 0;
+    const want = (_carrier.ent && _carrier.ent.alive) ? ((K.vol != null) ? K.vol : 1.8) : 0;
     if (Math.abs(S.g.gain.value - want) > 0.01) {
       S.g.gain.setTargetAtTime(want, audio.ctx.currentTime, 0.4);
     }
@@ -23608,12 +23602,13 @@ function _carrierEngineTick() {
 function _carrierEngineStop() {
   const S = _carrier.snd;
   _carrier.snd = null;
+  _carrier.sndWait = false;
   if (!S) return;
   try {
     const t = audio.ctx.currentTime;
     S.g.gain.setTargetAtTime(0.0001, t, 0.15);
     setTimeout(() => {
-      try { S.o1.stop(); S.o2.stop(); if (S.noise) S.noise.stop(); } catch (_) {}
+      try { S.src.stop(); } catch (_) {}
       try { S.g.disconnect(); S.pan.disconnect(); S.lp.disconnect(); } catch (_) {}
     }, 700);
   } catch (_) {}
@@ -23677,6 +23672,8 @@ function _carrierCollide(pos, velocity, radius) {
   const ax = Math.abs(_ccP.x), ay = Math.abs(_ccP.y), az = Math.abs(_ccP.z);
   if (ax > hx || ay > hy || az > hz) return;                 // outside the box
   const px = hx - ax, py = hy - ay, pz = hz - az;            // penetration per axis
+  const _shell = Math.min(_carrier.half.x, _carrier.half.y, _carrier.half.z) * 0.45 + radius;
+  if (px > _shell && py > _shell && pz > _shell) return;
   const sx = _ccP.x < 0 ? -1 : 1, sy = _ccP.y < 0 ? -1 : 1, sz = _ccP.z < 0 ? -1 : 1;
   if (py <= px && py <= pz) { _ccP.y = sy * hy; _ccN.set(0, sy, 0); }
   else if (px <= pz)        { _ccP.x = sx * hx; _ccN.set(sx, 0, 0); }
@@ -24024,6 +24021,12 @@ function _cyberDeckPlace(C) {
     player.position.copy(d);
     player.position.y += 40;
     player.velocity.set(0, 0, 0);
+    if (_carrier.dir && _carrier.dir.lengthSq() > 0.5 && player.euler) {
+      const h = _carrier.dir;
+      player.euler.y = Math.atan2(-h.x, -h.z);
+      player.euler.x = 0;
+      player.euler.z = 0;
+    }
     return true;
   } catch (_) { return false; }
 }
@@ -26831,7 +26834,7 @@ function _losBlockedByClusters(from, dir, dist) {
   return false;
 }
 
-function raycastLevel(origin, dir, maxDist, coarse) {
+function raycastLevel(origin, dir, maxDist, coarse, skipCarrier) {
   let nearest = maxDist;
   if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) {
     const grp = _lssGmaps.tiles && _lssGmaps.tiles.group;
@@ -26859,7 +26862,7 @@ function raycastLevel(origin, dir, maxDist, coarse) {
   }
 
   
-  if (typeof _carrierRayDist === 'function') {
+  if (typeof _carrierRayDist === 'function' && !skipCarrier) {
     const _cd2 = _carrierRayDist(origin, dir, nearest);
     if (_cd2 >= 0 && _cd2 < nearest) nearest = _cd2;
   }
@@ -43580,7 +43583,7 @@ function _lssApplyShipRig(dt) {
       const _bLen = _tpOff.length();
       _tpDir.copy(_tpOff).multiplyScalar(1 / _bLen);
       let _bSafe = _bLen;
-      try { if (typeof raycastLevel === 'function') _bSafe = Math.min(_bLen, Math.max(26, raycastLevel(player.position, _tpDir, _bLen + 20) - 14)); } catch (_) {}
+      try { if (typeof raycastLevel === 'function') _bSafe = Math.min(_bLen, Math.max(26, raycastLevel(player.position, _tpDir, _bLen + 20, false, true) - 14)); } catch (_) {}
       const _bCur = (game._tpBoom == null) ? _bLen : game._tpBoom;
       game._tpBoom = (_bSafe < _bCur) ? _bSafe : Math.min(_bLen, _bCur + (_bSafe - _bCur) * Math.min(1, dt * 4));
       if (game._tpBoom < _bLen - 0.01) _tpOff.multiplyScalar(game._tpBoom / _bLen);
@@ -43757,7 +43760,7 @@ function _lssApplyShipRig(dt) {
       } else if (z > 0) {
         _tpDir.set(0, 0, -1).applyQuaternion(camera.quaternion);
         let L = 3400;
-        try { if (typeof raycastLevel === 'function') L = raycastLevel(camera.position, _tpDir, 3400); } catch (_) {}
+        try { if (typeof raycastLevel === 'function') L = raycastLevel(camera.position, _tpDir, 3400, false, true); } catch (_) {}
         L = Math.max(120, L);
         const _dT = z * Math.min((Z.frac != null ? Z.frac : 0.55) * L, (Z.dMax != null ? Z.dMax : 420));
         let _dC = game._adsDolly || 0;
