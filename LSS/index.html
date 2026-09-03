@@ -4177,7 +4177,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.96';
+const LSS_BUILD = '37.97';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23532,6 +23532,8 @@ function _carrierAttach(root, sector) {
   };
   if (_carrier.team != null) _carrier.ent.team = _carrier.team;
   if (game && Array.isArray(game.entities)) game.entities.push(_carrier.ent);
+  _carrier.rideY = null;
+  try { _carrierRide(0, true); } catch (_) {}      // (v37.97) never spawn inside the hill
   try { _carrierEngineStart(); } catch (_) {}
   return _carrier.ent;
 }
@@ -23651,29 +23653,39 @@ function _carrierClear(keepSound) {
   _carrier.obj = null; _carrier.ent = null;
   _carrier.spawns.length = 0; _carrier.guns.length = 0; _carrier.thrusters.length = 0;
 }
+const _crP = new THREE.Vector3();
+function _carrierRide(dt, snap) {
+  const o = _carrier.obj;
+  if (!o) return;
+  let gy = null;
+  try {
+    const T = game.sandwichTerrain;
+    if (T && typeof _stGroundYCarved === 'function') {
+      const half = (_carrier.half ? _carrier.half.x : 680) * 0.92;
+      for (let i = -1; i <= 1; i++) {
+        _crP.copy(o.position).addScaledVector(_carrier.dir, half * i);
+        const h = _stGroundYCarved(_crP.x, _crP.z, T);
+        if (typeof h === 'number' && isFinite(h) && (gy == null || h > gy)) gy = h;
+      }
+    }
+  } catch (_) {}
+  if (typeof gy !== 'number' || !isFinite(gy)) return;
+  const K = _carrierKnobs();
+  const _cl = (typeof K.clearance === 'number') ? K.clearance : CARRIER.clearance;
+  const want = Math.max(o.position.y, gy + _cl);
+  const next = (snap || _carrier.rideY == null) ? want
+             : _carrier.rideY + (want - _carrier.rideY) * Math.min(1, (dt || 0.016) * 0.8);
+  if (isFinite(next)) { _carrier.rideY = next; o.position.y = next; if (_carrier.ent) _carrier.ent.position.copy(o.position); }
+}
 function _carrierFrame(dt) {
   if (!_carrier.obj || !_carrier.ent) return;
   if (!_carrier.ent.alive) return;
-  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) { _carrierRide(dt, false); return; }
   _carrier.t += (dt || 0.016);
   const travelled = Math.min(_carrier.dist, _carrierSpeed() * _carrier.t);
   const o = _carrier.obj;
   o.position.copy(_carrier.from).addScaledVector(_carrier.dir, travelled);
-  {
-    let gy = null;
-    try {
-      const T = game.sandwichTerrain;
-      if (T && typeof _stGroundYCarved === 'function') gy = _stGroundYCarved(o.position.x, o.position.z, T);
-    } catch (_) {}
-    if (typeof gy === 'number' && isFinite(gy)) {
-      const K = _carrierKnobs();
-      const _cl = (typeof K.clearance === 'number') ? K.clearance : CARRIER.clearance;
-      const want = Math.max(o.position.y, gy + _cl);
-      const next = (_carrier.rideY == null) ? want
-                 : _carrier.rideY + (want - _carrier.rideY) * Math.min(1, (dt || 0.016) * 0.8);
-      if (isFinite(next)) { _carrier.rideY = next; o.position.y = next; }
-    }
-  }
+  _carrierRide(dt, false);
   if (_carrier.glows && _carrier.glows.length) {
     const pulse = 1 + 0.14 * Math.sin(_carrier.t * 2.2);
     for (const m of _carrier.glows) {
@@ -24069,6 +24081,11 @@ function _cyberApplyStart(sector, routeT, fx, fy, fz) {
   }
 }
 if (typeof window !== 'undefined') window.startCyberpunkCity = startCyberpunkCity;
+const _CY_CLEAR_DIRS = [
+  new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, -1, 0),
+  new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0),
+  new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1),
+];
 function _cyberSpawnField() {
   if (typeof StasisField !== 'function' || typeof HUB_CITY === 'undefined') return null;
   const R = (HUB_CITY.genome && HUB_CITY.genome.radius) ? HUB_CITY.genome.radius : 7500;
@@ -24084,8 +24101,10 @@ function _cyberSpawnField() {
     let clear = true;
     try {
       if (typeof _hubCityRayHit === 'function') {
-        const a1 = _hubCityRayHit(c, up, 220), a2 = _hubCityRayHit(c, dn, 220);
-        if ((a1 && a1 < 220) || (a2 && a2 < 220)) clear = false;
+        for (const d of _CY_CLEAR_DIRS) {
+          const h = _hubCityRayHit(c, d, 220);
+          if (h && h < 220) { clear = false; break; }
+        }
       }
     } catch (_) {}
     if (clear) pos = c;
@@ -24344,6 +24363,25 @@ function _cyberFrame(dt) {
   if (C.over) return;
   if (net.active && !C.authority) return;     // (v37.80) a joiner mirrors; it does not adjudicate
   try { _cyberReviveBots(C, dt || 0.016); } catch (_) {}
+  C._fieldT = (C._fieldT || 0) - (dt || 0.016);
+  if (C._fieldT <= 0) {
+    C._fieldT = 1.0;
+    const _missing = !C.field || !C.field.position ||
+                     (Array.isArray(game.stasisFields) && game.stasisFields.indexOf(C.field) < 0);
+    if (_missing) {
+      try {
+        C.field = _cyberSpawnField();
+        if (C.field && net.active && net.sendEvent) {
+          net.sendEvent({ type: 'cyber_start', sector: C.sector, t: _carrier.t,
+                          fx: C.field.position.x, fy: C.field.position.y, fz: C.field.position.z });
+        }
+        if (C.field) console.warn('[cyber] objective was missing - rebuilt');
+      } catch (e) { console.warn('[cyber] field rebuild:', e); }
+    } else {
+      game.championField = C.field;                 // keep the HUD's handle pointed at it
+      game.championSpawned = true;
+    }
+  }
   C._cityT = (C._cityT || 0) - (dt || 0.016);
   if (C._cityT <= 0) { C._cityT = 1.0; try { _cyberCityDefence(C); } catch (_) {} }
 
@@ -42279,6 +42317,16 @@ function commitLoadout(key) {
   updateTeammatesStrip();
 
   try { if (typeof _pinPostFXPrograms === 'function') _pinPostFXPrograms(); } catch (_) {}
+  try {
+    if (typeof _ghostHullApply === 'function' && typeof player !== 'undefined' && player && player.mesh) {
+      _ghostHullApply(player.mesh);
+      if (typeof renderer !== 'undefined' && renderer && renderer.compile &&
+          typeof scene !== 'undefined' && typeof camera !== 'undefined') {
+        renderer.compile(scene, camera);
+      }
+      _ghostHullRestore(player.mesh);
+    }
+  } catch (e) { console.warn('[ghost] warm failed:', e && e.message); }
 
   const _launchSoloAfterCinematic = () => {
     if (_countdownActive) return;
