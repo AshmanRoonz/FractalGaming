@@ -50,6 +50,16 @@ SAMPLES = int(opt('--samples', '4'))
 BAKE_NORMAL = '--no-normal' not in argv
 RENDER = '--render' in argv
 EXPORT = '--no-export' not in argv
+PKG = opt('--pkg', os.path.join(REPO, 'tools', 'blender', 'vendor', 'blender-model-optimizer'))   # Hinneman/blender-model-optimizer (vendored, MIT): its decimate_single ; --pkg '' = plain collapse
+_opt_geometry = None
+if PKG and os.path.isdir(os.path.join(PKG, 'blender_model_optimizer')):
+    import importlib
+    import types as _types
+    _pkg = _types.ModuleType('blender_model_optimizer')
+    _pkg.__path__ = [os.path.join(PKG, 'blender_model_optimizer')]
+    sys.modules['blender_model_optimizer'] = _pkg
+    _opt_geometry = importlib.import_module('blender_model_optimizer.geometry')
+    _opt_geometry.log = lambda context, message, level='INFO': print(f'[optimizer:{level}] {message}')
 
 
 def import_glb(path):
@@ -221,7 +231,17 @@ def process(ship):
 
     # ---- 3. decimate + smooth ----------------------------------------------------------------
     n_tri = sum(len(pg.vertices) - 2 for pg in clean.data.polygons)      # the remesh is quads
-    if n_tri > TARGET:
+    if n_tri > TARGET and _opt_geometry is not None:
+        # blender-model-optimizer's decimation (owner: "try this"): a planar pre-pass merges the
+        # remesh's coplanar quads into n-gons first, then a two-pass collapse spends the budget on
+        # curved skin. Its ratio is per face, so aim by triangles.
+        import types as _types
+        props = _types.SimpleNamespace(merge_distance_mm=0.1, decimate_ratio=TARGET / n_tri, decimate_passes=2,
+                                       protect_uv_seams=False, run_planar_prepass=True, planar_angle=math.radians(5.0),
+                                       verbose_logging=True)
+        _opt_geometry.decimate_single(bpy.context, clean, props)
+        rep['decimate'] = 'blender-model-optimizer planar + 2-pass collapse'
+    elif n_tri > TARGET:
         select_only([clean])
         mod = clean.modifiers.new('dec', 'DECIMATE')
         mod.ratio = TARGET / n_tri
@@ -229,6 +249,7 @@ def process(ship):
         mod.use_symmetry = True
         mod.symmetry_axis = 'Y'
         bpy.ops.object.modifier_apply(modifier=mod.name)
+        rep['decimate'] = 'blender collapse (Y symmetry)'
     # the decimated mesh must be VALID: the first run left one face without loops and every later
     # step (unwrap, bake, export) silently did nothing on it
     bad = clean.data.validate(verbose=False, clean_customdata=True)
@@ -260,9 +281,9 @@ def process(ship):
     bpy.ops.mesh.select_all(action='SELECT')
     bpy.ops.mesh.select_mode(type='FACE')
     bpy.ops.mesh.select_all(action='SELECT')
-    bpy.ops.uv.smart_project(angle_limit=math.radians(66), island_margin=0.001, scale_to_bounds=False)
+    bpy.ops.uv.smart_project(angle_limit=math.radians(80), island_margin=0.0005, scale_to_bounds=False)   # fewer, larger islands
     try:
-        bpy.ops.uv.pack_islands(rotate=True, margin=0.002)       # smart_project alone covered ~37% of the texture
+        bpy.ops.uv.pack_islands(rotate=True, margin=0.001)       # smart_project alone covered ~37% of the texture
     except Exception as ex:
         print('pack_islands skipped:', ex)
     bpy.ops.object.mode_set(mode='OBJECT')

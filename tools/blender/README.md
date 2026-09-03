@@ -413,3 +413,21 @@ Then the cockpit chain on the clean hulls: `ship_original.py --orig assets_base/
 (imports with merge_vertices: the export split vertices along UV seams, 5647 "shells" otherwise).
 Outline marks drawn on the ORIGINAL in the editor replay as cuts on the clean hull too (same
 space) ; brush marks match faces by centroid and do not transfer.
+
+### blender-model-optimizer (v37.54) — what it does for us
+
+Owner: *"try this https://github.com/Hinneman/blender-model-optimizer"*. It is a Blender 4.2+ sidebar
+add-on that cleans and decimates AI models (merge doubles, fill holes, remove enclosed loose parts or
+ray-cast interior faces, delete small pieces, planar pre-pass + multi-pass collapse with UV-seam
+protection, optional normal bake, export with Draco). Its geometry functions are plain bpy, so
+`tools/blender/optimizer_try.py` drives them headless under 4.1 from the vendored copy in
+`tools/blender/vendor/blender-model-optimizer/` (MIT). Findings on the Pyro (`reports/remesh/
+_compare_pyro.png`, scratch `sheet_compare.py`): it keeps the original texture crispest because it
+never bakes, but it is a decimator — the overlapping zero-thickness panel soup stays, which is what
+reads as a mess up close and what the glass cuts and the cabin cannot live with ; its collapse also
+leaves a mesh the glTF exporter rejects until validated (same trap as ours) ; its RAY_CAST interior
+removal is 13 Python rays per face (hours on a million faces — use LOOSE_PARTS). What we kept: its
+`decimate_single` (planar pre-pass merges the remesh's coplanar quads into n-gons, then a two-pass
+collapse spends the budget on curves) now runs inside `ship_remesh.py` by default (`--pkg ''` for
+the plain collapse), together with larger UV islands (80°, tighter pack: 55% coverage instead of
+36%) — the remeshed Pyro is now close to the original's crispness with clean geometry.
