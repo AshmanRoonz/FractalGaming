@@ -4251,7 +4251,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.87';
+const LSS_BUILD = '37.88';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -30114,7 +30114,9 @@ function _cyberCinematic(C) {
     const fx = (typeof _lssShipEngineFX === 'function') ? _lssShipEngineFX(rec.mesh) : [];
     _cinematic.ships.push({
       mesh: rec.mesh, isPlayer: rec.isPlayer,
-      origPos: rec.mesh.position.clone(), origQuat: rec.mesh.quaternion.clone(), origVisible: rec.mesh.visible,
+      // (v37.88) restore TO the deck pose, not to wherever the ship stood before the lineup: the
+      // teardown copies origPos back onto the mesh, and the old spawn is a long way from here
+      origPos: new THREE.Vector3(p.x, p.y + 30, p.z), origQuat: q.clone(), origVisible: rec.mesh.visible,
       shield: sh || null, origShieldVisible: sh ? sh.visible : null,
       engineFx: fx.map(o => ({ o, v: o.visible })),
       pos: { x: p.x, y: p.y + 30, z: p.z }, quat: q,
@@ -30152,6 +30154,22 @@ function _cyberCinematic(C) {
 // (v37.85) Building the match is its own step so it can run from the CINEMATIC hook - which fires
 // before the countdown - instead of the first 'playing' frame, which is after it. Idempotent: the
 // second caller sees C.started and does nothing.
+// (v37.88) THE ATTACKER IS ACTUALLY ON THE DECK, not just drawn there. The cinematic moves MESHES;
+// player.position was still sitting at the free-flight spawn out by the portal, so the moment the
+// lineup ended the camera snapped back to that spawn, the 3-2-1 ran there, and the mode's deck
+// assert hauled you back to the carrier a second later. That round trip is the glitch. Writing the
+// real position here - and holding it through warmup - means there is nowhere else to snap to.
+function _cyberDeckPlace(C) {
+  if (!C || !C.started || player.team !== C.teamA) return false;
+  try {
+    const d = _carrierDeckPoint(0);
+    if (!d) return false;
+    player.position.copy(d);
+    player.position.y += 40;
+    player.velocity.set(0, 0, 0);
+    return true;
+  } catch (_) { return false; }
+}
 function _cyberSetup(C) {
   if (!C || C.started) return;
   {
@@ -30182,6 +30200,7 @@ function _cyberSetup(C) {
     }
     // the attacker starts on the deck
     C.placeT = 2.5;   // the free-flight spawn lands after this frame ; hold the deck briefly
+    try { _cyberDeckPlace(C); } catch (_) {}
     try {
       if (window.Overlays && Overlays.banner) Overlays.banner('CYBERPUNK CITY', 'take the field in the city');
     } catch (_) {}
@@ -30189,7 +30208,14 @@ function _cyberSetup(C) {
 }
 function _cyberFrame(dt) {
   const C = game._cyber;
-  if (!C || !C.armed || game.state !== 'playing') return;
+  if (!C || !C.armed) return;
+  if (game.state !== 'playing') {
+    // (v37.88) the lineup and the 3-2-1 both happen before 'playing' - keep the ship on the deck
+    // for them, or the countdown plays out at the free-flight spawn and the match starts with a
+    // teleport back to the carrier
+    if (C.started) _cyberDeckPlace(C);
+    return;
+  }
   if (!C.started) _cyberSetup(C);
   // (v37.76b) The mode's own spawn has to win over free flight's, which places the player on the
   // frame after 'playing' begins - so the deck is re-asserted for a couple of seconds rather than
