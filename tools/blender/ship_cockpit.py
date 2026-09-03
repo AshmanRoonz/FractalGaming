@@ -123,9 +123,10 @@ EMIS_FILL = 1.5            # interior fill light (LINEAR multiplier on the base 
                            # 1.5 keeps the dark, moody v37.34 look with shadowed panels just readable
 GLASS_ALPHA = 0.35
 # ships whose canopy rim rail should follow the WHOLE glass outline (tall greenhouse slit)
-RAIL_FULL = {'pyro'}
+RAIL_FULL = set()          # (v37.40) the painted frame art outlines the window now ; the full thin rail was redundant (the dark bars
+                           # across the Pyro's sky are the HULL's own painted greenhouse mullions, not this rail)
 # ships whose dash grows into a tall instrument stack (eye high above the rim in a greenhouse)
-TALL_DASH = {'pyro'}
+TALL_DASH = set()          # (v37.40) the painted dashboard strip hides the tall instrument stack anyway
 # Hull light-strip emissive mask knobs (see HULL LIGHTS below): pixels more saturated than
 # `sat`, brighter than `val`, within `hue_tol` (0..1 hue space) of the class colour.
 HULL_GLOW = {
@@ -665,7 +666,16 @@ def cut_canopy_bulge(hull, cp, L, prm, rep):
 
 
 def build_frame_billboard(ship, B, eye_local, Lc, rep):
-    """The painted frame PNG as depth-sorted strips around the eye (own object + material)."""
+    """The painted frame PNG as ONE continuous band around the eye (own object + material).
+
+    v37.41: the v37.39 build cut the PNG into dash / rail / pillar strips at three radii and the
+    owner saw the cut lines ("it looks cut up on the frame"). Now a single grid covers the whole
+    picture and only its RADIUS varies, blended smoothly: the dashboard rows sit close
+    (FRAME_R['dash']), the rail rows far (FRAME_R['top']), the pillar columns between
+    (FRAME_R['side']). Screen angles stay exact at the default eye (pitch over the PNG height,
+    yaw over its width), so the artist's composition holds and the head parallaxes against
+    real depth - without a seam anywhere. Cells whose pixels are fully transparent are skipped.
+    """
     src = os.path.join(REPO, FRAME_PNG[ship])
     img = bpy.data.images.load(src)
     W, H = img.size
@@ -677,10 +687,9 @@ def build_frame_billboard(ship, B, eye_local, Lc, rep):
     mx = rgb.max(2)
     mn = rgb.min(2)
     sat = np.where(mx > 1e-4, (mx - mn) / np.maximum(mx, 1e-4), 0)
-    # the painting carries its own lighting: render it mostly SELF-LIT (emissive = the art,
-    # base colour dimmed) so it reads like the overlay did instead of sun + emissive doubling
-    # up and blowing out the centre display
-    emis = np.concatenate([rgb * FRAME_EMIS_GAIN, a], 2).clip(0, 1)
+    glow = np.clip((sat * mx - 0.10) / 0.35, 0, 1) ** 1.2
+    glow = np.maximum(glow, np.clip((mx - 0.80) / 0.2, 0, 1))
+    emis = np.concatenate([rgb * glow[..., None] * FRAME_EMIS_GAIN, a], 2).clip(0, 1)
     eimg = bpy.data.images.new(f'{ship}_frame_emis', W, H, alpha=True)
     eimg.pixels.foreach_set(emis.astype(np.float32).ravel())
     eimg.filepath_raw = os.path.join(ATLAS_DIR, f'{ship}_frame_emis.png')
@@ -688,18 +697,18 @@ def build_frame_billboard(ship, B, eye_local, Lc, rep):
     eimg.save()
     eimg.pack()
     img.pack()
-    # strips from the alpha: row / column coverage
+    # where the art has its dashboard rows, rail rows and pillar columns (by alpha coverage)
     op = (px[..., 3] > 0.5)
     row_cov = op.mean(1)                          # per row (bottom -> top)
     col_cov = op[int(0.30 * H):int(0.70 * H)].mean(0)   # per column, middle rows only
     j = 0
     while j < H and row_cov[j] > 0.15:
         j += 1
-    v_dash = j / H                                # dashboard strip = rows [0, v_dash)
+    v_dash = j / H
     j = H - 1
     while j >= 0 and row_cov[j] > 0.15:
         j -= 1
-    v_top = (j + 1) / H                           # rail strip = rows [v_top, 1)
+    v_top = (j + 1) / H
     i = 0
     while i < W and col_cov[i] > 0.5:
         i += 1
@@ -708,44 +717,57 @@ def build_frame_billboard(ship, B, eye_local, Lc, rep):
     while i >= 0 and col_cov[i] > 0.5:
         i -= 1
     u_right = (i + 1) / W
-    strips = []
-    if v_dash > 0.02:
-        strips.append(('dash', 0.0, 1.0, 0.0, min(0.6, v_dash + 0.01)))
-    if v_top < 0.98:
-        strips.append(('top', 0.0, 1.0, max(0.4, v_top - 0.01), 1.0))
-    if u_left > 0.02:
-        strips.append(('side', 0.0, min(0.35, u_left + 0.01), 0.0, 1.0))
-    if u_right < 0.98:
-        strips.append(('side', max(0.65, u_right - 0.01), 1.0, 0.0, 1.0))
     rep['frame_art'] = {'png': FRAME_PNG[ship], 'size': [W, H], 'v_dash': round(v_dash, 3), 'v_top': round(v_top, 3),
-                        'u_left': round(u_left, 3), 'u_right': round(u_right, 3), 'strips': [st[0] for st in strips]}
+                        'u_left': round(u_left, 3), 'u_right': round(u_right, 3), 'band': 'continuous'}
+
+    def sstep(e0, e1, x):
+        t = (x - e0) / (e1 - e0) if e1 != e0 else (1.0 if x >= e1 else 0.0)
+        t = max(0.0, min(1.0, t))
+        return t * t * (3 - 2 * t)
+
+    def radius(u, v):
+        w_dash = sstep(v_dash + 0.08, v_dash - 0.02, v) if v_dash > 0.02 else 0.0
+        w_top = sstep(v_top - 0.08, v_top + 0.02, v) if v_top < 0.98 else 0.0
+        r_mid = FRAME_R['side'] + (FRAME_R['top'] - FRAME_R['side']) * w_top
+        return (r_mid + (FRAME_R['dash'] - r_mid) * w_dash) * Lc
+
     h = math.radians(FRAME_HFOV / 2)
+    NU, NV = 96, 48
+    # per-cell alpha presence (skip fully transparent cells)
+    cell_a = np.zeros((NV, NU), bool)
+    for jj in range(NV):
+        y0, y1 = int(jj * H / NV), max(int(jj * H / NV) + 1, int((jj + 1) * H / NV))
+        for ii in range(NU):
+            x0, x1 = int(ii * W / NU), max(int(ii * W / NU) + 1, int((ii + 1) * W / NU))
+            cell_a[jj, ii] = bool(px[y0:y1, x0:x1, 3].max() > 0.02)
     bm = bmesh.new()
     uvl = bm.loops.layers.uv.new('UVMap')
-    for name, u0, u1, v0, v1 in strips:
-        R = FRAME_R[name] * Lc
-        NU = max(4, int(48 * (u1 - u0)))
-        NV = max(2, int(12 * (v1 - v0)))
-        grid = []
-        for jj in range(NV + 1):
-            vv = v0 + (v1 - v0) * jj / NV
+    grid = [[None] * (NU + 1) for _ in range(NV + 1)]
+
+    def vert(jj, ii):
+        if grid[jj][ii] is None:
+            uu, vv = ii / NU, jj / NV
+            R = radius(uu, vv)
             z = R * math.tan(math.radians(-FRAME_VFOV / 2 + FRAME_VFOV * vv))
-            row = []
-            for ii in range(NU + 1):
-                uu = u0 + (u1 - u0) * ii / NU
-                yaw = -h + 2 * h * uu
-                p_ = Vector((eye_local.x + R * math.cos(yaw), eye_local.y + R * math.sin(yaw), eye_local.z + z))
-                row.append((bm.verts.new(B.to_world(p_)), uu, vv))
-            grid.append(row)
-        for jj in range(NV):
-            for ii in range(NU):
-                a_, b_, c_, d_ = grid[jj][ii], grid[jj][ii + 1], grid[jj + 1][ii + 1], grid[jj + 1][ii]
-                try:
-                    f = bm.faces.new((a_[0], b_[0], c_[0], d_[0]))     # wound to face the eye
-                except ValueError:
-                    continue
-                for l, (v0_, uu, vv) in zip(f.loops, (a_, b_, c_, d_)):
-                    l[uvl].uv = (uu, vv)
+            yaw = -h + 2 * h * uu
+            p_ = Vector((eye_local.x + R * math.cos(yaw), eye_local.y + R * math.sin(yaw), eye_local.z + z))
+            grid[jj][ii] = (bm.verts.new(B.to_world(p_)), uu, vv)
+        return grid[jj][ii]
+
+    n_faces = 0
+    for jj in range(NV):
+        for ii in range(NU):
+            if not cell_a[jj, ii]:
+                continue
+            a_, b_, c_, d_ = vert(jj, ii), vert(jj, ii + 1), vert(jj + 1, ii + 1), vert(jj + 1, ii)
+            try:
+                f = bm.faces.new((a_[0], b_[0], c_[0], d_[0]))     # wound to face the eye
+            except ValueError:
+                continue
+            for l, (v0_, uu, vv) in zip(f.loops, (a_, b_, c_, d_)):
+                l[uvl].uv = (uu, vv)
+            n_faces += 1
+    rep['frame_art']['faces'] = n_faces
     fmesh = bpy.data.meshes.new('cockpit_frame')
     bm.to_mesh(fmesh)
     bm.free()
@@ -754,18 +776,13 @@ def build_frame_billboard(ship, B, eye_local, Lc, rep):
     nt = fmat.node_tree
     bsdf = nt.nodes['Principled BSDF']
     tex = new_image_node(nt, img)
-    mixn = nt.nodes.new('ShaderNodeMixRGB')          # base colour = art x FRAME_LIT (exported as the material's base factor)
-    mixn.blend_type = 'MULTIPLY'
-    mixn.inputs['Fac'].default_value = 1.0
-    mixn.inputs['Color2'].default_value = (FRAME_LIT, FRAME_LIT, FRAME_LIT, 1.0)
-    nt.links.new(tex.outputs['Color'], mixn.inputs['Color1'])
-    nt.links.new(mixn.outputs['Color'], bsdf.inputs['Base Color'])
+    nt.links.new(tex.outputs['Color'], bsdf.inputs['Base Color'])
     nt.links.new(tex.outputs['Alpha'], bsdf.inputs['Alpha'])
     etex = new_image_node(nt, eimg)
     nt.links.new(etex.outputs['Color'], bsdf.inputs['Emission Color'])
     bsdf.inputs['Emission Strength'].default_value = 1.0
-    bsdf.inputs['Roughness'].default_value = 0.7
-    bsdf.inputs['Metallic'].default_value = 0.0
+    bsdf.inputs['Roughness'].default_value = 0.55
+    bsdf.inputs['Metallic'].default_value = 0.2
     fmat.blend_method = 'BLEND'
     fmat.use_backface_culling = True
     fmesh.materials.append(fmat)

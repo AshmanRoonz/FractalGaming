@@ -254,3 +254,61 @@ in their JSON); chosen hulls land in `assets_base/ships_v2/` after intake.
   UV seams and reports thousands of fake "loose parts".
 - Forward axis = mean(gun markers) − mean(thruster markers); glTF space round-trips when
   the hierarchy is flattened, transforms applied, and `export_yup=True`.
+
+## The ORIGINAL exports (v37.41) — `ship_original.py`
+
+The owner dropped the original hi-poly exports in `LSS/ships_original/<Ship>.glb` (capitalised
+names ; 0.3–1.0 M triangles in a single mesh of ~2000 overlapping shells, one 2048² JPEG,
+opaque, no markers ; Syphon is a 22k-triangle PNG + normal-map export). Owner: *"the interiors
+seem to be intact, but the windows need to be transparent... most of the symmetry is good, so
+just add some floating dashboards and other interior cockpit design"*, *"the originals aren't
+marked for the engines and weapons... but they are similar shape, so we can transfer that over"*.
+
+`orig_peek.py` (→ `reports/orig/`) showed the originals sit in the SAME frame and scale as the
+frozen v37.23 hulls (dims and centres agree to 1e-4), so the frozen markers transfer at identical
+coordinates ; the hulls are hollow shells with a real cockpit pit under an opaque painted canopy,
+and the inner skin is textured well enough to read as an interior when rendered double-sided
+(which is what the owner saw).
+
+Chain: `LSS/ships_original` → `ship_original.py` → `assets_src/ships` → `node tools/compress_glb.mjs --only ships`
+→ `LSS/ships`. **No `ship_cleanup` / `ship_symmetry` on these** (cleanup deleted 60% of a
+multi-shell hull before). The script executes the top half of `ship_cockpit.py` as its library
+(knobs, atlas, `Builder`, `build_frame_billboard`), so there is one copy of the frame-art code.
+
+Per ship: markers from `assets_base/ships/<ship>.glb` → the hull split into its loose shells
+(Blender's own split ; a face attribute carries the part id through the join) → canopy =
+TRANSFER of the old chain's `canopy_glass` region: `tools/blender/work/ref/<ship>.glb` (copies of
+`LSS/ships` at v37.39/40, the canopies the owner judged in-game ; `work/` is gitignored, so the script
+re-fetches them with `git show 5491ffb:LSS/ships/<ship>.glb` when missing), reduced to its big edge-connected
+components (the old chain also laid hundreds of small panes over see-through gaps around the canopy
+zone — those blotches must not transfer), then every original face within `REF_TOL` (0.007 L) of
+that surface facing the same way is glass → SURROUND FILL (an opaque outer-skin face whose glass
+neighbours' mean sits at its own centre is a bar between panes / a missed pane triangle → glass ;
+voxel-grid statistics, not per-face tree queries — those took minutes per pass) → UNDERSIDE (a face
+whose ray along −normal meets glass within 0.03 L is the shell's inner surface) → ISLANDS (small
+loose shells lying wholly inside the glass fringe — bar remnants, specks — would float as shards in
+the pilot's sky) → EYE by open-view scan along the canopy centreline under the canopy TOP surface
+(first glass hit from above ; the lowest hit dropped Tracker's eye into the belly), candidates
+without a pit floor beneath them penalised, rearmost on ties, `cockpit1` moved there → hull material
+double-sided + hull-light emissive from the paint → floating dashboard = the frame art band + two
+`cockpit_holo` side panels (translucent, self-lit) + a seat hung from the eye with a pedestal to the
+pit floor → decimate (`--target 150000` triangles ; shells within 0.35 L of the eye keep up to 60%
+of the budget at ratio ≤ 0.5, the rest fills it, `delimit={'MATERIAL'}` so nothing collapses
+across the glass border) → export.
+
+⭐ What did NOT work on these hulls, so nobody tries it again: paint rules (Vortex's canopy and
+fuselage share one purple, Pyro's bars and hull one black), bounding-box fills (leak over the
+nose of every dark hull), "small shell" guards (the fuselage IS thousands of small panels),
+flood-fill islands (with ~2000 shells everything is an island), and rays straight up from the
+frozen `cockpit1` (they hit seat and console shells, not the canopy).
+
+Diagnostics with `--render`: `reports/original/<ship>_{front34,canopy_close,top_close,
+canopy_debug,cutaway,pilotpov,pilotpov_down,pilotpov_right}.png` and `<ship>_original.json`.
+
+Game side (v37.41): `buildModelShipMesh` keeps `THREE.DoubleSide` from the GLB (the inner skin is
+the interior ; single-sided left see-through holes wherever the pit shells gap).
+
+Frame art (v37.41): ONE continuous band instead of cut strips — the owner saw the strip cuts
+("it looks cut up on the frame"). A single grid covers the whole PNG and only its radius varies,
+blended smoothly (dash rows close, rail rows far, pillar columns between) ; fully transparent
+cells are skipped.
