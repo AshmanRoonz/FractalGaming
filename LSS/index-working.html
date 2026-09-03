@@ -4272,7 +4272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.08';
+const LSS_BUILD = '38.10';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -24476,7 +24476,12 @@ function _swWaterReflectShader() {
       // The zone system already drives scene fog to the sky's own colour, so that is the light
       // level to borrow: full brightness in daylight (the clamp saturates, so daytime water is
       // untouched), dimmed and tinted toward the night sky after dark.
-      '  float _flit = clamp(dot(fogColor, vec3(0.299,0.587,0.114)) * 1.7, 0.22, 1.0);',
+      // (v38.09) A CURVE, not a scale. v38.07's linear 1.7x with a 0.22 floor still left night foam
+      // at a quarter brightness, and against near-black water a quarter-bright white is exactly the
+      // pale wash the owner circled - then the bloom pass finds it and lifts it again. The power
+      // curve saturates before any daytime sky (0.75 luma -> 1.0, so daylight foam is untouched to
+      // the pixel) and falls off a cliff after dark (0.16 luma -> 0.09).
+      '  float _flit = clamp(pow(max(dot(fogColor, vec3(0.299,0.587,0.114)) * 1.35, 0.0), 1.6), 0.05, 1.0);',
       '  _flit = mix(1.0, _flit, uFoamLit);',
       '  _dist = mix(_dist * _flit, fogColor, 0.20 * (1.0 - _flit));',   
       '  outc = mix(outc, _dist, clamp(foam * 0.5 * caustic, 0.0, 0.85));',   
@@ -37938,8 +37943,9 @@ class Bot {
     // the player and for peers, and bots were simply never wired to it. Gated on distance to the
     // camera: a Gatling bot fires 20 times a second and the flash is a handful of particles, a
     // light and a billboard - none of it worth spending on a hull you cannot make out.
+    const _mfR = ((typeof _fxSmallDevice === 'function') && _fxSmallDevice()) ? 1100 : 2600;
     if (typeof emitChassisMuzzleFlash === 'function' && typeof camera !== 'undefined' && camera &&
-        this.position.distanceToSquared(camera.position) < 2600 * 2600) {
+        this.position.distanceToSquared(camera.position) < _mfR * _mfR) {
       try { emitChassisMuzzleFlash(this.loadout.name, fireOrigin, fireDir); } catch (_) {}
     }
 
@@ -53094,8 +53100,9 @@ function spawnHitFire(pos, colorHex, ent, scale) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   try {
     const now = (game.time || 0);
+    const _small = (typeof _fxSmallDevice === 'function') && _fxSmallDevice();
     if (ent) {
-      if (ent._hitFireT && now - ent._hitFireT < 0.18) return;
+      if (ent._hitFireT && now - ent._hitFireT < (_small ? 0.36 : 0.18)) return;
       ent._hitFireT = now;
     }
     const col = new THREE.Color((colorHex != null) ? colorHex : 0xff9944);
@@ -53111,7 +53118,7 @@ function spawnHitFire(pos, colorHex, ent, scale) {
       follow: (ent && ent.position) ? ent : null,
       foff: (ent && ent.position) ? pos.clone().sub(ent.position) : null,
     });
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < (_small ? 0 : 4); i++) {
       game.particles.push({
         position: pos.clone(),
         velocity: _pVel((Math.random() - 0.5) * 60, 30 + Math.random() * 80, (Math.random() - 0.5) * 60),
@@ -53888,6 +53895,15 @@ function releaseAbilityOverlayPrime(loadoutKey, abilityName) {
 // release fires (muzzle frame + slide-out) and runs the actual ability
 // effect. Only cores stay tap-fire (player wants the big-moment cores
 // to land instantly when committed).
+// (v38.10) One place to ask whether the effects budget should be a phone's. Headsets count: the
+// Quest renders the whole scene twice.
+function _fxSmallDevice() {
+  try {
+    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return true;
+    if (typeof isXRPresenting === 'function' && isXRPresenting()) return true;
+  } catch (_) {}
+  return false;
+}
 const _paA = new THREE.Vector3(), _paB = new THREE.Vector3();
 function _primeArcTick(dt) {
   if (typeof player === 'undefined' || !player) return;
@@ -53899,7 +53915,9 @@ function _primeArcTick(dt) {
   if (K && K.on === false) return;
   player._primeArcT = (player._primeArcT || 0) - (dt || 0.016);
   if (player._primeArcT > 0) return;
-  player._primeArcT = (K && K.every != null) ? K.every : 0.06;
+  const _small = _fxSmallDevice();
+  // 16 tube-geometry builds a second is a desktop's idea of cheap, not a phone's
+  player._primeArcT = (K && K.every != null) ? K.every : (_small ? 0.18 : 0.06);
   const col = (typeof chassisFlashColor === 'function')
     ? chassisFlashColor(player.loadoutKey) : 0x88ddff;
   const hull = (player.chassis && player.chassis.hullLength) || 60;
@@ -53923,8 +53941,9 @@ function _primeArcTick(dt) {
     spawnLightningBolt(_paA.clone(), _paB.clone(), col, 0.11, 1,
                        (K && K.thick != null) ? K.thick : 0.9, false);
   } catch (_) {}
-  // one small light per few arcs so the hull around the guns picks the colour up
-  if (Math.random() < 0.34 && typeof spawnDynamicLight === 'function') {
+  // one small light per few arcs so the hull around the guns picks the colour up - not on a phone,
+  // where every dynamic light is a real cost in the forward pass
+  if (!_small && Math.random() < 0.34 && typeof spawnDynamicLight === 'function') {
     try { spawnDynamicLight(_paA, col, 1.6, 90, 0.12); } catch (_) {}
   }
 }
@@ -57155,6 +57174,12 @@ function _ghostHullSync() {
 // running-light orbs, plumes, frame strips and anything already transparent stay as they are.
 // (v37.66) the ghost materials are built ONCE per hull and cached: the water reflection pass swaps
 // them out and back every time it runs, and cloning a material per swap would churn all frame.
+// (v38.10) free a cached set of ghost clones (one material, or an array of them)
+function _ghostMatsDispose(mats) {
+  if (!mats) return;
+  const a = Array.isArray(mats) ? mats : [mats];
+  for (const m of a) { try { if (m && m.dispose) m.dispose(); } catch (_) {} }
+}
 function _ghostHullApply(mesh) {
   if (!mesh || mesh.userData._ghostOn) return;
   const K = _ghostHullKnobs();
@@ -57165,6 +57190,11 @@ function _ghostHullApply(mesh) {
     const arr = Array.isArray(o.material);
     const ms = arr ? o.material : [o.material];
     if (!o.userData._ghostMats || o.userData._ghostOrig !== o.material) {
+      // (v38.10) the cache is stale - a ship swap, or a respawn on a different hull. The old
+      // clones used to be dropped on the floor with their GPU programs still live; since v37.97
+      // warms this on every launch that leak fires on every ship change, which is a phone running
+      // out of memory between sessions.
+      _ghostMatsDispose(o.userData._ghostMats);
       const built = ms.map(m => (!m || m.transparent) ? m : _addGhostHull(m.clone(), K));
       if (!built.some((m, i) => m !== ms[i])) return;
       o.userData._ghostOrig = o.material;
@@ -57205,7 +57235,10 @@ window.__ghostHullRefresh = function () {
   try {
     const mesh = player && player.mesh;
     _ghostHullRestore(mesh);
-    if (mesh) mesh.traverse(o => { if (o.userData) { o.userData._ghostMats = null; o.userData._ghostOrig = null; } });
+    if (mesh) mesh.traverse(o => { if (o.userData) {
+      _ghostMatsDispose(o.userData._ghostMats);
+      o.userData._ghostMats = null; o.userData._ghostOrig = null;
+    } });
   } catch (_) {}
 };
 function _cockpit3dWanted() {

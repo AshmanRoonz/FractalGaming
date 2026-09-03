@@ -4198,7 +4198,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.08';
+const LSS_BUILD = '38.10';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -19434,7 +19434,7 @@ function _swWaterReflectShader() {
       '  float _eS = max(exp(crestE*10.0) - log(1.0 + (1.0 - min(crestE*10.0,1.0))*5.0) - 1.0, 0.0);',   
       '  vec3 _foamC = mix(vec3(0.50,0.66,0.74), vec3(0.86,0.94,1.0), clamp(caustic, 0.0, 1.0));',
       '  vec3 _dist  = (_eF*_foamC + _eS*vec3(0.95,0.98,1.0)) / (_eF + _eS + 1e-4);',
-      '  float _flit = clamp(dot(fogColor, vec3(0.299,0.587,0.114)) * 1.7, 0.22, 1.0);',
+      '  float _flit = clamp(pow(max(dot(fogColor, vec3(0.299,0.587,0.114)) * 1.35, 0.0), 1.6), 0.05, 1.0);',
       '  _flit = mix(1.0, _flit, uFoamLit);',
       '  _dist = mix(_dist * _flit, fogColor, 0.20 * (1.0 - _flit));',   
       '  outc = mix(outc, _dist, clamp(foam * 0.5 * caustic, 0.0, 0.85));',   
@@ -29777,8 +29777,9 @@ class Bot {
     const flashColor = (typeof chassisFlashColor === 'function')
       ? chassisFlashColor(this.loadout.name)
       : 0xffdd44;
+    const _mfR = ((typeof _fxSmallDevice === 'function') && _fxSmallDevice()) ? 1100 : 2600;
     if (typeof emitChassisMuzzleFlash === 'function' && typeof camera !== 'undefined' && camera &&
-        this.position.distanceToSquared(camera.position) < 2600 * 2600) {
+        this.position.distanceToSquared(camera.position) < _mfR * _mfR) {
       try { emitChassisMuzzleFlash(this.loadout.name, fireOrigin, fireDir); } catch (_) {}
     }
 
@@ -41125,8 +41126,9 @@ function spawnHitFire(pos, colorHex, ent, scale) {
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   try {
     const now = (game.time || 0);
+    const _small = (typeof _fxSmallDevice === 'function') && _fxSmallDevice();
     if (ent) {
-      if (ent._hitFireT && now - ent._hitFireT < 0.18) return;
+      if (ent._hitFireT && now - ent._hitFireT < (_small ? 0.36 : 0.18)) return;
       ent._hitFireT = now;
     }
     const col = new THREE.Color((colorHex != null) ? colorHex : 0xff9944);
@@ -41142,7 +41144,7 @@ function spawnHitFire(pos, colorHex, ent, scale) {
       follow: (ent && ent.position) ? ent : null,
       foff: (ent && ent.position) ? pos.clone().sub(ent.position) : null,
     });
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < (_small ? 0 : 4); i++) {
       game.particles.push({
         position: pos.clone(),
         velocity: _pVel((Math.random() - 0.5) * 60, 30 + Math.random() * 80, (Math.random() - 0.5) * 60),
@@ -41758,6 +41760,13 @@ function releaseAbilityOverlayPrime(loadoutKey, abilityName) {
   trig.primedReleaseTime = now;
 }
 
+function _fxSmallDevice() {
+  try {
+    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return true;
+    if (typeof isXRPresenting === 'function' && isXRPresenting()) return true;
+  } catch (_) {}
+  return false;
+}
 const _paA = new THREE.Vector3(), _paB = new THREE.Vector3();
 function _primeArcTick(dt) {
   if (typeof player === 'undefined' || !player) return;
@@ -41769,7 +41778,8 @@ function _primeArcTick(dt) {
   if (K && K.on === false) return;
   player._primeArcT = (player._primeArcT || 0) - (dt || 0.016);
   if (player._primeArcT > 0) return;
-  player._primeArcT = (K && K.every != null) ? K.every : 0.06;
+  const _small = _fxSmallDevice();
+  player._primeArcT = (K && K.every != null) ? K.every : (_small ? 0.18 : 0.06);
   const col = (typeof chassisFlashColor === 'function')
     ? chassisFlashColor(player.loadoutKey) : 0x88ddff;
   const hull = (player.chassis && player.chassis.hullLength) || 60;
@@ -41791,7 +41801,7 @@ function _primeArcTick(dt) {
     spawnLightningBolt(_paA.clone(), _paB.clone(), col, 0.11, 1,
                        (K && K.thick != null) ? K.thick : 0.9, false);
   } catch (_) {}
-  if (Math.random() < 0.34 && typeof spawnDynamicLight === 'function') {
+  if (!_small && Math.random() < 0.34 && typeof spawnDynamicLight === 'function') {
     try { spawnDynamicLight(_paA, col, 1.6, 90, 0.12); } catch (_) {}
   }
 }
@@ -44088,6 +44098,11 @@ function _ghostHullSync() {
     _ghostHullRestore(mesh);
   }
 }
+function _ghostMatsDispose(mats) {
+  if (!mats) return;
+  const a = Array.isArray(mats) ? mats : [mats];
+  for (const m of a) { try { if (m && m.dispose) m.dispose(); } catch (_) {} }
+}
 function _ghostHullApply(mesh) {
   if (!mesh || mesh.userData._ghostOn) return;
   const K = _ghostHullKnobs();
@@ -44098,6 +44113,7 @@ function _ghostHullApply(mesh) {
     const arr = Array.isArray(o.material);
     const ms = arr ? o.material : [o.material];
     if (!o.userData._ghostMats || o.userData._ghostOrig !== o.material) {
+      _ghostMatsDispose(o.userData._ghostMats);
       const built = ms.map(m => (!m || m.transparent) ? m : _addGhostHull(m.clone(), K));
       if (!built.some((m, i) => m !== ms[i])) return;
       o.userData._ghostOrig = o.material;
@@ -44135,7 +44151,10 @@ window.__ghostHullRefresh = function () {
   try {
     const mesh = player && player.mesh;
     _ghostHullRestore(mesh);
-    if (mesh) mesh.traverse(o => { if (o.userData) { o.userData._ghostMats = null; o.userData._ghostOrig = null; } });
+    if (mesh) mesh.traverse(o => { if (o.userData) {
+      _ghostMatsDispose(o.userData._ghostMats);
+      o.userData._ghostMats = null; o.userData._ghostOrig = null;
+    } });
   } catch (_) {}
 };
 function _cockpit3dWanted() {
