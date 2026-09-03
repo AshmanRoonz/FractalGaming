@@ -4167,12 +4167,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.65';
+const LSS_BUILD = '37.66';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '37.65';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.66';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -20647,6 +20647,8 @@ function _swBuildHubWater(T) {
       const _shieldsWas = _shields.map(function (m) { return m.visible; });
       for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = false;
       _reflSkipSet = _shields;
+      const _ghostWas = !!(ship && ship.userData && ship.userData._ghostOn);
+      if (_ghostWas) { try { _ghostHullRestore(ship); } catch (_) {} }
       if (_showShip) ship.traverse(_shipReflOverride);
       const _wD = _hubWaterDisp, _wO = game._hubWaterOverlay, _wU = game._hubWaterUnder;
       const _wDv = !!(_wD && _wD.visible), _wOv = !!(_wO && _wO.visible), _wUv = !!(_wU && _wU.visible);
@@ -20659,6 +20661,7 @@ function _swBuildHubWater(T) {
         if (_wOv) _wO.visible = true;
         if (_wUv) _wU.visible = true;
         if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
+        if (_ghostWas) { try { _ghostHullApply(ship); } catch (_) {} }
       }
       _reflNrm.set(0, 0, 1).applyMatrix4(_reflRot.extractRotation(this.matrixWorld));
       _reflRP.setFromMatrixPosition(this.matrixWorld);
@@ -42232,8 +42235,8 @@ function _ghostHullTint() {
   const G = window.__cockpit && window.__cockpit.ghost;
   if (G && G.tint != null) return G.tint;
   try {
-    const L = (typeof LOADOUTS !== 'undefined' && LOADOUTS) ? LOADOUTS[player.loadoutKey] : null;
-    if (L && L.color != null) return L.color;
+    const c = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS[player.loadoutKey] : null;
+    if (c != null) return c;
   } catch (_) {}
   return 0x8ad8ff;
 }
@@ -42241,10 +42244,12 @@ function _ghostHullKnobs() {
   const G = (window.__cockpit && window.__cockpit.ghost) || {};
   return {
     on: G.on !== false,
-    core: (typeof G.core === 'number') ? G.core : 0.30,
-    rim: (typeof G.rim === 'number') ? G.rim : 0.62,
-    mix: (typeof G.mix === 'number') ? G.mix : 0.35,
-    flicker: (typeof G.flicker === 'number') ? G.flicker : 1,
+    core: (typeof G.core === 'number') ? G.core : 0.09,
+    rim: (typeof G.rim === 'number') ? G.rim : 0.44,
+    mix: (typeof G.mix === 'number') ? G.mix : 0.30,
+    flicker: (typeof G.flicker === 'number') ? G.flicker : 0.25,
+    glow: (typeof G.glow === 'number') ? G.glow : 0.85,
+    order: (typeof G.order === 'number') ? G.order : 4000,
     glassCore: (typeof G.glassCore === 'number') ? G.glassCore : 0.10,
     glassRim: (typeof G.glassRim === 'number') ? G.glassRim : 0.30,
     tint: _ghostHullTint()
@@ -42256,7 +42261,7 @@ function _addGhostHull(mat, K, isGlass) {
   mat.side = THREE.DoubleSide;
   const U = {
     uGhTint: { value: new THREE.Color(K.tint) }, uGhTime: _ghostHullTimeU,
-    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }
+    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }, uGhGlow: { value: K.glow }
   };
   mat.userData._ghostU = U;
   mat.onBeforeCompile = (shader) => {
@@ -42266,7 +42271,7 @@ function _addGhostHull(mat, K, isGlass) {
       '#include <project_vertex>',
       '#include <project_vertex>\n  vGhN = normalize(normalMatrix * normal);\n  vGhV = normalize(-mvPosition.xyz);'
     );
-    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
+    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nuniform float uGhGlow;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <opaque_fragment>',
       '#include <opaque_fragment>\n' +
@@ -42275,7 +42280,7 @@ function _addGhostHull(mat, K, isGlass) {
       '    float ghFlick = 1.0 - uGhFlick * 0.08 * (1.0 - sin(uGhTime * 44.0) * (0.55 + 0.45 * sin(uGhTime * 9.7)));\n' +
       '    float ghScan = 1.0 - uGhFlick * 0.05 * (1.0 - sin(gl_FragCoord.y * 0.28 - uGhTime * 14.0));\n' +
       '    gl_FragColor.rgb = mix(gl_FragColor.rgb, uGhTint * 0.55, uGhMix);\n' +
-      '    gl_FragColor.rgb += uGhTint * ghFres * (1.15 + 0.25 * uGhFlick * sin(uGhTime * 38.0));\n' +
+      '    gl_FragColor.rgb += uGhTint * ghFres * uGhGlow * (1.0 + 0.22 * uGhFlick * sin(uGhTime * 38.0));\n' +
       '    gl_FragColor.a = clamp((uGhCore + uGhRim * ghFres) * ghFlick * ghScan, 0.0, 0.92); }'
     );
   };
@@ -42298,6 +42303,7 @@ function _ghostHullSync() {
     _ghostHullSync._t = now;
     _ghostHullTimeU.value += Math.min(0.1, (now - prev) / 1000);
     _ghostHullApply(mesh);
+    _ghostHullTune(mesh, _ghostHullKnobs());
   } else if (mesh.userData && mesh.userData._ghostOn) {
     _ghostHullRestore(mesh);
   }
@@ -42311,22 +42317,47 @@ function _ghostHullApply(mesh) {
     if (o.userData && (o.userData.isPlume || o.userData.isRunningLight || o.userData._cockpitFrame)) return;
     const arr = Array.isArray(o.material);
     const ms = arr ? o.material : [o.material];
-    const out = ms.map(m => !m ? m : (m.name === 'canopy_glass' ? _addGhostHull(m.clone(), K, true) : (m.transparent ? m : _addGhostHull(m.clone(), K))));
-    if (out.some((m, i) => m !== ms[i])) { o.userData._ghostOrig = o.material; o.material = arr ? out : out[0]; }
+    if (!o.userData._ghostMats || o.userData._ghostOrig !== o.material) {
+      const built = ms.map(m => (!m || m.transparent) ? m : _addGhostHull(m.clone(), K));
+      if (!built.some((m, i) => m !== ms[i])) return;
+      o.userData._ghostOrig = o.material;
+      o.userData._ghostMats = arr ? built : built[0];
+      o.userData._ghostOrder = o.renderOrder;
+    }
+    o.material = o.userData._ghostMats;
+    o.renderOrder = K.order;
   });
 }
 function _ghostHullRestore(mesh) {
   if (!mesh || !mesh.userData._ghostOn) return;
   mesh.userData._ghostOn = false;
   mesh.traverse(o => {
-    if (!o.isMesh || !o.userData._ghostOrig) return;
-    const cur = Array.isArray(o.material) ? o.material : [o.material];
+    if (!o.isMesh || !o.userData || !o.userData._ghostMats) return;
     o.material = o.userData._ghostOrig;
-    delete o.userData._ghostOrig;
-    for (const m of cur) if (m && m.userData && m.userData._ghostU) m.dispose();
+    o.renderOrder = o.userData._ghostOrder || 0;
   });
 }
-window.__ghostHullRefresh = function () { try { _ghostHullRestore(player && player.mesh); } catch (_) {} };
+function _ghostHullTune(mesh, K) {
+  mesh.traverse(o => {
+    if (!o.isMesh || !o.userData || !o.userData._ghostMats) return;
+    const ms = Array.isArray(o.userData._ghostMats) ? o.userData._ghostMats : [o.userData._ghostMats];
+    for (const m of ms) {
+      const U = m && m.userData && m.userData._ghostU;
+      if (!U) continue;
+      U.uGhTint.value.set(K.tint);
+      U.uGhCore.value = K.core; U.uGhRim.value = K.rim; U.uGhMix.value = K.mix; U.uGhFlick.value = K.flicker;
+      if (U.uGhGlow) U.uGhGlow.value = K.glow;
+    }
+    o.renderOrder = K.order;
+  });
+}
+window.__ghostHullRefresh = function () {
+  try {
+    const mesh = player && player.mesh;
+    _ghostHullRestore(mesh);
+    if (mesh) mesh.traverse(o => { if (o.userData) { o.userData._ghostMats = null; o.userData._ghostOrig = null; } });
+  } catch (_) {}
+};
 function _cockpit3dWanted() {
   const W = window.__cockpit;
   if (W && typeof W.on === 'boolean') return W.on;

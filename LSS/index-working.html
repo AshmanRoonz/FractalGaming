@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.65';
+const LSS_BUILD = '37.66';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4335,7 +4335,7 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // (v37.35) 37.34 -> 37.35: INNER LINING closes every see-through hull face around
 // the seat, crack zipper in the cleanup stage, four distinct instrument tiles,
 // control stick, console switch rows, harness straps.
-const _MODELS_VERSION = '37.65';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.66';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -25846,6 +25846,13 @@ function _swBuildHubWater(T) {
       const _shieldsWas = _shields.map(function (m) { return m.visible; });
       for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = false;
       _reflSkipSet = _shields;
+      // (v37.66) the ghost shell is TRANSPARENT, and _shipReflOverride hides every transparent
+      // mesh (the shield-blob rule) - so in the seat view the ship simply had no reflection at all
+      // (owner: "on the water you can't see the reflection of the ship while looking out in ghost
+      // mode"). Put the painted hull back for the pass: the mirror shows the real ship, the seat
+      // keeps the shell. Restored in the same finally as everything else below.
+      const _ghostWas = !!(ship && ship.userData && ship.userData._ghostOn);
+      if (_ghostWas) { try { _ghostHullRestore(ship); } catch (_) {} }
       if (_showShip) ship.traverse(_shipReflOverride);
       // ─────────────────────────────────────────────────────────────────────────────────
       // (v36.42) NO WATER IN THE WATER'S OWN REFLECTION.
@@ -25875,6 +25882,7 @@ function _swBuildHubWater(T) {
         if (_wOv) _wO.visible = true;
         if (_wUv) _wU.visible = true;
         if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
+        if (_ghostWas) { try { _ghostHullApply(ship); } catch (_) {} }
       }
       // (v36.42) Capture the world->UV matrix that matches what we just rendered. Only when
       // the Reflector really re-rendered : it BAILS on `view.dot(normal) > 0` (camera behind
@@ -54825,9 +54833,11 @@ const _ghostHullTimeU = { value: 0 };
 function _ghostHullTint() {
   const G = window.__cockpit && window.__cockpit.ghost;
   if (G && G.tint != null) return G.tint;
+  // (v37.66) the ship's own theme colour (owner: "make it correspond with the theme color of the
+  // ship") - LSS.CLASS_COLORS is the same table the projectiles, beams and shields tint from.
   try {
-    const L = (typeof LOADOUTS !== 'undefined' && LOADOUTS) ? LOADOUTS[player.loadoutKey] : null;
-    if (L && L.color != null) return L.color;
+    const c = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS[player.loadoutKey] : null;
+    if (c != null) return c;
   } catch (_) {}
   return 0x8ad8ff;
 }
@@ -54835,10 +54845,23 @@ function _ghostHullKnobs() {
   const G = (window.__cockpit && window.__cockpit.ghost) || {};
   return {
     on: G.on !== false,
-    core: (typeof G.core === 'number') ? G.core : 0.30,
-    rim: (typeof G.rim === 'number') ? G.rim : 0.62,
-    mix: (typeof G.mix === 'number') ? G.mix : 0.35,
-    flicker: (typeof G.flicker === 'number') ? G.flicker : 1,
+    // (v37.66) the eye sits at the hull CENTRE, so a look out passes through four to eight layers
+    // of shell and the old 0.30 core compounded to nearly opaque - worse now that the shell draws
+    // over the water and the city instead of being cut by them. Thin flats, edges still strong:
+    // the creases draw the airframe, the panels stay see-through.
+    core: (typeof G.core === 'number') ? G.core : 0.09,
+    rim: (typeof G.rim === 'number') ? G.rim : 0.44,
+    mix: (typeof G.mix === 'number') ? G.mix : 0.30,
+    // (v37.66) owner: "less flicker" - 1 was the monsters' full hologram jitter, 0.25 leaves a
+    // trace of life in the shell. 0 = perfectly steady.
+    flicker: (typeof G.flicker === 'number') ? G.flicker : 0.25,
+    // (v37.66) how hard the rim ADDS light. Against a night city or dark water the additive
+    // term was what made the shell dominate the view, not its alpha.
+    glow: (typeof G.glow === 'number') ? G.glow : 0.85,
+    // (v37.66) draw the shell after every other transparent thing. The hub water plane FOLLOWS the
+    // ship and the city's glass sorts by its own bounding centre, so both tied with the hull on
+    // distance and won the toss about half the time (owner: "the water and the city cut through it").
+    order: (typeof G.order === 'number') ? G.order : 4000,
     // (v37.62) the owner's glass cut-out = the MORE translucent zone of the ghost shell
     glassCore: (typeof G.glassCore === 'number') ? G.glassCore : 0.10,
     glassRim: (typeof G.glassRim === 'number') ? G.glassRim : 0.30,
@@ -54851,7 +54874,7 @@ function _addGhostHull(mat, K, isGlass) {
   mat.side = THREE.DoubleSide;
   const U = {
     uGhTint: { value: new THREE.Color(K.tint) }, uGhTime: _ghostHullTimeU,
-    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }
+    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }, uGhGlow: { value: K.glow }
   };
   mat.userData._ghostU = U;
   mat.onBeforeCompile = (shader) => {
@@ -54861,7 +54884,7 @@ function _addGhostHull(mat, K, isGlass) {
       '#include <project_vertex>',
       '#include <project_vertex>\n  vGhN = normalize(normalMatrix * normal);\n  vGhV = normalize(-mvPosition.xyz);'
     );
-    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
+    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nuniform float uGhGlow;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <opaque_fragment>',
       '#include <opaque_fragment>\n' +
@@ -54870,7 +54893,7 @@ function _addGhostHull(mat, K, isGlass) {
       '    float ghFlick = 1.0 - uGhFlick * 0.08 * (1.0 - sin(uGhTime * 44.0) * (0.55 + 0.45 * sin(uGhTime * 9.7)));\n' +
       '    float ghScan = 1.0 - uGhFlick * 0.05 * (1.0 - sin(gl_FragCoord.y * 0.28 - uGhTime * 14.0));\n' +
       '    gl_FragColor.rgb = mix(gl_FragColor.rgb, uGhTint * 0.55, uGhMix);\n' +
-      '    gl_FragColor.rgb += uGhTint * ghFres * (1.15 + 0.25 * uGhFlick * sin(uGhTime * 38.0));\n' +
+      '    gl_FragColor.rgb += uGhTint * ghFres * uGhGlow * (1.0 + 0.22 * uGhFlick * sin(uGhTime * 38.0));\n' +
       '    gl_FragColor.a = clamp((uGhCore + uGhRim * ghFres) * ghFlick * ghScan, 0.0, 0.92); }'
     );
   };
@@ -54900,12 +54923,15 @@ function _ghostHullSync() {
     _ghostHullSync._t = now;
     _ghostHullTimeU.value += Math.min(0.1, (now - prev) / 1000);
     _ghostHullApply(mesh);
+    _ghostHullTune(mesh, _ghostHullKnobs());
   } else if (mesh.userData && mesh.userData._ghostOn) {
     _ghostHullRestore(mesh);
   }
 }
-// swap the hull materials of the player's mesh for ghost clones (idempotent per mesh) ; the
-// running-light orbs, plumes, frame strips and anything already transparent (the canopy) stay
+// swap the hull materials of the player's mesh for the ghost set (idempotent per mesh) ; the
+// running-light orbs, plumes, frame strips and anything already transparent stay as they are.
+// (v37.66) the ghost materials are built ONCE per hull and cached: the water reflection pass swaps
+// them out and back every time it runs, and cloning a material per swap would churn all frame.
 function _ghostHullApply(mesh) {
   if (!mesh || mesh.userData._ghostOn) return;
   const K = _ghostHullKnobs();
@@ -54915,23 +54941,50 @@ function _ghostHullApply(mesh) {
     if (o.userData && (o.userData.isPlume || o.userData.isRunningLight || o.userData._cockpitFrame)) return;
     const arr = Array.isArray(o.material);
     const ms = arr ? o.material : [o.material];
-    const out = ms.map(m => !m ? m : (m.name === 'canopy_glass' ? _addGhostHull(m.clone(), K, true) : (m.transparent ? m : _addGhostHull(m.clone(), K))));
-    if (out.some((m, i) => m !== ms[i])) { o.userData._ghostOrig = o.material; o.material = arr ? out : out[0]; }
+    if (!o.userData._ghostMats || o.userData._ghostOrig !== o.material) {
+      const built = ms.map(m => (!m || m.transparent) ? m : _addGhostHull(m.clone(), K));
+      if (!built.some((m, i) => m !== ms[i])) return;
+      o.userData._ghostOrig = o.material;
+      o.userData._ghostMats = arr ? built : built[0];
+      o.userData._ghostOrder = o.renderOrder;
+    }
+    o.material = o.userData._ghostMats;
+    o.renderOrder = K.order;
   });
 }
 function _ghostHullRestore(mesh) {
   if (!mesh || !mesh.userData._ghostOn) return;
   mesh.userData._ghostOn = false;
   mesh.traverse(o => {
-    if (!o.isMesh || !o.userData._ghostOrig) return;
-    const cur = Array.isArray(o.material) ? o.material : [o.material];
+    if (!o.isMesh || !o.userData || !o.userData._ghostMats) return;
     o.material = o.userData._ghostOrig;
-    delete o.userData._ghostOrig;
-    for (const m of cur) if (m && m.userData && m.userData._ghostU) m.dispose();
+    o.renderOrder = o.userData._ghostOrder || 0;
+  });
+}
+// live knobs without a rebuild: the cached materials keep their uniform objects, so tint / core /
+// rim / mix / flicker land on the next frame
+function _ghostHullTune(mesh, K) {
+  mesh.traverse(o => {
+    if (!o.isMesh || !o.userData || !o.userData._ghostMats) return;
+    const ms = Array.isArray(o.userData._ghostMats) ? o.userData._ghostMats : [o.userData._ghostMats];
+    for (const m of ms) {
+      const U = m && m.userData && m.userData._ghostU;
+      if (!U) continue;
+      U.uGhTint.value.set(K.tint);
+      U.uGhCore.value = K.core; U.uGhRim.value = K.rim; U.uGhMix.value = K.mix; U.uGhFlick.value = K.flicker;
+      if (U.uGhGlow) U.uGhGlow.value = K.glow;
+    }
+    o.renderOrder = K.order;
   });
 }
 // live re-tune: window.__cockpit.ghost = {...}; __ghostHullRefresh()
-window.__ghostHullRefresh = function () { try { _ghostHullRestore(player && player.mesh); } catch (_) {} };
+window.__ghostHullRefresh = function () {
+  try {
+    const mesh = player && player.mesh;
+    _ghostHullRestore(mesh);
+    if (mesh) mesh.traverse(o => { if (o.userData) { o.userData._ghostMats = null; o.userData._ghostOrig = null; } });
+  } catch (_) {}
+};
 function _cockpit3dWanted() {
   const W = window.__cockpit;
   if (W && typeof W.on === 'boolean') return W.on;

@@ -557,3 +557,42 @@ apply from an earlier frame survived into a view that shows the hull from outsid
 the RENDER side: `_ghostHullSync()` runs at the top of `renderFrame`, after every camera is final and
 before any path draws, and `_ghostSeatWanted()` requires the seat camera (cockpit live, not third
 person, no cinematic). The cinematic also strips the shell the moment it takes the camera.
+
+### v37.66 — a BAKED skin on the decimated hull
+
+Owner: "earlier we ran a streamline that cleaned up the ship models... it made the skin theme go on
+way cleaner... right now we can see a lot of triangles with the skins applied". The original UVs are
+per-panel and a collapse drags them across their own seams, so the texture smears along every
+decimated triangle. `ship_plain.py` now finishes the way the remesh chain did: the decimated hull
+gets ONE fresh atlas (smart project 80 deg + pack) and the original's appearance is baked into it
+through space (Cycles DIFFUSE COLOR, 2048), plus a tangent NORMAL bake at 1024 that puts the panel
+detail the decimation removed back into the shading. Cage 0.015 L, rays 0.035 L, 4 samples, ~5 s a
+ship. `--nobake` keeps the original texture and UVs, `--tex` sets the atlas size.
+
+The bake source is a copy of the hi-poly taken before the weld, kept hidden and removed after.
+Fleet after this: **17.9 MB** (2.2-3.2 MB a ship), against 21.1 MB unbaked and 46.1 MB in the glass
+chain, and the skin lands clean (reports/plain/_vortex_baked.png).
+
+### v37.66 — the ghost shell: theme tint, calmer, and it stops being cut
+
+Owner: "less flicker, and also make it correspond with the theme color of the ship / water and the
+city really mess with the ghost transparency... on land it looks fine... the water and the city cut
+through it... and also on the water you can't see the reflection of the ship while looking out in
+ghost mode" then "a bit more transparent would be better".
+
+  * **tint** = `LSS.CLASS_COLORS[loadoutKey]`, the same table the beams and shields use.
+  * **flicker** 1 -> 0.25, and the rim's additive term is now the `glow` knob (0.85, was a
+    hard-coded 1.15) - against a night city that term, not the alpha, was what swamped the view.
+  * **cut through** = transparent-vs-transparent sort order. The hub water plane FOLLOWS the ship
+    and the city's glass sorts by its own bounding centre, so both tie with the hull on distance and
+    won the toss about half the time. The shell now draws at `renderOrder` 4000, after everything.
+  * **no reflection** = `_shipReflOverride` HIDES every transparent mesh in the reflection pass (the
+    v33.79 shield-blob rule), and the ghost hull is transparent, so the ship simply had no
+    reflection. The pass now puts the painted hull back for its own render and re-applies the shell
+    after, so the mirror shows the real ship while the seat keeps the shell.
+  * density: core 0.30 -> 0.09, rim 0.62 -> 0.44. The eye sits at the hull centre, so a look out
+    passes through four to eight layers of shell and the old core compounded to nearly opaque.
+
+Ghost materials are now built ONCE per hull and cached (the reflection pass swaps them out and back
+every time it runs; cloning per swap would churn all frame). Knobs, all live:
+`window.__cockpit.ghost = { on, core, rim, mix, glow, flicker, tint, order }`.

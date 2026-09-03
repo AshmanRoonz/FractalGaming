@@ -29,6 +29,7 @@ import types
 
 import bmesh
 import bpy
+import numpy as np
 from mathutils import Vector
 
 
@@ -48,7 +49,9 @@ OUT_DIR = os.path.join(REPO, opt('--out', 'assets_src/ships'))
 REPORT = os.path.join(REPO, 'tools', 'blender', 'reports', 'plain')
 SHIPS = [s for s in opt('--ships', 'vortex,pyro,puncture,slayer,tracker,blaster,syphon').split(',') if s]
 TARGET = int(opt('--target', '60000'))     # triangle budget per hull (150k was ~6.9 MB shipped)
-TEX_MAX = int(opt('--tex', '2048'))        # downscale any image larger than this
+TEX = int(opt('--tex', '2048'))            # baked atlas size (the normal map is baked at half)
+SAMPLES = int(opt('--samples', '4'))       # Cycles bake samples ; the bake is flat colour, 4 is plenty
+BAKE = '--nobake' not in argv              # bake a fresh skin onto the decimated hull
 SHARP_DEG = float(opt('--sharp', '32'))    # edges sharper than this stay hard after decimation
 RENDER = '--render' in argv
 EXPORT = '--no-export' not in argv
@@ -172,6 +175,14 @@ def process(ship):
     L = max(hi - lo)
     ctr = (lo + hi) / 2
     cp = next((e.matrix_world.translation.copy() for e in empties if e.name.lower().startswith('cockpit')), ctr)
+    hi = None
+    if BAKE:
+        # the bake source: the untouched hi-poly with its own material and UVs
+        hi = obj.copy()
+        hi.data = obj.data.copy()
+        hi.name = hi.data.name = 'hi'
+        bpy.context.scene.collection.objects.link(hi)
+        hi.hide_render = False
     n_in = tris_of(obj.data)
     rep['in'] = {'tris': n_in, 'verts': len(obj.data.vertices), 'materials': [m.name if m else '?' for m in obj.data.materials],
                  'markers': sorted(e.name for e in empties), 'L': round(L, 4), 'bytes': os.path.getsize(src)}
@@ -285,6 +296,84 @@ def process(ship):
     rep['out'] = {'tris': tris_of(obj.data), 'verts': len(obj.data.vertices), 'validate_fixed': bool(bad),
                   'sharp_edges': len(sharp)}
 
+    # ---- UV + bake ---------------------------------------------------------------------------
+    # (v37.66) owner: "earlier we ran a streamline that cleaned up the ship models... it made the
+    # skin theme go on way cleaner... right now we can see a lot of triangles with the skins
+    # applied". The original UVs are per-panel and the collapse drags them across their seams, so
+    # the texture smears along every decimated triangle. The fix is the one the remesh chain used:
+    # give the decimated hull ONE fresh atlas (smart project) and bake the original's appearance
+    # into it through space, plus a tangent normal map that puts the panel detail the decimation
+    # removed back into the shading.
+    if BAKE and hi is not None:
+        step('uv unwrap')
+        select_only([obj])
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.select_mode(type='FACE')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.uv.smart_project(angle_limit=math.radians(80), island_margin=0.0005, scale_to_bounds=False)
+        try:
+            bpy.ops.uv.pack_islands(rotate=True, margin=0.001)      # smart_project alone covers ~37% of the sheet
+        except Exception as ex:
+            print('pack_islands skipped:', ex)
+        bpy.ops.object.mode_set(mode='OBJECT')
+        uvl = obj.data.uv_layers.active
+        uv = np.empty(len(obj.data.loops) * 2, np.float32)
+        uvl.data.foreach_get('uv', uv)
+        uv = uv.reshape(-1, 2)
+        rep['uv'] = {'layers': len(obj.data.uv_layers),
+                     'span': [round(float(v), 3) for v in (uv[:, 0].min(), uv[:, 0].max(), uv[:, 1].min(), uv[:, 1].max())]}
+        if len(obj.data.uv_layers) == 0 or (uv.max() - uv.min()) < 0.5:
+            raise RuntimeError('%s: smart_project produced no usable UVs: %s' % (ship, rep['uv']))
+        step('bake colour')
+        sc = bpy.context.scene
+        mat = bpy.data.materials.new('hull')
+        mat.use_nodes = True
+        nt = mat.node_tree
+        bsdf = nt.nodes['Principled BSDF']
+        img_c = bpy.data.images.new(ship + '_base', TEX, TEX, alpha=False)
+        tex_c = nt.nodes.new('ShaderNodeTexImage')
+        tex_c.image = img_c
+        nt.links.new(tex_c.outputs['Color'], bsdf.inputs['Base Color'])
+        obj.data.materials.clear()
+        obj.data.materials.append(mat)
+        sc.render.engine = 'CYCLES'
+        sc.cycles.device = 'CPU'
+        sc.cycles.samples = SAMPLES
+        cage, ray = 0.015 * L, 0.035 * L      # tuned in the remesh chain: longer rays streak the bake
+        nt.nodes.active = tex_c
+        select_only([hi, obj], obj)
+        t1 = time.time()
+        res = bpy.ops.object.bake(type='DIFFUSE', pass_filter={'COLOR'}, use_selected_to_active=True,
+                                  cage_extrusion=cage, max_ray_distance=ray, margin=8)
+        px = np.empty(TEX * TEX * 4, np.float32)
+        img_c.pixels.foreach_get(px)
+        rgb = px.reshape(-1, 4)[:, :3]
+        rep['bake_color'] = {'result': str(res), 'mean_rgb': [round(float(v), 3) for v in rgb.mean(0)],
+                             'nonblack_pct': round(float(100 * (rgb.max(1) > 0.02).mean()), 1),
+                             'seconds': round(time.time() - t1, 1)}
+        if rep['bake_color']['nonblack_pct'] < 5:
+            raise RuntimeError('%s: the colour bake wrote nothing: %s' % (ship, rep['bake_color']))
+        img_c.pack()
+        step('bake normal')
+        img_n = bpy.data.images.new(ship + '_normal', TEX // 2, TEX // 2, alpha=False)
+        img_n.colorspace_settings.name = 'Non-Color'
+        tex_n = nt.nodes.new('ShaderNodeTexImage')
+        tex_n.image = img_n
+        nt.nodes.active = tex_n
+        select_only([hi, obj], obj)
+        t1 = time.time()
+        res = bpy.ops.object.bake(type='NORMAL', normal_space='TANGENT', use_selected_to_active=True,
+                                  cage_extrusion=cage, max_ray_distance=ray, margin=8)
+        img_n.pack()
+        nmap = nt.nodes.new('ShaderNodeNormalMap')
+        nt.links.new(tex_n.outputs['Color'], nmap.inputs['Color'])
+        nt.links.new(nmap.outputs['Normal'], bsdf.inputs['Normal'])
+        rep['bake_normal'] = {'result': str(res), 'seconds': round(time.time() - t1, 1)}
+        bsdf.inputs['Roughness'].default_value = 0.6
+        bsdf.inputs['Metallic'].default_value = 0.2
+        bpy.data.objects.remove(hi, do_unlink=True)
+        hi = None
     step('seat eye')
     cock = next((e for e in empties if e.name.lower() == 'cockpit1'), None)
     if cock is not None:
@@ -298,10 +387,9 @@ def process(ship):
     step('textures')
     imgs = []
     for im in bpy.data.images:
-        if im.size[0] and (im.size[0] > TEX_MAX or im.size[1] > TEX_MAX):
-            w = min(TEX_MAX, im.size[0])
-            h = max(1, int(round(im.size[1] * w / im.size[0])))
-            im.scale(w, h)
+        if im.size[0] and (im.size[0] > TEX or im.size[1] > TEX):
+            w = min(TEX, im.size[0])
+            im.scale(w, max(1, int(round(im.size[1] * w / im.size[0]))))
         if im.size[0]:
             imgs.append(f'{im.name} {im.size[0]}x{im.size[1]}')
     rep['images'] = imgs
