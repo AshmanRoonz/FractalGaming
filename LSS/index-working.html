@@ -3606,6 +3606,19 @@ body.vr-active #camp-video { display: none !important; }
   text-shadow: 0 0 24px rgba(240,108,255,0.7);
   background: transparent !important; border: none !important;
 }
+#ss-mode-label {
+  position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  z-index: 6; pointer-events: none;
+  font-size: 13px; letter-spacing: 6px; font-weight: bold;
+  color: #ffd27a; text-shadow: 0 0 18px rgba(255,190,90,0.55);
+  white-space: nowrap; text-align: center; opacity: 0; transition: opacity 0.25s ease;
+}
+#ss-mode-label.on { opacity: 1; }
+#ss-mode-label small {
+  display: block; font-size: 8px; letter-spacing: 3px; font-weight: normal;
+  color: rgba(255,255,255,0.45); margin-top: 3px;
+}
+@media (max-width: 900px) { #ss-mode-label { font-size: 10px; letter-spacing: 3px; top: 8px; } }
 #btn-freeflight { color: #5fd39a !important; }
 #btn-freeflight:hover {
   color: #8fe9bc !important; transform: translateX(12px);
@@ -3771,6 +3784,10 @@ body.vr-active #camp-video { display: none !important; }
        existing layer. Same z plane as the preview stage but earlier in the DOM,
        so it paints beneath everything. -->
   <canvas id="ship-select-bg"></canvas>
+  <!-- (v38.00) WHICH MODE AM I PICKING FOR. Absolutely positioned rather than folded into the
+       header flex row: that row is title / room-chip / buttons, and the room chip already owns the
+       middle when you are connected. -->
+  <div id="ss-mode-label"></div>
   <div id="ship-select-header" style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
     <div>
       <h1>LAST SHIP SAILING</h1>
@@ -4251,7 +4268,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.99';
+const LSS_BUILD = '38.00';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -10556,6 +10573,35 @@ function _updateShipSelectRoom() {
 // becomes irreversible, so nothing can uncover a live picker again before
 // finishLaunch. Everything that SHOWS the picker clears it (enterShipSelect, the
 // between-rounds re-show, and the failed-build recovery).
+// (v38.00) The mode's own name, in the main menu's words, over the picker.
+function _ssModeName() {
+  try {
+    if (game && game._cyber && game._cyber.armed) return 'CYBERPUNK CITY';
+    const M = (typeof LSS !== 'undefined') ? LSS.MODE : '';
+    if (M === 'race') return 'RACE MODE';
+    if (M === 'assault') return 'ASSAULT';
+    if (M === 'campaign') return 'CAMPAIGN';
+    if (M === 'endless') return 'ENDLESS';
+    if (M === 'freeflight') return 'EXHIBITION';
+    if (net && net.active) return 'ELIMINATION';
+    return 'SKIRMISH';
+  } catch (_) { return ''; }
+}
+function _ssModeLabel() {
+  try {
+    const el = document.getElementById('ss-mode-label');
+    if (!el) return;
+    const name = _ssModeName();
+    if (!name) { el.classList.remove('on'); el.textContent = ''; return; }
+    let sub = '';
+    if (game && game._cyber && game._cyber.armed) {
+      sub = (player && game._cyber.teamA != null && player.team === game._cyber.teamB)
+        ? 'HOLD THE FIELD' : 'TAKE THE FIELD';
+    }
+    el.innerHTML = name + (sub ? '<small>' + sub + '</small>' : '');
+    el.classList.add('on');
+  } catch (_) {}
+}
 function _shipSelectSetLaunching(on) {
   try {
     const sel = document.getElementById('ship-select');
@@ -10637,7 +10683,8 @@ function enterShipSelect() {
   // function's job, so it owns the inline value rather than hoping nobody set it.
   sel.style.display = 'flex';
   sel.classList.add('active');
-  _updateShipSelectRoom();   
+  _updateShipSelectRoom();
+  try { _ssModeLabel(); } catch (_) {}
   
   
   const cd = document.getElementById('ship-select-countdown');
@@ -30510,6 +30557,31 @@ function _cyberLineupTrack(C) {
     if (sp.ent && sp.ent.position) { sp.ent.position.copy(d); if (sp.ent.velocity) sp.ent.velocity.set(0, 0, 0); }
   }
 }
+// (v38.00) The lineup parks the wing on the deck but lets go the moment the cinematic ends, so
+// through the whole countdown the bots flew their own AI from INSIDE the carrier's collision body
+// and the collider ejected them the shortest way out - through the hull. Hold them where the
+// lineup left them until the match actually starts.
+function _cyberHoldWing(C) {
+  if (!C || !C.bots || !_carrier.obj) return;
+  let i = 1;
+  for (const b of C.bots) {
+    if (!b || !b._cyberAttacker || !b.alive || !b.position) continue;
+    const d = _carrierDeckSpot(i++);
+    if (!d) continue;
+    b.position.copy(d);
+    if (b.velocity) b.velocity.set(0, 0, 0);
+  }
+}
+// ...and then let them go FORWARD, off the bow, rather than dropping them into the hull.
+function _cyberLaunchWing(C) {
+  if (!C || !C.bots || !_carrier.dir) return;
+  for (const b of C.bots) {
+    if (!b || !b._cyberAttacker || !b.alive || !b.velocity) continue;
+    const spd = (b.chassis && (b.chassis.flightSpeed || b.chassis.maxSpeed)) || 300;
+    b.velocity.copy(_carrier.dir).multiplyScalar(spd * 0.8);
+    b.velocity.y += spd * 0.15;
+  }
+}
 function _cyberDeckPlace(C) {
   try { _cyberLineupTrack(C); } catch (_) {}
   if (!C || !C.started || player.team !== C.teamA) return false;
@@ -30563,7 +30635,10 @@ function _cyberSetup(C) {
       C.sector = _sector;
     }
     // the attacker starts on the deck
-    C.placeT = 2.5;   // the free-flight spawn lands after this frame ; hold the deck briefly
+    // (v38.00) Half a second, not two and a half. Since v37.94 the ship is already standing on
+    // the deck before the world is baked, so this only has to survive the single frame in which
+    // free flight places the player - and a longer pin reads as being stuck to the carrier.
+    C.placeT = 0.5;
     try { _cyberDeckPlace(C); } catch (_) {}
     try {
       if (window.Overlays && Overlays.banner) Overlays.banner('CYBERPUNK CITY', 'take the field in the city');
@@ -30577,8 +30652,12 @@ function _cyberFrame(dt) {
     // (v37.88) the lineup and the 3-2-1 both happen before 'playing' - keep the ship on the deck
     // for them, or the countdown plays out at the free-flight spawn and the match starts with a
     // teleport back to the carrier
-    if (C.started) _cyberDeckPlace(C);
+    if (C.started) { _cyberDeckPlace(C); try { _cyberHoldWing(C); } catch (_) {} }
     return;
+  }
+  if (!C._wingLaunched && C.started) {
+    C._wingLaunched = true;
+    try { _cyberLaunchWing(C); } catch (_) {}
   }
   if (!C.started) _cyberSetup(C);
   // (v37.76b) The mode's own spawn has to win over free flight's, which places the player on the
@@ -30588,9 +30667,21 @@ function _cyberFrame(dt) {
     // (v37.93) count down only while the placement is LANDING. It used to run the clock whether or
     // not the carrier was ready, so a couple of unlucky frames left free flight's own spawn
     // standing - a different portal ring, a different biome from the one the lineup just showed.
-    let _held = false;
-    try { _held = _cyberDeckPlace(C); } catch (_) {}
-    if (_held) C.placeT -= (dt || 0.016);
+    // any input from the pilot ends the hold on the spot - it exists to win a race with free
+    // flight's spawn, not to take the controls away
+    let _moved = false;
+    try {
+      const k = input.keys || {};
+      _moved = !!(k['w'] || k['a'] || k['s'] || k['d'] || k['W'] || k['A'] || k['S'] || k['D'] ||
+                  k[' '] || k['Shift'] || input.mouseDown || input.gpFire ||
+                  (input.gpConnected && (Math.abs(input.gpLX || 0) > 0.2 || Math.abs(input.gpLY || 0) > 0.2)));
+    } catch (_) {}
+    if (_moved) { C.placeT = 0; }
+    else {
+      let _held = false;
+      try { _held = _cyberDeckPlace(C); } catch (_) {}
+      if (_held) C.placeT -= (dt || 0.016);
+    }
   }
   if (_carrier.dead && !C.lost) {
     C.lost = true;
