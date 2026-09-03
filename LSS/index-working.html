@@ -4272,7 +4272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.10';
+const LSS_BUILD = '38.11';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -24414,8 +24414,26 @@ function _swWaterReflectShader() {
       '  N = normalize(N);',
       '  vec3 V = normalize(vWP - uCam);',                                  
       '  float graze = 1.0 - clamp(abs(V.y), 0.0, 1.0);',                   
-      '  vec4 uvp = vUv; uvp.xy += N.xz * uvp.w * 0.04 * fade * (1.0 - graze * 0.55);',   
-      '  uvp.xy += pgrad * uvp.w * uReliefScale * 0.012 * graze * fade * (1.0 - graze * 0.5);',   
+      // (v38.11) CAP HOW FAR THE MIRROR SAMPLE MAY WANDER. Two terms push the reflection UV: the
+      // ripple normal (a few percent, which is the point) and the RELIEF gradient, scaled by
+      // uReliefScale = 28, i.e. pgrad * 0.336. Near a shoreline pgrad is the mask's own edge and
+      // that term throws the sample clean across the render target - so a patch of water samples
+      // the moon or the bright sky and paints it flat white over the true reflection. Isolated by
+      // toggling: uReliefScale 0 restores a clean mirror, and putting it back with the relief
+      // SHADING off makes the whole surface white. The distortion stays, it just cannot leave the
+      // neighbourhood any more.
+      '  vec2 _rOff = pgrad * uReliefScale * 0.012 * graze * fade * (1.0 - graze * 0.5);',
+      // (v38.11) LEASH THE RELIEF DRAG, not the ripple. The ripple normal moves the mirror sample a
+      // few percent and that is the whole look. The RELIEF gradient is scaled by uReliefScale = 28,
+      // i.e. pgrad * 0.336, and near a shoreline pgrad IS the mask's own edge - so that term throws
+      // the sample clean across the render target and a patch of water paints the moon, or the
+      // bright sky, flat over the true reflection. Isolated by toggling: uReliefScale 0 gives a
+      // clean mirror, and putting it back with the relief SHADING off turns the whole surface
+      // white. Capped at a fifth of the ripple's own range, the shimmer stays and the sample
+      // cannot leave its neighbourhood.
+      '  float _rL = length(_rOff);',
+      '  if (_rL > 0.012) _rOff *= 0.012 / _rL;',
+      '  vec4 uvp = vUv; uvp.xy += (N.xz * 0.04 * fade * (1.0 - graze * 0.55) + _rOff) * uvp.w;',   
       '  vec3 refl = texture2DProj(tDiffuse, uvp).rgb;',
       // (v33.66) GRAZING BLACK-OUT GUARD : at extreme grazing a rippled reflection UV can project off the
       // low-res mirror RT (or behind the mirror camera, uvp.w->0) and sample BLACK = the "black hole" the
