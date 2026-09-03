@@ -4167,7 +4167,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.73';
+const LSS_BUILD = '37.74';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23218,7 +23218,9 @@ const CARRIER = {
   length: null,       // computed from xBlaster ; set it directly to override
   scale: null,        // set from `length` at load ; the carrier never uses the ship fit path
   box: [900, 200, 2400],   // placeholder footprint (w, h, l), also the fallback deck extent
-  arrive: 1500,       // stop this far short of the city centre
+  edge: 900,          // how far OUTSIDE the city radius the carrier parks
+  arrive: null,       // absolute stop distance from the city centre ; overrides `edge`
+  clearance: 450,     // minimum height above the ground along the route
 };
 const _carrier = {
   obj: null, ent: null, proto: null, loading: false,
@@ -23332,7 +23334,11 @@ function _carrierAttach(root, sector) {
   _carrier.sector = from.sector;
   _carrier.to.copy(_carrierCityPoint());
   _carrier.dir.copy(_carrier.to).sub(_carrier.from);
-  _carrier.dist = Math.max(1, _carrier.dir.length() - ((_carrierKnobs().arrive != null) ? _carrierKnobs().arrive : CARRIER.arrive));
+  const _cityR = (typeof HUB_CITY !== 'undefined' && HUB_CITY.genome && HUB_CITY.genome.radius) ? HUB_CITY.genome.radius : 7500;
+  const _stop = (_carrierKnobs().arrive != null) ? _carrierKnobs().arrive
+              : (_cityR + ((_carrierKnobs().edge != null) ? _carrierKnobs().edge : CARRIER.edge));
+  _carrier.dist = Math.max(1, _carrier.dir.length() - _stop);
+  _carrier.rideY = null;
   _carrier.dir.normalize();
   _carrier.t = 0;
   _carrier.dead = false;
@@ -23427,6 +23433,21 @@ function _carrierFrame(dt) {
   const travelled = Math.min(_carrier.dist, _carrierSpeed() * _carrier.t);
   const o = _carrier.obj;
   o.position.copy(_carrier.from).addScaledVector(_carrier.dir, travelled);
+  {
+    let gy = null;
+    try {
+      const T = game.sandwichTerrain;
+      if (T && typeof _stGroundYCarved === 'function') gy = _stGroundYCarved(o.position.x, o.position.z, T);
+    } catch (_) {}
+    if (typeof gy === 'number' && isFinite(gy)) {
+      const K = _carrierKnobs();
+      const _cl = (typeof K.clearance === 'number') ? K.clearance : CARRIER.clearance;
+      const want = Math.max(o.position.y, gy + _cl);
+      const next = (_carrier.rideY == null) ? want
+                 : _carrier.rideY + (want - _carrier.rideY) * Math.min(1, (dt || 0.016) * 0.8);
+      if (isFinite(next)) { _carrier.rideY = next; o.position.y = next; }
+    }
+  }
   _carrier.ent.velocity.copy(_carrier.dir).multiplyScalar(travelled < _carrier.dist ? _carrierSpeed() : 0);
   _carrier.ent.position.copy(o.position);
 }
@@ -23458,6 +23479,7 @@ if (typeof window !== 'undefined') {
     sector: _carrier.sector, speed: Math.round(_carrierSpeed()),
     t: +_carrier.t.toFixed(1), dist: Math.round(_carrier.dist),
     travelled: Math.round(Math.min(_carrier.dist, _carrierSpeed() * _carrier.t)),
+    stopsAtCityEdge: Math.round(_carrier.to.distanceTo(_carrier.from) - _carrier.dist),
     etaSec: Math.max(0, Math.round((_carrier.dist - _carrierSpeed() * _carrier.t) / Math.max(1, _carrierSpeed()))),
     pos: _carrier.obj ? _carrier.obj.position.toArray().map(Math.round) : null,
     health: _carrier.ent ? Math.round(_carrier.ent.health) : null,
