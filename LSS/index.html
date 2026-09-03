@@ -4170,7 +4170,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.77';
+const LSS_BUILD = '37.78';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23227,7 +23227,7 @@ const CARRIER = {
   clearance: 450,     // minimum height above the ground along the route
   zapRange: 1600,     // the guns answer anything hostile inside this
   zapEvery: 0.7,      // seconds between bolts
-  zapDamage: 550,
+  zapDamage: 200,     // (v37.78) was 550 - ~285 dps deters, 785 deleted a dreadnought in 9 s
   glow: 0.10,         // engine orb radius as a fraction of hull height (548 -> ~55 units)
 };
 const _carrier = {
@@ -23595,8 +23595,15 @@ if (typeof window !== 'undefined') {
     size: _carrier.size ? _carrier.size.toArray().map(Math.round) : null,
   });
 }
+const CYBER = {
+  attackers: 3,       // bots flying in from the carrier alongside the player
+  defenders: 4,       // bots holding the city
+  respawn: 6,         // seconds before a downed bot returns
+  capture: 12,        // seconds an attacker must hold the field to win
+  botShips: ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'],
+};
 function startCyberpunkCity() {
-  game._cyber = { armed: true, started: false, lost: false };
+  game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false };
   startFreeFlight();
 }
 if (typeof window !== 'undefined') window.startCyberpunkCity = startCyberpunkCity;
@@ -23628,13 +23635,65 @@ function _cyberSpawnField() {
   game.championSpawned = true;
   return f;
 }
+function _cyberCityPoint(i) {
+  const f = (game._cyber && game._cyber.field) ? game._cyber.field.position : null;
+  const c = f ? f.clone() : new THREE.Vector3(HUB_CITY.x, HUB_CITY.padY + 300, HUB_CITY.z);
+  const a = ((i | 0) * 1.7) + Math.random() * 0.9;
+  const r = 500 + Math.random() * 900;
+  return c.add(new THREE.Vector3(Math.cos(a) * r, 120 + Math.random() * 320, Math.sin(a) * r));
+}
+function _cyberSpawnBots(C) {
+  const K = window.__cyber || (window.__cyber = {});
+  const nA = (K.attackers != null) ? K.attackers : CYBER.attackers;
+  const nD = (K.defenders != null) ? K.defenders : CYBER.defenders;
+  let id = 9300;
+  const make = (team, atk, i) => {
+    let b = null;
+    try { b = new Bot(CYBER.botShips[i % CYBER.botShips.length], team, id++); } catch (_) { return; }
+    b._cyberAttacker = atk;
+    const sp = atk ? _carrierDeckPoint(i) : _cyberCityPoint(i);
+    if (sp) { b.position.copy(sp); if (b.mesh) b.mesh.position.copy(sp); }
+    game.entities.push(b);
+    C.bots.push(b);
+  };
+  for (let i = 0; i < nA; i++) make(C.teamA, true, i);
+  for (let i = 0; i < nD; i++) make(C.teamB, false, i);
+}
+function _cyberReviveBots(C, dt) {
+  for (let i = 0; i < C.bots.length; i++) {
+    const b = C.bots[i];
+    if (!b || b.alive) { if (b) b._reT = null; continue; }
+    b._reT = (b._reT == null) ? ((window.__cyber && window.__cyber.respawn != null) ? window.__cyber.respawn : CYBER.respawn) : b._reT - dt;
+    if (b._reT > 0) continue;
+    const sp = b._cyberAttacker ? _carrierDeckPoint(i) : _cyberCityPoint(i);
+    if (!sp) continue;                       // carrier gone: attackers stay down
+    b._reT = null;
+    b.alive = true;
+    b.health = b.maxHealth;
+    if (b.shield != null && b.maxShield != null) b.shield = b.maxShield;
+    b.position.copy(sp);
+    if (b.mesh) { b.mesh.position.copy(sp); if (!b.mesh.parent) scene.add(b.mesh); }
+  }
+}
+function _cyberEnd(C, title, sub) {
+  if (C.over) return;
+  C.over = true;
+  try { if (window.Overlays && Overlays.banner) Overlays.banner(title, sub); } catch (_) {}
+  try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+  setTimeout(() => { try { if (typeof returnToRootMenu === 'function') returnToRootMenu(); } catch (_) {} }, 7000);
+}
 function _cyberFrame(dt) {
   const C = game._cyber;
   if (!C || !C.armed || game.state !== 'playing') return;
   if (!C.started) {
     C.started = true;
+    C.teamA = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_A != null) ? LSS.TEAM_FLEET_A : 2;
+    C.teamB = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_B != null) ? LSS.TEAM_FLEET_B : 3;
+    try { player.team = C.teamA; } catch (_) {}          // the player attacks, from the deck
     try { _carrierSpawn(); } catch (_) {}
+    try { if (_carrier.ent) _carrier.ent.team = C.teamA; } catch (_) {}   // its guns answer defenders only
     try { C.field = _cyberSpawnField(); } catch (_) {}
+    try { _cyberSpawnBots(C); } catch (e) { console.warn('[cyber] bots:', e); }
     C.placeT = 2.5;   // the free-flight spawn lands after this frame ; hold the deck briefly
     try {
       if (window.Overlays && Overlays.banner) Overlays.banner('CYBERPUNK CITY', 'take the field in the city');
@@ -23653,6 +23712,63 @@ function _cyberFrame(dt) {
       if (window.Overlays && Overlays.banner) Overlays.banner('CARRIER LOST', 'no more deck spawns');
     } catch (_) {}
   }
+  if (C.over) return;
+  try { _cyberReviveBots(C, dt || 0.016); } catch (_) {}
+
+  const F = C.field;
+  if (F && F.position) {
+    const R = (F.radius || 50) + 120;
+    let held = false;
+    try {
+      if (player && player.shipState !== 'dead' && player.position.distanceTo(F.position) < R) held = true;
+    } catch (_) {}
+    if (!held) {
+      for (const b of C.bots) {
+        if (b && b.alive && b._cyberAttacker && b.position.distanceTo(F.position) < R) { held = true; break; }
+      }
+    }
+    let contested = false;
+    for (const b of C.bots) {
+      if (b && b.alive && !b._cyberAttacker && b.position.distanceTo(F.position) < R) { contested = true; break; }
+    }
+    const need = (window.__cyber && window.__cyber.capture != null) ? window.__cyber.capture : CYBER.capture;
+    if (held && !contested) {
+      const was = C.hold;
+      C.hold += (dt || 0.016);
+      if (was < 0.05) { try { if (window.Overlays && Overlays.banner) Overlays.banner('CAPTURING', 'hold the field'); } catch (_) {} }
+      if (C.hold >= need) _cyberEnd(C, 'ATTACKERS WIN', 'the field is taken');
+    } else if (C.hold > 0) {
+      C.hold = Math.max(0, C.hold - (dt || 0.016) * 0.5);   // slips back at half speed
+    }
+  }
+
+  if (_carrier.dead) {
+    let anyAttacker = false;
+    try { if (player && player.shipState !== 'dead') anyAttacker = true; } catch (_) {}
+    if (!anyAttacker) {
+      for (const b of C.bots) if (b && b.alive && b._cyberAttacker) { anyAttacker = true; break; }
+    }
+    if (!anyAttacker) {
+      C.deadT = (C.deadT || 0) + (dt || 0.016);
+      if (C.deadT > 2.5) _cyberEnd(C, 'DEFENDERS WIN', 'the carrier and its wing are gone');
+    } else {
+      C.deadT = 0;
+    }
+  }
+}
+if (typeof window !== 'undefined') {
+  window.__cyber = window.__cyber || {};
+  window.__cyber.state = () => {
+    const C = game._cyber;
+    if (!C) return null;
+    return {
+      started: !!C.started, over: !!C.over, carrierLost: !!C.lost,
+      hold: +(C.hold || 0).toFixed(1), need: (window.__cyber.capture != null) ? window.__cyber.capture : CYBER.capture,
+      attackersAlive: (player && player.shipState !== 'dead' ? 1 : 0) + C.bots.filter(b => b && b.alive && b._cyberAttacker).length,
+      defendersAlive: C.bots.filter(b => b && b.alive && !b._cyberAttacker).length,
+      bots: C.bots.length, field: C.field ? C.field.position.toArray().map(Math.round) : null,
+    };
+  };
 }
 function _hubCityFrame(dt) {
   if (!game.hubCity) {
@@ -41934,6 +42050,15 @@ function playerDie(attacker) {
 
 function respawnPlayer() {
   if (!player.loadout) return;
+  if (game._cyber && game._cyber.armed && typeof _carrier !== 'undefined' && _carrier.dead) {
+    try {
+      if (!game._cyber._noSpawnSaid) {
+        game._cyber._noSpawnSaid = true;
+        if (window.Overlays && Overlays.banner) Overlays.banner('NO CARRIER', 'the attack has nowhere to launch from');
+      }
+    } catch (_) {}
+    return;
+  }
   if (window.Overlays) Overlays.hideRespawn();
   game.playerInChampionStasis = false;
   game.playerInStasis = false;
