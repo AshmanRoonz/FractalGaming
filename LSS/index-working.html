@@ -4272,7 +4272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.16';
+const LSS_BUILD = '38.17';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -25288,10 +25288,23 @@ function _swRippleTick(dt) {
           return Math.max(0.10, Math.min(1, Math.pow(Math.max(l * 1.35, 0), 1.6)));
         } catch (_) { return 1; }
       })();
-      du.uReflBright.value = ((W2.reflBright != null) ? W2.reflBright : 2.4) * (0.42 + 0.58 * _wlit);   
+      // (v38.17) A CAVERN IS NOT A SKY-LIT LAKE. Both of these exist to make an open-air surface hold
+      // up against a bright sky - amplify what the mirror returns, and never let it fall below a
+      // haze floor. Underground there is no sky: the mirror returns dark rock and bright crystals,
+      // which is the whole point, and amplifying it by 2.4 over a 0.24 floor paints the white sheet
+      // straight back. Keying them on the fog colour (v38.13) does not save it either, because a
+      // cavern's fog colour is its biome's bright sky tint - measured #afc2d6 in the rocky caves,
+      // which leaves the amplifier at 1.8. So caverns get their own pair: show what is actually
+      // down there, at the brightness it actually is.
+      const _cavW = (typeof _swCavernWaterWanted === 'function') && _swCavernWaterWanted(game.sandwichTerrain);
+      du.uReflBright.value = _cavW
+        ? ((W2.cavReflBright != null) ? W2.cavReflBright : 1.0)
+        : ((W2.reflBright != null) ? W2.reflBright : 2.4) * (0.42 + 0.58 * _wlit);   
       du.uGrazeClear.value = (W2.grazeClear != null) ? W2.grazeClear : 0.7;   
       du.uGrazeAlpha.value = (W2.grazeAlpha != null) ? W2.grazeAlpha : 0.45;  
-      du.uReflFloor.value = ((W2.reflFloor != null) ? W2.reflFloor : 0.24) * _wlit;      
+      du.uReflFloor.value = _cavW
+        ? ((W2.cavReflFloor != null) ? W2.cavReflFloor : 0.03)
+        : ((W2.reflFloor != null) ? W2.reflFloor : 0.24) * _wlit;      
       du.uFoamLod.value = (W2.foamLod != null) ? W2.foamLod : 0.30;            
       du.uMaskTex.value = R.maskTex;                                          
       du.uFarMaskTex.value = R.farTex;                                        
@@ -26106,14 +26119,15 @@ function _swBuildHubWater(T) {
   const WL = (T && T.WL != null) ? T.WL : ((T && T.YFLOOR != null) ? T.YFLOOR : 0);
   game._hubWaterT = T; game._hubWaterWL = WL;   
   const geo = new THREE.PlaneGeometry(48000, 48000, 32, 32);
-  // (v38.16) A cavern has no sky to mirror, and the pass re-renders the whole scene. The displaced
-  // sheet's fallback is the scene's own fog colour (v38.14), which IS the cave's light - so down
-  // here the mirror buys nothing and costs a render. window.__cavernWater.reflect = true to try it.
-  const _cavern = (typeof _swCavernWaterWanted === 'function') && _swCavernWaterWanted(T);
-  const _cavRefl = _cavern && !!(window.__cavernWater && window.__cavernWater.reflect);
+  // (v38.17) THE MIRROR STAYS ON DOWN THERE. v38.16 skipped it in caverns to save the extra scene
+  // render - reasoning that a closed cavern has no sky to mirror. Two things wrong with that: the
+  // walls, the crystals and the ship's own lights are exactly what SHOULD be in the water, and the
+  // ripple simulation is initialised on this branch, so switching it off left the cavern with a
+  // dead flat sheet - owner: "no life to the water, it doesn't reflect or move". It is the same
+  // pass the hub already pays for, quality-gated the same way.
   const _canReflect = (typeof THREE.Reflector === 'function')
     && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())
-    && (!_cavern || _cavRefl);   
+    && !(window.__cavernWater && window.__cavernWater.reflect === false);   
   let mesh;
   if (_canReflect) {
     const dpr = (renderer && renderer.getPixelRatio) ? renderer.getPixelRatio() : 1;
@@ -46321,6 +46335,12 @@ class OutskirtsMonster {
         } catch (_) { out.push(mat); }
       }
       node.material = Array.isArray(node.material) ? out : out[0];
+      // (v38.17) ABOVE THE WATER. The ghost is transparent with depthWrite off, and so is the water
+      // plane - and three sorts the transparent queue by renderOrder FIRST, ties by depth. Both sat
+      // at 0, and the water plane is re-centred on the camera every frame so it always sorts as the
+      // nearer of the two: a lake drawn straight through an apparition. 3 is where the FX
+      // particles already sit for exactly this reason (see the note at the plume shader).
+      node.renderOrder = 3;
     });
     // Normalize: every kid-designed monster comes in at its own scale ;
     // fit the longest axis to MONSTER_SIZE and recentre on origin.
