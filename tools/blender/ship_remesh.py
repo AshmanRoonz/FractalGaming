@@ -25,6 +25,7 @@ import time
 
 import numpy as np
 from mathutils import Vector
+from mathutils.bvhtree import BVHTree
 
 argv = sys.argv[sys.argv.index('--') + 1:] if '--' in sys.argv else []
 
@@ -122,6 +123,69 @@ def render_views(objs_visible, tag, ship, L, ctr, cp):
         cam.rotation_euler = (tgt - loc).to_track_quat('-Z', 'Y').to_euler()
         sc.render.filepath = os.path.join(REPORT, f'{ship}_{tag}_{name}.png')
         bpy.ops.render.render(write_still=True)
+
+
+def remove_inner_skin(obj, L):
+    """Delete every face no external viewpoint can see: the inner surface of the solidified shell
+    (64% of the clean Pyro's faces sat a few mm under the outer skin and left opaque slivers under
+    the glass) and buried debris. A face survives if any ray of a 9-ray cone around its normal
+    escapes, or if it is the first hit from any of 14 far-away directions (so nozzle interiors and
+    intakes, which fail the cone test, still count as exterior)."""
+    dg = bpy.context.evaluated_depsgraph_get()
+    bvh = BVHTree.FromObject(obj, dg)
+    me = obj.data
+    nP = len(me.polygons)
+    dirs14 = [Vector(v).normalized() for v in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                                               (1, 1, 1), (1, 1, -1), (1, -1, 1), (1, -1, -1), (-1, 1, 1), (-1, 1, -1), (-1, -1, 1), (-1, -1, -1))]
+    eps = 0.0008 * L
+    far = 3.0 * L
+    kill = np.zeros(nP, bool)
+    up = Vector((0, 0, 1))
+    for p in me.polygons:
+        n = p.normal
+        if n.length < 1e-9:
+            continue
+        c = p.center
+        o = c + n * eps
+        ref = up if abs(n.dot(up)) < 0.9 else Vector((1, 0, 0))
+        u = n.cross(ref).normalized()
+        v = n.cross(u).normalized()
+        escaped = bvh.ray_cast(o, n, far)[0] is None
+        if not escaped:
+            for k in range(8):
+                a = math.pi * k / 4
+                d = (n + (u * math.cos(a) + v * math.sin(a)) * 0.84).normalized()     # ~40 deg off the normal
+                if bvh.ray_cast(o, d, far)[0] is None:
+                    escaped = True
+                    break
+        if escaped:
+            continue
+        seen = False
+        for d in dirs14:
+            if d.dot(n) <= 0.05:
+                continue                                    # cannot be seen from behind
+            org = c + d * far
+            hit = bvh.ray_cast(org, -d, far * 1.01)
+            if hit[0] is not None and hit[2] == p.index:
+                seen = True
+                break
+        if not seen:
+            kill[p.index] = True
+    n_kill = int(kill.sum())
+    if n_kill:
+        select_only([obj])
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_mode(type='FACE')
+        bpy.ops.mesh.select_all(action='DESELECT')
+        bpy.ops.object.mode_set(mode='OBJECT')
+        me.polygons.foreach_set('select', kill)
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.delete(type='FACE')
+        bpy.ops.mesh.select_all(action='SELECT')
+        bpy.ops.mesh.delete_loose()
+        bpy.ops.object.mode_set(mode='OBJECT')
+        me.update()
+    return n_kill, nP
 
 
 def process(ship):
@@ -231,25 +295,40 @@ def process(ship):
 
     # ---- 3. decimate + smooth ----------------------------------------------------------------
     n_tri = sum(len(pg.vertices) - 2 for pg in clean.data.polygons)      # the remesh is quads
-    if n_tri > TARGET and _opt_geometry is not None:
+    TARGET1 = 2 * TARGET          # the inner skin (about half the faces) goes after this pass
+    if n_tri > TARGET1 and _opt_geometry is not None:
         # blender-model-optimizer's decimation (owner: "try this"): a planar pre-pass merges the
         # remesh's coplanar quads into n-gons first, then a two-pass collapse spends the budget on
         # curved skin. Its ratio is per face, so aim by triangles.
         import types as _types
-        props = _types.SimpleNamespace(merge_distance_mm=0.1, decimate_ratio=TARGET / n_tri, decimate_passes=2,
+        props = _types.SimpleNamespace(merge_distance_mm=0.1, decimate_ratio=TARGET1 / n_tri, decimate_passes=2,
                                        protect_uv_seams=False, run_planar_prepass=True, planar_angle=math.radians(5.0),
                                        verbose_logging=True)
         _opt_geometry.decimate_single(bpy.context, clean, props)
         rep['decimate'] = 'blender-model-optimizer planar + 2-pass collapse'
-    elif n_tri > TARGET:
+    elif n_tri > TARGET1:
         select_only([clean])
         mod = clean.modifiers.new('dec', 'DECIMATE')
-        mod.ratio = TARGET / n_tri
+        mod.ratio = TARGET1 / n_tri
         mod.use_collapse_triangulate = True
         mod.use_symmetry = True
         mod.symmetry_axis = 'Y'
         bpy.ops.object.modifier_apply(modifier=mod.name)
         rep['decimate'] = 'blender collapse (Y symmetry)'
+    # INNER SKIN: faces no external viewpoint can see
+    t1 = time.time()
+    n_kill, n_before = remove_inner_skin(clean, L)
+    rep['inner_skin'] = {'removed': n_kill, 'of': n_before, 'seconds': round(time.time() - t1, 1)}
+    # second pass down to the budget, now spent on the outside only
+    n_tri2 = sum(len(pg.vertices) - 2 for pg in clean.data.polygons)
+    if n_tri2 > TARGET * 1.05:
+        select_only([clean])
+        mod = clean.modifiers.new('dec2', 'DECIMATE')
+        mod.ratio = TARGET / n_tri2
+        mod.use_collapse_triangulate = True
+        mod.use_symmetry = True
+        mod.symmetry_axis = 'Y'
+        bpy.ops.object.modifier_apply(modifier=mod.name)
     # the decimated mesh must be VALID: the first run left one face without loops and every later
     # step (unwrap, bake, export) silently did nothing on it
     bad = clean.data.validate(verbose=False, clean_customdata=True)

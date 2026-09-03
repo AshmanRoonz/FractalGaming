@@ -225,10 +225,19 @@ def load_marks(ship):
             continue
         cam = g2b(op['cam'])
         mirror = op.get('mirror')
-        fills.append({'cam': cam, 'points': pts, 'erase': bool(op.get('erase'))})
         if mirror:
             # glTF z -> Blender y ; glTF x -> Blender x ; glTF y -> Blender z
             ax = {'z': 1, 'x': 0, 'y': 2}.get(mirror, 1)
+            # an outline drawn up to the centreline meets its mirror there: the edge plane through
+            # the camera and its mirrored plane make a thin wedge neither polygon covers (a jagged
+            # crack down the Pyro's pane). Nudge points near the mirror plane 2% of the model
+            # across it, so the two halves overlap instead of touching.
+            ext = max(abs(c[ax]) for c in pts) if pts else 1.0
+            span = 2.0 * max(ext, 1e-6)
+            side = 1.0 if sum(q[ax] for q in pts) >= 0 else -1.0
+            pts = [Vector([(q[i] if i != ax else (q[i] if abs(q[i]) > 0.02 * span else -side * 0.02 * span)) for i in range(3)]) for q in pts]
+        fills.append({'cam': cam, 'points': pts, 'erase': bool(op.get('erase'))})
+        if mirror:
             mv = lambda v: Vector([(-v[i] if i == ax else v[i]) for i in range(3)])
             fills.append({'cam': mv(cam), 'points': [mv(q) for q in pts], 'erase': bool(op.get('erase'))})
     return {'centroids': cen_b, 'eye': eye, 'tris': j.get('tris'), 'path': path, 'fills': fills, 'markers': markers}
@@ -664,6 +673,34 @@ def process(ship):
                 changed = True
     rep['glass']['grown'] = grown
     rep['glass']['grow_iters'] = it
+
+    # SLIVERS: the cuts leave needle-thin faces along the planes ; some sit inside the glass with
+    # glass on two of their edges but fail the surround test (their centroid is on a line). A near
+    # face far smaller than the glass faces around it, sharing >= 2 edges with glass, joins.
+    if glass.any():
+        areas = np.empty(nP, np.float32)
+        me.polygons.foreach_get('area', areas)
+        med = float(np.median(areas[glass]))
+        ef_s = {}
+        for fi in near_idx:
+            fi = int(fi)
+            for e in me.polygons[fi].edge_keys:
+                ef_s.setdefault(e, []).append(fi)
+        slivers = 0
+        for _pass in range(3):
+            added = 0
+            for fi in near_idx:
+                fi = int(fi)
+                if glass[fi] or areas[fi] > 0.15 * med:
+                    continue
+                ng = sum(1 for e in me.polygons[fi].edge_keys for q in ef_s.get(e, ()) if q != fi and glass[q])
+                if ng >= 2:
+                    glass[fi] = True
+                    added += 1
+            slivers += added
+            if not added:
+                break
+        rep['glass']['slivers'] = slivers
 
     def fringe():
         c_, _ = grid_g.stats(glass[near_idx])

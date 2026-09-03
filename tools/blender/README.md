@@ -406,6 +406,15 @@ property) → smart UV + pack → Cycles bake hi→clean: DIFFUSE colour (the pa
 NORMAL (the detail), `--tex` 4096 (2k was visibly soft ; coverage ~36% from the many islands),
 cage 0.015 L / rays 0.035 L (longer rays drew thin dark streaks across the panes where they
 crossed overlapping panels) → `assets_base/ships_clean/<Ship>.glb` (gitignored) with the markers.
+INNER SKIN (v37.57): solidify + voxel remesh yields a shell with an outer AND an inner surface ;
+the cavity filter only drops inner skins that are separate loose parts, and where the inner skin
+connects to the outer through openings it survived — 64% of the clean Pyro's faces sat a few mm
+under the skin and left opaque slivers and a jagged "crack" under the owner's glass cuts.
+`remove_inner_skin` (after a first decimation to 2× the budget) deletes every face no external
+viewpoint can see: a 9-ray cone around the normal must all be blocked AND none of 14 far-away
+directions sees the face first (so nozzle interiors and intakes, which fail the cone test, stay) ;
+then a second decimation to the budget spends it on the outside only. `inner_probe.py` reports the
+blocked-normal fraction (Pyro 64% → 17% = its concavities).
 Diagnostics: `reports/remesh/<ship>_{before,after}_{front34,canopy_close,skin_macro}.png` (scratch
 `sheet_remesh.py`) and `<ship>_remesh.json` — every step asserts it produced data.
 
