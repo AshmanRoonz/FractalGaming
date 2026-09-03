@@ -388,3 +388,28 @@ files — the untouched copies in `assets_base/ships_original_raw/` restored the
 `ship_original.py` reads markers from the original's own nodes first (`markers_source: original`),
 then the frozen hull ; markers placed in the editor (the marks JSON) override both. The editor
 opens the originals with the markers detected, so they can be adjusted there.
+
+## Clean hulls: remesh + rebake (v37.52) — `tools/blender/ship_remesh.py`
+
+Owner (2026-09-03): *"the GLB files are shit... they look nice from far, but when you zoom in, it
+is a hot mess"* — every original is ~2000 loose overlapping panels with no thickness. Option 1:
+
+`blender --background --python tools/blender/ship_remesh.py -- --ships pyro --render` per ship:
+SOLIDIFY the panels (`--solid` 0.006 L ; without thickness a voxel remesh cannot tell inside from
+outside: the `voxel_remesh` operator gave a pitted, porous surface and crashed Blender with an
+access violation two runs in three, the REMESH modifier a sparse cloud) → REMESH modifier, voxel
+`--voxel` 0.002 L (≈1.08 M quads on the Pyro, stable) → SMOOTH ×2 (voxel terracing) → drop the
+loose parts boxed inside another (cavities) → decimate (triangle count, Y symmetry) to `--target`
+150k, validate + dissolve degenerate (a decimated mesh once lost a face's loops and every later
+step silently did nothing) → smooth shading with sharp edges by angle (4.1: no auto-smooth
+property) → smart UV + pack → Cycles bake hi→clean: DIFFUSE colour (the paint) and tangent
+NORMAL (the detail), `--tex` 4096 (2k was visibly soft ; coverage ~36% from the many islands),
+cage 0.015 L / rays 0.035 L (longer rays drew thin dark streaks across the panes where they
+crossed overlapping panels) → `assets_base/ships_clean/<Ship>.glb` (gitignored) with the markers.
+Diagnostics: `reports/remesh/<ship>_{before,after}_{front34,canopy_close,skin_macro}.png` (scratch
+`sheet_remesh.py`) and `<ship>_remesh.json` — every step asserts it produced data.
+
+Then the cockpit chain on the clean hulls: `ship_original.py --orig assets_base/ships_clean`
+(imports with merge_vertices: the export split vertices along UV seams, 5647 "shells" otherwise).
+Outline marks drawn on the ORIGINAL in the editor replay as cuts on the clean hull too (same
+space) ; brush marks match faces by centroid and do not transfer.

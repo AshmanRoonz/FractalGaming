@@ -44,7 +44,7 @@ import numpy as np
 from mathutils import Vector, Matrix
 from mathutils.bvhtree import BVHTree
 
-ORIG_DIR = os.path.join(REPO, 'LSS', 'ships_original')
+ORIG_DIR = os.path.join(REPO, opt('--orig', 'LSS/ships_original'))   # --orig assets_base/ships_clean = the remeshed hulls (ship_remesh.py)
 FROZEN_DIR = os.path.join(REPO, 'assets_base', 'ships')
 REPORT_DIR = os.path.join(REPO, 'tools', 'blender', 'reports', 'original')
 os.makedirs(REPORT_DIR, exist_ok=True)
@@ -422,7 +422,9 @@ def process(ship):
     sc = bpy.context.scene
     vl = bpy.context.view_layer
     src = os.path.join(ORIG_DIR, ship.capitalize() + '.glb')
-    meshes, orig_empties = import_glb(src)
+    # the remeshed hulls (ship_remesh.py) are ONE shell whose export split vertices along UV seams
+    # and sharp edges: merge them back or the loose-part split sees 5000 "shells"
+    meshes, orig_empties = import_glb(src, merge_vertices=(os.path.normpath(ORIG_DIR).lower().endswith('ships_clean') or '--merge' in argv))
     hull = meshes[0]
     for o in meshes:
         mw = o.matrix_world.copy()
