@@ -645,7 +645,10 @@ def process(ship):
     grid_g = Grid(r_g)
     grown = 0
     it = 0
-    changed = marks is None
+    # under the owner's marks the SURROUND fill still runs: a mirrored outline and its original
+    # both cut along the centreline and leave sliver triangles between the two planes (Pyro) ;
+    # a face with glass all around it joins, the straight outer edges are untouched
+    changed = True
     while changed and it < 12:
         changed = False
         it += 1
@@ -822,7 +825,11 @@ def process(ship):
             # a seat needs a floor: candidates hanging in a void (or below the pit) lose 0.5
             sc0 = open_score(e) - (0.0 if fl is not None and e.z - fl < 0.5 * L else 0.5)
             cands.append((sc0, x, e, gz))
-    if marks is not None and marks.get('eye') is not None:
+    _eye_moved = (marks is not None and marks.get('eye') is not None
+                  and ('cockpit1' not in mk or (Vector(marks['eye']) - Vector(mk['cockpit1'])).length > 0.01 * L))
+    if _eye_moved:
+        # the editor re-exports the GLB's own cockpit1 unchanged ; only a marker the owner MOVED
+        # is an eye (the frozen one sits inside the old carved tub - Tracker scored 0.00 on it)
         eye_world = Vector(marks['eye'])
         gz = glass_z_at(eye_world.x, eye_world.y)
         glass_z_eye = gz if gz is not None else float(g_hi[2])
