@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.61';
+const LSS_BUILD = '37.65';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4335,7 +4335,7 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // (v37.35) 37.34 -> 37.35: INNER LINING closes every see-through hull face around
 // the seat, crack zipper in the cleanup stage, four distinct instrument tiles,
 // control stick, console switch rows, harness straps.
-const _MODELS_VERSION = '37.61';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.65';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -21060,6 +21060,8 @@ function renderFrame() {
   // gates itself on game.state === 'playing'. All ship transforms are final
   // by the time any render path gets here.
   try { if (typeof _shipLightsFrame === 'function') _shipLightsFrame(); } catch (_) {}
+  // (v37.64) ghost seat shell on/off, judged against the camera that is about to draw
+  try { if (typeof _ghostHullSync === 'function') _ghostHullSync(); } catch (_) {}
   if (renderer.xr.isPresenting) {
     if (!renderFrame._xrLogged) {
       renderFrame._xrLogged = true;
@@ -54223,6 +54225,7 @@ function _lssStartSpectatorCinematic() {
   _cinematic.swayZ = sideZ;
   _cinematic.startMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   _cinematic.active = true;
+  try { _ghostHullRestore(player && player.mesh); } catch (_) {}   // (v37.64) the lineup is an EXTERNAL view: painted hull
   _cinematic.after = null;
 
   try {
@@ -54773,6 +54776,8 @@ function updatePlayerMovement(dt) {
 // persisted) is the player-facing switch ; window.__cockpit = { on: false }
 // overrides it live for A/B feel checks without touching saved settings.
 const _cpEyeW = new THREE.Vector3();
+const _cpEyeOff = new THREE.Vector3();
+const _cpEyeQ = new THREE.Quaternion();
 const _cpFwd = new THREE.Vector3();
 const _cpUp = new THREE.Vector3();
 // (v37.37) cockpit light rig: two point lights that live in the scene from
@@ -54834,16 +54839,19 @@ function _ghostHullKnobs() {
     rim: (typeof G.rim === 'number') ? G.rim : 0.62,
     mix: (typeof G.mix === 'number') ? G.mix : 0.35,
     flicker: (typeof G.flicker === 'number') ? G.flicker : 1,
+    // (v37.62) the owner's glass cut-out = the MORE translucent zone of the ghost shell
+    glassCore: (typeof G.glassCore === 'number') ? G.glassCore : 0.10,
+    glassRim: (typeof G.glassRim === 'number') ? G.glassRim : 0.30,
     tint: _ghostHullTint()
   };
 }
-function _addGhostHull(mat, K) {
+function _addGhostHull(mat, K, isGlass) {
   mat.transparent = true;
   mat.depthWrite = false;      // x-ray layering: the far wall glows through the near one
   mat.side = THREE.DoubleSide;
   const U = {
     uGhTint: { value: new THREE.Color(K.tint) }, uGhTime: _ghostHullTimeU,
-    uGhCore: { value: K.core }, uGhRim: { value: K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }
+    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }
   };
   mat.userData._ghostU = U;
   mat.onBeforeCompile = (shader) => {
@@ -54870,6 +54878,32 @@ function _addGhostHull(mat, K) {
   mat.needsUpdate = true;
   return mat;
 }
+// (v37.64) THE SHELL IS A SEAT EFFECT AND NOTHING ELSE. Owner: "it glitched on endless and the
+// cinematic showed the external view as the ghost (it should only be internal view looking out as
+// ghost)". The pre-round cinematic flies an external camera while the game is still in first
+// person, and the ship rig does not run on every one of those frames, so an apply from an earlier
+// frame survived into a view that shows the hull from outside. The gate is now checked from the
+// RENDER side instead (_ghostHullSync in renderFrame, after every camera is final): whichever
+// path drew the frame, the shell is on only while the pilot's own seat camera is the view.
+function _ghostSeatWanted() {
+  if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
+  if (game.thirdPerson || !game._cockpit3dLive) return false;
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
+  return _ghostHullKnobs().on;
+}
+function _ghostHullSync() {
+  const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
+  if (!mesh) return;
+  if (_ghostSeatWanted()) {
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const prev = _ghostHullSync._t || now;
+    _ghostHullSync._t = now;
+    _ghostHullTimeU.value += Math.min(0.1, (now - prev) / 1000);
+    _ghostHullApply(mesh);
+  } else if (mesh.userData && mesh.userData._ghostOn) {
+    _ghostHullRestore(mesh);
+  }
+}
 // swap the hull materials of the player's mesh for ghost clones (idempotent per mesh) ; the
 // running-light orbs, plumes, frame strips and anything already transparent (the canopy) stay
 function _ghostHullApply(mesh) {
@@ -54881,7 +54915,7 @@ function _ghostHullApply(mesh) {
     if (o.userData && (o.userData.isPlume || o.userData.isRunningLight || o.userData._cockpitFrame)) return;
     const arr = Array.isArray(o.material);
     const ms = arr ? o.material : [o.material];
-    const out = ms.map(m => (!m || m.transparent || m.name === 'canopy_glass') ? m : _addGhostHull(m.clone(), K));
+    const out = ms.map(m => !m ? m : (m.name === 'canopy_glass' ? _addGhostHull(m.clone(), K, true) : (m.transparent ? m : _addGhostHull(m.clone(), K))));
     if (out.some((m, i) => m !== ms[i])) { o.userData._ghostOrig = o.material; o.material = arr ? out : out[0]; }
   });
 }
@@ -55063,7 +55097,19 @@ function _lssApplyShipRig(dt) {
         if (!player.mesh.visible) player.mesh.visible = true;
         player.mesh.updateMatrixWorld(true);
         _eye.getWorldPosition(_cpEyeW);
-        camera.position.copy(_cpEyeW);
+        // (v37.65) live seat nudge, in the SHIP's own axes and game units (a corvette is ~100 long):
+        // window.__cockpit.eye = { fwd: 12, up: -3, right: 0 }. The pipeline puts the eye at the hull
+        // centre ; this is how the owner dials the seat in from the seat, before it is baked.
+        {
+          const _E = window.__cockpit && window.__cockpit.eye;
+          if (_E && (_E.fwd || _E.up || _E.right)) {
+            _cpEyeOff.set(-(_E.fwd || 0), (_E.up || 0), -(_E.right || 0));   // model space: fwd -X, up +Y, right -Z
+            _eye.getWorldQuaternion(_cpEyeQ);
+            camera.position.copy(_cpEyeW).add(_cpEyeOff.applyQuaternion(_cpEyeQ));
+          } else {
+            camera.position.copy(_cpEyeW);
+          }
+        }
         if (!game._cockpit3dLive) {
           game._cockpit3dLive = true;
           try { document.body.classList.add('lss-cockpit3d'); } catch (_) {}
@@ -55105,9 +55151,6 @@ function _lssApplyShipRig(dt) {
         }
         if (game._cockpitFrameObjs) for (const _fo of game._cockpitFrameObjs) if (!_fo.visible) _fo.visible = true;
         try { const _rl = player.mesh && player.mesh.userData && player.mesh.userData.runningLight; if (_rl && _rl.visible) _rl.visible = false; } catch (_) {}
-        // (v37.61) ghost hull from the seat (see _addGhostHull) ; one shared clock for the flicker
-        _ghostHullTimeU.value += (dt || 0.016);
-        try { if (_ghostHullKnobs().on) _ghostHullApply(player.mesh); else _ghostHullRestore(player.mesh); } catch (_) {}
         // (v37.37) COCKPIT LIGHT RIG. The interior faces the pilot, never the
         // sun, so under the scene's three directionals + weak hemi it read as
         // black shards. Two point lights ride the eye while the cockpit is live:

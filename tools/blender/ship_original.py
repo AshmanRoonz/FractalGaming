@@ -48,6 +48,7 @@ ORIG_DIR = os.path.join(REPO, opt('--orig', 'LSS/ships_original'))   # --orig as
 FROZEN_DIR = os.path.join(REPO, 'assets_base', 'ships')
 REPORT_DIR = os.path.join(REPO, 'tools', 'blender', 'reports', 'original')
 os.makedirs(REPORT_DIR, exist_ok=True)
+OUT_DIR = os.path.join(REPO, opt('--out', 'assets_src/ships'))   # (v37.63) --out assets_src/ships_orig for the original-hull A/B set
 TARGET_TRIS = int(opt('--target', '150000'))   # whole-hull triangle budget after decimation
 NEAR_R = 0.35          # of L: shells within this radius of the eye decimate lightly
 NEAR_RATIO = 0.5
@@ -250,10 +251,10 @@ def load_marks(ship):
             # points near the bottom drop well below the level so the polygon covers it ; the
             # horizontal cut and the z >= level test then draw the lower edge
             pts = [Vector((q.x, q.y, (level_z - 0.5 * zr) if q.z < level_z + 0.35 * zr else q.z)) for q in pts]
-        fills.append({'cam': cam, 'points': pts, 'erase': bool(op.get('erase')), 'level_z': level_z})
+        fills.append({'cam': cam, 'points': pts, 'erase': bool(op.get('erase')), 'level_z': level_z, 'mirrored': bool(mirror)})
         if mirror:
             mv = lambda v: Vector([(-v[i] if i == ax else v[i]) for i in range(3)])
-            fills.append({'cam': mv(cam), 'points': [mv(q) for q in pts], 'erase': bool(op.get('erase')), 'level_z': level_z})
+            fills.append({'cam': mv(cam), 'points': [mv(q) for q in pts], 'erase': bool(op.get('erase')), 'level_z': level_z, 'mirrored': True})
     return {'centroids': cen_b, 'eye': eye, 'tris': j.get('tris'), 'path': path, 'fills': fills, 'markers': markers}
 
 
@@ -600,6 +601,14 @@ def process(ship):
     glass_cand = None
     if marks is not None and marks.get('fills'):
         glass_cut, glass_cand = replay_fills(me, marks['fills'], L, rep)     # cuts the mesh: everything below reads the cut mesh
+        # (v37.63) a MIRRORED outline covers the far half of the pane from the mirrored camera, where
+        # it is the NEAR half and the primary rule cuts it directly. The hidden-behind-glass rule is
+        # then redundant, and what it actually adopted was the hull just beyond the far rim - the
+        # ground the bubble occludes from the drawing camera (owner, Vortex: "that cutout on its hull
+        # under the windows again", a jagged tongue below the rim on the flanks). Off for mirrored fills.
+        if any(f_.get('mirrored') for f_ in marks['fills']):
+            glass_cand = None
+            rep['glass']['hidden_by_glass'] = 'off (mirrored outline covers the far half)'
     flab = np.empty(len(me.polygons), np.int32)
     me.attributes['shell'].data.foreach_get('value', flab)
     me.attributes.remove(me.attributes['shell'])

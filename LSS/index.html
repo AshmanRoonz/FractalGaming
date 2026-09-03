@@ -4167,12 +4167,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.61';
+const LSS_BUILD = '37.65';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '37.61';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '37.65';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -17011,6 +17011,7 @@ function _lssHubDirectTonemap() {
 function renderFrame() {
   try { _lssHubDirectTonemap(); } catch (_) {}
   try { if (typeof _shipLightsFrame === 'function') _shipLightsFrame(); } catch (_) {}
+  try { if (typeof _ghostHullSync === 'function') _ghostHullSync(); } catch (_) {}
   if (renderer.xr.isPresenting) {
     if (!renderFrame._xrLogged) {
       renderFrame._xrLogged = true;
@@ -41803,6 +41804,7 @@ function _lssStartSpectatorCinematic() {
   _cinematic.swayZ = sideZ;
   _cinematic.startMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   _cinematic.active = true;
+  try { _ghostHullRestore(player && player.mesh); } catch (_) {}   // (v37.64) the lineup is an EXTERNAL view: painted hull
   _cinematic.after = null;
 
   try {
@@ -42196,6 +42198,8 @@ function updatePlayerMovement(dt) {
   _lssApplyShipRig(dt);
 }
 const _cpEyeW = new THREE.Vector3();
+const _cpEyeOff = new THREE.Vector3();
+const _cpEyeQ = new THREE.Quaternion();
 const _cpFwd = new THREE.Vector3();
 const _cpUp = new THREE.Vector3();
 function _lssCockpitOff(dt) {
@@ -42241,16 +42245,18 @@ function _ghostHullKnobs() {
     rim: (typeof G.rim === 'number') ? G.rim : 0.62,
     mix: (typeof G.mix === 'number') ? G.mix : 0.35,
     flicker: (typeof G.flicker === 'number') ? G.flicker : 1,
+    glassCore: (typeof G.glassCore === 'number') ? G.glassCore : 0.10,
+    glassRim: (typeof G.glassRim === 'number') ? G.glassRim : 0.30,
     tint: _ghostHullTint()
   };
 }
-function _addGhostHull(mat, K) {
+function _addGhostHull(mat, K, isGlass) {
   mat.transparent = true;
   mat.depthWrite = false;      // x-ray layering: the far wall glows through the near one
   mat.side = THREE.DoubleSide;
   const U = {
     uGhTint: { value: new THREE.Color(K.tint) }, uGhTime: _ghostHullTimeU,
-    uGhCore: { value: K.core }, uGhRim: { value: K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }
+    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }
   };
   mat.userData._ghostU = U;
   mat.onBeforeCompile = (shader) => {
@@ -42277,6 +42283,25 @@ function _addGhostHull(mat, K) {
   mat.needsUpdate = true;
   return mat;
 }
+function _ghostSeatWanted() {
+  if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
+  if (game.thirdPerson || !game._cockpit3dLive) return false;
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
+  return _ghostHullKnobs().on;
+}
+function _ghostHullSync() {
+  const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
+  if (!mesh) return;
+  if (_ghostSeatWanted()) {
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    const prev = _ghostHullSync._t || now;
+    _ghostHullSync._t = now;
+    _ghostHullTimeU.value += Math.min(0.1, (now - prev) / 1000);
+    _ghostHullApply(mesh);
+  } else if (mesh.userData && mesh.userData._ghostOn) {
+    _ghostHullRestore(mesh);
+  }
+}
 function _ghostHullApply(mesh) {
   if (!mesh || mesh.userData._ghostOn) return;
   const K = _ghostHullKnobs();
@@ -42286,7 +42311,7 @@ function _ghostHullApply(mesh) {
     if (o.userData && (o.userData.isPlume || o.userData.isRunningLight || o.userData._cockpitFrame)) return;
     const arr = Array.isArray(o.material);
     const ms = arr ? o.material : [o.material];
-    const out = ms.map(m => (!m || m.transparent || m.name === 'canopy_glass') ? m : _addGhostHull(m.clone(), K));
+    const out = ms.map(m => !m ? m : (m.name === 'canopy_glass' ? _addGhostHull(m.clone(), K, true) : (m.transparent ? m : _addGhostHull(m.clone(), K))));
     if (out.some((m, i) => m !== ms[i])) { o.userData._ghostOrig = o.material; o.material = arr ? out : out[0]; }
   });
 }
@@ -42391,7 +42416,16 @@ function _lssApplyShipRig(dt) {
         if (!player.mesh.visible) player.mesh.visible = true;
         player.mesh.updateMatrixWorld(true);
         _eye.getWorldPosition(_cpEyeW);
-        camera.position.copy(_cpEyeW);
+        {
+          const _E = window.__cockpit && window.__cockpit.eye;
+          if (_E && (_E.fwd || _E.up || _E.right)) {
+            _cpEyeOff.set(-(_E.fwd || 0), (_E.up || 0), -(_E.right || 0));   // model space: fwd -X, up +Y, right -Z
+            _eye.getWorldQuaternion(_cpEyeQ);
+            camera.position.copy(_cpEyeW).add(_cpEyeOff.applyQuaternion(_cpEyeQ));
+          } else {
+            camera.position.copy(_cpEyeW);
+          }
+        }
         if (!game._cockpit3dLive) {
           game._cockpit3dLive = true;
           try { document.body.classList.add('lss-cockpit3d'); } catch (_) {}
@@ -42419,8 +42453,6 @@ function _lssApplyShipRig(dt) {
         }
         if (game._cockpitFrameObjs) for (const _fo of game._cockpitFrameObjs) if (!_fo.visible) _fo.visible = true;
         try { const _rl = player.mesh && player.mesh.userData && player.mesh.userData.runningLight; if (_rl && _rl.visible) _rl.visible = false; } catch (_) {}
-        _ghostHullTimeU.value += (dt || 0.016);
-        try { if (_ghostHullKnobs().on) _ghostHullApply(player.mesh); else _ghostHullRestore(player.mesh); } catch (_) {}
         {
           const _lr = game._cockpitLights || (game._cockpitLights = _lssCockpitLights());
           if (_lr) {

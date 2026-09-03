@@ -152,10 +152,9 @@ const DEAD = new Set([
 //   e.g. 'ships/pyro.glb': { simplify: 0.35 },
 //        'objects/hoard/disco.glb': { skip: true },
 const OVERRIDES = {
-  // (v37.24) The seven ship hulls in assets_src/ are written by
-  // tools/blender/ship_cleanup.py (and later the cockpit script) FROM the
-  // v36.29 meshopt-simplified hulls — the June originals are not on disk any
-  // more. Running simplify(0.5) on them again would decimate twice
+  // (v37.64) The seven ship hulls in assets_src/ are written by
+  // tools/blender/ship_plain.py: the owner's ORIGINAL hi-poly exports in
+  // LSS/ships_original, decimated to ~60k triangles with their own texture kept. Running simplify(0.5) on them again would decimate twice
   // (~58k -> ~29k tris) and bring back the surface wobble the 0.5 pass was
   // tuned to avoid. simplify: 1.0 skips the simplifier ; weld + quantize still
   // run, which is what recovers the byte size the float32 Blender export lost.

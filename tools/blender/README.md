@@ -485,3 +485,75 @@ monsters' `_addSpectralGhost` treatment onto the player's hull materials while t
 live (abs(N.V) fresnel so the inner skin reads like the outer, canopy glass untouched, restored on
 leaving the seat). Knobs `window.__cockpit.ghost = { on, core 0.30, rim 0.62, mix 0.35, tint
 0x8ad8ff, flicker 1 }` + `__ghostHullRefresh()` to re-apply after a change.
+
+### v37.62 — the glass is a TRANSLUCENT ZONE, not a hole (game side)
+
+Owner: "on all the models, let's use the glass cut out to define a more translucent area, instead
+of cutting it fully out". Outside: `_addCanopyPane` gives the canopy_glass material a body
+(opacity 0.62 over the GLB's 0.35) plus a fresnel rim, knobs `window.__canopy = { opacity, rim,
+tint }`. Seat: the glass joins the ghost shell at a lower alpha (`__cockpit.ghost.glassCore 0.10 /
+glassRim 0.30`). The ghost shell is restored whenever the chase view is up (warmup frames run
+first-person, so a guard at the top of `_lssApplyShipRig` puts the painted hull back).
+
+### v37.63 — the far-half rule is OFF for mirrored outlines
+
+Owner: "vortex has that cutout on its hull under the windows again". A probe from the eye with
+the glass painted green (`eye_probe.py`, session scratchpad) showed a jagged tongue of glass
+below the canopy rim on the flanks: the hull the bubble occludes from the drawing camera, which
+the hidden-behind-glass rule adopted (exterior, escaping, aligned — none of the earlier filters
+could reject it). With a MIRRORED outline the far half of the pane is the near half of the
+mirrored pass and the primary rule cuts it directly, so the rule is redundant: `load_marks` now
+tags fills `mirrored` and `replay_fills`' candidates are dropped when any fill is. Vortex glass
+2991 -> 2491 faces, the pane's edges are the owner's straight lines only.
+
+### v37.63 — original-hull A/B set
+
+Owner: "we might have to start over with the original glbs". `ship_original.py --orig
+LSS/ships_original --out assets_src/ships_orig` cuts the same outlines into the ORIGINAL hi-poly
+exports (decimated to the 150k budget, panel soup and all) ; `node tools/compress_glb.mjs --only
+ships_orig` -> `LSS/ships_orig/`. In the game `?hull=orig` (or localStorage lss_hull_set = 'orig')
+loads that set instead of the remeshed one — a reload switches, the model cache is per boot.
+
+## v37.64-65 — START OVER FROM THE ORIGINALS, NO GLASS (`ship_plain.py`)
+
+Owner: "i don't think we need the glb models with the cutout, let's start over and use the
+ships_original models, let's shrink the file size down / we won't use the glass cutout data at all
+/ let's do this for all the ships". The remesh + bake + glass-cut chain is retired (both scripts
+stay for reference) and replaced by ONE short stage:
+
+    blender --background --python tools/blender/ship_plain.py -- [--target 60000] [--render]
+    node tools/compress_glb.mjs --only ships          # -> LSS/ships, then bump the stamps
+
+`LSS/ships_original/<Ship>.glb` -> weld exact duplicates -> planar 5 deg pre-pass + 2-pass collapse
+to 60k triangles with UV seams protected (the original texture is KEPT, nothing is re-baked) ->
+validate -> smooth with edges over 32 deg split -> export with the marker nodes. 606k-1.0M tris in,
+60k out, and at that budget the hull is indistinguishable from the original at every distance
+(reports/plain/_vortex_plain.png). Shipped: **21.1 MB for the fleet, down from 46.1 MB** (2.6-3.7 MB
+a ship, was 5.4-7.6). No glass material, no cuts, no interior, no marks JSON.
+
+Two traps, both fatal and silent (Blender exits 127 with no traceback):
+  * the seam-protected decimation leaves a mesh datablock `bmesh.from_mesh()` CANNOT read - drop the
+    vertex groups it made and rebuild the datablock with `bpy.data.meshes.new_from_object()` first ;
+  * the 4.1 edit-mode shading operators (`edges_select_sharp` / `mark_sharp`) and an applied
+    EDGE_SPLIT modifier crash on these hulls - split the sharp edges in bmesh instead.
+
+### The seat
+
+The old `cockpit1` markers came from the simplified hulls: on five of the seven originals they sit
+ON the outer skin with nothing above them, which is why the seat view had a floor and no ceiling
+(owner: "it looks like the top half the ship is missing in ghost view" -> "maybe it's just where the
+cockpit position is placed"). The eye is now the hull's EXACT CENTRE (owner: "let's try placing the
+cockpit location in the exact middle of each ship") - enclosed on all six sides on every ship, so
+the ghost shell wraps the pilot. Nudge it live from the seat with
+`window.__cockpit.eye = { fwd, up, right }` (game units, a corvette is ~100 long), or bake an offset
+per ship in `tools/blender/marks/<ship>_eye.json` `{"offset": [fwd, right, up]}` (hull lengths).
+
+### The ghost is a seat effect only
+
+Owner: "it glitched on endless and the cinematic showed the external view as the ghost (it should
+only be internal view looking out as ghost)". The pre-round cinematic flies an EXTERNAL camera while
+the game is still in first person, and the ship rig does not run on every one of those frames, so an
+apply from an earlier frame survived into a view that shows the hull from outside. The gate moved to
+the RENDER side: `_ghostHullSync()` runs at the top of `renderFrame`, after every camera is final and
+before any path draws, and `_ghostSeatWanted()` requires the seat camera (cockpit live, not third
+person, no cinematic). The cinematic also strips the shell the moment it takes the camera.
