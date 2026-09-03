@@ -4251,7 +4251,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.97';
+const LSS_BUILD = '37.98';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -60724,6 +60724,35 @@ const SONAR_PULSE_MAX_RADIUS = 3000;
 // over time." Burns everything currently lit by a pulse. Ticked once per
 // frame from the main loop; no per-frame allocation, and it self-gates so it
 // costs one predicate on every other ship.
+// (v37.98) Locks are keyed by entity id and only cleared when a Bot DIES. The city's freighters
+// never die - they cycle through their schedule - so a lock stamped on one outlived the ship that
+// earned it and came back on whatever later held that id. Sweep the table against the live
+// candidates once a second; cheap, and it is the only thing that bounds its growth.
+function _sweepTrackerLocks() {
+  const L = player.trackerLocks;
+  if (!L) return;
+  let n = 0;
+  for (const k in L) { n++; if (n > 0) break; }
+  if (!n) return;
+  const live = _sweepTrackerLocks._s || (_sweepTrackerLocks._s = new Set());
+  live.clear();
+  try {
+    for (const e of game.entities) if (e && e.alive && e.id != null) live.add(String(e.id));
+    if (game.monsters) for (const m of game.monsters) if (m && m.alive && m.id != null) live.add(String(m.id));
+  } catch (_) { return; }
+  for (const k in L) {
+    if (!live.has(String(k))) {
+      delete L[k];
+      if (player.trackerLockedTarget && String(player.trackerLockedTarget.id) === String(k)) {
+        player.trackerLockedTarget = null;
+      }
+    }
+  }
+  if (player.trackerLockedTarget && (!player.trackerLockedTarget.alive ||
+      !(player.trackerLocks[player.trackerLockedTarget.id] >= 3))) {
+    player.trackerLockedTarget = null;
+  }
+}
 function _tickTrackerSonarDOT(dt) {
   if (typeof player === 'undefined' || !player) return;
   if (player.loadoutKey !== 'TRACKER') return;
@@ -66503,16 +66532,36 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
     }
     // (v35.96) Lock rings draw over MONSTERS too: candidates are enemy ships
     // plus alive leviathans carrying a lock id — same rings, same lock data.
+    // (v37.98) how many lock rings the HUD draws at once - window.__lockRings tunes it
+    const _LOCK_RING_MAX = (typeof window !== 'undefined' && window.__lockRings != null) ? window.__lockRings : 6;
     const _lockCands = (_hudSharedTail._c = _hudSharedTail._c || []);
     _lockCands.length = 0;
+    // (v37.98) Only things that are actually THERE. City traffic sits in game.entities the whole
+    // time but is drawn for part of its schedule only; while it is away, alive stays true and
+    // position stays at its last stop, so an un-filtered list painted lock rings over empty sky.
+    // _cloaked is the same suppression the enemy callouts use.
+    const _lockShown = (o) => !!o && o.alive && !o._cloaked && (!o.mesh || o.mesh.visible);
     for (const bot of game.entities) {
-      if (!bot.alive || bot.team === player.team) continue;
+      if (bot.team === player.team || !_lockShown(bot)) continue;
+      if (!(player.trackerLocks[bot.id] > 0)) continue;
       _lockCands.push(bot);
     }
     if (game.monsters) {
       for (const mon of game.monsters) {
-        if (mon.alive && mon.id != null) _lockCands.push(mon);
+        if (mon.id == null || !_lockShown(mon)) continue;
+        if (!(player.trackerLocks[mon.id] > 0)) continue;
+        _lockCands.push(mon);
       }
+    }
+    // (v37.98) ...and only the ones worth reading. A pulse over the city can lock a dozen hulls at
+    // once, and each ring is three arcs, eight ticks and a label. Full locks first, then nearest.
+    if (_lockCands.length > _LOCK_RING_MAX) {
+      _lockCands.sort((a, b) => {
+        const fa = (player.trackerLocks[a.id] >= 3) ? 0 : 1, fb = (player.trackerLocks[b.id] >= 3) ? 0 : 1;
+        if (fa !== fb) return fa - fb;
+        return a.position.distanceToSquared(player.position) - b.position.distanceToSquared(player.position);
+      });
+      _lockCands.length = _LOCK_RING_MAX;
     }
     for (const bot of _lockCands) {
       const locks = player.trackerLocks[bot.id] || 0;
@@ -82371,6 +82420,10 @@ function gameLoop(timestamp) {
   // (v36.68) TRACKER 17 Signal Strength: burn sonar-lit targets. Self-gates
   // on ship + rank, so it is one predicate for everyone else.
   if (typeof _tickTrackerSonarDOT === 'function') { try { _tickTrackerSonarDOT(dt); } catch (_) {} }
+  if (typeof _sweepTrackerLocks === 'function' && player && player.loadoutKey === 'TRACKER') {
+    _sweepTrackerLocks._t = (_sweepTrackerLocks._t || 0) - (dt || 0.016);
+    if (_sweepTrackerLocks._t <= 0) { _sweepTrackerLocks._t = 1.0; try { _sweepTrackerLocks(); } catch (_) {} }
+  }
   __pmark('dots');
   tickScanlineTexture();
   tickEnergyShields(dt);

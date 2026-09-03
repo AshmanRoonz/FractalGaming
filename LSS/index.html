@@ -4177,7 +4177,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.97';
+const LSS_BUILD = '37.98';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -46702,6 +46702,31 @@ const SONAR_PULSE_DURATION = 1.2;
 
 
 const SONAR_PULSE_MAX_RADIUS = 3000;
+function _sweepTrackerLocks() {
+  const L = player.trackerLocks;
+  if (!L) return;
+  let n = 0;
+  for (const k in L) { n++; if (n > 0) break; }
+  if (!n) return;
+  const live = _sweepTrackerLocks._s || (_sweepTrackerLocks._s = new Set());
+  live.clear();
+  try {
+    for (const e of game.entities) if (e && e.alive && e.id != null) live.add(String(e.id));
+    if (game.monsters) for (const m of game.monsters) if (m && m.alive && m.id != null) live.add(String(m.id));
+  } catch (_) { return; }
+  for (const k in L) {
+    if (!live.has(String(k))) {
+      delete L[k];
+      if (player.trackerLockedTarget && String(player.trackerLockedTarget.id) === String(k)) {
+        player.trackerLockedTarget = null;
+      }
+    }
+  }
+  if (player.trackerLockedTarget && (!player.trackerLockedTarget.alive ||
+      !(player.trackerLocks[player.trackerLockedTarget.id] >= 3))) {
+    player.trackerLockedTarget = null;
+  }
+}
 function _tickTrackerSonarDOT(dt) {
   if (typeof player === 'undefined' || !player) return;
   if (player.loadoutKey !== 'TRACKER') return;
@@ -50731,16 +50756,29 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
       if (_vrDeg > 0.001) _ringK = Math.max(1, Math.min(3, 90 / _vrDeg));
       _ringA = 0.85;
     }
+    const _LOCK_RING_MAX = (typeof window !== 'undefined' && window.__lockRings != null) ? window.__lockRings : 6;
     const _lockCands = (_hudSharedTail._c = _hudSharedTail._c || []);
     _lockCands.length = 0;
+    const _lockShown = (o) => !!o && o.alive && !o._cloaked && (!o.mesh || o.mesh.visible);
     for (const bot of game.entities) {
-      if (!bot.alive || bot.team === player.team) continue;
+      if (bot.team === player.team || !_lockShown(bot)) continue;
+      if (!(player.trackerLocks[bot.id] > 0)) continue;
       _lockCands.push(bot);
     }
     if (game.monsters) {
       for (const mon of game.monsters) {
-        if (mon.alive && mon.id != null) _lockCands.push(mon);
+        if (mon.id == null || !_lockShown(mon)) continue;
+        if (!(player.trackerLocks[mon.id] > 0)) continue;
+        _lockCands.push(mon);
       }
+    }
+    if (_lockCands.length > _LOCK_RING_MAX) {
+      _lockCands.sort((a, b) => {
+        const fa = (player.trackerLocks[a.id] >= 3) ? 0 : 1, fb = (player.trackerLocks[b.id] >= 3) ? 0 : 1;
+        if (fa !== fb) return fa - fb;
+        return a.position.distanceToSquared(player.position) - b.position.distanceToSquared(player.position);
+      });
+      _lockCands.length = _LOCK_RING_MAX;
     }
     for (const bot of _lockCands) {
       const locks = player.trackerLocks[bot.id] || 0;
@@ -63474,6 +63512,10 @@ function gameLoop(timestamp) {
   if (_vrThrottleTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   if (typeof _arenaCloudTick === 'function') { try { _arenaCloudTick(dt); } catch (_) {} }
   if (typeof _tickTrackerSonarDOT === 'function') { try { _tickTrackerSonarDOT(dt); } catch (_) {} }
+  if (typeof _sweepTrackerLocks === 'function' && player && player.loadoutKey === 'TRACKER') {
+    _sweepTrackerLocks._t = (_sweepTrackerLocks._t || 0) - (dt || 0.016);
+    if (_sweepTrackerLocks._t <= 0) { _sweepTrackerLocks._t = 1.0; try { _sweepTrackerLocks(); } catch (_) {} }
+  }
   __pmark('dots');
   tickScanlineTexture();
   tickEnergyShields(dt);
