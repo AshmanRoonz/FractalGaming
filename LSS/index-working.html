@@ -3614,6 +3614,10 @@ body.vr-active #camp-video { display: none !important; }
   white-space: nowrap; text-align: center; opacity: 0; transition: opacity 0.25s ease;
 }
 #ss-mode-label.on { opacity: 1; }
+/* (v38.03) the picker keeps its element through the launch with the chrome stripped off it
+   (.lss-launching), so the mode line has to be stripped with the rest or it hangs over the
+   cinematic */
+#ship-select.lss-launching #ss-mode-label { display: none !important; }
 #ss-mode-label small {
   display: block; font-size: 8px; letter-spacing: 3px; font-weight: normal;
   color: rgba(255,255,255,0.45); margin-top: 3px;
@@ -4268,7 +4272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.02';
+const LSS_BUILD = '38.03';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -29807,18 +29811,35 @@ function _carrierClear(keepSound) {
 // nose in a ridge while its centre is over the valley.
 const _crP = new THREE.Vector3();
 const _CR_DOWN = new THREE.Vector3(0, -1, 0);
+const _crS = new THREE.Vector3();
 function _carrierRide(dt, snap) {
   const o = _carrier.obj;
   if (!o) return;
   let gy = null;
   try {
-    const T = game.sandwichTerrain;   // eslint-disable-line
-    if (T && typeof _stGroundYCarved === 'function') {
-      const half = (_carrier.half ? _carrier.half.x : 680) * 0.92;
-      for (let i = -1; i <= 1; i++) {
-        _crP.copy(o.position).addScaledVector(_carrier.dir, half * i);
-        const h = _stGroundYCarved(_crP.x, _crP.z, T);
-        if (typeof h === 'number' && isFinite(h) && (gy == null || h > gy)) gy = h;
+    const T = game.sandwichTerrain;
+    // (v38.03) the whole FOOTPRINT, not a line down the middle: 1367 long by 816 wide, and a ridge
+    // beside the hull was invisible to a three-point sample along its length.
+    const halfL = (_carrier.half ? _carrier.half.x : 680) * 0.92;
+    const halfW = (_carrier.half ? _carrier.half.z : 400) * 0.92;
+    _crS.set(-_carrier.dir.z, 0, _carrier.dir.x);      // across the beam
+    for (let i = -1; i <= 1; i++) {
+      for (let j = -1; j <= 1; j++) {
+        _crP.copy(o.position).addScaledVector(_carrier.dir, halfL * i).addScaledVector(_crS, halfW * j);
+        let h = null;
+        if (T && typeof _stGroundYCarved === 'function') {
+          const v = _stGroundYCarved(_crP.x, _crP.z, T);
+          if (typeof v === 'number' && isFinite(v)) h = v;
+        }
+        // the terrain sampler has nothing for a spot whose chunk is not built yet; the level
+        // raycast still knows the ground is there, and a hull half-buried in a hill is worse
+        // than three extra rays at spawn
+        if (h == null && typeof raycastLevel === 'function') {
+          _crP.y = o.position.y + 3000;
+          const d = raycastLevel(_crP, _CR_DOWN, 12000, true, true);
+          if (typeof d === 'number' && d < 12000) h = _crP.y - d;
+        }
+        if (h != null && (gy == null || h > gy)) gy = h;
       }
     }
   } catch (_) {}
@@ -30581,7 +30602,9 @@ function _cyberCinematic(C) {
   const P = _carrier.obj.position;
   const L = _carrier.size ? _carrier.size.x : 1367;
   const CN = window.__cine || (window.__cine = {});
-  _cinematic.orbitR = L * ((CN.carrierR != null) ? CN.carrierR : 1.15);
+  // (v38.03) closer - 1.15 hull lengths framed the whole ship and lost the three pilots standing
+  // on it, which is what the shot is actually about
+  _cinematic.orbitR = L * ((CN.carrierR != null) ? CN.carrierR : 0.78);
   _cinematic.orbitY = P.y + L * 0.20;
   _cinematic.orbitCX = P.x;
   _cinematic.orbitCZ = P.z;
@@ -30598,7 +30621,37 @@ function _cyberCinematic(C) {
   _cinematic.active = true;
   try { _lssEnsureCinematicStyles(); document.body.classList.add('lss-cinematic-active'); } catch (_) {}
   try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
+  _cyberCineLightOn(P, L);
   return true;
+}
+// (v38.03) THE LINEUP'S OWN LIGHT. v37.94 pinned the zone morph to the city so the biome would
+// stop sliding mid-match - and the city's look is a dark dusk, so the launch ring is now lit like
+// midnight downtown and the shot went black (owner: "the cinematic is too dark"). Rather than
+// unpin it and bring the sliding back, the shot carries its own key and fill, torn down with it.
+function _cyberCineLightOn(P, L) {
+  try {
+    _cyberCineLightOff();
+    const CN = window.__cine || (window.__cine = {});
+    const k = (CN.fill != null) ? CN.fill : 1.0;
+    const key = new THREE.DirectionalLight(0xfff2e0, 2.6 * k);
+    key.position.set(P.x + L * 0.9, P.y + L * 0.8, P.z + L * 0.6);
+    key.target.position.copy(P);
+    scene.add(key); scene.add(key.target);
+    const rim = new THREE.DirectionalLight(0x9fd8ff, 1.5 * k);
+    rim.position.set(P.x - L * 0.8, P.y + L * 0.35, P.z - L * 0.9);
+    rim.target.position.copy(P);
+    scene.add(rim); scene.add(rim.target);
+    const amb = new THREE.HemisphereLight(0xbfd4ff, 0x2a2438, 1.1 * k);
+    amb.position.copy(P);
+    scene.add(amb);
+    _carrier._cineLights = [key, key.target, rim, rim.target, amb];
+  } catch (_) { _carrier._cineLights = null; }
+}
+function _cyberCineLightOff() {
+  const A = _carrier._cineLights;
+  _carrier._cineLights = null;
+  if (!A) return;
+  for (const o of A) { try { scene.remove(o); if (o.dispose) o.dispose(); } catch (_) {} }
 }
 // (v37.85) Building the match is its own step so it can run from the CINEMATIC hook - which fires
 // before the countdown - instead of the first 'playing' frame, which is after it. Idempotent: the
@@ -30655,6 +30708,9 @@ function _cyberLaunchWing(C) {
 }
 function _cyberDeckPlace(C) {
   try { _cyberLineupTrack(C); } catch (_) {}
+  if (_carrier._cineLights && !(typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) {
+    try { _cyberCineLightOff(); } catch (_) {}
+  }
   if (!C || !C.started || player.team !== C.teamA) return false;
   try {
     const d = _carrierDeckSpot(0);
@@ -30725,6 +30781,9 @@ function _cyberFrame(dt) {
     // teleport back to the carrier
     if (C.started) { _cyberDeckPlace(C); try { _cyberHoldWing(C); } catch (_) {} }
     return;
+  }
+  if (_carrier._cineLights && !(typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) {
+    try { _cyberCineLightOff(); } catch (_) {}
   }
   if (!C._wingLaunched && C.started) {
     C._wingLaunched = true;
@@ -69938,7 +69997,21 @@ function showLoadingOverlay(mainText, subText) {
   ov.classList.add('active');
   _lssAudioHoldEngage();          // (v36.24) no music / ship audio behind the loading screen
 }
+let _lssCurtainTries = 0;
 function hideLoadingOverlay() {
+  // (v38.03) CYBERPUNK CITY: hold the curtain until the mode has built itself. It used to lift a
+  // beat before the lineup started, and that beat is the free-flight camera sitting at the launch
+  // ring with nothing else made yet - your ship, alone, in what looks like the wrong place. The
+  // retry is bounded so nothing can ever be trapped behind it.
+  try {
+    if (game && game._cyber && game._cyber.armed && !game._cyber.started &&
+        game.state !== 'playing' && _lssCurtainTries < 240) {
+      _lssCurtainTries++;
+      setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
+      return;
+    }
+  } catch (_) {}
+  _lssCurtainTries = 0;
   const ov = document.getElementById('lss-loading-overlay');
   if (ov) ov.classList.remove('active');
   _lssAudioHoldRelease();         // (v36.24)
