@@ -375,3 +375,16 @@ Technically: the editor makes the hull non-indexed, tints marked triangles throu
 `onBeforeCompile`, picks with a GPU id pass (triangle index encoded as colour, one pixel read
 back) so a million-triangle hull paints at full speed, and brushes by centroid distance on a
 uniform grid.
+
+### The originals carry the markers now (v37.51)
+
+Owner: *"can you transfer the other saved points to the ships_original glb files? thrusters, guns
+and cockpit?"* — `node tools/transfer_markers.mjs [ship...]` copies the gun* / thruster* /
+cockpit* nodes from `assets_base/ships/<ship>.glb` (the frozen v37.23 hulls, same scene space)
+into `LSS/ships_original/<Ship>.glb` as empty nodes at the scene root, meshes and textures
+untouched (written binary in memory: a `.tmp` name once made NodeIO emit a JSON stub with side
+files — the untouched copies in `assets_base/ships_original_raw/` restored the folder).
+`tools/blender/marker_check.py` confirms every marker imports at the frozen position (offset 0).
+`ship_original.py` reads markers from the original's own nodes first (`markers_source: original`),
+then the frozen hull ; markers placed in the editor (the marks JSON) override both. The editor
+opens the originals with the markers detected, so they can be adjusted there.

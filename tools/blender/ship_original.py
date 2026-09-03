@@ -214,6 +214,10 @@ def load_marks(ship):
         e = mk['cockpit'][0]
         eye = Vector((e[0], -e[2], e[1]))
     g2b = lambda q: Vector((q[0], -q[2], q[1]))
+    markers = {}
+    for kind in ('gun', 'thruster', 'cockpit'):
+        if mk.get(kind):
+            markers[kind] = [g2b(q) for q in mk[kind]]
     fills = []
     for op in j.get('fills', []) or []:
         pts = [g2b(q) for q in op.get('points', [])]
@@ -227,7 +231,7 @@ def load_marks(ship):
             ax = {'z': 1, 'x': 0, 'y': 2}.get(mirror, 1)
             mv = lambda v: Vector([(-v[i] if i == ax else v[i]) for i in range(3)])
             fills.append({'cam': mv(cam), 'points': [mv(q) for q in pts], 'erase': bool(op.get('erase'))})
-    return {'centroids': cen_b, 'eye': eye, 'tris': j.get('tris'), 'path': path, 'fills': fills}
+    return {'centroids': cen_b, 'eye': eye, 'tris': j.get('tris'), 'path': path, 'fills': fills, 'markers': markers}
 
 
 def replay_fills(me, fills, L, rep):
@@ -418,7 +422,7 @@ def process(ship):
     sc = bpy.context.scene
     vl = bpy.context.view_layer
     src = os.path.join(ORIG_DIR, ship.capitalize() + '.glb')
-    meshes, _ = import_glb(src)
+    meshes, orig_empties = import_glb(src)
     hull = meshes[0]
     for o in meshes:
         mw = o.matrix_world.copy()
@@ -466,14 +470,29 @@ def process(ship):
     fwd, up, right = Vector((-1, 0, 0)), Vector((0, 0, 1)), Vector((0, 1, 0))
     frame = Matrix([[fwd.x, right.x, 0, 0], [fwd.y, right.y, 0, 0], [fwd.z, right.z, 1, 0], [0, 0, 0, 1]])
 
-    # ---------------- 2. markers from the frozen hull -------------------------------------------
-    fm, fe = import_glb(os.path.join(FROZEN_DIR, ship + '.glb'))
+    # ---------------- 2. markers: the original's own nodes (tools/transfer_markers.mjs put the
+    # owner's gun* / thruster* / cockpit* there), else the frozen hull's ---------------------------
     mk = {}
-    for e in fe:
+    for e in orig_empties:
         if any(e.name.startswith(p) for p in ('gun', 'thruster', 'cockpit')):
             mk[e.name] = e.matrix_world.translation.copy()
-    for o in fm + fe:
-        bpy.data.objects.remove(o, do_unlink=True)
+    rep['markers_source'] = 'original' if mk else 'frozen'
+    for e in orig_empties:
+        bpy.data.objects.remove(e, do_unlink=True)
+    if not mk:
+        fm, fe = import_glb(os.path.join(FROZEN_DIR, ship + '.glb'))
+        for e in fe:
+            if any(e.name.startswith(p) for p in ('gun', 'thruster', 'cockpit')):
+                mk[e.name] = e.matrix_world.translation.copy()
+        for o in fm + fe:
+            bpy.data.objects.remove(o, do_unlink=True)
+    # markers placed in the editor (marks JSON) override
+    _mj = load_marks(ship)
+    if _mj and _mj.get('markers'):
+        for kind, pts in _mj['markers'].items():
+            for k_, q in enumerate(pts):
+                mk[f'{kind}{k_ + 1}'] = Vector(q)
+        rep['markers_source'] = 'editor_json'
     markers = {}
     for name, loc in mk.items():
         e = bpy.data.objects.new(name, None)
