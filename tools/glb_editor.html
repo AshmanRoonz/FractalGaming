@@ -995,7 +995,7 @@ function paintPrepare(mesh) {
   const pickMat = new THREE.ShaderMaterial({
     vertexShader: 'attribute float fid;\nvarying float vId;\nvoid main(){ vId = fid; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
     fragmentShader: 'varying float vId;\nvoid main(){ float id = floor(vId + 0.5); float r = mod(id, 256.0); float g = mod(floor(id / 256.0), 256.0); float b = floor(id / 65536.0); gl_FragColor = vec4(r / 255.0, g / 255.0, b / 255.0, 1.0); }',
-    side: THREE.FrontSide,
+    side: mats[0].side,        // (v37.56) a double-sided hull (Syphon: 22% of its triangles wound inward) must pick on both sides
   });
   const pickMesh = new THREE.Mesh(g, pickMat);
   pickMesh.matrixAutoUpdate = false;
@@ -1003,7 +1003,8 @@ function paintPrepare(mesh) {
   pickScene.background = new THREE.Color(0xffffff);
   pickScene.add(pickMesh);
   const pickRT = new THREE.WebGLRenderTarget(1, 1, { minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter });
-  Object.assign(paint, { mesh, n, mark, cen, nrm, grid: { counts, items }, cell, gmin: bmin, gdim, markAttr, pickMesh, pickScene, pickRT });
+  Object.assign(paint, { mesh, n, mark, cen, nrm, grid: { counts, items }, cell, gmin: bmin, gdim, markAttr, pickMesh, pickScene, pickRT,
+                         doubleSided: mats[0].side === THREE.DoubleSide });
   paintUpdateInfo();
 }
 
@@ -1062,7 +1063,7 @@ function paintStroke(clientX, clientY) {
   const r = paint.radiusPct / 100 * (Math.max(...paint.gdim) * paint.cell);
   const camDirW = camera.getWorldDirection(new THREE.Vector3());
   const camDirL = camDirW.clone().applyMatrix3(new THREE.Matrix3().setFromMatrix4(paint.mesh.matrixWorld).invert()).normalize();
-  const front = document.getElementById('paint-front').checked;
+  const front = document.getElementById('paint-front').checked && !paint.doubleSided;
   const cd = [camDirL.x, camDirL.y, camDirL.z];
   let changed = paintBrushAt(c[3 * id], c[3 * id + 1], c[3 * id + 2], r, paint.erase, cd, front);
   if (document.getElementById('paint-mirror').checked) {
@@ -1309,7 +1310,7 @@ function outlineFill(erase) {
   const e = mv.elements;
   const depthOf = (t) => -(e[2] * cen[3 * t] + e[6] * cen[3 * t + 1] + e[10] * cen[3 * t + 2] + e[14]);
   const camDirL = camera.getWorldDirection(new THREE.Vector3()).applyMatrix3(new THREE.Matrix3().setFromMatrix4(paint.mesh.matrixWorld).invert()).normalize();
-  const front = document.getElementById('paint-front').checked;
+  const front = document.getElementById('paint-front').checked && !paint.doubleSided;   // inward-wound faces still show on a double-sided hull
   const ext = Math.max(...paint.gdim) * paint.cell;
   const tol = 0.015 * ext;
   const proj = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, mv);
