@@ -4241,7 +4241,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.67';
+const LSS_BUILD = '37.68';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -15673,6 +15673,86 @@ function _blasterCoreVolley(dir) {
     nodes[0].getWorldPosition(_bcvPos);
     spawnDynamicLight(_bcvPos, 0xffffff, (K.light != null) ? K.light : 4.0, 320, 0.14);
   }
+}
+// (v37.68) CHARGE SHOT GLOW. Owner: "when blaster's charged shot [charges], the weapon has to
+// start glowing as it charges". One additive orb per gun marker, PARENTED to the marker so it rides
+// the barrel through every transform (ship, faceRotY, scale, third person or the seat) for free.
+// It grows and whitens with the charge and dies the frame the charge does. The orbs are transparent,
+// so the ghost shell skips them, and renderOrder 3 keeps them above the hub water like the particles.
+// Knobs: window.__blasterCharge = { size, light, pulse }.
+const _bcgPos = new THREE.Vector3(), _bcgTmp = new THREE.Vector3(), _bcgFwd = new THREE.Vector3();
+const _bcgSpawn = [];
+const _bcgQuat = new THREE.Quaternion();
+function _blasterChargeGlow(t) {
+  const mesh = player.mesh;
+  const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
+  if (!nodes || !nodes.length) return;
+  const K = window.__blasterCharge || (window.__blasterCharge = {});
+  const hull = (player.chassis && player.chassis.hullLength) || 60;
+  const tint = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.BLASTER : 0x44eeff;
+  const col = new THREE.Color(tint).lerp(new THREE.Color(0xffffff), t * t);
+  // Build the tubes once. They live in the SCENE, not on the ship: the marker nodes carry their own
+  // export rotation, so orienting a child of one is guesswork - a world-space tube aimed down the
+  // aim vector is exact. They are transparent, so the ghost shell skips them.
+  if (!player._bcgTubes || player._bcgTubes.length !== nodes.length) {
+    if (player._bcgTubes) for (const m of player._bcgTubes) { scene.remove(m); m.material.dispose(); }
+    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.55, 1, 8, 1, true);
+    player._bcgTubes = nodes.map(() => {
+      const m = new THREE.Mesh(_blasterChargeGlow._geo, new THREE.MeshBasicMaterial({
+        color: 0xffffff, transparent: true, opacity: 0, depthWrite: false,
+        blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
+      }));
+      m.renderOrder = 3;
+      m.frustumCulled = false;
+      m.visible = false;
+      scene.add(m);
+      return m;
+    });
+  }
+  // the guns point where the ship aims
+  _bcgFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  _bcgQuat.setFromUnitVectors(_mvUp, _bcgFwd);
+  const len = hull * ((K.len != null) ? K.len : 0.16) * (0.35 + 0.65 * t);   // the hot stretch grows back down the barrel
+  // wider than the barrel on purpose: the owner wants "some glow that exceeds the physical edge"
+  const rad = hull * ((K.rad != null) ? K.rad : 0.034) * (0.5 + 0.5 * t);
+  const flick = 1 + 0.10 * Math.sin((game.time || 0) * 30) * t;
+  for (let i = 0; i < nodes.length; i++) {
+    const m = player._bcgTubes[i];
+    nodes[i].getWorldPosition(_bcgPos);
+    // centre it just BEHIND the muzzle so the glow sits on the gun, not in the air ahead of it
+    m.position.copy(_bcgPos).addScaledVector(_bcgFwd, -len * 0.42);
+    m.quaternion.copy(_bcgQuat);
+    m.scale.set(rad * flick, len, rad * flick);
+    // OVERDRIVEN colour (>1 per channel) on an additive material: that is what makes the post
+    // chain's bloom spill the glow past the barrel's silhouette, which is the whole ask.
+    m.material.color.copy(col).multiplyScalar(1 + ((K.hot != null) ? K.hot : 1.6) * t);
+    m.material.opacity = Math.min(1, 0.35 + 0.65 * t);
+    m.visible = true;
+  }
+  // plus a light per POD so the hull around the guns picks it up
+  const half = Math.max(1, Math.floor(nodes.length / 2));
+  player._bcgLightT = (player._bcgLightT || 0) - (game._dtLast || 0.016);
+  if (player._bcgLightT <= 0 && typeof spawnDynamicLight === 'function') {
+    player._bcgLightT = 0.07;
+    for (let pod = 0; pod * half < nodes.length; pod++) {
+      _bcgPos.set(0, 0, 0);
+      let n = 0;
+      for (let i = pod * half; i < Math.min(nodes.length, (pod + 1) * half); i++) {
+        nodes[i].getWorldPosition(_bcgTmp);
+        _bcgPos.add(_bcgTmp);
+        n++;
+      }
+      if (!n) continue;
+      _bcgPos.multiplyScalar(1 / n);
+      spawnDynamicLight(_bcgPos, col.getHex(), ((K.light != null) ? K.light : 5.0) * (0.2 + t * t), 130, 0.10);
+    }
+  }
+  player._bcgOn = true;
+}
+function _blasterChargeGlowOff() {
+  player._bcgOn = false;
+  if (!player._bcgTubes) return;
+  for (const m of player._bcgTubes) { m.visible = false; m.material.opacity = 0; }
 }
 function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
   if (!pos || !dir) return;
@@ -52685,6 +52765,7 @@ function commitLoadout(key) {
   player.blasterMode = 'close';
   player.gunShieldHP = 0; player.gunShieldTimer = 0;
   player.powerShotCharging = false; player.powerShotCharge = 0;
+  try { if (player._bcgOn) _blasterChargeGlowOff(); } catch (_) {}
   player.blasterSwitchTimer = 0;
   player.thermalShieldHP = player.thermalShieldMaxHP; 
   player.trapCharges = player.maxTrapCharges; 
@@ -53737,6 +53818,7 @@ function respawnPlayer() {
   player.enemyToneLockMax = 0;
   player.blasterMode = 'close';
   player.powerShotCharging = false; player.powerShotCharge = 0;
+  try { if (player._bcgOn) _blasterChargeGlowOff(); } catch (_) {}
   player.blasterSwitchTimer = 0;
   player.phaseInvuln = false;
   player.phaseInvulnTimer = 0;
@@ -58065,6 +58147,7 @@ function firePowerShot() {
   try { playSound('power_shot_release'); } catch (_) {}
   player.powerShotCharging = false;
   player.powerShotCharge = 0;
+  try { if (player._bcgOn) _blasterChargeGlowOff(); } catch (_) {}   // (v37.68) the shot has left
   player.abilityCooldowns[0] = 8; 
 }
 
@@ -60957,11 +61040,17 @@ function updateAbilities(dt) {
   // Blaster Charge Shot: charge up over 1s, then auto-fire
   if (player.powerShotCharging) {
     player.powerShotCharge = Math.min(1.0, player.powerShotCharge + dt / 1.0);
+    // (v37.68) the guns light up as it spools - before the fire check, so the last frame of the
+    // charge is the brightest one and the shot leaves at full glow
+    try { _blasterChargeGlow(player.powerShotCharge); } catch (_) {}
     if (player.powerShotCharge >= 1.0) {
       firePowerShot();
     }
+  } else if (player._bcgOn) {
+    try { _blasterChargeGlowOff(); } catch (_) {}
   }
 
+  game._dtLast = dt;   // (v37.68) last frame's dt, for effects that tick outside this function
   // Freeze core meter while core is active, and cap at 0 for maxed Syphon
   if (player.coreActive) player.coreMeter = 0;
   if (player.loadout && player.loadout.core.name === 'AI Nanobots' && player.syphonTier >= 3) player.coreMeter = 0;

@@ -610,3 +610,18 @@ in index-working.html, knobs `window.__blasterCore`).
 DEPLOY ROOT - 195 MB that `tools/deploy_cf.py` would have uploaded to the live site ; the folder had
 also been renamed by hand to "New folder"). `ship_plain.py --orig` defaults there now, and the
 deploy script excludes both old names as a guard.
+
+### v37.68 — the Blaster's guns glow while the Charge Shot spools
+
+Owner: "when he does his charged shot, the weapon has to start glowing as it charges", then
+"instead of circles, how about make those circles just brighten up the ends of the gun, so they
+don't look so circular", then "there should be some glow that exceeds the physical edge".
+
+Three passes: additive orbs at each marker (circles - rejected), point lights on the pods alone
+(invisible: the gun-pod region's mean pixel value moved 77.1 -> 77.3 across a full charge against a
+sunlit hull), and finally what shipped - a thin tube lying ALONG each barrel, world-space and aimed
+down the ship's own aim vector because the marker nodes carry their own export rotation. It is wider
+than the barrel on purpose and its colour is OVERDRIVEN past 1.0 on an additive material, which is
+what makes the post chain's bloom spill the glow past the gun's silhouette. Measured: pod mean
+88.4 -> 94.1, bright pixels 0.1% -> 1.4%. A light per pod rides along so the hull picks it up.
+Knobs: `window.__blasterCharge = { len, rad, hot, light }`.
