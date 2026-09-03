@@ -70,6 +70,17 @@ GLASS_CFG = {
     'slayer': {'sat': 0.25, 'hue_tol': 0.22},      # its pane streaks are yellow-green, not the class green (see HULL_GLOW)
 }
 HOLO_ALPHA = 0.72
+# The library's interior atlas bakes an emissive FILL of EMIS_FILL x the base tile (1.5, tuned for the
+# old enclosed tub with no light at all). Under a clear canopy the sun comes in and the cockpit light
+# rig rides the eye, so at 1.5 (x1.5 emission strength) the tub walls glowed a flat pale grey that no
+# light setting could change. Override for this chain:
+EMIS_FILL = 0.35
+# Owner (v37.42): "i dont think merging the png dashboards with the glbs is working" - the painted
+# overlay and the 3D cabin are two visual languages. No frame-art band in the model ; the
+# cockpit is fully 3D (instrument panel, glare shield, rim rail).
+FRAME_ART = False
+TUB_SHRINK = 0.92          # tub rim = this fraction of the canopy outline (polar profile of the glass)
+TUB_DEPTH = 0.42           # of Lc: tub floor below the eye (a seated pilot ; the AI pit is often the whole hull)
 
 
 def _hue_of(c):
@@ -550,49 +561,218 @@ def process(ship):
     bsdf.inputs['Emission Strength'].default_value = 1.0
     rep['hull_glow'] = {'pixels_pct': round(float(100 * (m1 > 0.5).mean()), 2)}
 
-    # ---------------- 6. floating dashboard + holo panels + seat --------------------------------
+    # ---------------- 6. the TUB: an authored cabin inside the hull ------------------------------
+    # Owner on v37.41 ("they all look so bad" - the seat view): the AI hull has no interior, only
+    # hollow overlapping panels, and the clear canopy exposed them. So: a lofted tub from the
+    # canopy outline - walls up to the lowest glass of each sector, a coaming ledge out to the
+    # glass rim, a floor - the hull's junk inside it deleted, seat / sills / consoles / bulkhead /
+    # ribs / pedals inside, MFDs on the sill fronts, the painted frame band at the eye.
     origin_local = frame.transposed() @ eye_world
     B = Builder(frame, origin_local)          # local (0, 0, 0) = the eye ; x fwd, y right, z up
     if FRAME_ART and ship in FRAME_PNG and os.path.exists(os.path.join(REPO, FRAME_PNG[ship])):
         build_frame_billboard(ship, B, Vector((0, 0, 0)), Lc, rep)
-    # holographic side panels: two tilted screens floating beside the dash, a glow bar under each
-    Bh = Builder(frame, origin_local)
+    # canopy outline as a polar profile around the canopy centre (local: x fwd = -world x)
+    gcl = cen[glass]
+    cxw = float(g_ctr.x)
+    NA = 48
+    lx = -(gcl[:, 0] - cxw)
+    ly = gcl[:, 1]
+    ang = np.arctan2(ly, lx)
+    rad = np.hypot(lx, ly)
+    zl = gcl[:, 2] - eye_z
+    bins = ((ang + np.pi) / (2 * np.pi) * NA).astype(int) % NA
+    prof = np.full(NA, np.nan)
+    z_lo_g = np.full(NA, np.nan)
+    z_hi_g = np.full(NA, np.nan)
+    for k in range(NA):
+        m_ = bins == k
+        if m_.sum() >= 3:
+            prof[k] = np.percentile(rad[m_], 90)
+            outer = m_ & (rad > 0.8 * prof[k])
+            z_lo_g[k] = np.percentile(zl[outer], 5) if outer.sum() >= 3 else np.percentile(zl[m_], 5)
+            z_hi_g[k] = np.percentile(zl[m_], 98)
+
+    def fill_circular(arr):
+        idx = np.arange(NA)
+        valid = ~np.isnan(arr)
+        if not valid.any():
+            raise RuntimeError(f'{ship}: empty canopy profile')
+        out = arr.copy()
+        for k in np.nonzero(~valid)[0]:
+            dd = np.minimum(np.abs(idx[valid] - k), NA - np.abs(idx[valid] - k))
+            out[k] = arr[valid][np.argmin(dd)]
+        return (np.roll(out, 1) + 2 * out + np.roll(out, -1)) / 4
+
+    prof_raw = fill_circular(prof)
+    z_lo_g = fill_circular(z_lo_g)
+    z_hi_g = fill_circular(z_hi_g)
+    prof_t = prof_raw * TUB_SHRINK
+    thetas = -np.pi + 2 * np.pi * (np.arange(NA) + 0.5) / NA
+    c_loc = B.to_local(Vector((cxw, 0.0, eye_z)))
+
+    def rim_pt(k, f, z):
+        return Vector((c_loc.x + f * prof_t[k] * math.cos(thetas[k]), f * prof_t[k] * math.sin(thetas[k]), z))
+
+    z_floor = max(-TUB_DEPTH * Lc, float(lo.z) + 0.03 * L - eye_z)
+    top = [rim_pt(k, 1.0, float(z_lo_g[k]) - 0.002 * L) for k in range(NA)]
+    r2 = [rim_pt(k, 0.96, min(-0.10 * Lc, top[k].z - 0.03 * Lc)) for k in range(NA)]
+    r3 = [rim_pt(k, 0.86, min(0.6 * z_floor, r2[k].z - 0.05 * Lc)) for k in range(NA)]
+    fl = [rim_pt(k, 0.72, z_floor) for k in range(NA)]
+    tub_center = Vector((c_loc.x, 0.0, 0.5 * z_floor))
+    tub_faces, vrings = B.loft([top, r2, r3, fl], region='metal', inward_center=tub_center)
+    floor_faces = B.cap(vrings[-1], region='trim', inward_center=tub_center)
+    # coaming ledge: from the wall top out past the glass rim, facing up
+    outer = [Vector((c_loc.x + 1.06 * prof_raw[k] * math.cos(thetas[k]), 1.06 * prof_raw[k] * math.sin(thetas[k]), top[k].z)) for k in range(NA)]
+    coam_faces, _ = B.loft([top, outer], region='trim', inward_center=Vector((c_loc.x, 0.0, 5.0 * Lc)), smooth=False)
+    w = float(min(prof_t[(NA * 3) // 4], prof_t[NA // 4]))     # half-width at the sides (+-90 deg)
+    rep['tub'] = {'z_floor': round(z_floor, 4), 'half_width': round(w, 4), 'rim_mean': round(float(prof_t.mean()), 4),
+                  'wall_top_z': [round(float(v), 3) for v in (z_lo_g.min(), z_lo_g.max())]}
+    # ---- furniture (local, relative to the eye)
+    sw = 0.30 * w
     for sgn in (1, -1):
-        yaw = sgn * math.radians(38)
-        r_ = 0.28 * Lc
-        c_ = Vector((r_ * math.cos(yaw), r_ * math.sin(yaw), -0.06 * Lc))
-        Bh.box(c_, (0.006 * Lc, 0.14 * Lc, 0.09 * Lc), rot=(0, math.radians(-8), yaw), region='scrB' if sgn > 0 else 'scrC')
-        Bh.box(c_ + Vector((0, 0, -0.062 * Lc)), (0.006 * Lc, 0.14 * Lc, 0.012 * Lc), rot=(0, 0, yaw), region='glow')
-    # (a readout above the centre display was tried: it floated in the sky over the nose)
-    Bh.assign_uvs(tile_len=0.30 * Wc)
-    bmesh.ops.recalc_face_normals(Bh.bm, faces=list(Bh.bm.faces))
-    hmesh = bpy.data.meshes.new('cockpit_holo')
-    Bh.bm.to_mesh(hmesh)
-    Bh.bm.free()
-    hobj = bpy.data.objects.new('cockpit_holo', hmesh)
-    sc.collection.objects.link(hobj)
-    # seat, only when the pit leaves room for it
-    seat_built = False
-    if floor_z is not None and (eye_z - floor_z) > 0.22 * Lc:
-        pan_z = -0.30 * Lc                                      # hips under the eye
-        B.box(Vector((-0.02 * Lc, 0, pan_z)), (0.30 * Lc, 0.22 * Lc, 0.05 * Lc), region='seat', bevel=0.004 * Lc)
-        B.box(Vector((-0.17 * Lc, 0, pan_z * 0.5 + 0.02 * Lc)), (0.05 * Lc, 0.22 * Lc, -pan_z - 0.06 * Lc), region='seat', bevel=0.004 * Lc)
-        B.box(Vector((-0.17 * Lc, 0, 0.07 * Lc)), (0.05 * Lc, 0.11 * Lc, 0.09 * Lc), region='seat', bevel=0.004 * Lc)
+        ys = sgn * (w - sw / 2 - 0.004 * L)
+        B.box(Vector((-0.04 * Lc, ys, -0.14 * Lc)), (0.52 * Lc, sw, 0.05 * Lc), region='metal', bevel=0.003 * Lc)   # sill
+        B.box(Vector((-0.04 * Lc, sgn * (w - sw - 0.004 * L), -0.108 * Lc)), (0.52 * Lc, 0.02 * w, 0.02 * Lc), region='trim')  # lip
+        B.box(Vector((0.10 * Lc, ys, -0.112 * Lc)), (0.12 * Lc, 0.55 * sw, 0.008 * Lc), region='scrD' if sgn > 0 else 'scrB')
+        for k in range(4):
+            B.box(Vector((-0.02 * Lc + k * 0.045 * Lc, ys, -0.112 * Lc)), (0.025 * Lc, 0.30 * sw, 0.008 * Lc), region='glow')
+        for k in range(6):
+            lit = (k % 3 == 0)
+            B.box(Vector((-0.24 * Lc + k * 0.04 * Lc, ys + sgn * 0.30 * sw, -0.110 * Lc)), (0.012 * Lc, 0.10 * sw, 0.014 * Lc), region='glow' if lit else 'trim')
+        # MFD on the sill front, angled toward the pilot
+        yaw = sgn * math.radians(28)
+        B.box(Vector((0.20 * Lc, sgn * 0.78 * w, -0.06 * Lc)), (0.006 * Lc, 0.10 * Lc, 0.07 * Lc), rot=(0, math.radians(-10), yaw), region='scrB' if sgn > 0 else 'scrC')
+        B.box(Vector((0.20 * Lc, sgn * 0.78 * w, -0.10 * Lc)), (0.02 * Lc, 0.03 * Lc, 0.02 * Lc), region='trim')
+    # bulkhead behind the seat with avionics racks and a light strip
+    bx = -0.34 * Lc
+    B.box(Vector((bx, 0, -0.16 * Lc)), (0.03 * Lc, 1.8 * w, 0.40 * Lc), region='trim', bevel=0.003 * Lc)
+    for sgn in (1, -1):
+        B.box(Vector((bx + 0.02 * Lc, sgn * 0.5 * w, -0.22 * Lc)), (0.03 * Lc, 0.5 * w, 0.22 * Lc), region='metal')
+        for k in range(3):
+            B.box(Vector((bx + 0.036 * Lc, sgn * 0.5 * w, -0.30 * Lc + k * 0.07 * Lc)), (0.004 * Lc, 0.4 * w, 0.01 * Lc), region='glow' if k == 1 else 'trim')
+    B.box(Vector((bx + 0.02 * Lc, 0, -0.35 * Lc)), (0.03 * Lc, 1.4 * w, 0.015 * Lc), region='glow')
+    # INSTRUMENT PANEL across the front of the tub, tilted toward the pilot, top just under the eye
+    # line so the view forward stays clear: attitude display in the centre, radar left, bars right,
+    # a log strip, buttons along the bottom, glow strips along the top, a glare shield on top.
+    k0 = int(((0.0 + math.pi) / (2 * math.pi)) * NA) % NA
+    x_front = c_loc.x + prof_t[k0]
+    # (v37.43 in-game: at 0.36 Lc the panel was a small far box and the cabin read as a corridor)
+    x_d = min(0.26 * Lc, x_front - 0.05 * Lc)
+    wd = max(min(1.5 * w, 0.55 * Lc), 0.34 * Lc)
+    tilt = math.radians(22)
+    n_d = Vector((-math.cos(tilt), 0.0, math.sin(tilt)))      # the tilted face's normal (toward the eye)
+    dc = Vector((x_d, 0.0, -0.16 * Lc))
+    B.box(dc, (0.05 * Lc, wd, 0.20 * Lc), rot=(0, tilt, 0), region='metal', bevel=0.004 * Lc)
+    face = dc + n_d * (0.025 * Lc + 0.004 * Lc)
+
+    def on_dash(y, up, size, region):
+        c_ = face + Vector((0, y, 0)) + Vector((-math.sin(tilt), 0.0, math.cos(tilt))) * up
+        B.box(c_, (0.006 * Lc, size[0], size[1]), rot=(0, tilt, 0), region=region)
+    on_dash(0.0, 0.015 * Lc, (0.26 * wd, 0.10 * Lc), 'scrC')
+    on_dash(-0.34 * wd, 0.015 * Lc, (0.22 * wd, 0.09 * Lc), 'screen')
+    on_dash(0.34 * wd, 0.015 * Lc, (0.22 * wd, 0.09 * Lc), 'scrB')
+    on_dash(0.0, -0.062 * Lc, (0.36 * wd, 0.025 * Lc), 'scrD')
+    for k in range(8):
+        on_dash(-0.42 * wd + k * 0.12 * wd, -0.080 * Lc, (0.05 * wd, 0.014 * Lc), 'glow' if k % 2 == 0 else 'trim')
+    for sgn in (1, -1):
+        on_dash(sgn * 0.30 * wd, 0.082 * Lc, (0.30 * wd, 0.008 * Lc), 'glow')
+    B.box(Vector((x_d - 0.03 * Lc, 0.0, -0.055 * Lc)), (0.14 * Lc, 1.08 * wd, 0.012 * Lc), region='trim', bevel=0.002 * Lc)   # glare shield
+    # CANOPY ARCHES: a mullion over the glass ahead and a roll bar behind the head, each a chain of
+    # short tubes riding just under the glass surface - the window gets a 3D frame again.
+    for xa in (0.15 * Lc, -0.11 * Lc):
+        pts = []
+        for j in range(17):
+            y_ = -1.05 * w + 2.10 * w * j / 16
+            w_ = B.to_world(Vector((xa, y_, 0.0)))
+            gz = glass_z_at(w_.x, w_.y)
+            if gz is None:
+                continue
+            pts.append(Vector((xa, y_, gz - eye_z - 0.006 * L)))
+        for a_, b_ in zip(pts, pts[1:]):
+            dv = b_ - a_
+            ln = dv.length
+            if ln < 1e-6:
+                continue
+            roll = math.atan2(dv.z, dv.y)
+            B.box((a_ + b_) / 2, (0.018 * Lc, ln * 1.08, 0.018 * Lc), rot=(roll, 0, 0), region='trim')
+    # RIM RAIL: a square tube along the outer edge of the coaming, so the window has an outline
+    rt = 0.02 * Lc
+    for k in range(NA):
+        a_ = outer[k] + Vector((0, 0, rt * 0.5))
+        b_ = outer[(k + 1) % NA] + Vector((0, 0, rt * 0.5))
+        dv = b_ - a_
+        ln = dv.length
+        if ln < 1e-6:
+            continue
+        yaw = math.atan2(dv.y, dv.x)
+        pitch = -math.asin(max(-1.0, min(1.0, dv.z / ln)))
+        B.box((a_ + b_) / 2, (ln * 1.06, rt, rt), rot=(0, pitch, yaw), region='trim')
+    # ribs along the walls, deck grating, pedals
+    for xr in (-0.22, 0.02, 0.26):
         for sgn in (1, -1):
-            B.box(Vector((-0.02 * Lc, sgn * 0.13 * Lc, pan_z + 0.07 * Lc)), (0.26 * Lc, 0.03 * Lc, 0.03 * Lc), region='trim', bevel=0.003 * Lc)
-        ped_top = pan_z - 0.025 * Lc
-        ped_bot = -(eye_z - floor_z) + 0.01 * Lc
-        if ped_top - ped_bot > 0.02 * Lc:
-            B.box(Vector((-0.04 * Lc, 0, (ped_top + ped_bot) / 2)), (0.16 * Lc, 0.12 * Lc, ped_top - ped_bot), region='metal', bevel=0.003 * Lc)
-        seat_built = True
+            B.box(Vector((xr * Lc, sgn * 0.97 * w, -0.20 * Lc)), (0.02 * Lc, 0.02 * Lc, 0.34 * Lc), region='metal', bevel=0.002 * Lc)
+    B.box(Vector((0.12 * Lc, 0, z_floor + 0.02 * Lc)), (0.40 * Lc, 1.2 * w, 0.03 * Lc), region='trim', bevel=0.002 * Lc)
+    for sgn in (1, -1):
+        B.box(Vector((0.34 * Lc, sgn * 0.06 * Lc, z_floor + 0.06 * Lc)), (0.05 * Lc, 0.06 * Lc, 0.08 * Lc), rot=(0, math.radians(-30), 0), region='seat', bevel=0.002 * Lc)
+    # seat: pan under the eye, back, headrest, armrests, pedestal to the floor
+    pan_z = -0.30 * Lc
+    B.box(Vector((-0.02 * Lc, 0, pan_z)), (0.30 * Lc, 0.22 * Lc, 0.05 * Lc), region='seat', bevel=0.004 * Lc)
+    B.box(Vector((-0.17 * Lc, 0, pan_z * 0.5 + 0.02 * Lc)), (0.05 * Lc, 0.22 * Lc, -pan_z - 0.06 * Lc), region='seat', bevel=0.004 * Lc)
+    B.box(Vector((-0.17 * Lc, 0, 0.07 * Lc)), (0.05 * Lc, 0.11 * Lc, 0.09 * Lc), region='seat', bevel=0.004 * Lc)
+    for sgn in (1, -1):
+        B.box(Vector((-0.02 * Lc, sgn * 0.13 * Lc, pan_z + 0.07 * Lc)), (0.26 * Lc, 0.03 * Lc, 0.03 * Lc), region='trim', bevel=0.003 * Lc)
+    ped_top = pan_z - 0.025 * Lc
+    ped_bot = z_floor + 0.01 * Lc
+    if ped_top - ped_bot > 0.02 * Lc:
+        B.box(Vector((-0.04 * Lc, 0, (ped_top + ped_bot) / 2)), (0.16 * Lc, 0.12 * Lc, ped_top - ped_bot), region='metal', bevel=0.003 * Lc)
+    seat_built = True
     B.assign_uvs(tile_len=0.30 * Wc)
-    bmesh.ops.recalc_face_normals(B.bm, faces=list(B.bm.faces))
+    B.tub_uvs(tub_faces, NA, 3)
+    _skip = set(tub_faces) | set(floor_faces) | set(coam_faces)
+    bmesh.ops.recalc_face_normals(B.bm, faces=[f for f in B.bm.faces if f not in _skip])
     imesh = bpy.data.meshes.new('cockpit_interior')
     B.bm.to_mesh(imesh)
     B.bm.free()
     iobj = bpy.data.objects.new('cockpit_interior', imesh)
     sc.collection.objects.link(iobj)
-    rep['interior'] = {'seat': seat_built, 'holo_faces': len(hmesh.polygons), 'interior_faces': len(imesh.polygons)}
+    # (the two floating holo billboards of the first v37.41 cut are gone: they read as signs in the sky)
+    hmesh = bpy.data.meshes.new('cockpit_holo')
+    hobj = bpy.data.objects.new('cockpit_holo', hmesh)
+    sc.collection.objects.link(hobj)
+    rep['interior'] = {'seat': seat_built, 'tub_faces': len(tub_faces), 'interior_faces': len(imesh.polygons)}
+
+    # ---- the hull's junk inside the tub goes: every opaque face inside the canopy outline,
+    # between the tub floor and the glass of its sector, unless it hugs the glass (frame bars)
+    lxh = -(cen[:, 0] - cxw)
+    lyh = cen[:, 1]
+    angh = np.arctan2(lyh, lxh)
+    radh = np.hypot(lxh, lyh)
+    binh = ((angh + np.pi) / (2 * np.pi) * NA).astype(int) % NA
+    zh = cen[:, 2] - eye_z
+    inside = (radh < prof_raw[binh] * 0.98) & (zh > z_floor - 0.01 * L) & (zh < z_hi_g[binh] - 0.003 * L)
+    kill = inside & ~glass & ~fringe()
+    n_kill = int(kill.sum())
+    if n_kill:
+        bpy.ops.object.select_all(action='DESELECT')
+        hull.select_set(True)
+        vl.objects.active = hull
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.select_mode(type='FACE')
+        bpy.ops.mesh.select_all(action='DESELECT')
+        bpy.ops.object.mode_set(mode='OBJECT')
+        me.polygons.foreach_set('select', kill)
+        bpy.ops.object.mode_set(mode='EDIT')
+        bpy.ops.mesh.delete(type='FACE')
+        bpy.ops.object.mode_set(mode='OBJECT')
+        me = hull.data
+        me.update()
+        nP = len(me.polygons)
+        cen = np.empty(nP * 3, np.float32)
+        me.polygons.foreach_get('center', cen)
+        cen = cen.reshape(-1, 3)
+        d = np.linalg.norm(cen - np.array(cp, np.float32), axis=1)
+    rep['hull']['junk_deleted'] = n_kill
+
     # materials: the interior atlas (opaque) and a translucent self-lit copy for the holograms
     int_png, emis_png = build_atlas(ship, tint)
     int_img = bpy.data.images.load(int_png)
@@ -618,7 +798,7 @@ def process(ship):
             m.show_transparent_back = False
         m.use_backface_culling = True
         return m
-    imesh.materials.append(atlas_material('cockpit_interior'))
+    imesh.materials.append(atlas_material('cockpit_interior', emis_strength=1.0))
     hmesh.materials.append(atlas_material('cockpit_holo', alpha=HOLO_ALPHA, emis_strength=2.2))
 
     # ---------------- 7. decimate to the budget -----------------------------------------------

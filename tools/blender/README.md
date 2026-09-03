@@ -290,9 +290,23 @@ loose shells lying wholly inside the glass fringe — bar remnants, specks — w
 the pilot's sky) → EYE by open-view scan along the canopy centreline under the canopy TOP surface
 (first glass hit from above ; the lowest hit dropped Tracker's eye into the belly), candidates
 without a pit floor beneath them penalised, rearmost on ties, `cockpit1` moved there → hull material
-double-sided + hull-light emissive from the paint → floating dashboard = the frame art band + two
-`cockpit_holo` side panels (translucent, self-lit) + a seat hung from the eye with a pedestal to the
-pit floor → decimate (`--target 150000` triangles ; shells within 0.35 L of the eye keep up to 60%
+double-sided + hull-light emissive from the paint → THE TUB (v37.42, owner on v37.41: "they all look so
+bad" from the seat — the AI hull has no interior, only hollow overlapping panels, and the clear
+canopy exposed them): a lofted cabin from the canopy outline (polar 90th-percentile profile of the
+glass centres × `TUB_SHRINK`), walls up to the LOWEST glass of each sector (so a greenhouse's side
+windows stay outside the wall), a coaming ledge out past the glass rim, floor at `TUB_DEPTH`·Lc under
+the eye, the hull's opaque faces inside that volume deleted (except the glass fringe = frame bars),
+then sills with screens / buttons / switches, MFDs on the sill fronts, bulkhead with racks and a light
+strip, wall ribs, deck grating, pedals, seat with pedestal → v37.43: NO frame-art band in the model (owner: *"i
+dont think merging the png dashboards with the glbs are working"* — two visual languages) ; instead a
+3D INSTRUMENT PANEL across the tub front, tilted 22° toward the pilot with its top under the eye line
+(attitude display centre, radar left, bars right, log strip, buttons, glow strips, glare shield) and a
+RIM RAIL tube along the coaming's outer edge so the window keeps an outline. The library's emissive
+FILL (1.5×, for the old lightless tub) made these walls glow flat pale grey under a clear canopy ; this
+chain overrides `EMIS_FILL = 0.35` and emission strength 1.0. v37.44 (in-game the cabin read as a long
+corridor): panel at 0.26 Lc and ≥ 0.34 Lc wide, sills end at it, MFDs at 0.20 Lc, plus CANOPY ARCHES —
+a mullion 0.15 Lc ahead and a roll bar 0.11 Lc behind the head, chains of tubes riding just under the
+glass surface, so the window is framed in 3D → decimate (`--target 150000` triangles ; shells within 0.35 L of the eye keep up to 60%
 of the budget at ratio ≤ 0.5, the rest fills it, `delimit={'MATERIAL'}` so nothing collapses
 across the glass border) → export.
 
