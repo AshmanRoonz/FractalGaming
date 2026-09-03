@@ -4198,12 +4198,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.04';
+const LSS_BUILD = '38.06';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '38.04';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '38.06';   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -41753,6 +41753,43 @@ function releaseAbilityOverlayPrime(loadoutKey, abilityName) {
   trig.primedReleaseTime = now;
 }
 
+const _paA = new THREE.Vector3(), _paB = new THREE.Vector3();
+function _primeArcTick(dt) {
+  if (typeof player === 'undefined' || !player) return;
+  if (!player._abilityPrime || player.shipState === 'dead') { player._primeArcT = 0; return; }
+  const mesh = player.mesh;
+  const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
+  if (!nodes || !nodes.length) return;
+  const K = (typeof window !== 'undefined' && window.__primeArc) ? window.__primeArc : null;
+  if (K && K.on === false) return;
+  player._primeArcT = (player._primeArcT || 0) - (dt || 0.016);
+  if (player._primeArcT > 0) return;
+  player._primeArcT = (K && K.every != null) ? K.every : 0.06;
+  const col = (typeof chassisFlashColor === 'function')
+    ? chassisFlashColor(player.loadoutKey) : 0x88ddff;
+  const hull = (player.chassis && player.chassis.hullLength) || 60;
+  const reach = hull * ((K && K.reach != null) ? K.reach : 0.09);
+  const i = (Math.random() * nodes.length) | 0;
+  nodes[i].getWorldPosition(_paA);
+  if (nodes.length > 1 && Math.random() < 0.6) {
+    let j = (i + 1 + ((Math.random() * (nodes.length - 1)) | 0)) % nodes.length;
+    nodes[j].getWorldPosition(_paB);
+  } else {
+    _paB.set(
+      _paA.x + (Math.random() - 0.5) * reach * 2,
+      _paA.y + (Math.random() - 0.5) * reach * 2,
+      _paA.z + (Math.random() - 0.5) * reach * 2
+    );
+  }
+  if (_paA.distanceTo(_paB) < 6) return;      // spawnLightningBolt ignores anything shorter
+  try {
+    spawnLightningBolt(_paA.clone(), _paB.clone(), col, 0.11, 1,
+                       (K && K.thick != null) ? K.thick : 0.9, false);
+  } catch (_) {}
+  if (Math.random() < 0.34 && typeof spawnDynamicLight === 'function') {
+    try { spawnDynamicLight(_paA, col, 1.6, 90, 0.12); } catch (_) {}
+  }
+}
 function _isHoldPrimeAbility(loadoutKey, abilityName) {
   if (loadoutKey === 'SLAYER'   && abilityName === 'Stun Bolt')       return true;
   if (loadoutKey === 'VORTEX'   && abilityName === 'Laser')           return true;
@@ -45610,7 +45647,8 @@ function executeAbility(slot, ability) {
             removeHaze:  true,
             tracking:    true,
             trackTarget: target,
-            originFrac:  _trLaunchers[_trIdx++ % _trLaunchers.length],
+            originFrac:  _trLaunchers[_trIdx % _trLaunchers.length],
+            originMuzzle: _trIdx++,      // (v38.05) same tell, same fix
           });
         }
         delete player.trackerLocks[target.id];
@@ -45636,6 +45674,7 @@ function executeAbility(slot, ability) {
           color:      LSS.CLASS_COLORS.SYPHON,
           smokeTrail: true,
           originFrac: _PLAYER_LAUNCHER_FRACS.SYPHON[r % 2],
+          originMuzzle: r,      // (v38.05) the hull's own gun markers, alternating per rocket
           originAdvance: 50,    
         });
       }
@@ -47003,12 +47042,14 @@ function _drainStaggeredRocketSalvo(dt) {
     tracking = false;
     trackTarget = null;
   }
-  let origin;
-  if (cfg.originFrac && typeof _computeScreenMuzzleWorld === 'function') {
-    origin = _computeScreenMuzzleWorld(cfg.originFrac.x, cfg.originFrac.y) || player.position.clone();
-  } else {
-    origin = player.position.clone();
+  let origin = null;
+  if (cfg.originMuzzle != null && typeof shipMuzzleWorld === 'function' && player.mesh) {
+    try { origin = shipMuzzleWorld(player.mesh, cfg.originMuzzle, new THREE.Vector3()); } catch (_) { origin = null; }
   }
+  if (!origin && cfg.originFrac && typeof _computeScreenMuzzleWorld === 'function') {
+    origin = _computeScreenMuzzleWorld(cfg.originFrac.x, cfg.originFrac.y);
+  }
+  if (!origin) origin = player.position.clone();
   if (typeof cfg.originAdvance === 'number' && cfg.originAdvance > 0) {
     const _af = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
     origin.addScaledVector(_af, cfg.originAdvance);
@@ -48319,13 +48360,17 @@ function updateAbilities(dt) {
         player._pbAcc -= _pbGap;
         player._pbFired = (player._pbFired || 0) + 1;
         try { playSound('barrage_missile_pop'); } catch (_) {}
-        let _pbOrigin = player.position;
+        let _pbOrigin = null;
         const _pbLaunchers = _PLAYER_LAUNCHER_FRACS.PUNCTURE;
-        if (_pbLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
-          player._megaBarrageLaunchIdx = (player._megaBarrageLaunchIdx || 0) + 1;
-          const _f = _pbLaunchers[player._megaBarrageLaunchIdx % _pbLaunchers.length];
-          _pbOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _pbOrigin;
+        player._megaBarrageLaunchIdx = (player._megaBarrageLaunchIdx || 0) + 1;
+        if (typeof shipMuzzleWorld === 'function' && player.mesh) {
+          try { _pbOrigin = shipMuzzleWorld(player.mesh, player._megaBarrageLaunchIdx, new THREE.Vector3()); } catch (_) {}
         }
+        if (!_pbOrigin && _pbLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
+          const _f = _pbLaunchers[player._megaBarrageLaunchIdx % _pbLaunchers.length];
+          _pbOrigin = _computeScreenMuzzleWorld(_f.x, _f.y);
+        }
+        if (!_pbOrigin) _pbOrigin = player.position;
         const vel = _abTmpA.copy(player.position).addScaledVector(forward, 1200).sub(_pbOrigin).normalize();
         vel.x += (Math.random() - 0.5) * 0.2;
         vel.y += (Math.random() - 0.5) * 0.2;
@@ -48501,6 +48546,8 @@ function updateAbilities(dt) {
       }
     }
   }
+
+  try { _primeArcTick(dt); } catch (_) {}
 
   if (player.powerShotCharging) {
     player.powerShotCharge = Math.min(1.0, player.powerShotCharge + dt / 1.0);
