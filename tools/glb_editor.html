@@ -930,7 +930,7 @@ document.getElementById('btn-save').addEventListener('click', () => {
 // limited to faces that face the camera.
 const paint = { on: false, mesh: null, n: 0, mark: null, cen: null, nrm: null, grid: null, cell: 1, gmin: null, gdim: null,
                 markAttr: null, pickMesh: null, pickScene: null, pickRT: null, painting: false, erase: false, radiusPct: 3,
-                fileName: 'model' };
+                fileName: 'model', fills: [] };
 const paintBtn = document.getElementById('btn-paint');
 const paintInfo = document.getElementById('paint-info');
 
@@ -1076,7 +1076,8 @@ function paintStroke(clientX, clientY) {
 function paintUpdateInfo() {
   if (!paint.mark) { paintInfo.textContent = 'No marks.'; return; }
   let n = 0; for (let t = 0; t < paint.n; t++) if (paint.mark[3 * t] > 0.5) n++;
-  paintInfo.textContent = n ? `${n.toLocaleString()} of ${paint.n.toLocaleString()} triangles marked as glass` : 'No marks.';
+  const nf = paint.fills.length;
+  paintInfo.textContent = n ? `${n.toLocaleString()} of ${paint.n.toLocaleString()} triangles marked as glass` + (nf ? ` (${nf} outline${nf === 1 ? '' : 's'} - the pipeline cuts along their lines)` : '') : 'No marks.';
   document.getElementById('btn-paint-clear').disabled = !n;
   document.getElementById('btn-paint-export').disabled = !n;
   document.getElementById('btn-paint-save').disabled = !n;
@@ -1109,7 +1110,8 @@ function paintMarksJSON() {
   const cen = paint.cen;
   const centroids = ids.map(t => [+cen[3 * t].toFixed(5), +cen[3 * t + 1].toFixed(5), +cen[3 * t + 2].toFixed(5)]);
   const markerOut = (list) => list.map(o => { const p = o.position; return [+p.x.toFixed(5), +p.y.toFixed(5), +p.z.toFixed(5)]; });
-  return { version: 1, file: paint.fileName, mesh: paint.mesh.name || '', tris: paint.n, marked: ids, centroids,
+  return { version: 2, file: paint.fileName, mesh: paint.mesh.name || '', tris: paint.n, marked: ids, centroids,
+           fills: paint.fills.slice(),
            coords: 'glTF local space of the mesh (three.js) ; Blender = (x, -z, y)',
            markers: { cockpit: markerOut(cockpitMarkers), gun: markerOut(gunMarkers), thruster: markerOut(thrusterMarkers) } };
 }
@@ -1120,7 +1122,7 @@ function paintShipName() {
 
 paintBtn.addEventListener('click', () => setPaintMode(!paint.on));
 document.getElementById('paint-radius').addEventListener('input', (e) => { paint.radiusPct = +e.target.value; document.getElementById('paint-radius-val').textContent = paint.radiusPct + '%'; });
-document.getElementById('btn-paint-clear').addEventListener('click', () => { if (!paint.mark) return; paint.mark.fill(0); paint.markAttr.needsUpdate = true; paintUpdateInfo(); });
+document.getElementById('btn-paint-clear').addEventListener('click', () => { if (!paint.mark) return; paint.mark.fill(0); paint.fills.length = 0; paint.markAttr.needsUpdate = true; paintUpdateInfo(); });
 document.getElementById('btn-paint-export').addEventListener('click', () => {
   if (!paint.mark) return;
   const blob = new Blob([JSON.stringify(paintMarksJSON())], { type: 'application/json' });
@@ -1147,6 +1149,7 @@ document.getElementById('paint-load-input').addEventListener('change', (e) => {
       if (!paint.mark) return;
       if (j.tris !== paint.n) showStatus(`Marks were made on a ${j.tris} triangle mesh; this one has ${paint.n}`, 5000);
       paint.mark.fill(0);
+      paint.fills = Array.isArray(j.fills) ? j.fills.slice() : [];
       for (const t of j.marked) if (t < paint.n) paint.mark[3 * t] = paint.mark[3 * t + 1] = paint.mark[3 * t + 2] = 1;
       paint.markAttr.needsUpdate = true; paintUpdateInfo();
     } catch (err) { showStatus('Bad marks file: ' + err.message, 4000); }
@@ -1193,7 +1196,7 @@ function paintBindPointer() {
 // hook: remember the file name for the export, enable the button, allow ?load=<url> for testing
 const _origLoadGLB = loadGLB;
 loadGLB = function (arrayBuffer, name) {
-  paintRelease(); paint.on = false; paintBtn.textContent = 'Paint Glass: OFF'; paintBtn.classList.remove('primary');
+  paintRelease(); paint.on = false; paint.fills = []; paintBtn.textContent = 'Paint Glass: OFF'; paintBtn.classList.remove('primary');
   _origLoadGLB(arrayBuffer, name);
   paint.fileName = name || 'model';
   setTimeout(() => { paintBtn.disabled = !loadedRoot; document.getElementById('btn-paint-load').disabled = !loadedRoot; }, 50);
@@ -1349,6 +1352,13 @@ function outlineFill(erase) {
       changed += paintBrushAt(m[0], m[1], m[2], rr, erase, [0, 0, 0], false);
     }
   }
+  // the fill as an operation the pipeline can replay as CUTS: the outline's straight lines are
+  // planes through the camera, so the glass edge becomes exactly the line drawn, not the
+  // nearest triangle edges (owner: "after i hit enter... it goes jagged")
+  const camLocal = camera.position.clone().applyMatrix4(paint.mesh.matrixWorld.clone().invert());
+  paint.fills.push({ erase: !!erase, mirror: document.getElementById('paint-mirror').checked ? document.getElementById('paint-axis').value : null,
+                     cam: [+camLocal.x.toFixed(5), +camLocal.y.toFixed(5), +camLocal.z.toFixed(5)],
+                     points: outline.pts.map(v => [+v.x.toFixed(5), +v.y.toFixed(5), +v.z.toFixed(5)]) });
   paint.markAttr.needsUpdate = true;
   paintUpdateInfo();
   showStatus(`${erase ? 'Erased' : 'Marked'} ${changed.toLocaleString()} triangles inside the outline`, 3000);

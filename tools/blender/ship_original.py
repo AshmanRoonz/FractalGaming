@@ -213,7 +213,138 @@ def load_marks(ship):
     if mk.get('cockpit'):
         e = mk['cockpit'][0]
         eye = Vector((e[0], -e[2], e[1]))
-    return {'centroids': cen_b, 'eye': eye, 'tris': j.get('tris'), 'path': path}
+    g2b = lambda q: Vector((q[0], -q[2], q[1]))
+    fills = []
+    for op in j.get('fills', []) or []:
+        pts = [g2b(q) for q in op.get('points', [])]
+        if len(pts) < 3:
+            continue
+        cam = g2b(op['cam'])
+        mirror = op.get('mirror')
+        fills.append({'cam': cam, 'points': pts, 'erase': bool(op.get('erase'))})
+        if mirror:
+            # glTF z -> Blender y ; glTF x -> Blender x ; glTF y -> Blender z
+            ax = {'z': 1, 'x': 0, 'y': 2}.get(mirror, 1)
+            mv = lambda v: Vector([(-v[i] if i == ax else v[i]) for i in range(3)])
+            fills.append({'cam': mv(cam), 'points': [mv(q) for q in pts], 'erase': bool(op.get('erase'))})
+    return {'centroids': cen_b, 'eye': eye, 'tris': j.get('tris'), 'path': path, 'fills': fills}
+
+
+def replay_fills(me, fills, L, rep):
+    """CUT the hull along every outline's straight lines and mark the pieces inside.
+
+    An outline drawn in the editor is a polygon on the screen ; each of its edges together with
+    the camera position spans a plane. Bisecting the hull's front-facing faces near the edge with
+    that plane splits the triangles exactly where the line runs, so after classifying the pieces
+    (inside the polygon as seen from that camera, front-facing, not occluded) the glass edge IS
+    the line. Returns a bool array over me.polygons (after the cuts)."""
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    lay = bm.faces.layers.int.new('gmark')
+    n_cuts = 0
+    up = Vector((0, 0, 1))
+    for op in fills:
+        C = Vector(op['cam'])
+        P = [Vector(q) for q in op['points']]
+        V = (sum(P, Vector()) / len(P) - C).normalized()
+        ref = up if abs(V.dot(up)) < 0.9 else Vector((1, 0, 0))
+        U = V.cross(ref).normalized()
+        W = U.cross(V).normalized()
+
+        def p2(X):
+            d = X - C
+            t = d.dot(V)
+            if t <= 1e-6:
+                return None
+            return (d.dot(U) / t, d.dot(W) / t)
+
+        poly = [p2(q) for q in P]
+        if any(q is None for q in poly):
+            continue
+        xs = [q[0] for q in poly]
+        ys = [q[1] for q in poly]
+        ext = max(max(xs) - min(xs), max(ys) - min(ys), 1e-6)
+        m = 0.05 * ext
+        bx0, bx1, by0, by1 = min(xs) - m, max(xs) + m, min(ys) - m, max(ys) + m
+
+        def inbox(q):
+            return q is not None and bx0 <= q[0] <= bx1 and by0 <= q[1] <= by1
+
+        def inpoly(q):
+            inside = False
+            j = len(poly) - 1
+            for i in range(len(poly)):
+                xi, yi = poly[i]
+                xj, yj = poly[j]
+                if (yi > q[1]) != (yj > q[1]) and q[0] < (xj - xi) * (q[1] - yi) / (yj - yi) + xi:
+                    inside = not inside
+                j = i
+            return inside
+
+        def seg_d2(q, a, b):
+            vx, vy = b[0] - a[0], b[1] - a[1]
+            wx, wy = q[0] - a[0], q[1] - a[1]
+            ll = vx * vx + vy * vy
+            t = 0.0 if ll < 1e-18 else max(0.0, min(1.0, (wx * vx + wy * vy) / ll))
+            dx, dy = wx - t * vx, wy - t * vy
+            return dx * dx + dy * dy
+
+        bm.normal_update()
+        # the working subset: front-facing faces whose centre projects into the outline's box
+        subset = set()
+        for f in bm.faces:
+            c = f.calc_center_median()
+            q = p2(c)
+            if inbox(q) and f.normal.dot(C - c) > 0:
+                subset.add(f)
+        margin2 = (0.02 * ext) ** 2
+        for i in range(len(P)):
+            a, b = P[i], P[(i + 1) % len(P)]
+            a2, b2 = poly[i], poly[(i + 1) % len(P)]
+            no = (a - C).cross(b - C)
+            if no.length < 1e-12:
+                continue
+            no.normalize()
+            cand = [f for f in subset if f.is_valid and seg_d2(p2(f.calc_center_median()) or (1e9, 1e9), a2, b2) < margin2]
+            if not cand:
+                continue
+            verts = {v for f in cand for v in f.verts}
+            edges = {e for f in cand for e in f.edges}
+            ret = bmesh.ops.bisect_plane(bm, geom=list(verts) + list(edges) + cand, dist=1e-5 * L, plane_co=a, plane_no=no,
+                                         use_snap_center=False, clear_outer=False, clear_inner=False)
+            n_cuts += 1
+            subset = {f for f in subset if f.is_valid}
+            for g in ret['geom']:
+                if isinstance(g, bmesh.types.BMFace) and g.is_valid:
+                    subset.add(g)
+            for g in ret['geom_cut']:
+                if isinstance(g, bmesh.types.BMEdge) and g.is_valid:
+                    for f in g.link_faces:
+                        subset.add(f)
+        bm.normal_update()
+        bvh = BVHTree.FromBMesh(bm)
+        val = 0 if op['erase'] else 1
+        for f in subset:
+            if not f.is_valid:
+                continue
+            c = f.calc_center_median()
+            q = p2(c)
+            if q is None or not inpoly(q) or f.normal.dot(C - c) <= 0:
+                continue
+            d = c - C
+            dist = d.length
+            hit = bvh.ray_cast(C, d / dist, dist + 0.01 * L)
+            if hit[0] is None or hit[3] >= dist - 0.002 * L:
+                f[lay] = val
+    bm.to_mesh(me)
+    bm.free()
+    me.update()
+    out = np.zeros(len(me.polygons), np.int32)
+    me.attributes['gmark'].data.foreach_get('value', out)
+    me.attributes.remove(me.attributes['gmark'])
+    rep['glass']['fill_ops'] = len(fills)
+    rep['glass']['fill_cuts'] = n_cuts
+    return out > 0
 
 
 def load_reference_glass(ship):
@@ -324,10 +455,8 @@ def process(ship):
     bpy.ops.object.join()
     me = hull.data
     n_shells = len(parts)
-    flab = np.empty(len(me.polygons), np.int32)
-    me.attributes['shell'].data.foreach_get('value', flab)
-    me.attributes.remove(me.attributes['shell'])
     rep['shells'] = n_shells
+    # (the 'shell' face attribute is read in the selection stage, after any outline cuts)
     bb = [Vector(c) for c in hull.bound_box]
     lo = Vector([min(v[i] for v in bb) for i in range(3)])
     hi = Vector([max(v[i] for v in bb) for i in range(3)])
@@ -358,6 +487,14 @@ def process(ship):
     # ---------------- 3. canopy paint -> glass ---------------------------------------------------
     mat0 = me.materials[0]
     mat0.name = 'hull'
+    marks = load_marks(ship)
+    rep['glass'] = {}
+    glass_cut = None
+    if marks is not None and marks.get('fills'):
+        glass_cut = replay_fills(me, marks['fills'], L, rep)     # cuts the mesh: everything below reads the cut mesh
+    flab = np.empty(len(me.polygons), np.int32)
+    me.attributes['shell'].data.foreach_get('value', flab)
+    me.attributes.remove(me.attributes['shell'])
     img = next(n.image for n in mat0.node_tree.nodes if n.type == 'TEX_IMAGE' and n.image)
     W, H = img.size
     px = np.empty(W * H * 4, np.float32)
@@ -382,7 +519,7 @@ def process(ship):
     # tinted seed: class-hue paint on the upper skin near the marker (panes, streaks, decals)
     seed = ((d < R) & (sat > prm['sat']) & (mx > prm['val']) & (dh < prm['hue_tol'])
             & (cen[:, 2] > cp.z - prm['z_below'] * L) & (nrm[:, 2] > -0.05))
-    rep['glass'] = {'seed_faces': int(seed.sum())}
+    rep['glass']['seed_faces'] = int(seed.sum())
     shell_n = np.bincount(flab, minlength=n_shells)
     dg = bpy.context.evaluated_depsgraph_get()
     bvh = BVHTree.FromObject(hull, dg)
@@ -391,10 +528,15 @@ def process(ship):
     # surface, facing the same way, is canopy - bars and streaked panes included. No paint rule
     # survived these hulls: Vortex's canopy and fuselage share one purple, Pyro's bars and hull
     # one black, and every growth heuristic leaked over the nose.
-    marks = load_marks(ship)
     glass = np.zeros(nP, bool)
     near_idx = np.nonzero(d < R * 1.6)[0]
-    if marks is not None:
+    if glass_cut is not None:
+        # OUTLINE CUTS: the owner's straight lines, replayed as bisections ; the pieces inside are glass
+        glass = glass_cut.copy()
+        rep['glass'].update({'marks': os.path.relpath(marks['path'], REPO), 'cut_faces': int(glass.sum())})
+        if int(glass.sum()) < 10:
+            raise RuntimeError(f'{ship}: the outline cuts produced {int(glass.sum())} glass faces - camera/points mismatch?')
+    elif marks is not None:
         # OWNER'S MARKS (tools/glb_editor.html, Paint Glass): match every painted centroid to the
         # nearest face centre. The editor works on the same file in the same triangle order, so
         # this is exact up to float noise ; matching by position also survives any reordering.

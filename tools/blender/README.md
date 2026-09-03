@@ -361,9 +361,15 @@ window is. The owner can, in a minute: the GLB editor has a **Paint Glass** sect
 6. Rebuild: `blender --background --python tools/blender/ship_original.py -- --ships <ship>`
    then `node tools/compress_glb.mjs --only ships`.
 
-With a marks file present the pipeline uses exactly those triangles as the window (matched by
-centroid, so triangle order does not matter), adds only the shell's inner layer, and skips the
-reference transfer, the surround fill, the boundary smoothing and the shell vote. The report
+With a marks file present the pipeline uses your marks as the window and skips the reference
+transfer, the surround fill, the boundary smoothing, the shell vote and the islands. Outline fills
+are replayed as CUTS (v37.50, owner: *"after i hit enter to fill the nice straight lines, it goes
+jagged"*): every outline edge together with the camera you drew it from spans a plane ;
+`replay_fills` bisects the front-facing faces near that edge with it (`bmesh.ops.bisect_plane` on a
+working subset, mirrored outlines replayed with the mirrored camera), then the pieces inside the
+polygon, front-facing and unoccluded from that camera, become glass — so the glass edge IS the line
+you drew. Brush marks (no outline) are matched by centroid, whole triangles. The report shows
+`fill_ops` / `fill_cuts` / `cut_faces`, or `marks_matched` / `marks_missed` for brush files. The report
 shows `marks_matched` / `marks_missed` ; a miss count in the thousands means the wrong file.
 Technically: the editor makes the hull non-indexed, tints marked triangles through
 `onBeforeCompile`, picks with a GPU id pass (triangle index encoded as colour, one pixel read
