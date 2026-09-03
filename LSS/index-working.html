@@ -4272,7 +4272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.15';
+const LSS_BUILD = '38.16';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -24190,6 +24190,24 @@ if (typeof window !== 'undefined') window.__dbg = {
   },
 };
 
+// (v38.16) Which sandwich maps get water, and how deep. The hub has its own sea (the mossy
+// branch); Broken Simulation is a failing simulation with an open sky and gets none.
+function _swCavernWaterWanted(T) {
+  if (!T || !T.ON || T.YFLOOR == null) return false;
+  if (T.biome === 'mossy' || T.biome === 'brokensim') return false;
+  const K = (typeof window !== 'undefined') ? (window.__cavernWater = window.__cavernWater || {}) : null;
+  if (K && K.on === false) return false;
+  return true;
+}
+// Floor plus a slice of the ground's own relief: the valleys flood, the ridges stay dry, so it
+// reads as pools and channels between the rocks rather than an arena someone filled with a hose.
+function _swCavernWaterLevel(T) {
+  const K = (typeof window !== 'undefined' && window.__cavernWater) ? window.__cavernWater : null;
+  const amp = (T.GROUND_AMP != null) ? T.GROUND_AMP : ((T.AMP != null) ? T.AMP : 300);
+  if (K && typeof K.depth === 'number') return T.YFLOOR + K.depth;
+  const frac = (K && typeof K.ampFrac === 'number') ? K.ampFrac : 0.16;
+  return T.YFLOOR + amp * frac;
+}
 function _swApplyAtmosphere() {
   const T = game.sandwichTerrain;
   if (!T || !T.ON) {
@@ -24244,7 +24262,17 @@ function _swApplyAtmosphere() {
     try { _lssApplyHubLighting(true); } catch (_) {}
   } else {
     try { _clearBrokenSimForcefield(); } catch (_) {}
-    try { _swDisposeHubWater(); } catch (_) {}
+    // (v38.16) WATER IN THE CAVERNS. Everything needed was already generic - the builder takes a
+    // terrain and a level, and the per-frame drivers are gated on sandwichTerrain.ON rather than on
+    // the biome. What kept caverns dry was this branch disposing the water, and every non-hub map
+    // setting its WL 120 units BELOW its own floor. Give it a level over the floor instead and the
+    // whole existing system comes with it, ripple sim included.
+    if (_swCavernWaterWanted(T)) {
+      try { T.WL = _swCavernWaterLevel(T); } catch (_) {}
+      try { _swBuildHubWater(T); } catch (e) { console.warn('[cavern water] build failed:', e); }
+    } else {
+      try { _swDisposeHubWater(); } catch (_) {}
+    }
     try { _lssApplyHubLighting(false); } catch (_) {}
     // (v34.66) Arena mood: restore baseline first (in case a different biome's
     // mood was live), then tint from the look table. Data-only — no new lights.
@@ -26078,8 +26106,14 @@ function _swBuildHubWater(T) {
   const WL = (T && T.WL != null) ? T.WL : ((T && T.YFLOOR != null) ? T.YFLOOR : 0);
   game._hubWaterT = T; game._hubWaterWL = WL;   
   const geo = new THREE.PlaneGeometry(48000, 48000, 32, 32);
+  // (v38.16) A cavern has no sky to mirror, and the pass re-renders the whole scene. The displaced
+  // sheet's fallback is the scene's own fog colour (v38.14), which IS the cave's light - so down
+  // here the mirror buys nothing and costs a render. window.__cavernWater.reflect = true to try it.
+  const _cavern = (typeof _swCavernWaterWanted === 'function') && _swCavernWaterWanted(T);
+  const _cavRefl = _cavern && !!(window.__cavernWater && window.__cavernWater.reflect);
   const _canReflect = (typeof THREE.Reflector === 'function')
-    && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());   
+    && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())
+    && (!_cavern || _cavRefl);   
   let mesh;
   if (_canReflect) {
     const dpr = (renderer && renderer.getPixelRatio) ? renderer.getPixelRatio() : 1;
