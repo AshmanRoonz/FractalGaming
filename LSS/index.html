@@ -4170,7 +4170,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '37.78';
+const LSS_BUILD = '37.79';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23682,6 +23682,46 @@ function _cyberEnd(C, title, sub) {
   try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
   setTimeout(() => { try { if (typeof returnToRootMenu === 'function') returnToRootMenu(); } catch (_) {} }, 7000);
 }
+const _cyWp = new THREE.Vector3();
+function _cyberBotWaypoint(bot) {
+  const C = game._cyber;
+  if (!C || !C.armed || !bot || bot._cyberAttacker == null) return null;
+  const t = bot.target;
+  if (t && t.alive !== false && t.position && bot.position.distanceTo(t.position) < 1800) return null;
+  const field = (C.field && C.field.alive && C.field.position) ? C.field.position : null;
+  const carrier = (_carrier.obj && _carrier.ent && _carrier.ent.alive) ? _carrier.obj.position : null;
+  const now = (game.time || 0);
+  if (bot._cyberAttacker) {
+    const hurt = (bot.maxHealth > 0) && (bot.health / bot.maxHealth) < 0.45;
+    if (bot._cyNext == null) bot._cyNext = now + 30 + Math.random() * 20;
+    if ((hurt || now > bot._cyNext) && carrier) {
+      if (bot.position.distanceTo(carrier) < 1100) {
+        bot._cyNext = now + 30 + Math.random() * 20;      // made it home, push again
+      } else {
+        return _cyWp.copy(carrier).add(new THREE.Vector3(0, 220, 0));
+      }
+    }
+    return field ? _cyWp.copy(field) : null;
+  }
+  if (carrier) return _cyWp.copy(carrier).add(new THREE.Vector3(0, 160, 0));
+  return field ? _cyWp.copy(field) : null;
+}
+function _cyberCityDefence(C) {
+  if (!game.entities || !HUB_CITY) return;
+  let inside = false;
+  try {
+    const dx = player.position.x - HUB_CITY.x, dz = player.position.z - HUB_CITY.z;
+    const R = ((HUB_CITY.genome && HUB_CITY.genome.radius) || 7500) + 1200;
+    inside = (player.shipState !== 'dead') && (dx * dx + dz * dz < R * R);
+  } catch (_) {}
+  if (inside === C._cityHot) return;
+  C._cityHot = inside;
+  for (const e of game.entities) {
+    if (!e || !e.isHubTraffic) continue;
+    if (inside) { e.team = C.teamB; e.aggro = true; }
+    else if (!e._dmgLog) { e.aggro = false; }   // one that was actually shot stays angry
+  }
+}
 function _cyberFrame(dt) {
   const C = game._cyber;
   if (!C || !C.armed || game.state !== 'playing') return;
@@ -23714,6 +23754,8 @@ function _cyberFrame(dt) {
   }
   if (C.over) return;
   try { _cyberReviveBots(C, dt || 0.016); } catch (_) {}
+  C._cityT = (C._cityT || 0) - (dt || 0.016);
+  if (C._cityT <= 0) { C._cityT = 1.0; try { _cyberCityDefence(C); } catch (_) {} }
 
   const F = C.field;
   if (F && F.position) {
@@ -23767,6 +23809,9 @@ if (typeof window !== 'undefined') {
       attackersAlive: (player && player.shipState !== 'dead' ? 1 : 0) + C.bots.filter(b => b && b.alive && b._cyberAttacker).length,
       defendersAlive: C.bots.filter(b => b && b.alive && !b._cyberAttacker).length,
       bots: C.bots.length, field: C.field ? C.field.position.toArray().map(Math.round) : null,
+      cityHot: !!C._cityHot,
+      plan: C.bots.filter(b => b && b.alive).map(b => (b._cyberAttacker ? 'A' : 'D') +
+        (b.aiTarget ? Math.round(b.position.distanceTo(b.aiTarget)) : '-')),
     };
   };
 }
@@ -28202,7 +28247,16 @@ class Bot {
 
     let _raceWaypoint = null;
     let _arenaVia = null;
-    if (LSS.MODE !== 'race' && game.state === 'playing' &&
+    if (game._cyber && game._cyber.armed && this._cyberAttacker != null && game.state === 'playing') {
+      const _wp = _cyberBotWaypoint(this);
+      if (_wp) {
+        if (!this.aiTarget) this.aiTarget = new THREE.Vector3();
+        this.aiTarget.copy(_wp);
+        this.aiRetreating = false;
+        this.aiRole = 'engage';
+        _raceWaypoint = this.aiTarget;
+      }
+    } else if (LSS.MODE !== 'race' && game.state === 'playing' &&
         game.championField && game.championField.alive && game.championField.position) {
       if (game.championField.claimedBy !== this) {
         if (_isAssault() && this.team !== _assaultAttackerFleet()) {
