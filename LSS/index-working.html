@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.56';
+const LSS_BUILD = '38.57';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -26416,6 +26416,10 @@ function _swBuildHubWater(T) {
       const _cp = (typeof _SHIPL !== 'undefined' && _SHIPL) ? _SHIPL.coneP : null;
       const _cpWas = !!(_cp && _cp.visible);
       const _cpOp = (_cp && _cp.material) ? _cp.material.opacity : 0;
+      // (v38.57) ⚠ CLONE, do not getHex(). The gain below drives this colour ABOVE 1.0 on purpose
+      // and getHex() clamps, so saving a hex would quietly darken the direct-view beam every time
+      // the mirror ran. A Color survives being over-range ; a hex does not.
+      const _cpCol = (_cp && _cp.material) ? _cp.material.color.clone() : null;
       if (_cp && _cp.userData && _cp.userData._lit) {
         if (!_cpWas) _cp.visible = true;
         // (v38.51) BRIGHTER IN THE MIRROR. Owner: "the cone should be brighter in the water
@@ -26424,9 +26428,30 @@ function _swBuildHubWater(T) {
         // reflection mix and its brightness floor, so the same value arrives much fainter.
         // Boosted for this pass only and put back in the finally, so the third-person beam you
         // actually fly behind is untouched. window.__shipCones.reflBoost.
+        // (v38.57) ...and 3.2 was leaving most of the range on the table. Owner: "the ship light
+        // is not very bright reflecting in the water". The direct-view cone tops out at opMax
+        // 0.12, so a 3.2x boost reached 0.38 of the 1.0 that additive blending will take - I had
+        // assumed that number was near the ceiling when I picked it, and it was not. 8.0 spends
+        // the rest.
+        //
+        // But opacity ALONE cannot make it glow, because 1.0 is the ceiling and the water spends
+        // that budget before you see it: the reflection is mixed in by FRESNEL, which is small
+        // when you look down at water from above, and then compressed by 1 - exp(-x). So the
+        // colour is driven over-range too. That is not decoration - v38.19 put an explicit
+        // over-range term in the water shader (uReflHot) so that reflected bolts and explosions
+        // stay hot instead of flattening to the same near-white, and a headlight is exactly the
+        // kind of thing it was built for. Above 1.0 the cone takes that path and blooms in the
+        // water; at 1.0 it just sits in the compressor with everything else.
+        //
+        // Both are pass-only and both are put back in the finally, so the third-person beam you
+        // actually fly behind is untouched. window.__shipCones.reflBoost / .reflGain.
         const _C = window.__shipCones;
-        const _b = (_C && _C.reflBoost != null) ? _C.reflBoost : 3.2;
-        if (_cp.material) _cp.material.opacity = Math.min(1, _cpOp * _b);
+        const _b = (_C && _C.reflBoost != null) ? _C.reflBoost : 8.0;
+        const _g = (_C && _C.reflGain != null) ? _C.reflGain : 2.6;
+        if (_cp.material) {
+          _cp.material.opacity = Math.min(1, _cpOp * _b);
+          if (_g !== 1) _cp.material.color.multiplyScalar(_g);
+        }
       }
       const _wD = _hubWaterDisp, _wO = game._hubWaterOverlay, _wU = game._hubWaterUnder;
       const _wDv = !!(_wD && _wD.visible), _wOv = !!(_wO && _wO.visible), _wUv = !!(_wU && _wU.visible);
@@ -26438,7 +26463,7 @@ function _swBuildHubWater(T) {
         if (_wDv) _wD.visible = true;
         if (_wOv) _wO.visible = true;
         if (_wUv) _wU.visible = true;
-        if (_cp) { _cp.visible = _cpWas; if (_cp.material) _cp.material.opacity = _cpOp; }   // (v38.50/51) back to the direct-view rule and brightness
+        if (_cp) { _cp.visible = _cpWas; if (_cp.material) { _cp.material.opacity = _cpOp; if (_cpCol) _cp.material.color.copy(_cpCol); } }   // (v38.50/51/57) back to the direct-view rule, brightness and colour
         if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
         if (_ghostWas) { try { _ghostHullApply(ship); } catch (_) {} }
       }
