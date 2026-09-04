@@ -21,7 +21,13 @@ EXCLUDE_DIRS = [".git", ".claude", "backups", "old_versions", "old_plans",
                 # (v37.67) the hi-poly ship SOURCES (~195 MB) lived in LSS/ships_original and
                 # then in a hand-made "New folder" - both inside the site root, both would have
                 # uploaded. They now live in assets_base/ships_original ; these stay as a guard.
-                "ships_original", "New folder"]
+                "ships_original", "New folder",
+                # (v38.45) LSS/old_files - retired art that stays in the repo and off the CDN.
+                # The painted PNG cockpit frames (34 MB) and the mock folder's unreferenced
+                # source/scratch images (28 MB) were 19% of the deploy for something the ghost
+                # seat view replaced. The mock *.json geometry the circumpunct HUD still fetches
+                # stays where it is - only the images moved.
+                "old_files"]
 # Dev-only files that live in LSS/ but have no business on the live site.
 # index-working.html is the commented SOURCE (4.2 MB) that strip.py turns into
 # the shipped index.html; lss.map.md is the internal architecture map. Together
