@@ -4211,7 +4211,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.57';
+const LSS_BUILD = '38.59';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -20908,17 +20908,40 @@ function _swBuildHubWater(T) {
       return new THREE.MeshBasicMaterial({ color: c, fog: true });   
     };
     let _reflSkipSet = null;
+    let _reflLift = [];
+    let _reflPassId = 0;
     const _shipReflOverride = function (o) {
       if (_reflSkipSet && _reflSkipSet.indexOf(o) >= 0) return;
       if (!o.isMesh || !o.material) return;
-      const _hideFX = !(window.__water && window.__water.reflHideFX === 0);
+      const _modeE = (window.__water && window.__water.reflShip) || ((window.__water && window.__water.reflShipColor === 0) ? 'flat' : 'real');
+      const _hkK = (window.__water && window.__water.reflHideFX);
+      const _hideFX = (_hkK === 1) ? true : (_hkK === 0 ? false : (_modeE !== 'real'));
       const m = Array.isArray(o.material) ? o.material[0] : o.material;
       if (_hideFX && (o.name === 'shield' || (m && (m.transparent === true || m.blending === THREE.AdditiveBlending)))) {
         if (o.visible) { o._reflHid = true; o.visible = false; }   
         return;
       }
       const _mode = (window.__water && window.__water.reflShip) || ((window.__water && window.__water.reflShipColor === 0) ? 'flat' : 'real');
-      if (_mode === 'real') return;                            
+      if (_mode === 'real') {
+        const _L = (window.__water && window.__water.reflShipLift != null) ? window.__water.reflShipLift : 0.38;
+        if (_L > 0) {
+          const _ms = Array.isArray(o.material) ? o.material : [o.material];
+          for (let _i = 0; _i < _ms.length; _i++) {
+            const _mm = _ms[_i];
+            if (!_mm || !_mm.color || _mm._reflLiftT === _reflPassId) continue;
+            _mm._reflLiftT = _reflPassId;
+            if (_mm.emissive && _mm.emissive.isColor) {
+              _reflLift.push({ m: _mm, e: _mm.emissive.clone(), i: _mm.emissiveIntensity });
+              _mm.emissive.copy(_mm.color).multiplyScalar(_L);
+              _mm.emissiveIntensity = 1;
+            } else {
+              _reflLift.push({ m: _mm, c: _mm.color.clone() });
+              _mm.color.multiplyScalar(1 + _L);
+            }
+          }
+        }
+        return;
+      }
       if (!o._reflSaved) {
         o._reflSaved = o.material;
         if (_mode === 'flat') { o.material = _shipReflMat; return; }   
@@ -20983,6 +21006,7 @@ function _swBuildHubWater(T) {
       _reflSkipSet = _shields;
       const _ghostWas = !!(ship && ship.userData && ship.userData._ghostOn);
       if (_ghostWas) { try { _ghostHullRestore(ship); } catch (_) {} }
+      _reflPassId++;                                    // (v38.59) new pass = every material liftable again
       if (_showShip) ship.traverse(_shipReflOverride);
       const _cp = (typeof _SHIPL !== 'undefined' && _SHIPL) ? _SHIPL.coneP : null;
       const _cpWas = !!(_cp && _cp.visible);
@@ -21009,7 +21033,7 @@ function _swBuildHubWater(T) {
         if (_wOv) _wO.visible = true;
         if (_wUv) _wU.visible = true;
         if (_cp) { _cp.visible = _cpWas; if (_cp.material) { _cp.material.opacity = _cpOp; if (_cpCol) _cp.material.color.copy(_cpCol); } }   // (v38.50/51/57) back to the direct-view rule, brightness and colour
-        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
+        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _reflLift.length; _i++) { const _e = _reflLift[_i]; if (_e.c) _e.m.color.copy(_e.c); else { _e.m.emissive.copy(_e.e); _e.m.emissiveIntensity = _e.i; } } _reflLift.length = 0; for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
         if (_ghostWas) { try { _ghostHullApply(ship); } catch (_) {} }
       }
       _reflNrm.set(0, 0, 1).applyMatrix4(_reflRot.extractRotation(this.matrixWorld));

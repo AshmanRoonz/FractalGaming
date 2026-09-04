@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.57';
+const LSS_BUILD = '38.59';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -26270,6 +26270,26 @@ function _swBuildHubWater(T) {
     // view) must NOT reflect : the OPAQUE dark override would otherwise paint it as a solid dark sphere in the
     // mirror (the "ship is a blob" bug). Skip it in the material override (+ hide it for the pass below).
     let _reflSkipSet = null;
+    // (v38.59) THE REFLECTED HULL IS AN UNDERSIDE, AND AN UNDERSIDE IS IN SHADOW. Letting the
+    // ship's own glows through (v38.58) moved it from 0.92x the brightness of the water behind it
+    // to 1.035x, which is honest but still reads dark - the sun is above the ship, and a mirror
+    // only ever shows the face it is not lighting. There is no light to find here, so the lift is
+    // stated outright rather than dressed up as one.
+    // ⚠ IT HAS TO BE EMISSIVE, NOT ALBEDO. Scaling material.color 2.2x measured as no change at
+    // all (ship/background 1.011 lifted vs 1.025 flat - noise), and the reason is the same one
+    // that makes the problem: albedo is MULTIPLIED by incoming light, and on an unlit underside
+    // that light is ~0. 2.2 x 0 is 0. Emissive is ADDED, so it is the only term that can put
+    // brightness on a face nothing is lighting.
+    // The material's own albedo is what gets emitted, so per-part colour survives - unlike the
+    // 'color' mode, which flattens every part to a computed flat tint and is why 'real' became
+    // the default in v34.06. A material with no emissive slot falls back to the colour scale.
+    // ⚠ MATERIALS ARE SHARED between meshes on a hull, so a plain traverse would scale the same
+    // material several times and compound it. Each is tagged with the pass id and lifted once, and
+    // the ledger below is what puts them back - not a second traverse, which would have the same
+    // double-visit problem in reverse.
+    // ⚠ Clone the Color, never getHex(): the lift takes it over 1.0 on purpose and getHex clamps.
+    let _reflLift = [];
+    let _reflPassId = 0;
     const _shipReflOverride = function (o) {
       if (_reflSkipSet && _reflSkipSet.indexOf(o) >= 0) return;
       if (!o.isMesh || !o.material) return;
@@ -26279,7 +26299,22 @@ function _swBuildHubWater(T) {
       // is gone once its material is swapped) -> the ship reflects as a dark/washed-out SPHERE, not a ship. That is why
       // NO colour setting ever helped: it was re-tinting the shield blob, not the hull. So HIDE every energy/glow/shield
       // wrapper for the reflection pass (named 'shield', transparent, or additive) and override ONLY the solid hull.
-      const _hideFX = !(window.__water && window.__water.reflHideFX === 0);
+      // (v38.58) ...but that reason is a property of the OVERRIDE, and the override has not been
+      // the default since v34.06. Owner: "my ship reflection looks so dark".
+      // A mirror on the water shows the UNDERSIDE of your ship, and an underside is in shadow -
+      // the sun is above it. So the only bright thing a reflected hull has to offer is its own
+      // light: engine plumes, glows, running lights. Every one of those is additive or
+      // transparent, which is exactly what this test hides. Measured at the hub, ship pixels
+      // against the background they cover: 0.92x with the hide on (DARKER than the water behind
+      // it) and 1.36x with it off.
+      // In 'real' mode nothing is swapped, so a glow renders as itself and the blob cannot
+      // happen; the shield sphere's own shader discards at intensity 0 the way it does in the
+      // main view, and the shield meshes are force-hidden separately through _reflSkipSet in any
+      // case. So the hide is only needed when a material really is being replaced.
+      // window.__water.reflHideFX = 1 forces the old behaviour back for an A/B.
+      const _modeE = (window.__water && window.__water.reflShip) || ((window.__water && window.__water.reflShipColor === 0) ? 'flat' : 'real');
+      const _hkK = (window.__water && window.__water.reflHideFX);
+      const _hideFX = (_hkK === 1) ? true : (_hkK === 0 ? false : (_modeE !== 'real'));
       const m = Array.isArray(o.material) ? o.material[0] : o.material;
       if (_hideFX && (o.name === 'shield' || (m && (m.transparent === true || m.blending === THREE.AdditiveBlending)))) {
         if (o.visible) { o._reflHid = true; o.visible = false; }   
@@ -26289,7 +26324,26 @@ function _swBuildHubWater(T) {
       // (white hull + lit detail + yellow engines) appears in the mirror, instead of a flat dark tint that read as a ghost.
       // window.__water.reflShip : 'real' (default) | 'color' (flat-bright per-part tint) | 'flat' (old 0x55698c silhouette).
       const _mode = (window.__water && window.__water.reflShip) || ((window.__water && window.__water.reflShipColor === 0) ? 'flat' : 'real');
-      if (_mode === 'real') return;                            
+      if (_mode === 'real') {
+        const _L = (window.__water && window.__water.reflShipLift != null) ? window.__water.reflShipLift : 0.38;
+        if (_L > 0) {
+          const _ms = Array.isArray(o.material) ? o.material : [o.material];
+          for (let _i = 0; _i < _ms.length; _i++) {
+            const _mm = _ms[_i];
+            if (!_mm || !_mm.color || _mm._reflLiftT === _reflPassId) continue;
+            _mm._reflLiftT = _reflPassId;
+            if (_mm.emissive && _mm.emissive.isColor) {
+              _reflLift.push({ m: _mm, e: _mm.emissive.clone(), i: _mm.emissiveIntensity });
+              _mm.emissive.copy(_mm.color).multiplyScalar(_L);
+              _mm.emissiveIntensity = 1;
+            } else {
+              _reflLift.push({ m: _mm, c: _mm.color.clone() });
+              _mm.color.multiplyScalar(1 + _L);
+            }
+          }
+        }
+        return;
+      }
       if (!o._reflSaved) {
         o._reflSaved = o.material;
         if (_mode === 'flat') { o.material = _shipReflMat; return; }   
@@ -26391,6 +26445,7 @@ function _swBuildHubWater(T) {
       // keeps the shell. Restored in the same finally as everything else below.
       const _ghostWas = !!(ship && ship.userData && ship.userData._ghostOn);
       if (_ghostWas) { try { _ghostHullRestore(ship); } catch (_) {} }
+      _reflPassId++;                                    // (v38.59) new pass = every material liftable again
       if (_showShip) ship.traverse(_shipReflOverride);
       // ─────────────────────────────────────────────────────────────────────────────────
       // (v36.42) NO WATER IN THE WATER'S OWN REFLECTION.
@@ -26464,7 +26519,7 @@ function _swBuildHubWater(T) {
         if (_wOv) _wO.visible = true;
         if (_wUv) _wU.visible = true;
         if (_cp) { _cp.visible = _cpWas; if (_cp.material) { _cp.material.opacity = _cpOp; if (_cpCol) _cp.material.color.copy(_cpCol); } }   // (v38.50/51/57) back to the direct-view rule, brightness and colour
-        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
+        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _reflLift.length; _i++) { const _e = _reflLift[_i]; if (_e.c) _e.m.color.copy(_e.c); else { _e.m.emissive.copy(_e.e); _e.m.emissiveIntensity = _e.i; } } _reflLift.length = 0; for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
         if (_ghostWas) { try { _ghostHullApply(ship); } catch (_) {} }
       }
       // (v36.42) Capture the world->UV matrix that matches what we just rendered. Only when
