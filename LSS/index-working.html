@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.28';
+const LSS_BUILD = '38.31';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -30238,7 +30238,10 @@ function _carrierCollide(pos, velocity, radius) {
 // A top-down map: the hull's length x beam divided into cells, each keeping the real min and max
 // height of the geometry standing in it. Empty cells are empty - which is the whole point, because
 // it means open deck beside the superstructure is open, and the bow taper is a taper.
-const CARRIER_NX = 40, CARRIER_NZ = 20;
+// (v38.31) 40x20 over a 1367x816 hull is a 34x41-unit cell - coarser than the thin structures
+// it is supposed to model, so a fin or a wing edge either vanished into an empty cell or got
+// inflated into its neighbours. 72x36 halves the cell to 19x23 and costs 2592 pairs of floats.
+const CARRIER_NX = 72, CARRIER_NZ = 36;
 function _carrierBuildBody(root) {
   _carrier.body = null;
   try {
@@ -30314,9 +30317,17 @@ function _carrierRayDist(origin, dir, maxDist) {
   const along = _cbP.dot(dir);
   if (along < -_carrier.bound || along > maxDist + _carrier.bound) return -1;
   if (_cbP.lengthSq() - along * along > _carrier.bound * _carrier.bound) return -1;
-  const step = 45;      // (v37.92) fine enough for the measured cross-sections
+  // (v38.29) STEP SMALLER THAN THE THINNEST THING ON THE HULL. 45 units cleared the fuselage
+  // fine and walked straight through the flat parts - a wing or a fin 30 units thick fits
+  // between two samples, so a beam aimed at one registered nothing (owner: "some places on its
+  // body with hitscan weapons were not getting hit markers"). 12 is under the thinnest measured
+  // cross-section. It is not more work either: the march now STARTS where the ray enters the
+  // hull's bounding sphere instead of at the muzzle, so a shot from 5000 units out walks the
+  // same ~130 samples as one from point blank rather than 400.
+  const step = 12;
+  const d0 = Math.max(0, along - _carrier.bound - step);
   const lim = Math.min(maxDist, along + _carrier.bound + step);
-  for (let d = 0; d <= lim; d += step) {
+  for (let d = d0; d <= lim; d += step) {
     _cbP.copy(dir).multiplyScalar(d).add(origin);
     if (_carrierBlocks(_cbP, 0)) return d;
   }
@@ -30512,13 +30523,28 @@ function _carrierDeckSpot(i, out) {
   const d = _carrierDeckPoint(i, out);
   if (!d) return null;
   const o = _carrier.obj;
-  if (!o || !_carrier.body) { d.y += 70; return d; }
+  // (v38.29) no measured hull yet (the placeholder, before the GLB lands): the marker alone is
+  // not a promise of anything, so stand on the hull's own roof rather than 70 over the empty.
+  if (!o || !_carrier.body) {
+    d.y += (_carrier.localTop != null) ? Math.max(70, _carrier.localTop + 95 - d.y) : 70;
+    return d;
+  }
   _cdQ.copy(o.quaternion).invert();
   _cdP.copy(d).sub(o.position).applyQuaternion(_cdQ);
   const S = _carrierBodyAt(_cdP.x, _cdP.z);
   const top = (S ? S.yHi : _cdP.y) + 95;      // a hull radius (~50) and room to breathe
   if (_cdP.y < top) {
     _cdP.y = top;
+    d.copy(_cdP.applyQuaternion(o.quaternion).add(o.position));
+  }
+  // (v38.29) ...and PROVE it. Owner: "sometimes rarely, we spawn under the carrier (should always
+  // spawn on top)". The lift above asks the hull map for the column under the marker, and a column
+  // can lie: a marker sitting under an overhang, or over a gap between structures, measures a top
+  // that is below the deck. Ask the collider whether the answer is actually outside the hull, and
+  // when it is not, go to the roof of the whole hull - which is never wrong, only occasionally
+  // higher than it needed to be.
+  if (_carrierBlocks(d, 0) && _carrier.localTop != null) {
+    _cdP.y = _carrier.localTop + 95;
     d.copy(_cdP.applyQuaternion(o.quaternion).add(o.position));
   }
   return d;
@@ -30529,6 +30555,10 @@ if (typeof window !== 'undefined') {
   window.__carrier.clear = () => _carrierClear();
   window.__carrier.kill = () => (_carrier.ent ? _carrier.ent.takeDamage(1e9, null) : 0);
   window.__carrier.deck = (i) => { const v = _carrierDeckPoint(i || 0); return v ? v.toArray().map(Math.round) : null; };
+  // (v38.31) the point a ship is actually PUT at, and whether a world point is inside the hull -
+  // the two things you need to prove "nobody spawns under the carrier" instead of eyeballing it
+  window.__carrier.spot = (i) => { const v = _carrierDeckSpot(i || 0); return v ? v.toArray().map(Math.round) : null; };
+  window.__carrier.inside = (x, y, z) => _carrierBlocks((x && x.isVector3) ? x : new THREE.Vector3(x, y, z), 0);
   window.__carrier.info = () => ({
     alive: !!(_carrier.ent && _carrier.ent.alive), dead: _carrier.dead,
     model: _carrier.obj ? (_carrier.obj.userData._carrierPlaceholder ? 'placeholder' : 'Carrier.glb') : 'none',
@@ -30765,7 +30795,10 @@ function _cyberSpawnBots(C) {
     let b = null;
     try { b = new Bot(CYBER.botShips[i % CYBER.botShips.length], team, id++); } catch (_) { return; }
     b._cyberAttacker = atk;
-    const sp = atk ? _carrierDeckPoint(i) : _cyberCityPoint(i);
+    // (v38.29) the SPOT, not the raw marker - the marker is a point on the plating, and a ship
+    // placed exactly there is inside the hull. This is the other half of "we spawn under the
+    // carrier": the pilot went through _carrierDeckSpot, the wing never did.
+    const sp = atk ? _carrierDeckSpot(i) : _cyberCityPoint(i);
     if (sp) { b.position.copy(sp); if (b.mesh) b.mesh.position.copy(sp); }
     game.entities.push(b);
     C.bots.push(b);
@@ -30782,7 +30815,7 @@ function _cyberReviveBots(C, dt) {
     if (!b || b.alive) { if (b) b._reT = null; continue; }
     b._reT = (b._reT == null) ? ((window.__cyber && window.__cyber.respawn != null) ? window.__cyber.respawn : CYBER.respawn) : b._reT - dt;
     if (b._reT > 0) continue;
-    const sp = b._cyberAttacker ? _carrierDeckPoint(i) : _cyberCityPoint(i);
+    const sp = b._cyberAttacker ? _carrierDeckSpot(i) : _cyberCityPoint(i);   // (v38.29) same
     if (!sp) continue;                       // carrier gone: attackers stay down
     b._reT = null;
     b.alive = true;
@@ -49229,6 +49262,12 @@ function _ghostPinWarm() {
   try {
     if (typeof _ghostHullApply !== 'function') return;
     if (typeof player === 'undefined' || !player || !player.mesh) return;
+    // (v38.30) the seat FRAME is built here too: measuring a hundred thousand vertices is not a
+    // thing to do on the frame the pilot switches view. Built, compiled, then hidden again.
+    try {
+      const _f = _hullFrameBuild(player.mesh);
+      if (_f) _f.visible = true;
+    } catch (_) {}
     const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
     if (!_was) _ghostHullApply(player.mesh);
     const _tm = renderer.toneMapping;
@@ -49247,6 +49286,7 @@ function _ghostPinWarm() {
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
+    try { const _f = player.mesh.userData && player.mesh.userData._hullFrame; if (_f) _f.visible = false; } catch (_) {}
     if (!_was) _ghostHullRestore(player.mesh);
   } catch (_) {}
 }
@@ -57666,15 +57706,29 @@ function _ghostSeatWanted() {
 function _ghostHullSync() {
   const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
   if (!mesh) return;
+  // (v38.30) two treatments share this gate now. Whichever is not live is torn down first, so a
+  // knob flip mid-flight is one frame and cannot leave a hull half-hidden.
   if (_ghostSeatWanted()) {
+    const mode = _seatShellMode();
+    if (mode === 'frame') {
+      if (mesh.userData && mesh.userData._ghostOn) _ghostHullRestore(mesh);
+      _hullFrameApply(mesh);
+      return;
+    }
+    _hullFrameRestore(mesh);
+    if (mode === 'off') {
+      if (mesh.userData && mesh.userData._ghostOn) _ghostHullRestore(mesh);
+      return;
+    }
     const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     const prev = _ghostHullSync._t || now;
     _ghostHullSync._t = now;
     _ghostHullTimeU.value += Math.min(0.1, (now - prev) / 1000);
     _ghostHullApply(mesh);
     _ghostHullTune(mesh, _ghostHullKnobs());
-  } else if (mesh.userData && mesh.userData._ghostOn) {
-    _ghostHullRestore(mesh);
+  } else {
+    _hullFrameRestore(mesh);
+    if (mesh.userData && mesh.userData._ghostOn) _ghostHullRestore(mesh);
   }
 }
 // swap the hull materials of the player's mesh for the ghost set (idempotent per mesh) ; the
@@ -57737,6 +57791,277 @@ function _ghostHullTune(mesh, K) {
     o.renderOrder = K.order;
   });
 }
+// ============================================================================
+// (v38.30) THE SEAT FRAME. Formers and stringers built from the hull's own vertices: one ellipse
+// per cross-section station, straight lines connecting the same angle on consecutive stations.
+// Everything here is circles and straight segments by construction - there is no path that can
+// produce a wavy line, because no line ever follows the surface.
+// ============================================================================
+const _FRAME_DEF = {
+  rings: 11,        // cross-sections down the long axis. More = a denser cage, not a curvier one.
+  spokes: 8,        // stringers. 8 puts one on the crown, one on the keel and one on each beam.
+  seg: 48,          // segments per ellipse. Purely how round a circle looks ; no shape cost.
+  pct: 0.62,        // extent percentile per station. 1 = the full span including wingtips ;
+                    // lower pulls the rings in to the body you are actually sitting in.
+  ends: 0.08,       // trim this much off each end - the extreme nose and tail stations are a
+                    // point, and a degenerate ellipse reads as a dot of noise.
+  opacity: 0.9,
+  glow: 2.2,        // the colour is multiplied by this, so >1 pushes it into the bloom threshold
+  order: 4000,      // same sort seat the shell used: after the water and the city's glass
+  // (v38.31) THE HARDWARE. Owner: "i want enough detail that you can see the shape of the guns,
+  // at least". A cross-section cage cannot show a gun - it collapses each station to one ellipse -
+  // so the marked mounts are drawn as what they are: short line-art cylinders, a muzzle ring and a
+  // breech ring with four rails between them, at the hull's own gunN and thrusterN empties.
+  guns: 1,          // 0 = cage only
+  gunR: 0.035,      // muzzle radius, as a fraction of hull length
+  gunLen: 0.16,     // barrel length, same units
+  thrust: 1,        // the engine bells too - they are the other thing you can name by its shape
+  thrustR: 0.05,
+};
+function _hullFrameKnobs() {
+  const F = (window.__cockpit && window.__cockpit.frame) || {};
+  const K = {};
+  for (const k in _FRAME_DEF) K[k] = (typeof F[k] === 'number') ? F[k] : _FRAME_DEF[k];
+  K.tint = (F.tint != null) ? F.tint : _ghostHullTint();
+  return K;
+}
+// Which seat treatment is live. 'frame' (v38.30 default), 'ghost' (the v37.61 shell), 'off'.
+function _seatShellMode() {
+  const W = window.__cockpit;
+  const m = W && W.seat;
+  return (m === 'ghost' || m === 'off' || m === 'frame') ? m : 'frame';
+}
+const _hfV = new THREE.Vector3(), _hfM = new THREE.Matrix4();
+function _hullFrameGeometry(group, K) {
+  group.updateMatrixWorld(true);
+  _hfM.copy(group.matrixWorld).invert();
+  // ---- 1. every hull vertex, in the GROUP's own space (so the frame rides the ship) ----
+  let total = 0;
+  const metas = [];
+  group.traverse(o => {
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes || !o.geometry.attributes.position) return;
+    if (o.userData && (o.userData.isPlume || o.userData.isRunningLight || o.userData._cockpitFrame)) return;
+    metas.push(o);
+    total += o.geometry.attributes.position.count;
+  });
+  if (!total) return null;
+  // a hull is ~100k vertices and this is a shape measurement, not a mesh: sample it
+  const stride = Math.max(1, Math.floor(total / 40000));
+  const pts = [];
+  const bb = new THREE.Box3();
+  const _mm = new THREE.Matrix4();
+  for (const o of metas) {
+    const pos = o.geometry.attributes.position;
+    _mm.multiplyMatrices(_hfM, o.matrixWorld);
+    for (let i = 0; i < pos.count; i += stride) {
+      _hfV.fromBufferAttribute(pos, i).applyMatrix4(_mm);
+      pts.push(_hfV.x, _hfV.y, _hfV.z);
+      bb.expandByPoint(_hfV);
+    }
+  }
+  const n = pts.length / 3;
+  if (n < 32) return null;
+  // ---- 2. the long axis is the station axis ; the other two span each cross-section ----
+  const size = bb.getSize(new THREE.Vector3());
+  const ax = (size.x >= size.y && size.x >= size.z) ? 0 : ((size.y >= size.z) ? 1 : 2);
+  // keep world up as the ellipse's vertical wherever the ship is not standing on end
+  const av = (ax === 1) ? 2 : 1;                 // "up" within the section
+  const au = 3 - ax - av;                        // the remaining axis, across the hull
+  const lo = bb.min.getComponent(ax), hi = bb.max.getComponent(ax);
+  const span = hi - lo;
+  if (!(span > 0)) return null;
+  const rings = Math.max(2, Math.round(K.rings));
+  const trim = span * Math.max(0, Math.min(0.4, K.ends));
+  const s0 = lo + trim, s1 = hi - trim;
+  const dS = (s1 - s0) / (rings - 1);
+  const half = (dS > 0) ? dS * 0.6 : span;       // stations overlap slightly so none comes up empty
+  // ---- 3. one ellipse per station, sized by a percentile of that slab's spread ----
+  const bins = [];
+  for (let r = 0; r < rings; r++) bins.push({ u: [], v: [] });
+  for (let i = 0; i < n; i++) {
+    const b = i * 3;
+    const a = pts[b + ax];
+    let r = Math.round((a - s0) / (dS || 1));
+    if (r < 0) r = 0; else if (r >= rings) r = rings - 1;
+    if (Math.abs(a - (s0 + r * dS)) > half) continue;
+    bins[r].u.push(pts[b + au]);
+    bins[r].v.push(pts[b + av]);
+  }
+  const pct = Math.max(0.05, Math.min(1, K.pct));
+  const st = [];
+  for (let r = 0; r < rings; r++) {
+    const B = bins[r];
+    if (B.u.length < 8) { st.push(null); continue; }
+    B.u.sort((a, b) => a - b); B.v.sort((a, b) => a - b);
+    // a symmetric trim off both tails: the middle `pct` of the spread is the body
+    const cut = (1 - pct) * 0.5;
+    const q = (arr, f) => arr[Math.max(0, Math.min(arr.length - 1, Math.round(f * (arr.length - 1))))];
+    const uLo = q(B.u, cut), uHi = q(B.u, 1 - cut);
+    const vLo = q(B.v, cut), vHi = q(B.v, 1 - cut);
+    const hu = (uHi - uLo) * 0.5, hv = (vHi - vLo) * 0.5;
+    if (!(hu > 1e-3) || !(hv > 1e-3)) { st.push(null); continue; }
+    st.push({ a: s0 + r * dS, cu: (uHi + uLo) * 0.5, cv: (vHi + vLo) * 0.5, hu, hv });
+  }
+  // ---- 4. rings + stringers, as one LineSegments ----
+  const seg = Math.max(8, Math.round(K.seg));
+  const spokes = Math.max(0, Math.round(K.spokes));
+  const out = [];
+  const put = (station, ang, dst) => {
+    dst[ax] = station.a;
+    dst[au] = station.cu + Math.cos(ang) * station.hu;
+    dst[av] = station.cv + Math.sin(ang) * station.hv;
+  };
+  const A = [0, 0, 0], Bv = [0, 0, 0];
+  for (const p of st) {
+    if (!p) continue;
+    for (let k = 0; k < seg; k++) {
+      put(p, (k / seg) * Math.PI * 2, A);
+      put(p, ((k + 1) / seg) * Math.PI * 2, Bv);
+      out.push(A[0], A[1], A[2], Bv[0], Bv[1], Bv[2]);
+    }
+  }
+  for (let k = 0; k < spokes; k++) {
+    const ang = (k / spokes) * Math.PI * 2;
+    let prev = null;
+    for (const p of st) {
+      if (!p) { prev = null; continue; }
+      if (prev) { put(prev, ang, A); put(p, ang, Bv); out.push(A[0], A[1], A[2], Bv[0], Bv[1], Bv[2]); }
+      prev = p;
+    }
+  }
+  // ---- 5. THE HARDWARE. gunN / thrusterN are real empties on every hull, so the guns can be
+  // drawn where they actually are rather than guessed at. Each is one line-art cylinder: two
+  // rings and four rails - circles and straight lines, same as the rest of the frame.
+  // The nose direction is read off the THRUSTERS, which are at the tail by definition, so this
+  // needs no per-hull convention and cannot be wrong-way-round on a future model.
+  const len = Math.max(1, hi - lo);
+  const marks = { gun: [], thruster: [] };
+  const _mw = new THREE.Vector3();
+  group.traverse(o => {
+    const m = /^(gun|thruster)\d+$/i.exec(o.name || '');
+    if (!m) return;
+    o.getWorldPosition(_mw).applyMatrix4(_hfM);
+    marks[m[1].toLowerCase()].push(_mw.clone());
+  });
+  let nose = 1;
+  if (marks.thruster.length) {
+    let t = 0;
+    for (const p of marks.thruster) t += p.getComponent(ax);
+    nose = ((t / marks.thruster.length) < (lo + hi) * 0.5) ? 1 : -1;
+  }
+  const ring = (cx, cu, cv, rad, dst) => {
+    for (let k = 0; k < 20; k++) {
+      for (const kk of [k, k + 1]) {
+        const a2 = (kk / 20) * Math.PI * 2;
+        const q = [0, 0, 0];
+        q[ax] = cx; q[au] = cu + Math.cos(a2) * rad; q[av] = cv + Math.sin(a2) * rad;
+        dst.push(q[0], q[1], q[2]);
+      }
+    }
+  };
+  const rail = (x0, x1, cu, cv, rad, dst) => {
+    for (let k = 0; k < 4; k++) {
+      const a2 = (k / 4) * Math.PI * 2 + Math.PI * 0.25;
+      const du = Math.cos(a2) * rad, dv = Math.sin(a2) * rad;
+      const p0 = [0, 0, 0], p1 = [0, 0, 0];
+      p0[ax] = x0; p0[au] = cu + du; p0[av] = cv + dv;
+      p1[ax] = x1; p1[au] = cu + du; p1[av] = cv + dv;
+      dst.push(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2]);
+    }
+  };
+  if (K.guns) {
+    const r = len * Math.max(0.002, K.gunR), L = len * Math.max(0.01, K.gunLen);
+    for (const p of marks.gun) {
+      const a0 = p.getComponent(ax), cu = p.getComponent(au), cv = p.getComponent(av);
+      const front = a0 + nose * L * 0.5, back = a0 - nose * L * 0.5;
+      ring(front, cu, cv, r, out);
+      ring(back, cu, cv, r * 0.72, out);
+      rail(back, front, cu, cv, r * 0.86, out);
+    }
+  }
+  if (K.thrust) {
+    const r = len * Math.max(0.002, K.thrustR), L = len * Math.max(0.01, K.gunLen) * 0.7;
+    for (const p of marks.thruster) {
+      const a0 = p.getComponent(ax), cu = p.getComponent(au), cv = p.getComponent(av);
+      const back = a0 - nose * L * 0.5, front = a0 + nose * L * 0.5;
+      ring(back, cu, cv, r, out);            // the bell mouth
+      ring(front, cu, cv, r * 0.6, out);     // the throat
+      rail(front, back, cu, cv, r * 0.8, out);
+    }
+  }
+  if (!out.length) return null;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(out, 3));
+  return geo;
+}
+function _hullFrameBuild(group) {
+  const K = _hullFrameKnobs();
+  let f = group.userData._hullFrame;
+  if (f && f.parent === group) return f;
+  const geo = _hullFrameGeometry(group, K);
+  if (!geo) return null;
+  const mat = new THREE.LineBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: K.opacity,
+    blending: THREE.AdditiveBlending, depthWrite: false, fog: false,
+  });
+  f = new THREE.LineSegments(geo, mat);
+  f.name = '_hullFrame';
+  f.frustumCulled = false;
+  f.renderOrder = K.order;
+  f.visible = false;
+  group.add(f);
+  group.userData._hullFrame = f;
+  _hullFrameTune(f, K);
+  return f;
+}
+function _hullFrameTune(f, K) {
+  if (!f || !f.material) return;
+  f.material.color.set(K.tint).multiplyScalar(Math.max(0, K.glow));
+  f.material.opacity = K.opacity;
+  f.renderOrder = K.order;
+}
+function _hullFrameApply(group) {
+  if (!group) return;
+  const f = _hullFrameBuild(group);
+  if (!f) return;
+  if (!group.userData._frameOn) {
+    group.userData._frameOn = true;
+    // the painted hull goes away entirely - that is the point of the treatment. Plumes, running
+    // lights and the frame art are first-person elements the rig owns and are left alone.
+    const hid = group.userData._frameHid = [];
+    group.traverse(o => {
+      if (!o.isMesh || !o.visible) return;
+      if (o.userData && (o.userData.isPlume || o.userData.isRunningLight || o.userData._cockpitFrame)) return;
+      o.visible = false; hid.push(o);
+    });
+  }
+  f.visible = true;
+  _hullFrameTune(f, _hullFrameKnobs());
+}
+function _hullFrameRestore(group) {
+  if (!group || !group.userData._frameOn) return;
+  group.userData._frameOn = false;
+  const hid = group.userData._frameHid;
+  if (hid) for (const o of hid) { try { o.visible = true; } catch (_) {} }
+  group.userData._frameHid = null;
+  const f = group.userData._hullFrame;
+  if (f) f.visible = false;
+}
+// throw the built frame away so the next apply re-measures : __cockpit.frame = {...}; __seatRefresh()
+window.__seatRefresh = function () {
+  try {
+    const g = player && player.mesh;
+    if (!g) return 'no hull';
+    _hullFrameRestore(g);
+    const f = g.userData._hullFrame;
+    if (f) {
+      if (f.parent) f.parent.remove(f);
+      try { f.geometry.dispose(); f.material.dispose(); } catch (_) {}
+      g.userData._hullFrame = null;
+    }
+    return 'frame rebuilt on next seat frame';
+  } catch (e) { return String(e && e.message || e); }
+};
 // live re-tune: window.__cockpit.ghost = {...}; __ghostHullRefresh()
 window.__ghostHullRefresh = function () {
   try {
