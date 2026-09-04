@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.71';
+const LSS_BUILD = '38.72';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -362,7 +362,7 @@ const LOADOUTS = {
       { name: 'Energy Syphon', cooldown: 8, duration: 2, desc: 'Drain shields: 800 heal', type: 'defensive' },
       { name: 'Inner Spark', cooldown: 12, duration: 0.1, desc: 'Reset ability cooldowns', type: 'utility' },
     ],
-    core: { name: 'AI Nanobots', desc: '3 tiers of permanent upgrades', duration: 12, damage: 3000, cooldown: 60 },
+    core: { name: 'AI Nanobots', desc: '3 permanent upgrades, then full restores', duration: 12, damage: 3000, cooldown: 60 },
   },
 };
 
@@ -2882,7 +2882,7 @@ const EndlessMode = {
     run.phase = 'travel'; run.phaseT = -22; run.waveN = 0; run.waveBots = null;
     run.biomeIdx = 0; run.nextBiomeAt = 11000; run.rays = null; run.rayT = 0;
     run.stormy = false; run.boltT = 0;
-    run.aegis = { lvl: 0, flashT: 0, bobT: 0, rwTxt: '', rwT: 0, lifeGrants: 0, distBonus: 0,
+    run.aegis = { lvl: 0, flashT: 0, bobT: 0, rwTxt: '', rwT: 0, lifeGrants: 0, distBonus: 0, overSpd: 0,
                   bolts: 0, kills: 0, seen: {}, baseCh: null, curCh: null };
     try { if (typeof _lssEndlessBolts === 'function') for (let i = 0; i < run.segs.length; i++) _lssEndlessBolts(run, run.segs[i]); } catch (_) {}
     try { const ri = document.getElementById('round-info'); if (ri) ri.style.display = 'none'; } catch (_) {}
@@ -3318,16 +3318,21 @@ const EndlessMode = {
           if (a.lvl < _EAEGIS_MAX) {
             try { this._aegisSetLvl(run, a.lvl + 1); } catch (_) {}   // sets flashT + upgrade_core
             a.rwTxt = ''; a.rwT = 0;
-          } else if (run.lives < (run.livesMax || run.lives)) {
-            run.lives++; a.lifeGrants++;
-            a.rwTxt = '+1 LIFE'; a.rwT = 3.2; a.flashT = 3.2;
-            try { if (window.Overlays && Overlays.banner) Overlays.banner('AEGIS OVERFLOW', '+1 LIFE  ·  ' + run.lives + ' of ' + run.livesMax); } catch (_) {}
-            try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
           } else {
-            run.dist += _EAEGIS_DIST_BONUS; a.distBonus += _EAEGIS_DIST_BONUS;
-            a.rwTxt = '+' + _EAEGIS_DIST_BONUS + ' m'; a.rwT = 2.4; a.flashT = 2.4;
-            try { if (window.Overlays && Overlays.banner) Overlays.banner('AEGIS OVERFLOW', '+' + _EAEGIS_DIST_BONUS + ' m scored'); } catch (_) {}
-            try { if (typeof playSound === 'function') playSound('upgrade_core'); } catch (_) {}
+            a.overSpd = (a.overSpd || 0) + 1;
+            try { this._aegisApplySpeed(run); } catch (_) {}
+            const _spdTxt = '+1% SPEED  \u00b7  x' + (1 + (_EAEGIS_SPD[a.lvl] || 0) + 0.01 * a.overSpd).toFixed(2);
+            if (run.lives < (run.livesMax || run.lives)) {
+              run.lives++; a.lifeGrants++;
+              a.rwTxt = '+1% SPD  +1 LIFE'; a.rwT = 3.2; a.flashT = 3.2;
+              try { if (window.Overlays && Overlays.banner) Overlays.banner('AEGIS OVERFLOW', _spdTxt + '  \u00b7  +1 LIFE  \u00b7  ' + run.lives + ' of ' + run.livesMax); } catch (_) {}
+              try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+            } else {
+              run.dist += _EAEGIS_DIST_BONUS; a.distBonus += _EAEGIS_DIST_BONUS;
+              a.rwTxt = '+1% SPD  +' + _EAEGIS_DIST_BONUS + ' m'; a.rwT = 2.4; a.flashT = 2.4;
+              try { if (window.Overlays && Overlays.banner) Overlays.banner('AEGIS OVERFLOW', _spdTxt + '  \u00b7  +' + _EAEGIS_DIST_BONUS + ' m scored'); } catch (_) {}
+              try { if (typeof playSound === 'function') playSound('upgrade_core'); } catch (_) {}
+            }
           }
           try { if (typeof playSound === 'function') playSound('rearm_reset'); } catch (_) {}
           try {
@@ -3353,21 +3358,26 @@ const EndlessMode = {
       player.health = Math.min(player.maxHealth, player.health + player.maxHealth * (_EAEGIS_REG[a.lvl] || 0) * dt);
     }
   },
+  _aegisApplySpeed(run) {
+    const a = run.aegis; if (!a || !(a.lvl > 0)) return;
+    const base = (a.curCh && player.chassis === a.curCh && a.baseCh) ? a.baseCh : player.chassis;
+    a.baseCh = base;
+    const m = 1 + (_EAEGIS_SPD[a.lvl] || 0) + 0.01 * (a.overSpd || 0);
+    a.curCh = Object.assign({}, base, {
+      flightSpeed: (base.flightSpeed || 300) * m,
+      strafeSpeed: (base.strafeSpeed || 250) * m,
+      verticalSpeed: (base.verticalSpeed || 250) * m,
+    });
+    a.spdMul = m;
+    player.chassis = a.curCh;
+  },
   _aegisSetLvl(run, lvl) {
     const a = run.aegis; if (!a || lvl === a.lvl) return;
     const up = lvl > a.lvl;
     a.lvl = lvl;
     try {
       if (lvl > 0) {
-        const base = (a.curCh && player.chassis === a.curCh && a.baseCh) ? a.baseCh : player.chassis;
-        a.baseCh = base;
-        const m = 1 + (_EAEGIS_SPD[lvl] || 0);   // (v36.38) tapered curve, was 1 + 0.04*lvl
-        a.curCh = Object.assign({}, base, {
-          flightSpeed: (base.flightSpeed || 300) * m,
-          strafeSpeed: (base.strafeSpeed || 250) * m,
-          verticalSpeed: (base.verticalSpeed || 250) * m,
-        });
-        player.chassis = a.curCh;
+        this._aegisApplySpeed(run);   // (v38.72) rank curve + overflow, one place
       } else {
         if (a.curCh && player.chassis === a.curCh && a.baseCh) player.chassis = a.baseCh;
         a.curCh = null; a.baseCh = null;
@@ -3778,6 +3788,7 @@ if (typeof window !== 'undefined') window.__endlessAegis = function () {
       lvl: a.lvl || 0, max: _EAEGIS_MAX,
       lives: run.lives, livesMax: run.livesMax, startLives: run.startLives,
       lifeGrants: a.lifeGrants || 0, distBonus: a.distBonus || 0,
+      overSpd: a.overSpd || 0, spdMult: +((a.spdMul || (1 + (_EAEGIS_SPD[a.lvl] || 0)))).toFixed(3),   // (v38.72)
       reward: a.rwTxt || '', regenPctPerSec: +(((_EAEGIS_REG[a.lvl] || 0) * 100).toFixed(3)),
       boltsTaken: a.bolts || 0, kills: a.kills || 0, liveBolts, firstBolts,
       dropBolts: drops.length, drops,
@@ -43015,7 +43026,6 @@ function firePowerShot() {
 
 function activateCore() {
   if (player.coreMeter < 100 || player.coreActive || player.shipState === 'dead') return;
-  if (player.loadout && player.loadout.core.name === 'AI Nanobots' && player.syphonTier >= 3) return;
   player.coreActive = true;
   player.coreTimer = player.loadout.core.duration * ((player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(20)) ? 2 : 1);
   player.coreMeter = 0;
@@ -43130,6 +43140,16 @@ function activateCore() {
   }
   else if (coreName === 'AI Nanobots') {
     try { playSound('upgrade_core'); } catch (_) {}
+    if (player.syphonTier >= 3) {
+      player.shield = player.maxShield;
+      player.shieldRegenDelay = 0;
+      if (player.abilityCooldowns) for (let _i = 0; _i < player.abilityCooldowns.length; _i++) player.abilityCooldowns[_i] = 0;
+      player.trapCooldownTimer = 0;
+      if (player.maxDashes) player.dashCharges = player.maxDashes;
+      player.dashCooldownTimer = 0;
+      try { if (window.Overlays && Overlays.banner) Overlays.banner('NANOBOTS', 'SHIELD FULL  \u00b7  COOLDOWNS RESET  \u00b7  DASHES REFILLED'); } catch (_) {}
+      try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(player.position, LSS.CLASS_COLORS.SYPHON, 3.0, 600, 0.4); } catch (_) {}
+    } else {
     player.syphonTier = Math.min(3, player.syphonTier + 1);
     switch (player.syphonTier) {
       case 1: 
@@ -43149,6 +43169,7 @@ function activateCore() {
         if (player.weapon) player.weapon.fireRate = Math.max(0.06, player.weapon.fireRate * 0.75);
         break;
     }
+    }   // (v38.72) end of the tier ladder
   }
 }
 
@@ -45344,7 +45365,6 @@ function updateAbilities(dt) {
 
   game._dtLast = dt;   // (v37.68) last frame's dt, for effects that tick outside this function
   if (player.coreActive) player.coreMeter = 0;
-  if (player.loadout && player.loadout.core.name === 'AI Nanobots' && player.syphonTier >= 3) player.coreMeter = 0;
   const _nowCoreReady = player.coreMeter >= 100;
   if (_nowCoreReady && !player._wasCoreReady) {
     try { if (typeof ANN !== 'undefined' && ANN.coreReady) ANN.coreReady(); } catch (_) {}
