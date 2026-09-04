@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.36';
+const LSS_BUILD = '38.37';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -30287,6 +30287,31 @@ function _carrierBodyAt(lx, lz) {
   _cbBox.zLo = B.z0 + j * B.dz; _cbBox.zHi = _cbBox.zLo + B.dz;
   return _cbBox;
 }
+// (v38.37) HOW FAR A POINT IS FROM THE HULL. Every area effect in the game measures to an
+// entity's `position`, which for a fighter is its middle and near enough its whole body. The
+// carrier is 1367 units long: its middle can be 683 units from the plating you just set fire to,
+// so a 300-unit thermite splash on the bow measured 683 and dealt nothing (owner: "pyro's fire
+// and hitscan weapons are not seeming to damage the carrier... its hitboxes are way off").
+// Point-to-oriented-box, zero inside it. The box is the right shape here even though the collider
+// uses the finer hull map - an area effect asks "how close", not "did it hit".
+const _chP = new THREE.Vector3(), _chQ = new THREE.Quaternion();
+function _carrierHullDist(pt) {
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive || !_carrier.half || !pt) return Infinity;
+  const o = _carrier.obj;
+  _chQ.copy(o.quaternion).invert();
+  _chP.set(pt.x - o.position.x, pt.y - o.position.y, pt.z - o.position.z)
+      .applyQuaternion(_chQ).sub(_carrier.ctr);
+  const dx = Math.max(0, Math.abs(_chP.x) - _carrier.half.x);
+  const dy = Math.max(0, Math.abs(_chP.y) - _carrier.half.y);
+  const dz = Math.max(0, Math.abs(_chP.z) - _carrier.half.z);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+// ...and the one call every area effect should make instead of pt.distanceTo(ent.position).
+function _bodyDist(pt, ent) {
+  if (!ent || !ent.position) return Infinity;
+  if (ent.isCarrier) { const d = _carrierHullDist(pt); if (d !== Infinity) return d; }
+  return pt.distanceTo(ent.position);
+}
 // (v37.85) Does this point sit inside the hull? The same oriented box the movement collider uses -
 // a world-aligned box on a 1367-unit hull that turns to face its route would swallow shots hundreds
 // of units clear of it.
@@ -39914,9 +39939,10 @@ class Projectile {
                    : (this.ownerTeam != null ? this.ownerTeam : player.team);
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === _splTeam || bot === this.ownerRef) continue;
-      const distSq = this.position.distanceToSquared(bot.position);
+      // (v38.37) to the BODY, so a thermite on the carrier's bow is 0 away from it and not 683
+      const dist = _bodyDist(this.position, bot);
+      const distSq = dist * dist;
       if (distSq < this.splash * this.splash && distSq > 0) {
-        const dist = Math.sqrt(distSq);
         const falloff = 1 - dist / this.splash;
         const dealt = bot.takeDamage(this.damage * 0.75 * falloff,
           this.owner === 'player' ? 'player' : (this.ownerRef || 'bot'));
@@ -58988,6 +59014,27 @@ function fireHitscan(origin, dir, w) {
   const lineMax = Math.min(w.range, levelDist, bestObstacle ? bestObstDist : Infinity);
   for (const bot of game.entities) {
     if (!bot.alive || bot.team === player.team) continue;
+    // (v38.37) THE CARRIER IS NOT A SPHERE. Every other ship is tested as one centred on its
+    // position with a radius of 0.7 hullLength, which for a fighter is its whole body. The
+    // carrier's chassis reports hullLength 816 - its WIDTH, since the entity is built from
+    // [size.x, size.y, size.z] and the hull is 1367 long - so the sphere was 571 units on a body
+    // that reaches 683 to either end: the bow and the stern were outside their own hitbox.
+    // Worse, `lineMax` is capped by raycastLevel, which stops AT the hull, so the projection of
+    // the far-away centre usually sat beyond it and the carrier was skipped entirely. That is the
+    // whole of "hitscan weapons are not seeming to damage the carrier": the beam stopped on the
+    // plating and nothing was ever asked to take the hit.
+    // The collider already knows the real answer - march the ray against the measured hull map.
+    if (bot.isCarrier) {
+      let _cd = -1;
+      try { _cd = _carrierRayDist(origin, aimDir, Math.min(w.range, lineMax + 24)); } catch (_) {}
+      // lineMax already carries levelDist, and levelDist includes the carrier, so a hit at or
+      // before it means the carrier is genuinely the first surface the beam met.
+      if (_cd >= 0 && _cd <= lineMax + 24) {
+        if (isPiercing) pierceHits.push({ bot, proj: _cd });
+        else if (_cd < bestDist) { bestHit = bot; bestDist = _cd; }
+      }
+      continue;
+    }
     const toBot = _hsToTgt.subVectors(bot.position, origin);
     const proj = toBot.dot(aimDir);
     if (proj < 0 || proj > lineMax) continue;
@@ -62221,7 +62268,7 @@ function updateWorldEffects(dt) {
         // Check for enemy proximity
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
-          if (bot.position.distanceTo(eff.position) < eff.radius) {
+          if (_bodyDist(eff.position, bot) < eff.radius) {
             // Detonate
             const dealt = bot.takeDamage(eff.dmg, eff.owner);
             // (v36.19) hit marker gated on being alive — this loop now ticks
@@ -62540,7 +62587,7 @@ function updateWorldEffects(dt) {
         // Damage and slow ALL enemies in the burning area (bots + player)
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
-          if (bot.position.distanceTo(eff.position) < eff.radius) {
+          if (_bodyDist(eff.position, bot) < eff.radius) {
             const dealt = bot.takeDamage(eff.igniteDmgPerSec * dt, eff.owner);
             if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
             if (bot.velocity) bot.velocity.multiplyScalar(1 - eff.slowFactor * dt);
@@ -62660,7 +62707,7 @@ function updateWorldEffects(dt) {
       if (!eff.triggered) {
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
-          if (bot.position.distanceTo(eff.position) < eff.radius) {
+          if (_bodyDist(eff.position, bot) < eff.radius) {
             eff.triggered = true;
             eff.rootTarget = bot;
             eff.rootTimer = eff.rootDuration;
@@ -62874,7 +62921,7 @@ function updateWorldEffects(dt) {
       // Damage enemies in the blast zone
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === eff.team) continue;
-        if (bot.position.distanceTo(eff.position) < eff.radius) {
+        if (_bodyDist(eff.position, bot) < eff.radius) {
           const dealt = bot.takeDamage(eff.dmgPerSec * dt, eff.owner);
           if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
         }

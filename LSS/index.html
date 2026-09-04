@@ -4211,7 +4211,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.36';
+const LSS_BUILD = '38.37';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -24005,6 +24005,23 @@ function _carrierBodyAt(lx, lz) {
   _cbBox.zLo = B.z0 + j * B.dz; _cbBox.zHi = _cbBox.zLo + B.dz;
   return _cbBox;
 }
+const _chP = new THREE.Vector3(), _chQ = new THREE.Quaternion();
+function _carrierHullDist(pt) {
+  if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive || !_carrier.half || !pt) return Infinity;
+  const o = _carrier.obj;
+  _chQ.copy(o.quaternion).invert();
+  _chP.set(pt.x - o.position.x, pt.y - o.position.y, pt.z - o.position.z)
+      .applyQuaternion(_chQ).sub(_carrier.ctr);
+  const dx = Math.max(0, Math.abs(_chP.x) - _carrier.half.x);
+  const dy = Math.max(0, Math.abs(_chP.y) - _carrier.half.y);
+  const dz = Math.max(0, Math.abs(_chP.z) - _carrier.half.z);
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+function _bodyDist(pt, ent) {
+  if (!ent || !ent.position) return Infinity;
+  if (ent.isCarrier) { const d = _carrierHullDist(pt); if (d !== Infinity) return d; }
+  return pt.distanceTo(ent.position);
+}
 const _cbP = new THREE.Vector3(), _cbQ = new THREE.Quaternion();
 function _carrierBlocks(pt, pad) {
   if (!_carrier.obj || !_carrier.ent || !_carrier.ent.alive || !_carrier.half || !pt) return false;
@@ -31177,9 +31194,9 @@ class Projectile {
                    : (this.ownerTeam != null ? this.ownerTeam : player.team);
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === _splTeam || bot === this.ownerRef) continue;
-      const distSq = this.position.distanceToSquared(bot.position);
+      const dist = _bodyDist(this.position, bot);
+      const distSq = dist * dist;
       if (distSq < this.splash * this.splash && distSq > 0) {
-        const dist = Math.sqrt(distSq);
         const falloff = 1 - dist / this.splash;
         const dealt = bot.takeDamage(this.damage * 0.75 * falloff,
           this.owner === 'player' ? 'player' : (this.ownerRef || 'bot'));
@@ -45253,6 +45270,15 @@ function fireHitscan(origin, dir, w) {
   const lineMax = Math.min(w.range, levelDist, bestObstacle ? bestObstDist : Infinity);
   for (const bot of game.entities) {
     if (!bot.alive || bot.team === player.team) continue;
+    if (bot.isCarrier) {
+      let _cd = -1;
+      try { _cd = _carrierRayDist(origin, aimDir, Math.min(w.range, lineMax + 24)); } catch (_) {}
+      if (_cd >= 0 && _cd <= lineMax + 24) {
+        if (isPiercing) pierceHits.push({ bot, proj: _cd });
+        else if (_cd < bestDist) { bestHit = bot; bestDist = _cd; }
+      }
+      continue;
+    }
     const toBot = _hsToTgt.subVectors(bot.position, origin);
     const proj = toBot.dot(aimDir);
     if (proj < 0 || proj > lineMax) continue;
@@ -47741,7 +47767,7 @@ function updateWorldEffects(dt) {
         eff.armed = true;
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
-          if (bot.position.distanceTo(eff.position) < eff.radius) {
+          if (_bodyDist(eff.position, bot) < eff.radius) {
             const dealt = bot.takeDamage(eff.dmg, eff.owner);
             if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); if (player.shipState !== 'dead') showHitMarker(); }
             spawnExplosion(eff.position, 20);
@@ -47977,7 +48003,7 @@ function updateWorldEffects(dt) {
         eff.igniteTimer -= dt;
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
-          if (bot.position.distanceTo(eff.position) < eff.radius) {
+          if (_bodyDist(eff.position, bot) < eff.radius) {
             const dealt = bot.takeDamage(eff.igniteDmgPerSec * dt, eff.owner);
             if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
             if (bot.velocity) bot.velocity.multiplyScalar(1 - eff.slowFactor * dt);
@@ -48071,7 +48097,7 @@ function updateWorldEffects(dt) {
       if (!eff.triggered) {
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
-          if (bot.position.distanceTo(eff.position) < eff.radius) {
+          if (_bodyDist(eff.position, bot) < eff.radius) {
             eff.triggered = true;
             eff.rootTarget = bot;
             eff.rootTimer = eff.rootDuration;
@@ -48223,7 +48249,7 @@ function updateWorldEffects(dt) {
     else if (eff.type === 'cluster') {
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === eff.team) continue;
-        if (bot.position.distanceTo(eff.position) < eff.radius) {
+        if (_bodyDist(eff.position, bot) < eff.radius) {
           const dealt = bot.takeDamage(eff.dmgPerSec * dt, eff.owner);
           if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
         }
