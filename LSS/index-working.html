@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.33';
+const LSS_BUILD = '38.34';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4379,7 +4379,7 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // (v37.35) 37.34 -> 37.35: INNER LINING closes every see-through hull face around
 // the seat, crack zipper in the cleanup stage, four distinct instrument tiles,
 // control stick, console switch rows, harness straps.
-const _MODELS_VERSION = '38.06';   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '38.34';   // (v38.34) canopy glass grafted back onto all seven hulls   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -36414,8 +36414,14 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
           params.roughness = 0.10;
           params.envMapIntensity = 1.0;
           params.emissive = new THREE.Color(0x000000);
+          // (v38.34) BLEND in the GLB, so the loader already set transparent + the artist's 0.35
+          // alpha and per-ship tint ; this only makes sure a live knob is honoured on a hull built
+          // after it was set. _glassApply owns the rest.
+          params.transparent = true;
+          params.depthWrite = false;
         }
         const mat = new THREE.MeshStandardMaterial(params);
+        if (m && m.name === 'canopy_glass') { try { _glassApply(mat); } catch (_) {} }   // (v38.34)
         if (!params.transparent) hullMats.push(mat);
         return mat;
       });
@@ -57605,6 +57611,65 @@ const _ghostHullTimeU = { value: 0 };
 // map_lab. It loads the real hulls, seats the camera on cockpit1 and runs the exact shader
 // below, and exports a window.__cockpit block to paste in here. The panel that briefly lived
 // in this file is gone: a dev UI does not belong in the shipped game.
+// (v38.34) THE CANOPY GLASS, BACK, WITH ITS OWN TRANSPARENCY. The v37.36 cockpit pipeline built
+// every hull with a canopy_glass material; what shipped from v37.41 on came from ship_original.py,
+// the same hull mesh re-exported alone, so the glass went with it. tools/graft_canopy_glass.mjs
+// puts it back from tools/blender/work/ref/, which still had it - the ref hull dequantizes to
+// within 0.001 of the shipped one, so it is a copy, not a fit.
+//
+// The GLB carries a per-ship tint at 0.35 alpha - each canopy is already its own class colour -
+// so `tint: null` keeps what the artist set and a hex overrides every ship at once.
+//
+//   window.__cockpit.glass = { opacity: 0.2 }     // clearer
+//   window.__cockpit.glass = { on: false }        // no canopy at all
+//   window.__cockpit.glass = { tint: 0x66ddff }   // one colour for the fleet
+//   __glassRefresh()                              // push it to every ship already in the world
+function _glassKnobs() {
+  const G = (window.__cockpit && window.__cockpit.glass) || {};
+  return {
+    on: G.on !== false,
+    opacity: (typeof G.opacity === 'number') ? G.opacity : null,   // null = the GLB's own 0.35
+    tint: (G.tint != null) ? G.tint : null,                        // null = the ship's own canopy tint
+    rough: (typeof G.rough === 'number') ? G.rough : 0.10,
+    env: (typeof G.env === 'number') ? G.env : 1.0,
+  };
+}
+// Applied to one material. Called at build time for every ship, and every frame for the player's
+// own hull so a knob lands from the seat without a rebuild.
+function _glassApply(mat, K) {
+  if (!mat) return;
+  K = K || _glassKnobs();
+  if (mat.userData._glassBase == null) mat.userData._glassBase = (mat.opacity != null) ? mat.opacity : 0.35;
+  const want = (K.opacity != null) ? K.opacity : mat.userData._glassBase;
+  if (mat.opacity !== want) mat.opacity = want;
+  if (K.tint != null) mat.color.set(K.tint);
+  if (mat.roughness !== K.rough) mat.roughness = K.rough;
+  if (mat.envMapIntensity !== K.env) mat.envMapIntensity = K.env;
+  if (mat.visible !== K.on) mat.visible = K.on;
+}
+function _glassSync(mesh) {
+  if (!mesh) return;
+  const K = _glassKnobs();
+  mesh.traverse(o => {
+    if (!o.isMesh || !o.material) return;
+    const ms = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of ms) if (m && m.name === 'canopy_glass') _glassApply(m, K);
+  });
+}
+// push the current knobs to EVERY ship in the world, not just the player's
+window.__glassRefresh = function () {
+  let n = 0;
+  const K = _glassKnobs();
+  const hit = (mesh) => { if (!mesh) return; mesh.traverse(o => {
+    if (!o.isMesh || !o.material) return;
+    const ms = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of ms) if (m && m.name === 'canopy_glass') { _glassApply(m, K); n++; }
+  }); };
+  try { hit(player && player.mesh); } catch (_) {}
+  try { for (const e of (game.entities || [])) hit(e && e.mesh); } catch (_) {}
+  try { for (const np of ((net && net.networkPlayers) || [])) hit(np && np.mesh); } catch (_) {}
+  return n + ' canopy material(s) updated';
+};
 function _ghostHullTint() {
   const G = window.__cockpit && window.__cockpit.ghost;
   if (G && G.tint != null) return G.tint;
@@ -57699,6 +57764,8 @@ function _ghostSeatWanted() {
 function _ghostHullSync() {
   const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
   if (!mesh) return;
+  // (v38.34) the canopy is live-tunable from the seat: a handful of material writes on one hull
+  try { _glassSync(mesh); } catch (_) {}
   if (_ghostSeatWanted()) {
     const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     const prev = _ghostHullSync._t || now;

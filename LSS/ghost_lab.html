@@ -201,6 +201,12 @@ const LIGHT_ROWS = [
   { k: 'fill', lo: 0,  hi: 2000, st: 10, d: 280, t: 'cool FILL, high and behind - sky through the canopy.' },
   { k: 'dist', lo: 20, hi: 600,  st: 5,  d: 160, t: 'falloff distance for both. Short = the interior only ; long = the shell lights up from the inside.' },
 ];
+const GLASS_ROWS = [
+  { k: 'on', lo: 0, hi: 1, st: 1, d: 1, t: 'draw the canopy at all. 0 is the v37.41-38.33 state, when the glass had been dropped from the export entirely.' },
+  { k: 'opacity', lo: 0, hi: 1, st: 0.01, d: 0.35, t: 'THE INDEPENDENT ONE. Nothing about the ghost shell touches this - the shell skips anything already transparent, so the canopy has always kept its own material. 0.35 is what the artist set in the GLB.' },
+  { k: 'rough', lo: 0, hi: 1, st: 0.01, d: 0.10, t: 'gloss. Low is wet glass reflecting the environment ; high is frosted.' },
+  { k: 'env', lo: 0, hi: 3, st: 0.05, d: 1.0, t: 'how much of the scene environment it mirrors. This is what makes it read as glass rather than as a tinted film.' },
+];
 const SCENE_ROWS = [   // lab-only, never exported
   { k: 'fov',      lo: 60,  hi: 120, st: 1,    d: 90,   t: 'the game default is 90 (input.fovDeg).' },
   { k: 'exposure', lo: 0.2, hi: 2,   st: 0.01, d: 0.78, t: 'ACES exposure. cineFX uses 0.78.' },
@@ -247,13 +253,14 @@ const PLACES = {
 const S = {
   ship: 'VORTEX',
   view: 'seat',
-  ghost: {}, eye: {}, light: {}, scene: {},
+  ghost: {}, glass: {}, eye: {}, light: {}, scene: {},
   tintPin: null,          // '#rrggbb' or null = follow the ship's class colour
   place: 'city',
   flares: true,
 };
 function resetAll() {
   for (const r of GHOST_ROWS) S.ghost[r.k] = r.d;
+  for (const r of GLASS_ROWS) S.glass[r.k] = r.d;
   for (const r of EYE_ROWS)   S.eye[r.k]   = r.d;
   for (const r of LIGHT_ROWS) S.light[r.k] = r.d;
   for (const r of SCENE_ROWS) S.scene[r.k] = r.d;
@@ -434,6 +441,31 @@ function ghostTune(mesh, K) {
       if (U.uGhGlow) U.uGhGlow.value = K.glow;
     }
     o.renderOrder = K.order;
+  });
+}
+
+// ===========================================================================
+// THE CANOPY GLASS - _glassApply / _glassSync, ported from the game so a number tuned here is
+// the number in flight. Independent of the shell by construction: the shell only ever clones
+// OPAQUE materials, so the canopy keeps its own.
+// ===========================================================================
+const glassTint = { pin: null };
+function glassSync(group) {
+  group.traverse(o => {
+    if (!o.isMesh || !o.material) return;
+    const ms = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of ms) {
+      if (!m || m.name !== 'canopy_glass') continue;
+      if (m.userData._glassBase == null) {
+        m.userData._glassBase = (m.opacity != null) ? m.opacity : 0.35;
+        m.userData._glassTint = m.color.getHex();
+      }
+      m.opacity = S.glass.opacity;
+      m.roughness = S.glass.rough;
+      m.envMapIntensity = S.glass.env;
+      m.visible = S.glass.on >= 0.5;
+      m.color.set(glassTint.pin != null ? glassTint.pin : m.userData._glassTint);
+    }
   });
 }
 
@@ -773,6 +805,11 @@ note('Every knob here lands on the NEXT FRAME - the game re-reads them and re-tu
 for (const r of GHOST_ROWS) mkRow(S.ghost, r);
 note('<b>glassCore / glassRim</b> are inert today: all seven hulls ship a single opaque <b>hull</b> material, and the shell skips anything already transparent. They come alive the day a hull carries a separate canopy_glass again.');
 
+// --- canopy glass ---
+h2('Canopy glass');
+note('Grafted back onto all seven hulls in v38.34 from the v37.36 pipeline’s own files. The GLB carries a per-ship tint at 0.35 alpha - every canopy is already its class colour - and these are <b>window.__cockpit.glass</b>, with <b>__glassRefresh()</b> to push a change to every ship already in the world.');
+for (const r of GLASS_ROWS) mkRow(S.glass, r);
+
 // --- tint ---
 h2('Tint');
 const tintWrap = document.createElement('div'); tintWrap.className = 'row';
@@ -853,9 +890,10 @@ function mkBtn(txt, fn, cls) {
 function buildCfg() {
   const g = { on: S.ghost.on !== false, tint: S.tintPin ? S.tintPin : null };
   for (const r of GHOST_ROWS) g[r.k] = +Number(S.ghost[r.k]).toFixed(4);
+  const gl = {}; for (const r of GLASS_ROWS) gl[r.k] = +Number(S.glass[r.k]).toFixed(4);
   const e = {}; for (const r of EYE_ROWS) e[r.k] = +Number(S.eye[r.k]).toFixed(2);
   const l = {}; for (const r of LIGHT_ROWS) l[r.k] = +Number(S.light[r.k]).toFixed(1);
-  return { ghost: g, eye: e, light: l };
+  return { ghost: g, glass: gl, eye: e, light: l };
 }
 function buildJson() {
   const c = buildCfg();
@@ -939,6 +977,7 @@ const clock = new THREE.Clock();
 function loop() {
   const dt = Math.min(0.1, clock.getDelta());
   ghostTimeU.value += dt;
+  if (hull) glassSync(hull);
   if (hull) {
     // _ghostHullSync: apply while the seat is the view, restore the moment it is not
     if (S.ghost.on !== false && S.view === 'seat') { ghostApply(hull); ghostTune(hull, ghostKnobs()); }
