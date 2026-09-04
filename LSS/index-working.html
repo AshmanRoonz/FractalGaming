@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.45';
+const LSS_BUILD = '38.47';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -18988,12 +18988,6 @@ function _xrSettingsRows() {
       },
     },
     {
-      label: 'Strip Rocks, Clouds, Lightning',
-      value: (input && input.vrStripFx) ? 'ON' : 'OFF',
-      change: _xrToggleVRStripFx,
-      activate: _xrToggleVRStripFx,
-    },
-    {
       label: 'Head Aim Nudge',
       value: (input && input.vrHeadAim && input.vrHeadAim.enabled) ? 'ON' : 'OFF',
       change: () => {
@@ -25294,6 +25288,7 @@ function _swRippleTick(dt) {
       du.uRippleCenter.value.set(R.center.x, R.center.y);
       du.uRippleBounds.value = R.bounds;
       if (_swU) { if (_swU.uTime) du.uTime.value = _swU.uTime.value; if (_swU.uCam) du.uCam.value.copy(_swU.uCam.value); }
+      try { _swFeedShipLight(dm.material); } catch (_) {}   // (v38.47) the headlight's pool
       const W2 = window.__water || {};
       if (W2.disp !== undefined) du.uDispScale.value = W2.disp;
       if (W2.gain !== undefined) du.uGain.value = W2.gain;
@@ -26046,7 +26041,14 @@ function _swBuildHubWaterDispGet(WL) {
         uReflFloor: { value: 0.24 }, uSkyDark: { value: 0.0 }, uReflHot: { value: 0.75 },   
 
         uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 }, uShoreFoam: { value: 0.0 },   
-        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 } }   
+        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 },
+        // (v38.47) THE SHIP'S HEADLIGHT. This material has no lights block - it merges only
+        // UniformsLib.fog - so no scene light has ever touched the water. xyz is the lamp in
+        // world space, w its 0..1 strength ; the pool is drawn analytically in the fragment.
+        uShipL: { value: new THREE.Vector4(0, 0, 0, 0) },
+        uShipLDir: { value: new THREE.Vector3(0, 0, -1) },
+        uShipLCol: { value: new THREE.Color(0xffe8c4) },
+        uShipLRange: { value: 2400.0 }, uShipLStr: { value: 1.0 } }   
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
@@ -26174,6 +26176,25 @@ function _swBuildHubWaterDispGet(WL) {
       '  float foamVis = max(lod, fIn * edgeFade);',                                                
       '  float shoreFoam = (1.0 - smoothstep(0.0, 0.16, depthShape)) * (0.35 + 0.65 * spd) * foamVis;',
       '  c = mix(c, foamCol, shoreFoam * 0.28 * uShoreFoam);',
+      // (v38.47) THE HEADLIGHT'S POOL. Falloff to the lamp's own range, shaped two ways: by the
+      // CONE, because a spotlight throws an ellipse ahead of the ship rather than a disc under it,
+      // and by lambert against the displaced normal, so the crests catch it and the troughs stay
+      // dark - which is what makes it read as light on moving water instead of a decal.
+      // Added before the horizon fade so distant water still washes out to the fog.
+      '  if (uShipL.w > 0.001) {',
+      '    vec3 _sl = uShipL.xyz - vWP;',
+      '    float _sd = length(_sl);',
+      // cubic, not square: at the lamp's own range a linear-ish falloff still had 0.84 of full
+      // strength 200 units out, which is a floodlit lake rather than a headlight on it
+      '    float _att = clamp(1.0 - _sd / max(1.0, uShipLRange), 0.0, 1.0);',
+      '    _att = _att * _att * _att;',
+      '    vec3 _sn = _sl / max(_sd, 0.001);',
+      '    float _cone = pow(clamp(dot(-_sn, uShipLDir), 0.0, 1.0), 5.0);',
+      '    float _lam = clamp(dot(N, _sn), 0.0, 1.0);',
+      // 0.22 keeps uShipLStr readable as "1.0 = the default look" while the term itself stays a
+      // highlight rather than a second sun. The whole thing is additive on top of the reflection.
+      '    c += uShipLCol * (_att * (0.30 + 0.70 * _cone) * (0.30 + 0.70 * _lam)) * uShipL.w * uShipLStr * 0.22;',
+      '  }',
       '  { float _whd = length(vWP.xz - uCam.xz); float _whf = smoothstep(uWHorizA, uWHorizB, _whd) * uWHorizStr; c = mix(c, fogColor, clamp(_whf, 0.0, 1.0)); }',
       '  float aGraze = 0.93 * (1.0 - uGrazeAlpha * smoothstep(0.55, 0.95, graze));',
       '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',
@@ -26860,6 +26881,34 @@ window.__pwaterApply = function () {
     return 'pwater=' + (window.__pwater === true) + ' : overlay rebuilt';
   } catch (e) { try { console.warn('[pwater] rebuild failed', e); } catch (_) {} return 'failed: ' + (e && e.message); }
 };
+// (v38.47) Hand the water the player's headlight. Called from the water tick, which already
+// rewrites this material's uniforms every frame - so this is four writes, not new machinery.
+const _wShipLDir = new THREE.Vector3();
+function _swFeedShipLight(mat) {
+  if (!mat || !mat.uniforms || !mat.uniforms.uShipL) return;
+  const U = mat.uniforms;
+  const K = (typeof window !== 'undefined' && window.__water && window.__water.shipLight)
+    ? window.__water.shipLight : null;
+  let lit = 0;
+  try {
+    const S = (typeof _SHIPL !== 'undefined') ? _SHIPL : null;
+    const H = S && S.head;
+    if (H && (!K || K.on !== false)) {
+      // hCur is the smoothed candela the rig is actually driving the lamp at ; 2200 is its
+      // documented full-strength value, so this is "how on is the headlight, 0..1"
+      lit = Math.max(0, Math.min(1, (S.hCur || 0) / 2200));
+      if (lit > 0.001) {
+        U.uShipL.value.set(H.position.x, H.position.y, H.position.z, lit);
+        _wShipLDir.copy(H.target.position).sub(H.position);
+        if (_wShipLDir.lengthSq() > 1e-6) U.uShipLDir.value.copy(_wShipLDir.normalize());
+        U.uShipLCol.value.copy(H.color);
+        U.uShipLRange.value = (K && K.range != null) ? K.range : (H.distance || 2400);
+        U.uShipLStr.value = (K && K.str != null) ? K.str : 1.0;
+      }
+    }
+  } catch (_) { lit = 0; }
+  if (lit <= 0.001) U.uShipL.value.w = 0;
+}
 function _swUpdateHubWater() {
   const w = game._hubWater; if (!w) return;
   // (v33.69) PHASE 1 : when the displaced-water surface is active, keep the flat Reflector HIDDEN so the two
@@ -58094,9 +58143,12 @@ function _navLightSeatDim(mesh, on) {
   }
 }
 function _cockpit3dWanted() {
+  // (v38.46) THE SETTING IS GONE. Its "off" branch was the painted PNG cockpit and v38.45
+  // retired that art, so the switch could only offer a bare view. First person is the modelled
+  // seat now, full stop. window.__cockpit.on is kept as the dev override.
   const W = window.__cockpit;
   if (W && typeof W.on === 'boolean') return W.on;
-  return !(typeof input !== 'undefined' && input && input.cockpit3d === false);
+  return true;
 }
 // (v37.31) VR is opt-in and EXPERIMENTAL (untested on a headset here). The XR
 // path already composes headset pose on top of whatever the game wrote into
@@ -73335,9 +73387,7 @@ function _refreshSettingsValues() {
     const _hv = $('#val-vr-hud-scale');
     if (_hv) _hv.textContent = _hs.toFixed(2) + 'x';
   }
-  setChk('set-vr-strip-fx', input.vrStripFx);
   setChk('set-show-fps', input.showFps);
-  setChk('set-cockpit3d', input.cockpit3d !== false);
   setChk('set-hull-glow', input.hullGlow !== false);
   setChk('set-cockpit-vr', input.cockpitVR === true);
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
@@ -73629,13 +73679,6 @@ function buildSettingsPage() {
         <input type="checkbox" id="set-show-fps" ${input.showFps ? 'checked' : ''}>
       </div>
       <div class="setting-row">
-        <label>3D Cockpit (first person)</label>
-        <input type="checkbox" id="set-cockpit3d" ${input.cockpit3d !== false ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">On: first person looks out from the pilot's seat of the modelled cockpit. Off: the classic painted cockpit frame.</label>
-      </div>
-      <div class="setting-row">
         <label>3D Cockpit in VR (experimental)</label>
         <input type="checkbox" id="set-cockpit-vr" ${input.cockpitVR === true ? 'checked' : ''}>
       </div>
@@ -73704,14 +73747,6 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Scales the HUD plane in VR only &mdash; flat screen has its own HUD Size slider above, and the two never compound. Applies live inside a running session. Default 1.5&times; &mdash; the plane was sized to match a desktop window, which reads small through a headset.</label>
-      </div>
-      <!-- (v18VR 2026-05-22 round 13) Hard-strip toggle. -->
-      <div class="setting-row" style="margin-top:6px;">
-        <label>Strip Rocks / Clouds / Lightning</label>
-        <input type="checkbox" id="set-vr-strip-fx" ${input.vrStripFx ? 'checked' : ''}>
-      </div>
-      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Hard-removes the expensive VR systems: rock cluster meshes and atom-fractal shaders, gas clouds (basin pools, per-rock pockets, ambient cloud puffs), and lightning bolts (Stun Bolt, Mega Stun Bolt, ability arcs, dash crackle). Only applies in VR ; flat mode is unaffected. If toggled during an active VR session, current rocks and ambient cloud dots are removed immediately.</label>
       </div>
     </div>
 
@@ -75079,11 +75114,6 @@ function buildSettingsPage() {
   });
   // (v37.26) 3D cockpit switch ; _lssApplyShipRig reads input.cockpit3d every
   // frame, so the change is live without a restart or a view toggle.
-  const cockpitChk = overlay.querySelector('#set-cockpit3d');
-  if (cockpitChk) cockpitChk.addEventListener('change', () => {
-    input.cockpit3d = !!cockpitChk.checked;
-    saveSettings();
-  });
   const hullGlowChk = overlay.querySelector('#set-hull-glow');
   if (hullGlowChk) hullGlowChk.addEventListener('change', () => {
     input.hullGlow = !!hullGlowChk.checked;
@@ -75127,18 +75157,8 @@ function buildSettingsPage() {
     saveSettings();
     try { _clipApplyEnabled(); } catch (_) {}
   });
-    const vrStripSel = overlay.querySelector('#set-vr-strip-fx');
-  if (vrStripSel) vrStripSel.addEventListener('change', () => {
-    input.vrStripFx = !!vrStripSel.checked;
-    if (input.vrStripFx) {
-      if (typeof clearAmbientCloudDots === 'function') clearAmbientCloudDots();
-      if (typeof clearVRRockObstacles === 'function' &&
-          typeof isXRPresenting === 'function' && isXRPresenting()) {
-        try { clearVRRockObstacles(); } catch (e) { console.warn('[vr-strip] live clear failed:', e); }
-      }
-    }
-    saveSettings();
-  });
+  // (v38.46) the Strip Rocks / Clouds / Lightning control is gone from both surfaces ;
+  // _vrStripActive and its guards still work off input.vrStripFx for a perf experiment.
 
   // Close button
   overlay.querySelector('#settings-close').addEventListener('click', closeSettings);
@@ -77691,9 +77711,15 @@ function loadSettings() {
     // larger HUD rather than being pinned to the old size by a missing entry.
     if (typeof data.vrHudScale === 'number') input.vrHudScale = data.vrHudScale;
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
-    if (typeof data.vrStripFx === 'boolean') input.vrStripFx = data.vrStripFx;
+    // (v38.46) BOTH RETIRED SETTINGS ARE FORCED, not restored. Whoever turned the 3D cockpit
+    // off before today has cockpit3d:false saved, and with the control gone would have been
+    // stuck in a first person with nothing drawn in it - v38.45 took the painted frames away.
+    // Same shape for anyone who left the VR strip on. An old save heals instead of stranding.
+    input.cockpit3d = true;
+    input.vrStripFx = false;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
-    if (typeof data.cockpit3d === 'boolean') input.cockpit3d = data.cockpit3d;
+    // (v38.46) data.cockpit3d is deliberately NOT restored - see the force above. Reading it back
+    // here is what put the stale `false` straight back after the force on the first attempt.
     if (typeof data.hullGlow === 'boolean') input.hullGlow = data.hullGlow;
     if (typeof data.cockpitVR === 'boolean') input.cockpitVR = data.cockpitVR;
     // (v37.67) ONE-TIME MIGRATION. The 3D cockpit in VR was opt-in while the seat view was an
