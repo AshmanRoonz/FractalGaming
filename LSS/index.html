@@ -4211,7 +4211,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.37';
+const LSS_BUILD = '38.38';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23676,15 +23676,33 @@ function _carrierAttach(root, sector) {
         _carrier.dead = true;   // the mode reads this: no more attacker spawns
         try {
           if (typeof spawnExplosion === 'function') {
-            const L = (this.chassis && this.chassis.hullLength) || 2400;
-            spawnExplosion(this.position.clone(), L * 0.25);
-            const f = new THREE.Vector3(0, 0, 1).applyQuaternion(this.mesh.quaternion);
-            for (let k = -1; k <= 1; k += 2) {
-              spawnExplosion(this.position.clone().addScaledVector(f, k * L * 0.35), L * 0.18);
+            const K = _carrierKnobs();
+            const half = (_carrier.half ? _carrier.half.x : 683);
+            const hy = (_carrier.half ? _carrier.half.y : 274);
+            const axis = (_carrier.dir && _carrier.dir.lengthSq() > 0.5)
+              ? _carrier.dir.clone()
+              : new THREE.Vector3(-1, 0, 0).applyQuaternion(this.mesh.quaternion);
+            const ctr = this.position.clone();
+            const N = Math.max(1, (K.deathBlasts != null) ? K.deathBlasts : 14);
+            const span = (K.deathSpan != null) ? K.deathSpan : 2.6;
+            const sizeK = (K.deathSize != null) ? K.deathSize : 1.0;
+            const _mesh = this.mesh;
+            for (let i = 0; i < N; i++) {
+              const t = (N > 1) ? ((i / (N - 1)) * 2 - 1) : 0;      // -1 bow .. +1 stern
+              const at = ctr.clone().addScaledVector(axis, t * half * 0.92);
+              at.y += (Math.random() - 0.5) * hy * 0.8;
+              at.x += (Math.random() - 0.5) * hy * 0.5;
+              at.z += (Math.random() - 0.5) * hy * 0.5;
+              const r = (300 + 260 * (1 - Math.abs(t))) * sizeK;    // fattest amidships
+              const delay = (i === 0) ? 0 : Math.random() * span;
+              if (delay <= 0) spawnExplosion(at, r);
+              else setTimeout(() => { try { spawnExplosion(at, r); } catch (_) {} }, delay * 1000);
             }
+            setTimeout(() => { try { if (_mesh) _mesh.visible = false; } catch (_) {} }, (span + 0.5) * 1000);
+          } else {
+            this.mesh.visible = false;
           }
-        } catch (_) {}
-        this.mesh.visible = false;
+        } catch (_) { try { this.mesh.visible = false; } catch (__) {} }
       }
       return applied;
     },
@@ -24179,7 +24197,10 @@ function _carrierGuns(dt) {
     const d = c.position.distanceTo(_carrier.obj.position);
     if (d < bestD) { bestD = d; best = c; }
   };
-  if (K.zapTest && typeof player !== 'undefined' && player && player.shipState !== 'dead') consider(player);
+  try {
+    if (typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
+        (K.zapTest || (_carrier.ent && player.team !== _carrier.ent.team))) consider(player);
+  } catch (_) {}
   if (game && Array.isArray(game.entities)) {
     for (const e of game.entities) {
       if (!e || !e.alive || e.isCarrier) continue;
@@ -41463,6 +41484,9 @@ function spawnHitFire(pos, colorHex, ent, scale) {
     if (ent) {
       if (ent._hitFireT && now - ent._hitFireT < (_small ? 0.36 : 0.18)) return;
       ent._hitFireT = now;
+    } else {
+      if (spawnHitFire._wT && now - spawnHitFire._wT < (_small ? 0.15 : 0.05)) return;
+      spawnHitFire._wT = now;
     }
     const col = new THREE.Color((colorHex != null) ? colorHex : 0xff9944);
     const base = (scale || 1) * 5.5;
@@ -45189,10 +45213,11 @@ function fireHitscan(origin, dir, w) {
   }
   const end = origin.clone().add(aimDir.clone().multiplyScalar(levelDist));
   if (game._hubWater) { try { _swWaterCrossSplash(origin.x, origin.y, origin.z, end.x, end.y, end.z, 78, 0.09); } catch (_) {} }
-  if (levelDist < w.range && typeof spawnWallRipple === 'function') {
+  if (levelDist < w.range) {
     const _hsCol = (typeof chassisFlashColor === 'function')
       ? chassisFlashColor(player.loadoutKey) : 0x66ccff;
-    spawnWallRipple(end, _hsCol);
+    if (typeof spawnWallRipple === 'function') spawnWallRipple(end, _hsCol);
+    if (typeof spawnHitFire === 'function') spawnHitFire(end, _hsCol, null, 0.8);
   }
   const tracerColor = chassisFlashColor(player.loadoutKey);
   const isChaingun = (w.fireRate <= 0.10);
@@ -45515,9 +45540,10 @@ function fireSpread(origin, dir, w) {
     const levelDist = raycastLevel(origin, spreadDir, w.range);
     const end = origin.clone().add(spreadDir.clone().multiplyScalar(levelDist));
     spawnPelletBurst(origin, spreadDir, levelDist);
-    if (levelDist < w.range && typeof spawnWallRipple === 'function') {
+    if (levelDist < w.range) {
       const _slCol = (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0xff66ff;
-      spawnWallRipple(end, _slCol);
+      if (typeof spawnWallRipple === 'function') spawnWallRipple(end, _slCol);
+      if (typeof spawnHitFire === 'function') spawnHitFire(end, _slCol, null, 0.6);
     }
     if (net.active && net.sendEvent) {
       net.sendEvent({
@@ -45763,6 +45789,16 @@ function executeAbility(slot, ability) {
         : (_vlGp2 ? player.position.clone().addScaledVector(forward, 1400).sub(_vlGp2).normalize()
                   : forward.clone());
       const beamEnd = _vlOrigin.clone().addScaledVector(_vlDir, range);
+      try {
+        if (typeof raycastLevel === 'function' && typeof spawnHitFire === 'function') {
+          const _vlWall = raycastLevel(_vlOrigin, _vlDir, range);
+          if (_vlWall < range) {
+            spawnHitFire(_vlOrigin.clone().addScaledVector(_vlDir, _vlWall),
+                         (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.VORTEX : 0xaa55ff,
+                         null, 1.25);
+          }
+        }
+      } catch (_) {}
       if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { _swWaterCrossSplash(_vlOrigin.x, _vlOrigin.y, _vlOrigin.z, beamEnd.x, beamEnd.y, beamEnd.z, 110, 0.12); } catch (_) {} }
       const BEAM_RADIUS = 4; 
       const beamLife = 0.22; 
