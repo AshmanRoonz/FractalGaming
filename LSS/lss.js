@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.72';
+const LSS_BUILD = '38.73';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -1733,6 +1733,14 @@ function _buildMatchIdForCurrentMatch() {
   return game._soloMatchId;
 }
 
+function _teamMatchScore(team) {
+  try {
+    if (typeof _isAssault === 'function' && _isAssault() && game.assaultLedger) {
+      return (team === LSS.TEAM_FLEET_A) ? (game.assaultLedger.capsA | 0) : (game.assaultLedger.capsB | 0);
+    }
+    return (team === LSS.TEAM_FLEET_A) ? (game.scoreA | 0) : (game.scoreB | 0);
+  } catch (_) { return null; }
+}
 function _gatherMatchParticipants(winningTeam) {
   const out = [];
   if (player && player.loadoutKey) {
@@ -1747,6 +1755,7 @@ function _gatherMatchParticipants(winningTeam) {
       damage_taken: Math.floor(player.damageTaken || 0),
       is_mvp:       0,    
       is_winner:    (player.team === winningTeam) ? 1 : 0,
+      score:        _teamMatchScore(player.team || LSS.TEAM_FLEET_A),   // (v38.73)
     });
   }
   let botIdx = 0;
@@ -1762,6 +1771,7 @@ function _gatherMatchParticipants(winningTeam) {
       damage_taken: Math.floor(b.damageTaken || 0),
       is_mvp:       0,
       is_winner:    (b.team === winningTeam) ? 1 : 0,
+      score:        _teamMatchScore(b.team || LSS.TEAM_FLEET_A),   // (v38.73)
     });
   }
   for (const np of (net.networkPlayers || [])) {
@@ -1777,6 +1787,7 @@ function _gatherMatchParticipants(winningTeam) {
       damage_taken: Math.floor(np.damageTaken || 0),
       is_mvp:       0,
       is_winner:    (np.team === winningTeam) ? 1 : 0,
+      score:        _teamMatchScore(np.team || LSS.TEAM_FLEET_A),   // (v38.73)
     });
   }
   let mvp = null;

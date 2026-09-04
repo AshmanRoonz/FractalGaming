@@ -250,7 +250,7 @@
     <img src="LSS.png" alt="LSS">
     <div>
       <h1>Leaderboard</h1>
-      <div class="tagline">Last Ship Sailing &mdash; Classic &middot; Race &middot; Assault</div>
+      <div class="tagline">Last Ship Sailing &mdash; Classic &middot; Race &middot; Assault &middot; Endless</div>
     </div>
   </a>
   <div class="nav">
@@ -271,15 +271,17 @@
     <button data-gamemode="classic">Classic</button>
     <button data-gamemode="race">Race</button>
     <button data-gamemode="assault">Assault</button>
+    <button data-gamemode="endless">Endless</button>
+  </div>
+  <div class="toggle-group" id="difficulty-toggle" style="display:none;">
+    <button data-diff="" class="active">All</button>
+    <button data-diff="easy">Easy</button>
+    <button data-diff="medium">Medium</button>
+    <button data-diff="hard">Hard</button>
   </div>
   <label>
     Sort by
-    <select id="sort-select">
-      <option value="wins">Wins</option>
-      <option value="kills">Total Kills</option>
-      <option value="matches">Matches Played</option>
-      <option value="damage">Total Damage</option>
-    </select>
+    <select id="sort-select"></select>
   </label>
   <div class="spacer"></div>
   <div class="refresh-info" id="refresh-info">; ; ;</div>
@@ -288,19 +290,7 @@
 <main>
   <div id="status" class="status-line">Loading leaderboard...</div>
   <table class="lb" id="lb-table" style="display:none;">
-    <thead>
-      <tr>
-        <th class="rank">#</th>
-        <th>Player</th>
-        <th class="right">Matches</th>
-        <th class="right">W-L</th>
-        <th class="right hide-narrow">Win%</th>
-        <th class="right">K/D</th>
-        <th class="right hide-narrow">Avg K</th>
-        <th class="right">Max K</th>
-        <th class="right hide-narrow">Max DMG</th>
-      </tr>
-    </thead>
+    <thead id="lb-head"></thead>
     <tbody id="lb-body"></tbody>
   </table>
 </main>
@@ -318,6 +308,70 @@
   let currentMode = 'multiplayer';
   let currentGamemode = 'all';
   let currentSort = 'wins';
+  let currentDiff = '';   // endless only: '' | easy | medium | hard -> ?map=endless_<diff>
+
+  // ---- Per-board columns and sort options (2026-09-04) ----
+  // Endless is ranked on distance: the API's best_score is the longest single run in
+  // metres, total_score the sum of every run, best_survived the longest run in seconds.
+  // Race adds the fastest winning match (best_time). Classic / assault add MVPs and
+  // the score column the game posts (rounds won / captures).
+  const fmtKm = (m) => (m == null) ? '-' : (Number(m) / 1000).toFixed(2) + ' km';
+  const fmtDur = (sec) => {
+    if (sec == null) return '-';
+    sec = Math.max(0, Math.round(Number(sec)));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s2 = sec % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : String(m)) + ':' + String(s2).padStart(2, '0');
+  };
+  const COL = {
+    matches: { th: 'Matches', cls: 'stat-dim', val: e => fmtNum(e.matches) },
+    runs:    { th: 'Runs',    cls: 'stat-dim', val: e => fmtNum(e.matches) },
+    wl:      { th: 'W-L',     cls: '', val: e => { const l = e.losses != null ? e.losses : Math.max(0, (e.matches || 0) - (e.wins || 0)); return `<span class="stat-good">${fmtNum(e.wins)}</span><span class="stat-dim">-</span><span class="stat-bad">${fmtNum(l)}</span>`; } },
+    winpct:  { th: 'Win%',    cls: 'stat-dim', narrow: true, val: e => fmtPct(e.win_rate) },
+    kd:      { th: 'K/D',     cls: 'stat-prim', val: e => e.kd != null ? Number(e.kd).toFixed(2) : '-' },
+    avgk:    { th: 'Avg K',   cls: 'stat-dim', narrow: true, val: e => e.avg_kills != null ? Number(e.avg_kills).toFixed(1) : '-' },
+    maxk:    { th: 'Max K',   cls: 'peak', val: e => fmtNum(e.max_kills) },
+    maxdmg:  { th: 'Max DMG', cls: 'peak', narrow: true, val: e => fmtNum(e.max_damage) },
+    mvps:    { th: 'MVPs',    cls: 'stat-good', narrow: true, val: e => fmtNum(e.mvps) },
+    rounds:  { th: 'Rounds',  cls: 'stat-dim', narrow: true, val: e => fmtNum(e.total_score) },
+    caps:    { th: 'Captures',cls: 'stat-prim', val: e => fmtNum(e.total_score) },
+    time:    { th: 'Best Time', cls: 'peak', val: e => fmtDur(e.best_time) },
+    bestkm:  { th: 'Best Run', cls: 'stat-prim', val: e => fmtKm(e.best_score) },
+    totalkm: { th: 'Total', cls: 'stat-dim', val: e => fmtKm(e.total_score) },
+    longest: { th: 'Longest', cls: 'peak', narrow: true, val: e => fmtDur(e.best_survived) },
+    kills:   { th: 'Kills',   cls: 'stat-dim', val: e => fmtNum(e.kills) },
+  };
+  const BOARDS = {
+    all:     { cols: ['matches', 'wl', 'winpct', 'kd', 'avgk', 'maxk', 'maxdmg'],
+               sorts: [['wins', 'Wins'], ['kills', 'Total Kills'], ['matches', 'Matches Played'], ['damage', 'Total Damage']], empty: 'matches' },
+    classic: { cols: ['matches', 'wl', 'winpct', 'kd', 'mvps', 'rounds', 'maxk', 'maxdmg'],
+               sorts: [['wins', 'Wins'], ['kills', 'Total Kills'], ['mvps', 'MVPs'], ['total_score', 'Rounds Won'], ['matches', 'Matches Played'], ['damage', 'Total Damage']], empty: 'classic matches' },
+    race:    { cols: ['matches', 'wl', 'winpct', 'time', 'kd', 'mvps', 'maxk'],
+               sorts: [['wins', 'Wins'], ['time', 'Best Time'], ['kills', 'Total Kills'], ['matches', 'Matches Played']], empty: 'races' },
+    assault: { cols: ['matches', 'wl', 'winpct', 'caps', 'kd', 'mvps', 'maxk', 'maxdmg'],
+               sorts: [['wins', 'Wins'], ['total_score', 'Captures'], ['kills', 'Total Kills'], ['mvps', 'MVPs'], ['matches', 'Matches Played'], ['damage', 'Total Damage']], empty: 'assault matches' },
+    endless: { cols: ['runs', 'bestkm', 'totalkm', 'longest', 'kills', 'maxk'],
+               sorts: [['score', 'Best Run'], ['total_score', 'Total Distance'], ['survived', 'Time Survived'], ['kills', 'Total Kills'], ['matches', 'Runs']], empty: 'endless runs' },
+  };
+  function boardFor(gm) { return BOARDS[gm] || BOARDS.all; }
+  function renderHead(board) {
+    const head = document.getElementById('lb-head');
+    head.innerHTML = '<tr><th class="rank">#</th><th>Player</th>' +
+      board.cols.map(k => { const c = COL[k]; return `<th class="right${c.narrow ? ' hide-narrow' : ''}">${c.th}</th>`; }).join('') + '</tr>';
+  }
+  function syncSortOptions(board) {
+    const sel = document.getElementById('sort-select');
+    sel.innerHTML = board.sorts.map(([v, l]) => `<option value="${v}">${l}</option>`).join('');
+    if (!board.sorts.some(([v]) => v === currentSort)) currentSort = board.sorts[0][0];
+    sel.value = currentSort;
+  }
+  function syncControls() {
+    const isEndless = currentGamemode === 'endless';
+    // Endless runs are solo by nature: the Multiplayer / Solo split is meaningless there,
+    // so the board reads every run and the toggle steps aside for the difficulty filter.
+    document.getElementById('mode-toggle').style.display = isEndless ? 'none' : '';
+    document.getElementById('difficulty-toggle').style.display = isEndless ? '' : 'none';
+    syncSortOptions(boardFor(currentGamemode));
+  }
   let lastFetchAt = 0;
   let refreshTimer = null;
 
@@ -373,6 +427,7 @@
       const tr = document.createElement('tr');
       if (me && e.discord_id === me) tr.classList.add('you');
       const losses = e.losses != null ? e.losses : Math.max(0, (e.matches || 0) - (e.wins || 0));
+      const board = boardFor(currentGamemode);
       tr.innerHTML = `
         <td class="rank">${i + 1}</td>
         <td>
@@ -380,15 +435,8 @@
             ${e.avatar_url ? `<img src="${escapeHtml(e.avatar_url)}" alt="">` : ''}
             <span class="name">${escapeHtml(e.display_name || 'Player')}</span>
           </a>
-        </td>
-        <td class="right stat stat-dim">${fmtNum(e.matches)}</td>
-        <td class="right stat"><span class="stat-good">${fmtNum(e.wins)}</span><span class="stat-dim">-</span><span class="stat-bad">${fmtNum(losses)}</span></td>
-        <td class="right stat stat-dim hide-narrow">${fmtPct(e.win_rate)}</td>
-        <td class="right stat stat-prim">${e.kd != null ? Number(e.kd).toFixed(2) : '-'}</td>
-        <td class="right stat stat-dim hide-narrow">${e.avg_kills != null ? Number(e.avg_kills).toFixed(1) : '-'}</td>
-        <td class="right stat peak">${fmtNum(e.max_kills)}</td>
-        <td class="right stat peak hide-narrow">${fmtNum(e.max_damage)}</td>
-      `;
+        </td>` +
+        board.cols.map(k => { const c = COL[k]; return `<td class="right stat ${c.cls}${c.narrow ? ' hide-narrow' : ''}">${c.val(e)}</td>`; }).join('');
       tbody.appendChild(tr);
     });
   }
@@ -398,8 +446,12 @@
     setStatus('Loading...');
     tbl.style.display = 'none';
     try {
+      const isEndless = currentGamemode === 'endless';
       const gmParam = currentGamemode === 'all' ? '' : `&gamemode=${encodeURIComponent(currentGamemode)}`;
-      const url = `${API_BASE}/leaderboard?mode=${encodeURIComponent(currentMode)}&sort=${encodeURIComponent(currentSort)}${gmParam}&limit=100`;
+      const mapParam = (isEndless && currentDiff) ? `&map=${encodeURIComponent('endless_' + currentDiff)}` : '';
+      const modeParam = isEndless ? 'combined' : currentMode;
+      const url = `${API_BASE}/leaderboard?mode=${encodeURIComponent(modeParam)}&sort=${encodeURIComponent(currentSort)}${gmParam}${mapParam}&limit=100`;
+      renderHead(boardFor(currentGamemode));
       const res = await fetch(url);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
@@ -408,11 +460,13 @@
       updateRefreshInfo();
       if (entries.length === 0) {
         tbl.style.display = 'none';
-        const modeLabel = currentMode === 'multiplayer' ? 'multiplayer' : currentMode === 'solo' ? 'solo' : '';
+        document.getElementById('lb-body').innerHTML = '';   // no stale rows from the previous board
+        const modeLabel = (currentGamemode === 'endless') ? '' : currentMode === 'multiplayer' ? 'multiplayer' : currentMode === 'solo' ? 'solo' : '';
+        const what = boardFor(currentGamemode).empty;
         document.getElementById('status').innerHTML = `
           <div class="empty-state">
-            <h2>No ${modeLabel} matches yet</h2>
-            <div>Play a${modeLabel === 'multiplayer' ? ' multiplayer' : modeLabel === 'solo' ? ' solo' : ''} match to seed the leaderboard.</div>
+            <h2>No ${modeLabel} ${what} yet</h2>
+            <div>${currentGamemode === 'endless' ? 'Sign in with Discord and finish an endless run to put your distance on the board.' : 'Play a' + (modeLabel === 'multiplayer' ? ' multiplayer' : modeLabel === 'solo' ? ' solo' : '') + ' match to seed the leaderboard.'}</div>
             <a href="index.html">Play Now</a>
           </div>
         `;
@@ -472,6 +526,20 @@
     document.querySelectorAll('#gamemode-toggle button').forEach(b => {
       b.classList.toggle('active', b.dataset.gamemode === gm);
     });
+    syncControls();
+    loadLeaderboard();
+  });
+
+  // Wire the endless difficulty filter (All / Easy / Medium / Hard)
+  document.getElementById('difficulty-toggle').addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    const d = btn.dataset.diff || '';
+    if (d === currentDiff) return;
+    currentDiff = d;
+    document.querySelectorAll('#difficulty-toggle button').forEach(b => {
+      b.classList.toggle('active', (b.dataset.diff || '') === d);
+    });
     loadLeaderboard();
   });
 
@@ -482,6 +550,7 @@
   });
 
   // Initial load
+  syncControls();
   loadLeaderboard();
   scheduleRefresh();
 </script>

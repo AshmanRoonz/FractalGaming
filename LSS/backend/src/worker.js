@@ -520,15 +520,31 @@ async function handleGetLeaderboard(request, env, origin) {
     // board. best_score_ is a MAX (your best run), not a SUM: totalling runs
     // would reward grinding short ones over one deep run.
     const scoreRanked = SCORE_RANKED_MODES.has(gamemode);
+    // (2026-09-04) More ways to rank a mode board, all from columns the rows
+    // already carry: total_score (endless: total distance; assault: total
+    // captures; classic: total rounds), mvps (SUM is_mvp), survived (SUM
+    // survived_sec = time in a PvE mode), time (race: the FASTEST winning
+    // match, ascending, NULLs last).
     const aggSortCol = ({
-      wins:    'wins_',
-      kills:   'kills_',
-      matches: 'matches_',
-      damage:  'damage_',
-      score:   'best_score_',
+      wins:        'wins_',
+      kills:       'kills_',
+      matches:     'matches_',
+      damage:      'damage_',
+      score:       'best_score_',
+      total_score: 'total_score_',
+      mvps:        'mvps_',
+      survived:    'total_survived_',
+      time:        'best_time_',
     })[sort] || (scoreRanked ? 'best_score_' : 'wins_');
     const tieCol = scoreRanked ? 'best_score_' : 'kills_';
+    const orderClause = (aggSortCol === 'best_time_')
+      ? `ORDER BY (best_time_ IS NULL), best_time_ ASC, ${tieCol} DESC`
+      : `ORDER BY ${aggSortCol} DESC, ${tieCol} DESC`;
     const modeClause = (mode === 'combined') ? '' : 'AND m.mode = ?';
+    // (2026-09-04) Optional per-map filter: endless posts map_key 'endless_<difficulty>',
+    // so ?map=endless_hard is the per-difficulty board; race maps compare like for like.
+    const mapOk = /^[A-Za-z0-9_\-]{1,64}$/.test(map);
+    const mapClause = mapOk ? 'AND m.map_key = ?' : '';
     const stmt = env.DB.prepare(`
       SELECT p.discord_id, p.username, p.display_name, p.avatar_hash,
              COUNT(*)             AS matches_,
@@ -543,18 +559,24 @@ async function handleGetLeaderboard(request, env, origin) {
              MAX(mp.damage_dealt) AS max_damage_,
              MIN(mp.damage_dealt) AS min_damage_,
              MAX(mp.score)        AS best_score_,
-             MAX(mp.survived_sec) AS best_survived_
+             MAX(mp.survived_sec) AS best_survived_,
+             SUM(mp.score)        AS total_score_,
+             SUM(mp.is_mvp)       AS mvps_,
+             SUM(mp.survived_sec) AS total_survived_,
+             MIN(CASE WHEN mp.is_winner = 1 AND m.duration_sec > 0 THEN m.duration_sec END) AS best_time_
       FROM matches m
       JOIN match_participants mp ON mp.match_id = m.id AND mp.reported_by = mp.discord_id
       JOIN players p ON p.discord_id = mp.discord_id
-      WHERE m.validated = 1 AND m.game_mode = ? ${modeClause}
+      WHERE m.validated = 1 AND m.game_mode = ? ${modeClause} ${mapClause}
       GROUP BY mp.discord_id
-      ORDER BY ${aggSortCol} DESC, ${tieCol} DESC
+      ${orderClause}
       LIMIT ?
     `);
-    const bound = (mode === 'combined')
-      ? stmt.bind(gamemode, limit)
-      : stmt.bind(gamemode, mode, limit);
+    const bindArgs = [gamemode];
+    if (mode !== 'combined') bindArgs.push(mode);
+    if (mapOk) bindArgs.push(map);
+    bindArgs.push(limit);
+    const bound = stmt.bind(...bindArgs);
     const aggResult = await bound.all();
     const aggEntries = (aggResult.results || []).map(p => decoratePlayerStats(p));
     await env.CACHE.put(cacheKey, JSON.stringify(aggEntries), { expirationTtl: LEADERBOARD_TTL_SEC });
@@ -624,14 +646,40 @@ async function handleGetPlayer(env, origin, discordId) {
   `).bind(discordId).all();
 
   const recentMatches = await env.DB.prepare(`
-    SELECT m.id, m.started_at, m.ended_at, m.map_key, m.winning_team, m.duration_sec,
-           mp.team, mp.loadout_key, mp.kills, mp.deaths, mp.is_winner, mp.is_mvp
+    SELECT m.id, m.started_at, m.ended_at, m.map_key, m.winning_team, m.duration_sec, m.game_mode,
+           mp.team, mp.loadout_key, mp.kills, mp.deaths, mp.is_winner, mp.is_mvp, mp.score, mp.survived_sec
     FROM matches m
     JOIN match_participants mp ON mp.match_id = m.id
     WHERE m.validated = 1 AND mp.discord_id = ? AND mp.reported_by = ?
     ORDER BY m.started_at DESC
     LIMIT 20
   `).bind(discordId, discordId).all();
+
+  // (2026-09-04) Per-game-mode bests so the profile can show an endless card
+  // (best run, total distance, longest run) and the same for any other
+  // score-carrying mode, without a schema change.
+  const modeBests = await env.DB.prepare(`
+    SELECT m.game_mode AS game_mode, COUNT(*) AS matches_, SUM(mp.is_winner) AS wins_,
+           SUM(mp.kills) AS kills_, MAX(mp.score) AS best_score_, SUM(mp.score) AS total_score_,
+           MAX(mp.survived_sec) AS best_survived_, SUM(mp.survived_sec) AS total_survived_,
+           SUM(mp.is_mvp) AS mvps_,
+           MIN(CASE WHEN mp.is_winner = 1 AND m.duration_sec > 0 THEN m.duration_sec END) AS best_time_
+    FROM matches m
+    JOIN match_participants mp ON mp.match_id = m.id
+    WHERE m.validated = 1 AND mp.discord_id = ? AND mp.reported_by = ? AND m.game_mode IS NOT NULL
+    GROUP BY m.game_mode
+  `).bind(discordId, discordId).all();
+  const modes = {};
+  for (const r of (modeBests.results || [])) {
+    modes[r.game_mode] = {
+      matches: r.matches_ || 0, wins: r.wins_ || 0, kills: r.kills_ || 0, mvps: r.mvps_ || 0,
+      best_score: r.best_score_ == null ? null : r.best_score_,
+      total_score: r.total_score_ == null ? null : r.total_score_,
+      best_survived: r.best_survived_ == null ? null : Math.round(r.best_survived_),
+      total_survived: r.total_survived_ == null ? null : Math.round(r.total_survived_),
+      best_time: r.best_time_ == null ? null : Math.round(r.best_time_ * 10) / 10,
+    };
+  }
 
   const achievements = await env.DB.prepare(`
     SELECT type, achieved_at, match_id FROM achievements
@@ -675,6 +723,7 @@ async function handleGetPlayer(env, origin, discordId) {
     loadout_stats: loadoutStats.results || [],
     recent_matches: recentMatches.results || [],
     achievements: achievements.results || [],
+    modes,   // (2026-09-04) per-game-mode bests (endless distance etc.)
   }, env, origin);
 }
 
@@ -910,6 +959,12 @@ function decoratePlayerStats(p) {
     // UI knows whether to show a score column at all.
     best_score:    p.best_score_    == null ? null : p.best_score_,
     best_survived: p.best_survived_ == null ? null : Math.round(p.best_survived_),
+    // (2026-09-04) totals + peaks the mode boards can rank on. null on the
+    // players-table path (gamemode=all), like best_score.
+    total_score:    p.total_score_    == null ? null : p.total_score_,
+    mvps:           p.mvps_           == null ? null : p.mvps_,
+    total_survived: p.total_survived_ == null ? null : Math.round(p.total_survived_),
+    best_time:      p.best_time_      == null ? null : Math.round(p.best_time_ * 10) / 10,
   };
 }
 
