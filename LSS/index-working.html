@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.54';
+const LSS_BUILD = '38.55';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -40273,6 +40273,50 @@ function _despawnProjectileSilent(p) {
 // Spawn a small lingering pyro flame at the given position. Lasts 2 seconds,
 // emits fire particles each frame, and pops a brief impact light + fire burst
 // on creation. Pure visual; no damage. Used by Pyro main-weapon impacts.
+// (v38.55) A PELLET'S FIRE BURST, IN A CLASS COLOUR. Owner, on the v38.54 version: "i don't
+// like how perfect the circle is, and how it grows and shrinks... it should look more like green
+// explosions, like pyro's fire explosions from his main shot on surfaces, but green".
+// spawnHitFire is a single pooled SPHERE with a sine on its scale - one clean silhouette that
+// pulses, which is exactly what was being described. Pyro's impact never used it: it goes through
+// _makeFireCloudMaterial, a volumetric FBM shader whose vertex displacement billows the hull and
+// whose `discard` eats the rim, so there is no circle left to see.
+// That material already takes a FOUR-STOP RAMP, so the only thing between Pyro's fire and green
+// fire was the colours - and those are DERIVED from the caller's own class colour rather than
+// written down, so this is Slayer's green today and stays correct for anyone else who calls it.
+// The ramp keeps fire's value structure: near-black root, saturated body, the class colour at the
+// hot core, a desaturated near-white tip.
+// It is pushed as `explFireCloud`, the type _spawnExplosionFireCloud already uses, so the
+// animation, the fog injection, the expiry cleanup and both round teardowns own it already -
+// no new lifecycle code, and nothing new that can leak.
+function _spawnClassFireBurst(pos, colorHex, size) {
+  if (typeof game === 'undefined' || !game || !game.worldEffects) return;
+  if (typeof _makeFireCloudMaterial !== 'function' || typeof scene === 'undefined' || !scene) return;
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+  if (!window._fireCloudGeo) window._fireCloudGeo = new THREE.SphereGeometry(1, 16, 12);
+  const sz = size || 12;
+  const base = new THREE.Color((colorHex != null) ? colorHex : 0x44ff66);
+  const hsl = {};
+  base.getHSL(hsl);
+  const mat = _makeFireCloudMaterial({
+    radius: sz * 2.2, alpha: 0.85, oct: 5, gain: 1.0, rise: 2.0,
+    c0: new THREE.Color().setHSL(hsl.h, hsl.s, 0.05).getHex(),          // the shadowed root
+    c1: new THREE.Color().setHSL(hsl.h, hsl.s, 0.26).getHex(),          // the body
+    c2: base.getHex(),                                                  // the hot core
+    c3: new THREE.Color().setHSL(hsl.h, hsl.s * 0.30, 0.90).getHex(),   // the tip, near white
+  });
+  const m = new THREE.Mesh(window._fireCloudGeo, mat);
+  m.position.set(pos.x + (Math.random() - 0.5) * sz * 0.5,
+                 pos.y + (Math.random() - 0.5) * sz * 0.5,
+                 pos.z + (Math.random() - 0.5) * sz * 0.5);
+  m.scale.setScalar(sz * 0.7);
+  m.renderOrder = 1;
+  m.frustumCulled = true;
+  scene.add(m);
+  game.worldEffects.push({
+    type: 'explFireCloud', position: pos.clone(),
+    timer: 0.62, duration: 0.62, fireMeshes: [m], _explSize: sz,
+  });
+}
 function spawnPyroFlame(pos) {
   const eff = {
     type: 'pyro_flame',
@@ -53796,10 +53840,7 @@ function showDirectionalDamage(attacker, projectile) {
 // ship it hit for its short life - a flame left at a world point would be behind the target within
 // a frame at combat speeds - and it is throttled per target, so a Gatling at 20 rounds a second
 // leaves a burning hull rather than a wall of flame.
-// (v38.53) `force` skips the global world throttle. It exists for a deliberate BURST - Slayer's
-// shotgun wants several fires from one trigger pull, and the throttle would collapse them to one.
-// Everything else still goes through the throttle ; a caller using force owns its own budget.
-function spawnHitFire(pos, colorHex, ent, scale, force) {
+function spawnHitFire(pos, colorHex, ent, scale) {
   if (!pos || !game || !game.effects) return;
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   try {
@@ -53812,10 +53853,8 @@ function spawnHitFire(pos, colorHex, ent, scale, force) {
       // (v38.38) A WORLD SURFACE has no entity to hang the throttle on, so it gets a global one.
       // 0.05 s is 20 a second - the gatling's exact fire rate, so on a desktop every shot leaves
       // its mark; a phone gets a third of that, because each flame is a pooled billboard.
-      if (!force) {
-        if (spawnHitFire._wT && now - spawnHitFire._wT < (_small ? 0.15 : 0.05)) return;
-        spawnHitFire._wT = now;
-      }
+      if (spawnHitFire._wT && now - spawnHitFire._wT < (_small ? 0.15 : 0.05)) return;
+      spawnHitFire._wT = now;
     }
     const col = new THREE.Color((colorHex != null) ? colorHex : 0xff9944);
     const base = (scale || 1) * 5.5;
@@ -59582,6 +59621,17 @@ function fireProjectile(origin, dir, w) {
   }
 }
 
+// (v38.55) The per-blast budget for Slayer's fire, shared by all three impact branches - world,
+// hull, leviathan. `i` is the PELLET INDEX, so the cap is per trigger pull rather than per second:
+// a shotgun's whole point is that its pellets land together, and a time throttle would keep one of
+// them and throw the spray away. Three volumetric clouds read as a scatter ; eight is just budget.
+function _slayerFireBurst(pt, col, i) {
+  const K = (typeof window !== 'undefined' && window.__slayerFire) ? window.__slayerFire : null;
+  const n = (K && K.count != null) ? K.count : 3;
+  const sz = (K && K.size != null) ? K.size : 13;
+  if (sz <= 0 || i >= n) return;
+  try { _spawnClassFireBurst(pt, col, sz); } catch (_) {}
+}
 function fireSpread(origin, dir, w) {
   for (let i = 0; i < w.pellets; i++) {
     
@@ -59597,6 +59647,8 @@ function fireSpread(origin, dir, w) {
 
     const levelDist = raycastLevel(origin, spreadDir, w.range);
     const end = origin.clone().add(spreadDir.clone().multiplyScalar(levelDist));
+    // (v38.55) hoisted out of the wall branch below - the hull and leviathan branches want it too
+    const _slCol = (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0xff66ff;
     // Spread weapons now spawn a particle burst along each pellet's
     // path instead of a long tracer beam. The tracer was reading as a laser;
     // a brief shower of warm-colored sparks reads as a shotgun blast (per the
@@ -59605,23 +59657,8 @@ function fireSpread(origin, dir, w) {
     // Wall ripple for every Slayer pellet that hits a
     // wall before max range.
     if (levelDist < w.range) {
-      const _slCol = (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0xff66ff;
       if (typeof spawnWallRipple === 'function') spawnWallRipple(end, _slCol);
-      // (v38.53) BIG GREEN FIRE, LIKE THE MEGA LASER'S. Owner: "make slayer's main weapon do a
-      // similar effect to that mega laser on the surface, but green fire". v38.38 gave each pellet
-      // a 0.6 flame and let the global throttle collapse an 8-pellet blast into one of them ; this
-      // is the other shape entirely - a SCATTER of big ones where the shot actually landed.
-      // The colour is already Slayer's own class green (chassisFlashColor -> 0x44ff66), which is
-      // why nothing is hard-coded here.
-      // The first few pellets force past the throttle and the rest still respect it, so a blast
-      // costs a bounded handful rather than all eight: at fireRate 0.85 that is ~4 a second
-      // against the throttle's own ceiling of 20.
-      if (typeof spawnHitFire === 'function') {
-        const _sfK = (typeof window !== 'undefined' && window.__slayerFire) ? window.__slayerFire : null;
-        const _sfN = (_sfK && _sfK.count != null) ? _sfK.count : 3;
-        const _sfS = (_sfK && _sfK.size != null) ? _sfK.size : 6.5;
-        if (_sfS > 0) spawnHitFire(end, _slCol, null, _sfS, i < _sfN);
-      }
+      _slayerFireBurst(end, _slCol, i);      // (v38.55) fire on the surface it stopped against
     }
     if (net.active && net.sendEvent) {
       net.sendEvent({
@@ -59686,6 +59723,11 @@ function fireSpread(origin, dir, w) {
           // (Pellet weapons fire 12+ pellets per shot — even a small cloud
           // burst per pellet pushes too many particles for the pool.)
           if (!hadShield) spawnImpactSparks(closest, 3);
+          // (v38.55) Owner: "slayer's weapon surface effect didn't work on ships and leviathans".
+          // It could not have: v38.53 hung the fire off the levelDist branch, and that is the
+          // WORLD raycast - a pellet that stopped on a hull never reached the line. A shielded hit
+          // still gets its ripple alone, so the fire stays a mark on bare metal.
+          if (!hadShield) _slayerFireBurst(closest, _slCol, i);
         }
         hitBot = true;
         break;
@@ -59703,6 +59745,7 @@ function fireSpread(origin, dir, w) {
         showHitMarker();
         const hitPt = origin.clone().add(spreadDir.clone().multiplyScalar(bestObstDist));
         spawnImpactSparks(hitPt, 2);
+        _slayerFireBurst(hitPt, _slCol, i);      // (v38.55) leviathans and destructibles too
       }
     }
   }

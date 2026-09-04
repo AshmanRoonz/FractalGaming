@@ -4211,7 +4211,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.54';
+const LSS_BUILD = '38.55';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -31428,6 +31428,35 @@ function _despawnProjectileSilent(p) {
   } catch (_) {}
 }
 
+function _spawnClassFireBurst(pos, colorHex, size) {
+  if (typeof game === 'undefined' || !game || !game.worldEffects) return;
+  if (typeof _makeFireCloudMaterial !== 'function' || typeof scene === 'undefined' || !scene) return;
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+  if (!window._fireCloudGeo) window._fireCloudGeo = new THREE.SphereGeometry(1, 16, 12);
+  const sz = size || 12;
+  const base = new THREE.Color((colorHex != null) ? colorHex : 0x44ff66);
+  const hsl = {};
+  base.getHSL(hsl);
+  const mat = _makeFireCloudMaterial({
+    radius: sz * 2.2, alpha: 0.85, oct: 5, gain: 1.0, rise: 2.0,
+    c0: new THREE.Color().setHSL(hsl.h, hsl.s, 0.05).getHex(),          // the shadowed root
+    c1: new THREE.Color().setHSL(hsl.h, hsl.s, 0.26).getHex(),          // the body
+    c2: base.getHex(),                                                  // the hot core
+    c3: new THREE.Color().setHSL(hsl.h, hsl.s * 0.30, 0.90).getHex(),   // the tip, near white
+  });
+  const m = new THREE.Mesh(window._fireCloudGeo, mat);
+  m.position.set(pos.x + (Math.random() - 0.5) * sz * 0.5,
+                 pos.y + (Math.random() - 0.5) * sz * 0.5,
+                 pos.z + (Math.random() - 0.5) * sz * 0.5);
+  m.scale.setScalar(sz * 0.7);
+  m.renderOrder = 1;
+  m.frustumCulled = true;
+  scene.add(m);
+  game.worldEffects.push({
+    type: 'explFireCloud', position: pos.clone(),
+    timer: 0.62, duration: 0.62, fireMeshes: [m], _explSize: sz,
+  });
+}
 function spawnPyroFlame(pos) {
   const eff = {
     type: 'pyro_flame',
@@ -41512,7 +41541,7 @@ function showDirectionalDamage(attacker, projectile) {
   el.classList.add('pulse');
 }
 
-function spawnHitFire(pos, colorHex, ent, scale, force) {
+function spawnHitFire(pos, colorHex, ent, scale) {
   if (!pos || !game || !game.effects) return;
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   try {
@@ -41522,10 +41551,8 @@ function spawnHitFire(pos, colorHex, ent, scale, force) {
       if (ent._hitFireT && now - ent._hitFireT < (_small ? 0.36 : 0.18)) return;
       ent._hitFireT = now;
     } else {
-      if (!force) {
-        if (spawnHitFire._wT && now - spawnHitFire._wT < (_small ? 0.15 : 0.05)) return;
-        spawnHitFire._wT = now;
-      }
+      if (spawnHitFire._wT && now - spawnHitFire._wT < (_small ? 0.15 : 0.05)) return;
+      spawnHitFire._wT = now;
     }
     const col = new THREE.Color((colorHex != null) ? colorHex : 0xff9944);
     const base = (scale || 1) * 5.5;
@@ -45619,6 +45646,13 @@ function fireProjectile(origin, dir, w) {
   }
 }
 
+function _slayerFireBurst(pt, col, i) {
+  const K = (typeof window !== 'undefined' && window.__slayerFire) ? window.__slayerFire : null;
+  const n = (K && K.count != null) ? K.count : 3;
+  const sz = (K && K.size != null) ? K.size : 13;
+  if (sz <= 0 || i >= n) return;
+  try { _spawnClassFireBurst(pt, col, sz); } catch (_) {}
+}
 function fireSpread(origin, dir, w) {
   for (let i = 0; i < w.pellets; i++) {
     
@@ -45634,16 +45668,11 @@ function fireSpread(origin, dir, w) {
 
     const levelDist = raycastLevel(origin, spreadDir, w.range);
     const end = origin.clone().add(spreadDir.clone().multiplyScalar(levelDist));
+    const _slCol = (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0xff66ff;
     spawnPelletBurst(origin, spreadDir, levelDist);
     if (levelDist < w.range) {
-      const _slCol = (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0xff66ff;
       if (typeof spawnWallRipple === 'function') spawnWallRipple(end, _slCol);
-      if (typeof spawnHitFire === 'function') {
-        const _sfK = (typeof window !== 'undefined' && window.__slayerFire) ? window.__slayerFire : null;
-        const _sfN = (_sfK && _sfK.count != null) ? _sfK.count : 3;
-        const _sfS = (_sfK && _sfK.size != null) ? _sfK.size : 6.5;
-        if (_sfS > 0) spawnHitFire(end, _slCol, null, _sfS, i < _sfN);
-      }
+      _slayerFireBurst(end, _slCol, i);      // (v38.55) fire on the surface it stopped against
     }
     if (net.active && net.sendEvent) {
       net.sendEvent({
@@ -45701,6 +45730,7 @@ function fireSpread(origin, dir, w) {
           player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
           showHitMarker();
           if (!hadShield) spawnImpactSparks(closest, 3);
+          if (!hadShield) _slayerFireBurst(closest, _slCol, i);
         }
         hitBot = true;
         break;
@@ -45717,6 +45747,7 @@ function fireSpread(origin, dir, w) {
         showHitMarker();
         const hitPt = origin.clone().add(spreadDir.clone().multiplyScalar(bestObstDist));
         spawnImpactSparks(hitPt, 2);
+        _slayerFireBurst(hitPt, _slCol, i);      // (v38.55) leviathans and destructibles too
       }
     }
   }
