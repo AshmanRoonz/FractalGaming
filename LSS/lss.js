@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.68';
+const LSS_BUILD = '38.69';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -44525,6 +44525,17 @@ function updateWorldEffects(dt) {
         eff.mesh.quaternion.setFromUnitVectors(_mvUp, eff._fwd);
         eff.mesh.scale.set(_vcbRadius, _vcbRange, _vcbRadius);
         eff.mesh.visible = true;
+        if (game._hubWater && typeof _swWaterCrossSplash === 'function') {
+          eff._splashT = (eff._splashT || 0) - dt;
+          if (eff._splashT <= 0) {
+            eff._splashT = 0.08;
+            try {
+              _swWaterCrossSplash(np.position.x, np.position.y, np.position.z,
+                                  np.position.x + eff._fwd.x * _vcbRange, np.position.y + eff._fwd.y * _vcbRange, np.position.z + eff._fwd.z * _vcbRange,
+                                  140, 0.07);
+            } catch (_) {}
+          }
+        }
         if (eff.mesh.material && eff.mesh.material.uniforms && eff.mesh.material.uniforms.uIntensity) {
           const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
           eff.mesh.material.uniforms.uIntensity.value = breath;
@@ -44808,12 +44819,14 @@ function updateAbilities(dt) {
 
     if (coreName === 'Mega Laser') {
       const range = 4800;      // (v38.40) the core out-reaches the ability, as it should
+      const _mlCol = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.VORTEX : 0xaa55ff;
       const end = _abTmpC.copy(player.position).addScaledVector(forward, range);
       try {
         player._mlProbeT = (player._mlProbeT || 0) - dt;
         if (player._mlProbeT <= 0 && typeof raycastLevel === 'function' && typeof spawnHitFire === 'function') {
           player._mlProbeT = 0.05;
           const _mlD = raycastLevel(player.position, forward, range);
+          player._mlHitDist = _mlD;   // (v38.69) the water splash below stops where the beam does
           if (_mlD < range) {
             const _mlK = (typeof window !== 'undefined' && window.__megaLaser) ? window.__megaLaser : null;
             const _mlS = (_mlK && _mlK.fire != null) ? _mlK.fire : 8;
@@ -44825,6 +44838,18 @@ function updateAbilities(dt) {
           }
         }
       } catch (_) {}
+      if (game._hubWater && typeof _swWaterCrossSplash === 'function') {
+        player._mlSplashT = (player._mlSplashT || 0) - dt;
+        if (player._mlSplashT <= 0) {
+          player._mlSplashT = 0.08;
+          const _mlReach = (player._mlHitDist != null) ? Math.min(range, player._mlHitDist) : range;
+          try {
+            _swWaterCrossSplash(player.position.x, player.position.y, player.position.z,
+                                player.position.x + forward.x * _mlReach, player.position.y + forward.y * _mlReach, player.position.z + forward.z * _mlReach,
+                                140, 0.07);
+          } catch (_) {}
+        }
+      }
       if (!player._vortexCoreBeam) {
         const beamMat = _makeFXMaterial('core_beam');
         if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / 95;
@@ -44940,6 +44965,7 @@ function updateAbilities(dt) {
               }
               spawnDynamicLight(hitPoint, 0xeebbff, 4.0, 600, 0.22);
             }
+            if (dealt > 0 && typeof spawnHitFire === 'function') spawnHitFire(hitPoint, _mlCol, bot, 1.5);
             bot._megaLaserHitMarkerTimer = (bot._megaLaserHitMarkerTimer || 0) - dt;
             if (bot._megaLaserHitMarkerTimer <= 0 && dealt > 0) {
               bot._megaLaserHitMarkerTimer = 0.18;
@@ -44974,6 +45000,7 @@ function updateAbilities(dt) {
               const _hitPt = _abTmpA.set(_objClosestX, _objClosestY, _objClosestZ);
               if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_hitPt, 5);
               spawnDynamicLight(_hitPt, 0xeebbff, 3.0, 500, 0.20);
+              if (typeof spawnHitFire === 'function') spawnHitFire(_hitPt, _mlCol, obst, 1.2);   // (v38.69)
             }
           }
         }
@@ -44996,6 +45023,7 @@ function updateAbilities(dt) {
           if (_mdx * _mdx + _mdy * _mdy + _mdz * _mdz < _mR * _mR) {
             const _mDealt = mon.takeDamage(2500 * dt, 'player', _abTmpA.set(_mCx, _mCy, _mCz));
             if (_mDealt > 0) { player.damageDealt += _mDealt; player.coreMeter = Math.min(100, player.coreMeter + _mDealt / 100); }
+            if (_mDealt > 0 && typeof spawnHitFire === 'function') spawnHitFire(_abTmpA.set(_mCx, _mCy, _mCz), _mlCol, mon, 1.6);   // (v38.69)
           }
         }
       }
