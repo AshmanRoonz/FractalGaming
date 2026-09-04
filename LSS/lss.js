@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.74';
+const LSS_BUILD = '38.75';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -47665,12 +47665,33 @@ function _hlArcLabel(ctx, cx, cy, radPx, midDeg, str, col, fontPx, maxDeg) {
   ctx.drawImage(spr, cx - spr.width / 2, cy - spr.height / 2);
 }
 
-function _hlGaugeLabel(ctx, r, p) {
+function _hlGaugeLabel(ctx, r, p, val) {
   if (!p.lab) return;
   if (typeof input !== 'undefined' && input && input.hudGaugeLabels === false) return;
   const rad = (p.labR != null) ? p.labR * r.vmin : Math.min(r.w, r.h) / 2;
-  _hlArcLabel(ctx, r.cx, r.cy, rad, p.labAt, p.lab,
-    'rgba(226,244,255,0.72)', Math.max(7, r.vmin * 0.88));
+  const fontPx = Math.max(7, r.vmin * 0.88);
+  _hlArcLabel(ctx, r.cx, r.cy, rad, p.labAt, p.lab, 'rgba(226,244,255,0.72)', fontPx);
+  if (!val) return;
+  const m = (_hlGaugeLabel._m = _hlGaugeLabel._m || document.createElement('canvas').getContext('2d'));
+  const fontStr = '700 ' + fontPx.toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif';
+  m.font = fontStr;
+  const labW = m.measureText(p.lab).width + fontPx * 0.10 * (p.lab.length - 1);
+  const valW = m.measureText(val).width;
+  const flip = (((p.labAt % 360) + 360) % 360) < 180;
+  const offRad = (labW / 2 + fontPx * 0.9 + valW / 2) / rad;
+  const a = p.labAt * _HL_D2R + (flip ? -offRad : offRad);
+  hudFont(fontStr);   // before save() — see _hlText
+  ctx.save();
+  ctx.translate(r.cx + Math.cos(a) * rad, r.cy + Math.sin(a) * rad);
+  ctx.rotate(a + (flip ? -Math.PI / 2 : Math.PI / 2));
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(1.6, fontPx * 0.34);
+  ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+  ctx.strokeText(val, 0, 0);
+  ctx.fillStyle = 'rgba(226,244,255,0.92)';
+  ctx.fillText(val, 0, 0);
+  ctx.restore();
 }
 
 function _hlText(ctx, r, p, str, col) {
@@ -47775,11 +47796,11 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
 
   r = _hlPlace(_HL.speed, W, H);
   _hlTicks(ctx, r, _HL.speed, v.speedPct, _HL.speed.col);
-  _hlGaugeLabel(ctx, r, _HL.speed);
+  _hlGaugeLabel(ctx, r, _HL.speed, v.speedStr);   // (v38.75) 'SPEED  ###km/h'
 
   r = _hlPlace(_HL.ammo, W, H);
   _hlTicks(ctx, r, _HL.ammo, v.ammoPct, v.ammoCol || _HL.ammo.col);
-  _hlGaugeLabel(ctx, r, _HL.ammo);
+  _hlGaugeLabel(ctx, r, _HL.ammo, v.ammoFull);    // (v38.75) 'AMMO  ##/##'
 
   r = _hlPlace(_HL.core, W, H);
   _hlSegArc(ctx, r, _HL.core, v.corePct, v.coreCol || _HL.core.col);
@@ -48160,6 +48181,8 @@ function drawCircumpunctHUD() {
       speedPct: speedPct,
       ammoPct: _infAmmo ? 1 : player.clipAmmo / player.maxClip,
       ammoStr: _infAmmo ? 'INF' : String(player.clipAmmo),
+      speedStr: Math.round(player.velocity ? player.velocity.length() : 0) + 'km/h',
+      ammoFull: _infAmmo ? 'INF' : (player.clipAmmo + '/' + player.maxClip),
       ammoCol: player.reloading ? '#ffb020' : null,
       corePct: _corePctDraw, coreCol: _coreCol,
       dashN: player.dashCharges, dashMax: player.maxDashes,

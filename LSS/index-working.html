@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.74';
+const LSS_BUILD = '38.75';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -68641,7 +68641,7 @@ function _hlArcLabel(ctx, cx, cy, radPx, midDeg, str, col, fontPx, maxDeg) {
 // `labR` overrides the text radius in vmin. Needed for the tick strips, whose
 // `r` is where the ticks BEGIN — a label there would sit in the tick roots, so
 // speed and ammo put theirs outside the tick tips instead.
-function _hlGaugeLabel(ctx, r, p) {
+function _hlGaugeLabel(ctx, r, p, val) {
   if (!p.lab) return;
   // (v35.55) Settings > Display > HUD Gauge Labels. Gated HERE rather than at
   // each call site so it covers exactly the six that go through this helper —
@@ -68652,8 +68652,36 @@ function _hlGaugeLabel(ctx, r, p) {
   // alpha) so the captions read as secondary, but 0.76 was tested at 1:1 and
   // came out ~5 px — past discreet into unreadable. Floor at 7 px so it stays
   // legible on a short viewport.
-  _hlArcLabel(ctx, r.cx, r.cy, rad, p.labAt, p.lab,
-    'rgba(226,244,255,0.72)', Math.max(7, r.vmin * 0.88));
+  const fontPx = Math.max(7, r.vmin * 0.88);
+  _hlArcLabel(ctx, r.cx, r.cy, rad, p.labAt, p.lab, 'rgba(226,244,255,0.72)', fontPx);
+  if (!val) return;
+  // (v38.75) THE LIVE VALUE RIDES THE SAME ARC, RIGHT AFTER THE WORD. Owner: "put the actual
+  // speed number readout beside/after the arc'd word speed on the HUD ###km/h, and put the ammo
+  // number ##/## beside ammo". _hlArcLabel caches a sprite per string, which is right for six
+  // fixed captions and wrong for a number that changes every frame (a fresh 300 px canvas per
+  // value, and the cache clearing would evict the captions too), so the value is drawn straight,
+  // tangent to the arc, in the caption's own orientation: the same rotate the caption's
+  // characters get, placed half a word plus a gap further along in the reading direction.
+  const m = (_hlGaugeLabel._m = _hlGaugeLabel._m || document.createElement('canvas').getContext('2d'));
+  const fontStr = '700 ' + fontPx.toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif';
+  m.font = fontStr;
+  const labW = m.measureText(p.lab).width + fontPx * 0.10 * (p.lab.length - 1);
+  const valW = m.measureText(val).width;
+  const flip = (((p.labAt % 360) + 360) % 360) < 180;
+  const offRad = (labW / 2 + fontPx * 0.9 + valW / 2) / rad;
+  const a = p.labAt * _HL_D2R + (flip ? -offRad : offRad);
+  hudFont(fontStr);   // before save() — see _hlText
+  ctx.save();
+  ctx.translate(r.cx + Math.cos(a) * rad, r.cy + Math.sin(a) * rad);
+  ctx.rotate(a + (flip ? -Math.PI / 2 : Math.PI / 2));
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(1.6, fontPx * 0.34);
+  ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+  ctx.strokeText(val, 0, 0);
+  ctx.fillStyle = 'rgba(226,244,255,0.92)';
+  ctx.fillText(val, 0, 0);
+  ctx.restore();
 }
 
 function _hlText(ctx, r, p, str, col) {
@@ -68817,11 +68845,11 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
 
   r = _hlPlace(_HL.speed, W, H);
   _hlTicks(ctx, r, _HL.speed, v.speedPct, _HL.speed.col);
-  _hlGaugeLabel(ctx, r, _HL.speed);
+  _hlGaugeLabel(ctx, r, _HL.speed, v.speedStr);   // (v38.75) 'SPEED  ###km/h'
 
   r = _hlPlace(_HL.ammo, W, H);
   _hlTicks(ctx, r, _HL.ammo, v.ammoPct, v.ammoCol || _HL.ammo.col);
-  _hlGaugeLabel(ctx, r, _HL.ammo);
+  _hlGaugeLabel(ctx, r, _HL.ammo, v.ammoFull);    // (v38.75) 'AMMO  ##/##'
 
   r = _hlPlace(_HL.core, W, H);
   _hlSegArc(ctx, r, _HL.core, v.corePct, v.coreCol || _HL.core.col);
@@ -69367,6 +69395,9 @@ function drawCircumpunctHUD() {
       speedPct: speedPct,
       ammoPct: _infAmmo ? 1 : player.clipAmmo / player.maxClip,
       ammoStr: _infAmmo ? 'INF' : String(player.clipAmmo),
+      // (v38.75) the readouts beside the arc captions
+      speedStr: Math.round(player.velocity ? player.velocity.length() : 0) + 'km/h',
+      ammoFull: _infAmmo ? 'INF' : (player.clipAmmo + '/' + player.maxClip),
       ammoCol: player.reloading ? '#ffb020' : null,
       corePct: _corePctDraw, coreCol: _coreCol,
       dashN: player.dashCharges, dashMax: player.maxDashes,
