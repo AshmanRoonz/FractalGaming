@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.73';
+const LSS_BUILD = '38.74';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -16950,6 +16950,52 @@ function _swBuildHubWater(T) {
     let _reflSkipSet = null;
     let _reflLift = [];
     let _reflPassId = 0;
+    const _reflFxLift = [];
+    const _REFL_FX_TYPES = { tracer: 1, tracerTail: 1, tracerGlow: 1, tracerSpiral: 1, lightning: 1, lightningTube: 1, vortexLaserBeam: 1, siphon_beam: 1, siphonHelix: 1, hitFire: 1, explosionFlash: 1, spark: 1, tether: 1, playerHitSplash: 1 };
+    const _reflFxMat = function (m, G, A, B) {
+      if (!m || m._reflFxT === _reflPassId) return;
+      m._reflFxT = _reflPassId;
+      if (m.uniforms && m.uniforms.uBrightness && typeof m.uniforms.uBrightness.value === 'number') {
+        _reflFxLift.push({ m: m, u: m.uniforms.uBrightness.value });
+        m.uniforms.uBrightness.value *= B;
+        return;
+      }
+      if (!m.color || !m.color.isColor) return;
+      _reflFxLift.push({ m: m, c: m.color.clone(), o: m.opacity });
+      m.color.multiplyScalar(G);
+      if (m.transparent && typeof m.opacity === 'number') m.opacity = Math.min(1, m.opacity * A);
+    };
+    const _reflFxObj = function (o, G, A, B) {
+      if (!o || !o.visible) return;
+      if (o.material) { const _ms = Array.isArray(o.material) ? o.material : [o.material]; for (let _i = 0; _i < _ms.length; _i++) _reflFxMat(_ms[_i], G, A, B); }
+      const _ch = o.children;
+      if (_ch) for (let _i = 0; _i < _ch.length; _i++) { const _c = _ch[_i]; if (_c && _c.material) _reflFxObj(_c, G, A, B); }
+    };
+    const _reflFxBoost = function () {
+      const _W = window.__water || {};
+      if (_W.reflFx === 0) return;
+      const G = (_W.reflFxGain != null) ? _W.reflFxGain : 2.2;
+      const A = (_W.reflFxAlpha != null) ? _W.reflFxAlpha : 2.5;
+      const B = (_W.reflFxBright != null) ? _W.reflFxBright : 2.0;
+      const _fx = game.effects;
+      if (_fx) for (let _i = 0; _i < _fx.length; _i++) { const _e = _fx[_i]; if (_e && _e.mesh && _REFL_FX_TYPES[_e.type]) _reflFxObj(_e.mesh, G, A, B); }
+      const _pj = game.projectiles;
+      if (_pj) for (let _i = 0; _i < _pj.length; _i++) { const _p = _pj[_i]; if (!_p) continue; _reflFxObj(_p.mesh, G, A, B); _reflFxObj(_p.glowMesh, G, A, B); _reflFxObj(_p.hazeMesh, G, A, B); _reflFxObj(_p.trail, G, A, B); }
+      if (typeof player !== 'undefined' && player) {
+        _reflFxObj(player._vortexCoreBeam, G, A, B);
+        if (player._vortexCoreArms) for (let _i = 0; _i < player._vortexCoreArms.length; _i++) _reflFxObj(player._vortexCoreArms[_i], G, A, B);
+      }
+      const _we = game.worldEffects;
+      if (_we) for (let _i = 0; _i < _we.length; _i++) { const _e = _we[_i]; if (_e && _e.type === 'vortex_core_beam_remote' && _e.mesh) _reflFxObj(_e.mesh, G, A, B); }
+    };
+    const _reflFxRestore = function () {
+      for (let _i = 0; _i < _reflFxLift.length; _i++) {
+        const _e = _reflFxLift[_i];
+        if (_e.u != null) { _e.m.uniforms.uBrightness.value = _e.u; }
+        else { _e.m.color.copy(_e.c); if (_e.o != null) _e.m.opacity = _e.o; }
+      }
+      _reflFxLift.length = 0;
+    };
     const _shipReflOverride = function (o) {
       if (_reflSkipSet && _reflSkipSet.indexOf(o) >= 0) return;
       if (!o.isMesh || !o.material) return;
@@ -16963,16 +17009,30 @@ function _swBuildHubWater(T) {
       }
       const _mode = (window.__water && window.__water.reflShip) || ((window.__water && window.__water.reflShipColor === 0) ? 'flat' : 'real');
       if (_mode === 'real') {
-        const _L = (window.__water && window.__water.reflShipLift != null) ? window.__water.reflShipLift : 0.38;
-        if (_L > 0) {
+        const _L = (window.__water && window.__water.reflShipLift != null) ? window.__water.reflShipLift : 1.6;
+        const _E = (window.__water && window.__water.reflShipEnv != null) ? window.__water.reflShipEnv : 3.0;
+        const _G = (window.__water && window.__water.reflShipGlow != null) ? window.__water.reflShipGlow : 2.0;
+        if (_L > 0 || _E !== 1 || _G !== 1) {
           const _ms = Array.isArray(o.material) ? o.material : [o.material];
           for (let _i = 0; _i < _ms.length; _i++) {
             const _mm = _ms[_i];
+            if (_mm && _mm.uniforms && _mm.uniforms.uBrightness && typeof _mm.uniforms.uBrightness.value === 'number' && _mm._reflLiftT !== _reflPassId) {
+              _mm._reflLiftT = _reflPassId;
+              _reflLift.push({ m: _mm, u: _mm.uniforms.uBrightness.value });
+              _mm.uniforms.uBrightness.value *= _G;
+              continue;
+            }
             if (!_mm || !_mm.color || _mm._reflLiftT === _reflPassId) continue;
             _mm._reflLiftT = _reflPassId;
+            if (typeof _mm.envMapIntensity === 'number' && _E !== 1) { _reflLift.push({ m: _mm, env: _mm.envMapIntensity }); _mm.envMapIntensity *= _E; }
+            if (!(_L > 0)) continue;
             if (_mm.emissive && _mm.emissive.isColor) {
-              _reflLift.push({ m: _mm, e: _mm.emissive.clone(), i: _mm.emissiveIntensity });
-              _mm.emissive.copy(_mm.color).multiplyScalar(_L);
+              _reflLift.push({ m: _mm, e: _mm.emissive.clone(), i: _mm.emissiveIntensity, em: _mm.emissiveMap, sw: false });
+              const _rec = _reflLift[_reflLift.length - 1];
+              if (_mm.map && !_mm.emissiveMap) { _mm.emissiveMap = _mm.map; _mm.needsUpdate = true; _rec.sw = true; }
+              const _e0 = _rec.e;
+              const _ei = (_mm.emissiveIntensity != null) ? _mm.emissiveIntensity : 1;
+              _mm.emissive.setRGB(Math.max(_mm.color.r * _L, _e0.r * _ei), Math.max(_mm.color.g * _L, _e0.g * _ei), Math.max(_mm.color.b * _L, _e0.b * _ei));
               _mm.emissiveIntensity = 1;
             } else {
               _reflLift.push({ m: _mm, c: _mm.color.clone() });
@@ -17065,6 +17125,7 @@ function _swBuildHubWater(T) {
       if (_ghostWas) { try { _ghostHullRestore(ship); } catch (_) {} }
       _reflPassId++;                                    // (v38.59) new pass = every material liftable again
       if (_showShip) ship.traverse(_shipReflOverride);
+      try { _reflFxBoost(); } catch (_) {}   // (v38.74) the weapons, brighter for the mirror only
       const _cp = (typeof _SHIPL !== 'undefined' && _SHIPL) ? _SHIPL.coneP : null;
       const _cpWas = !!(_cp && _cp.visible);
       const _cpOp = (_cp && _cp.material) ? _cp.material.opacity : 0;
@@ -17090,7 +17151,8 @@ function _swBuildHubWater(T) {
         if (_wOv) _wO.visible = true;
         if (_wUv) _wU.visible = true;
         if (_cp) { _cp.visible = _cpWas; if (_cp.material) { _cp.material.opacity = _cpOp; if (_cpCol) _cp.material.color.copy(_cpCol); } }   // (v38.50/51/57) back to the direct-view rule, brightness and colour
-        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _reflLift.length; _i++) { const _e = _reflLift[_i]; if (_e.c) _e.m.color.copy(_e.c); else { _e.m.emissive.copy(_e.e); _e.m.emissiveIntensity = _e.i; } } _reflLift.length = 0; for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
+        try { _reflFxRestore(); } catch (_) {}   // (v38.74)
+        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _reflLift.length; _i++) { const _e = _reflLift[_i]; if (_e.u != null) _e.m.uniforms.uBrightness.value = _e.u; else if (_e.env != null) _e.m.envMapIntensity = _e.env; else if (_e.c) _e.m.color.copy(_e.c); else { _e.m.emissive.copy(_e.e); _e.m.emissiveIntensity = _e.i; if (_e.sw) { _e.m.emissiveMap = _e.em || null; _e.m.needsUpdate = true; } } } _reflLift.length = 0; for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
         if (_ghostWas) { try { _ghostHullApply(ship); } catch (_) {} }
       }
       _reflNrm.set(0, 0, 1).applyMatrix4(_reflRot.extractRotation(this.matrixWorld));
@@ -40698,9 +40760,9 @@ function _addGhostHull(mat, K, isGlass) {
 function _ghostSeatWanted() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
   const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
-  if (!game._cockpit3dLive) return false;
-  if (game.thirdPerson && !_vr) return false;
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
+  if (game.thirdPerson && !_vr) return !!game._tpGhost && _ghostHullKnobs().on;
+  if (!game._cockpit3dLive) return false;
   return _ghostHullKnobs().on;
 }
 function _seatViewLive() {
@@ -40873,6 +40935,14 @@ function _lssApplyShipRig(dt) {
       const _bCur = (game._tpBoom == null) ? _bLen : game._tpBoom;
       game._tpBoom = (_bSafe < _bCur) ? _bSafe : Math.min(_bLen, _bCur + (_bSafe - _bCur) * Math.min(1, dt * 4));
       if (game._tpBoom < _bLen - 0.01) _tpOff.multiplyScalar(game._tpBoom / _bLen);
+      {
+        const _hl = (player.chassis && player.chassis.hullLength) || 100;
+        const _TG = window.__tpGhost || {};
+        const _gOn = (_TG.on != null) ? _TG.on : (_hl * 0.55 + 16);
+        const _gOff = (_TG.off != null) ? _TG.off : (_gOn + 14);
+        if (!game._tpGhost && game._tpBoom < _gOn) game._tpGhost = true;
+        else if (game._tpGhost && game._tpBoom > _gOff) game._tpGhost = false;
+      }
       camera.position.add(_tpOff);
       if (!player.mesh.visible) player.mesh.visible = true;
       {
