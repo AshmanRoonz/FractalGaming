@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.66';
+const LSS_BUILD = '38.67';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -8383,7 +8383,7 @@ function _makeHexHologramMaterial(baseColor) {
       '  vec2 p = vUv - 0.5;',
       '  vec2 q = p + vec2(time * 0.012, time * 0.020);',
       '  float h = hex2D(q, 0.07);',
-      '  float edge = 1.0 - smoothstep(0.42, 0.50, h);', 
+      '  float edge = smoothstep(0.42, 0.50, h);',
       
       '  vec2 cell = floor(q / 0.07);',
       '  float r1 = hash21(cell);',
@@ -8392,8 +8392,8 @@ function _makeHexHologramMaterial(baseColor) {
       '  float fres = pow(1.0 - abs(dot(vNormal, viewDir)), 2.0);',
       '  vec3 dyingTint = vec3(1.0, 0.35, 0.30);',
       '  vec3 col = mix(dyingTint, uColor, uHp);',
-      '  float bright = edge * 1.4 + fres * 0.6 + crack * 0.8;',
-      '  float alpha = edge * 0.28 + fres * 0.16 + crack * 0.45;',
+      '  float bright = edge * 1.4 + fres * 0.3 + crack * 0.8;',
+      '  float alpha = edge * 0.28 + fres * 0.08 + crack * 0.45;',
       '  alpha *= (0.45 + 0.55 * uHp);',
       '  alpha = clamp(alpha, 0.0, 0.55);',
       '  alpha *= uAlphaMul;',
@@ -16573,6 +16573,7 @@ function _fishSchoolInit(T) {
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.frustumCulled = false; mesh.position.set(0, 0, 0); mesh.visible = false;
+    mesh.renderOrder = -2;   // (v38.67) below the water surface (ro -1): draw first so it keeps tinting them
     scene.add(mesh);
     F.gpu = gpu; F.velVar = velVar; F.posVar = posVar; F.geo = geo; F.mat = mat; F.mesh = mesh; F.texW = texW; F.frame = 0; F.acc = 0; F.WL = WL; F.T = T; F.shown = false;
     if (F.liveCount) geo.setDrawRange(0, F.liveCount * 9);
@@ -16768,7 +16769,7 @@ function _swBuildHubWaterDispGet(WL) {
   const mesh = new THREE.Mesh(geo, mat);
   mesh.rotation.x = -Math.PI / 2;
   mesh.position.set(0, WL, 0);
-  mesh.renderOrder = 0; mesh.frustumCulled = false; mesh.visible = false;
+  mesh.renderOrder = -1; mesh.frustumCulled = false; mesh.visible = false;   // (v38.67) -1: see the hub water note
   mesh.userData = { isHubWater: true, WL: WL };
   scene.add(mesh);
   _hubWaterDisp = mesh;
@@ -16927,6 +16928,22 @@ function _swBuildHubWater(T) {
       const _shields = [];
       if (ship && ship.userData && ship.userData.shieldMesh) _shields.push(ship.userData.shieldMesh);
       if (typeof player !== 'undefined' && player) { const _ak = ['_gunShieldMesh', '_thermalShieldMesh', '_vortexShieldMesh', '_swordBlockMesh']; for (let _i = 0; _i < _ak.length; _i++) { if (player[_ak[_i]]) _shields.push(player[_ak[_i]]); } }
+      if (game.worldEffects && !(window.__water && window.__water.reflWalls)) {
+        for (let _i = 0; _i < game.worldEffects.length; _i++) {
+          const _e = game.worldEffects[_i];
+          if (!_e || _e.type !== 'particle_wall') continue;
+          if (_e.mesh) _shields.push(_e.mesh);
+          if (_e.edgeMesh) _shields.push(_e.edgeMesh);
+          if (_e.plasmaMesh) _shields.push(_e.plasmaMesh);
+        }
+      }
+      if (game.entities) {
+        for (let _i = 0; _i < game.entities.length; _i++) {
+          const _en = game.entities[_i];
+          const _sm = _en && _en.mesh && _en.mesh !== ship && _en.mesh.userData && _en.mesh.userData.shieldMesh;
+          if (_sm) _shields.push(_sm);
+        }
+      }
       const _shieldsWas = _shields.map(function (m) { return m.visible; });
       for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = false;
       _reflSkipSet = _shields;
@@ -16978,7 +16995,7 @@ function _swBuildHubWater(T) {
     
     const undMat = new THREE.MeshBasicMaterial({ color: 0x12455a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });   
     const und = new THREE.Mesh(geo.clone(), undMat);
-    und.rotation.x = -Math.PI / 2; und.renderOrder = 0; und.frustumCulled = false; und.matrixAutoUpdate = false;   
+    und.rotation.x = -Math.PI / 2; und.renderOrder = -1; und.frustumCulled = false; und.matrixAutoUpdate = false;   // (v38.67) -1 with the surface   
     und.position.set(camera.position.x, WL, camera.position.z); und.updateMatrix();
     und.userData = { isHubWater: true };
     und.visible = false;
@@ -16996,7 +17013,7 @@ function _swBuildHubWater(T) {
   }
   mesh.rotation.x = -Math.PI / 2;     
   mesh.position.set(camera.position.x, WL, camera.position.z);
-  mesh.renderOrder = 0;
+  mesh.renderOrder = -1;
   mesh.frustumCulled = false;
   mesh.matrixAutoUpdate = false;
   mesh.userData = Object.assign(mesh.userData || {}, { isHubWater: true, WL: WL });
@@ -17328,7 +17345,7 @@ function _swBuildHubWaterOverlay(WL) {
   }
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(camera.position.x, WL + 1.0, camera.position.z);   
-  mesh.renderOrder = 0;            
+  mesh.renderOrder = -1;           // (v38.67) with the surface, see the hub water note
   mesh.frustumCulled = false; mesh.matrixAutoUpdate = false; mesh.updateMatrix();
   mesh.userData = { isHubWater: true };
   scene.add(mesh);
@@ -40969,6 +40986,7 @@ function _adsOverlayRender() {
     try {
       renderer.autoClear = false;
       scene.background = null;
+      renderer.clearDepth();
       renderer.render(scene, _adsOvCam);
     } finally {
       renderer.autoClear = _prevAC;
