@@ -4272,7 +4272,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.22';
+const LSS_BUILD = '38.23';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -12825,7 +12825,8 @@ function handleNetEvent(evt, fromPeerId) {
     try {
       if (evt.cyber) {
         net.cyber = true;
-        game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false };
+        game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false,
+                  round: 1, ledger: { capsA: 0, capsB: 0, attA: 0, attB: 0 } };
       }
     } catch (_) {}
     // (v30.63) Adopt our open-solo team NOW so the fleet strip sorts
@@ -12980,6 +12981,16 @@ function handleNetEvent(evt, fromPeerId) {
       C.sector = evt.sector | 0;
       C.started = true;
       try { _cyberApplyStart(evt.sector | 0, evt.t, evt.fx, evt.fy, evt.fz); } catch (_) {}
+    }
+    return;
+  }
+  // (v38.23) a ROUND's verdict. The peer books the same ledger entry, shows the same banner and
+  // resets on its own clock ; the authority's next cyber_start is what rebuilds the world, so the
+  // two cannot disagree about where the new carrier launched.
+  if (evt.type === 'cyber_round') {
+    const C = game._cyber;
+    if (C && !C.authority) {
+      try { _cyberRoundEnd(C, evt.win, evt.title || 'ROUND OVER', evt.sub || '', true); } catch (_) {}
     }
     return;
   }
@@ -29608,7 +29619,9 @@ function _hubCityDispose() {
 // cruise (frac is a multiple of a dreadnought's flight speed, 0.5 by the owner's spec).
 const CARRIER = {
   file: 'carrier.glb',
-  frac: 0.5,          // of CHASSIS.DREADNOUGHT.flightSpeed (250) -> 125 u/s
+  // (v38.23) 0.5 -> 0.38 : owner, "it got to the target pretty fast". A quarter off the
+  // cruise buys the defenders about a minute more of approach to shoot at.
+  frac: 0.38,         // of CHASSIS.DREADNOUGHT.flightSpeed (250) -> 95 u/s
   hp: 400000,
   alt: 1200,          // cruise height above the city pad
   // (v37.73) SIZED AGAINST THE BLASTER, not by a raw multiplier (owner: "it needs to be like 6x the
@@ -30541,7 +30554,7 @@ function _cyberPrePlace() {
     let team = C.teamA;
     try { team = (net.active ? _cyberTeamForPeer(net.myPeerId, C) : C.teamA); } catch (_) {}
     player.team = team;
-    if (team === C.teamA) {
+    if (team === _cyberAtkFleet(C)) {
       // the attackers' side: the carrier's launch ring. A joiner has no sector yet and waits for
       // the authority's cyber_start, so it stands off the city instead.
       if (C.sector == null && (!net.active || C.authority)) C.sector = Math.floor(Math.random() * 6);
@@ -30565,9 +30578,31 @@ function _cyberPrePlace() {
 }
 function startCyberpunkCity() {
   _cyberPrefetch();
-  game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false };
+  game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false,
+                  round: 1, ledger: { capsA: 0, capsB: 0, attA: 0, attB: 0 } };
   try { net.cyber = true; } catch (_) {}     // (v37.80) marks the ROOM, so peers and the bot
   startFreeFlight();                          //          roster authority both behave
+}
+// (v38.23) WHO IS ATTACKING THIS ROUND. The assault pattern, for the same reason it was chosen
+// there: role is a pure function of the round number, so nothing is reassigned when the sides swap
+// and no peer has to be told. Odd rounds the A fleet flies the carrier, even rounds the B fleet
+// does - and a player who stormed the city in round 1 defends it in round 2 without their team
+// ever changing (owner: "teams should switch sides after either destroying the carrier or a
+// capture").
+function _cyberAtkFleet(C) {
+  C = C || (typeof game !== 'undefined' ? game._cyber : null);
+  const A = (C && C.teamA != null) ? C.teamA : LSS.TEAM_FLEET_A;
+  const B = (C && C.teamB != null) ? C.teamB : LSS.TEAM_FLEET_B;
+  return ((((C && C.round) || 1) % 2) === 1) ? A : B;
+}
+function _cyberDefFleet(C) {
+  C = C || (typeof game !== 'undefined' ? game._cyber : null);
+  const A = (C && C.teamA != null) ? C.teamA : LSS.TEAM_FLEET_A;
+  const B = (C && C.teamB != null) ? C.teamB : LSS.TEAM_FLEET_B;
+  return ((((C && C.round) || 1) % 2) === 1) ? B : A;
+}
+function _cyberPlayerAttacks(C) {
+  try { return player.team === _cyberAtkFleet(C); } catch (_) { return true; }
 }
 // (v37.80) The mode's authority is the same peer the champion field and the campaign hoard already
 // trust: the lowest peer id. Solo, amStasisOwner() is true, so every path below is a no-op wrapper.
@@ -30579,7 +30614,10 @@ function _cyberApplyStart(sector, routeT, fx, fy, fz) {
   const C = game._cyber;
   if (!C) return;
   try { _carrierSpawn({ sector: sector }); } catch (_) {}
-  try { _carrier.team = C.teamA; if (_carrier.ent) _carrier.ent.team = C.teamA; } catch (_) {}
+  try {
+    const _atk = _cyberAtkFleet(C);
+    _carrier.team = _atk; if (_carrier.ent) _carrier.ent.team = _atk;
+  } catch (_) {}
   if (typeof routeT === 'number' && isFinite(routeT)) _carrier.t = routeT;
   if (typeof fx === 'number' && typeof StasisField === 'function') {
     try {
@@ -30660,8 +30698,10 @@ function _cyberSpawnBots(C) {
   try {
     if (net.active) {
       const ids = [net.myPeerId, ...(typeof nonJudgePeerIds === 'function' ? nonJudgePeerIds() : [])].sort();
-      for (const id of ids) (_cyberTeamForPeer(id, C) === C.teamA ? humanA++ : humanD++);
-    } else { humanA = 1; }
+      const _atkF = _cyberAtkFleet(C);
+      for (const id of ids) (_cyberTeamForPeer(id, C) === _atkF ? humanA++ : humanD++);
+    } else if (_cyberPlayerAttacks(C)) { humanA = 1; }   // (v38.23) ...on the side they are on
+    else { humanD = 1; }                                //   this round, not always the attack
   } catch (_) { humanA = 1; }
   const nA = (K.attackers != null) ? K.attackers : Math.max(0, team - humanA);
   const nD = (K.defenders != null) ? K.defenders : Math.max(0, team - humanD);
@@ -30675,8 +30715,8 @@ function _cyberSpawnBots(C) {
     game.entities.push(b);
     C.bots.push(b);
   };
-  for (let i = 0; i < nA; i++) make(C.teamA, true, i);
-  for (let i = 0; i < nD; i++) make(C.teamB, false, i);
+  for (let i = 0; i < nA; i++) make(_cyberAtkFleet(C), true, i);
+  for (let i = 0; i < nD; i++) make(_cyberDefFleet(C), false, i);
 }
 // A downed bot comes back at its own team's spawn. Bot.die() only unlinks the mesh, so a revive is
 // a re-add plus a reset - and an ATTACKER with no carrier simply never comes back, which is the
@@ -30697,10 +30737,98 @@ function _cyberReviveBots(C, dt) {
     if (b.mesh) { b.mesh.position.copy(sp); if (!b.mesh.parent) scene.add(b.mesh); }
   }
 }
+// (v38.23) MATCH LEDGER, assault's shape and assault's reasoning. Net captures = caps - failed
+// attacks = 2*caps - attackRounds. A fleet takes the match at net >= the spread with the higher
+// net, and ONLY when both fleets have attacked the same number of times - so whichever side
+// happened to fly the carrier first gets no extra-round advantage out of it.
+function _cyberLedgerApply(C, winnerTeam) {
+  const L = C.ledger || (C.ledger = { capsA: 0, capsB: 0, attA: 0, attB: 0 });
+  const atk = _cyberAtkFleet(C);
+  if (atk === C.teamA) { L.attA++; if (winnerTeam === C.teamA) L.capsA++; }
+  else { L.attB++; if (winnerTeam === C.teamB) L.capsB++; }
+}
+function _cyberMatchWinner(C) {
+  const L = C && C.ledger; if (!L) return 0;
+  if (L.attA !== L.attB) return 0;
+  const netA = 2 * L.capsA - L.attA, netB = 2 * L.capsB - L.attB;
+  const S = (window.__cyber && window.__cyber.spread != null) ? window.__cyber.spread
+          : ((typeof LSS !== 'undefined' && LSS.ASSAULT_NET_SPREAD) || 2);
+  if (netA >= S && netA > netB) return C.teamA;
+  if (netB >= S && netB > netA) return C.teamB;
+  return 0;
+}
+function _cyberScoreLine(C) {
+  const L = C && C.ledger; if (!L) return '';
+  let mineA = true;
+  try { mineA = (player.team === C.teamA); } catch (_) {}
+  return 'captures ' + (mineA ? L.capsA : L.capsB) + ' - ' + (mineA ? L.capsB : L.capsA);
+}
+// One round is over. Book it, and either swap the sides for the next one or call the match.
+function _cyberRoundEnd(C, winnerTeam, title, sub, fromNet) {
+  if (C.over || C.matchOver) return;
+  // (v37.80) one verdict per round: the authority decides and broadcasts, peers only mirror.
+  if (!fromNet && net.active && !C.authority) return;
+  C.over = true;
+  _cyberLedgerApply(C, winnerTeam);            // BEFORE the round number moves - the ledger reads
+  const champ = _cyberMatchWinner(C);          //   the ENDING round's attacker off it
+  if (!fromNet && net.active && net.sendEvent) {
+    try { net.sendEvent({ type: 'cyber_round', win: winnerTeam, title: title, sub: sub }); } catch (_) {}
+  }
+  let mine = false;
+  try { mine = (player.team === winnerTeam); } catch (_) {}
+  try {
+    if (window.Overlays && Overlays.banner) {
+      Overlays.banner(title, (sub ? sub + '  \u00b7  ' : '') + (mine ? 'round to you' : 'round to them'));
+    }
+  } catch (_) {}
+  try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+  if (champ) {
+    let win = false;
+    try { win = (player.team === champ); } catch (_) {}
+    setTimeout(() => { try { _cyberEnd(C, win ? 'VICTORY' : 'DEFEAT', _cyberScoreLine(C), true); } catch (_) {} }, 3200);
+    return;
+  }
+  setTimeout(() => { try { _cyberNextRound(C); } catch (e) { console.warn('[cyber] next round:', e); } }, 5000);
+}
+// Tear the round down and build the next one. Everything the round owns is rebuilt from scratch -
+// a new launch ring, a new objective, both wings - and because the roles are a function of the
+// round number, the sides have swapped by the time _cyberSetup reads them.
+function _cyberNextRound(C) {
+  if (!C || C.matchOver) return;
+  C.round = (C.round || 1) + 1;
+  try { _carrierClear(); } catch (_) {}
+  try { _carrier.dead = false; } catch (_) {}
+  try { if (C.field && C.field.destroy) C.field.destroy(); } catch (_) {}
+  C.field = null;
+  try { game.championField = null; game.championSpawned = false; } catch (_) {}
+  for (const b of C.bots) {
+    try { if (b && b.destroy) b.destroy(); } catch (_) {}
+    try { if (b && b.mesh && b.mesh.parent) scene.remove(b.mesh); } catch (_) {}
+    try { const i = game.entities.indexOf(b); if (i >= 0) game.entities.splice(i, 1); } catch (_) {}
+  }
+  C.bots.length = 0;
+  C.started = false; C.over = false; C.lost = false; C.hold = 0; C.deadT = 0;
+  C.sector = null; C.prePlaced = false;
+  C._aimedAtField = false; C._wingLaunched = false; C._noSpawnSaid = false;
+  C._fieldT = 0; C._cityT = 0;
+  try { _cyberSetup(C); } catch (e) { console.warn('[cyber] setup:', e); }
+  // the pilot comes back - on the deck if this round is theirs to attack (C.placeT + the deck
+  // placer own that), out over the city if it is theirs to defend
+  try {
+    if (player.shipState === 'dead' && typeof respawnPlayer === 'function') respawnPlayer();
+  } catch (_) {}
+  try {
+    if (!_cyberPlayerAttacks(C) && typeof HUB_CITY !== 'undefined' && HUB_CITY) {
+      player.position.set(HUB_CITY.x + 1400, (HUB_CITY.padY || 300) + 900, HUB_CITY.z + 1400);
+      if (player.velocity) player.velocity.set(0, 0, 0);
+    }
+  } catch (_) {}
+}
 function _cyberEnd(C, title, sub, fromNet) {
-  if (C.over) return;
+  if (C.matchOver) return;
   // (v37.80) one verdict per match: the authority decides and broadcasts, peers only mirror.
   if (!fromNet && net.active && !C.authority) return;
+  C.matchOver = true;
   C.over = true;
   if (!fromNet && net.active && net.sendEvent) {
     try { net.sendEvent({ type: 'cyber_end', title: title, sub: sub }); } catch (_) {}
@@ -30744,15 +30872,18 @@ function _cyberCityDefence(C) {
   if (!game.entities || !HUB_CITY) return;
   let inside = false;
   try {
+    // (v38.23) ...and only against an ATTACKER. On a defender's round this was the city shooting
+    // the pilot who is there to defend it.
     const dx = player.position.x - HUB_CITY.x, dz = player.position.z - HUB_CITY.z;
     const R = ((HUB_CITY.genome && HUB_CITY.genome.radius) || 7500) + 1200;
-    inside = (player.shipState !== 'dead') && (dx * dx + dz * dz < R * R);
+    inside = _cyberPlayerAttacks(C) && (player.shipState !== 'dead') && (dx * dx + dz * dz < R * R);
   } catch (_) {}
   if (inside === C._cityHot) return;
   C._cityHot = inside;
+  const _defF = _cyberDefFleet(C);
   for (const e of game.entities) {
     if (!e || !e.isHubTraffic) continue;
-    if (inside) { e.team = C.teamB; e.aggro = true; }
+    if (inside) { e.team = _defF; e.aggro = true; }
     else if (!e._dmgLog) { e.aggro = false; }   // one that was actually shot stays angry
   }
 }
@@ -30761,7 +30892,7 @@ function _cyberCityDefence(C) {
 // and simply declines in the overworld.
 function _cyberCinematic(C) {
   if (typeof _cinematic === 'undefined' || !_cinematic || !_carrier.obj) return false;
-  if (player.team !== C.teamA) return false;          // defenders are already in the city
+  if (!_cyberPlayerAttacks(C)) return false;           // defenders are already in the city
   const list = [];
   if (player && player.mesh) list.push({ mesh: player.mesh, isPlayer: true, ent: null });
   for (const b of C.bots) if (b && b._cyberAttacker && b.mesh) list.push({ mesh: b.mesh, isPlayer: false, ent: b });
@@ -30905,7 +31036,7 @@ function _cyberDeckPlace(C) {
   if (_carrier._cineLights && !(typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) {
     try { _cyberCineLightOff(); } catch (_) {}
   }
-  if (!C || !C.started || player.team !== C.teamA) return false;
+  if (!C || !C.started || !_cyberPlayerAttacks(C)) return false;
   try {
     const d = _carrierDeckSpot(0);
     if (!d) return false;
@@ -30959,10 +31090,15 @@ function _cyberSetup(C) {
     // (v38.00) Half a second, not two and a half. Since v37.94 the ship is already standing on
     // the deck before the world is baked, so this only has to survive the single frame in which
     // free flight places the player - and a longer pin reads as being stuck to the carrier.
-    C.placeT = 0.5;
+    C.placeT = _cyberPlayerAttacks(C) ? 0.5 : 0;    // (v38.23) a defender has no deck to hold
     try { _cyberDeckPlace(C); } catch (_) {}
     try {
-      if (window.Overlays && Overlays.banner) Overlays.banner('CYBERPUNK CITY', 'take the field in the city');
+      if (window.Overlays && Overlays.banner) {
+        const _rn = C.round || 1;
+        Overlays.banner(_rn > 1 ? ('ROUND ' + _rn) : 'CYBERPUNK CITY',
+                        _cyberPlayerAttacks(C) ? 'launch from the carrier and take the field'
+                                               : 'hold the field - stop the carrier');
+      }
     } catch (_) {}
   }
 }
@@ -31052,9 +31188,14 @@ function _cyberFrame(dt) {
   const F = C.field;
   if (F && F.position) {
     const R = (F.radius || 50) + 120;
-    let held = false;
+    let held = false, contested = false;
+    // (v38.23) the pilot counts for the side they are ON this round. Before the sides swapped
+    // there was only one of those, so the player was simply assumed to be attacking - which on an
+    // even round would have had a defender capturing their own field for the enemy.
     try {
-      if (player && player.shipState !== 'dead' && player.position.distanceTo(F.position) < R) held = true;
+      if (player && player.shipState !== 'dead' && player.position.distanceTo(F.position) < R) {
+        if (_cyberPlayerAttacks(C)) held = true; else contested = true;
+      }
     } catch (_) {}
     if (!held) {
       for (const b of C.bots) {
@@ -31062,46 +31203,80 @@ function _cyberFrame(dt) {
       }
     }
     // a defender inside the ring contests it and freezes the count
-    let contested = false;
-    for (const b of C.bots) {
-      if (b && b.alive && !b._cyberAttacker && b.position.distanceTo(F.position) < R) { contested = true; break; }
+    if (!contested) {
+      for (const b of C.bots) {
+        if (b && b.alive && !b._cyberAttacker && b.position.distanceTo(F.position) < R) { contested = true; break; }
+      }
     }
+    // (v38.23) THE CARRIER COUNTS. Owner: it "reached the championship field and sat on it and
+    // nobody could capture it". Since v38.01 it flies the whole way and ARRIVES - 1370 units of
+    // hull with a collision body, parked on a ring 170 across. Neither side can be inside that
+    // ring any more, so the count could never start and the round could never end. Station-keeping
+    // over the objective IS the attack succeeding: the carrier holds the field, and since nothing
+    // can stand inside a hull nothing contests it, so it runs out on its own - the owner's
+    // "automatic win", reached by the rules rather than by a special case.
+    let carrierOn = false;
+    try {
+      if (_carrier.obj && _carrier.ent && _carrier.ent.alive) {
+        const _cr = R + _carrierLength() * 0.35;
+        carrierOn = Math.hypot(_carrier.obj.position.x - F.position.x,
+                               _carrier.obj.position.z - F.position.z) < _cr;
+      }
+    } catch (_) {}
+    if (carrierOn) { held = true; contested = false; }
     const need = (window.__cyber && window.__cyber.capture != null) ? window.__cyber.capture : CYBER.capture;
     if (held && !contested) {
       const was = C.hold;
       C.hold += (dt || 0.016);
-      if (was < 0.05) { try { if (window.Overlays && Overlays.banner) Overlays.banner('CAPTURING', 'hold the field'); } catch (_) {} }
-      if (C.hold >= need) _cyberEnd(C, 'ATTACKERS WIN', 'the field is taken');
+      if (was < 0.05) {
+        try {
+          if (window.Overlays && Overlays.banner) {
+            if (carrierOn) Overlays.banner('CARRIER ON STATION', 'the field is under its guns');
+            else Overlays.banner('CAPTURING', 'hold the field');
+          }
+        } catch (_) {}
+      }
+      if (C.hold >= need) {
+        _cyberRoundEnd(C, _cyberAtkFleet(C), 'FIELD TAKEN',
+                       carrierOn ? 'the carrier holds it' : 'the attack holds it');
+      }
     } else if (C.hold > 0) {
       C.hold = Math.max(0, C.hold - (dt || 0.016) * 0.5);   // slips back at half speed
     }
   }
 
-  // ---- the other way it ends: the carrier is down and so is every attacker
+  // ---- the other way it ends: the carrier is down. (v38.23) It used to wait for the carrier
+  // AND every last attacker, which with deck respawns gone was a slow bleed with the result
+  // already known. Owner: "teams should switch sides after either destroying the carrier or a
+  // capture" - so the wreck is the verdict, after a beat for the explosion to read.
   if (_carrier.dead) {
-    let anyAttacker = false;
-    try { if (player && player.shipState !== 'dead') anyAttacker = true; } catch (_) {}
-    if (!anyAttacker) {
-      for (const b of C.bots) if (b && b.alive && b._cyberAttacker) { anyAttacker = true; break; }
-    }
-    if (!anyAttacker) {
-      C.deadT = (C.deadT || 0) + (dt || 0.016);
-      if (C.deadT > 2.5) _cyberEnd(C, 'DEFENDERS WIN', 'the carrier and its wing are gone');
-    } else {
-      C.deadT = 0;
-    }
+    C.deadT = (C.deadT || 0) + (dt || 0.016);
+    if (C.deadT > 2.5) _cyberRoundEnd(C, _cyberDefFleet(C), 'CARRIER DOWN', 'the field holds');
   }
 }
 if (typeof window !== 'undefined') {
   window.__cyber = window.__cyber || {};
+  // force this round's verdict without flying it: __cyber.win('atk') / __cyber.win('def')
+  window.__cyber.win = (side) => {
+    const C = game._cyber;
+    if (!C || !C.armed) return 'not in cyberpunk city';
+    const atk = (side !== 'def');
+    _cyberRoundEnd(C, atk ? _cyberAtkFleet(C) : _cyberDefFleet(C),
+                   atk ? 'FIELD TAKEN' : 'CARRIER DOWN', 'forced');
+    return window.__cyber.state();
+  };
   window.__cyber.state = () => {
     const C = game._cyber;
     if (!C) return null;
     return {
-      started: !!C.started, over: !!C.over, carrierLost: !!C.lost,
+      started: !!C.started, over: !!C.over, matchOver: !!C.matchOver, carrierLost: !!C.lost,
+      round: C.round || 1, ledger: C.ledger, attackers: _cyberAtkFleet(C),
+      youAttack: _cyberPlayerAttacks(C),
       hold: +(C.hold || 0).toFixed(1), need: (window.__cyber.capture != null) ? window.__cyber.capture : CYBER.capture,
-      attackersAlive: (player && player.shipState !== 'dead' ? 1 : 0) + C.bots.filter(b => b && b.alive && b._cyberAttacker).length,
-      defendersAlive: C.bots.filter(b => b && b.alive && !b._cyberAttacker).length,
+      attackersAlive: ((player && player.shipState !== 'dead' && _cyberPlayerAttacks(C)) ? 1 : 0) +
+                      C.bots.filter(b => b && b.alive && b._cyberAttacker).length,
+      defendersAlive: ((player && player.shipState !== 'dead' && !_cyberPlayerAttacks(C)) ? 1 : 0) +
+                      C.bots.filter(b => b && b.alive && !b._cyberAttacker).length,
       bots: C.bots.length, field: C.field ? C.field.position.toArray().map(Math.round) : null,
       cityHot: !!C._cityHot,
       plan: C.bots.filter(b => b && b.alive).map(b => (b._cyberAttacker ? 'A' : 'D') +
@@ -55953,7 +56128,8 @@ function respawnPlayer() {
   // (v37.78) CYBERPUNK CITY: "if the carrier is destroyed, they get no more spawns" - and that has
   // to include the pilot, not just the bots. With the deck gone the attacker stays down, which is
   // what lets the defenders' win condition resolve.
-  if (game._cyber && game._cyber.armed && typeof _carrier !== 'undefined' && _carrier.dead) {
+  if (game._cyber && game._cyber.armed && typeof _carrier !== 'undefined' && _carrier.dead &&
+      (typeof _cyberPlayerAttacks !== 'function' || _cyberPlayerAttacks(game._cyber))) {
     try {
       if (!game._cyber._noSpawnSaid) {
         game._cyber._noSpawnSaid = true;
@@ -57240,217 +57416,10 @@ function _lssCockpitLights() {
 // the chase view and every other ship keep the painted hull. Behind window.__cockpit.ghost =
 // { on, core, rim, tint, mix, flicker } (on by default while the owner judges it).
 const _ghostHullTimeU = { value: 0 };
-// ============================================================================
-// (v38.22) THE GHOST LAB - live tuning for the seat view's shell.
-//   __ghostLab()        open / close
-//   __ghostLab(false)   close
-// Everything here writes window.__cockpit and nothing else: _ghostHullSync re-reads the knobs and
-// calls _ghostHullTune every frame, so each slider lands on the very next frame with no rebuild.
-// Open it, take the seat (first person, 3D cockpit on), and fly.
-// ============================================================================
-const _GHOST_LAB_ROWS = [
-  { k: 'core',      lo: 0,    hi: 0.60, st: 0.005, d: 0.09,  t: 'flat panels - how solid the hull skin reads' },
-  { k: 'rim',       lo: 0,    hi: 1.50, st: 0.01,  d: 0.44,  t: 'edges - how hard a crease catches the light' },
-  { k: 'mix',       lo: 0,    hi: 1.00, st: 0.01,  d: 0.30,  t: 'how far the shell pulls toward its tint' },
-  { k: 'glow',      lo: 0,    hi: 3.00, st: 0.01,  d: 0.85,  t: 'additive rim - what makes it dominate a dark view' },
-  { k: 'flicker',   lo: 0,    hi: 1.00, st: 0.01,  d: 0.25,  t: 'hologram jitter - 0 is perfectly steady' },
-  { k: 'glassCore', lo: 0,    hi: 0.60, st: 0.005, d: 0.10,  t: 'canopy zone: panels' },
-  { k: 'glassRim',  lo: 0,    hi: 1.50, st: 0.01,  d: 0.30,  t: 'canopy zone: edges' },
-  { k: 'order',     lo: 0,    hi: 5000, st: 100,   d: 4000,  t: 'draw order - above water and city glass at 4000' },
-];
-const _GHOST_LAB_EYE = [
-  { k: 'fwd',   lo: -60, hi: 60, st: 1, d: 0, t: 'seat forward / back, in game units' },
-  { k: 'up',    lo: -40, hi: 40, st: 1, d: 0, t: 'seat up / down' },
-  { k: 'right', lo: -40, hi: 40, st: 1, d: 0, t: 'seat left / right' },
-];
-let _ghostLabEl = null;
-function _ghostLabCfg() {
-  const W = (window.__cockpit = window.__cockpit || {});
-  W.ghost = W.ghost || {};
-  W.eye = W.eye || {};
-  return W;
-}
-function _ghostLabExport() {
-  const W = _ghostLabCfg(), G = W.ghost, E = W.eye;
-  const hex = (v) => '0x' + ((v >>> 0) & 0xffffff).toString(16).padStart(6, '0');
-  const out = {
-    ship: (typeof player !== 'undefined' && player && player.loadoutKey) || null,
-    ghost: {
-      on: G.on !== false,
-      tint: (G.tint != null) ? hex(G.tint) : null,   // null = follow the ship's class colour
-    },
-    eye: {},
-  };
-  for (const r of _GHOST_LAB_ROWS) out.ghost[r.k] = (typeof G[r.k] === 'number') ? +G[r.k].toFixed(4) : r.d;
-  for (const r of _GHOST_LAB_EYE) out.eye[r.k] = (typeof E[r.k] === 'number') ? +E[r.k].toFixed(2) : r.d;
-  return out;
-}
-function _ghostLabClose() {
-  if (_ghostLabEl && _ghostLabEl.parentNode) _ghostLabEl.parentNode.removeChild(_ghostLabEl);
-  _ghostLabEl = null;
-}
-function _ghostLabOpen() {
-  if (_ghostLabEl) { _ghostLabClose(); return; }
-  const W = _ghostLabCfg();
-  const el = document.createElement('div');
-  _ghostLabEl = el;
-  el.id = 'ghost-lab';
-  el.style.cssText = [
-    'position:fixed', 'top:12px', 'left:12px', 'z-index:99999',
-    'width:320px', 'max-height:calc(100vh - 24px)', 'overflow-y:auto',
-    'background:rgba(8,14,22,0.90)', 'border:1px solid rgba(120,220,255,0.45)',
-    'border-radius:10px', 'padding:12px 14px 14px',
-    'font:11px/1.45 "Courier New",monospace', 'color:#cfe9ff',
-    'box-shadow:0 8px 40px rgba(0,0,0,0.6)', 'backdrop-filter:blur(3px)',
-  ].join(';');
-  // the panel must never eat flight input
-  ['keydown', 'keyup', 'keypress'].forEach(t => el.addEventListener(t, e => e.stopPropagation()));
-  el.addEventListener('mousedown', e => e.stopPropagation());
-  el.addEventListener('wheel', e => e.stopPropagation());
-
-  const h = document.createElement('div');
-  h.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:8px';
-  h.innerHTML = '<span style="letter-spacing:3px;color:#8ad8ff;font-weight:bold">GHOST LAB</span>';
-  const x = document.createElement('button');
-  x.textContent = 'close';
-  x.style.cssText = 'background:rgba(255,80,80,0.18);color:#ff9a9a;border:1px solid rgba(255,110,110,0.5);border-radius:5px;padding:2px 9px;cursor:pointer;font:10px "Courier New",monospace';
-  x.onclick = _ghostLabClose;
-  h.appendChild(x);
-  el.appendChild(h);
-
-  const note = document.createElement('div');
-  note.style.cssText = 'color:rgba(200,230,255,0.5);margin-bottom:10px';
-  note.textContent = 'first person + 3D cockpit to see it. every knob lands next frame.';
-  el.appendChild(note);
-
-  const mkRow = (store, r, after) => {
-    const wrap = document.createElement('div');
-    wrap.style.cssText = 'margin-bottom:9px';
-    const lab = document.createElement('div');
-    lab.style.cssText = 'display:flex;justify-content:space-between;color:#bfe4ff';
-    const val = document.createElement('span');
-    val.style.color = '#ffd27a';
-    const cur = (typeof store[r.k] === 'number') ? store[r.k] : r.d;
-    val.textContent = (r.st < 1) ? cur.toFixed(3) : String(Math.round(cur));
-    lab.innerHTML = '<span>' + r.k + '</span>';
-    lab.appendChild(val);
-    const sl = document.createElement('input');
-    sl.type = 'range'; sl.min = r.lo; sl.max = r.hi; sl.step = r.st; sl.value = cur;
-    sl.style.cssText = 'width:100%;margin:3px 0 1px;accent-color:#8ad8ff';
-    sl.oninput = () => {
-      const v = parseFloat(sl.value);
-      store[r.k] = v;
-      val.textContent = (r.st < 1) ? v.toFixed(3) : String(Math.round(v));
-      if (after) after();
-    };
-    const tip = document.createElement('div');
-    tip.style.cssText = 'color:rgba(190,220,255,0.42);font-size:10px';
-    tip.textContent = r.t;
-    wrap.appendChild(lab); wrap.appendChild(sl); wrap.appendChild(tip);
-    el.appendChild(wrap);
-    return { sl, val, row: r };
-  };
-
-  const ctrls = [];
-  // ---- on / off + tint --------------------------------------------------------------------
-  const top = document.createElement('div');
-  top.style.cssText = 'display:flex;gap:8px;align-items:center;margin-bottom:10px';
-  const onBtn = document.createElement('button');
-  const paintOn = () => {
-    const isOn = W.ghost.on !== false;
-    onBtn.textContent = isOn ? 'shell ON' : 'shell OFF';
-    onBtn.style.background = isOn ? 'rgba(120,255,170,0.16)' : 'rgba(255,255,255,0.07)';
-    onBtn.style.color = isOn ? '#7dffa8' : '#9fb4c8';
-  };
-  onBtn.style.cssText = 'border:1px solid rgba(120,220,255,0.4);border-radius:5px;padding:3px 10px;cursor:pointer;font:10px "Courier New",monospace';
-  onBtn.onclick = () => { W.ghost.on = (W.ghost.on === false); paintOn(); };
-  paintOn();
-  const col = document.createElement('input');
-  col.type = 'color';
-  col.style.cssText = 'width:36px;height:24px;background:none;border:1px solid rgba(120,220,255,0.4);border-radius:5px;cursor:pointer';
-  const liveTint = () => {
-    try { return (typeof _ghostHullTint === 'function') ? _ghostHullTint() : 0x8ad8ff; } catch (_) { return 0x8ad8ff; }
-  };
-  col.value = '#' + ((liveTint() >>> 0) & 0xffffff).toString(16).padStart(6, '0');
-  col.oninput = () => { W.ghost.tint = parseInt(col.value.slice(1), 16); };
-  const themeBtn = document.createElement('button');
-  themeBtn.textContent = 'ship theme';
-  themeBtn.title = 'follow the hull’s own class colour';
-  themeBtn.style.cssText = 'border:1px solid rgba(120,220,255,0.4);border-radius:5px;padding:3px 8px;cursor:pointer;font:10px "Courier New",monospace;background:rgba(255,255,255,0.06);color:#bfe4ff';
-  themeBtn.onclick = () => {
-    delete W.ghost.tint;
-    col.value = '#' + ((liveTint() >>> 0) & 0xffffff).toString(16).padStart(6, '0');
-  };
-  top.appendChild(onBtn); top.appendChild(col); top.appendChild(themeBtn);
-  el.appendChild(top);
-
-  for (const r of _GHOST_LAB_ROWS) ctrls.push(mkRow(W.ghost, r));
-
-  const eh = document.createElement('div');
-  eh.style.cssText = 'margin:12px 0 7px;letter-spacing:2px;color:#8ad8ff';
-  eh.textContent = 'SEAT';
-  el.appendChild(eh);
-  for (const r of _GHOST_LAB_EYE) ctrls.push(mkRow(W.eye, r));
-
-  // ---- export -----------------------------------------------------------------------------
-  const bar = document.createElement('div');
-  bar.style.cssText = 'display:flex;gap:6px;margin-top:12px';
-  const mkBtn = (label, fn, tint) => {
-    const b = document.createElement('button');
-    b.textContent = label;
-    b.style.cssText = 'flex:1;border:1px solid ' + tint + ';border-radius:5px;padding:5px 0;cursor:pointer;' +
-      'font:10px "Courier New",monospace;background:rgba(255,255,255,0.06);color:#dff0ff';
-    b.onclick = fn;
-    bar.appendChild(b);
-    return b;
-  };
-  const out = document.createElement('textarea');
-  out.readOnly = true;
-  out.style.cssText = 'width:100%;height:120px;margin-top:9px;background:rgba(0,0,0,0.45);color:#a8e6ff;' +
-    'border:1px solid rgba(120,220,255,0.25);border-radius:6px;font:10px/1.4 "Courier New",monospace;padding:6px;resize:vertical';
-  const refreshOut = () => { out.value = JSON.stringify(_ghostLabExport(), null, 2); };
-  mkBtn('copy json', () => {
-    refreshOut();
-    try { navigator.clipboard.writeText(out.value); } catch (_) { out.select(); document.execCommand('copy'); }
-    out.style.borderColor = 'rgba(120,255,170,0.7)';
-    setTimeout(() => { out.style.borderColor = 'rgba(120,220,255,0.25)'; }, 500);
-  }, 'rgba(120,220,255,0.4)');
-  mkBtn('download', () => {
-    refreshOut();
-    try {
-      const blob = new Blob([out.value], { type: 'application/json' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'ghost_' + ((_ghostLabExport().ship || 'ship').toLowerCase()) + '.json';
-      document.body.appendChild(a); a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-    } catch (_) {}
-  }, 'rgba(120,220,255,0.4)');
-  mkBtn('reset', () => {
-    for (const r of _GHOST_LAB_ROWS) W.ghost[r.k] = r.d;
-    for (const r of _GHOST_LAB_EYE) W.eye[r.k] = r.d;
-    delete W.ghost.tint;
-    W.ghost.on = true;
-    for (const c of ctrls) {
-      const store = (_GHOST_LAB_EYE.indexOf(c.row) >= 0) ? W.eye : W.ghost;
-      c.sl.value = store[c.row.k];
-      c.val.textContent = (c.row.st < 1) ? (+store[c.row.k]).toFixed(3) : String(Math.round(store[c.row.k]));
-    }
-    col.value = '#' + ((liveTint() >>> 0) & 0xffffff).toString(16).padStart(6, '0');
-    paintOn(); refreshOut();
-  }, 'rgba(255,180,90,0.45)');
-  el.appendChild(bar);
-  el.appendChild(out);
-  refreshOut();
-  document.body.appendChild(el);
-  return 'ghost lab open - fly first person to judge it';
-}
-if (typeof window !== 'undefined') {
-  window.__ghostLab = function (open) {
-    if (open === false) { _ghostLabClose(); return 'closed'; }
-    return _ghostLabOpen();
-  };
-}
+// (v38.22/23) The ghost lab is a SEPARATE FILE - LSS/ghost_lab.html, next to fx_lab and
+// map_lab. It loads the real hulls, seats the camera on cockpit1 and runs the exact shader
+// below, and exports a window.__cockpit block to paste in here. The panel that briefly lived
+// in this file is gone: a dev UI does not belong in the shipped game.
 function _ghostHullTint() {
   const G = window.__cockpit && window.__cockpit.ghost;
   if (G && G.tint != null) return G.tint;

@@ -1,0 +1,950 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LSS Ghost Lab ; the seat view of a ship's interior</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /*
+    LSS GHOST LAB. Companion to fx_lab / map_lab / sound_lab.
+
+    What it is: the pilot's own hull, seen from the pilot's own seat, with the
+    ghost shell on it and every knob that shapes it exposed. Tune it here, export
+    the JSON, paste it into window.__cockpit in the game.
+
+    Why it is faithful: the shell shader, the material rebuild, the model scale,
+    the env map, the light rig and the seat-marker maths below are PORTED from
+    LSS/index-working.html, not approximated. Where a number came from the game
+    it is labelled with the game's own name for it. If the game's shader changes,
+    this file has to change with it - that is the price of a lab that tells the
+    truth.
+
+    Known differences from the live game, all deliberate:
+      - no HUD, no cockpit PNG frames, no weapons ; the shell is the subject
+      - post is the game's cineFX stack (RenderPass -> UnrealBloom -> OutputPass,
+        ACES @ 0.78), NOT the legacy composite with its colour grade
+      - the backdrops are cheap stand-ins for the real maps. They exist to put
+        the right RANGE of luminance behind the shell (a night city, a noon sky,
+        a black cavern), because that is what decides whether the additive rim
+        reads as a hologram or as a whiteout.
+  */
+  :root {
+    --bg: #050510;
+    --bg-elev: #0d0d1c;
+    --bg-row: #0a0a1a;
+    --text: #d8d8e0;
+    --text-dim: #888899;
+    --text-faint: #555566;
+    --accent: #ffaa00;
+    --accent-dim: rgba(255,170,0,0.35);
+    --rule: rgba(80,80,120,0.3);
+    --good: #66cc66;
+    --bad: #ff6644;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font-family: 'JetBrains Mono', 'Courier New', monospace;
+    font-size: 12px; line-height: 1.4; height: 100%;
+  }
+  #app { display: grid; grid-template-columns: 1fr 380px; height: 100vh; }
+  #stage { background: #000; position: relative; overflow: hidden; cursor: grab; }
+  #stage.dragging { cursor: grabbing; }
+  #stage canvas { display: block; }
+  .stage-label {
+    position: absolute; top: 14px; left: 14px;
+    color: var(--accent); font-size: 14px; letter-spacing: 4px;
+    text-transform: uppercase; text-shadow: 0 0 12px rgba(0,0,0,0.9);
+    pointer-events: none;
+  }
+  .stage-tag {
+    position: absolute; top: 34px; left: 14px;
+    color: var(--text-dim); font-size: 10px; letter-spacing: 1.5px;
+    text-transform: uppercase; pointer-events: none;
+    text-shadow: 0 0 10px rgba(0,0,0,0.9);
+  }
+  .stage-hint {
+    position: absolute; bottom: 12px; right: 14px;
+    color: var(--text-faint); font-size: 10px; pointer-events: none;
+    text-shadow: 0 0 10px rgba(0,0,0,0.9);
+  }
+  .stage-btns { position: absolute; bottom: 12px; left: 14px; display: flex; gap: 8px; }
+  .stage-btns button {
+    background: rgba(12,12,26,0.82); border: 1px solid var(--rule); color: var(--text-dim);
+    padding: 6px 14px; font-family: inherit; font-size: 10px; letter-spacing: 1.5px;
+    text-transform: uppercase; cursor: pointer; border-radius: 3px;
+  }
+  .stage-btns button:hover { color: var(--text); border-color: var(--accent-dim); }
+  .stage-btns button.active { color: #101018; background: var(--accent); border-color: var(--accent); }
+
+  #panel { background: var(--bg-elev); border-left: 1px solid var(--rule); overflow-y: auto; padding: 14px; }
+  #panel h2 {
+    font-size: 10px; letter-spacing: 2.5px; text-transform: uppercase;
+    color: var(--accent); margin: 18px 0 8px; padding-bottom: 5px;
+    border-bottom: 1px solid var(--rule);
+  }
+  #panel h2:first-child { margin-top: 0; }
+  .note { color: var(--text-faint); font-size: 10px; line-height: 1.5; margin: -2px 0 8px; }
+  .note b { color: var(--text-dim); font-weight: normal; }
+
+  .row { margin-bottom: 9px; }
+  .row .head { display: flex; align-items: baseline; gap: 8px; }
+  .row .head label { flex: 1; color: var(--text); font-size: 11px; }
+  .row .head .val { color: var(--accent); font-size: 11px; min-width: 52px; text-align: right; }
+  .row .desc { color: var(--text-faint); font-size: 10px; margin: 1px 0 2px; }
+  input[type="range"] { width: 100%; accent-color: var(--accent); margin: 0; height: 16px; }
+  input[type="color"] { width: 46px; height: 26px; padding: 0; background: var(--bg-row); border: 1px solid var(--rule); border-radius: 3px; cursor: pointer; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+  .chip {
+    background: var(--bg-row); border: 1px solid var(--rule); color: var(--text-dim);
+    padding: 5px 9px; font-family: inherit; font-size: 10px; letter-spacing: 1px;
+    cursor: pointer; border-radius: 3px;
+  }
+  .chip:hover { color: var(--text); }
+  .chip.on { color: #101018; font-weight: bold; }
+
+  .btnrow { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+  .btnrow button {
+    flex: 1; min-width: 88px; background: var(--bg-row); border: 1px solid var(--rule);
+    color: var(--text-dim); padding: 7px 8px; font-family: inherit; font-size: 10px;
+    letter-spacing: 1px; text-transform: uppercase; cursor: pointer; border-radius: 3px;
+  }
+  .btnrow button:hover { color: var(--text); border-color: var(--accent-dim); }
+  .btnrow button.warn:hover { border-color: rgba(255,120,80,0.5); color: #ffb0a0; }
+
+  #json-out {
+    width: 100%; height: 240px; background: #06060e; color: #9fd8b0;
+    border: 1px solid var(--rule); border-radius: 3px; padding: 8px;
+    font-family: inherit; font-size: 10px; line-height: 1.45; resize: vertical;
+  }
+  .flash { color: var(--good); }
+</style>
+</head>
+<body>
+
+<div id="app">
+  <div id="stage">
+    <div class="stage-label">Ghost Lab</div>
+    <div class="stage-tag" id="stage-tag">loading&hellip;</div>
+    <div class="stage-btns">
+      <button id="v-seat" class="active">Seat</button>
+      <button id="v-out">Outside</button>
+      <button id="v-shell" class="active">Shell on</button>
+    </div>
+    <div class="stage-hint">drag&nbsp;=&nbsp;look &nbsp;&middot;&nbsp; wheel&nbsp;=&nbsp;dolly (outside) &nbsp;&middot;&nbsp; 1-7&nbsp;=&nbsp;ship &nbsp;&middot;&nbsp; R&nbsp;=&nbsp;recentre</div>
+  </div>
+  <div id="panel"></div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader }      from 'three/addons/loaders/GLTFLoader.js';
+import { EffectComposer }  from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }      from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass }      from 'three/addons/postprocessing/OutputPass.js';
+
+// ===========================================================================
+// SHIP TABLE - the numbers the game fits each hull with: SHIP_MODELS
+// (scaleMult, faceRotY), CHASSIS (hullLength), LSS.CLASS_COLORS.
+// The scale matters: the seat nudge below is in GAME UNITS, so it only
+// transfers if the hull here is the size it is in the game.
+// ===========================================================================
+const VISUAL_SCALE_BOOST = 1.55;              // game constant
+const FACE_ROT_Y = Math.PI / 2;               // every hull, SHIP_MODELS.faceRotY
+const SHIPS = {
+  BLASTER:  { file: 'blaster.glb',  hullLength: 140, scaleMult: 1.05, color: 0x44eeff, chassis: 'Dreadnought' },
+  PYRO:     { file: 'pyro.glb',     hullLength: 140, scaleMult: 1.05, color: 0xff3322, chassis: 'Dreadnought' },
+  PUNCTURE: { file: 'puncture.glb', hullLength:  80, scaleMult: 1.10, color: 0xffee44, chassis: 'Frigate'     },
+  SLAYER:   { file: 'slayer.glb',   hullLength:  80, scaleMult: 1.10, color: 0x44ff66, chassis: 'Frigate'     },
+  TRACKER:  { file: 'tracker.glb',  hullLength: 100, scaleMult: 1.00, color: 0xff8800, chassis: 'Corvette'    },
+  VORTEX:   { file: 'vortex.glb',   hullLength: 100, scaleMult: 1.15, color: 0xaa55ff, chassis: 'Corvette'    },
+  SYPHON:   { file: 'syphon.glb',   hullLength: 100, scaleMult: 1.10, color: 0x4488ff, chassis: 'Corvette'    },
+};
+const SHIP_KEYS = Object.keys(SHIPS);
+
+// ===========================================================================
+// KNOB TABLES. k = the key on window.__cockpit, d = the game's current default.
+// Change a default here ONLY when it has been changed in the game too.
+// ===========================================================================
+const GHOST_ROWS = [
+  { k: 'core',      lo: 0, hi: 0.60, st: 0.005, d: 0.09, t: 'flat panels - how solid the hull skin reads. The eye sits at the hull centre, so a look out crosses four to eight layers of this and it compounds fast.' },
+  { k: 'rim',       lo: 0, hi: 1.50, st: 0.01,  d: 0.44, t: 'edges - alpha on the fresnel term. This is what draws the airframe: creases and silhouette solid, panels see-through.' },
+  { k: 'mix',       lo: 0, hi: 1.00, st: 0.01,  d: 0.30, t: 'how far the lit hull colour is pulled toward the tint, before any of the above.' },
+  { k: 'glow',      lo: 0, hi: 3.00, st: 0.01,  d: 0.85, t: 'how hard the rim ADDS light. Against a night city this term, not alpha, is what makes the shell dominate the view.' },
+  { k: 'flicker',   lo: 0, hi: 1.00, st: 0.01,  d: 0.25, t: 'hologram jitter + scanline drift. 1 = the leviathans’ full jitter, 0 = perfectly steady.' },
+  { k: 'glassCore', lo: 0, hi: 0.60, st: 0.005, d: 0.10, t: 'canopy zone: panels. INERT on today’s hulls - see the note under this section.' },
+  { k: 'glassRim',  lo: 0, hi: 1.50, st: 0.01,  d: 0.30, t: 'canopy zone: edges. Same - inert until a hull ships a separate glass material again.' },
+  { k: 'order',     lo: 0, hi: 8000, st: 100,   d: 4000, t: 'renderOrder. The hub water plane follows the ship and the city glass sorts by its own centre, so both tie with the hull on depth ; a high order settles the toss. No visible effect in this lab - nothing here ties with it.' },
+];
+const EYE_ROWS = [
+  { k: 'fwd',   lo: -60, hi: 60, st: 0.5, d: 0, t: 'toward the nose. The pipeline drops cockpit1 at the model ORIGIN on every hull, so this is the whole seat placement.' },
+  { k: 'up',    lo: -40, hi: 40, st: 0.5, d: 0, t: 'toward the canopy.' },
+  { k: 'right', lo: -40, hi: 40, st: 0.5, d: 0, t: 'toward the starboard wing.' },
+];
+const LIGHT_ROWS = [
+  { k: 'key',  lo: 0,  hi: 3000, st: 10, d: 700, t: 'warm KEY, low and in front - the dash glow bouncing up. Candela ; it competes with a 2.3-intensity sun.' },
+  { k: 'fill', lo: 0,  hi: 2000, st: 10, d: 280, t: 'cool FILL, high and behind - sky through the canopy.' },
+  { k: 'dist', lo: 20, hi: 600,  st: 5,  d: 160, t: 'falloff distance for both. Short = the interior only ; long = the shell lights up from the inside.' },
+];
+const SCENE_ROWS = [   // lab-only, never exported
+  { k: 'fov',      lo: 60,  hi: 120, st: 1,    d: 90,   t: 'the game default is 90 (input.fovDeg).' },
+  { k: 'exposure', lo: 0.2, hi: 2,   st: 0.01, d: 0.78, t: 'ACES exposure. cineFX uses 0.78.' },
+  { k: 'bloom',    lo: 0,   hi: 1.5, st: 0.01, d: 0.35, t: 'UnrealBloom strength. The game runs 0.35 / radius 0.55 / threshold 1.0 - bloom is half of how the glow term reads.' },
+];
+
+// ===========================================================================
+// PLACES - what is behind the shell. That is the variable which actually
+// decides whether a setting works, so it gets first-class treatment.
+// ===========================================================================
+const PLACES = {
+  hub: {
+    name: 'Hub noon', tag: 'open world, sun up',
+    sky: [0x7fb2e8, 0xdfeaf5], ground: 0x3a4a2a, fog: 0.000035, city: 0, stars: 0,
+    // _lssApplyHubLighting(true)
+    amb: 0.14, sun: 3.0, sunCol: 0xfff3e0, fill: 0.03, rim: 0.02, hemi: 0.30, hSky: 0x9fc8e8, hGnd: 0x3a4a2a,
+  },
+  city: {
+    name: 'Cyberpunk city', tag: 'night, neon under you',
+    sky: [0x05060f, 0x1a1030], ground: 0x07070e, fog: 0.00009, city: 1, stars: 1,
+    amb: 0.10, sun: 0.35, sunCol: 0x9fb8ff, fill: 0.05, rim: 0.10, hemi: 0.22, hSky: 0x2a3a6a, hGnd: 0x140a1e,
+  },
+  arena: {
+    name: 'Arena', tag: 'the default light rig',
+    sky: [0x101830, 0x2a3a58], ground: 0x1a2030, fog: 0.00004, city: 0, stars: 1,
+    // the scene's own baseline lights
+    amb: 0.85, sun: 2.3, sunCol: 0xbfd9ff, fill: 0.50, rim: 0.28, hemi: 0.40, hSky: 0x6688cc, hGnd: 0x224466,
+  },
+  cavern: {
+    name: 'Cavern', tag: 'sandwich, lid on',
+    sky: [0x04060a, 0x0a1016], ground: 0x0a0e12, fog: 0.00016, city: 0, stars: 0,
+    amb: 0.16, sun: 0.30, sunCol: 0x8fb0d0, fill: 0.04, rim: 0.06, hemi: 0.18, hSky: 0x21405a, hGnd: 0x0a1014,
+  },
+  voidp: {
+    name: 'Void', tag: 'nothing behind it',
+    sky: [0x000000, 0x000000], ground: null, fog: 0, city: 0, stars: 0,
+    amb: 0.10, sun: 1.2, sunCol: 0xbfd9ff, fill: 0.10, rim: 0.10, hemi: 0.10, hSky: 0x223344, hGnd: 0x111111,
+  },
+};
+
+// ===========================================================================
+// STATE
+// ===========================================================================
+const S = {
+  ship: 'VORTEX',
+  view: 'seat',
+  ghost: {}, eye: {}, light: {}, scene: {},
+  tintPin: null,          // '#rrggbb' or null = follow the ship's class colour
+  place: 'city',
+  flares: true,
+};
+function resetAll() {
+  for (const r of GHOST_ROWS) S.ghost[r.k] = r.d;
+  for (const r of EYE_ROWS)   S.eye[r.k]   = r.d;
+  for (const r of LIGHT_ROWS) S.light[r.k] = r.d;
+  for (const r of SCENE_ROWS) S.scene[r.k] = r.d;
+  S.tintPin = null;
+  S.ghost.on = true;
+}
+resetAll();
+
+function tintHex() {   // what _ghostHullTint() would return
+  if (S.tintPin) return new THREE.Color(S.tintPin).getHex();
+  return SHIPS[S.ship].color;
+}
+
+// ===========================================================================
+// RENDERER / SCENE
+// ===========================================================================
+const stage = document.getElementById('stage');
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;    // cineFX
+renderer.toneMappingExposure = S.scene.exposure;
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(S.scene.fov, 1, 1, 25000);   // the game's near/far
+
+// --- lights: the scene's own five, driven by the place preset ---------------
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
+const dirLight  = new THREE.DirectionalLight(0xbfd9ff, 2.3);  dirLight.position.set(1000, 3000, 1500);
+const dirLight2 = new THREE.DirectionalLight(0xffece0, 0.50); dirLight2.position.set(-1500, 2000, -1200);
+const dirLight3 = new THREE.DirectionalLight(0xffeed0, 0.28); dirLight3.position.set(-500, 1500, -2500);
+const hemiLight = new THREE.HemisphereLight(0x6688cc, 0x224466, 0.4);
+scene.add(ambientLight, dirLight, dirLight2, dirLight3, hemiLight);
+
+// --- the cockpit rig's two point lights, ported from _lssCockpitLights ------
+const cockKey  = new THREE.PointLight(0xffe2c4, 0, 160, 2);
+const cockFill = new THREE.PointLight(0xa9c6ff, 0, 160, 2);
+scene.add(cockKey, cockFill);
+
+// --- env map: buildProceduralEnvMap(), ported ------------------------------
+function buildProceduralEnvMap() {
+  const size = 256;
+  const faceColors = [
+    ['#1a1230', '#2a1f50', '#5a2a4a', '#1a1230'],   // +X warm rim
+    ['#0a0a1c', '#142244', '#2a4070', '#0a0a1c'],   // -X cool rim
+    ['#1c2050', '#3a3870', '#5a5090', '#1c2050'],   // +Y ceiling glow
+    ['#050510', '#0a0a1a', '#101028', '#050510'],   // -Y dark floor
+    ['#0a1a26', '#163050', '#244c70', '#0a1a26'],   // +Z teal
+    ['#1a0a26', '#3a1450', '#5a2470', '#1a0a26'],   // -Z magenta
+  ];
+  const images = faceColors.map(stops => {
+    const c = document.createElement('canvas'); c.width = c.height = size;
+    const ctx = c.getContext('2d');
+    const g = ctx.createRadialGradient(size * 0.5, size * 0.5, 0, size * 0.5, size * 0.5, size * 0.7);
+    g.addColorStop(0.00, stops[0]); g.addColorStop(0.45, stops[1]);
+    g.addColorStop(0.85, stops[2]); g.addColorStop(1.00, stops[3]);
+    ctx.fillStyle = g; ctx.fillRect(0, 0, size, size);
+    for (let i = 0; i < 18; i++) {
+      const x = Math.random() * size, y = Math.random() * size, r = 4 + Math.random() * 12;
+      const dg = ctx.createRadialGradient(x, y, 0, x, y, r);
+      dg.addColorStop(0, 'rgba(220, 230, 255, 0.6)');
+      dg.addColorStop(1, 'rgba(220, 230, 255, 0)');
+      ctx.fillStyle = dg; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    return c;
+  });
+  const cubeTex = new THREE.CubeTexture(images);
+  cubeTex.format = THREE.RGBAFormat;
+  cubeTex.colorSpace = THREE.SRGBColorSpace;
+  cubeTex.needsUpdate = true;
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  pmrem.compileCubemapShader();
+  const rt = pmrem.fromCubemap(cubeTex);
+  pmrem.dispose();
+  return rt.texture;
+}
+scene.environment = buildProceduralEnvMap();
+
+// --- post: the game's cineFX stack -----------------------------------------
+const composer = new EffectComposer(renderer);
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(1, 1), S.scene.bloom, 0.55, 1.00);
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+
+// ===========================================================================
+// THE GHOST SHELL - ported from _addGhostHull / _ghostHullApply / _ghostHullTune.
+// The GLSL below is the game's, character for character. Do not "improve" it
+// here: a number tuned against a different shader does not transfer.
+// ===========================================================================
+const ghostTimeU = { value: 0 };
+function addGhostHull(mat, K, isGlass) {
+  mat.transparent = true;
+  mat.depthWrite = false;      // x-ray layering: the far wall glows through the near one
+  mat.side = THREE.DoubleSide;
+  const U = {
+    uGhTint: { value: new THREE.Color(K.tint) }, uGhTime: ghostTimeU,
+    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim },
+    uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }, uGhGlow: { value: K.glow }
+  };
+  mat.userData._ghostU = U;
+  mat.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, U);
+    shader.vertexShader = 'varying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace(
+      '#include <project_vertex>',
+      '#include <project_vertex>\n  vGhN = normalize(normalMatrix * normal);\n  vGhV = normalize(-mvPosition.xyz);'
+    );
+    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nuniform float uGhGlow;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <opaque_fragment>',
+      '#include <opaque_fragment>\n' +
+      '  { vec3 ghN = normalize(vGhN); vec3 ghV = normalize(vGhV);\n' +
+      '    float ghFres = pow(1.0 - clamp(abs(dot(ghN, ghV)), 0.0, 1.0), 2.0);\n' +
+      '    float ghFlick = 1.0 - uGhFlick * 0.08 * (1.0 - sin(uGhTime * 44.0) * (0.55 + 0.45 * sin(uGhTime * 9.7)));\n' +
+      '    float ghScan = 1.0 - uGhFlick * 0.05 * (1.0 - sin(gl_FragCoord.y * 0.28 - uGhTime * 14.0));\n' +
+      '    gl_FragColor.rgb = mix(gl_FragColor.rgb, uGhTint * 0.55, uGhMix);\n' +
+      '    gl_FragColor.rgb += uGhTint * ghFres * uGhGlow * (1.0 + 0.22 * uGhFlick * sin(uGhTime * 38.0));\n' +
+      '    gl_FragColor.a = clamp((uGhCore + uGhRim * ghFres) * ghFlick * ghScan, 0.0, 0.92); }'
+    );
+  };
+  mat.customProgramCacheKey = () => 'ghostHull';
+  mat.needsUpdate = true;
+  return mat;
+}
+function ghostKnobs() {
+  return {
+    on: S.ghost.on !== false,
+    core: S.ghost.core, rim: S.ghost.rim, mix: S.ghost.mix,
+    flicker: S.ghost.flicker, glow: S.ghost.glow, order: S.ghost.order,
+    glassCore: S.ghost.glassCore, glassRim: S.ghost.glassRim,
+    tint: tintHex(),
+  };
+}
+// Anything already transparent is left alone - that is the game's rule, and it
+// is why a canopy_glass material (when a hull ships one) keeps its own look.
+function ghostApply(mesh) {
+  if (!mesh || mesh.userData._ghostOn) return;
+  const K = ghostKnobs();
+  mesh.userData._ghostOn = true;
+  mesh.traverse(o => {
+    if (!o.isMesh || !o.material) return;
+    if (o.userData && o.userData._cockpitFrame) return;
+    const arr = Array.isArray(o.material);
+    const ms = arr ? o.material : [o.material];
+    if (!o.userData._ghostMats || o.userData._ghostOrig !== o.material) {
+      const built = ms.map(m => (!m || m.transparent) ? m : addGhostHull(m.clone(), K));
+      if (!built.some((m, i) => m !== ms[i])) return;
+      o.userData._ghostOrig = o.material;
+      o.userData._ghostMats = arr ? built : built[0];
+      o.userData._ghostOrder = o.renderOrder;
+    }
+    o.material = o.userData._ghostMats;
+    o.renderOrder = K.order;
+  });
+}
+function ghostRestore(mesh) {
+  if (!mesh || !mesh.userData._ghostOn) return;
+  mesh.userData._ghostOn = false;
+  mesh.traverse(o => {
+    if (!o.isMesh || !o.userData || !o.userData._ghostMats) return;
+    o.material = o.userData._ghostOrig;
+    o.renderOrder = o.userData._ghostOrder || 0;
+  });
+}
+// Live, every frame, no rebuild. This is why every slider here lands on the
+// next frame - and why it does in the game too.
+function ghostTune(mesh, K) {
+  mesh.traverse(o => {
+    if (!o.isMesh || !o.userData || !o.userData._ghostMats) return;
+    const ms = Array.isArray(o.userData._ghostMats) ? o.userData._ghostMats : [o.userData._ghostMats];
+    for (const m of ms) {
+      const U = m && m.userData && m.userData._ghostU;
+      if (!U) continue;
+      U.uGhTint.value.set(K.tint);
+      U.uGhCore.value = K.core; U.uGhRim.value = K.rim; U.uGhMix.value = K.mix; U.uGhFlick.value = K.flicker;
+      if (U.uGhGlow) U.uGhGlow.value = K.glow;
+    }
+    o.renderOrder = K.order;
+  });
+}
+
+// ===========================================================================
+// THE HULL - loaded, fitted and re-materialled as the game does it
+// (preloadShipModels + buildModelShipMesh).
+// ===========================================================================
+const loader = new GLTFLoader();
+const shipRoot = new THREE.Group();
+scene.add(shipRoot);
+let hull = null;        // the fitted model
+let eyeNode = null;     // cockpit1
+const modelCache = {};
+
+function rebuildMaterials(model, teamColor) {
+  const teamCol = new THREE.Color(teamColor);
+  model.traverse(child => {
+    if (!child.isMesh) return;
+    const mats = Array.isArray(child.material) ? child.material : [child.material];
+    const built = mats.map(m => {
+      const params = {
+        metalness: 0.20, roughness: 0.60,
+        emissive: teamCol.clone().multiplyScalar(0.04), emissiveIntensity: 1.0,
+        envMapIntensity: 0.20,
+        transparent: !!(m && m.transparent),
+        opacity: (m && m.opacity != null) ? m.opacity : 1.0,
+      };
+      if (m && m.map) params.map = m.map;
+      if (m && m.vertexColors) params.vertexColors = true;
+      // the hulls are exported doubleSided on purpose: their INNER SKIN is the
+      // cockpit interior the pilot looks at. Honour the authored side.
+      if (m && m.side === THREE.DoubleSide) params.side = THREE.DoubleSide;
+      if (m && m.name) params.name = m.name;
+      if (m && m.emissiveMap) {            // hull light strips (input.hullGlow on)
+        params.emissiveMap = m.emissiveMap;
+        params.emissive = new THREE.Color(0xffffff);
+        params.emissiveIntensity = (typeof m.emissiveIntensity === 'number') ? m.emissiveIntensity : 1.0;
+      }
+      params.color = (m && m.color) ? m.color.clone() : new THREE.Color(0xbfc4d2);
+      if (m && ((typeof m.name === 'string' && m.name.indexOf('cockpit') === 0) || m.normalMap || m.roughnessMap || m.metalnessMap)) {
+        if (m.normalMap) { params.normalMap = m.normalMap; params.normalScale = (m.normalScale ? m.normalScale.clone() : new THREE.Vector2(1, 1)); }
+        if (m.roughnessMap) { params.roughnessMap = m.roughnessMap; params.roughness = 1.0; }
+        else params.roughness = (typeof m.roughness === 'number') ? m.roughness : 0.6;
+        if (m.metalnessMap) { params.metalnessMap = m.metalnessMap; params.metalness = 1.0; }
+        else params.metalness = (typeof m.metalness === 'number') ? Math.min(0.6, m.metalness) : 0.25;
+        if (m.aoMap) { params.aoMap = m.aoMap; params.aoMapIntensity = (typeof m.aoMapIntensity === 'number') ? m.aoMapIntensity : 1.0; }
+        params.envMapIntensity = 0.45;
+      }
+      if (m && m.name === 'canopy_glass') {
+        params.metalness = 0.0; params.roughness = 0.10;
+        params.envMapIntensity = 1.0; params.emissive = new THREE.Color(0x000000);
+      }
+      return new THREE.MeshStandardMaterial(params);
+    });
+    child.material = built.length === 1 ? built[0] : built;
+    // the painted frame strips are a first-person element the rig owns
+    if (child.name && child.name.indexOf('cockpit_frame') === 0) { child.visible = false; child.userData._cockpitFrame = true; }
+  });
+}
+
+function fitModel(model, spec) {
+  model.rotation.y = FACE_ROT_Y;
+  const box = new THREE.Box3().setFromObject(model);
+  const sz = box.getSize(new THREE.Vector3());
+  const longest = Math.max(sz.x, sz.y, sz.z) || 1;
+  model.scale.setScalar((spec.hullLength / longest) * spec.scaleMult * VISUAL_SCALE_BOOST);
+  const box2 = new THREE.Box3().setFromObject(model);
+  model.position.sub(box2.getCenter(new THREE.Vector3()));
+}
+
+function setTag(txt) { document.getElementById('stage-tag').textContent = txt; }
+
+async function loadShip(key) {
+  S.ship = key;
+  paintShipChips();
+  paintTint();
+  setTag(key + ' · loading…');
+  const spec = SHIPS[key];
+  if (!modelCache[key]) {
+    const gltf = await loader.loadAsync('ships/' + spec.file);
+    const model = gltf.scene;
+    rebuildMaterials(model, spec.color);
+    fitModel(model, spec);
+    modelCache[key] = model;
+  }
+  if (hull) { ghostRestore(hull); shipRoot.remove(hull); }
+  hull = modelCache[key];
+  hull.userData._ghostOn = false;
+  shipRoot.add(hull);
+  shipRoot.updateMatrixWorld(true);
+  eyeNode = hull.getObjectByName('cockpit1') || null;
+  const bb = new THREE.Box3().setFromObject(hull).getSize(new THREE.Vector3());
+  setTag(key + ' · ' + spec.chassis + ' · ' + bb.toArray().map(v => Math.round(v)).join('×') + 'u · ' +
+         (eyeNode ? 'cockpit1 at hull centre' : 'NO cockpit1 - eye at bbox centre'));
+  outDist = Math.max(bb.x, bb.y, bb.z) * 1.9;
+  refreshOut();
+}
+
+// ===========================================================================
+// BACKDROP - a cheap stand-in whose only job is to put the right luminance
+// behind the shell.
+// ===========================================================================
+const backdrop = new THREE.Group();
+scene.add(backdrop);
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, fog: false,
+  uniforms: { uTop: { value: new THREE.Color(0x05060f) }, uBot: { value: new THREE.Color(0x1a1030) }, uStars: { value: 0 } },
+  vertexShader: 'varying vec3 vP; void main(){ vP = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+  fragmentShader: [
+    'uniform vec3 uTop; uniform vec3 uBot; uniform float uStars; varying vec3 vP;',
+    'float h(vec2 p){ return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.545); }',
+    'void main(){',
+    '  vec3 d = normalize(vP);',
+    '  vec3 c = mix(uBot, uTop, clamp(d.y * 0.5 + 0.5, 0.0, 1.0));',
+    '  if (uStars > 0.5) { vec2 g = floor(d.xz * 220.0 + d.y * 40.0);',
+    '    float s = h(g); if (s > 0.9975) c += vec3(0.7, 0.8, 1.0) * (s - 0.9975) * 320.0; }',
+    '  gl_FragColor = vec4(c, 1.0);',
+    '}'
+  ].join('\n'),
+});
+backdrop.add(new THREE.Mesh(new THREE.SphereGeometry(9000, 32, 20), skyMat));
+
+const groundMat = new THREE.MeshStandardMaterial({ color: 0x07070e, roughness: 0.85, metalness: 0.0 });
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(24000, 24000), groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = -420;
+backdrop.add(ground);
+
+// City: near-black mass + bright coloured windows. One hue per TOWER - mixed
+// hues inside a facade read as confetti at any distance.
+const CITY_N = 260;
+const cityMass = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshStandardMaterial({ color: 0x0a0a12, roughness: 0.9, metalness: 0.1 }), CITY_N);
+const cityGlow = new THREE.InstancedMesh(new THREE.BoxGeometry(1, 1, 1),
+  new THREE.MeshBasicMaterial({}), CITY_N * 2);
+cityMass.frustumCulled = false; cityGlow.frustumCulled = false;
+backdrop.add(cityMass, cityGlow);
+(function buildCity() {
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3();
+  const col = new THREE.Color();
+  const HUES = [0.52, 0.86, 0.08, 0.55];      // cyan dominant, magenta counter, amber + blue accents
+  let gi = 0;
+  for (let i = 0; i < CITY_N; i++) {
+    const a = Math.random() * Math.PI * 2, r = 900 + Math.pow(Math.random(), 0.6) * 6500;
+    const w = 90 + Math.random() * 260, h = 220 + Math.pow(Math.random(), 2) * 2400;
+    p.set(Math.cos(a) * r, -420 + h * 0.5, Math.sin(a) * r);
+    s.set(w, h, w * (0.7 + Math.random() * 0.6));
+    m.compose(p, q, s); cityMass.setMatrixAt(i, m);
+    const hue = HUES[(Math.random() * HUES.length) | 0];
+    for (let k = 0; k < 2 && gi < CITY_N * 2; k++, gi++) {
+      p.set(Math.cos(a) * r, -420 + h * (0.15 + Math.random() * 0.8), Math.sin(a) * r);
+      s.set(s.x * 1.02, 6 + Math.random() * 16, s.z * 1.02);
+      m.compose(p, q, s); cityGlow.setMatrixAt(gi, m);
+      col.setHSL(hue, 0.85, 0.35 + Math.random() * 0.35);
+      cityGlow.setColorAt(gi, col);
+    }
+  }
+  cityMass.instanceMatrix.needsUpdate = true;
+  cityGlow.instanceMatrix.needsUpdate = true;
+  if (cityGlow.instanceColor) cityGlow.instanceColor.needsUpdate = true;
+})();
+
+// FX flares: the shell is judged against explosions and beams as much as
+// against the sky, so put two bright things just outside the hull.
+const flares = new THREE.Group();
+scene.add(flares);
+(function buildFlares() {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const x = c.getContext('2d');
+  const g = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.25, 'rgba(255,255,255,0.55)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  for (const col of [0xff9944, 0x66ddff]) {
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: tex, color: col, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false,
+    }));
+    s.scale.setScalar(140);
+    flares.add(s);
+  }
+})();
+
+function applyPlace() {
+  const P = PLACES[S.place];
+  skyMat.uniforms.uTop.value.setHex(P.sky[1]);
+  skyMat.uniforms.uBot.value.setHex(P.sky[0]);
+  skyMat.uniforms.uStars.value = P.stars;
+  ground.visible = P.ground != null;
+  if (P.ground != null) groundMat.color.setHex(P.ground);
+  cityMass.visible = cityGlow.visible = !!P.city;
+  scene.fog = P.fog ? new THREE.FogExp2(P.sky[0], P.fog) : null;
+  ambientLight.intensity = P.amb;
+  dirLight.intensity = P.sun; dirLight.color.setHex(P.sunCol);
+  dirLight2.intensity = P.fill; dirLight3.intensity = P.rim;
+  hemiLight.intensity = P.hemi; hemiLight.color.setHex(P.hSky); hemiLight.groundColor.setHex(P.hGnd);
+  paintPlaceChips();
+}
+
+// ===========================================================================
+// CAMERA - the seat, exactly as the rig places it.
+// ===========================================================================
+let yaw = 0, pitch = 0, outYaw = 0.9, outPitch = 0.25, outDist = 400;
+const _eyeW = new THREE.Vector3(), _eyeQ = new THREE.Quaternion(), _off = new THREE.Vector3();
+const _fwd = new THREE.Vector3(), _up = new THREE.Vector3();
+const _basis = new THREE.Matrix4(), _q0 = new THREE.Quaternion(), _look = new THREE.Quaternion();
+const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _mFwd = new THREE.Vector3(-1, 0, 0);    // model space: fwd -X, up +Y, right -Z
+const _mUp  = new THREE.Vector3(0, 1, 0);
+const _mRight = new THREE.Vector3().crossVectors(_mFwd, _mUp);
+const _mBack = _mFwd.clone().negate();
+_basis.makeBasis(_mRight, _mUp, _mBack);      // a camera basis aligned to the ship
+_q0.setFromRotationMatrix(_basis);
+
+function placeCamera() {
+  if (!hull) return;
+  shipRoot.updateMatrixWorld(true);
+  if (eyeNode) { eyeNode.getWorldPosition(_eyeW); eyeNode.getWorldQuaternion(_eyeQ); }
+  else { new THREE.Box3().setFromObject(hull).getCenter(_eyeW); hull.getWorldQuaternion(_eyeQ); }
+
+  if (S.view === 'seat') {
+    // _lssApplyShipRig: camera at cockpit1 + the seat nudge in SHIP axes
+    _off.set(-(S.eye.fwd || 0), (S.eye.up || 0), -(S.eye.right || 0)).applyQuaternion(_eyeQ);
+    camera.position.copy(_eyeW).add(_off);
+    _euler.set(pitch, yaw, 0);
+    _look.setFromEuler(_euler);
+    camera.quaternion.copy(_eyeQ).multiply(_q0).multiply(_look);
+  } else {
+    const cp = Math.cos(outPitch);
+    camera.position.set(
+      _eyeW.x + Math.sin(outYaw) * cp * outDist,
+      _eyeW.y + Math.sin(outPitch) * outDist,
+      _eyeW.z + Math.cos(outYaw) * cp * outDist
+    );
+    camera.lookAt(_eyeW);
+  }
+  // the cockpit rig's key/fill ride the eye
+  _fwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  _up.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  cockKey.position.copy(_eyeW).addScaledVector(_fwd, 9).addScaledVector(_up, -5);
+  cockFill.position.copy(_eyeW).addScaledVector(_fwd, -6).addScaledVector(_up, 8);
+  cockKey.intensity = S.light.key; cockFill.intensity = S.light.fill;
+  cockKey.distance = S.light.dist; cockFill.distance = S.light.dist;
+}
+
+// ---- input ----------------------------------------------------------------
+let dragging = false, lastX = 0, lastY = 0;
+stage.addEventListener('pointerdown', e => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  stage.classList.add('dragging');
+  try { stage.setPointerCapture(e.pointerId); } catch (_) {}
+});
+stage.addEventListener('pointerup', e => {
+  dragging = false; stage.classList.remove('dragging');
+  try { stage.releasePointerCapture(e.pointerId); } catch (_) {}
+});
+stage.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const dx = (e.clientX - lastX) * 0.004, dy = (e.clientY - lastY) * 0.004;
+  lastX = e.clientX; lastY = e.clientY;
+  if (S.view === 'seat') { yaw -= dx; pitch = Math.max(-1.45, Math.min(1.45, pitch - dy)); }
+  else { outYaw -= dx; outPitch = Math.max(-1.4, Math.min(1.4, outPitch + dy)); }
+});
+stage.addEventListener('wheel', e => {
+  if (S.view !== 'out') return;
+  e.preventDefault();
+  outDist = Math.max(40, Math.min(6000, outDist * (1 + Math.sign(e.deltaY) * 0.12)));
+}, { passive: false });
+window.addEventListener('keydown', e => {
+  if (e.target && /INPUT|TEXTAREA/.test(e.target.tagName)) return;
+  const n = parseInt(e.key, 10);
+  if (n >= 1 && n <= SHIP_KEYS.length) loadShip(SHIP_KEYS[n - 1]);
+  if (e.key === 'r' || e.key === 'R') { yaw = pitch = 0; outYaw = 0.9; outPitch = 0.25; }
+});
+
+// ===========================================================================
+// PANEL
+// ===========================================================================
+const panel = document.getElementById('panel');
+const ctrls = [];
+
+function h2(txt) { const e = document.createElement('h2'); e.textContent = txt; panel.appendChild(e); return e; }
+function note(html) { const e = document.createElement('div'); e.className = 'note'; e.innerHTML = html; panel.appendChild(e); return e; }
+
+function mkRow(store, spec, onChange) {
+  const wrap = document.createElement('div'); wrap.className = 'row';
+  const head = document.createElement('div'); head.className = 'head';
+  const lab = document.createElement('label'); lab.textContent = spec.k;
+  const val = document.createElement('div'); val.className = 'val';
+  head.appendChild(lab); head.appendChild(val);
+  const desc = document.createElement('div'); desc.className = 'desc'; desc.textContent = spec.t;
+  const sl = document.createElement('input');
+  sl.type = 'range'; sl.min = spec.lo; sl.max = spec.hi; sl.step = spec.st;
+  const dp = (spec.st >= 1) ? 0 : (spec.st >= 0.01 ? 2 : 3);
+  const paint = () => { sl.value = store[spec.k]; val.textContent = Number(store[spec.k]).toFixed(dp); };
+  sl.addEventListener('input', () => {
+    store[spec.k] = parseFloat(sl.value);
+    val.textContent = Number(store[spec.k]).toFixed(dp);
+    if (onChange) onChange();
+    refreshOut();
+  });
+  wrap.appendChild(head); wrap.appendChild(desc); wrap.appendChild(sl);
+  panel.appendChild(wrap);
+  ctrls.push(paint);
+  paint();
+  return wrap;
+}
+
+// --- ship picker ---
+h2('Ship');
+const shipChips = document.createElement('div'); shipChips.className = 'chips'; panel.appendChild(shipChips);
+const shipBtns = {};
+for (const k of SHIP_KEYS) {
+  const b = document.createElement('button'); b.className = 'chip'; b.textContent = k;
+  b.addEventListener('click', () => loadShip(k));
+  shipChips.appendChild(b); shipBtns[k] = b;
+}
+function paintShipChips() {
+  for (const k of SHIP_KEYS) {
+    const b = shipBtns[k], on = (k === S.ship);
+    const hex = '#' + SHIPS[k].color.toString(16).padStart(6, '0');
+    b.classList.toggle('on', on);
+    b.style.background = on ? hex : '';
+    b.style.borderColor = on ? hex : '';
+  }
+}
+note('The hull decides the seat: a frigate’s canopy is inches from your face, a dreadnought’s is a hall. Judge every setting on at least one of each.');
+
+// --- shell ---
+h2('Ghost shell');
+note('Every knob here lands on the NEXT FRAME - the game re-reads them and re-tunes the cached materials every frame, so nothing is ever rebuilt. These are <b>window.__cockpit.ghost</b>.');
+for (const r of GHOST_ROWS) mkRow(S.ghost, r);
+note('<b>glassCore / glassRim</b> are inert today: all seven hulls ship a single opaque <b>hull</b> material, and the shell skips anything already transparent. They come alive the day a hull carries a separate canopy_glass again.');
+
+// --- tint ---
+h2('Tint');
+const tintWrap = document.createElement('div'); tintWrap.className = 'row';
+const tintHead = document.createElement('div'); tintHead.className = 'head';
+const tintLab = document.createElement('label'); tintLab.textContent = 'tint';
+const tintVal = document.createElement('div'); tintVal.className = 'val';
+tintHead.appendChild(tintLab); tintHead.appendChild(tintVal);
+const tintDesc = document.createElement('div'); tintDesc.className = 'desc';
+tintDesc.textContent = 'what the shell is coloured with. Unpinned it follows the ship’s own class colour, the same table the beams and shields tint from.';
+const tintRow = document.createElement('div'); tintRow.className = 'btnrow';
+const tintPick = document.createElement('input'); tintPick.type = 'color';
+const tintTheme = document.createElement('button'); tintTheme.textContent = 'Follow ship';
+tintRow.appendChild(tintPick); tintRow.appendChild(tintTheme);
+tintWrap.appendChild(tintHead); tintWrap.appendChild(tintDesc); tintWrap.appendChild(tintRow);
+panel.appendChild(tintWrap);
+function paintTint() {
+  const hex = '#' + tintHex().toString(16).padStart(6, '0');
+  tintPick.value = hex;
+  tintVal.textContent = S.tintPin ? hex : 'ship';
+}
+tintPick.addEventListener('input', () => { S.tintPin = tintPick.value; paintTint(); refreshOut(); });
+tintTheme.addEventListener('click', () => { S.tintPin = null; paintTint(); refreshOut(); });
+ctrls.push(paintTint);
+
+// --- seat ---
+h2('Seat');
+note('In SHIP axes and game units - a corvette is about 100 long. <b>window.__cockpit.eye</b>. One global setting in the game today, not per hull.');
+for (const r of EYE_ROWS) mkRow(S.eye, r);
+
+// --- cockpit lights ---
+h2('Cockpit lights');
+note('Two point lights ride the eye so the interior is not a black shard under a sun that never faces it. <b>window.__cockpit.light</b>.');
+for (const r of LIGHT_ROWS) mkRow(S.light, r);
+
+// --- scene (lab only) ---
+h2('Where you are');
+note('Not exported - this is the lab’s own stage. It is the most important control on this panel anyway: the additive glow term is judged against whatever is BEHIND it.');
+const placeChips = document.createElement('div'); placeChips.className = 'chips'; panel.appendChild(placeChips);
+const placeBtns = {};
+for (const k of Object.keys(PLACES)) {
+  const b = document.createElement('button'); b.className = 'chip'; b.textContent = PLACES[k].name;
+  b.title = PLACES[k].tag;
+  b.addEventListener('click', () => { S.place = k; applyPlace(); });
+  placeChips.appendChild(b); placeBtns[k] = b;
+}
+function paintPlaceChips() {
+  for (const k of Object.keys(PLACES)) {
+    const on = (k === S.place);
+    placeBtns[k].classList.toggle('on', on);
+    placeBtns[k].style.background = on ? 'var(--accent)' : '';
+    placeBtns[k].style.borderColor = on ? 'var(--accent)' : '';
+  }
+}
+const flareRow = document.createElement('div'); flareRow.className = 'btnrow';
+const flareBtn = document.createElement('button'); flareBtn.textContent = 'Flares: on';
+flareBtn.addEventListener('click', () => {
+  S.flares = !S.flares; flares.visible = S.flares;
+  flareBtn.textContent = 'Flares: ' + (S.flares ? 'on' : 'off');
+});
+flareRow.appendChild(flareBtn);
+panel.appendChild(flareRow);
+note('Flares are two bright additive lights circling just outside the hull - a stand-in for the explosions and beams the shell is really judged against.');
+for (const r of SCENE_ROWS) mkRow(S.scene, r, applyScene);
+
+// --- export ---
+h2('Export');
+note('This is the exact shape <b>window.__cockpit</b> takes. Paste the console line into the game to try it live, then hand the JSON over to be baked in as the defaults.');
+const actions = document.createElement('div'); actions.className = 'btnrow';
+function mkBtn(txt, fn, cls) {
+  const b = document.createElement('button'); b.textContent = txt; if (cls) b.className = cls;
+  b.addEventListener('click', () => {
+    fn();
+    const o = b.textContent; b.textContent = 'Done'; b.classList.add('flash');
+    setTimeout(() => { b.textContent = o; b.classList.remove('flash'); }, 1200);
+  });
+  actions.appendChild(b); return b;
+}
+function buildCfg() {
+  const g = { on: S.ghost.on !== false, tint: S.tintPin ? S.tintPin : null };
+  for (const r of GHOST_ROWS) g[r.k] = +Number(S.ghost[r.k]).toFixed(4);
+  const e = {}; for (const r of EYE_ROWS) e[r.k] = +Number(S.eye[r.k]).toFixed(2);
+  const l = {}; for (const r of LIGHT_ROWS) l[r.k] = +Number(S.light[r.k]).toFixed(1);
+  return { ghost: g, eye: e, light: l };
+}
+function buildJson() {
+  const c = buildCfg();
+  return JSON.stringify({
+    lab: 'ghost', version: 1, ship: S.ship, judgedIn: PLACES[S.place].name, cockpit: c,
+  }, null, 2);
+}
+function buildLine() {
+  return 'window.__cockpit = Object.assign(window.__cockpit || {}, ' + JSON.stringify(buildCfg()) + ');';
+}
+function copy(txt) {
+  try { navigator.clipboard.writeText(txt); } catch (_) { out.select(); }
+}
+mkBtn('Copy JSON', () => { refreshOut(); copy(buildJson()); });
+mkBtn('Copy console line', () => { out.value = buildLine(); copy(buildLine()); });
+mkBtn('Download', () => {
+  const b = new Blob([buildJson()], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(b);
+  a.download = 'lss_ghost_' + S.ship.toLowerCase() + '.json';
+  a.click();
+});
+mkBtn('Reset', () => {
+  resetAll();
+  for (const p of ctrls) p();
+  shellBtn.classList.add('active'); shellBtn.textContent = 'Shell on';
+  applyScene(); refreshOut();
+}, 'warn');
+panel.appendChild(actions);
+const out = document.createElement('textarea'); out.id = 'json-out'; out.spellcheck = false;
+panel.appendChild(out);
+function refreshOut() { out.value = buildJson(); }
+
+// --- stage buttons ---
+const seatBtn = document.getElementById('v-seat');
+const outBtn = document.getElementById('v-out');
+const shellBtn = document.getElementById('v-shell');
+function setView(v) {
+  S.view = v;
+  seatBtn.classList.toggle('active', v === 'seat');
+  outBtn.classList.toggle('active', v === 'out');
+}
+seatBtn.addEventListener('click', () => setView('seat'));
+outBtn.addEventListener('click', () => setView('out'));
+shellBtn.addEventListener('click', () => {
+  S.ghost.on = !S.ghost.on;
+  shellBtn.classList.toggle('active', S.ghost.on);
+  shellBtn.textContent = 'Shell ' + (S.ghost.on ? 'on' : 'off');
+  refreshOut();
+});
+
+function applyScene() {
+  camera.fov = S.scene.fov; camera.updateProjectionMatrix();
+  renderer.toneMappingExposure = S.scene.exposure;
+  bloomPass.strength = S.scene.bloom;
+}
+
+// ===========================================================================
+// LOOP
+// ===========================================================================
+function onResize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h, false);
+  composer.setSize(w, h);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', onResize);
+
+const clock = new THREE.Clock();
+function loop() {
+  const dt = Math.min(0.1, clock.getDelta());
+  ghostTimeU.value += dt;
+  if (hull) {
+    // _ghostHullSync: apply while the seat is the view, restore the moment it is not
+    if (S.ghost.on !== false && S.view === 'seat') { ghostApply(hull); ghostTune(hull, ghostKnobs()); }
+    else ghostRestore(hull);
+  }
+  const t = clock.elapsedTime;
+  flares.children[0].position.set(Math.cos(t * 0.6) * 260, 40 + Math.sin(t * 0.9) * 60, Math.sin(t * 0.6) * 260);
+  flares.children[1].position.set(Math.cos(-t * 0.4 + 2) * 340, -30 + Math.cos(t * 0.7) * 50, Math.sin(-t * 0.4 + 2) * 340);
+  placeCamera();
+  composer.render();
+  requestAnimationFrame(loop);
+}
+
+// ===========================================================================
+// BOOT
+// ===========================================================================
+paintTint();
+applyPlace();
+applyScene();
+flares.visible = S.flares;
+refreshOut();
+onResize();
+loop();
+loadShip(S.ship).catch(e => setTag('LOAD FAILED: ' + (e && e.message ? e.message : e)));
+</script>
+
+</body>
+</html>
