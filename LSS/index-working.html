@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.31';
+const LSS_BUILD = '38.32';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -57798,24 +57798,24 @@ function _ghostHullTune(mesh, K) {
 // produce a wavy line, because no line ever follows the surface.
 // ============================================================================
 const _FRAME_DEF = {
-  rings: 11,        // cross-sections down the long axis. More = a denser cage, not a curvier one.
-  spokes: 8,        // stringers. 8 puts one on the crown, one on the keel and one on each beam.
-  seg: 48,          // segments per ellipse. Purely how round a circle looks ; no shape cost.
-  pct: 0.62,        // extent percentile per station. 1 = the full span including wingtips ;
-                    // lower pulls the rings in to the body you are actually sitting in.
-  ends: 0.08,       // trim this much off each end - the extreme nose and tail stations are a
-                    // point, and a degenerate ellipse reads as a dot of noise.
+  // (v38.32) The frame is CONTOURED off the real mesh now, not fitted around its extents. These
+  // are the cuts, and how hard each contour is straightened afterwards.
+  sections: 12,     // cross-section planes down the long axis - the frames you sit between
+  profile: 1,       // the side view, cut through the middle: canopy line, spine, belly
+  plan: 1,          // the top view, same cut: nose, wings, tail
+  simp: 0.015,      // Douglas-Peucker tolerance as a fraction of hull length. This is the knob
+                    // that decides "line art" vs "traced outline" - bigger = fewer, longer runs.
+  minLoop: 0.025,   // drop contour loops smaller than this fraction of the hull: mesh specks
   opacity: 0.9,
   glow: 2.2,        // the colour is multiplied by this, so >1 pushes it into the bloom threshold
   order: 4000,      // same sort seat the shell used: after the water and the city's glass
-  // (v38.31) THE HARDWARE. Owner: "i want enough detail that you can see the shape of the guns,
-  // at least". A cross-section cage cannot show a gun - it collapses each station to one ellipse -
-  // so the marked mounts are drawn as what they are: short line-art cylinders, a muzzle ring and a
-  // breech ring with four rails between them, at the hull's own gunN and thrusterN empties.
-  guns: 1,          // 0 = cage only
+  // THE HARDWARE. Owner: "i want enough detail that you can see the shape of the guns, at least".
+  // The marked mounts are drawn as what they are: short line-art cylinders at the hull's own
+  // gunN and thrusterN empties.
+  guns: 1,          // 0 = contours only
   gunR: 0.035,      // muzzle radius, as a fraction of hull length
   gunLen: 0.16,     // barrel length, same units
-  thrust: 1,        // the engine bells too - they are the other thing you can name by its shape
+  thrust: 1,        // the engine bells too - the other thing you can name by its shape
   thrustR: 0.05,
 };
 function _hullFrameKnobs() {
@@ -57835,106 +57835,197 @@ const _hfV = new THREE.Vector3(), _hfM = new THREE.Matrix4();
 function _hullFrameGeometry(group, K) {
   group.updateMatrixWorld(true);
   _hfM.copy(group.matrixWorld).invert();
-  // ---- 1. every hull vertex, in the GROUP's own space (so the frame rides the ship) ----
-  let total = 0;
-  const metas = [];
+  // ---- 1. the hull's triangles, in the GROUP's own space (so the frame rides the ship) ----
+  const meshes = [];
   group.traverse(o => {
     if (!o.isMesh || !o.geometry || !o.geometry.attributes || !o.geometry.attributes.position) return;
     if (o.userData && (o.userData.isPlume || o.userData.isRunningLight || o.userData._cockpitFrame)) return;
-    metas.push(o);
-    total += o.geometry.attributes.position.count;
+    meshes.push(o);
   });
-  if (!total) return null;
-  // a hull is ~100k vertices and this is a shape measurement, not a mesh: sample it
-  const stride = Math.max(1, Math.floor(total / 40000));
-  const pts = [];
+  if (!meshes.length) return null;
+  // ⚠ READ-ONLY. Nothing below writes to a ship's geometry, material or file - the triangles are
+  // copied into a scratch buffer, the frame is a SEPARATE LineSegments object, and the hull is
+  // only ever hidden by a `visible` flag that _hullFrameRestore puts straight back.
   const bb = new THREE.Box3();
   const _mm = new THREE.Matrix4();
-  for (const o of metas) {
-    const pos = o.geometry.attributes.position;
+  let budget = 0;
+  for (const o of meshes) {
+    const g = o.geometry;
+    budget += ((g.index ? g.index.count : g.attributes.position.count) / 3) | 0;
+  }
+  if (budget < 16) return null;
+  // a hull is ~100k triangles; every plane test walks all of them, so cap the working set
+  const stride = Math.max(1, Math.ceil(budget / 90000));
+  const tri = new Float32Array(Math.ceil(budget / stride) * 9 + 9);
+  const a0 = new THREE.Vector3(), b0 = new THREE.Vector3(), c0 = new THREE.Vector3();
+  let w = 0, seenTri = 0;
+  for (const o of meshes) {
+    const g = o.geometry, pos = g.attributes.position, idx = g.index;
     _mm.multiplyMatrices(_hfM, o.matrixWorld);
-    for (let i = 0; i < pos.count; i += stride) {
-      _hfV.fromBufferAttribute(pos, i).applyMatrix4(_mm);
-      pts.push(_hfV.x, _hfV.y, _hfV.z);
-      bb.expandByPoint(_hfV);
+    const n = idx ? idx.count : pos.count;
+    for (let i = 0; i + 2 < n; i += 3, seenTri++) {
+      if (seenTri % stride) continue;
+      if (w + 9 > tri.length) break;
+      const ia = idx ? idx.getX(i) : i, ib = idx ? idx.getX(i + 1) : i + 1, ic = idx ? idx.getX(i + 2) : i + 2;
+      a0.fromBufferAttribute(pos, ia).applyMatrix4(_mm);
+      b0.fromBufferAttribute(pos, ib).applyMatrix4(_mm);
+      c0.fromBufferAttribute(pos, ic).applyMatrix4(_mm);
+      tri[w] = a0.x; tri[w + 1] = a0.y; tri[w + 2] = a0.z;
+      tri[w + 3] = b0.x; tri[w + 4] = b0.y; tri[w + 5] = b0.z;
+      tri[w + 6] = c0.x; tri[w + 7] = c0.y; tri[w + 8] = c0.z;
+      w += 9;
+      bb.expandByPoint(a0); bb.expandByPoint(b0); bb.expandByPoint(c0);
     }
   }
-  const n = pts.length / 3;
-  if (n < 32) return null;
-  // ---- 2. the long axis is the station axis ; the other two span each cross-section ----
+  const nTri = w / 9;
+  if (nTri < 16) return null;
   const size = bb.getSize(new THREE.Vector3());
   const ax = (size.x >= size.y && size.x >= size.z) ? 0 : ((size.y >= size.z) ? 1 : 2);
-  // keep world up as the ellipse's vertical wherever the ship is not standing on end
-  const av = (ax === 1) ? 2 : 1;                 // "up" within the section
-  const au = 3 - ax - av;                        // the remaining axis, across the hull
+  const av = (ax === 1) ? 2 : 1;                 // "up" within a cross-section
+  const au = 3 - ax - av;                        // across the hull
   const lo = bb.min.getComponent(ax), hi = bb.max.getComponent(ax);
   const span = hi - lo;
   if (!(span > 0)) return null;
-  const rings = Math.max(2, Math.round(K.rings));
-  const trim = span * Math.max(0, Math.min(0.4, K.ends));
-  const s0 = lo + trim, s1 = hi - trim;
-  const dS = (s1 - s0) / (rings - 1);
-  const half = (dS > 0) ? dS * 0.6 : span;       // stations overlap slightly so none comes up empty
-  // ---- 3. one ellipse per station, sized by a percentile of that slab's spread ----
-  const bins = [];
-  for (let r = 0; r < rings; r++) bins.push({ u: [], v: [] });
-  for (let i = 0; i < n; i++) {
-    const b = i * 3;
-    const a = pts[b + ax];
-    let r = Math.round((a - s0) / (dS || 1));
-    if (r < 0) r = 0; else if (r >= rings) r = rings - 1;
-    if (Math.abs(a - (s0 + r * dS)) > half) continue;
-    bins[r].u.push(pts[b + au]);
-    bins[r].v.push(pts[b + av]);
+
+  // ---- 2. SLICE THE MESH. Every triangle that straddles a plane contributes one segment; the
+  // segments chain into closed loops, and each loop is simplified to a handful of straight runs.
+  // This is the hull's REAL section - the cockpit recess, the wing roots, the gun pods are all in
+  // it - rather than an ellipse fitted around its extents, which is what the first pass drew and
+  // what the owner rightly said "doesn't really take the shape of the inside of the ships".
+  const EPS = span * 1e-5;
+  function sliceAt(axis, value) {
+    const seg = [];
+    const d = [0, 0, 0];
+    for (let t = 0; t < nTri; t++) {
+      const o = t * 9;
+      d[0] = tri[o + axis] - value;
+      d[1] = tri[o + 3 + axis] - value;
+      d[2] = tri[o + 6 + axis] - value;
+      const p0 = d[0] > 0, p1 = d[1] > 0, p2 = d[2] > 0;
+      if (p0 === p1 && p1 === p2) continue;               // wholly on one side
+      const pts = [];
+      for (let e = 0; e < 3; e++) {
+        const i0 = e, i1 = (e + 1) % 3;
+        const da = d[i0], db = d[i1];
+        if ((da > 0) === (db > 0)) continue;
+        const f = da / (da - db);
+        const A = o + i0 * 3, B = o + i1 * 3;
+        pts.push(tri[A] + (tri[B] - tri[A]) * f,
+                 tri[A + 1] + (tri[B + 1] - tri[A + 1]) * f,
+                 tri[A + 2] + (tri[B + 2] - tri[A + 2]) * f);
+      }
+      if (pts.length >= 6) seg.push(pts[0], pts[1], pts[2], pts[3], pts[4], pts[5]);
+    }
+    return seg;
   }
-  const pct = Math.max(0.05, Math.min(1, K.pct));
-  const st = [];
-  for (let r = 0; r < rings; r++) {
-    const B = bins[r];
-    if (B.u.length < 8) { st.push(null); continue; }
-    B.u.sort((a, b) => a - b); B.v.sort((a, b) => a - b);
-    // a symmetric trim off both tails: the middle `pct` of the spread is the body
-    const cut = (1 - pct) * 0.5;
-    const q = (arr, f) => arr[Math.max(0, Math.min(arr.length - 1, Math.round(f * (arr.length - 1))))];
-    const uLo = q(B.u, cut), uHi = q(B.u, 1 - cut);
-    const vLo = q(B.v, cut), vHi = q(B.v, 1 - cut);
-    const hu = (uHi - uLo) * 0.5, hv = (vHi - vLo) * 0.5;
-    if (!(hu > 1e-3) || !(hv > 1e-3)) { st.push(null); continue; }
-    st.push({ a: s0 + r * dS, cu: (uHi + uLo) * 0.5, cv: (vHi + vLo) * 0.5, hu, hv });
+  // Chain segments end-to-end into polylines. Endpoints are quantised onto a grid so the
+  // floating-point intersections of neighbouring triangles land in the same bucket.
+  const Q = Math.max(1e-4, span * 4e-4);
+  function chain(seg) {
+    const nS = seg.length / 6;
+    if (!nS) return [];
+    const key = (x, y, z) => (Math.round(x / Q) + ',' + Math.round(y / Q) + ',' + Math.round(z / Q));
+    const ends = new Map();
+    const used = new Uint8Array(nS);
+    for (let i = 0; i < nS; i++) {
+      for (const h of [0, 3]) {
+        const k = key(seg[i * 6 + h], seg[i * 6 + h + 1], seg[i * 6 + h + 2]);
+        let L = ends.get(k); if (!L) { L = []; ends.set(k, L); }
+        L.push(i);
+      }
+    }
+    const loops = [];
+    for (let s = 0; s < nS; s++) {
+      if (used[s]) continue;
+      used[s] = 1;
+      const pts = [seg[s * 6], seg[s * 6 + 1], seg[s * 6 + 2], seg[s * 6 + 3], seg[s * 6 + 4], seg[s * 6 + 5]];
+      // walk forward from the tail
+      for (let guard = 0; guard < nS; guard++) {
+        const n = pts.length;
+        const k = key(pts[n - 3], pts[n - 2], pts[n - 1]);
+        const cand = ends.get(k);
+        let nxt = -1;
+        if (cand) for (const c of cand) if (!used[c]) { nxt = c; break; }
+        if (nxt < 0) break;
+        used[nxt] = 1;
+        const b = nxt * 6;
+        const headMatches = key(seg[b], seg[b + 1], seg[b + 2]) === k;
+        if (headMatches) pts.push(seg[b + 3], seg[b + 4], seg[b + 5]);
+        else pts.push(seg[b], seg[b + 1], seg[b + 2]);
+      }
+      if (pts.length >= 9) loops.push(pts);
+    }
+    return loops;
   }
-  // ---- 4. rings + stringers, as one LineSegments ----
-  const seg = Math.max(8, Math.round(K.seg));
-  const spokes = Math.max(0, Math.round(K.spokes));
+  // Douglas-Peucker in the slice's own plane: the output is straight runs by construction, which
+  // is the whole point - "no curvy or wavy lines". A tighter tolerance keeps more of the shape.
+  function simplify(pts, i0, i1, tol) {
+    const n = pts.length / 3;
+    if (n < 3) return pts;
+    const keep = new Uint8Array(n);
+    keep[0] = keep[n - 1] = 1;
+    const stack = [[0, n - 1]];
+    while (stack.length) {
+      const [s, e] = stack.pop();
+      if (e <= s + 1) continue;
+      const ax0 = pts[s * 3 + i0], ay0 = pts[s * 3 + i1];
+      const bx0 = pts[e * 3 + i0], by0 = pts[e * 3 + i1];
+      const dx = bx0 - ax0, dy = by0 - ay0;
+      const len = Math.hypot(dx, dy) || 1e-6;
+      let bi = -1, bd = tol;
+      for (let i = s + 1; i < e; i++) {
+        const px = pts[i * 3 + i0] - ax0, py = pts[i * 3 + i1] - ay0;
+        const dist = Math.abs(px * dy - py * dx) / len;
+        if (dist > bd) { bd = dist; bi = i; }
+      }
+      if (bi >= 0) { keep[bi] = 1; stack.push([s, bi], [bi, e]); }
+    }
+    const out = [];
+    for (let i = 0; i < n; i++) if (keep[i]) out.push(pts[i * 3], pts[i * 3 + 1], pts[i * 3 + 2]);
+    return out;
+  }
+
   const out = [];
-  const put = (station, ang, dst) => {
-    dst[ax] = station.a;
-    dst[au] = station.cu + Math.cos(ang) * station.hu;
-    dst[av] = station.cv + Math.sin(ang) * station.hv;
+  const tol = span * Math.max(0.0005, K.simp);
+  const minLoop = span * Math.max(0, K.minLoop);
+  const emit = (loops, i0, i1) => {
+    for (const raw of loops) {
+      if (raw.length < 9) continue;
+      // drop specks: a loop whose plane-space extent is a rounding error is mesh noise
+      let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+      for (let i = 0; i < raw.length; i += 3) {
+        const a = raw[i + i0], b = raw[i + i1];
+        if (a < x0) x0 = a; if (a > x1) x1 = a;
+        if (b < y0) y0 = b; if (b > y1) y1 = b;
+      }
+      if (Math.max(x1 - x0, y1 - y0) < minLoop) continue;
+      const s = simplify(raw, i0, i1, tol);
+      const m = s.length / 3;
+      if (m < 2) continue;
+      for (let i = 0; i + 1 < m; i++) {
+        out.push(s[i * 3], s[i * 3 + 1], s[i * 3 + 2],
+                 s[(i + 1) * 3], s[(i + 1) * 3 + 1], s[(i + 1) * 3 + 2]);
+      }
+    }
   };
-  const A = [0, 0, 0], Bv = [0, 0, 0];
-  for (const p of st) {
-    if (!p) continue;
-    for (let k = 0; k < seg; k++) {
-      put(p, (k / seg) * Math.PI * 2, A);
-      put(p, ((k + 1) / seg) * Math.PI * 2, Bv);
-      out.push(A[0], A[1], A[2], Bv[0], Bv[1], Bv[2]);
-    }
+  // cross-sections: the frames you are sitting between
+  const sections = Math.max(0, Math.round(K.sections));
+  for (let i = 0; i < sections; i++) {
+    const f = (i + 1) / (sections + 1);
+    emit(chain(sliceAt(ax, lo + span * f)), au, av);
   }
-  for (let k = 0; k < spokes; k++) {
-    const ang = (k / spokes) * Math.PI * 2;
-    let prev = null;
-    for (const p of st) {
-      if (!p) { prev = null; continue; }
-      if (prev) { put(prev, ang, A); put(p, ang, Bv); out.push(A[0], A[1], A[2], Bv[0], Bv[1], Bv[2]); }
-      prev = p;
-    }
-  }
-  // ---- 5. THE HARDWARE. gunN / thrusterN are real empties on every hull, so the guns can be
+  // the two drawing-board views, cut through the middle of the hull: the SIDE profile carries the
+  // canopy line and the belly, the PLAN carries the wings and the nose.
+  const ctr = bb.getCenter(new THREE.Vector3());
+  if (K.profile) emit(chain(sliceAt(au, ctr.getComponent(au))), ax, av);
+  if (K.plan) emit(chain(sliceAt(av, ctr.getComponent(av))), ax, au);
+
+  // ---- 3. THE HARDWARE. gunN / thrusterN are real empties on every hull, so the guns can be
   // drawn where they actually are rather than guessed at. Each is one line-art cylinder: two
   // rings and four rails - circles and straight lines, same as the rest of the frame.
   // The nose direction is read off the THRUSTERS, which are at the tail by definition, so this
   // needs no per-hull convention and cannot be wrong-way-round on a future model.
-  const len = Math.max(1, hi - lo);
+  const len = span;
   const marks = { gun: [], thruster: [] };
   const _mw = new THREE.Vector3();
   group.traverse(o => {
@@ -57972,8 +58063,8 @@ function _hullFrameGeometry(group, K) {
   if (K.guns) {
     const r = len * Math.max(0.002, K.gunR), L = len * Math.max(0.01, K.gunLen);
     for (const p of marks.gun) {
-      const a0 = p.getComponent(ax), cu = p.getComponent(au), cv = p.getComponent(av);
-      const front = a0 + nose * L * 0.5, back = a0 - nose * L * 0.5;
+      const a1 = p.getComponent(ax), cu = p.getComponent(au), cv = p.getComponent(av);
+      const front = a1 + nose * L * 0.5, back = a1 - nose * L * 0.5;
       ring(front, cu, cv, r, out);
       ring(back, cu, cv, r * 0.72, out);
       rail(back, front, cu, cv, r * 0.86, out);
@@ -57982,10 +58073,10 @@ function _hullFrameGeometry(group, K) {
   if (K.thrust) {
     const r = len * Math.max(0.002, K.thrustR), L = len * Math.max(0.01, K.gunLen) * 0.7;
     for (const p of marks.thruster) {
-      const a0 = p.getComponent(ax), cu = p.getComponent(au), cv = p.getComponent(av);
-      const back = a0 - nose * L * 0.5, front = a0 + nose * L * 0.5;
-      ring(back, cu, cv, r, out);            // the bell mouth
-      ring(front, cu, cv, r * 0.6, out);     // the throat
+      const a1 = p.getComponent(ax), cu = p.getComponent(au), cv = p.getComponent(av);
+      const back = a1 - nose * L * 0.5, front = a1 + nose * L * 0.5;
+      ring(back, cu, cv, r, out);
+      ring(front, cu, cv, r * 0.6, out);
       rail(front, back, cu, cv, r * 0.8, out);
     }
   }
