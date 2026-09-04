@@ -2700,7 +2700,7 @@ body.vr-active #camp-video { display: none !important; }
           <button id="btn-endless" onclick="startEndless()" type="button" title="Endless — a cavern without end; fly as far as your lives allow">
             ENDLESS
           </button>
-          <button id="btn-cyberpunk" onclick="startCyberpunkCity()" type="button" title="Cyberpunk City — fly in from a carrier and take the champion field in the city">
+          <button id="btn-cyberpunk" onclick="startCyberpunkCity()" type="button" title="Cyberpunk City — attack from a carrier or defend the city. Sides swap every round.">
             CYBERPUNK CITY
           </button>
           <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;">
@@ -2919,6 +2919,19 @@ body.vr-active #camp-video { display: none !important; }
                 <line x1="4.93" y1="19.07" x2="7.76" y2="16.24"/><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"/>
               </svg>
               FX LAB
+            </a>
+            <a href="ghost_lab.html" target="_blank" rel="noopener" style="
+              background:rgba(15,30,40,0.6);border:1px solid rgba(120,200,255,0.35);
+              color:#cce8ff;padding:9px 12px;font-family:'Rajdhani','Orbitron',sans-serif;font-size:11px;
+              text-decoration:none;letter-spacing:2px;transition:all 0.2s;border-radius:6px;
+              display:flex;align-items:center;gap:8px;"
+              onmouseover="this.style.background='rgba(40,70,100,0.7)';this.style.borderColor='#7cf'"
+              onmouseout="this.style.background='rgba(15,30,40,0.6)';this.style.borderColor='rgba(120,200,255,0.35)'">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3c-4 0-7 3-7 7v11l3-2 2 2 2-2 2 2 3-2V10c0-4-3-7-5-7z"/>
+                <circle cx="9.5" cy="10" r="1"/><circle cx="14.5" cy="10" r="1"/>
+              </svg>
+              GHOST LAB
             </a>
           </div>
         </div>
@@ -4272,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.23';
+const LSS_BUILD = '38.24';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -12826,7 +12839,10 @@ function handleNetEvent(evt, fromPeerId) {
       if (evt.cyber) {
         net.cyber = true;
         game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false,
-                  round: 1, ledger: { capsA: 0, capsB: 0, attA: 0, attB: 0 } };
+                  round: 1, ledger: { capsA: 0, capsB: 0, attA: 0, attB: 0 },
+                  // (v38.24) which battle track this match opens on - rolled ONCE, here, so the
+                  // 500ms music sync cannot reroll it every tick
+                  msalt: (Math.random() * 1e9) | 0 };
       }
     } catch (_) {}
     // (v30.63) Adopt our open-solo team NOW so the fleet strip sorts
@@ -30579,7 +30595,10 @@ function _cyberPrePlace() {
 function startCyberpunkCity() {
   _cyberPrefetch();
   game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false,
-                  round: 1, ledger: { capsA: 0, capsB: 0, attA: 0, attB: 0 } };
+                  round: 1, ledger: { capsA: 0, capsB: 0, attA: 0, attB: 0 },
+                  // (v38.24) which battle track this match opens on - rolled ONCE, here, so the
+                  // 500ms music sync cannot reroll it every tick
+                  msalt: (Math.random() * 1e9) | 0 };
   try { net.cyber = true; } catch (_) {}     // (v37.80) marks the ROOM, so peers and the bot
   startFreeFlight();                          //          roster authority both behave
 }
@@ -30878,13 +30897,21 @@ function _cyberCityDefence(C) {
     const R = ((HUB_CITY.genome && HUB_CITY.genome.radius) || 7500) + 1200;
     inside = _cyberPlayerAttacks(C) && (player.shipState !== 'dead') && (dx * dx + dz * dz < R * R);
   } catch (_) {}
-  if (inside === C._cityHot) return;
-  C._cityHot = inside;
+  // (v38.24) ALLEGIANCE IS NOT AGGRO. The city's hulls belong to whichever fleet is DEFENDING it,
+  // for the whole match - that is what makes them read blue to a defending pilot (owner: "if i'm
+  // on the defending team, the city hoard ships are on my team"). Whether they SHOOT is the old
+  // rule underneath, and it only changes when an attacker crosses the perimeter. The team write
+  // has to run every tick, not only on that change, because traffic is streamed: a freighter that
+  // arrived since the last hot/cold flip would otherwise still be flying for nobody.
   const _defF = _cyberDefFleet(C);
+  const _flip = (inside !== C._cityHot);
+  C._cityHot = inside;
   for (const e of game.entities) {
     if (!e || !e.isHubTraffic) continue;
-    if (inside) { e.team = _defF; e.aggro = true; }
-    else if (!e._dmgLog) { e.aggro = false; }   // one that was actually shot stays angry
+    if (e.team !== _defF) e.team = _defF;
+    if (!_flip) continue;
+    if (inside) e.aggro = true;
+    else if (!e._dmgLog) e.aggro = false;      // one that was actually shot stays angry
   }
 }
 // (v37.82) THE ATTACKERS' LINEUP. Three ships on the deck, the camera arcing around the carrier.
@@ -31149,6 +31176,10 @@ function _cyberFrame(dt) {
       if (window.Overlays && Overlays.banner) Overlays.banner('CARRIER LOST', 'no more deck spawns');
     } catch (_) {}
   }
+  // (v38.24) above the gates on purpose: whose side the city is on is a local presentation +
+  // targeting fact, not a verdict, so a joiner and the gap between rounds both need it.
+  C._cityT = (C._cityT || 0) - (dt || 0.016);
+  if (C._cityT <= 0) { C._cityT = 1.0; try { _cyberCityDefence(C); } catch (_) {} }
   if (C.over) return;
   if (net.active && !C.authority) return;     // (v37.80) a joiner mirrors; it does not adjudicate
   try { _cyberReviveBots(C, dt || 0.016); } catch (_) {}
@@ -31180,8 +31211,6 @@ function _cyberFrame(dt) {
       try { if (_carrierAimAt(C.field.position)) C._aimedAtField = true; } catch (_) {}
     }
   }
-  C._cityT = (C._cityT || 0) - (dt || 0.016);
-  if (C._cityT <= 0) { C._cityT = 1.0; try { _cyberCityDefence(C); } catch (_) {} }
 
   // ---- the objective. Counted here rather than read off the field's own charge state, which the
   // arena round loop drives and this mode does not run.
@@ -69223,6 +69252,32 @@ function updateMinimap() {
       ctx.fill();
       continue;
     }
+    // (v38.24) THE CARRIER reads as a capital ship, not as one more fighter: a hollow hull
+    // silhouette on the disc, and off it a bigger HOLLOW arrow so it is not mistaken for a
+    // hostile fighter's solid one. Friend/enemy colour like everything else - the glyph says
+    // WHAT, the colour says WHOSE.
+    if (bot.isCarrier) {
+      const _cc = isEnemy ? ENEMY_COL : FRIEND_COL;
+      if (p.off) {
+        const _ca = Math.atan2(p.y - cy, p.x - cx);
+        ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(_ca);
+        ctx.strokeStyle = _cc; ctx.lineWidth = 1.3;
+        ctx.beginPath(); ctx.moveTo(6, 0); ctx.lineTo(-3, 4.5); ctx.lineTo(-3, -4.5); ctx.closePath(); ctx.stroke();
+        ctx.restore();
+        continue;
+      }
+      ctx.strokeStyle = _cc; ctx.lineWidth = 1.3;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y - 7);
+      ctx.lineTo(p.x + 3.2, p.y - 2);
+      ctx.lineTo(p.x + 3.2, p.y + 5.5);
+      ctx.lineTo(p.x - 3.2, p.y + 5.5);
+      ctx.lineTo(p.x - 3.2, p.y - 2);
+      ctx.closePath(); ctx.stroke();
+      ctx.fillStyle = _cc;
+      ctx.fillRect(p.x - 1.1, p.y - 2, 2.2, 5);
+      continue;
+    }
     if (p.off) { _mmArrow(p, isEnemy ? ENEMY_COL : FRIEND_COL); continue; }
     ctx.fillStyle = isEnemy ? ENEMY_COL : FRIEND_COL;
     ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
@@ -71457,6 +71512,14 @@ function _howtoRender(ov) {
      'Two disciplines. THE STRAIGHTAWAY is an open-cavern point-to-point: line up on the start, find your own line through the mountains, first to capture the finish field wins. POLE POSITION is a ring-gated circuit: clear every ring to unlock the finish, then dive in and take it.'],
     ['ASSAULT', '#ff8a4a',
      'Attack and defend the CHAMPION FIELD. Only the attacking fleet can charge it by holding the field — the charge decays when they leave, and the timer running out hands the round to the defenders. Roles swap every round with unlimited respawns; the match is decided on net-capture spread, so out-attack them across the swaps.'],
+    ['CYBERPUNK CITY', '#ff4fd0',
+     "A siege over the neon city in the overworld hub. The attacking fleet launches from a CARRIER - " +
+     "a capital ship six Blasters long that flies in from a portal ring, makes its own way over the " +
+     "skyline to the CHAMPION FIELD, and is the only place attackers respawn. Hold the field to take " +
+     "the round; get the carrier parked over it and it takes the field for you. The defenders fly " +
+     "from the city, and the city's own traffic fights alongside them. Destroy the carrier and the " +
+     "round is theirs. Sides swap after every round and the match is decided on net-capture spread, " +
+     "the same as ASSAULT."],
     ['CAMPAIGN', '#b98cff',
      'A solo or co-op journey through themed legs, launched from the overworld hub. Each leg is waves of enemies, then a boss. Difficulty sets how big the swarm gets.'],
     ['EXHIBITION', '#8fe6a8',
@@ -93215,11 +93278,21 @@ function _mp3SyncToState() {
   // outside keeps the welcome theme; the rift home restores it. Composed
   // tracks only, per the house music rule — no loop mutation.
   const _cavern = _ff && !!game._cavern;
-  const inMenu = ((game.state === 'select') || _ff) && !_cavern;
+  // (v38.24) CYBERPUNK CITY is a MATCH that happens to be flown in the hub, so LSS.MODE is
+  // 'freeflight' and this read it as the lobby - the welcome theme played over the whole siege
+  // (owner: "the music needs to be other than the lobby music... it will cycle the other songs").
+  // It takes the battle playlist, which already alternates through every track on 'ended', opening
+  // on a per-match salted one. The ship-select screen still gets the welcome theme.
+  const _cyberM = _ff && game.state !== 'select' && !!(game._cyber && game._cyber.armed);
+  const inMenu = ((game.state === 'select') || _ff) && !_cavern && !_cyberM;
   if (inMenu && typeof audio !== 'undefined' && audio.musicMuteLobby && game.state === 'select') { _mp3Stop(); return; }
   const _bt = MUSIC_TRACKS.battle;
-  _mp3Play(inMenu ? 'menu' : 'battle',
-           (_cavern && _bt && _bt.length) ? (((game._cavernSalt || 0) >>> 0) % _bt.length) : undefined);
+  let _startIdx;
+  if (_bt && _bt.length) {
+    if (_cavern) _startIdx = ((game._cavernSalt || 0) >>> 0) % _bt.length;
+    else if (_cyberM) _startIdx = ((game._cyber.msalt || 0) >>> 0) % _bt.length;
+  }
+  _mp3Play(inMenu ? 'menu' : 'battle', _startIdx);
   if (mp3Music.el) {
     const v = _mp3Vol();
     if (Math.abs(mp3Music.el.volume - v) > 0.005) mp3Music.el.volume = v;
