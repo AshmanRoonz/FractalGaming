@@ -4211,7 +4211,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.26';
+const LSS_BUILD = '38.28';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -8108,6 +8108,7 @@ function loadHoardModel(key) {
       _hoardBaseUrl + key + '.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version, not LSS_BUILD
       (gltf) => {
         const proto = gltf.scene;
+        try { _lssCapModelTextures(proto, 'hoard ' + key); } catch (_) {}   // (v38.28)
         try { _applyProceduralShipNormalMap(proto); } catch (_) {}
         try {
           proto.updateMatrixWorld(true);
@@ -15908,6 +15909,7 @@ function setEquirectangularSky(url) {
     
     
     
+    try { if (!isHdr) _lssShrinkTexture(tex, _lssTexCap()); } catch (_) {}
     const _skyMips = !isHdr && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE);
     if (_skyMips) {
       tex.generateMipmaps = true;
@@ -17371,6 +17373,7 @@ scene.add(dirLight3);
 
 const hemiLight = new THREE.HemisphereLight(0x6688cc, 0x224466, 0.4);
 scene.add(hemiLight);
+try { game._cockpitLights = _lssCockpitLights(); } catch (_) {}
 ambientLight.layers.enable(5);
 dirLight.layers.enable(5);
 dirLight2.layers.enable(5);
@@ -23705,6 +23708,7 @@ function _carrierLoadProto(then) {
     new THREE.GLTFLoader().load(url, gltf => {
       _carrier.loading = false;
       _carrier.proto = gltf.scene;
+      try { _lssCapModelTextures(_carrier.proto, 'carrier'); } catch (_) {}   // (v38.28)
       console.log('[carrier] loaded', url);
       const cbs = _carrier.protoCbs || [];
       _carrier.protoCbs = [];
@@ -27673,6 +27677,60 @@ function _makeProceduralShipNormalMap() {
   _PROCEDURAL_SHIP_NORMALMAP = tex;
   return tex;
 }
+const _TEX_CAP_SMALL = 1024;
+function _lssTexCap() {
+  const K = (typeof window !== 'undefined') ? window.__texCap : null;
+  if (K && K.on === false) return 0;
+  if (K && typeof K.max === 'number') return K.max;
+  let small = false;
+  try {
+    small = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ||
+            ((typeof isXRPresenting === 'function') && isXRPresenting());
+  } catch (_) {}
+  return small ? _TEX_CAP_SMALL : 0;
+}
+function _lssShrinkTexture(t, cap) {
+  if (!t || !t.isTexture || !cap) return false;
+  const img = t.image;
+  if (!img || !img.width || !img.height) return false;
+  const m = Math.max(img.width, img.height);
+  if (m <= cap) return false;
+  const k = cap / m;
+  const w = Math.max(1, Math.round(img.width * k));
+  const h = Math.max(1, Math.round(img.height * k));
+  try {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    t.image = c;                 // r152+: setter writes source.data
+    t.needsUpdate = true;
+    try { if (img.close) img.close(); } catch (_) {}
+    return true;
+  } catch (_) { return false; }
+}
+const _TEX_MAP_KEYS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
+                       'aoMap', 'alphaMap', 'bumpMap', 'displacementMap', 'specularMap'];
+function _lssCapModelTextures(root, label) {
+  const cap = _lssTexCap();
+  if (!cap || !root || !root.traverse) return 0;
+  const seen = new Set();
+  let n = 0;
+  root.traverse(o => {
+    if (!o.isMesh || !o.material) return;
+    const ms = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of ms) {
+      if (!m) continue;
+      for (const key of _TEX_MAP_KEYS) {
+        const t = m[key];
+        if (!t || !t.isTexture || seen.has(t.uuid)) continue;
+        seen.add(t.uuid);
+        if (_lssShrinkTexture(t, cap)) n++;
+      }
+    }
+  });
+  if (n) console.log('[texcap] ' + (label || 'model') + ': ' + n + ' texture(s) capped to ' + cap);
+  return n;
+}
 function _applyProceduralShipNormalMap(obj) {
   const tex = _makeProceduralShipNormalMap();
   obj.traverse(n => {
@@ -27702,6 +27760,7 @@ function preloadShipModels() {
       _shipsBaseUrl + spec.url + _MODEL_CACHE_BUST,
       gltf => {
         const proto = gltf.scene;
+        try { _lssCapModelTextures(proto, 'ship ' + key); } catch (_) {}
         try { _applyProceduralShipNormalMap(proto); }
         catch (e) { console.warn('[ships] normal map apply failed:', e && e.message); }
         if (typeof spec.faceRotY === 'number') {
@@ -38422,6 +38481,27 @@ function _programEnvSig() {
   } catch (_) { return null; }   // null NEVER memoizes — the next call re-pins
 }
 let _pinBuildOnly = false;   // (v36.27) see _pinCombatEffectProgramsStaged
+function _ghostPinWarm() {
+  try {
+    if (typeof _ghostHullApply !== 'function') return;
+    if (typeof player === 'undefined' || !player || !player.mesh) return;
+    const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
+    if (!_was) _ghostHullApply(player.mesh);
+    const _tm = renderer.toneMapping;
+    const _no = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
+    try { renderer.toneMapping = _no; renderer.compile(scene, camera); } catch (_) {}
+    try { renderer.toneMapping = _tm; } catch (_) {}
+    try { renderer.compile(scene, camera); } catch (_) {}
+    try {
+      if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
+        renderer.setRenderTarget(postFX.rtScene);
+        renderer.compile(scene, camera);
+        renderer.setRenderTarget(null);
+      }
+    } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
+    if (!_was) _ghostHullRestore(player.mesh);
+  } catch (_) {}
+}
 function _pinCombatEffectPrograms() {
   try {
     if (typeof renderer === 'undefined' || !renderer ||
@@ -38429,6 +38509,7 @@ function _pinCombatEffectPrograms() {
         typeof camera === 'undefined' || !camera) return;
     const _sig = _programEnvSig();
     if (_fxPinGroup && _sig && _sig === _pinnedEnvSig) return;
+    _ghostPinWarm();     // (v38.27) the seat shell forks on the same key everything else does
     if (!_fxPinGroup) {
       _fxPinGroup = new THREE.Group();
       _fxPinGroup.position.set(0, -100000, 0);
@@ -42794,12 +42875,10 @@ function commitLoadout(key) {
   try { if (typeof _pinPostFXPrograms === 'function') _pinPostFXPrograms(); } catch (_) {}
   try {
     if (typeof _ghostHullApply === 'function' && typeof player !== 'undefined' && player && player.mesh) {
-      _ghostHullApply(player.mesh);
-      if (typeof renderer !== 'undefined' && renderer && renderer.compile &&
-          typeof scene !== 'undefined' && typeof camera !== 'undefined') {
-        renderer.compile(scene, camera);
-      }
-      _ghostHullRestore(player.mesh);
+      const _parented = !!player.mesh.parent;
+      if (!_parented) { try { scene.add(player.mesh); } catch (_) {} }
+      _ghostPinWarm();
+      if (!_parented) { try { scene.remove(player.mesh); } catch (_) {} }
     }
   } catch (e) { console.warn('[ghost] warm failed:', e && e.message); }
 

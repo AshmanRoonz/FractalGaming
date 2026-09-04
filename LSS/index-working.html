@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.26';
+const LSS_BUILD = '38.28';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -9718,6 +9718,7 @@ function loadHoardModel(key) {
       _hoardBaseUrl + key + '.glb' + _MODEL_CACHE_BUST,   // (v36.25) art version, not LSS_BUILD
       (gltf) => {
         const proto = gltf.scene;
+        try { _lssCapModelTextures(proto, 'hoard ' + key); } catch (_) {}   // (v38.28)
         try { _applyProceduralShipNormalMap(proto); } catch (_) {}
         // Fit longest axis to ~140u (the playable-ship scale) and face travel.
         try {
@@ -19722,6 +19723,9 @@ function setEquirectangularSky(url) {
     
     
     
+    // (v38.28) 4096x2048 is 42.7 MB decoded - the largest single texture in the build, and the
+    // one a phone can least afford. Capped like the models are, before first upload.
+    try { if (!isHdr) _lssShrinkTexture(tex, _lssTexCap()); } catch (_) {}
     const _skyMips = !isHdr && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE);
     if (_skyMips) {
       tex.generateMipmaps = true;
@@ -21514,6 +21518,18 @@ scene.add(dirLight3);
 // vertical gradient to ship hulls that the directionals miss.
 const hemiLight = new THREE.HemisphereLight(0x6688cc, 0x224466, 0.4);
 scene.add(hemiLight);
+// (v38.27) THE COCKPIT'S TWO POINT LIGHTS EXIST FROM BOOT, at intensity 0. v37.37 wrote the
+// reason down - "they exist from boot at intensity 0 so the shader light count never changes (a
+// light added later recompiles every material = a hitch)" - but the code built them LAZILY, on
+// the frame the pilot first took the seat. Light counts are a term of three.js's program cache
+// key, so that frame re-linked every visible material: measured at 19 programs on first entry
+// into a cyberpunk city seat - the city's two lambert variants, three terrain physical variants,
+// three depth variants for the shadow pass, the basics, and the ghost shell. That is the owner's
+// "when i switch to the inside view for the first time, it hitches", and warming the ghost
+// materials never touched it because the ghost was two of the nineteen.
+// The cost of the fix is two dark point lights in every scene's light list for the whole session,
+// which is exactly the trade v37.37 meant to make.
+try { game._cockpitLights = _lssCockpitLights(); } catch (_) {}
 // (v36.74) The five combat lights also carry LAYER 5 — the ADS ship-overlay
 // pass (see _adsOverlayRender) renders the player's ship through a camera
 // that sees only layer 5, and three.js includes a light in a pass only if it
@@ -29902,6 +29918,7 @@ function _carrierLoadProto(then) {
     new THREE.GLTFLoader().load(url, gltf => {
       _carrier.loading = false;
       _carrier.proto = gltf.scene;
+      try { _lssCapModelTextures(_carrier.proto, 'carrier'); } catch (_) {}   // (v38.28)
       console.log('[carrier] loaded', url);
       const cbs = _carrier.protoCbs || [];
       _carrier.protoCbs = [];
@@ -35103,6 +35120,68 @@ function _makeProceduralShipNormalMap() {
 // Apply the shared normal map to every MeshStandardMaterial under `obj`.
 // Runs at GLB load time, so each ship picks it up once. Skips materials
 // that already have an authored normalMap (no override).
+// (v38.28) TEXTURE BUDGET. A decoded texture costs w*h*4 bytes of VRAM (x1.33 with mipmaps)
+// whatever it weighed on disk - WebP compression buys download time, not GPU memory. On a phone
+// the whole page's texture set is what decides whether a backgrounded tab keeps its GL context,
+// so anything over the cap is redrawn to fit BEFORE its first upload.
+// Returns 0 (no cap) on desktop unless window.__texCap.max says otherwise.
+const _TEX_CAP_SMALL = 1024;
+function _lssTexCap() {
+  const K = (typeof window !== 'undefined') ? window.__texCap : null;
+  if (K && K.on === false) return 0;
+  if (K && typeof K.max === 'number') return K.max;
+  let small = false;
+  try {
+    small = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ||
+            ((typeof isXRPresenting === 'function') && isXRPresenting());
+  } catch (_) {}
+  return small ? _TEX_CAP_SMALL : 0;
+}
+function _lssShrinkTexture(t, cap) {
+  if (!t || !t.isTexture || !cap) return false;
+  const img = t.image;
+  if (!img || !img.width || !img.height) return false;
+  const m = Math.max(img.width, img.height);
+  if (m <= cap) return false;
+  const k = cap / m;
+  const w = Math.max(1, Math.round(img.width * k));
+  const h = Math.max(1, Math.round(img.height * k));
+  try {
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    c.getContext('2d').drawImage(img, 0, 0, w, h);
+    t.image = c;                 // r152+: setter writes source.data
+    t.needsUpdate = true;
+    // GLTFLoader hands back ImageBitmaps; the decoded original is dead weight once copied
+    try { if (img.close) img.close(); } catch (_) {}
+    return true;
+  } catch (_) { return false; }
+}
+// Walk a loaded model and cap every map on it. Textures are shared between materials, so this
+// dedupes by uuid - a hull's base colour is one upload however many meshes reference it.
+const _TEX_MAP_KEYS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
+                       'aoMap', 'alphaMap', 'bumpMap', 'displacementMap', 'specularMap'];
+function _lssCapModelTextures(root, label) {
+  const cap = _lssTexCap();
+  if (!cap || !root || !root.traverse) return 0;
+  const seen = new Set();
+  let n = 0;
+  root.traverse(o => {
+    if (!o.isMesh || !o.material) return;
+    const ms = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of ms) {
+      if (!m) continue;
+      for (const key of _TEX_MAP_KEYS) {
+        const t = m[key];
+        if (!t || !t.isTexture || seen.has(t.uuid)) continue;
+        seen.add(t.uuid);
+        if (_lssShrinkTexture(t, cap)) n++;
+      }
+    }
+  });
+  if (n) console.log('[texcap] ' + (label || 'model') + ': ' + n + ' texture(s) capped to ' + cap);
+  return n;
+}
 function _applyProceduralShipNormalMap(obj) {
   const tex = _makeProceduralShipNormalMap();
   obj.traverse(n => {
@@ -35141,6 +35220,8 @@ function preloadShipModels() {
         // panel-level relief so dynamic lights (explosion flashes, weapon
         // muzzle flashes, doomed-state red) actually catch on the body
         // instead of sliding off a uniformly smooth shader. Subtle scale.
+        // (v38.28) cap BEFORE the normal map is attached: the procedural one is already 256.
+        try { _lssCapModelTextures(proto, 'ship ' + key); } catch (_) {}
         try { _applyProceduralShipNormalMap(proto); }
         catch (e) { console.warn('[ships] normal map apply failed:', e && e.message); }
         // faceRotY overrides; faceFlip kept as legacy alias.
@@ -49136,7 +49217,39 @@ function _programEnvSig() {
     ].join('|');
   } catch (_) { return null; }   // null NEVER memoizes — the next call re-pins
 }
+// (v38.27) THE SEAT SHELL RIDES THE RE-PIN. The launch warm compiles the ghost materials once,
+// in the environment that existed at launch - and then hub weather swaps scene.environment, which
+// is a term of the program cache key, so every `physical` program forks. Measured: two ghostHull
+// programs still linking on the frame the pilot first took the seat, after all nineteen of the
+// v38.27 cockpit-light relinks were gone. The pin already re-runs on exactly that transition
+// (_programEnvSig), so the shell just has to be in it. Apply, compile both tone-mapping variants,
+// put the painted hull back - all inside one call, so no frame ever renders the swap.
 let _pinBuildOnly = false;   // (v36.27) see _pinCombatEffectProgramsStaged
+function _ghostPinWarm() {
+  try {
+    if (typeof _ghostHullApply !== 'function') return;
+    if (typeof player === 'undefined' || !player || !player.mesh) return;
+    const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
+    if (!_was) _ghostHullApply(player.mesh);
+    const _tm = renderer.toneMapping;
+    const _no = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
+    try { renderer.toneMapping = _no; renderer.compile(scene, camera); } catch (_) {}
+    try { renderer.toneMapping = _tm; } catch (_) {}
+    try { renderer.compile(scene, camera); } catch (_) {}
+    // ...and for the target the game actually draws into. The OUTPUT COLOUR SPACE is a term of
+    // the program cache key: a compile against the canvas builds the `srgb` variant, and the
+    // gameplay frame renders into postFX.rtScene, which is `srgb-linear`. That one character was
+    // the whole of the residual two-program hitch - the same reason the main pin does this.
+    try {
+      if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
+        renderer.setRenderTarget(postFX.rtScene);
+        renderer.compile(scene, camera);
+        renderer.setRenderTarget(null);
+      }
+    } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
+    if (!_was) _ghostHullRestore(player.mesh);
+  } catch (_) {}
+}
 function _pinCombatEffectPrograms() {
   try {
     if (typeof renderer === 'undefined' || !renderer ||
@@ -49148,6 +49261,7 @@ function _pinCombatEffectPrograms() {
     // compiles below are a guaranteed-empty walk of the whole world.
     const _sig = _programEnvSig();
     if (_fxPinGroup && _sig && _sig === _pinnedEnvSig) return;
+    _ghostPinWarm();     // (v38.27) the seat shell forks on the same key everything else does
     if (!_fxPinGroup) {
       _fxPinGroup = new THREE.Group();
       // Parked far below the map like the warmup prototypes ; never visible
@@ -55402,12 +55516,12 @@ function commitLoadout(key) {
   // the real switch is a pointer swap.
   try {
     if (typeof _ghostHullApply === 'function' && typeof player !== 'undefined' && player && player.mesh) {
-      _ghostHullApply(player.mesh);
-      if (typeof renderer !== 'undefined' && renderer && renderer.compile &&
-          typeof scene !== 'undefined' && typeof camera !== 'undefined') {
-        renderer.compile(scene, camera);
-      }
-      _ghostHullRestore(player.mesh);
+      // (v38.27) one warm, in one place: _ghostPinWarm covers both tone-mapping variants AND
+      // the post-FX render target's colour space, which is what the seat actually draws into.
+      const _parented = !!player.mesh.parent;
+      if (!_parented) { try { scene.add(player.mesh); } catch (_) {} }
+      _ghostPinWarm();
+      if (!_parented) { try { scene.remove(player.mesh); } catch (_) {} }
     }
   } catch (e) { console.warn('[ghost] warm failed:', e && e.message); }
 
