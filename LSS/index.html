@@ -4211,7 +4211,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.25';
+const LSS_BUILD = '38.26';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -24318,6 +24318,7 @@ function _cyberApplyStart(sector, routeT, fx, fy, fz) {
   if (typeof fx === 'number' && typeof StasisField === 'function') {
     try {
       const f = new StasisField(new THREE.Vector3(fx, fy, fz), true);
+      try { f.holdRadius = f.radius + 120; } catch (_) {}      // (v38.26) same zone as the authority's
       if (Array.isArray(game.stasisFields)) game.stasisFields.push(f);
       game.championField = f;
       game.championSpawned = true;
@@ -24356,6 +24357,7 @@ function _cyberSpawnField() {
   }
   if (!pos) pos = new THREE.Vector3(HUB_CITY.x, HUB_CITY.padY + 400, HUB_CITY.z);
   const f = new StasisField(pos, true);
+  try { f.holdRadius = f.radius + 120; } catch (_) {}
   if (Array.isArray(game.stasisFields)) game.stasisFields.push(f);
   game.championField = f;
   game.championSpawned = true;
@@ -24794,6 +24796,16 @@ function _cyberFrame(dt) {
         const _cr = (F.radius || 50) + 120 + _carrierLength() * 0.35;
         carrierOn = Math.hypot(_carrier.obj.position.x - F.position.x,
                                _carrier.obj.position.z - F.position.z) < _cr;
+      }
+    } catch (_) {}
+    try {
+      const _sh = game.championShell;
+      const _now = (game.time || 0);
+      if (_sh && _sh.alive && _cyberPlayerAttacks(C) && player.shipState !== 'dead' &&
+          player.position.distanceTo(F.position) < 900 &&
+          (!C._shellSaidT || _now - C._shellSaidT > 10)) {
+        C._shellSaidT = _now;
+        if (window.Overlays && Overlays.banner) Overlays.banner('SHELL UP', 'break it to reach the field');
       }
     } catch (_) {}
     const need = (window.__cyber && window.__cyber.capture != null) ? window.__cyber.capture : CYBER.capture;
@@ -60119,6 +60131,7 @@ class StasisField {
     this.alive = true;
     this.championMode = !!championMode;
     this.radius = this.championMode ? 50 : 120;
+    this.holdRadius = this.radius;
     if (this.championMode) {
       try { if (typeof _spawnChampionShell === 'function') _spawnChampionShell(this); }
       catch (e) { console.warn('[champ-shell] spawn failed:', e); }
@@ -60695,7 +60708,7 @@ function updateStasisFields(dt) {
         const isPlayer = (ship === player);
         const shipDead = isPlayer ? (player.shipState === 'dead') : (!ship.alive);
         const distToField = ship.position.distanceTo(field.position);
-        const shovedOut = !shipDead && distToField > field.radius;
+        const shovedOut = !shipDead && distToField > (field.holdRadius || field.radius);
         if (shipDead || shovedOut) {
           _releaseChampionClaim(field,  true, ship);
           if (window.Overlays) {
@@ -60754,7 +60767,7 @@ function updateStasisFields(dt) {
             (!_isAssault() || player.team === _assaultAttackerFleet()) &&
             (!_isCyber() || _cyberPlayerAttacks(game._cyber))) {
           const d = player.position.distanceTo(field.position);
-          if (d < field.radius) {
+          if (d < (field.holdRadius || field.radius)) {
             field.claimedBy = player;
             field.chargingTeam = player.team;
             field._championChargeStartShield = null;
@@ -60776,7 +60789,7 @@ function updateStasisFields(dt) {
             if (field.recentlyReleasedShip === bot) continue;
             if (_isAssault() && bot.team !== _assaultAttackerFleet()) continue;
             if (_isCyber() && !bot._cyberAttacker) continue;
-            if (bot.position.distanceTo(field.position) < field.radius) {
+            if (bot.position.distanceTo(field.position) < (field.holdRadius || field.radius)) {
               field.claimedBy = bot;
               field.chargingTeam = bot.team;
               field._championChargeStartShield = null;

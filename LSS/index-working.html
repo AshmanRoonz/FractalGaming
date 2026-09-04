@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.25';
+const LSS_BUILD = '38.26';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -30654,6 +30654,7 @@ function _cyberApplyStart(sector, routeT, fx, fy, fz) {
   if (typeof fx === 'number' && typeof StasisField === 'function') {
     try {
       const f = new StasisField(new THREE.Vector3(fx, fy, fz), true);
+      try { f.holdRadius = f.radius + 120; } catch (_) {}      // (v38.26) same zone as the authority's
       if (Array.isArray(game.stasisFields)) game.stasisFields.push(f);
       game.championField = f;
       game.championSpawned = true;
@@ -30697,6 +30698,11 @@ function _cyberSpawnField() {
   }
   if (!pos) pos = new THREE.Vector3(HUB_CITY.x, HUB_CITY.padY + 400, HUB_CITY.z);
   const f = new StasisField(pos, true);
+  // (v38.26) The zone is the space the SHELL was in - break the sphere and what it enclosed is
+  // where you hold. The mode's own capture counter used radius + 120 before v38.25 moved ships
+  // onto the champion machinery, and that is the number this restores: a 50-unit dot is not a
+  // thing you can sit in for twelve seconds over an open city while three defenders shoot at you.
+  try { f.holdRadius = f.radius + 120; } catch (_) {}
   if (Array.isArray(game.stasisFields)) game.stasisFields.push(f);
   game.championField = f;
   game.championSpawned = true;
@@ -31246,6 +31252,20 @@ function _cyberFrame(dt) {
         const _cr = (F.radius || 50) + 120 + _carrierLength() * 0.35;
         carrierOn = Math.hypot(_carrier.obj.position.x - F.position.x,
                                _carrier.obj.position.z - F.position.z) < _cr;
+      }
+    } catch (_) {}
+    // (v38.26) WHY IT IS NOT CAPTURING. The objective spawns sealed inside a 3000 HP shell that
+    // ships BOUNCE off at 170 units, and the claim needs you inside it - so an attacker parked on
+    // the shell is sitting on the objective and charging nothing, with no reason given (owner: "i
+    // was on the champion field, and it wasn't capturing"). Say it, throttled.
+    try {
+      const _sh = game.championShell;
+      const _now = (game.time || 0);
+      if (_sh && _sh.alive && _cyberPlayerAttacks(C) && player.shipState !== 'dead' &&
+          player.position.distanceTo(F.position) < 900 &&
+          (!C._shellSaidT || _now - C._shellSaidT > 10)) {
+        C._shellSaidT = _now;
+        if (window.Overlays && Overlays.banner) Overlays.banner('SHELL UP', 'break it to reach the field');
       }
     } catch (_) {}
     const need = (window.__cyber && window.__cyber.capture != null) ? window.__cyber.capture : CYBER.capture;
@@ -78054,6 +78074,11 @@ class StasisField {
     // them and the contested-charge resolution reads at a glance.
     this.championMode = !!championMode;
     this.radius = this.championMode ? 50 : 120;
+    // (v38.26) HOW CLOSE COUNTS AS "ON IT". The dot is 50 across because in an arena you park in
+    // a room; a mode that asks for a twelve-second hold in open air over a city needs a zone you
+    // can actually station-keep in. Defaults to the dot, so every existing mode is unchanged;
+    // cyberpunk city widens it to the volume the champion shell occupied.
+    this.holdRadius = this.radius;
     // Champion fields spawn sealed inside the destructible Champion
     // Shell (Sphere.glb, 3000 HP). Constructor hook covers every spawn
     // path: stasis-owner spawn, net 'stasis_spawn' receivers, race mode.
@@ -78854,7 +78879,7 @@ function updateStasisFields(dt) {
         // release the claim PRESERVING this team's accrued progress so
         // they can resume on re-entry.
         const distToField = ship.position.distanceTo(field.position);
-        const shovedOut = !shipDead && distToField > field.radius;
+        const shovedOut = !shipDead && distToField > (field.holdRadius || field.radius);
         if (shipDead || shovedOut) {
           _releaseChampionClaim(field,  true, ship);
           if (window.Overlays) {
@@ -78942,7 +78967,7 @@ function updateStasisFields(dt) {
             // capture the round for the enemy
             (!_isCyber() || _cyberPlayerAttacks(game._cyber))) {
           const d = player.position.distanceTo(field.position);
-          if (d < field.radius) {
+          if (d < (field.holdRadius || field.radius)) {
             field.claimedBy = player;
             field.chargingTeam = player.team;
             field._championChargeStartShield = null;
@@ -78970,7 +78995,7 @@ function updateStasisFields(dt) {
             // _cyberAttacker flag, so neither can claim - the carrier takes the field by parking
             // on it (C.hold), which is the one thing C.hold counts now.
             if (_isCyber() && !bot._cyberAttacker) continue;
-            if (bot.position.distanceTo(field.position) < field.radius) {
+            if (bot.position.distanceTo(field.position) < (field.holdRadius || field.radius)) {
               field.claimedBy = bot;
               field.chargingTeam = bot.team;
               field._championChargeStartShield = null;
