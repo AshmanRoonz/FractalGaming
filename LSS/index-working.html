@@ -4343,7 +4343,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.61';
+const LSS_BUILD = '38.62';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -25146,6 +25146,11 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL) {
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
   if (game._xrBlurred) return;
+  // (v38.62) HIDDEN TAB: the 30 Hz background worker keeps the whole sim
+  // alive (multiplayer needs that), but nothing is drawn — so the ripple
+  // compute, its readback and the crest scan were pure heat. Drop pending
+  // seeds (visual only) and skip; the surface picks up where it was.
+  if (typeof document !== 'undefined' && document.hidden && !((typeof isXRPresenting === 'function') && isXRPresenting())) { R.pending.length = 0; return; }
   // (v38.15) live A/B for the two that decide how far a ripple carries. The shipped feel is
   // waveC2 0.16 / visc 0.9885 ; window.__water = { waveC2: 0.05, visc: 0.972 } is the old water
   // exactly, so the change can be judged against it without a rebuild.
@@ -25921,6 +25926,7 @@ function _birdFlockInit(T) {
 }
 function _birdFlockTick(dt) {
   const F = _birdFlock; if (!F.gpu || !F.mat) return; if (game._xrBlurred) return;
+  if (typeof document !== 'undefined' && document.hidden && !((typeof isXRPresenting === 'function') && isXRPresenting())) return;   // (v38.62) no GPU sim while nothing is drawn
   const B = (typeof window !== 'undefined' && window.__birds) ? window.__birds : {};
   if (F.mesh) F.mesh.visible = (B.on !== 0);
   if (B.on === 0) return;
@@ -26141,6 +26147,7 @@ function _fishReseed(cx, cz) {
 }
 function _fishSchoolTick(dt) {
   const F = _fishSchool; if (!F.gpu || !F.mat) return; if (game._xrBlurred) return;
+  if (typeof document !== 'undefined' && document.hidden && !((typeof isXRPresenting === 'function') && isXRPresenting())) return;   // (v38.62) no GPU sim while nothing is drawn
   const B = (typeof window !== 'undefined' && window.__fish) ? window.__fish : {};
   if (B.on === 0) { if (F.mesh) F.mesh.visible = false; return; }
   const near = _fishNearWater(F.WL, F.T);
@@ -26574,8 +26581,13 @@ function _swBuildHubWater(T) {
       // reflGapMax = 3 restores the exact v36.41 flat 1-in-3 for an A/B.
       {
         const _WK = window.__water || {};
-        const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : 2;   // hard cost ceiling
-        const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : 3;   // shipped cadence
+        // (v38.62) Phones / Quest-flat: 4-6 instead of 2-3. The mirror is a
+        // full second scene render (~100 draws, 1.7M tris measured); a
+        // draw-call-bound phone was paying it at the desktop cadence while VR
+        // skips it outright. Desktop unchanged. The knobs still override.
+        const _sm = _fxSmallDevice();
+        const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : (_sm ? 4 : 2);   // hard cost ceiling
+        const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : (_sm ? 6 : 3);   // shipped cadence
         this._reflGap++;
         let _go = (this._reflGap >= _gMax);
         if (!_go && this._reflGap >= _gMin) {
