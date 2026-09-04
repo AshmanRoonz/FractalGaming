@@ -1889,6 +1889,12 @@ body.lss-test-dev #settings-overlay.open h2 { display: none; }
 }
 #ov-warp::before { animation: ovWarpZoom 0.85s linear infinite; }
 #ov-warp::after  { animation: ovWarpZoom 1.5s linear infinite; opacity: 0.55; }
+/* (v38.61) Two 300vmax layers with mix-blend-mode + will-change were animating
+   forever behind an opacity-0 element (and the four shield overlays below ran
+   their filter flicker the same way). The compositor keeps ticking hidden
+   animations and holds their layers; pause them until shown. */
+#ov-warp:not(.show):not(.tunnel)::before, #ov-warp:not(.show):not(.tunnel)::after { animation-play-state: paused; }
+#ov-sword-block:not(.show), #ov-vortex-shield:not(.show), #ov-gun-shield:not(.show), #ov-thermal-shield:not(.show) { animation-play-state: paused; }
 @keyframes ovWarpZoom {
   0%   { transform: scale(0.15) rotate(0deg);  opacity: 0; }
   18%  { opacity: 0.95; }
@@ -4337,7 +4343,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.60';
+const LSS_BUILD = '38.61';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -9939,11 +9945,24 @@ function _campHoardTerrainNav(bot, dt) {
   if (!T || !T.ON || !bot || !bot.position || !bot.velocity) return;
   const p = bot.position;
   const vh = Math.hypot(bot.velocity.x, bot.velocity.z) || 1;
-  const LA = 1100;                                   
-  const ax = p.x + (bot.velocity.x / vh) * LA;
-  const az = p.z + (bot.velocity.z / vh) * LA;
-  const fc = _stGroundYCarved(p.x, p.z, T), cc = _stCeilYCarved(p.x, p.z, T);
-  const fa = _stGroundYCarved(ax, az, T),   ca = _stCeilYCarved(ax, az, T);
+  const LA = 1100;
+  const hx = bot.velocity.x / vh, hz = bot.velocity.z / vh;
+  const ax = p.x + hx * LA;
+  const az = p.z + hz * LA;
+  // (v38.61) Four carved-height samples per bot per frame (each walks the
+  // room/tunnel list + noise) — the player's own sampler caches behind a
+  // 40 u travel gate ("real per-frame money on phones"); the bot path had no
+  // cache. Re-sample after 40 u of travel or a ~10 degree heading change; the
+  // output is lerped at dt*3.5 so 0.1 s of staleness is invisible.
+  const _tc = bot._tnav || (bot._tnav = { x: 1e9, z: 1e9, hx: 0, hz: 0, fc: 0, cc: 0, fa: 0, ca: 0 });
+  const _tdx = p.x - _tc.x, _tdz = p.z - _tc.z;
+  if (_tdx * _tdx + _tdz * _tdz > 1600 || (hx * _tc.hx + hz * _tc.hz) < 0.985) {
+    _tc.x = p.x; _tc.z = p.z; _tc.hx = hx; _tc.hz = hz;
+    _tc.fc = _stGroundYCarved(p.x, p.z, T); _tc.cc = _stCeilYCarved(p.x, p.z, T);
+    _tc.fa = _stGroundYCarved(ax, az, T);   _tc.ca = _stCeilYCarved(ax, az, T);
+  }
+  const fc = _tc.fc, cc = _tc.cc;
+  const fa = _tc.fa, ca = _tc.ca;
   // The open-travel "crack of sky" is TIGHT (often only ~300u). We STEER the
   // ship to the centre of the crack rather than hard-snapping it: a hard
   // position clamp fights resolveCollision frame-to-frame and stutters the
@@ -25216,7 +25235,11 @@ function _swRippleTick(dt) {
     if (W3.breakSlope === undefined) W3.breakSlope = 0.06;   
     if (W3.breakRate === undefined) W3.breakRate = 0.5;      
     if (W3.breakBudget === undefined) W3.breakBudget = 500;   
-    if (W3.breakEvery === undefined) W3.breakEvery = 2;      
+    // (v38.61) 2 -> 4. The v35.37 note further down says "2 -> 4: halves the
+    // stall frequency" and falls back to 4 — but this default block runs
+    // first and had been pinning breakEvery at 2 all along, so that halving
+    // never happened. 4 is now the shipped cadence (every 4th 60 Hz sim step).
+    if (W3.breakEvery === undefined) W3.breakEvery = 4;
     if (W3.jetLean === undefined) W3.jetLean = 1.0;          
     if (W3.crestDebug === undefined) W3.crestDebug = 0;      
     const fp = _swShipFootprint();
@@ -25333,11 +25356,45 @@ function _swRippleTick(dt) {
         const RES = _SW_RIPPLE_RES, B = R.bounds, WLc = w.userData.WL;
         if (!R._crBuf) R._crBuf = new Float32Array(RES * RES * 4);
         const buf = R._crBuf;
-        const _prevRT = renderer.getRenderTarget();
-        try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); }
-        catch (e) { R._crErr = 1; try { console.warn('[crestBreak] readback failed — disabling rule, set window.__water.crestBreak=0 to clear:', e && e.message); } catch (_) {} }
-        if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
-        if (!R._crErr) {
+        // (v38.61) ASYNC READBACK — the stall itself is gone, not just gated.
+        // readRenderTargetPixels is a synchronous readPixels: the CPU waits
+        // for the whole GPU queue (this frame's compute + last frame's scene)
+        // to drain before it returns — the 8 ms/frame the v35.37 note measured,
+        // and on a phone's tiler far worse. three r165 has
+        // readRenderTargetPixelsAsync: readPixels into a PIXEL_PACK_BUFFER
+        // (a GPU-side copy, queued like any other command), a fence, and a
+        // promise that fills `buf` when the GPU gets there. The crest scan then
+        // runs on the NEXT sim step, from data one step old — invisible for
+        // spray. One read in flight at a time; a failure falls back to the
+        // synchronous path once, and a second failure disables the rule as
+        // before. window.__water.syncReadback = 1 forces the old path (A/B).
+        const _asyncRB = (typeof renderer.readRenderTargetPixelsAsync === 'function') && !_Wc.syncReadback && !R._crAsyncErr;
+        let _scanNow = false;
+        if (_asyncRB) {
+          if (R._crReady) { R._crReady = false; _scanNow = true; }
+          if (!R._crPending) {
+            R._crPending = true;
+            const _prevRT = renderer.getRenderTarget();
+            let _pr = null;
+            try { _pr = renderer.readRenderTargetPixelsAsync(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); }
+            catch (e) { R._crPending = false; R._crAsyncErr = 1; try { console.warn('[crestBreak] async readback unavailable, using the synchronous path:', e && e.message); } catch (_) {} }
+            // The async call leaves the ripple framebuffer + a pixel-pack buffer
+            // bound until its promise settles; restore both so nothing in between
+            // draws into the ripple target or readPixels into the PBO.
+            if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
+            try { const _gl = renderer.getContext(); if (_gl && _gl.PIXEL_PACK_BUFFER) _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null); } catch (_) {}
+            if (_pr && typeof _pr.then === 'function') {
+              _pr.then(function () { R._crPending = false; R._crReady = true; _Wc.crReads = (_Wc.crReads | 0) + 1; },
+                       function (e) { R._crPending = false; R._crAsyncErr = 1; try { console.warn('[crestBreak] async readback failed, using the synchronous path:', e && e.message); } catch (_) {} });
+            }
+          }
+        } else {
+          const _prevRT = renderer.getRenderTarget();
+          try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); _scanNow = true; }
+          catch (e) { R._crErr = 1; try { console.warn('[crestBreak] readback failed — disabling rule, set window.__water.crestBreak=0 to clear:', e && e.message); } catch (_) {} }
+          if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
+        }
+        if (!R._crErr && _scanNow) {
           const dispS = (_Wc.disp != null) ? _Wc.disp : 180, gainS = (_Wc.gain != null) ? _Wc.gain : 180;
           const g2d = gainS / Math.max(dispS, 0.01);
           const bPeak = (_Wc.breakPeak != null) ? _Wc.breakPeak : 0.22;
@@ -29180,49 +29237,71 @@ function _hcApplyNetState(rows) {
     sh.ent.alive = r[4] > 0;
   }
 }
-function _hcPadSched(pad, i, t, lift) {
-  const h = _stHash2(i * 7.13, HUB_CITY.genome.seed * 0.001);
-  const h2 = _stHash2(i * 3.71, 9.2);
-  const period = 90 + h * 80;
-  const ph = ((t / period) + h2) % 1;
-const R = HUB_CITY.genome.radius;
-  const azIn = h * 6.283, azOut = (h * 6.283 + 2.0 + h2 * 1.6) % 6.283;
-  // far waypoints sit OUTSIDE the city edge, relative to the CITY CENTER —
-  // and the cruise altitude clears all but the hero crown (v34.26 towers)
-  const dIn = R + 2000 + h2 * 1600, dOut = R + 2300 + h * 1500;
-  // (v34.87) Cruise higher (clear of even the hero crown) and route via a
-  // waypoint DIRECTLY ABOVE the pad, so descent/climb are vertical drops over
-  // the pad's own clear column — the old FI->pad diagonal sliced through
-  // towers on the way down. Parked window shrunk so more ships are airborne.
-  // (v35.65) AIR-STREETS: cruise dropped from 5600 to 2100-3300 above pad Y.
-  // At 5600 the traffic was a row of specks against the sky and read as
-  // scenery; down here it flies through the skyline and reads as city traffic.
-  // The hero crown tops out around +1600, so 2100 is the floor that still
-  // clears it — do NOT lower this without re-checking the tower heights.
-  // The h-term spreads ships across ~4 stacked lanes instead of one sheet.
-  const alt = 2100 + Math.floor(h * 4) * 300 + h2 * 180;
-  const FI = { x: HUB_CITY.x + Math.cos(azIn) * dIn, y: pad.y + alt, z: HUB_CITY.z + Math.sin(azIn) * dIn };
-  const FO = { x: HUB_CITY.x + Math.cos(azOut) * dOut, y: pad.y + alt + 100, z: HUB_CITY.z + Math.sin(azOut) * dOut };
-  const A  = { x: pad.x, y: pad.y + 560, z: pad.z };
-  const AH = { x: pad.x, y: pad.y + alt, z: pad.z };
-  const sm = (a, b, u) => { u = u < 0 ? 0 : (u > 1 ? 1 : u); u = u * u * (3 - 2 * u); return a + (b - a) * u; };
-  const lerp3 = (P, Q2, u) => ({ x: sm(P.x, Q2.x, u), y: sm(P.y, Q2.y, u), z: sm(P.z, Q2.z, u) });
+// (v38.61) The smoothstep lerp pair, hoisted out of _hcPadSched (they were
+// two closures re-created per ship per hub frame) with a write-into variant so
+// the scheduler hands back no fresh objects.
+function _hcSm(a, b, u) { u = u < 0 ? 0 : (u > 1 ? 1 : u); u = u * u * (3 - 2 * u); return a + (b - a) * u; }
+function _hcLerpInto(o, P, Q2, u) { o.x = _hcSm(P.x, Q2.x, u); o.y = _hcSm(P.y, Q2.y, u); o.z = _hcSm(P.z, Q2.z, u); return o; }
+function _hcPadSched(pad, i, t, lift, cache) {
+  // (v38.61) Everything but the phase is a constant of (pad, i, lift): the two
+  // hashes, the period, the five waypoints. They were rebuilt — ~9 objects and
+  // 2 closures — for all 34 ships on every hub frame (~300 allocations a
+  // frame, the steadiest garbage source in the hub). The ship record is the
+  // cache (5th arg; re-derived when the measured hull lift lands), and the
+  // result is written into one reusable record per ship. Consumers read st.*
+  // inside the same loop iteration only (verified: position/obb copies, the
+  // seg number, the fx point copied into a fresh Vector3).
+  let C = cache ? cache._sched : null;
+  if (!C || C.pad !== pad || C.i !== i || C.lift !== lift) {
+    const h = _stHash2(i * 7.13, HUB_CITY.genome.seed * 0.001);
+    const h2 = _stHash2(i * 3.71, 9.2);
+    const period = 90 + h * 80;
+    const R = HUB_CITY.genome.radius;
+    const azIn = h * 6.283, azOut = (h * 6.283 + 2.0 + h2 * 1.6) % 6.283;
+    // far waypoints sit OUTSIDE the city edge, relative to the CITY CENTER —
+    // and the cruise altitude clears all but the hero crown (v34.26 towers)
+    const dIn = R + 2000 + h2 * 1600, dOut = R + 2300 + h * 1500;
+    // (v34.87) Cruise higher (clear of even the hero crown) and route via a
+    // waypoint DIRECTLY ABOVE the pad, so descent/climb are vertical drops over
+    // the pad's own clear column — the old FI->pad diagonal sliced through
+    // towers on the way down. Parked window shrunk so more ships are airborne.
+    // (v35.65) AIR-STREETS: cruise dropped from 5600 to 2100-3300 above pad Y.
+    // At 5600 the traffic was a row of specks against the sky and read as
+    // scenery; down here it flies through the skyline and reads as city traffic.
+    // The hero crown tops out around +1600, so 2100 is the floor that still
+    // clears it — do NOT lower this without re-checking the tower heights.
+    // The h-term spreads ships across ~4 stacked lanes instead of one sheet.
+    const alt = 2100 + Math.floor(h * 4) * 300 + h2 * 180;
+    C = {
+      pad: pad, i: i, lift: lift, period: period, h2: h2,
+      FI: { x: HUB_CITY.x + Math.cos(azIn) * dIn, y: pad.y + alt, z: HUB_CITY.z + Math.sin(azIn) * dIn },
+      FO: { x: HUB_CITY.x + Math.cos(azOut) * dOut, y: pad.y + alt + 100, z: HUB_CITY.z + Math.sin(azOut) * dOut },
+      A:  { x: pad.x, y: pad.y + 560, z: pad.z },
+      AH: { x: pad.x, y: pad.y + alt, z: pad.z },
+      // (v34.87b) Rest height: ship models are origin-centered, so parking at the
+      // raw pad point sank hulls into pad roofs / the ground (user-sighted).
+      PK: { x: pad.x, y: pad.y + ((typeof lift === 'number' && lift > 0) ? lift : 56), z: pad.z },
+      pos: { x: 0, y: 0, z: 0 },
+      out: { seg: 0, pos: null, from: null, to: null, fx: null, yaw: undefined },
+    };
+    if (cache) cache._sched = C;
+  }
+  const ph = ((t / C.period) + C.h2) % 1;
+  const o = C.out, P = C.pos;
+  o.pos = P; o.from = null; o.to = null; o.fx = null; o.yaw = undefined;
   // segments: 0 in-cruise, 1 descend, 2 parked, 3 rise, 4 out-cruise, 5 absent
-  // (v34.87b) Rest height: ship models are origin-centered, so parking at the
-  // raw pad point sank hulls into pad roofs / the ground (user-sighted).
-  const PK = { x: pad.x, y: pad.y + ((typeof lift === 'number' && lift > 0) ? lift : 56), z: pad.z };
   // (v35.65) Rebalanced toward AIRBORNE. Old split was 42% flying / 36% parked
   // / 22% warped-out, so most of the fleet was on the ground or absent and the
   // sky looked empty however high maxShips went. Now ~74% flying / 18% parked
   // / 8% absent — the same ships, just spending their cycle in the air.
-  if (ph < 0.20) return { seg: 0, pos: lerp3(FI, AH, ph / 0.20), from: FI, to: AH, fx: FI };
-  if (ph < 0.26) return { seg: 1, pos: lerp3(AH, A, (ph - 0.20) / 0.06), from: AH, to: A };
-  if (ph < 0.30) return { seg: 1, pos: lerp3(A, PK, (ph - 0.26) / 0.04), from: A, to: PK };
-  if (ph < 0.48) return { seg: 2, pos: { x: PK.x, y: PK.y, z: PK.z }, yaw: pad.yaw };
-  if (ph < 0.52) return { seg: 3, pos: lerp3(PK, A, (ph - 0.48) / 0.04), from: PK, to: A };
-  if (ph < 0.58) return { seg: 3, pos: lerp3(A, AH, (ph - 0.52) / 0.06), from: A, to: AH };
-  if (ph < 0.92) return { seg: 4, pos: lerp3(AH, FO, (ph - 0.58) / 0.34), from: AH, to: FO, fx: FO };
-  return { seg: 5, pos: null };
+  if (ph < 0.20) { o.seg = 0; _hcLerpInto(P, C.FI, C.AH, ph / 0.20);          o.from = C.FI; o.to = C.AH; o.fx = C.FI; return o; }
+  if (ph < 0.26) { o.seg = 1; _hcLerpInto(P, C.AH, C.A, (ph - 0.20) / 0.06);  o.from = C.AH; o.to = C.A;  return o; }
+  if (ph < 0.30) { o.seg = 1; _hcLerpInto(P, C.A, C.PK, (ph - 0.26) / 0.04);  o.from = C.A;  o.to = C.PK; return o; }
+  if (ph < 0.48) { o.seg = 2; P.x = C.PK.x; P.y = C.PK.y; P.z = C.PK.z;        o.yaw = pad.yaw; return o; }
+  if (ph < 0.52) { o.seg = 3; _hcLerpInto(P, C.PK, C.A, (ph - 0.48) / 0.04);  o.from = C.PK; o.to = C.A;  return o; }
+  if (ph < 0.58) { o.seg = 3; _hcLerpInto(P, C.A, C.AH, (ph - 0.52) / 0.06);  o.from = C.A;  o.to = C.AH; return o; }
+  if (ph < 0.92) { o.seg = 4; _hcLerpInto(P, C.AH, C.FO, (ph - 0.58) / 0.34); o.from = C.AH; o.to = C.FO; o.fx = C.FO; return o; }
+  o.seg = 5; o.pos = null; return o;
 }
 
 function _hcTrafficInit(city, group) {
@@ -29429,7 +29508,7 @@ function _hcTrafficUpdate(dt) {
   const nearCity = ((px - HUB_CITY.x) ** 2 + (pz - HUB_CITY.z) ** 2) < nearR * nearR;
   _HC_TRAF.obbs.length = 0;
   for (const s of _HC_TRAF.ships) {
-    const st = _hcPadSched(s.pad, s.idx, t, s.lift);
+    const st = _hcPadSched(s.pad, s.idx, t, s.lift, s);   // (v38.61) s carries the per-ship schedule cache
     // (v34.87) Default the combat entity to its pad every frame — hidden /
     // absent ships otherwise idle at world origin (inside the terrain) and
     // environmental damage executes them. Visible/aggro branches overwrite
@@ -32983,8 +33062,9 @@ function _swHubLoadingOverlay(show) {
   else { try { hideLoadingOverlay(); } catch (_) {} }
 }
 
+const _swStreamIdle = { idle: false, T: null, scx: 0, scz: 0, view: 0, size: -1, grass: false, trees: false, clip: false };   // (v38.61) see the idle early-out
 function updateSandwichStream(px, pz, budget, gLim, tLim) {
-  if (game._xrBlurred) return 0;   
+  if (game._xrBlurred) return 0;
   const T = game.sandwichTerrain;
   if (!T || !T.ON) { if (game.sandwichChunks && game.sandwichChunks.size) resetSandwichTerrain(); return; }
   if (!game.sandwichChunks) game.sandwichChunks = new Map();
@@ -32998,6 +33078,21 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   
   const _disc = (T && T.biome === 'mossy');
   const _R2 = _VIEW * _VIEW;
+  const wantGrass = (game.sandwichGrass !== false) && (((T.biome || 'grassy') === 'grassy') || T.biome === 'mossy');
+  const wantTrees = (game.sandwichTrees !== false) && (T.biome === 'mossy');
+  // (v38.61) IDLE EARLY-OUT. In steady state (same chunk cell, nothing left
+  // to build, dispose or plant) this rescanned the whole view square — 625
+  // cells on the desktop hub, each a fresh 'cx,cz' string + a Map lookup —
+  // and swept every live chunk twice, every frame, to find nothing. Remember
+  // what the last full pass concluded and skip it while nothing that could
+  // change the answer has changed. Anything that does (cell, view radius,
+  // chunk count via invalidate/reset, foliage wants, clipmap state, a new T)
+  // misses the cache and runs the full pass again.
+  const _SC = _swStreamIdle;
+  const _clipOn = !!(typeof _clipmap !== 'undefined' && _clipmap && _clipmap.on);
+  if (_SC.idle && _SC.T === T && _SC.scx === scx && _SC.scz === scz && _SC.view === _VIEW &&
+      _SC.size === chunks.size && _SC.grass === wantGrass && _SC.trees === wantTrees && _SC.clip === _clipOn) return 0;
+  let _swDisposed = 0, _swRemoved = 0;
   const todo = [];
   for (let cx = scx - _VIEW; cx <= scx + _VIEW; cx++) {
     for (let cz = scz - _VIEW; cz <= scz + _VIEW; cz++) {
@@ -33028,13 +33123,11 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       ? ((cx - scx) * (cx - scx) + (cz - scz) * (cz - scz)) > _hystFar2
       : (Math.abs(cx - scx) > _VIEW + _hyst || Math.abs(cz - scz) > _VIEW + _hyst);
     if (!_swChunkAllowed(cx, cz, T) || _far) {
-      _swDisposeChunk(c); chunks.delete(key);
+      _swDisposeChunk(c); chunks.delete(key); _swDisposed++;
     }
   }
 
 
-  const wantGrass = (game.sandwichGrass !== false) && (((T.biome || 'grassy') === 'grassy') || T.biome === 'mossy');
-  const wantTrees = (game.sandwichTrees !== false) && (T.biome === 'mossy');
   const _treeView = (T && T.biome === 'mossy') ? _swHubView() : _SW_TREE_VIEW;
   let gBuilt = 0, tBuilt = 0;
   for (const c of chunks.values()) {
@@ -33046,7 +33139,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       c.grass = _swBuildGrass(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.grassBuilt = true; gBuilt++;
       if (game._foliageProf) _foliageProfRec('grass', performance.now() - _fpT);
     } else if ((!near || !wantGrass) && c.grassBuilt) {
-      _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false;
+      _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false; _swRemoved++;
     }
     const nearT = _cheb <= _treeView;
     if (nearT && wantTrees && !c.treesBuilt && tBuilt < (tLim || 1)) {
@@ -33054,9 +33147,13 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       c.trees = _swBuildTrees(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.treesBuilt = true; tBuilt++;
       if (game._foliageProf) _foliageProfRec('trees', performance.now() - _fpT);
     } else if ((!nearT || !wantTrees) && c.treesBuilt) {
-      _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false;
+      _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;
     }
   }
+  // (v38.61) record what this pass concluded (see the idle early-out above)
+  _SC.idle = (lim === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0);
+  _SC.T = T; _SC.scx = scx; _SC.scz = scz; _SC.view = _VIEW; _SC.size = chunks.size;
+  _SC.grass = wantGrass; _SC.trees = wantTrees; _SC.clip = _clipOn;
   return lim + gBuilt + tBuilt;
 }
 // Debug hook (the __* convention): drive the streamer manually with a chosen
@@ -39131,6 +39228,10 @@ const _projArcEnd = new THREE.Vector3();
 
 const _hitOBBScratchV = new THREE.Vector3();
 const _hitOBBScratchQ = new THREE.Quaternion();
+// (v38.61) The broad-phase margin the projectile hit test passes for every
+// projectile x enemy ship every frame — one shared read-only object instead of
+// a fresh literal per test (~200 small allocations a frame in a firefight).
+const _PROJ_HIT_MARGIN = { w: 1.4, h: 1.1, l: 1.4 };
 function _pointInsideShipOBB(worldPoint, ship, margin) {
   if (!ship || !ship.chassis || !ship.position || !worldPoint) return false;
   // `margin` accepts either a single number (uniform on all three axes)
@@ -40039,7 +40140,7 @@ class Projectile {
         if (hasShield || _usesSplashSlop) {
           isHit = this.position.distanceToSquared(bot.position) < hitRadius * hitRadius;
         } else {
-          const inBroadOBB = _pointInsideShipOBB(this.position, bot, { w: 1.4, h: 1.1, l: 1.4 });
+          const inBroadOBB = _pointInsideShipOBB(this.position, bot, _PROJ_HIT_MARGIN);   // (v38.61) hoisted literal
           isHit = inBroadOBB && _swepRayHitsShipMesh(this.position, this.velocity, bot.mesh);
         }
         if (isHit) {
@@ -40204,7 +40305,7 @@ class Projectile {
         if (hasShield || _usesSplashSlop) {
           isHit = this.position.distanceToSquared(player.position) < hitRadius * hitRadius;
         } else {
-          const inBroadOBB = _pointInsideShipOBB(this.position, player, { w: 1.4, h: 1.1, l: 1.4 });
+          const inBroadOBB = _pointInsideShipOBB(this.position, player, _PROJ_HIT_MARGIN);   // (v38.61) hoisted literal
           isHit = inBroadOBB && _swepRayHitsShipMesh(this.position, this.velocity, player.mesh);
         }
         if (isHit) {
@@ -52766,6 +52867,56 @@ function _syncVRLiteMaterialUniforms() {
   return _vrLiteForMaterials;
 }
 
+// (v38.61) Wake impulse from one source onto an effect's wakeVel. Was an
+// arrow closure re-created per wake-effect per frame (with the three source
+// loops duplicated inline for fx_burst and shaderSmoke); hoisted so a
+// firefight's 40 live bursts allocate nothing here. Math byte-identical.
+function _fxWakeOne(e, sx, sy, sz, sSpd, wakeR, wakeR2, base, mul, dt) {
+  const _dx = e.mesh.position.x - sx;
+  const _dy = e.mesh.position.y - sy;
+  const _dz = e.mesh.position.z - sz;
+  const _d2 = _dx*_dx + _dy*_dy + _dz*_dz;
+  if (_d2 >= wakeR2 || _d2 <= 1) return;
+  const _d = Math.sqrt(_d2);
+  const _falloff = 1 - (_d / wakeR);
+  const _impulse = _falloff * (base + sSpd * mul);
+  const _inv = 1 / _d;
+  e.wakeVel.x += _dx * _inv * _impulse * dt;
+  e.wakeVel.y += _dy * _inv * _impulse * dt;
+  e.wakeVel.z += _dz * _inv * _impulse * dt;
+}
+function _fxWakeSources(e, wakeR, wakeR2, base, mul, dt) {
+  // Player.
+  if (typeof player !== 'undefined' && player && player.position
+      && player.shipState !== 'dead' && player.shipState !== 'spawning') {
+    const sSpd = (player.velocity ? player.velocity.length() : 0);
+    _fxWakeOne(e, player.position.x, player.position.y, player.position.z, sSpd, wakeR, wakeR2, base, mul, dt);
+  }
+  // Bots / remote ships.
+  if (game && game.entities) {
+    for (let bi = 0; bi < game.entities.length; bi++) {
+      const bot = game.entities[bi];
+      if (!bot || bot === player || !bot.alive || !bot.position) continue;
+      const sSpd = (bot.velocity)
+        ? Math.sqrt(bot.velocity.x*bot.velocity.x + bot.velocity.y*bot.velocity.y + bot.velocity.z*bot.velocity.z)
+        : 0;
+      _fxWakeOne(e, bot.position.x, bot.position.y, bot.position.z, sSpd, wakeR, wakeR2, base, mul, dt);
+    }
+  }
+  // Up to 12 in-flight projectiles (cap so a salvo can't blow the budget).
+  if (game && game.projectiles) {
+    let pCount = 0;
+    for (let pi = 0; pi < game.projectiles.length && pCount < 12; pi++) {
+      const proj = game.projectiles[pi];
+      if (!proj || !proj.alive || !proj.position) continue;
+      const sSpd = (proj.velocity)
+        ? Math.sqrt(proj.velocity.x*proj.velocity.x + proj.velocity.y*proj.velocity.y + proj.velocity.z*proj.velocity.z)
+        : 0;
+      _fxWakeOne(e, proj.position.x, proj.position.y, proj.position.z, sSpd, wakeR, wakeR2, base, mul, dt);
+      pCount++;
+    }
+  }
+}
 function updateEffects(dt) {
   _syncVRLiteMaterialUniforms();
   // Tick the fractal atom shaders so they animate. Single shared
@@ -52860,47 +53011,9 @@ function updateEffects(dt) {
         const _expandFactor = 1 + t * ((e.maxSize || 1.6) - 1);
         const _wakeR = (e._wakeRadius || 200) * _expandFactor;
         const _wakeR2 = _wakeR * _wakeR;
-        const _applyOne = (sx, sy, sz, sSpd) => {
-          const _dx = e.mesh.position.x - sx;
-          const _dy = e.mesh.position.y - sy;
-          const _dz = e.mesh.position.z - sz;
-          const _d2 = _dx*_dx + _dy*_dy + _dz*_dz;
-          if (_d2 >= _wakeR2 || _d2 <= 1) return;
-          const _d = Math.sqrt(_d2);
-          const _falloff = 1 - (_d / _wakeR);
-          const _impulse = _falloff * (50 + sSpd * 0.30);
-          const _inv = 1 / _d;
-          e.wakeVel.x += _dx * _inv * _impulse * dt;
-          e.wakeVel.y += _dy * _inv * _impulse * dt;
-          e.wakeVel.z += _dz * _inv * _impulse * dt;
-        };
-        if (typeof player !== 'undefined' && player && player.position
-            && player.shipState !== 'dead' && player.shipState !== 'spawning') {
-          const sSpd = (player.velocity ? player.velocity.length() : 0);
-          _applyOne(player.position.x, player.position.y, player.position.z, sSpd);
-        }
-        if (game && game.entities) {
-          for (let bi = 0; bi < game.entities.length; bi++) {
-            const bot = game.entities[bi];
-            if (!bot || bot === player || !bot.alive || !bot.position) continue;
-            const sSpd = (bot.velocity)
-              ? Math.sqrt(bot.velocity.x*bot.velocity.x + bot.velocity.y*bot.velocity.y + bot.velocity.z*bot.velocity.z)
-              : 0;
-            _applyOne(bot.position.x, bot.position.y, bot.position.z, sSpd);
-          }
-        }
-        if (game && game.projectiles) {
-          let pCount = 0;
-          for (let pi = 0; pi < game.projectiles.length && pCount < 12; pi++) {
-            const proj = game.projectiles[pi];
-            if (!proj || !proj.alive || !proj.position) continue;
-            const sSpd = (proj.velocity)
-              ? Math.sqrt(proj.velocity.x*proj.velocity.x + proj.velocity.y*proj.velocity.y + proj.velocity.z*proj.velocity.z)
-              : 0;
-            _applyOne(proj.position.x, proj.position.y, proj.position.z, sSpd);
-            pCount++;
-          }
-        }
+        // (v38.61) _fxWakeSources: one shared module-level pass instead of a
+        // fresh closure + three source loops per wake-effect per frame.
+        _fxWakeSources(e, _wakeR, _wakeR2, 50, 0.30, dt);
         // Integrate accumulated velocity into position and decay.
         e.mesh.position.x += e.wakeVel.x * dt;
         e.mesh.position.y += e.wakeVel.y * dt;
@@ -53078,50 +53191,8 @@ function updateEffects(dt) {
         const _expandFactor = 1 + t * ((e.maxSize || 2.2) - 1);
         const _wakeR = (e._wakeRadius || e.baseScale * 1.6) * _expandFactor + 220;
         const _wakeR2 = _wakeR * _wakeR;
-        const _applyOne = (sx, sy, sz, sSpd) => {
-          const _dx = e.mesh.position.x - sx;
-          const _dy = e.mesh.position.y - sy;
-          const _dz = e.mesh.position.z - sz;
-          const _d2 = _dx*_dx + _dy*_dy + _dz*_dz;
-          if (_d2 >= _wakeR2 || _d2 <= 1) return;
-          const _d = Math.sqrt(_d2);
-          const _falloff = 1 - (_d / _wakeR);
-          const _impulse = _falloff * (60 + sSpd * 0.35);
-          const _inv = 1 / _d;
-          e.wakeVel.x += _dx * _inv * _impulse * dt;
-          e.wakeVel.y += _dy * _inv * _impulse * dt;
-          e.wakeVel.z += _dz * _inv * _impulse * dt;
-        };
-        // Player.
-        if (typeof player !== 'undefined' && player && player.position
-            && player.shipState !== 'dead' && player.shipState !== 'spawning') {
-          const sSpd = (player.velocity ? player.velocity.length() : 0);
-          _applyOne(player.position.x, player.position.y, player.position.z, sSpd);
-        }
-        // Bots / remote ships.
-        if (game && game.entities) {
-          for (let bi = 0; bi < game.entities.length; bi++) {
-            const bot = game.entities[bi];
-            if (!bot || bot === player || !bot.alive || !bot.position) continue;
-            const sSpd = (bot.velocity)
-              ? Math.sqrt(bot.velocity.x*bot.velocity.x + bot.velocity.y*bot.velocity.y + bot.velocity.z*bot.velocity.z)
-              : 0;
-            _applyOne(bot.position.x, bot.position.y, bot.position.z, sSpd);
-          }
-        }
-        // Up to 12 in-flight projectiles (cap so a salvo can't blow the budget).
-        if (game && game.projectiles) {
-          let pCount = 0;
-          for (let pi = 0; pi < game.projectiles.length && pCount < 12; pi++) {
-            const proj = game.projectiles[pi];
-            if (!proj || !proj.alive || !proj.position) continue;
-            const sSpd = (proj.velocity)
-              ? Math.sqrt(proj.velocity.x*proj.velocity.x + proj.velocity.y*proj.velocity.y + proj.velocity.z*proj.velocity.z)
-              : 0;
-            _applyOne(proj.position.x, proj.position.y, proj.position.z, sSpd);
-            pCount++;
-          }
-        }
+        // (v38.61) shared source pass (player + bots + first 12 projectiles) — see _fxWakeSources
+        _fxWakeSources(e, _wakeR, _wakeR2, 60, 0.35, dt);
         // Apply accumulated wake velocity with strong damping so the push
         // dissipates over ~1.5s (visible momentum, not eternal drift).
         e.mesh.position.x += e.wakeVel.x * dt;
@@ -58170,12 +58241,23 @@ function _glassApply(mat, K) {
 }
 function _glassSync(mesh) {
   if (!mesh) return;
+  // (v38.61) This runs from renderFrame EVERY FRAME on the player's hull, and
+  // was a full GLB traversal + an array literal per node for a material that
+  // most hulls no longer even carry (v38.35 note above). Cache the canopy
+  // material list per mesh once; an empty list costs one property read.
+  let list = mesh.userData ? mesh.userData._glassMats : null;
+  if (!list) {
+    list = [];
+    mesh.traverse(o => {
+      if (!o.isMesh || !o.material) return;
+      const ms = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of ms) if (m && m.name === 'canopy_glass') list.push(m);
+    });
+    if (mesh.userData) mesh.userData._glassMats = list;
+  }
+  if (!list.length) return;
   const K = _glassKnobs();
-  mesh.traverse(o => {
-    if (!o.isMesh || !o.material) return;
-    const ms = Array.isArray(o.material) ? o.material : [o.material];
-    for (const m of ms) if (m && m.name === 'canopy_glass') _glassApply(m, K);
-  });
+  for (let i = 0; i < list.length; i++) _glassApply(list[i], K);
 }
 // push the current knobs to EVERY ship in the world, not just the player's
 window.__glassRefresh = function () {
@@ -61901,23 +61983,36 @@ function _makeHullHugShield(player, presetName) {
 
 function _setShipShieldEmissive(shipMesh, colorHex, intensity) {
   if (!shipMesh) return;
-  shipMesh.traverse(child => {
-    if (!child.isMesh || !child.material) return;
-    const mats = Array.isArray(child.material) ? child.material : [child.material];
-    for (const m of mats) {
-      if (!m || !('emissive' in m) || !m.emissive) continue;
-      // Stash original emissive so we can restore on shield-down.
-      if (!m.userData) m.userData = {};
-      if (!m.userData._shieldOrigEmissive) {
-        m.userData._shieldOrigEmissive = {
-          hex: m.emissive.getHex(),
-          intensity: ('emissiveIntensity' in m) ? m.emissiveIntensity : 1.0,
-        };
-      }
-      m.emissive.setHex(colorHex);
-      if ('emissiveIntensity' in m) m.emissiveIntensity = intensity;
+  // (v38.61) Called every frame while a hold-shield is up (Vortex / Body /
+  // Fire / Absorption) — was a full hull traversal + an array literal per
+  // node each time. Cache the emissive-capable material list per mesh; the
+  // ghost seat shell swaps materials in and out, so the cache is keyed on
+  // that state and rebuilt when it flips.
+  const ud = shipMesh.userData || (shipMesh.userData = {});
+  const gk = ud._ghostOn ? 1 : 0;
+  let list = ud._emisMats;
+  if (!list || ud._emisMatsKey !== gk) {
+    list = [];
+    shipMesh.traverse(child => {
+      if (!child.isMesh || !child.material) return;
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      for (const m of mats) if (m && ('emissive' in m) && m.emissive) list.push(m);
+    });
+    ud._emisMats = list; ud._emisMatsKey = gk;
+  }
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
+    // Stash original emissive so we can restore on shield-down.
+    if (!m.userData) m.userData = {};
+    if (!m.userData._shieldOrigEmissive) {
+      m.userData._shieldOrigEmissive = {
+        hex: m.emissive.getHex(),
+        intensity: ('emissiveIntensity' in m) ? m.emissiveIntensity : 1.0,
+      };
     }
-  });
+    m.emissive.setHex(colorHex);
+    if ('emissiveIntensity' in m) m.emissiveIntensity = intensity;
+  }
 }
 
 function _clearShipShieldEmissive(shipMesh) {
@@ -63635,18 +63730,31 @@ function updateWorldEffects(dt) {
       // doesn't strand the storm at the original detonation point.
       eff.position.copy(casterPos);
       const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
-      for (let k = 0; k < 2; k++) {
-        const ang = Math.random() * Math.PI * 2;
-        // Bolts terminate inside the 500-unit damage radius. Inner
-        // floor of 200 keeps them from collapsing into a single point
-        // when the random draw is small.
-        const r = 200 + Math.random() * 300;
-        const endPos = new THREE.Vector3(
-          casterPos.x + Math.cos(ang) * r,
-          casterPos.y + (Math.random() - 0.5) * 220,
-          casterPos.z + Math.sin(ang) * r
-        );
-        spawnLightningBolt(casterPos.clone(), endPos, SLAYER_GREEN, 0.45, 3, 4);
+      // (v38.61) Timer-gated at the pool's own sustainable rate. This spawned
+      // 2 bolts EVERY FRAME for the storm's 5 s life (120+ attempts/s); the
+      // 24-slot lightning pool at 0.45 s life can only ever show ~53/s, so
+      // the surplus attempts paid full path generation + tube rebuilds and
+      // then died in _acquireLightningSlot — while starving every other bolt
+      // (projectile arcs, damage arcs, gas sparks) of a slot for 5 s. Two
+      // bolts every 38 ms = ~52/s: same on-screen density, ~55% less work,
+      // and the pool is no longer permanently saturated.
+      eff._arcT = (eff._arcT || 0) - dt;
+      if (eff._arcT <= 0) {
+        eff._arcT = 0.038;
+        for (let k = 0; k < 2; k++) {
+          const ang = Math.random() * Math.PI * 2;
+          // Bolts terminate inside the 500-unit damage radius. Inner
+          // floor of 200 keeps them from collapsing into a single point
+          // when the random draw is small.
+          const r = 200 + Math.random() * 300;
+          _emitArcA.set(
+            casterPos.x + Math.cos(ang) * r,
+            casterPos.y + (Math.random() - 0.5) * 220,
+            casterPos.z + Math.sin(ang) * r
+          );
+          // spawnLightningBolt reads from/to synchronously and never retains them
+          spawnLightningBolt(_emitArcB.copy(casterPos), _emitArcA, SLAYER_GREEN, 0.45, 3, 4);
+        }
       }
     }
 
@@ -63969,7 +64077,12 @@ function updateAbilities(dt) {
       // (20/s) is what keeps a four-second sustained beam from flooding the effect pool, so the
       // size comes from the scale rather than from spawning more of them.
       try {
-        if (typeof raycastLevel === 'function' && typeof spawnHitFire === 'function') {
+        // (v38.61) Probe at the same 20 Hz spawnHitFire is throttled to. The
+        // fine raycast (up to 280 SDF steps on sandwich maps) and the clone ran
+        // every frame for nothing 5 frames out of 6.
+        player._mlProbeT = (player._mlProbeT || 0) - dt;
+        if (player._mlProbeT <= 0 && typeof raycastLevel === 'function' && typeof spawnHitFire === 'function') {
+          player._mlProbeT = 0.05;
           const _mlD = raycastLevel(player.position, forward, range);
           if (_mlD < range) {
             const _mlK = (typeof window !== 'undefined' && window.__megaLaser) ? window.__megaLaser : null;
@@ -64620,8 +64733,8 @@ function updateRoundSystem(dt) {
     _tickTimer('warmupTimer');
     // Suppress the overlay 3-2-1 if the ship-select screen is still handling the
     // countdown (launchCountdown draws its own giant digits inside ship-select).
-    const selectActive = document.getElementById('ship-select') &&
-                         document.getElementById('ship-select').classList.contains('active');
+    const _selEl = _hudEl('ship-select');   // (v38.61) cached (was two lookups per warmup frame)
+    const selectActive = _selEl && _selEl.classList.contains('active');
     // Cinematic 3-2-1 countdown in the final seconds of warmup.
     // (v33.12) the free-flight HUB has no rounds — skip the "ROUND N" countdown.
     const _ffHubCD = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
@@ -66737,7 +66850,7 @@ function pollGamepad() {
   input.gpRB = !!(gp.buttons[5] && (gp.buttons[5].pressed || gp.buttons[5].value > input.triggerThreshold));
 
   // ---- Menu navigation (runs before gameplay edge triggers) ----
-  const _shipSelect = document.getElementById('ship-select');
+  const _shipSelect = _hudEl('ship-select');   // (v38.61) cached; this runs every frame a pad is connected
   const _matchStartingNav = !!(
     (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) ||
     (typeof _countdownActive !== 'undefined' && _countdownActive)
@@ -66752,7 +66865,7 @@ function pollGamepad() {
   // GAMEPLAY input ; menu nav stays available as long as the menu is
   // visible.
   const _shipSelectActive = !!(_shipSelect && _shipSelect.classList.contains('active'));
-  const _lobby = document.getElementById('lobby');
+  const _lobby = _hudEl('lobby');   // (v38.61) cached
   const _lobbyActive = !!(_lobby && _lobby.style.display !== 'none' && _lobby.offsetParent !== null);
   const _menuActive = settingsOpen || _shipSelectActive || _lobbyActive || game.state === 'select' || game.state === 'matchEnd';
 
@@ -70643,6 +70756,21 @@ function _apApplyFromSlot(qid, e) {
 }
 
 function updateAbilityHUD() {
+  // (v38.61) #abilities is display:none in the stylesheet and nothing ever
+  // shows it, yet this wrote class / width / text into its three slots every
+  // frame (a fresh unquantized width string per frame during every cooldown).
+  // Re-checked every ~2 s so a future toggle still works.
+  {
+    const _c = _hudEl('abilities');
+    const _now = game.time || 0;
+    if (!updateAbilityHUD._chkT || _now - updateAbilityHUD._chkT > 2 || _now < updateAbilityHUD._chkT) {
+      updateAbilityHUD._chkT = _now;
+      let _hidden = false;
+      try { _hidden = !_c || getComputedStyle(_c).display === 'none'; } catch (_) {}
+      updateAbilityHUD._hidden = _hidden;
+    }
+    if (updateAbilityHUD._hidden) return;
+  }
   for (let i = 0; i < 3; i++) {
     const e = _abSlot(i);
     if (!e) continue;
@@ -71444,11 +71572,16 @@ function showLoadingOverlay(mainText, subText) {
   const ov = document.getElementById('lss-loading-overlay');
   if (!ov) return;
   _lssLoadingImgEnsure();
-  if (mainText != null) {
+  // (v38.61) The hub preload calls this EVERY FRAME with the same strings;
+  // replacing two text nodes a frame dirtied layout while the streamer was
+  // trying to bake chunks. Compare before writing.
+  if (mainText != null && ov._lssMain !== mainText) {
+    ov._lssMain = mainText;
     const t = document.getElementById('lss-loading-text');
     if (t) t.textContent = mainText;
   }
-  if (subText != null) {
+  if (subText != null && ov._lssSub !== subText) {
+    ov._lssSub = subText;
     const s = document.getElementById('lss-loading-sub');
     if (s) s.textContent = subText;
   }
@@ -80092,6 +80225,7 @@ function checkExecutions(dt) {
 
   const execRadius = player.chassis ? player.chassis.hullLength * 1.2 : 100;
   const promptEl = _hudEl('execution-prompt');
+  if (!promptEl) return;
 
   for (const bot of game.entities) {
     if (!bot.alive || bot.team === player.team) continue;
@@ -80106,10 +80240,11 @@ function checkExecutions(dt) {
     const dist = player.position.distanceTo(bot.position);
 
     if (bot.doomed && dist < execRadius * 2.5) {
-      const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-      const toBot = new THREE.Vector3().subVectors(bot.position, player.position).normalize();
+      // (v38.61) scratch vectors + dirty-checked display write
+      const forward = _execFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+      const toBot = _execToBot.subVectors(bot.position, player.position).normalize();
       if (forward.dot(toBot) > 0.3) {
-        promptEl.style.display = 'block';
+        _hudDisplay(promptEl, 'exec:d', 'block');
       }
     }
 
@@ -80131,7 +80266,7 @@ function checkExecutions(dt) {
       showKillMarker();
 
       addKillFeed('You', bot.loadout.name + ' [EXEC]');
-      promptEl.style.display = 'none';
+      _hudDisplay(promptEl, 'exec:d', 'none');
       return;
     }
   }
@@ -80160,8 +80295,10 @@ function checkExecutions(dt) {
       if (dist < (player.chassis ? player.chassis.hullLength * 3 : 300)) { anyDoomed = true; break; }
     }
   }
-  if (!anyDoomed) document.getElementById('execution-prompt').style.display = 'none';
+  // (v38.61) was an unconditional getElementById + style write every frame
+  if (!anyDoomed) _hudDisplay(promptEl, 'exec:d', 'none');
 }
+const _execFwd = new THREE.Vector3(), _execToBot = new THREE.Vector3();   // (v38.61) checkExecutions scratch
 
 // ---- MAP: Carved from E=1 ----
 // Hard-coded symmetric arena. 5 hollow spheres + 8 hollow cylinders.
@@ -82248,14 +82385,31 @@ const Overlays = (() => {
   }
 
   // ---- Damage vignette ----
+  // (v38.61) Same keyframes/timing as the #ov-damage-vignette.flash CSS rule
+  // (ovDamageFlash 0.45s ease-out forwards); per-keyframe easing matches CSS.
+  const _DV_FLASH_KEYS = [{ opacity: 0, offset: 0, easing: 'ease-out' }, { opacity: 1, offset: 0.15, easing: 'ease-out' }, { opacity: 0, offset: 1 }];
+  const _DV_FLASH_OPTS = { duration: 450, fill: 'forwards' };
   function damageVignette(intensity) {
     const el = $('ov-damage-vignette');
     if (!el) return;
-    // Scale opacity by severity via inline opacity on the flash peak.
     const i = Math.max(0.15, Math.min(1, intensity));
-    el.style.setProperty('--dmg-peak', i.toFixed(2));
-    // Tint intensity: heavier hit -> brighter red. Done via inline background weight.
-    el.style.background = `radial-gradient(ellipse at center, transparent 30%, rgba(255,0,0,${0.25 + 0.45 * i}) 100%)`;
+    // (v38.61) DOT damage (firewall / gas) reaches here EVERY FRAME. The old
+    // body rebuilt the gradient string and forced a synchronous reflow of a
+    // full-viewport element (class remove + offsetWidth + class add) on each
+    // call — for an animation that a per-frame restart pins at its 0%
+    // keyframe anyway. Now: the gradient is written only when its quantized
+    // weight changes (the --dmg-peak custom property went too: no rule ever
+    // read it), and the flash is restarted through the Web Animations API,
+    // which restarts without touching layout. Same look, same timing.
+    const q = Math.round(i * 16);
+    if (el._dvQ !== q) {
+      el._dvQ = q;
+      el.style.background = `radial-gradient(ellipse at center, transparent 30%, rgba(255,0,0,${(0.25 + 0.45 * (q / 16)).toFixed(3)}) 100%)`;
+    }
+    if (typeof el.animate === 'function') {
+      if (el._dvAnim) { try { el._dvAnim.cancel(); } catch (_) {} }
+      try { el._dvAnim = el.animate(_DV_FLASH_KEYS, _DV_FLASH_OPTS); return; } catch (_) {}
+    }
     replay(el, 'flash');
   }
 
@@ -82274,9 +82428,12 @@ const Overlays = (() => {
   function underwater(on, depth01) {
     const el = $('ov-underwater');
     if (!el) return;
-    if (on && depth01 != null) el.style.opacity = String(Math.min(1, 0.65 + 0.35 * depth01));
-    else el.style.opacity = '';
-    el.classList.toggle('show', !!on);
+    // (v38.61) Called every submerged frame; the element carries a 0.35 s opacity
+    // transition, so an unchanged per-frame write kept re-targeting it. Quantize
+    // to 1/40 and compare before writing.
+    const _op = (on && depth01 != null) ? String(Math.round(Math.min(1, 0.65 + 0.35 * depth01) * 40) / 40) : '';
+    if (el._lssOp !== _op) { el._lssOp = _op; el.style.opacity = _op; }
+    if (el._lssShow !== !!on) { el._lssShow = !!on; el.classList.toggle('show', !!on); }
   }
 
   // ---- Kill streak ----
@@ -82534,16 +82691,33 @@ function _hitRumble(strong, weak, ms) {
 }
 
 // Add (or refresh) the vignette pulse CSS class. Stylesheet hook is below.
+// (v38.61) Same keyframes/timing as #doomed-vignette.v8-hit-pulse (v8HitPulse 0.32s ease-out 1).
+const _HP_PULSE_KEYS = [{ opacity: 0, offset: 0, easing: 'ease-out' }, { opacity: 0.95, offset: 0.2, easing: 'ease-out' }, { opacity: 0, offset: 1 }];
+const _HP_PULSE_OPTS = { duration: 320, fill: 'none' };
+let _hitVignetteEl = null;
 function _hitVignettePulse(ms) {
   hitFX.vignetteUntil = (typeof performance !== 'undefined' ? performance.now() : Date.now()) + ms;
-  const el = document.getElementById('doomed-vignette');
+  const el = _hitVignetteEl || (_hitVignetteEl = document.getElementById('doomed-vignette'));
   if (!el) return;
-  el.classList.remove('v8-hit-pulse');
-  // Force reflow so re-adding restarts the animation.
-  void el.offsetWidth;
-  el.classList.add('v8-hit-pulse');
+  if (typeof el.animate === 'function') {
+    // (v38.61) No remove / offsetWidth / add: under DOT this fired every frame
+    // and each restart forced a synchronous full-viewport reflow. The class is
+    // only added if absent (it supplies display:block), and the pulse itself
+    // is restarted through the Web Animations API — same keyframes, no layout.
+    if (!el.classList.contains('v8-hit-pulse')) el.classList.add('v8-hit-pulse');
+    if (el._hpAnim) { try { el._hpAnim.cancel(); } catch (_) {} }
+    try { el._hpAnim = el.animate(_HP_PULSE_KEYS, _HP_PULSE_OPTS); } catch (_) { el._hpAnim = null; }
+  } else {
+    el.classList.remove('v8-hit-pulse');
+    // Force reflow so re-adding restarts the animation.
+    void el.offsetWidth;
+    el.classList.add('v8-hit-pulse');
+  }
   clearTimeout(el.__v8pulseTimer);
-  el.__v8pulseTimer = setTimeout(() => el.classList.remove('v8-hit-pulse'), ms);
+  el.__v8pulseTimer = setTimeout(() => {
+    el.classList.remove('v8-hit-pulse');
+    if (el._hpAnim) { try { el._hpAnim.cancel(); } catch (_) {} el._hpAnim = null; }
+  }, ms);
 }
 
 function triggerHitFeedback(opts) {
@@ -83739,11 +83913,16 @@ function updateEnemyHealthBars() {
 
     const div = hbarPool.markers[mkIdx];
     _hbarDisplay(div, '');
-    div.style.left = (sx - 20) + 'px';
-    div.style.top = (sy - 20) + 'px';
+    // (v38.61) Same int-rounded compare-before-write the name labels got in
+    // v32.87 — these three writes ran every frame per visible marker and
+    // dirtied layout even when nothing moved.
+    const _mxi = (sx - 20) | 0, _myi = (sy - 20) | 0;
+    if (div._mx !== _mxi) { div.style.left = _mxi + 'px'; div._mx = _mxi; }
+    if (div._my !== _myi) { div.style.top = _myi + 'px'; div._my = _myi; }
     // Use cached label reference (populated in initHbarPool); saves per-frame
     // querySelector traversal across 8 markers.
-    div._distEl.textContent = Math.round(dist) + 'm';
+    const _mdi = Math.round(dist);
+    if (div._md !== _mdi) { div._distEl.textContent = _mdi + 'm'; div._md = _mdi; }
     mkIdx++;
   }
   for (let i = mkIdx; i < hbarPool.markers.length; i++) _hbarDisplay(hbarPool.markers[i], 'none');
@@ -83815,14 +83994,14 @@ function gameLoop(timestamp) {
       for (let i = 0; i < 60; i++) { const v = game._fpsSamples[i]; if (v > 0) { sum += v; n++; } }
       const meanMs = n > 0 ? (sum / n) : dtMs;
       const fps = Math.round(1000 / meanMs);
-      const el = document.getElementById('fps-counter');
+      const el = _hudEl('fps-counter');   // (v38.61) cached lookup
       if (el) {
         if (el.style.display !== 'block') el.style.display = 'block';
         el.textContent = fps + ' fps';
       }
     }
   } else {
-    const el = document.getElementById('fps-counter');
+    const el = _hudEl('fps-counter');   // (v38.61) was a getElementById every frame
     if (el && el.style.display !== 'none') el.style.display = 'none';
   }
 
@@ -94551,6 +94730,10 @@ function updateScoreboard() {
 
   // Personal summary footer
   html += '<div style="text-align:center;color:#888;font-size:10px;margin-top:12px;letter-spacing:2px;">KILLS ' + (player.kills || 0) + '  &middot;  DEATHS ' + (player.deaths || 0) + '  &middot;  DAMAGE ' + Math.floor(player.damageDealt || 0) + '</div>';
+  // (v38.61) 5 Hz rebuild while the board is held open — skip the parse +
+  // relayout when nothing on it changed.
+  if (sb._lssHtml === html) return;
+  sb._lssHtml = html;
   sb.innerHTML = html;
 }
 
