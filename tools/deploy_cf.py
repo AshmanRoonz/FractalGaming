@@ -110,3 +110,24 @@ if "--stage" not in sys.argv:
                "--project-name", PROJECT, "--branch", "main",
                "--commit-dirty=true"])
     print("deployed. Preview: https://lss-61y.pages.dev")
+
+    # (v38.70) POST-DEPLOY GUARD. Cloudflare lifts static <link rel=preload|modulepreload> tags
+    # into a `Link:` response header (Early Hints) on the custom domain; a modulepreload that
+    # arrives before the import map has Chrome ignore the map ("Failed to resolve module
+    # specifier 'three'", black screen). Localhost can never show it, so the LIVE headers are
+    # checked here. Warn only: propagation lags the upload by ~30 s, so a stale answer is possible.
+    try:
+        import urllib.request, time
+        req = urllib.request.Request("https://lss.fractalreality.ca/?deploycheck=" + str(int(time.time())),
+                                     headers={"User-Agent": "deploy_cf.py"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            link = r.headers.get("Link") or ""
+            body = r.read().decode("utf-8", "ignore")
+        if "modulepreload" in link or 'rel="modulepreload"' in body:
+            print("!! WARNING: the live page carries static module preloads (Link header or <link> tags).")
+            print("!! They start module fetches before the import map and break the site in Chrome.")
+            print("!! Link:", link[:200])
+        else:
+            print("live headers ok: no module preloads in Link (", link[:80], ")")
+    except Exception as e:
+        print("live header check skipped:", e)
