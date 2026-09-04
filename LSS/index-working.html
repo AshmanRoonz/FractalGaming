@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.42';
+const LSS_BUILD = '38.43';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -30585,16 +30585,23 @@ function _carrierDeckSpot(i, out) {
   const d = _carrierDeckPoint(i, out);
   if (!d) return null;
   const o = _carrier.obj;
-  // (v38.29) no measured hull yet (the placeholder, before the GLB lands): the marker alone is
-  // not a promise of anything, so stand on the hull's own roof rather than 70 over the empty.
-  if (!o || !_carrier.body) {
-    d.y += (_carrier.localTop != null) ? Math.max(70, _carrier.localTop + 95 - d.y) : 70;
-    return d;
-  }
+  if (!o) { d.y += 70; return d; }
+  // (v38.43) ONE PATH, IN THE HULL'S OWN SPACE. v38.29 gave the no-measured-hull case its own
+  // branch and got it wrong twice: it compared _carrier.localTop, which is a LOCAL offset from
+  // the model origin, against d.y, which is a WORLD height - so `localTop + 95 - d.y` was a
+  // couple of thousand units negative and Math.max fell through to a bare +70 - and it RETURNED
+  // before the collider proof below could catch that. Every deck marker sits INSIDE the hull
+  // (measured: all eight), so +70 lands inside it. That is the owner spawning below the carrier
+  // again, and it is exactly the window the placeholder hull is up: the whole of round 1 on a
+  // cold start, before the GLB lands and _carrierBuildBody runs.
+  // Now there is no second branch. Everything happens in local space, and a missing hull map
+  // just means the roof stands in for the column top.
   _cdQ.copy(o.quaternion).invert();
   _cdP.copy(d).sub(o.position).applyQuaternion(_cdQ);
-  const S = _carrierBodyAt(_cdP.x, _cdP.z);
-  const top = (S ? S.yHi : _cdP.y) + 95;      // a hull radius (~50) and room to breathe
+  const S = _carrier.body ? _carrierBodyAt(_cdP.x, _cdP.z) : null;
+  const _roof = (_carrier.localTop != null) ? _carrier.localTop
+              : (_carrier.half ? _carrier.half.y : 274);
+  const top = (S ? S.yHi : _roof) + 95;       // a hull radius (~50) and room to breathe
   if (_cdP.y < top) {
     _cdP.y = top;
     d.copy(_cdP.applyQuaternion(o.quaternion).add(o.position));
@@ -30605,8 +30612,8 @@ function _carrierDeckSpot(i, out) {
   // that is below the deck. Ask the collider whether the answer is actually outside the hull, and
   // when it is not, go to the roof of the whole hull - which is never wrong, only occasionally
   // higher than it needed to be.
-  if (_carrierBlocks(d, 0) && _carrier.localTop != null) {
-    _cdP.y = _carrier.localTop + 95;
+  if (_carrierBlocks(d, 0)) {
+    _cdP.y = _roof + 95;
     d.copy(_cdP.applyQuaternion(o.quaternion).add(o.position));
   }
   return d;
@@ -56545,9 +56552,24 @@ function respawnPlayer() {
   // of the geometry instead of a separate check.
   if (game._cyber && game._cyber.armed) {
     try {
-      player._cyberDeck = (player._cyberDeck | 0) + 1;
-      const _d = _carrierDeckPoint(player._cyberDeck);
-      if (_d) { sp = _d.clone(); sp.y += 40; }
+      // (v38.43) THE SPOT, NOT THE MARKER - and only for an ATTACKER.
+      // This is the third and last place that placed a ship from _carrierDeckPoint: v38.29 fixed
+      // the initial placement and the bot wing and missed this one, so every mid-round respawn
+      // put the pilot back at the raw marker. Every marker sits INSIDE the hull (measured: all
+      // eight of them), and a flat +40 does not clear it - that is the owner spawning below the
+      // carrier again, on the one path that runs most often.
+      // And a DEFENDER has no business on the enemy's deck now that the sides swap: they come
+      // back over the city, where their objective is.
+      if (_cyberPlayerAttacks(game._cyber)) {
+        player._cyberDeck = (player._cyberDeck | 0) + 1;
+        const _d = _carrierDeckSpot(player._cyberDeck);
+        if (_d) sp = _d.clone();
+      } else if (typeof HUB_CITY !== 'undefined' && HUB_CITY) {
+        const _a = Math.random() * Math.PI * 2, _r = 900 + Math.random() * 900;
+        sp = new THREE.Vector3(HUB_CITY.x + Math.cos(_a) * _r,
+                               (HUB_CITY.padY || 300) + 700 + Math.random() * 300,
+                               HUB_CITY.z + Math.sin(_a) * _r);
+      }
     } catch (_) {}
   }
   player.position.copy(sp);
