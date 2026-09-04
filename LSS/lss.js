@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.64';
+const LSS_BUILD = '38.65';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -39438,6 +39438,7 @@ function playerDie(attacker) {
   player.railgunCharge = 0;
   player.deaths++;
   spawnExplosion(player.position, player.chassis.hullLength);
+  if (player.mesh) player.mesh.visible = false;
   if (attacker && attacker.loadout) addKillFeed(attacker.loadout.name, 'You');
   if (typeof triggerScreenShake === 'function') triggerScreenShake(12);
   if (typeof triggerHitFeedback === 'function') {
