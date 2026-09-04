@@ -4269,7 +4269,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.62';
+const LSS_BUILD = '38.63';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6433,8 +6433,9 @@ async function joinRoom() {
           peer.discord_name   = data.discord_name;
           peer.discord_avatar = data.discord_avatar;
         }
+        const _hadShip = !!peer.networkPlayer;   // (v38.63)
         updateNetworkPlayer(peerId, data);
-        if (net.openSolo && game.state !== 'select' && typeof _dropinReplaceBot === 'function') {
+        if (!_hadShip && net.openSolo && game.state !== 'select' && typeof _dropinReplaceBot === 'function') {
           try { _dropinReplaceBot(data.team); } catch (_) {}
         }
         checkAllLoadoutsReady();
@@ -6478,7 +6479,7 @@ async function joinRoom() {
           discord_id:     _du ? _du.id : undefined,
           discord_name:   _du ? (_du.global_name || _du.username) : undefined,
           discord_avatar: _du ? _du.avatar : undefined,
-        });
+        }, peerId);
       }
 
       if (net.sendEvent) {
@@ -6500,7 +6501,7 @@ async function joinRoom() {
       }
 
       if (game.clusters && game.clusters.length > 0) {
-        broadcastWorldObjects();
+        broadcastWorldObjects(peerId);   // (v38.63) to the joiner only
       }
 
       if (net.openSolo && game.state !== 'select' && net.sendEvent) {
@@ -6526,6 +6527,7 @@ async function joinRoom() {
 
     net.room.onPeerLeave(peerId => {
       console.log('Peer left:', peerId);
+      const _wasBotAuth = (typeof _botAuthority === 'function') ? _botAuthority() : false;   // (v38.63)
       const peer = net.peers.get(peerId);
       if (peer && peer.networkPlayer) {
         peer.networkPlayer.destroy();
@@ -6536,15 +6538,30 @@ async function joinRoom() {
       }
       net.peers.delete(peerId);
       if (net.peerGameSync) net.peerGameSync.delete(peerId);
-      updateLobbyPeers();
-      checkAllReady();          
-      checkAllLoadoutsReady();  
-      
-      try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
-
-      if (game.clusters && game.clusters.length > 0) {
-        broadcastWorldObjects();
+      if (net.openSolo && net.openSoloHostId === peerId) {
+        const _ids = [net.myPeerId, ...nonJudgePeerIds()].sort();
+        net.openSoloHostId = _ids[0] || net.myPeerId;
       }
+      try {
+        const _isBotAuth = (typeof _botAuthority === 'function') ? _botAuthority() : false;
+        if (!_wasBotAuth && _isBotAuth && game && game.entities) {
+          let _adopted = 0;
+          for (const b of game.entities) {
+            if (!(b instanceof Bot) || !b.isProxy) continue;
+            b.isProxy = false; b._netX = null;
+            if (b.velocity) b.velocity.set(0, 0, 0);
+            _adopted++;
+          }
+          if (_adopted && typeof _botSendRoster === 'function') _botSendRoster();
+          if (_adopted && window.Overlays && Overlays.banner) Overlays.banner('HOST LEFT', 'you are running the bots now');
+          console.log('[net] bot authority migrated to us; adopted', _adopted, 'proxies');
+        }
+      } catch (e) { console.warn('[net] bot authority migration failed:', e); }
+      updateLobbyPeers();
+      checkAllReady();
+      checkAllLoadoutsReady();
+
+      try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     });
 
     document.getElementById('lobby-status').textContent = 'CONNECTED: ROOM ' + code + ' ; WAITING FOR PLAYERS...';
@@ -9965,15 +9982,19 @@ class NetworkPlayer {
   takeDamage(amount, attacker, hitPoint) {
     if (amount > 0 && net.active && net.sendHitClaim && this.peerId) {
       const hitId = ++net.hitIdCounter;
-      net.sendHitClaim({
+      const _isBot = !!(attacker && (typeof Bot !== 'undefined') && (attacker instanceof Bot));
+      const _from = (_isBot && attacker.position) ? attacker.position : player.position;
+      const claim = {
         hitId,
         shooterId: net.myPeerId,
         targetId: this.peerId,
         damage: amount,
-        sx: player.position.x,
-        sy: player.position.y,
-        sz: player.position.z,
-      });
+        sx: _from.x,
+        sy: _from.y,
+        sz: _from.z,
+      };
+      if (_isBot) { claim.bot = 1; claim.botId = attacker.id; claim.botKey = attacker.loadoutKey || null; }
+      net.sendHitClaim(claim);
     }
     if (this.mesh && this.mesh.userData && this.mesh.userData.shieldMesh && this.shield > 0) {
       const ripPoint = hitPoint || this.position;
@@ -10015,6 +10036,12 @@ function updateNetworkPlayer(peerId, data) {
   const peer = net.peers.get(peerId);
   if (!peer) return;
   if (!data || typeof data.loadoutKey !== 'string' || !Object.prototype.hasOwnProperty.call(LOADOUTS, data.loadoutKey)) return;
+  if (peer.networkPlayer) {
+    const np0 = peer.networkPlayer;
+    const _team = data.team || LSS.TEAM_FLEET_B;
+    const _skin = (typeof _shipSkinDef === 'function') ? _shipSkinDef(data.skinId).id : data.skinId;
+    if (np0.loadoutKey === data.loadoutKey && np0.team === _team && np0.skinId === _skin) return;
+  }
 
   if (peer.networkPlayer) {
     peer.networkPlayer.destroy();
@@ -10134,34 +10161,31 @@ function applyGameSyncConsensus() {
   let wtSum = (game.warmupTimer   || 0);
   let etSum = (game.roundEndTimer || 0);
   let mtSum = (game.matchEndTimer || 0);
-  let gtSum = (game.time          || 0);
   let crMax = (game.currentRound  | 0);
   let saMax = (game.scoreA        | 0);
   let sbMax = (game.scoreB        | 0);
   for (const [pid, snap] of peerMap) {
     if (!snap) continue;
     if ((now - (snap.lastUpdate || 0)) > STALE) continue;
+    if ((snap.cr | 0) > crMax) crMax = (snap.cr | 0);
+    if ((snap.sa | 0) > saMax) saMax = (snap.sa | 0);
+    if ((snap.sb | 0) > sbMax) sbMax = (snap.sb | 0);
+    if (snap.s && snap.s !== game.state) continue;
     n++;
     rtSum += (snap.rt || 0);
     wtSum += (snap.wt || 0);
     etSum += (snap.et || 0);
     mtSum += (snap.mt || 0);
-    gtSum += (snap.gt || 0);
-    if ((snap.cr | 0) > crMax) crMax = (snap.cr | 0);
-    if ((snap.sa | 0) > saMax) saMax = (snap.sa | 0);
-    if ((snap.sb | 0) > sbMax) sbMax = (snap.sb | 0);
   }
-  if (n < 2) return; 
-  
-  
+  game.currentRound  = crMax;
+  game.scoreA        = saMax;
+  game.scoreB        = sbMax;
+  if (n < 2) return;
+
   game.roundTimer    = rtSum / n;
   game.warmupTimer   = wtSum / n;
   game.roundEndTimer = etSum / n;
   game.matchEndTimer = mtSum / n;
-  game.time          = gtSum / n;
-  game.currentRound  = crMax;
-  game.scoreA        = saMax;
-  game.scoreB        = sbMax;
   const _nowMs = Date.now();
   if (typeof game.roundTimerAnchorMs === 'number') {
     game.roundTimerAnchorMs = _nowMs; game.roundTimerTotal = game.roundTimer;
@@ -10209,13 +10233,16 @@ function handleHitClaim(claim, fromPeerId) {
 
   if (claim.targetId === net.myPeerId && valid) {
     const shooterPeer = net.peers.get(claim.shooterId);
-    const shooterLoadout = (shooterPeer && shooterPeer.loadoutKey)
-      ? LOADOUTS[shooterPeer.loadoutKey] : null;
+    const _botKey = (claim.bot && typeof claim.botKey === 'string' && Object.prototype.hasOwnProperty.call(LOADOUTS, claim.botKey)) ? claim.botKey : null;
+    const shooterLoadout = _botKey ? LOADOUTS[_botKey]
+      : ((shooterPeer && shooterPeer.loadoutKey) ? LOADOUTS[shooterPeer.loadoutKey] : null);
     const fakeAttacker = (typeof claim.sx === 'number')
       ? {
           position: new THREE.Vector3(claim.sx, claim.sy, claim.sz),
-          peerId: claim.shooterId,
+          peerId: claim.bot ? null : claim.shooterId,
           loadout: shooterLoadout,
+          botId: claim.bot ? claim.botId : undefined,
+          botOwnerId: claim.bot ? claim.shooterId : undefined,
         }
       : null;
     let _dmg = claim.damage;
@@ -10253,6 +10280,12 @@ function handleHitVote(vote, fromPeerId) {
 function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'kill') {
     addKillFeed(evt.killerName || 'Peer', evt.victimName || 'Peer');
+    if (evt.killerBotId != null && evt.killerBotOwner === net.myPeerId && typeof _botAuthority === 'function' && _botAuthority()) {
+      try {
+        const _kb = game.entities.find(x => (x instanceof Bot) && !x.isProxy && x.id === evt.killerBotId);
+        if (_kb) _kb.kills = (_kb.kills | 0) + 1;
+      } catch (_) {}
+    }
     if (evt.killerPeerId && evt.killerPeerId === net.myPeerId) {
       player.kills = (player.kills | 0) + 1;
       player.coreMeter = Math.min(100, (player.coreMeter || 0) + 15);
@@ -10453,11 +10486,11 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'bot_roster' && Array.isArray(evt.bots)) {
-    if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }
+    if (!_botAuthority()) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }   // (v38.63) one gate
     return;
   }
   if (evt.type === 'bot_state' && Array.isArray(evt.m)) {
-    if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) {
+    if (!_botAuthority()) {   // (v38.63) one gate — see _botAuthority
       for (const r of evt.m) {
         if (!Array.isArray(r) || r.length < 7) continue;
         const b = _botProxyById(r[0]);
@@ -10466,19 +10499,25 @@ function handleNetEvent(evt, fromPeerId) {
         b.health = r[4]; b.shield = r[5];
         const aliveNow = !!r[6];
         if (!aliveNow && b.alive) { try { b.die(null); } catch (_) { b.alive = false; } }
+        else if (aliveNow && !b.alive) {
+          b.alive = true; b.doomed = false; b.doomTimer = 0; b.shipState = 'flying';
+          b.position.set(r[1], r[2], r[3]);
+          if (b.velocity) b.velocity.set(0, 0, 0);
+          if (b.mesh) { if (!b.mesh.parent) { try { scene.add(b.mesh); } catch (_) {} } b.mesh.position.copy(b.position); b.mesh.visible = true; }
+        }
       }
     }
     return;
   }
   if (evt.type === 'bot_dmg' && typeof evt.i === 'number') {
-    if (net.openSolo) {
+    if (_botAuthority()) {   // (v38.63) one gate (was `net.openSolo`, which also dropped co-op campaign/endless hits)
       const b = game.entities.find(x => (x instanceof Bot) && !x.isProxy && x.id === evt.i);
       if (b && b.alive) { try { b.takeDamage(Math.max(0, +evt.d || 0), 'net', null); } catch (_) {} }
     }
     return;
   }
   if (evt.type === 'bot_fire') {
-    const _amBotAuth = !!(net.openSoloHostId && net.myPeerId === net.openSoloHostId);
+    const _amBotAuth = _botAuthority();   // (v38.63) one gate — see _botAuthority
     if (!_amBotAuth && typeof spawnTracer === 'function') {
       try {
         _bfA.set(+evt.ox || 0, +evt.oy || 0, +evt.oz || 0);
@@ -43096,7 +43135,7 @@ function commitLoadout(key) {
       document.getElementById('stasis-warning').style.display = 'none';
       document.getElementById('stasis-vignette').style.display = 'none';
 
-      if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();
+      if (game.eliminationBots !== false && _botAuthority() && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();   // (v38.63) only the bot authority spawns real bots; everyone else proxies its roster
       if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
       if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
     };
@@ -43287,7 +43326,9 @@ const _bfD = new THREE.Vector3();
 
 function _botNetSync(dt) {
   if (!net || !net.active || !net.sendEvent) return;
-  if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;   // (v37.80) cyber is authority-owned too
+  if (!_botAuthority()) return;   // (v38.63) one gate — see _botAuthority
+  _botNetSync._rosterT = (_botNetSync._rosterT || 0) - dt;
+  if (_botNetSync._rosterT <= 0) { _botNetSync._rosterT = 2.0; try { _botSendRoster(); } catch (_) {} }
   _botNetSync._t = (_botNetSync._t || 0) - dt;
   if (_botNetSync._t > 0) return;
   _botNetSync._t = 0.12;
@@ -43301,15 +43342,21 @@ function _botNetSync(dt) {
   if (rows.length) { try { net.sendEvent({ type: 'bot_state', m: rows }); } catch (_) {} }
 }
 
-function _botSendRoster() {
+function _botAuthority() {
+  if (typeof net === 'undefined' || !net || !net.active) return true;
+  if (net.campaign || net.endless || net.cyber) return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : true;
+  if (net.openSolo) return !!(net.openSoloHostId && net.myPeerId === net.openSoloHostId);
+  return false;
+}
+function _botSendRoster(toPeerId) {
   if (!net || !net.active || !net.sendEvent) return;
-  if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;   // (v37.80) cyber is authority-owned too
+  if (!_botAuthority()) return;   // (v38.63) one gate — see _botAuthority
   const bots = [];
   for (const b of game.entities) {
     if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
     bots.push({ i: b.id, k: b.loadoutKey, t: (b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A', h: b.hoardModelKey || null, n: b.isNemesis ? 1 : 0 });
   }
-  try { net.sendEvent({ type: 'bot_roster', bots }); } catch (_) {}
+  try { if (toPeerId) net.sendEvent({ type: 'bot_roster', bots }, toPeerId); else net.sendEvent({ type: 'bot_roster', bots }); } catch (_) {}
 }
 
 function _botProxyById(id) {
@@ -43322,16 +43369,20 @@ function _botProxyById(id) {
 
 function _botApplyRoster(rows) {
   if (!game || !game.entities) return;
+  if (game.state === 'select') return;
   const want = new Map(rows.map(r => [r.i, r]));
   for (let i = game.entities.length - 1; i >= 0; i--) {
     const b = game.entities[i];
     if (!(b instanceof Bot) || !b.isProxy) continue;
-    if (!want.has(b.id)) {
+    const r = want.get(b.id);
+    const _stale = r && (r.k !== b.loadoutKey || ((r.t === 'B') ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A) !== b.team);
+    if (!r || _stale) {
       if (b.alive && typeof spawnFXBurst === 'function') {
         try { spawnFXBurst('cloud', b.position, 60, 0.6, { startScale: 1.0, endScale: 0.2 }); } catch (_) {}
       }
       try { b.destroy(); } catch (_) {}
       game.entities.splice(i, 1);
+      if (_stale) continue;   // (v38.63) leave the row in `want` so it is rebuilt below
     } else {
       want.delete(b.id);
     }
@@ -43424,8 +43475,8 @@ function spawnBots() {
     applyPrev(bot);
     game.entities.push(bot);
   }
-  if (net.active && net.openSolo && typeof _botSendRoster === 'function') {
-    try { _botSendRoster(); } catch (_) {}
+  if (net.active && typeof _botSendRoster === 'function') {
+    try { _botSendRoster(); } catch (_) {}   // (v38.63) self-gates on _botAuthority
   }
   for (const b of game.entities) { if (b.mesh && b.position) b.mesh.position.copy(b.position); }
 }
@@ -43635,6 +43686,8 @@ function playerDie(attacker) {
       killerName,
       victimName,
       killerPeerId: (attacker && attacker.peerId) ? attacker.peerId : null,
+      killerBotId: (attacker && attacker.botId != null) ? attacker.botId : undefined,
+      killerBotOwner: (attacker && attacker.botOwnerId) ? attacker.botOwnerId : undefined,
     });
   }
   player._streakCount = 0;
@@ -49401,7 +49454,9 @@ function dash() {
 
 
 function updateRoundSystem(dt) {
-  
+  if (game.state === 'roundEnd') { if (typeof game._rrFromRound !== 'number') game._rrFromRound = game.currentRound | 0; }
+  else if (game.state === 'playing') game._rrFromRound = undefined;
+
   
   if (game.state === 'warmup' && (game.testMode || (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight'))) {   
     game.warmupTimer = ((typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') && game._swPreloading) ? 0.1 : 0;   
@@ -49508,7 +49563,7 @@ function updateRoundSystem(dt) {
     }
     if (_v8nearEnemies >= 3 && typeof ANN !== 'undefined') ANN.multipleHostiles();
 
-    if (_isAssault() && game.eliminationBots !== false && (!net.active || net.openSolo) && (!net.active || amStasisOwner())) {
+    if (_isAssault() && game.eliminationBots !== false && _botAuthority() && (!net.active || amStasisOwner())) {   // (v38.63)
       const _rAtkFleet = _assaultAttackerFleet();
       const _rAtkEvery = LSS.ASSAULT_RESPAWN_DELAY;
       const _rDefEvery = LSS.ASSAULT_RESPAWN_DELAY + LSS.ASSAULT_DEFENDER_RESPAWN_EXTRA;
@@ -49702,7 +49757,8 @@ function updateRoundSystem(dt) {
       } else {
         const _swap = (typeof _swapArmed === 'function') ? _swapArmed() : null;
         game._swapPending = null;
-        game.currentRound++;
+        game.currentRound = Math.max(game.currentRound | 0, ((typeof game._rrFromRound === 'number') ? game._rrFromRound : (game.currentRound | 0)) + 1);
+        game._rrFromRound = undefined;
         game.state = 'warmup';
         if (typeof musicSetPattern === 'function') {
           try { musicSetPattern('warmup', { bpmTarget: 92, intensity: 1 }); } catch (_) {}
@@ -49843,7 +49899,7 @@ function updateRoundSystem(dt) {
         respawnPlayer();
 
 
-        if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();
+        if (game.eliminationBots !== false && _botAuthority() && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();   // (v38.63) only the bot authority spawns real bots; everyone else proxies its roster
 
         };
         const _rrRoster = () => {
@@ -60861,20 +60917,21 @@ function serializeWorldObjects() {
         scale: ch.scale,
         hp: ch.maxHp,
         flife: ch.fragmentMaxLife,
+        chp: (typeof ch.hp === 'number') ? Math.round(ch.hp) : undefined,
+        dead: (ch.alive === false) ? 1 : undefined,
+        seed: (ch._rockSeed != null) ? ch._rockSeed : undefined,
       })),
     });
   }
   return out;
 }
 
-function broadcastWorldObjects() {
+function broadcastWorldObjects(toPeerId) {
   if (!net.active || !net.sendEvent) return;
   if (!amStasisOwner()) return;
   if (!game.clusters || game.clusters.length === 0) return;
-  net.sendEvent({
-    type: 'world_objects',
-    clusters: serializeWorldObjects(),
-  });
+  const _evt = { type: 'world_objects', clusters: serializeWorldObjects() };
+  if (toPeerId) net.sendEvent(_evt, toPeerId); else net.sendEvent(_evt);
 }
 
 function applyWorldObjectsManifest(clusterEntries) {
@@ -60901,8 +60958,23 @@ function applyWorldObjectsManifest(clusterEntries) {
     const e = clusterEntries[i];
     const pos = new THREE.Vector3(e.px, e.py, e.pz);
     const cluster = new ClusterObstacle(pos, e.scale, e);
-    cluster.netId = i; 
+    cluster.netId = i;
     game.clusters.push(cluster);
+    try {
+      const _cc = Array.isArray(e.children) ? e.children : [];
+      for (let k = 0; k < _cc.length && k < cluster.children.length; k++) {
+        const _src = _cc[k], _ch = cluster.children[k];
+        if (!_src || !_ch) continue;
+        if (_src.dead) {
+          _ch.alive = false; _ch.hp = 0;
+          if (_ch.mesh && _ch.mesh.parent) _ch.mesh.parent.remove(_ch.mesh);
+          if (_ch.edgeMesh && _ch.edgeMesh.parent) _ch.edgeMesh.parent.remove(_ch.edgeMesh);
+          if (_ch._atomSmoke && typeof _ch._atomSmoke.dispose === 'function') { try { _ch._atomSmoke.dispose(); } catch (_) {} _ch._atomSmoke = null; }
+        } else if (typeof _src.chp === 'number' && _src.chp > 0 && _src.chp < _ch.hp) {
+          _ch.hp = _src.chp;
+        }
+      }
+    } catch (_) {}
   }
 }
 

@@ -4343,7 +4343,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.62';
+const LSS_BUILD = '38.63';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -7298,10 +7298,13 @@ async function joinRoom() {
           peer.discord_avatar = data.discord_avatar;
         }
         // Create or update their NetworkPlayer
+        const _hadShip = !!peer.networkPlayer;   // (v38.63)
         updateNetworkPlayer(peerId, data);
         // Open-solo: the challenger takes a bot's seat on their team,
         // mid-round, with a phase-out puff where the bot stood.
-        if (net.openSolo && game.state !== 'select' && typeof _dropinReplaceBot === 'function') {
+        // (v38.63) ...on their FIRST commit only. A re-announce or a ship
+        // change between rounds is the same human, not another seat.
+        if (!_hadShip && net.openSolo && game.state !== 'select' && typeof _dropinReplaceBot === 'function') {
           try { _dropinReplaceBot(data.team); } catch (_) {}
         }
         // A peer just committed in ship-select; if everyone now has a
@@ -7348,6 +7351,10 @@ async function joinRoom() {
       // render our avatar + handle in their lobby chips.
       if (player.loadoutKey && net.sendLoadout) {
         const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
+        // (v38.63) TO THE JOINER ONLY. This re-announce went to the whole room,
+        // and every receiver rebuilt our NetworkPlayer from scratch (GLB swap,
+        // a ship reset to the origin) — on the open-solo host it also seated
+        // us AGAIN via _dropinReplaceBot, deleting another bot per join.
         net.sendLoadout({
           loadoutKey: player.loadoutKey,
           team: player.team,
@@ -7358,7 +7365,7 @@ async function joinRoom() {
           discord_id:     _du ? _du.id : undefined,
           discord_name:   _du ? (_du.global_name || _du.username) : undefined,
           discord_avatar: _du ? _du.avatar : undefined,
-        });
+        }, peerId);
       }
 
       // (v30.63) Identity hello : introduce ourselves to the newcomer
@@ -7390,7 +7397,7 @@ async function joinRoom() {
       // manifest to the new peer so they don't sit with empty / divergent
       // cluster placements until next round.
       if (game.clusters && game.clusters.length > 0) {
-        broadcastWorldObjects();
+        broadcastWorldObjects(peerId);   // (v38.63) to the joiner only
       }
 
       // Open-solo: brief the challenger on the match in progress so they
@@ -7422,6 +7429,7 @@ async function joinRoom() {
     // Peer leaves
     net.room.onPeerLeave(peerId => {
       console.log('Peer left:', peerId);
+      const _wasBotAuth = (typeof _botAuthority === 'function') ? _botAuthority() : false;   // (v38.63)
       const peer = net.peers.get(peerId);
       if (peer && peer.networkPlayer) {
         peer.networkPlayer.destroy();
@@ -7434,15 +7442,40 @@ async function joinRoom() {
       // Drop their last game-sync snapshot too so the consensus average
       // doesn't include a frozen reading from a peer that just left.
       if (net.peerGameSync) net.peerGameSync.delete(peerId);
-      updateLobbyPeers();
-      checkAllReady();          
-      checkAllLoadoutsReady();  
-      
-      try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
-
-      if (game.clusters && game.clusters.length > 0) {
-        broadcastWorldObjects();
+      // (v38.63) HOST RE-ELECTION. When the open-solo host leaves, nobody
+      // owned the bots: proxies froze mid-air, invulnerable, still counted
+      // alive, so the round could only end by timer. The lowest remaining
+      // id takes the seat (the same tie-break the launch proposer uses);
+      // if that is us, our proxies become real bots on the spot. Co-op
+      // rooms key on amStasisOwner(), which migrates by itself — the
+      // adoption below covers that case too.
+      if (net.openSolo && net.openSoloHostId === peerId) {
+        const _ids = [net.myPeerId, ...nonJudgePeerIds()].sort();
+        net.openSoloHostId = _ids[0] || net.myPeerId;
       }
+      try {
+        const _isBotAuth = (typeof _botAuthority === 'function') ? _botAuthority() : false;
+        if (!_wasBotAuth && _isBotAuth && game && game.entities) {
+          let _adopted = 0;
+          for (const b of game.entities) {
+            if (!(b instanceof Bot) || !b.isProxy) continue;
+            b.isProxy = false; b._netX = null;
+            if (b.velocity) b.velocity.set(0, 0, 0);
+            _adopted++;
+          }
+          if (_adopted && typeof _botSendRoster === 'function') _botSendRoster();
+          if (_adopted && window.Overlays && Overlays.banner) Overlays.banner('HOST LEFT', 'you are running the bots now');
+          console.log('[net] bot authority migrated to us; adopted', _adopted, 'proxies');
+        }
+      } catch (e) { console.warn('[net] bot authority migration failed:', e); }
+      updateLobbyPeers();
+      checkAllReady();
+      checkAllLoadoutsReady();
+
+      try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
+      // (v38.63) No world_objects rebroadcast on leave: nothing about the
+      // arena changed for the peers that stayed, and the untargeted resend
+      // rebuilt every non-owner's clusters (destroyed rocks included).
     });
 
     document.getElementById('lobby-status').textContent = 'CONNECTED: ROOM ' + code + ' ; WAITING FOR PLAYERS...';
@@ -12207,15 +12240,25 @@ class NetworkPlayer {
     // Local hit detection creates a claim; actual HP change comes from network state.
     if (amount > 0 && net.active && net.sendHitClaim && this.peerId) {
       const hitId = ++net.hitIdCounter;
-      net.sendHitClaim({
+      // (v38.63) A hit from one of OUR real bots used to go out as if the
+      // local player fired it: the victim validated it against the player's
+      // position (a bot 4 km from its host did no damage at all), pointed
+      // its damage indicator at the host, and credited the host with the
+      // kill. Name the bot: its position for validation, its loadout for
+      // the splash colour / kill feed, and no peer credit.
+      const _isBot = !!(attacker && (typeof Bot !== 'undefined') && (attacker instanceof Bot));
+      const _from = (_isBot && attacker.position) ? attacker.position : player.position;
+      const claim = {
         hitId,
         shooterId: net.myPeerId,
         targetId: this.peerId,
         damage: amount,
-        sx: player.position.x,
-        sy: player.position.y,
-        sz: player.position.z,
-      });
+        sx: _from.x,
+        sy: _from.y,
+        sz: _from.z,
+      };
+      if (_isBot) { claim.bot = 1; claim.botId = attacker.id; claim.botKey = attacker.loadoutKey || null; }
+      net.sendHitClaim(claim);
     }
     if (this.mesh && this.mesh.userData && this.mesh.userData.shieldMesh && this.shield > 0) {
       const ripPoint = hitPoint || this.position;
@@ -12265,6 +12308,15 @@ function updateNetworkPlayer(peerId, data) {
   // (v38.60) Refuse an unknown loadout BEFORE tearing the old ship down, so a
   // bad payload can't leave the peer with a half-built / dangling entry.
   if (!data || typeof data.loadoutKey !== 'string' || !Object.prototype.hasOwnProperty.call(LOADOUTS, data.loadoutKey)) return;
+  // (v38.63) Same ship, same team, same livery: nothing to rebuild. A
+  // duplicate announcement used to destroy and recreate the peer's hull
+  // (fresh at the origin, so its next death exploded at world zero).
+  if (peer.networkPlayer) {
+    const np0 = peer.networkPlayer;
+    const _team = data.team || LSS.TEAM_FLEET_B;
+    const _skin = (typeof _shipSkinDef === 'function') ? _shipSkinDef(data.skinId).id : data.skinId;
+    if (np0.loadoutKey === data.loadoutKey && np0.team === _team && np0.skinId === _skin) return;
+  }
 
   // Remove old NetworkPlayer if loadout changed
   if (peer.networkPlayer) {
@@ -12423,34 +12475,43 @@ function applyGameSyncConsensus() {
   let wtSum = (game.warmupTimer   || 0);
   let etSum = (game.roundEndTimer || 0);
   let mtSum = (game.matchEndTimer || 0);
-  let gtSum = (game.time          || 0);
   let crMax = (game.currentRound  | 0);
   let saMax = (game.scoreA        | 0);
   let sbMax = (game.scoreB        | 0);
   for (const [pid, snap] of peerMap) {
     if (!snap) continue;
     if ((now - (snap.lastUpdate || 0)) > STALE) continue;
+    // Forward-only fields (scores, round) merge from every live peer.
+    if ((snap.cr | 0) > crMax) crMax = (snap.cr | 0);
+    if ((snap.sa | 0) > saMax) saMax = (snap.sa | 0);
+    if ((snap.sb | 0) > sbMax) sbMax = (snap.sb | 0);
+    // (v38.63) TIMERS ONLY BLEND WITH PEERS IN THE SAME PHASE. `snap.s` was
+    // recorded and never read: a drop-in still sitting in the hangar (its
+    // roundTimer parked at the full ROUND_TIME) or a peer already into
+    // roundEnd was averaged straight into a mid-round clock — every join
+    // stretched the round, every early finisher halved it.
+    if (snap.s && snap.s !== game.state) continue;
     n++;
     rtSum += (snap.rt || 0);
     wtSum += (snap.wt || 0);
     etSum += (snap.et || 0);
     mtSum += (snap.mt || 0);
-    gtSum += (snap.gt || 0);
-    if ((snap.cr | 0) > crMax) crMax = (snap.cr | 0);
-    if ((snap.sa | 0) > saMax) saMax = (snap.sa | 0);
-    if ((snap.sb | 0) > sbMax) sbMax = (snap.sb | 0);
   }
-  if (n < 2) return; 
-  
-  
+  game.currentRound  = crMax;
+  game.scoreA        = saMax;
+  game.scoreB        = sbMax;
+  if (n < 2) return;
+
+  // (v38.63) game.time is NOT consensus any more. It is page uptime on every
+  // client (the only other writer is `game.time += deltaTime`), so averaging
+  // it yanked both clocks by minutes on join — and everything that measures
+  // an interval against it (the 5 s shield-regen gate, kill-feed expiry, bot
+  // memory ages, the multikill window) went with it. Nothing cross-peer
+  // reads it: the city traffic clock has its own net.cityT sync.
   game.roundTimer    = rtSum / n;
   game.warmupTimer   = wtSum / n;
   game.roundEndTimer = etSum / n;
   game.matchEndTimer = mtSum / n;
-  game.time          = gtSum / n;
-  game.currentRound  = crMax;
-  game.scoreA        = saMax;
-  game.scoreB        = sbMax;
   const _nowMs = Date.now();
   if (typeof game.roundTimerAnchorMs === 'number') {
     game.roundTimerAnchorMs = _nowMs; game.roundTimerTotal = game.roundTimer;
@@ -12516,13 +12577,18 @@ function handleHitClaim(claim, fromPeerId) {
   // (gives responsive feel; consensus can override if vote fails)
   if (claim.targetId === net.myPeerId && valid) {
     const shooterPeer = net.peers.get(claim.shooterId);
-    const shooterLoadout = (shooterPeer && shooterPeer.loadoutKey)
-      ? LOADOUTS[shooterPeer.loadoutKey] : null;
+    // (v38.63) A claim flagged `bot` came from one of the sender's real bots:
+    // the bot's loadout names the killer and no peer takes the credit.
+    const _botKey = (claim.bot && typeof claim.botKey === 'string' && Object.prototype.hasOwnProperty.call(LOADOUTS, claim.botKey)) ? claim.botKey : null;
+    const shooterLoadout = _botKey ? LOADOUTS[_botKey]
+      : ((shooterPeer && shooterPeer.loadoutKey) ? LOADOUTS[shooterPeer.loadoutKey] : null);
     const fakeAttacker = (typeof claim.sx === 'number')
       ? {
           position: new THREE.Vector3(claim.sx, claim.sy, claim.sz),
-          peerId: claim.shooterId,
+          peerId: claim.bot ? null : claim.shooterId,
           loadout: shooterLoadout,
+          botId: claim.bot ? claim.botId : undefined,
+          botOwnerId: claim.bot ? claim.shooterId : undefined,
         }
       : null;
     // Clamp peer-supplied damage. claim.damage crosses the wire
@@ -12570,6 +12636,14 @@ function handleHitVote(vote, fromPeerId) {
 function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'kill') {
     addKillFeed(evt.killerName || 'Peer', evt.victimName || 'Peer');
+    // (v38.63) One of our real bots killed a peer: credit the bot's own
+    // counter so the scoreboard row is right on the authority.
+    if (evt.killerBotId != null && evt.killerBotOwner === net.myPeerId && typeof _botAuthority === 'function' && _botAuthority()) {
+      try {
+        const _kb = game.entities.find(x => (x instanceof Bot) && !x.isProxy && x.id === evt.killerBotId);
+        if (_kb) _kb.kills = (_kb.kills | 0) + 1;
+      } catch (_) {}
+    }
     // (kills 2026-05) Credit the killer's kill counter. The dying peer
     // broadcasts the kill event with killerPeerId set to whoever
     // landed the killing blow. If that's us, bump player.kills so the
@@ -12843,11 +12917,11 @@ function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'bot_roster' && Array.isArray(evt.bots)) {
     // (v32.76) Apply when NOT openSolo (existing drop-in) OR when a campaign NON-authority
     // peer (it proxies the host's hoard). The authority owns the real bots, so it skips.
-    if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }
+    if (!_botAuthority()) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }   // (v38.63) one gate
     return;
   }
   if (evt.type === 'bot_state' && Array.isArray(evt.m)) {
-    if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) {
+    if (!_botAuthority()) {   // (v38.63) one gate — see _botAuthority
       for (const r of evt.m) {
         if (!Array.isArray(r) || r.length < 7) continue;
         const b = _botProxyById(r[0]);
@@ -12856,12 +12930,22 @@ function handleNetEvent(evt, fromPeerId) {
         b.health = r[4]; b.shield = r[5];
         const aliveNow = !!r[6];
         if (!aliveNow && b.alive) { try { b.die(null); } catch (_) { b.alive = false; } }
+        else if (aliveNow && !b.alive) {
+          // (v38.63) REVIVE. Only alive->dead was handled, so a proxy that died
+          // stayed dead on this peer forever: the authority's bot came back next
+          // round with the same id, the roster kept our dead shell, and its
+          // shots replayed from nowhere. Put it back where the authority says.
+          b.alive = true; b.doomed = false; b.doomTimer = 0; b.shipState = 'flying';
+          b.position.set(r[1], r[2], r[3]);
+          if (b.velocity) b.velocity.set(0, 0, 0);
+          if (b.mesh) { if (!b.mesh.parent) { try { scene.add(b.mesh); } catch (_) {} } b.mesh.position.copy(b.position); b.mesh.visible = true; }
+        }
       }
     }
     return;
   }
   if (evt.type === 'bot_dmg' && typeof evt.i === 'number') {
-    if (net.openSolo) {
+    if (_botAuthority()) {   // (v38.63) one gate (was `net.openSolo`, which also dropped co-op campaign/endless hits)
       const b = game.entities.find(x => (x instanceof Bot) && !x.isProxy && x.id === evt.i);
       if (b && b.alive) { try { b.takeDamage(Math.max(0, +evt.d || 0), 'net', null); } catch (_) {} }
     }
@@ -12873,7 +12957,7 @@ function handleNetEvent(evt, fromPeerId) {
     // openSolo=true on EVERY member (which blanked all bot fire for the
     // party), and the flat tracer never matched projectile-mode weapons
     // like Pyro's thermite (whose "fire" is a flame gout, not a beam).
-    const _amBotAuth = !!(net.openSoloHostId && net.myPeerId === net.openSoloHostId);
+    const _amBotAuth = _botAuthority();   // (v38.63) one gate — see _botAuthority
     if (!_amBotAuth && typeof spawnTracer === 'function') {
       try {
         _bfA.set(+evt.ox || 0, +evt.oy || 0, +evt.oz || 0);
@@ -56012,7 +56096,7 @@ function commitLoadout(key) {
       // toggle does nothing offline — race and assault both run solo
       // (net.active false) when no room code is entered, and that branch
       // spawns bots unconditionally.
-      if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();
+      if (game.eliminationBots !== false && _botAuthority() && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();   // (v38.63) only the bot authority spawns real bots; everyone else proxies its roster
       // (v31.20) Bots exist now ; aim the player at the enemy fleet so the
       // spawn-in faces the fight (was facing a default way, had to turn).
       if (typeof _facePlayerAtEnemy === 'function') _facePlayerAtEnemy();
@@ -56377,7 +56461,16 @@ function _botNetSync(dt) {
   // (v32.76) Broadcast in open-solo (existing) OR a co-op CAMPAIGN room when we're the
   // authority (the host owns + syncs the hoard ; peers proxy it via bot_state).
   // (v35.85) Co-op ENDLESS rides the same rails: authority owns the ambush wave.
-  if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;   // (v37.80) cyber is authority-owned too
+  if (!_botAuthority()) return;   // (v38.63) one gate — see _botAuthority
+  // (v38.63) PERIODIC ROSTER. The roster used to go out only at spawn and at
+  // a peer's join — both moments where the receiver might still be in the
+  // hangar (its fresh-match reset wipes game.entities), so it could arrive
+  // before there was anything to apply it to and never come again. Two
+  // seconds and eight rows: every member converges on the authority's bot
+  // list whatever order things happened in (party start, late join, a bot
+  // dying, a host migration). _botApplyRoster is idempotent.
+  _botNetSync._rosterT = (_botNetSync._rosterT || 0) - dt;
+  if (_botNetSync._rosterT <= 0) { _botNetSync._rosterT = 2.0; try { _botSendRoster(); } catch (_) {} }
   _botNetSync._t = (_botNetSync._t || 0) - dt;
   if (_botNetSync._t > 0) return;
   _botNetSync._t = 0.12;
@@ -56391,9 +56484,24 @@ function _botNetSync(dt) {
   if (rows.length) { try { net.sendEvent({ type: 'bot_state', m: rows }); } catch (_) {} }
 }
 
-function _botSendRoster() {
+// (v38.63) ONE predicate for "this client runs the real bots". Before this,
+// four different gates answered the question four different ways, and the
+// party-room one (`net.openSolo`, which open_solo_start sets on EVERY member)
+// was wrong: every member spawned its own real bots, broadcast bot_state that
+// nobody applied, and replayed everyone else's bot_fire from empty space —
+// two humans in a party bot match were fighting different bots in different
+// places. Now: solo = me; co-op campaign/endless/cyber = the stasis owner
+// (lowest id, migrates on leave); open-solo party / drop-in = the host that
+// started it (re-elected in onPeerLeave); plain PvP room = nobody.
+function _botAuthority() {
+  if (typeof net === 'undefined' || !net || !net.active) return true;
+  if (net.campaign || net.endless || net.cyber) return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : true;
+  if (net.openSolo) return !!(net.openSoloHostId && net.myPeerId === net.openSoloHostId);
+  return false;
+}
+function _botSendRoster(toPeerId) {
   if (!net || !net.active || !net.sendEvent) return;
-  if ((net.campaign || net.endless || net.cyber) ? (typeof amStasisOwner === 'function' && !amStasisOwner()) : !net.openSolo) return;   // (v37.80) cyber is authority-owned too
+  if (!_botAuthority()) return;   // (v38.63) one gate — see _botAuthority
   const bots = [];
   for (const b of game.entities) {
     if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
@@ -56401,7 +56509,7 @@ function _botSendRoster() {
     // seen by the e.hoardModelKey filters) ; n = Nemesis role (excluded from clear-check).
     bots.push({ i: b.id, k: b.loadoutKey, t: (b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A', h: b.hoardModelKey || null, n: b.isNemesis ? 1 : 0 });
   }
-  try { net.sendEvent({ type: 'bot_roster', bots }); } catch (_) {}
+  try { if (toPeerId) net.sendEvent({ type: 'bot_roster', bots }, toPeerId); else net.sendEvent({ type: 'bot_roster', bots }); } catch (_) {}
 }
 
 function _botProxyById(id) {
@@ -56414,11 +56522,20 @@ function _botProxyById(id) {
 
 function _botApplyRoster(rows) {
   if (!game || !game.entities) return;
+  // (v38.63) Not while we're in the hangar: the fresh-match reset wipes
+  // game.entities without disposing, so proxies built here would leak their
+  // meshes into the scene. The authority re-sends the roster every 2 s, so
+  // it lands again once we're in the world.
+  if (game.state === 'select') return;
   const want = new Map(rows.map(r => [r.i, r]));
   for (let i = game.entities.length - 1; i >= 0; i--) {
     const b = game.entities[i];
     if (!(b instanceof Bot) || !b.isProxy) continue;
-    if (!want.has(b.id)) {
+    const r = want.get(b.id);
+    // (v38.63) a proxy whose loadout / team no longer matches the roster row
+    // is rebuilt, not kept (a fresh deal or a re-seated slot on the authority)
+    const _stale = r && (r.k !== b.loadoutKey || ((r.t === 'B') ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A) !== b.team);
+    if (!r || _stale) {
       // Removed from roster: replaced by a human or round-reset. Phase-out
       // puff so it doesn't just blink away.
       if (b.alive && typeof spawnFXBurst === 'function') {
@@ -56426,6 +56543,7 @@ function _botApplyRoster(rows) {
       }
       try { b.destroy(); } catch (_) {}
       game.entities.splice(i, 1);
+      if (_stale) continue;   // (v38.63) leave the row in `want` so it is rebuilt below
     } else {
       want.delete(b.id);
     }
@@ -56538,8 +56656,8 @@ function spawnBots() {
     applyPrev(bot);
     game.entities.push(bot);
   }
-  if (net.active && net.openSolo && typeof _botSendRoster === 'function') {
-    try { _botSendRoster(); } catch (_) {}
+  if (net.active && typeof _botSendRoster === 'function') {
+    try { _botSendRoster(); } catch (_) {}   // (v38.63) self-gates on _botAuthority
   }
   // Snap each bot's MESH onto its assigned spawn right now. The Bot constructor
   // seeds a random position and adds the mesh to the scene immediately; during
@@ -56857,6 +56975,9 @@ function playerDie(attacker) {
       killerName,
       victimName,
       killerPeerId: (attacker && attacker.peerId) ? attacker.peerId : null,
+      // (v38.63) a bot kill names the bot so its authority can credit it
+      killerBotId: (attacker && attacker.botId != null) ? attacker.botId : undefined,
+      killerBotOwner: (attacker && attacker.botOwnerId) ? attacker.botOwnerId : undefined,
     });
   }
   // Cinematic: respawn overlay + track killer for revenge medals.
@@ -64734,7 +64855,13 @@ function dash() {
 // ---- ROUND SYSTEM ----
 
 function updateRoundSystem(dt) {
-  
+  // (v38.63) Round-advance stamp: remember which round ENDED, once, when we
+  // first see roundEnd, and forget it while playing. The roundEnd->warmup
+  // transition advances from this stamp, so a consensus bump that lands
+  // during roundEnd cannot make the round number skip (see the transition).
+  if (game.state === 'roundEnd') { if (typeof game._rrFromRound !== 'number') game._rrFromRound = game.currentRound | 0; }
+  else if (game.state === 'playing') game._rrFromRound = undefined;
+
   
   if (game.state === 'warmup' && (game.testMode || (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight'))) {   
     game.warmupTimer = ((typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') && game._swPreloading) ? 0.1 : 0;   
@@ -64969,7 +65096,7 @@ function updateRoundSystem(dt) {
     // themselves stay bound to the role, not the fleet — a role swap just
     // hands each clock the other cadence, and both are zeroed on round build
     // anyway, so no cross-round drift).
-    if (_isAssault() && game.eliminationBots !== false && (!net.active || net.openSolo) && (!net.active || amStasisOwner())) {
+    if (_isAssault() && game.eliminationBots !== false && _botAuthority() && (!net.active || amStasisOwner())) {   // (v38.63)
       const _rAtkFleet = _assaultAttackerFleet();
       const _rAtkEvery = LSS.ASSAULT_RESPAWN_DELAY;
       const _rDefEvery = LSS.ASSAULT_RESPAWN_DELAY + LSS.ASSAULT_DEFENDER_RESPAWN_EXTRA;
@@ -65280,7 +65407,15 @@ function updateRoundSystem(dt) {
         // See the _rrStagedSwap header for the measurements and the traps.
         const _swap = (typeof _swapArmed === 'function') ? _swapArmed() : null;
         game._swapPending = null;
-        game.currentRound++;
+        // (v38.63) ADVANCE FROM THE ROUND THAT ENDED, not from whatever the
+        // consensus max-rule has pushed currentRound to meanwhile. Peer A
+        // transitions first, its next game_sync carries N+1, peer B (still
+        // in roundEnd for the transit time) takes the max to N+1 and then did
+        // its own ++ to N+2: "ROUND 4" after round 2, assault sides flipping
+        // against the ledger, the map rotation skipping. _rrFromRound is
+        // stamped at every roundEnd entry.
+        game.currentRound = Math.max(game.currentRound | 0, ((typeof game._rrFromRound === 'number') ? game._rrFromRound : (game.currentRound | 0)) + 1);
+        game._rrFromRound = undefined;
         game.state = 'warmup';
         // Reactive band: rolling between rounds, warmup pattern.
         if (typeof musicSetPattern === 'function') {
@@ -65487,7 +65622,7 @@ function updateRoundSystem(dt) {
 
 
         // (v35.20) Same ADD BOTS gate as the round-1 build above.
-        if (game.eliminationBots !== false && (!net.active || net.openSolo) && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();
+        if (game.eliminationBots !== false && _botAuthority() && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();   // (v38.63) only the bot authority spawns real bots; everyone else proxies its roster
 
         };
         // ---- PHASE 3a : fleet strip refresh ----
@@ -79437,20 +79572,28 @@ function serializeWorldObjects() {
         scale: ch.scale,
         hp: ch.maxHp,
         flife: ch.fragmentMaxLife,
+        // (v38.63) live state, so a joiner builds the arena AS IT IS: the
+        // manifest carried only maxHp, so every receiver got destroyed rocks
+        // back at full health.
+        chp: (typeof ch.hp === 'number') ? Math.round(ch.hp) : undefined,
+        dead: (ch.alive === false) ? 1 : undefined,
+        seed: (ch._rockSeed != null) ? ch._rockSeed : undefined,
       })),
     });
   }
   return out;
 }
 
-function broadcastWorldObjects() {
+// (v38.63) `toPeerId`: the manifest goes to the peer that just joined, not to
+// the whole room. It used to be re-broadcast on every join AND every leave,
+// untargeted — so each of those tore down every non-owner's clusters and
+// rebuilt them mid-round (a synchronous hitch), with every shot rock resurrected.
+function broadcastWorldObjects(toPeerId) {
   if (!net.active || !net.sendEvent) return;
   if (!amStasisOwner()) return;
   if (!game.clusters || game.clusters.length === 0) return;
-  net.sendEvent({
-    type: 'world_objects',
-    clusters: serializeWorldObjects(),
-  });
+  const _evt = { type: 'world_objects', clusters: serializeWorldObjects() };
+  if (toPeerId) net.sendEvent(_evt, toPeerId); else net.sendEvent(_evt);
 }
 
 function applyWorldObjectsManifest(clusterEntries) {
@@ -79484,8 +79627,24 @@ function applyWorldObjectsManifest(clusterEntries) {
     const e = clusterEntries[i];
     const pos = new THREE.Vector3(e.px, e.py, e.pz);
     const cluster = new ClusterObstacle(pos, e.scale, e);
-    cluster.netId = i; 
+    cluster.netId = i;
     game.clusters.push(cluster);
+    // (v38.63) apply the live state the manifest now carries (see serializeWorldObjects)
+    try {
+      const _cc = Array.isArray(e.children) ? e.children : [];
+      for (let k = 0; k < _cc.length && k < cluster.children.length; k++) {
+        const _src = _cc[k], _ch = cluster.children[k];
+        if (!_src || !_ch) continue;
+        if (_src.dead) {
+          _ch.alive = false; _ch.hp = 0;
+          if (_ch.mesh && _ch.mesh.parent) _ch.mesh.parent.remove(_ch.mesh);
+          if (_ch.edgeMesh && _ch.edgeMesh.parent) _ch.edgeMesh.parent.remove(_ch.edgeMesh);
+          if (_ch._atomSmoke && typeof _ch._atomSmoke.dispose === 'function') { try { _ch._atomSmoke.dispose(); } catch (_) {} _ch._atomSmoke = null; }
+        } else if (typeof _src.chp === 'number' && _src.chp > 0 && _src.chp < _ch.hp) {
+          _ch.hp = _src.chp;
+        }
+      }
+    } catch (_) {}
   }
 }
 
