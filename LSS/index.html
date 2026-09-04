@@ -4211,7 +4211,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.24';
+const LSS_BUILD = '38.25';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -24294,6 +24294,15 @@ function _cyberDefFleet(C) {
 function _cyberPlayerAttacks(C) {
   try { return player.team === _cyberAtkFleet(C); } catch (_) { return true; }
 }
+function _isCyber() { return !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed); }
+function _champChargeTime() {
+  if (_isCyber()) {
+    const K = (typeof window !== 'undefined') ? window.__cyber : null;
+    return (K && K.capture != null) ? K.capture : CYBER.capture;
+  }
+  if (typeof _isAssault === 'function' && _isAssault()) return LSS.ASSAULT_CHARGE_TIME;
+  return LSS.CHAMPION_CHARGE_TIME;
+}
 function _cyberAuthority() {
   return (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
 }
@@ -24779,48 +24788,24 @@ function _cyberFrame(dt) {
 
   const F = C.field;
   if (F && F.position) {
-    const R = (F.radius || 50) + 120;
-    let held = false, contested = false;
-    try {
-      if (player && player.shipState !== 'dead' && player.position.distanceTo(F.position) < R) {
-        if (_cyberPlayerAttacks(C)) held = true; else contested = true;
-      }
-    } catch (_) {}
-    if (!held) {
-      for (const b of C.bots) {
-        if (b && b.alive && b._cyberAttacker && b.position.distanceTo(F.position) < R) { held = true; break; }
-      }
-    }
-    if (!contested) {
-      for (const b of C.bots) {
-        if (b && b.alive && !b._cyberAttacker && b.position.distanceTo(F.position) < R) { contested = true; break; }
-      }
-    }
     let carrierOn = false;
     try {
       if (_carrier.obj && _carrier.ent && _carrier.ent.alive) {
-        const _cr = R + _carrierLength() * 0.35;
+        const _cr = (F.radius || 50) + 120 + _carrierLength() * 0.35;
         carrierOn = Math.hypot(_carrier.obj.position.x - F.position.x,
                                _carrier.obj.position.z - F.position.z) < _cr;
       }
     } catch (_) {}
-    if (carrierOn) { held = true; contested = false; }
     const need = (window.__cyber && window.__cyber.capture != null) ? window.__cyber.capture : CYBER.capture;
-    if (held && !contested) {
+    if (carrierOn) {
       const was = C.hold;
       C.hold += (dt || 0.016);
       if (was < 0.05) {
         try {
-          if (window.Overlays && Overlays.banner) {
-            if (carrierOn) Overlays.banner('CARRIER ON STATION', 'the field is under its guns');
-            else Overlays.banner('CAPTURING', 'hold the field');
-          }
+          if (window.Overlays && Overlays.banner) Overlays.banner('CARRIER ON STATION', 'the field is under its guns');
         } catch (_) {}
       }
-      if (C.hold >= need) {
-        _cyberRoundEnd(C, _cyberAtkFleet(C), 'FIELD TAKEN',
-                       carrierOn ? 'the carrier holds it' : 'the attack holds it');
-      }
+      if (C.hold >= need) _cyberRoundEnd(C, _cyberAtkFleet(C), 'FIELD TAKEN', 'the carrier holds it');
     } else if (C.hold > 0) {
       C.hold = Math.max(0, C.hold - (dt || 0.016) * 0.5);   // slips back at half speed
     }
@@ -60721,7 +60706,7 @@ function updateStasisFields(dt) {
           const teamKey = ship.team;
           if (typeof field.teamProgress[teamKey] !== 'number') field.teamProgress[teamKey] = 0;
           field.teamProgress[teamKey] += dt;
-          const progress = Math.min(1, field.teamProgress[teamKey] / Math.max(0.001, _isAssault() ? LSS.ASSAULT_CHARGE_TIME : LSS.CHAMPION_CHARGE_TIME));
+          const progress = Math.min(1, field.teamProgress[teamKey] / Math.max(0.001, _champChargeTime()));
           field.chargeTimer = field.teamProgress[teamKey];
           const maxS = ship.maxShield || 0;
           if (typeof field._championChargeStartShield !== 'number') {
@@ -60737,8 +60722,11 @@ function updateStasisFields(dt) {
           if (targetShield > ship.shield) ship.shield = targetShield;
           if (progress >= 1) {
             const team = ship.team;
-            game.championResult = (team === LSS.TEAM_FLEET_A) ? 'A' : 'B';
-            game.championEndTimer = 5.0;
+            const _cy = _isCyber();
+            if (!_cy) {
+              game.championResult = (team === LSS.TEAM_FLEET_A) ? 'A' : 'B';
+              game.championEndTimer = 5.0;
+            }
             field.alive = false;
             if (field.group && field.group.parent) scene.remove(field.group);
             if (isPlayer) {
@@ -60749,19 +60737,22 @@ function updateStasisFields(dt) {
               if (w) w.style.display = 'none';
               if (v) v.style.display = 'none';
             }
-            if (window.Overlays) {
+            if (_cy) {
+              try { _cyberRoundEnd(game._cyber, team, 'FIELD TAKEN', 'the attack holds it'); } catch (_) {}
+            } else if (window.Overlays) {
               const teamLabel = team === LSS.TEAM_FLEET_A ? 'FLEET A' : 'FLEET B';
               Overlays.banner('CHAMPION CLAIMED', teamLabel + ' WINS THE ROUND');
             }
           }
         }
       } else {
-        if (_isAssault() && field.teamProgress) {
-          const _ak = _assaultAttackerFleet();
+        if (field.teamProgress && (_isAssault() || _isCyber())) {
+          const _ak = _isCyber() ? _cyberAtkFleet(game._cyber) : _assaultAttackerFleet();
           if (field.teamProgress[_ak] > 0) field.teamProgress[_ak] = Math.max(0, field.teamProgress[_ak] - dt * 0.5);
         }
         if (player.shipState !== 'dead' && player.position && field.recentlyReleasedShip !== player &&
-            (!_isAssault() || player.team === _assaultAttackerFleet())) {
+            (!_isAssault() || player.team === _assaultAttackerFleet()) &&
+            (!_isCyber() || _cyberPlayerAttacks(game._cyber))) {
           const d = player.position.distanceTo(field.position);
           if (d < field.radius) {
             field.claimedBy = player;
@@ -60784,6 +60775,7 @@ function updateStasisFields(dt) {
             if (!bot.alive) continue;
             if (field.recentlyReleasedShip === bot) continue;
             if (_isAssault() && bot.team !== _assaultAttackerFleet()) continue;
+            if (_isCyber() && !bot._cyberAttacker) continue;
             if (bot.position.distanceTo(field.position) < field.radius) {
               field.claimedBy = bot;
               field.chargingTeam = bot.team;
