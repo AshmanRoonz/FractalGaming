@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.67';
+const LSS_BUILD = '38.68';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -3639,10 +3639,23 @@ const _tpDir = new THREE.Vector3();
 const _tpRight = new THREE.Vector3();
 function _toggleThirdPerson() {
   if (typeof LSS === 'undefined') return;   
+  if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return;   // (v38.68) VR has no third person
   game.thirdPerson = !game.thirdPerson;
   try { document.body.classList.toggle('lss-thirdperson', !!game.thirdPerson); } catch (_) {}
+  try { localStorage.setItem('lss_view', game.thirdPerson ? 'tp' : 'fp'); } catch (_) {}   // (v38.68) remembered across matches
   if (!game.thirdPerson && player && player.mesh) player.mesh.visible = false;   
   try { if (window.Overlays && Overlays.banner) Overlays.banner(game.thirdPerson ? 'THIRD PERSON' : 'FIRST PERSON', '(V) to toggle'); } catch (_) {}
+}
+function _viewPrefThirdPerson() {
+  try { if (localStorage.getItem('lss_view') === 'fp') return false; } catch (_) {}
+  return true;
+}
+function _applyStartView() {
+  if (typeof game === 'undefined' || !game || game._liveSwap) return;   // a live ship swap is not a launch
+  const _tp = _viewPrefThirdPerson() && !(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
+  game.thirdPerson = _tp;
+  try { document.body.classList.toggle('lss-thirdperson', _tp); } catch (_) {}
+  if (!_tp && typeof player !== 'undefined' && player && player.mesh) player.mesh.visible = false;
 }
 function startFreeFlight() {
   LSS.MODE = 'freeflight';
@@ -7287,6 +7300,7 @@ function _vortexYKnobs() {
     join: (K.join != null) ? K.join : 300,          // how far ahead of the ship the arms meet
     armAbility: (K.armAbility != null) ? K.armAbility : 0.85,
     armCore: (K.armCore != null) ? K.armCore : 0.15,
+    armTip: (K.armTip != null) ? K.armTip : 0.18,
   };
 }
 function _vortexGunPair(outA, outB) {
@@ -7330,6 +7344,14 @@ function _getVortexCoreBeamConeGeometry() {
   if (_VORTEX_CORE_BEAM_CONE_GEO) return _VORTEX_CORE_BEAM_CONE_GEO;
   _VORTEX_CORE_BEAM_CONE_GEO = new THREE.CylinderGeometry(1.0, 0.03, 1, 24, 1, true);
   return _VORTEX_CORE_BEAM_CONE_GEO;
+}
+
+let _VORTEX_CORE_ARM_CONE_GEO = null;
+function _getVortexCoreArmConeGeometry() {
+  if (_VORTEX_CORE_ARM_CONE_GEO) return _VORTEX_CORE_ARM_CONE_GEO;
+  const _tip = Math.max(0.01, Math.min(1.0, _vortexYKnobs().armTip));
+  _VORTEX_CORE_ARM_CONE_GEO = new THREE.CylinderGeometry(_tip, 1.0, 1, 24, 1, true);
+  return _VORTEX_CORE_ARM_CONE_GEO;
 }
 
 let _SMOKE_CONE_GEO = null;
@@ -10294,6 +10316,7 @@ renderer.xr.addEventListener('sessionstart', () => {
   _xrSessionLifecycleActive = true;
   _xrEnsureAnimationLoop('sessionstart');
   document.body.classList.add('vr-active');
+  try { if (typeof game !== 'undefined' && game && game.thirdPerson) { game.thirdPerson = false; document.body.classList.remove('lss-thirdperson'); if (typeof player !== 'undefined' && player && player.mesh) player.mesh.visible = false; } } catch (_) {}
   _xrPendingResume = false;
   _xrResumeArmedForWarmup = false;
   if (typeof _xrCancelResumeCountdown === 'function') _xrCancelResumeCountdown();
@@ -34249,14 +34272,15 @@ const _VX_TRC_MID  = new THREE.Vector3();
 function _vxTracerRetract(e, t) {
   if (!e._retractFrom || !e._retractTo) return;
   const DELAY = 0.30;
-  if (t <= DELAY) return;
-  const tt = (t - DELAY) / (1 - DELAY);
+  if (t <= DELAY && !e._anchor) return;
+  const tt = (t <= DELAY) ? 0 : (t - DELAY) / (1 - DELAY);
   const r = tt > 1 ? 1 : tt;
   const retract = r * r * 0.94;
   _VX_TRC_FROM.copy(e._retractFrom).lerp(e._retractTo, retract);
   const newLen = _VX_TRC_FROM.distanceTo(e._retractTo);
   _VX_TRC_MID.copy(_VX_TRC_FROM).add(e._retractTo).multiplyScalar(0.5);
   e.mesh.position.copy(_VX_TRC_MID);
+  if (e._anchor) e.mesh.lookAt(e._retractTo);   // (v38.68) the tube re-aims as its near end moves
   e.mesh.scale.z = newLen;
 }
 
@@ -35639,8 +35663,10 @@ const _PLAYER_LAUNCHER_FRACS = {
   ],
 };
 
-function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
+function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul, anchor) {
   widthScale = widthScale || 1.0;
+  anchor = (anchor && anchor.isObject3D) ? anchor : null;
+  const _fromRef = anchor ? fromVec.clone() : fromVec;
   tailMul = (typeof tailMul === 'number' && tailMul > 0) ? tailMul : 1.0;
   const dir = new THREE.Vector3().subVectors(toVec, fromVec);
   const len = dir.length();
@@ -35659,8 +35685,9 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
     scene.add(mesh);
     game.effects.push({
       mesh, lifetime, age: 0, type,
-      _retractFrom: fromVec,
+      _retractFrom: _fromRef,
       _retractTo:   toVec,
+      _anchor: anchor,
     });
   }
 
@@ -35796,19 +35823,20 @@ function spawnTracer(from, to, color, widthScale) {
     if (_nodes && _nodes.length) {
       const _nearPlayer = from.distanceTo(player.position) < 4 ||
         (typeof camera !== 'undefined' && camera && from.distanceTo(camera.position) < 4);
-      let _atBarrel = false;
+      let _atBarrel = false, _atNode = null;
       if (!_nearPlayer) {
         for (let i = 0; i < _nodes.length && !_atBarrel; i++) {
-          if (from.distanceTo(_nodes[i].getWorldPosition(_cpTracerTmp)) < 4) _atBarrel = true;
+          if (from.distanceTo(_nodes[i].getWorldPosition(_cpTracerTmp)) < 4) { _atBarrel = true; _atNode = _nodes[i]; }
         }
       }
       if (_nearPlayer || _atBarrel) {
         let _o = from;
         if (_nearPlayer) {
           player._muzzleShot = (player._muzzleShot | 0) + 1;
-          _o = _nodes[player._muzzleShot % _nodes.length].getWorldPosition(new THREE.Vector3());
+          _atNode = _nodes[player._muzzleShot % _nodes.length];
+          _o = _atNode.getWorldPosition(new THREE.Vector3());
         }
-        _spawnSingleTracer(_o, to, color, 1.0 * wScale, 0.30);
+        _spawnSingleTracer(_o, to, color, 1.0 * wScale, 0.30, _atNode);   // (v38.68) anchored to the gun
         return;
       }
     }
@@ -35849,7 +35877,17 @@ function spawnTracer(from, to, color, widthScale) {
     _spawnSingleTracer(rightMuzzle, to, color, 0.85 * wScale, 0.30);
     return;
   }
-  _spawnSingleTracer(from, to, color, 1.0 * wScale, 0.4);
+  let _tpAnchor = null;
+  if (typeof game !== 'undefined' && game && game.thirdPerson &&
+      typeof player !== 'undefined' && player && player.mesh && player.mesh.userData) {
+    const _pn = player.mesh.userData.muzzleNodes;
+    if (_pn && _pn.length) {
+      for (let i = 0; i < _pn.length; i++) {
+        if (from.distanceTo(_pn[i].getWorldPosition(_cpTracerTmp)) < 4) { _tpAnchor = _pn[i]; break; }
+      }
+    }
+  }
+  _spawnSingleTracer(from, to, color, 1.0 * wScale, 0.4, _tpAnchor);
 }
 
 const _LIGHTNING_CYL_GEO = new THREE.CylinderGeometry(1, 1, 1, 8, 1, true);
@@ -36836,6 +36874,7 @@ function updateEffects(dt) {
       }
     }
     else if (e.type === 'tracer') {
+      if (e._anchor) { try { e._anchor.getWorldPosition(e._retractFrom); } catch (_) { e._anchor = null; } }
       _vxTracerRetract(e, t);
       if (e._dslvBase == null) e._dslvBase = e.mesh.material.opacity || 0.8;
       e._dslvBase *= (1 - t);
@@ -38692,6 +38731,7 @@ function _commitDeferOneFrame(fn) {
 function commitLoadout(key) {
   if (_commitPending && !game._liveSwap) return;
   if (typeof game !== 'undefined' && game._swapPending && !game._swapStaging && !game._liveSwap) game._swapPending = null;
+  try { _applyStartView(); } catch (_) {}
   if (typeof game !== 'undefined' && game._campPicker) {
     game._campPicker = false;   
     const _selLvl = game.selectedMap;
@@ -38699,7 +38739,7 @@ function commitLoadout(key) {
       _campHubSetup();
     } else if (typeof _selLvl === 'string' && _selLvl.indexOf('camp_') === 0 && MAP_DATA[_selLvl]) {
       LSS.MODE = 'campaign';
-      try { document.body.classList.remove('lss-freeflight'); document.body.classList.remove('lss-thirdperson'); game.thirdPerson = false; } catch (_) {}
+      try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   // (v38.68) the view is _applyStartView's call now, not a forced cockpit
       game.testMode = true; game.raceNoTimer = true; game.currentRound = 1;
       if (!game.campaign) game.campaign = { sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel', unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY', unlockedLegs: (function () { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); })(), nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false }, waveCount: 3, _ended: false, _needFirstWave: false, difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()) };
       try { if (typeof CAMPAIGN_LEGS !== 'undefined') { const _li = CAMPAIGN_LEGS.findIndex(l => l && l.key === _selLvl); if (_li >= 0) game.campaign.sceneIndex = _li; } } catch (_) {}
@@ -44809,7 +44849,7 @@ function updateAbilities(dt) {
       if (_vyPairC) {
         if (!player._vortexCoreArms) {
           player._vortexCoreArms = [0, 1].map(() => {
-            const m = new THREE.Mesh(_getVortexCoreBeamGeometry(), _makeFXMaterial('core_beam'));
+            const m = new THREE.Mesh(_getVortexCoreArmConeGeometry(), _makeFXMaterial('core_beam'));
             if (m.material.uniforms.uPosScale) m.material.uniforms.uPosScale.value = 1.0 / Math.max(1, 95 * 0.15);
             m.frustumCulled = false;
             m.renderOrder = 2;
@@ -45198,14 +45238,15 @@ function spawnDashBoosters(shipMesh, dashWorldDir, color) {
     const _eng = shipMesh.userData && shipMesh.userData.engineMesh;
     if (_eng && _eng.getWorldPosition) _eng.getWorldPosition(from);   
     else shipMesh.getWorldPosition(from);
-    _spawnSingleTracer(from, from.clone().add(back.clone().multiplyScalar(length)), color, 1.0);
+    _spawnSingleTracer(from, from.clone().add(back.clone().multiplyScalar(length)), color, 1.0, undefined,
+                       (_eng && _eng.getWorldPosition) ? _eng : shipMesh);   // (v38.68) anchored
     return;
   }
   for (const plume of plumes) {
     const from = new THREE.Vector3();
     plume.getWorldPosition(from);
     const to = from.clone().add(back.clone().multiplyScalar(length));
-    _spawnSingleTracer(from, to, color, 1.0);
+    _spawnSingleTracer(from, to, color, 1.0, undefined, plume);
   }
 }
 

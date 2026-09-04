@@ -4357,7 +4357,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.67';
+const LSS_BUILD = '38.68';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -9478,10 +9478,31 @@ const _tpDir = new THREE.Vector3();
 const _tpRight = new THREE.Vector3();
 function _toggleThirdPerson() {
   if (typeof LSS === 'undefined') return;   
+  if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return;   // (v38.68) VR has no third person
   game.thirdPerson = !game.thirdPerson;
   try { document.body.classList.toggle('lss-thirdperson', !!game.thirdPerson); } catch (_) {}
+  try { localStorage.setItem('lss_view', game.thirdPerson ? 'tp' : 'fp'); } catch (_) {}   // (v38.68) remembered across matches
   if (!game.thirdPerson && player && player.mesh) player.mesh.visible = false;   
   try { if (window.Overlays && Overlays.banner) Overlays.banner(game.thirdPerson ? 'THIRD PERSON' : 'FIRST PERSON', '(V) to toggle'); } catch (_) {}
+}
+// (v38.68) THIRD PERSON IS THE STARTING VIEW IN EVERY MODE. Owner: "3rd person looks way cooler...
+// it should be the default starting view in all the modes". Until now only free flight and the
+// campaign hub switched it on; classic / hosted / assault / race / campaign legs all launched in
+// the cockpit. commitLoadout (the one launch path every mode goes through) now applies the
+// player's remembered choice, default third person. The V toggle still works mid-match and is
+// what writes the memory (lss_view: 'tp' | 'fp'). VR always launches in the cockpit: the rig
+// ignores thirdPerson while presenting and the ship mesh hides in XR, so a headset never sees
+// the chase camera.
+function _viewPrefThirdPerson() {
+  try { if (localStorage.getItem('lss_view') === 'fp') return false; } catch (_) {}
+  return true;
+}
+function _applyStartView() {
+  if (typeof game === 'undefined' || !game || game._liveSwap) return;   // a live ship swap is not a launch
+  const _tp = _viewPrefThirdPerson() && !(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
+  game.thirdPerson = _tp;
+  try { document.body.classList.toggle('lss-thirdperson', _tp); } catch (_) {}
+  if (!_tp && typeof player !== 'undefined' && player && player.mesh) player.mesh.visible = false;
 }
 // world with no enemies. Endless like campaign (testMode + raceNoTimer) but no bots /
 // no win-gate. Solo for P1 (no co-op handshake). Mirrors startCampaign's solo path.
@@ -14295,7 +14316,7 @@ let _VORTEX_CORE_BEAM_GEO = null;
 // the two weapons into one beam, in front of the ship, and then the core can be the same Y shape
 // but much thicker". Two arms leave the real gun markers and meet at a JOINT a fixed distance
 // ahead of the ship ; the stem carries on from there. Damage is untouched - it stays on the centre
-// aim ray, as it always was. Knobs: window.__vortexY = { on, join, arm }.
+// aim ray, as it always was. Knobs: window.__vortexY = { on, join, arm, armTip }.
 const _vyGunA = new THREE.Vector3(), _vyGunB = new THREE.Vector3();
 const _vyDir = new THREE.Vector3(), _vyJoint = new THREE.Vector3();
 function _vortexYKnobs() {
@@ -14308,6 +14329,9 @@ function _vortexYKnobs() {
     join: (K.join != null) ? K.join : 300,          // how far ahead of the ship the arms meet
     armAbility: (K.armAbility != null) ? K.armAbility : 0.85,
     armCore: (K.armCore != null) ? K.armCore : 0.15,
+    // (v38.68) the core arm's radius AT THE MUZZLE as a fraction of its full radius (0.18 of
+    // 14.25u = ~2.5u, the size of the gun holes); it grows to the full radius at the joint.
+    armTip: (K.armTip != null) ? K.armTip : 0.18,
   };
 }
 function _vortexGunPair(outA, outB) {
@@ -14370,6 +14394,20 @@ function _getVortexCoreBeamConeGeometry() {
   if (_VORTEX_CORE_BEAM_CONE_GEO) return _VORTEX_CORE_BEAM_CONE_GEO;
   _VORTEX_CORE_BEAM_CONE_GEO = new THREE.CylinderGeometry(1.0, 0.03, 1, 24, 1, true);
   return _VORTEX_CORE_BEAM_CONE_GEO;
+}
+
+// (v38.68) The Mega Laser ARMS are cones with the POINT at the gun. Owner: "it's two cylinders
+// that don't look like they are coming out of those small muzzle holes... it should start small
+// and get bigger, more like cone shaped". _vortexSpan aligns local +Y from the joint to the
+// gun, so radiusTop is the muzzle end (armTip of the arm radius) and the full radius sits at
+// the joint where the two arms meet the stem. Built once from the knob; the ability's thin
+// arms keep the straight cylinder.
+let _VORTEX_CORE_ARM_CONE_GEO = null;
+function _getVortexCoreArmConeGeometry() {
+  if (_VORTEX_CORE_ARM_CONE_GEO) return _VORTEX_CORE_ARM_CONE_GEO;
+  const _tip = Math.max(0.01, Math.min(1.0, _vortexYKnobs().armTip));
+  _VORTEX_CORE_ARM_CONE_GEO = new THREE.CylinderGeometry(_tip, 1.0, 1, 24, 1, true);
+  return _VORTEX_CORE_ARM_CONE_GEO;
 }
 
 // (v27) Smoke-trail cone geometry + shader. Shared singletons : the
@@ -18131,6 +18169,10 @@ renderer.xr.addEventListener('sessionstart', () => {
   _xrSessionLifecycleActive = true;
   _xrEnsureAnimationLoop('sessionstart');
   document.body.classList.add('vr-active');
+  // (v38.68) VR has no third person (owner). Whatever view the match launched in, a headset
+  // always gets the cockpit: the rig already ignores thirdPerson while presenting, but the
+  // 3D cockpit and ship-mesh gates read the flag, so it is cleared here.
+  try { if (typeof game !== 'undefined' && game && game.thirdPerson) { game.thirdPerson = false; document.body.classList.remove('lss-thirdperson'); if (typeof player !== 'undefined' && player && player.mesh) player.mesh.visible = false; } } catch (_) {}
   // Pending auto-resume already fired (user manually clicked Enter VR);
   // suppress the countdown so it doesn't double-fire on session end.
   _xrPendingResume = false;
@@ -49503,14 +49545,17 @@ function _vxTracerRetract(e, t) {
   // at full intensity, then the back end peels forward in the last 70%
   // of lifetime, which is when strafe-induced spaghetti would form anyway.
   const DELAY = 0.30;
-  if (t <= DELAY) return;
-  const tt = (t - DELAY) / (1 - DELAY);
+  // (v38.68) an anchored streak is re-placed from frame one (its near end rides the ship);
+  // the retract itself still waits out the delay
+  if (t <= DELAY && !e._anchor) return;
+  const tt = (t <= DELAY) ? 0 : (t - DELAY) / (1 - DELAY);
   const r = tt > 1 ? 1 : tt;
   const retract = r * r * 0.94;
   _VX_TRC_FROM.copy(e._retractFrom).lerp(e._retractTo, retract);
   const newLen = _VX_TRC_FROM.distanceTo(e._retractTo);
   _VX_TRC_MID.copy(_VX_TRC_FROM).add(e._retractTo).multiplyScalar(0.5);
   e.mesh.position.copy(_VX_TRC_MID);
+  if (e._anchor) e.mesh.lookAt(e._retractTo);   // (v38.68) the tube re-aims as its near end moves
   e.mesh.scale.z = newLen;
 }
 
@@ -51851,8 +51896,15 @@ const _PLAYER_LAUNCHER_FRACS = {
 // Internal helper: spawn one tracer streak along (fromVec -> toVec).
 // spawnTracer() routes player-side shots through two calls to this (one
 // from each arm) so the visible beams converge on the target as a triangle.
-function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
+function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul, anchor) {
   widthScale = widthScale || 1.0;
+  // (v38.68) `anchor`: an Object3D (gun marker, engine orb) the near end stays glued to for the
+  // streak's whole life; updateEffects re-reads its world position every frame into this one
+  // shared vector (cloned here so the caller's scratch is never mutated). Owner: "the dash
+  // speed lines don't always come from the engine lights when i'm moving at angles... same
+  // with vortex's laser shot from his muzzles when i'm moving". null = static, as before.
+  anchor = (anchor && anchor.isObject3D) ? anchor : null;
+  const _fromRef = anchor ? fromVec.clone() : fromVec;
   tailMul = (typeof tailMul === 'number' && tailMul > 0) ? tailMul : 1.0;
   const dir = new THREE.Vector3().subVectors(toVec, fromVec);
   const len = dir.length();
@@ -51885,8 +51937,9 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul) {
     // mutated, only read.
     game.effects.push({
       mesh, lifetime, age: 0, type,
-      _retractFrom: fromVec,
+      _retractFrom: _fromRef,
       _retractTo:   toVec,
+      _anchor: anchor,
     });
   }
 
@@ -52081,19 +52134,20 @@ function spawnTracer(from, to, color, widthScale) {
     if (_nodes && _nodes.length) {
       const _nearPlayer = from.distanceTo(player.position) < 4 ||
         (typeof camera !== 'undefined' && camera && from.distanceTo(camera.position) < 4);
-      let _atBarrel = false;
+      let _atBarrel = false, _atNode = null;
       if (!_nearPlayer) {
         for (let i = 0; i < _nodes.length && !_atBarrel; i++) {
-          if (from.distanceTo(_nodes[i].getWorldPosition(_cpTracerTmp)) < 4) _atBarrel = true;
+          if (from.distanceTo(_nodes[i].getWorldPosition(_cpTracerTmp)) < 4) { _atBarrel = true; _atNode = _nodes[i]; }
         }
       }
       if (_nearPlayer || _atBarrel) {
         let _o = from;
         if (_nearPlayer) {
           player._muzzleShot = (player._muzzleShot | 0) + 1;
-          _o = _nodes[player._muzzleShot % _nodes.length].getWorldPosition(new THREE.Vector3());
+          _atNode = _nodes[player._muzzleShot % _nodes.length];
+          _o = _atNode.getWorldPosition(new THREE.Vector3());
         }
-        _spawnSingleTracer(_o, to, color, 1.0 * wScale, 0.30);
+        _spawnSingleTracer(_o, to, color, 1.0 * wScale, 0.30, _atNode);   // (v38.68) anchored to the gun
         return;
       }
     }
@@ -52181,7 +52235,20 @@ function spawnTracer(from, to, color, widthScale) {
   // long-lived wide outer haze collapses — an INCOMING enemy laser was reading as
   // a soft flashlight CONE (the 9-radius haze lingered ~0.42s); a short haze keeps
   // the sharp colored core + thin beam so it reads as a laser BOLT instead.
-  _spawnSingleTracer(from, to, color, 1.0 * wScale, 0.4);
+  // (v38.68) THIRD PERSON, OUR OWN SHOT: fireWeapon put `from` on a real gun marker, so hand that
+  // node over as the anchor and the streak's near end stays on the barrel while the ship keeps
+  // moving. Bot and peer shots stay static (their `from` is never at one of our markers).
+  let _tpAnchor = null;
+  if (typeof game !== 'undefined' && game && game.thirdPerson &&
+      typeof player !== 'undefined' && player && player.mesh && player.mesh.userData) {
+    const _pn = player.mesh.userData.muzzleNodes;
+    if (_pn && _pn.length) {
+      for (let i = 0; i < _pn.length; i++) {
+        if (from.distanceTo(_pn[i].getWorldPosition(_cpTracerTmp)) < 4) { _tpAnchor = _pn[i]; break; }
+      }
+    }
+  }
+  _spawnSingleTracer(from, to, color, 1.0 * wScale, 0.4, _tpAnchor);
 }
 
 // Lightning bolt: jagged line from A to B using a single merged BufferGeometry (1 draw call)
@@ -53472,6 +53539,9 @@ function updateEffects(dt) {
     }
     // --- Tracers: retract muzzle end + fade ---
     else if (e.type === 'tracer') {
+      // (v38.68) anchored streaks follow their gun / engine marker: the ship has moved since the
+      // spawn (a dash carries it 30u a frame), so the near end is re-read from the live node
+      if (e._anchor) { try { e._anchor.getWorldPosition(e._retractFrom); } catch (_) { e._anchor = null; } }
       _vxTracerRetract(e, t);
       // (v36.00) The legacy compounding age-fade now compounds on a TRACKED
       // base value instead of reading material.opacity back, so the
@@ -55854,6 +55924,8 @@ function commitLoadout(key) {
   // rift: measured, the campaign traverse fell back to the one-frame synchronous
   // rebuild with no loading overlay while the zone-rift path staged correctly.
   if (typeof game !== 'undefined' && game._swapPending && !game._swapStaging && !game._liveSwap) game._swapPending = null;
+  // (v38.68) the starting view, before any mode branch below can rely on it
+  try { _applyStartView(); } catch (_) {}
   // (v34.22) PICKER CONFIRM ROUTING. When confirming from the campaign ship-select picker,
   // switch mode + flags for the CHOSEN LEVEL *before* _v12mValidate and *before* getNextMap so
   // the build fork constructs the right world. The chosen SHIP is `key` (independent of level).
@@ -55866,7 +55938,7 @@ function commitLoadout(key) {
     } else if (typeof _selLvl === 'string' && _selLvl.indexOf('camp_') === 0 && MAP_DATA[_selLvl]) {
       // A COMBAT LEG chosen -> start that leg directly in campaign mode.
       LSS.MODE = 'campaign';
-      try { document.body.classList.remove('lss-freeflight'); document.body.classList.remove('lss-thirdperson'); game.thirdPerson = false; } catch (_) {}
+      try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   // (v38.68) the view is _applyStartView's call now, not a forced cockpit
       game.testMode = true; game.raceNoTimer = true; game.currentRound = 1;
       if (!game.campaign) game.campaign = { sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel', unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY', unlockedLegs: (function () { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); })(), nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false }, waveCount: 3, _ended: false, _needFirstWave: false, difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()) };
       // sceneIndex = this leg's position in CAMPAIGN_LEGS so per-leg intro video + boss voice match.
@@ -64400,8 +64472,9 @@ function updateAbilities(dt) {
       if (_vyPairC) {
         if (!player._vortexCoreArms) {
           player._vortexCoreArms = [0, 1].map(() => {
-            // a straight cylinder, not the death-ray cone: an arm is short and must not flare
-            const m = new THREE.Mesh(_getVortexCoreBeamGeometry(), _makeFXMaterial('core_beam'));
+            // (v38.68) a cone with its point at the muzzle (was a straight cylinder, which came out
+            // of the small gun holes at its full 14u radius); wide end at the joint
+            const m = new THREE.Mesh(_getVortexCoreArmConeGeometry(), _makeFXMaterial('core_beam'));
             if (m.material.uniforms.uPosScale) m.material.uniforms.uPosScale.value = 1.0 / Math.max(1, 95 * 0.15);
             m.frustumCulled = false;
             m.renderOrder = 2;
@@ -64930,7 +65003,8 @@ function spawnDashBoosters(shipMesh, dashWorldDir, color) {
     // spawnTracer's camDist<80 cockpit-muzzle zone, which would relocate the
     // trail's start to barrel tips projected IN FRONT of the camera. That made
     // the dash streaks render ahead of the ship instead of trailing behind.
-    _spawnSingleTracer(from, from.clone().add(back.clone().multiplyScalar(length)), color, 1.0);
+    _spawnSingleTracer(from, from.clone().add(back.clone().multiplyScalar(length)), color, 1.0, undefined,
+                       (_eng && _eng.getWorldPosition) ? _eng : shipMesh);   // (v38.68) anchored
     return;
   }
   for (const plume of plumes) {
@@ -64938,7 +65012,9 @@ function spawnDashBoosters(shipMesh, dashWorldDir, color) {
     plume.getWorldPosition(from);
     const to = from.clone().add(back.clone().multiplyScalar(length));
     // _spawnSingleTracer bypasses the cockpit-muzzle relocation (see above).
-    _spawnSingleTracer(from, to, color, 1.0);
+    // (v38.68) anchored to the orb: the near end rides the engine light for the streak's whole
+    // life instead of being left at the spawn point while the dash carries the ship away
+    _spawnSingleTracer(from, to, color, 1.0, undefined, plume);
   }
 }
 
