@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.40';
+const LSS_BUILD = '38.41';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -30960,19 +30960,85 @@ function _cyberNextRound(C) {
   C.started = false; C.over = false; C.lost = false; C.hold = 0; C.deadT = 0;
   C.sector = null; C.prePlaced = false;
   C._aimedAtField = false; C._wingLaunched = false; C._noSpawnSaid = false;
-  C._fieldT = 0; C._cityT = 0;
-  try { _cyberSetup(C); } catch (e) { console.warn('[cyber] setup:', e); }
-  // the pilot comes back - on the deck if this round is theirs to attack (C.placeT + the deck
-  // placer own that), out over the city if it is theirs to defend
+  C._fieldT = 0; C._cityT = 0; C._shellSaidT = 0;
+  // (v38.41) A NEW ROUND IS A FRESH SHIP. The reset rebuilt the carrier, the field and both wings
+  // and never touched the pilot, so last round's damage - and its fires - came along.
   try {
     if (player.shipState === 'dead' && typeof respawnPlayer === 'function') respawnPlayer();
+    if (player.maxHealth) player.health = player.maxHealth;
+    if (player.maxShield != null) player.shield = player.maxShield;
+    player.doomed = false;
+    player.onFireTimer = 0; player.onFireDps = 0; player.onFireSource = null;
+    if (player.overShield != null) player.overShield = 0;
   } catch (_) {}
+  // (v38.41) AND A CITY THAT FORGOT THE GRUDGE. v38.24 flips the traffic's TEAM to whoever is
+  // defending, and that part worked - on the swap they joined the player's side. Their MOOD did
+  // not: aggro is only stood down on the hot/cold transition, and only for a ship that was never
+  // actually shot, because one that was stays permanently angry by design. Right within a round,
+  // wrong across one - the grudge belonged to a side this ship is no longer on.
   try {
-    if (!_cyberPlayerAttacks(C) && typeof HUB_CITY !== 'undefined' && HUB_CITY) {
-      player.position.set(HUB_CITY.x + 1400, (HUB_CITY.padY || 300) + 900, HUB_CITY.z + 1400);
-      if (player.velocity) player.velocity.set(0, 0, 0);
+    for (const e of (game.entities || [])) {
+      if (!e || !e.isHubTraffic) continue;
+      e.aggro = false; e._dmgLog = null; e._fireT = 1.5;
     }
+    C._cityHot = false;
   } catch (_) {}
+  // (v38.41) ...and now the round OPENS the way round 1 does: the swap window, then the lineup,
+  // then the 3-2-1. See _cyberRoundIntro.
+  try { _cyberRoundIntro(C); } catch (e) {
+    console.warn('[cyber] intro:', e);
+    try { _cyberSetup(C); } catch (__) {}
+  }
+}
+// (v38.41) THE BETWEEN-ROUNDS OPENING. The arena modes have had a swap window since v36.36 -
+// ship-select comes back up, a countdown runs alongside it, a chip click STAGES a pick and
+// _applyStagedRoundShip commits it at LAUNCH - and every piece of that is reusable. Cyberpunk
+// city runs its own round loop, so it never got any of it and rounds 2+ blinked from a banner
+// straight into gameplay.
+// The sequence is the mode's own round 1, in order: pick, build, fly the lineup, count down.
+// game.state goes to 'warmup' and game.currentRound to the round number because that pair is
+// exactly what _betweenRoundsPick() tests to decide a chip click stages rather than launches.
+const _CY_SWAP_SECS = 8;
+function _cyberRoundIntro(C) {
+  const K = (typeof window !== 'undefined') ? (window.__cyber || {}) : {};
+  if (K.intro === false) { _cyberSetup(C); return; }      // straight in, the pre-v38.41 behaviour
+  const swap = (typeof K.swapSecs === 'number') ? K.swapSecs : _CY_SWAP_SECS;
+  try { game.state = 'warmup'; } catch (_) {}
+  try { game.currentRound = C.round || 1; } catch (_) {}
+  // ⚠ ARM THE WARMUP CLOCK FIRST. The arena round system flips warmup -> playing the moment
+  // warmupTimer hits 0 with the picker down, and it re-checks every frame - so leaving it at 0
+  // meant the flip landed in the 350 ms between the picker closing and the round being built,
+  // handing the pilot control over their own cinematic. Armed here it covers the whole sequence,
+  // and the build step below trims it to what the lineup actually needs.
+  try { game.warmupTimer = swap + 11; } catch (_) {}
+  try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
+  try { if (typeof launchCountdown === 'function') launchCountdown(swap); } catch (_) {}
+  // launchCountdown owns three things at its LAUNCH beat - the visible timer, the staged-ship
+  // commit and the picker teardown - so the swap window is just that call. The round is built
+  // immediately after it, which is what puts the NEW hull on the deck.
+  //
+  // Order matters for the rest: the state stays 'warmup' through the lineup, because that is what
+  // keeps _cyberFrame holding the wing on the deck instead of letting them fly their own AI out of
+  // the carrier's collision body (the v38.00 lesson). Only the 3-2-1 releases them.
+  setTimeout(() => {
+    let cine = false;
+    try {
+      _cyberSetup(C);
+      try { cine = !!(typeof _cyberCinematic === 'function' && _cyberCinematic(C)); } catch (_) {}
+    } catch (e) { console.warn('[cyber] round build:', e); }
+    // a defender gets no lineup - they are already in the city - so their countdown starts at once
+    const CN = (typeof window !== 'undefined' && window.__cine) ? window.__cine : {};
+    const cineSecs = cine ? (((CN.dur != null) ? CN.dur : 7.0) + 0.3) : 0;
+    // ⚠ DO NOT set game.state here. The arena round system owns the warmup -> playing flip and
+    // makes it the moment warmupTimer hits 0 with the picker down - which, left at 0, fired
+    // BEFORE the lineup had even started and handed the pilot control over their own cinematic.
+    // Give it a timer that covers the lineup and the 3-2-1 and it flips itself, at the right beat,
+    // through the same path round 1 uses (which is also what runs _warmRealCombatFX).
+    try { game.warmupTimer = cineSecs + 3.4; } catch (_) {}   // trimmed now the lineup is known
+    setTimeout(() => {
+      try { if (typeof launchCountdown === 'function') launchCountdown(3); } catch (_) {}
+    }, cineSecs * 1000);
+  }, swap * 1000 + 350);
 }
 function _cyberEnd(C, title, sub, fromNet) {
   if (C.matchOver) return;
