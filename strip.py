@@ -126,6 +126,37 @@ def node_check(lines):
     os.remove(tmp)
     return (r.returncode == 0, (r.stderr or r.stdout).strip()[:500])
 
+def split_game_script(lines):
+    """(v38.64) Lift the game <script> (the block holding _bootLSS) out of the
+    page into its own file. Returns (html_lines, js_lines, build) — or
+    (lines, None, None) when the block can't be located, in which case the
+    page ships single-file exactly as before.
+
+    Why: index.html is served `no-cache` (a build must reach players at
+    once) and the edge strips its validators, so every visit re-downloaded
+    and re-compiled the whole 3 MB script. As lss.js?v=<build> it is a
+    versioned URL: cached immutable for a year, and V8 keeps a code cache
+    for it — neither of which an inline script ever gets."""
+    try:
+        bi = next(i for i, l in enumerate(lines) if "function _bootLSS" in l)
+    except StopIteration:
+        return lines, None, None
+    op = max(i for i in range(bi)
+             if re.search(r"<script(\s|>)", lines[i])
+             and 'type="module"' not in lines[i] and "importmap" not in lines[i])
+    cl = next(i for i in range(bi, len(lines)) if "</script>" in lines[i])
+    if lines[op].strip() != "<script>" or lines[cl].strip() != "</script>":
+        sys.stderr.write("split: game script tags are not on their own lines; shipping inline.\n")
+        return lines, None, None
+    js = lines[op + 1:cl]
+    m = next((re.search(r"const LSS_BUILD = '([^']+)'", l) for l in js
+              if "const LSS_BUILD = '" in l), None)
+    build = m.group(1) if m else "0"
+    tag = ('<script src="lss.js?v=%s"></script>' % build)
+    html = lines[:op] + [tag] + lines[cl + 1:]
+    return html, js, build
+
+
 def main():
     args = sys.argv[1:]
     check_only = False
@@ -152,12 +183,27 @@ def main():
 
     sys.stderr.write(f"src={len(src)} lines, removed {removed} comment lines, "
                      f"out={len(result)} lines. code-identical + node-check OK.\n")
+
+    # (v38.64) SPLIT the game script into lss.js (see split_game_script).
+    html, js, build = split_game_script(result)
+    # SAFETY 3: the split must be lossless — html tags + js body reassemble to
+    # the exact stripped page (nothing dropped, nothing reordered).
+    if js is not None:
+        i = html.index('<script src="lss.js?v=%s"></script>' % build)
+        if html[:i] + ["<script>"] + js + ["</script>"] + html[i + 1:] != result:
+            sys.stderr.write("SAFETY FAIL: the lss.js split is not lossless. Not writing.\n")
+            sys.exit(4)
+
     if check_only:
         sys.stderr.write("--check: not writing index.html.\n")
         return
     nl = "\r\n" if crlf else "\n"
-    open(out, "wb").write(nl.join(result).encode("utf-8"))
-    sys.stderr.write(f"wrote {out}\n")
+    if js is not None:
+        js_path = os.path.join(os.path.dirname(out), "lss.js")
+        open(js_path, "wb").write(nl.join(js).encode("utf-8"))
+        sys.stderr.write(f"wrote {js_path} ({len(js)} lines, build {build})\n")
+    open(out, "wb").write(nl.join(html).encode("utf-8"))
+    sys.stderr.write(f"wrote {out} ({len(html)} lines)\n")
 
 if __name__ == "__main__":
     main()

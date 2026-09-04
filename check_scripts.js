@@ -35,4 +35,18 @@ for (const file of ['index.html', 'index-working.html']) {
   console.log(`${file}: ${n} scripts, ${bad} bad`);
   if (bad) anyBad = true;
 }
+// (v38.64) The shipped game script lives in its own file now (strip.py splits
+// it out of index.html); check it the same way.
+{
+  const js = path.join(__dirname, 'LSS', 'lss.js');
+  if (fs.existsSync(js)) {
+    try {
+      execFileSync('node', ['--check', js], { stdio: 'pipe' });
+      console.log('lss.js: ok');
+    } catch (e) {
+      anyBad = true;
+      console.error(`lss.js FAILED:\n${e.stderr}`);
+    }
+  }
+}
 process.exit(anyBad ? 1 : 0);

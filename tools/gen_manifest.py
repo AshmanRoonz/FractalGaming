@@ -88,7 +88,16 @@ def read_source():
         p = os.path.join(LSS, name)
         if os.path.exists(p):
             with open(p, 'r', encoding='utf-8') as f:
-                return name, f.read()
+                text = f.read()
+            # (v38.64) The shipped build keeps the game script in LSS/lss.js
+            # (strip.py splits it out of index.html); the code tables this
+            # walks live there now. Concatenate so both layouts work.
+            js = os.path.join(LSS, 'lss.js')
+            if name == 'index.html' and os.path.exists(js):
+                with open(js, 'r', encoding='utf-8') as f:
+                    text += '\n' + f.read()
+                name = 'index.html+lss.js'
+            return name, text
     sys.exit('gen_manifest: no LSS/index.html or LSS/index-working.html found')
 
 
