@@ -4357,7 +4357,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.65';
+const LSS_BUILD = '38.66';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -59184,7 +59184,15 @@ function _lssApplyShipRig(dt) {
       // Ship-overlay layer state: on while third-person zoom is engaged;
       // also restores layer 0 on release, across a mid-zoom mesh rebuild,
       // and when the mode is live-switched away from an overlay mode.
-      if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p);
+      // (v38.66) ONLY WHILE THE POST CHAIN THAT DRAWS THE OVERLAY IS THE ONE
+      // RENDERING. The layer-5 trick moves the hull out of the main camera's
+      // sight and relies on renderPostFX's extra pass to draw it back. Between
+      // rounds (roundEnd / matchEnd) renderFrame hands the frame to the cineFX
+      // composer instead, which has no such pass — so zooming in third person
+      // after a round win made the ship vanish. In those frames the hull stays
+      // on layer 0 and zooms the classic way (drawn by the zoomed camera).
+      const _ovOk = !(typeof _shouldUseCineFXFrame === 'function' && _shouldUseCineFXFrame());
+      if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p && _ovOk);
       }
     }
   }
@@ -67864,6 +67872,11 @@ function _hlArcBar(ctx, r, p, pct, col) {
   const border = Math.max(1, th * 0.15);
   const fillW = Math.max(2, th - th * 0.4);
   const span = (a1 - a0 - gap * (n - 1)) / n;
+  // (v38.66) A rect smaller than the bar's own thickness (a 0x0 canvas in a
+  // hidden / just-opened tab, an absurdly small window) put a NEGATIVE radius
+  // into ctx.arc, which THROWS — and the throw aborted the whole HUD draw
+  // and the rest of the frame with it. Nothing to draw at that size anyway.
+  if (!(rad - th / 2 > 0)) return;
   ctx.save();
   for (let i = 0; i < n; i++) {
     const s = (a0 + i * (span + gap)) * _HL_D2R, e = s + span * _HL_D2R;
@@ -67979,6 +67992,7 @@ function _hlSegArc(ctx, r, p, pct, col) {
   const a0 = (p.a0 || 200) + rot, a1 = (p.a1 != null ? p.a1 : 340) + rot;
   const gap = p.gapDeg != null ? p.gapDeg : 2.5;
   const span = (a1 - a0 - gap * (n - 1)) / n;
+  if (!(rad > 0)) return;   // (v38.66) see _hlArcBar — a zero/negative radius throws in ctx.arc
   ctx.save();
   ctx.lineWidth = Math.max(1.5, (p.thick != null ? p.thick : 1.2) * r.vmin);
   ctx.lineCap = 'butt';
@@ -84837,9 +84851,14 @@ function gameLoop(timestamp) {
   // camera (world-space panning — tails rotate correctly as you turn) and
   // the missile flyby/doppler voices track their projectiles.
   if (typeof _audioSpatialFrame === 'function') { try { _audioSpatialFrame(dt); } catch (_) {} }
-  updateHUD();
-  if (!_xrPresentingForOverlays && _vrPerfTier < 1) updateEnemyHealthBars();
-  __pmark('fx+hud+minimap'); 
+  // (v38.66) THE HUD MUST NOT BE ABLE TO KILL THE FRAME LOOP. three's
+  // setAnimationLoop requests the next frame AFTER the callback returns, so
+  // one uncaught throw anywhere in here freezes the game for good. A 2D-canvas
+  // draw error (seen: a negative arc radius from a 0x0 canvas) is worth a
+  // missed HUD frame, not the match. Logged once.
+  try { updateHUD(); } catch (e) { if (!gameLoop._hudErr) { gameLoop._hudErr = 1; console.error('[hud] draw failed (HUD frame skipped):', e); } }
+  if (!_xrPresentingForOverlays && _vrPerfTier < 1) { try { updateEnemyHealthBars(); } catch (e) { if (!gameLoop._hbErr) { gameLoop._hbErr = 1; console.error('[hud] health bars failed:', e); } } }
+  __pmark('fx+hud+minimap');
 
   // Apply screen shake offset to camera (skip during death cam)
   if (!deathCam.active) {

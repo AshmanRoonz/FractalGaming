@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.65';
+const LSS_BUILD = '38.66';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -40923,7 +40923,8 @@ function _lssApplyShipRig(dt) {
         camera.updateProjectionMatrix();
         game._adsDolly = 0;
       }
-      if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p);
+      const _ovOk = !(typeof _shouldUseCineFXFrame === 'function' && _shouldUseCineFXFrame());
+      if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p && _ovOk);
       }
     }
   }
@@ -47166,6 +47167,7 @@ function _hlArcBar(ctx, r, p, pct, col) {
   const border = Math.max(1, th * 0.15);
   const fillW = Math.max(2, th - th * 0.4);
   const span = (a1 - a0 - gap * (n - 1)) / n;
+  if (!(rad - th / 2 > 0)) return;
   ctx.save();
   for (let i = 0; i < n; i++) {
     const s = (a0 + i * (span + gap)) * _HL_D2R, e = s + span * _HL_D2R;
@@ -47246,6 +47248,7 @@ function _hlSegArc(ctx, r, p, pct, col) {
   const a0 = (p.a0 || 200) + rot, a1 = (p.a1 != null ? p.a1 : 340) + rot;
   const gap = p.gapDeg != null ? p.gapDeg : 2.5;
   const span = (a1 - a0 - gap * (n - 1)) / n;
+  if (!(rad > 0)) return;   // (v38.66) see _hlArcBar — a zero/negative radius throws in ctx.arc
   ctx.save();
   ctx.lineWidth = Math.max(1.5, (p.thick != null ? p.thick : 1.2) * r.vmin);
   ctx.lineCap = 'butt';
@@ -60611,9 +60614,9 @@ function gameLoop(timestamp) {
     if (_xrPresentingForOverlays && _xrMinimapTex && _mm.lastTick !== _mmPrev) _xrMinimapTex.needsUpdate = true;
   }
   if (typeof _audioSpatialFrame === 'function') { try { _audioSpatialFrame(dt); } catch (_) {} }
-  updateHUD();
-  if (!_xrPresentingForOverlays && _vrPerfTier < 1) updateEnemyHealthBars();
-  __pmark('fx+hud+minimap'); 
+  try { updateHUD(); } catch (e) { if (!gameLoop._hudErr) { gameLoop._hudErr = 1; console.error('[hud] draw failed (HUD frame skipped):', e); } }
+  if (!_xrPresentingForOverlays && _vrPerfTier < 1) { try { updateEnemyHealthBars(); } catch (e) { if (!gameLoop._hbErr) { gameLoop._hbErr = 1; console.error('[hud] health bars failed:', e); } } }
+  __pmark('fx+hud+minimap');
 
   if (!deathCam.active) {
     camera.position.x += game.shakeOffset.x;
