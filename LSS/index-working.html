@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.43';
+const LSS_BUILD = '38.44';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -57857,15 +57857,19 @@ function _ghostHullKnobs() {
     // bloom. The range is compressed from both ends: panels come UP a little, edges come DOWN,
     // and the additive term is cut to about a third. Same shell, narrower spread.
     //   pre-v38.36:  core 0.09, rim 0.44, glow 0.85
+    // (v38.44) and down again on the two fresnel terms, which ARE the bright parts - the flat
+    // panels sit at `core` and were never the complaint, so core holds at 0.13. Dropping it would
+    // thin the shell rather than dim it.
+    //   pre-v38.44:  rim 0.32, glow 0.30
     core: (typeof G.core === 'number') ? G.core : 0.13,
-    rim: (typeof G.rim === 'number') ? G.rim : 0.32,
+    rim: (typeof G.rim === 'number') ? G.rim : 0.24,       // (v38.44) 0.32 -> 0.24
     mix: (typeof G.mix === 'number') ? G.mix : 0.30,
     // (v37.66) owner: "less flicker" - 1 was the monsters' full hologram jitter, 0.25 leaves a
     // trace of life in the shell. 0 = perfectly steady.
     flicker: (typeof G.flicker === 'number') ? G.flicker : 0.25,
     // (v37.66) how hard the rim ADDS light. Against a night city or dark water the additive
     // term was what made the shell dominate the view, not its alpha.
-    glow: (typeof G.glow === 'number') ? G.glow : 0.30,
+    glow: (typeof G.glow === 'number') ? G.glow : 0.14,     // (v38.44) 0.30 -> 0.14
     // (v37.66) draw the shell after every other transparent thing. The hub water plane FOLLOWS the
     // ship and the city's glass sorts by its own bounding centre, so both tied with the hull on
     // distance and won the toss about half the time (owner: "the water and the city cut through it").
@@ -57929,11 +57933,26 @@ function _ghostSeatWanted() {
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
   return _ghostHullKnobs().on;
 }
+// (v38.44) The same test WITHOUT the shell's on/off knob: "is the pilot's own seat the view".
+// The nav-light dim follows the seat, not the shell, and it has to be re-evaluated from a place
+// that runs on every frame in every view - the rig's own else-branch is the "no cockpit marker"
+// case, not third person, so a restore hung there never fired and the bead stayed dim in the
+// chase camera.
+function _seatViewLive() {
+  if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
+  const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
+  if (!game._cockpit3dLive) return false;
+  if (game.thirdPerson && !_vr) return false;
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
+  return true;
+}
 function _ghostHullSync() {
   const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
   if (!mesh) return;
   // (v38.34) the canopy is live-tunable from the seat: a handful of material writes on one hull
   try { _glassSync(mesh); } catch (_) {}
+  // (v38.44) ...and the pilot's own running lights are gentle from inside, full strength out
+  try { _navLightSeatDim(mesh, _seatViewLive()); } catch (_) {}
   if (_ghostSeatWanted()) {
     const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
     const prev = _ghostHullSync._t || now;
@@ -58021,6 +58040,39 @@ window.__ghostHullRefresh = function () {
     } });
   } catch (_) {}
 };
+// (v38.44) THE PILOT'S OWN RUNNING LIGHTS, SEEN FROM INSIDE. The port and starboard beads are
+// MeshBasicMaterial with toneMapped:false on a deliberately hot base colour, so the bloom takes
+// them at any distance - correct for a light another ship is meant to spot, far too much from
+// eighty units away inside your own hull. This dims the LOCAL player's pair while the seat is
+// live and puts them back the instant it is not, so every other ship and every outside view is
+// untouched.
+// Opacity alone would not do it: a toneMapped:false colour still blooms, so the colour is scaled
+// as well, and depthWrite goes off so it reads as a glow behind the shell rather than a bead in
+// front of it. The `transparent` flag is written ONLY on the transition - flipping it recompiles
+// the material, and this runs every frame.
+function _navLightSeatDim(mesh, on) {
+  const ud = mesh && mesh.userData;
+  if (!ud) return;
+  const K = (typeof window !== 'undefined' && window.__cockpit) ? window.__cockpit : {};
+  const dim = (typeof K.navDim === 'number') ? K.navDim : 0.16;
+  for (const m of [ud.runningLightPortMat, ud.runningLightStarMat]) {
+    if (!m) continue;
+    if (m.userData._navBaseCol == null) {
+      m.userData._navBaseCol = m.color.getHex();
+      m.userData._navBaseOp = (m.opacity != null) ? m.opacity : 1;
+    }
+    if (on) {
+      if (!m.transparent) { m.transparent = true; m.depthWrite = false; m.needsUpdate = true; }
+      const _o = Math.max(0, Math.min(1, dim));
+      if (m.opacity !== _o) m.opacity = _o;
+      m.color.setHex(m.userData._navBaseCol).multiplyScalar(Math.max(0.05, _o * 1.6));
+    } else if (m.transparent) {
+      m.transparent = false; m.depthWrite = true; m.needsUpdate = true;
+      m.opacity = m.userData._navBaseOp;
+      m.color.setHex(m.userData._navBaseCol);
+    }
+  }
+}
 function _cockpit3dWanted() {
   const W = window.__cockpit;
   if (W && typeof W.on === 'boolean') return W.on;
