@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.48';
+const LSS_BUILD = '38.49';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -25288,7 +25288,6 @@ function _swRippleTick(dt) {
       du.uRippleCenter.value.set(R.center.x, R.center.y);
       du.uRippleBounds.value = R.bounds;
       if (_swU) { if (_swU.uTime) du.uTime.value = _swU.uTime.value; if (_swU.uCam) du.uCam.value.copy(_swU.uCam.value); }
-      try { _swFeedShipLight(dm.material); } catch (_) {}   // (v38.47) the headlight's pool
       const W2 = window.__water || {};
       if (W2.disp !== undefined) du.uDispScale.value = W2.disp;
       if (W2.gain !== undefined) du.uGain.value = W2.gain;
@@ -26041,14 +26040,7 @@ function _swBuildHubWaterDispGet(WL) {
         uReflFloor: { value: 0.24 }, uSkyDark: { value: 0.0 }, uReflHot: { value: 0.75 },   
 
         uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 }, uShoreFoam: { value: 0.0 },   
-        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 },
-        // (v38.47) THE SHIP'S HEADLIGHT. This material has no lights block - it merges only
-        // UniformsLib.fog - so no scene light has ever touched the water. xyz is the lamp in
-        // world space, w its 0..1 strength ; the pool is drawn analytically in the fragment.
-        uShipL: { value: new THREE.Vector4(0, 0, 0, 0) },
-        uShipLDir: { value: new THREE.Vector3(0, 0, -1) },
-        uShipLCol: { value: new THREE.Color(0xffe8c4) },
-        uShipLRange: { value: 2400.0 }, uShipLStr: { value: 1.0 } }   
+        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 } }   
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
@@ -26084,11 +26076,6 @@ function _swBuildHubWaterDispGet(WL) {
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uSkyDark; uniform float uReflHot; uniform float uFoamLod;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
       'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',   
-      // (v38.48) ⚠ THESE DECLARATIONS ARE THE WHOLE FIX. v38.47 added the ship-light uniforms
-      // to the material and the term to the body but never declared them here - a ShaderMaterial
-      // needs both - so the fragment failed to COMPILE and the water stopped drawing entirely
-      // (owner: "that broke the water ... can't see it much at all anymore").
-      'uniform vec4 uShipL; uniform vec3 uShipLDir; uniform vec3 uShipLCol; uniform float uShipLRange; uniform float uShipLStr;',
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
@@ -26181,25 +26168,6 @@ function _swBuildHubWaterDispGet(WL) {
       '  float foamVis = max(lod, fIn * edgeFade);',                                                
       '  float shoreFoam = (1.0 - smoothstep(0.0, 0.16, depthShape)) * (0.35 + 0.65 * spd) * foamVis;',
       '  c = mix(c, foamCol, shoreFoam * 0.28 * uShoreFoam);',
-      // (v38.47) THE HEADLIGHT'S POOL. Falloff to the lamp's own range, shaped two ways: by the
-      // CONE, because a spotlight throws an ellipse ahead of the ship rather than a disc under it,
-      // and by lambert against the displaced normal, so the crests catch it and the troughs stay
-      // dark - which is what makes it read as light on moving water instead of a decal.
-      // Added before the horizon fade so distant water still washes out to the fog.
-      '  if (uShipL.w > 0.001) {',
-      '    vec3 _sl = uShipL.xyz - vWP;',
-      '    float _sd = length(_sl);',
-      // cubic, not square: at the lamp's own range a linear-ish falloff still had 0.84 of full
-      // strength 200 units out, which is a floodlit lake rather than a headlight on it
-      '    float _att = clamp(1.0 - _sd / max(1.0, uShipLRange), 0.0, 1.0);',
-      '    _att = _att * _att * _att;',
-      '    vec3 _sn = _sl / max(_sd, 0.001);',
-      '    float _cone = pow(clamp(dot(-_sn, uShipLDir), 0.0, 1.0), 5.0);',
-      '    float _lam = clamp(dot(N, _sn), 0.0, 1.0);',
-      // 0.22 keeps uShipLStr readable as "1.0 = the default look" while the term itself stays a
-      // highlight rather than a second sun. The whole thing is additive on top of the reflection.
-      '    c += uShipLCol * (_att * (0.30 + 0.70 * _cone) * (0.30 + 0.70 * _lam)) * uShipL.w * uShipLStr * 0.22;',
-      '  }',
       '  { float _whd = length(vWP.xz - uCam.xz); float _whf = smoothstep(uWHorizA, uWHorizB, _whd) * uWHorizStr; c = mix(c, fogColor, clamp(_whf, 0.0, 1.0)); }',
       '  float aGraze = 0.93 * (1.0 - uGrazeAlpha * smoothstep(0.55, 0.95, graze));',
       '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',
@@ -26886,41 +26854,6 @@ window.__pwaterApply = function () {
     return 'pwater=' + (window.__pwater === true) + ' : overlay rebuilt';
   } catch (e) { try { console.warn('[pwater] rebuild failed', e); } catch (_) {} return 'failed: ' + (e && e.message); }
 };
-// (v38.47) Hand the water the player's headlight. Called from the water tick, which already
-// rewrites this material's uniforms every frame - so this is four writes, not new machinery.
-const _wShipLDir = new THREE.Vector3();
-function _swFeedShipLight(mat) {
-  if (!mat || !mat.uniforms || !mat.uniforms.uShipL) return;
-  const U = mat.uniforms;
-  const K = (typeof window !== 'undefined' && window.__water && window.__water.shipLight)
-    ? window.__water.shipLight : null;
-  let lit = 0;
-  try {
-    const S = (typeof _SHIPL !== 'undefined') ? _SHIPL : null;
-    const H = S && S.head;
-    // (v38.48) OPT-IN. v38.47 shipped this on and broke the water - the uniforms were never
-    // declared in the fragment, so the shader would not compile and the surface stopped drawing.
-    // The declarations are fixed, but the pool itself has still never been judged over the lake,
-    // so it stays off until it has been: with `on` unset this writes w = 0 and the water is
-    // exactly the surface it was before v38.47.
-    //   window.__water.shipLight = { on: true }            // turn the pool on
-    //   window.__water.shipLight = { on: true, str: 2 }    // and brighter
-    if (H && K && K.on === true) {
-      // hCur is the smoothed candela the rig is actually driving the lamp at ; 2200 is its
-      // documented full-strength value, so this is "how on is the headlight, 0..1"
-      lit = Math.max(0, Math.min(1, (S.hCur || 0) / 2200));
-      if (lit > 0.001) {
-        U.uShipL.value.set(H.position.x, H.position.y, H.position.z, lit);
-        _wShipLDir.copy(H.target.position).sub(H.position);
-        if (_wShipLDir.lengthSq() > 1e-6) U.uShipLDir.value.copy(_wShipLDir.normalize());
-        U.uShipLCol.value.copy(H.color);
-        U.uShipLRange.value = (K && K.range != null) ? K.range : (H.distance || 2400);
-        U.uShipLStr.value = (K && K.str != null) ? K.str : 1.0;
-      }
-    }
-  } catch (_) { lit = 0; }
-  if (lit <= 0.001) U.uShipL.value.w = 0;
-}
 function _swUpdateHubWater() {
   const w = game._hubWater; if (!w) return;
   // (v33.69) PHASE 1 : when the displaced-water surface is active, keep the flat Reflector HIDDEN so the two

@@ -4211,7 +4211,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.48';
+const LSS_BUILD = '38.49';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -20056,7 +20056,6 @@ function _swRippleTick(dt) {
       du.uRippleCenter.value.set(R.center.x, R.center.y);
       du.uRippleBounds.value = R.bounds;
       if (_swU) { if (_swU.uTime) du.uTime.value = _swU.uTime.value; if (_swU.uCam) du.uCam.value.copy(_swU.uCam.value); }
-      try { _swFeedShipLight(dm.material); } catch (_) {}   // (v38.47) the headlight's pool
       const W2 = window.__water || {};
       if (W2.disp !== undefined) du.uDispScale.value = W2.disp;
       if (W2.gain !== undefined) du.uGain.value = W2.gain;
@@ -20735,11 +20734,7 @@ function _swBuildHubWaterDispGet(WL) {
         uReflFloor: { value: 0.24 }, uSkyDark: { value: 0.0 }, uReflHot: { value: 0.75 },   
 
         uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 }, uShoreFoam: { value: 0.0 },   
-        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 },
-        uShipL: { value: new THREE.Vector4(0, 0, 0, 0) },
-        uShipLDir: { value: new THREE.Vector3(0, 0, -1) },
-        uShipLCol: { value: new THREE.Color(0xffe8c4) },
-        uShipLRange: { value: 2400.0 }, uShipLStr: { value: 1.0 } }   
+        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 } }   
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
@@ -20775,7 +20770,6 @@ function _swBuildHubWaterDispGet(WL) {
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uSkyDark; uniform float uReflHot; uniform float uFoamLod;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
       'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',   
-      'uniform vec4 uShipL; uniform vec3 uShipLDir; uniform vec3 uShipLCol; uniform float uShipLRange; uniform float uShipLStr;',
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
@@ -20837,16 +20831,6 @@ function _swBuildHubWaterDispGet(WL) {
       '  float foamVis = max(lod, fIn * edgeFade);',                                                
       '  float shoreFoam = (1.0 - smoothstep(0.0, 0.16, depthShape)) * (0.35 + 0.65 * spd) * foamVis;',
       '  c = mix(c, foamCol, shoreFoam * 0.28 * uShoreFoam);',
-      '  if (uShipL.w > 0.001) {',
-      '    vec3 _sl = uShipL.xyz - vWP;',
-      '    float _sd = length(_sl);',
-      '    float _att = clamp(1.0 - _sd / max(1.0, uShipLRange), 0.0, 1.0);',
-      '    _att = _att * _att * _att;',
-      '    vec3 _sn = _sl / max(_sd, 0.001);',
-      '    float _cone = pow(clamp(dot(-_sn, uShipLDir), 0.0, 1.0), 5.0);',
-      '    float _lam = clamp(dot(N, _sn), 0.0, 1.0);',
-      '    c += uShipLCol * (_att * (0.30 + 0.70 * _cone) * (0.30 + 0.70 * _lam)) * uShipL.w * uShipLStr * 0.22;',
-      '  }',
       '  { float _whd = length(vWP.xz - uCam.xz); float _whf = smoothstep(uWHorizA, uWHorizB, _whd) * uWHorizStr; c = mix(c, fogColor, clamp(_whf, 0.0, 1.0)); }',
       '  float aGraze = 0.93 * (1.0 - uGrazeAlpha * smoothstep(0.55, 0.95, graze));',
       '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',
@@ -21393,30 +21377,6 @@ window.__pwaterApply = function () {
     return 'pwater=' + (window.__pwater === true) + ' : overlay rebuilt';
   } catch (e) { try { console.warn('[pwater] rebuild failed', e); } catch (_) {} return 'failed: ' + (e && e.message); }
 };
-const _wShipLDir = new THREE.Vector3();
-function _swFeedShipLight(mat) {
-  if (!mat || !mat.uniforms || !mat.uniforms.uShipL) return;
-  const U = mat.uniforms;
-  const K = (typeof window !== 'undefined' && window.__water && window.__water.shipLight)
-    ? window.__water.shipLight : null;
-  let lit = 0;
-  try {
-    const S = (typeof _SHIPL !== 'undefined') ? _SHIPL : null;
-    const H = S && S.head;
-    if (H && K && K.on === true) {
-      lit = Math.max(0, Math.min(1, (S.hCur || 0) / 2200));
-      if (lit > 0.001) {
-        U.uShipL.value.set(H.position.x, H.position.y, H.position.z, lit);
-        _wShipLDir.copy(H.target.position).sub(H.position);
-        if (_wShipLDir.lengthSq() > 1e-6) U.uShipLDir.value.copy(_wShipLDir.normalize());
-        U.uShipLCol.value.copy(H.color);
-        U.uShipLRange.value = (K && K.range != null) ? K.range : (H.distance || 2400);
-        U.uShipLStr.value = (K && K.str != null) ? K.str : 1.0;
-      }
-    }
-  } catch (_) { lit = 0; }
-  if (lit <= 0.001) U.uShipL.value.w = 0;
-}
 function _swUpdateHubWater() {
   const w = game._hubWater; if (!w) return;
   if (typeof window !== 'undefined' && window.__waterDisp && !game._swSubmerged &&
