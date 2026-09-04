@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.70';
+const LSS_BUILD = '38.71';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10041,7 +10041,36 @@ try {
                      'ms of XR session end ; suppressing reload, waiting for restore');
         return;
       }
-      console.warn('[context-loss] WebGL context lost ; recovery overlay + reload in 3s');
+      console.warn('[context-loss] WebGL context lost ; recovery overlay + reload in 6s');
+      let _diagText = '', _stepMsg = '';
+      try {
+        const _d = { t: Date.now(), up: Math.round(performance.now() / 1000), path: location.pathname,
+                     mobile: !!(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE), dpr: window.devicePixelRatio,
+                     win: [window.innerWidth, window.innerHeight],
+                     mode: (typeof LSS !== 'undefined' && LSS && LSS.MODE) || null,
+                     state: (typeof game !== 'undefined' && game) ? game.state : null,
+                     tp: (typeof game !== 'undefined' && game) ? !!game.thirdPerson : null,
+                     fx: (typeof window.__postFXInfo === 'function') ? window.__postFXInfo() : null,
+                     mem: (renderer.info && renderer.info.memory) ? { geo: renderer.info.memory.geometries, tex: renderer.info.memory.textures } : null,
+                     draw: (renderer.info && renderer.info.render) ? { calls: renderer.info.render.calls, tris: renderer.info.render.triangles } : null,
+                     jsHeapMB: (performance.memory && performance.memory.usedJSHeapSize) ? Math.round(performance.memory.usedJSHeapSize / 1048576) : null };
+        let _hist = [];
+        try { _hist = JSON.parse(localStorage.getItem('lss_ctxlost') || '[]') || []; } catch (_) {}
+        if (!Array.isArray(_hist)) _hist = [];
+        _hist.push(_d); while (_hist.length > 3) _hist.shift();
+        try { localStorage.setItem('lss_ctxlost', JSON.stringify(_hist)); } catch (_) {}
+        const _lvl = (typeof QUALITY !== 'undefined' && QUALITY) ? QUALITY.level : null;
+        const _down = (_lvl === 'mega') ? 'ultra' : (_lvl === 'ultra') ? 'high' : null;
+        if (_down) {
+          try { localStorage.setItem('lss_quality', _down); } catch (_) {}
+          _stepMsg = ' Reloading at ' + _down.toUpperCase() + ' quality (was ' + _lvl.toUpperCase() + '); Settings can put it back.';
+        }
+        const _fx = (_d.fx && typeof _d.fx === 'object') ? _d.fx : null;
+        _diagText = (_lvl || '?') + ' | ' + (_d.mobile ? 'mobile' : 'desktop') + ' dpr ' + (+_d.dpr).toFixed(2) +
+          (_fx ? ' | canvas ' + _fx.canvas.join('x') + ' | scene ' + _fx.scene[0] + 'x' + _fx.scene[1] + ' s' + _fx.scene[3] + ' | bloom ' + _fx.bloom.join('x') : '') +
+          (_d.mem ? ' | tex ' + _d.mem.tex + ' geo ' + _d.mem.geo : '') + (_d.draw ? ' | calls ' + _d.draw.calls : '') +
+          ' | ' + (_d.mode || '') + '/' + (_d.state || '') + (_d.tp ? ' 3p' : ' 1p') + ' | up ' + _d.up + 's';
+      } catch (_) {}
       try {
         let overlay = document.getElementById('lss-context-lost-overlay');
         if (!overlay) {
@@ -10057,14 +10086,15 @@ try {
             '<div style="font-size:14px;opacity:0.85;max-width:540px;line-height:1.6;">' +
               'The graphics process crashed (usually transient: VRAM pressure, driver hiccup, ' +
               'or a previous Chrome tab still holding resources). Reloading in <span ' +
-              'id="lss-context-lost-counter" style="color:#ffaa00;font-weight:bold;">3</span>s.' +
+              'id="lss-context-lost-counter" style="color:#ffaa00;font-weight:bold;">6</span>s.' + _stepMsg +
             '</div>' +
+            '<div id="lss-context-lost-diag" style="font-size:11px;opacity:0.8;max-width:600px;line-height:1.5;word-break:break-word;">' + _diagText + '</div>' +
             '<div style="font-size:11px;opacity:0.55;letter-spacing:2px;">' +
               'If this keeps happening: close other browser tabs / GPU-heavy apps and try again.' +
             '</div>';
           document.body.appendChild(overlay);
         }
-        let _t = 3;
+        let _t = 6;   // (v38.71) long enough to photograph the line above
         const _tick = () => {
           const c = document.getElementById('lss-context-lost-counter');
           if (c) c.textContent = String(_t);
@@ -10081,6 +10111,13 @@ try {
     _glCanvas.addEventListener('webglcontextrestored', () => {
       console.log('[context-loss] WebGL context restored');
     }, false);
+    try {
+      const _h = JSON.parse(localStorage.getItem('lss_ctxlost') || '[]') || [];
+      if (Array.isArray(_h) && _h.length) {
+        window.__lastContextLoss = _h[_h.length - 1];
+        console.warn('[context-loss] previous session lost the GPU context:', JSON.stringify(_h[_h.length - 1]));
+      }
+    } catch (_) {}
   }
 } catch (_) {}
 
@@ -12573,14 +12610,45 @@ try {
   }
 } catch (e) {}
 
+const _ssDyn = { scale: 1.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0 };
+function _lssSupersampleActive() {
+  try {
+    return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega()) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
+           !(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
+  } catch (_) { return false; }
+}
+function _lssSupersampleTick(ts) {
+  const S = _ssDyn;
+  if (!S.last) { S.last = ts; return; }
+  const dt = ts - S.last; S.last = ts;
+  if (!_lssSupersampleActive()) return;
+  if (!(dt >= 2 && dt <= 250)) return;                 // a tab switch or a load hitch is not a sample
+  if (dt < S.minDt) {
+    S.minDt = dt;
+    const hz = 1000 / dt;
+    S.hz = [60, 72, 75, 90, 100, 120, 144, 165, 240].reduce((a, b) => (Math.abs(b - hz) < Math.abs(a - hz)) ? b : a);
+  }
+  S.ema = S.ema ? S.ema + (dt - S.ema) * 0.08 : dt;
+  S.acc += dt; if (S.acc < 500) return; S.acc = 0;   // decide twice a second
+  const period = 1000 / S.hz;
+  let sc = S.scale;
+  if (S.ema > period * 1.10) {
+    if (sc > 0) { sc = Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
+  } else if (S.ema <= period * 1.02) {
+    if (S.hold > 0) S.hold -= 0.5; else if (sc < 1) sc = Math.min(1, sc + 0.05);
+  }
+  if (sc !== S.scale) { S.scale = sc; S.steps++; try { if (typeof _doPostFXResize === 'function') _doPostFXResize(); } catch (_) {} }
+}
 function _getBloomRTSize() {
   const cap = (typeof QUALITY !== 'undefined' && typeof QUALITY.bloomDPR === 'function')
               ? QUALITY.bloomDPR() : 1.0;
   let dpr = Math.min(window.devicePixelRatio, cap);
   try {
     if (typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega()) &&
+        !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
         typeof renderer !== 'undefined' && renderer && renderer.getPixelRatio) {
-      dpr = Math.max(dpr, renderer.getPixelRatio());
+      const _base = dpr, _super = renderer.getPixelRatio();
+      if (_super > _base) dpr = _base + (_super - _base) * Math.max(0, Math.min(1, _ssDyn.scale));   // (v38.71) adaptive
       const _px = window.innerWidth * window.innerHeight * dpr * dpr;
       const _MAXPX = 16e6;
       if (_px > _MAXPX) dpr *= Math.sqrt(_MAXPX / _px);
@@ -12597,7 +12665,7 @@ const _rtSceneOpts = {
 try {
   const _bootQuality = localStorage.getItem('lss_quality') || 'high';
   const _isWebGL2 = renderer.capabilities && renderer.capabilities.isWebGL2;
-  if (_bootQuality === 'ultra' && _isWebGL2) {
+  if (_bootQuality === 'ultra' && _isWebGL2 && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) {   // (v38.71) no MSAA target on phones
     _rtSceneOpts.samples = 2;
   }
 } catch (_) {}
@@ -12609,12 +12677,13 @@ postFX.rtScene = new THREE.WebGLRenderTarget(
 function _lssSyncSceneRTSamples() {
   if (typeof postFX === 'undefined' || !postFX || !postFX.rtScene) return;
   const _isWebGL2 = renderer.capabilities && renderer.capabilities.isWebGL2;
-  const want = (QUALITY.level === 'ultra' && _isWebGL2) ? 2 : 0;
+  const want = (QUALITY.level === 'ultra' && _isWebGL2 && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 2 : 0;   // (v38.71) phones: never
   if ((postFX.rtScene.samples | 0) === want) return;
   const old = postFX.rtScene;
   postFX.rtScene = new THREE.WebGLRenderTarget(old.width, old.height, Object.assign({}, _rtSceneOpts, { samples: want }));
   try { old.dispose(); } catch (_) {}
 }
+if (typeof window !== 'undefined') window.__ss = _ssDyn;   // (v38.71) adaptive supersample state
 if (typeof window !== 'undefined') window.__postFXInfo = function () {
   try {
     return { level: QUALITY.level, pixelRatio: renderer.getPixelRatio(),
@@ -40944,6 +41013,7 @@ function _lssApplyShipRig(dt) {
     if (!_zVr) {
       const z = game._adsZoom;
       const _z3p = !!(game.thirdPerson && player && player.mesh && player.mesh.visible);
+      if (_z3p && game._adsOvWarmMesh !== player.mesh && (game.state === 'warmup' || player.shipState === 'spawning')) _adsOverlayPrewarm();
       if (_zm === 'classic') {
         const _ct = _zAim ? 65 : _zBase;
         camera.fov += (_ct - camera.fov) * Math.min(1, (dt || 0.016) * 12);
@@ -41006,6 +41076,36 @@ function _adsShipOverlaySet(on) {
   }
 }
 let _adsOvCam = null;
+let _adsOvWarmRT = null;
+function _adsOverlayPrewarm() {
+  try {
+    const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
+    if (!mesh || !game || game._adsOvWarmMesh === mesh) return;
+    if (typeof renderer === 'undefined' || !renderer || (renderer.xr && renderer.xr.isPresenting)) return;
+    game._adsOvWarmMesh = mesh;
+    if (!_adsOvCam) { _adsOvCam = new THREE.PerspectiveCamera(90, 1, 1, 100); _adsOvCam.layers.set(5); }
+    if (!_adsOvWarmRT) _adsOvWarmRT = new THREE.WebGLRenderTarget(8, 8);
+    const wasOn = !!game._adsOvOn, wasVis = mesh.visible;
+    const prevRT = renderer.getRenderTarget(), prevBG = scene.background, prevAC = renderer.autoClear;
+    try {
+      if (!wasOn) mesh.traverse((o) => { o.layers.set(5); });
+      mesh.visible = true;
+      _adsOvCam.fov = camera.fov; _adsOvCam.aspect = camera.aspect; _adsOvCam.near = camera.near; _adsOvCam.far = camera.far;
+      _adsOvCam.position.copy(camera.position); _adsOvCam.quaternion.copy(camera.quaternion);
+      _adsOvCam.updateProjectionMatrix(); _adsOvCam.updateMatrixWorld(true);
+      scene.background = null;
+      renderer.setRenderTarget(_adsOvWarmRT);
+      renderer.autoClear = true;
+      renderer.render(scene, _adsOvCam);
+    } finally {
+      renderer.setRenderTarget(prevRT);
+      scene.background = prevBG;
+      renderer.autoClear = prevAC;
+      mesh.visible = wasVis;
+      if (!wasOn) mesh.traverse((o) => { o.layers.set(0); });
+    }
+  } catch (_) {}
+}
 function _adsOverlayRender() {
   try {
     if (!game || !game._adsOvOn || typeof renderer === 'undefined' || !renderer) return;
@@ -60291,6 +60391,7 @@ function gameLoop(timestamp) {
   __pmark(); 
   if (typeof _tickFlatCombatPerf === 'function') _tickFlatCombatPerf(game.deltaTime);
 
+  try { _lssSupersampleTick(timestamp); } catch (_) {}   // (v38.71) adaptive supersample
   if (input.showFps) {
     if (!game._fpsSamples) { game._fpsSamples = new Float32Array(60); game._fpsIdx = 0; game._fpsLastWriteMs = 0; }
     const dtMs = Math.max(0.5, timestamp - (game._fpsLastTimestamp || timestamp));
