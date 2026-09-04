@@ -4285,7 +4285,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.49';
+const LSS_BUILD = '38.50';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -26391,6 +26391,13 @@ function _swBuildHubWater(T) {
       // triangles (the disp plane is 768x768 = 1,179,648 of them) at 98 draws either way.
       // The main render list was already built by projectObject before any of these draws,
       // so toggling `visible` here can never hide them from the MAIN pass.
+      // (v38.50) THE PLAYER'S HEADLIGHT CONE, FOR THE MIRROR ONLY. It is posed every frame the
+      // lamp is on but only shown in third person, because in first person you are inside the
+      // volume. The reflection is a different camera outside it, so the beam belongs there - this
+      // is what puts your own headlight on the water without putting it in your face.
+      const _cp = (typeof _SHIPL !== 'undefined' && _SHIPL) ? _SHIPL.coneP : null;
+      const _cpWas = !!(_cp && _cp.visible);
+      if (_cp && _cp.userData && _cp.userData._lit && !_cpWas) _cp.visible = true;
       const _wD = _hubWaterDisp, _wO = game._hubWaterOverlay, _wU = game._hubWaterUnder;
       const _wDv = !!(_wD && _wD.visible), _wOv = !!(_wO && _wO.visible), _wUv = !!(_wU && _wU.visible);
       if (_wDv) _wD.visible = false;
@@ -26401,6 +26408,7 @@ function _swBuildHubWater(T) {
         if (_wDv) _wD.visible = true;
         if (_wOv) _wO.visible = true;
         if (_wUv) _wU.visible = true;
+        if (_cp) _cp.visible = _cpWas;   // (v38.50) back to the direct-view rule
         if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
         if (_ghostWas) { try { _ghostHullApply(ship); } catch (_) {} }
       }
@@ -40859,13 +40867,23 @@ function _shipLightsFrame() {
   if (mP) {
     let pT = 0;
     const xr = (typeof isXRPresenting === 'function') && isXRPresenting();
-    if (flying && game.thirdPerson && !xr && input.headlight !== false &&
+    // (v38.50) LIT AND SHOWN ARE DIFFERENT NOW. Owner: "i can see laser fire reflection, so why
+    // not the ship headlight?" - because a tracer is GEOMETRY and the planar mirror reflects
+    // geometry, while a light is not. There IS cone geometry for the beam, but the player's own
+    // was gated on third person, so in the seat it was never drawn at all and the mirror had
+    // nothing of it to show. Other ships' cones are drawn in both views, which is exactly why
+    // theirs reflect and yours did not.
+    // So: POSE it whenever the lamp is on, and keep the direct-view rule as it was - the
+    // reflection pass turns it on for its own render (see the Reflector override).
+    if (flying && input.headlight !== false &&
         S.hCur > 0.01 && visK > 0.004) pT = Math.min(opMax, opBase * visK);
     S.conePCur += (pT - S.conePCur) * kc;
     const o = S.conePCur;
-    if (o <= 0.004) { if (mP.visible) mP.visible = false; }
+    if (o <= 0.004) { if (mP.visible) mP.visible = false; mP.userData._lit = false; }
     else {
-      mP.visible = true;
+      mP.userData._lit = true;
+      // unchanged for what you actually look at: from inside the volume it would fill the screen
+      mP.visible = !!game.thirdPerson && !xr;
       mP.material.opacity = o;
       // S.head.position is fresh whenever hCur > 0.01 (set in the headlight
       // block above); aim with the camera forward exactly like the spot's
