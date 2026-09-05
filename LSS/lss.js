@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.79';
+const LSS_BUILD = '38.80';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -71147,6 +71147,9 @@ function musicSyncToGameState() {
 
 const MUSIC_TRACKS = {
   menu:   ['music/welcome_to_LSS.mp3'],
+  hub:    ['music/welcome_to_LSS.mp3', 'music/battle_in_LSS.mp3', 'music/heavy_battle_in_LSS.mp3',
+           'music/Chrome_Clash.mp3', 'music/Chrome_Clash2.mp3',
+           'music/Victory_1.mp3', 'music/Victory_Circuit.mp3'],
   battle: ['music/battle_in_LSS.mp3', 'music/heavy_battle_in_LSS.mp3',
            'music/Chrome_Clash.mp3', 'music/Chrome_Clash2.mp3',
            'music/Victory_1.mp3', 'music/Victory_Circuit.mp3'],
@@ -71206,6 +71209,7 @@ function _mp3SyncToState() {
   const _cavern = _ff && !!game._cavern;
   const _cyberM = _ff && game.state !== 'select' && !!(game._cyber && game._cyber.armed);
   const inMenu = ((game.state === 'select') || _ff) && !_cavern && !_cyberM;
+  const _hubFly = _ff && game.state !== 'select' && !_cavern && !_cyberM;   // (v38.80) flying the overworld: the full cycle
   if (inMenu && typeof audio !== 'undefined' && audio.musicMuteLobby && game.state === 'select') { _mp3Stop(); return; }
   const _bt = MUSIC_TRACKS.battle;
   let _startIdx;
@@ -71213,7 +71217,7 @@ function _mp3SyncToState() {
     if (_cavern) _startIdx = ((game._cavernSalt || 0) >>> 0) % _bt.length;
     else if (_cyberM) _startIdx = ((game._cyber.msalt || 0) >>> 0) % _bt.length;
   }
-  _mp3Play(inMenu ? 'menu' : 'battle', _startIdx);
+  _mp3Play(_hubFly ? 'hub' : (inMenu ? 'menu' : 'battle'), _startIdx);   // (v38.80)
   if (mp3Music.el) {
     const v = _mp3Vol();
     if (Math.abs(mp3Music.el.volume - v) > 0.005) mp3Music.el.volume = v;
