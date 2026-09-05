@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.84';
+const LSS_BUILD = '38.85';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -21244,6 +21244,7 @@ const OW = {
   ZAP: { range: 1700, every: 3.2, dmg: 1400, charge: 1.6 },
   REGEN: { delay: 6, rate: 0.02 },   // (v38.81) an owned carrier repairs 2%/s of max after 6 s without a hit
   AWAY: 4500,            // carrier this far outside the city radius = taken away
+  AGGRO: 30, HUNT: 15000, STANDOFF: 1300,   // (v38.85) a hit wakes a hostile city for 30 s: fighters break formation onto the attacker, the carrier hunts them out to 15,000u and parks 1,300u off
   FIELD_BUILD: 120, FIELD_CHARGE: 10, RESPAWN: 45, LEASH: 9000,
   FOLLOW: { back: 2200, up: 300, side: 700, wander: 350, band: 900, vz: 80, spd: 330, accel: 90, jump: 9000, spread: 2600, sep: 2200 },
   BOSS: { key: 'GraveTitan', hpX: 80, size: 15000, rise: 14, zapEvery: 1.2, zapN: 4, zapDmg: 900, zapRange: 4200,
@@ -21460,6 +21461,35 @@ function _owReviveFleet(c, at) {
     _owReviveBot(b, at.x + Math.cos(ang) * 500, at.y + 200, at.z + Math.sin(ang) * 500);
   }
 }
+function _owAggroEnt(attacker) {
+  if (attacker === 'player' || (typeof player !== 'undefined' && attacker === player)) return (player && player.shipState !== 'dead') ? player : null;
+  if (typeof attacker === 'string' && attacker.indexOf('peer:') === 0) {
+    const pid = attacker.slice(5);
+    try { const np = (net.networkPlayers || []).find(n => n && n.peerId === pid); if (np && np.alive) return np; } catch (_) {}
+    return null;
+  }
+  if (attacker && typeof attacker === 'object' && attacker.position && attacker.alive !== false && !attacker.isOwBoss) return attacker;
+  return null;
+}
+function _owAggro(c, attacker) {
+  if (!c) return;
+  const ent = _owAggroEnt(attacker); if (!ent) return;
+  if (ent.team != null && ent.team === (c.owner != null ? c.owner : OW.TEAM0 + c.idx)) return;   // our own side
+  c._aggro = { ent, t: game.time || 0 };
+}
+function _owAggroTarget(c) {
+  const a = c._aggro; if (!a) return null;
+  const t = game.time || 0;
+  if (t - a.t > OW.AGGRO) { c._aggro = null; return null; }
+  const e = a.ent;
+  const up = e && e.position && (e === player ? player.shipState !== 'dead' : (e.alive !== false && (e.peerId ? true : game.entities.indexOf(e) >= 0)));
+  if (!up) { c._aggro = null; return null; }
+  return e;
+}
+function _owBotHit(bot, attacker) {
+  if (!OW.cities || bot._owCity == null || !_owAuthority()) return;
+  _owAggro(OW.cities[bot._owCity], attacker);
+}
 function _owFleetTick(c, dt) {
   const F = c.fleet; if (!F.length) return;
   const car = (c.carrier && c.carrier.alive) ? c.carrier : null;
@@ -21474,10 +21504,12 @@ function _owFleetTick(c, dt) {
   for (let i = 0; i < F.length; i++) {
     const b = F[i]; if (!b) continue;
     if (!b.alive) { dead++; continue; }
+    const ag = _owAggroTarget(c);
+    if (ag) { b.combatTarget = ag; if (!b.aiTarget) b.aiTarget = new THREE.Vector3(); b.aiTarget.copy(ag.position); b.aiLastKnownPlayer = (ag === player) ? player.position.clone() : b.aiLastKnownPlayer; b.aiLastKnownTime = game.time || 0; }
     const ct = b.combatTarget;
     const ctAlive = ct && (ct === player ? player.shipState !== 'dead' : !!ct.alive);
-    let engaged = false;
-    if (ctAlive && ct.position) {
+    let engaged = !!ag;
+    if (!engaged && ctAlive && ct.position) {
       const dT = b.position.distanceTo(ct.position);
       const dA = Math.hypot(ct.position.x - ax, ct.position.z - az);
       const big = ct.isOwBoss ? (ct.collisionRadius || 0) : 0;   // the leviathan is engaged from its skin, not its centre
@@ -21666,11 +21698,21 @@ class OwCarrier {
         _owSend({ type: 'ow_evt', k: 'warp', p: [Math.round(this.position.x), Math.round(this.position.y), Math.round(this.position.z)], r: 700 });
       }
     } else {
-      const r = c.R * 0.55;
-      this.heading += dt * (60 / Math.max(1, r));
-      tx = c.x + Math.cos(this.heading) * r; tz = c.z + Math.sin(this.heading) * r;
-      ty = _owTowerTop(c);
-      spd = 60;
+      const hunt = (c.owner == null) ? _owAggroTarget(c) : null;
+      const hd = hunt ? Math.hypot(hunt.position.x - this.position.x, hunt.position.z - this.position.z) : 1e9;
+      if (hunt && hd < OW.HUNT && Math.hypot(hunt.position.x - c.x, hunt.position.z - c.z) < OW.HUNT) {
+        const so = OW.STANDOFF;
+        if (hd > so) { tx = hunt.position.x - (hunt.position.x - this.position.x) / hd * so; tz = hunt.position.z - (hunt.position.z - this.position.z) / hd * so; }
+        else { tx = this.position.x; tz = this.position.z; }
+        ty = hunt.position.y + 200;
+        spd = _owK().followSpd || OW.FOLLOW.spd;
+      } else {
+        const r = c.R * 0.55;
+        this.heading += dt * (60 / Math.max(1, r));
+        tx = c.x + Math.cos(this.heading) * r; tz = c.z + Math.sin(this.heading) * r;
+        ty = _owTowerTop(c);
+        spd = 60;
+      }
     }
     const dx = tx - this.position.x, dz = tz - this.position.z;
     const d = Math.hypot(dx, dz);
@@ -21802,6 +21844,7 @@ class OwCarrier {
     this.damageTaken += applied;
     if (attacker && typeof attacker === 'object' && attacker.alive !== undefined && attacker !== this) attacker.damageDealt = (attacker.damageDealt || 0) + applied;
     this._lastAttacker = attacker;
+    try { if (this.city) _owAggro(this.city, attacker); } catch (_) {}   // (v38.85) the city remembers who shot its flagship
     if (this.health <= 0) this.die();
     return applied;
   }
@@ -22561,10 +22604,44 @@ function _owCollide(pos, velocity, radius) {
   for (let i = 0; i < C.length; i++) {
     const c = C[i];
     if (c.built && c.built.city) _hcCollideIn(c.built.city, c.site, pos, velocity, radius);
+    _owMesaCollide(c, pos, velocity, radius);   // (v38.85)
     if (c.carrier && c.carrier.alive) c.carrier.collide(pos, velocity, radius);
   }
   for (let i = 0; i < OW.orphans.length; i++) { const car = OW.orphans[i]; if (car.alive) car.collide(pos, velocity, radius); }
   if (OW.boss && OW.boss.alive) OW.boss.collide(pos, velocity, radius);
+}
+function _owMesaCollide(c, pos, velocity, radius) {
+  const dx = pos.x - c.x, dz = pos.z - c.z, dh = Math.hypot(dx, dz);
+  const Rp = c.R * 1.12 + radius;
+  if (dh >= Rp) return;
+  const top = c.padY + radius, bottom = c.minY - 260 - radius;
+  if (pos.y >= top || pos.y <= bottom) return;
+  const upPen = top - pos.y, sidePen = Rp - dh;
+  if (upPen <= sidePen || dh < 1) {
+    pos.y = top;
+    if (velocity && velocity.y < 0) velocity.y = 0;
+  } else {
+    const nx = dx / dh, nz = dz / dh;
+    pos.x = c.x + nx * Rp; pos.z = c.z + nz * Rp;
+    if (velocity) { const vn = velocity.x * nx + velocity.z * nz; if (vn < 0) { velocity.x -= nx * vn; velocity.z -= nz * vn; } }
+  }
+}
+function _owMesaRay(c, origin, dir, maxDist) {
+  const R = c.R * 1.12, top = c.padY, bottom = c.minY - 260;
+  let best = maxDist;
+  if (Math.abs(dir.y) > 1e-6) {
+    const t = (top - origin.y) / dir.y;
+    if (t > 0 && t < best) { const hx = origin.x + dir.x * t - c.x, hz = origin.z + dir.z * t - c.z; if (hx * hx + hz * hz <= R * R) best = t; }
+  }
+  const ox = origin.x - c.x, oz = origin.z - c.z, a = dir.x * dir.x + dir.z * dir.z;
+  if (a > 1e-8) {
+    const b = 2 * (ox * dir.x + oz * dir.z), cc = ox * ox + oz * oz - R * R, disc = b * b - 4 * a * cc;
+    if (disc >= 0) {
+      const t = (-b - Math.sqrt(disc)) / (2 * a);
+      if (t > 0 && t < best) { const y = origin.y + dir.y * t; if (y <= top && y >= bottom) best = t; }
+    }
+  }
+  return best;
 }
 function _owRayHit(origin, dir, maxDist, skipCarrier) {
   const C = OW.cities; if (!C) return maxDist;
@@ -22572,6 +22649,7 @@ function _owRayHit(origin, dir, maxDist, skipCarrier) {
   for (let i = 0; i < C.length; i++) {
     const c = C[i];
     if (c.built && c.built.city) { const d = _hcRayHitIn(c.built.city, c.site, origin, dir, best); if (d < best) best = d; }
+    if (c.built) { const d = _owMesaRay(c, origin, dir, best); if (d < best) best = d; }   // (v38.85)
     if (!skipCarrier && c.carrier && c.carrier.alive) { const d = c.carrier.rayDist(origin, dir, best); if (d >= 0 && d < best) best = d; }
   }
   if (!skipCarrier) for (let i = 0; i < OW.orphans.length; i++) { const car = OW.orphans[i]; if (!car.alive) continue; const d = car.rayDist(origin, dir, best); if (d >= 0 && d < best) best = d; }
@@ -27977,6 +28055,7 @@ class Bot {
     }
 
     this.damageTaken = (this.damageTaken || 0) + amount;   // (v38.60) match-report stat
+    if (this._owCity != null && typeof _owBotHit === 'function') { try { _owBotHit(this, attacker); } catch (_) {} }   // (v38.85) the city fleet remembers who shot it
     if (this.shield > 0) {
       if (amount <= this.shield) { this.shield -= amount; }
       else { const overflow = amount - this.shield; this.shield = 0; this.health -= overflow; }
