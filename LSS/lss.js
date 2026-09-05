@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.76';
+const LSS_BUILD = '38.77';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -3717,7 +3717,7 @@ function startEndless() {
   game.testMode = false;
   game.raceNoTimer = true;
   game.currentRound = 1;
-  game.selectedMap = (typeof window !== 'undefined' && window.__bend) ? 'endless_bend' : 'endless_caverns';
+  game.selectedMap = 'endless_bend';
   let _code = '';
   try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
   if ((net.active && net.room) || _code) {
@@ -4516,7 +4516,7 @@ function _applyModeClientSetup(mode) {
   } else if (mode === 'endless') {
     net.endless = true;
     game.testMode = false; game.raceNoTimer = true; game.currentRound = 1;
-    game.selectedMap = 'endless_caverns';
+    game.selectedMap = 'endless_bend';   // (v38.77) the only endless map, see startEndless
   } else if (mode === 'freeflight') {
     net.freeflight = true;
     try { document.body.classList.add('lss-freeflight'); } catch (_) {}
@@ -5562,6 +5562,8 @@ class NetworkPlayer {
     if (typeof s.kills === 'number') this.kills = s.kills;
     if (typeof s.damageDealt === 'number') this.damageDealt = s.damageDealt;
     if (typeof s.damageTaken === 'number') this.damageTaken = s.damageTaken;   // (v38.60)
+    if (typeof s.mk === 'number') this.monKills = s.mk;   // (v38.77)
+    if (typeof s.al === 'number') this.aegisLvl = s.al;
 
     const _spx = +s.px, _spy = +s.py, _spz = +s.pz;
     if (Number.isFinite(_spx) && Number.isFinite(_spy) && Number.isFinite(_spz)) this.targetPos.set(_spx, _spy, _spz);
@@ -5581,6 +5583,20 @@ class NetworkPlayer {
     this.mesh.quaternion.slerp(_npMeshTgt.copy(this.targetQuat).multiply(_npFlipY), Math.min(1, dt * 15));
 
     this.velocity.set(s.vx || 0, s.vy || 0, s.vz || 0);
+    if (typeof game !== 'undefined' && game && game._hubWater && typeof _swImpact === 'function') {
+      const _WL = game._hubWater.userData.WL;
+      const _above = this.position.y - _WL;
+      const _prev = (this._wPrevAbove === undefined) ? _above : this._wPrevAbove;
+      if ((_above < 0 && _prev >= 0) || (_above > 0 && _prev <= 0)) {
+        try {
+          const _fp = _swPeerFootprint(this);
+          const _W3 = window.__water || {};
+          _swImpact(this.position.x, this.position.z, _above < 0 ? +1 : -1, _fp, _fp.heft * ((_W3.mass != null) ? _W3.mass : 1.0), this.velocity, _WL);
+          if (typeof playSpatialSound === 'function') playSpatialSound(_above < 0 ? 'water_bloop' : 'water_bloop_soft', new THREE.Vector3(this.position.x, _WL, this.position.z), { refDistance: 300, maxDistance: 5200 });
+        } catch (_) {}
+      }
+      this._wPrevAbove = _above;
+    }
 
     if (this.mesh.userData.shieldMesh) {
       let opacity = 0;
@@ -5840,6 +5856,7 @@ const _broadcastState = {
   hp: 0, shield: 0, os: 0,
   doomed: false, dead: false,
   kills: 0, damageDealt: 0,
+  mk: 0, al: 0,   // (v38.77) leviathan kills, endless aegis level
   abilityShield: false,
   spawnProt: 0,
   cloak: false,
@@ -5871,6 +5888,8 @@ function broadcastPlayerState(dt) {
   s.kills = player.kills | 0;
   s.damageDealt = player.damageDealt | 0;
   s.damageTaken = player.damageTaken | 0;   // (v38.60) the match report's damage_taken was always 0
+  s.mk = player.monKills | 0;   // (v38.77) leviathan kills, for the co-op scoreboard
+  s.al = (typeof game !== 'undefined' && game && game.endlessRun && game.endlessRun.aegis) ? (game.endlessRun.aegis.lvl | 0) : 0;
   s.abilityShield = !!(
     (player.gunShieldHP > 0) ||
     player.phaseInvuln ||
@@ -6320,7 +6339,7 @@ function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'bot_dmg' && typeof evt.i === 'number') {
     if (_botAuthority()) {   // (v38.63) one gate (was `net.openSolo`, which also dropped co-op campaign/endless hits)
       const b = game.entities.find(x => (x instanceof Bot) && !x.isProxy && x.id === evt.i);
-      if (b && b.alive) { try { b.takeDamage(Math.max(0, +evt.d || 0), 'net', null); } catch (_) {} }
+      if (b && b.alive) { try { b.takeDamage(Math.max(0, +evt.d || 0), 'peer:' + fromPeerId, null); } catch (_) {} }   // (v38.77) who hit it, so a kill can be credited
     }
     return;
   }
@@ -6494,7 +6513,7 @@ function handleNetEvent(evt, fromPeerId) {
     if (game.monsters && typeof _monAuthority === 'function' && _monAuthority()) {
       const m = game.monsters.find(x => x.monId === evt.i);
       if (m && m.alive) {
-        try { m.takeDamage(Math.max(0, +evt.d || 0), 'net', null); } catch (_) {}
+        try { m.takeDamage(Math.max(0, +evt.d || 0), 'peer:' + fromPeerId, null); } catch (_) {}   // (v38.77) who hit it
       }
     }
     return;
@@ -6505,6 +6524,7 @@ function handleNetEvent(evt, fromPeerId) {
       if (m && m.alive) {
         if (typeof evt.x === 'number') m.position.set(evt.x, evt.y || 0, evt.z || 0);
         try { m.die(false); } catch (_) {}
+        if (evt.by && evt.by === net.myPeerId) player.monKills = (player.monKills | 0) + 1;   // (v38.77) my leviathan
       }
     }
     return;
@@ -15864,6 +15884,18 @@ function _swShipFootprint() {
   const heft = Math.pow((LEN * BEAM * DRAFT) / refVol, 0.34);   
   _swFP_cache = { _k: c, LEN: LEN, BEAM: BEAM, DRAFT: DRAFT, half: LEN * 0.5, heft: heft };
   return _swFP_cache;
+}
+function _swPeerFootprint(np) {
+  const c = np && np.chassis;
+  if (!c || !c.hullLength) return _swFP_default;
+  if (np._swFP && np._swFP._k === c) return np._swFP;
+  const cr = c.hullLength * 0.45, LEN = cr * 2.0;
+  const BEAM = LEN * (c.hullWidth / c.hullLength);
+  const DRAFT = LEN * (c.hullHeight / c.hullLength) * 0.5;
+  const refVol = 90 * (90 * 0.8) * (90 * 0.3 * 0.5);
+  const heft = Math.pow((LEN * BEAM * DRAFT) / refVol, 0.34);
+  np._swFP = { _k: c, LEN: LEN, BEAM: BEAM, DRAFT: DRAFT, half: LEN * 0.5, heft: heft };
+  return np._swFP;
 }
 function _swImpact(px, pz, sign, fp, mass, vel, WL) {
   const vy = vel ? Math.abs(vel.y) : 0;
@@ -26491,6 +26523,13 @@ class Bot {
     delete player.trackerLocks[this.id];
     if (player.trackerLockedTarget === this) player.trackerLockedTarget = null;
     delete player.enemyToneLocks[this.id];
+    if (typeof attacker === 'string' && attacker.indexOf('peer:') === 0 && typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+      const _kpid = attacker.slice(5);
+      let _kname = 'Peer';
+      try { const _knp = (net.networkPlayers || []).find(x => x && x.peerId === _kpid); if (_knp && _knp.loadout) _kname = _knp.loadout.name; } catch (_) {}
+      try { net.sendEvent({ type: 'kill', killerName: _kname, victimName: this.loadout.name, killerPeerId: _kpid }); } catch (_) {}
+      try { addKillFeed(_kname, this.loadout.name); } catch (_) {}
+    }
     if (attacker === 'player') {
       player.kills++;
       try { if (typeof _aegisAwardKill === 'function') _aegisAwardKill(); } catch (_) {}
@@ -32943,6 +32982,7 @@ class OutskirtsMonster {
       }
       return dmg;
     }
+    this._lastAttacker = attacker;   // (v38.77) for the kill credit in die()
     this.health -= dmg;
     if (this.health <= 0) this.die(true);
     return dmg;
@@ -32963,9 +33003,15 @@ class OutskirtsMonster {
       try { scene.remove(this.mesh); } catch (_) {}
     }
     try { if (typeof showKillMarker === 'function') showKillMarker(); } catch (_) {}
+    let _monBy = null;
+    try {
+      const _a = this._lastAttacker;
+      if (broadcast && (_a === player || _a === 'player')) { player.monKills = (player.monKills | 0) + 1; _monBy = (typeof net !== 'undefined' && net && net.active) ? net.myPeerId : null; }
+      else if (typeof _a === 'string' && _a.indexOf('peer:') === 0) _monBy = _a.slice(5);
+    } catch (_) {}
     if (broadcast && typeof net !== 'undefined' && net && net.active && net.sendEvent) {
       try {
-        net.sendEvent({ type: 'mon_dead', i: this.monId,
+        net.sendEvent({ type: 'mon_dead', i: this.monId, by: _monBy,
           x: Math.round(this.position.x), y: Math.round(this.position.y), z: Math.round(this.position.z) });
       } catch (_) {}
     }
@@ -39057,6 +39103,7 @@ function commitLoadout(key) {
   
   if (!midMatch && !game._liveSwap) {   
     player.kills = 0;
+    player.monKills = 0;   // (v38.77)
     player.deaths = 0;
     player.damageDealt = 0; player.damageTaken = 0;
   }
@@ -46398,6 +46445,7 @@ function returnToRootMenu(opts) {
   game.matchEndTimerAnchorMs = undefined; game.matchEndTimerTotal = undefined;
 
   player.kills = 0;
+  player.monKills = 0;   // (v38.77)
   player.deaths = 0;
   player.damageDealt = 0; player.damageTaken = 0;
 
@@ -58172,7 +58220,7 @@ const CAMPAIGN_LEG_MAP = {
 MAP_DATA.camp_approach = CAMPAIGN_LEG_MAP;
 
 MAP_DATA.endless_caverns = {
-  name: 'ENDLESS ; The Long Dark',
+  name: 'ENDLESS ; The Long Dark (flat, retired)',   // (v38.77) base for endless_bend only
   defaultTheme: 'Rocky',
   description: 'A cavern without end. Fly as far as you can on the lives you chose.',
   procedural: 'endless',
@@ -58187,7 +58235,7 @@ MAP_DATA.endless_caverns = {
 
 MAP_DATA.endless_bend = {
   ...MAP_DATA.endless_caverns,
-  name: 'ENDLESS ; The Long Dark (bent)',
+  name: 'ENDLESS ; The Long Dark',   // (v38.77) the one endless map
   bend: true,
 };
 function _lssEndlessNextSeg(run) {
@@ -69966,19 +70014,34 @@ function updateScoreboard() {
   const _youName = 'YOU (' + (player.loadout ? player.loadout.name : '?') + ')';
 
   let html = '<h2>SCOREBOARD</h2>';
-  html += '<div class="sb-header-row"><div class="sb-name sb-stat-header">SHIP</div><div class="sb-stat-header">STATUS</div><div class="sb-stat-header">KILLS</div><div class="sb-stat-header">DAMAGE</div></div>';
+  const _sbPvE = (_sbMode === 'campaign' || _sbMode === 'freeflight' || _sbMode === 'endless');
+  const _sbEndless = (_sbMode === 'endless');
+  html += '<div class="sb-header-row"><div class="sb-name sb-stat-header">SHIP</div><div class="sb-stat-header">STATUS</div><div class="sb-stat-header">KILLS</div>'
+    + (_sbPvE ? '<div class="sb-stat-header">LEVIATHANS</div>' : '')
+    + (_sbEndless ? '<div class="sb-stat-header">AEGIS</div>' : '')
+    + '<div class="sb-stat-header">DAMAGE</div></div>';
 
-  if (_sbMode === 'campaign' || _sbMode === 'freeflight' || _sbMode === 'endless') {
+  if (_sbPvE) {
     let _sbHdrX = '';
     if (_sbMode === 'campaign') _sbHdrX = ' — WAVE ' + (game.currentRound || 1);
     else if (_sbMode === 'endless' && game.endlessRun) _sbHdrX = ' — ' + (game.endlessRun.dist / 1000).toFixed(2) + ' KM';
     html += '<div class="sb-team-header sb-team-a">PILOTS' + _sbHdrX + '</div>';
-    const prows = [{ n: _youName, s: pStatus, k: player.kills || 0, d: player.damageDealt || 0, me: true }];
+    const _myAegis = (game.endlessRun && game.endlessRun.aegis) ? (game.endlessRun.aegis.lvl | 0) : null;
+    const prows = [{ n: _youName, s: pStatus, k: player.kills || 0, m: player.monKills || 0, a: _myAegis, d: player.damageDealt || 0, me: true }];
     for (const np of net.networkPlayers) {
-      prows.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, d: np.damageDealt || 0, me: false });
+      prows.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, m: np.monKills || 0, a: (np.aegisLvl != null) ? np.aegisLvl : null, d: np.damageDealt || 0, me: false });
     }
-    prows.sort((a, b) => b.k - a.k);
-    for (const p of prows) html += row(p.n, p.s, p.k, p.d, p.me);
+    prows.sort((a, b) => (b.k + b.m) - (a.k + a.m));
+    for (const p of prows) {
+      html += '<div class="sb-row' + (p.me ? ' player-row' : '') + '">' +
+        '<div class="sb-name">' + p.n + '</div>' +
+        '<div class="sb-stat">' + p.s + '</div>' +
+        '<div class="sb-stat">' + (p.k || 0) + '</div>' +
+        '<div class="sb-stat">' + (p.m || 0) + '</div>' +
+        (_sbEndless ? ('<div class="sb-stat">' + (p.a != null ? 'L' + p.a : '-') + '</div>') : '') +
+        '<div class="sb-stat">' + Math.floor(p.d || 0) + '</div>' +
+        '</div>';
+    }
   } else {
     const _asltSB = (_sbMode === 'assault');
     const mkList = (team) => {
