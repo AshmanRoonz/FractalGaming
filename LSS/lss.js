@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.86';
+const LSS_BUILD = '38.87';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -21484,6 +21484,8 @@ function _owAggroTarget(c) {
   const e = a.ent;
   const up = e && e.position && (e === player ? player.shipState !== 'dead' : (e.alive !== false && (e.peerId ? true : game.entities.indexOf(e) >= 0)));
   if (!up) { c._aggro = null; return null; }
+  const side = (c.owner != null) ? c.owner : OW.TEAM0 + c.idx;   // (v38.87) never our own side
+  if (e.team != null && e.team === side) { c._aggro = null; return null; }
   return e;
 }
 function _owBotHit(bot, attacker) {
@@ -21505,7 +21507,7 @@ function _owFleetTick(c, dt) {
     const b = F[i]; if (!b) continue;
     if (!b.alive) { dead++; continue; }
     const ag = _owAggroTarget(c);
-    if (ag) { b.combatTarget = ag; if (!b.aiTarget) b.aiTarget = new THREE.Vector3(); b.aiTarget.copy(ag.position); b.aiLastKnownPlayer = (ag === player) ? player.position.clone() : b.aiLastKnownPlayer; b.aiLastKnownTime = game.time || 0; }
+    if (ag && ag.team !== b.team) { b.combatTarget = ag; if (!b.aiTarget) b.aiTarget = new THREE.Vector3(); b.aiTarget.copy(ag.position); b.aiLastKnownPlayer = (ag === player) ? player.position.clone() : b.aiLastKnownPlayer; b.aiLastKnownTime = game.time || 0; }
     const ct = b.combatTarget;
     const ctAlive = ct && (ct === player ? player.shipState !== 'dead' : !!ct.alive);
     let engaged = !!ag;
@@ -21975,6 +21977,7 @@ function _owCarrierDied(car) {
     }
     _owKillFleet(c, true);
     c.owner = killerTeam; c.ownerName = _owTeamName(killerTeam); c._ownedAt = game.time || 0;
+    c._aggro = null;   // (v38.87) the grudge dies with the old garrison (owner: "the fleet keeps attacking me even though they changed teams")
     _owAnnounce({ k: 'own', c: c.idx, tm: killerTeam });
     c._carrierPending = 3.0; c._pendingMode = 'follow';
     _owBossCheck();
@@ -22117,6 +22120,7 @@ function _owCaptured(c, team, ship) {
   if (car) { OW.orphans.push(car); c.carrier = null; }
   _owKillFleet(c, true);
   c.owner = team; c.ownerName = _owTeamName(team); c._ownedAt = game.time || 0;
+  c._aggro = null;   // (v38.87)
   c.buildT = _owK().fieldBuild || OW.FIELD_BUILD;
   _owMakeField(c, _owFieldSpot(c), false);
   _owSpawnFleet(c, team, new THREE.Vector3(c.x, c.padY + 900, c.z));
