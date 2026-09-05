@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.75';
+const LSS_BUILD = '38.76';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6256,6 +6256,39 @@ function handleNetEvent(evt, fromPeerId) {
         m._netX = row[1]; m._netY = row[2]; m._netZ = row[3];
         m.aggro = !!row[4];
         if (typeof row[5] === 'number') m.health = row[5];
+        if (row.length >= 7) {
+          const _dorm = !!row[6];
+          if (m.dormant && !_dorm) { m.position.set(row[1], row[2], row[3]); if (m.mesh) { m.mesh.position.copy(m.position); m.mesh.visible = true; } }
+          else if (!m.dormant && _dorm) { if (m.mesh) m.mesh.visible = false; try { _monClearLocks(m); } catch (_) {} }
+          m.dormant = _dorm;
+        }
+      }
+    }
+    return;
+  }
+  if (evt.type === 'mon_summon' && typeof evt.i === 'number') {
+    if (game.monsters && typeof _monAuthority === 'function' && !_monAuthority()) {
+      const m = game.monsters.find(x => x.monId === evt.i);
+      if (m && m.alive) {
+        const sx = +evt.sx || 0, sy = +evt.sy || 0, sz = +evt.sz || 0;
+        m.position.set(+evt.x || 0, +evt.y || 0, +evt.z || 0);
+        m._netX = m.position.x; m._netY = m.position.y; m._netZ = m.position.z;
+        m.dormant = false; m.aggro = true; m._deAggroT = 0;
+        if (m.velocity) m.velocity.set(0, 0, 0);
+        if (m.mesh) { m.mesh.position.copy(m.position); m.mesh.visible = true; }
+        try { if (typeof m._tpFx === 'function') m._tpFx(sx, sy, sz); } catch (_) {}
+      }
+    }
+    return;
+  }
+  if (evt.type === 'mon_recall' && typeof evt.i === 'number') {
+    if (game.monsters && typeof _monAuthority === 'function' && !_monAuthority()) {
+      const m = game.monsters.find(x => x.monId === evt.i);
+      if (m && m.alive && !m.dormant) {
+        try { if (typeof m._tpFx === 'function' && m.mesh && m.mesh.visible) m._tpFx(m.position.x, m.position.y, m.position.z); } catch (_) {}
+        m.dormant = true; m.aggro = false; m._deAggroT = 0;
+        if (m.mesh) m.mesh.visible = false;
+        try { _monClearLocks(m); } catch (_) {}
       }
     }
     return;
@@ -33844,6 +33877,13 @@ function _monSummon(m) {
   if (m.velocity) m.velocity.set(0, 0, 0);
   if (m.mesh) { m.mesh.position.copy(m.position); m.mesh.visible = true; }
   try { if (typeof m._tpFx === 'function') m._tpFx(sx, sy, sz); } catch (_) {}
+  if (typeof net !== 'undefined' && net && net.active && net.sendEvent && m.monId != null && m.monId >= 0) {
+    try {
+      net.sendEvent({ type: 'mon_summon', i: m.monId,
+        sx: Math.round(sx), sy: Math.round(sy), sz: Math.round(sz),
+        x: Math.round(m.position.x), y: Math.round(m.position.y), z: Math.round(m.position.z) });
+    } catch (_) {}
+  }
 }
 function _monRecall(m) {
   if (!m) return;
@@ -33851,6 +33891,9 @@ function _monRecall(m) {
   m.dormant = true; m.aggro = false; m._deAggroT = 0;
   if (m.mesh) m.mesh.visible = false;
   _monClearLocks(m);
+  if (typeof net !== 'undefined' && net && net.active && net.sendEvent && typeof _monAuthority === 'function' && _monAuthority() && m.monId != null && m.monId >= 0) {
+    try { net.sendEvent({ type: 'mon_recall', i: m.monId }); } catch (_) {}
+  }
 }
 
 function _monClearLocks(m) {
@@ -33976,7 +34019,8 @@ function updateMonsters(dt) {
         if (m.monId == null || m.monId < 0 || !m.alive) continue;
         rows.push([m.monId,
           Math.round(m.position.x), Math.round(m.position.y), Math.round(m.position.z),
-          m.aggro ? 1 : 0, Math.round(m.health)]);
+          m.aggro ? 1 : 0, Math.round(m.health),
+          m.dormant ? 1 : 0]);   // (v38.76) row[6]: parked or summoned - see the mon_state receiver
       }
       if (rows.length) {
         try { net.sendEvent({ type: 'mon_state', m: rows }); } catch (_) {}
