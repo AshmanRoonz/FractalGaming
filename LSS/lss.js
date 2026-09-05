@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.83';
+const LSS_BUILD = '38.84';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -21245,7 +21245,7 @@ const OW = {
   REGEN: { delay: 6, rate: 0.02 },   // (v38.81) an owned carrier repairs 2%/s of max after 6 s without a hit
   AWAY: 4500,            // carrier this far outside the city radius = taken away
   FIELD_BUILD: 120, FIELD_CHARGE: 10, RESPAWN: 45, LEASH: 9000,
-  FOLLOW: { back: 1400, up: 420, spd: 330, accel: 90, jump: 9000, spread: 2600, sep: 2200 },   // (v38.81) 330 u/s cruise, 90 u/s^2; (v38.82) one slot per carrier, 2,600u across the beam, 2,200u keep-apart
+  FOLLOW: { back: 2200, up: 300, side: 700, wander: 350, band: 900, vz: 80, spd: 330, accel: 90, jump: 9000, spread: 2600, sep: 2200 },
   BOSS: { key: 'GraveTitan', hpX: 80, size: 15000, rise: 14, zapEvery: 1.2, zapN: 4, zapDmg: 900, zapRange: 4200,
           lanceEvery: 9, lanceRange: 10500, lanceDmg: 1600, touchDmg: 600, spd: 70, touch: 0.42 },
   NET: { hz: 4 },
@@ -21652,8 +21652,9 @@ class OwCarrier {
       if (this._fhx == null) { let hx = -this.dir.x, hz = -this.dir.z; const L0 = Math.hypot(hx, hz) || 1; this._fhx = hx / L0; this._fhz = hz / L0; }
       const F = OW.FOLLOW, K2 = _owK();
       const fl = _owFollowers(this.team); let si = fl.indexOf(this); if (si < 0) si = 0; const sn = Math.max(1, fl.length);
-      const lat = (si - (sn - 1) / 2) * (K2.followSpread || F.spread);
-      const back = F.back + si * 500, up = F.up + si * 220;
+      const tw = (game.time || 0);
+      const lat = (si - (sn - 1) / 2) * (K2.followSpread || F.spread) + ((si % 2) ? 1 : -1) * F.side + Math.sin(tw * 0.13 + si * 1.7) * F.wander;
+      const back = F.back + si * 500 + Math.cos(tw * 0.09 + si * 2.1) * F.wander, up = F.up + si * 220;
       const rx = this._fhz, rz = -this._fhx;   // the right-hand perpendicular in the horizontal plane
       tx = o.position.x - this._fhx * back + rx * lat; tz = o.position.z - this._fhz * back + rz * lat; ty = o.position.y + up;
       spd = _owK().followSpd || OW.FOLLOW.spd;
@@ -21684,20 +21685,24 @@ class OwCarrier {
     } else this.velocity.set(0, 0, 0);
     let gy = null;
     try { const T = game.sandwichTerrain; if (T && T.ON) { const h = _stGroundYCarved(this.position.x, this.position.z, T); if (isFinite(h)) gy = h; } } catch (_) {}
-    let want = (gy != null) ? gy + 450 : this.position.y;
-    if (ty != null) want = Math.max(want, ty);
+    let floor = (gy != null) ? gy + 450 : -1e9;
     try {
       const dH = Math.hypot(this.position.x - HUB_CITY.x, this.position.z - HUB_CITY.z);
-      if (dH < HUB_CITY.genome.radius + 900) want = Math.max(want, HUB_CITY.padY + HUB_CITY.genome.towerH * 0.95 + 300);
+      if (dH < HUB_CITY.genome.radius + 900) floor = Math.max(floor, HUB_CITY.padY + HUB_CITY.genome.towerH * 0.95 + 300);
       const C = OW.cities;
       if (C) for (let i = 0; i < C.length; i++) {
         const oc = C[i]; const dd = Math.hypot(this.position.x - oc.x, this.position.z - oc.z);
-        if (dd < oc.R + 900) want = Math.max(want, oc.padY + oc.site.genome.towerH * 0.95 + 300);
+        if (dd < oc.R + 900) floor = Math.max(floor, oc.padY + oc.site.genome.towerH * 0.95 + 300);
       }
     } catch (_) {}
-    if (this.rideY == null) this.rideY = want;
-    const rate = (want > this.rideY) ? 2.2 : 0.6;
-    this.rideY += (want - this.rideY) * Math.min(1, dt * rate);
+    if (this.rideY == null) this.rideY = Math.max((ty != null) ? ty : this.position.y, floor);
+    if (ty != null) {
+      const F2 = OW.FOLLOW, K3 = _owK();
+      const band = (K3.followBand != null) ? K3.followBand : F2.band, vz = ((K3.followVz != null) ? K3.followVz : F2.vz) * dt;
+      const diff = ty - this.rideY;
+      if (Math.abs(diff) > band) { const goal = ty - Math.sign(diff) * band * 0.5; this.rideY += Math.max(-vz, Math.min(vz, goal - this.rideY)); }
+    }
+    if (this.rideY < floor) this.rideY += (floor - this.rideY) * Math.min(1, dt * 2.2);   // the ground and the towers come up fast
     this.position.y = this.rideY;
     this.mesh.position.copy(this.position);
     this.mesh.quaternion.setFromUnitVectors(_OW_NEG_X, this.dir);
