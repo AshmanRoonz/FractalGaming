@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.80';
+const LSS_BUILD = '38.81';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -32517,9 +32517,10 @@ const OW = {
   BUILD_DIST: 11500, DROP_DIST: 14000, ARM_DIST: 9500,
   FLEET: 3, CARRIER_HP_X: 6,
   ZAP: { range: 1700, every: 3.2, dmg: 1400, charge: 1.6 },
+  REGEN: { delay: 6, rate: 0.02 },   // (v38.81) an owned carrier repairs 2%/s of max after 6 s without a hit
   AWAY: 4500,            // carrier this far outside the city radius = taken away
   FIELD_BUILD: 120, FIELD_CHARGE: 10, RESPAWN: 45, LEASH: 9000,
-  FOLLOW: { back: 1400, up: 420, spd: 520, jump: 9000 },
+  FOLLOW: { back: 1400, up: 420, spd: 330, accel: 90, jump: 9000 },   // (v38.81) 330 u/s cruise, 90 u/s^2 - owner: "the carrier is too fast moving"
   BOSS: { key: 'GraveTitan', hpX: 80, size: 15000, rise: 14, zapEvery: 1.5, zapDmg: 900, zapRange: 4200, spd: 70, touch: 0.42 },   // 900 every 1.5 s: ~25 s to kill a parked fighter, and it spreads its fire over every ship in reach
   NET: { hz: 4 },
   TEAM0: 9600,
@@ -32829,6 +32830,7 @@ class OwCarrier {
     this.dir = new THREE.Vector3(-1, 0, 0);
     this.heading = Math.random() * Math.PI * 2;
     this.rideY = null; this.zapT = 2; this.zapTgt = null; this.chargeFx = null;
+    this._spd = 0;   // (v38.81) current cruise speed, eased toward the wanted one
     this.mesh = null; this.guns = []; this.thrusters = []; this.glows = []; this.spawns = [];
     this.half = null; this.size = null; this.bound = 1500; this.localTop = 0;
     this._followOff = new THREE.Vector3(-OW.FOLLOW.back, OW.FOLLOW.up, 0);
@@ -32964,11 +32966,15 @@ class OwCarrier {
     }
     const dx = tx - this.position.x, dz = tz - this.position.z;
     const d = Math.hypot(dx, dz);
-    if (d > 1) {
-      const step = Math.min(d, spd * dt);
+    // (v38.81) mass: ease toward the wanted speed, brake into the last stretch (a 1,400-unit hull does not snap)
+    const wantSpd = (d > 1) ? Math.min(spd, Math.max(20, d * 0.6)) : 0;
+    const acc = (_owK().followAccel || OW.FOLLOW.accel) * dt;
+    this._spd += Math.max(-acc * 1.6, Math.min(acc, wantSpd - this._spd));
+    if (d > 1 && this._spd > 0.5) {
+      const step = Math.min(d, this._spd * dt);
       this.position.x += dx / d * step; this.position.z += dz / d * step;
-      this.velocity.set(dx / d * spd, 0, dz / d * spd);
-      if (d > 40) { _owV1.set(dx / d, 0, dz / d); this.dir.lerp(_owV1, Math.min(1, dt * 1.2)).normalize(); }
+      this.velocity.set(dx / d * this._spd, 0, dz / d * this._spd);
+      if (d > 40) { _owV1.set(dx / d, 0, dz / d); this.dir.lerp(_owV1, Math.min(1, dt * 0.9)).normalize(); }
     } else this.velocity.set(0, 0, 0);
     // altitude: ground clearance, the target height, and every city's towers
     let gy = null;
@@ -32991,6 +32997,13 @@ class OwCarrier {
     this.mesh.position.copy(this.position);
     this.mesh.quaternion.setFromUnitVectors(_OW_NEG_X, this.dir);
     this._glowTick();
+    // (v38.81) FIELD REPAIRS. Owner: "when i captured my second city, my first carrier disappeared" -
+    // it followed them into the siege and the hostile flagship and fighters ground it down. A carrier
+    // that lives through a fight now heals on the way to the next one; under fire it does not.
+    if (this.health < this.maxHealth && this.mode === 'follow') {
+      const R = OW.REGEN; const now = game.time || 0;
+      if (now - this._hitT > ((_owK().regenDelay != null) ? _owK().regenDelay : R.delay)) this.health = Math.min(this.maxHealth, this.health + this.maxHealth * ((_owK().regenRate != null) ? _owK().regenRate : R.rate) * dt);
+    }
     if (game.state === 'playing') { try { this._guns(dt); } catch (e) { if (!this._gunErr) { this._gunErr = true; console.warn('[cities] carrier guns threw:', e); } } }
   }
   _guns(dt) {
@@ -33196,6 +33209,7 @@ function _owCarrierDied(car) {
     return;
   }
   if (wasHostile) { c._carrierPending = 90; c._pendingMode = 'home'; return; }
+  try { addKillFeed(killerTeam != null ? _owTeamName(killerTeam) : 'The enemy', c.name + ' CARRIER'); } catch (_) {}   // (v38.81) the loss in the feed too
   _owAnnounce({ k: 'carlost', c: c.idx, tm: c.owner });
 }
 // ── banners: structured events, worded by each viewer ─────────────────────────────────────────
@@ -40790,7 +40804,8 @@ class Bot {
     for (const b of game.entities) {
       if (!b || b === this || !b.alive || b.team === this.team) continue;
       if (b.isHubTraffic && this._owCity != null) continue;   // (v38.78) a city fleet leaves the freighters alone
-      const d2 = this.position.distanceToSquared(b.position);
+      let d2 = this.position.distanceToSquared(b.position);
+      if (b.isOwCarrier && this._owCity != null) d2 *= 6.25;   // (v38.81) a carrier counts as 2.5x farther: fighters pick fighters and pilots first
       if (d2 < bestScore) { bestScore = d2; best = b; }
     }
     return best;
@@ -43329,11 +43344,15 @@ function _shipLightsFrame() {
         S._d.copy(_carrier.dir);
         m.position.copy(e.position).addScaledVector(S._d, _carrier.half.x * 0.92);
         m.position.y -= 30;
+      } else if (e.isOwCarrier && e.dir && e.half) {   // (v38.81) a city carrier: the same bow-light rule (owner: "its light is pointing directly left")
+        S._d.copy(e.dir);
+        m.position.copy(e.position).addScaledVector(S._d, e.half.x * 0.92);
+        m.position.y -= 30;
       } else if (ud.runningLight) ud.runningLight.getWorldPosition(m.position);
       else { m.position.copy(e.position); m.position.y -= 18; }
       // Billboard-free: the cone is rotationally symmetric, so aligning
       // geometry +Z with the ship's world nose axis is the whole job.
-      if (!(e.isCarrier && typeof _carrier !== 'undefined' && _carrier.dir)) e.mesh.getWorldDirection(S._d);
+      if (!(e.isCarrier && typeof _carrier !== 'undefined' && _carrier.dir) && !(e.isOwCarrier && e.dir)) e.mesh.getWorldDirection(S._d);   // (v38.81)
       m.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
       m.scale.set(cR, cR, cLen);
     }
