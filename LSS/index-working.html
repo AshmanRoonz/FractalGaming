@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.88';
+const LSS_BUILD = '38.90';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -31249,6 +31249,8 @@ function _carrierHullDist(pt) {
 function _bodyDist(pt, ent) {
   if (!ent || !ent.position) return Infinity;
   if (ent.isCarrier) { const d = _carrierHullDist(pt); if (d !== Infinity) return d; }
+  if (ent.isOwBoss && typeof ent.surfaceDist === 'function') return ent.surfaceDist(pt);   // (v38.89) the leviathan's body box
+  if (ent.isOwCarrier && typeof ent.hullDist === 'function') { const d = ent.hullDist(pt); if (d !== Infinity) return d; }   // (v38.89) a city carrier's hull box
   return pt.distanceTo(ent.position);
 }
 // (v37.85) Does this point sit inside the hull? The same oriented box the movement collider uses -
@@ -33208,6 +33210,14 @@ class OwCarrier {
     const i = game.entities.indexOf(this); if (i >= 0) game.entities.splice(i, 1);
     const j = OW.dying.indexOf(this); if (j >= 0) OW.dying.splice(j, 1);
   }
+  // (v38.89) distance from a point to the hull box (0 inside) - splash and the Tracker pulse read the body, not the centre
+  hullDist(pt) {
+    if (!this.alive || !this.mesh || !this.half || !pt) return Infinity;
+    _owQ.copy(this.mesh.quaternion).invert();
+    _owV3.set(pt.x - this.mesh.position.x, pt.y - this.mesh.position.y, pt.z - this.mesh.position.z).applyQuaternion(_owQ);
+    const dx = Math.max(0, Math.abs(_owV3.x) - this.half.x), dy = Math.max(0, Math.abs(_owV3.y) - this.half.y), dz = Math.max(0, Math.abs(_owV3.z) - this.half.z);
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
+  }
   // the hull collider: an oriented box, pushed out along the nearest face
   collide(pos, velocity, radius) {
     if (!this.alive || !this.mesh || !this.half) return;
@@ -33530,7 +33540,7 @@ function _owCityTick(c, dt, playing) {
 }
 // ── the leviathan ─────────────────────────────────────────────────────────────────────────────
 class OwBoss {
-  constructor(at, groundY) {
+  constructor(at, groundY, defKey) {   // (v38.90) defKey: which leviathan (the authority's pick, carried to the proxies)
     this.isOwBoss = true; this.alive = true; this.id = 'owboss'; this.team = 'boss'; this.isProxy = false;
     this.name = 'LEVIATHAN'; this.loadout = { name: 'THE LEVIATHAN' };
     const K = _owK().boss || {};
@@ -33547,10 +33557,15 @@ class OwBoss {
     this.zapT = 3; this.lanceT = 6; this.touchCd = 0; this._hitT = -1; this._lastAttacker = null;
     this._touch = new Map();   // (v38.83) per-ship contact cooldowns
     this.colR = this.size * 0.16;   // (v38.83) the column collider's radius (set from the model in _attach)
+    this.bx = this.size * 0.45; this.by = this.size * 0.5; this.bz = this.size * 0.3;   // (v38.89) the hit box's half extents (model-fitted in _attach)
     this.mesh = new THREE.Group(); this.mesh.position.copy(this.position); scene.add(this.mesh);
     this._mixer = null; this._sink = -1; this._gone = false;
     this._netX = null; this._netY = 0; this._netZ = 0; this._netRot = 0;
-    this.def = (typeof MONSTER_DEFS !== 'undefined' && MONSTER_DEFS.find(d => d.key === (K.key || OW.BOSS.key))) || { key: OW.BOSS.key, gut1: 0x9a8468, gut2: 0x5a2c20, ghost: 0xc9b8ff };
+    // (v38.90) owner: "make the giant leviathan any of the leviathans, at random"
+    const _defs = (typeof MONSTER_DEFS !== 'undefined') ? MONSTER_DEFS : null;
+    const _want = defKey || K.key || null;
+    this.def = (_defs && _want && _defs.find(d => d.key === _want)) || (_defs && _defs.length ? _defs[Math.floor(Math.random() * _defs.length)] : null) || { key: OW.BOSS.key, gut1: 0x9a8468, gut2: 0x5a2c20, ghost: 0xc9b8ff };
+    this.loadout = { name: 'THE LEVIATHAN · ' + String(this.def.key).replace(/([a-z])([A-Z])/g, '$1 $2').toUpperCase() };
     this._load();
   }
   _load() {
@@ -33593,6 +33608,7 @@ class OwBoss {
     inner.add(obj); inner.scale.setScalar(s);
     this.mesh.add(inner);
     this.halfH = sz.y * s * 0.5;
+    this.bx = sz.x * s * 0.5; this.by = sz.y * s * 0.5; this.bz = sz.z * s * 0.5;   // (v38.89)
     // hullWidth/Height give the box the direct-fire test uses (the mesh ray then trims it to the hull);
     // hullLength feeds the SPHERE tests (splash weapons x1.2, fleet shots x1.1, hitscan x0.7), so it is
     // kept to a third of the size or every rocket would burst kilometres short of the body
@@ -33792,30 +33808,40 @@ class OwBoss {
   // generic tests aim at an entity's CENTRE (a sphere of hullLength, or a box + a mesh ray against a
   // skinned model); on a 15,000u body the centre sits kilometres behind the skin - a hitscan beam ran out
   // of range before it, a shell had to thread the animated mesh. Both now test the column itself.
+  // (v38.89) THE SKIN IS THE BOX. Owner: "it's like his skin isn't his skin" - the v38.88 column only covered
+  // the torso of a titan whose arms and wings span 14,000u, so shots through the wings passed clean through
+  // (and Tracker never locked, since locks come from hits). The hit body is now the model's own bounding
+  // box, yawed with it: direct fire (contains), hitscan (rayDist) and splash (surfaceDist) all use it.
+  _toLocal(p, out) {
+    out.set(p.x - this.position.x, p.y - this.position.y, p.z - this.position.z);
+    if (this.mesh) { _owQ.copy(this.mesh.quaternion).invert(); out.applyQuaternion(_owQ); }
+    return out;
+  }
   contains(p, margin) {
     if (!this.alive) return false;
-    const m = margin || 0;
-    if (Math.abs(p.y - this.position.y) > this.halfH * 0.95 + m) return false;
-    const dx = p.x - this.position.x, dz = p.z - this.position.z;
-    return dx * dx + dz * dz <= (this.colR + m) * (this.colR + m);
+    const m = margin || 0, l = this._toLocal(p, _owV3);
+    return Math.abs(l.x) <= this.bx + m && Math.abs(l.y) <= this.by + m && Math.abs(l.z) <= this.bz + m;
+  }
+  surfaceDist(p) {
+    if (!this.alive) return Infinity;
+    const l = this._toLocal(p, _owV3);
+    const dx = Math.max(0, Math.abs(l.x) - this.bx), dy = Math.max(0, Math.abs(l.y) - this.by), dz = Math.max(0, Math.abs(l.z) - this.bz);
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
   }
   rayDist(origin, dir, maxDist) {
     if (!this.alive) return -1;
-    const R = this.colR, top = this.position.y + this.halfH * 0.95, bottom = this.position.y - this.halfH * 0.95;
-    let best = -1;
-    const take = (t) => { if (t >= 0 && t <= maxDist && (best < 0 || t < best)) best = t; };
-    // the side
-    const ox = origin.x - this.position.x, oz = origin.z - this.position.z, a = dir.x * dir.x + dir.z * dir.z;
-    if (a > 1e-8) {
-      const b = 2 * (ox * dir.x + oz * dir.z), c = ox * ox + oz * oz - R * R, disc = b * b - 4 * a * c;
-      if (disc >= 0) { const t = (-b - Math.sqrt(disc)) / (2 * a); const y = origin.y + dir.y * t; if (y <= top && y >= bottom) take(t); }
-    }
-    // the caps
-    if (Math.abs(dir.y) > 1e-6) {
-      for (const yy of [top, bottom]) { const t = (yy - origin.y) / dir.y; const hx = origin.x + dir.x * t - this.position.x, hz = origin.z + dir.z * t - this.position.z; if (hx * hx + hz * hz <= R * R) take(t); }
-    }
-    if (best < 0 && ox * ox + oz * oz <= R * R && origin.y <= top && origin.y >= bottom) best = 0;   // fired from inside
-    return best;
+    const o = this._toLocal(origin, _owV3).clone();
+    _owV1.copy(dir); if (this.mesh) { _owQ.copy(this.mesh.quaternion).invert(); _owV1.applyQuaternion(_owQ); }
+    let t0 = 0, t1 = maxDist;
+    const slab = (P, D, H) => {
+      if (Math.abs(D) < 1e-9) return Math.abs(P) <= H;
+      let ta = (-H - P) / D, tb = (H - P) / D;
+      if (ta > tb) { const tt = ta; ta = tb; tb = tt; }
+      if (ta > t0) t0 = ta; if (tb < t1) t1 = tb;
+      return t0 <= t1;
+    };
+    if (!slab(o.x, _owV1.x, this.bx) || !slab(o.y, _owV1.y, this.by) || !slab(o.z, _owV1.z, this.bz)) return -1;
+    return t0;
   }
   // (v38.83) a vertical column: pushed out sideways, capped by the body's height
   collide(pos, velocity, radius) {
@@ -33899,7 +33925,7 @@ function _owNetSend(dt) {
   for (const car of OW.orphans) pushCar(car, -1);
   for (const car of OW.dying) pushCar(car, (car.city && OW.cities[car.city.idx] === car.city) ? car.city.idx : -1);
   const B = OW.boss;
-  const b = B ? [B.alive ? 1 : 0, B.risen ? 1 : 0, Math.round(B.position.x), Math.round(B.position.y), Math.round(B.position.z), Math.round(B.health), Math.round(B.mesh.rotation.y * 100), Math.round(B.groundY)] : 0;
+  const b = B ? [B.alive ? 1 : 0, B.risen ? 1 : 0, Math.round(B.position.x), Math.round(B.position.y), Math.round(B.position.z), Math.round(B.health), Math.round(B.mesh.rotation.y * 100), Math.round(B.groundY), (B.def && B.def.key) || ''] : 0;   // (v38.90) b[8] = which leviathan
   _owSend({ type: 'ow_state', c, k, b, d: OW.bossDone ? 1 : 0 });
 }
 function _owApplyState(m) {
@@ -33943,7 +33969,7 @@ function _owApplyState(m) {
   for (let i = OW.dying.length - 1; i >= 0; i--) { const car = OW.dying[i]; if (car.isProxy && !seen.has(car.id)) { try { car.destroy(); } catch (_) {} } }
   const b = m.b;
   if (b) {
-    if (!OW.boss) { const boss = new OwBoss(new THREE.Vector3(b[2], b[3], b[4]), b[7]); boss.isProxy = true; OW.boss = boss; game.entities.push(boss); }
+    if (!OW.boss) { const boss = new OwBoss(new THREE.Vector3(b[2], b[3], b[4]), b[7], b[8] || null); boss.isProxy = true; OW.boss = boss; game.entities.push(boss); }   // (v38.90) the same leviathan as the authority's
     const B = OW.boss;
     B._netX = b[2]; B._netY = b[3]; B._netZ = b[4]; B.health = b[5]; B._netRot = (b[6] || 0) / 100; B.groundY = b[7];
     if (!B.risen && b[1]) B.risen = true;
@@ -41882,6 +41908,18 @@ class Projectile {
   update(dt) {
     if (!this.alive) return;
     this.age += dt;
+    // (v38.90) THE GIANT IS THE WALL. Owner: "my missiles are going through him" - watched live, every shell
+    // died of old age 30-300u short of the Leviathan's body: a 15,000u ghost fills the sky from well past any
+    // weapon's reach, so the pilot fires from where it LOOKS close. A player shell whose path meets the body
+    // flies on to land there, up to half again the distance it has already flown.
+    if (this.age > this.lifetime && !this._owExt && this.owner === 'player' && typeof OW !== 'undefined' && OW.boss && OW.boss.alive && typeof OW.boss.rayDist === 'function') {
+      this._owExt = true;
+      const _spd = this.velocity ? this.velocity.length() : 0;
+      if (_spd > 1) {
+        const _d = OW.boss.rayDist(this.position, new THREE.Vector3().copy(this.velocity).multiplyScalar(1 / _spd), 30000);
+        if (_d >= 0 && _d <= Math.max(800, this.age * _spd * 0.5)) this.lifetime = this.age + (_d + 300) / _spd;
+      }
+    }
     if (this.age > this.lifetime) {
       // Sonar beacon at end-of-life: detonate the pulse where it is
       // so it doesn't just silently vanish in mid-air.
@@ -62611,6 +62649,27 @@ function fireSpread(origin, dir, w) {
     let hitBot = false;
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === player.team) continue;
+      if (bot.isOwBoss && typeof bot.rayDist === 'function') {   // (v38.90) the leviathan: the pellet meets its body, range to the skin
+        const _bd = bot.rayDist(origin, spreadDir, Math.min(w.range, levelDist));
+        if (_bd >= 0) {
+          if (bestObst && bestObstDist < _bd) break;
+          const rangeFalloff = Math.max(0.3, 1 - (_bd / w.range) * 0.7);
+          let finalDmg = w.damage * rangeFalloff;
+          if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
+          const _hp = _spColTest.copy(origin).addScaledVector(spreadDir, _bd);
+          const dealt = bot.takeDamage(finalDmg, 'player', _hp);
+          if (dealt > 0) {
+            player.damageDealt += dealt;
+            player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
+            showHitMarker();
+            spawnImpactSparks(_hp, 3);
+            _slayerFireBurst(_hp, _slCol, i);
+          }
+          hitBot = true;
+          break;
+        }
+        continue;
+      }
       const toBot = _spToTgt.subVectors(bot.position, origin);
       const proj = toBot.dot(spreadDir);
       if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
@@ -66108,7 +66167,9 @@ function updateWorldEffects(dt) {
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === player.team) continue;
           if (eff.locked.has(bot.id)) continue;
-          if (eff.position.distanceToSquared(bot.position) >= r2) continue;
+          const _sd = (bot.isOwBoss && typeof bot.surfaceDist === 'function') ? bot.surfaceDist(eff.position)
+                    : ((bot.isOwCarrier && typeof bot.hullDist === 'function') ? bot.hullDist(eff.position) : eff.position.distanceTo(bot.position));   // (v38.89) to the body
+          if (_sd >= eff.radius) continue;
           const prevLocks = player.trackerLocks[bot.id] || 0;
           player.trackerLocks[bot.id] = Math.min(3, prevLocks + 1);
           eff.locked.add(bot.id);
