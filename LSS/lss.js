@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.87';
+const LSS_BUILD = '38.88';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -21246,7 +21246,7 @@ const OW = {
   AWAY: 4500,            // carrier this far outside the city radius = taken away
   AGGRO: 30, HUNT: 15000, STANDOFF: 1300,   // (v38.85) a hit wakes a hostile city for 30 s: fighters break formation onto the attacker, the carrier hunts them out to 15,000u and parks 1,300u off
   FIELD_BUILD: 120, FIELD_CHARGE: 10, RESPAWN: 45, LEASH: 9000,
-  FOLLOW: { back: 2200, up: 300, side: 700, wander: 350, band: 900, vz: 80, spd: 330, accel: 90, jump: 9000, spread: 2600, sep: 2200 },
+  FOLLOW: { back: 2200, up: 300, side: 700, wander: 350, band: 900, vz: 80, spd: 330, accel: 90, jump: 9000, jumpCd: 45, catchup: 1.35, spread: 2600, sep: 2200 },
   BOSS: { key: 'GraveTitan', hpX: 80, size: 15000, rise: 14, zapEvery: 1.2, zapN: 4, zapDmg: 900, zapRange: 4200,
           lanceEvery: 9, lanceRange: 10500, lanceDmg: 1600, touchDmg: 600, spd: 70, touch: 0.42 },
   NET: { hz: 4 },
@@ -21693,12 +21693,14 @@ class OwCarrier {
       tx = o.position.x - this._fhx * back + rx * lat; tz = o.position.z - this._fhz * back + rz * lat; ty = o.position.y + up;
       spd = _owK().followSpd || OW.FOLLOW.spd;
       const d = Math.hypot(tx - this.position.x, tz - this.position.z);
-      if (d > OW.FOLLOW.jump) {   // left far behind: a carrier cannot out-fly a fighter, so it jumps
+      this._jumpT = Math.max(0, (this._jumpT || 0) - dt);
+      if (d > (K2.followJump || F.jump) && this._jumpT <= 0) {   // left far behind: a carrier cannot out-fly a fighter, so it jumps - once per cooldown
+        this._jumpT = (K2.followJumpCd != null) ? K2.followJumpCd : F.jumpCd;
         this.position.set(tx, Math.max(ty, this.position.y), tz);
         this.rideY = null;
         _owWarpFx(this.position.clone(), 700);
         _owSend({ type: 'ow_evt', k: 'warp', p: [Math.round(this.position.x), Math.round(this.position.y), Math.round(this.position.z)], r: 700 });
-      }
+      } else if (d > 5000) spd *= F.catchup;   // (v38.88) the jump is spent: lean on the engines instead
     } else {
       const hunt = (c.owner == null) ? _owAggroTarget(c) : null;
       const hd = hunt ? Math.hypot(hunt.position.x - this.position.x, hunt.position.z - this.position.z) : 1e9;
@@ -22429,6 +22431,29 @@ class OwBoss {
     this._gone = true;
     try { if (this.mesh) scene.remove(this.mesh); } catch (_) {}
     const i = game.entities.indexOf(this); if (i >= 0) game.entities.splice(i, 1);
+  }
+  contains(p, margin) {
+    if (!this.alive) return false;
+    const m = margin || 0;
+    if (Math.abs(p.y - this.position.y) > this.halfH * 0.95 + m) return false;
+    const dx = p.x - this.position.x, dz = p.z - this.position.z;
+    return dx * dx + dz * dz <= (this.colR + m) * (this.colR + m);
+  }
+  rayDist(origin, dir, maxDist) {
+    if (!this.alive) return -1;
+    const R = this.colR, top = this.position.y + this.halfH * 0.95, bottom = this.position.y - this.halfH * 0.95;
+    let best = -1;
+    const take = (t) => { if (t >= 0 && t <= maxDist && (best < 0 || t < best)) best = t; };
+    const ox = origin.x - this.position.x, oz = origin.z - this.position.z, a = dir.x * dir.x + dir.z * dir.z;
+    if (a > 1e-8) {
+      const b = 2 * (ox * dir.x + oz * dir.z), c = ox * ox + oz * oz - R * R, disc = b * b - 4 * a * c;
+      if (disc >= 0) { const t = (-b - Math.sqrt(disc)) / (2 * a); const y = origin.y + dir.y * t; if (y <= top && y >= bottom) take(t); }
+    }
+    if (Math.abs(dir.y) > 1e-6) {
+      for (const yy of [top, bottom]) { const t = (yy - origin.y) / dir.y; const hx = origin.x + dir.x * t - this.position.x, hz = origin.z + dir.z * t - this.position.z; if (hx * hx + hz * hz <= R * R) take(t); }
+    }
+    if (best < 0 && ox * ox + oz * oz <= R * R && origin.y <= top && origin.y >= bottom) best = 0;   // fired from inside
+    return best;
   }
   collide(pos, velocity, radius) {
     if (!this.alive) return;
@@ -28884,7 +28909,9 @@ class Projectile {
         const hasShield = bot.shield > 0;
         const _usesSplashSlop = (this.splash || 0) >= 25;
         let isHit;
-        if (hasShield || _usesSplashSlop) {
+        if (bot.isOwBoss && typeof bot.contains === 'function') {
+          isHit = bot.contains(this.position, 30);   // (v38.88) the leviathan: its column, not a sphere round its centre
+        } else if (hasShield || _usesSplashSlop) {
           isHit = this.position.distanceToSquared(bot.position) < hitRadius * hitRadius;
         } else {
           const inBroadOBB = _pointInsideShipOBB(this.position, bot, _PROJ_HIT_MARGIN);   // (v38.61) hoisted literal
@@ -43347,6 +43374,15 @@ function fireHitscan(origin, dir, w) {
   const lineMax = Math.min(w.range, levelDist, bestObstacle ? bestObstDist : Infinity);
   for (const bot of game.entities) {
     if (!bot.alive || bot.team === player.team) continue;
+    if (bot.isOwBoss && typeof bot.rayDist === 'function') {   // (v38.88) the leviathan: the beam meets its column
+      let _bd = -1;
+      try { _bd = bot.rayDist(origin, aimDir, Math.min(w.range, lineMax + 24)); } catch (_) {}
+      if (_bd >= 0 && _bd <= lineMax + 24) {
+        if (isPiercing) pierceHits.push({ bot, proj: _bd });
+        else if (_bd < bestDist) { bestHit = bot; bestDist = _bd; }
+      }
+      continue;
+    }
     if (bot.isOwCarrier && typeof bot.rayDist === 'function') {   // (v38.78) a city carrier: march the beam against its hull box
       let _cd = -1;
       try { _cd = bot.rayDist(origin, aimDir, Math.min(w.range, lineMax + 24)); } catch (_) {}
