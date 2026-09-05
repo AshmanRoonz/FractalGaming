@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.81';
+const LSS_BUILD = '38.82';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -32520,7 +32520,7 @@ const OW = {
   REGEN: { delay: 6, rate: 0.02 },   // (v38.81) an owned carrier repairs 2%/s of max after 6 s without a hit
   AWAY: 4500,            // carrier this far outside the city radius = taken away
   FIELD_BUILD: 120, FIELD_CHARGE: 10, RESPAWN: 45, LEASH: 9000,
-  FOLLOW: { back: 1400, up: 420, spd: 330, accel: 90, jump: 9000 },   // (v38.81) 330 u/s cruise, 90 u/s^2 - owner: "the carrier is too fast moving"
+  FOLLOW: { back: 1400, up: 420, spd: 330, accel: 90, jump: 9000, spread: 2600, sep: 2200 },   // (v38.81) 330 u/s cruise, 90 u/s^2; (v38.82) one slot per carrier, 2,600u across the beam, 2,200u keep-apart
   BOSS: { key: 'GraveTitan', hpX: 80, size: 15000, rise: 14, zapEvery: 1.5, zapDmg: 900, zapRange: 4200, spd: 70, touch: 0.42 },   // 900 every 1.5 s: ~25 s to kill a parked fighter, and it spreads its fire over every ship in reach
   NET: { hz: 4 },
   TEAM0: 9600,
@@ -32941,13 +32941,20 @@ class OwCarrier {
     const o = this.owner;
     const ownerUp = o && o.position && (o === player ? player.shipState !== 'dead' : (!!o.alive && game.entities.indexOf(o) >= 0 && o.position.lengthSq() > 1));
     if (this.mode === 'follow' && ownerUp) {
-      // ride behind and above the owner, on the side away from their motion
+      // ride behind and above the owner, on the side away from their motion; the heading is
+      // remembered while they move so a parked pilot keeps the same formation
       const v = o.velocity;
-      if (v && (v.x * v.x + v.z * v.z) > 40 * 40) {
-        const L = Math.hypot(v.x, v.z);
-        this._followOff.set(-v.x / L * OW.FOLLOW.back, OW.FOLLOW.up, -v.z / L * OW.FOLLOW.back);
-      }
-      tx = o.position.x + this._followOff.x; tz = o.position.z + this._followOff.z; ty = o.position.y + this._followOff.y;
+      if (v && (v.x * v.x + v.z * v.z) > 40 * 40) { const L = Math.hypot(v.x, v.z); this._fhx = v.x / L; this._fhz = v.z / L; }
+      if (this._fhx == null) { let hx = -this.dir.x, hz = -this.dir.z; const L0 = Math.hypot(hx, hz) || 1; this._fhx = hx / L0; this._fhz = hz / L0; }
+      // (v38.82) ONE SLOT PER CARRIER. Owner: "the carriers merged, 2 became 1... they need to fly way
+      // further apart". Every following carrier of this pilot takes a slot in an echelon: further
+      // back, spread across the beam, and stepped up, so two flagships never share a point.
+      const F = OW.FOLLOW, K2 = _owK();
+      const fl = _owFollowers(this.team); let si = fl.indexOf(this); if (si < 0) si = 0; const sn = Math.max(1, fl.length);
+      const lat = (si - (sn - 1) / 2) * (K2.followSpread || F.spread);
+      const back = F.back + si * 500, up = F.up + si * 220;
+      const rx = this._fhz, rz = -this._fhx;   // the right-hand perpendicular in the horizontal plane
+      tx = o.position.x - this._fhx * back + rx * lat; tz = o.position.z - this._fhz * back + rz * lat; ty = o.position.y + up;
       spd = _owK().followSpd || OW.FOLLOW.spd;
       const d = Math.hypot(tx - this.position.x, tz - this.position.z);
       if (d > OW.FOLLOW.jump) {   // left far behind: a carrier cannot out-fly a fighter, so it jumps
@@ -33165,6 +33172,35 @@ class OwCarrier {
     };
     if (!slab(P0, D0, H0) || !slab(P1, D1, H1) || !slab(P2, D2, H2)) return -1;
     return t0;
+  }
+}
+// the carriers following one pilot's team, in a stable order (formation slots come from the index)
+function _owFollowers(team) {
+  const out = [];
+  const C = OW.cities; if (!C) return out;
+  for (let i = 0; i < C.length; i++) { const car = C[i].carrier; if (car && car.alive && car.mode === 'follow' && car.team === team) out.push(car); }
+  for (let i = 0; i < OW.orphans.length; i++) { const car = OW.orphans[i]; if (car.alive && car.mode === 'follow' && car.team === team) out.push(car); }
+  out.sort((a, b) => (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0)));
+  return out;
+}
+// (v38.82) capital hulls keep apart: eased, horizontal, whatever formation or orbit put them close
+function _owSeparate(dt) {
+  const list = [];
+  const C = OW.cities; if (!C) return;
+  for (let i = 0; i < C.length; i++) { const car = C[i].carrier; if (car && car.alive && !car.isProxy && car.mesh) list.push(car); }
+  for (let i = 0; i < OW.orphans.length; i++) { const car = OW.orphans[i]; if (car.alive && !car.isProxy && car.mesh) list.push(car); }
+  if (list.length < 2) return;
+  const sep = _owK().carrierSep || OW.FOLLOW.sep;
+  for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+    const a = list[i], b = list[j];
+    const dx = b.position.x - a.position.x, dz = b.position.z - a.position.z;
+    const d = Math.hypot(dx, dz);
+    if (d >= sep) continue;
+    const push = (sep - d) * 0.5 * Math.min(1, dt * 3);
+    let nx, nz;
+    if (d > 1) { nx = dx / d; nz = dz / d; } else { const a0 = (i * 2.399 + j) % 6.283; nx = Math.cos(a0); nz = Math.sin(a0); }
+    a.position.x -= nx * push; a.position.z -= nz * push; b.position.x += nx * push; b.position.z += nz * push;
+    a.mesh.position.copy(a.position); b.mesh.position.copy(b.position);
   }
 }
 function _owFindCarrier(id) {
@@ -33885,6 +33921,7 @@ function _owFrame(dt) {
   if (auth) {
     for (let i = 0; i < C.length; i++) { try { _owCityTick(C[i], dt, playing); } catch (e) { if (!C[i]._err) { C[i]._err = true; console.warn('[cities] city tick threw:', C[i].name, e); } } }
     for (let i = OW.orphans.length - 1; i >= 0; i--) { const car = OW.orphans[i]; if (!car.alive) { OW.orphans.splice(i, 1); continue; } if (car.mode === 'follow' && !car.owner) car.owner = _owOwnerEntity(car.team); car.tick(dt); }
+    _owSeparate(dt);   // (v38.82)
     if (OW.boss) {
       if (OW.boss.alive) OW.boss.tick(dt);
       else if (OW.boss._gone) OW.boss = null;
