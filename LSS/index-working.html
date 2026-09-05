@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.82';
+const LSS_BUILD = '38.83';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -32521,7 +32521,11 @@ const OW = {
   AWAY: 4500,            // carrier this far outside the city radius = taken away
   FIELD_BUILD: 120, FIELD_CHARGE: 10, RESPAWN: 45, LEASH: 9000,
   FOLLOW: { back: 1400, up: 420, spd: 330, accel: 90, jump: 9000, spread: 2600, sep: 2200 },   // (v38.81) 330 u/s cruise, 90 u/s^2; (v38.82) one slot per carrier, 2,600u across the beam, 2,200u keep-apart
-  BOSS: { key: 'GraveTitan', hpX: 80, size: 15000, rise: 14, zapEvery: 1.5, zapDmg: 900, zapRange: 4200, spd: 70, touch: 0.42 },   // 900 every 1.5 s: ~25 s to kill a parked fighter, and it spreads its fire over every ship in reach
+  BOSS: { key: 'GraveTitan', hpX: 80, size: 15000, rise: 14, zapEvery: 1.2, zapN: 4, zapDmg: 900, zapRange: 4200,
+          lanceEvery: 9, lanceRange: 10500, lanceDmg: 1600, touchDmg: 600, spd: 70, touch: 0.42 },
+  // (v38.83) owner: "zap a lot more of the ships" -> up to 4 bolts every 1.2 s at the nearest ships; "randomly have a
+  // longer ranged attack" -> the lance, every 6-14 s at a ship out to 10,500u; "if you touch it... you get damaged"
+  // -> 600 on contact for every ship, 0.8 s per ship; "the lightning causes explosions where it hits" -> _owZapFx
   NET: { hz: 4 },
   TEAM0: 9600,
   XP: { carrier: 5, boss: 30 },
@@ -32794,10 +32798,12 @@ function _owFleetTick(c, dt) {
 function _owZapFx(from, to, boss) {
   try {
     if (boss) {
-      spawnLightningBolt(from.clone(), to.clone(), 0xff5a4a, 0.3, 4, 7, true);
-      spawnLightningBolt(from.clone(), to.clone(), 0xffd0a0, 0.16, 2, 3, true);
-      if (typeof v8SpawnSparks === 'function') v8SpawnSparks(to, 14, 1.4, 320, 0xff5a4a, 0xffffff);
-      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(to, 0xff5a4a, 4.0, 1200, 0.2);
+      const lance = boss === 2;
+      spawnLightningBolt(from.clone(), to.clone(), 0xff5a4a, lance ? 0.55 : 0.3, lance ? 6 : 4, lance ? 11 : 7, true);
+      spawnLightningBolt(from.clone(), to.clone(), 0xffd0a0, lance ? 0.3 : 0.16, 2, lance ? 5 : 3, true);
+      if (typeof v8SpawnSparks === 'function') v8SpawnSparks(to, lance ? 22 : 14, 1.4, 320, 0xff5a4a, 0xffffff);
+      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(to, 0xff5a4a, lance ? 6.0 : 4.0, lance ? 2000 : 1200, 0.25);
+      try { spawnExplosion(to.clone(), lance ? 420 : 240); } catch (_) {}   // (v38.83) the strike bursts where it lands
       if (typeof playSpatialSound === 'function') playSpatialSound('monster_zap', to.clone(), { refDistance: 900, maxDistance: 20000, rolloffFactor: 0.8 });
     } else {
       const col = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66;
@@ -33266,7 +33272,7 @@ function _owShow(e) {
     case 'wake': _owBanner('SIX CITIES HELD', 'Something enormous is waking beneath the ground'); fanfare = true; try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {} break;
     case 'rise': _owBanner('THE LEVIATHAN RISES', 'Six fleets against one'); fanfare = true; break;
     case 'slain': _owBanner('LEVIATHAN SLAIN', 'The overworld is yours'); fanfare = true; break;
-    case 'zap': if (Array.isArray(e.f) && Array.isArray(e.t)) { _owV2.set(e.f[0], e.f[1], e.f[2]); _owV3.set(e.t[0], e.t[1], e.t[2]); _owZapFx(_owV2, _owV3, !!e.b); } break;
+    case 'zap': if (Array.isArray(e.f) && Array.isArray(e.t)) { _owV2.set(e.f[0], e.f[1], e.f[2]); _owV3.set(e.t[0], e.t[1], e.t[2]); _owZapFx(_owV2, _owV3, e.b ? (e.l ? 2 : 1) : 0); } break;
     case 'warp': if (Array.isArray(e.p)) _owWarpFx(new THREE.Vector3(e.p[0], e.p[1], e.p[2]), e.r || 800); break;
     default: break;
   }
@@ -33469,7 +33475,9 @@ class OwBoss {
     this.halfH = this.size * 0.4;
     this.chassis = { hullWidth: this.size * 0.5, hullHeight: this.size * 0.8, hullLength: this.size * 0.33, hullRadius: this.size * 0.33, flightSpeed: 70 };
     this.collisionRadius = this.size * OW.BOSS.touch * 0.7;
-    this.zapT = 3; this.touchCd = 0; this._hitT = -1; this._lastAttacker = null;
+    this.zapT = 3; this.lanceT = 6; this.touchCd = 0; this._hitT = -1; this._lastAttacker = null;
+    this._touch = new Map();   // (v38.83) per-ship contact cooldowns
+    this.colR = this.size * 0.16;   // (v38.83) the column collider's radius (set from the model in _attach)
     this.mesh = new THREE.Group(); this.mesh.position.copy(this.position); scene.add(this.mesh);
     this._mixer = null; this._sink = -1; this._gone = false;
     this._netX = null; this._netY = 0; this._netZ = 0; this._netRot = 0;
@@ -33486,11 +33494,25 @@ class OwBoss {
   }
   _attach(obj, clips) {
     if (this._gone) return;
-    const tint = new THREE.Color(this.def.gut2 || 0x5a2c20);
+    // (v38.83) THE GHOST SKIN - the same spectral treatment as every leviathan (owner: "the giant leviathan
+    // needs to be ghost effect"): unlit map + fresnel ghost tint, see-through, scanlines
+    const _ghCol = (this.def && this.def.ghost != null) ? this.def.ghost : 0xc9b8ff;
     obj.traverse(n => {
       if (!n.isMesh || !n.material) return;
       const ms = Array.isArray(n.material) ? n.material : [n.material];
-      for (const m of ms) { if (!m) continue; if (m.emissive) { m.emissive.copy(tint); m.emissiveIntensity = 0.35; } }
+      const out = [];
+      for (const m of ms) {
+        if (!m) { out.push(m); continue; }
+        try {
+          const flat = new THREE.MeshBasicMaterial({ map: m.map || null, color: (m.color && m.map) ? 0xffffff : ((m.color && m.color.getHex()) || 0x888888) });
+          if (!m.map) flat.color.multiplyScalar(0.85);
+          if (typeof _addSpectralGhost === 'function') _addSpectralGhost(flat, _ghCol);
+          out.push(flat);
+          try { if (m.dispose) m.dispose(); } catch (_) {}
+        } catch (_) { out.push(m); }
+      }
+      n.material = Array.isArray(n.material) ? out : out[0];
+      n.renderOrder = 3;
       n.frustumCulled = false; n.castShadow = false; n.receiveShadow = false;
     });
     const box = new THREE.Box3().setFromObject(obj);
@@ -33507,7 +33529,10 @@ class OwBoss {
     // kept to a third of the size or every rocket would burst kilometres short of the body
     this.chassis.hullWidth = sz.x * s; this.chassis.hullHeight = sz.y * s; this.chassis.hullLength = this.size * 0.33;
     this.chassis.hullRadius = this.size * 0.33;
-    this.collisionRadius = Math.max(sz.x, sz.z) * s * 0.5 * 0.55;
+    // (v38.83) a standing titan is a COLUMN, not a ball: the collider is a vertical cylinder on the
+    // narrower footprint axis, so ships touch the body where the body is
+    this.colR = Math.min(sz.x, sz.z) * s * 0.5 * 0.6;
+    this.collisionRadius = this.colR;
     try {
       if (clips && clips.length && THREE.AnimationMixer) {
         this._mixer = new THREE.AnimationMixer(obj);
@@ -33530,6 +33555,7 @@ class OwBoss {
     this.mesh.rotation.y += dy * Math.min(1, dt * 3);
     this.mesh.position.copy(this.position);
     if (!this.risen && Math.random() < dt * 9) this._riseDust();
+    if (typeof _monGhostTimeU !== 'undefined' && (!game.monsters || !game.monsters.length)) _monGhostTimeU.value = (_monGhostTimeU.value + Math.min(dt, 0.1)) % 3600;
   }
   _riseDust() {
     const a = Math.random() * Math.PI * 2, r = this.size * (0.12 + Math.random() * 0.3);
@@ -33566,11 +33592,22 @@ class OwBoss {
       let dy = yaw - this.mesh.rotation.y;
       while (dy > Math.PI) dy -= Math.PI * 2; while (dy < -Math.PI) dy += Math.PI * 2;
       this.mesh.rotation.y += dy * Math.min(1, dt * 0.8);
-      this.zapT -= dt;
-      if (this.zapT <= 0 && tgt.dist < (K.zapRange || B.zapRange) + this.size * 0.3) {
-        this.zapT = (K.zapEvery || B.zapEvery) * (0.85 + Math.random() * 0.3);
-        this._zap(tgt);
-      }
+    }
+    // (v38.83) THE STORM: up to zapN bolts a cycle at the nearest ships in reach, and now and then the
+    // LANCE - one far bolt at a ship beyond the storm's reach
+    this.zapT -= dt;
+    if (this.zapT <= 0) {
+      this.zapT = (K.zapEvery || B.zapEvery) * (0.85 + Math.random() * 0.3);
+      const reach = (K.zapRange || B.zapRange) + this.colR;
+      const tg = _owBossTargets(this, reach, K.zapN || B.zapN);
+      for (let i = 0; i < tg.length; i++) this._zap(tg[i], false);
+    }
+    this.lanceT -= dt;
+    if (this.lanceT <= 0) {
+      this.lanceT = (K.lanceEvery || B.lanceEvery) * (0.6 + Math.random() * 0.8);
+      const near = (K.zapRange || B.zapRange) + this.colR;
+      const far = _owBossTargets(this, K.lanceRange || B.lanceRange, 8).filter(t => t.dist > near * 0.8);
+      if (far.length) this._zap(far[Math.floor(Math.random() * far.length)], true);
     }
     let gy = this.groundY;
     try { const T = game.sandwichTerrain; if (T && T.ON) { const h = _stGroundYCarved(this.position.x, this.position.z, T); if (isFinite(h)) gy = h; } } catch (_) {}
@@ -33580,22 +33617,45 @@ class OwBoss {
     const wantY = gy + halfH * 0.75;
     this.position.y += (wantY - this.position.y) * Math.min(1, dt * 1.5);
     this.mesh.position.copy(this.position);
-    // contact: the body itself hurts and shoves (the local pilot; peers feel their own proxy's collider)
-    this.touchCd -= dt;
-    if (this.touchCd <= 0 && player.shipState !== 'dead' && player.position.distanceTo(this.position) < this.collisionRadius + 120) {
-      this.touchCd = 0.8;
-      try { playerTakeDamage((K.zapDmg || B.zapDmg) * 0.5, this); } catch (_) {}
-      _owV1.subVectors(player.position, this.position); const L = _owV1.length(); if (L > 0.001 && player.velocity) player.velocity.addScaledVector(_owV1.multiplyScalar(1 / L), 600);
-    }
+    this._contact(dt);
+    if (typeof _monGhostTimeU !== 'undefined' && (!game.monsters || !game.monsters.length)) _monGhostTimeU.value = (_monGhostTimeU.value + Math.min(dt, 0.1)) % 3600;   // the ghost skin's clock, when no leviathan pack runs it
   }
-  _zap(tgt) {
+  // (v38.83) CONTACT. Owner: "if you touch it or it touches your ship then you get damaged". Every ship
+  // (the pilot, other pilots, fleets, carriers) inside the column takes touchDmg every 0.8 s and is shoved.
+  _touching(pos, radius) {
+    const dx = pos.x - this.position.x, dz = pos.z - this.position.z;
+    if (Math.hypot(dx, dz) > this.colR + radius + 90) return false;
+    return Math.abs(pos.y - this.position.y) < this.halfH * 0.95 + radius + 60;
+  }
+  _contact(dt) {
+    const K = _owK().boss || {}, B = OW.BOSS;
+    const now = game.time || 0, dmg = K.touchDmg || B.touchDmg;
+    const hit = (key, ent, isPlayer) => {
+      const last = this._touch.get(key) || -10;
+      if (now - last < 0.8) return;
+      this._touch.set(key, now);
+      try { if (isPlayer) playerTakeDamage(dmg, this); else if (typeof ent.takeDamage === 'function') { const dealt = ent.takeDamage(dmg, this, ent.position); if (dealt > 0) this.damageDealt += dealt; } } catch (_) {}
+      _owV1.set(ent.position.x - this.position.x, 0, ent.position.z - this.position.z); const L = _owV1.length();
+      if (L > 0.001 && ent.velocity) ent.velocity.addScaledVector(_owV1.multiplyScalar(1 / L), 600);
+      try { if (typeof v8SpawnSparks === 'function') v8SpawnSparks(ent.position, 10, 1.4, 300, 0xff5a4a, 0xffffff); } catch (_) {}
+    };
+    if (player.shipState !== 'dead' && player.shipState !== 'spawning' && this._touching(player.position, 40)) hit('me', player, true);
+    for (const e of game.entities) {
+      if (!e || e === this || !e.alive || !e.position || e.isHubTraffic || e.isOwBoss) continue;
+      const r = (e.chassis && e.chassis.hullRadius) ? Math.min(e.chassis.hullRadius, 900) : 40;
+      if (this._touching(e.position, r)) hit(e.id != null ? e.id : e, e, false);
+    }
+    if (this._touch.size > 64) { for (const [k, t] of this._touch) if (now - t > 5) this._touch.delete(k); }
+  }
+  _zap(tgt, lance) {
     let victim = tgt.ent || null;
     if (!victim && tgt.isLocal) victim = player;
-    const from = _owV1.copy(tgt.pos).sub(this.position).normalize().multiplyScalar(this.size * 0.28).add(this.position); from.y += this.size * 0.18;
+    const from = _owV1.copy(tgt.pos).sub(this.position).normalize().multiplyScalar(this.colR * 0.9).add(this.position); from.y += this.halfH * (0.15 + Math.random() * 0.5);
     const to = _owV2.copy(tgt.pos);
-    _owZapFx(from, to, true);
-    _owSend({ type: 'ow_evt', k: 'zap', f: [Math.round(from.x), Math.round(from.y), Math.round(from.z)], t: [Math.round(to.x), Math.round(to.y), Math.round(to.z)], b: 1 });
-    const dmg = (_owK().boss && _owK().boss.zapDmg) || OW.BOSS.zapDmg;
+    _owZapFx(from, to, lance ? 2 : 1);
+    _owSend({ type: 'ow_evt', k: 'zap', f: [Math.round(from.x), Math.round(from.y), Math.round(from.z)], t: [Math.round(to.x), Math.round(to.y), Math.round(to.z)], b: 1, l: lance ? 1 : 0 });
+    const KB = _owK().boss || {};
+    const dmg = lance ? (KB.lanceDmg || OW.BOSS.lanceDmg) : (KB.zapDmg || OW.BOSS.zapDmg);
     try {
       if (victim === player) playerTakeDamage(dmg, this);
       else if (victim && typeof victim.takeDamage === 'function') { const dealt = victim.takeDamage(dmg, this, victim.position); if (dealt > 0) this.damageDealt += dealt; }
@@ -33659,15 +33719,17 @@ class OwBoss {
     try { if (this.mesh) scene.remove(this.mesh); } catch (_) {}
     const i = game.entities.indexOf(this); if (i >= 0) game.entities.splice(i, 1);
   }
+  // (v38.83) a vertical column: pushed out sideways, capped by the body's height
   collide(pos, velocity, radius) {
     if (!this.alive) return;
-    const dx = pos.x - this.position.x, dy = pos.y - this.position.y, dz = pos.z - this.position.z;
-    const d2 = dx * dx + dy * dy + dz * dz, R = this.collisionRadius + radius;
-    if (d2 >= R * R || d2 < 1) return;
-    const d = Math.sqrt(d2), nx = dx / d, ny = dy / d, nz = dz / d;
-    const push = R - d + 1;
-    pos.x += nx * push; pos.y += ny * push; pos.z += nz * push;
-    if (velocity) { const vn = velocity.x * nx + velocity.y * ny + velocity.z * nz; if (vn < 0) { velocity.x -= nx * vn * 1.1; velocity.y -= ny * vn * 1.1; velocity.z -= nz * vn * 1.1; } }
+    if (Math.abs(pos.y - this.position.y) > this.halfH * 0.95 + radius) return;
+    const dx = pos.x - this.position.x, dz = pos.z - this.position.z;
+    const d2 = dx * dx + dz * dz, R = this.colR + radius;
+    if (d2 >= R * R) return;
+    let nx, nz; if (d2 > 1) { const d = Math.sqrt(d2); nx = dx / d; nz = dz / d; } else { nx = 1; nz = 0; }
+    const d = Math.sqrt(Math.max(d2, 0)), push = R - d + 1;
+    pos.x += nx * push; pos.z += nz * push;
+    if (velocity) { const vn = velocity.x * nx + velocity.z * nz; if (vn < 0) { velocity.x -= nx * vn * 1.1; velocity.z -= nz * vn * 1.1; } }
   }
 }
 // the nearest ship of any kind (the pilot, other pilots, every fleet and carrier) - never the boss itself
@@ -33682,6 +33744,19 @@ function _owBossTarget(boss) {
     if (d < bestD) { bestD = d; bestPos = e.position; bestLocal = false; bestEnt = e; }
   }
   return bestPos ? { pos: bestPos, dist: bestD, isLocal: bestLocal, ent: bestEnt } : null;
+}
+// the nearest n ships within `range` of the boss (the pilot, every entity that is a ship); the boss itself never
+function _owBossTargets(boss, range, n) {
+  const out = [];
+  if (typeof player !== 'undefined' && player && player.position && player.shipState !== 'dead' && player.shipState !== 'spawning') {
+    const d = boss.position.distanceTo(player.position); if (d <= range) out.push({ pos: player.position, dist: d, isLocal: true, ent: player });
+  }
+  for (const e of game.entities) {
+    if (!e || e === boss || !e.alive || !e.position || e.isHubTraffic || e.isOwBoss) continue;
+    const d = boss.position.distanceTo(e.position); if (d <= range) out.push({ pos: e.position, dist: d, isLocal: false, ent: e });
+  }
+  out.sort((a, b) => a.dist - b.dist);
+  return out.slice(0, Math.max(1, n | 0));
 }
 function _owBossCheck() {
   if (OW.boss || OW.bossDone || !OW.cities || !_owAuthority()) return;
