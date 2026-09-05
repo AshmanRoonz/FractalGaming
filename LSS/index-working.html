@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.77';
+const LSS_BUILD = '38.78';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -9562,6 +9562,7 @@ function _applyStartView() {
 // no win-gate. Solo for P1 (no co-op handshake). Mirrors startCampaign's solo path.
 function startFreeFlight() {
   LSS.MODE = 'freeflight';
+  try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}   // (v38.78) every free flight starts with six hostile cities
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}   
   
   
@@ -10114,12 +10115,20 @@ function _campHoardTerrainNav(bot, dt) {
   // intercepting). Guards instead hold the TARGET's altitude, floored above
   // the terrain AHEAD so ridges never catch the run-in.
   if (bot._riftGuard) desiredY = Math.max(Math.max(fc, fa) + Math.max(120, safe), Math.min(hiA, tY));
+  // (v38.78) A CITY FLEET FLIES TO ITS SLOT. Its aiTarget is the formation Vector3 (no .position), which
+  // the line above reads as 'no target' = mid-gap hover; and the hub's open-top 'ceiling' is a number
+  // (~3,000u) that would keep the escorts under a carrier orbiting above the towers.
+  const _owBot = (bot._owCity != null);
+  if (_owBot) {
+    const _oy = (tgt && tgt.position) ? tgt.position.y : ((tgt && tgt.isVector3) ? tgt.y : midNow);
+    desiredY = Math.max(Math.max(fc, fa) + Math.max(120, safe), T._openTop ? _oy : Math.min(hiA, _oy));
+  }
   const vsp = (bot.chassis && bot.chassis.verticalSpeed) || 300;
   const desiredVY = Math.max(-vsp, Math.min(vsp, (desiredY - p.y) * 1.3));
   bot.velocity.y += (desiredVY - bot.velocity.y) * Math.min(1, dt * 3.5);
   // Loose anti-embed safety ONLY (no working margin) so it never fights the
   // collision solver inside the crack; the steering above does the centring.
-  if (p.y < fc + 10) p.y = fc + 10; else if (p.y > cc - 10) p.y = cc - 10;
+  if (p.y < fc + 10) p.y = fc + 10; else if (p.y > cc - 10 && !(_owBot && T._openTop)) p.y = cc - 10;   // (v38.78) no sky cap for a city fleet in the hub
 }
 function spawnCampaignWave(waveIndex) {
   if (!game.campaign || typeof Bot === 'undefined') return;
@@ -23510,6 +23519,7 @@ function _swBuildGrass(x0,z0,T){
   const CR=game.sandwichGrassClump||34;   
   for(let j=0;j<N;j++)for(let i=0;i<N;i++){
     const ax=x0+(i+Math.random())*step, az=z0+(j+Math.random())*step, ay=_stGroundYGrid(ax,az,T);
+    if(T.HUB && typeof _owExcludes === 'function' && _owExcludes(ax,az)) continue;   // (v38.78) overworld city pads
     if(T.HUB && _hubCityExcludes(ax,az) && (typeof _hubCityGroundBlocked !== 'function' || _hubCityGroundBlocked(ax,az))) continue;
     // (v35.13) Mossy grass is heartland flora — deep zones (snow, crystal,
     // volcanic...) grow their own ground cover instead of green blades.
@@ -23883,6 +23893,7 @@ function _swBuildTrees(x0,z0,T){
   for(let j=0;j<N;j++)for(let i=0;i<N;i++){
     const x=x0+(i+Math.random())*step, z=z0+(j+Math.random())*step, y=_stGroundYGrid(x,z,T);
     if(T.HUB && _hubCityExcludes(x,z)) continue;
+    if(T.HUB && typeof _owExcludes === 'function' && _owExcludes(x,z)) continue;   // (v38.78)
     if(T.WL!=null && y<T.WL+20) continue;
     const zn=T.HUB?_hzZoneForFoliage(x,z):null;
     const kind=zn?((zn.key==='snow')?'snow':((zn.key==='crystalcave'||zn.key==='rocky')?'shroom':'std')):'std';
@@ -27910,6 +27921,7 @@ function _swDisposeHubWater() {
 // Drop every built chunk (map change / terrain off), restoring atmosphere too.
 function resetSandwichTerrain() {
   try { _hubCityDispose(); } catch (_) {}
+  try { if (typeof _owDispose === 'function') _owDispose(); } catch (_) {}   // (v38.78) the overworld cities go with the terrain
   if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) _swDisposeChunk(c);
   game.sandwichChunks = new Map();
   try { _swApplyAtmosphere(); } catch (_) {}
@@ -28067,11 +28079,18 @@ function _hubCityExcludes(x, z) {
 // structure / facade / roofscape / connective layers. Output = per-kind
 // instance arrays (12 floats: x,y,z, sx,sy,sz, yaw, r,g,b, mode, rnd),
 // landing-pad list, park-tree points, solid-collider hash and ground canvases.
-function _hubCityBuild(g) {
+function _hubCityBuild(g, site) {
   const t0 = performance.now();
   const rng = _hcMulberry32(g.seed);
   const R = g.radius;
-  const CX = HUB_CITY.x, CZ = HUB_CITY.z, PY = HUB_CITY.padY;
+  // (v38.78) OVERWORLD CITIES: the generator takes a SITE (centre, pad height, palette) so the six
+  // satellite cities come out of the same pipeline. No site = the hub, byte-identical.
+  const _site = site || HUB_CITY;
+  const CX = _site.x, CZ = _site.z, PY = _site.padY;
+  const _pal = _site.palette || null;
+  const _HC_FACADE_L = (_pal && _pal.facade) || _HC_FACADE;
+  const _HC_NEON_L = (_pal && _pal.neon) || _HC_NEON;
+  const _HC_METAL_L = (_pal && _pal.metal) || _HC_METAL;
   const _full = !((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
                   (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE));
   const dens = g.density * (_full ? 1 : 0.62);
@@ -28152,13 +28171,13 @@ function _hubCityBuild(g) {
     else if (face === 1) { lz = -d / 2 - 10; lx = (rng() - 0.5) * w * 0.35; }
     else if (face === 2) { lx =  w / 2 + 10; lz = (rng() - 0.5) * d * 0.35; fyaw = yaw + Math.PI / 2; }
     else                 { lx = -w / 2 - 10; lz = (rng() - 0.5) * d * 0.35; fyaw = yaw + Math.PI / 2; }
-    const c = pick(_HC_NEON);
+    const c = pick(_HC_NEON_L);
     L.holo.push(x + ca * lx - sa * lz, y, z + sa * lx + ca * lz, bw2, bh2, 1, fyaw, c[0], c[1], c[2], 0, rng());
   };
   // vertical neon strips up the 4 tower edges + a 4-strip parapet outline
   const neonEdges = (x, y, z, w, h, d, yaw, prob) => {
     const ca = Math.cos(yaw), sa = Math.sin(yaw);
-    const c = pick(_HC_NEON);
+    const c = pick(_HC_NEON_L);
     for (const [su, sv] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
       if (rng() > prob) continue;
       const lx = su * w * 0.5, lz = sv * d * 0.5;
@@ -28180,7 +28199,7 @@ function _hubCityBuild(g) {
       else if (side === 1) { lx = t * w; lz = -d * 0.5; }
       else if (side === 2) { lx = w * 0.5; lz = t * d; }
       else { lx = -w * 0.5; lz = t * d; }
-      const c = rng() < 0.55 ? [1.0, 0.85, 0.55] : pick(_HC_NEON);
+      const c = rng() < 0.55 ? [1.0, 0.85, 0.55] : pick(_HC_NEON_L);
       push('neon', x + ca * lx - sa * lz, PY, z + sa * lx + ca * lz, 44, 68, 12, yaw, c, 0, rng());
     }
   };
@@ -28192,7 +28211,7 @@ function _hubCityBuild(g) {
     const nBox = 1 + Math.floor(rng() * 3);
     for (let k = 0; k < nBox; k++) {
       const [px, pz] = lp((rng() - 0.5) * w * 0.55, (rng() - 0.5) * d * 0.55);
-      push('box', px, roofY, pz, 48 + rng() * 68, 30 + rng() * 40, 40 + rng() * 56, yaw + rng() * 0.3, jit(pick(_HC_METAL), 0.15), 0, rng());
+      push('box', px, roofY, pz, 48 + rng() * 68, 30 + rng() * 40, 40 + rng() * 56, yaw + rng() * 0.3, jit(pick(_HC_METAL_L), 0.15), 0, rng());
     }
     if (rng() < 0.45) {
       const [px, pz] = lp((rng() - 0.5) * w * 0.4, (rng() - 0.5) * d * 0.4);
@@ -28237,7 +28256,7 @@ function _hubCityBuild(g) {
   // hoard-ship parking spot (needs r ≥ 80 — the ships are ~140u long)
   const landPad = (x, y, z, r, park) => {
     push('cyl', x, y, z, r * 2, 8, r * 2, 0, [0.10, 0.105, 0.12], 0, rng());
-    const c = pick(_HC_NEON);
+    const c = pick(_HC_NEON_L);
     L.ring.push(x, y + 9, z, r, 1, r, 0, c[0], c[1], c[2], 1, rng());
     pads.push({ x, y: y + 9.2, z, r, yaw: rng() * 6.283, park: !!park && r >= 80 });
   };
@@ -28317,7 +28336,7 @@ function _hubCityBuild(g) {
         const off = nT === 2 ? (ti === 0 ? -bw / 4 : bw / 4) : 0;
         const baseW = (nT === 2 ? bw / 2 : bw) - 80, baseD = bh - 80;
         const [px, pz] = local(off, 0);
-        const pal = pick(_HC_FACADE);
+        const pal = pick(_HC_FACADE_L);
         const ph = 144 + rng() * 200;
         solid('twr', px, PY, pz, baseW, ph, baseD, ang, jit(pal, 0.1), 1, rng());
         const tw = baseW * (0.48 + 0.20 * rng()), td = baseD * (0.48 + 0.20 * rng());
@@ -28349,12 +28368,12 @@ function _hubCityBuild(g) {
         const [px, pz] = local(-bw / 2 + segW * (k + 0.5), (rng() - 0.5) * bh * 0.15);
         const h = 200 + rng() * 280;
         const sd = bh * 0.55 + rng() * bh * 0.15;
-        solid('twr', px, PY, pz, segW - 80, h, sd, ang, jit(pick(_HC_FACADE), 0.1), 1, rng());
+        solid('twr', px, PY, pz, segW - 80, h, sd, ang, jit(pick(_HC_FACADE_L), 0.1), 1, rng());
         count++;
         // support-beam frame along the shed face
         for (let bIdx = 0; bIdx < 3; bIdx++) {
           const [fx, fz] = local(-bw / 2 + segW * (k + 0.2 + bIdx * 0.3), sd * 0.5 + 12);
-          push('box', fx, PY, fz, 14, h + 32, 14, ang, pick(_HC_METAL), 0, rng());
+          push('box', fx, PY, fz, 14, h + 32, 14, ang, pick(_HC_METAL_L), 0, rng());
         }
         if (rng() < 0.5) {
           const [sx, sz] = local(-bw / 2 + segW * (k + 0.5) + (rng() - 0.5) * segW * 0.4, bh * 0.33);
@@ -28397,9 +28416,9 @@ function _hubCityBuild(g) {
     const comTower = (px, pz, fw, fd, h, ang, pal, mode, baseY) => {
       const a = rng();
       const mast = (mx, my, mz, mr, mh) => {
-        push('cyl', mx, my, mz, mr, mh, mr, 0, pick(_HC_METAL), 0, rng());
+        push('cyl', mx, my, mz, mr, mh, mr, 0, pick(_HC_METAL_L), 0, rng());
         // pulsing beacon at the tip (mode 2 = pulse in _hcNeonMat)
-        push('neon', mx, my + mh, mz, mr * 2.6, mr * 2.6, mr * 2.6, 0, pick(_HC_NEON), 2, rng());
+        push('neon', mx, my + mh, mz, mr * 2.6, mr * 2.6, mr * 2.6, 0, pick(_HC_NEON_L), 2, rng());
       };
       if (a < 0.26) {
         // SLAB — the original. Kept, but now the minority.
@@ -28469,7 +28488,7 @@ function _hubCityBuild(g) {
           const fw = lw - 32, fd = dep - 32;
           let h = isCom ? (370 + rng() * rng() * 1200) * hMult : (270 + rng() * 350 + rng() * rng() * 290) * hMult * 0.62;
           h = Math.max(190, Math.min(h, isCom ? Math.max(1040, g.towerH * 0.55) : 1520));
-          const pal = pick(_HC_FACADE);
+          const pal = pick(_HC_FACADE_L);
           const mode = (isCom && rng() < 0.35) ? 2 : 1;
           const onStilts = rng() < g.stilts && h > 480;
           if (onStilts) {
@@ -28477,7 +28496,7 @@ function _hubCityBuild(g) {
             const sh = 80 + rng() * 90;
             for (const [su, sv] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) {
               const [qx, qz] = local(x + lw / 2 + su * fw * 0.38, rz + sv * fd * 0.38);
-              push('cyl', qx, PY, qz, 36, sh + 8, 36, 0, pick(_HC_METAL), 0, rng());
+              push('cyl', qx, PY, qz, 36, sh + 8, 36, 0, pick(_HC_METAL_L), 0, rng());
               solids.push({ cx: qx, cz: qz, yaw: ang, hw: 20, hd: 20, y0: PY, y1: PY + sh });
             }
             if (h > 620) comTower(px, pz, fw, fd, h, ang, pal, mode, PY + sh);
@@ -28529,7 +28548,7 @@ function _hubCityBuild(g) {
       // drone port: small elevated pad on a pole in some courtyards
       if (rng() < 0.25) {
         const [qx, qz] = local(0, 0);
-        push('cyl', qx, PY, qz, 24, 160, 24, 0, pick(_HC_METAL), 0, rng());
+        push('cyl', qx, PY, qz, 24, 160, 24, 0, pick(_HC_METAL_L), 0, rng());
         landPad(qx, PY + 160, qz, 80, false);
       }
     }
@@ -28550,8 +28569,8 @@ function _hubCityBuild(g) {
       const by = PY + (yTop - PY) * (0.45 + rng() * 0.35);
       const yaw = Math.atan2(dz, dx);
       const mx = (A.x + B.x) / 2, mz = (A.z + B.z) / 2;
-      solid('twr', mx, by, mz, dist, 50, 72, yaw, jit(pick(_HC_FACADE), 0.1), 2, rng());
-      const c = pick(_HC_NEON);
+      solid('twr', mx, by, mz, dist, 50, 72, yaw, jit(pick(_HC_FACADE_L), 0.1), 2, rng());
+      const c = pick(_HC_NEON_L);
       push('neon', mx, by + 52, mz, dist, 6.4, 6.4, yaw, c, 0, rng());
       nBridges++;
     }
@@ -28843,7 +28862,7 @@ function _hcGeoHolo() {
 // one InstancedMesh from a 12-float-per-instance array. aSize/aPrm feed the
 // window / neon shader patches; the whole-city bounding sphere makes frustum
 // culling correct with world-space instance positions.
-function _hcInstMesh(arr, geo, mat, cityR, maxH) {
+function _hcInstMesh(arr, geo, mat, cityR, maxH, site) {
   const n = arr.length / 12;
   const mesh = new THREE.InstancedMesh(geo, mat, n);
   const sizeA = new Float32Array(n * 3), prmA = new Float32Array(n * 2);
@@ -28866,8 +28885,9 @@ function _hcInstMesh(arr, geo, mat, cityR, maxH) {
   mesh.instanceMatrix.needsUpdate = true;
   if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
   mesh.frustumCulled = true;
+  const _bs = site || HUB_CITY;   // (v38.78) a satellite city passes its own centre
   mesh.boundingSphere = new THREE.Sphere(
-    new THREE.Vector3(HUB_CITY.x, HUB_CITY.padY + maxH * 0.5, HUB_CITY.z), cityR + maxH);
+    new THREE.Vector3(_bs.x, _bs.padY + maxH * 0.5, _bs.z), cityR + maxH);
   mesh.userData.isHubCity = true;
   return mesh;
 }
@@ -29106,10 +29126,11 @@ function _hcHoloMat() {
   });
 }
 
-function _hcMakeMeshes(city) {
-  const g = HUB_CITY.genome;
+function _hcMakeMeshes(city, site) {
+  const _site = site || HUB_CITY;   // (v38.78) see _hubCityBuild
+  const g = _site.genome;
   const group = new THREE.Group();
-  group.name = 'hubCity';
+  group.name = (_site === HUB_CITY) ? 'hubCity' : 'owCity';
   const matte = new THREE.MeshLambertMaterial({ color: 0xffffff });
   // (v36.07) shared drawing-buffer-height uniform for the neon line-AA;
   // refreshed each frame in _hubCityFrame so resize/XR stay correct.
@@ -29133,7 +29154,7 @@ function _hcMakeMeshes(city) {
   const add = (key, geo, mat, maxH, shad) => {
     const arr = city.layers[key];
     if (!arr || !arr.length) return null;
-    const m = _hcInstMesh(arr, geo, mat, g.radius, maxH);
+    const m = _hcInstMesh(arr, geo, mat, g.radius, maxH, _site);
     if (shad) { m.castShadow = true; m.receiveShadow = true; }
     group.add(m); return m;
   };
@@ -29183,7 +29204,7 @@ function _hcMakeMeshes(city) {
       '  }\n}');
   };
   gnd.rotation.x = -Math.PI / 2;
-  gnd.position.set(HUB_CITY.x, HUB_CITY.padY + 0.8, HUB_CITY.z);
+  gnd.position.set(_site.x, _site.padY + 0.8, _site.z);
   gnd.userData.isHubCity = true;
   gnd.receiveShadow = true;
   group.add(gnd);
@@ -29194,7 +29215,7 @@ function _hcMakeMeshes(city) {
   //   .emissiveIntensity scales the baked glow (walkways, plaza rings, pools)
   // Exposed so the look can be dialled in real time instead of through a
   // rebuild cycle per guess.  window.__cityFloor(albedo, glow)
-  try {
+  if (_site === HUB_CITY) try {
     window.__cityFloor = function (albedo, glow) {
       if (typeof albedo === 'number') gnd.material.color.setScalar(albedo);
       if (typeof glow === 'number') gnd.material.emissiveIntensity = glow;
@@ -29240,7 +29261,7 @@ function _hcMakeMeshes(city) {
   const beam = new THREE.Mesh(
     new THREE.CylinderGeometry(28, 44, 6000, 10, 1, true),
     new THREE.MeshBasicMaterial({
-      color: 0x54ffe8, blending: THREE.AdditiveBlending, transparent: true,
+      color: (_site.palette && _site.palette.beam) || 0x54ffe8, blending: THREE.AdditiveBlending, transparent: true,
       opacity: 0.30, depthWrite: false, toneMapped: false, side: THREE.DoubleSide,
     })
   );
@@ -30306,12 +30327,16 @@ function _hcTrafficRamPass(dt) {
 function _hubCityCollide(pos, velocity, radius) {
   const hc = game.hubCity;
   if (!hc) return;
-  const dxC = pos.x - HUB_CITY.x, dzC = pos.z - HUB_CITY.z;
-  const lim = HUB_CITY.genome.radius + 800;
+  _hcCollideIn(hc.city, HUB_CITY, pos, velocity, radius);
+}
+// (v38.78) the collider body, shared by the hub and the overworld cities (each passes its own site)
+function _hcCollideIn(city, site, pos, velocity, radius) {
+  const dxC = pos.x - site.x, dzC = pos.z - site.z;
+  const lim = site.genome.radius + 800;
   if (dxC * dxC + dzC * dzC > lim * lim) return;
   const REPULSE_RANGE = radius * 2.5;
   const REPULSE_STRENGTH = 8000;
-  const arr = hc.city.hash.get(Math.floor(pos.x / hc.city.cellSize) + ',' + Math.floor(pos.z / hc.city.cellSize));
+  const arr = city.hash.get(Math.floor(pos.x / city.cellSize) + ',' + Math.floor(pos.z / city.cellSize));
   if (arr) {
     for (let i = 0; i < arr.length; i++) {
       const o = arr[i];
@@ -30404,8 +30429,11 @@ const _hcRaySeen = new Set();
 function _hubCityRayHit(origin, dir, maxDist) {
   const hc = game.hubCity;
   if (!hc) return maxDist;
-  const R = HUB_CITY.genome.radius + 400;
-  const ox = origin.x - HUB_CITY.x, oz = origin.z - HUB_CITY.z;
+  return _hcRayHitIn(hc.city, HUB_CITY, origin, dir, maxDist);
+}
+function _hcRayHitIn(city, site, origin, dir, maxDist) {   // (v38.78) shared with the overworld cities
+  const R = site.genome.radius + 400;
+  const ox = origin.x - site.x, oz = origin.z - site.z;
   const dx = dir.x, dz = dir.z;
   const a = dx * dx + dz * dz;
   let tEnter = 0, tExit = maxDist;
@@ -30418,7 +30446,7 @@ function _hubCityRayHit(origin, dir, maxDist) {
     tExit = Math.min(maxDist, (-b + sq) / (2 * a));
     if (tEnter >= tExit) return maxDist;
   } else if (ox * ox + oz * oz > R * R) return maxDist;
-  const CELL = hc.city.cellSize;
+  const CELL = city.cellSize;
   let best = maxDist;
   const seen = _hcRaySeen;
   seen.clear();
@@ -30428,7 +30456,7 @@ function _hubCityRayHit(origin, dir, maxDist) {
     const key = Math.floor(px / CELL) + ',' + Math.floor(pz / CELL);
     if (seen.has(key)) continue;
     seen.add(key);
-    const arr = hc.city.hash.get(key);
+    const arr = city.hash.get(key);
     if (!arr) continue;
     for (let i = 0; i < arr.length; i++) {
       const o = arr[i];
@@ -32425,6 +32453,1141 @@ function _hubCityFrame(dt) {
 }
 
 if (typeof window !== 'undefined') window.HUBCITY = { cfg: HUB_CITY, build: _hubCityBuild, init: _hubCityInit, dispose: _hubCityDispose, frame: _hubCityFrame, collide: _hubCityCollide, rayHit: _hubCityRayHit, traf: _HC_TRAF, sched: _hcPadSched };
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// OVERWORLD CITIES (v38.78). Owner: "adding other cities in the distance to explore... a hostile
+// ship fleet of 3 and a carrier (weaker than cyberpunk's: like 6x dreadnought health, expanded in
+// size like that mode)... it will give aegis level points... if you kill the carrier in a city, the
+// carrier and its fleet will respawn and serve you, they will follow you wherever you go... if you
+// take your carrier away from your city, a champion stasis field will appear, and anyone else can
+// capture it to capture the city and spawn a new fleet (instant), and build a new carrier (the
+// field transforms into a carrier after 2 minutes unless it's recaptured)... if you recapture a
+// field and your carrier is still alive, your carrier respawns full health at that spot... you
+// could own more than one city, the main city cannot be owned... 6 portals, so a city beyond each
+// portal in each biome theme... if you own all 6 cities (multiplayer: by anyone), a giant leviathan
+// the size of the main city rises out of the ground and attacks you and all your ships."
+//
+// LAYOUT. One city per zone sector, on the sector's own ray past its rift ring (the ring sits at
+// 21,500u; the site is scanned at four radii for the flattest, driest ground and its pad height
+// comes from the terrain there - the terrain is deterministic, so every client would agree).
+// Each city is built by THE HUB CITY GENERATOR with a site (_hubCityBuild / _hcMakeMeshes took a
+// `site` argument in this version; no site = the hub, byte-identical) and a biome palette, on a
+// plateau skirt down to the ground. Built inside OW.BUILD_DIST, dropped past OW.DROP_DIST - the
+// hub terrain itself only streams ~10,800u, so nothing is drawn floating over the void.
+//
+// STATE MACHINE (per city). owner == null: HOSTILE - arms inside ARM_DIST with a carrier orbiting
+// the towers and three hoard fighters in formation on it; they dogfight whatever comes close and
+// fall back into formation. Kill the carrier (you or your fleet) -> the city is YOURS: the fleet
+// dies with its flagship and both come back under your colours a beat later, the carrier in
+// 'follow' mode (rides behind and above you, jumps to you if it falls >9,000u behind), the fleet
+// on the carrier. An owned city with no living carrier AT HOME grows a champion field over its
+// pad (the field has no shell and a 10 s hold). Capture by the owner: carrier alive -> it is
+// recalled there at full health and its fleet regroups; carrier dead -> a 2:00 build (the field
+// stays as the marker) then a new flagship. Capture by another team (multiplayer): the city
+// changes hands, a fleet spawns at once, the flagship builds in 2:00, the old owner's roaming
+// carrier keeps serving them as an orphan. Own all six -> THE LEVIATHAN: a GraveTitan scaled to
+// the main city's diameter rises out of the ground 11,000u from you (away from the hub), hunts the
+// nearest ship of any kind, zaps at 4,200u; it is an ENTITY (not a monster) so every fleet, every
+// carrier and every pilot can shoot it and every fleet AI targets it. Solo free flight in this
+// version; multiplayer FFA sync is the next step (see the net.active gate in _owFrame).
+const OW = {
+  ON: true,
+  DIST: [27500, 30500, 33500, 36500],   // candidate radii from the hub centre, along the sector ray
+  SPREAD: [0, -0.07, 0.07, -0.14, 0.14],   // ...and a fan of headings around it: 20 candidates per sector
+  RADIUS: 3400,
+  BUILD_DIST: 11500, DROP_DIST: 14000, ARM_DIST: 9500,
+  FLEET: 3, CARRIER_HP_X: 6,
+  ZAP: { range: 1700, every: 3.2, dmg: 1400, charge: 1.6 },
+  AWAY: 4500,            // carrier this far outside the city radius = taken away
+  FIELD_BUILD: 120, FIELD_CHARGE: 10, RESPAWN: 45, LEASH: 9000,
+  FOLLOW: { back: 1400, up: 420, spd: 520, jump: 9000 },
+  BOSS: { key: 'GraveTitan', hpX: 80, size: 15000, rise: 14, zapEvery: 1.5, zapDmg: 900, zapRange: 4200, spd: 70, touch: 0.42 },   // 900 every 1.5 s: ~25 s to kill a parked fighter, and it spreads its fire over every ship in reach
+  TEAM0: 9600,
+  XP: { carrier: 5, boss: 30 },
+  NAMES: { volcanic: 'EMBER REACH', goldmine: 'GILT HOLLOW', crystalcave: 'PRISM VAULT', snow: 'FROSTMARCH', rocky: 'CAIRN DEEP', brokensim: 'NULL SECTOR' },
+  PAL: {
+    volcanic:    { facade: [[0.16,0.07,0.06],[0.20,0.09,0.07],[0.12,0.06,0.06],[0.22,0.12,0.09]], neon: [[1.0,0.36,0.10],[1.0,0.62,0.16],[1.0,0.22,0.18],[1.0,0.80,0.30]], metal: [[0.18,0.12,0.10],[0.14,0.10,0.09],[0.22,0.16,0.12]], beam: 0xff6a2a, ground: [0.62,0.50,0.46] },
+    goldmine:    { facade: [[0.19,0.15,0.09],[0.24,0.19,0.11],[0.15,0.12,0.08],[0.28,0.22,0.13]], neon: [[1.0,0.80,0.25],[1.0,0.62,0.20],[0.95,0.92,0.55],[1.0,0.45,0.15]], metal: [[0.30,0.24,0.12],[0.24,0.19,0.10],[0.36,0.30,0.16]], beam: 0xffd24a, ground: [0.82,0.74,0.56] },
+    crystalcave: { facade: [[0.10,0.07,0.17],[0.13,0.09,0.21],[0.08,0.06,0.14],[0.16,0.11,0.24]], neon: [[0.70,0.40,1.0],[0.45,0.80,1.0],[1.0,0.50,0.90],[0.55,0.30,1.0]], metal: [[0.16,0.14,0.22],[0.12,0.11,0.18],[0.20,0.17,0.26]], beam: 0xb07aff, ground: [0.66,0.60,0.82] },
+    snow:        { facade: [[0.16,0.18,0.22],[0.20,0.22,0.27],[0.13,0.15,0.19],[0.24,0.26,0.30]], neon: [[0.60,0.90,1.0],[0.90,0.97,1.0],[0.40,0.70,1.0],[0.75,0.85,1.0]], metal: [[0.22,0.24,0.28],[0.17,0.19,0.23],[0.27,0.28,0.31]], beam: 0xbfe8ff, ground: [0.90,0.93,0.98] },
+    rocky:       { facade: [[0.13,0.12,0.11],[0.17,0.16,0.14],[0.10,0.10,0.09],[0.20,0.18,0.15]], neon: [[0.40,1.0,0.60],[0.90,0.90,0.70],[0.30,0.80,1.0],[1.0,0.70,0.35]], metal: [[0.18,0.17,0.15],[0.14,0.13,0.12],[0.22,0.20,0.17]], beam: 0x7dffb0, ground: [0.70,0.66,0.60] },
+    brokensim:   { facade: [[0.05,0.08,0.06],[0.07,0.10,0.08],[0.04,0.06,0.05],[0.09,0.12,0.09]], neon: [[0.20,1.0,0.40],[1.0,0.10,0.60],[0.20,0.90,1.0],[0.60,1.0,0.20]], metal: [[0.08,0.11,0.09],[0.06,0.09,0.07],[0.11,0.14,0.11]], beam: 0x33ff88, ground: [0.40,0.52,0.44] },
+  },
+  cities: null, orphans: [], boss: null, bossDone: false, _sunV: null,
+};
+const _owV1 = new THREE.Vector3(), _owV2 = new THREE.Vector3(), _owV3 = new THREE.Vector3();
+const _owQ = new THREE.Quaternion();
+const _OW_NEG_X = new THREE.Vector3(-1, 0, 0);
+const _OW_CLEAR_DIRS = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(-1, 0, 0), new THREE.Vector3(0, 0, 1), new THREE.Vector3(0, 0, -1), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, -1, 0)];
+function _owK() { return window.__cities || (window.__cities = {}); }
+function _owBanner(t, s) { try { if (window.Overlays && Overlays.banner) Overlays.banner(t, s || ''); } catch (_) {} }
+function _owTowerTop(c) { return c.padY + c.site.genome.towerH * 0.75 + 320; }
+function _owPlayerSide(a) {
+  if (a === 'player' || a === player) return true;
+  if (a && typeof a === 'object' && a.team != null && player && a.team === player.team) return true;
+  return false;
+}
+// ── sites ─────────────────────────────────────────────────────────────────────────────────────
+function _owEnsureSites(T) {
+  if (OW.cities) return true;
+  if (typeof _stGroundYCarved !== 'function' || typeof HUB_CITY === 'undefined' || typeof _HUB_ZONES === 'undefined') return false;
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -1e9;
+  const R = OW.RADIUS;
+  const n = _HUB_ZONES.sectors.length, SEC = (Math.PI * 2) / n;
+  const cities = [];
+  for (let i = 0; i < n; i++) {
+    const a0 = (i + 0.5) * SEC;   // the rift ring's own ray
+    let best = null;
+    for (let kk = 0; kk < OW.DIST.length * OW.SPREAD.length; kk++) {
+      const k = kk % OW.DIST.length, a = a0 + OW.SPREAD[Math.floor(kk / OW.DIST.length)], ca = Math.cos(a), sa = Math.sin(a);
+      const cx = HUB_CITY.x + ca * OW.DIST[k], cz = HUB_CITY.z + sa * OW.DIST[k];
+      let mn = 1e9, mx = -1e9, sum = 0, cnt = 0;
+      const sample = (x, z) => {
+        let h = 0; try { h = _stGroundYCarved(x, z, T); } catch (_) { h = 0; }
+        if (!isFinite(h)) h = 0;
+        if (h < mn) mn = h; if (h > mx) mx = h; sum += h; cnt++;
+      };
+      sample(cx, cz);
+      for (let j = 0; j < 8; j++) {
+        const b = j * Math.PI / 4;
+        sample(cx + Math.cos(b) * R * 0.55, cz + Math.sin(b) * R * 0.55);
+        sample(cx + Math.cos(b + 0.39) * R, cz + Math.sin(b + 0.39) * R);
+      }
+      const mean = sum / Math.max(1, cnt);
+      const wet = Math.max(0, (WL + 140) - mean);     // how far the mean sits below a dry pad
+      const score = (mx - mn) + wet * 6;
+      if (!best || score < best.score) best = { cx, cz, mn, mx, mean, score };
+    }
+    const biome = _HUB_ZONES.sectors[i];
+    // the pad stands just above the highest ground under it (a mesa; the skirt drops to the lowest), and dry
+    const pad = Math.max(best.mx + 24, WL + 150);
+    const genome = { seed: 3100 + i * 17, radius: R, blockScale: 0.65, gridChaos: 0.30, towerH: 2600, density: 0.85, industry: 0.30, parks: 0.20, stilts: 0.35 };
+    if (biome === 'volcanic')    { genome.industry = 0.55; genome.parks = 0.05; }
+    if (biome === 'snow')        { genome.parks = 0.10; genome.towerH = 2300; }
+    if (biome === 'brokensim')   { genome.gridChaos = 0.5; genome.density = 0.9; }
+    if (biome === 'goldmine')    { genome.industry = 0.45; genome.stilts = 0.2; }
+    if (biome === 'crystalcave') { genome.towerH = 3000; genome.parks = 0.15; }
+    const site = { x: best.cx, z: best.cz, padY: pad, genome, palette: OW.PAL[biome] || null };
+    cities.push({
+      idx: i, biome, name: OW.NAMES[biome] || ('CITY ' + (i + 1)), site, x: best.cx, z: best.cz, padY: pad, R, minY: best.mn,
+      built: null, owner: null, ownerName: null, armed: false, carrier: null, fleet: [], field: null, buildT: 0,
+      respawnT: 0, _visit: false, _fleetPending: false, _fleetKeys: null, _carrierPending: 0, _pendingMode: 'home', _rearm: false, _playerDist: 1e9,
+    });
+  }
+  OW.cities = cities;
+  try { console.log('[cities] sites:', cities.map(c => c.name + ' @' + Math.round(c.x) + ',' + Math.round(c.z) + ' pad ' + Math.round(c.padY)).join(' | ')); } catch (_) {}
+  return true;
+}
+// foliage exclusion for the chunk grass/trees (the hub city has _hubCityExcludes for the same job)
+function _owExcludes(x, z) {
+  const C = OW.cities; if (!C) return false;
+  for (let i = 0; i < C.length; i++) {
+    const c = C[i]; const dx = x - c.x, dz = z - c.z; const rr = c.R + 600;
+    if (dx * dx + dz * dz < rr * rr) return true;
+  }
+  return false;
+}
+// ── build / drop ──────────────────────────────────────────────────────────────────────────────
+function _owBuild(c) {
+  if (c.built) return;
+  const t0 = performance.now();
+  const city = _hubCityBuild(c.site.genome, c.site);
+  const made = _hcMakeMeshes(city, c.site);
+  try {
+    const gnd = made.group.children.find(o => o.isMesh && o.geometry && o.geometry.type === 'CircleGeometry');
+    const g = c.site.palette && c.site.palette.ground;
+    if (gnd && g) gnd.material.color.setRGB(g[0], g[1], g[2]);
+  } catch (_) {}
+  // the plateau skirt: the pad stands on a column down to the lowest ground under it
+  try {
+    const drop = Math.max(60, c.padY - (c.minY - 260));
+    const skirt = new THREE.Mesh(new THREE.CylinderGeometry(c.R * 1.12, c.R * 1.22, drop, 40, 1, true),
+      new THREE.MeshLambertMaterial({ color: 0x232830, side: THREE.DoubleSide }));
+    skirt.position.set(c.x, c.padY - drop * 0.5, c.z);
+    skirt.userData.isHubCity = true;
+    made.group.add(skirt);
+  } catch (_) {}
+  scene.add(made.group);
+  c.built = { city, group: made.group, lights: made.lights, twrMat: made.twrMat };
+  try { console.log('[cities] built ' + c.name + ' in ' + Math.round(performance.now() - t0) + ' ms', JSON.stringify(city.stats || {})); } catch (_) {}
+}
+function _owDrop(c) {
+  const b = c.built; if (!b) return;
+  c.built = null;
+  try {
+    if (b.group) {
+      scene.remove(b.group);
+      b.group.traverse((o) => {
+        if ((o.isMesh || o.isInstancedMesh) && !o.userData.hcShared) {
+          try { if (o.geometry) o.geometry.dispose(); } catch (_) {}
+          try {
+            const m = o.material;
+            if (Array.isArray(m)) m.forEach(x => { if (x && x.dispose) x.dispose(); });
+            else if (m && m.dispose) { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); m.dispose(); }
+          } catch (_) {}
+        }
+      });
+    }
+  } catch (_) {}
+}
+// ── fleets ────────────────────────────────────────────────────────────────────────────────────
+function _owFleetKeys(c) {
+  if (!c._fleetKeys) c._fleetKeys = (typeof _campWaveShips === 'function') ? _campWaveShips(OW.FLEET) : HOARD_SHIPS.slice(0, OW.FLEET);
+  return c._fleetKeys;
+}
+function _owSpawnFleet(c, team, at) {
+  if (c._fleetPending || typeof Bot === 'undefined' || typeof loadHoardModel !== 'function') return;
+  const keys = _owFleetKeys(c);
+  c._fleetPending = true;
+  const anchor = at.clone();
+  Promise.all(keys.map(k => loadHoardModel(k))).then((protos) => {
+    c._fleetPending = false;
+    if (!OW.cities || OW.cities[c.idx] !== c) return;
+    const hostileTeam = OW.TEAM0 + c.idx;
+    if (!((team === hostileTeam && c.owner == null) || (c.owner != null && team === c.owner))) return;   // changed hands while loading
+    const ships = (typeof CYBER !== 'undefined' && CYBER.botShips) ? CYBER.botShips : ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'];
+    for (let i = 0; i < keys.length; i++) {
+      if (!protos[i]) continue;
+      let b = null;
+      try { b = new Bot(ships[(c.idx * 3 + i) % ships.length], team, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9700 + c.idx * 10 + i), keys[i]); } catch (_) { continue; }
+      try { if (typeof _campSetShipName === 'function') _campSetShipName(b, keys[i]); if (typeof _campBoostSpeed === 'function') _campBoostSpeed(b, 1.2); } catch (_) {}
+      b._riftGuard = true;          // opts the bot into the hub terrain-nav path (see Bot.update)
+      b._owCity = c.idx; b._owSlot = i;
+      const p = anchor.clone();
+      p.x += (Math.random() - 0.5) * 900; p.y += 120 + Math.random() * 260; p.z += (Math.random() - 0.5) * 900;
+      b.position.copy(p); if (b.mesh) b.mesh.position.copy(p);
+      game.entities.push(b);
+      c.fleet.push(b);
+      try { if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', p, 70, 0.7, { startScale: 0.3, endScale: 1.2 }); } catch (_) {}
+    }
+  }).catch(() => { c._fleetPending = false; });
+}
+function _owKillFleet(c, explode) {
+  for (const b of c.fleet) {
+    if (!b) continue;
+    try {
+      if (b.alive && explode) { b.alive = false; b.health = 0; if (b.mesh) scene.remove(b.mesh); spawnExplosion(b.position, b.chassis.hullLength); }
+    } catch (_) {}
+    try { b.destroy(); } catch (_) {}
+    const i = game.entities.indexOf(b); if (i >= 0) game.entities.splice(i, 1);
+  }
+  c.fleet.length = 0;
+}
+function _owReviveBot(b, x, y, z) {
+  b.alive = true; b.doomed = false; b.doomTimer = 0; b.health = b.maxHealth;
+  if (b.shield != null && b.maxShield != null) b.shield = b.maxShield;
+  b.spawnProtection = 3;
+  b.position.set(x, y, z);
+  if (b.velocity) b.velocity.set(0, 0, 0);
+  if (b.mesh) { b.mesh.position.copy(b.position); if (!b.mesh.parent) scene.add(b.mesh); b.mesh.visible = true; }
+  try { if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', b.position, 70, 0.7, { startScale: 0.3, endScale: 1.2 }); } catch (_) {}
+}
+function _owReviveFleet(c, at) {
+  const F = c.fleet;
+  for (let i = 0; i < F.length; i++) {
+    const b = F[i]; if (!b || b.alive) continue;
+    const ang = (i / Math.max(1, F.length)) * Math.PI * 2;
+    _owReviveBot(b, at.x + Math.cos(ang) * 500, at.y + 200, at.z + Math.sin(ang) * 500);
+  }
+}
+function _owFleetTick(c, dt) {
+  const F = c.fleet; if (!F.length) return;
+  const car = (c.carrier && c.carrier.alive) ? c.carrier : null;
+  const owned = c.owner != null && c.owner === player.team;
+  // the anchor: the carrier; an owned fleet without one rides with its pilot; a hostile one holds the city
+  let ax, ay, az, ring;
+  if (car) { ax = car.position.x; ay = car.position.y; az = car.position.z; ring = 900; }
+  else if (owned && player.shipState !== 'dead') { ax = player.position.x; ay = player.position.y; az = player.position.z; ring = 620; }
+  else { ax = c.x; ay = _owTowerTop(c); az = c.z; ring = 1100; }
+  const t = game.time || 0;
+  let dead = 0;
+  for (let i = 0; i < F.length; i++) {
+    const b = F[i]; if (!b) continue;
+    if (!b.alive) { dead++; continue; }
+    // engaged = a live target close to the bot AND near the anchor: dogfight; otherwise formation
+    const ct = b.combatTarget;
+    const ctAlive = ct && (ct === player ? player.shipState !== 'dead' : !!ct.alive);
+    let engaged = false;
+    if (ctAlive && ct.position) {
+      const dT = b.position.distanceTo(ct.position);
+      const dA = Math.hypot(ct.position.x - ax, ct.position.z - az);
+      const big = ct.isOwBoss ? (ct.collisionRadius || 0) : 0;   // the leviathan is engaged from its skin, not its centre
+      engaged = dT < 3400 + big && dA < 7000 + big;
+    }
+    const dAnchor = Math.hypot(b.position.x - ax, b.position.z - az);
+    if (dAnchor > OW.LEASH) {
+      // fell too far behind (a fast pilot, a long chase): jump back to the anchor
+      const ang = (i / F.length) * Math.PI * 2 + t * 0.12;
+      b.position.set(ax + Math.cos(ang) * ring, ay + 150, az + Math.sin(ang) * ring);
+      if (b.mesh) b.mesh.position.copy(b.position);
+      if (b.velocity) b.velocity.set(0, 0, 0);
+      try { if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', b.position, 60, 0.6, { startScale: 0.3, endScale: 1.1 }); } catch (_) {}
+      engaged = false;
+    }
+    b._formationActive = !engaged;
+    if (!engaged) {
+      if (!b._formationTarget) b._formationTarget = new THREE.Vector3();
+      const ang = (i / F.length) * Math.PI * 2 + t * 0.12;
+      b._formationTarget.set(ax + Math.cos(ang) * ring, ay + 120 + Math.sin(t * 0.7 + i) * 110, az + Math.sin(ang) * ring);
+    }
+  }
+  // respawns only while the carrier lives (a fleet without a flagship is on its own)
+  if (dead && car) {
+    c.respawnT -= dt;
+    if (c.respawnT <= 0) { c.respawnT = OW.RESPAWN; _owReviveFleet(c, car.position); }
+  } else if (!dead) c.respawnT = OW.RESPAWN * 0.6;
+}
+// ── the carrier ───────────────────────────────────────────────────────────────────────────────
+class OwCarrier {
+  constructor(c, team, at, mode) {
+    this.city = c; this.team = team; this.isOwCarrier = true;
+    this.alive = true; this.id = 'owcar_' + c.idx + '_' + (OwCarrier._n = (OwCarrier._n | 0) + 1);
+    this.name = 'CARRIER'; this.loadout = { name: c.name + ' CARRIER' };
+    const hpBase = (typeof CHASSIS !== 'undefined' && CHASSIS.DREADNOUGHT) ? CHASSIS.DREADNOUGHT.maxHealth : 12500;
+    const K = _owK();
+    this.maxHealth = Math.round(hpBase * ((K.hpX != null) ? K.hpX : OW.CARRIER_HP_X));
+    this.health = this.maxHealth;
+    this.shield = 0; this.maxShield = 0;
+    this.position = at.clone(); this.velocity = new THREE.Vector3();
+    this.kills = 0; this.deaths = 0; this.damageDealt = 0; this.damageTaken = 0;
+    this.shipState = 'flying'; this.doomed = false; this.spawnProtection = 0;
+    this.chassis = { hullWidth: 900, hullHeight: 300, hullLength: 2400, hullRadius: 1200, flightSpeed: 250 };
+    this.collisionRadius = 1200;
+    this.mode = mode || 'home';       // 'home' = orbit the city ; 'follow' = ride with the owner
+    this.owner = null;
+    this.dir = new THREE.Vector3(-1, 0, 0);
+    this.heading = Math.random() * Math.PI * 2;
+    this.rideY = null; this.zapT = 2; this.zapTgt = null; this.chargeFx = null;
+    this.mesh = null; this.guns = []; this.thrusters = []; this.glows = []; this.spawns = [];
+    this.half = null; this.size = null; this.bound = 1500; this.localTop = 0;
+    this._followOff = new THREE.Vector3(-OW.FOLLOW.back, OW.FOLLOW.up, 0);
+    this._lastAttacker = null; this._hitT = -1;
+    this._build();
+  }
+  _build() {
+    const proto = (typeof _carrier !== 'undefined' && _carrier.proto) ? _carrier.proto : null;
+    let root;
+    if (proto) root = proto.clone(true);
+    else {
+      root = _carrierPlaceholder(); root.userData._carrierPlaceholder = true;
+      try { _carrierLoadProto(() => { try { if (this.alive && this.mesh && this.mesh.userData._placeholder) this._swap(); } catch (_) {} }); } catch (_) {}
+    }
+    this._attach(root);
+  }
+  _swap() {
+    const old = this.mesh;
+    try { if (old) scene.remove(old); } catch (_) {}
+    this._attach(_carrier.proto.clone(true));
+  }
+  _attach(root) {
+    const placeholder = !!root.userData._carrierPlaceholder;
+    root.position.set(0, 0, 0); root.quaternion.identity();
+    if (placeholder) root.scale.setScalar(1);
+    else {
+      root.scale.setScalar(1); root.updateMatrixWorld(true);
+      const sz0 = new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
+      root.scale.setScalar(_carrierLength() / (Math.max(sz0.x, sz0.y, sz0.z) || 1));
+    }
+    root.updateMatrixWorld(true);
+    const bb = new THREE.Box3().setFromObject(root);
+    this.size = bb.getSize(new THREE.Vector3());
+    const ctr = bb.getCenter(new THREE.Vector3());
+    // the entity sits at the hull's centre: the model is offset inside so `position` IS the middle
+    const g = new THREE.Group();
+    root.position.copy(ctr).negate();
+    g.add(root);
+    g.userData._placeholder = placeholder;
+    g.userData.isOwCarrier = true;
+    this.half = this.size.clone().multiplyScalar(0.5);
+    this.localTop = this.half.y;
+    this.bound = this.half.length();
+    // the box the projectile code tests (see _pointInsideShipOBB: width x, height y, length z). The
+    // long axis is X, so the sphere paths (splash / hitscan: hullLength-based) get the LONG extent
+    // and the box path gets a square footprint that the mesh ray test then trims to the hull.
+    const L = Math.max(this.size.x, this.size.z);
+    this.chassis.hullWidth = L; this.chassis.hullHeight = this.size.y; this.chassis.hullLength = L;
+    this.chassis.hullRadius = L * 0.5;
+    this.collisionRadius = L * 0.5;
+    // guns / thrusters / deck spots by name, like _carrierHarvest
+    this.guns.length = 0; this.thrusters.length = 0; this.spawns.length = 0; this.glows.length = 0;
+    root.traverse(o => {
+      const n = o.name || '';
+      if (/^(spawn|cockpit)\d+$/i.test(n)) this.spawns.push(o);
+      else if (/^gun\d+$/i.test(n)) this.guns.push(o);
+      else if (/^thruster\d+$/i.test(n)) this.thrusters.push(o);
+    });
+    const byName = (a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true });
+    this.spawns.sort(byName); this.guns.sort(byName); this.thrusters.sort(byName);
+    if (this.thrusters.length) {
+      g.updateMatrixWorld(true);
+      const ws = this.thrusters[0].getWorldScale(new THREE.Vector3());
+      const inv = 1 / Math.max(1e-6, ws.x);
+      const r = this.size.y * ((_carrierKnobs().glow != null) ? _carrierKnobs().glow : CARRIER.glow);
+      if (!OwCarrier._glowGeo) OwCarrier._glowGeo = new THREE.SphereGeometry(1, 14, 10);
+      for (const t of this.thrusters) {
+        const m = new THREE.Mesh(OwCarrier._glowGeo, new THREE.MeshBasicMaterial({ color: 0x8fe6ff, transparent: true, opacity: 0.9, depthWrite: false, blending: THREE.AdditiveBlending, fog: false }));
+        m.scale.setScalar(r * inv); m.renderOrder = 3; m.userData._carrierGlowBase = r * inv;
+        t.add(m); this.glows.push(m);
+      }
+    }
+    g.position.copy(this.position);
+    g.quaternion.setFromUnitVectors(_OW_NEG_X, this.dir);
+    scene.add(g);
+    this.mesh = g;
+  }
+  update() {}
+  tick(dt) {
+    if (!this.alive || !this.mesh) return;
+    const c = this.city;
+    let tx, tz, ty = null, spd;
+    const o = this.owner;
+    const ownerUp = o && (o === player ? player.shipState !== 'dead' : !!o.alive) && o.position;
+    if (this.mode === 'follow' && ownerUp) {
+      // ride behind and above the owner, on the side away from their motion
+      const v = o.velocity;
+      if (v && (v.x * v.x + v.z * v.z) > 40 * 40) {
+        const L = Math.hypot(v.x, v.z);
+        this._followOff.set(-v.x / L * OW.FOLLOW.back, OW.FOLLOW.up, -v.z / L * OW.FOLLOW.back);
+      }
+      tx = o.position.x + this._followOff.x; tz = o.position.z + this._followOff.z; ty = o.position.y + this._followOff.y;
+      spd = _owK().followSpd || OW.FOLLOW.spd;
+      const d = Math.hypot(tx - this.position.x, tz - this.position.z);
+      if (d > OW.FOLLOW.jump) {   // left far behind: a carrier cannot out-fly a fighter, so it jumps
+        this.position.set(tx, Math.max(ty, this.position.y), tz);
+        this.rideY = null;
+        try { if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', this.position, 700, 1.2, { startScale: 0.4, endScale: 1.6 }); } catch (_) {}
+        try { spawnDynamicLight(this.position, 0x8fe6ff, 4.0, 3000, 0.5); } catch (_) {}
+      }
+    } else {
+      // hold station over the home city: a slow orbit above the towers
+      const r = c.R * 0.55;
+      this.heading += dt * (60 / Math.max(1, r));
+      tx = c.x + Math.cos(this.heading) * r; tz = c.z + Math.sin(this.heading) * r;
+      ty = _owTowerTop(c);
+      spd = 60;
+    }
+    const dx = tx - this.position.x, dz = tz - this.position.z;
+    const d = Math.hypot(dx, dz);
+    if (d > 1) {
+      const step = Math.min(d, spd * dt);
+      this.position.x += dx / d * step; this.position.z += dz / d * step;
+      this.velocity.set(dx / d * spd, 0, dz / d * spd);
+      if (d > 40) { _owV1.set(dx / d, 0, dz / d); this.dir.lerp(_owV1, Math.min(1, dt * 1.2)).normalize(); }
+    } else this.velocity.set(0, 0, 0);
+    // altitude: ground clearance, the target height, and every city's towers
+    let gy = null;
+    try { const T = game.sandwichTerrain; if (T && T.ON) { const h = _stGroundYCarved(this.position.x, this.position.z, T); if (isFinite(h)) gy = h; } } catch (_) {}
+    let want = (gy != null) ? gy + 450 : this.position.y;
+    if (ty != null) want = Math.max(want, ty);
+    try {
+      const dH = Math.hypot(this.position.x - HUB_CITY.x, this.position.z - HUB_CITY.z);
+      if (dH < HUB_CITY.genome.radius + 900) want = Math.max(want, HUB_CITY.padY + HUB_CITY.genome.towerH * 0.95 + 300);
+      const C = OW.cities;
+      if (C) for (let i = 0; i < C.length; i++) {
+        const oc = C[i]; const dd = Math.hypot(this.position.x - oc.x, this.position.z - oc.z);
+        if (dd < oc.R + 900) want = Math.max(want, oc.padY + oc.site.genome.towerH * 0.95 + 300);
+      }
+    } catch (_) {}
+    if (this.rideY == null) this.rideY = want;
+    const rate = (want > this.rideY) ? 2.2 : 0.6;
+    this.rideY += (want - this.rideY) * Math.min(1, dt * rate);
+    this.position.y = this.rideY;
+    this.mesh.position.copy(this.position);
+    this.mesh.quaternion.setFromUnitVectors(_OW_NEG_X, this.dir);
+    if (this.glows.length) {
+      const t = game.time || 0, pulse = 1 + 0.14 * Math.sin(t * 2.2);
+      for (const m of this.glows) { m.scale.setScalar((m.userData._carrierGlowBase || 1) * pulse); m.material.opacity = 0.78 + 0.18 * Math.sin(t * 3.1); }
+    }
+    if (game.state === 'playing') { try { this._guns(dt); } catch (e) { if (!this._gunErr) { this._gunErr = true; console.warn('[cities] carrier guns threw:', e); } } }
+  }
+  _guns(dt) {
+    if (!this.guns.length || typeof spawnLightningBolt !== 'function') return;
+    const Z = OW.ZAP, K = _owK();
+    const range = K.zapRange || Z.range, charge = K.zapCharge || Z.charge;
+    if (this.zapT > 0) { this.zapT -= dt; return; }
+    const inRange = (e) => e && e.position && (e.position.distanceTo(this.position) - (e.isOwBoss ? (e.collisionRadius || 0) * 0.85 : 0)) <= range;
+    if (this.chargeFx) {
+      const tgt = this.zapTgt;
+      const there = tgt && (tgt === player ? player.shipState !== 'dead' : !!tgt.alive) && inRange(tgt);
+      if (!there) { this._chargeEnd(); this.zapTgt = null; this.zapT = 0.35; return; }
+      this._chargeTick(dt);
+      if (this.chargeFx.t < charge) return;
+      const col = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66;
+      for (const o of this.chargeFx.orbs) {
+        o.g.getWorldPosition(_owV1);
+        try { spawnLightningBolt(_owV1.clone(), tgt.position.clone(), col, 1.55, 3, 4, true, 1.0); } catch (_) {}
+      }
+      this._chargeEnd(); this.zapTgt = null; this.zapT = K.zapEvery || Z.every;
+      const dmg = K.zapDmg || Z.dmg;
+      try {
+        if (tgt === player) playerTakeDamage(dmg, this);
+        else if (typeof tgt.takeDamage === 'function') { const dealt = tgt.takeDamage(dmg, this, tgt.position); if (dealt > 0) this.damageDealt += dealt; }
+      } catch (_) {}
+      return;
+    }
+    let best = null, bestD = range;
+    const consider = (e) => { const d = e.position.distanceTo(this.position) - (e.isOwBoss ? (e.collisionRadius || 0) * 0.85 : 0); if (d < bestD) { bestD = d; best = e; } };
+    if (player.shipState !== 'dead' && player.team !== this.team) consider(player);
+    for (const e of game.entities) { if (!e || !e.alive || e === this || e.team === this.team || e.isHubTraffic || !e.position) continue; consider(e); }
+    if (!best) return;
+    let gun = this.guns[0], gd = Infinity;
+    for (const g of this.guns) { g.getWorldPosition(_owV1); const d = _owV1.distanceToSquared(best.position); if (d < gd) { gd = d; gun = g; } }
+    this.zapTgt = best;
+    this._chargeStart(gun, charge);
+  }
+  _chargeStart(gun, dur) {
+    this._chargeEnd();
+    const r = (this.size ? this.size.y : 548) * 0.035;
+    const col = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.SLAYER) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66;
+    if (!OwCarrier._orbGeo) OwCarrier._orbGeo = new THREE.SphereGeometry(1, 12, 10);
+    gun.getWorldPosition(_owV2);
+    const orbs = [];
+    for (const g of this.guns) {
+      g.getWorldPosition(_owV1);
+      if (_owV1.distanceTo(_owV2) > 420) continue;
+      const m = new THREE.Mesh(OwCarrier._orbGeo, new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }));
+      m.position.copy(_owV1); m.scale.setScalar(r * 0.25); m.renderOrder = 3; m.userData._r = r;
+      scene.add(m); orbs.push({ m, g });
+    }
+    this.chargeFx = { orbs, t: 0, dur, snd: null };
+    try {
+      if (player.position.distanceTo(_owV2) < 6000 && typeof _startRailgunChargeSound === 'function') this.chargeFx.snd = _startRailgunChargeSound(0);
+    } catch (_) {}
+  }
+  _chargeTick(dt) {
+    const F = this.chargeFx; if (!F) return;
+    F.t += dt;
+    const u = Math.min(1, F.t / Math.max(0.05, F.dur));
+    for (const o of F.orbs) { o.g.getWorldPosition(o.m.position); o.m.scale.setScalar(o.m.userData._r * (0.25 + u * u * 1.35)); o.m.material.opacity = 0.35 + 0.6 * u; }
+    try { if (F.snd && typeof F.snd.set === 'function') F.snd.set(u); } catch (_) {}
+  }
+  _chargeEnd() {
+    const F = this.chargeFx; this.chargeFx = null;
+    if (!F) return;
+    for (const o of F.orbs) { try { scene.remove(o.m); o.m.material.dispose(); } catch (_) {} }
+    try { if (F.snd && typeof _stopRailgunChargeSound === 'function') _stopRailgunChargeSound(F.snd); } catch (_) {}
+  }
+  takeDamage(amount, attacker, hitPoint) {
+    if (!this.alive || !this.mesh) return 0;
+    if (attacker === this || (attacker && attacker.owner === this)) return 0;
+    let dmg = Math.max(0, amount || 0);
+    if (attacker === 'player' && typeof _aegisDmgOut === 'function') { try { dmg = _aegisDmgOut(dmg, this); } catch (_) {} }
+    const applied = Math.min(Math.max(0, this.health), dmg);
+    this.health = Math.max(0, this.health - dmg);
+    this.damageTaken += applied;
+    if (attacker && typeof attacker === 'object' && attacker.alive !== undefined && attacker !== this) attacker.damageDealt = (attacker.damageDealt || 0) + applied;
+    this._lastAttacker = attacker;
+    const now = game.time || 0;
+    if (now - this._hitT > 0.1) {
+      this._hitT = now;
+      try { if (typeof v8SpawnSparks === 'function') v8SpawnSparks(hitPoint || this.position, 5, 1.2, 300, 0x8fe6ff, 0xffffff); } catch (_) {}
+    }
+    if (this.health <= 0) this.die();
+    return applied;
+  }
+  die() {
+    if (!this.alive) return;
+    this.alive = false; this.deaths++;
+    this._chargeEnd();
+    try {
+      const half = this.half ? this.half.x : 683, hy = this.half ? this.half.y : 274;
+      const axis = this.dir.clone(), ctr = this.position.clone(), N = 14, span = 2.6, mesh = this.mesh;
+      for (let i = 0; i < N; i++) {
+        const t = (i / (N - 1)) * 2 - 1;
+        const at = ctr.clone().addScaledVector(axis, t * half * 0.92);
+        at.y += (Math.random() - 0.5) * hy * 0.8; at.x += (Math.random() - 0.5) * hy * 0.5; at.z += (Math.random() - 0.5) * hy * 0.5;
+        const r = 300 + 260 * (1 - Math.abs(t));
+        const delay = (i === 0) ? 0 : Math.random() * span;
+        if (delay <= 0) spawnExplosion(at, r); else setTimeout(() => { try { spawnExplosion(at, r); } catch (_) {} }, delay * 1000);
+      }
+      setTimeout(() => { try { if (mesh) mesh.visible = false; } catch (_) {} }, (span + 0.5) * 1000);
+    } catch (_) { try { this.mesh.visible = false; } catch (__) {} }
+    try { _owCarrierDied(this); } catch (e) { console.warn('[cities] carrier death handler threw:', e); }
+  }
+  destroy() {
+    this._chargeEnd();
+    try { if (this.mesh) scene.remove(this.mesh); } catch (_) {}
+    const i = game.entities.indexOf(this); if (i >= 0) game.entities.splice(i, 1);
+  }
+  // the hull collider: an oriented box, pushed out along the nearest face
+  collide(pos, velocity, radius) {
+    if (!this.alive || !this.mesh || !this.half) return;
+    const o = this.mesh;
+    const dx = pos.x - o.position.x, dy = pos.y - o.position.y, dz = pos.z - o.position.z;
+    const R = this.bound + radius;
+    if (dx * dx + dy * dy + dz * dz > R * R) return;
+    _owQ.copy(o.quaternion).invert();
+    _owV1.set(dx, dy, dz).applyQuaternion(_owQ);
+    const hx = this.half.x * 0.96 + radius, hy = this.half.y * 0.9 + radius, hz = this.half.z * 0.9 + radius;
+    if (Math.abs(_owV1.x) > hx || Math.abs(_owV1.y) > hy || Math.abs(_owV1.z) > hz) return;
+    const px = hx - Math.abs(_owV1.x), py = hy - Math.abs(_owV1.y), pz = hz - Math.abs(_owV1.z);
+    if (py <= px && py <= pz) { const s = _owV1.y >= 0 ? 1 : -1; _owV1.y = s * hy; _owV2.set(0, s, 0); }
+    else if (px <= pz) { const s = _owV1.x >= 0 ? 1 : -1; _owV1.x = s * hx; _owV2.set(s, 0, 0); }
+    else { const s = _owV1.z >= 0 ? 1 : -1; _owV1.z = s * hz; _owV2.set(0, 0, s); }
+    pos.copy(_owV1.applyQuaternion(o.quaternion).add(o.position));
+    if (velocity) { _owV2.applyQuaternion(o.quaternion); const vn = velocity.dot(_owV2); if (vn < 0) velocity.addScaledVector(_owV2, -vn); }
+  }
+  // ray vs the oriented box (slab test), for raycastLevel and the hitscan weapons
+  rayDist(origin, dir, maxDist) {
+    if (!this.alive || !this.mesh || !this.half) return -1;
+    const o = this.mesh;
+    _owQ.copy(o.quaternion).invert();
+    _owV1.copy(origin).sub(o.position).applyQuaternion(_owQ);
+    _owV2.copy(dir).applyQuaternion(_owQ);
+    let t0 = 0, t1 = maxDist;
+    const H0 = this.half.x * 0.96, H1 = this.half.y * 0.9, H2 = this.half.z * 0.9;
+    const P0 = _owV1.x, P1 = _owV1.y, P2 = _owV1.z, D0 = _owV2.x, D1 = _owV2.y, D2 = _owV2.z;
+    const slab = (P, D, H) => {
+      if (Math.abs(D) < 1e-9) return Math.abs(P) <= H;
+      let ta = (-H - P) / D, tb = (H - P) / D;
+      if (ta > tb) { const tt = ta; ta = tb; tb = tt; }
+      if (ta > t0) t0 = ta; if (tb < t1) t1 = tb;
+      return t0 <= t1;
+    };
+    if (!slab(P0, D0, H0) || !slab(P1, D1, H1) || !slab(P2, D2, H2)) return -1;
+    return t0;
+  }
+}
+function _owSpawnCarrier(c, team, at, mode, owner) {
+  const car = new OwCarrier(c, team, at, mode);
+  car.owner = owner || null;
+  game.entities.push(car);
+  c.carrier = car;
+  try { if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', at, 800, 1.4, { startScale: 0.3, endScale: 1.8 }); spawnDynamicLight(at, 0x8fe6ff, 5.0, 3500, 0.7); } catch (_) {}
+  try { if (typeof playSpatialSound === 'function') playSpatialSound('phase_dash', at.clone(), { refDistance: 1500, maxDistance: 20000 }); } catch (_) {}
+  return car;
+}
+function _owCarrierDied(car) {
+  const c = car.city;
+  const byPlayerSide = _owPlayerSide(car._lastAttacker);
+  const wasHostile = (c.owner == null);
+  if (c.carrier === car) c.carrier = null;
+  const oi = OW.orphans.indexOf(car); if (oi >= 0) OW.orphans.splice(oi, 1);
+  setTimeout(() => { try { car.destroy(); } catch (_) {} }, 3600);   // the hulk leaves after the blast chain
+  if (wasHostile && byPlayerSide) {
+    // THE CITY FALLS TO YOU: the fleet goes down with its flagship, both return under your colours
+    try { addKillFeed('You', c.name + ' CARRIER'); showKillMarker(); } catch (_) {}
+    try { if (typeof _aegisAwardXp === 'function') _aegisAwardXp(AEGIS.XP_PER_KILL * OW.XP.carrier); } catch (_) {}
+    player.kills = (player.kills | 0) + 1;
+    _owKillFleet(c, true);
+    c.owner = player.team; c.ownerName = 'YOU';
+    _owBanner(c.name + ' IS YOURS', 'The carrier and its fleet will serve you');
+    try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+    c._carrierPending = 3.0; c._pendingMode = 'follow';
+    _owBossCheck();
+    return;
+  }
+  if (wasHostile) { c._carrierPending = 90; c._pendingMode = 'home'; return; }
+  _owBanner(c.name + ' CARRIER LOST', 'Recapture the city field to rebuild it');
+}
+// ── fields (the champion machinery with a city verdict) ───────────────────────────────────────
+function _owFieldSpot(c) {
+  const pos = new THREE.Vector3(c.x, c.padY + 320, c.z);
+  if (!c.built || !c.built.city) return pos;
+  for (let tries = 0; tries < 12; tries++) {
+    const a = Math.random() * Math.PI * 2, r = (tries === 0) ? 0 : c.R * (0.15 + 0.5 * Math.random());
+    const p = new THREE.Vector3(c.x + Math.cos(a) * r, c.padY + 320, c.z + Math.sin(a) * r);
+    let clear = true;
+    try { for (const d of _OW_CLEAR_DIRS) { const h = _hcRayHitIn(c.built.city, c.site, p, d, 240); if (h < 240) { clear = false; break; } } } catch (_) {}
+    if (clear) return p;
+  }
+  pos.y = c.padY + 520;
+  return pos;
+}
+function _owSpawnField(c, quiet) {
+  if (c.field && c.field.alive) return c.field;
+  if (typeof StasisField !== 'function') return null;
+  const f = new StasisField(_owFieldSpot(c), true, { noShell: true });
+  try { f.holdRadius = f.radius + 120; } catch (_) {}
+  f.chargeTime = _owK().fieldCharge || OW.FIELD_CHARGE;
+  f.cityIdx = c.idx;
+  f.onCaptured = (team, ship) => { try { _owCaptured(c, team, ship); } catch (e) { console.warn('[cities] capture handler threw:', e); } };
+  if (Array.isArray(game.stasisFields)) game.stasisFields.push(f);
+  c.field = f;
+  if (!quiet) _owBanner(c.name + ' UNGUARDED', 'A champion field marks the open city');
+  return f;
+}
+function _owRemoveField(c) {
+  const f = c.field; c.field = null;
+  if (!f) return;
+  f.alive = false;
+  try { if (f.group && f.group.parent) scene.remove(f.group); } catch (_) {}
+  if (f.claimedBy === player) {
+    game.playerInChampionStasis = false; game.playerInStasis = false;
+    try { const w = document.getElementById('stasis-warning'); const v = document.getElementById('stasis-vignette'); if (w) w.style.display = 'none'; if (v) v.style.display = 'none'; } catch (_) {}
+  }
+}
+function _owCaptured(c, team, ship) {
+  c.field = null;   // the field took itself down
+  const car = (c.carrier && c.carrier.alive) ? c.carrier : null;
+  if (team === c.owner) {
+    if (c.buildT > 0) { _owSpawnField(c, true); return; }   // a build is running: the marker stays
+    if (car) {
+      // your carrier comes home, whole, and its fleet regroups on it
+      car.health = car.maxHealth;
+      car.position.set(c.x, _owTowerTop(c), c.z); car.rideY = null;
+      if (car.mesh) car.mesh.position.copy(car.position);
+      try { if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', car.position, 800, 1.4, { startScale: 0.3, endScale: 1.8 }); spawnDynamicLight(car.position, 0x8fe6ff, 5.0, 3500, 0.7); } catch (_) {}
+      _owBanner('CARRIER RECALLED', c.name + ' flagship restored to full strength');
+      _owReviveFleet(c, car.position);
+    } else {
+      c.buildT = _owK().fieldBuild || OW.FIELD_BUILD;
+      _owSpawnField(c, true);
+      _owBanner('REBUILDING CARRIER', c.name + ' launches a new flagship in 2:00');
+      if (!c.fleet.some(b => b && b.alive)) { _owKillFleet(c, false); _owSpawnFleet(c, team, new THREE.Vector3(c.x, c.padY + 900, c.z)); }
+    }
+    return;
+  }
+  // a NEW owner: the fleet at once, the flagship in two minutes; the old fleet at home is scrapped
+  // and the old owner's roaming carrier keeps serving them as an orphan
+  if (car) { car.city = c; OW.orphans.push(car); c.carrier = null; }
+  _owKillFleet(c, true);
+  c.owner = team; c.ownerName = (team === player.team) ? 'YOU' : ('TEAM ' + team);
+  c.buildT = _owK().fieldBuild || OW.FIELD_BUILD;
+  _owSpawnField(c, true);
+  _owSpawnFleet(c, team, new THREE.Vector3(c.x, c.padY + 900, c.z));
+  if (team === player.team) { _owBanner(c.name + ' CAPTURED', 'Fleet deployed, flagship in 2:00'); try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {} }
+  else _owBanner(c.name + ' LOST', 'Another fleet holds the field');
+  _owBossCheck();
+}
+// ── per-city frame ────────────────────────────────────────────────────────────────────────────
+function _owArm(c) {
+  c.armed = true;
+  const team = OW.TEAM0 + c.idx;
+  const at = new THREE.Vector3(c.x, _owTowerTop(c), c.z);
+  _owSpawnCarrier(c, team, at, 'home', null);
+  _owSpawnFleet(c, team, at);
+}
+function _owArrive(c) {
+  if (c.owner == null) _owBanner(c.name, c.armed ? 'Hostile fleet: three ships and a carrier' : 'Hostile city');
+  else if (c.owner === player.team) _owBanner(c.name, c.field ? (c.buildT > 0 ? 'Your city - flagship under construction' : 'Your city - the field stands open') : 'Your city');
+  else _owBanner(c.name, 'Held by another fleet');
+}
+function _owCityTick(c, dt, playing) {
+  const owned = c.owner != null;
+  if (!owned && !c.armed && playing && c._playerDist < ((_owK().armDist) || OW.ARM_DIST)) _owArm(c);
+  if (c._rearm && c.built) {
+    // back from a terrain reset (a rift, a quality re-bake): an owned city gets its carrier and fleet again
+    c._rearm = false;
+    if (owned && !c.carrier) { const at = new THREE.Vector3(c.x, _owTowerTop(c), c.z); _owSpawnCarrier(c, c.owner, at, 'follow', (c.owner === player.team) ? player : null); _owSpawnFleet(c, c.owner, at); }
+  }
+  if (c._carrierPending > 0) {
+    c._carrierPending -= dt;
+    if (c._carrierPending <= 0) {
+      c._carrierPending = 0;
+      const team = owned ? c.owner : (OW.TEAM0 + c.idx);
+      const at = new THREE.Vector3(c.x, _owTowerTop(c), c.z);
+      const mode = owned ? (c._pendingMode || 'follow') : 'home';
+      _owSpawnCarrier(c, team, at, mode, (owned && c.owner === player.team) ? player : null);
+      if (!c.fleet.length) _owSpawnFleet(c, team, at); else _owReviveFleet(c, at);
+    }
+  }
+  const car = (c.carrier && c.carrier.alive) ? c.carrier : null;
+  if (car) car.tick(dt);
+  if (owned) {
+    const carAway = !!car && Math.hypot(car.position.x - c.x, car.position.z - c.z) > c.R + OW.AWAY;
+    if (c.field && !c.field.alive) c.field = null;
+    if (c.buildT > 0) {
+      c.buildT -= dt;
+      if (c.buildT <= 0) {
+        c.buildT = 0;
+        const at = c.field ? c.field.position.clone() : new THREE.Vector3(c.x, _owTowerTop(c), c.z);
+        at.y = Math.max(at.y, _owTowerTop(c));
+        _owRemoveField(c);
+        if (!c.carrier) { _owSpawnCarrier(c, c.owner, at, 'follow', (c.owner === player.team) ? player : null); _owBanner(c.name + ' FLAGSHIP LAUNCHED', 'A new carrier joins your fleet'); }
+      }
+    } else {
+      // once raised, the field stands until someone takes it (the owner included): the flagship
+      // riding home with its pilot does not close the city again
+      const needField = (!car || carAway) && !c.field && c._carrierPending <= 0 && c.built;
+      if (needField && playing) _owSpawnField(c);
+    }
+  }
+  _owFleetTick(c, dt);
+}
+// ── the leviathan ─────────────────────────────────────────────────────────────────────────────
+class OwBoss {
+  constructor(at, groundY) {
+    this.isOwBoss = true; this.alive = true; this.id = 'owboss'; this.team = 'boss';
+    this.name = 'LEVIATHAN'; this.loadout = { name: 'THE LEVIATHAN' };
+    const K = _owK().boss || {};
+    const hpBase = (typeof CHASSIS !== 'undefined' && CHASSIS.DREADNOUGHT) ? CHASSIS.DREADNOUGHT.maxHealth : 12500;
+    this.maxHealth = Math.round(hpBase * (K.hpX || OW.BOSS.hpX)); this.health = this.maxHealth;
+    this.shield = 0; this.maxShield = 0;
+    this.size = K.size || OW.BOSS.size;
+    this.position = at.clone(); this.velocity = new THREE.Vector3();
+    this.groundY = groundY; this.riseT = 0; this.risen = false;
+    this.kills = 0; this.deaths = 0; this.damageDealt = 0; this.damageTaken = 0; this.shipState = 'flying'; this.doomed = false; this.spawnProtection = 0;
+    this.halfH = this.size * 0.4;
+    this.chassis = { hullWidth: this.size * 0.5, hullHeight: this.size * 0.8, hullLength: this.size * 0.5, hullRadius: this.size * 0.4, flightSpeed: 70 };
+    this.collisionRadius = this.size * OW.BOSS.touch;
+    this.zapT = 3; this.touchCd = 0; this._hitT = -1; this._lastAttacker = null;
+    this.mesh = new THREE.Group(); this.mesh.position.copy(this.position); scene.add(this.mesh);
+    this._mixer = null; this._sink = -1; this._gone = false;
+    this.def = (typeof MONSTER_DEFS !== 'undefined' && MONSTER_DEFS.find(d => d.key === (K.key || OW.BOSS.key))) || { key: OW.BOSS.key, gut1: 0x9a8468, gut2: 0x5a2c20, ghost: 0xc9b8ff };
+    this._load();
+  }
+  _load() {
+    if (typeof THREE.GLTFLoader === 'undefined') return;
+    try {
+      new THREE.GLTFLoader().load(MONSTER_BASE_URL + this.def.key + '.glb' + _MODEL_CACHE_BUST,
+        (gltf) => { try { this._attach(gltf.scene, gltf.animations); } catch (e) { console.warn('[cities] boss attach failed:', e); } },
+        undefined, (err) => console.warn('[cities] boss model failed:', err && err.message));
+    } catch (e) { console.warn('[cities] boss load failed:', e); }
+  }
+  _attach(obj, clips) {
+    if (!this.alive) return;
+    const tint = new THREE.Color(this.def.gut2 || 0x5a2c20);
+    obj.traverse(n => {
+      if (!n.isMesh || !n.material) return;
+      const ms = Array.isArray(n.material) ? n.material : [n.material];
+      for (const m of ms) { if (!m) continue; if (m.emissive) { m.emissive.copy(tint); m.emissiveIntensity = 0.35; } }
+      n.frustumCulled = false; n.castShadow = false; n.receiveShadow = false;
+    });
+    const box = new THREE.Box3().setFromObject(obj);
+    const sz = box.getSize(new THREE.Vector3()), maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+    const center = box.getCenter(new THREE.Vector3());
+    const s = this.size / maxDim;
+    const inner = new THREE.Group();
+    obj.position.sub(center);
+    inner.add(obj); inner.scale.setScalar(s);
+    this.mesh.add(inner);
+    this.halfH = sz.y * s * 0.5;
+    // hullWidth/Height give the box the direct-fire test uses (the mesh ray then trims it to the hull);
+    // hullLength feeds the SPHERE tests (splash weapons x1.2, fleet shots x1.1, hitscan x0.7), so it is
+    // kept to a third of the size or every rocket would burst kilometres short of the body
+    this.chassis.hullWidth = sz.x * s; this.chassis.hullHeight = sz.y * s; this.chassis.hullLength = this.size * 0.33;
+    this.chassis.hullRadius = this.size * 0.33;
+    this.collisionRadius = Math.max(sz.x, sz.z) * s * 0.5 * 0.55;
+    try {
+      if (clips && clips.length && THREE.AnimationMixer) {
+        this._mixer = new THREE.AnimationMixer(obj);
+        const act = this._mixer.clipAction((typeof _monStripRootMotion === 'function') ? _monStripRootMotion(clips[0]) : clips[0]);
+        act.setLoop(THREE.LoopRepeat, Infinity); act.timeScale = 0.35; act.play();
+      }
+    } catch (_) {}
+  }
+  update() {}
+  tick(dt) {
+    if (!this.alive) return;
+    const K = _owK().boss || {}, B = OW.BOSS;
+    if (this._mixer) this._mixer.update(dt * (this.risen ? 1 : 0.5));
+    const halfH = this.halfH;
+    if (!this.risen) {
+      this.riseT += dt;
+      const u = Math.min(1, this.riseT / (K.rise || B.rise));
+      const e = u * u * (3 - 2 * u);
+      this.position.y = this.groundY - halfH * 1.05 + (halfH * 0.75 + halfH * 1.05) * e;
+      this.mesh.position.copy(this.position);
+      if (Math.random() < dt * 9) {
+        const a = Math.random() * Math.PI * 2, r = this.size * (0.12 + Math.random() * 0.3);
+        _owV1.set(this.position.x + Math.cos(a) * r, this.groundY + 30, this.position.z + Math.sin(a) * r);
+        try { spawnExplosion(_owV1.clone(), 140 + Math.random() * 220); } catch (_) {}
+      }
+      if (u >= 1) { this.risen = true; _owBanner('THE LEVIATHAN RISES', 'Six fleets against one'); try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {} }
+      return;
+    }
+    const tgt = _owBossTarget(this);
+    if (tgt) {
+      const dx = tgt.pos.x - this.position.x, dz = tgt.pos.z - this.position.z;
+      const d = Math.hypot(dx, dz);
+      const spd = K.spd || B.spd;
+      if (d > this.size * 0.25) {
+        const step = Math.min(d, spd * dt);
+        this.position.x += dx / d * step; this.position.z += dz / d * step;
+        this.velocity.set(dx / d * spd, 0, dz / d * spd);
+      } else this.velocity.set(0, 0, 0);
+      const yaw = Math.atan2(dx, dz);
+      let dy = yaw - this.mesh.rotation.y;
+      while (dy > Math.PI) dy -= Math.PI * 2; while (dy < -Math.PI) dy += Math.PI * 2;
+      this.mesh.rotation.y += dy * Math.min(1, dt * 0.8);
+      this.zapT -= dt;
+      if (this.zapT <= 0 && tgt.dist < (K.zapRange || B.zapRange) + this.size * 0.3) {
+        this.zapT = (K.zapEvery || B.zapEvery) * (0.85 + Math.random() * 0.3);
+        this._zap(tgt);
+      }
+    }
+    let gy = this.groundY;
+    try { const T = game.sandwichTerrain; if (T && T.ON) { const h = _stGroundYCarved(this.position.x, this.position.z, T); if (isFinite(h)) gy = h; } } catch (_) {}
+    const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -1e9;
+    if (gy < WL - halfH * 0.4) gy = WL - halfH * 0.4;   // wades, does not vanish under the lake
+    this.groundY = gy;
+    const wantY = gy + halfH * 0.75;
+    this.position.y += (wantY - this.position.y) * Math.min(1, dt * 1.5);
+    this.mesh.position.copy(this.position);
+    // contact: the body itself hurts and shoves
+    this.touchCd -= dt;
+    if (this.touchCd <= 0 && player.shipState !== 'dead' && player.position.distanceTo(this.position) < this.collisionRadius + 120) {
+      this.touchCd = 0.8;
+      try { playerTakeDamage((K.zapDmg || B.zapDmg) * 0.5, this); } catch (_) {}
+      _owV1.subVectors(player.position, this.position); const L = _owV1.length(); if (L > 0.001 && player.velocity) player.velocity.addScaledVector(_owV1.multiplyScalar(1 / L), 600);
+    }
+  }
+  _zap(tgt) {
+    let victim = tgt.ent || null;
+    if (!victim && tgt.isLocal) victim = player;
+    else if (!victim) {
+      for (const e of game.entities) { if (e && e.alive && e.position === tgt.pos) { victim = e; break; } }
+      if (!victim && typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) { const np = net.networkPlayers.find(n => n && n.position === tgt.pos); if (np) victim = np; }
+    }
+    const from = _owV1.copy(tgt.pos).sub(this.position).normalize().multiplyScalar(this.size * 0.28).add(this.position); from.y += this.size * 0.18;
+    const to = _owV2.copy(tgt.pos);
+    try {
+      spawnLightningBolt(from.clone(), to.clone(), 0xff5a4a, 0.3, 4, 7, true);
+      spawnLightningBolt(from.clone(), to.clone(), 0xffd0a0, 0.16, 2, 3, true);
+      if (typeof v8SpawnSparks === 'function') v8SpawnSparks(to, 14, 1.4, 320, 0xff5a4a, 0xffffff);
+      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(to, 0xff5a4a, 4.0, 1200, 0.2);
+      if (typeof playSpatialSound === 'function') playSpatialSound('monster_zap', to.clone(), { refDistance: 900, maxDistance: 20000, rolloffFactor: 0.8 });
+    } catch (_) {}
+    const dmg = (_owK().boss && _owK().boss.zapDmg) || OW.BOSS.zapDmg;
+    try {
+      if (victim === player) playerTakeDamage(dmg, this);
+      else if (victim && typeof victim.takeDamage === 'function') { const dealt = victim.takeDamage(dmg, this, victim.position); if (dealt > 0) this.damageDealt += dealt; }
+    } catch (_) {}
+  }
+  takeDamage(amount, attacker, hitPoint) {
+    if (!this.alive) return 0;
+    if (attacker === this) return 0;
+    let dmg = Math.max(0, amount || 0);
+    if (attacker === 'player' && typeof _aegisDmgOut === 'function') { try { dmg = _aegisDmgOut(dmg, this); } catch (_) {} }
+    const applied = Math.min(Math.max(0, this.health), dmg);
+    this.health = Math.max(0, this.health - dmg);
+    this.damageTaken += applied;
+    if (attacker && typeof attacker === 'object' && attacker.alive !== undefined && attacker !== this) attacker.damageDealt = (attacker.damageDealt || 0) + applied;
+    this._lastAttacker = attacker;
+    const now = game.time || 0;
+    if (now - this._hitT > 0.12) {
+      this._hitT = now;
+      try { if (typeof v8SpawnSparks === 'function') v8SpawnSparks(hitPoint || this.position, 6, 1.6, 340, this.def.gut1, 0xffddee); } catch (_) {}
+    }
+    if (this.health <= 0) this.die();
+    return applied;
+  }
+  die() {
+    if (!this.alive) return;
+    this.alive = false; this.deaths++;
+    const byPlayer = _owPlayerSide(this._lastAttacker);
+    try {
+      const N = 26, span = 4.5, R = this.size * 0.3;
+      for (let i = 0; i < N; i++) {
+        const at = this.position.clone(); at.x += (Math.random() - 0.5) * R * 1.6; at.y += (Math.random() - 0.5) * this.halfH * 1.4; at.z += (Math.random() - 0.5) * R * 1.6;
+        const r = 500 + Math.random() * 700;
+        setTimeout(() => { try { spawnExplosion(at, r); } catch (_) {} }, Math.random() * span * 1000);
+      }
+      if (typeof spawnMonsterGuts === 'function') setTimeout(() => { try { spawnMonsterGuts(this.position.clone(), 2500, this.def); } catch (_) {} }, 800);
+    } catch (_) {}
+    try { addKillFeed(byPlayer ? 'You' : 'The fleets', 'THE LEVIATHAN'); showKillMarker(); } catch (_) {}
+    player.monKills = (player.monKills | 0) + 1;
+    try { if (typeof _aegisAwardXp === 'function') _aegisAwardXp(AEGIS.XP_PER_KILL * OW.XP.boss); } catch (_) {}
+    _owBanner('LEVIATHAN SLAIN', 'The overworld is yours');
+    try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+    OW.bossDone = true;
+    this._sink = 0;
+  }
+  sinkTick(dt) {
+    if (this._gone) return;
+    this._sink += dt;
+    this.position.y -= dt * (this.halfH * 2.2 / 14);
+    this.mesh.position.copy(this.position);
+    if (this._mixer) this._mixer.update(dt * 0.3);
+    if (this._sink > 14) this.destroy();
+  }
+  destroy() {
+    this._gone = true;
+    try { if (this.mesh) scene.remove(this.mesh); } catch (_) {}
+    const i = game.entities.indexOf(this); if (i >= 0) game.entities.splice(i, 1);
+  }
+  collide(pos, velocity, radius) {
+    if (!this.alive) return;
+    const dx = pos.x - this.position.x, dy = pos.y - this.position.y, dz = pos.z - this.position.z;
+    const d2 = dx * dx + dy * dy + dz * dz, R = this.collisionRadius + radius;
+    if (d2 >= R * R || d2 < 1) return;
+    const d = Math.sqrt(d2), nx = dx / d, ny = dy / d, nz = dz / d;
+    const push = R - d + 1;
+    pos.x += nx * push; pos.y += ny * push; pos.z += nz * push;
+    if (velocity) { const vn = velocity.x * nx + velocity.y * ny + velocity.z * nz; if (vn < 0) { velocity.x -= nx * vn * 1.1; velocity.y -= ny * vn * 1.1; velocity.z -= nz * vn * 1.1; } }
+  }
+}
+// the nearest ship of any kind (the pilot, other pilots, every fleet and carrier) - never the boss itself
+function _owBossTarget(boss) {
+  let bestPos = null, bestD = Infinity, bestLocal = false, bestEnt = null;
+  if (typeof player !== 'undefined' && player && player.position && player.shipState !== 'dead' && player.shipState !== 'spawning') {
+    bestD = boss.position.distanceTo(player.position); bestPos = player.position; bestLocal = true; bestEnt = player;
+  }
+  if (typeof net !== 'undefined' && net && net.active && Array.isArray(net.networkPlayers)) {
+    for (const np of net.networkPlayers) { if (!np || !np.alive || !np.position) continue; const d = boss.position.distanceTo(np.position); if (d < bestD) { bestD = d; bestPos = np.position; bestLocal = false; bestEnt = np; } }
+  }
+  for (const e of game.entities) {
+    if (!e || e === boss || !e.alive || !e.position || e.isHubTraffic || e.isOwBoss) continue;
+    const d = boss.position.distanceTo(e.position);
+    if (d < bestD) { bestD = d; bestPos = e.position; bestLocal = false; bestEnt = e; }
+  }
+  return bestPos ? { pos: bestPos, dist: bestD, isLocal: bestLocal, ent: bestEnt } : null;
+}
+function _owBossCheck() {
+  if (OW.boss || OW.bossDone || !OW.cities) return;
+  for (const c of OW.cities) if (c.owner == null) return;
+  _owBossSpawn();
+}
+function _owBossSpawn() {
+  const T = game.sandwichTerrain;
+  let ax = player.position.x - HUB_CITY.x, az = player.position.z - HUB_CITY.z;
+  let L = Math.hypot(ax, az); if (L < 1) { ax = 1; az = 0; L = 1; }
+  ax /= L; az /= L;
+  const D = (_owK().boss && _owK().boss.dist) || 11000;
+  const x = player.position.x + ax * D, z = player.position.z + az * D;
+  let gy = 0; try { gy = _stGroundYCarved(x, z, T); } catch (_) {}
+  if (!isFinite(gy)) gy = 0;
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -1e9;
+  if (gy < WL - 400) gy = WL - 400;
+  const size = (_owK().boss && _owK().boss.size) || OW.BOSS.size;
+  const boss = new OwBoss(new THREE.Vector3(x, gy - size * 0.42, z), gy);
+  OW.boss = boss;
+  game.entities.push(boss);
+  _owBanner('SIX CITIES HELD', 'Something enormous is waking beneath the ground');
+  try { if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue(); } catch (_) {}
+  try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+  return boss;
+}
+// ── world hooks: colliders, rays, minimap ─────────────────────────────────────────────────────
+function _owCollide(pos, velocity, radius) {
+  const C = OW.cities; if (!C) return;
+  for (let i = 0; i < C.length; i++) {
+    const c = C[i];
+    if (c.built && c.built.city) _hcCollideIn(c.built.city, c.site, pos, velocity, radius);
+    if (c.carrier && c.carrier.alive) c.carrier.collide(pos, velocity, radius);
+  }
+  for (let i = 0; i < OW.orphans.length; i++) { const car = OW.orphans[i]; if (car.alive) car.collide(pos, velocity, radius); }
+  if (OW.boss && OW.boss.alive) OW.boss.collide(pos, velocity, radius);
+}
+function _owRayHit(origin, dir, maxDist, skipCarrier) {
+  const C = OW.cities; if (!C) return maxDist;
+  let best = maxDist;
+  for (let i = 0; i < C.length; i++) {
+    const c = C[i];
+    if (c.built && c.built.city) { const d = _hcRayHitIn(c.built.city, c.site, origin, dir, best); if (d < best) best = d; }
+    if (!skipCarrier && c.carrier && c.carrier.alive) { const d = c.carrier.rayDist(origin, dir, best); if (d >= 0 && d < best) best = d; }
+  }
+  if (!skipCarrier) for (let i = 0; i < OW.orphans.length; i++) { const car = OW.orphans[i]; if (!car.alive) continue; const d = car.rayDist(origin, dir, best); if (d >= 0 && d < best) best = d; }
+  return best;
+}
+function _owMinimap(ctx, plot, cx, cy) {
+  const C = OW.cities; if (!C) return;
+  const t = game.time || 0;
+  for (let i = 0; i < C.length; i++) {
+    const c = C[i];
+    const p = plot(c.x, c.z);
+    const mine = c.owner != null && c.owner === player.team;
+    const col = (c.owner == null) ? 'rgba(255,120,80,0.9)' : (mine ? 'rgba(79,209,255,0.95)' : 'rgba(255,64,64,0.95)');
+    ctx.strokeStyle = col; ctx.lineWidth = 1.4;
+    if (p.off) {
+      // a small hexagon at the rim, pointing the way
+      const ang = Math.atan2(p.y - cy, p.x - cx);
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(ang);
+      ctx.beginPath(); for (let k = 0; k < 6; k++) { const a = k * Math.PI / 3; const x = Math.cos(a) * 3.4, y = Math.sin(a) * 3.4; if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); } ctx.closePath(); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(4.5, -2.5); ctx.lineTo(7.5, 0); ctx.lineTo(4.5, 2.5); ctx.stroke();
+      ctx.restore();
+      continue;
+    }
+    ctx.beginPath(); for (let k = 0; k < 6; k++) { const a = k * Math.PI / 3; const x = p.x + Math.cos(a) * 6, y = p.y + Math.sin(a) * 6; if (k === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); } ctx.closePath(); ctx.stroke();
+    if (c.field && c.field.alive) {   // contested: a pulsing violet dot
+      ctx.fillStyle = 'rgba(178,120,255,' + (0.55 + Math.sin(t * 4) * 0.35) + ')';
+      ctx.beginPath(); ctx.arc(p.x, p.y, 2.4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+// ── the frame ─────────────────────────────────────────────────────────────────────────────────
+function _owFrame(dt) {
+  if (!OW.ON) return;
+  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
+  if (game._cavern) return;
+  if (game._cyber && game._cyber.armed) return;
+  if (typeof net !== 'undefined' && net && net.active) return;   // v38.78: solo; multiplayer sync is the next step
+  const T = game.sandwichTerrain;
+  if (!T || !T.ON || !T.HUB || T.biome !== 'mossy') return;
+  if (typeof player === 'undefined' || !player || !player.position) return;
+  if (game.state !== 'playing' && game.state !== 'warmup') return;
+  if (!_owEnsureSites(T)) return;
+  const C = OW.cities;
+  const px = player.position.x, pz = player.position.z;
+  const playing = game.state === 'playing';
+  const K = _owK();
+  const buildD = K.buildDist || OW.BUILD_DIST, dropD = Math.max(buildD + 1500, K.dropDist || OW.DROP_DIST);
+  let builtThisFrame = false, nearest = -1, nearestD = Infinity;
+  for (let i = 0; i < C.length; i++) {
+    const c = C[i];
+    const d = Math.hypot(px - c.x, pz - c.z);
+    c._playerDist = d;
+    if (d < nearestD) { nearestD = d; nearest = i; }
+    if (!c.built && d < buildD && !builtThisFrame) {
+      builtThisFrame = true;
+      try { _owBuild(c); } catch (e) { console.warn('[cities] build failed:', c.name, e); c.built = { city: null, group: null, failed: true }; }
+      try { if (typeof _carrierLoadProto === 'function') _carrierLoadProto(null); } catch (_) {}
+    } else if (c.built && d > dropD) _owDrop(c);
+  }
+  // what _hubCityFrame does for the hub: camera-relative sun for the tower shader, the light sweep
+  if (typeof camera !== 'undefined' && camera) {
+    if (!OW._sunV) OW._sunV = new THREE.Vector3();
+    OW._sunV.set(0.267, 0.802, 0.401).transformDirection(camera.matrixWorldInverse);
+    const t = (typeof _swU !== 'undefined' && _swU.uTime) ? _swU.uTime.value : 0;
+    for (let i = 0; i < C.length; i++) {
+      const b = C[i].built; if (!b) continue;
+      if (b.twrMat && b.twrMat.userData.uHcSunV) b.twrMat.userData.uHcSunV.value.copy(OW._sunV);
+      if (b.lights) { const hs = b.lights.children; for (let k = 0; k < hs.length; k++) hs[k].rotation.y = t * (0.14 + k * 0.07) + k * 2.09; }
+    }
+  }
+  if (nearest >= 0) {
+    const c = C[nearest];
+    const inside = nearestD < c.R + 900;
+    if (inside && !c._visit && playing) { c._visit = true; _owArrive(c); }
+    else if (!inside && nearestD > c.R + 2500) c._visit = false;
+  }
+  for (let i = 0; i < C.length; i++) { try { _owCityTick(C[i], dt, playing); } catch (e) { if (!C[i]._err) { C[i]._err = true; console.warn('[cities] city tick threw:', C[i].name, e); } } }
+  for (let i = OW.orphans.length - 1; i >= 0; i--) { const car = OW.orphans[i]; if (!car.alive) { OW.orphans.splice(i, 1); continue; } car.tick(dt); }
+  if (OW.boss) {
+    if (OW.boss.alive) OW.boss.tick(dt);
+    else if (OW.boss._gone) OW.boss = null;
+    else OW.boss.sinkTick(dt);
+  }
+}
+// terrain reset (a rift trip, a re-bake): drop everything built, keep the ownership; re-arm on return
+function _owDispose() {
+  const C = OW.cities;
+  if (C) for (const c of C) {
+    try { _owKillFleet(c, false); } catch (_) {}
+    try { if (c.carrier) { c.carrier.destroy(); c.carrier = null; } } catch (_) {}
+    try { _owRemoveField(c); } catch (_) {}
+    try { _owDrop(c); } catch (_) {}
+    c.armed = false; c.buildT = 0; c._carrierPending = 0; c._visit = false; c._fleetPending = false;
+    c._rearm = (c.owner != null);
+  }
+  for (const car of OW.orphans) { try { car.destroy(); } catch (_) {} }
+  OW.orphans.length = 0;
+  if (OW.boss) { try { OW.boss.destroy(); } catch (_) {} OW.boss = null; }
+}
+// a fresh free flight: everything starts hostile again
+function _owReset() { try { _owDispose(); } catch (_) {} OW.cities = null; OW.bossDone = false; }
+if (typeof window !== 'undefined') {
+  window.__citiesInfo = () => ({
+    cities: (OW.cities || []).map(c => ({ i: c.idx, name: c.name, biome: c.biome, x: Math.round(c.x), z: Math.round(c.z), pad: Math.round(c.padY),
+      owner: c.owner, built: !!c.built, armed: c.armed, dist: Math.round(c._playerDist),
+      carrier: c.carrier ? { hp: Math.round(c.carrier.health), mode: c.carrier.mode, alive: c.carrier.alive, x: Math.round(c.carrier.position.x), y: Math.round(c.carrier.position.y), z: Math.round(c.carrier.position.z) } : null,
+      fleet: c.fleet.map(b => (b.alive ? 'A' : 'd') + Math.round(b.health)).join(' '), field: !!(c.field && c.field.alive), buildT: Math.round(c.buildT) })),
+    boss: OW.boss ? { hp: Math.round(OW.boss.health), risen: OW.boss.risen, alive: OW.boss.alive, x: Math.round(OW.boss.position.x), y: Math.round(OW.boss.position.y), z: Math.round(OW.boss.position.z) } : null,
+    bossDone: OW.bossDone, orphans: OW.orphans.length,
+  });
+  window.__citiesTp = (i, far) => {
+    const c = OW.cities && OW.cities[i]; if (!c) return 'no city ' + i;
+    const d = (far != null) ? far : 3800;
+    player.position.set(c.x + d, _owTowerTop(c) + 300, c.z + d * 0.4); player.velocity.set(0, 0, 0);
+    if (player.mesh) player.mesh.position.copy(player.position);
+    return c.name + ' @ ' + Math.round(c.x) + ',' + Math.round(c.z);
+  };
+  window.__citiesOwn = (i) => { const c = OW.cities && OW.cities[i]; if (!c) return false; if (c.carrier && c.carrier.alive) { c.carrier._lastAttacker = 'player'; c.carrier.health = 0; c.carrier.die(); return true; } c.owner = player.team; c.ownerName = 'YOU'; _owBossCheck(); return true; };
+  window.__citiesBoss = () => (OW.boss || _owBossSpawn());
+  window.__citiesCfg = OW;
+}
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // HUB WEATHER (v34.27) : our own sky — the painted equirect skybox is retired
@@ -35629,6 +36792,7 @@ function resolveCollision(pos, velocity, radius, entity) {
 
   if (game.hubCity) _hubCityCollide(pos, velocity, radius);
   if (_carrier.obj) _carrierCollide(pos, velocity, radius);   // (v37.77) the flying carrier is solid
+  if (typeof _owCollide === 'function') _owCollide(pos, velocity, radius);   // (v38.78) overworld cities, their carriers, the leviathan
 
   const CONTAIN_RANGE = radius * 2.5;
   const CONTAIN_STRENGTH = 12000;
@@ -35758,6 +36922,7 @@ function resolveShipShipCollisions(dt) {
     // (v37.72) ...and never the CARRIER: it is a 2400-unit platform the attacking team spawns ON,
     // so the symmetric push-apart pass would fling every ship off its own deck.
     if (bot.isCarrier) continue;
+    if (bot.isOwCarrier || bot.isOwBoss) continue;   // (v38.78) their own colliders (see _owCollide)
     const s = _shipCollisionSlot(shipCount++);
     s.pos = bot.position;
     s.vel = bot.velocity;
@@ -36019,6 +37184,10 @@ function raycastLevel(origin, dir, maxDist, coarse, skipCarrier) {
   if (game.hubCity && typeof _hubCityRayHit === 'function') {
     const cd = _hubCityRayHit(origin, dir, nearest);
     if (cd < nearest) nearest = cd;
+  }
+  if (typeof _owRayHit === 'function') {   // (v38.78) overworld cities and their carriers
+    const cd3 = _owRayHit(origin, dir, nearest, skipCarrier);
+    if (cd3 < nearest) nearest = cd3;
   }
   const sdfHit = sdfRaycast(origin.x, origin.y, origin.z, dir.x, dir.y, dir.z, nearest, coarse);
   if (sdfHit < nearest) nearest = sdfHit;
@@ -38876,7 +40045,7 @@ class Bot {
     const _ctAlive = _ct && (_ct === player ? (player.shipState !== 'dead') : !!_ct.alive);
     if (this.fireTimer <= 0 && game.state === 'playing' && !this.aiRetreating && _ctAlive) {
       const toTgt = this._tempVec3a.subVectors(_ct.position, this.position);
-      const distToTgt = toTgt.length();
+      const distToTgt = toTgt.length() - (_ct.isOwBoss ? (_ct.collisionRadius || 0) * 0.85 : 0);   // (v38.78) range to the leviathan's skin
       // Range Mode (BLASTER utility approximation) extends reach while active.
       const _rangeMul = (this._rangeModeT > 0) ? 1.6 : 1.0;
       if (distToTgt < this.loadout.weapon.range * _rangeMul) {
@@ -39277,6 +40446,7 @@ class Bot {
     }
     for (const b of game.entities) {
       if (!b || b === this || !b.alive || b.team === this.team) continue;
+      if (b.isHubTraffic && this._owCity != null) continue;   // (v38.78) a city fleet leaves the freighters alone
       const d2 = this.position.distanceToSquared(b.position);
       if (d2 < bestScore) { bestScore = d2; best = b; }
     }
@@ -60414,6 +61584,15 @@ function fireHitscan(origin, dir, w) {
     // whole of "hitscan weapons are not seeming to damage the carrier": the beam stopped on the
     // plating and nothing was ever asked to take the hit.
     // The collider already knows the real answer - march the ray against the measured hull map.
+    if (bot.isOwCarrier && typeof bot.rayDist === 'function') {   // (v38.78) a city carrier: march the beam against its hull box
+      let _cd = -1;
+      try { _cd = bot.rayDist(origin, aimDir, Math.min(w.range, lineMax + 24)); } catch (_) {}
+      if (_cd >= 0 && _cd <= lineMax + 24) {
+        if (isPiercing) pierceHits.push({ bot, proj: _cd });
+        else if (_cd < bestDist) { bestHit = bot; bestDist = _cd; }
+      }
+      continue;
+    }
     if (bot.isCarrier) {
       let _cd = -1;
       try { _cd = _carrierRayDist(origin, aimDir, Math.min(w.range, lineMax + 24)); } catch (_) {}
@@ -66667,6 +67846,7 @@ function returnToRootMenu(opts) {
   // Wipe live entities / projectiles / stasis / world-effects so the next
   // match starts from clean state (commitLoadout's fresh-match path rebuilds
   // the world, but these references live on game until then).
+  try { if (typeof _owDispose === 'function') _owDispose(); } catch (_) {}   // (v38.78) overworld fleets, carriers, fields, boss
   for (const bot of game.entities) { try { bot.destroy(); } catch (e) {} }
   game.entities = [];
   // (fix 2026-06-12) Strip projectile meshes from the scene, not just the
@@ -71118,6 +72298,7 @@ function updateMinimap() {
   // (v35.79) Player: FIXED triangle, nose always screen-up — the map rotates
   // instead (ship-up radar). No direction line anymore: it would always point
   // straight up. In campaign mode _proj puts this exactly at the disc centre.
+  if (typeof _owMinimap === 'function') { try { _owMinimap(ctx, _plot, cx, cy); } catch (_) {} }   // (v38.78) city markers
   const pp = _proj(player.position.x, player.position.z);
   ctx.fillStyle = '#fff';
   ctx.beginPath();
@@ -71137,6 +72318,12 @@ function updateMinimap() {
     const isEnemy = (_localTeam == null) || (bot.team !== _localTeam);
     const p = _plot(bot.position.x, bot.position.z);
     // Campaign Nemesis : distinct silver diamond so the recurring villain reads.
+    if (bot.isOwBoss) {   // (v38.78) the leviathan: a big red diamond
+      if (p.off) { _mmArrow(p, '#ff5060'); continue; }
+      ctx.fillStyle = 'rgba(255,80,96,0.85)';
+      ctx.beginPath(); ctx.moveTo(p.x, p.y - 7); ctx.lineTo(p.x + 7, p.y); ctx.lineTo(p.x, p.y + 7); ctx.lineTo(p.x - 7, p.y); ctx.closePath(); ctx.fill();
+      continue;
+    }
     if (bot.isNemesis) {
       if (p.off) { _mmArrow(p, '#cfc0ff'); continue; }
       ctx.fillStyle = '#cfc0ff';
@@ -71149,7 +72336,7 @@ function updateMinimap() {
     // silhouette on the disc, and off it a bigger HOLLOW arrow so it is not mistaken for a
     // hostile fighter's solid one. Friend/enemy colour like everything else - the glyph says
     // WHAT, the colour says WHOSE.
-    if (bot.isCarrier) {
+    if (bot.isCarrier || bot.isOwCarrier) {   // (v38.78) the city carriers wear the same capital-ship glyph
       const _cc = isEnemy ? ENEMY_COL : FRIEND_COL;
       if (p.off) {
         const _ca = Math.atan2(p.y - cy, p.x - cx);
@@ -79958,9 +81145,10 @@ function _getSharedStasisBeaconGeo() {
 }
 
 class StasisField {
-  constructor(position, championMode) {
+  constructor(position, championMode, opts) {   // (v38.78) opts.noShell: a city field has no shell to break
     this.position = position.clone();
     this.alive = true;
+    this._opts = opts || null;
     // Champion fields are bigger so two ships can cross paths in
     // them and the contested-charge resolution reads at a glance.
     this.championMode = !!championMode;
@@ -79973,7 +81161,7 @@ class StasisField {
     // Champion fields spawn sealed inside the destructible Champion
     // Shell (Sphere.glb, 3000 HP). Constructor hook covers every spawn
     // path: stasis-owner spawn, net 'stasis_spawn' receivers, race mode.
-    if (this.championMode) {
+    if (this.championMode && !(opts && opts.noShell)) {
       try { if (typeof _spawnChampionShell === 'function') _spawnChampionShell(this); }
       catch (e) { console.warn('[champ-shell] spawn failed:', e); }
     }
@@ -80813,7 +82001,7 @@ function updateStasisFields(dt) {
           field.teamProgress[teamKey] += dt;
           // (v34.68) Assault charges are a real HOLD (contestable, shovable),
           // not the race/classic quick-touch.
-          const progress = Math.min(1, field.teamProgress[teamKey] / Math.max(0.001, _champChargeTime()));
+          const progress = Math.min(1, field.teamProgress[teamKey] / Math.max(0.001, field.chargeTime || _champChargeTime()));   // (v38.78) a field may carry its own hold time
           // Mirror to chargeTimer for any legacy readers (HUD / net).
           field.chargeTimer = field.teamProgress[teamKey];
           const maxS = ship.maxShield || 0;
@@ -80834,6 +82022,17 @@ function updateStasisFields(dt) {
           // Win condition: this team's accrued progress is full.
           if (progress >= 1) {
             const team = ship.team;
+            if (typeof field.onCaptured === 'function') {   // (v38.78) an overworld city field: its own verdict, no round result
+              field.alive = false;
+              if (field.group && field.group.parent) scene.remove(field.group);
+              if (isPlayer) {
+                game.playerInChampionStasis = false; game.playerInStasis = false;
+                const _w = document.getElementById('stasis-warning'); const _v = document.getElementById('stasis-vignette');
+                if (_w) _w.style.display = 'none'; if (_v) _v.style.display = 'none';
+              }
+              try { field.onCaptured(team, ship); } catch (_) {}
+              continue;
+            }
             // (v38.25) WHO IS TOLD. championResult + championEndTimer are the ARENA round loop's
             // channel; cyberpunk city runs its own loop and nothing there reads them, which is
             // exactly why a capture used to end in silence (owner: "i captured but it didn't make
@@ -80904,6 +82103,7 @@ function updateStasisFields(dt) {
         if (!field.claimedBy) {
           for (const bot of game.entities) {
             if (!bot.alive) continue;
+            if (field.cityIdx != null && !bot.peerId) continue;   // (v38.78) only pilots take a city field, never the fleets
             if (field.recentlyReleasedShip === bot) continue;
             if (_isAssault() && bot.team !== _assaultAttackerFleet()) continue;
             // (v38.25) the mode's attackers only. City traffic and the carrier itself carry no
@@ -84701,7 +85901,7 @@ function updateEnemyHealthBars() {
     const dist = player.position.distanceTo(ent.position);
     // (v38.02) A capital ship is legible from a great deal further away than a fighter, and the
     // player needs to be able to read its health from outside its guns' reach.
-    if (dist > (ent.isCarrier ? 30000 : 3500)) { ent._labelSpotTime = null; return; }
+    if (dist > ((ent.isCarrier || ent.isOwCarrier || ent.isOwBoss) ? 30000 : 3500)) { ent._labelSpotTime = null; return; }   // (v38.78)
     // Anchor the callout's target bracket AT the ship (not below
     // it). The diagonal line + text peel to the upper-right (or upper-
     // left when flipped), so the bracket reads as a target reticle on
@@ -84731,7 +85931,7 @@ function updateEnemyHealthBars() {
     // Color carries the friend/enemy reading ; show just the chassis name.
     let fullText = (ent.loadout.name || '?').toUpperCase();
     // (v38.02) the carrier wears its condition: name plus a live percentage
-    if (ent.isCarrier && ent.maxHealth > 0) {
+    if ((ent.isCarrier || ent.isOwCarrier || ent.isOwBoss) && ent.maxHealth > 0) {   // (v38.78) capital hulls read their health
       fullText += '  ' + Math.max(0, Math.ceil((ent.health / ent.maxHealth) * 100)) + '%';
     }
     // Digitize-in: reveal characters over 0.45s, then hold full string.
@@ -85217,6 +86417,7 @@ function gameLoop(timestamp) {
       __pmark('hub:zone');
       try { _hubCityFrame(dt); } catch (_) {}
       try { _carrierFrame(dt); } catch (_) {}   // (v37.72) no-op until a carrier is spawned
+      try { _owFrame(dt); } catch (e) { if (!window._owErr) { window._owErr = String((e && e.stack) || e); console.warn('[cities] frame threw:', e); } }   // (v38.78) overworld cities
       try { _cyberFrame(dt); } catch (_) {}     // (v37.76) no-op unless CYBERPUNK CITY is running
       __pmark('hub:city');
       try { _wxFrame(dt); } catch (_) {}
