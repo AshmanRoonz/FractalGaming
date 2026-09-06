@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.10';
+const LSS_BUILD = '39.12';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -26064,8 +26064,19 @@ function bakeShipThumbnails() {
     if ('outputColorSpace' in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace || 'srgb';
     renderer.setClearColor(0x000000, 0);
     const scene = new THREE.Scene();
-    if (typeof sceneEnvMap !== 'undefined') scene.environment = sceneEnvMap;
-    scene.add(new THREE.AmbientLight(0xffffff, 0.30));
+    try {
+      const ec = document.createElement('canvas'); ec.width = 64; ec.height = 32;
+      const eg = ec.getContext('2d');
+      const grad = eg.createLinearGradient(0, 0, 0, 32);
+      grad.addColorStop(0, '#a8c8ee'); grad.addColorStop(0.55, '#61708a'); grad.addColorStop(1, '#232a33');
+      eg.fillStyle = grad; eg.fillRect(0, 0, 64, 32);
+      const etex = new THREE.CanvasTexture(ec);
+      etex.mapping = THREE.EquirectangularReflectionMapping;
+      const pmrem = new THREE.PMREMGenerator(renderer);
+      scene.environment = pmrem.fromEquirectangular(etex).texture;
+      pmrem.dispose(); etex.dispose();
+    } catch (e) { try { console.warn('[v9b] bake env failed:', e && e.message); } catch (_) {} }
+    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
     const keyL = new THREE.DirectionalLight(0xbfd9ff, 0.70); keyL.position.set(180, 240, 160); scene.add(keyL);
     const fillL = new THREE.DirectionalLight(0xffb066, 0.32); fillL.position.set(-140, -80, -200); scene.add(fillL);
     const rimL = new THREE.DirectionalLight(0xffaa00, 0.20); rimL.position.set(0, 120, -260); scene.add(rimL);
@@ -26083,7 +26094,7 @@ function bakeShipThumbnails() {
       const dz = bbox.max.z - bbox.min.z;
       const longest = Math.max(dx, dy, dz);
       const targetLen = 180;
-      if (longest > 0) model.scale.setScalar(targetLen / longest);
+      if (longest > 0) model.scale.multiplyScalar(targetLen / longest);
       const bbox2 = new THREE.Box3().setFromObject(model);
       const center = new THREE.Vector3();
       bbox2.getCenter(center);
@@ -36678,10 +36689,22 @@ function _programEnvSig() {
   } catch (_) { return null; }   // null NEVER memoizes — the next call re-pins
 }
 let _pinBuildOnly = false;   // (v36.27) see _pinCombatEffectProgramsStaged
+function _ghostPinWarmAsync() {
+  try {
+    if (typeof _ghostHullApply !== 'function' || typeof _ghostHullRestore !== 'function') return;
+    if (typeof player === 'undefined' || !player || !player.mesh) return;
+    if (typeof renderer === 'undefined' || !renderer || typeof renderer.compileAsync !== 'function') return;
+    const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
+    if (!_was) _ghostHullApply(player.mesh);
+    const _restore = () => { try { if (!_was) _ghostHullRestore(player.mesh); } catch (_) {} };
+    renderer.compileAsync(player.mesh, camera, scene).then(_restore).catch(_restore);
+  } catch (_) {}
+}
+
 function _ghostPinWarm() {
   try {
     if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
-        !(typeof window !== 'undefined' && window.__pinShaders)) return;
+        !(typeof window !== 'undefined' && window.__pinShaders)) { _ghostPinWarmAsync(); return; }
   } catch (_) {}
   try {
     if (typeof _ghostHullApply !== 'function') return;
