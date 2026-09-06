@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.23';
+const LSS_BUILD = '39.24';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -26129,7 +26129,8 @@ function _animateShipPreview() {
   const s = _shipPreview3D;
   if (!s.renderer || !s.canvas) return;
   const sel = document.getElementById('ship-select');
-  const visible = !document.hidden && sel && sel.classList.contains('active');
+  const visible = !document.hidden && sel && sel.classList.contains('active') &&
+                  !sel.classList.contains('lss-launching');
   if (!visible) {
     try {
       const _de = s.renderer.domElement;
