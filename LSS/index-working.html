@@ -4391,7 +4391,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.18';
+const LSS_BUILD = '39.19';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -94283,7 +94283,25 @@ const _AUDIO_BAKE = {
   buf: Object.create(null),
   lastTake: Object.create(null),   // (v35.99) per-type round-robin memory
   ready: false, running: false, done: 0, total: 0, bytes: 0, ms: 0,
-  maxDur: 3.0,       // hard cap; the continuous voices are not recipes anyway
+  // (v39.19) 3.0 -> 5.5. This cap was TRUNCATING 9 of the 66 recipes, and the comment on
+  // _audioBakeLen right below already warned why that is fatal: "Offline renders are fixed
+  // length, so under-sizing this truncates the tail." The buffer just ends, mid-decay, with a
+  // hard edge. Owner: "the sound of the shield charge from the stasis field doesn't seem to
+  // finish, and gets interrupted at the end" - `stasis` needs 3.61 s and was losing 0.61 s of
+  // its own release, and durVar jitters the length so it lost a different amount every time
+  // ("doesn't SEEM to finish"). It was never the overshield work the owner dated it to; it
+  // arrived with the v35.99 bake, which shipped near it.
+  // Every recipe over the old cap, measured from the library (needs / was losing):
+  //   stun_core_zap 5.32/2.32   firework_pop 4.40/1.40   laser_core_beam 4.37/1.37
+  //   fire_burn     4.30/1.30   flame_core_blast 3.83/0.83   fire_salvo 3.65/0.65
+  //   stasis        3.61/0.61   kill 3.44/0.44   shield_hum 3.05/0.05
+  // i.e. the CORE SUPERS were the worst hit - stun_core_zap lost 44% of itself. 5.5 clears the
+  // longest with headroom and keeps the cap doing its actual job (a runaway-recipe backstop;
+  // the continuous voices are not recipes anyway). MEASURED COST via window.__sndBakeStats():
+  // 22.27 -> 23.40 MB (+1.1), 121.6 -> 127.8 baked seconds, SAME 145 takes / 66 recipes / 0
+  // skipped - because _audioBakeExtraTakes gives 0 extra takes to anything over 1.10 s, so
+  // every recipe this lengthens already had exactly one.
+  maxDur: 5.5,
   batch: 8,          // offline renders in flight at once
 };
 // Extra takes beyond the first, from the trimmed length. Short = fired fast =

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.18';
+const LSS_BUILD = '39.19';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -69080,7 +69080,7 @@ const _AUDIO_BAKE = {
   buf: Object.create(null),
   lastTake: Object.create(null),   // (v35.99) per-type round-robin memory
   ready: false, running: false, done: 0, total: 0, bytes: 0, ms: 0,
-  maxDur: 3.0,       // hard cap; the continuous voices are not recipes anyway
+  maxDur: 5.5,
   batch: 8,          // offline renders in flight at once
 };
 function _audioBakeExtraTakes(sec) {
