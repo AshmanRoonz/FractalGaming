@@ -483,6 +483,25 @@ body.lss-cockpit3d #ability-overlay-frame { display: none !important; }
   color: #fff; cursor: default; padding: 0;
 }
 #ship-select.active { display: flex; }
+/* (v39.25) ONE-CONTEXT PICKER: #ship-select is transparent so the MAIN canvas can show the
+   hangar + hull it now draws. Its 95%-opaque background used to hide the combat HUD for free;
+   with that gone the round clock, ring, radar and cockpit frame bleed straight through the
+   picker (the between-rounds case is the obvious one — a live "3:00 WARMUP" over the hangar).
+   `body.lss-picker-3d` is set only while the picker actually owns the frame, and is cleared the
+   instant the launch countdown starts, so the 3-2-1 still plays over a live arena. */
+body.lss-picker-3d #hud,
+body.lss-picker-3d #round-info,
+body.lss-picker-3d #champ-capture,
+body.lss-picker-3d #circumpunct-hud,
+body.lss-picker-3d #crosshair,
+body.lss-picker-3d #minimap,
+body.lss-picker-3d #kill-feed,
+body.lss-picker-3d #cockpit-frame,
+body.lss-picker-3d #gun-layer,
+body.lss-picker-3d #enemy-healthbars,
+body.lss-picker-3d #stasis-warning,
+body.lss-picker-3d #stasis-vignette,
+body.lss-picker-3d #enemy-lockon-warning { display: none !important; }
 /* (v37.23) The hangar image + scrim render from #ship-select-bg (a canvas
    baked once at boot — see the markup note), NOT from a CSS background: the
    v37.22 CSS url() version re-decoded the PNG on the between-rounds picker
@@ -4391,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.24';
+const LSS_BUILD = '39.25';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -38493,8 +38512,76 @@ function _shipPreviewDpr() {
   return Math.min(window.devicePixelRatio || 1, cap);
 }
 
+// (v39.25) ONE CONTEXT. The ship picker's rotating GLB has always had its OWN WebGLRenderer,
+// and that second context is the only thing every crash line has in common (`ctxL 2`). It costs
+// three separate things, all measured: a second FULL-SCREEN swapchain, a duplicate GPU copy of
+// whatever hull is on the stage, and a duplicate SHADER PROGRAM for every ship material — the
+// program cache keys differ on `srgb-linear` vs `srgb`, i.e. main renderer vs preview renderer
+// (`hull` had 11 variants, `Vortex_CP_Graphite` 9, the windshield 6).
+// With this on, the picker scene is drawn by the MAIN renderer straight to the game canvas, the
+// hangar backdrop moves into that scene as a quad, and #ship-select goes transparent so the
+// canvas shows through. #ship-preview-canvas STAYS in the DOM with no GL context at all — it is
+// still the pointer target, so the drag-to-rotate handlers below are untouched.
+// A/B: add `?twoctx` to the URL (easy to type on a phone) or set window.__onePassPreview = false
+// before boot to get the old two-context path back, unchanged.
+const _ONE_CTX_PREVIEW = (function () {
+  try {
+    if (typeof window !== 'undefined' && window.__onePassPreview === false) return false;
+    if (typeof location !== 'undefined' && /[?&]twoctx/i.test(location.search || '')) return false;
+  } catch (_) {}
+  return true;
+})();
+
+// The backdrop is a plane parked behind the ship, sized to EXACTLY fill the perspective frustum
+// at its own depth, with `object-fit: cover` reproduced in UV space so a wide phone crops the
+// hangar instead of stretching it — same as the CSS it replaces. Its texture is the very same
+// #ship-select-bg canvas the DOM version used, so the pixels (image + baked scrim) are identical.
+// Mouse-drag rotation: hold left button on the preview canvas and drag horizontally to spin
+// the ship. Listens for move/up on `window` so a drag that leaves the canvas still tracks until
+// release. Shared by both paths — in the one-context path #ship-preview-canvas has no GL context
+// at all and exists purely as this pointer target, so nothing here changes.
+function _bindShipPreviewDrag(canvas) {
+  if (!canvas || canvas._lssDragBound) return;
+  canvas._lssDragBound = true;
+  canvas.style.cursor = 'grab';
+  canvas.addEventListener('mousedown', (e) => {
+    _shipPreview3D.isMouseDragging = true;
+    _shipPreview3D.lastMouseX = e.clientX;
+    canvas.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+  window.addEventListener('mouseup', () => {
+    if (!_shipPreview3D.isMouseDragging) return;
+    _shipPreview3D.isMouseDragging = false;
+    if (_shipPreview3D.canvas) _shipPreview3D.canvas.style.cursor = 'grab';
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!_shipPreview3D.isMouseDragging) return;
+    const dx = e.clientX - _shipPreview3D.lastMouseX;
+    _shipPreview3D.lastMouseX = e.clientX;
+    _shipPreview3D.yaw += dx * _shipPreview3D.MOUSE_ROT_RATE;
+  });
+}
+
+function _previewFitBackdrop(aspect) {
+  const s = _shipPreview3D;
+  const bg = s && s.backdrop;
+  if (!bg || !aspect || !isFinite(aspect)) return;
+  const cam = s.camera;
+  const dist = Math.abs(cam.position.z - bg.position.z) || 1;
+  const h = 2 * Math.tan((cam.fov * Math.PI / 180) / 2) * dist;
+  bg.scale.set(h * aspect, h, 1);
+  const t = bg.material && bg.material.map;
+  const im = t && t.image;
+  if (t && im && im.width && im.height) {
+    const ia = im.width / im.height;
+    if (aspect > ia) { t.repeat.set(1, ia / aspect); t.offset.set(0, (1 - ia / aspect) / 2); }
+    else             { t.repeat.set(aspect / ia, 1); t.offset.set((1 - aspect / ia) / 2, 0); }
+  }
+}
+
 function _initShipPreview3D() {
-  if (_shipPreview3D.renderer) return _shipPreview3D.renderer;
+  if (_shipPreview3D.renderer || _shipPreview3D.ready) return _shipPreview3D.renderer;
   // Once init has failed (driver refused WebGL, canvas missing, etc.) don't
   // keep retrying on every setShipPreviewModel / startShipPreviewLoop call;
   // the preview panel will just stay hidden. The player can still pick and
@@ -38504,6 +38591,61 @@ function _initShipPreview3D() {
   const canvas = document.getElementById('ship-preview-canvas');
   if (!canvas) return null; 
   try {
+    // (v39.25) ONE-CONTEXT PATH: no second renderer at all. Everything below that builds the
+    // SCENE still runs; only the renderer is skipped, and the main one draws it (see
+    // _lssRenderPicker). The canvas keeps its drag handlers and gets no GL context.
+    if (_ONE_CTX_PREVIEW) {
+      const scene = new THREE.Scene();
+      scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+      const keyL = new THREE.DirectionalLight(0xbfd9ff, 0.65); keyL.position.set(180, 240, 160); scene.add(keyL);
+      const fillL = new THREE.DirectionalLight(0xffb066, 0.28); fillL.position.set(-140, -80, -200); scene.add(fillL);
+      const rimL = new THREE.DirectionalLight(0xffaa00, 0.18); rimL.position.set(0, 120, -260); scene.add(rimL);
+      try {
+        const _ec = document.createElement('canvas'); _ec.width = 64; _ec.height = 32;
+        const _eg = _ec.getContext('2d');
+        const _grad = _eg.createLinearGradient(0, 0, 0, 32);
+        _grad.addColorStop(0, '#a8c8ee'); _grad.addColorStop(0.55, '#61708a'); _grad.addColorStop(1, '#232a33');
+        _eg.fillStyle = _grad; _eg.fillRect(0, 0, 64, 32);
+        const _etex = new THREE.CanvasTexture(_ec);
+        _etex.mapping = THREE.EquirectangularReflectionMapping;
+        const _pm = new THREE.PMREMGenerator(renderer);   // the MAIN renderer owns it now — no cross-context borrow
+        scene.environment = _pm.fromEquirectangular(_etex).texture;
+        _pm.dispose(); _etex.dispose();
+      } catch (_) {}
+      const camera = new THREE.PerspectiveCamera(32, 1, 1, 8000);
+      camera.position.set(0, 70, 320); camera.lookAt(0, 0, 0);
+      _shipPreview3D.renderer = null;
+      _shipPreview3D.oneCtx = true;
+      _shipPreview3D.ready = true;
+      _shipPreview3D.scene = scene;
+      _shipPreview3D.camera = camera;
+      _shipPreview3D.canvas = canvas;
+      // The hangar: the SAME baked canvas the DOM backdrop used, as a texture.
+      try {
+        const src = document.getElementById('ship-select-bg');
+        if (src && src.width > 1) {
+          const bt = new THREE.CanvasTexture(src);
+          if ('colorSpace' in bt) bt.colorSpace = THREE.SRGBColorSpace;
+          bt.wrapS = bt.wrapT = THREE.ClampToEdgeWrapping;
+          const bg = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+            new THREE.MeshBasicMaterial({ map: bt, depthWrite: false, toneMapped: false, fog: false }));
+          bg.position.set(0, 0, -1200);
+          bg.renderOrder = -1;
+          scene.add(bg);
+          _shipPreview3D.backdrop = bg;
+        }
+      } catch (_) {}
+      // #ship-select must stop painting its own 95%-opaque background, and the DOM backdrop
+      // has to go, or either one would cover the canvas the ship is now drawn on.
+      try {
+        const sel = document.getElementById('ship-select');
+        if (sel) sel.style.background = 'transparent';
+        const bgEl = document.getElementById('ship-select-bg');
+        if (bgEl) bgEl.style.setProperty('display', 'none', 'important');
+      } catch (_) {}
+      _bindShipPreviewDrag(canvas);
+      return null;   // no renderer, and callers now gate on `.ready`
+    }
     // (v39.21) NO MSAA ON A PHONE. This is the DEFAULT framebuffer of a second context and it
     // is viewport-sized whenever the picker is up; 4x MSAA on Android means a multisampled
     // colour AND depth buffer plus the resolve target, several times the plain cost, in the
@@ -38578,24 +38720,7 @@ function _initShipPreview3D() {
     // adds to yaw on each pixel of horizontal motion; mouseup/leave drops
     // the latch. We listen to mousemove/mouseup on `window` (not the canvas)
     // so a drag that exits the canvas mid-motion still tracks until release.
-    canvas.style.cursor = 'grab';
-    canvas.addEventListener('mousedown', (e) => {
-      _shipPreview3D.isMouseDragging = true;
-      _shipPreview3D.lastMouseX = e.clientX;
-      canvas.style.cursor = 'grabbing';
-      e.preventDefault();
-    });
-    window.addEventListener('mouseup', () => {
-      if (!_shipPreview3D.isMouseDragging) return;
-      _shipPreview3D.isMouseDragging = false;
-      if (_shipPreview3D.canvas) _shipPreview3D.canvas.style.cursor = 'grab';
-    });
-    window.addEventListener('mousemove', (e) => {
-      if (!_shipPreview3D.isMouseDragging) return;
-      const dx = e.clientX - _shipPreview3D.lastMouseX;
-      _shipPreview3D.lastMouseX = e.clientX;
-      _shipPreview3D.yaw += dx * _shipPreview3D.MOUSE_ROT_RATE;
-    });
+    _bindShipPreviewDrag(canvas);
     return renderer;
   } catch (e) {
     console.warn('[ship-preview] WebGL init failed:', e && e.message ? e.message : e);
@@ -38608,8 +38733,8 @@ function _initShipPreview3D() {
 // finished loading yet, we arm a one-shot retry against shipModelCache.ready
 // so the preview backfills as soon as the model lands.
 function setShipPreviewModel(key) {
-  if (!_shipPreview3D.renderer) _initShipPreview3D();
-  if (!_shipPreview3D.renderer) return;
+  if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) _initShipPreview3D();
+  if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) return;
   _shipPreview3D.pendingKey = key;
   _applyShipPreviewModel(key);
 }
@@ -38664,7 +38789,7 @@ function _ssPrevRelease(root) {
 
 function _applyShipPreviewModel(key) {
   const s = _shipPreview3D;
-  if (!s.renderer) return;
+  if (!(s.renderer || s.ready)) return;
   if (s.pendingKey !== key) return; 
   const proto = shipModelCache.loaded && shipModelCache.loaded[key];
   if (!proto) {
@@ -38779,7 +38904,7 @@ function setShipPreviewSkin(skinId) {
 
 function _animateShipPreview() {
   const s = _shipPreview3D;
-  if (!s.renderer || !s.canvas) return;
+  if (!(s.renderer || s.ready) || !s.canvas) return;
   // Skip the render entirely when the tab is hidden or when the ship-select
   // panel isn't actually on screen (the .active class is added by buildShipSelect
   // and removed at LAUNCH). We still rAF so we can resume seamlessly when the
@@ -38814,6 +38939,19 @@ function _animateShipPreview() {
     s.animId = requestAnimationFrame(_animateShipPreview);
     return;
   }
+  // (v39.25) One-context path: there is no backbuffer of ours to resize. _lssRenderPicker
+  // owns the aspect (it reads the MAIN canvas) and the draw; this loop is only the spinner.
+  if (s.oneCtx) {
+    // Hide the combat HUD exactly while the picker owns the frame — see the CSS note.
+    const _owns = _lssPickerOwnsFrame();
+    if (_owns !== s._hudHidden) {
+      s._hudHidden = _owns;
+      try { document.body.classList.toggle('lss-picker-3d', _owns); } catch (_) {}
+    }
+    _spinShipPreview();
+    s.animId = requestAnimationFrame(_animateShipPreview);
+    return;
+  }
   // Keep the backbuffer in sync with the CSS-sized canvas.
   const w = s.canvas.clientWidth | 0;
   const h = s.canvas.clientHeight | 0;
@@ -38826,6 +38964,14 @@ function _animateShipPreview() {
       s.camera.updateProjectionMatrix();
     }
   }
+  _spinShipPreview();
+  s.renderer.render(s.scene, s.camera);
+  s.animId = requestAnimationFrame(_animateShipPreview);
+}
+
+// The auto-rotate + gamepad/drag spin, split out of _animateShipPreview so BOTH paths share it.
+function _spinShipPreview() {
+  const s = _shipPreview3D;
   // Compute frame dt so gamepad rotation rate is well-defined in radians/sec
   // even if rAF stutters. Cap dt at 0.1 s so a tab-blur stall doesn't fling
   // the ship around when focus returns.
@@ -38850,14 +38996,46 @@ function _animateShipPreview() {
     s.yaw += s.rotationSpeed;
   }
   if (s.model) s.model.rotation.y = s.yaw;
-  s.renderer.render(s.scene, s.camera);
-  s.animId = requestAnimationFrame(_animateShipPreview);
+}
+
+// (v39.25) Draw the picker scene with the MAIN renderer, straight to the game canvas.
+// Returns true if it drew, so the callers in gameLoop know not to render the arena as well.
+// ⚠ Does NOT touch renderer.outputColorSpace or toneMapping: both are in three's program cache
+// key, so flipping them per frame would recompile every material every frame — the exact cost
+// this whole change exists to remove.
+function _lssRenderPicker() {
+  const s = _shipPreview3D;
+  if (!s || !s.oneCtx || !s.ready || !s.scene || !s.camera) return false;
+  try {
+    const el = renderer.domElement;
+    const w = el.width || 1, h = el.height || 1;
+    const aspect = w / h;
+    if (s.camera.aspect !== aspect) {
+      s.camera.aspect = aspect;
+      s.camera.updateProjectionMatrix();
+      _previewFitBackdrop(aspect);
+    } else if (!s._bgFitted) { _previewFitBackdrop(aspect); s._bgFitted = true; }
+    renderer.setRenderTarget(null);
+    renderer.render(s.scene, s.camera);
+    return true;
+  } catch (_) { return false; }
+}
+// True when the picker is on screen and owns the frame.
+function _lssPickerOwnsFrame() {
+  if (!_ONE_CTX_PREVIEW) return false;
+  const s = _shipPreview3D;
+  if (!s || !s.oneCtx || !s.ready) return false;
+  try {
+    const sel = document.getElementById('ship-select');
+    return !!(sel && sel.classList.contains('active') && !sel.classList.contains('lss-launching'))
+           && !(renderer && renderer.xr && renderer.xr.isPresenting);
+  } catch (_) { return false; }
 }
 
 function startShipPreviewLoop() {
   if (_shipPreview3D.animId) return;
-  if (!_shipPreview3D.renderer) _initShipPreview3D();
-  if (!_shipPreview3D.renderer) return;
+  if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) _initShipPreview3D();
+  if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) return;
   _animateShipPreview();
 }
 
@@ -38891,6 +39069,9 @@ function _disposeShipPreview3D() {
 function stopShipPreviewLoop() {
   if (_shipPreview3D.animId) cancelAnimationFrame(_shipPreview3D.animId);
   _shipPreview3D.animId = null;
+  // (v39.25) The loop is what un-hides the combat HUD, so it cannot be left holding the class.
+  _shipPreview3D._hudHidden = false;
+  try { document.body.classList.remove('lss-picker-3d'); } catch (_) {}
   // (v39.18) Release the drawing buffer HERE too, not only in the loop's !visible
   // branch. finishLaunch drops the picker's `active` class and calls this in the SAME
   // synchronous block, so no rAF fires in between and that branch never gets a chance to
@@ -38898,7 +39079,7 @@ function stopShipPreviewLoop() {
   // earlier frame had caught it. This is the deterministic one: the loop is stopping,
   // so nothing will reinflate it until startShipPreviewLoop runs the guard again.
   try {
-    const _r = _shipPreview3D.renderer, _d = _r && _r.domElement;
+    const _r = _shipPreview3D.renderer, _d = _r && _r.domElement;   // null on the one-context path
     if (_r && _d && !window.__prevNoShrink && (_d.width > 2 || _d.height > 2)) _r.setSize(1, 1, false);
   } catch (_) {}
   // (v39.21) THE v39.20 HULL RELEASE THAT USED TO BE HERE IS GONE — it was a bad trade and
@@ -87773,7 +87954,9 @@ function gameLoop(timestamp) {
       || (!game._selectLastRender || _selNow - game._selectLastRender >= 167);
     if (_shouldRender) {
       game._selectLastRender = _selNow;
-      renderFrame();
+      // (v39.25) One context: the picker IS the frame here — the arena is behind an opaque
+      // cover anyway, and drawing the hangar + hull instead is what lets the second renderer go.
+      if (!(_lssPickerOwnsFrame() && _lssRenderPicker())) renderFrame();
     }
     return;
   }
@@ -88257,7 +88440,9 @@ function gameLoop(timestamp) {
     renderFrame();
   } else if (!game._occLastRender || timestamp - game._occLastRender >= 167) {
     game._occLastRender = timestamp;
-    renderFrame();
+    // (v39.25) Same substitution as the 'select' branch: while the picker covers the screen the
+    // arena's pixels are thrown away, so draw the picker instead of throwing a frame away.
+    if (!(_lssPickerOwnsFrame() && _lssRenderPicker())) renderFrame();
   }
   __pmark('renderFrame'); 
   

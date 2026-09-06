@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.24';
+const LSS_BUILD = '39.25';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -25934,13 +25934,110 @@ function _shipPreviewDpr() {
   return Math.min(window.devicePixelRatio || 1, cap);
 }
 
+const _ONE_CTX_PREVIEW = (function () {
+  try {
+    if (typeof window !== 'undefined' && window.__onePassPreview === false) return false;
+    if (typeof location !== 'undefined' && /[?&]twoctx/i.test(location.search || '')) return false;
+  } catch (_) {}
+  return true;
+})();
+
+function _bindShipPreviewDrag(canvas) {
+  if (!canvas || canvas._lssDragBound) return;
+  canvas._lssDragBound = true;
+  canvas.style.cursor = 'grab';
+  canvas.addEventListener('mousedown', (e) => {
+    _shipPreview3D.isMouseDragging = true;
+    _shipPreview3D.lastMouseX = e.clientX;
+    canvas.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+  window.addEventListener('mouseup', () => {
+    if (!_shipPreview3D.isMouseDragging) return;
+    _shipPreview3D.isMouseDragging = false;
+    if (_shipPreview3D.canvas) _shipPreview3D.canvas.style.cursor = 'grab';
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!_shipPreview3D.isMouseDragging) return;
+    const dx = e.clientX - _shipPreview3D.lastMouseX;
+    _shipPreview3D.lastMouseX = e.clientX;
+    _shipPreview3D.yaw += dx * _shipPreview3D.MOUSE_ROT_RATE;
+  });
+}
+
+function _previewFitBackdrop(aspect) {
+  const s = _shipPreview3D;
+  const bg = s && s.backdrop;
+  if (!bg || !aspect || !isFinite(aspect)) return;
+  const cam = s.camera;
+  const dist = Math.abs(cam.position.z - bg.position.z) || 1;
+  const h = 2 * Math.tan((cam.fov * Math.PI / 180) / 2) * dist;
+  bg.scale.set(h * aspect, h, 1);
+  const t = bg.material && bg.material.map;
+  const im = t && t.image;
+  if (t && im && im.width && im.height) {
+    const ia = im.width / im.height;
+    if (aspect > ia) { t.repeat.set(1, ia / aspect); t.offset.set(0, (1 - ia / aspect) / 2); }
+    else             { t.repeat.set(aspect / ia, 1); t.offset.set((1 - aspect / ia) / 2, 0); }
+  }
+}
+
 function _initShipPreview3D() {
-  if (_shipPreview3D.renderer) return _shipPreview3D.renderer;
+  if (_shipPreview3D.renderer || _shipPreview3D.ready) return _shipPreview3D.renderer;
   if (_shipPreview3D.initFailed) return null;
   if (typeof THREE === 'undefined') { _shipPreview3D.initFailed = true; return null; }
   const canvas = document.getElementById('ship-preview-canvas');
   if (!canvas) return null; 
   try {
+    if (_ONE_CTX_PREVIEW) {
+      const scene = new THREE.Scene();
+      scene.add(new THREE.AmbientLight(0xffffff, 0.25));
+      const keyL = new THREE.DirectionalLight(0xbfd9ff, 0.65); keyL.position.set(180, 240, 160); scene.add(keyL);
+      const fillL = new THREE.DirectionalLight(0xffb066, 0.28); fillL.position.set(-140, -80, -200); scene.add(fillL);
+      const rimL = new THREE.DirectionalLight(0xffaa00, 0.18); rimL.position.set(0, 120, -260); scene.add(rimL);
+      try {
+        const _ec = document.createElement('canvas'); _ec.width = 64; _ec.height = 32;
+        const _eg = _ec.getContext('2d');
+        const _grad = _eg.createLinearGradient(0, 0, 0, 32);
+        _grad.addColorStop(0, '#a8c8ee'); _grad.addColorStop(0.55, '#61708a'); _grad.addColorStop(1, '#232a33');
+        _eg.fillStyle = _grad; _eg.fillRect(0, 0, 64, 32);
+        const _etex = new THREE.CanvasTexture(_ec);
+        _etex.mapping = THREE.EquirectangularReflectionMapping;
+        const _pm = new THREE.PMREMGenerator(renderer);   // the MAIN renderer owns it now — no cross-context borrow
+        scene.environment = _pm.fromEquirectangular(_etex).texture;
+        _pm.dispose(); _etex.dispose();
+      } catch (_) {}
+      const camera = new THREE.PerspectiveCamera(32, 1, 1, 8000);
+      camera.position.set(0, 70, 320); camera.lookAt(0, 0, 0);
+      _shipPreview3D.renderer = null;
+      _shipPreview3D.oneCtx = true;
+      _shipPreview3D.ready = true;
+      _shipPreview3D.scene = scene;
+      _shipPreview3D.camera = camera;
+      _shipPreview3D.canvas = canvas;
+      try {
+        const src = document.getElementById('ship-select-bg');
+        if (src && src.width > 1) {
+          const bt = new THREE.CanvasTexture(src);
+          if ('colorSpace' in bt) bt.colorSpace = THREE.SRGBColorSpace;
+          bt.wrapS = bt.wrapT = THREE.ClampToEdgeWrapping;
+          const bg = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
+            new THREE.MeshBasicMaterial({ map: bt, depthWrite: false, toneMapped: false, fog: false }));
+          bg.position.set(0, 0, -1200);
+          bg.renderOrder = -1;
+          scene.add(bg);
+          _shipPreview3D.backdrop = bg;
+        }
+      } catch (_) {}
+      try {
+        const sel = document.getElementById('ship-select');
+        if (sel) sel.style.background = 'transparent';
+        const bgEl = document.getElementById('ship-select-bg');
+        if (bgEl) bgEl.style.setProperty('display', 'none', 'important');
+      } catch (_) {}
+      _bindShipPreviewDrag(canvas);
+      return null;   // no renderer, and callers now gate on `.ready`
+    }
     let _prevSmall = false;
     try { _prevSmall = !!(typeof _fxSmallDevice === 'function' && _fxSmallDevice()); } catch (_) {}
     const renderer = new THREE.WebGLRenderer({
@@ -25980,24 +26077,7 @@ function _initShipPreview3D() {
     _shipPreview3D.scene = scene;
     _shipPreview3D.camera = camera;
     _shipPreview3D.canvas = canvas;
-    canvas.style.cursor = 'grab';
-    canvas.addEventListener('mousedown', (e) => {
-      _shipPreview3D.isMouseDragging = true;
-      _shipPreview3D.lastMouseX = e.clientX;
-      canvas.style.cursor = 'grabbing';
-      e.preventDefault();
-    });
-    window.addEventListener('mouseup', () => {
-      if (!_shipPreview3D.isMouseDragging) return;
-      _shipPreview3D.isMouseDragging = false;
-      if (_shipPreview3D.canvas) _shipPreview3D.canvas.style.cursor = 'grab';
-    });
-    window.addEventListener('mousemove', (e) => {
-      if (!_shipPreview3D.isMouseDragging) return;
-      const dx = e.clientX - _shipPreview3D.lastMouseX;
-      _shipPreview3D.lastMouseX = e.clientX;
-      _shipPreview3D.yaw += dx * _shipPreview3D.MOUSE_ROT_RATE;
-    });
+    _bindShipPreviewDrag(canvas);
     return renderer;
   } catch (e) {
     console.warn('[ship-preview] WebGL init failed:', e && e.message ? e.message : e);
@@ -26007,8 +26087,8 @@ function _initShipPreview3D() {
 }
 
 function setShipPreviewModel(key) {
-  if (!_shipPreview3D.renderer) _initShipPreview3D();
-  if (!_shipPreview3D.renderer) return;
+  if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) _initShipPreview3D();
+  if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) return;
   _shipPreview3D.pendingKey = key;
   _applyShipPreviewModel(key);
 }
@@ -26048,7 +26128,7 @@ function _ssPrevRelease(root) {
 
 function _applyShipPreviewModel(key) {
   const s = _shipPreview3D;
-  if (!s.renderer) return;
+  if (!(s.renderer || s.ready)) return;
   if (s.pendingKey !== key) return; 
   const proto = shipModelCache.loaded && shipModelCache.loaded[key];
   if (!proto) {
@@ -26127,7 +26207,7 @@ function setShipPreviewSkin(skinId) {
 
 function _animateShipPreview() {
   const s = _shipPreview3D;
-  if (!s.renderer || !s.canvas) return;
+  if (!(s.renderer || s.ready) || !s.canvas) return;
   const sel = document.getElementById('ship-select');
   const visible = !document.hidden && sel && sel.classList.contains('active') &&
                   !sel.classList.contains('lss-launching');
@@ -26136,6 +26216,16 @@ function _animateShipPreview() {
       const _de = s.renderer.domElement;
       if (!window.__prevNoShrink && (_de.width > 2 || _de.height > 2)) s.renderer.setSize(1, 1, false);
     } catch (_) {}
+    s.animId = requestAnimationFrame(_animateShipPreview);
+    return;
+  }
+  if (s.oneCtx) {
+    const _owns = _lssPickerOwnsFrame();
+    if (_owns !== s._hudHidden) {
+      s._hudHidden = _owns;
+      try { document.body.classList.toggle('lss-picker-3d', _owns); } catch (_) {}
+    }
+    _spinShipPreview();
     s.animId = requestAnimationFrame(_animateShipPreview);
     return;
   }
@@ -26150,6 +26240,13 @@ function _animateShipPreview() {
       s.camera.updateProjectionMatrix();
     }
   }
+  _spinShipPreview();
+  s.renderer.render(s.scene, s.camera);
+  s.animId = requestAnimationFrame(_animateShipPreview);
+}
+
+function _spinShipPreview() {
+  const s = _shipPreview3D;
   const _now = performance.now();
   const _last = s._lastAnimT || _now;
   const dt = Math.min(0.1, (_now - _last) / 1000);
@@ -26164,14 +26261,40 @@ function _animateShipPreview() {
     s.yaw += s.rotationSpeed;
   }
   if (s.model) s.model.rotation.y = s.yaw;
-  s.renderer.render(s.scene, s.camera);
-  s.animId = requestAnimationFrame(_animateShipPreview);
+}
+
+function _lssRenderPicker() {
+  const s = _shipPreview3D;
+  if (!s || !s.oneCtx || !s.ready || !s.scene || !s.camera) return false;
+  try {
+    const el = renderer.domElement;
+    const w = el.width || 1, h = el.height || 1;
+    const aspect = w / h;
+    if (s.camera.aspect !== aspect) {
+      s.camera.aspect = aspect;
+      s.camera.updateProjectionMatrix();
+      _previewFitBackdrop(aspect);
+    } else if (!s._bgFitted) { _previewFitBackdrop(aspect); s._bgFitted = true; }
+    renderer.setRenderTarget(null);
+    renderer.render(s.scene, s.camera);
+    return true;
+  } catch (_) { return false; }
+}
+function _lssPickerOwnsFrame() {
+  if (!_ONE_CTX_PREVIEW) return false;
+  const s = _shipPreview3D;
+  if (!s || !s.oneCtx || !s.ready) return false;
+  try {
+    const sel = document.getElementById('ship-select');
+    return !!(sel && sel.classList.contains('active') && !sel.classList.contains('lss-launching'))
+           && !(renderer && renderer.xr && renderer.xr.isPresenting);
+  } catch (_) { return false; }
 }
 
 function startShipPreviewLoop() {
   if (_shipPreview3D.animId) return;
-  if (!_shipPreview3D.renderer) _initShipPreview3D();
-  if (!_shipPreview3D.renderer) return;
+  if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) _initShipPreview3D();
+  if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) return;
   _animateShipPreview();
 }
 
@@ -26193,8 +26316,10 @@ function _disposeShipPreview3D() {
 function stopShipPreviewLoop() {
   if (_shipPreview3D.animId) cancelAnimationFrame(_shipPreview3D.animId);
   _shipPreview3D.animId = null;
+  _shipPreview3D._hudHidden = false;
+  try { document.body.classList.remove('lss-picker-3d'); } catch (_) {}
   try {
-    const _r = _shipPreview3D.renderer, _d = _r && _r.domElement;
+    const _r = _shipPreview3D.renderer, _d = _r && _r.domElement;   // null on the one-context path
     if (_r && _d && !window.__prevNoShrink && (_d.width > 2 || _d.height > 2)) _r.setSize(1, 1, false);
   } catch (_) {}
 }
@@ -62859,7 +62984,7 @@ function gameLoop(timestamp) {
       || (!game._selectLastRender || _selNow - game._selectLastRender >= 167);
     if (_shouldRender) {
       game._selectLastRender = _selNow;
-      renderFrame();
+      if (!(_lssPickerOwnsFrame() && _lssRenderPicker())) renderFrame();
     }
     return;
   }
@@ -63167,7 +63292,7 @@ function gameLoop(timestamp) {
     renderFrame();
   } else if (!game._occLastRender || timestamp - game._occLastRender >= 167) {
     game._occLastRender = timestamp;
-    renderFrame();
+    if (!(_lssPickerOwnsFrame() && _lssRenderPicker())) renderFrame();
   }
   __pmark('renderFrame'); 
   
