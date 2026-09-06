@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.97';
+const LSS_BUILD = '39.00';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -17992,7 +17992,15 @@ try {
         _hist.push(_d); while (_hist.length > 3) _hist.shift();
         try { localStorage.setItem('lss_ctxlost', JSON.stringify(_hist)); } catch (_) {}
         const _lvl = (typeof QUALITY !== 'undefined' && QUALITY) ? QUALITY.level : null;
-        const _down = (_lvl === 'mega') ? 'ultra' : (_lvl === 'ultra') ? 'high' : null;
+        // (v38.99) The ladder used to stop at ultra -> high, so a phone crashing on HIGH reloaded on
+        // HIGH and crashed again ("high | mobile" in both owner screenshots, classic/warmup). Every
+        // level steps down now, and a small device goes straight to LOW (LOW is its intended default).
+        const _ladder = ['potato', 'low', 'medium', 'high', 'ultra', 'mega'];
+        let _down = null;
+        try {
+          const _li = _ladder.indexOf(_lvl);
+          if (_li > 0) _down = ((typeof _fxSmallDevice === 'function' && _fxSmallDevice()) && _li > 1) ? 'low' : _ladder[_li - 1];
+        } catch (_) { _down = null; }
         if (_down) {
           try { localStorage.setItem('lss_quality', _down); } catch (_) {}
           _stepMsg = ' Reloading at ' + _down.toUpperCase() + ' quality (was ' + _lvl.toUpperCase() + '); Settings can put it back.';
@@ -39317,6 +39325,12 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
       });
       child.material = newMats.length === 1 ? newMats[0] : newMats;
       child.castShadow = true; child.receiveShadow = false;
+      // (v38.98) COCKPIT PARTS. The c1seat hulls carry ~57k tris of cockpit detail (seat, dash,
+      // sticks, keys - every material named *_CP_*) that is only ever seen from the seat or through
+      // the glass up close. They never cast a shadow anyone can see (they are inside the hull) and
+      // animateShipMesh hides them past 300 u: in a 5-bot arena that is ~230k triangles and the
+      // same again in the shadow pass, a quarter of the frame's geometry, for nothing visible.
+      if (mats.some((mm) => mm && /_CP_/.test(mm.name || ''))) { child.userData._cockpitPart = true; child.castShadow = false; }
       // (v37.39) the painted FRAME ART strips (cockpit_frame) are a first-person
       // element like the PNG overlay they replace: hidden on every ship by
       // default, the rig shows them only while THIS player's cockpit is live.
@@ -39953,6 +39967,21 @@ function _dimHullMat(hullM, dim) {
 }
 function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
   if (!mesh || !mesh.userData) return;
+  // (v38.98) cockpit-part LOD: hide the interior detail past 300 u of the camera, show it again
+  // inside 250 (hysteresis, so a ship holding at the boundary does not flicker). The player's own
+  // ship is always within range of its own camera ; the toggle traverses only on a state change.
+  if (mesh.userData.hasCockpitParts !== false) {
+    try {
+      const _d2 = (typeof camera !== 'undefined' && camera) ? mesh.position.distanceToSquared(camera.position) : 0;
+      const _far = mesh.userData._cpFar ? (_d2 > 250 * 250) : (_d2 > 300 * 300);
+      if (mesh.userData._cpFar !== _far) {
+        let _n = 0;
+        mesh.traverse((o) => { if (o.userData && o.userData._cockpitPart) { o.visible = !_far; _n++; } });
+        mesh.userData._cpFar = _far;
+        if (!_n) mesh.userData.hasCockpitParts = false;   // no tagged parts: never traverse again
+      }
+    } catch (_) {}
+  }
   const t = Math.min(1, speed / maxSpeed);
   const time = game.time;
   // Distance-based outline culling: WebGL can't widen GL_LINES, so for distant
@@ -44036,6 +44065,17 @@ async function warmupCombatShaders() {
 }
 
 async function _warmupCombatShadersBody() {
+  // (v39.00) LITE WARMUP ON SMALL DEVICES. The full pass adds 14 ghost ships (7 hulls x 2 teams,
+  // 14 meshes each now), the model warm group and every FX pin to the scene at once and links
+  // every program in one synchronous renderer.compile() + render: 37 s cold on the dev GPU,
+  // minutes on a phone, inside single blocking calls - and Chrome kills a GPU process that stops
+  // answering, which is the "GPU CONTEXT LOST ... classic/warmup | up 25s" the owner's phone showed
+  // before its first match. Small devices now warm only what the player's own ship needs, and
+  // every compile this async body can await goes through compileAsync (KHR_parallel_shader_compile)
+  // so no single call blocks. window.__fullWarmOnMobile = true restores the full pass for A/B.
+  const _liteWarm = (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) &&
+                    !(typeof window !== 'undefined' && window.__fullWarmOnMobile);
+  if (_liteWarm) { try { console.log('[warmup] small device: lite pass (no ghost fleet / model warm group, async compiles)'); } catch (_) {} }
   const _warmupT0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
   let _warmupShipMeshCount = 0;
   let _warmupTextureCount = 0;
@@ -44307,7 +44347,7 @@ async function _warmupCombatShadersBody() {
         ? Object.keys(shipModelCache.loaded) : [];
       if (loadedKeys.length > 0 && typeof LOADOUTS !== 'undefined' && typeof CHASSIS !== 'undefined' && typeof createShipMesh === 'function') {
         const teamColors = [0xff4444, 0x44bb44];  
-        for (const key of loadedKeys) {
+        for (const key of (_liteWarm ? [] : loadedKeys)) {
           const ld = LOADOUTS[key];
           const ch = ld ? CHASSIS[ld.chassis] : null;
           if (!ch) continue;
@@ -44338,7 +44378,7 @@ async function _warmupCombatShadersBody() {
     // frame from 70 ms into 615 ms. See _buildModelWarmGroup for the audit that
     // found them. The group is pulled back out beside `scene.remove(group)`.
     let _modelWarm = null;
-    try { _modelWarm = _buildModelWarmGroup(); if (_modelWarm) scene.add(_modelWarm); } catch (_) {}
+    try { if (!_liteWarm) { _modelWarm = _buildModelWarmGroup(); if (_modelWarm) scene.add(_modelWarm); } } catch (_) {}
 
     // --- Explosion / impact mesh pool warmup (Trace 20260420T164534 fix) ---
     // Prime the pool BEFORE renderer.compile(scene, camera) so every pooled
@@ -44549,15 +44589,21 @@ async function _warmupCombatShadersBody() {
 
 
 
+    // (v39.00) compileAsync: links in parallel and resolves when every program is ready, so the
+    // render that follows never waits on the compiler inside one frame.
+    const _compileHere = async () => {
+      if (typeof renderer.compileAsync === 'function') { try { await renderer.compileAsync(scene, camera); return; } catch (_) {} }
+      renderer.compile(scene, camera);
+    };
     try {
       if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
         renderer.setRenderTarget(postFX.rtScene);
-        renderer.compile(scene, camera);
+        await _compileHere();
         renderer.render(scene, camera);
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
-    renderer.compile(scene, camera);
+    await _compileHere();
 
 
     await _warmupYield();
@@ -49604,6 +49650,22 @@ function _facePlayerAtEnemy() {
     if (typeof player === 'undefined' || !player || !player.euler || !player.position) return;
     let _tgt = (typeof _enemyFleetCentroid === 'function') ? _enemyFleetCentroid(player.team) : null;
     if (!_tgt && typeof _monsterArenaInfo === 'function') _tgt = _monsterArenaInfo().center;
+    // (v38.98) No live enemy known yet - round 2+ on a client that is not the bot authority, whose
+    // bot proxies arrive over the wire after respawnPlayer() ran, or any round where the roster is
+    // still empty - used to RETURN here and leave the heading wherever the last round ended:
+    // "second round we start facing the wrong way". Face the enemy team's spawn instead: it is
+    // static map data, so the heading is always right even before a single enemy exists.
+    if (!_tgt) {
+      try {
+        const _enemySide = (typeof LSS !== 'undefined' && player.team === LSS.TEAM_FLEET_B) ? 'A' : 'B';
+        // the room CENTRE, not getValidSpawnPoint(): that is a random point inside the room and
+        // read 45-47 deg off the eventual enemy centroid on the pane.
+        const _rooms = (game && game.currentLevel && Array.isArray(game.currentLevel.rooms)) ? game.currentLevel.rooms : [];
+        const _room = _rooms.find((r) => r && r.team === _enemySide);
+        if (_room) _tgt = { x: _room.x, y: _room.y, z: _room.z };
+        else if (typeof getValidSpawnPoint === 'function') _tgt = getValidSpawnPoint(_enemySide);
+      } catch (_) { _tgt = null; }
+    }
     if (!_tgt) return;
     const dx = player.position.x - _tgt.x, dz = player.position.z - _tgt.z;
     if (dx * dx + dz * dz > 1) {
@@ -52485,9 +52547,10 @@ function _pinCombatEffectPrograms() {
             const _slice = _kids.slice(i, i + 6);
             for (const k of _slice) _holder.add(k);
             { const _cTM = renderer.toneMapping; const _cNO = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
-              try { renderer.toneMapping = _cNO; renderer.compile(scene, camera); } catch (_) {}
+              // (v39.00) awaited compileAsync per slice: parallel links, no blocking call
+              try { renderer.toneMapping = _cNO; if (typeof renderer.compileAsync === 'function') await renderer.compileAsync(scene, camera); else renderer.compile(scene, camera); } catch (_) {}
               try { renderer.toneMapping = _cTM; } catch (_) {}
-              renderer.compile(scene, camera); }
+              if (typeof renderer.compileAsync === 'function') { try { await renderer.compileAsync(scene, camera); } catch (_) {} } else renderer.compile(scene, camera); }
             for (const k of _slice) _fxPinGroup.add(k);
             await _warmupYield();
           }
@@ -52933,6 +52996,15 @@ function _buildModelWarmGroup() {
 // round-restart block, never a `playing` frame.
 let _warmedFXSig = null;
 function _warmRealCombatFX() {
+  // (v38.99) Programs are resident now (_lssRetainMat keeps one material per real program key),
+  // so re-running every visual spawn path at every round transition is a burst of allocations and
+  // one heavy frame for nothing - on a phone, at the exact moment the level rebuilds, it was part
+  // of what lost the GL context. Round 1 (and any session where retention is still empty) warms ;
+  // later rounds skip. window.__fxWarmEveryRound = true restores the old behaviour.
+  try {
+    if ((game.currentRound | 0) > 1 && !(typeof window !== 'undefined' && window.__fxWarmEveryRound) &&
+        window._fxRetainKeys && window._fxRetainKeys.size >= 10) return;
+  } catch (_) {}
   // Pin reconstruction misses the real in-combat programs: LayeredFX / smoke
   // carry an onBeforeCompile hook that shifts the program cache key, burst
   // geometries differ from the unit-sphere pin, and the LEVEL environment (fog)
@@ -68294,6 +68366,10 @@ function updateRoundSystem(dt) {
 
         // (v35.20) Same ADD BOTS gate as the round-1 build above.
         if (game.eliminationBots !== false && _botAuthority() && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();   // (v38.63) only the bot authority spawns real bots; everyone else proxies its roster
+        // (v38.98) respawnPlayer() faced the player BEFORE this roster existed on some rounds (the
+        // order varies), so the heading was stale or the fallback's. Re-face now that the real
+        // enemies are placed ; warmup, so the player is not in control yet and nothing is yanked.
+        if (game.state === 'warmup' && typeof _facePlayerAtEnemy === 'function') { try { _facePlayerAtEnemy(); } catch (_) {} }
 
         };
         // ---- PHASE 3a : fleet strip refresh ----
@@ -84640,9 +84716,24 @@ function buildRoomGraphLevel(level) {
   } catch (_) {}
   // Tear down any prior sandwich-terrain chunks so they don't linger when
   // switching maps (including into gmaps levels, which return early below).
-  try { if (typeof resetSandwichTerrain === 'function') resetSandwichTerrain(); } catch (_) {}
+  // (v38.99) KEEP THE TERRAIN BETWEEN ROUNDS. Every round rebuilt the whole level: 284 streamed
+  // chunks disposed and re-meshed, the atmosphere re-applied, the core re-filled - ~130 ms warm, up
+  // to a second in one frame, and on a phone the peak that lost the GL context between rounds.
+  // When the round restarts on the SAME level object, biome and terrain mode, with chunks resident
+  // and no per-round terrain re-roll (pillar maps), the sandwich terrain is simply kept ; rooms,
+  // race graph, bounds and the dynamic objects still rebuild below exactly as before. Arena (The
+  // Spire), gmaps and procedural levels keep the full rebuild. window.__keepTerrain = false
+  // restores the old path for A/B.
+  const _wantBiome = (level && level._biomeOverride) || game.sandwichBiome || 'grassy';
+  const _keepTerrain = !!(level && game.currentLevel === level && !level.arena && level.type !== 'gmaps' && !level.procedural &&
+    !(level.terrain && level.terrain.pillars) && game.sandwichTerrainEnabled !== false &&
+    game.sandwichTerrain && game.sandwichTerrain.ON && game.sandwichTerrain.biome === _wantBiome &&
+    game.sandwichChunks && game.sandwichChunks.size > 0 &&
+    !(typeof window !== 'undefined' && window.__keepTerrain === false));
+  if (_keepTerrain) { try { console.log('[sandwich] terrain kept across the round (' + game.sandwichChunks.size + ' chunks)'); } catch (_) {} }
+  else { try { if (typeof resetSandwichTerrain === 'function') resetSandwichTerrain(); } catch (_) {} }
   // gmaps levels return before the params block; default terrain off for them.
-  game.sandwichTerrain = null;
+  if (!_keepTerrain) game.sandwichTerrain = null;
   // (v36.56) Arena mode resets here too, so gmaps early-returns and every
   // rebuild start clean ; set again below only when the level carries an
   // arena block (The Spire).
@@ -84964,7 +85055,10 @@ function buildRoomGraphLevel(level) {
   // collision is the field alone (worldSDF arena branch) — levelSpheres do
   // NOT carve this world. Slice 1 builds NO geometry ; slice 2 dispatches
   // the field to the marching-cubes worker below.
-  if (level && level.arena) {
+  if (_keepTerrain) {
+    // (v38.99) the terrain params object survives with its chunks - nothing to rebuild here
+  }
+  else if (level && level.arena) {
     game.arenaField = { ON: true, G: _arenaBuildParams(level.arena, level.rooms) };
     game.sandwichTerrain = null;
   }
@@ -85051,7 +85145,13 @@ function buildRoomGraphLevel(level) {
 
   // Fill the streamed rock mountains across the map footprint (the per-frame
   // game loop streams more as the ship roams the endless range).
-  try { initSandwichTerrain(); } catch (e) { console.warn('[sandwich] init error:', e); }
+  if (_keepTerrain) {
+    // (v38.99) chunks resident ; only the round's atmosphere/FX sync, which initSandwichTerrain
+    // would otherwise do after tearing everything down.
+    try { _swApplyAtmosphere(); _swSyncFX(); } catch (e) { console.warn('[sandwich] keep: atmosphere error:', e); }
+  } else {
+    try { initSandwichTerrain(); } catch (e) { console.warn('[sandwich] init error:', e); }
+  }
 
   // Show loading UI
   const mapGenHud = document.getElementById('map-gen-hud');

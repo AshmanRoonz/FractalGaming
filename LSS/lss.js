@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.97';
+const LSS_BUILD = '39.00';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10147,7 +10147,12 @@ try {
         _hist.push(_d); while (_hist.length > 3) _hist.shift();
         try { localStorage.setItem('lss_ctxlost', JSON.stringify(_hist)); } catch (_) {}
         const _lvl = (typeof QUALITY !== 'undefined' && QUALITY) ? QUALITY.level : null;
-        const _down = (_lvl === 'mega') ? 'ultra' : (_lvl === 'ultra') ? 'high' : null;
+        const _ladder = ['potato', 'low', 'medium', 'high', 'ultra', 'mega'];
+        let _down = null;
+        try {
+          const _li = _ladder.indexOf(_lvl);
+          if (_li > 0) _down = ((typeof _fxSmallDevice === 'function' && _fxSmallDevice()) && _li > 1) ? 'low' : _ladder[_li - 1];
+        } catch (_) { _down = null; }
         if (_down) {
           try { localStorage.setItem('lss_quality', _down); } catch (_) {}
           _stepMsg = ' Reloading at ' + _down.toUpperCase() + ' quality (was ' + _lvl.toUpperCase() + '); Settings can put it back.';
@@ -26509,6 +26514,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
       });
       child.material = newMats.length === 1 ? newMats[0] : newMats;
       child.castShadow = true; child.receiveShadow = false;
+      if (mats.some((mm) => mm && /_CP_/.test(mm.name || ''))) { child.userData._cockpitPart = true; child.castShadow = false; }
       if (child.name && child.name.indexOf('cockpit_frame') === 0) { child.visible = false; child.castShadow = false; child.userData._cockpitFrame = true; }
       
       
@@ -26975,6 +26981,18 @@ function _dimHullMat(hullM, dim) {
 }
 function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
   if (!mesh || !mesh.userData) return;
+  if (mesh.userData.hasCockpitParts !== false) {
+    try {
+      const _d2 = (typeof camera !== 'undefined' && camera) ? mesh.position.distanceToSquared(camera.position) : 0;
+      const _far = mesh.userData._cpFar ? (_d2 > 250 * 250) : (_d2 > 300 * 300);
+      if (mesh.userData._cpFar !== _far) {
+        let _n = 0;
+        mesh.traverse((o) => { if (o.userData && o.userData._cockpitPart) { o.visible = !_far; _n++; } });
+        mesh.userData._cpFar = _far;
+        if (!_n) mesh.userData.hasCockpitParts = false;   // no tagged parts: never traverse again
+      }
+    } catch (_) {}
+  }
   const t = Math.min(1, speed / maxSpeed);
   const time = game.time;
   if (mesh.userData.outlineMat && camera) {
@@ -30030,6 +30048,9 @@ async function warmupCombatShaders() {
 }
 
 async function _warmupCombatShadersBody() {
+  const _liteWarm = (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) &&
+                    !(typeof window !== 'undefined' && window.__fullWarmOnMobile);
+  if (_liteWarm) { try { console.log('[warmup] small device: lite pass (no ghost fleet / model warm group, async compiles)'); } catch (_) {} }
   const _warmupT0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
   let _warmupShipMeshCount = 0;
   let _warmupTextureCount = 0;
@@ -30213,7 +30234,7 @@ async function _warmupCombatShadersBody() {
         ? Object.keys(shipModelCache.loaded) : [];
       if (loadedKeys.length > 0 && typeof LOADOUTS !== 'undefined' && typeof CHASSIS !== 'undefined' && typeof createShipMesh === 'function') {
         const teamColors = [0xff4444, 0x44bb44];  
-        for (const key of loadedKeys) {
+        for (const key of (_liteWarm ? [] : loadedKeys)) {
           const ld = LOADOUTS[key];
           const ch = ld ? CHASSIS[ld.chassis] : null;
           if (!ch) continue;
@@ -30235,7 +30256,7 @@ async function _warmupCombatShadersBody() {
     scene.add(group);
 
     let _modelWarm = null;
-    try { _modelWarm = _buildModelWarmGroup(); if (_modelWarm) scene.add(_modelWarm); } catch (_) {}
+    try { if (!_liteWarm) { _modelWarm = _buildModelWarmGroup(); if (_modelWarm) scene.add(_modelWarm); } } catch (_) {}
 
     try {
       if (typeof _warmupExplosionPool === 'function') _warmupExplosionPool();
@@ -30381,15 +30402,19 @@ async function _warmupCombatShadersBody() {
 
 
 
+    const _compileHere = async () => {
+      if (typeof renderer.compileAsync === 'function') { try { await renderer.compileAsync(scene, camera); return; } catch (_) {} }
+      renderer.compile(scene, camera);
+    };
     try {
       if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
         renderer.setRenderTarget(postFX.rtScene);
-        renderer.compile(scene, camera);
+        await _compileHere();
         renderer.render(scene, camera);
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
-    renderer.compile(scene, camera);
+    await _compileHere();
 
 
     await _warmupYield();
@@ -34456,6 +34481,15 @@ function _facePlayerAtEnemy() {
     if (typeof player === 'undefined' || !player || !player.euler || !player.position) return;
     let _tgt = (typeof _enemyFleetCentroid === 'function') ? _enemyFleetCentroid(player.team) : null;
     if (!_tgt && typeof _monsterArenaInfo === 'function') _tgt = _monsterArenaInfo().center;
+    if (!_tgt) {
+      try {
+        const _enemySide = (typeof LSS !== 'undefined' && player.team === LSS.TEAM_FLEET_B) ? 'A' : 'B';
+        const _rooms = (game && game.currentLevel && Array.isArray(game.currentLevel.rooms)) ? game.currentLevel.rooms : [];
+        const _room = _rooms.find((r) => r && r.team === _enemySide);
+        if (_room) _tgt = { x: _room.x, y: _room.y, z: _room.z };
+        else if (typeof getValidSpawnPoint === 'function') _tgt = getValidSpawnPoint(_enemySide);
+      } catch (_) { _tgt = null; }
+    }
     if (!_tgt) return;
     const dx = player.position.x - _tgt.x, dz = player.position.z - _tgt.z;
     if (dx * dx + dz * dz > 1) {
@@ -36673,9 +36707,9 @@ function _pinCombatEffectPrograms() {
             const _slice = _kids.slice(i, i + 6);
             for (const k of _slice) _holder.add(k);
             { const _cTM = renderer.toneMapping; const _cNO = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
-              try { renderer.toneMapping = _cNO; renderer.compile(scene, camera); } catch (_) {}
+              try { renderer.toneMapping = _cNO; if (typeof renderer.compileAsync === 'function') await renderer.compileAsync(scene, camera); else renderer.compile(scene, camera); } catch (_) {}
               try { renderer.toneMapping = _cTM; } catch (_) {}
-              renderer.compile(scene, camera); }
+              if (typeof renderer.compileAsync === 'function') { try { await renderer.compileAsync(scene, camera); } catch (_) {} } else renderer.compile(scene, camera); }
             for (const k of _slice) _fxPinGroup.add(k);
             await _warmupYield();
           }
@@ -36902,6 +36936,10 @@ function _buildModelWarmGroup() {
 
 let _warmedFXSig = null;
 function _warmRealCombatFX() {
+  try {
+    if ((game.currentRound | 0) > 1 && !(typeof window !== 'undefined' && window.__fxWarmEveryRound) &&
+        window._fxRetainKeys && window._fxRetainKeys.size >= 10) return;
+  } catch (_) {}
   const _wsig = (typeof _programEnvSig === 'function') ? _programEnvSig() : null;
   if (_wsig && _warmedFXSig === _wsig) return;
   try {
@@ -47804,6 +47842,7 @@ function updateRoundSystem(dt) {
 
 
         if (game.eliminationBots !== false && _botAuthority() && (typeof LSS === 'undefined' || (LSS.MODE !== 'campaign' && LSS.MODE !== 'freeflight' && LSS.MODE !== 'endless'))) spawnBots();   // (v38.63) only the bot authority spawns real bots; everyone else proxies its roster
+        if (game.state === 'warmup' && typeof _facePlayerAtEnemy === 'function') { try { _facePlayerAtEnemy(); } catch (_) {} }
 
         };
         const _rrRoster = () => {
@@ -60559,8 +60598,15 @@ function buildRoomGraphLevel(level) {
     if (Array.isArray(game.mapMeshes)) game.mapMeshes.length = 0;
     else game.mapMeshes = [];
   } catch (_) {}
-  try { if (typeof resetSandwichTerrain === 'function') resetSandwichTerrain(); } catch (_) {}
-  game.sandwichTerrain = null;
+  const _wantBiome = (level && level._biomeOverride) || game.sandwichBiome || 'grassy';
+  const _keepTerrain = !!(level && game.currentLevel === level && !level.arena && level.type !== 'gmaps' && !level.procedural &&
+    !(level.terrain && level.terrain.pillars) && game.sandwichTerrainEnabled !== false &&
+    game.sandwichTerrain && game.sandwichTerrain.ON && game.sandwichTerrain.biome === _wantBiome &&
+    game.sandwichChunks && game.sandwichChunks.size > 0 &&
+    !(typeof window !== 'undefined' && window.__keepTerrain === false));
+  if (_keepTerrain) { try { console.log('[sandwich] terrain kept across the round (' + game.sandwichChunks.size + ' chunks)'); } catch (_) {} }
+  else { try { if (typeof resetSandwichTerrain === 'function') resetSandwichTerrain(); } catch (_) {} }
+  if (!_keepTerrain) game.sandwichTerrain = null;
   game.arenaField = null;
   if (!(level && level.arena)) { try { _arenaDisposeMesh(); } catch (_) {} }
   try { if (typeof _bendReset === 'function') _bendReset(); } catch (_) {}
@@ -60795,7 +60841,9 @@ function buildRoomGraphLevel(level) {
   }
 
   if (game.sandwichTerrainEnabled === undefined) game.sandwichTerrainEnabled = true;
-  if (level && level.arena) {
+  if (_keepTerrain) {
+  }
+  else if (level && level.arena) {
     game.arenaField = { ON: true, G: _arenaBuildParams(level.arena, level.rooms) };
     game.sandwichTerrain = null;
   }
@@ -60860,7 +60908,11 @@ function buildRoomGraphLevel(level) {
 
   const bounds={minX:bMinX,minY:bMinY,minZ:bMinZ,maxX:bMaxX,maxY:bMaxY,maxZ:bMaxZ};
 
-  try { initSandwichTerrain(); } catch (e) { console.warn('[sandwich] init error:', e); }
+  if (_keepTerrain) {
+    try { _swApplyAtmosphere(); _swSyncFX(); } catch (e) { console.warn('[sandwich] keep: atmosphere error:', e); }
+  } else {
+    try { initSandwichTerrain(); } catch (e) { console.warn('[sandwich] init error:', e); }
+  }
 
   const mapGenHud = document.getElementById('map-gen-hud');
   if (mapGenHud) {
