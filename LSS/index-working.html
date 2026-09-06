@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.90';
+const LSS_BUILD = '38.93';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4472,7 +4472,21 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // (v37.35) 37.34 -> 37.35: INNER LINING closes every see-through hull face around
 // the seat, crack zipper in the cleanup stage, four distinct instrument tiles,
 // control stick, console switch rows, harness straps.
-const _MODELS_VERSION = '38.35';   // (v38.35) glass grafted in at 38.34, taken back out here   // GLB models (ships/, objects/, objects/hoard/, rings/)
+// (v38.91) 38.35 -> 38.91: the seven ship hulls are the owner's c1seat build - each a
+// Blender 5.2 export with a modelled cockpit, window cutout and windshield glass, dropped
+// straight into LSS/ships as the shipped files (not via compress_glb.mjs ; 66 MB float32).
+// The bytes behind ships/*.glb changed, so the stamp moves ; frames untouched.
+// (v38.92) 38.91 -> 38.92: the same seven c1seat hulls rebuilt through compress_glb.mjs
+// (assets_src/ships re-synced from them): weld + quantize, and their ~240 cockpit parts
+// JOINED per material (14 draw calls a hull instead of 244). 66 MB -> ~32 MB, markers kept.
+// (v38.93) TWO SHIP SETS, ONE STAMP. compress_glb.mjs now also writes ships/m/<x>.glb (base
+// colour 1k) beside ships/<x>.glb (2k). _shipsVariant() picks the set by the same gate as the
+// texture cap (phone / standalone Quest / window.__texCap), and the preloader walks only the
+// matching manifest group ('ships' | 'ships_m'). Both sets share _MODELS_VERSION: distinct
+// URLs, so a PC never re-downloads because the 1k set appeared - but a change to EITHER set
+// alone still needs the stamp bumped, like any other GLB. Stamp unchanged here: the 2k set
+// is byte-identical to 38.92 and the 1k URLs are new.
+const _MODELS_VERSION = '38.92';   // (v38.92) c1seat hulls, compressed + joined   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -37887,6 +37901,19 @@ const VISUAL_SCALE_BOOST = 1.55;
 // (or domain root, e.g. index.html at lss.fractalreality.ca/) they live at
 // ./ships/. This keeps a single ships folder under LSS instead of a
 // duplicate copy in the parent directory.
+// (v38.93) DEVICE SET. compress_glb.mjs writes every hull twice: ships/<x>.glb (2k base
+// colour, PC) and ships/m/<x>.glb (1k, ~0.7 MB less and a 4x cheaper decode per hull). Same
+// gate as the texture cap, so a phone or a standalone Quest never downloads the 2k set, and
+// window.__texCap = { max: 1024 } set BEFORE boot previews the small set on a PC. Memoised on
+// first success: the manifest preloader and preloadShipModels() must agree, and _lssTexCap's
+// isXRPresenting() leg is false at boot anyway (the Quest browser loads before a session).
+function _shipsVariant() {
+  if (_shipsVariant._v === undefined) {
+    try { const cap = _lssTexCap(); _shipsVariant._v = (cap > 0 && cap <= 1024) ? 'm/' : ''; }
+    catch (_) { return ''; }
+  }
+  return _shipsVariant._v;
+}
 const _shipsBaseUrl = (function() {
   try {
     const path = (typeof location !== 'undefined' && location.pathname) ? location.pathname : '';
@@ -38079,12 +38106,13 @@ function preloadShipModels() {
     return shipModelCache.ready;
   }
   const loader = new THREE.GLTFLoader();
+  console.log('[ships] set: ' + (_shipsVariant() ? 'mobile (1k base colour, ships/m/)' : 'PC (2k, ships/)'));
   const jobs = Object.entries(SHIP_MODELS).map(([key, spec]) => new Promise(resolve => {
     loader.load(
       // (v36.25) Art-version stamped, not build-stamped: ship model updates
       // must bust the disk cache, but a code-only build must NOT — see
       // ASSET CONTENT VERSIONS (~L3796). Same for the monster/hoard/ring GLBs.
-      _shipsBaseUrl + spec.url + _MODEL_CACHE_BUST,
+      _shipsBaseUrl + _shipsVariant() + spec.url + _MODEL_CACHE_BUST,   // (v38.93) ships/ or ships/m/
       gltf => {
         const proto = gltf.scene;
         // Procedural micro-detail normal map. Gives the hull surface
@@ -38120,7 +38148,7 @@ function preloadShipModels() {
       },
       undefined,
       err => {
-        console.warn('[ships] failed to load', _shipsBaseUrl + spec.url, err && err.message ? err.message : err);
+        console.warn('[ships] failed to load', _shipsBaseUrl + _shipsVariant() + spec.url, err && err.message ? err.message : err);
         resolve();
       }
     );
@@ -74700,7 +74728,11 @@ function preloadAllAssets() {
   const run = fetch(ASSET_MANIFEST_URL + stamp, { credentials: 'omit', cache: 'default' })
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(man => {
-      const list = (man && Array.isArray(man.files)) ? man.files : [];
+      // (v38.93) two ship sets in the manifest ('ships' = 2k, 'ships_m' = 1k): walk only the
+      // one this device will actually load, so neither kind of player downloads both.
+      const _shipGroup = _shipsVariant() ? 'ships_m' : 'ships';
+      const list = ((man && Array.isArray(man.files)) ? man.files : [])
+        .filter((e) => !(e.g === 'ships' || e.g === 'ships_m') || e.g === _shipGroup);
       if (!list.length) throw new Error('manifest has no files');
       _assetPreload.total = list.length;
       _assetPreload.bytes = list.reduce((n, e) => n + (e.b || 0), 0);

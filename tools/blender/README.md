@@ -1,4 +1,4 @@
-# tools/blender — the LSS ship-model pipeline (headless Blender 4.1)
+# tools/blender — the LSS ship-model pipeline (headless Blender; 5.2.1 LTS today, see Requirements)
 
 Everything here runs Blender **without a GUI** through its Python API (`bpy`). Nothing in
 this folder ships to players; `LSS/` is the deploy root and only `tools/compress_glb.mjs`
@@ -37,12 +37,14 @@ for ships (see `OVERRIDES` in `compress_glb.mjs`) — simplifying twice would de
 ## Full rebuild (from the repo root)
 
 > ⚠ **`assets_src/` can be staler than what ships.** It is gitignored; `LSS/ships/` is
-> tracked. As of 2026-09-06 `assets_src/ships/` holds **Jun 27 / v37-era** exports (31.9 MB)
-> while the committed hulls are **v38.35** (18.7 MB, commit `71f0233`). Running
-> `node tools/compress_glb.mjs --only ships` on its own right now would overwrite the shipped
-> v38.35 art with the June source **and grow it to 33.3 MB** (`--dry` reports −9.4% "saved").
-> Always regenerate `assets_src/ships` through the Blender stages below (or `fleet_v2.py`,
-> whose cockpit stage writes it) **before** compressing. If you do clobber them:
+> tracked. `compress_glb.mjs` rebuilds `LSS/` from WHATEVER is in `assets_src/`, so before any
+> ship run make sure `assets_src/ships` holds the art you mean to ship. **2026-09-06:**
+> `assets_src/ships` = the owner's c1seat exports (the v38.92 source of truth); the Jun 27 /
+> v37-era set it replaced is parked at `tools/blender/work/assets_src_ships_jun27_stale/`.
+> The ship recipe now also JOINS the ~240 cockpit parts per material (`OVERRIDES.join` in
+> `compress_glb.mjs`, marker empties kept) — 14 draw calls a hull — and writes a second,
+> small-device copy of each hull at `LSS/ships/m/` (`OVERRIDES.mobile`, base colour 1k) that
+> the game picks on phones / standalone Quest. If you do clobber `LSS/ships/`:
 > `git checkout -- LSS/ships/`.
 
 ```bash

@@ -144,6 +144,9 @@ def main():
     ship_keys = re.findall(r"(\w+)\s*:\s*\{\s*url:\s*'([^']+)'", ship_block)
     for key, url in ship_keys:
         add('ships/' + url, True, 'ships')
+        # (v38.93) the small-device set (base colour 1k) compress_glb.mjs writes beside it.
+        # Its own group so the runtime preloader can walk exactly one of the two.
+        add('ships/m/' + url, True, 'ships_m')
     playable = [k for k, _ in ship_keys]
 
     # Cross-check against LOADOUTS so a new ship without a GLB is visible.

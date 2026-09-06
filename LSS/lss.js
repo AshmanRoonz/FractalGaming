@@ -9,12 +9,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.90';
+const LSS_BUILD = '38.93';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '38.35';   // (v38.35) glass grafted in at 38.34, taken back out here   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '38.92';   // (v38.92) c1seat hulls, compressed + joined   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -25556,6 +25556,13 @@ function getWallNormal(point) {
 
 
 const VISUAL_SCALE_BOOST = 1.55;
+function _shipsVariant() {
+  if (_shipsVariant._v === undefined) {
+    try { const cap = _lssTexCap(); _shipsVariant._v = (cap > 0 && cap <= 1024) ? 'm/' : ''; }
+    catch (_) { return ''; }
+  }
+  return _shipsVariant._v;
+}
 const _shipsBaseUrl = (function() {
   try {
     const path = (typeof location !== 'undefined' && location.pathname) ? location.pathname : '';
@@ -25715,9 +25722,10 @@ function preloadShipModels() {
     return shipModelCache.ready;
   }
   const loader = new THREE.GLTFLoader();
+  console.log('[ships] set: ' + (_shipsVariant() ? 'mobile (1k base colour, ships/m/)' : 'PC (2k, ships/)'));
   const jobs = Object.entries(SHIP_MODELS).map(([key, spec]) => new Promise(resolve => {
     loader.load(
-      _shipsBaseUrl + spec.url + _MODEL_CACHE_BUST,
+      _shipsBaseUrl + _shipsVariant() + spec.url + _MODEL_CACHE_BUST,   // (v38.93) ships/ or ships/m/
       gltf => {
         const proto = gltf.scene;
         try { _lssCapModelTextures(proto, 'ship ' + key); } catch (_) {}
@@ -25745,7 +25753,7 @@ function preloadShipModels() {
       },
       undefined,
       err => {
-        console.warn('[ships] failed to load', _shipsBaseUrl + spec.url, err && err.message ? err.message : err);
+        console.warn('[ships] failed to load', _shipsBaseUrl + _shipsVariant() + spec.url, err && err.message ? err.message : err);
         resolve();
       }
     );
@@ -52374,7 +52382,9 @@ function preloadAllAssets() {
   const run = fetch(ASSET_MANIFEST_URL + stamp, { credentials: 'omit', cache: 'default' })
     .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
     .then(man => {
-      const list = (man && Array.isArray(man.files)) ? man.files : [];
+      const _shipGroup = _shipsVariant() ? 'ships_m' : 'ships';
+      const list = ((man && Array.isArray(man.files)) ? man.files : [])
+        .filter((e) => !(e.g === 'ships' || e.g === 'ships_m') || e.g === _shipGroup);
       if (!list.length) throw new Error('manifest has no files');
       _assetPreload.total = list.length;
       _assetPreload.bytes = list.reduce((n, e) => n + (e.b || 0), 0);

@@ -92,7 +92,7 @@
 
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { dedup, prune, weld, quantize, dequantize, simplify, textureCompress } from '@gltf-transform/functions';
+import { dedup, prune, weld, quantize, dequantize, simplify, textureCompress, join, flatten, cloneDocument } from '@gltf-transform/functions';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import sharp from 'sharp';
 import fs from 'fs';
@@ -113,7 +113,21 @@ const ONLY = (() => { const i = process.argv.indexOf('--only'); return i > 0 ? p
 // starting from the already-simplified v37.23 hulls frozen in assets_base/ships.
 // assets_src/ships holds the Blender output (float32, unquantized) and the ship
 // recipe must NOT simplify it again — see OVERRIDES.
-const RECIPE_VERSION = '1.1';
+// (v38.92) 1.1 -> 1.2: ships may JOIN (OVERRIDES.join). The c1seat hulls arrive as ~240
+// separate cockpit parts under a scaled/rotated Cockpit_Root: 244 draw calls and 244
+// mesh+material clones per spawn. flatten+join merges everything sharing a material
+// into ONE primitive each (14 per hull), which is what buildModelShipMesh clones and
+// the GPU draws. Bytes: neutral. Frame time and spawn hitches: the whole point.
+const RECIPE_VERSION = '1.2';
+// The game's marker empties. join() leaves every absorbed part behind as a node holding
+// an EMPTY mesh; prune strips the mesh, then everything mesh-less that is not one of
+// these is dropped (prune's keepLeaves would otherwise keep ~240 dead empties).
+const MARKER_RE = /^(cockpit1|gun\d+|thruster\d+)$/;
+const dropJoinLeftovers = (doc) => {
+  for (const n of doc.getRoot().listNodes()) {
+    if (!n.getMesh() && !n.listChildren().length && !MARKER_RE.test(n.getName())) n.dispose();
+  }
+};
 
 const Q = { quantizePosition: 14, quantizeNormal: 10, quantizeTexcoord: 12 };
 const WEBP_Q = 90;
@@ -159,7 +173,8 @@ const OVERRIDES = {
   // tuned to avoid. simplify: 1.0 skips the simplifier ; weld + quantize still
   // run, which is what recovers the byte size the float32 Blender export lost.
   ...Object.fromEntries(['blaster', 'puncture', 'pyro', 'slayer', 'syphon', 'tracker', 'vortex'].map((s) =>
-    [`ships/${s}.glb`, { simplify: 1.0, reason: 'Blender-authored from the already-simplified hull' }])),
+    [`ships/${s}.glb`, { simplify: 1.0, join: true, mobile: { baseColorMax: 1024 },
+                        reason: 'Blender-authored from the already-simplified hull ; c1seat cockpit parts joined per material' }])),
   // (v37.73) the flying carrier: 565k triangles decimated to 120k in Blender with its own UVs and
   // all three maps kept. Simplifying again would decimate twice.
   'objects/carrier.glb': { simplify: 1.0, reason: 'Blender-decimated capital hull' },
@@ -217,12 +232,19 @@ const RECIPES = {
     // an authored hull round-trips with its triangles untouched.
     const steps = [dedup(), prune({ keepLeaves: true }), dequantize(), weld()];
     if (ratio < 1) steps.push(simplify({ simplifier: MeshoptSimplifier, ratio, error: 0.001 }));
+    if (o.join) {
+      // cleanup:false on both, or join's own prune() deletes the marker empties (trap 1).
+      steps.push(flatten({ cleanup: false }), join({ keepNamed: false, cleanup: false }),
+                 prune({ keepLeaves: true }), dropJoinLeftovers, prune({ keepLeaves: true }));
+    }
     steps.push(quantize(Q), webp());
     // (v37.37) The Meshy v2 hulls ship real PBR maps (2k normal + metallicRoughness
     // PNGs = 7 MB raw). Colour stays 2k ; the data maps go to 1k WebP q85, which
     // is invisible at hull scale and takes a hull from ~10 MB to ~4 MB.
     steps.push(textureCompress({
-      encoder: sharp, targetFormat: 'webp', quality: 88, formats: /^image\/(png|jpeg|webp)$/,
+      // (v38.92) WebP sources pass through untouched: re-encoding an authored 2k WebP at q88
+      // is a generation of loss for no bytes (the c1seat hulls ship WebP already).
+      encoder: sharp, targetFormat: 'webp', quality: 88, formats: /^image\/(png|jpeg)$/,
       slots: /baseColorTexture/,
     }));
     steps.push(textureCompress({
@@ -230,7 +252,7 @@ const RECIPES = {
       slots: /normalTexture|metallicRoughnessTexture|occlusionTexture/, resize: [1024, 1024],
     }));
     await doc.transform(...steps);
-    return ratio < 1 ? `simplify ${ratio} + requantize (JPEG kept)` : 'weld + quantize only, no simplify (Blender-authored hull) ; PBR data maps 1k';
+    return ratio < 1 ? `simplify ${ratio} + requantize (JPEG kept)` : `weld + quantize only, no simplify (Blender-authored hull)${o.join ? ' + join per material' : ''} ; PBR data maps 1k`;
   },
 
   // 2-5k tris carrying 3 MB of PNG. Pure texture bloat. EVERY slot is kept —
@@ -344,6 +366,33 @@ for (const rel of files) {
 
   console.log(rel.padEnd(36) + cat.padEnd(9) + mb(srcBytes).padStart(8) + mb(bin.byteLength).padStart(8) +
     mb(srcBytes - bin.byteLength).padStart(8) + '  ' + note);
+
+  // (v38.93) DEVICE VARIANT. `o.mobile` writes a SECOND copy of the finished file under
+  // <dir>/m/<name> with the base-colour map resized (ships: 2k -> 1k, ~-0.7 MB and a 4x
+  // cheaper decode per hull). The game picks it via _shipsVariant() when _lssTexCap() says
+  // small device (phone / standalone Quest / window.__texCap override) and the preloader
+  // walks the matching manifest group ('ships' vs 'ships_m'), so a PC never downloads the
+  // 1k set and a phone never downloads the 2k one. Distinct URLs share _MODELS_VERSION: a
+  // change to one set alone still needs the stamp bumped, exactly like any other GLB.
+  if (o.mobile) {
+    const mx = o.mobile.baseColorMax || 1024;
+    const mdoc = cloneDocument(doc);
+    await mdoc.transform(textureCompress({
+      encoder: sharp, targetFormat: 'webp', quality: 88, formats: /^image\/(png|jpeg|webp)$/,
+      slots: /baseColorTexture/, resize: [mx, mx],
+    }));
+    const mrel = path.posix.join(path.posix.dirname(rel), 'm', path.posix.basename(rel));
+    const mbin = await io.writeBinary(mdoc);
+    if (!DRY) {
+      const mp = path.join(DST, mrel);
+      fs.mkdirSync(path.dirname(mp), { recursive: true });
+      fs.writeFileSync(mp, Buffer.from(mbin));
+    }
+    const mcat = cat + '-m';
+    (per[mcat] ??= { b: 0, a: 0, n: 0 }).b += bin.byteLength; per[mcat].a += mbin.byteLength; per[mcat].n++;
+    console.log(mrel.padEnd(36) + mcat.padEnd(9) + mb(bin.byteLength).padStart(8) + mb(mbin.byteLength).padStart(8) +
+      mb(bin.byteLength - mbin.byteLength).padStart(8) + `  mobile variant: base colour capped at ${mx}`);
+  }
 }
 
 console.log('\n=== PER CATEGORY ===');
