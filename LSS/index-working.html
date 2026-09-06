@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.14';
+const LSS_BUILD = '39.15';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -17905,6 +17905,30 @@ try {
     });
   }
 } catch (_) {}
+// (v39.15) LIVE WEBGL CONTEXT COUNT - pure instrumentation, no behaviour change. Android Chrome
+// force-loses the OLDEST context in a process when a page goes past its per-process WebGL budget,
+// and the oldest is the game's own renderer - a "GPU CONTEXT LOST" with no VRAM pressure at all.
+// The game builds more than one context (the ship-select hangar preview, and a throwaway one for
+// bakeShipThumbnails), so the next crash should say how many were LIVE when it died. Installed here,
+// before the main renderer, so context #1 is counted too. `ctx 1` in a crash line kills the
+// eviction theory outright; `ctx 2+` makes it the prime suspect. Read it in the overlay, or from
+// the console as window.__glCtx.size.
+try {
+  if (typeof HTMLCanvasElement !== 'undefined' && typeof window !== 'undefined' && !window.__glCtx) {
+    window.__glCtx = new Set();
+    const _lssOrigGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      const ctx = _lssOrigGetContext.call(this, type, attrs);
+      try {
+        if (ctx && /webgl/i.test(String(type))) {
+          window.__glCtx.add(ctx);
+          this.addEventListener('webglcontextlost', function () { try { window.__glCtx.delete(ctx); } catch (_) {} }, false);
+        }
+      } catch (_) {}
+      return ctx;
+    };
+  }
+} catch (_) {}
 try {
   renderer = new THREE.WebGLRenderer({
     antialias: true,
@@ -18016,7 +18040,8 @@ try {
             scene.traverse((o) => { const g = o.geometry; if (!g || seen.has(g.uuid)) return; seen.add(g.uuid);
               for (const k in g.attributes) { const a = g.attributes[k]; if (a && a.array) gb += a.array.byteLength; }
               if (g.index && g.index.array) gb += g.index.array.byteLength; });
-            return ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
+            return ' | ctx ' + ((typeof window !== 'undefined' && window.__glCtx) ? window.__glCtx.size : '?') +
+              ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
               (_d.jsHeapMB != null ? ' | heap ' + _d.jsHeapMB + 'MB' : '') + ' | geoMB ' + (gb / 1048576).toFixed(0) +
               ' | chunks ' + ((typeof game !== 'undefined' && game && game.sandwichChunks) ? game.sandwichChunks.size : '?') +
               ' | tier ' + ((typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : '?') + ' | v' + (typeof LSS_BUILD !== 'undefined' ? LSS_BUILD : '?');

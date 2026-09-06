@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.14';
+const LSS_BUILD = '39.15';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10080,6 +10080,22 @@ try {
   }
 } catch (_) {}
 try {
+  if (typeof HTMLCanvasElement !== 'undefined' && typeof window !== 'undefined' && !window.__glCtx) {
+    window.__glCtx = new Set();
+    const _lssOrigGetContext = HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.getContext = function (type, attrs) {
+      const ctx = _lssOrigGetContext.call(this, type, attrs);
+      try {
+        if (ctx && /webgl/i.test(String(type))) {
+          window.__glCtx.add(ctx);
+          this.addEventListener('webglcontextlost', function () { try { window.__glCtx.delete(ctx); } catch (_) {} }, false);
+        }
+      } catch (_) {}
+      return ctx;
+    };
+  }
+} catch (_) {}
+try {
   renderer = new THREE.WebGLRenderer({
     antialias: true,
     powerPreference: 'high-performance',
@@ -10167,7 +10183,8 @@ try {
             scene.traverse((o) => { const g = o.geometry; if (!g || seen.has(g.uuid)) return; seen.add(g.uuid);
               for (const k in g.attributes) { const a = g.attributes[k]; if (a && a.array) gb += a.array.byteLength; }
               if (g.index && g.index.array) gb += g.index.array.byteLength; });
-            return ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
+            return ' | ctx ' + ((typeof window !== 'undefined' && window.__glCtx) ? window.__glCtx.size : '?') +
+              ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
               (_d.jsHeapMB != null ? ' | heap ' + _d.jsHeapMB + 'MB' : '') + ' | geoMB ' + (gb / 1048576).toFixed(0) +
               ' | chunks ' + ((typeof game !== 'undefined' && game && game.sandwichChunks) ? game.sandwichChunks.size : '?') +
               ' | tier ' + ((typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : '?') + ' | v' + (typeof LSS_BUILD !== 'undefined' ? LSS_BUILD : '?');
