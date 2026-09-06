@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.06';
+const LSS_BUILD = '39.08';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -38244,19 +38244,12 @@ const _shipPreview3D = {
 
 function _initShipPreview3D() {
   if (_shipPreview3D.renderer) return _shipPreview3D.renderer;
-  // (v39.06) NO SECOND GL CONTEXT ON A PHONE. This builds a second, permanent WebGLRenderer (its
-  // own context) for the hangar preview, and nothing ever disposes it. With bakeShipThumbnails'
-  // leaked context that is three live contexts; Android Chrome's per-process budget is small and
-  // it evicts the OLDEST to make room - the game's own renderer. It fits every symptom the owner
-  // saw: quality-independent, always at the picker (v38.41 put a picker at EVERY round change,
-  // which is exactly when this is created/used), and a crash on the ship-select screen itself.
-  // Returning null is an already-supported path: the panel stays hidden, the baked thumbnails
-  // still show every hull, and picking/launching is unaffected. window.__shipPreview3D = true
-  // forces it back on for A/B.
-  try {
-    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
-        !(typeof window !== 'undefined' && window.__shipPreview3D)) { _shipPreview3D.initFailed = true; return null; }
-  } catch (_) {}
+  // (v39.07) The phone KEEPS its hangar preview. v39.06 skipped this renderer outright on small
+  // devices to stop context eviction (see _disposeShipPreview3D) and that cost the owner the GLB
+  // preview on the ship-select screen. Instead the context is now RELEASED when the select screen
+  // is left (stopShipPreviewLoop), so the preview exists exactly while it is on screen and
+  // gameplay/round-warmup still run on the game's single context - which is the window the crashes
+  // happened in.
   // Once init has failed (driver refused WebGL, canvas missing, etc.) don't
   // keep retrying on every setShipPreviewModel / startShipPreviewLoop call;
   // the preview panel will just stay hidden. The player can still pick and
@@ -38497,9 +38490,43 @@ function startShipPreviewLoop() {
   _animateShipPreview();
 }
 
+// (v39.07) Fully release the preview's WebGL context. renderer.dispose() frees this renderer's own
+// objects but NOT the context, so it must be paired with forceContextLoss() - and a canvas whose
+// context has been force-lost can never hand out a fresh one, so the node is swapped for a clean
+// clone (same id/attributes) that _initShipPreview3D can bind to next time. Everything in the
+// preview scene is either a clone sharing the cached GLB resources or dies with the context, so
+// nothing is disposed by hand here (disposing shared GLB geometry/materials would break every
+// later-built ship of that key - the same hazard _disposeShipGroup guards with _sharedGLBGeo).
+function _disposeShipPreview3D() {
+  const P = _shipPreview3D;
+  if (!P || !P.renderer) return;
+  try { P.renderer.dispose(); } catch (_) {}
+  try { if (typeof P.renderer.forceContextLoss === 'function') P.renderer.forceContextLoss(); } catch (_) {}
+  try {
+    const old = P.canvas;
+    if (old && old.parentNode) old.parentNode.replaceChild(old.cloneNode(false), old);
+  } catch (_) {}
+  P.renderer = null; P.scene = null; P.camera = null; P.canvas = null;
+  P.model = null; P.lastKey = null; P.pendingKey = null;
+  // (v39.08) modelByKey caches a CLONE PER SHIP KEY, and those clones carry GPU resources bound to
+  // the context we just destroyed. Kept across a teardown, _applyShipPreviewModel would hand a dead
+  // clone to the freshly-built scene and the picker would show an empty stage - the exact bug this
+  // teardown was meant to avoid, one screen later. Drop the cache with the context; the next select
+  // re-clones from the shipModelCache prototypes, which are untouched.
+  P.modelByKey = null;
+  P.initFailed = false;   // a fresh canvas may init again
+}
+
 function stopShipPreviewLoop() {
   if (_shipPreview3D.animId) cancelAnimationFrame(_shipPreview3D.animId);
   _shipPreview3D.animId = null;
+  // (v39.07) On a phone the context goes with the screen: two live contexts during a match is what
+  // let Android evict the game's own. Desktop keeps its renderer cached (re-init is not free and
+  // the context budget is not a problem there). window.__keepPreviewCtx = true disables the drop.
+  try {
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__keepPreviewCtx)) _disposeShipPreview3D();
+  } catch (_) {}
 }
 
 const _shipThumbCache = {};            

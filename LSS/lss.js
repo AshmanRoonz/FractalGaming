@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.06';
+const LSS_BUILD = '39.08';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -25810,10 +25810,6 @@ const _shipPreview3D = {
 
 function _initShipPreview3D() {
   if (_shipPreview3D.renderer) return _shipPreview3D.renderer;
-  try {
-    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
-        !(typeof window !== 'undefined' && window.__shipPreview3D)) { _shipPreview3D.initFailed = true; return null; }
-  } catch (_) {}
   if (_shipPreview3D.initFailed) return null;
   if (typeof THREE === 'undefined') { _shipPreview3D.initFailed = true; return null; }
   const canvas = document.getElementById('ship-preview-canvas');
@@ -25992,9 +25988,28 @@ function startShipPreviewLoop() {
   _animateShipPreview();
 }
 
+function _disposeShipPreview3D() {
+  const P = _shipPreview3D;
+  if (!P || !P.renderer) return;
+  try { P.renderer.dispose(); } catch (_) {}
+  try { if (typeof P.renderer.forceContextLoss === 'function') P.renderer.forceContextLoss(); } catch (_) {}
+  try {
+    const old = P.canvas;
+    if (old && old.parentNode) old.parentNode.replaceChild(old.cloneNode(false), old);
+  } catch (_) {}
+  P.renderer = null; P.scene = null; P.camera = null; P.canvas = null;
+  P.model = null; P.lastKey = null; P.pendingKey = null;
+  P.modelByKey = null;
+  P.initFailed = false;   // a fresh canvas may init again
+}
+
 function stopShipPreviewLoop() {
   if (_shipPreview3D.animId) cancelAnimationFrame(_shipPreview3D.animId);
   _shipPreview3D.animId = null;
+  try {
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__keepPreviewCtx)) _disposeShipPreview3D();
+  } catch (_) {}
 }
 
 const _shipThumbCache = {};            
