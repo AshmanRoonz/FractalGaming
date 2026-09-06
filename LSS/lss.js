@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.15';
+const LSS_BUILD = '39.16';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -53420,7 +53420,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     'tc-lb':        { ax:'right',  x:29.7, ay:'top',    y:20.3, w:24,   h:15,   shape:'rect' },
     'tc-fd':        { ax:'right',  x:28.6, ay:'top',    y:2.5,  w:24,   h:15,   shape:'rect' },
     'tc-rd':        { ax:'right',  x:55.1, ay:'top',    y:20,   w:22.4, h:14.4, shape:'rect' },
-    'tc-core':      { ax:'center', x:-2.7, ay:'top',    y:2.1,  w:24,   h:9,    shape:'rect' },
+    'tc-core':      { ax:'center', x:-2.7, ay:'top',    y:12,   w:24,   h:9,    shape:'rect' },
     'tc-up':        { ax:'left',   x:0.8,  ay:'bottom', y:32.5, w:13.9, h:27.1, shape:'rect' },
     'tc-dn':        { ax:'left',   x:0.4,  ay:'bottom', y:1.3,  w:13.9, h:28.7, shape:'rect' },
     'tc-set':       { ax:'left',   x:0.7,  ay:'top',    y:0,    w:7,    h:7,    shape:'rect' },
@@ -53570,6 +53570,22 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       pin('tc-look');
       pin('tc-move-zone');
       pin('tc-look-zone');
+      pin('tc-core');
+      const _coreEl = document.getElementById('tc-core');
+      if (_coreEl) {
+        _coreEl.style.transform = 'none';
+        const _bot = (el) => {
+          if (!el) return 0;
+          const r = el.getBoundingClientRect();
+          return (r.width > 0 && r.height > 0) ? r.bottom : 0;
+        };
+        const _band = Math.max(_bot(document.getElementById('round-info')),
+                               _bot(document.getElementById('champ-capture')));
+        if (_band > 0) {
+          const _want = _band + 8 - b.t;
+          if (_want > parseFloat(_coreEl.style.top || '0')) _coreEl.style.top = Math.round(_want) + 'px';
+        }
+      }
     } catch (_) {}
   }
   function _layoutSticksSoon() {
