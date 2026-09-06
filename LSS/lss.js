@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.20';
+const LSS_BUILD = '39.21';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10201,8 +10201,15 @@ try {
               }
               _pvh = (_P && _P.modelByKey) ? Object.keys(_P.modelByKey).length : 0;
             } catch (_) {}
+            let _pvb = '-';
+            try {
+              const _B = window.__pvBuild;
+              if (_B && _B.at) {
+                _pvb = Math.round(performance.now() - _B.at) + 'ms' + (_B.done ? '' : '/inflight');
+              }
+            } catch (_) {}
             const _pv = document.getElementById('ship-preview-canvas');
-            return ' | pv ' + _pvi + ' | hulls ' + _pvh +
+            return ' | pv ' + _pvi + ' | pvB ' + _pvb + ' | hulls ' + _pvh +
               ' | ctxL ' + ((typeof window.__glCtxAtLoss === 'number') ? window.__glCtxAtLoss : '?') +
               ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
               ' | lost ' + ((window.__glLost && window.__glLost.length) ? window.__glLost.join(',') : '-') +
@@ -25860,9 +25867,11 @@ function _initShipPreview3D() {
   const canvas = document.getElementById('ship-preview-canvas');
   if (!canvas) return null; 
   try {
+    let _prevSmall = false;
+    try { _prevSmall = !!(typeof _fxSmallDevice === 'function' && _fxSmallDevice()); } catch (_) {}
     const renderer = new THREE.WebGLRenderer({
-      canvas: canvas, antialias: true, alpha: true,
-      powerPreference: 'high-performance', failIfMajorPerformanceCaveat: false,
+      canvas: canvas, antialias: !_prevSmall, alpha: true,
+      powerPreference: _prevSmall ? 'default' : 'high-performance', failIfMajorPerformanceCaveat: false,
     });
     renderer.setPixelRatio(_shipPreviewDpr());
     if ('physicallyCorrectLights' in renderer) renderer.physicallyCorrectLights = true;
@@ -25985,6 +25994,7 @@ function _applyShipPreviewModel(key) {
   s.lastKey = key;
   let modelRoot = s.modelByKey[key];
   if (!modelRoot) {
+    try { window.__pvBuild = { at: performance.now(), done: 0 }; } catch (_) {}
     modelRoot = proto.clone(true);
     modelRoot.traverse(child => {
       if (child.isMesh) {
@@ -26020,6 +26030,7 @@ function _applyShipPreviewModel(key) {
       }
     }
     s.modelByKey[key] = modelRoot;
+    try { if (window.__pvBuild) window.__pvBuild.done = performance.now(); } catch (_) {}
   }
   try { _applyShipSkin(modelRoot, _getStoredSkinId()); } catch (_) {}
   const box = new THREE.Box3().setFromObject(modelRoot);
@@ -26110,14 +26121,6 @@ function stopShipPreviewLoop() {
   try {
     const _r = _shipPreview3D.renderer, _d = _r && _r.domElement;
     if (_r && _d && !window.__prevNoShrink && (_d.width > 2 || _d.height > 2)) _r.setSize(1, 1, false);
-  } catch (_) {}
-  try {
-    const P = _shipPreview3D;
-    if (P && P.modelByKey) {
-      if (P.model && P.scene) { try { P.scene.remove(P.model); } catch (_) {} }
-      for (const k in P.modelByKey) _ssPrevRelease(P.modelByKey[k]);
-      P.modelByKey = null; P.model = null; P.lastKey = null;
-    }
   } catch (_) {}
 }
 

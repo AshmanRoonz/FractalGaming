@@ -4391,7 +4391,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.20';
+const LSS_BUILD = '39.21';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -18093,8 +18093,18 @@ try {
               }
               _pvh = (_P && _P.modelByKey) ? Object.keys(_P.modelByKey).length : 0;
             } catch (_) {}
+            // (v39.21) pvB = ms since the last preview HULL BUILD started (and whether it had
+            // finished). A small number means the loss landed inside that second context's
+            // upload + program-link burst.
+            let _pvb = '-';
+            try {
+              const _B = window.__pvBuild;
+              if (_B && _B.at) {
+                _pvb = Math.round(performance.now() - _B.at) + 'ms' + (_B.done ? '' : '/inflight');
+              }
+            } catch (_) {}
             const _pv = document.getElementById('ship-preview-canvas');
-            return ' | pv ' + _pvi + ' | hulls ' + _pvh +
+            return ' | pv ' + _pvi + ' | pvB ' + _pvb + ' | hulls ' + _pvh +
               ' | ctxL ' + ((typeof window.__glCtxAtLoss === 'number') ? window.__glCtxAtLoss : '?') +
               ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
               ' | lost ' + ((window.__glLost && window.__glLost.length) ? window.__glLost.join(',') : '-') +
@@ -38366,9 +38376,19 @@ function _initShipPreview3D() {
   const canvas = document.getElementById('ship-preview-canvas');
   if (!canvas) return null; 
   try {
+    // (v39.21) NO MSAA ON A PHONE. This is the DEFAULT framebuffer of a second context and it
+    // is viewport-sized whenever the picker is up; 4x MSAA on Android means a multisampled
+    // colour AND depth buffer plus the resolve target, several times the plain cost, in the
+    // context that is already the reason Chrome has a second one to weigh. The game's own
+    // canvas is the eviction victim (`lost ... gl0`), so anything this context does not need is
+    // taken straight out of the game's budget. Desktop keeps AA — it has never been the device
+    // in trouble. `powerPreference` drops to 'default' on a phone for the same reason: there is
+    // no discrete GPU to ask for, and the hint only adds weight to the request.
+    let _prevSmall = false;
+    try { _prevSmall = !!(typeof _fxSmallDevice === 'function' && _fxSmallDevice()); } catch (_) {}
     const renderer = new THREE.WebGLRenderer({
-      canvas: canvas, antialias: true, alpha: true,
-      powerPreference: 'high-performance', failIfMajorPerformanceCaveat: false,
+      canvas: canvas, antialias: !_prevSmall, alpha: true,
+      powerPreference: _prevSmall ? 'default' : 'high-performance', failIfMajorPerformanceCaveat: false,
     });
     // (v38.60) 1.5 on phones (matches the main renderer's mobile cap): the
     // full-bleed hangar stage was 4x the pixels of the game's own scene pass.
@@ -38536,6 +38556,12 @@ function _applyShipPreviewModel(key) {
   s.lastKey = key;
   let modelRoot = s.modelByKey[key];
   if (!modelRoot) {
+    // (v39.21) Stamp the hull-build window. This block uploads a hull's textures and
+    // geometry into the SECOND GL context and links its programs — the allocation burst the
+    // v39.20 crash line pointed at (`hulls 1 | prev 1x1`: a hull had just been built and the
+    // framebuffer had not yet reinflated). The overlay prints ms-since-start, so the next
+    // crash says outright whether it died inside one.
+    try { window.__pvBuild = { at: performance.now(), done: 0 }; } catch (_) {}
     // First time we've seen this ship key this session — clone the GLB
     // tree, clone + neutralize materials, cache the result.
     modelRoot = proto.clone(true);
@@ -38590,6 +38616,7 @@ function _applyShipPreviewModel(key) {
       }
     }
     s.modelByKey[key] = modelRoot;
+    try { if (window.__pvBuild) window.__pvBuild.done = performance.now(); } catch (_) {}
   }
   // (v36.31) Livery. Applied on EVERY show, not just on first build, because
   // modelByKey caches the per-ship root for the session: cycling ships would
@@ -38736,21 +38763,16 @@ function stopShipPreviewLoop() {
     const _r = _shipPreview3D.renderer, _d = _r && _r.domElement;
     if (_r && _d && !window.__prevNoShrink && (_d.width > 2 || _d.height > 2)) _r.setSize(1, 1, false);
   } catch (_) {}
-  // (v39.20) ...and hand the HULLS back too, not just the framebuffer. This is the big one:
-  // it takes the second context's ship-art residency during a MATCH from up to ~41 MB
-  // (measured, mobile set, seven hulls browsed) to zero. buildShipSelect's landing call
-  // re-establishes the model on reopen, re-cloning from the still-resident shipModelCache
-  // prototype — no re-download, and the rotating GLB is unchanged.
-  // ⚠ lastKey MUST be cleared: _applyShipPreviewModel early-returns on
-  //   `s.lastKey === key && s.model`, which would leave an EMPTY STAGE on reopen.
-  try {
-    const P = _shipPreview3D;
-    if (P && P.modelByKey) {
-      if (P.model && P.scene) { try { P.scene.remove(P.model); } catch (_) {} }
-      for (const k in P.modelByKey) _ssPrevRelease(P.modelByKey[k]);
-      P.modelByKey = null; P.model = null; P.lastKey = null;
-    }
-  } catch (_) {}
+  // (v39.21) THE v39.20 HULL RELEASE THAT USED TO BE HERE IS GONE — it was a bad trade and
+  // the phone's own telemetry said so. That crash line read `hulls 1 | prev 1x1 | pv 3/28/10`:
+  // the between-rounds picker had just REBUILT a hull (uploading its textures and linking ~10
+  // programs into the second context) and had not yet reinflated the framebuffer, i.e. it died
+  // INSIDE that upload burst. Dropping the cache here bought ~4 MB of residency during a match
+  // — when nothing is crashing — and paid for it with exactly that burst at the start of EVERY
+  // round, which is the one moment it does. The LRU in _applyShipPreviewModel still caps the
+  // cache at one hull on a small device, so the residency this was chasing is already bounded;
+  // this only removed the last one, and only while it was cheapest to keep.
+  // The FRAMEBUFFER release above stays: that is pure win, no re-upload on the way back.
 }
 
 const _shipThumbCache = {};            
