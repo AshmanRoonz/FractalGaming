@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.21';
+const LSS_BUILD = '39.22';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10083,6 +10083,65 @@ try {
   if (typeof HTMLCanvasElement !== 'undefined' && typeof window !== 'undefined' && !window.__glCtx) {
     window.__glCtx = new Set();
     window.__glLost = [];
+    window.__glBytes = Object.create(null);
+    (function () {
+      const FMT = { 6408: 4, 6407: 3, 32856: 4, 32849: 3, 34842: 8, 34836: 16, 33189: 2,
+                    34041: 4, 36012: 4, 35056: 4, 32854: 2, 33321: 1, 33323: 2, 33326: 4, 32857: 4 };
+      const SIZE = new WeakMap();
+      const rec = (gl) => {
+        const t = (gl && gl.canvas && gl.canvas.id) ? (gl.canvas.id === 'ship-preview-canvas' ? 'prev' : gl.canvas.id) : 'main';
+        return (window.__glBytes[t] = window.__glBytes[t] || { buf: 0, tex: 0 });
+      };
+      const put = (gl, obj, field, bytes) => {
+        if (!obj) return;
+        const r = rec(gl), prev = SIZE.get(obj) || 0;
+        r[field] += bytes - prev;
+        SIZE.set(obj, bytes);
+      };
+      const drop = (gl, obj, field) => {
+        if (!obj) return;
+        const r = rec(gl), prev = SIZE.get(obj) || 0;
+        r[field] -= prev; SIZE.delete(obj);
+      };
+      const CTORS = [];
+      if (typeof WebGLRenderingContext !== 'undefined') CTORS.push(WebGLRenderingContext);
+      if (typeof WebGL2RenderingContext !== 'undefined') CTORS.push(WebGL2RenderingContext);
+      for (const C of CTORS) {
+        const p = C.prototype;
+        const CUBE = 34067, CUBE_FACE0 = 34069;
+        const tgtKey = (t) => (t >= CUBE_FACE0 && t <= CUBE_FACE0 + 5) ? CUBE : t;
+        const bind = (gl, target, obj) => { (gl.__lssBind = gl.__lssBind || Object.create(null))[tgtKey(target)] = obj; };
+        const bound = (gl, target) => (gl.__lssBind ? gl.__lssBind[tgtKey(target)] : null);
+        const bb = p.bindBuffer;
+        p.bindBuffer = function (target, buf) { try { bind(this, target, buf); } catch (_) {} return bb.apply(this, arguments); };
+        const bt = p.bindTexture;
+        p.bindTexture = function (target, tex) { try { bind(this, target, tex); } catch (_) {} return bt.apply(this, arguments); };
+        const bd = p.bufferData;
+        p.bufferData = function (target, d) {
+          try { put(this, bound(this, target), 'buf', (d && d.byteLength) || (typeof d === 'number' ? d : 0)); } catch (_) {}
+          return bd.apply(this, arguments);
+        };
+        const dbuf = p.deleteBuffer;
+        p.deleteBuffer = function (buf) { try { drop(this, buf, 'buf'); } catch (_) {} return dbuf.apply(this, arguments); };
+        const t2 = p.texImage2D;
+        p.texImage2D = function () {
+          try {
+            const x = arguments; let w = 0, h = 0;
+            if (typeof x[3] === 'number' && typeof x[4] === 'number') { w = x[3]; h = x[4]; }
+            else { const s = x[5] || x[x.length - 1]; if (s && s.width != null) { w = s.width; h = s.height; } }
+            if ((x[1] | 0) === 0) put(this, bound(this, x[0]), 'tex', w * h * (FMT[x[2]] || 4) * 1.34);
+          } catch (_) {}
+          return t2.apply(this, arguments);
+        };
+        const ts = p.texStorage2D;
+        if (ts) p.texStorage2D = function (tgt, lv, ifmt, w, h) {
+          try { put(this, bound(this, tgt), 'tex', (w | 0) * (h | 0) * (FMT[ifmt] || 4) * ((lv | 0) > 1 ? 1.34 : 1)); } catch (_) {}
+          return ts.apply(this, arguments);
+        };
+        const dtex = p.deleteTexture;
+        p.deleteTexture = function (tex) { try { drop(this, tex, 'tex'); } catch (_) {} return dtex.apply(this, arguments); };
+      }
+    })();
     let _glSeq = 0;
     const _lssOrigGetContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (type, attrs) {
@@ -10188,9 +10247,11 @@ try {
           (_d.mem ? ' | tex ' + _d.mem.tex + ' geo ' + _d.mem.geo : '') + (_d.draw ? ' | calls ' + _d.draw.calls : '') +
           ' | ' + (_d.mode || '') + '/' + (_d.state || '') + (_d.tp ? ' 3p' : ' 1p') + ' | up ' + _d.up + 's' +
           (function () { try {
-            let gb = 0; const seen = new Set();
+            let gb = 0; const seen = new Set(); const bufs = new Set();
             scene.traverse((o) => { const g = o.geometry; if (!g || seen.has(g.uuid)) return; seen.add(g.uuid);
-              for (const k in g.attributes) { const a = g.attributes[k]; if (a && a.array) gb += a.array.byteLength; }
+              for (const k in g.attributes) { const a = g.attributes[k]; if (!a) continue;
+                const arr = a.data ? a.data.array : a.array;
+                if (arr && !bufs.has(arr)) { bufs.add(arr); gb += arr.byteLength; } }
               if (g.index && g.index.array) gb += g.index.array.byteLength; });
             let _pvi = '-', _pvh = '?';
             try {
@@ -10208,8 +10269,14 @@ try {
                 _pvb = Math.round(performance.now() - _B.at) + 'ms' + (_B.done ? '' : '/inflight');
               }
             } catch (_) {}
+            let _gpu = '-';
+            try {
+              const B = window.__glBytes || {};
+              _gpu = Object.keys(B).map((k) =>
+                k + ' ' + (B[k].buf / 1048576).toFixed(0) + 'b/' + (B[k].tex / 1048576).toFixed(0) + 't').join(' ');
+            } catch (_) {}
             const _pv = document.getElementById('ship-preview-canvas');
-            return ' | pv ' + _pvi + ' | pvB ' + _pvb + ' | hulls ' + _pvh +
+            return ' | gpu ' + _gpu + ' | pv ' + _pvi + ' | pvB ' + _pvb + ' | hulls ' + _pvh +
               ' | ctxL ' + ((typeof window.__glCtxAtLoss === 'number') ? window.__glCtxAtLoss : '?') +
               ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
               ' | lost ' + ((window.__glLost && window.__glLost.length) ? window.__glLost.join(',') : '-') +
@@ -10344,9 +10411,16 @@ document.body.appendChild(renderer.domElement);
     img.decoding = 'async';
     img.onload = function () {
       try {
-        cv.width = img.naturalWidth; cv.height = img.naturalHeight;
+        let _bw = img.naturalWidth, _bh = img.naturalHeight;
+        try {
+          if (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) {
+            const _cap = 1200, _long = Math.max(_bw, _bh);
+            if (_long > _cap) { const _k = _cap / _long; _bw = Math.round(_bw * _k); _bh = Math.round(_bh * _k); }
+          }
+        } catch (_) {}
+        cv.width = _bw; cv.height = _bh;
         const ctx = cv.getContext('2d');
-        ctx.drawImage(img, 0, 0);
+        ctx.drawImage(img, 0, 0, _bw, _bh);
         const g = ctx.createLinearGradient(0, 0, 0, cv.height);
         g.addColorStop(0.00, 'rgba(5,5,15,0.80)');
         g.addColorStop(0.26, 'rgba(5,5,15,0.34)');
