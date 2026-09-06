@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.19';
+const LSS_BUILD = '39.20';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10093,6 +10093,7 @@ try {
           window.__glCtx.add(ctx);
           this.addEventListener('webglcontextlost', function () {
             try {
+              window.__glCtxAtLoss = window.__glCtx.size;
               window.__glCtx.delete(ctx);
               window.__glLost.push(_tag + '@' + Math.round(performance.now() / 1000) + 's');
             } catch (_) {}
@@ -10191,8 +10192,19 @@ try {
             scene.traverse((o) => { const g = o.geometry; if (!g || seen.has(g.uuid)) return; seen.add(g.uuid);
               for (const k in g.attributes) { const a = g.attributes[k]; if (a && a.array) gb += a.array.byteLength; }
               if (g.index && g.index.array) gb += g.index.array.byteLength; });
+            let _pvi = '-', _pvh = '?';
+            try {
+              const _P = _shipPreview3D;
+              if (_P && _P.renderer && _P.renderer.info) {
+                const _pm = _P.renderer.info.memory, _pp = _P.renderer.info.programs;
+                _pvi = _pm.textures + '/' + _pm.geometries + '/' + (_pp ? _pp.length : '?');
+              }
+              _pvh = (_P && _P.modelByKey) ? Object.keys(_P.modelByKey).length : 0;
+            } catch (_) {}
             const _pv = document.getElementById('ship-preview-canvas');
-            return ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
+            return ' | pv ' + _pvi + ' | hulls ' + _pvh +
+              ' | ctxL ' + ((typeof window.__glCtxAtLoss === 'number') ? window.__glCtxAtLoss : '?') +
+              ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
               ' | lost ' + ((window.__glLost && window.__glLost.length) ? window.__glLost.join(',') : '-') +
               ' | ctx ' + ((typeof window !== 'undefined' && window.__glCtx) ? window.__glCtx.size : '?') +
               ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
@@ -25918,6 +25930,39 @@ function setShipPreviewModel(key) {
   _applyShipPreviewModel(key);
 }
 
+const _SS_PREV_TEX_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
+  'aoMap', 'alphaMap', 'bumpMap', 'displacementMap', 'clearcoatMap', 'clearcoatNormalMap',
+  'clearcoatRoughnessMap', 'specularColorMap', 'specularIntensityMap', 'sheenColorMap',
+  'sheenRoughnessMap', 'iridescenceMap', 'iridescenceThicknessMap', 'transmissionMap', 'thicknessMap'];
+function _ssPrevOwnTextures(mat) {
+  if (!mat || mat._ssPrevOwned) return;
+  for (let i = 0; i < _SS_PREV_TEX_SLOTS.length; i++) {
+    const k = _SS_PREV_TEX_SLOTS[i], t = mat[k];
+    if (t && t.isTexture && !t.isRenderTargetTexture) {
+      try { const c = t.clone(); c._ssPrevOwned = true; mat[k] = c; } catch (_) {}
+    }
+  }
+  mat._ssPrevOwned = true;
+}
+function _ssPrevRelease(root) {
+  if (!root) return;
+  try { if (root.parent) root.parent.remove(root); } catch (_) {}
+  try {
+    root.traverse((o) => {
+      const ms = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+      for (let i = 0; i < ms.length; i++) {
+        const m = ms[i];
+        if (!m || !m._ssPrevOwned) continue;          // never touch a shared original
+        for (let j = 0; j < _SS_PREV_TEX_SLOTS.length; j++) {
+          const t = m[_SS_PREV_TEX_SLOTS[j]];
+          if (t && t.isTexture && t._ssPrevOwned) { try { t.dispose(); } catch (_) {} }
+        }
+        try { m.dispose(); } catch (_) {}
+      }
+    });
+  } catch (_) {}
+}
+
 function _applyShipPreviewModel(key) {
   const s = _shipPreview3D;
   if (!s.renderer) return;
@@ -25947,6 +25992,7 @@ function _applyShipPreviewModel(key) {
         const newMats = mats.map(m => {
           if (!m) return m;
           const copy = m.clone();
+          _ssPrevOwnTextures(copy);   // (v39.20) preview-owned texture handles — see above
           if (copy.emissive) copy.emissive.setHex(0x121a26);
           if ('emissiveIntensity' in copy) copy.emissiveIntensity = 0.45;
           return copy;
@@ -25966,6 +26012,13 @@ function _applyShipPreviewModel(key) {
         s.scene.remove(modelRoot);
       }
     } catch (_) {}
+    let _prevEvict = false;
+    try { _prevEvict = !!(typeof _fxSmallDevice === 'function' && _fxSmallDevice()); } catch (_) {}
+    if (_prevEvict) {
+      for (const k in s.modelByKey) {
+        if (k !== key) { _ssPrevRelease(s.modelByKey[k]); delete s.modelByKey[k]; }
+      }
+    }
     s.modelByKey[key] = modelRoot;
   }
   try { _applyShipSkin(modelRoot, _getStoredSkinId()); } catch (_) {}
@@ -26057,6 +26110,14 @@ function stopShipPreviewLoop() {
   try {
     const _r = _shipPreview3D.renderer, _d = _r && _r.domElement;
     if (_r && _d && !window.__prevNoShrink && (_d.width > 2 || _d.height > 2)) _r.setSize(1, 1, false);
+  } catch (_) {}
+  try {
+    const P = _shipPreview3D;
+    if (P && P.modelByKey) {
+      if (P.model && P.scene) { try { P.scene.remove(P.model); } catch (_) {} }
+      for (const k in P.modelByKey) _ssPrevRelease(P.modelByKey[k]);
+      P.modelByKey = null; P.model = null; P.lastKey = null;
+    }
   } catch (_) {}
 }
 
@@ -63017,7 +63078,19 @@ function gameLoop(timestamp) {
   }
 
   __pmark('music+reactive'); 
-  renderFrame();
+  let _rfCovered = false;
+  try {
+    const _selEl = document.getElementById('ship-select');
+    _rfCovered = !!(_selEl && _selEl.classList.contains('active') &&
+                    !_selEl.classList.contains('lss-launching')) &&
+                 !_xrActive && !window.__noOccludedThrottle;
+  } catch (_) { _rfCovered = false; }
+  if (!_rfCovered) {
+    renderFrame();
+  } else if (!game._occLastRender || timestamp - game._occLastRender >= 167) {
+    game._occLastRender = timestamp;
+    renderFrame();
+  }
   __pmark('renderFrame'); 
   
   

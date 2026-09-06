@@ -4391,7 +4391,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.19';
+const LSS_BUILD = '39.20';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -17923,9 +17923,13 @@ try {
 // and the oldest is the game's own renderer - a "GPU CONTEXT LOST" with no VRAM pressure at all.
 // The game builds more than one context (the ship-select hangar preview, and a throwaway one for
 // bakeShipThumbnails), so the next crash should say how many were LIVE when it died. Installed here,
-// before the main renderer, so context #1 is counted too. `ctx 1` in a crash line kills the
-// eviction theory outright; `ctx 2+` makes it the prime suspect. Read it in the overlay, or from
-// the console as window.__glCtx.size.
+// before the main renderer, so context #1 is counted too. Read it in the overlay, or from the
+// console as window.__glCtx.size.
+// ⚠ (v39.20) THE SENTENCE THAT USED TO BE HERE — "`ctx 1` in a crash line kills the eviction
+// theory outright" — WAS WRONG, and it cost two sessions. It is contradicted by the delete()
+// twenty lines below, which this file has done since v39.15: `ctx 1` means one context is GONE,
+// not that only one was ever made. A healthy pane reads `ctx 2`. Use `ctxL` (sampled before the
+// delete) and `lost` (the loss ORDER) instead; both are printed in the overlay.
 try {
   if (typeof HTMLCanvasElement !== 'undefined' && typeof window !== 'undefined' && !window.__glCtx) {
     window.__glCtx = new Set();
@@ -17946,6 +17950,11 @@ try {
           window.__glCtx.add(ctx);
           this.addEventListener('webglcontextlost', function () {
             try {
+              // (v39.20) Sample BEFORE the delete. `ctx` is read post-delete, so today it means
+              // "how many OTHER contexts are still live" — do NOT print size+1 instead: if the
+              // preview dies first the Set is already down one and size+1 would print the same
+              // value as a healthy single-context page.
+              window.__glCtxAtLoss = window.__glCtx.size;
               window.__glCtx.delete(ctx);
               window.__glLost.push(_tag + '@' + Math.round(performance.now() / 1000) + 's');
             } catch (_) {}
@@ -18071,8 +18080,23 @@ try {
             // `canvas` field above. It was 2.37x the game canvas's pixels on an Android-emulated
             // pane; if a crash line shows prev much larger than canvas, that is the second
             // framebuffer being the bigger of the two. `lost` is the context loss ORDER.
+            // (v39.20) THE SECOND CONTEXT'S RESIDENCY. Everything above is the MAIN renderer's
+            // info and is structurally blind to the preview context, which the pane measured
+            // holding 24.0 MB of texture + 17.2 MB of buffers after browsing seven mobile hulls.
+            // `pv` = its own tex/geo/prog; `hulls` = how many ship clones it still holds.
+            let _pvi = '-', _pvh = '?';
+            try {
+              const _P = _shipPreview3D;
+              if (_P && _P.renderer && _P.renderer.info) {
+                const _pm = _P.renderer.info.memory, _pp = _P.renderer.info.programs;
+                _pvi = _pm.textures + '/' + _pm.geometries + '/' + (_pp ? _pp.length : '?');
+              }
+              _pvh = (_P && _P.modelByKey) ? Object.keys(_P.modelByKey).length : 0;
+            } catch (_) {}
             const _pv = document.getElementById('ship-preview-canvas');
-            return ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
+            return ' | pv ' + _pvi + ' | hulls ' + _pvh +
+              ' | ctxL ' + ((typeof window.__glCtxAtLoss === 'number') ? window.__glCtxAtLoss : '?') +
+              ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
               ' | lost ' + ((window.__glLost && window.__glLost.length) ? window.__glLost.join(',') : '-') +
               ' | ctx ' + ((typeof window !== 'undefined' && window.__glCtx) ? window.__glCtx.size : '?') +
               ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
@@ -38442,6 +38466,54 @@ function setShipPreviewModel(key) {
   _applyShipPreviewModel(key);
 }
 
+// (v39.20) THE PREVIEW OWNS ITS COPIES, AND GIVES THEM BACK.
+// Measured in the pane with a per-context texImage2D/bufferData probe on the MOBILE ship set
+// (ships/m/): browsing all seven hulls uploads 24.0 MB of texture and 17.2 MB of vertex buffers
+// into the PREVIEW'S OWN GL context — a second GPU copy of art the game already holds — and
+// nothing ever freed it (modelByKey is per-session; _disposeShipPreview3D has had ZERO callers
+// since the v39.13 revert). None of it shows in the crash overlay, because `tex`/`geo`/`prog`
+// there are renderer.info for the MAIN renderer only.
+// Freeing it is only safe because these clones can be given resources the GAME does not share:
+// Texture.clone() shares the `source`, and three refcounts the GL object per (source, cacheKey)
+// PER RENDERER — so a clone costs no extra GPU memory (the preview was already uploading its own
+// copy; that IS the 24 MB), and disposing it deletes only the preview context's texture.
+// ⚠ NEVER set .needsUpdate on one of these clones: the setter bumps source.version and the MAIN
+//   renderer would re-upload every hull texture on its next frame.
+// ⚠ NEVER dispose the ORIGINAL off shipModelCache — both renderers listen for 'dispose' on the
+//   same object. That is the _sharedGLBGeo hazard _disposeShipGroup already guards.
+const _SS_PREV_TEX_SLOTS = ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
+  'aoMap', 'alphaMap', 'bumpMap', 'displacementMap', 'clearcoatMap', 'clearcoatNormalMap',
+  'clearcoatRoughnessMap', 'specularColorMap', 'specularIntensityMap', 'sheenColorMap',
+  'sheenRoughnessMap', 'iridescenceMap', 'iridescenceThicknessMap', 'transmissionMap', 'thicknessMap'];
+function _ssPrevOwnTextures(mat) {
+  if (!mat || mat._ssPrevOwned) return;
+  for (let i = 0; i < _SS_PREV_TEX_SLOTS.length; i++) {
+    const k = _SS_PREV_TEX_SLOTS[i], t = mat[k];
+    if (t && t.isTexture && !t.isRenderTargetTexture) {
+      try { const c = t.clone(); c._ssPrevOwned = true; mat[k] = c; } catch (_) {}
+    }
+  }
+  mat._ssPrevOwned = true;
+}
+function _ssPrevRelease(root) {
+  if (!root) return;
+  try { if (root.parent) root.parent.remove(root); } catch (_) {}
+  try {
+    root.traverse((o) => {
+      const ms = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+      for (let i = 0; i < ms.length; i++) {
+        const m = ms[i];
+        if (!m || !m._ssPrevOwned) continue;          // never touch a shared original
+        for (let j = 0; j < _SS_PREV_TEX_SLOTS.length; j++) {
+          const t = m[_SS_PREV_TEX_SLOTS[j]];
+          if (t && t.isTexture && t._ssPrevOwned) { try { t.dispose(); } catch (_) {} }
+        }
+        try { m.dispose(); } catch (_) {}
+      }
+    });
+  } catch (_) {}
+}
+
 function _applyShipPreviewModel(key) {
   const s = _shipPreview3D;
   if (!s.renderer) return;
@@ -38473,6 +38545,7 @@ function _applyShipPreviewModel(key) {
         const newMats = mats.map(m => {
           if (!m) return m;
           const copy = m.clone();
+          _ssPrevOwnTextures(copy);   // (v39.20) preview-owned texture handles — see above
           // Subtle emissive lift so dark hull plates aren't pitch black, but
           // not loud enough to flatten the silhouette. Earlier value (0x22334a
           // at intensity 1.0) made every panel self-glow on top of the
@@ -38503,6 +38576,19 @@ function _applyShipPreviewModel(key) {
         s.scene.remove(modelRoot);
       }
     } catch (_) {}
+    // (v39.20) On a SMALL DEVICE, keep only the hull on the stage. Browsing seven hulls used
+    // to leave seven hulls' worth of GPU copies in the second context for the rest of the
+    // session (measured: 24.0 MB texture + 17.2 MB buffers on the mobile set), and the
+    // between-rounds picker — where the phone dies — is exactly when a player browses. The
+    // trade is a re-clone + re-upload when they cycle back to a hull they already viewed;
+    // desktop keeps the full session cache so cycling there stays instant.
+    let _prevEvict = false;
+    try { _prevEvict = !!(typeof _fxSmallDevice === 'function' && _fxSmallDevice()); } catch (_) {}
+    if (_prevEvict) {
+      for (const k in s.modelByKey) {
+        if (k !== key) { _ssPrevRelease(s.modelByKey[k]); delete s.modelByKey[k]; }
+      }
+    }
     s.modelByKey[key] = modelRoot;
   }
   // (v36.31) Livery. Applied on EVERY show, not just on first build, because
@@ -38649,6 +38735,21 @@ function stopShipPreviewLoop() {
   try {
     const _r = _shipPreview3D.renderer, _d = _r && _r.domElement;
     if (_r && _d && !window.__prevNoShrink && (_d.width > 2 || _d.height > 2)) _r.setSize(1, 1, false);
+  } catch (_) {}
+  // (v39.20) ...and hand the HULLS back too, not just the framebuffer. This is the big one:
+  // it takes the second context's ship-art residency during a MATCH from up to ~41 MB
+  // (measured, mobile set, seven hulls browsed) to zero. buildShipSelect's landing call
+  // re-establishes the model on reopen, re-cloning from the still-resident shipModelCache
+  // prototype — no re-download, and the rotating GLB is unchanged.
+  // ⚠ lastKey MUST be cleared: _applyShipPreviewModel early-returns on
+  //   `s.lastKey === key && s.model`, which would leave an EMPTY STAGE on reopen.
+  try {
+    const P = _shipPreview3D;
+    if (P && P.modelByKey) {
+      if (P.model && P.scene) { try { P.scene.remove(P.model); } catch (_) {} }
+      for (const k in P.modelByKey) _ssPrevRelease(P.modelByKey[k]);
+      P.modelByKey = null; P.model = null; P.lastKey = null;
+    }
   } catch (_) {}
 }
 
@@ -87973,7 +88074,31 @@ function gameLoop(timestamp) {
   }
 
   __pmark('music+reactive'); 
-  renderFrame();
+  // (v39.20) THE PICKER IS AN OPAQUE COVER IN 'warmup' TOO. Between rounds game.state is
+  // 'warmup' while #ship-select is up over #ship-select-bg — a full-screen canvas measured
+  // opaque (alpha 255 at all four corners and centre, `object-fit:cover`, inset 0) — so every
+  // pixel the main renderer produces here is thrown away. Measured in the pane: ~42,000 draw
+  // calls a SECOND for the whole ~6 s picker window, concurrently with the ship-preview's own
+  // context doing ~2,300/s. `game.state === 'select'` has had exactly this 6 Hz treatment since
+  // forever (see the block above); 'warmup' never did — and 'warmup' is the state in EVERY
+  // crash line the owner has photographed.
+  // ⚠ NOT while .lss-launching: the countdown strips the picker's backdrop and the arena
+  //   behind it must be live for the 3-2-1.
+  // ⚠ NOT in XR: the headset compositor expects a frame every tick.
+  // A/B: window.__noOccludedThrottle = true restores the every-frame render.
+  let _rfCovered = false;
+  try {
+    const _selEl = document.getElementById('ship-select');
+    _rfCovered = !!(_selEl && _selEl.classList.contains('active') &&
+                    !_selEl.classList.contains('lss-launching')) &&
+                 !_xrActive && !window.__noOccludedThrottle;
+  } catch (_) { _rfCovered = false; }
+  if (!_rfCovered) {
+    renderFrame();
+  } else if (!game._occLastRender || timestamp - game._occLastRender >= 167) {
+    game._occLastRender = timestamp;
+    renderFrame();
+  }
   __pmark('renderFrame'); 
   
   
