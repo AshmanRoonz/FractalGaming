@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.03';
+const LSS_BUILD = '39.04';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -25668,7 +25668,7 @@ function _makeProceduralShipNormalMap() {
   _PROCEDURAL_SHIP_NORMALMAP = tex;
   return tex;
 }
-const _TEX_CAP_SMALL = 1024;
+const _TEX_CAP_SMALL = 512;
 function _lssTexCap() {
   const K = (typeof window !== 'undefined') ? window.__texCap : null;
   if (K && K.on === false) return 0;
@@ -35093,6 +35093,7 @@ function _loadMonsterModelInto(m) {
     loader.load(
       MONSTER_BASE_URL + m.def.key + '.glb' + _MODEL_CACHE_BUST,
       gltf => {
+        try { _lssCapModelTextures(gltf.scene, 'monster ' + m.def.key); } catch (_) {}   // (v39.04) 512 cap on mobile
         try { m.attachModel(gltf.scene, gltf.animations); } catch (e) { console.warn('[monsters] attach failed:', m.def.key, e); }
         resolve(true);
       },
