@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.16';
+const LSS_BUILD = '39.17';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -53579,8 +53579,10 @@ document.addEventListener('contextmenu', e => e.preventDefault());
           const r = el.getBoundingClientRect();
           return (r.width > 0 && r.height > 0) ? r.bottom : 0;
         };
-        const _band = Math.max(_bot(document.getElementById('round-info')),
-                               _bot(document.getElementById('champ-capture')));
+        const _band = Math.max(_bot(document.getElementById('round-state')),
+                               _bot(document.getElementById('round-timer')),
+                               _bot(document.getElementById('champ-capture')),
+                               _bot(document.getElementById('endless-hud')));
         if (_band > 0) {
           const _want = _band + 8 - b.t;
           if (_want > parseFloat(_coreEl.style.top || '0')) _coreEl.style.top = Math.round(_want) + 'px';
