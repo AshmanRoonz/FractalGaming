@@ -4391,7 +4391,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.17';
+const LSS_BUILD = '39.18';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -17929,13 +17929,27 @@ try {
 try {
   if (typeof HTMLCanvasElement !== 'undefined' && typeof window !== 'undefined' && !window.__glCtx) {
     window.__glCtx = new Set();
+    // (v39.18) __glCtx DELETES on webglcontextlost, so a low `ctx` count in the crash
+    // telemetry does NOT mean "only one context was ever made" — it equally means one
+    // already died. That ambiguity cost a wrong conclusion twice (v39.15 read `ctx 1`
+    // as proof no second context existed; the pane shows 2 in the same situation). So
+    // record the LOSS ORDER as well: if the preview context dies before the main one,
+    // that is an eviction cascade, and the overlay will now say so out loud.
+    window.__glLost = [];
+    let _glSeq = 0;
     const _lssOrigGetContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (type, attrs) {
       const ctx = _lssOrigGetContext.call(this, type, attrs);
       try {
         if (ctx && /webgl/i.test(String(type))) {
+          const _tag = (this.id === 'ship-preview-canvas') ? 'prev' : (this.id || 'gl' + (_glSeq++));
           window.__glCtx.add(ctx);
-          this.addEventListener('webglcontextlost', function () { try { window.__glCtx.delete(ctx); } catch (_) {} }, false);
+          this.addEventListener('webglcontextlost', function () {
+            try {
+              window.__glCtx.delete(ctx);
+              window.__glLost.push(_tag + '@' + Math.round(performance.now() / 1000) + 's');
+            } catch (_) {}
+          }, false);
         }
       } catch (_) {}
       return ctx;
@@ -18053,7 +18067,14 @@ try {
             scene.traverse((o) => { const g = o.geometry; if (!g || seen.has(g.uuid)) return; seen.add(g.uuid);
               for (const k in g.attributes) { const a = g.attributes[k]; if (a && a.array) gb += a.array.byteLength; }
               if (g.index && g.index.array) gb += g.index.array.byteLength; });
-            return ' | ctx ' + ((typeof window !== 'undefined' && window.__glCtx) ? window.__glCtx.size : '?') +
+            // (v39.18) prev = the ship-preview canvas's BACKING STORE, next to the game's own
+            // `canvas` field above. It was 2.37x the game canvas's pixels on an Android-emulated
+            // pane; if a crash line shows prev much larger than canvas, that is the second
+            // framebuffer being the bigger of the two. `lost` is the context loss ORDER.
+            const _pv = document.getElementById('ship-preview-canvas');
+            return ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
+              ' | lost ' + ((window.__glLost && window.__glLost.length) ? window.__glLost.join(',') : '-') +
+              ' | ctx ' + ((typeof window !== 'undefined' && window.__glCtx) ? window.__glCtx.size : '?') +
               ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
               (_d.jsHeapMB != null ? ' | heap ' + _d.jsHeapMB + 'MB' : '') + ' | geoMB ' + (gb / 1048576).toFixed(0) +
               ' | chunks ' + ((typeof game !== 'undefined' && game && game.sandwichChunks) ? game.sandwichChunks.size : '?') +
@@ -38291,6 +38312,25 @@ const _shipPreview3D = {
   MOUSE_ROT_RATE: 0.012,   
 };
 
+// (v39.18) THE SINGLE OWNER of the preview's backbuffer scale. It MUST be the same
+// number in _initShipPreview3D's setPixelRatio and in _animateShipPreview's resize
+// guard: that guard compares `domElement.width !== floor(clientWidth * dpr)`, so if the
+// two disagree by any amount the comparison is true EVERY FRAME and setSize reallocates
+// the drawing buffer every frame - which is a far worse thing to do to a phone than the
+// oversized buffer this was written to fix.
+// 1 on a phone (was 1.5): the preview is a full-bleed stage, so at 1.5 it owned MORE
+// pixels than the game itself. Measured on an Android-emulated pane at 760x350 dpr 2:
+// game canvas 741x341 (the main renderer scales itself down under load), preview canvas
+// 1140x525 - 2.37x, antialiased, and alive for the whole session. On the owner's phone
+// that is ~1634x728 behind a 1061x472 game canvas. At 1 the preview matches the game.
+// ⚠ typeof on a top-level const in its temporal dead zone THROWS - hence the try/catch,
+// not a bare typeof guard (see the v39.02 boot failure).
+function _shipPreviewDpr() {
+  let cap = 2;
+  try { if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) cap = 1; } catch (_) {}
+  return Math.min(window.devicePixelRatio || 1, cap);
+}
+
 function _initShipPreview3D() {
   if (_shipPreview3D.renderer) return _shipPreview3D.renderer;
   // Once init has failed (driver refused WebGL, canvas missing, etc.) don't
@@ -38308,7 +38348,8 @@ function _initShipPreview3D() {
     });
     // (v38.60) 1.5 on phones (matches the main renderer's mobile cap): the
     // full-bleed hangar stage was 4x the pixels of the game's own scene pass.
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 1.5 : 2));
+    // (v39.18) 1.5 -> 1 on a phone, and the number now has ONE owner, _shipPreviewDpr().
+    renderer.setPixelRatio(_shipPreviewDpr());
     // v8VR: feature-checked PBR + colorSpace setup matches the main renderer.
     if ('physicallyCorrectLights' in renderer) renderer.physicallyCorrectLights = true;
     if ('useLegacyLights' in renderer) renderer.useLegacyLights = false;
@@ -38316,8 +38357,30 @@ function _initShipPreview3D() {
     else renderer.outputEncoding = THREE.sRGBEncoding || 3001;
     renderer.setClearColor(0x000000, 0); 
     const scene = new THREE.Scene();
-    // Inherit the in-game IBL so the preview hero shot reads the same as combat.
-    if (typeof sceneEnvMap !== 'undefined') scene.environment = sceneEnvMap;
+    // (v39.18) The preview builds its OWN environment, in its OWN context.
+    // It used to do `scene.environment = sceneEnvMap` — the identical cross-context bug
+    // v39.11 fixed in bakeShipThumbnails, quoted there: sceneEnvMap is a PMREM RENDER
+    // TARGET owned by the MAIN renderer, i.e. a GPU-only texture with no `image` behind
+    // it, so this renderer cannot upload it and silently binds nothing. Desktop got away
+    // with it because the full-PBR hulls carry clearcoat/specular and read off the four
+    // lights alone. The MOBILE set does not: ships/m/ is the LEAN build with the PBR
+    // extensions disposed down to plain metallic MeshStandardMaterial, and metal with no
+    // environment renders near-black whatever the lights do. That is the owner's "there's
+    // no ships in the preview, on mobile" — the hull was on the stage the whole time, just
+    // unlit against a dark hangar. Reproduced in the pane with an Android UA at 760x350.
+    // A 64x32 gradient through this renderer's own PMREMGenerator costs nothing.
+    try {
+      const _ec = document.createElement('canvas'); _ec.width = 64; _ec.height = 32;
+      const _eg = _ec.getContext('2d');
+      const _grad = _eg.createLinearGradient(0, 0, 0, 32);
+      _grad.addColorStop(0, '#a8c8ee'); _grad.addColorStop(0.55, '#61708a'); _grad.addColorStop(1, '#232a33');
+      _eg.fillStyle = _grad; _eg.fillRect(0, 0, 64, 32);
+      const _etex = new THREE.CanvasTexture(_ec);
+      _etex.mapping = THREE.EquirectangularReflectionMapping;
+      const _pmrem = new THREE.PMREMGenerator(renderer);
+      scene.environment = _pmrem.fromEquirectangular(_etex).texture;
+      _pmrem.dispose(); _etex.dispose();
+    } catch (e) { try { console.warn('[ship-preview] env build failed:', e && e.message); } catch (_) {} }
     // Lighting: cool key from upper-front, warm fill from below-back, plus ambient
     // so dark hull panels still read. Colors echo the main-game team-neutral palette.
     // Earlier values stacked four hot lights on top of the in-game IBL,
@@ -38483,6 +38546,20 @@ function _animateShipPreview() {
   const sel = document.getElementById('ship-select');
   const visible = !document.hidden && sel && sel.classList.contains('active');
   if (!visible) {
+    // (v39.18) Hand the DRAWING BUFFER back too, not just the frame. This branch has
+    // always skipped the render while the picker is off screen, but the buffer stayed
+    // allocated for the entire match - a second full-screen surface on a device that has
+    // already had to scale its own game canvas down to fit. 1x1 keeps the CONTEXT alive
+    // (deliberately: tearing it down and rebuilding it per round is context churn, and
+    // _disposeShipPreview3D's comment lists what that costs - dead clones, a canvas that
+    // can never hand out a fresh context). The guard below reinflates it on the frame the
+    // picker returns, and `false` leaves the CSS size alone so nothing reflows.
+    try {
+      // `window.__prevNoShrink = true` disables this from the console — kept as an A/B
+      // escape hatch, since this is the one line here that can be blamed for an empty stage.
+      const _de = s.renderer.domElement;
+      if (!window.__prevNoShrink && (_de.width > 2 || _de.height > 2)) s.renderer.setSize(1, 1, false);
+    } catch (_) {}
     s.animId = requestAnimationFrame(_animateShipPreview);
     return;
   }
@@ -38490,7 +38567,7 @@ function _animateShipPreview() {
   const w = s.canvas.clientWidth | 0;
   const h = s.canvas.clientHeight | 0;
   if (w > 0 && h > 0) {
-    const dpr = Math.min(window.devicePixelRatio || 1, (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 1.5 : 2);   // (v38.60) mobile cap
+    const dpr = _shipPreviewDpr();   // (v38.60) mobile cap; (v39.18) one owner, see there
     const wantW = Math.floor(w * dpr), wantH = Math.floor(h * dpr);
     if (s.renderer.domElement.width !== wantW || s.renderer.domElement.height !== wantH) {
       s.renderer.setSize(w, h, false);
@@ -38563,6 +38640,16 @@ function _disposeShipPreview3D() {
 function stopShipPreviewLoop() {
   if (_shipPreview3D.animId) cancelAnimationFrame(_shipPreview3D.animId);
   _shipPreview3D.animId = null;
+  // (v39.18) Release the drawing buffer HERE too, not only in the loop's !visible
+  // branch. finishLaunch drops the picker's `active` class and calls this in the SAME
+  // synchronous block, so no rAF fires in between and that branch never gets a chance to
+  // run on the way into a match — the buffer only happened to be small because an
+  // earlier frame had caught it. This is the deterministic one: the loop is stopping,
+  // so nothing will reinflate it until startShipPreviewLoop runs the guard again.
+  try {
+    const _r = _shipPreview3D.renderer, _d = _r && _r.domElement;
+    if (_r && _d && !window.__prevNoShrink && (_d.width > 2 || _d.height > 2)) _r.setSize(1, 1, false);
+  } catch (_) {}
 }
 
 const _shipThumbCache = {};            

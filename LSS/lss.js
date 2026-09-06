@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.17';
+const LSS_BUILD = '39.18';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10082,13 +10082,21 @@ try {
 try {
   if (typeof HTMLCanvasElement !== 'undefined' && typeof window !== 'undefined' && !window.__glCtx) {
     window.__glCtx = new Set();
+    window.__glLost = [];
+    let _glSeq = 0;
     const _lssOrigGetContext = HTMLCanvasElement.prototype.getContext;
     HTMLCanvasElement.prototype.getContext = function (type, attrs) {
       const ctx = _lssOrigGetContext.call(this, type, attrs);
       try {
         if (ctx && /webgl/i.test(String(type))) {
+          const _tag = (this.id === 'ship-preview-canvas') ? 'prev' : (this.id || 'gl' + (_glSeq++));
           window.__glCtx.add(ctx);
-          this.addEventListener('webglcontextlost', function () { try { window.__glCtx.delete(ctx); } catch (_) {} }, false);
+          this.addEventListener('webglcontextlost', function () {
+            try {
+              window.__glCtx.delete(ctx);
+              window.__glLost.push(_tag + '@' + Math.round(performance.now() / 1000) + 's');
+            } catch (_) {}
+          }, false);
         }
       } catch (_) {}
       return ctx;
@@ -10183,7 +10191,10 @@ try {
             scene.traverse((o) => { const g = o.geometry; if (!g || seen.has(g.uuid)) return; seen.add(g.uuid);
               for (const k in g.attributes) { const a = g.attributes[k]; if (a && a.array) gb += a.array.byteLength; }
               if (g.index && g.index.array) gb += g.index.array.byteLength; });
-            return ' | ctx ' + ((typeof window !== 'undefined' && window.__glCtx) ? window.__glCtx.size : '?') +
+            const _pv = document.getElementById('ship-preview-canvas');
+            return ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
+              ' | lost ' + ((window.__glLost && window.__glLost.length) ? window.__glLost.join(',') : '-') +
+              ' | ctx ' + ((typeof window !== 'undefined' && window.__glCtx) ? window.__glCtx.size : '?') +
               ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
               (_d.jsHeapMB != null ? ' | heap ' + _d.jsHeapMB + 'MB' : '') + ' | geoMB ' + (gb / 1048576).toFixed(0) +
               ' | chunks ' + ((typeof game !== 'undefined' && game && game.sandwichChunks) ? game.sandwichChunks.size : '?') +
@@ -25824,6 +25835,12 @@ const _shipPreview3D = {
   MOUSE_ROT_RATE: 0.012,   
 };
 
+function _shipPreviewDpr() {
+  let cap = 2;
+  try { if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) cap = 1; } catch (_) {}
+  return Math.min(window.devicePixelRatio || 1, cap);
+}
+
 function _initShipPreview3D() {
   if (_shipPreview3D.renderer) return _shipPreview3D.renderer;
   if (_shipPreview3D.initFailed) return null;
@@ -25835,14 +25852,25 @@ function _initShipPreview3D() {
       canvas: canvas, antialias: true, alpha: true,
       powerPreference: 'high-performance', failIfMajorPerformanceCaveat: false,
     });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 1.5 : 2));
+    renderer.setPixelRatio(_shipPreviewDpr());
     if ('physicallyCorrectLights' in renderer) renderer.physicallyCorrectLights = true;
     if ('useLegacyLights' in renderer) renderer.useLegacyLights = false;
     if ('outputColorSpace' in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace || 'srgb';
     else renderer.outputEncoding = THREE.sRGBEncoding || 3001;
     renderer.setClearColor(0x000000, 0); 
     const scene = new THREE.Scene();
-    if (typeof sceneEnvMap !== 'undefined') scene.environment = sceneEnvMap;
+    try {
+      const _ec = document.createElement('canvas'); _ec.width = 64; _ec.height = 32;
+      const _eg = _ec.getContext('2d');
+      const _grad = _eg.createLinearGradient(0, 0, 0, 32);
+      _grad.addColorStop(0, '#a8c8ee'); _grad.addColorStop(0.55, '#61708a'); _grad.addColorStop(1, '#232a33');
+      _eg.fillStyle = _grad; _eg.fillRect(0, 0, 64, 32);
+      const _etex = new THREE.CanvasTexture(_ec);
+      _etex.mapping = THREE.EquirectangularReflectionMapping;
+      const _pmrem = new THREE.PMREMGenerator(renderer);
+      scene.environment = _pmrem.fromEquirectangular(_etex).texture;
+      _pmrem.dispose(); _etex.dispose();
+    } catch (e) { try { console.warn('[ship-preview] env build failed:', e && e.message); } catch (_) {} }
     scene.add(new THREE.AmbientLight(0xffffff, 0.25));
     const keyL = new THREE.DirectionalLight(0xbfd9ff, 0.65);
     keyL.position.set(180, 240, 160); scene.add(keyL);
@@ -25965,13 +25993,17 @@ function _animateShipPreview() {
   const sel = document.getElementById('ship-select');
   const visible = !document.hidden && sel && sel.classList.contains('active');
   if (!visible) {
+    try {
+      const _de = s.renderer.domElement;
+      if (!window.__prevNoShrink && (_de.width > 2 || _de.height > 2)) s.renderer.setSize(1, 1, false);
+    } catch (_) {}
     s.animId = requestAnimationFrame(_animateShipPreview);
     return;
   }
   const w = s.canvas.clientWidth | 0;
   const h = s.canvas.clientHeight | 0;
   if (w > 0 && h > 0) {
-    const dpr = Math.min(window.devicePixelRatio || 1, (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 1.5 : 2);   // (v38.60) mobile cap
+    const dpr = _shipPreviewDpr();   // (v38.60) mobile cap; (v39.18) one owner, see there
     const wantW = Math.floor(w * dpr), wantH = Math.floor(h * dpr);
     if (s.renderer.domElement.width !== wantW || s.renderer.domElement.height !== wantH) {
       s.renderer.setSize(w, h, false);
@@ -26022,6 +26054,10 @@ function _disposeShipPreview3D() {
 function stopShipPreviewLoop() {
   if (_shipPreview3D.animId) cancelAnimationFrame(_shipPreview3D.animId);
   _shipPreview3D.animId = null;
+  try {
+    const _r = _shipPreview3D.renderer, _d = _r && _r.domElement;
+    if (_r && _d && !window.__prevNoShrink && (_d.width > 2 || _d.height > 2)) _r.setSize(1, 1, false);
+  } catch (_) {}
 }
 
 const _shipThumbCache = {};            
