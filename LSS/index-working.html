@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.05';
+const LSS_BUILD = '39.06';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -38244,6 +38244,19 @@ const _shipPreview3D = {
 
 function _initShipPreview3D() {
   if (_shipPreview3D.renderer) return _shipPreview3D.renderer;
+  // (v39.06) NO SECOND GL CONTEXT ON A PHONE. This builds a second, permanent WebGLRenderer (its
+  // own context) for the hangar preview, and nothing ever disposes it. With bakeShipThumbnails'
+  // leaked context that is three live contexts; Android Chrome's per-process budget is small and
+  // it evicts the OLDEST to make room - the game's own renderer. It fits every symptom the owner
+  // saw: quality-independent, always at the picker (v38.41 put a picker at EVERY round change,
+  // which is exactly when this is created/used), and a crash on the ship-select screen itself.
+  // Returning null is an already-supported path: the panel stays hidden, the baked thumbnails
+  // still show every hull, and picking/launching is unaffected. window.__shipPreview3D = true
+  // forces it back on for A/B.
+  try {
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__shipPreview3D)) { _shipPreview3D.initFailed = true; return null; }
+  } catch (_) {}
   // Once init has failed (driver refused WebGL, canvas missing, etc.) don't
   // keep retrying on every setShipPreviewModel / startShipPreviewLoop call;
   // the preview panel will just stay hidden. The player can still pick and
@@ -38564,6 +38577,12 @@ function bakeShipThumbnails() {
   } finally {
     if (renderer) {
       try { renderer.dispose(); } catch (_) {}
+      // (v39.06) dispose() frees this renderer's OWN objects but does NOT release the WebGL
+      // CONTEXT - the canvas keeps it until GC, and often past that. So every bake leaked a
+      // context. A page may only hold a handful (Chrome/Android especially), and when a new one
+      // is created past the budget the browser FORCE-LOSES THE OLDEST - which is the main game
+      // renderer. That is a "GPU CONTEXT LOST" with no memory pressure at all.
+      try { if (typeof renderer.forceContextLoss === 'function') renderer.forceContextLoss(); } catch (_) {}
     }
   }
 }
