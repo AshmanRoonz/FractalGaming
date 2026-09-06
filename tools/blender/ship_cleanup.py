@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-ship_cleanup.py — stage-1 hull cleanup for the seven LSS ship GLBs, headless Blender 4.1.
+ship_cleanup.py — stage-1 hull cleanup for the seven LSS ship GLBs, headless Blender.
+(Blender is resolved by tools/blender/blender_path.py — $LSS_BLENDER overrides.)
 
 Run from the REPO ROOT:
 
-    "C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background \
+    "$(python tools/blender/blender_path.py)" --background \
         --python tools/blender/ship_cleanup.py -- [--in DIR] [--out DIR] [--report DIR] [--ships a,b] [--render]
 
 Defaults:  --in assets_base/ships   --out tools/blender/work/clean   --report tools/blender/reports

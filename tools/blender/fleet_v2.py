@@ -18,7 +18,12 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-BLENDER = r'C:\Program Files\Blender Foundation\Blender 4.1\blender.exe'
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from blender_path import find_blender  # noqa: E402  (needs the path insert above)
+
+# Was hardcoded to "Blender 4.1"; that install is gone. See blender_path.py -
+# $LSS_BLENDER overrides, otherwise the newest portable/installed build wins.
+BLENDER = find_blender()
 argv = sys.argv[1:]
 
 

@@ -6,8 +6,16 @@ writes GLBs into it.
 
 ## Requirements
 
-- Blender 4.1.x — installed at `C:\Program Files\Blender Foundation\Blender 4.1\blender.exe`
-  (bundled glTF I/O add-on, EEVEE renders work in `--background`).
+- Blender — **resolved, not hardcoded**. `tools/blender/blender_path.py` picks `$LSS_BLENDER`
+  if set, else the newest `~/GLBs/ships/.tools/blender-*/`, else a `Program Files` install,
+  else `blender` on `PATH`. `python tools/blender/blender_path.py --all` shows what it finds.
+  Currently **5.2.1 LTS** (the portable build the art side runs); bundled glTF I/O add-on,
+  EEVEE renders work in `--background`.
+  *Written against 4.1 and unchanged on 5.2* — `BLENDER_EEVEE` / `BLENDER_WORKBENCH` / `CYCLES`
+  are all still valid engine ids (only `BLENDER_EEVEE_NEXT`, which nothing here uses, is gone),
+  every `bpy.ops.mesh.*` / `bpy.ops.object.*` the chain calls still resolves, all 111 glTF
+  export params are present, and a round-trip preserves both the `gun*`/`thruster*`/`cockpit1`
+  markers and the custom split normals stage 1 depends on.
 - Node deps for the compress step: `cd tools && npm install` (once).
 - Python 3 with `numpy` + `Pillow` for the report/diff helpers.
 
@@ -28,12 +36,22 @@ for ships (see `OVERRIDES` in `compress_glb.mjs`) — simplifying twice would de
 
 ## Full rebuild (from the repo root)
 
+> ⚠ **`assets_src/` can be staler than what ships.** It is gitignored; `LSS/ships/` is
+> tracked. As of 2026-09-06 `assets_src/ships/` holds **Jun 27 / v37-era** exports (31.9 MB)
+> while the committed hulls are **v38.35** (18.7 MB, commit `71f0233`). Running
+> `node tools/compress_glb.mjs --only ships` on its own right now would overwrite the shipped
+> v38.35 art with the June source **and grow it to 33.3 MB** (`--dry` reports −9.4% "saved").
+> Always regenerate `assets_src/ships` through the Blender stages below (or `fleet_v2.py`,
+> whose cockpit stage writes it) **before** compressing. If you do clobber them:
+> `git checkout -- LSS/ships/`.
+
 ```bash
-"C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/ship_cleanup.py -- --render
-"C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/verify_culled.py -- --after tools/blender/work/clean
+BLENDER=$(python tools/blender/blender_path.py)      # PowerShell: $BLENDER = python tools/blender/blender_path.py
+"$BLENDER" --background --python tools/blender/ship_cleanup.py -- --render
+"$BLENDER" --background --python tools/blender/verify_culled.py -- --after tools/blender/work/clean
 python tools/blender/verify_culled_diff.py
-"C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/ship_symmetry.py -- --fix --render
-"C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background --python tools/blender/ship_cockpit.py -- --render
+"$BLENDER" --background --python tools/blender/ship_symmetry.py -- --fix --render
+"$BLENDER" --background --python tools/blender/ship_cockpit.py -- --render
 node tools/compress_glb.mjs --only ships
 ```
 

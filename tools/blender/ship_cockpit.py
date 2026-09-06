@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 ship_cockpit.py — stage 2: canopy glass + a modelled cockpit interior for each LSS ship.
-Headless Blender 4.1:
+Headless Blender (resolved by tools/blender/blender_path.py — $LSS_BLENDER overrides):
 
-    "C:/Program Files/Blender Foundation/Blender 4.1/blender.exe" --background \
+    "$(python tools/blender/blender_path.py)" --background \
         --python tools/blender/ship_cockpit.py -- [--in DIR] [--out DIR] [--ships a,b] [--render] [--no-export]
 
 Defaults:  --in tools/blender/work/clean   --out assets_src/ships   reports -> tools/blender/reports/cockpit
