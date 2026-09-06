@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.01';
+const LSS_BUILD = '39.02';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10161,7 +10161,17 @@ try {
         _diagText = (_lvl || '?') + ' | ' + (_d.mobile ? 'mobile' : 'desktop') + ' dpr ' + (+_d.dpr).toFixed(2) +
           (_fx ? ' | canvas ' + _fx.canvas.join('x') + ' | scene ' + _fx.scene[0] + 'x' + _fx.scene[1] + ' s' + _fx.scene[3] + ' | bloom ' + _fx.bloom.join('x') : '') +
           (_d.mem ? ' | tex ' + _d.mem.tex + ' geo ' + _d.mem.geo : '') + (_d.draw ? ' | calls ' + _d.draw.calls : '') +
-          ' | ' + (_d.mode || '') + '/' + (_d.state || '') + (_d.tp ? ' 3p' : ' 1p') + ' | up ' + _d.up + 's';
+          ' | ' + (_d.mode || '') + '/' + (_d.state || '') + (_d.tp ? ' 3p' : ' 1p') + ' | up ' + _d.up + 's' +
+          (function () { try {
+            let gb = 0; const seen = new Set();
+            scene.traverse((o) => { const g = o.geometry; if (!g || seen.has(g.uuid)) return; seen.add(g.uuid);
+              for (const k in g.attributes) { const a = g.attributes[k]; if (a && a.array) gb += a.array.byteLength; }
+              if (g.index && g.index.array) gb += g.index.array.byteLength; });
+            return ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
+              (_d.jsHeapMB != null ? ' | heap ' + _d.jsHeapMB + 'MB' : '') + ' | geoMB ' + (gb / 1048576).toFixed(0) +
+              ' | chunks ' + ((typeof game !== 'undefined' && game && game.sandwichChunks) ? game.sandwichChunks.size : '?') +
+              ' | tier ' + ((typeof getVRBudgetTier === 'function') ? getVRBudgetTier() : '?') + ' | v' + (typeof LSS_BUILD !== 'undefined' ? LSS_BUILD : '?');
+          } catch (_) { return ''; } })();
       } catch (_) {}
       try {
         let overlay = document.getElementById('lss-context-lost-overlay');
@@ -12391,7 +12401,13 @@ function getVRPerfTier() {
 }
 
 function getVRBudgetTier() {
-  if (!isStandaloneQuest() && !isXRPresenting()) return 0;
+  if (!isStandaloneQuest() && !isXRPresenting()) {
+    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) {
+      const _o = (typeof window !== 'undefined') ? window.__phoneBudgetTier : undefined;
+      return (typeof _o === 'number') ? _o : 1;
+    }
+    return 0;
+  }
   const mode = getVRPerfMode();
   if (mode === 'max') return 3;
   if (mode === 'fast') return 2;
@@ -23750,7 +23766,8 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   if (!game.sandwichChunks) game.sandwichChunks = new Map();
   const chunks = game.sandwichChunks;
   const scx = Math.floor(px / _SW_CHUNK), scz = Math.floor(pz / _SW_CHUNK);
-  const _VIEW = (T && T.biome === 'mossy') ? (_swHubView()) : ((T && T.ENDLESS) ? (window.__endlessView || (_lssEndlessMobile() ? 6 : 9)) : _SW_VIEW);   // (v35.89) endless view: desktop 9, mobile/Quest 6 (13^2 x2 shells = 338 terrain draws vs 722 — endless draws TWO shells per chunk, so it needs a TIGHTER radius than the hub's 8). window.__endlessView stays the master override for BOTH.
+  const _VIEW = (T && T.biome === 'mossy') ? (_swHubView()) : ((T && T.ENDLESS) ? (window.__endlessView || (_lssEndlessMobile() ? 6 : 9)) :
+                (window.__arenaView || (((typeof _fxSmallDevice === 'function' && _fxSmallDevice())) ? Math.max(3, _SW_VIEW - 1) : _SW_VIEW)));   // (v35.89) endless view: desktop 9, mobile/Quest 6 (13^2 x2 shells = 338 terrain draws vs 722 — endless draws TWO shells per chunk, so it needs a TIGHTER radius than the hub's 8). window.__endlessView stays the master override for BOTH.
   
   
   
