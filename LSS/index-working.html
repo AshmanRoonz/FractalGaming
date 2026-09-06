@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.08';
+const LSS_BUILD = '39.10';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -38244,12 +38244,18 @@ const _shipPreview3D = {
 
 function _initShipPreview3D() {
   if (_shipPreview3D.renderer) return _shipPreview3D.renderer;
-  // (v39.07) The phone KEEPS its hangar preview. v39.06 skipped this renderer outright on small
-  // devices to stop context eviction (see _disposeShipPreview3D) and that cost the owner the GLB
-  // preview on the ship-select screen. Instead the context is now RELEASED when the select screen
-  // is left (stopShipPreviewLoop), so the preview exists exactly while it is on screen and
-  // gameplay/round-warmup still run on the game's single context - which is the window the crashes
-  // happened in.
+  // (v39.09) NO SECOND GL CONTEXT ON A PHONE - measured, twice. v39.06 skipped this renderer and the
+  // owner's phone stopped losing its context entirely. v39.07/08 tried to keep the preview and merely
+  // RELEASE the context on launch; the crash came straight back at `up 29s ... classic/warmup`, which
+  // the owner confirmed was "right after round 1 started" - exactly when finishLaunch runs the
+  // teardown. So it is not just holding a second context that hurts this device, it is creating and
+  // destroying one at all. The preview falls back to the baked GLB render instead (see
+  // _shipPreviewFallbackImage) so the ship is still shown, with no extra context anywhere.
+  // window.__shipPreview3D = true forces the real 3D preview back on.
+  try {
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__shipPreview3D)) { _shipPreview3D.initFailed = true; return null; }
+  } catch (_) {}
   // Once init has failed (driver refused WebGL, canvas missing, etc.) don't
   // keep retrying on every setShipPreviewModel / startShipPreviewLoop call;
   // the preview panel will just stay hidden. The player can still pick and
@@ -38329,9 +38335,40 @@ function _initShipPreview3D() {
 // Swap the rotating model to the given loadout key. If the GLB pool hasn't
 // finished loading yet, we arm a one-shot retry against shipModelCache.ready
 // so the preview backfills as soon as the model lands.
+// (v39.09) The ship the player picked, without a second WebGL context: bakeShipThumbnails already
+// renders every hull from its GLB (one temporary context at load, released with forceContextLoss),
+// so the select screen shows that render instead of a live 3D stage on small devices.
+function _shipPreviewFallbackImage(key) {
+  try {
+    const host = document.getElementById('ship-preview-model');
+    if (!host) return;
+    if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+    // there is no renderer on this device, so the stage canvas is an empty layer sitting over the
+    // image - hide it rather than rely on paint order.
+    try { const cv = document.getElementById('ship-preview-canvas'); if (cv) cv.style.display = 'none'; } catch (_) {}
+    let img = document.getElementById('ship-preview-fallback');
+    if (!img) {
+      img = document.createElement('img');
+      img.id = 'ship-preview-fallback'; img.alt = '';
+      img.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;pointer-events:none;';
+      host.appendChild(img);
+    }
+    const show = (src) => { if (src) { img.src = src; img.style.display = 'block'; } };
+    if (typeof _shipThumbCache !== 'undefined' && _shipThumbCache[key]) { show(_shipThumbCache[key]); return; }
+    img.style.display = 'none';
+    // thumbnails are baked once the hulls are in ; retry when they are
+    if (typeof shipModelCache !== 'undefined' && shipModelCache.ready && typeof shipModelCache.ready.then === 'function') {
+      shipModelCache.ready.then(() => {
+        try { if (typeof bakeShipThumbnails === 'function') bakeShipThumbnails(); } catch (_) {}
+        try { show(_shipThumbCache[key]); } catch (_) {}
+      });
+    }
+  } catch (_) {}
+}
+
 function setShipPreviewModel(key) {
   if (!_shipPreview3D.renderer) _initShipPreview3D();
-  if (!_shipPreview3D.renderer) return;
+  if (!_shipPreview3D.renderer) { _shipPreviewFallbackImage(key); return; }
   _shipPreview3D.pendingKey = key;
   _applyShipPreviewModel(key);
 }
@@ -38537,7 +38574,9 @@ function bakeShipThumbnails() {
   if (!shipModelCache || !shipModelCache.loaded) return;
   const keys = Object.keys(shipModelCache.loaded);
   if (keys.length === 0) return;       
-  const W = 256, H = 192;
+  // (v39.09) 256x192 -> 512x384: on small devices this render IS the ship-select preview, not just a
+  // chip thumbnail. One temporary context at load, released below with forceContextLoss().
+  const W = 512, H = 384;
   let renderer = null;
   try {
     const canvas = document.createElement('canvas');

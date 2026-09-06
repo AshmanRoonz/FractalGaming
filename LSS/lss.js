@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.08';
+const LSS_BUILD = '39.10';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -25810,6 +25810,10 @@ const _shipPreview3D = {
 
 function _initShipPreview3D() {
   if (_shipPreview3D.renderer) return _shipPreview3D.renderer;
+  try {
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__shipPreview3D)) { _shipPreview3D.initFailed = true; return null; }
+  } catch (_) {}
   if (_shipPreview3D.initFailed) return null;
   if (typeof THREE === 'undefined') { _shipPreview3D.initFailed = true; return null; }
   const canvas = document.getElementById('ship-preview-canvas');
@@ -25867,9 +25871,34 @@ function _initShipPreview3D() {
   }
 }
 
+function _shipPreviewFallbackImage(key) {
+  try {
+    const host = document.getElementById('ship-preview-model');
+    if (!host) return;
+    if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+    try { const cv = document.getElementById('ship-preview-canvas'); if (cv) cv.style.display = 'none'; } catch (_) {}
+    let img = document.getElementById('ship-preview-fallback');
+    if (!img) {
+      img = document.createElement('img');
+      img.id = 'ship-preview-fallback'; img.alt = '';
+      img.style.cssText = 'position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;pointer-events:none;';
+      host.appendChild(img);
+    }
+    const show = (src) => { if (src) { img.src = src; img.style.display = 'block'; } };
+    if (typeof _shipThumbCache !== 'undefined' && _shipThumbCache[key]) { show(_shipThumbCache[key]); return; }
+    img.style.display = 'none';
+    if (typeof shipModelCache !== 'undefined' && shipModelCache.ready && typeof shipModelCache.ready.then === 'function') {
+      shipModelCache.ready.then(() => {
+        try { if (typeof bakeShipThumbnails === 'function') bakeShipThumbnails(); } catch (_) {}
+        try { show(_shipThumbCache[key]); } catch (_) {}
+      });
+    }
+  } catch (_) {}
+}
+
 function setShipPreviewModel(key) {
   if (!_shipPreview3D.renderer) _initShipPreview3D();
-  if (!_shipPreview3D.renderer) return;
+  if (!_shipPreview3D.renderer) { _shipPreviewFallbackImage(key); return; }
   _shipPreview3D.pendingKey = key;
   _applyShipPreviewModel(key);
 }
@@ -26020,7 +26049,7 @@ function bakeShipThumbnails() {
   if (!shipModelCache || !shipModelCache.loaded) return;
   const keys = Object.keys(shipModelCache.loaded);
   if (keys.length === 0) return;       
-  const W = 256, H = 192;
+  const W = 512, H = 384;
   let renderer = null;
   try {
     const canvas = document.createElement('canvas');
