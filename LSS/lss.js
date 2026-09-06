@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.04';
+const LSS_BUILD = '39.05';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -36631,6 +36631,10 @@ function _programEnvSig() {
 let _pinBuildOnly = false;   // (v36.27) see _pinCombatEffectProgramsStaged
 function _ghostPinWarm() {
   try {
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__pinShaders)) return;
+  } catch (_) {}
+  try {
     if (typeof _ghostHullApply !== 'function') return;
     if (typeof player === 'undefined' || !player || !player.mesh) return;
     const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
@@ -36651,6 +36655,10 @@ function _ghostPinWarm() {
   } catch (_) {}
 }
 function _pinCombatEffectPrograms() {
+  try {
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__pinShaders)) return;
+  } catch (_) {}
   try {
     if (typeof renderer === 'undefined' || !renderer ||
         typeof scene === 'undefined' || !scene ||
@@ -36960,6 +36968,8 @@ function _warmRealCombatFX() {
   try {
     if ((game.currentRound | 0) > 1 && !(typeof window !== 'undefined' && window.__fxWarmEveryRound) &&
         window._fxRetainKeys && window._fxRetainKeys.size >= 10) return;
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__fxWarmEveryRound)) return;
   } catch (_) {}
   const _wsig = (typeof _programEnvSig === 'function') ? _programEnvSig() : null;
   if (_wsig && _warmedFXSig === _wsig) return;

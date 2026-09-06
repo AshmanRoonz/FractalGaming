@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.04';
+const LSS_BUILD = '39.05';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -52457,6 +52457,12 @@ function _programEnvSig() {
 // put the painted hull back - all inside one call, so no frame ever renders the swap.
 let _pinBuildOnly = false;   // (v36.27) see _pinCombatEffectProgramsStaged
 function _ghostPinWarm() {
+  // (v39.05) skipped on small devices with the other pin passes - three more synchronous
+  // full-scene compiles in the warmup window. See _pinCombatEffectPrograms.
+  try {
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__pinShaders)) return;
+  } catch (_) {}
   try {
     if (typeof _ghostHullApply !== 'function') return;
     if (typeof player === 'undefined' || !player || !player.mesh) return;
@@ -52482,6 +52488,18 @@ function _ghostPinWarm() {
   } catch (_) {}
 }
 function _pinCombatEffectPrograms() {
+  // (v39.05) THE PHONE CRASH. This runs at EVERY round warmup (both round-start paths) and does
+  // FIVE synchronous full-scene renderer.compile() passes - two tone-mapping variants plus the
+  // rtScene colourspace - over ~170 programs. _ghostPinWarm adds three more. On a phone that is a
+  // blocking GPU burst of seconds, and Android kills a context that stops answering: every crash
+  // the owner photographed says `classic/warmup`, at any quality, since v38 grew the program count.
+  // Since v38.97 _lssRetainMat keeps every program resident for the session, so pinning is
+  // redundant anyway - the worst case without it is a one-time hitch the first time an effect is
+  // seen, which is strictly better than losing the context. window.__pinShaders = true forces it.
+  try {
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__pinShaders)) return;
+  } catch (_) {}
   try {
     if (typeof renderer === 'undefined' || !renderer ||
         typeof scene === 'undefined' || !scene ||
@@ -53047,6 +53065,10 @@ function _warmRealCombatFX() {
   try {
     if ((game.currentRound | 0) > 1 && !(typeof window !== 'undefined' && window.__fxWarmEveryRound) &&
         window._fxRetainKeys && window._fxRetainKeys.size >= 10) return;
+    // (v39.05) and never on a phone: four more synchronous compile+render passes in the warmup
+    // window, the same burst that loses the GL context. window.__fxWarmEveryRound = true forces it.
+    if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() &&
+        !(typeof window !== 'undefined' && window.__fxWarmEveryRound)) return;
   } catch (_) {}
   // Pin reconstruction misses the real in-combat programs: LayeredFX / smoke
   // carry an onBeforeCompile hook that shifts the program cache key, burst
