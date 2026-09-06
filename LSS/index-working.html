@@ -4391,7 +4391,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.22';
+const LSS_BUILD = '39.23';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -17958,22 +17958,31 @@ try {
     (function () {
       const FMT = { 6408: 4, 6407: 3, 32856: 4, 32849: 3, 34842: 8, 34836: 16, 33189: 2,
                     34041: 4, 36012: 4, 35056: 4, 32854: 2, 33321: 1, 33323: 2, 33326: 4, 32857: 4 };
-      const SIZE = new WeakMap();
-      const rec = (gl) => {
-        const t = (gl && gl.canvas && gl.canvas.id) ? (gl.canvas.id === 'ship-preview-canvas' ? 'prev' : gl.canvas.id) : 'main';
-        return (window.__glBytes[t] = window.__glBytes[t] || { buf: 0, tex: 0 });
-      };
-      // Replace the remembered size of one GL object and fold the delta into `field`.
+      // ⚠ TREAT THIS AS INDICATIVE, NOT EXACT — and never size a fix from it alone.
+      // A running total with +=/-= deltas drifted badly (81.5 MB of texture where an
+      // independent per-object inventory said 30.7), so nothing accumulates here: every GL
+      // object gets an id, its CURRENT size is stored in a Map, deletes remove the entry, and
+      // the total is summed on demand. That form is arithmetically checkable — 256x256x4x1.34
+      // = 0.34 MB, and capped hulls report exactly that. It still reads HIGHER than a
+      // page-level probe armed at navigate (51 MB vs 9.7 on the same run), and the gap is not
+      // yet explained: this one is armed earlier and sees boot-time uploads the other misses,
+      // but that has not been proven to be the whole difference. Use it to spot CHANGES
+      // between crash lines; use a per-object inventory in the pane before acting on a total.
+      const IDS = new WeakMap(); let _idSeq = 1;
+      const LIVE = window.__glLive = new Map();   // id -> { c: ctxTag, f: 'buf'|'tex', b: bytes }
+      const tagOf = (gl) => (gl && gl.canvas && gl.canvas.id)
+        ? (gl.canvas.id === 'ship-preview-canvas' ? 'prev' : gl.canvas.id) : 'main';
       const put = (gl, obj, field, bytes) => {
         if (!obj) return;
-        const r = rec(gl), prev = SIZE.get(obj) || 0;
-        r[field] += bytes - prev;
-        SIZE.set(obj, bytes);
+        let id = IDS.get(obj); if (!id) { id = _idSeq++; IDS.set(obj, id); }
+        LIVE.set(id, { c: tagOf(gl), f: field, b: bytes });
       };
-      const drop = (gl, obj, field) => {
-        if (!obj) return;
-        const r = rec(gl), prev = SIZE.get(obj) || 0;
-        r[field] -= prev; SIZE.delete(obj);
+      const drop = (gl, obj) => { if (!obj) return; const id = IDS.get(obj); if (id) LIVE.delete(id); };
+      window.__glBytesRead = function () {
+        const out = Object.create(null);
+        LIVE.forEach((v) => { const r = out[v.c] = out[v.c] || { buf: 0, tex: 0 }; r[v.f] += v.b; });
+        window.__glBytes = out;
+        return out;
       };
       const CTORS = [];
       if (typeof WebGLRenderingContext !== 'undefined') CTORS.push(WebGLRenderingContext);
@@ -17998,7 +18007,7 @@ try {
           return bd.apply(this, arguments);
         };
         const dbuf = p.deleteBuffer;
-        p.deleteBuffer = function (buf) { try { drop(this, buf, 'buf'); } catch (_) {} return dbuf.apply(this, arguments); };
+        p.deleteBuffer = function (buf) { try { drop(this, buf); } catch (_) {} return dbuf.apply(this, arguments); };
         const t2 = p.texImage2D;
         p.texImage2D = function () {
           try {
@@ -18016,7 +18025,7 @@ try {
           return ts.apply(this, arguments);
         };
         const dtex = p.deleteTexture;
-        p.deleteTexture = function (tex) { try { drop(this, tex, 'tex'); } catch (_) {} return dtex.apply(this, arguments); };
+        p.deleteTexture = function (tex) { try { drop(this, tex); } catch (_) {} return dtex.apply(this, arguments); };
       }
     })();
     let _glSeq = 0;
@@ -18196,7 +18205,7 @@ try {
             // number every earlier crash line was missing.
             let _gpu = '-';
             try {
-              const B = window.__glBytes || {};
+              const B = (typeof window.__glBytesRead === 'function') ? window.__glBytesRead() : (window.__glBytes || {});
               _gpu = Object.keys(B).map((k) =>
                 k + ' ' + (B[k].buf / 1048576).toFixed(0) + 'b/' + (B[k].tex / 1048576).toFixed(0) + 't').join(' ');
             } catch (_) {}
@@ -38292,7 +38301,16 @@ function _makeProceduralShipNormalMap() {
 // at load. This is the lever the owner's phone crash needed - working set was ~150 MB (73 tex + 43 geo
 // + framebuffers) and dying at warmup. window.__texCap = { max: 768 } dials it back up if a hull reads
 // too soft; desktop is unaffected (_lssTexCap returns 0 there).
-const _TEX_CAP_SMALL = 512;
+// (v39.23) 512 -> 256, owner: "try it". Measured on the pane's mobile profile with a
+// per-GL-object texture inventory: 41 live textures / 30.7 MB, of which TWENTY are 512x512
+// base maps at 1.34 MB each = 26.8 MB — comfortably the largest single group. At 256 each is
+// 0.34 MB, so that group becomes ~6.7 MB: about a 20 MB cut against a ~100 MB working set.
+// ⚠ I first told the owner this would save ~58 MB. That came from a BROKEN counter (see the
+// note on __glLive above, which read 81.5 MB where the truth was 30.7); the honest figure is
+// ~20 MB. Recorded here so the next person sizes the lever from the right number.
+// window.__texCap = { max: 512 } puts it back at runtime if hulls read too soft; desktop is
+// unaffected (_lssTexCap returns 0 there).
+const _TEX_CAP_SMALL = 256;
 function _lssTexCap() {
   const K = (typeof window !== 'undefined') ? window.__texCap : null;
   if (K && K.on === false) return 0;

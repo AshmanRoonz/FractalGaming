@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.22';
+const LSS_BUILD = '39.23';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10087,21 +10087,21 @@ try {
     (function () {
       const FMT = { 6408: 4, 6407: 3, 32856: 4, 32849: 3, 34842: 8, 34836: 16, 33189: 2,
                     34041: 4, 36012: 4, 35056: 4, 32854: 2, 33321: 1, 33323: 2, 33326: 4, 32857: 4 };
-      const SIZE = new WeakMap();
-      const rec = (gl) => {
-        const t = (gl && gl.canvas && gl.canvas.id) ? (gl.canvas.id === 'ship-preview-canvas' ? 'prev' : gl.canvas.id) : 'main';
-        return (window.__glBytes[t] = window.__glBytes[t] || { buf: 0, tex: 0 });
-      };
+      const IDS = new WeakMap(); let _idSeq = 1;
+      const LIVE = window.__glLive = new Map();   // id -> { c: ctxTag, f: 'buf'|'tex', b: bytes }
+      const tagOf = (gl) => (gl && gl.canvas && gl.canvas.id)
+        ? (gl.canvas.id === 'ship-preview-canvas' ? 'prev' : gl.canvas.id) : 'main';
       const put = (gl, obj, field, bytes) => {
         if (!obj) return;
-        const r = rec(gl), prev = SIZE.get(obj) || 0;
-        r[field] += bytes - prev;
-        SIZE.set(obj, bytes);
+        let id = IDS.get(obj); if (!id) { id = _idSeq++; IDS.set(obj, id); }
+        LIVE.set(id, { c: tagOf(gl), f: field, b: bytes });
       };
-      const drop = (gl, obj, field) => {
-        if (!obj) return;
-        const r = rec(gl), prev = SIZE.get(obj) || 0;
-        r[field] -= prev; SIZE.delete(obj);
+      const drop = (gl, obj) => { if (!obj) return; const id = IDS.get(obj); if (id) LIVE.delete(id); };
+      window.__glBytesRead = function () {
+        const out = Object.create(null);
+        LIVE.forEach((v) => { const r = out[v.c] = out[v.c] || { buf: 0, tex: 0 }; r[v.f] += v.b; });
+        window.__glBytes = out;
+        return out;
       };
       const CTORS = [];
       if (typeof WebGLRenderingContext !== 'undefined') CTORS.push(WebGLRenderingContext);
@@ -10122,7 +10122,7 @@ try {
           return bd.apply(this, arguments);
         };
         const dbuf = p.deleteBuffer;
-        p.deleteBuffer = function (buf) { try { drop(this, buf, 'buf'); } catch (_) {} return dbuf.apply(this, arguments); };
+        p.deleteBuffer = function (buf) { try { drop(this, buf); } catch (_) {} return dbuf.apply(this, arguments); };
         const t2 = p.texImage2D;
         p.texImage2D = function () {
           try {
@@ -10139,7 +10139,7 @@ try {
           return ts.apply(this, arguments);
         };
         const dtex = p.deleteTexture;
-        p.deleteTexture = function (tex) { try { drop(this, tex, 'tex'); } catch (_) {} return dtex.apply(this, arguments); };
+        p.deleteTexture = function (tex) { try { drop(this, tex); } catch (_) {} return dtex.apply(this, arguments); };
       }
     })();
     let _glSeq = 0;
@@ -10271,7 +10271,7 @@ try {
             } catch (_) {}
             let _gpu = '-';
             try {
-              const B = window.__glBytes || {};
+              const B = (typeof window.__glBytesRead === 'function') ? window.__glBytesRead() : (window.__glBytes || {});
               _gpu = Object.keys(B).map((k) =>
                 k + ' ' + (B[k].buf / 1048576).toFixed(0) + 'b/' + (B[k].tex / 1048576).toFixed(0) + 't').join(' ');
             } catch (_) {}
@@ -25788,7 +25788,7 @@ function _makeProceduralShipNormalMap() {
   _PROCEDURAL_SHIP_NORMALMAP = tex;
   return tex;
 }
-const _TEX_CAP_SMALL = 512;
+const _TEX_CAP_SMALL = 256;
 function _lssTexCap() {
   const K = (typeof window !== 'undefined') ? window.__texCap : null;
   if (K && K.on === false) return 0;
