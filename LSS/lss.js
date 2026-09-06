@@ -9,12 +9,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.93';
+const LSS_BUILD = '38.95';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '38.92';   // (v38.92) c1seat hulls, compressed + joined   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '38.95';   // (v38.95) Pyro/Slayer cockpit1 forward again (-0.30/-0.29) ; c1seat hulls, cockpit1 placed by the owner   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -26494,6 +26494,11 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
           params.roughness = 0.10;
           params.envMapIntensity = 1.0;
           params.emissive = new THREE.Color(0x000000);
+          params.transparent = true;
+          params.depthWrite = false;
+        }
+        if (m && m.name !== 'canopy_glass' && m.transparent &&
+            typeof m.opacity === 'number' && m.opacity < 0.5) {
           params.transparent = true;
           params.depthWrite = false;
         }
