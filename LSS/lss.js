@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.13';
+const LSS_BUILD = '39.14';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -12716,8 +12716,7 @@ try {
   }
   const valid = ['low', 'medium', 'high', 'ultra', 'mega'];
   if (valid.indexOf(stored) >= 0) {
-    QUALITY.level = stored;
-    postFX.enabled = QUALITY.bloomEnabled();
+    applyQualityPreset(stored);
   }
 } catch (e) {}
 
