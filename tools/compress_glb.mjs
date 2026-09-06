@@ -92,7 +92,7 @@
 
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { dedup, prune, weld, quantize, dequantize, simplify, textureCompress, join, flatten, cloneDocument } from '@gltf-transform/functions';
+import { dedup, prune, weld, quantize, dequantize, simplify, simplifyPrimitive, textureCompress, join, flatten, cloneDocument } from '@gltf-transform/functions';
 import { MeshoptSimplifier } from 'meshoptimizer';
 import sharp from 'sharp';
 import fs from 'fs';
@@ -173,7 +173,7 @@ const OVERRIDES = {
   // tuned to avoid. simplify: 1.0 skips the simplifier ; weld + quantize still
   // run, which is what recovers the byte size the float32 Blender export lost.
   ...Object.fromEntries(['blaster', 'puncture', 'pyro', 'slayer', 'syphon', 'tracker', 'vortex'].map((s) =>
-    [`ships/${s}.glb`, { simplify: 1.0, join: true, mobile: { baseColorMax: 1024 },
+    [`ships/${s}.glb`, { simplify: 1.0, join: true, mobile: { baseColorMax: 1024, lean: true, cockpitRatio: 0.35 },
                         reason: 'Blender-authored from the already-simplified hull ; c1seat cockpit parts joined per material' }])),
   // (v37.73) the flying carrier: 565k triangles decimated to 120k in Blender with its own UVs and
   // all three maps kept. Simplifying again would decimate twice.
@@ -377,6 +377,35 @@ for (const rel of files) {
   if (o.mobile) {
     const mx = o.mobile.baseColorMax || 1024;
     const mdoc = cloneDocument(doc);
+    if (o.mobile.lean) {
+      // (v38.96) LEAN MOBILE HULLS. The c1seat hulls lost phones their GL context: per hull
+      // ~117k tris (57k of it cockpit interior every bot carries around unseen), a 1k normal
+      // map the game never samples in flight (buildModelShipMesh copies `map` only) but the
+      // loader decodes and the thumbnail bake uploads, and clearcoat/specular/ior extensions
+      // that make the loader build MeshPhysicalMaterial - the heaviest shader family - 14 per
+      // hull. The small-device set keeps the base colour only, comes in as plain Standard
+      // materials, and thins everything but the hull to cockpitRatio.
+      const mroot = mdoc.getRoot();
+      for (const m of mroot.listMaterials()) {
+        m.setNormalTexture(null); m.setOcclusionTexture(null); m.setMetallicRoughnessTexture(null);
+      }
+      // Extension.dispose() strips the extension AND every property of it from the document,
+      // so the materials come into three.js as MeshStandardMaterial, not MeshPhysicalMaterial.
+      for (const e of mroot.listExtensionsUsed()) {
+        if (/materials_(clearcoat|specular|ior|transmission|sheen|iridescence|volume|anisotropy)/.test(e.extensionName)) e.dispose();
+      }
+      // Re-weld with a normal tolerance: the hull carries authored split normals that keep
+      // ~3 verts per triangle apart; on a phone the soft edge is the better trade.
+      await mdoc.transform(dequantize(), weld({ toleranceNormal: 0.25 }));
+      const prims = mroot.listMeshes().flatMap((mm) => mm.listPrimitives());
+      const tri = (p) => (p.getIndices() ? p.getIndices().getCount() : p.getAttribute('POSITION').getCount()) / 3;
+      const hull = prims.reduce((a, b) => (tri(b) > tri(a) ? b : a));
+      const ratio = o.mobile.cockpitRatio ?? 0.4;
+      for (const p of prims) if (p !== hull && tri(p) > 300) simplifyPrimitive(p, { simplifier: MeshoptSimplifier, ratio, error: 0.01, lockBorder: false });
+      // identical materials now (no maps, no extensions) -> dedup + a second join shrinks draw calls
+      await mdoc.transform(dedup(), prune({ keepLeaves: true }), join({ keepNamed: false, cleanup: false }),
+                           prune({ keepLeaves: true }), dropJoinLeftovers, prune({ keepLeaves: true }), quantize(Q));
+    }
     await mdoc.transform(textureCompress({
       encoder: sharp, targetFormat: 'webp', quality: 88, formats: /^image\/(png|jpeg|webp)$/,
       slots: /baseColorTexture/, resize: [mx, mx],
@@ -391,7 +420,7 @@ for (const rel of files) {
     const mcat = cat + '-m';
     (per[mcat] ??= { b: 0, a: 0, n: 0 }).b += bin.byteLength; per[mcat].a += mbin.byteLength; per[mcat].n++;
     console.log(mrel.padEnd(36) + mcat.padEnd(9) + mb(bin.byteLength).padStart(8) + mb(mbin.byteLength).padStart(8) +
-      mb(bin.byteLength - mbin.byteLength).padStart(8) + `  mobile variant: base colour capped at ${mx}`);
+      mb(bin.byteLength - mbin.byteLength).padStart(8) + `  mobile variant: base colour capped at ${mx}${o.mobile.lean ? ' ; lean (no PBR maps/extensions, cockpit x' + (o.mobile.cockpitRatio ?? 0.4) + ')' : ''}`);
   }
 }
 

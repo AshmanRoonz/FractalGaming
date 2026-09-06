@@ -4378,7 +4378,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.95';
+const LSS_BUILD = '38.97';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -4489,7 +4489,13 @@ const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
 // (v38.94) 38.92 -> 38.94: the owner's cockpit1 placements baked into every hull (eye forward
 // into the cabin and up to headrest height ; seats untouched). Both sets (ships/, ships/m/)
 // changed bytes, so the stamp moves.
-const _MODELS_VERSION = '38.95';   // (v38.95) Pyro/Slayer cockpit1 forward again (-0.30/-0.29) ; c1seat hulls, cockpit1 placed by the owner   // GLB models (ships/, objects/, objects/hoard/, rings/)
+// (v38.96) 38.95 -> 38.96: LEAN MOBILE SET. ships/m/* rebuilt to a phone budget after standalone
+// players lost their GL context on the c1seat hulls: base colour only (no normal map), the
+// clearcoat/specular/ior extensions stripped so the loader builds MeshStandardMaterial not
+// MeshPhysicalMaterial, a normal-tolerant re-weld and the cockpit thinned to 0.35 - ~80k tris a
+// hull, 15.5 MB the set (the 2023 hulls were 18.7 MB). The PC set is byte-shifted by the same
+// compress run, so one stamp covers both.
+const _MODELS_VERSION = '38.96';   // (v38.96) lean mobile set ; c1seat hulls, cockpit1 placed by the owner   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 // (v35.20) Version badge moved bottom-LEFT -> bottom-RIGHT, with a
 // GAMEPAD RECOMMENDED line stacked directly above it in the same 11px face.
@@ -39324,6 +39330,8 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
   });
   group.add(model);
   group.userData.hullMats = hullMats;
+  // (v38.97) pool identity for bots: same hull, team tint and skin -> interchangeable group.
+  group.userData._poolKey = loadoutKey + '|' + teamColor + '|' + (skinId || '');
   // (v32.21) Stash the GLB weapon-muzzle marker nodes (gun1, gun2, ...) so bot
   // + peer gunfire can originate at the real barrels (see shipMuzzleWorld).
   // They are empty nodes inside `model`, so they ride the ship transform.
@@ -39549,10 +39557,47 @@ function _disposeShipGroup(group) {
       }
       const mats = Array.isArray(o.material) ? o.material : [o.material];
       for (const m of mats) {
-        if (m && m.dispose) { try { m.dispose(); } catch (_) {} }
+        // (v38.97) retain one material per program signature instead of disposing: a disposed
+        // hull material whose program has no other holder frees the program, and the next ship
+        // with that variant relinks it mid-match (224 ms cold on the pane, at round start).
+        if (m && m.dispose) { try { if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else m.dispose(); } catch (_) {} }
       }
     });
   } catch (_) {}
+}
+
+// (v38.97) BOT SHIP-GROUP POOL. spawnBots() tears every bot down and rebuilds it each round
+// (bot.destroy() -> _disposeShipGroup -> new Bot -> buildModelShipMesh). With the joined c1seat
+// hulls that is 14 meshes + 14 materials + the engine/plume/shield geometry per bot, per round:
+// the instrumented pane showed 519 GPU buffer uploads and 155 geometry deletes in ONE frame at
+// every round transition (~140 ms warm, 650-700 ms cold) - the "hitch at the start of battle"
+// and "the big one after the last kill" (the roundEnd -> warmup rebuild two seconds later).
+// A dying bot now parks its finished group by (loadout, team, skin) and the next bot with the
+// same key takes it back: nothing is disposed, uploaded or compiled, and the materials keep
+// their programs alive across matches. Bots only - the player's rig and peers keep the
+// build/dispose path. Reuse resets what a bot mutates: scene membership, visibility, the doomed
+// dim on the hull materials (_dimHullMat is base-relative) and userData.bot.
+const _botShipPool = new Map();
+const _BOT_SHIP_POOL_MAX = 4;   // per key ; beyond it the group is disposed as before
+function _botShipPoolPut(bot) {
+  const g = bot && bot.mesh;
+  const key = g && g.userData && g.userData._poolKey;
+  if (!key || g.userData.isProceduralFallback) return false;
+  const list = _botShipPool.get(key) || [];
+  if (list.length >= _BOT_SHIP_POOL_MAX) return false;
+  try { if (g.parent) g.parent.remove(g); } catch (_) {}
+  g.userData.bot = null;
+  list.push(g); _botShipPool.set(key, list);
+  return true;
+}
+function _botShipPoolTake(key) {
+  const list = _botShipPool.get(key);
+  if (!list || !list.length) return null;
+  const g = list.pop();
+  g.visible = true;
+  g.userData._dimAmount = undefined;
+  try { if (g.userData.hullMats) for (const hm of g.userData.hullMats) _dimHullMat(hm, 1.0); } catch (_) {}
+  return g;
 }
 
 function swapToModelMeshWhenReady(owner, teamColor) {
@@ -40162,7 +40207,9 @@ class Bot {
     // (campaign) Hoard ships wear a preloaded hoard GLB (mesh key = hoardModelKey)
     // while keeping the loadout for stats ; the campaign flies them in formation.
     const _meshKey = hoardModelKey || loadoutKey;
-    this.mesh = createShipMesh(chassisData, teamColor, _meshKey);
+    // (v38.97) a parked group from the last round with this hull + tint, else a fresh build
+    this.mesh = (typeof _botShipPoolTake === 'function' && _botShipPoolTake(_meshKey + '|' + teamColor + '|')) ||
+                createShipMesh(chassisData, teamColor, _meshKey);
     this.mesh.position.copy(this.position);
     this.mesh.userData.bot = this;
     scene.add(this.mesh);
@@ -41629,6 +41676,8 @@ class Bot {
   destroy() {
     // (leak fix 2026-06-12) Bots are torn down for good here (match end /
     // entity wipe); dispose the ship group's per-build resources too.
+    // (v38.97) ...unless the next round can wear it: park it in the bot ship pool.
+    if (typeof _botShipPoolPut === 'function' && _botShipPoolPut(this)) return;
     if (typeof _disposeShipGroup === 'function') _disposeShipGroup(this.mesh);
     else if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
   }
@@ -42944,32 +42993,32 @@ class Projectile {
     this.alive = false;
     if (this.mesh && this.mesh.parent) {
       scene.remove(this.mesh);
-      if (this.mesh.material) this.mesh.material.dispose();
+      if (this.mesh.material) _lssRetainMat(this.mesh.material);   // (v38.97) programs stay resident
     }
     if (this.trail && this.trail.parent) {
       scene.remove(this.trail);
       if (this.trail.geometry) this.trail.geometry.dispose();
-      if (this.trail.material) this.trail.material.dispose();
+      if (this.trail.material) _lssRetainMat(this.trail.material);
     }
     if (this.glowMesh && this.glowMesh.parent) {
       scene.remove(this.glowMesh);
-      this.glowMesh.material.dispose();
+      _lssRetainMat(this.glowMesh.material);
     }
     if (this.hazeMesh && this.hazeMesh.parent) {
       scene.remove(this.hazeMesh);
-      this.hazeMesh.material.dispose();
+      _lssRetainMat(this.hazeMesh.material);
     }
     if (this.smokeCone && this.smokeCone.parent) {
       scene.remove(this.smokeCone);
       if (this.smokeCone.material && this.smokeCone.material.dispose) {
-        try { this.smokeCone.material.dispose(); } catch (_) {}
+        try { _lssRetainMat(this.smokeCone.material); } catch (_) {}
       }
       this.smokeCone = null;
     }
     if (this.trailRibbon && this.trailRibbon.parent) {
       scene.remove(this.trailRibbon);
       if (this.trailRibbon.geometry) this.trailRibbon.geometry.dispose();
-      if (this.trailRibbon.material) this.trailRibbon.material.dispose();
+      if (this.trailRibbon.material) _lssRetainMat(this.trailRibbon.material);
     }
     let _exPos = this.position;
     let _exSize = this.isPyroThermite ? 22 : 15;
@@ -44700,10 +44749,12 @@ async function _warmupCombatShadersBody() {
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const m of mats) {
               if (!m) continue;
-              // Detach any shared texture maps before disposing the material.
-              m.map = null; m.normalMap = null; m.emissiveMap = null;
-              m.roughnessMap = null; m.metalnessMap = null; m.aoMap = null;
-              try { m.dispose(); _warmupMaterialCount++; } catch (_) {}
+              // (v38.97) RETAINED, not disposed. Disposing here freed the programs the warmup had
+              // just compiled for every hull variant the player's own ship doesn't wear, and the
+              // first bot wearing one relinked it mid-match (the round-start hitch, 224 ms cold on
+              // the pane). _lssRetainMat keeps one material per program signature resident for the
+              // session ; the maps stay attached because the signature and the program depend on them.
+              try { _lssRetainMat(m); _warmupMaterialCount++; } catch (_) {}
             }
             // Only dispose geometry if it was generated for this mesh; the
             // GLB path shares geometry across clones so we DON'T touch it.
@@ -46975,7 +47026,7 @@ class ClusterObstacle {
       if (child.mesh) {
         try {
           if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
-          if (child.mesh.material && child.mesh.material.dispose) child.mesh.material.dispose();
+          if (child.mesh.material && child.mesh.material.dispose) _lssRetainMat(child.mesh.material);   // (v38.97) keep the program resident
         } catch (_) {}
         const _rockSeed = Math.random() * 1000;
         child._rockSeed = _rockSeed;
@@ -46986,7 +47037,7 @@ class ClusterObstacle {
         if (child.edgeMesh) {
           if (child.edgeMesh.parent) scene.remove(child.edgeMesh);
           if (child.edgeMesh.geometry && child.edgeMesh.geometry.dispose) child.edgeMesh.geometry.dispose();
-          if (child.edgeMesh.material && child.edgeMesh.material.dispose) child.edgeMesh.material.dispose();
+          if (child.edgeMesh.material && child.edgeMesh.material.dispose) _lssRetainMat(child.edgeMesh.material);   // (v38.97)
           child.edgeMesh = null;
         }
       }
@@ -47014,7 +47065,7 @@ class ClusterObstacle {
       if (child.mesh) {
         try {
           if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
-          if (child.mesh.material && child.mesh.material.dispose) child.mesh.material.dispose();
+          if (child.mesh.material && child.mesh.material.dispose) _lssRetainMat(child.mesh.material);   // (v38.97) keep the program resident
         } catch (_) {}
         const _rockSeed = (cc.seed != null) ? cc.seed : Math.random() * 1000;
         child._rockSeed = _rockSeed;
@@ -47024,7 +47075,7 @@ class ClusterObstacle {
         if (child.edgeMesh) {
           if (child.edgeMesh.parent) scene.remove(child.edgeMesh);
           if (child.edgeMesh.geometry && child.edgeMesh.geometry.dispose) child.edgeMesh.geometry.dispose();
-          if (child.edgeMesh.material && child.edgeMesh.material.dispose) child.edgeMesh.material.dispose();
+          if (child.edgeMesh.material && child.edgeMesh.material.dispose) _lssRetainMat(child.edgeMesh.material);   // (v38.97)
           child.edgeMesh = null;
         }
       }
@@ -48229,12 +48280,13 @@ function _disposeVRRockMesh(mesh) {
     try { mesh.geometry.dispose(); } catch (_) {}
   }
   const mat = mesh.material;
+  // (v38.97) retained, not disposed: 105 rock ShaderMaterials went every round and relinked next.
   if (Array.isArray(mat)) {
     for (const m of mat) {
-      if (m && m.dispose) { try { m.dispose(); } catch (_) {} }
+      if (m && m.dispose) { try { _lssRetainMat(m); } catch (_) {} }
     }
   } else if (mat && mat.dispose) {
-    try { mat.dispose(); } catch (_) {}
+    try { _lssRetainMat(mat); } catch (_) {}
   }
 }
 
@@ -55180,12 +55232,45 @@ const MAX_EFFECTS = 350;
 function _lssRetainMat(mat) {
   if (!mat) return;
   if (Array.isArray(mat)) { for (const m of mat) _lssRetainMat(m); return; }
+  // (v38.97) RETAIN BY THREE'S OWN PROGRAM KEY. The hand-rolled signature below can never mirror
+  // WebGLPrograms' cache key exactly (light counts, fog, colourspace, UV channels, a dozen defines),
+  // so materials kept slipping through as "duplicates" and freeing programs the next build had to
+  // relink cold - the player's round-start rebuild linked 8 in one 1 s frame. renderer.properties
+  // holds, per material, the exact programs it owns (`programs`: cacheKey -> program). Keep the
+  // first material seen for each real key ; a material that was never rendered owns nothing and
+  // is simply disposed. The signature path stays as the fallback for renderers without it.
+  try {
+    if (typeof renderer !== 'undefined' && renderer && renderer.properties) {
+      const mp = renderer.properties.get(mat);
+      const progs = mp && mp.programs;
+      if (progs && progs.size) {
+        if (!window._fxRetainKeys) window._fxRetainKeys = new Map();
+        let held = false;
+        for (const key of progs.keys()) {
+          if (!window._fxRetainKeys.has(key)) { window._fxRetainKeys.set(key, mat); held = true; }
+        }
+        if (!held && mat.dispose) mat.dispose();
+        return;
+      }
+    }
+  } catch (_) {}
   try {
     if (!window._fxRetain) window._fxRetain = {};
     const sig = (mat.type || 'M') + '|' + (mat.vertexShader ? mat.vertexShader.length : 0) +
       '|' + (mat.fragmentShader ? mat.fragmentShader.length : 0) + '|' + mat.blending +
       '|' + (mat.transparent ? 1 : 0) + '|' + mat.side + '|' + (mat.vertexColors ? 1 : 0) +
-      '|' + (mat.flatShading ? 1 : 0) + '|' + (mat.depthWrite ? 1 : 0) + '|' + (mat.depthTest ? 1 : 0);
+      '|' + (mat.flatShading ? 1 : 0) + '|' + (mat.depthWrite ? 1 : 0) + '|' + (mat.depthTest ? 1 : 0)
+      // (v38.97) the map slots fork the program too (USE_MAP, USE_NORMALMAP, ...): without them a
+      // textured hull material and a bare cockpit panel shared one signature and only one of the
+      // two programs stayed resident. Ship and obstacle materials now come through here as well.
+      + '|' + ['map', 'normalMap', 'emissiveMap', 'alphaMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'envMap']
+        .map((k) => (mat[k] ? 1 : 0)).join('') + '|' + (mat.alphaTest > 0 ? 1 : 0)
+      // (v38.97) ...and so does the custom program key: the player's hull materials carry the
+      // ghost-hull injection (customProgramCacheKey 'ghostHull'), skins carry theirs. Without this
+      // they collided with the bots' plain variants, were disposed as "duplicates", and every
+      // player rebuild (round start / respawn) relinked 7 programs cold - a 2.3 s frame on the pane,
+      // blamed on player+weapons by the profiler.
+      + '|' + (typeof mat.customProgramCacheKey === 'function' ? String(mat.customProgramCacheKey()).slice(0, 48) : '');
     if (window._fxRetain[sig]) { if (mat.dispose) mat.dispose(); }
     else { window._fxRetain[sig] = mat; }
   } catch (_) { try { if (mat.dispose) mat.dispose(); } catch (__) {} }

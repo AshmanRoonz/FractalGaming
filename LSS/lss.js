@@ -9,12 +9,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '38.95';
+const LSS_BUILD = '38.97';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '38.95';   // (v38.95) Pyro/Slayer cockpit1 forward again (-0.30/-0.29) ; c1seat hulls, cockpit1 placed by the owner   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '38.96';   // (v38.96) lean mobile set ; c1seat hulls, cockpit1 placed by the owner   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -26519,6 +26519,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
   });
   group.add(model);
   group.userData.hullMats = hullMats;
+  group.userData._poolKey = loadoutKey + '|' + teamColor + '|' + (skinId || '');
   const _muzzleNodes = [];
   model.traverse(n => { if (/^gun\d+$/i.test(n.name || '')) _muzzleNodes.push(n); });
   _muzzleNodes.sort((a, b) => (a.name < b.name ? -1 : (a.name > b.name ? 1 : 0)));
@@ -26671,10 +26672,33 @@ function _disposeShipGroup(group) {
       }
       const mats = Array.isArray(o.material) ? o.material : [o.material];
       for (const m of mats) {
-        if (m && m.dispose) { try { m.dispose(); } catch (_) {} }
+        if (m && m.dispose) { try { if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else m.dispose(); } catch (_) {} }
       }
     });
   } catch (_) {}
+}
+
+const _botShipPool = new Map();
+const _BOT_SHIP_POOL_MAX = 4;   // per key ; beyond it the group is disposed as before
+function _botShipPoolPut(bot) {
+  const g = bot && bot.mesh;
+  const key = g && g.userData && g.userData._poolKey;
+  if (!key || g.userData.isProceduralFallback) return false;
+  const list = _botShipPool.get(key) || [];
+  if (list.length >= _BOT_SHIP_POOL_MAX) return false;
+  try { if (g.parent) g.parent.remove(g); } catch (_) {}
+  g.userData.bot = null;
+  list.push(g); _botShipPool.set(key, list);
+  return true;
+}
+function _botShipPoolTake(key) {
+  const list = _botShipPool.get(key);
+  if (!list || !list.length) return null;
+  const g = list.pop();
+  g.visible = true;
+  g.userData._dimAmount = undefined;
+  try { if (g.userData.hullMats) for (const hm of g.userData.hullMats) _dimHullMat(hm, 1.0); } catch (_) {}
+  return g;
 }
 
 function swapToModelMeshWhenReady(owner, teamColor) {
@@ -27143,7 +27167,8 @@ class Bot {
 
     const teamColor = team === LSS.TEAM_FLEET_A ? 0xff4444 : 0x44bb44;
     const _meshKey = hoardModelKey || loadoutKey;
-    this.mesh = createShipMesh(chassisData, teamColor, _meshKey);
+    this.mesh = (typeof _botShipPoolTake === 'function' && _botShipPoolTake(_meshKey + '|' + teamColor + '|')) ||
+                createShipMesh(chassisData, teamColor, _meshKey);
     this.mesh.position.copy(this.position);
     this.mesh.userData.bot = this;
     scene.add(this.mesh);
@@ -28252,6 +28277,7 @@ class Bot {
   }
 
   destroy() {
+    if (typeof _botShipPoolPut === 'function' && _botShipPoolPut(this)) return;
     if (typeof _disposeShipGroup === 'function') _disposeShipGroup(this.mesh);
     else if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
   }
@@ -29257,32 +29283,32 @@ class Projectile {
     this.alive = false;
     if (this.mesh && this.mesh.parent) {
       scene.remove(this.mesh);
-      if (this.mesh.material) this.mesh.material.dispose();
+      if (this.mesh.material) _lssRetainMat(this.mesh.material);   // (v38.97) programs stay resident
     }
     if (this.trail && this.trail.parent) {
       scene.remove(this.trail);
       if (this.trail.geometry) this.trail.geometry.dispose();
-      if (this.trail.material) this.trail.material.dispose();
+      if (this.trail.material) _lssRetainMat(this.trail.material);
     }
     if (this.glowMesh && this.glowMesh.parent) {
       scene.remove(this.glowMesh);
-      this.glowMesh.material.dispose();
+      _lssRetainMat(this.glowMesh.material);
     }
     if (this.hazeMesh && this.hazeMesh.parent) {
       scene.remove(this.hazeMesh);
-      this.hazeMesh.material.dispose();
+      _lssRetainMat(this.hazeMesh.material);
     }
     if (this.smokeCone && this.smokeCone.parent) {
       scene.remove(this.smokeCone);
       if (this.smokeCone.material && this.smokeCone.material.dispose) {
-        try { this.smokeCone.material.dispose(); } catch (_) {}
+        try { _lssRetainMat(this.smokeCone.material); } catch (_) {}
       }
       this.smokeCone = null;
     }
     if (this.trailRibbon && this.trailRibbon.parent) {
       scene.remove(this.trailRibbon);
       if (this.trailRibbon.geometry) this.trailRibbon.geometry.dispose();
-      if (this.trailRibbon.material) this.trailRibbon.material.dispose();
+      if (this.trailRibbon.material) _lssRetainMat(this.trailRibbon.material);
     }
     let _exPos = this.position;
     let _exSize = this.isPyroThermite ? 22 : 15;
@@ -30473,9 +30499,7 @@ async function _warmupCombatShadersBody() {
             const mats = Array.isArray(child.material) ? child.material : [child.material];
             for (const m of mats) {
               if (!m) continue;
-              m.map = null; m.normalMap = null; m.emissiveMap = null;
-              m.roughnessMap = null; m.metalnessMap = null; m.aoMap = null;
-              try { m.dispose(); _warmupMaterialCount++; } catch (_) {}
+              try { _lssRetainMat(m); _warmupMaterialCount++; } catch (_) {}
             }
             if (child.geometry && child.userData && child.userData.procedural) {
               try { child.geometry.dispose(); } catch (_) {}
@@ -32384,7 +32408,7 @@ class ClusterObstacle {
       if (child.mesh) {
         try {
           if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
-          if (child.mesh.material && child.mesh.material.dispose) child.mesh.material.dispose();
+          if (child.mesh.material && child.mesh.material.dispose) _lssRetainMat(child.mesh.material);   // (v38.97) keep the program resident
         } catch (_) {}
         const _rockSeed = Math.random() * 1000;
         child._rockSeed = _rockSeed;
@@ -32394,7 +32418,7 @@ class ClusterObstacle {
         if (child.edgeMesh) {
           if (child.edgeMesh.parent) scene.remove(child.edgeMesh);
           if (child.edgeMesh.geometry && child.edgeMesh.geometry.dispose) child.edgeMesh.geometry.dispose();
-          if (child.edgeMesh.material && child.edgeMesh.material.dispose) child.edgeMesh.material.dispose();
+          if (child.edgeMesh.material && child.edgeMesh.material.dispose) _lssRetainMat(child.edgeMesh.material);   // (v38.97)
           child.edgeMesh = null;
         }
       }
@@ -32418,7 +32442,7 @@ class ClusterObstacle {
       if (child.mesh) {
         try {
           if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
-          if (child.mesh.material && child.mesh.material.dispose) child.mesh.material.dispose();
+          if (child.mesh.material && child.mesh.material.dispose) _lssRetainMat(child.mesh.material);   // (v38.97) keep the program resident
         } catch (_) {}
         const _rockSeed = (cc.seed != null) ? cc.seed : Math.random() * 1000;
         child._rockSeed = _rockSeed;
@@ -32428,7 +32452,7 @@ class ClusterObstacle {
         if (child.edgeMesh) {
           if (child.edgeMesh.parent) scene.remove(child.edgeMesh);
           if (child.edgeMesh.geometry && child.edgeMesh.geometry.dispose) child.edgeMesh.geometry.dispose();
-          if (child.edgeMesh.material && child.edgeMesh.material.dispose) child.edgeMesh.material.dispose();
+          if (child.edgeMesh.material && child.edgeMesh.material.dispose) _lssRetainMat(child.edgeMesh.material);   // (v38.97)
           child.edgeMesh = null;
         }
       }
@@ -33400,10 +33424,10 @@ function _disposeVRRockMesh(mesh) {
   const mat = mesh.material;
   if (Array.isArray(mat)) {
     for (const m of mat) {
-      if (m && m.dispose) { try { m.dispose(); } catch (_) {} }
+      if (m && m.dispose) { try { _lssRetainMat(m); } catch (_) {} }
     }
   } else if (mat && mat.dispose) {
-    try { mat.dispose(); } catch (_) {}
+    try { _lssRetainMat(mat); } catch (_) {}
   }
 }
 
@@ -38351,11 +38375,29 @@ function _lssRetainMat(mat) {
   if (!mat) return;
   if (Array.isArray(mat)) { for (const m of mat) _lssRetainMat(m); return; }
   try {
+    if (typeof renderer !== 'undefined' && renderer && renderer.properties) {
+      const mp = renderer.properties.get(mat);
+      const progs = mp && mp.programs;
+      if (progs && progs.size) {
+        if (!window._fxRetainKeys) window._fxRetainKeys = new Map();
+        let held = false;
+        for (const key of progs.keys()) {
+          if (!window._fxRetainKeys.has(key)) { window._fxRetainKeys.set(key, mat); held = true; }
+        }
+        if (!held && mat.dispose) mat.dispose();
+        return;
+      }
+    }
+  } catch (_) {}
+  try {
     if (!window._fxRetain) window._fxRetain = {};
     const sig = (mat.type || 'M') + '|' + (mat.vertexShader ? mat.vertexShader.length : 0) +
       '|' + (mat.fragmentShader ? mat.fragmentShader.length : 0) + '|' + mat.blending +
       '|' + (mat.transparent ? 1 : 0) + '|' + mat.side + '|' + (mat.vertexColors ? 1 : 0) +
-      '|' + (mat.flatShading ? 1 : 0) + '|' + (mat.depthWrite ? 1 : 0) + '|' + (mat.depthTest ? 1 : 0);
+      '|' + (mat.flatShading ? 1 : 0) + '|' + (mat.depthWrite ? 1 : 0) + '|' + (mat.depthTest ? 1 : 0)
+      + '|' + ['map', 'normalMap', 'emissiveMap', 'alphaMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'envMap']
+        .map((k) => (mat[k] ? 1 : 0)).join('') + '|' + (mat.alphaTest > 0 ? 1 : 0)
+      + '|' + (typeof mat.customProgramCacheKey === 'function' ? String(mat.customProgramCacheKey()).slice(0, 48) : '');
     if (window._fxRetain[sig]) { if (mat.dispose) mat.dispose(); }
     else { window._fxRetain[sig] = mat; }
   } catch (_) { try { if (mat.dispose) mat.dispose(); } catch (__) {} }
