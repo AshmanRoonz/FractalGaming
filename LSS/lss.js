@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.02';
+const LSS_BUILD = '39.03';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -12402,7 +12402,10 @@ function getVRPerfTier() {
 
 function getVRBudgetTier() {
   if (!isStandaloneQuest() && !isXRPresenting()) {
-    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) {
+    let _mob = false;
+    try { _mob = (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) &&
+                 !!(typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(pointer: coarse)').matches); } catch (_) { _mob = false; }
+    if (_mob) {
       const _o = (typeof window !== 'undefined') ? window.__phoneBudgetTier : undefined;
       return (typeof _o === 'number') ? _o : 1;
     }
@@ -40225,7 +40228,7 @@ function releaseAbilityOverlayPrime(loadoutKey, abilityName) {
 
 function _fxSmallDevice() {
   try {
-    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return true;
+    if (_LSS_IS_MOBILE) return true;
     if (typeof isXRPresenting === 'function' && isXRPresenting()) return true;
   } catch (_) {}
   return false;
