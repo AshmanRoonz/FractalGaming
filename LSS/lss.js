@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.43';
+const LSS_BUILD = '39.46';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -30660,10 +30660,15 @@ async function _warmupCombatShadersBody() {
     matRefs.push(stdMat);
     group.add(new THREE.Mesh(stdGeo, stdMat));
 
+    try {
+      if (!_liteWarm && shipModelCache && shipModelCache.ready &&
+          typeof shipModelCache.ready.then === 'function') await shipModelCache.ready;
+    } catch (_) {}
     const shipWarmupMeshes = [];
     try {
       const loadedKeys = (typeof shipModelCache !== 'undefined' && shipModelCache.loaded)
         ? Object.keys(shipModelCache.loaded) : [];
+      try { window.__ghostKeys = loadedKeys.length; } catch (_) {}
       if (loadedKeys.length > 0 && typeof LOADOUTS !== 'undefined' && typeof CHASSIS !== 'undefined' && typeof createShipMesh === 'function') {
         const teamColors = [0xff4444, 0x44bb44];  
         for (const key of (_liteWarm ? [] : loadedKeys)) {
@@ -30949,6 +30954,12 @@ async function _warmupCombatShadersBody() {
 
     scene.remove(group);
     try { if (_modelWarm && _modelWarm.parent) _modelWarm.parent.remove(_modelWarm); } catch (_) {}
+    try {
+      let _ckWarm = 0;
+      for (const shipMesh of shipWarmupMeshes) _ckWarm += (_warmCloakForRoot(shipMesh) || 0);
+      try { window.__ghostWarm = { warm: _ckWarm, hulls: shipWarmupMeshes.length }; } catch (_) {}
+      console.log('[cloak] ghost fleet: pre-warmed ' + _ckWarm + ' transparent hull program(s) across ' + shipWarmupMeshes.length + ' hulls');
+    } catch (e) { console.warn('[cloak] ghost-fleet pre-warm failed:', e); }
     for (const shipMesh of shipWarmupMeshes) {
       try {
         shipMesh.traverse(child => {
@@ -37575,6 +37586,44 @@ async function _prebakeWorldForLaunch() {
     game._worldPrebaking = false;
     rep.totalMs = Math.round(_pbNow() - t0);
     _PREBAKE.last = rep;
+    try {
+      window.__warmProgKeys = new Set();
+      const _pl = renderer.info && renderer.info.programs;
+      if (_pl) for (const _p of _pl) { try { window.__warmProgKeys.add(_p.cacheKey); } catch (_) {} }
+      window.__coldProgs = function () {
+        const out = [];
+        const list = (renderer.info && renderer.info.programs) || [];
+        for (const p of list) {
+          try { if (!window.__warmProgKeys.has(p.cacheKey)) out.push(p.name || '(unnamed)'); } catch (_) {}
+        }
+        const tally = {};
+        out.forEach((n) => { tally[n] = (tally[n] || 0) + 1; });
+        return { count: out.length, byName: tally };
+      };
+      window.__coldSeen = [];
+      const _coldT0 = performance.now();
+      const _coldTimer = setInterval(function () {
+        try {
+          if (performance.now() - _coldT0 > 300000) { clearInterval(_coldTimer); return; }
+          const list = (renderer.info && renderer.info.programs) || [];
+          for (const p of list) {
+            if (window.__warmProgKeys.has(p.cacheKey)) continue;
+            window.__warmProgKeys.add(p.cacheKey);   // report each key once
+            const _t = Math.round((performance.now() - _coldT0) / 100) / 10;
+            window.__coldSeen.push({ t: _t, name: p.name || '(unnamed)' });
+            console.warn('[cold] +' + _t + 's  ' + (p.name || '(unnamed)') +
+              '   (total ' + window.__coldSeen.length + ')');
+          }
+          const _ce = document.getElementById('lss-coldhud');
+          if (_ce) {
+            const _tal = {};
+            window.__coldSeen.forEach((c) => { _tal[c.name] = (_tal[c.name] || 0) + 1; });
+            _ce.textContent = 'cold ' + window.__coldSeen.length + ': ' +
+              Object.keys(_tal).map((k) => k + ' x' + _tal[k]).join(', ');
+          }
+        } catch (_) {}
+      }, 1000);
+    } catch (_) {}
     const _pbLine = '[prebake] ' + rep.mode + '/' + rep.map + ' ' + rep.totalMs + 'ms' +
       ' chunks ' + rep.ch0 + '->' + rep.ch1 + ' trees ' + rep.tb0 + '->' + rep.tb1 +
       ' passes=' + rep.passes + ' gpu=' + rep.gpuPasses +
@@ -37593,6 +37642,17 @@ async function _prebakeWorldForLaunch() {
             'white-space:pre-wrap;word-break:break-word;pointer-events:none;';
           document.body.appendChild(_el);
         }
+        if (!document.getElementById('lss-coldhud')) {
+          const _ce = document.createElement('div');
+          _ce.id = 'lss-coldhud';
+          _ce.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99999;max-width:92vw;' +
+            'transform:translateY(-108px);' +
+            'font:11px/1.45 Courier New,monospace;color:#ffd9a8;background:rgba(24,8,2,0.86);' +
+            'border:1px solid rgba(255,170,90,0.4);border-radius:6px;padding:7px 10px;' +
+            'white-space:pre-wrap;word-break:break-word;pointer-events:none;';
+          _ce.textContent = 'cold 0';
+          document.body.appendChild(_ce);
+        }
         const _gl2 = renderer.getContext();
         const _ext = _gl2.getExtension('KHR_parallel_shader_compile');
         const _dbg = _gl2.getExtension('WEBGL_debug_renderer_info');
@@ -37604,6 +37664,9 @@ async function _prebakeWorldForLaunch() {
           ' (' + ((_cv.width * _cv.height) / 1e6).toFixed(2) + ' MP)' +
           ' | css ' + window.innerWidth + 'x' + window.innerHeight +
           '\nprograms ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
+          ' | warmed ' + ((window.__warmProgKeys && window.__warmProgKeys.size) || 0) +
+          ' | ghost ' + ((window.__ghostWarm && window.__ghostWarm.hulls) || 0) + 'h/' +
+          ((window.__ghostWarm && window.__ghostWarm.warm) || 0) + 'p' +
           ' | parallelCompile ' + (_ext ? 'yes' : 'NO') +
           '\n' + (_dbg ? String(_gl2.getParameter(_dbg.UNMASKED_RENDERER_WEBGL)).slice(0, 90) : 'renderer ?');
       }
@@ -42324,12 +42387,9 @@ function _setShipMeshOpacity(root, opacity) {
   });
 }
 
-let _cloakWarmed = false;
-function _warmCloakVariantOnce() {
-  if (_cloakWarmed) return;
-  const root = (typeof player !== 'undefined' && player) ? (player.mesh || player.shipMesh) : null;
-  if (!root || typeof root.traverse !== 'function') return;   // try again next frame
-  _cloakWarmed = true;
+function _warmCloakForRoot(root) {
+  if (!root || typeof root.traverse !== 'function') return 0;
+  if (root.userData) root.userData._cloakWarmed = true;
   try {
     const op = (typeof PILOT_PERKS !== 'undefined' && PILOT_PERKS && PILOT_PERKS.cloak &&
                 typeof PILOT_PERKS.cloak.cloakOpacity === 'number') ? PILOT_PERKS.cloak.cloakOpacity : 0.01;
@@ -42356,10 +42416,28 @@ function _warmCloakVariantOnce() {
       try { renderer.compile(root, camera, scene); } catch (_) {}
       for (const s of swaps) s.child.material = s.orig;        // restore FIRST
       for (const c of clonesAll) { try { _lssRetainMat(c); } catch (_) {} }
-      try { window.__cloakWarm = clonesAll.length; } catch (_) {}
-      console.log('[cloak] pre-warmed ' + clonesAll.length + ' transparent hull program(s)');
+      try { window.__cloakWarm = (window.__cloakWarm || 0) + clonesAll.length; } catch (_) {}
+      return clonesAll.length;
     }
   } catch (e) { console.warn('[cloak] pre-warm failed:', e); }
+  return 0;
+}
+
+function _warmCloakVariantOnce() {
+  let root = null;
+  try {
+    const p = (typeof player !== 'undefined' && player) ? (player.mesh || player.shipMesh) : null;
+    if (p && p.userData && !p.userData._cloakWarmed && typeof p.traverse === 'function') root = p;
+    if (!root && typeof game !== 'undefined' && game && Array.isArray(game.entities)) {
+      for (const bot of game.entities) {
+        const m = bot && (bot.mesh || bot.shipMesh);
+        if (m && m.userData && !m.userData._cloakWarmed && typeof m.traverse === 'function') { root = m; break; }
+      }
+    }
+  } catch (_) {}
+  if (!root) return;                     // nothing left to warm, or nothing built yet
+  const n = _warmCloakForRoot(root);
+  if (n) console.log('[cloak] pre-warmed ' + n + ' transparent hull program(s)');
 }
 
 function _setPlayerShipOpacity(opacity) {

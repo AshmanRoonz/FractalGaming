@@ -1384,3 +1384,46 @@ Callable from the browser console. This is a representative set — there are **
 ---
 
 *Generated from a full three-band read of `index.html` (v34.62). Line numbers are approximate hints — jump by anchor. Update entries when subsystems move; keep it coarse.*
+
+## v39.46 — the ghost fleet was a RACE, and losing it cost every hull's shaders
+
+`warmupCombatShaders` builds a GHOST FLEET (7 loadouts x 2 team colours = 14 hulls) offscreen so
+`renderer.compile()` links every ship program before combat. It reads `shipModelCache.loaded` —
+which `preloadShipModels()` fills ASYNCHRONOUSLY — and **nothing waited for it**. If the GLBs had
+not landed yet, `loadedKeys` was `[]`, the whole fleet was skipped in silence, and not one hull
+program got pre-compiled. On ANGLE every ship that then appeared in the match paid a synchronous
+GLSL->HLSL D3DCompile on the frame that first drew it.
+
+Measured both outcomes on the SAME build minutes apart (`window.__coldSeen`, below):
+
+| HTTP cache | ghost fleet | cold programs in combat |
+|---|---|---|
+| warm | 14 hulls / 270 mats | 0 |
+| cold | **0 hulls** | **28** (incl. `Blaster_CP_Graphite`, a bot hull, mid-fight) |
+
+Fix: `await shipModelCache.ready` before building the fleet — free when the models are already in,
+and gated on `!_liteWarm` because small devices build no fleet and must not pay the wait.
+Verified by forcing every GLB to an uncacheable URL: 14 hulls, 196 transparent programs, 0 cold.
+
+This is the answer to "so many hitches" in a Chrome incognito window (empty cache = always loses
+the race), why the same build felt different in every browser, and why cold-cache sessions hitched
+where warm ones did not. It was never browser-specific — it was load-order luck.
+
+## v39.46 — cloak pre-warm moved onto the ghost fleet
+
+`transparent` is in three's program cache key, so the opaque->transparent flip on cloak forks a new
+program per hull material. v39.40 pre-warmed only the PLAYER's hull, once per session; bots cloak
+too, each hull is a separate material instance, and a bot can spawn in any of the seven at any time
+— so `Puncture_CP_ScreenGlass` was caught linking at t=100 s of a match flown in a Vortex.
+Now `_warmCloakForRoot(root)` runs over the ghost fleet during warmup (the only moment all seven
+hulls coexist): **196 transparent programs, on the loading screen**. `_warmCloakVariantOnce()` still
+runs live, one group per frame, but is now a cache hit rather than a compile.
+
+## v39.44-46 — the cold-program watcher (`window.__coldSeen`, `?pbhud`)
+
+The prebake snapshots every linked program's `cacheKey` into `window.__warmProgKeys`. A 1 Hz poll
+(5 min, then it stops) diffs `renderer.info.programs` against it and `console.warn`s each newcomer
+by name with its timestamp — **every cold link IS a hitch on ANGLE**, so this turns "lots of
+hitches" into a named list. `?pbhud` shows a running tally box plus `ghost <hulls>h/<progs>p`.
+`window.__coldProgs()` returns the same diff on demand. A healthy session reads **cold 0**.
+
