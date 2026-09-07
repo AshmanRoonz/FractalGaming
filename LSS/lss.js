@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.30';
+const LSS_BUILD = '39.31';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -37571,11 +37571,33 @@ async function _prebakeWorldForLaunch() {
     game._worldPrebaking = false;
     rep.totalMs = Math.round(_pbNow() - t0);
     _PREBAKE.last = rep;
-    console.log('[prebake] ' + rep.mode + '/' + rep.map + ' ' + rep.totalMs + 'ms' +
+    const _pbLine = '[prebake] ' + rep.mode + '/' + rep.map + ' ' + rep.totalMs + 'ms' +
       ' chunks ' + rep.ch0 + '->' + rep.ch1 + ' trees ' + rep.tb0 + '->' + rep.tb1 +
       ' passes=' + rep.passes + ' gpu=' + rep.gpuPasses +
       ' [' + Object.keys(rep.ms).map(k => k + ' ' + rep.ms[k]).join(', ') + ']' +
-      (rep.capped ? ' CAPPED:' + rep.capped : ''));
+      (rep.capped ? ' CAPPED:' + rep.capped : '');
+    console.log(_pbLine);
+    try {
+      if (/[?&]pbhud/i.test(location.search || '')) {
+        let _el = document.getElementById('lss-pbhud');
+        if (!_el) {
+          _el = document.createElement('div');
+          _el.id = 'lss-pbhud';
+          _el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:99998;max-width:92vw;' +
+            'font:11px/1.45 Courier New,monospace;color:#cfe7ff;background:rgba(2,4,12,0.86);' +
+            'border:1px solid rgba(120,180,255,0.35);border-radius:6px;padding:7px 10px;' +
+            'white-space:pre-wrap;word-break:break-word;pointer-events:none;';
+          document.body.appendChild(_el);
+        }
+        const _gl2 = renderer.getContext();
+        const _ext = _gl2.getExtension('KHR_parallel_shader_compile');
+        const _dbg = _gl2.getExtension('WEBGL_debug_renderer_info');
+        _el.textContent = _pbLine +
+          '\nprograms ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
+          ' | parallelCompile ' + (_ext ? 'yes' : 'NO') +
+          '\n' + (_dbg ? String(_gl2.getParameter(_dbg.UNMASKED_RENDERER_WEBGL)).slice(0, 90) : 'renderer ?');
+      }
+    } catch (_) {}
   }
   return rep;
 }
