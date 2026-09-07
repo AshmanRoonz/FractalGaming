@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.34';
+const LSS_BUILD = '39.35';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -37644,9 +37644,9 @@ async function _prebakeGpuPrime() {
         if (rt) renderer.setRenderTarget(rt);
         renderer.render(scene, camera);
         passes++;
+        if (rt) renderer.setRenderTarget(null);
+        await _warmupYield();
       }
-      if (rt) renderer.setRenderTarget(null);
-      await _warmupYield();                     // let the driver flush each ring
     }
   } catch (err) {
     console.warn('[prebake] gpu prime pass failed:', err);
