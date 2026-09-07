@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.31';
+const LSS_BUILD = '39.32';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -37596,6 +37596,13 @@ async function _prebakeWorldForLaunch() {
           '\nprograms ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
           ' | parallelCompile ' + (_ext ? 'yes' : 'NO') +
           '\n' + (_dbg ? String(_gl2.getParameter(_dbg.UNMASKED_RENDERER_WEBGL)).slice(0, 90) : 'renderer ?');
+      }
+    } catch (_) {}
+    try {
+      if (!(typeof window !== 'undefined' && window.__shaderErrChecks) &&
+          renderer && renderer.debug && renderer.debug.checkShaderErrors) {
+        renderer.debug.checkShaderErrors = false;
+        console.log('[prebake] shader error checks OFF (they force a sync wait on ANGLE)');
       }
     } catch (_) {}
   }

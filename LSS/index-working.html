@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.31';
+const LSS_BUILD = '39.32';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -54215,6 +54215,33 @@ async function _prebakeWorldForLaunch() {
           '\nprograms ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
           ' | parallelCompile ' + (_ext ? 'yes' : 'NO') +
           '\n' + (_dbg ? String(_gl2.getParameter(_dbg.UNMASKED_RENDERER_WEBGL)).slice(0, 90) : 'renderer ?');
+      }
+    } catch (_) {}
+    // (v39.32) STOP THREE FROM SYNCHRONOUSLY JOINING EVERY ANGLE COMPILE.
+    // Owner: Firefox is smooth (144 fps, 80 fps floor in heavy combat) but Chrome hitches at the
+    // start of combat on identical code, and clearing browsing data changed nothing — correct,
+    // because Chrome's GPU shader cache is a separate store from history/cache.
+    // Their Chrome console gave it away:
+    //     [prebake] ... gpu 1618, drain 7
+    //     THREE.WebGLProgram: Program Info Log: (188,1): warning X4000: use of potentially
+    //     uninitialized variable (f_samplePatternLFX_int)          <-- repeatedly
+    // X4000 is a D3DCompiler (HLSL) warning, so three is calling getProgramInfoLog() — and on
+    // ANGLE, reading a program's INFO LOG or LINK_STATUS BLOCKS until the D3D compile finishes.
+    // That is `renderer.debug.checkShaderErrors`, which three.js defaults to TRUE and which this
+    // codebase never set. It defeats KHR_parallel_shader_compile completely: the drain reports 7
+    // ms because the parallel machinery is fine, and then every program's FIRST USE in combat
+    // serially joins its own HLSL compile. Firefox's WebGL path makes that check far cheaper,
+    // which is exactly why one browser hitches and the other does not.
+    // Left ON for boot and the whole prebake — real GLSL errors still surface (this game builds
+    // shaders from template literals; the X4000 above is a genuine, if harmless, find) and the
+    // blocking happens behind the loading screen where it belongs. Turned off from here, so
+    // programs created mid-match never stall the frame that first draws them.
+    // window.__shaderErrChecks = true keeps them on for shader work.
+    try {
+      if (!(typeof window !== 'undefined' && window.__shaderErrChecks) &&
+          renderer && renderer.debug && renderer.debug.checkShaderErrors) {
+        renderer.debug.checkShaderErrors = false;
+        console.log('[prebake] shader error checks OFF (they force a sync wait on ANGLE)');
       }
     } catch (_) {}
   }
