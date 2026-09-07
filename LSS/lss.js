@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.27';
+const LSS_BUILD = '39.28';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -26294,6 +26294,51 @@ function _lssPickerOwnsFrame() {
     return !!(sel && sel.classList.contains('active') && !sel.classList.contains('lss-launching'))
            && !(renderer && renderer.xr && renderer.xr.isPresenting);
   } catch (_) { return false; }
+}
+
+const _DYNRES = { scale: 1, lastChange: 0, acc: 0, n: 0, winStart: 0, good: 0, base: null };
+try { if (typeof window !== 'undefined') window.__dynResState = _DYNRES; } catch (_) {}
+function _lssDynResBase() {
+  try {
+    if (QUALITY.isPotato()) return 0.75;
+    if (QUALITY.isMega())   return Math.min(window.devicePixelRatio * 2.5, 3.0);
+    if (QUALITY.isUltra())  return Math.min(window.devicePixelRatio * 1.75, 2.6);
+    const rs = (QUALITY.level === 'low') ? 0.65 : (QUALITY.level === 'medium') ? 0.85 : 1.0;
+    let mob = false; try { mob = !!_LSS_IS_MOBILE; } catch (_) {}
+    return Math.min(window.devicePixelRatio, mob ? 1.5 : 2) * rs;
+  } catch (_) { return 1; }
+}
+function _lssDynResTick(now) {
+  const K = (typeof window !== 'undefined' && window.__dynRes) ? window.__dynRes : null;
+  if (K && K.on === false) return;
+  let small = false;
+  try { small = (typeof _fxSmallDevice === 'function') && _fxSmallDevice(); } catch (_) {}
+  if (!small && !(K && K.on === true)) return;
+  if (!game || game.state !== 'playing') { _DYNRES.n = 0; _DYNRES.acc = 0; _DYNRES.winStart = now; return; }
+  if (!_DYNRES.winStart) { _DYNRES.winStart = now; _DYNRES.last = now; return; }
+  const dt = now - (_DYNRES.last || now);
+  _DYNRES.last = now;
+  if (dt > 0 && dt < 500) { _DYNRES.acc += dt; _DYNRES.n++; }
+  if (now - _DYNRES.winStart < 1500) return;
+  const avg = _DYNRES.n ? _DYNRES.acc / _DYNRES.n : 0;
+  _DYNRES.acc = 0; _DYNRES.n = 0; _DYNRES.winStart = now;
+  _DYNRES.avgMs = +avg.toFixed(1);
+  if (!avg) return;
+  const target = (K && K.target) || 33;      // 30 fps
+  const floor  = (K && K.min) || 0.5;
+  if (now - _DYNRES.lastChange < 2000) return;
+  let next = _DYNRES.scale;
+  if (avg > target * 1.10 && _DYNRES.scale > floor) { next = Math.max(floor, _DYNRES.scale - 0.12); _DYNRES.good = 0; }
+  else if (avg < target * 0.72 && _DYNRES.scale < 1) { _DYNRES.good++; if (_DYNRES.good >= 2) { next = Math.min(1, _DYNRES.scale + 0.06); _DYNRES.good = 0; } }
+  else _DYNRES.good = 0;
+  if (Math.abs(next - _DYNRES.scale) < 0.001) return;
+  _DYNRES.scale = next;
+  _DYNRES.lastChange = now;
+  try {
+    renderer.setPixelRatio(_lssDynResBase() * next);
+    if (typeof _doPostFXResize === 'function') _doPostFXResize();
+    console.log('[dynres] frame ' + avg.toFixed(1) + 'ms -> render scale ' + next.toFixed(2));
+  } catch (_) {}
 }
 
 function startShipPreviewLoop() {
@@ -63289,6 +63334,7 @@ function gameLoop(timestamp) {
     return;
   }
 
+  _lssDynResTick(timestamp);
   __pmark('music+reactive'); 
   let _rfCovered = false;
   try {

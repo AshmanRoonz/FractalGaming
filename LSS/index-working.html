@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.27';
+const LSS_BUILD = '39.28';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -39049,6 +39049,58 @@ function _lssPickerOwnsFrame() {
     return !!(sel && sel.classList.contains('active') && !sel.classList.contains('lss-launching'))
            && !(renderer && renderer.xr && renderer.xr.isPresenting);
   } catch (_) { return false; }
+}
+
+// (v39.28) --- ADAPTIVE RESOLUTION (see the call site in gameLoop for why) ---
+const _DYNRES = { scale: 1, lastChange: 0, acc: 0, n: 0, winStart: 0, good: 0, base: null };
+try { if (typeof window !== 'undefined') window.__dynResState = _DYNRES; } catch (_) {}
+// The pixel-ratio cap the CURRENT quality tier would use, without the adaptive multiplier.
+// Mirrors applyQualityPreset's branches — keep the two in step.
+function _lssDynResBase() {
+  try {
+    if (QUALITY.isPotato()) return 0.75;
+    if (QUALITY.isMega())   return Math.min(window.devicePixelRatio * 2.5, 3.0);
+    if (QUALITY.isUltra())  return Math.min(window.devicePixelRatio * 1.75, 2.6);
+    const rs = (QUALITY.level === 'low') ? 0.65 : (QUALITY.level === 'medium') ? 0.85 : 1.0;
+    let mob = false; try { mob = !!_LSS_IS_MOBILE; } catch (_) {}
+    return Math.min(window.devicePixelRatio, mob ? 1.5 : 2) * rs;
+  } catch (_) { return 1; }
+}
+function _lssDynResTick(now) {
+  const K = (typeof window !== 'undefined' && window.__dynRes) ? window.__dynRes : null;
+  if (K && K.on === false) return;
+  // Small devices only by default — this exists for phones, and a desktop that dips should not
+  // silently lose resolution. `window.__dynRes = { on: true }` opts a desktop in for testing.
+  let small = false;
+  try { small = (typeof _fxSmallDevice === 'function') && _fxSmallDevice(); } catch (_) {}
+  if (!small && !(K && K.on === true)) return;
+  if (!game || game.state !== 'playing') { _DYNRES.n = 0; _DYNRES.acc = 0; _DYNRES.winStart = now; return; }
+  if (!_DYNRES.winStart) { _DYNRES.winStart = now; _DYNRES.last = now; return; }
+  const dt = now - (_DYNRES.last || now);
+  _DYNRES.last = now;
+  if (dt > 0 && dt < 500) { _DYNRES.acc += dt; _DYNRES.n++; }
+  if (now - _DYNRES.winStart < 1500) return;
+  const avg = _DYNRES.n ? _DYNRES.acc / _DYNRES.n : 0;
+  _DYNRES.acc = 0; _DYNRES.n = 0; _DYNRES.winStart = now;
+  _DYNRES.avgMs = +avg.toFixed(1);
+  if (!avg) return;
+  const target = (K && K.target) || 33;      // 30 fps
+  const floor  = (K && K.min) || 0.5;
+  // Only act every 2 s so a change has a window to show its effect, and because each one
+  // reallocates the scene + bloom render targets.
+  if (now - _DYNRES.lastChange < 2000) return;
+  let next = _DYNRES.scale;
+  if (avg > target * 1.10 && _DYNRES.scale > floor) { next = Math.max(floor, _DYNRES.scale - 0.12); _DYNRES.good = 0; }
+  else if (avg < target * 0.72 && _DYNRES.scale < 1) { _DYNRES.good++; if (_DYNRES.good >= 2) { next = Math.min(1, _DYNRES.scale + 0.06); _DYNRES.good = 0; } }
+  else _DYNRES.good = 0;
+  if (Math.abs(next - _DYNRES.scale) < 0.001) return;
+  _DYNRES.scale = next;
+  _DYNRES.lastChange = now;
+  try {
+    renderer.setPixelRatio(_lssDynResBase() * next);
+    if (typeof _doPostFXResize === 'function') _doPostFXResize();
+    console.log('[dynres] frame ' + avg.toFixed(1) + 'ms -> render scale ' + next.toFixed(2));
+  } catch (_) {}
 }
 
 function startShipPreviewLoop() {
@@ -88444,6 +88496,21 @@ function gameLoop(timestamp) {
     return;
   }
 
+  // (v39.28) ADAPTIVE RESOLUTION. The owner's phone sits at ~12 fps in battle with crackling
+  // audio, and found the cause themselves: leaving fullscreen (a smaller canvas) "improved the
+  // fps quite a bit". So the device is FILL bound, and the crackle is the audio graph
+  // underrunning because frames blow their budget — one problem, not two.
+  // Measured with EXT_disjoint_timer_query_webgl2 in the pane: the scene pass is 4.9-6.3 ms of
+  // GPU at 1.0 MP on a desktop RTX card, and 55% of that is terrain (241 chunk meshes) with 28%
+  // more in 828 transparent FX meshes. A phone GPU is an order of magnitude slower per pixel, so
+  // ~0.5 MP lands around 30-90 ms/frame — exactly the 12 fps reported.
+  // Resolution is the one lever that scales ALL of that at once, and rather than guess another
+  // constant per device this measures the frame and settles wherever the device can hold the
+  // target. Steps are coarse and rate-limited because each change reallocates the scene and
+  // bloom render targets; hysteresis keeps it from oscillating.
+  // Console: window.__dynRes = { on:false } to disable, { min:0.5, target:33 } to retune,
+  // window.__dynResState to read where it settled.
+  _lssDynResTick(timestamp);
   __pmark('music+reactive'); 
   // (v39.20) THE PICKER IS AN OPAQUE COVER IN 'warmup' TOO. Between rounds game.state is
   // 'warmup' while #ship-select is up over #ship-select-bg — a full-screen canvas measured
