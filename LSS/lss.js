@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.35';
+const LSS_BUILD = '39.36';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -63157,7 +63157,12 @@ function gameLoop(timestamp) {
         else { try { _swHubLoadingOverlay(true); } catch (_) {} }
       } else if (game._swapStaging || game._rrStaging) {
       } else if (game.state === 'warmup' && !game._worldPrebaking) {
-        _swDrainStream(_fX, _fZ, 12, 64);
+        let _drainMs = 3;
+        try {
+          const _selEl = document.getElementById('ship-select');
+          if (_selEl && _selEl.classList.contains('active')) _drainMs = 12;
+        } catch (_) { _drainMs = 12; }
+        _swDrainStream(_fX, _fZ, _drainMs, 64);
       } else {
         updateSandwichStream(_fX, _fZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
       }
