@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.36';
+const LSS_BUILD = '39.37';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -60921,14 +60921,24 @@ function _setShipMeshOpacity(root, opacity) {
           m.userData._cloakOrigOpacity = (m.opacity != null) ? m.opacity : 1.0;
           m.userData._cloakOrigTransparent = !!m.transparent;
         }
-        if (opacity < 0.99) {
-          m.transparent = true;
-          m.opacity = m.userData._cloakOrigOpacity * opacity;
-        } else {
-          m.opacity = m.userData._cloakOrigOpacity;
-          m.transparent = m.userData._cloakOrigTransparent;
+        // (v39.37) needsUpdate ONLY WHEN `transparent` ACTUALLY FLIPS. Owner: "hitch on auto
+        // cloak". This runs every frame while cloaked, for every material on the hull — and the
+        // c1seat hulls carry 14 of them. `material.needsUpdate = true` bumps the material version
+        // and makes three re-evaluate the program on the next render, so doing it unconditionally
+        // was 14 program re-evaluations PER FRAME for the whole cloak. Worse, `transparent` is in
+        // three's program cache key, so the false->true flip forks a NEW program per material,
+        // and on ANGLE that first use is a synchronous D3D compile — the hitch itself.
+        // `opacity` is a plain uniform and has never needed a recompile; only the flip does. So
+        // set the opacity freely and touch needsUpdate only on a real transition: one fork on the
+        // first cloak (unavoidable without pre-warming the transparent variant), nothing after.
+        const _wantTransparent = (opacity < 0.99) ? true : !!m.userData._cloakOrigTransparent;
+        m.opacity = (opacity < 0.99)
+          ? m.userData._cloakOrigOpacity * opacity
+          : m.userData._cloakOrigOpacity;
+        if (m.transparent !== _wantTransparent) {
+          m.transparent = _wantTransparent;
+          m.needsUpdate = true;
         }
-        m.needsUpdate = true;
       }
     }
   });

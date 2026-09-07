@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.36';
+const LSS_BUILD = '39.37';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -42296,14 +42296,14 @@ function _setShipMeshOpacity(root, opacity) {
           m.userData._cloakOrigOpacity = (m.opacity != null) ? m.opacity : 1.0;
           m.userData._cloakOrigTransparent = !!m.transparent;
         }
-        if (opacity < 0.99) {
-          m.transparent = true;
-          m.opacity = m.userData._cloakOrigOpacity * opacity;
-        } else {
-          m.opacity = m.userData._cloakOrigOpacity;
-          m.transparent = m.userData._cloakOrigTransparent;
+        const _wantTransparent = (opacity < 0.99) ? true : !!m.userData._cloakOrigTransparent;
+        m.opacity = (opacity < 0.99)
+          ? m.userData._cloakOrigOpacity * opacity
+          : m.userData._cloakOrigOpacity;
+        if (m.transparent !== _wantTransparent) {
+          m.transparent = _wantTransparent;
+          m.needsUpdate = true;
         }
-        m.needsUpdate = true;
       }
     }
   });
