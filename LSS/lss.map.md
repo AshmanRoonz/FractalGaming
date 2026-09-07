@@ -1446,3 +1446,32 @@ counts down — that function was already moved ahead of the deathCam branch for
 bug (a bot's fire freezing on screen), so it is the one tick guaranteed to keep running. Any future
 branch that stops the charge tick can no longer strand the tubes.
 
+## v39.48 — Mega Tracker Rockets home on the SHIP, not the bearing
+
+`salvoGuided` lerped each missile's velocity toward `getPlayerAimForward()` — a **direction**, not a
+target. A missile abeam of you that steers onto a bearing flies PARALLEL to the crosshair and never
+converges, so a volley fired off-axis sailed past everything. Owner: "if i am not looking at a ship,
+the hoard of missiles will just go where i look and not hit a ship... but then i swing around and
+it follows".
+
+`_megaTrackerAimTarget()` resolves the aim to an actual entity (10 Hz cache, like the AI Assist
+picker) and the missiles steer at **its position, measured from the missile** — that is the whole
+difference between converging and running alongside. Picked by SMALLEST ANGLE TO THE AIM RAY, never
+by distance, so a ship dead ahead always beats a nearer one off to the side. Two cones: ~35 deg
+"pointing at it" (turn 8.0) and ~70 deg "near where I'm looking" (turn 5.0); outside both, the old
+bearing-steer is still the fallback. No LOS test — the player is aiming, and missiles fly around
+corners. Entities and monsters both, so leviathans are valid targets.
+
+A/B measured in the pane, both volleys fired 45 deg off a bot, same speed:
+
+| | bearing-only (old) | with acquisition (new) |
+|---|---|---|
+| distance to target | 578 -> **1059** (diverging) | 1292 -> **749** (converging) |
+| velocity alignment | 0.96 -> **0.29** | 0.31 -> **0.93** |
+| missiles alive | 39 -> 39 (nothing lands) | 38 -> **12** (consumed on impact) |
+
+Speed 525 -> **360** (owner asked -15%, flew it, asked slower again). ⚠ **Speed and lifetime move
+together**: `Projectile.lifetime` is 5 s, so cutting speed alone silently cuts the swarm's REACH by
+the same fraction. Lifetime goes to 6.5 s, holding 2340 u against the original 2625 u. Both live on
+`window.__mtr = { speed, life, tight, wide, turnTight, turnWide, range }` for tuning by feel.
+

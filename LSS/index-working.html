@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.47';
+const LSS_BUILD = '39.48';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -42977,14 +42977,35 @@ class Projectile {
       // Outside FOV: missile flies straight (can be outmaneuvered)
     }
 
-    // Mega Tracker Rockets remote guidance: missile steers toward player's crosshair aim point
+    // Mega Tracker Rockets remote guidance: the missile steers at the SHIP under the crosshair,
+    // and only falls back to the raw aim bearing when the crosshair is on empty space.
+    // (v39.48) Steering toward a bearing made a missile off to one side fly parallel to the
+    // crosshair forever — see _megaTrackerAimTarget. Homing on the target's position converges.
     if (this.salvoGuided) {
-      const aimDir = (typeof getPlayerAimForward === 'function' && this.owner === 'player')
-        ? getPlayerAimForward(_projAimDir)
-        : _projAimDir.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
       const speed = this.velocity.length();
-      // Aggressive turn rate (player has full control)
-      this.velocity.lerp(aimDir.multiplyScalar(speed), 6.0 * dt);
+      let steerDir = null, homing = false;
+      if (this.owner === 'player' && typeof _megaTrackerAimTarget === 'function') {
+        const tgt = _megaTrackerAimTarget();
+        if (tgt && tgt.position) {
+          // Aim at the target from THE MISSILE, not from the ship: that is the whole difference
+          // between converging and running alongside.
+          steerDir = _projAimDir.subVectors(tgt.position, this.position);
+          if (steerDir.lengthSq() < 1) steerDir = null; else { steerDir.normalize(); homing = true; }
+        }
+      }
+      if (!steerDir) {
+        steerDir = (typeof getPlayerAimForward === 'function' && this.owner === 'player')
+          ? getPlayerAimForward(_projAimDir)
+          : _projAimDir.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+      }
+      // Harder turn when there is a real target to converge on; the loose bearing-follow keeps
+      // its old rate so free-aim sweeps feel unchanged.
+      const K = window.__mtr || (window.__mtr = {});
+      const turn = homing
+        ? ((player._mtrAim && player._mtrAim.tight) ? ((K.turnTight != null) ? K.turnTight : 8.0)
+                                                   : ((K.turnWide != null) ? K.turnWide : 5.0))
+        : 6.0;
+      this.velocity.lerp(steerDir.multiplyScalar(speed), turn * dt);
       this.velocity.normalize().multiplyScalar(speed);
     }
 
@@ -64109,6 +64130,65 @@ function getPlayerAimForward(out) {
   return target.set(0, 0, -1).applyQuaternion(q).normalize();
 }
 
+// (v39.48) WHICH SHIP IS THE CROSSHAIR ON. Mega Tracker Rockets steered toward the player's aim
+// DIRECTION, which is not the same thing as a target: a missile abeam of you that lerps toward a
+// bearing ends up flying PARALLEL to your crosshair, never converging on the ship under it. That
+// is why the swarm sailed past anything not straight ahead. Owner: "better track toward whatever
+// ship i am pointing at". So resolve the aim to an actual entity and let the missiles home on its
+// position; with nothing under the crosshair the old bearing-steer is still the fallback.
+// Picked by SMALLEST ANGLE TO THE AIM RAY, not by distance — "what I am pointing at" is an
+// angular question, and a near miss off to one side must not steal a target dead ahead.
+// No LOS test on purpose: the player is aiming, missiles fly around corners, and the previous
+// behaviour had none either. Sampled at 10 Hz like the AI Assist picker; the swarm re-reads it
+// every frame, so swinging the crosshair onto a new ship pulls the whole volley with it.
+// Speed and reach live here so they can be dialled live: window.__mtr = { speed, life }.
+// 525 was the original. The owner asked for -15% (446), flew it, and asked for slower again.
+// ⚠ Speed and LIFETIME move together: a Projectile lives 5 s, so cutting speed alone quietly
+// cuts the swarm's reach by the same fraction, and losing a third of the core's range is not
+// what "move slower" asked for. 360 x 6.5 s = 2340 u, against the original 525 x 5 s = 2625 u.
+function _mtrSpeed() { const K = window.__mtr || (window.__mtr = {}); return (K.speed != null) ? K.speed : 360; }
+function _mtrLife()  { const K = window.__mtr || (window.__mtr = {}); return (K.life  != null) ? K.life  : 6.5; }
+const _mtrAimTmp = new THREE.Vector3();
+const _mtrAimFwd = new THREE.Vector3();
+function _megaTrackerAimTarget() {
+  if (typeof player === 'undefined' || !player || !player.position) return null;
+  const now = (typeof game !== 'undefined' && game.time) || 0;
+  const c = player._mtrAim || (player._mtrAim = { tgt: null, t: -1 });
+  if (now - c.t < 0.1) {
+    const t = c.tgt;
+    if (t && t.alive !== false && t.shipState !== 'dead' && t.position) return t;
+    return null;
+  }
+  c.t = now; c.tgt = null;
+  const fwd = getPlayerAimForward(_mtrAimFwd);
+  const K = window.__mtr || (window.__mtr = {});
+  const MAX_RANGE = (K.range != null) ? K.range : 6000;
+  // TWO CONES, and the wide one is the point. Owner: "if i am not looking at a ship, the hoard of
+  // missiles will just go where i look and not hit a ship". A core burst that lands on nothing
+  // because the crosshair drifted off a hull is a wasted ultimate, so anything inside the wide
+  // cone is fair game — the tight cone only decides WHO wins when several are in view. Both are
+  // angular, so a ship dead ahead always beats one off to the side no matter which is nearer.
+  const WIDE = (K.wide != null) ? K.wide : 0.34;    // ~70 degrees: "near where I am looking"
+  let best = null, bestDot = WIDE;
+  const consider = (e) => {
+    if (!e || e.alive === false || e.shipState === 'dead' || !e.position) return;
+    if (e === player) return;
+    if (e.team != null && player.team != null && e.team === player.team) return;
+    const to = _mtrAimTmp.subVectors(e.position, player.position);
+    const d = to.length();
+    if (d < 1 || d > MAX_RANGE) return;
+    const dot = to.multiplyScalar(1 / d).dot(fwd);
+    if (dot > bestDot) { bestDot = dot; best = e; }
+  };
+  try {
+    for (const e of (game.entities || [])) consider(e);
+    if (game.monsters) for (const m of game.monsters) consider(m);   // leviathans lock like ships
+  } catch (_) { return null; }
+  c.tgt = best;
+  c.tight = bestDot >= ((K.tight != null) ? K.tight : 0.82);   // ~35 deg: actually pointing AT it
+  return best;
+}
+
 function getPlayerForwardOrigin(forward, distance, out) {
   const target = out || new THREE.Vector3();
   if (typeof player === 'undefined' || !player || !player.position) return target.set(0, 0, 0);
@@ -65754,9 +65834,12 @@ function activateCore() {
         _mtrOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _mtrOrigin;
       }
       // (v30.92) Converge on the crosshair point from the pod, then spread.
+      // (v39.48) slower on purpose - see _mtrSpeed. A slower missile also turns in a tighter
+      // radius at the same turn rate, so this compounds with the homing rather than fighting it.
       const vel = player.position.clone().addScaledVector(forward, 1200)
-        .sub(_mtrOrigin).normalize().add(spread).normalize().multiplyScalar(525);
+        .sub(_mtrOrigin).normalize().add(spread).normalize().multiplyScalar(_mtrSpeed());
       const proj = new Projectile(_mtrOrigin, vel, 250, 120, 'player', 0xffcc00);
+      proj.lifetime = _mtrLife();
       proj.salvoGuided = true; 
       proj.smokeTrail = true;
       proj.removeHaze();
@@ -68494,7 +68577,7 @@ function updateAbilities(dt) {
         aimDir.x += (Math.random() - 0.5) * 0.25;
         aimDir.y += (Math.random() - 0.5) * 0.25;
         aimDir.normalize();
-        const vel = aimDir.multiplyScalar(525);
+        const vel = aimDir.multiplyScalar(_mtrSpeed());   // (v39.48) matches the opening burst
         // Alternate left/right painted launcher origin per spawn so
         // continuous core fire visibly emerges from both pods.
         let _mtrcOrigin = player.position;
@@ -68505,6 +68588,7 @@ function updateAbilities(dt) {
           _mtrcOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _mtrcOrigin;
         }
         const missile = new Projectile(_mtrcOrigin, vel, 200, 120, 'player', LSS.CLASS_COLORS.TRACKER);
+        missile.lifetime = _mtrLife();
         missile.salvoGuided = true;
         missile.smokeTrail = true;
         // Mega Tracker Rockets bust rocks on splash impact.

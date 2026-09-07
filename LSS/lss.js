@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.47';
+const LSS_BUILD = '39.48';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -29076,11 +29076,26 @@ class Projectile {
     }
 
     if (this.salvoGuided) {
-      const aimDir = (typeof getPlayerAimForward === 'function' && this.owner === 'player')
-        ? getPlayerAimForward(_projAimDir)
-        : _projAimDir.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
       const speed = this.velocity.length();
-      this.velocity.lerp(aimDir.multiplyScalar(speed), 6.0 * dt);
+      let steerDir = null, homing = false;
+      if (this.owner === 'player' && typeof _megaTrackerAimTarget === 'function') {
+        const tgt = _megaTrackerAimTarget();
+        if (tgt && tgt.position) {
+          steerDir = _projAimDir.subVectors(tgt.position, this.position);
+          if (steerDir.lengthSq() < 1) steerDir = null; else { steerDir.normalize(); homing = true; }
+        }
+      }
+      if (!steerDir) {
+        steerDir = (typeof getPlayerAimForward === 'function' && this.owner === 'player')
+          ? getPlayerAimForward(_projAimDir)
+          : _projAimDir.set(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+      }
+      const K = window.__mtr || (window.__mtr = {});
+      const turn = homing
+        ? ((player._mtrAim && player._mtrAim.tight) ? ((K.turnTight != null) ? K.turnTight : 8.0)
+                                                   : ((K.turnWide != null) ? K.turnWide : 5.0))
+        : 6.0;
+      this.velocity.lerp(steerDir.multiplyScalar(speed), turn * dt);
       this.velocity.normalize().multiplyScalar(speed);
     }
 
@@ -44510,6 +44525,44 @@ function getPlayerAimForward(out) {
   return target.set(0, 0, -1).applyQuaternion(q).normalize();
 }
 
+function _mtrSpeed() { const K = window.__mtr || (window.__mtr = {}); return (K.speed != null) ? K.speed : 360; }
+function _mtrLife()  { const K = window.__mtr || (window.__mtr = {}); return (K.life  != null) ? K.life  : 6.5; }
+const _mtrAimTmp = new THREE.Vector3();
+const _mtrAimFwd = new THREE.Vector3();
+function _megaTrackerAimTarget() {
+  if (typeof player === 'undefined' || !player || !player.position) return null;
+  const now = (typeof game !== 'undefined' && game.time) || 0;
+  const c = player._mtrAim || (player._mtrAim = { tgt: null, t: -1 });
+  if (now - c.t < 0.1) {
+    const t = c.tgt;
+    if (t && t.alive !== false && t.shipState !== 'dead' && t.position) return t;
+    return null;
+  }
+  c.t = now; c.tgt = null;
+  const fwd = getPlayerAimForward(_mtrAimFwd);
+  const K = window.__mtr || (window.__mtr = {});
+  const MAX_RANGE = (K.range != null) ? K.range : 6000;
+  const WIDE = (K.wide != null) ? K.wide : 0.34;    // ~70 degrees: "near where I am looking"
+  let best = null, bestDot = WIDE;
+  const consider = (e) => {
+    if (!e || e.alive === false || e.shipState === 'dead' || !e.position) return;
+    if (e === player) return;
+    if (e.team != null && player.team != null && e.team === player.team) return;
+    const to = _mtrAimTmp.subVectors(e.position, player.position);
+    const d = to.length();
+    if (d < 1 || d > MAX_RANGE) return;
+    const dot = to.multiplyScalar(1 / d).dot(fwd);
+    if (dot > bestDot) { bestDot = dot; best = e; }
+  };
+  try {
+    for (const e of (game.entities || [])) consider(e);
+    if (game.monsters) for (const m of game.monsters) consider(m);   // leviathans lock like ships
+  } catch (_) { return null; }
+  c.tgt = best;
+  c.tight = bestDot >= ((K.tight != null) ? K.tight : 0.82);   // ~35 deg: actually pointing AT it
+  return best;
+}
+
 function getPlayerForwardOrigin(forward, distance, out) {
   const target = out || new THREE.Vector3();
   if (typeof player === 'undefined' || !player || !player.position) return target.set(0, 0, 0);
@@ -45714,8 +45767,9 @@ function activateCore() {
         _mtrOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _mtrOrigin;
       }
       const vel = player.position.clone().addScaledVector(forward, 1200)
-        .sub(_mtrOrigin).normalize().add(spread).normalize().multiplyScalar(525);
+        .sub(_mtrOrigin).normalize().add(spread).normalize().multiplyScalar(_mtrSpeed());
       const proj = new Projectile(_mtrOrigin, vel, 250, 120, 'player', 0xffcc00);
+      proj.lifetime = _mtrLife();
       proj.salvoGuided = true; 
       proj.smokeTrail = true;
       proj.removeHaze();
@@ -47812,7 +47866,7 @@ function updateAbilities(dt) {
         aimDir.x += (Math.random() - 0.5) * 0.25;
         aimDir.y += (Math.random() - 0.5) * 0.25;
         aimDir.normalize();
-        const vel = aimDir.multiplyScalar(525);
+        const vel = aimDir.multiplyScalar(_mtrSpeed());   // (v39.48) matches the opening burst
         let _mtrcOrigin = player.position;
         const _mtrcLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER;
         if (_mtrcLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
@@ -47821,6 +47875,7 @@ function updateAbilities(dt) {
           _mtrcOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _mtrcOrigin;
         }
         const missile = new Projectile(_mtrcOrigin, vel, 200, 120, 'player', LSS.CLASS_COLORS.TRACKER);
+        missile.lifetime = _mtrLife();
         missile.salvoGuided = true;
         missile.smokeTrail = true;
         missile.bustsRocks = true;
