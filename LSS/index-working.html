@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.48';
+const LSS_BUILD = '39.49';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -18319,6 +18319,9 @@ const _LSS_IS_MOBILE = (navigator.maxTouchPoints > 0) &&
     try { localStorage.setItem('lss_quality', 'low'); } catch (_) {}
   }
   let _dprCap;
+  // (v39.49) desktop ULTRA / MEGA boot on a NATIVE canvas - the supersample is the scene target's
+  // (see _getBloomRTSize). Phones keep the tier's canvas ratio exactly as before.
+  if ((_stored === 'mega' || _stored === 'ultra') && !_isMobileGPU) { _dprCap = Math.min(window.devicePixelRatio, 2); } else
   if (_stored === 'mega') { _dprCap = Math.min(window.devicePixelRatio * 2.5, 3.0); } else if (_stored === 'ultra') {
     // Keep in sync with applyQualityPreset's ultra branch (1.75x / 2.6).
     _dprCap = Math.min(window.devicePixelRatio * 1.75, 2.6);
@@ -21381,8 +21384,16 @@ function applyQualityPreset(level) {
   try {
     if (typeof renderer !== 'undefined' && renderer && renderer.setPixelRatio) {
       let _cap;
+      const _deskSuper = (QUALITY.isMega() || QUALITY.isUltra()) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE);
       if (QUALITY.isPotato()) {
         _cap = 0.75;
+      } else if (_deskSuper) {
+        // (v39.49) ULTRA / MEGA ON DESKTOP: NATIVE CANVAS. The supersample is the SCENE TARGET's
+        // (see _getBloomRTSize / _lssTierSuper / _lssSceneActive): rendering at the canvas
+        // ratio and letting the browser downscale cost a 4x-MSAA resolve + composite + compositor
+        // copy at 8.8 MP every frame even when the adaptive scale had already dropped the scene
+        // to native — measured 103 -> 92 fps and 12x the dropped frames on the owner's laptop.
+        _cap = Math.min(window.devicePixelRatio, 2);
       } else if (QUALITY.isMega()) {
         _cap = Math.min(window.devicePixelRatio * 2.5, 3.0);
       } else if (QUALITY.isUltra()) {
@@ -21468,7 +21479,12 @@ try {
 // refresh creeps it back a twentieth at a time after an exponential hold (4, 8, 16 ... 60 s)
 // so the picture does not pump. scale 0 = the pre-v38.64 look, which held 120. Desktop only
 // (phones never get the supersample) and never during XR. Live: window.__ss.
-const _ssDyn = { scale: 1.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0 };
+// (v39.49) START AT NATIVE AND EARN THE SUPERSAMPLE. scale began at 1.0, so every match opened
+// at the tier's full 8.8 MP (the countdown is not sampled, the first decision lands 0.5 s into
+// combat, and each shed is a step) — the first seconds of every round ran at ~60 fps by design.
+// Starting at 0 and creeping up (0.05 per half-second while the refresh is held) reaches full
+// resolution in ~10 s on a GPU that can hold it, and never over-spends on one that cannot.
+const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0 };
 function _lssSupersampleActive() {
   try {
     return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega()) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
@@ -21480,22 +21496,52 @@ function _lssSupersampleTick(ts) {
   if (!S.last) { S.last = ts; return; }
   const dt = ts - S.last; S.last = ts;
   if (!_lssSupersampleActive()) return;
+  // (v39.49) ONLY FULL-RATE FRAMES ARE SAMPLES. The ship picker and the settings panel render at
+  // 6 Hz (167 ms intervals, under the 250 ms filter below), so the EMA read the picker as a GPU
+  // 24x over budget and shed the whole supersample in five steps — each step a render-target
+  // reallocation, ~125 ms at 8.8 MP: five hitches on the picker, measured in the owner's
+  // session (__prof prelude+input 128 ms x5), and scale 0 before combat even began. The loading
+  // overlay's throttled frames and the cinematic are the same trap.
+  if (game.state !== 'playing' || settingsOpen || game._worldPrebaking ||
+      (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) { S.ema = 0; return; }
   if (!(dt >= 2 && dt <= 250)) return;                 // a tab switch or a load hitch is not a sample
-  if (dt < S.minDt) {
-    S.minDt = dt;
-    const hz = 1000 / dt;
-    S.hz = [60, 72, 75, 90, 100, 120, 144, 165, 240].reduce((a, b) => (Math.abs(b - hz) < Math.abs(a - hz)) ? b : a);
+  // (v39.49) THE REFRESH IS NOT THE FASTEST GAP EVER SEEN. rAF timestamps jitter; one 5.6 ms gap
+  // on the owner's 144 Hz panel snapped `hz` to 165, a budget the display can never meet, so the
+  // EMA (6.95 ms) never got under the 6.18 ms target and the supersample never crept back — the
+  // MEGA tier was permanently at scale 0. Use the 5th percentile of a 240-frame window: a single
+  // short gap cannot move it, and it still reads the panel's own period whenever the game holds
+  // it. Monotonic, like the old minimum, so a GPU-bound spell cannot talk the target down.
+  if (!S.win) { S.win = new Float32Array(240); S.wi = 0; }
+  S.win[S.wi++] = dt;
+  if (S.wi >= 240) {
+    S.wi = 0;
+    const _a = Array.from(S.win).sort((x, y) => x - y);
+    const _p5 = _a[12];
+    const hz = 1000 / _p5;
+    const _snap = [60, 72, 75, 90, 100, 120, 144, 165, 240].reduce((a, b) => (Math.abs(b - hz) < Math.abs(a - hz)) ? b : a);
+    if (Math.abs(_snap - hz) / _snap < 0.12 && _snap > S.hz) S.hz = _snap;
+    if (_p5 < S.minDt) S.minDt = _p5;
   }
   S.ema = S.ema ? S.ema + (dt - S.ema) * 0.08 : dt;
   S.acc += dt; if (S.acc < 500) return; S.acc = 0;   // decide twice a second
   const period = 1000 / S.hz;
   let sc = S.scale;
-  if (S.ema > period * 1.10) {
-    if (sc > 0) { sc = Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
+  // (v39.49b) BELOW NATIVE UNDER LOAD. A step is a free viewport change now, so when the GPU cannot
+  // hold the refresh even at native (owner: bursts of six 21 ms frames with the CPU at 7 ms during
+  // heavy FX, felt as stutter and as sound cutting), the scene rectangle may shrink to
+  // window.__ssMin (default -0.6 = 70% of native each axis) and creep back the same way.
+  const _floor = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
+  // Above native: shed at 10% over budget. Below native: only when the frame is 40% over budget
+  // (~100 fps at 144 Hz) - a mild 130 fps at native beats 144 at 70% resolution.
+  const _over = S.ema > period * 1.10, _far = S.ema > period * 1.40;
+  if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
+    { sc = Math.max(_floor, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
   } else if (S.ema <= period * 1.02) {
     if (S.hold > 0) S.hold -= 0.5; else if (sc < 1) sc = Math.min(1, sc + 0.05);
   }
-  if (sc !== S.scale) { S.scale = sc; S.steps++; try { if (typeof _doPostFXResize === 'function') _doPostFXResize(); } catch (_) {} }
+  // (v39.49) a step is a viewport change now (renderPostFX reads S.scale every frame) - no
+  // render-target reallocation, no _doPostFXResize, no hitch. See _getBloomRTSize.
+  if (sc !== S.scale) { S.scale = sc; S.steps++; }
 }
 function _getBloomRTSize() {
   const cap = (typeof QUALITY !== 'undefined' && typeof QUALITY.bloomDPR === 'function')
@@ -21514,18 +21560,63 @@ function _getBloomRTSize() {
   // 3.0x canvas; handing the scene target the same 3.4 MP (it was 2.0x = 1.5 MP), plus ULTRA's
   // live 2x MSAA below, is exactly the VRAM / fill step that tips a phone's GPU process over.
   // The 16 MP cap is a desktop number. Mobile: min(DPR, bloomDPR()), as before v38.64.
+  // (v39.49) THE SUPERSAMPLE LIVES IN THE SCENE TARGET, NOT THE CANVAS. Measured in the owner's
+  // session (RTX 5050 laptop, 144 Hz, MEGA): the adaptive scale had already fallen to 0 - scene
+  // target 1920x798, the same pixels as HIGH - yet the CANVAS was still 4608x1917 (pixel ratio 3),
+  // so every frame still paid a 4x-MSAA resolve, the composite quad and the browser's downscale at
+  // 8.8 MP for nothing. A/B on the same map, same scene size: native canvas 103 fps / 0.7 dropped
+  // frames a second; 3x canvas 92 fps / 8.5 a second. And every scale step re-allocated this
+  // target (~125 ms at 8.8 MP): five hitches on one ship picker.
+  // Now: ULTRA / MEGA keep a NATIVE canvas (applyQualityPreset), this target is allocated ONCE at
+  // the tier's maximum (_lssTierSuper, 16 MP cap), and each frame renders into a VIEWPORT of it
+  // sized by _ssDyn.scale (_lssSceneActive, applied in renderPostFX) while the bright and
+  // composite passes sample the used sub-rectangle (uSceneScale / uSceneMax). A scale step is a
+  // viewport change: free, no reallocation, no hitch. The composite's linear fetch from a larger
+  // rectangle is the downsample. Bloom RTs stay at HALF THE BASE size whatever the scale (bw/bh).
+  const _bw = Math.floor(window.innerWidth * dpr), _bh = Math.floor(window.innerHeight * dpr);
   try {
-    if (typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega()) &&
-        !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
-        typeof renderer !== 'undefined' && renderer && renderer.getPixelRatio) {
-      const _base = dpr, _super = renderer.getPixelRatio();
-      if (_super > _base) dpr = _base + (_super - _base) * Math.max(0, Math.min(1, _ssDyn.scale));   // (v38.71) adaptive
+    const _super = _lssTierSuper();
+    if (_super > dpr) {
+      dpr = _super;
       const _px = window.innerWidth * window.innerHeight * dpr * dpr;
       const _MAXPX = 16e6;
       if (_px > _MAXPX) dpr *= Math.sqrt(_MAXPX / _px);
     }
   } catch (_) {}
-  return { w: Math.floor(window.innerWidth * dpr), h: Math.floor(window.innerHeight * dpr) };
+  return { w: Math.floor(window.innerWidth * dpr), h: Math.floor(window.innerHeight * dpr),
+           bw: Math.floor(_bw / 2), bh: Math.floor(_bh / 2), base: Math.min(window.devicePixelRatio, cap) };
+}
+// (v39.49) The tier's supersample ratio, canvas-independent. 0 where there is none (HIGH and
+// below, phones, XR). Kept in one place: applyQualityPreset's canvas ratio used to BE this number.
+function _lssTierSuper() {
+  try {
+    if (typeof QUALITY === 'undefined' || !QUALITY) return 0;
+    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return 0;
+    if (QUALITY.isMega()) return Math.min(window.devicePixelRatio * 2.5, 3.0);
+    if (QUALITY.isUltra()) return Math.min(window.devicePixelRatio * 1.75, 2.6);
+  } catch (_) {}
+  return 0;
+}
+// (v39.49) The scene rectangle this frame actually renders into: base + (super - base) * scale,
+// clamped to the allocated target. Returns the same object every call (no per-frame allocation).
+const _sceneActive = { w: 0, h: 0, sx: 1, sy: 1 };
+function _lssSceneActive(rt) {
+  const W = rt.width, H = rt.height;
+  let w = W, h = H;
+  try {
+    const _super = _lssTierSuper();
+    if (_super > 0 && _lssSupersampleActive()) {
+      const cap = (typeof QUALITY.bloomDPR === 'function') ? QUALITY.bloomDPR() : 1.0;
+      const base = Math.min(window.devicePixelRatio, cap);
+      const _sc = Math.max(-0.9, Math.min(1, _ssDyn.scale));
+      // (v39.49b) negative scale = below native: -1 would be half size on each axis
+      const s = (_sc >= 0) ? base + (Math.max(base, _super) - base) * _sc : base * (1 + 0.5 * _sc);
+      w = Math.min(W, Math.max(1, Math.floor(window.innerWidth * s)));
+      h = Math.min(H, Math.max(1, Math.floor(window.innerHeight * s)));
+    }
+  } catch (_) {}
+  _sceneActive.w = w; _sceneActive.h = h; _sceneActive.sx = w / W; _sceneActive.sy = h / H;
+  return _sceneActive;
 }
 const _initBloomRT = _getBloomRTSize();
 const _rtSceneOpts = {
@@ -21573,12 +21664,13 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
     return { level: QUALITY.level, pixelRatio: renderer.getPixelRatio(),
              canvas: [renderer.domElement.width, renderer.domElement.height],
              scene: [postFX.rtScene.width, postFX.rtScene.height, 'samples', postFX.rtScene.samples | 0],
+             active: [_sceneActive.w, _sceneActive.h, 'scale', _ssDyn.scale, 'hz', _ssDyn.hz],   // (v39.49) the viewport actually rendered this frame
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
 };
 // Bloom: extract bright pixels, blur, composite
 postFX.rtBright = new THREE.WebGLRenderTarget(
-  Math.floor(postFX.rtScene.width / 2), Math.floor(postFX.rtScene.height / 2),
+  _initBloomRT.bw, _initBloomRT.bh,   // (v39.49) half the BASE size, never half the supersampled target
   { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
 );
 postFX.rtBlurH = new THREE.WebGLRenderTarget(
@@ -21596,15 +21688,17 @@ postFX.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
 // Brightness threshold extraction shader (soft knee for smoother bloom)
 postFX.brightMat = new THREE.ShaderMaterial({
-  uniforms: { tDiffuse: { value: null }, threshold: { value: 0.4 }, softKnee: { value: 0.9 } },   // (v34.63) bloom threshold 0.1->0.4 (user-tuned): only genuinely bright things bloom, kills the white-ship/building halo. Live: tunePostFX({threshold})   
+  uniforms: { tDiffuse: { value: null }, threshold: { value: 0.4 }, softKnee: { value: 0.9 },   // (v34.63) bloom threshold 0.1->0.4 (user-tuned): only genuinely bright things bloom, kills the white-ship/building halo. Live: tunePostFX({threshold})
+              uSceneScale: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) } },   // (v39.49) the used sub-rectangle of rtScene
   vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tDiffuse;
     uniform float threshold;
     uniform float softKnee;
+    uniform vec2 uSceneScale, uSceneMax;
     varying vec2 vUv;
     void main() {
-      vec4 c = texture2D(tDiffuse, vUv);
+      vec4 c = texture2D(tDiffuse, min(vUv * uSceneScale, uSceneMax));
       float brightness = max(c.r, max(c.g, c.b));
       // Soft-knee: smooth ramp around threshold instead of hard cutoff
       float knee = threshold * softKnee + 1e-5;
@@ -21670,12 +21764,15 @@ postFX.compositeMat = new THREE.ShaderMaterial({
     exposure: { value: 1.05 },
     time: { value: 0.0 },
     godrayStrength: { value: 0.15 },   // (v34.63) 0.40->0.15 (user-tuned): far less directional bright-pixel smear (the "ghosting/doubling"), keeps a touch of glow. Live: tunePostFX({godray})
-    gradeSat: { value: 1.0 }, gradeContrast: { value: 1.0 }, gradeWarmth: { value: 1.0 }, gradeLift: { value: 0.0 }
+    gradeSat: { value: 1.0 }, gradeContrast: { value: 1.0 }, gradeWarmth: { value: 1.0 }, gradeLift: { value: 0.0 },
+    uSceneScale: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) }   // (v39.49) the used sub-rectangle of rtScene (viewport supersample)
   },
   vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tScene;
     uniform sampler2D tBloom;
+    uniform vec2 uSceneScale, uSceneMax;
+    #define SCENE(uv) texture2D(tScene, clamp((uv) * uSceneScale, vec2(0.0), uSceneMax))
     uniform float bloomStrength;
     uniform float vignetteIntensity;
     uniform float vignetteSize;
@@ -21754,11 +21851,11 @@ postFX.compositeMat = new THREE.ShaderMaterial({
       vec3 col;
       if (chromAb > 0.001) {
         float abAmount = chromAb * dist * 0.025 + 0.0008 * dist;
-        col.r = texture2D(tScene, warpedUv + center * abAmount).r;
-        col.g = texture2D(tScene, warpedUv).g;
-        col.b = texture2D(tScene, warpedUv - center * abAmount).b;
+        col.r = SCENE(warpedUv + center * abAmount).r;
+        col.g = SCENE(warpedUv).g;
+        col.b = SCENE(warpedUv - center * abAmount).b;
       } else {
-        col = texture2D(tScene, warpedUv).rgb;
+        col = SCENE(warpedUv).rgb;
       }
 
       // Bloom add (lens-dirt path removed ; see lensDirtMask comment above).
@@ -22114,6 +22211,22 @@ function renderPostFX() {
   }
 
   // 1. Render scene to offscreen target
+  // (v39.49) VIEWPORT SUPERSAMPLE: render into the sub-rectangle _ssDyn.scale selects and tell the
+  // two passes that read rtScene which part of it is live. See _getBloomRTSize for the why.
+  {
+    const _rt = postFX.rtScene, _A = _lssSceneActive(_rt);
+    const _partial = (_A.w < _rt.width || _A.h < _rt.height);
+    if (_rt.viewport.z !== _A.w || _rt.viewport.w !== _A.h || _rt.scissorTest !== _partial) {
+      _rt.viewport.set(0, 0, _A.w, _A.h);
+      _rt.scissor.set(0, 0, _A.w, _A.h);
+      _rt.scissorTest = _partial;
+      const _mx = (_A.w - 0.5) / _rt.width, _my = (_A.h - 0.5) / _rt.height;
+      postFX.brightMat.uniforms.uSceneScale.value.set(_A.sx, _A.sy);
+      postFX.brightMat.uniforms.uSceneMax.value.set(_mx, _my);
+      postFX.compositeMat.uniforms.uSceneScale.value.set(_A.sx, _A.sy);
+      postFX.compositeMat.uniforms.uSceneMax.value.set(_mx, _my);
+    }
+  }
   renderer.setRenderTarget(postFX.rtScene);
   renderer.render(scene, camera);
   // (v36.74) ADS ship overlay: while third-person zoom is engaged the ship
@@ -24306,28 +24419,30 @@ function _swBuildTrees(x0,z0,T){
 }
 function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ if(im && im.parent)scene.remove(im); if(im && im.dispose)im.dispose(); }catch(_){} } } }
 
-function _swBuildShell(x0, z0, isCeil, T) {
-  const n = _SW_CELLS, step = _SW_CHUNK / n;
-  const nVert = (n + 1) * (n + 1);
-  const verts = new Float32Array(nVert * 3);
-  const cols  = new Float32Array(nVert * 3);
-  let p = 0;
-  for (let j = 0; j <= n; j++) {
+// (v39.49) SHELL ROW JOBS. A chunk shell is 41x41 vertices of _stGroundYCarved / _stCeilYCarved
+// (+ rim pinch + colour): ~10-15 ms of main-thread SDF sampling on a rocky/snow map, two shells a
+// chunk. Procedural arenas (shifting_deep...) rebuild their ring every round, and the ring kept
+// filling for ~10 s AFTER the countdown at 60-70 fps (one shell a frame), while the countdown drain
+// itself spent 25 ms lumps per call. The build is now a resumable job: _swShellJobRows fills rows
+// until a budget is spent, _swShellJobFinish makes the geometry + mesh when the last row lands.
+// _swBuildShell (sync) is the same job run to completion - the prebake / preload / staged paths.
+function _swShellJobNew(x0, z0, isCeil, T) {
+  const n = _SW_CELLS, nVert = (n + 1) * (n + 1);
+  return { x0, z0, isCeil, T, n, j: 0, p: 0, verts: new Float32Array(nVert * 3), cols: new Float32Array(nVert * 3) };
+}
+function _swShellJobRows(J, budgetMs) {
+  const n = J.n, step = _SW_CHUNK / n, T = J.T, isCeil = J.isCeil, verts = J.verts, cols = J.cols, x0 = J.x0, z0 = J.z0;
+  const t0 = performance.now();
+  let p = J.p;
+  while (J.j <= n) {
+    const j = J.j;
     for (let i = 0; i <= n; i++) {
       const gx0 = x0 + i * step, gz0 = z0 + j * step;
-      // De-grid : jitter X/Z by a deterministic world-space hash so facet edges
-      // are irregular/fractal instead of clean grid lines. Keyed off the GLOBAL
-      // vertex index so shared chunk-edge vertices get identical offsets (no
-      // seams). Height field sampled at the jittered point but otherwise
-      // unchanged, so the mountain SHAPE is preserved ; no extra triangles.
       const _gi = Math.round(gx0 / step), _gj = Math.round(gz0 / step);
       const _jit = step * 0.40;
       const x = gx0 + (_stHash2(_gi * 1.7, _gj * 2.3) - 0.5) * _jit;
       const z = gz0 + (_stHash2(_gi * 3.1 + 5.0, _gj * 1.1 + 9.0) - 0.5) * _jit;
       let y = isCeil ? _stCeilYCarved(x, z, T) : _stGroundYCarved(x, z, T);
-      // (2026-06-12c) Rim seal; see _swRimPinch. Ground rises / ceiling
-      // drops toward the shared midline as the margin runs out, so the
-      // shells meet in a closed clamshell at the world edge.
       const _pinch = _swRimPinch(x, z, T);
       if (_pinch > 0) {
         const _other = isCeil ? _stGroundYCarved(x, z, T) : _stCeilYCarved(x, z, T);
@@ -24338,7 +24453,14 @@ function _swBuildShell(x0, z0, isCeil, T) {
       cols[p] = _SW_tmpC.r; cols[p + 1] = _SW_tmpC.g; cols[p + 2] = _SW_tmpC.b;
       p += 3;
     }
+    J.j++;
+    if (J.j <= n && performance.now() - t0 > budgetMs) break;
   }
+  J.p = p;
+  return J.j > n;
+}
+function _swShellJobFinish(J) {
+  const n = J.n, isCeil = J.isCeil, verts = J.verts, cols = J.cols, nVert = (n + 1) * (n + 1);
   const idx = [];
   const row = n + 1;
   for (let j = 0; j < n; j++) {
@@ -24347,14 +24469,6 @@ function _swBuildShell(x0, z0, isCeil, T) {
       if (isCeil) { idx.push(a, b, c, b, d, c); } else { idx.push(a, c, b, b, c, d); }
     }
   }
-  // (v36.96) BENT SANDWICH: the chunk was built flat, byte-identically —
-  // colors, spikes, carves all baked from flat coords. Curve the finished
-  // vertices through the bend; the terrain shader derives its normal from
-  // dFdx/dFdy of position, so lighting follows for free.
-  // (v36.99) aFlatY preserves each vertex's pre-bend height so the
-  // shader's height bands (snowline, strata, biome bands) stay glued to
-  // the FLAT terrain — 'it said snow and there wasn't snow' was the
-  // shader hunting for peaks at flat-space altitudes in a bent world.
   let flatY = null;
   const _bendOn = game.bendWorld && game._bendSegs && game._bendSegs.length && typeof _bendVerts === 'function';
   if (_bendOn) {
@@ -24367,11 +24481,6 @@ function _swBuildShell(x0, z0, isCeil, T) {
   geo.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
   if (flatY) geo.setAttribute('aFlatY', new THREE.Float32BufferAttribute(flatY, 1));
   geo.setIndex(idx);
-  // (v33.48 perf) NO computeVertexNormals: the terrain material is flatShading:true and the
-  // moss/slope/snow/lava shader derives its normal from dFdx/dFdy(vWPos) in the FRAGMENT
-  // shader — the per-vertex normal attribute is never read by anything (and hub collision
-  // uses the height function, not mesh raycasting). Skipping it removes the per-chunk normal
-  // pass + a ~20KB/chunk normal buffer alloc+upload. Graphics-identical.
   const mat = _swTerrainMatShared(isCeil);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = !isCeil;
@@ -24380,8 +24489,24 @@ function _swBuildShell(x0, z0, isCeil, T) {
   scene.add(mesh);
   return mesh;
 }
-
+function _swBuildShell(x0, z0, isCeil, T) {
+  const J = _swShellJobNew(x0, z0, isCeil, T);
+  _swShellJobRows(J, 1e9);
+  return _swShellJobFinish(J);
+}
+// Finish a chunk's in-flight job synchronously (a budgeted state handed over to a synchronous one).
+function _swShellJobFlush(c, T, wantCeil) {
+  let guard = 0;
+  while (c._job && guard++ < 3) {
+    const J = c._job;
+    _swShellJobRows(J, 1e9);
+    const mesh = _swShellJobFinish(J);
+    if (J.isCeil) c.ceiling = mesh; else c.ground = mesh;
+    c._job = (!J.isCeil && wantCeil) ? _swShellJobNew(c.cx * _SW_CHUNK, c.cz * _SW_CHUNK, true, T) : null;
+  }
+}
 function _swDisposeChunk(c) {
+  c._job = null;   // (v39.49) an in-flight shell job holds no GPU resources
   for (const m of [c.ground, c.ceiling]) {
     if (!m) continue;   
     try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material && !m.material._swShared) m.material.dispose(); } catch (_) {}   
@@ -25790,6 +25915,78 @@ function _swWaterCrossSplash(x0, y0, z0, x1, y1, z1, radius, amp) {
 // sim reflects ripples off shorelines (-> cymatic standing waves) instead of an open square edge.
 // R = water mask (terrainHeight < WL), G = depth (foam/shore). 128^2 _stGroundYCarved calls, but
 // only re-baked when the window RECENTRES (the ship moved >25% of the window) so the cost amortises.
+// (v39.49) ONE ROW of a shore-mask bake, shared by the synchronous bakes (init, teleport) and the
+// amortized job below. `near` writes the binary shoreline into R (the foam threshold); the far mask
+// leaves R at 0 and only carries the depth ramp in G.
+function _swRippleBakeMaskRow(data, cx, cz, j, RES, B, T, WL, near) {
+  let k = j * RES * 4;
+  const wz = cz + ((j + 0.5) / RES - 0.5) * B;
+  for (let i = 0; i < RES; i++) {
+    const wx = cx + ((i + 0.5) / RES - 0.5) * B;
+    let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; }
+    const d = WL - gy;
+    data[k] = near ? ((d > 2.0) ? 1.0 : 0.0) : 0;
+    data[k + 1] = Math.max(0, Math.min(1, d / 400));
+    data[k + 2] = 0; data[k + 3] = 1;
+    k += 4;
+  }
+}
+// (v39.49) THE AMORTIZED SHORE-MASK BAKE. Every 1000 u of travel on a water map the near mask (96x96 =
+// 9,216 _stGroundYCarved evals) and, every 4000 u, the far mask (another 9,216) were rebaked in ONE
+// frame: `hub:ripple` max 20-42 ms in the owner's session, the largest in-play hitch on any water
+// map. v34.43 had row-sliced these; the v34.53 combat revert took that with it and it was never
+// re-added. Now a recenter only records a FROZEN target centre (R._maskJob / R._farJob); this tick
+// bakes rows into a staging buffer for ~1 ms a frame (3 ms under the cinematic, whose camera moves
+// faster) and, on the last row, commits the whole thing at once - data, window scroll, centre and
+// texture upload in the same frame - so the mask never shows a half-baked state and the sim's scroll
+// never precedes its own shoreline. One lane a frame: the far job waits for the near job.
+// Knobs: window.__water.bakeMs (per-frame budget), window.__water.syncBake = 1 (old one-frame path).
+function _swRippleMaskJobTick(cine) {
+  const R = _swRipple;
+  const J = R._maskJob, F = R._farJob;
+  if (!J && !F) return;
+  const T = game._hubWaterT;
+  if (!T || typeof _stGroundYCarved !== 'function') { R._maskJob = null; R._farJob = null; return; }
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : (T.WL || 0);
+  const budget = (window.__water && window.__water.bakeMs) || ((cine || (J && J.fast) || (F && F.fast)) ? 4.0 : 1.0);
+  const t0 = performance.now();
+  if (J) {
+    if (!R.maskData) { R._maskJob = null; return; }
+    const RES = _SW_MASK_RES, B = _SW_RIPPLE_BOUNDS;
+    if (!R._maskStage || R._maskStage.length !== R.maskData.length) R._maskStage = new Float32Array(R.maskData.length);
+    const stage = R._maskStage;
+    while (J.row < RES) {
+      _swRippleBakeMaskRow(stage, J.cx, J.cz, J.row, RES, B, T, WL, true);
+      J.row++;
+      if ((J.row & 3) === 0 && performance.now() - t0 > budget) break;
+    }
+    if (J.row >= RES) {
+      R.maskData.set(stage);
+      R.scrollX += (J.cx - R.center.x) / R.bounds;
+      R.scrollZ += (J.cz - R.center.y) / R.bounds;
+      R.center.set(J.cx, J.cz);
+      R.acc = R.step;
+      if (R.maskTex) R.maskTex.needsUpdate = true;
+      R._maskJob = null;
+    }
+    return;
+  }
+  if (!R.farData) { R._farJob = null; return; }
+  const RES = _SW_FARMASK_RES, B = _SW_FARMASK_BOUNDS;
+  if (!R._farStage || R._farStage.length !== R.farData.length) R._farStage = new Float32Array(R.farData.length);
+  const stage = R._farStage;
+  while (F.row < RES) {
+    _swRippleBakeMaskRow(stage, F.cx, F.cz, F.row, RES, B, T, WL, false);
+    F.row++;
+    if ((F.row & 3) === 0 && performance.now() - t0 > budget) break;
+  }
+  if (F.row >= RES) {
+    R.farData.set(stage);
+    R.farCenter.set(F.cx, F.cz);
+    if (R.farTex) R.farTex.needsUpdate = true;
+    R._farJob = null;
+  }
+}
 function _swRippleBakeMask() {
   const R = _swRipple;
   if (!R.maskData || typeof _stGroundYCarved !== 'function') return;
@@ -25934,13 +26131,26 @@ function _swRippleTick(dt) {
     
     
     
-    const _texel = R.bounds / 32;   
+    const _texel = R.bounds / 32;
     const ncx = Math.round(px / _texel) * _texel, ncz = Math.round(pz / _texel) * _texel;
-    R.scrollX += (ncx - R.center.x) / R.bounds;
-    R.scrollZ += (ncz - R.center.y) / R.bounds;
-    R.center.set(ncx, ncz);
-    R.acc = R.step;                 
-    _swRippleBakeMask();            
+    // (v39.49) A jump past the whole window (spawn, rift, teleport) still bakes synchronously — a
+    // stale shoreline there would be visible, one long frame there is not. Ordinary travel only
+    // records the target; _swRippleMaskJobTick bakes it over the next frames and commits scroll +
+    // centre + data together (see the function). While a job is in flight the centre has not moved,
+    // so this branch keeps re-entering; the `!R._maskJob` guard is what makes that harmless.
+    if (window.__water && window.__water.syncBake) {
+      R._maskJob = null;
+      R.scrollX += (ncx - R.center.x) / R.bounds;
+      R.scrollZ += (ncz - R.center.y) / R.bounds;
+      R.center.set(ncx, ncz);
+      R.acc = R.step;
+      _swRippleBakeMask();
+    } else if (!R._maskJob || (ddx * ddx + ddz * ddz > R.bounds * R.bounds && !R._maskJob.fast)) {
+      // (v39.49b) a JUMP (spawn, rift) restarts the job at a 4 ms budget instead of baking
+      // synchronously - measured 90 ms in one frame at a round start on shifting_deep. The
+      // shoreline foam near the spawn is ~25 frames late; nobody is looking at it yet.
+      R._maskJob = { cx: ncx, cz: ncz, row: 0, fast: (ddx * ddx + ddz * ddz > R.bounds * R.bounds) };
+    }
   }
   // (v33.98 LOD foam) re-bake the COARSE FAR mask on a much larger cadence (every FARSTEP=4000u of travel, ~8× rarer than
   // the near recenter). Separate centre, intentionally lazy — far foam is coarse so the window can drift without a visible shift.
@@ -25954,15 +26164,23 @@ function _swRippleTick(dt) {
       // (the only texels that change are the far in-fog edge, where edgeFade has already dissolved the water). The
       // FARSTEP travel guard is kept so rebakes stay ~4000u-rare; snapping to a fixed grid keeps them seamless anyway.
       const _foamSnap = !(window.__water && window.__water.foamSnap === 0);
+      let _fcx = px, _fcz = pz;
       if (_foamSnap) {
-        const _ftex = _SW_FARMASK_BOUNDS / _SW_FARMASK_RES;   
-        R.farCenter.set(Math.round(px / _ftex) * _ftex, Math.round(pz / _ftex) * _ftex);
-      } else {
-        R.farCenter.set(px, pz);   
+        const _ftex = _SW_FARMASK_BOUNDS / _SW_FARMASK_RES;
+        _fcx = Math.round(px / _ftex) * _ftex; _fcz = Math.round(pz / _ftex) * _ftex;
       }
-      _swRippleBakeFarMask();
+      // (v39.49) first bake (NaN centre) stays synchronous; travel rebakes go through the row job.
+      if (isNaN(R.farCenter.x) || (window.__water && window.__water.syncBake)) {
+        R._farJob = null;
+        R.farCenter.set(_fcx, _fcz);
+        _swRippleBakeFarMask();
+      } else if (!R._farJob) {
+        // (v39.49b) a jump past 2 far steps runs at the 4 ms budget too
+        R._farJob = { cx: _fcx, cz: _fcz, row: 0, fast: (dfx * dfx + dfz * dfz > (2 * FARSTEP) * (2 * FARSTEP)) };
+      }
     }
   }
+  _swRippleMaskJobTick(_cineW);
   // SHIP WAKE : the ONLY ambient ripple source — the water is STILL until something touches it
   // (world.html is windless). Seed ONLY when the ship is actually MOVING low over the surface ; a
   // hovering ship leaves the water flat, and (critically) re-seeding ONE fixed point would build a
@@ -25992,7 +26210,11 @@ function _swRippleTick(dt) {
     if (W3.breakPeak === undefined) W3.breakPeak = 0.22;     
     if (W3.breakSlope === undefined) W3.breakSlope = 0.06;   
     if (W3.breakRate === undefined) W3.breakRate = 0.5;      
-    if (W3.breakBudget === undefined) W3.breakBudget = 500;   
+    // (v39.49) 500 -> 40. At 500 one readback scan could fire up to 500 spray bursts (64 particles each)
+    // while skimming: the particle cap filled every few frames and `hub:stream+water` read 11-36 ms a
+    // frame for 17 s straight on shifting_deep (owner: "lag", 61-77 fps). 40 bursts a scan is the whole
+    // visible crest line; the scan below is also time-capped. Live: window.__water.breakBudget.
+    if (W3.breakBudget === undefined) W3.breakBudget = 40;
     // (v38.61) 2 -> 4. The v35.37 note further down says "2 -> 4: halves the
     // stall frequency" and falls back to 4 — but this default block runs
     // first and had been pinning breakEvery at 2 all along, so that halving
@@ -26110,7 +26332,11 @@ function _swRippleTick(dt) {
       R._crStep = (R._crStep || 0) + 1;
       // 2 -> 4: halves the stall frequency even when the gate is open.
       const _every = Math.max(1, (_Wc.breakEvery | 0) || 4);
-      if (R._crStep % _every === 0) {
+      // (v39.49b) ADAPTIVE CADENCE. The async readback CALL blocks on Chrome's command-buffer flush
+      // whenever the GPU queue is deep: measured 5 ms average and 11-23 ms per call for the first ten
+      // seconds after FIGHT on shifting_deep (hub:ripple 12-24 ms a frame, 0.3 with crestBreak=0).
+      // A call over 4 ms doubles the interval (to 32 frames); cheap calls decay it back to breakEvery.
+      if (R._crStep % (R._crSkip || _every) === 0) {
         const RES = _SW_RIPPLE_RES, B = R.bounds, WLc = w.userData.WL;
         if (!R._crBuf) R._crBuf = new Float32Array(RES * RES * 4);
         const buf = R._crBuf;
@@ -26134,6 +26360,7 @@ function _swRippleTick(dt) {
             R._crPending = true;
             const _prevRT = renderer.getRenderTarget();
             let _pr = null;
+            const _rt0 = performance.now();
             try { _pr = renderer.readRenderTargetPixelsAsync(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); }
             catch (e) { R._crPending = false; R._crAsyncErr = 1; try { console.warn('[crestBreak] async readback unavailable, using the synchronous path:', e && e.message); } catch (_) {} }
             // The async call leaves the ripple framebuffer + a pixel-pack buffer
@@ -26141,6 +26368,9 @@ function _swRippleTick(dt) {
             // draws into the ripple target or readPixels into the PBO.
             if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
             try { const _gl = renderer.getContext(); if (_gl && _gl.PIXEL_PACK_BUFFER) _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null); } catch (_) {}
+            { const _c = performance.now() - _rt0; R._crCost = _c; const _cur = R._crSkip || _every;
+              R._crSkip = (_c > 4) ? Math.min(32, _cur * 2) : Math.max(_every, (_cur * 0.75) | 0);
+              _Wc.crCost = Math.round(_c * 10) / 10; _Wc.crSkip = R._crSkip; }
             if (_pr && typeof _pr.then === 'function') {
               _pr.then(function () { R._crPending = false; R._crReady = true; _Wc.crReads = (_Wc.crReads | 0) + 1; },
                        function (e) { R._crPending = false; R._crAsyncErr = 1; try { console.warn('[crestBreak] async readback failed, using the synchronous path:', e && e.message); } catch (_) {} });
@@ -26165,7 +26395,9 @@ function _swRippleTick(dt) {
           const sc = function (hh, wf) { const x = hh * g2d; return (x / (1 + Math.abs(x))) * wf; };  
           let emitted = 0, nBreak = 0, maxV = 0;
           R._crScan = (((R._crScan || 0) + 7) % (RES - 2));                    
+          const _scanT0 = performance.now();
           for (let jj = 0; jj < RES - 2 && emitted < budget; jj++) {
+            if ((jj & 7) === 7 && performance.now() - _scanT0 > 1.5) break;   // (v39.49) the scan + sprays stay under ~1.5 ms a frame
             const j = 1 + ((jj + R._crScan) % (RES - 2));
             const rvY = (j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
             const rowB = j * RES;
@@ -26378,10 +26610,55 @@ function _critterTerrainBake(cx, cz) {
   }
   C.cx = cx; C.cz = cz; C.ymin = lo; C.ymax = hi; C.tex.needsUpdate = true;
 }
+// (v39.49) AMORTIZED, like the shore masks: the travel rebake (4096 _stGroundYCarved samples +
+// the 3x3 max filter, 2-6 ms in one frame every ~1300 u) now fills a staging buffer ~0.8 ms a
+// frame against a frozen target centre and commits raw + data + centre + texture together on
+// the last row. The first bake (init) and a jump past half the field stay synchronous.
+function _critterTerrainJobTick() {
+  const C = _critterTerrain, J = C._job; if (!J) return;
+  const T = C.T || game._hubWaterT;
+  if (!T || typeof _stGroundYCarved !== 'function' || !C.raw) { C._job = null; return; }
+  const res = C.res, B = C.bounds;
+  if (!C._rawStage || C._rawStage.length !== C.raw.length) C._rawStage = new Float32Array(C.raw.length);
+  const stage = C._rawStage, t0 = performance.now();
+  const budget = (window.__birds && window.__birds.bakeMs) || 0.8;
+  while (J.row < res) {
+    const j = J.row, wz = J.cz + ((j + 0.5) / res - 0.5) * B;
+    let k = j * res;
+    for (let i = 0; i < res; i++) {
+      const wx = J.cx + ((i + 0.5) / res - 0.5) * B;
+      let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = -1e4; }
+      stage[k++] = gy;
+    }
+    J.row++;
+    if ((J.row & 3) === 0 && performance.now() - t0 > budget) break;
+  }
+  if (J.row < res) return;
+  const raw = C.raw, data = C.data;
+  raw.set(stage);
+  let lo = 1e9, hi = -1e9;
+  for (let q = 0; q < raw.length; q++) { const v = raw[q]; if (v < lo) lo = v; if (v > hi) hi = v; }
+  let k = 0;
+  for (let j = 0; j < res; j++) {
+    for (let i = 0; i < res; i++) {
+      let m = -1e9;
+      for (let dj = -1; dj <= 1; dj++) { const jj = j + dj; if (jj < 0 || jj >= res) continue;
+        for (let di = -1; di <= 1; di++) { const ii = i + di; if (ii < 0 || ii >= res) continue;
+          const v = raw[jj * res + ii]; if (v > m) m = v; } }
+      const o = k * 4; data[o] = m; data[o + 1] = 0; data[o + 2] = 0; data[o + 3] = 1; k++;
+    }
+  }
+  C.cx = J.cx; C.cz = J.cz; C.ymin = lo; C.ymax = hi; C.tex.needsUpdate = true;
+  C._job = null;
+}
 function _critterTerrainMaybeBake(cx, cz) {
   const C = _critterTerrain; if (!C.tex) return;
+  if (C._job) { _critterTerrainJobTick(); return; }
   const dx = cx - C.cx, dz = cz - C.cz, r = C.bounds * 0.25;
-  if (dx * dx + dz * dz > r * r) _critterTerrainBake(cx, cz);
+  if (!(dx * dx + dz * dz > r * r)) return;
+  if (dx * dx + dz * dz > (C.bounds * 0.5) * (C.bounds * 0.5) || (window.__birds && window.__birds.syncBake)) { _critterTerrainBake(cx, cz); return; }
+  C._job = { cx, cz, row: 0 };
+  _critterTerrainJobTick();
 }
 // (v33.90) BOIDS velocity FS builder — ONE flocking core (separation / alignment / cohesion + ship-avoid
 // + soft bounds + shared terrain avoidance) parameterised for AIR (birds: sky band, terrain = floor) or
@@ -26848,7 +27125,8 @@ function _fishSchoolInit(T) {
     gpu.setVariableDependencies(posVar, [velVar, posVar]);
     velVar.minFilter = THREE.NearestFilter; velVar.magFilter = THREE.NearestFilter;
     posVar.minFilter = THREE.NearestFilter; posVar.magFilter = THREE.NearestFilter;
-    const _CT = _critterTerrainEnsure(T); if (_CT) { try { _critterTerrainBake(cx, cz); } catch (_) {} }
+    // (v39.49) the birds' init just baked this exact field (same T, same centre) - do not bake it twice
+    const _CT = _critterTerrainEnsure(T); if (_CT && !(_CT.cx === cx && _CT.cz === cz)) { try { _critterTerrainBake(cx, cz); } catch (_) {} }
     const vu = velVar.material.uniforms;
     vu.uTime = { value: 0 }; vu.uDelta = { value: 0.016 };
     vu.uShip = { value: new THREE.Vector3(cx, WL, cz) }; vu.uCenter = { value: new THREE.Vector3(cx, WL - 160, cz) };
@@ -28954,6 +29232,15 @@ function _hubCityBuild(g, site) {
   // per-pixel moss: 3-octave value noise blending the hub's moss tones with
   // large dry-grass patches — organic ground cover instead of blobby circles
   {
+    // (v39.49) BAKED ONCE PER PAGE. The per-pixel loop below is a pure function of (x, y) - no
+    // rng, no radius, no site - yet it ran again for every satellite city built in flight (six
+    // per hub session, 267-290 ms each measured in node), the largest stall a pilot meets in
+    // normal hub flight. The hub's own build (under the loading overlay) fills the cache; every
+    // later city just putImageData()s it. Correctness: the two canvases are byte-identical
+    // before the stroke passes, by construction.
+    if (_hubCityBuild._noiseImg) {
+      a2.putImageData(_hubCityBuild._noiseImg, 0, 0);
+    } else {
     const img = a2.createImageData(CS, CS);
     const d8 = img.data;
     const hsh = (x, y) => { const h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return h - Math.floor(h); };
@@ -28983,6 +29270,8 @@ function _hubCityBuild(g, site) {
       }
     }
     a2.putImageData(img, 0, 0);
+    _hubCityBuild._noiseImg = img;   // (v39.49) 4 MB, kept for the session
+    }
   }
   const rimG = a2.createRadialGradient(CS / 2, CS / 2, CS * 0.43, CS / 2, CS / 2, CS * 0.5);
   rimG.addColorStop(0, 'rgba(0,0,0,0)'); rimG.addColorStop(1, 'rgba(0,0,0,1)');
@@ -30519,7 +30808,9 @@ function _hcTrafficUpdate(dt) {
             orig.x += _nx * _clear; orig.y += _ny * _clear; orig.z += _nz * _clear;
             const vel = new THREE.Vector3(_nx - _nz * _sp, _ny + _sp * 0.35, _nz + _nx * _sp)
               .normalize().multiplyScalar(_tc.bolt);
-            game.projectiles.push(new Projectile(orig, vel, _tc.dmg, 0, e, _tc.col));
+            const _tb = new Projectile(orig, vel, _tc.dmg, 0, e, _tc.col);
+            _tb._cheapHit = true;   // (v39.49) sphere/OBB hit test only - never the 117k-tri hull raycast (see Projectile.update)
+            game.projectiles.push(_tb);
           }
           try { if (typeof playSpatialSound === 'function') playSpatialSound('fire_projectile', e.position.clone()); } catch (_) {}
         } catch (_) {}
@@ -35524,10 +35815,15 @@ function _clipBakeEdge(L, ogx, ogz) {
   // in the same toroidal atlas as ones baked by the full path, so a mismatch
   // would put point-sampled columns next to footprint-sampled ones and rebuild
   // the exact leading-edge seam this atlas exists to avoid.
-  for (let gx = ngx; gx <= ngx + N; gx++) { if (gx > ogx && gx < ogx + N) continue;
+  // (v39.49) INCLUSIVE skips: the old grid covered [ogx, ogx+N] inclusive, so its two boundary
+  // columns / rows were already baked and the strict `>`/`<` tests re-baked them on every snap
+  // (idempotent toroidal writes - byte-identical output, just ~60% more _clipCellH samples:
+  // 645 -> 258 per straight-line snap, at ~37 snaps/s flat out). Bit-identical trim; __clipSeam
+  // must still read 0.
+  for (let gx = ngx; gx <= ngx + N; gx++) { if (gx >= ogx && gx <= ogx + N) continue;
     const tcol = ((gx % R) + R) % R, wx = gx * sp;
     for (let jj = 0; jj <= N; jj++) { const gz = ngz + jj; d[(((gz % R) + R) % R) * R + tcol] = _clipCellH(wx, gz * sp, sp, T, L.k); } }
-  for (let gz = ngz; gz <= ngz + N; gz++) { if (gz > ogz && gz < ogz + N) continue;
+  for (let gz = ngz; gz <= ngz + N; gz++) { if (gz >= ogz && gz <= ogz + N) continue;
     const trow = (((gz % R) + R) % R) * R, wz = gz * sp;
     for (let ii = 0; ii <= N; ii++) { const gx = ngx + ii; d[trow + (((gx % R) + R) % R)] = _clipCellH(gx * sp, wz, sp, T, L.k); } }
   L.mat._clipOrigin.value.set(((ngx % R) + R) % R, ((ngz % R) + R) % R);
@@ -35774,9 +36070,54 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   }
   todo.sort((a, b) => a.d - b.d);
   const lim = Math.min(budget || _SW_BUILD_PER_FRAME, todo.length);
-  for (let i = 0; i < lim; i++) {
-    const t = todo[i], ox = t.cx * _SW_CHUNK, oz = t.cz * _SW_CHUNK;
-    chunks.set(t.key, { cx: t.cx, cz: t.cz, ground: (typeof _clipmap !== 'undefined' && _clipmap.on) ? null : _swBuildShell(ox, oz, false, T), ceiling: (T && T.biome === 'mossy') ? null : _swBuildShell(ox, oz, true, T) });
+  // (v39.49) ONE SHELL A FRAME WHILE THE PILOT IS WATCHING. Each _swBuildShell is ~3 ms of SDF
+  // sampling on the main thread; ceiling maps (endless, caverns) built TWO chunks x TWO shells in
+  // one frame = the 15-21 ms consecutive frames measured on endless_bend at speed. In play the
+  // loop is now time-budgeted (window.__swBuildMs, 2.5 ms) and a new chunk's ceiling is deferred
+  // to a later frame (`_ceilPending`, one per frame, before any new chunk). Loading paths
+  // (preload, prebake, warmup drain, swap staging) keep the old synchronous shape - there the
+  // overlay hides the frame and throughput is what matters.
+  // (v39.49) BUDGETED SHELL JOBS while the pilot is watching (play AND the countdown): one chunk in
+  // flight at a time, its ground shell then its ceiling built row by row within _bMs per call
+  // (window.__swBuildMs, 2.5 ms; the warmup drain calls this repeatedly inside its own slice, so
+  // it fills the ring at ~3-12 ms a frame in precise slices instead of 25 ms lumps). Loading paths
+  // (preload, prebake, swap / round staging) keep the synchronous shape - the overlay hides those
+  // frames and throughput is what matters there.
+  const _bt0 = performance.now();
+  const _bMs = (typeof window !== 'undefined' && window.__swBuildMs != null) ? window.__swBuildMs : 2.5;
+  const _budgeted = ((game.state === 'playing' || game.state === 'warmup') && !game._swPreloading && !game._worldPrebaking && !game._swapStaging && !game._rrStaging);
+  const _wantCeil = !(T && T.biome === 'mossy');
+  const _wantGround = !(typeof _clipmap !== 'undefined' && _clipmap.on);
+  let built = 0, stepped = 0;
+  if (_budgeted) {
+    let _cur = null;
+    for (const c of chunks.values()) { if (c._job) { _cur = c; break; } }
+    if (!_cur && lim > 0) {
+      const t = todo[0];
+      _cur = { cx: t.cx, cz: t.cz, ground: null, ceiling: null, _job: null };
+      _cur._job = _wantGround ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, false, T)
+                : (_wantCeil ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, true, T) : null);
+      chunks.set(t.key, _cur);
+      if (!_cur._job) built++;
+    }
+    if (_cur && _cur._job) {
+      const J = _cur._job;
+      stepped++;
+      const _left = _bMs - (performance.now() - _bt0);
+      if (_swShellJobRows(J, Math.max(0.2, _left))) {
+        const mesh = _swShellJobFinish(J);
+        if (J.isCeil) _cur.ceiling = mesh; else _cur.ground = mesh;
+        _cur._job = (!J.isCeil && _wantCeil) ? _swShellJobNew(_cur.cx * _SW_CHUNK, _cur.cz * _SW_CHUNK, true, T) : null;
+        built++;
+      }
+    }
+  } else {
+    for (const c of chunks.values()) { if (c._job) { _swShellJobFlush(c, T, _wantCeil); built++; } }
+    for (let i = 0; i < lim; i++) {
+      const t = todo[i], ox = t.cx * _SW_CHUNK, oz = t.cz * _SW_CHUNK;
+      chunks.set(t.key, { cx: t.cx, cz: t.cz, ground: _wantGround ? _swBuildShell(ox, oz, false, T) : null, ceiling: _wantCeil ? _swBuildShell(ox, oz, true, T) : null, _job: null });
+      built++;
+    }
   }
   
   
@@ -35819,10 +36160,10 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
     }
   }
   // (v38.61) record what this pass concluded (see the idle early-out above)
-  _SC.idle = (lim === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0);
+  _SC.idle = (built === 0 && stepped === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0);   // (v39.49) a stepped job is not idle
   _SC.T = T; _SC.scx = scx; _SC.scz = scz; _SC.view = _VIEW; _SC.size = chunks.size;
   _SC.grass = wantGrass; _SC.trees = wantTrees; _SC.clip = _clipOn;
-  return lim + gBuilt + tBuilt;
+  return built + stepped + gBuilt + tBuilt;   // (v39.49) stepped keeps the warmup drain looping while a job is in flight
 }
 // Debug hook (the __* convention): drive the streamer manually with a chosen
 // budget — headless tests teleport faster than the 2/frame budget streams, so
@@ -38204,7 +38545,25 @@ const VISUAL_SCALE_BOOST = 1.55;
 // isXRPresenting() leg is false at boot anyway (the Quest browser loads before a session).
 function _shipsVariant() {
   if (_shipsVariant._v === undefined) {
-    try { const cap = _lssTexCap(); _shipsVariant._v = (cap > 0 && cap <= 1024) ? 'm/' : ''; }
+    try {
+      // (v39.49) THE SET FOLLOWS THE DEVICE, NOT THE CAP VALUE. v39.34 gave desktop HIGH a 1024
+      // texture cap, and the old `cap <= 1024` test read that as "small device": every PC on HIGH
+      // (the default tier) quietly downloaded the lean phone hulls — base colour only, no normal
+      // maps, Standard instead of Physical, cockpits thinned to 0.35 — i.e. the owner's 2k art was
+      // gone on the owner's own machine (console: "[ships] set: mobile"). And because this is
+      // memoised at boot, before the stored MEGA/ULTRA tier is restored, even those tiers got it.
+      // The 1024 cap still shrinks the 2k maps at upload on HIGH; only a phone, a standalone
+      // Quest, or an explicit window.__texCap.max <= 1024 preview gets ships/m/.
+      const K = (typeof window !== 'undefined') ? window.__texCap : null;
+      const explicit = !!(K && typeof K.max === 'number' && K.max <= 1024);
+      let small = false;
+      try {
+        small = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ||
+                ((typeof isStandaloneQuest === 'function') && isStandaloneQuest()) ||
+                ((typeof isXRPresenting === 'function') && isXRPresenting());
+      } catch (_) {}
+      _shipsVariant._v = (explicit || small) ? 'm/' : '';
+    }
     catch (_) { return ''; }
   }
   return _shipsVariant._v;
@@ -39105,6 +39464,10 @@ try { if (typeof window !== 'undefined') window.__dynResState = _DYNRES; } catch
 function _lssDynResBase() {
   try {
     if (QUALITY.isPotato()) return 0.75;
+    // (v39.49) desktop ULTRA / MEGA canvas is native now (applyQualityPreset) - keep this in step
+    // so a desktop opted into dynres does not jump the canvas to the old 3x.
+    let _desk = true; try { _desk = !_LSS_IS_MOBILE; } catch (_) {}
+    if (_desk && (QUALITY.isMega() || QUALITY.isUltra())) return Math.min(window.devicePixelRatio, 2);
     if (QUALITY.isMega())   return Math.min(window.devicePixelRatio * 2.5, 3.0);
     if (QUALITY.isUltra())  return Math.min(window.devicePixelRatio * 1.75, 2.6);
     const rs = (QUALITY.level === 'low') ? 0.65 : (QUALITY.level === 'medium') ? 0.85 : 1.0;
@@ -43477,7 +43840,7 @@ class Projectile {
         let isHit;
         if (bot.isOwBoss && typeof bot.contains === 'function') {
           isHit = bot.contains(this.position, 30);   // (v38.88) the leviathan: its column, not a sphere round its centre
-        } else if (hasShield || _usesSplashSlop) {
+        } else if (hasShield || _usesSplashSlop || this.isNetwork || this._cheapHit) {   // (v39.49) see the player-side site
           isHit = this.position.distanceToSquared(bot.position) < hitRadius * hitRadius;
         } else {
           const inBroadOBB = _pointInsideShipOBB(this.position, bot, _PROJ_HIT_MARGIN);   // (v38.61) hoisted literal
@@ -43642,7 +44005,16 @@ class Projectile {
         const hasShield = player.shield > 0;
         const _usesSplashSlop = (this.splash || 0) >= 25;
         let isHit;
-        if (hasShield || _usesSplashSlop) {
+        // (v39.49) NETWORK SHOTS AND HUB TRAFFIC BOLTS NEVER WALK THE HULL. Below this branch is
+        // _swepRayHitsShipMesh: a THREE.Raycaster over every triangle of the c1seat hull (14 joined
+        // primitives, ~117k tris, KHR-quantized so each vertex read denormalizes) - measured 20.6-22.7 ms
+        // PER CALL on the owner's machine, and it repeats every frame the projectile sits inside the
+        // 1.4x OBB (7-40 frames). Remote projectiles are built with splash 0 (`spawnNetworkProjectile`
+        // forces it - they deal no local damage, the shooter's client resolves hits), so every incoming
+        // peer shot while the local shield was down paid that walk, as did aggro'd hub traffic bolts
+        // (splash 0). The sphere/OBB test is all a cosmetic shot needs. `isNetwork` had been set for a
+        // long time and never read.
+        if (hasShield || _usesSplashSlop || this.isNetwork || this._cheapHit) {
           isHit = this.position.distanceToSquared(player.position) < hitRadius * hitRadius;
         } else {
           const inBroadOBB = _pointInsideShipOBB(this.position, player, _PROJ_HIT_MARGIN);   // (v38.61) hoisted literal
@@ -44145,6 +44517,7 @@ const dynamicLights = {
 (function initDynamicLights() {
   for (let i = 0; i < dynamicLights.MAX_LIGHTS; i++) {
     const light = new THREE.PointLight(0xff8800, 0, 600);
+    light.layers.enable(5);   // (v39.49) see _lssCockpitLights: every light rides layer 5 so the ADS pass keys like the main pass
     // Permanently visible; intensity=0 is the "off" state. See comment above.
     light.visible = true;
     scene.add(light);
@@ -44229,6 +44602,7 @@ const _SHIPL = {
 (function initShipLights() {
   const S = _SHIPL;
   S.engine = new THREE.PointLight(0x66d8ff, 0, 700, 0);
+  S.engine.layers.enable(5);   // (v39.49) layer 5 = the ADS overlay camera sees the same light set as the main pass
   S.engine.visible = true;   // pinned resident; intensity 0 = off
   scene.add(S.engine);
   // Warm white beam, no shadowmap. angle/penumbra/range tuned live v36.03.
@@ -44238,12 +44612,14 @@ const _SHIPL = {
   // 1600u — a natural headlight throw. Verified in the volcanic rift vault:
   // beam-footprint luminance 13→33.5 avg (68%→45% of pixels under 16/255).
   S.head = new THREE.SpotLight(0xffe8c4, 0, 2400, 0.5, 0.45, 1);
+  S.head.layers.enable(5);   // (v39.49) without this the ADS pass has NUM_SPOT_LIGHTS 0 = a second program per hull material
   S.head.castShadow = false;
   S.head.visible = true;
   scene.add(S.head);
   scene.add(S.head.target);
   for (let i = 0; i < S.TRAF_N; i++) {
     const l = new THREE.PointLight(0x7fd0ff, 0, 620, 0);
+    l.layers.enable(5);   // (v39.49) ADS-pass light parity
     l.visible = true;
     scene.add(l);
     S.traffic.push(l);
@@ -47152,7 +47528,7 @@ function _getEffectiveCloudColor(parentRockColor) {
 }
 
 class DestructibleObstacle {
-  constructor(pos, shapeType, scale) {
+  constructor(pos, shapeType, scale, opts) {
     this.position = pos.clone();
     this.originalPos = pos.clone();
     this.shapeType = shapeType || OBSTACLE_SHAPES[Math.floor(Math.random() * OBSTACLE_SHAPES.length)];
@@ -47199,7 +47575,20 @@ class DestructibleObstacle {
     const colorIdx = Math.floor(Math.random() * _effObstColors.length);
     this.baseColor = _effObstColors[colorIdx];
 
-    this._buildMesh();
+    // (v39.49) CLUSTER CHILDREN SKIP _buildMesh. ClusterObstacle built every rock as a full
+    // standalone obstacle - random primitive geometry + MeshStandardMaterial + a CLONED edge
+    // geometry + edge material + two scene adds - and then threw all of it away and replaced it
+    // with the rock geometry/fractal material it actually uses. Measured 18-23 ms warm / 57 ms cold
+    // per round-start frame (~40% of the ~130 ms world-build frame), pure garbage. The seeded world
+    // layout (spawnDynamicObjects runs under withSeededRandom) must not move, so the default box
+    // branch's three Math.random() draws are burned here exactly as _buildMesh would have drawn them.
+    if (opts && opts.skipMesh) {
+      this._leanChild = true;
+      const _st = this.shapeType;
+      if (_st !== 'diamond' && _st !== 'cross' && _st !== 'wedge' && _st !== 'ring') { Math.random(); Math.random(); Math.random(); }
+    } else {
+      this._buildMesh();
+    }
   }
 
   _buildMesh() {
@@ -47930,10 +48319,22 @@ class ClusterObstacle {
       const rotatedOffset = offset.clone().applyQuaternion(q);
       const childPos = this.position.clone().add(rotatedOffset);
       const childScale = avgChildScale * (0.75 + Math.random() * 0.55);
-      const child = new DestructibleObstacle(childPos, null, childScale);
+      const child = new DestructibleObstacle(childPos, null, childScale, { skipMesh: true });   // (v39.49) see the ctor
+      if (!child.mesh) {
+        // (v39.49) the rock this child really draws, built once instead of after a throw-away
+        // primitive. Same Math.random() order as the old replace-in-place block below.
+        const _rockSeed = Math.random() * 1000;
+        child._rockSeed = _rockSeed;
+        child.mesh = new THREE.Mesh(_makeRockGeometry(1, _rockSeed), _makeAtomFractalMaterial(this.baseColor));
+        child.mesh.position.copy(child.position);
+        child.mesh.rotation.copy(child.rotation);
+        child.mesh.scale.setScalar(childScale);
+        scene.add(child.mesh);
+        child.edgeMesh = null;
+      }
       // Replace the child's geometry + material with a per-atom
       // unique rock geometry plus the fractal shader material.
-      if (child.mesh) {
+      if (child.mesh && !child._leanChild) {
         try {
           if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
           if (child.mesh.material && child.mesh.material.dispose) _lssRetainMat(child.mesh.material);   // (v38.97) keep the program resident
@@ -47972,7 +48373,7 @@ class ClusterObstacle {
       const childPos = this.position.clone().add(rotatedOffset);
       const child = new DestructibleObstacle(childPos, null, cc.scale);
       // Same fractal-atom replacement as the non-config path.
-      if (child.mesh) {
+      if (child.mesh && !child._leanChild) {
         try {
           if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
           if (child.mesh.material && child.mesh.material.dispose) _lssRetainMat(child.mesh.material);   // (v38.97) keep the program resident
@@ -51348,6 +51749,15 @@ function _loadMonsterModelInto(m) {
 
 function _loadNextMonsterModel() {
   if (!game.monsters || _monsterLoadIdx >= game.monsters.length) return;
+  // (v39.49) NEVER PARSE A GLB IN 'playing' if it can wait. This trickle only runs when the launch
+  // prime was capped (cold cache, incognito, an early launch) and it then parses + attaches a
+  // leviathan on the main thread every 2.5 s DURING the first combat seconds: 15-30 ms frames.
+  // Mesh-less monsters are inert (their update returns on !this.mesh), so deferring to the next
+  // warmup / roundEnd / picker costs nothing visible. Bounded: after ~20 s of continuous play (a
+  // freeflight session has no round ends) it loads anyway.
+  const _d = (_loadNextMonsterModel._defer = (_loadNextMonsterModel._defer || 0) + 1);
+  if (game.state === 'playing' && _d < 20) { setTimeout(_loadNextMonsterModel, 1000); return; }
+  _loadNextMonsterModel._defer = 0;
   const m = game.monsters[_monsterLoadIdx++];
   _loadMonsterModelInto(m).then((ok) => {
     // 2.5 s breather between parses spreads the main-thread cost so no
@@ -53322,6 +53732,19 @@ function _ghostPinWarm() {
       if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
         renderer.setRenderTarget(postFX.rtScene);
         renderer.compile(scene, camera);
+        // (v39.49b) the seat shell's ghost materials are transparent + DoubleSide, so three draws
+        // them in two single-sided passes with two programs; compile both (see _warmCloakForRoot).
+        try {
+          const _gm = [];
+          player.mesh.traverse((o) => { const g = o.userData && o.userData._ghostMats; if (!g) return; for (const m of (Array.isArray(g) ? g : [g])) if (m && m.side === THREE.DoubleSide && m.transparent) _gm.push(m); });
+          if (_gm.length) {
+            for (const m of _gm) { m.side = THREE.BackSide; m.needsUpdate = true; }
+            renderer.compile(scene, camera);
+            for (const m of _gm) { m.side = THREE.FrontSide; m.needsUpdate = true; }
+            renderer.compile(scene, camera);
+            for (const m of _gm) { m.side = THREE.DoubleSide; m.needsUpdate = true; }
+          }
+        } catch (_) {}
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
@@ -54196,6 +54619,84 @@ async function _prebakeWorldForLaunch() {
     try { rep.mon = await _primeMonsterModels(_bt0, _MON_PRIME_MAX_MS); } catch (_) {}
     rep.ms.mon = Math.round(_pbNow() - _tM);
 
+    // ---- C3. (v39.49) HUB CARRIER PRIME ----
+    // The overworld carrier GLB was loaded lazily on the first city you approached and drawn for
+    // the first time in the same frame as that city's fleet: two cold physical-shader links
+    // (~80 KB fragment shaders named 'material' and an unnamed transparent one) plus its texture
+    // and geometry uploads landed in ONE 1.09 s render frame at city arrival (pane, __pw watcher).
+    // Load it now (4 s cap), compile its materials against the live scene with rtScene bound,
+    // upload its textures, pre-warm its mirror variants, and leave a frustumCulled:false clone in
+    // the scene through the GPU prime below so its geometry is uploaded by those draws. The clone
+    // shares geometry and materials with the proto (Object3D.clone), so nothing is disposed.
+    let _carWarmGroup = null;
+    const _tK = _pbNow();
+    try {
+      // (v39.49) ...and on ANY map with water. The mirror lifts BOT hulls too, and bots spawn after
+      // this prebake (`reflWarm` read 3 = the player's materials only), so a bot in a hull the player
+      // is not flying linked its USE_EMISSIVEMAP variants cold at first reflection: 2 links / 4.2 s
+      // in the owner's hourglass match. One hull per loadout here covers every bot on every water map.
+      const _ffMode = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
+      if ((_ffMode || game._hubWater) && _pbNow() - _bt0 < _PREBAKE_MAX_MS) {
+        _pbSub(_ffMode ? 'docking the carrier' : 'priming the hulls');
+        if (_ffMode && typeof _carrierLoadProto === 'function' && typeof _carrier !== 'undefined' && _carrier) {
+          await new Promise((res) => {
+            let done = false; const fin = () => { if (!done) { done = true; res(); } };
+            try { _carrierLoadProto(fin); } catch (_) { fin(); }
+            if (_carrier.proto) fin();
+            setTimeout(fin, 4000);
+          });
+        }
+        // (v39.49) ...AND THE SHADOW-PASS VARIANTS. With the carrier primed, city arrival still linked
+        // seven programs cold: the DEPTH variants (transmission / alpha hull materials) the hub sun's
+        // shadow pass needs for the fleet hulls and the carrier. The ghost-fleet warm parks its hulls at
+        // y = -100000, outside the shadow camera's frustum, so the shadow pass never drew them. This
+        // group sits just BELOW the pilot (inside the shadow frustum, occluded by terrain for the main
+        // camera) through the GPU prime's renders, one hull of each loadout plus the carrier, casting.
+        _carWarmGroup = new THREE.Group();
+        try { _carWarmGroup.position.set(player.position.x, player.position.y - 1500, player.position.z); } catch (_) { _carWarmGroup.position.set(0, -100000, 0); }
+        if (_ffMode && typeof _carrier !== 'undefined' && _carrier && _carrier.proto) {
+          const _cl = _carrier.proto.clone(true);
+          _cl.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = true; } });
+          _carWarmGroup.add(_cl);
+        }
+        try {
+          const _keys = (typeof shipModelCache !== 'undefined' && shipModelCache.loaded) ? Object.keys(shipModelCache.loaded) : [];
+          if (typeof createShipMesh === 'function' && typeof LOADOUTS !== 'undefined' && typeof CHASSIS !== 'undefined') {
+            let _i = 0;
+            for (const _key of _keys) {
+              const _ld = LOADOUTS[_key]; const _ch = _ld ? CHASSIS[_ld.chassis] : null; if (!_ch) continue;
+              const _hm = createShipMesh(_ch, 0xff4444, _key);
+              if (!_hm) continue;
+              _hm.position.set((_i++) * 40, 0, 0);
+              _hm.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; if (!(o.userData && o.userData._cockpitPart)) o.castShadow = true; } });
+              _carWarmGroup.add(_hm);
+            }
+          }
+        } catch (_) {}
+        scene.add(_carWarmGroup);
+        {
+          const _cl = _carWarmGroup;
+          const _rtK = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+          const _pRTK = renderer.getRenderTarget();
+          try {
+            if (_rtK) renderer.setRenderTarget(_rtK);
+            renderer.compile(scene, camera);
+            _cl.traverse((o) => {
+              const _ms = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+              for (const _m of _ms) {
+                for (const _k of ['map', 'normalMap', 'emissiveMap', 'roughnessMap', 'metalnessMap', 'aoMap']) {
+                  const _t = _m && _m[_k];
+                  if (_t && _t.isTexture) { try { renderer.initTexture(_t); } catch (_) {} }
+                }
+              }
+            });
+            if (game._hubWater && typeof _warmReflLiftForRoot === 'function') _warmReflLiftForRoot(_cl);
+          } finally { try { renderer.setRenderTarget(_pRTK); } catch (_) {} }
+        }
+      }
+    } catch (e) { console.warn('[prebake] carrier prime failed:', e && e.message); }
+    rep.ms.carrier = Math.round(_pbNow() - _tK);
+
     // ---- D. GPU prime: real scene, real camera, full sphere, rtScene bound ----
     const _tD = _pbNow();
     if (_pbNow() - _bt0 < _PREBAKE_MAX_MS) {
@@ -54203,6 +54704,8 @@ async function _prebakeWorldForLaunch() {
       rep.gpuPasses = await _prebakeGpuPrime();
     } else if (!rep.capped) rep.capped = 'gpu-skipped';
     rep.ms.gpu = Math.round(_pbNow() - _tD);
+    // (v39.49) the carrier warm clone has been drawn by the prime; take it out, dispose nothing
+    try { if (_carWarmGroup) { scene.remove(_carWarmGroup); _carWarmGroup = null; } } catch (_) {}
 
     // ---- E. (v37.18) ANGLE COMPILE-QUEUE DRAIN — the battery match-start
     // hitch, root-caused by a GPU-service trace: with KHR_parallel_shader_
@@ -54424,6 +54927,44 @@ async function _prebakeGpuPrime() {
   const e = new THREE.Euler(0, 0, 0, 'YXZ');
   const PITCH = [0, -0.6, 0.6];
   let passes = 0;
+  // (v39.49) THE HUB'S GPU SIMS LINK HERE, NOT AT FIRST SIGHT. The ripple heightfield, the bird
+  // flock and the fish school are GPUComputationRenderer passes whose programs only exist once
+  // their first compute() runs - which was ~16-18 s into free flight (`[cold] GPUComputationShader
+  // x2` in the pane), a synchronous ANGLE link each, in play. One tick of each here, behind the
+  // overlay, before the prime renders draw the water with their textures.
+  // The ticks themselves gate on document.hidden / "near water" / flock visibility, so drive the
+  // compute passes directly: one step of each GPUComputationRenderer links its programs.
+  try { if (typeof _swRipple !== 'undefined' && _swRipple && _swRipple.gpu) _swRipple.gpu.compute(); } catch (_) {}
+  try { if (typeof _birdFlock !== 'undefined' && _birdFlock && _birdFlock.gpu) _birdFlock.gpu.compute(); } catch (_) {}
+  try { if (typeof _fishSchool !== 'undefined' && _fishSchool && _fishSchool.gpu) _fishSchool.gpu.compute(); } catch (_) {}
+  // The flock / school draw materials only compile once their mesh is visible (fish: near water),
+  // so compile them here with the meshes forced visible for one call.
+  try {
+    const _vis = [];
+    for (const _F of [(typeof _birdFlock !== 'undefined') ? _birdFlock : null, (typeof _fishSchool !== 'undefined') ? _fishSchool : null]) {
+      if (_F && _F.mesh && !_F.mesh.visible) { _F.mesh.visible = true; _vis.push(_F.mesh); }
+    }
+    if (_vis.length) {
+      const _pRT = renderer.getRenderTarget();
+      if (rt) renderer.setRenderTarget(rt);
+      try { renderer.compile(scene, camera); } catch (_) {}
+      renderer.setRenderTarget(_pRT);
+      for (const _m of _vis) _m.visible = false;
+    }
+  } catch (_) {}
+  // (v39.49) THE MIRROR'S HULL VARIANTS. The hub water's Reflector pass lifts every hull material
+  // that has a map and no emissiveMap by setting emissiveMap = map (USE_EMISSIVEMAP is a program
+  // key term) - so the first frame the ship was mirrored linked 5-8 hull programs at once: a 480 ms
+  // frame at 14.4 s of free flight in the pane (`[cold] hull, Vortex_CP_Graphite, ...`). Compile
+  // those variants now, for the player and every bot hull present, the way the cloak warm does.
+  try {
+    if (game._hubWater && typeof _warmReflLiftForRoot === 'function') {
+      let _n = 0;
+      if (typeof player !== 'undefined' && player && player.mesh) _n += _warmReflLiftForRoot(player.mesh);
+      for (const _e of (game.entities || [])) { if (_e && _e.mesh) _n += _warmReflLiftForRoot(_e.mesh); }
+      try { window.__reflWarm = _n; } catch (_) {}
+    }
+  } catch (_) {}
   try {
     for (let p = 0; p < PITCH.length; p++) {
       for (let y = 0; y < 4; y++) {
@@ -61136,45 +61677,82 @@ function _setShipMeshOpacity(root, opacity) {
 // the transparent twin of each belongs in the same pass, on the same loading screen, before any
 // of them is torn down. After this, no hull ever forks a cloak program in combat.
 function _warmCloakForRoot(root) {
+  // (v39.49b) IN PLACE, NOT CLONED. Material.clone() copies the standard props and userData but
+  // NOT `onBeforeCompile` / `customProgramCacheKey` - and every hull material carries the skin hook
+  // (`lssSkinHue`, a program-key term). So the clones this warm used to compile keyed a DIFFERENT
+  // program family than the live material the cloak actually flips; the "196 transparent hull
+  // programs" it reported were never the ones drawn, and the owner's first cloak per hull still
+  // linked cold (4 programs, 2.3 s in a Tracker). Now the ghost hull's OWN materials are flipped
+  // exactly the way _setShipMeshOpacity flips them (transparent + opacity x cloakOpacity), compiled
+  // with rtScene bound in BOTH single-sided passes three uses for a transparent DoubleSide material
+  // (side = BackSide, then FrontSide - two programs), and restored. Same call, no render between.
   if (!root || typeof root.traverse !== 'function') return 0;
   if (root.userData) root.userData._cloakWarmed = true;
   try {
     const op = (typeof PILOT_PERKS !== 'undefined' && PILOT_PERKS && PILOT_PERKS.cloak &&
                 typeof PILOT_PERKS.cloak.cloakOpacity === 'number') ? PILOT_PERKS.cloak.cloakOpacity : 0.01;
-    const swaps = [], clonesAll = [];
+    const mats = [];
     root.traverse((child) => {
       if (!child.isMesh || !child.material) return;
-      const orig = child.material;
-      const arr = Array.isArray(orig) ? orig : [orig];
-      let any = false;
-      const clones = arr.map((m) => {
-        if (!m || m.transparent) return m;          // already transparent — same program
-        const c = m.clone();
-        c.transparent = true;
-        c.opacity = (m.opacity != null ? m.opacity : 1) * op;
-        c.needsUpdate = true;
-        clonesAll.push(c); any = true;
-        return c;
-      });
-      if (!any) return;
-      child.material = Array.isArray(orig) ? clones : clones[0];
-      swaps.push({ child, orig });
+      const arr = Array.isArray(child.material) ? child.material : [child.material];
+      for (const m of arr) { if (m && !m.transparent && mats.indexOf(m) < 0) mats.push(m); }
     });
-    if (clonesAll.length) {
-      try { renderer.compile(root, camera, scene); } catch (_) {}
-      for (const s of swaps) s.child.material = s.orig;        // restore FIRST
-      for (const c of clonesAll) { try { _lssRetainMat(c); } catch (_) {} }
-      try { window.__cloakWarm = (window.__cloakWarm || 0) + clonesAll.length; } catch (_) {}
-      return clonesAll.length;
+    if (!mats.length) return 0;
+    const _rtC = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+    const _pRTC = renderer.getRenderTarget();
+    try {
+      if (_rtC) renderer.setRenderTarget(_rtC);
+      for (const m of mats) {
+        m._wOp = m.opacity; m._wSide = m.side;
+        m.transparent = true;
+        m.opacity = (m.opacity != null ? m.opacity : 1) * op;
+        if (m.side === THREE.DoubleSide) m.side = THREE.BackSide;
+        m.needsUpdate = true;
+      }
+      renderer.compile(root, camera, scene);
+      let _any = false;
+      for (const m of mats) { if (m._wSide === THREE.DoubleSide) { m.side = THREE.FrontSide; m.needsUpdate = true; _any = true; } }
+      if (_any) renderer.compile(root, camera, scene);
+    } catch (_) {}
+    for (const m of mats) {
+      try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
+      delete m._wOp; delete m._wSide;
     }
+    try { renderer.setRenderTarget(_pRTC); } catch (_) {}
+    try { window.__cloakWarm = (window.__cloakWarm || 0) + mats.length; } catch (_) {}
+    return mats.length;
   } catch (e) { console.warn('[cloak] pre-warm failed:', e); }
   return 0;
 }
-
-// The live path: player's hull first, then any bot that has appeared since. ONE GROUP PER FRAME,
-// so a mid-round spawn is covered without a spike. Bots that spawn after the countdown still land
-// here, but the ghost-fleet pass above means their programs are already resident, so this is a
-// cache hit rather than a compile.
+// (v39.49) Pre-compile the hub mirror's lifted-hull variants for one ship root: every material the
+// Reflector pass would give an emissiveMap (`_shipReflOverride`: has color + emissive + map, no
+// emissiveMap) is flipped IN PLACE (v39.49b: not cloned - see _warmCloakForRoot for why a clone keys
+// a different program), compiled against the live scene with rtScene bound, and restored.
+function _warmReflLiftForRoot(root) {
+  if (!root || typeof root.traverse !== 'function') return 0;
+  if (root.userData && root.userData._reflWarmed) return 0;
+  if (root.userData) root.userData._reflWarmed = true;
+  try {
+    const mats = [];
+    root.traverse((child) => {
+      if (!child.isMesh || !child.material) return;
+      const arr = Array.isArray(child.material) ? child.material : [child.material];
+      for (const m of arr) { if (m && m.color && m.emissive && m.emissive.isColor && m.map && !m.emissiveMap && mats.indexOf(m) < 0) mats.push(m); }
+    });
+    if (!mats.length) return 0;
+    const _rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+    const _pRT = renderer.getRenderTarget();
+    try {
+      if (_rt) renderer.setRenderTarget(_rt);
+      for (const m of mats) { m.emissiveMap = m.map; m.needsUpdate = true; }
+      renderer.compile(root, camera, scene);
+    } catch (_) {}
+    for (const m of mats) { try { m.emissiveMap = null; m.needsUpdate = true; } catch (_) {} }
+    try { renderer.setRenderTarget(_pRT); } catch (_) {}
+    return mats.length;
+  } catch (e) { console.warn('[refl] variant pre-warm failed:', e); }
+  return 0;
+}
 function _warmCloakVariantOnce() {
   let root = null;
   try {
@@ -62078,6 +62656,17 @@ function _lssCockpitLights() {
   if (typeof scene === 'undefined' || !scene) return null;
   const key = new THREE.PointLight(0xffe2c4, 0, 160, 2);
   const fill = new THREE.PointLight(0xa9c6ff, 0, 160, 2);
+  // (v39.49) EVERY LIGHT RIDES LAYER 5. v36.74 put the five combat lights on layer 5 so the ADS
+  // overlay camera (layer 5 only) would light the hull - but the 15 lights added since (this pair,
+  // the engine + thruster point lights, the headlight spot, the 8-light dynamic pool) were not, so
+  // that pass rendered every hull material with NUM_POINT_LIGHTS 0 / NUM_SPOT_LIGHTS 0: light counts
+  // are program-key terms, so it was a SECOND program per hull material, linked cold by
+  // _adsOverlayPrewarm during play (8 links in one frame, ~1 s, at 17 s of free flight in the pane:
+  // the 76 KB `hull` variant missing SPOT_LIGHT_MAP_INDEX). With parity the ADS pass hits the
+  // main pass's programs and the prewarm is a cache hit. The zoomed hull also finally gets its own
+  // engine / cockpit / headlight lighting.
+  key.layers.enable(5);
+  fill.layers.enable(5);
   key.name = 'cockpitKey'; fill.name = 'cockpitFill';
   scene.add(key); scene.add(fill);
   return { key, fill };
@@ -63008,9 +63597,17 @@ function _adsOverlayRender() {
     // means the hull depth-tests correctly against the zoomed world.
     const _prevAC = renderer.autoClear;
     const _prevBG = scene.background;
+    // (v39.49) The main pass one call earlier already updated every world matrix and rendered the
+    // shadow map; this second render() re-walked scene.updateMatrixWorld and, in the hub, re-drew
+    // the 2048^2 shadow map with only the layer-5 hull in it (the hull's world shadow vanished
+    // while zoomed). Same guard pattern the monster warm uses. Lights/fog untouched: no program forks.
+    const _prevMW = scene.matrixWorldAutoUpdate;
+    const _prevSM = renderer.shadowMap.autoUpdate;
     try {
       renderer.autoClear = false;
       scene.background = null;
+      scene.matrixWorldAutoUpdate = false;
+      renderer.shadowMap.autoUpdate = false;
       // (v38.67) CLEAR THE DEPTH FIRST. This pass draws the hull (and its
       // shield bubble) with the UN-zoomed camera into the target the ZOOMED
       // camera just filled. Near/far match, so depths are comparable — but a
@@ -63026,6 +63623,8 @@ function _adsOverlayRender() {
     } finally {
       renderer.autoClear = _prevAC;
       scene.background = _prevBG;
+      scene.matrixWorldAutoUpdate = _prevMW;
+      renderer.shadowMap.autoUpdate = _prevSM;
     }
   } catch (_) {}
 }
@@ -77955,11 +78554,13 @@ function _doPostFXResize() {
   try {
     const _sz = _getBloomRTSize();
     const w = _sz.w, h = _sz.h;
+    // (v39.49) scene target at the tier's MAXIMUM (the per-frame viewport does the rest); bloom
+    // chain at half the BASE size. WebGLRenderTarget.setSize is a no-op when nothing changed.
     try { postFX.rtScene.setSize(w, h); } catch (_) {}
-    try { postFX.rtBright.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
-    try { postFX.rtBlurH.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
-    try { postFX.rtBlurV.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
-    try { postFX.blurMat.uniforms.resolution.value.set(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
+    try { postFX.rtBright.setSize(_sz.bw, _sz.bh); } catch (_) {}
+    try { postFX.rtBlurH.setSize(_sz.bw, _sz.bh); } catch (_) {}
+    try { postFX.rtBlurV.setSize(_sz.bw, _sz.bh); } catch (_) {}
+    try { postFX.blurMat.uniforms.resolution.value.set(_sz.bw, _sz.bh); } catch (_) {}
     try { resizeCineFX(window.innerWidth, window.innerHeight); } catch (_) {}
   } catch (_) {}
 }
@@ -88593,6 +89194,7 @@ function gameLoop(timestamp) {
           try { _clipEnableNow(_fX, _fZ); } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }
         } else { try { _clipUpdate(_fX, _fZ); } catch (_) {} }
       }
+      __pmark('hub:clip');   // (v39.49) clipmap enable/update
       if (game._swPreloading) {
         var _plBuilt = updateSandwichStream(_fX, _fZ, 28, 14, 14);   
         game._swPreloadFrames = (game._swPreloadFrames || 0) + 1;
@@ -88642,17 +89244,36 @@ function gameLoop(timestamp) {
         } catch (_) { _drainMs = 12; }
         _swDrainStream(_fX, _fZ, _drainMs, 64);
         try { _warmCloakVariantOnce(); } catch (_) {}   // (v39.39) once, behind the countdown
+        // (v39.49b) ...AND AGAIN FOR THE PLAYER'S HULL IN THE LAST 2 s OF THE COUNTDOWN. The pass above
+        // reaches the player's ship ~4 s into the launch, before its hull texture is assigned, so it
+        // compiled the no-map transparent variants (cache-key term `mapUv`); the first real cloak then
+        // linked the textured pair cold (2 programs, ~2 s). Re-run once the materials are final.
+        try {
+          if (typeof game.warmupTimer === 'number') {
+            if (game.warmupTimer > 3) game._cloakLateWarm = false;
+            else if (game.warmupTimer < 2 && !game._cloakLateWarm && player && player.mesh) {
+              game._cloakLateWarm = true;
+              if (player.mesh.userData) player.mesh.userData._cloakWarmed = false;
+              _warmCloakForRoot(player.mesh);
+            }
+          }
+        } catch (_) {}
       } else {
         updateSandwichStream(_fX, _fZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
       }
+      __pmark('hub:stream');   // (v39.49) chunk streamer / warmup drain alone
       try { _swUpdateHubWater(); } catch (_) {}   
+      __pmark('hub:water');   // (v39.49) _swUpdateHubWater alone
       // (v35.37) SUB-MARKS. The single 'dots+shields' bucket below actually
       // spanned this whole hub-world frame — ripple sim, critters, zone morph,
       // city, weather — so a 55%-of-frame reading told you nothing about which
       // of them was responsible. Splitting it costs one performance.now() per
       // section and only when the profiler is on.
       try { _swRippleTick(dt); } catch (_) {}
-      __pmark('hub:ripple');
+      // (v39.49) was 'hub:ripple' - but this mark closes the clipmap update, the chunk STREAMER
+      // (_swBuildShell, 2 chunks x 2 shells a frame on endless = the 15-21 ms frames measured on
+      // endless_bend) and the water update as well as the ripple tick. Named for what it covers.
+      __pmark('hub:ripple');   // (v39.49) the ripple tick alone now (see hub:clip / hub:stream / hub:water above)
       try { _swUpdateUnderwater(); } catch (_) {}
       __pmark('hub:underwater');
       try { _birdFlockTick(_wallDt); } catch (_) {}
@@ -98904,20 +99525,41 @@ try {
 // ---- HOOK AUDIO INTO EXISTING FUNCTIONS ----
 // Override key functions to add sound triggers
 
-function showHitMarker() {
-  const el = document.getElementById('hit-marker');
-  if (!el) return;
+// (v39.49) HIT / KILL MARKERS RESTART THROUGH THE WEB ANIMATIONS API. The class-toggle restart
+// (`remove('active'); void el.offsetWidth; add('active')`) forces a synchronous style + layout
+// pass on the whole document, mid gameLoop, on every landed hit: up to 20/s with the Gatling and
+// 8x in ONE frame from a Shotgun spread (~0.2-0.8 ms each with the crosshair's dirty layout).
+// Same pattern _hitVignettePulse (v38.61) uses; keyframes are the CSS @keyframes hitFlash /
+// killFlash verbatim so the look is unchanged. The `.active` class path stays as the fallback.
+const _HIT_FLASH_KEYS = [
+  { offset: 0,   opacity: 1,    transform: 'translate(-50%, -50%) scale(1.3)',  filter: 'drop-shadow(-2px 0 0 rgba(0,255,255,0.95)) drop-shadow(2px 0 0 rgba(255,0,180,0.95))' },
+  { offset: 0.4, opacity: 0.95, transform: 'translate(-50%, -50%) scale(1.05)', filter: 'drop-shadow(-1px 0 0 rgba(0,255,255,0.55)) drop-shadow(1px 0 0 rgba(255,0,180,0.55))' },
+  { offset: 1,   opacity: 0,    transform: 'translate(-50%, -50%) scale(0.8)',  filter: 'drop-shadow(0 0 0 rgba(0,255,255,0)) drop-shadow(0 0 0 rgba(255,0,180,0))' },
+];
+const _KILL_FLASH_KEYS = [
+  { offset: 0,    opacity: 1, transform: 'translate(-50%, -50%) scale(1.5)', filter: 'drop-shadow(-4px 0 0 rgba(0,240,255,1)) drop-shadow(4px 0 0 rgba(255,50,200,1))' },
+  { offset: 0.25, opacity: 1, transform: 'translate(-50%, -50%) scale(1.0)', filter: 'drop-shadow(-2px 0 0 rgba(0,240,255,0.75)) drop-shadow(2px 0 0 rgba(255,50,200,0.75))' },
+  { offset: 1,    opacity: 0, transform: 'translate(-50%, -50%) scale(0.6)', filter: 'drop-shadow(0 0 0 rgba(0,240,255,0)) drop-shadow(0 0 0 rgba(255,50,200,0))' },
+];
+function _markerFlash(el, keys, ms) {
+  if (typeof el.animate === 'function') {
+    if (el._flashAnim) { try { el._flashAnim.cancel(); } catch (_) {} }
+    try { el._flashAnim = el.animate(keys, { duration: ms, easing: 'ease-out' }); return; } catch (_) { el._flashAnim = null; }
+  }
   el.classList.remove('active');
   void el.offsetWidth;
   el.classList.add('active');
 }
+function showHitMarker() {
+  const el = showHitMarker._el || (showHitMarker._el = document.getElementById('hit-marker'));
+  if (!el) return;
+  _markerFlash(el, _HIT_FLASH_KEYS, 250);
+}
 
 function showKillMarker() {
-  const el = document.getElementById('hit-marker-kill');
+  const el = showKillMarker._el || (showKillMarker._el = document.getElementById('hit-marker-kill'));
   if (!el) return;
-  el.classList.remove('active');
-  void el.offsetWidth;
-  el.classList.add('active');
+  _markerFlash(el, _KILL_FLASH_KEYS, 500);
 }
 
 const _origFireWeapon = fireWeapon;

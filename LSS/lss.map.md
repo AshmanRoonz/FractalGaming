@@ -1475,3 +1475,40 @@ together**: `Projectile.lifetime` is 5 s, so cutting speed alone silently cuts t
 the same fraction. Lifetime goes to 6.5 s, holding 2340 u against the original 2625 u. Both live on
 `window.__mtr = { speed, life, tight, wide, turnTight, turnWide, range }` for tuning by feel.
 
+## v39.49 — the supersample moved into the scene target, and the hitch lanes got their warms
+
+**Canvas vs scene.** MEGA/ULTRA used to set the CANVAS pixel ratio (3x = 4608x1917) while the adaptive
+scale had already dropped the scene target to native: every frame still paid a 4x-MSAA resolve +
+composite + compositor copy at 8.8 MP for nothing. A/B on one map, same scene size: native canvas
+103 fps / 0.7 dropped frames a second vs 3x canvas 92 fps / 8.5 a second. Now desktop ULTRA/MEGA keep
+a native canvas (`applyQualityPreset`, boot DPR block, `_lssDynResBase`); `postFX.rtScene` is
+allocated ONCE at the tier max (`_getBloomRTSize` / `_lssTierSuper`, 16 MP cap) and each frame
+renders into a VIEWPORT of it sized by `_ssDyn.scale` (`_lssSceneActive`, applied in `renderPostFX`);
+`brightMat` / `compositeMat` sample the live sub-rectangle through `uSceneScale` / `uSceneMax`
+(the `SCENE(uv)` macro). A scale step is free. Bloom RTs are half the BASE size. Read
+`window.__postFXInfo().active` = [w, h, 'scale', s, 'hz', hz].
+
+**The sampler** (`_lssSupersampleTick`) only samples `playing` frames (the picker's 6 Hz frames used
+to read as a GPU 24x over budget and shed the supersample in five render-target reallocations = five
+hitches on the picker), estimates the refresh from the 5th percentile of a 240-frame window
+(the old minimum snapped a 144 Hz panel to 165 and killed the supersample for the session), and
+starts at scale 0, creeping up.
+
+**Hitch lanes closed** (each measured before/after in the pane, `window.__lssProbe` in the owner's
+Chrome): ADS-overlay light-layer parity (all lights `layers.enable(5)` - the layer-5 camera keyed a
+second program per hull material); `_warmReflLiftForRoot` pre-compiles the Reflector's
+USE_EMISSIVEMAP hull variants; `_prebakeGpuPrime` steps the ripple/bird/fish GPGPU sims and
+compiles the flock meshes; prebake phase C3 loads + draws the overworld carrier and one hull per
+loadout INSIDE the sun shadow frustum (shadow-depth variants); `_hubCityBuild._noiseImg` caches the
+1024^2 albedo noise (300 ms -> ~10 ms per satellite); cluster rocks skip `_buildMesh`
+(`{skipMesh:true}`, `_leanChild`, RNG draws burned); `updateSandwichStream` is time-budgeted with
+deferred ceilings while playing (`window.__swBuildMs`); shore/far masks and the critter field bake
+as row jobs (`_swRippleMaskJobTick`, `_critterTerrainJobTick`); peer shots / hub traffic bolts skip
+the 117k-tri hull raycast (`isNetwork` / `_cheapHit`); monster trickle defers while playing;
+`_clipBakeEdge` inclusive skips; hit/kill markers restart via WAAPI (`_markerFlash`).
+Also fixed: `_shipsVariant()` chose the lean MOBILE hull set on desktop since v39.34; the
+`hub:ripple` profiler mark (clipmap + streamer + water + ripple) is now `hub:stream+water`.
+
+**Open:** city arrival still has one ~280 ms CPU frame outside gameLoop (fleet + carrier spawn);
+the first city of a session links the fleet shield shader cold; "tower" is GPU-bound at 103 fps
+on the dev laptop at native resolution.

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.48';
+const LSS_BUILD = '39.49';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10355,6 +10355,7 @@ const _LSS_IS_MOBILE = (navigator.maxTouchPoints > 0) &&
     try { localStorage.setItem('lss_quality', 'low'); } catch (_) {}
   }
   let _dprCap;
+  if ((_stored === 'mega' || _stored === 'ultra') && !_isMobileGPU) { _dprCap = Math.min(window.devicePixelRatio, 2); } else
   if (_stored === 'mega') { _dprCap = Math.min(window.devicePixelRatio * 2.5, 3.0); } else if (_stored === 'ultra') {
     _dprCap = Math.min(window.devicePixelRatio * 1.75, 2.6);
   } else if (_isMobileGPU) {
@@ -12809,8 +12810,11 @@ function applyQualityPreset(level) {
   try {
     if (typeof renderer !== 'undefined' && renderer && renderer.setPixelRatio) {
       let _cap;
+      const _deskSuper = (QUALITY.isMega() || QUALITY.isUltra()) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE);
       if (QUALITY.isPotato()) {
         _cap = 0.75;
+      } else if (_deskSuper) {
+        _cap = Math.min(window.devicePixelRatio, 2);
       } else if (QUALITY.isMega()) {
         _cap = Math.min(window.devicePixelRatio * 2.5, 3.0);
       } else if (QUALITY.isUltra()) {
@@ -12842,7 +12846,7 @@ try {
   }
 } catch (e) {}
 
-const _ssDyn = { scale: 1.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0 };
+const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0 };
 function _lssSupersampleActive() {
   try {
     return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega()) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
@@ -12854,39 +12858,76 @@ function _lssSupersampleTick(ts) {
   if (!S.last) { S.last = ts; return; }
   const dt = ts - S.last; S.last = ts;
   if (!_lssSupersampleActive()) return;
+  if (game.state !== 'playing' || settingsOpen || game._worldPrebaking ||
+      (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) { S.ema = 0; return; }
   if (!(dt >= 2 && dt <= 250)) return;                 // a tab switch or a load hitch is not a sample
-  if (dt < S.minDt) {
-    S.minDt = dt;
-    const hz = 1000 / dt;
-    S.hz = [60, 72, 75, 90, 100, 120, 144, 165, 240].reduce((a, b) => (Math.abs(b - hz) < Math.abs(a - hz)) ? b : a);
+  if (!S.win) { S.win = new Float32Array(240); S.wi = 0; }
+  S.win[S.wi++] = dt;
+  if (S.wi >= 240) {
+    S.wi = 0;
+    const _a = Array.from(S.win).sort((x, y) => x - y);
+    const _p5 = _a[12];
+    const hz = 1000 / _p5;
+    const _snap = [60, 72, 75, 90, 100, 120, 144, 165, 240].reduce((a, b) => (Math.abs(b - hz) < Math.abs(a - hz)) ? b : a);
+    if (Math.abs(_snap - hz) / _snap < 0.12 && _snap > S.hz) S.hz = _snap;
+    if (_p5 < S.minDt) S.minDt = _p5;
   }
   S.ema = S.ema ? S.ema + (dt - S.ema) * 0.08 : dt;
   S.acc += dt; if (S.acc < 500) return; S.acc = 0;   // decide twice a second
   const period = 1000 / S.hz;
   let sc = S.scale;
-  if (S.ema > period * 1.10) {
-    if (sc > 0) { sc = Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
+  const _floor = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
+  const _over = S.ema > period * 1.10, _far = S.ema > period * 1.40;
+  if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
+    { sc = Math.max(_floor, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
   } else if (S.ema <= period * 1.02) {
     if (S.hold > 0) S.hold -= 0.5; else if (sc < 1) sc = Math.min(1, sc + 0.05);
   }
-  if (sc !== S.scale) { S.scale = sc; S.steps++; try { if (typeof _doPostFXResize === 'function') _doPostFXResize(); } catch (_) {} }
+  if (sc !== S.scale) { S.scale = sc; S.steps++; }
 }
 function _getBloomRTSize() {
   const cap = (typeof QUALITY !== 'undefined' && typeof QUALITY.bloomDPR === 'function')
               ? QUALITY.bloomDPR() : 1.0;
   let dpr = Math.min(window.devicePixelRatio, cap);
+  const _bw = Math.floor(window.innerWidth * dpr), _bh = Math.floor(window.innerHeight * dpr);
   try {
-    if (typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega()) &&
-        !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
-        typeof renderer !== 'undefined' && renderer && renderer.getPixelRatio) {
-      const _base = dpr, _super = renderer.getPixelRatio();
-      if (_super > _base) dpr = _base + (_super - _base) * Math.max(0, Math.min(1, _ssDyn.scale));   // (v38.71) adaptive
+    const _super = _lssTierSuper();
+    if (_super > dpr) {
+      dpr = _super;
       const _px = window.innerWidth * window.innerHeight * dpr * dpr;
       const _MAXPX = 16e6;
       if (_px > _MAXPX) dpr *= Math.sqrt(_MAXPX / _px);
     }
   } catch (_) {}
-  return { w: Math.floor(window.innerWidth * dpr), h: Math.floor(window.innerHeight * dpr) };
+  return { w: Math.floor(window.innerWidth * dpr), h: Math.floor(window.innerHeight * dpr),
+           bw: Math.floor(_bw / 2), bh: Math.floor(_bh / 2), base: Math.min(window.devicePixelRatio, cap) };
+}
+function _lssTierSuper() {
+  try {
+    if (typeof QUALITY === 'undefined' || !QUALITY) return 0;
+    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return 0;
+    if (QUALITY.isMega()) return Math.min(window.devicePixelRatio * 2.5, 3.0);
+    if (QUALITY.isUltra()) return Math.min(window.devicePixelRatio * 1.75, 2.6);
+  } catch (_) {}
+  return 0;
+}
+const _sceneActive = { w: 0, h: 0, sx: 1, sy: 1 };
+function _lssSceneActive(rt) {
+  const W = rt.width, H = rt.height;
+  let w = W, h = H;
+  try {
+    const _super = _lssTierSuper();
+    if (_super > 0 && _lssSupersampleActive()) {
+      const cap = (typeof QUALITY.bloomDPR === 'function') ? QUALITY.bloomDPR() : 1.0;
+      const base = Math.min(window.devicePixelRatio, cap);
+      const _sc = Math.max(-0.9, Math.min(1, _ssDyn.scale));
+      const s = (_sc >= 0) ? base + (Math.max(base, _super) - base) * _sc : base * (1 + 0.5 * _sc);
+      w = Math.min(W, Math.max(1, Math.floor(window.innerWidth * s)));
+      h = Math.min(H, Math.max(1, Math.floor(window.innerHeight * s)));
+    }
+  } catch (_) {}
+  _sceneActive.w = w; _sceneActive.h = h; _sceneActive.sx = w / W; _sceneActive.sy = h / H;
+  return _sceneActive;
 }
 const _initBloomRT = _getBloomRTSize();
 const _rtSceneOpts = {
@@ -12921,11 +12962,12 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
     return { level: QUALITY.level, pixelRatio: renderer.getPixelRatio(),
              canvas: [renderer.domElement.width, renderer.domElement.height],
              scene: [postFX.rtScene.width, postFX.rtScene.height, 'samples', postFX.rtScene.samples | 0],
+             active: [_sceneActive.w, _sceneActive.h, 'scale', _ssDyn.scale, 'hz', _ssDyn.hz],   // (v39.49) the viewport actually rendered this frame
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
 };
 postFX.rtBright = new THREE.WebGLRenderTarget(
-  Math.floor(postFX.rtScene.width / 2), Math.floor(postFX.rtScene.height / 2),
+  _initBloomRT.bw, _initBloomRT.bh,   // (v39.49) half the BASE size, never half the supersampled target
   { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
 );
 postFX.rtBlurH = new THREE.WebGLRenderTarget(
@@ -12941,15 +12983,17 @@ postFX.quadGeo = new THREE.PlaneGeometry(2, 2);
 postFX.quadCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
 postFX.brightMat = new THREE.ShaderMaterial({
-  uniforms: { tDiffuse: { value: null }, threshold: { value: 0.4 }, softKnee: { value: 0.9 } },   // (v34.63) bloom threshold 0.1->0.4 (user-tuned): only genuinely bright things bloom, kills the white-ship/building halo. Live: tunePostFX({threshold})   
+  uniforms: { tDiffuse: { value: null }, threshold: { value: 0.4 }, softKnee: { value: 0.9 },   // (v34.63) bloom threshold 0.1->0.4 (user-tuned): only genuinely bright things bloom, kills the white-ship/building halo. Live: tunePostFX({threshold})
+              uSceneScale: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) } },   // (v39.49) the used sub-rectangle of rtScene
   vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tDiffuse;
     uniform float threshold;
     uniform float softKnee;
+    uniform vec2 uSceneScale, uSceneMax;
     varying vec2 vUv;
     void main() {
-      vec4 c = texture2D(tDiffuse, vUv);
+      vec4 c = texture2D(tDiffuse, min(vUv * uSceneScale, uSceneMax));
       float brightness = max(c.r, max(c.g, c.b));
       // Soft-knee: smooth ramp around threshold instead of hard cutoff
       float knee = threshold * softKnee + 1e-5;
@@ -13013,12 +13057,15 @@ postFX.compositeMat = new THREE.ShaderMaterial({
     exposure: { value: 1.05 },
     time: { value: 0.0 },
     godrayStrength: { value: 0.15 },   // (v34.63) 0.40->0.15 (user-tuned): far less directional bright-pixel smear (the "ghosting/doubling"), keeps a touch of glow. Live: tunePostFX({godray})
-    gradeSat: { value: 1.0 }, gradeContrast: { value: 1.0 }, gradeWarmth: { value: 1.0 }, gradeLift: { value: 0.0 }
+    gradeSat: { value: 1.0 }, gradeContrast: { value: 1.0 }, gradeWarmth: { value: 1.0 }, gradeLift: { value: 0.0 },
+    uSceneScale: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) }   // (v39.49) the used sub-rectangle of rtScene (viewport supersample)
   },
   vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tScene;
     uniform sampler2D tBloom;
+    uniform vec2 uSceneScale, uSceneMax;
+    #define SCENE(uv) texture2D(tScene, clamp((uv) * uSceneScale, vec2(0.0), uSceneMax))
     uniform float bloomStrength;
     uniform float vignetteIntensity;
     uniform float vignetteSize;
@@ -13097,11 +13144,11 @@ postFX.compositeMat = new THREE.ShaderMaterial({
       vec3 col;
       if (chromAb > 0.001) {
         float abAmount = chromAb * dist * 0.025 + 0.0008 * dist;
-        col.r = texture2D(tScene, warpedUv + center * abAmount).r;
-        col.g = texture2D(tScene, warpedUv).g;
-        col.b = texture2D(tScene, warpedUv - center * abAmount).b;
+        col.r = SCENE(warpedUv + center * abAmount).r;
+        col.g = SCENE(warpedUv).g;
+        col.b = SCENE(warpedUv - center * abAmount).b;
       } else {
-        col = texture2D(tScene, warpedUv).rgb;
+        col = SCENE(warpedUv).rgb;
       }
 
       // Bloom add (lens-dirt path removed ; see lensDirtMask comment above).
@@ -13400,6 +13447,20 @@ function renderPostFX() {
     if (window.__exposure != null) _cm.exposure.value = window.__exposure;
   }
 
+  {
+    const _rt = postFX.rtScene, _A = _lssSceneActive(_rt);
+    const _partial = (_A.w < _rt.width || _A.h < _rt.height);
+    if (_rt.viewport.z !== _A.w || _rt.viewport.w !== _A.h || _rt.scissorTest !== _partial) {
+      _rt.viewport.set(0, 0, _A.w, _A.h);
+      _rt.scissor.set(0, 0, _A.w, _A.h);
+      _rt.scissorTest = _partial;
+      const _mx = (_A.w - 0.5) / _rt.width, _my = (_A.h - 0.5) / _rt.height;
+      postFX.brightMat.uniforms.uSceneScale.value.set(_A.sx, _A.sy);
+      postFX.brightMat.uniforms.uSceneMax.value.set(_mx, _my);
+      postFX.compositeMat.uniforms.uSceneScale.value.set(_A.sx, _A.sy);
+      postFX.compositeMat.uniforms.uSceneMax.value.set(_mx, _my);
+    }
+  }
   renderer.setRenderTarget(postFX.rtScene);
   renderer.render(scene, camera);
   if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
@@ -14900,13 +14961,16 @@ function _swBuildTrees(x0,z0,T){
 }
 function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ if(im && im.parent)scene.remove(im); if(im && im.dispose)im.dispose(); }catch(_){} } } }
 
-function _swBuildShell(x0, z0, isCeil, T) {
-  const n = _SW_CELLS, step = _SW_CHUNK / n;
-  const nVert = (n + 1) * (n + 1);
-  const verts = new Float32Array(nVert * 3);
-  const cols  = new Float32Array(nVert * 3);
-  let p = 0;
-  for (let j = 0; j <= n; j++) {
+function _swShellJobNew(x0, z0, isCeil, T) {
+  const n = _SW_CELLS, nVert = (n + 1) * (n + 1);
+  return { x0, z0, isCeil, T, n, j: 0, p: 0, verts: new Float32Array(nVert * 3), cols: new Float32Array(nVert * 3) };
+}
+function _swShellJobRows(J, budgetMs) {
+  const n = J.n, step = _SW_CHUNK / n, T = J.T, isCeil = J.isCeil, verts = J.verts, cols = J.cols, x0 = J.x0, z0 = J.z0;
+  const t0 = performance.now();
+  let p = J.p;
+  while (J.j <= n) {
+    const j = J.j;
     for (let i = 0; i <= n; i++) {
       const gx0 = x0 + i * step, gz0 = z0 + j * step;
       const _gi = Math.round(gx0 / step), _gj = Math.round(gz0 / step);
@@ -14924,7 +14988,14 @@ function _swBuildShell(x0, z0, isCeil, T) {
       cols[p] = _SW_tmpC.r; cols[p + 1] = _SW_tmpC.g; cols[p + 2] = _SW_tmpC.b;
       p += 3;
     }
+    J.j++;
+    if (J.j <= n && performance.now() - t0 > budgetMs) break;
   }
+  J.p = p;
+  return J.j > n;
+}
+function _swShellJobFinish(J) {
+  const n = J.n, isCeil = J.isCeil, verts = J.verts, cols = J.cols, nVert = (n + 1) * (n + 1);
   const idx = [];
   const row = n + 1;
   for (let j = 0; j < n; j++) {
@@ -14953,8 +15024,23 @@ function _swBuildShell(x0, z0, isCeil, T) {
   scene.add(mesh);
   return mesh;
 }
-
+function _swBuildShell(x0, z0, isCeil, T) {
+  const J = _swShellJobNew(x0, z0, isCeil, T);
+  _swShellJobRows(J, 1e9);
+  return _swShellJobFinish(J);
+}
+function _swShellJobFlush(c, T, wantCeil) {
+  let guard = 0;
+  while (c._job && guard++ < 3) {
+    const J = c._job;
+    _swShellJobRows(J, 1e9);
+    const mesh = _swShellJobFinish(J);
+    if (J.isCeil) c.ceiling = mesh; else c.ground = mesh;
+    c._job = (!J.isCeil && wantCeil) ? _swShellJobNew(c.cx * _SW_CHUNK, c.cz * _SW_CHUNK, true, T) : null;
+  }
+}
 function _swDisposeChunk(c) {
+  c._job = null;   // (v39.49) an in-flight shell job holds no GPU resources
   for (const m of [c.ground, c.ceiling]) {
     if (!m) continue;   
     try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material && !m.material._swShared) m.material.dispose(); } catch (_) {}   
@@ -15985,6 +16071,65 @@ function _swWaterCrossSplash(x0, y0, z0, x1, y1, z1, radius, amp) {
   _swRippleSeed(_hx, _hz, radius, amp * ((window.__water && window.__water.impactPeak) || 50));   
   _swSpawnSplash(_hx, WL, _hz, 4, 0.6 + Math.min(1.2, amp * 4.0));   
 }
+function _swRippleBakeMaskRow(data, cx, cz, j, RES, B, T, WL, near) {
+  let k = j * RES * 4;
+  const wz = cz + ((j + 0.5) / RES - 0.5) * B;
+  for (let i = 0; i < RES; i++) {
+    const wx = cx + ((i + 0.5) / RES - 0.5) * B;
+    let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; }
+    const d = WL - gy;
+    data[k] = near ? ((d > 2.0) ? 1.0 : 0.0) : 0;
+    data[k + 1] = Math.max(0, Math.min(1, d / 400));
+    data[k + 2] = 0; data[k + 3] = 1;
+    k += 4;
+  }
+}
+function _swRippleMaskJobTick(cine) {
+  const R = _swRipple;
+  const J = R._maskJob, F = R._farJob;
+  if (!J && !F) return;
+  const T = game._hubWaterT;
+  if (!T || typeof _stGroundYCarved !== 'function') { R._maskJob = null; R._farJob = null; return; }
+  const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : (T.WL || 0);
+  const budget = (window.__water && window.__water.bakeMs) || ((cine || (J && J.fast) || (F && F.fast)) ? 4.0 : 1.0);
+  const t0 = performance.now();
+  if (J) {
+    if (!R.maskData) { R._maskJob = null; return; }
+    const RES = _SW_MASK_RES, B = _SW_RIPPLE_BOUNDS;
+    if (!R._maskStage || R._maskStage.length !== R.maskData.length) R._maskStage = new Float32Array(R.maskData.length);
+    const stage = R._maskStage;
+    while (J.row < RES) {
+      _swRippleBakeMaskRow(stage, J.cx, J.cz, J.row, RES, B, T, WL, true);
+      J.row++;
+      if ((J.row & 3) === 0 && performance.now() - t0 > budget) break;
+    }
+    if (J.row >= RES) {
+      R.maskData.set(stage);
+      R.scrollX += (J.cx - R.center.x) / R.bounds;
+      R.scrollZ += (J.cz - R.center.y) / R.bounds;
+      R.center.set(J.cx, J.cz);
+      R.acc = R.step;
+      if (R.maskTex) R.maskTex.needsUpdate = true;
+      R._maskJob = null;
+    }
+    return;
+  }
+  if (!R.farData) { R._farJob = null; return; }
+  const RES = _SW_FARMASK_RES, B = _SW_FARMASK_BOUNDS;
+  if (!R._farStage || R._farStage.length !== R.farData.length) R._farStage = new Float32Array(R.farData.length);
+  const stage = R._farStage;
+  while (F.row < RES) {
+    _swRippleBakeMaskRow(stage, F.cx, F.cz, F.row, RES, B, T, WL, false);
+    F.row++;
+    if ((F.row & 3) === 0 && performance.now() - t0 > budget) break;
+  }
+  if (F.row >= RES) {
+    R.farData.set(stage);
+    R.farCenter.set(F.cx, F.cz);
+    if (R.farTex) R.farTex.needsUpdate = true;
+    R._farJob = null;
+  }
+}
 function _swRippleBakeMask() {
   const R = _swRipple;
   if (!R.maskData || typeof _stGroundYCarved !== 'function') return;
@@ -16100,28 +16245,39 @@ function _swRippleTick(dt) {
     
     
     
-    const _texel = R.bounds / 32;   
+    const _texel = R.bounds / 32;
     const ncx = Math.round(px / _texel) * _texel, ncz = Math.round(pz / _texel) * _texel;
-    R.scrollX += (ncx - R.center.x) / R.bounds;
-    R.scrollZ += (ncz - R.center.y) / R.bounds;
-    R.center.set(ncx, ncz);
-    R.acc = R.step;                 
-    _swRippleBakeMask();            
+    if (window.__water && window.__water.syncBake) {
+      R._maskJob = null;
+      R.scrollX += (ncx - R.center.x) / R.bounds;
+      R.scrollZ += (ncz - R.center.y) / R.bounds;
+      R.center.set(ncx, ncz);
+      R.acc = R.step;
+      _swRippleBakeMask();
+    } else if (!R._maskJob || (ddx * ddx + ddz * ddz > R.bounds * R.bounds && !R._maskJob.fast)) {
+      R._maskJob = { cx: ncx, cz: ncz, row: 0, fast: (ddx * ddx + ddz * ddz > R.bounds * R.bounds) };
+    }
   }
   {
     const FARSTEP = 4000;
     const dfx = px - R.farCenter.x, dfz = pz - R.farCenter.y;
     if (isNaN(R.farCenter.x) || dfx * dfx + dfz * dfz > FARSTEP * FARSTEP) {
       const _foamSnap = !(window.__water && window.__water.foamSnap === 0);
+      let _fcx = px, _fcz = pz;
       if (_foamSnap) {
-        const _ftex = _SW_FARMASK_BOUNDS / _SW_FARMASK_RES;   
-        R.farCenter.set(Math.round(px / _ftex) * _ftex, Math.round(pz / _ftex) * _ftex);
-      } else {
-        R.farCenter.set(px, pz);   
+        const _ftex = _SW_FARMASK_BOUNDS / _SW_FARMASK_RES;
+        _fcx = Math.round(px / _ftex) * _ftex; _fcz = Math.round(pz / _ftex) * _ftex;
       }
-      _swRippleBakeFarMask();
+      if (isNaN(R.farCenter.x) || (window.__water && window.__water.syncBake)) {
+        R._farJob = null;
+        R.farCenter.set(_fcx, _fcz);
+        _swRippleBakeFarMask();
+      } else if (!R._farJob) {
+        R._farJob = { cx: _fcx, cz: _fcz, row: 0, fast: (dfx * dfx + dfz * dfz > (2 * FARSTEP) * (2 * FARSTEP)) };
+      }
     }
   }
+  _swRippleMaskJobTick(_cineW);
   const w = game._hubWater;
   if (w) {
     const WL = w.userData.WL;
@@ -16140,7 +16296,7 @@ function _swRippleTick(dt) {
     if (W3.breakPeak === undefined) W3.breakPeak = 0.22;     
     if (W3.breakSlope === undefined) W3.breakSlope = 0.06;   
     if (W3.breakRate === undefined) W3.breakRate = 0.5;      
-    if (W3.breakBudget === undefined) W3.breakBudget = 500;   
+    if (W3.breakBudget === undefined) W3.breakBudget = 40;
     if (W3.breakEvery === undefined) W3.breakEvery = 4;
     if (W3.jetLean === undefined) W3.jetLean = 1.0;          
     if (W3.crestDebug === undefined) W3.crestDebug = 0;      
@@ -16224,7 +16380,7 @@ function _swRippleTick(dt) {
         renderer && renderer.readRenderTargetPixels && R.gpu.getAlternateRenderTarget) {
       R._crStep = (R._crStep || 0) + 1;
       const _every = Math.max(1, (_Wc.breakEvery | 0) || 4);
-      if (R._crStep % _every === 0) {
+      if (R._crStep % (R._crSkip || _every) === 0) {
         const RES = _SW_RIPPLE_RES, B = R.bounds, WLc = w.userData.WL;
         if (!R._crBuf) R._crBuf = new Float32Array(RES * RES * 4);
         const buf = R._crBuf;
@@ -16236,10 +16392,14 @@ function _swRippleTick(dt) {
             R._crPending = true;
             const _prevRT = renderer.getRenderTarget();
             let _pr = null;
+            const _rt0 = performance.now();
             try { _pr = renderer.readRenderTargetPixelsAsync(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); }
             catch (e) { R._crPending = false; R._crAsyncErr = 1; try { console.warn('[crestBreak] async readback unavailable, using the synchronous path:', e && e.message); } catch (_) {} }
             if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
             try { const _gl = renderer.getContext(); if (_gl && _gl.PIXEL_PACK_BUFFER) _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null); } catch (_) {}
+            { const _c = performance.now() - _rt0; R._crCost = _c; const _cur = R._crSkip || _every;
+              R._crSkip = (_c > 4) ? Math.min(32, _cur * 2) : Math.max(_every, (_cur * 0.75) | 0);
+              _Wc.crCost = Math.round(_c * 10) / 10; _Wc.crSkip = R._crSkip; }
             if (_pr && typeof _pr.then === 'function') {
               _pr.then(function () { R._crPending = false; R._crReady = true; _Wc.crReads = (_Wc.crReads | 0) + 1; },
                        function (e) { R._crPending = false; R._crAsyncErr = 1; try { console.warn('[crestBreak] async readback failed, using the synchronous path:', e && e.message); } catch (_) {} });
@@ -16264,7 +16424,9 @@ function _swRippleTick(dt) {
           const sc = function (hh, wf) { const x = hh * g2d; return (x / (1 + Math.abs(x))) * wf; };  
           let emitted = 0, nBreak = 0, maxV = 0;
           R._crScan = (((R._crScan || 0) + 7) % (RES - 2));                    
+          const _scanT0 = performance.now();
           for (let jj = 0; jj < RES - 2 && emitted < budget; jj++) {
+            if ((jj & 7) === 7 && performance.now() - _scanT0 > 1.5) break;   // (v39.49) the scan + sprays stay under ~1.5 ms a frame
             const j = 1 + ((jj + R._crScan) % (RES - 2));
             const rvY = (j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
             const rowB = j * RES;
@@ -16437,10 +16599,51 @@ function _critterTerrainBake(cx, cz) {
   }
   C.cx = cx; C.cz = cz; C.ymin = lo; C.ymax = hi; C.tex.needsUpdate = true;
 }
+function _critterTerrainJobTick() {
+  const C = _critterTerrain, J = C._job; if (!J) return;
+  const T = C.T || game._hubWaterT;
+  if (!T || typeof _stGroundYCarved !== 'function' || !C.raw) { C._job = null; return; }
+  const res = C.res, B = C.bounds;
+  if (!C._rawStage || C._rawStage.length !== C.raw.length) C._rawStage = new Float32Array(C.raw.length);
+  const stage = C._rawStage, t0 = performance.now();
+  const budget = (window.__birds && window.__birds.bakeMs) || 0.8;
+  while (J.row < res) {
+    const j = J.row, wz = J.cz + ((j + 0.5) / res - 0.5) * B;
+    let k = j * res;
+    for (let i = 0; i < res; i++) {
+      const wx = J.cx + ((i + 0.5) / res - 0.5) * B;
+      let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = -1e4; }
+      stage[k++] = gy;
+    }
+    J.row++;
+    if ((J.row & 3) === 0 && performance.now() - t0 > budget) break;
+  }
+  if (J.row < res) return;
+  const raw = C.raw, data = C.data;
+  raw.set(stage);
+  let lo = 1e9, hi = -1e9;
+  for (let q = 0; q < raw.length; q++) { const v = raw[q]; if (v < lo) lo = v; if (v > hi) hi = v; }
+  let k = 0;
+  for (let j = 0; j < res; j++) {
+    for (let i = 0; i < res; i++) {
+      let m = -1e9;
+      for (let dj = -1; dj <= 1; dj++) { const jj = j + dj; if (jj < 0 || jj >= res) continue;
+        for (let di = -1; di <= 1; di++) { const ii = i + di; if (ii < 0 || ii >= res) continue;
+          const v = raw[jj * res + ii]; if (v > m) m = v; } }
+      const o = k * 4; data[o] = m; data[o + 1] = 0; data[o + 2] = 0; data[o + 3] = 1; k++;
+    }
+  }
+  C.cx = J.cx; C.cz = J.cz; C.ymin = lo; C.ymax = hi; C.tex.needsUpdate = true;
+  C._job = null;
+}
 function _critterTerrainMaybeBake(cx, cz) {
   const C = _critterTerrain; if (!C.tex) return;
+  if (C._job) { _critterTerrainJobTick(); return; }
   const dx = cx - C.cx, dz = cz - C.cz, r = C.bounds * 0.25;
-  if (dx * dx + dz * dz > r * r) _critterTerrainBake(cx, cz);
+  if (!(dx * dx + dz * dz > r * r)) return;
+  if (dx * dx + dz * dz > (C.bounds * 0.5) * (C.bounds * 0.5) || (window.__birds && window.__birds.syncBake)) { _critterTerrainBake(cx, cz); return; }
+  C._job = { cx, cz, row: 0 };
+  _critterTerrainJobTick();
 }
 function _boidsVelFrag(count, mode) {
   const water = (mode === 'water');
@@ -16875,7 +17078,7 @@ function _fishSchoolInit(T) {
     gpu.setVariableDependencies(posVar, [velVar, posVar]);
     velVar.minFilter = THREE.NearestFilter; velVar.magFilter = THREE.NearestFilter;
     posVar.minFilter = THREE.NearestFilter; posVar.magFilter = THREE.NearestFilter;
-    const _CT = _critterTerrainEnsure(T); if (_CT) { try { _critterTerrainBake(cx, cz); } catch (_) {} }
+    const _CT = _critterTerrainEnsure(T); if (_CT && !(_CT.cx === cx && _CT.cz === cz)) { try { _critterTerrainBake(cx, cz); } catch (_) {} }
     const vu = velVar.material.uniforms;
     vu.uTime = { value: 0 }; vu.uDelta = { value: 0.016 };
     vu.uShip = { value: new THREE.Vector3(cx, WL, cz) }; vu.uCenter = { value: new THREE.Vector3(cx, WL - 160, cz) };
@@ -18482,6 +18685,9 @@ function _hubCityBuild(g, site) {
   const emi = document.createElement('canvas'); emi.width = emi.height = CS;
   const a2 = alb.getContext('2d'), e2 = emi.getContext('2d');
   {
+    if (_hubCityBuild._noiseImg) {
+      a2.putImageData(_hubCityBuild._noiseImg, 0, 0);
+    } else {
     const img = a2.createImageData(CS, CS);
     const d8 = img.data;
     const hsh = (x, y) => { const h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453; return h - Math.floor(h); };
@@ -18504,6 +18710,8 @@ function _hubCityBuild(g, site) {
       }
     }
     a2.putImageData(img, 0, 0);
+    _hubCityBuild._noiseImg = img;   // (v39.49) 4 MB, kept for the session
+    }
   }
   const rimG = a2.createRadialGradient(CS / 2, CS / 2, CS * 0.43, CS / 2, CS / 2, CS * 0.5);
   rimG.addColorStop(0, 'rgba(0,0,0,0)'); rimG.addColorStop(1, 'rgba(0,0,0,1)');
@@ -19622,7 +19830,9 @@ function _hcTrafficUpdate(dt) {
             orig.x += _nx * _clear; orig.y += _ny * _clear; orig.z += _nz * _clear;
             const vel = new THREE.Vector3(_nx - _nz * _sp, _ny + _sp * 0.35, _nz + _nx * _sp)
               .normalize().multiplyScalar(_tc.bolt);
-            game.projectiles.push(new Projectile(orig, vel, _tc.dmg, 0, e, _tc.col));
+            const _tb = new Projectile(orig, vel, _tc.dmg, 0, e, _tc.col);
+            _tb._cheapHit = true;   // (v39.49) sphere/OBB hit test only - never the 117k-tri hull raycast (see Projectile.update)
+            game.projectiles.push(_tb);
           }
           try { if (typeof playSpatialSound === 'function') playSpatialSound('fire_projectile', e.position.clone()); } catch (_) {}
         } catch (_) {}
@@ -23736,10 +23946,10 @@ function _clipWireParents() {
 function _clipBakeEdge(L, ogx, ogz) {
   const T = game.sandwichTerrain; if (!T) return;
   const N = _CLIP_N, R = N + 1, sp = L.spacing, d = L.data, ngx = L.gIx, ngz = L.gIz;
-  for (let gx = ngx; gx <= ngx + N; gx++) { if (gx > ogx && gx < ogx + N) continue;
+  for (let gx = ngx; gx <= ngx + N; gx++) { if (gx >= ogx && gx <= ogx + N) continue;
     const tcol = ((gx % R) + R) % R, wx = gx * sp;
     for (let jj = 0; jj <= N; jj++) { const gz = ngz + jj; d[(((gz % R) + R) % R) * R + tcol] = _clipCellH(wx, gz * sp, sp, T, L.k); } }
-  for (let gz = ngz; gz <= ngz + N; gz++) { if (gz > ogz && gz < ogz + N) continue;
+  for (let gz = ngz; gz <= ngz + N; gz++) { if (gz >= ogz && gz <= ogz + N) continue;
     const trow = (((gz % R) + R) % R) * R, wz = gz * sp;
     for (let ii = 0; ii <= N; ii++) { const gx = ngx + ii; d[trow + (((gx % R) + R) % R)] = _clipCellH(gx * sp, wz, sp, T, L.k); } }
   L.mat._clipOrigin.value.set(((ngx % R) + R) % R, ((ngz % R) + R) % R);
@@ -23919,9 +24129,41 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   }
   todo.sort((a, b) => a.d - b.d);
   const lim = Math.min(budget || _SW_BUILD_PER_FRAME, todo.length);
-  for (let i = 0; i < lim; i++) {
-    const t = todo[i], ox = t.cx * _SW_CHUNK, oz = t.cz * _SW_CHUNK;
-    chunks.set(t.key, { cx: t.cx, cz: t.cz, ground: (typeof _clipmap !== 'undefined' && _clipmap.on) ? null : _swBuildShell(ox, oz, false, T), ceiling: (T && T.biome === 'mossy') ? null : _swBuildShell(ox, oz, true, T) });
+  const _bt0 = performance.now();
+  const _bMs = (typeof window !== 'undefined' && window.__swBuildMs != null) ? window.__swBuildMs : 2.5;
+  const _budgeted = ((game.state === 'playing' || game.state === 'warmup') && !game._swPreloading && !game._worldPrebaking && !game._swapStaging && !game._rrStaging);
+  const _wantCeil = !(T && T.biome === 'mossy');
+  const _wantGround = !(typeof _clipmap !== 'undefined' && _clipmap.on);
+  let built = 0, stepped = 0;
+  if (_budgeted) {
+    let _cur = null;
+    for (const c of chunks.values()) { if (c._job) { _cur = c; break; } }
+    if (!_cur && lim > 0) {
+      const t = todo[0];
+      _cur = { cx: t.cx, cz: t.cz, ground: null, ceiling: null, _job: null };
+      _cur._job = _wantGround ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, false, T)
+                : (_wantCeil ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, true, T) : null);
+      chunks.set(t.key, _cur);
+      if (!_cur._job) built++;
+    }
+    if (_cur && _cur._job) {
+      const J = _cur._job;
+      stepped++;
+      const _left = _bMs - (performance.now() - _bt0);
+      if (_swShellJobRows(J, Math.max(0.2, _left))) {
+        const mesh = _swShellJobFinish(J);
+        if (J.isCeil) _cur.ceiling = mesh; else _cur.ground = mesh;
+        _cur._job = (!J.isCeil && _wantCeil) ? _swShellJobNew(_cur.cx * _SW_CHUNK, _cur.cz * _SW_CHUNK, true, T) : null;
+        built++;
+      }
+    }
+  } else {
+    for (const c of chunks.values()) { if (c._job) { _swShellJobFlush(c, T, _wantCeil); built++; } }
+    for (let i = 0; i < lim; i++) {
+      const t = todo[i], ox = t.cx * _SW_CHUNK, oz = t.cz * _SW_CHUNK;
+      chunks.set(t.key, { cx: t.cx, cz: t.cz, ground: _wantGround ? _swBuildShell(ox, oz, false, T) : null, ceiling: _wantCeil ? _swBuildShell(ox, oz, true, T) : null, _job: null });
+      built++;
+    }
   }
   
   
@@ -23963,10 +24205,10 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;
     }
   }
-  _SC.idle = (lim === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0);
+  _SC.idle = (built === 0 && stepped === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0);   // (v39.49) a stepped job is not idle
   _SC.T = T; _SC.scx = scx; _SC.scz = scz; _SC.view = _VIEW; _SC.size = chunks.size;
   _SC.grass = wantGrass; _SC.trees = wantTrees; _SC.clip = _clipOn;
-  return lim + gBuilt + tBuilt;
+  return built + stepped + gBuilt + tBuilt;   // (v39.49) stepped keeps the warmup drain looping while a job is in flight
 }
 if (typeof window !== 'undefined') window.__swStream = updateSandwichStream;
 
@@ -25704,7 +25946,17 @@ function getWallNormal(point) {
 const VISUAL_SCALE_BOOST = 1.55;
 function _shipsVariant() {
   if (_shipsVariant._v === undefined) {
-    try { const cap = _lssTexCap(); _shipsVariant._v = (cap > 0 && cap <= 1024) ? 'm/' : ''; }
+    try {
+      const K = (typeof window !== 'undefined') ? window.__texCap : null;
+      const explicit = !!(K && typeof K.max === 'number' && K.max <= 1024);
+      let small = false;
+      try {
+        small = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ||
+                ((typeof isStandaloneQuest === 'function') && isStandaloneQuest()) ||
+                ((typeof isXRPresenting === 'function') && isXRPresenting());
+      } catch (_) {}
+      _shipsVariant._v = (explicit || small) ? 'm/' : '';
+    }
     catch (_) { return ''; }
   }
   return _shipsVariant._v;
@@ -26317,6 +26569,8 @@ try { if (typeof window !== 'undefined') window.__dynResState = _DYNRES; } catch
 function _lssDynResBase() {
   try {
     if (QUALITY.isPotato()) return 0.75;
+    let _desk = true; try { _desk = !_LSS_IS_MOBILE; } catch (_) {}
+    if (_desk && (QUALITY.isMega() || QUALITY.isUltra())) return Math.min(window.devicePixelRatio, 2);
     if (QUALITY.isMega())   return Math.min(window.devicePixelRatio * 2.5, 3.0);
     if (QUALITY.isUltra())  return Math.min(window.devicePixelRatio * 1.75, 2.6);
     const rs = (QUALITY.level === 'low') ? 0.65 : (QUALITY.level === 'medium') ? 0.85 : 1.0;
@@ -29446,7 +29700,7 @@ class Projectile {
         let isHit;
         if (bot.isOwBoss && typeof bot.contains === 'function') {
           isHit = bot.contains(this.position, 30);   // (v38.88) the leviathan: its column, not a sphere round its centre
-        } else if (hasShield || _usesSplashSlop) {
+        } else if (hasShield || _usesSplashSlop || this.isNetwork || this._cheapHit) {   // (v39.49) see the player-side site
           isHit = this.position.distanceToSquared(bot.position) < hitRadius * hitRadius;
         } else {
           const inBroadOBB = _pointInsideShipOBB(this.position, bot, _PROJ_HIT_MARGIN);   // (v38.61) hoisted literal
@@ -29575,7 +29829,7 @@ class Projectile {
         const hasShield = player.shield > 0;
         const _usesSplashSlop = (this.splash || 0) >= 25;
         let isHit;
-        if (hasShield || _usesSplashSlop) {
+        if (hasShield || _usesSplashSlop || this.isNetwork || this._cheapHit) {
           isHit = this.position.distanceToSquared(player.position) < hitRadius * hitRadius;
         } else {
           const inBroadOBB = _pointInsideShipOBB(this.position, player, _PROJ_HIT_MARGIN);   // (v38.61) hoisted literal
@@ -29972,6 +30226,7 @@ const dynamicLights = {
 (function initDynamicLights() {
   for (let i = 0; i < dynamicLights.MAX_LIGHTS; i++) {
     const light = new THREE.PointLight(0xff8800, 0, 600);
+    light.layers.enable(5);   // (v39.49) see _lssCockpitLights: every light rides layer 5 so the ADS pass keys like the main pass
     light.visible = true;
     scene.add(light);
     dynamicLights.pool.push(light);
@@ -30002,15 +30257,18 @@ const _SHIPL = {
 (function initShipLights() {
   const S = _SHIPL;
   S.engine = new THREE.PointLight(0x66d8ff, 0, 700, 0);
+  S.engine.layers.enable(5);   // (v39.49) layer 5 = the ADS overlay camera sees the same light set as the main pass
   S.engine.visible = true;   // pinned resident; intensity 0 = off
   scene.add(S.engine);
   S.head = new THREE.SpotLight(0xffe8c4, 0, 2400, 0.5, 0.45, 1);
+  S.head.layers.enable(5);   // (v39.49) without this the ADS pass has NUM_SPOT_LIGHTS 0 = a second program per hull material
   S.head.castShadow = false;
   S.head.visible = true;
   scene.add(S.head);
   scene.add(S.head.target);
   for (let i = 0; i < S.TRAF_N; i++) {
     const l = new THREE.PointLight(0x7fd0ff, 0, 620, 0);
+    l.layers.enable(5);   // (v39.49) ADS-pass light parity
     l.visible = true;
     scene.add(l);
     S.traffic.push(l);
@@ -32221,7 +32479,7 @@ function _getEffectiveCloudColor(parentRockColor) {
 }
 
 class DestructibleObstacle {
-  constructor(pos, shapeType, scale) {
+  constructor(pos, shapeType, scale, opts) {
     this.position = pos.clone();
     this.originalPos = pos.clone();
     this.shapeType = shapeType || OBSTACLE_SHAPES[Math.floor(Math.random() * OBSTACLE_SHAPES.length)];
@@ -32261,7 +32519,13 @@ class DestructibleObstacle {
     const colorIdx = Math.floor(Math.random() * _effObstColors.length);
     this.baseColor = _effObstColors[colorIdx];
 
-    this._buildMesh();
+    if (opts && opts.skipMesh) {
+      this._leanChild = true;
+      const _st = this.shapeType;
+      if (_st !== 'diamond' && _st !== 'cross' && _st !== 'wedge' && _st !== 'ring') { Math.random(); Math.random(); Math.random(); }
+    } else {
+      this._buildMesh();
+    }
   }
 
   _buildMesh() {
@@ -32888,8 +33152,18 @@ class ClusterObstacle {
       const rotatedOffset = offset.clone().applyQuaternion(q);
       const childPos = this.position.clone().add(rotatedOffset);
       const childScale = avgChildScale * (0.75 + Math.random() * 0.55);
-      const child = new DestructibleObstacle(childPos, null, childScale);
-      if (child.mesh) {
+      const child = new DestructibleObstacle(childPos, null, childScale, { skipMesh: true });   // (v39.49) see the ctor
+      if (!child.mesh) {
+        const _rockSeed = Math.random() * 1000;
+        child._rockSeed = _rockSeed;
+        child.mesh = new THREE.Mesh(_makeRockGeometry(1, _rockSeed), _makeAtomFractalMaterial(this.baseColor));
+        child.mesh.position.copy(child.position);
+        child.mesh.rotation.copy(child.rotation);
+        child.mesh.scale.setScalar(childScale);
+        scene.add(child.mesh);
+        child.edgeMesh = null;
+      }
+      if (child.mesh && !child._leanChild) {
         try {
           if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
           if (child.mesh.material && child.mesh.material.dispose) _lssRetainMat(child.mesh.material);   // (v38.97) keep the program resident
@@ -32923,7 +33197,7 @@ class ClusterObstacle {
       const rotatedOffset = offset.clone().applyQuaternion(q);
       const childPos = this.position.clone().add(rotatedOffset);
       const child = new DestructibleObstacle(childPos, null, cc.scale);
-      if (child.mesh) {
+      if (child.mesh && !child._leanChild) {
         try {
           if (child.mesh.geometry && child.mesh.geometry.dispose) child.mesh.geometry.dispose();
           if (child.mesh.material && child.mesh.material.dispose) _lssRetainMat(child.mesh.material);   // (v38.97) keep the program resident
@@ -35547,6 +35821,9 @@ function _loadMonsterModelInto(m) {
 
 function _loadNextMonsterModel() {
   if (!game.monsters || _monsterLoadIdx >= game.monsters.length) return;
+  const _d = (_loadNextMonsterModel._defer = (_loadNextMonsterModel._defer || 0) + 1);
+  if (game.state === 'playing' && _d < 20) { setTimeout(_loadNextMonsterModel, 1000); return; }
+  _loadNextMonsterModel._defer = 0;
   const m = game.monsters[_monsterLoadIdx++];
   _loadMonsterModelInto(m).then((ok) => {
     setTimeout(_loadNextMonsterModel, ok ? 2500 : 400);
@@ -37099,6 +37376,17 @@ function _ghostPinWarm() {
       if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
         renderer.setRenderTarget(postFX.rtScene);
         renderer.compile(scene, camera);
+        try {
+          const _gm = [];
+          player.mesh.traverse((o) => { const g = o.userData && o.userData._ghostMats; if (!g) return; for (const m of (Array.isArray(g) ? g : [g])) if (m && m.side === THREE.DoubleSide && m.transparent) _gm.push(m); });
+          if (_gm.length) {
+            for (const m of _gm) { m.side = THREE.BackSide; m.needsUpdate = true; }
+            renderer.compile(scene, camera);
+            for (const m of _gm) { m.side = THREE.FrontSide; m.needsUpdate = true; }
+            renderer.compile(scene, camera);
+            for (const m of _gm) { m.side = THREE.DoubleSide; m.needsUpdate = true; }
+          }
+        } catch (_) {}
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
@@ -37566,12 +37854,72 @@ async function _prebakeWorldForLaunch() {
     try { rep.mon = await _primeMonsterModels(_bt0, _MON_PRIME_MAX_MS); } catch (_) {}
     rep.ms.mon = Math.round(_pbNow() - _tM);
 
+    let _carWarmGroup = null;
+    const _tK = _pbNow();
+    try {
+      const _ffMode = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
+      if ((_ffMode || game._hubWater) && _pbNow() - _bt0 < _PREBAKE_MAX_MS) {
+        _pbSub(_ffMode ? 'docking the carrier' : 'priming the hulls');
+        if (_ffMode && typeof _carrierLoadProto === 'function' && typeof _carrier !== 'undefined' && _carrier) {
+          await new Promise((res) => {
+            let done = false; const fin = () => { if (!done) { done = true; res(); } };
+            try { _carrierLoadProto(fin); } catch (_) { fin(); }
+            if (_carrier.proto) fin();
+            setTimeout(fin, 4000);
+          });
+        }
+        _carWarmGroup = new THREE.Group();
+        try { _carWarmGroup.position.set(player.position.x, player.position.y - 1500, player.position.z); } catch (_) { _carWarmGroup.position.set(0, -100000, 0); }
+        if (_ffMode && typeof _carrier !== 'undefined' && _carrier && _carrier.proto) {
+          const _cl = _carrier.proto.clone(true);
+          _cl.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; o.castShadow = true; } });
+          _carWarmGroup.add(_cl);
+        }
+        try {
+          const _keys = (typeof shipModelCache !== 'undefined' && shipModelCache.loaded) ? Object.keys(shipModelCache.loaded) : [];
+          if (typeof createShipMesh === 'function' && typeof LOADOUTS !== 'undefined' && typeof CHASSIS !== 'undefined') {
+            let _i = 0;
+            for (const _key of _keys) {
+              const _ld = LOADOUTS[_key]; const _ch = _ld ? CHASSIS[_ld.chassis] : null; if (!_ch) continue;
+              const _hm = createShipMesh(_ch, 0xff4444, _key);
+              if (!_hm) continue;
+              _hm.position.set((_i++) * 40, 0, 0);
+              _hm.traverse((o) => { if (o.isMesh) { o.frustumCulled = false; if (!(o.userData && o.userData._cockpitPart)) o.castShadow = true; } });
+              _carWarmGroup.add(_hm);
+            }
+          }
+        } catch (_) {}
+        scene.add(_carWarmGroup);
+        {
+          const _cl = _carWarmGroup;
+          const _rtK = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+          const _pRTK = renderer.getRenderTarget();
+          try {
+            if (_rtK) renderer.setRenderTarget(_rtK);
+            renderer.compile(scene, camera);
+            _cl.traverse((o) => {
+              const _ms = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+              for (const _m of _ms) {
+                for (const _k of ['map', 'normalMap', 'emissiveMap', 'roughnessMap', 'metalnessMap', 'aoMap']) {
+                  const _t = _m && _m[_k];
+                  if (_t && _t.isTexture) { try { renderer.initTexture(_t); } catch (_) {} }
+                }
+              }
+            });
+            if (game._hubWater && typeof _warmReflLiftForRoot === 'function') _warmReflLiftForRoot(_cl);
+          } finally { try { renderer.setRenderTarget(_pRTK); } catch (_) {} }
+        }
+      }
+    } catch (e) { console.warn('[prebake] carrier prime failed:', e && e.message); }
+    rep.ms.carrier = Math.round(_pbNow() - _tK);
+
     const _tD = _pbNow();
     if (_pbNow() - _bt0 < _PREBAKE_MAX_MS) {
       _pbSub('priming the GPU');
       rep.gpuPasses = await _prebakeGpuPrime();
     } else if (!rep.capped) rep.capped = 'gpu-skipped';
     rep.ms.gpu = Math.round(_pbNow() - _tD);
+    try { if (_carWarmGroup) { scene.remove(_carWarmGroup); _carWarmGroup = null; } } catch (_) {}
 
     const _tDr = _pbNow();
     try {
@@ -37710,6 +38058,30 @@ async function _prebakeGpuPrime() {
   const e = new THREE.Euler(0, 0, 0, 'YXZ');
   const PITCH = [0, -0.6, 0.6];
   let passes = 0;
+  try { if (typeof _swRipple !== 'undefined' && _swRipple && _swRipple.gpu) _swRipple.gpu.compute(); } catch (_) {}
+  try { if (typeof _birdFlock !== 'undefined' && _birdFlock && _birdFlock.gpu) _birdFlock.gpu.compute(); } catch (_) {}
+  try { if (typeof _fishSchool !== 'undefined' && _fishSchool && _fishSchool.gpu) _fishSchool.gpu.compute(); } catch (_) {}
+  try {
+    const _vis = [];
+    for (const _F of [(typeof _birdFlock !== 'undefined') ? _birdFlock : null, (typeof _fishSchool !== 'undefined') ? _fishSchool : null]) {
+      if (_F && _F.mesh && !_F.mesh.visible) { _F.mesh.visible = true; _vis.push(_F.mesh); }
+    }
+    if (_vis.length) {
+      const _pRT = renderer.getRenderTarget();
+      if (rt) renderer.setRenderTarget(rt);
+      try { renderer.compile(scene, camera); } catch (_) {}
+      renderer.setRenderTarget(_pRT);
+      for (const _m of _vis) _m.visible = false;
+    }
+  } catch (_) {}
+  try {
+    if (game._hubWater && typeof _warmReflLiftForRoot === 'function') {
+      let _n = 0;
+      if (typeof player !== 'undefined' && player && player.mesh) _n += _warmReflLiftForRoot(player.mesh);
+      for (const _e of (game.entities || [])) { if (_e && _e.mesh) _n += _warmReflLiftForRoot(_e.mesh); }
+      try { window.__reflWarm = _n; } catch (_) {}
+    }
+  } catch (_) {}
   try {
     for (let p = 0; p < PITCH.length; p++) {
       for (let y = 0; y < 4; y++) {
@@ -42410,36 +42782,64 @@ function _warmCloakForRoot(root) {
   try {
     const op = (typeof PILOT_PERKS !== 'undefined' && PILOT_PERKS && PILOT_PERKS.cloak &&
                 typeof PILOT_PERKS.cloak.cloakOpacity === 'number') ? PILOT_PERKS.cloak.cloakOpacity : 0.01;
-    const swaps = [], clonesAll = [];
+    const mats = [];
     root.traverse((child) => {
       if (!child.isMesh || !child.material) return;
-      const orig = child.material;
-      const arr = Array.isArray(orig) ? orig : [orig];
-      let any = false;
-      const clones = arr.map((m) => {
-        if (!m || m.transparent) return m;          // already transparent — same program
-        const c = m.clone();
-        c.transparent = true;
-        c.opacity = (m.opacity != null ? m.opacity : 1) * op;
-        c.needsUpdate = true;
-        clonesAll.push(c); any = true;
-        return c;
-      });
-      if (!any) return;
-      child.material = Array.isArray(orig) ? clones : clones[0];
-      swaps.push({ child, orig });
+      const arr = Array.isArray(child.material) ? child.material : [child.material];
+      for (const m of arr) { if (m && !m.transparent && mats.indexOf(m) < 0) mats.push(m); }
     });
-    if (clonesAll.length) {
-      try { renderer.compile(root, camera, scene); } catch (_) {}
-      for (const s of swaps) s.child.material = s.orig;        // restore FIRST
-      for (const c of clonesAll) { try { _lssRetainMat(c); } catch (_) {} }
-      try { window.__cloakWarm = (window.__cloakWarm || 0) + clonesAll.length; } catch (_) {}
-      return clonesAll.length;
+    if (!mats.length) return 0;
+    const _rtC = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+    const _pRTC = renderer.getRenderTarget();
+    try {
+      if (_rtC) renderer.setRenderTarget(_rtC);
+      for (const m of mats) {
+        m._wOp = m.opacity; m._wSide = m.side;
+        m.transparent = true;
+        m.opacity = (m.opacity != null ? m.opacity : 1) * op;
+        if (m.side === THREE.DoubleSide) m.side = THREE.BackSide;
+        m.needsUpdate = true;
+      }
+      renderer.compile(root, camera, scene);
+      let _any = false;
+      for (const m of mats) { if (m._wSide === THREE.DoubleSide) { m.side = THREE.FrontSide; m.needsUpdate = true; _any = true; } }
+      if (_any) renderer.compile(root, camera, scene);
+    } catch (_) {}
+    for (const m of mats) {
+      try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
+      delete m._wOp; delete m._wSide;
     }
+    try { renderer.setRenderTarget(_pRTC); } catch (_) {}
+    try { window.__cloakWarm = (window.__cloakWarm || 0) + mats.length; } catch (_) {}
+    return mats.length;
   } catch (e) { console.warn('[cloak] pre-warm failed:', e); }
   return 0;
 }
-
+function _warmReflLiftForRoot(root) {
+  if (!root || typeof root.traverse !== 'function') return 0;
+  if (root.userData && root.userData._reflWarmed) return 0;
+  if (root.userData) root.userData._reflWarmed = true;
+  try {
+    const mats = [];
+    root.traverse((child) => {
+      if (!child.isMesh || !child.material) return;
+      const arr = Array.isArray(child.material) ? child.material : [child.material];
+      for (const m of arr) { if (m && m.color && m.emissive && m.emissive.isColor && m.map && !m.emissiveMap && mats.indexOf(m) < 0) mats.push(m); }
+    });
+    if (!mats.length) return 0;
+    const _rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+    const _pRT = renderer.getRenderTarget();
+    try {
+      if (_rt) renderer.setRenderTarget(_rt);
+      for (const m of mats) { m.emissiveMap = m.map; m.needsUpdate = true; }
+      renderer.compile(root, camera, scene);
+    } catch (_) {}
+    for (const m of mats) { try { m.emissiveMap = null; m.needsUpdate = true; } catch (_) {} }
+    try { renderer.setRenderTarget(_pRT); } catch (_) {}
+    return mats.length;
+  } catch (e) { console.warn('[refl] variant pre-warm failed:', e); }
+  return 0;
+}
 function _warmCloakVariantOnce() {
   let root = null;
   try {
@@ -43126,6 +43526,8 @@ function _lssCockpitLights() {
   if (typeof scene === 'undefined' || !scene) return null;
   const key = new THREE.PointLight(0xffe2c4, 0, 160, 2);
   const fill = new THREE.PointLight(0xa9c6ff, 0, 160, 2);
+  key.layers.enable(5);
+  fill.layers.enable(5);
   key.name = 'cockpitKey'; fill.name = 'cockpitFill';
   scene.add(key); scene.add(fill);
   return { key, fill };
@@ -43696,14 +44098,20 @@ function _adsOverlayRender() {
     _adsOvCam.updateMatrixWorld(true);
     const _prevAC = renderer.autoClear;
     const _prevBG = scene.background;
+    const _prevMW = scene.matrixWorldAutoUpdate;
+    const _prevSM = renderer.shadowMap.autoUpdate;
     try {
       renderer.autoClear = false;
       scene.background = null;
+      scene.matrixWorldAutoUpdate = false;
+      renderer.shadowMap.autoUpdate = false;
       renderer.clearDepth();
       renderer.render(scene, _adsOvCam);
     } finally {
       renderer.autoClear = _prevAC;
       scene.background = _prevBG;
+      scene.matrixWorldAutoUpdate = _prevMW;
+      renderer.shadowMap.autoUpdate = _prevSM;
     }
   } catch (_) {}
 }
@@ -54451,10 +54859,10 @@ function _doPostFXResize() {
     const _sz = _getBloomRTSize();
     const w = _sz.w, h = _sz.h;
     try { postFX.rtScene.setSize(w, h); } catch (_) {}
-    try { postFX.rtBright.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
-    try { postFX.rtBlurH.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
-    try { postFX.rtBlurV.setSize(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
-    try { postFX.blurMat.uniforms.resolution.value.set(Math.floor(w / 2), Math.floor(h / 2)); } catch (_) {}
+    try { postFX.rtBright.setSize(_sz.bw, _sz.bh); } catch (_) {}
+    try { postFX.rtBlurH.setSize(_sz.bw, _sz.bh); } catch (_) {}
+    try { postFX.rtBlurV.setSize(_sz.bw, _sz.bh); } catch (_) {}
+    try { postFX.blurMat.uniforms.resolution.value.set(_sz.bw, _sz.bh); } catch (_) {}
     try { resizeCineFX(window.innerWidth, window.innerHeight); } catch (_) {}
   } catch (_) {}
 }
@@ -63341,6 +63749,7 @@ function gameLoop(timestamp) {
           try { _clipEnableNow(_fX, _fZ); } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }
         } else { try { _clipUpdate(_fX, _fZ); } catch (_) {} }
       }
+      __pmark('hub:clip');   // (v39.49) clipmap enable/update
       if (game._swPreloading) {
         var _plBuilt = updateSandwichStream(_fX, _fZ, 28, 14, 14);   
         game._swPreloadFrames = (game._swPreloadFrames || 0) + 1;
@@ -63356,12 +63765,24 @@ function gameLoop(timestamp) {
         } catch (_) { _drainMs = 12; }
         _swDrainStream(_fX, _fZ, _drainMs, 64);
         try { _warmCloakVariantOnce(); } catch (_) {}   // (v39.39) once, behind the countdown
+        try {
+          if (typeof game.warmupTimer === 'number') {
+            if (game.warmupTimer > 3) game._cloakLateWarm = false;
+            else if (game.warmupTimer < 2 && !game._cloakLateWarm && player && player.mesh) {
+              game._cloakLateWarm = true;
+              if (player.mesh.userData) player.mesh.userData._cloakWarmed = false;
+              _warmCloakForRoot(player.mesh);
+            }
+          }
+        } catch (_) {}
       } else {
         updateSandwichStream(_fX, _fZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
       }
+      __pmark('hub:stream');   // (v39.49) chunk streamer / warmup drain alone
       try { _swUpdateHubWater(); } catch (_) {}   
+      __pmark('hub:water');   // (v39.49) _swUpdateHubWater alone
       try { _swRippleTick(dt); } catch (_) {}
-      __pmark('hub:ripple');
+      __pmark('hub:ripple');   // (v39.49) the ripple tick alone now (see hub:clip / hub:stream / hub:water above)
       try { _swUpdateUnderwater(); } catch (_) {}
       __pmark('hub:underwater');
       try { _birdFlockTick(_wallDt); } catch (_) {}
@@ -72405,20 +72826,35 @@ try {
 } catch (_) {}
 
 
-function showHitMarker() {
-  const el = document.getElementById('hit-marker');
-  if (!el) return;
+const _HIT_FLASH_KEYS = [
+  { offset: 0,   opacity: 1,    transform: 'translate(-50%, -50%) scale(1.3)',  filter: 'drop-shadow(-2px 0 0 rgba(0,255,255,0.95)) drop-shadow(2px 0 0 rgba(255,0,180,0.95))' },
+  { offset: 0.4, opacity: 0.95, transform: 'translate(-50%, -50%) scale(1.05)', filter: 'drop-shadow(-1px 0 0 rgba(0,255,255,0.55)) drop-shadow(1px 0 0 rgba(255,0,180,0.55))' },
+  { offset: 1,   opacity: 0,    transform: 'translate(-50%, -50%) scale(0.8)',  filter: 'drop-shadow(0 0 0 rgba(0,255,255,0)) drop-shadow(0 0 0 rgba(255,0,180,0))' },
+];
+const _KILL_FLASH_KEYS = [
+  { offset: 0,    opacity: 1, transform: 'translate(-50%, -50%) scale(1.5)', filter: 'drop-shadow(-4px 0 0 rgba(0,240,255,1)) drop-shadow(4px 0 0 rgba(255,50,200,1))' },
+  { offset: 0.25, opacity: 1, transform: 'translate(-50%, -50%) scale(1.0)', filter: 'drop-shadow(-2px 0 0 rgba(0,240,255,0.75)) drop-shadow(2px 0 0 rgba(255,50,200,0.75))' },
+  { offset: 1,    opacity: 0, transform: 'translate(-50%, -50%) scale(0.6)', filter: 'drop-shadow(0 0 0 rgba(0,240,255,0)) drop-shadow(0 0 0 rgba(255,50,200,0))' },
+];
+function _markerFlash(el, keys, ms) {
+  if (typeof el.animate === 'function') {
+    if (el._flashAnim) { try { el._flashAnim.cancel(); } catch (_) {} }
+    try { el._flashAnim = el.animate(keys, { duration: ms, easing: 'ease-out' }); return; } catch (_) { el._flashAnim = null; }
+  }
   el.classList.remove('active');
   void el.offsetWidth;
   el.classList.add('active');
 }
+function showHitMarker() {
+  const el = showHitMarker._el || (showHitMarker._el = document.getElementById('hit-marker'));
+  if (!el) return;
+  _markerFlash(el, _HIT_FLASH_KEYS, 250);
+}
 
 function showKillMarker() {
-  const el = document.getElementById('hit-marker-kill');
+  const el = showKillMarker._el || (showKillMarker._el = document.getElementById('hit-marker-kill'));
   if (!el) return;
-  el.classList.remove('active');
-  void el.offsetWidth;
-  el.classList.add('active');
+  _markerFlash(el, _KILL_FLASH_KEYS, 500);
 }
 
 const _origFireWeapon = fireWeapon;
