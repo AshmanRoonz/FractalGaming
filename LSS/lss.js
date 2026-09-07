@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.32';
+const LSS_BUILD = '39.33';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -37592,7 +37592,13 @@ async function _prebakeWorldForLaunch() {
         const _gl2 = renderer.getContext();
         const _ext = _gl2.getExtension('KHR_parallel_shader_compile');
         const _dbg = _gl2.getExtension('WEBGL_debug_renderer_info');
+        const _cv = renderer.domElement;
         _el.textContent = _pbLine +
+          '\ndpr ' + (window.devicePixelRatio || 1).toFixed(2) +
+          ' | pixelRatio ' + (renderer.getPixelRatio ? renderer.getPixelRatio().toFixed(2) : '?') +
+          ' | canvas ' + _cv.width + 'x' + _cv.height +
+          ' (' + ((_cv.width * _cv.height) / 1e6).toFixed(2) + ' MP)' +
+          ' | css ' + window.innerWidth + 'x' + window.innerHeight +
           '\nprograms ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
           ' | parallelCompile ' + (_ext ? 'yes' : 'NO') +
           '\n' + (_dbg ? String(_gl2.getParameter(_dbg.UNMASKED_RENDERER_WEBGL)).slice(0, 90) : 'renderer ?');
