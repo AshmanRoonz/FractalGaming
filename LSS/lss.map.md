@@ -1512,3 +1512,38 @@ Also fixed: `_shipsVariant()` chose the lean MOBILE hull set on desktop since v3
 **Open:** city arrival still has one ~280 ms CPU frame outside gameLoop (fleet + carrier spawn);
 the first city of a session links the fleet shield shader cold; "tower" is GPU-bound at 103 fps
 on the dev laptop at native resolution.
+
+## v39.49 (live piloting, same day) — the clone trap, the two-pass split, shell row jobs, sub-native
+
+Found with the owner flying in Chrome while `window.__lssProbe` + an owner-tracking program watcher ran
+in their tab (see the memory notes for the method):
+
+- **`Material.clone()` does not copy `onBeforeCompile` / `customProgramCacheKey`.** Every hull
+  material carries the skin hook (`_skinPatchHueShader`, key `lssSkinHue|...`), so a warm that
+  compiles a CLONE keys a program family the live material never uses. The cloak warm had been doing
+  that since v39.40; the owner's first cloak per hull linked 4 programs cold (2.3 s). `_warmCloakForRoot`
+  and `_warmReflLiftForRoot` now flip the REAL materials in place, compile with rtScene bound, restore.
+- **three r165 draws a transparent DoubleSide material in two single-sided passes** (`side = BackSide`
+  then `FrontSide`, `needsUpdate` each) = two programs; a `compile()` of the DoubleSide state links a
+  third the draw never uses. Warms compile both sides (`_warmCloakForRoot`, `_ghostPinWarm`).
+- The countdown's `_warmCloakVariantOnce` reaches the player's ship before its hull texture is assigned
+  (`mapUv` is a key term) -> a second warm of `player.mesh` in the last 2 s of the countdown
+  (`game._cloakLateWarm`). Simulated cloak after all three: 0 new programs.
+- **Shell row jobs** (`_swShellJobNew` / `_swShellJobRows` / `_swShellJobFinish`; `_swBuildShell` is the
+  synchronous wrapper; `_swShellJobFlush` finishes an in-flight job when a synchronous state takes over):
+  `updateSandwichStream` builds one chunk at a time within `window.__swBuildMs` (2.5 ms) in play AND in the
+  countdown drain. Procedural arenas rebuild their ring every round and used to fill it in play at one
+  12-15 ms shell a frame (60-70 fps for ~10 s). Now `hub:stream` max ~3 ms.
+- Ripple: spawn-jump mask bakes are fast jobs (4 ms budget) instead of a 90 ms sync frame; the crest
+  readback (`readRenderTargetPixelsAsync`) blocks on the command-buffer flush when the GPU queue is deep
+  (5 ms avg, 11-23 ms per call after FIGHT) -> adaptive cadence (`__water.crCost` / `crSkip`, doubles to
+  32 frames when a call costs > 4 ms); `__water.breakBudget` 500 -> 40 with a 1.5 ms scan cap (skimming
+  water used to flood the particle cap: 61-77 fps).
+- **Sub-native adaptive scale**: `_ssDyn.scale` may go to `window.__ssMin` (-0.6 = 70% each axis) when
+  the frame is 40% over budget (`_lssSceneActive`), creeping back as before. A step is a viewport change.
+- Profiler marks split: `hub:clip`, `hub:stream`, `hub:water`, `hub:ripple`.
+- Program-key decoding for the next hunt: `cacheKey.split(',')` index 4 = colour space, 51/52 = boolean
+  masks (52: bit0 fog, 1 useFog, 10 doubleSided, 11 flipSided, 16 opaque), 14 = mapUv, 54 = custom key.
+- Still open: between-round picker stutter (`_rrStagedRound` runs `ph.world()` ~45 ms in one frame behind
+  the picker), the ~280 ms fleet/carrier spawn frame on first arrival at a satellite city, the owner's
+  "sound cutting" (audio engine reported no drops; it tracked GPU-bound 21 ms frame bursts).
