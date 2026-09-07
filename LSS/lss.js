@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.46';
+const LSS_BUILD = '39.47';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -8838,6 +8838,7 @@ function _blasterChargeGlow(t, tintOverride) {
     }
   }
   player._bcgOn = true;
+  player._bcgTTL = 0.2;   // (v39.47) fed every frame by the charge tick; see updateWorldEffects
 }
 function _blasterChargeGlowOff() {
   player._bcgOn = false;
@@ -42042,8 +42043,9 @@ function playerDie(attacker) {
     player._railgunChargingPrev = false;
   }
   player.railgunCharge = 0;
-  player.deaths++;
-  spawnExplosion(player.position, player.chassis.hullLength);
+  player.powerShotCharging = false;
+  player.powerShotCharge = 0;
+  try { if (player._bcgOn) _blasterChargeGlowOff(); } catch (_) {}
   if (player.mesh) player.mesh.visible = false;
   if (attacker && attacker.loadout) addKillFeed(attacker.loadout.name, 'You');
   if (typeof triggerScreenShake === 'function') triggerScreenShake(12);
@@ -46590,6 +46592,10 @@ function _releaseVortexShieldBurst(playBurstSound) {
 }
 
 function updateWorldEffects(dt) {
+  if (player._bcgOn) {
+    player._bcgTTL = (player._bcgTTL || 0) - dt;
+    if (player._bcgTTL <= 0) { try { _blasterChargeGlowOff(); } catch (_) {} }
+  }
   for (let e = game.worldEffects.length - 1; e >= 0; e--) {
     const eff = game.worldEffects[e];
     eff.timer -= dt;

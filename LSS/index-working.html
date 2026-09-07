@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.46';
+const LSS_BUILD = '39.47';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -16367,6 +16367,7 @@ function _blasterChargeGlow(t, tintOverride) {
     }
   }
   player._bcgOn = true;
+  player._bcgTTL = 0.2;   // (v39.47) fed every frame by the charge tick; see updateWorldEffects
 }
 function _blasterChargeGlowOff() {
   player._bcgOn = false;
@@ -60549,8 +60550,15 @@ function playerDie(attacker) {
     player._railgunChargingPrev = false;
   }
   player.railgunCharge = 0;
-  player.deaths++;
-  spawnExplosion(player.position, player.chassis.hullLength);
+  // (v39.47) ...and the CHARGE GLOW, for exactly the reason the tone above needed this spot.
+  // The tubes live in the SCENE at world positions (see _blasterChargeGlow), and the only code
+  // that hides them is the charge tick inside updateAbilities — which the deathCam branch of the
+  // game loop skips. Die mid-charge and the lights stayed lit at the death spot for the rest of
+  // the round. Owner: "blaster's charged shot was charging while i got killed and the charging
+  // lights didn't get cleared off the map". Puncture drives the same glow, so it fixes both.
+  player.powerShotCharging = false;
+  player.powerShotCharge = 0;
+  try { if (player._bcgOn) _blasterChargeGlowOff(); } catch (_) {}
   // (v38.65) HIDE THE HULL. Nothing did: the ship sat at the death spot, intact
   // and lit, while the death cam flew away from it — in the seat view (first
   // person has been the modelled cockpit since v38.46, so the hull is drawn
@@ -66835,6 +66843,16 @@ function _releaseVortexShieldBurst(playBurstSound) {
 // player.coreMeter in 13 places and updateAbilities' core-meter freeze/edge
 // detect at its tail must still see those writes in the same order.
 function updateWorldEffects(dt) {
+  // (v39.47) THE CHARGE GLOW EXPIRES IF NOTHING IS FEEDING IT. playerDie clears it outright, but
+  // death is only the path we hit — the tubes are scene-owned world-space meshes whose only
+  // hide-me call lives in updateAbilities, so ANY future branch that stops that tick with a charge
+  // up would strand them again. This function was already moved ahead of the deathCam branch for
+  // the same class of bug (a bot's fire freezing on screen), so it is the one tick guaranteed to
+  // keep running — which makes it the right place for the backstop.
+  if (player._bcgOn) {
+    player._bcgTTL = (player._bcgTTL || 0) - dt;
+    if (player._bcgTTL <= 0) { try { _blasterChargeGlowOff(); } catch (_) {} }
+  }
   // ---- WORLD EFFECTS UPDATE (firewalls, trip wires, traps, tethers) ----
   for (let e = game.worldEffects.length - 1; e >= 0; e--) {
     const eff = game.worldEffects[e];

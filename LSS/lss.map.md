@@ -1427,3 +1427,22 @@ by name with its timestamp — **every cold link IS a hitch on ANGLE**, so this 
 hitches" into a named list. `?pbhud` shows a running tally box plus `ghost <hulls>h/<progs>p`.
 `window.__coldProgs()` returns the same diff on demand. A healthy session reads **cold 0**.
 
+## v39.47 — the charge glow outlived the ship
+
+`_blasterChargeGlow` builds its tubes in the **SCENE, not on the ship** (world-space, so the muzzle
+markers' export rotation can't skew them). The only code that hides them is the charge tick inside
+`updateAbilities` — and the game loop runs `if (deathCam.active) { updateDeathCam } else {
+updateWeapon; updateAbilities }`. Die mid-charge and the tick never runs again, so the lights stayed
+lit at the death spot for the rest of the round. Owner: "blaster's charged shot was charging while i
+got killed and the charging lights didn't get cleared off the map".
+
+**This is the same hole v31.16b fixed for the railgun TONE** — its comment even spells out the
+cause — but the glow was added later (v37.68/v37.95) and never got the same treatment. Puncture
+drives the identical glow via `railgunCharge`, so one fix covers both hulls.
+
+Two parts: `playerDie` clears it outright beside the audio kill (deterministic, no lingering
+frame), and `_blasterChargeGlow` now stamps `player._bcgTTL = 0.2` which `updateWorldEffects`
+counts down — that function was already moved ahead of the deathCam branch for this same class of
+bug (a bot's fire freezing on screen), so it is the one tick guaranteed to keep running. Any future
+branch that stops the charge tick can no longer strand the tubes.
+
