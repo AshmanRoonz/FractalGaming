@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.33';
+const LSS_BUILD = '39.34';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -38343,7 +38343,26 @@ function _lssTexCap() {
             ((typeof isStandaloneQuest === 'function') && isStandaloneQuest()) ||
             ((typeof isXRPresenting === 'function') && isXRPresenting());
   } catch (_) {}
-  return small ? _TEX_CAP_SMALL : 0;
+  // (v39.34) DESKTOP GETS A CAP TOO — it never had one, and that is where the memory went.
+  // Read from the owner's Chrome performance trace (build 39.33, so the v39.32 shader fix was
+  // already in and this is NOT that):
+  //   · JS is 4.6 ms/frame in the slow window — the main thread is 75% IDLE
+  //   · frames block for 22-33 ms INSIDE three's render (FunctionCall `r`, three.module.min.js)
+  //   · one 1808 ms task on CrGpuMain, the GPU process main thread
+  //   · GPU memory climbs through the session and PEAKS AT 252 MB
+  // i.e. the GPU service is saturated and WebGL calls are waiting on it. And the biggest single
+  // consumer is art this function was declining to touch: `return ... : 0` meant NO CAP on
+  // desktop, so the seven hulls upload their full 2048x2048 base maps. Measured on desktop with
+  // a per-texture inventory: 14 textures at 2048x2048 = 300 MB, plus 20 at 1024 = 107 MB.
+  // 1024 is a quarter of the bytes and still far more texel than a hull ever gets on screen —
+  // the biggest a ship is drawn is the ship-select hero shot, a few hundred pixels across.
+  // MEGA/ULTRA keep the full 2048 (they exist to spend GPU); window.__texCap = { max: 2048 }
+  // restores it anywhere, { on: false } removes the cap entirely.
+  if (!small) {
+    try { if (QUALITY && (QUALITY.isMega() || QUALITY.isUltra())) return 0; } catch (_) {}
+    return 2048 > 1024 ? 1024 : 0;
+  }
+  return _TEX_CAP_SMALL;
 }
 function _lssShrinkTexture(t, cap) {
   if (!t || !t.isTexture || !cap) return false;

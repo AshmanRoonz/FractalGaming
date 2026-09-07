@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.33';
+const LSS_BUILD = '39.34';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -25799,7 +25799,11 @@ function _lssTexCap() {
             ((typeof isStandaloneQuest === 'function') && isStandaloneQuest()) ||
             ((typeof isXRPresenting === 'function') && isXRPresenting());
   } catch (_) {}
-  return small ? _TEX_CAP_SMALL : 0;
+  if (!small) {
+    try { if (QUALITY && (QUALITY.isMega() || QUALITY.isUltra())) return 0; } catch (_) {}
+    return 2048 > 1024 ? 1024 : 0;
+  }
+  return _TEX_CAP_SMALL;
 }
 function _lssShrinkTexture(t, cap) {
   if (!t || !t.isTexture || !cap) return false;
