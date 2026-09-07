@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.29';
+const LSS_BUILD = '39.30';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -38895,9 +38895,35 @@ function _applyShipPreviewModel(key) {
   cam.lookAt(0, 0, 0);
   // Reset rotation so every new ship starts facing camera.
   modelRoot.rotation.set(0, 0, 0);
-  s.yaw = 0; 
-  s.scene.add(modelRoot);
-  s.model = modelRoot;
+  s.yaw = 0;
+  // (v39.30) PUT THE HULL ON THE STAGE WHEN ITS SHADERS ARE READY, NOT BEFORE.
+  // Owner: "there's a lag spike usually when i get the last kill... it's like it starts loading
+  // the next stuff right there... it can wait until the ship selection screen to load what it
+  // needs to, and add extra time if needed."
+  // That is exactly what it was doing. Measured across a forced round transition:
+  //   two-context path : __rrStage() ms.picker = 1466   (the whole cost, named)
+  //   one-context path : ms.picker = 8, but totalMs 2550 against 128 ms of accounted phases —
+  //                      a single unattributed 2392 ms frame right after the picker is raised
+  // Both are the same thing: compileAsync() was fired and NOT awaited, then the model was added
+  // to the scene in the same tick, so the very next render blocked on the compiler for the whole
+  // hull. Awaiting it moves that wait off the frame: the picker and its hangar paint at once,
+  // the shaders finish in the background (KHR_parallel_shader_compile links them in parallel),
+  // and the ship lands a beat later. Which is precisely the trade the owner asked for.
+  // ⚠ Re-check `s.pendingKey`/`lastKey` on the way back in: the player can cycle ships while a
+  // compile is in flight, and a late resolve must not drop a stale hull onto the stage.
+  const _stage = () => {
+    if (s.lastKey !== key || s.pendingKey !== key) return;   // superseded while compiling
+    if (s.model && s.model !== modelRoot) { try { s.scene.remove(s.model); } catch (_) {} }
+    s.scene.add(modelRoot);
+    s.model = modelRoot;
+  };
+  let _p = null;
+  try {
+    const _r = s.renderer || (s.oneCtx ? renderer : null);
+    if (_r && typeof _r.compileAsync === 'function') _p = _r.compileAsync(modelRoot, s.camera, s.scene);
+  } catch (_) { _p = null; }
+  if (_p && typeof _p.then === 'function') _p.then(_stage).catch(_stage);
+  else _stage();
 }
 
 // (v36.31) Live re-skin of whatever hull is currently on the preview stage.

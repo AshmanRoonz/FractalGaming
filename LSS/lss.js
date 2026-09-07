@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.29';
+const LSS_BUILD = '39.30';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -26196,9 +26196,20 @@ function _applyShipPreviewModel(key) {
   cam.position.set(0, maxDim * 0.35, maxDim * 2.0);
   cam.lookAt(0, 0, 0);
   modelRoot.rotation.set(0, 0, 0);
-  s.yaw = 0; 
-  s.scene.add(modelRoot);
-  s.model = modelRoot;
+  s.yaw = 0;
+  const _stage = () => {
+    if (s.lastKey !== key || s.pendingKey !== key) return;   // superseded while compiling
+    if (s.model && s.model !== modelRoot) { try { s.scene.remove(s.model); } catch (_) {} }
+    s.scene.add(modelRoot);
+    s.model = modelRoot;
+  };
+  let _p = null;
+  try {
+    const _r = s.renderer || (s.oneCtx ? renderer : null);
+    if (_r && typeof _r.compileAsync === 'function') _p = _r.compileAsync(modelRoot, s.camera, s.scene);
+  } catch (_) { _p = null; }
+  if (_p && typeof _p.then === 'function') _p.then(_stage).catch(_stage);
+  else _stage();
 }
 
 function setShipPreviewSkin(skinId) {
