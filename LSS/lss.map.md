@@ -1548,7 +1548,7 @@ in their tab (see the memory notes for the method):
   the picker), the ~280 ms fleet/carrier spawn frame on first arrival at a satellite city, the owner's
   "sound cutting" (audio engine reported no drops; it tracked GPU-bound 21 ms frame bursts).
 
-## v39.49 (battery round, same day) — the mirror lifts a cloaked hull; "the sound cuts out"
+## v39.50 — the mirror lifts a cloaked hull; "the sound cuts out" (battery round of the 39.49 session)
 
 - **Round-end 668 ms frame** = the hub water Reflector's `_shipReflOverride` lifting a TRANSPARENT
   (cloaked) hull: `emissiveMap = map` on a transparent DoubleSide material forks USE_EMISSIVEMAP x
@@ -1572,3 +1572,5 @@ in their tab (see the memory notes for the method):
   `__audioDrops()` = plays and folds by type. This Chrome has no `AudioContext.renderCapacity`.
 - Still open: two unnamed programs (`onBeforeCompile` materials, transparent BackSide) link during the
   countdown of some loadouts (TRACKER, VORTEX) — behind the countdown, not felt.
+- Shipped as **39.50** because `lss.js?v=<build>` is the only cache-buster: a redeploy under the same
+  build number leaves every browser (and the CDN) on the old lss.js. Bump LSS_BUILD for EVERY deploy.
