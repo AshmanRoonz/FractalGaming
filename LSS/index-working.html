@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.37';
+const LSS_BUILD = '39.40';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -60944,6 +60944,59 @@ function _setShipMeshOpacity(root, opacity) {
   });
 }
 
+// (v39.39) PRE-WARM THE CLOAK VARIANT, once per session, in the countdown.
+// Owner: "pre-warm the transparent variant so the first cloak doesn't hitch."
+// `transparent` is in three's program cache key, so the false->true flip _setShipMeshOpacity
+// makes when Auto Cloak fires forks a NEW program for every opaque hull material — 14 of the 19
+// on a c1seat ship — and on ANGLE that first use is a synchronous D3D compile. v39.37 stopped it
+// happening every frame; this stops the first one landing in combat.
+// ⚠ IT MUST BE A CLONE THAT WE THEN RETAIN. Flipping the real material, compiling, and flipping
+// back frees the program the moment its last user reverts — three refcounts programs per
+// material. So clone each opaque hull material, mark it transparent at the real cloak opacity,
+// swap it onto the SAME MESH (identical geometry, so the key matches what combat will ask for),
+// compile, restore the originals, and hand the clones to _lssRetainMat, which holds one material
+// per real program key for the session.
+// ⚠ NOT IN THE PREBAKE: `player.mesh` does not exist yet when a launch prebakes (the ship is
+// built afterwards), and `shipWarmupMeshes` is empty on the lite-warm path. Warmup is the first
+// moment the real hull exists, and it is still behind the countdown.
+let _cloakWarmed = false;
+function _warmCloakVariantOnce() {
+  if (_cloakWarmed) return;
+  const root = (typeof player !== 'undefined' && player) ? (player.mesh || player.shipMesh) : null;
+  if (!root || typeof root.traverse !== 'function') return;   // try again next frame
+  _cloakWarmed = true;
+  try {
+    const op = (typeof PILOT_PERKS !== 'undefined' && PILOT_PERKS && PILOT_PERKS.cloak &&
+                typeof PILOT_PERKS.cloak.cloakOpacity === 'number') ? PILOT_PERKS.cloak.cloakOpacity : 0.01;
+    const swaps = [], clonesAll = [];
+    root.traverse((child) => {
+      if (!child.isMesh || !child.material) return;
+      const orig = child.material;
+      const arr = Array.isArray(orig) ? orig : [orig];
+      let any = false;
+      const clones = arr.map((m) => {
+        if (!m || m.transparent) return m;          // already transparent — same program
+        const c = m.clone();
+        c.transparent = true;
+        c.opacity = (m.opacity != null ? m.opacity : 1) * op;
+        c.needsUpdate = true;
+        clonesAll.push(c); any = true;
+        return c;
+      });
+      if (!any) return;
+      child.material = Array.isArray(orig) ? clones : clones[0];
+      swaps.push({ child, orig });
+    });
+    if (clonesAll.length) {
+      try { renderer.compile(root, camera, scene); } catch (_) {}
+      for (const s of swaps) s.child.material = s.orig;        // restore FIRST
+      for (const c of clonesAll) { try { _lssRetainMat(c); } catch (_) {} }
+      try { window.__cloakWarm = clonesAll.length; } catch (_) {}
+      console.log('[cloak] pre-warmed ' + clonesAll.length + ' transparent hull program(s)');
+    }
+  } catch (e) { console.warn('[cloak] pre-warm failed:', e); }
+}
+
 // Back-compat wrapper for the legacy name used inside _tickPerkEffects.
 function _setPlayerShipOpacity(opacity) {
   _setShipMeshOpacity(player && (player.mesh || player.shipMesh), opacity);
@@ -88320,6 +88373,7 @@ function gameLoop(timestamp) {
           if (_selEl && _selEl.classList.contains('active')) _drainMs = 12;
         } catch (_) { _drainMs = 12; }
         _swDrainStream(_fX, _fZ, _drainMs, 64);
+        try { _warmCloakVariantOnce(); } catch (_) {}   // (v39.39) once, behind the countdown
       } else {
         updateSandwichStream(_fX, _fZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
       }
