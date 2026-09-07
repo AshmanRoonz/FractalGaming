@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.50';
+const LSS_BUILD = '39.53';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -16314,7 +16314,11 @@ function _blasterChargeGlow(t, tintOverride) {
   // export rotation, so orienting a child of one is guesswork - a world-space tube aimed down the
   // aim vector is exact. They are transparent, so the ghost shell skips them.
   if (!player._bcgTubes || player._bcgTubes.length !== nodes.length) {
-    if (player._bcgTubes) for (const m of player._bcgTubes) { scene.remove(m); m.material.dispose(); }
+    // (v39.53) RETAIN, DO NOT DISPOSE. Disposing the old tubes freed their two programs (the
+    // transparent DoubleSide material draws as BackSide + FrontSide passes), and the next charge
+    // linked them cold: the owner's F8 marks on 39.52 - 1.4 s (Puncture railgun charge), 0.4 s
+    // (Blaster) - were exactly this material, an 18-vertex open cylinder in the class colour.
+    if (player._bcgTubes) for (const m of player._bcgTubes) { scene.remove(m); if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else m.material.dispose(); }
     if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.55, 1, 8, 1, true);
     player._bcgTubes = nodes.map(() => {
       const m = new THREE.Mesh(_blasterChargeGlow._geo, new THREE.MeshBasicMaterial({
@@ -16368,6 +16372,37 @@ function _blasterChargeGlow(t, tintOverride) {
   }
   player._bcgOn = true;
   player._bcgTTL = 0.2;   // (v39.47) fed every frame by the charge tick; see updateWorldEffects
+}
+// (v39.53) THE CHARGE GLOW LINKS AT LOAD, NOT AT THE FIRST CHARGE. The tubes above are built
+// lazily on the first charge of a match, and a fresh material with this recipe (transparent,
+// additive, DoubleSide, no fog, no depth write) keys two MeshBasic programs three has never linked
+// in the map - a synchronous link in play. One tube with the same recipe is drawn once here
+// (_warmDrawRoot: both single-sided passes with the real geometry) and its material is retained,
+// so the programs are resident before the countdown ends. Called from _prebakeGpuPrime.
+function _warmChargeGlowOnce() {
+  try {
+    if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene || typeof THREE === 'undefined') return 0;
+    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.55, 1, 8, 1, true);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0.5, depthWrite: false,
+      blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
+    });
+    const m = new THREE.Mesh(_blasterChargeGlow._geo, mat);
+    m.frustumCulled = false;
+    const at = (typeof player !== 'undefined' && player && player.position) ? player.position
+             : ((typeof camera !== 'undefined' && camera) ? camera.position : null);
+    if (at) m.position.copy(at);
+    m.scale.set(4, 30, 4);
+    scene.add(m);
+    const rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+    let drew = false;
+    try { drew = (typeof _warmDrawRoot === 'function') ? _warmDrawRoot(m, rt) : false; } catch (_) {}
+    if (!drew) { try { renderer.compile(scene, camera); } catch (_) {} }
+    scene.remove(m);
+    if (typeof _lssRetainMat === 'function') _lssRetainMat(mat); else mat.dispose();
+    try { window.__chargeGlowWarm = (window.__chargeGlowWarm || 0) + 1; } catch (_) {}
+    return 1;
+  } catch (e) { console.warn('[warm] charge glow failed:', e); return 0; }
 }
 function _blasterChargeGlowOff() {
   player._bcgOn = false;
@@ -21547,11 +21582,23 @@ function _lssSupersampleTick(ts) {
   // Above native: shed at 10% over budget. Below native: only when the frame is 40% over budget
   // (~100 fps at 144 Hz) - a mild 130 fps at native beats 144 at 70% resolution.
   const _over = S.ema > period * 1.10, _far = S.ema > period * 1.40;
+  // (v39.51) BELOW NATIVE IS A BURST RESPONSE, NOT A RATCHET. Measured in the owner's session (144 Hz,
+  // plugged in): 141 fps with the scene parked at the -0.6 floor (1344x707 on a 1920 canvas). Every
+  // shed doubled the hold (up to 60 ticks = 30 s with no creep-back) and the backoff never reset, so
+  // a few explosion bursts walked the scale to the floor and left it there for the rest of the
+  // fight - and a 10% overage at scale 0.1 stepped straight through native to -0.1. Now: above native
+  // a shed stops at native and keeps the exponential hold (a step there is a real supersample cost);
+  // below native only the 40%-over rule sheds, the hold is 1 s, and the creep back is 0.1 a tick
+  // (3 s from the floor to native); the backoff resets once the scale is back at its cap.
   if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
-    { sc = Math.max(_floor, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
+    if (sc > 0) { sc = Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
+    else { sc = Math.max(_floor, sc - 0.2); S.hold = 2; }
   } else if (S.ema <= period * 1.02) {
     const _cap = (_lssTierSuper() > 0) ? 1 : 0;   // (v39.49c) HIGH on battery creeps back to native, never above
-    if (S.hold > 0) S.hold -= 0.5; else if (sc < _cap) sc = Math.min(_cap, sc + 0.05);
+    if (S.hold > 0) S.hold -= 0.5;
+    else if (sc < 0) sc = Math.min(0, sc + 0.1);
+    else if (sc < _cap) sc = Math.min(_cap, sc + 0.05);
+    if (sc >= _cap) S.backoff = 4;
   }
   // (v39.49) a step is a viewport change now (renderPostFX reads S.scale every frame) - no
   // render-target reallocation, no _doPostFXResize, no hitch. See _getBloomRTSize.
@@ -21678,7 +21725,7 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
     return { level: QUALITY.level, pixelRatio: renderer.getPixelRatio(),
              canvas: [renderer.domElement.width, renderer.domElement.height],
              scene: [postFX.rtScene.width, postFX.rtScene.height, 'samples', postFX.rtScene.samples | 0],
-             active: [_sceneActive.w, _sceneActive.h, 'scale', _ssDyn.scale, 'hz', _ssDyn.hz],   // (v39.49) the viewport actually rendered this frame
+             active: [_sceneActive.w, _sceneActive.h, 'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
 };
@@ -53770,6 +53817,7 @@ function _ghostPinWarm() {
             for (const m of _gm) { m.side = THREE.DoubleSide; m.needsUpdate = true; }
           }
         } catch (_) {}
+        try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player.mesh, postFX.rtScene); } catch (_) {}   // (v39.52)
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
@@ -54990,6 +55038,7 @@ async function _prebakeGpuPrime() {
       try { window.__reflWarm = _n; } catch (_) {}
     }
   } catch (_) {}
+  try { if (typeof _warmChargeGlowOnce === 'function') _warmChargeGlowOnce(); } catch (_) {}   // (v39.53) charge-glow program pair
   try {
     for (let p = 0; p < PITCH.length; p++) {
       for (let y = 0; y < 4; y++) {
@@ -61701,6 +61750,53 @@ function _setShipMeshOpacity(root, opacity) {
 // renderer.compile() sees every opaque variant, then retains those programs for the session — so
 // the transparent twin of each belongs in the same pass, on the same loading screen, before any
 // of them is torn down. After this, no hull ever forks a cloak program in combat.
+// (v39.52) A WARM MUST DRAW, NOT JUST LINK. Measured in the owner's session (RTX 5050, ANGLE
+// D3D11, 39.51): three F8-marked hitches in play, and the third was a 2.0 s frame with the main
+// thread IDLE - no link, no texture upload, no new three program - in a frame that issued twice
+// the usual draw calls. That is work inside the GPU process, and the ANGLE D3D11 backend has
+// exactly one such job that a `renderer.compile()` cannot pre-pay: it compiles a vertex executable
+// PER VERTEX INPUT LAYOUT at the first draw that uses the layout. The hull meshes are quantized
+// (Int16 normalized positions/normals, Uint16 uvs on 14 of the 19 meshes; Float32 on the rest), so
+// every hull program has at least two layouts, and a program that was only ever COMPILED (the
+// cloak pair, the mirror lift, the ghost seat shell) meets its real layout in play - the whole
+// 86 KB physical shader through the D3D compiler again, on the frame the state first shows.
+// This renders the live scene from a camera looking at `root` into an 8x8 corner of the scene
+// target, with whatever material state the caller has flipped on: same lights, fog, tone mapping
+// and colour space as the gameplay frame, so the programs are the ones the frame uses, and the
+// draw itself is what makes ANGLE build the layout variants. Hidden roots (the pooled hulls) are
+// shown for the one call. Shadow maps are frozen so the pass is one cheap render.
+function _warmDrawRoot(root, rt) {
+  try {
+    if (!root || typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene ||
+        typeof camera === 'undefined' || !camera || !rt) return false;
+    if (renderer.xr && renderer.xr.isPresenting) return false;
+    const box = new THREE.Box3().setFromObject(root);
+    if (box.isEmpty()) return false;
+    const c = box.getCenter(new THREE.Vector3());
+    const r = Math.max(1, box.getSize(new THREE.Vector3()).length() * 0.5);
+    const cam = _warmDrawRoot._cam || (_warmDrawRoot._cam = new THREE.PerspectiveCamera(60, 1, 1, 10));
+    cam.near = Math.max(0.1, r * 0.05); cam.far = Math.max(cam.near + 1, r * 20); cam.fov = 60; cam.aspect = 1;
+    cam.position.set(c.x, c.y + r * 0.5, c.z + r * 2.6); cam.lookAt(c);
+    cam.updateProjectionMatrix(); cam.updateMatrixWorld(true);
+    cam.layers.mask = camera.layers.mask;
+    const shown = [];
+    for (let n = root; n; n = n.parent) { if (!n.visible) { n.visible = true; shown.push(n); } }
+    const pRT = renderer.getRenderTarget();
+    const sm = renderer.shadowMap.autoUpdate; renderer.shadowMap.autoUpdate = false;
+    const vp = rt.viewport.clone(), sc = rt.scissor.clone(), st = rt.scissorTest;
+    try {
+      rt.viewport.set(0, 0, 8, 8); rt.scissor.set(0, 0, 8, 8); rt.scissorTest = true;
+      renderer.setRenderTarget(rt);
+      renderer.render(scene, cam);
+    } catch (_) {}
+    rt.viewport.copy(vp); rt.scissor.copy(sc); rt.scissorTest = st;
+    try { renderer.setRenderTarget(pRT); } catch (_) {}
+    renderer.shadowMap.autoUpdate = sm;
+    for (const n of shown) n.visible = false;
+    try { window.__warmDraws = (window.__warmDraws || 0) + 1; } catch (_) {}
+    return true;
+  } catch (e) { console.warn('[warm] draw failed:', e); return false; }
+}
 function _warmCloakForRoot(root) {
   // (v39.49b) IN PLACE, NOT CLONED. Material.clone() copies the standard props and userData but
   // NOT `onBeforeCompile` / `customProgramCacheKey` - and every hull material carries the skin hook
@@ -61738,6 +61834,10 @@ function _warmCloakForRoot(root) {
       let _any = false;
       for (const m of mats) { if (m._wSide === THREE.DoubleSide) { m.side = THREE.FrontSide; m.needsUpdate = true; _any = true; } }
       if (_any) renderer.compile(root, camera, scene);
+      // (v39.52) ...then DRAW the cloaked state once with its real (quantized) geometry: back to
+      // DoubleSide, still transparent, so three's two single-sided passes both run - see _warmDrawRoot.
+      for (const m of mats) { if (m.side !== m._wSide) { m.side = m._wSide; m.needsUpdate = true; } }
+      _warmDrawRoot(root, _rtC);
     } catch (_) {}
     for (const m of mats) {
       try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
@@ -61771,6 +61871,7 @@ function _warmReflLiftForRoot(root) {
       if (_rt) renderer.setRenderTarget(_rt);
       for (const m of mats) { m.emissiveMap = m.map; m.needsUpdate = true; }
       renderer.compile(root, camera, scene);
+      _warmDrawRoot(root, _rt);   // (v39.52) and draw it - the layout variants, see _warmDrawRoot
     } catch (_) {}
     for (const m of mats) { try { m.emissiveMap = null; m.needsUpdate = true; } catch (_) {} }
     try { renderer.setRenderTarget(_pRT); } catch (_) {}

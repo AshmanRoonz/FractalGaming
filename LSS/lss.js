@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.50';
+const LSS_BUILD = '39.53';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -8791,7 +8791,7 @@ function _blasterChargeGlow(t, tintOverride) {
         ? window.__blasterCharge.tint : 0x00d8ff);
   const col = new THREE.Color(tint);
   if (!player._bcgTubes || player._bcgTubes.length !== nodes.length) {
-    if (player._bcgTubes) for (const m of player._bcgTubes) { scene.remove(m); m.material.dispose(); }
+    if (player._bcgTubes) for (const m of player._bcgTubes) { scene.remove(m); if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else m.material.dispose(); }
     if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.55, 1, 8, 1, true);
     player._bcgTubes = nodes.map(() => {
       const m = new THREE.Mesh(_blasterChargeGlow._geo, new THREE.MeshBasicMaterial({
@@ -8839,6 +8839,31 @@ function _blasterChargeGlow(t, tintOverride) {
   }
   player._bcgOn = true;
   player._bcgTTL = 0.2;   // (v39.47) fed every frame by the charge tick; see updateWorldEffects
+}
+function _warmChargeGlowOnce() {
+  try {
+    if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene || typeof THREE === 'undefined') return 0;
+    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.55, 1, 8, 1, true);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffffff, transparent: true, opacity: 0.5, depthWrite: false,
+      blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
+    });
+    const m = new THREE.Mesh(_blasterChargeGlow._geo, mat);
+    m.frustumCulled = false;
+    const at = (typeof player !== 'undefined' && player && player.position) ? player.position
+             : ((typeof camera !== 'undefined' && camera) ? camera.position : null);
+    if (at) m.position.copy(at);
+    m.scale.set(4, 30, 4);
+    scene.add(m);
+    const rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+    let drew = false;
+    try { drew = (typeof _warmDrawRoot === 'function') ? _warmDrawRoot(m, rt) : false; } catch (_) {}
+    if (!drew) { try { renderer.compile(scene, camera); } catch (_) {} }
+    scene.remove(m);
+    if (typeof _lssRetainMat === 'function') _lssRetainMat(mat); else mat.dispose();
+    try { window.__chargeGlowWarm = (window.__chargeGlowWarm || 0) + 1; } catch (_) {}
+    return 1;
+  } catch (e) { console.warn('[warm] charge glow failed:', e); return 0; }
 }
 function _blasterChargeGlowOff() {
   player._bcgOn = false;
@@ -12887,10 +12912,14 @@ function _lssSupersampleTick(ts) {
   const _floor = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
   const _over = S.ema > period * 1.10, _far = S.ema > period * 1.40;
   if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
-    { sc = Math.max(_floor, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
+    if (sc > 0) { sc = Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
+    else { sc = Math.max(_floor, sc - 0.2); S.hold = 2; }
   } else if (S.ema <= period * 1.02) {
     const _cap = (_lssTierSuper() > 0) ? 1 : 0;   // (v39.49c) HIGH on battery creeps back to native, never above
-    if (S.hold > 0) S.hold -= 0.5; else if (sc < _cap) sc = Math.min(_cap, sc + 0.05);
+    if (S.hold > 0) S.hold -= 0.5;
+    else if (sc < 0) sc = Math.min(0, sc + 0.1);
+    else if (sc < _cap) sc = Math.min(_cap, sc + 0.05);
+    if (sc >= _cap) S.backoff = 4;
   }
   if (sc !== S.scale) { S.scale = sc; S.steps++; }
 }
@@ -12971,7 +13000,7 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
     return { level: QUALITY.level, pixelRatio: renderer.getPixelRatio(),
              canvas: [renderer.domElement.width, renderer.domElement.height],
              scene: [postFX.rtScene.width, postFX.rtScene.height, 'samples', postFX.rtScene.samples | 0],
-             active: [_sceneActive.w, _sceneActive.h, 'scale', _ssDyn.scale, 'hz', _ssDyn.hz],   // (v39.49) the viewport actually rendered this frame
+             active: [_sceneActive.w, _sceneActive.h, 'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
 };
@@ -37399,6 +37428,7 @@ function _ghostPinWarm() {
             for (const m of _gm) { m.side = THREE.DoubleSide; m.needsUpdate = true; }
           }
         } catch (_) {}
+        try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player.mesh, postFX.rtScene); } catch (_) {}   // (v39.52)
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
@@ -38094,6 +38124,7 @@ async function _prebakeGpuPrime() {
       try { window.__reflWarm = _n; } catch (_) {}
     }
   } catch (_) {}
+  try { if (typeof _warmChargeGlowOnce === 'function') _warmChargeGlowOnce(); } catch (_) {}   // (v39.53) charge-glow program pair
   try {
     for (let p = 0; p < PITCH.length; p++) {
       for (let y = 0; y < 4; y++) {
@@ -42788,6 +42819,38 @@ function _setShipMeshOpacity(root, opacity) {
   });
 }
 
+function _warmDrawRoot(root, rt) {
+  try {
+    if (!root || typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene ||
+        typeof camera === 'undefined' || !camera || !rt) return false;
+    if (renderer.xr && renderer.xr.isPresenting) return false;
+    const box = new THREE.Box3().setFromObject(root);
+    if (box.isEmpty()) return false;
+    const c = box.getCenter(new THREE.Vector3());
+    const r = Math.max(1, box.getSize(new THREE.Vector3()).length() * 0.5);
+    const cam = _warmDrawRoot._cam || (_warmDrawRoot._cam = new THREE.PerspectiveCamera(60, 1, 1, 10));
+    cam.near = Math.max(0.1, r * 0.05); cam.far = Math.max(cam.near + 1, r * 20); cam.fov = 60; cam.aspect = 1;
+    cam.position.set(c.x, c.y + r * 0.5, c.z + r * 2.6); cam.lookAt(c);
+    cam.updateProjectionMatrix(); cam.updateMatrixWorld(true);
+    cam.layers.mask = camera.layers.mask;
+    const shown = [];
+    for (let n = root; n; n = n.parent) { if (!n.visible) { n.visible = true; shown.push(n); } }
+    const pRT = renderer.getRenderTarget();
+    const sm = renderer.shadowMap.autoUpdate; renderer.shadowMap.autoUpdate = false;
+    const vp = rt.viewport.clone(), sc = rt.scissor.clone(), st = rt.scissorTest;
+    try {
+      rt.viewport.set(0, 0, 8, 8); rt.scissor.set(0, 0, 8, 8); rt.scissorTest = true;
+      renderer.setRenderTarget(rt);
+      renderer.render(scene, cam);
+    } catch (_) {}
+    rt.viewport.copy(vp); rt.scissor.copy(sc); rt.scissorTest = st;
+    try { renderer.setRenderTarget(pRT); } catch (_) {}
+    renderer.shadowMap.autoUpdate = sm;
+    for (const n of shown) n.visible = false;
+    try { window.__warmDraws = (window.__warmDraws || 0) + 1; } catch (_) {}
+    return true;
+  } catch (e) { console.warn('[warm] draw failed:', e); return false; }
+}
 function _warmCloakForRoot(root) {
   if (!root || typeof root.traverse !== 'function') return 0;
   if (root.userData) root.userData._cloakWarmed = true;
@@ -42816,6 +42879,8 @@ function _warmCloakForRoot(root) {
       let _any = false;
       for (const m of mats) { if (m._wSide === THREE.DoubleSide) { m.side = THREE.FrontSide; m.needsUpdate = true; _any = true; } }
       if (_any) renderer.compile(root, camera, scene);
+      for (const m of mats) { if (m.side !== m._wSide) { m.side = m._wSide; m.needsUpdate = true; } }
+      _warmDrawRoot(root, _rtC);
     } catch (_) {}
     for (const m of mats) {
       try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
@@ -42845,6 +42910,7 @@ function _warmReflLiftForRoot(root) {
       if (_rt) renderer.setRenderTarget(_rt);
       for (const m of mats) { m.emissiveMap = m.map; m.needsUpdate = true; }
       renderer.compile(root, camera, scene);
+      _warmDrawRoot(root, _rt);   // (v39.52) and draw it - the layout variants, see _warmDrawRoot
     } catch (_) {}
     for (const m of mats) { try { m.emissiveMap = null; m.needsUpdate = true; } catch (_) {} }
     try { renderer.setRenderTarget(_pRT); } catch (_) {}

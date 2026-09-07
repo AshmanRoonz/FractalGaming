@@ -1574,3 +1574,41 @@ in their tab (see the memory notes for the method):
   countdown of some loadouts (TRACKER, VORTEX) — behind the countdown, not felt.
 - Shipped as **39.50** because `lss.js?v=<build>` is the only cache-buster: a redeploy under the same
   build number leaves every browser (and the CDN) on the old lss.js. Bump LSS_BUILD for EVERY deploy.
+
+## v39.51 — the sub-native scale was a ratchet
+
+`_lssSupersampleTick`: measured at 141 fps on the 144 Hz panel with the scene parked at the -0.6 floor.
+Every shed doubled the hold (to 30 s) and the backoff never reset, so a few explosion bursts walked the
+scale to the floor for the rest of the fight; a 10% overage at 0.1 stepped through native to -0.1. Now a
+shed above native stops at native (exponential hold kept, reset at the cap); below native only the
+40%-over rule sheds, the hold is 1 s and the creep back is 0.1 a tick. `__postFXInfo().active` carries
+ema / hold / backoff / steps. Also seen this session: 0.4-1.3 s frames in the COUNTDOWN with an idle main
+thread and no cold three program (GPU-process work; GL call counters `window.__glc` in the probe kit
+record link / texImage2D / first-draw-of-program per long frame to name it).
+
+## v39.52 — a warm must DRAW (ANGLE compiles a vertex executable per input layout)
+
+Three F8-marked hitches in the owner's 39.51 session: two were cold links of unnamed MeshBasicMaterial
+variants in play (1.7 s and 0.4 s - the game's `?pbhud` cold tracker stops itself after 5 minutes, so it
+never named them; the probe kit's per-frame program watcher does); the third was a 2.0 s frame with the
+main thread IDLE, no link, no upload, no new three program, in a frame with twice the usual draws. The
+ANGLE D3D11 backend compiles a vertex executable per vertex INPUT LAYOUT at the first draw that uses it;
+the hulls are quantized (Int16n positions/normals, Uint16n uvs on 14 of 19 meshes, Float32 on 5), so a
+program that was only ever `renderer.compile()`d (the cloak pair, the mirror lift, the ghost seat shell)
+meets its real layout in play and pays the 86 KB physical shader through the D3D compiler again, with
+nothing on the JS side to see. `_warmDrawRoot(root, rt)` renders the live scene from a camera looking at
+the root into an 8x8 corner of rtScene with the flipped state on (same lights / fog / tone mapping /
+colour space = the same programs as the frame; hidden pooled hulls shown for the call; shadow maps
+frozen); `_warmCloakForRoot`, `_warmReflLiftForRoot` and `_ghostPinWarm` call it after their compiles.
+`window.__warmDraws` counts the calls. Status: the layout explanation is the best fit for the idle-thread
+stall and is being confirmed with a (program, layout) first-draw tracker in the owner's tab.
+
+## v39.53 — the charge glow linked at the first charge
+
+F8 on 39.52 (probe kit: `renderBufferDirect` wrapper logging the material/object of any draw that grows
+`renderer.info.programs`): a 1.4 s frame = the `_blasterChargeGlow` tubes - an 18-vertex open cylinder,
+MeshBasic transparent/additive/DoubleSide/fog:false, class colour (Puncture's railgun charge uses the same
+helper) - built lazily on the FIRST CHARGE of a match, with `dispose()` on rebuild freeing the two programs
+(transparent DoubleSide = BackSide + FrontSide passes; the logger reads `side` 1 during the first pass).
+`_warmChargeGlowOnce` (from `_prebakeGpuPrime`) draws one tube with the recipe and retains its material;
+the rebuild path retains instead of disposing. `window.__chargeGlowWarm` counts.
