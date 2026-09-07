@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.25';
+const LSS_BUILD = '39.26';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -26226,6 +26226,7 @@ function _animateShipPreview() {
       try { document.body.classList.toggle('lss-picker-3d', _owns); } catch (_) {}
     }
     _spinShipPreview();
+    if (_owns) _lssRenderPicker();
     s.animId = requestAnimationFrame(_animateShipPreview);
     return;
   }
@@ -26284,6 +26285,7 @@ function _lssPickerOwnsFrame() {
   if (!_ONE_CTX_PREVIEW) return false;
   const s = _shipPreview3D;
   if (!s || !s.oneCtx || !s.ready) return false;
+  if (!s.animId) return false;
   try {
     const sel = document.getElementById('ship-select');
     return !!(sel && sel.classList.contains('active') && !sel.classList.contains('lss-launching'))
@@ -26295,6 +26297,10 @@ function startShipPreviewLoop() {
   if (_shipPreview3D.animId) return;
   if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) _initShipPreview3D();
   if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) return;
+  if (_shipPreview3D.oneCtx) {
+    _shipPreview3D._hudHidden = true;
+    try { document.body.classList.add('lss-picker-3d'); } catch (_) {}
+  }
   _animateShipPreview();
 }
 
@@ -62984,7 +62990,7 @@ function gameLoop(timestamp) {
       || (!game._selectLastRender || _selNow - game._selectLastRender >= 167);
     if (_shouldRender) {
       game._selectLastRender = _selNow;
-      if (!(_lssPickerOwnsFrame() && _lssRenderPicker())) renderFrame();
+      if (!_lssPickerOwnsFrame()) renderFrame();
     }
     return;
   }
@@ -63292,7 +63298,7 @@ function gameLoop(timestamp) {
     renderFrame();
   } else if (!game._occLastRender || timestamp - game._occLastRender >= 167) {
     game._occLastRender = timestamp;
-    if (!(_lssPickerOwnsFrame() && _lssRenderPicker())) renderFrame();
+    if (!_lssPickerOwnsFrame()) renderFrame();
   }
   __pmark('renderFrame'); 
   

@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.25';
+const LSS_BUILD = '39.26';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -38949,6 +38949,13 @@ function _animateShipPreview() {
       try { document.body.classList.toggle('lss-picker-3d', _owns); } catch (_) {}
     }
     _spinShipPreview();
+    // (v39.25b) RENDER HERE, at rAF rate. v39.25 drew the picker from gameLoop instead, and
+    // gameLoop gates that branch at 167 ms — a throttle that was correct when the thing being
+    // drawn was an INVISIBLE arena behind an opaque cover, and completely wrong once the thing
+    // being drawn is the picker itself. Owner: "the ship spinning looks choppy". It was 6 fps.
+    // The preview owning its own frame is also the pre-v39.25 architecture, so the spin is
+    // back to exactly the cadence it had before the context merge.
+    if (_owns) _lssRenderPicker();
     s.animId = requestAnimationFrame(_animateShipPreview);
     return;
   }
@@ -39025,6 +39032,9 @@ function _lssPickerOwnsFrame() {
   if (!_ONE_CTX_PREVIEW) return false;
   const s = _shipPreview3D;
   if (!s || !s.oneCtx || !s.ready) return false;
+  // ⚠ Only claim the frame if the preview's rAF loop is actually running — gameLoop skips its
+  // own render on the strength of this, so a stopped loop would leave the canvas unpainted.
+  if (!s.animId) return false;
   try {
     const sel = document.getElementById('ship-select');
     return !!(sel && sel.classList.contains('active') && !sel.classList.contains('lss-launching'))
@@ -39036,6 +39046,14 @@ function startShipPreviewLoop() {
   if (_shipPreview3D.animId) return;
   if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) _initShipPreview3D();
   if (!(_shipPreview3D.renderer || _shipPreview3D.ready)) return;
+  // (v39.26) Hide the combat HUD NOW, not on the loop's first rAF tick. The picker is already
+  // on screen and transparent by the time this runs, so waiting a frame lets the round clock
+  // show through over the hangar — owner: "i saw the timer in the ship selection screen".
+  // The per-frame toggle in the loop still owns it after this; this just closes the gap.
+  if (_shipPreview3D.oneCtx) {
+    _shipPreview3D._hudHidden = true;
+    try { document.body.classList.add('lss-picker-3d'); } catch (_) {}
+  }
   _animateShipPreview();
 }
 
@@ -87954,9 +87972,10 @@ function gameLoop(timestamp) {
       || (!game._selectLastRender || _selNow - game._selectLastRender >= 167);
     if (_shouldRender) {
       game._selectLastRender = _selNow;
-      // (v39.25) One context: the picker IS the frame here — the arena is behind an opaque
-      // cover anyway, and drawing the hangar + hull instead is what lets the second renderer go.
-      if (!(_lssPickerOwnsFrame() && _lssRenderPicker())) renderFrame();
+      // (v39.25b) The picker draws ITSELF, from its own rAF loop at full rate. All this
+      // branch has to do is stay out of the way — rendering the arena here would both cost a
+      // full scene pass for pixels nobody sees and fight the picker for the canvas.
+      if (!_lssPickerOwnsFrame()) renderFrame();
     }
     return;
   }
@@ -88440,9 +88459,9 @@ function gameLoop(timestamp) {
     renderFrame();
   } else if (!game._occLastRender || timestamp - game._occLastRender >= 167) {
     game._occLastRender = timestamp;
-    // (v39.25) Same substitution as the 'select' branch: while the picker covers the screen the
-    // arena's pixels are thrown away, so draw the picker instead of throwing a frame away.
-    if (!(_lssPickerOwnsFrame() && _lssRenderPicker())) renderFrame();
+    // (v39.25b) Same as the 'select' branch: the picker's own loop owns the canvas while it
+    // is up, so skip the arena pass entirely rather than throttling it.
+    if (!_lssPickerOwnsFrame()) renderFrame();
   }
   __pmark('renderFrame'); 
   
