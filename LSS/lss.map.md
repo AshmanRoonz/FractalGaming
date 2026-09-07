@@ -1547,3 +1547,28 @@ in their tab (see the memory notes for the method):
 - Still open: between-round picker stutter (`_rrStagedRound` runs `ph.world()` ~45 ms in one frame behind
   the picker), the ~280 ms fleet/carrier spawn frame on first arrival at a satellite city, the owner's
   "sound cutting" (audio engine reported no drops; it tracked GPU-bound 21 ms frame bursts).
+
+## v39.49 (battery round, same day) — the mirror lifts a cloaked hull; "the sound cuts out"
+
+- **Round-end 668 ms frame** = the hub water Reflector's `_shipReflOverride` lifting a TRANSPARENT
+  (cloaked) hull: `emissiveMap = map` on a transparent DoubleSide material forks USE_EMISSIVEMAP x
+  transparent x BackSide/FrontSide — two programs per material that no warm compiles. The lift now
+  skips `_mm.transparent` (a 1% reflection is invisible). Diagnosis trick: for every `hull` program
+  list [EMISSIVEMAP?, opaque bit, side, mapUv, usedTimes]; the missing combination is the un-warmed state.
+- **"The many missiles of Tracker's mega core make the sound cut out"** = the Web Audio render thread
+  STARVING, measured: `audio.ctx.getOutputTimestamp()` gives (performanceTime, contextTime); their
+  difference is constant to the millisecond when healthy and jumped 1.9-2.5 s inside 5 s at the volley's
+  IMPACTS — every missed quantum went out as silence. Two causes:
+  1. gating `'off'` (v35.49) returned from `_audioPeekSoundAllowed` BEFORE the per-type min gap, so the
+     explosion fold (70 ms, written to cap simultaneous HRTF panners) never ran: 2138 spatial explosions
+     in 338 s, 0 folded; a volley landing 40 missiles in a second put 40 HRTF panners + convolver sends on
+     the thread at once. The explosion fold now runs in every gate mode (budget gating stays off).
+  2. no real load signal: `_audioStressed` counts sound STARTS in 0.25 s and never trips. New
+     `_audioStarveTick` (per frame from `_audioSpatialFrame`) watches the timestamp pair and flips
+     `_audioStarved` for 3 s after any > 20 ms jump -> `_audioLeanMode()` true (equalpower panners, no
+     reverb sends, thinner recipes, 1.2 s panner release) + a 120 ms explosion gap.
+  Live: `window.__audioStarve()` (events / lostMs / starved), `__audioStarve(false)` for an A/B,
+  `__audioStats()` carries `starved` / `starveEvents` / `starveLostMs`; `__audioDrops(true)` then
+  `__audioDrops()` = plays and folds by type. This Chrome has no `AudioContext.renderCapacity`.
+- Still open: two unnamed programs (`onBeforeCompile` materials, transparent BackSide) link during the
+  countdown of some loadouts (TRACKER, VORTEX) — behind the countdown, not felt.

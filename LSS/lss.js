@@ -12847,9 +12847,17 @@ try {
 } catch (e) {}
 
 const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0 };
+let _lssOnBattery = false;
+try {
+  if (navigator.getBattery) navigator.getBattery().then((b) => {
+    _lssOnBattery = !b.charging;
+    b.addEventListener('chargingchange', () => { _lssOnBattery = !b.charging; });
+  }).catch(() => {});
+} catch (_) {}
+if (typeof window !== 'undefined') window.__onBattery = () => _lssOnBattery;
 function _lssSupersampleActive() {
   try {
-    return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega()) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
+    return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega() || (_lssOnBattery && QUALITY.level === 'high')) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
            !(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
   } catch (_) { return false; }
 }
@@ -12881,7 +12889,8 @@ function _lssSupersampleTick(ts) {
   if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
     { sc = Math.max(_floor, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
   } else if (S.ema <= period * 1.02) {
-    if (S.hold > 0) S.hold -= 0.5; else if (sc < 1) sc = Math.min(1, sc + 0.05);
+    const _cap = (_lssTierSuper() > 0) ? 1 : 0;   // (v39.49c) HIGH on battery creeps back to native, never above
+    if (S.hold > 0) S.hold -= 0.5; else if (sc < _cap) sc = Math.min(_cap, sc + 0.05);
   }
   if (sc !== S.scale) { S.scale = sc; S.steps++; }
 }
@@ -12917,7 +12926,7 @@ function _lssSceneActive(rt) {
   let w = W, h = H;
   try {
     const _super = _lssTierSuper();
-    if (_super > 0 && _lssSupersampleActive()) {
+    if (_lssSupersampleActive()) {   // (v39.49c) also HIGH on battery (super 0: sub-native only)
       const cap = (typeof QUALITY.bloomDPR === 'function') ? QUALITY.bloomDPR() : 1.0;
       const base = Math.min(window.devicePixelRatio, cap);
       const _sc = Math.max(-0.9, Math.min(1, _ssDyn.scale));
@@ -17450,6 +17459,7 @@ function _swBuildHubWater(T) {
               continue;
             }
             if (!_mm || !_mm.color || _mm._reflLiftT === _reflPassId) continue;
+            if (_mm.transparent) continue;
             _mm._reflLiftT = _reflPassId;
             if (typeof _mm.envMapIntensity === 'number' && _E !== 1) { _reflLift.push({ m: _mm, env: _mm.envMapIntensity }); _mm.envMapIntensity *= _E; }
             if (!(_L > 0)) continue;
@@ -24238,6 +24248,7 @@ function initSandwichTerrain() {
   const ccz = Math.floor(_cz0 / _SW_CHUNK);
   const R = 2;   
   const chunks = game.sandwichChunks;
+  if (!game._rrStaging) {
   try {
     for (let cz = ccz - R; cz <= ccz + R; cz++) {
       for (let cx = ccx - R; cx <= ccx + R; cx++) {
@@ -24247,6 +24258,7 @@ function initSandwichTerrain() {
       }
     }
   } catch (e) { console.warn('[sandwich] init terrain failed:', e); }
+  }
   if (!game._swapStaging) { try { _hubCityInit(); } catch (e) { console.warn('[hubcity] init failed:', e); } }
   if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && T && T.biome === 'mossy') {
     game._clipWantHub = !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && typeof _clipBuild === 'function';
@@ -48805,7 +48817,7 @@ function updateRoundSystem(dt) {
           const _tB2 = _pbNow();
           spawnOrganics(game.sdfRoomData);
           try {
-            game._rrBuildMs = { lvl: Math.round(_tB1 - _tB0), dyn: Math.round(_tB2 - _tB1),
+            game._rrBuildMs = { parts: game._rrBuildParts || null, lvl: Math.round(_tB1 - _tB0), dyn: Math.round(_tB2 - _tB1),
                                 org: Math.round(_pbNow() - _tB2) };
           } catch (_) {}
         };
@@ -61701,6 +61713,7 @@ function _cleanupOrphanWallMeshes(keepList) {
 }
 
 function buildRoomGraphLevel(level) {
+  const _bpT0 = performance.now(); game._rrBuildParts = {};
   try {
     _cleanupOrphanWallMeshes([]);
     if (Array.isArray(game.mapMeshes)) game.mapMeshes.length = 0;
@@ -61714,6 +61727,7 @@ function buildRoomGraphLevel(level) {
     !(typeof window !== 'undefined' && window.__keepTerrain === false));
   if (_keepTerrain) { try { console.log('[sandwich] terrain kept across the round (' + game.sandwichChunks.size + ' chunks)'); } catch (_) {} }
   else { try { if (typeof resetSandwichTerrain === 'function') resetSandwichTerrain(); } catch (_) {} }
+  try { game._rrBuildParts.reset = Math.round(performance.now() - _bpT0); } catch (_) {}   // (v39.49c)
   if (!_keepTerrain) game.sandwichTerrain = null;
   game.arenaField = null;
   if (!(level && level.arena)) { try { _arenaDisposeMesh(); } catch (_) {} }
@@ -62019,7 +62033,9 @@ function buildRoomGraphLevel(level) {
   if (_keepTerrain) {
     try { _swApplyAtmosphere(); _swSyncFX(); } catch (e) { console.warn('[sandwich] keep: atmosphere error:', e); }
   } else {
+  try { game._rrBuildParts.rooms = Math.round(performance.now() - _bpT0); } catch (_) {}   // (v39.49c) rooms + graph + spawn-clear, before initSandwichTerrain
     try { initSandwichTerrain(); } catch (e) { console.warn('[sandwich] init error:', e); }
+  try { game._rrBuildParts.init = Math.round(performance.now() - _bpT0); } catch (_) {}   // (v39.49c)
   }
 
   const mapGenHud = document.getElementById('map-gen-hud');
@@ -70538,6 +70554,7 @@ function __audioStats() {
     gating: __audioGate(),
     leanMode: _audioLeanMode(),
     stressed: _audioStressed,
+    starved: _audioStarved, starveEvents: _audioStarve.events, starveLostMs: +_audioStarve.lostMs.toFixed(0),   // (v39.49d)
     mobile: _audioIsMobileDevice(),
     spatialDepth: _audioSpatialDepth,
     userVol: Object.assign({}, audio.userVol),
@@ -70783,6 +70800,35 @@ function _audioIsMobileDevice() {
   return _audioMobileCached;
 }
 
+let _audioStarved = false;
+const _audioStarve = { on: true, init: false, last: 0, lastT: 0, until: 0, lostMs: 0, events: 0, lastEventT: 0 };
+function _audioStarveTick() {
+  if (!_audioStarve.on || !audio.ctx || audio.ctx.state !== 'running') return;
+  const now = performance.now();
+  let d;
+  try {
+    const ts = audio.ctx.getOutputTimestamp();
+    if (!(ts && ts.contextTime > 0)) return;
+    d = ts.performanceTime - ts.contextTime * 1000;
+  } catch (_) { d = now - audio.ctx.currentTime * 1000; }
+  const gap = now - _audioStarve.lastT, prev = _audioStarve.last, wasInit = _audioStarve.init;
+  _audioStarve.last = d; _audioStarve.lastT = now; _audioStarve.init = true;
+  if (!wasInit || gap > 400 || (typeof document !== 'undefined' && document.hidden)) return;
+  const dd = d - prev;   // > 0: the audio clock fell behind (silence went out); < 0: catching up
+  if (dd > 20) {
+    _audioStarve.lostMs += dd; _audioStarve.events++; _audioStarve.lastEventT = now;
+    _audioStarve.until = now + 3000;
+    _audioStarved = true;
+  } else if (_audioStarved && now > _audioStarve.until) {
+    _audioStarved = false;
+  }
+}
+if (typeof window !== 'undefined') window.__audioStarve = function (on) {
+  if (typeof on === 'boolean') { _audioStarve.on = on; if (!on) _audioStarved = false; }
+  return { on: _audioStarve.on, starved: _audioStarved, events: _audioStarve.events,
+           lostMs: +_audioStarve.lostMs.toFixed(0),
+           lastEventAgoS: _audioStarve.lastEventT ? +((performance.now() - _audioStarve.lastEventT) / 1000).toFixed(1) : null };
+};
 let _audioForceLean = null;
 if (typeof window !== 'undefined') window.__audioForceLean = function (v) {
   _audioForceLean = (v == null) ? null : !!v;
@@ -70790,6 +70836,7 @@ if (typeof window !== 'undefined') window.__audioForceLean = function (v) {
 };
 function _audioLeanMode() {
   if (_audioForceLean !== null) return _audioForceLean;
+  if (_audioStarved) return true;   // (v39.49d) a measured underrun - see _audioStarveTick
   return _audioIsMobileDevice() ||
          _audioQuestCombatMode() ||
          (_audioGateMode !== 'off' && _audioStressed) ||
@@ -70810,6 +70857,7 @@ function _audioVoiceBudget() {
 
 function _soundMinGap(type) {
   const base = _SOUND_MIN_GAP[type] || 0;
+  if (_audioStarved && type === 'explosion') return Math.max(base, 0.12);   // (v39.49d) one boom per 120 ms while the audio thread is behind
   if (_audioIsQuestVR()) return Math.max(base, _SOUND_MIN_GAP_VR[type] || 0);
   return base;
 }
@@ -70840,10 +70888,15 @@ function _audioPeekSoundAllowed(type, own) {
   _audioPruneRecentVoices(t);
   const budget = _audioVoiceBudget();
   _audioUpdateStress(_audioRecentVoices.length, budget);
-  if (_audioGateMode === 'off') { _audioNoteDrop('played', type); return true; }
-
   const gapKey = own ? type : (type + '@r');
   const gap = _soundMinGap(type);
+  if (_audioGateMode === 'off') {
+    if (gap && type === 'explosion') {
+      const last = _lastSoundTime[gapKey];
+      if (last !== undefined && t - last < gap) { _audioNoteDrop('gap', type); return false; }
+    }
+    _audioNoteDrop('played', type); return true;
+  }
   if (gap) {
     const last = _lastSoundTime[gapKey];
     if (last !== undefined && t - last < gap) { _audioNoteDrop('gap', type); return false; }
@@ -71176,6 +71229,7 @@ function _flybyTick(dt) {
 }
 function _audioSpatialFrame(dt) {
   _audioUpdateListener();
+  _audioStarveTick();   // (v39.49d)
   _flybyTick(dt);
 }
 if (typeof window !== 'undefined') window.__flybyDbg = function () {
@@ -71221,7 +71275,7 @@ function _playSpatialSoundHRTF(type, worldPos, opts) {
   const triple = _acquireSpatialTriple(audio.ctx);
   const { panner, occl, occlGain } = triple;
   try {
-    panner.panningModel = ((typeof _audioQuestCombatMode === 'function' && _audioQuestCombatMode()) || (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) || (_audioStressed && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE))) ? 'equalpower' : 'HRTF';
+    panner.panningModel = ((typeof _audioQuestCombatMode === 'function' && _audioQuestCombatMode()) || (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) || (_audioStressed && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) || _audioStarved) ? 'equalpower' : 'HRTF';   // (v39.49d) starved -> equalpower
     panner.distanceModel = 'inverse';
     panner.refDistance = (opts && opts.refDistance) || 250;
     panner.maxDistance = (opts && opts.maxDistance) || 8000;
