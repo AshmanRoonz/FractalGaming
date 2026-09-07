@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.26';
+const LSS_BUILD = '39.27';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -25965,12 +25965,13 @@ function _bindShipPreviewDrag(canvas) {
   });
 }
 
+const _PREVIEW_BG_DIST = 1200;
 function _previewFitBackdrop(aspect) {
   const s = _shipPreview3D;
   const bg = s && s.backdrop;
   if (!bg || !aspect || !isFinite(aspect)) return;
   const cam = s.camera;
-  const dist = Math.abs(cam.position.z - bg.position.z) || 1;
+  const dist = _PREVIEW_BG_DIST;
   const h = 2 * Math.tan((cam.fov * Math.PI / 180) / 2) * dist;
   bg.scale.set(h * aspect, h, 1);
   const t = bg.material && bg.material.map;
@@ -26023,9 +26024,10 @@ function _initShipPreview3D() {
           bt.wrapS = bt.wrapT = THREE.ClampToEdgeWrapping;
           const bg = new THREE.Mesh(new THREE.PlaneGeometry(1, 1),
             new THREE.MeshBasicMaterial({ map: bt, depthWrite: false, toneMapped: false, fog: false }));
-          bg.position.set(0, 0, -1200);
+          bg.position.set(0, 0, -_PREVIEW_BG_DIST);   // CAMERA space — see _previewFitBackdrop
           bg.renderOrder = -1;
-          scene.add(bg);
+          camera.add(bg);
+          scene.add(camera);   // three only renders a camera's children if the camera is in the scene
           _shipPreview3D.backdrop = bg;
         }
       } catch (_) {}
@@ -26271,11 +26273,12 @@ function _lssRenderPicker() {
     const el = renderer.domElement;
     const w = el.width || 1, h = el.height || 1;
     const aspect = w / h;
-    if (s.camera.aspect !== aspect) {
+    if (s.camera.aspect !== aspect || !s._bgFitted) {
       s.camera.aspect = aspect;
       s.camera.updateProjectionMatrix();
       _previewFitBackdrop(aspect);
-    } else if (!s._bgFitted) { _previewFitBackdrop(aspect); s._bgFitted = true; }
+      s._bgFitted = true;
+    }
     renderer.setRenderTarget(null);
     renderer.render(s.scene, s.camera);
     return true;
