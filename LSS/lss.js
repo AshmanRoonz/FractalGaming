@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.40';
+const LSS_BUILD = '39.43';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -42287,6 +42287,21 @@ function _tickOutlineOptics(active) {
 
 function _setShipMeshOpacity(root, opacity) {
   if (!root || typeof root.traverse !== 'function') return;
+  try {
+    const _fx = root.userData && root.userData.shaderEngineMats;
+    if (_fx && _fx.length) {
+      const _k = (opacity < 0.99) ? opacity : 1;
+      for (const m of _fx) {
+        if (!m || !m.uniforms) continue;
+        for (const u of ['uBrightness', 'uOpacity', 'uLayerAlpha']) {
+          const slot = m.uniforms[u];
+          if (!slot || typeof slot.value !== 'number') continue;
+          if (m.userData['_cloakOrig_' + u] === undefined) m.userData['_cloakOrig_' + u] = slot.value;
+          slot.value = m.userData['_cloakOrig_' + u] * _k;
+        }
+      }
+    }
+  } catch (_) {}
   root.traverse((obj) => {
     if (obj.material) {
       const mats = Array.isArray(obj.material) ? obj.material : [obj.material];

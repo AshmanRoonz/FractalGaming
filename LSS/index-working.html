@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.40';
+const LSS_BUILD = '39.43';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -60911,6 +60911,39 @@ function _tickOutlineOptics(active) {
 // reuse it.)
 function _setShipMeshOpacity(root, opacity) {
   if (!root || typeof root.traverse !== 'function') return;
+  // (v39.41) THE ENGINE LIGHTS AND THE TEAM-COLOURED GLOW CLOAK TOO. Owner: "the engine lights,
+  // and the red/green sphere should also cloak". They never did, and the reason is that they are
+  // LayeredFX ShaderMaterials (`_makeFXMaterial('engine_disc')`, collected on
+  // `group.userData.shaderEngineMats`, tinted with the fleet colour at createShipMesh). three
+  // only applies `material.opacity` to its own built-in materials — a ShaderMaterial gets it as
+  // an unused property unless its shader reads it, so the loop below was setting a number nobody
+  // looked at while the discs stayed at full brightness over an invisible hull.
+  // These carry `uBrightness` (and some a `uOpacity`), so scale that instead.
+  // ⚠ AND THIS NEEDS NO WARM. The owner asked whether these should be "baked in the warmup as
+  // cloaked versions" like the hull — they should not, and that is the point: a UNIFORM is not
+  // in three's program cache key, so changing it forks no program and compiles nothing. Only the
+  // hull needed pre-warming (v39.40) because `transparent` IS in the key.
+  try {
+    const _fx = root.userData && root.userData.shaderEngineMats;
+    if (_fx && _fx.length) {
+      const _k = (opacity < 0.99) ? opacity : 1;
+      for (const m of _fx) {
+        if (!m || !m.uniforms) continue;
+        // Measured on a live c1seat hull in a match: FIVE FX materials on the ship group, each
+        // with `uBrightness` as a plain number — 2.4, 2.4, 2.2, 2.2 and 3.6 (the last is
+        // _markerGlowMat, the class/team marker, i.e. the red/green one). `uLayerAlpha` exists
+        // too but its value is an ARRAY (per-layer alphas), and `uOpacity` is absent entirely —
+        // hence the `typeof === 'number'` guard, which skips both without touching LayeredFX's
+        // layer logic. Scaling uBrightness to 1% is what puts them out.
+        for (const u of ['uBrightness', 'uOpacity', 'uLayerAlpha']) {
+          const slot = m.uniforms[u];
+          if (!slot || typeof slot.value !== 'number') continue;
+          if (m.userData['_cloakOrig_' + u] === undefined) m.userData['_cloakOrig_' + u] = slot.value;
+          slot.value = m.userData['_cloakOrig_' + u] * _k;
+        }
+      }
+    }
+  } catch (_) {}
   root.traverse((obj) => {
     if (obj.material) {
       const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
