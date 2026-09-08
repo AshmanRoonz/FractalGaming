@@ -1249,6 +1249,15 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   display: none;
 }
 #ship-select-countdown.active { display: block; }
+/* (v40.00) NEVER TWO COUNTDOWNS. #ov-countdown is the ROUND countdown (white, 96px, top 40%) and
+   #ship-select-countdown is the LAUNCH countdown (yellow, 180px, top 50%). They belong to different
+   moments and never used to coincide - not by design, but because the launch one lived inside
+   #ship-select and was invisible whenever the picker was hidden, which is exactly when the round one
+   runs. v39.98 moved it to the body to fix "sound but no text", and that accident of parentage went
+   with it: the owner saw "two countdowns one white one yellow, at the same time in the same spot".
+   Both are body children, so a sibling rule restores the rule the DOM used to enforce. The JS tick
+   carries the same guard, so it holds even if the markup moves again. */
+#ov-countdown.show ~ #ship-select-countdown { display: none !important; }
 #ship-select-countdown .cd-num {
   font-family: 'Orbitron', sans-serif; font-weight: 900;
   font-size: 180px; color: #ffaa00;
@@ -4422,7 +4431,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.99';
+const LSS_BUILD = '40.01';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -78820,6 +78829,12 @@ function launchCountdown(duration) {
 
   // Helper: pulse a single digit/word, restarting the cdPulse animation each tick.
   function tick(text, sub) {
+    // (v40.00) the ROUND countdown owns the screen between rounds; stand down rather than draw a
+    // second one over it (see the CSS note at #ship-select-countdown.active).
+    try {
+      const _rc = document.getElementById('ov-countdown');
+      if (_rc && _rc.classList.contains('show')) { overlay.classList.remove('active'); return; }
+    } catch (_) {}
     numEl.textContent = text;
     subEl.textContent = sub;
     overlay.classList.add('active');
@@ -91387,7 +91402,19 @@ function gameLoop(timestamp) {
   // Refresh scoreboard contents while it's visible so kills/damage update
   // in real time (throttled to ~5 Hz to avoid rebuilding the DOM every frame).
   if (scoreboardVisible) {
-    if (!game._sbLastUpdate || game.time - game._sbLastUpdate >= 0.2) {
+    // (v40.01) FROZEN SCORES DO NOT NEED REBUILDING. The 5 Hz refresh is for live kills and damage
+    // during play; at roundEnd and matchEnd the numbers are final and the board is force-shown, so
+    // every one of those ticks was a full DOM rebuild of a 600 px panel for identical content -
+    // and a DOM rebuild is paid in the browser's RENDER phase on the following frame, not in script
+    // time. That is the shape of the owner's end-of-match mark: 10 late frames totalling 965 ms with
+    // only 37 ms in any profiled section, `res` showing no resource churn at all, and a long-frame
+    // entry reading duration 289 ms / blocking 0 / render 284 ms / no scripts. One refresh on
+    // entering the state, then nothing until the state changes.
+    const _sbFrozen = (game.state === 'roundEnd' || game.state === 'matchEnd');
+    if (_sbFrozen) {
+      if (game._sbFrozenAt !== game.state) { game._sbFrozenAt = game.state; updateScoreboard(); }
+    } else if (!game._sbLastUpdate || game.time - game._sbLastUpdate >= 0.2) {
+      game._sbFrozenAt = null;
       game._sbLastUpdate = game.time;
       updateScoreboard();
     }

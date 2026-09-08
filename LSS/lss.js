@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.99';
+const LSS_BUILD = '40.01';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -54966,6 +54966,10 @@ function launchCountdown(duration) {
   if (!overlay || !numEl || !subEl) { _countdownActive = false; return; }
 
   function tick(text, sub) {
+    try {
+      const _rc = document.getElementById('ov-countdown');
+      if (_rc && _rc.classList.contains('show')) { overlay.classList.remove('active'); return; }
+    } catch (_) {}
     numEl.textContent = text;
     subEl.textContent = sub;
     overlay.classList.add('active');
@@ -65296,7 +65300,11 @@ function gameLoop(timestamp) {
   __pmark('prelude+input'); 
 
   if (scoreboardVisible) {
-    if (!game._sbLastUpdate || game.time - game._sbLastUpdate >= 0.2) {
+    const _sbFrozen = (game.state === 'roundEnd' || game.state === 'matchEnd');
+    if (_sbFrozen) {
+      if (game._sbFrozenAt !== game.state) { game._sbFrozenAt = game.state; updateScoreboard(); }
+    } else if (!game._sbLastUpdate || game.time - game._sbLastUpdate >= 0.2) {
+      game._sbFrozenAt = null;
       game._sbLastUpdate = game.time;
       updateScoreboard();
     }

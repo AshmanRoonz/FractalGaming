@@ -2872,3 +2872,114 @@ the id set is pruned as it grows, so the difference could go negative. Only incr
 the v39.94 lesson (budget the destroy, not just the create) is the obvious shape of the answer — but
 after three misattributions this session I would rather have the next mark name the resource than
 guess which teardown it is.
+
+## v40.00 — never two countdowns
+
+Owner: "i noticed two countdowns one white one yellow, at the same time in the same spot". Both are
+real elements and they belong to different moments:
+
+| | element | look | position |
+|---|---|---|---|
+| ROUND countdown | `#ov-countdown` | white, 96 px, `.show` | `top: 40%` |
+| LAUNCH countdown | `#ship-select-countdown` | yellow, 180 px, `.active` | `top: 50%` |
+
+They never used to coincide — **not by design**, but because the launch one lived inside
+`#ship-select` and was therefore invisible whenever the picker was hidden, which is exactly when the
+round one runs. v39.98 moved it to the body to fix "sound but no text", and that accident of parentage
+went with it.
+
+Both are body children now, so a sibling rule restores what the DOM used to enforce:
+
+```css
+#ov-countdown.show ~ #ship-select-countdown { display: none !important; }
+```
+
+and `launchCountdown`'s `tick()` carries the same guard in JS (stand down if the round countdown is
+showing) so it survives the markup moving again.
+
+Verified at the DOM level and through a real launch:
+
+| | white | yellow |
+|---|---|---|
+| launch countdown alone | not showing | **visible** |
+| both requested | showing | **`display: none`** |
+
+```
+33.37 s  "3 LAUNCH IN"    round countdown not showing
+34.37 s  "2 LAUNCH IN"
+35.36 s  "1 LAUNCH IN"
+36.38 s  "LAUNCH WARP-IN"  -> playing
+37.09 s  hidden
+```
+
+⚠ The pattern to remember from v39.92 → v39.98 → v40.00: fixing a bug by removing an accidental
+dependency also removes whatever that accident was quietly doing for you. Both times the accident was
+`#ship-select`'s visibility standing in for logic nobody had written down.
+
+## v40.01 — the end-of-match hitches are DOM, not GPU
+
+The 39.99 `res` probe answered the question in one mark. Elimination, `roundEnd`:
+
+```
+worst 312.7 ms   avg 110 fps over 549 frames   cold: []
+chop: { n: 10, ms: 965.1, by: [ ["renderFrame", 30.2], ["terrain+overlays+collisions", 6.9] ] }
+res:  every entry [t, 0, 0, 0, ...]   ← no programs, geometries or textures changed hands
+lo:   [t, duration 289, blocking 0, render 284, scripts: NONE]
+```
+
+So: not a teardown (the whole reason `res` exists), no shader linked, 37 ms of JS across ten late
+frames — and a long-frame entry attributing **284 of 289 ms to the browser's RENDER phase with zero
+scripts**. That is style/layout/paint, not WebGL and not the game's own code.
+
+I also killed the obvious WebGL suspect by measurement rather than reasoning: at `roundEnd` the frame
+goes through `cineFX.composer` (RenderPass + UnrealBloom + SMAA + OutputPass) instead of
+`renderPostFX`, which looks like a lot more GPU work. Timed in the pane with `gl.finish()` either
+side: **composer 1.01 ms, plain scene render 0.98 ms.** Not it.
+
+What changes in the DOM at round end is the scoreboard: force-shown, and then rebuilt by the 5 Hz
+`updateScoreboard()` refresh that exists for live kills and damage during play. At `roundEnd` and
+`matchEnd` the numbers are final, so every one of those ticks rebuilt a 600 px panel for identical
+content — and a DOM rebuild is paid in the browser's render phase on the *following* frame, which is
+exactly why no profiled section and no script showed it. It now refreshes **once** on entering either
+state and then stops until the state changes.
+
+⚠ Note for reading `res`: `renderer.info.render.calls` is reset per `render()` call, so on a
+composer frame it reports only the LAST internal pass (1 quad), not the frame's total. The resource
+deltas are the trustworthy part.
+
+## The skin lab — `LSS/skin_lab.html`
+
+A standalone page for designing `SHIP_SKINS` entries against the real shader. Served from the same
+root as the game: **http://localhost:8099/skin_lab.html**.
+
+**It does not own a copy of the shader.** On load it fetches `lss.js` and extracts `_SKIN_HUE_PARS`,
+`_SKIN_PAT_VERT`, `_SKIN_PAT_ID` and `SHIP_SKINS` from the shipped build, then patches a
+`MeshStandardMaterial` with the same `onBeforeCompile` injection `_skinPatchHueShader` uses. A lab
+holding its own copy of 121 lines of GLSL drifts the first time either side is edited and then lies
+to you; this one cannot. If extraction fails the banner goes red and nothing renders, rather than
+rendering something that is not the game.
+
+It also mirrors `_skinBakePatternSpace` — pattern coordinates normalised by the hull's own longest
+axis — so `patScale` means the same thing here as in game, on all seven hulls, and reproduces
+`_applyShipSkin`'s field→uniform mapping exactly (including the factory snapshot and the
+`emissive = skin floor + factory` add).
+
+Controls are one-for-one with the table: hue / hueMix / sat / lift / mul, the five patterns with
+c0-c2, patScale, both band thresholds, patSoft, patLift, patGain, patMix, and
+metalness / roughness / envMapIntensity / emissive. Three lighting rigs (bright sky, dark cavern,
+dusk) because the readability floor — `emissive` and `patLift`, the thing that stops a dark livery
+vanishing in a cavern — is only decidable by looking at both. EXPORT writes a paste-ready entry.
+
+⚠ The export emits the hue line for **pattern** skins too when it is doing anything. `_applyShipSkin`
+sets `uSkinHue/Mix/Sat/Lift` regardless of the pattern and the camo shades against the already
+hue-processed albedo, so a hue dialled in on a camo is load-bearing; the stock camo presets just
+leave it at defaults, which makes the table look either/or when it is not.
+
+Two traps hit while building it, both worth knowing before editing this file:
+- the literal scanner must skip `//` comments — `strip.py` keeps trailing ones, and prose like
+  "across the ship's longest axis" opened a string the scanner never closed, running the slice to the
+  end of the file (971 KB instead of 6 KB);
+- it must anchor on `const <name>`, not the first mention — `_SKIN_PAT_ID` appears inside
+  `Object.keys(_SKIN_PAT_ID)` earlier, and starting there grabbed an empty `{}` that parsed fine and
+  silently produced a table with no patterns. Both are now guarded, plus shape checks that refuse to
+  start on a bad slice.

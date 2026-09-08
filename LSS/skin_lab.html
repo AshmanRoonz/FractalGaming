@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSS Skin Lab</title>
+<!--
+  LSS SKIN LAB — design SHIP_SKINS entries against the real shader.
+
+  ⚠ THIS LAB DOES NOT OWN A COPY OF THE SHADER. On load it fetches lss.js (the shipped build) and pulls
+  `_SKIN_HUE_PARS`, `_SKIN_PAT_VERT`, `_SKIN_PAT_ID` and `SHIP_SKINS` straight out of the shipped
+  build, then patches a MeshStandardMaterial with the same onBeforeCompile injection the game uses.
+  That is the whole point: a lab holding its own copy of the GLSL drifts from the game the first time
+  someone edits one of them, and then it is lying to you. If the extraction fails the banner says so
+  in red and nothing is rendered rather than rendering something that is not the game.
+
+  What it mirrors, and why each matters (see the SHIP_SKINS block comment in index-working.html):
+    · the hue model      — absolute target hue + hueMix + ABSOLUTE saturation + the albedo lift that
+                           is the only reason a livery is visible at all on the four near-black hulls
+    · the pattern layer  — the five procedural camos, their three colours, band thresholds, edge
+                           softness, shading floor and gain
+    · ship space         — pattern coordinates are normalised by the hull's own longest axis, so
+                           `patScale` means "features across the ship" on every hull. The lab bakes
+                           the same matrix, so a number tuned here reads the same in game.
+    · material params    — mul / metalness / roughness / envMapIntensity / emissive
+
+  It does NOT reproduce the game's lighting rig exactly (that is a whole world). It gives you a
+  three-light studio plus a switchable environment so you can check a livery against a bright sky and
+  a dark cavern, which is where the readability floor (`emissive`, `patLift`) is actually decided.
+
+  Output: the EXPORT panel writes a paste-ready SHIP_SKINS entry. Paste it into index-working.html
+  beside the others, run `python strip.py`, done.
+-->
+<style>
+  :root {
+    --bg: #05070f; --panel: rgba(10,16,28,0.92); --line: rgba(255,170,0,0.28);
+    --ink: #cfe7ff; --dim: #7f93ad; --hot: #ffaa00; --bad: #ff5566;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font-family: 'Rajdhani', 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+  #view { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  #panel {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 380px; z-index: 10;
+    background: var(--panel); border-left: 1px solid var(--line);
+    padding: 14px 16px 40px; overflow-y: auto; backdrop-filter: blur(10px);
+  }
+  #panel h1 { font-size: 15px; letter-spacing: 4px; color: var(--hot); margin: 0 0 2px; font-weight: 700; }
+  #panel .sub { font-size: 11px; color: var(--dim); margin-bottom: 12px; letter-spacing: 1px; }
+  fieldset { border: 1px solid rgba(120,160,220,0.18); border-radius: 8px; margin: 0 0 12px; padding: 8px 10px 10px; }
+  legend { font-size: 10px; letter-spacing: 3px; color: var(--hot); padding: 0 6px; }
+  .row { display: grid; grid-template-columns: 92px 1fr 52px; align-items: center; gap: 8px; margin: 6px 0; }
+  .row label { font-size: 12px; color: var(--dim); }
+  .row output { font-size: 11px; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+  input[type=range] { width: 100%; accent-color: var(--hot); }
+  input[type=color] { width: 100%; height: 26px; border: 1px solid rgba(120,160,220,0.25);
+    background: none; border-radius: 4px; padding: 0; cursor: pointer; }
+  select, input[type=text] {
+    width: 100%; background: rgba(0,0,0,0.4); color: var(--ink);
+    border: 1px solid rgba(120,160,220,0.25); border-radius: 4px; padding: 5px 7px; font-size: 12px;
+    font-family: inherit;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; }
+  .grid3 label { font-size: 10px; color: var(--dim); display: block; margin-bottom: 3px; letter-spacing: 1px; }
+  button {
+    background: rgba(255,170,0,0.14); color: var(--hot); border: 1px solid var(--line);
+    border-radius: 5px; padding: 7px 10px; font-size: 12px; letter-spacing: 1px; cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover { background: rgba(255,170,0,0.26); }
+  #out {
+    width: 100%; height: 190px; background: #02040a; color: #b8e0a0; border: 1px solid rgba(120,160,220,0.25);
+    border-radius: 6px; font-family: 'Consolas','Courier New',monospace; font-size: 10.5px;
+    padding: 8px; resize: vertical; white-space: pre; overflow: auto;
+  }
+  #banner {
+    position: fixed; left: 12px; top: 12px; z-index: 20; max-width: calc(100vw - 420px);
+    font-size: 12px; padding: 8px 12px; border-radius: 6px; letter-spacing: 0.5px;
+    background: rgba(10,16,28,0.9); border: 1px solid var(--line); color: var(--dim);
+  }
+  #banner.err { border-color: var(--bad); color: var(--bad); }
+  #hint { position: fixed; left: 12px; bottom: 12px; z-index: 20; font-size: 11px; color: var(--dim); }
+</style>
+</head>
+<body>
+<div id="view"></div>
+<div id="banner">loading…</div>
+<div id="hint">drag to orbit · wheel to zoom · the numbers below are the SHIP_SKINS fields, one for one</div>
+
+<div id="panel">
+  <h1>SKIN LAB</h1>
+  <div class="sub">shader + presets pulled live from LSS/lss.js</div>
+
+  <fieldset>
+    <legend>SUBJECT</legend>
+    <div class="grid2">
+      <div><label style="font-size:10px;color:var(--dim);letter-spacing:1px">HULL</label>
+        <select id="ship"></select></div>
+      <div><label style="font-size:10px;color:var(--dim);letter-spacing:1px">START FROM</label>
+        <select id="preset"></select></div>
+    </div>
+    <div class="grid2" style="margin-top:8px">
+      <div><label style="font-size:10px;color:var(--dim);letter-spacing:1px">LIGHTING</label>
+        <select id="env">
+          <option value="sky">bright sky</option>
+          <option value="cavern">dark cavern</option>
+          <option value="dusk">dusk</option>
+        </select></div>
+      <div><label style="font-size:10px;color:var(--dim);letter-spacing:1px">TURNTABLE</label>
+        <select id="spin"><option value="1">on</option><option value="0">off</option></select></div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>IDENTITY</legend>
+    <div class="row"><label>id</label><input type="text" id="f_id" value="custom"><output></output></div>
+    <div class="row"><label>name</label><input type="text" id="f_name" value="CUSTOM LIVERY"><output></output></div>
+    <div class="row"><label>swatch</label><input type="color" id="f_swatch" value="#8e99ad"><output></output></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>HUE MODEL</legend>
+    <div class="row"><label>hue °</label><input type="range" id="f_hue" min="0" max="360" step="1" value="42"><output></output></div>
+    <div class="row"><label>hueMix</label><input type="range" id="f_hueMix" min="0" max="1" step="0.01" value="1"><output></output></div>
+    <div class="row"><label>sat</label><input type="range" id="f_sat" min="0" max="1" step="0.01" value="0.32"><output></output></div>
+    <div class="row"><label>lift</label><input type="range" id="f_lift" min="0" max="1" step="0.01" value="0.34"><output></output></div>
+    <div class="row"><label>mul</label><input type="range" id="f_mul" min="0.2" max="2" step="0.01" value="1.14"><output></output></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>PATTERN</legend>
+    <div class="row"><label>pattern</label><select id="f_pattern"></select><output></output></div>
+    <div class="grid3" style="margin:8px 0 4px">
+      <div><label>c0 low</label><input type="color" id="f_c0" value="#939aa8"></div>
+      <div><label>c1 mid</label><input type="color" id="f_c1" value="#45484f"></div>
+      <div><label>c2 high</label><input type="color" id="f_c2" value="#141519"></div>
+    </div>
+    <div class="row"><label>patScale</label><input type="range" id="f_patScale" min="0.5" max="20" step="0.1" value="7"><output></output></div>
+    <div class="row"><label>band 0</label><input type="range" id="f_band0" min="0" max="1" step="0.01" value="0.42"><output></output></div>
+    <div class="row"><label>band 1</label><input type="range" id="f_band1" min="0" max="1" step="0.01" value="0.68"><output></output></div>
+    <div class="row"><label>patSoft</label><input type="range" id="f_patSoft" min="0" max="0.15" step="0.001" value="0.02"><output></output></div>
+    <div class="row"><label>patLift</label><input type="range" id="f_patLift" min="0" max="1" step="0.01" value="0.72"><output></output></div>
+    <div class="row"><label>patGain</label><input type="range" id="f_patGain" min="0.5" max="14" step="0.1" value="6"><output></output></div>
+    <div class="row"><label>patMix</label><input type="range" id="f_patMix" min="0" max="1" step="0.01" value="1"><output></output></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>FINISH</legend>
+    <div class="row"><label>metalness</label><input type="range" id="f_metalness" min="0" max="1" step="0.01" value="0.14"><output></output></div>
+    <div class="row"><label>roughness</label><input type="range" id="f_roughness" min="0" max="1" step="0.01" value="0.64"><output></output></div>
+    <div class="row"><label>envMapInt</label><input type="range" id="f_env" min="0" max="1.5" step="0.01" value="0.14"><output></output></div>
+    <div class="row"><label>emissive</label><input type="color" id="f_emissive" value="#120400"><output></output></div>
+    <div class="row"><label>desc</label><input type="text" id="f_desc" value="…"><output></output></div>
+  </fieldset>
+
+  <fieldset>
+    <legend>EXPORT</legend>
+    <textarea id="out" readonly spellcheck="false"></textarea>
+    <div class="grid2" style="margin-top:8px">
+      <button id="copy">COPY</button>
+      <button id="reset">RESET TO PRESET</button>
+    </div>
+  </fieldset>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+
+const banner = document.getElementById('banner');
+const say = (t, bad) => { banner.textContent = t; banner.classList.toggle('err', !!bad); };
+
+// ── PULL THE REAL SHADER OUT OF THE SHIPPED BUILD ────────────────────────────────────────────────
+// Bracket-matched slice from a declaration to its closing bracket, so a literal containing braces or
+// brackets inside strings does not end the scan early. Only used on our own generated file.
+// Written as char codes on purpose: this file has been through a text-editing pass that ate
+// backslash escapes once already, and a lone backslash in a string literal kills the module.
+const _NL = String.fromCharCode(10), _BS = String.fromCharCode(92);
+function sliceLiteral(src, name, open, close) {
+  // Anchor on the DECLARATION, not the first mention. `_SKIN_PAT_ID` appears in
+  // `Object.keys(_SKIN_PAT_ID)` earlier in the file, and starting there grabbed the next `{}` it
+  // found - an empty block - which parsed fine and silently produced a table with no patterns in it.
+  const at = src.indexOf('const ' + name);
+  if (at < 0) return null;
+  let i = src.indexOf(open, at);
+  if (i < 0) return null;
+  let depth = 0, q = null;
+  for (let j = i; j < src.length; j++) {
+    const ch = src[j], prev = src[j - 1], next = src[j + 1];
+    if (q) {
+      if (q === '//') { if (ch === _NL) q = null; continue; }
+      if (q === '/*') { if (ch === '/' && prev === '*') q = null; continue; }
+      if (ch === q && prev !== _BS) q = null;
+      continue;
+    }
+    // COMMENTS ARE NOT CODE. strip.py removes comment LINES but keeps trailing ones, and the GLSL
+    // block is full of prose like "across the ship's longest axis" - that apostrophe opened a string
+    // the scanner never closed, so the slice ran to the end of the file (971 KB instead of 6 KB).
+    if (ch === '/' && next === '/') { q = '//'; continue; }
+    if (ch === '/' && next === '*') { q = '/*'; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { q = ch; continue; }
+    if (ch === open) depth++;
+    else if (ch === close) { depth--; if (!depth) return src.slice(i, j + 1); }
+  }
+  return null;
+}
+
+let SKIN = null;   // { hueGlsl, vertGlsl, patId, presets }
+async function loadSkinSystem() {
+  const res = await fetch('lss.js', { cache: 'no-cache' });
+  if (!res.ok) throw new Error('lss.js ' + res.status + ' — serve the LSS folder, the same root the game is served from');
+  const src = await res.text();
+  const grab = (decl, open, close) => {
+    const lit = sliceLiteral(src, decl, open, close);
+    if (!lit) throw new Error('could not find ' + decl + ' in lss.js');
+    return Function('return (' + lit + ')')();
+  };
+  const hueArr  = grab('_SKIN_HUE_PARS', '[', ']');
+  const vertArr = grab('_SKIN_PAT_VERT', '[', ']');
+  const patId   = grab('_SKIN_PAT_ID', '{', '}');
+  const presets = grab('SHIP_SKINS', '{', '}');
+  // Shape checks: a bad slice can still PARSE (an empty block is valid JS), and a lab that silently
+  // renders with no patterns and no presets is worse than one that refuses to start.
+  if (!Array.isArray(hueArr) || hueArr.length < 50) throw new Error('_SKIN_HUE_PARS looks wrong (' + (hueArr && hueArr.length) + ' lines)');
+  if (!Array.isArray(vertArr) || !vertArr.length)   throw new Error('_SKIN_PAT_VERT looks wrong');
+  if (!patId || Object.keys(patId).length < 3)      throw new Error('_SKIN_PAT_ID looks wrong (' + Object.keys(patId || {}).length + ' entries)');
+  if (!presets || Object.keys(presets).length < 2)  throw new Error('SHIP_SKINS looks wrong (' + Object.keys(presets || {}).length + ' entries)');
+  return {
+    hueGlsl: hueArr.join('\n'),
+    vertGlsl: vertArr.join('\n'),
+    patId,
+    presets,
+    lines: hueArr.length,
+  };
+}
+
+// ── THE SAME MATERIAL PATCH THE GAME USES ────────────────────────────────────────────────────────
+// Injection points copied verbatim from _skinPatchHueShader. These three replace() calls are the
+// only text this lab holds of its own; everything they inject comes from the fetched build.
+function patchHue(m) {
+  const ud = m.userData || (m.userData = {});
+  if (ud._skinHueU) return ud._skinHueU;
+  const u = {
+    uSkinHue: { value: 0 }, uSkinMix: { value: 0 }, uSkinSat: { value: 1 }, uSkinLift: { value: 0 },
+    uSkinPat: { value: 0 },
+    uSkinPatM: { value: new THREE.Matrix4() },
+    uSkinPatAxis: { value: new THREE.Vector3(0, 0, 1) },
+    uSkinPatScale: { value: 6 }, uSkinPatSoft: { value: 0.02 }, uSkinPatMix: { value: 0 },
+    uSkinPatLift: { value: 0.5 }, uSkinPatGain: { value: 5 },
+    uSkinPatBands: { value: new THREE.Vector2(0.34, 0.67) },
+    uSkinPatC0: { value: new THREE.Color(0xffffff) },
+    uSkinPatC1: { value: new THREE.Color(0x808080) },
+    uSkinPatC2: { value: new THREE.Color(0x202020) },
+  };
+  ud._skinHueU = u;
+  m.onBeforeCompile = (shader) => {
+    for (const k in u) shader.uniforms[k] = u[k];
+    shader.vertexShader = shader.vertexShader
+      .replace('void main() {', SKIN.vertGlsl + '\nvoid main() {')
+      .replace('#include <begin_vertex>',
+        '#include <begin_vertex>\n\tvSkinPos = (uSkinPatM * vec4(position, 1.0)).xyz;\n\tvSkinNrm = mat3(uSkinPatM) * normal;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('void main() {', SKIN.hueGlsl + '\nvoid main() {')
+      .replace('#include <map_fragment>',
+        '#include <map_fragment>\n\tdiffuseColor.rgb = lssSkinHue(diffuseColor.rgb, uSkinHue, uSkinMix, uSkinSat, uSkinLift);'
+        + '\n\tif (uSkinPatMix > 0.001) diffuseColor.rgb = lssSkinPattern(diffuseColor.rgb);');
+  };
+  m.customProgramCacheKey = () => 'lssSkinHue|';
+  m.needsUpdate = true;
+  return u;
+}
+
+// Same hull test the game uses when a root has no published hullMats list.
+function hullMats(root) {
+  const out = [];
+  root.traverse(n => {
+    if (!n.isMesh || !n.material) return;
+    if (n.name === 'shield') return;
+    const mats = Array.isArray(n.material) ? n.material : [n.material];
+    for (const m of mats) {
+      if (!m || !m.isMeshStandardMaterial || m.transparent) continue;
+      if (out.indexOf(m) < 0) out.push(m);
+    }
+  });
+  return out;
+}
+
+// Ship space, normalised by the hull's own longest axis — the reason patScale means the same thing
+// on all seven hulls. Same construction as _skinBakePatternSpace.
+function bakePatternSpace(root, mats) {
+  const hull = new Set(mats), entries = [];
+  const box = new THREE.Box3(), tmp = new THREE.Box3();
+  box.makeEmpty();
+  const stack = [[root, new THREE.Matrix4()]];
+  while (stack.length) {
+    const [obj, parentM] = stack.pop();
+    let M = parentM;
+    if (obj !== root) {
+      if (obj.matrixAutoUpdate) obj.updateMatrix();
+      M = new THREE.Matrix4().multiplyMatrices(parentM, obj.matrix);
+    }
+    if (obj.isMesh && obj.geometry) {
+      const mm = Array.isArray(obj.material) ? obj.material : [obj.material];
+      if (mm.some(m => m && hull.has(m))) {
+        if (!obj.geometry.boundingBox) obj.geometry.computeBoundingBox();
+        if (obj.geometry.boundingBox) { tmp.copy(obj.geometry.boundingBox).applyMatrix4(M); box.union(tmp); }
+        entries.push([mm, M]);
+      }
+    }
+    for (const c of obj.children) stack.push([c, M]);
+  }
+  if (!entries.length || box.isEmpty()) return;
+  const size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+  const span = Math.max(size.x, size.y, size.z) || 1, inv = 1 / span;
+  const ax = (size.x >= size.y && size.x >= size.z) ? new THREE.Vector3(1, 0, 0)
+           : (size.y >= size.z ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(0, 0, 1));
+  const norm = new THREE.Matrix4().makeScale(inv, inv, inv)
+    .multiply(new THREE.Matrix4().makeTranslation(-ctr.x, -ctr.y, -ctr.z));
+  for (const [mm, M] of entries) {
+    const full = new THREE.Matrix4().multiplyMatrices(norm, M);
+    for (const m of mm) {
+      if (!m || !hull.has(m)) continue;
+      const u = patchHue(m);
+      u.uSkinPatM.value.copy(full);
+      u.uSkinPatAxis.value.copy(ax);
+    }
+  }
+}
+
+// Field -> uniform, exactly as _applyShipSkin does it.
+function applySkin(root, sk) {
+  const mats = hullMats(root);
+  bakePatternSpace(root, mats);
+  for (const m of mats) {
+    const ud = m.userData;
+    if (!ud._skinBase) {
+      ud._skinBase = {
+        color: m.color ? m.color.clone() : new THREE.Color(0xffffff),
+        emissive: m.emissive ? m.emissive.clone() : new THREE.Color(0x000000),
+        emissiveIntensity: m.emissiveIntensity != null ? m.emissiveIntensity : 1,
+        metalness: m.metalness != null ? m.metalness : 0.5,
+        roughness: m.roughness != null ? m.roughness : 0.5,
+        envMapIntensity: m.envMapIntensity != null ? m.envMapIntensity : 1,
+      };
+    }
+    const b = ud._skinBase, hu = patchHue(m);
+    if (sk.restore) {
+      hu.uSkinHue.value = 0; hu.uSkinMix.value = 0; hu.uSkinSat.value = 1; hu.uSkinLift.value = 0;
+      hu.uSkinPat.value = 0; hu.uSkinPatMix.value = 0;
+      if (m.color) m.color.copy(b.color);
+      if (m.emissive) m.emissive.copy(b.emissive);
+      m.emissiveIntensity = b.emissiveIntensity;
+      m.metalness = b.metalness; m.roughness = b.roughness; m.envMapIntensity = b.envMapIntensity;
+      continue;
+    }
+    hu.uSkinHue.value = ((sk.hue || 0) % 360) / 360;
+    hu.uSkinMix.value = sk.hueMix != null ? sk.hueMix : 1;
+    hu.uSkinSat.value = sk.sat != null ? sk.sat : 1;
+    hu.uSkinLift.value = sk.lift != null ? sk.lift : 0;
+    const pid = SKIN.patId[sk.pattern] || 0;
+    hu.uSkinPat.value = pid;
+    hu.uSkinPatMix.value = pid ? (sk.patMix != null ? sk.patMix : 1) : 0;
+    if (pid) {
+      hu.uSkinPatScale.value = sk.patScale != null ? sk.patScale : 6;
+      hu.uSkinPatSoft.value = sk.patSoft != null ? sk.patSoft : 0.02;
+      hu.uSkinPatLift.value = sk.patLift != null ? sk.patLift : 0.5;
+      hu.uSkinPatGain.value = sk.patGain != null ? sk.patGain : 5;
+      const bd = sk.patBands || [0.34, 0.67];
+      hu.uSkinPatBands.value.set(bd[0], bd[1]);
+      hu.uSkinPatC0.value.setHex(sk.c0 != null ? sk.c0 : 0xffffff);
+      hu.uSkinPatC1.value.setHex(sk.c1 != null ? sk.c1 : 0x808080);
+      hu.uSkinPatC2.value.setHex(sk.c2 != null ? sk.c2 : 0x202020);
+    }
+    if (m.color) {
+      m.color.copy(b.color);
+      if (sk.mul != null && sk.mul !== 1) m.color.multiplyScalar(sk.mul);
+    }
+    if (m.emissive) { m.emissive.setHex(sk.emissive != null ? sk.emissive : 0); m.emissive.add(b.emissive); }
+    m.emissiveIntensity = 1;
+    if (sk.metalness != null) m.metalness = sk.metalness;
+    if (sk.roughness != null) m.roughness = sk.roughness;
+    if (sk.envMapIntensity != null) m.envMapIntensity = sk.envMapIntensity;
+  }
+}
+
+// ── SCENE ────────────────────────────────────────────────────────────────────────────────────────
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.getElementById('view').appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 4000);
+camera.position.set(120, 45, 165);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+
+const key  = new THREE.DirectionalLight(0xffffff, 2.3); key.position.set(1, 1.4, 0.9);
+const fill = new THREE.DirectionalLight(0xffd9b0, 0.85); fill.position.set(-1.2, 0.3, -0.6);
+const rim  = new THREE.DirectionalLight(0x88bbff, 1.1);  rim.position.set(-0.4, 0.8, -1.4);
+const amb  = new THREE.AmbientLight(0xffffff, 0.5);
+const hemi = new THREE.HemisphereLight(0xbcd8ff, 0x2a2118, 0.7);
+scene.add(key, fill, rim, amb, hemi);
+
+const ENVS = {
+  sky:    { bg: 0x9dc4e8, amb: 0.62, hemi: 0.95, key: 2.6, exposure: 1.0 },
+  cavern: { bg: 0x090c12, amb: 0.14, hemi: 0.20, key: 0.9, exposure: 1.15 },
+  dusk:   { bg: 0x2b2438, amb: 0.30, hemi: 0.45, key: 1.5, exposure: 1.05 },
+};
+function setEnv(name) {
+  const e = ENVS[name] || ENVS.sky;
+  scene.background = new THREE.Color(e.bg);
+  amb.intensity = e.amb; hemi.intensity = e.hemi; key.intensity = e.key;
+  renderer.toneMappingExposure = e.exposure;
+}
+
+const holder = new THREE.Group();
+scene.add(holder);
+let shipRoot = null;
+
+const loader = new GLTFLoader();
+const draco = new DRACOLoader();
+draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/libs/draco/');
+loader.setDRACOLoader(draco);
+
+const SHIPS = ['vortex', 'pyro', 'puncture', 'slayer', 'tracker', 'blaster', 'syphon'];
+
+function loadShip(key) {
+  say('loading ' + key + '…');
+  return new Promise((resolve, reject) => {
+    loader.load('ships/' + key + '.glb', (g) => {
+      if (shipRoot) { holder.remove(shipRoot); shipRoot.traverse(o => { if (o.isMesh) { o.geometry.dispose(); } }); }
+      shipRoot = g.scene;
+      // frame it: normalise the hull to a consistent on-screen size
+      const box = new THREE.Box3().setFromObject(shipRoot);
+      const size = box.getSize(new THREE.Vector3());
+      const ctr = box.getCenter(new THREE.Vector3());
+      const span = Math.max(size.x, size.y, size.z) || 1;
+      shipRoot.position.sub(ctr);
+      holder.scale.setScalar(120 / span);
+      holder.add(shipRoot);
+      say('ready — ' + hullMats(shipRoot).length + ' hull materials · shader pulled from lss.js ('
+        + SKIN.lines + ' GLSL lines)');
+      resolve(shipRoot);
+    }, undefined, (e) => reject(new Error('could not load ships/' + key + '.glb')));
+  });
+}
+
+function resize() {
+  const w = innerWidth - 380, h = innerHeight;
+  renderer.setSize(Math.max(1, w), h, false);
+  renderer.domElement.style.width = Math.max(1, w) + 'px';
+  renderer.domElement.style.height = h + 'px';
+  camera.aspect = Math.max(0.2, w / h); camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize);
+
+// ── UI ───────────────────────────────────────────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+const FIELDS = ['hue','hueMix','sat','lift','mul','patScale','patSoft','patLift','patGain','patMix',
+                'metalness','roughness','env'];
+const hex = s => parseInt(s.replace('#',''), 16);
+const toHex = n => '#' + (n >>> 0).toString(16).padStart(6, '0');
+
+function readSkin() {
+  const pat = $('f_pattern').value;
+  const sk = {
+    id: $('f_id').value.trim() || 'custom',
+    name: $('f_name').value.trim() || 'CUSTOM',
+    swatch: $('f_swatch').value,
+    desc: $('f_desc').value.trim(),
+    hue: +$('f_hue').value, hueMix: +$('f_hueMix').value, sat: +$('f_sat').value,
+    mul: +$('f_mul').value, lift: +$('f_lift').value,
+    metalness: +$('f_metalness').value, roughness: +$('f_roughness').value,
+    envMapIntensity: +$('f_env').value, emissive: hex($('f_emissive').value),
+  };
+  if (pat !== 'none') {
+    sk.pattern = pat;
+    sk.c0 = hex($('f_c0').value); sk.c1 = hex($('f_c1').value); sk.c2 = hex($('f_c2').value);
+    sk.patScale = +$('f_patScale').value;
+    sk.patBands = [+$('f_band0').value, +$('f_band1').value];
+    sk.patSoft = +$('f_patSoft').value; sk.patLift = +$('f_patLift').value;
+    sk.patGain = +$('f_patGain').value; sk.patMix = +$('f_patMix').value;
+  }
+  return sk;
+}
+
+function exportText(sk) {
+  const h = n => '0x' + (n >>> 0).toString(16).padStart(6, '0');
+  const L = [];
+  L.push('  ' + sk.id + ': {');
+  L.push("    id: '" + sk.id + "', name: '" + sk.name + "', swatch: '" + sk.swatch + "',");
+  if (sk.desc) L.push("    desc: '" + sk.desc.replace(/'/g, "\\'") + "',");
+  // ⚠ The hue line is emitted for PATTERN skins too when it is doing anything. _applyShipSkin sets
+  // uSkinHue/Mix/Sat/Lift regardless of the pattern, and the pattern shades against the already
+  // hue-processed albedo - so a hue you dialled in here is load-bearing even on a camo. The stock
+  // camo presets simply leave it at its defaults, which is why the table looks like it is either/or.
+  const hueActive = (sk.hue !== 0) || (sk.hueMix !== 1) || (sk.sat !== 1) || (sk.lift !== 0) || (sk.mul !== 1);
+  if (hueActive) {
+    L.push('    hue: ' + sk.hue + ', hueMix: ' + sk.hueMix + ', sat: ' + sk.sat + ', mul: ' + sk.mul + ', lift: ' + sk.lift + ',');
+  }
+  if (sk.pattern) {
+    L.push("    pattern: '" + sk.pattern + "', c0: " + h(sk.c0) + ', c1: ' + h(sk.c1) + ', c2: ' + h(sk.c2) + ',');
+    L.push('    patScale: ' + sk.patScale + ', patBands: [' + sk.patBands[0] + ', ' + sk.patBands[1] + '], patSoft: '
+      + sk.patSoft + ', patLift: ' + sk.patLift + ', patGain: ' + sk.patGain
+      + (sk.patMix !== 1 ? ', patMix: ' + sk.patMix : '') + ',');
+  }
+  L.push('    metalness: ' + sk.metalness + ', roughness: ' + sk.roughness
+    + ', envMapIntensity: ' + sk.envMapIntensity + ', emissive: ' + h(sk.emissive) + ',');
+  L.push('  },');
+  return L.join('\n');
+}
+
+function refresh() {
+  for (const f of FIELDS) {
+    const el = $('f_' + f); if (!el) continue;
+    const out = el.parentElement.querySelector('output'); if (out) out.textContent = (+el.value).toFixed(f === 'patSoft' ? 3 : 2);
+  }
+  const b0 = $('f_band0'), b1 = $('f_band1');
+  b0.parentElement.querySelector('output').textContent = (+b0.value).toFixed(2);
+  b1.parentElement.querySelector('output').textContent = (+b1.value).toFixed(2);
+  const sk = readSkin();
+  if (shipRoot) applySkin(shipRoot, sk);
+  $('out').value = exportText(sk);
+}
+
+function fillFrom(sk) {
+  $('f_id').value = sk.id || 'custom';
+  $('f_name').value = sk.name || 'CUSTOM';
+  $('f_swatch').value = sk.swatch || '#8e99ad';
+  $('f_desc').value = sk.desc || '';
+  $('f_hue').value = sk.hue != null ? sk.hue : 42;
+  $('f_hueMix').value = sk.hueMix != null ? sk.hueMix : 1;
+  $('f_sat').value = sk.sat != null ? sk.sat : 0.32;
+  $('f_lift').value = sk.lift != null ? sk.lift : 0.34;
+  $('f_mul').value = sk.mul != null ? sk.mul : 1;
+  $('f_pattern').value = sk.pattern || 'none';
+  $('f_c0').value = toHex(sk.c0 != null ? sk.c0 : 0x939aa8);
+  $('f_c1').value = toHex(sk.c1 != null ? sk.c1 : 0x45484f);
+  $('f_c2').value = toHex(sk.c2 != null ? sk.c2 : 0x141519);
+  $('f_patScale').value = sk.patScale != null ? sk.patScale : 6;
+  $('f_band0').value = sk.patBands ? sk.patBands[0] : 0.34;
+  $('f_band1').value = sk.patBands ? sk.patBands[1] : 0.67;
+  $('f_patSoft').value = sk.patSoft != null ? sk.patSoft : 0.02;
+  $('f_patLift').value = sk.patLift != null ? sk.patLift : 0.5;
+  $('f_patGain').value = sk.patGain != null ? sk.patGain : 5;
+  $('f_patMix').value = sk.patMix != null ? sk.patMix : 1;
+  $('f_metalness').value = sk.metalness != null ? sk.metalness : 0.14;
+  $('f_roughness').value = sk.roughness != null ? sk.roughness : 0.64;
+  $('f_env').value = sk.envMapIntensity != null ? sk.envMapIntensity : 0.14;
+  $('f_emissive').value = toHex(sk.emissive != null ? sk.emissive : 0);
+  refresh();
+}
+
+// ── BOOT ─────────────────────────────────────────────────────────────────────────────────────────
+(async function boot() {
+  try {
+    SKIN = await loadSkinSystem();
+  } catch (e) {
+    say('SHADER NOT LOADED — ' + e.message, true);
+    return;   // deliberately render nothing rather than render something that is not the game
+  }
+
+  for (const k of SHIPS) { const o = document.createElement('option'); o.value = k; o.textContent = k.toUpperCase(); $('ship').appendChild(o); }
+  for (const k of Object.keys(SKIN.patId)) { const o = document.createElement('option'); o.value = k; o.textContent = k; $('f_pattern').appendChild(o); }
+  for (const k of Object.keys(SKIN.presets)) {
+    const o = document.createElement('option'); o.value = k; o.textContent = (SKIN.presets[k].name || k); $('preset').appendChild(o);
+  }
+  $('preset').value = Object.keys(SKIN.presets).find(k => SKIN.presets[k].pattern) || Object.keys(SKIN.presets)[0];
+
+  setEnv('sky');
+  resize();
+  await loadShip($('ship').value).catch(e => say(e.message, true));
+  fillFrom(SKIN.presets[$('preset').value] || {});
+
+  $('ship').onchange = async () => { await loadShip($('ship').value).catch(e => say(e.message, true)); refresh(); };
+  $('preset').onchange = () => fillFrom(SKIN.presets[$('preset').value] || {});
+  $('reset').onclick   = () => fillFrom(SKIN.presets[$('preset').value] || {});
+  $('env').onchange = () => setEnv($('env').value);
+  $('panel').addEventListener('input', refresh);
+  $('copy').onclick = async () => {
+    try { await navigator.clipboard.writeText($('out').value); say('copied — paste into SHIP_SKINS, then run python strip.py'); }
+    catch (_) { $('out').select(); say('press Ctrl+C'); }
+  };
+
+  (function tick() {
+    requestAnimationFrame(tick);
+    if ($('spin').value === '1') holder.rotation.y += 0.0035;
+    controls.update();
+    renderer.render(scene, camera);
+  })();
+})();
+</script>
+</body>
+</html>
