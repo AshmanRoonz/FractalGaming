@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.73';
+const LSS_BUILD = '39.75';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13671,8 +13671,11 @@ function _waterRefractWanted() {
     return !!(u && u.uSceneTex);
   } catch (_) { return false; }
 }
+const _WATER_LAYER_BIT = 1 << _WATER_LAYER;
 function _waterRefractPass() {
   const rt = postFX.rtScene, u = _hubWaterDisp.material.uniforms;
+  const kids = scene.children;
+  for (let i = 0; i < kids.length; i++) { const o = kids[i]; if (o.isLight && !(o.layers.mask & _WATER_LAYER_BIT)) o.layers.enable(_WATER_LAYER); }
   let tex = rt.texture;
   if (!(rt.samples > 0)) {
     const C = postFX.rtRefractCopy;
@@ -13994,11 +13997,11 @@ scene.add(dirLight3);
 const hemiLight = new THREE.HemisphereLight(0x6688cc, 0x224466, 0.4);
 scene.add(hemiLight);
 try { game._cockpitLights = _lssCockpitLights(); } catch (_) {}
-ambientLight.layers.enable(5);
-dirLight.layers.enable(5);
-dirLight2.layers.enable(5);
-dirLight3.layers.enable(5);
-hemiLight.layers.enable(5);
+ambientLight.layers.enable(5); ambientLight.layers.enable(6);
+dirLight.layers.enable(5); dirLight.layers.enable(6);
+dirLight2.layers.enable(5); dirLight2.layers.enable(6);
+dirLight3.layers.enable(5); dirLight3.layers.enable(6);
+hemiLight.layers.enable(5); hemiLight.layers.enable(6);
 function _lssApplyHubLighting(on) {
   if (game._swSavedLights === undefined) {
     game._swSavedLights = { amb: ambientLight.intensity, key: dirLight.intensity, keyCol: dirLight.color.getHex(), fill: dirLight2.intensity, rim: dirLight3.intensity, hemi: hemiLight.intensity, hSky: hemiLight.color.getHex(), hGnd: hemiLight.groundColor.getHex() };
@@ -31130,7 +31133,7 @@ const dynamicLights = {
 (function initDynamicLights() {
   for (let i = 0; i < dynamicLights.MAX_LIGHTS; i++) {
     const light = new THREE.PointLight(0xff8800, 0, 600);
-    light.layers.enable(5);   // (v39.49) see _lssCockpitLights: every light rides layer 5 so the ADS pass keys like the main pass
+    light.layers.enable(5); light.layers.enable(6);   // (v39.49) see _lssCockpitLights: every light rides layer 5 so the ADS pass keys like the main pass
     light.visible = true;
     scene.add(light);
     dynamicLights.pool.push(light);
@@ -31161,18 +31164,18 @@ const _SHIPL = {
 (function initShipLights() {
   const S = _SHIPL;
   S.engine = new THREE.PointLight(0x66d8ff, 0, 700, 0);
-  S.engine.layers.enable(5);   // (v39.49) layer 5 = the ADS overlay camera sees the same light set as the main pass
+  S.engine.layers.enable(5); S.engine.layers.enable(6);   // (v39.49) layer 5 = the ADS overlay camera sees the same light set as the main pass
   S.engine.visible = true;   // pinned resident; intensity 0 = off
   scene.add(S.engine);
   S.head = new THREE.SpotLight(0xffe8c4, 0, 2400, 0.5, 0.45, 1);
-  S.head.layers.enable(5);   // (v39.49) without this the ADS pass has NUM_SPOT_LIGHTS 0 = a second program per hull material
+  S.head.layers.enable(5); S.head.layers.enable(6);   // (v39.49) without this the ADS pass has NUM_SPOT_LIGHTS 0 = a second program per hull material
   S.head.castShadow = false;
   S.head.visible = true;
   scene.add(S.head);
   scene.add(S.head.target);
   for (let i = 0; i < S.TRAF_N; i++) {
     const l = new THREE.PointLight(0x7fd0ff, 0, 620, 0);
-    l.layers.enable(5);   // (v39.49) ADS-pass light parity
+    l.layers.enable(5); l.layers.enable(6);   // (v39.49) ADS-pass light parity
     l.visible = true;
     scene.add(l);
     S.traffic.push(l);
@@ -38886,6 +38889,40 @@ async function _prebakeWorldForLaunch() {
         out.forEach((n) => { tally[n] = (tally[n] || 0) + 1; });
         return { count: out.length, byName: tally };
       };
+      const _COLD_TAIL = { 20: 'numDirLights', 19: 'numPointLights', 18: 'numSpotLights', 17: 'numSpotLightMaps',
+        16: 'numHemiLights', 15: 'numRectAreaLights', 14: 'numDirLightShadows', 13: 'numPointLightShadows',
+        12: 'numSpotLightShadows', 11: 'numSpotLightShadowsWithMaps', 10: 'numLightProbes', 9: 'shadowMapType',
+        8: 'toneMapping', 7: 'numClippingPlanes', 6: 'numClipIntersection', 5: 'depthPacking',
+        4: 'flags', 3: 'flags', 2: 'outputColorSpace', 1: 'customCacheKey' };
+      const _COLD_SIG = [['uPatchScale', 'terrain'], ['uRefract', 'water'], ['uRippleTex', 'water'],
+        ['uTreeFadeA', 'tree'], ['uSway', 'grass'], ['uFadeA', 'chunk-fx'], ['uAxialFalloff', 'layeredFX'],
+        ['uRimColor', 'hull'], ['uRim', 'terrain'], ['uGlitch', 'terrain']];
+      function _coldName(p) {
+        let sig = '';
+        try { if (p.name) sig = p.name; } catch (_) {}
+        if (!sig) { try { const m = p.getUniforms().map; for (const r of _COLD_SIG) { if (m[r[0]]) { sig = r[1]; break; } } } catch (_) {} }
+        let head = '';
+        try { const t = (p.cacheKey || '').split(',')[0]; if (t && !/^[0-9]+$/.test(t)) head = t; } catch (_) {}
+        const base = sig || head || '(unnamed)';
+        try {
+          const k = (p.cacheKey || '').split(',');
+          const lead = k.slice(0, 2).join(',');
+          let best = null;
+          for (const w of window.__warmProgKeys) {
+            const a = w.split(',');
+            if (a.length !== k.length || a.slice(0, 2).join(',') !== lead) continue;
+            const d = [];
+            for (let i = 0; i < k.length; i++) if (a[i] !== k[i]) d.push(k.length - i);
+            if (d.length && (!best || d.length < best.length)) best = d;
+          }
+          if (best) {
+            const names = [];
+            for (const fe of best) { const n = _COLD_TAIL[fe] || ('idx-' + fe); if (names.indexOf(n) < 0) names.push(n); }
+            return base + ' [FORK: ' + names.join(' ') + ']';
+          }
+        } catch (_) {}
+        return base;
+      }
       window.__coldSeen = [];
       const _coldT0 = performance.now();
       const _coldTimer = setInterval(function () {
@@ -38894,11 +38931,11 @@ async function _prebakeWorldForLaunch() {
           const list = (renderer.info && renderer.info.programs) || [];
           for (const p of list) {
             if (window.__warmProgKeys.has(p.cacheKey)) continue;
+            const _nm = _coldName(p);   // (v39.74) named + fork-checked BEFORE the key joins the warm set
             window.__warmProgKeys.add(p.cacheKey);   // report each key once
             const _t = Math.round((performance.now() - _coldT0) / 100) / 10;
-            window.__coldSeen.push({ t: _t, name: p.name || '(unnamed)' });
-            console.warn('[cold] +' + _t + 's  ' + (p.name || '(unnamed)') +
-              '   (total ' + window.__coldSeen.length + ')');
+            window.__coldSeen.push({ t: _t, name: _nm });
+            console.warn('[cold] +' + _t + 's  ' + _nm + '   (total ' + window.__coldSeen.length + ')');
           }
           const _ce = document.getElementById('lss-coldhud');
           if (_ce) {
@@ -44483,8 +44520,8 @@ function _lssCockpitLights() {
   if (typeof scene === 'undefined' || !scene) return null;
   const key = new THREE.PointLight(0xffe2c4, 0, 160, 2);
   const fill = new THREE.PointLight(0xa9c6ff, 0, 160, 2);
-  key.layers.enable(5);
-  fill.layers.enable(5);
+  key.layers.enable(5); key.layers.enable(6);
+  fill.layers.enable(5); fill.layers.enable(6);
   key.name = 'cockpitKey'; fill.name = 'cockpitFill';
   scene.add(key); scene.add(fill);
   return { key, fill };

@@ -2005,3 +2005,50 @@ active uniforms). Owner on the result: "water looks great".
 Note for future pane sessions: the owner's Pro Controller rests with a stuck stick (axes 0.69 / -1),
 which flies the ship out of frame between two screenshots. `navigator.getGamepads = () => []` in the
 pane freezes it for like-for-like A/B shots.
+
+## v39.74 / v39.75 — the water pass forked its program, and the recorder now names what links
+
+The owner's first two F8 marks on 39.73, read against their 39.72 marks:
+
+| build | at | worst | section | cold |
+|---|---|---|---|---|
+| 39.72 | 35.49 s | 2578 ms | `hub:stream` | 2 |
+| 39.72 | 45.67 s | 792 ms | `renderFrame` | 1 |
+| 39.73 | 53.27 s | 3154 ms | `hub:stream` | 2 |
+| 39.73 | 68.85 s | 1980 ms | `renderFrame` | 1 |
+| 39.73 | 139.41 s | 2557 ms | `renderFrame` | 1 |
+
+Both shapes are already in 39.72, so the hitch **class** is not new — but 39.73 did add one program to
+it, and it is mine.
+
+**v39.74 — light parity for the water pass.** `_waterRefractPass` renders with a layer-6-only camera,
+and `projectObject` gates `pushLight` on `object.layers.test(camera.layers)` exactly as it gates
+meshes. So the pass saw **zero lights**, and the light counts are program-cache-key terms: the water
+material linked a second, zero-light program the first time the pass ran, cold, in play. Measured in
+the owner's session: **four** water programs where there should be one, two of them with
+`numDirLights 0, numPointLights 0, numSpotLights 0, numHemiLights 0, numDirLightShadows 0`.
+This is v39.49's ADS-overlay finding one layer over — and the comment I wrote in v39.73 claiming
+"render the main scene and the counts match" was wrong, because the camera's mask filters lights too.
+Fix: every light that carries layer 5 for the ADS pass now carries layer 6 as well (11 creation
+sites; measured live, all 20 lights in the scene are mask 33 → now 97), and `_waterRefractPass`
+re-asserts layer 6 over `scene.children` each pass — a flat loop where every light in the game
+actually lives — so a light added by future code cannot fork the program even once. Pane after:
+**one** water program with the full light set, `cold 0`, 144 fps measured over water.
+
+**v39.75 — the cold-link watcher names what linked.** Every cold link so far reported `(unnamed)`,
+because `WebGLProgram.name` is `material.name` and almost nothing here names its materials, so a mark
+could prove a 2 s hitch was a shader compile but not say which shader. Now `_coldName(p)` gives:
+- a **signature uniform** (`uPatchScale` → terrain, `uRefract` → water, `uTreeFadeA` → tree, ...), or
+  the cache key's leading shader id for built-ins (`depth`, `physical`, ...);
+- **fork detection**, the actionable half. three.js' cache key has a fixed tail, so a cold key that
+  matches a warm one except in the light counts, the output colour space or the tone mapping is not
+  new content — it is the same material linked again under different render conditions, which is a
+  bug every time. `_COLD_TAIL` indexes that tail from the END so it holds for built-ins (one leading
+  id) and ShaderMaterials (two).
+Verified by reproducing the v39.73 fork on purpose in the pane; the HUD read
+`depth [FORK: numDirLights numPointLights numSpotLights numHemiLights numDirLightShadows]` — the
+diagnosis that took a hand-diff of two cache keys, printed automatically.
+
+**Still open (pre-existing, both classes visible on 39.72):** `hub:stream` links 2 programs when
+terrain chunks stream in (2.5–3.2 s), and `renderFrame` links 1 in the hub during play (0.8–2.6 s).
+The next F8 mark on 39.75 will name them.
