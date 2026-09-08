@@ -3108,3 +3108,118 @@ authored. Everything else in the entry is unchanged. In game with the livery equ
 blocks in `_skinCycle`, the hue reading 92.5° then 322.4° then 323.4° across samples (wrapping, never
 reversing), the hull visibly swinging through purple and magenta, `cold 0`, and no frame cost worth
 measuring — the whole feature is one float written per hull material per frame.
+
+### v40.07 — the stalls with nothing in them, and the probe that can tell them apart
+
+Five F8 marks (#21–#25, build 40.06, classic on `shifting_deep`, round 1, played on the DEPLOYED
+build at lss.fractalreality.ca) all say the same thing, and it is a *negative* result:
+
+| mark | t | worst | blame | cold | res delta | LoAF |
+|---|---|---|---|---|---|---|
+| 21/22 | 44.28 s | **2313.6 ms** | renderFrame 4.7, hub:stream 2.7 | 0 | 0/0/0 | `[41.98, 2318, 0, 2302, [three.js rAF: 15 ms]]` |
+| 22 | 46.27 s | 368.2 ms | renderFrame 3.7 | 0 | 0/0/0 | `[45.91, 371, 0, 362, [… 8 ms]]` |
+| 23 | 77.49 s | 597.7 ms | renderFrame 2.7 | 0 | 0/0/0 | `[76.9, 598, 0, 592, [… 5 ms]]` |
+| 23 | 77.96 s | 472.2 ms | renderFrame 3.0 | 0 | 0/0/0 | `[77.5, 470, 0, 465, []]` |
+| 24 | 88.52 s | **1806.4 ms** | renderFrame 3.0 | 0 | 0/0/0 | `[86.72, 1808, 0, 1802, []]` |
+| 25 | 176.15 s | **1806.5 ms** | terrain+overlays+collisions 3.7, renderFrame 2.5 | 0 | 0/0/0 | — |
+
+Read that LoAF row: `duration 1808, blockingDuration 0, renderStart at +1802, scripts []`. A frame
+1.8 seconds long in which **no script ran at all** and **no task exceeded 50 ms**. The `["user-callback","r",134224,…]`
+entries in the other rows are three.js' own `WebGLAnimation` rAF thunk (char 134224 of
+three.module.min.js r165) — i.e. the whole of `gameLoop`, at 5–15 ms. The profiler sections agree:
+2.5–4.7 ms of CPU inside a 1806 ms frame.
+
+So it is not our JS, not a shader link (`cold 0` every time), and not resource churn on the stalling
+frame. Two stalls came back **1806.4 and 1806.5 ms**, 88 seconds apart — work varies, waits don't.
+
+What the marks *did* newly reveal: the run-up to the 2313 ms stall is 2.3 s of steady 20.7–28.2 ms
+frames (`avgFps 40`) with 3–5 ms of CPU in each. 20.8 ms is 3 × 6.94 and 27.8 is 4 × 6.94, so those
+are whole missed vsyncs on a 144 Hz panel — **GPU-bound**, not CPU-bound. And `lss_quality` on that
+machine reads **`mega`**: full supersample on an RTX 5050 Laptop.
+
+Two stories remain and they want opposite fixes:
+
+* the GPU was still chewing on work we gave it — our draw list, a driver upload, or an **ANGLE vertex
+  executable built at first draw** (which `renderer.info.programs` cannot see, because the three.js
+  program already existed); or
+* the GPU finished on time and the browser never came back — compositor, present, power state,
+  another process. Not ours, and worth knowing before chasing it.
+
+**The probe** (all inside the `?pbhud` IIFE, nothing runs without the flag):
+
+* **`made`** — `[t, dPrograms, dGeometries, dTextures]` on *every* frame that built something, not
+  just late ones. `res` (v39.99) only samples late frames, so a geometry created on a normal 7 ms
+  frame and first *drawn* on the next one was invisible: the stall frame reports 0/0/0 and the frame
+  that actually loaded the gun is not in the list. Mark #21 hints at exactly that shape — the frame
+  immediately before the 2313 ms stall created 4 geometries.
+* **`gpu`** — `[tSubmitted, msToSignal]` from a `fenceSync` placed at the top of the recorder's rAF.
+  That callback is registered at parse time and three.js' animation loop only when the game starts
+  drawing, so it runs FIRST each frame: every command of the previous frame is already submitted when
+  the fence goes in. ⚠ Polled once per rAF while frames are healthy, so a healthy reading is just the
+  frame period (~14 ms) — an upper bound, not a GPU time. The reading that matters is the one taken
+  *during* a stall, and rAF is by definition not running then, which is what the heartbeat is for.
+* **`hb`** — a 4 ms `setInterval` that does not depend on frames being produced, logging its own late
+  fires, and polling the fence every ~20 ms once a gap is already open (zero extra IPC in the steady
+  state). **This is the discriminator.** If `hb` is empty beside a 1800 ms frame, the main thread
+  never stopped and the stall is downstream of it; if `hb` stalls too, the whole renderer was
+  descheduled and nothing in the page could have caused it. And whichever it is, `gpu` now says
+  whether the GPU had already drained.
+* **`q` / `px` / `hz`** — preset, `[canvas w, h, rtScene w, h, samples]`, panel refresh, so a mark
+  stops needing a separate trip to localStorage to be read.
+
+Boot-tested at 40.07: fence live, 300 samples, heartbeat 3 ms fresh, `made` logging (including the
+−16/+15 texture swap at world load), no console errors, mark carries all seven new fields.
+
+### v40.08 — the fence answered it: the stalls are the GPU, and the main thread never stopped
+
+Marks #25–#28 on 40.07 (classic, `shifting_deep`, round 1, **local** build this time, fullscreen,
+`q: mega`, `px: [1920, 1080, 4608, 2592, 0]` — a 1920×1080 canvas with an **11.9 MP** scene target).
+
+The v40.07 probe was unambiguous:
+
+| mark | stall | fence submitted before it | heartbeat |
+|---|---|---|---|
+| 25 | 1480 / **1917.7** ms | `[234.67, 1959.3]` and `[236.74, 1789]` | `[]` |
+| 26 | **3411.4** ms | `[242.39, 3480.8]` | `[]` |
+| 27 | **3508.7** ms | `[246.10, 3529.3]` | 61.6, 62.8 ms |
+| 28 | **3383.4** ms | `[250.04, 3411.5]` | 51.3, 64.1 ms |
+
+The fence placed *before* each stalled frame — covering the previous frame's already-submitted
+commands — took **essentially exactly as long as the stall** to signal. Meanwhile the 4 ms heartbeat
+kept firing through 3.4-second frames with at worst a 64 ms hiccup. So: the main thread never
+stopped, the browser was not descheduled, and the GPU was genuinely busy for the whole stall. Every
+LoAF row still reads `blockingDuration 0` with an empty or 6–20 ms script list, which is now
+explained rather than mysterious.
+
+Two more things fell out of it:
+
+* **Even the healthy frames are deep in the queue.** Fence latencies between stalls run 41–118 ms at
+  20.8 ms frame intervals — the GPU is routinely 2–6 frames behind. This machine is saturated at
+  MEGA well before anything stalls.
+* **The stalls sit on top of geometry bursts.** `made` (new in 40.07, logs every frame that builds
+  something, not just late ones) shows the streamer creating ~30 geometries in the half-second before
+  the 3411 ms stall (+5 +2 +4 +2 +2 −1 +1 +2 +2 +1 +2 +7, then +11 on the far side). `res` alone
+  never saw those — they land on normal 7 ms frames.
+
+What the data still cannot say is *which* GPU work. A fence measures the whole pipeline: our draw
+list, the driver's residency and paging, an ANGLE vertex executable built at first draw. Those want
+opposite fixes, so v40.08 adds the discriminator and two pieces of context the marks were missing:
+
+* **`gt`** — `[t, ms]`, a `TIME_ELAPSED` query bracketing `renderFrame` only. `gt ≈ the stall` means
+  the frame really did ask for that much shading (fewer pixels, fewer draws). `gt ≈ 20 ms` beside a
+  3.4 s fence means the card was doing something our draw list never asked for, and shedding
+  resolution cannot touch it. The query ends before the keep-warm burn so it can never overlap that
+  pass's own query — only one `TIME_ELAPSED` may be active at a time.
+* **`ss`** — `[_ssDyn.scale, active w, h, hz, steps]`. ⚠ `px` reports the **allocated** target, which
+  at MEGA is 4608×2592 no matter what the adaptive sampler is doing; the live rectangle is
+  `innerWidth × s` where `s = base + (super − base) × scale` (or `base × (1 + 0.5·scale)` below
+  native). Without it a mark cannot say whether the governor had already shed — which decides
+  whether a stall is fill rate at all. Related: `_lssSupersampleTick` discards every sample outside
+  `2 ≤ dt ≤ 250`, so **the 3.4 s frames are invisible to the governor**; it only ever sees the 20.8 ms
+  frames between them.
+* **`kw`** — `[running, K, measured ms, cap ms]`. The keep-warm burner (v39.63) is GPU load this page
+  adds *on purpose*, so a mark that blames the GPU has to be able to rule it out. Boot-test in the
+  pane read `[1, 5951, 3.55, 4.17]` — 3.55 ms of burn against a 2–4 ms real frame.
+
+Boot-tested at 40.08 in gameplay: `gtOk true`, steady 1.9–4.5 ms readings with a 17.3 ms spike,
+fence and heartbeat unaffected, `ss` and `kw` populated, no console errors.

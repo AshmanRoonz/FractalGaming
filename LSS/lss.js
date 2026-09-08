@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.06';
+const LSS_BUILD = '40.08';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -65056,13 +65056,90 @@ function __pmark(name) {
   const KEY = 'lss_f8log', CAP = 40, BYTES = 400000, N = 16384;
   window.__profOn = true;
   const R = { ring: new Float32Array(N), ringT: new Float32Array(N), ri: 0, lo: [], secPrev: {}, big: [], lastProgs: 0, cold: [], last: 0, marks: null,
-    res: [], resPrev: null };   // (v39.99) see the teardown probe below
+    res: [], resPrev: null,                       // (v39.99) see the teardown probe below
+    made: [], madePrev: null,                     // (v40.07) resource creation on EVERY frame, not just late ones
+    gpu: [], gl: null, sync: null, syncT: 0,      // (v40.07) the fence
+    hb: [], hbLast: 0, hbN: 0,                    // (v40.07) the heartbeat
+    gt: [], gtP: [], gtQ: null, gtE: null, gtOk: undefined };   // (v40.08) TIME_ELAPSED around renderFrame
   const profNow = () => { const p = window.__prof, o = {}; if (!p) return o; for (const k in p) { const v = p[k]; if (v && typeof v.total === 'number') o[k] = v.total; } return o; };
+  function _gtInit() {
+    if (R.gtOk !== undefined) return R.gtOk;
+    try {
+      const gl = R.gl || (R.gl = (typeof renderer !== 'undefined' && renderer && renderer.getContext) ? renderer.getContext() : null);
+      R.gtE = (gl && gl.getExtension) ? gl.getExtension('EXT_disjoint_timer_query_webgl2') : null;
+      R.gtOk = !!R.gtE;
+    } catch (_) { R.gtOk = false; }
+    return R.gtOk;
+  }
+  window.__f8gt = {
+    b: function () {
+      try {
+        if (!_gtInit()) return;
+        const gl = R.gl;
+        if (R.gtQ) { try { gl.endQuery(R.gtE.TIME_ELAPSED_EXT); gl.deleteQuery(R.gtQ); } catch (_) {} R.gtQ = null; }
+        R.gtQ = gl.createQuery();
+        gl.beginQuery(R.gtE.TIME_ELAPSED_EXT, R.gtQ);
+      } catch (_) { R.gtQ = null; }
+    },
+    e: function () {
+      if (!R.gtQ) return;
+      try {
+        const gl = R.gl;
+        gl.endQuery(R.gtE.TIME_ELAPSED_EXT);
+        R.gtP.push([performance.now(), R.gtQ]);
+        R.gtQ = null;
+        const disj = gl.getParameter(R.gtE.GPU_DISJOINT_EXT);
+        const keep = [];
+        for (const e of R.gtP) {
+          if (!gl.getQueryParameter(e[1], gl.QUERY_RESULT_AVAILABLE)) { keep.push(e); continue; }
+          const ms = gl.getQueryParameter(e[1], gl.QUERY_RESULT) / 1e6;
+          gl.deleteQuery(e[1]);
+          if (!disj) { R.gt.push([+(e[0] / 1000).toFixed(2), +ms.toFixed(1)]); if (R.gt.length > 300) R.gt.shift(); }
+        }
+        R.gtP = keep;
+        if (R.gtP.length > 64) { for (const e of R.gtP) { try { gl.deleteQuery(e[1]); } catch (_) {} } R.gtP = []; }
+      } catch (_) { R.gtQ = null; }
+    }
+  };
+  function _gpuFence(t) {
+    try {
+      const gl = R.gl || (R.gl = (typeof renderer !== 'undefined' && renderer && renderer.getContext) ? renderer.getContext() : null);
+      if (!gl || !gl.fenceSync) return;
+      if (R.sync) {
+        if (gl.getSyncParameter(R.sync, gl.SYNC_STATUS) === gl.SIGNALED) {
+          R.gpu.push([+(R.syncT / 1000).toFixed(2), +(t - R.syncT).toFixed(1)]);
+          if (R.gpu.length > 300) R.gpu.shift();
+          gl.deleteSync(R.sync); R.sync = null;
+        } else if (t - R.syncT > 6000) { gl.deleteSync(R.sync); R.sync = null; }
+      }
+      if (!R.sync) { R.sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); R.syncT = t; }
+    } catch (_) { R.sync = null; }
+  }
+  const _beat = () => {
+    const t = performance.now();
+    if (R.hbLast) {
+      const g = t - R.hbLast;
+      if (g > 40) { R.hb.push([+(t / 1000).toFixed(2), +g.toFixed(1)]); if (R.hb.length > 200) R.hb.shift(); }
+    }
+    R.hbLast = t;
+    if (R.last && t - R.last > 40 && !(++R.hbN % 5)) _gpuFence(t);   // ~20 ms polling, only inside a gap
+  };
+  try { setInterval(_beat, 4); } catch (_) {}
   const tick = (t) => {
     requestAnimationFrame(tick);
     if (R.last) {
       const gap = t - R.last;
       R.ring[R.ri] = gap; R.ringT[R.ri] = t / 1000; R.ri = (R.ri + 1) % N;
+      try {
+        const _mi = renderer.info, _mm = _mi.memory;
+        const _mn = [_mi.programs ? _mi.programs.length : 0, _mm.geometries, _mm.textures];
+        if (R.madePrev) {
+          const a = _mn[0] - R.madePrev[0], b = _mn[1] - R.madePrev[1], c = _mn[2] - R.madePrev[2];
+          if (a || b || c) { R.made.push([+(t / 1000).toFixed(2), a, b, c]); if (R.made.length > 300) R.made.shift(); }
+        }
+        R.madePrev = _mn;
+      } catch (_) {}
+      _gpuFence(t);
       const cur = profNow();
       const _bigMs = Math.max(16, Math.min(30, 1000 / ((window.__ss && window.__ss.hz) || 60) * 2.2));   // 16 ms at 144 Hz, the old 30 at 60
       if (gap > _bigMs && document.visibilityState === 'visible') {
@@ -65165,6 +65242,18 @@ function __pmark(name) {
       cold: R.cold.filter(c => c[0] >= now - 5),
       coldNames: (function () { try { return (window.__coldSeen || []).slice(-24); } catch (_) { return null; } })(),
       res: R.res.filter(r => r[0] >= now - 5).slice(-12),
+      made: R.made.filter(r => r[0] >= now - 5).slice(-40),
+      gpu: R.gpu.filter(r => r[0] >= now - 5).slice(-40),
+      hb: R.hb.filter(r => r[0] >= now - 5).slice(-20),
+      gt: R.gt.filter(r => r[0] >= now - 5).slice(-40),
+      ss: (function () { try { const A = _lssSceneActive(postFX.rtScene);
+        return [+_ssDyn.scale.toFixed(2), A.w, A.h, _ssDyn.hz, _ssDyn.steps]; } catch (_) { return null; } })(),
+      kw: (function () { try { const W = window.__keepWarm; if (!W) return null;
+        return [(W.on && !W.disabled) ? 1 : 0, W.K, W.ms, W.cap]; } catch (_) { return null; } })(),
+      q: (function () { try { return localStorage.getItem('lss_quality') || '?'; } catch (_) { return '?'; } })(),
+      px: (function () { try { const c = renderer.domElement, r = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+        return [c.width, c.height, r ? r.width : 0, r ? r.height : 0, r ? (r.samples || 0) : 0]; } catch (_) { return null; } })(),
+      hz: (function () { try { return (window.__ss && window.__ss.hz) || 0; } catch (_) { return 0; } })(),
       frames: 0, worst: 0, avgFps: 0, info: null, run: null, speed: null, round: null,
     };
     try { const all = around(now - 5, now, 0); m.frames = all.length; m.worst = all.length ? +Math.max(...all.map(a => a[1])).toFixed(1) : 0; m.avgFps = all.length ? Math.round(1000 / (all.reduce((acc, a) => acc + a[1], 0) / all.length)) : 0; } catch (_) {}
@@ -65708,7 +65797,9 @@ function gameLoop(timestamp) {
                  !_xrActive && !window.__noOccludedThrottle;
   } catch (_) { _rfCovered = false; }
   if (!_rfCovered) {
+    try { if (window.__f8gt) window.__f8gt.b(); } catch (_) {}
     renderFrame();
+    try { if (window.__f8gt) window.__f8gt.e(); } catch (_) {}
     try { _gpuKeepWarmTick(timestamp); } catch (_) {}   // (v39.63) idle load after the real work
   } else if (!game._occLastRender || timestamp - game._occLastRender >= 167) {
     game._occLastRender = timestamp;
