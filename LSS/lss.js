@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.75';
+const LSS_BUILD = '39.80';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -7534,6 +7534,7 @@ function _vortexGunPair(outA, outB) {
   if (!nodes || nodes.length < 2 || !player.mesh.visible) return false;
   nodes[0].getWorldPosition(outA);
   nodes[1].getWorldPosition(outB);
+  _adsAnchor(outA); _adsAnchor(outB);
   return true;
 }
 function _vortexSpan(mesh, from, to, radius) {
@@ -8939,6 +8940,24 @@ const _bcgSpawn = [];
 const _bcgQuat = new THREE.Quaternion();
 const _BCG_FLIP = new THREE.Quaternion(1, 0, 0, 0);   // (v39.71) 180 degrees about X: flips the tube's +Y down the barrel
 const _bcgWhite = new THREE.Color(0xffffff);
+const _adsAnchV = new THREE.Vector3(), _adsAnchQ = new THREE.Quaternion();
+function _adsAnchor(v) {
+  try {
+    if (!v || typeof game === 'undefined' || !game || !game._adsOvOn) return v;
+    if (typeof camera === 'undefined' || !camera) return v;
+    const _fo = (typeof input !== 'undefined' && input && typeof input.fovDeg === 'number') ? input.fovDeg : camera.fov;
+    const t0 = Math.tan(_fo * Math.PI / 360), t1 = Math.tan(camera.fov * Math.PI / 360);
+    if (!(t1 > 1e-6)) return v;
+    const mag = t0 / t1;
+    if (!(mag > 1.001)) return v;
+    _adsAnchQ.copy(camera.quaternion).invert();
+    _adsAnchV.copy(v).sub(camera.position).applyQuaternion(_adsAnchQ);
+    _adsAnchV.x /= mag; _adsAnchV.y /= mag;
+    v.copy(_adsAnchV.applyQuaternion(camera.quaternion)).add(camera.position);
+  } catch (_) {}
+  return v;
+}
+if (typeof window !== 'undefined') window.__adsAnchor = _adsAnchor;
 function _blasterChargeGlow(t, tintOverride) {
   const mesh = player.mesh;
   const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
@@ -9031,8 +9050,9 @@ function _blasterChargeGlowOff() {
   if (!player._bcgTubes) return;
   for (const m of player._bcgTubes) { m.visible = false; m.material.opacity = 0; }
 }
-function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
+function emitChassisMuzzleFlash(loadoutKey, pos, dir, mine) {
   if (!pos || !dir) return;
+  if (mine) pos = _adsAnchor(pos.clone());
   const flashColor = chassisFlashColor(loadoutKey);
 
   if (!(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) {
@@ -9068,7 +9088,7 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
     });
   }
 
-  try { _classMuzzleFire(loadoutKey, pos, dir); } catch (_) {}   // (v39.70) the class flame, every ship but Vortex (own path) and Pyro (own flames)
+  try { _classMuzzleFire(loadoutKey, pos, dir, mine); } catch (_) {}   // (v39.70) the class flame, every ship but Vortex (own path) and Pyro (own flames)
   if (loadoutKey === 'PYRO') {
     for (let i = 0; i < 5; i++) {
       _muzzleSpread.set(
@@ -13656,7 +13676,6 @@ function tunePostFX(opts) {
 }
 window.tunePostFX       = tunePostFX;
 
-let _wrCam = null;
 const _wrZero = new THREE.Vector2(0, 0);
 const _WATER_LAYER = 6;
 function _waterRefractWanted() {
@@ -13671,13 +13690,13 @@ function _waterRefractWanted() {
     return !!(u && u.uSceneTex);
   } catch (_) { return false; }
 }
-const _WATER_LAYER_BIT = 1 << _WATER_LAYER;
-function _waterRefractPass() {
-  const rt = postFX.rtScene, u = _hubWaterDisp.material.uniforms;
-  const kids = scene.children;
-  for (let i = 0; i < kids.length; i++) { const o = kids[i]; if (o.isLight && !(o.layers.mask & _WATER_LAYER_BIT)) o.layers.enable(_WATER_LAYER); }
-  let tex = rt.texture;
-  if (!(rt.samples > 0)) {
+function _waterRefractBind(rnd, scn, cam) {
+  const u = _hubWaterDisp.material.uniforms;
+  u.uRefract.value = 0.0;
+  try {
+    if (!_waterRefractWanted()) return;
+    const rt = rnd.getRenderTarget();
+    if (!rt || rt !== postFX.rtScene || rt.samples > 0) return;
     const C = postFX.rtRefractCopy;
     if (!C || C.image.width !== rt.width || C.image.height !== rt.height) {
       try { if (C) C.dispose(); } catch (_) {}
@@ -13685,43 +13704,17 @@ function _waterRefractPass() {
       postFX.rtRefractCopy.minFilter = THREE.LinearFilter;
       postFX.rtRefractCopy.magFilter = THREE.LinearFilter;
     }
-    renderer.setRenderTarget(rt);
-    renderer.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
-    tex = postFX.rtRefractCopy;
-  }
-  u.uSceneTex.value = tex;
-  u.uSceneRes.value.set(rt.width, rt.height);
-  const A = _lssSceneActive(rt);   // the live sub-rectangle of the target (v39.49 supersample viewport)
-  u.uSceneMax.value.set(A.sx, A.sy);
-  const W = window.__water || {};
-  u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
-  if (W.refractK != null) u.uRefractK.value = +W.refractK;
-  if (!_wrCam) { _wrCam = new THREE.PerspectiveCamera(); _wrCam.layers.set(_WATER_LAYER); }
-  _wrCam.fov = camera.fov; _wrCam.aspect = camera.aspect; _wrCam.near = camera.near; _wrCam.far = camera.far; _wrCam.zoom = camera.zoom;
-  _wrCam.position.copy(camera.position);
-  _wrCam.quaternion.copy(camera.quaternion);
-  _wrCam.projectionMatrix.copy(camera.projectionMatrix);
-  _wrCam.projectionMatrixInverse.copy(camera.projectionMatrixInverse);
-  _wrCam.updateMatrixWorld(true);
-  const _pAC = renderer.autoClear, _pBG = scene.background, _pMW = scene.matrixWorldAutoUpdate, _pSM = renderer.shadowMap.autoUpdate;
-  try {
-    renderer.autoClear = false;
-    scene.background = null;   // a non-null background REPAINTS the whole target here - see _adsOverlayRender
-    scene.matrixWorldAutoUpdate = false;
-    renderer.shadowMap.autoUpdate = false;
-    renderer.setRenderTarget(rt);
-    renderer.render(scene, _wrCam);
-  } finally {
-    renderer.autoClear = _pAC;
-    scene.background = _pBG;
-    scene.matrixWorldAutoUpdate = _pMW;
-    renderer.shadowMap.autoUpdate = _pSM;
-    u.uRefract.value = 0.0;   // every other render of this mesh is the plain tinted body
-  }
-  try {
+    rnd.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
+    u.uSceneTex.value = postFX.rtRefractCopy;
+    u.uSceneRes.value.set(rt.width, rt.height);
+    const A = _lssSceneActive(rt);   // the live sub-rectangle of the target (v39.49 supersample viewport)
+    u.uSceneMax.value.set(A.sx, A.sy);
+    const W = window.__water || {};
+    u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
+    if (W.refractK != null) u.uRefractK.value = +W.refractK;
     const I = window.__waterRefractInfo || (window.__waterRefractInfo = { frames: 0 });
-    I.frames++; I.msaa = rt.samples > 0; I.copy = (tex !== rt.texture); I.res = [rt.width, rt.height]; I.k = u.uRefractK.value;
-  } catch (_) {}
+    I.frames++; I.res = [rt.width, rt.height]; I.k = u.uRefractK.value; I.inline = true;
+  } catch (_) { u.uRefract.value = 0.0; }
 }
 function renderPostFX() {
   const cinematicActive =
@@ -13796,14 +13789,8 @@ function renderPostFX() {
       postFX.compositeMat.uniforms.uSceneMax.value.set(_mx, _my);
     }
   }
-  const _wrOn = _waterRefractWanted();
-  if (_wrOn) camera.layers.disable(_WATER_LAYER);
   renderer.setRenderTarget(postFX.rtScene);
-  renderer.render(scene, camera);
-  if (_wrOn) {
-    camera.layers.enable(_WATER_LAYER);
-    try { _waterRefractPass(); } catch (e) { try { console.warn('[water] refraction pass failed:', e && (e.message || e)); } catch (_) {} }
-  }
+  renderer.render(scene, camera);   // (v39.79) the water is back inside this pass; it binds its own refraction source
   if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
 
   if (lowQuality) {
@@ -17949,8 +17936,8 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.renderOrder = -1; mesh.frustumCulled = false; mesh.visible = false;   // (v38.67) -1: see the hub water note
   mesh.userData = { isHubWater: true, WL: WL };
   scene.add(mesh);
-  mesh.layers.set(_WATER_LAYER);   // (v39.73) held back from the main pass and drawn by _waterRefractPass
-  try { if (typeof camera !== 'undefined' && camera) camera.layers.enable(_WATER_LAYER); } catch (_) {}   // ...but every OTHER render with this camera still gets it
+  mesh.onBeforeRender = function (rnd, scn, cam) { try { _waterRefractBind(rnd, scn, cam); } catch (_) {} };
+  mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
   _hubWaterDisp = mesh;
   return mesh;
 }
@@ -17976,6 +17963,7 @@ function _swBuildHubWater(T) {
     const rw = Math.max(256, Math.min(_rcap, Math.floor((window.innerWidth || 1280) * dpr * _rsc)));
     const rh = Math.max(256, Math.min(_rcap, Math.floor((window.innerHeight || 720) * dpr * _rsc)));
     mesh = new THREE.Reflector(geo, { textureWidth: rw, textureHeight: rh, color: 0x16465c, clipBias: 0.0028, shader: _swWaterReflectShader() });
+    try { if (mesh.camera && mesh.camera.layers) mesh.camera.layers.enable(5); } catch (_) {}
     mesh.material.uniforms.uTime = _swU.uTime;   
     mesh.material.uniforms.uCam = _swU.uCam;      
     mesh.material.transparent = true;
@@ -30958,7 +30946,7 @@ function _classFireLive() {
   for (const e of game.worldEffects) if (e && e._classFlame) n++;
   return n;
 }
-function _classMuzzleFire(key, pos, dir) {
+function _classMuzzleFire(key, pos, dir, mine) {
   try {
     const CF = (typeof window !== 'undefined') ? window.__classFire : null;
     if (CF && CF.on === false) return;
@@ -30973,7 +30961,7 @@ function _classMuzzleFire(key, pos, dir) {
     const mul = (CF && CF.mul != null) ? CF.mul : 1.0;
     let at = null;
     try {
-      const firstPerson = !game.thirdPerson && !game._cockpit3dLive && player && player.position && pos.distanceToSquared(player.position) < 400;
+      const firstPerson = mine && !game.thirdPerson && !game._cockpit3dLive && player && player.position;   // (v39.77) told, not guessed by distance
       if (firstPerson && typeof _computeScreenMuzzleWorld === 'function') {
         const MF = (typeof window !== 'undefined' && window.__muzzleFrac) ? window.__muzzleFrac : null;
         const mf = (MF && MF[key]) || _PLAYER_MAIN_MUZZLE_FRAC[key];
@@ -30986,7 +30974,7 @@ function _classMuzzleFire(key, pos, dir) {
         if (at) at = at.clone().addScaledVector(dir, 10);
       }
     } catch (_) { at = null; }
-    if (!at) at = pos.clone().addScaledVector(dir, (pos.distanceToSquared(player.position) < 400) ? 40 : 14);
+    if (!at) at = pos.clone().addScaledVector(dir, mine ? 40 : 14);   // (v39.77) ditto
     const n0 = game.worldEffects.length;
     _spawnClassFireBurst(at, row.color, row.size * mul * (0.85 + Math.random() * 0.3), row.life);
     if (game.worldEffects.length > n0) { const fe = game.worldEffects[game.worldEffects.length - 1]; fe._classFlame = true; fe._grow = 1.2; }
@@ -31021,6 +31009,7 @@ function _chargeFireTick(dt, t, tint) {
     const mul = (CF && CF.mul != null) ? CF.mul : 1.0;
     const size = (3.5 + 6 * t) * Math.sqrt(hull / 60) * mul;
     const n0 = game.worldEffects.length;
+    _adsAnchor(_cfTmp);   // (v39.77) inside the tube, which rides the overlay layer (v39.76) - same pixels either way
     _spawnClassFireBurst(_cfTmp, (tint != null) ? tint : 0x44eeff, size, 0.32);
     if (game.worldEffects.length > n0) { const fe = game.worldEffects[game.worldEffects.length - 1]; fe._classFlame = true; fe._grow = 1.25; }
   } catch (_) {}
@@ -38889,7 +38878,15 @@ async function _prebakeWorldForLaunch() {
         out.forEach((n) => { tally[n] = (tally[n] || 0) + 1; });
         return { count: out.length, byName: tally };
       };
-      const _COLD_TAIL = { 20: 'numDirLights', 19: 'numPointLights', 18: 'numSpotLights', 17: 'numSpotLightMaps',
+      const _COLD_TAIL = { 51: 'outputColorSpace', 50: 'envMapMode', 49: 'envMapCubeUVHeight',
+        48: 'mapUv', 47: 'alphaMapUv', 46: 'lightMapUv', 45: 'aoMapUv', 44: 'bumpMapUv',
+        43: 'normalMapUv', 42: 'displacementMapUv', 41: 'emissiveMapUv', 40: 'metalnessMapUv',
+        39: 'roughnessMapUv', 38: 'anisotropyMapUv', 37: 'clearcoatMapUv', 36: 'clearcoatNormalMapUv',
+        35: 'clearcoatRoughnessMapUv', 34: 'iridescenceMapUv', 33: 'iridescenceThicknessMapUv',
+        32: 'sheenColorMapUv', 31: 'sheenRoughnessMapUv', 30: 'specularMapUv', 29: 'specularColorMapUv',
+        28: 'specularIntensityMapUv', 27: 'transmissionMapUv', 26: 'thicknessMapUv', 25: 'combine',
+        24: 'fogExp2', 23: 'sizeAttenuation', 22: 'morphTargetsCount', 21: 'morphAttributeCount',
+        20: 'numDirLights', 19: 'numPointLights', 18: 'numSpotLights', 17: 'numSpotLightMaps',
         16: 'numHemiLights', 15: 'numRectAreaLights', 14: 'numDirLightShadows', 13: 'numPointLightShadows',
         12: 'numSpotLightShadows', 11: 'numSpotLightShadowsWithMaps', 10: 'numLightProbes', 9: 'shadowMapType',
         8: 'toneMapping', 7: 'numClippingPlanes', 6: 'numClipIntersection', 5: 'depthPacking',
@@ -45051,6 +45048,26 @@ function _adsLookScale() {
     return 1 + z * (m0 / M - 1);
   } catch (_) { return 1; }
 }
+const _ADS_EXTRAS = [];
+function _adsOvSyncExtras(on) {
+  try {
+    const S = game._adsOvExtraSet || (game._adsOvExtraSet = new Set());
+    if (on) {
+      _ADS_EXTRAS.length = 0;
+      if (typeof _SHIPL !== 'undefined' && _SHIPL && _SHIPL.coneP) _ADS_EXTRAS.push(_SHIPL.coneP);
+      if (typeof player !== 'undefined' && player && player._bcgTubes) {
+        for (let i = 0; i < player._bcgTubes.length; i++) _ADS_EXTRAS.push(player._bcgTubes[i]);
+      }
+      for (let i = 0; i < _ADS_EXTRAS.length; i++) {
+        const o = _ADS_EXTRAS[i];
+        if (o.layers.mask !== 32) { o.layers.set(5); S.add(o); }
+      }
+    } else if (S.size) {
+      S.forEach((o) => { try { o.layers.set(0); } catch (_) {} });
+      S.clear();
+    }
+  } catch (_) {}
+}
 function _adsShipOverlaySet(on) {
   const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
   if (on && mesh) {
@@ -45067,7 +45084,9 @@ function _adsShipOverlaySet(on) {
     if (game._adsOvMesh) { try { game._adsOvMesh.traverse((o) => { o.layers.set(0); }); } catch (_) {} }
     game._adsOvMesh = null;
     game._adsOvOn = false;
+    _adsOvSyncExtras(false);   // (v39.76) the cone and the charge tubes come back to layer 0 with it
   }
+  if (!on) _adsOvSyncExtras(false);   // ...and after any other route out of the overlay
 }
 let _adsOvCam = null;
 let _adsOvWarmRT = null;
@@ -45103,6 +45122,7 @@ function _adsOverlayPrewarm() {
 function _adsOverlayRender() {
   try {
     if (!game || !game._adsOvOn || typeof renderer === 'undefined' || !renderer) return;
+    _adsOvSyncExtras(true);   // (v39.76) every frame: the charge tubes are built on the first charge
     if (!_adsOvCam) {
       _adsOvCam = new THREE.PerspectiveCamera(90, 1, 1, 100);
       _adsOvCam.layers.set(5);
@@ -45317,7 +45337,7 @@ function fireWeapon() {
     }
   }
 
-  emitChassisMuzzleFlash(player.loadoutKey, _fwOrigin, _fwDir);
+  emitChassisMuzzleFlash(player.loadoutKey, _fwOrigin, _fwDir, true);   // (v39.77) mine: anchor the whole flash to the drawn barrel under zoom
   if (_blasterCore) _blasterCoreVolley(_fwDir);
 
   if (w.mode === 'hitscan') fireHitscan(_hitOrigin, _hitForward, w);
@@ -45493,7 +45513,7 @@ function fireHitscan(origin, dir, w) {
     const localFrom = (!game.thirdPerson && frac && typeof _computeScreenMuzzleWorld === 'function')
       ? (_computeScreenMuzzleWorld(frac.x, frac.y) || origin)
       : origin;
-    _spawnRailgunSpiral(localFrom, end, tracerColor);
+    _spawnRailgunSpiral(_adsAnchor(localFrom.clone()), end, tracerColor);   // (v39.77) ...and on the drawn barrel under zoom
   } else {
     const _vAds = (player.loadoutKey === 'VORTEX' && player.vortexAdsActive);
     const _vfS = (player.loadoutKey === 'VORTEX') ? (window.__vortexFire || {}) : null;
@@ -45502,12 +45522,13 @@ function fireHitscan(origin, dir, w) {
     const _vCol = _vAds
       ? new THREE.Color(_vDeep).lerp(new THREE.Color(0xffffff), 0.30).getHex()
       : _vDeep;
-    spawnTracer(origin, end, _vCol, _vAds ? 1.85 : (isChaingun ? 0.55 : (_vfS ? 1.15 : 1.0)));
+    const _vOrigin = _adsAnchor(origin.clone());
+    spawnTracer(_vOrigin, end, _vCol, _vAds ? 1.85 : (isChaingun ? 0.55 : (_vfS ? 1.15 : 1.0)));
     if (_vfS && typeof _spawnClassFireBurst === 'function') {
       try {
         const _vfC = (_vfS.color != null) ? _vfS.color : 0xc46cff;
         const _n1 = game.worldEffects.length;
-        _spawnClassFireBurst(origin.clone().addScaledVector(aimDir, 40), _vfC, (_vfS.shotMuzzle != null ? _vfS.shotMuzzle : 12), 0.45);
+        _spawnClassFireBurst(_vOrigin.clone().addScaledVector(aimDir, 40), _vfC, (_vfS.shotMuzzle != null ? _vfS.shotMuzzle : 12), 0.45);
         if (levelDist < w.range) _spawnClassFireBurst(end, _vfC, (_vfS.shotHit != null ? _vfS.shotHit : 20), 0.9);
         for (let _k = _n1; _k < game.worldEffects.length; _k++) game.worldEffects[_k]._grow = 1.2;
       } catch (_) {}
@@ -64978,6 +64999,7 @@ function __pmark(name) {
       big: R.big.filter(b => b[0] >= now - 5).slice(-20),
       lo: R.lo.filter(l => l[0] >= now - 5).slice(-20),
       cold: R.cold.filter(c => c[0] >= now - 5),
+      coldNames: (function () { try { return (window.__coldSeen || []).slice(-24); } catch (_) { return null; } })(),
       frames: 0, worst: 0, avgFps: 0, info: null, run: null, speed: null, round: null,
     };
     try { const all = around(now - 5, now, 0); m.frames = all.length; m.worst = all.length ? +Math.max(...all.map(a => a[1])).toFixed(1) : 0; m.avgFps = all.length ? Math.round(1000 / (all.reduce((acc, a) => acc + a[1], 0) / all.length)) : 0; } catch (_) {}

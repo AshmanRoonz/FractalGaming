@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.75';
+const LSS_BUILD = '39.80';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -14705,6 +14705,11 @@ function _vortexGunPair(outA, outB) {
   if (!nodes || nodes.length < 2 || !player.mesh.visible) return false;
   nodes[0].getWorldPosition(outA);
   nodes[1].getWorldPosition(outB);
+  // (v39.77) THE BARRELS AS DRAWN. Both the Mega Laser core and the Laser ability read their gun
+  // points here, so one anchor moves the arms, the glow cards that hide their open ends and the
+  // barrel flames together - the seam between them can never open. The stem and the outbound beam
+  // are deliberately left alone: they are world geometry and still end where you are aiming.
+  _adsAnchor(outA); _adsAnchor(outB);
   return true;
 }
 // span a unit-Y beam mesh from `from` to `to` at `radius`
@@ -16494,6 +16499,41 @@ const _bcgQuat = new THREE.Quaternion();
 // muzzleNodes the hull carries, in whatever colour it is handed. Puncture drives it too.
 const _BCG_FLIP = new THREE.Quaternion(1, 0, 0, 0);   // (v39.71) 180 degrees about X: flips the tube's +Y down the barrel
 const _bcgWhite = new THREE.Color(0xffffff);
+// ═══ (v39.77) EVERY GUN FIRES FROM WHERE THE SHIP IS DRAWN ══════════════════════════════════════
+// v39.76 fixed the headlight cone and the charge tubes by moving them onto the overlay layer with
+// the hull. That works for a mesh that is entirely the ship's own, but most of what a gun emits is
+// not: a tracer and a beam START at the muzzle and END out in the world, particles are all one
+// shared Points object that cannot be split across layers, and a pooled flash billboard has to go
+// back to the pool on layer 0. Moving those is either impossible or would aim them at the wrong
+// place. So the rest of the weapons get the same result the other way round - by SPAWNING at the
+// point that lands where the ship is drawn.
+//
+// While third-person zoom is engaged the hull is drawn by `_adsOvCam` at the settings FOV and
+// everything else by `camera` at the zoomed FOV, from the same position and orientation. Two
+// perspective cameras that differ only in FOV project the same point to NDC coordinates in a fixed
+// ratio - the magnification - so a point's zoomed image can be made to match its un-zoomed image by
+// dividing its camera-space x and y by that ratio and leaving its depth alone. That is all this is.
+// The far end of a tracer or a beam is left exactly where it was, so it still ends where you are
+// aiming; only the muzzle end slides onto the drawn barrel.
+// Outside third-person zoom `game._adsOvOn` is false and this is the identity.
+const _adsAnchV = new THREE.Vector3(), _adsAnchQ = new THREE.Quaternion();
+function _adsAnchor(v) {
+  try {
+    if (!v || typeof game === 'undefined' || !game || !game._adsOvOn) return v;
+    if (typeof camera === 'undefined' || !camera) return v;
+    const _fo = (typeof input !== 'undefined' && input && typeof input.fovDeg === 'number') ? input.fovDeg : camera.fov;
+    const t0 = Math.tan(_fo * Math.PI / 360), t1 = Math.tan(camera.fov * Math.PI / 360);
+    if (!(t1 > 1e-6)) return v;
+    const mag = t0 / t1;
+    if (!(mag > 1.001)) return v;
+    _adsAnchQ.copy(camera.quaternion).invert();
+    _adsAnchV.copy(v).sub(camera.position).applyQuaternion(_adsAnchQ);
+    _adsAnchV.x /= mag; _adsAnchV.y /= mag;
+    v.copy(_adsAnchV.applyQuaternion(camera.quaternion)).add(camera.position);
+  } catch (_) {}
+  return v;
+}
+if (typeof window !== 'undefined') window.__adsAnchor = _adsAnchor;
 function _blasterChargeGlow(t, tintOverride) {
   const mesh = player.mesh;
   const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
@@ -16609,8 +16649,13 @@ function _blasterChargeGlowOff() {
   if (!player._bcgTubes) return;
   for (const m of player._bcgTubes) { m.visible = false; m.material.opacity = 0; }
 }
-function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
+function emitChassisMuzzleFlash(loadoutKey, pos, dir, mine) {
   if (!pos || !dir) return;
+  // (v39.77) `mine` = the local player's own shot (fireWeapon passes it; peers and bots do not).
+  // One anchor here puts EVERY visual this function spawns on the barrel as it is drawn while
+  // third-person zoom is engaged: the flare billboard, the muzzle light, the universal sparks,
+  // Pyro's flame tongues, Slayer's kick sparks and Puncture's barrel lightning.
+  if (mine) pos = _adsAnchor(pos.clone());
   const flashColor = chassisFlashColor(loadoutKey);
 
   // (v37.95) THE DISCHARGE ITSELF. Everything below is sparks and a light - there was never a
@@ -16653,7 +16698,7 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
   }
 
   // Chassis-specific layer on top of the universal flash.
-  try { _classMuzzleFire(loadoutKey, pos, dir); } catch (_) {}   // (v39.70) the class flame, every ship but Vortex (own path) and Pyro (own flames)
+  try { _classMuzzleFire(loadoutKey, pos, dir, mine); } catch (_) {}   // (v39.70) the class flame, every ship but Vortex (own path) and Pyro (own flames)
   if (loadoutKey === 'PYRO') {
     // Flame tongues reaching forward; reuses Pyro's fire palette.
     for (let i = 0; i < 5; i++) {
@@ -22481,35 +22526,34 @@ function tunePostFX(opts) {
 }
 window.tunePostFX       = tunePostFX;
 
-// === (v39.73) THE WATER PASS ====================================================================
-// Refraction needs the colour of the world BEHIND the water, and the water is in the same scene as
-// that world - so it draws in a second pass, after the first one has finished laying the world down.
-// The near-field sheet sits on layer 7; renderPostFX turns layer 7 off for the main render, then
-// calls this, which re-renders the SAME scene with a layer-7-only camera into the SAME target. The
-// depth buffer is deliberately not cleared, so the sheet depth-tests against the world exactly as it
-// did when it was part of the main list, and the ADS hull overlay still goes on top afterwards.
+// === (v39.79) THE WATER REFRACTS FROM INSIDE THE MAIN PASS =======================================
+// v39.73 drew the water in a SECOND pass after the world so it could sample what was behind it. That
+// bought refraction and cost every transparent thing in front of the water: tracers, weapon trails,
+// shield bubbles and muzzle flames do not write depth, so a sheet drawn AFTER them, depth-testing
+// only against the opaque world, simply painted over them (owner: "a lot of the effects are not
+// working over top the water, they are cancelled out, like the weapon trails and the shields").
 //
-// Reading the target while drawing into it:
-//   - MSAA on (ULTRA): the draw goes to the multisample renderbuffer and rt.texture is the resolved
-//     copy renderer.render() already blitted - two different objects, so sampling it is legal.
-//   - no MSAA (everything else): rt.texture IS the draw attachment, so it is copied aside first.
-//     One copyTexSubImage2D of the target, the same trick MeshPhysicalMaterial's transmission uses.
-// The main scene (not a private one) is re-rendered on purpose: a second Scene has its own light
-// state, and light COUNTS are part of the program cache key, so the water material would link a
-// SECOND program the first time this ran - a cold link in play, exactly what v39.72 was about. Same
-// reason the ADS overlay renders `scene`. ⚠ (v39.74) That is necessary but NOT sufficient: the
-// camera's layer mask filters LIGHTS as well as meshes, so a layer-6-only camera still saw zero of
-// them and forked the program anyway. The lights carry layer 6 now (see the parity sweep below).
-// matrixWorldAutoUpdate / shadowMap.autoUpdate are pinned off for the pass so it costs a
-// render-list walk and one draw, not a second shadow map.
-// window.__water.refract = 0 turns it off; .refractK bends more or less; __waterRefractInfo reports.
-let _wrCam = null;
+// So the sheet goes back where it was - in the main transparent pass at renderOrder -1, first among
+// the transparents, with every effect compositing on top of it exactly as before v39.73 - and the
+// refraction source is taken at the one moment that is both late enough and early enough: its own
+// onBeforeRender. three.js finishes the whole OPAQUE pass before it starts the transparent one, so
+// at that instant the target holds the solid world and nothing else. That is a better source than
+// the second pass had (which also swept up every transparent effect into the refraction), and it
+// costs one framebuffer copy instead of a second render-list walk and a draw.
+//
+// ⚠ MSAA (strict ULTRA only) has no single-sample buffer to copy from mid-render - the resolve to
+// rt.texture happens at the END of renderer.render() - so copyTexSubImage2D there is invalid. Those
+// frames keep uRefract 0 and get the v39.72 tinted body; everything else (the mirror, the caustics,
+// the foam, the Kelvin wake) is unchanged. window.__water.refract = 0 turns it off everywhere;
+// .refractK bends more or less; __waterRefractInfo reports what actually happened.
 const _wrZero = new THREE.Vector2(0, 0);
-// ⚠ 6, NOT 7. Layer 7 already belongs to _wxBuildTerrProxy's shadow-only terrain proxy - a white
-// MeshBasicMaterial heightfield that only the sun's shadow camera is allowed to see. The first cut
-// of this pass used 7 and enabled it on the main camera, which drew that proxy over the world:
-// translucent white slabs standing exactly where the mountains are. Layers in this game are 0
-// (everything), 5 (the ADS hull overlay) and 7 (the shadow proxy); 6 was the free one.
+// (v39.74, kept for the record) Layers in this game are 0 (everything), 5 (the ADS hull overlay) and
+// 7 (_wxBuildTerrProxy's shadow-only terrain proxy - a white heightfield only the sun's shadow camera
+// may see; v39.73's first cut claimed 7 for the water and drew that proxy over the mountains). 6 was
+// the free one and the water used it until v39.79 brought the sheet back into the main pass. The
+// lights still carry 6 alongside 5, which costs nothing and keeps the layer usable for the next pass
+// that needs one - see the v39.74 note at the combat lights for why a pass layer must be on EVERY
+// light (light counts are program-cache-key terms).
 const _WATER_LAYER = 6;
 function _waterRefractWanted() {
   try {
@@ -22523,18 +22567,17 @@ function _waterRefractWanted() {
     return !!(u && u.uSceneTex);
   } catch (_) { return false; }
 }
-const _WATER_LAYER_BIT = 1 << _WATER_LAYER;
-function _waterRefractPass() {
-  const rt = postFX.rtScene, u = _hubWaterDisp.material.uniforms;
-  // ⚠ LIGHT PARITY (v39.74). three.js gates pushLight on object.layers.test(camera.layers) and puts
-  // the light COUNTS in the program cache key, so a layer-6-only camera that cannot see the lights
-  // makes this material link a SECOND, zero-light program - cold, in play. The creation sites all
-  // enable 6 beside 5; this flat pass over the scene's direct children (where every light in the
-  // game lives, measured) is the insurance that a light added later cannot fork it even once.
-  const kids = scene.children;
-  for (let i = 0; i < kids.length; i++) { const o = kids[i]; if (o.isLight && !(o.layers.mask & _WATER_LAYER_BIT)) o.layers.enable(_WATER_LAYER); }
-  let tex = rt.texture;
-  if (!(rt.samples > 0)) {
+// Called by the sheet itself, immediately before it draws, from wherever it is being drawn. It only
+// arms refraction when the current target IS the post chain's scene target and that target has no
+// MSAA; a bare render (XR, potato, the picker) or the mirror leaves uRefract 0 and gets the plain
+// tinted body, which is what every one of those wants anyway.
+function _waterRefractBind(rnd, scn, cam) {
+  const u = _hubWaterDisp.material.uniforms;
+  u.uRefract.value = 0.0;
+  try {
+    if (!_waterRefractWanted()) return;
+    const rt = rnd.getRenderTarget();
+    if (!rt || rt !== postFX.rtScene || rt.samples > 0) return;
     const C = postFX.rtRefractCopy;
     if (!C || C.image.width !== rt.width || C.image.height !== rt.height) {
       try { if (C) C.dispose(); } catch (_) {}
@@ -22542,43 +22585,17 @@ function _waterRefractPass() {
       postFX.rtRefractCopy.minFilter = THREE.LinearFilter;
       postFX.rtRefractCopy.magFilter = THREE.LinearFilter;
     }
-    renderer.setRenderTarget(rt);
-    renderer.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
-    tex = postFX.rtRefractCopy;
-  }
-  u.uSceneTex.value = tex;
-  u.uSceneRes.value.set(rt.width, rt.height);
-  const A = _lssSceneActive(rt);   // the live sub-rectangle of the target (v39.49 supersample viewport)
-  u.uSceneMax.value.set(A.sx, A.sy);
-  const W = window.__water || {};
-  u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
-  if (W.refractK != null) u.uRefractK.value = +W.refractK;
-  if (!_wrCam) { _wrCam = new THREE.PerspectiveCamera(); _wrCam.layers.set(_WATER_LAYER); }
-  _wrCam.fov = camera.fov; _wrCam.aspect = camera.aspect; _wrCam.near = camera.near; _wrCam.far = camera.far; _wrCam.zoom = camera.zoom;
-  _wrCam.position.copy(camera.position);
-  _wrCam.quaternion.copy(camera.quaternion);
-  _wrCam.projectionMatrix.copy(camera.projectionMatrix);
-  _wrCam.projectionMatrixInverse.copy(camera.projectionMatrixInverse);
-  _wrCam.updateMatrixWorld(true);
-  const _pAC = renderer.autoClear, _pBG = scene.background, _pMW = scene.matrixWorldAutoUpdate, _pSM = renderer.shadowMap.autoUpdate;
-  try {
-    renderer.autoClear = false;
-    scene.background = null;   // a non-null background REPAINTS the whole target here - see _adsOverlayRender
-    scene.matrixWorldAutoUpdate = false;
-    renderer.shadowMap.autoUpdate = false;
-    renderer.setRenderTarget(rt);
-    renderer.render(scene, _wrCam);
-  } finally {
-    renderer.autoClear = _pAC;
-    scene.background = _pBG;
-    scene.matrixWorldAutoUpdate = _pMW;
-    renderer.shadowMap.autoUpdate = _pSM;
-    u.uRefract.value = 0.0;   // every other render of this mesh is the plain tinted body
-  }
-  try {
+    rnd.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
+    u.uSceneTex.value = postFX.rtRefractCopy;
+    u.uSceneRes.value.set(rt.width, rt.height);
+    const A = _lssSceneActive(rt);   // the live sub-rectangle of the target (v39.49 supersample viewport)
+    u.uSceneMax.value.set(A.sx, A.sy);
+    const W = window.__water || {};
+    u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
+    if (W.refractK != null) u.uRefractK.value = +W.refractK;
     const I = window.__waterRefractInfo || (window.__waterRefractInfo = { frames: 0 });
-    I.frames++; I.msaa = rt.samples > 0; I.copy = (tex !== rt.texture); I.res = [rt.width, rt.height]; I.k = u.uRefractK.value;
-  } catch (_) {}
+    I.frames++; I.res = [rt.width, rt.height]; I.k = u.uRefractK.value; I.inline = true;
+  } catch (_) { u.uRefract.value = 0.0; }
 }
 function renderPostFX() {
   // Low-quality gate: skip the three bloom passes (bright-extract + horizontal
@@ -22672,16 +22689,8 @@ function renderPostFX() {
       postFX.compositeMat.uniforms.uSceneMax.value.set(_mx, _my);
     }
   }
-  // (v39.73) the near-field water is held back from this render and drawn by _waterRefractPass
-  // right after it, so it can sample the world it is standing in front of.
-  const _wrOn = _waterRefractWanted();
-  if (_wrOn) camera.layers.disable(_WATER_LAYER);
   renderer.setRenderTarget(postFX.rtScene);
-  renderer.render(scene, camera);
-  if (_wrOn) {
-    camera.layers.enable(_WATER_LAYER);
-    try { _waterRefractPass(); } catch (e) { try { console.warn('[water] refraction pass failed:', e && (e.message || e)); } catch (_) {} }
-  }
+  renderer.render(scene, camera);   // (v39.79) the water is back inside this pass; it binds its own refraction source
   // (v36.74) ADS ship overlay: while third-person zoom is engaged the ship
   // lives on layer 5 (skipped by the pass above) and is drawn here from the
   // un-zoomed camera into the SAME target — before post, so bloom/grade/fog
@@ -22974,13 +22983,14 @@ try { game._cockpitLights = _lssCockpitLights(); } catch (_) {}
 // shares a layer with the CAMERA. Without these the ship would go black the
 // moment third-person zoom engages. Layer 0 membership is untouched, so the
 // normal world pass is byte-identical.
-// (v39.74) ...and LAYER 6 for the same reason, for _waterRefractPass. projectObject gates
+// (v39.74) ...and LAYER 6 for the same reason, for the water pass that lived there until v39.79.
+// Kept because it costs nothing and the next pass that needs a layer needs this. projectObject gates
 // pushLight on object.layers.test(camera.layers), so a layer-6-only camera saw ZERO lights and
 // the light COUNTS are program-key terms — the water material linked a second, zero-light
 // program the first time the pass ran, cold, in play (owner's F8 at 68.85 s: renderFrame
 // 1980 ms, 1 cold link). Exactly the v39.49 finding one layer over. Every light that carries 5
-// carries 6; _waterRefractPass also re-asserts it over scene.children each pass, so a light
-// added by future code cannot fork the program even once.
+// carries 6. Any future layer-restricted pass MUST do the same or its material forks a zero-light
+// program the first time it runs - cold, in play.
 ambientLight.layers.enable(5); ambientLight.layers.enable(6);
 dirLight.layers.enable(5); dirLight.layers.enable(6);
 dirLight2.layers.enable(5); dirLight2.layers.enable(6);
@@ -28062,7 +28072,7 @@ function _swBuildHubWaterDispGet(WL) {
 
         uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 }, uShoreFoam: { value: 0.0 },   
         uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 },
-        // (v39.73) REFRACTION (see _waterRefractPass). uSceneTex is the world already drawn under
+        // (v39.73) REFRACTION (see _waterRefractBind). uSceneTex is the opaque world drawn under
         // this pixel; uSceneRes/uSceneMax say which part of the scene target is live this frame
         // (the v39.49 supersample viewport). uRefract is 1 ONLY inside the water pass - any other
         // render of this mesh (XR, potato, the mirror) leaves it 0 and gets the old tinted body.
@@ -28236,8 +28246,11 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.renderOrder = -1; mesh.frustumCulled = false; mesh.visible = false;   // (v38.67) -1: see the hub water note
   mesh.userData = { isHubWater: true, WL: WL };
   scene.add(mesh);
-  mesh.layers.set(_WATER_LAYER);   // (v39.73) held back from the main pass and drawn by _waterRefractPass
-  try { if (typeof camera !== 'undefined' && camera) camera.layers.enable(_WATER_LAYER); } catch (_) {}   // ...but every OTHER render with this camera still gets it
+  // (v39.79) renderOrder -1 already puts it FIRST among the transparents, so every effect draws
+  // over it as it always did. onBeforeRender grabs the opaque-only frame as its refraction source
+  // and arms uRefract; onAfterRender disarms, so the mirror and the bare paths get the plain body.
+  mesh.onBeforeRender = function (rnd, scn, cam) { try { _waterRefractBind(rnd, scn, cam); } catch (_) {} };
+  mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
   _hubWaterDisp = mesh;
   return mesh;
 }
@@ -28279,6 +28292,9 @@ function _swBuildHubWater(T) {
     const rw = Math.max(256, Math.min(_rcap, Math.floor((window.innerWidth || 1280) * dpr * _rsc)));
     const rh = Math.max(256, Math.min(_rcap, Math.floor((window.innerHeight || 720) * dpr * _rsc)));
     mesh = new THREE.Reflector(geo, { textureWidth: rw, textureHeight: rh, color: 0x16465c, clipBias: 0.0028, shader: _swWaterReflectShader() });
+    // (v39.76) the mirror sees the ADS overlay layer too: while third-person zoom is engaged the
+    // hull and its headlight cone live on layer 5, and a layer-0-only virtual camera lost both.
+    try { if (mesh.camera && mesh.camera.layers) mesh.camera.layers.enable(5); } catch (_) {}
     mesh.material.uniforms.uTime = _swU.uTime;   
     mesh.material.uniforms.uCam = _swU.uCam;      
     mesh.material.transparent = true;
@@ -45479,7 +45495,7 @@ function _classFireLive() {
   for (const e of game.worldEffects) if (e && e._classFlame) n++;
   return n;
 }
-function _classMuzzleFire(key, pos, dir) {
+function _classMuzzleFire(key, pos, dir, mine) {
   try {
     const CF = (typeof window !== 'undefined') ? window.__classFire : null;
     if (CF && CF.on === false) return;
@@ -45498,7 +45514,7 @@ function _classMuzzleFire(key, pos, dir) {
     // class's main-muzzle fraction if it has one, else the dual-tip fractions (alternating sides).
     let at = null;
     try {
-      const firstPerson = !game.thirdPerson && !game._cockpit3dLive && player && player.position && pos.distanceToSquared(player.position) < 400;
+      const firstPerson = mine && !game.thirdPerson && !game._cockpit3dLive && player && player.position;   // (v39.77) told, not guessed by distance
       if (firstPerson && typeof _computeScreenMuzzleWorld === 'function') {
         const MF = (typeof window !== 'undefined' && window.__muzzleFrac) ? window.__muzzleFrac : null;
         const mf = (MF && MF[key]) || _PLAYER_MAIN_MUZZLE_FRAC[key];
@@ -45511,7 +45527,7 @@ function _classMuzzleFire(key, pos, dir) {
         if (at) at = at.clone().addScaledVector(dir, 10);
       }
     } catch (_) { at = null; }
-    if (!at) at = pos.clone().addScaledVector(dir, (pos.distanceToSquared(player.position) < 400) ? 40 : 14);
+    if (!at) at = pos.clone().addScaledVector(dir, mine ? 40 : 14);   // (v39.77) ditto
     const n0 = game.worldEffects.length;
     _spawnClassFireBurst(at, row.color, row.size * mul * (0.85 + Math.random() * 0.3), row.life);
     if (game.worldEffects.length > n0) { const fe = game.worldEffects[game.worldEffects.length - 1]; fe._classFlame = true; fe._grow = 1.2; }
@@ -45546,6 +45562,7 @@ function _chargeFireTick(dt, t, tint) {
     const mul = (CF && CF.mul != null) ? CF.mul : 1.0;
     const size = (3.5 + 6 * t) * Math.sqrt(hull / 60) * mul;
     const n0 = game.worldEffects.length;
+    _adsAnchor(_cfTmp);   // (v39.77) inside the tube, which rides the overlay layer (v39.76) - same pixels either way
     _spawnClassFireBurst(_cfTmp, (tint != null) ? tint : 0x44eeff, size, 0.32);
     if (game.worldEffects.length > n0) { const fe = game.worldEffects[game.worldEffects.length - 1]; fe._classFlame = true; fe._grow = 1.25; }
   } catch (_) {}
@@ -56006,7 +56023,20 @@ async function _prebakeWorldForLaunch() {
       //     no lights, and light counts are key terms), and how v39.49's ADS hull fork was found
       //     before it. The tail is indexed from the END so it holds for both built-in shaders
       //     (one leading id) and ShaderMaterials (two).
-      const _COLD_TAIL = { 20: 'numDirLights', 19: 'numPointLights', 18: 'numSpotLights', 17: 'numSpotLightMaps',
+      // (v39.78) The WHOLE parameter block, not just its tail. three.js pushes a fixed-length list, so
+      // a parameter's distance from the END of the key is the same for a built-in shader (one leading
+      // id) and a ShaderMaterial (two) - checked against live keys at numDirLights 20, numPointLights
+      // 19, numSpotLights 18, numHemiLights 16, numDirLightShadows 14, toneMapping 8 and
+      // outputColorSpace 51. Without the head half a real fork read as "idx-48" instead of "mapUv".
+      const _COLD_TAIL = { 51: 'outputColorSpace', 50: 'envMapMode', 49: 'envMapCubeUVHeight',
+        48: 'mapUv', 47: 'alphaMapUv', 46: 'lightMapUv', 45: 'aoMapUv', 44: 'bumpMapUv',
+        43: 'normalMapUv', 42: 'displacementMapUv', 41: 'emissiveMapUv', 40: 'metalnessMapUv',
+        39: 'roughnessMapUv', 38: 'anisotropyMapUv', 37: 'clearcoatMapUv', 36: 'clearcoatNormalMapUv',
+        35: 'clearcoatRoughnessMapUv', 34: 'iridescenceMapUv', 33: 'iridescenceThicknessMapUv',
+        32: 'sheenColorMapUv', 31: 'sheenRoughnessMapUv', 30: 'specularMapUv', 29: 'specularColorMapUv',
+        28: 'specularIntensityMapUv', 27: 'transmissionMapUv', 26: 'thicknessMapUv', 25: 'combine',
+        24: 'fogExp2', 23: 'sizeAttenuation', 22: 'morphTargetsCount', 21: 'morphAttributeCount',
+        20: 'numDirLights', 19: 'numPointLights', 18: 'numSpotLights', 17: 'numSpotLightMaps',
         16: 'numHemiLights', 15: 'numRectAreaLights', 14: 'numDirLightShadows', 13: 'numPointLightShadows',
         12: 'numSpotLightShadows', 11: 'numSpotLightShadowsWithMaps', 10: 'numLightProbes', 9: 'shadowMapType',
         8: 'toneMapping', 7: 'numClippingPlanes', 6: 'numClipIntersection', 5: 'depthPacking',
@@ -64856,6 +64886,42 @@ function _adsLookScale() {
     return 1 + z * (m0 / M - 1);
   } catch (_) { return 1; }
 }
+// (v39.76) THE SHIP'S WORLD-SPACE ATTACHMENTS HAVE TO FOLLOW IT. `_adsShipOverlaySet` moves
+// `player.mesh` and its children to layer 5, and `_adsOverlayRender` draws that layer with the
+// UN-zoomed camera. But two things that are visually bolted to the ship are deliberately NOT
+// children of it - the headlight cone (`_SHIPL.coneP`, posed in world space from the spot's
+// position and the camera's forward) and the charge tubes (`player._bcgTubes`, world-space so the
+// muzzle markers' own export rotation never has to be guessed). Both sat on layer 0, so while
+// third-person zoom was engaged the MAIN pass drew them through the ZOOMED projection while the
+// hull was drawn through the un-zoomed one. Same pose, different FOV, so everything off the screen
+// centre is magnified away from it: the owner's "the headlight floats too low under the ship" and,
+// with Puncture double-zoomed, "the charge isn't in the right spot".
+// The hull leaving layer 0 also emptied the main pass's depth around the ship, so the cone's apex -
+// normally buried inside the hull - was drawn over whatever layer-0 sprite sits at the screen
+// centre, which is the "cutout of the green/red ball at the peak of the pie shape". Both go away
+// once the cone is drawn in the overlay pass, where the hull's depth is in front of it again.
+// Re-asserted every frame because the tubes are built lazily, on the first charge, which can be
+// long after the zoom engaged; the touched set is remembered so release restores exactly those.
+const _ADS_EXTRAS = [];
+function _adsOvSyncExtras(on) {
+  try {
+    const S = game._adsOvExtraSet || (game._adsOvExtraSet = new Set());
+    if (on) {
+      _ADS_EXTRAS.length = 0;
+      if (typeof _SHIPL !== 'undefined' && _SHIPL && _SHIPL.coneP) _ADS_EXTRAS.push(_SHIPL.coneP);
+      if (typeof player !== 'undefined' && player && player._bcgTubes) {
+        for (let i = 0; i < player._bcgTubes.length; i++) _ADS_EXTRAS.push(player._bcgTubes[i]);
+      }
+      for (let i = 0; i < _ADS_EXTRAS.length; i++) {
+        const o = _ADS_EXTRAS[i];
+        if (o.layers.mask !== 32) { o.layers.set(5); S.add(o); }
+      }
+    } else if (S.size) {
+      S.forEach((o) => { try { o.layers.set(0); } catch (_) {} });
+      S.clear();
+    }
+  } catch (_) {}
+}
 function _adsShipOverlaySet(on) {
   const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
   if (on && mesh) {
@@ -64872,7 +64938,9 @@ function _adsShipOverlaySet(on) {
     if (game._adsOvMesh) { try { game._adsOvMesh.traverse((o) => { o.layers.set(0); }); } catch (_) {} }
     game._adsOvMesh = null;
     game._adsOvOn = false;
+    _adsOvSyncExtras(false);   // (v39.76) the cone and the charge tubes come back to layer 0 with it
   }
+  if (!on) _adsOvSyncExtras(false);   // ...and after any other route out of the overlay
 }
 let _adsOvCam = null;
 let _adsOvWarmRT = null;
@@ -64915,6 +64983,7 @@ function _adsOverlayPrewarm() {
 function _adsOverlayRender() {
   try {
     if (!game || !game._adsOvOn || typeof renderer === 'undefined' || !renderer) return;
+    _adsOvSyncExtras(true);   // (v39.76) every frame: the charge tubes are built on the first charge
     if (!_adsOvCam) {
       _adsOvCam = new THREE.PerspectiveCamera(90, 1, 1, 100);
       _adsOvCam.layers.set(5);
@@ -65234,7 +65303,7 @@ function fireWeapon() {
   // Per-chassis muzzle flash. Visual signature so each primary reads
   // distinctly. Receivers spawn the matching flash via the fire_tracer /
   // network projectile receive paths below.
-  emitChassisMuzzleFlash(player.loadoutKey, _fwOrigin, _fwDir);
+  emitChassisMuzzleFlash(player.loadoutKey, _fwOrigin, _fwDir, true);   // (v39.77) mine: anchor the whole flash to the drawn barrel under zoom
   if (_blasterCore) _blasterCoreVolley(_fwDir);
 
   if (w.mode === 'hitscan') fireHitscan(_hitOrigin, _hitForward, w);
@@ -65491,7 +65560,7 @@ function fireHitscan(origin, dir, w) {
     const localFrom = (!game.thirdPerson && frac && typeof _computeScreenMuzzleWorld === 'function')
       ? (_computeScreenMuzzleWorld(frac.x, frac.y) || origin)
       : origin;
-    _spawnRailgunSpiral(localFrom, end, tracerColor);
+    _spawnRailgunSpiral(_adsAnchor(localFrom.clone()), end, tracerColor);   // (v39.77) ...and on the drawn barrel under zoom
   } else {
     // (v30.66) VORTEX ADS boost : the 1.75x-damage beam should READ as
     // boosted — fatter strand, color pushed toward white-hot.
@@ -65505,12 +65574,15 @@ function fireHitscan(origin, dir, w) {
     const _vCol = _vAds
       ? new THREE.Color(_vDeep).lerp(new THREE.Color(0xffffff), 0.30).getHex()
       : _vDeep;
-    spawnTracer(origin, end, _vCol, _vAds ? 1.85 : (isChaingun ? 0.55 : (_vfS ? 1.15 : 1.0)));
+    // (v39.77) the VISUAL origin only - `origin` itself still drives the raycast, the damage and
+    // `end`, so the shot lands exactly where it did; the tracer just leaves the drawn barrel.
+    const _vOrigin = _adsAnchor(origin.clone());
+    spawnTracer(_vOrigin, end, _vCol, _vAds ? 1.85 : (isChaingun ? 0.55 : (_vfS ? 1.15 : 1.0)));
     if (_vfS && typeof _spawnClassFireBurst === 'function') {
       try {
         const _vfC = (_vfS.color != null) ? _vfS.color : 0xc46cff;
         const _n1 = game.worldEffects.length;
-        _spawnClassFireBurst(origin.clone().addScaledVector(aimDir, 40), _vfC, (_vfS.shotMuzzle != null ? _vfS.shotMuzzle : 12), 0.45);
+        _spawnClassFireBurst(_vOrigin.clone().addScaledVector(aimDir, 40), _vfC, (_vfS.shotMuzzle != null ? _vfS.shotMuzzle : 12), 0.45);
         if (levelDist < w.range) _spawnClassFireBurst(end, _vfC, (_vfS.shotHit != null ? _vfS.shotHit : 20), 0.9);
         for (let _k = _n1; _k < game.worldEffects.length; _k++) game.worldEffects[_k]._grow = 1.2;
       } catch (_) {}
@@ -90750,6 +90822,16 @@ function __pmark(name) {
       big: R.big.filter(b => b[0] >= now - 5).slice(-20),
       lo: R.lo.filter(l => l[0] >= now - 5).slice(-20),
       cold: R.cold.filter(c => c[0] >= now - 5),
+      // (v39.80) ...and WHICH programs those were. The count alone made a recorded hitch
+      // un-actionable - "2 cold" cannot say whether that was new content compiling or the same
+      // material forking - and the names live only in the page that recorded them, which is
+      // usually gone by the time a mark is read. The cold watcher's own list (signature uniform +
+      // fork detection, v39.75/78) is copied in whole at mark time rather than sliced at detection
+      // time, because the two run on different clocks: the watcher polls once a second while this
+      // notices the program count on the very frame it rises, so a slice could name the wrong ones.
+      // Its `t` is seconds since the watcher armed (just after the prebake), close enough to this
+      // mark's own clock to line the two up by eye.
+      coldNames: (function () { try { return (window.__coldSeen || []).slice(-24); } catch (_) { return null; } })(),
       frames: 0, worst: 0, avgFps: 0, info: null, run: null, speed: null, round: null,
     };
     try { const all = around(now - 5, now, 0); m.frames = all.length; m.worst = all.length ? +Math.max(...all.map(a => a[1])).toFixed(1) : 0; m.avgFps = all.length ? Math.round(1000 / (all.reduce((acc, a) => acc + a[1], 0) / all.length)) : 0; } catch (_) {}

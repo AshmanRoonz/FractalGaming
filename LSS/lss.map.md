@@ -2052,3 +2052,181 @@ diagnosis that took a hand-diff of two cache keys, printed automatically.
 **Still open (pre-existing, both classes visible on 39.72):** `hub:stream` links 2 programs when
 terrain chunks stream in (2.5–3.2 s), and `renderFrame` links 1 in the hub during play (0.8–2.6 s).
 The next F8 mark on 39.75 will name them.
+
+## v39.76 — the ship's world-space attachments follow it into the ADS overlay pass
+
+Owner, third person with zoom held: "when i double zoom with puncture, and am charging, the charge
+isn't in the right spot", and "just on regular zoom in 3rd person all ships, the headlight floats too
+low under the ship, and can see a cutout of the green/red ball in the headlight pie shape at the peak
+of the pie shape".
+
+One cause for all three. `_adsShipOverlaySet` moves `player.mesh` **and its children** to layer 5, and
+`_adsOverlayRender` draws that layer with `_adsOvCam` at the UN-zoomed settings FOV. Two things that
+are visually bolted to the ship are deliberately *not* children of it:
+- `_SHIPL.coneP`, the headlight cone — a scene object posed each frame at the spot's world position
+  and aimed with the camera's forward;
+- `player._bcgTubes`, the charge tubes — world-space on purpose, so the muzzle markers' own export
+  rotation never has to be guessed (see the v39.71 note).
+
+Both sat on layer 0, so the MAIN pass drew them through the ZOOMED projection while the hull was
+drawn through the un-zoomed one. Same camera pose, different FOV, so everything off the screen centre
+is magnified away from it. Measured in the pane: the settings FOV is 120°, a held zoom narrows the
+camera to 71.6°, and Puncture's double zoom to **39.7°** — a 3x magnification difference between the
+hull and its own headlight. That is exactly "floats too low under the ship" and "the charge isn't in
+the right spot", and it scales with the zoom, which is why double zoom made it obvious.
+
+The hull leaving layer 0 also empties the main pass's depth around the ship, so the cone's apex —
+normally buried inside the hull — was drawn over whatever layer-0 sprite sits near the screen centre.
+That is the "cutout of the green/red ball at the peak of the pie shape"; it goes away once the cone is
+drawn in the overlay pass, where the hull's depth is in front of it again.
+
+`_adsOvSyncExtras(on)` puts both on layer 5 with the hull and back on layer 0 on release. It runs
+**every frame** from the top of `_adsOverlayRender`, not once at the toggle, because the charge tubes
+are built lazily on the first charge — long after the zoom engaged. The objects it touched are
+remembered in `game._adsOvExtraSet` so release restores exactly those, whatever the current list is.
+
+⚠ And the mirror keeps them: `THREE.Reflector`'s virtual camera is layer 0 only, so moving the cone to
+layer 5 would have dropped the headlight out of the water reflection exactly where v38.50 put it.
+`mesh.camera.layers.enable(5)` at the Reflector's construction keeps the cone and, as a bonus, finally
+puts the zoomed hull in the water instead of making the ship vanish from its own reflection.
+
+Pane, Puncture, third person, charging, double zoom held (camera 39.7° vs overlay 120°): both extras
+report layer mask 32 while held and mask 1 after release, the set empties, `cold 0`, no console
+errors. Not moved: the class muzzle-fire bursts, which live in `game.worldEffects` shared with every
+other ship — they will still be drawn zoomed for the brief moment they exist.
+
+## v39.77 / v39.78 — every gun fires from where the ship is drawn
+
+Owner, after v39.76: "fix all the weapons in the same way, on all the ships."
+
+v39.76's fix was to move a mesh onto the overlay layer with the hull. That works for something that
+is *entirely* the ship's own — the headlight cone, the charge tubes — but most of what a gun emits
+is not. A tracer or a beam **starts** at the muzzle and **ends** out in the world; every particle in
+the game is one shared `THREE.Points`, which cannot be split across layers; a pooled flash billboard
+has to go back to the pool on layer 0. Moving those is either impossible or would aim them somewhere
+they are not pointing.
+
+So the rest of the weapons get the same result from the other end — by **spawning at the point that
+lands where the ship is drawn**.
+
+**`_adsAnchor(v)`** (defined before every call site, so nothing can read it in its TDZ). While
+third-person zoom is engaged the hull is drawn by `_adsOvCam` at the settings FOV and everything else
+by `camera` at the zoomed FOV, from the same position and orientation. Two perspective cameras that
+differ only in FOV project a point to NDC in a fixed ratio — the magnification — so dividing the
+point's camera-space x and y by that ratio, and leaving its depth alone, makes its zoomed image land
+exactly on its un-zoomed image. Outside third-person zoom it is the identity. `window.__adsAnchor`.
+
+Verified numerically in the pane (settings FOV 120, Puncture double zoom → camera 39.7°, so 3x):
+
+| point | hull's camera | drawn before | drawn after |
+|---|---|---|---|
+| muzzle node 0 | 0.0243, −0.1230 | 0.1169, −0.5902 | 0.0243, −0.1230 |
+| muzzle node 1 | −0.0249, −0.1228 | −0.1195, −0.5892 | −0.0249, −0.1228 |
+| under the hull | 0.0514, −0.2119 | 0.2467, −1.0170 | 0.0514, −0.2119 |
+
+Exact to four decimals, and note the third row: a point the hull draws a fifth of the way down the
+screen was being drawn **off the bottom edge**. That is the owner's "floats too low under the ship".
+
+Where it is applied — one anchor per emitter, never on anything that decides a hit:
+- `emitChassisMuzzleFlash(key, pos, dir, mine)` — a single anchor at the top covers the flare
+  billboard, the muzzle light, the universal sparks, Pyro's flame tongues, Slayer's kick sparks and
+  Puncture's barrel lightning, for every ship. `fireWeapon` passes `mine: true`; peers and bots do
+  not, so their flashes are untouched.
+- `_classMuzzleFire(key, pos, dir, mine)` — now *told* whose shot it is instead of guessing by a 20 u
+  distance test, which an anchored `pos` could cross. `mine` also picks the 40 u / 14 u stand-off.
+- `fireHitscan` — a separate `_vOrigin` for the tracer and the Vortex barrel flame. ⚠ `origin` itself
+  still drives the raycast, the damage and `end`, so **the shot lands exactly where it did**.
+- `_spawnRailgunSpiral` — Puncture's spiral leaves the drawn barrel (v39.71 got third person right;
+  this is the zoom case on top).
+- `_vortexGunPair` — both Vortex beam paths (Mega Laser core, Laser ability) read their barrels here,
+  so one anchor moves the arms, the glow cards that hide their open ends and the barrel flames
+  **together**: the seam between them can never open. The stem and the outbound beam are deliberately
+  left alone — they are world geometry and still end where you are aiming.
+- `_chargeFireTick` — the fire that fills the growing glow shape. The tube itself rides the overlay
+  layer from v39.76; an anchored point and a layer-moved mesh land on the same pixels by construction,
+  so the two agree.
+
+Pane: Vortex (gun pair anchored, measured 41 u toward the view axis; muzzle flame on the hull),
+Puncture (charge glow on the barrel at 4.8x zoom, tube layer mask 32), Blaster (clean). `cold 0`,
+144 fps, no console errors, and the anchor is bit-exact identity with the overlay off.
+
+**v39.78 — the cold-link namer knows the whole parameter block.** v39.75 only named the key's last 20
+slots, so a real fork caught on the very next run printed `physical [FORK: idx-48]`. three.js pushes a
+fixed-length parameter list, so a parameter's distance from the END of the key is the same for a
+built-in shader (one leading id) and a ShaderMaterial (two) — checked against live keys at
+`numDirLights` 20, `numPointLights` 19, `numSpotLights` 18, `numHemiLights` 16, `numDirLightShadows`
+14, `toneMapping` 8 and `outputColorSpace` 51. The table now runs 1–51, and that fork reads `mapUv`:
+two `physical` programs differing only in the base map's UV channel, linked at 7 s during the load,
+not in play. Pre-existing, low priority, and now legible.
+
+## v39.79 / v39.80 — the water stops erasing the effects in front of it
+
+Owner: "a lot of the effects are not working over top the water, they are cancelled out, like the
+weapon trails and the shields... (which was fixed just recently about the water)". Correct — v39.73
+caused it.
+
+v39.73 drew the near-field sheet in a **second pass after the world** so it could sample what was
+behind it. Tracers, weapon trails, shield bubbles and muzzle flames are transparent and do not write
+depth, so a sheet drawn after them, depth-testing only against the opaque world, simply painted over
+them. The v39.73 alpha push (`aGraze` to 0.99 while refracting) made it total.
+
+**v39.79 puts the sheet back in the main transparent pass** at `renderOrder -1` — first among the
+transparents, with every effect compositing on top of it exactly as before v39.73 — and takes the
+refraction source at the one moment that is both late enough and early enough: **its own
+`onBeforeRender`**. three.js finishes the whole opaque pass before it starts the transparent one, so
+at that instant the target holds the solid world and nothing else. That is a *better* source than the
+second pass had (which also swept every transparent effect into the refraction), and it costs one
+framebuffer copy instead of a second render-list walk and a draw.
+
+- `_waterRefractBind(rnd, scn, cam)` arms refraction only when the current target IS `postFX.rtScene`
+  and that target has no MSAA; `onAfterRender` disarms. A bare render (XR, potato, the picker) or the
+  mirror leaves `uRefract` 0 and gets the plain tinted body, which is what each of those wants.
+- ⚠ **MSAA (strict ULTRA only) has no single-sample buffer to copy from mid-render** — the resolve to
+  `rt.texture` happens at the END of `renderer.render()`, so `copyTexSubImage2D` there is invalid.
+  Those frames keep `uRefract` 0 and get the v39.72 tinted body. The mirror, the caustics, the foam
+  and the Kelvin wake are unchanged.
+- The layer-6 hold-back, `_waterRefractPass`, `_wrCam` and the per-pass light sweep are all gone.
+  `_WATER_LAYER` is kept as a note, and the lights keep layer 6 — it costs nothing and the next
+  layer-restricted pass will need it (see the v39.74 note at the combat lights: a pass layer must be
+  on EVERY light or the material forks a zero-light program, cold, in play).
+Pane: effects visible over the water again, refraction still reading through to the lake bed,
+`cold 0`, 141.6 fps.
+
+**v39.80 — a recorded hitch now names the shaders that linked.** The mark stored `cold: [[t, count]]`
+and nothing else, so "2 cold" could not say whether that was new content compiling or the same
+material forking, and the names live only in the page that recorded them, which is usually gone by
+the time a mark is read. The mark now carries `coldNames`, the cold watcher's own list (signature
+uniform + fork detection, v39.75/78), copied in whole **at mark time** rather than sliced at
+detection time — the two run on different clocks (the watcher polls once a second, the recorder
+notices the program count on the frame it rises), so a slice could name the wrong ones. Its `t` is
+seconds since the watcher armed, close enough to the mark's clock to line up by eye.
+
+### What the owner's two 39.78 marks actually said
+
+| at | worst | section | cold |
+|---|---|---|---|
+| 55.78 s ("laggy startup") | 34.8 ms | `renderFrame` 3.3 ms | 0 |
+| 144.17 s ("third→first person") | 514.1 ms | `hub:stream` 510.2 ms | 2 |
+
+The startup mark holds **one 35 ms frame** and nothing else — avg 122 fps over 610 frames, no shader
+links. The recorder's ring is ~5 s, and it arms after the prebake, so a slow *load* is invisible to
+it. The load cost is on the prebake line instead, and on the owner's machine it is large:
+
+```
+[prebake] freeflight/hub_overworld 17052ms ... [clip 8, terrain 480, arena 0, fx 2806, ent 1090,
+          mon 0, carrier 1423, gpu 11194, drain 46]
+```
+
+**17.0 s, 11.2 s of it the GPU warm stage** — against 6.4 s / 3.2 s in the pane. The difference is
+resolution: the owner runs MEGA, so `postFX.rtScene` is 4608x2592 (11.9 MP) against the pane's
+1070x688 (0.74 MP), sixteen times the fill for warm passes that only need to LINK programs. Program
+cache keys do not depend on viewport size, so those passes could run in a small scissored rectangle
+of the same target and link exactly the same programs — the trick `_adsOverlayPrewarm` already uses
+with its 8x8 target. **Open, not done: shrink the prebake's GPU-warm viewport.**
+
+The view-switch hitch is the `hub:stream` + 2-cold-links pattern that predates all of this (it is in
+the 39.72 marks too). The fork the namer catches in the pane and on the owner's machine is
+`physical [FORK: customCacheKey]` x2 — two hull programs identical except for `ghostHull` against the
+default key, i.e. the seat-shell variant and the painted variant of the same material, one of them
+not warmed. `_ghostPinWarm` already exists for exactly this and clearly is not covering every case.
+**Open: find which hull material reaches the frame in the flavour the pin did not build.**
