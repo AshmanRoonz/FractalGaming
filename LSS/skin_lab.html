@@ -128,6 +128,7 @@
     <div class="row"><label>sat</label><input type="range" id="f_sat" min="0" max="1" step="0.01" value="0.32"><output></output></div>
     <div class="row"><label>lift</label><input type="range" id="f_lift" min="0" max="1" step="0.01" value="0.34"><output></output></div>
     <div class="row"><label>mul</label><input type="range" id="f_mul" min="0.2" max="2" step="0.01" value="1.14"><output></output></div>
+    <div class="row"><label>hueCycle</label><input type="range" id="f_hueCycle" min="0" max="180" step="1" value="0"><output></output></div>
   </fieldset>
 
   <fieldset>
@@ -471,7 +472,7 @@ addEventListener('resize', resize);
 
 // ── UI ───────────────────────────────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id);
-const FIELDS = ['hue','hueMix','sat','lift','mul','patScale','patSoft','patLift','patGain','patMix',
+const FIELDS = ['hue','hueMix','sat','lift','mul','hueCycle','patScale','patSoft','patLift','patGain','patMix',
                 'metalness','roughness','env'];
 const hex = s => parseInt(s.replace('#',''), 16);
 const toHex = n => '#' + (n >>> 0).toString(16).padStart(6, '0');
@@ -484,6 +485,7 @@ function readSkin() {
     swatch: $('f_swatch').value,
     desc: $('f_desc').value.trim(),
     hue: +$('f_hue').value, hueMix: +$('f_hueMix').value, sat: +$('f_sat').value,
+    hueCycle: +$('f_hueCycle').value,
     mul: +$('f_mul').value, lift: +$('f_lift').value,
     metalness: +$('f_metalness').value, roughness: +$('f_roughness').value,
     envMapIntensity: +$('f_env').value, emissive: hex($('f_emissive').value),
@@ -509,9 +511,13 @@ function exportText(sk) {
   // uSkinHue/Mix/Sat/Lift regardless of the pattern, and the pattern shades against the already
   // hue-processed albedo - so a hue you dialled in here is load-bearing even on a camo. The stock
   // camo presets simply leave it at its defaults, which is why the table looks like it is either/or.
-  const hueActive = (sk.hue !== 0) || (sk.hueMix !== 1) || (sk.sat !== 1) || (sk.lift !== 0) || (sk.mul !== 1);
+  const hueActive = (sk.hue !== 0) || (sk.hueMix !== 1) || (sk.sat !== 1) || (sk.lift !== 0) || (sk.mul !== 1) || sk.hueCycle;
   if (hueActive) {
-    L.push('    hue: ' + sk.hue + ', hueMix: ' + sk.hueMix + ', sat: ' + sk.sat + ', mul: ' + sk.mul + ', lift: ' + sk.lift + ',');
+    // hueCycle is DEGREES PER SECOND and `hue` is the phase it starts from, so a paused cycle and a
+    // static livery are the same entry. It only ever writes uSkinHue, which keeps it inside the rule
+    // that no field in this table may fork a shader program.
+    L.push('    hue: ' + sk.hue + (sk.hueCycle ? ', hueCycle: ' + sk.hueCycle : '')
+      + ', hueMix: ' + sk.hueMix + ', sat: ' + sk.sat + ', mul: ' + sk.mul + ', lift: ' + sk.lift + ',');
   }
   if (sk.pattern) {
     L.push("    pattern: '" + sk.pattern + "', c0: " + h(sk.c0) + ', c1: ' + h(sk.c1) + ', c2: ' + h(sk.c2) + ',');
@@ -548,6 +554,7 @@ function fillFrom(sk) {
   $('f_sat').value = sk.sat != null ? sk.sat : 0.32;
   $('f_lift').value = sk.lift != null ? sk.lift : 0.34;
   $('f_mul').value = sk.mul != null ? sk.mul : 1;
+  $('f_hueCycle').value = sk.hueCycle != null ? sk.hueCycle : 0;
   $('f_pattern').value = sk.pattern || 'none';
   $('f_c0').value = toHex(sk.c0 != null ? sk.c0 : 0x939aa8);
   $('f_c1').value = toHex(sk.c1 != null ? sk.c1 : 0x45484f);
@@ -597,9 +604,29 @@ function fillFrom(sk) {
     catch (_) { $('out').select(); say('press Ctrl+C'); }
   };
 
+  // A small handle for driving the lab from the console (and for checking that a change actually
+  // reached the uniforms rather than just the sliders).
+  window.__lab = {
+    get root() { return shipRoot; },
+    get mats() { return shipRoot ? hullMats(shipRoot) : []; },
+    get hue() { const m = shipRoot && hullMats(shipRoot)[0]; const u = m && m.userData && m.userData._skinHueU; return u ? u.uSkinHue.value : null; },
+    skin: () => readSkin(),
+    apply: () => refresh(),
+  };
   (function tick() {
     requestAnimationFrame(tick);
     if ($('spin').value === '1') holder.rotation.y += 0.0035;
+    // the cycling livery, driven the same way the game drives it (_skinHueCycleTick): degrees per
+    // second on the wheel, phase-anchored to `hue`, one uniform write per material per frame.
+    const _hc = +$('f_hueCycle').value;
+    if (_hc && shipRoot) {
+      const base = (+$('f_hue').value % 360) / 360, t = performance.now() / 1000;
+      const v = ((base + (_hc / 360) * t) % 1 + 1) % 1;
+      for (const m of hullMats(shipRoot)) {
+        const u = m.userData && m.userData._skinHueU;
+        if (u) u.uSkinHue.value = v;
+      }
+    }
     controls.update();
     renderer.render(scene, camera);
   })();

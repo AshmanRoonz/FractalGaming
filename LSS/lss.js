@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.03';
+const LSS_BUILD = '40.06';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -236,6 +236,38 @@ const SHIP_SKINS = {
     pattern: 'organic', c0: 0x7a4620, c1: 0xd89a52, c2: 0x2f7060,
     patScale: 3.4, patBands: [0.40, 0.62], patSoft: 0.055, patLift: 0.66, patGain: 6.5,
     metalness: 0.40, roughness: 0.46, envMapIntensity: 0.24, emissive: 0x080200,
+  },
+  purpletiger: {
+    id: 'purpletiger', name: 'PURPLE TIGER', swatch: '#3308aa',
+    desc: 'Purple tiger',
+    hue: 191, hueMix: 0.26, sat: 0.75, mul: 1, lift: 0.4,
+    pattern: 'tiger', c0: 0x5939a2, c1: 0x45484f, c2: 0x141519,
+    patScale: 10.9, patBands: [0.55, 0.75], patSoft: 0.012, patLift: 0.04, patGain: 6.9, patMix: 0.67,
+    metalness: 0.49, roughness: 0.66, envMapIntensity: 0.2, emissive: 0x0a0510,
+  },
+  chromehex: {
+    id: 'chromehex', name: 'HEX ALLOY', swatch: '#cfd8e6',
+    desc: 'Hex-plated alloy. Near-monochrome; the seams catch the light, not the paint.',
+    hue: 163, hueMix: 0.8, sat: 0.58, mul: 2, lift: 0,
+    pattern: 'hex', c0: 0x000000, c1: 0x8a8a8a, c2: 0x4f4f4f,
+    patScale: 7.7, patBands: [0.71, 0.8], patSoft: 0.073, patLift: 0.5, patGain: 2.7,
+    metalness: 0, roughness: 0.26, envMapIntensity: 0.82, emissive: 0x0c1420,
+  },
+  mint: {
+    id: 'mint', name: 'MINTY', swatch: '#a86a34',
+    desc: 'metallic green and silver',
+    hue: 42, hueMix: 1, sat: 0.32, mul: 1, lift: 0.34,
+    pattern: 'organic', c0: 0x00ff11, c1: 0x000000, c2: 0xf2f2f2,
+    patScale: 20, patBands: [0.51, 0.7], patSoft: 0, patLift: 0.61, patGain: 14,
+    metalness: 1, roughness: 0.28, envMapIntensity: 0.29, emissive: 0x080200,
+  },
+  hueshift: {
+    id: 'hueshift', name: 'hueshifter', swatch: '#455778',
+    desc: 'Standard fleet issue. Untinted hull, matte service finish.',
+    hue: 360, hueCycle: 24, hueMix: 0.8, sat: 0.7, mul: 2, lift: 0,
+    pattern: 'hex', c0: 0x939aa8, c1: 0x45484f, c2: 0x141519,
+    patScale: 20, patBands: [0.73, 0.51], patSoft: 0, patLift: 0, patGain: 2.7, patMix: 0.3,
+    metalness: 1, roughness: 0.45, envMapIntensity: 0, emissive: 0x000000,
   },
   signal: {
     id: 'signal', name: 'SIGNAL SPLINTER', swatch: '#ff8a1e', swatch2: '#14151a',
@@ -27358,6 +27390,7 @@ function _animateShipPreview() {
       try { document.body.classList.toggle('lss-picker-3d', _owns); } catch (_) {}
     }
     _spinShipPreview();
+    if (typeof _skinHueCycleTick === 'function') _skinHueCycleTick();   // (v40.04) the picker draws its own frames
     if (_owns) _lssRenderPicker();
     s.animId = requestAnimationFrame(_animateShipPreview);
     return;
@@ -27786,6 +27819,17 @@ const _SKIN_PAT_VERT = [
 ].join('\n');
 
 const _SKIN_PAT_ID = { none: 0, splinter: 1, digital: 2, organic: 3, hex: 4, tiger: 5 };
+const _skinCycle = new Set();
+function _skinHueCycleTick() {
+  if (!_skinCycle.size) return;
+  const t = ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) / 1000;
+  _skinCycle.forEach((hu) => {
+    const c = hu._cyc;
+    if (!c) { _skinCycle.delete(hu); return; }
+    hu.uSkinHue.value = ((c.base + c.rate * t) % 1 + 1) % 1;
+  });
+}
+if (typeof window !== 'undefined') window.__skinCycle = _skinCycle;
 
 function _skinPatchHueShader(m) {
   const ud = m.userData || (m.userData = {});
@@ -27909,6 +27953,7 @@ function _applyShipSkin(root, skinId) {
     const hu = _skinPatchHueShader(m);
     if (sk.restore) {
       hu.uSkinHue.value = 0; hu.uSkinMix.value = 0; hu.uSkinSat.value = 1; hu.uSkinLift.value = 0;
+      hu._cyc = null; _skinCycle.delete(hu);   // (v40.04) FACTORY stops the cycle with everything else
       hu.uSkinPat.value = 0; hu.uSkinPatMix.value = 0;
       if (m.color) m.color.copy(b.color);
       if (m.emissive) m.emissive.copy(b.emissive);
@@ -27918,6 +27963,8 @@ function _applyShipSkin(root, skinId) {
       m.envMapIntensity = b.envMapIntensity;
     } else {
       hu.uSkinHue.value = ((sk.hue || 0) % 360) / 360;
+      if (sk.hueCycle) { hu._cyc = { base: hu.uSkinHue.value, rate: sk.hueCycle / 360 }; _skinCycle.add(hu); }
+      else { hu._cyc = null; _skinCycle.delete(hu); }
       hu.uSkinMix.value = (sk.hueMix != null) ? sk.hueMix : 1;
       hu.uSkinSat.value = (sk.sat != null) ? sk.sat : 1;
       hu.uSkinLift.value = (sk.lift != null) ? sk.lift : 0;
@@ -65254,6 +65301,7 @@ function gameLoop(timestamp) {
   }
 
   if (typeof _layeredFXTick === 'function') _layeredFXTick(game.time);
+  if (typeof _skinHueCycleTick === 'function') _skinHueCycleTick();   // (v40.04) cycling liveries
 
   if (typeof updateGasLighting === 'function') updateGasLighting();
   if (typeof updateBCSLighting === 'function') updateBCSLighting();

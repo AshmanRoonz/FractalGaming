@@ -3034,3 +3034,77 @@ so every write the mirror pass makes is recorded:
 | `__water.reflWalls = true` | none | none | untouched — full strength in the mirror |
 
 0.36 is 0.8 x the 0.45 dim, and the material comes back at 0.8 every frame. `cold 0` throughout.
+
+## v40.04 — four owner-authored skins, and a livery whose hue never settles
+
+The four entries designed in `skin_lab.html` are in `SHIP_SKINS` as written: **PURPLE TIGER**,
+**HEX ALLOY** (`chromehex`), **MINTY** and **HUESHIFTER**.
+
+**`hueCycle`, a new field: DEGREES PER SECOND on the hue wheel.** 24 walks the whole spectrum in
+fifteen seconds; `hue` stays the phase the cycle starts from, so a paused cycle and a static livery
+are the same entry. It writes `uSkinHue` and nothing else, which keeps it inside the rule that governs
+this whole table — every field is a uniform, none appear in three.js' program cache key, and a livery
+can therefore never fork a shader or bring back the first-sight compile hitch.
+
+- `_skinCycle` holds uniform BLOCKS (one per skinned material, created once by `_skinPatchHueShader`),
+  not materials. `_applyShipSkin` adds on a skin with `hueCycle` and removes on any other, FACTORY
+  included. A block whose material is later disposed keeps taking one float write, which is harmless
+  and bounded by the number of hull materials that have ever worn a cycling skin.
+- `_skinHueCycleTick()` runs beside `_layeredFXTick` in `gameLoop` **and** in the ship picker's own
+  rAF loop, so the livery keeps turning while you are choosing a ship and between rounds. It uses
+  `performance.now()`, not `game.time`, precisely because the game clock is not advancing there.
+- The lab has the same dial and animates it the same way, and its export round-trips `hueCycle`.
+
+⚠ **HUESHIFTER as authored will not visibly cycle**, and this is a property of its own numbers, not of
+the feature. `sat: 0` means the hue has nothing to colour: `lssSkinHue` ends on
+`val * mix(vec3(1.0), hueColour, sat)`, so at zero saturation every hue renders the same grey.
+`hueMix: 0.22` then applies only a fifth of the shift, and `patMix: 0.55` lays fixed hex colours over
+the result. Verified both ways in the lab — at the authored values two frames a second apart are
+pixel-identical; at `sat 0.85 / hueMix 1 / patMix 0` the hull swings teal → green in the same
+interval, with the uniform reading 0.656 → 0.469 → 0.471. The dials that make it read are **sat above
+zero** first, then **hueMix**, then lowering **patMix**.
+
+The lab also gained `window.__lab` — `{ root, mats, hue, skin(), apply() }` — for checking that a
+change reached the uniforms rather than just the sliders. That is how the above was measured.
+
+### v40.05 — hueshifter updated, and the measurement behind why it looks static
+
+The entry now carries the owner's values verbatim (`hue: 360`, name `hueshifter`, the fleet-issue
+desc). `hue` is only the phase the cycle starts from, so 360 and 0 are the same starting point.
+
+**The cycle is a continuous wrap, which is what was asked for.** `uSkinHue = ((base + rate*t) mod 1)`
+runs 0 → 360 → straight back to 0 forever and never reverses. Verified in the running game, not just
+the lab: with the skin equipped, `window.__skinCycle` holds **24** uniform blocks, `rate` reads
+0.0667 turns/sec (= 24 deg/s), and sampling twice gives 55.9° → 58.8°.
+
+**It is invisible at `sat: 0`, and that is arithmetic, not a bug.** `lssSkinHue` ends on
+
+```glsl
+return val * mix(vec3(1.0), clamp(p - 1.0, 0.0, 1.0), sat);
+```
+
+so saturation is the gate the hue has to pass through — at zero, every hue on the wheel renders the
+same grey. `hueMix: 0.22` then applies only a fifth of the shift, and `patMix: 0.55` lays the fixed
+hex colours over 55% of what is left. Tested four ways, all with the uniform confirmed cycling:
+
+| hull | settings | two frames a second apart |
+|---|---|---|
+| VORTEX (near-black) | as authored | identical |
+| BLASTER (bright) | as authored | identical |
+| VORTEX | `sat 0.85, hueMix 1, patMix 0` | teal → green |
+| in game, VORTEX | as authored | identical |
+
+The dials, in the order that matters: **`sat` above zero** first (it is the gate), then **`hueMix`**
+toward 1, then **`patMix`** down so the fixed camo stops covering the result. Live, without a rebuild:
+
+```js
+window.__skinTune('hueshift', { sat: 0.7, hueMix: 0.8, patMix: 0.3 })
+```
+
+### v40.06 — hueshifter's tuned values baked
+
+`sat: 0.7, hueMix: 0.8, patMix: 0.3`, arrived at live through `window.__skinTune` and baked as
+authored. Everything else in the entry is unchanged. In game with the livery equipped: 24 uniform
+blocks in `_skinCycle`, the hue reading 92.5° then 322.4° then 323.4° across samples (wrapping, never
+reversing), the hull visibly swinging through purple and magenta, `cold 0`, and no frame cost worth
+measuring — the whole feature is one float written per hull material per frame.
