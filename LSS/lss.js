@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.53';
+const LSS_BUILD = '39.69';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -611,6 +611,7 @@ const input = {
   vrPerfMode: 'standard',
   vrStripFx: false,
   showFps: false,
+  keepWarm: true,   // (v39.63) GPU keep-warm idle load (anti-stutter on power-capped laptops)
   cockpit3d: true,
   hullGlow: true,
   cockpitVR: true,     // (v37.67) ON by default: the ghost shell IS the VR seat view now
@@ -3301,8 +3302,9 @@ const EndlessMode = {
             if (tl > 1600) { const k = 1600 / tl; nox *= k; noy *= k; noz *= k; }   // TETHER
             const nx = b.x + nox, nz = b.z + noz; let ny = b.y + noy;
             try {
-              const gy = _stGroundYCarved(nx, nz, T) + 170, cv = _stCeilYCarved(nx, nz, T) - 170;
-              if (cv > gy) ny = ny < gy ? gy : (ny > cv ? cv : ny);   // carved-gap clamp
+              const _mq = _bendToFlat(nx, ny, nz);   // (v39.59) bend: clamp in flat space, keep the world x/z
+              const gy = _stGroundYCarved(_mq.x, _mq.z, T) + 170, cv = _stCeilYCarved(_mq.x, _mq.z, T) - 170;
+              if (cv > gy) { const _fy = _mq.y < gy ? gy : (_mq.y > cv ? cv : _mq.y); if (_fy !== _mq.y) ny = _bendToWorld(_mq.x, _fy, _mq.z).y; }   // carved-gap clamp
               const cy0 = b.y + poy;
               if (worldSDF(nx, ny, nz) < -60) { b.ox = nox; b.oy = ny - b.y; b.oz = noz; }
               else if (worldSDF(nx, cy0, nz) < -60) { b.ox = nox; b.oz = noz; }   // slide: hold height
@@ -3514,10 +3516,14 @@ const EndlessMode = {
           const bt = run.gen.cos();
           const bx = bs.a.x + (bs.b.x - bs.a.x) * bt + (run.gen.cos() - 0.5) * 900;
           const bz = bs.a.z + (bs.b.z - bs.a.z) * bt + (run.gen.cos() - 0.5) * 900;
-          const cy = _stCeilYCarved(bx, bz, T), gy = _stGroundYCarved(bx, bz, T);
+          const _lq = _bendToFlat(bx, bs.a.y + (bs.b.y - bs.a.y) * bt, bz);
+          const cy = _stCeilYCarved(_lq.x, _lq.z, T), gy = _stGroundYCarved(_lq.x, _lq.z, T);
           if (cy < 1e8 && cy - gy > 200 && typeof spawnLightningBolt === 'function') {
-            spawnLightningBolt(new THREE.Vector3(bx, cy - 40, bz),
-              new THREE.Vector3(bx + (run.gen.cos() - 0.5) * 300, gy + 30, bz + (run.gen.cos() - 0.5) * 300),
+            const _la = _bendToWorld(_lq.x, cy - 40, _lq.z);
+            const _jx = (run.gen.cos() - 0.5) * 300, _jz = (run.gen.cos() - 0.5) * 300;
+            const _lb = _bendToWorld(_lq.x + _jx, gy + 30, _lq.z + _jz);
+            spawnLightningBolt(new THREE.Vector3(_la.x, _la.y, _la.z),
+              new THREE.Vector3(_lb.x, _lb.y, _lb.z),
               0x88bbff, 0.35, 4, 3);
           }
         } catch (_) {}
@@ -3537,10 +3543,12 @@ const EndlessMode = {
         const x = s.a.x + (s.b.x - s.a.x) * t + (run.gen.cos() - 0.5) * 600;
         const z = s.a.z + (s.b.z - s.a.z) * t + (run.gen.cos() - 0.5) * 600;
         try {
-          const cy = _stCeilYCarved(x, z, T);
+          const _rq = _bendToFlat(x, s.a.y + (s.b.y - s.a.y) * t, z);   // (v39.59) bend: flat image of the spine point
+          const cy = _stCeilYCarved(_rq.x, _rq.z, T);
           if (cy < 1e8 && cy > T.YMID + (T.YCEIL - T.YMID) * 0.55) {
             slot.life = 9;
-            slot.mesh.position.set(x, cy - 620, z);
+            const _rw = _bendToWorld(_rq.x, cy - 620, _rq.z);
+            slot.mesh.position.set(_rw.x, _rw.y, _rw.z);
             slot.mesh.rotation.z = (run.gen.cos() - 0.5) * 0.18;
             slot.mesh.visible = true;
           }
@@ -4067,9 +4075,114 @@ function _campTuneHoardBot(bot, shipKey) {
   bot.maxHealth = Math.round((bot.maxHealth || 1000) * 0.5); bot.health = bot.maxHealth;
   bot.maxShield = Math.round((bot.maxShield || 0) * 0.5);   bot.shield = bot.maxShield;
 }
+function _endlessLaneKeep(bot, dt, q, p, v) {
+  const run = game.endlessRun; const segs = run && run.segs; if (!segs || !segs.length) return;
+  const pp = player && player.position; if (!pp) return;
+  const near = (x, z, o) => {
+    let best = Infinity, bi = -1, bt = 0;
+    for (let i = 0; i < segs.length; i++) {
+      const c = segs[i].cyl; if (!c) continue;
+      const ex = c.bx - c.ax, ez = c.bz - c.az; const l2 = ex * ex + ez * ez || 1;
+      let t = ((x - c.ax) * ex + (z - c.az) * ez) / l2; t = t < 0 ? 0 : (t > 1 ? 1 : t);
+      const d = Math.hypot(x - (c.ax + ex * t), z - (c.az + ez * t));
+      if (d < best) { best = d; bi = i; bt = t; }
+    }
+    o.d = best; o.i = bi; o.t = bt; return o;
+  };
+  const K = bot._lane || (bot._lane = { b: { d: 0, i: -1, t: 0 }, p: { d: 0, i: -1, t: 0 }, outT: 0, pq: { x: 0, y: 0, z: 0 }, w: { x: 0, y: 0, z: 0 }, tick: 0 });
+  K.tick -= dt;
+  if (K.tick <= 0) {   // 10 Hz: two axis scans per bot
+    K.tick = 0.1;
+    near(q.x, q.z, K.b);
+    const pq = _bendToFlat(pp.x, pp.y, pp.z, K.pq);
+    near(pq.x, pq.z, K.p);
+  }
+  const B = K.b; if (B.i < 0 || !segs[B.i] || !segs[B.i].cyl) return;
+  const c = segs[B.i].cyl;
+  const r = c.r || 400;
+  let inHall = false;
+  for (let i = 0; i < segs.length && !inHall; i++) { const sp = segs[i].sph; if (sp && Math.hypot(q.x - sp.cx, q.y - sp.cy, q.z - sp.cz) < sp.r * 0.9) inHall = true; }
+  const out = inHall ? 0 : (B.d - r * 0.85);
+  const far = Math.hypot(pp.x - p.x, pp.y - p.y, pp.z - p.z) > 2600;
+  if (out <= 0 && !far) { K.outT = 0; return; }   // in the lane and close: the combat AI owns the ship
+  const ex = c.bx - c.ax, ey = c.by - c.ay, ez = c.bz - c.az;
+  let tx, ty, tz;
+  if (out > 0) { tx = c.ax + ex * B.t; ty = c.ay + ey * B.t; tz = c.az + ez * B.t; }
+  else {
+    const P = K.p; let ti = B.i, tt = B.t;
+    const step = 900 / (Math.hypot(ex, ez) || 1);
+    const ahead = (P.i > B.i) || (P.i === B.i && P.t > B.t);
+    if (ahead) { tt = B.t + step; if (tt > 1) { if (ti + 1 < segs.length && segs[ti + 1].cyl) { ti++; tt = Math.min(1, tt - 1); } else tt = 1; } }
+    else { tt = B.t - step; if (tt < 0) { if (ti - 1 >= 0 && segs[ti - 1].cyl) { ti--; tt = Math.max(0, 1 + tt); } else tt = 0; } }
+    const cc = segs[ti].cyl; tx = cc.ax + (cc.bx - cc.ax) * tt; ty = cc.ay + (cc.by - cc.ay) * tt; tz = cc.az + (cc.bz - cc.az) * tt;
+  }
+  const w = _bendToWorld(tx, ty, tz, K.w);
+  let dx = w.x - p.x, dy = w.y - p.y, dz = w.z - p.z; const dl = Math.hypot(dx, dy, dz);
+  if (dl > 1) {
+    dx /= dl; dy /= dl; dz /= dl;
+    const fs = (bot.chassis && bot.chassis.flightSpeed) || 380;
+    const want = out > 0 ? Math.min(fs, 140 + out * 0.9) : fs * 0.85;
+    const have = v.x * dx + v.y * dy + v.z * dz;
+    const diff = want - have;
+    const k = diff > 0 ? Math.min(diff, ((bot.chassis && bot.chassis.acceleration) || 900) * dt * (out > 0 ? 1.2 : 1.0)) : 0;
+    v.x += dx * k; v.y += dy * k; v.z += dz * k;
+  }
+  if (out > 200 && Math.hypot(v.x, v.y, v.z) < 60) K.outT += dt; else if (out <= 0) K.outT = 0;
+  if (K.outT > 4) {   // rescue: crawling in the crack outside the lane for 4 s -> back on the axis
+    K.outT = 0;
+    const w2 = _bendToWorld(c.ax + ex * B.t, c.ay + ey * B.t, c.az + ez * B.t, K.w);
+    p.set(w2.x, w2.y, w2.z); v.set(0, 0, 0);
+    if (bot.mesh) bot.mesh.position.copy(p);
+    if (bot._tnav) { bot._tnav.x = 1e9; bot._tnav.z = 1e9; }
+    try { window.__laneRescues = (window.__laneRescues || 0) + 1; } catch (_) {}
+  }
+}
+function _campHoardTerrainNavBent(bot, dt, T) {
+  const p = bot.position, v = bot.velocity;
+  const LA = 1100;
+  const vl = Math.hypot(v.x, v.y, v.z);
+  const dx = vl > 1 ? v.x / vl : 0, dy = vl > 1 ? v.y / vl : 0, dz = vl > 1 ? v.z / vl : 1;
+  const _tc = bot._tnav || (bot._tnav = { x: 1e9, z: 1e9, hx: 0, hz: 0, fc: 0, cc: 0, fa: 0, ca: 0 });
+  const q = _bendToFlat(p.x, p.y, p.z, _tc.q || (_tc.q = { x: 0, y: 0, z: 0 }));
+  const _tdx = q.x - _tc.x, _tdz = q.z - _tc.z;
+  if (_tdx * _tdx + _tdz * _tdz > 1600 || (dx * _tc.hx + dz * _tc.hz) < 0.985) {
+    _tc.x = q.x; _tc.z = q.z; _tc.hx = dx; _tc.hz = dz;
+    const qa = _bendToFlat(p.x + dx * LA, p.y + dy * LA, p.z + dz * LA, _tc.qa || (_tc.qa = { x: 0, y: 0, z: 0 }));
+    _tc.fc = _stGroundYCarved(q.x, q.z, T); _tc.cc = _stCeilYCarved(q.x, q.z, T);
+    _tc.fa = _stGroundYCarved(qa.x, qa.z, T); _tc.ca = _stCeilYCarved(qa.x, qa.z, T);
+  }
+  const fc = _tc.fc, cc = _tc.cc, fa = _tc.fa, ca = _tc.ca;
+  const gapNow = Math.max(40, cc - fc);
+  const safe = Math.min(80, gapNow * 0.3);
+  const loA = fc + safe, hiA = cc - safe;
+  const midNow = (fc + cc) * 0.5;
+  const midAhead = (Math.max(fc, fa) + Math.min(cc, ca)) * 0.5;
+  const tgt = bot.combatTarget || bot.aiTarget;
+  let tY = midNow;
+  if (tgt && tgt.position) { const tq = _bendToFlat(tgt.position.x, tgt.position.y, tgt.position.z, _tc.tq || (_tc.tq = { x: 0, y: 0, z: 0 })); tY = tq.y; }
+  let desiredY = midNow * 0.55 + midAhead * 0.45;
+  desiredY = desiredY * 0.75 + Math.max(loA, Math.min(hiA, tY)) * 0.25;
+  desiredY = Math.max(loA, Math.min(hiA, desiredY));
+  const w = _bendToWorld(q.x, desiredY, q.z, _tc.w || (_tc.w = { x: 0, y: 0, z: 0 }));
+  let nx = w.x - p.x, ny = w.y - p.y, nz = w.z - p.z;
+  const nl = Math.hypot(nx, ny, nz);
+  const vsp = (bot.chassis && bot.chassis.verticalSpeed) || 300;
+  if (nl > 0.5) {
+    nx /= nl; ny /= nl; nz /= nl;
+    const want = Math.min(vsp, nl * 1.3);           // P-on-position along the tube's up axis (the flat navigator's controller)
+    const have = v.x * nx + v.y * ny + v.z * nz;
+    const k = Math.min(1, dt * 3.5) * (want - have);
+    v.x += nx * k; v.y += ny * k; v.z += nz * k;
+  }
+  let fy = q.y, clamped = false;
+  if (fy < fc + 10) { fy = fc + 10; clamped = true; } else if (fy > cc - 10) { fy = cc - 10; clamped = true; }
+  if (clamped) { const w2 = _bendToWorld(q.x, fy, q.z, _tc.w2 || (_tc.w2 = { x: 0, y: 0, z: 0 })); p.set(w2.x, w2.y, w2.z); }
+  if (LSS.MODE === 'endless') { try { _endlessLaneKeep(bot, dt, q, p, v); } catch (_) {} }   // (v39.60)
+}
 function _campHoardTerrainNav(bot, dt) {
   const T = game && game.sandwichTerrain;
   if (!T || !T.ON || !bot || !bot.position || !bot.velocity) return;
+  if (typeof _bendOn === 'function' && _bendOn()) { _campHoardTerrainNavBent(bot, dt, T); return; }   // (v39.59) endless_bend
   const p = bot.position;
   const vh = Math.hypot(bot.velocity.x, bot.velocity.z) || 1;
   const LA = 1100;
@@ -4108,6 +4221,7 @@ function _campHoardTerrainNav(bot, dt) {
   const desiredVY = Math.max(-vsp, Math.min(vsp, (desiredY - p.y) * 1.3));
   bot.velocity.y += (desiredVY - bot.velocity.y) * Math.min(1, dt * 3.5);
   if (p.y < fc + 10) p.y = fc + 10; else if (p.y > cc - 10 && !(_owBot && T._openTop)) p.y = cc - 10;   // (v38.78) no sky cap for a city fleet in the hub
+  if (LSS.MODE === 'endless' && game.endlessRun) { try { _endlessLaneKeep(bot, dt, p, p, bot.velocity); } catch (_) {} }   // (v39.60) classic endless: flat == world
 }
 function spawnCampaignWave(waveIndex) {
   if (!game.campaign || typeof Bot === 'undefined') return;
@@ -5434,15 +5548,15 @@ function assignTeamFromPeerOrder() {
   if (net.campaign || net.endless) { player.team = LSS.TEAM_FLEET_A; return; }
   if (LSS.MODE === 'freeflight' && typeof _ffaTeamForPeer === 'function') { player.team = _ffaTeamForPeer(net.myPeerId); return; }   // (v38.79) FFA: one team per pilot, on every path
   if (net.openSoloHostId) {
-    if (net.myPeerId === net.openSoloHostId) { player.team = LSS.TEAM_FLEET_A; return; }
+    if (net.myPeerId === net.openSoloHostId) { _owSetPlayerTeam(LSS.TEAM_FLEET_A); return; }   // (v39.55)
     const others = [net.myPeerId, ...nonJudgePeerIds()].filter(id => id !== net.openSoloHostId).sort();
     const idx = Math.max(0, others.indexOf(net.myPeerId));
-    player.team = (idx < 3) ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A;
+    _owSetPlayerTeam((idx < 3) ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A);   // (v39.55)
     return;
   }
   const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
   const myIndex = allIds.indexOf(net.myPeerId);
-  player.team = (myIndex % 2 === 0) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B;
+  _owSetPlayerTeam((myIndex % 2 === 0) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B);   // (v39.55)
 }
 
 function _teamForPeerId(id) {
@@ -6325,7 +6439,16 @@ function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'ow_evt') { try { if (typeof _owShow === 'function') _owShow(evt); } catch (_) {} return; }
   if (evt.type === 'ow_dmg') { try { if (typeof _owOnDamage === 'function') _owOnDamage(evt, fromPeerId); } catch (_) {} return; }
   if (evt.type === 'bot_roster' && Array.isArray(evt.bots)) {
-    if (!_botAuthority()) { try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); } }   // (v38.63) one gate
+    if (!_botAuthority()) {
+      try { _botApplyRoster(evt.bots); } catch (e) { console.warn('[dropin] roster apply failed:', e); }   // (v38.63) one gate
+      try {
+        const run = game.endlessRun;
+        if (run && typeof evt.rt === 'number' && run.startedAt) {
+          const off = evt.rt - (Date.now() - run.startedAt) / 1000;
+          run.clockOff = (run.clockOff == null) ? off : run.clockOff + (off - run.clockOff) * 0.3;
+        }
+      } catch (_) {}
+    }
     return;
   }
   if (evt.type === 'bot_state' && Array.isArray(evt.m)) {
@@ -7380,6 +7503,22 @@ function _makeSmokeMaterial(initialColor, baseAlpha) {
 let _VORTEX_CORE_BEAM_GEO = null;
 const _vyGunA = new THREE.Vector3(), _vyGunB = new THREE.Vector3();
 const _vyDir = new THREE.Vector3(), _vyJoint = new THREE.Vector3();
+let _VORTEX_GLOW_MAT = null, _VORTEX_GLOW_GEO = null;
+function _vortexGlowMaterial() {
+  if (_VORTEX_GLOW_MAT) return _VORTEX_GLOW_MAT;
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const r = g.createRadialGradient(32, 32, 2, 32, 32, 31);
+  r.addColorStop(0, 'rgba(255,240,255,1)'); r.addColorStop(0.28, 'rgba(232,180,255,0.75)'); r.addColorStop(0.62, 'rgba(196,108,255,0.22)'); r.addColorStop(1, 'rgba(160,80,255,0)');
+  g.fillStyle = r; g.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  const m = new THREE.MeshBasicMaterial({ map: tex, color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: true, fog: false });
+  m.name = 'vortex_core_glow';
+  try { if (typeof _lssRetainMat === 'function') _lssRetainMat(m); } catch (_) {}
+  _VORTEX_GLOW_MAT = m;
+  return m;
+}
+function _vortexGlowGeometry() { return _VORTEX_GLOW_GEO || (_VORTEX_GLOW_GEO = new THREE.PlaneGeometry(1, 1)); }
 function _vortexYKnobs() {
   const K = window.__vortexY || (window.__vortexY = {});
   return {
@@ -8305,21 +8444,21 @@ const EFFECT_PRESETS = {
   },
   core_beam: {
     name: 'Vortex Core Beam',
-    baseColor: '#9933ff',
+    baseColor: '#c46cff',
     fresnel: 0.4,
-    brightness: 3.0,
+    brightness: 2.3,
     intensity: 1.0,
     axialFalloff:      0.25,
-    axialCoreColor:    '#dccff5',
-    axialCoreStrength: 0.30,
+    axialCoreColor:    '#eacfff',
+    axialCoreStrength: 0.26,
     axialCoreFalloff:  1.4,
-    displaceAmount: 0.0,
-    displaceFreq:   1.0,
-    softEdge:       0.20,
+    displaceAmount: 0.18,
+    displaceFreq:   1.4,
+    softEdge:       0.32,
     layers: [
-      { pattern: 5, scale: 2.4, timeRate: 4.0, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.90 },
-      { pattern: 1, scale: 1.6, timeRate: 3.2, hue: 0.92, alpha: 0.80, blend: 2, sat: 0.95 },
-      { pattern: 5, scale: 5.0, timeRate: 5.0, hue: 0.92, alpha: 0.55, blend: 3, sat: 0.45 },
+      { pattern: 5, scale: 2.4, timeRate: 5.0, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.90 },
+      { pattern: 1, scale: 1.6, timeRate: 4.6, hue: 0.78, alpha: 0.80, blend: 2, sat: 0.95 },
+      { pattern: 5, scale: 5.0, timeRate: 5.0, hue: 0.80, alpha: 0.55, blend: 3, sat: 0.45 },
     ],
   },
   gas_pocket: {
@@ -12886,6 +13025,74 @@ function _lssSupersampleActive() {
            !(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
   } catch (_) { return false; }
 }
+const _kw = { on: true, ok: null, disabled: false, K: 300, ms: 0, cap: 0, pend: [], sum: 0, n: 0, frames: 0, lastAdj: 0, gapSum: 0, gapN: 0, last: 0, rt: null, sc: null, cam: null, mat: null, gl: null, ext: null, hist: [] };
+if (typeof window !== 'undefined') window.__keepWarm = _kw;
+function _gpuKeepWarmTick(ts) {
+  const W = _kw;
+  if (!W.on || W.disabled) return;
+  if (typeof input !== 'undefined' && input && input.keepWarm === false) return;
+  try {
+    if (W.ok === null) {
+      const gl = renderer.getContext();
+      const ext = gl.getExtension && gl.getExtension('EXT_disjoint_timer_query_webgl2');
+      if (!ext || (typeof _fxSmallDevice === 'function' && _fxSmallDevice())) { W.ok = false; W.disabled = true; return; }
+      W.gl = gl; W.ext = ext;
+      W.rt = new THREE.WebGLRenderTarget(512, 512, { depthBuffer: false, stencilBuffer: false });
+      W.mat = new THREE.ShaderMaterial({
+        uniforms: { uK: { value: 300 }, uT: { value: 0 } },
+        vertexShader: 'void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }',
+        fragmentShader: 'precision highp float; uniform float uK; uniform float uT; void main(){ float a = gl_FragCoord.x * 0.001 + uT; for (int i = 0; i < 65536; i++) { if (float(i) >= uK) break; a = sin(a * 1.7 + 0.3) * 1.01 + cos(a * 0.9); } gl_FragColor = vec4(fract(a), 0.0, 0.0, 1.0); }',
+        depthTest: false, depthWrite: false,
+      });
+      W.mat.name = 'keepwarm';
+      const q = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), W.mat); q.frustumCulled = false;
+      W.sc = new THREE.Scene(); W.sc.add(q); W.cam = new THREE.Camera();
+      try { if (typeof _lssRetainMat === 'function') _lssRetainMat(W.mat); } catch (_) {}
+      W.ok = true;
+    }
+    W.frames++;
+    if (W.last) { W.gapSum += ts - W.last; W.gapN++; }
+    W.last = ts;
+    const st = game.state;
+    if ((st !== 'playing' && st !== 'warmup') || document.hidden) return;
+    if (renderer.xr && renderer.xr.isPresenting) return;
+    if (typeof _lssOnBattery !== 'undefined' && _lssOnBattery) return;
+    const gl = W.gl, ext = W.ext;
+    const prev = renderer.getRenderTarget();
+    W.mat.uniforms.uK.value = W.K; W.mat.uniforms.uT.value = (ts % 1000) * 0.001;
+    const q = gl.createQuery();
+    gl.beginQuery(ext.TIME_ELAPSED_EXT, q);
+    renderer.setRenderTarget(W.rt);
+    renderer.render(W.sc, W.cam);
+    gl.endQuery(ext.TIME_ELAPSED_EXT);
+    renderer.setRenderTarget(prev);
+    W.pend.push(q);
+    const disj = gl.getParameter(ext.GPU_DISJOINT_EXT);
+    const keep = [];
+    for (const pq of W.pend) {
+      if (!gl.getQueryParameter(pq, gl.QUERY_RESULT_AVAILABLE)) { keep.push(pq); continue; }
+      const ms = gl.getQueryParameter(pq, gl.QUERY_RESULT) / 1e6;
+      gl.deleteQuery(pq);
+      if (!disj) { W.sum += ms; W.n++; }
+    }
+    W.pend = keep;
+    if (W.pend.length > 64) { for (const pq of W.pend) gl.deleteQuery(pq); W.pend = []; }
+    if (W.frames - W.lastAdj >= 20 && W.n >= 8 && W.gapN >= 8) {
+      const period = 1000 / Math.max(30, (typeof _ssDyn !== 'undefined' && _ssDyn.hz) || 60);
+      const cap = period * 0.25;
+      const ms = W.sum / W.n, gap = W.gapSum / W.gapN;
+      W.ms = +ms.toFixed(2); W.cap = +cap.toFixed(2);
+      if (gap > period * 1.08 || ms > cap) W.K = Math.max(50, Math.round(W.K * 0.7));
+      else W.K = Math.min(60000, Math.round(W.K * 1.15) + 20);
+      if (W.hist.length >= 300) W.hist.shift();
+      W.hist.push([+(ts / 1000).toFixed(1), W.ms, W.K, +(1000 / gap).toFixed(0)]);
+      W.sum = 0; W.n = 0; W.gapSum = 0; W.gapN = 0; W.lastAdj = W.frames;
+    }
+  } catch (e) {
+    W.disabled = true;
+    try { console.warn('[keepwarm] disabled:', e && e.message); } catch (_) {}
+  }
+}
 function _lssSupersampleTick(ts) {
   const S = _ssDyn;
   if (!S.last) { S.last = ts; return; }
@@ -15799,7 +16006,7 @@ function _swWaterReflectShader() {
       '  vec2 _rOff = pgrad * uReliefScale * 0.012 * graze * fade * (1.0 - graze * 0.5);',
       '  float _rL = length(_rOff);',
       '  if (_rL > 0.012) _rOff *= 0.012 / _rL;',
-      '  vec4 uvp = vUv; uvp.xy += (N.xz * 0.04 * fade * (1.0 - graze * 0.55) + _rOff) * uvp.w;',   
+      '  vec4 uvp = vUv; uvp.xy += (N.xz * 0.025 * fade * (1.0 - graze * 0.55) + _rOff) * uvp.w;',   
       '  vec3 refl = texture2DProj(tDiffuse, uvp).rgb;',
       '  vec3 _skyRefl = fogColor * 0.80;',
       '  float reflLum = dot(refl, vec3(0.299, 0.587, 0.114));',
@@ -15810,7 +16017,7 @@ function _swWaterReflectShader() {
       '  }',
       '  refl = mix(_skyRefl, refl, uReflLive);',                         
       '  float fres = pow(clamp(1.0 - max(dot(-V,N),0.0),0.0,1.0), 4.0);',
-      '  float _fresFloor = mix(0.14, 0.50, 1.0 - uReflLive);',                         
+      '  float _fresFloor = mix(0.34, 0.50, 1.0 - uReflLive);',   // (v39.66) the far plane mirrors too                         
       '  fres = clamp(_fresFloor + (1.0 - _fresFloor)*fres, 0.0, 1.0);',
       '  vec3 baseTint = mix(uShallowTint, color, smoothstep(0.0, 0.32, shoreDepth));',
       '  vec3 outc = mix(baseTint, refl, fres);',
@@ -16114,8 +16321,14 @@ function _swRippleBakeMaskRow(data, cx, cz, j, RES, B, T, WL, near) {
   const wz = cz + ((j + 0.5) / RES - 0.5) * B;
   for (let i = 0; i < RES; i++) {
     const wx = cx + ((i + 0.5) / RES - 0.5) * B;
-    let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; }
-    const d = WL - gy;
+    let d;
+    if (_bendOn()) {
+      let sdf; try { sdf = worldSDF(wx, WL, wz); } catch (_) { sdf = 1000; }
+      d = -sdf;
+    } else {
+      let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; }
+      d = WL - gy;
+    }
     data[k] = near ? ((d > 2.0) ? 1.0 : 0.0) : 0;
     data[k + 1] = Math.max(0, Math.min(1, d / 400));
     data[k + 2] = 0; data[k + 3] = 1;
@@ -16180,8 +16393,9 @@ function _swRippleBakeMask() {
     const wz = cz + ((j + 0.5) / RES - 0.5) * B;
     for (let i = 0; i < RES; i++) {
       const wx = cx + ((i + 0.5) / RES - 0.5) * B;
-      let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; }
-      const d = WL - gy;                               
+      let d;
+      if (_bendOn()) { let sdf; try { sdf = worldSDF(wx, WL, wz); } catch (_) { sdf = 1000; } d = -sdf; }   // (v39.64) see the near mask
+      else { let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; } d = WL - gy; }                               
       data[k] = (d > 2.0) ? 1.0 : 0.0;                 
       data[k + 1] = Math.max(0, Math.min(1, d / 400)); 
       data[k + 2] = 0; data[k + 3] = 1;
@@ -16202,8 +16416,9 @@ function _swRippleBakeFarMask() {
     const wz = cz + ((j + 0.5) / RES - 0.5) * B;
     for (let i = 0; i < RES; i++) {
       const wx = cx + ((i + 0.5) / RES - 0.5) * B;
-      let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; }
-      const d = WL - gy;                               
+      let d;
+      if (_bendOn()) { let sdf; try { sdf = worldSDF(wx, WL, wz); } catch (_) { sdf = 1000; } d = -sdf; }   // (v39.64) see the near mask
+      else { let gy; try { gy = _stGroundYCarved(wx, wz, T); } catch (_) { gy = WL + 1000; } d = WL - gy; }                               
       data[k] = 0;
       data[k + 1] = Math.max(0, Math.min(1, d / 400)); 
       data[k + 2] = 0; data[k + 3] = 1;
@@ -16536,25 +16751,25 @@ function _swRippleTick(dt) {
         du.uReflLive.value = 0.0;
       }
       du.uReflMix.value = (W2.reflMix != null) ? W2.reflMix : 1.0;            
-      du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 1.0;
+      du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 0.6;   // (v39.66) steadier mirror image
       du.uReflFar.value = (W2.reflFar != null) ? W2.reflFar : 9000.0;      // (v38.56)
       const _wlit = (function () {
         try {
           const c = scene.fog && scene.fog.color;
           if (!c) return 1;
           const l = c.r * 0.299 + c.g * 0.587 + c.b * 0.114;
-          return Math.max(0.10, Math.min(1, Math.pow(Math.max(l * 1.35, 0), 1.6)));
+          return Math.max(0.6, Math.min(1, Math.pow(Math.max(l * 1.35, 0), 1.6)));   // (v39.66) a night lake still mirrors the lights (the mirror texture is already dark after dark)
         } catch (_) { return 1; }
       })();
       const _cavW = (typeof _swCavernWaterWanted === 'function') && _swCavernWaterWanted(game.sandwichTerrain);
       du.uReflBright.value = _cavW
-        ? ((W2.cavReflBright != null) ? W2.cavReflBright : 2.4)
-        : ((W2.reflBright != null) ? W2.reflBright : 2.4);   
-      du.uGrazeClear.value = (W2.grazeClear != null) ? W2.grazeClear : 0.7;   
-      du.uGrazeAlpha.value = (W2.grazeAlpha != null) ? W2.grazeAlpha : 0.45;  
+        ? ((W2.cavReflBright != null) ? W2.cavReflBright : 1.6)
+        : ((W2.reflBright != null) ? W2.reflBright : 1.6);   
+      du.uGrazeClear.value = (W2.grazeClear != null) ? W2.grazeClear : 0.25;   // (v39.66) keep the mirror at grazing angles   
+      du.uGrazeAlpha.value = (W2.grazeAlpha != null) ? W2.grazeAlpha : 0.25;  
       du.uReflFloor.value = _cavW
-        ? ((W2.cavReflFloor != null) ? W2.cavReflFloor : 0.03)
-        : ((W2.reflFloor != null) ? W2.reflFloor : 0.24) * _wlit;
+        ? ((W2.cavReflFloor != null) ? W2.cavReflFloor : 0.35)
+        : ((W2.reflFloor != null) ? W2.reflFloor : 0.42) * _wlit;
       if (du.uSkyDark) du.uSkyDark.value = _cavW ? ((W2.cavSkyDark != null) ? W2.cavSkyDark : 1.0) : 0.0;
       if (du.uReflHot) du.uReflHot.value = (W2.reflHot != null) ? W2.reflHot : 0.75;      
       du.uFoamLod.value = (W2.foamLod != null) ? W2.foamLod : 0.30;            
@@ -17221,6 +17436,240 @@ function _fishSchoolDispose() {
   try { if (F.mat && F.mat.dispose) F.mat.dispose(); } catch (_) {}
   F.gpu = F.posVar = F.velVar = F.mesh = F.geo = F.mat = F.seedTex = null; F.count = 0; F.texW = 0; F.frame = 0; F.acc = 0; F.shown = false; F.seedX = 1e9; F.seedZ = 1e9;
 }
+const _ecr = { on: true, fishOn: true, batsOn: true, groups: new Map(), fish: null, bats: null, lastScan: 0 };
+if (typeof window !== 'undefined') window.__ecr = _ecr;
+function _ecrClock(run) { return (Date.now() - (run.startedAt || 0)) / 1000 + (run.clockOff || 0); }
+function _ecrHash(a, b) { let h = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; }
+function _ecrKind(kind) {
+  const have = kind === 'fish' ? _ecr.fish : _ecr.bats;
+  if (have) return have;
+  const texW = 32, cap = texW * texW;
+  const posTex = new THREE.DataTexture(new Float32Array(cap * 4), texW, texW, THREE.RGBAFormat, THREE.FloatType);
+  const velTex = new THREE.DataTexture(new Float32Array(cap * 4), texW, texW, THREE.RGBAFormat, THREE.FloatType);
+  posTex.minFilter = posTex.magFilter = THREE.NearestFilter; velTex.minFilter = velTex.magFilter = THREE.NearestFilter;
+  posTex.needsUpdate = true; velTex.needsUpdate = true;
+  const verts = cap * 9;
+  const geo = new THREE.BufferGeometry();
+  const posA = new Float32Array(verts * 3), refA = new Float32Array(verts * 2), bvA = new Float32Array(verts);
+  let Lx, Ly, Lz;
+  if (kind === 'fish') { const S = 14; Lx = [0, 0, 0, 0, 0, 0, 0, 0, 0]; Ly = [0, S * 0.34, 0, 0, 0, -S * 0.34, 0, S * 0.5, -S * 0.5]; Lz = [S, 0, -S * 0.7, S, -S * 0.7, 0, -S * 0.7, -S * 1.15, -S * 1.15]; }
+  else { const S = 12; Lx = [0, S * 0.18, -S * 0.18, 0, -S, 0, 0, S, 0]; Ly = [0, 0, 0, 0, 0, 0, 0, 0, 0]; Lz = [-S, S * 0.7, S * 0.7, 0.2 * S, 0.6 * S, 0.6 * S, 0.2 * S, 0.6 * S, 0.6 * S]; }
+  let p = 0, r = 0, b = 0;
+  for (let i = 0; i < cap; i++) {
+    const u = (i % texW + 0.5) / texW, v = (Math.floor(i / texW) + 0.5) / texW;
+    for (let k = 0; k < 9; k++) { posA[p++] = Lx[k]; posA[p++] = Ly[k]; posA[p++] = Lz[k]; refA[r++] = u; refA[r++] = v; bvA[b++] = k; }
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(posA, 3));
+  geo.setAttribute('reference', new THREE.BufferAttribute(refA, 2));
+  geo.setAttribute('birdVertex', new THREE.BufferAttribute(bvA, 1));
+  geo.setDrawRange(0, 0);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+      texturePosition: { value: null }, textureVelocity: { value: null }, uTime: { value: 0 },
+      uColorTop: { value: new THREE.Color(kind === 'fish' ? 0x4a6b76 : 0x0d0b12) }, uColorBelly: { value: new THREE.Color(kind === 'fish' ? 0xbcd0d8 : 0x2b2433) }, uFade: { value: 1.0 },
+    }]),
+    vertexShader: kind === 'fish' ? _FISH_VS : _BIRD_VS, fragmentShader: _BIRD_FS, fog: true, side: THREE.DoubleSide, transparent: true, depthWrite: true,
+  });
+  mat.name = 'ecr_' + kind;
+  mat.uniforms.texturePosition.value = posTex; mat.uniforms.textureVelocity.value = velTex;
+  const mesh = new THREE.Mesh(geo, mat); mesh.frustumCulled = false; mesh.renderOrder = kind === 'fish' ? -2 : 0; mesh.visible = false;
+  scene.add(mesh);
+  try { if (typeof _lssRetainMat === 'function') _lssRetainMat(mat); } catch (_) {}
+  try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(mesh); } catch (_) {}
+  const K = { mesh, geo, mat, posTex, velTex, cap, pos: posTex.image.data, vel: velTex.image.data };
+  if (kind === 'fish') _ecr.fish = K; else _ecr.bats = K;
+  return K;
+}
+function _ecrOpen(x, y, z) { try { return worldSDF(x, y, z) < -80; } catch (_) { return true; } }
+function _ecrScan(run) {
+  const WL = (typeof game._hubWaterWL === 'number' && game._hubWater) ? game._hubWaterWL : null;
+  const live = new Set();
+  for (const s of run.segs) {
+    if (!s || !s.a || !s.b) continue;
+    const gid = s.gid | 0, r = (s.cyl && s.cyl.r) || 400;
+    if (WL != null && _ecr.fishOn !== false) {
+      for (let k = 0; k < 2; k++) {
+        const t = 0.3 + 0.4 * k;
+        const x = s.a.x + (s.b.x - s.a.x) * t, y = s.a.y + (s.b.y - s.a.y) * t, z = s.a.z + (s.b.z - s.a.z) * t;
+        if (y + r * 0.45 < WL - 60) {
+          const key = 'f' + gid + '_' + k;
+          if (!_ecr.groups.has(key)) {
+            const ay = Math.min(y, WL - 160);
+            if (!_ecrOpen(x, ay, z)) continue;
+            _ecr.groups.set(key, { kind: 'fish', seed: gid * 7 + k, x, y: ay, z, r: Math.max(120, r * 0.5), n: 48, ymax: WL - 60 });
+          }
+          live.add(key);
+        }
+      }
+    }
+    if (_ecr.batsOn !== false) {
+      let bx = null, by = 0, bz = 0, br = 0;
+      if (s.sph) { const w = _bendToWorld(s.sph.cx, s.sph.cy + s.sph.r * 0.35, s.sph.cz); bx = w.x; by = w.y; bz = w.z; br = s.sph.r * 0.45; }
+      else if (_ecrHash(gid, 11) < 0.34) { const t = 0.25 + 0.5 * _ecrHash(gid, 13); bx = s.a.x + (s.b.x - s.a.x) * t; by = s.a.y + (s.b.y - s.a.y) * t + r * 0.3; bz = s.a.z + (s.b.z - s.a.z) * t; br = r * 0.45; }
+      if (bx != null && !(WL != null && by < WL + 40)) {
+        const key = 'b' + gid;
+        if (!_ecr.groups.has(key)) {
+          if (_ecrOpen(bx, by, bz)) _ecr.groups.set(key, { kind: 'bats', seed: gid * 13 + 5, x: bx, y: by, z: bz, r: Math.max(100, br), n: 36 });
+          else continue;
+        }
+        live.add(key);
+      }
+    }
+  }
+  for (const key of Array.from(_ecr.groups.keys())) if (!live.has(key)) _ecr.groups.delete(key);
+}
+function _ecrPose(g, t, P, V, at) {
+  const fish = g.kind === 'fish';
+  const R = g.r, s0 = g.seed;
+  const w = fish ? 0.22 : 0.6, h = fish ? R * 0.35 : R * 0.45;
+  const cph = _ecrHash(s0, 1) * 6.283, cph2 = _ecrHash(s0, 2) * 6.283, cph3 = _ecrHash(s0, 3) * 6.283;
+  const DT = 0.06;
+  for (let i = 0; i < g.n; i++) {
+    const a1 = _ecrHash(s0, 10 + i * 3), a2 = _ecrHash(s0, 11 + i * 3), a3 = _ecrHash(s0, 12 + i * 3), a4 = _ecrHash(s0, 400 + i);
+    const ri = fish ? (0.05 + 0.4 * a1) * R : (30 + (0.5 * R) * a1);
+    const th = a2 * 6.283, yi = fish ? (a3 - 0.5) * R * 0.5 : (a3 - 0.5) * R * 0.6;
+    const wi = fish ? 1.2 + a4 * 1.0 : 1.3 + a4 * 1.6;
+    let x0, y0, z0, x1, y1, z1;
+    for (let pass = 0; pass < 2; pass++) {
+      const tt = pass ? t - DT : t;
+      let cx, cy, cz;
+      if (fish) {
+        cx = g.x + R * 0.5 * Math.sin(w * tt + cph); cy = g.y + h * 0.6 * Math.sin(0.5 * w * tt + cph2); cz = g.z + R * 0.5 * Math.cos(0.7 * w * tt + cph3);
+      } else {
+        cx = g.x + R * 0.35 * Math.sin(w * tt + cph); cy = g.y + h * 0.4 * Math.sin(0.8 * w * tt + cph2); cz = g.z + R * 0.35 * Math.cos(0.9 * w * tt + cph3);
+      }
+      let px, py, pz;
+      if (fish) {
+        const wob = 10 * Math.sin(tt * 1.7 + th * 3.0);
+        px = cx + ri * Math.cos(th + tt * 0.15) + wob * 0.3; py = cy + yi + 6 * Math.sin(tt * 0.9 + th); pz = cz + ri * Math.sin(th + tt * 0.15) + wob * 0.3;
+      } else {
+        px = cx + ri * Math.cos(wi * tt + th); py = cy + yi + 0.45 * ri * Math.sin(2.0 * wi * tt + th); pz = cz + ri * Math.sin(wi * tt + th);
+      }
+      if (g.ymax != null && py > g.ymax) py = g.ymax;
+      if (pass === 0) { x0 = px; y0 = py; z0 = pz; } else { x1 = px; y1 = py; z1 = pz; }
+    }
+    const k = (at + i) * 4;
+    P[k] = x0; P[k + 1] = y0; P[k + 2] = z0; P[k + 3] = t * (fish ? 4.0 + 2.0 * a4 : 9.0 + 3.0 * a4) + th;
+    V[k] = (x0 - x1) / DT; V[k + 1] = (y0 - y1) / DT; V[k + 2] = (z0 - z1) / DT; V[k + 3] = fish ? 0 : 1;
+  }
+}
+function _ecrCommit(K, used, t) {
+  if (!K) return;
+  K.geo.setDrawRange(0, used * 9); K.mesh.visible = used > 0;
+  if (used > 0) { K.posTex.needsUpdate = true; K.velTex.needsUpdate = true; K.mat.uniforms.uTime.value = t; }
+}
+function _ecrHide() { if (_ecr.fish) _ecr.fish.mesh.visible = false; if (_ecr.bats) _ecr.bats.mesh.visible = false; }
+function _ecrTick(dt) {
+  const run = game.endlessRun;
+  if (!_ecr.on || !run || (game.state !== 'playing' && game.state !== 'warmup')) { _ecrHide(); return; }
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+  if (typeof document !== 'undefined' && document.hidden) return;
+  const now = performance.now() / 1000;
+  if (now - _ecr.lastScan > 2) { _ecr.lastScan = now; try { _ecrScan(run); } catch (_) {} }
+  if (!_ecr.groups.size) { _ecrHide(); return; }
+  const t = _ecrClock(run);
+  const cam = camera.position;
+  const fishK = _ecr.fishOn !== false ? _ecrKind('fish') : null, batK = _ecr.batsOn !== false ? _ecrKind('bats') : null;
+  let fu = 0, bu = 0;
+  for (const g of _ecr.groups.values()) {
+    const dx = g.x - cam.x, dy = g.y - cam.y, dz = g.z - cam.z;
+    if (dx * dx + dy * dy + dz * dz > 6000 * 6000) continue;
+    const K = g.kind === 'fish' ? fishK : batK; if (!K) continue;
+    const used = g.kind === 'fish' ? fu : bu;
+    if (used + g.n > K.cap) continue;
+    _ecrPose(g, t, K.pos, K.vel, used);
+    if (g.kind === 'fish') fu += g.n; else bu += g.n;
+  }
+  _ecrCommit(fishK, fu, t); _ecrCommit(batK, bu, t);
+}
+const _ecl = { on: true, max: 14, list: new Map(), lastScan: 0, ships: [] };
+if (typeof window !== 'undefined') window.__ecl = _ecl;
+function _eclColor() {
+  const c = new THREE.Color(0x9fb8d8);
+  try { if (scene.fog && scene.fog.color) c.copy(scene.fog.color).lerp(new THREE.Color(0xffffff), 0.55); } catch (_) {}
+  const l = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+  if (l < 0.35) c.multiplyScalar(0.35 / Math.max(0.05, l));   // a black cave still gets a readable cloud
+  return c;
+}
+function _eclScan(run) {
+  const WL = (typeof game._hubWaterWL === 'number' && game._hubWater) ? game._hubWaterWL : null;
+  const live = new Set();
+  for (const sg of run.segs) {
+    if (!sg || !sg.a || !sg.b) continue;
+    const gid = sg.gid | 0, r = (sg.cyl && sg.cyl.r) || 400;
+    const h = _ecrHash(gid, 21);
+    const n = h < 0.55 ? 1 : (h < 0.80 ? 2 : 0);
+    for (let k = 0; k < n; k++) {
+      const key = 'c' + gid + '_' + k;
+      live.add(key);
+      if (_ecl.list.has(key)) continue;
+      if (_ecl.list.size >= _ecl.max) continue;
+      const t = 0.2 + 0.6 * _ecrHash(gid, 30 + k), th = _ecrHash(gid, 40 + k) * 6.283, lat = 0.4 * r * _ecrHash(gid, 50 + k), vert = (_ecrHash(gid, 60 + k) - 0.5) * 0.5 * r;
+      const ex = sg.b.x - sg.a.x, ez = sg.b.z - sg.a.z, el = Math.hypot(ex, ez) || 1;
+      const px = -ez / el, pz = ex / el;
+      const x = sg.a.x + (sg.b.x - sg.a.x) * t + px * Math.cos(th) * lat;
+      const y = sg.a.y + (sg.b.y - sg.a.y) * t + vert;
+      const z = sg.a.z + (sg.b.z - sg.a.z) * t + pz * Math.cos(th) * lat;
+      if (WL != null && y < WL + 60) continue;
+      const bounds = Math.max(110, Math.min(380, 0.28 * r + 60 * _ecrHash(gid, 70 + k)));
+      if (!_ecrOpen(x, y, z)) continue;
+      try {
+        const col = _eclColor();
+        const c = new GasCloud(billboardCloudSystem, new THREE.Vector3(x, y, z), {
+          boundsRadius: bounds, spriteScale: bounds * 1.7, spriteScaleVar: 0.42,
+          alpha: 0.34 + 0.14 * _ecrHash(gid, 80 + k), color: col, baseColor: col.getHex(), colorJitter: 0.06, segments: 14,
+        });
+        _ecl.list.set(key, { c, x, y, z, r: bounds, seed: gid * 17 + k, ph: _ecrHash(gid, 90 + k) * 6.283 });
+      } catch (_) {}
+    }
+  }
+  for (const [key, e] of Array.from(_ecl.list.entries())) {
+    if (live.has(key)) continue;
+    try { e.c.dispose(); } catch (_) {}
+    _ecl.list.delete(key);
+  }
+}
+function _eclDisposeAll() {
+  for (const e of _ecl.list.values()) { try { e.c.dispose(); } catch (_) {} }
+  _ecl.list.clear();
+}
+function _endlessCloudsTick(dt) {
+  const run = game.endlessRun;
+  if (!_ecl.on || !run || (game.state !== 'playing' && game.state !== 'warmup')) { if (_ecl.list.size) _eclDisposeAll(); return; }
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+  if (typeof getVRPerfTier === 'function' && getVRPerfTier() >= 2) return;
+  if (typeof GasCloud !== 'function' || typeof billboardCloudSystem === 'undefined') return;
+  const now = performance.now() / 1000;
+  if (now - _ecl.lastScan > 2) { _ecl.lastScan = now; try { _eclScan(run); } catch (_) {} }
+  if (!_ecl.list.size) return;
+  const t = _ecrClock(run);
+  const cam = camera.position;
+  const ships = _ecl.ships; ships.length = 0;
+  try {
+    if (player && player.position && player.shipState !== 'dead' && player.shipState !== 'spawning') ships.push(player);
+    if (game.entities) for (const b of game.entities) { if (b && b.alive && b.position) ships.push(b); }
+  } catch (_) {}
+  const WR = (typeof _AR_CLOUD_WAKE_R === 'number') ? _AR_CLOUD_WAKE_R : 520, WS = (typeof _AR_CLOUD_WAKE_STR === 'number') ? _AR_CLOUD_WAKE_STR : 14;
+  const R2 = WR * WR;
+  for (const e of _ecl.list.values()) {
+    const dx = e.x - cam.x, dy = e.y - cam.y, dz = e.z - cam.z;
+    if (dx * dx + dy * dy + dz * dz > 6500 * 6500) continue;
+    const A = e.r * 0.35, w = 6.283 / 45;
+    const px = e.x + A * Math.sin(w * t + e.ph), py = e.y + A * 0.5 * Math.sin(0.7 * w * t + e.ph * 1.7), pz = e.z + A * Math.cos(0.8 * w * t + e.ph * 0.6);
+    try { e.c.setPosition(px, py, pz); } catch (_) {}
+    let hit = null, bestD2 = R2;
+    for (let i = 0; i < ships.length; i++) {
+      const sp = ships[i].position;
+      const ddx = sp.x - px, ddy = sp.y - py, ddz = sp.z - pz;
+      const d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+      if (d2 < bestD2) { bestD2 = d2; hit = ships[i]; }
+    }
+    try {
+      if (hit) { const v = hit.velocity; e.c.applyWake(hit.position.x, hit.position.y, hit.position.z, v ? v.x : 0, v ? v.y : 0, v ? v.z : 0, WS, WR, dt); }
+      e.c.tickWake(dt);
+    } catch (_) {}
+  }
+}
 let _hubWaterDisp = null;
 function _swBuildHubWaterDispGet(WL) {
   if (_hubWaterDisp) return _hubWaterDisp;
@@ -17235,10 +17684,10 @@ function _swBuildHubWaterDispGet(WL) {
         uDispScale: { value: 180.0 }, uGain: { value: 180.0 }, color: { value: new THREE.Color(0x16465c) },
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 },
         uSprayBreak: { value: 1.4 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.32 }, uSprayFreq: { value: 0.05 },
-        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 1.0 }, uReflBright: { value: 2.4 },
+        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 0.6 }, uReflBright: { value: 1.6 },
         uReflFar: { value: 9000.0 },
-        uGrazeClear: { value: 0.7 }, uGrazeAlpha: { value: 0.45 },   
-        uReflFloor: { value: 0.24 }, uSkyDark: { value: 0.0 }, uReflHot: { value: 0.75 },   
+        uGrazeClear: { value: 0.25 }, uGrazeAlpha: { value: 0.25 },   
+        uReflFloor: { value: 0.42 }, uSkyDark: { value: 0.0 }, uReflHot: { value: 0.75 },   
 
         uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 }, uShoreFoam: { value: 0.0 },   
         uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 } }   
@@ -17368,8 +17817,13 @@ function _swBuildHubWater(T) {
   let mesh;
   if (_canReflect) {
     const dpr = (renderer && renderer.getPixelRatio) ? renderer.getPixelRatio() : 1;
-    const rw = Math.max(256, Math.min(768, Math.floor((window.innerWidth || 1280) * dpr * 0.25)));
-    const rh = Math.max(256, Math.min(768, Math.floor((window.innerHeight || 720) * dpr * 0.25)));
+    const _rsc = (window.__water && window.__water.reflScale != null) ? window.__water.reflScale
+      : ((typeof _fxSmallDevice === 'function' && _fxSmallDevice()) ? 0.25
+        : ((typeof QUALITY !== 'undefined' && (QUALITY.isMega() || QUALITY.isUltra())) ? 0.5
+          : ((typeof QUALITY !== 'undefined' && QUALITY.level === 'high') ? 0.4 : 0.25)));
+    const _rcap = _rsc > 0.3 ? 1536 : 768;
+    const rw = Math.max(256, Math.min(_rcap, Math.floor((window.innerWidth || 1280) * dpr * _rsc)));
+    const rh = Math.max(256, Math.min(_rcap, Math.floor((window.innerHeight || 720) * dpr * _rsc)));
     mesh = new THREE.Reflector(geo, { textureWidth: rw, textureHeight: rh, color: 0x16465c, clipBias: 0.0028, shader: _swWaterReflectShader() });
     mesh.material.uniforms.uTime = _swU.uTime;   
     mesh.material.uniforms.uCam = _swU.uCam;      
@@ -18082,9 +18536,68 @@ function _swSubmergedFogGet() {
   if (!game._swSubmergedFog) game._swSubmergedFog = new THREE.FogExp2(0x0a3a44, 0.0018);
   return game._swSubmergedFog;
 }
+const _swDeepCol = new THREE.Color(0x03141c);
+function _swSubmergedAudio(on) {
+  try {
+    const a = (typeof audio !== 'undefined') ? audio : null;
+    if (!a || !a.ctx || !a.hiCut) return;
+    const K = (typeof window !== 'undefined' && window.__underwater) ? window.__underwater : null;
+    const cut = (K && K.cut != null) ? K.cut : 620;
+    const f = a.hiCut.frequency, t = a.ctx.currentTime;
+    f.cancelScheduledValues(t);
+    f.setTargetAtTime(on ? cut : 3500, t, on ? 0.35 : 0.2);
+  } catch (_) {}
+}
+const _swBub = { pts: null, n: 240, pos: null, spd: null, ph: null, box: 900, geo: null, mat: null, tex: null };
+function _swBubblesEnsure() {
+  const B = _swBub; if (B.pts) return B.pts;
+  try {
+    const n = B.n; B.pos = new Float32Array(n * 3); B.spd = new Float32Array(n); B.ph = new Float32Array(n);
+    for (let i = 0; i < n; i++) { B.spd[i] = 22 + Math.random() * 48; B.ph[i] = Math.random() * 6.283; }
+    B.geo = new THREE.BufferGeometry(); B.geo.setAttribute('position', new THREE.BufferAttribute(B.pos, 3));
+    const c = document.createElement('canvas'); c.width = c.height = 32; const g = c.getContext('2d');
+    const r = g.createRadialGradient(16, 16, 2, 16, 16, 15);
+    r.addColorStop(0, 'rgba(215,242,255,0.95)'); r.addColorStop(0.45, 'rgba(160,212,240,0.35)'); r.addColorStop(1, 'rgba(120,180,220,0)');
+    g.fillStyle = r; g.fillRect(0, 0, 32, 32);
+    B.tex = new THREE.CanvasTexture(c);
+    B.mat = new THREE.PointsMaterial({ size: 9, map: B.tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.55, sizeAttenuation: true, fog: true, color: 0xbfe6ff });
+    B.mat.name = 'bubbles';
+    B.pts = new THREE.Points(B.geo, B.mat); B.pts.frustumCulled = false; B.pts.renderOrder = 5; B.pts.visible = false;
+    try { if (typeof _lssRetainMat === 'function') _lssRetainMat(B.mat); } catch (_) {}
+    scene.add(B.pts);
+    try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(B.pts); } catch (_) {}   // link the points program behind the countdown, not on the first dive
+  } catch (_) { B.pts = null; }
+  return B.pts;
+}
+function _swBubblesSeed(c) {
+  const B = _swBub, p = B.pos, half = B.box * 0.5;
+  for (let i = 0; i < B.n; i++) { const k = i * 3; p[k] = c.x + (Math.random() - 0.5) * B.box; p[k + 1] = c.y - half + Math.random() * B.box; p[k + 2] = c.z + (Math.random() - 0.5) * B.box; }
+}
+function _swBubblesTick(dt, WL) {
+  const B = _swBub; const pts = _swBubblesEnsure(); if (!pts) return;
+  const K = (typeof window !== 'undefined' && window.__underwater) ? window.__underwater : null;
+  if (K && K.bubbles === false) { pts.visible = false; return; }
+  const c = camera.position, half = B.box * 0.5, t = performance.now() * 0.001, p = B.pos;
+  if (!pts.visible) { _swBubblesSeed(c); pts.visible = true; }
+  for (let i = 0; i < B.n; i++) {
+    const k = i * 3;
+    p[k + 1] += B.spd[i] * dt;
+    p[k] += Math.sin(t * 1.3 + B.ph[i]) * 9 * dt;
+    p[k + 2] += Math.cos(t * 1.1 + B.ph[i]) * 9 * dt;
+    const dx = p[k] - c.x; if (dx > half) p[k] -= B.box; else if (dx < -half) p[k] += B.box;
+    const dz = p[k + 2] - c.z; if (dz > half) p[k + 2] -= B.box; else if (dz < -half) p[k + 2] += B.box;
+    const dy = p[k + 1] - c.y;
+    if (dy > half || p[k + 1] > WL - 4) p[k + 1] = c.y - half + Math.random() * 60;
+    else if (dy < -half) p[k + 1] += B.box;
+  }
+  B.geo.attributes.position.needsUpdate = true;
+}
+function _swBubblesHide() { const B = _swBub; if (B.pts) B.pts.visible = false; }
 function _swExitUnderwater() {
   if (!game._swSubmerged) return;
   game._swSubmerged = false;
+  try { _swSubmergedAudio(false); } catch (_) {}   // (v39.64)
+  try { _swBubblesHide(); } catch (_) {}
   if (game._swAboveFog) { scene.fog = game._swAboveFog; game._swAboveFog = null; }
   try { _skyDomeRefresh(); } catch (_) {}   
   try { if (window.Overlays && Overlays.underwater) Overlays.underwater(false); } catch (_) {}
@@ -18092,6 +18605,7 @@ function _swExitUnderwater() {
 function _swUpdateUnderwater() {
   const w = game._hubWater;
   if (!w || !camera) { _swExitUnderwater(); return; }
+  if (!_swBub.pts && game.state === 'warmup') { try { _swBubblesEnsure(); } catch (_) {} }   // (v39.64) link behind the 3-2-1
   const below = w.userData.WL - camera.position.y;   
   let sub = game._swSubmerged;
   if (!sub && below > 12) sub = true;                
@@ -18100,6 +18614,7 @@ function _swUpdateUnderwater() {
     game._swSubmerged = true;
     game._swAboveFog = scene.fog || null;            
     scene.fog = _swSubmergedFogGet();
+    try { _swSubmergedAudio(true); } catch (_) {}   // (v39.64)
     try { if (window.Overlays && Overlays.underwater) Overlays.underwater(true); } catch (_) {}
   } else if (!sub && game._swSubmerged) {            
     _swExitUnderwater();
@@ -18107,6 +18622,8 @@ function _swUpdateUnderwater() {
   if (game._swSubmerged) {                           
     const depth01 = Math.max(0, Math.min(1, below / 1200));
     _swSubmergedFogGet().density = 0.0016 + 0.0010 * depth01;
+    try { _swSubmergedFogGet().color.setHex(0x0a3a44).lerp(_swDeepCol, depth01 * 0.8); } catch (_) {}   // (v39.64) darker with depth
+    try { _swBubblesTick(Math.min(0.05, (typeof _lastFrameDt === 'number') ? _lastFrameDt : 0.016), w.userData.WL); } catch (_) {}
     try { if (window.Overlays && Overlays.underwater) Overlays.underwater(true, depth01); } catch (_) {}
   }
 }
@@ -20517,19 +21034,29 @@ function _carrierRide(dt, snap) {
       _carrier._cityT = (_carrier._cityT || 0) - (dt || 0.016);
       if (_carrier._cityT <= 0 || _carrier._cityTop == null) {
         _carrier._cityT = 0.2;
-        const half = (_carrier.half ? _carrier.half.x : 680) * 0.92;
+        const halfL = (_carrier.half ? _carrier.half.x : 680) * 0.92;
+        const halfW = (_carrier.half ? _carrier.half.z : 400) * 0.92;
         const TOP = o.position.y + 4000;
         let top = null;
-        for (let i = -1; i <= 1; i++) {
-          _crP.copy(o.position).addScaledVector(_carrier.dir, half * i);
-          _crP.y = TOP;
-          const hit = _hubCityRayHit(_crP, _CR_DOWN, 9000);
-          if (typeof hit === 'number' && hit < 9000) {
-            const y = TOP - hit;
-            if (top == null || y > top) top = y;
+        const _Kc = _carrierKnobs();
+        const _ahead = (_Kc.roofAhead != null ? _Kc.roofAhead : 2400);
+        const AHEAD = [-halfL, 0, halfL, halfL + _ahead * 0.25, halfL + _ahead * 0.5, halfL + _ahead * 0.75, halfL + _ahead];
+        _crS.set(-_carrier.dir.z, 0, _carrier.dir.x);
+        for (const a of AHEAD) {
+          for (let j = -1; j <= 1; j++) {
+            _crP.copy(o.position).addScaledVector(_carrier.dir, a).addScaledVector(_crS, halfW * j);
+            _crP.y = TOP;
+            const hit = _hubCityRayHit(_crP, _CR_DOWN, 9000);
+            if (typeof hit === 'number' && hit < 9000) {
+              const y = TOP - hit;
+              if (top == null || y > top) top = y;
+            }
           }
         }
-        _carrier._cityTop = top;
+        const _prevTop = (typeof _carrier._cityTop === 'number') ? _carrier._cityTop : null;
+        const _fall = (_Kc.roofFall != null ? _Kc.roofFall : 120) * 0.2;
+        if (top == null) _carrier._cityTop = (_prevTop == null) ? null : _prevTop - _fall;
+        else _carrier._cityTop = (_prevTop == null) ? top : Math.max(top, _prevTop - _fall);
       }
       if (typeof _carrier._cityTop === 'number' && (gy == null || _carrier._cityTop > gy)) gy = _carrier._cityTop;
     }
@@ -20539,9 +21066,11 @@ function _carrierRide(dt, snap) {
   const _cl = (typeof K.clearance === 'number') ? K.clearance : CARRIER.clearance;
   const want = gy + _cl;
   const cur = (_carrier.rideY == null) ? o.position.y : _carrier.rideY;
-  const rate = (want > cur) ? 2.2 : 0.45;        // rise quickly, come down slowly
-  const next = (snap || _carrier.rideY == null) ? Math.max(o.position.y, want)
-             : cur + (want - cur) * Math.min(1, (dt || 0.016) * rate);
+  const rate = (want > cur) ? (K.riseRate != null ? K.riseRate : 1.2) : (K.fallRate != null ? K.fallRate : 0.3);
+  let _vstep = (want - cur) * Math.min(1, (dt || 0.016) * rate);
+  const _vmax = (K.vMax != null ? K.vMax : 180) * (dt || 0.016);
+  _vstep = Math.max(-_vmax, Math.min(_vmax, _vstep));
+  const next = (snap || _carrier.rideY == null) ? Math.max(o.position.y, want) : cur + _vstep;
   if (isFinite(next)) { _carrier.rideY = next; o.position.y = next; if (_carrier.ent) _carrier.ent.position.copy(o.position); }
 }
 function _carrierFaceRoute() {
@@ -20565,10 +21094,59 @@ function _carrierAimAt(pos) {
   _carrierFaceRoute();
   return true;
 }
+const _csDir = new THREE.Vector3(), _csBest = new THREE.Vector3(), _csUp = new THREE.Vector3(0, 1, 0);
+const _csWant = new THREE.Vector3(), _csA = new THREE.Vector3(), _csB = new THREE.Vector3();
+const _CS_ANGLES = [0, 0.26, -0.26, 0.52, -0.52, 0.85, -0.85, 1.2, -1.2];
+function _carrierSteer(dt) {
+  const o = _carrier.obj;
+  if (!o || !game.hubCity || typeof _hubCityRayHit !== 'function') return;
+  const K = _carrierKnobs();
+  if (K.steer === false) return;
+  _csWant.copy(_carrier.to).sub(o.position); _csWant.y = 0;
+  const remain = _csWant.length();
+  if (!(remain > 300)) return;
+  _csWant.multiplyScalar(1 / remain);
+  _carrier._steerT = (_carrier._steerT || 0) - (dt || 0.016);
+  if (_carrier._steerT <= 0 || _carrier._steerA == null) {
+    _carrier._steerT = 0.1;
+    const range = (K.lookAhead != null ? K.lookAhead : 2600);
+    const halfW = (_carrier.half ? _carrier.half.z : 400);
+    let bestA = 0, bestS = -Infinity;
+    for (const a of _CS_ANGLES) {
+      _csDir.copy(_csWant).applyAxisAngle(_csUp, a);
+      _crS.set(-_csDir.z, 0, _csDir.x);
+      let dmin = range;
+      for (let j = -1; j <= 1; j++) {
+        _crP.copy(o.position).addScaledVector(_crS, halfW * j);
+        const d = _hubCityRayHit(_crP, _csDir, range);
+        if (typeof d === 'number' && d < dmin) dmin = d;
+      }
+      if (a === 0 && dmin >= range) { bestA = 0; bestS = Infinity; break; }
+      const score = dmin - Math.abs(a) * (K.turnCost != null ? K.turnCost : 500);
+      if (score > bestS) { bestS = score; bestA = a; }
+    }
+    _carrier._steerA = bestA;
+  }
+  _csBest.copy(_csWant).applyAxisAngle(_csUp, _carrier._steerA || 0);
+  const cur = _carrier.dir;
+  const dot = Math.max(-1, Math.min(1, cur.x * _csBest.x + cur.z * _csBest.z));
+  const ang = Math.acos(dot);
+  if (!(ang > 0.002)) return;
+  const step = Math.min(ang, (K.yawRate != null ? K.yawRate : 0.25) * (dt || 0.016));
+  _csA.copy(cur).applyAxisAngle(_csUp, step); _csB.copy(cur).applyAxisAngle(_csUp, -step);
+  const pick = ((_csA.x * _csBest.x + _csA.z * _csBest.z) >= (_csB.x * _csBest.x + _csB.z * _csBest.z)) ? _csA : _csB;
+  pick.y = cur.y; pick.normalize();
+  _carrier.from.copy(o.position);
+  _carrier.dir.copy(pick);
+  _carrier.dist = remain;
+  _carrier.t = 0;
+  _carrierFaceRoute();
+}
 function _carrierFrame(dt) {
   if (!_carrier.obj || !_carrier.ent) return;
   if (!_carrier.ent.alive) return;
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) { _carrierRide(dt, false); return; }
+  try { _carrierSteer(dt); } catch (_) {}   // (v39.55) around the towers, not through them
   _carrier.t += (dt || 0.016);
   const travelled = Math.min(_carrier.dist, _carrierSpeed() * _carrier.t);
   const o = _carrier.obj;
@@ -21433,9 +22011,9 @@ function _cyberSetup(C) {
     C.teamB = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_B != null) ? LSS.TEAM_FLEET_B : 3;
     C.authority = _cyberAuthority();
     if (net.active && !C.authority) {
-      try { player.team = _cyberTeamForPeer(net.myPeerId, C); } catch (_) { player.team = C.teamA; }
+      try { _owSetPlayerTeam(_cyberTeamForPeer(net.myPeerId, C)); } catch (_) { _owSetPlayerTeam(C.teamA); }   // (v39.55) the owned cities follow
     } else {
-      try { player.team = (net.active ? _cyberTeamForPeer(net.myPeerId, C) : C.teamA); } catch (_) { player.team = C.teamA; }
+      try { _owSetPlayerTeam(net.active ? _cyberTeamForPeer(net.myPeerId, C) : C.teamA); } catch (_) { _owSetPlayerTeam(C.teamA); }   // (v39.55)
       const _sector = (C.sector != null) ? C.sector : Math.floor(Math.random() * 6);
       _cyberApplyStart(_sector, 0);
       try { C.field = _cyberSpawnField(); } catch (_) {}
@@ -22559,7 +23137,7 @@ function _owCityTick(c, dt, playing) {
       const at = new THREE.Vector3(c.x, _owTowerTop(c), c.z);
       const mode = owned ? (c._pendingMode || 'follow') : 'home';
       _owSpawnCarrier(c, team, at, mode, owned ? _owOwnerEntity(c.owner) : null);
-      if (!c.fleet.length) _owSpawnFleet(c, team, at); else _owReviveFleet(c, at);
+      if (!c.fleet.length || c.fleet.some((b) => b && b.team !== team)) { try { _owKillFleet(c, false); } catch (_) {} _owSpawnFleet(c, team, at); } else _owReviveFleet(c, at);
     }
   }
   const car = (c.carrier && c.carrier.alive) ? c.carrier : null;
@@ -23018,13 +23596,33 @@ function _owAuthTransition(auth) {
   if (was === null) return;
   try { if (auth) _owAdopt(); else _owDemote(); } catch (e) { console.warn('[cities] authority handoff threw:', e); }
 }
+function _owSyncTeams(oldTeam, newTeam) {
+  try {
+    if (oldTeam == null || newTeam == null || oldTeam === newTeam) return 0;
+    if (typeof OW === 'undefined' || !OW || !OW.cities) return 0;
+    let n = 0;
+    for (const c of OW.cities) {
+      if (!c) continue;
+      if (c.owner === oldTeam) { c.owner = newTeam; n++; }
+      if (c.fleet) for (const b of c.fleet) { if (b && b.team === oldTeam) { b.team = newTeam; n++; } }
+      if (c.carrier && c.carrier.team === oldTeam) { c.carrier.team = newTeam; n++; }
+    }
+    return n;
+  } catch (_) { return 0; }
+}
+function _owSetPlayerTeam(t) {
+  const prev = (typeof player !== 'undefined' && player) ? player.team : null;
+  player.team = t;
+  if (prev !== t) _owSyncTeams(prev, t);
+}
 function _owAdopt() {
   for (const c of OW.cities) {
     if (c.carrier && c.carrier.isProxy) { const car = c.carrier; car.isProxy = false; car.owner = (car.mode === 'follow') ? _owOwnerEntity(car.team) : null; car.rideY = null; }
-    const mine = game.entities.filter(b => b && (b instanceof Bot) && b._owCity === c.idx);
+    const _side = (c.owner != null) ? c.owner : (OW.TEAM0 + c.idx);   // (v39.55) the city's side, not whatever the roster carried
+    const mine = game.entities.filter(b => b && (b instanceof Bot) && b._owCity === c.idx && b.team === _side);
     for (const b of mine) { b.isProxy = false; b._netX = null; if (b.velocity) b.velocity.set(0, 0, 0); }
     c.fleet = mine; c._fleetPending = false; c._carrierPending = 0;
-    if (!mine.length && c.carrier && c.carrier.alive) _owSpawnFleet(c, c.carrier.team, c.carrier.position);
+    if (!mine.length && c.carrier && c.carrier.alive) _owSpawnFleet(c, _side, c.carrier.position);
     else if (!c.carrier && c.owner == null) c.armed = false;   // a hostile city with no flagship re-arms on approach
     if (c.field) { c.field.isProxy = false; c.field.teamProgress = {}; if (c.field._owTeam != null) c.field.teamProgress[c.field._owTeam] = (c.field._owProg || 0) * (c.field.chargeTime || OW.FIELD_CHARGE); }
   }
@@ -23226,7 +23824,7 @@ if (typeof window !== 'undefined') {
     if (player.mesh) player.mesh.position.copy(player.position);
     return c.name + ' @ ' + Math.round(c.x) + ',' + Math.round(c.z);
   };
-  window.__citiesOwn = (i) => { const c = OW.cities && OW.cities[i]; if (!c || !_owAuthority()) return false; if (c.carrier && c.carrier.alive) { c.carrier._lastAttacker = 'player'; c.carrier.health = 0; c.carrier.die(); return true; } c.owner = player.team; c.ownerName = 'YOU'; _owBossCheck(); return true; };
+  window.__citiesOwn = (i) => { const c = OW.cities && OW.cities[i]; if (!c || !_owAuthority()) return false; if (c.carrier && c.carrier.alive) { c.carrier._lastAttacker = 'player'; c.carrier.health = 0; c.carrier.die(); return true; } try { _owKillFleet(c, true); } catch (_) {} c.owner = player.team; c.ownerName = 'YOU'; _owBossCheck(); return true; };   // (v39.55) no hostile garrison left behind
   window.__citiesBoss = () => (OW.boss || (_owAuthority() ? _owBossSpawn() : null));
   window.__citiesCfg = OW;
 }
@@ -25473,6 +26071,24 @@ function _bendUnmap(px, py, pz) {
   Q.x = qx; Q.y = qy; Q.z = qz;
   return Q;
 }
+function _bendOn() { return !!(game.bendWorld && game._bendSegs && game._bendSegs.length); }
+function _bendToFlat(x, y, z, out) {
+  out = out || { x: 0, y: 0, z: 0 };
+  if (_bendOn()) { const q = _bendUnmap(x, y, z); out.x = q.x; out.y = q.y; out.z = q.z; }
+  else { out.x = x; out.y = y; out.z = z; }
+  return out;
+}
+function _bendToWorld(x, y, z, out) {
+  out = out || { x: 0, y: 0, z: 0 };
+  if (_bendOn()) { const w = _bendMapPoint(x, y, z); out.x = w.x; out.y = w.y; out.z = w.z; }
+  else { out.x = x; out.y = y; out.z = z; }
+  return out;
+}
+function _flatSDF(qx, qy, qz) {
+  if (!_bendOn()) return worldSDF(qx, qy, qz);
+  const w = _bendMapPoint(qx, qy, qz);
+  return worldSDF(w.x, w.y, w.z);
+}
 function _bendVerts(verts) {
   for (let i = 0; i < verts.length; i += 3) {
     const p = _bendMapPoint(verts[i], verts[i + 1], verts[i + 2]);
@@ -26281,6 +26897,23 @@ function _previewFitBackdrop(aspect) {
   }
 }
 
+const _PICKER_LIGHTS = { amb: 0.48, key: 1.25, fill: 0.55, rim: 0.42, hemi: 0.45 };
+function _pickerLightsAdd(scene) {
+  const L = {};
+  L.amb = new THREE.AmbientLight(0xffffff, _PICKER_LIGHTS.amb); scene.add(L.amb);
+  L.key = new THREE.DirectionalLight(0xbfd9ff, _PICKER_LIGHTS.key); L.key.position.set(180, 240, 160); scene.add(L.key);
+  L.fill = new THREE.DirectionalLight(0xffb066, _PICKER_LIGHTS.fill); L.fill.position.set(-140, -80, -200); scene.add(L.fill);
+  L.rim = new THREE.DirectionalLight(0xffaa00, _PICKER_LIGHTS.rim); L.rim.position.set(0, 120, -260); scene.add(L.rim);
+  L.hemi = new THREE.HemisphereLight(0x8fb4e6, 0x3a2a1a, _PICKER_LIGHTS.hemi); scene.add(L.hemi);
+  try { _shipPreview3D.lights = L; } catch (_) {}
+  return L;
+}
+if (typeof window !== 'undefined') window.__pickerLights = function (v) {
+  const L = _shipPreview3D && _shipPreview3D.lights; if (!L) return 'no picker scene yet';
+  if (typeof v === 'number') { for (const k in _PICKER_LIGHTS) if (L[k]) L[k].intensity = _PICKER_LIGHTS[k] * v; return 'x' + v; }
+  if (v && typeof v === 'object') { for (const k in v) if (L[k] && typeof v[k] === 'number') L[k].intensity = v[k]; }
+  const out = {}; for (const k in L) out[k] = +L[k].intensity.toFixed(2); return out;
+};
 function _initShipPreview3D() {
   if (_shipPreview3D.renderer || _shipPreview3D.ready) return _shipPreview3D.renderer;
   if (_shipPreview3D.initFailed) return null;
@@ -26290,10 +26923,7 @@ function _initShipPreview3D() {
   try {
     if (_ONE_CTX_PREVIEW) {
       const scene = new THREE.Scene();
-      scene.add(new THREE.AmbientLight(0xffffff, 0.25));
-      const keyL = new THREE.DirectionalLight(0xbfd9ff, 0.65); keyL.position.set(180, 240, 160); scene.add(keyL);
-      const fillL = new THREE.DirectionalLight(0xffb066, 0.28); fillL.position.set(-140, -80, -200); scene.add(fillL);
-      const rimL = new THREE.DirectionalLight(0xffaa00, 0.18); rimL.position.set(0, 120, -260); scene.add(rimL);
+      _pickerLightsAdd(scene);   // (v39.65) the shared rig, brighter
       try {
         const _ec = document.createElement('canvas'); _ec.width = 64; _ec.height = 32;
         const _eg = _ec.getContext('2d');
@@ -26363,13 +26993,7 @@ function _initShipPreview3D() {
       scene.environment = _pmrem.fromEquirectangular(_etex).texture;
       _pmrem.dispose(); _etex.dispose();
     } catch (e) { try { console.warn('[ship-preview] env build failed:', e && e.message); } catch (_) {} }
-    scene.add(new THREE.AmbientLight(0xffffff, 0.25));
-    const keyL = new THREE.DirectionalLight(0xbfd9ff, 0.65);
-    keyL.position.set(180, 240, 160); scene.add(keyL);
-    const fillL = new THREE.DirectionalLight(0xffb066, 0.28);
-    fillL.position.set(-140, -80, -200); scene.add(fillL);
-    const rimL = new THREE.DirectionalLight(0xffaa00, 0.18);
-    rimL.position.set(0, 120, -260); scene.add(rimL);
+    _pickerLightsAdd(scene);   // (v39.65) the shared rig, brighter
     const camera = new THREE.PerspectiveCamera(32, 1, 1, 8000);
     camera.position.set(0, 70, 320);
     camera.lookAt(0, 0, 0);
@@ -28627,12 +29251,14 @@ class Bot {
 
   _acquireCombatTarget() {
     let best = null, bestScore = Infinity;
-    if (player.shipState !== 'dead' && player.team !== this.team) {
+    const _side = (this._owCity != null && typeof OW !== 'undefined' && OW && OW.cities && OW.cities[this._owCity] &&
+                   OW.cities[this._owCity].owner != null) ? OW.cities[this._owCity].owner : this.team;
+    if (player.shipState !== 'dead' && player.team !== _side) {
       best = player;
       bestScore = this.position.distanceToSquared(player.position) * 0.5625;
     }
     for (const b of game.entities) {
-      if (!b || b === this || !b.alive || b.team === this.team) continue;
+      if (!b || b === this || !b.alive || b.team === _side) continue;
       if (b.isHubTraffic && this._owCity != null) continue;   // (v38.78) a city fleet leaves the freighters alone
       let d2 = this.position.distanceToSquared(b.position);
       if (b.isOwCarrier && this._owCity != null) d2 *= 6.25;   // (v38.81) a carrier counts as 2.5x farther: fighters pick fighters and pilots first
@@ -30130,7 +30756,8 @@ function _despawnProjectileSilent(p) {
   } catch (_) {}
 }
 
-function _spawnClassFireBurst(pos, colorHex, size) {
+const _vfTmpA = new THREE.Vector3(), _vfTmpB = new THREE.Vector3(), _vfTmpC = new THREE.Vector3(), _vfTmpD = new THREE.Vector3();
+function _spawnClassFireBurst(pos, colorHex, size, life) {   // (v39.54) life: seconds, default 0.62
   if (typeof game === 'undefined' || !game || !game.worldEffects) return;
   if (typeof _makeFireCloudMaterial !== 'function' || typeof scene === 'undefined' || !scene) return;
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
@@ -30154,9 +30781,10 @@ function _spawnClassFireBurst(pos, colorHex, size) {
   m.renderOrder = 1;
   m.frustumCulled = true;
   scene.add(m);
+  const _lifeF = (typeof life === 'number' && life > 0) ? life : 0.62;
   game.worldEffects.push({
     type: 'explFireCloud', position: pos.clone(),
-    timer: 0.62, duration: 0.62, fireMeshes: [m], _explSize: sz,
+    timer: _lifeF, duration: _lifeF, fireMeshes: [m], _explSize: sz,
   });
 }
 function spawnPyroFlame(pos) {
@@ -30404,6 +31032,15 @@ function _shipLightsFrame() {
   }
   let hT = 0;
   if (flying && tier < 3 && input.headlight !== false) hT = ((T && T.hI != null) ? T.hI : 2200.0) * (tier >= 1 ? 0.7 : 1);
+  let _hBoost = 1, _hReach = 1;
+  try {
+    const _f = scene.fog;
+    if (_f && _f.color) { const _fc = _f.color, _lm = 0.2126 * _fc.r + 0.7152 * _fc.g + 0.0722 * _fc.b; if (_lm < 0.16) _hBoost *= 1 + 0.7 * (1 - _lm / 0.16); }
+    const _K = (typeof window !== 'undefined' && window.__headBoost) ? window.__headBoost : null;
+    if (_K && _K.dark != null) _hBoost = Math.min(_hBoost, 1 + _K.dark);
+    if (game._swSubmerged) { _hBoost *= (_K && _K.sub != null) ? _K.sub : 2.3; _hReach *= 1.5; }
+  } catch (_) {}
+  hT *= _hBoost;
   S.hCur += (hT - S.hCur) * k;
   S.head.intensity = S.hCur;
   if (S.hCur > 0.01) {
@@ -30412,8 +31049,10 @@ function _shipLightsFrame() {
     else { S.head.position.copy(player.position); S.head.position.y -= 24; }
     camera.getWorldDirection(S._v);
     S.head.target.position.copy(player.position).addScaledVector(S._v, 1600);
-    S.head.distance = (T && T.hR) || 2400;
+    S.head.distance = ((T && T.hR) || 2400) * _hReach;   // (v39.64)
+    if (S._angle0 == null) S._angle0 = S.head.angle;
     if (T && T.hA != null) S.head.angle = T.hA;
+    else S.head.angle = game._swSubmerged ? Math.min(1.2, S._angle0 * 1.25) : S._angle0;   // (v39.64) a wider cone under water
     if (T && T.hP != null) S.head.penumbra = T.hP;
   }
   if (!S.TRAF_N && !S.CONE_N) return;
@@ -35277,8 +35916,7 @@ function _faceRaceFirstRing() {
   try {
     if (typeof LSS === 'undefined' || LSS.MODE !== 'race') return;
     if (typeof player === 'undefined' || !player || !player.euler || !player.position) return;
-    if (!game || game.selectedMap !== 'race_pole_position') return;
-    const map = (typeof MAP_DATA !== 'undefined') ? MAP_DATA.race_pole_position : null;
+    const map = _raceRingMap();   // (v39.57) the generated track too
     if (!map || !Array.isArray(map.rooms)) return;
     const _teamCode = (player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
     const teamRoom = map.rooms.find(r => r && r.team === _teamCode);
@@ -36336,11 +36974,17 @@ function _poleRoomFlowAxis(roomPos, tunnels, fallbackTarget) {
   if (fallbackTarget) return fallbackTarget.clone().sub(roomPos);
   return new THREE.Vector3(0, 0, 1);
 }
+function _raceRingMap() {
+  if (!game) return null;
+  if (game.selectedMap === 'race_pole_position') return (typeof MAP_DATA !== 'undefined') ? MAP_DATA.race_pole_position : null;
+  const lv = game.currentLevel;
+  if (lv && Array.isArray(lv.rooms) && lv.rooms.some(r => r && r.gate)) return lv;
+  return null;
+}
 function _spawnPoleRings() {
   try {
     if (typeof LSS === 'undefined' || LSS.MODE !== 'race') return;
-    if (!game || game.selectedMap !== 'race_pole_position') return;
-    const map = (typeof MAP_DATA !== 'undefined') ? MAP_DATA.race_pole_position : null;
+    const map = _raceRingMap();
     if (!map || !Array.isArray(map.rooms)) return;
     _preloadCyanRing();
     const fin = map.rooms.find(r => r && r.champion);
@@ -36349,6 +36993,7 @@ function _spawnPoleRings() {
     for (const r of map.rooms) {
       if (!r || r.champion) continue;
       if (r.team) continue;
+      if (map.procedural && !r.gate) continue;   // (v39.57) a generated track rings its gate rooms only
       const pos = new THREE.Vector3(r.x, r.y, r.z);
       const dia = Math.min((r.r || 300) * 1.7, 560);
       const ring = new RaceRing(pos, dia);
@@ -36375,7 +37020,7 @@ function _raceOnRingCaptured(ring) {
   } catch (_) {}
 }
 function _raceFinishUnlocked() {
-  if (!game || game.selectedMap !== 'race_pole_position') return true;
+  if (!game || !_raceRingMap()) return true;   // (v39.57) any ringed track locks its finish
   const rings = game.poleRings;
   if (!Array.isArray(rings) || rings.length === 0) return false;
   for (let i = 0; i < rings.length; i++) { if (!rings[i] || !rings[i].captured) return false; }
@@ -38064,6 +38709,7 @@ async function _prebakeWorldForLaunch() {
         const _dbg = _gl2.getExtension('WEBGL_debug_renderer_info');
         const _cv = renderer.domElement;
         _el.textContent = _pbLine +
+          '\nwarm ' + ((_kw.on && _kw.ok && !_kw.disabled) ? (_kw.K + ' it, ' + _kw.ms + ' of ' + _kw.cap + ' ms') : 'off') +   // (v39.63)
           '\ndpr ' + (window.devicePixelRatio || 1).toFixed(2) +
           ' | pixelRatio ' + (renderer.getPixelRatio ? renderer.getPixelRatio().toFixed(2) : '?') +
           ' | canvas ' + _cv.width + 'x' + _cv.height +
@@ -39804,6 +40450,7 @@ function updateEffects(dt) {
     else if (e.type === 'vortexLaserBeam') {
       const u = e.mesh.material && e.mesh.material.uniforms;
       const fade = (1 - t) * (1 - t);
+      if (e.glow) { const _gs = e.glow * (0.35 + 0.65 * fade); e.mesh.scale.set(_gs, _gs, 1); }   // (v39.68) glow cards shrink out (shared material: never touch its opacity)
       if (u && u.uIntensity) {
         u.uIntensity.value = fade * 1.15;
       }
@@ -42159,7 +42806,8 @@ function _botSendRoster(toPeerId) {
     bots.push({ i: b.id, k: b.loadoutKey, t: (b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A', h: b.hoardModelKey || null, n: b.isNemesis ? 1 : 0,
       tm: b.team, c: (b._owCity != null) ? b._owCity : -1 });   // (v38.79) numeric team + overworld city
   }
-  try { if (toPeerId) net.sendEvent({ type: 'bot_roster', bots }, toPeerId); else net.sendEvent({ type: 'bot_roster', bots }); } catch (_) {}
+  const rt = (game.endlessRun && game.endlessRun.startedAt) ? (Date.now() - game.endlessRun.startedAt) / 1000 : undefined;
+  try { if (toPeerId) net.sendEvent({ type: 'bot_roster', bots, rt }, toPeerId); else net.sendEvent({ type: 'bot_roster', bots, rt }); } catch (_) {}
 }
 
 function _botProxyById(id) {
@@ -43336,12 +43984,10 @@ function updatePlayerMovement(dt) {
   if (game.playerInStasis || game.playerRootTimer > 0 || game.state === 'warmup') {
     player.velocity.set(0, 0, 0);
     if ((input.locked || input.touchActive) && (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
-      player.euler.y -= input.mouseDX * input.sensitivity;
-      player.euler.x -= input.mouseDY * input.sensitivity;
+      { const _ls = _adsLookScale(); player.euler.y -= input.mouseDX * input.sensitivity * _ls; player.euler.x -= input.mouseDY * input.sensitivity * _ls; }   // (v39.54)
     }
     if (input.gpConnected) {
-      player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
-      player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt;
+      { const _ls = _adsLookScale(); player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt * _ls; player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt * _ls; }   // (v39.54)
     }
     player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
     input.mouseDX = 0; input.mouseDY = 0;
@@ -43362,12 +44008,10 @@ function updatePlayerMovement(dt) {
     : player.chassis;
 
   if ((input.locked || input.touchActive) && (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
-    player.euler.y -= input.mouseDX * input.sensitivity;
-    player.euler.x -= input.mouseDY * input.sensitivity;
+    { const _ls = _adsLookScale(); player.euler.y -= input.mouseDX * input.sensitivity * _ls; player.euler.x -= input.mouseDY * input.sensitivity * _ls; }   // (v39.54)
   }
   if (input.gpConnected) {
-    player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
-    player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt;
+    { const _ls = _adsLookScale(); player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt * _ls; player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt * _ls; }   // (v39.54)
   }
 
   if (renderer && renderer.xr && renderer.xr.isPresenting && input.vrHeadAim && input.vrHeadAim.enabled && _xrCachedCameraVR) {
@@ -44062,6 +44706,23 @@ function _lssApplyShipRig(dt) {
     const _zk = Math.min(1, (dt || 0.016) * (Z.rate || 12));
     game._adsZoom = (game._adsZoom || 0) + ((_zAim ? 1 : 0) - (game._adsZoom || 0)) * _zk;
     if (game._adsZoom < 0.002) game._adsZoom = 0;
+    {
+      const _zNow = performance.now();
+      const _zS = game._adsTap || (game._adsTap = { held: false, downAt: 0, upAt: -1e9, lastDur: 1e9, dbl: false, mag: 0 });
+      if (_zAim && !_zS.held) {
+        _zS.dbl = ((_zNow - _zS.upAt) < (Z.dblWin != null ? Z.dblWin : 320)) && (_zS.lastDur < (Z.tapMax != null ? Z.tapMax : 260));
+        _zS.downAt = _zNow; _zS.held = true;
+      } else if (!_zAim && _zS.held) {
+        _zS.lastDur = _zNow - _zS.downAt; _zS.upAt = _zNow; _zS.held = false;
+      }
+      const _mBase = (Z.mMax != null ? Z.mMax : 2.4);
+      const _mTarget = _mBase * (_zS.dbl ? (Z.dblMul != null ? Z.dblMul : 2) : 1);
+      if (!_zS.mag) _zS.mag = _mTarget;
+      if (_zAim) _zS.mag += (_mTarget - _zS.mag) * _zk;
+      else if (game._adsZoom === 0) { _zS.mag = _mBase; _zS.dbl = false; }
+      game._adsMag = _zS.mag;
+      game._adsDouble = _zS.dbl;
+    }
     const _zBase = (typeof input !== 'undefined' && input && typeof input.fovDeg === 'number') ? input.fovDeg : 90;
     if (!_zVr) {
       const z = game._adsZoom;
@@ -44076,7 +44737,7 @@ function _lssApplyShipRig(dt) {
       } else {
       if (z > 0 && (_z3p || _zm === 'steady')) {
         game._adsDolly = 0;
-        const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
+        const _mTot = 1 + z * ((game._adsMag || (Z.mMax != null ? Z.mMax : 2.4)) - 1);   // (v39.54) double-tap zoom
         camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mTot) * 180 / Math.PI;
         camera.updateProjectionMatrix();
       } else if (z > 0) {
@@ -44088,7 +44749,7 @@ function _lssApplyShipRig(dt) {
         let _dC = game._adsDolly || 0;
         _dC = _dC + (_dT - _dC) * Math.min(1, (dt || 0.016) * (_dT < _dC ? 10 : 3.5));
         _dC = Math.min(_dC, Math.max(0, L - 60));
-        const _mTot = 1 + z * ((Z.mMax != null ? Z.mMax : 2.4) - 1);
+        const _mTot = 1 + z * ((game._adsMag || (Z.mMax != null ? Z.mMax : 2.4)) - 1);   // (v39.54) double-tap zoom
         const _mFov = Math.max(1, _mTot / (L / Math.max(1, L - _dC)));
         if (_mFov > 1.0001) {
           camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mFov) * 180 / Math.PI;
@@ -44110,6 +44771,14 @@ function _lssApplyShipRig(dt) {
   }
 }
 
+function _adsLookScale() {
+  try {
+    const Z = window.__zoom; if (!Z || Z.dblSens === false) return 1;
+    const z = game._adsZoom || 0, M = game._adsMag || 0, m0 = (Z.mMax != null ? Z.mMax : 2.4);
+    if (!z || !M || M <= m0) return 1;
+    return 1 + z * (m0 / M - 1);
+  } catch (_) { return 1; }
+}
 function _adsShipOverlaySet(on) {
   const mesh = (typeof player !== 'undefined' && player) ? player.mesh : null;
   if (on && mesh) {
@@ -44555,10 +45224,22 @@ function fireHitscan(origin, dir, w) {
     _spawnRailgunSpiral(localFrom, end, tracerColor);
   } else {
     const _vAds = (player.loadoutKey === 'VORTEX' && player.vortexAdsActive);
+    const _vfS = (player.loadoutKey === 'VORTEX') ? (window.__vortexFire || {}) : null;
+    const _vDeep = (_vfS && _vfS.shotDeep > 0) ? new THREE.Color(tracerColor).lerp(new THREE.Color(0x5a00c8), _vfS.shotDeep).getHex()
+                 : ((_vfS && _vfS.shotTint != null) ? _vfS.shotTint : tracerColor);   // (v39.56) red-shifted so the additive tracer reads purple
     const _vCol = _vAds
-      ? new THREE.Color(tracerColor).lerp(new THREE.Color(0xffffff), 0.35).getHex()
-      : tracerColor;
-    spawnTracer(origin, end, _vCol, _vAds ? 1.85 : (isChaingun ? 0.55 : 1.0));
+      ? new THREE.Color(_vDeep).lerp(new THREE.Color(0xffffff), 0.30).getHex()
+      : _vDeep;
+    spawnTracer(origin, end, _vCol, _vAds ? 1.85 : (isChaingun ? 0.55 : (_vfS ? 1.15 : 1.0)));
+    if (_vfS && typeof _spawnClassFireBurst === 'function') {
+      try {
+        const _vfC = (_vfS.color != null) ? _vfS.color : 0xc46cff;
+        const _n1 = game.worldEffects.length;
+        _spawnClassFireBurst(origin.clone().addScaledVector(aimDir, 40), _vfC, (_vfS.shotMuzzle != null ? _vfS.shotMuzzle : 12), 0.45);
+        if (levelDist < w.range) _spawnClassFireBurst(end, _vfC, (_vfS.shotHit != null ? _vfS.shotHit : 20), 0.9);
+        for (let _k = _n1; _k < game.worldEffects.length; _k++) game.worldEffects[_k]._grow = 1.2;
+      } catch (_) {}
+    }
   }
   if (net.active && net.sendEvent) {
     net.sendEvent({
@@ -44786,7 +45467,7 @@ function fireHitscan(origin, dir, w) {
           velocity: sparkVel,
           life: 0.15 + Math.random() * 0.1,
           maxLife: 0.25,
-          color: 0x44ddff,
+          color: (player.loadoutKey === 'VORTEX') ? 0xaa55ff : 0x44ddff,   // (v39.54) purple sparks off a purple beam; (v39.55) the class purple
           size: 1.5 + Math.random() * 1.5
         });
       }
@@ -45240,6 +45921,7 @@ function executeAbility(slot, ability) {
           const _armMat = _makeFXMaterial('core_beam');
           const _armR = BEAM_RADIUS * _vyK.armAbility;
           if (_armMat.uniforms.uPosScale) _armMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _armR);
+          if (_armMat.uniforms.uAxialFalloff) _armMat.uniforms.uAxialFalloff.value = 0.95;   // (v39.68) fades into the muzzle glow (+Y = the gun)
           const _armMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _armMat);
           _vortexSpan(_armMesh, _vlOrigin, _gun, _armR);   // opaque +Y end at the joint
           _armMesh.frustumCulled = false;
@@ -45248,6 +45930,29 @@ function executeAbility(slot, ability) {
           game.effects.push({ mesh: _armMesh, type: 'vortexLaserBeam', age: 0, lifetime: beamLife });
         }
       }
+      try {
+        const _gmat = _vortexGlowMaterial(), _ggeo = _vortexGlowGeometry();
+        const _vfA = window.__vortexFire || {};
+        const _gMuzA = (_vfA.glowMuzzleAbility != null) ? _vfA.glowMuzzleAbility : 16;
+        const _gJointA = (_vfA.glowJointAbility != null) ? _vfA.glowJointAbility : 22;
+        const _spots = _vyPair ? [[_vyGunA, _gMuzA], [_vyGunB, _gMuzA], [_vlOrigin, _gJointA]] : [[_vlOrigin, _gJointA]];
+        for (const _sp of _spots) {
+          const q = new THREE.Mesh(_ggeo, _gmat);
+          q.position.copy(_sp[0]); q.quaternion.copy(camera.quaternion); q.scale.set(_sp[1], _sp[1], 1);
+          q.frustumCulled = false; q.renderOrder = 3;
+          scene.add(q);
+          game.effects.push({ mesh: q, type: 'vortexLaserBeam', age: 0, lifetime: beamLife, glow: _sp[1] });
+        }
+        if (_vyPair && typeof _spawnClassFireBurst === 'function') {
+          for (const _gun of [_vyGunA, _vyGunB]) {
+            for (let _k = 0; _k < 2; _k++) {
+              const _n0 = game.worldEffects.length;
+              _spawnClassFireBurst(_vfTmpD.copy(_gun).addScaledVector(_vlDir, 5 + Math.random() * 9), (_vfA.color != null) ? _vfA.color : 0xc46cff, 7 + Math.random() * 5, 0.38);
+              if (game.worldEffects.length > _n0) game.worldEffects[game.worldEffects.length - 1]._grow = 1.3;
+            }
+          }
+        }
+      } catch (_) {}
       game.effects.push({
         mesh: beamMesh,
         type: 'vortexLaserBeam',
@@ -46247,11 +46952,15 @@ function activateCore() {
     const _mtrN = (typeof _aegisUpFor === 'function' && _aegisUpFor(20)) ? 12 : 8;
     for (let m = 0; m < _mtrN; m++) {
       const spread = new THREE.Vector3((Math.random()-0.5)*0.3, (Math.random()-0.5)*0.3, 0);
-      let _mtrOrigin = player.position.clone();
-      if (_mtrLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
-        const _f = _mtrLaunchers[m % _mtrLaunchers.length];
-        _mtrOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _mtrOrigin;
+      let _mtrOrigin = null;
+      if (typeof shipMuzzleWorld === 'function' && player.mesh) {
+        try { _mtrOrigin = shipMuzzleWorld(player.mesh, m, new THREE.Vector3()); } catch (_) { _mtrOrigin = null; }
       }
+      if (!_mtrOrigin && _mtrLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
+        const _f = _mtrLaunchers[m % _mtrLaunchers.length];
+        _mtrOrigin = _computeScreenMuzzleWorld(_f.x, _f.y);
+      }
+      if (!_mtrOrigin) _mtrOrigin = player.position.clone();
       const vel = player.position.clone().addScaledVector(forward, 1200)
         .sub(_mtrOrigin).normalize().add(spread).normalize().multiplyScalar(_mtrSpeed());
       const proj = new Projectile(_mtrOrigin, vel, 250, 120, 'player', 0xffcc00);
@@ -47231,7 +47940,7 @@ function updateWorldEffects(dt) {
         }
       }
     }
-    else if(eff.type==="explFireCloud"){const tt=1-Math.max(0,eff.timer/(eff.duration||.5));if(eff.fireMeshes){const t2=typeof game!=="undefined"?game.time:0;for(let i=0;i<eff.fireMeshes.length;i++){const m=eff.fireMeshes[i];const u=m.material.uniforms;u.time.value=t2;u.uBaseAlpha.value=.85*(1-tt)*(1-tt);m.scale.setScalar((eff._explSize||20)*(.7+i*.3+tt*2.2))}}}
+    else if(eff.type==="explFireCloud"){const tt=1-Math.max(0,eff.timer/(eff.duration||.5));if(eff.fireMeshes){const t2=typeof game!=="undefined"?game.time:0;for(let i=0;i<eff.fireMeshes.length;i++){const m=eff.fireMeshes[i];const u=m.material.uniforms;u.time.value=t2;u.uBaseAlpha.value=.85*(1-tt)*(1-tt);m.scale.setScalar((eff._explSize||20)*(.7+i*.3+tt*(eff._grow!=null?eff._grow:2.2)))}}}
 
     else if (eff.type === 'tripwire') {
       const isMyWire = !net.active || !eff.ownerPeerId || eff.ownerPeerId === net.myPeerId;
@@ -48124,11 +48833,36 @@ function updateAbilities(dt) {
       beam.quaternion.setFromUnitVectors(_mvUp, forward);
       beam.scale.set(BEAM_RADIUS, _stemLen, BEAM_RADIUS);
       beam.visible = true;
+      try {
+        const _vfK = window.__vortexFire || (window.__vortexFire = { hz: 10, life: 1.6, size: 26, max: 22, color: 0xc46cff, out: 1.0, grow: 1.0, shotMuzzle: 12, shotHit: 20, shotDeep: 0, shotTint: 0xc46cff });   // (v39.56) purple as seen, not as stored
+        player._mlFlameT = (player._mlFlameT || 0) - dt;
+        if (_vfK.hz > 0 && player._mlFlameT <= 0 && typeof _spawnClassFireBurst === 'function') {
+          player._mlFlameT = 1 / _vfK.hz;
+          let _live = 0;
+          for (const _we of game.worldEffects) if (_we && _we._beamFlame) _live++;
+          if (_live < _vfK.max) {
+            const _joinF = _vyPairC ? _vyKc.join : 0;
+            const _reachF = (player._mlHitDist != null) ? Math.max(40, Math.min(_stemLen, player._mlHitDist - _joinF)) : _stemLen;
+            const _along = _reachF * (0.12 + Math.random() * 0.86);
+            const _ang = Math.random() * Math.PI * 2;
+            const _ax = (Math.abs(forward.y) < 0.9) ? _vfTmpA.set(0, 1, 0) : _vfTmpA.set(1, 0, 0);
+            const _r1 = _vfTmpB.crossVectors(forward, _ax).normalize();
+            const _r2 = _vfTmpC.crossVectors(forward, _r1).normalize();
+            const _pt = _vfTmpD.copy(_stemFrom).addScaledVector(forward, _along)
+              .addScaledVector(_r1, Math.cos(_ang) * BEAM_RADIUS * _vfK.out)
+              .addScaledVector(_r2, Math.sin(_ang) * BEAM_RADIUS * _vfK.out);
+            const _n0 = game.worldEffects.length;
+            _spawnClassFireBurst(_pt, _vfK.color, _vfK.size * (0.75 + Math.random() * 0.5), _vfK.life);
+            if (game.worldEffects.length > _n0) { const _fe = game.worldEffects[game.worldEffects.length - 1]; _fe._beamFlame = true; _fe._grow = (_vfK.grow != null ? _vfK.grow : 1.0); }
+          }
+        }
+      } catch (_) {}
       if (_vyPairC) {
         if (!player._vortexCoreArms) {
           player._vortexCoreArms = [0, 1].map(() => {
             const m = new THREE.Mesh(_getVortexCoreArmConeGeometry(), _makeFXMaterial('core_beam'));
             if (m.material.uniforms.uPosScale) m.material.uniforms.uPosScale.value = 1.0 / Math.max(1, 95 * 0.15);
+            if (m.material.uniforms.uAxialFalloff) m.material.uniforms.uAxialFalloff.value = 0.95;
             m.frustumCulled = false;
             m.renderOrder = 2;
             scene.add(m);
@@ -48138,6 +48872,34 @@ function updateAbilities(dt) {
         const _armR = BEAM_RADIUS * _vyKc.armCore;
         _vortexSpan(player._vortexCoreArms[0], _stemFrom, _vyGunA, _armR);
         _vortexSpan(player._vortexCoreArms[1], _stemFrom, _vyGunB, _armR);
+        try {
+          if (!player._vortexCoreGlows) {
+            const _gm = _vortexGlowMaterial();   // (v39.68) shared with the Laser ability
+            player._vortexCoreGlows = [0, 1, 2].map(() => { const q = new THREE.Mesh(_vortexGlowGeometry(), _gm); q.frustumCulled = false; q.renderOrder = 3; scene.add(q); return q; });
+            try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player._vortexCoreGlows[0]); } catch (_) {}
+          }
+          const _vfG = window.__vortexFire || {};
+          const _gMuz = (_vfG.glowMuzzle != null) ? _vfG.glowMuzzle : 30, _gJoint = (_vfG.glowJoint != null) ? _vfG.glowJoint : 4.5 * _armR;
+          const _G = player._vortexCoreGlows;
+          _G[0].position.copy(_vyGunA); _G[1].position.copy(_vyGunB); _G[2].position.copy(_stemFrom);
+          const _gPulse = 0.9 + 0.14 * Math.sin(game.time * 23.0);
+          _G[0].scale.set(_gMuz * _gPulse, _gMuz * _gPulse, 1); _G[1].scale.set(_gMuz * (2 - _gPulse), _gMuz * (2 - _gPulse), 1); _G[2].scale.set(_gJoint, _gJoint, 1);
+          for (const _g of _G) { _g.quaternion.copy(camera.quaternion); _g.visible = true; }
+          const _mHz = (_vfG.muzzleHz != null) ? _vfG.muzzleHz : 14;
+          player._mlMuzzleT = (player._mlMuzzleT || 0) - dt;
+          if (_mHz > 0 && player._mlMuzzleT <= 0 && typeof _spawnClassFireBurst === 'function') {
+            player._mlMuzzleT = 1 / _mHz;
+            let _liveM = 0;
+            for (const _we of game.worldEffects) if (_we && _we._muzzleFlame) _liveM++;
+            if (_liveM < 10) {
+              const _gun = (player._mlMuzzleSide = 1 - (player._mlMuzzleSide || 0)) ? _vyGunA : _vyGunB;
+              const _mSize = ((_vfG.muzzleSize != null) ? _vfG.muzzleSize : 13) * (0.8 + Math.random() * 0.5);
+              const _n0 = game.worldEffects.length;
+              _spawnClassFireBurst(_vfTmpD.copy(_gun).addScaledVector(forward, 6 + Math.random() * 10), (_vfG.color != null) ? _vfG.color : 0xc46cff, _mSize, 0.42);
+              if (game.worldEffects.length > _n0) { const _fe = game.worldEffects[game.worldEffects.length - 1]; _fe._muzzleFlame = true; _fe._grow = 1.3; }
+            }
+          }
+        } catch (_) {}
         for (const _a of player._vortexCoreArms) {
           _a.visible = true;
           if (_a.material && _a.material.uniforms && _a.material.uniforms.uIntensity && beam.material.uniforms.uIntensity) {
@@ -48224,6 +48986,43 @@ function updateAbilities(dt) {
               bot._megaLaserHitMarkerTimer = 0.18;
               if (typeof showHitMarker === 'function') showHitMarker();
             }
+          }
+        }
+      }
+      if (game.monsters) {
+        for (const mon of game.monsters) {
+          if (!mon || !mon.alive || !mon.position) continue;
+          const dx = mon.position.x - player.position.x;
+          const dy = mon.position.y - player.position.y;
+          const dz = mon.position.z - player.position.z;
+          const proj = dx * forward.x + dy * forward.y + dz * forward.z;
+          if (!(proj > 0 && proj < range)) continue;
+          const closest = _abTmpA.copy(player.position).addScaledVector(forward, proj);
+          const cdx = closest.x - mon.position.x;
+          const cdy = closest.y - mon.position.y;
+          const cdz = closest.z - mon.position.z;
+          const _mR = ((mon.collisionRadius || 200) + BEAM_RADIUS * 0.6);
+          if (cdx * cdx + cdy * cdy + cdz * cdz >= _mR * _mR) continue;
+          const _len = Math.sqrt(cdx * cdx + cdy * cdy + cdz * cdz);
+          const hitPoint = _abProbeMid.copy(mon.position);
+          if (_len > 0.001) hitPoint.addScaledVector(_abTmpD.set(cdx, cdy, cdz), Math.min(_len, (mon.collisionRadius || 200) * 0.8) / _len);
+          const dealt = mon.takeDamage(3000 * dt, 'player', hitPoint);
+          if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
+          mon._megaLaserFxTimer = (mon._megaLaserFxTimer || 0) - dt;
+          if (mon._megaLaserFxTimer <= 0 && dealt > 0) {
+            mon._megaLaserFxTimer = 0.06;
+            if (typeof spawnHullBurst === 'function') { spawnHullBurst(hitPoint, 0xffffff, 70); spawnHullBurst(hitPoint, 0xeeccff, 55); }
+            if (typeof spawnLightningBolt === 'function') {
+              const arcEnd = _abTmpA.set(hitPoint.x + (Math.random() - 0.5) * 90, hitPoint.y + (Math.random() - 0.5) * 90, hitPoint.z + (Math.random() - 0.5) * 90);
+              spawnLightningBolt(hitPoint, arcEnd, 0xeeccff, 0.14, 1, 2.0);
+            }
+            spawnDynamicLight(hitPoint, 0xeebbff, 4.0, 600, 0.22);
+          }
+          if (dealt > 0 && typeof spawnHitFire === 'function') spawnHitFire(hitPoint, _mlCol, null, 1.5);
+          mon._megaLaserHitMarkerTimer = (mon._megaLaserHitMarkerTimer || 0) - dt;
+          if (mon._megaLaserHitMarkerTimer <= 0 && dealt > 0) {
+            mon._megaLaserHitMarkerTimer = 0.18;
+            if (typeof showHitMarker === 'function') showHitMarker();
           }
         }
       }
@@ -48353,13 +49152,17 @@ function updateAbilities(dt) {
         aimDir.y += (Math.random() - 0.5) * 0.25;
         aimDir.normalize();
         const vel = aimDir.multiplyScalar(_mtrSpeed());   // (v39.48) matches the opening burst
-        let _mtrcOrigin = player.position;
+        let _mtrcOrigin = null;
         const _mtrcLaunchers = _PLAYER_LAUNCHER_FRACS.TRACKER;
-        if (_mtrcLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
-          player._megaTrackerLaunchIdx = (player._megaTrackerLaunchIdx || 0) + 1;
-          const _f = _mtrcLaunchers[player._megaTrackerLaunchIdx % _mtrcLaunchers.length];
-          _mtrcOrigin = _computeScreenMuzzleWorld(_f.x, _f.y) || _mtrcOrigin;
+        player._megaTrackerLaunchIdx = (player._megaTrackerLaunchIdx || 0) + 1;
+        if (typeof shipMuzzleWorld === 'function' && player.mesh) {
+          try { _mtrcOrigin = shipMuzzleWorld(player.mesh, player._megaTrackerLaunchIdx, new THREE.Vector3()); } catch (_) { _mtrcOrigin = null; }
         }
+        if (!_mtrcOrigin && _mtrcLaunchers && typeof _computeScreenMuzzleWorld === 'function') {
+          const _f = _mtrcLaunchers[player._megaTrackerLaunchIdx % _mtrcLaunchers.length];
+          _mtrcOrigin = _computeScreenMuzzleWorld(_f.x, _f.y);
+        }
+        if (!_mtrcOrigin) _mtrcOrigin = player.position.clone();
         const missile = new Projectile(_mtrcOrigin, vel, 200, 120, 'player', LSS.CLASS_COLORS.TRACKER);
         missile.lifetime = _mtrLife();
         missile.salvoGuided = true;
@@ -48439,6 +49242,7 @@ function updateAbilities(dt) {
     if (!isFiringLaserCore) {
       player._vortexCoreBeam.visible = false;
       if (player._vortexCoreArms) for (const _a of player._vortexCoreArms) _a.visible = false;
+      if (player._vortexCoreGlows) for (const _g of player._vortexCoreGlows) _g.visible = false;   // (v39.67)
     }
   }
 
@@ -51110,6 +51914,23 @@ try {
   };
 } catch (_) {}
 
+function _champCaptureState() {
+  try {
+    const _cf = game.championField;
+    if (!_cf || !_cf.alive || !_cf.teamProgress) return null;
+    const _pa = _cf.teamProgress[LSS.TEAM_FLEET_A] || 0;
+    const _pb = _cf.teamProgress[LSS.TEAM_FLEET_B] || 0;
+    const _act = _cf.chargingTeam;
+    let lead, isA;
+    if (_act === LSS.TEAM_FLEET_A && _pa > 0)      { lead = _pa; isA = true;  }
+    else if (_act === LSS.TEAM_FLEET_B && _pb > 0) { lead = _pb; isA = false; }
+    else if (_pa >= _pb)                           { lead = _pa; isA = true;  }
+    else                                           { lead = _pb; isA = false; }
+    if (!(lead > 0)) return null;
+    const max = Math.max(0.001, (typeof _isAssault === 'function' && _isAssault()) ? LSS.ASSAULT_CHARGE_TIME : LSS.CHAMPION_CHARGE_TIME);
+    return { frac: Math.min(1, lead / max), isA, mine: (player && player.team === (isA ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B)) };
+  } catch (_) { return null; }
+}
 function drawCircumpunctHUD() {
   if (!player.chassis) return;
 
@@ -51245,6 +52066,30 @@ function drawCircumpunctHUD() {
       blasterClose: player.loadoutKey === 'BLASTER' && player.blasterMode === 'close',
     });
 
+  {
+    const _cc = _champCaptureState();
+    if (_cc && _cc.frac > 0) {
+      const _ccR = Math.max(44, Math.round(Math.min(W, H) * 0.052)), _a0 = -Math.PI / 2, _a1 = _a0 + Math.PI * 2 * _cc.frac;
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = 'rgba(200,215,255,0.22)';
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(cx, cy, _ccR, 0, Math.PI * 2); ctx.stroke();
+      const _col = _cc.isA ? 'rgba(255,90,90,' : 'rgba(110,230,110,';
+      ctx.strokeStyle = _col + '0.28)';
+      ctx.lineWidth = 10;
+      ctx.beginPath(); ctx.arc(cx, cy, _ccR, _a0, _a1); ctx.stroke();
+      ctx.strokeStyle = _col + '0.95)';
+      ctx.lineWidth = 4;
+      ctx.beginPath(); ctx.arc(cx, cy, _ccR, _a0, _a1); ctx.stroke();
+      if (_cc.frac >= 0.999) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(cx, cy, _ccR + 7, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
     _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed);
     return;
   }
@@ -52157,7 +53002,8 @@ function updateHUD() {
   }
 
   const _ccEl = _hudEl('champ-capture');
-  if (_ccEl) {
+  if (_ccEl && window.__champBar !== true) { _hudDisplay(_ccEl, 'champ-cap:d', 'none'); }
+  else if (_ccEl) {
     const _cf = game.championField;
     let _ccFrac = 0, _ccIsA = true;
     if (_cf && _cf.alive && _cf.teamProgress) {
@@ -55087,6 +55933,7 @@ function _refreshSettingsValues() {
     if (_hv) _hv.textContent = _hs.toFixed(2) + 'x';
   }
   setChk('set-show-fps', input.showFps);
+  setChk('set-keep-warm', input.keepWarm !== false);
   setChk('set-hull-glow', input.hullGlow !== false);
   setChk('set-cockpit-vr', input.cockpitVR === true);
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
@@ -55354,6 +56201,10 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Show FPS Counter</label>
         <input type="checkbox" id="set-show-fps" ${input.showFps ? 'checked' : ''}>
+      </div>
+      <div class="setting-row">
+        <label>GPU keep-warm (anti-stutter)</label>
+        <input type="checkbox" id="set-keep-warm" ${input.keepWarm !== false ? 'checked' : ''}>
       </div>
       <div class="setting-row">
         <label>3D Cockpit in VR (experimental)</label>
@@ -56679,6 +57530,11 @@ function buildSettingsPage() {
     input.showFps = !!showFpsChk.checked;
     saveSettings();
   });
+  const keepWarmChk = overlay.querySelector('#set-keep-warm');   // (v39.63)
+  if (keepWarmChk) keepWarmChk.addEventListener('change', () => {
+    input.keepWarm = !!keepWarmChk.checked;
+    saveSettings();
+  });
   const hullGlowChk = overlay.querySelector('#set-hull-glow');
   if (hullGlowChk) hullGlowChk.addEventListener('change', () => {
     input.hullGlow = !!hullGlowChk.checked;
@@ -57290,6 +58146,7 @@ function saveSettings() {
       vrPerfMode: input.vrPerfMode || 'standard',
       vrStripFx: !!input.vrStripFx,
       showFps: !!input.showFps,
+      keepWarm: input.keepWarm !== false,
       cockpit3d: input.cockpit3d !== false,
       hullGlow: input.hullGlow !== false,
       cockpitVR: input.cockpitVR === true,
@@ -59103,6 +59960,7 @@ function loadSettings() {
     input.cockpit3d = true;
     input.vrStripFx = false;
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
+    if (typeof data.keepWarm === 'boolean') input.keepWarm = data.keepWarm;
     if (typeof data.hullGlow === 'boolean') input.hullGlow = data.hullGlow;
     if (typeof data.cockpitVR === 'boolean') input.cockpitVR = data.cockpitVR;
     if (!data.cockpitVRv2) input.cockpitVR = true;
@@ -61081,6 +61939,55 @@ const MAP_DATA = {
     ]
   },
 
+  assault_shifting: {
+    name: 'Assault ; The Shifting Causeway',
+    procedural: 'assault_shifting',
+    description: 'Assault, re-rolled every round: a fresh cavern, the Champion Field dug in ahead of the defenders. Roles swap every round.',
+    defaultTheme: 'Broken Simulation',
+    terrain: { wallPinch: 0.22 },
+    palette: [
+      0x2a2838, 0x282a40, 0x303040, 0x242235, 0x2c2a3a, 0x282a40, 0x303040, 0x242838
+    ],
+    rooms: [
+      { id: 'spawn_a', team: 'A',  x: -SU * 8, y: 0, z: 0, r: SU * 2.2 },
+      { id: 'champ',   team: null, champion: true, x: -SU * 5, y: 0, z: 0, r: SU * 2.4 },
+      { id: 'center',  team: null, x: 0,       y: 0, z: 0, r: SU * 2.5 },
+      { id: 'spawn_b', team: 'B',  x:  SU * 8, y: 0, z: 0, r: SU * 2.2 },
+    ],
+    tunnels: [
+      { path: [{x: -SU*8, y: 0, z: 0}, {x: -SU*5, y: 0, z: 0}] },
+      { path: [{x: -SU*5, y: 0, z: 0}, {x: 0, y: 0, z: 0}] },
+      { path: [{x: 0, y: 0, z: 0}, {x: SU*8, y: 0, z: 0}] },
+    ]
+  },
+  race_shifting: {
+    name: 'Race ; The Shifting Run',
+    procedural: 'race_shifting',
+    description: 'A new track every round: line up across the start, thread the rings through a cavern that has never existed before, dive for the finish.',
+    defaultTheme: 'Snow',
+    terrain: { wallPinch: 0.24 },
+    palette: [
+      0x6aa8ff, 0xaad4ff, 0xffffff, 0x88bbee, 0xc0e0ff, 0x99cfff, 0x77aadd, 0xeaf4ff
+    ],
+    rooms: [
+      { id: 'start_a1', team: 'A', x: -SU * 3.6, y: 0, z: -SU * 20, r: SU * 1.6 },
+      { id: 'start_b1', team: 'B', x: -SU * 1.2, y: 0, z: -SU * 20, r: SU * 1.6 },
+      { id: 'start_a2', team: 'A', x:  SU * 1.2, y: 0, z: -SU * 20, r: SU * 1.6 },
+      { id: 'start_b2', team: 'B', x:  SU * 3.6, y: 0, z: -SU * 20, r: SU * 1.6 },
+      { id: 'gate_1',   team: null, gate: 1, x: 0,      y: 0,  z: -SU * 8, r: SU * 2.0 },
+      { id: 'gate_2',   team: null, gate: 2, x: SU * 3, y: SU, z:  SU * 4, r: SU * 2.0 },
+      { id: 'finish',   team: null, champion: true, x: 0, y: 0, z: SU * 20, r: SU * 3.0 },
+    ],
+    tunnels: [
+      { path: [{x: -SU*3.6, y: 0, z: -SU*20}, {x: 0, y: 0, z: -SU*8}], r: 240 },
+      { path: [{x: -SU*1.2, y: 0, z: -SU*20}, {x: 0, y: 0, z: -SU*8}], r: 240 },
+      { path: [{x:  SU*1.2, y: 0, z: -SU*20}, {x: 0, y: 0, z: -SU*8}], r: 240 },
+      { path: [{x:  SU*3.6, y: 0, z: -SU*20}, {x: 0, y: 0, z: -SU*8}], r: 240 },
+      { path: [{x: 0, y: 0, z: -SU*8}, {x: SU*3, y: SU, z: SU*4}], r: 260 },
+      { path: [{x: SU*3, y: SU, z: SU*4}, {x: 0, y: 0, z: SU*20}], r: 260 },
+    ]
+  },
+
   assault_causeway: {
     name: 'The Causeway',
     description: 'Assault. Storm the causeway and charge the Champion Field — or hold the line until the clock runs out. Roles swap every round.',
@@ -61521,14 +62428,18 @@ function _lssEndlessBolts(run, seg) {
     }
   }
   try {
-    const gy = _stGroundYCarved(x, z, T) + 170, cy = _stCeilYCarved(x, z, T) - 170;
+    const _bq = _bendToFlat(x, y, z);
+    const gy = _stGroundYCarved(_bq.x, _bq.z, T) + 170, cy = _stCeilYCarved(_bq.x, _bq.z, T) - 170;
     if (cy < gy) return;
-    if (!chamber) y = gy + (cy - gy) * (0.62 + 0.3 * _lssEndlessBoltHash(gid, 19));
-    y = Math.max(gy, Math.min(cy, y));
+    let fy = _bq.y;
+    if (!chamber) fy = gy + (cy - gy) * (0.62 + 0.3 * _lssEndlessBoltHash(gid, 19));
+    fy = Math.max(gy, Math.min(cy, fy));
     if (typeof worldSDF === 'function') {
-      for (let k = 0; k < 6 && worldSDF(x, y, z) > -60; k++) y -= 230;
-      if (worldSDF(x, y, z) > -60) return;
+      for (let k = 0; k < 6 && _flatSDF(_bq.x, fy, _bq.z) > -60; k++) fy -= 230;
+      if (_flatSDF(_bq.x, fy, _bq.z) > -60) return;
     }
+    const _bw = _bendToWorld(_bq.x, fy, _bq.z);
+    x = _bw.x; y = _bw.y; z = _bw.z;
   } catch (_) {}
   const slot = _lssEndlessBoltSlot(run);
   if (!slot) return;
@@ -61554,15 +62465,45 @@ function _lssEndlessDropBolt(pos) {
   if (run._boltPool) for (let i = 0; i < run._boltPool.length; i++) if (run._boltPool[i].inUse) used++;
   if (used > cap - 8) return;   // headroom guard: route bolts always find a slot
   let x = pos.x, y = pos.y, z = pos.z;
-  try {
-    const gy = _stGroundYCarved(x, z, T) + 170, cy = _stCeilYCarved(x, z, T) - 170;
-    if (cy < gy) return;
-    y = Math.max(gy, Math.min(cy, y));
-    if (typeof worldSDF === 'function') {
-      for (let k = 0; k < 6 && worldSDF(x, y, z) > -60; k++) y -= 230;
-      if (worldSDF(x, y, z) > -60) return;   // sealed column — no bounty here
+  const _open = (px, py, pz) => {
+    try {
+      const q = _bendToFlat(px, py, pz);
+      const gy = _stGroundYCarved(q.x, q.z, T) + 170, cy = _stCeilYCarved(q.x, q.z, T) - 170;
+      if (!(cy > gy)) return null;
+      let yy = Math.max(gy, Math.min(cy, q.y));
+      if (typeof worldSDF === 'function') {
+        for (let k = 0; k < 6 && _flatSDF(q.x, yy, q.z) > -60; k++) yy -= 230;
+        if (_flatSDF(q.x, yy, q.z) > -60) {
+          yy = Math.max(gy, Math.min(cy, q.y));
+          for (let k = 0; k < 6 && _flatSDF(q.x, yy, q.z) > -60; k++) yy += 230;
+          if (yy > cy || _flatSDF(q.x, yy, q.z) > -60) return null;
+        }
+      }
+      const w = _bendToWorld(q.x, yy, q.z);
+      return { x: w.x, y: w.y, z: w.z };
+    } catch (_) { return null; }
+  };
+  let spot = _open(x, y, z);
+  if (!spot) {
+    for (let ring = 1; ring <= 3 && !spot; ring++) {
+      const rr = 320 * ring;
+      for (let k = 0; k < 8 && !spot; k++) { const a = k * Math.PI / 4; spot = _open(x + Math.cos(a) * rr, y, z + Math.sin(a) * rr); }
     }
-  } catch (_) { return; }
+  }
+  if (!spot && run.segs && run.segs.length) {
+    let best = null, bd = Infinity;
+    for (const sg of run.segs) {
+      for (const q of [sg.a, sg.b]) {
+        if (!q) continue;
+        const d = (q.x - x) * (q.x - x) + (q.y - y) * (q.y - y) + (q.z - z) * (q.z - z);
+        if (d < bd) { bd = d; best = q; }
+      }
+    }
+    if (best) spot = _open(best.x, best.y, best.z) || { x: best.x, y: best.y, z: best.z };
+  }
+  if (!spot) return;
+  if (spot.x !== x || spot.z !== z) { try { window.__endlessBountyMiss = (window.__endlessBountyMiss || 0) + 1; } catch (_) {} }
+  x = spot.x; y = spot.y; z = spot.z;
   const slot = _lssEndlessBoltSlot(run);
   if (!slot) return;
   slot.grp.position.set(x, y, z);
@@ -61579,10 +62520,13 @@ function _endlessAegisDmgOut(amount) {
 }
 
 function _lssGenEndlessLevel(base) {
-  const seed = ((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0xE7D1E55) >>> 0;
+  const seed = (((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0xE7D1E55) +
+                ((net && net.active) ? 0 : (((game.currentRound | 0) + 1) * 0x9E3779B9))) >>> 0;
   const rand = mulberry32((seed ^ 0x9D2C5680) >>> 0);
   const cos = mulberry32((seed ^ 0x41C64E6D) >>> 0);
   const gen = { rand, cos, x: 0, y: 0, z: 0, heading: rand() * Math.PI * 2, sinceHall: 0, nextGid: 0 };
+  const _ENDLESS_BIOMES = ['rocky', 'crystalcave', 'volcanic', 'snow', 'goldmine', 'grassy', 'brokensim'];
+  const _endlessBiome = _ENDLESS_BIOMES[Math.floor(cos() * _ENDLESS_BIOMES.length) % _ENDLESS_BIOMES.length];
   const bend = !!(base && base.bend);
   const run = game.endlessRun = {
     gen, bend, segs: [], dist: 0, progGid: -1, progT: 0, lives: 1,
@@ -61607,7 +62551,7 @@ function _lssGenEndlessLevel(base) {
   return {
     name: base.name, description: base.description, defaultTheme: base.defaultTheme,
     procedural: 'endless', bend,
-    terrain: base.terrain, palette: base.palette, _biomeOverride: 'rocky',
+    terrain: base.terrain, palette: base.palette, _biomeOverride: _endlessBiome,   // (v39.57) roulette, was 'rocky'
     rooms, tunnels: [{ r: 400, w: 0.15, path: nodes }],
   };
 }
@@ -61627,7 +62571,8 @@ const CAMPAIGN_LEGS = [
   { key: 'camp_brokensim', name: 'The Broken Simulation' },
   { locked: true, name: 'More legs unlock as you journey on' },
 ];
-function _lssGenShiftingDeep(base) {
+function _lssGenShiftingDeep(base, opts) {
+  opts = opts || {};
   const seed = ((((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0x51F7C0DE) +
                 (((game.currentRound | 0) + 1) * 0x9E3779B9)) ^ ((game._cavernSalt || 0) >>> 0)) >>> 0;
   const rnd = mulberry32(seed);
@@ -61640,6 +62585,9 @@ function _lssGenShiftingDeep(base) {
     { id: 'spawn_a', team: 'A', x: Math.cos(ang) * D,  y: sy,  z: Math.sin(ang) * D,  r: SU * 2.2 },
     { id: 'spawn_b', team: 'B', x: -Math.cos(ang) * D, y: -sy, z: -Math.sin(ang) * D, r: SU * 2.2 },
   ];
+  if (opts.champion) {
+    rooms.push({ id: 'champ', team: null, champion: true, x: Math.cos(ang) * D * 0.6, y: sy * 0.6, z: Math.sin(ang) * D * 0.6, r: SU * 2.4 });
+  }
 
   const pairsN = 2 + ((rnd() < 0.5) ? 1 : 0);
   const minSep = SU * 3.1;
@@ -61742,9 +62690,55 @@ function _lssGenShiftingDeep(base) {
 
   console.log('[shifting-deep] seed=' + seed + ' rooms=' + rooms.length + ' tunnels=' + tunnels.length + ' biome=' + biome);
   return {
-    procedural: 'shifting_deep',
+    procedural: opts.procedural || 'shifting_deep',
     name: base.name, thumb: base.thumb, description: base.description,
-    defaultTheme: base.defaultTheme, palette: base.palette,
+    defaultTheme: base.defaultTheme, palette: base.palette, terrain: base.terrain,
+    _biomeOverride: biome,
+    rooms, tunnels,
+  };
+}
+
+function _lssGenRaceTrack(base) {
+  const seed = ((((((net && typeof net.worldSeed === 'number') ? net.worldSeed : 0x5EED) >>> 0) ^ 0x7ACE0BEE) +
+                (((game.currentRound | 0) + 1) * 0x9E3779B9)) ^ ((game._cavernSalt || 0) >>> 0)) >>> 0;
+  const rnd = mulberry32(seed);
+  const R = (a, b) => a + (b - a) * rnd();
+  const ang = R(0, Math.PI * 2);
+  const fx = Math.cos(ang), fz = Math.sin(ang), px = -fz, pz = fx;
+  const L = SU * R(36, 48);
+  const at = (t, side, y) => ({ x: fx * t + px * side, y: y, z: fz * t + pz * side });
+  const rooms = [], tunnels = [];
+  const s0 = -L / 2;
+  const lanes = [-3.6, -1.2, 1.2, 3.6];
+  for (let i = 0; i < lanes.length; i++) {
+    const q = at(s0, lanes[i] * SU, 0);
+    rooms.push({ id: 'start_' + ((i % 2) ? 'b' : 'a') + (Math.floor(i / 2) + 1), team: (i % 2) ? 'B' : 'A', x: q.x, y: q.y, z: q.z, r: SU * 1.6 });
+  }
+  const N = 4 + Math.floor(rnd() * 3);
+  let side = 0, yy = 0;
+  const gates = [];
+  for (let i = 0; i < N; i++) {
+    const t = s0 + L * (i + 1) / (N + 1);
+    side = Math.max(-SU * 7, Math.min(SU * 7, side + SU * R(-4, 4)));
+    yy = Math.max(-SU * 3, Math.min(SU * 3, yy + SU * R(-1.6, 1.6)));
+    const q = at(t, side, yy);
+    const g = { id: 'gate_' + (i + 1), team: null, gate: i + 1, x: q.x, y: q.y, z: q.z, r: SU * R(1.8, 2.3) };
+    rooms.push(g); gates.push(g);
+  }
+  const fq = at(L / 2, 0, 0);
+  const finish = { id: 'finish', team: null, champion: true, x: fq.x, y: fq.y, z: fq.z, r: SU * 3.0 };
+  rooms.push(finish);
+  const link = (a, b, r) => tunnels.push({ path: [{ x: a.x, y: a.y, z: a.z }, { x: b.x, y: b.y, z: b.z }], r: r });
+  for (let i = 0; i < lanes.length; i++) link(rooms[i], gates[0], 240);
+  for (let i = 0; i < gates.length - 1; i++) link(gates[i], gates[i + 1], 260);
+  link(gates[gates.length - 1], finish, 260);
+  const BIOMES = ['rocky', 'crystalcave', 'volcanic', 'snow', 'goldmine', 'grassy', 'brokensim'];
+  const biome = BIOMES[Math.floor(rnd() * BIOMES.length) % BIOMES.length];
+  console.log('[race-shifting] seed=' + seed + ' gates=' + N + ' len=' + Math.round(L) + ' biome=' + biome);
+  return {
+    procedural: 'race_shifting',
+    name: base.name, thumb: base.thumb, description: base.description,
+    defaultTheme: base.defaultTheme, palette: base.palette, terrain: base.terrain,
     _biomeOverride: biome,
     rooms, tunnels,
   };
@@ -61897,6 +62891,14 @@ function buildRoomGraphLevel(level) {
   if (level && level.procedural === 'shifting_deep' && typeof _lssGenShiftingDeep === 'function') {
     try { level = _lssGenShiftingDeep(MAP_DATA.shifting_deep || level); }
     catch (e) { console.warn('[shifting-deep] generate failed, using static fallback:', e); }
+  }
+  if (level && level.procedural === 'assault_shifting' && typeof _lssGenShiftingDeep === 'function') {
+    try { level = _lssGenShiftingDeep(MAP_DATA.assault_shifting || level, { champion: true, procedural: 'assault_shifting' }); }
+    catch (e) { console.warn('[assault-shifting] generate failed, using static fallback:', e); }
+  }
+  if (level && level.procedural === 'race_shifting' && typeof _lssGenRaceTrack === 'function') {
+    try { level = _lssGenRaceTrack(MAP_DATA.race_shifting || level); }
+    catch (e) { console.warn('[race-shifting] generate failed, using static fallback:', e); }
   }
   if (level && level.procedural === 'endless' && typeof _lssGenEndlessLevel === 'function') {
     try { level = _lssGenEndlessLevel((level && level.bend) ? level : (MAP_DATA.endless_caverns || level)); }
@@ -63613,6 +64615,136 @@ function __pmark(name) {
   __pmLast = t;
 }
 
+(() => {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  let on = false;
+  try { on = /[?&]pbhud\b/i.test(location.search || '') || localStorage.getItem('lss_pbhud') === '1'; } catch (_) {}
+  if (!on) return;
+  const KEY = 'lss_f8log', CAP = 40, BYTES = 400000, N = 16384;
+  window.__profOn = true;
+  const R = { ring: new Float32Array(N), ringT: new Float32Array(N), ri: 0, lo: [], secPrev: {}, big: [], lastProgs: 0, cold: [], last: 0, marks: null };
+  const profNow = () => { const p = window.__prof, o = {}; if (!p) return o; for (const k in p) { const v = p[k]; if (v && typeof v.total === 'number') o[k] = v.total; } return o; };
+  const tick = (t) => {
+    requestAnimationFrame(tick);
+    if (R.last) {
+      const gap = t - R.last;
+      R.ring[R.ri] = gap; R.ringT[R.ri] = t / 1000; R.ri = (R.ri + 1) % N;
+      const cur = profNow();
+      if (gap > 30 && document.visibilityState === 'visible') {
+        const secs = [];
+        for (const k in cur) { const d = cur[k] - (R.secPrev[k] || 0); if (d >= 2) secs.push([k, +d.toFixed(1)]); }
+        secs.sort((a, b) => b[1] - a[1]);
+        R.big.push([+(t / 1000).toFixed(2), +gap.toFixed(1), secs.slice(0, 4)]);
+        if (R.big.length > 200) R.big.shift();
+      }
+      R.secPrev = cur;
+      try {
+        const n = (typeof renderer !== 'undefined' && renderer && renderer.info) ? renderer.info.programs.length : 0;
+        if (R.lastProgs && n > R.lastProgs) { R.cold.push([+(t / 1000).toFixed(2), n - R.lastProgs]); if (R.cold.length > 100) R.cold.shift(); }
+        R.lastProgs = n;
+      } catch (_) {}
+    }
+    R.last = t;
+  };
+  requestAnimationFrame(tick);
+  try {
+    const po = new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (e.duration < 50) continue;
+        R.lo.push([+(e.startTime / 1000).toFixed(2), Math.round(e.duration), Math.round(e.blockingDuration), Math.round(e.renderStart - e.startTime),
+          (e.scripts || []).slice(0, 3).map(sc => [sc.invokerType, String(sc.sourceFunctionName || '').slice(0, 30), sc.sourceCharPosition, Math.round(sc.duration)])]);
+        if (R.lo.length > 120) R.lo.shift();
+      }
+    });
+    po.observe({ type: 'long-animation-frame', buffered: true });
+  } catch (_) {}
+  const load = () => {
+    if (R.marks) return R.marks;
+    try { R.marks = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (_) { R.marks = []; }
+    if (!Array.isArray(R.marks)) R.marks = [];
+    return R.marks;
+  };
+  const save = () => {
+    try {
+      let txt = JSON.stringify(R.marks);
+      while ((R.marks.length > CAP || txt.length > BYTES) && R.marks.length > 1) { R.marks.shift(); txt = JSON.stringify(R.marks); }
+      localStorage.setItem(KEY, txt);
+    } catch (_) {}
+  };
+  const around = (t0, t1, minMs) => {
+    const out = [];
+    for (let i = 0; i < N; i++) { const tt = R.ringT[i]; if (tt >= t0 && tt <= t1 && R.ring[i] >= minMs) out.push([+tt.toFixed(2), +R.ring[i].toFixed(1)]); }
+    out.sort((a, b) => a[0] - b[0]);
+    return out;
+  };
+  let box = null, boxT = 0;
+  const show = (txt) => {
+    try {
+      if (!box) {
+        box = document.createElement('div');
+        box.id = 'lss-f8hud';
+        box.style.cssText = 'position:fixed;right:8px;top:8px;z-index:99999;font:12px/1.4 Courier New,monospace;color:#d8ffd8;' +
+          'background:rgba(2,12,4,0.88);border:1px solid rgba(120,255,140,0.45);border-radius:6px;padding:6px 10px;pointer-events:none;';
+        document.body.appendChild(box);
+      }
+      box.textContent = txt; box.style.display = 'block';
+      clearTimeout(boxT); boxT = setTimeout(() => { if (box) box.style.display = 'none'; }, 5000);
+    } catch (_) {}
+  };
+  const snapshot = (label) => {
+    const now = performance.now() / 1000;
+    const g = (typeof game !== 'undefined' && game) ? game : null;
+    const marks = load();
+    const m = {
+      n: (marks.length ? (marks[marks.length - 1].n || marks.length) : 0) + 1, label: label || 'F8', wall: new Date().toISOString(), t: +now.toFixed(1),
+      build: (typeof LSS_BUILD !== 'undefined') ? LSS_BUILD : '?',
+      mode: (typeof LSS !== 'undefined' && LSS && LSS.MODE) || '?', map: (g && g.selectedMap) || '?', state: (g && g.state) || '?',
+      fs: !!document.fullscreenElement, dpr: window.devicePixelRatio || 1, vis: document.visibilityState,
+      gaps: around(now - 5, now, 20).slice(-40),
+      big: R.big.filter(b => b[0] >= now - 5).slice(-20),
+      lo: R.lo.filter(l => l[0] >= now - 5).slice(-20),
+      cold: R.cold.filter(c => c[0] >= now - 5),
+      frames: 0, worst: 0, avgFps: 0, info: null, run: null, speed: null, round: null,
+    };
+    try { const all = around(now - 5, now, 0); m.frames = all.length; m.worst = all.length ? +Math.max(...all.map(a => a[1])).toFixed(1) : 0; m.avgFps = all.length ? Math.round(1000 / (all.reduce((acc, a) => acc + a[1], 0) / all.length)) : 0; } catch (_) {}
+    try { const I = renderer.info; m.info = { programs: I.programs.length, geos: I.memory.geometries, texs: I.memory.textures }; } catch (_) {}   // (render.calls/triangles auto-reset each frame: meaningless at F8 time)
+    try { if (typeof player !== 'undefined' && player && player.velocity) m.speed = Math.round(player.velocity.length()); } catch (_) {}
+    try { const run = g && g.endlessRun; if (run) m.run = { dist: Math.round(run.dist), wave: run.waveN, phase: run.phase, ents: g.entities.length, segs: run.segs.length, lives: run.lives }; } catch (_) {}
+    try { if (g && g.currentRound != null) m.round = g.currentRound; } catch (_) {}
+    marks.push(m); save();
+    return m;
+  };
+  window.addEventListener('keydown', (ev) => {
+    if (ev.code !== 'F8' && ev.key !== 'F8') return;
+    try {
+      const m = snapshot('F8');
+      show('F8 #' + m.n + ' saved  worst ' + m.worst + ' ms  gaps ' + m.gaps.length + '  long ' + m.lo.length);
+      console.log('[f8] mark #' + m.n + ' saved: worst ' + m.worst + ' ms, ' + m.gaps.length + ' gaps >= 20 ms, ' + m.lo.length + ' long frames, ' + m.cold.length + ' cold links');
+    } catch (e) { console.warn('[f8] snapshot failed', e); }
+  }, true);
+  const api = () => load();
+  api.summary = () => load().map(m => [m.n, m.wall, m.build, m.mode + ':' + m.map, m.state, m.worst, m.gaps.length, m.lo.length,
+    (m.big && m.big.length) ? m.big.reduce((a, b) => (b[1] > a[1] ? b : a))[2].slice(0, 1).map(x => x[0] + ':' + x[1]).join('') : '',
+    m.run ? (m.run.phase + ' w' + m.run.wave + ' e' + m.run.ents + ' d' + m.run.dist) : '', m.speed, m.fs ? 'fs' : 'win']);
+  api.clear = () => { R.marks = []; save(); return 'cleared'; };
+  api.export = () => {
+    try {
+      const txt = JSON.stringify(load(), null, 1);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([txt], { type: 'application/json' }));
+      a.download = 'lss-f8-' + ((typeof LSS_BUILD !== 'undefined') ? LSS_BUILD : 'x') + '-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+      document.body.appendChild(a); a.click();
+      setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (_) {} }, 1000);
+      return 'exported ' + load().length + ' marks';
+    } catch (e) { return 'export failed: ' + e; }
+  };
+  api.mark = (label) => snapshot(label || 'manual');
+  api.around = around;
+  api._R = R;
+  window.__f8log = api;
+  try { console.log('[f8] recorder armed (pbhud): ' + load().length + ' saved marks. window.__f8log() / .summary() / .export() / .clear()'); } catch (_) {}
+})();
+
 function gameLoop(timestamp) {
   if (typeof timestamp !== 'number') timestamp = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   if (typeof _lssResolveFrameYields === 'function') _lssResolveFrameYields();
@@ -63828,7 +64960,11 @@ function gameLoop(timestamp) {
       }
       if (game._clipWantHub && !_clipmap.enabling) {   // (v36.27) enabling: _clipEnableSliced owns it
         if (!_clipmap.on) {
-          try { _clipEnableNow(_fX, _fZ); } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }
+          if (game.state === 'playing' && typeof _clipEnableSliced === 'function') {
+            try { const _pr = _clipEnableSliced(_fX, _fZ); if (_pr && _pr.catch) _pr.catch(() => { _clipmap.enabling = false; }); } catch (_) { _clipmap.enabling = false; }
+          } else {
+            try { _clipEnableNow(_fX, _fZ); } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }
+          }
         } else { try { _clipUpdate(_fX, _fZ); } catch (_) {} }
       }
       __pmark('hub:clip');   // (v39.49) clipmap enable/update
@@ -63869,6 +65005,7 @@ function gameLoop(timestamp) {
       __pmark('hub:underwater');
       try { _birdFlockTick(_wallDt); } catch (_) {}
       try { _fishSchoolTick(_wallDt); } catch (_) {}
+      try { if (typeof _ecrTick === 'function' && game.endlessRun) _ecrTick(_wallDt); } catch (_) {}   // (v39.64) endless fish + bats
       __pmark('hub:critters');
       try {
         const _zc = (game._cyber && game._cyber.armed && (!window.__cyber || window.__cyber.zonePin !== false) &&
@@ -63898,6 +65035,7 @@ function gameLoop(timestamp) {
   __pmark('smokeLights+cloudDots');
   if (_vrThrottleTier < 3) updateDots(dt); else if (game.dots && game.dots.length) disposeAllDots();
   if (typeof _arenaCloudTick === 'function') { try { _arenaCloudTick(dt); } catch (_) {} }
+  if (game.endlessRun && typeof _endlessCloudsTick === 'function') { try { _endlessCloudsTick(dt); } catch (_) {} }   // (v39.69)
   if (typeof _tickTrackerSonarDOT === 'function') { try { _tickTrackerSonarDOT(dt); } catch (_) {} }
   if (typeof _sweepTrackerLocks === 'function' && player && player.loadoutKey === 'TRACKER') {
     _sweepTrackerLocks._t = (_sweepTrackerLocks._t || 0) - (dt || 0.016);
@@ -64039,8 +65177,8 @@ function gameLoop(timestamp) {
   __pmark('particles'); 
   updateEffects(dt);
   try {
-    const _wantPoleRings = (typeof LSS !== 'undefined' && LSS.MODE === 'race' &&
-      game.selectedMap === 'race_pole_position' && game.state === 'playing');
+    const _wantPoleRings = (typeof LSS !== 'undefined' && LSS.MODE === 'race' && game.state === 'playing' &&
+      typeof _raceRingMap === 'function' && !!_raceRingMap());
     if (_wantPoleRings) {
       if (!game.poleRings || !game.poleRings.length) { if (typeof _spawnPoleRings === 'function') _spawnPoleRings(); }
       if (game.poleRings) for (let _pri = 0; _pri < game.poleRings.length; _pri++) { try { game.poleRings[_pri].update(dt); } catch (_) {} }
@@ -64096,6 +65234,7 @@ function gameLoop(timestamp) {
   } catch (_) { _rfCovered = false; }
   if (!_rfCovered) {
     renderFrame();
+    try { _gpuKeepWarmTick(timestamp); } catch (_) {}   // (v39.63) idle load after the real work
   } else if (!game._occLastRender || timestamp - game._occLastRender >= 167) {
     game._occLastRender = timestamp;
     if (!_lssPickerOwnsFrame()) renderFrame();
@@ -73247,12 +74386,10 @@ function updateDeathCam(dt) {
     if ((input.locked || input.touchActive) &&
         (typeof game === 'undefined' || !game.testMode ||
          (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
-      player.euler.y -= input.mouseDX * input.sensitivity;
-      player.euler.x -= input.mouseDY * input.sensitivity;
+      { const _ls = _adsLookScale(); player.euler.y -= input.mouseDX * input.sensitivity * _ls; player.euler.x -= input.mouseDY * input.sensitivity * _ls; }   // (v39.54)
     }
     if (input.gpConnected) {
-      player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt;
-      player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt;
+      { const _ls = _adsLookScale(); player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt * _ls; player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt * _ls; }   // (v39.54)
     }
     player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
     input.mouseDX = 0; input.mouseDY = 0;

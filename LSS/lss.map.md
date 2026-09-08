@@ -1612,3 +1612,271 @@ helper) - built lazily on the FIRST CHARGE of a match, with `dispose()` on rebui
 (transparent DoubleSide = BackSide + FrontSide passes; the logger reads `side` 1 during the first pass).
 `_warmChargeGlowOnce` (from `_prebakeGpuPrime`) draws one tube with the recipe and retains its material;
 the rebuild path retains instead of disposing. `window.__chargeGlowWarm` counts.
+
+## v39.54 — three wishes: muzzle-true Mega Tracker Rockets, double-tap double zoom, Vortex purple fire
+
+- **Mega Tracker Rockets** (opening burst in `activateCore`, per-tick spawn in `updateAbilities`): origin is
+  `shipMuzzleWorld(player.mesh, idx)` first (the hull's gunN markers), the painted `_PLAYER_LAUNCHER_FRACS`
+  screen fractions only for a hull without markers - those fractions put the pods in the sky above the ship
+  in third person. Same precedent as `_drainStaggeredRocketSalvo` / Mega Barrage (v38.05).
+- **Double-tap-and-hold zoom** (ADS block in the camera update): the OR'd aim boolean (RMB / gamepad LT /
+  touch LT) is edge-tracked in `game._adsTap`; a press shorter than `__zoom.tapMax` (260 ms) followed by a
+  press within `__zoom.dblWin` (320 ms) makes that hold zoom to `mMax * __zoom.dblMul` (2.4 -> 4.8x).
+  `game._adsMag` springs at the zoom rate and both `_mTot` formulas read it; `_adsLookScale()` scales mouse
+  and gamepad look by (2.4 / current) blended with the zoom so 4.8x aims like 2.4x per pixel
+  (`__zoom.dblSens = false` disables). Pane-verified: fov 120 -> 39.7 on the double, 71.6 on a plain hold.
+- **Vortex on fire**: `core_beam` preset base #9933ff -> #6f14f2, lavender axial core, `displaceAmount`
+  0.18 / `softEdge` 0.32 (the beam edge churns), plasma layers hue 0.92 (pink) -> 0.78/0.80 (violet);
+  `_spawnClassFireBurst(pos, color, size, life)` gained a life; the Mega Laser tick seeds violet fire
+  clouds on the beam surface (`window.__vortexFire`: hz 10, life 1.6 s, size 26, max 22 live, grow 1.0
+  via the new `_grow` knob on `explFireCloud`) so the last ones outlive the beam by ~1 s; the primary shot
+  tracer is pulled toward #5a00c8 (`shotDeep`), a little wider, with a fire puff at the muzzle and one
+  where it lands; hull-hit sparks are purple for Vortex. Taste knobs are live on `window.__vortexFire`.
+
+## v39.55 — the carrier goes around, the clipmap enables in slices, a fleet follows its city's side
+
+- **Carrier** (`_carrierRide` / new `_carrierSteer` before `_carrierFrame`'s rail move): the city roof probe
+  was three centre-line rays straight down (null over every street, a tower top only once the hull was on
+  it) into a 2.2/0.45 lerp = hard climb, long sag, hard climb. Now a forward corridor the whole beam wide
+  (`__carrier.roofAhead` 2400 u) with a decaying running max (`roofFall` 120 u/s), rise/fall rates 1.2/0.3
+  and a hard cap `vMax` 180 u/s. `_carrierSteer` (10 Hz) probes a fan of headings around the route's end at
+  the hull's own height (`lookAhead` 2600, `turnCost` 500, `yawRate` 0.25 rad/s, `steer:false` to disable),
+  re-bases the rail from the current position and yaws toward the clearest heading.
+- **Clipmap**: a hub rebuild flips `_clipmap.on` off; when the next frame is a PLAYING frame the whole
+  level bake landed in it (`hub:clip` 214 ms in a 292 ms frame). In play the gameLoop now calls
+  `_clipEnableSliced` (one level per frame); loading states keep `_clipEnableNow`.
+- **City fleets**: `bot.team` was frozen at construction while `player.team` is rewritten every cyberpunk
+  round (and on peer-order re-seats), so a captured city's fleet read the player as hostile next round
+  ("my own team city ship shooting me when I was defending"). `_owSetPlayerTeam` (every player-team write)
+  calls `_owSyncTeams(old, new)` over owned cities (owner, fleet, carrier); `_acquireCombatTarget` resolves
+  a city bot's side from `OW.cities[_owCity].owner` live; `_owCityTick` rebuilds instead of reviving a
+  fleet on the wrong side; `_owAdopt` adopts only bots on the city's side; `__citiesOwn` kills the garrison.
+- Probe findings this session (overworld, MEGA): median GPU time per frame ~7.5 ms (GPU-bound at ~117
+  fps); the 60-300 ms idle-main-thread stalls carry no upload, no link, no new layout and no GPU_DISJOINT,
+  and their timer queries never resolved - still unexplained (external GPU preemption suspected).
+
+## v39.56 — the ring in the right HUD path; purple as seen
+
+- The champion capture ring (v39.55) was drawn in the LEGACY crosshair layer of `drawCircumpunctHUD`; every
+  normal view takes the `_hlDrawHUD` layout path, which returns before that layer, so the owner never saw
+  it. It now draws right before `_hudSharedTail` in the layout path, radius max(44, 5.2% of vmin), pane-verified.
+- The Vortex beam read BLUE: #aa55ff is 170/85/255 and under additive overdrive (brightness 3.3) the blue
+  channel clips first. Base is now #c46cff at brightness 2.3 (axial core #eacfff, strength 0.26); the
+  flames, shot tint (`__vortexFire.shotTint`) and puffs use the same red-shifted purple. The class purple is
+  what the eye gets after tone mapping and bloom, not what the uniform holds.
+
+## v39.57 — the Shifting Deep for assault and race; endless borrows its dice
+
+- `MAP_DATA.assault_shifting` (procedural 'assault_shifting'): `_lssGenShiftingDeep(base, opts)` grew an
+  `opts.champion` room on the spawn axis 0.6 D ahead of side A (the defenders), the way the Causeway's
+  champ room fronts spawn_def; the generator now returns `procedural` from opts and passes `terrain`
+  through. Dispatch beside the shifting_deep line in `buildRoomGraphLevel`. Assault needs only the team
+  tags + the champion flag (`spawnChampionField` reads `sdfRoomData`), and the assault_ prefix is the
+  carousel filter. Pane: field landed exactly on the generated champ room.
+- `MAP_DATA.race_shifting` + `_lssGenRaceTrack(base)`: seeded axis, a start row of four A/B rooms across
+  it, 4-6 `gate: n` rooms on a wandering line (side/height random-walked in bounds), a champion finish,
+  tunnels start->gate1->...->finish (r 240/260), biome roulette. The ring helpers now key off map DATA:
+  `_raceRingMap()` returns MAP_DATA.race_pole_position for the authored track or `game.currentLevel` when
+  it carries gate rooms; `_spawnPoleRings` (rings only on `gate` rooms for a generated map),
+  `_raceFinishUnlocked`, `_faceRaceFirstRing` and the game-loop spawn/clear gate all use it. Pane: 4 gates
+  -> 4 rings, finish locked until all captured, field then spawns on the finish room.
+- Endless: `_lssGenEndlessLevel` folds the round counter into the seed for SOLO runs (co-op keeps the
+  pure worldSeed so peers grow the same route) and draws `_biomeOverride` from the deep's biome list via
+  the COSMETIC stream (route bytes untouched). Pane: crystalcave instead of the fixed rocky.
+
+## v39.58 — the endless bounty is owed wherever the beast died
+
+`_lssEndlessDropBolt` only ever tried the corpse column (band clamp + a 6-step SDF walk down) and returned
+silently when it was sealed. A leviathan phases through rock, so a kill inside a wall or a pinched stretch
+paid nothing (owner: "the leviathans stopped producing the aegis rewards"; a `Monster.die` wrapper in the
+owner's tab logged 2 of 3 kills with no bolt, pool empty, columns sealed). Now: the column (walking up as
+well as down), then a ring of offsets (8 headings x 320/640/960 u), then the nearest endpoint of the carved
+route (`run.segs[].a/b`), which is open by construction. `window.__endlessBountyMiss` counts kills that
+needed the fallback. Pane: a monster killed outside the terrain and one moved 6000 u above the band both
+dropped a bolt.
+Also this session: a 20 s HUD-canvas freeze A/B showed no difference (0 long frames in both windows) - the
+idle-thread stall storms in endless are episodic and remain unattributed in-page.
+
+## v39.59 — the bent tube: gameplay reads the flat sheets at the FLAT image
+
+Owner: "in the bent map, in endless, sometimes enemy ships are outside the map". On endless_bend the terrain
+meshes are the flat sheets curved along the pitched spine (`_bendMapPoint`/`_bendUnmap`, v36.96) and
+`worldSDF` unbends its query, but every gameplay path that samples `_stGroundYCarved`/`_stCeilYCarved`
+directly did so at a WORLD x/z, where the flat band is the default -674..726 while the tube can sit
+kilometres away (owner's run: spine at world y 3400; all six wave bots parked at y 100-260, speed 0).
+- Helpers before `_bendVerts`: `_bendOn()`, `_bendToFlat(x,y,z,out)`, `_bendToWorld(x,y,z,out)` (copies,
+  identity off the bend) and `_flatSDF(q)` = worldSDF of the flat point's world image. Function declarations
+  (hoisted; no TDZ).
+- `_campHoardTerrainNav` (the endless bots' vertical nav, Bot.update `LSS.MODE === 'endless'`) branches to
+  `_campHoardTerrainNavBent`: unbend the bot, its 1100 u look-ahead (full 3D heading) and its target; read
+  the crack there; the same desiredY blend; then steer along the vector from the bot to the WORLD image of
+  (flat x, desiredY, flat z) with the same P-controller (want = min(vsp, dist*1.3), lerp dt*3.5); the
+  anti-embed clamp runs in flat space and re-places the bot at the clamped point's world image.
+- `_lssEndlessBolts` (route Aegis bolts): band + SDF walk at the flat image, spot mapped back. Bent runs had
+  NO route bolts (every column walked into rock and returned) - this restores them.
+- `_lssEndlessDropBolt._open` (bounty), storm `spawnLightningBolt` endpoints, god-ray placement and the
+  bolt drift clamp: same treatment. gen.cos() call count/order unchanged (co-op stream).
+Pane test pending the owner's idle window: bots inside the lane on endless_bend, `run.segs[].._bolts` non-empty.
+Session tooling: `performance.getEntriesByType('long-animation-frame')` recovers the last 200 long frames
+after a reload wiped the probe (161 of 200 were pre-render waits = GPU-process stalls, 43 script).
+
+## v39.60 — endless wave bots keep the lane and follow the route
+
+39.59 live on the owner's endless_bend run: the six wave bots were no longer under the world, but they sat
+1.7-5.4 km off the carved lane in the thin sandwich crack (open air by the SDF, boxed in by rock, 1-9 u/s,
+5-7 km from the pilot) and the battle never resolved. The vertical navigators only keep a bot inside the
+crack, which exists between the sheets everywhere; a straight-line pursuit leaves a curved tube and the
+bot is stranded in the crack. `_endlessLaneKeep(bot, dt, q, p, v)` (defined before
+`_campHoardTerrainNavBent`, called at the tail of BOTH navigators when `LSS.MODE === 'endless'`):
+- flat space via `run.segs[].cyl` (the carved axis in flat coords in both modes; `a`/`b` are world),
+  10 Hz nearest-axis scans for the bot and the pilot's flat image, hall spheres count as in-lane;
+- outside `0.85 r`: pull toward the nearest axis point (want = min(flightSpeed, 140 + 0.9*out));
+  inside but > 2600 u from the pilot: follow the route toward the pilot's segment (the axis point ~900 u
+  along, want = 0.85 flightSpeed) instead of the chord; targets go through `_bendToWorld`, steering is the
+  same additive P-controller as the vertical nav (velocity persists across frames: accel + cap + decel);
+- crawling outside the lane (out > 200, speed < 60) for 4 s: placed back on the axis point's world image
+  (`window.__laneRescues` counts).
+Pane test pending the owner's idle window.
+
+## v39.61 — the lane keeper pushes with thrust, not a lerp
+
+39.60 live: all six wave bots inside the lane (49-169 u off the axis, r 400) but at 3-7 u/s, 2-3.5 km
+from the pilot. Bot.update brakes the whole velocity by `chassis.deceleration` (400-800 u/s^2) every
+frame, so a `dt*2` lerp toward the wanted along-route speed (~4.5 u/s per frame) barely beat the
+~4.2 u/s per-frame brake. `_endlessLaneKeep` now adds `min(want - have, chassis.acceleration * dt)`
+(x1.2 when outside the lane) and never brakes; the AI's own thrust budget, so bots reach 0.85
+flightSpeed along the route in about a second. The bent vertical nav keeps its lerp (it rides on top
+of the AI's thrust, like the flat one).
+
+## v39.62 — F8 marks that stick (the in-game hitch recorder, `?pbhud` only)
+
+Owner: "how do the f8 marks save?" They didn't: the recorder was injected from the monitoring session
+and every lobby return (a reload) wiped it. Now an IIFE right after `__pmark` (before `gameLoop`), active
+only with `?pbhud` on the URL or `localStorage.lss_pbhud = '1'`: sets `__profOn = true` (that line must
+stay AFTER the `window.__profOn = false` default at the profiler), keeps an rAF ring of 16k frame gaps,
+`__prof` section deltas for frames > 30 ms, a long-animation-frame ring (>= 50 ms, script attribution)
+and a cold-link watch on `renderer.info.programs.length`. F8 (keydown, capture) snapshots the last 5 s
+(gaps >= 20 ms, big frames + blame, long frames, cold links, renderer.info counts, mode/map/state,
+endless run state, player speed, fullscreen) into localStorage `lss_f8log` (newest last, 40 marks /
+~400 KB cap) and shows a top-right box for 5 s. Console: `__f8log()`, `.summary()` (one row per
+mark), `.export()` (downloads JSON), `.clear()`, `.mark(label)`. Read it from the lobby or any later
+session; nothing runs without the flag.
+
+## v39.63 — GPU keep-warm: the stall fix for the power-capped laptop
+
+The 50-300 ms endless stalls (13 F8 marks in 5 minutes on 39.62, all GPU-process waits, no in-page
+cause) are the laptop GPU's clock ramping down in light-load stretches (40-60% utilisation: travel,
+thin waves) and the next heavy frame waiting for it to come back; heavy combat at 90%+ pins the clock
+and is clean. Live A/B with an injected idle load, same play (~300 u/s, waves): OFF 85 long frames in
+121 s (64 over 75 ms, worst 234 ms); ON 2 in 139 s (worst 95 ms), then 6 in 144 s. Shipped as
+`_gpuKeepWarmTick(ts)` (defined before `_lssSupersampleTick`, called in gameLoop right after
+`renderFrame()` in the uncovered branch): a 512x512 quad with a fragment loop of K iterations drawn
+into an offscreen target after the frame's real work; K +15% every 20 frames while the rAF gap holds
+the refresh (`_ssDyn.hz` period) and the burn (its own EXT_disjoint_timer_query) stays under a
+quarter of the period, -30% otherwise; typical cost 0.4-0.7 ms/frame. Off without the timer
+extension, on small devices, in XR, on battery, when hidden, outside warmup/playing. Setting: "GPU
+keep-warm (anti-stutter)" (`input.keepWarm`, default on, saved/loaded with the other toggles); live
+`window.__keepWarm` (on, K, ms, cap, hist); the ?pbhud box shows `warm K it, ms of cap ms`. The
+supersample ratchet keeps first claim on headroom (28 s holds vs the burner's 20-frame yield).
+Live on the owner's tab: 0-1 stalls/min against 6-40 before.
+
+## v39.64 — bent water surface, the underwater effect, dark-room headlight, endless fish + bats
+
+Owner wishes after the first deep dives on endless_bend. The water plane is WORLD-flat at WL (the
+"really deep underwater cavern" is the tube diving under it - keep it), so:
+- Shore masks (`_swRippleBakeMaskRow`, the far bake and its amortized job row): on the bend the flat
+  sheets sampled at world x/z are kilometres from the walls, so the mask cut holes and shore fades
+  through open water at the crossing. In bend mode the texel asks `worldSDF(wx, WL, wz)` (bend-aware):
+  open where negative, `-sdf` standing in for depth. Flat hub keeps the height sample.
+- Underwater (`_swUpdateUnderwater`): fog colour lerps to `_swDeepCol` 0x03141c with depth, the master
+  `audio.hiCut` drops to 620 Hz (`_swSubmergedAudio`), 240 rising additive bubbles around the camera
+  (`_swBub*`, points in a 900 u box that wraps with the camera, never above WL; program linked behind
+  the countdown via `_warmDrawRoot`). Knobs `window.__underwater = { bubbles, cut }`.
+- Headlight (`_shipLightsTick` block): x(1 + 0.7*(1 - lum/0.16)) under a dark fog, x2.3 submerged with
+  the throw x1.5 and the cone x1.25 (`S._angle0` remembers the stock angle); `window.__headBoost`.
+- Endless critters (`_ecr*`, after `_fishSchoolDispose`): closed-form fish schools (48, under the water
+  plane where `spine y + 0.45 r < WL - 60`) and bat swarms (36, hall spheres via `_bendToWorld` and one
+  plain segment in three, upper half of the tube), positions = f(seed, run clock) into 32x32 position/
+  velocity DataTextures rendered with the hub's `_FISH_VS`/`_BIRD_VS`/`_BIRD_FS`. Rescanned from
+  `run.segs` every 2 s, drawn within 6 km. Co-op: the authority's run time rides in `bot_roster` (`rt`),
+  peers keep `run.clockOff` -> identical creatures with zero traffic. `window.__ecr` (on, fishOn, batsOn).
+Pane (39.64): the crossing shows the surface as a plane cutting the tube; submerged reads fog 041f28,
+bubbles 240, headlight 8340 cd / 3600 u; 5 fish schools + 5 bat swarms on the test route; no errors.
+
+## v39.65 — the ship-select light rig, brighter
+
+Owner: "make the lobby (ship selection screen) lights brighter on the ships". The two preview paths
+(one-context `_ONE_CTX_PREVIEW` and the two-context fallback in `_initShipPreview3D`) built the same
+three lights inline (ambient 0.25, key 0.65, fill 0.28, rim 0.18 + the gradient PMREM environment) and
+the hull read as a dark silhouette. Now one `_pickerLightsAdd(scene)` (defined before
+`_initShipPreview3D`) adds the rig from `_PICKER_LIGHTS` = amb 0.48 / key 1.25 / fill 0.55 / rim 0.42
+plus a 0x8fb4e6/0x3a2a1a hemisphere at 0.45; same positions and colour roles, ~1.9x the level, refs in
+`_shipPreview3D.lights`. Live: `window.__pickerLights(1.3)` scales the rig, `__pickerLights({ key: 2 })`
+sets levels, no arg reads them. The chip-thumbnail bake (path C, ambient 0.55 rig) is untouched.
+Pane: the Vortex hull, engine glow and panel lines read against the hangar plate.
+
+## v39.66 — mirror water
+
+Owner: "surprised how dull and not mirrorlike the water is everywhere in all the modes". Two causes,
+both in the water rig, none in the reflection itself (the Reflector was live, `uReflLive` 1):
+1. The mirror render target was a QUARTER of the canvas (`_swBuildHubWater`: 334x256 in the pane,
+   ~600x340 on the owner's 1080p) - every reflection a soft smear. Now `_rsc` = 0.5 on MEGA/ULTRA, 0.4
+   on HIGH, 0.25 below and on small devices, cap 1536 (`window.__water.reflScale` overrides; needs a
+   water rebuild).
+2. The shaders were told to hide it: near-field fresnel floor 0.24 x a dusk factor that fell to 0.10
+   (`_wlit`), 0.03 in the caverns (`cavReflFloor`), `uGrazeClear` 0.7 wiping 70% of the mirror at
+   grazing angles (where water IS a mirror), `uGrazeAlpha` 0.45, a 2.4x soft-knee (`uReflBright`) that
+   squashed it to a pale wash, perturb 1.0; the far plane's own floor 0.14 and UV wobble 0.04. New
+   defaults: floor 0.42 (dusk factor min 0.6), cavern floor 0.35, grazeClear 0.25, grazeAlpha 0.25,
+   bright 1.6, perturb 0.6, far floor 0.34 / wobble 0.025. Every near-field value stays live under
+   `window.__water` (reflFloor, cavReflFloor, grazeClear, grazeAlpha, reflBright, cavReflBright,
+   reflPerturb, reflHot, reflMix, reflFar); the far-plane constants are shader literals.
+GPU: the mirror pass now draws 16-25% of the main pass's pixels instead of 6%; the keep-warm pass
+yields first, then the supersample ratchet. Pane (HIGH tier, 39.66): RT 535x344, uniforms as baked,
+no console errors; the judging shot needs a third-person view the pane cannot pose - owner judges.
+
+## v39.67 — Mega Laser: monsters take the beam, no hard ends
+
+Owner: "vortex's mega laser core doesn't seem to give me hit markers" + "the ends of the cylinder need
+smoothing or hiding or blending into muzzle fire at the muzzle". The core tick (`updateAbilities`,
+`coreName === 'Mega Laser'`) already threw a throttled `showHitMarker()` for Bots (0.18 s) - but the
+loop only walked `game.entities`, so leviathans / outskirts monsters (the endless targets) took NO
+damage and no marker. A second loop over `game.monsters` mirrors it (axis test with
+`collisionRadius + 0.6 * BEAM_RADIUS`, 3000 dps, hull bursts, arcs, hit fire, the same marker
+throttle). Ends: the two arm cones set `uAxialFalloff` 0.95 (the LayeredFX shader scales by
+`1 - uv.y * falloff`, uv.y = 1 at the +Y end = the gun), three additive glow cards
+(`player._vortexCoreGlows`: muzzle x2 at 30 u pulsing, joint at 4.5 x arm radius; a radial canvas on a
+MeshBasicMaterial, warmed at creation) hide the open cone ends, and each barrel spits
+`_spawnClassFireBurst` at 14 Hz (cap 10 live, `_muzzleFlame` tag) so the arm is born out of flame.
+Knobs on `window.__vortexFire`: muzzleHz, muzzleSize, glowMuzzle, glowJoint. Pane: bot pinned 1500 u
+ahead in the beam -> 12 markers / 2 s and 2546 damage; an OutskirtsMonster pinned 1800 u ahead ->
+12500 -> 1647 hp and 11 markers; glows/arms/muzzle flames all live, no errors.
+
+## v39.68 — the Laser ability gets the same ends
+
+Owner: "make the same changes to laser's appearance". The 0.22 s Laser shot (`activateAbility`,
+`'Laser'`, the `_vlOrigin`/`_vlDir` block) builds the same three cones as the core. Now: the glow card
+material + geometry are shared helpers (`_vortexGlowMaterial()` / `_vortexGlowGeometry()`, defined
+before `_vortexYKnobs`; the core's inline creation was folded into them), the ability arms set
+`uAxialFalloff` 0.95, three glow cards (muzzles 16 u, joint 22 u; `__vortexFire.glowMuzzleAbility` /
+`glowJointAbility`) ride the shot as their own `'vortexLaserBeam'` effect entries with `e.glow` = base
+size (the shared fade path shrinks them to 35% over the life and disposes them; the material is shared
+so its opacity is never touched), and each barrel spits two class-fire bursts. Pane: `q` fires it
+(`input.kbBindings.ability0`); one shot = 6 effect entries (stem, 2 arms at 0.95, 3 glows) + 4 muzzle
+flames, no errors. Tip for the pane: extend `e.lifetime` on the entries right after the shot to hold
+the beam for a screenshot.
+
+## v39.69 — endless drift clouds
+
+Owner: "we could probably afford to put a few extra clouds randomly floating around in endless". The
+arena `GasCloud`s (billboardCloudSystem sprites, GPU drift, ship wakes via `applyWake`/`tickWake`) now
+hang in the endless tube: `_endlessCloudsTick(dt)` (after the `_ecr*` critters block; called beside
+`_arenaCloudTick` in the game loop) rescans `run.segs` every 2 s and seeds 0-2 clouds per segment by
+gid hash (55% one, 25% two) at a spine point pushed up to 0.4 r sideways and 0.25 r up/down, SDF-open,
+above the water plane; bounds 0.28 r + jitter (110-380 u), sprites 1.7x, 14 slots each, alpha
+0.34-0.48, colour = fog lifted 55% toward white (floor luminance 0.35), `recolor()` follows biome
+switches. Each cloud rides a 45 s closed-form loop of 0.35 x bounds around its anchor on the shared
+run clock (`_ecrClock`: co-op peers agree), moved with `setPosition`; ships within `_AR_CLOUD_WAKE_R`
+push the sprites like the arenas. Clouds leave with their segment (`dispose()` returns the slots); cap
+`__ecl.max` 14; off on potato / VR perf tier >= 2. Pane (39.69): 7 clouds on the test route, no
+errors.
