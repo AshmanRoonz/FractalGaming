@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.08';
+const LSS_BUILD = '40.32';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13085,7 +13085,8 @@ try {
   }
 } catch (e) {}
 
-const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0 };
+const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0,
+  stallT: 0, stallN: 0 };   // (v40.13) the frames the EMA is not allowed to see
 let _lssOnBattery = false;
 try {
   if (navigator.getBattery) navigator.getBattery().then((b) => {
@@ -13177,7 +13178,8 @@ function _lssSupersampleTick(ts) {
                    (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
   if (!_cineNow && S.cineSaved != null) { S.scale = S.cineSaved; S.cineSaved = null; }
   if (_cineNow && !settingsOpen && !game._worldPrebaking) {
-    const _want = (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : null;
+    const _wantRaw = (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : 0;
+    const _want = _wantRaw;
     if (typeof _want === 'number') {
       if (S.cineSaved == null) S.cineSaved = S.scale;
       if (S.scale > _want) S.scale = _want;
@@ -13185,7 +13187,11 @@ function _lssSupersampleTick(ts) {
   }
   if (game.state !== 'playing' || settingsOpen || game._worldPrebaking ||
       (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) { S.ema = 0; return; }
-  if (!(dt >= 2 && dt <= 250)) return;                 // a tab switch or a load hitch is not a sample
+  if (dt > 250) {
+    if (document.visibilityState === 'visible') { S.stallT = ts; S.stallN++; }
+    return;
+  }
+  if (dt < 2) return;
   if (!S.win) { S.win = new Float32Array(240); S.wi = 0; }
   S.win[S.wi++] = dt;
   if (S.wi >= 240) {
@@ -13202,11 +13208,12 @@ function _lssSupersampleTick(ts) {
   const period = 1000 / S.hz;
   let sc = S.scale;
   const _floor = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
-  const _over = S.ema > period * 1.10, _far = S.ema > period * 1.40;
+  const _stalled = !!(S.stallT && (ts - S.stallT) < 4000);
+  const _over = _stalled || S.ema > period * 1.10, _far = _stalled || S.ema > period * 1.40;
   if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
     if (sc > 0) { sc = Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
     else { sc = Math.max(_floor, sc - 0.2); S.hold = 2; }
-  } else if (S.ema <= period * 1.02) {
+  } else if (S.ema <= period * 1.02 && !_stalled) {   // (v40.13) never climb out of a stalling patch
     const _cap = (_lssTierSuper() > 0) ? 1 : 0;   // (v39.49c) HIGH on battery creeps back to native, never above
     if (S.hold > 0) S.hold -= 0.5;
     else if (sc < 0) sc = Math.min(0, sc + 0.1);
@@ -13743,17 +13750,24 @@ function _waterRefractBind(rnd, scn, cam) {
     const A = _lssSceneActive(rt);   // the live sub-rectangle (v39.49 supersample viewport)
     const bw = Math.max(128, Math.min(rt.width, Math.ceil(A.w / 128) * 128));
     const bh = Math.max(128, Math.min(rt.height, Math.ceil(A.h / 128) * 128));
+    const _grow = !(typeof window !== 'undefined' && window.__waterCopyGrow === 0);
     const C = postFX.rtRefractCopy;
-    if (!C || C.image.width !== bw || C.image.height !== bh) {
+    const _fits = C && (_grow ? (C.image.width >= bw && C.image.height >= bh)
+                              : (C.image.width === bw && C.image.height === bh));
+    if (!_fits) {
       try { if (C) C.dispose(); } catch (_) {}
-      postFX.rtRefractCopy = new THREE.FramebufferTexture(bw, bh);
+      const nw = _grow ? Math.max(bw, C ? C.image.width : 0) : bw;
+      const nh = _grow ? Math.max(bh, C ? C.image.height : 0) : bh;
+      postFX.rtRefractCopy = new THREE.FramebufferTexture(nw, nh);
       postFX.rtRefractCopy.minFilter = THREE.LinearFilter;
       postFX.rtRefractCopy.magFilter = THREE.LinearFilter;
+      try { window.__waterCopyAllocs = (window.__waterCopyAllocs || 0) + 1; } catch (_) {}
     }
     rnd.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
     u.uSceneTex.value = postFX.rtRefractCopy;
-    u.uSceneRes.value.set(bw, bh);
-    u.uSceneMax.value.set(Math.min(1, A.w / bw), Math.min(1, A.h / bh));
+    const _cw = postFX.rtRefractCopy.image.width, _ch = postFX.rtRefractCopy.image.height;
+    u.uSceneRes.value.set(_cw, _ch);
+    u.uSceneMax.value.set(Math.min(1, A.w / _cw), Math.min(1, A.h / _ch));
     const W = window.__water || {};
     u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
     if (W.refractK != null) u.uRefractK.value = +W.refractK;
@@ -16647,6 +16661,7 @@ function _swRippleTick(dt) {
       R._maskJob = { cx: ncx, cz: ncz, row: 0, fast: (ddx * ddx + ddz * ddz > R.bounds * R.bounds) };
     }
   }
+  __pmark('rip:near');   // (v40.12) the near-mask recentre decision (and its syncBake path)
   {
     const FARSTEP = 4000;
     const dfx = px - R.farCenter.x, dfz = pz - R.farCenter.y;
@@ -16666,7 +16681,9 @@ function _swRippleTick(dt) {
       }
     }
   }
+  __pmark('rip:far');   // (v40.12) the far-mask recentre decision - INCLUDING the synchronous first bake
   _swRippleMaskJobTick(_cineW);
+  __pmark('rip:job');   // (v40.12) the budgeted row job that bakes whichever mask is in flight
   const w = game._hubWater;
   if (w) {
     const WL = w.userData.WL;
@@ -16769,7 +16786,10 @@ function _swRippleTick(dt) {
         renderer && renderer.readRenderTargetPixels && R.gpu.getAlternateRenderTarget) {
       R._crStep = (R._crStep || 0) + 1;
       const _every = Math.max(1, (_Wc.breakEvery | 0) || 4);
-      if (R._crStep % (R._crSkip || _every) === 0) {
+      const _crHoldMs = (_Wc.crHoldMs != null) ? +_Wc.crHoldMs : 15000;
+      const _crHold = (game.state !== 'playing') || !!(game._fightAt && (performance.now() - game._fightAt) < _crHoldMs);
+      const _crOff = _crHold || !!(R._crOffUntil && performance.now() < R._crOffUntil);
+      if (!_crOff && R._crStep % (R._crSkip || _every) === 0) {
         const RES = _SW_RIPPLE_RES, B = R.bounds, WLc = w.userData.WL;
         if (!R._crBuf) R._crBuf = new Float32Array(RES * RES * 4);
         const buf = R._crBuf;
@@ -16788,6 +16808,12 @@ function _swRippleTick(dt) {
             try { const _gl = renderer.getContext(); if (_gl && _gl.PIXEL_PACK_BUFFER) _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null); } catch (_) {}
             { const _c = performance.now() - _rt0; R._crCost = _c; const _cur = R._crSkip || _every;
               R._crSkip = (_c > 4) ? Math.min(32, _cur * 2) : Math.max(_every, (_cur * 0.75) | 0);
+              if (_c > 50) {
+                R._crBack = Math.min(60000, (R._crBack ? R._crBack * 2 : 4000));
+                R._crOffUntil = performance.now() + R._crBack;
+                _Wc.crOff = Math.round(R._crBack / 100) / 10;
+                try { window.__crestOffN = (window.__crestOffN || 0) + 1; } catch (_) {}
+              } else if (_c < 4) { R._crBack = 0; _Wc.crOff = 0; }
               _Wc.crCost = Math.round(_c * 10) / 10; _Wc.crSkip = R._crSkip; }
             if (_pr && typeof _pr.then === 'function') {
               _pr.then(function () { R._crPending = false; R._crReady = true; _Wc.crReads = (_Wc.crReads | 0) + 1; },
@@ -16796,9 +16822,16 @@ function _swRippleTick(dt) {
           }
         } else {
           const _prevRT = renderer.getRenderTarget();
+          const _rt0s = performance.now();
           try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); _scanNow = true; }
           catch (e) { R._crErr = 1; try { console.warn('[crestBreak] readback failed — disabling rule, set window.__water.crestBreak=0 to clear:', e && e.message); } catch (_) {} }
           if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
+          { const _c = performance.now() - _rt0s; R._crCost = _c;
+            if (_c > 50) { R._crBack = Math.min(60000, (R._crBack ? R._crBack * 2 : 4000));
+              R._crOffUntil = performance.now() + R._crBack; _Wc.crOff = Math.round(R._crBack / 100) / 10;
+              try { window.__crestOffN = (window.__crestOffN || 0) + 1; } catch (_) {} }
+            else if (_c < 4) { R._crBack = 0; _Wc.crOff = 0; }
+            _Wc.crCost = Math.round(_c * 10) / 10; }
         }
         if (!R._crErr && _scanNow) {
           const dispS = (_Wc.disp != null) ? _Wc.disp : 180, gainS = (_Wc.gain != null) ? _Wc.gain : 180;
@@ -38732,6 +38765,30 @@ function _buildModelWarmGroup() {
 
 let _warmedFXSig = null;
 function _warmRealCombatFX() {
+  let _errChkPrev = null;
+  try {
+    const _covered = !!((typeof game !== 'undefined' && game && (game._worldPrebaking || game._swapStaging || game._rrStaging)) ||
+                        (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on));
+    if (!_covered && _warmedFXSig !== null) {
+      try { (window.__fxWarmSkipped = window.__fxWarmSkipped || []).push(+(performance.now() / 1000).toFixed(1)); if (window.__fxWarmSkipped.length > 8) window.__fxWarmSkipped.shift(); } catch (_) {}
+      return 0;
+    }
+  } catch (_) {}
+  try { (window.__fxWarmRuns = window.__fxWarmRuns || []).push(+(performance.now() / 1000).toFixed(1)); if (window.__fxWarmRuns.length > 8) window.__fxWarmRuns.shift(); } catch (_) {}
+  try {
+    if (!(typeof window !== 'undefined' && window.__shaderErrChecks) &&
+        typeof renderer !== 'undefined' && renderer && renderer.debug &&
+        renderer.debug.checkShaderErrors) {
+      _errChkPrev = true;
+      renderer.debug.checkShaderErrors = false;
+    }
+  } catch (_) {}
+  try { return _warmRealCombatFXInner(); }
+  finally {
+    try { if (_errChkPrev !== null) renderer.debug.checkShaderErrors = _errChkPrev; } catch (_) {}
+  }
+}
+function _warmRealCombatFXInner() {
   try {
     if ((game.currentRound | 0) > 1 && !(typeof window !== 'undefined' && window.__fxWarmEveryRound) &&
         window._fxRetainKeys && window._fxRetainKeys.size >= 10) return;
@@ -38747,6 +38804,7 @@ function _warmRealCombatFX() {
     if (typeof game === 'undefined' || !game || !Array.isArray(game.effects)) return;
     if (typeof THREE === 'undefined') return;
     _warmedFXSig = _wsig;
+    try { (window.__fxWarmRan = window.__fxWarmRan || []).push(+(performance.now() / 1000).toFixed(1)); if (window.__fxWarmRan.length > 8) window.__fxWarmRan.shift(); } catch (_) {}   // (v40.27) it actually RAN (past the memo)
     const fp = camera.position.clone(); fp.y -= 50000;
     const fp2 = fp.clone(); fp2.x += 60;
     const V = (x, y, z) => new THREE.Vector3(x, y, z);
@@ -38818,6 +38876,74 @@ function _pbNow() { return (typeof performance !== 'undefined' && performance.no
 function _pbSub(txt) {
   try { showLoadingOverlay(null, txt); } catch (_) {}
 }
+async function _drainProgramLinks(capMs, rep, key) {
+  const _t = _pbNow();
+  let pending = 0, polls = 0, capped = false;
+  try {
+    const gl = renderer.getContext();
+    const ext = gl.getExtension('KHR_parallel_shader_compile');
+    const list = renderer.info && renderer.info.programs;
+    if (ext && list && list.length) {
+      for (;;) {
+        pending = 0; polls++;
+        for (const pw of list) {
+          try { if (pw.program && !gl.getProgramParameter(pw.program, ext.COMPLETION_STATUS_KHR)) pending++; } catch (_) {}
+        }
+        if (pending === 0) break;
+        if (_pbNow() - _t > (capMs || 4000)) { capped = true; break; }
+        try { _pbSub('linking shaders · ' + (list.length - pending) + '/' + list.length); } catch (_) {}
+        await _warmupYield();
+      }
+    }
+  } catch (_) {}
+  const ms = Math.round(_pbNow() - _t);
+  try { if (rep && rep.ms) { rep.ms[key || 'drain'] = (rep.ms[key || 'drain'] | 0) + ms; if (capped && !rep.capped) rep.capped = (key || 'drain') + '-capped'; } } catch (_) {}
+  try { window.__linkDrain = { ms: ms, polls: polls, pending: pending, at: key || 'drain' }; } catch (_) {}
+  return pending === 0;
+}
+async function _prebakeGpuFence(capMs, rep, key) {
+  const _t = _pbNow();
+  let ms = 0, capped = false;
+  try {
+    const gl = (typeof renderer !== 'undefined' && renderer && renderer.getContext) ? renderer.getContext() : null;
+    if (gl && gl.fenceSync) {
+      try { gl.flush(); } catch (_) {}
+      const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      if (sync) {
+        for (;;) {
+          let done = false;
+          try { done = gl.getSyncParameter(sync, gl.SYNC_STATUS) === gl.SIGNALED; } catch (_) { done = true; }
+          if (done) break;
+          if (_pbNow() - _t > capMs) { capped = true; break; }
+          try { _pbSub('waiting for the GPU · ' + Math.round((_pbNow() - _t) / 100) / 10 + ' s'); } catch (_) {}
+          await _warmupYield();
+        }
+        try { gl.deleteSync(sync); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  ms = Math.round(_pbNow() - _t);
+  try { if (rep) { rep.ms[key || 'fence'] = ms; if (capped && !rep.capped) rep.capped = 'gpu-fence'; } } catch (_) {}
+  try { window.__gpuFence = { ms: ms, capped: capped, at: key || 'fence' }; } catch (_) {}
+  return ms;
+}
+async function _prebakeCloakWarmRoots(roots, budgetUntil, rep, withShadow) {
+  let n = 0, mats = 0;
+  const _t = _pbNow();
+  const fins = [];
+  for (const r of roots) {
+    if (!r || typeof r.traverse !== 'function') continue;
+    if (budgetUntil && _pbNow() > budgetUntil) { try { if (rep && !rep.capped) rep.capped = 'cloak-warm'; } catch (_) {} break; }
+    try { if (r.userData) r.userData._cloakWarmed = false; } catch (_) {}
+    try { const f = _warmCloakForRoot(r, withShadow !== false, true); if (typeof f === 'function') { fins.push(f); mats += f.mats | 0; } n++; } catch (_) {}
+    try { _pbSub('cloaking the fleet · ' + n + '/' + roots.length); } catch (_) {}
+    await _warmupYield();
+  }
+  await _drainProgramLinks(Math.max(1000, budgetUntil ? budgetUntil - _pbNow() : 4000), rep, 'drainCloak');
+  for (const f of fins) { try { f(); } catch (_) {} await _warmupYield(); }
+  try { if (rep) { rep.ms.cloak = Math.round(_pbNow() - _t); rep.cloakHulls = n; rep.cloakMats = mats; } } catch (_) {}
+  return n;
+}
 async function _prebakeWorldForLaunch() {
   if (_PREBAKE.on) return _PREBAKE.last;
   try { if (typeof _cyberPrePlace === 'function') _cyberPrePlace(); } catch (_) {}
@@ -38886,7 +39012,7 @@ async function _prebakeWorldForLaunch() {
     const _tK = _pbNow();
     try {
       const _ffMode = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
-      if ((_ffMode || game._hubWater) && _pbNow() - _bt0 < _PREBAKE_MAX_MS) {
+      if (_pbNow() - _bt0 < _PREBAKE_MAX_MS) {
         _pbSub(_ffMode ? 'docking the carrier' : 'priming the hulls');
         if (_ffMode && typeof _carrierLoadProto === 'function' && typeof _carrier !== 'undefined' && _carrier) {
           await new Promise((res) => {
@@ -38937,6 +39063,13 @@ async function _prebakeWorldForLaunch() {
             if (game._hubWater && typeof _warmReflLiftForRoot === 'function') _warmReflLiftForRoot(_cl);
           } finally { try { renderer.setRenderTarget(_pRTK); } catch (_) {} }
         }
+        try {
+          const _ckRoots = [];
+          _carWarmGroup.children.forEach((c) => { if (c && c.userData && c.userData.isModelShip) _ckRoots.push(c); });   // ship hulls only, not the carrier clone
+          if (typeof player !== 'undefined' && player && player.mesh) _ckRoots.push(player.mesh);
+          _pbSub('cloaking the fleet');
+          await _prebakeCloakWarmRoots(_ckRoots, _bt0 + _PREBAKE_MAX_MS, rep, true);
+        } catch (e) { try { console.warn('[prebake] cloak warm failed:', e && e.message); } catch (_) {} }
       }
     } catch (e) { console.warn('[prebake] carrier prime failed:', e && e.message); }
     rep.ms.carrier = Math.round(_pbNow() - _tK);
@@ -38970,6 +39103,10 @@ async function _prebakeWorldForLaunch() {
       }
     } catch (_) {}
     rep.ms.drain = Math.round(_pbNow() - _tDr);
+    if (_pbNow() - _bt0 < _PREBAKE_MAX_MS) {
+      _pbSub('waiting for the GPU');
+      await _prebakeGpuFence(Math.max(500, Math.min(4000, _PREBAKE_MAX_MS - (_pbNow() - _bt0))), rep, 'fence');
+    }
   } catch (e) {
     console.warn('[prebake] failed (launching anyway):', e);
     rep.error = String((e && e.message) || e);
@@ -39133,6 +39270,183 @@ async function _prebakeWorldForLaunch() {
 }
 if (typeof window !== 'undefined') window.__prebake = () => _PREBAKE.last;
 
+let _fxWarmDone = false;
+async function _warmRuntimeFxOnce() {
+  if (_fxWarmDone) return 0;
+  _fxWarmDone = true;
+  try {
+    const rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+    if (!rt || typeof _warmDrawRoot !== 'function' || typeof scene === 'undefined' || !scene) return 0;
+    const at = (typeof player !== 'undefined' && player && player.position) ? player.position.clone()
+             : ((typeof camera !== 'undefined' && camera) ? camera.position.clone() : new THREE.Vector3());
+    const junkG = [], junkM = [];
+    const grp = new THREE.Group();
+    grp.position.copy(at);
+    scene.add(grp);
+    let n = 0;
+
+    try {
+      if (typeof _makeRockGeometry === 'function' && typeof _makeAtomFractalMaterial === 'function') {
+        const g = _makeRockGeometry(1, 0);
+        const m = _makeAtomFractalMaterial(0x88ccff);
+        const mesh = new THREE.Mesh(g, m);
+        mesh.frustumCulled = false; mesh.scale.setScalar(1.5);
+        grp.add(mesh); junkG.push(g); junkM.push(m); n++;
+      }
+    } catch (_) {}
+
+    try {
+      const pts = [];
+      for (let i = 0; i < 6; i++) pts.push(new THREE.Vector3(i * 2, (i % 2) * 1.5, 0));
+      const curve = new THREE.CatmullRomCurve3(pts);
+      for (let k = 0; k < 2; k++) {
+        const vc = (k === 1);
+        const g = new THREE.TubeGeometry(curve, 30, 0.4, 5, false);
+        if (vc) {
+          const arr = new Float32Array(g.attributes.position.count * 3);
+          arr.fill(1);
+          g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+        }
+        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: vc, transparent: true,
+          opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false });
+        const mesh = new THREE.Mesh(g, m);
+        mesh.frustumCulled = false; mesh.position.set(0, 3 + k * 3, 0);
+        grp.add(mesh); junkG.push(g); junkM.push(m); n++;
+      }
+    } catch (_) {}
+
+    try {
+      const g = new THREE.SphereGeometry(1.5, 16, 10);
+      const m = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8,
+        blending: THREE.AdditiveBlending, depthWrite: false });
+      const mesh = new THREE.Mesh(g, m);
+      mesh.frustumCulled = false; mesh.position.set(0, -3, 0);
+      grp.add(mesh); junkG.push(g); junkM.push(m); n++;
+    } catch (_) {}
+
+    try {
+      if (typeof _makeLayeredFXMaterial === 'function') {
+        const _mk = (variant) => {
+          const g = new THREE.SphereGeometry(1.2, 16, 10);            // normal+position+uv
+          if (variant === 'color') {
+            const arr = new Float32Array(g.attributes.position.count * 3); arr.fill(1);
+            g.setAttribute('color', new THREE.BufferAttribute(arr, 3));   // color+normal+position+uv
+          } else if (variant === 'nouv') {
+            g.deleteAttribute('uv');                                   // normal+position
+          }
+          return g;
+        };
+        let k = 0;
+        for (const variant of ['uv', 'color', 'nouv']) {
+          for (let add = 0; add < 2; add++) {
+            const g = _mk(variant);
+            const m = _makeLayeredFXMaterial(null);
+            if (add) m.blending = THREE.AdditiveBlending;
+            const mesh = new THREE.Mesh(g, m);
+            mesh.frustumCulled = false; mesh.position.set(-6 + (k++) * 2.5, 6, 0);
+            grp.add(mesh); junkG.push(g); junkM.push(m); n++;
+          }
+        }
+      }
+    } catch (_) {}
+    try {
+      if (typeof _ptsMat !== 'undefined' && _ptsMat) {
+        const N = 8;
+        const g = new THREE.BufferGeometry();
+        const pos = new Float32Array(N * 3), col = new Float32Array(N * 3), sz = new Float32Array(N), al = new Float32Array(N);
+        for (let i = 0; i < N; i++) { pos[i * 3] = i * 0.5; pos[i * 3 + 1] = -6; pos[i * 3 + 2] = 0; col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = 1; sz[i] = 8; al[i] = 0.5; }
+        g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        g.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+        g.setAttribute('aSize', new THREE.BufferAttribute(sz, 1));
+        g.setAttribute('aAlpha', new THREE.BufferAttribute(al, 1));
+        const pts = new THREE.Points(g, _ptsMat);
+        pts.frustumCulled = false;
+        grp.add(pts); junkG.push(g); n++;   // junkM deliberately NOT: the material is the live one
+      }
+    } catch (_) {}
+    try {
+      const _cv = document.createElement('canvas'); _cv.width = _cv.height = 16;
+      const _cx = _cv.getContext('2d'); if (_cx) { _cx.fillStyle = '#fff'; _cx.fillRect(0, 0, 16, 16); }
+      const _tex = new THREE.CanvasTexture(_cv);
+      for (let k = 0; k < 2; k++) {
+        const m = new THREE.SpriteMaterial({ map: _tex, color: 0xffffff, transparent: true, opacity: 0.8,
+          blending: k ? THREE.AdditiveBlending : THREE.NormalBlending, depthWrite: false });
+        const sp = new THREE.Sprite(m);
+        sp.position.set(4 + k * 3, -3, 0); sp.scale.set(2, 2, 1);
+        grp.add(sp); junkM.push(m); n++;
+      }
+      junkG.push(_tex);   // disposed with the geometries (it has a dispose())
+    } catch (_) {}
+    try {
+      const seenM = new Set();
+      const shown = [];
+      scene.traverse((o) => {
+        try {
+          if (!o.isSprite || !o.material || seenM.has(o.material)) return;
+          seenM.add(o.material);
+          if (!o.visible) { o.visible = true; shown.push(o); }
+          n++;
+        } catch (_) {}
+      });
+      if (shown.length) {
+        try { _warmDrawRoot(grp, rt, false); } catch (_) {}   // grp frames the camera; hidden sprites elsewhere still get submitted (frustumCulled off on pooled sprites is common, and an 8x8 draw is free either way)
+        for (const o of shown) { try { o.visible = false; } catch (_) {} }
+      }
+      try { window.__fxWarmSprites = seenM.size; } catch (_) {}
+    } catch (_) {}
+    try {
+      const _mk = (opts) => { const m = new THREE.SpriteMaterial(opts); const sp = new THREE.Sprite(m); sp.scale.set(2, 2, 1); sp.position.set(-8 + (n % 7) * 2, -5, 0); grp.add(sp); junkM.push(m); n++; return sp; };
+      if (typeof _emberFalloffTexture !== 'undefined' && _emberFalloffTexture) {
+        _mk({ map: _emberFalloffTexture, color: 0xffaa44, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false });
+      }
+      try { if (typeof getElectricSmokeTexture === 'function') { const et = getElectricSmokeTexture(); if (et) _mk({ map: et, color: 0x88c0ff, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false }); } } catch (_) {}
+      try {
+        const cv = document.createElement('canvas'); cv.width = 64; cv.height = 16;
+        const cx = cv.getContext('2d'); if (cx) { cx.fillStyle = '#fff'; cx.fillRect(0, 0, 64, 16); }
+        const lt = new THREE.CanvasTexture(cv); lt.minFilter = THREE.LinearFilter; lt.magFilter = THREE.LinearFilter; lt.generateMipmaps = false; lt.colorSpace = THREE.SRGBColorSpace;
+        _mk({ map: lt, transparent: true, depthTest: false, depthWrite: false, sizeAttenuation: true, toneMapped: false });
+        junkG.push(lt);
+      } catch (_) {}
+    } catch (_) {}
+    if (n) {
+      try { const _pR = renderer.getRenderTarget(); if (rt) renderer.setRenderTarget(rt); renderer.compile(grp, camera, scene); renderer.setRenderTarget(_pR); } catch (_) {}
+      await _drainProgramLinks(4000, null, 'drainFx');
+      try { _warmDrawRoot(grp, rt, true); } catch (_) {}
+    }
+
+    try {
+      const slot = (typeof _lightningPool !== 'undefined' && _lightningPool) ? _lightningPool[0] : null;
+      if (slot && slot.haloMesh && typeof _buildLightningTubeGeometry === 'function') {
+        const path = [];
+        for (let i = 0; i < 18; i++) path.push(new THREE.Vector3(at.x + i * 0.6, at.y + ((i % 3) - 1) * 0.4, at.z));
+        const g = _buildLightningTubeGeometry([path], 0.35, 6, null);
+        if (g) {
+          const phH = slot.haloMesh.geometry, phC = slot.coreMesh.geometry;
+          slot.haloMesh.geometry = g; slot.coreMesh.geometry = g;
+          try { if (_warmDrawRoot(slot.haloMesh, rt, false)) n++; } catch (_) {}
+          try { if (_warmDrawRoot(slot.coreMesh, rt, false)) n++; } catch (_) {}
+          slot.haloMesh.geometry = phH; slot.coreMesh.geometry = phC;
+          slot.haloMesh.visible = false; slot.coreMesh.visible = false;
+          try { g.dispose(); } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
+    try { scene.remove(grp); } catch (_) {}
+    try {
+      if (typeof _atomFractalMaterials !== 'undefined' && _atomFractalMaterials) {
+        for (const m of junkM) { const i = _atomFractalMaterials.indexOf(m); if (i >= 0) _atomFractalMaterials.splice(i, 1); }
+      }
+    } catch (_) {}
+    for (const g of junkG) { try { g.dispose(); } catch (_) {} }
+    for (const m of junkM) { try { m.dispose(); } catch (_) {} }
+    try { window.__fxWarm = n; } catch (_) {}
+    return n;
+  } catch (e) {
+    try { console.warn('[warm] runtime-fx warm failed:', e && e.message); } catch (_) {}
+    return 0;
+  }
+}
 async function _prebakeGpuPrime() {
   if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene ||
       typeof camera === 'undefined' || !camera || typeof THREE === 'undefined') return 0;
@@ -39169,6 +39483,8 @@ async function _prebakeGpuPrime() {
     }
   } catch (_) {}
   try { if (typeof _warmChargeGlowOnce === 'function') _warmChargeGlowOnce(); } catch (_) {}   // (v39.53) charge-glow program pair
+  try { await _warmRuntimeFxOnce(); } catch (_) {}
+  try { await _drainProgramLinks(4000, null, 'drainPrime'); } catch (_) {}
   try {
     for (let p = 0; p < PITCH.length; p++) {
       for (let y = 0; y < 4; y++) {
@@ -39508,6 +39824,18 @@ async function _rrStagedSwap(pending, ph) {
       rep.gpuPasses = await _prebakeGpuPrime();
     } else if (!rep.capped) rep.capped = 'gpu-skipped';
     rep.ms.gpu = Math.round(_pbNow() - t);
+    t = _pbNow();
+    try {
+      const _ckRoots = [];
+      for (const _e of (game.entities || [])) { const _m = _e && (_e.mesh || _e.shipMesh); if (_m && _m.userData) _ckRoots.push(_m); }
+      if (player && player.mesh) _ckRoots.push(player.mesh);
+      try { showLoadingOverlay(null, 'cloaking the fleet'); } catch (_) {}
+      await _prebakeCloakWarmRoots(_ckRoots, t0 + _SWAP_MAX_MS, rep, false);   // (v40.25) shadowless: depth variants came from the launch overlay
+    } catch (_) {}
+    if (_pbNow() - t0 < _SWAP_MAX_MS) {
+      try { showLoadingOverlay(null, 'waiting for the GPU'); } catch (_) {}
+      await _prebakeGpuFence(Math.max(500, Math.min(4000, _SWAP_MAX_MS - (_pbNow() - t0))), rep, 'fence');
+    }
   } catch (e) {
     console.warn('[swap] staged rebuild failed (launching anyway):', e);
     rep.error = String((e && e.message) || e);
@@ -43900,7 +44228,7 @@ function _warmDrawRoot(root, rt, withShadow) {
     return true;
   } catch (e) { console.warn('[warm] draw failed:', e); return false; }
 }
-function _warmCloakForRoot(root, withShadow) {
+function _warmCloakForRoot(root, withShadow, deferDraw) {
   if (!root || typeof root.traverse !== 'function') return 0;
   if (root.userData) root.userData._cloakWarmed = true;
   try {
@@ -43929,6 +44257,24 @@ function _warmCloakForRoot(root, withShadow) {
       for (const m of mats) { if (m._wSide === THREE.DoubleSide) { m.side = THREE.FrontSide; m.needsUpdate = true; _any = true; } }
       if (_any) renderer.compile(root, camera, scene);
       for (const m of mats) { if (m.side !== m._wSide) { m.side = m._wSide; m.needsUpdate = true; } }
+      if (deferDraw) {
+        try { renderer.setRenderTarget(_pRTC); } catch (_) {}
+        const _fin = function () {
+          try {
+            const _pR = renderer.getRenderTarget();
+            try { if (_rtC) renderer.setRenderTarget(_rtC); _warmDrawRoot(root, _rtC, withShadow !== false); } catch (_) {}
+            try { renderer.setRenderTarget(_pR); } catch (_) {}
+          } catch (_) {}
+          for (const m of mats) {
+            try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
+            delete m._wOp; delete m._wSide;
+          }
+          try { window.__cloakWarm = (window.__cloakWarm || 0) + mats.length; } catch (_) {}
+          return mats.length;
+        };
+        _fin.mats = mats.length;
+        return _fin;
+      }
       _warmDrawRoot(root, _rtC, withShadow !== false);
     } catch (_) {}
     for (const m of mats) {
@@ -43980,8 +44326,27 @@ function _warmCloakVariantOnce() {
     }
   } catch (_) {}
   if (!root) return;                     // nothing left to warm, or nothing built yet
-  const n = _warmCloakForRoot(root);
-  if (n) console.log('[cloak] pre-warmed ' + n + ' transparent hull program(s)');
+  try {
+    const _before = renderer.info.programs.length;
+    const f = _warmCloakForRoot(root, false, true);
+    if (typeof f === 'function') {
+      _cloakPendingFin = { fin: f, progs: renderer.info.programs.slice(_before), t0: performance.now(), root: root };
+    }
+  } catch (_) {}
+}
+let _cloakPendingFin = null;
+function _cloakPendingTick() {
+  const P = _cloakPendingFin;
+  if (!P) return;
+  let ready = true;
+  try {
+    const gl = renderer.getContext();
+    const ext = gl.getExtension('KHR_parallel_shader_compile');
+    if (ext) for (const pw of P.progs) { try { if (pw.program && !gl.getProgramParameter(pw.program, ext.COMPLETION_STATUS_KHR)) { ready = false; break; } } catch (_) {} }
+  } catch (_) {}
+  if (!ready && performance.now() - P.t0 < 6000) return;
+  _cloakPendingFin = null;
+  try { const n = P.fin(); if (n) console.log('[cloak] pre-warmed ' + n + ' transparent hull program(s)' + (ready ? '' : ' (link cap)')); } catch (_) {}
 }
 
 function _setPlayerShipOpacity(opacity) {
@@ -49824,6 +50189,7 @@ function updateRoundSystem(dt) {
         !(game.arenaField && _arenaMesh.building && (performance.now() - _arenaMesh.t0) < 60000)) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
+      try { game._fightAt = performance.now(); } catch (_) {}   // (v40.25) the crest readback holds off from here
       try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}   
       
       
@@ -65054,13 +65420,19 @@ function __pmark(name) {
   try { on = /[?&]pbhud\b/i.test(location.search || '') || localStorage.getItem('lss_pbhud') === '1'; } catch (_) {}
   if (!on) return;
   const KEY = 'lss_f8log', CAP = 40, BYTES = 400000, N = 16384;
+  let _f8NoGpu = false;
+  try { _f8NoGpu = /[?&]nogpu\b/i.test(location.search || '') || localStorage.getItem('lss_nogpu') === '1'; } catch (_) {}
+  try { window.__f8noGpu = _f8NoGpu; } catch (_) {}
   window.__profOn = true;
   const R = { ring: new Float32Array(N), ringT: new Float32Array(N), ri: 0, lo: [], secPrev: {}, big: [], lastProgs: 0, cold: [], last: 0, marks: null,
     res: [], resPrev: null,                       // (v39.99) see the teardown probe below
     made: [], madePrev: null,                     // (v40.07) resource creation on EVERY frame, not just late ones
     gpu: [], gl: null, sync: null, syncT: 0,      // (v40.07) the fence
     hb: [], hbLast: 0, hbN: 0,                    // (v40.07) the heartbeat
-    gt: [], gtP: [], gtQ: null, gtE: null, gtOk: undefined };   // (v40.08) TIME_ELAPSED around renderFrame
+    foc: [], focPrev: '', rafN: 0, beatN: 0,      // (v40.20) is the browser still SCHEDULING frames?
+    lt: [],                                       // (v40.26) long TASKS (not frames): [t, ms, name, attribution]
+    gt: [], gtP: [], gtQ: null, gtE: null, gtOk: undefined,     // (v40.08) TIME_ELAPSED around renderFrame
+    first: [], seenG: null, wrapped: false };                   // (v40.10) the first draw of each geometry, named
   const profNow = () => { const p = window.__prof, o = {}; if (!p) return o; for (const k in p) { const v = p[k]; if (v && typeof v.total === 'number') o[k] = v.total; } return o; };
   function _gtInit() {
     if (R.gtOk !== undefined) return R.gtOk;
@@ -65071,7 +65443,7 @@ function __pmark(name) {
     } catch (_) { R.gtOk = false; }
     return R.gtOk;
   }
-  window.__f8gt = {
+  if (!_f8NoGpu) window.__f8gt = {   // (v40.21) absent in nogpu mode, so gameLoop's `if (window.__f8gt)` skips it
     b: function () {
       try {
         if (!_gtInit()) return;
@@ -65088,20 +65460,64 @@ function __pmark(name) {
         gl.endQuery(R.gtE.TIME_ELAPSED_EXT);
         R.gtP.push([performance.now(), R.gtQ]);
         R.gtQ = null;
-        const disj = gl.getParameter(R.gtE.GPU_DISJOINT_EXT);
+        const disj = gl.getParameter(R.gtE.GPU_DISJOINT_EXT) ? 1 : 0;
         const keep = [];
         for (const e of R.gtP) {
           if (!gl.getQueryParameter(e[1], gl.QUERY_RESULT_AVAILABLE)) { keep.push(e); continue; }
           const ms = gl.getQueryParameter(e[1], gl.QUERY_RESULT) / 1e6;
           gl.deleteQuery(e[1]);
-          if (!disj) { R.gt.push([+(e[0] / 1000).toFixed(2), +ms.toFixed(1)]); if (R.gt.length > 300) R.gt.shift(); }
+          R.gt.push([+(e[0] / 1000).toFixed(2), +ms.toFixed(1), disj]);
+          if (R.gt.length > 300) R.gt.shift();
         }
         R.gtP = keep;
         if (R.gtP.length > 64) { for (const e of R.gtP) { try { gl.deleteQuery(e[1]); } catch (_) {} } R.gtP = []; }
       } catch (_) { R.gtQ = null; }
     }
   };
+  function _wrapFirstDraw() {
+    if (R.wrapped) return;
+    try {
+      if (typeof renderer === 'undefined' || !renderer || typeof renderer.renderBufferDirect !== 'function') return;
+      R.wrapped = true;
+      R.seenG = new Set();
+      const orig = renderer.renderBufferDirect;
+      renderer.renderBufferDirect = function (camera, scene, geometry, material, object, group) {
+        try {
+          if (geometry && material) {
+            const a = geometry.attributes || {};
+            const _uk = material.uniforms ? Object.keys(material.uniforms).slice(0, 7).join(',') : '';   // (v40.28) seven: uAxialFalloff is the sixth
+            let _pid = '';
+            try { const _pr = renderer.properties.get(material); const _cp = _pr && _pr.currentProgram; if (_cp && _cp.id != null) _pid = 'p' + _cp.id; } catch (_) {}
+            let _rtTag = 'c';
+            try { const _t = renderer.getRenderTarget(); if (_t) { _rtTag = (typeof postFX !== 'undefined' && postFX && _t === postFX.rtScene) ? 's' : ((_t.depthTexture || _t.isWebGLCubeRenderTarget) ? 'x' : ('t' + (_t.texture && _t.texture.type ? _t.texture.type : ''))); } } catch (_) {}
+            const sig = (material.type || '?') + (material.name ? ('#' + material.name) : '') + (_uk ? ('{' + _uk + '}') : '') + (_pid ? ('@' + _pid) : '') +
+              '>' + _rtTag + (material.depthTest === false ? 'D' : '') + (material.colorWrite === false ? 'C' : '') + ((material.alphaTest > 0) ? 'a' : '') +
+              '|' + Object.keys(a).sort().join('+') +
+              '|b' + (material.blending | 0) + (material.transparent ? 'T' : 'O') +
+              (material.depthWrite ? 'w' : '-') + 's' + (material.side | 0) +
+              (geometry.index ? 'i' : '-') + ((object && object.isInstancedMesh) ? 'I' : '-') +
+              ((object && object.isSkinnedMesh) ? 'S' : '-');
+            if (!R.seenG.has(sig)) {
+              R.seenG.add(sig);
+              const pos = a.position;
+              R.first.push([
+                +(performance.now() / 1000).toFixed(2),
+                (object && (object.name || (object.userData && object.userData.kind))) || (object ? object.type : '?'),
+                sig,
+                pos ? (pos.count | 0) : 0,
+                R.seenG.size,          // how many distinct pipelines have been drawn so far
+              ]);
+              if (R.first.length > 200) R.first.shift();
+            }
+          }
+        } catch (_) {}
+        return orig.call(this, camera, scene, geometry, material, object, group);
+      };
+      try { console.log('[f8] first-draw probe armed'); } catch (_) {}
+    } catch (_) { R.wrapped = true; }
+  }
   function _gpuFence(t) {
+    if (_f8NoGpu) return;   // (v40.21) no synchronous GPU-process round trips in this mode
     try {
       const gl = R.gl || (R.gl = (typeof renderer !== 'undefined' && renderer && renderer.getContext) ? renderer.getContext() : null);
       if (!gl || !gl.fenceSync) return;
@@ -65117,11 +65533,23 @@ function __pmark(name) {
   }
   const _beat = () => {
     const t = performance.now();
+    R.beatN++;
     if (R.hbLast) {
       const g = t - R.hbLast;
       if (g > 40) { R.hb.push([+(t / 1000).toFixed(2), +g.toFixed(1)]); if (R.hb.length > 200) R.hb.shift(); }
     }
     R.hbLast = t;
+    try {
+      const st = (document.visibilityState || '?')[0] +
+        (document.hasFocus && document.hasFocus() ? 'F' : 'f') +
+        (document.fullscreenElement ? 'S' : 's') +
+        ((typeof _lssOnBattery !== 'undefined' && _lssOnBattery) ? 'B' : 'p');
+      if (st !== R.focPrev) {
+        R.foc.push([+(t / 1000).toFixed(2), st]);
+        if (R.foc.length > 60) R.foc.shift();
+        R.focPrev = st;
+      }
+    } catch (_) {}
     if (R.last && t - R.last > 40 && !(++R.hbN % 5)) _gpuFence(t);   // ~20 ms polling, only inside a gap
   };
   try { setInterval(_beat, 4); } catch (_) {}
@@ -65139,7 +65567,9 @@ function __pmark(name) {
         }
         R.madePrev = _mn;
       } catch (_) {}
+      R.rafN++;   // (v40.20) counted against the heartbeat's own beats
       _gpuFence(t);
+      if (!R.wrapped) _wrapFirstDraw();   // (v40.10) renderer does not exist at parse time
       const cur = profNow();
       const _bigMs = Math.max(16, Math.min(30, 1000 / ((window.__ss && window.__ss.hz) || 60) * 2.2));   // 16 ms at 144 Hz, the old 30 at 60
       if (gap > _bigMs && document.visibilityState === 'visible') {
@@ -65184,6 +65614,18 @@ function __pmark(name) {
     });
     po.observe({ type: 'long-animation-frame', buffered: true });
   } catch (_) {}
+  try {
+    const plt = new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (e.duration < 50) continue;
+        let att = '';
+        try { const a = (e.attribution || [])[0]; if (a) att = (a.containerType || '') + ':' + (a.containerName || a.containerId || a.containerSrc || '').slice(0, 24); } catch (_) {}
+        R.lt.push([+(e.startTime / 1000).toFixed(2), Math.round(e.duration), e.name || '', att]);
+        if (R.lt.length > 120) R.lt.shift();
+      }
+    });
+    plt.observe({ type: 'longtask', buffered: true });
+  } catch (_) {}
   const load = () => {
     if (R.marks) return R.marks;
     try { R.marks = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (_) { R.marks = []; }
@@ -65217,6 +65659,16 @@ function __pmark(name) {
       clearTimeout(boxT); boxT = setTimeout(() => { if (box) box.style.display = 'none'; }, 5000);
     } catch (_) {}
   };
+  const _peaks = (ring, now, top, tail) => {
+    try {
+      const win = ring.filter(r => r[0] >= now - 5);
+      if (win.length <= top + tail) return win;
+      const big = win.slice().sort((a, b) => b[1] - a[1]).slice(0, top);
+      const out = new Set(big);
+      for (const r of win.slice(-tail)) out.add(r);
+      return Array.from(out).sort((a, b) => a[0] - b[0]);
+    } catch (_) { return []; }
+  };
   const snapshot = (label) => {
     const now = performance.now() / 1000;
     const g = (typeof game !== 'undefined' && game) ? game : null;
@@ -65239,21 +65691,67 @@ function __pmark(name) {
         } catch (_) { return null; }
       })(),
       lo: R.lo.filter(l => l[0] >= now - 5).slice(-20),
+      lt: R.lt.filter(l => l[0] >= now - 5).slice(-20),
       cold: R.cold.filter(c => c[0] >= now - 5),
       coldNames: (function () { try { return (window.__coldSeen || []).slice(-24); } catch (_) { return null; } })(),
       res: R.res.filter(r => r[0] >= now - 5).slice(-12),
       made: R.made.filter(r => r[0] >= now - 5).slice(-40),
-      gpu: R.gpu.filter(r => r[0] >= now - 5).slice(-40),
+      gpu: _peaks(R.gpu, now, 24, 8),   // (v40.09) same peak-keeping window as `gt`
       hb: R.hb.filter(r => r[0] >= now - 5).slice(-20),
-      gt: R.gt.filter(r => r[0] >= now - 5).slice(-40),
+      foc: R.foc.filter(r => r[0] >= now - 5),
+      ticks: [R.rafN, R.beatN, R.focPrev],
+      first: R.first.filter(r => r[0] >= now - 5).slice(-40),
+      pipes: (function () { try { return R.seenG ? R.seenG.size : 0; } catch (_) { return 0; } })(),
+      gt: _peaks(R.gt, now, 24, 8),
       ss: (function () { try { const A = _lssSceneActive(postFX.rtScene);
-        return [+_ssDyn.scale.toFixed(2), A.w, A.h, _ssDyn.hz, _ssDyn.steps]; } catch (_) { return null; } })(),
+        return [+_ssDyn.scale.toFixed(2), A.w, A.h, _ssDyn.hz, _ssDyn.steps, _ssDyn.stallN]; } catch (_) { return null; } })(),
       kw: (function () { try { const W = window.__keepWarm; if (!W) return null;
         return [(W.on && !W.disabled) ? 1 : 0, W.K, W.ms, W.cap]; } catch (_) { return null; } })(),
       q: (function () { try { return localStorage.getItem('lss_quality') || '?'; } catch (_) { return '?'; } })(),
       px: (function () { try { const c = renderer.domElement, r = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
         return [c.width, c.height, r ? r.width : 0, r ? r.height : 0, r ? (r.samples || 0) : 0]; } catch (_) { return null; } })(),
       hz: (function () { try { return (window.__ss && window.__ss.hz) || 0; } catch (_) { return 0; } })(),
+      gl: (function () { try {
+        if (window.__glId !== undefined) return window.__glId;
+        const g = renderer.getContext();
+        const d = g.getExtension('WEBGL_debug_renderer_info');
+        window.__glId = d ? String(g.getParameter(d.UNMASKED_RENDERER_WEBGL)).slice(0, 90) : '?';
+        return window.__glId;
+      } catch (_) { return '?'; } })(),
+      flags: (function () { try {
+        const W = window.__water || {}, K = window.__keepWarm || {};
+        return {
+          refract: (W.refract != null) ? +W.refract : 1,
+          disp: (window.__waterDisp != null) ? +window.__waterDisp : 1,
+          reflShields: (W.reflShields === false) ? 0 : 1,
+          copyGrow: (window.__waterCopyGrow === 0) ? 0 : 1,
+          copyAllocs: window.__waterCopyAllocs || 0,
+          kwOn: (K.on && !K.disabled) ? 1 : 0,
+          ssCine: (window.__ssCine !== undefined) ? window.__ssCine : 0,
+          ssMin: (typeof window.__ssMin === 'number') ? window.__ssMin : -0.6,
+          fxWarm: window.__fxWarm || 0,
+          noGpu: (function () { try { return window.__f8noGpu ? 1 : 0; } catch (_) { return 0; } })(),   // (v40.21)
+          onBattery: (function () { try { return (typeof _lssOnBattery !== 'undefined' && _lssOnBattery) ? 1 : 0; } catch (_) { return -1; } })(),
+          crestBreak: (W.crestBreak != null) ? +W.crestBreak : 1,   // (v40.19) the crest-spray readback
+          crCost: (W.crCost != null) ? W.crCost : null,             // ms the last readback call blocked for
+          crSkip: (W.crSkip != null) ? W.crSkip : null,             // steps between calls
+          crOff: (W.crOff != null) ? W.crOff : 0,                   // seconds the rule is switched off for
+          crOffN: window.__crestOffN || 0,                          // how many times it has had to
+          fxRuns: window.__fxWarmRuns || null,                      // (v40.26) when _warmRealCombatFX was entered
+          pb: (function () { try { const r = window.__prebake ? window.__prebake() : null; if (!r || !r.ms) return null;
+            return [r.totalMs | 0, r.ms.fence | 0, r.ms.cloak | 0, r.ms.fx | 0, r.ms.gpu | 0, r.capped || 0, r.cloakHulls | 0, window.__fxWarmSprites | 0]; } catch (_) { return null; } })(),
+          fxRan: window.__fxWarmRan || null,                        // (v40.27) ...and when it got past the memo and actually ran
+          fxSkipped: window.__fxWarmSkipped || null,                // (v40.27) ...and when the in-view guard refused it
+          crHold: (function () { try { const W2 = window.__water || {}; const h = (W2.crHoldMs != null) ? +W2.crHoldMs : 15000;
+            return (game && game._fightAt) ? Math.max(0, Math.round((h - (performance.now() - game._fightAt)) / 100) / 10) : -1; } catch (_) { return -1; } })(),   // (v40.25) s of hold left
+          warmDraws: window.__warmDraws || 0,
+        };
+      } catch (_) { return null; } })(),
+      ua: (function () { try {
+        const b = navigator.userAgentData && navigator.userAgentData.brands;
+        if (b && b.length) return b.map((x) => x.brand + ' ' + x.version).join(', ').slice(0, 90);
+        return String(navigator.userAgent).slice(-60);
+      } catch (_) { return '?'; } })(),
       frames: 0, worst: 0, avgFps: 0, info: null, run: null, speed: null, round: null,
     };
     try { const all = around(now - 5, now, 0); m.frames = all.length; m.worst = all.length ? +Math.max(...all.map(a => a[1])).toFixed(1) : 0; m.avgFps = all.length ? Math.round(1000 / (all.reduce((acc, a) => acc + a[1], 0) / all.length)) : 0; } catch (_) {}
@@ -65264,6 +65762,38 @@ function __pmark(name) {
     marks.push(m); save();
     return m;
   };
+  const _auto = { thresh: 400, n: 0, max: 30, lastT: 0, cool: 0 };
+  try { window.__autoMark = _auto; } catch (_) {}
+  let _autoOn = true;
+  try { _autoOn = !/[?&]noauto\b/i.test(location.search || ''); } catch (_) {}
+  if (_autoOn) {
+    try {
+      setInterval(() => {
+        try {
+          if (_auto.n >= _auto.max || document.visibilityState !== 'visible') return;
+          const nowS = performance.now() / 1000;
+          if (nowS < _auto.cool) return;
+          let bestT = 0, bestG = 0;
+          for (let i = 0; i < N; i++) {
+            const t = R.ringT[i], g = R.ring[i];
+            if (t > _auto.lastT && g >= _auto.thresh && g > bestG) { bestG = g; bestT = t; }
+          }
+          if (!bestT) return;
+          _auto.lastT = bestT + 0.001;
+          try {
+            const g0 = bestT - bestG / 1000;
+            for (const fr of R.foc) { if (fr[0] >= g0 - 0.05 && fr[0] <= bestT + 0.05 && /^h/.test(fr[1])) return; }
+            if (R.focPrev && /^h/.test(R.focPrev)) return;
+          } catch (_) {}
+          _auto.cool = nowS + 1.5;
+          const m = snapshot('auto ' + Math.round(bestG) + 'ms');
+          _auto.n++;
+          show('auto #' + m.n + '  ' + Math.round(bestG) + ' ms');
+          console.log('[f8] auto mark #' + m.n + ': ' + Math.round(bestG) + ' ms frame at ' + bestT.toFixed(2) + ' s');
+        } catch (_) {}
+      }, 250);
+    } catch (_) {}
+  }
   window.addEventListener('keydown', (ev) => {
     if (ev.code !== 'F8' && ev.key !== 'F8') return;
     try {
@@ -65292,7 +65822,8 @@ function __pmark(name) {
   api.around = around;
   api._R = R;
   window.__f8log = api;
-  try { console.log('[f8] recorder armed (pbhud): ' + load().length + ' saved marks. window.__f8log() / .summary() / .export() / .clear()'); } catch (_) {}
+  try { console.log('[f8] recorder armed (pbhud' + (_f8NoGpu ? ', nogpu: no fence, no frame timer' : '') + '): ' +
+    load().length + ' saved marks. window.__f8log() / .summary() / .export() / .clear()'); } catch (_) {}
 })();
 
 function gameLoop(timestamp) {
@@ -65546,14 +66077,17 @@ function gameLoop(timestamp) {
           if (_selEl && _selEl.classList.contains('active')) _drainMs = 12;
         } catch (_) { _drainMs = 12; }
         _swDrainStream(_fX, _fZ, _drainMs, 64);
-        try { _warmCloakVariantOnce(); } catch (_) {}   // (v39.39) once, behind the countdown
+        try { _cloakPendingTick(); } catch (_) {}         // (v40.32) draw last frame's compile once its links are done
+        try { if (!_cloakPendingFin) _warmCloakVariantOnce(); } catch (_) {}   // (v39.39) once, behind the countdown
         try {
           if (typeof game.warmupTimer === 'number') {
             if (game.warmupTimer > 3) game._cloakLateWarm = false;
-            else if (game.warmupTimer < 2 && !game._cloakLateWarm && player && player.mesh) {
+            else if (game.warmupTimer < 2 && !game._cloakLateWarm) {
               game._cloakLateWarm = true;
-              if (player.mesh.userData) player.mesh.userData._cloakWarmed = false;
-              _warmCloakForRoot(player.mesh, false);
+              if (player && player.mesh) {
+                try { if (player.mesh.userData) player.mesh.userData._cloakWarmed = false; } catch (_) {}
+                try { window.__cloakLateN = 1; } catch (_) {}
+              }
             }
           }
         } catch (_) {}

@@ -4431,7 +4431,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.08';
+const LSS_BUILD = '40.32';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -21826,7 +21826,8 @@ try {
 // combat, and each shed is a step) — the first seconds of every round ran at ~60 fps by design.
 // Starting at 0 and creeping up (0.05 per half-second while the refresh is held) reaches full
 // resolution in ~10 s on a GPU that can hold it, and never over-spends on one that cannot.
-const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0 };
+const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0,
+  stallT: 0, stallN: 0 };   // (v40.13) the frames the EMA is not allowed to see
 // (v39.49c) ON BATTERY, HIGH MAY GO BELOW NATIVE TOO. Measured on the owner's laptop unplugged (RTX
 // 5050 power-limited): MEGA at the 70% floor held 49 fps, HIGH at full native held 60 - and HIGH had
 // no adaptive path at all (the sampler only ran for ULTRA/MEGA). With the battery flag set the
@@ -21960,13 +21961,23 @@ function _lssSupersampleTick(ts) {
                    (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
   if (!_cineNow && S.cineSaved != null) { S.scale = S.cineSaved; S.cineSaved = null; }
   if (_cineNow && !settingsOpen && !game._worldPrebaking) {
-    // ⚠ DEFAULT OFF. Built when the owner asked for "something like foveated rendering for the
-    // cinematic", then left disabled when they pulled back ("no... wait") - and the codebase's own
-    // measurement argues against it anyway: v35.22 retired the LOW/MEDIUM tiers because "this game is
-    // DRAW-CALL bound, not fill bound - the same reason dropping the render-resolution tier was
-    // measured to not move hub fps at all", which is also why their lower quality setting changed
-    // nothing. Set window.__ssCine = -0.75 to try it; it costs a viewport change and nothing else.
-    const _want = (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : null;
+    // (v39.87) Built when the owner asked for "something like foveated rendering for the cinematic",
+    // then left DEFAULT OFF when they pulled back ("no... wait"), and the codebase's own measurement
+    // argued against it: v35.22 retired the LOW/MEDIUM tiers because "this game is DRAW-CALL bound,
+    // not fill bound - the same reason dropping the render-resolution tier was measured to not move
+    // hub fps at all".
+    // ⚠ (v40.13) DEFAULT 0 NOW - NATIVE, NOT BELOW IT. That measurement was taken on the HUB. On
+    // `shifting_deep` at MEGA this machine is plainly fill-bound: 20.8 ms frames with 3 ms of CPU in
+    // them, the GPU 2-6 frames deep in its own queue even between stalls, and `gt` reading 1.9-2.9 s
+    // for a single frame's draw list. Owner: "it lags right from the countdown" - and the countdown
+    // is exactly where this used to FREEZE the scale at whatever combat left, which the 40.12 marks
+    // caught at 0.25 (2592x1458) because the ratchet had crept up through the stalls (see v40.13 on
+    // the sampler). Non-playing states now run at native and the supersample is earned back in
+    // combat, which is what v39.49 wanted in the first place. This is a viewport change and nothing
+    // else - free to apply, free to undo, and the save/restore below puts combat back where it was.
+    // window.__ssCine = null restores the old freeze; -0.75 goes below native.
+    const _wantRaw = (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : 0;
+    const _want = _wantRaw;
     if (typeof _want === 'number') {
       if (S.cineSaved == null) S.cineSaved = S.scale;
       if (S.scale > _want) S.scale = _want;
@@ -21974,7 +21985,20 @@ function _lssSupersampleTick(ts) {
   }
   if (game.state !== 'playing' || settingsOpen || game._worldPrebaking ||
       (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) { S.ema = 0; return; }
-  if (!(dt >= 2 && dt <= 250)) return;                 // a tab switch or a load hitch is not a sample
+  // ⚠ (v40.13) THE FILTER WAS HIDING THE ONLY FRAMES THAT MATTERED. Everything over 250 ms is
+  // discarded as "not a sample" - which is right, a tab switch or a load hitch would poison an EMA -
+  // but the owner's 40.12 session is a 1.5-2.9 s stall every ~3.9 s, and every one of them went
+  // straight in the bin. Worse than invisible: the frames right AFTER a stall are fast (the GPU queue
+  // has just drained), so the EMA read healthy and the ratchet CREPT UP - marks 47 and 48 caught it
+  // climbing to scale 0.05 and then 0.25 (2592x1458) on a machine that was stalling two seconds at a
+  // time. The sample is still refused; what changes is that the fact of it is remembered, and a
+  // recent stall now counts as over budget on its own. One shed per decision tick, no creep-back
+  // while it stands, and it decays after 4 s so a single hiccup cannot park the resolution.
+  if (dt > 250) {
+    if (document.visibilityState === 'visible') { S.stallT = ts; S.stallN++; }
+    return;
+  }
+  if (dt < 2) return;
   // (v39.49) THE REFRESH IS NOT THE FASTEST GAP EVER SEEN. rAF timestamps jitter; one 5.6 ms gap
   // on the owner's 144 Hz panel snapped `hz` to 165, a budget the display can never meet, so the
   // EMA (6.95 ms) never got under the 6.18 ms target and the supersample never crept back — the
@@ -22003,7 +22027,10 @@ function _lssSupersampleTick(ts) {
   const _floor = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
   // Above native: shed at 10% over budget. Below native: only when the frame is 40% over budget
   // (~100 fps at 144 Hz) - a mild 130 fps at native beats 144 at 70% resolution.
-  const _over = S.ema > period * 1.10, _far = S.ema > period * 1.40;
+  // (v40.13) a stall inside the last 4 s is over budget by itself, at both thresholds - it is the
+  // strongest evidence available that this machine cannot hold what it is being asked to draw.
+  const _stalled = !!(S.stallT && (ts - S.stallT) < 4000);
+  const _over = _stalled || S.ema > period * 1.10, _far = _stalled || S.ema > period * 1.40;
   // (v39.51) BELOW NATIVE IS A BURST RESPONSE, NOT A RATCHET. Measured in the owner's session (144 Hz,
   // plugged in): 141 fps with the scene parked at the -0.6 floor (1344x707 on a 1920 canvas). Every
   // shed doubled the hold (up to 60 ticks = 30 s with no creep-back) and the backoff never reset, so
@@ -22015,7 +22042,7 @@ function _lssSupersampleTick(ts) {
   if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
     if (sc > 0) { sc = Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
     else { sc = Math.max(_floor, sc - 0.2); S.hold = 2; }
-  } else if (S.ema <= period * 1.02) {
+  } else if (S.ema <= period * 1.02 && !_stalled) {   // (v40.13) never climb out of a stalling patch
     const _cap = (_lssTierSuper() > 0) ? 1 : 0;   // (v39.49c) HIGH on battery creeps back to native, never above
     if (S.hold > 0) S.hold -= 0.5;
     else if (sc < 0) sc = Math.min(0, sc + 0.1);
@@ -22684,19 +22711,43 @@ function _waterRefractBind(rnd, scn, cam) {
     const A = _lssSceneActive(rt);   // the live sub-rectangle (v39.49 supersample viewport)
     const bw = Math.max(128, Math.min(rt.width, Math.ceil(A.w / 128) * 128));
     const bh = Math.max(128, Math.min(rt.height, Math.ceil(A.h / 128) * 128));
+    // ⚠ (v40.16) GROW ONLY. NEVER FREE AND REALLOCATE THIS MID-PLAY. v39.86 rebuilt the copy
+    // whenever the bucketed rectangle CHANGED - either direction - which was fine while the adaptive
+    // supersampler moved once a minute, and is not fine now that it moves on every stall. Destroying
+    // a multi-megabyte GPU texture that in-flight commands still reference forces the driver to
+    // flush and synchronise, and that work happens on the GPU process's own CPU: invisible to the
+    // page's LoAF (blockingDuration 0, script list empty), invisible to TIME_ELAPSED (which counts
+    // GPU EXECUTION, not driver work) - and it stalls the fence. That is exactly the fingerprint of
+    // the owner's marks 52 and 53: `gpu` 3377 and 3738 ms against a `gt` of 16-22 ms for the same
+    // frame, with the 4 ms heartbeat never missing a beat. It is also new in this session (the
+    // refraction path is v39.79/v39.86), on water maps only, which matches "it never did this
+    // before"; and each shed the governor takes crosses a 128 px bucket, so shed -> reallocate ->
+    // stall -> shed is a loop that feeds itself.
+    // Growing only costs a slightly larger blit than strictly needed - the shader clamps to
+    // uSceneMax regardless - and buys a texture that is allocated a handful of times per session and
+    // never freed under a live frame. A predictable blit beats an unpredictable driver sync.
+    // window.__waterCopyGrow = 0 restores the v39.86 exact-fit behaviour for an A/B.
+    const _grow = !(typeof window !== 'undefined' && window.__waterCopyGrow === 0);
     const C = postFX.rtRefractCopy;
-    if (!C || C.image.width !== bw || C.image.height !== bh) {
+    const _fits = C && (_grow ? (C.image.width >= bw && C.image.height >= bh)
+                              : (C.image.width === bw && C.image.height === bh));
+    if (!_fits) {
       try { if (C) C.dispose(); } catch (_) {}
-      postFX.rtRefractCopy = new THREE.FramebufferTexture(bw, bh);
+      const nw = _grow ? Math.max(bw, C ? C.image.width : 0) : bw;
+      const nh = _grow ? Math.max(bh, C ? C.image.height : 0) : bh;
+      postFX.rtRefractCopy = new THREE.FramebufferTexture(nw, nh);
       postFX.rtRefractCopy.minFilter = THREE.LinearFilter;
       postFX.rtRefractCopy.magFilter = THREE.LinearFilter;
+      try { window.__waterCopyAllocs = (window.__waterCopyAllocs || 0) + 1; } catch (_) {}
     }
     rnd.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
     u.uSceneTex.value = postFX.rtRefractCopy;
     // gl_FragCoord is in the live viewport's own pixels, and the copy starts at its origin, so the
-    // shader divides by the COPY's size and clamps to the live fraction of it.
-    u.uSceneRes.value.set(bw, bh);
-    u.uSceneMax.value.set(Math.min(1, A.w / bw), Math.min(1, A.h / bh));
+    // shader divides by the COPY's ACTUAL size (which grow-only may have made larger than this
+    // frame's bucket) and clamps to the live fraction of it.
+    const _cw = postFX.rtRefractCopy.image.width, _ch = postFX.rtRefractCopy.image.height;
+    u.uSceneRes.value.set(_cw, _ch);
+    u.uSceneMax.value.set(Math.min(1, A.w / _cw), Math.min(1, A.h / _ch));
     const W = window.__water || {};
     u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
     if (W.refractK != null) u.uRefractK.value = +W.refractK;
@@ -26758,6 +26809,7 @@ function _swRippleTick(dt) {
   }
   // (v33.98 LOD foam) re-bake the COARSE FAR mask on a much larger cadence (every FARSTEP=4000u of travel, ~8× rarer than
   // the near recenter). Separate centre, intentionally lazy — far foam is coarse so the window can drift without a visible shift.
+  __pmark('rip:near');   // (v40.12) the near-mask recentre decision (and its syncBake path)
   {
     const FARSTEP = 4000;
     const dfx = px - R.farCenter.x, dfz = pz - R.farCenter.y;
@@ -26784,7 +26836,9 @@ function _swRippleTick(dt) {
       }
     }
   }
+  __pmark('rip:far');   // (v40.12) the far-mask recentre decision - INCLUDING the synchronous first bake
   _swRippleMaskJobTick(_cineW);
+  __pmark('rip:job');   // (v40.12) the budgeted row job that bakes whichever mask is in flight
   // SHIP WAKE : the ONLY ambient ripple source — the water is STILL until something touches it
   // (world.html is windless). Seed ONLY when the ship is actually MOVING low over the surface ; a
   // hovering ship leaves the water flat, and (critically) re-seeding ONE fixed point would build a
@@ -26940,7 +26994,38 @@ function _swRippleTick(dt) {
       // whenever the GPU queue is deep: measured 5 ms average and 11-23 ms per call for the first ten
       // seconds after FIGHT on shifting_deep (hub:ripple 12-24 ms a frame, 0.3 with crestBreak=0).
       // A call over 4 ms doubles the interval (to 32 frames); cheap calls decay it back to breakEvery.
-      if (R._crStep % (R._crSkip || _every) === 0) {
+      // ⚠ (v40.19) A CALL THAT BLOCKS FOR A SECOND IS NOT A CADENCE PROBLEM. The v39.49b note above
+      // is the whole bug written down and then under-treated: "the async readback CALL blocks on
+      // Chrome's command-buffer flush whenever the GPU queue is deep". It does - and the queue is far
+      // deeper now than when that was measured. The owner's fence readings run 40-120 ms even between
+      // stalls, so the flush this call waits on is waiting for frames of work, not milliseconds.
+      // Marks 58 and 60 caught it exactly: `hub:ripple 1398.3` of a 1403.5 ms frame with the 4 ms
+      // heartbeat stalled 1416.5 ms beside it, and `hub:ripple 488.9` of a 493.1 ms frame with the
+      // heartbeat out for 507.5 ms. Main thread, not GPU execution - which is why it survived every
+      // GPU-side theory, survived `__water.refract = 0`, survived both maps, and ⚠ survived the drop
+      // to HIGH (mark 58 is `q: high`, a 1536x864 target): the readback is a FIXED 128x128 RGBA float
+      // pull, so resolution cannot touch it. It is also self-feeding - a blocked frame queues more
+      // work, which deepens the queue, which makes the next call block longer.
+      // Doubling the interval to a cap of 32 steps was never going to be enough: at 32 steps you
+      // still take another multi-second stall, just less often. A call that costs more than 50 ms
+      // now switches the rule OFF for a backing-off window (4 s, doubling to 60 s) and one cheap call
+      // resets it, so a machine that cannot afford this loses the crest spray instead of the frame.
+      // window.__water.crestBreak = 0 turns the rule off outright; .crOff reports the current window.
+      // (v40.25) ...AND A PREVENTIVE HOLD AFTER FIGHT. The cutoff above is reactive: the first call
+      // into a deep queue still pays the whole flush before it can switch anything off, and the
+      // queue is deepest in the first seconds of a round (everything the warm and the first real
+      // frames submitted). Marks 10-12 in the owner's 40.24 run: `hub:ripple 3527.3` with the
+      // heartbeat stopped 3546 ms, 13 s into round 1. So no crest readback at all for the first
+      // window after FIGHT (window.__water.crHoldMs, 15 s); spray is a metres-from-the-surface
+      // detail nobody is looking at while the fight opens.
+      const _crHoldMs = (_Wc.crHoldMs != null) ? +_Wc.crHoldMs : 15000;
+      // (v40.26) ...and the whole of warmup / the countdown, where the sim already runs but
+      // `_fightAt` is not stamped yet: marks 16/17 show `crOffN 1` at t=23 s, i.e. the readback ran
+      // in the countdown, tripped the cutoff and paid for it on screen. Nobody needs crest spray
+      // during a countdown.
+      const _crHold = (game.state !== 'playing') || !!(game._fightAt && (performance.now() - game._fightAt) < _crHoldMs);
+      const _crOff = _crHold || !!(R._crOffUntil && performance.now() < R._crOffUntil);
+      if (!_crOff && R._crStep % (R._crSkip || _every) === 0) {
         const RES = _SW_RIPPLE_RES, B = R.bounds, WLc = w.userData.WL;
         if (!R._crBuf) R._crBuf = new Float32Array(RES * RES * 4);
         const buf = R._crBuf;
@@ -26974,6 +27059,13 @@ function _swRippleTick(dt) {
             try { const _gl = renderer.getContext(); if (_gl && _gl.PIXEL_PACK_BUFFER) _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null); } catch (_) {}
             { const _c = performance.now() - _rt0; R._crCost = _c; const _cur = R._crSkip || _every;
               R._crSkip = (_c > 4) ? Math.min(32, _cur * 2) : Math.max(_every, (_cur * 0.75) | 0);
+              // (v40.19) the hard cutoff: tens of milliseconds means the flush is waiting on frames.
+              if (_c > 50) {
+                R._crBack = Math.min(60000, (R._crBack ? R._crBack * 2 : 4000));
+                R._crOffUntil = performance.now() + R._crBack;
+                _Wc.crOff = Math.round(R._crBack / 100) / 10;
+                try { window.__crestOffN = (window.__crestOffN || 0) + 1; } catch (_) {}
+              } else if (_c < 4) { R._crBack = 0; _Wc.crOff = 0; }
               _Wc.crCost = Math.round(_c * 10) / 10; _Wc.crSkip = R._crSkip; }
             if (_pr && typeof _pr.then === 'function') {
               _pr.then(function () { R._crPending = false; R._crReady = true; _Wc.crReads = (_Wc.crReads | 0) + 1; },
@@ -26982,9 +27074,19 @@ function _swRippleTick(dt) {
           }
         } else {
           const _prevRT = renderer.getRenderTarget();
+          const _rt0s = performance.now();
           try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); _scanNow = true; }
           catch (e) { R._crErr = 1; try { console.warn('[crestBreak] readback failed — disabling rule, set window.__water.crestBreak=0 to clear:', e && e.message); } catch (_) {} }
           if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
+          // (v40.19) the synchronous path is a readPixels - it ALWAYS waits for the queue - so it
+          // gets the same cutoff. It is only reached when the async one has failed, but that is
+          // exactly the machine that can least afford a pipeline flush.
+          { const _c = performance.now() - _rt0s; R._crCost = _c;
+            if (_c > 50) { R._crBack = Math.min(60000, (R._crBack ? R._crBack * 2 : 4000));
+              R._crOffUntil = performance.now() + R._crBack; _Wc.crOff = Math.round(R._crBack / 100) / 10;
+              try { window.__crestOffN = (window.__crestOffN || 0) + 1; } catch (_) {} }
+            else if (_c < 4) { R._crBack = 0; _Wc.crOff = 0; }
+            _Wc.crCost = Math.round(_c * 10) / 10; }
         }
         if (!R._crErr && _scanNow) {
           const dispS = (_Wc.disp != null) ? _Wc.disp : 180, gainS = (_Wc.gain != null) ? _Wc.gain : 180;
@@ -55808,7 +55910,70 @@ function _buildModelWarmGroup() {
 // mid-combat run: the only two call sites are the warmup tick and the
 // round-restart block, never a `playing` frame.
 let _warmedFXSig = null;
+// ⚠ (v40.22) THE SHADER-ERROR CHECK IS SWITCHED OFF TOO LATE, AND THIS IS THE FUNCTION THAT PAYS.
+// The owner's Chrome DevTools trace of a stalling session settles a whole day of theories in one
+// line. Two frames in it are 2555.5 ms and 4014.0 ms of `RunTask` on CrRendererMain -
+// PageAnimator::serviceScriptedAnimations -> FireAnimationFrame -> v8.callFunction - with a single
+// GPUTask of 2513.4 ms and 3925.1 ms running alongside on CrGpuMain. The V8 sampler says where:
+//   6909 of 7487 samples (92%) in `getProgramInfoLog`
+//   stack: getProgramInfoLog <- Ml.getUniforms <- Ql.renderBufferDirect <- Ql.render
+//          <- _warmRealCombatFX
+// That is three.js' WebGLProgram.onFirstUse, and it only calls getProgramInfoLog when
+// `renderer.debug.checkShaderErrors` is true. The v39.44 note at the end of _prebakeWorldForLaunch
+// already worked this out - "on ANGLE, reading a program's INFO LOG or LINK_STATUS BLOCKS until the
+// D3D compile finishes ... It defeats KHR_parallel_shader_compile completely" - and turns the flag
+// off. But it turns it off at the END of the prebake, and THIS warm runs INSIDE the prebake, so the
+// one function whose entire job is to draw every combat material for the first time did all of it
+// with the checks still on: every program serially joining its own HLSL compile instead of letting
+// ANGLE overlap them. Hence 4 seconds in a single frame.
+// The draws still happen, so the warm still warms - what goes away is the explicit synchronisation
+// around each one. Restored afterwards so the rest of the prebake keeps reporting real GLSL errors,
+// which is what the v39.44 note wanted (this game builds shaders from template literals).
+// window.__shaderErrChecks = true keeps them on here too, for shader work.
 function _warmRealCombatFX() {
+  let _errChkPrev = null;
+  // ⚠ (v40.27) NOT IN VIEW, NOT TWICE. The owner's 40.26 mark 18 is a single frame whose own draw
+  // list executed for 4100.9 ms on the GPU (TIME_ELAPSED, disjoint clear) with `first: 0` - nothing
+  // new was built, it was simply an enormous amount of drawing - and `flags.fxRuns` puts an entry
+  // into this function at 19.1 s, one tenth of a second before that frame. The prebake had already
+  // run it at 11.2 s behind the overlay; the countdown call (`warmupTimer <= 2`) and the FIGHT call
+  // (`warmupTimer <= 0`) entered it again, and the memo that should have stopped them keys on
+  // `_programEnvSig()`, which COUNTS VISIBLE LIGHTS: anything that changed the visible light set
+  // between the prebake and the countdown (the cinematic, a bot's engine light, a muzzle light
+  // coming online) makes the signature differ, and the whole thing runs again - every combat
+  // effect in the game spawned at once and rendered in one frame, on screen. That is the
+  // "already-built but expensive" class (marks 35 / 38 / 41 / 7 / 18): not a compile, a 4 s render.
+  // So: once ANY warm has run this session, the function only runs again behind a cover
+  // (the launch prebake, the traverse stage, the round stage). In view it is skipped and stamped,
+  // whatever the signature says. The trade is explicit: a genuinely changed environment leaves a
+  // few FX variants to link on first use in play - each a single program, mostly resident via
+  // _lssRetainMat - instead of one guaranteed multi-second frame that nothing hides.
+  try {
+    const _covered = !!((typeof game !== 'undefined' && game && (game._worldPrebaking || game._swapStaging || game._rrStaging)) ||
+                        (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on));
+    if (!_covered && _warmedFXSig !== null) {
+      try { (window.__fxWarmSkipped = window.__fxWarmSkipped || []).push(+(performance.now() / 1000).toFixed(1)); if (window.__fxWarmSkipped.length > 8) window.__fxWarmSkipped.shift(); } catch (_) {}
+      return 0;
+    }
+  } catch (_) {}
+  // (v40.26) every entry is stamped, memoized or not: a re-run in the countdown (a changed
+  // _programEnvSig after the cinematic would do it) is exactly the kind of on-screen work marks
+  // 16/17 cannot otherwise attribute. flags.fxRuns carries the last few timestamps.
+  try { (window.__fxWarmRuns = window.__fxWarmRuns || []).push(+(performance.now() / 1000).toFixed(1)); if (window.__fxWarmRuns.length > 8) window.__fxWarmRuns.shift(); } catch (_) {}
+  try {
+    if (!(typeof window !== 'undefined' && window.__shaderErrChecks) &&
+        typeof renderer !== 'undefined' && renderer && renderer.debug &&
+        renderer.debug.checkShaderErrors) {
+      _errChkPrev = true;
+      renderer.debug.checkShaderErrors = false;
+    }
+  } catch (_) {}
+  try { return _warmRealCombatFXInner(); }
+  finally {
+    try { if (_errChkPrev !== null) renderer.debug.checkShaderErrors = _errChkPrev; } catch (_) {}
+  }
+}
+function _warmRealCombatFXInner() {
   // (v38.99) Programs are resident now (_lssRetainMat keeps one material per real program key),
   // so re-running every visual spawn path at every round transition is a burst of allocations and
   // one heavy frame for nothing - on a phone, at the exact moment the level rebuilds, it was part
@@ -55842,6 +56007,7 @@ function _warmRealCombatFX() {
     // tick (the warmup tick fires this at warmupTimer<=2 AND again at <=0) can't
     // double-run. A null signature never memoizes, so it retries next call.
     _warmedFXSig = _wsig;
+    try { (window.__fxWarmRan = window.__fxWarmRan || []).push(+(performance.now() / 1000).toFixed(1)); if (window.__fxWarmRan.length > 8) window.__fxWarmRan.shift(); } catch (_) {}   // (v40.27) it actually RAN (past the memo)
     const fp = camera.position.clone(); fp.y -= 50000;
     const fp2 = fp.clone(); fp2.x += 60;
     const V = (x, y, z) => new THREE.Vector3(x, y, z);
@@ -56021,6 +56187,111 @@ function _pbSub(txt) {
   // is the v36.24 audio-hold engage point and is idempotent, so calling it here is safe.
   try { showLoadingOverlay(null, txt); } catch (_) {}
 }
+// ═══ (v40.24) A WARM IS NOT FINISHED UNTIL ITS DRAWS HAVE EXECUTED ═══════════════════════════════
+// Owner: "is the warmup just not finished? but it started the match anyway?" Yes - in a precise way.
+// The owner's DevTools trace shows the residual stalls as 3.7-3.9 s of `StartDrawToSwapStart` in the
+// viz pipeline with the renderer main thread IDLE, and the GPU process's only event in that window is
+// a single GPUTask of the same length: the command decoder blocked inside ONE GL command. On
+// ANGLE/D3D11 the command that blocks for seconds is the first DRAW with a (program x input layout x
+// state) whose D3D executable the driver has not built yet. The prebake's v37.18 drain polls
+// COMPLETION_STATUS_KHR, which answers "has this program LINKED" - and every warm draw the phases
+// above submitted is still queued behind that answer when the overlay drops. Then the countdown
+// runs the cloak warms on screen (they cannot run earlier on launch: bots spawn after this prebake),
+// and each of those first draws takes the decoder down for seconds with nothing to hide it.
+// v40.22 made this MORE visible, not less: getProgramInfoLog used to force each build to finish
+// inside the warm; with it gone the builds land wherever the draw does.
+// A fence is the honest test. fenceSync goes in after the last warm draw and the overlay stays up
+// until the GPU has EXECUTED everything before it - which, for a draw, means its pipeline exists.
+// Non-blocking (SYNC_STATUS is a poll, yielded a frame at a time), capped so a lost context or a
+// stuck driver cannot strand the launch, and free when the queue is empty, which is every warm
+// session with a hot cache.
+// ═══ (v40.32) COMPILE, DRAIN, THEN DRAW ══════════════════════════════════════════════════════════
+// The owner's chrome://tracing capture with the GPU categories on is the end of the argument. The
+// countdown's 1.9 s stall is, on the renderer's main thread, `GLES2Implementation::GetProgramiv` ->
+// `CommandBufferHelper::Finish` -> `WaitForGetOffset` (1872 ms), and on the GPU main thread the
+// matching `Program::MainLinkLoadEvent::wait` (1871.8 ms): three.js' first use of a freshly linked
+// program asks for ACTIVE_UNIFORMS, and on ANGLE that question cannot be answered until the D3D
+// link has finished - the `D3DCompile` of that pixel shader (`uSkinHue`, `normalMap`, `envMap`:
+// a hull material) was still running on ANGLE's worker (655 ms) when the draw asked. That happened
+// INSIDE the prebake's cloak warm of the player's hull, at page-time 13.22 s, with the ship-select
+// countdown on screen: `cold [[13.22, 6]]`, heartbeat stopped 1931.9 ms. v40.22 removed one such
+// join (getProgramInfoLog); this is the other one, and it lives in every warm that draws right after
+// it compiles. The v37.18 drain already knew the answer - poll COMPLETION_STATUS_KHR, which is
+// spec-guaranteed non-blocking - but it ran once, after the prime, i.e. AFTER every warm draw had
+// already joined its own link. So it becomes a helper, and every warm calls it between its compile
+// and its draw. Free when nothing is linking (one poll), capped so a stuck link cannot strand a launch.
+async function _drainProgramLinks(capMs, rep, key) {
+  const _t = _pbNow();
+  let pending = 0, polls = 0, capped = false;
+  try {
+    const gl = renderer.getContext();
+    const ext = gl.getExtension('KHR_parallel_shader_compile');
+    const list = renderer.info && renderer.info.programs;
+    if (ext && list && list.length) {
+      for (;;) {
+        pending = 0; polls++;
+        for (const pw of list) {
+          try { if (pw.program && !gl.getProgramParameter(pw.program, ext.COMPLETION_STATUS_KHR)) pending++; } catch (_) {}
+        }
+        if (pending === 0) break;
+        if (_pbNow() - _t > (capMs || 4000)) { capped = true; break; }
+        try { _pbSub('linking shaders · ' + (list.length - pending) + '/' + list.length); } catch (_) {}
+        await _warmupYield();
+      }
+    }
+  } catch (_) {}
+  const ms = Math.round(_pbNow() - _t);
+  try { if (rep && rep.ms) { rep.ms[key || 'drain'] = (rep.ms[key || 'drain'] | 0) + ms; if (capped && !rep.capped) rep.capped = (key || 'drain') + '-capped'; } } catch (_) {}
+  try { window.__linkDrain = { ms: ms, polls: polls, pending: pending, at: key || 'drain' }; } catch (_) {}
+  return pending === 0;
+}
+async function _prebakeGpuFence(capMs, rep, key) {
+  const _t = _pbNow();
+  let ms = 0, capped = false;
+  try {
+    const gl = (typeof renderer !== 'undefined' && renderer && renderer.getContext) ? renderer.getContext() : null;
+    if (gl && gl.fenceSync) {
+      try { gl.flush(); } catch (_) {}
+      const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      if (sync) {
+        for (;;) {
+          let done = false;
+          try { done = gl.getSyncParameter(sync, gl.SYNC_STATUS) === gl.SIGNALED; } catch (_) { done = true; }
+          if (done) break;
+          if (_pbNow() - _t > capMs) { capped = true; break; }
+          try { _pbSub('waiting for the GPU · ' + Math.round((_pbNow() - _t) / 100) / 10 + ' s'); } catch (_) {}
+          await _warmupYield();
+        }
+        try { gl.deleteSync(sync); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  ms = Math.round(_pbNow() - _t);
+  try { if (rep) { rep.ms[key || 'fence'] = ms; if (capped && !rep.capped) rep.capped = 'gpu-fence'; } } catch (_) {}
+  try { window.__gpuFence = { ms: ms, capped: capped, at: key || 'fence' }; } catch (_) {}
+  return ms;
+}
+// (v40.24) Cloak-warm a list of ship roots that are already in the scene, one per yield so the
+// cover's own frames keep painting. Skips nothing: the flag is cleared first so a root warmed
+// earlier with unfinished textures (v39.49b) is built again with them final. Returns hulls done.
+async function _prebakeCloakWarmRoots(roots, budgetUntil, rep, withShadow) {
+  let n = 0, mats = 0;
+  const _t = _pbNow();
+  // (v40.32) two passes: compile every hull (links start on ANGLE's workers), drain ONCE, then draw.
+  const fins = [];
+  for (const r of roots) {
+    if (!r || typeof r.traverse !== 'function') continue;
+    if (budgetUntil && _pbNow() > budgetUntil) { try { if (rep && !rep.capped) rep.capped = 'cloak-warm'; } catch (_) {} break; }
+    try { if (r.userData) r.userData._cloakWarmed = false; } catch (_) {}
+    try { const f = _warmCloakForRoot(r, withShadow !== false, true); if (typeof f === 'function') { fins.push(f); mats += f.mats | 0; } n++; } catch (_) {}
+    try { _pbSub('cloaking the fleet · ' + n + '/' + roots.length); } catch (_) {}
+    await _warmupYield();
+  }
+  await _drainProgramLinks(Math.max(1000, budgetUntil ? budgetUntil - _pbNow() : 4000), rep, 'drainCloak');
+  for (const f of fins) { try { f(); } catch (_) {} await _warmupYield(); }
+  try { if (rep) { rep.ms.cloak = Math.round(_pbNow() - _t); rep.cloakHulls = n; rep.cloakMats = mats; } } catch (_) {}
+  return n;
+}
 async function _prebakeWorldForLaunch() {
   if (_PREBAKE.on) return _PREBAKE.last;
   // (v37.94) CYBERPUNK CITY stands the player where the match actually is FIRST, so everything
@@ -56124,7 +56395,12 @@ async function _prebakeWorldForLaunch() {
       // is not flying linked its USE_EMISSIVEMAP variants cold at first reflection: 2 links / 4.2 s
       // in the owner's hourglass match. One hull per loadout here covers every bot on every water map.
       const _ffMode = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
-      if ((_ffMode || game._hubWater) && _pbNow() - _bt0 < _PREBAKE_MAX_MS) {
+      // (v40.24) ⚠ EVERY MAP, not only water. The hull-per-loadout group below was built for the
+      // mirror lift (water only), but it is also the only place a launch prebake can reach the BOT
+      // hulls at all - bots spawn after this prebake - and their cloak variants are what the
+      // countdown was building on screen. The carrier and the mirror lift keep their own gates
+      // inside; only the group itself is unconditional now.
+      if (_pbNow() - _bt0 < _PREBAKE_MAX_MS) {
         _pbSub(_ffMode ? 'docking the carrier' : 'priming the hulls');
         if (_ffMode && typeof _carrierLoadProto === 'function' && typeof _carrier !== 'undefined' && _carrier) {
           await new Promise((res) => {
@@ -56181,6 +56457,20 @@ async function _prebakeWorldForLaunch() {
             if (game._hubWater && typeof _warmReflLiftForRoot === 'function') _warmReflLiftForRoot(_cl);
           } finally { try { renderer.setRenderTarget(_pRTK); } catch (_) {} }
         }
+        // (v40.24) THE CLOAK VARIANTS OF EVERY HULL, behind the overlay. One proxy per loadout is
+        // exactly what a bot will fly (bots are unskinned, and tint is a uniform, so the proxy's
+        // materials key the same programs as the live bot's), so warming the transparent pair here
+        // - both single-sided passes, the shadow-pass depth variant, and one real DRAW of each -
+        // is what makes a bot's first Auto Cloak in play a warm draw instead of a decoder stall.
+        // The player's own hull joins (textures may still be pending on launch - v39.49b's late
+        // re-run stays for that case, and is a cheap draw once the pipelines exist).
+        try {
+          const _ckRoots = [];
+          _carWarmGroup.children.forEach((c) => { if (c && c.userData && c.userData.isModelShip) _ckRoots.push(c); });   // ship hulls only, not the carrier clone
+          if (typeof player !== 'undefined' && player && player.mesh) _ckRoots.push(player.mesh);
+          _pbSub('cloaking the fleet');
+          await _prebakeCloakWarmRoots(_ckRoots, _bt0 + _PREBAKE_MAX_MS, rep, true);
+        } catch (e) { try { console.warn('[prebake] cloak warm failed:', e && e.message); } catch (_) {} }
       }
     } catch (e) { console.warn('[prebake] carrier prime failed:', e && e.message); }
     rep.ms.carrier = Math.round(_pbNow() - _tK);
@@ -56232,6 +56522,13 @@ async function _prebakeWorldForLaunch() {
       }
     } catch (_) {}
     rep.ms.drain = Math.round(_pbNow() - _tDr);
+    // ---- F. (v40.24) THE GPU FENCE: the drains above proved the LINKS; this proves the DRAWS ----
+    // (v40.25) capped at 4 s and only with budget left: the launch overlay is opaque, but the
+    // ship-select countdown behind it is not infinitely patient either.
+    if (_pbNow() - _bt0 < _PREBAKE_MAX_MS) {
+      _pbSub('waiting for the GPU');
+      await _prebakeGpuFence(Math.max(500, Math.min(4000, _PREBAKE_MAX_MS - (_pbNow() - _bt0))), rep, 'fence');
+    }
   } catch (e) {
     console.warn('[prebake] failed (launching anyway):', e);
     rep.error = String((e && e.message) || e);
@@ -56501,6 +56798,266 @@ if (typeof window !== 'undefined') window.__prebake = () => _PREBAKE.last;
 // and camera.quaternion from the player every frame.
 // ⚠ The render target is unbound before every yield so the gameLoop frame in
 // between renders normally.
+// ═══ (v40.11) WARM WHAT THE GAME SPAWNS, NOT ONLY WHAT IS ALREADY STANDING THERE ════════════════
+// Owner: "I'd rather not have that huge hitch there every first load - we should always try to
+// utilize the loading screen to prepare the game for play."
+//
+// THE MEASUREMENT. Owner, unprompted: refresh the browser and the big hitches are rare; CLOSE the
+// browser and they are back at the start of the first match. A refresh keeps the GPU process alive;
+// closing it does not. So the thing being paid for is cached per GPU-PROCESS LIFETIME, which is the
+// ANGLE/D3D pipeline for a given (program x vertex input layout x render state) - and the driver
+// builds that at the FIRST DRAW, not at link. That reconciles the two facts that looked
+// contradictory for five builds: `programs` pinned at 184 with `cold` empty (three.js links nothing
+// during play, so every program already exists) AND `gt` measuring 3652 / 3491 / 3418 ms inside
+// single frames with the disjoint bit clear. renderer.compile() links a program without drawing it.
+// _prebakeGpuPrime renders the LIVE SCENE from twelve directions - and nothing the game spawns at
+// runtime is in the scene at that moment, so those programs are linked behind the loading screen and
+// rasterised for the first time in combat. Same trap as v39.83 (the cockpit interior, hidden inside
+// the root) and v39.84 (the depth variant): A WARM MUST DRAW, NOT JUST COMPILE.
+//
+// WHAT ARRIVES COLD, measured with a renderBufferDirect wrapper over 15 s of play (500 first draws,
+// aggregated by geometry type / vertex count / material / uniform names):
+//   172  BufferGeometry 1681v  color+position            MeshStandardMaterial  terrain shells (41^2)
+//   111  Icosahedron     240v  normal+position+uv        atom-fractal shader   projectile body
+//    74  BufferGeometry  108-216v position+uv            uIsCore shader        lightning halo+core
+//    28  Sphere          187v  normal+position+uv        MeshBasicMaterial     additive puff
+//    17  Sphere          425v  normal+position+uv        shield shader         ship shields
+//     6  Tube        186/276v  color+normal+position+uv  MeshBasicMaterial     trails - TWO layouts
+// The terrain shells and the shields are already drawn by the prime and by _warmDrawRoot(player.mesh)
+// respectively - later ones share the program and the layout, so only the buffer upload is new.
+// The rest are what this covers.
+//
+// ⚠ THE LIGHTNING POOL IS THE TRAP IN MINIATURE. _initLightningPool builds 96 meshes with their real
+// materials and a PLACEHOLDER geometry that carries only `position`, while a real bolt is
+// `position+uv`. Anything that warms through the placeholder warms the wrong input layout and buys
+// nothing. So a real bolt is built here, hung on a pooled mesh for one draw, and taken back off.
+//
+// The draw itself is _warmDrawRoot's 8x8 scissored render: pipeline creation happens at draw-call
+// validation, not per pixel, so eight by eight costs the same as full screen and warms the same
+// thing. With the shadow pass on for the group (v39.84 - the depth material is keyed on the real
+// material's flags, so a transparent additive prototype has its own depth variant).
+// window.__fxWarm reports how many prototypes were drawn; run once per session.
+let _fxWarmDone = false;
+async function _warmRuntimeFxOnce() {
+  if (_fxWarmDone) return 0;
+  _fxWarmDone = true;
+  try {
+    const rt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+    if (!rt || typeof _warmDrawRoot !== 'function' || typeof scene === 'undefined' || !scene) return 0;
+    const at = (typeof player !== 'undefined' && player && player.position) ? player.position.clone()
+             : ((typeof camera !== 'undefined' && camera) ? camera.position.clone() : new THREE.Vector3());
+    const junkG = [], junkM = [];
+    const grp = new THREE.Group();
+    grp.position.copy(at);
+    scene.add(grp);
+    let n = 0;
+
+    // (a) the projectile body: an irregular icosahedron under the atom-fractal shader. A second
+    //     material built from the same source shares the SAME WebGLProgram (three.js keys its cache
+    //     on the shader text and the defines), so a throwaway instance warms the real pipeline.
+    try {
+      if (typeof _makeRockGeometry === 'function' && typeof _makeAtomFractalMaterial === 'function') {
+        const g = _makeRockGeometry(1, 0);
+        const m = _makeAtomFractalMaterial(0x88ccff);
+        const mesh = new THREE.Mesh(g, m);
+        mesh.frustumCulled = false; mesh.scale.setScalar(1.5);
+        grp.add(mesh); junkG.push(g); junkM.push(m); n++;
+      }
+    } catch (_) {}
+
+    // (b) the tube trails, in BOTH layouts. Same material type, same program - but one carries a
+    //     `color` attribute and one does not, and the input layout is exactly what forks a D3D
+    //     vertex executable. The marks show both arriving cold within a second of each other.
+    try {
+      const pts = [];
+      for (let i = 0; i < 6; i++) pts.push(new THREE.Vector3(i * 2, (i % 2) * 1.5, 0));
+      const curve = new THREE.CatmullRomCurve3(pts);
+      for (let k = 0; k < 2; k++) {
+        const vc = (k === 1);
+        const g = new THREE.TubeGeometry(curve, 30, 0.4, 5, false);
+        if (vc) {
+          const arr = new Float32Array(g.attributes.position.count * 3);
+          arr.fill(1);
+          g.setAttribute('color', new THREE.BufferAttribute(arr, 3));
+        }
+        const m = new THREE.MeshBasicMaterial({ color: 0xffffff, vertexColors: vc, transparent: true,
+          opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false });
+        const mesh = new THREE.Mesh(g, m);
+        mesh.frustumCulled = false; mesh.position.set(0, 3 + k * 3, 0);
+        grp.add(mesh); junkG.push(g); junkM.push(m); n++;
+      }
+    } catch (_) {}
+
+    // (c) the additive puff sphere (16 x 10 = 187 vertices, the count the marks report).
+    try {
+      const g = new THREE.SphereGeometry(1.5, 16, 10);
+      const m = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8,
+        blending: THREE.AdditiveBlending, depthWrite: false });
+      const mesh = new THREE.Mesh(g, m);
+      mesh.frustumCulled = false; mesh.position.set(0, -3, 0);
+      grp.add(mesh); junkG.push(g); junkM.push(m); n++;
+    } catch (_) {}
+
+    // (d) (v40.28) THE LAYERED-FX SHADER, IN EVERY LAYOUT THE MARKS SHOWED. With the 4 s frames gone
+    //     (v40.27), the owner's mark 23 is a 382 ms frame whose draw list executed for 343 ms and
+    //     whose `first` list, now carrying uniform names, reads: `{uTime,uBaseColor,uFresnel,
+    //     uBrightness,uIntensity}` - `_makeLayeredFXMaterial` - drawn for the first time as
+    //     `color+normal+position+uv` (50 v), `normal+position` (56 v, mark 14's mystery) and
+    //     `normal+position+uv` (187 / 117 / 425 v), in both normal and additive blending, DoubleSide.
+    //     One ShaderMaterial, one program - but a D3D executable per INPUT LAYOUT, and three layouts
+    //     times two blend states is six pipelines that had never been drawn. A throwaway material
+    //     from the same factory shares the program (three keys its cache on the source), so six
+    //     small spheres here are the real thing.
+    try {
+      if (typeof _makeLayeredFXMaterial === 'function') {
+        const _mk = (variant) => {
+          const g = new THREE.SphereGeometry(1.2, 16, 10);            // normal+position+uv
+          if (variant === 'color') {
+            const arr = new Float32Array(g.attributes.position.count * 3); arr.fill(1);
+            g.setAttribute('color', new THREE.BufferAttribute(arr, 3));   // color+normal+position+uv
+          } else if (variant === 'nouv') {
+            g.deleteAttribute('uv');                                   // normal+position
+          }
+          return g;
+        };
+        let k = 0;
+        for (const variant of ['uv', 'color', 'nouv']) {
+          for (let add = 0; add < 2; add++) {
+            const g = _mk(variant);
+            const m = _makeLayeredFXMaterial(null);
+            if (add) m.blending = THREE.AdditiveBlending;
+            const mesh = new THREE.Mesh(g, m);
+            mesh.frustumCulled = false; mesh.position.set(-6 + (k++) * 2.5, 6, 0);
+            grp.add(mesh); junkG.push(g); junkM.push(m); n++;
+          }
+        }
+      }
+    } catch (_) {}
+    // (e) (v40.28) THE PARTICLE CLOUD. `_particlePoints` is in the scene from boot with drawRange 0,
+    //     so it never issues a draw until the first ember - mark 23 shows its first draw
+    //     (`{uMap,uScale}|aAlpha+aColor+aSize+position`) landing in the same 343 ms frame. The shared
+    //     material is reused here on a throwaway 8-point geometry with the same four attributes:
+    //     same program, same layout, one draw. The material is NOT disposed.
+    try {
+      if (typeof _ptsMat !== 'undefined' && _ptsMat) {
+        const N = 8;
+        const g = new THREE.BufferGeometry();
+        const pos = new Float32Array(N * 3), col = new Float32Array(N * 3), sz = new Float32Array(N), al = new Float32Array(N);
+        for (let i = 0; i < N; i++) { pos[i * 3] = i * 0.5; pos[i * 3 + 1] = -6; pos[i * 3 + 2] = 0; col[i * 3] = col[i * 3 + 1] = col[i * 3 + 2] = 1; sz[i] = 8; al[i] = 0.5; }
+        g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        g.setAttribute('aColor', new THREE.BufferAttribute(col, 3));
+        g.setAttribute('aSize', new THREE.BufferAttribute(sz, 1));
+        g.setAttribute('aAlpha', new THREE.BufferAttribute(al, 1));
+        const pts = new THREE.Points(g, _ptsMat);
+        pts.frustumCulled = false;
+        grp.add(pts); junkG.push(g); n++;   // junkM deliberately NOT: the material is the live one
+      }
+    } catch (_) {}
+    // (f) (v40.30) SPRITES. Cold-browser auto mark n36: the first SpriteMaterial draw of the match
+    //     (`SpriteMaterial|position+uv|b2T-s0i--`, 4 verts, additive) at 54.80 s, and a frame whose
+    //     draw list then executed for 3629 ms starting 54.81. Nothing in the warm had ever drawn a
+    //     Sprite. One additive and one normal-blend sprite, with a small map so the USE_MAP program
+    //     is the one built.
+    try {
+      const _cv = document.createElement('canvas'); _cv.width = _cv.height = 16;
+      const _cx = _cv.getContext('2d'); if (_cx) { _cx.fillStyle = '#fff'; _cx.fillRect(0, 0, 16, 16); }
+      const _tex = new THREE.CanvasTexture(_cv);
+      for (let k = 0; k < 2; k++) {
+        const m = new THREE.SpriteMaterial({ map: _tex, color: 0xffffff, transparent: true, opacity: 0.8,
+          blending: k ? THREE.AdditiveBlending : THREE.NormalBlending, depthWrite: false });
+        const sp = new THREE.Sprite(m);
+        sp.position.set(4 + k * 3, -3, 0); sp.scale.set(2, 2, 1);
+        grp.add(sp); junkM.push(m); n++;
+      }
+      junkG.push(_tex);   // disposed with the geometries (it has a dispose())
+    } catch (_) {}
+    // (g) (v40.31) THE REAL SPRITES. The v40.30 synthetic sprites warmed program p<x>; the cold run's
+    //     first live sprite was `SpriteMaterial@p172` and the frame it opened cost 1341 ms (auto mark
+    //     n47). A sprite's program is keyed on its map's colour space, rotation, size attenuation and
+    //     fog like everything else, so a CanvasTexture stand-in is a different program from a loaded
+    //     glow map. The pooled FX sprites already exist in the scene, hidden, with their real
+    //     materials: show one sprite per distinct material for the one warm draw, then hide it again.
+    try {
+      const seenM = new Set();
+      const shown = [];
+      scene.traverse((o) => {
+        try {
+          if (!o.isSprite || !o.material || seenM.has(o.material)) return;
+          seenM.add(o.material);
+          if (!o.visible) { o.visible = true; shown.push(o); }
+          n++;
+        } catch (_) {}
+      });
+      if (shown.length) {
+        try { _warmDrawRoot(grp, rt, false); } catch (_) {}   // grp frames the camera; hidden sprites elsewhere still get submitted (frustumCulled off on pooled sprites is common, and an 8x8 draw is free either way)
+        for (const o of shown) { try { o.visible = false; } catch (_) {} }
+      }
+      try { window.__fxWarmSprites = seenM.size; } catch (_) {}
+    } catch (_) {}
+    // (h) (v40.32) THE FIRST-FIRE SPRITES, WITH THEIR REAL RECIPES. Two cold runs in a row opened a
+    //     3.4 s frame a quarter-second after `SpriteMaterial@p172` was first drawn, and the v40.31
+    //     "real sprites" pass could not reach it: that material does not exist until the first hit
+    //     (spawnPlayerHitSplash builds it per call). The recipes are copied from their spawners so
+    //     the programs match: the hit splash (ember falloff map, additive), electric smoke (its own
+    //     map, additive, opacity 0) and the sRGB name label (depthTest off, toneMapped off).
+    try {
+      const _mk = (opts) => { const m = new THREE.SpriteMaterial(opts); const sp = new THREE.Sprite(m); sp.scale.set(2, 2, 1); sp.position.set(-8 + (n % 7) * 2, -5, 0); grp.add(sp); junkM.push(m); n++; return sp; };
+      if (typeof _emberFalloffTexture !== 'undefined' && _emberFalloffTexture) {
+        _mk({ map: _emberFalloffTexture, color: 0xffaa44, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending, depthWrite: false });
+      }
+      try { if (typeof getElectricSmokeTexture === 'function') { const et = getElectricSmokeTexture(); if (et) _mk({ map: et, color: 0x88c0ff, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false }); } } catch (_) {}
+      try {
+        const cv = document.createElement('canvas'); cv.width = 64; cv.height = 16;
+        const cx = cv.getContext('2d'); if (cx) { cx.fillStyle = '#fff'; cx.fillRect(0, 0, 64, 16); }
+        const lt = new THREE.CanvasTexture(cv); lt.minFilter = THREE.LinearFilter; lt.magFilter = THREE.LinearFilter; lt.generateMipmaps = false; lt.colorSpace = THREE.SRGBColorSpace;
+        _mk({ map: lt, transparent: true, depthTest: false, depthWrite: false, sizeAttenuation: true, toneMapped: false });
+        junkG.push(lt);
+      } catch (_) {}
+    } catch (_) {}
+    // (v40.32) compile the whole group first, let ANGLE finish the links, THEN draw - the draw is
+    // what used to join each link synchronously (GetProgramiv -> MainLinkLoadEvent::wait).
+    if (n) {
+      try { const _pR = renderer.getRenderTarget(); if (rt) renderer.setRenderTarget(rt); renderer.compile(grp, camera, scene); renderer.setRenderTarget(_pR); } catch (_) {}
+      await _drainProgramLinks(4000, null, 'drainFx');
+      try { _warmDrawRoot(grp, rt, true); } catch (_) {}
+    }
+
+    // (d) the lightning pool, drawn with a REAL bolt rather than its position-only placeholder.
+    try {
+      const slot = (typeof _lightningPool !== 'undefined' && _lightningPool) ? _lightningPool[0] : null;
+      if (slot && slot.haloMesh && typeof _buildLightningTubeGeometry === 'function') {
+        const path = [];
+        for (let i = 0; i < 18; i++) path.push(new THREE.Vector3(at.x + i * 0.6, at.y + ((i % 3) - 1) * 0.4, at.z));
+        const g = _buildLightningTubeGeometry([path], 0.35, 6, null);
+        if (g) {
+          const phH = slot.haloMesh.geometry, phC = slot.coreMesh.geometry;
+          slot.haloMesh.geometry = g; slot.coreMesh.geometry = g;
+          try { if (_warmDrawRoot(slot.haloMesh, rt, false)) n++; } catch (_) {}
+          try { if (_warmDrawRoot(slot.coreMesh, rt, false)) n++; } catch (_) {}
+          slot.haloMesh.geometry = phH; slot.coreMesh.geometry = phC;
+          slot.haloMesh.visible = false; slot.coreMesh.visible = false;
+          try { g.dispose(); } catch (_) {}
+        }
+      }
+    } catch (_) {}
+
+    // Teardown. ⚠ The atom-fractal factory registers every material it makes in a list that is
+    // ticked each frame, so the throwaway comes back OUT of it before it is disposed.
+    try { scene.remove(grp); } catch (_) {}
+    try {
+      if (typeof _atomFractalMaterials !== 'undefined' && _atomFractalMaterials) {
+        for (const m of junkM) { const i = _atomFractalMaterials.indexOf(m); if (i >= 0) _atomFractalMaterials.splice(i, 1); }
+      }
+    } catch (_) {}
+    for (const g of junkG) { try { g.dispose(); } catch (_) {} }
+    for (const m of junkM) { try { m.dispose(); } catch (_) {} }
+    try { window.__fxWarm = n; } catch (_) {}
+    return n;
+  } catch (e) {
+    try { console.warn('[warm] runtime-fx warm failed:', e && e.message); } catch (_) {}
+    return 0;
+  }
+}
 async function _prebakeGpuPrime() {
   if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene ||
       typeof camera === 'undefined' || !camera || typeof THREE === 'undefined') return 0;
@@ -56551,6 +57108,11 @@ async function _prebakeGpuPrime() {
     }
   } catch (_) {}
   try { if (typeof _warmChargeGlowOnce === 'function') _warmChargeGlowOnce(); } catch (_) {}   // (v39.53) charge-glow program pair
+  // (v40.11) ...and everything the game SPAWNS. Before the twelve prime renders, so anything these
+  // prototypes touch is warm by the time the wide passes run. See the note on _warmRuntimeFxOnce.
+  try { await _warmRuntimeFxOnce(); } catch (_) {}
+  // (v40.32) ...and nothing below draws until every link so far has finished.
+  try { await _drainProgramLinks(4000, null, 'drainPrime'); } catch (_) {}
   try {
     for (let p = 0; p < PITCH.length; p++) {
       for (let y = 0; y < 4; y++) {
@@ -57158,6 +57720,22 @@ async function _rrStagedSwap(pending, ph) {
       rep.gpuPasses = await _prebakeGpuPrime();
     } else if (!rep.capped) rep.capped = 'gpu-skipped';
     rep.ms.gpu = Math.round(_pbNow() - t);
+    // (v40.24) the bots exist here (ph.reset ran above): cloak-warm the live hulls, then fence.
+    t = _pbNow();
+    try {
+      const _ckRoots = [];
+      for (const _e of (game.entities || [])) { const _m = _e && (_e.mesh || _e.shipMesh); if (_m && _m.userData) _ckRoots.push(_m); }
+      if (player && player.mesh) _ckRoots.push(player.mesh);
+      try { showLoadingOverlay(null, 'cloaking the fleet'); } catch (_) {}
+      await _prebakeCloakWarmRoots(_ckRoots, t0 + _SWAP_MAX_MS, rep, false);   // (v40.25) shadowless: depth variants came from the launch overlay
+    } catch (_) {}
+    // (v40.25) the fence stays INSIDE the stage budget (this path shortens its countdown by the
+    // stage's length, floor 4 s - see `dur` below), capped at 4 s so a slow drain costs seconds of
+    // countdown, never the countdown.
+    if (_pbNow() - t0 < _SWAP_MAX_MS) {
+      try { showLoadingOverlay(null, 'waiting for the GPU'); } catch (_) {}
+      await _prebakeGpuFence(Math.max(500, Math.min(4000, _SWAP_MAX_MS - (_pbNow() - t0))), rep, 'fence');
+    }
   } catch (e) {
     console.warn('[swap] staged rebuild failed (launching anyway):', e);
     rep.error = String((e && e.message) || e);
@@ -57304,6 +57882,12 @@ async function _rrStagedRound(ph) {
     }
     rep.ms.terrain = Math.round(_pbNow() - t);
     rep.ch1 = _cnt();
+    // (v40.25) ⚠ NO WARM AND NO FENCE HERE, ON PURPOSE. v40.24 put both in and the owner got "so
+    // many hitches... and it skips the countdown because it's lagged there": this stage's cover is
+    // the ship picker, not an opaque overlay, and its countdown is wall-clock (`_tickTimer`), so
+    // anything done here is done on screen and anything longer than the countdown eats it. Fresh
+    // bot hulls between rounds are handled by the countdown's one-per-frame `_warmCloakVariantOnce`
+    // as before, now shadowless (the depth variants were built behind the launch overlay).
   } catch (e) {
     console.warn('[rrstage] staged round rebuild failed:', e);
     rep.error = String((e && e.message) || e);
@@ -63333,7 +63917,7 @@ function _warmDrawRoot(root, rt, withShadow) {
     return true;
   } catch (e) { console.warn('[warm] draw failed:', e); return false; }
 }
-function _warmCloakForRoot(root, withShadow) {
+function _warmCloakForRoot(root, withShadow, deferDraw) {
   // (v39.49b) IN PLACE, NOT CLONED. Material.clone() copies the standard props and userData but
   // NOT `onBeforeCompile` / `customProgramCacheKey` - and every hull material carries the skin hook
   // (`lssSkinHue`, a program-key term). So the clones this warm used to compile keyed a DIFFERENT
@@ -63378,6 +63962,28 @@ function _warmCloakForRoot(root, withShadow) {
       // two seconds of the countdown, which exists purely to rebuild the TEXTURED colour variants once
       // the hull materials are final - the depth variant was already built by the pass behind the
       // loading screen, and a second full shadow render is the bulk of what the player feels there.
+      // (v40.32) COMPILE NOW, DRAW AFTER THE LINKS HAVE FINISHED. With `deferDraw` the materials stay
+      // flipped and the caller gets a finisher; it drains COMPLETION_STATUS_KHR (non-blocking) and
+      // only then draws, so three.js' first-use GetProgramiv never joins a link in progress - the
+      // 1.87 s `Program::MainLinkLoadEvent::wait` in the owner's GPU trace, mid-countdown.
+      if (deferDraw) {
+        try { renderer.setRenderTarget(_pRTC); } catch (_) {}
+        const _fin = function () {
+          try {
+            const _pR = renderer.getRenderTarget();
+            try { if (_rtC) renderer.setRenderTarget(_rtC); _warmDrawRoot(root, _rtC, withShadow !== false); } catch (_) {}
+            try { renderer.setRenderTarget(_pR); } catch (_) {}
+          } catch (_) {}
+          for (const m of mats) {
+            try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
+            delete m._wOp; delete m._wSide;
+          }
+          try { window.__cloakWarm = (window.__cloakWarm || 0) + mats.length; } catch (_) {}
+          return mats.length;
+        };
+        _fin.mats = mats.length;
+        return _fin;
+      }
       _warmDrawRoot(root, _rtC, withShadow !== false);
     } catch (_) {}
     for (const m of mats) {
@@ -63433,8 +64039,34 @@ function _warmCloakVariantOnce() {
     }
   } catch (_) {}
   if (!root) return;                     // nothing left to warm, or nothing built yet
-  const n = _warmCloakForRoot(root);
-  if (n) console.log('[cloak] pre-warmed ' + n + ' transparent hull program(s)');
+  // (v40.25) shadowless: this runs one hull per frame INSIDE the countdown, on screen, and the
+  // depth variants of every hull archetype are built behind the launch overlay (v40.24 proxies,
+  // withShadow true). A full shadow render per hull here was the bulk of what the player felt.
+  // (v40.32) ...and it no longer draws on the frame it compiles. The draw is what joins the link
+  // (GetProgramiv -> MainLinkLoadEvent::wait, 1.9 s in the owner's GPU trace), so the compile
+  // happens now and the draw waits in `_cloakPendingFin` until every program linked since reports
+  // COMPLETION_STATUS_KHR - polled once a frame, non-blocking, 6 s cap.
+  try {
+    const _before = renderer.info.programs.length;
+    const f = _warmCloakForRoot(root, false, true);
+    if (typeof f === 'function') {
+      _cloakPendingFin = { fin: f, progs: renderer.info.programs.slice(_before), t0: performance.now(), root: root };
+    }
+  } catch (_) {}
+}
+let _cloakPendingFin = null;
+function _cloakPendingTick() {
+  const P = _cloakPendingFin;
+  if (!P) return;
+  let ready = true;
+  try {
+    const gl = renderer.getContext();
+    const ext = gl.getExtension('KHR_parallel_shader_compile');
+    if (ext) for (const pw of P.progs) { try { if (pw.program && !gl.getProgramParameter(pw.program, ext.COMPLETION_STATUS_KHR)) { ready = false; break; } } catch (_) {} }
+  } catch (_) {}
+  if (!ready && performance.now() - P.t0 < 6000) return;
+  _cloakPendingFin = null;
+  try { const n = P.fin(); if (n) console.log('[cloak] pre-warmed ' + n + ' transparent hull program(s)' + (ready ? '' : ' (link cap)')); } catch (_) {}
 }
 
 // Back-compat wrapper for the legacy name used inside _tickPerkEffects.
@@ -71482,6 +72114,7 @@ function updateRoundSystem(dt) {
         !(game.arenaField && _arenaMesh.building && (performance.now() - _arenaMesh.t0) < 60000)) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
+      try { game._fightAt = performance.now(); } catch (_) {}   // (v40.25) the crest readback holds off from here
       // (v35.06) Orientation unlock removed (locking is gone entirely —
       // see _lssLockLandscape). The unlock that fired here rotated the
       // viewport at FIGHT, mid-touch, on Chrome/Android.
@@ -91096,13 +91729,31 @@ function __pmark(name) {
   try { on = /[?&]pbhud\b/i.test(location.search || '') || localStorage.getItem('lss_pbhud') === '1'; } catch (_) {}
   if (!on) return;
   const KEY = 'lss_f8log', CAP = 40, BYTES = 400000, N = 16384;
+  // ⚠ (v40.21) THE RECORDER HAS TO BE ABLE TO TAKE ITSELF OUT OF THE PICTURE. Two of these probes
+  // ask the GPU process a question every frame and wait for the answer: `getSyncParameter` on the
+  // v40.07 fence and `getQueryParameter` draining the v40.08 TIME_ELAPSED queries. Both are
+  // synchronous round trips across the command buffer, which is exactly the operation this whole
+  // investigation has been chasing - the v39.49b note on the crest readback says the same thing
+  // about the same mechanism. Every mark the owner has taken was recorded with ?pbhud on, so the
+  // instrument has never been ruled out as a contributor to what it is measuring.
+  // `?pbhud&nogpu` (or localStorage lss_nogpu = '1') keeps the gap ring, the section blame, the LoAF
+  // records, the resource log, the heartbeat and the pipeline probe - everything that costs nothing
+  // but a performance.now() - and drops the fence and the frame timer entirely. If the stalls
+  // survive that, the recorder is innocent and the marks stand; if they do not, they never were the
+  // game's. Either answer is worth more than another theory. `flags.noGpu` records which it was.
+  let _f8NoGpu = false;
+  try { _f8NoGpu = /[?&]nogpu\b/i.test(location.search || '') || localStorage.getItem('lss_nogpu') === '1'; } catch (_) {}
+  try { window.__f8noGpu = _f8NoGpu; } catch (_) {}
   window.__profOn = true;
   const R = { ring: new Float32Array(N), ringT: new Float32Array(N), ri: 0, lo: [], secPrev: {}, big: [], lastProgs: 0, cold: [], last: 0, marks: null,
     res: [], resPrev: null,                       // (v39.99) see the teardown probe below
     made: [], madePrev: null,                     // (v40.07) resource creation on EVERY frame, not just late ones
     gpu: [], gl: null, sync: null, syncT: 0,      // (v40.07) the fence
     hb: [], hbLast: 0, hbN: 0,                    // (v40.07) the heartbeat
-    gt: [], gtP: [], gtQ: null, gtE: null, gtOk: undefined };   // (v40.08) TIME_ELAPSED around renderFrame
+    foc: [], focPrev: '', rafN: 0, beatN: 0,      // (v40.20) is the browser still SCHEDULING frames?
+    lt: [],                                       // (v40.26) long TASKS (not frames): [t, ms, name, attribution]
+    gt: [], gtP: [], gtQ: null, gtE: null, gtOk: undefined,     // (v40.08) TIME_ELAPSED around renderFrame
+    first: [], seenG: null, wrapped: false };                   // (v40.10) the first draw of each geometry, named
   const profNow = () => { const p = window.__prof, o = {}; if (!p) return o; for (const k in p) { const v = p[k]; if (v && typeof v.total === 'number') o[k] = v.total; } return o; };
   // ═══ (v40.08) ...AND WHERE ON THE GPU IT WENT ═════════════════════════════════════════════════
   // v40.07's fence settled the first question: the 1.5-3.5 s frames are the GPU, not the page (the
@@ -91127,7 +91778,7 @@ function __pmark(name) {
     } catch (_) { R.gtOk = false; }
     return R.gtOk;
   }
-  window.__f8gt = {
+  if (!_f8NoGpu) window.__f8gt = {   // (v40.21) absent in nogpu mode, so gameLoop's `if (window.__f8gt)` skips it
     b: function () {
       try {
         if (!_gtInit()) return;
@@ -91144,21 +91795,111 @@ function __pmark(name) {
         gl.endQuery(R.gtE.TIME_ELAPSED_EXT);
         R.gtP.push([performance.now(), R.gtQ]);
         R.gtQ = null;
-        const disj = gl.getParameter(R.gtE.GPU_DISJOINT_EXT);
+        // (v40.09) ⚠ FLAG DISJOINT, DO NOT DROP IT. v40.08 discarded the whole batch whenever
+        // GPU_DISJOINT was set - and that bit is set when the GPU was interrupted mid-query, which
+        // is exactly what a multi-second stall IS. So the probe was throwing away the only samples
+        // it was built to catch. Third element: 1 = the driver says this timing may be unreliable.
+        // An unreliable number in the right order of magnitude beats no number at all.
+        const disj = gl.getParameter(R.gtE.GPU_DISJOINT_EXT) ? 1 : 0;
         const keep = [];
         for (const e of R.gtP) {
           if (!gl.getQueryParameter(e[1], gl.QUERY_RESULT_AVAILABLE)) { keep.push(e); continue; }
           const ms = gl.getQueryParameter(e[1], gl.QUERY_RESULT) / 1e6;
           gl.deleteQuery(e[1]);
-          if (!disj) { R.gt.push([+(e[0] / 1000).toFixed(2), +ms.toFixed(1)]); if (R.gt.length > 300) R.gt.shift(); }
+          R.gt.push([+(e[0] / 1000).toFixed(2), +ms.toFixed(1), disj]);
+          if (R.gt.length > 300) R.gt.shift();
         }
         R.gtP = keep;
         if (R.gtP.length > 64) { for (const e of R.gtP) { try { gl.deleteQuery(e[1]); } catch (_) {} } R.gtP = []; }
       } catch (_) { R.gtQ = null; }
     }
   };
+  // ═══ (v40.10) WHICH GEOMETRY, AND IN WHAT SHAPE ══════════════════════════════════════════════
+  // 40.09 pinned the lane: `gt [30.36, 3652, 0]` - one frame's own draw list costing 3.65 s of GPU
+  // time with the disjoint bit CLEAR, against 15-18 ms neighbours - and `made [30.34, 0, 4, 0]`
+  // twenty milliseconds earlier. Four geometries uploaded, then a frame that costs 3.65 s. The
+  // second mark is the same shape: +15 at 39.59, the stalled frame starts at 39.61.
+  //
+  // `renderer.info.memory.geometries` increments in WebGLGeometries.get(), i.e. at first upload, so
+  // `made` already proves it is a first-draw cost rather than a steady-state one. What it cannot say
+  // is WHICH geometry, and that is the whole question - because the suspect is ANGLE building a D3D
+  // vertex executable per INPUT LAYOUT at first draw, which three.js' program count structurally
+  // cannot see (the three.js program already exists; only the layout is new). If the four geometries
+  // in that frame carry an attribute set no earlier draw used, the fix is the established one in
+  // this codebase: draw it once behind the loading screen, because a warm must DRAW, not just
+  // compile.
+  //
+  // renderBufferDirect is WebGLRenderer's single funnel for object draws, so one wrapper sees every
+  // geometry at the moment it is first submitted. Records the layout key (the attribute names, which
+  // is exactly what forks an executable), the size, and what was drawing it. One Set lookup per draw
+  // call, and only with ?pbhud.
+  function _wrapFirstDraw() {
+    if (R.wrapped) return;
+    try {
+      if (typeof renderer === 'undefined' || !renderer || typeof renderer.renderBufferDirect !== 'function') return;
+      R.wrapped = true;
+      R.seenG = new Set();
+      const orig = renderer.renderBufferDirect;
+      renderer.renderBufferDirect = function (camera, scene, geometry, material, object, group) {
+        try {
+          if (geometry && material) {
+            const a = geometry.attributes || {};
+            // ⚠ (v40.15) KEY ON THE PIPELINE, NOT THE GEOMETRY. v40.10 keyed on geometry.uuid, and
+            // that made the list useless for its own purpose: the lightning system builds a NEW
+            // BufferGeometry per bolt, so every bolt showed up as a "first draw" even though its
+            // program and its input layout were warmed behind the loading screen four minutes
+            // earlier. Marks 51-53 are page after page of those, drowning the handful of entries
+            // that could actually have cost something. A new BUFFER is an upload; a new
+            // (program x input layout x render state) is what makes a driver build a pipeline, and
+            // only the second one can explain a multi-second frame. Same key ANGLE would be keying
+            // on: what the shader is, what vertex attributes feed it, and the blend/depth/side state
+            // it draws under.
+            // (v40.26) ...and WHICH shader. Mark 14: a brand-new `ShaderMaterial|normal+position|b2T-s2i--`
+            // drawn 20 ms before a 3.9 s stall, and the layout alone cannot say which of the game's
+            // ShaderMaterials that is. The uniform names can (uIsCore = lightning, uAxialFalloff =
+            // layered FX, shieldColor = shield, uBaseColor+uVRLite = atom fractal, ...).
+            const _uk = material.uniforms ? Object.keys(material.uniforms).slice(0, 7).join(',') : '';   // (v40.28) seven: uAxialFalloff is the sixth
+            // ⚠ (v40.30) ...AND THE PROGRAM. The owner's cold-browser run (auto marks n36/n38/n42)
+            // is three frames whose draw lists executed for 3629 / 3042 / 2645 ms with `first` EMPTY
+            // - and a signature built from material NAME + layout + state cannot tell a hull
+            // material apart from the same-named material with its texture now assigned (a different
+            // program: USE_MAP), or one sprite from another with a different map. three.js keeps
+            // the live program on the material's renderer properties; its id is the honest key.
+            let _pid = '';
+            try { const _pr = renderer.properties.get(material); const _cp = _pr && _pr.currentProgram; if (_cp && _cp.id != null) _pid = 'p' + _cp.id; } catch (_) {}
+            // (v40.31) ...and the render TARGET and the rest of the state. A first draw into the shadow
+            // map, the mirror or a GPGPU target is a different pipeline from the same draw into rtScene.
+            let _rtTag = 'c';
+            try { const _t = renderer.getRenderTarget(); if (_t) { _rtTag = (typeof postFX !== 'undefined' && postFX && _t === postFX.rtScene) ? 's' : ((_t.depthTexture || _t.isWebGLCubeRenderTarget) ? 'x' : ('t' + (_t.texture && _t.texture.type ? _t.texture.type : ''))); } } catch (_) {}
+            const sig = (material.type || '?') + (material.name ? ('#' + material.name) : '') + (_uk ? ('{' + _uk + '}') : '') + (_pid ? ('@' + _pid) : '') +
+              '>' + _rtTag + (material.depthTest === false ? 'D' : '') + (material.colorWrite === false ? 'C' : '') + ((material.alphaTest > 0) ? 'a' : '') +
+              '|' + Object.keys(a).sort().join('+') +
+              '|b' + (material.blending | 0) + (material.transparent ? 'T' : 'O') +
+              (material.depthWrite ? 'w' : '-') + 's' + (material.side | 0) +
+              (geometry.index ? 'i' : '-') + ((object && object.isInstancedMesh) ? 'I' : '-') +
+              ((object && object.isSkinnedMesh) ? 'S' : '-');
+            if (!R.seenG.has(sig)) {
+              R.seenG.add(sig);
+              const pos = a.position;
+              R.first.push([
+                +(performance.now() / 1000).toFixed(2),
+                (object && (object.name || (object.userData && object.userData.kind))) || (object ? object.type : '?'),
+                sig,
+                pos ? (pos.count | 0) : 0,
+                R.seenG.size,          // how many distinct pipelines have been drawn so far
+              ]);
+              if (R.first.length > 200) R.first.shift();
+            }
+          }
+        } catch (_) {}
+        return orig.call(this, camera, scene, geometry, material, object, group);
+      };
+      try { console.log('[f8] first-draw probe armed'); } catch (_) {}
+    } catch (_) { R.wrapped = true; }
+  }
   // The fence poll itself. Split out because the heartbeat calls it too.
   function _gpuFence(t) {
+    if (_f8NoGpu) return;   // (v40.21) no synchronous GPU-process round trips in this mode
     try {
       const gl = R.gl || (R.gl = (typeof renderer !== 'undefined' && renderer && renderer.getContext) ? renderer.getContext() : null);
       if (!gl || !gl.fenceSync) return;
@@ -91184,11 +91925,35 @@ function __pmark(name) {
   // leave running, and nothing at all without ?pbhud.
   const _beat = () => {
     const t = performance.now();
+    R.beatN++;
     if (R.hbLast) {
       const g = t - R.hbLast;
       if (g > 40) { R.hb.push([+(t / 1000).toFixed(2), +g.toFixed(1)]); if (R.hb.length > 200) R.hb.shift(); }
     }
     R.hbLast = t;
+    // (v40.20) ⚠ IS THE BROWSER STILL SCHEDULING FRAMES AT ALL? Marks 63-66 are the shape nothing in
+    // this recorder has been able to explain: a 2007.8 ms frame with `hb` EMPTY (the 4 ms heartbeat
+    // never missed a beat, so the main thread was alive the whole time), `gt` 26 ms, the fence 69 ms
+    // - and `lo` EMPTY, no long-animation-frame entry at all for a two-second frame. LoAF reports
+    // frames; if the browser never scheduled a rendering opportunity there is nothing to report, and
+    // that is the one story consistent with all four readings at once.
+    // Which leaves the question of WHY it stopped scheduling, and the candidates are page state the
+    // heartbeat can see while the rAF cannot: focus lost to another window, an occluded or
+    // backgrounded surface, or Chrome's energy saver throttling a laptop on battery. So the beat
+    // records every transition with a timestamp, and counts beats against rAF ticks - if `raf` is
+    // near zero across a window where `beats` kept climbing, the browser stopped drawing and no
+    // amount of work inside the page caused it.
+    try {
+      const st = (document.visibilityState || '?')[0] +
+        (document.hasFocus && document.hasFocus() ? 'F' : 'f') +
+        (document.fullscreenElement ? 'S' : 's') +
+        ((typeof _lssOnBattery !== 'undefined' && _lssOnBattery) ? 'B' : 'p');
+      if (st !== R.focPrev) {
+        R.foc.push([+(t / 1000).toFixed(2), st]);
+        if (R.foc.length > 60) R.foc.shift();
+        R.focPrev = st;
+      }
+    } catch (_) {}
     if (R.last && t - R.last > 40 && !(++R.hbN % 5)) _gpuFence(t);   // ~20 ms polling, only inside a gap
   };
   try { setInterval(_beat, 4); } catch (_) {}
@@ -91226,7 +91991,9 @@ function __pmark(name) {
       // to drain it. One fence in flight, dropped after 6 s so a lost context cannot leak it. Polled
       // from the rAF while frames are healthy (no extra IPC in the steady state) and from the
       // heartbeat once a gap starts looking long - which is the only way to see INSIDE a stall.
+      R.rafN++;   // (v40.20) counted against the heartbeat's own beats
       _gpuFence(t);
+      if (!R.wrapped) _wrapFirstDraw();   // (v40.10) renderer does not exist at parse time
       const cur = profNow();
       // (v39.88) CATCH THE CHOP BAND, NOT JUST THE STALLS. 30 ms was set for hitches, and it made the
       // owner's actual complaint invisible: "choppy during the cinematic ... the sound for the
@@ -91287,6 +92054,24 @@ function __pmark(name) {
     });
     po.observe({ type: 'long-animation-frame', buffered: true });
   } catch (_) {}
+  // (v40.26) ⚠ LONG TASKS TOO, NOT ONLY LONG FRAMES. Mark 15: the 4 ms heartbeat stalled 3589.9 ms,
+  // so the main thread was genuinely blocked - and `lo` was EMPTY, no profiled section over 4 ms,
+  // no GPU work. long-animation-frame only reports frames; a block inside a timer, a message or a
+  // promise continuation (a texture upload on decode, a readback promise, the music scheduler) is a
+  // TASK, and only a `longtask` observer sees it. Attribution is coarse (container type/name) but
+  // it proves task-vs-frame, which is the fork that matters next.
+  try {
+    const plt = new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (e.duration < 50) continue;
+        let att = '';
+        try { const a = (e.attribution || [])[0]; if (a) att = (a.containerType || '') + ':' + (a.containerName || a.containerId || a.containerSrc || '').slice(0, 24); } catch (_) {}
+        R.lt.push([+(e.startTime / 1000).toFixed(2), Math.round(e.duration), e.name || '', att]);
+        if (R.lt.length > 120) R.lt.shift();
+      }
+    });
+    plt.observe({ type: 'longtask', buffered: true });
+  } catch (_) {}
   const load = () => {
     if (R.marks) return R.marks;
     try { R.marks = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (_) { R.marks = []; }
@@ -91320,6 +92105,18 @@ function __pmark(name) {
       clearTimeout(boxT); boxT = setTimeout(() => { if (box) box.style.display = 'none'; }, 5000);
     } catch (_) {}
   };
+  // (v40.09) The last 5 s of a ring, keeping what a stall recorder is for: the `top` biggest
+  // readings plus the `tail` most recent ones, de-duplicated and returned in time order.
+  const _peaks = (ring, now, top, tail) => {
+    try {
+      const win = ring.filter(r => r[0] >= now - 5);
+      if (win.length <= top + tail) return win;
+      const big = win.slice().sort((a, b) => b[1] - a[1]).slice(0, top);
+      const out = new Set(big);
+      for (const r of win.slice(-tail)) out.add(r);
+      return Array.from(out).sort((a, b) => a[0] - b[0]);
+    } catch (_) { return []; }
+  };
   const snapshot = (label) => {
     const now = performance.now() / 1000;
     const g = (typeof game !== 'undefined' && game) ? game : null;
@@ -91345,6 +92142,8 @@ function __pmark(name) {
         } catch (_) { return null; }
       })(),
       lo: R.lo.filter(l => l[0] >= now - 5).slice(-20),
+      // (v40.26) [t, ms, name, attribution] - main-thread blocks that were TASKS, not frames.
+      lt: R.lt.filter(l => l[0] >= now - 5).slice(-20),
       cold: R.cold.filter(c => c[0] >= now - 5),
       // (v39.80) ...and WHICH programs those were. The count alone made a recorded hitch
       // un-actionable - "2 cold" cannot say whether that was new content compiling or the same
@@ -91363,21 +92162,42 @@ function __pmark(name) {
       // or not - the frame that created the thing is usually not the frame that stalls on it.
       made: R.made.filter(r => r[0] >= now - 5).slice(-40),
       // (v40.07) [tSubmitted, msToSignal] - how long the GPU took to finish each frame's work.
-      gpu: R.gpu.filter(r => r[0] >= now - 5).slice(-40),
+      gpu: _peaks(R.gpu, now, 24, 8),   // (v40.09) same peak-keeping window as `gt`
       // (v40.07) [t, ms] - every 4 ms heartbeat that came late. EMPTY beside a 1800 ms frame means
       // the main thread never stopped and the stall was downstream of it.
       hb: R.hb.filter(r => r[0] >= now - 5).slice(-20),
-      // (v40.08) [t, ms] - GPU time for the frame's own draw list, TIME_ELAPSED, excluding the
-      // keep-warm burn. Read it beside `gpu` (the fence): equal means the shading really cost that;
-      // fence >> gt means the card was busy with something our draw list did not ask for.
-      gt: R.gt.filter(r => r[0] >= now - 5).slice(-40),
+      // (v40.20) [t, state] on every change, from the heartbeat (which keeps running through a stall
+      // the rAF cannot see). State is visibility + focus + fullscreen + battery, e.g. "vFSp" =
+      // visible, Focused, fullScreen, plugged; "vfSB" = the window lost focus, on Battery.
+      foc: R.foc.filter(r => r[0] >= now - 5),
+      // (v40.20) the two clocks over the mark's own life: rAF ticks against 4 ms beats. If `raf` is
+      // far below `beats/4` the browser stopped scheduling frames, whatever the page was doing.
+      ticks: [R.rafN, R.beatN, R.focPrev],
+      // (v40.15) [t, object, pipeline signature, verts, running distinct-pipeline count] for each
+      // PIPELINE drawn for the first time in the window - shader + input layout + blend/depth/side
+      // state, which is what a driver builds an executable for. A new geometry on a warm pipeline no
+      // longer shows up here at all, so an entry beside a stall frame now means something.
+      first: R.first.filter(r => r[0] >= now - 5).slice(-40),
+      // (v40.15) how many distinct pipelines have been drawn since the page loaded. If this is flat
+      // across a stall, the frame drew nothing the driver had not already built, and no amount of
+      // warming behind the loading screen can help that one.
+      pipes: (function () { try { return R.seenG ? R.seenG.size : 0; } catch (_) { return 0; } })(),
+      // (v40.08) [t, ms, disjoint] - GPU time for the frame's own draw list, TIME_ELAPSED, excluding
+      // the keep-warm burn. Read it beside `gpu` (the fence): equal means the shading really cost
+      // that; fence >> gt means the card was busy with something our draw list did not ask for.
+      // (v40.09) ⚠ `.slice(-40)` was the wrong window. At 7 ms a frame the last 40 entries cover
+      // 0.3 s of a 5 s mark, so three of the four 40.08 stalls had their own frame cut out of the
+      // list and only the healthy frames after it survived - the probe reported 6-10 ms for a
+      // 2400 ms frame because the 2400 ms sample was never in the payload. Keep the PEAKS (the 24
+      // largest in the window) plus the last 8 for a baseline, back in time order.
+      gt: _peaks(R.gt, now, 24, 8),
       // (v40.08) ⚠ `px` reports the ALLOCATED scene target, which at MEGA is the full 4608x2592
       // whatever the adaptive sampler is doing. This is the rectangle actually being rendered:
       // [_ssDyn.scale, active w, h, the refresh it is budgeting against, steps taken]. Without it a
       // mark cannot say whether the governor had already shed - which decides whether a stall is
       // fill rate at all.
       ss: (function () { try { const A = _lssSceneActive(postFX.rtScene);
-        return [+_ssDyn.scale.toFixed(2), A.w, A.h, _ssDyn.hz, _ssDyn.steps]; } catch (_) { return null; } })(),
+        return [+_ssDyn.scale.toFixed(2), A.w, A.h, _ssDyn.hz, _ssDyn.steps, _ssDyn.stallN]; } catch (_) { return null; } })(),
       // (v40.08) the keep-warm burner is GPU load this page adds ON PURPOSE (v39.63), so a mark that
       // blames the GPU has to be able to rule it out: [running, K, measured ms, cap ms].
       kw: (function () { try { const W = window.__keepWarm; if (!W) return null;
@@ -91388,6 +92208,60 @@ function __pmark(name) {
       px: (function () { try { const c = renderer.domElement, r = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
         return [c.width, c.height, r ? r.width : 0, r ? r.height : 0, r ? (r.samples || 0) : 0]; } catch (_) { return null; } })(),
       hz: (function () { try { return (window.__ss && window.__ss.hz) || 0; } catch (_) { return 0; } })(),
+      // (v40.17) WHICH BROWSER AND WHICH CARD. The owner's DuckDuckGo control mark - same build, same
+      // MEGA preset, same 1920x1080 fullscreen canvas and the same 4608x2592 allocated target - came
+      // back `worst 117 ms`, `gt` max 43 ms, fence max 172 ms and `stallN 0`, while Chrome and Edge
+      // on the same machine stall 1.5-3.7 s every few seconds. When the variable under test is the
+      // browser, the mark has to say which one it came from and which GPU it was handed; all three
+      // are Chromium, so a UA string alone would not have separated them. Cached after the first
+      // call - WEBGL_debug_renderer_info is not free.
+      gl: (function () { try {
+        if (window.__glId !== undefined) return window.__glId;
+        const g = renderer.getContext();
+        const d = g.getExtension('WEBGL_debug_renderer_info');
+        window.__glId = d ? String(g.getParameter(d.UNMASKED_RENDERER_WEBGL)).slice(0, 90) : '?';
+        return window.__glId;
+      } catch (_) { return '?'; } })(),
+      // (v40.18) WHICH TOGGLES WERE SET WHEN THIS WAS RECORDED. The owner is now A/B-ing live knobs
+      // across three browsers, and marks 54-57 cannot say whether `window.__water.refract = 0` was
+      // still in force when they were taken - which makes them unusable as evidence either way. Any
+      // knob that can change what the GPU is asked to do belongs in the payload, not in memory.
+      flags: (function () { try {
+        const W = window.__water || {}, K = window.__keepWarm || {};
+        return {
+          refract: (W.refract != null) ? +W.refract : 1,
+          disp: (window.__waterDisp != null) ? +window.__waterDisp : 1,
+          reflShields: (W.reflShields === false) ? 0 : 1,
+          copyGrow: (window.__waterCopyGrow === 0) ? 0 : 1,
+          copyAllocs: window.__waterCopyAllocs || 0,
+          kwOn: (K.on && !K.disabled) ? 1 : 0,
+          ssCine: (window.__ssCine !== undefined) ? window.__ssCine : 0,
+          ssMin: (typeof window.__ssMin === 'number') ? window.__ssMin : -0.6,
+          fxWarm: window.__fxWarm || 0,
+          noGpu: (function () { try { return window.__f8noGpu ? 1 : 0; } catch (_) { return 0; } })(),   // (v40.21)
+          onBattery: (function () { try { return (typeof _lssOnBattery !== 'undefined' && _lssOnBattery) ? 1 : 0; } catch (_) { return -1; } })(),
+          crestBreak: (W.crestBreak != null) ? +W.crestBreak : 1,   // (v40.19) the crest-spray readback
+          crCost: (W.crCost != null) ? W.crCost : null,             // ms the last readback call blocked for
+          crSkip: (W.crSkip != null) ? W.crSkip : null,             // steps between calls
+          crOff: (W.crOff != null) ? W.crOff : 0,                   // seconds the rule is switched off for
+          crOffN: window.__crestOffN || 0,                          // how many times it has had to
+          fxRuns: window.__fxWarmRuns || null,                      // (v40.26) when _warmRealCombatFX was entered
+          // (v40.31) owner: "is the warmup failing somehow?" - the prebake's own report, so a mark can
+          // say what the launch actually did: [total ms, fence ms, cloak ms, fx ms, gpu ms, capped, cloak hulls, sprites warmed]
+          pb: (function () { try { const r = window.__prebake ? window.__prebake() : null; if (!r || !r.ms) return null;
+            return [r.totalMs | 0, r.ms.fence | 0, r.ms.cloak | 0, r.ms.fx | 0, r.ms.gpu | 0, r.capped || 0, r.cloakHulls | 0, window.__fxWarmSprites | 0]; } catch (_) { return null; } })(),
+          fxRan: window.__fxWarmRan || null,                        // (v40.27) ...and when it got past the memo and actually ran
+          fxSkipped: window.__fxWarmSkipped || null,                // (v40.27) ...and when the in-view guard refused it
+          crHold: (function () { try { const W2 = window.__water || {}; const h = (W2.crHoldMs != null) ? +W2.crHoldMs : 15000;
+            return (game && game._fightAt) ? Math.max(0, Math.round((h - (performance.now() - game._fightAt)) / 100) / 10) : -1; } catch (_) { return -1; } })(),   // (v40.25) s of hold left
+          warmDraws: window.__warmDraws || 0,
+        };
+      } catch (_) { return null; } })(),
+      ua: (function () { try {
+        const b = navigator.userAgentData && navigator.userAgentData.brands;
+        if (b && b.length) return b.map((x) => x.brand + ' ' + x.version).join(', ').slice(0, 90);
+        return String(navigator.userAgent).slice(-60);
+      } catch (_) { return '?'; } })(),
       frames: 0, worst: 0, avgFps: 0, info: null, run: null, speed: null, round: null,
     };
     try { const all = around(now - 5, now, 0); m.frames = all.length; m.worst = all.length ? +Math.max(...all.map(a => a[1])).toFixed(1) : 0; m.avgFps = all.length ? Math.round(1000 / (all.reduce((acc, a) => acc + a[1], 0) / all.length)) : 0; } catch (_) {}
@@ -91398,6 +92272,47 @@ function __pmark(name) {
     marks.push(m); save();
     return m;
   };
+  // (v40.29) AUTO MARKS. Owner: "sorry i didn't mark them" - and the hitch that matters only
+  // happens on a cold browser, once, so a missed keypress is a lost session. With ?pbhud on, any
+  // frame gap of 400 ms or more now takes its own snapshot ('auto <ms>'), rate-limited to one per
+  // 1.5 s and capped at 30 per page load so a truly broken machine cannot fill the store. F8 still
+  // works and still says what it always said. window.__autoMark = { thresh, n, max } tunes it;
+  // ?pbhud&noauto turns it off.
+  const _auto = { thresh: 400, n: 0, max: 30, lastT: 0, cool: 0 };
+  try { window.__autoMark = _auto; } catch (_) {}
+  let _autoOn = true;
+  try { _autoOn = !/[?&]noauto\b/i.test(location.search || ''); } catch (_) {}
+  if (_autoOn) {
+    try {
+      setInterval(() => {
+        try {
+          if (_auto.n >= _auto.max || document.visibilityState !== 'visible') return;
+          const nowS = performance.now() / 1000;
+          if (nowS < _auto.cool) return;
+          let bestT = 0, bestG = 0;
+          for (let i = 0; i < N; i++) {
+            const t = R.ringT[i], g = R.ring[i];
+            if (t > _auto.lastT && g >= _auto.thresh && g > bestG) { bestG = g; bestT = t; }
+          }
+          if (!bestT) return;
+          _auto.lastT = bestT + 0.001;
+          // (v40.30) a gap that spans a HIDDEN interval is the tab being backgrounded, not a stall
+          // (auto marks n29-n31: `foc` flipping h<->v inside each). rAF simply does not run while
+          // hidden. Skip those - the F8 key still records anything a person wants recorded.
+          try {
+            const g0 = bestT - bestG / 1000;
+            for (const fr of R.foc) { if (fr[0] >= g0 - 0.05 && fr[0] <= bestT + 0.05 && /^h/.test(fr[1])) return; }
+            if (R.focPrev && /^h/.test(R.focPrev)) return;
+          } catch (_) {}
+          _auto.cool = nowS + 1.5;
+          const m = snapshot('auto ' + Math.round(bestG) + 'ms');
+          _auto.n++;
+          show('auto #' + m.n + '  ' + Math.round(bestG) + ' ms');
+          console.log('[f8] auto mark #' + m.n + ': ' + Math.round(bestG) + ' ms frame at ' + bestT.toFixed(2) + ' s');
+        } catch (_) {}
+      }, 250);
+    } catch (_) {}
+  }
   window.addEventListener('keydown', (ev) => {
     if (ev.code !== 'F8' && ev.key !== 'F8') return;
     try {
@@ -91426,7 +92341,8 @@ function __pmark(name) {
   api.around = around;
   api._R = R;
   window.__f8log = api;
-  try { console.log('[f8] recorder armed (pbhud): ' + load().length + ' saved marks. window.__f8log() / .summary() / .export() / .clear()'); } catch (_) {}
+  try { console.log('[f8] recorder armed (pbhud' + (_f8NoGpu ? ', nogpu: no fence, no frame timer' : '') + '): ' +
+    load().length + ' saved marks. window.__f8log() / .summary() / .export() / .clear()'); } catch (_) {}
 })();
 
 function gameLoop(timestamp) {
@@ -91841,7 +92757,8 @@ function gameLoop(timestamp) {
           if (_selEl && _selEl.classList.contains('active')) _drainMs = 12;
         } catch (_) { _drainMs = 12; }
         _swDrainStream(_fX, _fZ, _drainMs, 64);
-        try { _warmCloakVariantOnce(); } catch (_) {}   // (v39.39) once, behind the countdown
+        try { _cloakPendingTick(); } catch (_) {}         // (v40.32) draw last frame's compile once its links are done
+        try { if (!_cloakPendingFin) _warmCloakVariantOnce(); } catch (_) {}   // (v39.39) once, behind the countdown
         // (v39.49b) ...AND AGAIN FOR THE PLAYER'S HULL IN THE LAST 2 s OF THE COUNTDOWN. The pass above
         // reaches the player's ship ~4 s into the launch, before its hull texture is assigned, so it
         // compiled the no-map transparent variants (cache-key term `mapUv`); the first real cloak then
@@ -91849,17 +92766,41 @@ function gameLoop(timestamp) {
         try {
           if (typeof game.warmupTimer === 'number') {
             if (game.warmupTimer > 3) game._cloakLateWarm = false;
-            else if (game.warmupTimer < 2 && !game._cloakLateWarm && player && player.mesh) {
+            else if (game.warmupTimer < 2 && !game._cloakLateWarm) {
               game._cloakLateWarm = true;
-              if (player.mesh.userData) player.mesh.userData._cloakWarmed = false;
-              // (v39.96) ⚠ THIS RUNS WITH THE COUNTDOWN ON SCREEN. Measured in the pane: suppressing
-              // this one call takes the worst `hub:stream` frame of the launch from 1073 ms to 78 ms -
-              // and `hub:stream` only gets the blame because the call sits inside that section, which
-              // is why three F8 marks in a row pointed at the terrain streamer for work the streamer
-              // never did. v39.83 (draw the hidden interior) and v39.84 (add the shadow pass) both made
-              // it heavier, so the shadow half is dropped here: this pass is about the textured colour
-              // variants, and the depth one was built behind the loading screen.
-              _warmCloakForRoot(player.mesh, false);
+              // (v39.96) ⚠ THIS RUNS WITH THE COUNTDOWN ON SCREEN. Measured in the pane: doing the
+              // player's re-warm as ONE call took the worst `hub:stream` frame of the launch from
+              // 1073 ms to 78 ms - and `hub:stream` only got the blame because the call sits inside
+              // that section, which is why three F8 marks in a row pointed at the terrain streamer
+              // for work the streamer never did. v39.83 (draw the hidden interior) and v39.84 (add
+              // the shadow pass) both made it heavier, so the shadow half is dropped: this pass is
+              // about the textured colour variants, and the depth one was built behind the loading
+              // screen.
+              // ⚠ (v40.23) AND IT HAS TO COVER THE BOTS, NOT JUST THE PLAYER. Owner: "pretty sure
+              // auto cloak caused a hitch in elimination mode." The reason the player needs a LATE
+              // re-warm is that `_warmCloakVariantOnce` reaches its ship ~4 s into the launch, before
+              // the hull texture is assigned, so it compiles the no-map transparent variants
+              // (cache-key term `mapUv`) and the first real cloak links the textured pair cold. Every
+              // bot has exactly the same problem and only the player was ever re-warmed - and
+              // elimination is the mode with the most hulls on the field and the most rounds to meet
+              // them in. Auto Cloak fires off the core meter, so it can trigger at any moment in
+              // play, with nothing hiding the link.
+              // Clearing the flags is all this does: `_warmCloakVariantOnce()` runs every frame in
+              // this same block and warms exactly ONE unwarmed root per call, player first, so the
+              // whole field drains at one hull per frame over the last two seconds of the countdown
+              // instead of in a single lump. Nine hulls is nine frames.
+              // ⚠ (v40.25) REVERTED to the v39.96 shape: the player only, one call, no shadow pass.
+              // v40.23 cleared the flag on every bot too and let the per-frame drain rebuild them all
+              // in the last two seconds - and that drain ran WITH the shadow pass (its default), so
+              // it was N full shadow renders on screen. Bots are covered by the launch overlay's
+              // per-loadout proxies (v40.24) and, between rounds, by the same per-frame drain as
+              // before, now shadowless.
+              if (player && player.mesh) {
+                // (v40.32) clear the flag only: the per-frame drain above compiles it next frame and
+                // draws once the links report complete, instead of joining them here on screen.
+                try { if (player.mesh.userData) player.mesh.userData._cloakWarmed = false; } catch (_) {}
+                try { window.__cloakLateN = 1; } catch (_) {}
+              }
             }
           }
         } catch (_) {}
@@ -91874,6 +92815,19 @@ function gameLoop(timestamp) {
       // city, weather — so a 55%-of-frame reading told you nothing about which
       // of them was responsible. Splitting it costs one performance.now() per
       // section and only when the profiler is on.
+      // (v40.12) ⚠ SPLIT `hub:ripple`. The owner's round-2 warmup mark is a 3758.7 ms frame reading
+      // `hub:ripple: 3750.8` - CPU, not GPU this time: blockingDuration 3704, the gameLoop script
+      // itself 3753 ms, and the 4 ms heartbeat stalled 3760 ms alongside it, so the main thread was
+      // genuinely stuck. (The frame before it was another 2480 ms block with only 71 ms of ripple in
+      // it, so there are two of these back to back at a round transition.) But `hub:ripple` covers
+      // five different jobs - the near-mask recentre decision, the coarse far-mask recentre, the
+      // budgeted row job that bakes either of them, the ship-wake seeding and the sim step - and one
+      // number across all five cannot say which. Each of them can be slow for a different reason and
+      // wants a different fix: the row job is budgeted to 1-4 ms and checks every fourth row, so it
+      // can only overrun by one long ROW, whereas `_swRippleBakeMask` / `_swRippleBakeFarMask` on
+      // the synchronous paths bake a whole 96x96 grid of `_stGroundYCarved` queries in one call.
+      // These sub-marks cost one performance.now() each and only with the profiler on, and the F8
+      // recorder picks them up with no change of its own (it walks every key in window.__prof).
       try { _swRippleTick(dt); } catch (_) {}
       // (v39.49) was 'hub:ripple' - but this mark closes the clipmap update, the chunk STREAMER
       // (_swBuildShell, 2 chunks x 2 shells a frame on endless = the 15-21 ms frames measured on

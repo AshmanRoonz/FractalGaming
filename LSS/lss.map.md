@@ -3223,3 +3223,934 @@ opposite fixes, so v40.08 adds the discriminator and two pieces of context the m
 
 Boot-tested at 40.08 in gameplay: `gtOk true`, steady 1.9–4.5 ms readings with a 17.3 ms spike,
 fence and heartbeat unaffected, `ss` and `kw` populated, no console errors.
+
+### v40.09 — what 40.08 measured, and the two holes it found in its own probe
+
+Marks #29–#33 (40.08, classic, `shifting_deep`, round 1, `q: mega`, canvas 1920×1080).
+
+**Ruled out, with numbers.** `kw` came back `[1, 50, 0.1, 4.17]` on the worst mark — the keep-warm
+burner had already collapsed K to its 50 floor and was burning 0.06–0.93 ms. It is not the cause.
+`programs` sat at 184 across every mark and `cold` stayed empty: no shader linking. `hb` was empty
+on all five: the main thread never stopped.
+
+**Not plain fill rate either.** `ss` (new in 40.08) shows the governor doing its job — mark 29 at
+`[0, 1920, 1080, 60, 0]` (native), and by mark 30 at `[-0.6, 1344, 756, 144, 7]`, the floor, seven
+steps down. Per-frame GPU cost duly halved, 14–17 ms → 6–10 ms. **The stalls survived the shed**:
+3605 / 3696 → 2376 → 2390 → 1590 → 1027 ms. They shrink with resolution but nowhere near
+proportionally, so pixels are not the whole story.
+
+**The correlation that is left is geometry first-upload.** `renderer.info.memory.geometries`
+increments in `WebGLGeometries.get()`, i.e. when a geometry is first uploaded for a draw — so `made`
+is measuring uploads, not constructions. Mark 29: `+4 at 34.71`, stall frame at 34.83. Mark 30:
+`+20 at 44.07`, stalled frame starts 44.09. Mark 32: `+2 +2` at 52.42/52.49, stall starts 52.64.
+⚠ The sandwich streamer is *not* the source — it has been budgeted since v39.49 (one chunk in
+flight, rows within `__swBuildMs` 2.5 ms), so it cannot produce +20 in a frame. Something else on
+this map uploads in bursts; that is the next thing to find.
+
+**The direct reading was 3658 ms inside `renderFrame`.** Mark 29's `gt` caught
+`[34.83, 3658.3]` — one frame's own draw list costing 3.66 s of GPU time against a 14–17 ms
+neighbour, and the 3696 ms rAF stall immediately after it is the CPU waiting on that queue. Marks
+30–33 appeared to contradict it with 6–10 ms readings, but they did not: they were the probe's own
+two bugs, both fixed here.
+
+* ⚠ **`slice(-40)` was the wrong window.** At 7 ms a frame the last 40 entries cover 0.3 s of a 5 s
+  mark, so in marks 31, 32 and 33 the stalling frame's own sample was cut out of the payload and
+  only the healthy frames *after* it survived. `gt` and `gpu` now go through `_peaks()`: the 24
+  largest readings in the window plus the last 8, de-duplicated, back in time order. A stall
+  recorder must keep the peak, not the tail.
+* ⚠ **`GPU_DISJOINT` was dropping the samples the probe exists to catch.** 40.08 discarded the whole
+  batch whenever that bit was set — and the driver sets it when the GPU was interrupted mid-query,
+  which is what a multi-second stall *is*. Samples are now kept with a third element flagging
+  unreliability. An unreliable number of the right order of magnitude beats no number.
+
+Boot-tested at 40.09: `gt` surfaced `[19.57, 2447.9, 0]` from a world-load frame — a 2.4 s
+TIME_ELAPSED reading, disjoint flag clear, that the old window would have thrown away. `ss`, `kw`,
+fence and heartbeat all still populate; no console errors.
+
+### v40.10 — the lane is first-draw, and now the marks name the geometry
+
+Marks #35–#36 (40.09, classic, `shifting_deep`, round 1, `q: mega`, `ss [0, 1920, 1080]` — native,
+the governor had not needed to shed). With `_peaks()` and the disjoint flag in place the picture is
+clean:
+
+**Mark 35 — the direct confirmation.**
+```
+made  [30.34, 0, +4, 0]          4 geometries first-uploaded
+gt    [30.36, 3652, 0]           20 ms later, one frame's own draw list = 3652 ms of GPU time,
+                                 disjoint bit CLEAR, against 15.3-17.9 ms neighbours
+gpu   [30.39, 3731]              the fence agrees
+gap   [34.08, 3675.3]            and the rAF stall is just the CPU waiting on that queue
+```
+
+**Mark 36 — same trigger, cost landed elsewhere.**
+```
+made  [39.59, 0, +15, 0]         15 geometries first-uploaded
+lo    [39.61, 2356, 0, 2342, …]  the stalled frame starts 20 ms later
+gpu   [39.57, 2383]              fence matches the stall
+gt    (no entry)                 its own draw list was under 18 ms, so it fell below the peak filter
+```
+So the cost is not always inside our command stream. A `bufferData` is asynchronous from the
+driver's point of view — it copies to staging and the real VRAM work happens when the GPU needs it,
+which can be a later frame and outside our `TIME_ELAPSED` bracket entirely. Same trigger, two places
+for the bill to land.
+
+Either way the trigger is now unambiguous: **a burst of geometries drawn for the first time, ~20 ms
+before the stall, every time.** `renderer.info.memory.geometries` increments in
+`WebGLGeometries.get()`, i.e. at first upload, so `made` was already measuring first-draw rather
+than steady state. It is not the sandwich streamer — that has been budgeted since v39.49 to one
+chunk in flight in `__swBuildMs` 2.5 ms slices and cannot produce +15 in a frame.
+
+The standing suspect is **ANGLE building a D3D vertex executable per input layout at first draw**,
+which three.js' program count structurally cannot see: the three.js program already exists, only the
+layout is new. That is the same lane as the earlier "a warm must DRAW, not just compile" finding.
+
+**`first`** (v40.10) answers the remaining question. `renderBufferDirect` is WebGLRenderer's single
+funnel for object draws, so one wrapper catches every geometry the moment it is first submitted and
+records `[t, object, material, attribute layout, verts, tris, instances]`. The attribute layout is
+the part that matters — that string is exactly what forks an executable. Line it up with `gt` and
+`made`: if the geometries in a stall frame carry a layout no earlier frame used, the fix is to draw
+that shape once behind the loading screen. One Set lookup per draw call, `?pbhud` only.
+
+Boot-tested at 40.10: probe armed, 699 unique geometries seen by warmup, entries reading like
+`[22.85, "shield", "ShaderMaterial", "normal+position+uv", 425, 720, 0]`, no console errors.
+
+### v40.10 marks — the owner's cold-start clue closes the case: compiled, never drawn
+
+Owner, unprompted and decisive: *"if I play once and let it happen, then refresh the browser and play
+again, it's less likely to happen. If I close the browser and start again, the big hitches happen at
+the start."*
+
+A page refresh keeps the same GPU process; closing the browser kills it. So whatever is being paid
+for is cached **per GPU-process lifetime** — the ANGLE/D3D pipeline built for a given
+(program × vertex input layout × render state), which is compiled by the driver on **first draw**,
+not at link. That is why the marks look the way they do:
+
+* `programs` sits at **184** across every mark and `cold` is always empty — three.js links nothing
+  during play. All 184 programs already exist.
+* Yet `gt` measures 3652 / 3491 / 3418 ms inside single frames, disjoint bit clear.
+
+Both are true at once because **`renderer.compile()` links a program without drawing it.** The
+prebake's `_prebakeGpuPrime` renders the live scene from 12 directions — and runtime FX are not in
+the scene at that moment, so their programs get linked and never rasterised. This is the same trap
+already recorded twice in this file (v39.83 cockpit interior, v39.84 depth variant): *a warm must
+DRAW, not just compile.*
+
+**What is first-drawn in play.** A live `renderBufferDirect` wrapper in the pane, 15 s of play,
+aggregated by (geometry type, verts, material, uniforms) — 500 first-draws, the top of the list:
+
+| n | geometry | verts | attribute layout | material | identity |
+|---|---|---|---|---|---|
+| 172 | BufferGeometry | 1681 | `color+position` | MeshStandardMaterial | `userData.isSandwichTerrain` — terrain shells (41²) |
+| 111 | IcosahedronGeometry | 240 | `normal+position+uv` | ShaderMaterial `time,uBaseColor,uOpacity,uVRLite` | projectile body |
+| 74 | BufferGeometry | 108/144/162/216 | `position+uv` | ShaderMaterial `uColor,uOpacity,uTime,uIsCore` | lightning halo + core |
+| 28 | SphereGeometry | 187 | `normal+position+uv` | MeshBasicMaterial | — |
+| 17 | SphereGeometry | 425 | `normal+position+uv` | ShaderMaterial `shieldColor,impact,uHitDirs,…` | `shield` |
+| 17 | SphereGeometry | 117 | `normal+position+uv` | ShaderMaterial `uAxialFalloff,…` | layered FX |
+| 4+2 | TubeGeometry | 186/276 | `color+normal+position+uv` **and** `normal+position+uv` | MeshBasicMaterial | trail — **two layouts, one material type** |
+
+⚠ The lightning pool is the clearest instance of the trap in the codebase right now.
+`_initLightningPool` builds 96 meshes with their real materials and a **placeholder geometry carrying
+only `position`** — so anything that draws a pooled mesh before first acquire warms the *wrong input
+layout*; the real bolts are `position+uv`. Note also that the pool reuses meshes and materials but
+**rebuilds the BufferGeometry per bolt**, which is where the 74 distinct geometries come from.
+
+**The fix that follows** is to make the prebake draw a representative of each runtime FX before the
+12 prime renders, then tear them down — same shape as `_warmChargeGlowOnce` and the mirror-lift warm,
+and the `first` field now tells us directly whether any first-draws still land in play afterwards.
+Not yet written: each spawner needs its own harmless-arguments path, and a warm that fires a real
+projectile or plays an announcer line during the loading screen would be worse than the hitch.
+
+### v40.11 — the loading screen now warms what the game SPAWNS
+
+Owner: *"I'd rather not have that huge hitch there every first load — we should always try to utilize
+the loading screen to prepare the game for play."*
+
+`_warmRuntimeFxOnce()`, called from `_prebakeGpuPrime` immediately after `_warmChargeGlowOnce` and
+**before** the twelve prime renders, so anything these prototypes touch is warm by the time the wide
+passes run. It builds one throwaway instance of each shape the marks showed arriving cold in combat,
+draws them, and takes them all back out:
+
+| prototype | why |
+|---|---|
+| `_makeRockGeometry(1,0)` + `_makeAtomFractalMaterial()` | the projectile body — Icosahedron 240 v, `normal+position+uv` |
+| `TubeGeometry(curve, 30, 0.4, 5)` ×2, one with a `color` attribute | the trails — **both layouts**, `normal+position+uv` and `color+normal+position+uv`, on the same material type |
+| `SphereGeometry(1.5, 16, 10)` + additive MeshBasicMaterial | the 187-vertex puff |
+| `_lightningPool[0]` with a real `_buildLightningTubeGeometry` bolt | see below |
+
+Three things make it correct rather than merely plausible:
+
+* **A second material built from the same source shares the same `WebGLProgram`** — three.js keys
+  its program cache on the shader text plus the defines — so a throwaway instance warms the pipeline
+  the real spawn will use. This is why the warm does not need to reach the live material instances.
+* ⚠ **The lightning pool is the trap in miniature.** `_initLightningPool` builds 96 meshes with their
+  real materials and a placeholder geometry carrying only `position`, while a real bolt is
+  `position+uv`. Drawing a pooled mesh as-is warms the *wrong input layout* and buys nothing, so a
+  real bolt is built, hung on slot 0 for one draw, and taken back off (placeholder restored,
+  `visible` false, geometry disposed).
+* **`_warmDrawRoot` draws into an 8×8 scissored viewport.** Pipeline creation happens at draw-call
+  validation, not per pixel, so eight by eight warms exactly what full screen would. The group goes
+  through with `withShadow` true (v39.84: the depth material is keyed on the real material's flags,
+  and a transparent additive prototype has its own depth variant).
+
+Teardown is explicit: the group is removed from the scene, and ⚠ the atom-fractal factory registers
+every material it makes in a list that is ticked every frame, so the throwaway is spliced back out of
+`_atomFractalMaterials` **before** it is disposed.
+
+Boot-tested at 40.11: `window.__fxWarm` = 6 (four in the group plus the two lightning meshes),
+`__warmDraws` 35, reached `playing`, no console errors, no leftover group in `scene.children`, the
+first `position+uv` bolt layout now drawn at t = 18.87 s — during the load, not in combat.
+
+Still not covered, deliberately: the terrain shells (`color+position`, 172 of them) and the ship
+shields (425 v) are already drawn by the prime and by `_warmDrawRoot(player.mesh)` respectively —
+later instances share the program *and* the layout, so only the buffer upload is new. If the marks
+still show a stall next to one of those, `first` will name it.
+
+### v40.12 — the FX warm holds, and a second, CPU-side stall surfaces at round transitions
+
+Marks #41–#45 on 40.11 (classic, `shifting_deep`, `q: mega`).
+
+**The warm works, and mark 42 is the proof.** A full 5 s window with **40 lightning first-draws**
+(`ShaderMaterial position+uv`, the 216/162/144/108 set) and a worst frame of **27.9 ms** — no stall,
+no long frame, `big` empty. That is exactly the burst that used to cost seconds. The bolt layout is
+now first drawn at t≈19 s, during the load.
+
+**But three GPU stalls survived** — 41 (`gt [32.26, 3681, 0]`), 43 (`gt [40.51, 3270.3, 0]`),
+44 (`gpu [49.69, 2292.7]`) — all with the heartbeat clean, so still GPU-side, still no cold links,
+`programs` flat. And ⚠ mark 41's stall has **no first-draw anywhere near it**: nothing was created
+between 31.6 s and 36.0 s, and the frame at 32.26 still cost 3.68 s of GPU time on its own draw list.
+So first-draw is *a* trigger, not the only one, and the input-layout theory does not cover 41.
+
+**Mark 45 is a different bug and it is CPU-side.** Round-2 warmup, two consecutive multi-second
+main-thread blocks:
+```
+big  86.06  2480.7ms  hub:ripple:71.3
+big  89.81  3758.7ms  hub:ripple:3750.8
+lo   [86.06, 3755, 3704, 1, [gameLoop: 3753 ms]]      blockingDuration 3704, script 3753
+hb   [[86.06, 2484.5], [89.82, 3760]]                 the 4 ms heartbeat stalled too
+```
+Everything the GPU stalls are not: the script itself ran for 3753 ms and the heartbeat stopped with
+it, so the main thread was genuinely stuck — and `hub:ripple` owns 3750.8 of the 3758.7 ms frame.
+
+⚠ `hub:ripple` was one section over five different jobs, and one number across all five cannot say
+which. They fail differently and want different fixes: `_swRippleMaskJobTick` is budgeted to 1–4 ms
+and tests the clock every fourth row, so it can only overrun by one long ROW, whereas
+`_swRippleBakeMask` / `_swRippleBakeFarMask` on their synchronous paths bake a whole 96×96 grid of
+`_stGroundYCarved` queries inside a single call. Split into `rip:near` (the near recentre decision and
+its `syncBake` path), `rip:far` (the far recentre decision, **including the synchronous first bake**)
+and `rip:job` (the budgeted row job); `hub:ripple` now measures the remainder — the ship-wake seeding
+and the sim step. One `performance.now()` each, profiler-only, and the F8 recorder picks them up with
+no change of its own because it walks every key in `window.__prof`.
+
+Boot-tested at 40.12: `rip:near 1.8`, `rip:far 0.5`, `rip:job 9.7`, `hub:ripple 446.1` cumulative
+over ~15 s of play — the bulk is in the remainder, which is the normal per-frame sim. No errors.
+
+### v40.13 / v40.14 — the governor was blind to the stalls, and climbing through them
+
+Marks #46–#50 on 40.12 are a **metronome**: stalls at 28.46, 32.45, 36.33, 40.23 and 44.2 s —
+1563 / 2160 / 1896 / 2855 / 2487 ms, one every ~3.9 s, roughly half the wall clock spent stalled.
+All GPU (`gt` 2149 / 1870 / 2839 ms, heartbeat clean, `cold` empty, `programs` flat at 183).
+
+The new thing the marks showed is what the **supersample governor** was doing through all of it:
+
+```
+mark 46  ss [0,    1920, 1080, 60,  0]     native
+mark 47  ss [0.05, 2054, 1155, 60,  1]     climbing
+mark 48  ss [0.25, 2592, 1458, 144, 5]     2592x1458 — while stalling 1.9 s every 4 s
+```
+
+⚠ **`_lssSupersampleTick` discards every frame outside 2–250 ms.** That filter is right in itself — a
+tab switch or a load hitch would poison an EMA — but every one of these stalls went straight in the
+bin, and it is worse than merely invisible: the frames immediately *after* a stall are fast, because
+the GPU queue has just drained, so the EMA read healthy and the ratchet **crept up**. The governor
+was raising the resolution on a machine that was stalling two seconds at a time.
+
+**v40.13** keeps refusing the sample but remembers the fact of it (`S.stallT` / `S.stallN`, visible
+frames only). A stall inside the last 4 s is over budget by itself at both thresholds, and the
+creep-back is blocked while it stands, so one shed per decision tick and no climbing out of a
+stalling patch. It decays after 4 s so a single hiccup cannot park the resolution. `ss` gained a
+sixth element, the stall count.
+
+**v40.14** answers *"it lags right from the countdown"*. The countdown and the cinematic are
+`game.state !== 'playing'`, where the sampler returns early — which left the scale **frozen at
+whatever combat last set**, and mark 48 caught that at 0.25. The mechanism to fix it already existed:
+v39.87's `__ssCine`, built when the owner asked for "something like foveated rendering for the
+cinematic" and then left default-off when they pulled back ("no... wait"). Its default is now **0 —
+native, not below it**. v35.22's "this game is DRAW-CALL bound, not fill bound" was measured on the
+HUB; on `shifting_deep` at MEGA this machine is plainly fill-bound (20.8 ms frames with 3 ms of CPU,
+the GPU 2–6 frames deep in its own queue even between stalls). `window.__ssCine = null` restores the
+old freeze; `-0.75` goes below native.
+
+Boot-tested at 40.14 on **MEGA** (the configuration this targets), not just the pane default:
+`px [1352, 860, 3246, 2064]` with `ss [0, 1352, 860]` during warmup — the active rectangle is native
+while the allocated target is the full MEGA one, a 5.8x pixel reduction in exactly the phase that
+lags. On entering `playing`, `cineSaved` returned to null and the scale was released (`steps` 8,
+ema 7.0 ms, `gtMax` 5.4 ms, `stallN` 0). No console errors.
+
+Neither of these removes the underlying stall — they stop the game making it worse, and take the
+countdown out of the worst case. ⚠ Mark 41 (v40.11) still stands as the counter-example to the
+first-draw theory: a 3.68 s draw list with nothing created anywhere near it.
+
+### v40.15 / v40.16 — it is not our draw list, and not the resolution
+
+Marks #51–#53 on 40.14. Two things settle here, both against earlier working theories.
+
+**1. The stall is not our GPU commands executing.** With `_peaks()` keeping the largest sample in the
+window, mark 53 has both numbers for the same frame:
+```
+gpu  [38.27, 3377]     the fence took 3377 ms to signal
+gt   [38.28, 22.5, 0]  that frame's own draw list: 22.5 ms of GPU time, disjoint clear
+hb   []                the 4 ms heartbeat never missed a beat
+```
+Mark 52 is the same shape: fence 3737.8 ms, `gt` 16.5 ms. ⚠ **`TIME_ELAPSED` counts GPU EXECUTION,
+not the GPU process's own CPU work.** Driver-side work — pipeline building, resource transitions, a
+flush forced by freeing something still in flight — sits in exactly the blind spot where LoAF sees
+nothing (`blockingDuration 0`, empty script list), TIME_ELAPSED sees nothing, and the fence sees all
+of it. That is the whole fingerprint.
+
+**2. It is not the resolution.** Owner: *"it's not the resolution/bloom... it never did this
+before."* The data agrees, and it is the v40.13 governor fix that proves it: mark 53 reads
+`ss [-0.2, 1728, 972, 72, 4, 2]` — the stall counter drove it two steps **below native** — and the
+stall on that very frame was still 3307 ms. Shedding pixels changes nothing.
+
+**3. The browser split.** Owner: the DuckDuckGo browser does not hitch; Edge and Chrome do. All three
+are Chromium; what differs is which GPU Windows hands them and which ANGLE/D3D path they take. Taken
+with "it never did this before" and with the fact that it only shows on a water map, that points at
+the one thing this session added to the per-frame water path.
+
+**v40.16, grow-only refraction copy.** ⚠ v39.86 rebuilt `postFX.rtRefractCopy` whenever the bucketed
+live rectangle *changed* — either direction. That was fine while the adaptive supersampler moved once
+a minute; it is not fine now that it moves on every stall. **Destroying a multi-megabyte GPU texture
+that in-flight commands still reference forces the driver to flush and synchronise**, on the GPU
+process's own CPU — invisible to LoAF, invisible to TIME_ELAPSED, and it stalls the fence. And each
+shed the governor takes crosses a 128 px bucket, so shed → reallocate → stall → shed feeds itself.
+The copy now only ever grows: a slightly larger blit than strictly needed (the shader clamps to
+`uSceneMax` regardless) in exchange for a texture allocated a handful of times per session and never
+freed under a live frame. `window.__waterCopyGrow = 0` restores the exact-fit behaviour for an A/B;
+`window.__waterCopyAllocs` counts allocations.
+
+**v40.15, the first-draw probe keys on the PIPELINE, not the geometry.** v40.10 keyed on
+`geometry.uuid`, which made the list useless for its own purpose: the lightning system builds a new
+BufferGeometry per bolt, so every bolt read as a "first draw" even though its program and layout were
+warmed behind the loading screen — marks 51–53 are pages of those, drowning anything real. The key is
+now what a driver would key on: shader + input layout + blend/depth/side/index/instanced state. New
+field `pipes` = distinct pipelines drawn since load; **if `pipes` is flat across a stall, that frame
+drew nothing the driver had not already built, and no amount of warming can help it.**
+
+Boot-tested at 40.16: `__waterCopyAllocs` 1 (was one per bucket change), `pipes` 272 with exactly one
+new pipeline in the last 5 s — the keep-warm burner's own quad — and `refractInfo` live. No errors.
+
+### v40.17 — the DuckDuckGo control mark, and what it rules out
+
+The owner pressed F8 in the DuckDuckGo browser "in a similar spot in the gameplay, even though there
+wasn't a glitch". ⚠ Its marks are in **its own** storage:
+`AppData/Local/Packages/DuckDuckGo.DesktopBrowser_ya2fgkz3nks94/LocalState/DDGWebView/Default/Local Storage/leveldb`
+— the same LevelDB reader, pointed at that directory.
+
+Same build (40.16), same MEGA preset, same 1920×1080 fullscreen canvas, the same 4608×2592 allocated
+target, same dpr 1.25, same 144 Hz panel, same 350 u/s of flight:
+
+| | Chrome (marks 51–53) | **DuckDuckGo (control)** |
+|---|---|---|
+| worst frame | 3717 / 3717 / 3307 ms | **117 ms** |
+| `gt` peak | 22.5 ms (fence 3377) | **43 ms** (fence 172) |
+| `stallN` | 2 | **0** |
+| avg fps | 8–18 | **70** |
+| `cold` / `programs` | [] / 184 | [] / 182 |
+| new pipelines in window | ~0 | **5, none of which stalled anything** |
+
+So the same workload, the same quality preset and the same card produce no multi-second stall in a
+different browser — and five *new pipelines* were built mid-play there without one. That is strong
+evidence against every theory that blames the game's own draw work, and it is consistent with the
+fence/`gt`/heartbeat split (v40.16): the time is going somewhere only the GPU process can see.
+
+⚠ **The control is not yet clean: the map differs.** Every Chrome mark since #21 is `shifting_deep`;
+the DDG mark is `hourglass`. Browser and map are perfectly confounded, so the next comparison has to
+hold the map fixed. (`hub:ripple` appears in the DDG chop at 75.9 ms over 28 frames, so water is
+running there too, which weakens the confound but does not remove it.)
+
+**v40.17** puts the two variables that now matter into every mark, cached after the first call:
+`gl` (the `WEBGL_debug_renderer_info` unmasked renderer — all three browsers are Chromium, so a UA
+string alone would not separate which GPU Windows handed them) and `ua` (userAgentData brands).
+Boot-tested: `gl` "ANGLE (NVIDIA, NVIDIA GeForce RTX 5050 Laptop GPU (0x00002DD8) Direct3D11 …",
+`ua` "Not/A)Brand 99, Chromium 148". No errors.
+
+### v40.18 — the map is ruled out; it is the browser, and the allocation is still untested
+
+Owner tried both maps, and `window.__water.refract = 0` changed nothing. Marks #54–#57 are Chrome on
+**`hourglass`** — the same map as the DuckDuckGo control:
+
+| | Chrome 152 / `hourglass` | DuckDuckGo / `hourglass` |
+|---|---|---|
+| worst | 1625.9 / 3446.1 / 986.6 ms | **117 ms** |
+| fps | 51 / 12 / 67 | **70** |
+| `gt` peak | 16.9 / 26.2 / 156.4 ms | 43 ms |
+| fence peak | 1660.5 / 125.3 / 1181 ms | 172 ms |
+
+Same machine, same card (`gl` = "ANGLE (NVIDIA, NVIDIA GeForce RTX 5050 Laptop GPU … Direct3D11"),
+same build, same MEGA preset, same map. **The map is out. The variable is the browser** — Chrome 152
+against DuckDuckGo's WebView2.
+
+Two details worth keeping:
+
+* ⚠ Mark 56's 3446 ms frame has **no section blame, no multi-second `gt` and no multi-second fence** —
+  `gt` peaks at 26.2 ms and the fence at 125.3 ms in the whole window. Marks 52/54/57 do show the
+  fence catching it (3377 / 1660.5 / 1181 ms). So even the fence does not always see it, which puts
+  the time outside the GL timeline entirely.
+* ⚠ **"Not the resolution" is only half tested.** The v40.13 governor moves the *viewport*
+  (`ss [-0.6, 1344, 756]` in mark 57) — `px` shows the **allocated** target sitting at 4608×2592 in
+  every one of these marks regardless. Only a preset change shrinks the allocation and the whole post
+  chain with it, and `applyQualityPreset` cannot resize render targets mid-session (v37.14). So a
+  MEGA→HIGH run is still an untested and *different* experiment from anything the governor has done:
+  it tests the allocation, not the fill rate.
+
+**v40.18** records the live knobs in every mark (`flags`: refract, disp, reflShields, copyGrow,
+copyAllocs, kwOn, ssCine, ssMin, fxWarm, warmDraws). Marks 54–57 cannot say whether
+`__water.refract = 0` was still in force when they were taken, which makes them unusable as evidence
+either way — any knob that changes what the GPU is asked to do belongs in the payload, not in memory.
+Boot-tested; `flags` reads back with `gl` and `ua` beside it.
+
+### v40.19 — FOUND IT: the crest-spray readback blocks on the command-buffer flush
+
+Marks #58–#60 (Chrome 152) against DDG #3–#4 (Chromium 151), same card in both — `gl` reads
+"ANGLE (NVIDIA, NVIDIA GeForce RTX 5050 Laptop GPU … Direct3D11" on **both**, so the GPU-assignment
+theory is dead too.
+
+⚠ **Mark 58 is `q: high`** — `px [1920, 1080, 1536, 864, 0]`, a 1536×864 target, not MEGA's
+4608×2592 — **and it still stalls 1403.5 and 1556.2 ms.** Resolution is out, allocation and all.
+
+And this time the stall is named, because v40.12 split the section and v40.07 added the heartbeat:
+```
+mark 58   big  27.05  1403.5ms   hub:ripple: 1398.3      hb [[27.06, 1416.5]]
+mark 60   big  37.09   493.1ms   hub:ripple:  488.9      hb [[37.10,  507.5]]
+```
+`hub:ripple` owns essentially the whole frame, and the 4 ms heartbeat stalls alongside it. **Main
+thread, not GPU execution.** Which is why it survived every GPU-side theory, survived
+`__water.refract = 0`, survived both maps and survived the drop to HIGH.
+
+**The cause is written in the codebase's own v39.49b comment**: *"the async readback CALL blocks on
+Chrome's command-buffer flush whenever the GPU queue is deep"*. The crest-breaking rule pulls a fixed
+**128×128 RGBA float** (256 KB) off the ripple heightfield to find pitching wave crests. v38.61 moved
+it to `readRenderTargetPixelsAsync` so the *data* arrives a step late — but the **call itself** still
+forces Chrome to flush the command buffer, and that flush waits for whatever is queued. The owner's
+fence readings run 40–120 ms between stalls, so it is waiting on frames of work, not milliseconds.
+Everything fits:
+
+* **fixed 128×128** → resolution cannot touch it. ✓ HIGH stalls identically.
+* **flush depth** → browser-dependent, Chrome 152 vs Chromium 151. ✓
+* **self-feeding** → a blocked frame queues more work, deepening the queue for the next call.
+* **"it never did this before"** → the v39.73+ refraction work deepened the per-frame queue this call
+  now waits on.
+
+**The fix.** v39.49b's adaptive cadence doubles the interval to a cap of 32 steps — which only makes
+a multi-second stall rarer, never absent. A call costing more than **50 ms** now switches the rule
+**off** for a backing-off window (4 s, doubling to 60 s), and one cheap call resets it. A machine that
+cannot afford this loses the crest spray instead of the frame. The synchronous fallback gets the same
+cutoff — it is only reached when the async path has failed, which is exactly the machine that can
+least afford a pipeline flush. `flags` now carries `crestBreak`, `crCost`, `crSkip`, `crOff`,
+`crOffN` so a mark says whether the rule was on and what it cost.
+
+Boot-tested at 40.19: `crCost 1` ms, `crSkip 4`, `crOff 0`, `crOffN 0`, 82 reads — the rule runs
+normally when it is cheap, and the cutoff sits armed. No console errors.
+`window.__water.crestBreak = 0` turns it off outright.
+
+### v40.20 — incognito Chrome does not hitch: the cause is outside the page
+
+Owner: *"I ran it in an incognito Chrome window and it didn't hitch."* Same Chrome 152, same profile
+binary, same RTX 5050, same build, same map, same preset. Incognito differs in two ways that matter:
+**extensions are disabled by default**, and the profile's caches are fresh and in-memory.
+
+That is now three independent controls, all pointing the same way:
+
+| control | result |
+|---|---|
+| DuckDuckGo (Chromium 151, same card) | worst 117–170 ms |
+| Chrome at HIGH (1536×864 target) | still stalls — resolution out |
+| **Chrome incognito** | **no hitch** |
+
+And it matches what marks #63–#66 could not explain: a 2007.8 ms frame with `hb` **empty** (the 4 ms
+heartbeat never missed a beat, so the main thread was alive throughout), `gt` 26 ms, the fence 69 ms —
+and ⚠ **`lo` empty, no long-animation-frame entry at all for a two-second frame**. LoAF reports
+frames; if the browser never scheduled a rendering opportunity there is nothing to report. Nothing
+inside the page was slow. The page simply was not asked to draw.
+
+⚠ The v40.19 crest cutoff is working and is not this: `crCost` 13.3–14.9 ms, `crSkip` 32, `crOff` 0,
+`crOffN` 0 — the readback is behaving and `hub:ripple` has dropped out of the blame entirely. It was
+a genuine 1.4 s stall in marks 58/60 and it is fixed; it was not the only one.
+
+**v40.20** adds the probe that names this class outright, driven from the heartbeat because that is
+the one clock that survives a stall the rAF cannot see:
+
+* **`ticks`** — `[rAF ticks, 4 ms beats, current state]` over the mark's life. If `raf` is far below
+  `beats / 4`, the browser stopped scheduling frames whatever the page was doing. Boot-tested in the
+  hidden pane, which is exactly that case: **`[12, 964, "hfsp"]`** — twelve frames against 964 beats.
+* **`foc`** — `[t, state]` on every transition: visibility + focus + fullscreen + battery, e.g.
+  `"vFSp"` = visible, Focused, fullScreen, plugged; `"vfSB"` = lost focus, on Battery. The pane's own
+  v↔h flapping every 2 s shows up correctly.
+* **`flags.onBattery`** — Chrome's energy saver throttles rendering on battery and the game already
+  tracks `_lssOnBattery`; it belongs in the payload.
+
+Next mark from a stalling Chrome window settles it: `raf` collapsing against `beats` means the
+browser stopped drawing, and the bisect is `chrome://extensions`, not this file.
+
+**Edge, and reading marks from other browsers.** Edge's copy had been compacted into a
+snappy-compressed `.ldb` SSTable, so the `.log` reader found nothing — `read_f8_ldb.py` (a minimal
+snappy decoder plus a brute-force block-start scan) gets it out. Its three marks are build **40.14**,
+i.e. *before* the v40.19 crest fix: 200–700 ms stalls, `hb` empty, `gt` up to 613 ms, fence up to
+833 ms — the same class as Chrome's, milder. ⚠ A mark taken moments ago is still in the memtable and
+not on disk at all. **The reliable cross-browser route is `window.__f8log.export()`**, which drops a
+JSON into Downloads that can be read directly, with no LevelDB archaeology and no waiting for a flush.
+
+### v40.21 — incognito stalls too, so the profile theory is dead; and the recorder itself is now testable
+
+⚠ Correction to the v40.20 entry: the owner removed the extensions and Chrome still stalled, then
+**incognito started stalling as well**. The clean incognito run was not reproducible. Extensions, the
+profile and its caches are all out. What survives every control is the browser build itself:
+**Chrome 152 and Edge stall; DuckDuckGo (Chromium 151) does not**, same machine, same card, same
+build, same map, same preset.
+
+DDG mark #5 (40.20) is the healthy reference the `ticks` probe was built for:
+`ticks [2547, 4396, "vFSp"]` — 4396 beats is ~17.6 s, and 2547 rAF ticks over 17.6 s is a full
+144 Hz. Frames are being scheduled normally, `foc` is empty, `worst` 212.8 ms, 100 fps, `crCost` 1.2.
+
+⚠ **And the recorder has never been ruled out as a contributor to what it measures.** Two of its
+probes ask the GPU process a question every frame and wait for the answer — `getSyncParameter` on the
+v40.07 fence, `getQueryParameter` draining the v40.08 TIME_ELAPSED queries. Both are synchronous
+round trips across the command buffer, which is precisely the mechanism the v39.49b crest note
+describes and precisely what this investigation has been chasing. Every mark taken all session has
+had `?pbhud` on.
+
+**`?pbhud&nogpu`** (or `localStorage lss_nogpu = '1'`) keeps everything that costs only a
+`performance.now()` — the gap ring, section blame, LoAF records, `made`, the heartbeat, `pipes`,
+`foc`, `ticks` — and drops the fence and the frame timer entirely. If the stalls survive it, the
+recorder is innocent and every mark stands. If they do not, they were never the game's.
+`flags.noGpu` records which mode a mark was taken in. Boot-tested: `noGpu true`, `__f8gt` absent so
+gameLoop skips the bracket, `gpu`/`gt` empty, everything else still populating.
+
+**Reading marks from another browser:** `window.__f8log.export()` drops a JSON into Downloads. A mark
+taken moments ago is still in the memtable and not on disk — Chrome's newest were unreadable this
+turn for exactly that reason, and Edge's newest on disk was still 40.14.
+
+### v40.21 marks — the recorder is innocent, and the main thread does sometimes freeze
+
+⚠ **`flags.noGpu = 1` and it still stalls**: 1743.9, 4008.7 and 2897.4 ms with the fence and the
+frame timer both disabled. The recorder's synchronous GPU-process round trips are not causing this
+and every mark taken all session stands.
+
+And mark 2 is a shape none of the earlier ones had:
+```
+big  38.38  4008.7ms  renderFrame:2.5     the only blamed section, 2.5 ms of it
+hb   [[38.41, 4038]]                      ⚠ the 4 ms heartbeat stalled 4038 ms
+lo   []                                   no long-animation-frame entry at all
+ticks [3774, 8018, "vFSp"]                ~118 Hz of rAF across the mark otherwise
+```
+The heartbeat stopping means the **main thread genuinely froze for four seconds** — but no LoAF entry
+was produced and no profiled section accounts for it, so whatever blocked it was not inside an
+animation frame and was not our JS. Earlier marks (52, 53, 63) had the heartbeat *clean* through
+their stalls. So there are at least two distinct residual shapes, and they need different answers.
+
+⚠ Chrome 152's `#use-angle` offers only **Default / D3D11 / D3D11 WARP** on this machine — no OpenGL
+or Vulkan backend — so the "switch the ANGLE backend" test is not available (WARP is software
+rasterisation and would not run at a speed that proves anything).
+
+**On "why isn't it saving properly?"** — it was saving; the reader was broken. `localStorage` is
+durable to the page immediately, but Chrome's storage service batches the flush to LevelDB, and
+LevelDB pads and *recycles* log blocks. `records()` used to `break` on the first malformed or zeroed
+record, which threw away everything after it — i.e. exactly the newest writes. It now skips to the
+next 32 KB boundary and keeps going, and also guards zero-length and over-long records. The four
+40.21 marks came straight out of `000004.log`, thirty seconds after they were taken.
+
+### v40.22 — the trace ends it: `getProgramInfoLog`, 92% of a four-second frame
+
+The owner's Chrome DevTools trace settles a day of theories in one line.
+
+```
+22.64s  RunTask 2555.5 ms  Renderer/CrRendererMain   (PageAnimator -> FireAnimationFrame -> v8.callFunction)
+22.67s  GPUTask 2513.4 ms  GPU Process/CrGpuMain     alongside it
+30.03s  RunTask 4014.0 ms  Renderer/CrRendererMain
+30.06s  GPUTask 3925.1 ms  GPU Process/CrGpuMain     alongside it
+```
+And the V8 sampler in the same trace says exactly where those four seconds went:
+```
+6909 of 7487 samples (92%)  getProgramInfoLog
+stack:  getProgramInfoLog <- Ml.getUniforms <- Ql.renderBufferDirect <- Ql.render <- _warmRealCombatFX
+```
+That is three.js' `WebGLProgram.onFirstUse`, which calls `getProgramInfoLog` **only when
+`renderer.debug.checkShaderErrors` is true**.
+
+⚠ **This codebase already found the mechanism and fixed it in the wrong place.** The v39.44 note at
+the end of `_prebakeWorldForLaunch` has it word for word — *"on ANGLE, reading a program's INFO LOG
+or LINK_STATUS BLOCKS until the D3D compile finishes … It defeats KHR_parallel_shader_compile
+completely"*, and *"Firefox's WebGL path makes that check far cheaper, which is exactly why one
+browser hitches and the other does not"* (which is also why DuckDuckGo's Chromium 151 was clean all
+day). But it turns the flag off at the **end** of the prebake — and `_warmRealCombatFX` runs
+**inside** it. So the one function whose entire job is to draw every combat material for the first
+time did all of it with the checks on, every program serially joining its own HLSL compile instead
+of letting ANGLE overlap them.
+
+**v40.22** turns `checkShaderErrors` off around `_warmRealCombatFX` and restores it in a `finally`,
+so the rest of the prebake keeps reporting real GLSL errors (this game builds shaders from template
+literals, and the v39.44 note found a genuine X4000 that way). The draws still happen, so the warm
+still warms; what goes away is the explicit synchronisation around each one.
+`window.__shaderErrChecks = true` keeps them on here too.
+
+Boot-tested at 40.22: `checkShaderErrors` reads `true` at ship-select and `false` after the prebake,
+so the flip and the restore both work; `__prebake().ms.fx` = 474 ms in the pane, no console errors.
+
+⚠ Not everything in the trace is this. Two stalls — `26.13s GPUTask 3764 ms` and
+`42.58s GPUTask 3939 ms` — are on **CrGpuMain with the renderer main thread idle** (its per-second
+busy time is 3–193 ms across those seconds, and the only main-thread gaps are 150–364 ms). Those are
+the "heartbeat clean" marks from earlier and they are still unexplained.
+
+**v40.22 result.** Owner: *"it helped, and for some reason things looked clearer... but there were
+some hitches remaining."* Mark #5 on 40.22: **worst 979.7 ms**, down from 2555 / 4014 ms, 65 fps.
+The remaining one is the *other* lane, exactly as flagged:
+```
+big  26.40  979.7ms  renderFrame:3.2, hub:stream:2      hb []          main thread never stopped
+lo   [25.43, 987, 0, 972, [gameLoop 13 ms]]             gt top 21.5    our draw list was 21 ms
+                                                        gpu top 1014.6 the fence saw all of it
+```
+GPU-process side, renderer idle — the same shape as the trace's `26.13s GPUTask 3764 ms` and
+`42.58s GPUTask 3939 ms`.
+
+⚠ **It is not VRAM pressure.** The trace's `GPUTask` args carry `used_bytes` per renderer, and ours
+never exceeds **57 MB** across the whole recording (36–46 MB in the stalling stretch). Every "the
+card is short of memory" theory is out. The long GPUTasks do coincide with `used_bytes` changing,
+which is consistent with resource creation/destruction forcing a driver synchronise — the same class
+as the v40.16 refract-copy realloc — but three.js' own counters (`made`) show only ~1 geometry a
+frame there, so whatever is being created is Chrome-side, not ours.
+
+Naming it needs a trace with the `gpu`/`gpu.service` categories enabled, which the DevTools
+Performance panel does not expose (Perfetto / `chrome://tracing` does). Untested one-liner that would
+narrow it first: `window.__keepWarm.on = false` — the v39.63 burner is the one thing this game adds
+to the GPU queue on purpose and it has never been A/B'd.
+
+### v40.23 — the late cloak re-warm only ever covered the player
+
+Owner: *"pretty sure auto cloak caused a hitch in elimination mode."*
+
+`_warmCloakVariantOnce()` warms exactly **one** unwarmed root per call — the player first, then the
+first unwarmed bot — and it is called once a frame in the countdown block, so the field does drain.
+But v39.49b then found that the player's warm lands ~4 s into the launch, *before* its hull texture
+is assigned, so it compiles the **no-map** transparent variants (cache-key term `mapUv`) and the
+first real cloak links the textured pair cold, ~2 s. The fix for that was a **late re-warm at
+`warmupTimer < 2`** — and it was written for `player.mesh` alone.
+
+⚠ Every bot has exactly the same problem, and two things make it bite hardest in elimination: it is
+the mode with the most hulls on the field and the most rounds to meet them in, and **Auto Cloak
+fires off the core meter**, so it triggers at an arbitrary moment in play with nothing hiding the
+link. Skins sharpen it further — `_applyShipSkin` runs in the ship factory for *every* ship built,
+player or bot, and `lssSkinHue` is a program-cache-key term, so a bot wearing a livery the boot-time
+ghost-fleet warm never saw is its own program family. (That warm reports
+`pre-warmed 196 transparent hull program(s) across 14 hulls` — archetypes, not the live skinned
+instances.)
+
+**v40.23** clears `_cloakWarmed` on the player *and every entity mesh* at `warmupTimer < 2` and lets
+the existing per-frame `_warmCloakVariantOnce()` drain them, one hull per frame, instead of doing the
+player's in a single lump. Nine hulls is nine frames of the two seconds available, and it replaces
+the direct `_warmCloakForRoot(player.mesh, false)` call that v39.96 measured at 1073 ms → 78 ms when
+suppressed. `window.__cloakLateN` reports how many hulls were re-armed.
+
+⚠ **Correction to the paragraph above.** I claimed skins sharpen this because "a bot wearing a
+livery is its own program family". **Bots are not skinned.** The spawn calls
+`createShipMesh(chassisData, teamColor, _meshKey)` with no `skinId`, so `_poolKey` is built as
+`loadoutKey + '|' + teamColor + '|' + ''` and `_botShipPoolTake` asks for the same empty-skin key —
+consistent, and no livery is applied. `_applyShipSkin` reaches the player's rig and the picker
+previews, not the bot fleet. What v40.23 actually buys is (a) the late re-warm reaching bot hulls at
+all, which matters if a bot cloaks, and (b) the player's own re-warm being **sliced one hull per
+frame** instead of the single lump v39.96 measured at up to 1073 ms. Both are real; the skin
+reasoning was not.
+
+**On the endless precedent** (owner: *"probably what fixed the hitches in endless mode … that's when
+we implemented the ?pbhud command"*): that was **v38.97** — the bot ship-group pool plus
+`_lssRetainMat`. Its own note says it exactly: *"a disposed hull material whose program has no other
+holder frees the program, and the next ship with that variant relinks it mid-match (224 ms cold on
+the pane, at round start)"*, against *"519 GPU buffer uploads and 155 geometry deletes in ONE frame
+at every round transition"*. ⚠ That fix is **mode-agnostic** — the pool keys on hull + tint, not on
+mode — so elimination has had it all along. The half elimination never got was the *warm*, which is
+what v40.23 adds. The `?pbhud` recorder itself is v39.62.
+
+### v40.24 — "is the warmup just not finished, but it started the match anyway?" Yes. Fixed.
+
+The owner's question, answered from their own trace. The residual stalls are **`StartDrawToSwapStart`
+3766.9 / 3943.8 ms** in the viz pipeline (async events — my first scan only read synchronous ones),
+with the renderer main thread idle and the GPU process showing *nothing* on any thread in that window
+except one `GPUTask` of the same length: the command decoder blocked inside a single GL command. On
+ANGLE/D3D11 that command is the first DRAW with a (program × input layout × state) whose D3D
+executable is not built yet.
+
+⚠ The prebake's v37.18 drain polls `COMPLETION_STATUS_KHR` — *"has this program LINKED"* — and
+returned while every warm **draw** was still queued behind it. Then the cloak warms ran in the
+countdown, on screen, one decoder stall per hull. Measured in the pane at 40.24: `drain 3 ms`
+(links long done) against **`fence 285 ms`** (draws not) — that gap is the whole thesis, and on the
+owner's card it is seconds.
+
+Three additions, all from existing pieces:
+
+* **`_prebakeGpuFence(capMs, rep, key)`** — `fenceSync` after the last warm draw, `SYNC_STATUS`
+  polled a frame at a time via `_warmupYield` (non-blocking), capped (10 s launch / 8 s swap / 6 s
+  round → `rep.capped = 'gpu-fence'`), free when the queue is empty. Every prebake's overlay drop now
+  waits on it. `rep.ms.fence`, `window.__gpuFence`.
+* **Launch (`_prebakeWorldForLaunch`)** — the hull-per-loadout proxy group (v39.49, built for the
+  mirror lift on water maps) is now built on **every** map, and `_prebakeCloakWarmRoots` runs
+  `_warmCloakForRoot(root, true)` on each proxy plus the player, one per yield. Bots spawn after this
+  prebake, but a bot is unskinned and tint is a uniform, so the proxy's materials key the same
+  programs as the live bot's. Pane: `cloakHulls 8`, `cloakMats 112`, `ms.cloak 235`.
+* **Rounds 2+ (`_rrStagedRound`)** ⚠ had no warm and no fence at all: `ph.reset()` re-ran
+  `spawnBots()` behind the cover and the stage returned after terrain, leaving every fresh bot hull's
+  transparent variant to the countdown's one-per-frame warm, on screen — the owner's "auto cloak
+  caused a hitch in elimination mode". It now cloak-warms the unwarmed live hulls plus the player
+  (textures final by round 2) and fences. `_rrStagedSwap` (traverse) gets the same before its cover
+  lifts.
+
+⚠ Build note: a `sed` that appended a `//` comment inside a one-line arrow body commented out its
+closing `});` and broke the source; caught by `node --check` in strip.py and repaired before the
+regenerate. Never append a comment to a line that does not end the statement.
+
+Verified at 40.24 in the pane: `capped null`, total 2455 ms, no console errors, `checkShaderErrors`
+false after the prebake.
+
+### v40.25 — v40.24 regressed the countdown; pulled back to what is provably safe
+
+Owner on 40.24: *"so many hitches... and it skips the countdown because it's lagged there."* Two of
+my changes did that, and the 40.24 marks show a third thing that no warm can fix.
+
+**What regressed and why.**
+* **v40.23's countdown re-warm ran with the shadow pass.** It cleared `_cloakWarmed` on every bot and
+  let `_warmCloakVariantOnce` rebuild them one per frame — but that drain calls
+  `_warmCloakForRoot(root)` with no second argument, and `withShadow !== false` is **true**: N full
+  shadow-map renders in the last two seconds of the countdown, on screen. The old late warm passed
+  `false` explicitly. Reverted to exactly v39.96 (player only, shadowless), and the per-frame drain
+  itself is now shadowless — the depth variants of every hull archetype come from the launch
+  overlay's proxies (v40.24, `withShadow` true), so nothing is lost.
+* **v40.24's fence and cloak warm inside `_rrStagedRound`.** That stage's cover is the ship picker,
+  not an opaque overlay, and its countdown is wall-clock (`_tickTimer`). Work behind it is work on
+  screen; work longer than the countdown *is* the skipped countdown. Both removed. `_rrStagedSwap`
+  (traverse) keeps its cloak warm (now shadowless) and its fence, because it has a real overlay and
+  shortens its own countdown by the stage length (floor 4 s) — but the fence is now capped at 4 s
+  **inside** the stage budget, never beyond it. The launch fence likewise: 4 s cap, budget-gated.
+
+**What the 40.24 marks proved.**
+* Marks 10–12: **`hub:ripple 3527.3` with the heartbeat stopped 3546 ms**, 13 s into round 1. That
+  is the crest readback again — the v40.19 cutoff is *reactive*: the first call into a deep queue
+  still pays the whole flush before it can switch anything off, and the queue is deepest in the
+  first seconds after FIGHT. **v40.25 holds the readback off for 15 s after FIGHT**
+  (`game._fightAt`, stamped at the warmup→playing transition; `window.__water.crHoldMs`; `flags.crHold`
+  = seconds of hold left). Spray is a metres-from-the-surface detail nobody watches as the fight opens.
+* Mark 7: `gt [31.75, 3519.9, 0]` — **3.5 s of GPU-executed draw list with `first: 0`**: no new
+  pipeline was drawn on that frame. Warming pipelines cannot touch that one. It is the same shape as
+  marks 35 / 38 / 41 earlier in the session and it is still open. ⚠ Do not spend more warm work on it.
+
+Verified at 40.25 in the pane: launch prebake `cloak 211 ms / 8 hulls`, `fence 33 ms`, `capped null`,
+total 4257 ms, no console errors. The FIGHT stamp and the readback hold are verified by construction
+(`node --check`, unique anchors) — the hidden pane parks its countdown at 5 s, so FIGHT was not
+reached to watch `crHold` count down.
+
+### v40.26 — four marks, three shapes; the probe learns to tell them apart
+
+Marks #14–#17 on 40.25 (classic, `hourglass`, MEGA):
+
+| mark | where | shape | what it says |
+|---|---|---|---|
+| 14 | playing, 3918.6 ms | GPU-side (`hb []`, `gt` 31 ms, fence 4016) | **a new pipeline drawn 20 ms before it** — `ShaderMaterial\|normal+position\|b2T-s2i--`, 56 v, additive, DoubleSide, no UVs, unwarmed |
+| 15 | playing, 3662.2 ms | **main thread blocked** (`hb [37.48, 3589.9]`), `lo []`, no blame, no GPU | a block in a TASK, not a frame — invisible to the LoAF observer |
+| 16/17 | **warmup**, 1361.9 ms | GPU-side, `first 0` | already-built work; and `crOffN 1` at t=23 s — the crest readback had run *in the countdown* (the v40.25 hold only started at FIGHT) |
+
+Three probe fixes and one real fix:
+
+* **`first` names the shader.** The pipeline signature now carries `{first five uniform names}` and
+  the material name, so the next mark 14 says which ShaderMaterial family (uIsCore = lightning,
+  uAxialFalloff = layered FX, shieldColor = shield, uBaseColor+uVRLite = atom fractal…) and the fix
+  is a targeted warm rather than a guess.
+* **A `longtask` observer** beside the long-animation-frame one (`lt`: `[t, ms, name, attribution]`).
+  Attribution is coarse but it proves task-vs-frame, which is the fork mark 15 sits on: a texture
+  upload on decode, a readback promise, a scheduler timer — all tasks.
+* **`flags.fxRuns`** — every entry into `_warmRealCombatFX` is stamped, memoized or not, so a re-run
+  in the countdown (a changed `_programEnvSig` after the cinematic would do it) shows up.
+* **The crest hold covers every non-playing state**, not only the 15 s after FIGHT — the sim runs
+  during warmup and `_fightAt` is not stamped yet, so the readback was tripping the cutoff on screen
+  in the countdown.
+
+Verified at 40.26 in the pane: `lt` populated (`[18.89, 1486, "self", "window:"]` — the prebake's own
+long tasks behind the overlay, as expected), `fxRuns [18.4]` (one run, in the prebake, no countdown
+re-run), `crOffN 0` / `crCost null` through warmup (hold in force), no console errors.
+
+### v40.27 — the "already-built but expensive" frame was the combat-FX warm re-running in view
+
+Marks #18–#22 on 40.26 (classic, `hourglass`, MEGA). Mark 18 is the class that had resisted every
+warm: **one frame whose own draw list executed for 4100.9 ms on the GPU** (`gt`, disjoint clear,
+fence 4168.7) with `first: 0` — nothing new built, just an enormous amount of drawing. And the new
+`flags.fxRuns` puts an entry into `_warmRealCombatFX` at **19.1 s, one tenth of a second before that
+frame**. The prebake had run it at 11.2 s behind the overlay; the countdown call (`warmupTimer <= 2`)
+and the FIGHT call (`warmupTimer <= 0`, `fxRuns` 23.4) entered it again.
+
+⚠ **The memo keys on `_programEnvSig()`, which counts VISIBLE lights** (`scene.traverseVisible`),
+plus fog type, environment, shadow flags, tone mapping, colour space, clipping. Anything that changes
+the visible light set between the prebake and the countdown — the cinematic, a bot's engine light,
+a muzzle light coming online — makes the signature differ, and the whole warm runs again: every
+combat effect in the game spawned at once and rendered in one frame, on screen. That is marks 35 /
+38 / 41 / 7 / 18 — not a compile, a 4 s render — and it explains why no amount of pipeline warming
+touched them.
+
+**v40.27**: once *any* warm has run this session, `_warmRealCombatFX` only runs again behind a cover
+(`game._worldPrebaking`, `_PREBAKE.on`, `_swapStaging`, `_rrStaging`). In view it is refused and
+stamped (`flags.fxSkipped`), whatever the signature says; `flags.fxRan` records entries that got past
+the memo. The trade is explicit: a genuinely changed environment leaves a few FX variants to link on
+first use in play — single programs, mostly resident via `_lssRetainMat` — instead of one guaranteed
+multi-second frame that nothing hides.
+
+Verified at 40.27 in the pane: `fxRuns [18.3]`, `fxRan [18.3]` (once, in the prebake, `ms.fx 2897` —
+2.9 s of work, hidden), **`fxSkipped [29, 31]`** — the countdown entry and the FIGHT entry both
+refused in view; `cloakHulls 8`, `fence 6`, `capped null`, reached `playing`, no console errors.
+⚠ A first attempt read `fxRuns null` at 24 s: a fresh browser context was still fetching assets and
+the prebake had not reached the FX phase. Wait for `__prebake()` to exist before reading it.
+
+**Still open — the compositor lane.** Marks 20 / 21 / 22 (1660 / 2189 / 1821 ms): renderer idle
+(`hb` only ~65 ms blips, `lo []`, `lt []`), our GPU idle (`gt` 9–14 ms, fence 42–56 ms), `first 0`.
+Nothing in the page was busy and the GPU had drained; the browser simply did not present a frame.
+That is the `StartDrawToSwapStart` shape from the trace with *no* GL work behind it — viz/Graphite
+itself. The only page-side lever left for that class is avoiding *new compositor layer
+configurations* at match start (pre-showing HUD/overlay states during the loading screen); untested.
+
+### v40.28 → v40.30 — the cold-browser run, captured from the inside
+
+**v40.28** warms the layered-FX shader in three layouts × two blend states and the particle cloud
+(`_warmRuntimeFxOnce`, `__fxWarm` 6 → 13). Pane-verified: `fxRan [19.8]` once, **`fxSkipped
+[28.2, 30.2]`** (countdown + FIGHT refused), `fence 42`, no errors. On the owner's card the launch
+prebake now hides **10.3 s** of warming: `fx 5043 / carrier 2064 / cloak 1974 / mon 1550 / gpu 1487`.
+
+**v40.29 — auto marks.** Owner: *"sorry i didn't mark them"* — and the hitch that matters only
+happens once, on a cold browser. Under `?pbhud` any frame gap ≥ 400 ms now snapshots itself
+(`'auto <ms>'`, one per 1.5 s, 30 per page load; `?pbhud&noauto` off). Reading them without a
+keypress: with the Claude-in-Chrome extension connected, an MCP tab at
+`http://localhost:8099/404.html` (same origin, game not running) reads `localStorage.lss_f8log`
+live; otherwise `read_f8_ldb.py` (⚠ the block-start scan must include offset 0 — `range(start, lo-1,
+-1)` — the value sat at offset 172 of a 24 KB table).
+
+**The cold run (owner quit Chrome, fresh GPU process, 40.29, elimination, MEGA, 1920×1010):**
+
+| mark | t | what | reading |
+|---|---|---|---|
+| n29–31 auto | 6–32 s, `select` | 2.4–3.9 s | ⚠ false positives: `foc` flips `h`↔`v` inside each gap — the tab was hidden; rAF does not run hidden |
+| n32 auto | 43.9 s, warmup | 639 ms | **`cold [[43.93, 118]]`** — 118 programs linked, +197 geos, +12 tex: the prebake's compile, behind the overlay. Fine. |
+| n33 F8 | 53.3 s, warmup | 21 ms | `fxRan [44.9]` — clean countdown so far |
+| n34 auto | **54.67 s, FIGHT** | **3043 ms** | `fxSkipped [54.7, 54.7]` ✓; `gt` 9.9 ms, fence 3056.7, `hb` 79, `lt []`, `first []`. GPU-side; the frame began at 51.6 — it spans the last 3 s of the countdown (the "3", the player's late cloak re-warm at <2 s) |
+| n36 auto | 58.47 s | **3647 ms** | **`gt [54.81, 3629]`** — our draw list executed 3.6 s, starting right after **the first `SpriteMaterial` draw of the match at 54.80** (4 v, additive). The warm had never drawn a Sprite. |
+| n38 auto | 62.31 s | 3064 ms | `gt [59.23, 3042]`, `first []` — draw list, nothing new *by name* |
+| n40 auto | 66.16 s | 1862 ms | `gt [64.29, 1849]`, first at 63.37: `{uColor,uOpacity}` glow sphere |
+| n42 auto | 70.02 s | 2654 ms | `gt [67.36, 2645]`, `first []` |
+
+Every in-play stall on the cold browser is now the same shape: **our own draw list executing for
+2–3.6 s** (`gt ≈ stall`, disjoint clear), no CPU (`hb` ~65 ms blips, `lt []`), fence agreeing — and
+`first` mostly EMPTY. ⚠ That emptiness was the probe's fault: its signature was material NAME +
+layout + state, which cannot tell a hull material from the same-named material with its texture
+now assigned (a different program, `USE_MAP`), nor one sprite from another with a different map.
+Different program = a different D3D pipeline the driver has to build at first draw.
+
+**v40.30**: the signature carries the live three.js program id (`renderer.properties.get(material)
+.currentProgram.id` → `@p<id>`); `_warmRuntimeFxOnce` draws an additive and a normal-blend
+`Sprite` with a small map (`__fxWarm` 15); the auto marker skips any gap that spans a hidden
+interval. Pane-verified: `fxWarm 15`, 134/200 `first` entries carrying `@p`, `fxSkipped [27.1,
+29.1]`, `cloakHulls 8`, `fence 59`, no errors, `autoN 0` in the (hidden-flipping) pane.
+
+### v40.31 — the 40.30 cold run: the warm ran, and the residual is not (only) first-use pipelines
+
+Owner, on 40.30, Chrome quit and restarted (cold GPU process), elimination, MEGA: *"still hitches…
+is the warmup failing somehow?"* Ten marks (auto + F8), read live through the extension.
+
+**The warm did run**: `fxRan [17.2]` once, `fxWarm 15`, `warmDraws 44`, cloak proxies drawing
+their transparent pairs at 16.3 s (`Syphon_CP_*@p157/@p158`), `cold [[16.24, 118]]` = the prebake's
+118 program links behind the overlay, `fxSkipped [25.5, 28.8]` = the countdown and FIGHT entries
+refused. Nothing in the prebake failed or was capped.
+
+**What the stalls look like now, with program ids in the signature:**
+
+| mark | frame | inside our draw stream? | first-use event before it |
+|---|---|---|---|
+| n47 | 1341 ms (began 24.14, warmup) | yes (fence 1369) | **`SpriteMaterial@p172`** first draw at 24.14 — the v40.30 synthetic sprite warmed a *different* program |
+| n49 | **2932 ms** (began 25.91) | yes — `gt [25.87, 2916]` | **none** — nothing new by program × layout × state in the 1.5 s before |
+| n50 | 883 ms | yes — `gt 838` | none |
+| n52 (F8) | **20.9 ms** | — | ⚠ **five brand-new pipelines** (`MeshBasicMaterial@p141/@p143 color+position`, layered FX 24 v) drawn at 35.57–36.16 **for free** |
+| n53 | 2758 ms | **no** — `gt` small, fence 2772 | a 12-vertex quad on a known program, 0.65 s earlier |
+| n54 | 1341 ms | **no** — `gt` 7.8, fence 1362 | none |
+
+Two conclusions the earlier model did not allow for:
+* **A first-use pipeline is not reliably expensive** — n52 drew five new ones inside a 21 ms frame.
+* **The multi-second frames mostly have no first-use event at all**, and they split between
+  "inside our command stream" (`gt ≈ stall`, which only proves the stall sits between our first
+  and last GL command of the frame — a driver stall there still counts on the GPU timer) and
+  "outside it" (fence sees it, `gt` does not). Both are GPU-process work we cannot name from the
+  page. ⚠ Every remaining candidate — the driver's own shader cache writes on a cold process, ANGLE
+  blob-cache persistence, a state combination the signature still cannot see — lives inside
+  `GPUTask` and needs the GPU process's *own* trace categories, which the DevTools panel does not
+  record. **Next instrument: `chrome://tracing` → Record → "Manually select settings" → tick
+  `gpu`, `gpu.service`, `gpu.angle`, `gpu.decoder`, `viz`, `cc` → record the cold start → save.**
+  That trace names the GL command / ANGLE work inside each 3 s GPUTask. It is the only thing left
+  that can, and it has to be recorded by the owner (extensions cannot open `chrome://` pages).
+
+**v40.31** (pane-verified, no errors): the runtime-FX warm shows one sprite per **real** hidden
+`SpriteMaterial` in the scene for its draw (`__fxWarmSprites` 13 → `__fxWarm` 28; a CanvasTexture
+stand-in keyed a different program); the `first` signature carries the render target
+(`>s` rtScene / `>c` canvas / `>t<type>` other — the same points program showed up as both `>s` and
+`>t1016`, i.e. the mirror pass, which the old signature merged) plus depthTest / colorWrite /
+alphaTest; and `flags.pb` = `[total, fence, cloak, fx, gpu, capped, cloakHulls, sprites]` so
+"is the warmup failing" is answered by the mark itself (pane: `[2637, 10, 90, 1782, 194, 0, 8, 13]`).
+
+**On "it works only in DuckDuckGo?"** — the game's work is identical in both; DDG ships a different
+Chromium/ANGLE build (151) that does not pay these GPU-process costs on this machine. What the page
+can do is front-load first uses (done: 4 s → 1–3 s, FIGHT frame gone in some runs); it cannot change
+what the GPU process does with a cold shader cache.
+
+### v40.32 — the GPU-category trace names it: a link joined at a draw, mid-countdown
+
+Owner's `chrome://tracing` capture with `gpu`, `gpu.service`, `gpu.angle`, `viz`, `cc` on
+(`Downloads/trace_lastshipsailing.json.gz`, 5.57 M events; `trace_gpu.py` / `trace_gpu2.py`).
+Trace clock ≈ page clock + 31.3 s. What it says, event by event:
+
+| trace t | page t | thread | what |
+|---|---|---|---|
+| 33.75 s | 2.4 s | GPU main | `DXGISwapChainImageBacking::Present` **718 ms** (boot; the renderer's `GetFloatv` capability query waited 672 ms behind it) |
+| 35.17 s | 3.9 s | ANGLE worker | `D3DCompile` **331 ms** — pixel shader `uSkinHue, normalMap` (a hull material) |
+| 43.35 s | 12.1 s | ANGLE worker | `D3DCompile` **655 ms** — pixel shader `uSkinHue, normalMap, envMap` (a hull material under the environment map) |
+| **44.54 s** | **13.22 s** | renderer main → GPU main | `GLES2Implementation::GetProgramiv` → `CommandBufferHelper::Finish` → `WaitForGetOffset` **1872 ms**, matched by `Program::MainLinkLoadEvent::wait` **1871.8 ms** |
+| 53.15 s | 21.9 s | GPU main + Dawn worker | raster decoder blocked 1057 ms on `GpuPersistentCache::LoadImpl → DiskCache::Load` (Graphite's pipeline cache read from disk — Chrome's, cold process, once) |
+| 54.63 s | 23.3 s | GPU main | WebGL `CommandBuffer::Flush` **3366 ms** with no ANGLE sub-event — the decoder inside one command; still unnamed |
+| 61.07 s | 29.8 s | GPU main | `Present` **858 ms**, again coinciding with a Dawn `GpuPersistentCache::LoadImpl` |
+
+The owner's marks for the same run line up to the frame: `cold [[13.22, 6]]` — **six programs linked at
+13.22 s**, `hb` stopped **1931.9 ms** at 13.22, `first` at 13.23 = `Vortex_CP_Rubber /
+Vortex_InnerHull_Composite.001 / Vortex_CP_Cushion >s` — the **player's hull** drawn into rtScene
+for the first time, from the prebake's cloak warm of `player.mesh`, with the ship-select countdown
+on screen. **three.js' first use of a program asks `getProgramParameter(ACTIVE_UNIFORMS)`, and on
+ANGLE that blocks until the D3D link finishes** — the same lane v40.22 closed for
+`getProgramInfoLog`, through the other API. Every warm in this codebase compiled and drew in the
+same call, so every warm joined its own links. The v37.18 drain (poll `COMPLETION_STATUS_KHR`,
+non-blocking) ran once, after the prime — after every warm draw had already paid.
+
+The HDR environment is *not* the late arrival I suspected: the netlog shows `cinematic_2k.hdr`
+fetched at page-time 2.4 s from the disk cache. The 12.1 s `envMap` compile is a hull variant, not
+an environment change.
+
+**v40.32 — compile, drain, then draw, everywhere a warm draws:**
+* `_drainProgramLinks(capMs, rep, key)` — the v37.18 loop as a helper (one poll when nothing is
+  linking; `_warmupYield` between polls; capped; `rep.ms[key]`, `window.__linkDrain`).
+* `_warmCloakForRoot(root, withShadow, deferDraw)` — with `deferDraw` it compiles both passes and
+  returns a finisher that draws and restores. `_prebakeCloakWarmRoots` now compiles every hull, drains
+  once (`drainCloak`), then runs the finishers.
+* `_warmRuntimeFxOnce` is async: `renderer.compile(grp)` → `_drainProgramLinks` → draw. It also
+  carries the **first-fire sprite recipes** copied from their spawners (`spawnPlayerHitSplash`: ember
+  falloff map, additive; `spawnElectricSmoke`; the sRGB name label) — `SpriteMaterial@p172` is built
+  per hit and no scene scan could reach it.
+* `_prebakeGpuPrime` drains (`drainPrime`) before its twelve renders.
+* **The countdown's per-frame cloak drain no longer joins**: `_warmCloakVariantOnce` compiles and
+  parks a finisher in `_cloakPendingFin`; `_cloakPendingTick` (called first each frame) polls the
+  programs linked since and draws only when they all report complete (6 s cap). The player's late
+  re-warm at `warmupTimer < 2` just clears the flag and goes through the same path.
+
+Pane-verified: `cloakHulls 8 / cloakMats 112` with `drainCloak 7 ms`, `drainPrime 5 ms (1 poll,
+0 pending)`, `fence 118`, `fxWarm 35` (17 real sprite materials + 3 recipes), `capped null`,
+`cold []` in play, `fxSkipped [34.7, 36.7]`, no console errors.
+
+**Still open**: the 3.4 s decoder flush at page 23.3 s (a quarter-second after `SpriteMaterial@p172`
+first drew into rtScene and into the picker's half-float target `t1016`) has no ANGLE event inside
+it, so the trace cannot say which command. The Present stalls are Chrome's Dawn pipeline-cache disk
+loads on a cold GPU process — outside the page, once per cold start.
