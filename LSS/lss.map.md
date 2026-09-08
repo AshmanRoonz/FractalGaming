@@ -2983,3 +2983,54 @@ Two traps hit while building it, both worth knowing before editing this file:
   `Object.keys(_SKIN_PAT_ID)` earlier, and starting there grabbed an empty `{}` that parsed fine and
   silently produced a table with no patterns. Both are now guarded, plus shape checks that refuse to
   start on a bad slice.
+
+## v40.02 — shields reflect again, dimmed rather than hidden
+
+Owner: "i don't see the reflection of shields in the water", then "we had this fix before ... look how
+we did it in the previous version before we changed the water".
+
+**Checked, and the water work is not the cause.** `git show cd20081:LSS/index-working.html` (v39.69,
+the last build before the v39.73 water pass) carries the shield block byte-identical to the one that
+was there before this change:
+
+```js
+const _shields = [];
+if (ship && ship.userData && ship.userData.shieldMesh) _shields.push(ship.userData.shieldMesh);
+if (player) { const _ak = ['_gunShieldMesh','_thermalShieldMesh','_vortexShieldMesh','_swordBlockMesh']; … }
+```
+
+Every bubble has been force-hidden from the mirror since **v33.79**, extended to every *other* ship's
+bubble in **v38.67**. The reason is in that comment and it is a real one: a fresnel hologram is faint
+face-on and BRIGHT at a grazing angle, which is exactly how the mirror camera — low, under the surface
+— sees a bubble standing over the lake, so the water carried a hard rim that never appears in direct
+view. Hiding them fixed a brightness problem by deleting the object, which is a big hammer.
+
+Now they render, with their opacity scaled **for the pass only** — the same shape as the headlight
+cone's `reflBoost`, in the other direction — and restored in the same `finally` as everything else.
+`window.__water.reflShields = false` restores the v38.67 behaviour exactly; `.reflShieldDim` (0.45) is
+the scale. A shield whose ShaderMaterial ignores `opacity` reflects at full strength, which is still
+what was asked for; if one of them blows out at a grazing angle, that is the one to give a uniform.
+
+⚠ One other thing did change about how reflections read, and it is worth ruling in or out by eye
+before tuning this: before v39.73 the water's body was a flat painted blue, so the mirror was the only
+real thing in it. It is now the **refracted scene**, and the two are still mixed by the same fresnel —
+so at the shallow angle you get looking down at water, everything reflected reads weaker than it did.
+`window.__water.refract = 0` A/Bs that in one line.
+
+### v40.03 — and the PLASMA wall, which was the one actually being looked for
+
+v40.02 gave the ship bubbles the dimmed treatment but left the Plasma Shield walls on their own older
+knob (`__water.reflWalls`), which defaults to HIDDEN — so the shield the owner was looking at was
+still missing ("nope, i can't see the plasma shield in the water reflection"). A wall is three meshes
+(body, edge, plasma) and all three go through the same `_shTake` path now.
+
+Verified in the pane by planting a probe `particle_wall` over the lake with an instrumented material,
+so every write the mirror pass makes is recorded:
+
+| setting | opacity writes | visible writes | result |
+|---|---|---|---|
+| default | `[0.36, 0.8]` | none | dimmed to 45% for the pass, restored — **it reflects** |
+| `__water.reflShields = false` | none | `[false, true]` | hidden and restored — the v38.67 behaviour |
+| `__water.reflWalls = true` | none | none | untouched — full strength in the mirror |
+
+0.36 is 0.8 x the 0.45 dim, and the material comes back at 0.8 every frame. `cold 0` throughout.

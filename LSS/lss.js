@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.01';
+const LSS_BUILD = '40.03';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18188,23 +18188,34 @@ function _swBuildHubWater(T) {
       const wasVis = ship ? ship.visible : false;
       const _showShip = !!(ship && _rab < _rmax);
       if (ship) ship.visible = _showShip;
-      const _shields = [];
-      if (ship && ship.userData && ship.userData.shieldMesh) _shields.push(ship.userData.shieldMesh);
-      if (typeof player !== 'undefined' && player) { const _ak = ['_gunShieldMesh', '_thermalShieldMesh', '_vortexShieldMesh', '_swordBlockMesh']; for (let _i = 0; _i < _ak.length; _i++) { if (player[_ak[_i]]) _shields.push(player[_ak[_i]]); } }
-      if (game.worldEffects && !(window.__water && window.__water.reflWalls)) {
+      const _shieldsOn = !(window.__water && window.__water.reflShields === false);
+      const _shieldDim = (window.__water && window.__water.reflShieldDim != null) ? window.__water.reflShieldDim : 0.45;
+      const _shields = [];      // hidden for the pass
+      const _shDim = [];        // shown, but turned down: [mesh material, saved opacity]
+      const _shTake = (m) => {
+        if (!m) return;
+        if (!_shieldsOn) { _shields.push(m); return; }
+        const mm = m.material;
+        for (const _m of (Array.isArray(mm) ? mm : [mm])) {
+          if (_m && _m.transparent && typeof _m.opacity === 'number') { _shDim.push([_m, _m.opacity]); _m.opacity *= _shieldDim; }
+        }
+      };
+      if (ship && ship.userData && ship.userData.shieldMesh) _shTake(ship.userData.shieldMesh);
+      if (typeof player !== 'undefined' && player) { const _ak = ['_gunShieldMesh', '_thermalShieldMesh', '_vortexShieldMesh', '_swordBlockMesh']; for (let _i = 0; _i < _ak.length; _i++) { if (player[_ak[_i]]) _shTake(player[_ak[_i]]); } }
+      if (game.worldEffects) {
+        const _wallsFull = !!(window.__water && window.__water.reflWalls);
         for (let _i = 0; _i < game.worldEffects.length; _i++) {
           const _e = game.worldEffects[_i];
           if (!_e || _e.type !== 'particle_wall') continue;
-          if (_e.mesh) _shields.push(_e.mesh);
-          if (_e.edgeMesh) _shields.push(_e.edgeMesh);
-          if (_e.plasmaMesh) _shields.push(_e.plasmaMesh);
+          if (_wallsFull) continue;
+          _shTake(_e.mesh); _shTake(_e.edgeMesh); _shTake(_e.plasmaMesh);
         }
       }
       if (game.entities) {
         for (let _i = 0; _i < game.entities.length; _i++) {
           const _en = game.entities[_i];
           const _sm = _en && _en.mesh && _en.mesh !== ship && _en.mesh.userData && _en.mesh.userData.shieldMesh;
-          if (_sm) _shields.push(_sm);
+          if (_sm) _shTake(_sm);   // (v40.02) every ship's bubble takes the same route as the player's
         }
       }
       const _shieldsWas = _shields.map(function (m) { return m.visible; });
@@ -18247,7 +18258,7 @@ function _swBuildHubWater(T) {
         if (_wUv) _wU.visible = true;
         if (_cp) { _cp.visible = _cpWas; if (_cp.material) { _cp.material.opacity = _cpOp; if (_cpCol) _cp.material.color.copy(_cpCol); } }   // (v38.50/51/57) back to the direct-view rule, brightness and colour
         try { _reflFxRestore(); } catch (_) {}   // (v38.74)
-        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _reflLift.length; _i++) { const _e = _reflLift[_i]; if (_e.u != null) _e.m.uniforms.uBrightness.value = _e.u; else if (_e.env != null) _e.m.envMapIntensity = _e.env; else if (_e.c) _e.m.color.copy(_e.c); else { _e.m.emissive.copy(_e.e); _e.m.emissiveIntensity = _e.i; if (_e.sw) { _e.m.emissiveMap = _e.em || null; _e.m.needsUpdate = true; } } } _reflLift.length = 0; for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; _reflSkipSet = null; if (ship) ship.visible = wasVis;
+        if (_showShip) ship.traverse(_shipReflRestore); for (let _i = 0; _i < _reflLift.length; _i++) { const _e = _reflLift[_i]; if (_e.u != null) _e.m.uniforms.uBrightness.value = _e.u; else if (_e.env != null) _e.m.envMapIntensity = _e.env; else if (_e.c) _e.m.color.copy(_e.c); else { _e.m.emissive.copy(_e.e); _e.m.emissiveIntensity = _e.i; if (_e.sw) { _e.m.emissiveMap = _e.em || null; _e.m.needsUpdate = true; } } } _reflLift.length = 0; for (let _i = 0; _i < _shields.length; _i++) _shields[_i].visible = _shieldsWas[_i]; for (let _i = 0; _i < _shDim.length; _i++) _shDim[_i][0].opacity = _shDim[_i][1];   /* (v40.02) */ _reflSkipSet = null; if (ship) ship.visible = wasVis;
         if (_ghostWas) { try { _ghostHullApply(ship); } catch (_) {} }
       }
       _reflNrm.set(0, 0, 1).applyMatrix4(_reflRot.extractRotation(this.matrixWorld));
