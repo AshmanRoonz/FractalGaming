@@ -1880,3 +1880,128 @@ run clock (`_ecrClock`: co-op peers agree), moved with `setPosition`; ships with
 push the sprites like the arenas. Clouds leave with their segment (`dispose()` returns the slots); cap
 `__ecl.max` 14; off on potato / VR perf tier >= 2. Pane (39.69): 7 clouds on the test route, no
 errors.
+
+## v39.70 — biome-coloured clouds, class fire for every ship, charge fire in the glow
+
+- Clouds: `_eclColor()` reads `game.sandwichTerrain.biome` -> `_ECL_BIOME` (volcanic ember, goldmine
+  gold, crystalcave violet, snow pale blue, rocky dust, grassy green-white, mossy white-blue, brokensim
+  magenta), a quarter toward the live fog, luminance floor 0.35; `__ecl.colors[biome]` overrides. A
+  cloud keeps its birth colour (biome switches are spatial, new stretches grow new clouds).
+- Class fire (owner: "same effect that vortex has as muzzle fire, smaller ... other ships in their
+  theme"): `_CLASS_FIRE` table (SLAYER/TRACKER/BLASTER/PUNCTURE/SYPHON colour+size+life, sizes 6-8 vs
+  the Vortex's 12), `_classMuzzleFire(key, pos, dir)` called from `emitChassisMuzzleFlash` (so peers and
+  bots get it too), one burst 40 u down the barrel, 12 Hz per class, 12 live (`_classFlame` tag);
+  Vortex keeps its fireHitscan path, Pyro its flame particles.
+- Charge fire: `_chargeFireTick(dt, t, tint)` beside `_blasterChargeGlow` for the Blaster power shot and
+  the Puncture railgun spool - bursts spawned INSIDE the glow tube (the "basic shape that grows"):
+  `len = hull*0.16*(0.35+0.65t)`, `rad = hull*0.034*(0.5+0.5t)`, 5-20 Hz, 3.5-9.5 u x sqrt(hull/60),
+  life 0.32, alternating muzzle nodes. `window.__classFire = { on, mul, table }`.
+Pane (39.70, Puncture, third person): crystalcave cloud 9889fa; railgunCharge 0.9 -> 6 flames in the
+glow; 4 shots -> muzzle flames; no errors.
+
+## v39.71 — Puncture's spiral leaves the barrel; the charge glow loses its cone
+
+- Spiral origin (owner: "puncture's spiral tracer ... looks like it comes under slightly"): in
+  `fireHitscan` the Puncture branch always projected the first-person screen fraction
+  (`_PLAYER_MAIN_MUZZLE_FRAC.PUNCTURE` 0.356/0.634), even in third person where `origin` already IS the
+  muzzle node fireWeapon resolved. Now third person uses `origin`; first person keeps the fraction,
+  overridable live with `window.__muzzleFrac = { PUNCTURE: { x, y } }` (measure on screen, then bake).
+- Class muzzle fire placement: `_classMuzzleFire` puts the burst on the same on-screen barrel the
+  tracer leaves from in plain first person (the class's main-muzzle fraction, else the dual-tip
+  fractions alternating sides, +10 u); peers/bots/third person get their muzzle +14 u.
+- Charge glow (owner: "too conelike ... sharp edges, kinda like vortex's cylinder lasers"): the tube is
+  a 24-segment near-cylinder (1 -> 0.82) wearing a new LayeredFX preset `charge_glow` (core_beam's
+  soft body: fresnel 0.55, softEdge 0.55, axialFalloff 0.92 fading the REAR - the tube is flipped with
+  `_BCG_FLIP` so +Y points back down the barrel), tinted per frame through uBaseColor /
+  uAxialCoreColor (class colour, pale core) with uIntensity = (0.35 + 0.85 t)(1 + 0.45 t);
+  `_warmChargeGlowOnce` warms the FX material behind the countdown. Pane: ShaderMaterial, base
+  ffee44, 24 segments; muzzle flame 2 u from the node in cockpit-3d; no errors.
+
+## v39.72 — a flock rebuilt mid-flight no longer compiles on the game thread
+
+The first hitch caught by the in-game F8 recorder (owner, hub free flight on 39.71): a 3307 ms frame
+blamed on `hub:critters` with 2 cold GPUComputationShader programs, then a 2473 ms frame. Cause:
+`_fishReseed` threw (cause swallowed by `catch (_)`), its catch tore the school down and rebuilt it,
+and the very next `compute()` blocked on the D3D compile of the unrolled boids velocity shader, then
+the first draw blocked on the render program. The prebake primes both flocks behind the loading
+overlay (`_prebakeGpuPrime` computes + compiles them); a rebuild in play had no overlay. Now:
+- `_critterPrecompile(F)` (before `_birdFlockInit`): after ANY init the flock is gated (`F._pending`)
+  until `renderer.compileAsync` has linked its two compute materials (a throwaway scene of two quads)
+  and the render mesh off-thread; both ticks skip `compute()` and the fish tick hides its mesh while
+  pending; an 8 s timeout unwedges a stuck promise. The prebake's direct `gpu.compute()` still primes
+  synchronously behind the overlay.
+- The reseed catch logs its cause (`[fish] reseed failed, rebuilding the school: ...`) and refuses to
+  rebuild more than once per 20 s.
+- `window.__critters = { bird, fish }` exposes both flock states for diagnosis.
+The same F8 mark's ring also showed 6.7 s / 61 s / 11.6 s rAF gaps with no long animation frame:
+those are the tab being hidden (alt-tab), not hitches; the recorder's `vis` flag reads the frame
+after the return.
+
+## v39.73 — you can see through the water, and the headlight stops shouting in daylight
+
+Two owner asks in one cut: "during the bright light scenes, the water reflection of the ships'
+headlight can be dimmed, it's too bright during brighter scenes", and — pointing at
+jeantimex/threejs-water — "i really like this water, it looks and acts great ... it just is missing
+the 39 degree 'ducks' wake and foam", i.e. bring that reference's look to LSS water and keep the
+Kelvin wake and foam we already have.
+
+**The mirrored headlight now scales with the sky.** In the Reflector's `onBeforeRender` the
+pass-only cone boost/gain (v38.51/v38.57's 8.0 and 2.6, tuned against night water and dark caverns)
+are multiplied by a daylight factor read off `scene.fog.color`'s luminance — the same signal the
+water shader uses for its own sky tint — `day = clamp((lum - 0.10)/0.35, 0, 1)`, falling to
+`__shipCones.dayDim` (0.25) of full at noon, the gain riding `sqrt(dayDim)` so the over-range bloom
+fades more gently than the opacity. Measured in the hub at midday the fog luminance is 0.35, so the
+boost lands near 3.7 and the gain near 1.7 — dimmer, still there (owner in the dark: "i see it").
+
+**Refraction: the body of the water is the world under it.** `base` used to be a flat `color * diff`,
+an opaque painted blue, so the mirror was the only real thing in the surface. The near-field sheet
+now samples the scene already drawn beneath each pixel and absorbs it toward the water colour with
+depth. Machinery:
+- `_hubWaterDisp` sits on **layer 6** (`_WATER_LAYER`), and the main camera keeps 6 enabled so every
+  other render path — XR, potato, the bare `renderFrame` — still draws it normally.
+  ⚠ **Not layer 7.** Layer 7 already belongs to `_wxBuildTerrProxy`'s shadow-only terrain proxy, a
+  white `MeshBasicMaterial` heightfield only the sun's shadow camera may see. The first cut used 7
+  and enabled it on the main camera: translucent white slabs standing exactly where the mountains
+  are (owner: "what are the mountains glowing white"). Layers in this game are 0, 5 (ADS hull
+  overlay), 6 (this) and 7 (shadow proxy).
+- `renderPostFX` disables layer 6 for the main render, then calls `_waterRefractPass()`, which
+  re-renders **the same scene** with a layer-6-only camera into the **same** target. Depth is
+  deliberately not cleared, so the sheet depth-tests against the world exactly as before, and the ADS
+  hull overlay still goes on top afterwards. `scene.background` is nulled (a non-null background
+  repaints the whole target — the v36.81 whiteout), `matrixWorldAutoUpdate` and
+  `shadowMap.autoUpdate` are pinned off (the v39.49 second-shadow-map trap), all restored in a
+  `finally`.
+- ⚠ **The main scene, not a private one.** A second `Scene` has its own light state, and light COUNTS
+  are in three.js' program cache key, so the water material would link a SECOND program the first
+  time the pass ran — a cold link in play. Same reason `_adsOverlayRender` renders `scene`.
+- Reading the target while drawing into it: with MSAA (ULTRA only) `rt.texture` is the resolved copy
+  `renderer.render()` already blitted, a different object from the multisample draw buffer, so
+  sampling it is legal; without MSAA (everything else) it IS the draw attachment, so one
+  `copyFramebufferToTexture` into `postFX.rtRefractCopy` (a `FramebufferTexture` reallocated only on
+  resize) stands in — the trick `MeshPhysicalMaterial`'s transmission uses.
+- Shader: `uRefract` is 1 **only** inside the pass and reset to 0 in the `finally`, so any other
+  render of this mesh keeps the old tinted body. `suv = gl_FragCoord.xy / uSceneRes` slid by `N.xz *
+  uRefractK`, shrinking with distance (a constant world wobble must shrink on screen or the horizon
+  crawls) and at grazing angles, clamped to `uSceneMax` = the v39.49 supersample viewport's live
+  fraction (`_lssSceneActive(rt).sx/.sy`). `shDepth` (the shore mask's depth channel) was hoisted up
+  next to `base` to tint it: clear over a sandbar, deep teal over a trench. Alpha is pushed to 0.99
+  while refracting — the refracted floor IS the see-through, ghosting the unbent copy only softens it.
+- Knobs: `window.__water.refract` (0 = off, back to v39.72 exactly), `.refractK` (0.045),
+  `window.__waterRefractInfo` = { frames, msaa, copy, res, k }.
+
+**Caustics on the flooded floor.** The terrain fragment shader gained `uWaterY` / `uWaterOn` on the
+shared `_swU` (hooked up beside `uBendFlat`, written per frame from `game._hubWaterWL` /
+`game._hubWater`, 0 on potato). Below `uWaterY` the albedo is multiplied by a two-crossed-sine
+interference net (`pow(..,3.5)`, gain 1.15), faded in over the first 30 u of depth and gone by
+1100 u, weighted by the up-facing normal so walls get none. The water plane is world-flat at WL in
+every mode, so a plain world-y compare is right on the bend too. `window.__water.caustics` scales it
+(0 = off).
+
+Pane, hub free flight, 39.73: 144 fps, `cold 0`, no console errors, refraction pass running every
+frame (1070x688, no MSAA so the copy path), caustics confirmed live on the submerged floor
+(`__swU.uWaterOn` 1, `uWaterY` -720, and all six terrain programs report `uWaterOn`/`uWaterY` as
+active uniforms). Owner on the result: "water looks great".
+
+Note for future pane sessions: the owner's Pro Controller rests with a stuck stick (axes 0.69 / -1),
+which flies the ship out of frame between two screenshots. `navigator.getGamepads = () => []` in the
+pane freezes it for like-for-like A/B shots.

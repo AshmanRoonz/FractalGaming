@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.69';
+const LSS_BUILD = '39.73';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -15876,6 +15876,24 @@ const EFFECT_PRESETS = {
       { pattern: 5, scale: 5.0, timeRate: 5.0, hue: 0.80, alpha: 0.55, blend: 3, sat: 0.45 },
     ],
   },
+  charge_glow: {   // (v39.71) the Blaster/Puncture charge tube: core_beam's soft body, rear end faded
+    name: 'Charge Glow',
+    baseColor: '#ffee44',
+    fresnel: 0.55,
+    brightness: 2.1,
+    intensity: 1.0,
+    axialFalloff:      0.92,
+    axialCoreColor:    '#fff6c8',
+    axialCoreStrength: 0.30,
+    axialCoreFalloff:  1.2,
+    displaceAmount: 0.10,
+    displaceFreq:   1.8,
+    softEdge:       0.55,
+    layers: [
+      { pattern: 5, scale: 2.6, timeRate: 5.5, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.90 },
+      { pattern: 1, scale: 1.7, timeRate: 4.8, hue: 0.02, alpha: 0.70, blend: 2, sat: 0.90 },
+    ],
+  },
   gas_pocket: {
     name: 'Gas Pocket',
     baseColor: '#888888',  
@@ -16474,6 +16492,8 @@ const _bcgSpawn = [];
 const _bcgQuat = new THREE.Quaternion();
 // (v37.95) `tint` makes this the SHIP's charge glow rather than the Blaster's: it lights whatever
 // muzzleNodes the hull carries, in whatever colour it is handed. Puncture drives it too.
+const _BCG_FLIP = new THREE.Quaternion(1, 0, 0, 0);   // (v39.71) 180 degrees about X: flips the tube's +Y down the barrel
+const _bcgWhite = new THREE.Color(0xffffff);
 function _blasterChargeGlow(t, tintOverride) {
   const mesh = player.mesh;
   const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
@@ -16497,12 +16517,9 @@ function _blasterChargeGlow(t, tintOverride) {
     // linked them cold: the owner's F8 marks on 39.52 - 1.4 s (Puncture railgun charge), 0.4 s
     // (Blaster) - were exactly this material, an 18-vertex open cylinder in the class colour.
     if (player._bcgTubes) for (const m of player._bcgTubes) { scene.remove(m); if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else m.material.dispose(); }
-    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.55, 1, 8, 1, true);
+    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.82, 1, 24, 1, true);
     player._bcgTubes = nodes.map(() => {
-      const m = new THREE.Mesh(_blasterChargeGlow._geo, new THREE.MeshBasicMaterial({
-        color: 0xffffff, transparent: true, opacity: 0, depthWrite: false,
-        blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
-      }));
+      const m = new THREE.Mesh(_blasterChargeGlow._geo, _makeFXMaterial('charge_glow'));   // (v39.71) soft body, no cone
       m.renderOrder = 3;
       m.frustumCulled = false;
       m.visible = false;
@@ -16512,7 +16529,7 @@ function _blasterChargeGlow(t, tintOverride) {
   }
   // the guns point where the ship aims
   _bcgFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
-  _bcgQuat.setFromUnitVectors(_mvUp, _bcgFwd);
+  _bcgQuat.setFromUnitVectors(_mvUp, _bcgFwd).multiply(_BCG_FLIP);   // (v39.71) +Y points back down the barrel: the preset's axial falloff fades the rear
   const len = hull * ((K.len != null) ? K.len : 0.16) * (0.35 + 0.65 * t);   // the hot stretch grows back down the barrel
   // wider than the barrel on purpose: the owner wants "some glow that exceeds the physical edge"
   const rad = hull * ((K.rad != null) ? K.rad : 0.034) * (0.5 + 0.5 * t);
@@ -16526,8 +16543,16 @@ function _blasterChargeGlow(t, tintOverride) {
     m.scale.set(rad * flick, len, rad * flick);
     // OVERDRIVEN colour (>1 per channel) on an additive material: that is what makes the post
     // chain's bloom spill the glow past the barrel's silhouette, which is the whole ask.
-    m.material.color.copy(col).multiplyScalar(1 + ((K.hot != null) ? K.hot : 0.9) * t);
-    m.material.opacity = Math.min(1, 0.30 + 0.62 * t);
+    const _u = m.material.uniforms;
+    if (_u && _u.uBaseColor) {   // (v39.71) the LayeredFX tube: class colour, pale core, intensity with the charge
+      _u.uBaseColor.value.copy(col);
+      if (_u.uAxialCoreColor) _u.uAxialCoreColor.value.copy(col).lerp(_bcgWhite, 0.65);
+      if (_u.uIntensity) _u.uIntensity.value = (0.35 + 0.85 * t) * (1 + ((K.hot != null) ? K.hot : 0.9) * t * 0.5);
+      if (_u.uPosScale) _u.uPosScale.value = 1.0 / Math.max(1, rad);
+    } else {
+      m.material.color.copy(col).multiplyScalar(1 + ((K.hot != null) ? K.hot : 0.9) * t);
+      m.material.opacity = Math.min(1, 0.30 + 0.62 * t);
+    }
     m.visible = true;
   }
   // plus a light per POD so the hull around the guns picks it up
@@ -16560,11 +16585,8 @@ function _blasterChargeGlow(t, tintOverride) {
 function _warmChargeGlowOnce() {
   try {
     if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene || typeof THREE === 'undefined') return 0;
-    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.55, 1, 8, 1, true);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.5, depthWrite: false,
-      blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
-    });
+    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.82, 1, 24, 1, true);
+    const mat = _makeFXMaterial('charge_glow');   // (v39.71) the tube's real material, linked behind the countdown
     const m = new THREE.Mesh(_blasterChargeGlow._geo, mat);
     m.frustumCulled = false;
     const at = (typeof player !== 'undefined' && player && player.position) ? player.position
@@ -16631,6 +16653,7 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
   }
 
   // Chassis-specific layer on top of the universal flash.
+  try { _classMuzzleFire(loadoutKey, pos, dir); } catch (_) {}   // (v39.70) the class flame, every ship but Vortex (own path) and Pyro (own flames)
   if (loadoutKey === 'PYRO') {
     // Flame tongues reaching forward; reuses Pyro's fire palette.
     for (let i = 0; i < 5; i++) {
@@ -22458,6 +22481,94 @@ function tunePostFX(opts) {
 }
 window.tunePostFX       = tunePostFX;
 
+// === (v39.73) THE WATER PASS ====================================================================
+// Refraction needs the colour of the world BEHIND the water, and the water is in the same scene as
+// that world - so it draws in a second pass, after the first one has finished laying the world down.
+// The near-field sheet sits on layer 7; renderPostFX turns layer 7 off for the main render, then
+// calls this, which re-renders the SAME scene with a layer-7-only camera into the SAME target. The
+// depth buffer is deliberately not cleared, so the sheet depth-tests against the world exactly as it
+// did when it was part of the main list, and the ADS hull overlay still goes on top afterwards.
+//
+// Reading the target while drawing into it:
+//   - MSAA on (ULTRA): the draw goes to the multisample renderbuffer and rt.texture is the resolved
+//     copy renderer.render() already blitted - two different objects, so sampling it is legal.
+//   - no MSAA (everything else): rt.texture IS the draw attachment, so it is copied aside first.
+//     One copyTexSubImage2D of the target, the same trick MeshPhysicalMaterial's transmission uses.
+// The main scene (not a private one) is re-rendered on purpose: a second Scene has its own light
+// state, and light COUNTS are part of the program cache key, so the water material would link a
+// SECOND program the first time this ran - a cold link in play, exactly what v39.72 was about. Same
+// reason the ADS overlay renders `scene`. matrixWorldAutoUpdate / shadowMap.autoUpdate are pinned
+// off for the pass so it costs a render-list walk and one draw, not a second shadow map.
+// window.__water.refract = 0 turns it off; .refractK bends more or less; __waterRefractInfo reports.
+let _wrCam = null;
+const _wrZero = new THREE.Vector2(0, 0);
+// ⚠ 6, NOT 7. Layer 7 already belongs to _wxBuildTerrProxy's shadow-only terrain proxy - a white
+// MeshBasicMaterial heightfield that only the sun's shadow camera is allowed to see. The first cut
+// of this pass used 7 and enabled it on the main camera, which drew that proxy over the world:
+// translucent white slabs standing exactly where the mountains are. Layers in this game are 0
+// (everything), 5 (the ADS hull overlay) and 7 (the shadow proxy); 6 was the free one.
+const _WATER_LAYER = 6;
+function _waterRefractWanted() {
+  try {
+    if (!_hubWaterDisp || !_hubWaterDisp.visible) return false;
+    if (typeof postFX === 'undefined' || !postFX || !postFX.rtScene) return false;
+    if (renderer.xr && renderer.xr.isPresenting) return false;
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return false;
+    const W = window.__water;
+    if (W && W.refract != null && !+W.refract) return false;
+    const u = _hubWaterDisp.material && _hubWaterDisp.material.uniforms;
+    return !!(u && u.uSceneTex);
+  } catch (_) { return false; }
+}
+function _waterRefractPass() {
+  const rt = postFX.rtScene, u = _hubWaterDisp.material.uniforms;
+  let tex = rt.texture;
+  if (!(rt.samples > 0)) {
+    const C = postFX.rtRefractCopy;
+    if (!C || C.image.width !== rt.width || C.image.height !== rt.height) {
+      try { if (C) C.dispose(); } catch (_) {}
+      postFX.rtRefractCopy = new THREE.FramebufferTexture(rt.width, rt.height);
+      postFX.rtRefractCopy.minFilter = THREE.LinearFilter;
+      postFX.rtRefractCopy.magFilter = THREE.LinearFilter;
+    }
+    renderer.setRenderTarget(rt);
+    renderer.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
+    tex = postFX.rtRefractCopy;
+  }
+  u.uSceneTex.value = tex;
+  u.uSceneRes.value.set(rt.width, rt.height);
+  const A = _lssSceneActive(rt);   // the live sub-rectangle of the target (v39.49 supersample viewport)
+  u.uSceneMax.value.set(A.sx, A.sy);
+  const W = window.__water || {};
+  u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
+  if (W.refractK != null) u.uRefractK.value = +W.refractK;
+  if (!_wrCam) { _wrCam = new THREE.PerspectiveCamera(); _wrCam.layers.set(_WATER_LAYER); }
+  _wrCam.fov = camera.fov; _wrCam.aspect = camera.aspect; _wrCam.near = camera.near; _wrCam.far = camera.far; _wrCam.zoom = camera.zoom;
+  _wrCam.position.copy(camera.position);
+  _wrCam.quaternion.copy(camera.quaternion);
+  _wrCam.projectionMatrix.copy(camera.projectionMatrix);
+  _wrCam.projectionMatrixInverse.copy(camera.projectionMatrixInverse);
+  _wrCam.updateMatrixWorld(true);
+  const _pAC = renderer.autoClear, _pBG = scene.background, _pMW = scene.matrixWorldAutoUpdate, _pSM = renderer.shadowMap.autoUpdate;
+  try {
+    renderer.autoClear = false;
+    scene.background = null;   // a non-null background REPAINTS the whole target here - see _adsOverlayRender
+    scene.matrixWorldAutoUpdate = false;
+    renderer.shadowMap.autoUpdate = false;
+    renderer.setRenderTarget(rt);
+    renderer.render(scene, _wrCam);
+  } finally {
+    renderer.autoClear = _pAC;
+    scene.background = _pBG;
+    scene.matrixWorldAutoUpdate = _pMW;
+    renderer.shadowMap.autoUpdate = _pSM;
+    u.uRefract.value = 0.0;   // every other render of this mesh is the plain tinted body
+  }
+  try {
+    const I = window.__waterRefractInfo || (window.__waterRefractInfo = { frames: 0 });
+    I.frames++; I.msaa = rt.samples > 0; I.copy = (tex !== rt.texture); I.res = [rt.width, rt.height]; I.k = u.uRefractK.value;
+  } catch (_) {}
+}
 function renderPostFX() {
   // Low-quality gate: skip the three bloom passes (bright-extract + horizontal
   // blur + vertical blur) whenever bloom cannot meaningfully be seen. Cuts
@@ -22550,8 +22661,16 @@ function renderPostFX() {
       postFX.compositeMat.uniforms.uSceneMax.value.set(_mx, _my);
     }
   }
+  // (v39.73) the near-field water is held back from this render and drawn by _waterRefractPass
+  // right after it, so it can sample the world it is standing in front of.
+  const _wrOn = _waterRefractWanted();
+  if (_wrOn) camera.layers.disable(_WATER_LAYER);
   renderer.setRenderTarget(postFX.rtScene);
   renderer.render(scene, camera);
+  if (_wrOn) {
+    camera.layers.enable(_WATER_LAYER);
+    try { _waterRefractPass(); } catch (e) { try { console.warn('[water] refraction pass failed:', e && (e.message || e)); } catch (_) {} }
+  }
   // (v36.74) ADS ship overlay: while third-person zoom is engaged the ship
   // lives on layer 5 (skipped by the pass above) and is drawn here from the
   // un-zoomed camera into the SAME target — before post, so bloom/grade/fog
@@ -23843,6 +23962,11 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                // (v36.99) 1 = bent-sandwich mode: height bands read the
                // pre-bend height attribute (aFlatY) instead of world y.
                uBendFlat:{value:0},
+               // (v39.73) CAUSTICS. The world-flat water level and a strength knob
+               // (window.__water.caustics). Everything below uWaterY gets the sun's
+               // refracted light net - the half of jeantimex's pool that lives on the
+               // FLOOR rather than on the surface. uWaterOn 0 = no water in this map.
+               uWaterY:{value:-1e9}, uWaterOn:{value:0},
                // (v35.26) GROUND SURFACE PATCHES — breaks up the vast unbroken
                // green with bare dirt, loose rubble/scree and dark overgrowth.
                // xyz = dirt / rubble / overgrowth strength; uPatchScale shrinks
@@ -23897,6 +24021,14 @@ function _swSyncFX() {
   const T = game.sandwichTerrain; if (!T) return;
   _swU.uYMid.value = T.YMID; _swU.uAMP.value = T.AMP; _swU.uSnow.value = T.snowLine || 0.7;
   _swU.uBendFlat.value = game.bendWorld ? 1 : 0;
+  // (v39.73) the flooded floor: the water plane is world-flat at WL in every mode (bent or not),
+  // so a plain world-y compare is right even on the bend. Potato has no water shading to match.
+  try {
+    const _wOn = !!game._hubWater && typeof game._hubWaterWL === 'number'
+      && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+    _swU.uWaterY.value = _wOn ? game._hubWaterWL : -1e9;
+    _swU.uWaterOn.value = _wOn ? ((window.__water && window.__water.caustics != null) ? +window.__water.caustics : 1.0) : 0.0;
+  } catch (_) {}
   _swU.uLava.value = (T.biome === 'volcanic') ? 1 : 0;
   _swU.uRocky.value = (T.biome === 'rocky') ? 1 : 0;
   _swU.uGlitch.value = (T.biome === 'brokensim') ? 1 : 0;   
@@ -24005,6 +24137,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.uniforms.uAerial=_swU.uAerial; sh.uniforms.uAerialStart=_swU.uAerialStart; sh.uniforms.uAerialFar=_swU.uAerialFar; sh.uniforms.uAerialColor=_swU.uAerialColor;
     sh.uniforms.uStrata=_swU.uStrata; sh.uniforms.uRim=_swU.uRim;
     sh.uniforms.uBendFlat=_swU.uBendFlat;
+    sh.uniforms.uWaterY=_swU.uWaterY; sh.uniforms.uWaterOn=_swU.uWaterOn;   // (v39.73) caustics
     sh.uniforms.uPatchMix=_swU.uPatchMix; sh.uniforms.uPatchScale=_swU.uPatchScale;
     sh.uniforms.uColDirt=_swU.uColDirt;
     if (!window.__terrainAOU) { var _aoDef=0.55, _satDef=0.40;
@@ -24129,7 +24262,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // attribute (reads 0) and uBendFlat stays 0 — byte-identical look.
       sh.vertexShader='attribute float aFlatY;\nuniform float uBendFlat;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=mix(position.y, aFlatY, uBendFlat); vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
-    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt;\n'
+    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt;\n'
       +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
       +'float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
       +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
@@ -24147,7 +24280,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // always sit next to bare earth). Rubble is slope-biased: it collects on
       // the steeper grass near rock, the way scree actually does.
       +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _dirtM=smoothstep(0.16,0.46,_sN)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
-      +' float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_snowWander(vWPos.xz)*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
+      +' float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_snowWander(vWPos.xz)*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _rsl=uSnow+_snowWander(vWPos.xz)*uSnowVary;\n float _snow=smoothstep(_rsl,_rsl+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
@@ -27212,6 +27345,31 @@ function _birdRehome(cx, cz) {
     if (F.geo) F.geo.setDrawRange(0, F.liveCount * 9);
   } catch (_) {}
 }
+// (v39.72) A FLOCK REBUILT MID-FLIGHT MUST NOT COMPILE ON THE GAME THREAD. The owner's F8 on the hub
+// (39.71): one 3307 ms frame blamed on hub:critters with 2 cold GPUComputationShader programs, then a
+// 2473 ms frame - _fishReseed threw, its catch tore the school down and rebuilt it, and the very next
+// compute() blocked on the D3D compile of the unrolled boids shader, then the first draw on the render
+// program. The prebake primes both flocks behind the loading overlay; a rebuild in play has no overlay.
+// So after ANY init the sim is gated (F._pending) until renderer.compileAsync has linked its two compute
+// materials and the render mesh off-thread (KHR_parallel_shader_compile); the ticks skip compute() and
+// hide the mesh meanwhile, and the reseed catch logs its cause and refuses to rebuild more than once
+// per 20 s. window.__critters = { bird, fish } exposes the state.
+function _critterPrecompile(F) {
+  try {
+    if (!F || !F.gpu || typeof renderer === 'undefined' || !renderer) return;
+    if (typeof renderer.compileAsync !== 'function') { F._pending = false; return; }
+    F._pending = true;
+    const tiny = new THREE.Scene();
+    const quad = new THREE.PlaneGeometry(2, 2);
+    for (const v of [F.velVar, F.posVar]) { if (v && v.material) tiny.add(new THREE.Mesh(quad, v.material)); }
+    const cam = new THREE.Camera();
+    const jobs = [renderer.compileAsync(tiny, cam)];
+    if (F.mesh && typeof scene !== 'undefined' && scene && typeof camera !== 'undefined' && camera) jobs.push(renderer.compileAsync(F.mesh, camera, scene));
+    Promise.all(jobs).then(() => { F._pending = false; }, () => { F._pending = false; });
+    setTimeout(() => { F._pending = false; }, 8000);   // never wedge a flock on a stuck promise
+  } catch (_) { if (F) F._pending = false; }
+}
+if (typeof window !== 'undefined') window.__critters = { get bird() { return _birdFlock; }, get fish() { return _fishSchool; } };
 function _birdFlockInit(T) {
   const F = _birdFlock;
   if (F.gpu) return;   
@@ -27288,6 +27446,7 @@ function _birdFlockInit(T) {
     F.gpu = gpu; F.velVar = velVar; F.posVar = posVar; F.geo = geo; F.mat = mat; F.mesh = mesh; F.count = count; F.texW = texW; F.frame = 0; F.acc = 0; F.fadeT = 0;   
     F.liveCount = Math.max(2, Math.round(count * Math.pow(Math.random(), 2.2)));
     geo.setDrawRange(0, F.liveCount * 9);
+    _critterPrecompile(F);   // (v39.72)
   } catch (e) { try { console.warn('[birds] init exception', e); } catch (_) {} try { if (gpu && gpu.dispose) gpu.dispose(); } catch (_) {} _birdFlock.gpu = null; }
 }
 function _birdFlockTick(dt) {
@@ -27503,6 +27662,7 @@ function _fishSchoolInit(T) {
     scene.add(mesh);
     F.gpu = gpu; F.velVar = velVar; F.posVar = posVar; F.geo = geo; F.mat = mat; F.mesh = mesh; F.texW = texW; F.frame = 0; F.acc = 0; F.WL = WL; F.T = T; F.shown = false;
     if (F.liveCount) geo.setDrawRange(0, F.liveCount * 9);
+    _critterPrecompile(F);   // (v39.72)
   } catch (e) { try { console.warn('[fish] init exception', e); } catch (_) {} try { if (gpu && gpu.dispose) gpu.dispose(); } catch (_) {} _fishSchool.gpu = null; }
 }
 function _fishReseed(cx, cz) {
@@ -27511,7 +27671,14 @@ function _fishReseed(cx, cz) {
     _fishFillSeed(F, cx, cz, F.WL, F.T);
     F.gpu.renderTexture(F.seedTex, F.gpu.getCurrentRenderTarget(F.posVar));   
     if (F.geo && F.liveCount) F.geo.setDrawRange(0, F.liveCount * 9);
-  } catch (_) { try { _fishSchoolDispose(); _fishSchoolInit(F.T || game._hubWaterT); } catch (__) {} }
+  } catch (e) {
+    // (v39.72) say what broke, never storm, never compile on the game thread (see _critterPrecompile)
+    try { console.warn('[fish] reseed failed, rebuilding the school:', e && (e.message || e)); } catch (_) {}
+    const _now = performance.now() / 1000;
+    if (_now - (F._reinitT || -1e9) < 20) return;
+    F._reinitT = _now;
+    try { _fishSchoolDispose(); _fishSchoolInit(F.T || game._hubWaterT); } catch (__) {}
+  }
 }
 function _fishSchoolTick(dt) {
   const F = _fishSchool; if (!F.gpu || !F.mat) return; if (game._xrBlurred) return;
@@ -27527,6 +27694,7 @@ function _fishSchoolTick(dt) {
     }
     F.fadeT = 0;
   }
+  if (F._pending) { if (F.mesh) F.mesh.visible = false; return; }   // (v39.72) still linking
   if (F.mesh) F.mesh.visible = true; F.shown = true;
   F.fadeT = Math.min(1, (F.fadeT || 0) + dt * 1.2);   
   const _t = _swU ? _swU.uTime.value : 0;
@@ -27551,7 +27719,7 @@ function _fishSchoolTick(dt) {
     const _step = Math.min(F.acc, 0.05); F.acc = 0;
     vu.uDelta.value = _step; F.posVar.material.uniforms.uDelta.value = _step;
     const _xrPrevRT = (renderer && renderer.getRenderTarget) ? renderer.getRenderTarget() : null;
-    F.gpu.compute();
+    if (!F._pending) F.gpu.compute();   // (v39.72) not while a rebuilt sim is still linking off-thread
     if (renderer && renderer.setRenderTarget) renderer.setRenderTarget(_xrPrevRT);
   }
   const mu = F.mat.uniforms;
@@ -27753,9 +27921,21 @@ function _ecrTick(dt) {
 // at most __ecl.max (14) live; nothing on potato or high VR perf tiers. Live: window.__ecl.
 const _ecl = { on: true, max: 14, list: new Map(), lastScan: 0, ships: [] };
 if (typeof window !== 'undefined') window.__ecl = _ecl;
+// (v39.70) THE BIOME'S OWN CLOUD. Owner: "make the clouds we just put in match the biome colors".
+// One colour per cavern biome (the palette the sectors use for dirt/water, pushed to a cloud), then
+// a quarter toward the live fog so it sits in the air it floats in. A cloud keeps the colour it was
+// born with; biome switches are spatial, so the new stretch simply grows new clouds in its own hue.
+const _ECL_BIOME = {
+  volcanic: 0xe8703a, goldmine: 0xf2c25c, crystalcave: 0x9c8cff, snow: 0xe6f0ff,
+  rocky: 0xcdb99c, grassy: 0xcfe8b8, mossy: 0xdde9f5, brokensim: 0xe070e0, purple: 0xb58cff,
+};
 function _eclColor() {
-  const c = new THREE.Color(0x9fb8d8);
-  try { if (scene.fog && scene.fog.color) c.copy(scene.fog.color).lerp(new THREE.Color(0xffffff), 0.55); } catch (_) {}
+  const T = game.sandwichTerrain;
+  const biome = (T && T.biome) || 'rocky';
+  const K = (typeof window !== 'undefined' && window.__ecl && window.__ecl.colors) ? window.__ecl.colors : null;
+  const hex = (K && K[biome] != null) ? K[biome] : ((_ECL_BIOME[biome] != null) ? _ECL_BIOME[biome] : 0xc4c8d2);
+  const c = new THREE.Color(hex);
+  try { if (scene.fog && scene.fog.color) c.lerp(scene.fog.color, 0.25); } catch (_) {}
   const l = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
   if (l < 0.35) c.multiplyScalar(0.35 / Math.max(0.05, l));   // a black cave still gets a readable cloud
   return c;
@@ -27863,7 +28043,13 @@ function _swBuildHubWaterDispGet(WL) {
         uReflFloor: { value: 0.42 }, uSkyDark: { value: 0.0 }, uReflHot: { value: 0.75 },   
 
         uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 }, uShoreFoam: { value: 0.0 },   
-        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 } }   
+        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 },
+        // (v39.73) REFRACTION (see _waterRefractPass). uSceneTex is the world already drawn under
+        // this pixel; uSceneRes/uSceneMax say which part of the scene target is live this frame
+        // (the v39.49 supersample viewport). uRefract is 1 ONLY inside the water pass - any other
+        // render of this mesh (XR, potato, the mirror) leaves it 0 and gets the old tinted body.
+        uSceneTex: { value: null }, uSceneRes: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) },
+        uRefract: { value: 0.0 }, uRefractK: { value: 0.045 } }   
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
@@ -27898,7 +28084,8 @@ function _swBuildHubWaterDispGet(WL) {
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uSkyDark; uniform float uReflHot; uniform float uFoamLod; uniform float uReflFar;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
-      'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',   
+      'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',
+      'uniform sampler2D uSceneTex; uniform vec2 uSceneRes; uniform vec2 uSceneMax; uniform float uRefract; uniform float uRefractK;',   // (v39.73)   
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
@@ -27913,6 +28100,7 @@ function _swBuildHubWaterDispGet(WL) {
       '  vec3 H = normalize(sunDir + V);',
       '  float spec = pow(max(dot(N,H),0.0), 200.0);',                                
       '  vec3 base = color * diff;',
+      '  float shDepth = mix(1.0, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',   // (v39.73) hoisted: the refraction below tints by depth
       // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT, slope-sheared by the wave
       // normal so it bends over crests WITHOUT mirror-bob (projection is from the UNDISPLACED wp0). Matches the
       // flat shader's 0.04 shear + grazing taper + distance fade ; falls back to the muted sky tint when the RT
@@ -27962,7 +28150,26 @@ function _swBuildHubWaterDispGet(WL) {
       '  reflTex *= 1.0 - uGrazeClear * smoothstep(0.55, 0.95, graze);',               
       '  vec3 reflC = mix(skyT, reflTex, uReflLive);',                                
       '  vec3 refl = mix(skyT, reflC, uReflMix);',                                    
-      '  vec3 c = mix(base, refl, fres) + vec3(1.0,0.98,0.92)*spec*0.3*(1.0 - uReflMix*0.6);',   
+      // (v39.73) THE BODY OF THE WATER IS THE WORLD UNDER IT. Owner, pointing at
+      // jeantimex/threejs-water: "i really like this water, it looks and acts great ... it just is
+      // missing the 39 degree ducks wake and foam" - i.e. that look plus the Kelvin wake we already
+      // have. What that reference has and this shader did not is the see-through floor: `base` was
+      // a flat `color * diff`, an opaque painted blue, so the mirror was the only real thing in it.
+      // Now `base` is the scene already rendered under this pixel, read back at the fragment's own
+      // screen position and slid by the surface normal - one texture fetch, no ray marching - then
+      // absorbed toward the water colour with depth: clear over a sandbar, deep teal over a trench.
+      // Reflection still goes on top through the same fresnel, so v39.66's mirror is untouched.
+      '  if (uRefract > 0.001) {',
+      '    vec2 suv = gl_FragCoord.xy / uSceneRes;',
+      // the world-space wobble is constant, so its SCREEN size has to shrink with distance or the
+      // horizon crawls; grazing angles bend less because you are looking along the surface.
+      '    suv += N.xz * uRefractK * (1.0 - graze * 0.6) * clamp(1.0 - dCam / 6000.0, 0.12, 1.0);',
+      '    suv = clamp(suv, vec2(0.0015), uSceneMax - 0.0015);',
+      '    vec3 seen = texture2D(uSceneTex, suv).rgb;',
+      '    float murk = clamp(0.22 + 0.78 * shDepth, 0.0, 1.0);',
+      '    base = mix(base, seen * mix(vec3(1.0), color * 2.2, murk), uRefract * mix(0.92, 0.55, murk));',
+      '  }',
+      '  vec3 c = mix(base, refl, fres) + vec3(1.0,0.98,0.92)*spec*0.3*(1.0 - uReflMix*0.6);',
       
       
       
@@ -27980,7 +28187,6 @@ function _swBuildHubWaterDispGet(WL) {
       
       
       
-      '  float shDepth = mix(1.0, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',
       '  float shoreA = smoothstep(0.0, max(uShoreSoft, 0.001), shDepth);',
       // (v33.98 LOD foam) "low-res far, high-res close" : the near mask (fine, ±2000u) gives a CRISP surf line inside its
       // window; a 2nd COARSE far mask (world-UV, ±12000u) gives BASE foam everywhere beyond so distant lakes don't pop in.
@@ -28000,6 +28206,7 @@ function _swBuildHubWaterDispGet(WL) {
       '  c = mix(c, foamCol, shoreFoam * 0.28 * uShoreFoam);',
       '  { float _whd = length(vWP.xz - uCam.xz); float _whf = smoothstep(uWHorizA, uWHorizB, _whd) * uWHorizStr; c = mix(c, fogColor, clamp(_whf, 0.0, 1.0)); }',
       '  float aGraze = 0.93 * (1.0 - uGrazeAlpha * smoothstep(0.55, 0.95, graze));',
+      '  aGraze = mix(aGraze, max(aGraze, 0.99), uRefract);',   // (v39.73) the refracted floor IS the see-through; ghosting the unbent copy through it only softens it
       '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',
       '  #include <fog_fragment>',
       '}',
@@ -28011,6 +28218,8 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.renderOrder = -1; mesh.frustumCulled = false; mesh.visible = false;   // (v38.67) -1: see the hub water note
   mesh.userData = { isHubWater: true, WL: WL };
   scene.add(mesh);
+  mesh.layers.set(_WATER_LAYER);   // (v39.73) held back from the main pass and drawn by _waterRefractPass
+  try { if (typeof camera !== 'undefined' && camera) camera.layers.enable(_WATER_LAYER); } catch (_) {}   // ...but every OTHER render with this camera still gets it
   _hubWaterDisp = mesh;
   return mesh;
 }
@@ -28447,8 +28656,22 @@ function _swBuildHubWater(T) {
         // Both are pass-only and both are put back in the finally, so the third-person beam you
         // actually fly behind is untouched. window.__shipCones.reflBoost / .reflGain.
         const _C = window.__shipCones;
-        const _b = (_C && _C.reflBoost != null) ? _C.reflBoost : 8.0;
-        const _g = (_C && _C.reflGain != null) ? _C.reflGain : 2.6;
+        // (v39.73) ...BUT NOT IN DAYLIGHT. Both numbers were tuned against night water and a dark
+        // cavern, where the mirror has nothing else bright in it. Under a lit sky the same cone
+        // arrives on top of an already-bright reflection and reads as a white slab on the water
+        // (owner: "during the bright light scenes, the water reflection of the ships' headlight can
+        // be dimmed, it's too bright during brighter scenes"). So both scale with how light the
+        // scene is - the fog colour's luminance is the same signal the water shader uses for its own
+        // sky tint - from full at night down to __shipCones.dayDim (0.25) of it at noon. The gain
+        // rides the square root of that so the over-range bloom fades more gently than the opacity.
+        let _day = 0;
+        try {
+          const _fc = scene.fog && scene.fog.color;
+          if (_fc) _day = Math.max(0, Math.min(1, ((0.299 * _fc.r + 0.587 * _fc.g + 0.114 * _fc.b) - 0.10) / 0.35));
+        } catch (_) {}
+        const _dk = (_C && _C.dayDim != null) ? _C.dayDim : 0.25;
+        const _b = ((_C && _C.reflBoost != null) ? _C.reflBoost : 8.0) * (1 - _day * (1 - _dk));
+        const _g = ((_C && _C.reflGain != null) ? _C.reflGain : 2.6) * (1 - _day * (1 - Math.sqrt(_dk)));
         if (_cp.material) {
           _cp.material.opacity = Math.min(1, _cpOp * _b);
           if (_g !== 1) _cp.material.color.multiplyScalar(_g);
@@ -45212,6 +45435,102 @@ function _spawnClassFireBurst(pos, colorHex, size, life) {   // (v39.54) life: s
     type: 'explFireCloud', position: pos.clone(),
     timer: _lifeF, duration: _lifeF, fireMeshes: [m], _explSize: sz,
   });
+}
+// ═══ (v39.70) CLASS FIRE FOR EVERY SHIP ═════════════════════════════════════════════════════════
+// Owner: "let's use the same effect that vortex has as muzzle fire, but smaller ... similar effects
+// for the other ships that don't have muzzle fire, in their respective theme". _spawnClassFireBurst
+// is the Vortex's purple flame (v39.54); this table gives each class its own size and life in the
+// class colour (the Vortex keeps its own path in fireHitscan, the Pyro its flame particles):
+//   muzzle fire: emitChassisMuzzleFlash -> _classMuzzleFire, one small burst 40 u down the barrel per
+//   shot, throttled to 12 Hz per class and 12 live so chainguns don't paint the sky
+//   charge fire: _chargeFireTick, called beside _blasterChargeGlow while the Blaster power shot and the
+//   Puncture railgun spool - bursts spawned INSIDE the glow tube (the "basic shape that grows while
+//   charging"), 5 to 20 Hz and 3.5 to 9.5 u as the charge climbs, so the shape fills with fire
+// window.__classFire = { on, mul, table } tunes it live.
+const _CLASS_FIRE = {
+  SLAYER:   { color: 0x44ff66, size: 7,   life: 0.40 },
+  TRACKER:  { color: 0xff8800, size: 8,   life: 0.45 },
+  BLASTER:  { color: 0x44eeff, size: 6,   life: 0.36 },
+  PUNCTURE: { color: 0xffee44, size: 7,   life: 0.40 },
+  SYPHON:   { color: 0x4488ff, size: 6,   life: 0.36 },
+};
+const _classFireState = { t: {}, live: 0 };
+if (typeof window !== 'undefined') window.__classFire = { on: true, mul: 1.0, table: _CLASS_FIRE };
+function _classFireLive() {
+  let n = 0;
+  for (const e of game.worldEffects) if (e && e._classFlame) n++;
+  return n;
+}
+function _classMuzzleFire(key, pos, dir) {
+  try {
+    const CF = (typeof window !== 'undefined') ? window.__classFire : null;
+    if (CF && CF.on === false) return;
+    if (key === 'VORTEX' || key === 'PYRO') return;
+    const row = (CF && CF.table && CF.table[key]) || _CLASS_FIRE[key];
+    if (!row || typeof _spawnClassFireBurst !== 'function') return;
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+    const now = (typeof game !== 'undefined' && game.time) || 0;
+    if (now - (_classFireState.t[key] || -1) < 1 / 12) return;
+    if (_classFireLive() >= 12) return;
+    _classFireState.t[key] = now;
+    const mul = (CF && CF.mul != null) ? CF.mul : 1.0;
+    // (v39.71) WHERE THE BARREL IS. A peer's or bot's `pos` is its muzzle; so is the local player's in
+    // third person / cockpit-3d (fireWeapon resolves the node). In plain first person the local `pos`
+    // is the ship centre, so put the flame on the same on-screen barrel the tracer leaves from: the
+    // class's main-muzzle fraction if it has one, else the dual-tip fractions (alternating sides).
+    let at = null;
+    try {
+      const firstPerson = !game.thirdPerson && !game._cockpit3dLive && player && player.position && pos.distanceToSquared(player.position) < 400;
+      if (firstPerson && typeof _computeScreenMuzzleWorld === 'function') {
+        const MF = (typeof window !== 'undefined' && window.__muzzleFrac) ? window.__muzzleFrac : null;
+        const mf = (MF && MF[key]) || _PLAYER_MAIN_MUZZLE_FRAC[key];
+        if (mf) at = _computeScreenMuzzleWorld(mf.x, mf.y);
+        else {
+          const tf = (typeof _TIP_FRAC_BY_SHIP !== 'undefined' && _TIP_FRAC_BY_SHIP[key]) || null;
+          const xl = (tf && tf.xl != null) ? tf.xl : 0.305, xr = (tf && tf.xr != null) ? tf.xr : 0.695, ty = (tf && tf.y != null) ? tf.y : 0.680;
+          at = _computeScreenMuzzleWorld(player.muzzleFlashSide ? xr : xl, ty);
+        }
+        if (at) at = at.clone().addScaledVector(dir, 10);
+      }
+    } catch (_) { at = null; }
+    if (!at) at = pos.clone().addScaledVector(dir, (pos.distanceToSquared(player.position) < 400) ? 40 : 14);
+    const n0 = game.worldEffects.length;
+    _spawnClassFireBurst(at, row.color, row.size * mul * (0.85 + Math.random() * 0.3), row.life);
+    if (game.worldEffects.length > n0) { const fe = game.worldEffects[game.worldEffects.length - 1]; fe._classFlame = true; fe._grow = 1.2; }
+  } catch (_) {}
+}
+const _cfTmp = new THREE.Vector3(), _cfFwd = new THREE.Vector3(), _cfR1 = new THREE.Vector3(), _cfR2 = new THREE.Vector3();
+function _chargeFireTick(dt, t, tint) {
+  try {
+    const CF = (typeof window !== 'undefined') ? window.__classFire : null;
+    if (CF && CF.on === false) return;
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+    const mesh = player.mesh;
+    const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
+    if (!nodes || !nodes.length || typeof _spawnClassFireBurst !== 'function') return;
+    t = Math.max(0, Math.min(1, t || 0));
+    player._cfChargeT = (player._cfChargeT || 0) - dt;
+    if (player._cfChargeT > 0) return;
+    const hz = 5 + 15 * t;
+    player._cfChargeT = 1 / hz;
+    if (_classFireLive() >= 12) return;
+    const K = (typeof window !== 'undefined' && window.__blasterCharge) ? window.__blasterCharge : {};
+    const hull = (player.chassis && player.chassis.hullLength) || 60;
+    const len = hull * ((K.len != null) ? K.len : 0.16) * (0.35 + 0.65 * t);   // the glow tube's own shape
+    const rad = hull * ((K.rad != null) ? K.rad : 0.034) * (0.5 + 0.5 * t);
+    _cfFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    const ax = (Math.abs(_cfFwd.y) < 0.9) ? _cfR1.set(0, 1, 0) : _cfR1.set(1, 0, 0);
+    _cfR2.crossVectors(_cfFwd, ax).normalize(); _cfR1.crossVectors(_cfFwd, _cfR2).normalize();
+    player._cfChargeSide = ((player._cfChargeSide || 0) + 1) % nodes.length;
+    nodes[player._cfChargeSide].getWorldPosition(_cfTmp);
+    const a = Math.random() * 6.283, rr = rad * Math.random();
+    _cfTmp.addScaledVector(_cfFwd, -len * (0.05 + 0.8 * Math.random())).addScaledVector(_cfR1, Math.cos(a) * rr).addScaledVector(_cfR2, Math.sin(a) * rr);
+    const mul = (CF && CF.mul != null) ? CF.mul : 1.0;
+    const size = (3.5 + 6 * t) * Math.sqrt(hull / 60) * mul;
+    const n0 = game.worldEffects.length;
+    _spawnClassFireBurst(_cfTmp, (tint != null) ? tint : 0x44eeff, size, 0.32);
+    if (game.worldEffects.length > n0) { const fe = game.worldEffects[game.worldEffects.length - 1]; fe._classFlame = true; fe._grow = 1.25; }
+  } catch (_) {}
 }
 function spawnPyroFlame(pos) {
   const eff = {
@@ -65096,8 +65415,13 @@ function fireHitscan(origin, dir, w) {
   // spiral trail that's the same from inside (cockpit) and outside (peer)
   // views. Every other loadout still uses the dual-barrel V tracer.
   if (player.loadoutKey === 'PUNCTURE') {
-    const frac = _PLAYER_MAIN_MUZZLE_FRAC.PUNCTURE;
-    const localFrom = (frac && typeof _computeScreenMuzzleWorld === 'function')
+    // (v39.71) THIRD PERSON: `origin` already IS the muzzle node (fireWeapon resolved it through
+    // shipMuzzleWorld); the screen fraction is a first-person device and, projected from outside,
+    // landed the spiral a little under the real barrel (owner: "puncture's spiral tracer doesn't look
+    // like it comes out the muzzle, it looks like it comes under slightly"). First person keeps the
+    // fraction, now overridable live: window.__muzzleFrac = { PUNCTURE: { x, y } } (0..1 of the screen).
+    const frac = (typeof window !== 'undefined' && window.__muzzleFrac && window.__muzzleFrac.PUNCTURE) || _PLAYER_MAIN_MUZZLE_FRAC.PUNCTURE;
+    const localFrom = (!game.thirdPerson && frac && typeof _computeScreenMuzzleWorld === 'function')
       ? (_computeScreenMuzzleWorld(frac.x, frac.y) || origin)
       : origin;
     _spawnRailgunSpiral(localFrom, end, tracerColor);
@@ -70472,6 +70796,7 @@ function updateAbilities(dt) {
     // (v37.68) the guns light up as it spools - before the fire check, so the last frame of the
     // charge is the brightest one and the shot leaves at full glow
     try { _blasterChargeGlow(player.powerShotCharge); } catch (_) {}
+    try { _chargeFireTick(dt, player.powerShotCharge, (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.BLASTER : 0x44eeff); } catch (_) {}   // (v39.70)
     if (player.powerShotCharge >= 1.0) {
       firePowerShot();
     }
@@ -70481,6 +70806,7 @@ function updateAbilities(dt) {
     const _pt = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.PUNCTURE != null)
       ? LSS.CLASS_COLORS.PUNCTURE : 0xffee44;
     try { _blasterChargeGlow(Math.min(1, player.railgunCharge), _pt); } catch (_) {}
+    try { _chargeFireTick(dt, Math.min(1, player.railgunCharge), _pt); } catch (_) {}   // (v39.70) fire inside the growing shape
   } else if (player._bcgOn) {
     try { _blasterChargeGlowOff(); } catch (_) {}
   }

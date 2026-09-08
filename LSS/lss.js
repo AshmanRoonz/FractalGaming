@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.69';
+const LSS_BUILD = '39.73';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -8461,6 +8461,24 @@ const EFFECT_PRESETS = {
       { pattern: 5, scale: 5.0, timeRate: 5.0, hue: 0.80, alpha: 0.55, blend: 3, sat: 0.45 },
     ],
   },
+  charge_glow: {   // (v39.71) the Blaster/Puncture charge tube: core_beam's soft body, rear end faded
+    name: 'Charge Glow',
+    baseColor: '#ffee44',
+    fresnel: 0.55,
+    brightness: 2.1,
+    intensity: 1.0,
+    axialFalloff:      0.92,
+    axialCoreColor:    '#fff6c8',
+    axialCoreStrength: 0.30,
+    axialCoreFalloff:  1.2,
+    displaceAmount: 0.10,
+    displaceFreq:   1.8,
+    softEdge:       0.55,
+    layers: [
+      { pattern: 5, scale: 2.6, timeRate: 5.5, hue: 0.0,  alpha: 1.0,  blend: 0, sat: 0.90 },
+      { pattern: 1, scale: 1.7, timeRate: 4.8, hue: 0.02, alpha: 0.70, blend: 2, sat: 0.90 },
+    ],
+  },
   gas_pocket: {
     name: 'Gas Pocket',
     baseColor: '#888888',  
@@ -8919,6 +8937,8 @@ function _blasterCoreVolley(dir) {
 const _bcgPos = new THREE.Vector3(), _bcgTmp = new THREE.Vector3(), _bcgFwd = new THREE.Vector3();
 const _bcgSpawn = [];
 const _bcgQuat = new THREE.Quaternion();
+const _BCG_FLIP = new THREE.Quaternion(1, 0, 0, 0);   // (v39.71) 180 degrees about X: flips the tube's +Y down the barrel
+const _bcgWhite = new THREE.Color(0xffffff);
 function _blasterChargeGlow(t, tintOverride) {
   const mesh = player.mesh;
   const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
@@ -8931,12 +8951,9 @@ function _blasterChargeGlow(t, tintOverride) {
   const col = new THREE.Color(tint);
   if (!player._bcgTubes || player._bcgTubes.length !== nodes.length) {
     if (player._bcgTubes) for (const m of player._bcgTubes) { scene.remove(m); if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else m.material.dispose(); }
-    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.55, 1, 8, 1, true);
+    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.82, 1, 24, 1, true);
     player._bcgTubes = nodes.map(() => {
-      const m = new THREE.Mesh(_blasterChargeGlow._geo, new THREE.MeshBasicMaterial({
-        color: 0xffffff, transparent: true, opacity: 0, depthWrite: false,
-        blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
-      }));
+      const m = new THREE.Mesh(_blasterChargeGlow._geo, _makeFXMaterial('charge_glow'));   // (v39.71) soft body, no cone
       m.renderOrder = 3;
       m.frustumCulled = false;
       m.visible = false;
@@ -8945,7 +8962,7 @@ function _blasterChargeGlow(t, tintOverride) {
     });
   }
   _bcgFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
-  _bcgQuat.setFromUnitVectors(_mvUp, _bcgFwd);
+  _bcgQuat.setFromUnitVectors(_mvUp, _bcgFwd).multiply(_BCG_FLIP);   // (v39.71) +Y points back down the barrel: the preset's axial falloff fades the rear
   const len = hull * ((K.len != null) ? K.len : 0.16) * (0.35 + 0.65 * t);   // the hot stretch grows back down the barrel
   const rad = hull * ((K.rad != null) ? K.rad : 0.034) * (0.5 + 0.5 * t);
   const flick = 1 + 0.10 * Math.sin((game.time || 0) * 30) * t;
@@ -8955,8 +8972,16 @@ function _blasterChargeGlow(t, tintOverride) {
     m.position.copy(_bcgPos).addScaledVector(_bcgFwd, -len * 0.42);
     m.quaternion.copy(_bcgQuat);
     m.scale.set(rad * flick, len, rad * flick);
-    m.material.color.copy(col).multiplyScalar(1 + ((K.hot != null) ? K.hot : 0.9) * t);
-    m.material.opacity = Math.min(1, 0.30 + 0.62 * t);
+    const _u = m.material.uniforms;
+    if (_u && _u.uBaseColor) {   // (v39.71) the LayeredFX tube: class colour, pale core, intensity with the charge
+      _u.uBaseColor.value.copy(col);
+      if (_u.uAxialCoreColor) _u.uAxialCoreColor.value.copy(col).lerp(_bcgWhite, 0.65);
+      if (_u.uIntensity) _u.uIntensity.value = (0.35 + 0.85 * t) * (1 + ((K.hot != null) ? K.hot : 0.9) * t * 0.5);
+      if (_u.uPosScale) _u.uPosScale.value = 1.0 / Math.max(1, rad);
+    } else {
+      m.material.color.copy(col).multiplyScalar(1 + ((K.hot != null) ? K.hot : 0.9) * t);
+      m.material.opacity = Math.min(1, 0.30 + 0.62 * t);
+    }
     m.visible = true;
   }
   const half = Math.max(1, Math.floor(nodes.length / 2));
@@ -8982,11 +9007,8 @@ function _blasterChargeGlow(t, tintOverride) {
 function _warmChargeGlowOnce() {
   try {
     if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene || typeof THREE === 'undefined') return 0;
-    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.55, 1, 8, 1, true);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0xffffff, transparent: true, opacity: 0.5, depthWrite: false,
-      blending: THREE.AdditiveBlending, side: THREE.DoubleSide, fog: false,
-    });
+    if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.82, 1, 24, 1, true);
+    const mat = _makeFXMaterial('charge_glow');   // (v39.71) the tube's real material, linked behind the countdown
     const m = new THREE.Mesh(_blasterChargeGlow._geo, mat);
     m.frustumCulled = false;
     const at = (typeof player !== 'undefined' && player && player.position) ? player.position
@@ -9046,6 +9068,7 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir) {
     });
   }
 
+  try { _classMuzzleFire(loadoutKey, pos, dir); } catch (_) {}   // (v39.70) the class flame, every ship but Vortex (own path) and Pyro (own flames)
   if (loadoutKey === 'PYRO') {
     for (let i = 0; i < 5; i++) {
       _muzzleSpread.set(
@@ -13633,6 +13656,70 @@ function tunePostFX(opts) {
 }
 window.tunePostFX       = tunePostFX;
 
+let _wrCam = null;
+const _wrZero = new THREE.Vector2(0, 0);
+const _WATER_LAYER = 6;
+function _waterRefractWanted() {
+  try {
+    if (!_hubWaterDisp || !_hubWaterDisp.visible) return false;
+    if (typeof postFX === 'undefined' || !postFX || !postFX.rtScene) return false;
+    if (renderer.xr && renderer.xr.isPresenting) return false;
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return false;
+    const W = window.__water;
+    if (W && W.refract != null && !+W.refract) return false;
+    const u = _hubWaterDisp.material && _hubWaterDisp.material.uniforms;
+    return !!(u && u.uSceneTex);
+  } catch (_) { return false; }
+}
+function _waterRefractPass() {
+  const rt = postFX.rtScene, u = _hubWaterDisp.material.uniforms;
+  let tex = rt.texture;
+  if (!(rt.samples > 0)) {
+    const C = postFX.rtRefractCopy;
+    if (!C || C.image.width !== rt.width || C.image.height !== rt.height) {
+      try { if (C) C.dispose(); } catch (_) {}
+      postFX.rtRefractCopy = new THREE.FramebufferTexture(rt.width, rt.height);
+      postFX.rtRefractCopy.minFilter = THREE.LinearFilter;
+      postFX.rtRefractCopy.magFilter = THREE.LinearFilter;
+    }
+    renderer.setRenderTarget(rt);
+    renderer.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
+    tex = postFX.rtRefractCopy;
+  }
+  u.uSceneTex.value = tex;
+  u.uSceneRes.value.set(rt.width, rt.height);
+  const A = _lssSceneActive(rt);   // the live sub-rectangle of the target (v39.49 supersample viewport)
+  u.uSceneMax.value.set(A.sx, A.sy);
+  const W = window.__water || {};
+  u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
+  if (W.refractK != null) u.uRefractK.value = +W.refractK;
+  if (!_wrCam) { _wrCam = new THREE.PerspectiveCamera(); _wrCam.layers.set(_WATER_LAYER); }
+  _wrCam.fov = camera.fov; _wrCam.aspect = camera.aspect; _wrCam.near = camera.near; _wrCam.far = camera.far; _wrCam.zoom = camera.zoom;
+  _wrCam.position.copy(camera.position);
+  _wrCam.quaternion.copy(camera.quaternion);
+  _wrCam.projectionMatrix.copy(camera.projectionMatrix);
+  _wrCam.projectionMatrixInverse.copy(camera.projectionMatrixInverse);
+  _wrCam.updateMatrixWorld(true);
+  const _pAC = renderer.autoClear, _pBG = scene.background, _pMW = scene.matrixWorldAutoUpdate, _pSM = renderer.shadowMap.autoUpdate;
+  try {
+    renderer.autoClear = false;
+    scene.background = null;   // a non-null background REPAINTS the whole target here - see _adsOverlayRender
+    scene.matrixWorldAutoUpdate = false;
+    renderer.shadowMap.autoUpdate = false;
+    renderer.setRenderTarget(rt);
+    renderer.render(scene, _wrCam);
+  } finally {
+    renderer.autoClear = _pAC;
+    scene.background = _pBG;
+    scene.matrixWorldAutoUpdate = _pMW;
+    renderer.shadowMap.autoUpdate = _pSM;
+    u.uRefract.value = 0.0;   // every other render of this mesh is the plain tinted body
+  }
+  try {
+    const I = window.__waterRefractInfo || (window.__waterRefractInfo = { frames: 0 });
+    I.frames++; I.msaa = rt.samples > 0; I.copy = (tex !== rt.texture); I.res = [rt.width, rt.height]; I.k = u.uRefractK.value;
+  } catch (_) {}
+}
 function renderPostFX() {
   const cinematicActive =
     (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
@@ -13706,8 +13793,14 @@ function renderPostFX() {
       postFX.compositeMat.uniforms.uSceneMax.value.set(_mx, _my);
     }
   }
+  const _wrOn = _waterRefractWanted();
+  if (_wrOn) camera.layers.disable(_WATER_LAYER);
   renderer.setRenderTarget(postFX.rtScene);
   renderer.render(scene, camera);
+  if (_wrOn) {
+    camera.layers.enable(_WATER_LAYER);
+    try { _waterRefractPass(); } catch (e) { try { console.warn('[water] refraction pass failed:', e && (e.message || e)); } catch (_) {} }
+  }
   if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
 
   if (lowQuality) {
@@ -14641,6 +14734,7 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                uAerial:{value:0.0}, uAerialStart:{value:1200}, uAerialFar:{value:6500}, uAerialColor:{value:new THREE.Color(0xb4c8da)},
                uStrata:{value:0.14}, uRim:{value:0.0},
                uBendFlat:{value:0},
+               uWaterY:{value:-1e9}, uWaterOn:{value:0},
                uPatchMix:{value:new THREE.Vector3(0.85, 0.55, 0.70)}, uPatchScale:{value:1.0},
                uSway:{value:0.075},
                uColDirt:{value:new THREE.Color(0x54371f)} };
@@ -14671,6 +14765,12 @@ function _swSyncFX() {
   const T = game.sandwichTerrain; if (!T) return;
   _swU.uYMid.value = T.YMID; _swU.uAMP.value = T.AMP; _swU.uSnow.value = T.snowLine || 0.7;
   _swU.uBendFlat.value = game.bendWorld ? 1 : 0;
+  try {
+    const _wOn = !!game._hubWater && typeof game._hubWaterWL === 'number'
+      && !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+    _swU.uWaterY.value = _wOn ? game._hubWaterWL : -1e9;
+    _swU.uWaterOn.value = _wOn ? ((window.__water && window.__water.caustics != null) ? +window.__water.caustics : 1.0) : 0.0;
+  } catch (_) {}
   _swU.uLava.value = (T.biome === 'volcanic') ? 1 : 0;
   _swU.uRocky.value = (T.biome === 'rocky') ? 1 : 0;
   _swU.uGlitch.value = (T.biome === 'brokensim') ? 1 : 0;   
@@ -14756,6 +14856,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.uniforms.uAerial=_swU.uAerial; sh.uniforms.uAerialStart=_swU.uAerialStart; sh.uniforms.uAerialFar=_swU.uAerialFar; sh.uniforms.uAerialColor=_swU.uAerialColor;
     sh.uniforms.uStrata=_swU.uStrata; sh.uniforms.uRim=_swU.uRim;
     sh.uniforms.uBendFlat=_swU.uBendFlat;
+    sh.uniforms.uWaterY=_swU.uWaterY; sh.uniforms.uWaterOn=_swU.uWaterOn;   // (v39.73) caustics
     sh.uniforms.uPatchMix=_swU.uPatchMix; sh.uniforms.uPatchScale=_swU.uPatchScale;
     sh.uniforms.uColDirt=_swU.uColDirt;
     if (!window.__terrainAOU) { var _aoDef=0.55, _satDef=0.40;
@@ -14783,7 +14884,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     } else {
       sh.vertexShader='attribute float aFlatY;\nuniform float uBendFlat;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=mix(position.y, aFlatY, uBendFlat); vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
-    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt;\n'
+    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt;\n'
       +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
       +'float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
       +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
@@ -14792,7 +14893,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
     sh.fragmentShader=sh.fragmentShader.replace('#include <color_fragment>',
       '#include <color_fragment>\n if(uCeil<0.5){\n vec3 fn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float fl=clamp((abs(fn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);\n float pc=_tpatch(vWPos.xz);\n vec3 grass=mix(uColMoss,uColGrass,smoothstep(0.32,0.72,pc));\n float moss1=_tvn(vWPos.xz*0.07);\n float moss2=_tvn(vWPos.xz*0.19+vec2(7.0,3.0));\n float mott=clamp(0.5+0.5*(moss1*0.62+moss2*0.38),0.0,1.0);\n grass*=(0.78+0.34*mott);\n grass=mix(grass,uColMoss*(0.7+0.4*mott),(1.0-smoothstep(0.28,0.62,pc))*0.6);\n float rkA=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float rkB=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float rkC=_tvn(vWPos.xz*0.30+vec2(vWPos.y*0.05,0.0));\n float rockMott=clamp(0.5+0.5*(rkA*0.55+rkB*0.3+rkC*0.15),0.0,1.0);\n float strata=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n vec3 rock=uColRock*(0.70+0.55*rockMott)*(1.0-uStrata*0.57+uStrata*strata);\n if(uMossy>0.5){ float mc=_tvn(vWPos.xz*0.022+vec2(vWPos.y*0.015,0.0))*0.55+_tvn(vWPos.xz*0.06+vec2(9.0,4.0))*0.45; float mossSide=smoothstep(0.5,0.82,0.5+0.5*mc)*(1.0-fl); rock=mix(rock,uColMoss*(0.62+0.5*mott),mossSide*0.72); }\n vec3 terr=mix(rock,grass,fl);\n if(uMossy>0.5 && uSat>0.001){ float _gl=dot(grass,vec3(0.299,0.587,0.114)); vec3 _gd=mix(grass,vec3(_gl),uSat*0.85); float _dry=_tpatch(vWPos.xz*1.7+vec2(31.0,12.0)); float _dirt=clamp(0.5+0.5*_tvn(vWPos.xz*0.011+vec2(4.0,8.0)),0.0,1.0); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.46,0.42,0.20)*2.2,smoothstep(0.62,0.86,_dry)),uSat*0.55); _gd=mix(_gd,_gd*mix(vec3(1.0),vec3(0.27,0.20,0.12)*2.6,1.0-smoothstep(0.18,0.42,_dirt)),uSat*0.45); grass=mix(grass,_gd,clamp(uSat*1.4,0.0,1.0)); terr=mix(rock,grass,fl); }\n'
       +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _dirtM=smoothstep(0.16,0.46,_sN)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
-      +' float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_snowWander(vWPos.xz)*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
+      +' float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_snowWander(vWPos.xz)*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _rsl=uSnow+_snowWander(vWPos.xz)*uSnowVary;\n float _snow=smoothstep(_rsl,_rsl+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
@@ -17096,6 +17197,22 @@ function _birdRehome(cx, cz) {
     if (F.geo) F.geo.setDrawRange(0, F.liveCount * 9);
   } catch (_) {}
 }
+function _critterPrecompile(F) {
+  try {
+    if (!F || !F.gpu || typeof renderer === 'undefined' || !renderer) return;
+    if (typeof renderer.compileAsync !== 'function') { F._pending = false; return; }
+    F._pending = true;
+    const tiny = new THREE.Scene();
+    const quad = new THREE.PlaneGeometry(2, 2);
+    for (const v of [F.velVar, F.posVar]) { if (v && v.material) tiny.add(new THREE.Mesh(quad, v.material)); }
+    const cam = new THREE.Camera();
+    const jobs = [renderer.compileAsync(tiny, cam)];
+    if (F.mesh && typeof scene !== 'undefined' && scene && typeof camera !== 'undefined' && camera) jobs.push(renderer.compileAsync(F.mesh, camera, scene));
+    Promise.all(jobs).then(() => { F._pending = false; }, () => { F._pending = false; });
+    setTimeout(() => { F._pending = false; }, 8000);   // never wedge a flock on a stuck promise
+  } catch (_) { if (F) F._pending = false; }
+}
+if (typeof window !== 'undefined') window.__critters = { get bird() { return _birdFlock; }, get fish() { return _fishSchool; } };
 function _birdFlockInit(T) {
   const F = _birdFlock;
   if (F.gpu) return;   
@@ -17169,6 +17286,7 @@ function _birdFlockInit(T) {
     F.gpu = gpu; F.velVar = velVar; F.posVar = posVar; F.geo = geo; F.mat = mat; F.mesh = mesh; F.count = count; F.texW = texW; F.frame = 0; F.acc = 0; F.fadeT = 0;   
     F.liveCount = Math.max(2, Math.round(count * Math.pow(Math.random(), 2.2)));
     geo.setDrawRange(0, F.liveCount * 9);
+    _critterPrecompile(F);   // (v39.72)
   } catch (e) { try { console.warn('[birds] init exception', e); } catch (_) {} try { if (gpu && gpu.dispose) gpu.dispose(); } catch (_) {} _birdFlock.gpu = null; }
 }
 function _birdFlockTick(dt) {
@@ -17371,6 +17489,7 @@ function _fishSchoolInit(T) {
     scene.add(mesh);
     F.gpu = gpu; F.velVar = velVar; F.posVar = posVar; F.geo = geo; F.mat = mat; F.mesh = mesh; F.texW = texW; F.frame = 0; F.acc = 0; F.WL = WL; F.T = T; F.shown = false;
     if (F.liveCount) geo.setDrawRange(0, F.liveCount * 9);
+    _critterPrecompile(F);   // (v39.72)
   } catch (e) { try { console.warn('[fish] init exception', e); } catch (_) {} try { if (gpu && gpu.dispose) gpu.dispose(); } catch (_) {} _fishSchool.gpu = null; }
 }
 function _fishReseed(cx, cz) {
@@ -17379,7 +17498,13 @@ function _fishReseed(cx, cz) {
     _fishFillSeed(F, cx, cz, F.WL, F.T);
     F.gpu.renderTexture(F.seedTex, F.gpu.getCurrentRenderTarget(F.posVar));   
     if (F.geo && F.liveCount) F.geo.setDrawRange(0, F.liveCount * 9);
-  } catch (_) { try { _fishSchoolDispose(); _fishSchoolInit(F.T || game._hubWaterT); } catch (__) {} }
+  } catch (e) {
+    try { console.warn('[fish] reseed failed, rebuilding the school:', e && (e.message || e)); } catch (_) {}
+    const _now = performance.now() / 1000;
+    if (_now - (F._reinitT || -1e9) < 20) return;
+    F._reinitT = _now;
+    try { _fishSchoolDispose(); _fishSchoolInit(F.T || game._hubWaterT); } catch (__) {}
+  }
 }
 function _fishSchoolTick(dt) {
   const F = _fishSchool; if (!F.gpu || !F.mat) return; if (game._xrBlurred) return;
@@ -17395,6 +17520,7 @@ function _fishSchoolTick(dt) {
     }
     F.fadeT = 0;
   }
+  if (F._pending) { if (F.mesh) F.mesh.visible = false; return; }   // (v39.72) still linking
   if (F.mesh) F.mesh.visible = true; F.shown = true;
   F.fadeT = Math.min(1, (F.fadeT || 0) + dt * 1.2);   
   const _t = _swU ? _swU.uTime.value : 0;
@@ -17419,7 +17545,7 @@ function _fishSchoolTick(dt) {
     const _step = Math.min(F.acc, 0.05); F.acc = 0;
     vu.uDelta.value = _step; F.posVar.material.uniforms.uDelta.value = _step;
     const _xrPrevRT = (renderer && renderer.getRenderTarget) ? renderer.getRenderTarget() : null;
-    F.gpu.compute();
+    if (!F._pending) F.gpu.compute();   // (v39.72) not while a rebuilt sim is still linking off-thread
     if (renderer && renderer.setRenderTarget) renderer.setRenderTarget(_xrPrevRT);
   }
   const mu = F.mat.uniforms;
@@ -17584,9 +17710,17 @@ function _ecrTick(dt) {
 }
 const _ecl = { on: true, max: 14, list: new Map(), lastScan: 0, ships: [] };
 if (typeof window !== 'undefined') window.__ecl = _ecl;
+const _ECL_BIOME = {
+  volcanic: 0xe8703a, goldmine: 0xf2c25c, crystalcave: 0x9c8cff, snow: 0xe6f0ff,
+  rocky: 0xcdb99c, grassy: 0xcfe8b8, mossy: 0xdde9f5, brokensim: 0xe070e0, purple: 0xb58cff,
+};
 function _eclColor() {
-  const c = new THREE.Color(0x9fb8d8);
-  try { if (scene.fog && scene.fog.color) c.copy(scene.fog.color).lerp(new THREE.Color(0xffffff), 0.55); } catch (_) {}
+  const T = game.sandwichTerrain;
+  const biome = (T && T.biome) || 'rocky';
+  const K = (typeof window !== 'undefined' && window.__ecl && window.__ecl.colors) ? window.__ecl.colors : null;
+  const hex = (K && K[biome] != null) ? K[biome] : ((_ECL_BIOME[biome] != null) ? _ECL_BIOME[biome] : 0xc4c8d2);
+  const c = new THREE.Color(hex);
+  try { if (scene.fog && scene.fog.color) c.lerp(scene.fog.color, 0.25); } catch (_) {}
   const l = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
   if (l < 0.35) c.multiplyScalar(0.35 / Math.max(0.05, l));   // a black cave still gets a readable cloud
   return c;
@@ -17690,7 +17824,9 @@ function _swBuildHubWaterDispGet(WL) {
         uReflFloor: { value: 0.42 }, uSkyDark: { value: 0.0 }, uReflHot: { value: 0.75 },   
 
         uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 }, uShoreFoam: { value: 0.0 },   
-        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 } }   
+        uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 },
+        uSceneTex: { value: null }, uSceneRes: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) },
+        uRefract: { value: 0.0 }, uRefractK: { value: 0.045 } }   
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
@@ -17725,7 +17861,8 @@ function _swBuildHubWaterDispGet(WL) {
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uSkyDark; uniform float uReflHot; uniform float uFoamLod; uniform float uReflFar;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
-      'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',   
+      'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',
+      'uniform sampler2D uSceneTex; uniform vec2 uSceneRes; uniform vec2 uSceneMax; uniform float uRefract; uniform float uRefractK;',   // (v39.73)   
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
@@ -17740,6 +17877,7 @@ function _swBuildHubWaterDispGet(WL) {
       '  vec3 H = normalize(sunDir + V);',
       '  float spec = pow(max(dot(N,H),0.0), 200.0);',                                
       '  vec3 base = color * diff;',
+      '  float shDepth = mix(1.0, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',   // (v39.73) hoisted: the refraction below tints by depth
       '  vec3 skyT = vec3(0.32,0.47,0.66);',
       '  float _slit = clamp(pow(max(dot(fogColor, vec3(0.299,0.587,0.114)) * 1.35, 0.0), 1.6), 0.05, 1.0);',
       '  skyT = mix(fogColor * 0.9, skyT, _slit);',
@@ -17757,7 +17895,15 @@ function _swBuildHubWaterDispGet(WL) {
       '  reflTex *= 1.0 - uGrazeClear * smoothstep(0.55, 0.95, graze);',               
       '  vec3 reflC = mix(skyT, reflTex, uReflLive);',                                
       '  vec3 refl = mix(skyT, reflC, uReflMix);',                                    
-      '  vec3 c = mix(base, refl, fres) + vec3(1.0,0.98,0.92)*spec*0.3*(1.0 - uReflMix*0.6);',   
+      '  if (uRefract > 0.001) {',
+      '    vec2 suv = gl_FragCoord.xy / uSceneRes;',
+      '    suv += N.xz * uRefractK * (1.0 - graze * 0.6) * clamp(1.0 - dCam / 6000.0, 0.12, 1.0);',
+      '    suv = clamp(suv, vec2(0.0015), uSceneMax - 0.0015);',
+      '    vec3 seen = texture2D(uSceneTex, suv).rgb;',
+      '    float murk = clamp(0.22 + 0.78 * shDepth, 0.0, 1.0);',
+      '    base = mix(base, seen * mix(vec3(1.0), color * 2.2, murk), uRefract * mix(0.92, 0.55, murk));',
+      '  }',
+      '  vec3 c = mix(base, refl, fres) + vec3(1.0,0.98,0.92)*spec*0.3*(1.0 - uReflMix*0.6);',
       
       
       
@@ -17775,7 +17921,6 @@ function _swBuildHubWaterDispGet(WL) {
       
       
       
-      '  float shDepth = mix(1.0, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',
       '  float shoreA = smoothstep(0.0, max(uShoreSoft, 0.001), shDepth);',
       '  vec2 fUv = (vWP.xz - uFarCenter) / uFarBounds + 0.5;',
       '  float fIn = step(0.0, fUv.x) * step(fUv.x, 1.0) * step(0.0, fUv.y) * step(fUv.y, 1.0);',   
@@ -17789,6 +17934,7 @@ function _swBuildHubWaterDispGet(WL) {
       '  c = mix(c, foamCol, shoreFoam * 0.28 * uShoreFoam);',
       '  { float _whd = length(vWP.xz - uCam.xz); float _whf = smoothstep(uWHorizA, uWHorizB, _whd) * uWHorizStr; c = mix(c, fogColor, clamp(_whf, 0.0, 1.0)); }',
       '  float aGraze = 0.93 * (1.0 - uGrazeAlpha * smoothstep(0.55, 0.95, graze));',
+      '  aGraze = mix(aGraze, max(aGraze, 0.99), uRefract);',   // (v39.73) the refracted floor IS the see-through; ghosting the unbent copy through it only softens it
       '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',
       '  #include <fog_fragment>',
       '}',
@@ -17800,6 +17946,8 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.renderOrder = -1; mesh.frustumCulled = false; mesh.visible = false;   // (v38.67) -1: see the hub water note
   mesh.userData = { isHubWater: true, WL: WL };
   scene.add(mesh);
+  mesh.layers.set(_WATER_LAYER);   // (v39.73) held back from the main pass and drawn by _waterRefractPass
+  try { if (typeof camera !== 'undefined' && camera) camera.layers.enable(_WATER_LAYER); } catch (_) {}   // ...but every OTHER render with this camera still gets it
   _hubWaterDisp = mesh;
   return mesh;
 }
@@ -18053,8 +18201,14 @@ function _swBuildHubWater(T) {
       if (_cp && _cp.userData && _cp.userData._lit) {
         if (!_cpWas) _cp.visible = true;
         const _C = window.__shipCones;
-        const _b = (_C && _C.reflBoost != null) ? _C.reflBoost : 8.0;
-        const _g = (_C && _C.reflGain != null) ? _C.reflGain : 2.6;
+        let _day = 0;
+        try {
+          const _fc = scene.fog && scene.fog.color;
+          if (_fc) _day = Math.max(0, Math.min(1, ((0.299 * _fc.r + 0.587 * _fc.g + 0.114 * _fc.b) - 0.10) / 0.35));
+        } catch (_) {}
+        const _dk = (_C && _C.dayDim != null) ? _C.dayDim : 0.25;
+        const _b = ((_C && _C.reflBoost != null) ? _C.reflBoost : 8.0) * (1 - _day * (1 - _dk));
+        const _g = ((_C && _C.reflGain != null) ? _C.reflGain : 2.6) * (1 - _day * (1 - Math.sqrt(_dk)));
         if (_cp.material) {
           _cp.material.opacity = Math.min(1, _cpOp * _b);
           if (_g !== 1) _cp.material.color.multiplyScalar(_g);
@@ -30786,6 +30940,87 @@ function _spawnClassFireBurst(pos, colorHex, size, life) {   // (v39.54) life: s
     type: 'explFireCloud', position: pos.clone(),
     timer: _lifeF, duration: _lifeF, fireMeshes: [m], _explSize: sz,
   });
+}
+const _CLASS_FIRE = {
+  SLAYER:   { color: 0x44ff66, size: 7,   life: 0.40 },
+  TRACKER:  { color: 0xff8800, size: 8,   life: 0.45 },
+  BLASTER:  { color: 0x44eeff, size: 6,   life: 0.36 },
+  PUNCTURE: { color: 0xffee44, size: 7,   life: 0.40 },
+  SYPHON:   { color: 0x4488ff, size: 6,   life: 0.36 },
+};
+const _classFireState = { t: {}, live: 0 };
+if (typeof window !== 'undefined') window.__classFire = { on: true, mul: 1.0, table: _CLASS_FIRE };
+function _classFireLive() {
+  let n = 0;
+  for (const e of game.worldEffects) if (e && e._classFlame) n++;
+  return n;
+}
+function _classMuzzleFire(key, pos, dir) {
+  try {
+    const CF = (typeof window !== 'undefined') ? window.__classFire : null;
+    if (CF && CF.on === false) return;
+    if (key === 'VORTEX' || key === 'PYRO') return;
+    const row = (CF && CF.table && CF.table[key]) || _CLASS_FIRE[key];
+    if (!row || typeof _spawnClassFireBurst !== 'function') return;
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+    const now = (typeof game !== 'undefined' && game.time) || 0;
+    if (now - (_classFireState.t[key] || -1) < 1 / 12) return;
+    if (_classFireLive() >= 12) return;
+    _classFireState.t[key] = now;
+    const mul = (CF && CF.mul != null) ? CF.mul : 1.0;
+    let at = null;
+    try {
+      const firstPerson = !game.thirdPerson && !game._cockpit3dLive && player && player.position && pos.distanceToSquared(player.position) < 400;
+      if (firstPerson && typeof _computeScreenMuzzleWorld === 'function') {
+        const MF = (typeof window !== 'undefined' && window.__muzzleFrac) ? window.__muzzleFrac : null;
+        const mf = (MF && MF[key]) || _PLAYER_MAIN_MUZZLE_FRAC[key];
+        if (mf) at = _computeScreenMuzzleWorld(mf.x, mf.y);
+        else {
+          const tf = (typeof _TIP_FRAC_BY_SHIP !== 'undefined' && _TIP_FRAC_BY_SHIP[key]) || null;
+          const xl = (tf && tf.xl != null) ? tf.xl : 0.305, xr = (tf && tf.xr != null) ? tf.xr : 0.695, ty = (tf && tf.y != null) ? tf.y : 0.680;
+          at = _computeScreenMuzzleWorld(player.muzzleFlashSide ? xr : xl, ty);
+        }
+        if (at) at = at.clone().addScaledVector(dir, 10);
+      }
+    } catch (_) { at = null; }
+    if (!at) at = pos.clone().addScaledVector(dir, (pos.distanceToSquared(player.position) < 400) ? 40 : 14);
+    const n0 = game.worldEffects.length;
+    _spawnClassFireBurst(at, row.color, row.size * mul * (0.85 + Math.random() * 0.3), row.life);
+    if (game.worldEffects.length > n0) { const fe = game.worldEffects[game.worldEffects.length - 1]; fe._classFlame = true; fe._grow = 1.2; }
+  } catch (_) {}
+}
+const _cfTmp = new THREE.Vector3(), _cfFwd = new THREE.Vector3(), _cfR1 = new THREE.Vector3(), _cfR2 = new THREE.Vector3();
+function _chargeFireTick(dt, t, tint) {
+  try {
+    const CF = (typeof window !== 'undefined') ? window.__classFire : null;
+    if (CF && CF.on === false) return;
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
+    const mesh = player.mesh;
+    const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
+    if (!nodes || !nodes.length || typeof _spawnClassFireBurst !== 'function') return;
+    t = Math.max(0, Math.min(1, t || 0));
+    player._cfChargeT = (player._cfChargeT || 0) - dt;
+    if (player._cfChargeT > 0) return;
+    const hz = 5 + 15 * t;
+    player._cfChargeT = 1 / hz;
+    if (_classFireLive() >= 12) return;
+    const K = (typeof window !== 'undefined' && window.__blasterCharge) ? window.__blasterCharge : {};
+    const hull = (player.chassis && player.chassis.hullLength) || 60;
+    const len = hull * ((K.len != null) ? K.len : 0.16) * (0.35 + 0.65 * t);   // the glow tube's own shape
+    const rad = hull * ((K.rad != null) ? K.rad : 0.034) * (0.5 + 0.5 * t);
+    _cfFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    const ax = (Math.abs(_cfFwd.y) < 0.9) ? _cfR1.set(0, 1, 0) : _cfR1.set(1, 0, 0);
+    _cfR2.crossVectors(_cfFwd, ax).normalize(); _cfR1.crossVectors(_cfFwd, _cfR2).normalize();
+    player._cfChargeSide = ((player._cfChargeSide || 0) + 1) % nodes.length;
+    nodes[player._cfChargeSide].getWorldPosition(_cfTmp);
+    const a = Math.random() * 6.283, rr = rad * Math.random();
+    _cfTmp.addScaledVector(_cfFwd, -len * (0.05 + 0.8 * Math.random())).addScaledVector(_cfR1, Math.cos(a) * rr).addScaledVector(_cfR2, Math.sin(a) * rr);
+    const mul = (CF && CF.mul != null) ? CF.mul : 1.0;
+    const size = (3.5 + 6 * t) * Math.sqrt(hull / 60) * mul;
+    const n0 = game.worldEffects.length;
+    _spawnClassFireBurst(_cfTmp, (tint != null) ? tint : 0x44eeff, size, 0.32);
+    if (game.worldEffects.length > n0) { const fe = game.worldEffects[game.worldEffects.length - 1]; fe._classFlame = true; fe._grow = 1.25; }
+  } catch (_) {}
 }
 function spawnPyroFlame(pos) {
   const eff = {
@@ -45217,8 +45452,8 @@ function fireHitscan(origin, dir, w) {
   const tracerColor = chassisFlashColor(player.loadoutKey);
   const isChaingun = (w.fireRate <= 0.10);
   if (player.loadoutKey === 'PUNCTURE') {
-    const frac = _PLAYER_MAIN_MUZZLE_FRAC.PUNCTURE;
-    const localFrom = (frac && typeof _computeScreenMuzzleWorld === 'function')
+    const frac = (typeof window !== 'undefined' && window.__muzzleFrac && window.__muzzleFrac.PUNCTURE) || _PLAYER_MAIN_MUZZLE_FRAC.PUNCTURE;
+    const localFrom = (!game.thirdPerson && frac && typeof _computeScreenMuzzleWorld === 'function')
       ? (_computeScreenMuzzleWorld(frac.x, frac.y) || origin)
       : origin;
     _spawnRailgunSpiral(localFrom, end, tracerColor);
@@ -49289,6 +49524,7 @@ function updateAbilities(dt) {
   if (player.powerShotCharging) {
     player.powerShotCharge = Math.min(1.0, player.powerShotCharge + dt / 1.0);
     try { _blasterChargeGlow(player.powerShotCharge); } catch (_) {}
+    try { _chargeFireTick(dt, player.powerShotCharge, (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.BLASTER : 0x44eeff); } catch (_) {}   // (v39.70)
     if (player.powerShotCharge >= 1.0) {
       firePowerShot();
     }
@@ -49296,6 +49532,7 @@ function updateAbilities(dt) {
     const _pt = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS.PUNCTURE != null)
       ? LSS.CLASS_COLORS.PUNCTURE : 0xffee44;
     try { _blasterChargeGlow(Math.min(1, player.railgunCharge), _pt); } catch (_) {}
+    try { _chargeFireTick(dt, Math.min(1, player.railgunCharge), _pt); } catch (_) {}   // (v39.70) fire inside the growing shape
   } else if (player._bcgOn) {
     try { _blasterChargeGlowOff(); } catch (_) {}
   }
