@@ -2536,3 +2536,339 @@ chop: { n: 11, ms: 2237.5, by: [ ["hub:clip",1703.4], ["hub:weather",219.3],
 
 Eleven late frames, 76% of the time in the terrain clipmap. **That is the shape of answer the owner's
 question needs, and the next F8 taken during the real chop will give it for the cinematic.**
+
+## v39.89 — the flock precompile was warming a variant the game never runs
+
+Three F8 marks in a twenty-second window on 39.88, and the new `chop` summary named the middle one:
+
+| at | worst | chop `by` |
+|---|---|---|
+| 173.1 s | 674 ms | `renderFrame` 680 |
+| 185.6 s | **2112 ms** | **`hub:critters` 2109.7** |
+| 192.1 s | 5746 ms | `renderFrame` 20.1 — the CPU was **idle** |
+
+And the cold watcher had the cause written down beside it:
+
+```
+t 42.5  GPUComputationShader [FORK: outputColorSpace toneMapping]  x2
+```
+
+**That fork is v39.72's fault, and it is mine.** `_critterPrecompile` calls `renderer.compileAsync`
+with whatever render target happens to be bound — at flock init that is the **canvas** — so it built
+the `srgb` / tone-mapped variant of the two boids compute shaders, while `gpu.compute()` binds the
+GPUComputationShader's own linear target and needs a different key. The gate that was supposed to keep
+a rebuilt flock off the game thread warmed two programs the game never uses, and the real pair linked
+on the first `compute()`: `hub:critters`, 2.1 s, in play.
+
+Two fixes, both needed:
+- **`toneMapped = false` on the compute materials.** They are data passes — tone mapping is
+  meaningless for a velocity texture — and it pins that key term to `NoToneMapping` in every context,
+  so the prebake's `compute()` prime and the in-play one can never disagree again.
+- **Bind the target each job really draws into**, around the *call* (compileAsync does its
+  synchronous compile at call time, so wrapping the promise would be too late): the GPGPU's own render
+  target for the sim, `postFX.rtScene` for the render mesh.
+
+Pane after: every GPUComputationShader program reports `toneMapping 0`, and **zero**
+`GPUComputationShader` forks where the owner had two. A fresh load reaches the end of the loading
+overlay at 246 programs and adds **none** after it lifts, across a tour that teleports the map and
+flips seat/chase view: `cold 0`.
+
+**The third mark is a different animal and still open.** 5745.9 ms of wall clock with `renderFrame`
+at 2.5 ms of CPU, an empty long-animation-frame list and no cold link — the main thread was not busy.
+That is the v39.52 signature: work inside the GPU process that no `renderer.compile()` can pre-pay.
+Its `info` also shows the world shrinking around it (geometries 720 → 493, textures 120 → 99), so a
+teardown was in flight. Next step is to catch it with the GPU timer rather than the CPU profiler.
+
+## v39.90 / v39.91 — choppy at 144 fps is a clock problem, not a throughput problem
+
+Owner: "the cinematic is still choppy (even though it's very high fps, like 120-144), and it misses
+the count down still". High framerate plus visible judder rules out throughput and points at pacing.
+
+**v39.91 — the cinematic camera was positioned from the wrong clock.** `_lssUpdateSpectatorCinematic`
+computes a pure function of `elapsed`, which is the right shape — no per-frame smoothing, identical
+across peers — but elapsed was measured with `performance.now()` read **inside the callback**. That is
+not the frame's time; it is whenever the main thread reached that line, so it carries every
+millisecond of jitter from whatever was scheduled ahead of it. A camera positioned from a jittering
+clock and presented on a steady vsync judders at *any* framerate, which is exactly the report.
+`requestAnimationFrame` already hands `gameLoop` the frame's own timestamp on the same time origin, so
+it is now passed through; the watchdog path still falls back to `performance.now()`.
+
+**v39.90 — the select-state 6 Hz gate, fixed but not the cause.** `_lssPickerOwnsFrame` deliberately
+releases the frame the moment `#ship-select` goes `lss-launching`, and from then the select branch
+drew the world through its 167 ms throttle — 6 fps — while the countdown owned the screen. Exactly the
+v39.25b mistake one screen over ("the ship spinning looks choppy. It was 6 fps"). The gate now exempts
+`_countdownActive` and `_cinematic.active`. ⚠ **But this is defensive, not the fix**: `commitLoadout`'s
+own note says `game.state` is already `'warmup'` during the launch countdown, so the select branch is
+not the one running then. Left in because the gate was wrong in principle.
+
+**"Misses the countdown" — one concrete candidate, unconfirmed.** `_lssStartSpectatorCinematic` ends
+with:
+
+```js
+const ov = document.getElementById('ship-select-countdown');
+if (ov) ov.classList.remove('active');
+```
+
+so a cinematic beginning while digits are still running takes the overlay away and the rest are never
+seen. That is the team-lineup path (`myTeamCode`, `sdfRoomData`), which is team-mode machinery — it
+could not be shown to run in free flight from here, so it stays a candidate rather than a finding.
+
+Pane on 39.91: boots clean, `cold 0`, no console errors, renders normally.
+
+## v39.92 — the 3-2-1 was running inside a hidden parent
+
+Owner: "the digits are not there, should be a count down after the cinematic... it makes the sound but
+not the text". The sound and the text come from the same `tick()` in `launchCountdown`, so if one
+happens and the other does not, the text is being written and never painted.
+
+`#ship-select-countdown` is a **DOM child of `#ship-select`**, and
+`_lssStartSpectatorCinematic` ends with:
+
+```js
+const sel = document.getElementById('ship-select');
+if (sel) { sel.classList.remove('active'); sel.style.display = 'none'; }
+```
+
+Two hides in one line — the missing `.active` (the base rule is `display: none`) and an **inline**
+`display: none` that outlives the cinematic and beats every class the countdown can add to itself. The
+source warns about precisely this, twice:
+
+> ⚠ Do NOT "fix" this by hiding #ship-select instead: #ship-select-countdown is a DOM CHILD of it ...
+> so the 3-2-1 ticker would run inside a hidden parent  — the v36.19 note
+
+> #ship-select is still `.active` on purpose — #ship-select-countdown is its CHILD, so the 3-2-1 dies
+> if you display:none the parent  — the v36.21 note
+
+Rather than chase every caller that might hide it, **the countdown now owns its container for its own
+duration**: `.active` to make it displayable plus `lss-launching` (the v36.21 state, which hides the
+header, body and hangar backdrop) so only the digits show over the live world. The previous state is
+remembered and restored verbatim in `hideLaunchOverlay`, so a caller that meant the picker gone still
+gets it gone the instant the digits finish.
+
+Measured in the pane, DOM-level, reproducing what the cinematic leaves behind:
+
+| | overlay computed | parent computed | actually on screen |
+|---|---|---|---|
+| before | `block` | `none` | **no** |
+| after | `block` | `flex` | **yes**, 148x209 px |
+| after restore | — | `none` | no |
+
+The overlay's own `.active` was working the whole time; it was painting nowhere. And live through a
+real launch:
+
+```
+53.20 s  visible  "3 LAUNCH IN"   #ship-select: lss-launching active
+54.20 s  visible  "2 LAUNCH IN"
+55.21 s  visible  "1 LAUNCH IN"
+56.21 s  hidden                   state -> playing
+```
+
+**Still open:** the owner reports the cinematic is "still a little laggy ... but in a different spot"
+after v39.91's timestamp fix. The v39.88 chop profiler now captures from 16 ms on a 144 Hz panel and
+summarises a run by system, so an F8 taken during it will name what remains.
+
+## v39.93 — the painted flavour of the seat was the other half
+
+The 39.92 mark: **833.7 ms**, and the v39.88 summary named it in one line:
+
+```
+chop: { n: 2, ms: 875.5, by: [ ["hub:stream", 833.2] ] }     cold: [[49.58, 2]]
+```
+
+Two programs at the same instant, and the watcher again appeared to name nothing — until the clocks
+are lined up. It arms at the end of the prebake, so its two `physical [FORK: customCacheKey]` entries
+at t 7 are the recorder's t 49.5. **They are the same two.** `hub:stream` owns the frame because the
+streamer's work and the link land together, not because the streamer caused it.
+
+The fork is on the custom key alone: `ghostHull` against the default. v39.82/83 fixed the missing
+half in one direction — everything in `_ghostPinWarm` runs with the seat shell APPLIED, and it now
+draws the hidden cockpit while it does, so the `ghostHull` programs are built behind the loading
+screen. But the cockpit's **painted** materials are only ever drawn when the pilot is actually in the
+seat, so they met the frame for the first time in play.
+
+One more `_warmDrawRoot` **after** `_ghostHullRestore`, with the interior still shown, covers it.
+
+Pane, clean load then a tour that teleports the map (forcing `hub:stream`) while flipping seat/chase
+and fire every couple of seconds: **`cold 0`**, program count flat at 245, no console errors. The two
+`physical [FORK: customCacheKey]` links that had survived every build since v39.80 are gone.
+
+## v39.94 — tearing the terrain down was the unbudgeted half
+
+Two 39.93 marks, and the chop summary is unambiguous both times:
+
+| at | worst | chop `by` |
+|---|---|---|
+| 29.6 s | **3015.4 ms** | `hub:stream` **3011.4** |
+| 41.6 s | **1730.0 ms** | `hub:stream` **1729.3** |
+
+The two cold programs beside each are the same pair the watcher logged at its t 7.7, i.e. incidental
+— **3011 ms of a 3015 ms frame is the section's own CPU**, and the long-animation-frame entry agrees
+(`user-callback` 3016 ms). This is not a shader compile. `updateSandwichStream` really did spend three
+seconds on the main thread.
+
+Building has been time-sliced since v39.49 (`_budgeted`, ~2.5 ms of shell rows a frame). **Tearing
+down never was.** The dispose sweep walked every live chunk and freed everything outside the
+hysteresis square in one pass, and the foliage loop — which plants one grass and one tree chunk per
+frame — removed them without any cap at all. Fly fast enough and a whole rank leaves the square
+together, so one frame frees dozens of geometries. The earlier 5746 ms frame with the CPU **idle** and
+`info.geos` falling 720 → 493 is the same teardown seen from the GPU side.
+
+Nothing on screen depends on an already-invisible chunk being freed *this* frame, so both are capped
+(`window.__swDisposeMax` / `__swRemoveMax`, 3 each) and the remainder rolls to the next frame.
+`_SC.idle` already keys off `_swDisposed`/`_swRemoved`, so a partial sweep re-runs immediately instead
+of waiting for the player to move again. Loading paths (prebake, staging, swaps) keep the old
+all-at-once shape.
+
+Pane, six 16-20 km teleports in a row — far harsher than flying:
+
+```
+before:  hub:stream = the entire 3011 ms frame
+after :  chop n 8 frames, 3188 ms total → hub:stream 45.6 ms
+```
+
+Headroom check: 3 disposals a frame at 144 Hz is 432/s, against ~42 chunks shed per boundary crossing
+at 450 u/s. The chunk count settles at 491 (the view square plus its hysteresis band) and stays flat.
+
+**Still open:** what dominates that artificial tour is now `renderFrame` and `hub:clip` — the clipmap
+rebuilding wholesale after a 16 km jump, which normal flight does not do. And one
+`lambert [FORK: flags]` still links when the tour crosses city sites (the v39.85 lane).
+
+## v39.95 / v39.96 — `hub:stream` was taking the blame for the cloak warm
+
+The 39.94 mark still read `hub:stream` 1205.8 ms, so v39.94's dispose budget was not the whole story.
+Reproduced in the pane and instrumented per frame — and the section is innocent:
+
+```
+spike 1073.1 ms   state warmup   _swapStaging false  _rrStaging false
+                                 _swPreloading false _worldPrebaking false   chunks 441
+```
+
+All four staging flags false (so the build path *was* budgeted) and 441 chunks already resident (so
+there was nothing to build). The `hub:stream` mark does not wrap only the streamer: the warmup arm of
+that section also runs `_warmCloakVariantOnce()` **and** the v39.49b late cloak re-warm,
+`_warmCloakForRoot(player.mesh)` at `warmupTimer < 2` — the last two seconds of the countdown, on
+screen. Suppressing that one call:
+
+| | worst `hub:stream` frame at launch |
+|---|---|
+| with the late re-warm | **1073.1 ms** |
+| suppressed | **77.7 ms** (the earlier intended warm, behind the picker) |
+
+**Three F8 marks in a row pointed at the terrain streamer for work the streamer never did.** The
+section name is the enclosing `__pmark`, not the callee.
+
+**v39.96** takes the shadow half back out of it: `_warmCloakForRoot(root, withShadow)` now defaults to
+the v39.84 shadow pass but the late re-run passes `false`. That pass exists to rebuild the TEXTURED
+colour variants once the hull materials are final; the depth variant was already built behind the
+loading screen. Worth ~70 ms of the second — the rest is ~40 transparent hull program links, which is
+real work in the wrong place.
+
+**Open, and the actual fix:** slice that late re-warm across the countdown's frames (or link it with
+`compileAsync` and drop its draw, since the vertex layout was already built by the first cloak pass).
+~1000 ms in one frame becomes ~8 ms across the window. Deliberately not attempted in the same pass as
+everything else this session.
+
+**v39.95 — the ship's random rotation at the end of the sequence.** The tick returned on the frame
+`elapsed` passed `duration`, so the arrival blend's last applied value was the previous frame's, at
+`b` a little under 1 — and `_lssEndSpectatorCinematic` then wrote the lineup mesh back to the pose
+captured at cinematic START. For the player's own ship that is wherever it happened to be sitting, so
+the hull snapped to a stale orientation for the frames before the rig took over. The last frame now
+runs with `elapsed` pinned to exactly `duration` (b = 1, where the blended and gameplay poses coincide
+by construction) and completes afterwards, and that frame writes the landed pose into `origPos` /
+`origQuat` so the restore is a no-op. `elapsed` is also clamped at zero: `startMs` is a
+`performance.now()` taken partway through a frame while v39.91's `frameMs` is that frame's start, so
+the first tick could otherwise see a small negative value and swing the orbit backwards.
+
+## v39.97 — the cinematic branch had no profiler marks at all
+
+Owner, on elimination mode: "cinematic in elimination mode has some lag, too... will it be the same
+fix?" — then, on a second run, "it might have been a fluke ... i didn't see a hitch in there a second
+time".
+
+**It would not have been the same fix.** The cinematic arm of `gameLoop` `return`s before every
+`__pmark` in the main path, and the v39.96 late cloak re-warm lives past that return — so it cannot
+run while a cinematic is up. Whatever elimination's cinematic costs, it is one of the calls inside
+that arm or the render itself.
+
+Which nothing could have told us, because that arm carried no marks. An F8 taken during any cinematic
+came back with a frame time and no attribution — the same blind spot that produced the 5746 ms mark
+with `renderFrame` at 2.5 ms of CPU. It is now instrumented: `cine:tick` (the camera/lineup update),
+`cine:water`, `cine:ripple`, `cine:critters`, `cine:city`, `cine:weather` and `cine:render`. Free
+flight never enters this arm, so the sections stay absent there; they appear the moment a team-lineup
+cinematic runs.
+
+Not chased further — the owner could not reproduce it. The marks cost one `performance.now()` each
+and only while the profiler is on, so they can sit there until it recurs.
+
+Two of this session's cinematic fixes DO carry over to elimination, since they are in the shared
+`_lssUpdateSpectatorCinematic`: v39.91 (drive the camera from the frame's own timestamp instead of a
+`performance.now()` read inside the callback) and v39.95 (land the arrival blend at b = 1 before
+cutting, and clamp a negative elapsed).
+
+## v39.98 — the countdown is its own element now
+
+Owner: "you did something weird in the elimination mode... you made the ship selection screen appear
+over top with a new countdown after round 2 starts". That is v39.92, and the mechanism is worth
+recording because the shape of the mistake is general.
+
+v39.92 fixed "sound but no text" by having `launchCountdown` force `#ship-select` visible for the
+countdown's duration and put the previous state back in `hideLaunchOverlay`. **That restore is
+time-blind.** In free flight the picker was hidden at capture, so restoring it hid it again — fine. In
+elimination the picker is legitimately UP when the between-rounds countdown starts, so the capture
+recorded `.active`; the round start then hid it, and the restore faithfully put `.active` back **on
+top of round 2**. A save/restore pair is only safe when nothing else may touch the value in between,
+and here the whole point of the window is that something else does.
+
+So the dependency is removed instead of managed: `#ship-select-countdown` is a **direct child of
+`<body>`**, not of `#ship-select`, and its CSS is `position: fixed` rather than `absolute` (it used to
+resolve against the picker, which is fixed). Every caller may hide `#ship-select` however it likes
+again, and the two standing warnings in the CSS — "⚠ Do NOT fix this by hiding #ship-select ... the
+3-2-1 ticker would run inside a hidden parent" and the v36.21 note — no longer describe a hazard.
+`launchCountdown` touches nothing but its own overlay.
+
+Verified through a real launch, watching both elements every 40 ms:
+
+```
+21.42 s  visible  "3 LAUNCH IN"     #ship-select: lss-launching   box at 460,239
+21.90 s  visible  "2 LAUNCH IN"     #ship-select: lss-launching
+22.90 s  visible  "1 LAUNCH IN"     #ship-select: lss-launching
+23.90 s  visible  "LAUNCH WARP-IN"  state -> playing
+24.62 s  hidden
+```
+
+All three digits, viewport-centred (window 1070 wide, box left 460 for a ~150 px digit), and
+`#ship-select` **never gains `.active`** at any point — which is exactly the regression.
+
+## v39.99 — a late frame now says what it did to the GPU's resources
+
+Owner: "little hitches at the end of matches". The mark, taken in `roundEnd`:
+
+```
+worst 277.7 ms   avg 107 fps over 534 frames   cold: []
+chop: { n: 15, ms: 875.9, by: [ ["renderFrame", 45.3], ["hub:ripple", 17.6] ] }
+```
+
+Fifteen late frames totalling 876 ms, of which the profiler can account for **63 ms** — `renderFrame`
+is ~3 ms of CPU per frame. No shader linked. The main thread was not busy. And the program count on
+that tab had fallen from 246 during play to **184**: sixty-two programs released. That is a teardown,
+and the cost is inside the GPU process where CPU profiling cannot follow it.
+
+This is the fourth mark this session with that shape (the 5746 ms frame with `renderFrame` at 2.5 ms
+was the same), so the recorder now records, for every late frame, **what changed in `renderer.info`
+across it**: programs, geometries and textures, plus the draw calls and triangles issued.
+
+```
+res: [ [t, dPrograms, dGeometries, dTextures, drawCalls, triangles], ... ]
+```
+
+A negative triple is a teardown; a positive one is content arriving; zeros with a normal draw count
+mean the frame was simply expensive to draw. A mark can no longer come back saying only "the CPU was
+idle".
+
+Also fixed: the v39.81 free-detector could print `freed x-6` — the count is monotonic in principle but
+the id set is pruned as it grows, so the difference could go negative. Only increases are reported now.
+
+**Not fixed:** the end-of-match hitches themselves. The evidence points at the match-end teardown, and
+the v39.94 lesson (budget the destroy, not just the create) is the obvious shape of the answer — but
+after three misattributions this session I would rather have the next mark name the resource than
+guess which teardown it is.

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.88';
+const LSS_BUILD = '39.99';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -17207,10 +17207,27 @@ function _critterPrecompile(F) {
     F._pending = true;
     const tiny = new THREE.Scene();
     const quad = new THREE.PlaneGeometry(2, 2);
-    for (const v of [F.velVar, F.posVar]) { if (v && v.material) tiny.add(new THREE.Mesh(quad, v.material)); }
+    for (const v of [F.velVar, F.posVar]) {
+      if (!v || !v.material) continue;
+      try { v.material.toneMapped = false; } catch (_) {}
+      tiny.add(new THREE.Mesh(quad, v.material));
+    }
     const cam = new THREE.Camera();
-    const jobs = [renderer.compileAsync(tiny, cam)];
-    if (F.mesh && typeof scene !== 'undefined' && scene && typeof camera !== 'undefined' && camera) jobs.push(renderer.compileAsync(F.mesh, camera, scene));
+    const jobs = [];
+    const _pRT = renderer.getRenderTarget();
+    try {
+      let grt = null;
+      try { if (F.gpu.getCurrentRenderTarget && F.velVar) grt = F.gpu.getCurrentRenderTarget(F.velVar); } catch (_) {}
+      if (grt) renderer.setRenderTarget(grt);
+      jobs.push(renderer.compileAsync(tiny, cam));
+    } finally { try { renderer.setRenderTarget(_pRT); } catch (_) {} }
+    if (F.mesh && typeof scene !== 'undefined' && scene && typeof camera !== 'undefined' && camera) {
+      try {
+        const srt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+        if (srt) renderer.setRenderTarget(srt);
+        jobs.push(renderer.compileAsync(F.mesh, camera, scene));
+      } finally { try { renderer.setRenderTarget(_pRT); } catch (_) {} }
+    }
     Promise.all(jobs).then(() => { F._pending = false; }, () => { F._pending = false; });
     setTimeout(() => { F._pending = false; }, 8000);   // never wedge a flock on a stuck promise
   } catch (_) { if (F) F._pending = false; }
@@ -24975,7 +24992,9 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   
   const _hyst = (T && T.biome === 'mossy') ? 3 : 8;
   const _hystFar2 = (_VIEW + _hyst) * (_VIEW + _hyst);
+  const _dispMax = _budgeted ? Math.max(1, (typeof window !== 'undefined' && window.__swDisposeMax != null) ? window.__swDisposeMax : 3) : Infinity;
   for (const [key, c] of chunks) {
+    if (_swDisposed >= _dispMax) break;
     const cx = c.cx, cz = c.cz;
     const _far = _disc
       ? ((cx - scx) * (cx - scx) + (cz - scz) * (cz - scz)) > _hystFar2
@@ -24987,6 +25006,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
 
 
   const _treeView = (T && T.biome === 'mossy') ? _swHubView() : _SW_TREE_VIEW;
+  const _remMax = _budgeted ? Math.max(1, (typeof window !== 'undefined' && window.__swRemoveMax != null) ? window.__swRemoveMax : 3) : Infinity;
   let gBuilt = 0, tBuilt = 0;
   for (const c of chunks.values()) {
     const cx = c.cx, cz = c.cz;
@@ -24996,16 +25016,16 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       const _fpT = game._foliageProf ? performance.now() : 0;
       c.grass = _swBuildGrass(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.grassBuilt = true; gBuilt++;
       if (game._foliageProf) _foliageProfRec('grass', performance.now() - _fpT);
-    } else if ((!near || !wantGrass) && c.grassBuilt) {
-      _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false; _swRemoved++;
+    } else if ((!near || !wantGrass) && c.grassBuilt && _swRemoved < _remMax) {
+      _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false; _swRemoved++;   // (v39.94) capped, see the dispose note
     }
     const nearT = _cheb <= _treeView;
     if (nearT && wantTrees && !c.treesBuilt && tBuilt < (tLim || 1)) {
       const _fpT = game._foliageProf ? performance.now() : 0;
       c.trees = _swBuildTrees(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.treesBuilt = true; tBuilt++;
       if (game._foliageProf) _foliageProfRec('trees', performance.now() - _fpT);
-    } else if ((!nearT || !wantTrees) && c.treesBuilt) {
-      _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;
+    } else if ((!nearT || !wantTrees) && c.treesBuilt && _swRemoved < _remMax) {
+      _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;   // (v39.94) capped
     }
   }
   _SC.idle = (built === 0 && stepped === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0);   // (v39.49) a stepped job is not idle
@@ -38332,8 +38352,15 @@ function _ghostPinWarm() {
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
-    for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }   // (v39.82) exactly as they were
     if (!_was) _ghostHullRestore(player.mesh);
+    try {
+      if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
+        const _pRT2 = renderer.getRenderTarget();
+        try { renderer.setRenderTarget(postFX.rtScene); _warmDrawRoot(player.mesh, postFX.rtScene, true); }
+        finally { try { renderer.setRenderTarget(_pRT2); } catch (_) {} }
+      }
+    } catch (_) {}
+    for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }   // (v39.82) exactly as they were
   } catch (_) {}
 }
 function _pinCombatEffectPrograms() {
@@ -38971,11 +38998,12 @@ async function _prebakeWorldForLaunch() {
           try {
             const _live = new Set(); for (const p of list) _live.add(p.id);
             let _gone = 0; window.__coldIds.forEach((id) => { if (!_live.has(id)) _gone++; });
-            if (_gone !== (window.__coldGone || 0)) {
+            const _prevGone = window.__coldGone || 0;
+            if (_gone > _prevGone) {
               const _t = Math.round((performance.now() - _coldT0) / 100) / 10;
-              window.__coldSeen.push({ t: _t, name: 'freed x' + (_gone - (window.__coldGone || 0)) });
-              window.__coldGone = _gone;
+              window.__coldSeen.push({ t: _t, name: 'freed x' + (_gone - _prevGone) });
             }
+            if (_gone !== _prevGone) window.__coldGone = _gone;
           } catch (_) {}
           const _ce = document.getElementById('lss-coldhud');
           if (_ce) {
@@ -43814,7 +43842,7 @@ function _warmDrawRoot(root, rt, withShadow) {
     return true;
   } catch (e) { console.warn('[warm] draw failed:', e); return false; }
 }
-function _warmCloakForRoot(root) {
+function _warmCloakForRoot(root, withShadow) {
   if (!root || typeof root.traverse !== 'function') return 0;
   if (root.userData) root.userData._cloakWarmed = true;
   try {
@@ -43843,7 +43871,7 @@ function _warmCloakForRoot(root) {
       for (const m of mats) { if (m._wSide === THREE.DoubleSide) { m.side = THREE.FrontSide; m.needsUpdate = true; _any = true; } }
       if (_any) renderer.compile(root, camera, scene);
       for (const m of mats) { if (m.side !== m._wSide) { m.side = m._wSide; m.needsUpdate = true; } }
-      _warmDrawRoot(root, _rtC, true);   // (v39.84) the cloaked hull is transparent: its DEPTH variant needs the shadow pass to exist
+      _warmDrawRoot(root, _rtC, withShadow !== false);
     } catch (_) {}
     for (const m of mats) {
       try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
@@ -44195,14 +44223,14 @@ function _lssCompleteSpectatorCinematic() {
   }
 }
 
-function _lssUpdateSpectatorCinematic() {
+function _lssUpdateSpectatorCinematic(frameMs) {
   if (!_cinematic.active) return false;
-  const nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-  const elapsed = (nowMs - _cinematic.startMs) / 1000.0;
-  if (elapsed >= _cinematic.duration) {
-    _lssCompleteSpectatorCinematic();
-    return false;
-  }
+  const nowMs = (typeof frameMs === 'number' && frameMs > 0) ? frameMs
+    : ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  let elapsed = (nowMs - _cinematic.startMs) / 1000.0;
+  if (elapsed < 0) elapsed = 0;
+  const _cineDone = elapsed >= _cinematic.duration;
+  if (_cineDone) elapsed = _cinematic.duration;
   if (_cinematic.ships) {
     for (let i = 0; i < _cinematic.ships.length; i++) {
       const s = _cinematic.ships[i];
@@ -44257,8 +44285,10 @@ function _lssUpdateSpectatorCinematic() {
       _cineMQ.copy(_cineQ).multiply(_cineFlipY);
       _s0.mesh.position.lerp(player.position, b);
       _s0.mesh.quaternion.slerp(_cineMQ, b);
+      if (_cineDone) { _s0.origPos.copy(_s0.mesh.position); _s0.origQuat.copy(_s0.mesh.quaternion); }
     }
   }
+  if (_cineDone) { _lssCompleteSpectatorCinematic(); return false; }
   return true;
 }
 
@@ -64963,7 +64993,8 @@ function __pmark(name) {
   if (!on) return;
   const KEY = 'lss_f8log', CAP = 40, BYTES = 400000, N = 16384;
   window.__profOn = true;
-  const R = { ring: new Float32Array(N), ringT: new Float32Array(N), ri: 0, lo: [], secPrev: {}, big: [], lastProgs: 0, cold: [], last: 0, marks: null };
+  const R = { ring: new Float32Array(N), ringT: new Float32Array(N), ri: 0, lo: [], secPrev: {}, big: [], lastProgs: 0, cold: [], last: 0, marks: null,
+    res: [], resPrev: null };   // (v39.99) see the teardown probe below
   const profNow = () => { const p = window.__prof, o = {}; if (!p) return o; for (const k in p) { const v = p[k]; if (v && typeof v.total === 'number') o[k] = v.total; } return o; };
   const tick = (t) => {
     requestAnimationFrame(tick);
@@ -64978,6 +65009,20 @@ function __pmark(name) {
         secs.sort((a, b) => b[1] - a[1]);
         R.big.push([+(t / 1000).toFixed(2), +gap.toFixed(1), secs.slice(0, 4)]);
         if (R.big.length > 200) R.big.shift();
+        try {
+          const _i = renderer.info, _m = _i.memory, _r = _i.render;
+          const _now = [_i.programs ? _i.programs.length : 0, _m.geometries, _m.textures, _r.calls, _r.triangles];
+          if (R.resPrev) {
+            const _d = [_now[0] - R.resPrev[0], _now[1] - R.resPrev[1], _now[2] - R.resPrev[2]];
+            if (_d[0] || _d[1] || _d[2] || _r.calls > 0) {
+              R.res.push([+(t / 1000).toFixed(2), _d[0], _d[1], _d[2], _r.calls, _r.triangles]);
+              if (R.res.length > 200) R.res.shift();
+            }
+          }
+          R.resPrev = _now;
+        } catch (_) {}
+      } else {
+        try { const _i = renderer.info, _m = _i.memory; R.resPrev = [_i.programs ? _i.programs.length : 0, _m.geometries, _m.textures, _i.render.calls, _i.render.triangles]; } catch (_) {}
       }
       R.secPrev = cur;
       try {
@@ -65057,6 +65102,7 @@ function __pmark(name) {
       lo: R.lo.filter(l => l[0] >= now - 5).slice(-20),
       cold: R.cold.filter(c => c[0] >= now - 5),
       coldNames: (function () { try { return (window.__coldSeen || []).slice(-24); } catch (_) { return null; } })(),
+      res: R.res.filter(r => r[0] >= now - 5).slice(-12),
       frames: 0, worst: 0, avgFps: 0, info: null, run: null, speed: null, round: null,
     };
     try { const all = around(now - 5, now, 0); m.frames = all.length; m.worst = all.length ? +Math.max(...all.map(a => a[1])).toFixed(1) : 0; m.avgFps = all.length ? Math.round(1000 / (all.reduce((acc, a) => acc + a[1], 0) / all.length)) : 0; } catch (_) {}
@@ -65139,7 +65185,8 @@ function gameLoop(timestamp) {
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
     if (typeof _lssUpdateSpectatorCinematic === 'function') {
       try {
-        _lssUpdateSpectatorCinematic();
+        _lssUpdateSpectatorCinematic(timestamp);   // (v39.91) the frame's own clock, not the callback's
+        __pmark('cine:tick');   // (v39.97)
       } catch (e) {
         console.warn('[cinematic] tick failed:', e && e.message);
         try { _lssCompleteSpectatorCinematic(); } catch (_) { _cinematic.active = false; }
@@ -65154,17 +65201,23 @@ function gameLoop(timestamp) {
           _swU.uTime.value += _cdt;
           _swU.uCam.value.set(camera.position.x, camera.position.y, camera.position.z);
           try { _swUpdateHubWater(); } catch (_) {}
+          __pmark('cine:water');
           try { _swRippleTick(_cdt); } catch (_) {}
           try { _swUpdateUnderwater(); } catch (_) {}
+          __pmark('cine:ripple');
           try { _birdFlockTick(_cdt); } catch (_) {}
           try { _fishSchoolTick(_cdt); } catch (_) {}
+          __pmark('cine:critters');
           try { _hubCityFrame(_cdt); } catch (_) {}
+          __pmark('cine:city');
           try { _wxFrame(_cdt); } catch (_) {}
           try { _hzDuskLights(); } catch (_) {}
+          __pmark('cine:weather');
         } catch (_) {}
       }
       const _xrActive = !!(renderer && renderer.xr && renderer.xr.isPresenting);
       if (typeof document === 'undefined' || !document.hidden || _xrActive) renderFrame();
+      __pmark('cine:render');
       return;
     }
   }
@@ -65251,7 +65304,9 @@ function gameLoop(timestamp) {
 
   if (game.state === 'select') {
     const _selNow = timestamp;
-    const _shouldRender = renderer.xr.isPresenting
+    const _launching = (typeof _countdownActive !== 'undefined' && _countdownActive) ||
+                       (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
+    const _shouldRender = renderer.xr.isPresenting || _launching
       || (!game._selectLastRender || _selNow - game._selectLastRender >= 167);
     if (_shouldRender) {
       game._selectLastRender = _selNow;
@@ -65342,7 +65397,7 @@ function gameLoop(timestamp) {
             else if (game.warmupTimer < 2 && !game._cloakLateWarm && player && player.mesh) {
               game._cloakLateWarm = true;
               if (player.mesh.userData) player.mesh.userData._cloakWarmed = false;
-              _warmCloakForRoot(player.mesh);
+              _warmCloakForRoot(player.mesh, false);
             }
           }
         } catch (_) {}

@@ -1241,7 +1241,9 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
 }
 
 #ship-select-countdown {
-  position: absolute; top: 50%; left: 50%;
+  /* (v39.98) `fixed`, not `absolute`: it used to resolve against #ship-select (position: fixed);
+     as a direct child of <body> only `fixed` puts it back in the same place, viewport-centred. */
+  position: fixed; top: 50%; left: 50%;
   transform: translate(-50%, -50%);
   z-index: 110; pointer-events: none; text-align: center;
   display: none;
@@ -4082,10 +4084,20 @@ body.vr-active #camp-video { display: none !important; }
     </div>
     </div><!-- /#ss-right-col -->
   </div>
-  <div id="ship-select-countdown">
-    <div class="cd-num">3</div>
-    <div class="cd-sub">LAUNCH</div>
-  </div>
+</div>
+
+<!-- (v39.98) THE COUNTDOWN IS ITS OWN ELEMENT NOW, not a child of #ship-select. It lived inside the
+     picker, so every caller that took the picker off screen also took the 3-2-1 with it - which is
+     what the two standing warnings in the CSS were about ("⚠ Do NOT fix this by hiding #ship-select
+     instead ... the 3-2-1 ticker would run inside a hidden parent", and the v36.21 note). v39.92
+     answered that by having launchCountdown force the parent visible and put it back afterwards, and
+     that restore is time-blind: between capture and restore the round start legitimately hides the
+     picker, and the restore then re-showed it - the owner's "you made the ship selection screen
+     appear over top with a new countdown after round 2 starts". Moving the element removes the
+     dependency instead of managing it, and every caller may hide #ship-select freely again. -->
+<div id="ship-select-countdown">
+  <div class="cd-num">3</div>
+  <div class="cd-sub">LAUNCH</div>
 </div>
 
 
@@ -4410,7 +4422,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.88';
+const LSS_BUILD = '39.99';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -27433,12 +27445,43 @@ function _critterPrecompile(F) {
     if (!F || !F.gpu || typeof renderer === 'undefined' || !renderer) return;
     if (typeof renderer.compileAsync !== 'function') { F._pending = false; return; }
     F._pending = true;
+    // ⚠ (v39.89) WARM THE VARIANT THAT ACTUALLY RUNS. The v39.72 version called compileAsync with
+    // whatever render target happened to be bound - at init that is the CANVAS - so it built the
+    // srgb / tone-mapped variant of the compute shaders, while `gpu.compute()` binds the
+    // GPUComputationShader's own linear target and needs a different one. The precompile warmed two
+    // programs the game never uses and the real pair linked on the first compute(), which is the
+    // whole point of the gate. Named by the v39.75/81 watcher on the owner's machine:
+    //   GPUComputationShader [FORK: outputColorSpace toneMapping] x2
+    // and the F8 that followed is `hub:critters` 2109.7 ms. Two fixes, both needed:
+    //   • toneMapped = false on the compute materials. They are DATA passes - tone mapping is
+    //     meaningless for a velocity texture - and it pins that key term to NoToneMapping in every
+    //     context, so the prebake's compute() prime and the in-play one can never disagree again.
+    //   • bind the target each job really draws into while its compile is set up: the GPGPU's own
+    //     render target for the sim, postFX.rtScene for the render mesh. compileAsync does its
+    //     synchronous compile at call time, so the binding has to wrap the CALL, not the promise.
     const tiny = new THREE.Scene();
     const quad = new THREE.PlaneGeometry(2, 2);
-    for (const v of [F.velVar, F.posVar]) { if (v && v.material) tiny.add(new THREE.Mesh(quad, v.material)); }
+    for (const v of [F.velVar, F.posVar]) {
+      if (!v || !v.material) continue;
+      try { v.material.toneMapped = false; } catch (_) {}
+      tiny.add(new THREE.Mesh(quad, v.material));
+    }
     const cam = new THREE.Camera();
-    const jobs = [renderer.compileAsync(tiny, cam)];
-    if (F.mesh && typeof scene !== 'undefined' && scene && typeof camera !== 'undefined' && camera) jobs.push(renderer.compileAsync(F.mesh, camera, scene));
+    const jobs = [];
+    const _pRT = renderer.getRenderTarget();
+    try {
+      let grt = null;
+      try { if (F.gpu.getCurrentRenderTarget && F.velVar) grt = F.gpu.getCurrentRenderTarget(F.velVar); } catch (_) {}
+      if (grt) renderer.setRenderTarget(grt);
+      jobs.push(renderer.compileAsync(tiny, cam));
+    } finally { try { renderer.setRenderTarget(_pRT); } catch (_) {} }
+    if (F.mesh && typeof scene !== 'undefined' && scene && typeof camera !== 'undefined' && camera) {
+      try {
+        const srt = (typeof postFX !== 'undefined' && postFX && postFX.rtScene) ? postFX.rtScene : null;
+        if (srt) renderer.setRenderTarget(srt);
+        jobs.push(renderer.compileAsync(F.mesh, camera, scene));
+      } finally { try { renderer.setRenderTarget(_pRT); } catch (_) {} }
+    }
     Promise.all(jobs).then(() => { F._pending = false; }, () => { F._pending = false; });
     setTimeout(() => { F._pending = false; }, 8000);   // never wedge a flock on a stuck promise
   } catch (_) { if (F) F._pending = false; }
@@ -37236,7 +37279,20 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   
   const _hyst = (T && T.biome === 'mossy') ? 3 : 8;
   const _hystFar2 = (_VIEW + _hyst) * (_VIEW + _hyst);
+  // (v39.94) ⚠ TEARING DOWN IS WORK TOO, AND IT WAS THE ONLY UNBUDGETED HALF LEFT. Building is
+  // sliced (`_budgeted` above, ~2.5 ms of shell rows a frame) but this swept EVERY chunk that had
+  // fallen out of range and disposed them all in one pass. Fly fast enough and a whole rank leaves
+  // the hysteresis square together, so one frame frees dozens of geometries - and the owner's F8s
+  // land exactly there: `hub:stream` 3011 ms and 1729 ms of frames whose CPU section IS this
+  // function, plus an earlier 5746 ms frame with the CPU idle and `info.geos` falling 720 -> 493,
+  // which is the same teardown seen from the GPU side. Nothing on screen depends on a chunk that is
+  // already out of view being freed THIS frame, so the sweep is capped and the remainder rolls to
+  // the next one - `_SC.idle` stays false while any disposal happened, so the pass re-runs
+  // immediately rather than waiting for the player to move again. window.__swDisposeMax tunes it;
+  // loading paths (prebake, staging, swaps) keep the old all-at-once shape.
+  const _dispMax = _budgeted ? Math.max(1, (typeof window !== 'undefined' && window.__swDisposeMax != null) ? window.__swDisposeMax : 3) : Infinity;
   for (const [key, c] of chunks) {
+    if (_swDisposed >= _dispMax) break;
     const cx = c.cx, cz = c.cz;
     const _far = _disc
       ? ((cx - scx) * (cx - scx) + (cz - scz) * (cz - scz)) > _hystFar2
@@ -37248,6 +37304,9 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
 
 
   const _treeView = (T && T.biome === 'mossy') ? _swHubView() : _SW_TREE_VIEW;
+  // (v39.94) planting was already one chunk a frame each; UNPLANTING was not - the same rank that
+  // leaves the dispose square drops its grass and trees together. Same cap, same reasoning.
+  const _remMax = _budgeted ? Math.max(1, (typeof window !== 'undefined' && window.__swRemoveMax != null) ? window.__swRemoveMax : 3) : Infinity;
   let gBuilt = 0, tBuilt = 0;
   for (const c of chunks.values()) {
     const cx = c.cx, cz = c.cz;
@@ -37257,16 +37316,16 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       const _fpT = game._foliageProf ? performance.now() : 0;
       c.grass = _swBuildGrass(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.grassBuilt = true; gBuilt++;
       if (game._foliageProf) _foliageProfRec('grass', performance.now() - _fpT);
-    } else if ((!near || !wantGrass) && c.grassBuilt) {
-      _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false; _swRemoved++;
+    } else if ((!near || !wantGrass) && c.grassBuilt && _swRemoved < _remMax) {
+      _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false; _swRemoved++;   // (v39.94) capped, see the dispose note
     }
     const nearT = _cheb <= _treeView;
     if (nearT && wantTrees && !c.treesBuilt && tBuilt < (tLim || 1)) {
       const _fpT = game._foliageProf ? performance.now() : 0;
       c.trees = _swBuildTrees(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.treesBuilt = true; tBuilt++;
       if (game._foliageProf) _foliageProfRec('trees', performance.now() - _fpT);
-    } else if ((!nearT || !wantTrees) && c.treesBuilt) {
-      _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;
+    } else if ((!nearT || !wantTrees) && c.treesBuilt && _swRemoved < _remMax) {
+      _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;   // (v39.94) capped
     }
   }
   // (v38.61) record what this pass concluded (see the idle early-out above)
@@ -55054,8 +55113,24 @@ function _ghostPinWarm() {
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
-    for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }   // (v39.82) exactly as they were
+    // (v39.93) ...AND THE PAINTED FLAVOUR OF THE SAME MESHES. Everything above runs with the seat
+    // shell APPLIED, so it warms the `ghostHull` programs - and v39.82/83 made sure the hidden
+    // cockpit is drawn while it does. But the cockpit's PAINTED materials are only ever drawn when
+    // the pilot is actually in the seat, which is the first time they meet the frame too. The owner's
+    // 39.92 mark is that other half: `hub:stream` 833.2 ms with two cold programs at the same
+    // instant, and the watcher's clock (armed at the end of the prebake) puts its two
+    // `physical [FORK: customCacheKey]` entries at exactly that moment. The fork is the custom key
+    // alone - `ghostHull` against the default - so the flavour still missing is the painted one.
+    // One more warm draw AFTER the restore, with the interior still shown, covers it.
     if (!_was) _ghostHullRestore(player.mesh);
+    try {
+      if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
+        const _pRT2 = renderer.getRenderTarget();
+        try { renderer.setRenderTarget(postFX.rtScene); _warmDrawRoot(player.mesh, postFX.rtScene, true); }
+        finally { try { renderer.setRenderTarget(_pRT2); } catch (_) {} }
+      }
+    } catch (_) {}
+    for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }   // (v39.82) exactly as they were
   } catch (_) {}
 }
 function _pinCombatEffectPrograms() {
@@ -56190,11 +56265,15 @@ async function _prebakeWorldForLaunch() {
           try {
             const _live = new Set(); for (const p of list) _live.add(p.id);
             let _gone = 0; window.__coldIds.forEach((id) => { if (!_live.has(id)) _gone++; });
-            if (_gone !== (window.__coldGone || 0)) {
+            // (v39.99) report only INCREASES. `_gone` counts ids we have seen that are no longer
+            // live, which is monotonic in theory - but the id set is pruned when it grows, so the
+            // difference could come out negative and the owner's log read "freed x-6".
+            const _prevGone = window.__coldGone || 0;
+            if (_gone > _prevGone) {
               const _t = Math.round((performance.now() - _coldT0) / 100) / 10;
-              window.__coldSeen.push({ t: _t, name: 'freed x' + (_gone - (window.__coldGone || 0)) });
-              window.__coldGone = _gone;
+              window.__coldSeen.push({ t: _t, name: 'freed x' + (_gone - _prevGone) });
             }
+            if (_gone !== _prevGone) window.__coldGone = _gone;
           } catch (_) {}
           const _ce = document.getElementById('lss-coldhud');
           if (_ce) {
@@ -63148,7 +63227,7 @@ function _warmDrawRoot(root, rt, withShadow) {
     return true;
   } catch (e) { console.warn('[warm] draw failed:', e); return false; }
 }
-function _warmCloakForRoot(root) {
+function _warmCloakForRoot(root, withShadow) {
   // (v39.49b) IN PLACE, NOT CLONED. Material.clone() copies the standard props and userData but
   // NOT `onBeforeCompile` / `customProgramCacheKey` - and every hull material carries the skin hook
   // (`lssSkinHue`, a program-key term). So the clones this warm used to compile keyed a DIFFERENT
@@ -63188,7 +63267,12 @@ function _warmCloakForRoot(root) {
       // (v39.52) ...then DRAW the cloaked state once with its real (quantized) geometry: back to
       // DoubleSide, still transparent, so three's two single-sided passes both run - see _warmDrawRoot.
       for (const m of mats) { if (m.side !== m._wSide) { m.side = m._wSide; m.needsUpdate = true; } }
-      _warmDrawRoot(root, _rtC, true);   // (v39.84) the cloaked hull is transparent: its DEPTH variant needs the shadow pass to exist
+      // (v39.84) the cloaked hull is transparent: its DEPTH variant needs the shadow pass to exist.
+      // (v39.96) ...but only the FIRST time. `withShadow === false` is for the late re-run in the last
+      // two seconds of the countdown, which exists purely to rebuild the TEXTURED colour variants once
+      // the hull materials are final - the depth variant was already built by the pass behind the
+      // loading screen, and a second full shadow render is the bulk of what the player feels there.
+      _warmDrawRoot(root, _rtC, withShadow !== false);
     } catch (_) {}
     for (const m of mats) {
       try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
@@ -63598,14 +63682,35 @@ function _lssCompleteSpectatorCinematic() {
   }
 }
 
-function _lssUpdateSpectatorCinematic() {
+// (v39.91) ⚠ DRIVE IT FROM THE FRAME'S OWN CLOCK. The camera path below is a pure function of
+// `elapsed`, which is the right shape - no per-frame smoothing, identical across peers - but elapsed
+// was measured with `performance.now()` read INSIDE the callback. That is not the frame's time: it is
+// whenever the main thread happened to reach this line, so it carries every millisecond of jitter
+// from the work scheduled ahead of it that frame. A camera positioned from a jittering clock and
+// presented on a steady vsync judders no matter how high the framerate is - which is exactly the
+// owner's report, "the cinematic is still choppy (even though it's very high fps, like 120-144)".
+// requestAnimationFrame hands gameLoop the frame's own timestamp on the same time origin, so passing
+// it through costs nothing and removes the jitter at the source. Falls back to performance.now() for
+// the watchdog path, which has no timestamp to give.
+function _lssUpdateSpectatorCinematic(frameMs) {
   if (!_cinematic.active) return false;
-  const nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-  const elapsed = (nowMs - _cinematic.startMs) / 1000.0;
-  if (elapsed >= _cinematic.duration) {
-    _lssCompleteSpectatorCinematic();
-    return false;
-  }
+  const nowMs = (typeof frameMs === 'number' && frameMs > 0) ? frameMs
+    : ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  // (v39.95) LAND THE BLEND, THEN CUT. The old shape returned on the frame elapsed passed duration,
+  // so the arrival blend's LAST applied value was the previous frame's - b a little under 1 - and
+  // `_lssEndSpectatorCinematic` then wrote the lineup mesh back to the pose it was captured with at
+  // cinematic START. For the player's own ship that pose is wherever it happened to be sitting, so
+  // the hull visibly snapped to a stale orientation for the frames before the rig took over. Owner:
+  // "the ship rotated randomly at the end of the sequence". This frame now runs with elapsed pinned
+  // to exactly the duration - b = 1, the blended pose and the gameplay pose coincide by construction
+  // (that is what the v36.76 note means by seamless) - and completes afterwards.
+  // The lower clamp guards the other end: `startMs` is a performance.now() reading taken partway
+  // through a frame, while `frameMs` is that frame's START, so the first tick could see a small
+  // NEGATIVE elapsed and swing the orbit the wrong way for one frame.
+  let elapsed = (nowMs - _cinematic.startMs) / 1000.0;
+  if (elapsed < 0) elapsed = 0;
+  const _cineDone = elapsed >= _cinematic.duration;
+  if (_cineDone) elapsed = _cinematic.duration;
   // Re-apply ship poses every frame. Defensive : even though the
   // warmup state freezes physics, NetworkPlayer.update interpolates
   // mesh.position from peer broadcasts every frame regardless of
@@ -63699,8 +63804,12 @@ function _lssUpdateSpectatorCinematic() {
       _cineMQ.copy(_cineQ).multiply(_cineFlipY);
       _s0.mesh.position.lerp(player.position, b);
       _s0.mesh.quaternion.slerp(_cineMQ, b);
+      // (v39.95) and on the last frame, tell the restore to leave OUR ship exactly here: it landed
+      // on the gameplay pose, and rewriting it to the start-of-cinematic pose is the visible snap.
+      if (_cineDone) { _s0.origPos.copy(_s0.mesh.position); _s0.origQuat.copy(_s0.mesh.quaternion); }
     }
   }
+  if (_cineDone) { _lssCompleteSpectatorCinematic(); return false; }
   return true;
 }
 
@@ -78704,6 +78813,10 @@ function launchCountdown(duration) {
   const numEl = overlay ? overlay.querySelector('.cd-num') : null;
   const subEl = overlay ? overlay.querySelector('.cd-sub') : null;
   if (!overlay || !numEl || !subEl) { _countdownActive = false; return; }
+  // (v39.98) The v39.92 block that forced #ship-select visible for the duration is GONE, along with
+  // the reason for it: #ship-select-countdown is a top-level element now, so no caller can hide the
+  // digits by hiding the picker. Its restore was also time-blind - the round start hides the picker
+  // between capture and restore, and putting the captured state back re-showed it on top of round 2.
 
   // Helper: pulse a single digit/word, restarting the cdPulse animation each tick.
   function tick(text, sub) {
@@ -90872,7 +90985,8 @@ function __pmark(name) {
   if (!on) return;
   const KEY = 'lss_f8log', CAP = 40, BYTES = 400000, N = 16384;
   window.__profOn = true;
-  const R = { ring: new Float32Array(N), ringT: new Float32Array(N), ri: 0, lo: [], secPrev: {}, big: [], lastProgs: 0, cold: [], last: 0, marks: null };
+  const R = { ring: new Float32Array(N), ringT: new Float32Array(N), ri: 0, lo: [], secPrev: {}, big: [], lastProgs: 0, cold: [], last: 0, marks: null,
+    res: [], resPrev: null };   // (v39.99) see the teardown probe below
   const profNow = () => { const p = window.__prof, o = {}; if (!p) return o; for (const k in p) { const v = p[k]; if (v && typeof v.total === 'number') o[k] = v.total; } return o; };
   const tick = (t) => {
     requestAnimationFrame(tick);
@@ -90895,6 +91009,28 @@ function __pmark(name) {
         secs.sort((a, b) => b[1] - a[1]);
         R.big.push([+(t / 1000).toFixed(2), +gap.toFixed(1), secs.slice(0, 4)]);
         if (R.big.length > 200) R.big.shift();
+        // (v39.99) WHAT THE FRAME DID TO THE GPU'S RESOURCES. Four times this session a mark has
+        // come back as a long frame with the CPU idle - `renderFrame` 2.5 ms of a 5746 ms gap, and
+        // the owner's roundEnd mark is 15 late frames totalling 876 ms with only 63 ms attributed to
+        // any profiled section. CPU profiling cannot see that; it is work inside the GPU process,
+        // and the thing that provokes it here is resources being created or destroyed. So a late
+        // frame now records what changed in renderer.info across it: programs, geometries and
+        // textures, plus the draw calls and triangles it issued. A teardown then reads as a teardown
+        // (negative counts) instead of as a mystery, and an upload burst reads as an upload burst.
+        try {
+          const _i = renderer.info, _m = _i.memory, _r = _i.render;
+          const _now = [_i.programs ? _i.programs.length : 0, _m.geometries, _m.textures, _r.calls, _r.triangles];
+          if (R.resPrev) {
+            const _d = [_now[0] - R.resPrev[0], _now[1] - R.resPrev[1], _now[2] - R.resPrev[2]];
+            if (_d[0] || _d[1] || _d[2] || _r.calls > 0) {
+              R.res.push([+(t / 1000).toFixed(2), _d[0], _d[1], _d[2], _r.calls, _r.triangles]);
+              if (R.res.length > 200) R.res.shift();
+            }
+          }
+          R.resPrev = _now;
+        } catch (_) {}
+      } else {
+        try { const _i = renderer.info, _m = _i.memory; R.resPrev = [_i.programs ? _i.programs.length : 0, _m.geometries, _m.textures, _i.render.calls, _i.render.triangles]; } catch (_) {}
       }
       R.secPrev = cur;
       try {
@@ -90986,6 +91122,9 @@ function __pmark(name) {
       // Its `t` is seconds since the watcher armed (just after the prebake), close enough to this
       // mark's own clock to line the two up by eye.
       coldNames: (function () { try { return (window.__coldSeen || []).slice(-24); } catch (_) { return null; } })(),
+      // (v39.99) [t, dPrograms, dGeometries, dTextures, drawCalls, triangles] for each late frame in
+      // the window. A negative triple is a teardown; a positive one is content arriving.
+      res: R.res.filter(r => r[0] >= now - 5).slice(-12),
       frames: 0, worst: 0, avgFps: 0, info: null, run: null, speed: null, round: null,
     };
     try { const all = around(now - 5, now, 0); m.frames = all.length; m.worst = all.length ? +Math.max(...all.map(a => a[1])).toFixed(1) : 0; m.avgFps = all.length ? Math.round(1000 / (all.reduce((acc, a) => acc + a[1], 0) / all.length)) : 0; } catch (_) {}
@@ -91084,7 +91223,8 @@ function gameLoop(timestamp) {
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
     if (typeof _lssUpdateSpectatorCinematic === 'function') {
       try {
-        _lssUpdateSpectatorCinematic();
+        _lssUpdateSpectatorCinematic(timestamp);   // (v39.91) the frame's own clock, not the callback's
+        __pmark('cine:tick');   // (v39.97)
       } catch (e) {
         console.warn('[cinematic] tick failed:', e && e.message);
         try { _lssCompleteSpectatorCinematic(); } catch (_) { _cinematic.active = false; }
@@ -91103,24 +91243,37 @@ function gameLoop(timestamp) {
       // pose is fresh. uCam follows camera.position (its edgeFade/Fresnel anchor); _swRippleTick
       // already recenters its window on the camera while _cinematic.active (the _cineW pattern),
       // and the wake block inside it keys off the (frozen) ship so no spurious wake is laid.
+      // (v39.97) THIS BRANCH HAD NO PROFILER MARKS AT ALL. It returns before every `__pmark` in the
+      // main path, so an F8 taken during a cinematic came back with a frame time and no attribution -
+      // which is exactly the position the owner is in for elimination mode ("cinematic in elimination
+      // mode has some lag, too... will it be the same fix?"). It will NOT be the same fix: the late
+      // cloak re-warm that v39.96 is about lives past this `return`, so it cannot run while a
+      // cinematic is up. Whatever this lag is, it is one of the calls below or the render itself, and
+      // now the mark will say which.
       if (game.sandwichTerrain && game.sandwichTerrain.ON && player && player.position) {
         try {
           const _cdt = game.deltaTime;
           _swU.uTime.value += _cdt;
           _swU.uCam.value.set(camera.position.x, camera.position.y, camera.position.z);
           try { _swUpdateHubWater(); } catch (_) {}
+          __pmark('cine:water');
           try { _swRippleTick(_cdt); } catch (_) {}
           try { _swUpdateUnderwater(); } catch (_) {}
+          __pmark('cine:ripple');
           try { _birdFlockTick(_cdt); } catch (_) {}
           try { _fishSchoolTick(_cdt); } catch (_) {}
+          __pmark('cine:critters');
           try { _hubCityFrame(_cdt); } catch (_) {}
+          __pmark('cine:city');
           try { _wxFrame(_cdt); } catch (_) {}
           // MUST be after _wxFrame — it owns the sun intensities each frame.
           try { _hzDuskLights(); } catch (_) {}
+          __pmark('cine:weather');
         } catch (_) {}
       }
       const _xrActive = !!(renderer && renderer.xr && renderer.xr.isPresenting);
       if (typeof document === 'undefined' || !document.hidden || _xrActive) renderFrame();
+      __pmark('cine:render');
       return;
     }
   }
@@ -91242,9 +91395,21 @@ function gameLoop(timestamp) {
 
   if (game.state === 'select') {
     const _selNow = timestamp;
+    // (v39.90) ...AND THE LAUNCH IS NOT A BACKGROUND FRAME. The 167 ms gate below is right while the
+    // picker is up - it sits opaque over the world, so 6 Hz behind it costs nothing anyone can see.
+    // But `_lssPickerOwnsFrame` deliberately releases the frame the moment `#ship-select` goes
+    // `lss-launching`, and from then until `game.state` flips the COUNTDOWN and the warp-in are the
+    // whole screen - drawn by this branch, at 6 fps. Owner: "the cinematic is still choppy (even
+    // though it's very high fps, like 120-144), and it misses the count down still". Both halves of
+    // that are this one gate: the fps counter reads rAF ticks, which never stopped being 144, while
+    // the WORLD was being drawn six times a second, and a digit that lives for a second can fall
+    // between two of those frames. Exactly the v39.25b mistake one screen over - "the ship spinning
+    // looks choppy. It was 6 fps" - where the throttle outlived the opaque thing that justified it.
+    const _launching = (typeof _countdownActive !== 'undefined' && _countdownActive) ||
+                       (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
     // VR fork: in immersive mode the headset still expects a frame each
     // tick, so render every call (no throttle) when XR is presenting.
-    const _shouldRender = renderer.xr.isPresenting
+    const _shouldRender = renderer.xr.isPresenting || _launching
       || (!game._selectLastRender || _selNow - game._selectLastRender >= 167);
     if (_shouldRender) {
       game._selectLastRender = _selNow;
@@ -91411,7 +91576,14 @@ function gameLoop(timestamp) {
             else if (game.warmupTimer < 2 && !game._cloakLateWarm && player && player.mesh) {
               game._cloakLateWarm = true;
               if (player.mesh.userData) player.mesh.userData._cloakWarmed = false;
-              _warmCloakForRoot(player.mesh);
+              // (v39.96) ⚠ THIS RUNS WITH THE COUNTDOWN ON SCREEN. Measured in the pane: suppressing
+              // this one call takes the worst `hub:stream` frame of the launch from 1073 ms to 78 ms -
+              // and `hub:stream` only gets the blame because the call sits inside that section, which
+              // is why three F8 marks in a row pointed at the terrain streamer for work the streamer
+              // never did. v39.83 (draw the hidden interior) and v39.84 (add the shadow pass) both made
+              // it heavier, so the shadow half is dropped here: this pass is about the textured colour
+              // variants, and the depth one was built behind the loading screen.
+              _warmCloakForRoot(player.mesh, false);
             }
           }
         } catch (_) {}
