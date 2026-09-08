@@ -2230,3 +2230,309 @@ the 39.72 marks too). The fork the namer catches in the pane and on the owner's 
 default key, i.e. the seat-shell variant and the painted variant of the same material, one of them
 not warmed. `_ghostPinWarm` already exists for exactly this and clearly is not covering every case.
 **Open: find which hull material reaches the frame in the flavour the pin did not build.**
+
+## v39.81 — the cold watcher sees a program being REBUILT, not just a new one
+
+The owner's 39.80 mark, a hitch over the countdown: `hub:stream` **2107 ms**, `renderFrame` 3.3 ms,
+the program count **up by 2** at that instant — and `coldNames` naming nothing from that moment (its
+only two entries were 33 s earlier). The key-only watch could not see it, and that absence is itself
+the finding.
+
+three.js frees a `WebGLProgram` when its last material is disposed and builds a fresh one — a real
+`gl.linkProgram`, the full ANGLE/D3D compile — the next time that same key is wanted. The **key** set
+has seen it, so the watcher stayed quiet; the **count** rose, so the recorder blamed the frame. Two
+seconds for two links is entirely plausible for shaders this size.
+
+So the watcher now tracks program **ids**, not just keys:
+- a new id whose key is new → the old report (`terrain`, `water`, `physical [FORK: ...]`);
+- a new id whose key was already warm → **`[RELINK]`**, which means churn: something disposed a
+  material that was about to be needed again. That is a bug every time, and a different bug from
+  "new content compiled", which is expected and warmable;
+- ids that vanish are reported as `freed xN`, so a mark can show the disposal and the rebuild as one
+  story.
+
+**Ruled out along the way — the near-field water is not this.** Instrumented over a full load, its
+material links three programs, and they are (output colour space, tone mapping) variants:
+
+| at | colour space | tone mapping | who draws it |
+|---|---|---|---|
+| 7.8 s | srgb-linear | none | the gameplay path, into `postFX.rtScene` |
+| 16.5 s | srgb | 4 | a pin pass, against the canvas |
+| 20.3 s | srgb | none | a pin pass with `toneMapping` forced off |
+
+The one the game actually renders with links **first**, inside the prebake. The other two are the pin
+passes compiling canvas variants the gameplay frame never uses — waste that lands on the load, the
+same 17 s / 11.2 s GPU-warm bill as above, not on a play frame.
+
+**Open:** reproduce the re-link. A teleport tour across the hub in the pane produced no program frees
+and no re-links, so whatever disposes it needs the owner's longer load and the countdown window. The
+next mark will name it.
+
+## v39.82 — the seat-shell warm never drew the cockpit, so the seat paid for it
+
+Found with v39.81's namer, free flight in the pane: **seven programs linking together at t=30.3 s, in
+play** — `Vortex_CP_ScreenGlass [FORK: customCacheKey]` x2, `hull [FORK: customCacheKey]` x2,
+`basic [FORK: customCacheKey]` x2 and `depth [FORK: flags]` x1. Two of each because the ghost
+materials are transparent + DoubleSide and three.js draws those in two single-sided passes, each with
+its own program. The fork is on `customCacheKey` alone, which is `ghostHull` against the default (the
+stringified `onBeforeCompile`) — so the painted variant was warm and the seat-shell variant was not.
+
+`_ghostPinWarm` exists precisely to build these behind the loading overlay, and it does apply the
+shell and compile. What it did not do is **draw** them, and v39.52 established that a warm must draw:
+ANGLE builds a vertex executable per vertex input layout at the first draw that uses it. The pin runs
+with the hull in its THIRD-PERSON state, where the cockpit interior is hidden, and `_warmDrawRoot`
+only un-hides the root's ANCESTORS, never its descendants. So the interior was never drawn, and its
+programs were built on the frame the pilot first took the seat — the owner's "the switch from third
+to first person lagged a bit".
+
+Both `_ghostPinWarm` and `_ghostPinWarmAsync` now show every descendant of `player.mesh` for the
+duration of the warm and put each back exactly as it was. The draw is 8x8 and off-screen.
+
+Pane before: 4 `ghostHull` programs, linking in play at t=30.3.
+Pane after: **16** `ghostHull` programs, all built during the load, and a tour that teleports across
+the hub while flipping between the seat and the chase view every ~200 frames adds **no** cold link at
+all. What remains is `physical [FORK: customCacheKey]` x2 and `depth [FORK: flags]` x1, all at t=7 —
+the moment the watcher arms at the end of the load, which is where the owner sees them too.
+
+**Still open — the countdown hitch itself.** The owner's 39.80 mark is `hub:stream` 2107 ms with the
+program count up by 2 and no new key to show for it, which is the re-link signature v39.81 was built
+to name. It did not reproduce in the pane (no frees, no re-links across a full teleport tour), so it
+needs the owner's longer load and the countdown window. The next mark will label it `[RELINK]` and
+say which shader.
+
+## v39.83 — a warm that does not DRAW is not a warm, and `_warmDrawRoot` never drew the seat
+
+Owner: "it shouldn't still be warming there, we have a loading screen for that." Correct, and
+measurable. Instrumenting the pane with the overlay's `.active` class beside `renderer.info.programs.length`:
+
+| build | programs under the overlay | programs after it lifts |
+|---|---|---|
+| 39.82 | 190 → 246 | **246 → 248 at +6.7 s, during the countdown** |
+| 39.83 | 190 → 248 | **none** |
+
+The two late ones were `physical [FORK: customCacheKey]` x2 — the pair the owner's own machine reports
+at t≈7-8 every load, and the same shape as the 39.80 countdown mark.
+
+The cause is one line in `_warmDrawRoot`, and it was costing every pin that calls it. v39.52
+established the principle — *a warm must draw*, because ANGLE builds a vertex executable per vertex
+input layout at the first draw that uses it — but the helper only un-hid the root's **ancestors**:
+
+```js
+for (let n = root; n; n = n.parent) { if (!n.visible) { n.visible = true; shown.push(n); } }
+```
+
+Every one of these pins runs with the ship in its THIRD-PERSON state, and the cockpit interior is
+hidden there. So the whole seat — the `*_CP_*` meshes, the windshield, the screen glass — was
+compiled and never rasterised by `_warmCloakForRoot`, the mirror-lift warm or `_ghostPinWarm`, and
+paid for itself on the frame the pilot took the seat or first cloaked. `root.traverse` now shows the
+descendants too, restored by the same `shown` list. One line, every caller fixed.
+
+(v39.82 had already done this inside `_ghostPinWarm` / `_ghostPinWarmAsync`, which found it: the
+namer caught `Vortex_CP_ScreenGlass` x2, `hull` x2, `basic` x2 and `depth` x1 linking together at
+t=30.3 s in play, two of each because the ghost materials are transparent + DoubleSide and three.js
+draws those in two single-sided passes. That change is kept — it also covers the `renderer.compile`
+calls that run before the draw — but v39.83 is what generalises it.)
+
+Pane after, across a tour that teleports around the hub while flipping between the seat and the chase
+view and toggling fire every couple of seconds: **one** cold link, `depth [FORK: flags] x1`, a single
+shadow-depth variant differing from a warm sibling by one boolean bit.
+
+**Open, and the same family:** `_warmDrawRoot` pins `renderer.shadowMap.autoUpdate = false` so the
+pass stays one cheap render — which means the *depth* variant of a cloaked or ghosted material is
+never built. Letting one shadow update through during the cloak warm should close it.
+
+## v39.84 — the shadow pass was the last thing the warm did not do
+
+Owner's 39.83 F8 on the third-to-first-person switch: **2785.8 ms, entirely `renderFrame`**, with
+exactly **one** cold program — and `coldNames` again showing nothing from that instant. This time the
+absence resolves: the live tab has `__coldIds.size === renderer.info.programs.length === 250` and
+only three named entries, all from the load, so no *unnamed* program object exists. The watcher's
+clock starts when it arms (end of prebake) and the recorder's at page load; the offset makes the
+watcher's `depth [FORK: flags]` at t 20.9 the recorder's +1 at t 50.42. **The 2.8 s frame is that one
+shadow-depth program.**
+
+Which is the item v39.83 left open, and the cause is the line right below the one it fixed:
+
+```js
+const sm = renderer.shadowMap.autoUpdate; renderer.shadowMap.autoUpdate = false;
+```
+
+Freezing the shadow map keeps `_warmDrawRoot` to one cheap render, which is right for the dozens of
+per-hull calls. But the sun's shadow pass draws with the **depth** material, whose program is keyed on
+the real material's flags — and a ghosted or cloaked hull is *transparent*, a different depth key. So
+that variant was never built by any warm and linked on the frame the state first showed: the seat.
+
+`_warmDrawRoot(root, rt, withShadow)` now takes an opt-in third argument. `_ghostPinWarm` and
+`_warmCloakForRoot` pass `true` — the two warms that change a material's transparency, and therefore
+its depth key. Everything else keeps the single cheap pass.
+
+Pane, clean load, tour flipping seat/chase and fire every couple of seconds:
+
+| | programs behind the overlay | after it lifts | cold links in play |
+|---|---|---|---|
+| 39.82 | 190 → 246 | 246 → 248 | 7 at the first seat view |
+| 39.83 | 190 → 248 | none | 1 (`depth [FORK: flags]`) |
+| 39.84 | 140 → 216 | **none** | **0** |
+
+Shadows still render and `shadowMap.autoUpdate` is restored to `true` after the warm.
+
+### The countdown numbers
+
+Owner: "also, i couldn't see the countdown numbers". The ROUND countdown is not missing — it is off by
+design in this mode:
+
+```css
+body.lss-freeflight #ov-countdown { display: none !important; }
+```
+
+Confirmed on the owner's own tab: `body.className` is `cine-fx lss-freeflight lss-thirdperson`, and
+`#ov-countdown` is `display: none` with its text sitting at "ROUND 1 3". The numbers they mean are
+`#ship-select-countdown` ("3 ... LAUNCH", currently reading "LAUNCH WARP-IN"), which runs at ship
+select *before* the loading overlay goes up — so a stall there skips them, and the warm work this
+section is about is exactly what stalls. Nothing to fix in the UI.
+
+## v39.85 — the cities were churning shader programs, and the watcher had gone home
+
+The owner's "little hitch": 778.4 ms at t 423.5, entirely `renderFrame`, `hub:city` in its section
+list, exactly **one** cold program — and once again no name. But this time the live watcher had
+already written the whole story, 200 s earlier:
+
+```
+t 167.4  lambert [FORK: flags]
+t 196.0  freed x1
+t 226.0  lambert [FORK: flags] [RELINK]
+t 230.3  freed x1
+```
+
+That is v39.81's id-watch doing exactly what it was built for: a program **built, freed, and rebuilt**.
+Two separate bugs fall out of it.
+
+**1. The watcher stops after five minutes.** The 300 s cutoff was fine when this only printed to the
+console; the F8 mark has depended on it since v39.80, and the owner's hitch landed at t 423 s — long
+after it had quit — which is why the mark came back with a cold COUNT and no name for the third time
+running. It now runs for the whole session, dropping to a two-second poll after the first five
+minutes. The poll is a Set diff over ~250 programs; at that rate it is free and still catches a link
+inside the same F8 ring.
+
+**2. `_owDrop` disposed every city material outright.** `_hcMakeMeshes` builds fresh
+`MeshLambertMaterial`s per city site, and dropping a site called `m.dispose()` on all of them — which
+frees their programs, so the next city to stream in relinks them cold, in play. `_hubCityDispose` did
+the same. Both now free the per-site canvas textures (which are large and genuinely per-site) and hand
+the material to **`_lssRetainMat`**, the v38.97 helper that keeps ONE material per real program key
+(three's own, read from `renderer.properties`) and disposes every duplicate. Cost: a handful of
+materials for the session. Benefit: no city ever relinks.
+
+Measured in the pane by driving `HUBCITY.dispose()` / `HUBCITY.init()` in a loop:
+
+| cycle | before | after dispose | after rebuild |
+|---|---|---|---|
+| 1 | 247 | 246 | 246 |
+| 2 | 246 | 246 | 246 |
+| 3 | 246 | 246 | 246 |
+
+The first teardown retains one material per key; every cycle after it frees nothing and links nothing.
+Before the change the same loop freed three programs per teardown.
+
+**Not fully closed.** That artificial loop still reports one `lambert [FORK: outputColorSpace]
+[RELINK]` per rebuild — the canvas (`srgb`) twin of a material whose render-target (`srgb-linear`)
+twin is retained, freed and rebuilt while the total holds flat. In real play the hub city is built
+once, and the streaming path is `_owBuild`/`_owDrop`, which the console cannot drive (`OW` is
+module-scoped), so this needs the owner's next mark to confirm. With the watcher now alive for the
+whole session, that mark will name it.
+
+## v39.86 — the refraction copy was blitting the whole target, not the part being drawn
+
+Owner: "it was choppy during the cinematic, and the countdown too, i could hear the sound for the
+countdown were even off beat because of lag". The 39.85 mark says this is **not a hitch**:
+
+| worst | avg fps | frames | cold links | long frames |
+|---|---|---|---|---|
+| 28.1 ms | 127 | 635 | 0 | none |
+
+`big` and `lo` are both empty. What the ring holds is a run of seven 20-28 ms frames inside four
+seconds — each one three or four dropped frames at 144 Hz, which is exactly what makes audio land off
+the beat without anything ever freezing. Sustained GPU load, not a stall.
+
+And the machine says so directly. `window.__ss` on the owner's tab mid-session:
+
+```
+scale -0.6   steps 7   backoff 8   ema 33.1 ms   hz 144
+```
+
+The v39.49 adaptive supersampler has backed off seven steps and is rendering into 1920x1080 of a
+**4608x2592** allocated scene target — MEGA at a 1080p canvas with dpr 1.25.
+
+Which is where v39.79's refraction copy was quietly expensive. `copyFramebufferToTexture` copies
+`texture.image` worth of pixels, and the copy was sized to `rt` — so it blitted the **entire allocated
+target every frame**, 11.9 MP, five sixths of it stale pixels outside the live viewport that the
+shader clamps away anyway. On a machine already short of GPU that is a per-frame tax in exactly the
+shape reported.
+
+The copy is now sized to the live rectangle from `_lssSceneActive`, bucketed to 128 px so the
+sampler's steps do not reallocate the texture as they move. `uSceneRes` becomes the copy's size and
+`uSceneMax` the live fraction of it; `gl_FragCoord` is already in the live viewport's own pixels, so
+the shader math is simpler than before, not more complex.
+
+Measured in the pane forced to MEGA (target 3210x2064, the same ~5.7x ratio as the owner's):
+
+| supersampler | live viewport | copy before | copy after |
+|---|---|---|---|
+| scale 0 | 1337x860 | 3210x2064 (6.6 MP) | 1408x896 (1.26 MP) |
+| scale -0.6 (owner's state) | 936x602 | 3210x2064 (6.6 MP) | 1024x640 (0.66 MP) |
+| scale 1 | 3210x2064 | 3210x2064 | 3210x2064 (nothing to save) |
+
+⚠ **Not proven to be the whole cause.** The pane's GPU has headroom at these sizes — refraction on
+143.9 fps against off 144.0, both at the cap — so the saving is arithmetic, not a measured framerate
+win. What is certain is that the cost was real, self-inflicted by v39.79, and is now 6-10x smaller.
+The underlying pressure is MEGA itself: a 4608x2592 scene target is what the sampler has been backing
+away from all session. HIGH would drop that target entirely — the owner's call.
+
+## v39.87 / v39.88 — the recorder could not see the chop band
+
+Owner: "it was choppy during the cinematic, and the countdown too, i could hear the sound for the
+countdown were even off beat because of lag" — then, after trying the obvious: "even though i put it
+lower performance setting, it still did the same thing", and the right question: **"what should be
+during the loading screen, and not during the cinematic?"**
+
+**Why the quality setting did nothing.** The codebase already measured this, in the v35.22 note that
+retired the LOW/MEDIUM tiers from the picker:
+
+> this game is DRAW-CALL bound, not fill bound — the same reason dropping the render-resolution tier
+> was measured to not move hub fps at all
+
+So resolution is not the lever here, and LOW/MEDIUM are not even reachable from the UI (they migrate
+to HIGH); a "lower setting" is MEGA → ULTRA → HIGH, all of which change pixels, not draw calls.
+`applyQualityPreset` does resize the targets now (v38.64 `_doPostFXResize`), so the old "presets don't
+resize mid-session" note is stale — it just does not address this.
+
+**v39.87 — a cinematic resolution drop, built and left OFF.** The supersampler deliberately refuses
+samples while `game.state !== 'playing'` or the cinematic is up (their frames are throttled and would
+poison the EMA) — but the consequence was that the scale simply FROZE at whatever gameplay left, so
+the most expensive view in the game ran with no adaptation at all. Dropping the scale for those
+states is one clamp and a viewport change, and true foveation is not an option here: WebGL2 exposes no
+variable-rate shading, and a low-res frame plus a high-res centre inset submits the centre's geometry
+twice, which on a vista where terrain fills the frame costs more than it saves. **Default off**
+(`window.__ssCine = null`) — the owner pulled back ("no... wait"), and the draw-call finding says it
+would not have been the fix anyway. `window.__ssCine = -0.75` enables it; `__postFXInfo().cine`
+reports it.
+
+**v39.88 — profile the chop band, and summarise the run.** This is the actual gap. The recorder only
+captured `__prof` section deltas for frames over **30 ms**, and the owner's chop frames were 20-28 ms
+— so the mark recorded `worst 28.1 ms` with an **empty** `big` list: it could prove a run of frames
+was late and not say which system ate them, three reports running.
+
+- The threshold now tracks the display: `max(16, min(30, period * 2.2))` — **16 ms on the owner's
+  144 Hz panel**, and never worse than the old 30 (at 60 Hz the formula would have risen to 36.7).
+- A new `chop` field summarises the same 5-second window as one number per system, worst first,
+  because with the threshold down there the interesting thing is no longer any single frame but where
+  the milliseconds went across the run.
+
+Pane, teleport tour to force streaming (artificial, but it proves the instrument):
+
+```
+chop: { n: 11, ms: 2237.5, by: [ ["hub:clip",1703.4], ["hub:weather",219.3],
+                                 ["hub:critters",88.2], ["hub:ripple",43.9] ] }
+```
+
+Eleven late frames, 76% of the time in the terrain clipmap. **That is the shape of answer the owner's
+question needs, and the next F8 taken during the real chop will give it for the cinematic.**

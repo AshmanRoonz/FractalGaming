@@ -4410,7 +4410,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.80';
+const LSS_BUILD = '39.88';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -21880,6 +21880,37 @@ function _lssSupersampleTick(ts) {
   // reallocation, ~125 ms at 8.8 MP: five hitches on the picker, measured in the owner's
   // session (__prof prelude+input 128 ms x5), and scale 0 before combat even began. The loading
   // overlay's throttled frames and the cinematic are the same trap.
+  // (v39.87) THE CINEMATIC AND THE COUNTDOWN GET A SMALLER RECTANGLE, NOT A FROZEN ONE.
+  // The guard below is right to refuse SAMPLES from these states - their frames are throttled and
+  // would poison the EMA - but the consequence was that the scale simply froze at whatever gameplay
+  // left, and then the most expensive view in the game ran at it: a camera flying over the open
+  // overworld with no occlusion, everything drawn, on a MEGA target of 4608x2592. The owner heard
+  // the result as the countdown audio drifting off the beat, and asked for "something like foveated
+  // rendering for the cinematic in that big open area".
+  //
+  // True foveation is not available here. WebGL2 exposes no variable-rate shading, and the two-pass
+  // version - a low-resolution full frame plus a high-resolution centre inset - submits the centre's
+  // geometry twice, which on a vista where terrain fills the whole frame costs more than it saves.
+  // What IS available is the thing foveation is a refinement of: rasterise fewer pixels while nobody
+  // is aiming at anything. A step here is a viewport change, not a reallocation (see v39.49b), so
+  // this is free to apply and free to undo, and motion blur plus the upscale hide it far better in a
+  // fly-through than they would in combat. window.__ssCine tunes it; null restores the old behaviour.
+  const _cineNow = (game.state !== 'playing') ||
+                   (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
+  if (!_cineNow && S.cineSaved != null) { S.scale = S.cineSaved; S.cineSaved = null; }
+  if (_cineNow && !settingsOpen && !game._worldPrebaking) {
+    // ⚠ DEFAULT OFF. Built when the owner asked for "something like foveated rendering for the
+    // cinematic", then left disabled when they pulled back ("no... wait") - and the codebase's own
+    // measurement argues against it anyway: v35.22 retired the LOW/MEDIUM tiers because "this game is
+    // DRAW-CALL bound, not fill bound - the same reason dropping the render-resolution tier was
+    // measured to not move hub fps at all", which is also why their lower quality setting changed
+    // nothing. Set window.__ssCine = -0.75 to try it; it costs a viewport change and nothing else.
+    const _want = (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : null;
+    if (typeof _want === 'number') {
+      if (S.cineSaved == null) S.cineSaved = S.scale;
+      if (S.scale > _want) S.scale = _want;
+    }
+  }
   if (game.state !== 'playing' || settingsOpen || game._worldPrebaking ||
       (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) { S.ema = 0; return; }
   if (!(dt >= 2 && dt <= 250)) return;                 // a tab switch or a load hitch is not a sample
@@ -22055,6 +22086,7 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
     return { level: QUALITY.level, pixelRatio: renderer.getPixelRatio(),
              canvas: [renderer.domElement.width, renderer.domElement.height],
              scene: [postFX.rtScene.width, postFX.rtScene.height, 'samples', postFX.rtScene.samples | 0],
+             cine: [_ssDyn.cineSaved != null, (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : null],   // (v39.87) off by default
              active: [_sceneActive.w, _sceneActive.h, 'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
@@ -22578,23 +22610,37 @@ function _waterRefractBind(rnd, scn, cam) {
     if (!_waterRefractWanted()) return;
     const rt = rnd.getRenderTarget();
     if (!rt || rt !== postFX.rtScene || rt.samples > 0) return;
+    // (v39.86) COPY THE LIVE RECTANGLE, NOT THE WHOLE TARGET. copyFramebufferToTexture copies
+    // `texture.image` worth of pixels, so sizing the copy to `rt` blitted the entire allocated scene
+    // target every frame - and on MEGA that target is 4608x2592 (11.9 MP) while the v39.49 adaptive
+    // supersampler is usually rendering into a much smaller corner of it. Measured on the owner's
+    // machine mid-session: allocated 4608x2592, live 1920x1080, sampler backed off 7 steps to
+    // scale -0.6 with a 33 ms EMA - so ~48 MB of blit per frame, five sixths of it stale pixels the
+    // shader clamps away anyway. That is a per-frame GPU cost on a machine already short of GPU, and
+    // it is the shape of the owner's report: not a hitch, a run of 21-28 ms frames ("choppy during
+    // the cinematic, and the countdown ... the sound for the countdown was off beat because of lag").
+    // Bucketed to 128 px so the sampler's steps do not reallocate the texture every time they move.
+    const A = _lssSceneActive(rt);   // the live sub-rectangle (v39.49 supersample viewport)
+    const bw = Math.max(128, Math.min(rt.width, Math.ceil(A.w / 128) * 128));
+    const bh = Math.max(128, Math.min(rt.height, Math.ceil(A.h / 128) * 128));
     const C = postFX.rtRefractCopy;
-    if (!C || C.image.width !== rt.width || C.image.height !== rt.height) {
+    if (!C || C.image.width !== bw || C.image.height !== bh) {
       try { if (C) C.dispose(); } catch (_) {}
-      postFX.rtRefractCopy = new THREE.FramebufferTexture(rt.width, rt.height);
+      postFX.rtRefractCopy = new THREE.FramebufferTexture(bw, bh);
       postFX.rtRefractCopy.minFilter = THREE.LinearFilter;
       postFX.rtRefractCopy.magFilter = THREE.LinearFilter;
     }
     rnd.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
     u.uSceneTex.value = postFX.rtRefractCopy;
-    u.uSceneRes.value.set(rt.width, rt.height);
-    const A = _lssSceneActive(rt);   // the live sub-rectangle of the target (v39.49 supersample viewport)
-    u.uSceneMax.value.set(A.sx, A.sy);
+    // gl_FragCoord is in the live viewport's own pixels, and the copy starts at its origin, so the
+    // shader divides by the COPY's size and clamps to the live fraction of it.
+    u.uSceneRes.value.set(bw, bh);
+    u.uSceneMax.value.set(Math.min(1, A.w / bw), Math.min(1, A.h / bh));
     const W = window.__water || {};
     u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
     if (W.refractK != null) u.uRefractK.value = +W.refractK;
     const I = window.__waterRefractInfo || (window.__waterRefractInfo = { frames: 0 });
-    I.frames++; I.res = [rt.width, rt.height]; I.k = u.uRefractK.value; I.inline = true;
+    I.frames++; I.res = [bw, bh]; I.target = [rt.width, rt.height]; I.live = [A.w, A.h]; I.k = u.uRefractK.value; I.inline = true;
   } catch (_) { u.uRefract.value = 0.0; }
 }
 function renderPostFX() {
@@ -32066,8 +32112,11 @@ function _hubCityDispose() {
       if ((o.isMesh || o.isInstancedMesh) && !o.userData.hcShared) {
         try { if (o.geometry) o.geometry.dispose(); } catch (_) {}
         try {
-          const m = o.material;
-          if (m && m.dispose) { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); m.dispose(); }
+          const m = o.material;   // (v39.85) same churn as _owDrop - retain the program, free the canvases
+          if (m) {
+            try { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); } catch (_) {}
+            if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else if (m.dispose) m.dispose();
+          }
         } catch (_) {}
       }
     });
@@ -34302,9 +34351,24 @@ function _owDrop(c) {
         if ((o.isMesh || o.isInstancedMesh) && !o.userData.hcShared) {
           try { if (o.geometry) o.geometry.dispose(); } catch (_) {}
           try {
+            // (v39.85) RETAIN THE PROGRAMS, DISPOSE THE REST. `_hcMakeMeshes` builds fresh
+            // MeshLambertMaterials for every city site, and this dropped them outright - which frees
+            // their programs, so the next city to stream in relinks them cold, in play. Caught by the
+            // v39.81 id-watch on the owner's machine as a clean churn cycle:
+            //   t 167.4 lambert [FORK: flags]  ->  t 196 freed x1  ->  t 226 lambert [RELINK]  ->  t 230.3 freed x1
+            // and the F8 that followed is a 778 ms frame in `renderFrame` with `hub:city` in its
+            // section list and exactly one cold program. `_lssRetainMat` keeps ONE material per real
+            // program key (three's own, from renderer.properties) and disposes every duplicate, so
+            // the cost is a handful of materials for the session and no city ever relinks again.
+            // The canvas textures are still freed - they are per-site and much larger than a program.
             const m = o.material;
-            if (Array.isArray(m)) m.forEach(x => { if (x && x.dispose) x.dispose(); });
-            else if (m && m.dispose) { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); m.dispose(); }
+            const _keep = (typeof _lssRetainMat === 'function');
+            const _one = (x) => {
+              if (!x) return;
+              try { if (x.map) x.map.dispose(); if (x.emissiveMap) x.emissiveMap.dispose(); } catch (_) {}
+              if (_keep) _lssRetainMat(x); else if (x.dispose) x.dispose();
+            };
+            if (Array.isArray(m)) m.forEach(_one); else _one(m);
           } catch (_) {}
         }
       });
@@ -54927,7 +54991,12 @@ function _ghostPinWarmAsync() {
     if (typeof renderer === 'undefined' || !renderer || typeof renderer.compileAsync !== 'function') return;
     const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
     if (!_was) _ghostHullApply(player.mesh);
-    const _restore = () => { try { if (!_was) _ghostHullRestore(player.mesh); } catch (_) {} };
+    const _hid = [];   // (v39.82) the cockpit interior is hidden in third person - see _ghostPinWarm
+    try { player.mesh.traverse((o) => { if (o.visible === false) { o.visible = true; _hid.push(o); } }); } catch (_) {}
+    const _restore = () => {
+      for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }
+      try { if (!_was) _ghostHullRestore(player.mesh); } catch (_) {}
+    };
     renderer.compileAsync(player.mesh, camera, scene).then(_restore).catch(_restore);
   } catch (_) {}
 }
@@ -54944,6 +55013,17 @@ function _ghostPinWarm() {
     if (typeof player === 'undefined' || !player || !player.mesh) return;
     const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
     if (!_was) _ghostHullApply(player.mesh);
+    // (v39.82) SHOW THE WHOLE SHIP FOR THE WARM. The pin ran with the hull in its THIRD-PERSON
+    // state, and the cockpit interior is hidden there - so `_warmDrawRoot` never drew those meshes
+    // (it only un-hides the root's ANCESTORS, never its descendants) and their ghost programs were
+    // built on the frame the pilot first took the seat. Measured with the v39.81 namer, free flight
+    // in the pane: `Vortex_CP_ScreenGlass [FORK: customCacheKey]` x2 and `hull [FORK: customCacheKey]`
+    // x2 linking together at t=30.3 s, in play - two side variants each, because the ghost materials
+    // are transparent + DoubleSide and three.js draws those in two single-sided passes. That is the
+    // owner's "the switch from third to first person lagged a bit". Every descendant is shown for
+    // the duration of the warm and put back exactly as it was; the draw is 8x8 and off-screen.
+    const _hid = [];
+    try { player.mesh.traverse((o) => { if (o.visible === false) { o.visible = true; _hid.push(o); } }); } catch (_) {}
     const _tm = renderer.toneMapping;
     const _no = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
     try { renderer.toneMapping = _no; renderer.compile(scene, camera); } catch (_) {}
@@ -54970,10 +55050,11 @@ function _ghostPinWarm() {
             for (const m of _gm) { m.side = THREE.DoubleSide; m.needsUpdate = true; }
           }
         } catch (_) {}
-        try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player.mesh, postFX.rtScene); } catch (_) {}   // (v39.52)
+        try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player.mesh, postFX.rtScene, true); } catch (_) {}   // (v39.52; v39.84 with the shadow pass - the seat shell is transparent, a different depth key)
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
+    for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }   // (v39.82) exactly as they were
     if (!_was) _ghostHullRestore(player.mesh);
   } catch (_) {}
 }
@@ -55990,8 +56071,17 @@ async function _prebakeWorldForLaunch() {
     // window.__coldProgs() lists them; the warmed count also rides the ?pbhud line.
     try {
       window.__warmProgKeys = new Set();
+      // (v39.81) ...and the program OBJECTS, by id. A key-only watch is blind to the case the owner's
+      // 39.80 mark caught: `hub:stream` 2107 ms with the program count up by 2, and no new key to
+      // show for it. three.js frees a WebGLProgram when its last material is disposed and builds a
+      // fresh one - a real gl.linkProgram, the full ANGLE/D3D compile - the next time that same key
+      // is wanted. The key set has seen it, so it stays quiet; the count rises, so the recorder
+      // blames the frame. Watching ids catches the re-link and labels it, which is the difference
+      // between "new content compiled" (expected, warmable) and "we are churning programs"
+      // (a bug: something is disposing a material that is about to be needed again).
+      window.__coldIds = new Set();
       const _pl = renderer.info && renderer.info.programs;
-      if (_pl) for (const _p of _pl) { try { window.__warmProgKeys.add(_p.cacheKey); } catch (_) {} }
+      if (_pl) for (const _p of _pl) { try { window.__warmProgKeys.add(_p.cacheKey); window.__coldIds.add(_p.id); } catch (_) {} }
       window.__coldProgs = function () {
         const out = [];
         const list = (renderer.info && renderer.info.programs) || [];
@@ -56073,18 +56163,39 @@ async function _prebakeWorldForLaunch() {
       }
       window.__coldSeen = [];
       const _coldT0 = performance.now();
+      // (v39.85) IT MUST NOT STOP WHILE THE SESSION IS RUNNING. The 5-minute cutoff was fine when
+      // this only printed to the console, but the F8 mark now depends on it (v39.80 `coldNames`) -
+      // and the owner's 778 ms hitch landed at t 423 s, long after the watcher had quit, so the mark
+      // came back with a cold COUNT and no name for the third time. The poll is a Set diff over ~250
+      // programs; after the first five minutes it drops to once every two seconds, which is free and
+      // still catches a link inside the same F8 ring.
+      let _coldSlow = false;
       const _coldTimer = setInterval(function () {
         try {
-          if (performance.now() - _coldT0 > 300000) { clearInterval(_coldTimer); return; }
+          if (!_coldSlow && performance.now() - _coldT0 > 300000) { _coldSlow = true; }
+          if (_coldSlow && (Math.round(performance.now() / 1000) % 2)) return;
           const list = (renderer.info && renderer.info.programs) || [];
           for (const p of list) {
-            if (window.__warmProgKeys.has(p.cacheKey)) continue;
-            const _nm = _coldName(p);   // (v39.74) named + fork-checked BEFORE the key joins the warm set
-            window.__warmProgKeys.add(p.cacheKey);   // report each key once
+            if (window.__coldIds.has(p.id)) continue;   // (v39.81) every NEW program object, not just every new key
+            window.__coldIds.add(p.id);
+            const _known = window.__warmProgKeys.has(p.cacheKey);
+            const _nm = _coldName(p) + (_known ? ' [RELINK]' : '');   // named + fork-checked BEFORE the key joins the warm set
+            window.__warmProgKeys.add(p.cacheKey);
             const _t = Math.round((performance.now() - _coldT0) / 100) / 10;
             window.__coldSeen.push({ t: _t, name: _nm });
             console.warn('[cold] +' + _t + 's  ' + _nm + '   (total ' + window.__coldSeen.length + ')');
           }
+          // (v39.81) programs going AWAY is the other half of churn, and it is what precedes a
+          // re-link. Reported so a mark can show the disposal and the rebuild as one story.
+          try {
+            const _live = new Set(); for (const p of list) _live.add(p.id);
+            let _gone = 0; window.__coldIds.forEach((id) => { if (!_live.has(id)) _gone++; });
+            if (_gone !== (window.__coldGone || 0)) {
+              const _t = Math.round((performance.now() - _coldT0) / 100) / 10;
+              window.__coldSeen.push({ t: _t, name: 'freed x' + (_gone - (window.__coldGone || 0)) });
+              window.__coldGone = _gone;
+            }
+          } catch (_) {}
           const _ce = document.getElementById('lss-coldhud');
           if (_ce) {
             const _tal = {};
@@ -62984,7 +63095,7 @@ function _setShipMeshOpacity(root, opacity) {
 // and colour space as the gameplay frame, so the programs are the ones the frame uses, and the
 // draw itself is what makes ANGLE build the layout variants. Hidden roots (the pooled hulls) are
 // shown for the one call. Shadow maps are frozen so the pass is one cheap render.
-function _warmDrawRoot(root, rt) {
+function _warmDrawRoot(root, rt, withShadow) {
   try {
     if (!root || typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene ||
         typeof camera === 'undefined' || !camera || !rt) return false;
@@ -62998,10 +63109,31 @@ function _warmDrawRoot(root, rt) {
     cam.position.set(c.x, c.y + r * 0.5, c.z + r * 2.6); cam.lookAt(c);
     cam.updateProjectionMatrix(); cam.updateMatrixWorld(true);
     cam.layers.mask = camera.layers.mask;
+    // (v39.83) ⚠ ANCESTORS *AND* DESCENDANTS. This walked up from `root` only, so any hidden mesh
+    // INSIDE it was never drawn - and a warm that does not draw is not a warm (see the v39.52 note
+    // above: ANGLE builds a vertex executable per input layout at the first draw). The cockpit
+    // interior is hidden while the ship is in its third-person state, which is the state every one
+    // of these pins runs in, so the whole seat - `*_CP_*` meshes, windshield, screen glass - was
+    // compiled but never rasterised, and paid for itself on the frame the pilot took the seat or
+    // first cloaked. Measured with the v39.81 namer: two `physical [FORK: customCacheKey]` programs
+    // linking 6.7 s AFTER the loading overlay came down, during the countdown - owner: "it shouldn't
+    // still be warming there, we have a loading screen for that". Fixing it here fixes every caller
+    // at once (_warmCloakForRoot, the mirror lift, _ghostPinWarm, and whatever comes next).
     const shown = [];
     for (let n = root; n; n = n.parent) { if (!n.visible) { n.visible = true; shown.push(n); } }
+    try { root.traverse((o) => { if (o !== root && o.visible === false) { o.visible = true; shown.push(o); } }); } catch (_) {}
     const pRT = renderer.getRenderTarget();
-    const sm = renderer.shadowMap.autoUpdate; renderer.shadowMap.autoUpdate = false;
+    // (v39.84) ...AND THE SHADOW PASS, when the caller asks. Freezing the shadow map keeps this to
+    // one cheap render, which is right for the dozens of per-hull calls - but the sun's shadow pass
+    // draws with the DEPTH material, whose program is keyed on the real material's flags. A ghosted
+    // or cloaked hull is transparent, which is a different depth key, so that variant was never
+    // built here and linked on the frame the state first showed. Measured: the owner's 39.83 F8 on
+    // the third-to-first-person switch is a 2786 ms frame, entirely `renderFrame`, with exactly one
+    // cold program - `depth [FORK: flags]`, one boolean bit from a warm sibling. One shadow render
+    // behind the loading overlay buys it. Opt-in, so the per-hull calls stay one pass.
+    const sm = renderer.shadowMap.autoUpdate;
+    renderer.shadowMap.autoUpdate = !!withShadow;
+    if (withShadow) { try { renderer.shadowMap.needsUpdate = true; } catch (_) {} }
     const vp = rt.viewport.clone(), sc = rt.scissor.clone(), st = rt.scissorTest;
     try {
       rt.viewport.set(0, 0, 8, 8); rt.scissor.set(0, 0, 8, 8); rt.scissorTest = true;
@@ -63056,7 +63188,7 @@ function _warmCloakForRoot(root) {
       // (v39.52) ...then DRAW the cloaked state once with its real (quantized) geometry: back to
       // DoubleSide, still transparent, so three's two single-sided passes both run - see _warmDrawRoot.
       for (const m of mats) { if (m.side !== m._wSide) { m.side = m._wSide; m.needsUpdate = true; } }
-      _warmDrawRoot(root, _rtC);
+      _warmDrawRoot(root, _rtC, true);   // (v39.84) the cloaked hull is transparent: its DEPTH variant needs the shadow pass to exist
     } catch (_) {}
     for (const m of mats) {
       try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
@@ -90748,7 +90880,16 @@ function __pmark(name) {
       const gap = t - R.last;
       R.ring[R.ri] = gap; R.ringT[R.ri] = t / 1000; R.ri = (R.ri + 1) % N;
       const cur = profNow();
-      if (gap > 30 && document.visibilityState === 'visible') {
+      // (v39.88) CATCH THE CHOP BAND, NOT JUST THE STALLS. 30 ms was set for hitches, and it made the
+      // owner's actual complaint invisible: "choppy during the cinematic ... the sound for the
+      // countdown was off beat because of lag" recorded as `worst 28.1 ms` with an EMPTY `big` list -
+      // seven 20-28 ms frames, every one of them under the bar, so the mark could say a run of frames
+      // was late but not which system ate them. The threshold now tracks the display: 2.2x the
+      // refresh period (15.3 ms at 144 Hz), floored at 16 ms so a 60 Hz panel keeps roughly the old
+      // meaning of "a frame you can feel". The ring is still capped at 200 and the mark still emits
+      // only the last 5 s, so a struggling machine cannot blow the payload.
+      const _bigMs = Math.max(16, Math.min(30, 1000 / ((window.__ss && window.__ss.hz) || 60) * 2.2));   // 16 ms at 144 Hz, the old 30 at 60
+      if (gap > _bigMs && document.visibilityState === 'visible') {
         const secs = [];
         for (const k in cur) { const d = cur[k] - (R.secPrev[k] || 0); if (d >= 2) secs.push([k, +d.toFixed(1)]); }
         secs.sort((a, b) => b[1] - a[1]);
@@ -90820,6 +90961,19 @@ function __pmark(name) {
       fs: !!document.fullscreenElement, dpr: window.devicePixelRatio || 1, vis: document.visibilityState,
       gaps: around(now - 5, now, 20).slice(-40),
       big: R.big.filter(b => b[0] >= now - 5).slice(-20),
+      // (v39.88) the same window as one number per system: with the threshold down in the chop band
+      // the interesting thing is no longer any single frame but WHERE the milliseconds went across
+      // the run. Summed section deltas over the last 5 s of late frames, worst first.
+      chop: (function () {
+        try {
+          const win = R.big.filter(b => b[0] >= now - 5);
+          if (!win.length) return null;
+          const tot = {};
+          for (const b of win) for (const kv of (b[2] || [])) tot[kv[0]] = (tot[kv[0]] || 0) + kv[1];
+          const out = Object.keys(tot).map(k => [k, +tot[k].toFixed(1)]).sort((a, b) => b[1] - a[1]).slice(0, 6);
+          return { n: win.length, ms: +win.reduce((a, b) => a + b[1], 0).toFixed(1), by: out };
+        } catch (_) { return null; }
+      })(),
       lo: R.lo.filter(l => l[0] >= now - 5).slice(-20),
       cold: R.cold.filter(c => c[0] >= now - 5),
       // (v39.80) ...and WHICH programs those were. The count alone made a recorded hitch

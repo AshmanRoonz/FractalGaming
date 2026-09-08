@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '39.80';
+const LSS_BUILD = '39.88';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13141,6 +13141,16 @@ function _lssSupersampleTick(ts) {
   if (!S.last) { S.last = ts; return; }
   const dt = ts - S.last; S.last = ts;
   if (!_lssSupersampleActive()) return;
+  const _cineNow = (game.state !== 'playing') ||
+                   (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
+  if (!_cineNow && S.cineSaved != null) { S.scale = S.cineSaved; S.cineSaved = null; }
+  if (_cineNow && !settingsOpen && !game._worldPrebaking) {
+    const _want = (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : null;
+    if (typeof _want === 'number') {
+      if (S.cineSaved == null) S.cineSaved = S.scale;
+      if (S.scale > _want) S.scale = _want;
+    }
+  }
   if (game.state !== 'playing' || settingsOpen || game._worldPrebaking ||
       (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) { S.ema = 0; return; }
   if (!(dt >= 2 && dt <= 250)) return;                 // a tab switch or a load hitch is not a sample
@@ -13250,6 +13260,7 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
     return { level: QUALITY.level, pixelRatio: renderer.getPixelRatio(),
              canvas: [renderer.domElement.width, renderer.domElement.height],
              scene: [postFX.rtScene.width, postFX.rtScene.height, 'samples', postFX.rtScene.samples | 0],
+             cine: [_ssDyn.cineSaved != null, (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : null],   // (v39.87) off by default
              active: [_sceneActive.w, _sceneActive.h, 'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
@@ -13697,23 +13708,25 @@ function _waterRefractBind(rnd, scn, cam) {
     if (!_waterRefractWanted()) return;
     const rt = rnd.getRenderTarget();
     if (!rt || rt !== postFX.rtScene || rt.samples > 0) return;
+    const A = _lssSceneActive(rt);   // the live sub-rectangle (v39.49 supersample viewport)
+    const bw = Math.max(128, Math.min(rt.width, Math.ceil(A.w / 128) * 128));
+    const bh = Math.max(128, Math.min(rt.height, Math.ceil(A.h / 128) * 128));
     const C = postFX.rtRefractCopy;
-    if (!C || C.image.width !== rt.width || C.image.height !== rt.height) {
+    if (!C || C.image.width !== bw || C.image.height !== bh) {
       try { if (C) C.dispose(); } catch (_) {}
-      postFX.rtRefractCopy = new THREE.FramebufferTexture(rt.width, rt.height);
+      postFX.rtRefractCopy = new THREE.FramebufferTexture(bw, bh);
       postFX.rtRefractCopy.minFilter = THREE.LinearFilter;
       postFX.rtRefractCopy.magFilter = THREE.LinearFilter;
     }
     rnd.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
     u.uSceneTex.value = postFX.rtRefractCopy;
-    u.uSceneRes.value.set(rt.width, rt.height);
-    const A = _lssSceneActive(rt);   // the live sub-rectangle of the target (v39.49 supersample viewport)
-    u.uSceneMax.value.set(A.sx, A.sy);
+    u.uSceneRes.value.set(bw, bh);
+    u.uSceneMax.value.set(Math.min(1, A.w / bw), Math.min(1, A.h / bh));
     const W = window.__water || {};
     u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
     if (W.refractK != null) u.uRefractK.value = +W.refractK;
     const I = window.__waterRefractInfo || (window.__waterRefractInfo = { frames: 0 });
-    I.frames++; I.res = [rt.width, rt.height]; I.k = u.uRefractK.value; I.inline = true;
+    I.frames++; I.res = [bw, bh]; I.target = [rt.width, rt.height]; I.live = [A.w, A.h]; I.k = u.uRefractK.value; I.inline = true;
   } catch (_) { u.uRefract.value = 0.0; }
 }
 function renderPostFX() {
@@ -20792,8 +20805,11 @@ function _hubCityDispose() {
       if ((o.isMesh || o.isInstancedMesh) && !o.userData.hcShared) {
         try { if (o.geometry) o.geometry.dispose(); } catch (_) {}
         try {
-          const m = o.material;
-          if (m && m.dispose) { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); m.dispose(); }
+          const m = o.material;   // (v39.85) same churn as _owDrop - retain the program, free the canvases
+          if (m) {
+            try { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); } catch (_) {}
+            if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else if (m.dispose) m.dispose();
+          }
         } catch (_) {}
       }
     });
@@ -22512,8 +22528,13 @@ function _owDrop(c) {
           try { if (o.geometry) o.geometry.dispose(); } catch (_) {}
           try {
             const m = o.material;
-            if (Array.isArray(m)) m.forEach(x => { if (x && x.dispose) x.dispose(); });
-            else if (m && m.dispose) { if (m.map) m.map.dispose(); if (m.emissiveMap) m.emissiveMap.dispose(); m.dispose(); }
+            const _keep = (typeof _lssRetainMat === 'function');
+            const _one = (x) => {
+              if (!x) return;
+              try { if (x.map) x.map.dispose(); if (x.emissiveMap) x.emissiveMap.dispose(); } catch (_) {}
+              if (_keep) _lssRetainMat(x); else if (x.dispose) x.dispose();
+            };
+            if (Array.isArray(m)) m.forEach(_one); else _one(m);
           } catch (_) {}
         }
       });
@@ -38265,7 +38286,12 @@ function _ghostPinWarmAsync() {
     if (typeof renderer === 'undefined' || !renderer || typeof renderer.compileAsync !== 'function') return;
     const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
     if (!_was) _ghostHullApply(player.mesh);
-    const _restore = () => { try { if (!_was) _ghostHullRestore(player.mesh); } catch (_) {} };
+    const _hid = [];   // (v39.82) the cockpit interior is hidden in third person - see _ghostPinWarm
+    try { player.mesh.traverse((o) => { if (o.visible === false) { o.visible = true; _hid.push(o); } }); } catch (_) {}
+    const _restore = () => {
+      for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }
+      try { if (!_was) _ghostHullRestore(player.mesh); } catch (_) {}
+    };
     renderer.compileAsync(player.mesh, camera, scene).then(_restore).catch(_restore);
   } catch (_) {}
 }
@@ -38280,6 +38306,8 @@ function _ghostPinWarm() {
     if (typeof player === 'undefined' || !player || !player.mesh) return;
     const _was = !!(player.mesh.userData && player.mesh.userData._ghostOn);
     if (!_was) _ghostHullApply(player.mesh);
+    const _hid = [];
+    try { player.mesh.traverse((o) => { if (o.visible === false) { o.visible = true; _hid.push(o); } }); } catch (_) {}
     const _tm = renderer.toneMapping;
     const _no = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
     try { renderer.toneMapping = _no; renderer.compile(scene, camera); } catch (_) {}
@@ -38300,10 +38328,11 @@ function _ghostPinWarm() {
             for (const m of _gm) { m.side = THREE.DoubleSide; m.needsUpdate = true; }
           }
         } catch (_) {}
-        try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player.mesh, postFX.rtScene); } catch (_) {}   // (v39.52)
+        try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player.mesh, postFX.rtScene, true); } catch (_) {}   // (v39.52; v39.84 with the shadow pass - the seat shell is transparent, a different depth key)
         renderer.setRenderTarget(null);
       }
     } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
+    for (let i = 0; i < _hid.length; i++) { try { _hid[i].visible = false; } catch (_) {} }   // (v39.82) exactly as they were
     if (!_was) _ghostHullRestore(player.mesh);
   } catch (_) {}
 }
@@ -38866,8 +38895,9 @@ async function _prebakeWorldForLaunch() {
     _PREBAKE.last = rep;
     try {
       window.__warmProgKeys = new Set();
+      window.__coldIds = new Set();
       const _pl = renderer.info && renderer.info.programs;
-      if (_pl) for (const _p of _pl) { try { window.__warmProgKeys.add(_p.cacheKey); } catch (_) {} }
+      if (_pl) for (const _p of _pl) { try { window.__warmProgKeys.add(_p.cacheKey); window.__coldIds.add(_p.id); } catch (_) {} }
       window.__coldProgs = function () {
         const out = [];
         const list = (renderer.info && renderer.info.programs) || [];
@@ -38922,18 +38952,31 @@ async function _prebakeWorldForLaunch() {
       }
       window.__coldSeen = [];
       const _coldT0 = performance.now();
+      let _coldSlow = false;
       const _coldTimer = setInterval(function () {
         try {
-          if (performance.now() - _coldT0 > 300000) { clearInterval(_coldTimer); return; }
+          if (!_coldSlow && performance.now() - _coldT0 > 300000) { _coldSlow = true; }
+          if (_coldSlow && (Math.round(performance.now() / 1000) % 2)) return;
           const list = (renderer.info && renderer.info.programs) || [];
           for (const p of list) {
-            if (window.__warmProgKeys.has(p.cacheKey)) continue;
-            const _nm = _coldName(p);   // (v39.74) named + fork-checked BEFORE the key joins the warm set
-            window.__warmProgKeys.add(p.cacheKey);   // report each key once
+            if (window.__coldIds.has(p.id)) continue;   // (v39.81) every NEW program object, not just every new key
+            window.__coldIds.add(p.id);
+            const _known = window.__warmProgKeys.has(p.cacheKey);
+            const _nm = _coldName(p) + (_known ? ' [RELINK]' : '');   // named + fork-checked BEFORE the key joins the warm set
+            window.__warmProgKeys.add(p.cacheKey);
             const _t = Math.round((performance.now() - _coldT0) / 100) / 10;
             window.__coldSeen.push({ t: _t, name: _nm });
             console.warn('[cold] +' + _t + 's  ' + _nm + '   (total ' + window.__coldSeen.length + ')');
           }
+          try {
+            const _live = new Set(); for (const p of list) _live.add(p.id);
+            let _gone = 0; window.__coldIds.forEach((id) => { if (!_live.has(id)) _gone++; });
+            if (_gone !== (window.__coldGone || 0)) {
+              const _t = Math.round((performance.now() - _coldT0) / 100) / 10;
+              window.__coldSeen.push({ t: _t, name: 'freed x' + (_gone - (window.__coldGone || 0)) });
+              window.__coldGone = _gone;
+            }
+          } catch (_) {}
           const _ce = document.getElementById('lss-coldhud');
           if (_ce) {
             const _tal = {};
@@ -43736,7 +43779,7 @@ function _setShipMeshOpacity(root, opacity) {
   });
 }
 
-function _warmDrawRoot(root, rt) {
+function _warmDrawRoot(root, rt, withShadow) {
   try {
     if (!root || typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene ||
         typeof camera === 'undefined' || !camera || !rt) return false;
@@ -43752,8 +43795,11 @@ function _warmDrawRoot(root, rt) {
     cam.layers.mask = camera.layers.mask;
     const shown = [];
     for (let n = root; n; n = n.parent) { if (!n.visible) { n.visible = true; shown.push(n); } }
+    try { root.traverse((o) => { if (o !== root && o.visible === false) { o.visible = true; shown.push(o); } }); } catch (_) {}
     const pRT = renderer.getRenderTarget();
-    const sm = renderer.shadowMap.autoUpdate; renderer.shadowMap.autoUpdate = false;
+    const sm = renderer.shadowMap.autoUpdate;
+    renderer.shadowMap.autoUpdate = !!withShadow;
+    if (withShadow) { try { renderer.shadowMap.needsUpdate = true; } catch (_) {} }
     const vp = rt.viewport.clone(), sc = rt.scissor.clone(), st = rt.scissorTest;
     try {
       rt.viewport.set(0, 0, 8, 8); rt.scissor.set(0, 0, 8, 8); rt.scissorTest = true;
@@ -43797,7 +43843,7 @@ function _warmCloakForRoot(root) {
       for (const m of mats) { if (m._wSide === THREE.DoubleSide) { m.side = THREE.FrontSide; m.needsUpdate = true; _any = true; } }
       if (_any) renderer.compile(root, camera, scene);
       for (const m of mats) { if (m.side !== m._wSide) { m.side = m._wSide; m.needsUpdate = true; } }
-      _warmDrawRoot(root, _rtC);
+      _warmDrawRoot(root, _rtC, true);   // (v39.84) the cloaked hull is transparent: its DEPTH variant needs the shadow pass to exist
     } catch (_) {}
     for (const m of mats) {
       try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
@@ -64925,7 +64971,8 @@ function __pmark(name) {
       const gap = t - R.last;
       R.ring[R.ri] = gap; R.ringT[R.ri] = t / 1000; R.ri = (R.ri + 1) % N;
       const cur = profNow();
-      if (gap > 30 && document.visibilityState === 'visible') {
+      const _bigMs = Math.max(16, Math.min(30, 1000 / ((window.__ss && window.__ss.hz) || 60) * 2.2));   // 16 ms at 144 Hz, the old 30 at 60
+      if (gap > _bigMs && document.visibilityState === 'visible') {
         const secs = [];
         for (const k in cur) { const d = cur[k] - (R.secPrev[k] || 0); if (d >= 2) secs.push([k, +d.toFixed(1)]); }
         secs.sort((a, b) => b[1] - a[1]);
@@ -64997,6 +65044,16 @@ function __pmark(name) {
       fs: !!document.fullscreenElement, dpr: window.devicePixelRatio || 1, vis: document.visibilityState,
       gaps: around(now - 5, now, 20).slice(-40),
       big: R.big.filter(b => b[0] >= now - 5).slice(-20),
+      chop: (function () {
+        try {
+          const win = R.big.filter(b => b[0] >= now - 5);
+          if (!win.length) return null;
+          const tot = {};
+          for (const b of win) for (const kv of (b[2] || [])) tot[kv[0]] = (tot[kv[0]] || 0) + kv[1];
+          const out = Object.keys(tot).map(k => [k, +tot[k].toFixed(1)]).sort((a, b) => b[1] - a[1]).slice(0, 6);
+          return { n: win.length, ms: +win.reduce((a, b) => a + b[1], 0).toFixed(1), by: out };
+        } catch (_) { return null; }
+      })(),
       lo: R.lo.filter(l => l[0] >= now - 5).slice(-20),
       cold: R.cold.filter(c => c[0] >= now - 5),
       coldNames: (function () { try { return (window.__coldSeen || []).slice(-24); } catch (_) { return null; } })(),
