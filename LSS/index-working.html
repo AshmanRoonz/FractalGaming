@@ -4580,7 +4580,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.65';
+const LSS_BUILD = '40.67';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -82397,7 +82397,34 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   // layout hook of its own to piggyback on.
   function _repaintFixedOverlays() {
     try {
-      const ids = ['touch-controls', 'ship-select-countdown'];
+      // ⚠ (v40.67) KILL SWITCH, AND IT DEFAULTS TO OFF-WHEN-ASKED. This function hides each overlay
+      // for one forced reflow and restores it. That is invisible if it runs ONCE after a rotation -
+      // and it is a visible blink if anything makes it run repeatedly, because a hidden-then-shown
+      // element also RESTARTS any CSS animation on it (the countdown's cdPulse, the banner, the
+      // damage edges). The owner is reporting "the orange launch in 3, 2, 1, is missing", "the fps
+      // counter and callout tags flicker" and now "the same issues on desktop" against 40.65, which
+      // is the first build that carries this. It may be innocent - the same symptoms were reported
+      // BEFORE it shipped - but it is the least-verified thing in the owner's hands and it must be
+      // switchable without a rebuild:
+      //   window.__noOverlayRepaint = true    // off, live, no reload
+      // If the flicker survives with it off, this is not the cause and the hunt moves on. If it
+      // stops, this runs far more often than the rotation it was written for, and the fix is to find
+      // that caller - not to keep the kick.
+      if (typeof window !== 'undefined' && window.__noOverlayRepaint) return;
+      try { window.__repaintN = (window.__repaintN | 0) + 1; } catch (_) {}
+      // (v40.66) ...and every other fixed overlay, because the owner confirmed the two are ONE bug:
+      // "i think the fact that 3, 2, 1 is hidden, that's part of the same bug". If the compositor
+      // drops one `position: fixed` layer across a rotation it can drop any of them, and the rest of
+      // the HUD is the same shape - all fixed, all painted over the canvas. Verified `position:
+      // fixed` in the stylesheet, so this list is not guesswork: the combat HUD and its readouts,
+      // the callout container, the round strip and the banner. (#minimap is NOT fixed - it inherits
+      // from #hud - and #ov-countdown no longer exists as of v40.57.)
+      // ⚠ A hidden element is SKIPPED, so this cannot reveal something the game means to keep off
+      // screen; and the toggle restarts any CSS animation on the element, which is why it is bound
+      // to rotation only - a rare, already-disruptive moment - and never to a per-frame path.
+      const ids = ['touch-controls', 'ship-select-countdown', 'hud', 'crosshair', 'circumpunct-hud',
+        'kill-feed', 'enemy-healthbars', 'round-info', 'abilities', 'fps-counter',
+        'cockpit-frame', 'gun-layer', 'hit-marker', 'hit-marker-kill', 'stasis-vignette', 'ov-banner'];
       for (const id of ids) {
         const el = document.getElementById(id);
         if (!el) continue;

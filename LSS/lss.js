@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.65';
+const LSS_BUILD = '40.67';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -56898,7 +56898,11 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   }
   function _repaintFixedOverlays() {
     try {
-      const ids = ['touch-controls', 'ship-select-countdown'];
+      if (typeof window !== 'undefined' && window.__noOverlayRepaint) return;
+      try { window.__repaintN = (window.__repaintN | 0) + 1; } catch (_) {}
+      const ids = ['touch-controls', 'ship-select-countdown', 'hud', 'crosshair', 'circumpunct-hud',
+        'kill-feed', 'enemy-healthbars', 'round-info', 'abilities', 'fps-counter',
+        'cockpit-frame', 'gun-layer', 'hit-marker', 'hit-marker-kill', 'stasis-vignette', 'ov-banner'];
       for (const id of ids) {
         const el = document.getElementById(id);
         if (!el) continue;
