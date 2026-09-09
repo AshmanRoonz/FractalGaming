@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.67';
+const LSS_BUILD = '40.93';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18340,6 +18340,7 @@ function _swBuildHubWater(T) {
       this._reflFrame = (this._reflFrame + 1) % 3;
       {
         const _WK = window.__water || {};
+        try { if (window.__lssWarmDraw) return; } catch (_) {}
         const _sm = _fxSmallDevice();
         const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : (_sm ? 4 : 2);   // hard cost ceiling
         const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : (_sm ? 6 : 3);   // shipped cadence
@@ -27517,7 +27518,7 @@ function _applyShipPreviewModel(key) {
     try { _applyShipSkin(modelRoot, _getStoredSkinId()); } catch (_) {}
     try {
       if (typeof s.renderer.compileAsync === 'function') {
-        s.renderer.compileAsync(modelRoot, s.scene, s.camera).catch(() => {});
+        s.renderer.compileAsync(modelRoot, s.camera, s.scene).catch(() => {});
       } else if (typeof s.renderer.compile === 'function') {
         s.scene.add(modelRoot);
         s.renderer.compile(s.scene, s.camera);
@@ -27548,6 +27549,7 @@ function _applyShipPreviewModel(key) {
     if (s.model && s.model !== modelRoot) { try { s.scene.remove(s.model); } catch (_) {} }
     s.scene.add(modelRoot);
     s.model = modelRoot;
+    try { if (typeof _lssPrimeTick === 'function') _lssPrimeTick(8); } catch (_) {}
   };
   let _p = null;
   try {
@@ -27586,6 +27588,7 @@ function _animateShipPreview() {
     }
     _spinShipPreview();
     if (typeof _skinHueCycleTick === 'function') _skinHueCycleTick();   // (v40.04) the picker draws its own frames
+    try { if (typeof _lssPrimeTick === 'function') _lssPrimeTick(3); } catch (_) {}
     if (_owns) _lssRenderPicker();
     s.animId = requestAnimationFrame(_animateShipPreview);
     return;
@@ -27835,6 +27838,8 @@ function _addShipRunningLight(group, hullW, hullH, hullL) {
   const lightGroup = new THREE.Group();
   lightGroup.add(portMesh);
   lightGroup.add(starMesh);
+  portMesh.userData.isRunningLight = true;
+  starMesh.userData.isRunningLight = true;
   lightGroup.position.set(0, -hullH * 0.5 - 12, hullL * 0.45);
   lightGroup.userData.isRunningLight = true;
   lightGroup.userData.baseY = lightGroup.position.y;
@@ -38939,7 +38944,7 @@ function _buildModelWarmGroup() {
 }
 
 let _warmedFXSig = null;
-function _warmRealCombatFX() {
+function _warmRealCombatFX(_fxDefer) {
   let _errChkPrev = null;
   try {
     const _covered = !!((typeof game !== 'undefined' && game && (game._worldPrebaking || game._swapStaging || game._rrStaging)) ||
@@ -38958,12 +38963,13 @@ function _warmRealCombatFX() {
       renderer.debug.checkShaderErrors = false;
     }
   } catch (_) {}
-  try { return _warmRealCombatFXInner(); }
+  try { return _warmRealCombatFXInner(_fxDefer); }
   finally {
     try { if (_errChkPrev !== null) renderer.debug.checkShaderErrors = _errChkPrev; } catch (_) {}
   }
 }
-function _warmRealCombatFXInner() {
+function _warmRealCombatFXInner(_fxDefer) {
+  let _fxFinish = null;
   try {
     if ((game.currentRound | 0) > 1 && !(typeof window !== 'undefined' && window.__fxWarmEveryRound) &&
         window._fxRetainKeys && window._fxRetainKeys.size >= 10) return;
@@ -39045,10 +39051,15 @@ function _warmRealCombatFXInner() {
       if (renderer.xr && renderer.xr.isPresenting) { renderer.compile(scene, camera); return; }
       const _prevTM = renderer.toneMapping;
       const _NO = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
-      try { renderer.toneMapping = _NO; renderer.compile(scene, camera); renderer.render(scene, camera); } catch (_) {}
+      const _drawPasses = () => {
+        try { renderer.toneMapping = _NO; renderer.render(scene, camera); } catch (_) {}
+        try { renderer.toneMapping = _prevTM; } catch (_) {}
+        try { renderer.render(scene, camera); } catch (_) {}
+      };
+      try { renderer.toneMapping = _NO; renderer.compile(scene, camera); } catch (_) {}
       try { renderer.toneMapping = _prevTM; } catch (_) {}
-      renderer.compile(scene, camera);
-      renderer.render(scene, camera);
+      try { renderer.compile(scene, camera); } catch (_) {}
+      if (_fxDefer) { _fxFinish = _drawPasses; } else { _drawPasses(); }
       try {   // (v40.38) name the programs this warm created, by a material that uses each
         const _newIds = new Set();
         for (const pw of (renderer.info.programs || [])) if (pw.id >= _fxNp0) _newIds.add(pw.id);
@@ -39082,6 +39093,7 @@ function _warmRealCombatFXInner() {
       } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
     });
     W(() => { if (_mwg && _mwg.parent) scene.remove(_mwg); });
+    if (_fxDefer && _fxFinish) return _fxFinish;   // (v40.69) the caller draws, after it has drained
     W(() => { if (_lzg && _lzg.parent) { scene.remove(_lzg); _lzg.traverse((o) => { try { if (o.isMesh && o.material && o.material.dispose) o.material.dispose(); } catch (_) {} }); } });   // (v40.45) the laser stand-ins go with the pins
   } catch (_) {}
 }
@@ -39437,7 +39449,12 @@ async function _prebakeWorldForLaunch() {
 
     const _tC = _pbNow();
     _pbSub('compiling effects');
-    try { if (typeof _warmRealCombatFX === 'function') _warmRealCombatFX(); } catch (_) {}
+    let _fxFin = null;
+    try { if (typeof _warmRealCombatFX === 'function') _fxFin = _warmRealCombatFX(true); } catch (_) {}
+    if (typeof _fxFin === 'function') {
+      try { await _drainProgramLinks(6000, rep, 'drainFx0'); } catch (_) {}
+      try { _fxFin(); } catch (_) {}
+    }
     rep.ms.fx = Math.round(_pbNow() - _tC);
     await _warmupYield();
 
@@ -44671,8 +44688,9 @@ function _setShipMeshOpacity(root, opacity) {
       for (const m of mats) {
         if (!m) continue;
         if (m.userData._cloakOrigOpacity === undefined) {
-          m.userData._cloakOrigOpacity = (m.opacity != null) ? m.opacity : 1.0;
-          m.userData._cloakOrigTransparent = !!m.transparent;
+          const _warmFlipped = (m._wOp !== undefined);
+          m.userData._cloakOrigOpacity = _warmFlipped ? m._wOp : ((m.opacity != null) ? m.opacity : 1.0);
+          m.userData._cloakOrigTransparent = _warmFlipped ? false : !!m.transparent;
         }
         const _wantTransparent = (opacity < 0.99) ? true : !!m.userData._cloakOrigTransparent;
         m.opacity = (opacity < 0.99)
@@ -44711,8 +44729,9 @@ function _warmDrawRoot(root, rt, withShadow) {
     const vp = rt.viewport.clone(), sc = rt.scissor.clone(), st = rt.scissorTest;
     try {
       rt.viewport.set(0, 0, 8, 8); rt.scissor.set(0, 0, 8, 8); rt.scissorTest = true;
+      try { window.__lssWarmDraw = true; } catch (_) {}
       renderer.setRenderTarget(rt);
-      renderer.render(scene, cam);
+      try { renderer.render(scene, cam); } finally { try { window.__lssWarmDraw = false; } catch (_) {} }
     } catch (_) {}
     rt.viewport.copy(vp); rt.scissor.copy(sc); rt.scissorTest = st;
     try { renderer.setRenderTarget(pRT); } catch (_) {}
@@ -44753,15 +44772,41 @@ function _warmCloakForRoot(root, withShadow, deferDraw) {
       for (const m of mats) { if (m.side !== m._wSide) { m.side = m._wSide; m.needsUpdate = true; } }
       if (deferDraw) {
         try { renderer.setRenderTarget(_pRTC); } catch (_) {}
+        const _restoreMats = function () {
+          let n = 0;
+          for (const m of mats) {
+            if (!m || m._wOp === undefined) continue;
+            try {
+              m.side = m._wSide;
+              const ud = m.userData;
+              if (ud && ud._cloakOrigOpacity !== undefined) {
+                ud._cloakOrigOpacity = m._wOp;
+                ud._cloakOrigTransparent = false;
+              }
+              m.transparent = false; m.opacity = m._wOp;
+              m.needsUpdate = true;
+            } catch (_) {}
+            delete m._wOp; delete m._wSide; n++;
+          }
+          return n;
+        };
+        const _flip = [];
+        for (const m of mats) { if (m) _flip.push([m, m._wOp, m._wSide]); }
+        _restoreMats();
         const _fin = function () {
           try {
+            for (const f of _flip) {
+              const m = f[0]; if (!m) continue;
+              m._wOp = f[1]; m._wSide = f[2];
+              m.transparent = true;
+              m.opacity = (f[1] != null ? f[1] : 1) * op;
+              m.needsUpdate = true;
+            }
             const _pR = renderer.getRenderTarget();
             try { if (_rtC) renderer.setRenderTarget(_rtC); _warmDrawRoot(root, _rtC, withShadow !== false); } catch (_) {}
             try { renderer.setRenderTarget(_pR); } catch (_) {}
-          } catch (_) {}
-          for (const m of mats) {
-            try { m.side = m._wSide; m.transparent = false; m.opacity = m._wOp; m.needsUpdate = true; } catch (_) {}
-            delete m._wOp; delete m._wSide;
+          } finally {
+            _restoreMats();
           }
           try { window.__cloakWarm = (window.__cloakWarm || 0) + mats.length; } catch (_) {}
           return mats.length;
@@ -45667,6 +45712,11 @@ function _ghostHullApply(mesh) {
     if (o.userData && (o.userData.isPlume || o.userData.isRunningLight || o.userData._cockpitFrame)) return;
     const arr = Array.isArray(o.material);
     const ms = arr ? o.material : [o.material];
+    if (o.userData._ghostMats && o.userData._ghostOrig === o.material && ms.some(m => m && m.transparent)) {
+      _ghostMatsDispose(o.userData._ghostMats);
+      o.userData._ghostMats = null; o.userData._ghostOrig = null;
+      return;
+    }
     if (!o.userData._ghostMats || o.userData._ghostOrig !== o.material) {
       _ghostMatsDispose(o.userData._ghostMats);
       const built = ms.map(m => (!m || m.transparent) ? m : _addGhostHull(m.clone(), K));
@@ -55934,6 +55984,7 @@ function _cdPaint(owner, text, sub, opts) {
   const num = el ? el.querySelector('.cd-num') : null;
   const sb = el ? el.querySelector('.cd-sub') : null;
   if (!el || !num || !sb) return false;
+  try { (window.__cdLog = window.__cdLog || []).push(['P', owner, String(text).slice(0, 6), Math.round(now / 100) / 10]); if (window.__cdLog.length > 8) window.__cdLog.shift(); } catch (_) {}
   _cdOwner = owner; _cdPrio = prio;
   el.classList.toggle('fight', !!o.fight);
   num.textContent = text;
@@ -55952,6 +56003,13 @@ function _cdPaint(owner, text, sub, opts) {
   return true;
 }
 function _cdClear(owner) {
+  try {
+    let _who = '?';
+    try { const _st = (new Error()).stack || ''; const _ln = _st.split('\n')[2] || '';
+      const _m = _ln.match(/at ([\w$.]+)/); _who = _m ? _m[1].slice(-18) : _ln.trim().slice(0, 18); } catch (_) {}
+    (window.__cdLog = window.__cdLog || []).push(['C', owner || '*', _who, Math.round((performance.now ? performance.now() : 0) / 100) / 10]);
+    if (window.__cdLog.length > 10) window.__cdLog.shift();
+  } catch (_) {}
   if (owner && _cdOwner && owner !== _cdOwner) return;
   if (_cdHoldT) { clearTimeout(_cdHoldT); _cdHoldT = null; }
   _cdHoldUntil = 0; _cdOwner = null; _cdPrio = 0;
@@ -55961,11 +56019,21 @@ function _cdClear(owner) {
 function _cdRound(n, label) {
   try { if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return; } catch (_) {}
   if (n === 0 || n === 'FIGHT') { _cdPaint('round', 'FIGHT', '', { fight: true, prio: 2, hold: _CDHOLD_FIGHT_MS }); return; }
-  try { if (game && game._launchCdOwnsDigits) return; } catch (_) {}
+  try { if (game && game._launchCdOwnsDigits && _launchCountdownRuntime && !_launchCountdownRuntime.launched) return; } catch (_) {}
   _cdPaint('round', String(n), label || '', { hold: _CDHOLD_DIGIT_MS });
 }
 function launchCountdown(duration) {
-  if (_countdownActive) return;
+  if (_countdownActive) {
+    let _stale = true;
+    try {
+      const _rt = _launchCountdownRuntime;
+      const _now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+      _stale = !_rt || !!_rt.launched || (_now - _rt.startMs) > ((_rt.durationMs || 0) + 2000);
+    } catch (_) { _stale = true; }
+    if (!_stale) return;                       // a genuinely live countdown still wins
+    try { window.__cdRecovered = (window.__cdRecovered | 0) + 1; } catch (_) {}
+    _clearLaunchCountdown();                   // ...otherwise take the screen back
+  }
   _clearLaunchCountdown();
   _countdownActive = true;
   try { game._launchCdOwnsDigits = true; } catch (_) {}
@@ -56700,8 +56768,9 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     '  font-family: "Rajdhani", sans-serif; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }',
     '#touch-controls .tc { position: absolute; pointer-events: auto; touch-action: none;',
     '  display: flex; align-items: center; justify-content: center;',
-    '  background: rgba(80, 200, 255, 0.07); border: 1px solid rgba(120, 220, 255, 0.30);',
-    '  color: rgba(190, 235, 255, 0.75); font-size: 2.2vmin; font-weight: 600; letter-spacing: 0.08em;',
+    '  background: rgba(80, 200, 255, 0.18); border: 1.5px solid rgba(140, 230, 255, 0.65);',
+    '  color: rgba(215, 245, 255, 0.95); font-size: 2.2vmin; font-weight: 600; letter-spacing: 0.08em;',
+    '  text-shadow: 0 1px 3px rgba(0,0,0,0.9);',
     '  text-transform: uppercase; }',
     '#touch-controls .tc.tc-pressed { background: rgba(120, 220, 255, 0.22); border-color: rgba(170, 240, 255, 0.7); }',
     '.tc-rect { width: 24vmin; height: 15vmin; border-radius: 1.2vmin; }',
@@ -56898,7 +56967,9 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   }
   function _repaintFixedOverlays() {
     try {
-      if (typeof window !== 'undefined' && window.__noOverlayRepaint) return;
+      let _rkOn = false;
+      try { _rkOn = !!window.__overlayRepaint || /[?&]repaintkick\b/i.test(location.search || ''); } catch (_) {}
+      if (!_rkOn) return;
       try { window.__repaintN = (window.__repaintN | 0) + 1; } catch (_) {}
       const ids = ['touch-controls', 'ship-select-countdown', 'hud', 'crosshair', 'circumpunct-hud',
         'kill-feed', 'enemy-healthbars', 'round-info', 'abilities', 'fps-counter',
@@ -56994,6 +57065,10 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     if (window.visualViewport) {
       try { window.visualViewport.addEventListener('resize', _layoutSticksSoon); } catch (_) {}
     }
+    try {
+      document.addEventListener('fullscreenchange', _layoutSticksSoon);
+      document.addEventListener('webkitfullscreenchange', _layoutSticksSoon);
+    } catch (_) {}
     try {
       if (screen.orientation && screen.orientation.addEventListener) {
         screen.orientation.addEventListener('change', _layoutSticksSoon);
@@ -57192,9 +57267,21 @@ function _doPostFXResize() {
 }
 function _applyViewportSize() {
   if (renderer.xr && renderer.xr.isPresenting) return;
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  try { renderer.setSize(window.innerWidth, window.innerHeight); } catch (_) {}
+  const _vw = window.innerWidth, _vh = window.innerHeight, _vasp = _vw / _vh;
+  if (camera.aspect !== _vasp) { camera.aspect = _vasp; camera.updateProjectionMatrix(); }
+  try {
+    const _el = renderer.domElement;
+    const _pr = renderer.getPixelRatio ? renderer.getPixelRatio() : 1;
+    const _cw = Math.floor(_vw * _pr), _ch = Math.floor(_vh * _pr);
+    if (_el.width !== _cw || _el.height !== _ch) {
+      renderer.setSize(_vw, _vh);
+      try { window.__vpSize = [((window.__vpSize && window.__vpSize[0]) | 0) + 1, (window.__vpSize && window.__vpSize[1]) | 0]; } catch (_) {}
+    } else {
+      if (_el.style.width !== _vw + 'px') _el.style.width = _vw + 'px';
+      if (_el.style.height !== _vh + 'px') _el.style.height = _vh + 'px';
+      try { window.__vpSize = [(window.__vpSize && window.__vpSize[0]) | 0, ((window.__vpSize && window.__vpSize[1]) | 0) + 1]; } catch (_) {}
+    }
+  } catch (_) {}
   if (_rtResizeTimer) clearTimeout(_rtResizeTimer);
   _rtResizeTimer = setTimeout(_doPostFXResize, 200);
 }
@@ -57212,6 +57299,8 @@ function _viewportSettle() {
   } catch (_) {}
 }
 window.addEventListener('orientationchange', _viewportSettle);
+document.addEventListener('fullscreenchange', _viewportSettle);
+document.addEventListener('webkitfullscreenchange', _viewportSettle);
 try {
   if (screen.orientation && screen.orientation.addEventListener) {
     screen.orientation.addEventListener('change', _viewportSettle);
@@ -66085,6 +66174,10 @@ function __pmark(name) {
     first: [], seenG: null, wrapped: false,
     slowgl: [], curProg: null, glWrapped: false,  // (v40.34) [t, call, ms, hint] - every GL entry point that blocked >= 20 ms
     ui: [], uiArmed: false,                       // (v40.34) [t, element, class] - overlay class changes (the compositor's first-use pipelines)
+    pass: [], pcur: [], pwrap: false,          // (v40.90) per-frame render-pass shape, for the "2" flicker
+    alt: null, alt2: [],                          // (v40.70) a SECOND GL context's fence - the "is it us or the GPU process" discriminator
+    dbuf: [], dbufPrev: '',                       // (v40.70) canvas backing-store size per frame; a change here recreates the swap chain
+    tl: [], tlPrev: 0,                            // (v40.70) document.timeline.currentTime sampled INSIDE a stall
     loBig: [] };                                  // (v40.34) LoAFs >= 300 ms kept 40 s, so the NEXT mark carries their attribution                   // (v40.10) the first draw of each geometry, named
   const profNow = () => { const p = window.__prof, o = {}; if (!p) return o; for (const k in p) { const v = p[k]; if (v && typeof v.total === 'number') o[k] = v.total; } return o; };
   function _gtInit() {
@@ -66119,17 +66212,70 @@ function __pmark(name) {
       window.addEventListener('unhandledrejection', (ev) => {
         try { _push('REJ ' + ((ev.reason && (ev.reason.message || ev.reason)) || '?')); } catch (_) {}
       });
+      const _hw = { act: 0, numW: 0, numH: 0, subW: 0, subH: 0, txt: '' };
+      try { window.__cdHW = _hw; } catch (_) {}
+      setInterval(() => {
+        try {
+          const c = document.getElementById('ship-select-countdown');
+          if (!c) return;
+          if (c.classList.contains('active')) _hw.act = 1;
+          const n = c.querySelector('.cd-num'), b = c.querySelector('.cd-sub');
+          if (n) { const r = n.getBoundingClientRect();
+            if (r.width > _hw.numW) _hw.numW = Math.round(r.width);
+            if (r.height > _hw.numH) _hw.numH = Math.round(r.height);
+            if (n.textContent) _hw.txt = n.textContent; }
+          if (b) { const r = b.getBoundingClientRect();
+            if (r.width > _hw.subW) _hw.subW = Math.round(r.width);
+            if (r.height > _hw.subH) _hw.subH = Math.round(r.height); }
+        } catch (_) {}
+      }, 100);
       let _stateLine = '';
       setInterval(() => {
         try {
           const tc = document.getElementById('touch-controls');
           const cd = document.getElementById('ship-select-countdown');
+          const _fmt = (n) => { if (!n) return 'MISSING'; try { const c = getComputedStyle(n), r = n.getBoundingClientRect();
+            return 'd:' + c.display + ' op:' + c.opacity + ' v:' + c.visibility[0] +
+                   ' ' + Math.round(r.width) + 'x' + Math.round(r.height) + '@' + Math.round(r.left) + ',' + Math.round(r.top); }
+            catch (_) { return 'ERR'; } };
+          const _num = cd ? cd.querySelector('.cd-num') : null;
+          const _fsEl = document.fullscreenElement || document.webkitFullscreenElement;
           const ln = innerWidth + 'x' + innerHeight +
+            ' fs:' + (_fsEl ? (_fsEl.tagName + (_fsEl.id ? '#' + _fsEl.id : '')) : 'no') +
             ' ' + (document.documentElement.className || '-') +
-            ' tc:' + (tc ? (tc.style.display || 'auto') : 'MISSING') +
             ' ta:' + ((typeof input !== 'undefined' && input) ? (input.touchActive ? 1 : 0) : '?') +
             ' st:' + ((typeof game !== 'undefined' && game) ? game.state : '?') +
-            ' cd:' + (cd ? ((cd.className || '-') + '/' + ((cd.querySelector('.cd-num') || {}).textContent || '')) : 'MISSING');
+            '\nTC ' + _fmt(tc) +
+            '\nCD [' + (cd ? (cd.className || '-') : '?') + '] ' + _fmt(cd) +
+            '\nNUM \"' + (_num ? (_num.textContent || '') : '?') + '" ' + _fmt(_num) +
+            '\nMOVE ' + _fmt(document.getElementById('tc-move')) +
+            '\nBTN  ' + _fmt(document.querySelector('#touch-controls .tc-rect')) +
+            '\nPEAK act:' + _hw.act + ' num:' + _hw.numW + 'x' + _hw.numH + ' "' + _hw.txt + '"  sub:' + _hw.subW + 'x' + _hw.subH +
+            '\nCDLOG ' + (function () { try { return (window.__cdLog || []).slice(-4).map(function (r) { return r.join(':'); }).join(' | ') || 'none'; } catch (_) { return '?'; } })() +
+            '\nSTACK ' + (function () { try { const e = document.getElementById('ship-select-countdown'); if (!e) return '-';
+              const r = e.getBoundingClientRect(); if (!r.width) return 'no-rect';
+              const list = document.elementsFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)) || [];
+              return list.slice(0, 6).map(function (n) { return (n.id || n.tagName) + '/z' + getComputedStyle(n).zIndex; }).join(' > ');
+              } catch (_) { return '?'; } })() +
+            '\nANC   ' + (function () { try { let n = document.getElementById('ship-select-countdown'), out = [], i = 0;
+              while (n && n !== document.documentElement && i++ < 8) {
+                const c = getComputedStyle(n);
+                const ctx = [];
+                if (c.transform !== 'none') ctx.push('tf');
+                if (c.filter !== 'none') ctx.push('fi');
+                if (+c.opacity < 1) ctx.push('op');
+                if (c.willChange !== 'auto') ctx.push('wc');
+                if (c.contain !== 'none') ctx.push('ct');
+                if (c.isolation === 'isolate') ctx.push('iso');
+                if (c.mixBlendMode !== 'normal') ctx.push('bl');
+                out.push((n.id || n.tagName) + '[' + c.position + '/z' + c.zIndex + (ctx.length ? '/' + ctx.join('+') : '') + ']');
+                n = n.parentElement;
+              }
+              return out.join(' < '); } catch (_) { return '?'; } })() +
+            '\nCVS  ' + (function () { try { const c = renderer.domElement, s2 = getComputedStyle(c);
+              return s2.position + '/z' + s2.zIndex + ' par:' + (c.parentElement ? (c.parentElement.id || c.parentElement.tagName) : '-') +
+                ' fps:' + (function () { const f = document.getElementById('fps-counter'); if (!f) return '-';
+                  const c2 = getComputedStyle(f); return c2.display + '/z' + c2.zIndex; })(); } catch (_) { return '?'; } })();
           if (ln !== _stateLine) { _stateLine = ln; _box.title = ln; }
           _box.setAttribute('data-state', ln);
           _draw();
@@ -66354,6 +66500,41 @@ function __pmark(name) {
       if (!R.sync) { R.sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0); R.syncT = t; }
     } catch (_) { R.sync = null; }
   }
+  function _altGl() {
+    if (R.alt !== null) return R.alt;
+    R.alt = false;
+    try {
+      let _altOn = false;
+      try { _altOn = /[?&]pbalt/i.test(location.search || ''); } catch (_) {}
+      if (!_altOn) return R.alt;
+      if (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) return R.alt;
+      const c = document.createElement('canvas'); c.width = c.height = 1;
+      const g = c.getContext('webgl2', { antialias: false, depth: false, stencil: false, alpha: false,
+                                         powerPreference: 'high-performance', preserveDrawingBuffer: false });
+      if (g && g.fenceSync) R.alt = { gl: g, sync: null, t: 0 };
+    } catch (_) {}
+    return R.alt;
+  }
+  function _altPoll(t, submit, midStall) {
+    const A = _altGl(); if (!A) return;
+    try {
+      const g = A.gl;
+      if (A.sync) {
+        if (g.getSyncParameter(A.sync, g.SYNC_STATUS) === g.SIGNALED) {
+          R.alt2.push([+(A.t / 1000).toFixed(2), +(t - A.t).toFixed(1), A.mid ? 1 : 0]);
+          if (R.alt2.length > 300) R.alt2.shift();
+          g.deleteSync(A.sync); A.sync = null;
+        } else if (t - A.t > 6000) { g.deleteSync(A.sync); A.sync = null; }
+      }
+      if (!A.sync && submit) {
+        A.mid = !!midStall;   // (v40.71) was this fence submitted from INSIDE a stall?
+        g.clearColor((t % 1000) / 1000, 0, 0, 1);
+        g.clear(g.COLOR_BUFFER_BIT);
+        A.sync = g.fenceSync(g.SYNC_GPU_COMMANDS_COMPLETE, 0); A.t = t;
+        g.flush();   // ⚠ without this the fence sits in an unflushed command buffer and never signals
+      }
+    } catch (_) { R.alt = false; }
+  }
   const _beat = () => {
     const t = performance.now();
     R.beatN++;
@@ -66373,7 +66554,14 @@ function __pmark(name) {
         R.focPrev = st;
       }
     } catch (_) {}
-    if (R.last && t - R.last > 40 && !(++R.hbN % 5)) _gpuFence(t);   // ~20 ms polling, only inside a gap
+    if (R.last && t - R.last > 40 && !(++R.hbN % 5)) {
+      _gpuFence(t);
+      _altPoll(t, true, true);
+      try {
+        const _tl = (document.timeline && document.timeline.currentTime) || 0;
+        if (_tl !== R.tlPrev) { R.tl.push([+(t / 1000).toFixed(2), +(+_tl).toFixed(1)]); if (R.tl.length > 120) R.tl.shift(); R.tlPrev = _tl; }
+      } catch (_) {}
+    }
   };
   try { setInterval(_beat, 4); } catch (_) {}
   const tick = (t) => {
@@ -66390,8 +66578,41 @@ function __pmark(name) {
         }
         R.madePrev = _mn;
       } catch (_) {}
+      if (!R.pwrap) {
+        R.pwrap = true;
+        try {
+          const _o = renderer.render.bind(renderer);
+          renderer.render = function (sc, cm) {
+            let tg = 'C';
+            try {
+              const _t = renderer.getRenderTarget();
+              if (_t) {
+                const _pf = (typeof postFX !== 'undefined' && postFX) ? postFX : {};
+                tg = (_t === _pf.rtScene) ? 'S' : ((_t.width === 512 && _t.height === 512) ? 'K' : (_t.width + 'x' + _t.height));
+              }
+            } catch (_) {}
+            const _r = _o(sc, cm);
+            try { R.pcur.push(tg + ':' + renderer.info.render.calls); } catch (_) {}
+            return _r;
+          };
+        } catch (_) {}
+      }
+      if (R.pcur && R.pcur.length) {
+        try {
+          let _c = 0;
+          const _sig = R.pcur.map(function (x) { const i = x.lastIndexOf(':'); _c += (+x.slice(i + 1) || 0); return x.slice(0, i); }).join('>');
+          R.pass.push([+(t / 1000).toFixed(2), _sig, _c]);
+          if (R.pass.length > 400) R.pass.shift();
+        } catch (_) {}
+        R.pcur.length = 0;
+      }
       R.rafN++;   // (v40.20) counted against the heartbeat's own beats
       _gpuFence(t);
+      _altPoll(t, true);   // (v40.70) the second context's reference fence - see _altGl
+      try {
+        const _c = renderer.domElement, _sz = _c.width + 'x' + _c.height + '@' + (renderer.getPixelRatio ? +renderer.getPixelRatio().toFixed(2) : 0);
+        if (_sz !== R.dbufPrev) { R.dbuf.push([+(t / 1000).toFixed(2), _sz]); if (R.dbuf.length > 80) R.dbuf.shift(); R.dbufPrev = _sz; }
+      } catch (_) {}
       if (!R.wrapped) _wrapFirstDraw();   // (v40.10) renderer does not exist at parse time
       const cur = profNow();
       const _bigMs = Math.max(16, Math.min(30, 1000 / ((window.__ss && window.__ss.hz) || 60) * 2.2));   // 16 ms at 144 Hz, the old 30 at 60
@@ -66526,6 +66747,10 @@ function __pmark(name) {
       made: R.made.filter(r => r[0] >= now - 5).slice(-40),
       gpu: _peaks(R.gpu, now, 24, 8),   // (v40.09) same peak-keeping window as `gt`
       hb: R.hb.filter(r => r[0] >= now - 5).slice(-20),
+      alt: _peaks(R.alt2, now, 24, 8),
+      pass: R.pass.filter(r => r[0] >= now - 4).slice(-70),
+      dbuf: R.dbuf.filter(r => r[0] >= now - 8).slice(-10),
+      tl: R.tl.filter(r => r[0] >= now - 5).slice(-12),
       foc: R.foc.filter(r => r[0] >= now - 5),
       ticks: [R.rafN, R.beatN, R.focPrev],
       first: R.first.filter(r => r[0] >= now - 5).slice(-40),
@@ -66590,6 +66815,9 @@ function __pmark(name) {
           ld: window.__linkDrain || null,                          // (v40.34) {at, ms, polls, pending} of the last link drain
           uiw: window.__uiRehearsal || null,                       // (v40.34) the overlay rehearsal: {ms, n, groups, frames, worst}
           pt: window.__primeTick || null,                           // (v40.62) per-frame first-use priming: {n primed so far, last slice ms}
+          clip: (function () { try { return [input.clipRec ? 1 : 0, (typeof _clip !== 'undefined' && _clip && _clip.active) ? 1 : 0]; } catch (_) { return null; } })(),
+          vp: (function () { try { return window.__vpSize || null; } catch (_) { return null; } })(),
+          cs2: (function () { try { return window.__cloakStranded || 0; } catch (_) { return 0; } })(),
           fxp: window.__fxWarmProgs || null,                       // (v40.38) the programs the combat-FX warm built this launch, named
         };
       } catch (_) { return null; } })(),

@@ -4899,3 +4899,853 @@ ms after the event, per the v31.03 note): 300/800/1600 ms from the touch module,
 compositor simply does not exhibit the stall. This lands as a targeted repaint of exactly the two
 elements the owner loses, on exactly the transition he loses them on; it cannot make a working device
 worse (one forced reflow per rotation on two elements) but only the phone can confirm it.
+
+### v40.67–40.68 — ⚠ THE COUNTDOWN LATCH: one stuck flag killed BOTH tickers for the session
+
+Owner, across three machines: the phone shows no countdown, the desktop shows no countdown, the
+laptop showed one and then "missed the 3" after a reboot — and a FRESH LOAD is always fine. That
+pattern is latched state, not rendering, and the pane could never see it because every pane test is
+a fresh load.
+
+**The latch.** `launchCountdown()` opens with `if (_countdownActive) return;` — an early return that
+hands nothing back. Its own comment two lines below says "⚠ EVERY early return out of this function
+must hand the flag back", and this one, the first, never did. `game._launchCdOwnsDigits` is set on
+the very next line and is read by `_cdRound`, which stands the ROUND clock down while the launch
+ticker owns the digits. So once `_countdownActive` is stranded true:
+  - the LAUNCH ticker returns at the guard → no orange digits, and
+  - `_launchCdOwnsDigits` is still true → the ROUND clock keeps standing down for an owner that is
+    not running → no white FIGHT either.
+**Nothing paints, for the rest of the session, and only a reload clears it.** `_countdownActive` is
+cleared by `_clearLaunchCountdown()` and by `hideLaunchOverlay()` 700 ms after the LAUNCH beat, so
+any path that ends a match, aborts a launch or reloads a round inside that window strands it — and
+the v36 `_tickLaunchCountdownWatchdog` exists precisely because this has bitten before.
+
+**v40.68 fixes it in two places rather than hunting every stranding path.** The guard is now
+SELF-HEALING: a countdown that has already launched, or that is past its own duration by 2 s, is
+finished whatever the flag says, so it is cleared and the new one starts (`window.__cdRecovered`
+counts the saves). And `_cdRound`'s stand-down now requires a LIVE, unlaunched runtime alongside the
+flag, so a stale flag can no longer silence the round ticker either. Both halves of the "no countdown
+at all" state are now unreachable. Verified in the pane: with `game._launchCdOwnsDigits` forced true,
+`Overlays.countdown(2,'ROUND 1')` still paints (`active`, "2", block) and FIGHT still paints — under
+40.67 both would have been swallowed.
+
+**v40.67** added a kill switch for the v40.65 repaint kick (`window.__noOverlayRepaint = true`, plus
+`window.__repaintN`), because it was the least-verified thing in the owner's hands when the flicker
+reports arrived and it must be A/B-able without a rebuild.
+
+⚠ STILL OPEN: the phone's touch controls (invisible but hit-testable) and the combat hitch, which the
+40.60 marks put inside the `scene` pass. The laptop's "missed the 3" is almost certainly the hitch
+swallowing the frame that digit would have painted on, not a countdown fault — the digits are driven
+by timers that keep counting while frames are not painted.
+
+### ⚠ v40.60 mark n28 — THE IN-PLAY HITCH IS THE BLOOM PASS, AND A RENDER-TARGET REALLOCATION FEEDS IT
+
+The per-pass chain (`?pbseg`, v40.60) finally named it, and it is NOT what the earlier marks
+suggested. n28 (deployed 40.60, desktop, 60 Hz, quality mega, 1920x1080):
+
+```
+  2705.3 ms  bloom     <-- the whole 2703 ms gap
+     9.0 ms  scene
+     8.3 ms  scene         every other pass is 5-9 ms
+```
+
+⚠ Marks n35–n37 had labelled `scene`; n28 labels `bloom`. Both are real: the bracket that absorbs
+the stall is whichever pass first touches a freshly reallocated render target.
+
+**The mechanism, and it is a feedback loop.** `made` for that frame reads `[55.38, 0, 1, 1]` — one
+geometry and one TEXTURE created 30 ms before the stall. `_lssDynResTick` (the dynamic-resolution
+controller) does, on every step it takes:
+```js
+  renderer.setPixelRatio(_lssDynResBase() * next);
+  if (typeof _doPostFXResize === 'function') _doPostFXResize();
+```
+and `_doPostFXResize` calls `setSize()` on FOUR targets — `rtScene`, `rtBright`, `rtBlurH`,
+`rtBlurV`. In three.js `setSize()` disposes the GPU texture and forces reallocation on next use. At
+mega (base 4608x2592) that is a large allocation, and the first pass to touch the new bright/blur
+targets is the BLOOM chain — which is exactly where the seconds land. Then: the stall raises the
+measured average frame time → the controller drops the scale again → another reallocation → another
+stall. The `ss` field moving across marks (0 → -0.6 → 0.05) is that loop running.
+
+**⚠ The codebase already knows the right shape and applies it to only half the chain.** v39.49 moved
+MEGA/ULTRA supersampling into a VIEWPORT inside a fixed-size scene target precisely to avoid
+reallocation ("free steps, native canvas"), and the composite/bright shaders already carry
+`uSceneScale` / `uSceneMax` to sample a partial target. The bloom targets never got the same
+treatment and are still resized. The real fix is to give them the viewport treatment too; the cheap
+fix is to stop resizing them per step.
+
+**The one-line confirmation the owner can run before any of that:**
+`window.__dynRes = { on: false }` in the console, then play. If the combat hitches stop, this chain
+is the whole in-play class. (`_lssDynResTick` returns immediately on `K.on === false`.)
+
+### ⚠ v40.69 — the dyn-res theory was WRONG, and the real countdown-eater was the last compile-then-draw site
+
+**Retraction first.** The n28 reading (`bloom 2705 ms`, 30 ms after a texture was created) led me to blame
+`_lssDynResTick` → `_doPostFXResize()` → `setSize()` reallocating the bloom chain. Two things kill it:
+  1. the owner: "what worked was because the browser wasn't fresh... when i closed the browser and
+     tried `window.__dynRes = { on: false }`, still got a countdown glitch" — the A/B that appeared to
+     confirm it was a WARM-BROWSER artifact;
+  2. the code: `_getBloomRTSize()` reads `window.devicePixelRatio` and `QUALITY.bloomDPR()`, neither of
+     which `renderer.setPixelRatio()` changes — and `_doPostFXResize`'s own v39.49 comment says
+     "WebGLRenderTarget.setSize is a no-op when nothing changed". So a resolution STEP reallocates
+     nothing. The proposed patch was never applied (its anchor failed the uniqueness check).
+⚠ Keep the n28 reading itself — `bloom` really did absorb 2705 ms — but the cause is still open, and
+"a pass that first touches a freshly allocated target eats the allocation" remains the shape to test.
+
+**What a FRESH browser does point at**, and this is the fix that shipped: the countdown digits are
+painted by timers that keep counting while frames are not painted, so any multi-second stall over a
+digit's beat eats it whole. The 40.60 cold run named the one that lands there:
+`getProgramParameter 2043.5 ms on p190`, and p190 is `_warmRealCombatFX`'s own first program (the
+40.57 marks' `fxp` list names it first). That function was the LAST compile-then-draw-in-one-call site
+in the file — it could not follow the v40.60 rule (compile → drain → draw) because it is synchronous
+and there is nothing to await inside it.
+
+**v40.69** makes its draws deferrable: `_warmRealCombatFX(true)` compiles and returns a finisher; the
+launch prebake (async) then runs `_drainProgramLinks(6000, rep, 'drainFx0')` — which also pays the
+first-use uniform query per program (v40.60) — and only then calls the finisher. Callers that cannot
+await are untouched and still compile-and-draw in one go. Pane: prebake total 4083 ms, `fx` 1999 ms of
+which `drainFx0` is 1948 ms (i.e. the wait moved into the async, yielding drain instead of blocking a
+draw), and the countdown runs 3 → 2 → 1 → FIGHT cleanly.
+
+⚠ STILL OPEN: the phone's touch controls (hit-testable but unpainted; v40.65/66 repaint kick is
+unconfirmed and has a kill switch, `window.__noOverlayRepaint`), the in-play `bloom`/`scene` seconds
+(cause now un-explained again), and the ship-switch stall.
+
+
+## v40.70 — the in-play hitch is NOT ours, and the measurement that proves which side it is on
+
+The v40.69 fix held: mark n33 (build 40.69) has `cold: []`, `ld.pending: 0`, and a `slowgl` list whose
+worst entry is a 28.4 ms boot-time join. The 2043 ms blocking `getProgramParameter` is gone.
+
+**What is left is a different lane, and the recorder already rules the page out.** Mark n33 —
+1494 ms, classic, `playing`, `vis: "visible"`, `fs: true`, RTX 5050 Laptop (Optimus), 60 Hz:
+
+| reading | value | what it eliminates |
+| --- | --- | --- |
+| `hb` | `[]` (4 ms heartbeat, ~375 beats through the stall) | the main thread never blocked |
+| `lt`, `lo` | `[]`, `[]` | no long task, and **no LoAF at all** — no frame was even started |
+| `gt` | 8.1 ms before, 6.4 ms after | our draw list is cheap |
+| **`kwp`** | **4.2 ms at 25.94, 4.1 ms at 27.43** | **the card was at full clock; the GPU timeline was NOT stretched** |
+| `cold`, `first`, `made`, `res` | empty / silent 2.4 s / flat | no program, no pipeline, no upload |
+| `gpu` | 1521.9 ms, polled every ~20 ms by the LIVING heartbeat | the fence genuinely stayed unsignaled |
+| `foc` | `[]` | no focus, visibility, fullscreen or battery transition |
+
+`gap` is measured from the rAF **timestamp argument**, so the browser's own frame clock jumped 1494 ms.
+Mark n34 is the same class one round later (1702 ms, `warmup`): a LoAF **is** present but reads
+`[93.21, 1703, 0, 1700, []]` — blockingDuration 0, renderStart 1700 ms in, **empty script list**.
+
+⚠ **The `?pbseg` request is withdrawn.** Asking which pass ate the time presumes our passes ate it, and
+two independent GPU clocks (the frame's TIME_ELAPSED bracket and the fixed-cost keep-warm quad) agree
+that they did not. The bracket chain would have reported eight normal passes.
+
+**Ruled out by direct check, not by argument:** the clip recorder. It blits the full 1920x1080 WebGL
+canvas into a 2D canvas 32x/s and feeds a 5 Mbps VP9 `MediaRecorder` — a textbook GPU-process stall
+with a free main thread. `clipRec` was read straight out of the owner's saved settings in Chrome's
+localStorage: **false**. v40.70 puts it in the mark (`flags.clip = [setting, active]`) so that trip is
+never needed again.
+
+**v40.70 adds the discriminator for the one binary question that is left** — did the GPU process stop
+servicing the *page*, or stop servicing *our context*?
+
+- `_altGl` / `_altPoll` — a **second, independent WebGL2 context** on a 1x1 canvas that draws one
+  clear, **flushes** and fences, submitted from the rAF and polled from the 4 ms heartbeat. Emitted as
+  `alt` beside `gpu`. Both spike together -> the GPU process/driver stalled globally and no in-page
+  build can fix it (the hunt moves to fullscreen present mode, the hybrid-graphics mux, Chrome GPU
+  flags). Only `gpu` spikes -> it is our context, and the swap chain is first suspect.
+  ⚠ `high-performance` on purpose (`low-power` could land it on the iGPU and compare the wrong
+  adapter). `flush()` on purpose — `fenceSync` does not flush, and an unflushed fence on an idle
+  context never signals and would fake a stall every time. `?pbhud` only; off on small devices.
+- `dbuf` — `[t, "WxH@dpr"]` on every change of the canvas backing store. A resize recreates the D3D
+  swap chain, which on Windows is a multi-hundred-ms present stall with no script and no GPU work of
+  ours. A stall with a `dbuf` change on the same frame names the cause; a flat `dbuf` retires the
+  dynamic-resolution theory for good.
+- `tl` — `document.timeline.currentTime` sampled by the heartbeat *inside* a stall. Pinned = the
+  browser produced no frames; climbing = it produced them and skipped our callback.
+
+Pane baseline (40.70, in `warmup`): `alt` and `gpu` track each other (13.7/14.0 vs 27.9/34.7, then both
+42 then both 27.3), context not lost at 216 programs, `dbuf` a single entry for the whole session.
+
+
+## v40.71 / v40.72 — the verdict from the second-context fence, and the kick that had to be withdrawn
+
+**The v40.70 probe answered its question on the first run.** Chrome, build 40.70, nine marks with a
+gap over 300 ms. `alt` is the second, otherwise-idle WebGL2 context; `gpu` is the game's:
+
+| mark | gap | `gpu` | `alt` | churn on the frame |
+| --- | --- | --- | --- | --- |
+| n36 | 4023 | 4036.7 | **4036.7** | — |
+| n38 | 1098 | 3884.2 | **3884.2** | — |
+| n40 | 3995 | 4029.8 | 55.7 *(no fence in flight — blind)* | 13 geo + 3 tex, 342 calls, 2.33 M tris, **40 new pipelines** |
+| n41 | 4412 | 4432.6 | **4439.7** | **nothing created at all** |
+| n43 | 3766 | 3779.6 | **3786.8** | **`made` completely empty, `first` 0** |
+| n44 | 556 | 583.3 | **583.3** | — |
+
+Two independent GL contexts, sharing no swap chain, no targets, no programs and no draw list, stall
+**to the same millisecond**. In n43 the page created *nothing* and still lost 3.8 s. Alongside:
+`dbuf` empty after the one launch resize (**the dynamic-resolution / swap-chain theory is dead**),
+`tl` pinned (n41 sampled the animation clock at 24.62 reading 24570.5 — no frames produced), LoAFs of
+the form `[24.57, 4414, 0, 4409, []]` (0 blocking, empty script list), `hb` clean, `clip` `[0,0]`.
+
+**Chrome's GPU process stops servicing the whole page for seconds.** Owner's own A/B, unprompted:
+**DuckDuckGo browser — same Chromium engine — zero hitches.**
+
+**v40.71, the one lane that IS ours.** n40 is the ship picker, and it is the exception: a swap stages
+13 geometries and 3 textures, the next picker draw issues 342 calls / 2.33 M triangles across **40 new
+pipeline signatures**, and a program is created at 20.51. The picker already calls `compileAsync`
+before staging — but ⚠ **`compileAsync` finishes the LINK and never pays the first-use query**. That is
+the v40.60 correction restated: three.js fetches uniform/attribute locations lazily at the first DRAW,
+and on ANGLE that is what blocks. Fixed in two places — `_lssPrimeTick(8)` in `_stage()` (the link has
+just resolved, so priming is immediate) and `_lssPrimeTick(3)` before `_lssRenderPicker()`, because
+**the picker draws from its own rAF and gameLoop's v40.62 priming has never covered it** (every picker
+mark reads `pt: null` for exactly that reason).
+
+Also v40.71: `_altPoll` now submits from the heartbeat *during* a stall, flagged with a third element.
+Poll-only left n40 with no reading at all — a fence submitted mid-stall is the sharpest signal there is
+(signals promptly = the process is fine and only our context is stuck).
+
+## ⚠ v40.72 — `_repaintFixedOverlays` is OPT-IN. It made things worse, and the mechanism is now clear.
+
+Owner on 40.70: *"it doesn't have the countdown, and the lobby has hidden items"* — **on desktop**,
+where it had never happened, and broader than the phone symptom the kick was written for.
+
+`display: none` does not hide a box, it **destroys** it, and with it the compositor layer rasterising
+it; restoring the property builds a **new** layer that must be rasterised before anything appears.
+That is a fair trade only where rasterisation is reliable — and the table above proves it is not on
+this machine. Throwing away a layer that was painting correctly and asking for a fresh one is the
+worst available move: the old one is gone and the new one may never arrive, leaving the overlay laid
+out, hit-testable and invisible. Which is precisely the report, on both devices.
+
+It also fired far more often than the rotation it was scoped to: both callers hang off
+`_layoutSticksSoon` / `_viewportSettle`, which run on **every resize**, fullscreen transitions included.
+
+Now opt-in — `window.__overlayRepaint = true` or `?repaintkick`; `window.__repaintN` counts real runs.
+Verified on 40.72: lobby intact (7 chips, body 1116x584, preview, map row, confirm all visible),
+countdown paints `active|block` 3 → 2 → 1 in orange 180 px, `__repaintN` undefined (never ran), HUD
+renders in full.
+
+⚠ **Bisect note for the mobile report** (*"what broke this recently? i don't think it was like that in
+40.44"*): diffing 40.44 against head, **nothing in the touch module changed** — the only edits naming
+`#touch-controls` are the v40.64 error HUD and this v40.65-67 kick. The landscape media query
+`@media (max-height: 500px) and (orientation: landscape)` is byte-identical apart from
+`#map-select-row { order: 1 }` and three `#teammates-strip` sizing rules. So the mobile symptom was
+never a touch-layout regression.
+
+
+## v40.73 (bad, reverted) / v40.74 / v40.75 — the resize storm, and a fix that had to be taken back
+
+### ⚠ v40.73 broke the launch and was never the fix. Reverted in v40.74.
+
+Owner: *"40.73 is glitched, it just directly goes from the main screen to waiting for peers"* — the
+ship selection screen was skipped. v40.73 had replaced the picker's one `compileAsync` with
+`_compileSliced` + `_drainProgramLinks(4000, ...)`, and both await `_warmupYield()` in a loop, so
+`_stage()` — which sets `s.model` — could be deferred four seconds. The picker does not wait that
+long for its own model.
+
+**And the reasoning behind it was wrong on the measurement.** Re-measured in the pane on 40.73:
+`renderer.compile` costs **0.1–0.3 ms per call** and links nothing on a warm cache; instrumenting
+`linkProgram` / `compileShader` / `getProgramParameter` around a hull swap totals **0 ms**. The 996 ms
+`_compileSliced` reported for PYRO was **the rAF yield waiting for a frame that never came** — the
+stall was already underway. Which matches mark n62 exactly: `slowgl` empty, `hb` one 70 ms entry, and
+the idle second context stalling the identical 4182.1 ms against our 4182.6 ms. **Nothing about the
+ship change is main-thread bound**, so slicing main-thread work could never have helped.
+
+⚠ The lesson is procedural: **40.73 shipped without the launch flow being run once.** Every build
+that touches the picker, the countdown or the launch now gets the end-to-end check below.
+
+### v40.75 — `_applyViewportSize` reallocated the drawing buffer on every resize event
+
+Found by the audit workflow's completeness critic after all five auditors (and I) missed it: they all
+swept DOM overlay layers and program links, and **nobody looked at the biggest composited layer on the
+page — the canvas itself**.
+
+`_applyViewportSize` called `renderer.setSize(innerWidth, innerHeight)` **unconditionally**. In r165
+`setSize` assigns `_canvas.width` / `_canvas.height` every call, and **assigning `canvas.width`
+reallocates and clears the drawing buffer even when you assign the value it already holds** — swapping
+the canvas's compositor texture with it. Its callers, for ONE Android rotation:
+
+- `window resize` — 1–3 on a phone as the viewport settles
+- `orientationchange` → `_viewportSettle` → immediate + `setTimeout(250)` + `setTimeout(700)`
+- `visualViewport resize` for the URL-bar collapse
+
+**Eight to ten reallocations, nearly all to a size that did not change.** The author already knew the
+storm existed — the render targets are debounced against it three lines below — but `setSize` was left
+outside that debounce with no size comparison.
+
+⚠ **This is the v40.65 repaint-kick mistake one level up.** Destroying a layer is only safe where
+rasterisation is reliable, and v40.70's second-context fence proved it is not on this machine. The
+phone symptom is the identical shape: after a rotation the touch controls and countdown are laid out
+and still hit-testable (*"i can feel them working but can't see them"*) but never painted, and rotating
+away and back — another storm — eventually lands one that does rasterise.
+
+⚠ **And it is why `dbuf` looked clean.** The v40.70 probe logs the backing-store size only when the
+STRING changes, so a same-size reallocation was invisible to it. An empty `dbuf` never meant "no
+reallocation"; it meant "no size change". Now counted directly as `vp: [reallocated, skipped]`.
+
+The fix is the missing dirty check; the CSS size is still kept in step on the skip path (assigning
+`style.width/height` does not touch the backing store).
+
+**Verified on 40.75:** a storm of 10 resize events at an unchanged viewport → **0 reallocations, 10
+skipped**; forcing a genuine mismatch (canvas set to 640x400) → **1 reallocation, restored to
+1345x860**. Correct in both directions.
+
+### The end-to-end launch check (run this before shipping anything near the picker/countdown)
+
+```js
+// in the pane, after startFreeFlight()
+document.querySelectorAll('.ship-chip')[1].click();      // wait ~3 s — clicking chip+confirm in one
+document.getElementById('ship-preview-confirm').click(); //   tick does NOT launch (test artifact)
+// then poll [game.state, #ship-select.className, #ship-select-countdown display, .cd-num]
+```
+A healthy 40.75 run: `select|active` → `select|active lss-launching` → `warmup` → `block|3` →
+`block|2` → `block|1` → `playing|block|LAUNCH` → cleared.
+
+### Audit findings still open (adversarially verified, not yet fixed)
+
+| where | severity | what |
+| --- | --- | --- |
+| `_cloakPendingTick` L95112 | **high** | the deferred cloak-warm finisher is orphaned at the warmup→playing flip, leaving the hull at **1 % opacity**; `_cloakPendingTick`'s only call site is unreachable once `game.state` is `'playing'` |
+| `_warmRealCombatFXInner` L56933 | high | the `postFX.rtScene` compile+draw sits **outside** the v40.69 deferral |
+| `_ghostPinWarm` L56083 | medium | draws the whole scene in the same turn as its five full-scene compiles; no drain, unlike its sibling `_warmCloakForRoot` |
+| `_cyberRoundIntro` L34410 | medium | both `warmupTimer` writes are dead — freeflight forces it to 0 every frame |
+| `_cyberRoundIntro` L34437 | low | starts its 3-2-1 only 300 ms after the cinematic's nominal end; a late frame leaves `body.lss-cinematic-active` on and the CSS blanks the digits |
+| `_warmDrawRoot` L30155 | low | called with one argument → returns false at the `!rt` guard, so the hub-water bubbles program is never pre-linked |
+| `_warmReflLiftForRoot` L65370 | low | draws on the statement after its compile; both callers' drains are on the wrong side |
+
+⚠ The critic checked the mobile gates rather than assuming them: `_ghostPinWarm` (L56117) and
+`_warmRealCombatFXInner` (L56759) are both behind `_fxSmallDevice()`, so **neither can run on a phone**
+— they cannot be the mobile symptom.
+
+
+## v40.76 / v40.77 — THE MISSING COUNTDOWN, FOUND. It was never a compositor failure.
+
+The owner's own words named it: *"chrome mobile had the white Launch but not orange countdown"*.
+`.cd-sub` (LAUNCH, white, **no animation**) and `.cd-num` (the orange digit) are SIBLINGS inside
+`#ship-select-countdown`. The element was painting the whole time — only the digit was invisible. That
+rules out every layer/rasterisation theory in one line, and points at the digit's own style.
+
+```css
+#ship-select-countdown .cd-num { animation: cdPulse 0.9s ease-out forwards; }
+@keyframes cdPulse {
+  0%   { transform: scale(0.6); opacity: 0; }
+  15%  { transform: scale(1.1); opacity: 1; }
+  100% { transform: scale(1.4); opacity: 0; }     /* + `forwards` holds this */
+}
+```
+
+**The digit was visible only while the animation clock was advancing.** Transparent at 0 %,
+transparent at 100 %, and `forwards` pinned it there afterwards. Each beat lives 1000 ms against a
+900 ms animation, so even a flawless run left it blank for the last 100 ms of every beat — and any
+frame drop over the beat meant the digit was never seen at all.
+
+**Reproduced exactly, and by accident.** With the Browser pane hidden, `document.timeline.currentTime`
+is pinned at 0. Live computed style on `.cd-num`, with `playState: running`, `delay: 0s`, `fill: both`:
+
+```
+opacity: 0    transform: matrix(0.6, 0, 0, 0.6, 0, 0)     <- the 0 % frame, held forever
+```
+
+A frozen clock holds the 0 % frame exactly as a finished animation holds the last. **That is the same
+state this machine is in whenever Chrome's GPU process stops servicing the page** — v40.70's
+second-context fence proved those stalls (an idle 1x1 GL context stalling to the same millisecond as
+ours), and `tl` is pinned across every stalled mark. Every report follows: *"my desktop pc doesn't show
+the countdown"*, *"the 3 got skipped"*, the missing countdown on the phone — and why it always looked
+right here, where the clock runs.
+
+⚠ **This is a v40.57 regression** — the build that unified the two countdowns onto this element and
+gave the digit `cdPulse`. That is after 40.44, which is exactly where the owner placed it: *"I don't
+think it was like that in 40.44."*
+
+### The fix, in two steps, and why the first was not enough
+
+- **v40.76** made the base rule `opacity: 1` and stopped the keyframes ENDING at 0. That covers a
+  finished or never-started animation — but not a frozen one, because `fill: both` still applies the
+  0 % frame, which was still `opacity: 0`.
+- **v40.77** removes opacity from the animation entirely. Both `cdPulse` and `cdFightPulse` are now
+  `opacity: 1` at every keyframe; only `transform` animates. **There is no value of the animation
+  clock — running, frozen, or finished — at which the digit is invisible.**
+
+**Verified two ways.** With the clock frozen at 0, all four beats (3 / 2 / 1 / FIGHT) read
+`opacity: 1`; before the fix all four read `0`. And by pausing the animation and driving
+`a.currentTime` through it, opacity is 1 at 0 / 15 / 50 / 85 / 100 % of both variants while the scale
+pop is untouched (digit 0.6 → 1.1 → 1.15; FIGHT keeps its 1.11 overshoot and settle).
+
+⚠ **THE RULE THIS ESTABLISHES:** on this project, *no overlay may depend on a CSS animation to become
+visible.* An animation is emphasis. If the element must be seen, its resting style must show it. The
+animation clock stops whenever the compositor does, and on this hardware that is routine.
+
+### Reading a Chrome DevTools trace from this repo
+
+The exports are 200–350 MB and start with a `{"metadata": {...}}` block whose `sourceMaps` array is
+tens of MB — `"traceEvents"` is NOT in the first few KB. `scratchpad/trace_scan.py` streams the file
+with `JSONDecoder.raw_decode` over a sliding buffer (memory-bounded), scanning forward for the key
+first, and summarises busiest threads / longest events / per-thread top costs.
+
+
+## v40.78 / v40.79 — FULLSCREEN is the trigger, and the on-screen readout that localised it
+
+Owner: *"only fullscreen tho ... same on phone full screen breaks it"*, and *"desktop PC looks like
+mobile ... without the 321fight"*. Windowed is fine on both devices. `fs: true` had been sitting in
+every single F8 mark all session and nobody followed it.
+
+**What it is NOT** (each checked, not assumed):
+- not the v40.77 opacity bug — the deployed CSS was fetched from the live site and has `opacity: 1`
+  at every keyframe;
+- not a `:fullscreen` CSS rule — there are none in the stylesheet;
+- not "overlays outside the fullscreen subtree" — fullscreen is requested on `document.documentElement`;
+- not the fullscreen UA layout. Chrome's `:fullscreen` UA styles (`position: fixed; inset: 0;
+  width/height: 100%; margin: 0; transform: none`) were applied to `<html>` by hand in the pane and
+  **twelve of thirteen overlays measured identically before and after**.
+⚠ The Browser pane refuses `requestFullscreen` outright ("Permissions check failed"), so the API
+path cannot be reproduced here at all.
+
+**What the v40.78 readout showed, in fullscreen on the phone:**
+
+```
+1089x485 fs:HTML lss-touch ta:1 st:playing
+TC  d:block op:1 v:v 1089x485@0,0     <- container CORRECT, opaque, full viewport
+CD  [-] d:none  op:1 v:v 0x0@0,0      <- NO CLASS AT ALL, and display:none
+NUM "FIGHT" d:block op:1 v:v 0x0@0,0  <- the digit text IS set
+```
+
+Two separate faults, both now localised:
+
+1. **The countdown is not a paint failure.** The element has **no class** (`[-]`) and is `display:
+   none`, while `.cd-num` holds the right text. `_cdPaint` sets the text and *then* adds `.active`,
+   so either it ran and something stripped the class, or it never ran and that text is the static
+   markup (`<div class="cd-num">3</div>` — note the resting state on the menu reads exactly
+   `NUM "3" d:none`, which is indistinguishable in a photo). **v40.79 adds `CDLOG`** — every
+   `_cdPaint`/`_cdClear` as `P/C:owner:text:t` — which separates them outright.
+2. **The touch controls' CONTAINER is fine; the children are not.** `#touch-controls` measures
+   `block / opacity 1 / 1089x485 @0,0` while the screen shows no buttons and only two stick knobs
+   bunched near the centre instead of the corners. That is `_layoutSticks` / `_tcStyle` computing
+   against the wrong viewport, not a compositor problem. **v40.79 adds `MOVE` and `BTN`** — the
+   computed style and real rect of one stick and one button.
+
+⚠ Also from the phone readout: **`parallelCompile NO`** — that device has no
+KHR_parallel_shader_compile, so `_lssPrimeTick` stands down (v40.63) and `_drainProgramLinks` cannot
+poll. The whole compile-drain architecture is inert on that phone by design.
+
+⚠ `?pberr` alone does NOT arm the readout — the enclosing module is gated on `?pbhud`. Use `?pbhud`.
+
+
+## v40.80 / v40.81 — the countdown is CLEARED, not hidden. Plus the trace confirms the GPU process.
+
+### The owner's Chrome DevTools trace, read at last (77.1 s, 1,173,665 events)
+
+Busiest threads: `Renderer/CrRendererMain` 190.9 s, **`GPU Process/CrGpuMain` 90.8 s**,
+`GpuVSyncThread` 77.0 s (a blocking wait, not work), `VizCompositorThread` 2.4 s.
+
+The longest events in the whole trace are **single GPU-process tasks**:
+
+| t | ms | thread | event |
+| --- | --- | --- | --- |
+| 13.23 | **3947.4** | GPU Process/CrGpuMain | RunTask / GPUTask |
+| 35.84 | 3729.7 | GPU Process/CrGpuMain | RunTask |
+| 40.58 | 3722.5 | GPU Process/CrGpuMain | RunTask |
+| 67.43 | 3326.3 | GPU Process/CrGpuMain | RunTask / GPUTask |
+| 17.26 | 3306.5 | GPU Process/CrGpuMain | RunTask / GPUTask |
+| 3.03 | 2814.3 | GPU Process/CrGpuMain | RunTask / GPUTask |
+| 63.81 | 2248.3 | GPU Process/CrGpuMain | RunTask / GPUTask |
+
+**One task, on the GPU process's main thread, running for up to four seconds.** That is the direct
+confirmation of what v40.70's second-context fence could only infer. Exactly one renderer-side event
+is comparable (t=2.98, 2883 ms `FireAnimationFrame`) and it is inside the load, not in play.
+
+### The countdown: the v40.80 high-water readout settled it
+
+```
+PEAK  act:1 num:89x108 "3"  sub:149x19
+CDLOG C:*::51.5 | C:*::51.5 | C:*::51.5
+```
+
+**The digit goes `.active` and lays out** (89x108). Then **three `_cdClear()` calls with NO owner**
+land back to back and wipe it. An ownerless clear ignores `_cdOwner`/`_cdPrio` entirely, so it kills
+whatever is on screen regardless of who painted it - and there are six such sites
+(`enterShipSelect`, `showShipSelectWaiting`, `_lssStartSpectatorCinematic`, `returnToRootMenu` x2,
+`launchCountdown`). So the countdown was never a paint, opacity, compositor or fullscreen problem:
+**something clears it immediately after it paints.**
+
+⚠ This also retires the sibling-split reasoning that led to v40.76/40.77. Those builds are still
+correct and still worth keeping (a frozen animation clock genuinely could hide the digit, and does on
+this hardware) - but they were not THIS bug.
+
+**v40.81** adds one stack frame to each clear, so the log accuses a function by name:
+`CDLOG C:*:enterShipSelect:27.2`. Verified live in the pane.
+
+⚠ **A once-a-second sampler cannot observe a one-second countdown**, and a child of a `display:none`
+parent measures `0x0` - together those made v40.78/40.79 report a collapsed digit that was merely
+between beats. Any readout aimed at a transient must keep a HIGH-WATER MARK (v40.80, 100 ms).
+
+
+## v40.82 — VERDICT: the overlays are laid out perfectly and the compositor will not rasterise them
+
+The v40.81 readout, phone, fullscreen, countdown running:
+
+```
+CD   [active] d:block op:1 v:v 149x209@470,138
+NUM  "3"      d:block op:1 v:v  97x117@496,170
+MOVE          d:flex  op:1 v:v 146x146@151,268
+BTN           d:flex  op:1 v:v 108x73@714,11
+CDLOG C:*:SpectatorCinematic:12.1 | C:*:launchCountdown:18.1 | P:launch:3:18.1 | P:launch:3:18.1
+```
+
+Active, block, fully opaque, correctly sized, centred in the viewport, **painted twice** — and not on
+the screen. That eliminates opacity, display, visibility, layout, position, and the ownerless-clear
+theory v40.80 raised, all in one reading.
+
+⚠ **And then the owner sent a screenshot that settles it beyond argument**: in play, the `[prebake]`
+box and the error HUD render as **solid rectangles with no text in them** — the brownish band is the
+error HUD's own `rgba(20,0,0,0.62)` background, the dark blue one is the perf box. **Backgrounds
+rasterise, their text does not.** No CSS in this project can produce that. It is the GPU process
+failing to rasterise content, on a machine whose DevTools trace contains single
+`GPU Process/CrGpuMain` tasks of 2.2-3.9 s and whose second, idle GL context stalls in lockstep with
+ours. DuckDuckGo, same engine, same page: smooth.
+
+**What v40.82 changes anyway, because both are right on their own merits:**
+
+- `.cd-num` and `.fight .cd-num` lose their `animation` entirely. An animated `transform` promotes an
+  element to its own compositor layer, and those are exactly what go missing here; `.cd-sub` sits in
+  the SAME element with the same opacity, has no animation, is painted into the root layer, and shows
+  every time. ⚠ The animation was not even running: 97x117 against the 170x206 this digit measures on
+  a healthy machine is a ratio of 0.57, i.e. `scale(0.6)` — the 0 % keyframe, frozen. It cost a layer
+  and delivered nothing. Verified after: `animation: none`, `transform: none`, opacity 1, true size
+  149x180 (FIGHT 364x96).
+- The touch controls go from a 7 %-alpha fill behind a 30 %-alpha hairline to 18 % / 65 % with a text
+  shadow. That is a better default on a dark cavern regardless, and it is also a TEST: if they are
+  still invisible at those values it is paint, not contrast, and no stylesheet can fix it.
+
+⚠ Honest limit: the screenshot shows even NON-composited text failing to rasterise, so v40.82 improves
+the odds for the digit without being a guaranteed cure. The root cause is outside the page.
+
+
+## v40.83 — the green/red ball found and fixed, and the desktop countdown cleared by live recording
+
+Driven through the **claude-in-chrome extension on the owner's real desktop** (the Browser pane and
+the extension BOTH refuse `requestFullscreen` - `TypeError: not granted` - so the owner performed the
+transition while a 100 ms recorder ran in the page: `window.__fsWatch`).
+
+### The desktop 3-2-1 is not a code bug
+
+Recorded in FULLSCREEN on the owner's machine, through several complete sequences:
+
+```
+621.63 warmup "3"  block op1 149x180 @694,327  fs:1
+622.64 warmup "2"  block op1 149x180 @693,327  fs:1
+623.64 warmup "1"  block op1 148x180 @694,327  fs:1
+624.64 playing FIGHT block op1 364x96 @586,384 fs:1
+672.53-678.54  "6","5","4","3","2","1","LAUNCH"  all fs:1, all block op1
+```
+
+Active, block, fully opaque, correctly sized and positioned, **exactly one second apart**. The DOM and
+the clock are flawless in fullscreen. Whatever the owner is not seeing is the rasteriser, which is the
+GPU-process finding - not anything in the page, and not anything a revert would reach.
+
+⚠ The same recording clears v40.75: canvas went `1920x868 -> 1920x1080` on entering fullscreen and
+back on leaving, with exactly one `resize` each way. The dirty check is doing its job.
+
+### The green/red ball: found, mechanism confirmed, fixed
+
+It is **two `SphereGeometry` + `MeshBasicMaterial` children of `player.mesh`**, colours `30ff30` and
+`ff3030`. That puts them squarely inside the traverse in `_warmCloakForRoot`, which sets EVERY
+material on the root to `transparent = true; opacity *= PILOT_PERKS.cloak.cloakOpacity` (**0.01**).
+
+Caught live on the owner's machine: at t=600.80 in warmup the player's ship reported
+**19 materials, all 19 transparent, minimum opacity 0.01**. It recovered 170 ms later that time.
+
+With `deferDraw` the ONLY restore is inside `_fin`, and `_fin` is run by `_cloakPendingTick`, whose
+single call site is unreachable once `game.state === 'playing'`. Lose that race and the hull and the
+ball sit at one percent opacity for the rest of the match - *"disappears too, and stays hidden"*, and
+it reproduces in DuckDuckGo because it has nothing to do with the compositor.
+
+**v40.83** adds a hard 8 s deadline that restores any material still carrying `_wOp`, whatever happens
+to the finisher; `_fin` cancels it on the normal path. The restore is idempotent (guards on `_wOp`),
+8 s is past `_cloakPendingTick`'s own 6 s cap so a slow-but-healthy drain is never cut short, and a
+rescue is counted into `flags.cs2` so a recurrence can never be invisible again.
+
+**Verified end to end on 40.83:** launch reaches `playing`, countdown paints `3 -> 2 -> 1 -> LAUNCH`
+at opacity 1, `__cloakWarm 362` materials warmed and restored, `__cloakStranded` 0 (the deadline never
+fired, so the normal path is untouched), ship minimum opacity 0.08 - the real windshield/HUD glass,
+not 0.01.
+
+
+## v40.84 / v40.85 — the stuck cloak (mine) and the real cause of the green/red ball
+
+### v40.84 — "auto cloak doesn't turn off and stays on". I caused this in v40.83.
+
+`_setShipMeshOpacity` stashes its restore baseline ONCE per material, ever:
+
+```js
+if (m.userData._cloakOrigOpacity === undefined) {
+  m.userData._cloakOrigOpacity = m.opacity;            // <- whatever it happens to be RIGHT NOW
+  m.userData._cloakOrigTransparent = !!m.transparent;
+}
+```
+
+`_warmCloakForRoot` mutates those same live materials to `transparent = true; opacity = orig * 0.01`.
+If the first cloak lands inside that window the baseline is recorded as ONE PERCENT, and every
+"uncloak" afterwards restores the ship to 1 % and leaves it transparent - a cloak that never switches
+off. ⚠ **v40.83 is what made it reachable**: before, an orphaned finisher left the materials flipped
+forever (the ship just stayed invisible); the 8 s deadline turned that permanent blackout into a
+clean 8-second window for this capture to land in.
+
+Fixed by reading the warm's own marker: `_wOp` present means mid-warm, and the true baseline is
+`_wOp` with `transparent` false. The warm's restore also now hands the baseline over instead of
+stomping a cloak that went live after it flipped.
+
+**Proven in isolation against the shipped logic** (cloak fires during warm, then uncloak):
+
+| | opacity | transparent |
+| --- | --- | --- |
+| old code | **0.01** | **true** — permanently cloaked |
+| v40.84 | 1 | false |
+| no warm (control) | 1 | false |
+
+### v40.85 — THE BALL. Not the cloak warm at all, and not new since 40.44.
+
+Found by the revert-analysis workflow, adversarially verified, and it is a better explanation than
+the cloak-strand one v40.83 was built on:
+
+1. `_addShipRunningLight` sets `userData.isRunningLight` on **`lightGroup`** (L41913) - a `THREE.Group`.
+   Both readers (`_shipSkinHullMats`, `_ghostHullApply`) test that flag inside a traverse that opens
+   `if (!o.isMesh) return;`. **The Group is rejected before the flag is read, and the two bead meshes
+   carried no userData at all** - so the guard has never once fired for them.
+2. In `_ghostHullApply` the `transparent` test lives ONLY in the cold-cache branch; the assignment
+   `o.material = o.userData._ghostMats` runs unconditionally on a cache hit.
+3. So the beads get an `_addGhostHull` clone - transparent, `depthWrite` off, alpha ~0.13-0.37 - and
+   `_navLightSeatDim` then keeps writing colour and opacity to `_ghostOrig`, the material that is no
+   longer drawn. Nothing self-heals.
+4. `_ghostPinWarm` seeds that cache behind the loading overlay on **every launch**.
+
+⚠ It is a **SEAT-view** symptom (first person / VR). The chase camera runs `_ghostHullRestore`, which
+puts `_ghostOrig` back - so the ball returns in third person. That asymmetry is the diagnostic tell.
+
+**Fix**: flag `portMesh` and `starMesh` (two lines - the existing L66721 guard then does what it
+says), plus a cache-hit guard that drops the ghost cache when the live material has since gone
+transparent, which closes the same hole for the canopy glass and any cloaked hull material.
+
+**Verified in a live match on 40.85**: both beads `flagged: true`, `ghosted: false`, `transparent:
+false`, `opacity: 1`, still `MeshBasicMaterial` at `ff3030` / `30ff30`.
+
+⚠ **The diff confirms zero hunks in any of these functions since 40.44 - so a revert would NOT have
+fixed the ball.** That is the decisive input to the revert question.
+
+
+## v40.88 — "the only flicker is something at exactly 2" — the cloak warm's open window, closed
+
+The countdown beat "2" is where `_warmCloakForRoot` does its LATE re-run (its own v39.96 note:
+`withShadow === false` is "the late re-run in the last two seconds of the countdown"). Under
+`deferDraw` it left EVERY material on the ship at `transparent = true, opacity = orig * 0.01` and
+handed back a finisher that only restored them after a drain - so **every real frame rendered in that
+window drew the ships at one percent**. That is the flicker, on the beat the owner named.
+
+The same open window is the root of the two bugs before it: it is what let the cloak capture a 1 %
+baseline (v40.84, "auto cloak doesn't turn off") and what could strand the hull and the running-light
+beads outright (v40.83).
+
+⚠ **THE WINDOW WAS NEVER NECESSARY, and the comment that justified it is wrong here.** v39.39 says
+"flipping the real material, compiling, and flipping back frees the program the moment its last user
+reverts — three refcounts programs per material". Measured in a live scene on r165:
+
+| step | `renderer.info.programs.length` |
+| --- | --- |
+| opaque compile | 33 |
+| transparent compile | **34** (variant built) |
+| revert the material | **34** (NOT freed) |
+| full render | **34** |
+| re-flip | **34** (no rebuild) |
+
+So the materials are restored the instant the compile finishes, and `_fin` re-applies the flip only
+for the microseconds of its own draw, inside one synchronous call no frame can observe. `try/finally`
+replaces the v40.83 8-second deadline - a throw mid-draw can no longer strand anything, so the
+deadline retires along with the window it was guarding.
+
+**Verified over 864 consecutive frames with the warm running (250 materials warmed):** minimum ship
+material opacity never went below **0.08** - the windshield and HUD glass, legitimately translucent -
+where the pre-fix recording on the owner's own phone caught **19 materials, all transparent, min
+0.01**. Zero stranded.
+
+⚠ Mobile's flicker is a SEPARATE fault: the owner's phone screenshots show whole-frame RGB channel
+separation and smearing across the HUD and the 3D alike. That is the device's driver, not this.
+
+
+## v40.88 — MOBILE RESOLVED. Session summary.
+
+Owner's phone on 40.88, two screenshots: **every touch control rendering crisply** (gear + layout
+top-left, CORE MEGA LASER, LT ZOOM, F PLASMA MINES, RT ENERGY BLASTER, second row below), FIGHT at
+full size over an intact HUD, **48-60 fps**, and none of the whole-frame RGB smearing the pre-40.85
+shots showed. The readout finally agrees with the pixels: `CD [active]`, `NUM "2"`,
+`MOVE d:flex 146x146@151,268`, `BTN d:flex 108x73@714,11`.
+
+### What actually fixed what, across the whole hunt
+
+| symptom | cause | build |
+| --- | --- | --- |
+| countdown digit invisible (all devices) | `.cd-num` opacity animated 0→1→0 with `forwards`; a frozen animation clock holds the 0 % frame | 40.76 / **40.77** (opacity never animated) |
+| countdown digit still invisible on phone | animated `transform` promoted it to its own compositor layer, and promoted layers were the ones going missing | **40.82** (animation removed entirely) |
+| touch controls invisible | 7 %-alpha fill behind a 30 %-alpha hairline on a dark cavern | **40.82** (18 % / 65 % + text shadow) |
+| green/red ball gone, "stays hidden" | `isRunningLight` set on the GROUP, so the guard never fired for the bead MESHES → ghost-shell clone assigned on every cache hit | **40.85** |
+| "auto cloak doesn't turn off" | `_cloakOrigOpacity` captured while the warm had materials at 1 % → 1 % became the "original" | **40.84** |
+| flicker at exactly "2" | the warm left every ship material at 1 % ACROSS FRAMES until a drain finished | **40.88** |
+| countdown missing / lobby items hidden on desktop | my own `display:none` repaint kick destroying layers a sick GPU process could not rebuild | **40.72** (withdrawn) |
+| ship-select launch broken | my sliced picker compile deferring `_stage` by up to 4 s | **40.74** (reverted) |
+| drawing buffer reallocated 8-10x per rotation | `_applyViewportSize` had no dirty check | **40.75** |
+
+### What is NOT ours, established three independent ways
+
+Chrome's GPU process on this machine stalls for seconds: `GPU Process/CrGpuMain` `RunTask` events of
+**2.2-3.9 s** in the owner's own DevTools trace; a second, idle 1x1 WebGL context whose fence stalls
+to the same millisecond as the game's (including one submitted MID-stall); and overlay boxes
+rendering their background with no text. DuckDuckGo, same engine, same page: smooth. Nothing in the
+page can fix that - the levers are `chrome://flags/#use-angle` → Vulkan, clearing ShaderCache/GPUCache,
+Hardware-Accelerated GPU Scheduling, and pinning Chrome to the discrete GPU.
+
+⚠ **The revert to 40.44 was correctly declined**: the ball bug's functions have zero diff hunks since
+40.44, the countdown bug arrived with v40.57 (after it), and the desktop symptom is the browser. A
+revert would have cost every verified fix and repaired none of the three live bugs.
+
+
+## v40.90 / v40.91 — the fullscreen settle ladder, and per-frame pass shapes in a mark
+
+### v40.91 — FULLSCREEN NEVER RAN THE SETTLE LADDER
+
+Owner, on a phone: *"the countdown and touchscreen controls only appear if you're NOT in fullscreen,
+or if you switch away from full to not full to full again then you can have them in full screen"*.
+That recipe IS the diagnosis: the layout is computed once against the wrong viewport, and only a
+SECOND transition corrects it.
+
+This file already knows the failure mode. `_viewportSettle`'s own note: *"mobile browsers often fire
+orientationchange while innerWidth/Height still hold the OLD orientation's values, and don't always
+fire a final resize once they settle"* - and the remedy is a LADDER of retries (0 / 250 / 700 ms).
+But that ladder was wired to **`orientationchange` only**:
+
+| event | what ran |
+| --- | --- |
+| `orientationchange` | `_viewportSettle` (laddered 0/250/700) |
+| `resize` | `_applyViewportSize` — **one shot, no ladder** |
+| `visualViewport resize` | `_layoutSticksSoon` (laddered) |
+| **`fullscreenchange`** | **nothing** — only the incidental `resize` |
+
+So entering fullscreen got a single un-laddered `_applyViewportSize`, and `_layoutSticks` - which
+pins every stick and button in px - **never re-ran at all**. Toggling fullscreen off and on just buys
+more events, which is exactly the owner's workaround.
+
+⚠ **Corroborated by the file itself**, three lines from the fix, in a v35.06 note: *"window-level
+resize/orientationchange events get eaten by FULLSCREEN TRANSITIONS"*. That was written about the
+sticks missing rotations; it is the same mechanism making the fullscreen transition under-notified.
+
+v40.91 hooks `fullscreenchange` / `webkitfullscreenchange` to BOTH ladders - `_viewportSettle` for the
+canvas and camera, `_layoutSticksSoon` for the touch controls. Both are idempotent (they only write
+left/top/width/height), and `_applyViewportSize` has been dirty-checked since v40.75, so the extra
+calls are free when nothing moved. **Verified:** a dispatched `fullscreenchange` gives
+`__vpSize [1, 4]` - one real reallocation, four correctly skipped.
+
+### v40.90 — per-frame render-pass shape, in every mark
+
+Three live pass-recorders in a row were wiped by page reloads, so it is in the recorder now: wrap
+`renderer.render`, and on each rAF close out the frame's list of targets into one string. Emitted as
+`pass: [t, shape, totalDrawCalls]` for the last ~4 s.
+
+Read it for the countdown flicker. Measured live in elimination before this shipped:
+
+```
+~1.5 s before "2":   4608x2424>C                     (shadow map STRAIGHT TO CANVAS, no postFX)
+during "2":          4608x2424>S>S>S>C>K             (the full chain)
+```
+
+The pipeline changes shape inside the countdown - tone mapping, bloom and colour change with it. And
+an extra leading `S` pass appears on alternating frames (the water Reflector, +550 draw calls: 893 vs
+342, 201 swings of 1.3-1.6x across 416 frames). `S` = rtScene, `C` = canvas, `K` = the keep-warm 512.
+
+
+## v40.92 — THE WATER FLICKER AT "2". Found in a mark, mechanism traced, guard verified.
+
+Owner: *"something in the water flickers, at 2"*. v40.90's per-frame pass recorder caught it on the
+first try, and **three independent marks agree**:
+
+```
+n139  51.59  calls=787  960x540>S>128x128>960x540>S>960x540>960x540>960x540>C>K
+n142  19.50  calls=846  960x540>S>128x128>960x540>S>960x540>960x540>960x540>C>K
+n145  28.30  calls=903  960x540>S>128x128>960x540>S>960x540>960x540>960x540>C>K
+```
+
+Identical signature, exactly one occurrence per run, always in `warmup`. Every normal frame renders
+the scene ONCE (`S`); that frame renders it **twice**, at 787-903 draw calls against a normal 307-620.
+
+The extra `S` is `_warmDrawRoot` - and the `960x540` immediately in front of it is **the water
+Reflector refreshing inside that render**, off `_warmDrawRoot._cam`: a throwaway PerspectiveCamera
+parked at `(c.x, c.y + r*0.5, c.z + r*2.6)` looking at the ship, hundreds of units from the real eye.
+
+The mirror renders its RT from there **and caches that position as `_reflEyeP`**. On the next real
+frame the cadence gate measures the true camera against the WARM camera, finds it inside the 90 u
+jump threshold, and skips its refresh - so the water samples a reflection captured from a viewpoint
+the player is not at. `uReflFloor` puts that layer in every water pixel, so it reads as the whole
+surface flashing for a frame or two.
+
+⚠ **This is why v40.49's jump test never fixed it.** That test was written for the LAUNCH camera cuts
+and it works for those. Nothing anticipated a warm pass hijacking the mirror *between* two real
+frames - the cut it needed to notice happened inside a render it never saw.
+
+**Fix**: `_warmDrawRoot` raises `window.__lssWarmDraw` around its `renderer.render`, and the
+reflector's cadence gate returns early while it is set. The warm needs the hull's programs, not a
+reflection. Returning leaves `_reflGap` untouched, so the next real frame is due on the normal
+cadence and the cached eye still describes the last REAL eye.
+
+**Verified live** by driving the guard directly:
+
+| | frame shape |
+| --- | --- |
+| flag off | `26x26>26x26>`**`532x344`**`>S>532x344...` — mirror present |
+| **flag on** | `26x26>26x26>`**`S`**`>532x344...` — **mirror absent** |
+| flag off again | `26x26>26x26>`**`532x344`**`>S>532x344...` — mirror back |
+
+⚠ Note the pass ring holds 400 frames (~3 s), so "0 double-scene frames" in a late sample proves
+nothing - the warm frame scrolls out. Check `__cloakWarm` for whether the warm ran at all, and drive
+the guard directly rather than waiting for the frame.
+
+
+## v40.93 — the audit caught a bug I shipped, and corrected my mechanism
+
+An adversarial audit of the v40.92 water fix confirmed the diagnosis and returned three corrections.
+Two were right and one was wrong; all three were checked rather than taken on trust.
+
+**✓ REAL BUG, MINE, HIGH SEVERITY.** v40.84's `_restoreMats` branch read:
+
+```js
+if (ud && ud._cloakOrigOpacity !== undefined && m.opacity < m._wOp) { ...hand over baseline... }
+else { m.transparent = false; m.opacity = m._wOp; }
+```
+
+`m.opacity < m._wOp` was meant to mean "a cloak is live, let it keep control". It does not. At restore
+time the warm has JUST set `m.opacity = m._wOp * 0.01`, so **it is always true** - and every material
+that had ever cloaked was skipped and left at one percent, transparent, permanently. The first cloak
+of a match armed it; every warm after that stranded the ship.
+
+⚠ It never appeared in testing because `_cloakOrigOpacity` only exists once `_setShipMeshOpacity` has
+actually run - i.e. after a real cloak - and the v40.88 verification (864 frames, minimum opacity
+never below 0.08) was free flight with no combat. **The branch was never entered.**
+
+Fixed by always restoring; the baseline hand-over stays (that part of v40.84 is still correct). Safe
+because of v40.88: flip and restore are one synchronous call no frame can observe, and
+`_setShipMeshOpacity` re-applies every frame while cloaked. Proven in isolation against both versions:
+
+| material | old | v40.93 |
+| --- | --- | --- |
+| has cloaked before | **opacity 0.01, transparent** | opacity 1, opaque |
+| never cloaked | opacity 1, opaque | opacity 1, opaque |
+
+**✓ MECHANISM CORRECTION.** My v40.92 comment said the next real frame skips its refresh because the
+jump test measures against the warm eye. Backwards: the warm eye is hundreds of units away, so the
+90 u test FIRES and the mirror does refresh. The artefact survives on DRAW ORDER - the displaced sheet
+copies `_reflWorld`/`tDiffuse` BEFORE the Reflector's own onBeforeRender, so the frame after a warm
+draw samples the warm-eye capture through the warm-eye matrix. The file already said so beside the
+sheet ("THIS SHEET draws first", and the jump escape "shortens the artefact to ONE frame ... it does
+not reach zero"). The fix is right under either reading; the comment is now corrected.
+
+**✗ REFUTED.** The audit claimed `grep -c __lssWarmDraw index.html` = 0, so "the owner is playing an
+unguarded build". It grepped the wrong file: this project splits the JS out via `strip.py`, and
+`lss.js` contains the guard 3 times. ⚠ Any agent auditing this repo must be told about the two-file
+split, or it will report shipped code as missing.
+
+Also refuted by the audit, correctly: `rt4608x2424` is `postFX.rtScene` at MEGA, **not** a shadow
+atlas (there is one shadow map, 2048x2048, rendered inside `renderer.render`); and the 2-pass
+`...>C` frames are ones where `renderFrame` never ran because `_lssPickerOwnsFrame()` held it, not a
+postFX toggle. My earlier "the pipeline changes shape mid-countdown" reading was wrong on both counts.

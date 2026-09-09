@@ -1314,22 +1314,75 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
    that `after`, so the first round crossing is always after the class is off. If anything ever
    anchors warmupTimer before or during a cinematic, the digits will silently vanish rather than
    misbehave - check this rule first. */
+/* ⚠⚠ (v40.76) THE DIGIT MUST NOT DEPEND ON ITS ANIMATION TO BE VISIBLE. This is the missing
+   countdown, and the owner's own report named it exactly: "chrome mobile had the white Launch but
+   not orange countdown". `.cd-sub` (LAUNCH, white, no animation) and `.cd-num` (the orange digit)
+   are SIBLINGS inside this element, so the element was painting fine the whole time - only the
+   digit was invisible.
+   The cause was `cdPulse` + `forwards`: the keyframe ran `0% opacity 0 -> 15% opacity 1 -> 100%
+   opacity 0`, so the digit was transparent BEFORE the animation started and, because `forwards`
+   holds the final frame, transparent FOREVER after it finished. It was visible only during the
+   0.9 s the animation was actually running, and each beat lives 1000 ms - so even a perfect run
+   left the digit blank for the last 100 ms of every beat.
+   That turns any dropped frame into a missing digit, and on this machine dropped frames are the
+   norm: v40.70's second-context fence proved Chrome's GPU process stops servicing the page for
+   seconds at a time (marks n41/n43/n55/n62 - an idle 1x1 context stalling to the same millisecond
+   as ours, one of them on a fence submitted mid-stall). Every report follows from it: "my desktop
+   pc doesn't show the countdown", "the 3 got skipped", the missing countdown on the phone - and
+   why it always looked fine here, where nothing stalls and the animation always runs.
+   ⚠ The fix is not a longer or slower animation. It is that the animation may only ADD emphasis,
+   never own visibility: the base rule is opaque, and the keyframe no longer ends transparent. A
+   digit whose animation never starts, never finishes, or is skipped entirely is now still on
+   screen. The pop-in is unchanged; the trailing fade is gone, and it was never needed - each digit
+   is replaced by the next, and _cdClear drops `.active` at the end of the sequence. */
 #ship-select-countdown .cd-num {
   font-family: 'Orbitron', sans-serif; font-weight: 900;
   font-size: 180px; color: #ffaa00;
   text-shadow: 0 0 40px rgba(255,170,0,0.8), 0 0 80px rgba(255,100,0,0.4);
   letter-spacing: 0; line-height: 1;
-  animation: cdPulse 0.9s ease-out forwards;
+  opacity: 1;
+  /* ⚠⚠ (v40.82) NO ANIMATION. THE ANIMATION WAS THE ONLY THING KEEPING THIS OFF THE SCREEN.
+     The v40.81 on-screen readout, taken on the phone in fullscreen while the countdown was running:
+       CD  [active] d:block op:1 v:v 149x209@470,138
+       NUM "3"      d:block op:1 v:v  97x117@496,170
+       CDLOG ... | P:launch:3 | P:launch:3
+     Active, block, fully opaque, 97x117, centred in a 1089x485 viewport, painted twice - and NOT ON
+     THE SCREEN. That eliminates opacity, display, visibility, layout, position and the clear path
+     (v40.80's suspicion) in one reading. What is left is that the layer never rasterises.
+     The sibling proves it: `.cd-sub` sits in the SAME element with the same opacity and the same
+     parent, has no animation, is therefore painted into the root layer - and it shows, every time.
+     `.cd-num` animated `transform`, which promotes it to its own compositor layer, and on this
+     machine those layers do not come back: the owner's DevTools trace has single
+     `GPU Process/CrGpuMain` tasks of 2.2-3.9 s, and v40.70's second GL context stalls with ours.
+     ⚠ And the animation was never even running. 97x117 against the 170x206 this digit measures on a
+     healthy machine is a ratio of 0.57 - `scale(0.6)`, the 0 % keyframe. The clock is frozen, so the
+     pulse contributed nothing at all except the layer that loses the digit. Removing it costs a
+     decoration nobody has seen on this hardware and buys the countdown back.
+     Keep opacity explicit above; it is what v40.76/40.77 established and it still guards the case
+     where some other rule tries to animate this element. */
 }
 #ship-select-countdown .cd-sub {
   font-family: 'Orbitron', sans-serif; font-weight: 600;
   font-size: 15px; color: #ddd; letter-spacing: 6px; margin-top: 10px;
   text-transform: uppercase;
 }
+/* ⚠ (v40.77) THE DIGIT'S OPACITY IS NOT ANIMATED AT ALL. v40.76 stopped the keyframe ENDING at
+   zero, which was half the bug; the other half is that it also STARTED at zero, and a frozen
+   animation clock holds the 0 % frame just as surely as a finished one holds the last.
+   Reproduced exactly, live: with the animation reported as `playState: running`, `delay: 0s`,
+   `fill: both`, the computed style read `opacity: 0` and `transform: matrix(0.6, ...)` - the 0 %
+   frame - because `document.timeline.currentTime` was pinned at 0 and the clock never advanced.
+   That is the same state the owner's machine is in whenever Chrome's GPU process stops servicing
+   the page (v40.70's second-context fence; `tl` pinned across every stalled mark), and it is why
+   the white `.cd-sub` LAUNCH showed while the orange digit beside it did not.
+   So opacity is now constant across every frame and only `transform` animates. The digit pops in
+   exactly as before when the clock runs, and when the clock is frozen - at any point, for any
+   reason - it is simply on screen at full opacity. There is no longer a value of the animation
+   clock that can hide it. */
 @keyframes cdPulse {
-  0% { transform: scale(0.6); opacity: 0; }
+  0% { transform: scale(0.6); opacity: 1; }
   15% { transform: scale(1.1); opacity: 1; }
-  100% { transform: scale(1.4); opacity: 0; }
+  100% { transform: scale(1.15); opacity: 1; }
 }
 /* (v40.57) FIGHT - the one beat that must never read as another digit. Same element and the same
    Orbitron face as the 3-2-1, but red, about half the size and tracked out: the colour, the two
@@ -1347,13 +1400,13 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   font-size: 96px; color: #ff4400;
   text-shadow: 0 0 30px #ff4400, 0 0 60px #ff220088;
   letter-spacing: 8px;
-  animation: cdFightPulse 1.2s ease-out forwards;
+  /* (v40.82) FIGHT loses its pulse for the same reason - see the note on .cd-num above. */
 }
-@keyframes cdFightPulse {
-  0% { transform: scale(0.6); opacity: 0; }
+@keyframes cdFightPulse {   /* (v40.77) opacity constant at every frame - see the cdPulse note */
+  0% { transform: scale(0.6); opacity: 1; }
   12% { transform: scale(1.12); opacity: 1; }
   70% { transform: scale(1); opacity: 1; }
-  100% { transform: scale(1.25); opacity: 0; }
+  100% { transform: scale(1.1); opacity: 1; }
 }
 
 
@@ -4491,6 +4544,6 @@ window._lssLockLandscape = function () {};
 
 
 
-<script src="lss.js?v=40.67"></script>
+<script src="lss.js?v=40.93"></script>
 </body>
 </html>
