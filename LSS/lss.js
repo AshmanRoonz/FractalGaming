@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.32';
+const LSS_BUILD = '40.54';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2905,6 +2905,12 @@ const _EAEGIS_REG = [0, 0.003, 0.006, 0.009, 0.012, 0.015, 0.017, 0.0185, 0.0195
                      0.021, 0.021, 0.021, 0.021, 0.021, 0.021, 0.021, 0.021, 0.021, 0.021];
 const _EAEGIS_DIST_BONUS = 250;
 function _endlessLivesCapFor(startLives) { return startLives * 2; }
+const _EAEGIS_RANK_XP = 100;
+const _EAEGIS_XP_MUL = { easy: 1.0, medium: 0.7, hard: 0.5 };
+function _endlessAegisXpMulFor(d) {
+  const m = _EAEGIS_XP_MUL[d];
+  return (typeof m === 'number' && m > 0) ? m : _EAEGIS_XP_MUL.medium;
+}
 const EndlessMode = {
   onStart() {},
   onBuildWorld() {
@@ -2919,14 +2925,16 @@ const EndlessMode = {
         if (s.hall) { s.sph = game.levelSpheres[si] || null; si++; }
       }
     } catch (_) {}
-    try { run.lives = _endlessLivesFor(typeof _getStoredDifficulty === 'function' ? _getStoredDifficulty() : 'hard'); } catch (_) { run.lives = 1; }
+    try { run.difficulty = (typeof _getStoredDifficulty === 'function') ? _getStoredDifficulty() : 'hard'; } catch (_) { run.difficulty = 'hard'; }
+    try { run.lives = _endlessLivesFor(run.difficulty); } catch (_) { run.lives = 1; }
+    run.boltXp = Math.round(_EAEGIS_RANK_XP * _endlessAegisXpMulFor(run.difficulty));
     run.startLives = run.lives; run.livesMax = _endlessLivesCapFor(run.lives);
     run.dist = 0; run.progGid = -1; run.progT = 0; run.over = false; run.overT = 0;
     run.lastHall = { x: 0, y: 80, z: 0 };
     run.phase = 'travel'; run.phaseT = -22; run.waveN = 0; run.waveBots = null;
     run.biomeIdx = 0; run.nextBiomeAt = 11000; run.rays = null; run.rayT = 0;
     run.stormy = false; run.boltT = 0;
-    run.aegis = { lvl: 0, flashT: 0, bobT: 0, rwTxt: '', rwT: 0, lifeGrants: 0, distBonus: 0, overSpd: 0,
+    run.aegis = { lvl: 0, xp: 0, flashT: 0, bobT: 0, rwTxt: '', rwT: 0, lifeGrants: 0, distBonus: 0, overSpd: 0,
                   bolts: 0, kills: 0, seen: {}, baseCh: null, curCh: null };
     try { if (typeof _lssEndlessBolts === 'function') for (let i = 0; i < run.segs.length; i++) _lssEndlessBolts(run, run.segs[i]); } catch (_) {}
     try { const ri = document.getElementById('round-info'); if (ri) ri.style.display = 'none'; } catch (_) {}
@@ -3117,8 +3125,9 @@ const EndlessMode = {
     try { this._aegis(dt, run); } catch (_) {}
     try { this._world(dt, run); } catch (_) {}
     const ag = run.aegis;
-    const aegisTxt = (ag && ag.lvl > 0)
-      ? ' · AEGIS L' + ag.lvl + (ag.lvl >= _EAEGIS_MAX ? ' MAX' : '')
+    const agPct = (ag && ag.lvl < _EAEGIS_MAX && ag.xp > 0) ? Math.round(ag.xp / _EAEGIS_RANK_XP * 100) : 0;
+    const aegisTxt = (ag && (ag.lvl > 0 || agPct > 0))
+      ? ' · AEGIS L' + ag.lvl + (ag.lvl >= _EAEGIS_MAX ? ' MAX' : (agPct > 0 ? ' ' + agPct + '%' : ''))
         + (ag.flashT > 0 ? ' ⚡' : '') + (ag.rwT > 0 && ag.rwTxt ? ' ' + ag.rwTxt : '')
       : '';
     const phaseTxt = run.phase === 'battle' ? ' · WAVE ' + run.waveN
@@ -3361,8 +3370,17 @@ const EndlessMode = {
           b.taken = true; s.inUse = false; g.visible = false; b.slot = null;
           a.bolts++; a.flashT = 1.4;
           if (a.lvl < _EAEGIS_MAX) {
-            try { this._aegisSetLvl(run, a.lvl + 1); } catch (_) {}   // sets flashT + upgrade_core
-            a.rwTxt = ''; a.rwT = 0;
+            const _bxp = run.boltXp || _EAEGIS_RANK_XP;
+            a.xp = (a.xp || 0) + _bxp;
+            let _ranked = false;
+            while (a.xp >= _EAEGIS_RANK_XP && a.lvl < _EAEGIS_MAX) {
+              a.xp -= _EAEGIS_RANK_XP;
+              try { this._aegisSetLvl(run, a.lvl + 1); } catch (_) {}   // sets flashT + upgrade_core
+              _ranked = true;
+            }
+            if (a.lvl >= _EAEGIS_MAX) a.xp = 0;   // at MAX the overflow ladder owns every further bolt
+            if (_ranked) { a.rwTxt = ''; a.rwT = 0; }
+            else { a.rwTxt = '+' + _bxp + ' XP'; a.rwT = 2.4; }
           } else {
             a.overSpd = (a.overSpd || 0) + 1;
             try { this._aegisApplySpeed(run); } catch (_) {}
@@ -3838,6 +3856,7 @@ if (typeof window !== 'undefined') window.__endlessAegis = function () {
     }
     return {
       lvl: a.lvl || 0, max: _EAEGIS_MAX,
+      xp: a.xp || 0, rankXp: _EAEGIS_RANK_XP, boltXp: run.boltXp || _EAEGIS_RANK_XP, difficulty: run.difficulty || null,
       lives: run.lives, livesMax: run.livesMax, startLives: run.startLives,
       lifeGrants: a.lifeGrants || 0, distBonus: a.distBonus || 0,
       overSpd: a.overSpd || 0, spdMult: +((a.spdMul || (1 + (_EAEGIS_SPD[a.lvl] || 0)))).toFixed(3),   // (v38.72)
@@ -4867,6 +4886,7 @@ function _applyStagedRoundShip() {
 }
 
 function enterShipSelect() {
+  try { if (typeof _clipHideSaveBtn === 'function') _clipHideSaveBtn(); } catch (_) {}
   _stagedRoundShip = null;
   try { if (window._lssLockLandscape) window._lssLockLandscape(true); } catch (_) {}
   document.getElementById('lobby').style.display = 'none';
@@ -10410,6 +10430,7 @@ try {
     xrCompatible: true,
     failIfMajorPerformanceCaveat: false,
   });
+  try { renderer.debug.checkShaderErrors = /[?&]shadererr\b/i.test(location.search || ''); } catch (_) {}
 } catch (_rendererErr) {
   try {
     const _overlay = document.createElement('div');
@@ -10648,8 +10669,17 @@ document.body.appendChild(renderer.domElement);
   try {
     const cv = document.getElementById('ship-select-bg');
     if (!cv) return;
+    const _rep = { baked: false, tries: 0, err: null, ms: 0 };
+    try { window.__ssBg = _rep; } catch (_) {}
+    const _t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
     const img = new Image();
     img.decoding = 'async';
+    img.onerror = function () {
+      _rep.err = 'load failed';
+      if (_rep.tries >= 2) return;   // two retries, then leave the panel's dark base colour
+      const _n = ++_rep.tries;
+      setTimeout(() => { try { img.src = 'hangar.webp?r=' + _n; } catch (_) {} }, 400 * _n);
+    };
     img.onload = function () {
       try {
         let _bw = img.naturalWidth, _bh = img.naturalHeight;
@@ -10669,6 +10699,14 @@ document.body.appendChild(renderer.domElement);
         g.addColorStop(1.00, 'rgba(5,5,15,0.82)');
         ctx.fillStyle = g;
         ctx.fillRect(0, 0, cv.width, cv.height);
+        cv._lssBaked = true;
+        _rep.baked = true; _rep.w = _bw; _rep.h = _bh;
+        _rep.ms = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : 0) - _t0);
+        try {
+          const _bd = _shipPreview3D && _shipPreview3D.backdrop;
+          const _m = _bd && _bd.material && _bd.material.map;
+          if (_m) { _m.needsUpdate = true; _rep.repoked = true; }
+        } catch (_) {}
       } catch (_) {}
     };
     img.src = 'hangar.webp';   // (v38.64) 2.13 MB PNG -> 0.20 MB WebP, same pixels
@@ -13117,7 +13155,7 @@ function _gpuKeepWarmTick(ts) {
       W.mat = new THREE.ShaderMaterial({
         uniforms: { uK: { value: 300 }, uT: { value: 0 } },
         vertexShader: 'void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }',
-        fragmentShader: 'precision highp float; uniform float uK; uniform float uT; void main(){ float a = gl_FragCoord.x * 0.001 + uT; for (int i = 0; i < 65536; i++) { if (float(i) >= uK) break; a = sin(a * 1.7 + 0.3) * 1.01 + cos(a * 0.9); } gl_FragColor = vec4(fract(a), 0.0, 0.0, 1.0); }',
+        fragmentShader: 'precision highp float; uniform float uK; uniform float uT; void main(){ float a = gl_FragCoord.x * 0.001 + uT; int n = int(uK); for (int i = 0; i < n; i++) { a = sin(a * 1.7 + 0.3) * 1.01 + cos(a * 0.9); } gl_FragColor = vec4(fract(a), 0.0, 0.0, 1.0); }',
         depthTest: false, depthWrite: false,
       });
       W.mat.name = 'keepwarm';
@@ -13125,6 +13163,8 @@ function _gpuKeepWarmTick(ts) {
       W.sc = new THREE.Scene(); W.sc.add(q); W.cam = new THREE.Camera();
       try { if (typeof _lssRetainMat === 'function') _lssRetainMat(W.mat); } catch (_) {}
       W.ok = true;
+      try { const _pv = renderer.getRenderTarget(); renderer.setRenderTarget(W.rt); renderer.compile(W.sc, W.cam); renderer.setRenderTarget(_pv); } catch (_) {}
+      return;
     }
     W.frames++;
     if (W.last) { W.gapSum += ts - W.last; W.gapN++; }
@@ -17649,6 +17689,16 @@ function _fishSchoolDispose() {
 }
 const _ecr = { on: true, fishOn: true, batsOn: true, groups: new Map(), fish: null, bats: null, lastScan: 0 };
 if (typeof window !== 'undefined') window.__ecr = _ecr;
+const _ECR_TUNE = {
+  fishSpeed: 140,   // u/s the school centre cruises   (30-unit fish ~ 4.5 body lengths/s)
+  fishMill: 45,     // u/s a fish mills around inside its own school
+  batSpeed: 200,    // u/s a bat flies its own loop    (34-unit bat ~ 6 body lengths/s)
+  batDrift: 60,     // u/s the swarm's centre wanders
+  loopMinR: 60,     // rate = speed / radius, so floor the radius: a tiny loop must not spin on the spot
+  batLift: 260,     // how far above the chamber / lane centre the swarm hangs (was 0.35 x r, unbounded)
+  batRmax: 300,     // swarm radius cap - past this the members leave the carved air
+  drawR: 6000,      // draw distance, unchanged
+};
 function _ecrClock(run) { return (Date.now() - (run.startedAt || 0)) / 1000 + (run.clockOff || 0); }
 function _ecrHash(a, b) { let h = (Math.imul(a | 0, 374761393) + Math.imul(b | 0, 668265263)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; }
 function _ecrKind(kind) {
@@ -17664,7 +17714,7 @@ function _ecrKind(kind) {
   const posA = new Float32Array(verts * 3), refA = new Float32Array(verts * 2), bvA = new Float32Array(verts);
   let Lx, Ly, Lz;
   if (kind === 'fish') { const S = 14; Lx = [0, 0, 0, 0, 0, 0, 0, 0, 0]; Ly = [0, S * 0.34, 0, 0, 0, -S * 0.34, 0, S * 0.5, -S * 0.5]; Lz = [S, 0, -S * 0.7, S, -S * 0.7, 0, -S * 0.7, -S * 1.15, -S * 1.15]; }
-  else { const S = 12; Lx = [0, S * 0.18, -S * 0.18, 0, -S, 0, 0, S, 0]; Ly = [0, 0, 0, 0, 0, 0, 0, 0, 0]; Lz = [-S, S * 0.7, S * 0.7, 0.2 * S, 0.6 * S, 0.6 * S, 0.2 * S, 0.6 * S, 0.6 * S]; }
+  else { const S = 20; Lx = [0, S * 0.18, -S * 0.18, 0, -S, 0, 0, S, 0]; Ly = [0, 0, 0, 0, 0, 0, 0, 0, 0]; Lz = [-S, S * 0.7, S * 0.7, 0.2 * S, 0.6 * S, 0.6 * S, 0.2 * S, 0.6 * S, 0.6 * S]; }
   let p = 0, r = 0, b = 0;
   for (let i = 0; i < cap; i++) {
     const u = (i % texW + 0.5) / texW, v = (Math.floor(i / texW) + 0.5) / texW;
@@ -17677,7 +17727,7 @@ function _ecrKind(kind) {
   const mat = new THREE.ShaderMaterial({
     uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
       texturePosition: { value: null }, textureVelocity: { value: null }, uTime: { value: 0 },
-      uColorTop: { value: new THREE.Color(kind === 'fish' ? 0x4a6b76 : 0x0d0b12) }, uColorBelly: { value: new THREE.Color(kind === 'fish' ? 0xbcd0d8 : 0x2b2433) }, uFade: { value: 1.0 },
+      uColorTop: { value: new THREE.Color(kind === 'fish' ? 0x4a6b76 : 0x3a3040) }, uColorBelly: { value: new THREE.Color(kind === 'fish' ? 0xbcd0d8 : 0x9d92ac) }, uFade: { value: 1.0 },
     }]),
     vertexShader: kind === 'fish' ? _FISH_VS : _BIRD_VS, fragmentShader: _BIRD_FS, fog: true, side: THREE.DoubleSide, transparent: true, depthWrite: true,
   });
@@ -17715,12 +17765,12 @@ function _ecrScan(run) {
     }
     if (_ecr.batsOn !== false) {
       let bx = null, by = 0, bz = 0, br = 0;
-      if (s.sph) { const w = _bendToWorld(s.sph.cx, s.sph.cy + s.sph.r * 0.35, s.sph.cz); bx = w.x; by = w.y; bz = w.z; br = s.sph.r * 0.45; }
-      else if (_ecrHash(gid, 11) < 0.34) { const t = 0.25 + 0.5 * _ecrHash(gid, 13); bx = s.a.x + (s.b.x - s.a.x) * t; by = s.a.y + (s.b.y - s.a.y) * t + r * 0.3; bz = s.a.z + (s.b.z - s.a.z) * t; br = r * 0.45; }
+      if (s.sph) { const w = _bendToWorld(s.sph.cx, s.sph.cy + Math.min(s.sph.r * 0.35, _ECR_TUNE.batLift), s.sph.cz); bx = w.x; by = w.y; bz = w.z; br = s.sph.r * 0.45; }
+      else if (_ecrHash(gid, 11) < 0.34) { const t = 0.25 + 0.5 * _ecrHash(gid, 13); bx = s.a.x + (s.b.x - s.a.x) * t; by = s.a.y + (s.b.y - s.a.y) * t + Math.min(r * 0.3, _ECR_TUNE.batLift); bz = s.a.z + (s.b.z - s.a.z) * t; br = r * 0.45; }
       if (bx != null && !(WL != null && by < WL + 40)) {
         const key = 'b' + gid;
         if (!_ecr.groups.has(key)) {
-          if (_ecrOpen(bx, by, bz)) _ecr.groups.set(key, { kind: 'bats', seed: gid * 13 + 5, x: bx, y: by, z: bz, r: Math.max(100, br), n: 36 });
+          if (_ecrOpen(bx, by, bz)) _ecr.groups.set(key, { kind: 'bats', seed: gid * 13 + 5, x: bx, y: by, z: bz, r: Math.max(100, Math.min(br, _ECR_TUNE.batRmax)), n: 36, ymin: (WL != null) ? WL + 30 : null });
           else continue;
         }
         live.add(key);
@@ -17732,14 +17782,16 @@ function _ecrScan(run) {
 function _ecrPose(g, t, P, V, at) {
   const fish = g.kind === 'fish';
   const R = g.r, s0 = g.seed;
-  const w = fish ? 0.22 : 0.6, h = fish ? R * 0.35 : R * 0.45;
+  const h = fish ? R * 0.35 : R * 0.45;
+  const w = (fish ? _ECR_TUNE.fishSpeed : _ECR_TUNE.batDrift) / Math.max(_ECR_TUNE.loopMinR, fish ? R * 0.5 : R * 0.35);
   const cph = _ecrHash(s0, 1) * 6.283, cph2 = _ecrHash(s0, 2) * 6.283, cph3 = _ecrHash(s0, 3) * 6.283;
   const DT = 0.06;
   for (let i = 0; i < g.n; i++) {
     const a1 = _ecrHash(s0, 10 + i * 3), a2 = _ecrHash(s0, 11 + i * 3), a3 = _ecrHash(s0, 12 + i * 3), a4 = _ecrHash(s0, 400 + i);
     const ri = fish ? (0.05 + 0.4 * a1) * R : (30 + (0.5 * R) * a1);
     const th = a2 * 6.283, yi = fish ? (a3 - 0.5) * R * 0.5 : (a3 - 0.5) * R * 0.6;
-    const wi = fish ? 1.2 + a4 * 1.0 : 1.3 + a4 * 1.6;
+    const wi = fish ? (_ECR_TUNE.fishMill * (0.8 + 0.4 * a4)) / Math.max(_ECR_TUNE.loopMinR, ri)
+                    : (_ECR_TUNE.batSpeed * (0.75 + 0.5 * a4)) / Math.max(_ECR_TUNE.loopMinR, ri);
     let x0, y0, z0, x1, y1, z1;
     for (let pass = 0; pass < 2; pass++) {
       const tt = pass ? t - DT : t;
@@ -17752,11 +17804,12 @@ function _ecrPose(g, t, P, V, at) {
       let px, py, pz;
       if (fish) {
         const wob = 10 * Math.sin(tt * 1.7 + th * 3.0);
-        px = cx + ri * Math.cos(th + tt * 0.15) + wob * 0.3; py = cy + yi + 6 * Math.sin(tt * 0.9 + th); pz = cz + ri * Math.sin(th + tt * 0.15) + wob * 0.3;
+        px = cx + ri * Math.cos(th + tt * wi) + wob * 0.3; py = cy + yi + 6 * Math.sin(tt * 0.9 + th); pz = cz + ri * Math.sin(th + tt * wi) + wob * 0.3;
       } else {
         px = cx + ri * Math.cos(wi * tt + th); py = cy + yi + 0.45 * ri * Math.sin(2.0 * wi * tt + th); pz = cz + ri * Math.sin(wi * tt + th);
       }
       if (g.ymax != null && py > g.ymax) py = g.ymax;
+      if (g.ymin != null && py < g.ymin) py = g.ymin;   // (v40.49) bats set by _ecrScan: stay off the water plane
       if (pass === 0) { x0 = px; y0 = py; z0 = pz; } else { x1 = px; y1 = py; z1 = pz; }
     }
     const k = (at + i) * 4;
@@ -17772,27 +17825,55 @@ function _ecrCommit(K, used, t) {
 function _ecrHide() { if (_ecr.fish) _ecr.fish.mesh.visible = false; if (_ecr.bats) _ecr.bats.mesh.visible = false; }
 function _ecrTick(dt) {
   const run = game.endlessRun;
-  if (!_ecr.on || !run || (game.state !== 'playing' && game.state !== 'warmup')) { _ecrHide(); return; }
-  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
-  if (typeof document !== 'undefined' && document.hidden) return;
+  _ecr.lastDt = dt; _ecr.lastSkip = null;
+  if (!_ecr.on || !run || (game.state !== 'playing' && game.state !== 'warmup')) { _ecr.lastSkip = 'state ' + (game && game.state) + (run ? '' : ' / no run'); _ecrHide(); return; }
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) { _ecr.lastSkip = 'potato tier'; _ecrHide(); return; }
+  if (typeof document !== 'undefined' && document.hidden) { _ecr.lastSkip = 'document hidden'; return; }
   const now = performance.now() / 1000;
-  if (now - _ecr.lastScan > 2) { _ecr.lastScan = now; try { _ecrScan(run); } catch (_) {} }
-  if (!_ecr.groups.size) { _ecrHide(); return; }
+  if (now - _ecr.lastScan > 2) { _ecr.lastScan = now; try { _ecrScan(run); } catch (e) { _ecr.lastSkip = 'scan threw: ' + (e && (e.message || e)); } }
+  if (!_ecr.groups.size) { if (!_ecr.lastSkip) _ecr.lastSkip = 'no groups in the segment window'; _ecrHide(); return; }
   const t = _ecrClock(run);
+  _ecr.lastClock = t;
   const cam = camera.position;
   const fishK = _ecr.fishOn !== false ? _ecrKind('fish') : null, batK = _ecr.batsOn !== false ? _ecrKind('bats') : null;
-  let fu = 0, bu = 0;
+  let fu = 0, bu = 0, near = 0;
+  const DR2 = _ECR_TUNE.drawR * _ECR_TUNE.drawR;
   for (const g of _ecr.groups.values()) {
     const dx = g.x - cam.x, dy = g.y - cam.y, dz = g.z - cam.z;
-    if (dx * dx + dy * dy + dz * dz > 6000 * 6000) continue;
+    if (dx * dx + dy * dy + dz * dz > DR2) continue;
+    near++;
     const K = g.kind === 'fish' ? fishK : batK; if (!K) continue;
     const used = g.kind === 'fish' ? fu : bu;
     if (used + g.n > K.cap) continue;
     _ecrPose(g, t, K.pos, K.vel, used);
     if (g.kind === 'fish') fu += g.n; else bu += g.n;
   }
+  _ecr.drawnFish = fu; _ecr.drawnBats = bu; _ecr.nearGroups = near;
   _ecrCommit(fishK, fu, t); _ecrCommit(batK, bu, t);
 }
+if (typeof window !== 'undefined') window.__ecrDbg = function () {
+  let gf = 0, gb = 0, mf = 0, mb = 0, nearest = Infinity, nearKind = null;
+  try {
+    const cam = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+    for (const g of _ecr.groups.values()) {
+      if (g.kind === 'fish') { gf++; mf += g.n; } else { gb++; mb += g.n; }
+      if (cam) { const d = Math.hypot(g.x - cam.x, g.y - cam.y, g.z - cam.z); if (d < nearest) { nearest = d; nearKind = g.kind; } }
+    }
+  } catch (_) {}
+  const F = _ecr.fish, B = _ecr.bats;
+  return {
+    on: _ecr.on, fishOn: _ecr.fishOn !== false, batsOn: _ecr.batsOn !== false,
+    state: (typeof game !== 'undefined' && game) ? game.state : null,
+    run: !!(typeof game !== 'undefined' && game && game.endlessRun),
+    groups: { fish: gf, bats: gb, members: { fish: mf, bats: mb }, inRange: _ecr.nearGroups | 0 },
+    drawn: { fish: _ecr.drawnFish | 0, bats: _ecr.drawnBats | 0 },
+    built: { fish: !!F, bats: !!B },
+    visible: { fish: !!(F && F.mesh && F.mesh.visible), bats: !!(B && B.mesh && B.mesh.visible) },
+    nearest: (nearest === Infinity) ? null : { kind: nearKind, d: Math.round(nearest) },
+    lastDt: _ecr.lastDt, clock: (typeof _ecr.lastClock === 'number') ? +_ecr.lastClock.toFixed(2) : null,
+    skipped: _ecr.lastSkip || null, tune: _ECR_TUNE,
+  };
+};
 const _ecl = { on: true, max: 14, list: new Map(), lastScan: 0, ships: [] };
 if (typeof window !== 'undefined') window.__ecl = _ecl;
 const _ECL_BIOME = {
@@ -18031,7 +18112,17 @@ function _swBuildHubWaterDispGet(WL) {
   mesh.renderOrder = -1; mesh.frustumCulled = false; mesh.visible = false;   // (v38.67) -1: see the hub water note
   mesh.userData = { isHubWater: true, WL: WL };
   scene.add(mesh);
-  mesh.onBeforeRender = function (rnd, scn, cam) { try { _waterRefractBind(rnd, scn, cam); } catch (_) {} };
+  mesh.onBeforeRender = function (rnd, scn, cam) {
+    try {
+      const _w = game._hubWater, _u = mesh.material.uniforms;
+      if (_w && _w._reflWorldN > 0 && _u && _u.uReflLive && _u.uReflLive.value > 0.0) {
+        const _wm = _w.material && _w.material.uniforms;
+        if (_wm && _wm.tDiffuse && _u.tDiffuse) _u.tDiffuse.value = _wm.tDiffuse.value;
+        if (_u.uReflMatrix) _u.uReflMatrix.value.copy(_w._reflWorld);
+      }
+    } catch (_) {}
+    try { _waterRefractBind(rnd, scn, cam); } catch (_) {}
+  };
   mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
   _hubWaterDisp = mesh;
   return mesh;
@@ -18235,6 +18326,11 @@ function _swBuildHubWater(T) {
         const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : (_sm ? 6 : 3);   // shipped cadence
         this._reflGap++;
         let _go = (this._reflGap >= _gMax);
+        if (!_go) {
+          const _jmp = (_WK.reflJump != null) ? _WK.reflJump : 90;
+          _reflNowP.setFromMatrixPosition(cam.matrixWorld);
+          if (_reflNowP.distanceToSquared(_reflEyeP) > _jmp * _jmp) _go = true;
+        }
         if (!_go && this._reflGap >= _gMin) {
           cam.matrixWorld.decompose(_reflNowP, _reflNowQ, _reflNowS);
           if (_reflNowP.distanceToSquared(_reflEyeP) > ((_WK.reflMove != null ? _WK.reflMove : 6) ** 2)) _go = true;
@@ -20036,6 +20132,26 @@ function _hcMakeMeshes(city, site) {
 }
 
 const _HC_TRAF = { ships: [], obbs: [], ready: false };
+const _HC_TRAF_HUNT_R = 4200;     // units a pilot-friendly hot ship looks for a hostile before standing down
+const _hcTrafZeroV = new THREE.Vector3();
+function _hcTrafTarget(e) {
+  const _p = (typeof player !== 'undefined' && player && player.position) ? player : null;
+  if (_p && _p.team !== e.team) return _p;
+  const E = (typeof game !== 'undefined' && game && game.entities) ? game.entities : null;
+  if (!E) return null;
+  let best = null, bestD2 = _HC_TRAF_HUNT_R * _HC_TRAF_HUNT_R;
+  for (let i = 0; i < E.length; i++) {
+    const b = E[i];
+    if (!b || b === e || !b.alive || b.isHubTraffic || !b.loadoutKey || !b.position || b.team == null || b.team === e.team) continue;
+    const d2 = b.position.distanceToSquared(e.position);
+    if (d2 < bestD2) { bestD2 = d2; best = b; }
+  }
+  return best;
+}
+function _hcTrafTargetUp(T) {
+  if (!T) return false;
+  return (typeof player !== 'undefined' && T === player) ? (player.shipState !== 'dead') : (T.alive !== false);
+}
 const _hcSunVTmp = new THREE.Vector3();
 
 const _HC_TRAF_CLASSES = [
@@ -20590,7 +20706,14 @@ function _hcTrafficUpdate(dt) {
         s.lastSeg = st.seg;
         continue;
       }
-      const P = player.position;
+      const T = _hcTrafTarget(e);
+      if (!T) {
+        e.aggro = false; e._dmgLog = null; e._fireT = 1.5;
+        s.lastSeg = st.seg;
+        continue;
+      }
+      const P = T.position;
+      const TV = T.velocity || _hcTrafZeroV;
       const dx = P.x - e.position.x, dy = P.y - e.position.y, dz = P.z - e.position.z;
       const d = Math.max(1, Math.sqrt(dx * dx + dy * dy + dz * dz));
       const seek = (d > 620) ? 1 : (d < 380 ? -0.7 : 0.15);
@@ -20621,12 +20744,12 @@ function _hcTrafficUpdate(dt) {
       s.holder.rotation.y = Math.atan2(dx, dz);
       e._fireT -= dt;
       const _tc = e.trafClass || _HC_TRAF_CLASSES[1];
-      if (e._fireT <= 0 && d < 2800 && player.shipState !== 'dead' && game.state === 'playing') {
+      if (e._fireT <= 0 && d < 2800 && _hcTrafTargetUp(T) && game.state === 'playing') {   // (v40.45) whoever T is
         e._fireT = _tc.rate;
         const lead = d / _tc.bolt * _tc.lead;
-        const tx = P.x + player.velocity.x * lead - e.position.x;
-        const ty = P.y + player.velocity.y * lead - e.position.y;
-        const tz = P.z + player.velocity.z * lead - e.position.z;
+        const tx = P.x + TV.x * lead - e.position.x;
+        const ty = P.y + TV.y * lead - e.position.y;
+        const tz = P.z + TV.z * lead - e.position.z;
         const td = Math.max(1, Math.sqrt(tx * tx + ty * ty + tz * tz));
         try {
           const _clear = 260 * (_tc.scale || 1);
@@ -20639,6 +20762,7 @@ function _hcTrafficUpdate(dt) {
               .normalize().multiplyScalar(_tc.bolt);
             const _tb = new Projectile(orig, vel, _tc.dmg, 0, e, _tc.col);
             _tb._cheapHit = true;   // (v39.49) sphere/OBB hit test only - never the 117k-tri hull raycast (see Projectile.update)
+            _tb.ownerTeam = e.team; _tb.ownerRef = e;
             game.projectiles.push(_tb);
           }
           try { if (typeof playSpatialSound === 'function') playSpatialSound('fire_projectile', e.position.clone()); } catch (_) {}
@@ -21775,6 +21899,7 @@ const CYBER = {
   attackers: null,    // null = fill the team around the humans ; a number forces a bot count
   defenders: null,
   respawn: 6,         // seconds before a downed bot returns
+  reviveProtect: 3,   // (v40.45) seconds of spawn grace on a revive - what _owReviveBot gives a city fighter
   capture: 12,        // seconds an attacker must hold the field to win
   botShips: ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'],
 };
@@ -21955,6 +22080,9 @@ function _cyberReviveBots(C, dt) {
     b.alive = true;
     b.health = b.maxHealth;
     if (b.shield != null && b.maxShield != null) b.shield = b.maxShield;
+    b.doomed = false; b.doomTimer = 0; b.aiRetreating = false;
+    b.spawnProtection = (window.__cyber && window.__cyber.reviveProtect != null) ? window.__cyber.reviveProtect : CYBER.reviveProtect;
+    if (b.velocity) b.velocity.set(0, 0, 0);
     b.position.copy(sp);
     if (b.mesh) { b.mesh.position.copy(sp); if (!b.mesh.parent) scene.add(b.mesh); }
   }
@@ -27208,7 +27336,7 @@ function _initShipPreview3D() {
       _shipPreview3D.canvas = canvas;
       try {
         const src = document.getElementById('ship-select-bg');
-        if (src && src.width > 1) {
+        if (src) {
           const bt = new THREE.CanvasTexture(src);
           if ('colorSpace' in bt) bt.colorSpace = THREE.SRGBColorSpace;
           bt.wrapS = bt.wrapT = THREE.ClampToEdgeWrapping;
@@ -27418,7 +27546,7 @@ function _animateShipPreview() {
   }
   if (s.oneCtx) {
     const _owns = _lssPickerOwnsFrame();
-    if (_owns !== s._hudHidden) {
+    if (_owns !== s._hudHidden && !window.__f8rehearsing) {   // (v40.43) the overlay rehearsal lifts the class for a moment
       s._hudHidden = _owns;
       try { document.body.classList.toggle('lss-picker-3d', _owns); } catch (_) {}
     }
@@ -28296,6 +28424,7 @@ if (shipModelCache.ready && typeof shipModelCache.ready.then === 'function') {
 function _disposeShipGroup(group) {
   if (!group) return;
   try {
+    if (typeof _stripOutlineHug === 'function') _stripOutlineHug(group);
     if (group.parent) group.parent.remove(group);
     group.traverse((o) => {
       if (!(o.isMesh || o.isSprite || o.isLine || o.isPoints)) return;
@@ -29926,6 +30055,7 @@ class Bot {
   }
 
   destroy() {
+    try { if (typeof _clearOutlineOpticsOn === 'function') _clearOutlineOpticsOn(this); } catch (_) {}
     if (typeof _botShipPoolPut === 'function' && _botShipPoolPut(this)) return;
     if (typeof _disposeShipGroup === 'function') _disposeShipGroup(this.mesh);
     else if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
@@ -32153,7 +32283,7 @@ async function _warmupCombatShadersBody() {
 
 
     const _compileHere = async () => {
-      if (typeof renderer.compileAsync === 'function') { try { await renderer.compileAsync(scene, camera); return; } catch (_) {} }
+      try { await _compileSliced(scene, camera, scene, 6); await _drainProgramLinks(8000, null, 'drainWarmup'); return; } catch (_) {}
       renderer.compile(scene, camera);
     };
     try {
@@ -38796,6 +38926,8 @@ function _warmRealCombatFXInner() {
         !(typeof window !== 'undefined' && window.__fxWarmEveryRound)) return;
   } catch (_) {}
   const _wsig = (typeof _programEnvSig === 'function') ? _programEnvSig() : null;
+  let _fxNp0 = 0;   // (v40.38/39) first program id this warm can create - see window.__fxWarmProgs below
+  try { _fxNp0 = (renderer.info.programs || []).reduce((a, pw) => Math.max(a, pw.id), -1) + 1; } catch (_) {}
   if (_wsig && _warmedFXSig === _wsig) return;
   try {
     if (typeof renderer === 'undefined' || !renderer ||
@@ -38810,7 +38942,7 @@ function _warmRealCombatFXInner() {
     const V = (x, y, z) => new THREE.Vector3(x, y, z);
     const W = (fn) => { try { fn(); } catch (_) {} };
     const _meshBefore = new Set(); scene.traverse(o => { if (o.isMesh) _meshBefore.add(o); });
-    let _mwg = null;
+    let _mwg = null, _lzg = null;
     W(() => { _mwg = _buildModelWarmGroup(); if (_mwg) scene.add(_mwg); });
     W(() => { if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(fp, 40); });
     W(() => { if (typeof spawnFXBurst === 'function') { spawnFXBurst('fireball', fp, 60, 0.05, { startScale: 0.3, endScale: 1 }); spawnFXBurst('cloud', fp, 80, 0.05, { startScale: 0.3, endScale: 1 }); } });
@@ -38830,6 +38962,24 @@ function _warmRealCombatFXInner() {
     W(() => { if (typeof spawnDot === 'function') spawnDot(fp, {}); });
     W(() => { if (typeof spawnRockChunks === 'function') spawnRockChunks(fp, 0x888888, 1); });
     W(() => { if (typeof spawnSiphonHelix === 'function') spawnSiphonHelix(fp, fp2, 0x88ddff, 0.05); });
+    W(() => {
+      if (typeof _makeFXMaterial !== 'function' || typeof _getVortexCoreBeamConeGeometry !== 'function') return;
+      _lzg = new THREE.Group(); _lzg.position.copy(fp);
+      const beam = new THREE.Mesh(_getVortexCoreBeamConeGeometry(), _makeFXMaterial('core_beam'));
+      if (beam.material.uniforms && beam.material.uniforms.uPosScale) beam.material.uniforms.uPosScale.value = 1.0 / 95;
+      beam.scale.set(95, 400, 95); beam.frustumCulled = false; beam.renderOrder = 2; _lzg.add(beam);
+      if (typeof _getVortexCoreArmConeGeometry === 'function') {
+        for (let k = 0; k < 2; k++) {
+          const arm = new THREE.Mesh(_getVortexCoreArmConeGeometry(), _makeFXMaterial('core_beam'));
+          if (arm.material.uniforms && arm.material.uniforms.uPosScale) arm.material.uniforms.uPosScale.value = 1.0 / Math.max(1, 95 * 0.15);
+          if (arm.material.uniforms && arm.material.uniforms.uAxialFalloff) arm.material.uniforms.uAxialFalloff.value = 0.95;
+          arm.scale.set(14, 300, 14); arm.position.x = (k ? 30 : -30); arm.frustumCulled = false; arm.renderOrder = 2; _lzg.add(arm);
+        }
+      }
+      scene.add(_lzg);
+    });
+    W(() => { if (typeof spawnHitFire === 'function') spawnHitFire(fp2, 0xaa55ff, null, 8); });
+    W(() => { if (typeof _swSpawnSplash === 'function') _swSpawnSplash(fp.x, fp.y, fp.z, 4, 1.0); });
     W(() => { if (typeof v8SpawnDebris === 'function') v8SpawnDebris(fp, 6, 1, 80); });
     W(() => { if (typeof v8SpawnSparks === 'function') v8SpawnSparks(fp, 6, 1, 80, 0xff8822, 0xfff8a0); });
     W(() => {
@@ -38854,6 +39004,29 @@ function _warmRealCombatFXInner() {
       try { renderer.toneMapping = _prevTM; } catch (_) {}
       renderer.compile(scene, camera);
       renderer.render(scene, camera);
+      try {   // (v40.38) name the programs this warm created, by a material that uses each
+        const _newIds = new Set();
+        for (const pw of (renderer.info.programs || [])) if (pw.id >= _fxNp0) _newIds.add(pw.id);
+        const _named = new Map();
+        if (_newIds.size) scene.traverse((o) => {
+          const ms = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
+          for (const m of ms) {
+            try {
+              const pr = renderer.properties.get(m);
+              const _cands = [];
+              if (pr && pr.currentProgram) _cands.push(pr.currentProgram);
+              try { if (pr && pr.programs && pr.programs.forEach) pr.programs.forEach((pg) => { if (pg) _cands.push(pg); }); } catch (_) {}
+              for (const cp of _cands) {
+                if (cp && _newIds.has(cp.id) && !_named.has(cp.id)) {
+                  _named.set(cp.id, (m.type || '?') + (m.name ? ('#' + m.name) : '') + (m.uniforms ? ('{' + Object.keys(m.uniforms).slice(0, 5).join(',') + '}') : '') + (o.name ? (' @' + o.name) : ''));
+                }
+              }
+            } catch (_) {}
+          }
+        });
+        window.__fxWarmProgs = Array.from(_named.entries()).map((e) => 'p' + e[0] + ' ' + e[1]).slice(0, 24);
+        if (_newIds.size > _named.size) window.__fxWarmProgs.push('+' + (_newIds.size - _named.size) + ' unnamed');
+      } catch (_) {}
       try {
         if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
           renderer.setRenderTarget(postFX.rtScene);
@@ -38864,6 +39037,7 @@ function _warmRealCombatFXInner() {
       } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
     });
     W(() => { if (_mwg && _mwg.parent) scene.remove(_mwg); });
+    W(() => { if (_lzg && _lzg.parent) { scene.remove(_lzg); _lzg.traverse((o) => { try { if (o.isMesh && o.material && o.material.dispose) o.material.dispose(); } catch (_) {} }); } });   // (v40.45) the laser stand-ins go with the pins
   } catch (_) {}
 }
 
@@ -38875,6 +39049,22 @@ const _PREBAKE_MAX_PASSES = 900;     // belt: pass ceiling on top of the ms ceil
 function _pbNow() { return (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); }
 function _pbSub(txt) {
   try { showLoadingOverlay(null, txt); } catch (_) {}
+}
+async function _compileSliced(root, cam, scn, budgetMs) {
+  const _t = _pbNow();
+  let slices = 1, kids = 0;
+  try {
+    const list = (root && root.children) ? root.children.slice() : [];
+    let t = _pbNow();
+    for (const c of list) {
+      try { renderer.compile(c, cam, scn); } catch (_) {}
+      kids++;
+      if (_pbNow() - t > (budgetMs || 6)) { slices++; await _warmupYield(); t = _pbNow(); }
+    }
+    try { renderer.compile(root, cam, scn); } catch (_) {}   // anything the root itself carries
+  } catch (_) {}
+  try { window.__compileSliced = { ms: Math.round(_pbNow() - _t), slices: slices, children: kids }; } catch (_) {}
+  return slices;
 }
 async function _drainProgramLinks(capMs, rep, key) {
   const _t = _pbNow();
@@ -38900,6 +39090,117 @@ async function _drainProgramLinks(capMs, rep, key) {
   try { if (rep && rep.ms) { rep.ms[key || 'drain'] = (rep.ms[key || 'drain'] | 0) + ms; if (capped && !rep.capped) rep.capped = (key || 'drain') + '-capped'; } } catch (_) {}
   try { window.__linkDrain = { ms: ms, polls: polls, pending: pending, at: key || 'drain' }; } catch (_) {}
   return pending === 0;
+}
+async function _prebakeOverlayRehearsal(rep) {
+  const _t = _pbNow();
+  const out = { ms: 0, n: 0, groups: 0, frames: 0, worst: 0 };
+  const cover = document.getElementById('lss-loading-overlay');
+  const $ = (id) => document.getElementById(id);
+  const undo = [];
+  const show = (id, cls, fill) => {
+    const el = $(id); if (!el) return;
+    const prevCls = el.getAttribute('class') || '';
+    const texts = [];
+    try {
+      if (fill) for (const k in fill) { const c = el.querySelector(k); if (c) { texts.push([c, c.textContent, c.style.display]); c.textContent = fill[k]; c.style.display = ''; } }
+    } catch (_) {}
+    for (const c of String(cls).split(' ')) if (c) el.classList.add(c);
+    undo.push(() => { try { el.setAttribute('class', prevCls); for (const tx of texts) { tx[0].textContent = tx[1]; tx[0].style.display = tx[2]; } } catch (_) {} });
+    out.n++;
+  };
+  const medal = () => {
+    try {
+      const root = $('ov-medals'); if (!root) return;
+      const kinds = [['&#9733;', 'FIRST BLOOD', '#ff0044'], ['&#8635;', 'REVENGE', '#cc44ff'], ['&#10022;', 'SHUTDOWN', '#ffaa00'],
+        ['&#8594;', 'LONGSHOT', '#44ccff'], ['&#9670;', 'ASSIST', '#66ff66'], ['&#9675;', 'SAVIOR', '#44aaff'], ['&#9679;', 'EXECUTION', '#ff2200']];
+      for (const k of kinds) {
+        const row = document.createElement('div');
+        row.className = 'ov-medal';
+        row.style.setProperty('--med-color', k[2]); row.style.setProperty('--med-color-faint', k[2] + '44');
+        row.innerHTML = '<span class="med-icon">' + k[0] + '</span><span class="med-label">' + k[1] + '</span>';
+        root.appendChild(row);
+        undo.push(() => { try { row.remove(); } catch (_) {} });
+        out.n++;
+      }
+    } catch (_) {}
+  };
+  const frames = async (k) => {
+    for (let i = 0; i < k; i++) {
+      const f0 = _pbNow();
+      await _warmupYield();
+      out.frames++;
+      out.worst = Math.max(out.worst, Math.round(_pbNow() - f0));
+    }
+  };
+  const _body = document.body;
+  const _hadPicker = !!(_body && _body.classList.contains('lss-picker-3d'));
+  try { window.__f8rehearsing = true; if (_hadPicker) _body.classList.remove('lss-picker-3d'); } catch (_) {}
+  try {
+    if (cover) cover.style.opacity = '0.995';
+    const groups = [
+      () => { show('ship-select-countdown', 'active', { '.cd-num': '3', '.cd-sub': 'LAUNCH IN' });
+              show('ov-banner', 'show', { '.ban-text': 'ROUND 1', '.ban-sub': 'ELIMINATION' });
+              show('ov-damage-vignette', 'flash');
+              for (const e of ['ov-dmg-top', 'ov-dmg-right', 'ov-dmg-bottom', 'ov-dmg-left']) show(e, 'pulse'); },
+      () => { show('ov-countdown', 'show', { '.cd-label': 'ROUND 1', '.cd-number': '3' });
+              show('ov-killstreak', 'show', { '.ks-label': 'KILLING SPREE', '.ks-count': '3 KILLS' });
+              show('ov-ability', 'show', { '.ab-label': 'DASH ACTIVE' });
+              medal(); },
+      () => { show('ov-countdown', 'fight show', { '.cd-number': 'FIGHT' });
+              show('ov-killstreak', 'godlike show', { '.ks-label': 'GODLIKE', '.ks-count': '8 KILLS' });
+              show('ov-respawn', 'show'); },
+      () => { show('ov-warp', 'show'); show('ov-sword-block', 'show'); show('ov-vortex-shield', 'show');
+              show('ov-gun-shield', 'show'); show('ov-thermal-shield', 'show'); show('ov-underwater', 'show'); },
+      () => { show('ov-warp', 'tunnel'); },
+      () => {
+        try { if (typeof showHitMarker === 'function') showHitMarker(); if (typeof showKillMarker === 'function') showKillMarker(); out.n += 2; } catch (_) {}
+        try {
+          const cont = $('enemy-healthbars');
+          if (cont) { const pd = cont.style.display, pp = cont.style.getPropertyPriority('display'); cont.style.setProperty('display', 'block', 'important');
+            undo.push(() => { try { if (pd) cont.style.setProperty('display', pd, pp); else cont.style.removeProperty('display'); } catch (_) {} }); }
+          const vw = window.innerWidth || 1920, vh = window.innerHeight || 1080;
+          const hb = document.querySelector('#enemy-healthbars .enemy-hbar');
+          if (hb) { const pd = hb.style.display, pl = hb.style.left, pt = hb.style.top; hb.style.display = ''; hb.style.left = Math.round(vw * 0.5) + 'px'; hb.style.top = Math.round(vh * 0.35) + 'px';
+            try { hb._name.textContent = 'BOT-7'; hb._fill.style.width = '70%'; hb._fill.style.background = '#66bb66'; } catch (_) {}
+            undo.push(() => { try { hb.style.display = pd; hb.style.left = pl; hb.style.top = pt; hb._lx = hb._ly = undefined; } catch (_) {} }); out.n++; }
+          const labels = Array.from(document.querySelectorAll('#enemy-healthbars .ship-name-label')).slice(0, 3);
+          const variants = ['ship-name-label ship-name-label--enemy', 'ship-name-label ship-name-label--friendly', 'ship-name-label ship-name-label--enemy flip-left'];
+          labels.forEach((nl, i) => {
+            const pd = nl.style.display, pl = nl.style.left, pt = nl.style.top, pc = nl.className, ptx = nl._text ? nl._text.textContent : null;
+            nl.className = variants[i] || variants[0];
+            nl.style.display = ''; nl.style.left = Math.round(vw * (0.3 + i * 0.2)) + 'px'; nl.style.top = Math.round(vh * (0.45 + i * 0.1)) + 'px';
+            try { if (nl._text) nl._text.textContent = 'BOT-' + (i + 1); } catch (_) {}
+            undo.push(() => { try { nl.className = pc; nl._lc = pc; nl.style.display = pd; nl.style.left = pl; nl.style.top = pt; nl._lx = nl._ly = undefined; if (nl._text && ptx != null) { nl._text.textContent = ptx; nl._lt = ptx; } } catch (_) {} });
+            out.n++;
+          });
+          for (const sid of ['stasis-warning', 'stasis-vignette']) {   // (v40.43) shown by style.display in play
+            const se = $(sid); if (!se) continue; const pd = se.style.display; se.style.display = 'block';
+            undo.push(() => { try { se.style.display = pd; } catch (_) {} }); out.n++;
+          }
+          const kf = $('kill-feed');
+          if (kf) { const div = document.createElement('div'); div.className = 'kill-entry';
+            div.innerHTML = '<span style="color:#ff6666">BOT</span> destroyed <span style="color:#66bb66">BOT</span>';
+            kf.appendChild(div); undo.push(() => { try { div.remove(); } catch (_) {} }); out.n++; }
+        } catch (_) {}
+      },
+    ];
+    for (const g of groups) {
+      if (_pbNow() - _t > 15000) { out.capped = true; break; }   // a cold process pays per pipeline; never trap the load
+      try { g(); } catch (_) {}
+      out.groups++;
+      await frames(3);
+      while (undo.length) undo.pop()();
+      await frames(1);
+    }
+  } catch (_) {}
+  while (undo.length) { try { undo.pop()(); } catch (_) {} }
+  try { if (cover) cover.style.opacity = ''; } catch (_) {}
+  try { if (_hadPicker && _body) _body.classList.add('lss-picker-3d'); } catch (_) {}
+  try { window.__f8rehearsing = false; } catch (_) {}
+  out.ms = Math.round(_pbNow() - _t);
+  try { if (rep && rep.ms) rep.ms.ui = out.ms; } catch (_) {}
+  try { window.__uiRehearsal = out; } catch (_) {}
+  return out;
 }
 async function _prebakeGpuFence(capMs, rep, key) {
   const _t = _pbNow();
@@ -39050,7 +39351,7 @@ async function _prebakeWorldForLaunch() {
           const _pRTK = renderer.getRenderTarget();
           try {
             if (_rtK) renderer.setRenderTarget(_rtK);
-            renderer.compile(scene, camera);
+            await _compileSliced(scene, camera, scene, 6);   // (v40.33) was one renderer.compile(scene, camera): 37 programs, 2.6 s cold
             _cl.traverse((o) => {
               const _ms = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : [];
               for (const _m of _ms) {
@@ -39103,10 +39404,26 @@ async function _prebakeWorldForLaunch() {
       }
     } catch (_) {}
     rep.ms.drain = Math.round(_pbNow() - _tDr);
+    try {
+      _pbSub('first frame');
+      const _tF = _pbNow();
+      const _np0 = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+      try { renderFrame(); } catch (_) {}
+      try { if (typeof _gpuKeepWarmTick === 'function') _gpuKeepWarmTick(performance.now()); } catch (_) {}
+      await _warmupYield();
+      const _np1 = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+      if (_np1 > _np0) { try { await _drainProgramLinks(6000, rep, 'drainFrame0'); } catch (_) {} }
+      rep.frame0Forks = _np1 - _np0;
+      try { renderFrame(); } catch (_) {}
+      try { if (typeof _gpuKeepWarmTick === 'function') _gpuKeepWarmTick(performance.now()); } catch (_) {}
+      await _warmupYield();
+      rep.ms.frame0 = Math.round(_pbNow() - _tF);
+    } catch (_) {}
     if (_pbNow() - _bt0 < _PREBAKE_MAX_MS) {
       _pbSub('waiting for the GPU');
       await _prebakeGpuFence(Math.max(500, Math.min(4000, _PREBAKE_MAX_MS - (_pbNow() - _bt0))), rep, 'fence');
     }
+    try { _pbSub('warming the overlays'); await _prebakeOverlayRehearsal(rep); } catch (_) {}
   } catch (e) {
     console.warn('[prebake] failed (launching anyway):', e);
     rep.error = String((e && e.message) || e);
@@ -39362,6 +39679,7 @@ async function _warmRuntimeFxOnce() {
         const pts = new THREE.Points(g, _ptsMat);
         pts.frustumCulled = false;
         grp.add(pts); junkG.push(g); n++;   // junkM deliberately NOT: the material is the live one
+        try { window.__fxWarmPts = (window.__fxWarmPts | 0) + 1; } catch (_) {}   // (v40.42) proves this branch ran
       }
     } catch (_) {}
     try {
@@ -39411,7 +39729,12 @@ async function _warmRuntimeFxOnce() {
     if (n) {
       try { const _pR = renderer.getRenderTarget(); if (rt) renderer.setRenderTarget(rt); renderer.compile(grp, camera, scene); renderer.setRenderTarget(_pR); } catch (_) {}
       await _drainProgramLinks(4000, null, 'drainFx');
+      const _npA = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
       try { _warmDrawRoot(grp, rt, true); } catch (_) {}
+      try {
+        const _npB = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+        if (_npB > _npA) { await _drainProgramLinks(4000, null, 'drainFx2'); _warmDrawRoot(grp, rt, true); }
+      } catch (_) {}
     }
 
     try {
@@ -43177,6 +43500,7 @@ function commitLoadout(key) {
   player.perkCloakActiveTimer = 0;
   player.perkCloakTimer = 0;
   player._lastCorePctForCloak = 0;
+  try { if (typeof _clearAllOutlineOptics === 'function') _clearAllOutlineOptics(); } catch (_) {}
   if (_perk) {
     player._perkRefillArmed = false;
     player._perkOsLocked = false;
@@ -44152,6 +44476,40 @@ function _tickOutlineOptics(active) {
       if (active) attach(peer); else detach(peer);
     }
   }
+}
+
+function _stripOutlineHug(root) {
+  if (!root || !root.children) return;
+  for (let i = root.children.length - 1; i >= 0; i--) {
+    const c = root.children[i];
+    if (c && c.userData && c.userData._outlineHug) {
+      try { _disposeShieldClone(c); } catch (_) { try { root.remove(c); } catch (__) {} }
+    }
+  }
+}
+function _clearOutlineOpticsOn(ship) {
+  if (!ship) return;
+  if (ship._outlineHugMesh) {
+    try { _disposeShieldClone(ship._outlineHugMesh); } catch (_) {}
+    ship._outlineHugMesh = null;
+    ship._outlineHugAlly = null;
+  }
+  _stripOutlineHug(ship.mesh);
+  if (ship.shipMesh && ship.shipMesh !== ship.mesh) _stripOutlineHug(ship.shipMesh);
+}
+function _clearAllOutlineOptics() {
+  try {
+    if (typeof game !== 'undefined' && game && Array.isArray(game.entities)) {
+      for (const e of game.entities) _clearOutlineOpticsOn(e);
+    }
+  } catch (_) {}
+  try {
+    if (typeof net !== 'undefined' && net && net.peers && net.peers.values) {
+      for (const peer of net.peers.values()) _clearOutlineOpticsOn(peer);
+    }
+  } catch (_) {}
+  try { if (typeof player !== 'undefined' && player) _clearOutlineOpticsOn(player); } catch (_) {}
+  try { _tickPerkEffects._outlineWasActive = false; } catch (_) {}
 }
 
 function _setShipMeshOpacity(root, opacity) {
@@ -50812,6 +51170,12 @@ function _clipBtnTick() {
                 _clip.active && input.clipRec) ? 'block' : 'none';
   if (el.style.display !== want) el.style.display = want;
 }
+function _clipHideSaveBtn() {
+  try {
+    const el = document.getElementById('clip-save-btn');
+    if (el && el.style.display !== 'none') el.style.display = 'none';
+  } catch (_) {}
+}
 window._clipSaveClick = function () {
   try { _clipSave(); } catch (_) {}
   const el = document.getElementById('clip-save-btn');
@@ -50862,6 +51226,7 @@ function returnToRootMenu(opts) {
   if (window.Overlays && Overlays.hideRespawn) {
     try { Overlays.hideRespawn(); } catch (_) {}
   }
+  try { document.body.classList.remove('lss-ghost'); } catch (_) {}   // (v40.49) belt: the round teardown clears the ghost HUD hide whatever the overlay did
   if (typeof player !== 'undefined' && player) {
     player.shipState = 'spawning';
     player.doomed = false;
@@ -51040,6 +51405,7 @@ function returnToRootMenu(opts) {
   try { game._rrToneDone = false; } catch (_) {}
   const sel = document.getElementById('ship-select');
   if (sel) { sel.style.display = 'flex'; sel.classList.add('active'); }
+  try { if (typeof _clipHideSaveBtn === 'function') _clipHideSaveBtn(); } catch (_) {}
   try { _xrMenuForceHidden = false; } catch (_) {}
   buildShipSelect();
   if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch (_) {} }
@@ -54694,6 +55060,7 @@ function _setStoredPerkId(id) {
   if (!PILOT_PERKS[id]) return;
   try { localStorage.setItem('lss_perk_id', id); } catch (_) {}
   if (typeof player !== 'undefined') player.perkId = id;
+  try { if (typeof _clearAllOutlineOptics === 'function') _clearAllOutlineOptics(); } catch (_) {}
 }
 function _cyclePerk(dir) {
   const ids = Object.keys(PILOT_PERKS);
@@ -54787,7 +55154,8 @@ function _renderDifficultyPicker() {
     grid.appendChild(card);
   }
   if (desc) desc.textContent = (LSS.MODE === 'endless')
-    ? _endlessLivesFor(cur) + (_endlessLivesFor(cur) === 1 ? ' life' : ' lives') + ' for the run. Distance never resets.'
+    ? _endlessLivesFor(cur) + (_endlessLivesFor(cur) === 1 ? ' life' : ' lives') + ' for the run. Aegis bolts pay '
+      + Math.round(_endlessAegisXpMulFor(cur) * 100) + '% of a rank. Distance never resets.'
     : 'Up to ' + _campSwarmCapFor(cur) + ' enemy ships swarm at once.';
 }
 
@@ -64210,8 +64578,10 @@ const Overlays = (() => {
       killerRow.style.display = 'none';
     }
     el.classList.add('show');
+    try { if (window.__ghostHideHud !== false) document.body.classList.add('lss-ghost'); } catch (_) {}
   }
   function hideRespawn() {
+    try { document.body.classList.remove('lss-ghost'); } catch (_) {}
     const el = $('ov-respawn');
     if (!el) return;
     el.classList.remove('show');
@@ -65432,7 +65802,10 @@ function __pmark(name) {
     foc: [], focPrev: '', rafN: 0, beatN: 0,      // (v40.20) is the browser still SCHEDULING frames?
     lt: [],                                       // (v40.26) long TASKS (not frames): [t, ms, name, attribution]
     gt: [], gtP: [], gtQ: null, gtE: null, gtOk: undefined,     // (v40.08) TIME_ELAPSED around renderFrame
-    first: [], seenG: null, wrapped: false };                   // (v40.10) the first draw of each geometry, named
+    first: [], seenG: null, wrapped: false,
+    slowgl: [], curProg: null, glWrapped: false,  // (v40.34) [t, call, ms, hint] - every GL entry point that blocked >= 20 ms
+    ui: [], uiArmed: false,                       // (v40.34) [t, element, class] - overlay class changes (the compositor's first-use pipelines)
+    loBig: [] };                                  // (v40.34) LoAFs >= 300 ms kept 40 s, so the NEXT mark carries their attribution                   // (v40.10) the first draw of each geometry, named
   const profNow = () => { const p = window.__prof, o = {}; if (!p) return o; for (const k in p) { const v = p[k]; if (v && typeof v.total === 'number') o[k] = v.total; } return o; };
   function _gtInit() {
     if (R.gtOk !== undefined) return R.gtOk;
@@ -65474,6 +65847,104 @@ function __pmark(name) {
       } catch (_) { R.gtQ = null; }
     }
   };
+  function _wrapSlowGl() {
+    if (R.glWrapped) return;
+    if (typeof renderer === 'undefined' || !renderer || typeof renderer.getContext !== 'function') return;
+    const gl = renderer.getContext(); if (!gl) return;
+    R.glWrapped = true;
+    const progName = (pg) => {
+      try { const L = renderer.info && renderer.info.programs; if (L) for (const pw of L) if (pw.program === pg) return 'p' + pw.id + (pw.name ? (':' + String(pw.name).slice(0, 18)) : ''); } catch (_) {}
+      return '?';
+    };
+    const hint = (name, a) => {
+      try {
+        if (/Program|Uniform|Attrib/.test(name)) return progName(a[0]);
+        if (/^draw/.test(name)) return (R.curProg ? progName(R.curProg) : '?') + ' n' + (a[1] | 0);
+        if (name === 'texImage2D' || name === 'texSubImage2D' || name === 'compressedTexImage2D' || name === 'texStorage2D') {
+          if (a.length > 6 && typeof a[3] === 'number' && typeof a[4] === 'number') return a[3] + 'x' + a[4];
+          const src = a[a.length - 1]; return (src && src.width) ? (src.width + 'x' + src.height) : '';
+        }
+        if (name === 'readPixels') return a[2] + 'x' + a[3];
+        if (name === 'getParameter') return 'pname ' + (a[0] | 0);
+        if (name === 'bufferData') { const d = a[1]; return (d && d.byteLength != null) ? (Math.round(d.byteLength / 1024) + 'k') : String(d | 0); }
+      } catch (_) {}
+      return '';
+    };
+    const names = ['getProgramParameter', 'getShaderParameter', 'getProgramInfoLog', 'getShaderInfoLog', 'getUniformLocation', 'getActiveUniform',
+      'getActiveAttrib', 'getAttribLocation', 'getUniformBlockIndex', 'getError', 'getParameter', 'getSyncParameter', 'clientWaitSync', 'readPixels',
+      'finish', 'flush', 'texImage2D', 'texSubImage2D', 'texImage3D', 'compressedTexImage2D', 'texStorage2D', 'generateMipmap', 'bufferData',
+      'bufferSubData', 'linkProgram', 'compileShader', 'shaderSource', 'useProgram', 'drawElements', 'drawArrays', 'drawElementsInstanced',
+      'drawArraysInstanced', 'drawRangeElements', 'bindFramebuffer', 'blitFramebuffer', 'fenceSync', 'deleteProgram', 'deleteShader',
+      'framebufferTexture2D', 'framebufferRenderbuffer', 'renderbufferStorageMultisample', 'copyTexImage2D', 'copyTexSubImage2D'];
+    let wrapped = 0;
+    for (const name of names) {
+      const orig = gl[name];
+      if (typeof orig !== 'function') continue;
+      gl[name] = function () {
+        const t0 = performance.now();
+        const r = orig.apply(this, arguments);
+        const d = performance.now() - t0;
+        if (name === 'useProgram') R.curProg = arguments[0];
+        if (d >= 20) { try { R.slowgl.push([+(t0 / 1000).toFixed(2), name, +d.toFixed(1), hint(name, arguments)]); if (R.slowgl.length > 60) R.slowgl.shift(); } catch (_) {} }
+        return r;
+      };
+      wrapped++;
+    }
+    try { console.log('[f8] slow-GL probe armed: ' + wrapped + ' entry points'); } catch (_) {}
+  }
+  function _armUiProbe() {
+    if (R.uiArmed || typeof MutationObserver === 'undefined' || !document.body) return;
+    R.uiArmed = true;
+    const watched = (el) => {
+      try {
+        const id = el.id || '';
+        if (/^ov-|^ship-select-countdown$|^lss-loading-overlay$|^stasis-|^hud$|^ship-select$|^enemy-healthbars$|^hit-marker|^kill-feed$|^crosshair|^abilities$|^minimap/.test(id)) return true;
+        return /(^|\s)(dmg-edge|ov-medal|kill-entry|enemy-hbar|ship-name-label)(\s|$)/.test(String(el.className || ''));   // (v40.41) + the combat HUD
+      } catch (_) { return false; }
+    };
+    const kinds = new Set();
+    const kindKey = (el, what) => {
+      try {
+        const cls = (typeof el.className === 'string') ? el.className.trim().split(/\s+/).filter(Boolean).sort().join('.') : '';
+        return el.tagName + (el.id ? ('#' + el.id) : '') + (cls ? ('.' + cls) : '') + (what || '');
+      } catch (_) { return '?'; }
+    };
+    const firstOfKind = (el, what) => { const k = kindKey(el, what); if (kinds.has(k)) return false; kinds.add(k); return true; };
+    const push = (el, what) => {
+      try {
+        const cls = String(el.getAttribute('class') || '');
+        const key = (el.id || el.className || el.tagName) + '=' + (what || cls);
+        if (el._f8cls === key) return;
+        el._f8cls = key;
+        R.ui.push([+(performance.now() / 1000).toFixed(2), String(el.id || ('.' + String(el.className || '').split(' ')[0])).slice(0, 24), String(what || cls || '(none)').slice(0, 40)]);
+        if (R.ui.length > 80) R.ui.shift();
+      } catch (_) {}
+    };
+    const mo = new MutationObserver((recs) => {
+      for (const r of recs) {
+        if (r.type === 'attributes') {
+          const el = r.target; if (!el || el.nodeType !== 1) continue;
+          if (r.attributeName === 'style') {   // (v40.41) pooled bars and labels show by style.display, not class
+            try { const cls = String(el.className || ''); if (!/(^|\s)(enemy-hbar|ship-name-label)(\s|$)/.test(cls)) continue;
+              const d = el.style.display || 'shown'; if (el._f8disp === d) continue; el._f8disp = d;
+              if (d === 'shown' && firstOfKind(el, '|shown')) push(el, 'FIRST shown ' + cls.slice(0, 24));
+              else if (watched(el)) push(el, 'display:' + d); } catch (_) {}
+          } else if (firstOfKind(el)) push(el, 'FIRST ' + String(el.className || '').slice(0, 30));   // (v40.42) any element, first time in this class set
+          else if (watched(el)) push(el);
+        }
+        else if (r.type === 'childList') {
+          for (const n2 of r.addedNodes) {
+            if (!n2 || n2.nodeType !== 1) continue;
+            if (firstOfKind(n2, '+')) push(n2, 'FIRST +' + String(n2.className || n2.id || n2.tagName).slice(0, 28));
+            else if (watched(n2)) push(n2, '+' + String(n2.className || n2.id || ''));
+          }
+        }
+      }
+    });
+    mo.observe(document.body, { attributes: true, attributeFilter: ['class', 'style'], subtree: true, childList: true });
+    R.uiMo = mo;
+    try { console.log('[f8] overlay probe armed'); } catch (_) {}
+  }
   function _wrapFirstDraw() {
     if (R.wrapped) return;
     try {
@@ -65482,11 +65953,13 @@ function __pmark(name) {
       R.seenG = new Set();
       const orig = renderer.renderBufferDirect;
       renderer.renderBufferDirect = function (camera, scene, geometry, material, object, group) {
+        let _drawn = false;   // (v40.41) the signature block issues the draw itself, then keys on the resolved program
         try {
           if (geometry && material) {
             const a = geometry.attributes || {};
             const _uk = material.uniforms ? Object.keys(material.uniforms).slice(0, 7).join(',') : '';   // (v40.28) seven: uAxialFalloff is the sixth
             let _pid = '';
+            if (!_drawn) { _drawn = true; try { orig.call(this, camera, scene, geometry, material, object, group); } catch (_) {} }
             try { const _pr = renderer.properties.get(material); const _cp = _pr && _pr.currentProgram; if (_cp && _cp.id != null) _pid = 'p' + _cp.id; } catch (_) {}
             let _rtTag = 'c';
             try { const _t = renderer.getRenderTarget(); if (_t) { _rtTag = (typeof postFX !== 'undefined' && postFX && _t === postFX.rtScene) ? 's' : ((_t.depthTexture || _t.isWebGLCubeRenderTarget) ? 'x' : ('t' + (_t.texture && _t.texture.type ? _t.texture.type : ''))); } } catch (_) {}
@@ -65496,7 +65969,8 @@ function __pmark(name) {
               '|b' + (material.blending | 0) + (material.transparent ? 'T' : 'O') +
               (material.depthWrite ? 'w' : '-') + 's' + (material.side | 0) +
               (geometry.index ? 'i' : '-') + ((object && object.isInstancedMesh) ? 'I' : '-') +
-              ((object && object.isSkinnedMesh) ? 'S' : '-');
+              ((object && object.isSkinnedMesh) ? 'S' : '-') +
+              ((object && object.isPoints) ? 'P' : ((object && (object.isLine || object.isLineSegments)) ? 'L' : ''));   // (v40.34) draw mode
             if (!R.seenG.has(sig)) {
               R.seenG.add(sig);
               const pos = a.position;
@@ -65511,9 +65985,13 @@ function __pmark(name) {
             }
           }
         } catch (_) {}
+        if (_drawn) return;
         return orig.call(this, camera, scene, geometry, material, object, group);
       };
       try { console.log('[f8] first-draw probe armed'); } catch (_) {}
+      try { window.__f8first = () => R.first.slice(); window.__f8seen = () => Array.from(R.seenG || []); } catch (_) {}   // (v40.42) pane debugging
+      try { _wrapSlowGl(); } catch (_) {}     // (v40.34)
+      try { _armUiProbe(); } catch (_) {}     // (v40.34)
     } catch (_) { R.wrapped = true; }
   }
   function _gpuFence(t) {
@@ -65607,9 +66085,11 @@ function __pmark(name) {
     const po = new PerformanceObserver((list) => {
       for (const e of list.getEntries()) {
         if (e.duration < 50) continue;
-        R.lo.push([+(e.startTime / 1000).toFixed(2), Math.round(e.duration), Math.round(e.blockingDuration), Math.round(e.renderStart - e.startTime),
-          (e.scripts || []).slice(0, 3).map(sc => [sc.invokerType, String(sc.sourceFunctionName || '').slice(0, 30), sc.sourceCharPosition, Math.round(sc.duration)])]);
+        const _ent = [+(e.startTime / 1000).toFixed(2), Math.round(e.duration), Math.round(e.blockingDuration), Math.round(e.renderStart - e.startTime),
+          (e.scripts || []).slice(0, 3).map(sc => [sc.invokerType, String(sc.sourceFunctionName || '').slice(0, 30), sc.sourceCharPosition, Math.round(sc.duration)])];
+        R.lo.push(_ent);
         if (R.lo.length > 120) R.lo.shift();
+        if (e.duration >= 300) { R.loBig.push(_ent); if (R.loBig.length > 16) R.loBig.shift(); }
       }
     });
     po.observe({ type: 'long-animation-frame', buffered: true });
@@ -65691,6 +66171,9 @@ function __pmark(name) {
         } catch (_) { return null; }
       })(),
       lo: R.lo.filter(l => l[0] >= now - 5).slice(-20),
+      loBig: R.loBig.filter(l => l[0] >= now - 40).slice(-8),
+      slowgl: R.slowgl.filter(x => x[0] >= now - 30).slice(-24),
+      ui: R.ui.filter(x => x[0] >= now - 12).slice(-30),
       lt: R.lt.filter(l => l[0] >= now - 5).slice(-20),
       cold: R.cold.filter(c => c[0] >= now - 5),
       coldNames: (function () { try { return (window.__coldSeen || []).slice(-24); } catch (_) { return null; } })(),
@@ -65731,6 +66214,7 @@ function __pmark(name) {
           ssMin: (typeof window.__ssMin === 'number') ? window.__ssMin : -0.6,
           fxWarm: window.__fxWarm || 0,
           noGpu: (function () { try { return window.__f8noGpu ? 1 : 0; } catch (_) { return 0; } })(),   // (v40.21)
+          nodom: (window.__f8nodom ? 1 : 0) + (window.__f8nolabels ? 2 : 0) + (window.__f8litehud ? 4 : 0),   // (v40.43/44) 1 = ?nodom, 2 = ?nolabels, 4 = ?litehud
           onBattery: (function () { try { return (typeof _lssOnBattery !== 'undefined' && _lssOnBattery) ? 1 : 0; } catch (_) { return -1; } })(),
           crestBreak: (W.crestBreak != null) ? +W.crestBreak : 1,   // (v40.19) the crest-spray readback
           crCost: (W.crCost != null) ? W.crCost : null,             // ms the last readback call blocked for
@@ -65739,12 +66223,16 @@ function __pmark(name) {
           crOffN: window.__crestOffN || 0,                          // how many times it has had to
           fxRuns: window.__fxWarmRuns || null,                      // (v40.26) when _warmRealCombatFX was entered
           pb: (function () { try { const r = window.__prebake ? window.__prebake() : null; if (!r || !r.ms) return null;
-            return [r.totalMs | 0, r.ms.fence | 0, r.ms.cloak | 0, r.ms.fx | 0, r.ms.gpu | 0, r.capped || 0, r.cloakHulls | 0, window.__fxWarmSprites | 0]; } catch (_) { return null; } })(),
+            return [r.totalMs | 0, r.ms.fence | 0, r.ms.cloak | 0, r.ms.fx | 0, r.ms.gpu | 0, r.capped || 0, r.cloakHulls | 0, window.__fxWarmSprites | 0, r.ms.ui | 0, r.ms.frame0 | 0]; } catch (_) { return null; } })(),
           fxRan: window.__fxWarmRan || null,                        // (v40.27) ...and when it got past the memo and actually ran
           fxSkipped: window.__fxWarmSkipped || null,                // (v40.27) ...and when the in-view guard refused it
           crHold: (function () { try { const W2 = window.__water || {}; const h = (W2.crHoldMs != null) ? +W2.crHoldMs : 15000;
             return (game && game._fightAt) ? Math.max(0, Math.round((h - (performance.now() - game._fightAt)) / 100) / 10) : -1; } catch (_) { return -1; } })(),   // (v40.25) s of hold left
           warmDraws: window.__warmDraws || 0,
+          cs: window.__compileSliced || null,                      // (v40.34) {ms, slices, children} of the last sliced compile
+          ld: window.__linkDrain || null,                          // (v40.34) {at, ms, polls, pending} of the last link drain
+          uiw: window.__uiRehearsal || null,                       // (v40.34) the overlay rehearsal: {ms, n, groups, frames, worst}
+          fxp: window.__fxWarmProgs || null,                       // (v40.38) the programs the combat-FX warm built this launch, named
         };
       } catch (_) { return null; } })(),
       ua: (function () { try {
@@ -65766,6 +66254,11 @@ function __pmark(name) {
   try { window.__autoMark = _auto; } catch (_) {}
   let _autoOn = true;
   try { _autoOn = !/[?&]noauto\b/i.test(location.search || ''); } catch (_) {}
+  try {
+    if (/[?&]nodom\b/i.test(location.search || '')) { document.body.classList.add('lss-nodom'); window.__f8nodom = 1; }
+    if (/[?&]nolabels\b/i.test(location.search || '')) { document.body.classList.add('lss-nolabels'); window.__f8nolabels = 1; }
+    if (/[?&]litehud\b/i.test(location.search || '')) { document.body.classList.add('lss-litehud'); window.__f8litehud = 1; }   // (v40.44)
+  } catch (_) {}
   if (_autoOn) {
     try {
       setInterval(() => {
@@ -65773,6 +66266,20 @@ function __pmark(name) {
           if (_auto.n >= _auto.max || document.visibilityState !== 'visible') return;
           const nowS = performance.now() / 1000;
           if (nowS < _auto.cool) return;
+          try {
+            let n2 = 0, sum = 0, mx = 0;
+            for (let i = 0; i < N; i++) { const t = R.ringT[i]; if (t > nowS - 2 && t <= nowS) { n2++; sum += R.ring[i]; if (R.ring[i] > mx) mx = R.ring[i]; } }
+            const _cov = document.getElementById('lss-loading-overlay');
+            let _hid = false;
+            try { for (const fr of R.foc) { if (fr[0] >= nowS - 2.5 && fr[0] <= nowS && /^h/.test(fr[1])) _hid = true; } if (R.focPrev && /^h/.test(R.focPrev)) _hid = true; } catch (_) {}
+            if (!_hid && n2 >= 6 && (sum - mx) / (n2 - 1) >= 100 && nowS >= (_auto.slowCool || 0) && (_auto.slowN | 0) < 12 && !(_cov && _cov.classList.contains('active'))) {
+              _auto.slowCool = nowS + 6; _auto.slowN = (_auto.slowN | 0) + 1;
+              const fps = Math.round(1000 / (sum / n2));
+              const m2 = snapshot('slow ' + fps + 'fps');
+              show('slow #' + m2.n + '  ' + fps + ' fps');
+              console.log('[f8] slow mark #' + m2.n + ': ' + fps + ' fps over 2 s (' + n2 + ' frames)');
+            }
+          } catch (_) {}
           let bestT = 0, bestG = 0;
           for (let i = 0; i < N; i++) {
             const t = R.ringT[i], g = R.ring[i];
@@ -66323,18 +66830,25 @@ function gameLoop(timestamp) {
 
   _lssDynResTick(timestamp);
   __pmark('music+reactive'); 
-  let _rfCovered = false;
+  let _rfCovered = false, _rfPrebake = false;
   try {
     const _selEl = document.getElementById('ship-select');
     _rfCovered = !!(_selEl && _selEl.classList.contains('active') &&
                     !_selEl.classList.contains('lss-launching')) &&
                  !_xrActive && !window.__noOccludedThrottle;
+    try {
+      const _cov = document.getElementById('lss-loading-overlay');
+      const _launching = !!(_cov && _cov.classList.contains('active') && _selEl && _selEl.classList.contains('lss-launching'));
+      _rfPrebake = (!!(_PREBAKE && _PREBAKE.on) || _launching) && !_xrActive && !window.__noOccludedThrottle;
+    } catch (_) { _rfPrebake = false; }
+    if (_rfPrebake) _rfCovered = true;
   } catch (_) { _rfCovered = false; }
   if (!_rfCovered) {
     try { if (window.__f8gt) window.__f8gt.b(); } catch (_) {}
     renderFrame();
     try { if (window.__f8gt) window.__f8gt.e(); } catch (_) {}
     try { _gpuKeepWarmTick(timestamp); } catch (_) {}   // (v39.63) idle load after the real work
+  } else if (_rfPrebake) {
   } else if (!game._occLastRender || timestamp - game._occLastRender >= 167) {
     game._occLastRender = timestamp;
     if (!_lssPickerOwnsFrame()) renderFrame();

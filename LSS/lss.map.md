@@ -4154,3 +4154,370 @@ Pane-verified: `cloakHulls 8 / cloakMats 112` with `drainCloak 7 ms`, `drainPrim
 first drew into rtScene and into the picker's half-float target `t1016`) has no ANGLE event inside
 it, so the trace cannot say which command. The Present stalls are Chrome's Dawn pipeline-cache disk
 loads on a cold GPU process — outside the page, once per cold start.
+
+### v40.33 — two more cold runs: the countdown is the compile bursts; the in-play class is named as far as it can be
+
+Two cold runs on 40.32 (auto marks n66–n73 and n74–n78, read live).
+
+**The countdown.** `cold [[12.71, 118]]` with a **2161 ms long task** (`lt` "self") at 12.72 s, and
+`cold [[14.87, 37]]` with the heartbeat stopped **2613.8 ms** at 14.88 s: 118 programs and then 37
+compiled on the main thread in one call each — `warmupCombatShaders`' `compileAsync(scene, camera)`
+(one synchronous compile of the whole scene, then the wait) and the launch prebake's hull-proxy
+`renderer.compile(scene, camera)` — while `launchCountdown()` has already torn the loading overlay
+down ("so it doesn't cover the countdown") and the digits are on screen. ⚠ v39.29 batched this
+compile and reverted it as "MEASURED NO CHANGE". That was measured on a **warm** browser, where the
+program cache turns the burst into milliseconds; on a cold browser the shader text is assembled and
+compiled from scratch — two seconds of solid main thread under an animating countdown. Same code,
+different regime. **v40.33** `_compileSliced(root, cam, scene, budgetMs)` compiles top-level children
+and yields every 6 ms of work (three caches by source, so shared materials still compile once);
+both sites use it, and the existing link drain still waits for ANGLE afterwards. Pane: 927 children,
+5 slices, 64 ms; `drainPrime` 0 pending; no errors.
+
+**In play.** 1.5–3.7 s frames, every one `gt ≈ stall` (inside our command stream), `hb []`, `lt []`,
+`progs` flat, `cold []`, each 0.3–1 s after a first draw of an effect family: the `{uColor,uOpacity}`
+additive glow sphere, vertex-coloured `MeshBasicMaterial` tubes in three blend/depth states, the
+fire-cloud shader (`{time,uRadius,uOctaves,…}`), layered FX front-side, a named 4-vertex basic glow.
+Three targeted warms have not removed them. ⚠ `>t1016` is the **EffectComposer's half-float
+buffer**, so a `t1016` "first" is a duplicate of the rtScene one, not a new pipeline.
+
+**The honest reading of the in-play class.** In the GPU-category trace the corresponding 3.4 s
+decoder command had **no ANGLE sub-event and no `D3DCompile`** — it was inside a single GL command.
+Everything measured fits one thing the page cannot see: **the driver JIT-compiling a
+(vertex shader × pixel shader × state) combination inside the D3D draw call itself, on a cold driver
+cache** — invisible to Chrome's tracing, visible only as GPU-timeline time (`gt`) and to the fence,
+absent on a warm process, and different in DuckDuckGo's Chromium because its ANGLE emits different
+bytecode with its own cache entries. The only page-side lever is to draw every combination first
+behind a cover, and three rounds of doing that by name have shown the set is not enumerable from the
+page (each cold run names a different handful). **Stop adding warms for it.**
+
+What the session leaves in place for this class: `?pbhud` auto-marks with `first` carrying program
+id + render target, so any future cold run names its own stragglers in one read.
+
+### v40.34–40.40 — the compositor's pipelines, the loop's joins, and the probes that name them
+
+**The cold run on 40.33** (auto marks n81–n92, read from Chrome's LevelDB on disk with `read_f8_ldb.py`,
+which now scans every table and keeps the newest ring). Covered phase (n82–n86, behind the loading
+overlay): 632 ms for the 129-program burst, then 2460 / 3668 / 3759 / 3418 ms with `lt: self`, the
+heartbeat stopped, `gt` ≈ 0, no programs made. Visible phase (n87–n92): 1494 ms as the countdown came
+up, 3266 ms on the next digit, 2925 / 3300 ms at the first hits, 2168 ms as round 2's countdown came
+up — main thread FREE (`hb []`, LoAF blocking 0, 12 ms of script), `gt` small, `pipes` flat (1172 →
+1172 across n87/n88: not one new WebGL pipeline). The page was waiting on the GPU process.
+
+**The GPU trace names it** (`trace_dawn.py`, `trace_window.py` on the owner's chrome://tracing capture):
+`RendererRasterWorker > DoEndRasterCHROMIUM` blocked 1057 ms on `DawnPlatformImpl::RunWorkerTask`, a
+compositor Present blocked 858 ms on another — **Skia Graphite building a render pipeline for HTML
+content the first time this GPU process needs it**. Every transient overlay is such a first: 180 px
+glowing digits, the text-shadowed banner, the vignette, `mix-blend-mode: screen` warp layers,
+`filter: drop-shadow` medals. DuckDuckGo's engine (WebView2) is a different Chromium configuration.
+Also in the trace: a 3366 ms WebGL flush with NO child event and nothing on any other GPU-process
+thread — the decoder inside the driver, untraced — and only 4 `D3DCompile` events in the whole
+capture: programs come from the binary cache and the cost is the LOAD (driver JIT at CreateShader).
+
+**v40.34 `_prebakeOverlayRehearsal(rep)`** — last prebake stage: every `#ov-*` overlay, the launch and
+round countdowns, the damage edges, a medal row, shown for 3 frames each in 5 groups with real text
+and the loading cover at `opacity: 0.995` (an OPAQUE cover lets the compositor skip what it hides).
+Pane, same GPU process: first launch **2616 ms, worst frame 1540 ms**; second launch 166 ms / 39 ms.
+That is the compositor's pipeline cache, and the whole cost now sits behind the cover. Reports in
+`window.__uiRehearsal`, `flags.uiw`, `pb[8]`.
+
+**v40.34 probes** (all `?pbhud`, all in every mark): `slowgl` — every GL entry point that can wait on
+the GPU process is wrapped; any call ≥ 20 ms is recorded with its program (`p<id>:<material name>`)
+or size. `ui` — a MutationObserver on overlay class changes, deduplicated. `loBig` — LoAFs ≥ 300 ms
+kept 40 s so the NEXT mark carries the attribution the auto mark could not. `first` gains the draw
+mode (`P` points, `L` lines). `flags.cs` / `flags.ld` carry the last sliced compile and link drain.
+
+**What `slowgl` found in the pane (40.34)**: `getProgramInfoLog` 236 / 179 / 64 / **1626** / 438 ms
+and `getProgramParameter` 284 / 872 ms — one program each, the main thread frozen for that program's
+whole link — on frames the LOOP drew during the prebake (the picker is `.lss-launching`, so the 6 Hz
+occluded throttle did not apply and the arena rendered at full rate behind an opaque cover; every
+frame was the first use of what the prebake had just compiled). **v40.35**: `checkShaderErrors` off
+for the session (`?shadererr` restores it); the loop renders nothing while `_PREBAKE.on`; the prebake
+draws its own first frame behind the cover. **v40.36**: the gate covers the whole launch window
+(cover `.active` + picker `.lss-launching` — the 118-program burst runs before `_PREBAKE.on`); the
+first-frame stage is frame + keep-warm tick → `drainFrame0` → frame + keep-warm again; the FX prime
+drains and redraws once more when its draw forks a program. **v40.37/38**: the keep-warm quad's first
+call compiles only (with `W.rt` bound — a compile with the canvas current builds a DIFFERENT program:
+tone mapping and output colour space are canvas-only), and its shader uses a dynamic loop bound
+(`for (i < int(uK))`) instead of asking FXC to consider a 65536-way unroll (1.6 s of link for one
+program). **v40.38/39** `window.__fxWarmProgs` / `flags.fxp`: the programs `_warmRealCombatFX`
+creates each launch, named by a material that uses them — those are the joins left behind the cover
+(679 / 430 ms per launch, warm process: the binary-cache load on this machine is not cheap), and the
+list is what a retention fix would need.
+
+**Pane on 40.38** (fourth launch, one GPU process): `slowgl []`, prebake 2890 ms, no auto mark after
+the cover lifted. ⚠ The pane's process is warm; only the owner's cold Chrome decides the visible
+phase. The decisive A/B is Chrome with Skia Graphite disabled (`chrome://flags/#skia-graphite`, or
+`--disable-features=SkiaGraphite`): if the in-play stalls vanish, the rehearsal is the right shape
+and any residue is overlay styles it does not cover (read `ui` beside the gap).
+
+**Reading marks from disk**: Chrome's `Local Storage/leveldb` — `read_f8_ldb.py <dir> <out.json>`
+(all `.ldb` tables, newest ring by `n`), `read_f8_leveldb.py` for the `.log`. The live route (an MCP
+tab on `localhost:8099/404.html`) truncates at ~1 KB per read; disk is the full ring.
+
+### v40.41 — the 40.40 cold runs: countdown clean; the residue moves to combat firsts
+
+**Run A, Chrome cold, Graphite on (auto marks n100–n107).** Covered phase 10.5 → 33.3 s: the drain
+polls waiting on the decoder's synchronous binary loads (`getProgramParameter` 399 + 1324 ms on the
+118-program burst, 2571 ms on the hull burst), a 1032 ms `texSubImage2D` (command buffer full), the
+FX warm's own joins (462 / 522 ms), a 5.4 s GPU fence after the first-frame stage (the whole arena's
+first-draw executables, once, behind the cover), and the overlay rehearsal at **5777 ms** (group 1
+2528 ms, group 4 2033 ms). **The countdown and FIGHT (39.4 → 43.6 s) had no stall ≥ 300 ms** — the
+1494 / 3266 ms of 40.33 are gone. In play: 2869 ms at FIGHT+2 s, 1035 ms at the first kill, 3425 ms
+after it — main thread free, `ui` quiet (the overlay probe only watched `#ov-*`), `first` full of
+re-keyed repeats (see below). **Run B, Graphite OFF: worse** — the rehearsal's first group alone
+took 8706 ms, the real countdown 3015 ms and FIGHT 3092 ms anyway (Ganesh keys its pipelines more
+finely; the rehearsal did not take). Graphite stays on; the A/B answered the question it was asked.
+
+⚠ `gt` (TIME_ELAPSED around renderFrame) ≈ stall does NOT mean our draw list cost it: n103's stall
+frame drew one full-screen quad (`res` reads the keep-warm pass, `renderer.info` resets per render)
+and still measured 2840 ms — the GPU queue was blocked between our two timestamps by whatever held
+the GPU main thread. `gt` says "inside our bracket in time", not "our work". ⚠ The `first` signature
+read the program BEFORE the draw, so a new material keyed without `@p` and the next instance of the
+same shader keyed with it — phantom firsts in every combat frame. v40.41 issues the draw first and
+keys on the resolved program (`firstWithoutPid 0` in the pane).
+
+**v40.41**: rehearsal group 6 = the combat HUD (hit marker + kill marker `.active`, one pooled
+enemy health bar and name label shown, a `.kill-entry`); the `ui` probe watches `#hit-marker*`,
+`#kill-feed`, `.kill-entry`, `.enemy-hbar` / `.ship-name-label` (their `style.display`), `#crosshair`,
+`#abilities`, `#minimap`. Pane (warm process): 6 groups, 26 elements, 186 ms; nothing stuck.
+Next cold run reads: `ui` beside each in-play gap (a combat first → rehearse it), `first` (real
+firsts only now), `slowgl` (should be empty after the cover lifts).
+
+### v40.42 — two more cold runs on 40.41: one stall each, and it is the ship label
+
+**Runs (n117–n121, n122–n129).** Loading covered everything again (rehearsal 666 / 4225 ms, first
+frame 631 / 3833 ms). Countdown + FIGHT clean in both. **One in-play stall each**: n121 3113 ms at
+40.4 s, n125 2356 ms at 37.8 s — both ~4.5 s after FIGHT, main thread free, no new program, no new
+pipeline in the frame. The `ui` probe put the first FRIENDLY ship label on screen 60 ms (run 1) and
+300 ms (run 2) before each; enemy labels had shown earlier without a stall. Then the reason the
+v40.41 rehearsal of the label did nothing: `body.lss-picker-3d #enemy-healthbars { display: none }`
+holds for the whole launch (the picker is still up behind the cover), so the rehearsed label and bar
+sat in a hidden container and rasterised nothing. The label is the heaviest compositor object in the
+game — `.cl-target` inset + outer box-shadow, `.cl-svg` `filter: drop-shadow` over a polyline stroke,
+three-layer `text-shadow`, and a `flip-left` mirrored variant of all of it.
+
+**v40.42**: rehearsal group 6 forces the container visible (`display:block !important`, restored),
+shows one label per variant (enemy, friendly, enemy flip-left) at real screen positions with real
+text, one bar with fill and shield, the kill entry, and the hit markers through `showHitMarker()` /
+`showKillMarker()` (WAAPI, not the class). The `ui` probe now records the **first appearance of every
+element kind** (tag + id + class set, a Set lookup) anywhere in the DOM as `FIRST …`, alongside the
+watch list — the next stall's cause names itself. `window.__f8first()` / `__f8seen()` expose the
+first-draw ring in the pane; `window.__fxWarmPts` proves the particle warm ran (it does: its draw
+lands at 20.5 s behind the cover; the in-play `>s` / `>t1016` Points "firsts" are target-tag only).
+
+**Also seen, next lane**: n128 952 ms at round 2's first exchange (the probe's `FIRST` lines will
+say what was new); **n129 3960 ms when the between-rounds picker opened** (`#ship-select` over the
+live arena: six `backdrop-filter: blur()` panels and the preview renderer restarting — separate).
+**n109-class** (785 ms on the first picker, `resolve-promise` 746 ms at lss.js char 78180 — a
+launch-time JS task, not GPU) is a third.
+
+### v40.43 — the 40.42 cold run (n130–n140): the label still leads, the HUD was never rehearsed, and the picker lane opens
+
+**Run.** Rehearsal 7897 ms (worst 3154) + fence 3943 ms behind the cover; countdown clean; in play
+n138 681 ms (0.2 s after a rehearsed `#ov-vortex-shield.show`) and **n140 2049 ms, 300 ms after a
+label element was reclassed to `--friendly`** — the fourth run in a row where the biggest in-play
+stall follows a friendly label, this time WITH the label rehearsed (n136 shows the label group at
+31.08, 486 ms). The first-of-kind probe adds: the body switched to `cine-fx lss-cockpit3d` at 47.66 —
+but those classes only `display:none` the cockpit frames; not it.
+
+**What the probe made visible instead.** `body.lss-picker-3d` hides `#hud`, `#kill-feed`,
+`#crosshair`, `#minimap`, `#circumpunct-hud`, `#round-info`, `#enemy-healthbars`, the stasis pair and
+the lock-on warning — and it stays on until LAUNCH (`stopShipPreviewLoop`). Every rehearsal so far
+ran under it: the kill entry was in a hidden feed, and the HUD proper (ability slots with
+`backdrop-filter`, two canvases, the round strip) rasterised for the first time at FIGHT.
+**v40.43** lifts `lss-picker-3d` for the rehearsal (the picker loop's per-frame toggle is held by
+`window.__f8rehearsing`), puts it back after, and adds the stasis pair. Pane: 30 elements, 201 ms,
+class restored, HUD visible in play.
+
+**A/B switches (v40.43)**: `?nodom` paints no HTML over the arena at all (`body.lss-nodom`,
+visibility:hidden on every overlay/HUD container), `?nolabels` drops only `#enemy-healthbars`.
+`flags.nodom` = 1 / 2. If the first-exchange stall survives `?nodom` on a cold run, it is not the
+compositor's content and the next tool is a chrome://tracing capture of that moment.
+
+**The picker lane (owner: "lags on the ship selection screen between rounds, which doesn't give a
+chance to select a ship, and lags when you change ships").** n129 (40.41): 3960 ms GPU-side when the
+between-rounds picker opened over the live arena (six `backdrop-filter: blur()` panels, the preview
+drawn by the MAIN renderer in the one-context path). Sustained lag never produced a mark — the auto
+mark needs one ≥ 400 ms gap. **v40.43 `slow <fps>fps` marks**: two seconds averaging ≤ 10 fps with
+the cover down, 6 s apart, twelve per page, same fields — so the next between-rounds picker names
+its own cost (`chop` / `big` blame, `slowgl`, `ui`). Ship changes ≥ 400 ms already auto-mark.
+
+### v40.44 — the `?nodom` verdict, the round-transition anatomy, and `?litehud`
+
+**`?nodom` cold run (n145–n149, 40.43).** With every HTML overlay/HUD container `visibility:hidden`:
+prebake 5.2 s (rehearsal 166 ms — nothing rasterises), countdown clean, **round 1 had no in-play
+stall at all** (no mark between 25.5 s and the round-2 picker at 81 s). With the same HTML visible,
+every cold run had a 2–3 s stall at the first exchange. That is the verdict on the in-play class:
+**HTML compositing, once per kind, at first appearance** — not our shaders, not the driver on our
+draws. The LAUNCH stall of the previous session (n142 3752 ms, n144 2501 ms at round 2/3's LAUNCH,
+HUD re-appearing as `lss-picker-3d` comes off) was absent under `?nodom` too: same class.
+
+**What survives `?nodom` (so is NOT HUD content)**: the between-rounds picker opening (n147 1035 ms;
+with HTML: n141 1174, n143 1584) and **the ship switch inside it (n148 3488 ms; n141 1174 ms)** —
+GPU-process side, main thread free, `cold []`, `slowgl []`, the preview's first draws of the new hull
+(`>c`, programs p31–p37 from round 1's picker) in `first`. Hull attribute formats are identical
+across all eight ships (Int16n interleaved position/normal, Uint16n uv) — the ANGLE input-layout
+theory is dead. The picker's six `backdrop-filter: blur()` panels sit over a preview that changes
+every frame; that family is the candidate for both the per-switch stall and the sustained lag.
+
+**v40.44 `?litehud`**: the same HTML, none of the effects — `filter`, `backdrop-filter`,
+`text-shadow`, `box-shadow`, `mix-blend-mode` stripped (`!important`, beats the animations) from the
+HUD, overlays, labels, picker, lobby. `flags.nodom` bit 4. If a `?pbhud&litehud` cold run through
+round 2 is clean, the fix is to make those styles the default (or the Windows/Chrome default).
+Pane: `.sp-stat` / confirm / countdown digits all report `none`, boots to play.
+
+**Slow marks**: n150/n151 (`slow 2fps`) were artefacts — a 13.8 s tab-hidden gap plus 7 ms frames
+averaged as 2 fps. v40.44 skips windows spanning a hidden interval and averages without the single
+largest gap. Real 4 fps stretches (149.7–153.9 s: fence 220–350 ms per frame, `gt` 2 ms) remain
+unexplained — window went non-fullscreen at 1920×868 on a 144 Hz display there.
+
+### v40.45 — the `?litehud` run and the laser hitch
+
+**`?litehud` cold run (n154–n159).** Stripping every filter / backdrop-filter / text-shadow /
+box-shadow / mix-blend-mode did NOT make the rehearsal cheap: the six groups still cost 3891 / 2640 /
+2654 / 1494 ms behind the cover. The compositor's first-use cost is the plain content kinds too —
+180 px and 96 px text, gradients, SVG strokes, borders — not only the effect families. In play the run
+was clean except **n159, 1348 ms, "during vortex's mega core laser"**: GPU-process side, `first []`
+(post-draw keyed), `cold []`, no texture, `slowgl []`, main thread free; `.kill-entry` + `.ov-medal`
+(FIRST BLOOD) at 64.64, a label shown at 64.97, the stall from 64.98. Owner: the same laser gives
+**no hitch on their other PC's Chrome** — machine-specific first-use in that GPU process.
+**v40.45**: the combat-FX warm fires the laser sequence behind the cover (beam cone + two arm cones
+with the `core_beam` preset in a `_lzg` group removed with the pins, `spawnHitFire` at the far end,
+`_swSpawnSplash` drops — their own Points program), and the rehearsal shows all seven medal glyphs
+(★ ↻ ✦ → ◆ ○ ●, each its own fallback font) instead of one. Pane: 36 elements, no leftovers.
+
+**Ops note**: the 8099 dev server had died (curl 000); `preview_start {name:'lss'}` restarts it —
+the owner's own runs use it too.
+
+### v40.46–40.48 — three owner reports fixed (map selector, cyberpunk city, endless Aegis XP)
+
+**v40.46 map selector (CSS only, adversarially verified).** `#ss-right-col` is bottom-anchored
+(`justify-content: flex-end`, v35.20 on purpose), `#map-select` is its last child, and `selectMap()`
+toggles `#gmaps-overlay-panel` (`display: none ↔ flex`, 112 px measured) at the BOTTOM of the box —
+below the arrow row. Growth at the bottom of a bottom-anchored box is realised by moving the box TOP
+up, so the arrows moved with it. Fix: `#map-select-row { order: 1; position: sticky; bottom: 0;
+z-index: 1; pointer-events: none }` — the row becomes the last flex item, the panel opens ABOVE it,
+the row's bottom stays pinned. `order: 0 !important` back in the `max-width: 900` block (column is
+top-anchored there, panel already grows downward) and `order: 1 !important` in the landscape-phone
+block (bottom-anchored again, last in the cascade). Pane: box grows 39 px upward, `#map-next` stays
+at y 621 exactly; `elementFromPoint` still hits the arrow and GO.
+
+**v40.47 cyberpunk city — two independent defects.**
+(1) *Wing gone*: `_cyberReviveBots` resets alive/health/shield/position but never clears
+`doomed`/`doomTimer` (`_owReviveBot` always has). `Bot.update` runs the doomed clock first and dies
+on `<= 0`, so any wing bot that died while burning came back for one frame every `CYBER.respawn`
+seconds forever — over the 20,000 u crossing the whole wing ends in that loop. Fix mirrors
+`_owReviveBot`: clears `doomed`, `doomTimer`, `aiRetreating`, zeroes velocity, grants
+`CYBER.reviveProtect` (new knob, 3 s).
+(2) *Own team attacking*: `_cyberCityDefence` puts all hub traffic on the DEFENDING fleet's team
+(v38.24), and the traffic aggro chase was written against `player` with no team test — so on a round
+the pilot defends, a freighter that went hot hunted the one ship on its own side. Worse, its bolts
+carried no `ownerTeam`, so the friendly-fire guard (`this.ownerTeam == null || player.team !==
+this.ownerTeam`) never applied and they could not hit a bot at all. Fix: `_hcTrafTarget(e)` picks the
+pilot only when hostile, else the nearest hostile FIGHTER (has `loadoutKey`, not traffic/carrier/
+leviathan) inside `_HC_TRAF_HUNT_R` (4200) and stands the ship down when none is in reach; the fire
+gate, lead and bolt all follow that target; bolts carry `ownerTeam`/`ownerRef`.
+
+**v40.48 endless Aegis XP per difficulty.** Endless already had EASY/MEDIUM/HARD (shared picker,
+`lss_camp_difficulty`, default medium) but it only set lives — the Aegis rank was one bolt = one FULL
+rank, difficulty-blind (v35.90). Now a rank costs `_EAEGIS_RANK_XP` (100) and a bolt pays
+`_EAEGIS_RANK_XP * _EAEGIS_XP_MUL[diff]` — **easy 1.0 / medium 0.7 / hard 0.5**, snapshotted per run
+into `run.boltXp` by `onBuildWorld` (so lives and XP can never disagree, per client like lives).
+Remainder banks in `run.aegis.xp`; the HUD tag shows the banked % below MAX; a bolt that does not
+rank up announces `+50 XP` through the existing `rwTxt` readout. `__endlessAegis()` exposes
+`xp / rankXp / boltXp / difficulty`. ⚠ The at-MAX overflow ladder (+1 % speed / +1 life / +250 m)
+stays one-per-bolt — the request was about ranking. Pane on HARD: desc reads "Aegis bolts pay 50 % of
+a rank", bolt 1 → `xp 50, lvl 0, reward "+50 XP"`, bolt 2 → `lvl 1, xp 0`. To invert the direction,
+reorder the three numbers in `_EAEGIS_XP_MUL` and nothing else.
+
+### v40.49 — ghost mode hides the ship HUD
+
+Owner: "hide the HUD when you die (in ghost mode)". `body.lss-ghost` (mirroring the
+`body.lss-picker-3d` rule above it) hides `#hud`, `#crosshair`, `#circumpunct-hud`, `#minimap`,
+`#cockpit-frame`, `#gun-layer`, `#enemy-healthbars`, `#stasis-warning`, `#stasis-vignette`,
+`#enemy-lockon-warning` and both hit markers. Set in `Overlays.respawn()` and cleared in
+`Overlays.hideRespawn()` — the one funnel every death and respawn path already uses (the kill
+handler and the death-cam overlay both call it) — plus an unconditional clear in the round teardown
+beside `player.shipState = 'spawning'` as a belt. The clear in `hideRespawn` runs BEFORE the element
+guard so a missing overlay node cannot strand a hidden HUD. ⚠ Kept on purpose: `#ov-respawn` itself,
+`#round-info` and `#kill-feed` (match state a spectating ghost still wants) and every other `#ov-*`.
+`window.__ghostHideHud = false` opts out. Pane: hud/circumpunct/enemy-healthbars true → false →
+true across respawn()/hideRespawn(), body carries `lss-ghost` only in between.
+
+### v40.50 — the missing hangar backdrop: a decode race that stuck for the session
+
+Owner: "sometimes randomly the hangar.png doesn't load in the background of the ship selection
+screen". Two independent ways, both permanent once they happen:
+
+1. **The texture race (the common one).** The one-context picker builds
+   `new THREE.CanvasTexture(#ship-select-bg)` the first time it opens, guarded by `src.width > 1`.
+   ⚠ That is not a readiness test: a `<canvas>` with no width attribute is **300x150** of
+   transparent black, so the guard passes happily before the boot bake has drawn anything. The
+   blank pixels are uploaded once and nothing ever re-uploads them, so a slow `hangar.webp` decode
+   means no hangar for the whole session. The DOM fallback (`?twoctx`) self-heals because a canvas
+   paints live; the GL path cannot. **Measured in the pane on the very first test boot: the decode
+   took 690 ms and lost the race (`__ssBg.repoked: true`)** — this was not a rare corner.
+2. **A failed fetch.** The bake had no `onerror` at all, so one network blip left the canvas blank
+   forever.
+
+Fix: the bake stamps `cv._lssBaked`, sets `needsUpdate` on the picker's existing texture when the
+pixels land, and retries a failed load twice (400/800 ms, cache-busted); the picker's guard drops to
+`if (src)` so the quad always exists for the bake to fill. `window.__ssBg` reports
+`{baked, w, h, ms, tries, err, repoked}`.
+
+### v40.51–40.54 — four more owner reports (water flicker, stuck clip prompt, optics outlines, endless critters)
+
+Each investigated by one agent and then refuted by two more with different lenses; every set came back
+`amend`, and the amendments were real (see below). Applied after reconciling the two reviewers.
+
+**v40.51 the countdown water flicker — it is the planar MIRROR, not the ripple sim.** The Reflector's
+refresh cadence has a hard floor `_gMin` (2 desktop / 4 phone) that is checked BEFORE the eye-moved
+test, so the frame after any capture is skipped however far the eye went. The launch cuts the eye
+twice: the cover lift (the loop renders nothing while `_rfPrebake`, so the target still holds the
+prebake's own frame at the SPAWN pose while the first uncovered frame is the lineup orbit) and
+`_lssEndSpectatorCinematic`'s `camera.position.copy(player.position)` in the same call stack as
+`launchCountdown()`. The displaced sheet then samples a reflection captured from an eye 120–390 u
+away, whose projected UVs fall off that target (ClampToEdge smear, then the shader's graze guard
+swaps in flat sky tint), and `uReflFloor` 0.42 puts that layer in EVERY water pixel — one frame of it
+reads as the whole surface flashing, water only, exactly at the countdown. Fix: a jump past
+`window.__water.reflJump` (90 u; one frame can advance the eye at most 70 u because `game.deltaTime`
+is clamped to 0.05 and the top speed is 1400 u/s) forces a capture regardless of the floor, tested
+with a cheap `setFromMatrixPosition` so skipped frames do not pay a decompose. ⚠ Second half, required
+with it: `_swRippleTick` copies `uReflMatrix` before `renderFrame` while `tDiffuse` is the mirror's
+LIVE target, so whenever the Reflector draws first (the two coplanar planes tie in the transparent
+sort) the sheet projects this frame's image through last frame's matrix — invisible at 6 u of drift,
+gross on a cut frame. The sheet now re-takes the pair in its own `onBeforeRender`, matched under
+either draw order. ⚠ Refuted candidates, with the lines: the sim does not jump (`R.acc` is zeroed not
+decremented, so at most one compute step per frame; `R.pending` capped at 8), the compute is inside
+the tick not `renderFrame`, the refraction copy re-blits every armed frame, and `launchCountdown` /
+`hideLoadingOverlay` touch no water state.
+
+**v40.52 the stuck F9 clip prompt.** `#clip-save-btn` carries its visibility in an inline style, and
+only the 250 ms `_clipBtnTick` poll ever hides it — there is no hide on any state transition. The
+post-match `returnToRootMenu` raises `#ship-select` itself (it never calls `enterShipSelect`), and the
+picker is a transparent full-screen panel at z 100 over the button's z 66, so the prompt sat visible
+and unclickable. ⚠ A reviewer refuted the report's second root cause: `returnToRootMenu` DOES stop the
+recorder (a fourth `_clipStop` call site the report missed), so nothing accumulates and F9 there was
+already inert — the proposed extra `_clipStop(true)` and its "confirm with the owner" note were both
+removed. Fix: a `_clipHideSaveBtn()` helper called from `enterShipSelect` and from the post-match
+return, plus a CSS backstop (`body:has(#ship-select.active)`) — the round-end and match-end prompts
+are unaffected because `finishLaunch` removes `.active` before 'playing'.
+
+**v40.53 outline optics surviving an ability change.** The rim is a `_mirrorMeshTree` clone whose
+meshes SHARE the hull's GLB geometry but do NOT carry the `userData._sharedGLBGeo` flag the dispose
+guard looks for. Fixed at the choke point rather than per caller: `_disposeShipGroup` strips the rim
+before its traverse, which covers the bot dispose branch, `NetworkPlayer.destroy` (a peer leaving
+mid-match with the perk on) and the GLB swap-in. Plus `commitLoadout` clears outlines on every commit
+like the cloak fields, and `_setStoredPerkId` clears them when the between-rounds picker changes the
+perk live. Helper defined once, four call sites.
+
+**v40.54 endless critters.** Bats: the swarm mesh was `S 12` and coloured near-black, and the scan
+could place a group outside the carved chamber. Fish: every motion rate was a fixed per-frame number
+rather than derived from a target speed, so they crawled. Both now read `_ECR_TUNE`
+(`fishSpeed 140`, `batSpeed 200`, `batLift 260`, `batDrift 60`, `batRmax 300`, `drawR 6000`,
+`loopMinR 60`, `fishMill 45`); the loop RADII are deliberately untouched (the conservative of the two
+reviewed sets). `window.__ecrDbg()` reports groups by kind, members, built/visible/drawn, nearest
+group distance and the last dt. Pane, 30 s into an endless run: `built {bats:true, fish:true}`,
+`groups {bats:4, members:{bats:144}}`, nearest bat group 8034 u away against `drawR` 6000 — they
+exist and are simply not in range yet at the spawn, which is what the owner should now see change as
+they fly into a chamber.
