@@ -4761,3 +4761,82 @@ the cold load. NOT a gameplay stall — it is behind the cover.
 
 Also: `gt` came back with 0 labelled rows because the run used `?pbhud` alone. The per-pass timing
 needs `?pbhud&pbseg`, and it only fills on frames the loop actually renders (not the covered ones).
+
+### v40.60 field marks n26 / n35–n37 — the per-pass timing paid off, and it names `scene`
+
+**⚠ THE INSTRUMENT WORKED.** n35/n36/n37 (free flight, IN THE CITY, playing, mega, 144 Hz) each carry
+a labelled `gt` row and it is the SAME pass every time:
+`scene 979.9 / 1061.2 / 3689.5 ms` against gaps of 993.8 / 1070.2 / 3682 ms. Everything else is
+noise: `first` empty or trivial, `made` empty, `cold` empty, `slowgl` empty, main thread free,
+`renderFrame` section time 2.2–2.4 ms. So the multi-second in-play class is **the main scene render
+itself**, not compositing, not pipeline creation, not the keep-warm. ⚠ The `scene` bracket wraps
+`renderer.setRenderTarget(rtScene); renderer.render(scene, camera)` — which contains the SHADOW MAP
+pass, the world, the water and (sub-bracketed) the mirror. The next split needed is shadow vs world;
+three.js runs the shadow pass inside `render()`, so it cannot be bracketed from outside without
+driving `shadowMap` manually. Note `ss` moves across these marks (0 → -0.6 → 0.05, i.e. 1920x1080 →
+1344x756 → 2054x1155): the dynamic-resolution controller is reacting to the stalls, not causing them.
+
+**n26 — the cyberpunk cinematic, 10762 ms in ONE frame.** `big` attributes it to `cine:render`
+(10750 ms), and `slowgl` for that run lists **twelve** blocking `getProgramParameter` calls:
+474.8, 2152.8, **6545.5**, 1081.2, 677.9, 665.6, 642.0, 242.0, 617.3, 252.3, 888.5, 233.5 ms — on
+p278–p299, i.e. city materials (`p285:Puncture_CP_Graphi`, `p287:hull`, `p298:material`), spread from
+27.4 s to 53.3 s. That is ~14.5 s of main-thread link joins during the city load, and the `first`
+list confirms the shadow variants (`MeshDepthMaterial@p295-p297 >t1009`) are among them.
+⚠ ROOT: `_hubCityBuild` and the streaming path have **no drain at all** — every `_drainProgramLinks`
+call site in the file belongs to the launch prebake or the FX/cloak warms. The city streams in during
+the cinematic, and the cinematic branch calls `renderFrame()` directly, so each newly built material
+joins its own link on its first draw. Same class as the launch joins fixed in v40.60, different call
+site; the fix is to prime the city's programs (the v40.60 ACTIVE_UNIFORMS priming) as they are built,
+before the cinematic draws them. Prebake for cyberpunk reads 18377 ms total.
+
+**"All the horde ship tags pop up for a second" near the city.** Not a bug in the hysteresis: the
+callout range gate is a hard `dist <= 3500` (30000 for carriers/bosses), so a whole horde crosses it
+within a frame or two as the player approaches and every tag appears at once; moments later the city
+geometry gets between the camera and them (`raycastLevel` includes `_hubCityRayHit`) and the LOS gate
+drops them together. Correct by the rules as written, ugly to look at. A fix is a product decision:
+stagger the range entry, fade tags in, or cap concurrent callouts by distance rank.
+
+### v40.61–40.63 — the callout regression I caused, the city's link joins, and a mobile safety pass
+
+**⚠ v40.61 — THE CALLOUT POP-UP WAS MINE.** Owner: "when i got close to the city, i saw all the
+hoard ship tags pop up for a second", and "the callout tag issue is new... something we introduced
+caused it". Correct: `_lblSoftGate` (v40.55, hardened v40.58) returns TRUE — draw the tag — for
+`LABEL_DROP_HOLD` (0.35 s) after a gate first fails. That is right for a ship that flies out of range
+or behind cover: its tag holds instead of blinking. But it ran for a ship whose tag had **never been
+up**. The first frame a distant horde ship is walked, the range gate (`dist <= 3500`) fails, the hold
+starts, and the tag is DRAWN for 0.35 s before it expires. Approaching the city walks a whole horde
+for the first time within a frame or two, so every one of them flashed a callout it never earned.
+`_lblDown` could not catch it either — it is only latched when a hold EXPIRES, so a first-time entity
+sails past the re-acquire test. Fix is the missing precondition, not a shorter hold: `_lblUpPrev`
+(stamped from the previous frame's actual draw) gates the hold, so with no tag on screen a failing
+gate takes effect at once. This is very likely the same bug as "the tags flash" on mobile.
+
+**v40.62 — the city's link joins.** `_hubCityBuild` and the chunk streamer keep creating materials
+long after the last drain, and the cinematic branch calls `renderFrame()` directly, so each new
+material's first draw paid the v40.60 join alone: mark n26 has TWELVE blocking `getProgramParameter`
+calls between 27.4 s and 53.3 s (474 / 2152 / **6545** / 1081 / 677 / 665 / 642 / 242 / 617 / 252 /
+888 / 233 ms, on p278–p299 = city hulls, `material`, and the MeshDepthMaterial shadow variants) and
+one 10762 ms frame charged to `cine:render`. `_lssPrimeTick(budgetMs)` is the drain's two-step spread
+over frames and never blocking: poll `COMPLETION_STATUS_KHR` (skip anything still linking), then pay
+`getUniforms()`/`getAttributes()` for a program whose link IS done. Called before the cinematic's
+draw and before the normal frame's; self-retiring; reported as `flags.pt`.
+
+**⚠ v40.63 — THE PROBE WAS THE SLOW THING ON MOBILE.** Owner: "the fps has dropped considerably" on a
+phone, with `?pbhud`. `_wrapSlowGl` (v40.34) put two `performance.now()` calls and a closure around
+EVERY listed GL entry point — including `useProgram` and the five `draw*` calls (once per draw call)
+and `bufferSubData` / `texSubImage2D` (once per dynamic update). Affordable on a desktop, not on a
+phone, and it buys nothing: every join this probe has ever caught was a `getProgram*` / `getShader*`
+/ link / compile call, which happen hundreds of times per session, not thousands per frame. The
+default list is now the RARE calls only; `?pbgl` restores the full list; the whole probe stands down
+on a small device (`[f8] slow-GL probe OFF (small device)`). Also hardened v40.62: `_lssPrimeTick`
+now REQUIRES `KHR_parallel_shader_compile` and skips small devices — without the extension it would
+have force-primed, i.e. paid every link on the main thread, which is the exact thing it exists to
+avoid (common on mobile).
+
+⚠ **NOT REPRODUCED, and reported as such**: the mobile "touch controls disappeared" and "orange
+countdown doesn't appear". The Browser pane only emulates a phone (mobile UA + touch points) below
+768 px wide, which forces PORTRAIT; the owner plays landscape, and at a landscape-sized viewport the
+pane is a desktop with no touch, so `#touch-controls` legitimately never initialises there. In the
+mobile preset on 40.63 the countdown runs 3 → 2 → 1 → FIGHT, `#touch-controls` is `display: block`
+and `input.touchActive` is true. An earlier "reproduction" of the countdown failure at 844x390 was a
+MEASUREMENT ERROR on my part — I sampled at 28.5 s while that launch's countdown started at 33.4 s.

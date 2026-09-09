@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.60';
+const LSS_BUILD = '40.63';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -39160,6 +39160,42 @@ async function _drainProgramLinks(capMs, rep, key) {
   try { window.__linkDrain = { ms: ms, polls: polls, pending: pending, primed: primed, primeWorst: primeWorst, primeCapped: primeCapped, at: key || 'drain' }; } catch (_) {}
   return pending === 0;
 }
+function _lssPrimeTick(budgetMs) {
+  let n = 0;
+  try {
+    if (typeof renderer === 'undefined' || !renderer) return 0;
+    if (typeof window !== 'undefined' && window.__noUniformPrime) return 0;
+    const list = renderer.info && renderer.info.programs;
+    if (!list || !list.length) return 0;
+    const gl = renderer.getContext();
+    if (_lssPrimeTick._ext === undefined) {
+      try { _lssPrimeTick._ext = gl.getExtension('KHR_parallel_shader_compile'); } catch (_) { _lssPrimeTick._ext = null; }
+    }
+    const ext = _lssPrimeTick._ext;
+    if (!ext) return 0;
+    try { if (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) return 0; } catch (_) {}
+    const t0 = _pbNow(), budget = (budgetMs > 0) ? budgetMs : 2;
+    for (let i = 0; i < list.length; i++) {
+      const pw = list[i];
+      if (!pw || !pw.program || pw._lssPrimed) continue;
+      if (!pw._lssLinked) {
+        if (ext) {
+          let done = true;
+          try { done = !!gl.getProgramParameter(pw.program, ext.COMPLETION_STATUS_KHR); } catch (_) { done = true; }
+          if (!done) continue;   // still linking - do NOT ask for uniforms yet, that is the blocking call
+        }
+        pw._lssLinked = true;
+      }
+      pw._lssPrimed = true;   // set BEFORE the call so a bad program cannot be retried forever
+      try { if (typeof pw.getUniforms === 'function') pw.getUniforms(); } catch (_) {}
+      try { if (typeof pw.getAttributes === 'function') pw.getAttributes(); } catch (_) {}
+      n++;
+      if (_pbNow() - t0 > budget) break;
+    }
+    if (n) { try { window.__primeTick = { n: (window.__primeTick ? window.__primeTick.n : 0) + n, last: Math.round(_pbNow() - t0) }; } catch (_) {} }
+  } catch (_) {}
+  return n;
+}
 async function _prebakeOverlayRehearsal(rep) {
   const _t = _pbNow();
   const out = { ms: 0, n: 0, groups: 0, frames: 0, worst: 0 };
@@ -65818,6 +65854,7 @@ function _lblSoftGate(ent, ok, now) {
   if (ok) return true;
   ent._lblHeld = true;
   ent._lblClearT = null;                                   // (v40.58) a dirty gate restarts the re-acquire clock
+  if (!ent._lblUpPrev) { ent._lblDown = true; if (ent._lblDropT == null) ent._lblDropT = now; return false; }
   if (ent._lblDropT == null) ent._lblDropT = now;
   if ((now - ent._lblDropT) < LABEL_DROP_HOLD) return true;
   ent._lblDown = true;                                     // (v40.58) the tag really is down now
@@ -65874,6 +65911,8 @@ function updateEnemyHealthBars() {
   const _processShipForLabel = (ent) => {
     if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
     ent._lblHeld = false;   // (v40.55) set by _lblSoftGate below; the draw point only clears the hold clock when NO gate held
+    ent._lblUpPrev = !!ent._lblUp;
+    ent._lblUp = false;
     if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
       ent._labelSpotTime = null;
       return;
@@ -65924,6 +65963,7 @@ function updateEnemyHealthBars() {
     if (!ent._lblHeld) ent._lblDropT = null;   // drawn with every gate clean: the hold clock resets
     const div = _labels[_slot];
     _hbarDisplay(div, '');
+    ent._lblUp = true;   // (v40.61) the tag is on screen this frame - the one thing that earns a drop hold next frame
     const flip = ent._labelFlip ? (sx > winW * LABEL_FLIP_OFF) : (sx > winW * LABEL_FLIP_ON);
     ent._labelFlip = flip;
     let cls = 'ship-name-label ' + (isEnemy ? 'ship-name-label--enemy' : 'ship-name-label--friendly');
@@ -66101,12 +66141,16 @@ function __pmark(name) {
       } catch (_) {}
       return '';
     };
+    let _hot = false;
+    try { _hot = /[?&]pbgl\b/i.test(location.search || ''); } catch (_) {}
+    try { if (typeof _fxSmallDevice === 'function' && _fxSmallDevice() && !_hot) { console.log('[f8] slow-GL probe OFF (small device)'); return; } } catch (_) {}
     const names = ['getProgramParameter', 'getShaderParameter', 'getProgramInfoLog', 'getShaderInfoLog', 'getUniformLocation', 'getActiveUniform',
-      'getActiveAttrib', 'getAttribLocation', 'getUniformBlockIndex', 'getError', 'getParameter', 'getSyncParameter', 'clientWaitSync', 'readPixels',
-      'finish', 'flush', 'texImage2D', 'texSubImage2D', 'texImage3D', 'compressedTexImage2D', 'texStorage2D', 'generateMipmap', 'bufferData',
-      'bufferSubData', 'linkProgram', 'compileShader', 'shaderSource', 'useProgram', 'drawElements', 'drawArrays', 'drawElementsInstanced',
-      'drawArraysInstanced', 'drawRangeElements', 'bindFramebuffer', 'blitFramebuffer', 'fenceSync', 'deleteProgram', 'deleteShader',
-      'framebufferTexture2D', 'framebufferRenderbuffer', 'renderbufferStorageMultisample', 'copyTexImage2D', 'copyTexSubImage2D'];
+      'getActiveAttrib', 'getAttribLocation', 'getUniformBlockIndex', 'getParameter', 'getSyncParameter', 'clientWaitSync', 'readPixels',
+      'finish', 'texImage2D', 'texImage3D', 'compressedTexImage2D', 'texStorage2D', 'generateMipmap', 'bufferData',
+      'linkProgram', 'compileShader', 'shaderSource', 'blitFramebuffer', 'fenceSync', 'deleteProgram', 'deleteShader',
+      'renderbufferStorageMultisample', 'copyTexImage2D', 'copyTexSubImage2D']
+      .concat(_hot ? ['getError', 'flush', 'texSubImage2D', 'bufferSubData', 'useProgram', 'drawElements', 'drawArrays',
+        'drawElementsInstanced', 'drawArraysInstanced', 'drawRangeElements', 'bindFramebuffer', 'framebufferTexture2D', 'framebufferRenderbuffer'] : []);
     let wrapped = 0;
     for (const name of names) {
       const orig = gl[name];
@@ -66115,7 +66159,7 @@ function __pmark(name) {
         const t0 = performance.now();
         const r = orig.apply(this, arguments);
         const d = performance.now() - t0;
-        if (name === 'useProgram') R.curProg = arguments[0];
+        if (name === 'useProgram') R.curProg = arguments[0];   // (v40.63) only wrapped under ?pbgl now; the draw hint degrades to '?' without it
         if (d >= 20) { try { R.slowgl.push([+(t0 / 1000).toFixed(2), name, +d.toFixed(1), hint(name, arguments)]); if (R.slowgl.length > 60) R.slowgl.shift(); } catch (_) {} }
         return r;
       };
@@ -66475,6 +66519,7 @@ function __pmark(name) {
           cs: window.__compileSliced || null,                      // (v40.34) {ms, slices, children} of the last sliced compile
           ld: window.__linkDrain || null,                          // (v40.34) {at, ms, polls, pending} of the last link drain
           uiw: window.__uiRehearsal || null,                       // (v40.34) the overlay rehearsal: {ms, n, groups, frames, worst}
+          pt: window.__primeTick || null,                           // (v40.62) per-frame first-use priming: {n primed so far, last slice ms}
           fxp: window.__fxWarmProgs || null,                       // (v40.38) the programs the combat-FX warm built this launch, named
         };
       } catch (_) { return null; } })(),
@@ -66649,6 +66694,7 @@ function gameLoop(timestamp) {
         } catch (_) {}
       }
       const _xrActive = !!(renderer && renderer.xr && renderer.xr.isPresenting);
+      try { _lssPrimeTick(3); } catch (_) {}
       if (typeof document === 'undefined' || !document.hidden || _xrActive) renderFrame();
       __pmark('cine:render');
       return;
@@ -67092,6 +67138,7 @@ function gameLoop(timestamp) {
     if (_rfPrebake) _rfCovered = true;
   } catch (_) { _rfCovered = false; }
   if (!_rfCovered) {
+    try { _lssPrimeTick(2); } catch (_) {}
     try { if (window.__f8gt) window.__f8gt.b(); } catch (_) {}
     renderFrame();
     try { if (window.__f8gt) window.__f8gt.e(); } catch (_) {}
