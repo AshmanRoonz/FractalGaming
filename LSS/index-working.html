@@ -378,8 +378,14 @@ body.vr-active #fps-counter { display: none !important; }
   font-family: 'Rajdhani', sans-serif; font-size: 12px; letter-spacing: 1px;
 }
 
-body.lss-freeflight #round-info,
-body.lss-freeflight #ov-countdown { display: none !important; }
+/* (v40.57) #ov-countdown is retired - the ROUND countdown paints into #ship-select-countdown now.
+   Its freeflight hide deliberately does NOT move across. That rule was only ever about the ROUND
+   countdown (the hub has no rounds); the LAUNCH ticker is supposed to run in freeflight and always
+   has - the campaign journey and exhibition both reach launchCountdown as MODE 'freeflight'. A
+   `body.lss-freeflight #ship-select-countdown` rule would blank it. Freeflight suppression for the
+   round beats lives in JS instead: updateRoundSystem's `_ffHubCD` / `_ffHub` gates, plus a belt
+   inside _cdRound so it holds even for a future caller of Overlays.countdown. */
+body.lss-freeflight #round-info { display: none !important; }
 
 body.lss-thirdperson #cockpit-frame,
 body.lss-thirdperson #gun-layer,
@@ -416,8 +422,11 @@ body.lss-cockpit3d #ability-overlay-frame { display: none !important; }
    two lines on narrow viewports and the block grows ~19px taller (measured
    92px at 964 wide, 111px at 902) — a fixed top lands on top of the scores
    there. The value below is only the pre-measure default.
-   Z-INDEX 66: above #ov-banner / #ov-countdown (65), which is the whole reason
+   Z-INDEX 66: above #ov-banner (65), which is the whole reason
    this is not nested inside #round-info (z 10 = its own stacking context).
+   (v40.57) #ov-countdown was the other z-65 tenant named here and is retired. The countdown
+   that replaced it is #ship-select-countdown at z 110 - deliberately ABOVE this bar, because
+   a 3-2-1 a capture bar can cut into is not a countdown.
    The banner fires on CLAIMING / FIELD BREACH / CLAIM BROKEN — i.e. exactly
    when the bar matters — and is centred at top:18%, right over it.
    Vertical clearance: the kill feed is right-anchored at 4vmin while this is a
@@ -1282,15 +1291,29 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   display: none;
 }
 #ship-select-countdown.active { display: block; }
-/* (v40.00) NEVER TWO COUNTDOWNS. #ov-countdown is the ROUND countdown (white, 96px, top 40%) and
-   #ship-select-countdown is the LAUNCH countdown (yellow, 180px, top 50%). They belong to different
-   moments and never used to coincide - not by design, but because the launch one lived inside
-   #ship-select and was invisible whenever the picker was hidden, which is exactly when the round one
-   runs. v39.98 moved it to the body to fix "sound but no text", and that accident of parentage went
-   with it: the owner saw "two countdowns one white one yellow, at the same time in the same spot".
-   Both are body children, so a sibling rule restores the rule the DOM used to enforce. The JS tick
-   carries the same guard, so it holds even if the markup moves again. */
-#ov-countdown.show ~ #ship-select-countdown { display: none !important; }
+/* (v40.57) ONE COUNTDOWN, AND THIS IS IT. Owner: "why not just stay as the orange countdown and
+   get rid of the white? we don't need two". #ov-countdown (white, 96px, top 40%, z 65) is GONE,
+   and with it every part of the v40.00 / v40.55 machinery that existed only to keep TWO elements
+   off each other's toes: the sibling rule, `body.lss-round-cd` and its hold timers, and
+   Overlays.endCountdown(). There is nothing left to stand down FROM - the LAUNCH ticker and the
+   ROUND clock now paint THIS element through one renderer (_cdPaint, beside launchCountdown), so
+   "two countdowns one white one yellow, at the same time in the same spot" and the flicker it
+   caused ("on 2 it changes to white 2 from orange 3") are not bugs that were fixed - they are
+   states the DOM can no longer express.
+   ⚠ WHAT DID NOT CHANGE: the round digits and FIGHT are still driven by game.warmupTimer, the
+   wall-clock-anchored clock every peer ticks itself. Only the paint target moved.
+   ⚠ Do NOT re-add a `body.lss-freeflight #ship-select-countdown` rule in place of the one that
+   hid #ov-countdown there - see the note beside #round-info.
+   ⚠ THE ROUND COUNTDOWN NOW INHERITS THIS ELEMENT'S HIDES. Two are neutral: `?nodom` and
+   `?litehud` list `[id^="ov-"]` AND this id side by side, so both looks were equally suppressed
+   there before and after. ONE IS NEW - `body.lss-cinematic-active #ship-select-countdown`, in
+   _lssEnsureCinematicStyles. #ov-countdown was never in that list, so the round 3-2-1 and FIGHT
+   used to be immune to it and are not any more. No path collides TODAY, and the reason is worth
+   writing down because it is not obvious: _lssCompleteSpectatorCinematic removes the class BEFORE
+   it runs its `after`, and all four `_lssRunCinematicThen` call sites anchor warmupTimer INSIDE
+   that `after`, so the first round crossing is always after the class is off. If anything ever
+   anchors warmupTimer before or during a cinematic, the digits will silently vanish rather than
+   misbehave - check this rule first. */
 #ship-select-countdown .cd-num {
   font-family: 'Orbitron', sans-serif; font-weight: 900;
   font-size: 180px; color: #ffaa00;
@@ -1307,6 +1330,30 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   0% { transform: scale(0.6); opacity: 0; }
   15% { transform: scale(1.1); opacity: 1; }
   100% { transform: scale(1.4); opacity: 0; }
+}
+/* (v40.57) FIGHT - the one beat that must never read as another digit. Same element and the same
+   Orbitron face as the 3-2-1, but red, about half the size and tracked out: the colour, the two
+   shadow layers and the 8px letter-spacing are carried over VERBATIM from the retired
+   `#ov-countdown.fight .cd-number`, so the beat still looks like itself. It gets its own keyframe
+   rather than cdPulse because cdPulse starts fading at 15% - fine for a digit you glance at, wrong
+   for a word you read - so this one holds fully opaque to 70% and runs 1.2s, the same duration the
+   white .fight variant used. Specificity (id + class + class) beats `#ship-select-countdown .cd-num`
+   above, so the `animation` shorthand here wins; _cdPaint's animation restart writes an INLINE
+   'none' then '' , which falls back to whichever of the two rules is in force.
+   No sub-line under FIGHT: _cdPaint is called with sub === '' and hides .cd-sub, matching the white
+   one's `.cd-label { display: none }` on its fight beat. The expanding .cd-ring is deliberately not
+   carried over - it belonged to the white look being retired. */
+#ship-select-countdown.fight .cd-num {
+  font-size: 96px; color: #ff4400;
+  text-shadow: 0 0 30px #ff4400, 0 0 60px #ff220088;
+  letter-spacing: 8px;
+  animation: cdFightPulse 1.2s ease-out forwards;
+}
+@keyframes cdFightPulse {
+  0% { transform: scale(0.6); opacity: 0; }
+  12% { transform: scale(1.12); opacity: 1; }
+  70% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(1.25); opacity: 0; }
 }
 
 
@@ -1616,7 +1663,15 @@ body.lss-litehud #lobby *, body.lss-litehud #lobby-room-hud * {
     shipLabelJitter 0.18s steps(2) infinite,
     shipLabelGlitch 4.7s steps(1) infinite;
 }
-.ship-name-label.flip-left .cl-wrap {
+/* (v40.55) THE MIRROR MOVED OFF .cl-wrap. .cl-wrap's `transform` is owned by the two animations
+   declared just above it, and an ANIMATED property beats a plain declaration in the cascade at
+   every point of the timeline — so this scaleX(-1) has never once applied. The counter-flip on
+   .cl-text below is NOT animated and does apply, which is why a right-edge callout drew its NAME
+   backwards, and why toggling the flip class strobed the name back and forth.
+   .ship-name-label is a 0x0 anchor box that nothing animates, so mirroring it is the same mirror
+   about the anchor point with none of the cascade fight — and it finally does what both code
+   comments already promise: the callout peels to the upper-LEFT for a right-edge ship. */
+.ship-name-label.flip-left {
   transform: scaleX(-1);
 }
 
@@ -1862,6 +1917,29 @@ body.lss-litehud #lobby *, body.lss-litehud #lobby-room-hud * {
 }
 .map-arrow:hover { border-color: #ffaa00; background: rgba(40,40,60,0.9); }
 .map-arrow:active { background: rgba(60,50,15,0.9); }
+/* (v40.58) A DISABLED ARROW HAS TO LOOK DISABLED. `.map-arrow` sets its own `color` and
+   `background`, which beat the UA's disabled painting, so the multiplayer commit lock (and, since
+   this build, the mid-match lock in _syncMapButtonsDisabled) drew a fully live-looking arrow that
+   did nothing when clicked. :hover / :active are neutralised too, or it still lights up under the
+   cursor and reads as clickable. The THEME arrows (.sky-arrow) are deliberately NOT covered —
+   cyclePreset has no state guard and they keep working mid-match. */
+.map-arrow:disabled,
+.map-arrow[disabled] {
+  opacity: 0.32; cursor: not-allowed;
+  color: #8a8aa0; border-color: rgba(80,80,120,0.28);
+  background: rgba(20,20,40,0.35);
+}
+.map-arrow:disabled:hover, .map-arrow[disabled]:hover,
+.map-arrow:disabled:active, .map-arrow[disabled]:active {
+  border-color: rgba(80,80,120,0.28); background: rgba(20,20,40,0.35);
+}
+/* The dots and the MAP label follow the arrows (`.ss-map-locked` is written onto #map-select by
+   _syncMapButtonsDisabled) so the whole box reads as one locked control. `.map-dot.active` keeps
+   full strength on purpose: WHICH ARENA IS NEXT is the one thing this box still has to tell you
+   while the selection itself is frozen. */
+#map-select.ss-map-locked #map-select-label { opacity: 0.55; }
+#map-select.ss-map-locked .map-dot { opacity: 0.45; }
+#map-select.ss-map-locked .map-dot.active { opacity: 1; }
 #map-indicator {
   display: flex; flex-direction: row; gap: 6px;
   flex: 1; justify-content: center;
@@ -2078,36 +2156,11 @@ body.lss-litehud #lobby *, body.lss-litehud #lobby-room-hud * {
 }
 
 
-#ov-countdown {
-  position: fixed; top: 40%; left: 50%;
-  transform: translate(-50%, -50%);
-  opacity: 0; z-index: 65; pointer-events: none; text-align: center;
-  font-family: 'Courier New', monospace;
-}
-#ov-countdown.show { animation: ovCountdown 0.9s ease-out forwards; }
-#ov-countdown.fight.show { animation-duration: 1.2s; }
-@keyframes ovCountdown {
-  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.4); }
-  10%  { opacity: 1; transform: translate(-50%, -50%) scale(1.15); }
-  20%  { transform: translate(-50%, -50%) scale(0.95); }
-  30%  { transform: translate(-50%, -50%) scale(1.02); }
-  70%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.3); }
-}
-#ov-countdown .cd-label { font-size: 12px; color: #ffaa00aa; letter-spacing: 4px; margin-bottom: 8px; }
-#ov-countdown .cd-number { font-weight: bold; font-size: 96px; color: #ffffff; text-shadow: 0 0 20px rgba(255,255,255,0.3); letter-spacing: 0; }
-#ov-countdown.fight .cd-number { font-size: 64px; color: #ff4400; text-shadow: 0 0 30px #ff4400, 0 0 60px #ff220088; letter-spacing: 8px; }
-#ov-countdown .cd-ring {
-  position: absolute; top: 50%; left: 50%;
-  width: 80px; height: 80px; border: 2px solid rgba(255,170,0,0.4);
-  border-radius: 50%;
-  transform: translate(-50%, -50%);
-  animation: ovCountdownRing 0.9s ease-out forwards;
-}
-@keyframes ovCountdownRing {
-  0%   { width: 80px; height: 80px; opacity: 0.4; }
-  100% { width: 280px; height: 280px; opacity: 0; }
-}
+/* (v40.57) #ov-countdown lived here and is RETIRED - the element, its .cd-label / .cd-number /
+   .cd-ring children, the ovCountdown + ovCountdownRing keyframes and the red .fight variant.
+   There is ONE countdown now: #ship-select-countdown, up in the ship-select block, painted by
+   both the launch ticker and the round clock through _cdPaint. The .fight colour, shadow and
+   tracking that used to live here moved there verbatim; nothing else survived. */
 
 
 #camp-video {
@@ -2484,11 +2537,8 @@ body.vr-active #camp-video { display: none !important; }
   <div class="ks-bar"></div>
 </div>
 
-<div id="ov-countdown">
-  <div class="cd-label">ROUND 1</div>
-  <div class="cd-number">3</div>
-  <div class="cd-ring"></div>
-</div>
+<!-- (v40.57) #ov-countdown was here (white ROUND countdown). Retired: there is one countdown now,
+     #ship-select-countdown, and both the launch ticker and the round clock paint it. -->
 
 <div id="ov-medals"></div>
 
@@ -4530,7 +4580,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.54';
+const LSS_BUILD = '40.60';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -11363,8 +11413,11 @@ function enterShipSelect() {
   try { _ssModeLabel(); } catch (_) {}
   
   
-  const cd = document.getElementById('ship-select-countdown');
-  if (cd) cd.classList.remove('active');
+  // (v40.57) one countdown, one renderer: drops .active, .fight AND any pending hold. A raw class
+  // strip would leave _cdOwner/_cdHoldUntil set, so a FIGHT hold could refuse the next launch
+  // ticker's first digits. try/catch to match every other _cdClear site — this function is on the
+  // boot path and nothing below it may be skipped by a surprise throw.
+  try { _cdClear(); } catch (_) {}
   // Re-show the bespoke VR overlay when we land back on
   // the ship-select panel (cold start, between rounds, post-match return).
   // commitLoadout set _xrMenuForceHidden=true earlier ; clearing it here
@@ -11456,6 +11509,13 @@ function buildMapSelector() {
       dot.addEventListener('click', () => selectMap(k));
       dot.style.cursor = 'pointer';
       dot.style.pointerEvents = 'all';
+      // (v40.58) MARK THE POSITION DOT HERE, not via the selectMap() call at the foot of this
+      // function. That call was the ONLY thing that ever set `.active`, and its echo guard
+      // (`game.selectedMap === mapKey && _mapSelectorRendered`) returns early on every rebuild
+      // after the first — so any later buildMapSelector left the freshly-created dots with no
+      // active one at all, i.e. a map carousel whose position marker is missing. One line, and it
+      // is what makes the rebuild safe to call from the between-rounds picker (see _rrCountdown).
+      if (k === game.selectedMap) dot.classList.add('active');
       indicator.appendChild(dot);
     }
     // (v32.54) Campaign : append greyed, non-selectable LOCKED dots for legs
@@ -12109,10 +12169,33 @@ function _syncMapButtonsDisabled() {
   // rather than waiting for the full all-loadouts launchAt proposal.
   const locked = !!(typeof net !== 'undefined' && net.active &&
                     (net.launchScheduledAt || net.mapCommitLocked));
+  // (v40.58) ...AND ON "the match is underway", which is the OTHER half of the lock and never
+  // reached the UI. selectMap() and cycleMap() BOTH refuse a different key once game.state has
+  // left 'select' — in solo as well as multiplayer, the map is locked for the whole match — so
+  // between rounds the arrows and the dots were live-looking controls that did nothing at all
+  // when clicked. The map cannot legally change mid-match, so show it DISABLED: same items, in
+  // the same place, honestly greyed. Nothing becomes unreachable that was reachable before —
+  // every input path (arrow click, dot click, D-pad cycle) already hit those two guards.
+  // ⚠ THIS IS A SEPARATE FLAG AND IT MUST NOT BE FOLDED INTO `locked`. `locked` also drives the
+  // preset-prev / preset-next THEME arrows a dozen lines below, and cyclePreset() has NO
+  // game.state guard — the 'B' key still cycles themes mid-match — so widening `locked` would
+  // switch off a control that WORKS, here and on the campaign death re-entry picker (which
+  // enters ship-select at game.state 'playing'). Only the MAP arrows take the wider lock.
+  // ⚠ `typeof game` inside a try: `game` is a top-level const, and typeof does NOT shield a read
+  // before its line has run — this function is reachable from lobby paths on the boot road.
+  let _mapFrozen = false;
+  try { _mapFrozen = !!(typeof game !== 'undefined' && game && game.state && game.state !== 'select'); } catch (_) {}
+  const mapLocked = locked || _mapFrozen;
   const prev = document.getElementById('map-prev');
   const next = document.getElementById('map-next');
-  if (prev) prev.disabled = locked;
-  if (next) next.disabled = locked;
+  if (prev) prev.disabled = mapLocked;
+  if (next) next.disabled = mapLocked;
+  // The dots and the MAP label dim with the arrows so the box reads as ONE locked control rather
+  // than a live carousel whose two buttons happen to be greyed.
+  try {
+    const box = document.getElementById('map-select');
+    if (box) box.classList.toggle('ss-map-locked', mapLocked);
+  } catch (_) {}
   // Also lock the preset-prev / preset-next arrows once
   // the launch handshake is in flight. Changing the skybox preset triggers
   // a multi-MB texture swap that can stall the main thread long enough to
@@ -12406,8 +12489,10 @@ function getRoundSeed(roundNum) {
 
 function showShipSelectWaiting() {
   // Make sure no stale overlay from a previous call is still showing.
-  const overlay = document.getElementById('ship-select-countdown');
-  if (overlay) overlay.classList.remove('active');
+  // (v40.57) one countdown, one renderer: class, .fight and hold timer all released. Wrapped so a
+  // throw here can never skip the updateTeammatesStrip() below, which is what actually carries the
+  // ready-state info this function exists to refresh.
+  try { _cdClear(); } catch (_) {}
   // The teammates strip carries the ready-state info now.
   if (typeof updateTeammatesStrip === 'function') {
     try { updateTeammatesStrip(); } catch (_) {}
@@ -22063,7 +22148,12 @@ function _lssSupersampleActive() {
 // headroom: it reacts on 28 s holds, the burner yields within 20 frames, so real pixels win over
 // idle work. Settings: "GPU keep-warm (anti-stutter)", input.keepWarm (default on); live knobs
 // window.__keepWarm = { on, K, ms, cap, hist }; the ?pbhud box shows "warm K it, ms of cap".
-const _kw = { on: true, ok: null, disabled: false, K: 300, ms: 0, cap: 0, pend: [], sum: 0, n: 0, frames: 0, lastAdj: 0, gapSum: 0, gapN: 0, last: 0, rt: null, sc: null, cam: null, mat: null, gl: null, ext: null, hist: [] };
+// (v40.59) `gap` = the last interval this tick saw (diagnostic only - see the warning at its
+// assignment); `samp` = every burn reading kept with its own submit time, disjoint ones INCLUDED,
+// because this quad is CONSTANT-cost and is therefore the only reference in the frame that can tell
+// a slow pass from a stretched GPU timeline; `capMs` = a LIVE absolute ceiling for the burn, null =
+// the shipped refresh-only cap, 1.75 = the budget 144 Hz always authorised (the A/B arm).
+const _kw = { on: true, ok: null, disabled: false, K: 300, ms: 0, cap: 0, pend: [], sum: 0, n: 0, frames: 0, lastAdj: 0, gapSum: 0, gapN: 0, last: 0, gap: 0, samp: [], capMs: null, rt: null, sc: null, cam: null, mat: null, gl: null, ext: null, hist: [] };
 if (typeof window !== 'undefined') window.__keepWarm = _kw;
 function _gpuKeepWarmTick(ts) {
   const W = _kw;
@@ -22102,7 +22192,17 @@ function _gpuKeepWarmTick(ts) {
       return;
     }
     W.frames++;
-    if (W.last) { W.gapSum += ts - W.last; W.gapN++; }
+    // (v40.59) THE LAST GAP, KEPT - as EVIDENCE, not as a trigger. The controller below only ever
+    // saw a twenty-frame MEAN, so one 4169 ms frame (40.57 mark n8) reached it as a 224 ms average
+    // and bought a single 30% trim. Recorded here so a mark can show the trajectory.
+    // ⚠ IT IS NOT A FRAME GAP IN GENERAL, and nothing may act on it as if it were: this tick is only
+    // called from the `!_rfCovered` branch of gameLoop (and twice from the prebake), so across the
+    // ship picker and the whole covered launch window `W.last` goes stale and the first tick after
+    // the cover lifts reports the ENTIRE cover as one "gap". Any rule keyed on a single large value
+    // here would fire at every launch and every round transition and pin K at its floor - which is
+    // the v39.63 pass switched off in all but name. Read it; do not steer on it.
+    W.gap = W.last ? (ts - W.last) : 0;
+    if (W.last) { W.gapSum += W.gap; W.gapN++; }
     W.last = ts;
     const st = game.state;
     if ((st !== 'playing' && st !== 'warmup') || document.hidden) return;
@@ -22112,6 +22212,7 @@ function _gpuKeepWarmTick(ts) {
     const prev = renderer.getRenderTarget();
     W.mat.uniforms.uK.value = W.K; W.mat.uniforms.uT.value = (ts % 1000) * 0.001;
     const q = gl.createQuery();
+    try { q.__kwT = ts; } catch (_) {}   // (v40.59) when this burn was SUBMITTED, so its reading lines up with a mark
     gl.beginQuery(ext.TIME_ELAPSED_EXT, q);
     renderer.setRenderTarget(W.rt);
     renderer.render(W.sc, W.cam);
@@ -22123,20 +22224,63 @@ function _gpuKeepWarmTick(ts) {
     for (const pq of W.pend) {
       if (!gl.getQueryParameter(pq, gl.QUERY_RESULT_AVAILABLE)) { keep.push(pq); continue; }
       const ms = gl.getQueryParameter(pq, gl.QUERY_RESULT) / 1e6;
+      const _qt = (pq && pq.__kwT != null) ? pq.__kwT : ts;
       gl.deleteQuery(pq);
       if (!disj) { W.sum += ms; W.n++; }
+      // (v40.59) INSTRUMENTATION. This quad is a FIXED-K workload measured by its own TIME_ELAPSED
+      // query, which makes it the discriminator `gt` has never had: if a scene segment reads 4139 ms
+      // (mark n8) while this quad, drawn milliseconds later, still reads 4 ms, the card was not slow
+      // and our shading did not cost that - the GPU timeline under our bracket was stretched by
+      // something we did not issue. If the quad blows up too, the whole timeline stretched and
+      // shedding our own pixels cannot touch it. Until now only a >= 8-sample MEAN survived (W.ms),
+      // and the disjoint samples - the stall frames, every one of them - were dropped without a
+      // trace, so the reference was never available on the frames it was needed for. Keep them all,
+      // flagged, with the time they were submitted. Read as `kwp` in an F8 mark.
+      if (W.samp) { W.samp.push([+(_qt / 1000).toFixed(2), +ms.toFixed(1), W.K, disj ? 1 : 0]); if (W.samp.length > 300) W.samp.shift(); }
     }
     W.pend = keep;
     if (W.pend.length > 64) { for (const pq of W.pend) gl.deleteQuery(pq); W.pend = []; }
+    // (v40.59) THE BUDGET IS BIGGER AT 60 Hz THAN AT THE REFRESH THIS PASS WAS VALIDATED AT - and
+    // that is recorded here as a KNOB, not shipped as a change. `cap` is a fraction of the REFRESH
+    // PERIOD alone, and the v39.63 A/B that justified the whole pass ran on the owner's laptop at
+    // 144 Hz: period 6.94 ms, cap 1.74 ms, and the header above still states the result as "typical
+    // cost 0.4-0.7 ms/frame". That laptop now runs 60 Hz, so the same formula authorises 4.17 ms -
+    // and the 40.57 recorder caught the burner at K 2953 / 4.73 ms (n7) and K 2164 / 3.48 ms (n8),
+    // i.e. doing exactly what the formula says, oscillating around its cap (2953 * 0.7 = 2067).
+    // ⚠ NOTHING MEASURED SAYS THAT IS A PROBLEM, so nothing changes by default:
+    //   - the burn is EXCLUDED from `gt` by construction (gameLoop ends the frame query before this
+    //     pass runs), so no value of K moves n7's 2757 ms or n8's 4139 ms;
+    //   - 4.73 ms against n7's 2793 ms and n8's 4169 ms gaps is 0.17%;
+    //   - it is not even CALLED on the covered launch frames where n4-n6's stalls happened (gameLoop
+    //     only ticks it in the `!_rfCovered` branch), and those stalls stopped the 4 ms HEARTBEAT -
+    //     a GPU-side idle burn cannot block the main thread;
+    //   - a countdown digit lives 1000 ms (launchCountdown's setTimeouts -> _cdPaint), so a burn
+    //     that costs at most a dropped vsync cannot be why "the 3 got skipped". That report is the
+    //     compile-burst / link-join lane (see the v40.22/v40.33 notes beside _compileSliced).
+    // Cutting the burn is a bet AGAINST the one intervention that measurably worked on this machine,
+    // and warmup is a LIGHT-LOAD phase - precisely the clock-ramp band the header says this exists
+    // for. So the owner decides it with an A/B, live, no reload:
+    //   window.__keepWarm.capMs = 1.75   the ceiling 144 Hz always authorised (the "too much" arm)
+    //   window.__keepWarm.capMs = null   shipped behaviour, refresh-only cap
+    //   Settings -> "GPU keep-warm (anti-stutter)"   off entirely (the third arm)
+    // If OFF is not the WORST of the three, v39.63 no longer holds here and the cap can be lowered
+    // on evidence. The one unconditional change is the DROP FACTOR, and it is a no-op at the
+    // measured operating point: a flat 0.7 needs four adjustments (80 frames, >= 1.3 s of
+    // over-budget frames) to bring a burn 3x over cap back under it, so the factor goes proportional
+    // once the overshoot exceeds what 0.7 would already fix. At n7's 4.73 vs 4.17 that is
+    // min(0.7, 0.88) = 0.7 - byte-for-byte 40.58 - and it can only ever REDUCE the burn.
     if (W.frames - W.lastAdj >= 20 && W.n >= 8 && W.gapN >= 8) {
       const period = 1000 / Math.max(30, (typeof _ssDyn !== 'undefined' && _ssDyn.hz) || 60);
-      const cap = period * 0.25;
+      const cap = Math.min(period * 0.25, (typeof W.capMs === 'number' && W.capMs > 0) ? W.capMs : Infinity);
       const ms = W.sum / W.n, gap = W.gapSum / W.gapN;
       W.ms = +ms.toFixed(2); W.cap = +cap.toFixed(2);
-      if (gap > period * 1.08 || ms > cap) W.K = Math.max(50, Math.round(W.K * 0.7));
+      if (gap > period * 1.08 || ms > cap) {
+        const _f = (ms > cap) ? Math.max(0.25, Math.min(0.7, cap / ms)) : 0.7;   // (v40.59) proportional, never gentler than 40.58
+        W.K = Math.max(50, Math.round(W.K * _f));
+      }
       else W.K = Math.min(60000, Math.round(W.K * 1.15) + 20);
       if (W.hist.length >= 300) W.hist.shift();
-      W.hist.push([+(ts / 1000).toFixed(1), W.ms, W.K, +(1000 / gap).toFixed(0)]);
+      W.hist.push([+(ts / 1000).toFixed(1), W.ms, W.K, +(1000 / gap).toFixed(0), Math.round(W.gap)]);   // (v40.59) 5th = the LAST interval
       W.sum = 0; W.n = 0; W.gapSum = 0; W.gapN = 0; W.lastAdj = W.frames;
     }
   } catch (e) {
@@ -22953,7 +23097,9 @@ function _waterRefractBind(rnd, scn, cam) {
       postFX.rtRefractCopy.magFilter = THREE.LinearFilter;
       try { window.__waterCopyAllocs = (window.__waterCopyAllocs || 0) + 1; } catch (_) {}
     }
+    if (window.__f8seg) window.__f8seg('refcopy');   // (v40.59) the blit on its own - see the v40.16 note above
     rnd.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
+    if (window.__f8seg) window.__f8seg('scene');   // (v40.59)
     u.uSceneTex.value = postFX.rtRefractCopy;
     // gl_FragCoord is in the live viewport's own pixels, and the copy starts at its origin, so the
     // shader divides by the COPY's ACTUAL size (which grow-only may have made larger than this
@@ -23060,12 +23206,16 @@ function renderPostFX() {
       postFX.compositeMat.uniforms.uSceneMax.value.set(_mx, _my);
     }
   }
+  if (window.__f8seg) window.__f8seg('scene');   // (v40.59) shadow map + world + mirror + water live in here
   renderer.setRenderTarget(postFX.rtScene);
   renderer.render(scene, camera);   // (v39.79) the water is back inside this pass; it binds its own refraction source
   // (v36.74) ADS ship overlay: while third-person zoom is engaged the ship
   // lives on layer 5 (skipped by the pass above) and is drawn here from the
   // un-zoomed camera into the SAME target — before post, so bloom/grade/fog
   // feedback treat the hull exactly like everything else.
+  // (v40.59) `ads` opens unconditionally, so with the overlay off it reads ~0 - and it also covers
+  // the lowQuality early return below, whose own composite is therefore billed to this label.
+  if (window.__f8seg) window.__f8seg('ads');
   if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
 
   if (lowQuality) {
@@ -23082,6 +23232,7 @@ function renderPostFX() {
   }
 
   // 2. Extract bright pixels
+  if (window.__f8seg) window.__f8seg('bloom');   // (v40.59) bright extract + both blur passes
   postFX.brightMat.uniforms.tDiffuse.value = postFX.rtScene.texture;
   postFX.brightQuad.visible = true;
   postFX.blurQuad.visible = false;
@@ -23104,6 +23255,11 @@ function renderPostFX() {
   renderer.render(postFX.passScene, postFX.quadCamera);
 
   // 5. Composite to screen
+  // (v40.59) ⚠ THE ONE PASS THAT TOUCHES THE DEFAULT FRAMEBUFFER. If the GPU is blocking on a back
+  // buffer the compositor has not released - the queue is 2-6 frames deep on this machine even
+  // between stalls (v40.07) - it blocks HERE, inside our bracket, and an elapsed-time query bills
+  // it to us. A stall that lands in `comp` and nowhere else is a present-queue wait, not shading.
+  if (window.__f8seg) window.__f8seg('comp');
   postFX.compositeMat.uniforms.tScene.value = postFX.rtScene.texture;
   postFX.compositeMat.uniforms.tBloom.value = postFX.rtBlurV.texture;
   postFX.blurQuad.visible = false;
@@ -29357,8 +29513,13 @@ function _swBuildHubWater(T) {
       if (_wDv) _wD.visible = false;
       if (_wOv) _wO.visible = false;
       if (_wUv) _wU.visible = false;
+      // (v40.59) a whole second scene render - name it. The restore in the finally is 'scene'
+      // because that is the only pass this mesh is ever drawn in (the water disp mesh is hidden for
+      // the mirror pass itself, three lines above, so refcopy can never nest inside this bracket).
+      if (window.__f8seg) window.__f8seg('mirror');
       try { _reflOBR.call(this, rnd, scn, cam, geo2, mat2, grp); }
       finally {
+        if (window.__f8seg) window.__f8seg('scene');   // (v40.59) back to the pass that contains us
         if (_wDv) _wD.visible = true;
         if (_wOv) _wO.visible = true;
         if (_wUv) _wU.visible = true;
@@ -40214,22 +40375,65 @@ function resolveShipShipCollisions(dt) {
 // Helper: is a point inside any cylinder (tunnel)?
 // Helper: is a point inside any sphere (room)?
 
-// Line-of-sight occlusion by the floating rock+cloud clusters, for the enemy
-// callout tags : a tag winks out when a cluster's rock OR its gas envelope sits
-// between you and the target. NOT used for shots (you can still fire through
-// gas). from = origin, dir = UNIT direction, dist = range to the target.
+// Line-of-sight occlusion by the floating rock clusters, for the enemy callout
+// tags : a tag winks out when a cluster's ROCK sits between you and the target.
+// NOT used for shots (you can still fire through gas). from = origin,
+// dir = UNIT direction, dist = range to the target.
+// (v40.58) THE GAS IS NOT AN OCCLUDER ANY MORE. Owner: the tags flicker when a ship is looked at
+// through effects/fire. There is no scene walk and no candidate list anywhere in the callout's
+// sight line to filter by layer or material: the other half of the test, raycastLevel, is the
+// level SDF, game.levelBoxes (declared and cleared, never pushed to), the carrier / hub-city /
+// overworld hulls, and in Google-tiles mode a raycast against the photoreal tile leaves - all
+// static solids, so no particle, sprite, beam, tracer or explosion mesh was ever a candidate for
+// it. The FX was baked into THIS function's RADIUS instead. clusterScale * 1.5 stood for "the rock
+// OR its gas envelope" (the sentence this comment replaced), and that gas is exactly what the
+// owner is looking THROUGH: a GasCloud billboard swarm per rock (_buildChildSmokeSphere, ~4.4x
+// the child's scale) plus the plumes ClusterObstacle.update keeps pushing into game.effects.
+// Worse, it was a SOLID ball around 5-11 SEPARATED rocks: children pack inside 0.70 * clusterScale
+// with collision radii up to ~0.44, so the ball blocked the gaps BETWEEN the rocks as well as the
+// whole see-through shell out to 1.5. A sight line easing through that halo read as occluded,
+// cleared, and read occluded again - and the v40.55 hold could only delay each blink, never stop
+// one. The sphere also kept its full size after the rocks inside it had been shot away (a cluster
+// only goes alive=false when EVERY child dies), so the invisible occluder outlived the thing it
+// stood for: "stopped for a bit and flickering started again".
+// So the fat sphere survives only as a BROAD-PHASE reject - it is a strict superset of every rock
+// (offset <= 0.70 * clusterScale, radius <= 0.44) - and a cluster the ray actually crosses is then
+// tested against its LIVE ROCK CHILDREN at their own collisionRadius, the same silhouette shots
+// already use. Real occlusion is untouched: a ship behind a rock still loses its tag, and terrain,
+// hulls and city never came through here at all - that is raycastLevel's half, unchanged.
 function _losBlockedByClusters(from, dir, dist) {
   const cl = (typeof game !== 'undefined') ? game.clusters : null;
   if (!cl || !cl.length) return false;
   for (let i = 0; i < cl.length; i++) {
     const c = cl[i];
     if (!c || c.alive === false || c.broken || !c.position) continue;
-    const r = (c.clusterScale || 40) * 1.5;            
+    const kids = c.children;
+    if (!kids || !kids.length) continue;
+    // (v40.58) BROAD PHASE - deliberately the same sphere v40.55 answered with, so a ray that
+    // misses a cluster costs exactly what it cost before. Widened by r at both ends so a cluster
+    // straddling either endpoint still reaches the narrow phase, which re-applies the strict
+    // segment guard per rock.
+    const r = (c.clusterScale || 40) * 1.5;
     const vx = c.position.x - from.x, vy = c.position.y - from.y, vz = c.position.z - from.z;
-    const tp = vx * dir.x + vy * dir.y + vz * dir.z;   
-    if (tp <= 0 || tp >= dist - 20) continue;          
+    const tp = vx * dir.x + vy * dir.y + vz * dir.z;
+    if (tp <= -r || tp >= dist + r) continue;
     const ex = vx - dir.x * tp, ey = vy - dir.y * tp, ez = vz - dir.z * tp;
-    if (ex * ex + ey * ey + ez * ez < r * r) return true;   
+    if (ex * ex + ey * ey + ez * ez >= r * r) continue;
+    // (v40.58) NARROW PHASE: the solid rocks, and only them. Child positions are rewritten every
+    // frame by ClusterObstacle.update, and a dead or broken child draws nothing so it now blocks
+    // nothing - which is what finally retires the ghost occluder a half-shot-out cluster used to
+    // leave standing for the rest of the round.
+    for (let k = 0; k < kids.length; k++) {
+      const ch = kids[k];
+      if (!ch || !ch.alive || ch.broken || !ch.position) continue;
+      const cr = ch.collisionRadius || 0;
+      if (cr <= 0) continue;
+      const kx = ch.position.x - from.x, ky = ch.position.y - from.y, kz = ch.position.z - from.z;
+      const ktp = kx * dir.x + ky * dir.y + kz * dir.z;
+      if (ktp <= 0 || ktp >= dist - 20) continue;
+      const px = kx - dir.x * ktp, py = ky - dir.y * ktp, pz = kz - dir.z * ktp;
+      if (px * px + py * py + pz * pz < cr * cr) return true;
+    }
   }
   return false;
 }
@@ -41282,7 +41486,15 @@ function _lssPickerOwnsFrame() {
   if (!s || !s.oneCtx || !s.ready) return false;
   // ⚠ Only claim the frame if the preview's rAF loop is actually running — gameLoop skips its
   // own render on the strength of this, so a stopped loop would leave the canvas unpainted.
-  if (!s.animId) return false;
+  // (v40.55) ...but `animId` is null for one more case than "stopped": the single tick
+  // startShipPreviewLoop runs BY HAND before the loop has scheduled anything (see there). On that
+  // tick this used to read `false`, which stripped the class the raise had just added three lines
+  // earlier and skipped the picker's own draw — so the combat HUD survived one frame INTO the
+  // picker and the picker's first frame was deferred. `_startTick` is true for exactly that call
+  // and for nothing else — set and cleared inside one synchronous block, so no other reader can
+  // ever observe it — which keeps "a stopped loop returns false" intact. Everything below (ready,
+  // #ship-select.active, !lss-launching, !xr.isPresenting) still has to pass.
+  if (!s.animId && !s._startTick) return false;
   try {
     const sel = document.getElementById('ship-select');
     return !!(sel && sel.classList.contains('active') && !sel.classList.contains('lss-launching'))
@@ -41358,7 +41570,17 @@ function startShipPreviewLoop() {
     _shipPreview3D._hudHidden = true;
     try { document.body.classList.add('lss-picker-3d'); } catch (_) {}
   }
-  _animateShipPreview();
+  // (v40.55) ⚠ THIS FIRST TICK IS RUN BY HAND, SO IT HAS NO `animId` YET — and _lssPickerOwnsFrame
+  // gates on `animId`. Without this flag the tick reads "the picker does not own the frame", so it
+  // (a) immediately undoes the class added three lines up (the toggle in _animateShipPreview fires
+  // whenever `_owns !== _hudHidden`) and (b) skips _lssRenderPicker — while gameLoop then skips
+  // renderFrame too, because by the time it reaches its cover branch this tick HAS set animId.
+  // The add and the undo are in ONE synchronous block, so nothing paints between them: what the
+  // frame actually shows is the v39.26 fix defeated ("i saw the timer in the ship selection
+  // screen" survives one frame into the picker) plus the picker's first draw pushed a frame late.
+  // `finally`, not a trailing clear: a throw inside the tick must not leave the flag standing.
+  _shipPreview3D._startTick = true;
+  try { _animateShipPreview(); } finally { _shipPreview3D._startTick = false; }
 }
 
 // (v39.07) Fully release the preview's WebGL context. renderer.dispose() frees this renderer's own
@@ -48006,6 +48228,38 @@ async function _warmupCombatShadersBody() {
     // when dynamicLights activate/deactivate during combat, because .visible
     // never toggles. See the NUM_POINT_LIGHTS PINNING note at initDynamicLights.
 
+    // (v40.59) THE GHOST-FLEET CLOAK WARM MOVED UP HERE, ABOVE `scene.remove(group)`. It used to sit
+    // ~15 lines below, AFTER the group had left the scene - and `_warmDrawRoot` draws by rendering
+    // `scene` from a camera aimed at the root, so every one of those 7-14 warm draws rendered a
+    // scene that no longer contained the hull it existed to rasterise. (The Box3 was fine: with the
+    // group detached, `expandByObject` does not update parents, so the stale `group.matrixWorld`
+    // still put the box at y = -100000. The camera was aimed correctly at NOTHING.) The compile half
+    // worked; the DRAW half - the ANGLE input-layout / executable variants that are the entire point
+    // of _warmDrawRoot (v39.52) - warmed nothing, while each call still forced a full shadow-map
+    // rebuild. The first real cloak in play, and the countdown's own `_warmCloakVariantOnce` pass,
+    // both still paid for it.
+    // ...and it now follows the v40.32 rule that `_prebakeCloakWarmRoots` already follows and this
+    // site never got: compile every hull with `deferDraw` (one per frame), drain ONCE, then run the
+    // finishers - instead of compiling and drawing inside the same synchronous call, per hull.
+    // ⚠ The hulls are parked at y = -100000 and the launch-window render gate (`_rfPrebake`) keeps
+    //   gameLoop out of the canvas here, so leaving them in the scene (transparent) across the
+    //   drain's yields shows nothing. The finishers restore every material before the retain walk.
+    try {
+      let _ckWarm = 0;
+      const _ckFins = [];
+      for (const shipMesh of shipWarmupMeshes) {
+        try {
+          const _f = _warmCloakForRoot(shipMesh, undefined, true);
+          if (typeof _f === 'function') { _ckFins.push(_f); _ckWarm += (_f.mats | 0); }
+        } catch (_) {}
+        await _warmupYield();   // (v40.59) one hull's compile per frame, as _prebakeCloakWarmRoots does
+      }
+      await _drainProgramLinks(6000, null, 'drainGhostCloak');
+      for (const _f of _ckFins) { try { _f(); } catch (_) {} await _warmupYield(); }
+      try { window.__ghostWarm = { warm: _ckWarm, hulls: shipWarmupMeshes.length }; } catch (_) {}
+      console.log('[cloak] ghost fleet: pre-warmed ' + _ckWarm + ' transparent hull program(s) across ' + shipWarmupMeshes.length + ' hulls');
+    } catch (e) { console.warn('[cloak] ghost-fleet pre-warm failed:', e); }
+
     scene.remove(group);
     // (v36.17) …and the GLB-material pins. Materials stay alive on
     // window.__lssModelWarmMats so the programs keep a refcount.
@@ -48019,15 +48273,10 @@ async function _warmupCombatShadersBody() {
     // tearing down textures that real bot ships will sample from next frame.
     // The shader programs stay in the Three.js WebGL cache keyed by program
     // signature, which is the whole point of running compile() first.
-    // (v39.46) transparent (CLOAK) twin of every ghost hull, BEFORE the retain/dispose walk
-    // below strips them. Same loading screen, same compile budget, and it is the only place all
-    // seven hulls coexist — see _warmCloakForRoot for the measurement that put it here.
-    try {
-      let _ckWarm = 0;
-      for (const shipMesh of shipWarmupMeshes) _ckWarm += (_warmCloakForRoot(shipMesh) || 0);
-      try { window.__ghostWarm = { warm: _ckWarm, hulls: shipWarmupMeshes.length }; } catch (_) {}
-      console.log('[cloak] ghost fleet: pre-warmed ' + _ckWarm + ' transparent hull program(s) across ' + shipWarmupMeshes.length + ' hulls');
-    } catch (e) { console.warn('[cloak] ghost-fleet pre-warm failed:', e); }
+    // (v39.46) transparent (CLOAK) twin of every ghost hull — it is still "before the retain/dispose
+    // walk below strips them", and it is still the only place all seven hulls coexist, but as of
+    // (v40.59) it runs ABOVE `scene.remove(group)` instead of here: `_warmDrawRoot` renders the SCENE,
+    // so a root that has already left it cannot be warmed. See the block up there for the measurement.
     for (const shipMesh of shipWarmupMeshes) {
       try {
         shipMesh.traverse(child => {
@@ -56761,9 +57010,46 @@ async function _compileSliced(root, cam, scn, budgetMs) {
   try { window.__compileSliced = { ms: Math.round(_pbNow() - _t), slices: slices, children: kids }; } catch (_) {}
   return slices;
 }
+// ═══ (v40.59) THE DRAIN ASKS TOO MANY TIMES, AND IT PROVES ONLY HALF OF WHAT A DRAW NEEDS ════════
+// Both halves come from the owner's 40.57 cold run (marks n4-n8, RTX 5050 laptop, Chromium 152).
+// ⚠ READ THE WINDOW FIRST, or this whole note gets mis-cited: n4 / n5 / n6 are all BEHIND THE
+//   OPAQUE COVER. `pb` is null at n4, `_PREBAKE.last` is written only in _prebakeWorldForLaunch's
+//   `finally`, and hideLoadingOverlay() + the cinematic + launchCountdown() all hang off the SAME
+//   promise, after the prebake (commitLoadout). So these are LOAD time. None of them is the 3-2-1,
+//   and nothing here should be quoted as a countdown fix - see the v40.36 note in gameLoop.
+//
+// 1. THE POLL PASS ASKED EVERY PROGRAM, EVERY TIME. n6: `ld {ms:4158, polls:597, at:drainFrame0}` -
+//    597 passes over the whole `renderer.info.programs` array (~200 entries by then), i.e. ~120,000
+//    synchronous command-buffer round trips, competing for the very GPU process the links are
+//    running on, while only a handful of programs were ever pending. A program that reports
+//    complete cannot un-complete, so it is marked (`pw._lssLinked`) and never ASKED again - here or
+//    at any of the seven later drain sites. ⚠ The pass still RESCANS the live list every time (a
+//    compile on another turn can push into it across a yield, which is why the old loop re-read it);
+//    what it no longer does is re-issue the GL query. 597 polls / 4158 ms = 6.96 ms per pass, i.e.
+//    `_warmupYield` (rAF) is the pacer and the pass cost rides on top of it.
+//
+// 2. A DRAIN THAT SAYS "ALL LINKED" DOES NOT STOP THE NEXT DRAW FROM JOINING. `COMPLETION_STATUS_KHR`
+//    answers "has the link TASK finished". three.js fetches a program's uniform and attribute
+//    locations LAZILY, at `setProgram`, inside the first DRAW - the captured stack in the v40.22
+//    note above is exactly that: `getProgramInfoLog <- Ml.getUniforms <- Ql.renderBufferDirect <-
+//    Ql.render` - and `getUniforms()` opens with `getProgramParameter(ACTIVE_UNIFORMS)`, which
+//    Chrome answers with a blocking program-info fetch. So both renders in _warmupCombatShadersBody
+//    ARE preceded by a drain and the marks still read `slowgl getProgramParameter 1116.8 ms on
+//    p47:Tracker_CP_Graphite` (n4, the rtScene render) and `1893.9 ms on p199:hull` beside
+//    `bufferData 35.3 ms (13824k)` (n5, the canvas render), heartbeat stopped 1863 / 1916 ms, with
+//    `ld {ms:640, polls:75, at:drainWarmup}` sitting right next to them.
+//    ⚠ WHAT THIS IS AND IS NOT. slowgl times ONE `apply`, so each of those is a SINGLE call, and
+//    asking the same question from here CANNOT slice it - the yield below only runs BETWEEN calls.
+//    What it buys is WHERE the query is paid: once per program, behind the cover, so no first draw
+//    in the countdown or in play pays one. For n4/n5 (both already behind the cover) expect the
+//    freeze to MOVE, not to vanish. `primeWorst` is the falsifier: if it comes back near 1900 the
+//    cost is the GPU process's backlog rather than the query itself, and this lever is spent.
+//    ⚠ Inert without KHR_parallel_shader_compile (nothing gets marked `_lssLinked`) - correct, the
+//      join is an ANGLE behaviour and links are synchronous anyway where the extension is missing.
+//    A/B: `window.__noUniformPrime = true` restores the old draw-time behaviour.
 async function _drainProgramLinks(capMs, rep, key) {
   const _t = _pbNow();
-  let pending = 0, polls = 0, capped = false;
+  let pending = 0, polls = 0, capped = false, primed = 0, primeCapped = false, primeWorst = 0;
   try {
     const gl = renderer.getContext();
     const ext = gl.getExtension('KHR_parallel_shader_compile');
@@ -56772,7 +57058,10 @@ async function _drainProgramLinks(capMs, rep, key) {
       for (;;) {
         pending = 0; polls++;
         for (const pw of list) {
-          try { if (pw.program && !gl.getProgramParameter(pw.program, ext.COMPLETION_STATUS_KHR)) pending++; } catch (_) {}
+          if (!pw || !pw.program || pw._lssLinked) continue;   // (v40.59) asked once, answered forever
+          let done = true;
+          try { done = !!gl.getProgramParameter(pw.program, ext.COMPLETION_STATUS_KHR); } catch (_) { done = true; }
+          if (done) { try { pw._lssLinked = true; } catch (_) {} } else pending++;
         }
         if (pending === 0) break;
         if (_pbNow() - _t > (capMs || 4000)) { capped = true; break; }
@@ -56780,10 +57069,36 @@ async function _drainProgramLinks(capMs, rep, key) {
         await _warmupYield();
       }
     }
+    // (v40.59) ...and THEN three.js' first-use query, here instead of inside the next draw. Snapshot
+    // the list: a compile on another turn can push into the live array while we yield. The budget is
+    // the CALLER'S (measured from the drain's start, 1.5 s floor) so this can never double a launch
+    // stage's cost, and a program that never reported complete is skipped - joining a link that is
+    // still running is the exact thing the poll above exists to avoid.
+    const list2 = renderer.info && renderer.info.programs;
+    if (list2 && list2.length && !(typeof window !== 'undefined' && window.__noUniformPrime)) {
+      const snap = list2.slice();
+      const _pEnd = _t + Math.max(1500, capMs || 4000);
+      let _s = _pbNow();
+      for (const pw of snap) {
+        if (!pw || pw._lssPrimed || !pw._lssLinked) continue;
+        pw._lssPrimed = true;                                 // set BEFORE the call: a bad program cannot loop
+        const _c0 = _pbNow();
+        try { if (typeof pw.getUniforms === 'function') pw.getUniforms(); } catch (_) {}
+        try { if (typeof pw.getAttributes === 'function') pw.getAttributes(); } catch (_) {}
+        primed++;
+        const _cd = Math.round(_pbNow() - _c0);
+        if (_cd > primeWorst) primeWorst = _cd;
+        if (_pbNow() - _s > 4) {
+          if (_pbNow() > _pEnd) { primeCapped = true; break; }
+          await _warmupYield();
+          _s = _pbNow();
+        }
+      }
+    }
   } catch (_) {}
   const ms = Math.round(_pbNow() - _t);
   try { if (rep && rep.ms) { rep.ms[key || 'drain'] = (rep.ms[key || 'drain'] | 0) + ms; if (capped && !rep.capped) rep.capped = (key || 'drain') + '-capped'; } } catch (_) {}
-  try { window.__linkDrain = { ms: ms, polls: polls, pending: pending, at: key || 'drain' }; } catch (_) {}
+  try { window.__linkDrain = { ms: ms, polls: polls, pending: pending, primed: primed, primeWorst: primeWorst, primeCapped: primeCapped, at: key || 'drain' }; } catch (_) {}
   return pending === 0;
 }
 // ═══ (v40.34) THE OVERLAY REHEARSAL ══════════════════════════════════════════════════════════════
@@ -56805,8 +57120,12 @@ async function _drainProgramLinks(capMs, rep, key) {
 // style with real text, then put everything back. The cover is dropped to 99.5 % for the duration:
 // the compositor does not rasterise what an OPAQUE layer fully covers, and at 0.995 nothing is
 // covered as far as it is concerned while nothing is visible as far as the player is concerned.
-// The ship-select and round countdowns are shown in different groups (`#ov-countdown.show ~
-// #ship-select-countdown { display: none }`). Reports in window.__uiRehearsal and `flags.uiw`.
+// (v40.57) There is ONE countdown element now (#ship-select-countdown) wearing two looks: the
+// orange 180px digits and the red 96px .fight word. Those are still TWO compositor pipelines, so
+// they are still rehearsed in two different groups - group 1 for the digits, group 3 for FIGHT -
+// and the coverage this harness gives the countdown is unchanged. The v40.55 note about keeping two
+// ELEMENTS apart (`body.lss-round-cd`) went with the second element.
+// Reports in window.__uiRehearsal and `flags.uiw`.
 async function _prebakeOverlayRehearsal(rep) {
   const _t = _pbNow();
   const out = { ms: 0, n: 0, groups: 0, frames: 0, worst: 0 };
@@ -56869,16 +57188,69 @@ async function _prebakeOverlayRehearsal(rep) {
               show('ov-banner', 'show', { '.ban-text': 'ROUND 1', '.ban-sub': 'ELIMINATION' });
               show('ov-damage-vignette', 'flash');
               for (const e of ['ov-dmg-top', 'ov-dmg-right', 'ov-dmg-bottom', 'ov-dmg-left']) show(e, 'pulse'); },
-      () => { show('ov-countdown', 'show', { '.cd-label': 'ROUND 1', '.cd-number': '3' });
-              show('ov-killstreak', 'show', { '.ks-label': 'KILLING SPREE', '.ks-count': '3 KILLS' });
+      // (v40.57) the white ROUND countdown was rehearsed here and is gone; the orange digits it
+      // was a second copy of are already covered by group 1 above, on the one surviving element.
+      () => { show('ov-killstreak', 'show', { '.ks-label': 'KILLING SPREE', '.ks-count': '3 KILLS' });
               show('ov-ability', 'show', { '.ab-label': 'DASH ACTIVE' });
               medal(); },
-      () => { show('ov-countdown', 'fight show', { '.cd-number': 'FIGHT' });
+      // (v40.57) FIGHT is a VARIANT of the one countdown now, not a second element - same node as
+      // group 1, but .fight swaps in a different size, colour, tracking and keyframe, so it is a
+      // distinct pipeline and still earns its own rehearsal. (undo runs between groups, so lighting
+      // the same node twice is safe.)
+      () => { show('ship-select-countdown', 'fight active', { '.cd-num': 'FIGHT' });
               show('ov-killstreak', 'godlike show', { '.ks-label': 'GODLIKE', '.ks-count': '8 KILLS' });
               show('ov-respawn', 'show'); },
       () => { show('ov-warp', 'show'); show('ov-sword-block', 'show'); show('ov-vortex-shield', 'show');
               show('ov-gun-shield', 'show'); show('ov-thermal-shield', 'show'); show('ov-underwater', 'show'); },
       () => { show('ov-warp', 'tunnel'); },
+      // (v40.58) THE LOCK-ON WARNING. The owner's 40.57 marks (n3) put `enemy-lockon-warning FIRST
+      // full-lock` and `lockon-pip-3 FIRST lockon-pip filled` on screen a few seconds before a
+      // 2334 ms frame whose GPU fence read 2370 ms with our own draw list under 60 ms, nothing
+      // created and no new WebGL pipeline - the compositor-first-use signature. It was never
+      // rehearsed because it shows by `style.display = 'flex'` from updateHUD (its base rule is
+      // display:none), not by a class, and it has TWO looks: amber "LOCKING" and, at three locks,
+      // the red `.full-lock` variant that recolours the text and every pip border. Both are shown
+      // here, with the pips in their filled and empty states, so the process pays for them behind
+      // the cover instead of on the frame the first missile lock lands.
+      () => {
+        try {
+          const el = $('enemy-lockon-warning');
+          if (el) {
+            const pd = el.style.display, pc = el.getAttribute('class') || '';
+            const txt = el.querySelector('.lockon-text');
+            const pt = txt ? txt.textContent : null;
+            el.style.display = 'flex';
+            el.setAttribute('class', 'full-lock');
+            if (txt) txt.textContent = 'WARNING: ENEMY LOCKED-ON';
+            const pips = Array.from(el.querySelectorAll('.lockon-pip'));
+            const pp = pips.map((q) => q.getAttribute('class') || '');
+            pips.forEach((q, i) => q.setAttribute('class', i < 2 ? 'lockon-pip filled' : 'lockon-pip'));
+            undo.push(() => { try { el.style.display = pd; el.setAttribute('class', pc); if (txt && pt != null) txt.textContent = pt;
+              pips.forEach((q, i) => q.setAttribute('class', pp[i])); } catch (_) {} });
+            out.n++;
+          }
+        } catch (_) {}
+      },
+      // ...and the amber (pre-full-lock) look, which is a different paint again.
+      () => {
+        try {
+          const el = $('enemy-lockon-warning');
+          if (el) {
+            const pd = el.style.display, pc = el.getAttribute('class') || '';
+            const txt = el.querySelector('.lockon-text');
+            const pt = txt ? txt.textContent : null;
+            el.style.display = 'flex';
+            el.setAttribute('class', '');
+            if (txt) txt.textContent = 'WARNING: ENEMY LOCKING';
+            const pips = Array.from(el.querySelectorAll('.lockon-pip'));
+            const pp = pips.map((q) => q.getAttribute('class') || '');
+            pips.forEach((q, i) => q.setAttribute('class', i < 1 ? 'lockon-pip filled' : 'lockon-pip'));
+            undo.push(() => { try { el.style.display = pd; el.setAttribute('class', pc); if (txt && pt != null) txt.textContent = pt;
+              pips.forEach((q, i) => q.setAttribute('class', pp[i])); } catch (_) {} });
+            out.n++;
+          }
+        } catch (_) {}
+      },
       // (v40.41) THE COMBAT HUD. Owner's cold run on 40.40 (Graphite on): the countdown was clean for
       // the first time, and the three stalls left (2869 / 1035 / 3425 ms at FIGHT+2 s, the first
       // kill, the first exchange after it) sat 0.3-2 s after combat firsts the rehearsal did not
@@ -57200,26 +57572,30 @@ async function _prebakeWorldForLaunch() {
     // ceiling in the arena-wait spirit. Warm cache / wall power completes in
     // ~a frame, so the common case pays nothing. Programs created after this
     // (per-map stragglers) still join lazily — the point is the BULK queue.
-    const _tDr = _pbNow();
+    // (v40.59) THE OVERLAY REHEARSAL STARTS HERE AND IS AWAITED IN PHASE G. It links nothing, draws
+    // nothing of ours, and spends its whole 2320 ms (owner's n7, `pb[8]`) waiting a frame at a time
+    // for Skia to build one compositor pipeline per overlay kind. Everything between here and the
+    // fence is ALSO waiting a frame at a time - on ANGLE's link workers, main thread free (n6:
+    // `drainFrame0` 4158 ms over 597 polls, `gpu 2152`, heartbeat running). Run one after the other
+    // they cost a + b, which is how the prebake reached 9161 ms; run beside each other they cost
+    // max(a, b). Both pace themselves on `_warmupYield`, so they interleave on the same rAF turns.
+    // ⚠ It MUST still be awaited before the `finally` below: its undo list is what restores every
+    //   overlay, the cover's inline opacity and `body.lss-picker-3d`. (If a phase between here and G
+    //   throws, the outer catch lifts the cover early; the rehearsal still self-restores in its own
+    //   tail, so the worst case is a short transient, not a stuck HUD.)
+    // ⚠ `_pbSub` only writes text and adds `.active` (showLoadingOverlay), so the captions the
+    //   stages below set cannot clobber the rehearsal's inline `opacity: 0.995` on the cover.
+    let _uiRehearsalP = null;
     try {
-      const _gl = renderer.getContext();
-      const _pcExt = _gl.getExtension('KHR_parallel_shader_compile');
-      const _plist = renderer.info && renderer.info.programs;
-      if (_pcExt && _plist && _plist.length) {
-        for (;;) {
-          let _pending = 0;
-          for (const _pw of _plist) {
-            try {
-              if (_pw.program && !_gl.getProgramParameter(_pw.program, _pcExt.COMPLETION_STATUS_KHR)) _pending++;
-            } catch (_) {}
-          }
-          if (_pending === 0) break;
-          if (_pbNow() - _tDr > 45000) { if (!rep.capped) rep.capped = 'compile-drain'; break; }
-          _pbSub('compiling shaders · ' + (_plist.length - _pending) + '/' + _plist.length);
-          await _warmupYield();
-        }
-      }
-    } catch (_) {}
+      _uiRehearsalP = _prebakeOverlayRehearsal(rep);
+      if (_uiRehearsalP && _uiRehearsalP.catch) _uiRehearsalP.catch(() => {});
+    } catch (_) { _uiRehearsalP = null; }
+    // (v40.59) ...and the bulk drain goes through the ONE helper, which since this version stops
+    // re-asking programs that already reported complete (n6: 597 passes over ~200 of them) and pays
+    // three.js' first-use query once per program, here, behind the cover. The hand-inlined copy that
+    // used to live here could inherit neither. ⚠ A cap now reads `drain-capped`, not `compile-drain`.
+    const _tDr = _pbNow();
+    try { await _drainProgramLinks(45000, rep, 'drain'); } catch (_) {}
     rep.ms.drain = Math.round(_pbNow() - _tDr);
     // ---- E2. (v40.35) THE FIRST FRAME, BEHIND THE COVER ----
     // With the loop no longer rendering during the prebake (see gameLoop), the first real frame of
@@ -57241,6 +57617,16 @@ async function _prebakeWorldForLaunch() {
       const _np1 = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
       if (_np1 > _np0) { try { await _drainProgramLinks(6000, rep, 'drainFrame0'); } catch (_) {} }
       rep.frame0Forks = _np1 - _np0;
+      // (v40.59) ...AND WHICH ONES. n6: `drainFrame0` 4158 ms over 597 polls - the drain working, with
+      // the links genuinely taking four seconds - and nothing in the report said WHAT was still being
+      // built that late, so there was no way to judge whether an earlier stage could have started it.
+      // The forked programs ride the report by name now; `__prebake().frame0New` reads them.
+      // ⚠ Positional: a program RELEASED during the prebake shifts the array, so treat a name that
+      //   makes no sense as a slice artefact rather than a finding.
+      try {
+        const _pl0 = (renderer.info && renderer.info.programs) ? renderer.info.programs : [];
+        rep.frame0New = _pl0.slice(_np0).slice(0, 12).map((p) => 'p' + p.id + (p.name ? (':' + String(p.name).slice(0, 18)) : ''));
+      } catch (_) {}
       try { renderFrame(); } catch (_) {}
       try { if (typeof _gpuKeepWarmTick === 'function') _gpuKeepWarmTick(performance.now()); } catch (_) {}
       await _warmupYield();
@@ -57255,7 +57641,13 @@ async function _prebakeWorldForLaunch() {
     }
     // ---- G. (v40.34) THE OVERLAY REHEARSAL: the compositor's pipelines, not ours (see the function) ----
     // Last, and outside the budget: it is exactly the work the budget exists to leave behind the cover.
-    try { _pbSub('warming the overlays'); await _prebakeOverlayRehearsal(rep); } catch (_) {}
+    // (v40.59) STARTED BACK AT PHASE E so it overlapped the link waits; this is only where it is
+    // JOINED, before the `finally` runs and before the cover can lift. The `else` keeps any path that
+    // reaches here without a started promise behaving exactly as it did.
+    try {
+      _pbSub('warming the overlays');
+      if (_uiRehearsalP) await _uiRehearsalP; else await _prebakeOverlayRehearsal(rep);
+    } catch (_) {}
   } catch (e) {
     console.warn('[prebake] failed (launching anyway):', e);
     rep.error = String((e && e.message) || e);
@@ -64943,6 +65335,15 @@ function _lssEnsureCinematicStyles() {
     'body.lss-cinematic-active #kill-feed,' +
     'body.lss-cinematic-active #minimap,' +
     'body.lss-cinematic-active #doomed-warning,' +
+    // (v40.57) ⚠ THIS LINE NOW HIDES THE ROUND COUNTDOWN AND FIGHT TOO. It used to reach only the
+    // LAUNCH ticker, because the round 3-2-1 and FIGHT lived on a separate element (#ov-countdown,
+    // retired) that this list never named. They share #ship-select-countdown now, so any cinematic
+    // that overlaps a warmupTimer crossing will silently eat that beat. Today none do, and that is
+    // load-bearing, not luck: _lssEndSpectatorCinematic drops this class BEFORE
+    // _lssCompleteSpectatorCinematic runs `after()` (which is what starts launchCountdown), and the
+    // cyberpunk carrier shot sets warmupTimer to cineSecs + 3.4 so its 3/2/1 land after the shot is
+    // over. ⚠ If you add a cinematic that runs while game.state === 'warmup' and warmupTimer <= 3,
+    // take this selector off the list for the duration or the countdown vanishes with no error.
     'body.lss-cinematic-active #ship-select-countdown,' +
     'body.lss-cinematic-active .ship-name-label,' +
     'body.lss-cinematic-active #hbar-pool,' +
@@ -65152,10 +65553,7 @@ function _lssStartSpectatorCinematic() {
     const sel = document.getElementById('ship-select');
     if (sel) { sel.classList.remove('active'); sel.style.display = 'none'; }
   } catch (_) {}
-  try {
-    const ov = document.getElementById('ship-select-countdown');
-    if (ov) ov.classList.remove('active');
-  } catch (_) {}
+  try { _cdClear(); } catch (_) {}   // (v40.57) one countdown, one renderer
   try { if (typeof hideShipSelectWaiting === 'function') hideShipSelectWaiting(); } catch (_) {}
   try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
   console.log('[cinematic] team lineup : ' + myTeamCode + ' team, ' + NS + ' ships, spawn=(' + cx.toFixed(0) + ',' + cy.toFixed(0) + ',' + cz.toFixed(0) + ')');
@@ -70147,6 +70545,14 @@ function _setShieldOverlay(id, on) {
   try {
     const el = _hudEl(id);
     if (!el) return;
+    // (v40.55) Idempotent for real. `classList.remove()` on an element that already carries a
+    // `class` attribute still WRITES that attribute, so the six unconditional callers below re-set
+    // `class` on four full-screen `position:fixed; inset:0` overlays four times EVERY frame —
+    // measured 5472 writes in 5472 frames, with nothing on screen changing. It is dead mutation
+    // traffic everywhere, and it is worst under the between-rounds picker, where gameLoop keeps
+    // running the whole combat frame behind a transparent panel. Read the live class rather than
+    // caching a flag, so an external writer of `.show` cannot make this drift.
+    if (!!on === el.classList.contains('show')) return;
     if (on) el.classList.add('show');
     else    el.classList.remove('show');
   } catch (_) {}
@@ -72859,7 +73265,23 @@ function updateRoundSystem(dt) {
     // Cinematic 3-2-1 countdown in the final seconds of warmup.
     // (v33.12) the free-flight HUB has no rounds — skip the "ROUND N" countdown.
     const _ffHubCD = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
-    if (window.Overlays && !selectActive && !_ffHubCD) {
+    // (v40.55) ...and hold it back for the WHOLE launch ticker, not just while the picker is up.
+    // `selectActive` was a proxy for "launchCountdown is drawing the digits" that stops being true
+    // the moment anything hides #ship-select — the pre-round lineup cinematic does exactly that
+    // before the fresh-launch countdown — so the orange 3-2-1 and this white one ran on ONE clock
+    // and handed over mid-sequence ("flicker on 2 ... white 2 from orange 3"; the white "3" never
+    // fired at all, because _anchorTimer sets warmupTimer to exactly 3 and the crossing needs
+    // prev > 3). game._launchCdOwnsDigits is the real signal and it clears at the LAUNCH beat, the
+    // same instant `selectActive` used to, so the between-rounds handoff is unchanged.
+    // (v40.57) THE CONDITION IS DELIBERATELY UNCHANGED, but there is no "white one" any more: this
+    // call now paints the SAME orange element the launch ticker does
+    // (Overlays.countdown -> _cdRound -> _cdPaint). Two of the three guards here are repeated inside
+    // _cdRound (freeflight, _launchCdOwnsDigits) and `selectActive` stays as extra cover for the
+    // picker window - belt and braces, the way the rest of this branch is written.
+    // ⚠ game.warmupTimer still drives these crossings, i.e. every peer's own wall-clock-anchored
+    // timer. Merging the two countdowns changed the PAINT TARGET, never the clock, so the v36.36
+    // split (picker digits t=0..6, arena digits t=7..9, FIGHT at t=10) is untouched by construction.
+    if (window.Overlays && !selectActive && !game._launchCdOwnsDigits && !_ffHubCD) {
       for (let n = 3; n >= 1; n--) {
         if (prev > n && game.warmupTimer <= n) {
           Overlays.countdown(n, 'ROUND ' + (game.currentRound || 1));
@@ -73634,8 +74056,47 @@ function updateRoundSystem(dt) {
         // Between-rounds : surface the VR ship-select
         // overlay again for the next pick. Mirror of enterShipSelect.
         try { _xrMenuForceHidden = false; } catch (_) {}
-        buildShipSelect();
-        updateTeammatesStrip();
+        // (v40.58) ⚠ THE PICKER REBUILD MUST NOT BE ABLE TO KILL THE ROUND, AND IT MUST REBUILD
+        // THE SAME ITEMS enterShipSelect DOES. Two defects, one block.
+        //   (a) This closure is PHASE 0 of _rrStagedRound and runs inside ITS try (L58685), so a
+        //       throw anywhere in buildShipSelect / previewLoadout skipped world, wave, shaders,
+        //       reset, roster AND the launchCountdown at the foot of this function — leaving a
+        //       half-populated picker that can never launch (`.active` never comes off, and the
+        //       warmup->playing flip is gated on !selectActive). The stage's own finally clears
+        //       _rrStaging, so nothing else ever recovers it: that is a soft-lock, not a hitch.
+        //       Pre-match the same throw is harmless because enterShipSelect is the LAST call on
+        //       its path. Contained here — EVERY section gets its OWN try, so one bad section
+        //       cannot take the others with it and the countdown below always runs.
+        //   (b) This was a PARTIAL COPY of enterShipSelect — buildShipSelect + updateTeammatesStrip
+        //       and nothing else — so the mode line, the room badge, the map box, the ADD BOTS
+        //       dock and the collapsed skin control were whatever the LAST visit left behind.
+        //       Anything a mid-match state change hid stayed hidden for the rest of the match, and
+        //       an expanded skin panel came back overlaying the middle of the next round's picker
+        //       (between rounds nobody has to click CONFIRM, so its document click-away never
+        //       fires). returnToRootMenu already re-runs buildMapSelector for the same reason.
+        try { buildShipSelect(); } catch (e) { console.warn('[round-swap] buildShipSelect failed, launching anyway:', e); }
+        try { updateTeammatesStrip(); } catch (_) {}
+        try { _updateShipSelectRoom(); } catch (_) {}
+        try { _ssModeLabel(); } catch (_) {}
+        try { if (typeof _setSkinPanelOpen === 'function') _setSkinPanelOpen(false); } catch (_) {}
+        // ⚠ UI ONLY. buildMapSelector re-snaps game.selectedMap to keys[0] whenever the current
+        // map is not in the mode's visible list; mid-match that would hand getNextMap() a
+        // DIFFERENT arena for the next round, so the committed key goes straight back. getNextMap
+        // is pure and never writes the key itself, so this restore is the only writer to undo.
+        // The selectMap() at the foot of buildMapSelector early-returns on its echo guard here, so
+        // this re-applies no theme and adds no map_change packet in multiplayer.
+        try {
+          const _mapWas = game.selectedMap;
+          buildMapSelector();
+          if (game.selectedMap !== _mapWas) game.selectedMap = _mapWas;
+        } catch (_) {}
+        try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
+        // (v40.49) the round-end SAVE CLIP prompt is a combat overlay and raising the picker is a
+        // transition — same reason enterShipSelect and returnToRootMenu take it down. Its 4 Hz
+        // poll only lights the button while state is roundEnd/matchEnd, and state left roundEnd
+        // before this frame, so the poll would write 'none' within 250 ms anyway; this just makes
+        // it instant. F9 still saves.
+        try { if (typeof _clipHideSaveBtn === 'function') _clipHideSaveBtn(); } catch (_) {}
         // (v36.36) TWO PHASES INSIDE ONE UNCHANGED ROUND CADENCE (owner: "the
         // screen clears at the end of the countdown, then the arena gets its
         // 3,2,1 countdown"). `warmupTimer` still runs the full LAUNCH_COUNTDOWN,
@@ -73953,8 +74414,12 @@ function returnToRootMenu(opts) {
     net.startScheduledAt = null;
   }
   // Hide the countdown overlay if it was showing.
-  const _cdEarly = document.getElementById('ship-select-countdown');
-  if (_cdEarly) _cdEarly.classList.remove('active');
+  // (v40.57) _cdClear() with NO owner is unconditional and also drops a pending hold - an abort that
+  // left a FIGHT hold standing would make the NEXT launch ticker's opening digits get refused by
+  // _cdPaint's priority check for up to 1.6 s. This is the one path where a stale high-priority hold
+  // could realistically survive into a new sequence. Wrapped like every other _cdClear site: the
+  // deathCam reset and Overlays.hideRespawn() below must run even if this ever throws.
+  try { _cdClear(); } catch (_) {}
 
   if (typeof deathCam !== 'undefined' && deathCam) {
     deathCam.active = false;
@@ -74189,8 +74654,10 @@ function returnToRootMenu(opts) {
   }
 
   // Hide any countdown overlays left over from a prior launch sequence.
-  const cd = document.getElementById('ship-select-countdown');
-  if (cd) cd.classList.remove('active');
+  // (v40.57) one countdown, one renderer: class, .fight and hold timer all released. Wrapped so the
+  // .lss-launching teardown immediately below - the v36.36 "start a new match without seeing the
+  // ship selection screen" bug - can never be skipped by a throw from the countdown cleanup.
+  try { _cdClear(); } catch (_) {}
 
   // Show the ship-select root menu exactly as it appears on cold boot.
   // (v36.36) ⚠ CLEAR THE LAUNCHING STATE FIRST — this was the owner's bug 4, "at
@@ -74958,7 +75425,27 @@ function pollGamepad() {
   const _gpDpadDownBtn = !!(gp.buttons[13] && (gp.buttons[13].pressed || gp.buttons[13].value > input.triggerThreshold));
   
   
-  if (_gpDpadDownBtn && !input._tpDpadPrev && game.state === 'playing') {   
+  // (v40.55) THE VIEW TOGGLE IS NOT A COMBAT-ONLY CONTROL. Owner: "you should be able to switch
+  // views, 3rd person to 1st person, whenever ... it shouldn't be locked between rounds and end of
+  // matches". `game.state === 'playing'` locked the PAD out of every other state - warmup (the whole
+  // 3-2-1 after the picker closes), roundEnd, matchEnd - while the V key and the mobile button had
+  // no such gate, so the same action worked on a keyboard and not on a pad.
+  // ⚠ WHY IT IS NOT SIMPLY UNGATED: D-pad DOWN is also the picker's map-cycle (see the
+  // `_shipSelectActive && !_commitPending && (game.state === 'select' || _betweenRoundsPick())`
+  // block further down, where dpadDown runs cycleMap(1)), and it drives the VR settings menu. So
+  // the gate becomes "not while a menu owns the pad" instead of "only while playing": the picker
+  // keeps its map cycling, everything else gets the toggle.
+  // ⚠ TDZ: `_shipSelectActive` is a const declared ~70 lines BELOW this line in the same function,
+  // so it cannot be read here (typeof would not shield it either). Read the DOM instead - one
+  // getElementById on a pad frame, and only while the button is actually down.
+  let _tpMenuOwnsPad = !!settingsOpen;
+  if (_gpDpadDownBtn && !_tpMenuOwnsPad) {
+    try {
+      const _ss = document.getElementById('ship-select');
+      _tpMenuOwnsPad = !!(_ss && _ss.classList.contains('active'));
+    } catch (_) {}
+  }
+  if (_gpDpadDownBtn && !input._tpDpadPrev && !_tpMenuOwnsPad) {
     try { _toggleThirdPerson(); } catch (_) {}
   }
   input._tpDpadPrev = _gpDpadDownBtn;
@@ -78780,15 +79267,45 @@ function addKillFeed(killer, victim) {
   game.killFeed.unshift({ killer, victim, time: game.time });
   if (game.killFeed.length > 5) game.killFeed.pop();
 
+  _renderKillFeed();
+}
+
+// (v40.55) THE FEED IS A FIXED SET OF ROWS NOW, NOT AN innerHTML REBUILD. `container.innerHTML =
+// ''` destroyed and recreated EVERY visible line on EVERY kill — a full teardown and repaint of
+// the top-right corner — and the 8 s expiry at the bottom of gameLoop only ever pruned the ARRAY,
+// so the DOM went on painting dead lines until the next kill dropped several of them at once.
+// Owner: "the fps readout and kills flickered"; this is the kills half of it. Same shape as the
+// hbarPool labels: build the rows once, write a row only when that row's text actually changes,
+// and hide the unused ones. The escaping contract below is unchanged and still mandatory.
+// _KILL_FEED_ROWS must match the unshift cap in addKillFeed above.
+const _KILL_FEED_ROWS = 5;
+function _renderKillFeed() {
   const container = document.getElementById('kill-feed');
-  container.innerHTML = '';
-  for (const entry of game.killFeed) {
-    const div = document.createElement('div');
-    div.className = 'kill-entry';
+  if (!container) return;
+  let rows = container._kfRows;
+  if (!rows) {
+    container.innerHTML = '';
+    rows = container._kfRows = [];
+    for (let i = 0; i < _KILL_FEED_ROWS; i++) {
+      const div = document.createElement('div');
+      div.className = 'kill-entry';
+      div.style.display = 'none';
+      container.appendChild(div);
+      rows.push(div);
+    }
+  }
+  for (let i = 0; i < rows.length; i++) {
+    const div = rows[i];
+    const entry = game.killFeed[i];
+    if (!entry) {
+      if (div._kfHtml !== null) { div._kfHtml = null; div.style.display = 'none'; }
+      continue;
+    }
     // (v38.60) Names arrive from peers over the wire (`kill` events carry
     // killerName/victimName verbatim) — escape them, this is an innerHTML sink.
-    div.innerHTML = `<span style="color:#ff6666">${_roomBoxEsc(entry.killer)}</span> destroyed <span style="color:#66bb66">${_roomBoxEsc(entry.victim)}</span>`;
-    container.appendChild(div);
+    const _kfHtml = `<span style="color:#ff6666">${_roomBoxEsc(entry.killer)}</span> destroyed <span style="color:#66bb66">${_roomBoxEsc(entry.victim)}</span>`;
+    if (div._kfHtml !== _kfHtml) { div._kfHtml = _kfHtml; div.innerHTML = _kfHtml; }
+    if (div.style.display !== '') div.style.display = '';
   }
 }
 
@@ -79816,6 +80333,9 @@ function _clearLaunchCountdown() {
   _activeLaunchTimers = [];
   _countdownActive = false;
   _launchCountdownRuntime = null;
+  // (v40.55) An ABORTED countdown hands the digits back too (round end, lobby exit, menu return),
+  // or the arena's own 3-2-1 would stay suppressed for whatever runs the next warmup.
+  try { game._launchCdOwnsDigits = false; } catch (_) {}
 }
 function _tickLaunchCountdownWatchdog(nowMs) {
   const rt = _launchCountdownRuntime;
@@ -80380,38 +80900,140 @@ function _allPeersWarmupReady() {
   }
   return true;
 }
+// ============================================================================
+// (v40.57) ONE COUNTDOWN. The white #ov-countdown is gone; #ship-select-countdown is the only
+// countdown element in the game and BOTH sources paint it through this one renderer:
+//   owner 'launch' - launchCountdown's local setTimeout ticker ("LAUNCH IN" N..1, then LAUNCH)
+//   owner 'round'  - updateRoundSystem's game.warmupTimer crossings ("ROUND N" 3-2-1) and the
+//                    FIGHT beat at the warmup->playing flip (via Overlays.countdown -> _cdRound)
+// Owner: "why not just stay as the orange countdown and get rid of the white? we don't need two".
+//
+// ⚠ THE AUTHORITATIVE CLOCK IS UNCHANGED - this unifies the PAINT and nothing else. The round
+// digits and FIGHT are still driven by game.warmupTimer, the wall-clock-anchored timer EVERY PEER
+// TICKS ITSELF (_anchorTimer / _tickTimer), so co-op peers still converge on one FIGHT instant, and
+// the paths that never call launchCountdown at all (a staged world-swap traverse, testMode, an
+// inbound launch_at) still get their 3-2-1 from it. launchCountdown's setTimeout chain stays purely
+// local and purely cosmetic, exactly as it always was. Deleting the round path and driving the
+// shared moment from that chain would have been the wrong "merge": it drifts and it is not started
+// on half the paths that reach a round start.
+//
+// WHO WINS WHEN BOTH WANT THE SCREEN - two independent layers:
+//   1. OWNERSHIP, over the whole launch ticker: game._launchCdOwnsDigits. Round DIGITS stand down
+//      from the ticker's first tick to its LAUNCH beat. ⚠ Deliberately NOT _countdownActive: that
+//      flag lives 700 ms longer (it clears in hideLaunchOverlay, not finishLaunch), and the v36.36
+//      between-rounds split hands the picker over at t=6 with the arena's 3-crossing at t=7 - a
+//      1.0 s margin on the flag but only 0.3 s on _countdownActive, and protecting that margin is
+//      the entire reason _rrArenaSecs is SHORT_COUNTDOWN + 1.
+//   2. PRIORITY, over one beat: FIGHT is prio 2, everything else prio 1, and a lower-prio paint is
+//      REFUSED while a higher one is still holding. On a fresh launch the LAUNCH tick and the FIGHT
+//      beat land in the same millisecond in a non-deterministic order (both keyed to the same
+//      clock) - this makes FIGHT win either way instead of letting the race decide. It also stops
+//      the launch ticker's own +700 ms hide from cutting a FIGHT short: see _cdClear's owner check.
+// ============================================================================
+const _CDHOLD_DIGIT_MS = 1500;   // digits are 1.0 s apart: outlive the gap, lift after the last one
+const _CDHOLD_FIGHT_MS = 1600;   // one beat longer than the 1.2 s cdFightPulse keyframe
+let _cdOwner = null;             // 'launch' | 'round' | null - who painted last
+let _cdPrio = 0;
+let _cdHoldT = null;
+let _cdHoldUntil = 0;
+// Paint the one countdown. opts: { prio, hold, fight }. `hold` (ms) auto-clears the element
+// afterwards - the round beats are one-shot threshold crossings and nobody would ever hide them.
+// Omit it and the CALLER owns the lifetime, which is what the launch ticker does (hideLaunchOverlay).
+function _cdPaint(owner, text, sub, opts) {
+  const o = opts || {};
+  const prio = o.prio || 1;
+  const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  if (prio < _cdPrio && now < _cdHoldUntil) return false;   // something more important is still up
+  const el = document.getElementById('ship-select-countdown');
+  const num = el ? el.querySelector('.cd-num') : null;
+  const sb = el ? el.querySelector('.cd-sub') : null;
+  if (!el || !num || !sb) return false;
+  _cdOwner = owner; _cdPrio = prio;
+  el.classList.toggle('fight', !!o.fight);
+  num.textContent = text;
+  sb.textContent = sub || '';
+  sb.style.display = sub ? '' : 'none';   // FIGHT carries no sub-line (the white one hid its label too)
+  el.classList.add('active');
+  // Restart the keyframe on every beat - cdPulse for digits, cdFightPulse under .fight.
+  num.style.animation = 'none';
+  void num.offsetWidth;   // force reflow so the next assignment restarts it
+  num.style.animation = '';
+  if (_cdHoldT) { clearTimeout(_cdHoldT); _cdHoldT = null; }
+  _cdHoldUntil = 0;
+  if (o.hold > 0) {
+    _cdHoldUntil = now + o.hold;
+    _cdHoldT = setTimeout(() => { _cdHoldT = null; _cdClear(owner); }, o.hold);
+  }
+  return true;
+}
+// Take the countdown down. With NO owner this is unconditional (abort, menu return, ship-select
+// re-entry, a fresh launchCountdown claiming the screen) and also drops any pending hold - an abort
+// that left a FIGHT hold standing would otherwise make the next ticker's first digits get refused
+// by the priority check for up to 1.6 s. With an owner it only fires if that owner still holds the
+// element, which is what stops hideLaunchOverlay's +700 ms from cutting a FIGHT that landed on the
+// same beat as LAUNCH.
+function _cdClear(owner) {
+  if (owner && _cdOwner && owner !== _cdOwner) return;
+  if (_cdHoldT) { clearTimeout(_cdHoldT); _cdHoldT = null; }
+  _cdHoldUntil = 0; _cdOwner = null; _cdPrio = 0;
+  const el = document.getElementById('ship-select-countdown');
+  if (el) { el.classList.remove('active'); el.classList.remove('fight'); }
+}
+// The ROUND side. Overlays.countdown() is a straight delegate to this, kept here beside
+// launchCountdown so both owners and the arbitration rule read as one thing.
+function _cdRound(n, label) {
+  // Freeflight has no rounds. This is where `body.lss-freeflight #ov-countdown` went - as a JS belt
+  // behind updateRoundSystem's own _ffHubCD / _ffHub gates, NOT as a CSS rule on
+  // #ship-select-countdown: the LAUNCH ticker must keep running in the hub, and does.
+  try { if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return; } catch (_) {}
+  if (n === 0 || n === 'FIGHT') { _cdPaint('round', 'FIGHT', '', { fight: true, prio: 2, hold: _CDHOLD_FIGHT_MS }); return; }
+  // The launch ticker owns the digits until its LAUNCH beat (v40.55 rule, unchanged).
+  try { if (game && game._launchCdOwnsDigits) return; } catch (_) {}
+  _cdPaint('round', String(n), label || '', { hold: _CDHOLD_DIGIT_MS });
+}
 function launchCountdown(duration) {
   if (_countdownActive) return;
   _clearLaunchCountdown();
   _countdownActive = true;
+  // (v40.55) ONE COUNTDOWN OWNS THE DIGITS. From here to the LAUNCH beat this ticker is the only
+  // 3-2-1 on screen: updateRoundSystem's warmup branch reads this flag and holds its own ROUND N
+  // countdown back. It used to read `selectActive` as a proxy for that, and the pre-round lineup
+  // cinematic hides #ship-select BEFORE this call, so on a fresh launch both countdowns ran on the
+  // same SHORT_COUNTDOWN clock (_anchorTimer + launchCountdown in one statement).
+  // ⚠ EVERY early return out of this function must hand the flag back — see the bail below.
+  // (v40.57) The flag SURVIVES the merge and is still the ownership signal - see the block above
+  // _cdPaint for why it is not _countdownActive (that one lives 700 ms longer and would eat the
+  // between-rounds "3": the picker hands over at t=6, the arena's 3-crossing is at t=7).
+  try { game._launchCdOwnsDigits = true; } catch (_) {}
+  // (v40.57) Take the one countdown outright. This replaces Overlays.endCountdown(), which existed
+  // only to lift the body.lss-round-cd hold - same job, one element: drop any hold still standing
+  // (a FIGHT's 1.6 s included) so this ticker's first digit can never be refused below.
+  try { _cdClear(); } catch (_) {}
   // Defensive: if the loading overlay is somehow still up (caller forgot
   // to hide it), tear it down now so it doesn't cover the countdown.
   try { hideLoadingOverlay(); } catch (_) {}
   const overlay = document.getElementById('ship-select-countdown');
   const numEl = overlay ? overlay.querySelector('.cd-num') : null;
   const subEl = overlay ? overlay.querySelector('.cd-sub') : null;
-  if (!overlay || !numEl || !subEl) { _countdownActive = false; return; }
+  // (v40.55) THE BAIL HANDS THE DIGITS BACK TOO. This is the one exit that does not go through
+  // _clearLaunchCountdown and leaves no runtime for _tickLaunchCountdownWatchdog to finish, so
+  // without this the ownership flag set above would latch and updateRoundSystem's white ROUND N
+  // 3-2-1 would stay suppressed for the whole session.
+  if (!overlay || !numEl || !subEl) { _countdownActive = false; try { game._launchCdOwnsDigits = false; } catch (_) {} return; }
   // (v39.98) The v39.92 block that forced #ship-select visible for the duration is GONE, along with
   // the reason for it: #ship-select-countdown is a top-level element now, so no caller can hide the
   // digits by hiding the picker. Its restore was also time-blind - the round start hides the picker
   // between capture and restore, and putting the captured state back re-showed it on top of round 2.
 
-  // Helper: pulse a single digit/word, restarting the cdPulse animation each tick.
+  // Helper: pulse a single digit/word through the one countdown renderer.
+  // (v40.57) The v40.00 "stand down for the ROUND countdown" guard and the v40.55 lss-round-cd
+  // class it read are BOTH gone, because there is no second countdown to stand down for: this and
+  // the round clock paint the same element. The only thing that can refuse a launch tick now is
+  // _cdPaint's priority check, and only while the FIGHT beat is still holding the screen.
+  // overlay / numEl / subEl above stay as the missing-element bail's evidence; the writes are
+  // _cdPaint's, so exactly one place in the file knows how this element is painted.
   function tick(text, sub) {
-    // (v40.00) the ROUND countdown owns the screen between rounds; stand down rather than draw a
-    // second one over it (see the CSS note at #ship-select-countdown.active).
-    try {
-      const _rc = document.getElementById('ov-countdown');
-      if (_rc && _rc.classList.contains('show')) { overlay.classList.remove('active'); return; }
-    } catch (_) {}
-    numEl.textContent = text;
-    subEl.textContent = sub;
-    overlay.classList.add('active');
-    // Re-trigger the CSS animation by removing/re-adding the node briefly.
-    numEl.style.animation = 'none';
-    // Force reflow so the next assignment restarts the keyframe.
-    void numEl.offsetWidth;
-    numEl.style.animation = '';
+    _cdPaint('launch', text, sub, {});
   }
 
   // START → ... → 4 (silent), then 3 → 2 → 1 → LAUNCH at 1s intervals with
@@ -80458,7 +81080,12 @@ function launchCountdown(duration) {
   }, (START - 1) * 1000));
 
   function hideLaunchOverlay() {
-    overlay.classList.remove('active');
+    // (v40.57) ...but only if the launch ticker still OWNS the element. On a fresh launch FIGHT
+    // lands on the same beat as LAUNCH and this fires 700 ms later - i.e. 500 ms into FIGHT's 1.2 s
+    // keyframe. _cdClear's owner check is what stops the launch ticker cutting the round's own beat
+    // off mid-word. Between rounds nothing has taken ownership by t=6.7, so this clears normally and
+    // the arena's 3-2-1 at t=7,8,9 paints onto an empty element exactly as designed.
+    _cdClear('launch');
     // Countdown has fully handed off to gameplay; next round (or a fresh
     // post-match re-entry) is allowed to start a new one.
     _countdownActive = false;
@@ -80476,6 +81103,20 @@ function launchCountdown(duration) {
     // painted over the arena instead of in the first visible frame.
     // No-op on a fresh launch (nothing is ever staged outside the swap window).
     try { _applyStagedRoundShip(); } catch (_) {}
+    // (v40.55) HAND THE DIGITS BACK at the LAUNCH beat — the same instant the picker is torn down
+    // below, which is the beat updateRoundSystem used to read as "the arena owns the countdown now".
+    // Between rounds this keeps the v36.36 split exactly as designed (picker digits t=0..6, arena
+    // digits t=7..9). On a fresh launch warmupTimer is already at 0 by here, so the crossings
+    // (`prev > n`) cannot fire late — only FIGHT lands.
+    // (v40.57) ...and FIGHT now lands on THIS element. The sentence that used to end the line above
+    // said "body.lss-round-cd hides this word" — that class and its stylesheet rule went with
+    // #ov-countdown, so the word below is no longer hidden by anything. What replaces the hide is
+    // _cdPaint's priority rule: the FIGHT beat paints at prio 2 over the LAUNCH/WARP-IN tick below
+    // at prio 1, and wins in EITHER order (both are keyed to the same clock and genuinely race),
+    // while hideLaunchOverlay's +700 ms clear is owner-checked so it cannot cut FIGHT short.
+    // The one visible difference from the old hide: LAUNCH can be on screen for up to a frame
+    // before FIGHT paints over it, instead of vanishing the instant FIGHT appeared.
+    try { game._launchCdOwnsDigits = false; } catch (_) {}
     tick('LAUNCH', 'WARP-IN');
     try { playSound('round_start'); } catch (e) {}
     // (v36.36) Tell the round system the launch tone is spent. It used to infer
@@ -91056,26 +91697,19 @@ const Overlays = (() => {
   }
 
   // ---- Round countdown (3, 2, 1, FIGHT) ----
+  // (v40.57) THE ROUND COUNTDOWN NO LONGER OWNS AN ELEMENT. #ov-countdown is retired; the round
+  // digits and FIGHT paint the SAME #ship-select-countdown the launch ticker does, through the one
+  // renderer beside launchCountdown (_cdRound -> _cdPaint). Everything this function used to carry
+  // went with the second element: the animationend listener that stripped .show (and left a ~100 ms
+  // hole between every digit - the owner's "flicker on 2"), the .cd-ring restart, the
+  // ROUND_CD_HOLD_MS / ROUND_CD_FIGHT_HOLD_MS / _roundCdClearT hold that papered over that hole, and
+  // endCountdown() which existed only to lift it. The hold IDEA survives, one level down, as
+  // _cdPaint's per-paint `hold`.
+  // ⚠ The CALLERS and the CLOCK are untouched: updateRoundSystem still drives this from
+  // game.warmupTimer's threshold crossings, so every peer still renders from its own anchored timer.
+  // `typeof` is safe here - _cdRound is a hoisted function declaration, not a const (no TDZ).
   function countdown(n, label) {
-    const el = $('ov-countdown');
-    if (!el) return;
-    const isFight = (n === 0 || n === 'FIGHT');
-    el.classList.toggle('fight', isFight);
-    el.querySelector('.cd-label').textContent = label || '';
-    el.querySelector('.cd-label').style.display = isFight ? 'none' : 'block';
-    el.querySelector('.cd-number').textContent = isFight ? 'FIGHT' : String(n);
-    // Install a one-shot animationend listener so the element fully clears
-    // after the fade-out keyframe (instead of holding at the final frame).
-    if (!el._hasEndListener) {
-      el.addEventListener('animationend', (e) => {
-        if (e.animationName === 'ovCountdown') el.classList.remove('show');
-      });
-      el._hasEndListener = true;
-    }
-    replay(el, 'show');
-    // The ring is a child with its own animation; restart it too.
-    const ring = el.querySelector('.cd-ring');
-    if (ring) { ring.style.animation = 'none'; void ring.offsetWidth; ring.style.animation = ''; }
+    try { if (typeof _cdRound === 'function') _cdRound(n, label); } catch (_) {}
   }
 
   // ---- Medals ----
@@ -91156,7 +91790,7 @@ const Overlays = (() => {
     el.querySelectorAll('.ban-line').forEach((ln) => { ln.style.animation = 'none'; void ln.offsetWidth; ln.style.animation = ''; });
   }
 
-  return { damageVignette, warp, underwater, killStreak, countdown, medal, abilityFlash, respawn, hideRespawn, banner };
+  return { damageVignette, warp, underwater, killStreak, countdown, medal, abilityFlash, respawn, hideRespawn, banner };   // (v40.57) endCountdown retired with #ov-countdown; launchCountdown calls _cdClear() instead
 })();
 
 // Expose globally for ease of debugging / future hooks.
@@ -92371,6 +93005,75 @@ function initHbarPool(maxBars, maxMarkers) {
 const _hbTmpA = new THREE.Vector3();
 const _hbTmpB = new THREE.Vector3();
 
+// (v40.55) ===== WHY THE CALLOUT TAGS FLICKERED ==========================================
+// Three independent oscillators, all in updateEnemyHealthBars below:
+//   1. THE SLOT WAS THE VISIBLE-SET INDEX. `_labels[labelIdx++]` meant one ship dropping out
+//      re-pointed every div after it at a DIFFERENT ship inside one frame — colour, text and
+//      position all jumped, and the v32.87 dirty-checks obligingly wrote the new values. Bot
+//      death and spawning reorder game.entities on their own, so this fired unprompted.
+//   2. EVERY GATE WAS A BARE BOOLEAN. LOS is re-raycast at ~15 Hz and flips as a ship grazes
+//      cover; the range cap and the screen margin flip on the pixel. A miss both hid the div
+//      (which RESTARTS the two CSS animations on .cl-wrap) and cleared _labelSpotTime, so the
+//      0.45 s digitize-in re-ran and the name re-scrambled from the random-glyph branch.
+//   3. THE MIRROR HAD NO DEAD BAND. `sx > winW * 0.55` flipped every frame for a ship parked
+//      near mid-screen — and see the CSS: only the counter-flip on .cl-text was landing, so
+//      what the owner actually saw strobing was the NAME reversing.
+// Fixes here: a slot is OWNED by an entity and only handed on by least-recently-drawn; a gate
+// that wants to HIDE has to keep saying so for LABEL_DROP_HOLD before it wins; the flip gets a
+// dead band. Showing is still instant and the left/top writes are untouched, so no tag lags
+// behind its ship. Tunables, not magic numbers, because these are feel decisions:
+const LABEL_DROP_HOLD = 0.35;   // s a SOFT gate (LOS / screen margin / range) must hold before the tag drops
+const LABEL_SHOW_HOLD = 0.25;   // (v40.58) ...and s EVERY gate must then read clean before a tag that ACTUALLY dropped comes back
+const LABEL_FLIP_ON   = 0.58;   // fraction of viewport width at which the callout mirrors...
+const LABEL_FLIP_OFF  = 0.52;   // ...and the fraction it has to fall back under to un-mirror
+const _lblOwner = [];           // slot -> the entity that holds it (kept while hidden, so a returning ship gets its own div back)
+const _lblSeen  = [];           // slot -> game.time the slot was last drawn (the LRU key)
+const _lblStamp = [];           // slot -> frame id of the last claim
+let   _lblFrameId = 0;
+// A soft gate. `ok` false does NOT hide at once — it starts (or continues) a hold and returns
+// true while the tag should stay up. Deliberately does not reset the clock on success: the
+// draw point does that, and only when no gate held this frame, or a gate that alternates
+// pass/fail would re-arm the hold forever and blink at 1/LABEL_DROP_HOLD instead.
+// (v40.58) It now also RECORDS the drop: when a hold finally expires the tag is genuinely off
+// screen, so _lblDown is latched here and the re-acquire test AFTER THE LAST GATE (see
+// LABEL_SHOW_HOLD there) makes it earn its way back. The clean branch stays a bare `return true`
+// on purpose - the three gates short-circuit, so a gate that passes cannot know whether a LATER
+// gate is still blocking, and deciding the re-show here would let the always-clean range gate
+// re-acquire on behalf of a still-blocked LOS gate and clear the SHARED _lblDropT out from under
+// it. Measured: that arrangement makes a permanently occluded ship strobe on ~0.5 s / off ~0.27 s
+// forever, which is worse than the bug. Every dirty gate clears _lblClearT, and that is what
+// restarts the re-acquire clock.
+function _lblSoftGate(ent, ok, now) {
+  if (ok) return true;
+  ent._lblHeld = true;
+  ent._lblClearT = null;                                   // (v40.58) a dirty gate restarts the re-acquire clock
+  if (ent._lblDropT == null) ent._lblDropT = now;
+  if ((now - ent._lblDropT) < LABEL_DROP_HOLD) return true;
+  ent._lblDown = true;                                     // (v40.58) the tag really is down now
+  return false;
+}
+// Hand `ent` a pool slot and keep handing it THE SAME ONE. Falls back to the first free slot,
+// else the least-recently-drawn one nothing has claimed this frame; -1 when the pool is full.
+function _lblClaimSlot(ent, now, n) {
+  const s = ent._labelSlot;
+  if (s != null && s >= 0 && s < n && _lblOwner[s] === ent && _lblStamp[s] !== _lblFrameId) {
+    _lblStamp[s] = _lblFrameId; _lblSeen[s] = now; return s;
+  }
+  let best = -1, bestT = Infinity;
+  for (let i = 0; i < n; i++) {
+    if (_lblStamp[i] === _lblFrameId) continue;
+    if (_lblOwner[i] == null) { best = i; break; }
+    const t = _lblSeen[i] || 0;
+    if (t < bestT) { bestT = t; best = i; }
+  }
+  if (best < 0) return -1;
+  const prev = _lblOwner[best];
+  if (prev && prev !== ent) prev._labelSlot = null;
+  _lblOwner[best] = ent; ent._labelSlot = best;
+  _lblStamp[best] = _lblFrameId; _lblSeen[best] = now;
+  return best;
+}
+
 
 
 
@@ -92397,14 +93100,15 @@ function updateEnemyHealthBars() {
 
   for (let i = 0; i < hbarPool.bars.length; i++) _hbarDisplay(hbarPool.bars[i], 'none');
 
-  let labelIdx = 0;
   const _labels = hbarPool.labels;
+  const _labelN = _labels.length;
   const _localTeam = (player && player.team) ? player.team : null;
+  _lblFrameId++;   // (v40.55) one stamp per frame; a slot left unstamped below is unused and gets hidden
   // Helper: walk one entity. Reused for bots and network players so the
   // friendly/enemy branch stays in one place.
   const _processShipForLabel = (ent) => {
     if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
-    if (labelIdx >= _labels.length) return;
+    ent._lblHeld = false;   // (v40.55) set by _lblSoftGate below; the draw point only clears the hold clock when NO gate held
     if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
       ent._labelSpotTime = null;
       return;
@@ -92414,21 +93118,31 @@ function updateEnemyHealthBars() {
     // from the broadcast cloak flag ; bots don't have the field so this
     // is a no-op for the bot-vs-bot solo case. Clears _labelSpotTime so
     // the digitize-in animation re-runs cleanly when the cloak ends.
-    if (ent._cloaked) { ent._labelSpotTime = null; return; }
+    if (ent._cloaked) { ent._labelSpotTime = null; ent._lblDown = false; ent._lblDropT = null; ent._lblClearT = null; return; }   // (v40.58) uncloaking is a fresh acquisition, not a re-acquire
     const dist = player.position.distanceTo(ent.position);
     // (v38.02) A capital ship is legible from a great deal further away than a fighter, and the
     // player needs to be able to read its health from outside its guns' reach.
-    if (dist > ((ent.isCarrier || ent.isOwCarrier || ent.isOwBoss) ? 30000 : 3500)) { ent._labelSpotTime = null; return; }   // (v38.78)
+    // (v40.55) SOFT. A ship holding station right on the cap blinked its tag every frame. This one
+    // still clears _labelSpotTime when it finally wins, because a ship that flies out of range is
+    // genuinely lost contact and should re-type its name when it comes back.
+    if (!_lblSoftGate(ent, dist <= ((ent.isCarrier || ent.isOwCarrier || ent.isOwBoss) ? 30000 : 3500), now)) { ent._labelSpotTime = null; return; }   // (v38.78)
     // Anchor the callout's target bracket AT the ship (not below
     // it). The diagonal line + text peel to the upper-right (or upper-
     // left when flipped), so the bracket reads as a target reticle on
     // the hull rather than a floating tag underneath.
     const wp = _hbTmpA.copy(ent.position);
     const proj = _hbTmpB.copy(wp).project(camera);
-    if (proj.z > 1) { ent._labelSpotTime = null; return; }
+    // (v40.55) HARD, and it has to be: behind the camera there is no screen point to hold onto, so
+    // holding here would pin the tag to a stale position. Clears the hold clock too.
+    if (proj.z > 1) { ent._labelSpotTime = null; ent._lblDropT = null; ent._lblDown = false; ent._lblClearT = null; return; }   // (v40.58) the re-acquire clock clears with the rest
     const sx = (proj.x * halfW) + halfW;
     const sy = -(proj.y * halfH) + halfH;
-    if (sx < -140 || sx > winW + 140 || sy < -20 || sy > winH + 30) {
+    // (v40.55) SOFT. The margin edge oscillated for any ship flying along it. The tag is absolutely
+    // positioned at sx/sy inside #enemy-healthbars, which is fixed, viewport-sized and clipped by
+    // `body { overflow: hidden }` — so holding it simply parks it off screen for a third of a
+    // second, invisible either way and with no scrollbar or reflow, and it stops the show/hide
+    // churn that restarts .cl-wrap's animations.
+    if (!_lblSoftGate(ent, !(sx < -140 || sx > winW + 140 || sy < -20 || sy > winH + 30), now)) {
       ent._labelSpotTime = null; return;
     }
     // LOS gate (cached at ~15 Hz, same as the legacy bar code).
@@ -92441,7 +93155,31 @@ function updateEnemyHealthBars() {
       ent._hbLosBlocked = (wallDist < dist - 30) || _losBlockedByClusters(player.position, toEnt, dist);
       ent._hbLosTime = now;
     }
-    if (ent._hbLosBlocked) { ent._labelSpotTime = null; return; }
+    // (v40.55) SOFT, and this is the loud one. _hbLosBlocked is re-raycast at ~15 Hz (see
+    // HBAR_LOS_INTERVAL) and flips as a ship grazes cover, so the tag blinked at up to 15 Hz AND
+    // re-ran its 0.45 s digitize-in on every blink — which is why the name looked like it was
+    // scrambling. _labelSpotTime is deliberately NOT cleared here: a ship ducking behind a rock
+    // has already been identified, so when it reappears its name is still typed out. Range, cloak,
+    // death and the cinematic still clear it, so genuine re-acquisition still types.
+    if (!_lblSoftGate(ent, !ent._hbLosBlocked, now)) { return; }
+    // (v40.58) THE OTHER EDGE OF THE HYSTERESIS, and it has to live HERE, after the LAST soft gate,
+    // rather than inside _lblSoftGate: the gates above short-circuit with an early return, so a
+    // gate answering "clean" cannot see that a later one is still dirty. Reaching this line means
+    // every gate read clean this frame. v40.55 debounced only the way DOWN, so a gate that blocked
+    // ~1 s, cleared ~0.2 s and blocked again drew the tag through every clear window and through
+    // the first LABEL_DROP_HOLD of every block: the hold delayed each blink, it never stopped one,
+    // and that is the flicker left over once the gas is out of the LOS test. Now a tag that
+    // ACTUALLY went down (_lblDown, latched in _lblSoftGate) must see LABEL_SHOW_HOLD of
+    // continuously clean frames before it returns, and any dirty gate nulls _lblClearT and
+    // restarts that clock - so a flapping gate settles to hidden instead of strobing. Coming back
+    // a quarter second late is invisible; a strobe is not. A tag that never went down skips this
+    // entirely, so nothing lags behind a ship in the common case, and a short graze past cover
+    // (shorter than LABEL_DROP_HOLD) never blinks at all.
+    if (ent._lblDown) {
+      if (ent._lblClearT == null) ent._lblClearT = now;
+      if ((now - ent._lblClearT) < LABEL_SHOW_HOLD) return;
+      ent._lblDown = false; ent._lblDropT = null; ent._lblClearT = null;   // re-acquired: back on the instant-show path
+    }
     // Spotted ; start the digitize-in clock.
     if (ent._labelSpotTime == null) ent._labelSpotTime = now;
     const isEnemy = _localTeam == null || ent.team !== _localTeam;
@@ -92466,9 +93204,19 @@ function updateEnemyHealthBars() {
     } else {
       visText = fullText;
     }
-    const div = _labels[labelIdx++];
+    // (v40.55) THE SLOT BELONGS TO THE SHIP, not to its position in the visible set. `labelIdx++`
+    // re-pointed every div after a drop-out at a different ship inside one frame.
+    const _slot = _lblClaimSlot(ent, now, _labelN);
+    if (_slot < 0) return;                     // pool full this frame (24 slots, 7v7 plus headroom)
+    if (!ent._lblHeld) ent._lblDropT = null;   // drawn with every gate clean: the hold clock resets
+    const div = _labels[_slot];
     _hbarDisplay(div, '');
-    const flip = (sx > winW * 0.55);
+    // (v40.55) Dead band on the mirror (LABEL_FLIP_ON / _OFF). One threshold made a ship parked
+    // near mid-screen re-write className every frame — and because .cl-wrap's transform is owned
+    // by its animations, only the counter-flip on .cl-text was landing, so the NAME strobed
+    // backwards and forwards. The CSS fix moves the mirror onto .ship-name-label itself.
+    const flip = ent._labelFlip ? (sx > winW * LABEL_FLIP_OFF) : (sx > winW * LABEL_FLIP_ON);
+    ent._labelFlip = flip;
     let cls = 'ship-name-label ' + (isEnemy ? 'ship-name-label--enemy' : 'ship-name-label--friendly');
     if (flip) cls += ' flip-left';
     // (v32.87 perf) Dirty-check these DOM writes : they ran every frame for every
@@ -92488,7 +93236,16 @@ function updateEnemyHealthBars() {
     for (const np of net.networkPlayers) _processShipForLabel(np);
   }
   // Hide unused label slots.
-  for (let i = labelIdx; i < _labels.length; i++) _hbarDisplay(_labels[i], 'none');
+  // (v40.55) Hide only the slots nothing claimed THIS frame. The owner is KEPT on a hidden slot so
+  // a ship that comes back gets its own div back (same position, same text, animations not
+  // restarted); a dead or cloaked owner is released so a long endless run cannot pin dead entities
+  // in the pool (see the open note about bots accumulating in game.entities).
+  for (let i = 0; i < _labelN; i++) {
+    if (_lblStamp[i] === _lblFrameId) continue;
+    _hbarDisplay(_labels[i], 'none');
+    const _own = _lblOwner[i];
+    if (_own && (!_own.alive || _own._cloaked)) { _own._labelSlot = null; _lblOwner[i] = null; }
+  }
 
   // Stasis field world markers
   let mkIdx = 0;
@@ -92598,7 +93355,7 @@ function __pmark(name) {
     hb: [], hbLast: 0, hbN: 0,                    // (v40.07) the heartbeat
     foc: [], focPrev: '', rafN: 0, beatN: 0,      // (v40.20) is the browser still SCHEDULING frames?
     lt: [],                                       // (v40.26) long TASKS (not frames): [t, ms, name, attribution]
-    gt: [], gtP: [], gtQ: null, gtE: null, gtOk: undefined,     // (v40.08) TIME_ELAPSED around renderFrame
+    gt: [], gtP: [], gtQ: null, gtL: null, gtE: null, gtOk: undefined,     // (v40.08) TIME_ELAPSED around renderFrame; (v40.59) gtL = the open segment's label
     first: [], seenG: null, wrapped: false,
     slowgl: [], curProg: null, glWrapped: false,  // (v40.34) [t, call, ms, hint] - every GL entry point that blocked >= 20 ms
     ui: [], uiArmed: false,                       // (v40.34) [t, element, class] - overlay class changes (the compositor's first-use pipelines)
@@ -92627,23 +93384,67 @@ function __pmark(name) {
     } catch (_) { R.gtOk = false; }
     return R.gtOk;
   }
+  // ═══ (v40.59) ...AND WHICH PASS. THIS IS INSTRUMENTATION, NOT A FIX. ═════════════════════════
+  // `gt` says "inside our bracket in time", not "our work", and v40.41's mark n103 proved it on
+  // this exact machine: a stall frame whose ENTIRE draw list was one full-screen quad still
+  // measured 2840 ms. TIME_ELAPSED is elapsed GPU-TIMELINE time between two markers, so anything
+  // that preempts the card between them - the browser compositor, another GL client, a clock ramp,
+  // a present-queue block on the final composite - lands inside the number. 40.57's n7 (gt 2757 ms)
+  // and n8 (gt 4139 ms), both with the main thread free, nothing created, no new pipeline and
+  // `slowgl` empty, are the same reading and CANNOT be told apart from it by one bracket.
+  // A CHAIN of them can, because a stretched timeline lands wherever the frame happened to be when
+  // it was stretched, while a genuinely expensive pass lands in the SAME label every time.
+  // ⚠ Read this beside the `?nodom` verdict (v40.44), which is still the standing answer for the
+  // in-play class: with every HTML overlay hidden, round 1 had NO in-play stall at all. If the
+  // seconds land nowhere in particular here, that is the lane, not our pixels.
+  // ⚠ Only one TIME_ELAPSED query may be active at a time, so these are strictly SEQUENTIAL and
+  // never nested: `s(label)` closes whatever is open (recording it under its own label) and opens
+  // the next; b() = s('pre'), e() = s(null) + the drain. The chain covers renderFrame AND the
+  // ripple GPGPU compute, which runs in the master tick outside the old bracket and has therefore
+  // never been inside `gt` at all. The drain still happens ONCE per frame, in e(): a
+  // getQueryParameter is a synchronous round trip across the command buffer (v40.21), and doing one
+  // per segment would multiply the probe's own cost by eight.
+  // Off by default. `?pbseg` (or localStorage lss_pbseg = '1') turns it on; without it every s() is
+  // a property read that resolves to null and the whole-frame bracket behaves exactly as it did in
+  // 40.58, so the two are a clean A/B rather than a replacement.
+  let _f8Seg = false;
+  try { _f8Seg = /[?&]pbseg\b/i.test(location.search || '') || localStorage.getItem('lss_pbseg') === '1'; } catch (_) {}
   if (!_f8NoGpu) window.__f8gt = {   // (v40.21) absent in nogpu mode, so gameLoop's `if (window.__f8gt)` skips it
+    seg: _f8Seg,
+    s: function (label) {   // (v40.59) close the open segment, open `label` (null = just close)
+      try {
+        if (!_f8Seg || !_gtInit()) return;
+        const gl = R.gl;
+        if (R.gtQ) {
+          try { gl.endQuery(R.gtE.TIME_ELAPSED_EXT); R.gtP.push([performance.now(), R.gtQ, R.gtL]); } catch (_) {}
+          R.gtQ = null; R.gtL = null;
+          // (v40.59) ⚠ THE DRAIN LIVES IN e(), AND e() RETURNS EARLY WHEN NO QUERY IS OPEN. On a
+          // COVERED frame - the ship picker, the whole launch window - gameLoop never calls b()/e(),
+          // and yet the ripple segment and the mirror's own s() calls still run, so without this cap
+          // their queries would accumulate for the length of the cover with nothing ever draining
+          // them. Same purge e() uses, applied where the queries are actually created.
+          if (R.gtP.length > 256) { for (const _e of R.gtP) { try { gl.deleteQuery(_e[1]); } catch (_) {} } R.gtP = []; }
+        }
+        if (label) { R.gtQ = gl.createQuery(); R.gtL = label; gl.beginQuery(R.gtE.TIME_ELAPSED_EXT, R.gtQ); }
+      } catch (_) { R.gtQ = null; R.gtL = null; }
+    },
     b: function () {
       try {
         if (!_gtInit()) return;
         const gl = R.gl;
         if (R.gtQ) { try { gl.endQuery(R.gtE.TIME_ELAPSED_EXT); gl.deleteQuery(R.gtQ); } catch (_) {} R.gtQ = null; }
         R.gtQ = gl.createQuery();
+        R.gtL = _f8Seg ? 'pre' : null;   // (v40.59) unlabelled = the 40.58 whole-frame bracket
         gl.beginQuery(R.gtE.TIME_ELAPSED_EXT, R.gtQ);
-      } catch (_) { R.gtQ = null; }
+      } catch (_) { R.gtQ = null; R.gtL = null; }
     },
     e: function () {
       if (!R.gtQ) return;
       try {
         const gl = R.gl;
         gl.endQuery(R.gtE.TIME_ELAPSED_EXT);
-        R.gtP.push([performance.now(), R.gtQ]);
-        R.gtQ = null;
+        R.gtP.push([performance.now(), R.gtQ, R.gtL]);
+        R.gtQ = null; R.gtL = null;
         // (v40.09) ⚠ FLAG DISJOINT, DO NOT DROP IT. v40.08 discarded the whole batch whenever
         // GPU_DISJOINT was set - and that bit is set when the GPU was interrupted mid-query, which
         // is exactly what a multi-second stall IS. So the probe was throwing away the only samples
@@ -92655,14 +93456,21 @@ function __pmark(name) {
           if (!gl.getQueryParameter(e[1], gl.QUERY_RESULT_AVAILABLE)) { keep.push(e); continue; }
           const ms = gl.getQueryParameter(e[1], gl.QUERY_RESULT) / 1e6;
           gl.deleteQuery(e[1]);
-          R.gt.push([+(e[0] / 1000).toFixed(2), +ms.toFixed(1), disj]);
-          if (R.gt.length > 300) R.gt.shift();
+          const row = [+(e[0] / 1000).toFixed(2), +ms.toFixed(1), disj];
+          if (e[2]) row.push(e[2]);   // (v40.59) 4th element = the pass this reading covered
+          R.gt.push(row);
+          if (R.gt.length > 600) R.gt.shift();   // (v40.59) up to 8 rows a frame when segmenting
         }
         R.gtP = keep;
-        if (R.gtP.length > 64) { for (const e of R.gtP) { try { gl.deleteQuery(e[1]); } catch (_) {} } R.gtP = []; }
-      } catch (_) { R.gtQ = null; }
+        if (R.gtP.length > 256) { for (const e of R.gtP) { try { gl.deleteQuery(e[1]); } catch (_) {} } R.gtP = []; }
+      } catch (_) { R.gtQ = null; R.gtL = null; }
     }
   };
+  // (v40.59) The call sites reach the chain through this property, never through a top-level const:
+  // a `const` read before its own line has run is a TDZ throw that `typeof` does not shield (v39.02
+  // killed boot everywhere that way), and renderPostFX / the mirror / the ripple tick all live
+  // thousands of lines above this one. Null unless ?pbseg, so an off run costs one property read.
+  try { window.__f8seg = (_f8Seg && !_f8NoGpu) ? function (label) { try { if (window.__f8gt) window.__f8gt.s(label); } catch (_) {} } : null; } catch (_) {}
   // ═══ (v40.10) WHICH GEOMETRY, AND IN WHAT SHAPE ══════════════════════════════════════════════
   // 40.09 pinned the lane: `gt [30.36, 3652, 0]` - one frame's own draw list costing 3.65 s of GPU
   // time with the disjoint bit CLEAR, against 15-18 ms neighbours - and `made [30.34, 0, 4, 0]`
@@ -93186,6 +93994,30 @@ function __pmark(name) {
       // blames the GPU has to be able to rule it out: [running, K, measured ms, cap ms].
       kw: (function () { try { const W = window.__keepWarm; if (!W) return null;
         return [(W.on && !W.disabled) ? 1 : 0, W.K, W.ms, W.cap]; } catch (_) { return null; } })(),
+      // (v40.59) INSTRUMENTATION, NOT A FIX. Which PASS the GPU-timeline time landed in, from the
+      // sequential bracket chain - `?pbseg` only, and the rows in `gt` carry a 4th element then.
+      // {label: [count, total ms, worst ms]} over the same 5 s window. A pass that is genuinely
+      // expensive lands in the same label every time; a stretched timeline lands wherever the frame
+      // happened to be. Labels: pre / scene / mirror / refcopy / ads / bloom / comp / ripple.
+      seg: (function () { try {
+        if (!(window.__f8gt && window.__f8gt.seg)) return null;
+        const o = {};
+        for (const r of R.gt) {
+          if (r[0] < now - 5 || !r[3]) continue;
+          const e = o[r[3]] || (o[r[3]] = [0, 0, 0]);
+          e[0]++; e[1] = +(e[1] + r[1]).toFixed(1); if (r[1] > e[2]) e[2] = r[1];
+        }
+        return o;
+      } catch (_) { return null; } })(),
+      // (v40.59) THE REFERENCE WORKLOAD, per frame and timestamped: [t, burn ms, K, disjoint]. The
+      // keep-warm quad is CONSTANT-cost and measured by its own query, so it is the discriminator
+      // `gt` has never had. Line these peaks up with a stall frame: if the quad still cost ~4 ms
+      // while a scene segment read 4139 ms, the card was not slow and our shading did not cost that;
+      // if the quad blew up too, the whole GPU timeline was stretched and shedding our own pixels
+      // cannot touch it. Before 40.59 only a >= 8-sample mean survived and the disjoint samples -
+      // the stall frames themselves - were dropped, so this reading never existed when it mattered.
+      kwp: (function () { try { const W = window.__keepWarm; if (!W || !W.samp) return null;
+        return _peaks(W.samp, now, 12, 6); } catch (_) { return null; } })(),
       // (v40.07) the settings that decide how much GPU a frame costs, so a mark stops needing a
       // separate trip to localStorage to be read: preset, canvas pixels, scene-target pixels, panel.
       q: (function () { try { return localStorage.getItem('lss_quality') || '?'; } catch (_) { return '?'; } })(),
@@ -93403,7 +94235,16 @@ function gameLoop(timestamp) {
       const el = _hudEl('fps-counter');   // (v38.61) cached lookup
       if (el) {
         if (el.style.display !== 'block') el.style.display = 'block';
-        el.textContent = fps + ' fps';
+        // (v40.55) THE READOUT REPAINTED FOR AN UNCHANGED NUMBER. A 60-sample rolling average lands
+        // on the same integer most of the time, and this wrote textContent anyway: a text node torn
+        // down and rebuilt, and a repaint of a fixed, text-shadowed box sitting over the canvas,
+        // four times a second, for no new information. Same dirty-check contract the display write
+        // above already had, and the same one _hudText gives the rest of the HUD.
+        // ⚠ HARDENING ONLY — NOT a proven cause of the owner's fps flicker. #fps-counter is a
+        // top-level body child and appears in NO body.lss-* hide list, so nothing display-toggles
+        // it; that half of the report is still OPEN. Do not close it on the strength of this.
+        const _fpsTxt = fps + ' fps';
+        if (game._fpsText !== _fpsTxt) { game._fpsText = _fpsTxt; el.textContent = _fpsTxt; }
       }
     }
   } else {
@@ -93843,7 +94684,15 @@ function gameLoop(timestamp) {
       // the synchronous paths bake a whole 96x96 grid of `_stGroundYCarved` queries in one call.
       // These sub-marks cost one performance.now() each and only with the profiler on, and the F8
       // recorder picks them up with no change of its own (it walks every key in window.__prof).
+      // (v40.59) ⚠ THE RIPPLE COMPUTE HAS NEVER BEEN IN `gt` AT ALL. It runs HERE, in the master
+      // tick, and the v40.08 bracket only ever covered renderFrame - which runs later in the same
+      // rAF. So every mark that read "our draw list cost N ms" was silently excluding this pass.
+      // Its own segment, opened and closed around the call (no frame bracket is open at this point).
+      // On a COVERED frame renderFrame never runs, so these are the only queries the chain creates -
+      // which is why s() carries its own R.gtP cap.
+      if (window.__f8seg) window.__f8seg('ripple');
       try { _swRippleTick(dt); } catch (_) {}
+      if (window.__f8seg) window.__f8seg(null);
       // (v39.49) was 'hub:ripple' - but this mark closes the clipmap update, the chunk STREAMER
       // (_swBuildShell, 2 chunks x 2 shells a frame on endless = the 15-21 ms frames measured on
       // endless_bend) and the water update as well as the ripple tick. Named for what it covers.
@@ -94153,9 +95002,15 @@ function gameLoop(timestamp) {
   }
 
   // In-place expire of old kill-feed entries; avoids per-frame array allocation.
+  // (v40.55) ...and the DOM hears about it now. This pruned the ARRAY only, so the feed painted
+  // dead lines until the next kill rebuilt it and several vanished at once — read from the
+  // outside as the feed flickering. The re-render only runs on an actual splice, and only
+  // rewrites the rows whose text changed, so a quiet match costs one boolean per frame.
+  let _kfDirty = false;
   for (let i = game.killFeed.length - 1; i >= 0; i--) {
-    if (game.time - game.killFeed[i].time >= 8) game.killFeed.splice(i, 1);
+    if (game.time - game.killFeed[i].time >= 8) { game.killFeed.splice(i, 1); _kfDirty = true; }
   }
+  if (_kfDirty && typeof _renderKillFeed === 'function') _renderKillFeed();
 
   // Update dynamic explosion lights
   updateDynamicLights();

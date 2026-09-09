@@ -4521,3 +4521,215 @@ group distance and the last dt. Pane, 30 s into an endless run: `built {bats:tru
 `groups {bats:4, members:{bats:144}}`, nearest bat group 8034 u away against `drawR` 6000 — they
 exist and are simply not in range yet at the spawn, which is what the owner should now see change as
 they fly into a chamber.
+
+### v40.55 — the view toggle is not a combat-only control
+
+Owner: "you should be able to switch views, 3rd person to 1st person, whenever ... it shouldn't be
+locked between rounds and end of matches". The GAMEPAD path alone was gated
+`game.state === 'playing'`, so the pad was locked out of warmup (the whole 3-2-1 after the picker
+closes), roundEnd and matchEnd — while the V key (the keydown handler has no state gate) and the
+mobile view button worked in all of them. Same action, different answer depending on the device.
+⚠ Not simply ungated: D-pad DOWN is also the picker's **map cycle** (`cycleMap(1)` in the
+`_shipSelectActive && !_commitPending && (game.state === 'select' || _betweenRoundsPick())` block)
+and drives the VR settings menu. The gate is now "not while a menu owns the pad" — settings open, or
+`#ship-select.active` — so the picker keeps cycling maps and every other moment gets the toggle.
+⚠ TDZ: `_shipSelectActive` is a `const` declared ~70 lines BELOW the toggle in the same function, so
+it cannot be read there (`typeof` would not shield it); the check reads the DOM directly, and only on
+frames where the button is actually down. Pane: keydown 'v' flips third person true → false → true in
+'playing' with the body class following; the generated build has no `game.state === 'playing'` left
+on the pad toggle.
+
+### v40.56 — the flicker set: one shared cause for three of the four reports
+
+Three parallel investigations, a synthesis pass that looked for a shared cause, then two adversarial
+reviewers; 26 patches applied from the second reviewer's amended set (it added the launchCountdown
+bail-out hand-back the first had missed).
+
+**THE SHARED CAUSE (lobby buttons, fps/kills, part of the callout tags).** `startShipPreviewLoop()`
+adds `body.lss-picker-3d`, then runs `_animateShipPreview()` BY HAND — and that hand-run tick has no
+`animId` yet, while `_lssPickerOwnsFrame()` gates on `if (!s.animId) return false`. So on the raise
+frame the tick reads "the picker does NOT own the frame", the toggle immediately REMOVES the class
+added three lines earlier, and `_lssRenderPicker()` is skipped; meanwhile gameLoop skips
+`renderFrame()` too, because by the time it reaches its cover branch the hand tick HAS set `animId`.
+On that one frame thirteen subtrees flip hidden → shown → hidden (`#hud`, `#kill-feed`,
+`#enemy-healthbars`, `#crosshair`, `#minimap`, `#cockpit-frame` …), the canvas is presented
+UNPAINTED, and `buildShipSelect()` is re-creating the ship / perk / skin / CONFIRM buttons — which is
+exactly "the buttons in the lobby were flickering in between rounds", and also "the fps readout and
+kills flickered" (`#kill-feed` is in that hide list and `#fps-counter` sits translucent right above
+it, watching the frame go black). Fix: a `_startTick` flag set and cleared inside one synchronous
+block (`try/finally`), and `_lssPickerOwnsFrame` accepts it — "a stopped loop returns false" is
+otherwise unchanged.
+
+**(a) The countdown — two tickers on ONE clock.** `_launchSoloAfterCinematic` anchors `warmupTimer`
+to `LSS.SHORT_COUNTDOWN` (3) and starts `launchCountdown(3)` in the same statement. The suppression
+meant to prevent that reads `selectActive`, but the pre-round lineup cinematic already dropped
+`#ship-select .active` and never restores it, so it is false for the whole launch countdown and both
+run. ⚠ The white "3" is structurally impossible there: `_anchorTimer` sets `warmupTimer` to exactly 3
+and the crossing test is `prev > n`, so the first white digit is "2" — the owner's "it changes to
+white 2 from orange 3". And the only thing hiding the orange overlay was
+`#ov-countdown.show ~ #ship-select-countdown`, keyed to a class the animationend listener REMOVES
+after 0.9 s while ticks are 1.0 s apart — so it fell open for ~100 ms between every digit. Fix: a
+stable `body.lss-round-cd` re-armed on every tick and released only when the sequence ends, plus an
+explicit digit-ownership flag handed back at LAUNCH, on abort and on the missing-element bail.
+
+**(c) Callout tags.** Slot ownership per frame plus hysteresis on the oscillating gates (range,
+screen margin, line of sight) and a dead band on the flip-left mirror; the `flip-left` transform
+moved off `.cl-wrap`, where the animations own `transform`. Behind-camera stays a hard cut.
+
+**(d) Kill feed / fps.** The feed rebuilt itself with `innerHTML = ''` + `createElement` on every
+kill; it is now a fixed row pool, and the 8 s expiry actually reaches the DOM. `#fps-counter` only
+writes when the number changed.
+
+Pane on 40.56: countdown 3 → 2 → 1 with `bothCountdownsVisible: 0`; label pool 24 with two shown
+carrying their class, text and position; kill feed five pooled rows; no console errors.
+
+### v40.57 — ONE countdown. `#ov-countdown` is retired.
+
+Owner: "why not just stay as the orange countdown and get rid of the white? we don't need two".
+Designed and built by one agent, then refuted by two (coverage across every mode; dead code and
+anchors). 22 patches after merging both amendments.
+
+**Which element survived, and why it was not a coin flip.** `#ship-select-countdown` stays,
+`#ov-countdown` is deleted. The orange element is named at 18 sites against the white one's 8, so
+retiring the smaller surface is less churn — and restyling the white one orange would ALSO mean
+repointing all five orange `.remove('active')` sites at it and renaming its children. More decisive:
+`.active` is a plain display toggle, so one renderer can hold the element up across a whole 3-2-1 and
+take it down when it decides, whereas `#ov-countdown` showed via a `forwards` animation plus an
+`animationend` listener that stripped `.show` — and that ~100 ms per-digit hole IS the mechanism
+behind the owner's flicker. It is also `position: fixed`, a direct `<body>` child at z 110 with no
+parent-visibility dependency.
+
+**One element, two sources.** A renderer `_cdPaint(owner, text, sub, opts)` / `_cdClear(owner)` /
+`_cdRound(n, label)` sits beside `launchCountdown`. The launch ticker paints as owner `'launch'`;
+`Overlays.countdown()` is now a one-line delegate painting as `'round'`. Two arbitration layers:
+`game._launchCdOwnsDigits` still stands the round DIGITS down for the whole launch ticker (kept
+deliberately over `_countdownActive`, which lives 700 ms longer and would cut the v36.36 split's
+documented 1.0 s margin to 0.3 s), and a per-beat priority (FIGHT 2, everything else 1, a lower paint
+refused while a higher one holds) so the LAUNCH tick and the FIGHT beat — which land in the same
+millisecond on a fresh launch, in an order the file already documents as non-deterministic — resolve
+to FIGHT either way instead of by race. ⚠ Two visible at once is no longer a bug that was fixed; it
+is a state the DOM cannot express.
+
+**FIGHT** is a `.fight` variant on the surviving element: red `#ff4400` at 96px against the digits'
+orange 180px, tracking and shadow carried over verbatim from the retired
+`#ov-countdown.fight .cd-number`, with its own 1.2 s `cdFightPulse` that holds opaque to 70% (a word
+to read, not a digit to glance at). The sub-line hides on the FIGHT beat. The expanding `.cd-ring` is
+NOT carried over — it belonged to the white look.
+
+**Removed, not orphaned**: the markup, the whole CSS block, `.cd-label` / `.cd-number` / `.cd-ring`,
+the `ovCountdown` keyframes, the animationend listener, the freeflight hide, and the entire v40.55/56
+two-element referee — `body.lss-round-cd` and its rule, `ROUND_CD_HOLD_MS`,
+`ROUND_CD_FIGHT_HOLD_MS`, `_roundCdClearT`, `Overlays.endCountdown()`. The five
+`.remove('active')` sites now go through `_cdClear()` so an abort also releases `.fight` and any
+pending hold. `_launchCdOwnsDigits` is the one piece of v40.56 that stays. Grep confirms every
+remaining mention of the retired names is a COMMENT: zero live references in the generated build.
+
+Pane on 40.57: `#ov-countdown` absent from the DOM; launch runs 3 → 2 → 1 → LAUNCH in orange 180px;
+`Overlays.countdown(2,'ROUND 1')` paints orange 180px with the ROUND sub-line and
+`Overlays.countdown('FIGHT','')` paints red 96px with the sub hidden, both on the one element;
+`Overlays.endCountdown` is gone from the API; no console errors.
+
+### v40.58–40.59 — the callout tags through fire, and the between-rounds picker's missing items
+
+**v40.58 lock-on warning rehearsed.** The owner's 40.57 marks (n3, n7) put
+`enemy-lockon-warning FIRST full-lock` and the `lockon-pip` states on screen seconds before 2.3 s and
+2.8 s frames. It was never rehearsed because it shows by `style.display = 'flex'` from updateHUD (its
+base rule is `display:none`), not by a class, and it has two looks — amber LOCKING and the red
+`.full-lock` variant that recolours the text and every pip border. Both are now shown behind the
+cover, pips in filled and empty states.
+
+**v40.59 (c) the callout tags — the gas cloud IS the occluder.** ⚠ The obvious hypothesis was WRONG
+and the agent killed it with evidence: there is no `THREE.Raycaster` and no scene walk anywhere in
+the callout line-of-sight path, so there was never an FX mesh in a candidate list to filter out.
+`raycastLevel` only touches the level SDF, `game.levelBoxes` and the carrier / hub-city / overworld
+hulls — all static solids. The FX was baked into the RADIUS of the OTHER test,
+`_losBlockedByClusters`: one sphere per rock cluster at `clusterScale * 1.5`, sized (by its own
+comment) to stand for "a cluster's rock OR its gas envelope". The rocks themselves never reach past
+~1.14 × clusterScale (children pack inside 0.70, the largest adds ~0.44), so roughly 60 % of the
+blocking volume was see-through gas — the GasCloud billboard swarm per rock plus the smoke plumes
+the cluster keeps pushing into `game.effects`. A sight line grazing that halo read as occluded,
+cleared, and grazed again: exactly "it flickers looking at it through effects/fire". ⚠ And the sphere
+never shrank as the rocks inside it were destroyed (a cluster is only `alive === false` when EVERY
+child dies), so mid-fight the false occluder outlived the thing it stood for — "it stopped for a bit
+and flickering started again". Fix: the fat sphere is demoted to a broad-phase reject and a cluster
+the ray actually crosses is tested against its LIVE rock children at their own `collisionRadius`.
+Real occlusion is untouched; terrain and hulls were never in this function.
+⚠ Second contributor, also confirmed: v40.56's hysteresis debounced only the DOWN edge, so a gate
+that blocks ~1 s / clears ~0.2 s / blocks again still drew the tag on every clear window — the hold
+delayed each blink but could never stop one. The re-show edge is now held too, at the one chokepoint
+that knows every gate is clean, with the state cleared on the hard behind-camera gate and on cloak.
+Both callers benefit: the DOM callouts and the VR sprite labels.
+
+**v40.59 (b) the between-rounds picker.** `_rrCountdown` raises the picker itself and calls
+`buildShipSelect()` ONLY — it never runs what `enterShipSelect()` runs alongside it:
+`_setSkinPanelOpen(false)` (an open skin panel is `position:absolute; z-index:5` and comes back
+sitting over the hero ship), `buildMapSelector`, `_renderEliminationBotsBtn`, `_ssModeLabel`,
+`_updateShipSelectRoom`. So the between-rounds picker legitimately had fewer items than the
+pre-match one. ⚠ Worse, `_rrStagedRound` wraps the call in a try whose catch only warns: a throw
+inside `buildShipSelect()` skips the rest of `_rrCountdown` INCLUDING `launchCountdown`, so a partial
+picker and a missing countdown share one cause. Fixed by rebuilding the same sections per-section,
+each guarded, so one failure cannot take the launch with it. The map arrows are now disabled (and
+styled disabled) whenever the map cannot legally change mid-match, rather than absent, and the active
+map dot is marked directly instead of relying on `selectMap()`, which carries its own
+`game.state !== 'select'` guard.
+
+Pane on 40.59: pre-match picker 7 chips / 16 perk cards / 11 map dots (1 active) / 4 stat rows, map
+selector and CONFIRM visible; in play 5 of 24 label slots shown with correct text and the flip-left
+variant; 15 clusters live; no console errors.
+
+### v40.60 — ⚠ THE DRAIN WAS PROVING THE WRONG THING (and the honest verdict on the in-play class)
+
+From the owner's 40.57 cold run (n4–n8, RTX 5050 laptop, 60 Hz, quality high, 1536x864).
+
+**⚠ THE CORRECTION TO v40.32'S RULE.** `_drainProgramLinks` polls `COMPLETION_STATUS_KHR`, which
+answers "has the link TASK finished". three.js does NOT fetch a program's uniform locations at link
+time: `WebGLProgram.getUniforms()` is lazy and fires at `setProgram`, i.e. **inside the first DRAW**,
+and its first act is `getProgramParameter(program, ACTIVE_UNIFORMS)` — which Chrome answers by
+fetching the whole program-info bucket, where the D3D binary load is actually paid. So a drain can
+report every link complete and the very next draw still freezes the main thread. Recorded:
+`getProgramParameter 1116.8 ms` on a Tracker cockpit material (n4) and **1893.9 ms** on a hull (n5),
+heartbeat stopped 1863 / 1916 ms, both AFTER `drainWarmup` said everything was linked. **The drain
+now pays that first-use query itself, per program, sliced with yields** (`ld.primed` /
+`ld.primeWorst` / `ld.primeCapped` in the marks). Compile → drain → draw was right in shape and
+incomplete in substance for three builds.
+
+**The drain's own cost.** It re-asked EVERY program on EVERY pass, including ones that reported
+complete and cannot un-complete: n6's `drainFrame0` was 4158 ms over 597 passes across ~200 programs,
+about 120,000 synchronous command-buffer queries competing with the very GPU process running the
+links. Completed programs are now marked and never asked again, in this drain or any later one.
+
+**A warm that warmed nothing.** The ghost-fleet cloak warm ran 13 lines AFTER `scene.remove(group)`,
+and `_warmDrawRoot` draws by rendering `scene` — so all 7–14 warm draws rendered a scene that no
+longer contained the hull. The compile half worked; the ANGLE input-layout executable that is the
+entire point of the draw (v39.52) was never built, so the first real cloak in play still paid for it.
+Moved above the removal.
+
+**Ordering.** The 2320 ms overlay rehearsal links nothing and draws nothing of ours — it is rAF turns
+waiting for Skia — and it ran strictly AFTER 4.2 s of link waiting that is also just rAF turns.
+Started at phase E and joined at phase G, the two overlap: `max(a,b)` instead of `a+b`.
+Pane on 40.60 (warm process): prebake 2770 ms, `drainFrame0` 1313 ms over 186 polls with
+`primed: 1`, rehearsal 250 ms.
+
+**⚠ THE IN-PLAY CLASS: gt CANNOT SETTLE IT, AND THE AGENT SAID SO RATHER THAN GUESSING.** n7/n8 show
+`gt ≈ gpu ≈ stall` (2757 / 4139 ms), which looks like our own draw list costing seconds — but `gt` is
+a TIME_ELAPSED bracket, i.e. elapsed GPU-TIMELINE time between two markers, not busy time on our
+commands. This file already proved that on this exact machine: the v40.41 note records a stall frame
+whose entire draw list was ONE full-screen quad and which still measured 2840 ms. Nothing in
+renderFrame is state-dependent enough to multiply our cost 150–250× and return to 16 ms with
+`slowgl` empty and nothing created (scene target allocated once, bloom RTs fixed, refraction copy
+grow-only since v40.16, MSAA 0 at 'high', supersample inactive at 'high' on mains, the Reflector a
+measured 0.74 ms). **So: instrumentation, not a fix.** `?pbseg` adds a sequential per-pass GPU
+bracket chain — `scene`, `ads`, `bloom`, `comp`, `mirror`, `refcopy`, `ripple` — and the next
+recording names the pass instead of the frame.
+
+**⚠ THE KEEP-WARM WAS NOT CUT, DELIBERATELY.** Its cap is a fraction of the REFRESH PERIOD, and the
+v39.63 A/B that justified the pass ran on this laptop at 144 Hz (period 6.94 ms → cap 1.74 ms,
+"typical cost 0.4–0.7 ms"). At 60 Hz the same formula authorises 4.17 ms, and the recorder caught it
+at 3.48–4.73 ms — doing exactly what the formula says. But: the burn is excluded from `gt` by
+construction, 4.73 ms against a 2793 ms gap is 0.17 %, it is not even called on the covered launch
+frames where n4–n6 stalled, and a countdown digit lives 1000 ms so a dropped vsync cannot be why "the
+3 got skipped". Cutting it would bet against the one intervention that measurably worked here. It is
+a LIVE KNOB instead: `window.__keepWarm.capMs = 1.75` (the 144 Hz ceiling), `= null` (shipped), or
+Settings → GPU keep-warm off. If OFF is not the worst of the three, v39.63 no longer holds and the
+cap can be lowered on evidence. The one unconditional change is a proportional drop factor, a no-op
+at the measured operating point.

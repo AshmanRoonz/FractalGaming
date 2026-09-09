@@ -378,8 +378,14 @@ body.vr-active #fps-counter { display: none !important; }
   font-family: 'Rajdhani', sans-serif; font-size: 12px; letter-spacing: 1px;
 }
 
-body.lss-freeflight #round-info,
-body.lss-freeflight #ov-countdown { display: none !important; }
+/* (v40.57) #ov-countdown is retired - the ROUND countdown paints into #ship-select-countdown now.
+   Its freeflight hide deliberately does NOT move across. That rule was only ever about the ROUND
+   countdown (the hub has no rounds); the LAUNCH ticker is supposed to run in freeflight and always
+   has - the campaign journey and exhibition both reach launchCountdown as MODE 'freeflight'. A
+   `body.lss-freeflight #ship-select-countdown` rule would blank it. Freeflight suppression for the
+   round beats lives in JS instead: updateRoundSystem's `_ffHubCD` / `_ffHub` gates, plus a belt
+   inside _cdRound so it holds even for a future caller of Overlays.countdown. */
+body.lss-freeflight #round-info { display: none !important; }
 
 body.lss-thirdperson #cockpit-frame,
 body.lss-thirdperson #gun-layer,
@@ -416,8 +422,11 @@ body.lss-cockpit3d #ability-overlay-frame { display: none !important; }
    two lines on narrow viewports and the block grows ~19px taller (measured
    92px at 964 wide, 111px at 902) — a fixed top lands on top of the scores
    there. The value below is only the pre-measure default.
-   Z-INDEX 66: above #ov-banner / #ov-countdown (65), which is the whole reason
+   Z-INDEX 66: above #ov-banner (65), which is the whole reason
    this is not nested inside #round-info (z 10 = its own stacking context).
+   (v40.57) #ov-countdown was the other z-65 tenant named here and is retired. The countdown
+   that replaced it is #ship-select-countdown at z 110 - deliberately ABOVE this bar, because
+   a 3-2-1 a capture bar can cut into is not a countdown.
    The banner fires on CLAIMING / FIELD BREACH / CLAIM BROKEN — i.e. exactly
    when the bar matters — and is centred at top:18%, right over it.
    Vertical clearance: the kill feed is right-anchored at 4vmin while this is a
@@ -1282,15 +1291,29 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   display: none;
 }
 #ship-select-countdown.active { display: block; }
-/* (v40.00) NEVER TWO COUNTDOWNS. #ov-countdown is the ROUND countdown (white, 96px, top 40%) and
-   #ship-select-countdown is the LAUNCH countdown (yellow, 180px, top 50%). They belong to different
-   moments and never used to coincide - not by design, but because the launch one lived inside
-   #ship-select and was invisible whenever the picker was hidden, which is exactly when the round one
-   runs. v39.98 moved it to the body to fix "sound but no text", and that accident of parentage went
-   with it: the owner saw "two countdowns one white one yellow, at the same time in the same spot".
-   Both are body children, so a sibling rule restores the rule the DOM used to enforce. The JS tick
-   carries the same guard, so it holds even if the markup moves again. */
-#ov-countdown.show ~ #ship-select-countdown { display: none !important; }
+/* (v40.57) ONE COUNTDOWN, AND THIS IS IT. Owner: "why not just stay as the orange countdown and
+   get rid of the white? we don't need two". #ov-countdown (white, 96px, top 40%, z 65) is GONE,
+   and with it every part of the v40.00 / v40.55 machinery that existed only to keep TWO elements
+   off each other's toes: the sibling rule, `body.lss-round-cd` and its hold timers, and
+   Overlays.endCountdown(). There is nothing left to stand down FROM - the LAUNCH ticker and the
+   ROUND clock now paint THIS element through one renderer (_cdPaint, beside launchCountdown), so
+   "two countdowns one white one yellow, at the same time in the same spot" and the flicker it
+   caused ("on 2 it changes to white 2 from orange 3") are not bugs that were fixed - they are
+   states the DOM can no longer express.
+   ⚠ WHAT DID NOT CHANGE: the round digits and FIGHT are still driven by game.warmupTimer, the
+   wall-clock-anchored clock every peer ticks itself. Only the paint target moved.
+   ⚠ Do NOT re-add a `body.lss-freeflight #ship-select-countdown` rule in place of the one that
+   hid #ov-countdown there - see the note beside #round-info.
+   ⚠ THE ROUND COUNTDOWN NOW INHERITS THIS ELEMENT'S HIDES. Two are neutral: `?nodom` and
+   `?litehud` list `[id^="ov-"]` AND this id side by side, so both looks were equally suppressed
+   there before and after. ONE IS NEW - `body.lss-cinematic-active #ship-select-countdown`, in
+   _lssEnsureCinematicStyles. #ov-countdown was never in that list, so the round 3-2-1 and FIGHT
+   used to be immune to it and are not any more. No path collides TODAY, and the reason is worth
+   writing down because it is not obvious: _lssCompleteSpectatorCinematic removes the class BEFORE
+   it runs its `after`, and all four `_lssRunCinematicThen` call sites anchor warmupTimer INSIDE
+   that `after`, so the first round crossing is always after the class is off. If anything ever
+   anchors warmupTimer before or during a cinematic, the digits will silently vanish rather than
+   misbehave - check this rule first. */
 #ship-select-countdown .cd-num {
   font-family: 'Orbitron', sans-serif; font-weight: 900;
   font-size: 180px; color: #ffaa00;
@@ -1307,6 +1330,30 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   0% { transform: scale(0.6); opacity: 0; }
   15% { transform: scale(1.1); opacity: 1; }
   100% { transform: scale(1.4); opacity: 0; }
+}
+/* (v40.57) FIGHT - the one beat that must never read as another digit. Same element and the same
+   Orbitron face as the 3-2-1, but red, about half the size and tracked out: the colour, the two
+   shadow layers and the 8px letter-spacing are carried over VERBATIM from the retired
+   `#ov-countdown.fight .cd-number`, so the beat still looks like itself. It gets its own keyframe
+   rather than cdPulse because cdPulse starts fading at 15% - fine for a digit you glance at, wrong
+   for a word you read - so this one holds fully opaque to 70% and runs 1.2s, the same duration the
+   white .fight variant used. Specificity (id + class + class) beats `#ship-select-countdown .cd-num`
+   above, so the `animation` shorthand here wins; _cdPaint's animation restart writes an INLINE
+   'none' then '' , which falls back to whichever of the two rules is in force.
+   No sub-line under FIGHT: _cdPaint is called with sub === '' and hides .cd-sub, matching the white
+   one's `.cd-label { display: none }` on its fight beat. The expanding .cd-ring is deliberately not
+   carried over - it belonged to the white look being retired. */
+#ship-select-countdown.fight .cd-num {
+  font-size: 96px; color: #ff4400;
+  text-shadow: 0 0 30px #ff4400, 0 0 60px #ff220088;
+  letter-spacing: 8px;
+  animation: cdFightPulse 1.2s ease-out forwards;
+}
+@keyframes cdFightPulse {
+  0% { transform: scale(0.6); opacity: 0; }
+  12% { transform: scale(1.12); opacity: 1; }
+  70% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(1.25); opacity: 0; }
 }
 
 
@@ -1616,7 +1663,15 @@ body.lss-litehud #lobby *, body.lss-litehud #lobby-room-hud * {
     shipLabelJitter 0.18s steps(2) infinite,
     shipLabelGlitch 4.7s steps(1) infinite;
 }
-.ship-name-label.flip-left .cl-wrap {
+/* (v40.55) THE MIRROR MOVED OFF .cl-wrap. .cl-wrap's `transform` is owned by the two animations
+   declared just above it, and an ANIMATED property beats a plain declaration in the cascade at
+   every point of the timeline — so this scaleX(-1) has never once applied. The counter-flip on
+   .cl-text below is NOT animated and does apply, which is why a right-edge callout drew its NAME
+   backwards, and why toggling the flip class strobed the name back and forth.
+   .ship-name-label is a 0x0 anchor box that nothing animates, so mirroring it is the same mirror
+   about the anchor point with none of the cascade fight — and it finally does what both code
+   comments already promise: the callout peels to the upper-LEFT for a right-edge ship. */
+.ship-name-label.flip-left {
   transform: scaleX(-1);
 }
 
@@ -1862,6 +1917,29 @@ body.lss-litehud #lobby *, body.lss-litehud #lobby-room-hud * {
 }
 .map-arrow:hover { border-color: #ffaa00; background: rgba(40,40,60,0.9); }
 .map-arrow:active { background: rgba(60,50,15,0.9); }
+/* (v40.58) A DISABLED ARROW HAS TO LOOK DISABLED. `.map-arrow` sets its own `color` and
+   `background`, which beat the UA's disabled painting, so the multiplayer commit lock (and, since
+   this build, the mid-match lock in _syncMapButtonsDisabled) drew a fully live-looking arrow that
+   did nothing when clicked. :hover / :active are neutralised too, or it still lights up under the
+   cursor and reads as clickable. The THEME arrows (.sky-arrow) are deliberately NOT covered —
+   cyclePreset has no state guard and they keep working mid-match. */
+.map-arrow:disabled,
+.map-arrow[disabled] {
+  opacity: 0.32; cursor: not-allowed;
+  color: #8a8aa0; border-color: rgba(80,80,120,0.28);
+  background: rgba(20,20,40,0.35);
+}
+.map-arrow:disabled:hover, .map-arrow[disabled]:hover,
+.map-arrow:disabled:active, .map-arrow[disabled]:active {
+  border-color: rgba(80,80,120,0.28); background: rgba(20,20,40,0.35);
+}
+/* The dots and the MAP label follow the arrows (`.ss-map-locked` is written onto #map-select by
+   _syncMapButtonsDisabled) so the whole box reads as one locked control. `.map-dot.active` keeps
+   full strength on purpose: WHICH ARENA IS NEXT is the one thing this box still has to tell you
+   while the selection itself is frozen. */
+#map-select.ss-map-locked #map-select-label { opacity: 0.55; }
+#map-select.ss-map-locked .map-dot { opacity: 0.45; }
+#map-select.ss-map-locked .map-dot.active { opacity: 1; }
 #map-indicator {
   display: flex; flex-direction: row; gap: 6px;
   flex: 1; justify-content: center;
@@ -2078,36 +2156,11 @@ body.lss-litehud #lobby *, body.lss-litehud #lobby-room-hud * {
 }
 
 
-#ov-countdown {
-  position: fixed; top: 40%; left: 50%;
-  transform: translate(-50%, -50%);
-  opacity: 0; z-index: 65; pointer-events: none; text-align: center;
-  font-family: 'Courier New', monospace;
-}
-#ov-countdown.show { animation: ovCountdown 0.9s ease-out forwards; }
-#ov-countdown.fight.show { animation-duration: 1.2s; }
-@keyframes ovCountdown {
-  0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.4); }
-  10%  { opacity: 1; transform: translate(-50%, -50%) scale(1.15); }
-  20%  { transform: translate(-50%, -50%) scale(0.95); }
-  30%  { transform: translate(-50%, -50%) scale(1.02); }
-  70%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.3); }
-}
-#ov-countdown .cd-label { font-size: 12px; color: #ffaa00aa; letter-spacing: 4px; margin-bottom: 8px; }
-#ov-countdown .cd-number { font-weight: bold; font-size: 96px; color: #ffffff; text-shadow: 0 0 20px rgba(255,255,255,0.3); letter-spacing: 0; }
-#ov-countdown.fight .cd-number { font-size: 64px; color: #ff4400; text-shadow: 0 0 30px #ff4400, 0 0 60px #ff220088; letter-spacing: 8px; }
-#ov-countdown .cd-ring {
-  position: absolute; top: 50%; left: 50%;
-  width: 80px; height: 80px; border: 2px solid rgba(255,170,0,0.4);
-  border-radius: 50%;
-  transform: translate(-50%, -50%);
-  animation: ovCountdownRing 0.9s ease-out forwards;
-}
-@keyframes ovCountdownRing {
-  0%   { width: 80px; height: 80px; opacity: 0.4; }
-  100% { width: 280px; height: 280px; opacity: 0; }
-}
+/* (v40.57) #ov-countdown lived here and is RETIRED - the element, its .cd-label / .cd-number /
+   .cd-ring children, the ovCountdown + ovCountdownRing keyframes and the red .fight variant.
+   There is ONE countdown now: #ship-select-countdown, up in the ship-select block, painted by
+   both the launch ticker and the round clock through _cdPaint. The .fight colour, shadow and
+   tracking that used to live here moved there verbatim; nothing else survived. */
 
 
 #camp-video {
@@ -2484,11 +2537,8 @@ body.vr-active #camp-video { display: none !important; }
   <div class="ks-bar"></div>
 </div>
 
-<div id="ov-countdown">
-  <div class="cd-label">ROUND 1</div>
-  <div class="cd-number">3</div>
-  <div class="cd-ring"></div>
-</div>
+<!-- (v40.57) #ov-countdown was here (white ROUND countdown). Retired: there is one countdown now,
+     #ship-select-countdown, and both the launch ticker and the round clock paint it. -->
 
 <div id="ov-medals"></div>
 
@@ -4441,6 +4491,6 @@ window._lssLockLandscape = function () {};
 
 
 
-<script src="lss.js?v=40.54"></script>
+<script src="lss.js?v=40.60"></script>
 </body>
 </html>
