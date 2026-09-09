@@ -4733,3 +4733,31 @@ a LIVE KNOB instead: `window.__keepWarm.capMs = 1.75` (the 144 Hz ceiling), `= n
 Settings → GPU keep-warm off. If OFF is not the worst of the three, v39.63 no longer holds and the
 cap can be lowered on evidence. The one unconditional change is a proportional drop factor, a no-op
 at the measured operating point.
+
+**v40.60 pane verification.** Regression sweep on a warm process: picker builds 7 chips / 16 perk
+cards / 11 map dots (1 active) / 4 stat rows; launch reaches 'playing' with prebake 1930-2770 ms,
+`drainFrame0` 1313 ms over 186 polls with `primed: 1`; 3 label slots shown; `#ov-countdown` absent;
+clip prompt hidden; HUD visible; 181 programs; no console errors. ⚠ A launch driven by clicking the
+chip and CONFIRM in the SAME tick does NOT launch (the picker needs a beat between them) — that is a
+test artifact, not a bug; leave ~2-3 s between the two clicks in any headless launch script.
+`?pbseg` verified live: `gt` rows carry a 4th element and the labels come through as
+`scene` / `pre` / `refcopy` / `mirror` / `ads` / `bloom` with per-pass ms (healthy frame: scene 2.5,
+mirror 1.4, the rest ~0).
+
+**v40.60 on the owner's laptop (marks n14–n16, 60 Hz, quality high).** ⚠ ALL THREE STALLS ARE NOW IN
+`warmup`, i.e. behind the cover — the in-play class did not appear at all in that run, and the owner
+reports "40.60 seems good". The prebake total is 6639 ms against 9161 (same laptop, 40.57) and 12259
+(desktop, 40.57), and the overlap works: `ui` 3960 + `frame0` 3827 = 7787 ms of stages inside a
+6639 ms total. `drainFrame0` is 3803 ms over **16 polls** (was 4158 ms over 597) with `primed: 1`.
+
+⚠ ONE JOIN SURVIVES: `getProgramParameter 2043.5 ms on p190`, at 9.28 s, while `ld` reads
+`{at: 'drainGhostCloak', primed: 0}`. p190 is a `_warmRealCombatFX` program (the 40.57 marks'
+`fxp` list names `p190 MeshStandardMaterial` first). That function is SYNCHRONOUS and does
+`renderer.compile(scene, camera); renderer.render(scene, camera)` back to back — the last
+compile-then-draw-in-one-call site in the file, and the one the v40.60 priming cannot reach because
+nothing can await inside it. Fixing it means either making it async (it has several sync callers) or
+splitting it so the compiles happen there and the prebake owns the drain + the draws. Worth ~2 s off
+the cold load. NOT a gameplay stall — it is behind the cover.
+
+Also: `gt` came back with 0 labelled rows because the run used `?pbhud` alone. The per-pass timing
+needs `?pbhud&pbseg`, and it only fills on frames the loop actually renders (not the covered ones).
