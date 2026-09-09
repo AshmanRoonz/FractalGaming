@@ -4867,3 +4867,35 @@ second — `740x360 lss-touch tc:auto ta:0 st:select cd:-/3` = viewport, the `<h
 **How to read it on the phone**: if a line appears when the screen rotates, that is the fault and it
 names the line. If NOTHING throws and the state line still says `tc:block ta:1` while no buttons are
 visible, the fault is layout — off-screen or covered — not logic, and that is a different hunt.
+
+### v40.65 — the landscape phone: laid out, hit-testable, NOT PAINTED
+
+Owner: "the touch screen buttons are hidden, i can feel them working but can't see them... when i
+rotate to portrait and rotate back to landscape, the buttons appear", plus "the orange launch in
+3, 2, 1, is missing" in the same landscape.
+
+⚠ THOSE TWO SENTENCES NAME THE FAULT BETWEEN THEM, and it is not what any of the earlier hunts
+assumed. Hit-testing finds the buttons where `_layoutSticks` put them and their handlers fire, so
+POSITION and LOGIC are both correct — what is missing is the PAINT. That is the mobile compositor
+declining to re-rasterise `position: fixed` content after an orientation change, and it is precisely
+why the owner's own workaround (rotate away, rotate back) cures it: the second transition forces the
+layer to be rebuilt. Both casualties are `position: fixed` overlays — `#touch-controls` (z 11) and
+`#ship-select-countdown` (z 110).
+
+⚠ RE-RUNNING THE LAYOUT CANNOT FIX THIS, which is why the existing ladders did not. `_layoutSticks`
+already runs on `resize`, `orientationchange`, `screen.orientation.change`, `visualViewport.resize`
+and a drift-polling interval — but it writes left/top/width/height values that are ALREADY correct,
+so the browser sees no change and has no reason to repaint. The invalidation has to hit the layer
+itself: `_repaintFixedOverlays()` sets `display: none`, READS `offsetHeight` (the read is what forces
+the reflow), and restores — skipping anything genuinely hidden. Hooked to both rotation paths on the
+same delay ladder the viewport code already uses (a phone can report its final viewport hundreds of
+ms after the event, per the v31.03 note): 300/800/1600 ms from the touch module, 320/900 ms from
+`_viewportSettle`, which is the handler a real `orientationchange` reaches first. Exposed as
+`window._lssRepaintOverlays()` so it can be fired by hand.
+
+⚠ Still NOT reproduced in the pane, and the fix is therefore unconfirmed on real hardware: at
+740x360 (touch emulation on, landscape media matching) a live rotate from the portrait preset leaves
+17 touch buttons with 16 paintable and the correct rects, and the manual kick is a no-op. The pane's
+compositor simply does not exhibit the stall. This lands as a targeted repaint of exactly the two
+elements the owner loses, on exactly the transition he loses them on; it cannot make a working device
+worse (one forced reflow per rotation on two elements) but only the phone can confirm it.

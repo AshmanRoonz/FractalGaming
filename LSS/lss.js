@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.64';
+const LSS_BUILD = '40.65';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -56896,12 +56896,30 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       }
     } catch (_) {}
   }
+  function _repaintFixedOverlays() {
+    try {
+      const ids = ['touch-controls', 'ship-select-countdown'];
+      for (const id of ids) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        const prev = el.style.display;
+        if (prev === 'none') continue;            // genuinely hidden - leave it alone
+        el.style.display = 'none';
+        void el.offsetHeight;                     // the read is what forces the reflow
+        el.style.display = prev;
+      }
+    } catch (_) {}
+  }
+  try { window._lssRepaintOverlays = _repaintFixedOverlays; } catch (_) {}
   function _layoutSticksSoon() {
     _layoutSticks();
     setTimeout(_layoutSticks, 250);
     setTimeout(_layoutSticks, 700);
     setTimeout(_layoutSticks, 1500);
     setTimeout(_layoutSticks, 3000);
+    setTimeout(_repaintFixedOverlays, 300);
+    setTimeout(_repaintFixedOverlays, 800);
+    setTimeout(_repaintFixedOverlays, 1600);
   }
   try { window._lssLayoutSticks = _layoutSticksSoon; } catch (_) {}
   setInterval(function () {
@@ -57182,6 +57200,12 @@ function _viewportSettle() {
   _applyViewportSize();
   setTimeout(_applyViewportSize, 250);
   setTimeout(_applyViewportSize, 700);
+  try {
+    if (window._lssRepaintOverlays) {
+      setTimeout(window._lssRepaintOverlays, 320);
+      setTimeout(window._lssRepaintOverlays, 900);
+    }
+  } catch (_) {}
 }
 window.addEventListener('orientationchange', _viewportSettle);
 try {

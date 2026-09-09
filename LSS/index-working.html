@@ -4580,7 +4580,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.64';
+const LSS_BUILD = '40.65';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -82380,12 +82380,47 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       }
     } catch (_) {}
   }
+  // ⚠ (v40.65) A ROTATION LEAVES THE FIXED OVERLAYS LAID OUT BUT NOT PAINTED. Owner, on a phone:
+  // "the touch screen buttons are hidden, i can feel them working but can't see them... when i
+  // rotate to portrait and rotate back to landscape, the buttons appear", and in the same landscape
+  // "the orange launch in 3, 2, 1, is missing". Both facts together name the fault precisely:
+  // hit-testing finds the buttons where _layoutSticks put them, so POSITION is right and the
+  // handlers are live - what is missing is the PAINT. That is the classic mobile compositor stall on
+  // `position: fixed` content after an orientation change, and it is exactly why rotating away and
+  // back cures it: the second transition forces the layer to be re-rasterised.
+  // ⚠ Re-running _layoutSticks alone cannot fix it. It writes left/top/width/height, and those
+  // values are ALREADY correct - the browser sees no change and has no reason to repaint. The kick
+  // has to invalidate the layer itself. `display: none` + a forced reflow read + restore is the
+  // cheapest invalidation that is guaranteed to drop and rebuild the layer, and it costs one frame
+  // on an element that is already mid-rotation. #ship-select-countdown gets the same treatment: it
+  // is `position: fixed` too, it is the other thing the owner loses in landscape, and it has no
+  // layout hook of its own to piggyback on.
+  function _repaintFixedOverlays() {
+    try {
+      const ids = ['touch-controls', 'ship-select-countdown'];
+      for (const id of ids) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        const prev = el.style.display;
+        if (prev === 'none') continue;            // genuinely hidden - leave it alone
+        el.style.display = 'none';
+        void el.offsetHeight;                     // the read is what forces the reflow
+        el.style.display = prev;
+      }
+    } catch (_) {}
+  }
+  try { window._lssRepaintOverlays = _repaintFixedOverlays; } catch (_) {}
   function _layoutSticksSoon() {
     _layoutSticks();
     setTimeout(_layoutSticks, 250);
     setTimeout(_layoutSticks, 700);
     setTimeout(_layoutSticks, 1500);
     setTimeout(_layoutSticks, 3000);
+    // (v40.65) ...and kick the paint once the layout has settled. Same ladder as above because a
+    // phone can report its final viewport several hundred ms after the event (see the v31.03 note).
+    setTimeout(_repaintFixedOverlays, 300);
+    setTimeout(_repaintFixedOverlays, 800);
+    setTimeout(_repaintFixedOverlays, 1600);
   }
   try { window._lssLayoutSticks = _layoutSticksSoon; } catch (_) {}
   // (v31.03) Chrome/Android can settle the fullscreen viewport WITHOUT ever
@@ -82764,6 +82799,16 @@ function _viewportSettle() {
   _applyViewportSize();
   setTimeout(_applyViewportSize, 250);
   setTimeout(_applyViewportSize, 700);
+  // (v40.65) The fixed overlays lose their paint across a rotation even though their layout is
+  // right - see the _repaintFixedOverlays note in the touch module. This handler is the one a real
+  // orientationchange reaches first, so it kicks them too; the touch module's own ladder covers the
+  // resize-only path (some browsers fire no orientationchange at all).
+  try {
+    if (window._lssRepaintOverlays) {
+      setTimeout(window._lssRepaintOverlays, 320);
+      setTimeout(window._lssRepaintOverlays, 900);
+    }
+  } catch (_) {}
 }
 window.addEventListener('orientationchange', _viewportSettle);
 try {
