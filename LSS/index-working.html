@@ -1288,9 +1288,16 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   position: fixed; top: 50%; left: 50%;
   transform: translate(-50%, -50%);
   z-index: 110; pointer-events: none; text-align: center;
-  display: none;
+  /* ⚠ (v40.94) NEVER `display: none` - see the note beside #touch-controls in the touch stylesheet.
+     Undisplaying destroys this element's compositor layer, and a layer first created while the page
+     is already fullscreen never rasterises on the owner's phone; one that already existed survives
+     the transition. The countdown is undisplayed for the whole match and then displayed at the
+     launch beat, which on a fullscreen start is exactly the case that cannot come back. Hiding with
+     visibility + opacity keeps the box and the layer alive, and `pointer-events: none` above means
+     an always-present box can never intercept anything. */
+  display: block; visibility: hidden; opacity: 0;
 }
-#ship-select-countdown.active { display: block; }
+#ship-select-countdown.active { visibility: visible; opacity: 1; }
 /* (v40.57) ONE COUNTDOWN, AND THIS IS IT. Owner: "why not just stay as the orange countdown and
    get rid of the white? we don't need two". #ov-countdown (white, 96px, top 40%, z 65) is GONE,
    and with it every part of the v40.00 / v40.55 machinery that existed only to keep TWO elements
@@ -4633,7 +4640,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.93';
+const LSS_BUILD = '40.96';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -81345,6 +81352,11 @@ function _cdPaint(owner, text, sub, opts) {
   sb.textContent = sub || '';
   sb.style.display = sub ? '' : 'none';   // FIGHT carries no sub-line (the white one hid its label too)
   el.classList.add('active');
+  // (v40.96) ...and flush layout so the beat is actually painted. Same finding as the touch overlay:
+  // with the debug readout on (which reads these elements' rects every 100 ms) the digits appear;
+  // without it the browser can leave a correct, visible, laid-out element unpainted. A read, never a
+  // display toggle - see the note in the touch visibility tick.
+  try { void el.offsetHeight; } catch (_) {}
   // Restart the keyframe on every beat - cdPulse for digits, cdFightPulse under .fight.
   num.style.animation = 'none';
   void num.offsetWidth;   // force reflow so the next assignment restarts it
@@ -82409,8 +82421,27 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // devices via the lss-touch class set below.
     'html.lss-touch, html.lss-touch body { position: fixed; inset: 0; width: 100%; height: 100%;',
     '  overflow: hidden; overscroll-behavior: none; }',
-    '#touch-controls { position: fixed; inset: 0; z-index: 11; pointer-events: none; display: none;',
+    // ⚠⚠ (v40.94) HIDDEN, BUT NEVER UNDISPLAYED. Owner: "it only shows the countdown and
+    // touchscreen controls if you're not in full screen... starting full screen after not being in
+    // full screen will keep the touchscreen controls and countdown active".
+    // Both halves of that are one fact: `display: none` DESTROYS the element's compositor layer, and
+    // a layer created while the page is ALREADY fullscreen never gets rasterised on this device -
+    // whereas a layer that already existed survives the transition intact. The visibility tick sets
+    // `root.style.display = show ? 'block' : 'none'`, and the v35.15 note beside it says exactly when:
+    // "the intro cinematic hides the overlay exactly while round start releases the orientation lock
+    // and Chrome settles fullscreen". So the controls are undisplayed during the cinematic and
+    // re-displayed mid-fullscreen, which is precisely the case that cannot come back.
+    // ⚠ This is the same mistake as the v40.65 repaint kick, which destroyed layers deliberately and
+    // had to be withdrawn in v40.72. The lesson there applies here: on this hardware, do not make the
+    // compositor rebuild a layer you still need.
+    // So the element is ALWAYS displayed and hides with `visibility` + `opacity` instead, which keeps
+    // the box, the layer and its rasterised content alive. `visibility: hidden` also inherits, so the
+    // `.tc` children (which carry `pointer-events: auto`) stop hit-testing exactly as they did under
+    // `display: none` - the behaviour the JS relies on is unchanged.
+    '#touch-controls { position: fixed; inset: 0; z-index: 11; pointer-events: none;',
+    '  display: block; visibility: hidden; opacity: 0;',
     '  font-family: "Rajdhani", sans-serif; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }',
+    '#touch-controls.tc-on { visibility: visible; opacity: 1; }',
     // ⚠ (v40.82) LEGIBLE ENOUGH TO BE A TEST. The same v40.81 readout measured the controls as
     // correctly laid out and fully opaque - `MOVE d:flex op:1 v:v 146x146@151,268`,
     // `BTN d:flex op:1 v:v 108x73@714,11` - while the owner cannot see them. There are two stories
@@ -82855,6 +82886,8 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   try { window._lssRepaintOverlays = _repaintFixedOverlays; } catch (_) {}
   function _layoutSticksSoon() {
     _layoutSticks();
+    // (v40.96) flush after the pin, so a transition that re-lays-out also gets repainted
+    try { const _r = document.getElementById('touch-controls'); if (_r) void _r.offsetHeight; } catch (_) {}
     setTimeout(_layoutSticks, 250);
     setTimeout(_layoutSticks, 700);
     setTimeout(_layoutSticks, 1500);
@@ -82871,7 +82904,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   // wrong until the Android BACK button forced a resize). Poll-and-verify :
   // if the measured box drifts from the last APPLIED one, re-pin.
   setInterval(function () {
-    if (!root || root.style.display === 'none') return;
+    if (!root || !root.classList.contains('tc-on')) return;   // (v40.94) class, not display - see the note in the stylesheet
     try {
       const b = _visBox();
       let repin = Math.abs(b.w - _lsBox.w) > 2 || Math.abs(b.h - _lsBox.h) > 2 ||
@@ -83152,7 +83185,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   // Cheap 250 ms poll ; avoids threading state through gameLoop.
   setInterval(() => {
     if (!_enabled) {
-      if (root && root.style.display !== 'none') { root.style.display = 'none'; input.touchActive = false; _zeroTouchInputs(); }
+      if (root && root.classList.contains('tc-on')) { root.classList.remove('tc-on'); input.touchActive = false; _zeroTouchInputs(); }   // (v40.94)
       return;
     }
     _build();
@@ -83168,9 +83201,27 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // when the pad disconnects (this interval re-polls every 250 ms).
     // Gyro steering intentionally stays live alongside a gamepad.
     const show = inMatch && !blocked && !input.gpConnected;
-    const cur = root.style.display === 'block';
+    // ⚠⚠ (v40.96) THE MEASUREMENT WAS THE WORKAROUND. Owner: "when it's on this debug mode, the
+    // touch screen controls and other missing items flash on and off" - and with `?pbhud` on, the
+    // v40.95 readout came back with EVERY number correct: `VV 1089x485 off:0,0 scale:1`,
+    // `win 1089x485`, `scr 1090x486`, `H:1089x485@0,0/fixed` and `B:1089x485@0,0/fixed`. Visual
+    // viewport, layout viewport, screen and both boxes agree, the controls are laid out where they
+    // belong - and without the readout they are not painted.
+    // The readout is the only difference, and what it does is call `getBoundingClientRect()` and
+    // `getComputedStyle()` on these very elements every 100 ms. Both force a style/layout flush. So
+    // the elements are correct and the browser is simply never scheduling their paint: the WebGL
+    // canvas updates through GL, which dirties no DOM, and a static overlay whose content never
+    // changes gives the compositor nothing to re-rasterise.
+    // ⚠ A FORCED READ, NOT A DISPLAY TOGGLE. v40.65 tried to force paints with `display:none` +
+    // restore and had to be withdrawn in v40.72 because that DESTROYS the layer - the exact thing
+    // this hardware cannot rebuild. Reading `offsetHeight` flushes layout without touching the box,
+    // the layer, or any animation, which is precisely what the debug readout does by accident.
+    // This rides the visibility tick that already runs every 250 ms, so it costs one forced layout
+    // four times a second and only while the controls are actually up.
+    if (root.classList.contains('tc-on')) { try { void root.offsetHeight; } catch (_) {} }
+    const cur = root.classList.contains('tc-on');   // (v40.94) the layer is never torn down now
     if (show !== cur) {
-      root.style.display = show ? 'block' : 'none';
+      root.classList.toggle('tc-on', show);
       input.touchActive = show;
       if (!show) { _zeroTouchInputs(); if (_dragReset) { try { _dragReset(); } catch (_) {} } }
       // (v35.15) Re-pin on EVERY reveal : the intro cinematic hides the
@@ -94191,6 +94242,30 @@ function __pmark(name) {
             // digit sits in the stack - and if CANVAS appears above it, that is the answer outright.
             // Also reports the countdown's ancestor chain, since a stacking-context trap is a
             // property of an ANCESTOR, not of the element that loses.
+            // ⚠ (v40.95) WHERE THE VISIBLE AREA ACTUALLY IS. Two theories have now been refuted by
+            // the owner's own testing - the layer-teardown one (v40.94 keeps every layer alive and
+            // it still happens) and the stale-viewport one (v40.91 added the settle ladder). Every
+            // readout so far says these elements are display:block, opacity 1, correctly sized and
+            // correctly positioned - and they are still not on the screen.
+            // The thing never measured is the VIEWPORT ITSELF. On mobile `position: fixed` resolves
+            // against the LAYOUT viewport, but what the player sees is the VISUAL viewport, and in
+            // fullscreen those can diverge - an offset, a scale, or a layout viewport larger than
+            // the visual one. Every rect in this readout is layout-relative, so all of them can be
+            // "correct" while sitting outside what is actually displayed.
+            // VV is the visual viewport (size, offset, scale, page offset); HTML and BODY carry the
+            // containing chain's real boxes plus their overflow, because `html.lss-touch, html.lss-touch
+            // body { position: fixed; inset: 0; overflow: hidden }` and Chrome's own `:fullscreen`
+            // UA rule BOTH write position/inset on <html> in fullscreen, and a clipped or mis-sized
+            // root box would clip fixed children without changing any of their own computed values.
+            '\nVV    ' + (function () { try { const v = window.visualViewport; if (!v) return 'none';
+              return Math.round(v.width) + 'x' + Math.round(v.height) + ' off:' + Math.round(v.offsetLeft) + ',' + Math.round(v.offsetTop) +
+                     ' pg:' + Math.round(v.pageLeft) + ',' + Math.round(v.pageTop) + ' scale:' + (Math.round(v.scale * 100) / 100) +
+                     '  win:' + innerWidth + 'x' + innerHeight + ' scr:' + (screen.width + 'x' + screen.height); } catch (_) { return '?'; } })() +
+            '\nBOX   ' + (function () { try {
+              const f = (n, nm) => { if (!n) return nm + ':-'; const r = n.getBoundingClientRect(), c = getComputedStyle(n);
+                return nm + ':' + Math.round(r.width) + 'x' + Math.round(r.height) + '@' + Math.round(r.left) + ',' + Math.round(r.top) +
+                       '/' + c.position + '/ov:' + c.overflow.slice(0, 4); };
+              return f(document.documentElement, 'H') + ' ' + f(document.body, 'B'); } catch (_) { return '?'; } })() +
             '\nSTACK ' + (function () { try { const e = document.getElementById('ship-select-countdown'); if (!e) return '-';
               const r = e.getBoundingClientRect(); if (!r.width) return 'no-rect';
               const list = document.elementsFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)) || [];

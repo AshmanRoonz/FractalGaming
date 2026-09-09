@@ -5749,3 +5749,93 @@ Also refuted by the audit, correctly: `rt4608x2424` is `postFX.rtScene` at MEGA,
 atlas (there is one shadow map, 2048x2048, rendered inside `renderer.render`); and the 2-pass
 `...>C` frames are ones where `renderFrame` never ran because `_lssPickerOwnsFrame()` held it, not a
 postFX toggle. My earlier "the pipeline changes shape mid-countdown" reading was wrong on both counts.
+
+
+## v40.94 — hide without destroying the layer (the fullscreen touch/countdown glitch)
+
+Owner: *"it only shows the countdown and touchscreen controls if you're not in full screen...
+starting full screen after not being in full screen will keep the touchscreen controls and countdown
+active"*. Both halves are one fact: **`display: none` DESTROYS the element's compositor layer**, and on
+this device a layer first created while the page is ALREADY fullscreen never gets rasterised - while
+one that already existed survives the transition intact.
+
+The visibility tick did `root.style.display = show ? 'block' : 'none'`, and the v35.15 note beside it
+already said exactly when: *"the intro cinematic hides the overlay exactly while round start releases
+the orientation lock and Chrome settles fullscreen"*. So the controls are undisplayed during the
+cinematic and re-displayed mid-fullscreen - precisely the case that cannot come back. `#ship-select-
+countdown` is the same shape: `display: none` for the whole match, `display: block` at the launch beat.
+
+⚠ Same mistake as the v40.65 repaint kick (withdrawn in v40.72), which destroyed layers on purpose.
+**On this hardware, never make the compositor rebuild a layer you still need.**
+
+Both now hide with `visibility: hidden; opacity: 0` and stay `display: block`. `visibility` INHERITS,
+so the `.tc` children (which carry `pointer-events: auto`) stop hit-testing exactly as they did under
+`display: none` - the behaviour the JS relied on is unchanged. The three JS sites that read/wrote
+`root.style.display` now read/write a `.tc-on` class instead.
+
+**Verified** (desktop, forced with `?touch=1` since the touch module only builds on touch-capable
+devices):
+
+| check | result |
+| --- | --- |
+| base rule parsed, font-family intact after the brace | ✓ |
+| `#touch-controls.tc-on` is a separate rule | `visibility: visible; opacity: 1` |
+| child `.tc` rule still parses (nothing swallowed) | ✓ |
+| root off → on | `block/vis:hidden/op:0` → `block/vis:visible/op:1` |
+| **child hit-testing** | `hidden` when off, `visible` when on |
+| button while hidden in warmup | `153x104@532,16` — laid out, layer alive |
+| countdown off → `.active` | `block/vis:hidden/op:0` → `block/vis:visible/op:1` |
+
+⚠ **`node --check` cannot see CSS.** The first attempt put the `.tc-on` rule INSIDE the unclosed
+`#touch-controls` block (the base rule spans several array entries and the `}` is on the font-family
+line). It passed every gate and would have shipped broken. When editing the injected stylesheet
+strings, always read back the PARSED rule from `document.styleSheets`.
+
+
+## v40.96 — the measurement WAS the workaround
+
+Owner: *"when it's on this debug mode, the touch screen controls and other missing items flash on and
+off"*. That one sentence is the diagnosis, and it also explains why five builds of readouts all came
+back "correct".
+
+The v40.95 geometry probe, on the phone in fullscreen:
+
+```
+VV   1089x485 off:0,0 pg:0,0 scale:1   win:1089x485   scr:1090x486
+BOX  H:1089x485@0,0/fixed/ov:hidd      B:1089x485@0,0/fixed/ov:hidd
+```
+
+Visual viewport, layout viewport, screen and both containing boxes all agree; the controls are laid
+out exactly where they belong - and without the readout they are not painted. **The elements are
+correct and the browser is simply never scheduling their paint.** The WebGL canvas updates through
+GL, which dirties no DOM, and a static overlay whose content never changes gives the compositor
+nothing to re-rasterise.
+
+The debug readout is the only difference, and what it does is call `getBoundingClientRect()` and
+`getComputedStyle()` on these very elements every 100 ms - both force a style/layout flush.
+
+⚠ **A FORCED READ, NOT A DISPLAY TOGGLE.** v40.65 tried to force paints with `display:none` + restore
+and had to be withdrawn in v40.72, because that DESTROYS the layer - the one thing this hardware
+cannot rebuild. `void el.offsetHeight` flushes layout without touching the box, the layer or any
+animation. It is exactly what the readout does by accident.
+
+Three sites, all cheap: the touch overlay's existing 250 ms visibility tick (one forced layout 4x/s,
+and only while the controls are up), every `_cdPaint` beat, and each `_layoutSticksSoon` ladder step
+(which is what covers the fullscreen transition).
+
+**Verified on 40.96:** countdown `active|3 -> 2 -> 1 -> LAUNCH`, `tc-on` engages and holds,
+`visibility: visible / opacity 1`, `touchActive: true`.
+
+⚠ Honest status: this is a WORKAROUND for a browser paint-scheduling failure, not a root fix, and it
+is the third attempt at this symptom (v40.91 settle ladder, v40.94 layer preservation, now this).
+The difference is that this one is derived from the owner's own observation rather than from a theory
+about the mechanism - and the two earlier attempts are still correct on their own merits.
+
+### Theories killed by the owner's testing, in order (all reasonable, all wrong)
+
+| theory | build | how it died |
+| --- | --- | --- |
+| stale viewport at the transition | v40.91 | ladder added; still broken |
+| `display:none` destroying the layer | v40.94 | layers preserved; still broken |
+| layout/visual viewport mismatch | — | `VV` == `win` == `scr`, boxes correct |
+| clipping by `overflow:hidden` | — | `H`/`B` boxes are full-viewport |

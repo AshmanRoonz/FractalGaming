@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.93';
+const LSS_BUILD = '40.96';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -55991,6 +55991,7 @@ function _cdPaint(owner, text, sub, opts) {
   sb.textContent = sub || '';
   sb.style.display = sub ? '' : 'none';   // FIGHT carries no sub-line (the white one hid its label too)
   el.classList.add('active');
+  try { void el.offsetHeight; } catch (_) {}
   num.style.animation = 'none';
   void num.offsetWidth;   // force reflow so the next assignment restarts it
   num.style.animation = '';
@@ -56764,8 +56765,10 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   const CSS = [
     'html.lss-touch, html.lss-touch body { position: fixed; inset: 0; width: 100%; height: 100%;',
     '  overflow: hidden; overscroll-behavior: none; }',
-    '#touch-controls { position: fixed; inset: 0; z-index: 11; pointer-events: none; display: none;',
+    '#touch-controls { position: fixed; inset: 0; z-index: 11; pointer-events: none;',
+    '  display: block; visibility: hidden; opacity: 0;',
     '  font-family: "Rajdhani", sans-serif; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }',
+    '#touch-controls.tc-on { visibility: visible; opacity: 1; }',
     '#touch-controls .tc { position: absolute; pointer-events: auto; touch-action: none;',
     '  display: flex; align-items: center; justify-content: center;',
     '  background: rgba(80, 200, 255, 0.18); border: 1.5px solid rgba(140, 230, 255, 0.65);',
@@ -56988,6 +56991,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   try { window._lssRepaintOverlays = _repaintFixedOverlays; } catch (_) {}
   function _layoutSticksSoon() {
     _layoutSticks();
+    try { const _r = document.getElementById('touch-controls'); if (_r) void _r.offsetHeight; } catch (_) {}
     setTimeout(_layoutSticks, 250);
     setTimeout(_layoutSticks, 700);
     setTimeout(_layoutSticks, 1500);
@@ -56998,7 +57002,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   }
   try { window._lssLayoutSticks = _layoutSticksSoon; } catch (_) {}
   setInterval(function () {
-    if (!root || root.style.display === 'none') return;
+    if (!root || !root.classList.contains('tc-on')) return;   // (v40.94) class, not display - see the note in the stylesheet
     try {
       const b = _visBox();
       let repin = Math.abs(b.w - _lsBox.w) > 2 || Math.abs(b.h - _lsBox.h) > 2 ||
@@ -57199,7 +57203,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 
   setInterval(() => {
     if (!_enabled) {
-      if (root && root.style.display !== 'none') { root.style.display = 'none'; input.touchActive = false; _zeroTouchInputs(); }
+      if (root && root.classList.contains('tc-on')) { root.classList.remove('tc-on'); input.touchActive = false; _zeroTouchInputs(); }   // (v40.94)
       return;
     }
     _build();
@@ -57211,9 +57215,10 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const blocked = (typeof settingsOpen !== 'undefined' && settingsOpen) || selectActive ||
       (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
     const show = inMatch && !blocked && !input.gpConnected;
-    const cur = root.style.display === 'block';
+    if (root.classList.contains('tc-on')) { try { void root.offsetHeight; } catch (_) {} }
+    const cur = root.classList.contains('tc-on');   // (v40.94) the layer is never torn down now
     if (show !== cur) {
-      root.style.display = show ? 'block' : 'none';
+      root.classList.toggle('tc-on', show);
       input.touchActive = show;
       if (!show) { _zeroTouchInputs(); if (_dragReset) { try { _dragReset(); } catch (_) {} } }
       if (show) _layoutSticksSoon();
@@ -66252,6 +66257,15 @@ function __pmark(name) {
             '\nBTN  ' + _fmt(document.querySelector('#touch-controls .tc-rect')) +
             '\nPEAK act:' + _hw.act + ' num:' + _hw.numW + 'x' + _hw.numH + ' "' + _hw.txt + '"  sub:' + _hw.subW + 'x' + _hw.subH +
             '\nCDLOG ' + (function () { try { return (window.__cdLog || []).slice(-4).map(function (r) { return r.join(':'); }).join(' | ') || 'none'; } catch (_) { return '?'; } })() +
+            '\nVV    ' + (function () { try { const v = window.visualViewport; if (!v) return 'none';
+              return Math.round(v.width) + 'x' + Math.round(v.height) + ' off:' + Math.round(v.offsetLeft) + ',' + Math.round(v.offsetTop) +
+                     ' pg:' + Math.round(v.pageLeft) + ',' + Math.round(v.pageTop) + ' scale:' + (Math.round(v.scale * 100) / 100) +
+                     '  win:' + innerWidth + 'x' + innerHeight + ' scr:' + (screen.width + 'x' + screen.height); } catch (_) { return '?'; } })() +
+            '\nBOX   ' + (function () { try {
+              const f = (n, nm) => { if (!n) return nm + ':-'; const r = n.getBoundingClientRect(), c = getComputedStyle(n);
+                return nm + ':' + Math.round(r.width) + 'x' + Math.round(r.height) + '@' + Math.round(r.left) + ',' + Math.round(r.top) +
+                       '/' + c.position + '/ov:' + c.overflow.slice(0, 4); };
+              return f(document.documentElement, 'H') + ' ' + f(document.body, 'B'); } catch (_) { return '?'; } })() +
             '\nSTACK ' + (function () { try { const e = document.getElementById('ship-select-countdown'); if (!e) return '-';
               const r = e.getBoundingClientRect(); if (!r.width) return 'no-rect';
               const list = document.elementsFromPoint(Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)) || [];
