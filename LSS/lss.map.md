@@ -5839,3 +5839,86 @@ about the mechanism - and the two earlier attempts are still correct on their ow
 | `display:none` destroying the layer | v40.94 | layers preserved; still broken |
 | layout/visual viewport mismatch | — | `VV` == `win` == `scr`, boxes correct |
 | clipping by `overflow:hidden` | — | `H`/`B` boxes are full-viewport |
+
+
+## v40.97 — the canvas had no stacking position (attempt 5 at the mobile fullscreen overlays)
+
+`canvas { display: block; cursor: none; }` was the WHOLE of the canvas's styling: **no `position`, no
+`z-index`**. A static, in-flow element paints below every positioned overlay, so on paper the order
+was always right. But a WebGL canvas is promoted to its own compositor layer, and the compositor then
+has to promote whatever paints above it to preserve order ("overlap testing") - exactly the work
+mobile compositors skip. The promoted canvas then composites OVER overlays that were never promoted.
+
+That single mechanism accounts for every symptom at once, including the two that killed the earlier
+theories:
+- correct geometry and computed styles (v40.95: `VV`==`win`==`scr`, boxes full-viewport, every element
+  `display:block`, `opacity 1`, correctly placed) - because nothing about the ELEMENT is wrong;
+- **hit-testing still works** ("i can feel them working but can't see them") - hit-testing walks the
+  DOM, compositing walks the layer tree, and only the latter is wrong;
+- **they FLASH with `?pbhud` on** - each forced repaint briefly re-orders them.
+
+Fix: `html.lss-touch canvas { position: fixed; top: 0; left: 0; z-index: 0; }`. Scoped to touch so
+desktop is untouched, and deliberately no `inset`/`width`/`height` - `renderer.setSize` owns those.
+**Verified geometrically inert**: with the class applied the canvas goes `static/zauto` -> `fixed/z0`
+with the rect (1084x688@0,0), backing store and CSS size all unchanged; order becomes canvas 0 <
+#touch-controls 11 < #ship-select-countdown 110.
+
+### The four theories this replaces, all killed by the owner's testing
+
+| theory | build | how it died |
+| --- | --- | --- |
+| stale viewport at the transition | v40.91 | settle ladder added; still broken |
+| `display:none` destroying the layer | v40.94 | layers kept alive with `visibility`; still broken |
+| layout vs visual viewport mismatch | — | `VV` == `win` == `scr`, boxes correct |
+| missing paint invalidation | v40.96 | `void offsetHeight` flushes LAYOUT, not paint - and `_cdPaint`
+  writes new text every beat (a real paint dirty) and the digits still did not appear |
+
+⚠ v40.91, v40.94 and v40.96 are all still correct on their own merits and stay in. None of them was
+this bug.
+
+⚠ **If v40.97 also fails**, the remaining option is architectural rather than another CSS guess: draw
+the touch controls and the countdown INTO the WebGL canvas (the HUD canvas path already exists -
+`_hlRadar` blits into it), which sidesteps DOM compositing entirely on the device that cannot be
+trusted to do it.
+
+
+## v40.99 — IT WAS THE OVERLAY REHEARSAL. Found by bisect, after six theory-driven fixes missed.
+
+Owner, after the v40.98 switchboard: *"https://lss.fractalreality.ca/?off=all made it work... it was
+rehearse. That fixed it."*
+
+`_prebakeOverlayRehearsal` (v40.34, grown in v40.45 and v40.58) shows ~37 transient overlays behind
+the loading cover so their compositor pipelines exist before the player can see a first-use hitch. On
+a desktop that buys a few milliseconds. **On a phone it exhausts the layer budget, and the overlays
+the game actually needs - the touch controls and the countdown - are never composited again**: laid
+out, styled visible, hit-testable, and simply not drawn.
+
+⚠ It also cost the most exactly where it helped least. `flags.uiw` from the owner's own marks:
+**1786 ms on one run and 12918 ms on another** (`worst` 1553-4340 ms) - seconds of load time on the
+device that could least afford it, to avoid a hitch that is invisible next to losing the UI.
+
+Fixed by gating it on `_fxSmallDevice()`. `?rehearse` forces it back for a desktop A/B; `?off=rehearse`
+disables it everywhere. **Verified**: desktop still rehearses (37 overlays, 264 ms) and the countdown
+runs 3-2-1-LAUNCH clean.
+
+### ⚠ THE PROCESS LESSON, which matters more than the fix
+
+**Six theory-driven fixes missed this**, each reasonable, each verified, each wrong:
+
+| # | theory | build | how it died |
+| --- | --- | --- | --- |
+| 1 | stale viewport at the transition | v40.91 | settle ladder added; still broken |
+| 2 | `display:none` destroying the layer | v40.94 | layers kept with `visibility`; still broken |
+| 3 | layout vs visual viewport mismatch | — | `VV` == `win` == `scr`, boxes correct |
+| 4 | clipping by `overflow:hidden` | — | `H`/`B` boxes full-viewport |
+| 5 | missing paint invalidation | v40.96 | `void offsetHeight` flushes LAYOUT not paint, and `_cdPaint` writes new text every beat and still did not show |
+| 6 | canvas stacking / overlap testing | v40.97 | explicit `z-index: 0`; still broken |
+
+What ended it was **the owner's question**: *"why would it be css unless we changed something that
+affects css? because it was working before"*. That reframed the problem from "which browser behaviour
+explains this" to "which of OUR changes caused this" - and the answer was a switchboard (v40.98,
+`?off=`) that reverts each post-40.44 change so one session bisects it, instead of one build per guess.
+
+⚠ Note the switchboard proved its own worth twice: the arms that were NOT the cause (v40.91, v40.94,
+v40.96, v40.97) are all still correct on their own merits and stay in, and `?off=all` also produced a
+black screen behind the HUD - which is `vpdirty`/`cvsz` reverting the canvas handling, not a new bug.

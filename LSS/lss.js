@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.96';
+const LSS_BUILD = '40.99';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -39209,6 +39209,15 @@ function _lssPrimeTick(budgetMs) {
   return n;
 }
 async function _prebakeOverlayRehearsal(rep) {
+  try {
+    if (_lssOff('rehearse')) { window.__uiRehearsal = { skipped: 'off' }; return; }
+    let _force = false;
+    try { _force = /[?&]rehearse/i.test(location.search || ''); } catch (_) {}
+    if (!_force && typeof _fxSmallDevice === 'function' && _fxSmallDevice()) {
+      window.__uiRehearsal = { skipped: 'smallDevice' };
+      return;
+    }
+  } catch (_) {}
   const _t = _pbNow();
   const out = { ms: 0, n: 0, groups: 0, frames: 0, worst: 0 };
   const cover = document.getElementById('lss-loading-overlay');
@@ -55991,7 +56000,7 @@ function _cdPaint(owner, text, sub, opts) {
   sb.textContent = sub || '';
   sb.style.display = sub ? '' : 'none';   // FIGHT carries no sub-line (the white one hid its label too)
   el.classList.add('active');
-  try { void el.offsetHeight; } catch (_) {}
+  try { if (!_lssOff('flush')) void el.offsetHeight; } catch (_) {}   // (v40.98) `?off=flush`
   num.style.animation = 'none';
   void num.offsetWidth;   // force reflow so the next assignment restarts it
   num.style.animation = '';
@@ -57215,7 +57224,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const blocked = (typeof settingsOpen !== 'undefined' && settingsOpen) || selectActive ||
       (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
     const show = inMatch && !blocked && !input.gpConnected;
-    if (root.classList.contains('tc-on')) { try { void root.offsetHeight; } catch (_) {} }
+    if (root.classList.contains('tc-on') && !_lssOff('flush')) { try { void root.offsetHeight; } catch (_) {} }   // (v40.98) `?off=flush`
     const cur = root.classList.contains('tc-on');   // (v40.94) the layer is never torn down now
     if (show !== cur) {
       root.classList.toggle('tc-on', show);
@@ -57278,7 +57287,7 @@ function _applyViewportSize() {
     const _el = renderer.domElement;
     const _pr = renderer.getPixelRatio ? renderer.getPixelRatio() : 1;
     const _cw = Math.floor(_vw * _pr), _ch = Math.floor(_vh * _pr);
-    if (_el.width !== _cw || _el.height !== _ch) {
+    if (_el.width !== _cw || _el.height !== _ch || _lssOff('vpdirty')) {   // (v40.98) `?off=vpdirty` restores the pre-v40.75 "always resize"
       renderer.setSize(_vw, _vh);
       try { window.__vpSize = [((window.__vpSize && window.__vpSize[0]) | 0) + 1, (window.__vpSize && window.__vpSize[1]) | 0]; } catch (_) {}
     } else {
