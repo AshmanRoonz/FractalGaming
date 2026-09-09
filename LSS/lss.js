@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.63';
+const LSS_BUILD = '40.64';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -66070,6 +66070,48 @@ function __pmark(name) {
   }
   let _f8Seg = false;
   try { _f8Seg = /[?&]pbseg\b/i.test(location.search || '') || localStorage.getItem('lss_pbseg') === '1'; } catch (_) {}
+  try {
+    const _eOn = /[?&]pb(err|hud)\b/i.test(location.search || '') || localStorage.getItem('lss_pberr') === '1';
+    if (_eOn && typeof document !== 'undefined' && document.body) {
+      const _box = document.createElement('div');
+      _box.id = 'lss-errhud';
+      _box.style.cssText = 'position:fixed;left:4px;bottom:4px;max-width:74vw;z-index:99999;pointer-events:none;' +
+        'font:9px/1.25 ui-monospace,Menlo,Consolas,monospace;color:#ffd0d0;background:rgba(20,0,0,0.62);' +
+        'padding:3px 5px;border-radius:3px;white-space:pre-wrap;word-break:break-word;';
+      document.body.appendChild(_box);
+      const _lines = [];
+      const _draw = () => { try { _box.textContent = _lines.join('\n'); } catch (_) {} };
+      const _push = (t) => { _lines.push(String(t).slice(0, 160)); while (_lines.length > 6) _lines.shift(); _draw(); };
+      window.addEventListener('error', (ev) => {
+        try {
+          const f = (ev.filename || '').split('/').pop();
+          _push('ERR ' + (ev.message || '?') + ' @' + f + ':' + (ev.lineno || 0));
+        } catch (_) {}
+      });
+      window.addEventListener('unhandledrejection', (ev) => {
+        try { _push('REJ ' + ((ev.reason && (ev.reason.message || ev.reason)) || '?')); } catch (_) {}
+      });
+      let _stateLine = '';
+      setInterval(() => {
+        try {
+          const tc = document.getElementById('touch-controls');
+          const cd = document.getElementById('ship-select-countdown');
+          const ln = innerWidth + 'x' + innerHeight +
+            ' ' + (document.documentElement.className || '-') +
+            ' tc:' + (tc ? (tc.style.display || 'auto') : 'MISSING') +
+            ' ta:' + ((typeof input !== 'undefined' && input) ? (input.touchActive ? 1 : 0) : '?') +
+            ' st:' + ((typeof game !== 'undefined' && game) ? game.state : '?') +
+            ' cd:' + (cd ? ((cd.className || '-') + '/' + ((cd.querySelector('.cd-num') || {}).textContent || '')) : 'MISSING');
+          if (ln !== _stateLine) { _stateLine = ln; _box.title = ln; }
+          _box.setAttribute('data-state', ln);
+          _draw();
+          _box.textContent = (_lines.length ? _lines.join('\n') + '\n' : '') + ln;
+        } catch (_) {}
+      }, 1000);
+      try { window.__errHud = (v) => { _box.style.display = (v === false) ? 'none' : ''; }; } catch (_) {}
+      try { console.log('[f8] on-screen error/state HUD armed'); } catch (_) {}
+    }
+  } catch (_) {}
   if (!_f8NoGpu) window.__f8gt = {   // (v40.21) absent in nogpu mode, so gameLoop's `if (window.__f8gt)` skips it
     seg: _f8Seg,
     s: function (label) {   // (v40.59) close the open segment, open `label` (null = just close)

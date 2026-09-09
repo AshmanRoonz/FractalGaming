@@ -4840,3 +4840,30 @@ pane is a desktop with no touch, so `#touch-controls` legitimately never initial
 mobile preset on 40.63 the countdown runs 3 → 2 → 1 → FIGHT, `#touch-controls` is `display: block`
 and `input.touchActive` is true. An earlier "reproduction" of the countdown failure at 844x390 was a
 MEASUREMENT ERROR on my part — I sampled at 28.5 s while that launch's countdown started at 33.4 s.
+
+### v40.64 — an on-screen error/state readout, because the phone has no console
+
+Owner: "i see the touch screen in portrait, and the countdown works in portrait... when i go to
+landscape both are gone, with lag", and "i'm not sure how to get the console on the mobile, i have to
+hook it to usb?".
+
+⚠ **THREE ATTEMPTS TO REPRODUCE IT HERE ALL FAILED, and the reason is worth recording**: the Browser
+pane only emulates a phone (mobile UA + touch points) BELOW 768 px wide, and a landscape phone is
+wider than that — so at 844x390 the pane is a desktop with no touch and `#touch-controls` correctly
+never initialises, which proves nothing. At **740x360** (narrow enough for touch emulation, landscape
+enough that `@media (max-height: 500px) and (orientation: landscape)` matches) everything is CORRECT:
+countdown 3 → 2 → 1 → FIGHT, `#touch-controls` `display: block`, `input.touchActive` true, no console
+errors — and the same after a LIVE rotate from the portrait preset mid-match. ⚠ Also logged: an
+earlier "reproduction" of the countdown failure at 844x390 was MY measurement error — I sampled at
+28.5 s while that launch's countdown started at 33.4 s.
+
+So the difference is the real device, and the readout goes on the glass instead. `?pberr` (or the
+existing `?pbhud`) creates `#lss-errhud`, bottom-left, `pointer-events: none`, z 99999: every uncaught
+error and promise rejection with file:line (capped at 6 lines), plus a state line refreshed once a
+second — `740x360 lss-touch tc:auto ta:0 st:select cd:-/3` = viewport, the `<html>` class list,
+`#touch-controls`' inline display, `input.touchActive`, `game.state`, and the countdown's class/text.
+`window.__errHud(false)` hides it. Verified with a synthetic error at 740x360.
+
+**How to read it on the phone**: if a line appears when the screen rotates, that is the fault and it
+names the line. If NOTHING throws and the state line still says `tc:block ta:1` while no buttons are
+visible, the fault is layout — off-screen or covered — not logic, and that is a different hunt.
