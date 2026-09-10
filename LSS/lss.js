@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.79';
+const LSS_BUILD = '41.85';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -640,6 +640,7 @@ const input = {
   vrRenderScale: 0.7,
   vrHudScale: 3,
   vrWater: false,
+  vrWaterRefl: false,
   hudScale: 1,
   vrPerfMode: 'standard',
   vrStripFx: false,
@@ -5975,6 +5976,7 @@ class NetworkPlayer {
       const ripColor = _shipShieldColor(this.loadoutKey);
       spawnShieldHit(ripPoint, this.chassis.hullLength * 0.8, ripColor, this.mesh);
     }
+    _hitMarkFor(attacker, amount);   // (v41.80)
     return amount;
   }
 
@@ -10922,6 +10924,7 @@ renderer.xr.addEventListener('sessionend', () => {
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
   if (xrAuxMesh) xrAuxMesh.visible = false;
+  if (xrScoreMesh) xrScoreMesh.visible = false;   // (v41.83)
   if (xrMinimapMesh) xrMinimapMesh.visible = false;
   if (xrMenuMesh) xrMenuMesh.visible = false;
   try {
@@ -11174,6 +11177,138 @@ _xrAuxCanvas.height = 768;
 const _xrAuxCtx = _xrAuxCanvas.getContext('2d');
 let _xrAuxTex = null;
 let xrAuxMesh = null;
+const _xrSbCanvas = document.createElement('canvas');
+_xrSbCanvas.width = 1400;
+_xrSbCanvas.height = 900;
+const _xrSbCtx = _xrSbCanvas.getContext('2d');
+let _xrSbTex = null;
+let xrScoreMesh = null;
+let _xrSbSig = '';
+function _xrEnsureScoreMesh() {
+  if (xrScoreMesh) return xrScoreMesh;
+  if (typeof xrDolly === 'undefined' || !xrDolly) return null;
+  _xrSbTex = new THREE.CanvasTexture(_xrSbCanvas);
+  _xrSbTex.minFilter = THREE.LinearFilter;
+  _xrSbTex.magFilter = THREE.LinearFilter;
+  _xrSbTex.format = THREE.RGBAFormat;
+  _xrSbTex.generateMipmaps = false;
+  _xrSbTex.colorSpace = THREE.SRGBColorSpace;
+  const geo = new THREE.PlaneGeometry(1.9, 1.22);
+  const mat = new THREE.MeshBasicMaterial({
+    map: _xrSbTex, transparent: true, depthTest: false, depthWrite: false,
+    toneMapped: false, color: new THREE.Color(1.45, 1.45, 1.45),
+  });
+  xrScoreMesh = new THREE.Mesh(geo, mat);
+  xrScoreMesh.position.set(0, 0.05, -1.6);
+  xrScoreMesh.renderOrder = 1001;   // 998 aux / 999 hud / 1000 menu / 1002 beam / 1003 dot
+  xrScoreMesh.frustumCulled = false;
+  xrScoreMesh.visible = false;
+  xrDolly.add(xrScoreMesh);
+  return xrScoreMesh;
+}
+function _xrScoreRows() {
+  const mode = (typeof LSS !== 'undefined' && LSS.MODE) || 'classic';
+  const pve = (mode === 'campaign' || mode === 'freeflight' || mode === 'endless');
+  const endless = (mode === 'endless');
+  const st = (e) => (!e.alive ? 'DEAD' : (e.doomed ? 'DOOMED' : 'ALIVE'));
+  const cols = ['SHIP', 'STATUS', 'KILLS'];
+  if (pve) cols.push('LEVIATHANS');
+  if (endless) cols.push('AEGIS');
+  cols.push('DAMAGE');
+  const groups = [];
+  const mine = [];
+  const myAegis = (game.endlessRun && game.endlessRun.aegis) ? (game.endlessRun.aegis.lvl | 0) : null;
+  const cell = (k, m, a, d) => {
+    const r = [String(k | 0)];
+    if (pve) r.push(String(m | 0));
+    if (endless) r.push(a != null ? ('L' + a) : '-');
+    r.push(String(Math.floor(d || 0)));
+    return r;
+  };
+  mine.push({ name: 'YOU (' + (player.loadout ? player.loadout.name : '?') + ')',
+              status: (player.shipState === 'dead' ? 'DEAD' : (player.doomed ? 'DOOMED' : 'ALIVE')),
+              stats: cell(player.kills, player.monKills, myAegis, player.damageDealt), me: true });
+  try {
+    for (const np of net.networkPlayers) {
+      mine.push({ name: '[NET] ' + (np.loadout ? np.loadout.name : '?'), status: st(np),
+                  stats: cell(np.kills, np.monKills, (np.aegisLvl != null) ? np.aegisLvl : null, np.damageDealt), me: false });
+    }
+  } catch (_) {}
+  let title = 'SCOREBOARD';
+  if (mode === 'campaign') title += '  \u2014  WAVE ' + (game.currentRound || 1);
+  else if (endless && game.endlessRun) title += '  \u2014  ' + (game.endlessRun.dist / 1000).toFixed(2) + ' KM';
+  groups.push({ label: 'PILOTS', rows: mine });
+  if (!pve) {
+    try {
+      const a = [], b = [];
+      for (const e of game.entities) {
+        if (!e || !e.loadout) continue;
+        if (!e.alive && mode === 'assault') continue;   // the reinforcement corpse pile
+        (e.team === 0 ? a : b).push({ name: e.loadout.name || '?', status: st(e),
+                                      stats: cell(e.kills, e.monKills, null, e.damageDealt), me: false });
+      }
+      const cut = (arr) => arr.sort((x, y) => (+y.stats[0]) - (+x.stats[0])).slice(0, 8);
+      if (a.length) groups.push({ label: 'FLEET A', rows: cut(a) });
+      if (b.length) groups.push({ label: 'FLEET B', rows: cut(b) });
+    } catch (_) {}
+  }
+  return { title: title, cols: cols, groups: groups };
+}
+function _xrDrawScoreboard(ctx, W2, H2) {
+  const M = _xrScoreRows();
+  ctx.clearRect(0, 0, W2, H2);
+  ctx.fillStyle = 'rgba(6,12,20,0.86)';
+  ctx.fillRect(0, 0, W2, H2);
+  ctx.strokeStyle = 'rgba(120,190,255,0.55)';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, W2 - 4, H2 - 4);
+  _xrText(ctx, M.title, W2 / 2, 74, 'bold 52px monospace', '#cfe8ff', 'center');
+  const nameX = 60, statX = [];
+  const nCols = M.cols.length - 1;                 // minus the SHIP column
+  const right = W2 - 60, first = 500, span = right - first;
+  for (let i = 0; i < nCols; i++) statX.push(first + span * ((i + 1) / nCols));
+  let y = 138;
+  _xrText(ctx, M.cols[0], nameX, y, 'bold 30px monospace', '#7fa8c8', 'left');
+  for (let i = 0; i < nCols; i++) _xrText(ctx, M.cols[i + 1], statX[i], y, 'bold 24px monospace', '#7fa8c8', 'right');
+  y += 14;
+  ctx.strokeStyle = 'rgba(120,190,255,0.35)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(nameX, y); ctx.lineTo(right, y); ctx.stroke();
+  y += 40;
+  for (const g of M.groups) {
+    if (y > H2 - 60) break;
+    _xrText(ctx, g.label, nameX, y, 'bold 28px monospace', '#ffcf6b', 'left');
+    y += 40;
+    for (const r of g.rows) {
+      if (y > H2 - 40) break;
+      const col = r.me ? '#ffffff' : (r.status === 'DEAD' ? '#8a97a5' : '#bcd8f0');
+      if (r.me) { ctx.fillStyle = 'rgba(90,150,220,0.22)'; ctx.fillRect(nameX - 16, y - 30, right - nameX + 32, 40); }
+      _xrText(ctx, r.name, nameX, y, (r.me ? 'bold ' : '') + '32px monospace', col, 'left');
+      _xrText(ctx, r.status, statX[0] , y, '28px monospace', col, 'right');
+      for (let i = 0; i < r.stats.length && i + 1 < statX.length; i++) {
+        _xrText(ctx, r.stats[i], statX[i + 1], y, '30px monospace', col, 'right');
+      }
+      y += 42;
+    }
+    y += 16;
+  }
+}
+window.__xrSb = function (show) {
+  try {
+    let el = document.getElementById('__xrSbPrev');
+    if (show === 0 || show === false) { if (el) el.style.display = 'none'; return 'hidden'; }
+    _xrDrawScoreboard(_xrSbCtx, _xrSbCanvas.width, _xrSbCanvas.height);
+    if (!el) {
+      el = document.createElement('canvas');
+      el.id = '__xrSbPrev';
+      el.style.cssText = 'position:fixed;right:6px;top:6px;z-index:99998;border:2px solid #4af;width:560px;height:360px;pointer-events:none';
+      document.body.appendChild(el);
+    }
+    el.style.display = '';
+    el.width = _xrSbCanvas.width; el.height = _xrSbCanvas.height;
+    el.getContext('2d').drawImage(_xrSbCanvas, 0, 0);
+    return { painted: true, w: _xrSbCanvas.width, h: _xrSbCanvas.height };
+  } catch (e) { return { err: String((e && e.message) || e) }; }
+};
 function _xrEnsureAuxMesh() {
   if (xrAuxMesh) return xrAuxMesh;
   _xrAuxTex = new THREE.CanvasTexture(_xrAuxCanvas);
@@ -12790,6 +12925,11 @@ function _swVrLite() {
   try { if (typeof input !== 'undefined' && input && input.vrWater) return false; } catch (_) {}
   return true;
 }
+function _swVrNoRefl() {
+  if (!((typeof isXRPresenting === 'function') && isXRPresenting())) return false;
+  try { if (typeof input !== 'undefined' && input && input.vrWater && input.vrWaterRefl) return false; } catch (_) {}
+  return true;
+}
 function isXRPresenting() {
   const r = (typeof window !== 'undefined') ? window.renderer : null;
   return !!(r && r.xr && r.xr.isPresenting);
@@ -14063,6 +14203,29 @@ function renderFrame() {
         }
       }
       if (xrAuxMesh) xrAuxMesh.visible = false;
+      {
+        let _sbOn = false;
+        try { _sbOn = !!scoreboardVisible; } catch (_) {}
+        if (_sbOn) {
+          const _sm = _xrEnsureScoreMesh();
+          if (_sm) {
+            _sm.visible = true;
+            let _sig = '';
+            try {
+              _sig = (player.kills | 0) + '/' + Math.floor(player.damageDealt || 0) + '/' + (player.monKills | 0)
+                   + '/' + player.shipState + '/' + (game.currentRound | 0)
+                   + '/' + ((net && net.networkPlayers) ? net.networkPlayers.length : 0)
+                   + '/' + ((game.entities) ? game.entities.length : 0);
+            } catch (_) { _sig = 'x'; }
+            if (_sig !== _xrSbSig) {
+              _xrSbSig = _sig;
+              try { _xrDrawScoreboard(_xrSbCtx, _xrSbCanvas.width, _xrSbCanvas.height); if (_xrSbTex) _xrSbTex.needsUpdate = true; } catch (_) {}
+            }
+          }
+        } else if (xrScoreMesh) {
+          xrScoreMesh.visible = false;
+        }
+      }
       if (xrMinimapMesh) {
         xrMinimapMesh.visible = _xrShowHud &&
           !!(typeof window !== 'undefined' && window.__xrSeparateRadar);
@@ -16049,6 +16212,10 @@ function _cavernWaterCheap(T) {
   const K = (typeof window !== 'undefined' && window.__cavernWater) ? window.__cavernWater : null;
   if (K && typeof K.cheap === 'boolean') return K.cheap && _swCavernWaterWanted(T);
   if (!_swCavernWaterWanted(T)) return false;
+  try {
+    if (typeof input !== 'undefined' && input && input.vrWater &&
+        (typeof isXRPresenting === 'function') && isXRPresenting()) return false;
+  } catch (_) {}
   return (typeof _fxSmallDevice === 'function') && _fxSmallDevice();
 }
 function _swCavernWaterWanted(T) {
@@ -18003,7 +18170,7 @@ function _swRippleTick(dt) {
       if (wm && wm.tDiffuse && w._reflWorldN > 0) {
         du.tDiffuse.value = wm.tDiffuse.value;
         du.uReflMatrix.value.copy(w._reflWorld);
-        du.uReflLive.value = _vrR ? 0.0 : 1.0;
+        du.uReflLive.value = _swVrNoRefl() ? 0.0 : 1.0;   // (v41.82) mirror tier, not _vrR
       } else {
         du.uReflLive.value = 0.0;
       }
@@ -19488,12 +19655,12 @@ function _swBuildHubWater(T) {
 
 
 
-      if (_swVrLite()) return;   // (v41.42) the planar mirror keeps refreshing when VR water is on
+      if (_swVrNoRefl()) return;
       this._reflFrame = (this._reflFrame + 1) % 3;
       {
         const _WK = window.__water || {};
         try { if (window.__lssWarmDraw) return; } catch (_) {}
-        const _sm = _fxSmallDevice();
+        const _sm = _fxSmallDevice() && _swVrNoRefl();
         const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : (_sm ? 4 : 2);   // hard cost ceiling
         const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : (_sm ? 6 : 3);   // shipped cadence
         this._reflGap++;
@@ -20047,7 +20214,7 @@ function _swUpdateHubWater() {
       const U = w.material.uniforms;
       if (U.uSubmerge) U.uSubmerge.value = Math.max(0, Math.min(1, (WL - camera.position.y) / 60));
       if (U.uEye) U.uEye.value.copy(camera.position);
-      if (U.uReflLive) U.uReflLive.value = _swVrLite() ? 0.0 : 1.0;   // (v41.42)
+      if (U.uReflLive) U.uReflLive.value = _swVrNoRefl() ? 0.0 : 1.0;   // (v41.82) mirror tier
       if (U.uFlipFace) U.uFlipFace.value = (window.__water && window.__water.flip) ? 1.0 : 0.0;
     }
   }
@@ -21944,6 +22111,7 @@ function _hcTrafficInit(city, group) {
               try { if (typeof _aegisAwardKill === 'function') _aegisAwardKill(); } catch (_) {}
             }
           }
+          _hitMarkFor(attacker, _applied);   // (v41.80)
           return _applied;
         },
       };
@@ -22546,6 +22714,7 @@ function _carrierAttach(root, sector) {
           }
         } catch (_) { try { this.mesh.visible = false; } catch (__) {} }
       }
+      _hitMarkFor(attacker, applied);   // (v41.80)
       return applied;
     },
   };
@@ -24496,6 +24665,7 @@ class OwCarrier {
     if (this.isProxy) {
       const hp = hitPoint || this.position;
       _owSend({ type: 'ow_dmg', id: this.id, d: Math.round(dmg), p: [Math.round(hp.x), Math.round(hp.y), Math.round(hp.z)] });
+      _hitMarkFor(attacker, dmg);   // (v41.80)
       return dmg;
     }
     if (attacker === 'player' && typeof _aegisDmgOut === 'function') { try { dmg = _aegisDmgOut(dmg, this); } catch (_) {} }
@@ -24506,6 +24676,7 @@ class OwCarrier {
     this._lastAttacker = attacker;
     try { if (this.city) _owAggro(this.city, attacker); } catch (_) {}   // (v38.85) the city remembers who shot its flagship
     if (this.health <= 0) this.die();
+    _hitMarkFor(attacker, applied);   // (v41.80)
     return applied;
   }
   dieFx() {
@@ -25054,6 +25225,7 @@ class OwBoss {
     if (this.isProxy) {
       const hp = hitPoint || this.position;
       _owSend({ type: 'ow_dmg', id: 'boss', d: Math.round(dmg), p: [Math.round(hp.x), Math.round(hp.y), Math.round(hp.z)] });
+      _hitMarkFor(attacker, dmg);   // (v41.80)
       return dmg;
     }
     if (attacker === 'player' && typeof _aegisDmgOut === 'function') { try { dmg = _aegisDmgOut(dmg, this); } catch (_) {} }
@@ -25063,6 +25235,7 @@ class OwBoss {
     if (attacker && typeof attacker === 'object' && attacker.alive !== undefined && attacker !== this) attacker.damageDealt = (attacker.damageDealt || 0) + applied;
     this._lastAttacker = attacker;
     if (this.health <= 0) this.die();
+    _hitMarkFor(attacker, applied);   // (v41.80)
     return applied;
   }
   dieFx() {
@@ -46610,7 +46783,7 @@ function updatePlayerMovement(dt) {
       player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
     }
     input.mouseDX = 0; input.mouseDY = 0;   // consumed either way, or they bank up for the release
-    if (!_vrHold) camera.quaternion.setFromEuler(player.euler);
+    camera.quaternion.setFromEuler(player.euler);
     camera.position.copy(player.position);
     _lssApplyShipRig(dt);   
     return;
@@ -47397,6 +47570,7 @@ function _lssApplyShipRig(dt) {
 
 function _adsLookScale() {
   try {
+    if ((typeof isXRPresenting === 'function') && isXRPresenting()) return 1;
     const Z = window.__zoom; if (!Z || Z.dblSens === false) return 1;
     const z = game._adsZoom || 0, M = game._adsMag || 0, m0 = (Z.mMax != null ? Z.mMax : 2.4);
     if (!z || !M || M <= m0) return 1;
@@ -58757,6 +58931,7 @@ function _refreshSettingsValues() {
 
   setSel('set-vr-perf', input.vrPerfMode || 'standard');
   setChk('set-vr-water', !!input.vrWater);   // (v41.79)
+  setChk('set-vr-water-refl', !!input.vrWaterRefl);   // (v41.82)
   setRange('set-vr-scale', null,
     (typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7);
   const vrScaleVal = $('#val-vr-scale');
@@ -59116,10 +59291,22 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Off (default) gives a headset the cheap water: the flat mirror, no
-        displaced surface, no live reflection, no crest scan, and the ripple sim at half rate. On gives
-        it exactly what a monitor gets &mdash; the displaced sheet, the wake, the spray and the planar
-        reflection. A standalone Quest cannot usually afford it; a PC headset generally can. Takes
-        effect immediately, including inside a running session.</label>
+        displaced surface, no crest scan, and the ripple sim at half rate. On gives it the displaced
+        sheet, the wake and the spray. A standalone Quest cannot usually afford it; a PC headset
+        generally can. Applies live in the hub &mdash; on cavern maps the water is built on entry, so
+        leave and re-enter the map for it to take.</label>
+      </div>
+      <!-- (v41.82) The mirror is its own tier: it is an entire extra render of the scene, where the
+           row above is a vertex-shader tier on geometry that gets drawn anyway. -->
+      <div class="setting-row">
+        <label>VR Water Reflection</label>
+        <input type="checkbox" id="set-vr-water-refl" ${input.vrWaterRefl ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Adds the planar mirror on top of VR Water Effects &mdash; the sky, the
+        land and the ships reflected in the surface. Needs VR Water Effects on to do anything. This is
+        the expensive half: a second render of the whole scene, several times a second. Turning it on
+        also gives the mirror the desktop refresh cadence rather than the phone one.</label>
       </div>
       <div class="setting-row">
         <label>VR HUD Size</label>
@@ -60359,6 +60546,11 @@ function buildSettingsPage() {
     input.vrWater = !!vrWaterChk.checked;
     saveSettings();
   });
+  const vrWaterReflChk = overlay.querySelector('#set-vr-water-refl');
+  if (vrWaterReflChk) vrWaterReflChk.addEventListener('change', () => {
+    input.vrWaterRefl = !!vrWaterReflChk.checked;
+    saveSettings();
+  });
 
   const vrHudScaleSel = overlay.querySelector('#set-vr-hud-scale');
   const vrHudScaleVal = overlay.querySelector('#val-vr-hud-scale');
@@ -61014,6 +61206,7 @@ function saveSettings() {
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
       vrHudMigrated: true,   // (v41.43) the one-time vrHudScale default bump has been applied
       vrWater: !!input.vrWater,   // (v41.43)
+      vrWaterRefl: !!input.vrWaterRefl,   // (v41.82)
       clipRec: !!input.clipRec,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
@@ -62817,6 +63010,7 @@ function loadSettings() {
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
     if (typeof data.vrWater === 'boolean') input.vrWater = data.vrWater;   // (v41.43)
+    if (typeof data.vrWaterRefl === 'boolean') input.vrWaterRefl = data.vrWaterRefl;   // (v41.82)
     if (typeof data.vrHudScale === 'number') {
       const _wasOldDefault = (Math.abs(data.vrHudScale - 1.5) < 1e-6) && !data.vrHudMigrated;
       input.vrHudScale = _wasOldDefault ? 3 : data.vrHudScale;
@@ -77707,9 +77901,17 @@ function _markerFlash(el, keys, ms) {
   el.classList.add('active');
 }
 function showHitMarker() {
+  const _t = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  if (_t - (showHitMarker._t || -1e9) < 25) return;
+  showHitMarker._t = _t;
   const el = showHitMarker._el || (showHitMarker._el = document.getElementById('hit-marker'));
   if (!el) return;
   _markerFlash(el, _HIT_FLASH_KEYS, 250);
+}
+function _hitMarkFor(attacker, dealt) {
+  if (!(dealt > 0) || attacker !== 'player') return;
+  try { if (typeof player !== 'undefined' && player && player.shipState === 'dead') return; } catch (_) { return; }
+  try { showHitMarker(); } catch (_) {}
 }
 
 function showKillMarker() {

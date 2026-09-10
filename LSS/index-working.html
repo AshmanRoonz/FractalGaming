@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.79';
+const LSS_BUILD = '41.85';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -5740,6 +5740,11 @@ const input = {
   // (v41.42) OFF by default: a standalone Quest cannot afford the displaced surface, the planar
   // mirror and the crest readback. A PC headset usually can, so it is a switch rather than a rule.
   vrWater: false,
+  // (v41.82) the SECOND tier. vrWater gives a headset the displaced surface, the wake, the spray and
+  // the full-rate sim; this adds the planar mirror on top, which is a whole extra scene render and is
+  // by far the most expensive part. Dependent by construction - it means nothing while vrWater is
+  // off, because the flat plane owns the water then and the sheet is not drawn at all.
+  vrWaterRefl: false,
   // (v36.19) FLAT-SCREEN HUD size multiplier — the VMIN-layout equivalent of
   // vrHudScale. 1 = the designed layout. Range 0.75..1.75 in the settings
   // slider: past ~1.8 the gauge cluster reaches the pinned compass rose, and
@@ -13021,6 +13026,7 @@ class NetworkPlayer {
       const ripColor = _shipShieldColor(this.loadoutKey);
       spawnShieldHit(ripPoint, this.chassis.hullLength * 0.8, ripColor, this.mesh);
     }
+    _hitMarkFor(attacker, amount);   // (v41.80)
     return amount;
   }
 
@@ -19478,6 +19484,7 @@ renderer.xr.addEventListener('sessionend', () => {
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
   if (xrAuxMesh) xrAuxMesh.visible = false;
+  if (xrScoreMesh) xrScoreMesh.visible = false;   // (v41.83)
   if (xrMinimapMesh) xrMinimapMesh.visible = false;
   if (xrMenuMesh) xrMenuMesh.visible = false;
   // (v35.66) Retire the laser pointer with the session. The controller objects
@@ -19809,6 +19816,167 @@ _xrAuxCanvas.height = 768;
 const _xrAuxCtx = _xrAuxCanvas.getContext('2d');
 let _xrAuxTex = null;
 let xrAuxMesh = null;
+// ⚠⚠ (v41.83) THE VR SCOREBOARD. Owner: "in VR, i could not see my score when i pushed the
+// scoreboard button, maybe we didn't build a VR scoreboard" - correct, we did not.
+// The board is a DOM overlay (`<div id="scoreboard">`), and a DOM overlay is not composited into an
+// immersive-vr session at all, so it was structurally invisible. The INPUT was never broken: the
+// right thumbstick up and right-controller B both flip `scoreboardVisible` every time, and the
+// end-of-match force-show sets the same flag. Only the display was missing.
+// This is its own plane rather than a reuse of the aux panel below: that one is positioned and tilted
+// to be GLANCED DOWN AT (0, -0.85, -1.7, pitched 26 degrees) for the ability pie its comment says it
+// was designed for, which is the wrong pose and the wrong shape for a six-column table you read.
+// ⚠ Parented to xrDolly, never to the scene: three writes the XR cameras' poses in reference
+// space and xrDolly is what carries the ship transform, so a scene-parented panel would swim.
+// ⚠ The material recipe is the HUD family's, not the menu's - toneMapped:false + the 1.45 colour
+// lift + SRGBColorSpace on the texture. The menu plane omits all three and renders visibly darker.
+// ⚠ Repainted only when the content SIGNATURE changes, not per frame: this is a 1400x900 canvas
+// and a per-frame repaint plus upload would cost more than the board is worth.
+const _xrSbCanvas = document.createElement('canvas');
+_xrSbCanvas.width = 1400;
+_xrSbCanvas.height = 900;
+const _xrSbCtx = _xrSbCanvas.getContext('2d');
+let _xrSbTex = null;
+let xrScoreMesh = null;
+let _xrSbSig = '';
+function _xrEnsureScoreMesh() {
+  if (xrScoreMesh) return xrScoreMesh;
+  if (typeof xrDolly === 'undefined' || !xrDolly) return null;
+  _xrSbTex = new THREE.CanvasTexture(_xrSbCanvas);
+  _xrSbTex.minFilter = THREE.LinearFilter;
+  _xrSbTex.magFilter = THREE.LinearFilter;
+  _xrSbTex.format = THREE.RGBAFormat;
+  _xrSbTex.generateMipmaps = false;
+  _xrSbTex.colorSpace = THREE.SRGBColorSpace;
+  const geo = new THREE.PlaneGeometry(1.9, 1.22);
+  const mat = new THREE.MeshBasicMaterial({
+    map: _xrSbTex, transparent: true, depthTest: false, depthWrite: false,
+    toneMapped: false, color: new THREE.Color(1.45, 1.45, 1.45),
+  });
+  xrScoreMesh = new THREE.Mesh(geo, mat);
+  xrScoreMesh.position.set(0, 0.05, -1.6);
+  xrScoreMesh.renderOrder = 1001;   // 998 aux / 999 hud / 1000 menu / 1002 beam / 1003 dot
+  xrScoreMesh.frustumCulled = false;
+  xrScoreMesh.visible = false;
+  xrDolly.add(xrScoreMesh);
+  return xrScoreMesh;
+}
+// The rows. Deliberately a SIMPLIFICATION of updateScoreboard's DOM build rather than a second copy
+// of its mode fork: pilots (you + peers) always, and in fleet modes the living fleet ships under
+// their team headings. Assault's attacking/defending tags and the corpse-pile hiding are not carried
+// across - if a headset player needs those, say so and they can be added here rather than duplicated.
+function _xrScoreRows() {
+  const mode = (typeof LSS !== 'undefined' && LSS.MODE) || 'classic';
+  const pve = (mode === 'campaign' || mode === 'freeflight' || mode === 'endless');
+  const endless = (mode === 'endless');
+  const st = (e) => (!e.alive ? 'DEAD' : (e.doomed ? 'DOOMED' : 'ALIVE'));
+  const cols = ['SHIP', 'STATUS', 'KILLS'];
+  if (pve) cols.push('LEVIATHANS');
+  if (endless) cols.push('AEGIS');
+  cols.push('DAMAGE');
+  const groups = [];
+  const mine = [];
+  const myAegis = (game.endlessRun && game.endlessRun.aegis) ? (game.endlessRun.aegis.lvl | 0) : null;
+  const cell = (k, m, a, d) => {
+    const r = [String(k | 0)];
+    if (pve) r.push(String(m | 0));
+    if (endless) r.push(a != null ? ('L' + a) : '-');
+    r.push(String(Math.floor(d || 0)));
+    return r;
+  };
+  mine.push({ name: 'YOU (' + (player.loadout ? player.loadout.name : '?') + ')',
+              status: (player.shipState === 'dead' ? 'DEAD' : (player.doomed ? 'DOOMED' : 'ALIVE')),
+              stats: cell(player.kills, player.monKills, myAegis, player.damageDealt), me: true });
+  try {
+    for (const np of net.networkPlayers) {
+      mine.push({ name: '[NET] ' + (np.loadout ? np.loadout.name : '?'), status: st(np),
+                  stats: cell(np.kills, np.monKills, (np.aegisLvl != null) ? np.aegisLvl : null, np.damageDealt), me: false });
+    }
+  } catch (_) {}
+  let title = 'SCOREBOARD';
+  if (mode === 'campaign') title += '  \u2014  WAVE ' + (game.currentRound || 1);
+  else if (endless && game.endlessRun) title += '  \u2014  ' + (game.endlessRun.dist / 1000).toFixed(2) + ' KM';
+  groups.push({ label: 'PILOTS', rows: mine });
+  if (!pve) {
+    try {
+      const a = [], b = [];
+      for (const e of game.entities) {
+        if (!e || !e.loadout) continue;
+        if (!e.alive && mode === 'assault') continue;   // the reinforcement corpse pile
+        (e.team === 0 ? a : b).push({ name: e.loadout.name || '?', status: st(e),
+                                      stats: cell(e.kills, e.monKills, null, e.damageDealt), me: false });
+      }
+      const cut = (arr) => arr.sort((x, y) => (+y.stats[0]) - (+x.stats[0])).slice(0, 8);
+      if (a.length) groups.push({ label: 'FLEET A', rows: cut(a) });
+      if (b.length) groups.push({ label: 'FLEET B', rows: cut(b) });
+    } catch (_) {}
+  }
+  return { title: title, cols: cols, groups: groups };
+}
+function _xrDrawScoreboard(ctx, W2, H2) {
+  const M = _xrScoreRows();
+  ctx.clearRect(0, 0, W2, H2);
+  ctx.fillStyle = 'rgba(6,12,20,0.86)';
+  ctx.fillRect(0, 0, W2, H2);
+  ctx.strokeStyle = 'rgba(120,190,255,0.55)';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, W2 - 4, H2 - 4);
+  _xrText(ctx, M.title, W2 / 2, 74, 'bold 52px monospace', '#cfe8ff', 'center');
+  // (v41.85) the stat columns start at 500, not 620. At 620 the right-aligned headers bunched - with
+  // four of them 'KILLS' and 'LEVIATHANS' nearly touched, and endless adds a fifth (AEGIS). The names
+  // are short, so the left half was mostly empty while the right half was cramped.
+  // ⚠ Header font is smaller than the row font on purpose: 'LEVIATHANS' is the widest string on
+  // the board and it sets the minimum column pitch for every mode.
+  const nameX = 60, statX = [];
+  const nCols = M.cols.length - 1;                 // minus the SHIP column
+  const right = W2 - 60, first = 500, span = right - first;
+  for (let i = 0; i < nCols; i++) statX.push(first + span * ((i + 1) / nCols));
+  let y = 138;
+  _xrText(ctx, M.cols[0], nameX, y, 'bold 30px monospace', '#7fa8c8', 'left');
+  for (let i = 0; i < nCols; i++) _xrText(ctx, M.cols[i + 1], statX[i], y, 'bold 24px monospace', '#7fa8c8', 'right');
+  y += 14;
+  ctx.strokeStyle = 'rgba(120,190,255,0.35)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(nameX, y); ctx.lineTo(right, y); ctx.stroke();
+  y += 40;
+  for (const g of M.groups) {
+    if (y > H2 - 60) break;
+    _xrText(ctx, g.label, nameX, y, 'bold 28px monospace', '#ffcf6b', 'left');
+    y += 40;
+    for (const r of g.rows) {
+      if (y > H2 - 40) break;
+      const col = r.me ? '#ffffff' : (r.status === 'DEAD' ? '#8a97a5' : '#bcd8f0');
+      if (r.me) { ctx.fillStyle = 'rgba(90,150,220,0.22)'; ctx.fillRect(nameX - 16, y - 30, right - nameX + 32, 40); }
+      _xrText(ctx, r.name, nameX, y, (r.me ? 'bold ' : '') + '32px monospace', col, 'left');
+      _xrText(ctx, r.status, statX[0] , y, '28px monospace', col, 'right');
+      for (let i = 0; i < r.stats.length && i + 1 < statX.length; i++) {
+        _xrText(ctx, r.stats[i], statX[i + 1], y, '30px monospace', col, 'right');
+      }
+      y += 42;
+    }
+    y += 16;
+  }
+}
+// ⚠ (v41.84) DEV PROBE - the VR scoreboard on a flat screen. Every other panel in this file can
+// only be judged through a headset, which is why the aux plane sat dead and unnoticed for builds. This
+// paints the real canvas with the real row model and pins it to the corner of the page:
+//   window.__xrSb()    -> paint and show     window.__xrSb(0) -> hide
+// It calls the SAME _xrDrawScoreboard the headset uses, so a layout or a throw shows up here first.
+window.__xrSb = function (show) {
+  try {
+    let el = document.getElementById('__xrSbPrev');
+    if (show === 0 || show === false) { if (el) el.style.display = 'none'; return 'hidden'; }
+    _xrDrawScoreboard(_xrSbCtx, _xrSbCanvas.width, _xrSbCanvas.height);
+    if (!el) {
+      el = document.createElement('canvas');
+      el.id = '__xrSbPrev';
+      el.style.cssText = 'position:fixed;right:6px;top:6px;z-index:99998;border:2px solid #4af;width:560px;height:360px;pointer-events:none';
+      document.body.appendChild(el);
+    }
+    el.style.display = '';
+    el.width = _xrSbCanvas.width; el.height = _xrSbCanvas.height;
+    el.getContext('2d').drawImage(_xrSbCanvas, 0, 0);
+    return { painted: true, w: _xrSbCanvas.width, h: _xrSbCanvas.height };
+  } catch (e) { return { err: String((e && e.message) || e) }; }
+};
 function _xrEnsureAuxMesh() {
   if (xrAuxMesh) return xrAuxMesh;
   _xrAuxTex = new THREE.CanvasTexture(_xrAuxCanvas);
@@ -21807,6 +21975,24 @@ function _swVrLite() {
   try { if (typeof input !== 'undefined' && input && input.vrWater) return false; } catch (_) {}
   return true;
 }
+// ⚠⚠ (v41.82) "IS VR SKIPPING THE MIRROR?" - a second, narrower question than _swVrLite's.
+// Owner: "the water performance option should include reflection on the water, or make it a secondary
+// option". Secondary is right, because the two costs are not the same order: the displaced sheet is a
+// vertex-shader tier on geometry that is drawn anyway, while the planar mirror is an ENTIRE EXTRA
+// SCENE RENDER per refresh. A PC headset can usually afford both; a Quest may want the wake and the
+// spray without paying for a second render of the world.
+// Of _swVrLite's six call sites, exactly three are about the mirror - the sheet's uReflLive, the
+// Reflector's onBeforeRender early return, and the flat plane's uReflLive. Those three move here.
+// ⚠ `input.vrWater &&` is load-bearing, not belt-and-braces: with vrWater off the flat plane owns
+// the water and the displaced sheet is not drawn, so a mirror without a sheet is not a state that
+// means anything. Requiring both keeps the tiers ordered however the checkboxes are clicked.
+// ⚠ The try/catch around the `input` read is copied verbatim from above for the same reason: the
+// top-level `const input` is a TDZ hazard for anything that runs during boot.
+function _swVrNoRefl() {
+  if (!((typeof isXRPresenting === 'function') && isXRPresenting())) return false;
+  try { if (typeof input !== 'undefined' && input && input.vrWater && input.vrWaterRefl) return false; } catch (_) {}
+  return true;
+}
 function isXRPresenting() {
   const r = (typeof window !== 'undefined') ? window.renderer : null;
   return !!(r && r.xr && r.xr.isPresenting);
@@ -23575,6 +23761,32 @@ function renderFrame() {
         }
       }
       if (xrAuxMesh) xrAuxMesh.visible = false;
+      // (v41.83) the VR scoreboard, driven off the SAME `scoreboardVisible` flag the DOM board uses -
+      // so the stick, the controller button and the end-of-match force-show all light it with no
+      // extra wiring, and it can never disagree with the flat board about whether it is up.
+      {
+        let _sbOn = false;
+        try { _sbOn = !!scoreboardVisible; } catch (_) {}
+        if (_sbOn) {
+          const _sm = _xrEnsureScoreMesh();
+          if (_sm) {
+            _sm.visible = true;
+            let _sig = '';
+            try {
+              _sig = (player.kills | 0) + '/' + Math.floor(player.damageDealt || 0) + '/' + (player.monKills | 0)
+                   + '/' + player.shipState + '/' + (game.currentRound | 0)
+                   + '/' + ((net && net.networkPlayers) ? net.networkPlayers.length : 0)
+                   + '/' + ((game.entities) ? game.entities.length : 0);
+            } catch (_) { _sig = 'x'; }
+            if (_sig !== _xrSbSig) {
+              _xrSbSig = _sig;
+              try { _xrDrawScoreboard(_xrSbCtx, _xrSbCanvas.width, _xrSbCanvas.height); if (_xrSbTex) _xrSbTex.needsUpdate = true; } catch (_) {}
+            }
+          }
+        } else if (xrScoreMesh) {
+          xrScoreMesh.visible = false;
+        }
+      }
       // (v35.57) The radar is drawn INTO the HUD canvas now (see _hlRadar), and
       // the HUD mesh above mirrors that canvas — so this standalone plane would
       // be a second copy. Kept behind a flag rather than deleted; the plane is
@@ -26424,6 +26636,18 @@ function _cavernWaterCheap(T) {
   const K = (typeof window !== 'undefined' && window.__cavernWater) ? window.__cavernWater : null;
   if (K && typeof K.cheap === 'boolean') return K.cheap && _swCavernWaterWanted(T);
   if (!_swCavernWaterWanted(T)) return false;
+  // ⚠⚠ (v41.82) THE VR WATER SETTING COULD NOT REACH A CAVERN MAP AT ALL. This is why "water
+  // effects on" appeared to do nothing outside the hub: _fxSmallDevice() returns true for ANY headset,
+  // so `cheap` was true on every cavern biome, which makes _canReflect false - and then the Reflector
+  // is never CONSTRUCTED and the ripple sim never initialises. There was nothing left for the
+  // per-frame switch to turn on. The setting only ever worked in the hub (mossy), which is exactly
+  // where it was tested.
+  // ⚠ This is a BUILD-time decision, unlike every other vrWater effect: the player has to leave and
+  // re-enter the map for it to take. The settings caption says so now.
+  try {
+    if (typeof input !== 'undefined' && input && input.vrWater &&
+        (typeof isXRPresenting === 'function') && isXRPresenting()) return false;
+  } catch (_) {}
   return (typeof _fxSmallDevice === 'function') && _fxSmallDevice();
 }
 function _swCavernWaterWanted(T) {
@@ -29605,7 +29829,7 @@ function _swRippleTick(dt) {
       if (wm && wm.tDiffuse && w._reflWorldN > 0) {
         du.tDiffuse.value = wm.tDiffuse.value;
         du.uReflMatrix.value.copy(w._reflWorld);
-        du.uReflLive.value = _vrR ? 0.0 : 1.0;
+        du.uReflLive.value = _swVrNoRefl() ? 0.0 : 1.0;   // (v41.82) mirror tier, not _vrR
       } else {
         du.uReflLive.value = 0.0;
       }
@@ -32050,7 +32274,9 @@ function _swBuildHubWater(T) {
 
 
 
-      if (_swVrLite()) return;   // (v41.42) the planar mirror keeps refreshing when VR water is on
+      // (v41.82) THE line that decides whether the extra scene render is paid at all - so it belongs
+      // to the mirror tier, not the water tier.
+      if (_swVrNoRefl()) return;
       this._reflFrame = (this._reflFrame + 1) % 3;
       // (v36.42) gap-based cadence, live-tunable via window.__water.{reflGapMin,reflGapMax,
       // reflMove,reflTurn}. reflGapMin 1 restores an every-frame mirror, reflGapMin =
@@ -32070,7 +32296,12 @@ function _swBuildHubWater(T) {
         // Returning here leaves `_reflGap` untouched, so the next real frame is due a refresh on the
         // normal cadence and the cached eye still describes the last REAL eye.
         try { if (window.__lssWarmDraw) return; } catch (_) {}
-        const _sm = _fxSmallDevice();
+        // (v41.82) _fxSmallDevice() returns true for ANY headset, so a PC headset that has deliberately
+        // turned the mirror on was still getting the phone cadence (refresh every 4-6 frames instead of
+        // 2-3). If the player has asked for the reflection and is paying for it, give them the one they
+        // are paying for; a Quest that leaves the option off never reaches this line at all, because
+        // the early return above fires first.
+        const _sm = _fxSmallDevice() && _swVrNoRefl();
         const _gMin = (_WK.reflGapMin != null) ? _WK.reflGapMin : (_sm ? 4 : 2);   // hard cost ceiling
         const _gMax = (_WK.reflGapMax != null) ? _WK.reflGapMax : (_sm ? 6 : 3);   // shipped cadence
         this._reflGap++;
@@ -32866,7 +33097,7 @@ function _swUpdateHubWater() {
       const U = w.material.uniforms;
       if (U.uSubmerge) U.uSubmerge.value = Math.max(0, Math.min(1, (WL - camera.position.y) / 60));
       if (U.uEye) U.uEye.value.copy(camera.position);
-      if (U.uReflLive) U.uReflLive.value = _swVrLite() ? 0.0 : 1.0;   // (v41.42)
+      if (U.uReflLive) U.uReflLive.value = _swVrNoRefl() ? 0.0 : 1.0;   // (v41.82) mirror tier
       if (U.uFlipFace) U.uFlipFace.value = (window.__water && window.__water.flip) ? 1.0 : 0.0;
     }
   }
@@ -35415,6 +35646,7 @@ function _hcTrafficInit(city, group) {
               try { if (typeof _aegisAwardKill === 'function') _aegisAwardKill(); } catch (_) {}
             }
           }
+          _hitMarkFor(attacker, _applied);   // (v41.80)
           return _applied;
         },
       };
@@ -36203,6 +36435,7 @@ function _carrierAttach(root, sector) {
           }
         } catch (_) { try { this.mesh.visible = false; } catch (__) {} }
       }
+      _hitMarkFor(attacker, applied);   // (v41.80)
       return applied;
     },
   };
@@ -38649,6 +38882,7 @@ class OwCarrier {
       // the authority owns the health: report the hit, let the packet bring the number back
       const hp = hitPoint || this.position;
       _owSend({ type: 'ow_dmg', id: this.id, d: Math.round(dmg), p: [Math.round(hp.x), Math.round(hp.y), Math.round(hp.z)] });
+      _hitMarkFor(attacker, dmg);   // (v41.80)
       return dmg;
     }
     if (attacker === 'player' && typeof _aegisDmgOut === 'function') { try { dmg = _aegisDmgOut(dmg, this); } catch (_) {} }
@@ -38659,6 +38893,7 @@ class OwCarrier {
     this._lastAttacker = attacker;
     try { if (this.city) _owAggro(this.city, attacker); } catch (_) {}   // (v38.85) the city remembers who shot its flagship
     if (this.health <= 0) this.die();
+    _hitMarkFor(attacker, applied);   // (v41.80)
     return applied;
   }
   // the blast chain, bow to stern (the cyberpunk carrier's farewell) - authority and proxies alike
@@ -39239,6 +39474,7 @@ class OwBoss {
     if (this.isProxy) {
       const hp = hitPoint || this.position;
       _owSend({ type: 'ow_dmg', id: 'boss', d: Math.round(dmg), p: [Math.round(hp.x), Math.round(hp.y), Math.round(hp.z)] });
+      _hitMarkFor(attacker, dmg);   // (v41.80)
       return dmg;
     }
     if (attacker === 'player' && typeof _aegisDmgOut === 'function') { try { dmg = _aegisDmgOut(dmg, this); } catch (_) {} }
@@ -39248,6 +39484,7 @@ class OwBoss {
     if (attacker && typeof attacker === 'object' && attacker.alive !== undefined && attacker !== this) attacker.damageDealt = (attacker.damageDealt || 0) + applied;
     this._lastAttacker = attacker;
     if (this.health <= 0) this.die();
+    _hitMarkFor(attacker, applied);   // (v41.80)
     return applied;
   }
   dieFx() {
@@ -69206,7 +69443,17 @@ function updatePlayerMovement(dt) {
       player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
     }
     input.mouseDX = 0; input.mouseDY = 0;   // consumed either way, or they bank up for the release
-    if (!_vrHold) camera.quaternion.setFromEuler(player.euler);
+    // ⚠⚠ (v41.80) THE QUATERNION WRITE GOES BACK TO UNCONDITIONAL - v41.41 broke aim with it.
+    // I listed this write in v41.41 as one of three things that 'take the view away from the player'
+    // in VR. It is not. In the XR composition it is the SHIP POSE that the head is composed on top of,
+    // so skipping it does not hand the view back - it leaves camera.quaternion at the IDENTITY that
+    // _xrResetDollyAtFrameStart wrote at the top of the frame. During a stasis field or a tether root
+    // the whole world then yaw-snaps to the world axes, the ship mesh snaps with it, and every shot
+    // fires along world -Z regardless of where you are looking.
+    // The owner's actual request - "the stasis field and tether traps shouldn't lock/nudge the look" -
+    // is implemented entirely by the INPUT guard above (`if (!_vrHold)` around the stick/mouse deltas
+    // and the pitch clamp). That stays. This line must not be part of it.
+    camera.quaternion.setFromEuler(player.euler);
     camera.position.copy(player.position);
     _lssApplyShipRig(dt);   
     return;
@@ -70475,6 +70722,14 @@ function _lssApplyShipRig(dt) {
 // false keeps the raw feel.
 function _adsLookScale() {
   try {
+    // ⚠ (v41.80, note corrected v41.81) ADS zoom is disabled in VR, but game._adsZoom / _adsMag
+    // are still computed outside that gate, so this would scale the look in a headset with no zoom on
+    // screen to explain it. It is INERT today, because VR stick look is zeroed by pollGamepad and the
+    // head nudge does not read this function - v41.80 claimed it had just become live, and then v41.81
+    // reverted the change that would have made it so. Kept anyway: it costs one comparison and it is
+    // correct in its own right, so anything that ever does feed a look delta in VR cannot inherit a
+    // zoom scale that has no zoom behind it.
+    if ((typeof isXRPresenting === 'function') && isXRPresenting()) return 1;
     const Z = window.__zoom; if (!Z || Z.dblSens === false) return 1;
     const z = game._adsZoom || 0, M = game._adsMag || 0, m0 = (Z.mMax != null ? Z.mMax : 2.4);
     if (!z || !M || M <= m0) return 1;
@@ -78296,6 +78551,20 @@ let _xrStickScoreboardHeld = false;
 // `inject` is the flat-screen test path (window.__xrStick) — it supplies stick
 // values and bypasses the isPresenting gate so the direction resolution and
 // action dispatch can be exercised without a headset. Null in normal play.
+// ⚠⚠ (v41.81) v41.80 GATED THIS OFF DURING A MATCH AND THAT WAS WRONG. REVERTED. Do not do it
+// again without asking.
+// The reasoning looked airtight: the fire direction in VR is the ship's heading, VR stick look is
+// zeroed by pollGamepad, so a headset has no coarse aim - and leftStickAsDpad is already gated on
+// `game.state !== 'playing'` as precedent. I read the owner's "aim doesn't work" as that gap and
+// gave the stick back to steering.
+// It is not a gap, it is the DESIGN. Owner: "i don't even use the right stick to aim in VR, it's used
+// for 4 other buttons, scoreboard, change ship, and one more i forgot... nudge look only." Aiming in
+// VR is the head nudge, deliberately; the stick is four bindings the player uses DURING a match, and
+// gating it on 'not playing' would have silently killed all of them exactly when they are wanted.
+// ⚠ The v35.68 comment below ("VR aims with the head") is therefore CORRECT as intent, even
+// though the head-aim feature's own settings copy calls itself a fine adjustment. Both are true: the
+// nudge is the only aim in VR and it is meant to be. Do not "fix" that contradiction by restoring
+// stick steering - it is a deliberate control scheme, not an oversight.
 function _xrStickDpadTick(inject) {
   const on = !!(inject || (renderer && renderer.xr && renderer.xr.isPresenting &&
                 input.xrSynth && input.xrSynth.rightStickAsDpad));
@@ -86612,6 +86881,7 @@ function _refreshSettingsValues() {
   // VR perf + render scale.
   setSel('set-vr-perf', input.vrPerfMode || 'standard');
   setChk('set-vr-water', !!input.vrWater);   // (v41.79)
+  setChk('set-vr-water-refl', !!input.vrWaterRefl);   // (v41.82)
   setRange('set-vr-scale', null,
     (typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7);
   const vrScaleVal = $('#val-vr-scale');
@@ -86993,10 +87263,22 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Off (default) gives a headset the cheap water: the flat mirror, no
-        displaced surface, no live reflection, no crest scan, and the ripple sim at half rate. On gives
-        it exactly what a monitor gets &mdash; the displaced sheet, the wake, the spray and the planar
-        reflection. A standalone Quest cannot usually afford it; a PC headset generally can. Takes
-        effect immediately, including inside a running session.</label>
+        displaced surface, no crest scan, and the ripple sim at half rate. On gives it the displaced
+        sheet, the wake and the spray. A standalone Quest cannot usually afford it; a PC headset
+        generally can. Applies live in the hub &mdash; on cavern maps the water is built on entry, so
+        leave and re-enter the map for it to take.</label>
+      </div>
+      <!-- (v41.82) The mirror is its own tier: it is an entire extra render of the scene, where the
+           row above is a vertex-shader tier on geometry that gets drawn anyway. -->
+      <div class="setting-row">
+        <label>VR Water Reflection</label>
+        <input type="checkbox" id="set-vr-water-refl" ${input.vrWaterRefl ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Adds the planar mirror on top of VR Water Effects &mdash; the sky, the
+        land and the ships reflected in the surface. Needs VR Water Effects on to do anything. This is
+        the expensive half: a second render of the whole scene, several times a second. Turning it on
+        also gives the mirror the desktop refresh cadence rather than the phone one.</label>
       </div>
       <div class="setting-row">
         <label>VR HUD Size</label>
@@ -88345,6 +88627,13 @@ function buildSettingsPage() {
     input.vrWater = !!vrWaterChk.checked;
     saveSettings();
   });
+  // (v41.82) the mirror tier. _swVrNoRefl() reads both flags every frame, so like the row above it
+  // needs no rebuild - the only build-time part is whether a CAVERN map made water at all.
+  const vrWaterReflChk = overlay.querySelector('#set-vr-water-refl');
+  if (vrWaterReflChk) vrWaterReflChk.addEventListener('change', () => {
+    input.vrWaterRefl = !!vrWaterReflChk.checked;
+    saveSettings();
+  });
 
   // (v35.64) VR HUD size slider. No re-enter needed — renderFrame reads
   // input.vrHudScale every frame and writes the mesh scale when it changes.
@@ -89117,6 +89406,7 @@ function saveSettings() {
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
       vrHudMigrated: true,   // (v41.43) the one-time vrHudScale default bump has been applied
       vrWater: !!input.vrWater,   // (v41.43)
+      vrWaterRefl: !!input.vrWaterRefl,   // (v41.82)
       clipRec: !!input.clipRec,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
@@ -90992,6 +91282,7 @@ function loadSettings() {
     // so it moves to the new default; any other value was chosen deliberately and is left alone.
     // `vrHudMigrated` makes it happen once, so someone who later picks 1.5 on purpose keeps it.
     if (typeof data.vrWater === 'boolean') input.vrWater = data.vrWater;   // (v41.43)
+    if (typeof data.vrWaterRefl === 'boolean') input.vrWaterRefl = data.vrWaterRefl;   // (v41.82)
     if (typeof data.vrHudScale === 'number') {
       const _wasOldDefault = (Math.abs(data.vrHudScale - 1.5) < 1e-6) && !data.vrHudMigrated;
       input.vrHudScale = _wasOldDefault ? 3 : data.vrHudScale;
@@ -109333,10 +109624,45 @@ function _markerFlash(el, keys, ms) {
   void el.offsetWidth;
   el.classList.add('active');
 }
+// ⚠⚠ (v41.80) A THROTTLE, because this is about to be driven by damage-over-time. It had none:
+// _markerFlash CANCELS and restarts its animation on every call, so a burn ticking every frame would
+// pin the marker permanently lit instead of flashing it - and the audio wrapper below would fire
+// playSound('hit') just as often (only _SOUND_MIN_GAP.hit collapses that, at 25 ms).
+// 25 ms, to match that same audio gate. NOT higher: the Gatling Cannon's fireRate is 0.05, so
+// anything above 50 ms would start eating markers the player can see today.
+// ⚠ The state is a property on the function object, deliberately - a top-level `const` read from
+// inside a class method defined earlier in the file is the TDZ pattern that cost this project a whole
+// boot in v39.02.
 function showHitMarker() {
+  const _t = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  if (_t - (showHitMarker._t || -1e9) < 25) return;
+  showHitMarker._t = _t;
   const el = showHitMarker._el || (showHitMarker._el = document.getElementById('hit-marker'));
   if (!el) return;
   _markerFlash(el, _HIT_FLASH_KEYS, 250);
+}
+// ⚠⚠ (v41.80) THE HITMARKER MOVES TO WHERE DAMAGE LANDS. Owner: "basically any time i damage an
+// enemy i should get hitmarkers", after noticing Pyro's fire and Puncture's cluster blasts gave none.
+// The marker was fired from 29 REMEMBERED call sites out of 86 damage sites, so every new damage
+// source had to opt in and most did not - all six of Pyro's fire paths and the whole Puncture cluster
+// zone were missing, exactly as reported.
+// There is no single takeDamage, but there is a single CONTRACT: eight of the nine implementations
+// are `(amount, attacker, hitPoint) -> dealt`, and every local-player call site in the file passes the
+// attacker as the string 'player' (checked: not one passes the player object). So the marker belongs
+// beside each `return dealt` - seven lines - and then a damage-over-time tick, a sub-munition, a
+// splash and a beam all get it for free, including anything added later.
+// ⚠ The 29 existing calls are LEFT ALONE. They now fire a few microseconds before this one and
+// the 25 ms throttle above collapses the pair, which is why the throttle had to come first. Removing
+// them would be 29 chances to break something for no visible gain.
+// ⚠ Rocks are deliberately not covered: DestructibleObstacle.takeDamage(dmg, hitDir) carries no
+// attacker at all, so it cannot tell your shot from a bot's. Its four existing markers still fire.
+// ⚠ The dead guard matches the v36.19 precedent already on two sites: a mine or a burn you left
+// behind keeps ticking through the death cam, and a hitmarker over the DESTROYED overlay reads as a
+// bug rather than a kill.
+function _hitMarkFor(attacker, dealt) {
+  if (!(dealt > 0) || attacker !== 'player') return;
+  try { if (typeof player !== 'undefined' && player && player.shipState === 'dead') return; } catch (_) { return; }
+  try { showHitMarker(); } catch (_) {}
 }
 
 function showKillMarker() {
