@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.74';
+const LSS_BUILD = '41.79';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6825,7 +6825,10 @@ function handleNetEvent(evt, fromPeerId) {
         shipMuzzleWorld(peerForWidth.mesh, peerForWidth._muzzleShot, from);
       }
     }
-    if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { _swWaterCrossSplash(from.x, from.y, from.z, to.x, to.y, to.z, 78, 0.09); } catch (_) {} }
+    if (game._hubWater && typeof _swWpnCross === 'function') { try {
+      _swWpnCross(from.x, from.y, from.z, to.x, to.y, to.z,
+                  (typeof _swWpnYield === 'function') ? _swWpnYield(0, 0, 1) : 120,
+                  0, 'peerTracer', 0.06); } catch (_) {} }
     const _shooterLoadout = (typeof evt.lo === 'string' && evt.lo)
       ? evt.lo
       : (peerForWidth && peerForWidth.loadoutKey);
@@ -17611,6 +17614,9 @@ function _swRippleTick(dt) {
     if (W3.vent === undefined) W3.vent = 0.009;          // (v41.23) cavity depth at which a hit vents droplets
     if (W3.wpnWake === undefined) W3.wpnWake = 1.0;      // (v41.27) trail left by a projectile skimming the surface
     if (W3.chargeYield === undefined) W3.chargeYield = 3000;   // (v41.29) the Blaster charge shot's water yield
+    if (W3.laserYield === undefined) W3.laserYield = 1200;     // (v41.77) the Vortex Mega Laser core, PER TICK at 10 Hz
+    if (W3.laserAbilityYield === undefined) W3.laserAbilityYield = 2400;   // (v41.78) the Laser ability, its own damage
+    if (W3.mainK === undefined) W3.mainK = 0.55;               // (v41.78) trim on your own gun's water yield
     if (W3.seedScale === undefined) W3.seedScale = 1.0;      // global trim; 1 = no-op (see _swRippleSeed)
     if (W3.impactPeak === undefined) W3.impactPeak = 0.135;  // was 50. MEASURED: puts a hard entry at 8.2 of the 9 units the display can show
     if (W3.seedImpulse === undefined) W3.seedImpulse = 0.25; // momentum, not a pluck (0.65 was sticky - see the shader)
@@ -17962,6 +17968,8 @@ function _swRippleTick(dt) {
       if (W2.foamAlb !== undefined && du.uFoamAlb) du.uFoamAlb.value = W2.foamAlb;           // (v41.55)
       if (W2.matteLo !== undefined && du.uMatteLo) du.uMatteLo.value = W2.matteLo;           // (v41.55)
       if (W2.matteHi !== undefined && du.uMatteHi) du.uMatteHi.value = W2.matteHi;           // (v41.55)
+      if (du.uFoamGate) du.uFoamGate.value = (W2.foamGate != null) ? +W2.foamGate : 1.0;     // (v41.75)
+      if (du.uFoamAll) du.uFoamAll.value = (W2.foamAll != null) ? +W2.foamAll : 0.0;         // (v41.76)
       try {
         const _hAlt = (typeof player !== 'undefined' && player && player.position) ? (player.position.y - WL2) : 1e6;
         const _hSpan = Math.max(_swHullSpan(), (_swShipFootprint().half || 0));   // (v41.57) the real hull
@@ -19048,6 +19056,8 @@ function _swBuildHubWaterDispGet(WL) {
         uCapFoamLo: { value: 0.18 }, uCapFoamHi: { value: 0.60 },   // (v41.56) rebased with the deposit
         uFoamMatte: { value: 0.35 },
         uMatteLo: { value: 0.06 }, uMatteHi: { value: 0.35 },   // (v41.56) re-based on the measured field
+        uFoamGate: { value: 1.0 },   // (v41.75) whitening only where the foam field says the water was churned
+        uFoamAll: { value: 0.0 },
         uFoamAlb: { value: 0.45 }, uFoamAlbCol: { value: new THREE.Color(0.58, 0.74, 0.78) },   // (v41.56) 0.75 was a whitewash
         tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 4.0 }, uReflBright: { value: 1.6 },
         uReflFar: { value: 9000.0 },
@@ -19124,7 +19134,7 @@ function _swBuildHubWaterDispGet(WL) {
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq; uniform float uFoamSlope; uniform float uSteepFoam;',
       'uniform float uPeakHi; uniform float uCapLo; uniform float uCapHi; uniform float uCapStr; uniform float uCapSteep; uniform float uCapFreq; uniform float uCapBright;',
       'uniform float uCapFoamLo; uniform float uCapFoamHi; uniform float uFoamMatte;',   // (v41.53/41.54)
-      'uniform float uMatteLo; uniform float uMatteHi; uniform float uFoamAlb; uniform vec3 uFoamAlbCol;',   // (v41.55)
+      'uniform float uMatteLo; uniform float uMatteHi; uniform float uFoamAlb; uniform vec3 uFoamAlbCol; uniform float uFoamGate; uniform float uFoamAll;',   // (v41.55/75/76)
       'uniform float uReflWave; uniform float uReflChop; uniform float uReflChopFreq;',   // (v41.50/41.51)
       'uniform float uReflDevD; uniform float uReflDevN; uniform float uReflOut;',   // (v41.56/41.74)
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
@@ -19159,8 +19169,9 @@ function _swBuildHubWaterDispGet(WL) {
       '  }',
       '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 3.0);',            
       '  fres = clamp(uReflFloor + (0.95 - uReflFloor)*fres, 0.0, 0.95);',
-      '  float _fmM = smoothstep(uMatteLo, max(uMatteHi, uMatteLo + 0.01), vFoam);',
-      '  float _fm = smoothstep(uCapFoamLo, max(uCapFoamHi, uCapFoamLo + 0.01), vFoam);',
+      '  float _fAll = clamp(uFoamAll, 0.0, 1.0);',
+      '  float _fmM = smoothstep(uMatteLo, max(uMatteHi, uMatteLo + 0.01), vFoam) * _fAll;',
+      '  float _fm = smoothstep(uCapFoamLo, max(uCapFoamHi, uCapFoamLo + 0.01), vFoam) * _fAll;',
       '  fres *= 1.0 - uFoamMatte * _fmM;',            
       '  vec3 sunDir = normalize(vec3(0.29,0.86,0.43));',
       '  float diff = 0.4 + 0.6*max(dot(N,sunDir),0.0);',                             
@@ -19219,6 +19230,7 @@ function _swBuildHubWaterDispGet(WL) {
       '  float peak = smoothstep(uPeakLo, max(uPeakHi, uPeakLo + 0.01), vDisp);',
       '  float steepF = smoothstep(uFoamSlope, uFoamSlope + 0.30, 1.0 - N.y);',
       '  peak = max(peak, steepF * uSteepFoam);',
+      '  peak *= mix(1.0, _fmM, clamp(uFoamGate, 0.0, 1.0)) * _fAll;',   // (v41.76)
       '  float eW = max(exp(1.2) - log(1.0 + (1.0 - min(peak*4.0,1.0))*2.5) - 1.0, 0.0);', 
       '  float eM = max(exp(peak*7.0) - log(1.0 + (1.0 - min(peak*7.0,1.0))*5.0) - 1.0, 0.0);', 
       '  float mistW = eM / (eW + eM + 1e-4);',                                           
@@ -19233,7 +19245,7 @@ function _swBuildHubWaterDispGet(WL) {
       '  float cap = capH * capW * uCapStr * (1.0 + uCapSteep * steepF) * mix(0.45, 1.0, capN);',
       '  _dbgCap = clamp(cap, 0.0, 0.97);',   // (v41.60)
       '  c = mix(c, foamCol * uCapBright, clamp(cap, 0.0, 0.97));',
-      '  c += vec3(0.80,0.88,0.96) * mistW * spd * uMist * foamLight;',                  
+      '  c += vec3(0.80,0.88,0.96) * mistW * spd * uMist * foamLight * mix(1.0, _fmM, clamp(uFoamGate, 0.0, 1.0)) * _fAll;',   // (v41.76)
       
       
       
@@ -47843,7 +47855,9 @@ function fireHitscan(origin, dir, w) {
   }
   const end = origin.clone().add(aimDir.clone().multiplyScalar(levelDist));
   if (game._hubWater) { try { _swWpnCross(origin.x, origin.y, origin.z, end.x, end.y, end.z,
-                                          _swWpnYield(w.damage, w.splash, 1), 0, null, 0); } catch (_) {} }
+                                          _swWpnYield(w.damage, w.splash, 1) *
+                                            ((window.__water && window.__water.mainK != null) ? +window.__water.mainK : 0.55),
+                                          0, null, 0); } catch (_) {} }
   if (levelDist < w.range) {
     const _hsCol = (typeof chassisFlashColor === 'function')
       ? chassisFlashColor(player.loadoutKey) : 0x66ccff;
@@ -48529,7 +48543,10 @@ function executeAbility(slot, ability) {
           }
         }
       } catch (_) {}
-      if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { _swWaterCrossSplash(_vlOrigin.x, _vlOrigin.y, _vlOrigin.z, beamEnd.x, beamEnd.y, beamEnd.z, 110, 0.12); } catch (_) {} }
+      if (game._hubWater && typeof _swWpnCross === 'function') { try {
+        _swWpnCross(_vlOrigin.x, _vlOrigin.y, _vlOrigin.z, beamEnd.x, beamEnd.y, beamEnd.z,
+                    (window.__water && window.__water.laserAbilityYield != null) ? +window.__water.laserAbilityYield : 2400,
+                    0, 'vLaser', 0.05); } catch (_) {} }
       const BEAM_RADIUS = 4; 
       const beamLife = 0.22; 
       const beamMid = _vlOrigin.clone().addScaledVector(_vlDir, range * 0.5);
@@ -51129,17 +51146,11 @@ function updateWorldEffects(dt) {
         eff.mesh.quaternion.setFromUnitVectors(_mvUp, eff._fwd);
         eff.mesh.scale.set(_vcbRadius, _vcbRange, _vcbRadius);
         eff.mesh.visible = true;
-        if (game._hubWater && typeof _swWaterCrossSplash === 'function') {
-          eff._splashT = (eff._splashT || 0) - dt;
-          if (eff._splashT <= 0) {
-            eff._splashT = 0.08;
-            try {
-              _swWaterCrossSplash(np.position.x, np.position.y, np.position.z,
-                                  np.position.x + eff._fwd.x * _vcbRange, np.position.y + eff._fwd.y * _vcbRange, np.position.z + eff._fwd.z * _vcbRange,
-                                  140, 0.07);
-            } catch (_) {}
-          }
-        }
+        if (game._hubWater && typeof _swWpnCross === 'function') { try {
+          _swWpnCross(np.position.x, np.position.y, np.position.z,
+                      np.position.x + eff._fwd.x * _vcbRange, np.position.y + eff._fwd.y * _vcbRange, np.position.z + eff._fwd.z * _vcbRange,
+                      (window.__water && window.__water.laserYield != null) ? +window.__water.laserYield : 1200,
+                      0, 'mlPeer' + (eff.ownerPeerId || ''), 0.10); } catch (_) {} }
         if (eff.mesh.material && eff.mesh.material.uniforms && eff.mesh.material.uniforms.uIntensity) {
           const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
           eff.mesh.material.uniforms.uIntensity.value = breath;
@@ -51442,17 +51453,14 @@ function updateAbilities(dt) {
           }
         }
       } catch (_) {}
-      if (game._hubWater && typeof _swWaterCrossSplash === 'function') {
-        player._mlSplashT = (player._mlSplashT || 0) - dt;
-        if (player._mlSplashT <= 0) {
-          player._mlSplashT = 0.08;
-          const _mlReach = (player._mlHitDist != null) ? Math.min(range, player._mlHitDist) : range;
-          try {
-            _swWaterCrossSplash(player.position.x, player.position.y, player.position.z,
-                                player.position.x + forward.x * _mlReach, player.position.y + forward.y * _mlReach, player.position.z + forward.z * _mlReach,
-                                140, 0.07);
-          } catch (_) {}
-        }
+      if (game._hubWater && typeof _swWpnCross === 'function') {
+        const _mlReach = (player._mlHitDist != null) ? Math.min(range, player._mlHitDist) : range;
+        const _mlY = (window.__water && window.__water.laserYield != null) ? +window.__water.laserYield : 1200;
+        try {
+          _swWpnCross(player.position.x, player.position.y, player.position.z,
+                      player.position.x + forward.x * _mlReach, player.position.y + forward.y * _mlReach, player.position.z + forward.z * _mlReach,
+                      _mlY, 0, 'mlCore', 0.10);
+        } catch (_) {}
       }
       if (!player._vortexCoreBeam) {
         const beamMat = _makeFXMaterial('core_beam');
@@ -58748,6 +58756,7 @@ function _refreshSettingsValues() {
   }
 
   setSel('set-vr-perf', input.vrPerfMode || 'standard');
+  setChk('set-vr-water', !!input.vrWater);   // (v41.79)
   setRange('set-vr-scale', null,
     (typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7);
   const vrScaleVal = $('#val-vr-scale');
@@ -59095,6 +59104,22 @@ function buildSettingsPage() {
         <label>VR Render Scale</label>
         <input type="range" id="set-vr-scale" min="0.35" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
         <div class="value-display" id="val-vr-scale">${getEffectiveVRRenderScale().toFixed(2)}</div>
+      </div>
+      <!-- (v41.79) The VR water switch. It has existed since v41.42 as input.vrWater, but only as a
+           row in the IN-HEADSET menu - which you can only reach once you are already presenting, and
+           which is not where anyone looks for a performance option. It belongs here, beside the other
+           things that trade fidelity for frames on a Quest. Both rows write the same flag and
+           saveSettings(), so they stay in step. -->
+      <div class="setting-row">
+        <label>VR Water Effects</label>
+        <input type="checkbox" id="set-vr-water" ${input.vrWater ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Off (default) gives a headset the cheap water: the flat mirror, no
+        displaced surface, no live reflection, no crest scan, and the ripple sim at half rate. On gives
+        it exactly what a monitor gets &mdash; the displaced sheet, the wake, the spray and the planar
+        reflection. A standalone Quest cannot usually afford it; a PC headset generally can. Takes
+        effect immediately, including inside a running session.</label>
       </div>
       <div class="setting-row">
         <label>VR HUD Size</label>
@@ -60327,6 +60352,12 @@ function buildSettingsPage() {
         renderer.xr.setFramebufferScaleFactor(getEffectiveVRRenderScale());
       }
     } catch (_) {}
+  });
+
+  const vrWaterChk = overlay.querySelector('#set-vr-water');
+  if (vrWaterChk) vrWaterChk.addEventListener('change', () => {
+    input.vrWater = !!vrWaterChk.checked;
+    saveSettings();
   });
 
   const vrHudScaleSel = overlay.querySelector('#set-vr-hud-scale');

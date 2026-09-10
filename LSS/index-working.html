@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.74';
+const LSS_BUILD = '41.79';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -14149,7 +14149,12 @@ function handleNetEvent(evt, fromPeerId) {
     }
     // (v33.88) splash the lake where a PEER's beam/tracer crosses the surface — was local-only, so other
     // players' lasers (and the remote Vortex laser, which also broadcasts on fire_tracer) didn't splash.
-    if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { _swWaterCrossSplash(from.x, from.y, from.z, to.x, to.y, to.z, 78, 0.09); } catch (_) {} }
+    // (v41.78) and the peer tracer, which carries other players' lasers. No damage travels with the
+    // event, so it takes _swWpnYield's own no-damage fallback rather than a literal.
+    if (game._hubWater && typeof _swWpnCross === 'function') { try {
+      _swWpnCross(from.x, from.y, from.z, to.x, to.y, to.z,
+                  (typeof _swWpnYield === 'function') ? _swWpnYield(0, 0, 1) : 120,
+                  0, 'peerTracer', 0.06); } catch (_) {} }
     // Dispatch Puncture peer shots through the railgun spiral
     // spawner so the visual matches what the firing player sees. Read
     // the loadout from the broadcast event first (added in v11d) and
@@ -28947,6 +28952,9 @@ function _swRippleTick(dt) {
     if (W3.vent === undefined) W3.vent = 0.009;          // (v41.23) cavity depth at which a hit vents droplets
     if (W3.wpnWake === undefined) W3.wpnWake = 1.0;      // (v41.27) trail left by a projectile skimming the surface
     if (W3.chargeYield === undefined) W3.chargeYield = 3000;   // (v41.29) the Blaster charge shot's water yield
+    if (W3.laserYield === undefined) W3.laserYield = 1200;     // (v41.77) the Vortex Mega Laser core, PER TICK at 10 Hz
+    if (W3.laserAbilityYield === undefined) W3.laserAbilityYield = 2400;   // (v41.78) the Laser ability, its own damage
+    if (W3.mainK === undefined) W3.mainK = 0.55;               // (v41.78) trim on your own gun's water yield
     // (v41.02) the jello pass. seedScale 1 + impactPeak 50 = the pre-41.02 surface, exactly.
     if (W3.seedScale === undefined) W3.seedScale = 1.0;      // global trim; 1 = no-op (see _swRippleSeed)
     if (W3.impactPeak === undefined) W3.impactPeak = 0.135;  // was 50. MEASURED: puts a hard entry at 8.2 of the 9 units the display can show
@@ -29524,6 +29532,8 @@ function _swRippleTick(dt) {
       if (W2.foamAlb !== undefined && du.uFoamAlb) du.uFoamAlb.value = W2.foamAlb;           // (v41.55)
       if (W2.matteLo !== undefined && du.uMatteLo) du.uMatteLo.value = W2.matteLo;           // (v41.55)
       if (W2.matteHi !== undefined && du.uMatteHi) du.uMatteHi.value = W2.matteHi;           // (v41.55)
+      if (du.uFoamGate) du.uFoamGate.value = (W2.foamGate != null) ? +W2.foamGate : 1.0;     // (v41.75)
+      if (du.uFoamAll) du.uFoamAll.value = (W2.foamAll != null) ? +W2.foamAll : 0.0;         // (v41.76)
       // (v41.54) where the hull is, and how high the water is allowed to stand there. The cap is the
       // keel: the ship's own altitude above the waterline, less a quarter of its draft so the surface
       // meets the hull rather than clipping through it. Off the water (or with the sheet hidden while
@@ -30968,6 +30978,10 @@ function _swBuildHubWaterDispGet(WL) {
         // narrower-based than the cap's window: measured foam p90 near the hull is 0.047, so anything
         // starting at 0.10 misses most of the trail. See the fragment note.
         uMatteLo: { value: 0.06 }, uMatteHi: { value: 0.35 },   // (v41.56) re-based on the measured field
+        uFoamGate: { value: 1.0 },   // (v41.75) whitening only where the foam field says the water was churned
+        // (v41.76) 0 = no foam of any kind on the surface. Everything above it stays tuned and
+        // measured; window.__water.foamAll = 1 restores the whole v41.75 look in one assignment.
+        uFoamAll: { value: 0.0 },
         // (v41.55) how far the churned band lifts toward a scattering colour, and what that colour is.
         // A pale green-blue rather than white: white is the CAP (the ridge), this is the body of the
         // wake, which reads as aerated water and not as spray.
@@ -31244,7 +31258,7 @@ function _swBuildHubWaterDispGet(WL) {
       // to compile and the water disappears (the v38.47 mistake).
       'uniform float uPeakHi; uniform float uCapLo; uniform float uCapHi; uniform float uCapStr; uniform float uCapSteep; uniform float uCapFreq; uniform float uCapBright;',
       'uniform float uCapFoamLo; uniform float uCapFoamHi; uniform float uFoamMatte;',   // (v41.53/41.54)
-      'uniform float uMatteLo; uniform float uMatteHi; uniform float uFoamAlb; uniform vec3 uFoamAlbCol;',   // (v41.55)
+      'uniform float uMatteLo; uniform float uMatteHi; uniform float uFoamAlb; uniform vec3 uFoamAlbCol; uniform float uFoamGate; uniform float uFoamAll;',   // (v41.55/75/76)
       'uniform float uReflWave; uniform float uReflChop; uniform float uReflChopFreq;',   // (v41.50/41.51)
       'uniform float uReflDevD; uniform float uReflDevN; uniform float uReflOut;',   // (v41.56/41.74)
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
@@ -31327,8 +31341,21 @@ function _swBuildHubWaterDispGet(WL) {
       // They are two different questions. "Is this water churned at all" (matte) is nearly binary and
       // starts at the faintest trace; "is this the crest of the churn" (cap) is the top of the range.
       // 0.02 -> 0.15 covers the whole trail; the cap's 0.10 -> 0.45 still rides on top of it.
-      '  float _fmM = smoothstep(uMatteLo, max(uMatteHi, uMatteLo + 0.01), vFoam);',
-      '  float _fm = smoothstep(uCapFoamLo, max(uCapFoamHi, uCapFoamLo + 0.01), vFoam);',
+      // ⚠⚠ (v41.76) ONE SWITCH OVER EVERY WHITENING ROUTE, AND IT IS OFF. Owner: "and yeah, no
+      // foam". There are five of them and they had accumulated over v41.17-41.55, each with its own
+      // gate, which is why "turn the foam down" kept meaning four different edits:
+      //   the height route (uPeakLo/uPeakHi), the steepness route (uFoamSlope/uSteepFoam), the crest
+      //   cap (uCapStr), the mist add (uMist), and the matte + albedo pair that makes the churned band
+      //   pale and non-reflective (uFoamMatte / uFoamAlb).
+      // Zeroing the two field gates here takes the cap, the matte and the albedo; `peak` and the mist
+      // are multiplied by the same factor below so they go with them whatever uFoamGate is set to.
+      // ⚠ This is the SHADER's whitening only. The spray PARTICLES - the rooster tail, the crest
+      // dots, the impact splashes - are separate systems and are untouched; they are the ones the owner
+      // asked to go higher in v41.12 and they still do.
+      // window.__water.foamAll = 1 brings all of it back exactly as v41.75 shipped it.
+      '  float _fAll = clamp(uFoamAll, 0.0, 1.0);',
+      '  float _fmM = smoothstep(uMatteLo, max(uMatteHi, uMatteLo + 0.01), vFoam) * _fAll;',
+      '  float _fm = smoothstep(uCapFoamLo, max(uCapFoamHi, uCapFoamLo + 0.01), vFoam) * _fAll;',
       '  fres *= 1.0 - uFoamMatte * _fmM;',            
       '  vec3 sunDir = normalize(vec3(0.29,0.86,0.43));',
       '  float diff = 0.4 + 0.6*max(dot(N,sunDir),0.0);',                             
@@ -31591,6 +31618,20 @@ function _swBuildHubWaterDispGet(WL) {
       '  float peak = smoothstep(uPeakLo, max(uPeakHi, uPeakLo + 0.01), vDisp);',
       '  float steepF = smoothstep(uFoamSlope, uFoamSlope + 0.30, 1.0 - N.y);',
       '  peak = max(peak, steepF * uSteepFoam);',
+      // ⚠⚠ (v41.75) THE CAP WAS GATED ON THE FOAM FIELD; THIS WAS NOT. Owner: "there's too much
+      // white in the water when it ripples... i just wanted it behind the ships and weapons".
+      // v41.53 built the foam field for exactly that and then only hung the CREST CAP on it. The two
+      // older routes above kept firing on their own: the height one on anything tall, and - the real
+      // offender - the STEEPNESS one on anything with a slope past uFoamSlope, anywhere on the lake.
+      // Steep ripples are everywhere now, because the shoreline returns the wake's energy (v41.72) and
+      // because v41.70 made the normal per-fragment, which resolves slopes the vertex normal averaged
+      // away. So `steepF * 0.55 * uSprayBreak 1.4` was painting up to 77% white on ordinary chop that
+      // no hull had touched - and neither route ever asked whether the water had been churned.
+      // The foam field is the only quantity in this shader that knows, and every seed in it comes from
+      // a hull or a weapon, so gating on it IS "behind the ships and weapons".
+      // ⚠ uFoamGate 1 = whitening only where the field says churned. 0 = the pre-41.75 behaviour,
+      // in case a genuine breaking swell should whiten on its own somewhere. window.__water.foamGate.
+      '  peak *= mix(1.0, _fmM, clamp(uFoamGate, 0.0, 1.0)) * _fAll;',   // (v41.76)
       '  float eW = max(exp(1.2) - log(1.0 + (1.0 - min(peak*4.0,1.0))*2.5) - 1.0, 0.0);', 
       '  float eM = max(exp(peak*7.0) - log(1.0 + (1.0 - min(peak*7.0,1.0))*5.0) - 1.0, 0.0);', 
       '  float mistW = eM / (eW + eM + 1e-4);',                                           
@@ -31624,7 +31665,8 @@ function _swBuildHubWaterDispGet(WL) {
       '  float cap = capH * capW * uCapStr * (1.0 + uCapSteep * steepF) * mix(0.45, 1.0, capN);',
       '  _dbgCap = clamp(cap, 0.0, 0.97);',   // (v41.60)
       '  c = mix(c, foamCol * uCapBright, clamp(cap, 0.0, 0.97));',
-      '  c += vec3(0.80,0.88,0.96) * mistW * spd * uMist * foamLight;',                  
+      // (v41.75) the mist rides on the same gate - it is the same whitening by another route.
+      '  c += vec3(0.80,0.88,0.96) * mistW * spd * uMist * foamLight * mix(1.0, _fmM, clamp(uFoamGate, 0.0, 1.0)) * _fAll;',   // (v41.76)
       
       
       
@@ -71079,7 +71121,13 @@ function fireHitscan(origin, dir, w) {
                                           // (v41.26) no stipple on your OWN gun. A 60 ms clock silently
                                           // ate every other Gatling round (fireRate 0.05), which is
                                           // exactly the "that one didn't splash" you would notice.
-                                          _swWpnYield(w.damage, w.splash, 1), 0, null, 0); } catch (_) {} }
+                                          // (v41.78) mainK. Owner: "the main weapon splash smaller".
+                                          // The beams above were the real fault - once the Laser lands
+                                          // at A = 0.188 the main gun is already the smaller of the two
+                                          // - so this is a trim, not a re-balance. window.__water.mainK.
+                                          _swWpnYield(w.damage, w.splash, 1) *
+                                            ((window.__water && window.__water.mainK != null) ? +window.__water.mainK : 0.55),
+                                          0, null, 0); } catch (_) {} }
   // If the hitscan terminated at a wall (not at max
   // range), spawn a force-field ripple at the impact point. If a ship
   // closer to origin also got hit, the ship-hit visual dominates the
@@ -72043,8 +72091,18 @@ function executeAbility(slot, ability) {
           }
         }
       } catch (_) {}
-      // (v33.88) splash the lake where the VORTEX laser ability crosses the surface (hub) — this beam was never wired to the water
-      if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { _swWaterCrossSplash(_vlOrigin.x, _vlOrigin.y, _vlOrigin.z, beamEnd.x, beamEnd.y, beamEnd.z, 110, 0.12); } catch (_) {} }
+      // ⚠⚠ (v41.78) THE v41.21 SWEEP MISSED EVERY BEAM. Owner: "laser is also a tiny splash, it
+      // should be bigger". v41.21 put every weapon on _swWpnCross - one yield curve, routed through
+      // _swImpact so a weapon gets the crater, rim, oblique streak and spray sheet the hull gets. It
+      // swept the PROJECTILE and HITSCAN paths. All four BEAM callers kept the v33.88 hook and their
+      // hand-written literals: this one (110 / 0.12), the Mega Laser core (140 / 0.07, fixed in
+      // v41.77), the peer core beam, and the peer tracer.
+      // This ability does 2400 damage in one 0.5 s burst - through the curve that is R = 199 and
+      // A = 0.188, roughly three times what it was laying and about what a hull impact makes.
+      if (game._hubWater && typeof _swWpnCross === 'function') { try {
+        _swWpnCross(_vlOrigin.x, _vlOrigin.y, _vlOrigin.z, beamEnd.x, beamEnd.y, beamEnd.z,
+                    (window.__water && window.__water.laserAbilityYield != null) ? +window.__water.laserAbilityYield : 2400,
+                    0, 'vLaser', 0.05); } catch (_) {} }
       const BEAM_RADIUS = 4; 
       const beamLife = 0.22; 
       const beamMid = _vlOrigin.clone().addScaledVector(_vlDir, range * 0.5);
@@ -75450,17 +75508,13 @@ function updateWorldEffects(dt) {
         eff.mesh.scale.set(_vcbRadius, _vcbRange, _vcbRadius);
         eff.mesh.visible = true;
         // (v38.69) the peer's beam boils the lake too, same cadence as the local core
-        if (game._hubWater && typeof _swWaterCrossSplash === 'function') {
-          eff._splashT = (eff._splashT || 0) - dt;
-          if (eff._splashT <= 0) {
-            eff._splashT = 0.08;
-            try {
-              _swWaterCrossSplash(np.position.x, np.position.y, np.position.z,
-                                  np.position.x + eff._fwd.x * _vcbRange, np.position.y + eff._fwd.y * _vcbRange, np.position.z + eff._fwd.z * _vcbRange,
-                                  140, 0.07);
-            } catch (_) {}
-          }
-        }
+        // (v41.78) the peer's core beam onto the same curve as the local one (v41.77), so a Mega
+        // Laser looks the same on the lake whoever is holding it. _swWpnCross rate-limits per `src`.
+        if (game._hubWater && typeof _swWpnCross === 'function') { try {
+          _swWpnCross(np.position.x, np.position.y, np.position.z,
+                      np.position.x + eff._fwd.x * _vcbRange, np.position.y + eff._fwd.y * _vcbRange, np.position.z + eff._fwd.z * _vcbRange,
+                      (window.__water && window.__water.laserYield != null) ? +window.__water.laserYield : 1200,
+                      0, 'mlPeer' + (eff.ownerPeerId || ''), 0.10); } catch (_) {} }
         if (eff.mesh.material && eff.mesh.material.uniforms && eff.mesh.material.uniforms.uIntensity) {
           const breath = 0.92 + 0.10 * Math.sin(game.time * 7.0);
           eff.mesh.material.uniforms.uIntensity.value = breath;
@@ -75866,17 +75920,30 @@ function updateAbilities(dt) {
       // did. 12 Hz along the beam, no further than the last terrain probe let it reach, so a
       // beam parked on the lake keeps the ripple sim and the spray fed without flooding the
       // splash pool (4 spray particles a call).
-      if (game._hubWater && typeof _swWaterCrossSplash === 'function') {
-        player._mlSplashT = (player._mlSplashT || 0) - dt;
-        if (player._mlSplashT <= 0) {
-          player._mlSplashT = 0.08;
-          const _mlReach = (player._mlHitDist != null) ? Math.min(range, player._mlHitDist) : range;
-          try {
-            _swWaterCrossSplash(player.position.x, player.position.y, player.position.z,
-                                player.position.x + forward.x * _mlReach, player.position.y + forward.y * _mlReach, player.position.z + forward.z * _mlReach,
-                                140, 0.07);
-          } catch (_) {}
-        }
+      // ⚠⚠ (v41.77) THIS WAS STILL ON THE PRE-v41 HOOK. Owner: "i don't think mega laser core
+      // affects the water" - and it did, technically, which is why it survived: v38.69 wired it to
+      // _swWaterCrossSplash with two literals (radius 140, amp 0.07) and it has been laying a faint
+      // round ripple ever since.
+      // v41.21 moved every other weapon onto _swWpnCross, which converts a YIELD into radius and
+      // amplitude on one curve and then routes it through _swImpact - the same function the hull uses,
+      // so a weapon gets the crater, the rim, the oblique streak, the spray sheet and the sub-surface
+      // trail for free. That was the owner's own instruction at the time: "weapons hitting the water
+      // should be the exact same as the ship". The Mega Laser was not in the sweep, so the game's
+      // biggest weapon - 12000 damage, more than any other single thing in it - was left making the
+      // game's faintest mark: amp 0.07 against a charge shot's 0.135 and a hull impact's 0.20+.
+      // ⚠ The yield is PER TICK, not the weapon's damage. This is a sustained beam being asked at
+      // 10 Hz for as long as it is held on the lake, so 12000 through the curve every tick would be a
+      // continuous detonation. 1200 puts each tick at R = 148 / A = 0.133 - about a Blaster charge
+      // shot, ten times a second, dragged along wherever the beam is pointed. window.__water.laserYield.
+      // _swWpnCross rate-limits per `src`, so the manual _mlSplashT timer is gone with it.
+      if (game._hubWater && typeof _swWpnCross === 'function') {
+        const _mlReach = (player._mlHitDist != null) ? Math.min(range, player._mlHitDist) : range;
+        const _mlY = (window.__water && window.__water.laserYield != null) ? +window.__water.laserYield : 1200;
+        try {
+          _swWpnCross(player.position.x, player.position.y, player.position.z,
+                      player.position.x + forward.x * _mlReach, player.position.y + forward.y * _mlReach, player.position.z + forward.z * _mlReach,
+                      _mlY, 0, 'mlCore', 0.10);
+        } catch (_) {}
       }
       if (!player._vortexCoreBeam) {
         // LayeredFX 'core_beam' preset replaces the bespoke vortex
@@ -86544,6 +86611,7 @@ function _refreshSettingsValues() {
 
   // VR perf + render scale.
   setSel('set-vr-perf', input.vrPerfMode || 'standard');
+  setChk('set-vr-water', !!input.vrWater);   // (v41.79)
   setRange('set-vr-scale', null,
     (typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7);
   const vrScaleVal = $('#val-vr-scale');
@@ -86913,6 +86981,22 @@ function buildSettingsPage() {
         <label>VR Render Scale</label>
         <input type="range" id="set-vr-scale" min="0.35" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
         <div class="value-display" id="val-vr-scale">${getEffectiveVRRenderScale().toFixed(2)}</div>
+      </div>
+      <!-- (v41.79) The VR water switch. It has existed since v41.42 as input.vrWater, but only as a
+           row in the IN-HEADSET menu - which you can only reach once you are already presenting, and
+           which is not where anyone looks for a performance option. It belongs here, beside the other
+           things that trade fidelity for frames on a Quest. Both rows write the same flag and
+           saveSettings(), so they stay in step. -->
+      <div class="setting-row">
+        <label>VR Water Effects</label>
+        <input type="checkbox" id="set-vr-water" ${input.vrWater ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Off (default) gives a headset the cheap water: the flat mirror, no
+        displaced surface, no live reflection, no crest scan, and the ripple sim at half rate. On gives
+        it exactly what a monitor gets &mdash; the displaced sheet, the wake, the spray and the planar
+        reflection. A standalone Quest cannot usually afford it; a PC headset generally can. Takes
+        effect immediately, including inside a running session.</label>
       </div>
       <div class="setting-row">
         <label>VR HUD Size</label>
@@ -88251,6 +88335,15 @@ function buildSettingsPage() {
         renderer.xr.setFramebufferScaleFactor(getEffectiveVRRenderScale());
       }
     } catch (_) {}
+  });
+
+  // (v41.79) VR water effects. _swVrLite() reads input.vrWater every frame - the displaced sheet's
+  // visibility, the mirror's refresh, uReflLive, the crest scan and the sim's step rate all key off
+  // it - so there is nothing to rebuild and no need to leave the session.
+  const vrWaterChk = overlay.querySelector('#set-vr-water');
+  if (vrWaterChk) vrWaterChk.addEventListener('change', () => {
+    input.vrWater = !!vrWaterChk.checked;
+    saveSettings();
   });
 
   // (v35.64) VR HUD size slider. No re-enter needed — renderFrame reads
