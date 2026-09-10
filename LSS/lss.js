@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.65';
+const LSS_BUILD = '41.74';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -16340,6 +16340,7 @@ const _SW_RIPPLE_FRAG = [
   'uniform vec2 uScroll;',           
   'uniform float uSeedImpulse;',   // (v41.02) 0 = the v41.01 displacement pluck, 1 = a pure velocity impulse
   'uniform float uFoamDecay; uniform float uSeedFoamK;',   // (v41.53) the foam field - see the note below
+  'uniform float uShoreDamp; uniform float uShoreDampD;',   // (v41.72) shallow-water absorption
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -16352,6 +16353,8 @@ const _SW_RIPPLE_FRAG = [
   '  float e = (texture2D(uMaskTex, uv + vec2( cellSize.x, 0.0)).x < 0.5) ? hC : texture2D(heightmap, suv + vec2( cellSize.x, 0.0)).x;',
   '  float w = (texture2D(uMaskTex, uv + vec2(-cellSize.x, 0.0)).x < 0.5) ? hC : texture2D(heightmap, suv + vec2(-cellSize.x, 0.0)).x;',
   '  float nh = (2.0 * hC - h.y + uWaveC2 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
+  '  float _shDep = texture2D(uMaskTex, uv).g;',
+  '  nh *= mix(uShoreDamp, 1.0, smoothstep(0.0, max(uShoreDampD, 0.001), _shDep));',
   '  vec2 wpos = (uv - 0.5) * BOUNDS;',
   '  float sAcc = 0.0;',
   '  float fAcc = 0.0;',
@@ -16389,6 +16392,8 @@ function _swRippleInit() {
     v.material.uniforms.viscosity = { value: 0.9945 };
     v.material.uniforms.uWaveC2 = { value: 0.26 };
     v.material.uniforms.uSeedImpulse = { value: 0.25 };
+    v.material.uniforms.uShoreDamp = { value: 0.96 };
+    v.material.uniforms.uShoreDampD = { value: 0.28 };
     v.material.uniforms.uFoamDecay = { value: 0.9930 };   // (v41.56) ~1.6 s half-life, was ~3 s
     v.material.uniforms.uSeedFoamK = { value: 0.10 };
     v.material.uniforms.uSeeds = { value: seeds };
@@ -17527,6 +17532,8 @@ function _swRippleTick(dt) {
       if (_W3.seedImpulse != null && _u.uSeedImpulse) _u.uSeedImpulse.value = _W3.seedImpulse;   // (v41.02)
       if (_W3.foamDecay != null && _u.uFoamDecay) _u.uFoamDecay.value = _W3.foamDecay;           // (v41.53)
       if (_W3.seedFoam != null && _u.uSeedFoamK) _u.uSeedFoamK.value = _W3.seedFoam;             // (v41.53)
+      if (_W3.shoreDamp != null && _u.uShoreDamp) _u.uShoreDamp.value = _W3.shoreDamp;           // (v41.72)
+      if (_W3.shoreDampD != null && _u.uShoreDampD) _u.uShoreDampD.value = _W3.shoreDampD;       // (v41.72)
     }
   } catch (_) {}   
   
@@ -17923,7 +17930,12 @@ function _swRippleTick(dt) {
     if (dm) {
       const _vrR = _swVrLite();
       dm.visible = !game._swSubmerged && !_vrR;
-      dm.position.set(px, WL2, pz);   
+      {
+        const _q = (dm.geometry.userData && dm.geometry.userData.swQuad) || 0;
+        const _snap = (_q > 0.01 && !(window.__water && window.__water.sheetSnap === 0));
+        dm.position.set(_snap ? Math.round(px / _q) * _q : px, WL2,
+                        _snap ? Math.round(pz / _q) * _q : pz);
+      }
       const du = dm.material.uniforms;
       du.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
       du.uRippleCenter.value.set(R.center.x, R.center.y);
@@ -17960,11 +17972,18 @@ function _swRippleTick(dt) {
         du.uHullTop.value = _hOn ? ((W2.hullTop != null) ? W2.hullTop : Math.max(_hAlt, 0)) : 1.0e6;
       } catch (_) {}
       if (du.uTapW) du.uTapW.value = (W2.tapW != null) ? +W2.tapW : Math.max(2, (R.bounds / _SW_RIPPLE_RES) * 0.5);
+      if (du.uDispSmooth) du.uDispSmooth.value = (W2.dispSmooth != null) ? +W2.dispSmooth : 0.45;
+      if (du.uSheetFar) du.uSheetFar.value = (W2.sheetFar != null) ? +W2.sheetFar : 11500.0;    // (v41.69)
+      if (du.uSheetSoft) du.uSheetSoft.value = (W2.sheetSoft != null) ? +W2.sheetSoft : 3000.0;  // (v41.69)
+      if (du.uNormPix) du.uNormPix.value = (W2.normPix != null) ? +W2.normPix : 1.0;             // (v41.70)
+      if (du.uMaxSlope) du.uMaxSlope.value = (W2.maxSlope != null) ? +W2.maxSlope : 0.9;         // (v41.71)
+      if (du.uSlopeLimit) du.uSlopeLimit.value = (W2.slopeLimit != null) ? +W2.slopeLimit : 1.0; // (v41.71)
       if (W2.reflPar !== undefined && du.uReflPar) du.uReflPar.value = W2.reflPar;     // (v41.50)
       if (W2.reflWave !== undefined && du.uReflWave) du.uReflWave.value = W2.reflWave; // (v41.50)
       if (W2.reflChop !== undefined && du.uReflChop) du.uReflChop.value = W2.reflChop; // (v41.51)
       if (W2.reflDevD !== undefined && du.uReflDevD) du.uReflDevD.value = W2.reflDevD; // (v41.56)
       if (W2.reflDevN !== undefined && du.uReflDevN) du.uReflDevN.value = W2.reflDevN; // (v41.56)
+      if (du.uReflOut) du.uReflOut.value = (W2.reflOut != null) ? +W2.reflOut : 0.03;  // (v41.74)
       if (du.uDebugTerm) du.uDebugTerm.value = (W2.debugTerm != null) ? +W2.debugTerm : 0.0;   // (v41.60)
       if (W2.capFreq !== undefined && du.uCapFreq) du.uCapFreq.value = W2.capFreq;     // (v41.48)
       if (W2.capBright !== undefined && du.uCapBright) du.uCapBright.value = W2.capBright;   // (v41.48)
@@ -18995,7 +19014,23 @@ let _hubWaterDisp = null;
 function _swBuildHubWaterDispGet(WL) {
   if (_hubWaterDisp) return _hubWaterDisp;
   if (typeof THREE === 'undefined' || !scene) return null;
-  const geo = new THREE.PlaneGeometry(24576, 24576, 768, 768);   
+  const _dispHalf = 12288, _dispSeg = 768;
+  const _dispInner = (window.__water && window.__water.dispInner != null) ? +window.__water.dispInner : 4000;
+  const _dispFrac = (window.__water && window.__water.dispFrac != null) ? +window.__water.dispFrac : 0.80;
+  const geo = new THREE.PlaneGeometry(2, 2, _dispSeg, _dispSeg);   // unit grid, warped below
+  {
+    const _pa = geo.attributes.position, _pv = _pa.array;
+    const _warp = function (u) {
+      const sg = (u < 0) ? -1 : 1, m = Math.min(1, Math.abs(u));
+      return sg * ((m <= _dispFrac)
+        ? (m / _dispFrac) * _dispInner
+        : _dispInner + ((m - _dispFrac) / Math.max(1e-4, 1 - _dispFrac)) * (_dispHalf - _dispInner));
+    };
+    for (let _i = 0; _i < _pv.length; _i += 3) { _pv[_i] = _warp(_pv[_i]); _pv[_i + 1] = _warp(_pv[_i + 1]); }
+    _pa.needsUpdate = true;
+    geo.computeBoundingSphere();
+    geo.userData.swQuad = _dispInner / Math.max(1, (_dispFrac * _dispSeg * 0.5));
+  }
   const mat = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: true,
     uniforms: THREE.UniformsUtils.merge([
@@ -19011,14 +19046,19 @@ function _swBuildHubWaterDispGet(WL) {
         uCapLo: { value: 0.12 }, uCapHi: { value: 0.26 }, uCapStr: { value: 1.0 },
         uCapSteep: { value: 0.40 }, uCapFreq: { value: 0.14 }, uCapBright: { value: 1.15 },
         uCapFoamLo: { value: 0.18 }, uCapFoamHi: { value: 0.60 },   // (v41.56) rebased with the deposit
-        uFoamMatte: { value: 0.85 },
+        uFoamMatte: { value: 0.35 },
         uMatteLo: { value: 0.06 }, uMatteHi: { value: 0.35 },   // (v41.56) re-based on the measured field
         uFoamAlb: { value: 0.45 }, uFoamAlbCol: { value: new THREE.Color(0.58, 0.74, 0.78) },   // (v41.56) 0.75 was a whitewash
         tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 4.0 }, uReflBright: { value: 1.6 },
         uReflFar: { value: 9000.0 },
         uReflPar: { value: 0.0 }, uReflWave: { value: 0.0 },
-        uReflDevD: { value: 0.0 }, uReflDevN: { value: 1.6 },
+        uReflOut: { value: 0.03 },
+        uReflDevD: { value: 0.0 }, uReflDevN: { value: 0.0 },
         uTapW: { value: 16.0 },
+        uSheetFar: { value: 11500.0 }, uSheetSoft: { value: 3000.0 },
+        uNormPix: { value: 1.0 },   // (v41.70) 1 = the normal is re-derived per fragment; 0 = the old vertex normal
+        uMaxSlope: { value: 0.9 }, uSlopeLimit: { value: 1.0 },
+        uDispSmooth: { value: 1.0 },
         uHullXZ: { value: new THREE.Vector2(0, 0) }, uHullR: { value: 0.0 },
         uHullFade: { value: 120.0 }, uHullTop: { value: 1.0e6 },
         uReflChop: { value: 0.010 }, uReflChopFreq: { value: 0.020 },
@@ -19036,11 +19076,12 @@ function _swBuildHubWaterDispGet(WL) {
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform float uCrestQ; uniform float uNormK; uniform mat4 uReflMatrix;',
       'uniform float uReflPar;',   // (v41.50) vertex-side; uReflWave is declared in the fragment
-      'uniform float uTapW;',   // (v41.61) normal tap half-width, WORLD units - see the note below
+      'uniform float uTapW; uniform float uDispSmooth; uniform float uMaxSlope; uniform float uSlopeLimit;',   // (v41.61/67/71)
       'uniform vec2 uHullXZ; uniform float uHullR; uniform float uHullFade; uniform float uHullTop;',   // (v41.54)
       'float _swShape(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       'varying float vFoam;',   // (v41.53)
+      'varying float vSlopeK;',   // (v41.71)
       '#include <fog_pars_vertex>',
       'void main(){',
       '  vec3 wp0 = (modelMatrix * vec4(position,1.0)).xyz;',                        
@@ -19052,20 +19093,26 @@ function _swBuildHubWaterDispGet(WL) {
       '  vec4 _hs = texture2D(uRippleTex, clamp(rUV,0.001,0.999));',
       '  float h = _hs.x;',
       '  vFoam = _hs.z * winFade;',
-      '  float disp = _swShape(h) * winFade;',
-      '  float _hd = length(wp0.xz - uHullXZ);',
-      '  float _hk = smoothstep(uHullR, uHullR + max(uHullFade, 1.0), _hd);',
-      '  disp = mix(min(disp, uHullTop), disp, _hk);',
-      '  vReflUv = uReflMatrix * vec4(wp0 + vec3(0.0, disp * uReflPar, 0.0), 1.0);',
-      '  vDisp = (h / (1.0 + abs(h))) * winFade;',
       '  float dU = uTapW / uRippleBounds;',
       '  float hL = texture2D(uRippleTex, clamp(rUV - vec2(dU,0.0),0.001,0.999)).x;',
       '  float hR = texture2D(uRippleTex, clamp(rUV + vec2(dU,0.0),0.001,0.999)).x;',
       '  float hD = texture2D(uRippleTex, clamp(rUV - vec2(0.0,dU),0.001,0.999)).x;',
       '  float hU = texture2D(uRippleTex, clamp(rUV + vec2(0.0,dU),0.001,0.999)).x;',
+      '  float hSm = (h * 2.0 + hL + hR + hD + hU) * 0.1666667;',
+      '  float _dLs = _swShape(hL), _dRs = _swShape(hR), _dDs = _swShape(hD), _dUs = _swShape(hU);',
+      '  float _grad = max(abs(_dLs - _dRs), abs(_dDs - _dUs)) / max(2.0 * uTapW, 1.0);',
+      '  float _sk = min(1.0, uMaxSlope / max(_grad, 1e-4));',
+      '  _sk = mix(1.0, _sk, clamp(uSlopeLimit, 0.0, 1.0));',
+      '  vSlopeK = _sk;',
+      '  float disp = _swShape(mix(h, hSm, uDispSmooth)) * _sk * winFade;',
+      '  float _hd = length(wp0.xz - uHullXZ);',
+      '  float _hk = smoothstep(uHullR, uHullR + max(uHullFade, 1.0), _hd);',
+      '  disp = mix(min(disp, uHullTop), disp, _hk);',
+      '  vReflUv = uReflMatrix * vec4(wp0 + vec3(0.0, disp * uReflPar, 0.0), 1.0);',
+      '  vDisp = (h / (1.0 + abs(h))) * winFade;',
       '  float dL = mix(min(_swShape(hL), uHullTop), _swShape(hL), _hk), dR = mix(min(_swShape(hR), uHullTop), _swShape(hR), _hk);',
       '  float dDn = mix(min(_swShape(hD), uHullTop), _swShape(hD), _hk), dUp = mix(min(_swShape(hU), uHullTop), _swShape(hU), _hk);',
-      '  vN = normalize(vec3((dL-dR)*winFade*uNormK, 2.0*uRippleBounds*dU, (dDn-dUp)*winFade*uNormK));',
+      '  vN = normalize(vec3((dL-dR)*winFade*uNormK*_sk, 2.0*uRippleBounds*dU, (dDn-dUp)*winFade*uNormK*_sk));',
       '  vec3 transformed = position; transformed.z += disp;',                        
       '  vec4 mvPosition = modelViewMatrix * vec4(transformed,1.0);',
       '  vWP = (modelMatrix * vec4(transformed,1.0)).xyz;',
@@ -19079,22 +19126,37 @@ function _swBuildHubWaterDispGet(WL) {
       'uniform float uCapFoamLo; uniform float uCapFoamHi; uniform float uFoamMatte;',   // (v41.53/41.54)
       'uniform float uMatteLo; uniform float uMatteHi; uniform float uFoamAlb; uniform vec3 uFoamAlbCol;',   // (v41.55)
       'uniform float uReflWave; uniform float uReflChop; uniform float uReflChopFreq;',   // (v41.50/41.51)
-      'uniform float uReflDevD; uniform float uReflDevN;',   // (v41.56)
+      'uniform float uReflDevD; uniform float uReflDevN; uniform float uReflOut;',   // (v41.56/41.74)
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uSkyDark; uniform float uReflHot; uniform float uFoamLod; uniform float uReflFar;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
       'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',
       'uniform sampler2D uSceneTex; uniform vec2 uSceneRes; uniform vec2 uSceneMax; uniform float uRefract; uniform float uRefractK;',   // (v39.73)   
       'uniform float uRefractMax; uniform float uDebugTerm; uniform float uMurkMin; uniform float uMurkTint;',   // (v41.59/60/62)
+      'uniform float uSheetFar; uniform float uSheetSoft;',   // (v41.68)
+      'uniform sampler2D uRippleTex; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform float uCrestQ; uniform float uNormK; uniform float uTapW; uniform float uNormPix;',
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       'varying float vFoam;',   // (v41.53)
+      'varying float vSlopeK;',   // (v41.71)
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
       'float _vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f); float a=_h2(i), b=_h2(i+vec2(1.0,0.0)), cc=_h2(i+vec2(0.0,1.0)), dd=_h2(i+vec2(1.0,1.0)); return mix(mix(a,b,f.x), mix(cc,dd,f.x), f.y); }',
+      'float _swShapeF(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'void main(){',
       '  vec3 _dbgSeen = vec3(0.0); float _dbgCap = 0.0;',
       '  vec3 V = normalize(uCam - vWP);',
       '  vec3 N = normalize(vN);',
+      '  if (uNormPix > 0.001) {',
+      '    float _dUf = uTapW / uRippleBounds;',
+      '    float _hLf = texture2D(uRippleTex, clamp(vRipUv - vec2(_dUf,0.0), 0.001, 0.999)).x;',
+      '    float _hRf = texture2D(uRippleTex, clamp(vRipUv + vec2(_dUf,0.0), 0.001, 0.999)).x;',
+      '    float _hDf = texture2D(uRippleTex, clamp(vRipUv - vec2(0.0,_dUf), 0.001, 0.999)).x;',
+      '    float _hUf = texture2D(uRippleTex, clamp(vRipUv + vec2(0.0,_dUf), 0.001, 0.999)).x;',
+      '    vec3 _Nf = normalize(vec3((_swShapeF(_hLf) - _swShapeF(_hRf)) * vWinFade * uNormK * vSlopeK,',
+      '                              2.0 * uRippleBounds * _dUf,',
+      '                              (_swShapeF(_hDf) - _swShapeF(_hUf)) * vWinFade * uNormK * vSlopeK));',
+      '    N = normalize(mix(N, _Nf, clamp(uNormPix, 0.0, 1.0)));',
+      '  }',
       '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 3.0);',            
       '  fres = clamp(uReflFloor + (0.95 - uReflFloor)*fres, 0.0, 0.95);',
       '  float _fmM = smoothstep(uMatteLo, max(uMatteHi, uMatteLo + 0.01), vFoam);',
@@ -19106,7 +19168,10 @@ function _swBuildHubWaterDispGet(WL) {
       '  float spec = pow(max(dot(N,H),0.0), 200.0);',                                
       '  vec3 base = color * diff;',
       '  base = mix(base, uFoamAlbCol * (0.62 + 0.55 * diff), _fmM * uFoamAlb);',
-      '  float shDepth = mix(1.0, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',   // (v39.73) hoisted: the refraction below tints by depth
+      '  vec2 fUv = (vWP.xz - uFarCenter) / uFarBounds + 0.5;',
+      '  float fIn = step(0.0, fUv.x) * step(fUv.x, 1.0) * step(0.0, fUv.y) * step(fUv.y, 1.0);',
+      '  float farDepth = mix(1.0, texture2D(uFarMaskTex, clamp(fUv, 0.001, 0.999)).g, fIn);',
+      '  float shDepth = mix(farDepth, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',   // (v41.73) far mask outside the window, not a constant 1.0
       '  vec3 skyT = vec3(0.32,0.47,0.66);',
       '  float _slit = clamp(pow(max(dot(fogColor, vec3(0.299,0.587,0.114)) * 1.35, 0.0), 1.6), 0.05, 1.0);',
       '  skyT = mix(fogColor * 0.9, skyT, _slit);',
@@ -19114,7 +19179,7 @@ function _swBuildHubWaterDispGet(WL) {
       '  float graze = 1.0 - clamp(abs(V.y), 0.0, 1.0);',                             
       '  float dCam = length(uCam.xz - vWP.xz);',                                     
       '  float rfade = clamp(1.0 - dCam / uReflFar, 0.0, 1.0);',                        
-      '  float edgeFade = clamp((11500.0 - dCam) / 3000.0, 0.0, 1.0);',              
+      '  float edgeFade = clamp((uSheetFar - dCam) / max(uSheetSoft, 1.0), 0.0, 1.0);',              
       '  vec4 ruv = vReflUv;',
       '  ruv.xy += N.xz * ruv.w * 0.04 * uReflPerturb * rfade * (1.0 - graze*0.55);', 
       '  ruv.xy += N.xz * ruv.w * uReflWave * abs(vDisp) * rfade * (1.0 - graze*0.35);',
@@ -19122,7 +19187,9 @@ function _swBuildHubWaterDispGet(WL) {
       '  ruv.xy += _chop * ruv.w * uReflChop * rfade;',
       '  vec2 _rv2 = ruv.xy / max(ruv.w, 1e-4);',
       '  vec3 reflTex = texture2D(tDiffuse, clamp(_rv2, vec2(0.0005), vec2(0.9995))).rgb;',
-      '  float _rok = step(1e-4, ruv.w);',
+      '  vec2 _rOut = max(vec2(0.0) - _rv2, _rv2 - vec2(1.0));',
+      '  float _rOutM = max(max(_rOut.x, _rOut.y), 0.0);',
+      '  float _rok = step(1e-4, ruv.w) * (1.0 - smoothstep(0.0, max(uReflOut, 0.0005), _rOutM));',
       '  if (dot(reflTex, vec3(0.299,0.587,0.114)) < 0.002) _rok = 0.0;',
       '  reflTex = mix(skyT, reflTex, _rok);',
       '  vec3 _rin = max(reflTex, 0.0) * uReflBright;',
@@ -19171,9 +19238,6 @@ function _swBuildHubWaterDispGet(WL) {
       
       
       '  float shoreA = smoothstep(0.0, max(uShoreSoft, 0.001), shDepth);',
-      '  vec2 fUv = (vWP.xz - uFarCenter) / uFarBounds + 0.5;',
-      '  float fIn = step(0.0, fUv.x) * step(fUv.x, 1.0) * step(0.0, fUv.y) * step(fUv.y, 1.0);',   
-      '  float farDepth = mix(1.0, texture2D(uFarMaskTex, clamp(fUv, 0.001, 0.999)).g, fIn);',      
       '  float nearDepth = texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g;',                    
       '  float fedge = min(min(vRipUv.x, 1.0 - vRipUv.x), min(vRipUv.y, 1.0 - vRipUv.y));',         
       '  float lod = clamp(fedge / max(uFoamLod, 0.001), 0.0, 1.0);',                               

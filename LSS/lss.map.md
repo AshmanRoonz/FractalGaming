@@ -6294,3 +6294,25 @@ own range. · `__mirrorDump()` - the planar mirror's render target into a canvas
 correct while the screen was not). · `window.__water.debugTerm = 1..8` - the water outputs ONE term
 full-screen. · ⚠ Bisect the water by DETACHING it from the scene: `_swRippleTick` rewrites
 `.visible` and the Reflector's `colorWrite` every frame, so hiding either proves nothing.
+
+**41.65 / 41.66 the cleanup.** `_warmDrawRoot(root)` with one argument returns before it draws;
+three warms had shipped dead (bubble cloud, bird/fish mesh, Vortex core glow). `rt` now defaults to
+`postFX.rtScene` with a one-time warning, and the bubble warm moved from the countdown into
+`_prebakeGpuPrime`. Then 41.66 backed out `uReflDevN` (1.6 -> 0) and trimmed `uFoamMatte`
+(0.85 -> 0.35): both were built to fight the black-out guard, and with it fixed they only produced
+the pale, low-contrast wash the owner reported as "still gotta fix the water here". ⚠ The
+deviation fade keys on `1-N.y`, which ordinary ripples reach - it was never crest-only.
+
+**41.67 - 41.74 the shoreline.** 41.67 low-passed the displacement to what the mesh can carry; 41.68
+shrank the sheet for density and traded a seam for it; 41.69 removed that trade with a WARPED grid
+(80% of the lines cover the inner +/-4000 at 13.0 u a quad, the rest stretch to 12288 - same 768^2
+vertices, full reach); 41.70 snapped the sheet to its own lattice (it had been sliding a fraction of
+a quad every frame - "when i hit p to freeze, the water goes back to normal") and moved the normal
+to a per-fragment quantity (the owner had already isolated this: "3, 7 and 8 i don't see the
+triangles" - the three isolator terms that do not read the surface shape); 41.71 capped the surface
+GRADIENT at 0.9 (measured 1.5, a 56-degree face, against deep water's real limit of 1/7).
+Then the actual cause: **41.72** the shoreline is a lossless wall and the wake was accumulating
+against it (h = 1.41 measured against a +/-0.55 seed clamp), so the shallows absorb now; **41.73** the
+water's alpha read only the near mask, so it was opaque past the ripple window's square edge - the
+horizontal straight line; **41.74** the reflection UV clamp smeared an edge texel past the mirror -
+the vertical straight line. ⚠ Live: `,`/`.` shore absorption, `;`/`'` viscosity, `[`/`]` maxSlope.

@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.65';
+const LSS_BUILD = '41.74';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -26849,6 +26849,7 @@ const _SW_RIPPLE_FRAG = [
   'uniform vec2 uScroll;',           
   'uniform float uSeedImpulse;',   // (v41.02) 0 = the v41.01 displacement pluck, 1 = a pure velocity impulse
   'uniform float uFoamDecay; uniform float uSeedFoamK;',   // (v41.53) the foam field - see the note below
+  'uniform float uShoreDamp; uniform float uShoreDampD;',   // (v41.72) shallow-water absorption
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -26874,6 +26875,28 @@ const _SW_RIPPLE_FRAG = [
   // was, and viscosity is nearer 1 so the energy survives long enough to come back off a shore and
   // meet itself.
   '  float nh = (2.0 * hC - h.y + uWaveC2 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
+  // ⚠⚠ (v41.72) A REAL SHORE ABSORBS. Owner: "it looks like the wake is coming up from the
+  // shoreline, and not around the hull" - which is exactly what this sim was built to do, and nobody
+  // noticed it had become the dominant feature.
+  // The land boundary above is a PERFECT reflector: a land neighbour substitutes the cell's own height
+  // (a Neumann wall), which returns 100% of the energy that arrives. v33.20 chose that deliberately,
+  // for shoreline interference. It only works while the water is losing energy faster than the ship
+  // feeds it - and v41.47 cut viscosity 0.9885 -> 0.9945 to get the ripple draw distance the owner
+  // asked for, which took the half-life from 1.0 s to 2.1 s. In an enclosed lake with 100%-reflecting
+  // walls, doubling the half-life more than doubles the standing energy: the wake radiates out, comes
+  // back off the shore, meets itself, and builds a standing swell ALONG THE SHORELINE that is bigger
+  // than the wake at the hull. Superposition of a wave and its reflection also doubles the amplitude
+  // right at the wall, which is where the impossible 1.5 gradients (see v41.71) were coming from.
+  // It also explains "when i hit p to freeze, the water goes back to normal": stop feeding it and the
+  // standing wave decays away over a couple of seconds.
+  // Real shallow water does not do this. A wave shoaling into a beach loses its energy to breaking and
+  // friction; almost nothing comes back. So damp by DEPTH: the mask's .g channel is the normalised
+  // depth the display already uses for its shoreline, and cells in the shallows now lose energy fast
+  // while deep water keeps every bit of the v41.47 reach.
+  // ⚠ This does NOT touch the wall condition itself, so the shoreline still reflects - just not
+  // losslessly. window.__water.shoreDamp = 1 restores the pre-41.72 perfect mirror exactly.
+  '  float _shDep = texture2D(uMaskTex, uv).g;',
+  '  nh *= mix(uShoreDamp, 1.0, smoothstep(0.0, max(uShoreDampD, 0.001), _shDep));',
   '  vec2 wpos = (uv - 0.5) * BOUNDS;',
   // ⚠⚠ (v41.02) A SEED WAS A PLUCK, AND A PLUCK IS WHY THE WATER LOOKED LIKE JELLO.
   // Owner: "something unrealistic about it... maybe looks too jello like when the boats and weapons
@@ -26984,6 +27007,13 @@ function _swRippleInit() {
     // whitewater behind a hull stays white. uSeedFoamK is how much a unit of seed amplitude aerates;
     // the raised cosine peaks at 2, seeds clamp at |0.55|, so a hard impact deposits ~0.4 in a step.
     // Live: window.__water.foamDecay / .seedFoam. seedFoam 0 turns the whole crest cap off at source.
+    // (v41.72) how much of a step survives in the SHALLOWEST water, and the depth by which the water is
+    // fully transparent to waves again. 0.96 per 60 Hz step is a ~0.4 s half-life right at the beach -
+    // a wave that reaches the shore is essentially spent, which is what a beach does. Deep water is
+    // untouched, so the v41.47 draw distance is intact. window.__water.shoreDamp / .shoreDampD;
+    // shoreDamp 1 is the pre-41.72 lossless shore.
+    v.material.uniforms.uShoreDamp = { value: 0.96 };
+    v.material.uniforms.uShoreDampD = { value: 0.28 };
     v.material.uniforms.uFoamDecay = { value: 0.9930 };   // (v41.56) ~1.6 s half-life, was ~3 s
     // ⚠ (v41.56) 0.36 -> 0.10. Measured on a Dreadnought at 340 u/s, 0.36 drove the field into its
     // own 1.6 clamp (foam p99 = 1.54 near the hull, saturated over a wide band) and the v41.55 albedo
@@ -28803,6 +28833,8 @@ function _swRippleTick(dt) {
       if (_W3.seedImpulse != null && _u.uSeedImpulse) _u.uSeedImpulse.value = _W3.seedImpulse;   // (v41.02)
       if (_W3.foamDecay != null && _u.uFoamDecay) _u.uFoamDecay.value = _W3.foamDecay;           // (v41.53)
       if (_W3.seedFoam != null && _u.uSeedFoamK) _u.uSeedFoamK.value = _W3.seedFoam;             // (v41.53)
+      if (_W3.shoreDamp != null && _u.uShoreDamp) _u.uShoreDamp.value = _W3.shoreDamp;           // (v41.72)
+      if (_W3.shoreDampD != null && _u.uShoreDampD) _u.uShoreDampD.value = _W3.shoreDampD;       // (v41.72)
     }
   } catch (_) {}   
   
@@ -29444,7 +29476,28 @@ function _swRippleTick(dt) {
       // (v41.42) THE BIG ONE - this is the mesh every crest, sheet and foam pass in v41 draws into.
       const _vrR = _swVrLite();
       dm.visible = !game._swSubmerged && !_vrR;
-      dm.position.set(px, WL2, pz);   
+      // ⚠⚠ (v41.70) SNAP THE SHEET TO ITS OWN GRID. Owner: "when i hit p to freeze, the water
+      // goes back to normal". That one sentence is the diagnosis - the artefact needs MOTION.
+      // This line moved the sheet to the ship's exact position every frame. Its vertices sit at fixed
+      // LOCAL offsets, so following the ship continuously drags every one of them to a different WORLD
+      // point each frame, while the heightfield they sample stays anchored to the world. At 13 units a
+      // quad against a 31.3-unit ripple texel that is a resampling problem: a crest lands on a vertex
+      // this frame and between two the next, so it hops from quad to quad, and each hop draws it as a
+      // spike over one quad. Freeze the ship, the lattice stops moving, and the surface goes still.
+      // The sim already solved this for its own window - see the INTEGER-texel note in the recentre
+      // block, which snaps the ripple centre so the field lands on identical world samples each time.
+      // The sheet needs the same discipline: quantised to its own quad size, the vertices stay on ONE
+      // world lattice however fast the ship flies, and the sheet jumps a whole quad at a time (which
+      // is invisible) instead of sliding a fraction of one (which is not).
+      // ⚠ Snapped on the INNER quad size. The warped rim has its own coarser spacing and still
+      // slides; harmless, because winFade is 0 out there and that band is flat by construction.
+      // window.__water.sheetSnap = 0 restores the pre-41.70 continuous follow.
+      {
+        const _q = (dm.geometry.userData && dm.geometry.userData.swQuad) || 0;
+        const _snap = (_q > 0.01 && !(window.__water && window.__water.sheetSnap === 0));
+        dm.position.set(_snap ? Math.round(px / _q) * _q : px, WL2,
+                        _snap ? Math.round(pz / _q) * _q : pz);
+      }
       const du = dm.material.uniforms;
       du.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
       du.uRippleCenter.value.set(R.center.x, R.center.y);
@@ -29508,11 +29561,20 @@ function _swRippleTick(dt) {
       // (v41.61) the normal's central difference tracks the texel size, so it stays a texel-wide
       // gradient if the window or the resolution ever change again.
       if (du.uTapW) du.uTapW.value = (W2.tapW != null) ? +W2.tapW : Math.max(2, (R.bounds / _SW_RIPPLE_RES) * 0.5);
+      // (v41.67) 1.0 -> 0.45: at 2.4 vertices per texel (v41.68) the mesh can carry far more of the
+      // field itself, so the low-pass only has to take the last texel-scale edge off.
+      if (du.uDispSmooth) du.uDispSmooth.value = (W2.dispSmooth != null) ? +W2.dispSmooth : 0.45;
+      if (du.uSheetFar) du.uSheetFar.value = (W2.sheetFar != null) ? +W2.sheetFar : 11500.0;    // (v41.69)
+      if (du.uSheetSoft) du.uSheetSoft.value = (W2.sheetSoft != null) ? +W2.sheetSoft : 3000.0;  // (v41.69)
+      if (du.uNormPix) du.uNormPix.value = (W2.normPix != null) ? +W2.normPix : 1.0;             // (v41.70)
+      if (du.uMaxSlope) du.uMaxSlope.value = (W2.maxSlope != null) ? +W2.maxSlope : 0.9;         // (v41.71)
+      if (du.uSlopeLimit) du.uSlopeLimit.value = (W2.slopeLimit != null) ? +W2.slopeLimit : 1.0; // (v41.71)
       if (W2.reflPar !== undefined && du.uReflPar) du.uReflPar.value = W2.reflPar;     // (v41.50)
       if (W2.reflWave !== undefined && du.uReflWave) du.uReflWave.value = W2.reflWave; // (v41.50)
       if (W2.reflChop !== undefined && du.uReflChop) du.uReflChop.value = W2.reflChop; // (v41.51)
       if (W2.reflDevD !== undefined && du.uReflDevD) du.uReflDevD.value = W2.reflDevD; // (v41.56)
       if (W2.reflDevN !== undefined && du.uReflDevN) du.uReflDevN.value = W2.reflDevN; // (v41.56)
+      if (du.uReflOut) du.uReflOut.value = (W2.reflOut != null) ? +W2.reflOut : 0.03;  // (v41.74)
       if (du.uDebugTerm) du.uDebugTerm.value = (W2.debugTerm != null) ? +W2.debugTerm : 0.0;   // (v41.60)
       if (W2.capFreq !== undefined && du.uCapFreq) du.uCapFreq.value = W2.capFreq;     // (v41.48)
       if (W2.capBright !== undefined && du.uCapBright) du.uCapBright.value = W2.capBright;   // (v41.48)
@@ -30762,7 +30824,56 @@ let _hubWaterDisp = null;
 function _swBuildHubWaterDispGet(WL) {
   if (_hubWaterDisp) return _hubWaterDisp;
   if (typeof THREE === 'undefined' || !scene) return null;
-  const geo = new THREE.PlaneGeometry(24576, 24576, 768, 768);   
+  // ⚠⚠ (v41.68) 24576 -> 10240 AT THE SAME 768 SEGMENTS. Owner, after v41.67: "that first run
+  // you could easily see the glitch there" - a single enormous flat facet across the near water.
+  // v41.61 fixed the normal and v41.67 low-passed the displacement, and both helped, but neither could
+  // fix the underlying arithmetic: 24576 / 768 = 32.0 world units a quad against a 31.3-unit ripple
+  // texel. ONE VERTEX PER TEXEL. A 146-unit crest thirty units wide is then, quite literally, two
+  // triangles - and no shading trick makes two triangles look like a wave.
+  // The vertices were in the wrong place, not too few. The ripple sim's window is uRippleBounds 8000,
+  // i.e. +/-4000 from the ship, and OUTSIDE it winFade is 0 - so `disp` is provably 0 there. The plane
+  // reached +/-12288, which means about 1.1 MILLION of its 1.18M triangles were tessellating water that
+  // cannot move. Pull the sheet in to just past the sim window and the same 768x768 grid gives 13.3
+  // units a quad - 2.4 vertices per texel - for exactly the same triangle count.
+  // ⚠ The far field is not lost: the flat Reflector built in _swBuildHubWater is a SEPARATE
+  // 48000-unit plane and already draws every horizon this sheet used to cover. What changes is where
+  // the handoff happens - see uSheetFar below, which moves edgeFade in to match.
+  // ⚠ window.__water.dispSize overrides it, but the geometry is built once: leave and re-enter the
+  // map for it to take.
+  // ⚠⚠ (v41.69) A WARPED GRID, because v41.68's straight trade was the wrong one. Shrinking the
+  // sheet to 10240 bought the density and cost a seam: the sheet then ended at 4900 (uSheetFar) and
+  // the flat Reflector's differently-shaded water took over beyond it. From a camera a few dozen
+  // units above the surface, a handoff CIRCLE of radius 4900 projects to within a degree of the
+  // horizon - i.e. a dead straight line - with a large pale region past it. That is the wedge the
+  // owner traced. Confirmed by pushing uSheetFar back to its pre-41.68 11500 live: the wedge vanishes.
+  // There is no need to choose. The sheet only has DETAIL inside the ripple window (+/-4000, where
+  // winFade is non-zero); past that it is flat and exists purely to carry colour to the horizon. So
+  // spend the vertices accordingly: 80% of the grid lines cover the inner +/-4000 at 13.0 world units
+  // a quad - 2.4 per ripple texel, the v41.68 win - and the remaining 20% stretch from 4000 out to
+  // 12288 at 54 units a quad, which is plenty for water that cannot move. Same 768x768 vertices,
+  // same 1.18M triangles, full original reach, and edgeFade goes back where it was so there is no
+  // handoff to see.
+  // ⚠ The tessellation steps 13 -> 54 u a quad at the 4000 boundary. That is invisible only because
+  // the surface is provably FLAT there (winFade = 0), so nothing keys off the triangle size. If the
+  // ripple window is ever widened past _dispInner, widen this with it.
+  const _dispHalf = 12288, _dispSeg = 768;
+  const _dispInner = (window.__water && window.__water.dispInner != null) ? +window.__water.dispInner : 4000;
+  const _dispFrac = (window.__water && window.__water.dispFrac != null) ? +window.__water.dispFrac : 0.80;
+  const geo = new THREE.PlaneGeometry(2, 2, _dispSeg, _dispSeg);   // unit grid, warped below
+  {
+    const _pa = geo.attributes.position, _pv = _pa.array;
+    const _warp = function (u) {
+      const sg = (u < 0) ? -1 : 1, m = Math.min(1, Math.abs(u));
+      return sg * ((m <= _dispFrac)
+        ? (m / _dispFrac) * _dispInner
+        : _dispInner + ((m - _dispFrac) / Math.max(1e-4, 1 - _dispFrac)) * (_dispHalf - _dispInner));
+    };
+    for (let _i = 0; _i < _pv.length; _i += 3) { _pv[_i] = _warp(_pv[_i]); _pv[_i + 1] = _warp(_pv[_i + 1]); }
+    _pa.needsUpdate = true;
+    geo.computeBoundingSphere();
+    // (v41.70) the inner region's quad size, so _swRippleTick can snap the sheet to its own lattice.
+    geo.userData.swQuad = _dispInner / Math.max(1, (_dispFrac * _dispSeg * 0.5));
+  }
   const mat = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: true,
     uniforms: THREE.UniformsUtils.merge([
@@ -30847,7 +30958,12 @@ function _swBuildHubWaterDispGet(WL) {
         // twice in this shader already (v41.18 and v41.48).
         uCapFoamLo: { value: 0.18 }, uCapFoamHi: { value: 0.60 },   // (v41.56) rebased with the deposit
         // (v41.54) how much of the mirror foam takes away. 1.0 = churned water reflects nothing at all.
-        uFoamMatte: { value: 0.85 },
+        // (v41.66) 0.85 -> 0.35, for the same reason. Aerated water really does scatter rather than
+        // reflect, so this is not zero - but 0.85 was sized to hide a reflection artefact, not to model
+        // foam, and at that strength the churned band goes flat and dead. The foam FIELD gates it
+        // tightly now (measured p99 = 0.0002 on water the ship has not touched), so what is left only
+        // acts on the wake.
+        uFoamMatte: { value: 0.35 },
         // (v41.55) the MATTE window - "has this water been churned at all". Deliberately much lower and
         // narrower-based than the cap's window: measured foam p90 near the hull is 0.047, so anything
         // starting at 0.10 misses most of the trail. See the fragment note.
@@ -30886,6 +31002,9 @@ function _swBuildHubWaterDispGet(WL) {
         // has no information about, every one of those is just a different wrong sample. The code stays
         // because the reasoning is sound for a MILD displacement; window.__water.reflPar / .reflWave.
         uReflPar: { value: 0.0 }, uReflWave: { value: 0.0 },
+        // (v41.74) how far outside the mirror a sample may stray before it is fully replaced by skyT,
+        // in projected UV. 0.03 is 3% of the render past its own edge. window.__water.reflOut.
+        uReflOut: { value: 0.03 },
         // (v41.56) how fast the planar mirror stops being believable as the sheet leaves its plane.
         // Measured bands to set these against (window.__crestStat, 340 u/s): vDisp p90 = 0.17 /
         // p99 = 0.38 near the hull, 1-N.y p90 = 0.47 / p99 = 0.71. So 2.0 and 1.1 take a p90 crest to
@@ -30905,12 +31024,37 @@ function _swBuildHubWaterDispGet(WL) {
         // under a hovering ship is displaced but not especially steep, so the height term was taking the
         // reflection away exactly where the owner wanted to see one.
         // Tilt carries it alone now, slightly raised to make up the difference.
-        uReflDevD: { value: 0.0 }, uReflDevN: { value: 1.6 },
+        // ⚠⚠ (v41.66) uReflDevN 1.6 -> 0. THIS WAS THE HAZE. Owner: "still gotta fix the water
+        // here", with the whole lake reading as a pale, low-contrast wash.
+        // Isolated live, with the foam matte and albedo already off: turning this term on ALONE takes a
+        // crisp mirror of the cliff and fogs it. Of course it does - `1 - uReflDevN*(1-N.y)` fires on
+        // ORDINARY RIPPLES, not just crests. Measured on calm-ish water 1-N.y sits around 0.1-0.3 across
+        // broad areas, so at 1.6 it was replacing 16-48% of the reflection with skyT over most of the
+        // surface. That is a haze by construction.
+        // And it was built in v41.56 to stop the shoreline's reflection cutting across the wake - which
+        // v41.63 established was the near-black graze guard all along. The artefact is gone; the cost of
+        // fighting it should go with it. The physical argument (a planar mirror holds no answer for a
+        // steeply tilted facet) is still sound, so the term stays, armed by nothing:
+        // window.__water.reflDevN if a crest ever visibly reflects something it should not.
+        uReflDevD: { value: 0.0 }, uReflDevN: { value: 0.0 },
         // (v41.54) the hull exclusion - see the vertex note. uHullR 0 + a huge uHullTop is "no hull
         // here", which is what every frame with the ship off the water writes.
         // (v41.61) half a ripple texel, in world units. The tick keeps it at bounds/RES*0.5 so it
         // follows the window; window.__water.tapW pins it. 2.0 is the pre-41.61 value (faceted).
         uTapW: { value: 16.0 },
+        // (v41.69) back to the pre-41.68 handoff now that the sheet reaches 12288 again - see the
+        // warped-grid note. These stay uniforms because having them live is how the wedge was found.
+        uSheetFar: { value: 11500.0 }, uSheetSoft: { value: 3000.0 },
+        uNormPix: { value: 1.0 },   // (v41.70) 1 = the normal is re-derived per fragment; 0 = the old vertex normal
+        // (v41.71) the steepest gradient the surface is allowed to hold, world units per world unit,
+        // and how much of the limit to apply. 0.9 is a 42-degree face - six times deep water's real
+        // limit and still well short of the 1.5 the sheet was reaching. window.__water.maxSlope /
+        // .slopeLimit; slopeLimit 0 is the pre-41.71 surface exactly.
+        uMaxSlope: { value: 0.9 }, uSlopeLimit: { value: 1.0 },
+        // (v41.67) how much of the geometry's height is the texel-wide average rather than the raw
+        // sample. 1 = fully low-passed to what a one-vertex-per-texel mesh can actually draw, 0 = the
+        // pre-41.67 faceting. window.__water.dispSmooth.
+        uDispSmooth: { value: 1.0 },
         uHullXZ: { value: new THREE.Vector2(0, 0) }, uHullR: { value: 0.0 },
         uHullFade: { value: 120.0 }, uHullTop: { value: 1.0e6 },
         // (v41.51) uReflChop - the reason a real lake never looks like a mirror even when nothing is
@@ -30944,13 +31088,14 @@ function _swBuildHubWaterDispGet(WL) {
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform float uCrestQ; uniform float uNormK; uniform mat4 uReflMatrix;',
       'uniform float uReflPar;',   // (v41.50) vertex-side; uReflWave is declared in the fragment
-      'uniform float uTapW;',   // (v41.61) normal tap half-width, WORLD units - see the note below
+      'uniform float uTapW; uniform float uDispSmooth; uniform float uMaxSlope; uniform float uSlopeLimit;',   // (v41.61/67/71)
       'uniform vec2 uHullXZ; uniform float uHullR; uniform float uHullFade; uniform float uHullTop;',   // (v41.54)
       // (v41.15) the crest expander, shared by the displacement and by the CPU mirrors in
       // _swDispWorld - the two must agree or spray spawns inside the wave it comes off.
       'float _swShape(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       'varying float vFoam;',   // (v41.53)
+      'varying float vSlopeK;',   // (v41.71)
       '#include <fog_pars_vertex>',
       'void main(){',
       '  vec3 wp0 = (modelMatrix * vec4(position,1.0)).xyz;',                        
@@ -30964,7 +31109,68 @@ function _swBuildHubWaterDispGet(WL) {
       '  vec4 _hs = texture2D(uRippleTex, clamp(rUV,0.001,0.999));',
       '  float h = _hs.x;',
       '  vFoam = _hs.z * winFade;',
-      '  float disp = _swShape(h) * winFade;',
+      // ⚠⚠ (v41.61) THE TRIANGLES IN THE RIPPLES ARE THIS NUMBER. Owner: "the triangles in the
+      // ripple in front".
+      // Measured, not guessed: the displaced sheet is PlaneGeometry(24576, 768, 768) = 32.0 world units
+      // per quad, and the ripple texel at 8000/256 is 31.3 world units. ONE VERTEX PER TEXEL, exactly
+      // at the Nyquist limit. That alone would only cost detail - what makes it read as flat triangles
+      // is the NORMAL: these taps sit +/-2 world units from the vertex, i.e. deep inside one texel, and
+      // the heightmap is LinearFilter, so the gradient it returns is piecewise CONSTANT across each
+      // texel. Every vertex therefore gets its own texel's constant gradient, neighbouring vertices
+      // jump between texels, and the interpolated normal across a triangle is near-constant. That is
+      // flat shading, drawn on a smooth surface, and it is why the water looks like a low-poly mesh.
+      // A central difference has to span the sample spacing it is differencing. Half a texel each side
+      // makes it a true texel-wide gradient, continuous across the boundaries, so the normal now varies
+      // smoothly from vertex to vertex.
+      // ⚠ The y term below is 2.0*uRippleBounds*dU, which IS the tap separation - so the normal stays
+      // analytically correct at any tap width, and widening it costs nothing and adds no fetches.
+      '  float dU = uTapW / uRippleBounds;',
+      '  float hL = texture2D(uRippleTex, clamp(rUV - vec2(dU,0.0),0.001,0.999)).x;',
+      '  float hR = texture2D(uRippleTex, clamp(rUV + vec2(dU,0.0),0.001,0.999)).x;',
+      '  float hD = texture2D(uRippleTex, clamp(rUV - vec2(0.0,dU),0.001,0.999)).x;',
+      '  float hU = texture2D(uRippleTex, clamp(rUV + vec2(0.0,dU),0.001,0.999)).x;',
+      // ⚠⚠ (v41.67) NEVER DISPLACE GEOMETRY WITH DETAIL THE MESH CANNOT CARRY. Owner, working
+      // the v41.60 isolator: "3, 7 and 8 i don't see the triangles" - the three terms that do not read
+      // the surface's shape. Every term that does (fresnel, the reflection, the refraction offset, the
+      // slope readout) still showed them.
+      // v41.61 fixed the NORMAL's half of this by widening its taps; this is the other half, and it is
+      // the geometry itself. The sheet is PlaneGeometry(24576, 768, 768) = 32.0 world units a quad
+      // against a 31.3-unit ripple texel: ONE VERTEX PER TEXEL, exactly Nyquist. A feature one texel
+      // across is therefore represented by one quad - two triangles - and no amount of shading makes
+      // two triangles look like a wave. The surface was not being drawn faceted, it WAS faceted.
+      // Raising the vertex count is the obvious answer and the expensive one (768 -> 1536 is four times
+      // a 1.18M-triangle sheet). The cheap and more correct one is to stop asking the mesh for what it
+      // cannot represent: low-pass the height that drives the GEOMETRY over the taps already fetched
+      // above, and leave the NORMAL reading the sharp field. That is normal mapping's whole premise -
+      // shading carries detail finer than the geometry - and it costs nothing, because those four taps
+      // were already being read one line later for the normal.
+      // ⚠ vDisp is deliberately NOT smoothed: it is the disturbance measure the foam and crest
+      // thresholds are calibrated against (see the v41.15 note), and moving it would re-tune all of them.
+      '  float hSm = (h * 2.0 + hL + hR + hD + hU) * 0.1666667;',
+      // ⚠⚠ (v41.71) A SLOPE LIMIT, because the surface was ten times steeper than water can be.
+      // Owner: "there's tall isosceles triangles", traced over a tall narrow wedge of stretched
+      // reflection standing off the wake. Measured with window.__crestStat: 1-N.y reaches 0.83 near the
+      // hull, which is a gradient of about 1.5 - a 56 degree face. Deep water's limiting steepness is
+      // roughly 1/7 (0.14); past it a real wave BREAKS instead of getting steeper. So the sheet was
+      // being asked to draw a shape water cannot hold, and on any mesh a shape like that is a shard.
+      // That is also why every previous attempt only moved the problem around: raising the vertex
+      // density (v41.68/69), smoothing the sampled height (v41.67), widening the normal taps (v41.61)
+      // and re-deriving the normal per fragment (v41.70) all draw the same impossible surface better.
+      // Confirmed by flattening the sheet live (gain 0, crestQ 0): the wedge disappears completely, so
+      // it is the displacement, not the shading and not the grid.
+      // The cap has to be on the GRADIENT, not the height - capping height would flatten the big wide
+      // crests the owner asked for in v41.12-41.15. This scales a vertex's displacement down only where
+      // its own local slope exceeds uMaxSlope, so a tall crest that is also WIDE is untouched and only
+      // the narrow spikes come down. uMaxSlope is deliberately far above the physical 0.14 - this is a
+      // game, and the crests were approved at speed - it is a ceiling on the impossible, not a model.
+      // ⚠ vSlopeK carries the same factor to the fragment stage, or the per-fragment normal from
+      // v41.70 would shade a steeper surface than the geometry actually is.
+      '  float _dLs = _swShape(hL), _dRs = _swShape(hR), _dDs = _swShape(hD), _dUs = _swShape(hU);',
+      '  float _grad = max(abs(_dLs - _dRs), abs(_dDs - _dUs)) / max(2.0 * uTapW, 1.0);',
+      '  float _sk = min(1.0, uMaxSlope / max(_grad, 1e-4));',
+      '  _sk = mix(1.0, _sk, clamp(uSlopeLimit, 0.0, 1.0));',
+      '  vSlopeK = _sk;',
+      '  float disp = _swShape(mix(h, hSm, uDispSmooth)) * _sk * winFade;',
       // ⚠⚠ (v41.54) THE HULL IS OCCUPYING THAT VOLUME - WATER MAY NOT BE DRAWN THROUGH IT.
       // Owner: "the reflection of the ship is cutting the paint job at a close distance to the water",
       // and before that "the ship bottom in the reflection is getting its color cut out to white",
@@ -31007,26 +31213,6 @@ function _swBuildHubWaterDispGet(WL) {
       // the 180/180 mapping every build before 41.14 used - so the crest knobs can move freely and
       // can never drag the foam threshold with them.
       '  vDisp = (h / (1.0 + abs(h))) * winFade;',
-      // ⚠⚠ (v41.61) THE TRIANGLES IN THE RIPPLES ARE THIS NUMBER. Owner: "the triangles in the
-      // ripple in front".
-      // Measured, not guessed: the displaced sheet is PlaneGeometry(24576, 768, 768) = 32.0 world units
-      // per quad, and the ripple texel at 8000/256 is 31.3 world units. ONE VERTEX PER TEXEL, exactly
-      // at the Nyquist limit. That alone would only cost detail - what makes it read as flat triangles
-      // is the NORMAL: these taps sit +/-2 world units from the vertex, i.e. deep inside one texel, and
-      // the heightmap is LinearFilter, so the gradient it returns is piecewise CONSTANT across each
-      // texel. Every vertex therefore gets its own texel's constant gradient, neighbouring vertices
-      // jump between texels, and the interpolated normal across a triangle is near-constant. That is
-      // flat shading, drawn on a smooth surface, and it is why the water looks like a low-poly mesh.
-      // A central difference has to span the sample spacing it is differencing. Half a texel each side
-      // makes it a true texel-wide gradient, continuous across the boundaries, so the normal now varies
-      // smoothly from vertex to vertex.
-      // ⚠ The y term below is 2.0*uRippleBounds*dU, which IS the tap separation - so the normal stays
-      // analytically correct at any tap width, and widening it costs nothing and adds no fetches.
-      '  float dU = uTapW / uRippleBounds;',
-      '  float hL = texture2D(uRippleTex, clamp(rUV - vec2(dU,0.0),0.001,0.999)).x;',
-      '  float hR = texture2D(uRippleTex, clamp(rUV + vec2(dU,0.0),0.001,0.999)).x;',
-      '  float hD = texture2D(uRippleTex, clamp(rUV - vec2(0.0,dU),0.001,0.999)).x;',
-      '  float hU = texture2D(uRippleTex, clamp(rUV + vec2(0.0,dU),0.001,0.999)).x;',
       // ⚠⚠ (v41.17) THE NORMAL WAS FOR A SURFACE THAT IS NO LONGER THE ONE BEING DRAWN, AND THAT IS
       // WHY THE WAKE VANISHED OVER WATER. Owner: "the wake disappears when it's seen over top of
       // water... if it's in front of a mountain or land it can be seen".
@@ -31043,7 +31229,8 @@ function _swBuildHubWaterDispGet(WL) {
       // texel - carrying it through keeps the normal consistent with the surface actually drawn.
       '  float dL = mix(min(_swShape(hL), uHullTop), _swShape(hL), _hk), dR = mix(min(_swShape(hR), uHullTop), _swShape(hR), _hk);',
       '  float dDn = mix(min(_swShape(hD), uHullTop), _swShape(hD), _hk), dUp = mix(min(_swShape(hU), uHullTop), _swShape(hU), _hk);',
-      '  vN = normalize(vec3((dL-dR)*winFade*uNormK, 2.0*uRippleBounds*dU, (dDn-dUp)*winFade*uNormK));',
+      // (v41.71) *_sk so the shading describes the surface that is actually drawn.
+      '  vN = normalize(vec3((dL-dR)*winFade*uNormK*_sk, 2.0*uRippleBounds*dU, (dDn-dUp)*winFade*uNormK*_sk));',
       '  vec3 transformed = position; transformed.z += disp;',                        
       '  vec4 mvPosition = modelViewMatrix * vec4(transformed,1.0);',
       '  vWP = (modelMatrix * vec4(transformed,1.0)).xyz;',
@@ -31059,18 +31246,24 @@ function _swBuildHubWaterDispGet(WL) {
       'uniform float uCapFoamLo; uniform float uCapFoamHi; uniform float uFoamMatte;',   // (v41.53/41.54)
       'uniform float uMatteLo; uniform float uMatteHi; uniform float uFoamAlb; uniform vec3 uFoamAlbCol;',   // (v41.55)
       'uniform float uReflWave; uniform float uReflChop; uniform float uReflChopFreq;',   // (v41.50/41.51)
-      'uniform float uReflDevD; uniform float uReflDevN;',   // (v41.56)
+      'uniform float uReflDevD; uniform float uReflDevN; uniform float uReflOut;',   // (v41.56/41.74)
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uSkyDark; uniform float uReflHot; uniform float uFoamLod; uniform float uReflFar;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
       'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',
       'uniform sampler2D uSceneTex; uniform vec2 uSceneRes; uniform vec2 uSceneMax; uniform float uRefract; uniform float uRefractK;',   // (v39.73)   
       'uniform float uRefractMax; uniform float uDebugTerm; uniform float uMurkMin; uniform float uMurkTint;',   // (v41.59/60/62)
+      'uniform float uSheetFar; uniform float uSheetSoft;',   // (v41.68)
+      // (v41.70) the fragment stage now reads the heightfield itself - see the normal note in main().
+      'uniform sampler2D uRippleTex; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform float uCrestQ; uniform float uNormK; uniform float uTapW; uniform float uNormPix;',
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       'varying float vFoam;',   // (v41.53)
+      'varying float vSlopeK;',   // (v41.71)
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
       'float _vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f); float a=_h2(i), b=_h2(i+vec2(1.0,0.0)), cc=_h2(i+vec2(0.0,1.0)), dd=_h2(i+vec2(1.0,1.0)); return mix(mix(a,b,f.x), mix(cc,dd,f.x), f.y); }',
+      // (v41.70) the same crest transfer the vertex stage uses - the two must agree exactly.
+      'float _swShapeF(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'void main(){',
       // ⚠⚠ (v41.60) THE TERM ISOLATOR. Six builds have now been spent attributing one artefact to
       // the wrong term - layers, then the mirror's parallax, then its tilt shear, then uReflPerturb,
@@ -31082,7 +31275,33 @@ function _swBuildHubWaterDispGet(WL) {
       // 0 is off and the branch is skipped entirely, so the shipped path is unchanged.
       '  vec3 _dbgSeen = vec3(0.0); float _dbgCap = 0.0;',
       '  vec3 V = normalize(uCam - vWP);',
+      // ⚠⚠ (v41.70) THE NORMAL IS A PER-FRAGMENT QUANTITY NOW. Owner: "the big triangles in the
+      // wake where the land reflects on the surface of the water and it cuts through the wake geometry".
+      // vN is computed once per VERTEX and interpolated linearly across each quad, so every term that
+      // reads it - the fresnel, the specular, the diffuse, the foam steepness, the refraction offset
+      // and above all the reflection's UV perturbation - varies LINEARLY across a triangle and kinks at
+      // its edges. Against a high-contrast image like a reflected shoreline that kink is visible as a
+      // straight line, and two of them meet at every quad: the tall triangles cutting through the wake.
+      // It is also why the v41.60 isolator showed them in terms 1, 2, 4, 5 and 6 but not 3, 7 and 8 -
+      // the owner's own observation, and 3/7/8 are exactly the terms that do not read the surface shape.
+      // Re-deriving it here from the ripple texture costs four fetches and makes the SHADING smooth
+      // independently of how coarse the geometry is. That is normal mapping's entire premise, and it is
+      // what lets a 13-unit quad carry a 31-unit texel's worth of surface without showing its seams.
+      // ⚠ Identical arithmetic to the vertex stage (same _swShape, same uTapW, same winFade and
+      // uNormK) or the geometry and its shading disagree. window.__water.normPix = 0 goes back to the
+      // interpolated vertex normal for an A/B or for weak hardware.
       '  vec3 N = normalize(vN);',
+      '  if (uNormPix > 0.001) {',
+      '    float _dUf = uTapW / uRippleBounds;',
+      '    float _hLf = texture2D(uRippleTex, clamp(vRipUv - vec2(_dUf,0.0), 0.001, 0.999)).x;',
+      '    float _hRf = texture2D(uRippleTex, clamp(vRipUv + vec2(_dUf,0.0), 0.001, 0.999)).x;',
+      '    float _hDf = texture2D(uRippleTex, clamp(vRipUv - vec2(0.0,_dUf), 0.001, 0.999)).x;',
+      '    float _hUf = texture2D(uRippleTex, clamp(vRipUv + vec2(0.0,_dUf), 0.001, 0.999)).x;',
+      '    vec3 _Nf = normalize(vec3((_swShapeF(_hLf) - _swShapeF(_hRf)) * vWinFade * uNormK * vSlopeK,',
+      '                              2.0 * uRippleBounds * _dUf,',
+      '                              (_swShapeF(_hDf) - _swShapeF(_hUf)) * vWinFade * uNormK * vSlopeK));',
+      '    N = normalize(mix(N, _Nf, clamp(uNormPix, 0.0, 1.0)));',
+      '  }',
       '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 3.0);',            
       '  fres = clamp(uReflFloor + (0.95 - uReflFloor)*fres, 0.0, 0.95);',
       // ⚠⚠ (v41.54) AERATED WATER IS NOT A MIRROR, AND THAT IS WHY THE WAKE KEPT GETTING CUT.
@@ -31127,7 +31346,27 @@ function _swBuildHubWaterDispGet(WL) {
       // This is the whole foam BAND - the pale turquoise churn - not the crest cap, which sits on top
       // of it and is a much brighter, noisier, ridge-only lid.
       '  base = mix(base, uFoamAlbCol * (0.62 + 0.55 * diff), _fmM * uFoamAlb);',
-      '  float shDepth = mix(1.0, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',   // (v39.73) hoisted: the refraction below tints by depth
+      // ⚠⚠ (v41.73) THE STRAIGHT LINE. Owner: "you can see how there's always that straight line
+      // in the screenshots", boxing a dead-straight horizontal edge on the water at the shoreline - and
+      // before that, "it looks like the wake is coming up from the shoreline".
+      // This line decided how deep the water is, and it read ONE mask: the near one, which only exists
+      // inside the ripple window. `mix(1.0, mask, vWinFade)` means that as vWinFade falls to 0 at the
+      // window's edge, shDepth is forced to 1.0 - DEEP WATER - so shoreA goes to 1 and the sheet draws
+      // at full alpha past that edge no matter what the terrain is doing. Inside the window the shore
+      // mask fades the water out over the shallows and you get a soft, real coastline; one texel
+      // outside it, that fade does not exist. The transition between the two runs along the ripple
+      // window's boundary - and that boundary is an AXIS-ALIGNED SQUARE, so where it crosses a coast it
+      // draws a perfectly straight line. It is in every screenshot because the window is always there.
+      // The fix is already built and bound: uFarMaskTex is the coarse +/-24000 depth mask, and the foam
+      // block below has been cross-fading near-to-far correctly since v34.08 (`depthShape`). The ALPHA
+      // simply never got the same treatment. Sample it here and the coastline continues past the window
+      // instead of stopping at it.
+      // ⚠ fUv/fIn/farDepth are hoisted from the foam block below (which now reuses them) - they
+      // must be computed before shDepth, and there must be exactly one copy or the two can disagree.
+      '  vec2 fUv = (vWP.xz - uFarCenter) / uFarBounds + 0.5;',
+      '  float fIn = step(0.0, fUv.x) * step(fUv.x, 1.0) * step(0.0, fUv.y) * step(fUv.y, 1.0);',
+      '  float farDepth = mix(1.0, texture2D(uFarMaskTex, clamp(fUv, 0.001, 0.999)).g, fIn);',
+      '  float shDepth = mix(farDepth, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',   // (v41.73) far mask outside the window, not a constant 1.0
       // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT, slope-sheared by the wave
       // normal so it bends over crests WITHOUT mirror-bob (projection is from the UNDISPLACED wp0). Matches the
       // flat shader's 0.04 shear + grazing taper + distance fade ; falls back to the muted sky tint when the RT
@@ -31160,7 +31399,11 @@ function _swBuildHubWaterDispGet(WL) {
       // now that it reaches three and a half times further, since distance and graze arrive
       // together. Live-tunable as window.__water.reflFar if it ever shimmers.
       '  float rfade = clamp(1.0 - dCam / uReflFar, 0.0, 1.0);',                        
-      '  float edgeFade = clamp((11500.0 - dCam) / 3000.0, 0.0, 1.0);',              
+      // (v41.68) 11500/3000 -> uniforms, defaulting to 4900/1000. The sheet is 10240 across now, so it
+      // has to be gone before its own edge at 5120 - and it has nothing to say past the ripple window
+      // at 4000 anyway, because winFade has already flattened it there. Beyond this the flat Reflector
+      // draws, as it always did further out. window.__water.sheetFar / .sheetSoft, live.
+      '  float edgeFade = clamp((uSheetFar - dCam) / max(uSheetSoft, 1.0), 0.0, 1.0);',              
       '  vec4 ruv = vReflUv;',
       '  ruv.xy += N.xz * ruv.w * 0.04 * uReflPerturb * rfade * (1.0 - graze*0.55);', 
       // (v41.50) and the SECOND half of it: a tilted facet reflects somewhere else entirely. The
@@ -31216,7 +31459,24 @@ function _swBuildHubWaterDispGet(WL) {
       // There is nothing to feather: a sample at the very edge of that render is as valid as one in
       // the middle. The only genuinely invalid case is behind the mirror camera (w <= 0), and the
       // clamp above keeps a perturbed sample on the texture instead of wrapping off it.
-      '  float _rok = step(1e-4, ruv.w);',
+      // ⚠⚠ (v41.74) THE STRAIGHT VERTICAL LINE IN THE WAKE. Owner: "there shouldn't be that
+      // straight vertical line in the wake".
+      // It is the boundary of the clamp on the line above. A steep swell reflects a direction the
+      // planar mirror does not contain, so the projected UV walks outside 0..1 - and clamp() then
+      // smears ONE edge texel across everything beyond that point. The set of pixels where the UV
+      // crosses the boundary is a curve on the surface but a straight line on screen, because the
+      // mirror's UV space IS screen space: _rv2.x = 1 is a vertical screen line. Hence a dead-straight
+      // vertical edge with smeared reflection on one side of it.
+      // v41.63 replaced the old near-black guard with a validity test, which was right; v41.64 then
+      // removed its feather because feathering on DISTANCE TO THE SCREEN EDGE drew a haze frame along
+      // the bottom, which was also right. Both times I had the wrong quantity. The thing to fade on is
+      // not where the sample sits inside the mirror, it is HOW FAR OUTSIDE it has gone - which is zero
+      // everywhere inside, so there is no frame, and grows smoothly past the edge, so there is no line.
+      // Beyond it the honest answer is skyT: a facet whose reflection the render does not contain is
+      // mostly looking at sky anyway.
+      '  vec2 _rOut = max(vec2(0.0) - _rv2, _rv2 - vec2(1.0));',
+      '  float _rOutM = max(max(_rOut.x, _rOut.y), 0.0);',
+      '  float _rok = step(1e-4, ruv.w) * (1.0 - smoothstep(0.0, max(uReflOut, 0.0005), _rOutM));',
       '  if (dot(reflTex, vec3(0.299,0.587,0.114)) < 0.002) _rok = 0.0;',
       '  reflTex = mix(skyT, reflTex, _rok);',
       // (v38.19) HOT THINGS STAY HOT. This curve is a compressor: 1 - exp(-x) saturates at 1, so a
@@ -31375,9 +31635,7 @@ function _swBuildHubWaterDispGet(WL) {
       // cross-dissolved TWO different-shaped foam bands (coarse far mask 250u + crisp near mask 42u) with max() over the
       // narrow ±240u window edge = a SHAPE POP. Instead blend the DEPTH (the shoreline SHAPE itself) coarse->crisp over a
       // WIDE band (uFoamLod ≈ 30% of the window ≈ 1200u) so ONE shoreline smoothly SHARPENS on approach = no pop.
-      '  vec2 fUv = (vWP.xz - uFarCenter) / uFarBounds + 0.5;',
-      '  float fIn = step(0.0, fUv.x) * step(fUv.x, 1.0) * step(0.0, fUv.y) * step(fUv.y, 1.0);',   
-      '  float farDepth = mix(1.0, texture2D(uFarMaskTex, clamp(fUv, 0.001, 0.999)).g, fIn);',      
+      // (v41.73) fUv / fIn / farDepth are computed once, up at shDepth - see the note there.
       '  float nearDepth = texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g;',                    
       '  float fedge = min(min(vRipUv.x, 1.0 - vRipUv.x), min(vRipUv.y, 1.0 - vRipUv.y));',         
       '  float lod = clamp(fedge / max(uFoamLod, 0.001), 0.0, 1.0);',                               
