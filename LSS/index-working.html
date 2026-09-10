@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.39';
+const LSS_BUILD = '41.65';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -5732,7 +5732,14 @@ const input = {
   // inside _hlPlace's vmin. The two never compound: _hlScale() returns 1 while
   // renderer.xr.isPresenting, because the VR plane is textured from the very
   // canvas the flat layout draws into.
-  vrHudScale: 1.5,
+  // (v41.41) 1.5 -> 3, the top of the slider's own range. Owner: "in VR, the default HUD size should
+  // be the max (3x, i think)" - and 3 is right, that is what the VR menu clamps to.
+  // ⚠ This is the DEFAULT only. A saved settings file with its own vrHudScale still wins, so an
+  // existing headset user keeps whatever they had rather than being jumped to 3x on update.
+  vrHudScale: 3,
+  // (v41.42) OFF by default: a standalone Quest cannot afford the displaced surface, the planar
+  // mirror and the crest readback. A PC headset usually can, so it is a switch rather than a rule.
+  vrWater: false,
   // (v36.19) FLAT-SCREEN HUD size multiplier — the VMIN-layout equivalent of
   // vrHudScale. 1 = the designed layout. Range 0.75..1.75 in the settings
   // slider: past ~1.8 the gauge cluster reaches the pinned compass rose, and
@@ -20475,19 +20482,33 @@ function _xrSettingsRows() {
       // knob added for VR was the one knob VR could not touch. Same range and
       // step as the #set-vr-hud-scale slider.
       label: 'VR HUD Size',
-      value: ((input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5).toFixed(2) + 'x',
+      value: ((input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 3).toFixed(2) + 'x',
       change: (dir) => {
-        const cur = (input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5;
+        const cur = (input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 3;
         input.vrHudScale = Math.max(0.75, Math.min(3, Math.round((cur + dir * 0.05) * 20) / 20));
         if (typeof saveSettings === 'function') saveSettings();
       },
       activate: () => {
         // Tapping the row cycles 1.0 -> 1.5 -> 2.0 -> 2.5 -> back, so the row
         // body is useful too rather than a dead zone between the steppers.
-        const steps = [1, 1.5, 2, 2.5];
-        const cur = (input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5;
+        // (v41.41) 3 added - the cycle stopped at 2.5 while the steppers and the slider both go to 3,
+        // so the row could never reach the size that is now the default.
+        const steps = [1, 1.5, 2, 2.5, 3];
+        const cur = (input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 3;
         let i = steps.findIndex(s => s > cur + 1e-6);
         input.vrHudScale = steps[i < 0 ? 0 : i];
+        if (typeof saveSettings === 'function') saveSettings();
+      },
+    },
+    {
+      label: 'Water Effects',
+      value: (input && input.vrWater) ? 'FULL' : 'LITE',
+      change: () => {
+        input.vrWater = !input.vrWater;
+        if (typeof saveSettings === 'function') saveSettings();
+      },
+      activate: () => {
+        input.vrWater = !input.vrWater;
         if (typeof saveSettings === 'function') saveSettings();
       },
     },
@@ -21764,6 +21785,23 @@ function isStandaloneQuest() {
   }
 }
 
+// ⚠⚠ (v41.42) "IS VR RUNNING THE CHEAP WATER?" - not "is this VR". Owner: "i also want the water
+// effects to be an option in VR".
+// Six separate places switched on isXRPresenting() to strip the water down, and together they turn
+// off almost everything built in v41: the DISPLACED MESH is not even drawn (VR falls back to the
+// flat Reflector), the planar mirror stops refreshing, uReflLive goes to 0, the crest-break scan is
+// skipped and the ripple sim runs at half rate. That was the right default for a standalone Quest
+// and the wrong one for a PC headset with a real GPU behind it, and there was no way to say so.
+// One predicate, one setting. `input.vrWater` false (the default) is exactly the old behaviour;
+// true gives a headset the same water a monitor gets.
+// ⚠ Deliberately NOT applied to the three `document.hidden` guards, where isXRPresenting() means
+// "a headset is still being drawn to even though the tab reports hidden". Same call, opposite
+// question - flipping those on this setting would stop the sim whenever a VR player looked away.
+function _swVrLite() {
+  if (!((typeof isXRPresenting === 'function') && isXRPresenting())) return false;
+  try { if (typeof input !== 'undefined' && input && input.vrWater) return false; } catch (_) {}
+  return true;
+}
 function isXRPresenting() {
   const r = (typeof window !== 'undefined') ? window.renderer : null;
   return !!(r && r.xr && r.xr.isPresenting);
@@ -23237,6 +23275,9 @@ function _waterRefractBind(rnd, scn, cam) {
     const W = window.__water || {};
     u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
     if (W.refractK != null) u.uRefractK.value = +W.refractK;
+    if (W.refractMax != null && u.uRefractMax) u.uRefractMax.value = +W.refractMax;   // (v41.59)
+    if (W.murkMin != null && u.uMurkMin) u.uMurkMin.value = +W.murkMin;               // (v41.62)
+    if (W.murkTint != null && u.uMurkTint) u.uMurkTint.value = +W.murkTint;           // (v41.62)
     const I = window.__waterRefractInfo || (window.__waterRefractInfo = { frames: 0 });
     I.frames++; I.res = [bw, bh]; I.target = [rt.width, rt.height]; I.live = [A.w, A.h]; I.k = u.uRefractK.value; I.inline = true;
   } catch (_) { u.uRefract.value = 0.0; }
@@ -23501,7 +23542,7 @@ function renderFrame() {
         // session instead of needing a re-enter. Compare-before-write keeps it
         // to one float compare per frame.
         const _hs = (typeof input !== 'undefined' && input && typeof input.vrHudScale === 'number')
-          ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 1.5;
+          ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 3;
         if (_hudMesh.scale.x !== _hs) _hudMesh.scale.setScalar(_hs);
         // (v37.71) BANK WITH THE SHIP (owner: "make the HUD rotate/follow the ship in VR as well").
         // The dolly hands the plane the ship's heading and pitch already - camera.quaternion comes
@@ -26525,7 +26566,13 @@ function _swWaterReflectShader() {
       THREE.UniformsLib.fog,
       { color: { value: null }, tDiffuse: { value: null }, textureMatrix: { value: null },
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() }, uFade: { value: 1 },   
-        uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 }, uRippleScale: { value: 0 },   
+        // ⚠⚠ (v41.45) THIS WAS A LITERAL 4000 AND NOTHING EVER UPDATED IT. The tick writes uRippleTex,
+        // uRippleCenter and uRippleScale onto this material every frame but NOT uRippleBounds, so it
+        // only agreed with the sim because both happened to say 4000. Widening the window in v41.44
+        // broke that coincidence: the mirror would have mapped world->UV at 4000 against a 6000-unit
+        // sim and sampled the heightfield at 1.5x the correct rate. Bound to the constant, and the
+        // tick now writes it alongside the others so the pair cannot drift apart again.
+        uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: _SW_RIPPLE_BOUNDS }, uRippleScale: { value: 0 },   
         uMaskTex: { value: null }, uFoamGain: { value: 1 }, uFoamLit: { value: 1 }, uReliefScale: { value: 28.0 }, uReliefShade: { value: 0.7 },   
         uSnellTint: { value: new THREE.Color(0x9fd0e6) }, uDeepTint: { value: new THREE.Color(0x0a3a44) }, uSubmerge: { value: 0 }, uEye: { value: new THREE.Vector3() }, uReflLive: { value: 1 }, uFlipFace: { value: 0 },   
         uShallowTint: { value: new THREE.Color(0x2e7a6a) }, uShoreSoft: { value: 0.05 }, uFoamThresh: { value: 0.18 },
@@ -26761,9 +26808,25 @@ function _swWaterReflectShader() {
 
 
 
-const _SW_RIPPLE_RES = 128;          
-const _SW_RIPPLE_BOUNDS = 4000;      
-const _SW_MASK_RES = 96;             
+// ⚠⚠ (v41.44) THE RIPPLE WINDOW IS THE DRAW DISTANCE. Owner: "the draw distance on the water
+// ripples isn't far enough". There is no distance fade doing this - the sim simply does not exist
+// outside a box centred on the ship, and the vertex shader's winFade takes the surface flat over the
+// outer 12% of it. At 4000 that was a 2000-unit radius with a clean 1520, i.e. about 4.6 seconds of
+// wake behind a hull at cruise before it stopped existing.
+// ⚠ RES AND BOUNDS MOVE TOGETHER OR THE CRESTS GO SOFT. The texel size is BOUNDS/RES and every
+// crest shape in v41 was tuned against 31.25 units per texel - a bare bounds increase would have
+// blurred the wake to buy the distance. 192/6000 is the same 31.25, with the radius up 50%.
+// Cost: the GPGPU pass goes 128^2 -> 192^2 = 2.25x of 16k pixels, which is nothing beside the
+// 768x768 water mesh it feeds. The crest-break READBACK also scales 2.25x (262KB -> 590KB) and that
+// one has a history - see the v40.19 note - but it is async, rate-limited, altitude-gated, held off
+// for the first 15 s of a round and backs itself off if a call costs over 4 ms. Watch __water.crCost.
+// The land/water MASK is a CPU bake of MASK_RES^2 terrain samples over the same window, so it is
+// raised too - 96 over 4000 was 41.7 units per texel; 128 over 6000 is 46.9, near enough that
+// shorelines do not get blockier, at 1.8x the samples spread over the same budgeted row job.
+// (v41.47) 192/6000 -> 256/8000, still 31.25 units per texel. Radius 3000 -> 4000.
+const _SW_RIPPLE_RES = 256;          
+const _SW_RIPPLE_BOUNDS = 8000;      
+const _SW_MASK_RES = 160;            
 const _SW_FARMASK_RES = 96;          
 const _SW_FARMASK_BOUNDS = 24000;    
 const _swRipple = {
@@ -26785,6 +26848,7 @@ const _SW_RIPPLE_FRAG = [
   'uniform sampler2D uMaskTex;',     
   'uniform vec2 uScroll;',           
   'uniform float uSeedImpulse;',   // (v41.02) 0 = the v41.01 displacement pluck, 1 = a pure velocity impulse
+  'uniform float uFoamDecay; uniform float uSeedFoamK;',   // (v41.53) the foam field - see the note below
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -26824,12 +26888,32 @@ const _SW_RIPPLE_FRAG = [
   // (today); SUBTRACTING S from what becomes `h.y` gives velocity with no instantaneous step. So the
   // seed is split between the two and `uSeedImpulse` blends them - 0 is v41.01 byte-for-byte, 1 is a
   // pure impulse. Live: window.__water.seedImpulse.
+  // ⚠⚠ (v41.53) THE FOAM FIELD. Owner: "the white peaks should only be on the wake behind the
+  // ship and weapons, not on all the waves/ripples".
+  // Every white pixel up to v41.52 was decided by the HEIGHT of the water under it, and height is the
+  // wrong quantity: a wave carries its height away with it. The wake seeds an impulse, the impulse
+  // radiates out at 956 u/s, bounces off the shoreline (which this sim deliberately does - see the
+  // v33.20 mask note) and comes back through itself, so within a few seconds the whole lake is full of
+  // tall interfering ripples that are, by every measure the shader had, indistinguishable from the
+  // crest behind the ship. Raising the threshold cannot separate them; they are the SAME AMPLITUDE.
+  // What separates them is that whitewater is a SUBSTANCE. Air entrained at an impact stays roughly
+  // where it was made and dissolves over a few seconds; it does not travel with the wave. So foam gets
+  // its own field: deposited where energy is INJECTED, decaying in place, never propagating. Because
+  // every seed in this sim comes from a hull or a weapon, that field IS "the wake behind the ship and
+  // the weapons" and nothing else, for free - no provenance tag, no ship position uniform.
+  // ⚠ It costs nothing to store. The sim reads the heightmap as a vec4 and writes it back whole;
+  // .x is the height and .y the previous height, and .z/.w have been passing through untouched since
+  // v33.20. .z is the foam. Nothing else in the file reads it (the probe, the crest scan and the
+  // display all take .x), so this is a free channel, not a repurposed one.
   '  float sAcc = 0.0;',
+  '  float fAcc = 0.0;',
   '  for (int i = 0; i < 8; i++){',
   '    if (i >= uSeedCount) break;',
   '    vec4 sd = uSeeds[i];',
   '    float ph = clamp(length(wpos - sd.xy) * PI / sd.z, 0.0, PI);',
-  '    sAcc += (cos(ph) + 1.0) * sd.w;',   
+  '    sAcc += (cos(ph) + 1.0) * sd.w;',
+  // abs(): a crater and its rim are one event and both aerate. Signed would cancel them out.
+  '    fAcc += (cos(ph) + 1.0) * abs(sd.w);',   
   '  }',
   // (v33.20) ABSORB at the window edge : the heightmap is a finite texture, so waves were REFLECTING
   // off its square border and bouncing back as "square patches". Damp the height toward 0 across the
@@ -26845,6 +26929,10 @@ const _SW_RIPPLE_FRAG = [
   '  nh += (1.0 - uSeedImpulse) * sA;',
   '  h.y = h.x - uSeedImpulse * sA;',  
   '  h.x = nh;',                      
+  // (v41.53) the foam field: no Laplacian, no neighbours, no propagation - it only decays and
+  // accumulates. uFoamDecay is per 60 Hz step, so 0.9962 is a ~3 second half-life. Clamped so a hull
+  // parked in one spot cannot bank up an unbounded white patch.
+  '  h.z = min(1.6, (h.z * uFoamDecay + fAcc * uSeedFoamK) * edg);',
   '  gl_FragColor = h;',
   '}'
 ].join('\n');
@@ -26866,7 +26954,18 @@ function _swRippleInit() {
     v.material.defines = v.material.defines || {};
     v.material.defines.BOUNDS = _SW_RIPPLE_BOUNDS.toFixed(1);
     const seeds = []; for (let i = 0; i < 8; i++) seeds.push(new THREE.Vector4(0, 0, 1, 0));
-    v.material.uniforms.viscosity = { value: 0.9885 };   // (v38.15) 0.972 -> longer-lived energy
+    // ⚠⚠ (v41.47) 0.9885 -> 0.9945, AND THIS IS THE ONE THAT ACTUALLY EXTENDS THE RIPPLES.
+    // Widening the window again would have bought almost nothing on its own, because past ~3000
+    // units there is nothing left to draw. The sim's wave speed is sqrt(uWaveC2)*dx/dt = 956 world
+    // units a second, and viscosity is applied per 60 Hz step, so amplitude decays as visc^(60t):
+    //   visc 0.9885 -> x0.500 a second, half-life 1.0 s -> 11% left at 3000 units, 5% at 4000
+    //   visc 0.9945 -> x0.718 a second, half-life 2.1 s -> 35% left at 3000 units, 25% at 4000
+    // So the DRAW DISTANCE was never really the window - it was how long a ripple survives the trip.
+    // That is 3x the amplitude at 3000 units and 4.5x at 4000, which is what makes the wider box
+    // worth having. It also continues the direction v38.15 set (0.972 -> 0.9885 'so the energy
+    // survives long enough to come back off a shore and meet itself') - the shoreline interference
+    // it wanted gets stronger with it. Live: window.__water.visc, 0.9885 restores v41.46 exactly.
+    v.material.uniforms.viscosity = { value: 0.9945 };
     // (v41.02) 0.16 -> 0.26. Energy that cannot LEAVE the impact site has nowhere to go but up and
     // down, which is half of what reads as jello. The 5-point stencil is stable to 0.5; this is a
     // ~27% faster wave (c scales as sqrt(C2)) and still comfortably inside it.
@@ -26881,6 +26980,17 @@ function _swRippleInit() {
     // The physics was right and the dose was wrong. A quarter of the seed as momentum still turns a
     // pluck into a crater that opens and radiates; three quarters of it made the whole surface lag.
     v.material.uniforms.uSeedImpulse = { value: 0.25 };
+    // (v41.53) 0.9962 per 60 Hz step = a ~3 second half-life, which is roughly how long real
+    // whitewater behind a hull stays white. uSeedFoamK is how much a unit of seed amplitude aerates;
+    // the raised cosine peaks at 2, seeds clamp at |0.55|, so a hard impact deposits ~0.4 in a step.
+    // Live: window.__water.foamDecay / .seedFoam. seedFoam 0 turns the whole crest cap off at source.
+    v.material.uniforms.uFoamDecay = { value: 0.9930 };   // (v41.56) ~1.6 s half-life, was ~3 s
+    // ⚠ (v41.56) 0.36 -> 0.10. Measured on a Dreadnought at 340 u/s, 0.36 drove the field into its
+    // own 1.6 clamp (foam p99 = 1.54 near the hull, saturated over a wide band) and the v41.55 albedo
+    // then painted most of the visible lake white. The deposit has to sit BELOW the clamp for the
+    // thresholds above it to mean anything - and the biggest hull is the one that sets that ceiling,
+    // not the smallest. At 0.10 the same run reads p90 = 0.17, p99 = 0.82.
+    v.material.uniforms.uSeedFoamK = { value: 0.10 };
     v.material.uniforms.uSeeds = { value: seeds };
     v.material.uniforms.uSeedCount = { value: 0 };
     v.material.uniforms.uScroll = { value: new THREE.Vector2(0, 0) };   
@@ -26991,7 +27101,32 @@ function _swRippleSeed(wx, wz, radius, amp) {
   // is a no-op and the wake is bit-for-bit what it was in v41.01 and every build before it.
   const _W3s = window.__water;
   const _k = (_W3s && _W3s.seedScale != null) ? +_W3s.seedScale : 1.0;
-  R.pending.push({ wx: wx, wz: wz, r: Math.max(20, radius), a: Math.max(-0.55, Math.min(0.55, amp * _k)) });   
+  // ⚠⚠ (v41.49) A SEED NARROWER THAN A TEXEL IS NOT A SMALL RIPPLE, IT IS A SPIKE. Owner: "from
+  // some angles i see a few (like 4 or 5) spikey triangles inside the wake peak".
+  // The sim shader lays each seed down as a raised cosine of radius sd.z, evaluated at TEXEL
+  // CENTRES. A texel is uRippleBounds/RES across - 31.3 world units at 8000/256 - and the wake
+  // family arrives here at Math.max(20, fp.BEAM * 0.7..1.25), i.e. 21-42 units. A 20-unit radius
+  // covers less than one texel: it lands on exactly one sample (sometimes, depending on where the
+  // grid happens to fall - which is why they flicker), at full amplitude, with its neighbours
+  // untouched. That is the wave equation's 2-texel Nyquist mode, which barely propagates and just
+  // sits there decaying, and the display then runs it through the v41.15 crest expander:
+  // h = 0.55 on one texel -> 130 world units, its neighbour at 0.05 -> 5, so a 130-unit needle
+  // across 31 units of ground. FOUR OR FIVE of them, because R.pending is capped at 8.
+  // "not new, started with this water" fits exactly: the sub-texel seeds are old, but before the
+  // expander the same outlier drew at 87 units against a neighbour's 18 - a bump, not a needle -
+  // and v41.44/41.47 then made every texel 50% wider, pushing more of the family under the limit.
+  // So the floor tracks the LIVE grid rather than being another literal, and the amplitude is
+  // corrected as an AREA (the cosine's volume goes as r^2) so widening the footprint does not
+  // quietly inject energy the caller never asked for. A seed that was already resolvable is
+  // untouched, bit for bit.
+  // ⚠ 1.5 texels = 3 texels across the full cosine, the least this grid can carry as a shape.
+  // window.__water.seedTexels raises or lowers it; 0 restores the pre-41.49 behaviour exactly.
+  const _texW = (R.bounds || _SW_RIPPLE_BOUNDS) / _SW_RIPPLE_RES;
+  const _minT = (_W3s && _W3s.seedTexels != null) ? +_W3s.seedTexels : 1.5;
+  const _rMin = _texW * _minT;
+  let _sr = Math.max(20, radius), _sa = amp * _k;
+  if (_minT > 0 && _sr < _rMin) { const _q = _sr / _rMin; _sa *= _q * _q; _sr = _rMin; }
+  R.pending.push({ wx: wx, wz: wz, r: _sr, a: Math.max(-0.55, Math.min(0.55, _sa)) });   
   if (R.pending.length > 8) R.pending.shift();   
 }
 // (v33.32) Visible water SPLASH spray : a burst of white/cyan droplets that arc UP and fall back (the
@@ -28180,6 +28315,84 @@ window.__waterProbe = function () {
   try { console.log('[waterProbe]', JSON.stringify(out)); } catch (_) {}
   return out;
 };
+// ⚠⚠ (v41.48) DEV PROBE - THE TWO NUMBERS THE FOAM THRESHOLDS ARE SET AGAINST, MEASURED.
+// Twice now a foam threshold has been set outside the range of the quantity it tests (uFoamSlope
+// 0.085 whitened the whole lake in v41.17, uPeakHi's implicit 1.0 whitened nothing at all until
+// v41.48) because both were guessed from geometry rather than read off the surface. This replicates
+// the vertex shader EXACTLY - the same _swShape, the same +/-2 world-unit taps, the same normalize -
+// over a box around the ship, and reports the percentiles of vDisp and of 1-N.y.
+//   window.__crestStat()      -> the 600-unit box around the hull
+//   window.__crestStat(2500)  -> out into the wake
+// Read it WHILE MOVING; a parked ship has no crest and every percentile collapses to ambient.
+// Synchronous readback - a dev tool, never on a frame path.
+window.__crestStat = function (radius) {
+  radius = (radius != null) ? +radius : 600;
+  const R = _swRipple;
+  if (!R.gpu || !R.heightVar) return { err: 'no gpgpu water' };
+  const m = game && game._hubWaterDispMat;
+  if (!m || !m.uniforms) return { err: 'no disp material' };
+  const RES = _SW_RIPPLE_RES, buf = new Float32Array(RES * RES * 4);
+  const prev = renderer.getRenderTarget();
+  try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); }
+  catch (e) { return { err: String(e && e.message || e) }; }
+  if (renderer.setRenderTarget) renderer.setRenderTarget(prev);
+  const U = m.uniforms;
+  const DS = U.uDispScale.value, G = U.uGain.value, Q = U.uCrestQ.value, NK = U.uNormK.value, B = U.uRippleBounds.value;
+  const shape = function (h) { const sq = h * (1.0 + Q * Math.abs(h)); const x = sq * G / Math.max(DS, 0.01); return DS * (x / (1.0 + Math.abs(x))); };
+  // LinearFilter on the heightmap (see the v33.20 note), so the taps have to be bilinear too or
+  // the gradient reads as zero everywhere inside a 31-unit texel.
+  const g1 = function (i, j) { i = Math.min(RES - 1, Math.max(0, i)); j = Math.min(RES - 1, Math.max(0, j)); return buf[(j * RES + i) * 4]; };
+  // (v41.53) the foam field lives in .z of the same texel - see _SW_RIPPLE_FRAG.
+  const g3 = function (i, j) { i = Math.min(RES - 1, Math.max(0, i)); j = Math.min(RES - 1, Math.max(0, j)); return buf[(j * RES + i) * 4 + 2]; };
+  const sampZ = function (u, v) {
+    u = Math.min(0.999, Math.max(0.001, u)); v = Math.min(0.999, Math.max(0.001, v));
+    const fx = u * RES - 0.5, fy = v * RES - 0.5;
+    const i0 = Math.floor(fx), j0 = Math.floor(fy), tx = fx - i0, ty = fy - j0;
+    return (g3(i0, j0) * (1 - tx) + g3(i0 + 1, j0) * tx) * (1 - ty) + (g3(i0, j0 + 1) * (1 - tx) + g3(i0 + 1, j0 + 1) * tx) * ty;
+  };
+  const samp = function (u, v) {
+    u = Math.min(0.999, Math.max(0.001, u)); v = Math.min(0.999, Math.max(0.001, v));
+    const fx = u * RES - 0.5, fy = v * RES - 0.5;
+    const i0 = Math.floor(fx), j0 = Math.floor(fy), tx = fx - i0, ty = fy - j0;
+    return (g1(i0, j0) * (1 - tx) + g1(i0 + 1, j0) * tx) * (1 - ty) + (g1(i0, j0 + 1) * (1 - tx) + g1(i0 + 1, j0 + 1) * tx) * ty;
+  };
+  const dU = 2.0 / B, cx = R.center.x, cz = R.center.y;
+  const px = player.position.x, pz = player.position.z;
+  const rows = [];
+  for (let wx = px - radius; wx <= px + radius; wx += 8) {
+    for (let wz = pz - radius; wz <= pz + radius; wz += 8) {
+      const u = (wx - cx) / B + 0.5, v = (wz - cz) / B + 0.5;
+      if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+      const h = samp(u, v);
+      if (Math.abs(h) < 0.02) continue;                 // untouched water tells you nothing
+      const dL = shape(samp(u - dU, v)), dR = shape(samp(u + dU, v));
+      const dD = shape(samp(u, v - dU)), dUp = shape(samp(u, v + dU));
+      const nx = (dL - dR) * NK, ny = 2.0 * B * dU, nz = (dD - dUp) * NK;
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+      rows.push({ vd: h / (1 + Math.abs(h)), sl: 1 - ny / len, wu: shape(h), fm: sampZ(u, v) });
+    }
+  }
+  const pc = function (key, q) {
+    if (!rows.length) return null;
+    const a = rows.map(function (o) { return o[key]; }).sort(function (x, y) { return x - y; });
+    return +a[Math.min(a.length - 1, Math.floor(q * a.length))].toFixed(4);
+  };
+  const top = rows.slice().sort(function (x, y) { return y.vd - x.vd; }).slice(0, 5)
+    .map(function (o) { return { vDisp: +o.vd.toFixed(3), slope: +o.sl.toFixed(3), units: Math.round(o.wu) }; });
+  const out2 = {
+    samples: rows.length, radius: radius, bounds: B, uPerTexel: +(B / RES).toFixed(1),
+    vDisp: { p50: pc('vd', 0.5), p90: pc('vd', 0.9), p99: pc('vd', 0.99), max: pc('vd', 0.9999) },
+    slope: { p50: pc('sl', 0.5), p90: pc('sl', 0.9), p99: pc('sl', 0.99), max: pc('sl', 0.9999) },
+    foam: { p50: pc('fm', 0.5), p90: pc('fm', 0.9), p99: pc('fm', 0.99), max: pc('fm', 0.9999) },
+    gates: { peakLo: U.uPeakLo.value, peakHi: U.uPeakHi ? U.uPeakHi.value : null,
+             capLo: U.uCapLo ? U.uCapLo.value : null, capHi: U.uCapHi ? U.uCapHi.value : null,
+             capFoamLo: U.uCapFoamLo ? U.uCapFoamLo.value : null, capFoamHi: U.uCapFoamHi ? U.uCapFoamHi.value : null,
+             foamSlope: U.uFoamSlope.value, steepFoam: U.uSteepFoam.value },
+    tallest: top,
+  };
+  try { console.log('[crestStat]', JSON.stringify(out2)); } catch (_) {}
+  return out2;
+};
 // (v41.00) DEV PROBE - what the oblique model does to a given approach, with no flying required.
 // window.__obliqueTest(400, 5) -> the 400 u/s 5° skim from the header note.
 window.__obliqueTest = function (V, deg) {
@@ -28546,6 +28759,29 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
                                 Math.min(26, Math.round((8 + 16 * fp.heft) * _shed)), 0.92, 1.0, 1.15, 1.15);
   }
 }
+// ⚠⚠ (v41.57) THE HULL'S REAL SIZE, because _swShipFootprint's is not it.
+// v41.54 sized the water exclusion off _swShipFootprint().half and measured the result on the live
+// hull: half gives 45 world units while the ship's own bounding box is 317 ACROSS. The footprint is a
+// hydrodynamic abstraction tuned for seeding wake amplitude - it is not the object's extent, and using
+// it meant the exclusion covered a 36-unit disc under the middle of a 317-unit ship, i.e. it protected
+// almost none of the hull the owner was watching get painted over.
+// Cached per mesh: Box3.setFromObject walks the whole hull (14 draw calls' worth of geometry) and this
+// is a per-frame path. ⚠ The box is in WORLD space so it grows slightly when the ship banks; the
+// first value for a given mesh is kept, which is the hull's size to within a few percent and is all
+// this needs.
+const _swWingR = new THREE.Vector3();   // (v41.58) scratch for the wing-contact test
+function _swHullSpan() {
+  try {
+    const m = (typeof player !== 'undefined' && player) ? player.mesh : null;
+    if (!m) return 0;
+    if (_swHullSpan._m === m && _swHullSpan._v > 0) return _swHullSpan._v;
+    const b = new THREE.Box3().setFromObject(m);
+    const v = Math.max(b.max.x - b.min.x, b.max.z - b.min.z) * 0.5;
+    if (!isFinite(v) || v <= 0) return 0;
+    _swHullSpan._m = m; _swHullSpan._v = v;
+    return v;
+  } catch (_) { return 0; }
+}
 // Per-frame driver — runs in the master tick BEFORE renderer.render.
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
@@ -28565,6 +28801,8 @@ function _swRippleTick(dt) {
       if (_W3.waveC2 != null && _u.uWaveC2) _u.uWaveC2.value = _W3.waveC2;
       if (_W3.visc != null && _u.viscosity) _u.viscosity.value = _W3.visc;
       if (_W3.seedImpulse != null && _u.uSeedImpulse) _u.uSeedImpulse.value = _W3.seedImpulse;   // (v41.02)
+      if (_W3.foamDecay != null && _u.uFoamDecay) _u.uFoamDecay.value = _W3.foamDecay;           // (v41.53)
+      if (_W3.seedFoam != null && _u.uSeedFoamK) _u.uSeedFoamK.value = _W3.seedFoam;             // (v41.53)
     }
   } catch (_) {}   
   
@@ -28797,6 +29035,44 @@ function _swRippleTick(dt) {
         const sx = px - hx * shoulder, sz = pz - hz * shoulder;
         _swRippleSeed(sx + lpx * off, sz + lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
         _swRippleSeed(sx - lpx * off, sz - lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
+        // ⚠⚠ (v41.58) THE WINGS ARE PART OF THE SHIP. Owner: "i noticed the spray/wake only happens
+        // off the middle of the ship, but if a wing hits the water, it doesn't affect the water".
+        // Every seed above is placed off fp.BEAM and fp.half, and _swShipFootprint builds those from
+        // chassis.hullLength/Width/Height - a hydrodynamic abstraction for the BODY. Measured on the
+        // live hull: fp.half is 45 world units while the ship's bounding box is 317 ACROSS. So the
+        // entire wake was being laid down by a 45-unit stub at the centre of a 317-unit aircraft, and a
+        // wing tip 159 units out could be under water and touch nothing. (The same mismatch is why the
+        // v41.54 hull exclusion above protected almost none of the hull.)
+        // A wing tip that is below the surface displaces water exactly like the hull does, and when the
+        // ship banks it is the ONLY part that is - which is the case the owner is describing. So the
+        // tips get their own contact test, at the real half-span, with their real height: the right
+        // vector comes off the ship's own quaternion, so roll carries into it for free.
+        // ⚠ Two more seeds a step, and R.pending only carries 8. They are gated on a tip actually
+        // being wet, so on level flight above the water this costs nothing and displaces nothing.
+        try {
+          const _wSpan = _swHullSpan();
+          if (_wSpan > fp.BEAM * 0.6) {
+            const _wm = player.mesh;
+            let _rx = lpx, _ry = 0, _rz = lpz;
+            if (_wm) { _swWingR.set(1, 0, 0).applyQuaternion(_wm.quaternion); _rx = _swWingR.x; _ry = _swWingR.y; _rz = _swWingR.z; }
+            const _wr = _wSpan * 0.88;                       // just inboard of the tip
+            const _wy = (player.mesh ? player.mesh.position.y : player.position.y);
+            for (let _sgn = -1; _sgn <= 1; _sgn += 2) {
+              const _tipY = _wy + _ry * _wr * _sgn;
+              const _dep = WL - _tipY;                        // >0 means this tip is under the surface
+              if (_dep <= 0) continue;
+              const _tx = px + _rx * _wr * _sgn, _tz = pz + _rz * _wr * _sgn;
+              // a wing is thin: a narrow seed, and its amplitude is how deep it is cutting, not how
+              // heavy the ship is. Saturates at one draft so a fully submerged wing does not run away.
+              const _wk = Math.min(1, _dep / Math.max(6, fp.DRAFT * 2));
+              _swRippleSeed(_tx, _tz, Math.max(22, fp.BEAM * 0.40), amp * _wk * (0.45 + 0.85 * spd) * 0.9);
+              _swFxN('wingCut');
+              if (window.__waterDisp && spd > 0.12 && ((R.dotStep | 0) & 1) === 0) {
+                _swCrestSpray(_tx, WL, _tz, amp * _wk * (0.4 + 0.9 * spd) * 0.8, player.velocity.x, player.velocity.z);
+              }
+            }
+          }
+        } catch (_) {}
         _swFxN('wake');
         // (v41.11) specks off the peaks we just made: the stern crest and both Kelvin shoulders. No
         // readback needed - these are the crests, we placed them. Every other wake step so the
@@ -28904,7 +29180,7 @@ function _swRippleTick(dt) {
     try { _swBlastTick(dt, WL); } catch (_) {}   // (v41.19) deferred blast columns
   }
   R.acc += dt;
-  if (R.acc >= (((typeof isXRPresenting === 'function') && isXRPresenting()) ? R.step * 2.0 : R.step)) {   
+  if (R.acc >= (_swVrLite() ? R.step * 2.0 : R.step)) {   // (v41.42) full-rate sim when VR water is on
     R.acc = 0;
     const u = R.heightVar.material.uniforms;
     if (u.uScroll) { u.uScroll.value.set(R.scrollX, R.scrollZ); R.scrollX = 0; R.scrollZ = 0; }   
@@ -28959,7 +29235,7 @@ function _swRippleTick(dt) {
       } catch (_) { return true; }
     })();
     if (w && window.__waterDisp && _Wc.crestBreak !== 0 && !game._swSubmerged && !R._crErr && _crAlt &&
-        !((typeof isXRPresenting === 'function') && isXRPresenting()) &&
+        !_swVrLite() &&   // (v41.42)
         renderer && renderer.readRenderTargetPixels && R.gpu.getAlternateRenderTarget) {
       R._crStep = (R._crStep || 0) + 1;
       // 2 -> 4: halves the stall frequency even when the gate is open.
@@ -29000,8 +29276,23 @@ function _swRippleTick(dt) {
       const _crHold = (game.state !== 'playing') || !!(game._fightAt && (performance.now() - game._fightAt) < _crHoldMs);
       const _crOff = _crHold || !!(R._crOffUntil && performance.now() < R._crOffUntil);
       if (!_crOff && R._crStep % (R._crSkip || _every) === 0) {
+        // ⚠⚠ (v41.46) THE READBACK IS PINNED TO A FIXED WINDOW, NOT THE WHOLE TARGET.
+        // Widening the sim to 192^2 in v41.44 dragged this with it: 262KB -> 590KB a call, and
+        // measured on the very next run crCost went 0.8 -> 4.7 ms, which tripped the v39.49b adaptive
+        // cadence into its maximum 32-step backoff. Frame rate was fine - that backoff is exactly
+        // what protects it - but the crest spray then fires eight times less often, so the wider
+        // water would have quietly cost the breaking crests.
+        // It does not need the whole window. Crest spray is a metres-from-the-surface detail with an
+        // altitude gate already on it; what happens 3000 units away is not going to be seen. So the
+        // scan reads a CENTRED 128x128 sub-rect - byte-for-byte the old cost - while the simulation
+        // and everything you can actually see stay at the full 192.
+        // The texel->world mapping is unchanged because the offset is folded into rvX/rvY: a texel at
+        // sub-rect (i,j) is global (CO+i, CO+j), so it maps through the same (rv - 0.5) * B it always
+        // did and the shoreline fade still measures distance to the real window edge.
         const RES = _SW_RIPPLE_RES, B = R.bounds, WLc = w.userData.WL;
-        if (!R._crBuf) R._crBuf = new Float32Array(RES * RES * 4);
+        const CRS = Math.min(128, RES);                 // sub-rect size
+        const CO = ((RES - CRS) >> 1);                  // its offset into the target
+        if (!R._crBuf || R._crBuf.length < CRS * CRS * 4) R._crBuf = new Float32Array(CRS * CRS * 4);
         const buf = R._crBuf;
         // (v38.61) ASYNC READBACK — the stall itself is gone, not just gated.
         // readRenderTargetPixels is a synchronous readPixels: the CPU waits
@@ -29024,7 +29315,7 @@ function _swRippleTick(dt) {
             const _prevRT = renderer.getRenderTarget();
             let _pr = null;
             const _rt0 = performance.now();
-            try { _pr = renderer.readRenderTargetPixelsAsync(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); }
+            try { _pr = renderer.readRenderTargetPixelsAsync(R.gpu.getAlternateRenderTarget(R.heightVar), CO, CO, CRS, CRS, buf); }
             catch (e) { R._crPending = false; R._crAsyncErr = 1; try { console.warn('[crestBreak] async readback unavailable, using the synchronous path:', e && e.message); } catch (_) {} }
             // The async call leaves the ripple framebuffer + a pixel-pack buffer
             // bound until its promise settles; restore both so nothing in between
@@ -29049,7 +29340,7 @@ function _swRippleTick(dt) {
         } else {
           const _prevRT = renderer.getRenderTarget();
           const _rt0s = performance.now();
-          try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); _scanNow = true; }
+          try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), CO, CO, CRS, CRS, buf); _scanNow = true; }
           catch (e) { R._crErr = 1; try { console.warn('[crestBreak] readback failed — disabling rule, set window.__water.crestBreak=0 to clear:', e && e.message); } catch (_) {} }
           if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
           // (v40.19) the synchronous path is a readPixels - it ALWAYS waits for the queue - so it
@@ -29090,22 +29381,23 @@ function _swRippleTick(dt) {
           const svx = player.velocity ? player.velocity.x : 0, svz = player.velocity ? player.velocity.z : 0;
           const sc = function (hh, wf) { const x = hh * g2d; return (x / (1 + Math.abs(x))) * wf; };  
           let emitted = 0, nBreak = 0, maxV = 0;
-          R._crScan = (((R._crScan || 0) + 7) % (RES - 2));                    
+          R._crScan = (((R._crScan || 0) + 7) % (CRS - 2));                    
           const _scanT0 = performance.now();
-          for (let jj = 0; jj < RES - 2 && emitted < budget && game.particles.length < _crPool; jj++) {
+          for (let jj = 0; jj < CRS - 2 && emitted < budget && game.particles.length < _crPool; jj++) {
             if ((jj & 7) === 7 && performance.now() - _scanT0 > 1.5) break;   // (v39.49) the scan + sprays stay under ~1.5 ms a frame
-            const j = 1 + ((jj + R._crScan) % (RES - 2));
-            const rvY = (j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
-            const rowB = j * RES;
-            for (let i = 1; i < RES - 1; i++) {
+            const j = 1 + ((jj + R._crScan) % (CRS - 2));
+            // (v41.46) sub-rect row j is global row CO+j, so the world mapping is untouched
+            const rvY = (CO + j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
+            const rowB = j * CRS;
+            for (let i = 1; i < CRS - 1; i++) {
               const h = buf[(rowB + i) * 4];
               if (h < 0.12) continue;                                          
-              const rvX = (i + 0.5) * invR, ed = Math.min(Math.min(rvX, 1 - rvX), edY);
+              const rvX = (CO + i + 0.5) * invR, ed = Math.min(Math.min(rvX, 1 - rvX), edY);
               const t = ed <= 0 ? 0 : (ed >= 0.12 ? 1 : ed / 0.12), wf = t * t * (3 - 2 * t);   
               const vD = sc(h, wf);
               if (vD < bPeak) continue;
               const gx = sc(buf[(rowB + i + 1) * 4], wf) - sc(buf[(rowB + i - 1) * 4], wf);
-              const gz = sc(buf[((j + 1) * RES + i) * 4], wf) - sc(buf[((j - 1) * RES + i) * 4], wf);
+              const gz = sc(buf[((j + 1) * CRS + i) * 4], wf) - sc(buf[((j - 1) * CRS + i) * 4], wf);
               const slope = Math.sqrt(gx * gx + gz * gz);
               if (slope < bSlope) continue;
               nBreak++; if (vD > maxV) maxV = vD;
@@ -29136,6 +29428,7 @@ function _swRippleTick(dt) {
     wu.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
     wu.uRippleCenter.value.set(R.center.x, R.center.y);
     wu.uRippleScale.value = R.scale;
+    if (wu.uRippleBounds) wu.uRippleBounds.value = R.bounds;   // (v41.45) see the note at its declaration
     if (wu.uMaskTex) wu.uMaskTex.value = R.maskTex;   
   }
   // (v33.69) PHASE 1 displaced-water surface — feed it the SAME sim, follow the ship, A/B against the Reflector.
@@ -29148,7 +29441,8 @@ function _swRippleTick(dt) {
       // (v33.76) show the displaced surface only ABOVE water + flatscreen ; underwater/VR fall back to the flat
       // Reflector (its from-below Snell window / cheap VR water). The flat mirror's colorWrite mask + RT-keep-alive
       // is owned by _swUpdateHubWater (runs just before this) so the reflection RT the disp mesh samples stays fresh.
-      const _vrR = (typeof isXRPresenting === 'function') && isXRPresenting();
+      // (v41.42) THE BIG ONE - this is the mesh every crest, sheet and foam pass in v41 draws into.
+      const _vrR = _swVrLite();
       dm.visible = !game._swSubmerged && !_vrR;
       dm.position.set(px, WL2, pz);   
       const du = dm.material.uniforms;
@@ -29166,6 +29460,62 @@ function _swRippleTick(dt) {
       if (W2.sprayBreak !== undefined) du.uSprayBreak.value = W2.sprayBreak;   
       if (W2.mist !== undefined) du.uMist.value = W2.mist;                     
       if (W2.peakLo !== undefined) du.uPeakLo.value = W2.peakLo;               
+      if (W2.peakHi !== undefined && du.uPeakHi) du.uPeakHi.value = W2.peakHi;         // (v41.48)
+      if (W2.capLo !== undefined && du.uCapLo) du.uCapLo.value = W2.capLo;             // (v41.48)
+      if (W2.capHi !== undefined && du.uCapHi) du.uCapHi.value = W2.capHi;             // (v41.48)
+      if (W2.capStr !== undefined && du.uCapStr) du.uCapStr.value = W2.capStr;         // (v41.48)
+      if (W2.capSteep !== undefined && du.uCapSteep) du.uCapSteep.value = W2.capSteep; // (v41.49)
+      if (W2.capFoamLo !== undefined && du.uCapFoamLo) du.uCapFoamLo.value = W2.capFoamLo;   // (v41.53)
+      if (W2.capFoamHi !== undefined && du.uCapFoamHi) du.uCapFoamHi.value = W2.capFoamHi;   // (v41.53)
+      if (W2.foamMatte !== undefined && du.uFoamMatte) du.uFoamMatte.value = W2.foamMatte;   // (v41.54)
+      if (W2.foamAlb !== undefined && du.uFoamAlb) du.uFoamAlb.value = W2.foamAlb;           // (v41.55)
+      if (W2.matteLo !== undefined && du.uMatteLo) du.uMatteLo.value = W2.matteLo;           // (v41.55)
+      if (W2.matteHi !== undefined && du.uMatteHi) du.uMatteHi.value = W2.matteHi;           // (v41.55)
+      // (v41.54) where the hull is, and how high the water is allowed to stand there. The cap is the
+      // keel: the ship's own altitude above the waterline, less a quarter of its draft so the surface
+      // meets the hull rather than clipping through it. Off the water (or with the sheet hidden while
+      // submerged) uHullR goes to 0 and this costs one smoothstep that always returns 1.
+      try {
+        const _hAlt = (typeof player !== 'undefined' && player && player.position) ? (player.position.y - WL2) : 1e6;
+        const _hSpan = Math.max(_swHullSpan(), (_swShipFootprint().half || 0));   // (v41.57) the real hull
+        // ⚠⚠ (v41.58) OFF BY DEFAULT. Owner on v41.57: "it's like i can't see the wake very much
+        // anymore at all now, and the same glitch is there on the ship and reflection through the wake".
+        // Both halves of that sentence condemn it. Sizing it off the real hull in v41.57 gave a 119-unit
+        // capped disc released at 310 - and the bow crest, the shoulders and the entire near wake live
+        // INSIDE that, because a wake starts at the hull. With uHullTop clamped to the ship's own
+        // altitude (5-ish units while skimming) it was flattening the most visible part of the wake to
+        // nothing. Shrinking it does not rescue it either: small enough to spare the wake is small
+        // enough to spare nothing.
+        // And it was never earning that cost: the reflection glitch it was built to fix is still there
+        // with it on, was there before it existed (v41.52 and earlier), and is still there with the
+        // v41.50-52 sample perturbation reverted - so that fault is PRE-EXISTING in the mirror pass,
+        // not water standing over the hull. I built this on a hypothesis and it did not survive.
+        // The machinery stays, correct and measured, behind window.__water.hullR; nothing arms it.
+        const _hOn = (W2.hullR > 0) && !game._swSubmerged && _hSpan > 0;
+        du.uHullXZ.value.set(px, pz);
+        du.uHullR.value = _hOn ? W2.hullR : 0.0;
+        du.uHullFade.value = (W2.hullFade != null) ? W2.hullFade : Math.max(80, _hSpan * 1.2);
+        // ⚠⚠ (v41.57) max(_hAlt, 0) - THE CAP MAY NEVER DIG. min(disp, uHullTop) only ever LOWERS
+        // the surface, so a negative cap does not stop water covering the hull, it excavates a bowl
+        // around it. Measured on the live ship at v41.56: player.position.y sat 44 units BELOW the
+        // waterline while the hull floated above it (the mesh is offset up from the origin by the ship
+        // rig), so uHullTop went to -47 and the shader cut a 47-unit crater under the ship - whose
+        // steep walls then smeared the reflection into exactly the ring the owner circled.
+        // Clamped at 0 the exclusion does only what it is for: it stops water STANDING ABOVE the hull,
+        // and leaves flat water where the hull is low. The trough outside the footprint is untouched.
+        du.uHullTop.value = _hOn ? ((W2.hullTop != null) ? W2.hullTop : Math.max(_hAlt, 0)) : 1.0e6;
+      } catch (_) {}
+      // (v41.61) the normal's central difference tracks the texel size, so it stays a texel-wide
+      // gradient if the window or the resolution ever change again.
+      if (du.uTapW) du.uTapW.value = (W2.tapW != null) ? +W2.tapW : Math.max(2, (R.bounds / _SW_RIPPLE_RES) * 0.5);
+      if (W2.reflPar !== undefined && du.uReflPar) du.uReflPar.value = W2.reflPar;     // (v41.50)
+      if (W2.reflWave !== undefined && du.uReflWave) du.uReflWave.value = W2.reflWave; // (v41.50)
+      if (W2.reflChop !== undefined && du.uReflChop) du.uReflChop.value = W2.reflChop; // (v41.51)
+      if (W2.reflDevD !== undefined && du.uReflDevD) du.uReflDevD.value = W2.reflDevD; // (v41.56)
+      if (W2.reflDevN !== undefined && du.uReflDevN) du.uReflDevN.value = W2.reflDevN; // (v41.56)
+      if (du.uDebugTerm) du.uDebugTerm.value = (W2.debugTerm != null) ? +W2.debugTerm : 0.0;   // (v41.60)
+      if (W2.capFreq !== undefined && du.uCapFreq) du.uCapFreq.value = W2.capFreq;     // (v41.48)
+      if (W2.capBright !== undefined && du.uCapBright) du.uCapBright.value = W2.capBright;   // (v41.48)
       if (W2.sprayFreq !== undefined) du.uSprayFreq.value = W2.sprayFreq;      
       
       
@@ -29188,7 +29538,28 @@ function _swRippleTick(dt) {
         du.uReflLive.value = 0.0;
       }
       du.uReflMix.value = (W2.reflMix != null) ? W2.reflMix : 1.0;            
-      du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 0.6;   // (v39.66) steadier mirror image
+      // ⚠⚠ (v41.52) THIS LINE IS THE VALUE, NOT THE INITIALIZER. v41.51 changed uReflPerturb where
+      // the material is BUILT, measured no change on screen, and the reason is here: this runs every
+      // frame and rewrote it to the literal 0.6 before the surface was ever drawn. The same trap as
+      // v41.13's `__pw` - a constant that reads like the setting and is not the one in play. Anything
+      // in this block that is assigned unconditionally OWNS its uniform; the initializer is only a
+      // pre-first-frame placeholder.
+      // 0.6 -> 4.0 for the reason written at the initializer: at 0.6 a ripple could not disturb the
+      // mirror, so a reflected shoreline lay across the wake as a razor-sharp silhouette.
+      // ⚠⚠ (v41.57) 4.0 -> BACK TO 0.6. Owner: "the bottom of the ship in the reflection at this
+      // altitude makes the image texture distorted", with a circled screenshot of the reflected hull
+      // filled with smeared shoreline - then "probably the same bug as the one making the reflections
+      // cut through the wake", which is exactly right.
+      // Work out what 4.0 actually does: the shear is N.xz * ruv.w * 0.04 * uReflPerturb, and ruv.xy/w
+      // is a 0..1 screen coordinate, so at uReflPerturb 4 a facet with N.xz = 0.8 moves the sample by
+      // 0.13 - THIRTEEN PERCENT OF THE SCREEN. That is not a ripple distorting a reflection, it is
+      // fetching a completely different part of the image, which is why the reflected hull came back
+      // full of landscape. v39.66 picked 0.6 deliberately ("steadier mirror image") and it was right.
+      // I raised it in v41.51/52 to attack the hard shoreline edge lying across the wake. v41.56 now
+      // fixes that at its cause - the planar mirror is simply not valid on a displaced surface, so it
+      // is faded out there rather than resampled - which makes the escalation both unnecessary and
+      // actively harmful. Same reasoning retires uReflPar and uReflWave below.
+      du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 0.6;   // (v41.57) 4.0 reverted
       du.uReflFar.value = (W2.reflFar != null) ? W2.reflFar : 9000.0;      // (v38.56)
       // (v38.12) THE REFLECTION FOLLOWS THE SKY'S LIGHT. These two are the white the owner has
       // been circling, and they live on the DISPLACED sheet - the surface you actually see - not on
@@ -30101,7 +30472,8 @@ function _ecrKind(kind) {
   const mesh = new THREE.Mesh(geo, mat); mesh.frustumCulled = false; mesh.renderOrder = kind === 'fish' ? -2 : 0; mesh.visible = false;
   scene.add(mesh);
   try { if (typeof _lssRetainMat === 'function') _lssRetainMat(mat); } catch (_) {}
-  try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(mesh); } catch (_) {}
+  // (v41.65) postFX.rtScene, explicitly - this was a one-argument call and therefore a no-op.
+  try { if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX) _warmDrawRoot(mesh, postFX.rtScene); } catch (_) {}
   const K = { mesh, geo, mat, posTex, velTex, cap, pos: posTex.image.data, vel: velTex.image.data };
   if (kind === 'fish') _ecr.fish = K; else _ecr.bats = K;
   return K;
@@ -30395,7 +30767,7 @@ function _swBuildHubWaterDispGet(WL) {
     transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: true,
     uniforms: THREE.UniformsUtils.merge([
       THREE.UniformsLib.fog,
-      { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 },
+      { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: _SW_RIPPLE_BOUNDS },   // (v41.45) the constant, not a literal
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() },
         // ⚠⚠ (v41.14) uGain 180 -> 650. THE CEILING WAS NEVER THE CONSTRAINT; THE SLOPE WAS.
         // Owner: "the crest still looks tiny for how fast that's going". The vertex shader is
@@ -30441,12 +30813,113 @@ function _swBuildHubWaterDispGet(WL) {
         color: { value: new THREE.Color(0x16465c) },
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 },
         uSprayBreak: { value: 1.4 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.32 }, uSprayFreq: { value: 0.05 },
+        // ⚠⚠ (v41.48) uPeakHi - THE TOP OF THE HEIGHT RAMP, WHICH USED TO BE AN UNREACHABLE 1.0.
+        // vDisp is h/(1+|h|), a saturating map: it cannot exceed 1.0 even as h goes to infinity, and
+        // the water it is measuring lives at h = 0.4-0.6, i.e. vDisp = 0.29-0.38. So
+        // smoothstep(0.32, 1.0, 0.38) = 0.021. The height route to foam was mathematically incapable
+        // of whitening anything - every white pixel on this lake since v41.17 has come from the
+        // steepness route, capped at uSteepFoam 0.55, which is why a wake crest greys rather than
+        // breaks. Same family as the v41.18 mistake (a threshold set outside its own range), at the
+        // other end of the same smoothstep.
+        // 0.42 is just above the measured crest, so the tallest water reaches full white and the rest
+        // ramps into it. Raise it to soften, lower it to whiten more of the crest.
+        uPeakHi: { value: 0.42 },
+        // (v41.48) THE CREST CAP - the aerated white lid on the ridge itself. Owner: "could we whiten
+        // the peak of the wake?".
+        // The existing two routes both describe a REGION, not a ridge: height alone also picks the
+        // broad mound behind the crest, steepness alone also picks the whole flank (and the flanks are
+        // the steepest part of a wake, not the top). Their PRODUCT is the ridge - the only place that
+        // is simultaneously near the top of the local hump and pitched - so this is a `*` where the
+        // line above is a `max`. It rides on top of the ordinary foam rather than replacing it, and it
+        // is allowed a higher ceiling (0.97) than the 0.9 the general foam mixes to, because breaking
+        // water really is opaque.
+        // ⚠ uCapFreq is a WORLD-space noise frequency like uSprayFreq, ~3x finer, so the cap reads as
+        // aeration speckle instead of a painted stripe. Tune live via window.__water = { capStr: ... }.
+        // (v41.49) measured with window.__crestStat at 340 u/s: over the wake vDisp p50 = 0.021,
+        // p90 = 0.056, p99 = 0.174, max 0.405; near the hull p90 = 0.133, p99 = 0.305. 0.12 -> 0.26
+        // therefore lights the top ~2% of the wake and saturates on the hull crest, which is the
+        // shape of "whiten the peak". uCapSteep is the forward-face bonus that replaced the slope
+        // gate - see the fragment note.
+        uCapLo: { value: 0.12 }, uCapHi: { value: 0.26 }, uCapStr: { value: 1.0 },
+        uCapSteep: { value: 0.40 }, uCapFreq: { value: 0.14 }, uCapBright: { value: 1.15 },
+        // (v41.53) the foam-field window. Tune against window.__crestStat().foam, which reports the
+        // live percentiles of exactly this quantity - do not guess it, that mistake has been made
+        // twice in this shader already (v41.18 and v41.48).
+        uCapFoamLo: { value: 0.18 }, uCapFoamHi: { value: 0.60 },   // (v41.56) rebased with the deposit
+        // (v41.54) how much of the mirror foam takes away. 1.0 = churned water reflects nothing at all.
+        uFoamMatte: { value: 0.85 },
+        // (v41.55) the MATTE window - "has this water been churned at all". Deliberately much lower and
+        // narrower-based than the cap's window: measured foam p90 near the hull is 0.047, so anything
+        // starting at 0.10 misses most of the trail. See the fragment note.
+        uMatteLo: { value: 0.06 }, uMatteHi: { value: 0.35 },   // (v41.56) re-based on the measured field
+        // (v41.55) how far the churned band lifts toward a scattering colour, and what that colour is.
+        // A pale green-blue rather than white: white is the CAP (the ridge), this is the body of the
+        // wake, which reads as aerated water and not as spray.
+        uFoamAlb: { value: 0.45 }, uFoamAlbCol: { value: new THREE.Color(0.58, 0.74, 0.78) },   // (v41.56) 0.75 was a whitewash
         // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT (uReflLive init 0 = sky-tint fallback until a real RT is fed)
-        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 0.6 }, uReflBright: { value: 1.6 },
+        // ⚠⚠ (v41.51) uReflPerturb 0.6 -> 4.0, AND THIS IS THE ONE THAT ANSWERS THE COMPLAINT.
+        // Owner: "the reflection of the land is cutting through the wake visibly".
+        // v41.50 gave the mirror the crest's HEIGHT and the crest's TILT, and both are real, but both
+        // are keyed on vDisp - so by construction they do nothing except where the water is strongly
+        // displaced. Photographed side by side, the cliff's reflection did not move at all: the part
+        // of the lake it sits on is calm, and the WAKE RIPPLES crossing it carry vDisp = 0.02-0.08,
+        // which those terms round away to nothing.
+        // The quantity that is NOT small on a ripple is its SLOPE - measured p90 = 0.47 near the hull -
+        // and that is what this line has always been multiplied by (N.xz). It was simply sized far too
+        // small: 0.04 * 0.6 = 2.4% of a projective unit, i.e. a mirror that a passing wave could not
+        // disturb. So the reflected shoreline stayed a razor-sharp silhouette laid straight across the
+        // wake - the land appearing to cut through it - which is exactly what a mirror does and water
+        // does not.
+        // 4.0 keeps the same form (N.xz, so genuinely flat water is still untouched to the bit) and
+        // gives a ripple the authority to shred what it is reflecting. uReflFar/rfade still fade it
+        // out with distance, which is what the v38.56 shimmer warning was about.
+        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 4.0 }, uReflBright: { value: 1.6 },
         // (v38.56) how far the wave-normal shear on the reflection reaches - see rfade below.
         // ⚠ A uniform has to appear in BOTH this block and the fragment's declaration line, or the
         // shader silently fails to compile and the water disappears (the v38.47 mistake).
         uReflFar: { value: 9000.0 },
+        // (v41.50) uReflPar - how much of the crest's HEIGHT the mirror is projected from (parallax).
+        // uReflWave - how much of the crest's TILT bends the sample, on top of the ambient shear.
+        // Both 0 = the pre-41.50 flat decal, exactly. window.__water.reflPar / .reflWave.
+        // (v41.57) both 0. They were the v41.50 attempt at the same problem v41.56 solves properly -
+        // give the mirror the crest's height, bend it by the crest's tilt - and on a surface the mirror
+        // has no information about, every one of those is just a different wrong sample. The code stays
+        // because the reasoning is sound for a MILD displacement; window.__water.reflPar / .reflWave.
+        uReflPar: { value: 0.0 }, uReflWave: { value: 0.0 },
+        // (v41.56) how fast the planar mirror stops being believable as the sheet leaves its plane.
+        // Measured bands to set these against (window.__crestStat, 340 u/s): vDisp p90 = 0.17 /
+        // p99 = 0.38 near the hull, 1-N.y p90 = 0.47 / p99 = 0.71. So 2.0 and 1.1 take a p90 crest to
+        // roughly 15% mirror and leave ambient (vDisp 0.02, slope 0.01) at 95%.
+        // (v41.57) 2.0/1.1 -> 2.6/1.5. This is now the ONLY thing standing between a displaced surface
+        // and a mirror that does not describe it, so it carries the load the three reverted knobs were
+        // failing to carry. A p90 crest (vDisp 0.17, slope 0.47) keeps ~1% of the mirror; ambient
+        // (0.02 / 0.01) keeps 93%.
+        // ⚠⚠ (v41.61) uReflDevD 2.6 -> 0. THE HEIGHT TERM WAS ERASING THE SHIP'S REFLECTION.
+        // Owner: "the washed out reflection". Term 1 of the v41.60 isolator (refl*fres) shows the ship's
+        // reflection as almost nothing, so the pale shape under the hull is not a bad reflection - it is
+        // the refracted submerged hull showing through in the ABSENCE of one.
+        // v41.56 faded the mirror out on both height and tilt, and the height half is wrong on its own
+        // terms: a raised patch of water that is still FLAT reflects almost correctly - the planar
+        // mirror's error there is parallax, which is second order. What genuinely invalidates it is
+        // TILT, because a tilted facet reflects a direction the render does not contain. Water directly
+        // under a hovering ship is displaced but not especially steep, so the height term was taking the
+        // reflection away exactly where the owner wanted to see one.
+        // Tilt carries it alone now, slightly raised to make up the difference.
+        uReflDevD: { value: 0.0 }, uReflDevN: { value: 1.6 },
+        // (v41.54) the hull exclusion - see the vertex note. uHullR 0 + a huge uHullTop is "no hull
+        // here", which is what every frame with the ship off the water writes.
+        // (v41.61) half a ripple texel, in world units. The tick keeps it at bounds/RES*0.5 so it
+        // follows the window; window.__water.tapW pins it. 2.0 is the pre-41.61 value (faceted).
+        uTapW: { value: 16.0 },
+        uHullXZ: { value: new THREE.Vector2(0, 0) }, uHullR: { value: 0.0 },
+        uHullFade: { value: 120.0 }, uHullTop: { value: 1.0e6 },
+        // (v41.51) uReflChop - the reason a real lake never looks like a mirror even when nothing is
+        // moving on it. This surface takes ALL of its height from the ripple sim, so water the ship
+        // has not touched is geometrically PERFECTLY flat - N.xz is exactly 0 and every slope-driven
+        // term above, old and new, multiplies out to zero. A tiny scrolling capillary chop, applied to
+        // the reflection sample only (no geometry, no normals, no foam), takes the glass off it.
+        // Small on purpose: this is texture, not waves. 0 = off.
+        uReflChop: { value: 0.010 }, uReflChopFreq: { value: 0.020 },
         uGrazeClear: { value: 0.25 }, uGrazeAlpha: { value: 0.25 },   
         uReflFloor: { value: 0.42 }, uSkyDark: { value: 0.0 }, uReflHot: { value: 0.75 },   
 
@@ -30457,25 +30930,76 @@ function _swBuildHubWaterDispGet(WL) {
         // (the v39.49 supersample viewport). uRefract is 1 ONLY inside the water pass - any other
         // render of this mesh (XR, potato, the mirror) leaves it 0 and gets the old tinted body.
         uSceneTex: { value: null }, uSceneRes: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) },
+        // (v41.59) the ceiling on that offset, in screen UV. 0.008 is about a fifth of what a wake
+        // normal was reaching and roughly what an ambient ripple already produces, so calm water is
+        // unchanged and only the over-bent pixels move. window.__water.refractMax.
+        // (v41.62) how absorbing the water is for anything seen THROUGH it, and the colour it absorbs
+        // toward. 1.45 * the body colour is (0.12, 0.40, 0.52) - under 1 in every channel, so a
+        // submerged hull darkens instead of being tinted bright cyan.
+        uMurkMin: { value: 0.55 }, uMurkTint: { value: 1.45 },
+        uRefractMax: { value: 0.008 },
+        uDebugTerm: { value: 0.0 },   // (v41.60) see the isolator note in the fragment shader
         uRefract: { value: 0.0 }, uRefractK: { value: 0.045 } }   
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform float uCrestQ; uniform float uNormK; uniform mat4 uReflMatrix;',
+      'uniform float uReflPar;',   // (v41.50) vertex-side; uReflWave is declared in the fragment
+      'uniform float uTapW;',   // (v41.61) normal tap half-width, WORLD units - see the note below
+      'uniform vec2 uHullXZ; uniform float uHullR; uniform float uHullFade; uniform float uHullTop;',   // (v41.54)
       // (v41.15) the crest expander, shared by the displacement and by the CPU mirrors in
       // _swDispWorld - the two must agree or spray spawns inside the wave it comes off.
       'float _swShape(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
+      'varying float vFoam;',   // (v41.53)
       '#include <fog_pars_vertex>',
       'void main(){',
       '  vec3 wp0 = (modelMatrix * vec4(position,1.0)).xyz;',                        
-      '  vReflUv = uReflMatrix * vec4(wp0, 1.0);',                                   
+      // (v41.50) vReflUv has MOVED below the displacement - it needs `disp`. See the note there.
       '  vec2 rUV = (wp0.xz - uRippleCenter) / uRippleBounds + 0.5;',
       '  float inWin = step(0.0, rUV.x)*step(rUV.x,1.0)*step(0.0,rUV.y)*step(rUV.y,1.0);',
       '  float edge = min(min(rUV.x, 1.0-rUV.x), min(rUV.y, 1.0-rUV.y));',
       '  float winFade = smoothstep(0.0, 0.12, edge) * inWin;',                       
       '  vRipUv = rUV; vWinFade = winFade;',                                          
-      '  float h = texture2D(uRippleTex, clamp(rUV,0.001,0.999)).x;',
+      // (v41.53) one fetch, two channels - .x is the height, .z is the foam field (see _SW_RIPPLE_FRAG).
+      '  vec4 _hs = texture2D(uRippleTex, clamp(rUV,0.001,0.999));',
+      '  float h = _hs.x;',
+      '  vFoam = _hs.z * winFade;',
       '  float disp = _swShape(h) * winFade;',
+      // ⚠⚠ (v41.54) THE HULL IS OCCUPYING THAT VOLUME - WATER MAY NOT BE DRAWN THROUGH IT.
+      // Owner: "the reflection of the ship is cutting the paint job at a close distance to the water",
+      // and before that "the ship bottom in the reflection is getting its color cut out to white",
+      // "once you get close enough, it does this", "all ships but slayer and puncture".
+      // Every one of those is the same fact, and it is not a reflection bug at all - I chased the
+      // mirror for four builds. __waterProbe says the crest AT THE HULL is 139-147 world units while a
+      // skimming ship sits about 20 above the waterline, so the sheet is simply IN FRONT OF the ship:
+      // a transparent, depth-tested polygon standing over the lower hull, showing whatever it happens
+      // to reflect - sky (pale), the shoreline, or the ship's own image. That reads exactly as "the
+      // paint job is being cut", it only happens once the hull is close enough for a 140-unit crest to
+      // reach it, and it is per-chassis because _swShipFootprint scales DRAFT/BEAM/heft off the
+      // chassis - which is why the two Frigates were the exception.
+      // The fix is the physics: a hull displaces water, it does not get submerged by it. Inside the
+      // ship's own footprint the surface is capped at the keel and released again over about two hull
+      // lengths, so the bow crest, the shoulders and the rooster tail - all of which live OUTSIDE the
+      // footprint - are untouched.
+      // ⚠ uHullR is set to 0 whenever there is no hull on the water (and uHullTop huge), so this is
+      // a no-op everywhere except under a ship that is actually near the surface.
+      '  float _hd = length(wp0.xz - uHullXZ);',
+      '  float _hk = smoothstep(uHullR, uHullR + max(uHullFade, 1.0), _hd);',
+      '  disp = mix(min(disp, uHullTop), disp, _hk);',
+      // ⚠⚠ (v41.50) THE MIRROR WAS PAINTED ON A FLAT PLANE WHILE THE GEOMETRY ROSE 147 UNITS OFF
+      // IT. Owner: "the reflection of the land is cutting through the wake visibly".
+      // This line used to project wp0 - the UNDISPLACED point, i.e. the spot on the flat water
+      // directly underneath. So the reflected shoreline was a decal: it stayed exactly where it
+      // would be on dead-calm water no matter what the surface in front of it was doing, and the
+      // hard land/sky edge in the mirror ran dead straight across a wake that was visibly not flat.
+      // Nothing bent it either - the only thing that perturbed the sample was a 0.04 * uReflPerturb
+      // normal shear tuned for gentle ripples, about 2% of a projective unit.
+      // A raised crest reflects like a mirror at ITS OWN height, so projecting the displaced point
+      // is both the physically right answer and a one-word change. The v33.76 note above warned this
+      // causes "mirror-bob"; that warning was written when the surface moved a few units and bob was
+      // all you would get. At v41 amplitudes the parallax IS the effect being asked for, and
+      // uReflPar exists to walk it back per-scene without a rebuild (0 = the pre-41.50 decal).
+      '  vReflUv = uReflMatrix * vec4(wp0 + vec3(0.0, disp * uReflPar, 0.0), 1.0);',
       // ⚠ (v41.15) vDisp is NOT the displacement any more. The fragment shader keys its foam and
       // spray thresholds off it (uPeakLo 0.32 and the eml weights), so tying it to the geometry means
       // every height change silently re-tunes the foam: under v41.14's G=650 foam started at h ≈ 0.13,
@@ -30483,7 +31007,22 @@ function _swBuildHubWaterDispGet(WL) {
       // the 180/180 mapping every build before 41.14 used - so the crest knobs can move freely and
       // can never drag the foam threshold with them.
       '  vDisp = (h / (1.0 + abs(h))) * winFade;',
-      '  float dU = 2.0 / uRippleBounds;',
+      // ⚠⚠ (v41.61) THE TRIANGLES IN THE RIPPLES ARE THIS NUMBER. Owner: "the triangles in the
+      // ripple in front".
+      // Measured, not guessed: the displaced sheet is PlaneGeometry(24576, 768, 768) = 32.0 world units
+      // per quad, and the ripple texel at 8000/256 is 31.3 world units. ONE VERTEX PER TEXEL, exactly
+      // at the Nyquist limit. That alone would only cost detail - what makes it read as flat triangles
+      // is the NORMAL: these taps sit +/-2 world units from the vertex, i.e. deep inside one texel, and
+      // the heightmap is LinearFilter, so the gradient it returns is piecewise CONSTANT across each
+      // texel. Every vertex therefore gets its own texel's constant gradient, neighbouring vertices
+      // jump between texels, and the interpolated normal across a triangle is near-constant. That is
+      // flat shading, drawn on a smooth surface, and it is why the water looks like a low-poly mesh.
+      // A central difference has to span the sample spacing it is differencing. Half a texel each side
+      // makes it a true texel-wide gradient, continuous across the boundaries, so the normal now varies
+      // smoothly from vertex to vertex.
+      // ⚠ The y term below is 2.0*uRippleBounds*dU, which IS the tap separation - so the normal stays
+      // analytically correct at any tap width, and widening it costs nothing and adds no fetches.
+      '  float dU = uTapW / uRippleBounds;',
       '  float hL = texture2D(uRippleTex, clamp(rUV - vec2(dU,0.0),0.001,0.999)).x;',
       '  float hR = texture2D(uRippleTex, clamp(rUV + vec2(dU,0.0),0.001,0.999)).x;',
       '  float hD = texture2D(uRippleTex, clamp(rUV - vec2(0.0,dU),0.001,0.999)).x;',
@@ -30500,7 +31039,10 @@ function _swBuildHubWaterDispGet(WL) {
       // into the normal or the geometry moves and the shading does not follow it.
       // Differencing the SHAPED world displacements over the taps' real separation is exact - the
       // 2.0*uRippleBounds*dU term already encodes that separation (it is 4.0 world units).
-      '  float dL = _swShape(hL), dR = _swShape(hR), dDn = _swShape(hD), dUp = _swShape(hU);',
+      // (v41.54) the taps are +/-2 world units from wp0, so they share its hull factor to well under a
+      // texel - carrying it through keeps the normal consistent with the surface actually drawn.
+      '  float dL = mix(min(_swShape(hL), uHullTop), _swShape(hL), _hk), dR = mix(min(_swShape(hR), uHullTop), _swShape(hR), _hk);',
+      '  float dDn = mix(min(_swShape(hD), uHullTop), _swShape(hD), _hk), dUp = mix(min(_swShape(hU), uHullTop), _swShape(hU), _hk);',
       '  vN = normalize(vec3((dL-dR)*winFade*uNormK, 2.0*uRippleBounds*dU, (dDn-dUp)*winFade*uNormK));',
       '  vec3 transformed = position; transformed.z += disp;',                        
       '  vec4 mvPosition = modelViewMatrix * vec4(transformed,1.0);',
@@ -30511,25 +31053,80 @@ function _swBuildHubWaterDispGet(WL) {
     ].join('\n'),
     fragmentShader: [
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq; uniform float uFoamSlope; uniform float uSteepFoam;',
+      // ⚠ a uniform has to appear HERE as well as in the block above, or the shader silently fails
+      // to compile and the water disappears (the v38.47 mistake).
+      'uniform float uPeakHi; uniform float uCapLo; uniform float uCapHi; uniform float uCapStr; uniform float uCapSteep; uniform float uCapFreq; uniform float uCapBright;',
+      'uniform float uCapFoamLo; uniform float uCapFoamHi; uniform float uFoamMatte;',   // (v41.53/41.54)
+      'uniform float uMatteLo; uniform float uMatteHi; uniform float uFoamAlb; uniform vec3 uFoamAlbCol;',   // (v41.55)
+      'uniform float uReflWave; uniform float uReflChop; uniform float uReflChopFreq;',   // (v41.50/41.51)
+      'uniform float uReflDevD; uniform float uReflDevN;',   // (v41.56)
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uSkyDark; uniform float uReflHot; uniform float uFoamLod; uniform float uReflFar;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
       'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',
       'uniform sampler2D uSceneTex; uniform vec2 uSceneRes; uniform vec2 uSceneMax; uniform float uRefract; uniform float uRefractK;',   // (v39.73)   
+      'uniform float uRefractMax; uniform float uDebugTerm; uniform float uMurkMin; uniform float uMurkTint;',   // (v41.59/60/62)
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
+      'varying float vFoam;',   // (v41.53)
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
       'float _vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f); float a=_h2(i), b=_h2(i+vec2(1.0,0.0)), cc=_h2(i+vec2(0.0,1.0)), dd=_h2(i+vec2(1.0,1.0)); return mix(mix(a,b,f.x), mix(cc,dd,f.x), f.y); }',
       'void main(){',
+      // ⚠⚠ (v41.60) THE TERM ISOLATOR. Six builds have now been spent attributing one artefact to
+      // the wrong term - layers, then the mirror's parallax, then its tilt shear, then uReflPerturb,
+      // then water standing over the hull - and each was argued from the source rather than measured on
+      // the pixel. This composite has eight things that can put light into a water pixel and no way to
+      // ask which one did. window.__water.debugTerm makes the shader output ONE of them, full screen:
+      //   1 reflection (refl*fres)   2 fresnel   3 foam field   4 |vDisp|   5 slope (1-N.y)
+      //   6 the refracted scene sample   7 the crest cap's lid   8 the body colour
+      // 0 is off and the branch is skipped entirely, so the shipped path is unchanged.
+      '  vec3 _dbgSeen = vec3(0.0); float _dbgCap = 0.0;',
       '  vec3 V = normalize(uCam - vWP);',
       '  vec3 N = normalize(vN);',
       '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 3.0);',            
-      '  fres = clamp(uReflFloor + (0.95 - uReflFloor)*fres, 0.0, 0.95);',            
+      '  fres = clamp(uReflFloor + (0.95 - uReflFloor)*fres, 0.0, 0.95);',
+      // ⚠⚠ (v41.54) AERATED WATER IS NOT A MIRROR, AND THAT IS WHY THE WAKE KEPT GETTING CUT.
+      // Owner, after v41.52: "the water wake is still being cut by the reflection of the land on the
+      // surface of the water".
+      // v41.50-52 attacked it as a sampling problem - project from the crest's height, bend the sample
+      // by its tilt, let a ripple shred what it reflects - and all of that is right, but it only ever
+      // MOVES the reflected shoreline around. The edge is still a hard silhouette and it still runs
+      // across the wake, because the wake is still behaving like a mirror. uReflFloor 0.42 guarantees
+      // it: even a crest face pointed straight at you keeps 42% reflection.
+      // Foam is a suspension of air bubbles. It scatters; it does not reflect. So where the v41.53 foam
+      // field says the water has been churned, the fresnel is taken away and the surface shows its own
+      // body and its own foam instead of the landscape - which is what stops the shoreline crossing it.
+      // This is the ONE quantity in the shader that knows the difference between the wake and a wave
+      // that merely arrived here, so it is the only place this could be hung.
+      // ⚠⚠ (v41.55) THE MATTE NEEDS ITS OWN WINDOW, AND IT IS NOT THE CAP'S. Owner, on v41.54:
+      // "the land reflection on the surface is breaking/cutting through the white wake".
+      // v41.54 hung the matte on the CAP's gate, 0.10 -> 0.45, and that gate is deliberately narrow -
+      // it is there to pick the top ~1% of the field for a white lid. Measured foam near the hull is
+      // p90 = 0.047, p99 = 0.65, so across most of the churned trail that smoothstep returns 0.1-0.3,
+      // i.e. it removed a fifth of the reflection and left four fifths of the shoreline lying across
+      // the wake. The cap was white; the water either side of each white ridge was still a mirror.
+      // They are two different questions. "Is this water churned at all" (matte) is nearly binary and
+      // starts at the faintest trace; "is this the crest of the churn" (cap) is the top of the range.
+      // 0.02 -> 0.15 covers the whole trail; the cap's 0.10 -> 0.45 still rides on top of it.
+      '  float _fmM = smoothstep(uMatteLo, max(uMatteHi, uMatteLo + 0.01), vFoam);',
+      '  float _fm = smoothstep(uCapFoamLo, max(uCapFoamHi, uCapFoamLo + 0.01), vFoam);',
+      '  fres *= 1.0 - uFoamMatte * _fmM;',            
       '  vec3 sunDir = normalize(vec3(0.29,0.86,0.43));',
       '  float diff = 0.4 + 0.6*max(dot(N,sunDir),0.0);',                             
       '  vec3 H = normalize(sunDir + V);',
       '  float spec = pow(max(dot(N,H),0.0), 200.0);',                                
       '  vec3 base = color * diff;',
+      // ⚠⚠ (v41.55) THE OTHER HALF OF v41.54. Taking the mirror away from foam is right and it
+      // works - photographed side by side, the shoreline stops running across the wake - but on its own
+      // it turns the wake into a dark navy band, because all it does is swap 42% reflected sky for 42%
+      // more of a 0x16465c body colour. That is the opposite of what churned water looks like.
+      // Both halves are the same physics. Entrained air makes the water a dense SCATTERING medium: it
+      // stops behaving like a specular interface (v41.54 removes the fresnel) and starts behaving like
+      // a bright diffuse one (this removes the darkness). Skip either half and the wake is wrong in the
+      // opposite direction.
+      // This is the whole foam BAND - the pale turquoise churn - not the crest cap, which sits on top
+      // of it and is a much brighter, noisier, ridge-only lid.
+      '  base = mix(base, uFoamAlbCol * (0.62 + 0.55 * diff), _fmM * uFoamAlb);',
       '  float shDepth = mix(1.0, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',   // (v39.73) hoisted: the refraction below tints by depth
       // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT, slope-sheared by the wave
       // normal so it bends over crests WITHOUT mirror-bob (projection is from the UNDISPLACED wp0). Matches the
@@ -30566,8 +31163,62 @@ function _swBuildHubWaterDispGet(WL) {
       '  float edgeFade = clamp((11500.0 - dCam) / 3000.0, 0.0, 1.0);',              
       '  vec4 ruv = vReflUv;',
       '  ruv.xy += N.xz * ruv.w * 0.04 * uReflPerturb * rfade * (1.0 - graze*0.55);', 
-      '  vec3 reflTex = texture2DProj(tDiffuse, ruv).rgb;',
-      '  if (dot(reflTex, vec3(0.299,0.587,0.114)) < 0.04 && graze > 0.5) reflTex = skyT;',   
+      // (v41.50) and the SECOND half of it: a tilted facet reflects somewhere else entirely. The
+      // line above is a fixed, tiny shear sized for ambient chop; this one is proportional to how
+      // disturbed the water actually is, so calm water is bit-for-bit what it was (vDisp = 0) and
+      // only the wake bends what it is reflecting. uReflWave = 0 restores the pre-41.50 mirror.
+      '  ruv.xy += N.xz * ruv.w * uReflWave * abs(vDisp) * rfade * (1.0 - graze*0.35);',
+      // (v41.51) and the capillary chop that keeps untouched water off perfect-mirror. Two taps of
+      // the noise the foam already uses, drifting in opposite directions so it never reads as a
+      // repeating tile; centred on zero so it wobbles the sample rather than sliding it.
+      '  vec2 _chop = vec2(_vn(vWP.xz * uReflChopFreq + vec2(uTime * 0.11, uTime * 0.07)), _vn(vWP.zx * uReflChopFreq * 1.31 + vec2(uTime * -0.09, uTime * 0.13))) - 0.5;',
+      '  ruv.xy += _chop * ruv.w * uReflChop * rfade;',
+      // (v41.64) divide once, here, so the validity test below and the sample use the same number.
+      '  vec2 _rv2 = ruv.xy / max(ruv.w, 1e-4);',
+      '  vec3 reflTex = texture2D(tDiffuse, clamp(_rv2, vec2(0.0005), vec2(0.9995))).rgb;',
+      // ⚠⚠ (v41.63) THIS LINE IS THE WHOLE BUG. Owner, across a dozen descriptions: "the ship
+      // bottom in the reflection is getting its color cut out to white", "only at a particular
+      // distance", "once you get close enough", "all ships but slayer and puncture", "the land
+      // reflection is breaking/cutting through the white wake", "this is not an accurate reflection...
+      // the texture is broken", "something is wrong with the reflection math". All of it is this test.
+      //
+      // It asks "is this reflected pixel DARK?" when the question it means to ask is "did the mirror
+      // sample land somewhere valid?". A luma test cannot tell a failed sample from a genuinely dark
+      // object, and a ship hull is full of genuinely dark pixels. So it replaced the dark PARTS of the
+      // reflected hull with skyT - a pale daylight blue - and left the bright parts alone, per pixel,
+      // following the hull's own light/dark pattern. That is not a washed-out reflection, it is a
+      // MOSAIC of sky punched through one, which is exactly "the texture is broken".
+      // Every symptom follows from the two halves of the condition:
+      //   `< 0.04`     -> it fires on dark hulls and spares light ones. Slayer and Puncture are the
+      //                  two the owner named as clean, and v38.74 already records them as the light
+      //                  hulls ("a BLACK HULL HAS NO PAINT TO LIFT (Vortex: albedo ~0.05)").
+      //   `graze>0.5`  -> it fires only at shallow view angles, i.e. once you are down near the water,
+      //                  and vanishes if you look steeply down. Photographed both ways: at graze it is
+      //                  a broken pale mosaic, and from directly above the same hull reflects clean.
+      // And it does the same to the dark parts of a reflected shoreline, which is the land "cutting
+      // through" the wake - not the wake failing to disturb the mirror, the mirror being punched full
+      // of sky along the cliff's own shadows.
+      // ⚠ v38.18 already met this: it found the guard firing "everywhere at night" and in caverns,
+      // where "the rock IS dark, and that is not a failure", and treated it by making the SUBSTITUTE
+      // darker instead of fixing the test. The substitution was always the wrong operation.
+      // The real question is answerable exactly: the projected UV either lands on the mirror or it
+      // does not. ruv.w <= 0 is behind the mirror camera, and xy/w outside 0..1 is off the render.
+      // Those are the only cases where tDiffuse holds nothing, and they are what skyT is for.
+      // The luma floor stays at 1/20th of what it was, where it can only catch a target that is
+      // genuinely cleared to black - no hull, no cliff and no night sky ever reaches 0.002.
+      // ⚠⚠ (v41.64) NO EDGE FEATHER. Owner on v41.63: "there's a hazy frame around the bottom of
+      // the screen on the water".
+      // The mirror is rendered from the reflected camera with the same projection, so its UV space IS
+      // screen space: _rv2 near 0 or 1 means the pixel is near the EDGE OF THE SCREEN, not near the
+      // edge of anything real. v41.63 faded those to skyT over a 1.5% band, which drew a pale border
+      // frame on the water - worst along the bottom, where the nearest and largest stretch of water
+      // sits. A screen-space fade is exactly the artefact I had just removed, re-added at the border.
+      // There is nothing to feather: a sample at the very edge of that render is as valid as one in
+      // the middle. The only genuinely invalid case is behind the mirror camera (w <= 0), and the
+      // clamp above keeps a perturbed sample on the texture instead of wrapping off it.
+      '  float _rok = step(1e-4, ruv.w);',
+      '  if (dot(reflTex, vec3(0.299,0.587,0.114)) < 0.002) _rok = 0.0;',
+      '  reflTex = mix(skyT, reflTex, _rok);',
       // (v38.19) HOT THINGS STAY HOT. This curve is a compressor: 1 - exp(-x) saturates at 1, so a
       // laser bolt at 5x full scale and a lit rock at 1x both came out of the mirror at the same
       // near-white - every bright thing in the water flattened to the same value. The compressed
@@ -30578,7 +31229,26 @@ function _swBuildHubWaterDispGet(WL) {
       '  vec3 _rin = max(reflTex, 0.0) * uReflBright;',
       '  reflTex = (vec3(1.0) - exp(-_rin)) + max(_rin - vec3(1.0), vec3(0.0)) * uReflHot;',               
       '  reflTex *= 1.0 - uGrazeClear * smoothstep(0.55, 0.95, graze);',               
-      '  vec3 reflC = mix(skyT, reflTex, uReflLive);',                                
+      '  vec3 reflC = mix(skyT, reflTex, uReflLive);',
+      // ⚠⚠ (v41.56) A PLANAR MIRROR IS ONLY VALID FOR THE PLANE. THIS IS THE REAL ANSWER, and
+      // v41.50 through v41.55 were all treating a symptom. Owner, five builds running: "the land
+      // reflection on the surface is breaking/cutting through the white wake", with a circled
+      // screenshot of a razor-sharp mirrored mountain lying across a wake.
+      // tDiffuse is one render of the world reflected about y = WL. It contains the answer for rays
+      // that bounce off THAT PLANE and no others. Every ray leaving a 140-unit crest tilted 40 degrees
+      // is a ray the render does not have, so whatever we sample for it is simply the wrong image -
+      // and being the wrong image, it keeps its own hard silhouette edges and lays them across a
+      // surface whose shape has nothing to do with them. Perturbing the sample (v41.50 parallax,
+      // v41.51 slope shear, v41.52 uReflPerturb 4.0) moves the wrong image around; it cannot make it
+      // the right one. Nor can the foam matte (v41.54/55), which only knows about churn - a wave that
+      // crossed the lake carries no foam and still cannot be mirrored.
+      // So: use the mirror where it is valid and stop where it is not. skyT is the honest fallback,
+      // not the body colour - a tilted water facet at a shallow angle really does mostly see sky, and
+      // sky has no edges to cut anything with. Calm water is vDisp = 0 and N.y = 1, so it keeps the
+      // full mirror to the bit; the deviation terms only bite where the sheet has left the plane.
+      // Live: window.__water.reflDevD (height) / .reflDevN (tilt); both 0 restores v41.55.
+      '  float _rvalid = clamp(1.0 - uReflDevD * abs(vDisp) - uReflDevN * (1.0 - N.y), 0.0, 1.0);',
+      '  reflC = mix(skyT, reflC, _rvalid);',                                
       '  vec3 refl = mix(skyT, reflC, uReflMix);',                                    
       // (v39.73) THE BODY OF THE WATER IS THE WORLD UNDER IT. Owner, pointing at
       // jeantimex/threejs-water: "i really like this water, it looks and acts great ... it just is
@@ -30593,11 +31263,54 @@ function _swBuildHubWaterDispGet(WL) {
       '    vec2 suv = gl_FragCoord.xy / uSceneRes;',
       // the world-space wobble is constant, so its SCREEN size has to shrink with distance or the
       // horizon crawls; grazing angles bend less because you are looking along the surface.
-      '    suv += N.xz * uRefractK * (1.0 - graze * 0.6) * clamp(1.0 - dCam / 6000.0, 0.12, 1.0);',
+      // ⚠⚠ (v41.59) THE THING THE OWNER CIRCLED IS THIS LINE, NOT THE MIRROR. Owner: "the bottom
+      // of the ship in the reflection at this altitude makes the image texture distorted".
+      // PROVEN, not reasoned: window.__mirrorDump reads the planar mirror's own render target back into
+      // a canvas, and side by side the ship IN THE MIRROR is crisp and correctly gold while the shape
+      // under the hull on screen is a warped white-blue smear. So the mirror pass is innocent - and so
+      // are the layers, which was the standing theory. Setting uRefractK to 0 live cleaned it up in one
+      // frame. That shape is not a reflection at all: at 35 units of altitude this hull's keel is 74
+      // units UNDER the waterline, so most of what is 'below' the ship is the ship, seen through the
+      // surface by the v39.73 refraction path.
+      // And that path has no limit on it. The offset is N.xz * uRefractK, in SCREEN UV, so a steep
+      // wake normal (measured |N.xz| up to 0.8 beside a hull) displaces the sample by 3.6% of the
+      // screen, per pixel, varying with the ripple - which is not refraction, it is fetching unrelated
+      // pixels and smearing them across the hull. Exactly the failure uReflPerturb 4.0 had in v41.52,
+      // in the other sampler.
+      // Physically the displacement should go as the refracted object's DEPTH below the surface, and
+      // the shader cannot know that - it uses one constant tuned for a lake bed hundreds of units down.
+      // A hull twenty units under is over-bent by more than an order of magnitude. Until there is a
+      // depth to scale by, the honest fix is a ceiling: gentle ripple refraction is untouched (its
+      // offsets are well under the cap), and no single pixel may reach more than uRefractMax of the
+      // screen away from where it belongs.
+      '    vec2 _roff = N.xz * uRefractK * (1.0 - graze * 0.6) * clamp(1.0 - dCam / 6000.0, 0.12, 1.0);',
+      '    float _rlen = length(_roff);',
+      '    if (_rlen > uRefractMax) _roff *= uRefractMax / max(_rlen, 1e-5);',
+      '    suv += _roff;',
       '    suv = clamp(suv, vec2(0.0015), uSceneMax - 0.0015);',
       '    vec3 seen = texture2D(uSceneTex, suv).rgb;',
-      '    float murk = clamp(0.22 + 0.78 * shDepth, 0.0, 1.0);',
-      '    base = mix(base, seen * mix(vec3(1.0), color * 2.2, murk), uRefract * mix(0.92, 0.55, murk));',
+      '    _dbgSeen = seen;',   // (v41.60)
+      // ⚠⚠ (v41.62) THE PALE SHAPE UNDER THE HULL IS THE SHIP'S OWN UNDERSIDE, AND IT IS NOT A
+      // SHADER BUG. Owner: "the reflection of the ship is cutting the paint job at a close distance to
+      // the water", "the washed out reflection".
+      // Settled by hiding the displaced sheet entirely (window.__waterDisp = 0) and photographing it:
+      // the hull is gold above the waterline and pale blue-white panels below it WITH THE WATER GONE.
+      // That is the model. At 22 units of altitude this chassis has its keel 74-128 units under the
+      // surface, so the waterline cuts across a ship whose top and bottom are painted differently, and
+      // the game faithfully draws both halves. Nothing in the mirror, the layers, the foam or the
+      // reflection was ever responsible - four builds went looking in each of those.
+      // What IS wrong is that the submerged half does not look submerged. This path shows it at
+      // uRefract * 0.55-0.92 with a tint of color*2.2 = (0.19, 0.61, 0.79) - a BRIGHTENING multiplier
+      // in blue - and `murk` is driven by the SHORELINE depth mask, which is a measure of how deep the
+      // lake is, not of how far under the surface the thing you are looking at sits. Over a shelf it
+      // stays low and the tint all but vanishes, so a hull 100 units down renders at nearly its dry
+      // brightness and reads as a paint change rather than as water over it.
+      // Water absorbs. A floor under the murk (any water that is not the surf line is at least
+      // partially absorbing) plus a tint that is < 1 in every channel makes submerged geometry darken
+      // and shift blue with depth, which is what makes a waterline read as a waterline.
+      // window.__water.murkMin / .murkTint; murkMin 0 + murkTint 2.2 is v41.61 exactly.
+      '    float murk = clamp(max(uMurkMin, 0.22 + 0.78 * shDepth), 0.0, 1.0);',
+      '    base = mix(base, seen * mix(vec3(1.0), color * uMurkTint, murk), uRefract * mix(0.92, 0.55, murk));',
       '  }',
       '  vec3 c = mix(base, refl, fres) + vec3(1.0,0.98,0.92)*spec*0.3*(1.0 - uReflMix*0.6);',
       
@@ -30614,7 +31327,8 @@ function _swBuildHubWaterDispGet(WL) {
       // before stops foaming) and adds the one that discriminates a wake crest from ambient swell:
       // ambient is low-slope however wide it is, a wake crest is steep. That is also why this cannot
       // be had by lowering uPeakLo - that just foams the calm water too.
-      '  float peak = smoothstep(uPeakLo, 1.0, vDisp);',
+      // (v41.48) uPeakHi, not 1.0 - see the uniform note. This is the line that was returning 0.02.
+      '  float peak = smoothstep(uPeakLo, max(uPeakHi, uPeakLo + 0.01), vDisp);',
       '  float steepF = smoothstep(uFoamSlope, uFoamSlope + 0.30, 1.0 - N.y);',
       '  peak = max(peak, steepF * uSteepFoam);',
       '  float eW = max(exp(1.2) - log(1.0 + (1.0 - min(peak*4.0,1.0))*2.5) - 1.0, 0.0);', 
@@ -30625,6 +31339,31 @@ function _swBuildHubWaterDispGet(WL) {
       '  vec3 foamCol = vec3(0.95, 0.97, 1.0) * foamLight;',
       '  float foam = peak * mix(1.0, smoothstep(0.25, 0.85, spd), mistW);',             
       '  c = mix(c, foamCol, clamp(foam * uSprayBreak, 0.0, 0.9));',                      
+      // (v41.48) THE CREST CAP. tall AND steep = the ridge line; either one alone is a region.
+      // Its own finer noise so the lid is broken-up aeration rather than a painted band, and its own
+      // brightness because whitewater is air, not water - it does not obey the body's fresnel.
+      // ⚠⚠ (v41.49) THE APEX OF A CREST IS THE FLATTEST PART OF IT, so this cannot be gated on
+      // slope. v41.48 shipped `capH * steepF`, reasoning that a ridge is the one place that is both
+      // tall and steep. It is not: a local maximum has zero gradient BY DEFINITION, and
+      // window.__crestStat measured it on the live surface - the five tallest texels near the hull
+      // ran vDisp 0.401-0.408 with slope 0.013-0.073, against a uFoamSlope gate of 0.50. The cap
+      // fired on precisely nothing. (The same measurement is why uFoamSlope alone cannot do this
+      // job either: out in the wake, slope p99 is 0.418 - the whole steepness route is below its own
+      // threshold more than 99% of the time once you are off the hull.)
+      // Height alone IS the ridge selector here, because vDisp is a disturbance measure, not a
+      // local one: measured over the wake, p50 = 0.021 and p99 = 0.174, so a floor at 0.12 picks the
+      // top couple of percent of the wake and nothing else. Steepness stays as a BONUS - the
+      // forward face of a breaker does foam harder - but it can no longer veto the crest.
+      '  float capH = smoothstep(uCapLo, max(uCapHi, uCapLo + 0.01), vDisp);',
+      '  float capN = _vn(vWP.xz * uCapFreq + vec2(uTime * 0.9, uTime * -0.7));',
+      // (v41.53) ...and WHERE it is allowed to happen at all is the foam field, not the height. capH
+      // still shapes the lid so it sits on the ridge rather than flooding the trough beside it; capW is
+      // the gate that says this water was churned rather than merely reached by a wave from somewhere
+      // else. A ripple that has crossed the lake and bounced back carries height but no foam.
+      '  float capW = _fm;',   // (v41.54) the same gate the matte uses, computed once
+      '  float cap = capH * capW * uCapStr * (1.0 + uCapSteep * steepF) * mix(0.45, 1.0, capN);',
+      '  _dbgCap = clamp(cap, 0.0, 0.97);',   // (v41.60)
+      '  c = mix(c, foamCol * uCapBright, clamp(cap, 0.0, 0.97));',
       '  c += vec3(0.80,0.88,0.96) * mistW * spd * uMist * foamLight;',                  
       
       
@@ -30649,6 +31388,18 @@ function _swBuildHubWaterDispGet(WL) {
       '  { float _whd = length(vWP.xz - uCam.xz); float _whf = smoothstep(uWHorizA, uWHorizB, _whd) * uWHorizStr; c = mix(c, fogColor, clamp(_whf, 0.0, 1.0)); }',
       '  float aGraze = 0.93 * (1.0 - uGrazeAlpha * smoothstep(0.55, 0.95, graze));',
       '  aGraze = mix(aGraze, max(aGraze, 0.99), uRefract);',   // (v39.73) the refracted floor IS the see-through; ghosting the unbent copy through it only softens it
+      // (v41.60) the isolator - see the note at the top of main.
+      '  if (uDebugTerm > 0.5) {',
+      '    vec3 dc = base;',
+      '    if (uDebugTerm < 1.5) dc = refl * fres;',
+      '    else if (uDebugTerm < 2.5) dc = vec3(fres);',
+      '    else if (uDebugTerm < 3.5) dc = vec3(vFoam);',
+      '    else if (uDebugTerm < 4.5) dc = vec3(abs(vDisp) * 2.5);',
+      '    else if (uDebugTerm < 5.5) dc = vec3(1.0 - N.y);',
+      '    else if (uDebugTerm < 6.5) dc = _dbgSeen;',
+      '    else if (uDebugTerm < 7.5) dc = vec3(_dbgCap);',
+      '    gl_FragColor = vec4(dc, 1.0); return;',
+      '  }',
       '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',
       '  #include <fog_fragment>',
       '}',
@@ -30999,7 +31750,7 @@ function _swBuildHubWater(T) {
 
 
 
-      if ((typeof isXRPresenting === 'function') && isXRPresenting()) return;
+      if (_swVrLite()) return;   // (v41.42) the planar mirror keeps refreshing when VR water is on
       this._reflFrame = (this._reflFrame + 1) % 3;
       // (v36.42) gap-based cadence, live-tunable via window.__water.{reflGapMin,reflGapMax,
       // reflMove,reflTurn}. reflGapMin 1 restores an every-frame mirror, reflGapMin =
@@ -31720,7 +32471,7 @@ function _swUpdateHubWater() {
   // camera. The mirror now captures `w._reflWorld` at render time instead — see the
   // onBeforeRender wrapper in _swBuildHubWater.
   if (typeof window !== 'undefined' && window.__waterDisp && !game._swSubmerged &&
-      !((typeof isXRPresenting === 'function') && isXRPresenting())) {
+      !_swVrLite()) {   // (v41.42)
     const WLd = w.userData.WL;
     w.visible = true;
     w.frustumCulled = false;
@@ -31815,7 +32566,7 @@ function _swUpdateHubWater() {
       const U = w.material.uniforms;
       if (U.uSubmerge) U.uSubmerge.value = Math.max(0, Math.min(1, (WL - camera.position.y) / 60));
       if (U.uEye) U.uEye.value.copy(camera.position);
-      if (U.uReflLive) U.uReflLive.value = ((typeof isXRPresenting === 'function') && isXRPresenting()) ? 0.0 : 1.0;
+      if (U.uReflLive) U.uReflLive.value = _swVrLite() ? 0.0 : 1.0;   // (v41.42)
       if (U.uFlipFace) U.uFlipFace.value = (window.__water && window.__water.flip) ? 1.0 : 0.0;
     }
   }
@@ -31890,9 +32641,14 @@ function _swBubblesEnsure() {
     };
     B.mat.name = 'bubbles';
     B.pts = new THREE.Points(B.geo, B.mat); B.pts.frustumCulled = false; B.pts.renderOrder = 5; B.pts.visible = false;
-    try { if (typeof _lssRetainMat === 'function') _lssRetainMat(B.mat); } catch (_) {}
     scene.add(B.pts);
-    try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(B.pts); } catch (_) {}   // link the points program behind the countdown, not on the first dive
+    // ⚠⚠ (v41.65) THE WARM IS NOT HERE ANY MORE - see _prebakeGpuPrime. Two things were wrong
+    // with doing it on this line. It called _warmDrawRoot with one argument, so it never drew (the
+    // guard there returns on a missing render target); and this function runs during the COUNTDOWN,
+    // which is the one place the owner has already asked warming not to happen - "it shouldn't still
+    // be warming there, we have a loading screen for that" (v39.83). The prime is that loading screen.
+    // _lssRetainMat moved with it: it reads renderer.properties.get(mat).programs, which is EMPTY for
+    // a material that has never rendered, so calling it here retained nothing at all.
   } catch (_) { B.pts = null; }
   return B.pts;
 }
@@ -60361,6 +61117,30 @@ async function _prebakeGpuPrime() {
   try { if (typeof _swRipple !== 'undefined' && _swRipple && _swRipple.gpu) _swRipple.gpu.compute(); } catch (_) {}
   try { if (typeof _birdFlock !== 'undefined' && _birdFlock && _birdFlock.gpu) _birdFlock.gpu.compute(); } catch (_) {}
   try { if (typeof _fishSchool !== 'undefined' && _fishSchool && _fishSchool.gpu) _fishSchool.gpu.compute(); } catch (_) {}
+  // ⚠⚠ (v41.65) THE UNDERWATER BUBBLE CLOUD, which has never once been warmed - see the note at
+  // _swBubblesEnsure. It cannot freeload on a stock PointsMaterial program either: v41.37 gave it an
+  // onBeforeCompile so it could size points per-vertex, and three r165's default customProgramCacheKey
+  // returns onBeforeCompile.toString(), so those 155 characters make it its own program by
+  // construction. Its geometry's input layout (position + aSize, no colour, no uv) is unique in this
+  // file too, and per v39.52 ANGLE builds a vertex executable per layout at the first DRAW. Link,
+  // uniform/attribute fetch and layout therefore all landed on the frame the player first dived.
+  // ⚠ The seed matters. At ensure time B.pos is all zeros, so Box3.setFromObject collapses to a
+  // point, r clamps to 1 and the warm camera frames nothing like the play-time cloud. Seed it first.
+  try {
+    if (rt && typeof _swBubblesEnsure === 'function') {
+      const _B = _swBubblesEnsure();
+      if (_B) {
+        try { if (typeof _swBubblesSeed === 'function') _swBubblesSeed(camera.position); } catch (_) {}
+        try { if (typeof _swBub !== 'undefined' && _swBub && _swBub.geo && _swBub.geo.attributes.position) _swBub.geo.attributes.position.needsUpdate = true; } catch (_) {}
+        const _pv = _B.visible;
+        _B.visible = true;
+        try { if (_warmDrawRoot(_B, rt)) passes++; } finally { _B.visible = _pv; }
+        // retained AFTER a real draw, so it takes v38.97's exact-program-key path instead of the
+        // hand-rolled signature fallback.
+        try { if (typeof _lssRetainMat === 'function' && typeof _swBub !== 'undefined' && _swBub && _swBub.mat) _lssRetainMat(_swBub.mat); } catch (_) {}
+      }
+    }
+  } catch (_) {}
   // The flock / school draw materials only compile once their mesh is visible (fish: near water),
   // so compile them here with the meshes forced visible for one call.
   try {
@@ -60372,6 +61152,11 @@ async function _prebakeGpuPrime() {
       const _pRT = renderer.getRenderTarget();
       if (rt) renderer.setRenderTarget(rt);
       try { renderer.compile(scene, camera); } catch (_) {}
+      // (v41.65) ...and DRAW them. v39.83 already established that a compile with no draw is only half
+      // a warm - ANGLE builds its vertex executable per input layout at the first draw call, not at
+      // link - so the instanced flock still paid for its layout at first sight. The meshes are force-
+      // visible on this very line; it is a two-line upgrade from compile-only to a real warm.
+      if (rt) { for (const _m of _vis) { try { if (_warmDrawRoot(_m, rt, false)) passes++; } catch (_) {} } }
       renderer.setRenderTarget(_pRT);
       for (const _m of _vis) _m.visible = false;
     }
@@ -67232,6 +68017,25 @@ function _setShipMeshOpacity(root, opacity) {
 // shown for the one call. Shadow maps are frozen so the pass is one cheap render.
 function _warmDrawRoot(root, rt, withShadow) {
   try {
+    // ⚠⚠ (v41.65) A MISSING `rt` USED TO MEAN "SILENTLY DO NOTHING", AND THREE CALLERS TOOK IT.
+    // `_warmDrawRoot(x)` reads as a complete call, returns false before it renders anything, and every
+    // call site discards the return inside a try/catch - so three warms shipped across three different
+    // builds, each with a comment claiming it linked a program, and not one of them ever ran:
+    //   the underwater bubble cloud (v41.37 gave it an onBeforeCompile, which makes it its own program
+    //     by construction - r165 pushes onBeforeCompile.toString() into the cache key - so its link,
+    //     its uniform/attribute fetch and a brand-new ANGLE input layout all land on the first dive),
+    //   the bird/bat/fish instanced mesh, and the Vortex core glow (built lazily on the first core
+    //     beam, i.e. mid-fight, with no other coverage).
+    // Every caller that wants a warm wants postFX.rtScene; there is no second choice in this file. So
+    // that is the default, and the silence is what actually gets fixed - a warm that cannot run has to
+    // say so once, or the next one takes another three builds to find.
+    if (rt === undefined && typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
+      rt = postFX.rtScene;
+      if (!_warmDrawRoot._warned) {
+        _warmDrawRoot._warned = 1;
+        try { console.warn('[warm] _warmDrawRoot called with no render target - defaulting to postFX.rtScene. Pass it explicitly.'); } catch (_) {}
+      }
+    }
     if (!root || typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene ||
         typeof camera === 'undefined' || !camera || !rt) return false;
     if (renderer.xr && renderer.xr.isPresenting) return false;
@@ -68076,16 +68880,33 @@ function updatePlayerMovement(dt) {
   if (game.playerInStasis || game.playerRootTimer > 0 || game.state === 'warmup') {
     // Kill any residual velocity so we don't drift mid-lockout.
     player.velocity.set(0, 0, 0);
-    // Still allow looking around but no movement
-    if ((input.locked || input.touchActive) && (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
-      { const _ls = _adsLookScale(); player.euler.y -= input.mouseDX * input.sensitivity * _ls; player.euler.x -= input.mouseDY * input.sensitivity * _ls; }   // (v39.54)
+    // ⚠⚠ (v41.41) IN VR, NOTHING BUT THE HEADSET MAY MOVE THE VIEW. Owner: "in VR, the stasis
+    // field and tether traps shouldn't lock/nudge the look".
+    // Three things in this block take the view away from the player, and all three are correct on a
+    // flat screen and wrong in a headset: the stick/mouse deltas rotate `player.euler`, the pitch
+    // clamp SNAPS it if the player happens to be looking past 81 degrees, and the quaternion write
+    // then forces the camera to that euler. On a monitor the view is the game's to move. In VR it is
+    // the player's neck - taking it is the thing that makes people ill, and a clamp that yanks the
+    // horizon while you are rooted in place is the worst version of it.
+    // Being ROOTED is gameplay and stays: the velocity is still zeroed above, so a stasis field and a
+    // tether still hold you exactly where they did. Only the camera is handed back.
+    // ⚠ Scoped to stasis and the tether root, as asked. WARMUP shares this branch and still drives
+    // the view in VR - it is the same argument and would be a one-word change, but it is a different
+    // moment (the 3-2-1, where a fixed view is arguably intended) so it is left alone deliberately.
+    const _vrHold = ((typeof isXRPresenting === 'function') && isXRPresenting()) &&
+                    (game.playerInStasis || game.playerRootTimer > 0);
+    if (!_vrHold) {
+      // Still allow looking around but no movement
+      if ((input.locked || input.touchActive) && (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
+        { const _ls = _adsLookScale(); player.euler.y -= input.mouseDX * input.sensitivity * _ls; player.euler.x -= input.mouseDY * input.sensitivity * _ls; }   // (v39.54)
+      }
+      if (input.gpConnected) {
+        { const _ls = _adsLookScale(); player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt * _ls; player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt * _ls; }   // (v39.54)
+      }
+      player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
     }
-    if (input.gpConnected) {
-      { const _ls = _adsLookScale(); player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt * _ls; player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt * _ls; }   // (v39.54)
-    }
-    player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
-    input.mouseDX = 0; input.mouseDY = 0;
-    camera.quaternion.setFromEuler(player.euler);
+    input.mouseDX = 0; input.mouseDY = 0;   // consumed either way, or they bank up for the release
+    if (!_vrHold) camera.quaternion.setFromEuler(player.euler);
     camera.position.copy(player.position);
     _lssApplyShipRig(dt);   
     return;
@@ -74888,7 +75709,8 @@ function updateAbilities(dt) {
           if (!player._vortexCoreGlows) {
             const _gm = _vortexGlowMaterial();   // (v39.68) shared with the Laser ability
             player._vortexCoreGlows = [0, 1, 2].map(() => { const q = new THREE.Mesh(_vortexGlowGeometry(), _gm); q.frustumCulled = false; q.renderOrder = 3; scene.add(q); return q; });
-            try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player._vortexCoreGlows[0]); } catch (_) {}
+            // (v41.65) postFX.rtScene, explicitly - this was a one-argument call and therefore a no-op.
+            try { if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX) _warmDrawRoot(player._vortexCoreGlows[0], postFX.rtScene); } catch (_) {}
           }
           const _vfG = window.__vortexFire || {};
           const _gMuz = (_vfG.glowMuzzle != null) ? _vfG.glowMuzzle : 30, _gJoint = (_vfG.glowJoint != null) ? _vfG.glowJoint : 4.5 * _armR;
@@ -78619,7 +79441,7 @@ function _hlArcBar(ctx, r, p, pct, col) {
     ctx.arc(r.cx, r.cy, rad + th / 2, s, e);
     ctx.arc(r.cx, r.cy, rad - th / 2, e, s, true);
     ctx.closePath();
-    ctx.strokeStyle = col; ctx.lineWidth = border; ctx.globalAlpha = 1; ctx.stroke();
+    ctx.strokeStyle = col; ctx.lineWidth = border; ctx.globalAlpha = _hlGA(); ctx.stroke();
     const f = Math.max(0, Math.min(1, pct * n - i));
     if (f > 0.001) {
       const inset = 2.5 / rad;
@@ -78662,7 +79484,7 @@ function _hlNanoSpan(ctx, r, p, f0, f1, col, lw, alpha) {
   const span = (a1 - a0 - gap * (n - 1)) / n;
   const inset = 2.5 / rad;                         // radians — matches _hlArcBar
   ctx.save();
-  ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.globalAlpha = alpha;
+  ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.globalAlpha = alpha * _hlGA();
   ctx.shadowColor = col; ctx.shadowBlur = lw * 0.9;
   for (let i = 0; i < n; i++) {
     const g0 = Math.max(0, Math.min(1, f0 * n - i));
@@ -78733,11 +79555,11 @@ function _hlSegArc(ctx, r, p, pct, col) {
   ctx.lineCap = 'butt';
   for (let i = 0; i < n; i++) {
     const s = a0 + i * (span + gap), e = s + span;
-    ctx.strokeStyle = col; ctx.globalAlpha = 0.16;
+    ctx.strokeStyle = col; ctx.globalAlpha = 0.16 * _hlGA();
     ctx.beginPath(); ctx.arc(r.cx, r.cy, rad, s * _HL_D2R, e * _HL_D2R); ctx.stroke();
     const f = Math.max(0, Math.min(1, pct * n - i));
     if (f > 0.001) {
-      ctx.globalAlpha = 1; ctx.shadowColor = col; ctx.shadowBlur = r.vmin * 0.7;
+      ctx.globalAlpha = _hlGA(); ctx.shadowColor = col; ctx.shadowBlur = r.vmin * 0.7;
       ctx.beginPath();
       ctx.arc(r.cx, r.cy, rad, s * _HL_D2R, (s + (e - s) * f) * _HL_D2R);
       ctx.stroke(); ctx.shadowBlur = 0;
@@ -78746,9 +79568,32 @@ function _hlSegArc(ctx, r, p, pct, col) {
   ctx.restore();
 }
 
-function _hlTicks(ctx, r, p, pct, col) {
+// (v41.40) HOW OPAQUE THE HUD'S GRAPHICS ARE. Text is excluded - see _hlDrawHUD.
+// window.__hudAlpha, live, 1 = the pre-41.40 HUD.
+function _hlGA() {
+  const a = (typeof window !== 'undefined' && window.__hudAlpha != null) ? +window.__hudAlpha : 0.72;
+  return (a >= 0 && a <= 1) ? a : 0.72;
+}
+// (v41.40) ONE TICK PER ROUND. Owner: "make the yellow lines on the HUD ammo correspond to how many
+// rounds are in the weapon". The strip was a fixed `seg: 19` for every gun, so a 4-round Shotgun and
+// a 150-round Gatling drew the same nineteen marks and a tick meant nothing.
+// One per round wherever that is legible - which is six of the seven loadouts (4, 6, 12, 12, 30, 40)
+// - and past 40 it subdivides so a tick still means a WHOLE number of rounds rather than a fraction:
+// the Gatling's 150 becomes 38 ticks of 4. Infinite/smart-ammo weapons keep the designed strip.
+// The lit count then falls out of the existing `frac <= pct` test for free: with seg = clip and
+// pct = clipAmmo/maxClip, the number lit IS the number of rounds left.
+function _hlAmmoSegs() {
+  try {
+    if (typeof player === 'undefined' || !player) return null;
+    const clip = player.maxClip || (player.weapon && player.weapon.clipSize) || 0;
+    if (!(clip > 0) || clip >= 999) return null;
+    const per = Math.ceil(clip / 40);
+    return Math.max(2, Math.min(40, Math.ceil(clip / per)));
+  } catch (_) { return null; }
+}
+function _hlTicks(ctx, r, p, pct, col, segOverride) {
   const rad = Math.min(r.w, r.h) / 2;
-  const n = Math.max(2, p.seg || 40);
+  const n = Math.max(2, segOverride || p.seg || 40);
   const rot = p.rot || 0;
   const a0 = (p.a0 || 200) + rot, a1 = (p.a1 != null ? p.a1 : 340) + rot;
   const len = (p.tick != null ? p.tick : 2.2) * r.vmin;
@@ -78760,7 +79605,7 @@ function _hlTicks(ctx, r, p, pct, col) {
     // `pct > 0` guard: the raw `frac <= pct` test leaves the end tick burning at
     // zero, which on an ammo gauge reads as one round left when the clip is dry.
     const lit = pct > 0 && frac <= pct;
-    ctx.strokeStyle = col; ctx.globalAlpha = lit ? 1 : 0.18;
+    ctx.strokeStyle = col; ctx.globalAlpha = (lit ? 1 : 0.18) * _hlGA();
     if (lit) { ctx.shadowColor = col; ctx.shadowBlur = r.vmin * 0.5; }
     const ca = Math.cos(a), sa = Math.sin(a);
     ctx.beginPath();
@@ -78785,11 +79630,11 @@ function _hlPips(ctx, r, p, n, col, slots) {
   for (let i = 0; i < total; i++) {
     const x = r.x + step * (i + 0.5);
     ctx.beginPath(); ctx.arc(x, r.cy, rad, 0, 7);
-    ctx.strokeStyle = col; ctx.globalAlpha = 0.6;
+    ctx.strokeStyle = col; ctx.globalAlpha = 0.6 * _hlGA();
     ctx.lineWidth = Math.max(1, r.vmin * 0.15);
     ctx.stroke();
     if (i < n) {
-      ctx.globalAlpha = 1; ctx.fillStyle = col;
+      ctx.globalAlpha = _hlGA(); ctx.fillStyle = col;
       ctx.shadowColor = col; ctx.shadowBlur = r.vmin * 0.5;
       ctx.fill(); ctx.shadowBlur = 0;
     }
@@ -78838,6 +79683,7 @@ const _hlArcTextCache = new Map();
 // would spill out of its cooldown bar and into the neighbouring one.
 function _hlArcLabel(ctx, cx, cy, radPx, midDeg, str, col, fontPx, maxDeg) {
   if (!str) return;
+  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
   const key = str + '|' + radPx.toFixed(1) + '|' + midDeg.toFixed(1) + '|' + col + '|' +
               fontPx.toFixed(1) + '|' + (maxDeg || 0);
   let spr = _hlArcTextCache.get(key);
@@ -78906,6 +79752,7 @@ function _hlGaugeLabel(ctx, r, p, val) {
   // each call site so it covers exactly the six that go through this helper —
   // the ability names take the _hlArcLabel path directly and are unaffected.
   if (typeof input !== 'undefined' && input && input.hudGaugeLabels === false) return;
+  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
   const rad = (p.labR != null) ? p.labR * r.vmin : Math.min(r.w, r.h) / 2;
   // 0.88 vmin sits deliberately under the ability names (1.0 vmin at 0.95
   // alpha) so the captions read as secondary, but 0.76 was tested at 1:1 and
@@ -78945,6 +79792,7 @@ function _hlGaugeLabel(ctx, r, p, val) {
 
 function _hlText(ctx, r, p, str, col) {
   if (!str) return;
+  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
   // ⚠ hudFont BEFORE save(). ctx.restore() reverts ctx.font but cannot touch
   // _hudFontCache, so setting the font inside a save/restore pair leaves the
   // cache claiming a font the context no longer has — and the next request for
@@ -79078,6 +79926,15 @@ function _hlCompass(ctx, r, col) {
 function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   ctx.save();
   ctx.translate(cx - W / 2, cy - H / 2);
+  // ⚠⚠ (v41.40) THE HUD'S GRAPHICS ARE TRANSLUCENT, ITS TEXT IS NOT. Owner: "make the whole HUD
+  // slightly transparent (but not the text)".
+  // A blanket globalAlpha here would not work on its own: five of the gauge helpers ASSIGN
+  // ctx.globalAlpha themselves (a lit tick at 1, a dead one at 0.18, the segarc's dim ring at 0.16)
+  // and would overwrite it. So every one of those assignments is multiplied by _hlGA() instead, and
+  // this line covers the helpers that set no alpha of their own - the reticle, radar and compass.
+  // The three TEXT helpers force alpha back to 1, which is the one thing the owner asked to keep
+  // solid; they leak that 1 forward, so the few draws that follow a label re-arm it below.
+  ctx.globalAlpha = _hlGA();
 
   let r = _hlPlace(_HL.health, W, H);
   _hlArcBar(ctx, r, _HL.health, v.healthPct, v.hCol);
@@ -79107,7 +79964,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   _hlGaugeLabel(ctx, r, _HL.speed, v.speedStr);   // (v38.75) 'SPEED  ###km/h'
 
   r = _hlPlace(_HL.ammo, W, H);
-  _hlTicks(ctx, r, _HL.ammo, v.ammoPct, v.ammoCol || _HL.ammo.col);
+  _hlTicks(ctx, r, _HL.ammo, v.ammoPct, v.ammoCol || _HL.ammo.col, _hlAmmoSegs());
   _hlGaugeLabel(ctx, r, _HL.ammo, v.ammoFull);    // (v38.75) 'AMMO  ##/##'
 
   r = _hlPlace(_HL.core, W, H);
@@ -79147,6 +80004,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
     ctx.save();
     ctx.strokeStyle = _hlA(_HL.reticle.col, 0.7);
     ctx.lineWidth = Math.max(1, r.vmin * 0.16);
+    ctx.globalAlpha = _hlGA();   // (v41.40) re-arm after the ability label above
     ctx.beginPath(); ctx.arc(r.cx, r.cy, Math.min(r.w, r.h) / 2, 0, 7); ctx.stroke();
     ctx.beginPath(); ctx.arc(r.cx, r.cy, Math.max(1, r.vmin * 0.2), 0, 7);
     ctx.fillStyle = _HL.reticle.col; ctx.fill();
@@ -79173,8 +80031,10 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   // y:-19`, and _hlCompass derives its inner radius as `R - 2.3*vmin` precisely
   // to clear the radar disc by 0.2 vmin. Scale one and pin the other and the
   // rose both detaches from the disc and moves its centre.
+  ctx.globalAlpha = _hlGA();   // (v41.40)
   _hlRadar(ctx, _hlPlace(_HL.minimap, W, H, 1));
   if (typeof window === 'undefined' || window.__hudCompass !== false) {
+    ctx.globalAlpha = _hlGA();   // (v41.40)
     _hlCompass(ctx, _hlPlace(_HL.compass, W, H, 1), _HL.compass.col);
   }
 
@@ -79248,7 +80108,7 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
       const _hm = (typeof xrHudMesh !== 'undefined') ? xrHudMesh : null;
       const _gp = (_hm && _hm.geometry && _hm.geometry.parameters) ? _hm.geometry.parameters : null;
       const _hs = (typeof input !== 'undefined' && input && typeof input.vrHudScale === 'number')
-        ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 1.5;
+        ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 3;
       _hpW = (_gp && _gp.width ? _gp.width : 2.0) * _hs;
       _hpH = (_gp && _gp.height ? _gp.height : 1.125) * _hs;
       _hpZ = _hm ? _hm.position.z : -2.0;
@@ -79440,7 +80300,7 @@ try {
     const _hm = (typeof xrHudMesh !== 'undefined') ? xrHudMesh : null;
     const _gp = (_hm && _hm.geometry && _hm.geometry.parameters) ? _hm.geometry.parameters : null;
     const _hs = (typeof input !== 'undefined' && input && typeof input.vrHudScale === 'number')
-      ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 1.5;
+      ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 3;
     const _pw = (_gp && _gp.width ? _gp.width : 2.0) * _hs;
     const _ph = (_gp && _gp.height ? _gp.height : 1.125) * _hs;
     const _pz = _hm ? _hm.position.z : -2.0;
@@ -85433,7 +86293,7 @@ function _refreshSettingsValues() {
     try { vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2); } catch (_) {}
   }
   {
-    const _hs = (typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5;
+    const _hs = (typeof input.vrHudScale === 'number') ? input.vrHudScale : 3;
     setRange('set-vr-hud-scale', null, _hs);
     const _hv = $('#val-vr-hud-scale');
     if (_hv) _hv.textContent = _hs.toFixed(2) + 'x';
@@ -85798,8 +86658,8 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row">
         <label>VR HUD Size</label>
-        <input type="range" id="set-vr-hud-scale" min="0.75" max="3" step="0.05" value="${(typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5}">
-        <div class="value-display" id="val-vr-hud-scale">${((typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5).toFixed(2)}x</div>
+        <input type="range" id="set-vr-hud-scale" min="0.75" max="3" step="0.05" value="${(typeof input.vrHudScale === 'number') ? input.vrHudScale : 3}">
+        <div class="value-display" id="val-vr-hud-scale">${((typeof input.vrHudScale === 'number') ? input.vrHudScale : 3).toFixed(2)}x</div>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Scales the HUD plane in VR only &mdash; flat screen has its own HUD Size slider above, and the two never compound. Applies live inside a running session. Default 1.5&times; &mdash; the plane was sized to match a desktop window, which reads small through a headset.</label>
@@ -87904,6 +88764,8 @@ function saveSettings() {
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
+      vrHudMigrated: true,   // (v41.43) the one-time vrHudScale default bump has been applied
+      vrWater: !!input.vrWater,   // (v41.43)
       clipRec: !!input.clipRec,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
@@ -89771,7 +90633,19 @@ function loadSettings() {
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
     // Absent key keeps the 1.5 default, so settings saved before v35.64 get the
     // larger HUD rather than being pinned to the old size by a missing entry.
-    if (typeof data.vrHudScale === 'number') input.vrHudScale = data.vrHudScale;
+    // ⚠⚠ (v41.43) A NEW DEFAULT DOES NOT REACH ANYONE WHO HAS ALREADY SAVED SETTINGS, and everyone
+    // who has ever opened the menu has. Raising the default to 3 in v41.41 changed nothing for the
+    // owner's own headset - it loaded their stored 1.5 straight back over it, which is exactly what
+    // this line is for and exactly why the change looked like a no-op.
+    // So: a one-time migration off the OLD default. A stored 1.5 is what an untouched install saved,
+    // so it moves to the new default; any other value was chosen deliberately and is left alone.
+    // `vrHudMigrated` makes it happen once, so someone who later picks 1.5 on purpose keeps it.
+    if (typeof data.vrWater === 'boolean') input.vrWater = data.vrWater;   // (v41.43)
+    if (typeof data.vrHudScale === 'number') {
+      const _wasOldDefault = (Math.abs(data.vrHudScale - 1.5) < 1e-6) && !data.vrHudMigrated;
+      input.vrHudScale = _wasOldDefault ? 3 : data.vrHudScale;
+    }
+    input.vrHudMigrated = true;
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     // (v38.46) BOTH RETIRED SETTINGS ARE FORCED, not restored. Whoever turned the 3D cockpit
     // off before today has cockpit3d:false saved, and with the control gone would have been

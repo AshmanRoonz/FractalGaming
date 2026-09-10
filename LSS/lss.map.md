@@ -6201,3 +6201,96 @@ a cap of 4000.
 
 `__waterFX()` census · `__waterProbe()` (now reads the live uniform, reports `nearHull`) ·
 `__obliqueTest()` · `__blastTest(size, dy)` · `__groundY` / `__waterAt`
+
+
+---
+
+## Water v41.31 - v41.65
+
+### v41.31 - v41.47  (dots, bubbles, HUD, VR, draw distance)
+
+- **41.31** second, finer/brighter layer of crest dots (`dotsFine`, a multiple of the coarse count).
+- **41.32 - 41.39** the underwater bubble cloud becomes a FLOW field: a potential-flow dipole past the
+  hull + viscous wake entrainment + shed vorticity (`flow` / `flowWake` / `flowSwirl`), bubbles born at
+  the nose and recycled (`bubbleNose`), present only above a speed knee (`bubbleSpeed`), with
+  projectiles and beams as extra sources (`flowProj`). Per-point `aSize` via `onBeforeCompile` -
+  ⚠ that hook is what makes the material its own program; see the v41.65 warm note.
+- **41.40** HUD: one ammo tick per ROUND (`_hlAmmoSegs`, subdivides past 40 so a tick is always a whole
+  number of rounds), and the whole HUD's GRAPHICS go translucent while its TEXT stays at alpha 1
+  (`_hlGA()`, `window.__hudAlpha`, default 0.72). Five gauge helpers assign their own alpha, so a
+  blanket `globalAlpha` could not work - each assignment is multiplied instead.
+- **41.41 - 41.43** VR: stasis and the tether root stop driving the view (`_vrHold`); the VR HUD
+  defaults to 3x with a one-time migration (saved settings override defaults, so the new default alone
+  was a no-op); full water becomes a VR OPTION (`_swVrLite()` / `input.vrWater`) instead of hard-off.
+- **41.44 - 41.47** ripple draw distance. ⚠ The window was never the binding constraint -
+  DAMPING was: at visc 0.9885 a ripple is down to 11% by 3000 units. 256 res / 8000 bounds AND visc
+  0.9945 together. The crest-break readback moved to a centred 128x128 sub-rect so a wider sim costs it
+  nothing, and the Reflector's `uRippleBounds` literal 4000 (only ever right by coincidence) was fixed.
+
+### v41.48 - v41.65  (whitening, the spikes, and the reflection hunt)
+
+**Whitening.** 41.48 found the height route to foam mathematically dead - `smoothstep(uPeakLo, 1.0,
+vDisp)` where vDisp saturates at 0.5 - and gave it a reachable `uPeakHi`. 41.49 added the crest cap,
+after 41.48's first cut gated it on SLOPE and fired on nothing (a crest apex is its flattest point:
+the five tallest near-hull texels measured slope 0.013-0.073 against a 0.50 gate).
+
+**41.49 the spikey triangles.** Seeds narrower than a texel (`Math.max(20, r)` vs 31.3 u) land on one
+sample = the 2-texel Nyquist mode, which the v41.15 crest expander draws as a 130-unit needle;
+`R.pending` caps at 8, hence "4 or 5". Floored at 1.5 texels of the live grid, area-corrected. The
+wake got STRONGER (near-hull vDisp p90 0.133 -> 0.171, slope p90 0.294 -> 0.473) because the energy
+now goes into travelling waves instead of a mode that does not propagate.
+
+**41.53 - 41.56 the foam field.** Owner: "the white peaks should only be on the wake behind the ship
+and weapons, not on all the waves/ripples". Height cannot separate them - the sim reflects waves off
+shorelines, so the whole lake carries crest-amplitude ripples within seconds. Foam gets its own field
+in the heightmap's unused `.z` channel: deposited where energy is injected, decaying in place, never
+propagating. Every seed comes from a hull or a weapon, so that field IS the wake. It gates the crest
+cap (41.53), the reflection matte (41.54) and the aerated albedo (41.55, its own much wider window).
+
+**41.61 the faceted ripples.** The sheet is `PlaneGeometry(24576, 768, 768)` = 32.0 u/quad against a
+31.3-unit texel - one vertex per texel. The facets were the NORMAL: its taps sat +/-2 world units,
+inside one texel, and a LinearFilter heightmap has a piecewise-CONSTANT gradient, so every vertex got
+its texel's constant normal and each triangle shaded flat. `uTapW` spans half a texel each side; the
+normal formula was already parameterised by tap width, so it is free.
+
+**41.58 the wings.** Every wake seed was placed off `fp.BEAM`/`fp.half`, and `_swShipFootprint` builds
+those from the chassis BODY: `half` = 45 units on a ship whose bounding box is 317 across. A wing tip
+159 units out could be underwater and touch nothing. Wing tips now get their own contact test at the
+real half-span (`_swHullSpan()`), with the right vector off the ship's quaternion so roll carries in.
+
+**41.63 THE REFLECTION.** ⚠⚠ `if (dot(reflTex, luma) < 0.04 && graze > 0.5) reflTex =
+skyT;` - it asks "is this pixel dark?" when it means "did the sample land somewhere valid?", so it
+punched pale sky through the DARK PARTS of any reflected hull or cliff, per pixel, at grazing angles.
+That single line is "the texture is broken", "cut out to white", "the land cutting through the wake",
+"all ships but slayer and puncture" (dark hulls trip it) and "only once you get close enough"
+(graze > 0.5 = down near the water). Replaced by the condition it was proxying for: `ruv.w <= 0` or
+the projected UV off the texture. 41.64 then removed the edge feather that fix introduced - a planar
+mirror's UV space IS screen space, so feathering it drew a haze frame along the bottom of the screen.
+
+**Dead ends kept for the record.** 41.50-41.52 (mirror parallax, tilt shear, `uReflPerturb` 0.6 -> 4.0)
+and 41.54/41.57 (the hull water-exclusion) were all aimed at the reflection artefact and all missed it;
+41.57 reverted the perturbation (at 4.0 the shear moved the sample 13% of the SCREEN) and 41.58 turned
+the exclusion off by default (it flattened the near wake, which starts at the hull). The machinery
+stays behind `window.__water.hullR` / `.reflPar` / `.reflWave`, armed by nothing.
+
+**41.65 the warm.** `_warmDrawRoot(root)` with one argument returns before it draws. Three warms had
+shipped dead - the bubble cloud, the bird/fish mesh, the Vortex core glow. `rt` now defaults to
+`postFX.rtScene` with a one-time warning, the bubble warm moved from the COUNTDOWN into
+`_prebakeGpuPrime` (seeded first, or `Box3` frames a point), and the flock's compile-only half-warm
+became a real draw.
+
+### Knobs added
+
+`peakHi` `capLo` `capHi` `capStr` `capSteep` `capFreq` `capBright` `capFoamLo` `capFoamHi` ·
+`matteLo` `matteHi` `foamMatte` `foamAlb` · `foamDecay` `seedFoam` `seedTexels` · `tapW` ·
+`reflPar` `reflWave` `reflPerturb` `reflChop` `reflDevD` `reflDevN` · `refractMax` `murkMin`
+`murkTint` · `hullR` `hullFade` `hullTop` · `debugTerm`
+
+### Instruments
+
+`__crestStat(radius)` - vDisp / slope / foam percentiles at the hull or out in the wake, replicating
+the vertex shader exactly. Set every threshold against it; three have now been shipped outside their
+own range. · `__mirrorDump()` - the planar mirror's render target into a canvas (proved the RT was
+correct while the screen was not). · `window.__water.debugTerm = 1..8` - the water outputs ONE term
+full-screen. · ⚠ Bisect the water by DETACHING it from the scene: `_swRippleTick` rewrites
+`.visible` and the Reflector's `colorWrite` every frame, so hiding either proves nothing.

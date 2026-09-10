@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.39';
+const LSS_BUILD = '41.65';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -638,7 +638,8 @@ const input = {
     invertPitch: false,
   },
   vrRenderScale: 0.7,
-  vrHudScale: 1.5,
+  vrHudScale: 3,
+  vrWater: false,
   hudScale: 1,
   vrPerfMode: 'standard',
   vrStripFx: false,
@@ -11761,17 +11762,29 @@ function _xrSettingsRows() {
     },
     {
       label: 'VR HUD Size',
-      value: ((input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5).toFixed(2) + 'x',
+      value: ((input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 3).toFixed(2) + 'x',
       change: (dir) => {
-        const cur = (input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5;
+        const cur = (input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 3;
         input.vrHudScale = Math.max(0.75, Math.min(3, Math.round((cur + dir * 0.05) * 20) / 20));
         if (typeof saveSettings === 'function') saveSettings();
       },
       activate: () => {
-        const steps = [1, 1.5, 2, 2.5];
-        const cur = (input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5;
+        const steps = [1, 1.5, 2, 2.5, 3];
+        const cur = (input && typeof input.vrHudScale === 'number') ? input.vrHudScale : 3;
         let i = steps.findIndex(s => s > cur + 1e-6);
         input.vrHudScale = steps[i < 0 ? 0 : i];
+        if (typeof saveSettings === 'function') saveSettings();
+      },
+    },
+    {
+      label: 'Water Effects',
+      value: (input && input.vrWater) ? 'FULL' : 'LITE',
+      change: () => {
+        input.vrWater = !input.vrWater;
+        if (typeof saveSettings === 'function') saveSettings();
+      },
+      activate: () => {
+        input.vrWater = !input.vrWater;
         if (typeof saveSettings === 'function') saveSettings();
       },
     },
@@ -12769,6 +12782,11 @@ function isStandaloneQuest() {
   }
 }
 
+function _swVrLite() {
+  if (!((typeof isXRPresenting === 'function') && isXRPresenting())) return false;
+  try { if (typeof input !== 'undefined' && input && input.vrWater) return false; } catch (_) {}
+  return true;
+}
 function isXRPresenting() {
   const r = (typeof window !== 'undefined') ? window.renderer : null;
   return !!(r && r.xr && r.xr.isPresenting);
@@ -13829,6 +13847,9 @@ function _waterRefractBind(rnd, scn, cam) {
     const W = window.__water || {};
     u.uRefract.value = (W.refract != null) ? +W.refract : 1.0;
     if (W.refractK != null) u.uRefractK.value = +W.refractK;
+    if (W.refractMax != null && u.uRefractMax) u.uRefractMax.value = +W.refractMax;   // (v41.59)
+    if (W.murkMin != null && u.uMurkMin) u.uMurkMin.value = +W.murkMin;               // (v41.62)
+    if (W.murkTint != null && u.uMurkTint) u.uMurkTint.value = +W.murkTint;           // (v41.62)
     const I = window.__waterRefractInfo || (window.__waterRefractInfo = { frames: 0 });
     I.frames++; I.res = [bw, bh]; I.target = [rt.width, rt.height]; I.live = [A.w, A.h]; I.k = u.uRefractK.value; I.inline = true;
   } catch (_) { u.uRefract.value = 0.0; }
@@ -14019,7 +14040,7 @@ function renderFrame() {
       if (_hudMesh) {
         _hudMesh.visible = _xrShowHud;
         const _hs = (typeof input !== 'undefined' && input && typeof input.vrHudScale === 'number')
-          ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 1.5;
+          ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 3;
         if (_hudMesh.scale.x !== _hs) _hudMesh.scale.setScalar(_hs);
         {
           const _H3 = window.__hud3d || {};
@@ -16143,7 +16164,7 @@ function _swWaterReflectShader() {
       THREE.UniformsLib.fog,
       { color: { value: null }, tDiffuse: { value: null }, textureMatrix: { value: null },
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() }, uFade: { value: 1 },   
-        uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 }, uRippleScale: { value: 0 },   
+        uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: _SW_RIPPLE_BOUNDS }, uRippleScale: { value: 0 },   
         uMaskTex: { value: null }, uFoamGain: { value: 1 }, uFoamLit: { value: 1 }, uReliefScale: { value: 28.0 }, uReliefShade: { value: 0.7 },   
         uSnellTint: { value: new THREE.Color(0x9fd0e6) }, uDeepTint: { value: new THREE.Color(0x0a3a44) }, uSubmerge: { value: 0 }, uEye: { value: new THREE.Vector3() }, uReflLive: { value: 1 }, uFlipFace: { value: 0 },   
         uShallowTint: { value: new THREE.Color(0x2e7a6a) }, uShoreSoft: { value: 0.05 }, uFoamThresh: { value: 0.18 },
@@ -16294,9 +16315,9 @@ function _swWaterReflectShader() {
 
 
 
-const _SW_RIPPLE_RES = 128;          
-const _SW_RIPPLE_BOUNDS = 4000;      
-const _SW_MASK_RES = 96;             
+const _SW_RIPPLE_RES = 256;          
+const _SW_RIPPLE_BOUNDS = 8000;      
+const _SW_MASK_RES = 160;            
 const _SW_FARMASK_RES = 96;          
 const _SW_FARMASK_BOUNDS = 24000;    
 const _swRipple = {
@@ -16318,6 +16339,7 @@ const _SW_RIPPLE_FRAG = [
   'uniform sampler2D uMaskTex;',     
   'uniform vec2 uScroll;',           
   'uniform float uSeedImpulse;',   // (v41.02) 0 = the v41.01 displacement pluck, 1 = a pure velocity impulse
+  'uniform float uFoamDecay; uniform float uSeedFoamK;',   // (v41.53) the foam field - see the note below
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -16332,11 +16354,13 @@ const _SW_RIPPLE_FRAG = [
   '  float nh = (2.0 * hC - h.y + uWaveC2 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
   '  vec2 wpos = (uv - 0.5) * BOUNDS;',
   '  float sAcc = 0.0;',
+  '  float fAcc = 0.0;',
   '  for (int i = 0; i < 8; i++){',
   '    if (i >= uSeedCount) break;',
   '    vec4 sd = uSeeds[i];',
   '    float ph = clamp(length(wpos - sd.xy) * PI / sd.z, 0.0, PI);',
-  '    sAcc += (cos(ph) + 1.0) * sd.w;',   
+  '    sAcc += (cos(ph) + 1.0) * sd.w;',
+  '    fAcc += (cos(ph) + 1.0) * abs(sd.w);',   
   '  }',
   '  vec2 ed = min(uv, 1.0 - uv);',
   '  float edg = smoothstep(0.0, 0.06, min(ed.x, ed.y));',
@@ -16345,6 +16369,7 @@ const _SW_RIPPLE_FRAG = [
   '  nh += (1.0 - uSeedImpulse) * sA;',
   '  h.y = h.x - uSeedImpulse * sA;',  
   '  h.x = nh;',                      
+  '  h.z = min(1.6, (h.z * uFoamDecay + fAcc * uSeedFoamK) * edg);',
   '  gl_FragColor = h;',
   '}'
 ].join('\n');
@@ -16361,9 +16386,11 @@ function _swRippleInit() {
     v.material.defines = v.material.defines || {};
     v.material.defines.BOUNDS = _SW_RIPPLE_BOUNDS.toFixed(1);
     const seeds = []; for (let i = 0; i < 8; i++) seeds.push(new THREE.Vector4(0, 0, 1, 0));
-    v.material.uniforms.viscosity = { value: 0.9885 };   // (v38.15) 0.972 -> longer-lived energy
+    v.material.uniforms.viscosity = { value: 0.9945 };
     v.material.uniforms.uWaveC2 = { value: 0.26 };
     v.material.uniforms.uSeedImpulse = { value: 0.25 };
+    v.material.uniforms.uFoamDecay = { value: 0.9930 };   // (v41.56) ~1.6 s half-life, was ~3 s
+    v.material.uniforms.uSeedFoamK = { value: 0.10 };
     v.material.uniforms.uSeeds = { value: seeds };
     v.material.uniforms.uSeedCount = { value: 0 };
     v.material.uniforms.uScroll = { value: new THREE.Vector2(0, 0) };   
@@ -16415,7 +16442,12 @@ function _swRippleSeed(wx, wz, radius, amp) {
   if (Math.abs(wx - R.center.x) > half || Math.abs(wz - R.center.y) > half) return;   
   const _W3s = window.__water;
   const _k = (_W3s && _W3s.seedScale != null) ? +_W3s.seedScale : 1.0;
-  R.pending.push({ wx: wx, wz: wz, r: Math.max(20, radius), a: Math.max(-0.55, Math.min(0.55, amp * _k)) });   
+  const _texW = (R.bounds || _SW_RIPPLE_BOUNDS) / _SW_RIPPLE_RES;
+  const _minT = (_W3s && _W3s.seedTexels != null) ? +_W3s.seedTexels : 1.5;
+  const _rMin = _texW * _minT;
+  let _sr = Math.max(20, radius), _sa = amp * _k;
+  if (_minT > 0 && _sr < _rMin) { const _q = _sr / _rMin; _sa *= _q * _q; _sr = _rMin; }
+  R.pending.push({ wx: wx, wz: wz, r: _sr, a: Math.max(-0.55, Math.min(0.55, _sa)) });   
   if (R.pending.length > 8) R.pending.shift();   
 }
 const _SW_BETA_REF = 0.3588;      // 20.6° = atan(2*13.5/72), the deadrise of the reference hull the v33.67 gate was tuned on
@@ -17159,6 +17191,71 @@ window.__waterProbe = function () {
   try { console.log('[waterProbe]', JSON.stringify(out)); } catch (_) {}
   return out;
 };
+window.__crestStat = function (radius) {
+  radius = (radius != null) ? +radius : 600;
+  const R = _swRipple;
+  if (!R.gpu || !R.heightVar) return { err: 'no gpgpu water' };
+  const m = game && game._hubWaterDispMat;
+  if (!m || !m.uniforms) return { err: 'no disp material' };
+  const RES = _SW_RIPPLE_RES, buf = new Float32Array(RES * RES * 4);
+  const prev = renderer.getRenderTarget();
+  try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); }
+  catch (e) { return { err: String(e && e.message || e) }; }
+  if (renderer.setRenderTarget) renderer.setRenderTarget(prev);
+  const U = m.uniforms;
+  const DS = U.uDispScale.value, G = U.uGain.value, Q = U.uCrestQ.value, NK = U.uNormK.value, B = U.uRippleBounds.value;
+  const shape = function (h) { const sq = h * (1.0 + Q * Math.abs(h)); const x = sq * G / Math.max(DS, 0.01); return DS * (x / (1.0 + Math.abs(x))); };
+  const g1 = function (i, j) { i = Math.min(RES - 1, Math.max(0, i)); j = Math.min(RES - 1, Math.max(0, j)); return buf[(j * RES + i) * 4]; };
+  const g3 = function (i, j) { i = Math.min(RES - 1, Math.max(0, i)); j = Math.min(RES - 1, Math.max(0, j)); return buf[(j * RES + i) * 4 + 2]; };
+  const sampZ = function (u, v) {
+    u = Math.min(0.999, Math.max(0.001, u)); v = Math.min(0.999, Math.max(0.001, v));
+    const fx = u * RES - 0.5, fy = v * RES - 0.5;
+    const i0 = Math.floor(fx), j0 = Math.floor(fy), tx = fx - i0, ty = fy - j0;
+    return (g3(i0, j0) * (1 - tx) + g3(i0 + 1, j0) * tx) * (1 - ty) + (g3(i0, j0 + 1) * (1 - tx) + g3(i0 + 1, j0 + 1) * tx) * ty;
+  };
+  const samp = function (u, v) {
+    u = Math.min(0.999, Math.max(0.001, u)); v = Math.min(0.999, Math.max(0.001, v));
+    const fx = u * RES - 0.5, fy = v * RES - 0.5;
+    const i0 = Math.floor(fx), j0 = Math.floor(fy), tx = fx - i0, ty = fy - j0;
+    return (g1(i0, j0) * (1 - tx) + g1(i0 + 1, j0) * tx) * (1 - ty) + (g1(i0, j0 + 1) * (1 - tx) + g1(i0 + 1, j0 + 1) * tx) * ty;
+  };
+  const dU = 2.0 / B, cx = R.center.x, cz = R.center.y;
+  const px = player.position.x, pz = player.position.z;
+  const rows = [];
+  for (let wx = px - radius; wx <= px + radius; wx += 8) {
+    for (let wz = pz - radius; wz <= pz + radius; wz += 8) {
+      const u = (wx - cx) / B + 0.5, v = (wz - cz) / B + 0.5;
+      if (u < 0 || u > 1 || v < 0 || v > 1) continue;
+      const h = samp(u, v);
+      if (Math.abs(h) < 0.02) continue;                 // untouched water tells you nothing
+      const dL = shape(samp(u - dU, v)), dR = shape(samp(u + dU, v));
+      const dD = shape(samp(u, v - dU)), dUp = shape(samp(u, v + dU));
+      const nx = (dL - dR) * NK, ny = 2.0 * B * dU, nz = (dD - dUp) * NK;
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+      rows.push({ vd: h / (1 + Math.abs(h)), sl: 1 - ny / len, wu: shape(h), fm: sampZ(u, v) });
+    }
+  }
+  const pc = function (key, q) {
+    if (!rows.length) return null;
+    const a = rows.map(function (o) { return o[key]; }).sort(function (x, y) { return x - y; });
+    return +a[Math.min(a.length - 1, Math.floor(q * a.length))].toFixed(4);
+  };
+  const top = rows.slice().sort(function (x, y) { return y.vd - x.vd; }).slice(0, 5)
+    .map(function (o) { return { vDisp: +o.vd.toFixed(3), slope: +o.sl.toFixed(3), units: Math.round(o.wu) }; });
+  const out2 = {
+    samples: rows.length, radius: radius, bounds: B, uPerTexel: +(B / RES).toFixed(1),
+    vDisp: { p50: pc('vd', 0.5), p90: pc('vd', 0.9), p99: pc('vd', 0.99), max: pc('vd', 0.9999) },
+    slope: { p50: pc('sl', 0.5), p90: pc('sl', 0.9), p99: pc('sl', 0.99), max: pc('sl', 0.9999) },
+    foam: { p50: pc('fm', 0.5), p90: pc('fm', 0.9), p99: pc('fm', 0.99), max: pc('fm', 0.9999) },
+    gates: { peakLo: U.uPeakLo.value, peakHi: U.uPeakHi ? U.uPeakHi.value : null,
+             capLo: U.uCapLo ? U.uCapLo.value : null, capHi: U.uCapHi ? U.uCapHi.value : null,
+             capFoamLo: U.uCapFoamLo ? U.uCapFoamLo.value : null, capFoamHi: U.uCapFoamHi ? U.uCapFoamHi.value : null,
+             foamSlope: U.uFoamSlope.value, steepFoam: U.uSteepFoam.value },
+    tallest: top,
+  };
+  try { console.log('[crestStat]', JSON.stringify(out2)); } catch (_) {}
+  return out2;
+};
 window.__obliqueTest = function (V, deg) {
   V = (V != null) ? +V : 400; deg = (deg != null) ? +deg : 5;
   const th = deg * Math.PI / 180, Vn = V * Math.sin(th), Vt = V * Math.cos(th);
@@ -17404,6 +17501,19 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
                                 Math.min(26, Math.round((8 + 16 * fp.heft) * _shed)), 0.92, 1.0, 1.15, 1.15);
   }
 }
+const _swWingR = new THREE.Vector3();   // (v41.58) scratch for the wing-contact test
+function _swHullSpan() {
+  try {
+    const m = (typeof player !== 'undefined' && player) ? player.mesh : null;
+    if (!m) return 0;
+    if (_swHullSpan._m === m && _swHullSpan._v > 0) return _swHullSpan._v;
+    const b = new THREE.Box3().setFromObject(m);
+    const v = Math.max(b.max.x - b.min.x, b.max.z - b.min.z) * 0.5;
+    if (!isFinite(v) || v <= 0) return 0;
+    _swHullSpan._m = m; _swHullSpan._v = v;
+    return v;
+  } catch (_) { return 0; }
+}
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
   if (game._xrBlurred) return;
@@ -17415,6 +17525,8 @@ function _swRippleTick(dt) {
       if (_W3.waveC2 != null && _u.uWaveC2) _u.uWaveC2.value = _W3.waveC2;
       if (_W3.visc != null && _u.viscosity) _u.viscosity.value = _W3.visc;
       if (_W3.seedImpulse != null && _u.uSeedImpulse) _u.uSeedImpulse.value = _W3.seedImpulse;   // (v41.02)
+      if (_W3.foamDecay != null && _u.uFoamDecay) _u.uFoamDecay.value = _W3.foamDecay;           // (v41.53)
+      if (_W3.seedFoam != null && _u.uSeedFoamK) _u.uSeedFoamK.value = _W3.seedFoam;             // (v41.53)
     }
   } catch (_) {}   
   
@@ -17568,6 +17680,28 @@ function _swRippleTick(dt) {
         const sx = px - hx * shoulder, sz = pz - hz * shoulder;
         _swRippleSeed(sx + lpx * off, sz + lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
         _swRippleSeed(sx - lpx * off, sz - lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
+        try {
+          const _wSpan = _swHullSpan();
+          if (_wSpan > fp.BEAM * 0.6) {
+            const _wm = player.mesh;
+            let _rx = lpx, _ry = 0, _rz = lpz;
+            if (_wm) { _swWingR.set(1, 0, 0).applyQuaternion(_wm.quaternion); _rx = _swWingR.x; _ry = _swWingR.y; _rz = _swWingR.z; }
+            const _wr = _wSpan * 0.88;                       // just inboard of the tip
+            const _wy = (player.mesh ? player.mesh.position.y : player.position.y);
+            for (let _sgn = -1; _sgn <= 1; _sgn += 2) {
+              const _tipY = _wy + _ry * _wr * _sgn;
+              const _dep = WL - _tipY;                        // >0 means this tip is under the surface
+              if (_dep <= 0) continue;
+              const _tx = px + _rx * _wr * _sgn, _tz = pz + _rz * _wr * _sgn;
+              const _wk = Math.min(1, _dep / Math.max(6, fp.DRAFT * 2));
+              _swRippleSeed(_tx, _tz, Math.max(22, fp.BEAM * 0.40), amp * _wk * (0.45 + 0.85 * spd) * 0.9);
+              _swFxN('wingCut');
+              if (window.__waterDisp && spd > 0.12 && ((R.dotStep | 0) & 1) === 0) {
+                _swCrestSpray(_tx, WL, _tz, amp * _wk * (0.4 + 0.9 * spd) * 0.8, player.velocity.x, player.velocity.z);
+              }
+            }
+          }
+        } catch (_) {}
         _swFxN('wake');
         R.dotStep = (R.dotStep | 0) + 1;
         if ((R.dotStep & 1) === 0) {
@@ -17638,7 +17772,7 @@ function _swRippleTick(dt) {
     try { _swBlastTick(dt, WL); } catch (_) {}   // (v41.19) deferred blast columns
   }
   R.acc += dt;
-  if (R.acc >= (((typeof isXRPresenting === 'function') && isXRPresenting()) ? R.step * 2.0 : R.step)) {   
+  if (R.acc >= (_swVrLite() ? R.step * 2.0 : R.step)) {   // (v41.42) full-rate sim when VR water is on
     R.acc = 0;
     const u = R.heightVar.material.uniforms;
     if (u.uScroll) { u.uScroll.value.set(R.scrollX, R.scrollZ); R.scrollX = 0; R.scrollZ = 0; }   
@@ -17669,7 +17803,7 @@ function _swRippleTick(dt) {
       } catch (_) { return true; }
     })();
     if (w && window.__waterDisp && _Wc.crestBreak !== 0 && !game._swSubmerged && !R._crErr && _crAlt &&
-        !((typeof isXRPresenting === 'function') && isXRPresenting()) &&
+        !_swVrLite() &&   // (v41.42)
         renderer && renderer.readRenderTargetPixels && R.gpu.getAlternateRenderTarget) {
       R._crStep = (R._crStep || 0) + 1;
       const _every = Math.max(1, (_Wc.breakEvery | 0) || 4);
@@ -17678,7 +17812,9 @@ function _swRippleTick(dt) {
       const _crOff = _crHold || !!(R._crOffUntil && performance.now() < R._crOffUntil);
       if (!_crOff && R._crStep % (R._crSkip || _every) === 0) {
         const RES = _SW_RIPPLE_RES, B = R.bounds, WLc = w.userData.WL;
-        if (!R._crBuf) R._crBuf = new Float32Array(RES * RES * 4);
+        const CRS = Math.min(128, RES);                 // sub-rect size
+        const CO = ((RES - CRS) >> 1);                  // its offset into the target
+        if (!R._crBuf || R._crBuf.length < CRS * CRS * 4) R._crBuf = new Float32Array(CRS * CRS * 4);
         const buf = R._crBuf;
         const _asyncRB = (typeof renderer.readRenderTargetPixelsAsync === 'function') && !_Wc.syncReadback && !R._crAsyncErr;
         let _scanNow = false;
@@ -17689,7 +17825,7 @@ function _swRippleTick(dt) {
             const _prevRT = renderer.getRenderTarget();
             let _pr = null;
             const _rt0 = performance.now();
-            try { _pr = renderer.readRenderTargetPixelsAsync(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); }
+            try { _pr = renderer.readRenderTargetPixelsAsync(R.gpu.getAlternateRenderTarget(R.heightVar), CO, CO, CRS, CRS, buf); }
             catch (e) { R._crPending = false; R._crAsyncErr = 1; try { console.warn('[crestBreak] async readback unavailable, using the synchronous path:', e && e.message); } catch (_) {} }
             if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
             try { const _gl = renderer.getContext(); if (_gl && _gl.PIXEL_PACK_BUFFER) _gl.bindBuffer(_gl.PIXEL_PACK_BUFFER, null); } catch (_) {}
@@ -17710,7 +17846,7 @@ function _swRippleTick(dt) {
         } else {
           const _prevRT = renderer.getRenderTarget();
           const _rt0s = performance.now();
-          try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), 0, 0, RES, RES, buf); _scanNow = true; }
+          try { renderer.readRenderTargetPixels(R.gpu.getAlternateRenderTarget(R.heightVar), CO, CO, CRS, CRS, buf); _scanNow = true; }
           catch (e) { R._crErr = 1; try { console.warn('[crestBreak] readback failed — disabling rule, set window.__water.crestBreak=0 to clear:', e && e.message); } catch (_) {} }
           if (renderer.setRenderTarget) renderer.setRenderTarget(_prevRT);
           { const _c = performance.now() - _rt0s; R._crCost = _c;
@@ -17734,22 +17870,22 @@ function _swRippleTick(dt) {
           const svx = player.velocity ? player.velocity.x : 0, svz = player.velocity ? player.velocity.z : 0;
           const sc = function (hh, wf) { const x = hh * g2d; return (x / (1 + Math.abs(x))) * wf; };  
           let emitted = 0, nBreak = 0, maxV = 0;
-          R._crScan = (((R._crScan || 0) + 7) % (RES - 2));                    
+          R._crScan = (((R._crScan || 0) + 7) % (CRS - 2));                    
           const _scanT0 = performance.now();
-          for (let jj = 0; jj < RES - 2 && emitted < budget && game.particles.length < _crPool; jj++) {
+          for (let jj = 0; jj < CRS - 2 && emitted < budget && game.particles.length < _crPool; jj++) {
             if ((jj & 7) === 7 && performance.now() - _scanT0 > 1.5) break;   // (v39.49) the scan + sprays stay under ~1.5 ms a frame
-            const j = 1 + ((jj + R._crScan) % (RES - 2));
-            const rvY = (j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
-            const rowB = j * RES;
-            for (let i = 1; i < RES - 1; i++) {
+            const j = 1 + ((jj + R._crScan) % (CRS - 2));
+            const rvY = (CO + j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
+            const rowB = j * CRS;
+            for (let i = 1; i < CRS - 1; i++) {
               const h = buf[(rowB + i) * 4];
               if (h < 0.12) continue;                                          
-              const rvX = (i + 0.5) * invR, ed = Math.min(Math.min(rvX, 1 - rvX), edY);
+              const rvX = (CO + i + 0.5) * invR, ed = Math.min(Math.min(rvX, 1 - rvX), edY);
               const t = ed <= 0 ? 0 : (ed >= 0.12 ? 1 : ed / 0.12), wf = t * t * (3 - 2 * t);   
               const vD = sc(h, wf);
               if (vD < bPeak) continue;
               const gx = sc(buf[(rowB + i + 1) * 4], wf) - sc(buf[(rowB + i - 1) * 4], wf);
-              const gz = sc(buf[((j + 1) * RES + i) * 4], wf) - sc(buf[((j - 1) * RES + i) * 4], wf);
+              const gz = sc(buf[((j + 1) * CRS + i) * 4], wf) - sc(buf[((j - 1) * CRS + i) * 4], wf);
               const slope = Math.sqrt(gx * gx + gz * gz);
               if (slope < bSlope) continue;
               nBreak++; if (vD > maxV) maxV = vD;
@@ -17777,6 +17913,7 @@ function _swRippleTick(dt) {
     wu.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
     wu.uRippleCenter.value.set(R.center.x, R.center.y);
     wu.uRippleScale.value = R.scale;
+    if (wu.uRippleBounds) wu.uRippleBounds.value = R.bounds;   // (v41.45) see the note at its declaration
     if (wu.uMaskTex) wu.uMaskTex.value = R.maskTex;   
   }
   if (typeof window !== 'undefined' && window.__waterDisp &&
@@ -17784,7 +17921,7 @@ function _swRippleTick(dt) {
     const WL2 = w ? w.userData.WL : (game._hubWaterWL || 0);
     const dm = _swBuildHubWaterDispGet(WL2);
     if (dm) {
-      const _vrR = (typeof isXRPresenting === 'function') && isXRPresenting();
+      const _vrR = _swVrLite();
       dm.visible = !game._swSubmerged && !_vrR;
       dm.position.set(px, WL2, pz);   
       const du = dm.material.uniforms;
@@ -17802,6 +17939,35 @@ function _swRippleTick(dt) {
       if (W2.sprayBreak !== undefined) du.uSprayBreak.value = W2.sprayBreak;   
       if (W2.mist !== undefined) du.uMist.value = W2.mist;                     
       if (W2.peakLo !== undefined) du.uPeakLo.value = W2.peakLo;               
+      if (W2.peakHi !== undefined && du.uPeakHi) du.uPeakHi.value = W2.peakHi;         // (v41.48)
+      if (W2.capLo !== undefined && du.uCapLo) du.uCapLo.value = W2.capLo;             // (v41.48)
+      if (W2.capHi !== undefined && du.uCapHi) du.uCapHi.value = W2.capHi;             // (v41.48)
+      if (W2.capStr !== undefined && du.uCapStr) du.uCapStr.value = W2.capStr;         // (v41.48)
+      if (W2.capSteep !== undefined && du.uCapSteep) du.uCapSteep.value = W2.capSteep; // (v41.49)
+      if (W2.capFoamLo !== undefined && du.uCapFoamLo) du.uCapFoamLo.value = W2.capFoamLo;   // (v41.53)
+      if (W2.capFoamHi !== undefined && du.uCapFoamHi) du.uCapFoamHi.value = W2.capFoamHi;   // (v41.53)
+      if (W2.foamMatte !== undefined && du.uFoamMatte) du.uFoamMatte.value = W2.foamMatte;   // (v41.54)
+      if (W2.foamAlb !== undefined && du.uFoamAlb) du.uFoamAlb.value = W2.foamAlb;           // (v41.55)
+      if (W2.matteLo !== undefined && du.uMatteLo) du.uMatteLo.value = W2.matteLo;           // (v41.55)
+      if (W2.matteHi !== undefined && du.uMatteHi) du.uMatteHi.value = W2.matteHi;           // (v41.55)
+      try {
+        const _hAlt = (typeof player !== 'undefined' && player && player.position) ? (player.position.y - WL2) : 1e6;
+        const _hSpan = Math.max(_swHullSpan(), (_swShipFootprint().half || 0));   // (v41.57) the real hull
+        const _hOn = (W2.hullR > 0) && !game._swSubmerged && _hSpan > 0;
+        du.uHullXZ.value.set(px, pz);
+        du.uHullR.value = _hOn ? W2.hullR : 0.0;
+        du.uHullFade.value = (W2.hullFade != null) ? W2.hullFade : Math.max(80, _hSpan * 1.2);
+        du.uHullTop.value = _hOn ? ((W2.hullTop != null) ? W2.hullTop : Math.max(_hAlt, 0)) : 1.0e6;
+      } catch (_) {}
+      if (du.uTapW) du.uTapW.value = (W2.tapW != null) ? +W2.tapW : Math.max(2, (R.bounds / _SW_RIPPLE_RES) * 0.5);
+      if (W2.reflPar !== undefined && du.uReflPar) du.uReflPar.value = W2.reflPar;     // (v41.50)
+      if (W2.reflWave !== undefined && du.uReflWave) du.uReflWave.value = W2.reflWave; // (v41.50)
+      if (W2.reflChop !== undefined && du.uReflChop) du.uReflChop.value = W2.reflChop; // (v41.51)
+      if (W2.reflDevD !== undefined && du.uReflDevD) du.uReflDevD.value = W2.reflDevD; // (v41.56)
+      if (W2.reflDevN !== undefined && du.uReflDevN) du.uReflDevN.value = W2.reflDevN; // (v41.56)
+      if (du.uDebugTerm) du.uDebugTerm.value = (W2.debugTerm != null) ? +W2.debugTerm : 0.0;   // (v41.60)
+      if (W2.capFreq !== undefined && du.uCapFreq) du.uCapFreq.value = W2.capFreq;     // (v41.48)
+      if (W2.capBright !== undefined && du.uCapBright) du.uCapBright.value = W2.capBright;   // (v41.48)
       if (W2.sprayFreq !== undefined) du.uSprayFreq.value = W2.sprayFreq;      
       
       
@@ -17815,7 +17981,7 @@ function _swRippleTick(dt) {
         du.uReflLive.value = 0.0;
       }
       du.uReflMix.value = (W2.reflMix != null) ? W2.reflMix : 1.0;            
-      du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 0.6;   // (v39.66) steadier mirror image
+      du.uReflPerturb.value = (W2.reflPerturb != null) ? W2.reflPerturb : 0.6;   // (v41.57) 4.0 reverted
       du.uReflFar.value = (W2.reflFar != null) ? W2.reflFar : 9000.0;      // (v38.56)
       const _wlit = (function () {
         try {
@@ -18591,7 +18757,7 @@ function _ecrKind(kind) {
   const mesh = new THREE.Mesh(geo, mat); mesh.frustumCulled = false; mesh.renderOrder = kind === 'fish' ? -2 : 0; mesh.visible = false;
   scene.add(mesh);
   try { if (typeof _lssRetainMat === 'function') _lssRetainMat(mat); } catch (_) {}
-  try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(mesh); } catch (_) {}
+  try { if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX) _warmDrawRoot(mesh, postFX.rtScene); } catch (_) {}
   const K = { mesh, geo, mat, posTex, velTex, cap, pos: posTex.image.data, vel: velTex.image.data };
   if (kind === 'fish') _ecr.fish = K; else _ecr.bats = K;
   return K;
@@ -18834,45 +19000,71 @@ function _swBuildHubWaterDispGet(WL) {
     transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: true,
     uniforms: THREE.UniformsUtils.merge([
       THREE.UniformsLib.fog,
-      { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 },
+      { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: _SW_RIPPLE_BOUNDS },   // (v41.45) the constant, not a literal
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() },
         uDispScale: { value: 180.0 }, uGain: { value: 100.0 }, uCrestQ: { value: 11.0 },
         uFoamSlope: { value: 0.50 }, uSteepFoam: { value: 0.55 }, uNormK: { value: 1.0 },
         color: { value: new THREE.Color(0x16465c) },
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 },
         uSprayBreak: { value: 1.4 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.32 }, uSprayFreq: { value: 0.05 },
-        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 0.6 }, uReflBright: { value: 1.6 },
+        uPeakHi: { value: 0.42 },
+        uCapLo: { value: 0.12 }, uCapHi: { value: 0.26 }, uCapStr: { value: 1.0 },
+        uCapSteep: { value: 0.40 }, uCapFreq: { value: 0.14 }, uCapBright: { value: 1.15 },
+        uCapFoamLo: { value: 0.18 }, uCapFoamHi: { value: 0.60 },   // (v41.56) rebased with the deposit
+        uFoamMatte: { value: 0.85 },
+        uMatteLo: { value: 0.06 }, uMatteHi: { value: 0.35 },   // (v41.56) re-based on the measured field
+        uFoamAlb: { value: 0.45 }, uFoamAlbCol: { value: new THREE.Color(0.58, 0.74, 0.78) },   // (v41.56) 0.75 was a whitewash
+        tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 4.0 }, uReflBright: { value: 1.6 },
         uReflFar: { value: 9000.0 },
+        uReflPar: { value: 0.0 }, uReflWave: { value: 0.0 },
+        uReflDevD: { value: 0.0 }, uReflDevN: { value: 1.6 },
+        uTapW: { value: 16.0 },
+        uHullXZ: { value: new THREE.Vector2(0, 0) }, uHullR: { value: 0.0 },
+        uHullFade: { value: 120.0 }, uHullTop: { value: 1.0e6 },
+        uReflChop: { value: 0.010 }, uReflChopFreq: { value: 0.020 },
         uGrazeClear: { value: 0.25 }, uGrazeAlpha: { value: 0.25 },   
         uReflFloor: { value: 0.42 }, uSkyDark: { value: 0.0 }, uReflHot: { value: 0.75 },   
 
         uMaskTex: { value: null }, uShoreSoft: { value: 0.05 }, uShoreFade: { value: 1.0 }, uShoreFoam: { value: 0.0 },   
         uFarMaskTex: { value: null }, uFarCenter: { value: new THREE.Vector2() }, uFarBounds: { value: 24000 }, uFoamLod: { value: 0.30 },
         uSceneTex: { value: null }, uSceneRes: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) },
+        uMurkMin: { value: 0.55 }, uMurkTint: { value: 1.45 },
+        uRefractMax: { value: 0.008 },
+        uDebugTerm: { value: 0.0 },   // (v41.60) see the isolator note in the fragment shader
         uRefract: { value: 0.0 }, uRefractK: { value: 0.045 } }   
     ]),
     vertexShader: [
       'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform float uCrestQ; uniform float uNormK; uniform mat4 uReflMatrix;',
+      'uniform float uReflPar;',   // (v41.50) vertex-side; uReflWave is declared in the fragment
+      'uniform float uTapW;',   // (v41.61) normal tap half-width, WORLD units - see the note below
+      'uniform vec2 uHullXZ; uniform float uHullR; uniform float uHullFade; uniform float uHullTop;',   // (v41.54)
       'float _swShape(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
+      'varying float vFoam;',   // (v41.53)
       '#include <fog_pars_vertex>',
       'void main(){',
       '  vec3 wp0 = (modelMatrix * vec4(position,1.0)).xyz;',                        
-      '  vReflUv = uReflMatrix * vec4(wp0, 1.0);',                                   
       '  vec2 rUV = (wp0.xz - uRippleCenter) / uRippleBounds + 0.5;',
       '  float inWin = step(0.0, rUV.x)*step(rUV.x,1.0)*step(0.0,rUV.y)*step(rUV.y,1.0);',
       '  float edge = min(min(rUV.x, 1.0-rUV.x), min(rUV.y, 1.0-rUV.y));',
       '  float winFade = smoothstep(0.0, 0.12, edge) * inWin;',                       
       '  vRipUv = rUV; vWinFade = winFade;',                                          
-      '  float h = texture2D(uRippleTex, clamp(rUV,0.001,0.999)).x;',
+      '  vec4 _hs = texture2D(uRippleTex, clamp(rUV,0.001,0.999));',
+      '  float h = _hs.x;',
+      '  vFoam = _hs.z * winFade;',
       '  float disp = _swShape(h) * winFade;',
+      '  float _hd = length(wp0.xz - uHullXZ);',
+      '  float _hk = smoothstep(uHullR, uHullR + max(uHullFade, 1.0), _hd);',
+      '  disp = mix(min(disp, uHullTop), disp, _hk);',
+      '  vReflUv = uReflMatrix * vec4(wp0 + vec3(0.0, disp * uReflPar, 0.0), 1.0);',
       '  vDisp = (h / (1.0 + abs(h))) * winFade;',
-      '  float dU = 2.0 / uRippleBounds;',
+      '  float dU = uTapW / uRippleBounds;',
       '  float hL = texture2D(uRippleTex, clamp(rUV - vec2(dU,0.0),0.001,0.999)).x;',
       '  float hR = texture2D(uRippleTex, clamp(rUV + vec2(dU,0.0),0.001,0.999)).x;',
       '  float hD = texture2D(uRippleTex, clamp(rUV - vec2(0.0,dU),0.001,0.999)).x;',
       '  float hU = texture2D(uRippleTex, clamp(rUV + vec2(0.0,dU),0.001,0.999)).x;',
-      '  float dL = _swShape(hL), dR = _swShape(hR), dDn = _swShape(hD), dUp = _swShape(hU);',
+      '  float dL = mix(min(_swShape(hL), uHullTop), _swShape(hL), _hk), dR = mix(min(_swShape(hR), uHullTop), _swShape(hR), _hk);',
+      '  float dDn = mix(min(_swShape(hD), uHullTop), _swShape(hD), _hk), dUp = mix(min(_swShape(hU), uHullTop), _swShape(hU), _hk);',
       '  vN = normalize(vec3((dL-dR)*winFade*uNormK, 2.0*uRippleBounds*dU, (dDn-dUp)*winFade*uNormK));',
       '  vec3 transformed = position; transformed.z += disp;',                        
       '  vec4 mvPosition = modelViewMatrix * vec4(transformed,1.0);',
@@ -18883,25 +19075,37 @@ function _swBuildHubWaterDispGet(WL) {
     ].join('\n'),
     fragmentShader: [
       'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq; uniform float uFoamSlope; uniform float uSteepFoam;',
+      'uniform float uPeakHi; uniform float uCapLo; uniform float uCapHi; uniform float uCapStr; uniform float uCapSteep; uniform float uCapFreq; uniform float uCapBright;',
+      'uniform float uCapFoamLo; uniform float uCapFoamHi; uniform float uFoamMatte;',   // (v41.53/41.54)
+      'uniform float uMatteLo; uniform float uMatteHi; uniform float uFoamAlb; uniform vec3 uFoamAlbCol;',   // (v41.55)
+      'uniform float uReflWave; uniform float uReflChop; uniform float uReflChopFreq;',   // (v41.50/41.51)
+      'uniform float uReflDevD; uniform float uReflDevN;',   // (v41.56)
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uSkyDark; uniform float uReflHot; uniform float uFoamLod; uniform float uReflFar;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
       'uniform sampler2D uFarMaskTex; uniform vec2 uFarCenter; uniform float uFarBounds;',
       'uniform sampler2D uSceneTex; uniform vec2 uSceneRes; uniform vec2 uSceneMax; uniform float uRefract; uniform float uRefractK;',   // (v39.73)   
+      'uniform float uRefractMax; uniform float uDebugTerm; uniform float uMurkMin; uniform float uMurkTint;',   // (v41.59/60/62)
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
+      'varying float vFoam;',   // (v41.53)
       '#include <fog_pars_fragment>',
       'float _h2(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }',
       'float _vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f); float a=_h2(i), b=_h2(i+vec2(1.0,0.0)), cc=_h2(i+vec2(0.0,1.0)), dd=_h2(i+vec2(1.0,1.0)); return mix(mix(a,b,f.x), mix(cc,dd,f.x), f.y); }',
       'void main(){',
+      '  vec3 _dbgSeen = vec3(0.0); float _dbgCap = 0.0;',
       '  vec3 V = normalize(uCam - vWP);',
       '  vec3 N = normalize(vN);',
       '  float fres = pow(clamp(1.0 - max(dot(N,V),0.0),0.0,1.0), 3.0);',            
-      '  fres = clamp(uReflFloor + (0.95 - uReflFloor)*fres, 0.0, 0.95);',            
+      '  fres = clamp(uReflFloor + (0.95 - uReflFloor)*fres, 0.0, 0.95);',
+      '  float _fmM = smoothstep(uMatteLo, max(uMatteHi, uMatteLo + 0.01), vFoam);',
+      '  float _fm = smoothstep(uCapFoamLo, max(uCapFoamHi, uCapFoamLo + 0.01), vFoam);',
+      '  fres *= 1.0 - uFoamMatte * _fmM;',            
       '  vec3 sunDir = normalize(vec3(0.29,0.86,0.43));',
       '  float diff = 0.4 + 0.6*max(dot(N,sunDir),0.0);',                             
       '  vec3 H = normalize(sunDir + V);',
       '  float spec = pow(max(dot(N,H),0.0), 200.0);',                                
       '  vec3 base = color * diff;',
+      '  base = mix(base, uFoamAlbCol * (0.62 + 0.55 * diff), _fmM * uFoamAlb);',
       '  float shDepth = mix(1.0, texture2D(uMaskTex, clamp(vRipUv, 0.001, 0.999)).g, vWinFade);',   // (v39.73) hoisted: the refraction below tints by depth
       '  vec3 skyT = vec3(0.32,0.47,0.66);',
       '  float _slit = clamp(pow(max(dot(fogColor, vec3(0.299,0.587,0.114)) * 1.35, 0.0), 1.6), 0.05, 1.0);',
@@ -18913,27 +19117,39 @@ function _swBuildHubWaterDispGet(WL) {
       '  float edgeFade = clamp((11500.0 - dCam) / 3000.0, 0.0, 1.0);',              
       '  vec4 ruv = vReflUv;',
       '  ruv.xy += N.xz * ruv.w * 0.04 * uReflPerturb * rfade * (1.0 - graze*0.55);', 
-      '  vec3 reflTex = texture2DProj(tDiffuse, ruv).rgb;',
-      '  if (dot(reflTex, vec3(0.299,0.587,0.114)) < 0.04 && graze > 0.5) reflTex = skyT;',   
+      '  ruv.xy += N.xz * ruv.w * uReflWave * abs(vDisp) * rfade * (1.0 - graze*0.35);',
+      '  vec2 _chop = vec2(_vn(vWP.xz * uReflChopFreq + vec2(uTime * 0.11, uTime * 0.07)), _vn(vWP.zx * uReflChopFreq * 1.31 + vec2(uTime * -0.09, uTime * 0.13))) - 0.5;',
+      '  ruv.xy += _chop * ruv.w * uReflChop * rfade;',
+      '  vec2 _rv2 = ruv.xy / max(ruv.w, 1e-4);',
+      '  vec3 reflTex = texture2D(tDiffuse, clamp(_rv2, vec2(0.0005), vec2(0.9995))).rgb;',
+      '  float _rok = step(1e-4, ruv.w);',
+      '  if (dot(reflTex, vec3(0.299,0.587,0.114)) < 0.002) _rok = 0.0;',
+      '  reflTex = mix(skyT, reflTex, _rok);',
       '  vec3 _rin = max(reflTex, 0.0) * uReflBright;',
       '  reflTex = (vec3(1.0) - exp(-_rin)) + max(_rin - vec3(1.0), vec3(0.0)) * uReflHot;',               
       '  reflTex *= 1.0 - uGrazeClear * smoothstep(0.55, 0.95, graze);',               
-      '  vec3 reflC = mix(skyT, reflTex, uReflLive);',                                
+      '  vec3 reflC = mix(skyT, reflTex, uReflLive);',
+      '  float _rvalid = clamp(1.0 - uReflDevD * abs(vDisp) - uReflDevN * (1.0 - N.y), 0.0, 1.0);',
+      '  reflC = mix(skyT, reflC, _rvalid);',                                
       '  vec3 refl = mix(skyT, reflC, uReflMix);',                                    
       '  if (uRefract > 0.001) {',
       '    vec2 suv = gl_FragCoord.xy / uSceneRes;',
-      '    suv += N.xz * uRefractK * (1.0 - graze * 0.6) * clamp(1.0 - dCam / 6000.0, 0.12, 1.0);',
+      '    vec2 _roff = N.xz * uRefractK * (1.0 - graze * 0.6) * clamp(1.0 - dCam / 6000.0, 0.12, 1.0);',
+      '    float _rlen = length(_roff);',
+      '    if (_rlen > uRefractMax) _roff *= uRefractMax / max(_rlen, 1e-5);',
+      '    suv += _roff;',
       '    suv = clamp(suv, vec2(0.0015), uSceneMax - 0.0015);',
       '    vec3 seen = texture2D(uSceneTex, suv).rgb;',
-      '    float murk = clamp(0.22 + 0.78 * shDepth, 0.0, 1.0);',
-      '    base = mix(base, seen * mix(vec3(1.0), color * 2.2, murk), uRefract * mix(0.92, 0.55, murk));',
+      '    _dbgSeen = seen;',   // (v41.60)
+      '    float murk = clamp(max(uMurkMin, 0.22 + 0.78 * shDepth), 0.0, 1.0);',
+      '    base = mix(base, seen * mix(vec3(1.0), color * uMurkTint, murk), uRefract * mix(0.92, 0.55, murk));',
       '  }',
       '  vec3 c = mix(base, refl, fres) + vec3(1.0,0.98,0.92)*spec*0.3*(1.0 - uReflMix*0.6);',
       
       
       
       
-      '  float peak = smoothstep(uPeakLo, 1.0, vDisp);',
+      '  float peak = smoothstep(uPeakLo, max(uPeakHi, uPeakLo + 0.01), vDisp);',
       '  float steepF = smoothstep(uFoamSlope, uFoamSlope + 0.30, 1.0 - N.y);',
       '  peak = max(peak, steepF * uSteepFoam);',
       '  float eW = max(exp(1.2) - log(1.0 + (1.0 - min(peak*4.0,1.0))*2.5) - 1.0, 0.0);', 
@@ -18944,6 +19160,12 @@ function _swBuildHubWaterDispGet(WL) {
       '  vec3 foamCol = vec3(0.95, 0.97, 1.0) * foamLight;',
       '  float foam = peak * mix(1.0, smoothstep(0.25, 0.85, spd), mistW);',             
       '  c = mix(c, foamCol, clamp(foam * uSprayBreak, 0.0, 0.9));',                      
+      '  float capH = smoothstep(uCapLo, max(uCapHi, uCapLo + 0.01), vDisp);',
+      '  float capN = _vn(vWP.xz * uCapFreq + vec2(uTime * 0.9, uTime * -0.7));',
+      '  float capW = _fm;',   // (v41.54) the same gate the matte uses, computed once
+      '  float cap = capH * capW * uCapStr * (1.0 + uCapSteep * steepF) * mix(0.45, 1.0, capN);',
+      '  _dbgCap = clamp(cap, 0.0, 0.97);',   // (v41.60)
+      '  c = mix(c, foamCol * uCapBright, clamp(cap, 0.0, 0.97));',
       '  c += vec3(0.80,0.88,0.96) * mistW * spd * uMist * foamLight;',                  
       
       
@@ -18962,6 +19184,17 @@ function _swBuildHubWaterDispGet(WL) {
       '  { float _whd = length(vWP.xz - uCam.xz); float _whf = smoothstep(uWHorizA, uWHorizB, _whd) * uWHorizStr; c = mix(c, fogColor, clamp(_whf, 0.0, 1.0)); }',
       '  float aGraze = 0.93 * (1.0 - uGrazeAlpha * smoothstep(0.55, 0.95, graze));',
       '  aGraze = mix(aGraze, max(aGraze, 0.99), uRefract);',   // (v39.73) the refracted floor IS the see-through; ghosting the unbent copy through it only softens it
+      '  if (uDebugTerm > 0.5) {',
+      '    vec3 dc = base;',
+      '    if (uDebugTerm < 1.5) dc = refl * fres;',
+      '    else if (uDebugTerm < 2.5) dc = vec3(fres);',
+      '    else if (uDebugTerm < 3.5) dc = vec3(vFoam);',
+      '    else if (uDebugTerm < 4.5) dc = vec3(abs(vDisp) * 2.5);',
+      '    else if (uDebugTerm < 5.5) dc = vec3(1.0 - N.y);',
+      '    else if (uDebugTerm < 6.5) dc = _dbgSeen;',
+      '    else if (uDebugTerm < 7.5) dc = vec3(_dbgCap);',
+      '    gl_FragColor = vec4(dc, 1.0); return;',
+      '  }',
       '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',
       '  #include <fog_fragment>',
       '}',
@@ -19179,7 +19412,7 @@ function _swBuildHubWater(T) {
 
 
 
-      if ((typeof isXRPresenting === 'function') && isXRPresenting()) return;
+      if (_swVrLite()) return;   // (v41.42) the planar mirror keeps refreshing when VR water is on
       this._reflFrame = (this._reflFrame + 1) % 3;
       {
         const _WK = window.__water || {};
@@ -19672,7 +19905,7 @@ window.__pwaterApply = function () {
 function _swUpdateHubWater() {
   const w = game._hubWater; if (!w) return;
   if (typeof window !== 'undefined' && window.__waterDisp && !game._swSubmerged &&
-      !((typeof isXRPresenting === 'function') && isXRPresenting())) {
+      !_swVrLite()) {   // (v41.42)
     const WLd = w.userData.WL;
     w.visible = true;
     w.frustumCulled = false;
@@ -19738,7 +19971,7 @@ function _swUpdateHubWater() {
       const U = w.material.uniforms;
       if (U.uSubmerge) U.uSubmerge.value = Math.max(0, Math.min(1, (WL - camera.position.y) / 60));
       if (U.uEye) U.uEye.value.copy(camera.position);
-      if (U.uReflLive) U.uReflLive.value = ((typeof isXRPresenting === 'function') && isXRPresenting()) ? 0.0 : 1.0;
+      if (U.uReflLive) U.uReflLive.value = _swVrLite() ? 0.0 : 1.0;   // (v41.42)
       if (U.uFlipFace) U.uFlipFace.value = (window.__water && window.__water.flip) ? 1.0 : 0.0;
     }
   }
@@ -19783,9 +20016,7 @@ function _swBubblesEnsure() {
     };
     B.mat.name = 'bubbles';
     B.pts = new THREE.Points(B.geo, B.mat); B.pts.frustumCulled = false; B.pts.renderOrder = 5; B.pts.visible = false;
-    try { if (typeof _lssRetainMat === 'function') _lssRetainMat(B.mat); } catch (_) {}
     scene.add(B.pts);
-    try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(B.pts); } catch (_) {}   // link the points program behind the countdown, not on the first dive
   } catch (_) { B.pts = null; }
   return B.pts;
 }
@@ -40921,6 +41152,19 @@ async function _prebakeGpuPrime() {
   try { if (typeof _birdFlock !== 'undefined' && _birdFlock && _birdFlock.gpu) _birdFlock.gpu.compute(); } catch (_) {}
   try { if (typeof _fishSchool !== 'undefined' && _fishSchool && _fishSchool.gpu) _fishSchool.gpu.compute(); } catch (_) {}
   try {
+    if (rt && typeof _swBubblesEnsure === 'function') {
+      const _B = _swBubblesEnsure();
+      if (_B) {
+        try { if (typeof _swBubblesSeed === 'function') _swBubblesSeed(camera.position); } catch (_) {}
+        try { if (typeof _swBub !== 'undefined' && _swBub && _swBub.geo && _swBub.geo.attributes.position) _swBub.geo.attributes.position.needsUpdate = true; } catch (_) {}
+        const _pv = _B.visible;
+        _B.visible = true;
+        try { if (_warmDrawRoot(_B, rt)) passes++; } finally { _B.visible = _pv; }
+        try { if (typeof _lssRetainMat === 'function' && typeof _swBub !== 'undefined' && _swBub && _swBub.mat) _lssRetainMat(_swBub.mat); } catch (_) {}
+      }
+    }
+  } catch (_) {}
+  try {
     const _vis = [];
     for (const _F of [(typeof _birdFlock !== 'undefined') ? _birdFlock : null, (typeof _fishSchool !== 'undefined') ? _fishSchool : null]) {
       if (_F && _F.mesh && !_F.mesh.visible) { _F.mesh.visible = true; _vis.push(_F.mesh); }
@@ -40929,6 +41173,7 @@ async function _prebakeGpuPrime() {
       const _pRT = renderer.getRenderTarget();
       if (rt) renderer.setRenderTarget(rt);
       try { renderer.compile(scene, camera); } catch (_) {}
+      if (rt) { for (const _m of _vis) { try { if (_warmDrawRoot(_m, rt, false)) passes++; } catch (_) {} } }
       renderer.setRenderTarget(_pRT);
       for (const _m of _vis) _m.visible = false;
     }
@@ -45690,6 +45935,13 @@ function _setShipMeshOpacity(root, opacity) {
 
 function _warmDrawRoot(root, rt, withShadow) {
   try {
+    if (rt === undefined && typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
+      rt = postFX.rtScene;
+      if (!_warmDrawRoot._warned) {
+        _warmDrawRoot._warned = 1;
+        try { console.warn('[warm] _warmDrawRoot called with no render target - defaulting to postFX.rtScene. Pass it explicitly.'); } catch (_) {}
+      }
+    }
     if (!root || typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' || !scene ||
         typeof camera === 'undefined' || !camera || !rt) return false;
     if (renderer.xr && renderer.xr.isPresenting) return false;
@@ -46270,15 +46522,19 @@ function updatePlayerMovement(dt) {
   if (game.playerRootTimer > 0) game.playerRootTimer -= dt;
   if (game.playerInStasis || game.playerRootTimer > 0 || game.state === 'warmup') {
     player.velocity.set(0, 0, 0);
-    if ((input.locked || input.touchActive) && (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
-      { const _ls = _adsLookScale(); player.euler.y -= input.mouseDX * input.sensitivity * _ls; player.euler.x -= input.mouseDY * input.sensitivity * _ls; }   // (v39.54)
+    const _vrHold = ((typeof isXRPresenting === 'function') && isXRPresenting()) &&
+                    (game.playerInStasis || game.playerRootTimer > 0);
+    if (!_vrHold) {
+      if ((input.locked || input.touchActive) && (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
+        { const _ls = _adsLookScale(); player.euler.y -= input.mouseDX * input.sensitivity * _ls; player.euler.x -= input.mouseDY * input.sensitivity * _ls; }   // (v39.54)
+      }
+      if (input.gpConnected) {
+        { const _ls = _adsLookScale(); player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt * _ls; player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt * _ls; }   // (v39.54)
+      }
+      player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
     }
-    if (input.gpConnected) {
-      { const _ls = _adsLookScale(); player.euler.y -= input.gpLookX * input.gpLookSensitivity * dt * _ls; player.euler.x -= input.gpLookY * input.gpLookSensitivity * dt * _ls; }   // (v39.54)
-    }
-    player.euler.x = Math.max(-Math.PI * 0.45, Math.min(Math.PI * 0.45, player.euler.x));
-    input.mouseDX = 0; input.mouseDY = 0;
-    camera.quaternion.setFromEuler(player.euler);
+    input.mouseDX = 0; input.mouseDY = 0;   // consumed either way, or they bank up for the release
+    if (!_vrHold) camera.quaternion.setFromEuler(player.euler);
     camera.position.copy(player.position);
     _lssApplyShipRig(dt);   
     return;
@@ -51198,7 +51454,7 @@ function updateAbilities(dt) {
           if (!player._vortexCoreGlows) {
             const _gm = _vortexGlowMaterial();   // (v39.68) shared with the Laser ability
             player._vortexCoreGlows = [0, 1, 2].map(() => { const q = new THREE.Mesh(_vortexGlowGeometry(), _gm); q.frustumCulled = false; q.renderOrder = 3; scene.add(q); return q; });
-            try { if (typeof _warmDrawRoot === 'function') _warmDrawRoot(player._vortexCoreGlows[0]); } catch (_) {}
+            try { if (typeof _warmDrawRoot === 'function' && typeof postFX !== 'undefined' && postFX) _warmDrawRoot(player._vortexCoreGlows[0], postFX.rtScene); } catch (_) {}
           }
           const _vfG = window.__vortexFire || {};
           const _gMuz = (_vfG.glowMuzzle != null) ? _vfG.glowMuzzle : 30, _gJoint = (_vfG.glowJoint != null) ? _vfG.glowJoint : 4.5 * _armR;
@@ -53670,7 +53926,7 @@ function _hlArcBar(ctx, r, p, pct, col) {
     ctx.arc(r.cx, r.cy, rad + th / 2, s, e);
     ctx.arc(r.cx, r.cy, rad - th / 2, e, s, true);
     ctx.closePath();
-    ctx.strokeStyle = col; ctx.lineWidth = border; ctx.globalAlpha = 1; ctx.stroke();
+    ctx.strokeStyle = col; ctx.lineWidth = border; ctx.globalAlpha = _hlGA(); ctx.stroke();
     const f = Math.max(0, Math.min(1, pct * n - i));
     if (f > 0.001) {
       const inset = 2.5 / rad;
@@ -53699,7 +53955,7 @@ function _hlNanoSpan(ctx, r, p, f0, f1, col, lw, alpha) {
   const span = (a1 - a0 - gap * (n - 1)) / n;
   const inset = 2.5 / rad;                         // radians — matches _hlArcBar
   ctx.save();
-  ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.globalAlpha = alpha;
+  ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.globalAlpha = alpha * _hlGA();
   ctx.shadowColor = col; ctx.shadowBlur = lw * 0.9;
   for (let i = 0; i < n; i++) {
     const g0 = Math.max(0, Math.min(1, f0 * n - i));
@@ -53749,11 +54005,11 @@ function _hlSegArc(ctx, r, p, pct, col) {
   ctx.lineCap = 'butt';
   for (let i = 0; i < n; i++) {
     const s = a0 + i * (span + gap), e = s + span;
-    ctx.strokeStyle = col; ctx.globalAlpha = 0.16;
+    ctx.strokeStyle = col; ctx.globalAlpha = 0.16 * _hlGA();
     ctx.beginPath(); ctx.arc(r.cx, r.cy, rad, s * _HL_D2R, e * _HL_D2R); ctx.stroke();
     const f = Math.max(0, Math.min(1, pct * n - i));
     if (f > 0.001) {
-      ctx.globalAlpha = 1; ctx.shadowColor = col; ctx.shadowBlur = r.vmin * 0.7;
+      ctx.globalAlpha = _hlGA(); ctx.shadowColor = col; ctx.shadowBlur = r.vmin * 0.7;
       ctx.beginPath();
       ctx.arc(r.cx, r.cy, rad, s * _HL_D2R, (s + (e - s) * f) * _HL_D2R);
       ctx.stroke(); ctx.shadowBlur = 0;
@@ -53762,9 +54018,22 @@ function _hlSegArc(ctx, r, p, pct, col) {
   ctx.restore();
 }
 
-function _hlTicks(ctx, r, p, pct, col) {
+function _hlGA() {
+  const a = (typeof window !== 'undefined' && window.__hudAlpha != null) ? +window.__hudAlpha : 0.72;
+  return (a >= 0 && a <= 1) ? a : 0.72;
+}
+function _hlAmmoSegs() {
+  try {
+    if (typeof player === 'undefined' || !player) return null;
+    const clip = player.maxClip || (player.weapon && player.weapon.clipSize) || 0;
+    if (!(clip > 0) || clip >= 999) return null;
+    const per = Math.ceil(clip / 40);
+    return Math.max(2, Math.min(40, Math.ceil(clip / per)));
+  } catch (_) { return null; }
+}
+function _hlTicks(ctx, r, p, pct, col, segOverride) {
   const rad = Math.min(r.w, r.h) / 2;
-  const n = Math.max(2, p.seg || 40);
+  const n = Math.max(2, segOverride || p.seg || 40);
   const rot = p.rot || 0;
   const a0 = (p.a0 || 200) + rot, a1 = (p.a1 != null ? p.a1 : 340) + rot;
   const len = (p.tick != null ? p.tick : 2.2) * r.vmin;
@@ -53774,7 +54043,7 @@ function _hlTicks(ctx, r, p, pct, col) {
     const a = (a0 + (a1 - a0) * (i / (n - 1))) * _HL_D2R;
     const frac = p.fromEnd ? 1 - i / (n - 1) : i / (n - 1);
     const lit = pct > 0 && frac <= pct;
-    ctx.strokeStyle = col; ctx.globalAlpha = lit ? 1 : 0.18;
+    ctx.strokeStyle = col; ctx.globalAlpha = (lit ? 1 : 0.18) * _hlGA();
     if (lit) { ctx.shadowColor = col; ctx.shadowBlur = r.vmin * 0.5; }
     const ca = Math.cos(a), sa = Math.sin(a);
     ctx.beginPath();
@@ -53794,11 +54063,11 @@ function _hlPips(ctx, r, p, n, col, slots) {
   for (let i = 0; i < total; i++) {
     const x = r.x + step * (i + 0.5);
     ctx.beginPath(); ctx.arc(x, r.cy, rad, 0, 7);
-    ctx.strokeStyle = col; ctx.globalAlpha = 0.6;
+    ctx.strokeStyle = col; ctx.globalAlpha = 0.6 * _hlGA();
     ctx.lineWidth = Math.max(1, r.vmin * 0.15);
     ctx.stroke();
     if (i < n) {
-      ctx.globalAlpha = 1; ctx.fillStyle = col;
+      ctx.globalAlpha = _hlGA(); ctx.fillStyle = col;
       ctx.shadowColor = col; ctx.shadowBlur = r.vmin * 0.5;
       ctx.fill(); ctx.shadowBlur = 0;
     }
@@ -53825,6 +54094,7 @@ function _hlReticle(ctx, r, col) {
 const _hlArcTextCache = new Map();
 function _hlArcLabel(ctx, cx, cy, radPx, midDeg, str, col, fontPx, maxDeg) {
   if (!str) return;
+  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
   const key = str + '|' + radPx.toFixed(1) + '|' + midDeg.toFixed(1) + '|' + col + '|' +
               fontPx.toFixed(1) + '|' + (maxDeg || 0);
   let spr = _hlArcTextCache.get(key);
@@ -53875,6 +54145,7 @@ function _hlArcLabel(ctx, cx, cy, radPx, midDeg, str, col, fontPx, maxDeg) {
 function _hlGaugeLabel(ctx, r, p, val) {
   if (!p.lab) return;
   if (typeof input !== 'undefined' && input && input.hudGaugeLabels === false) return;
+  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
   const rad = (p.labR != null) ? p.labR * r.vmin : Math.min(r.w, r.h) / 2;
   const fontPx = Math.max(7, r.vmin * 0.88);
   _hlArcLabel(ctx, r.cx, r.cy, rad, p.labAt, p.lab, 'rgba(226,244,255,0.72)', fontPx);
@@ -53903,6 +54174,7 @@ function _hlGaugeLabel(ctx, r, p, val) {
 
 function _hlText(ctx, r, p, str, col) {
   if (!str) return;
+  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
   hudFont('700 ' + ((p.size || 1.5) * r.vmin).toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif');
   ctx.save();
   if (p.rot) { ctx.translate(r.cx, r.cy); ctx.rotate(p.rot * _HL_D2R); ctx.translate(-r.cx, -r.cy); }
@@ -53984,6 +54256,7 @@ function _hlCompass(ctx, r, col) {
 function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   ctx.save();
   ctx.translate(cx - W / 2, cy - H / 2);
+  ctx.globalAlpha = _hlGA();
 
   let r = _hlPlace(_HL.health, W, H);
   _hlArcBar(ctx, r, _HL.health, v.healthPct, v.hCol);
@@ -54006,7 +54279,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   _hlGaugeLabel(ctx, r, _HL.speed, v.speedStr);   // (v38.75) 'SPEED  ###km/h'
 
   r = _hlPlace(_HL.ammo, W, H);
-  _hlTicks(ctx, r, _HL.ammo, v.ammoPct, v.ammoCol || _HL.ammo.col);
+  _hlTicks(ctx, r, _HL.ammo, v.ammoPct, v.ammoCol || _HL.ammo.col, _hlAmmoSegs());
   _hlGaugeLabel(ctx, r, _HL.ammo, v.ammoFull);    // (v38.75) 'AMMO  ##/##'
 
   r = _hlPlace(_HL.core, W, H);
@@ -54040,6 +54313,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
     ctx.save();
     ctx.strokeStyle = _hlA(_HL.reticle.col, 0.7);
     ctx.lineWidth = Math.max(1, r.vmin * 0.16);
+    ctx.globalAlpha = _hlGA();   // (v41.40) re-arm after the ability label above
     ctx.beginPath(); ctx.arc(r.cx, r.cy, Math.min(r.w, r.h) / 2, 0, 7); ctx.stroke();
     ctx.beginPath(); ctx.arc(r.cx, r.cy, Math.max(1, r.vmin * 0.2), 0, 7);
     ctx.fillStyle = _HL.reticle.col; ctx.fill();
@@ -54058,8 +54332,10 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
     _hlText(ctx, r, _HL.objective, v.objectiveStr, _HL.objective.col);
   }
 
+  ctx.globalAlpha = _hlGA();   // (v41.40)
   _hlRadar(ctx, _hlPlace(_HL.minimap, W, H, 1));
   if (typeof window === 'undefined' || window.__hudCompass !== false) {
+    ctx.globalAlpha = _hlGA();   // (v41.40)
     _hlCompass(ctx, _hlPlace(_HL.compass, W, H, 1), _HL.compass.col);
   }
 
@@ -54099,7 +54375,7 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
       const _hm = (typeof xrHudMesh !== 'undefined') ? xrHudMesh : null;
       const _gp = (_hm && _hm.geometry && _hm.geometry.parameters) ? _hm.geometry.parameters : null;
       const _hs = (typeof input !== 'undefined' && input && typeof input.vrHudScale === 'number')
-        ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 1.5;
+        ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 3;
       _hpW = (_gp && _gp.width ? _gp.width : 2.0) * _hs;
       _hpH = (_gp && _gp.height ? _gp.height : 1.125) * _hs;
       _hpZ = _hm ? _hm.position.z : -2.0;
@@ -54226,7 +54502,7 @@ try {
     const _hm = (typeof xrHudMesh !== 'undefined') ? xrHudMesh : null;
     const _gp = (_hm && _hm.geometry && _hm.geometry.parameters) ? _hm.geometry.parameters : null;
     const _hs = (typeof input !== 'undefined' && input && typeof input.vrHudScale === 'number')
-      ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 1.5;
+      ? Math.max(0.5, Math.min(4, input.vrHudScale)) : 3;
     const _pw = (_gp && _gp.width ? _gp.width : 2.0) * _hs;
     const _ph = (_gp && _gp.height ? _gp.height : 1.125) * _hs;
     const _pz = _hm ? _hm.position.z : -2.0;
@@ -58415,7 +58691,7 @@ function _refreshSettingsValues() {
     try { vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2); } catch (_) {}
   }
   {
-    const _hs = (typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5;
+    const _hs = (typeof input.vrHudScale === 'number') ? input.vrHudScale : 3;
     setRange('set-vr-hud-scale', null, _hs);
     const _hv = $('#val-vr-hud-scale');
     if (_hv) _hv.textContent = _hs.toFixed(2) + 'x';
@@ -58758,8 +59034,8 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row">
         <label>VR HUD Size</label>
-        <input type="range" id="set-vr-hud-scale" min="0.75" max="3" step="0.05" value="${(typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5}">
-        <div class="value-display" id="val-vr-hud-scale">${((typeof input.vrHudScale === 'number') ? input.vrHudScale : 1.5).toFixed(2)}x</div>
+        <input type="range" id="set-vr-hud-scale" min="0.75" max="3" step="0.05" value="${(typeof input.vrHudScale === 'number') ? input.vrHudScale : 3}">
+        <div class="value-display" id="val-vr-hud-scale">${((typeof input.vrHudScale === 'number') ? input.vrHudScale : 3).toFixed(2)}x</div>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Scales the HUD plane in VR only &mdash; flat screen has its own HUD Size slider above, and the two never compound. Applies live inside a running session. Default 1.5&times; &mdash; the plane was sized to match a desktop window, which reads small through a headset.</label>
@@ -60641,6 +60917,8 @@ function saveSettings() {
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
+      vrHudMigrated: true,   // (v41.43) the one-time vrHudScale default bump has been applied
+      vrWater: !!input.vrWater,   // (v41.43)
       clipRec: !!input.clipRec,
       fovDeg:        input.fovDeg,
       audioMaster: audio.userVol.master,
@@ -62443,7 +62721,12 @@ function loadSettings() {
     if (data.xrStickDpad) Object.assign(input.xrStickDpad, data.xrStickDpad);
     if (data.vrHeadAim)  Object.assign(input.vrHeadAim,  data.vrHeadAim);
     if (typeof data.vrRenderScale === 'number') input.vrRenderScale = data.vrRenderScale;
-    if (typeof data.vrHudScale === 'number') input.vrHudScale = data.vrHudScale;
+    if (typeof data.vrWater === 'boolean') input.vrWater = data.vrWater;   // (v41.43)
+    if (typeof data.vrHudScale === 'number') {
+      const _wasOldDefault = (Math.abs(data.vrHudScale - 1.5) < 1e-6) && !data.vrHudMigrated;
+      input.vrHudScale = _wasOldDefault ? 3 : data.vrHudScale;
+    }
+    input.vrHudMigrated = true;
     if (typeof data.vrPerfMode === 'string') input.vrPerfMode = data.vrPerfMode;
     input.cockpit3d = true;
     input.vrStripFx = false;
