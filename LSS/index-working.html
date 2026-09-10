@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.99';
+const LSS_BUILD = '41.39';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -12761,11 +12761,14 @@ class NetworkPlayer {
         try {
           const _fp = _swPeerFootprint(this);
           const _W3 = window.__water || {};
-          _swImpact(this.position.x, this.position.z, _above < 0 ? +1 : -1, _fp, _fp.heft * ((_W3.mass != null) ? _W3.mass : 1.0), this.velocity, _WL);
+          _swImpact(this.position.x, this.position.z, _above < 0 ? +1 : -1, _fp, _fp.heft * ((_W3.mass != null) ? _W3.mass : 1.0), this.velocity, _WL, this);
           if (typeof playSpatialSound === 'function') playSpatialSound(_above < 0 ? 'water_bloop' : 'water_bloop_soft', new THREE.Vector3(this.position.x, _WL, this.position.z), { refDistance: 300, maxDistance: 5200 });
         } catch (_) {}
       }
       this._wPrevAbove = _above;
+      // (v41.00) a peer's hull carries water in and out of the lake the same way ours does - the
+      // whole system is per-actor state precisely so this is one line.
+      try { if (typeof _swWetTick === 'function') _swWetTick(this, this.position.x, this.position.y, this.position.z, this.velocity, _swPeerFootprint(this), _WL, dt); } catch (_) {}
     }
 
     // Shield visual. (v9a, second pass) Only spawn protection lights the
@@ -16795,7 +16798,11 @@ const _pelletJitter = new THREE.Vector3();
 function spawnPelletBurst(origin, dir, distance) {
   if (!origin || !dir) return;
   // (v33.34) splash the lake where a shotgun/pellet burst crosses the surface (hub) — Slayer etc.
-  if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { const _d = distance || 800; _swWaterCrossSplash(origin.x, origin.y, origin.z, origin.x + dir.x * _d, origin.y + dir.y * _d, origin.z + dir.z * _d, 90, 0.14); } catch (_) {} }
+  // (v41.21) one burst, one disturbance - the pellets arrive together, so the yield is the blast's,
+  // not a pellet's.
+  if (game._hubWater && typeof _swWpnCross === 'function') { try { const _d = distance || 800;
+    _swWpnCross(origin.x, origin.y, origin.z, origin.x + dir.x * _d, origin.y + dir.y * _d, origin.z + dir.z * _d,
+                640, 0, 'pellet', 0.05); } catch (_) {} }
   const partCount = 48;
   const palette = [0xeeffee, 0xaaffbb, 0x66ff88, 0x44ff66, 0x22cc44, 0xddffdd];
   const baseSpeed = Math.min(3500, Math.max(1500, (distance || 800) * 2.5));
@@ -26777,6 +26784,7 @@ const _SW_RIPPLE_FRAG = [
   'uniform int uSeedCount;',
   'uniform sampler2D uMaskTex;',     
   'uniform vec2 uScroll;',           
+  'uniform float uSeedImpulse;',   // (v41.02) 0 = the v41.01 displacement pluck, 1 = a pure velocity impulse
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -26803,18 +26811,39 @@ const _SW_RIPPLE_FRAG = [
   // meet itself.
   '  float nh = (2.0 * hC - h.y + uWaveC2 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
   '  vec2 wpos = (uv - 0.5) * BOUNDS;',
+  // ⚠⚠ (v41.02) A SEED WAS A PLUCK, AND A PLUCK IS WHY THE WATER LOOKED LIKE JELLO.
+  // Owner: "something unrealistic about it... maybe looks too jello like when the boats and weapons
+  // hit it". Adding the bump straight into `nh` sets the new POSITION, and the integrator is
+  // `2h - h_prev + ...`, so the previous height is left where it was: the surface is yanked to a new
+  // height AND handed a matching upward velocity, then let go. That is a plucked membrane, and a
+  // plucked membrane oscillates about its rest position - boing - which is exactly the read.
+  // Water does not get plucked. An impact transfers MOMENTUM: the surface is accelerated downward, a
+  // crater opens over the following steps, and the rim the Laplacian pushes up radiates away as
+  // travelling waves. That is a velocity injection, not a displacement one.
+  // In this leapfrog the two are one line apart. Writing S into `h.x` gives displacement+velocity
+  // (today); SUBTRACTING S from what becomes `h.y` gives velocity with no instantaneous step. So the
+  // seed is split between the two and `uSeedImpulse` blends them - 0 is v41.01 byte-for-byte, 1 is a
+  // pure impulse. Live: window.__water.seedImpulse.
+  '  float sAcc = 0.0;',
   '  for (int i = 0; i < 8; i++){',
   '    if (i >= uSeedCount) break;',
   '    vec4 sd = uSeeds[i];',
   '    float ph = clamp(length(wpos - sd.xy) * PI / sd.z, 0.0, PI);',
-  '    nh += (cos(ph) + 1.0) * sd.w;',   
+  '    sAcc += (cos(ph) + 1.0) * sd.w;',   
   '  }',
   // (v33.20) ABSORB at the window edge : the heightmap is a finite texture, so waves were REFLECTING
   // off its square border and bouncing back as "square patches". Damp the height toward 0 across the
   // outer band so waves leaving the window are swallowed, not mirrored. (Shorelines still reflect.)
   '  vec2 ed = min(uv, 1.0 - uv);',
-  '  nh *= smoothstep(0.0, 0.06, min(ed.x, ed.y));',
-  '  h.y = h.x;',                     
+  '  float edg = smoothstep(0.0, 0.06, min(ed.x, ed.y));',
+  '  nh *= edg;',
+  // (v41.02) the seed gets the same edge damping the wave does, then splits: the displacement half
+  // lands on the new height, the impulse half is taken OFF the previous one, which leaves the
+  // surface where it was and moving. At uSeedImpulse = 0 this is `nh += sAcc*edg; h.y = h.x`, i.e.
+  // identical to every build before this one.
+  '  float sA = sAcc * edg;',
+  '  nh += (1.0 - uSeedImpulse) * sA;',
+  '  h.y = h.x - uSeedImpulse * sA;',  
   '  h.x = nh;',                      
   '  gl_FragColor = h;',
   '}'
@@ -26838,7 +26867,20 @@ function _swRippleInit() {
     v.material.defines.BOUNDS = _SW_RIPPLE_BOUNDS.toFixed(1);
     const seeds = []; for (let i = 0; i < 8; i++) seeds.push(new THREE.Vector4(0, 0, 1, 0));
     v.material.uniforms.viscosity = { value: 0.9885 };   // (v38.15) 0.972 -> longer-lived energy
-    v.material.uniforms.uWaveC2 = { value: 0.16 };       // (v38.15) 0.05 -> ripples that travel    
+    // (v41.02) 0.16 -> 0.26. Energy that cannot LEAVE the impact site has nowhere to go but up and
+    // down, which is half of what reads as jello. The 5-point stencil is stable to 0.5; this is a
+    // ~27% faster wave (c scales as sqrt(C2)) and still comfortably inside it.
+    v.material.uniforms.uWaveC2 = { value: 0.26 };
+    // ⚠⚠ (v41.06) 0.65 -> 0.25. Owner: "something lags behind when you move through it... like it's
+    // sticky". That is what a velocity injection DOES, and I did not think it through: an impulse
+    // sets the surface MOVING, so the displacement has to be integrated up over roughly a quarter of
+    // the local wave period before you can see it. For a bump a few texels across that is ~5 sim
+    // steps, ~80 ms - and at 340 u/s the ship is 27 units past the seed by the time the crest it
+    // asked for actually arrives, then keeps growing after the hull has gone. Delayed onset plus a
+    // trailing peak is exactly "sticky".
+    // The physics was right and the dose was wrong. A quarter of the seed as momentum still turns a
+    // pluck into a crater that opens and radiates; three quarters of it made the whole surface lag.
+    v.material.uniforms.uSeedImpulse = { value: 0.25 };
     v.material.uniforms.uSeeds = { value: seeds };
     v.material.uniforms.uSeedCount = { value: 0 };
     v.material.uniforms.uScroll = { value: new THREE.Vector2(0, 0) };   
@@ -26869,7 +26911,33 @@ function _swRippleInit() {
     if (typeof window !== 'undefined' && window.__waterDisp === undefined) window.__waterDisp = 1;
   } catch (e) { try { console.warn('[water] GPGPU init exception, analytic fallback:', e); } catch (_) {} _swRipple.gpu = null; }
 }
+// (v41.15) THE JS MIRROR OF THE VERTEX SHADER'S SHAPE. Three CPU sites need to know how high a given
+// heightfield value actually stands so they can spawn spray on TOP of the crest rather than at the
+// waterline: _swCrestSpray, the crest-break scan, and the wake's crest dots. They each carried their
+// own copy of the transform, which is how v41.14 shipped with the shader on one curve and the spray
+// spawners on another - the scan was placing spray 66 units BELOW the crest it was breaking off.
+// One helper, one set of defaults, read from the same window.__water keys the live-tune block writes.
+function _swDispWorld(h) {
+  const W = window.__water || {};
+  const D = (W.disp != null) ? +W.disp : 180, G = (W.gain != null) ? +W.gain : 100;
+  const Q = (W.crestQ != null) ? +W.crestQ : 11;
+  const sq = h * (1 + Q * Math.abs(h));
+  const x = sq * G / Math.max(D, 0.01);
+  return D * (x / (1 + Math.abs(x)));
+}
 // Inject a ripple where something touches the surface. world XZ -> window-local; out-of-window seeds dropped.
+// ⚠⚠ (v41.15) THE WAKE STOPPED RESPONDING TO SPEED AT 420 u/s, AND NO DISPLAY CHANGE COULD FIX IT.
+// The wake amplitude carries `Math.min(1, sp / 420)` and the stern crest another `min(1, sp / 350)`,
+// so every speed at or above the knee produced a byte-identical seed. The Corvette cruises at 350,
+// afterburns to 600 and dashes to 750 - the top 44% of its range had zero wake response, which is
+// its own half of "the crest still looks tiny for how fast that's going" and lives entirely on this
+// side of the renderer. A hard knee is right for a Froude-limited hull; a dead stop is not. The tail
+// continues the ramp at 30% slope, so nothing below the knee changes at all and the top of the range
+// keeps growing without reaching the +-0.55 funnel clamp the GPGPU sim is proven to.
+function _swSpdCurve(sp, knee, tail) {
+  const r = sp / knee;
+  return (r <= 1) ? r : 1 + ((tail != null) ? tail : 0.30) * (r - 1);
+}
 function _swRippleSeed(wx, wz, radius, amp) {
   const R = _swRipple; if (!R.gpu) return;
   const half = R.bounds * 0.5;
@@ -26878,13 +26946,437 @@ function _swRippleSeed(wx, wz, radius, amp) {
   
   
   if (Math.abs(wx - R.center.x) > half || Math.abs(wz - R.center.y) > half) return;   
-  R.pending.push({ wx: wx, wz: wz, r: Math.max(20, radius), a: Math.max(-0.55, Math.min(0.55, amp)) });   
+  // ⚠⚠ (v41.02) THE OTHER HALF OF THE JELLO: EVERY SEED WAS DRIVEN PAST THE SURFACE'S OWN CEILING.
+  // ⚠ (v41.15) THE FORMULA BELOW BELONGS TO A MATERIAL THAT IS NEVER BUILT. It is
+// _swBuildHubWaterOverlay's, and that function returns null on its second line - so `window.__pw`
+// is never created by the game and its live-tune block is unreachable twice over. The water you
+// see is the mesh built around L29900: disp = _swShape(h), a crest expander into a soft clip with
+// uDispScale/uGain/uCrestQ. This stale note is the single source of the "9-unit ceiling" premise
+// that ten builds of tuning were derived from. What it used to say:
+// What you SEE is the displaced mesh, whose vertex shader is
+  //     disp = uRelief * tanh(h * uGain / uRelief)      (uRelief 9, uGain 95, so tanh(h * 10.56))
+  // - a soft ceiling at 9 world units that is already 96% saturated by h = 0.25. Now price the seeds
+  // that arrive here. The raised cosine below peaks at TWICE its amplitude, so a seed saturates the
+  // display at about a = 0.12:
+  //   ship impact   baseA 0.21-0.58 x impactPeak 50  = 10 to 29     ~100x saturation (and the +-0.55
+  //                                                                  clamp on this very line hides it)
+  //   weapon cross  amp 0.07-0.14   x impactPeak 50  = 3.5 to 7     ~40x
+  //   wake crest    0.154 (no peak term)                            ~1.3x
+  // So a pistol shot, a ship at cruise and a ship slammed in at full speed all produce the SAME
+  // flat-topped 9-unit tanh dome. The surface was not responding to force at all - it was a binary,
+  // and a saturated tanh bump is a smooth rounded blob with soft shoulders, which is the literal
+  // shape of the thing the owner called jello. It also explains why the complaint names impacts:
+  // the wake is the one family that was NOT pinned, and the wake is the part that looked right.
+  // ⚠ The fix is one scale at the one funnel, not a hunt through a dozen coefficients - every seed
+  // in the game passes through this function. Calibrated so ordinary events live in the tanh's
+  // RESPONSIVE band and only a hard impact approaches the ceiling, which is what gives the surface
+  // its dynamic range back. `window.__water.seedScale = 1` with `.impactPeak = 50` restores the
+  // pre-41.02 behaviour exactly, in two assignments.
+  // ⚠⚠ (v41.03) 0.07 -> 1.0. THE GLOBAL SCALE WAS THE WRONG INSTRUMENT AND I SHIPPED IT ANYWAY.
+  // Owner on 41.02: "now the water barely moves when the ship touches it" - and TOUCHES is the word
+  // that gives it away. Two different families of seed pass through here:
+  //   the WAKE family - bow crest, stern trough, Kelvin shoulders, the resting bowl, the planing
+  //     spray's ripples - which never multiplied by impactPeak and arrive at 0.02-0.15, i.e. inside
+  //     the display's responsive band already;
+  //   the IMPACT family - _swImpact, weapon crossings, entrainment, drips - which DO multiply by
+  //     impactPeak and were arriving at 3-29, tens of times past the tanh ceiling.
+  // Only the second family was broken, and the owner had said so precisely: "jello like when the
+  // boats and weapons HIT it". A global 0.07 cut both, so the impacts came into range and the wake -
+  // which is what you actually see while flying along the surface, and which was fine - dropped from
+  // 8.3 world units of crest to 1.0. The complaint was the wake, not the impacts.
+  // ⚠ The lesson is the one this project keeps re-learning: when a report localises a fault ("when
+  // they HIT it"), fix it AT that location. A global knob is not a cheaper version of a targeted fix,
+  // it is a different and worse change. The recalibration now lives entirely in `impactPeak`, where
+  // the over-drive actually was. This stays as a trim for tuning the whole surface at once; at 1.0 it
+  // is a no-op and the wake is bit-for-bit what it was in v41.01 and every build before it.
+  const _W3s = window.__water;
+  const _k = (_W3s && _W3s.seedScale != null) ? +_W3s.seedScale : 1.0;
+  R.pending.push({ wx: wx, wz: wz, r: Math.max(20, radius), a: Math.max(-0.55, Math.min(0.55, amp * _k)) });   
   if (R.pending.length > 8) R.pending.shift();   
 }
 // (v33.32) Visible water SPLASH spray : a burst of white/cyan droplets that arc UP and fall back (the
 // particle update applies p.grav). Additive Points, so it reads as bright spray. `power` (~0.4..2.5)
 // scales the upward kick ; `n` the droplet count. No-op underwater or when the particle budget is tight
 // (combat FX keep priority). Pairs with the GPGPU ripple seed for a real splash (spray) + wake (ripple).
+// ────────────────────────────────────────────────────────────
+// (v41.00) OBLIQUE WATER DISPLACEMENT - the spray root, what gets dragged under, what comes out
+//
+// Owner: "I don't really like the way the ship and weapons interact with the water. Our physics of
+// water displacement is not right. The way the water displaces and splashes when objects move fast
+// at angles, we need to fix. It would also drag with it when it goes under water, and drag water
+// droplets with it when it surfaces out of the water."
+//
+// ⚠⚠ THE OLD MODEL ONLY EVER LOOKED AT THE VERTICAL SPEED, so a fast shallow entry made NO SPRAY.
+// v33.67 split the impact velocity into normal and tangential and then gated the WHOLE splash on the
+// normal part alone - `K = Vn * sqrt(D/D_REF)`, K_MIN 28 - citing Bird-Tsai-Stone. That is the right
+// law for a DROPLET striking a wall and the wrong one for a HULL entering a free surface. Do the
+// arithmetic on the case the owner is describing: a ship crossing the lake at 400 u/s on a 5° path
+// has Vn = 400*sin(5°) = 35, which lands at I = 0.036 of the gate - one droplet, or none. Skim a
+// stone or a jet ski across a lake and reality does the opposite: the SHALLOWER the angle, the more
+// violent the sheet. The model was not merely under-tuned at angle, it was inverted.
+//
+// What actually drives entry spray is the SPRAY-ROOT (contact-line) speed from von Karman / Wagner
+// wedge-impact theory. The wetted contact races outward along the hull at Vn/tan(β), where β is the
+// deadrise angle the hull presents TO THE SURFACE: a flat bottom (β→0) fires the jet out at enormous
+// speed, a fine V cuts in quietly. An OBLIQUE path lays the hull down almost flat against the water,
+// so the deadrise it effectively presents collapses with the path angle:
+//
+//     θ      = atan2(Vn, Vt)          the path angle below the horizon
+//     β_eff  = β_hull * sin θ        a shallow path meets the surface almost flat
+//     U      = Vn / tan(β_eff)      the spray-root speed
+//
+// and the limit is the whole point: as θ→0, Vn→Vθ and tan(β_eff)→βθ, so U → V/β_hull. The
+// spray-root speed tends to the FULL speed divided by the deadrise, independent of how shallow the
+// angle gets. That is the sheet you see off a planing hull, and it is what was missing.
+//
+// ⚠ U is normalised by the REFERENCE hull's tan β, so a vertical entry on a reference hull produces
+// the identical intensity the v33.67 gate produced. This change cannot regress the case that was
+// already right; it only fills in the case that was wrong. `window.__water.oblique = 0` restores the
+// pure-Vn gate exactly, for an A/B. The floor on β_eff (6°) caps the gain at 3.6x so the model
+// cannot run away as θ→0.
+const _SW_BETA_REF = 0.3588;      // 20.6° = atan(2*13.5/72), the deadrise of the reference hull the v33.67 gate was tuned on
+const _SW_TANB_REF = 0.37566;     // tan(_SW_BETA_REF), precomputed
+// Deadrise the hull presents: half-angle of its V-bottom from the footprint's beam and draft.
+function _swDeadrise(fp) {
+  if (!fp || !fp.BEAM) return _SW_BETA_REF;
+  const b = Math.atan2(2 * fp.DRAFT, Math.max(1e-3, fp.BEAM));
+  return Math.min(1.05, Math.max(0.12, b));   // clamp to 7°..60° - a real hull is never a knife or a dinner plate
+}
+// ⚠⚠ (v41.04) THE SPRAY DIRECTION IS A LAW, NOT A FAN - Savitsky & Morabito, "Origin and
+// Characteristics of the Spray Patterns Generated by Planing Hulls" (J. Ship Production & Design
+// 27(2):63-83). They treat a planing surface exactly like a SWEPT WING: the STAGNATION LINE is the
+// locus on the bottom where the flow divides into forward and aft components and the pressure is a
+// maximum, and the free stream is decomposed into a component ALONG that line (which slides, and is
+// preserved) and a component NORMAL to it (which is brought to rest, and is what makes the pressure
+// and the spray). In the spray area - the wetted bottom FORWARD of the stagnation line - the
+// streamlines are "nearly a reflection of the free stream about the stagnation line".
+// That is one line of vector algebra: reflect(v, s) = 2(v·s)s - v, which preserves the along-line
+// component and reverses the normal one. v41.00-41.03 instead fanned droplets from ±90° off the
+// track with a random forward lean - the right FAMILY of behaviour, an invented rule.
+//
+// Where the stagnation line points falls straight out of the geometry. A V-bottom of deadrise β
+// trimmed at τ sits at height x·tan τ + y·tan β above the flat surface (x forward along the
+// keel, y outboard), so the waterline on the hull - the stagnation line - is where that is zero, and
+// it leaves the keel at
+//     ψ = atan2(tan τ, tan β)            the stagnation line's angle FROM THE KEEL
+// Reflecting the free stream about it gives, in hull coordinates (forward, outboard),
+//     d = (-cos 2ψ, sin 2ψ)
+// and this ONE expression reproduces both spray families and the transition the paper describes
+// ("they transform seamlessly from one into the other"): below ψ = 45° - a deep V at low trim -
+// cos 2ψ is positive and the sheet goes AFT and outboard, the main spray; above it - a flat bottom,
+// or any hull at high trim - it flips FORWARD and outboard, the whisker spray you see off a fast
+// boat's bow. Nothing selects between them; the angle does.
+// ⚠ AND IT FIXES THE SPEED, WHICH WAS THE OTHER THING I HAD WRONG. Reflection preserves magnitude,
+// so in the hull frame the sheet leaves at the free-stream speed; back in world coordinates its
+// velocity is v_ship + |v|·d, which runs from 0 at ψ=0 to TWICE the ship's speed at ψ=90°. That
+// upper limit is not a coincidence - flat-plate impact measurements (arXiv:1804.01068) find droplet
+// speeds "more than twice the value of the horizontal velocity of the intersection line", rising
+// with Froude number. v41.00 threw its droplets at 0.16-0.60x, i.e. between three and twelve times
+// too slow, which is exactly why the sheet never read as one.
+function _swStagPsi(tau, beta) {
+  return Math.atan2(Math.tan(Math.max(0.004, tau)), Math.max(1e-4, Math.tan(beta || _SW_BETA_REF)));
+}
+// The spray-root speed. Returns Vn unchanged when the oblique term is switched off, so the A/B is exact.
+function _swSprayRoot(Vn, Vt, beta) {
+  if (!(Vn > 0)) return 0;
+  const W3 = (typeof window !== 'undefined' && window.__water) ? window.__water : null;
+  const ob = (W3 && W3.oblique != null) ? +W3.oblique : 1;
+  if (!(ob > 0)) return Vn;
+  const th = Math.atan2(Vn, Math.max(1e-4, Vt));
+  const be = Math.max(0.105, (beta || _SW_BETA_REF) * Math.sin(th));   // 6° floor -> gain capped at 3.6x
+  const U = Vn * (_SW_TANB_REF / Math.tan(be));
+  return Vn + (U - Vn) * Math.min(1, ob);
+}
+// ────────────────────────────────────────────────────────────
+// (v41.00) WETNESS, ENTRAINMENT AND SHED - the other half of the owner's ask.
+//
+// Water is not a surface the hull passes through, it is a MATERIAL the hull carries. Going down, the
+// free surface is pulled after it: a depression that TRACKS the hull instead of a one-shot dimple at
+// the entry point, plus a funnel of water dragged under that then floats back up (grav < 0 in the
+// particle integrator makes a buoyant droplet - it sinks, slows, and rises). Coming up, the hull
+// leaves WET and sheds what it carried: a sheet at the instant of exit, then a trail of drops that
+// are born WITH the hull's velocity and fall behind it as it climbs away - which is the visual the
+// owner asked for, and it falls out of the particle integrator for free because the per-frame drag
+// bleeds a drop's speed while the ship keeps thrusting.
+//
+// All of it hangs off one small per-actor state object, so a network ship gets the same treatment as
+// the local hull without a second copy of the logic. Knobs: `window.__water.entrain` / `.shed`.
+const _swDropV = new THREE.Vector3();
+const _SW_DROP_COL = [0x8fb4cc, 0xb6d2e2, 0x6f97b0];
+// ⚠⚠ (v41.07) THE EMITTER CENSUS. Owner, after six builds of this: "it's incomplete, that's all
+// I can say". They are right, and I had no way to tell them WHICH part - because I had been tuning
+// the parts I could measure (particle counts, tanh saturation) and simply assuming the rest ran.
+// This water system now has eleven separate emitters behind eleven separate gates, most of them
+// added in the last few builds, and not one of them reported whether it had ever fired. A feature
+// that never fires and a feature that fires wrongly look identical from the cockpit, they need
+// completely different fixes, and a set of silent no-ops is precisely what "incomplete" feels like.
+// One counter each, read with window.__waterFX(). A zero after a flight that should have triggered
+// it is a dead gate, not a tuning problem.
+const _SW_FXN = {};
+function _swFxN(k) { _SW_FXN[k] = (_SW_FXN[k] | 0) + 1; }
+const _swXB = { t: 0, n: 0 };   // (v41.00) weapon-crossing droplet budget, shared by every weapon (see _swWaterCrossSplash)
+function _swWetState(o) {
+  let st = o._swWet;
+  if (!st) st = o._swWet = { wet: 0, dripT: 0, entT: 0 };
+  return st;
+}
+// How much particle headroom the water FX may take. Combat FX keep the rest - a splash that starves
+// a hit spark is a worse trade than a thinner splash.
+function _swFxRoom() {
+  if (!game.particles) return 0;
+  const cap = (typeof _particleCap === 'function') ? _particleCap() : 500;
+  return cap * 0.62 - game.particles.length;
+}
+// One shed burst: `n` drops born ON the hull (a box the size of the footprint, long axis along the
+// track), each carrying `carry` of the hull's velocity so it trails instead of being left behind.
+function _swShedDrops(px, py, pz, vel, fp, n, carry, spreadK, sizeK, lifeK) {
+  if (!game.particles || game._swSubmerged || !fp) return 0;
+  if (_swFxRoom() < n) return 0;
+  const vx = vel ? vel.x : 0, vy = vel ? vel.y : 0, vz = vel ? vel.z : 0;
+  const sp = Math.hypot(vx, vz);
+  const fx = sp > 1e-3 ? vx / sp : 0, fz = sp > 1e-3 ? vz / sp : 1;   // hull points roughly along its track
+  const rl = fp.half * 0.85 * spreadK, rw = fp.BEAM * 0.5 * spreadK, rh = fp.DRAFT * 1.2 * spreadK;
+  let m = 0;
+  for (let i = 0; i < n; i++) {
+    const a = (Math.random() - 0.5) * 2 * rl, b = (Math.random() - 0.5) * 2 * rw;
+    const c = carry * (0.72 + Math.random() * 0.34);
+    _swDropV.set(vx * c + (Math.random() - 0.5) * 64,
+                 vy * c * 0.75 - Math.random() * 26,
+                 vz * c + (Math.random() - 0.5) * 64);
+    game.particles.push({
+      position: new THREE.Vector3(px + fx * a - fz * b, py + (Math.random() - 0.5) * 2 * rh, pz + fz * a + fx * b),
+      velocity: _swDropV.clone(),
+      life: (0.42 + Math.random() * 0.86) * lifeK, maxLife: 1.30 * lifeK,
+      color: _SW_DROP_COL[(Math.random() * 3) | 0],
+      size: (1.5 + Math.random() * 2.5) * sizeK * (window.__splashSz || 1),
+      grav: 300 + Math.random() * 260,
+      splash: true,
+    });
+    m++;
+  }
+  return m;
+}
+// (v41.00) The drops that come off the hull FALL BACK and pock the surface. Doing that per particle
+// would put a water test in the hottest loop in the game, so a bounded sample (24) of the shed drops
+// is integrated here instead, with the same gravity and the same per-frame drag the particle
+// integrator uses - close enough that the ripple lands where the drop is seen to land.
+const _SW_DRIPW_MAX = 24;
+function _swDripTrack(px, py, pz, vel, carry) {
+  const R = _swRipple; if (!R.gpu) return;
+  const A = R.dripW || (R.dripW = []);
+  if (A.length >= _SW_DRIPW_MAX) return;
+  A.push({ x: px, y: py, z: pz,
+           vx: (vel ? vel.x : 0) * carry, vy: (vel ? vel.y : 0) * carry * 0.75 - 18, vz: (vel ? vel.z : 0) * carry,
+           t: 0 });
+}
+function _swDripWTick(dt, WL) {
+  const R = _swRipple; const A = R.dripW; if (!A || !A.length) return;
+  const peak = (window.__water && window.__water.impactPeak != null) ? window.__water.impactPeak : 0.135;
+  for (let i = A.length - 1; i >= 0; i--) {
+    const d = A[i];
+    d.t += dt;
+    d.vy -= 380 * dt;
+    d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
+    d.vx *= 0.95; d.vy *= 0.95; d.vz *= 0.95;   // same per-frame drag the particle integrator applies
+    if (d.y <= WL || d.t > 4) {
+      if (d.y <= WL) { _swFxN('dripLand'); _swRippleSeed(d.x, d.z, 24 + Math.random() * 20, 0.020 * peak); }   // (v41.02) a droplet pock
+      const last = A.length - 1; if (i !== last) A[i] = A[last]; A.pop();
+    }
+  }
+}
+// ⚠⚠ (v41.04) WHAT HAPPENS AFTER THE SHIP IS GONE. This was missing entirely, and it is the most
+// recognisable single moment in a water entry.
+// Truscott, Epps & Belden, "Water Entry of Projectiles" (Annu. Rev. Fluid Mech. 46:355-378) and
+// Duclaux et al., "Dynamics of transient cavities" (JFM 591:1-19): a body going under does not just
+// drag a dimple down with it. The air cavity ELONGATES with the descending body, then collapses on
+// itself in a DEEP-SEAL PINCH-OFF at roughly half the cavity's depth - and the upper half of the
+// cavity, released, retreats upward and fires a high-speed WORTHINGTON JET straight out of the
+// surface, which ripples and breaks into droplets. That is the spike of water that shoots up a beat
+// AFTER the thing has vanished, and its delay is what sells it: the surface is briefly calm first.
+// v41.00 built the elongating cavity (see the entrainment block below) and stopped there.
+// Collapse is driven by hydrostatic pressure closing a cylindrical cavity - Besant-Rayleigh - so the
+// time scales with the cavity's radius, not with how fast the body was going. Here that is one
+// sqrt(BEAM) term; `__water.jetDelay` scales it and `__water.jet` is the whole effect's multiplier.
+function _swWorthingtonJet(px, pz, WL, fp, vEntry, k) {
+  if (!game.particles || game._swSubmerged) return 0;
+  const n = Math.max(4, Math.min(46, Math.round((10 + 26 * k) * (fp.BEAM / 72))));
+  if (_swFxRoom() < n) return 0;
+  // the jet is NARROW and FAST - that is its whole silhouette. A few fat slow drops at the base,
+  // the rest a thin column that outruns them and breaks up on the way.
+  const base = Math.max(120, vEntry * 0.55) * (0.8 + 0.6 * k);
+  for (let i = 0; i < n; i++) {
+    const fat = (i < n * 0.22);
+    const ang = Math.random() * 6.2832;
+    const cone = fat ? (0.10 + Math.random() * 0.22) : (0.02 + Math.random() * Math.random() * 0.16);
+    const spd = base * (fat ? (0.35 + Math.random() * 0.35) : (0.85 + Math.random() * 1.5));
+    const sc = Math.sin(cone) * spd;
+    _swDropV.set(Math.cos(ang) * sc, Math.cos(cone) * spd, Math.sin(ang) * sc);
+    game.particles.push({
+      position: new THREE.Vector3(px + Math.cos(ang) * fp.BEAM * 0.10 * Math.random(), WL + 6,
+                                  pz + Math.sin(ang) * fp.BEAM * 0.10 * Math.random()),
+      velocity: _swDropV.clone(),
+      life: fat ? (0.45 + Math.random() * 0.55) : (0.75 + Math.random() * 0.85),
+      maxLife: 1.6,
+      color: (Math.random() < 0.45) ? 0xa6c8de : 0xc8dcea,
+      size: (fat ? (2.4 + Math.random() * 3.0) : (1.0 + Math.random() * 1.9)) * (window.__splashSz || 1),
+      grav: 300 + Math.random() * 240,
+      splash: true,
+    });
+  }
+  // the surface rebounding behind the jet
+  const peak = (window.__water && window.__water.impactPeak != null) ? window.__water.impactPeak : 0.135;
+  _swRippleSeed(px, pz, Math.max(24, fp.BEAM * 0.8), 0.55 * k * fp.heft * peak);
+  return n;
+}
+// ⚠⚠ (v41.19) AN EXPLOSION ON WATER IS NOT A RIPPLE. What the hub had was one flat seed -
+//     if (|pos.y - WL| < 110 + size*3) _swRippleSeed(pos.x, pos.z, 140 + size*2, 0.11)
+// - a fixed 0.11 amplitude for every blast from a pellet to a thermite warhead, with `size` reaching
+// the RADIUS and never the height. So a missile into the lake made the same dimple as a spark.
+// The real shapes are well established and they differ by where the burst sits:
+//   ABOVE the surface  the overpressure presses a CRATER into the water with a raised rim around it
+//   AT or BELOW        the gas bubble pushes a DOME up, vents through its own middle, and a beat
+//                      later throws a vertical COLUMN as the cavity collapses - the same deep-seal
+//                      route the ship's water entry already models, so it reuses _swWorthingtonJet
+// Two concentric seeds of opposite sign make crater-and-rim for one extra slot, exactly as _swImpact
+// does. The column is deferred through _SW_BLASTS because the delay is most of what sells it: the
+// surface heaves, settles, and only then erupts.
+const _SW_BLASTS = [];
+function _swBlast(x, y, z, size) {
+  const w = game && game._hubWater; if (!w) return 0;
+  const W3 = window.__water || {};
+  const bk = (W3.blast != null) ? +W3.blast : 1;
+  if (!(bk > 0)) return 0;
+  const WL = w.userData.WL, d = y - WL;               // + above the surface, - below it
+  const R = Math.max(70, (size || 20) * 6);           // world radius the surface feels
+  const far = R * 2.2 + 140;
+  if (Math.abs(d) > far) return 0;
+  // ⚠ (v41.30) 0.5 -> 0.85, and the height falloff is now ^0.7 rather than linear. Owner:
+  // "cluster missile's cluster shots should explode the water in each blast of its clusters".
+  // They were already reaching the water - every cluster burst calls spawnExplosion and so lands
+  // here - but a cluster zone scatters its sub-bursts through a SPHERE of the zone radius, so most
+  // of them detonate 80-150 units off the surface and the linear falloff was halving them before
+  // they got there. Against the hull's own impact seed of 0.0806:
+  //   burst at the surface  0.110 -> 0.188    burst 80 up  0.081 -> 0.151
+  //   burst 150 up          0.055 -> 0.115    the cluster's own impact  0.192 -> 0.326
+  // so every sub-munition in the string now visibly detonates the water instead of only the ones
+  // that happen to go off at waterline.
+  const reach = Math.pow(1 - Math.abs(d) / far, 0.7);   // a burst loses the surface with distance
+  const peak = (W3.impactPeak != null) ? +W3.impactPeak : 0.135;
+  const A = Math.min(2.8, 0.85 * Math.pow((size || 20) / 20, 0.75) * bk) * reach;
+  if (A < 0.01) return 0;
+  _swFxN('blast');
+  if (d <= 0) {
+    _swRippleSeed(x, z, R * 1.15, A * peak * 2.4);    // the dome
+    _swRippleSeed(x, z, R * 0.42, -A * peak * 1.0);   // vented through its middle
+  } else {
+    _swRippleSeed(x, z, R * 0.55, -A * peak * 2.0);   // the crater
+    _swRippleSeed(x, z, R * 1.30, A * peak * 1.0);    // and its rim
+  }
+  // the crown. A blast has no preferred direction, so it goes in straight down and the emitter's
+  // own symmetric-crown branch does the rest.
+  const _sp = 260 + 520 * Math.min(1, (size || 20) / 60);
+  const _D = Math.max(26, Math.min(90, R * 0.5));
+  const _now = performance.now();
+  if (_now - _swXB.t > 250) { _swXB.t = _now; _swXB.n = 0; }
+  if (_swXB.n < ((W3.wxCap != null) ? +W3.wxCap : 34) && !game._swSubmerged) {
+    _swXB.n += _swSpawnSplashV(x, WL, z, { x: 0, y: -_sp, z: 0 }, _D, 0.5 + 0.8 * reach) || 0;
+  }
+  _swCrestDots(x, WL, z, 0.5 + 0.9 * reach, 0, 0, _swDispWorld(A * peak * 2.4));
+  // a burst at or under the surface vents a column once the cavity closes
+  if (d < R * 0.35 && _SW_BLASTS.length < 6) {
+    _SW_BLASTS.push({ x: x, z: z, t: 0, R: R, k: Math.min(1, A * 1.4),
+                      delay: 0.14 + 0.30 * Math.min(1, R / 400) });
+  }
+  return 1;
+}
+function _swBlastTick(dt, WL) {
+  if (!_SW_BLASTS.length) return;
+  for (let i = _SW_BLASTS.length - 1; i >= 0; i--) {
+    const b = _SW_BLASTS[i];
+    b.t += dt;
+    if (b.t < b.delay) continue;
+    try {
+      _swFxN('blastColumn');
+      _swWorthingtonJet(b.x, b.z, WL, { BEAM: b.R * 0.85, DRAFT: b.R * 0.2, heft: 1, half: b.R },
+                        340 + b.R * 1.6, b.k);
+    } catch (_) {}
+    const last = _SW_BLASTS.length - 1; if (i !== last) _SW_BLASTS[i] = _SW_BLASTS[last];
+    _SW_BLASTS.pop();
+  }
+}
+// Per-frame water contact for ONE actor. `o` only has to be an object we may hang state on.
+function _swWetTick(o, px, py, pz, vel, fp, WL, dt) {
+  if (!o || !fp || !game._hubWater) return;
+  const W3 = (window.__water = window.__water || {});
+  const st = _swWetState(o);
+  const above = py - WL;
+  const sp = vel ? Math.hypot(vel.x, vel.z) : 0;
+  // Soaked while the hull is in contact ; the airflow dries it off, faster the harder you are moving.
+  if (above < fp.DRAFT * 0.6) st.wet = 1;
+  else st.wet = Math.max(0, st.wet - dt * (0.42 + sp / 1100));
+  // ⚠ DRAGGED UNDER. The depression TRACKS the hull - that is the whole difference between water
+  // that was punched and water that is being carried. Fades out with depth (the surface stops caring
+  // a few hull-lengths down) and with speed (a hull hanging still in the water drags nothing).
+  const ent = (W3.entrain != null) ? +W3.entrain : 1;
+  if (ent > 0 && above < 0 && above > -fp.LEN * 3.2) {
+    st.entT += dt;
+    const depth01 = Math.min(1, -above / (fp.LEN * 3.2));
+    const pull = (1 - depth01) * Math.min(1, (sp + Math.abs(vel ? vel.y : 0)) / 260);
+    if (st.entT > 0.055 && pull > 0.02) {
+      st.entT = 0;
+      const peak = (W3.impactPeak != null) ? W3.impactPeak : 0.135;
+      // (v41.02) 0.055 -> 0.30. At impactPeak 50 this pinned the +-0.55 clamp eighteen times a
+      // second, which was a hammer where a following dimple was wanted; at the recalibrated peak
+      // it lands around 6 of the 9 available units of depression.
+      _swFxN('entrain');
+      _swRippleSeed(px, pz, Math.max(24, fp.BEAM * 1.25), -0.30 * pull * fp.heft * ent * peak);
+      if (!game._swSubmerged && _swFxRoom() > 4) {
+        const n = 1 + ((Math.random() * 2 * pull * ent) | 0);
+        for (let i = 0; i < n; i++) {
+          _swDropV.set((vel ? vel.x : 0) * 0.45 + (Math.random() - 0.5) * 46,
+                       -(55 + Math.random() * 115) * (0.4 + pull),
+                       (vel ? vel.z : 0) * 0.45 + (Math.random() - 0.5) * 46);
+          game.particles.push({
+            position: new THREE.Vector3(px + (Math.random() - 0.5) * fp.BEAM, WL + 2 - Math.random() * 18, pz + (Math.random() - 0.5) * fp.BEAM),
+            velocity: _swDropV.clone(),
+            life: 0.45 + Math.random() * 0.70, maxLife: 1.15,
+            color: 0xa8cadc,
+            size: (2.0 + Math.random() * 3.0) * (window.__splashSz || 1),
+            grav: -(120 + Math.random() * 160),   // buoyant: it is dragged down, slows, and floats back up
+            splash: true,
+          });
+        }
+      }
+    }
+  }
+  // ⚠ PINCH-OFF. The cavity closes and the jet goes up. Timed from the entry, gated on the hull
+  // still being under (a bounce never sealed) and on the surface being reachable.
+  const cav = st.cav;
+  if (cav) {
+    cav.t += dt;
+    const jk = (W3.jet != null) ? +W3.jet : 1;
+    const delay = ((W3.jetDelay != null) ? +W3.jetDelay : 0.30) * Math.sqrt(Math.max(0.2, fp.BEAM / 72));
+    if (cav.t >= delay || above > fp.DRAFT || cav.t > 2.5) {
+      if (jk > 0 && cav.t >= delay && cav.t <= 2.5 && above < 0) { _swFxN('jet'); _swWorthingtonJet(cav.x, cav.z, WL, fp, cav.v, cav.k * jk); }
+      else if (cav.t >= delay) _swFxN('jetMissed');
+      st.cav = null;
+    }
+  }
+  // ⚠ CARRIED OUT. A wet hull keeps shedding for as long as it is wet, and the drops keep the
+  // velocity they were shed at - so they trail the ship as it climbs instead of falling straight down.
+  const shed = (W3.shed != null) ? +W3.shed : 1;
+  if (shed > 0 && st.wet > 0.01 && above > 0 && !game._swSubmerged) {
+    st.dripT += dt;
+    const rate = st.wet * (5 + 18 * Math.min(1, sp / 320)) * shed;   // drops per second
+    const iv = 1 / Math.max(0.5, rate);
+    if (st.dripT > iv) {
+      const n = Math.min(4, Math.max(1, Math.round(st.dripT / iv)));
+      st.dripT = 0;
+      const carry = 0.55 + 0.30 * st.wet;
+      if (_swShedDrops(px, py, pz, vel, fp, n, carry, 1.0, 0.85, 1.0) && above < 900) { _swFxN('drip'); _swDripTrack(px, py, pz, vel, carry); }
+    }
+  }
+}
 const _swSplashTmp = new THREE.Vector3();
 function _swSpawnSplash(x, wl, z, n, power) {
   if (!game.particles || game._swSubmerged) return;
@@ -26927,22 +27419,72 @@ function _swSpawnSplash(x, wl, z, n, power) {
 // gentle touch makes only a ripple (caller seeds that separately). Per-ship scaled by D = hull beam.
 // Degenerate-safe: Vt=0 -> symmetric crown ; Vn=0 -> I=0 early-out ; no NaN (the +Y axis is fixed at 1).
 const _swSplV = new THREE.Vector3();
-function _swSpawnSplashV(x, wl, z, V, D, countScl) {
-  if (!game.particles || game._swSubmerged) return;
+// (v41.00) `beta` = the hull's deadrise (see _swDeadrise). Omitted -> the reference hull, which is
+// exactly what every pre-41 call site meant. Returns the number of droplets actually spawned so a
+// caller can budget against it.
+function _swSpawnSplashV(x, wl, z, V, D, countScl, beta) {
+  if (!game.particles || game._swSubmerged) return 0;
   const W3 = window.__water || {};
   const vx = V ? V.x : 0, vyy = V ? V.y : 0, vz = V ? V.z : 0;
   const Vn = Math.max(0, -vyy);                                 
   const Tx = vx, Tz = vz, Vt = Math.hypot(Tx, Tz);             
   const thx = Vt > 1e-4 ? Tx / Vt : 0, thz = Vt > 1e-4 ? Tz / Vt : 0;   
   const D_REF = 72, K_MIN = 28, K_REF = 220;                   
-  const K = Vn * Math.sqrt(D / D_REF);                         
+  // (v41.00) THE GATE READS THE SPRAY ROOT, NOT Vn. `U` is Vn for a vertical entry on a reference
+  // hull (so the calibration above is untouched) and climbs to ~V/β_hull as the path flattens -
+  // which is the case that used to fall under K_MIN and produce nothing. See the header note.
+  // ⚠⚠ (v41.08) `_beta` WAS NEVER DECLARED, AND IT COST FOUR BUILDS.
+  // v41.04 introduced two references to `_beta` in this function - one on the _psi line below, one
+  // in the sheet's elevation - while the deadrise was still being computed INLINE here. There is no
+  // `_beta` anywhere in the file, so every call that got past the intensity gate threw a
+  // ReferenceError before spawning a single droplet.
+  // That is the whole of the owner's "there's no splash" and "it's incomplete": since 41.04 the
+  // planing sheet, the impact crown and every weapon plume have thrown instead of spawning.
+  // ⚠ AND IT TOOK THE REST OF THE FRAME WITH IT. The planing emitter calls this bare, inside
+  // _swRippleTick, whose only caller wraps it in `try { ... } catch (_) {}` - so on every frame the
+  // ship was skimming, the throw unwound past the wake trough seeds, the surface-crossing impacts,
+  // the ricochet, `R.prevAbove = above` and the whole of _swWetTick, and was then swallowed in
+  // silence. That is also why the ricochet never fired in any test: `R.prevAbove` was not being
+  // updated on exactly the frames that mattered, so the entry test never saw a clean sign change.
+  // I spent an hour on that as a separate mystery. It was this.
+  // ⚠ WHY NOTHING CAUGHT IT: `node --check` in strip.py parses, it does not resolve scopes, so an
+  // undeclared identifier is a clean syntax tree. The console was clean because the exception never
+  // reached it. And my own verification measured particle COUNTS and tanh saturation - numbers that
+  // stayed plausible while the thing they described was not running. The census in v41.07 (`sheet 0,
+  // crown 0` against `plane 68`) found it in one reading, because it asked a different question:
+  // not "is this the right amount" but "did this happen at all".
+  const _beta = (beta != null) ? beta : _SW_BETA_REF;
+  const U = _swSprayRoot(Vn, Vt, _beta);
+  const K = U * Math.sqrt(D / D_REF);                          
   const I = Math.min(1, Math.max(0, (K - K_MIN) / (K_REF - K_MIN)));
-  if (I <= 0) return;                                          
+  if (I <= 0) return 0;                                        
   const r = Vt / Math.max(Vn, 1e-3), lean = r / (1 + r);       
   let N = Math.round((3 + 13 * I) * (D / D_REF) * (D / D_REF) * (countScl || 1) * (W3.spray != null ? W3.spray : 1) * (window.__splashN != null ? window.__splashN : 1));
   N = Math.max(1, Math.min(78, Math.round(N * 3.0)));   
   const cap = (typeof _particleCap === 'function') ? _particleCap() : 1200;
-  if (game.particles.length > cap - N - 2) return;
+  if (game.particles.length > cap - N - 2) return 0;
+  // (v41.00) how much of the burst is WHISKER SHEET rather than crown. At a steep entry almost all
+  // of it is the crown (unchanged); at a shallow one almost all of it is the pair of side sheets,
+  // which is what an angled hull actually throws.
+  // ⚠⚠ (v41.06) CAPPED. Owner: "there's no splash". `lean*lean` reaches 0.85 at a shallow skim, so
+  // almost every droplet went into the sheet - and at low trim the sheet is a LOW, mostly sideways
+  // thing (the reflection sends it aft-outboard in the hull frame, ~0.5x ship speed in the world).
+  // Physically that is the right shape for whisker spray, but it left nothing going UP: the crown
+  // that reads as a splash had been starved to a sixth of the burst. Both exist on a real hull at
+  // once - Savitsky's spray area is forward of the stagnation line, the pressure area behind it -
+  // so the crown keeps a floor of ~45% of the droplets whatever the angle.
+  // (v41.09) 0.55 -> 0.72. The cap existed because the old sheet piled up at one point and starved
+  // the crown of anything going upward; the sheet places itself along its own length now, so it can
+  // carry more of the burst without becoming a lump.
+  const wFrac = Math.min(0.72, lean * lean);
+  let _made = 0;
+  // (v41.04) the stagnation line for this burst. TRIM is the hull's attitude to the water; the path
+  // angle is the part of it we can know here, floored at a nominal planing trim so a dead-flat skim
+  // still has a stagnation line to reflect about (a hull at literally zero trim has no wetted
+  // triangle and no spray, which is true and useless).
+  const _trimMin = (W3.trim != null) ? +W3.trim : 0.10;   
+  const _psi = _swStagPsi(Math.max(_trimMin, Math.atan2(Vn, Math.max(1e-4, Vt))), _beta);
+  const _c2 = Math.cos(2 * _psi), _s2 = Math.sin(2 * _psi);
   // mean spray axis = up-normal tilted toward the downstream dir by `lean` (Eq.8)
   let ax = thx * lean, ay = 1.0, az = thz * lean;
   const al = Math.hypot(ax, ay, az); ax /= al; ay /= al; az /= al;
@@ -26957,6 +27499,90 @@ function _swSpawnSplashV(x, wl, z, V, D, countScl) {
   const cAdv = 0.55 * lean;                                   
   for (let i = 0; i < N; i++) {
     const u1 = Math.random(), u2 = Math.random(), u3 = Math.random();
+    if (Math.random() < wFrac) {
+      // ⚠⚠ (v41.09) ONE SHEET - BENT, WARPED, AND BROKEN UP IN A CASCADE.
+      // Owner: "don't do two sheets... make the one sheet bend and warp and fractalize". Which is both
+      // the better look and the more honest physics, because a spray sheet is not a pair of fans. It is
+      // a single continuous liquid FILM leaving the whole length of the spray root at once, and what
+      // happens to it after that is one of the classic instability cascades:
+      //   BEND      the root is a curved line, not a point, and the direction the film leaves rotates
+      //             continuously along it - so the sheet is a curved ruled surface that wraps from one
+      //             chine, around the keel contact, to the other. Previous builds picked a side with a
+      //             coin flip and threw a cone from it, which is why it read as a blob stuck to the hull.
+      //   WARP      a thin film in a fast stream FLAPS. The sheet is stiff at the root where it is thick
+      //             and unstable further out where it has thinned, so the flapping amplitude grows with
+      //             distance travelled - a travelling wave along the root, not per-droplet noise.
+      //   FRACTAL   the film does not become droplets, it becomes LIGAMENTS, which become droplets,
+      //             which become finer droplets (the Squire / Rayleigh-Plateau route). That is a
+      //             self-similar cascade, so a parcel picks a breakup LEVEL from a geometric
+      //             distribution and its size, scatter, reach and lifetime all follow from it: a few
+      //             fat slow blobs near the root, a haze of fine fast ones at the outside.
+      // ⚠ AND THIS IS WHAT UNSTICKS THE SPRAY FROM THE HULL. Every previous version was born at one
+      // point and relied on velocity to spread it. Here a parcel is placed ALONG the sheet at the
+      // distance its breakup level puts it, so the shape exists at the instant it spawns.
+      // Knobs: __water.sheetBend / .sheetWarp / .sheetFrac (0 flattens each behaviour out).
+      const _W9 = W3;
+      // where along the spray root this parcel left. -1 = port chine, 0 = keel contact, +1 = starboard.
+      const _sv = Math.random() * 2 - 1, _as = Math.abs(_sv), _sg = (_sv < 0) ? -1 : 1;
+      const ox = -thz * _sg, oz = thx * _sg;
+      // BEND: the root's sweep is not constant along its own length. At the keel the contact is nearly
+      // transverse and the film is thrown forward; out at the chine it is laid back and the film goes
+      // outboard. Interpolating ψ across the span is what curves the sheet.
+      const _bnd = (_W9.sheetBend != null) ? +_W9.sheetBend : 1;
+      const _psiS = _psi * (1 - 0.72 * _bnd * _as * _as);
+      const _cS = Math.cos(2 * _psiS), _sS = Math.sin(2 * _psiS);
+      let wx = thx * -_cS + ox * _sS, wz = thz * -_cS + oz * _sS;
+      // FRACTAL: the breakup level. P(level >= n) = 0.55^n, so most parcels are level 0-1 ligaments and
+      // the fine haze is the tail. Everything else about the parcel is derived from it.
+      const _frc = (_W9.sheetFrac != null) ? +_W9.sheetFrac : 1;
+      let _lv = 0; while (_lv < 4 && Math.random() < 0.55 * _frc) _lv++;
+      // ⚠⚠ (v41.10) THE SHAPE WAS RIGHT AND THE DENSITY WAS WRONG. v41.09 placed parcels out to
+      // 2.75 beam-widths and shrank the deepest cascade level to 0.15 of the base size, so the same
+      // droplet count was spread over roughly ten times the volume at a fraction of the area each -
+      // and a film you cannot see is not a film. Screenshotted side by side against 41.08 it went
+      // from a (too solid) white mass to very nearly nothing.
+      // A real spray sheet reaches about one to one and a half beam-widths before it is all droplets,
+      // and the cascade thins the parcels without making them invisible: 0.72^level bottoms out at
+      // 0.27 instead of 0.15, and the base is larger to match.
+      const _szK = Math.pow(0.72, _lv);                    
+      const _reach = 0.15 + 0.22 * _lv + Math.random() * 0.42;   
+      // WARP: one travelling wave along the root, sampled at this parcel's s. Amplitude grows with how
+      // far out the parcel is, because that is where the film has thinned enough to flap.
+      const _wrp = (_W9.sheetWarp != null) ? +_W9.sheetWarp : 1;
+      const _tw = (typeof game !== 'undefined' && game.time) ? game.time : (performance.now() * 0.001);
+      const _phase = _sv * 5.4 + _tw * 11.0;
+      const _flap = Math.sin(_phase) * 0.34 * _wrp * Math.min(1, _reach * 0.55);
+      const _snake = Math.cos(_phase * 0.7 + 1.1) * 0.26 * _wrp * Math.min(1, _reach * 0.55);
+      // the snake displaces the parcel ACROSS the sheet (along the root), the flap displaces it in
+      // elevation - together the film undulates instead of fanning flat.
+      wx += ox * _snake; wz += oz * _snake;
+      const _wl2 = Math.hypot(wx, wz) || 1; wx /= _wl2; wz /= _wl2;
+      // the spray BLISTER climbs the hull side before it leaves, so the film rises rather more than the
+      // bare deadrise; the flap rides on top of that.
+      const se = Math.tan(_beta) * (0.35 + 0.55 * Math.random()) + 0.12 + _flap;
+      // finer droplets have lost the most memory of the sheet, so they stray furthest off it
+      const _scat = (0.05 + 0.16 * _lv) * (1 - _as * 0.4);
+      const _sx = wx + (Math.random() - 0.5) * _scat, _sz = wz + (Math.random() - 0.5) * _scat;
+      _swSplV.set(Tx + Vt * _sx, Vt * Math.hypot(_sx, _sz) * se, Tz + Vt * _sz);
+      _swFxN('sheet');
+      // born ALONG the sheet: at the root offset for its s, then carried out by its breakup level.
+      const _rx = x + thx * D * 0.42 + ox * D * 0.42 * _as;
+      const _rz = z + thz * D * 0.42 + oz * D * 0.42 * _as;
+      const _out = D * _reach;
+      game.particles.push({
+        position: new THREE.Vector3(_rx + wx * _out + (Math.random() - 0.5) * 10,
+                                    wl + 3 + Math.max(0, se) * _out * 0.22,
+                                    _rz + wz * _out + (Math.random() - 0.5) * 10),
+        velocity: _swSplV.clone(),
+        life: (0.30 + Math.random() * 0.55) * (1 - 0.13 * _lv), maxLife: 0.92,
+        color: (_lv >= 2) ? ((Math.random() < 0.5) ? 0xc4dcea : 0xd8e8f2) : ((Math.random() < 0.6) ? 0x9dbfd6 : 0xb2cee0),
+        size: sizeMean * _szK * (0.85 + u1 * u1 * 1.9),
+        grav: (300 + Math.random() * 300) * (1 - 0.16 * _lv),   
+        splash: true,
+      });
+      _made++;
+      continue;
+    }
     let phi = 6.2832 * u3; phi -= lean * 0.6 * Math.sin(phi);   
     const fwd = Math.cos(phi);
     if (fwd < -0.3 && Math.random() < lean * 0.7) continue;     
@@ -26978,7 +27604,10 @@ function _swSpawnSplashV(x, wl, z, V, D, countScl) {
       grav: 270 + Math.random() * 320,
       splash: true,
     });
+    _swFxN('crown');
+    _made++;
   }
+  return _made;
 }
 // (v33.72) CREST SPRAY — actual 3D droplet + mist PARTICLES thrown off a breaking wave crest (the user's
 // "eml clouds" idea, ported from a raymarched volume to particles since a per-crest volume march is too
@@ -27000,10 +27629,8 @@ function _swCrestSpray(x, wl, z, crestAmp, vx, vz, crestYOverride) {
   if (game.particles.length > cap - n - 2) return;
   // SPAWN HEIGHT : the displaced surface is RAISED at the crest (matches the VS soft-ceiling), so birth the
   // droplets ABOVE that height — otherwise they spawn inside/under the water and you never see them. (v33.74)
-  const dispS = (window.__water && window.__water.disp != null) ? window.__water.disp : 180;
-  const gainS = (window.__water && window.__water.gain != null) ? window.__water.gain : 180;
-  const _hx = crestAmp * gainS / Math.max(dispS, 0.01);
-  const crestY = (crestYOverride !== undefined) ? crestYOverride : dispS * (_hx / (1 + Math.abs(_hx)));   
+  // (v41.15) through the shared mirror - see _swDispWorld.
+  const crestY = (crestYOverride !== undefined) ? crestYOverride : _swDispWorld(crestAmp);
   const spawnY = wl + 12 + crestY * 0.55;                                     
   for (let i = 0; i < n; i++) {
     const mist = Math.random() < 0.55;                                       
@@ -27021,8 +27648,563 @@ function _swCrestSpray(x, wl, z, crestAmp, vx, vz, crestYOverride) {
     });
   }
 }
+// ⚠⚠ (v41.36) ANYTHING MOVING FAST THROUGH WATER LEAVES A TRAIL OF BUBBLES BEHIND IT.
+// Owner: "bubbles should trail the ship from its nose, and navier stokes out around the ship toward
+// the back... and projectiles and lasers too". The hull got that in v41.32-41.35; a round crossing
+// the same water got nothing once it was under the surface.
+// This is cavitation, and it is a different thing from the hull's flow field. The hull is a large
+// slow body and what matters there is where the water GOES - a velocity field, solved analytically.
+// A projectile is small and fast: it drops the local pressure below vapour pressure along its own
+// line, and what you see is the cavity it leaves collapsing into a string of bubbles that rise.
+// So it is an emitter along the path, not a field - a line of buoyant motes (grav < 0) laid down
+// where the round has been, drifting apart as they climb.
+// Spaced by DISTANCE, per source, so a 12 Hz beam and a 900 u/s bolt lay the same density of trail,
+// and clipped to the part of the segment that is actually underwater.
+const _SW_SUBT = {};
+let _swTidN = 0;   // (v41.37) rolling id so each projectile gets its own trail clock
+function _swSubTrail(x0, y0, z0, x1, y1, z1, R, key) {
+  const w = game && game._hubWater; if (!w || !game.particles) return 0;
+  const W3 = window.__water || {};
+  const tk = (W3.subTrail != null) ? +W3.subTrail : 1;
+  if (!(tk > 0)) return 0;
+  const WL = w.userData.WL;
+  // clip the segment to the part below the waterline
+  let ax = x0, ay = y0, az = z0, bx = x1, by = y1, bz = z1;
+  if (ay > WL && by > WL) return 0;
+  if (ay > WL || by > WL) {
+    const t = (WL - ay) / ((by - ay) || 1e-6);
+    const cx = ax + (bx - ax) * t, cy = WL, cz = az + (bz - az) * t;
+    if (ay > WL) { ax = cx; ay = cy; az = cz; } else { bx = cx; by = cy; bz = cz; }
+  }
+  const dx = bx - ax, dy = by - ay, dz = bz - az;
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 1) return 0;
+  const kk = key || 'x';
+  const st = _SW_SUBT[kk] || (_SW_SUBT[kk] = { t: 0 });
+  const now = performance.now();
+  // (v41.37) 45 -> 28 ms. With every projectile now on its OWN key this is a per-source rate, and
+  // a single missile laying 22 puffs a second was a dotted line rather than a trail.
+  if (now - st.t < 28) return 0;
+  st.t = now;
+  // ⚠ (v41.39) BRIGHT WHITE, BIGGER, MORE. Owner: "i see the weapon bubbles, they are very faint
+  // and hard to see... bright white". Three things were stacking against them: a pale BLUE colour,
+  // sub-pixel sizes (0.5-2.0), and the splash channel's global alpha of 0.45. The channel is
+  // ADDITIVE, so colour is literally how much light a particle contributes - a blue-white at 0.45
+  // alpha over a dark teal underwater fog adds almost nothing. White is the whole fix; the size and
+  // count bumps stop each one being a single dim pixel at distance.
+  const rad = Math.max(10, Math.min(70, R * 0.35));
+  const n = Math.max(2, Math.min(11, Math.round((2 + len / 90) * tk)));
+  if (_swFxRoom() < n) return 0;
+  const ilen = 1 / len, ux = dx * ilen, uy = dy * ilen, uz = dz * ilen;
+  for (let i = 0; i < n; i++) {
+    const f = (i + Math.random()) / n;
+    // a little of the round's own direction, then buoyancy takes over
+    _swDropV.set(ux * 26 + (Math.random() - 0.5) * 34,
+                 16 + Math.random() * 26,
+                 uz * 26 + (Math.random() - 0.5) * 34);
+    game.particles.push({
+      position: new THREE.Vector3(ax + dx * f + (Math.random() - 0.5) * rad,
+                                  ay + dy * f + (Math.random() - 0.5) * rad * 0.6,
+                                  az + dz * f + (Math.random() - 0.5) * rad),
+      velocity: _swDropV.clone(),
+      life: 0.6 + Math.random() * 1.1, maxLife: 1.7,
+      color: (Math.random() < 0.72) ? 0xffffff : 0xeafcff,
+      size: (1.0 + Math.random() * 2.6) * (window.__splashSz || 1),
+      grav: -(70 + Math.random() * 120),   // buoyant: these RISE
+      splash: true,
+    });
+  }
+  _swFxN('subTrail');
+  return n;
+}
+// ⚠⚠ (v41.24) A SHOT FIRED FROM UNDER THE SURFACE PRODUCED NOTHING AT ALL.
+// The crossing test is direction-blind - it fires on any segment that spans the waterline - but
+// everything downstream of it assumed ENTRY. The droplet emitter takes its intensity from
+// `Vn = max(0, -V.y)`, i.e. the DOWNWARD normal speed, and the crossing helper hands it
+// `y: -|dvy|*speed`, forcing that sign. So an upward crossing scored Vn on a velocity it had
+// flipped, and the seed still punched a crater into water the shot was leaving. Firing up from
+// below gave you a dent and no spray.
+// Leaving is not entering backwards. The round carries a sleeve of water out through the surface
+// with it and that water keeps going along the shot's line before gravity takes it - a narrow plume
+// that follows the bullet, not a crown that opens around a hole. Same idea as the hull's exit sheet
+// (_swShedDrops), which is why the droplets are born ON the surface carrying the shot's direction.
+function _swExitPlume(hx, wl, hz, dx, dy, dz, sp, radius, k) {
+  // ⚠ (v41.25) NO `game._swSubmerged` GUARD HERE, unlike every other spray emitter. Those are all
+  // gated on it because their droplets are born at the surface and would be spawned INSIDE the water
+  // when the camera is under. This one is the opposite case by definition: it exists precisely for a
+  // shot fired from below, so the camera being submerged is the NORMAL condition for it, and its
+  // droplets are above the waterline where they belong either way. Copying the guard across cost the
+  // feature its only use case - measured 0 plumes on the exact scenario it was built for.
+  if (!game.particles) return 0;
+  const n = Math.max(3, Math.min(30, Math.round((5 + 22 * k) * Math.min(1.6, radius / 60))));
+  if (_swFxRoom() < n) return 0;
+  const spd = Math.min(900, Math.max(90, sp * 0.30));
+  // a frame around the shot's line so the sleeve can be spread across it
+  let e1x = -dz, e1y = 0, e1z = dx;
+  const e1l = Math.hypot(e1x, e1y, e1z) || 1; e1x /= e1l; e1z /= e1l;
+  const e2x = dy * e1z - dz * e1y, e2y = dz * e1x - dx * e1z, e2z = dx * e1y - dy * e1x;
+  for (let i = 0; i < n; i++) {
+    const u1 = Math.random(), u2 = Math.random();
+    // tight around the line near the shot, fanning out for the water peeled off the rim
+    const cone = 0.05 + 0.42 * u1 * u1;
+    const ph = Math.random() * 6.2832, ca = Math.cos(cone), sa = Math.sin(cone);
+    const cx = Math.cos(ph) * sa, cy = Math.sin(ph) * sa;
+    const vx = dx * ca + (e1x * cx + e2x * cy), vy = dy * ca + (e1y * cx + e2y * cy), vz = dz * ca + (e1z * cx + e2z * cy);
+    const v = spd * (0.35 + 0.85 * (1 - u1) + 0.5 * u2);
+    _swDropV.set(vx * v, vy * v, vz * v);
+    game.particles.push({
+      position: new THREE.Vector3(hx + (Math.random() - 0.5) * radius * 0.5,
+                                  wl + 2 + Math.random() * 10,
+                                  hz + (Math.random() - 0.5) * radius * 0.5),
+      velocity: _swDropV.clone(),
+      life: 0.30 + Math.random() * 0.75, maxLife: 1.1,
+      color: (Math.random() < 0.5) ? 0xa6c8de : 0xd2e6f2,
+      size: (1.1 + Math.random() * 2.4) * (window.__splashSz || 1),
+      grav: 300 + Math.random() * 260,
+      splash: true,
+    });
+  }
+  _swFxN('exitPlume');
+  return n;
+}
+// ⚠⚠ (v41.21) EVERY SHOT MADE THE SAME SPLASH. Nine call sites reach the water and not one of
+// them reads the weapon: the radius and amplitude at each is a LITERAL (65/0.08, 78/0.09, 90/0.14,
+// 110/0.12, 140/0.07). So a Gatling round at 85 damage and a Sodium Railgun at 1000 punched an
+// identical hole, and a Sonar Pulse - damage 0, splash 0, half size - splashed like a thermite.
+// The fix is not nine new formulas at nine sites. It is one YIELD, one curve, and one number passed
+// in; _swWaterCrossSplash keeps doing the oblique fan and the droplet budget exactly as before.
+//
+// ⚠ THE YIELD HAS TO SURVIVE THE NETWORK. spawnNetworkProjectile builds its mirror with damage 0
+// (damage authority lives in the hit-claim path and must stay there), but it DOES replicate `splash`
+// and `sizeMult`. So the yield falls back through those: a peer thermite carries splash 300 -> 900,
+// which is exactly the local thermite's damage. Scaling on damage alone would have sent every peer
+// shot to the floor - the "it only splashes on the shooter's screen" bug this codebase has had before.
+function _swWpnYield(dmg, splash, sizeMult) {
+  if (dmg > 0) return dmg;
+  if (splash > 0) return splash * 3;
+  return 120 * ((sizeMult > 0) ? sizeMult : 1);
+}
+// ⚠ AND THE REAL CEILING IS THE SEED QUEUE, NOT THE DROPLET BUDGET. `_swRippleSeed` pushes into a
+// list capped at 8, and the sim consumes at most 8 per 60 Hz step and then clears it - while the
+// wake alone lays 5 a step. `wxCap` only guards the SPRAY, and it is checked after the ripple seeds
+// are already in, which is why a chaingun can quietly starve the ship's own wake out of the queue.
+// So: a second bucket for seeds, and a per-source stipple clock that COALESCES rapid fire into fewer
+// slightly larger disturbances rather than dropping shots silently - the skipped yield is carried
+// forward into the next one that gets through.
+const _swXS = { t: 0, n: 0 };
+const _SW_WPN_T = {};
+// ⚠⚠ (v41.27) A MISSILE SKIMMING THE SURFACE SHOULD TRAIL A WAKE, AND ONLY THE SHIP HAD ONE.
+// Owner: "a missile flying over top of the water should leave a wake". The hull's wake block already
+// seeds while it is merely NEAR the water - up to 200 units clear, weighted by proximity - because
+// what disturbs the surface is the pressure field passing over it, not contact. Nothing else in the
+// game did that: a thermite skimming a metre over the lake left it mirror-flat until it hit.
+// Same trail, spaced by distance travelled rather than by time, so it does not thin out with the
+// frame rate, and per-projectile state so two missiles do not share one trail.
+function _swWpnWake(o, x, y, z, vx, vz, R) {
+  const w = game && game._hubWater; if (!w) return 0;
+  const W3 = window.__water || {};
+  const wk = (W3.wpnWake != null) ? +W3.wpnWake : 1;
+  if (!(wk > 0)) return 0;
+  const WL = w.userData.WL, above = y - WL;
+  const ceil = R * 4 + 90;
+  if (above <= 0 || above > ceil) return 0;
+  const sp = Math.hypot(vx, vz);
+  if (sp < 60) return 0;
+  const st = o._swWk || (o._swWk = { x: 1e9, z: 0 });
+  const spacing = Math.max(26, R * 1.2);
+  const dx = x - st.x, dz = z - st.z;
+  if (dx * dx + dz * dz < spacing * spacing) return 0;
+  st.x = x; st.z = z;
+  const prox = 1 - above / ceil;
+  const peak = (W3.impactPeak != null) ? +W3.impactPeak : 0.135;
+  const a = 0.42 * prox * prox * Math.min(1, sp / 700) * wk * peak;
+  if (a < 0.0005) return 0;
+  const ih = 1 / sp, hx = vx * ih, hz = vz * ih;
+  _swRippleSeed(x, z, Math.max(20, R * 0.9), -a);                                   // pressed down under it
+  _swRippleSeed(x - hx * R * 1.7, z - hz * R * 1.7, Math.max(20, R * 1.25), a * 0.5);  // closing in behind
+  _swFxN('wpnWake');
+  return 1;
+}
+function _swWpnCross(x0, y0, z0, x1, y1, z1, Y, speed, src, minDt) {
+  const w = game && game._hubWater; if (!w) return 0;
+  // (v41.36) a shot travelling ENTIRELY underwater never crosses the surface, so it would fall out
+  // of every branch below. Trail first, ask about crossings after.
+  const _wl0 = w.userData.WL;
+  if (y0 < _wl0 && y1 < _wl0) {
+    try { _swSubTrail(x0, y0, z0, x1, y1, z1, 60, src || 'p'); } catch (_) {}
+    return 0;
+  }
+  const W3 = window.__water || {};
+  const wk = (W3.wpn != null) ? +W3.wpn : 1;
+  if (!(wk > 0)) return 0;
+  const now = performance.now();
+  let yld = (Y > 0) ? Y : 85;
+  // per-source stipple: hold the skipped yield and hand it to the shot that does get through
+  // (v41.37) `src` doubles as the stipple key; projectiles pass minDt 0 so a per-projectile id here
+  // only ever reaches the trail, never the stipple.
+  if (src && minDt > 0) {
+    const st = _SW_WPN_T[src] || (_SW_WPN_T[src] = { t: 0, hold: 0 });
+    if (now - st.t < minDt * 1000) { st.hold += yld; return 0; }
+    yld += st.hold * 0.5; st.hold = 0; st.t = now;
+  }
+  // ⚠ CALIBRATED TO BE A NO-OP AT THE CURRENT AVERAGE. At the Energy Blaster's 380 damage this
+  // gives R 59 / A 0.068, which is where the shipped 78 / 0.09 already sat - so the lake does not get
+  // globally louder or quieter, the RANGE opens up around where it was. impactPeak was recalibrated
+  // twice in v41.02/41.03 and a global shift here would relitigate all of it.
+  // ⚠⚠ (v41.28) EVERY WEAPON SPLASH WAS 5-16x WEAKER THAN THE SHIP'S, and after v41.27 routed
+  // them through _swImpact the lever had moved without me noticing. The seed a weapon lays is
+  //     (0.10 + 0.10p) * (fp.DRAFT/13.5) * wake * ampK * impactPeak,  fp.DRAFT = R * 0.19
+  // so it is driven by the FOOTPRINT RADIUS and by ampK. `A` below now only picks the budget class
+  // and the vent threshold - tuning it, which is what I had been doing, moved almost nothing.
+  // Measured against the hull's own impact seed of 0.0806:
+  //     Gatling 0.0049   Blaster 0.0097   Thermite 0.0142   Railgun 0.0149
+  // The Gatling was SIXTEEN times weaker than a ship touching the water, which is exactly the
+  // owner's "blaster's weapon... has none". Radius base 30 -> 45 and ampK 0.15 -> 0.55 give:
+  //     Gatling 0.0271   Blaster 0.0531   Thermite 0.0783   Railgun 0.0821   charged 0.1533
+  // - a missile now enters the water about as hard as the hull does, and a chaingun round pocks it
+  // instead of disappearing. The radius also feeds the droplet count as (R/72)^2, so the spray
+  // spreads with it rather than needing its own curve.
+  const rel = yld / 85;
+  const R = Math.max(40, Math.min(260, 45 * Math.pow(rel, 0.45)));
+  const A = Math.max(0.025, Math.min(0.30, 0.030 * Math.pow(rel, 0.55)));
+  // A big shot always gets its full seed. Small ones share a bucket - but (v41.26) an exhausted
+  // bucket now SHRINKS the disturbance rather than dropping it, for the same reason as the droplet
+  // budget above: a hit that does nothing at all is the one thing the owner asked not to happen.
+  let Ax = A;
+  if (A < 0.075) {
+    if (now - _swXS.t > 250) { _swXS.t = now; _swXS.n = 0; }
+    const cap = (W3.wxSeedCap != null) ? +W3.wxSeedCap : 60;
+    if (_swXS.n >= cap) Ax = A * 0.45;
+    else _swXS.n++;
+  }
+  // ⚠⚠ (v41.27) A WEAPON HITTING THE WATER IS THE SAME EVENT AS THE SHIP HITTING IT.
+  // Owner: "weapons hitting the water should be the exact same as the ship, actually". They are
+  // right, and it collapses two models into one. `_swImpact` already carries everything the weapon
+  // path had been reimplementing badly: the crater with its thrown rim, the velocity gash for a
+  // grazing hit, the bent/warped/fractal spray sheet through the hull's own deadrise, and - on the
+  // way OUT - the shed sheet that drags water up after the thing that is leaving.
+  // All a weapon needs is a footprint its own size and a scale. The footprint comes from the yield
+  // radius; `ampK` 0.15 is set so the amplitudes land where the v41.21 curve already put them, which
+  // keeps the calibration and changes only the shape.
+  // ⚠ `actor` is null on purpose. _swImpact arms a collapse cavity on its actor's wet-state, and
+  // that state is only ticked for the player and network ships - a per-shot object would arm a
+  // cavity nothing ever fires. Weapons vent through _SW_BLASTS below, which IS ticked.
+  const wl2 = game._hubWater.userData.WL;
+  const t2 = (Math.abs(y1 - y0) < 1e-6) ? 0.5 : (wl2 - y0) / (y1 - y0);
+  if (!(t2 >= 0 && t2 <= 1)) return 0;
+  const hx2 = x0 + (x1 - x0) * t2, hz2 = z0 + (z1 - z0) * t2;
+  let ux = x1 - x0, uy = y1 - y0, uz = z1 - z0;
+  const ul = Math.hypot(ux, uy, uz) || 1; ux /= ul; uy /= ul; uz /= ul;
+  const shotSp = (speed > 0) ? Math.min(4000, speed) : (240 + 1500 * Math.min(1, Ax * 5));
+  const fp2 = { BEAM: R, LEN: R * 1.3, DRAFT: R * 0.19, half: R * 0.65, heft: 1 };
+  // (v41.36) the cavitation trail for whatever part of this step was underwater
+  try { _swSubTrail(x0, y0, z0, x1, y1, z1, R, src || 'p'); } catch (_) {}
+  _swFxN('wpnCross');
+  _swImpact(hx2, hz2, (uy > 0) ? -1 : 1, fp2, 1,
+            { x: ux * shotSp, y: uy * shotSp, z: uz * shotSp }, wl2, null,
+            // (v41.28) 0.15 -> 0.55, and `__water.wpn` rides HERE rather than on `A`, because this is
+            // the term the amplitude actually depends on. The Ax/A ratio is the budget's thinning.
+            // ⚠ (v41.29) ...and an EXIT is boosted back to parity. `_swImpact` softens the exit on
+            // purpose - `k = 0.62` and a 0.85 radius - because a HULL rising out of water lifts it
+            // gently compared with slamming in. A round punched out from underneath does no such
+            // thing: it leaves at the same speed it arrived and takes the surface with it. Owner:
+            // "we need to have splashing just the same if something is shot out of the water from
+            // underneath". Cancelling the 0.62 is exactly that parity, and it leaves the ship's own
+            // exit behaviour untouched because this multiplier only exists on the weapon path.
+            0.55 * wk * (Ax / Math.max(1e-4, A)) * ((uy > 0) ? 1.61 : 1));
+  // the cavity a hard ENTRY digs collapses and throws droplets back up a beat later
+  const vth = (W3.vent != null) ? +W3.vent : 0.009;
+  if (uy <= 0 && Ax * ((W3.impactPeak != null) ? +W3.impactPeak : 0.135) > vth &&
+      typeof _SW_BLASTS !== 'undefined' && _SW_BLASTS.length < 6) {
+    _swFxN('vent');
+    _SW_BLASTS.push({ x: hx2, z: hz2, t: 0, R: R * 1.5,
+                      k: Math.max(0.10, Math.min(0.9, (Ax * 0.135 - vth * 0.7) * 40)),
+                      delay: 0.10 + 0.16 * Math.min(1, R / 160) });
+  }
+  // a round on its way OUT also drags a sleeve along its own line - the one thing a hull has no
+  // equivalent of, because a hull has no barrel direction.
+  if (uy > 0) { try { _swExitPlume(hx2, wl2, hz2, ux, uy, uz, shotSp, R, 0.25 + 0.75 * Math.min(1, Ax * 6)); } catch (_) {} }
+  return 1;
+}
+// (v41.11) ROOSTER TAIL - the arc of water a planing hull throws off its TRANSOM.
+// Owner: "make that arc of spray behind the boat go higher". There was no stern emitter at all: the
+// planing sheet leaves from the wetted contact near the BOW, and what looked like an arc behind was
+// just those parcels being left behind as the ship ran out from under them. A real rooster tail is
+// its own thing - water lifted by the hull's after-body and thrown up and back, which is why it
+// rises well above the deck and falls in a clean ballistic curve rather than trailing off flat.
+// The parcels are launched steeply (45-75 degrees) at a fraction of the hull's speed, so their apex
+// scales as v^2/2g and the arc grows with speed the way it should. `__water.rooster` is the height
+// multiplier - this is the dial for 'higher'.
+function _swRooster(px, wl, pz, vel, fp, wet01) {
+  if (!game.particles || game._swSubmerged || !fp) return 0;
+  const W3 = window.__water || {};
+  const k = (W3.rooster != null) ? +W3.rooster : 1;
+  if (!(k > 0)) return 0;
+  const vx = vel ? vel.x : 0, vz = vel ? vel.z : 0, sp = Math.hypot(vx, vz);
+  if (sp < 60) return 0;
+  const n = Math.max(2, Math.min(22, Math.round((3 + 9 * wet01) * (fp.BEAM / 72))));
+  if (_swFxRoom() < n) return 0;
+  const bx = sp > 1e-3 ? vx / sp : 0, bz = sp > 1e-3 ? vz / sp : 1;   
+  const lx = -bz, lz = bx;                                            
+  for (let i = 0; i < n; i++) {
+    const u1 = Math.random(), u2 = Math.random();
+    // steep and backward: elevation 45-75 deg, thrown against the direction of travel
+    const el = 0.79 + u1 * 0.52;
+    const side = (u2 - 0.5) * 1.35;                                   
+    const spd = sp * (0.34 + 0.42 * Math.random()) * k * (0.55 + 0.65 * wet01);
+    const ce = Math.cos(el), se = Math.sin(el);
+    _swDropV.set((-bx * ce + lx * side) * spd + vx * 0.30,
+                 se * spd,
+                 (-bz * ce + lz * side) * spd + vz * 0.30);
+    game.particles.push({
+      position: new THREE.Vector3(px + lx * (Math.random() - 0.5) * fp.BEAM * 0.7,
+                                  wl + 4 + Math.random() * fp.DRAFT,
+                                  pz + lz * (Math.random() - 0.5) * fp.BEAM * 0.7),
+      velocity: _swDropV.clone(),
+      life: 0.55 + Math.random() * 0.95, maxLife: 1.5,
+      color: (Math.random() < 0.5) ? 0xa6c8de : 0xcfe4f0,
+      size: (1.4 + Math.random() * 2.8) * (window.__splashSz || 1),
+      grav: 300 + Math.random() * 200,
+      splash: true,
+    });
+  }
+  _swFxN('rooster');
+  return n;
+}
+// (v41.11) CREST DOTS - the bright specks that come off the top of a wave.
+// Owner: "we could also add dots like the underwater effect, off the peaks of the wakes/waves".
+// The underwater bubbles (_swBubblesTick) read the way they do because they are SMALL, BRIGHT and
+// SLOW - additive points with almost no gravity, so they hang and drift instead of arcing. These are
+// the same idea in air: a crest that is steep enough sheds a few specks off its top, they rise a
+// little, and they hang. Deliberately low gravity and long life; that hang is the whole effect.
+// Fed from the wake's own crest positions (free - we already know where we put them) and from the
+// crest-break scan when it is running. `__water.dots` scales the count, 0 turns them off.
+// (v41.14) `crestY` lifts the spawn to the top of the crest. With crests now reaching 80-150 units
+// the old flat `wl + 6` put every speck at the waterline, i.e. INSIDE the wave it was supposed to be
+// coming off - which is most of why the spray read as low however high the crest got.
+function _swCrestDots(px, wl, pz, k, vx, vz, crestY) {
+  if (!game.particles || game._swSubmerged) return 0;
+  const W3 = window.__water || {};
+  const dk = (W3.dots != null) ? +W3.dots : 1;
+  if (!(dk > 0) || !(k > 0.02)) return 0;
+  // (v41.31) TWO LAYERS. Owner: "make more of them, keep them as is (maybe a bit brighter), but add
+  // a next layer of tinier brighter ones". Which is also how a breaking crest actually sheds: the
+  // ligament breakup does not produce one droplet size, it produces a coarse population and a much
+  // finer one, and the fine one is what catches the light because there is far more surface area
+  // per unit of water in it. Same reason sea spray reads as a bright haze over darker drops.
+  // COARSE is the layer that was already here, count up and a touch brighter. FINE is new: roughly
+  // 1.7x as many at a third the size, near-white, and lighter gravity so it hangs above the coarse
+  // drops after they have fallen out - which is what gives the crest a lingering glitter rather than
+  // a puff that vanishes.
+  const n = Math.max(1, Math.min(20, Math.round((2 + 8 * Math.min(1, k)) * dk)));
+  const fk = (W3.dotsFine != null) ? +W3.dotsFine : 1.7;
+  const n2 = Math.max(0, Math.min(34, Math.round(n * fk)));
+  if (_swFxRoom() < n + n2) return 0;
+  const spawnY = function () {
+    return wl + 6 + Math.random() * 14 + (crestY || 0) * (0.55 + 0.45 * Math.random());
+  };
+  for (let i = 0; i < n; i++) {
+    const ang = Math.random() * 6.2832, out = Math.random() * Math.random() * 46;
+    _swDropV.set(Math.cos(ang) * out + (vx || 0) * 0.06,
+                 22 + Math.random() * 78 * Math.min(1, k * 1.6),
+                 Math.sin(ang) * out + (vz || 0) * 0.06);
+    game.particles.push({
+      position: new THREE.Vector3(px + (Math.random() - 0.5) * 40, spawnY(), pz + (Math.random() - 0.5) * 40),
+      velocity: _swDropV.clone(),
+      life: 0.7 + Math.random() * 1.1, maxLife: 1.8,
+      color: (Math.random() < 0.5) ? 0xe6faff : 0xbce4fb,   // (v41.31) a touch brighter than before
+      size: (0.7 + Math.random() * 1.5) * (window.__splashSz || 1),
+      grav: 55 + Math.random() * 95,                        
+      splash: true,
+    });
+  }
+  // the fine layer: smaller, whiter, thrown a little further and falling much more slowly
+  for (let i = 0; i < n2; i++) {
+    const ang = Math.random() * 6.2832, out = Math.random() * Math.random() * 78;
+    _swDropV.set(Math.cos(ang) * out + (vx || 0) * 0.10,
+                 26 + Math.random() * 104 * Math.min(1, k * 1.6),
+                 Math.sin(ang) * out + (vz || 0) * 0.10);
+    game.particles.push({
+      position: new THREE.Vector3(px + (Math.random() - 0.5) * 56, spawnY(), pz + (Math.random() - 0.5) * 56),
+      velocity: _swDropV.clone(),
+      life: 0.9 + Math.random() * 1.3, maxLife: 2.2,
+      color: (Math.random() < 0.55) ? 0xffffff : 0xeafcff,
+      size: (0.22 + Math.random() * 0.55) * (window.__splashSz || 1),
+      grav: 26 + Math.random() * 52,                        
+      splash: true,
+    });
+  }
+  _swFxN('dots');
+  if (n2) _swFxN('dotsFine');
+  return n + n2;
+}
 // (v33.74) DEV PROBE — fire a strong crest-spray burst at the ship so you can confirm the droplet particles
 // actually RENDER, independent of the wake firing conditions. Console: window.__crestTest()  (or __crestTest(0.6))
+// (v41.20) DEV PROBE - fire a blast on the lake without needing a weapon that carries splash.
+// window.__blastTest(size, dy) : size is the explosion size spawnExplosion takes (20 default, 60 is
+// a thermite-scale warhead), dy is metres above the waterline - negative for a submerged burst,
+// which is the one that vents a column a beat later. Fires at the aim point if there is water under
+// it, else straight in front of the ship.
+window.__blastTest = function (size, dy) {
+  const w = game && game._hubWater; if (!w) { console.log('[blastTest] no hub water'); return null; }
+  const WL = w.userData.WL;
+  let bx = player.position.x, bz = player.position.z;
+  try {
+    const f = new THREE.Vector3(0, 0, -1).applyEuler(player.euler);
+    const t = (Math.abs(f.y) > 1e-3) ? (WL - player.position.y) / f.y : -1;
+    if (t > 0 && t < 20000) { bx = player.position.x + f.x * t; bz = player.position.z + f.z * t; }
+    else { bx = player.position.x + f.x * 600; bz = player.position.z + f.z * 600; }
+  } catch (_) {}
+  const n = _swBlast(bx, WL + ((dy != null) ? +dy : 0), bz, (size != null) ? +size : 40);
+  const out = { at: [Math.round(bx), Math.round(bz)], dy: (dy != null) ? +dy : 0,
+                size: (size != null) ? +size : 40, fired: n,
+                water: window.__waterAt(bx, bz), pendingColumns: _SW_BLASTS.length };
+  try { console.log('[blastTest]', JSON.stringify(out)); } catch (_) {}
+  return out;
+};
+// (v41.03) DEV HELPERS - the water tests I kept doing by eye. `__groundY(x,z)` is the carved terrain
+// height the ripple mask is baked from; `__waterAt(x,z)` is the mask's own question, i.e. whether a
+// seed dropped there would survive. Finding open water by flying up and squinting at a screenshot is
+// how two of this session's measurements ended up being taken over dry land.
+window.__groundY = function (x, z) {
+  try { return _stGroundYCarved(x, z, (game && game.sandwichTerrain) || null); } catch (e) { return NaN; }
+};
+window.__waterAt = function (x, z) {
+  const w = game && game._hubWater; if (!w) return null;
+  const WL = w.userData.WL, gy = window.__groundY(x, z);
+  return { WL: WL, groundY: Math.round(gy), depth: Math.round(WL - gy), water: (gy < WL) };
+};
+// (v41.02) DEV PROBE - reads the live heightfield back and reports what the DISPLAY does with it.
+// This is the instrument the v41.02 calibration was made against, and the number that matters is
+// `satPct`: the share of disturbed texels the vertex shader's tanh has flattened. Anything much
+// above a few percent means the surface has lost its dynamic range and will read as jello however
+// the seeds are shaped. Synchronous readback - a dev tool, never on a frame path.
+// (v41.07) which emitters have fired since the last reset, plus the gate state that decides each
+// one. window.__waterFX() to read, window.__waterFX(1) to read and zero.
+window.__waterFX = function (reset) {
+  const out = {};
+  for (const k in _SW_FXN) out[k] = _SW_FXN[k];
+  const w = game && game._hubWater;
+  if (w && typeof player !== 'undefined' && player) {
+    const fp = _swShipFootprint(), WL = w.userData.WL, above = player.position.y - WL;
+    const sp = player.velocity ? Math.hypot(player.velocity.x, player.velocity.z) : 0;
+    const st = _swRipple._swWet;
+    out._gate = { above: Math.round(above), sp: Math.round(sp),
+                  DRAFT: Math.round(fp.DRAFT), LEN: Math.round(fp.LEN), BEAM: Math.round(fp.BEAM),
+                  touching: (above < fp.DRAFT * 1.5 && above > -fp.DRAFT * 5),
+                  wet01: +Math.max(0, Math.min(1, (fp.DRAFT - above) / (2 * fp.DRAFT))).toFixed(2),
+                  wet: +((st && st.wet) || 0).toFixed(2), cav: !!(st && st.cav),
+                  submerged: !!game._swSubmerged,
+                  parts: game.particles ? game.particles.length : -1,
+                  room: Math.round(_swFxRoom()) };
+  }
+  const _we = window.__water || {};
+  if (_we.tickErrN) out._tickErr = { n: _we.tickErrN, msg: _we.tickErr };
+  if (reset) for (const k in _SW_FXN) delete _SW_FXN[k];
+  try { console.log('[waterFX]', JSON.stringify(out)); } catch (_) {}
+  return out;
+};
+window.__waterProbe = function () {
+  const R = _swRipple;
+  if (!R.gpu || !R.heightVar) return { err: 'no gpgpu water' };
+  const RES = _SW_RIPPLE_RES, buf = new Float32Array(RES * RES * 4);
+  const prev = renderer.getRenderTarget();
+  let rt = null;
+  try { rt = R.gpu.getCurrentRenderTarget ? R.gpu.getCurrentRenderTarget(R.heightVar) : R.gpu.getAlternateRenderTarget(R.heightVar); } catch (_) {}
+  if (!rt) return { err: 'no render target' };
+  try { renderer.readRenderTargetPixels(rt, 0, 0, RES, RES, buf); }
+  catch (e) { return { err: String(e && e.message || e) }; }
+  if (renderer.setRenderTarget) renderer.setRenderTarget(prev);
+  // ⚠⚠ (v41.13) THIS PROBE WAS READING THE WRONG SHADER, AND I QUOTED ITS NUMBERS FOR TEN BUILDS.
+  // `window.__pw` (relief 9 / gain 95) belongs to _swBuildHubWaterDispGet's OVERLAY material. The
+  // water you actually see is the mesh built around L29824, whose vertex shader is
+  //     _hx  = h * uGain / uDispScale ;  disp = uDispScale * (_hx / (1 + |_hx|))
+  // with uDispScale = uGain = 180 - a rational sigmoid with a ceiling of 180 world units, not a
+  // tanh with a ceiling of 9. Every 'the crest is pinned at 9 units' reading I took was computed
+  // from constants belonging to a material that is not on screen. Read the LIVE uniform.
+  const W3 = window.__water || {};
+  let _dS = 180, _gS = 180;
+  try {
+    const _m = game._hubWaterDispMat;
+    if (_m && _m.uniforms && _m.uniforms.uDispScale) { _dS = _m.uniforms.uDispScale.value; _gS = _m.uniforms.uGain.value; }
+  } catch (_) {}
+  const relief = _dS, gain = _gS;
+  const kk = gain / Math.max(relief, 0.01);
+  let mn = 1e9, mx = -1e9, s2 = 0, live = 0, sat = 0;
+  for (let i = 0; i < RES * RES; i++) {
+    const h = buf[i * 4];
+    if (h < mn) mn = h;
+    if (h > mx) mx = h;
+    s2 += h * h;
+    const a = Math.abs(h);
+    if (a > 2e-4) live++;
+    if (a * kk > 2.0) sat++;   // tanh(2) = 0.964 : flat-topped for anything you can see
+  }
+  // (v41.16) through _swDispWorld, the ONE mirror. This probe was a fourth private copy of the
+  // transform and it desynced the instant v41.15 changed the shape: it reported a 45-unit crest
+  // where the shader was drawing 130. Any code that needs a world height calls the helper.
+  const dsp = function (h) { return +_swDispWorld(h).toFixed(2); };
+  // ⚠ hMax over the WHOLE 128x128 window is not what you are looking at - a stale spike left at
+  // the far edge by an earlier impact wins it every time. The number that matters is the surface
+  // NEAR THE HULL, so take the crest and trough over a box around the ship and report both.
+  let lo = 0, hi = 0, lr = -1;
+  try {
+    if (typeof player !== 'undefined' && player && game._hubWater) {
+      const cx = R.center.x, cz = R.center.y, B = R.bounds;
+      const rx = (player.position.x - cx) / B + 0.5, rz = (player.position.z - cz) / B + 0.5;
+      const rad = ((W3.probeRadius != null) ? +W3.probeRadius : 420) / B;   // world units -> uv
+      const i0 = Math.max(0, Math.floor((rx - rad) * RES)), i1 = Math.min(RES - 1, Math.ceil((rx + rad) * RES));
+      const j0 = Math.max(0, Math.floor((rz - rad) * RES)), j1 = Math.min(RES - 1, Math.ceil((rz + rad) * RES));
+      if (i1 >= i0 && j1 >= j0) {
+        lr = 0;
+        for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+          const h = buf[(j * RES + i) * 4];
+          if (h > hi) hi = h; if (h < lo) lo = h; lr++;
+        }
+      }
+    }
+  } catch (_) {}
+  const out = {
+    dispScale: relief, gain: gain, ceilingUnits: relief,
+    nearHull: { hCrest: +hi.toFixed(4), hTrough: +lo.toFixed(4),
+                crestUnits: dsp(hi), troughUnits: dsp(lo), texels: lr },
+    hMin: +mn.toFixed(4), hMax: +mx.toFixed(4), hRms: +Math.sqrt(s2 / (RES * RES)).toFixed(5),
+    dispMin: dsp(mn), dispMax: dsp(mx),
+    liveTexels: live, satTexels: sat, satPct: live ? +(100 * sat / live).toFixed(1) : 0,
+    seedScale: (W3.seedScale != null) ? W3.seedScale : 1.0,
+    impactPeak: (W3.impactPeak != null) ? W3.impactPeak : 0.135,
+    seedImpulse: (W3.seedImpulse != null) ? W3.seedImpulse : 0.25,
+    waveC2: (W3.waveC2 != null) ? W3.waveC2 : 0.26, crater: (W3.crater != null) ? W3.crater : 1,
+    skips: (window.__lssSkips | 0),
+  };
+  try { console.log('[waterProbe]', JSON.stringify(out)); } catch (_) {}
+  return out;
+};
+// (v41.00) DEV PROBE - what the oblique model does to a given approach, with no flying required.
+// window.__obliqueTest(400, 5) -> the 400 u/s 5° skim from the header note.
+window.__obliqueTest = function (V, deg) {
+  V = (V != null) ? +V : 400; deg = (deg != null) ? +deg : 5;
+  const th = deg * Math.PI / 180, Vn = V * Math.sin(th), Vt = V * Math.cos(th);
+  const fp = (typeof _swShipFootprint === 'function') ? _swShipFootprint() : null;
+  const beta = _swDeadrise(fp);
+  const U = _swSprayRoot(Vn, Vt, beta), D = fp ? fp.BEAM : 72;
+  const I = function (k) { return Math.min(1, Math.max(0, (k - 28) / 192)); };
+  // (v41.04) ...and where the stagnation line points, which decides the sheet's direction and speed.
+  const W3o = window.__water || {};
+  const psi = _swStagPsi(Math.max((W3o.trim != null) ? +W3o.trim : 0.10, th), beta);
+  const c2 = Math.cos(2 * psi), s2 = Math.sin(2 * psi);
+  const wG = (W3o.waveG != null) ? +W3o.waveG : 1300, Frc = (W3o.waveFrc != null) ? +W3o.waveFrc : 0.5;
+  const L = fp ? fp.LEN : 90, Fr = V / Math.sqrt(Math.max(1, wG * L));
+  const out = { V: V, deg: deg, Vn: +Vn.toFixed(1), Vt: +Vt.toFixed(1),
+                beta: +(beta * 180 / Math.PI).toFixed(1), U: +U.toFixed(1),
+                oldI: +I(Vn * Math.sqrt(D / 72)).toFixed(3), newI: +I(U * Math.sqrt(D / 72)).toFixed(3),
+                psi: +(psi * 57.29578).toFixed(1),
+                sheet: (c2 > 0 ? 'aft-outboard (main spray)' : 'forward-outboard (whisker)'),
+                sheetSpeedX: +Math.hypot(1 - c2, s2).toFixed(2),   // world speed / ship speed: 0 at psi=0, 2 at psi=90deg
+                Fr: +Fr.toFixed(2),
+                wakeDeg: +((Fr <= Frc ? 0.33998 : 0.33998 * Frc / Fr) * 57.29578).toFixed(1) };
+  console.log('[oblique]', JSON.stringify(out)); return out;
+};
 window.__crestTest = function (amp) {
   const w = game._hubWater; if (!w) { console.log('[crestTest] no hub water — enter free-flight first'); return; }
   const px = player ? player.position.x : 0, pz = player ? player.position.z : 0;
@@ -27033,14 +28215,106 @@ window.__crestTest = function (amp) {
 // (v33.21) WEAPON SPLASH : given a 3D segment (a hitscan beam, or a projectile's last->now step),
 // if it CROSSES the water surface, seed a ripple at the crossing point. Hub-only (no-op without the
 // GPGPU water). Lets bullets/bolts/beams/explosions splash the lake exactly where they hit it.
-function _swWaterCrossSplash(x0, y0, z0, x1, y1, z1, radius, amp) {
+// (v41.00) THE SAME OBLIQUE CORRECTION, FOR EVERYTHING THAT SHOOTS. Two things were wrong here.
+// First, the disturbance was always ROUND: one ripple seed at the crossing point, whatever angle
+// the shot came in at. A steep shot does punch a single hole, but a shallow one drags its contact
+// point across the surface at v/tan(θ) and cuts a STREAK - so a grazing beam now lays 2-4 seeds
+// along its own path, weakening downstream, and a plunging one still lays exactly one.
+// Second, the spray was `_swSpawnSplash(4, ...)`: a symmetric vertical puff with no idea which way
+// the shot was travelling. It goes through the velocity-biased emitter now, built from the segment's
+// own direction, so the plume leans downrange the way the water actually throws it.
+// ⚠ AND IT IS BUDGETED NOW, which it never was. The old path was a flat 4 droplets per call with no
+// ceiling of any kind, and the Mega Laser / peer beam callers fire at 12 Hz for as long as the beam is
+// held on the lake. A directional plume costs more than a puff, so every weapon that touches the water
+// draws from ONE shared token bucket (`__water.wxCap` droplets per 250 ms, 34 = ~136/s). Over budget,
+// the ripple still seeds - the water still reacts - and only the spray is dropped.
+// `speed` is optional: pass the real one where it is known (a projectile's step), otherwise it is
+// inferred from `amp` the way the old power term was.
+function _swWaterCrossSplash(x0, y0, z0, x1, y1, z1, radius, amp, speed) {
   const w = game._hubWater; if (!w) return;
   const WL = w.userData.WL;
+  // ⚠⚠ (v41.37) THE TRAIL HAS TO COME BEFORE THE CROSSING TEST. Owner: "i didn't see missiles and
+  // lasers making a bubble path". v41.36 put the call four lines too low - below the early return
+  // that bails when both endpoints are on the SAME side of the waterline. A beam held entirely
+  // underwater is exactly that case, so the one situation the trail was written for returned before
+  // reaching it. Same class of mistake as gating the exit plume on `_swSubmerged` in v41.24: the
+  // guard above a feature quietly excluding the feature's own use case.
+  try { _swSubTrail(x0, y0, z0, x1, y1, z1, radius, 'beam'); } catch (_) {}
   if ((y0 - WL) * (y1 - WL) > 0.0) return;   
   const dy = y1 - y0, t = (Math.abs(dy) < 1e-6) ? 0.5 : (WL - y0) / dy;
   const _hx = x0 + (x1 - x0) * t, _hz = z0 + (z1 - z0) * t;
-  _swRippleSeed(_hx, _hz, radius, amp * ((window.__water && window.__water.impactPeak) || 50));   
-  _swSpawnSplash(_hx, WL, _hz, 4, 0.6 + Math.min(1.2, amp * 4.0));   
+  const W3 = window.__water || {};
+  const _peak = (W3.impactPeak != null) ? W3.impactPeak : 0.135;   // (v41.03) recalibrated - see _swRippleSeed
+  let _dx = x1 - x0, _dvy = y1 - y0, _dz = z1 - z0;
+  const _dl = Math.hypot(_dx, _dvy, _dz) || 1; _dx /= _dl; _dvy /= _dl; _dz /= _dl;
+  const _sinT = Math.min(1, Math.abs(_dvy));   
+  const _nG = (W3.oblique === 0) ? 1 : (_sinT > 0.50 ? 1 : (_sinT > 0.28 ? 2 : (_sinT > 0.12 ? 3 : 4)));
+  const _step = radius * (0.85 + 1.7 * (1 - _sinT));
+  // ⚠⚠ (v41.22) THE SEED WAS POSITIVE, SO EVERY ROUND MADE THE WATER BULGE UP AT THE POINT OF
+  // IMPACT. That has been true since v33.21 and it survived the whole v41 rebuild, because the
+  // rebuild changed how much the surface moved and never checked which WAY. It is the same
+  // inversion v41.02 fixed for the hull and nobody carried across to the weapons: a projectile
+  // punches a CAVITY, and the water it displaces is thrown up as a rim AROUND the hole, not at it.
+  // A mound where the hole should be is most of why the old splash read as a soft puff - it had the
+  // silhouette of a bubble rising rather than something being driven in.
+  // (v41.24) which WAY it crossed. Entering punches a hole; leaving lifts the surface after the
+  // round and drops it back, so the seed changes sign with the direction.
+  const _exiting = _dvy > 0;
+  for (let i = 0; i < _nG; i++) {
+    const _a = amp * _peak * (1 - 0.5 * (i / _nG)) * (1.35 / _nG) * (_exiting ? -0.75 : 1);
+    _swRippleSeed(_hx + _dx * _step * i, _hz + _dz * _step * i, radius * (1 - 0.16 * i), -_a);
+    // the displaced water, thrown out around the hole. Only the entry point gets one - the trailing
+    // seeds of a grazing streak are the furrow, and a furrow does not ring.
+    if (i === 0) _swRippleSeed(_hx, _hz, radius * 2.3, _a * 0.55);
+  }
+  // ⚠ AND A HARD HIT VENTS. Above a threshold the cavity is deep enough to collapse on itself and
+  // throw a vertical column a beat later - the same deferred deep-seal route the ship's water entry
+  // and the explosion path already use, so it is a push onto the same queue rather than a new shape.
+  // This is what makes a railgun slug read differently from a gatling round at a glance: the small
+  // one pocks, the big one erupts.
+  // ⚠ THE THRESHOLD I FIRST WROTE (0.055) WAS ABOVE EVERY WEAPON IN THE GAME. Checked before
+  // shipping it: amp*impactPeak runs 0.0040 for a Gatling round to 0.0337 for a fully charged
+  // railgun, so nothing would ever have vented and the collapse droplets would have been dead code -
+  // the exact class of silent no-op the v41.07 census exists to catch. 0.009 puts the split where it
+  // belongs: Gatling and Zapper pock the surface, Blaster and up punch deep enough to collapse.
+  //   Gatling 0.0040  Zapper 0.0072  |  Blaster 0.0092  Bolt 0.0125  Thermite 0.0148
+  //   Railgun 0.0157  Railgun charged 0.0337
+  const _colA = amp * _peak;
+  const _vth = (W3.vent != null) ? +W3.vent : 0.009;
+  // only an ENTRY digs a cavity that can collapse; a round on its way out has nothing to close
+  if (!_exiting && _colA > _vth && typeof _SW_BLASTS !== 'undefined' && _SW_BLASTS.length < 6) {
+    _swFxN('vent');
+    _SW_BLASTS.push({ x: _hx, z: _hz, t: 0, R: radius * 1.5,
+                      k: Math.max(0.10, Math.min(0.9, (_colA - _vth * 0.7) * 40)),
+                      delay: 0.10 + 0.16 * Math.min(1, radius / 160) });
+  }
+  // vapour off the strike. Small, bright and slow - the crest-dot emitter is already exactly that
+  // shape, and a thin hanging puff is what sells an energy weapon boiling water.
+  try { _swCrestDots(_hx, WL, _hz, 0.30 + 1.5 * _colA, _dx * 40, _dz * 40, radius * 0.35); } catch (_) {}
+  // ⚠⚠ (v41.26) THIS WAS A CLIFF, AND A CLIFF IS WHY SOME HITS MADE NO SPLASH AT ALL.
+  // Owner: "any of the weapons hitting the water should make a splash". The budget did its job -
+  // it stopped the pool flooding - but it did it by returning EARLY, so once 34 droplets had been
+  // spent in a 250 ms window every further hit produced a ripple seed and nothing visible. In a
+  // firefight that is most of them, and a small ripple at a 30-unit radius is not a splash.
+  // A budget should thin the effect, not delete it. The bucket now SCALES the burst down as it
+  // fills, with a floor, so a busy lake gets many small splashes instead of a few and then none.
+  // The cap itself was also far too tight for the headroom that actually exists: measured during a
+  // firefight the particle pool sat at 218-385 live against a cap of 4000.
+  const _now = performance.now();
+  if (_now - _swXB.t > 250) { _swXB.t = _now; _swXB.n = 0; }
+  const _wxCap = (W3.wxCap != null) ? +W3.wxCap : 90;
+  const _bScale = Math.max(0.30, 1 - _swXB.n / Math.max(1, _wxCap));
+  const _sp = (speed != null && speed > 0) ? Math.min(4000, speed) : (160 + 1100 * Math.min(1, amp * 4));
+  const _D = Math.max(22, Math.min(58, radius * 0.5));
+  _swFxN('weapon');
+  if (_exiting) {
+    // the sleeve of water the round takes out with it, along the line it is travelling
+    _swXB.n += _swExitPlume(_hx, WL, _hz, _dx, _dvy, _dz, _sp, radius,
+                            (0.25 + 0.75 * Math.min(1, amp * 6)) * _bScale) || 0;
+  } else {
+    _swXB.n += _swSpawnSplashV(_hx, WL, _hz, { x: _dx * _sp, y: -Math.abs(_dvy) * _sp, z: _dz * _sp },
+                               _D, (0.22 + 0.50 * Math.min(1, amp * 5)) * _bScale) || 0;
+  }
 }
 // (v33.20) Bake the LAND/WATER MASK over the ripple window from the terrain heightfield, so the
 // sim reflects ripples off shorelines (-> cymatic standing waves) instead of an open square edge.
@@ -27217,14 +28491,31 @@ function _swPeerFootprint(np) {
   np._swFP = { _k: c, LEN: LEN, BEAM: BEAM, DRAFT: DRAFT, half: LEN * 0.5, heft: heft };
   return np._swFP;
 }
-function _swImpact(px, pz, sign, fp, mass, vel, WL) {
+// (v41.27) `ampK` scales the whole disturbance without changing its SHAPE, which is what lets a
+// bullet and a hull share this function. Omitted, it is 1 and every pre-41.27 caller is untouched.
+function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
   const vy = vel ? Math.abs(vel.y) : 0;
   const vh = vel ? Math.hypot(vel.x, vel.z) : 0;
   const p = Math.min(2.6, vy / 90);
   const k = (sign > 0) ? 1.0 : 0.62;                                  
   const baseR = (sign > 0 ? 1.0 : 0.85) * fp.BEAM * 1.6;             
-  const baseA = (0.10 + 0.10 * p) * (fp.DRAFT / 13.5) * fp.heft * mass * k * ((window.__water && window.__water.wake) || 1);
-  _swRippleSeed(px, pz, baseR + 50 * p, baseA * ((window.__water && window.__water.impactPeak) || 50));   
+  const baseA = (0.10 + 0.10 * p) * (fp.DRAFT / 13.5) * fp.heft * mass * k * ((window.__water && window.__water.wake) || 1) * ((ampK != null) ? ampK : 1);
+  // (v41.02) AN IMPACT DIGS A CRATER. This seed was positive for both directions - the water jumped
+  // UP at the point of contact, which is not what entry does and is the most pluck-like thing in the
+  // system. Entry drives the surface DOWN (the wave equation raises the rim by itself, and with
+  // uSeedImpulse the crater opens over several steps instead of appearing whole); exit lifts water
+  // with the hull, so it stays positive. `window.__water.crater = 0` restores the always-up seed.
+  const _cw = window.__water || {};
+  const _peakI = (_cw.impactPeak != null) ? +_cw.impactPeak : 0.135;
+  const _sd = ((_cw.crater != null) ? +_cw.crater : 1) ? ((sign > 0) ? -1 : 1) : 1;
+  // (v41.03) ...and the crater gets a RIM. A lone negative bump is a dent; what an entry actually
+  // leaves is a hollow with a raised ring of displaced water around it, and the ring is most of what
+  // you see. Two concentric raised cosines do it for one extra seed slot: a WIDE one of opposite
+  // sign at ~2x the radius, with the narrow crater cut into it.
+  _swFxN(sign > 0 ? 'entry' : 'exit');
+  const _cR = baseR + 50 * p;
+  _swRippleSeed(px, pz, _cR, _sd * baseA * _peakI);   
+  if (_sd < 0 || ((_cw.crater != null) ? +_cw.crater : 1)) _swRippleSeed(px, pz, _cR * 2.1, -_sd * baseA * _peakI * 0.45);
   if (typeof window !== 'undefined' && window.__waterDisp && !(window.__water && window.__water.crestBreak)) _swCrestSpray(px, WL, pz, baseA, vel ? vel.x : 0, vel ? vel.z : 0);   
   if (vh > 60) {                                                      
     const ih = 1 / vh, hx = vel.x * ih, hz = vel.z * ih;
@@ -27234,7 +28525,26 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL) {
   }
   // (v33.67) velocity-biased droplet crown : Vn = crossing speed (force downward so entry AND exit both
   // spray), leaned along the horizontal motion = the angled cut. Per-ship via fp.BEAM. exit a touch softer.
-  _swSpawnSplashV(px, WL, pz, { x: vel ? vel.x : 0, y: -vy, z: vel ? vel.z : 0 }, fp.BEAM, sign > 0 ? 1.0 : 0.7);
+  // (v41.00) ...and the hull's own deadrise now decides how hard that crown comes off. A wide flat
+  // hull slaps and throws; a narrow deep one knifes in. Same call, one more argument.
+  _swSpawnSplashV(px, WL, pz, { x: vel ? vel.x : 0, y: -vy, z: vel ? vel.z : 0 }, fp.BEAM, sign > 0 ? 1.0 : 0.7, _swDeadrise(fp));
+  // (v41.00) COMING OUT, THE HULL BRINGS THE WATER WITH IT. One sheet at the instant of exit, born on
+  // the hull and carrying nearly all of its velocity; _swWetTick keeps it dripping afterwards for as
+  // long as the hull stays wet. This is the exit half of the owner's ask, and it is the reason a
+  // breach now reads as a ship coming OUT of water instead of a ship passing a plane.
+  // (v41.04) ARM THE CAVITY. The jet fires from _swWetTick once the pinch-off delay has run, and only
+  // if the hull is still under - a hull that bounces straight back out never formed a deep seal.
+  if (sign > 0 && actor) {
+    const _st = _swWetState(actor);
+    const _jk = Math.min(1, Math.max(0, (vy - 40) / 420));
+    if (_jk > 0.02) _st.cav = { x: px, z: pz, t: 0, v: vy, k: _jk };
+  }
+  if (sign < 0) {
+    const _shed = (window.__water && window.__water.shed != null) ? +window.__water.shed : 1;
+    if (_shed > 0) _swFxN('exitSheet');
+    if (_shed > 0) _swShedDrops(px, WL + fp.DRAFT * 0.6, pz, vel, fp,
+                                Math.min(26, Math.round((8 + 16 * fp.heft) * _shed)), 0.92, 1.0, 1.15, 1.15);
+  }
 }
 // Per-frame driver — runs in the master tick BEFORE renderer.render.
 function _swRippleTick(dt) {
@@ -27254,6 +28564,7 @@ function _swRippleTick(dt) {
       const _u = R.heightVar.material.uniforms;
       if (_W3.waveC2 != null && _u.uWaveC2) _u.uWaveC2.value = _W3.waveC2;
       if (_W3.visc != null && _u.viscosity) _u.viscosity.value = _W3.visc;
+      if (_W3.seedImpulse != null && _u.uSeedImpulse) _u.uSeedImpulse.value = _W3.seedImpulse;   // (v41.02)
     }
   } catch (_) {}   
   
@@ -27350,9 +28661,68 @@ function _swRippleTick(dt) {
     if (W3.mass === undefined) W3.mass = 1.0;        
     if (W3.wake === undefined) W3.wake = 1.6;        
     if (W3.spray === undefined) W3.spray = 1.0;      
-    if (W3.kelvin === undefined) W3.kelvin = 0.34;   
+    // (v41.04) now a MULTIPLIER on the Kelvin/Mach angle derived at the shoulder seeds (1 = as derived).
+    if (W3.kelvin === undefined) W3.kelvin = 1.0;    
     if (W3.cut === undefined) W3.cut = 1.0;          
+    // (v41.00) the oblique-displacement pass. Every one of these is a MULTIPLIER on a system that
+    // is on by default; 0 disables that system and restores the pre-41 behaviour for it exactly.
+    if (W3.oblique === undefined) W3.oblique = 1.0;   // spray-root correction (0 = the old vertical-only gate)
+    if (W3.plane === undefined) W3.plane = 1.0;       // continuous planing whisker spray while skimming
+    if (W3.entrain === undefined) W3.entrain = 1.0;   // water dragged under with a submerging hull
+    if (W3.shed === undefined) W3.shed = 1.0;         // water carried out of the lake and shed as drops
+    if (W3.wxCap === undefined) W3.wxCap = 90;        // (v41.26) 34 -> 90; a soft ceiling now, not a cliff
+    if (W3.blast === undefined) W3.blast = 1.0;       // (v41.19) explosion crater / dome / vented column
+    if (W3.wpn === undefined) W3.wpn = 1.0;           // (v41.21) weapon-crossing amplitude, scaled by yield
+    if (W3.wxSeedCap === undefined) W3.wxSeedCap = 60;   // (v41.26) 30 -> 60, and over it the seed shrinks rather than vanishing
+    if (W3.vent === undefined) W3.vent = 0.009;          // (v41.23) cavity depth at which a hit vents droplets
+    if (W3.wpnWake === undefined) W3.wpnWake = 1.0;      // (v41.27) trail left by a projectile skimming the surface
+    if (W3.chargeYield === undefined) W3.chargeYield = 3000;   // (v41.29) the Blaster charge shot's water yield
+    // (v41.02) the jello pass. seedScale 1 + impactPeak 50 = the pre-41.02 surface, exactly.
+    if (W3.seedScale === undefined) W3.seedScale = 1.0;      // global trim; 1 = no-op (see _swRippleSeed)
+    if (W3.impactPeak === undefined) W3.impactPeak = 0.135;  // was 50. MEASURED: puts a hard entry at 8.2 of the 9 units the display can show
+    if (W3.seedImpulse === undefined) W3.seedImpulse = 0.25; // momentum, not a pluck (0.65 was sticky - see the shader)
+    if (W3.crater === undefined) W3.crater = 1;             // entry digs down instead of jumping up
+    // (v41.04) the literature pass.
+    if (W3.trim === undefined) W3.trim = 0.10;         // nominal planing trim (rad, ~5.7deg) for the stagnation line
+    // (v41.09) the sheet's three behaviours, each independently flattenable for an A/B.
+    if (W3.sheetBend === undefined) W3.sheetBend = 1.0;   // curvature of the film across the spray root
+    if (W3.sheetWarp === undefined) W3.sheetWarp = 1.0;   // the flapping instability
+    if (W3.sheetFrac === undefined) W3.sheetFrac = 1.0;   // ligament -> droplet breakup cascade
+    // (v41.11)
+    // (v41.12) MEASURED, not guessed. Owner asked for the arc higher, then "like 4x higher". The
+    // apex is not proportional to this knob - the particle integrator's per-frame drag eats most of
+    // the launch speed inside ~0.13 s, so height goes roughly as k^0.7. Sampled the peak height of
+    // every live splash parcel over a skim run: k=2 -> 78 units above the waterline, k=5 -> 147,
+    // k=8 -> 304, k=12 -> 450. 8.0 is the 3.9x the owner asked for; anything read off the knob
+    // itself would have been out by a factor of two in either direction.
+    if (W3.rooster === undefined) W3.rooster = 8.0;       // transom rooster-tail HEIGHT (the 'higher' dial)
+    if (W3.dots === undefined) W3.dots = 1.4;             // bright specks off wave/wake peaks (coarse layer)
+    if (W3.dotsFine === undefined) W3.dotsFine = 1.7;     // (v41.31) the finer, brighter second layer, as a multiple of the coarse count
+    // (v41.32) the underwater flow field around the hull. 0 = the pre-41.32 sine wobble.
+    if (W3.flow === undefined) W3.flow = 1.0;             // dipole (potential flow past the body)
+    if (W3.flowWake === undefined) W3.flowWake = 1.0;     // viscous entrainment behind it
+    if (W3.flowSwirl === undefined) W3.flowSwirl = 1.0;   // shed vorticity
+    if (W3.bubbleNose === undefined) W3.bubbleNose = 0.8; // (v41.34) share of recycled bubbles born at the nose
+    if (W3.bubbleSpeed === undefined) W3.bubbleSpeed = 140;   // (v41.34) speed at which the cloud is fully present
+    if (W3.subTrail === undefined) W3.subTrail = 1.0;         // (v41.36) cavitation trail behind underwater shots
+    if (W3.flowProj === undefined) W3.flowProj = 3;           // (v41.38) how many projectiles also push the bubbles
+    if (W3.waveG === undefined) W3.waveG = 1300;       // effective g for the wake Froude number (game units)
+    if (W3.waveFrc === undefined) W3.waveFrc = 0.5;    // Rabaud-Moisy Kelvin -> Mach crossover
+    if (W3.jet === undefined) W3.jet = 1.0;            // Worthington jet after cavity pinch-off
+    if (W3.jetDelay === undefined) W3.jetDelay = 0.30; // pinch-off delay, scaled by sqrt(beam)
+    if (W3.skip === undefined) W3.skip = 1.0;          // ricochet off a shallow fast entry (0 = never skip)
+    if (W3.skipAngle === undefined) W3.skipAngle = 20; // the magic angle, degrees
+    if (W3.skipSpeed === undefined) W3.skipSpeed = 190;
     
+    // (v41.14) the display transform, exposed so the crest height is one live number.
+    // `disp` is the saturation ceiling (world units), `gain` is the slope and the one that matters.
+    if (W3.disp === undefined) W3.disp = 180;      // soft-clip ceiling, world units
+    if (W3.gain === undefined) W3.gain = 100;      // slope as h -> 0 : this is CALM water
+    if (W3.crestQ === undefined) W3.crestQ = 11;   // crest-only expander : this is CREST HEIGHT
+    if (W3.foamSlope === undefined) W3.foamSlope = 0.50;    // (v41.18) slope at which a crest whitecaps
+    if (W3.steepFoam === undefined) W3.steepFoam = 0.55;    // (v41.18) how white a steep crest goes
+    if (W3.normK === undefined) W3.normK = 1.0;             // (v41.17) crest normal strength
+    if (W3.spdTail === undefined) W3.spdTail = 0.30;   // wake response above its speed knee
     if (W3.crestBreak === undefined) W3.crestBreak = 1;      
     if (W3.breakPeak === undefined) W3.breakPeak = 0.22;     
     if (W3.breakSlope === undefined) W3.breakSlope = 0.06;   
@@ -27362,6 +28732,9 @@ function _swRippleTick(dt) {
     // frame for 17 s straight on shifting_deep (owner: "lag", 61-77 fps). 40 bursts a scan is the whole
     // visible crest line; the scan below is also time-capped. Live: window.__water.breakBudget.
     if (W3.breakBudget === undefined) W3.breakBudget = 40;
+    // (v41.01) ...and the fraction of the particle pool the surface rule may occupy. See the long
+    // note at the scan itself: `breakBudget` bounds the burst COUNT, this bounds the droplet count.
+    if (W3.breakPool === undefined) W3.breakPool = 0.40;
     // (v38.61) 2 -> 4. The v35.37 note further down says "2 -> 4: halves the
     // stall frequency" and falls back to 4 — but this default block runs
     // first and had been pinning breakEvery at 2 all along, so that halving
@@ -27382,10 +28755,37 @@ function _swRippleTick(dt) {
       const lwx = R.wakeX, moved = (lwx === undefined) ? 1e9 : ((px - lwx) * (px - lwx) + (pz - R.wakeZ) * (pz - R.wakeZ));
       if (moved > spacing * spacing && (touching || sp > 35)) {
         const prox = 1.0 - Math.min(1, Math.abs(above) / 200);
-        const amp = 0.16 * (fp.DRAFT / 13.5) * fp.heft * mass * (touching ? 1.0 : 0.35) * Math.min(1, sp / 420) * (0.45 + 0.55 * prox) * W3.wake;
+        const amp = 0.16 * (fp.DRAFT / 13.5) * fp.heft * mass * (touching ? 1.0 : 0.35) * _swSpdCurve(sp, 420, (W3.spdTail != null) ? +W3.spdTail : 0.30) * (0.45 + 0.55 * prox) * W3.wake;
         const lpx = -hz, lpz = hx;                   
-        const shoulder = fp.half * 1.1, off = shoulder * W3.kelvin + fp.BEAM * 0.5;
-        const spd = Math.min(1, sp / 350);   
+        // ⚠⚠ (v41.04) THE 19.47° KELVIN V IS THE WRONG SHAPE AT THESE SPEEDS.
+        // Rabaud & Moisy, "Ship Wakes: Kelvin or Mach Angle?" (PRL 110, 214503 / arXiv:1304.2653):
+        // from airborne images of real ship wakes, "the wake angles decrease as U^-1 at large
+        // velocities, in a way similar to the Mach cone for supersonic airplanes". Kelvin's constant
+        // 19.47° only holds below a crossover at Fr = U/sqrt(gL) ≈ 0.5, where L is the HULL LENGTH;
+        // above it the visible wake narrows like a Mach cone because the disturbance has finite size.
+        // An LSS hull is ~90 units long and cruises at 300-500, which puts it well past the crossover -
+        // so the wake should be several times narrower than the one being drawn.
+        // ⚠ AND THE OLD CODE DID NOT DRAW AN ANGLE AT ALL. `shoulder` was a FIXED distance behind the
+        // hull (fp.half*1.1) with a FIXED lateral offset, so the ship laid down two parallel lines of
+        // seeds, not a V - there was no angle in it to be right or wrong. A wake is a TRAIL: seed the
+        // shoulder pair at a distance behind that grows with speed, offset by that distance times
+        // tan(α), and the locus those seeds trace as the ship advances IS the V. The beam term stays
+        // because a real wake starts at the hull sides, not the centreline.
+        // `__water.kelvin` is now a multiplier on the computed angle (1 = as derived); `.waveG` is the
+        // effective gravity that sets where the crossover lands in game units, and `.waveFrc` the
+        // crossover Froude number the paper reports.
+        const _wG = (W3.waveG != null) ? +W3.waveG : 1300;
+        const _Frc = (W3.waveFrc != null) ? +W3.waveFrc : 0.5;
+        const _Fr = sp / Math.sqrt(Math.max(1, _wG * fp.LEN));
+        const _alphaK = 0.33998;   // 19.47° in radians - Kelvin's half-angle
+        const _alpha = (_Fr <= _Frc) ? _alphaK : _alphaK * (_Frc / _Fr);
+        // (v41.06) sp*0.35 capped at 2.5 hull lengths put the shoulder seeds up to 275 units BEHIND
+        // the hull - a correct wake angle with a hole between the ship and the start of its own wake,
+        // which is the other half of "something lags behind when you move through it". The trail
+        // still has to extend with speed for the V to have an angle at all, just not that far.
+        const shoulder = fp.half * 1.1 + Math.min(sp * 0.12, fp.LEN * 1.1);
+        const off = shoulder * Math.tan(_alpha) * W3.kelvin + fp.BEAM * 0.5;
+        const spd = _swSpdCurve(sp, 350, (W3.spdTail != null) ? +W3.spdTail : 0.30);   
         _swRippleSeed(px + hx * fp.half * 0.8, pz + hz * fp.half * 0.8, Math.max(20, fp.BEAM * 0.9), amp * 0.6);   
         
         
@@ -27397,15 +28797,71 @@ function _swRippleTick(dt) {
         const sx = px - hx * shoulder, sz = pz - hz * shoulder;
         _swRippleSeed(sx + lpx * off, sz + lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
         _swRippleSeed(sx - lpx * off, sz - lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
-        if (touching && sp > 90) _swSpawnSplashV(px - hx * fp.half, WL, pz - hz * fp.half, { x: player.velocity.x, y: -sp * 0.16, z: player.velocity.z }, fp.BEAM, 0.5);   
+        _swFxN('wake');
+        // (v41.11) specks off the peaks we just made: the stern crest and both Kelvin shoulders. No
+        // readback needed - these are the crests, we placed them. Every other wake step so the
+        // count stays honest at speed.
+        R.dotStep = (R.dotStep | 0) + 1;
+        if ((R.dotStep & 1) === 0) {
+          const _dk = amp * (0.45 + 0.95 * spd) * 3.4;
+          // (v41.14) how high the crest we just seeded actually stands, through the same transform the
+          // vertex shader uses - so the specks leave from the top of it rather than from the waterline.
+          const _ha = amp * (0.45 + 0.95 * spd) * 2 * ((W3.seedScale != null) ? +W3.seedScale : 1);
+          const _cY = _swDispWorld(_ha);   // (v41.15) the shared mirror
+          _swCrestDots(px - hx * crestD, WL, pz - hz * crestD, _dk, player.velocity.x, player.velocity.z, _cY);
+          _swCrestDots(sx + lpx * off, WL, sz + lpz * off, _dk * 0.55, player.velocity.x, player.velocity.z, _cY * 0.6);
+          _swCrestDots(sx - lpx * off, WL, sz - lpz * off, _dk * 0.55, player.velocity.x, player.velocity.z, _cY * 0.6);
+        }
+        // (v41.00) the stern burst that used to live here fired ONCE PER WAKE STEP, i.e. once every
+        // ~fp.LEN*0.35 of travel and only while the wake gate was open - a skim read as a stutter of
+        // puffs rather than a sheet. Replaced by the rate-based planing emitter below, which is not
+        // tied to the wake spacing at all.
         R.wakeX = px; R.wakeZ = pz;
       }
+    }
+    // (v41.00) PLANING SPRAY - the continuous pair of whisker sheets a hull throws while it skims.
+    // A hull at speed with its bottom in the water is not a sequence of impacts, it is a steady
+    // wetted contact shedding two sheets, and the rate should follow how DEEP it is riding rather
+    // than how far it has travelled since the last wake seed. `_wet01` is 0 at the moment of touch
+    // and 1 with the hull a full draft under, so easing down onto the water ramps the spray up
+    // instead of switching it on. Held under 55% of the particle cap: combat FX keep their headroom,
+    // and a starved spray is a better failure than a starved hit spark.
+    {
+      const _pl = (W3.plane != null) ? +W3.plane : 1;
+      const _wet01 = Math.max(0, Math.min(1, (fp.DRAFT - above) / (2 * fp.DRAFT)));
+      if (_pl > 0 && _wet01 > 0.02 && sp > 55 && !game._swSubmerged) {
+        R.planT = (R.planT || 0) + dt;
+        const _rate = (3 + 11 * _wet01 * Math.min(1, sp / 300)) * _pl;
+        if (R.planT > 1 / Math.max(0.5, _rate)) {
+          R.planT = 0;
+          if (_swFxRoom() > 12) {   // (v41.01) the same 62%-of-pool headroom every other water FX uses
+            _swFxN('plane');
+            _swSpawnSplashV(px + hx * fp.half * 0.55, WL, pz + hz * fp.half * 0.55,
+                            { x: player.velocity.x, y: -Math.max(14, sp * 0.10 * _wet01), z: player.velocity.z },
+                            // (v41.10) 0.26+0.30 -> 0.55+0.55. A sheet needs parcels ALONG it, not
+                            // just a puff at the root, and the pool has the headroom (measured: 103
+                            // live particles against 2377 free while skimming).
+                            fp.BEAM, 0.55 + 0.55 * _wet01, _swDeadrise(fp));
+          }
+        }
+      } else if (R.planT) R.planT = 0;
+      // (v41.11) THE ROOSTER TAIL, from the transom rather than the bow contact. Same rate-based
+      // shape as the planing sheet but its own emitter, its own position and its own height dial.
+      if (_pl > 0 && _wet01 > 0.04 && sp > 90 && !game._swSubmerged) {
+        R.roosT = (R.roosT || 0) + dt;
+        const _rr = (7 + 15 * _wet01 * Math.min(1, sp / 320)) * _pl;
+        if (R.roosT > 1 / Math.max(0.5, _rr)) {
+          R.roosT = 0;
+          if (_swFxRoom() > 10) _swRooster(px - hx * fp.half * 1.15, WL, pz - hz * fp.half * 1.15, player.velocity, fp, _wet01);
+        }
+      } else if (R.roosT) R.roosT = 0;
     }
     // (2) BUOYANT REST : a static bowl sized to the WATERPLANE + DRAFT (gentle, wide, time-spaced = no "X").
     //     Strict gate sp<=8 (mutually exclusive with planing sp>8) per the budget proof.
     if (touching && sp <= 8) {
       R.bobT = (R.bobT || 0) + dt;
-      if (R.bobT > 0.33) { R.bobT = 0; _swRippleSeed(px, pz, Math.max(60, (fp.LEN + fp.BEAM) * 0.55), 0.018 * (fp.DRAFT / 13.5) * fp.heft * mass); }
+      // (v41.03) back to 0.018 - v41.02 raised this to compensate for a global scale that is gone.
+      if (R.bobT > 0.33) { R.bobT = 0; _swFxN('rest'); _swRippleSeed(px, pz, Math.max(60, (fp.LEN + fp.BEAM) * 0.55), 0.018 * (fp.DRAFT / 13.5) * fp.heft * mass); }
     }
     // (3) SURFACE CROSSING : unified impact (hull-scaled crown + angled gash along V). Entry loud, exit softer.
     // (v34.26) hull-drag spray hiss : overlapping retriggered one-shots read as a
@@ -27414,9 +28870,38 @@ function _swRippleTick(dt) {
     if (_wantHiss && !game._dragHiss) { try { game._dragHiss = _swStartDragHiss(); } catch (_) {} }
     else if (!_wantHiss && game._dragHiss) { try { _swStopDragHiss(game._dragHiss); } catch (_) {} game._dragHiss = null; }
     if (game._dragHiss && game._dragHiss.set) { try { game._dragHiss.set(sp); } catch (_) {} }
-    if (above < 0 && prevAbove >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
-    else if (above > 0 && prevAbove <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
+    if (above < 0 && prevAbove >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
+    else if (above > 0 && prevAbove <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
+    // ⚠⚠ (v41.04) A SHALLOW FAST ENTRY SKIPS. Clanet, Hersen & Bocquet, "Secrets of successful
+    // stone-skipping" (Nature 427:29): there is a MAGIC ANGLE of about 20° between the body and the
+    // surface that minimises the speed needed to ricochet - below it a fast body bounces off the
+    // water instead of penetrating it, which is why a stone thrown flat skips and one thrown steeply
+    // dives. LSS ships cross the lake at 5-15° all the time and simply passed through.
+    // ⚠ THIS IS THE ONE CHANGE IN THE PASS THAT TOUCHES FLIGHT, so it is deliberately gentle: the
+    // horizontal velocity is untouched, the vertical is reflected at about half (a real skip loses
+    // most of its normal momentum to the splash), and it only fires above a speed threshold - ease
+    // down onto the water and you still land on it. `__water.skip = 0` turns it off outright.
+    try { const _wx = (window.__water = window.__water || {});
+      _wx.xAbove = Math.round(above); _wx.xPrev = Math.round(prevAbove);
+      if (above < 0 && prevAbove >= 0) _wx.xEnter = (_wx.xEnter | 0) + 1;
+      else if (above > 0 && prevAbove <= 0) _wx.xExit = (_wx.xExit | 0) + 1; } catch (_) {}
+    if (above < 0 && prevAbove >= 0 && player.velocity) {
+      const _sk = (W3.skip != null) ? +W3.skip : 1;
+      const _vyIn = -player.velocity.y;
+      const _inc = Math.atan2(Math.max(0, _vyIn), Math.max(1e-4, sp)) * 57.29578;
+      const _skA = (W3.skipAngle != null) ? +W3.skipAngle : 20;
+      const _skV = (W3.skipSpeed != null) ? +W3.skipSpeed : 190;
+      if (_sk > 0 && _vyIn > 0 && _inc < _skA && sp > _skV) {
+        player.velocity.y = _vyIn * (0.34 + 0.30 * (1 - _inc / _skA)) * _sk;
+        _swFxN('skip');
+        try { window.__lssSkips = (window.__lssSkips | 0) + 1; } catch (_) {}
+      }
+    }
     R.prevAbove = above;
+    // (v41.00) what the hull is carrying, either way through the surface.
+    try { _swWetTick(R, px, player.position.y, pz, player.velocity, fp, WL, dt); } catch (_) {}
+    try { _swDripWTick(dt, WL); } catch (_) {}
+    try { _swBlastTick(dt, WL); } catch (_) {}   // (v41.19) deferred blast columns
   }
   R.acc += dt;
   if (R.acc >= (((typeof isXRPresenting === 'function') && isXRPresenting()) ? R.step * 2.0 : R.step)) {   
@@ -27584,6 +29069,22 @@ function _swRippleTick(dt) {
           const bSlope = (_Wc.breakSlope != null) ? _Wc.breakSlope : 0.06;
           const bRate = (_Wc.breakRate != null) ? _Wc.breakRate : 0.5;
           const budget = Math.max(1, (_Wc.breakBudget | 0) || 8);
+          // ⚠⚠ (v41.01) THE SURFACE RULE WAS EATING THE ENTIRE PARTICLE POOL. `budget` caps how many
+          // BURSTS a scan may fire (40 since v39.49) but each burst is up to 64 droplets, and the only
+          // other brake is _swCrestSpray's own `length > cap - n - 2` - which is the HARD cap, so the
+          // rule is entitled to fill the pool right to the ceiling and it does. Measured on 41.00 with
+          // the hull held skimming at 320 u/s: 490-495 of a 500 particle cap live, 327 of them crest
+          // mist in two colours, and every other water effect starved out - the planing sheet, the
+          // hull's own crown, weapon splashes, and combat sparks all lost the allocation race. That is
+          // a large part of why fast water reads as a flat uniform fog instead of a hull throwing
+          // water: it very nearly IS one effect on screen.
+          // The crest rule is the right thing to make yield. It is a WHOLE-SURFACE cosmetic - distant
+          // detail, already held off for the first 15 s of a round and switched off entirely on a
+          // machine whose readback stalls - whereas the hull's spray is attached to the object the
+          // player is looking at. So it now stops at a FRACTION of the pool (`__water.breakPool`, 0.40)
+          // and everything closer to the camera gets the rest. 1.0 restores the v41.00 behaviour.
+          const _crPool = ((typeof _particleCap === 'function') ? _particleCap() : 500) *
+                          ((_Wc.breakPool != null) ? +_Wc.breakPool : 0.40);
           const jet = (_Wc.jetLean != null) ? _Wc.jetLean : 1.0;
           const cx = R.center.x, cz = R.center.y, invR = 1 / RES;
           const svx = player.velocity ? player.velocity.x : 0, svz = player.velocity ? player.velocity.z : 0;
@@ -27591,7 +29092,7 @@ function _swRippleTick(dt) {
           let emitted = 0, nBreak = 0, maxV = 0;
           R._crScan = (((R._crScan || 0) + 7) % (RES - 2));                    
           const _scanT0 = performance.now();
-          for (let jj = 0; jj < RES - 2 && emitted < budget; jj++) {
+          for (let jj = 0; jj < RES - 2 && emitted < budget && game.particles.length < _crPool; jj++) {
             if ((jj & 7) === 7 && performance.now() - _scanT0 > 1.5) break;   // (v39.49) the scan + sprays stay under ~1.5 ms a frame
             const j = 1 + ((jj + R._crScan) % (RES - 2));
             const rvY = (j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
@@ -27611,10 +29112,14 @@ function _swRippleTick(dt) {
               const exceed = Math.min(1, (vD - bPeak) / Math.max(0.001, 1 - bPeak)) * Math.min(1, slope / Math.max(0.001, bSlope * 2));
               if (Math.random() > bRate * (0.3 + 0.7 * exceed)) continue;      
               const wx = cx + (rvX - 0.5) * B, wz = cz + (rvY - 0.5) * B;
-              const dispWorld = dispS * vD;                                    
+              const dispWorld = _swDispWorld(h) * wf;   // (v41.15) the shared mirror, from the RAW texel
               const ejx = -gx * jet * 2600 + svx * 0.10, ejz = -gz * jet * 2600 + svz * 0.10;   
+              _swFxN('crest');
               _swCrestSpray(wx, WLc, wz, vD * 0.26 + 0.04, ejx, ejz, dispWorld);   
-              if (++emitted >= budget) break;
+              // (v41.11) the surface rule finds real breaking crests anywhere on the lake, not just
+              // under the hull - so it feeds the dots too, at a third the rate of the mist.
+              if ((emitted % 3) === 0) _swCrestDots(wx, WLc, wz, vD * 1.6, ejx * 0.2, ejz * 0.2, dispWorld);
+              if (++emitted >= budget || game.particles.length >= _crPool) break;   // (v41.01) re-read the pool per burst
             }
           }
           if (_Wc.crestDebug) {
@@ -27654,6 +29159,10 @@ function _swRippleTick(dt) {
       const W2 = window.__water || {};
       if (W2.disp !== undefined) du.uDispScale.value = W2.disp;
       if (W2.gain !== undefined) du.uGain.value = W2.gain;
+      if (W2.crestQ !== undefined && du.uCrestQ) du.uCrestQ.value = W2.crestQ;   // (v41.15)
+      if (W2.foamSlope !== undefined && du.uFoamSlope) du.uFoamSlope.value = W2.foamSlope;   // (v41.17)
+      if (W2.steepFoam !== undefined && du.uSteepFoam) du.uSteepFoam.value = W2.steepFoam;   // (v41.18)
+      if (W2.normK !== undefined && du.uNormK) du.uNormK.value = W2.normK;                   // (v41.17)
       if (W2.sprayBreak !== undefined) du.uSprayBreak.value = W2.sprayBreak;   
       if (W2.mist !== undefined) du.uMist.value = W2.mist;                     
       if (W2.peakLo !== undefined) du.uPeakLo.value = W2.peakLo;               
@@ -28888,7 +30397,48 @@ function _swBuildHubWaterDispGet(WL) {
       THREE.UniformsLib.fog,
       { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 },
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() },
-        uDispScale: { value: 180.0 }, uGain: { value: 180.0 }, color: { value: new THREE.Color(0x16465c) },
+        // ⚠⚠ (v41.14) uGain 180 -> 650. THE CEILING WAS NEVER THE CONSTRAINT; THE SLOPE WAS.
+        // Owner: "the crest still looks tiny for how fast that's going". The vertex shader is
+        //     _hx = h * uGain / uDispScale ;  disp = uDispScale * (_hx / (1 + |_hx|))
+        // which for the amplitudes this sim produces reduces to disp ≈ h * uGain. uDispScale only says
+        // where it saturates - and raising IT alone does almost nothing, because it appears in the
+        // numerator too: measured live, taking uDispScale 180 -> 900 moved a crest from 51 to 67
+        // units, while uGain 180 -> 650 took the same crest past 150.
+        // The measured heightfield at the hull while skimming at 330 u/s is h = +0.41 / -0.22, and at
+        // uGain 180 that rendered as a 52-unit crest beside a 90-unit hull - which read as a mirror.
+        // ⚠ This is a SLOPE, so it scales the ambient field too; calm water is h ≈ 0 and stays flat,
+        // but every leftover disturbance gets taller with it. 1400 turns the lake into chaotic
+        // spikes. 650 was picked by looking at it.
+        // ⚠⚠ (v41.15) uGain 650 -> 100, plus uCrestQ. A FLAT GAIN WAS THE WRONG SHAPE, and it was the
+        // v41.02 mistake again: one number that moves the thing you want AND the thing you don't.
+        // The transfer function is disp = D*(x/(1+|x|)) with x = h*G/D, so its knee sits at h = D/G.
+        // At G=650/D=180 that knee is h = 0.277 - inside the working band (the measured near-hull
+        // crest is h = 0.41 at 330 u/s). Local slope d(disp)/dh then falls 565 -> 106 -> 23 across
+        // h = 0.02..1.2, a 25x collapse, so h 0.41 -> 107 units but h 1.20 -> only 146: tripling the
+        // height field buys 36% more crest. That is the same compression that made every impact look
+        // identical before v41.03, just relocated to a higher ceiling.
+        // And because it is a SLOPE it lifted the whole field: ambient leftovers at h = 0.05 went
+        // from 8.6 world units to 27.5, i.e. permanent chop on water nobody had touched.
+        // ⚠ A CREST-ONLY EXPANDER DOES WHAT A GAIN CANNOT. Shape the height BEFORE the soft clip:
+        //     hs = h * (1 + uCrestQ*|h|)
+        // so as h->0 the response is uGain alone (calm water is exactly what it was) and as h grows
+        // it turns quadratic and outruns the clip. Measured against the same field: ambient h=0.05
+        // -> 5.1 units (was 27.5), crest h=0.41 -> 100 units (the height that was approved at
+        // G=650), h=0.8 -> 144, h=1.2 -> 161. Taller crests, calm calm, and the speed range spreads
+        // out again instead of bunching at the top.
+        uDispScale: { value: 180.0 }, uGain: { value: 100.0 }, uCrestQ: { value: 11.0 },
+        // (v41.17) whitecapping by STEEPNESS, and how hard the true crest normals bite. See the
+        // note on the vN line below.
+        // (v41.18) uFoamSlope 0.085 -> 0.50 and a STRENGTH beside it. 0.085 whitened the entire lake:
+        // I had guessed the crest slope from the pre-expander geometry, and the shaped surface is far
+        // steeper than that - a 139-unit crest across a 31-unit ripple texel is a slope of about 4,
+        // so 1-N.y sits near 0.9 anywhere the wake has been. Measured by bisection against the
+        // screenshot: everything foams at 0.085, nothing foams at 0.65, the crest lives around 0.5.
+        // And at full strength it painted a solid white WALL, because foam mixes to 90% opaque. The
+        // steepness route is capped so it whitens the crest without erasing it; the height route
+        // (uPeakLo) still reaches full white on a genuine breaker.
+        uFoamSlope: { value: 0.50 }, uSteepFoam: { value: 0.55 }, uNormK: { value: 1.0 },
+        color: { value: new THREE.Color(0x16465c) },
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 },
         uSprayBreak: { value: 1.4 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.32 }, uSprayFreq: { value: 0.05 },
         // (v33.76) P4 REAL REFLECTION : sample the flat Reflector's planar-mirror RT (uReflLive init 0 = sky-tint fallback until a real RT is fed)
@@ -28910,7 +30460,10 @@ function _swBuildHubWaterDispGet(WL) {
         uRefract: { value: 0.0 }, uRefractK: { value: 0.045 } }   
     ]),
     vertexShader: [
-      'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
+      'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform float uCrestQ; uniform float uNormK; uniform mat4 uReflMatrix;',
+      // (v41.15) the crest expander, shared by the displacement and by the CPU mirrors in
+      // _swDispWorld - the two must agree or spray spawns inside the wave it comes off.
+      'float _swShape(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       '#include <fog_pars_vertex>',
       'void main(){',
@@ -28922,14 +30475,33 @@ function _swBuildHubWaterDispGet(WL) {
       '  float winFade = smoothstep(0.0, 0.12, edge) * inWin;',                       
       '  vRipUv = rUV; vWinFade = winFade;',                                          
       '  float h = texture2D(uRippleTex, clamp(rUV,0.001,0.999)).x;',
-      '  float _hx = h * uGain / max(uDispScale, 0.01); float disp = uDispScale * (_hx / (1.0 + abs(_hx))) * winFade;', 
-      '  vDisp = (_hx / (1.0 + abs(_hx))) * winFade;',   
+      '  float disp = _swShape(h) * winFade;',
+      // ⚠ (v41.15) vDisp is NOT the displacement any more. The fragment shader keys its foam and
+      // spray thresholds off it (uPeakLo 0.32 and the eml weights), so tying it to the geometry means
+      // every height change silently re-tunes the foam: under v41.14's G=650 foam started at h ≈ 0.13,
+      // i.e. on ambient chop. It is now a fixed, shape-independent measure of DISTURBANCE - exactly
+      // the 180/180 mapping every build before 41.14 used - so the crest knobs can move freely and
+      // can never drag the foam threshold with them.
+      '  vDisp = (h / (1.0 + abs(h))) * winFade;',
       '  float dU = 2.0 / uRippleBounds;',
       '  float hL = texture2D(uRippleTex, clamp(rUV - vec2(dU,0.0),0.001,0.999)).x;',
       '  float hR = texture2D(uRippleTex, clamp(rUV + vec2(dU,0.0),0.001,0.999)).x;',
       '  float hD = texture2D(uRippleTex, clamp(rUV - vec2(0.0,dU),0.001,0.999)).x;',
       '  float hU = texture2D(uRippleTex, clamp(rUV + vec2(0.0,dU),0.001,0.999)).x;',
-      '  vN = normalize(vec3((hL-hR)*uGain*winFade, 2.0*uRippleBounds*dU, (hD-hU)*uGain*winFade));',   
+      // ⚠⚠ (v41.17) THE NORMAL WAS FOR A SURFACE THAT IS NO LONGER THE ONE BEING DRAWN, AND THAT IS
+      // WHY THE WAKE VANISHED OVER WATER. Owner: "the wake disappears when it's seen over top of
+      // water... if it's in front of a mountain or land it can be seen".
+      // `(hL-hR)*uGain` is the analytically correct normal only while disp = h*uGain, which stopped
+      // being true in v41.15 when the crest expander went in: the real crest slope is now roughly
+      // 2.5x what this reports. So a 130-unit crest was being shaded as a gentle ripple - its normal
+      // stayed near vertical, its fresnel and specular stayed identical to the flat water beside it,
+      // and it reflected the same sky. Against reflected sky-on-water there was nothing to see; only
+      // where it silhouetted against reflected LAND did it appear. A shape change has to be carried
+      // into the normal or the geometry moves and the shading does not follow it.
+      // Differencing the SHAPED world displacements over the taps' real separation is exact - the
+      // 2.0*uRippleBounds*dU term already encodes that separation (it is 4.0 world units).
+      '  float dL = _swShape(hL), dR = _swShape(hR), dDn = _swShape(hD), dUp = _swShape(hU);',
+      '  vN = normalize(vec3((dL-dR)*winFade*uNormK, 2.0*uRippleBounds*dU, (dDn-dUp)*winFade*uNormK));',
       '  vec3 transformed = position; transformed.z += disp;',                        
       '  vec4 mvPosition = modelViewMatrix * vec4(transformed,1.0);',
       '  vWP = (modelMatrix * vec4(transformed,1.0)).xyz;',
@@ -28938,7 +30510,7 @@ function _swBuildHubWaterDispGet(WL) {
       '}',
     ].join('\n'),
     fragmentShader: [
-      'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq;',
+      'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq; uniform float uFoamSlope; uniform float uSteepFoam;',
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uSkyDark; uniform float uReflHot; uniform float uFoamLod; uniform float uReflFar;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
@@ -29032,7 +30604,19 @@ function _swBuildHubWaterDispGet(WL) {
       
       
       
-      '  float peak = smoothstep(uPeakLo, 1.0, vDisp);',                                  
+      // ⚠ (v41.17) A WHITECAP IS A STEEPNESS EVENT, NOT A HEIGHT ONE. Real water breaks when its
+      // slope passes a critical value (~1/7 in deep water), and nothing in this shader looked at
+      // slope at all: foam keyed on vDisp alone, which needs h > 0.47 to reach uPeakLo 0.32 while the
+      // measured near-hull crest runs h = 0.41-0.61. So the wake crest was very nearly foam-free -
+      // it was a big SMOOTH mound, and a big smooth mound of water reflecting sky is invisible
+      // against more water reflecting sky.
+      // Taking the max of the two keeps the old height path exactly as it was (nothing that foamed
+      // before stops foaming) and adds the one that discriminates a wake crest from ambient swell:
+      // ambient is low-slope however wide it is, a wake crest is steep. That is also why this cannot
+      // be had by lowering uPeakLo - that just foams the calm water too.
+      '  float peak = smoothstep(uPeakLo, 1.0, vDisp);',
+      '  float steepF = smoothstep(uFoamSlope, uFoamSlope + 0.30, 1.0 - N.y);',
+      '  peak = max(peak, steepF * uSteepFoam);',
       '  float eW = max(exp(1.2) - log(1.0 + (1.0 - min(peak*4.0,1.0))*2.5) - 1.0, 0.0);', 
       '  float eM = max(exp(peak*7.0) - log(1.0 + (1.0 - min(peak*7.0,1.0))*5.0) - 1.0, 0.0);', 
       '  float mistW = eM / (eW + eM + 1e-4);',                                           
@@ -29117,6 +30701,9 @@ function _swBuildHubWaterDispGet(WL) {
   };
   mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
   _hubWaterDisp = mesh;
+  // (v41.13) the material whose vertex shader decides what the water LOOKS like. Exposed because
+  // __waterProbe spent ten builds reading __pw's constants, which belong to a different material.
+  try { game._hubWaterDispMat = mat; } catch (_) {}
   return mesh;
 }
 function _swBuildHubWater(T) {
@@ -30264,7 +31851,17 @@ function _swSubmergedAudio(on) {
     f.setTargetAtTime(on ? cut : 3500, t, on ? 0.35 : 0.2);
   } catch (_) {}
 }
-const _swBub = { pts: null, n: 240, pos: null, spd: null, ph: null, box: 900, geo: null, mat: null, tex: null };
+// ⚠ (v41.33) box 900 -> 520. Owner: "tighter around the ship". Measured on 41.32 the nearest
+// bubble to the hull was 110 units and the mean was far outside the flow field's reach - 240 points
+// spread through a 900-unit cube is about one per 3 million cubic units, so almost none of them were
+// anywhere the dipole could move them. Shrinking the box concentrates the SAME 240 points into ~5x
+// the density, which costs nothing and is the only reason the flow reads at all.
+const _swNoseV = new THREE.Vector3();   // (v41.34) camera forward, reused each tick
+// (v41.38) flow sources for the underwater cloud, 11 floats each: x y z, ux uy uz, radius, speed,
+// fx fy fz. Slot 0 is always the hull; 1..3 are the nearest underwater projectiles. Preallocated so
+// a per-frame path never allocates.
+const _SW_FSRC = new Float32Array(11 * 4);
+const _swBub = { pts: null, n: 240, pos: null, spd: null, ph: null, sz: null, box: 520, geo: null, mat: null, tex: null };
 function _swBubblesEnsure() {
   const B = _swBub; if (B.pts) return B.pts;
   try {
@@ -30276,7 +31873,21 @@ function _swBubblesEnsure() {
     r.addColorStop(0, 'rgba(215,242,255,0.95)'); r.addColorStop(0.45, 'rgba(160,212,240,0.35)'); r.addColorStop(1, 'rgba(120,180,220,0)');
     g.fillStyle = r; g.fillRect(0, 0, 32, 32);
     B.tex = new THREE.CanvasTexture(c);
-    B.mat = new THREE.PointsMaterial({ size: 9, map: B.tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.55, sizeAttenuation: true, fog: true, color: 0xbfe6ff });
+    // ⚠ (v41.37) SIZE VARIETY WITHOUT LEAVING PointsMaterial. Owner: "make the bubbles tinier, but
+    // variety of sizes that are smaller than what's there now". PointsMaterial carries ONE size for
+    // the whole cloud, so all 240 were identical 9-unit dots - there was no variety to shrink.
+    // Rather than hand-roll a ShaderMaterial and re-implement fog, the map and additive blending,
+    // patch the one line of three's own points shader that sets gl_PointSize and multiply it by a
+    // per-point attribute. Everything else about the material stays exactly as it was.
+    // Base 9 -> 3.4 with aSize spanning 0.32..1.5, so the cloud runs about 1.1 to 5.1 units - every
+    // bubble smaller than the old uniform 9, and a real spread of sizes rather than one.
+    B.sz = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const u = Math.random(); B.sz[i] = 0.32 + u * u * 1.18; }
+    B.geo.setAttribute('aSize', new THREE.BufferAttribute(B.sz, 1));
+    B.mat = new THREE.PointsMaterial({ size: 3.4, map: B.tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.55, sizeAttenuation: true, fog: true, color: 0xbfe6ff });
+    B.mat.onBeforeCompile = function (sh) {
+      sh.vertexShader = 'attribute float aSize;\n' + sh.vertexShader.replace('gl_PointSize = size;', 'gl_PointSize = size * aSize;');
+    };
     B.mat.name = 'bubbles';
     B.pts = new THREE.Points(B.geo, B.mat); B.pts.frustumCulled = false; B.pts.renderOrder = 5; B.pts.visible = false;
     try { if (typeof _lssRetainMat === 'function') _lssRetainMat(B.mat); } catch (_) {}
@@ -30293,20 +31904,211 @@ function _swBubblesTick(dt, WL) {
   const B = _swBub; const pts = _swBubblesEnsure(); if (!pts) return;
   const K = (typeof window !== 'undefined' && window.__underwater) ? window.__underwater : null;
   if (K && K.bubbles === false) { pts.visible = false; return; }
-  const c = camera.position, half = B.box * 0.5, t = performance.now() * 0.001, p = B.pos;
+  // ⚠⚠ (v41.35) THE CLOUD AND THE STREAM BOTH ANCHOR ON THE SHIP, NOT THE CAMERA.
+  // Owner: "in first person, it looks ok while moving... in third person, the bubbles don't look
+  // like they come from center". Both halves of v41.34 used the CAMERA - the box was centred on the
+  // eye and the nose birth was `camera.position + cameraForward * d`. In first person the eye is at
+  // the hull so those coincide and it looked right; in third person the eye sits behind and above,
+  // so the stream was being born somewhere near the camera and the densest part of the cloud was
+  // BEHIND the ship. The bubbles belong to the hull, so they follow the hull in every view.
+  const c = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
+  const half = B.box * 0.5, t = performance.now() * 0.001, p = B.pos;
   if (!pts.visible) { _swBubblesSeed(c); pts.visible = true; }
+  // ⚠⚠ (v41.32) THE BUBBLES NOW FOLLOW THE FLOW AROUND THE HULL.
+  // Owner: "the little dots under water, let's make them follow a navier stokes type flow around
+  // the ship". They were a fixed sine wobble plus a rise - the same motion whether the ship was
+  // parked or doing 400, and identical in front of the bow and behind the transom.
+  // A grid solve for 240 points would be absurd here, and it is also not what this needs. The
+  // incompressible momentum equation
+  //     ρ(∂u/∂t + u·∇u) = -∇p + ρν∇²u
+  // has a closed-form solution for a body moving through still fluid when the viscous term is
+  // small - which at these speeds and scales it is, everywhere except the thin layer on the hull
+  // and the wake it sheds. So the field is assembled from the three pieces that actually matter,
+  // each one cheap:
+  //
+  //  1. THE PRESSURE / INERTIA TERM - potential flow past a sphere, which in the lab frame is a
+  //     DIPOLE centred on the hull:   v = (a³/2r³)[3(U·r̂)r̂ - U]
+  //     This is the whole reason water gets out of the way of a bow and closes behind a stern, it
+  //     falls off as 1/r³ so it is local to the ship, and it is exactly six multiplies per point.
+  //     Its radial component vanishes at r = a, so bubbles slide AROUND the hull instead of
+  //     through it - the no-penetration boundary condition comes free with the solution.
+  //  2. THE VISCOUS TERM - what the analytic solution throws away. Real fluid is dragged along
+  //     behind the body inside a cone that widens with distance; that is the momentum the hull
+  //     actually loses. Applied only downstream, decaying with distance and with angle off the axis.
+  //  3. VORTICITY - a hull sheds a rotating pair. One tangential term about the track axis, sign
+  //     fixed per bubble so the field reads as circulation rather than noise.
+  //
+  // The old sine wobble stays underneath as the ambient turbulence, scaled DOWN where the hull's
+  // field is strong so the structured flow reads instead of fighting it.
+  // window.__water.flow = 0 restores the pre-41.32 wobble exactly.
+  const W3f = window.__water || {};
+  const flowK = (W3f.flow != null) ? +W3f.flow : 1;
+  // ⚠⚠ (v41.38) A PROJECTILE IS A FLOW SOURCE, NOT JUST A TRAIL EMITTER.
+  // Owner: "if the ships make splashes and the weapons do the same, then if the ship makes bubbles,
+  // the weapons can do the same". That is the same argument that collapsed the splash models in
+  // v41.27, and it applies here for the same reason: a hull and a shell are both just bodies moving
+  // through water. v41.36 gave weapons a cavitation TRAIL - the bubbles they create - but left them
+  // unable to move the bubbles that were already there, which the hull has done since v41.32.
+  // So the field is a SUM over sources now rather than one hard-coded hull. The dipole superposes
+  // exactly (potential flow is linear in the velocity potential, so adding sources is the correct
+  // operation, not an approximation), and the wake and swirl terms are local enough that adding them
+  // is fine too. Bounded at 3 projectiles - nearest first - because the cost is 240 bubbles x sources.
+  // Their radius is small so the 1/r^3 falloff keeps each one to its own neighbourhood, which is the
+  // physically right result: a shell shoves the water it passes through and nothing further out.
+  const F = _SW_FSRC;
+  let nSrc = 0;
+  if (flowK > 0 && typeof player !== 'undefined' && player && player.position) {
+    let fpB = 72;
+    try { const _f = _swShipFootprint(); if (_f && _f.BEAM) fpB = _f.BEAM; } catch (_) {}
+    const _u = player.velocity;
+    const _sp = _u ? Math.hypot(_u.x, _u.y, _u.z) : 0;
+    if (_sp > 4) {
+      const o = 0;
+      F[o] = player.position.x; F[o + 1] = player.position.y; F[o + 2] = player.position.z;
+      F[o + 3] = _u.x; F[o + 4] = _u.y; F[o + 5] = _u.z;
+      F[o + 6] = fpB * 0.70;              // the effective body radius the flow sees
+      F[o + 7] = _sp;
+      F[o + 8] = _u.x / _sp; F[o + 9] = _u.y / _sp; F[o + 10] = _u.z / _sp;
+      nSrc = 1;
+    }
+  }
+  // the nearest few underwater projectiles, added the same way
+  if (flowK > 0 && game.projectiles && game.projectiles.length) {
+    const wl0 = WL, cx0 = c.x, cy0 = c.y, cz0 = c.z, reach = B.box * 0.75;
+    const maxP = Math.max(0, Math.min(3, (W3f.flowProj != null) ? (+W3f.flowProj | 0) : 3));
+    for (let pi = 0; pi < game.projectiles.length && nSrc < 1 + maxP; pi++) {
+      const pr = game.projectiles[pi];
+      if (!pr || !pr.position || !pr.velocity) continue;
+      if (pr.position.y > wl0) continue;                       // only what is actually in the water
+      const ddx = pr.position.x - cx0, ddy = pr.position.y - cy0, ddz = pr.position.z - cz0;
+      if (ddx * ddx + ddy * ddy + ddz * ddz > reach * reach) continue;
+      const psp = Math.hypot(pr.velocity.x, pr.velocity.y, pr.velocity.z);
+      if (psp < 40) continue;
+      const o = nSrc * 11;
+      F[o] = pr.position.x; F[o + 1] = pr.position.y; F[o + 2] = pr.position.z;
+      F[o + 3] = pr.velocity.x; F[o + 4] = pr.velocity.y; F[o + 5] = pr.velocity.z;
+      F[o + 6] = Math.max(12, Math.min(60, 22 * (pr.sizeMult || 1)));
+      F[o + 7] = psp;
+      F[o + 8] = pr.velocity.x / psp; F[o + 9] = pr.velocity.y / psp; F[o + 10] = pr.velocity.z / psp;
+      nSrc++;
+    }
+  }
+  const useFlow = (nSrc > 0);
+  const aR = nSrc > 0 ? F[6] : 0;   // the hull's radius, still used by the nose-birth geometry
+  // (v41.34) where the stream is born. Camera forward, not ship velocity - the owner asked for the
+  // NOSE / centre of the screen, and in a cockpit view that is where you are looking, which is also
+  // the only definition that still works when the ship is drifting sideways or reversing.
+  let nfx = 0, nfy = 0, nfz = 0, haveNose = false;
+  // (v41.35) the SHIP's facing. Falls back to the camera's only if the ship has no orientation yet.
+  try {
+    if (player && player.euler) _swNoseV.set(0, 0, -1).applyEuler(player.euler);
+    else _swNoseV.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    nfx = _swNoseV.x; nfy = _swNoseV.y; nfz = _swNoseV.z;
+    haveNose = (nfx * nfx + nfy * nfy + nfz * nfz) > 0.5;
+  } catch (_) {}
+  // ⚠⚠ (v41.34) AND THE CLOUD ONLY EXISTS WHEN YOU ARE MOVING. Owner: "also just when moving...
+  // otherwise it looks like the water is fizzy". Exactly right, and it is a real observation about
+  // what these bubbles ARE: they are cavitation and entrained air off a hull under way. Still water
+  // beside a stationary hull has nothing in it, so a full cloud hanging in place reads as soda.
+  // The draw range is scaled by speed rather than the alpha, so a parked ship pays for almost none
+  // of them - 6% of the cloud stays as a faint hint of ambient motes, the rest arrive with the
+  // throttle. This is also why the nose birth is gated on the same term: a stream from the nose of
+  // a ship that is not going anywhere is the fizz by another name.
+  let _shipSp = 0;
+  try { if (player && player.velocity) _shipSp = Math.hypot(player.velocity.x, player.velocity.y, player.velocity.z); } catch (_) {}
+  const moveK = Math.min(1, _shipSp / ((W3f.bubbleSpeed != null) ? +W3f.bubbleSpeed : 140));
+  const nVis = Math.max(0, Math.min(B.n, Math.round(B.n * (0.06 + 0.94 * moveK))));
+  const noseBias = ((W3f.bubbleNose != null) ? +W3f.bubbleNose : 0.8) * (moveK > 0.15 ? 1 : 0);
+  const noseD = (aR > 0 ? aR : 50) * 1.7;
+  const noseSpread = (aR > 0 ? aR : 50) * 1.15;
+  const wakeK = (W3f.flowWake != null) ? +W3f.flowWake : 1;
+  const swirlK = (W3f.flowSwirl != null) ? +W3f.flowSwirl : 1;
   for (let i = 0; i < B.n; i++) {
     const k = i * 3;
+    let turb = 1;
+    if (useFlow) {
+      let vx = 0, vy = 0, vz = 0, nearest = 1e9;
+      const sgn = (B.ph[i] > 3.1416) ? 1 : -1;
+      for (let sI = 0; sI < nSrc; sI++) {
+        const o = sI * 11;
+        const sAR = F[o + 6], sSp = F[o + 7];
+        const sux = F[o + 3], suy = F[o + 4], suz = F[o + 5];
+        const sfx = F[o + 8], sfy = F[o + 9], sfz = F[o + 10];
+        let dx0 = p[k] - F[o], dy0 = p[k + 1] - F[o + 1], dz0 = p[k + 2] - F[o + 2];
+        let r2 = dx0 * dx0 + dy0 * dy0 + dz0 * dz0;
+        if (r2 < 1) r2 = 1;
+        const r = Math.sqrt(r2);
+        const rc = (r < sAR) ? sAR : r;                  // never evaluate inside the body
+        const rel = rc / sAR;
+        if (rel > 26) continue;                          // 1/r^3 has nothing left to give out here
+        if (rel < nearest) nearest = rel;
+        const inv = 1 / rc;
+        const rx = dx0 * inv, ry = dy0 * inv, rz = dz0 * inv;
+        // (1) dipole - superposes exactly across sources
+        const ur = sux * rx + suy * ry + suz * rz;
+        const sD = (sAR * sAR * sAR) / (2 * rc * rc * rc);
+        vx += sD * (3 * ur * rx - sux); vy += sD * (3 * ur * ry - suy); vz += sD * (3 * ur * rz - suz);
+        // (2) viscous wake - downstream only, inside a widening cone
+        const along = -(rx * sfx + ry * sfy + rz * sfz);   // +1 directly astern
+        if (along > 0.15) {
+          const fall = sAR / (sAR + rc * 1.6);
+          const cone = (along - 0.15) / 0.85;
+          const wv = sSp * 0.55 * fall * cone * cone * wakeK;
+          vx += sfx * wv; vy += sfy * wv; vz += sfz * wv;
+        }
+        // (3) shed vorticity - tangential about the track axis
+        if (along > 0 && swirlK > 0) {
+          const tx = sfy * rz - sfz * ry, ty = sfz * rx - sfx * rz, tz = sfx * ry - sfy * rx;
+          const tl = Math.hypot(tx, ty, tz);
+          if (tl > 1e-3) {
+            const _env = sAR / (sAR + rc);
+            const sw = sgn * sSp * 0.42 * _env * _env * along * swirlK / tl;
+            vx += tx * sw; vy += ty * sw; vz += tz * sw;
+          }
+        }
+        // hard no-penetration backstop for a bubble this source could not clear in one step
+        if (r < sAR) {
+          const push = (sAR - r) + 1;
+          p[k] += rx * push; p[k + 1] += ry * push; p[k + 2] += rz * push;
+        }
+      }
+      p[k] += vx * dt; p[k + 1] += vy * dt; p[k + 2] += vz * dt;
+      // the ambient wobble yields wherever ANY source's field is strong
+      turb = (nearest < 1e9) ? (1 / (1 + nearest * 1.1)) : 1;
+      turb = 1 - 0.85 * turb;
+    }
     p[k + 1] += B.spd[i] * dt;
-    p[k] += Math.sin(t * 1.3 + B.ph[i]) * 9 * dt;
-    p[k + 2] += Math.cos(t * 1.1 + B.ph[i]) * 9 * dt;
-    const dx = p[k] - c.x; if (dx > half) p[k] -= B.box; else if (dx < -half) p[k] += B.box;
-    const dz = p[k + 2] - c.z; if (dz > half) p[k + 2] -= B.box; else if (dz < -half) p[k + 2] += B.box;
-    const dy = p[k + 1] - c.y;
-    if (dy > half || p[k + 1] > WL - 4) p[k + 1] = c.y - half + Math.random() * 60;
-    else if (dy < -half) p[k + 1] += B.box;
+    p[k] += Math.sin(t * 1.3 + B.ph[i]) * 9 * dt * turb;
+    p[k + 2] += Math.cos(t * 1.1 + B.ph[i]) * 9 * dt * turb;
+    // ⚠⚠ (v41.34) BORN AT THE NOSE, NOT WRAPPED AROUND A BOX.
+    // Owner: "the bubbles should look like they are coming from the nose of the ship, more, or the
+    // center of the screen". The cloud was a periodic box: a bubble leaving one face reappeared on
+    // the opposite one, so it read as ambient fog the ship happened to be inside. Nothing about it
+    // had an origin, and the flow field from v41.32 was pushing points that were mostly behind or
+    // beside the hull already.
+    // Recycling them to a small volume just ahead of the camera turns the same 240 points into a
+    // STREAM: born at the nose, swept down the hull by the dipole, entrained into the wake, and
+    // recycled when they fall out the back. The flow does not change at all - only where a bubble
+    // starts - and that is the whole difference between fog and slipstream.
+    // A fraction still recycles the old way so the field does not become a single hard jet.
+    const dx = p[k] - c.x, dz = p[k + 2] - c.z, dy = p[k + 1] - c.y;
+    if (Math.abs(dx) > half || Math.abs(dz) > half || dy > half || dy < -half || p[k + 1] > WL - 4) {
+      if (haveNose && Math.random() < noseBias) {
+        p[k]     = c.x + nfx * noseD + (Math.random() - 0.5) * noseSpread;
+        p[k + 1] = c.y + nfy * noseD + (Math.random() - 0.5) * noseSpread;
+        p[k + 2] = c.z + nfz * noseD + (Math.random() - 0.5) * noseSpread;
+        // never birth one above the surface - it would pop into the air in front of you
+        if (p[k + 1] > WL - 12) p[k + 1] = WL - 12 - Math.random() * 40;
+      } else {
+        if (dx > half) p[k] -= B.box; else if (dx < -half) p[k] += B.box;
+        if (dz > half) p[k + 2] -= B.box; else if (dz < -half) p[k + 2] += B.box;
+        if (dy > half || p[k + 1] > WL - 4) p[k + 1] = c.y - half + Math.random() * 60;
+        else if (dy < -half) p[k + 1] += B.box;
+      }
+    }
   }
   B.geo.attributes.position.needsUpdate = true;
+  try { B.geo.setDrawRange(0, nVis); } catch (_) {}   // (v41.34) parked hulls do not fizz
 }
 function _swBubblesHide() { const B = _swBub; if (B.pts) B.pts.visible = false; }
 function _swExitUnderwater() {
@@ -44904,7 +46706,23 @@ class Bot {
       // Hitscan weapons: tracer, muzzle particles, muzzle flash light.
       // Chaingun-class weapons (fireRate <= 0.10) get a thinner tracer so
       // overlapping haze layers don't pile up into a 2D streak.
-      const isChaingunBot = (weapon.fireRate <= 0.10);
+      // ⚠⚠ (v41.21) BOTS PUT MORE ROUNDS DOWNRANGE THAN EVERY PLAYER COMBINED AND NEVER TOUCHED THE
+// WATER. Their hitscan spawns a tracer and nothing else, so a firefight over the lake left it glass
+// while the same shot from the player splashed. Stippled per bot (a chaingun bot drops from ~20
+// seeds a second to 5, with the skipped yield rolled into the next) and culled by distance the same
+// way the muzzle flash already is - a bot you cannot make out does not need to move the lake.
+if (game._hubWater) {
+  try {
+    const _bd = (typeof camera !== 'undefined' && camera) ? fireOrigin.distanceTo(camera.position) : 0;
+    const _bmax = ((typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 1100 : 2600);
+    if (_bd < _bmax) {
+      _swWpnCross(fireOrigin.x, fireOrigin.y, fireOrigin.z,
+                  target.position.x, target.position.y, target.position.z,
+                  _swWpnYield(weapon.damage * 0.6, weapon.splash, 1), 0, 'bot' + this.id, 0.20);
+    }
+  } catch (_) {}
+}
+const isChaingunBot = (weapon.fireRate <= 0.10);
       spawnTracer(fireOrigin, target.position, flashColor, isChaingunBot ? 0.55 : 1.0);
 
       // Muzzle particles (POJO position/velocity ; no Vector3 churn)
@@ -49130,11 +50948,9 @@ if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPus
 
 function spawnExplosion(pos, size) {
   size = size || 20;
-  // (v33.21) big water splash when an explosion goes off at/near the lake surface (hub)
-  if (game._hubWater && pos) {
-    const _wl = game._hubWater.userData.WL;
-    if (Math.abs(pos.y - _wl) < 110 + size * 3) { try { _swRippleSeed(pos.x, pos.z, 140 + size * 2, 0.11); } catch (_) {} }
-  }
+  // (v41.19) every explosion in the game funnels through here, so ONE hook covers projectiles,
+  // cluster kills, gas ignition, ship deaths and monster attacks alike. See _swBlast for the shape.
+  if (game._hubWater && pos) { try { _swBlast(pos.x, pos.y, pos.z, size); } catch (_) {} }
   // Burst guard: a missile into a rock cluster destroys many rocks in one
   // frame, and each full explosion spawns fireball + smoke + debris + a light.
   // N of them at once spiked the GPU (~244ms) and blocked the main thread on
@@ -68178,8 +69994,13 @@ function fireHitscan(origin, dir, w) {
     if (_pwHit && _pwHit.dist < levelDist) levelDist = _pwHit.dist;
   }
   const end = origin.clone().add(aimDir.clone().multiplyScalar(levelDist));
-  // (v33.21) splash where a beam crosses the lake surface (hub)
-  if (game._hubWater) { try { _swWaterCrossSplash(origin.x, origin.y, origin.z, end.x, end.y, end.z, 78, 0.09); } catch (_) {} }
+  // (v41.21) the weapon is right here in `w` - a railgun slug and a gatling round should not leave
+  // the same hole. Charge multipliers ride on damage already.
+  if (game._hubWater) { try { _swWpnCross(origin.x, origin.y, origin.z, end.x, end.y, end.z,
+                                          // (v41.26) no stipple on your OWN gun. A 60 ms clock silently
+                                          // ate every other Gatling round (fireRate 0.05), which is
+                                          // exactly the "that one didn't splash" you would notice.
+                                          _swWpnYield(w.damage, w.splash, 1), 0, null, 0); } catch (_) {} }
   // If the hitscan terminated at a wall (not at max
   // range), spawn a force-field ripple at the impact point. If a ship
   // closer to origin also got hit, the ship-hit visual dominates the
@@ -70184,8 +72005,18 @@ function executeAbility(slot, ability) {
 
 function firePowerShot() {
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-  // (v33.34) splash the lake where the Blaster Charge Shot crosses the surface (hub)
-  if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { _swWaterCrossSplash(player.position.x, player.position.y, player.position.z, player.position.x + forward.x * 1500, player.position.y + forward.y * 1500, player.position.z + forward.z * 1500, 110, 0.12); } catch (_) {} }
+  // ⚠⚠ (v41.29) THE CHARGE SHOT HAD ITS OWN HOOK WITH ITS OWN LITERALS (110 / 0.12) and never saw
+  // the yield curve, so a full second of spool-up landed on the water with less weight than an
+  // uncharged Gatling round does now. It is the single biggest shot the Blaster has - a whole
+  // charge cycle spent on one trigger pull - and it should read that way on the surface.
+  // Yield 3000 puts it near the top of the curve: R = 224, a seed around 0.135, which is roughly
+  // 1.7x what the hull itself makes hitting the water. Both barrels of the close-range mode fire
+  // twelve pellets after this, and those go through the pellet path separately.
+  if (game._hubWater && typeof _swWpnCross === 'function') { try {
+    _swWpnCross(player.position.x, player.position.y, player.position.z,
+                player.position.x + forward.x * 1500, player.position.y + forward.y * 1500, player.position.z + forward.z * 1500,
+                (window.__water && window.__water.chargeYield != null) ? +window.__water.chargeYield : 3000,
+                0, null, 0); } catch (_) {} }
   if (player.blasterMode === 'close') {
     // Close-range Charge Shot: shotgun blast (12 pellets, wide spread, knockback)
     const range = 1700;                    // (v38.40)
@@ -95463,7 +97294,9 @@ function gameLoop(timestamp) {
           _swU.uCam.value.set(camera.position.x, camera.position.y, camera.position.z);
           try { _swUpdateHubWater(); } catch (_) {}
           __pmark('cine:water');
-          try { _swRippleTick(_cdt); } catch (_) {}
+          try { _swRippleTick(_cdt); }
+          catch (e) { try { const _we = (window.__water = window.__water || {}); _we.tickErrN = (_we.tickErrN | 0) + 1;
+            if (!_we.tickErr) { _we.tickErr = String((e && e.message) || e); console.warn('[water] ripple tick threw (cinematic):', e); } } catch (_) {} }
           try { _swUpdateUnderwater(); } catch (_) {}
           __pmark('cine:ripple');
           try { _birdFlockTick(_cdt); } catch (_) {}
@@ -95865,7 +97698,19 @@ function gameLoop(timestamp) {
       // On a COVERED frame renderFrame never runs, so these are the only queries the chain creates -
       // which is why s() carries its own R.gtP cap.
       if (window.__f8seg) window.__f8seg('ripple');
-      try { _swRippleTick(dt); } catch (_) {}
+      // ⚠⚠ (v41.08) THIS `catch (_) {}` HID A TOTAL FEATURE FAILURE FOR FOUR BUILDS. A ReferenceError
+      // inside the tick threw away the back half of the water frame, every frame, and said nothing -
+      // to the console, to the F8 recorder, or to me. The catch has to stay (a water glitch must not
+      // take the game down) but silence is not the same as safety: it now logs once and leaves the
+      // message and a count on `window.__water.tickErr` / `.tickErrN`, which the F8 mark carries.
+      try { _swRippleTick(dt); }
+      catch (e) {
+        try {
+          const _we = (window.__water = window.__water || {});
+          _we.tickErrN = (_we.tickErrN | 0) + 1;
+          if (!_we.tickErr) { _we.tickErr = String((e && e.message) || e); console.warn('[water] ripple tick threw:', e); }
+        } catch (_) {}
+      }
       if (window.__f8seg) window.__f8seg(null);
       // (v39.49) was 'hub:ripple' - but this mark closes the clipmap update, the chunk STREAMER
       // (_swBuildShell, 2 chunks x 2 shells a frame on endless = the 15-21 ms frames measured on
@@ -96081,7 +97926,21 @@ function gameLoop(timestamp) {
     let _wpx, _wpy, _wpz;
     if (_wTrack) { _wpx = p.position.x; _wpy = p.position.y; _wpz = p.position.z; }
     p.update(dt);
-    if (_wTrack && p.position) { try { _swWaterCrossSplash(_wpx, _wpy, _wpz, p.position.x, p.position.y, p.position.z, 65, 0.08); } catch (_) {} }
+    // (v41.00) a projectile's step IS its velocity, so hand the crossing helper the real speed
+    // rather than letting it infer one from `amp` - a railgun bolt and a lobbed thermite should not
+    // throw the same plume.
+    // (v41.21) through the yield curve, so a thermite crater and a sonar pulse's dimple stop being
+    // the same event. `p.damage` is real locally and on bots; peer mirrors fall back to splash/size.
+    if (_wTrack && p.position) { try { const _sdx = p.position.x - _wpx, _sdy = p.position.y - _wpy, _sdz = p.position.z - _wpz;
+      const _wy = _swWpnYield(p.damage, p.splash, p.sizeMult);
+      const _wsp = Math.hypot(_sdx, _sdy, _sdz) / Math.max(1e-3, dt);
+      // (v41.37) a per-projectile key. Passing null meant every projectile in the air shared one
+      // rate-limit clock, so a salvo laid a single sparse trail between them instead of one each.
+      if (p._swTid === undefined) p._swTid = 'p' + ((_swTidN = (_swTidN + 1) & 1023));
+      _swWpnCross(_wpx, _wpy, _wpz, p.position.x, p.position.y, p.position.z, _wy, _wsp, p._swTid, 0);
+      // (v41.27) and the trail it leaves while it is still ABOVE the water
+      _swWpnWake(p, p.position.x, p.position.y, p.position.z, _sdx / Math.max(1e-3, dt), _sdz / Math.max(1e-3, dt),
+                 Math.max(28, Math.min(200, 30 * Math.pow(Math.max(1, _wy) / 85, 0.45)))); } catch (_) {} }
     if (!p.alive) {
       const lastIdx = game.projectiles.length - 1;
       if (i !== lastIdx) game.projectiles[i] = game.projectiles[lastIdx];

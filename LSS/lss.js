@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '40.99';
+const LSS_BUILD = '41.39';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5770,11 +5770,12 @@ class NetworkPlayer {
         try {
           const _fp = _swPeerFootprint(this);
           const _W3 = window.__water || {};
-          _swImpact(this.position.x, this.position.z, _above < 0 ? +1 : -1, _fp, _fp.heft * ((_W3.mass != null) ? _W3.mass : 1.0), this.velocity, _WL);
+          _swImpact(this.position.x, this.position.z, _above < 0 ? +1 : -1, _fp, _fp.heft * ((_W3.mass != null) ? _W3.mass : 1.0), this.velocity, _WL, this);
           if (typeof playSpatialSound === 'function') playSpatialSound(_above < 0 ? 'water_bloop' : 'water_bloop_soft', new THREE.Vector3(this.position.x, _WL, this.position.z), { refDistance: 300, maxDistance: 5200 });
         } catch (_) {}
       }
       this._wPrevAbove = _above;
+      try { if (typeof _swWetTick === 'function') _swWetTick(this, this.position.x, this.position.y, this.position.z, this.velocity, _swPeerFootprint(this), _WL, dt); } catch (_) {}
     }
 
     if (this.mesh.userData.shieldMesh) {
@@ -8913,7 +8914,9 @@ const _pelletWobble = new THREE.Vector3();
 const _pelletJitter = new THREE.Vector3();
 function spawnPelletBurst(origin, dir, distance) {
   if (!origin || !dir) return;
-  if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { const _d = distance || 800; _swWaterCrossSplash(origin.x, origin.y, origin.z, origin.x + dir.x * _d, origin.y + dir.y * _d, origin.z + dir.z * _d, 90, 0.14); } catch (_) {} }
+  if (game._hubWater && typeof _swWpnCross === 'function') { try { const _d = distance || 800;
+    _swWpnCross(origin.x, origin.y, origin.z, origin.x + dir.x * _d, origin.y + dir.y * _d, origin.z + dir.z * _d,
+                640, 0, 'pellet', 0.05); } catch (_) {} }
   const partCount = 48;
   const palette = [0xeeffee, 0xaaffbb, 0x66ff88, 0x44ff66, 0x22cc44, 0xddffdd];
   const baseSpeed = Math.min(3500, Math.max(1500, (distance || 800) * 2.5));
@@ -16314,6 +16317,7 @@ const _SW_RIPPLE_FRAG = [
   'uniform int uSeedCount;',
   'uniform sampler2D uMaskTex;',     
   'uniform vec2 uScroll;',           
+  'uniform float uSeedImpulse;',   // (v41.02) 0 = the v41.01 displacement pluck, 1 = a pure velocity impulse
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -16327,15 +16331,19 @@ const _SW_RIPPLE_FRAG = [
   '  float w = (texture2D(uMaskTex, uv + vec2(-cellSize.x, 0.0)).x < 0.5) ? hC : texture2D(heightmap, suv + vec2(-cellSize.x, 0.0)).x;',
   '  float nh = (2.0 * hC - h.y + uWaveC2 * ((n + s + e + w) - 4.0 * hC)) * viscosity;',
   '  vec2 wpos = (uv - 0.5) * BOUNDS;',
+  '  float sAcc = 0.0;',
   '  for (int i = 0; i < 8; i++){',
   '    if (i >= uSeedCount) break;',
   '    vec4 sd = uSeeds[i];',
   '    float ph = clamp(length(wpos - sd.xy) * PI / sd.z, 0.0, PI);',
-  '    nh += (cos(ph) + 1.0) * sd.w;',   
+  '    sAcc += (cos(ph) + 1.0) * sd.w;',   
   '  }',
   '  vec2 ed = min(uv, 1.0 - uv);',
-  '  nh *= smoothstep(0.0, 0.06, min(ed.x, ed.y));',
-  '  h.y = h.x;',                     
+  '  float edg = smoothstep(0.0, 0.06, min(ed.x, ed.y));',
+  '  nh *= edg;',
+  '  float sA = sAcc * edg;',
+  '  nh += (1.0 - uSeedImpulse) * sA;',
+  '  h.y = h.x - uSeedImpulse * sA;',  
   '  h.x = nh;',                      
   '  gl_FragColor = h;',
   '}'
@@ -16354,7 +16362,8 @@ function _swRippleInit() {
     v.material.defines.BOUNDS = _SW_RIPPLE_BOUNDS.toFixed(1);
     const seeds = []; for (let i = 0; i < 8; i++) seeds.push(new THREE.Vector4(0, 0, 1, 0));
     v.material.uniforms.viscosity = { value: 0.9885 };   // (v38.15) 0.972 -> longer-lived energy
-    v.material.uniforms.uWaveC2 = { value: 0.16 };       // (v38.15) 0.05 -> ripples that travel    
+    v.material.uniforms.uWaveC2 = { value: 0.26 };
+    v.material.uniforms.uSeedImpulse = { value: 0.25 };
     v.material.uniforms.uSeeds = { value: seeds };
     v.material.uniforms.uSeedCount = { value: 0 };
     v.material.uniforms.uScroll = { value: new THREE.Vector2(0, 0) };   
@@ -16384,6 +16393,18 @@ function _swRippleInit() {
     if (typeof window !== 'undefined' && window.__waterDisp === undefined) window.__waterDisp = 1;
   } catch (e) { try { console.warn('[water] GPGPU init exception, analytic fallback:', e); } catch (_) {} _swRipple.gpu = null; }
 }
+function _swDispWorld(h) {
+  const W = window.__water || {};
+  const D = (W.disp != null) ? +W.disp : 180, G = (W.gain != null) ? +W.gain : 100;
+  const Q = (W.crestQ != null) ? +W.crestQ : 11;
+  const sq = h * (1 + Q * Math.abs(h));
+  const x = sq * G / Math.max(D, 0.01);
+  return D * (x / (1 + Math.abs(x)));
+}
+function _swSpdCurve(sp, knee, tail) {
+  const r = sp / knee;
+  return (r <= 1) ? r : 1 + ((tail != null) ? tail : 0.30) * (r - 1);
+}
 function _swRippleSeed(wx, wz, radius, amp) {
   const R = _swRipple; if (!R.gpu) return;
   const half = R.bounds * 0.5;
@@ -16392,8 +16413,236 @@ function _swRippleSeed(wx, wz, radius, amp) {
   
   
   if (Math.abs(wx - R.center.x) > half || Math.abs(wz - R.center.y) > half) return;   
-  R.pending.push({ wx: wx, wz: wz, r: Math.max(20, radius), a: Math.max(-0.55, Math.min(0.55, amp)) });   
+  const _W3s = window.__water;
+  const _k = (_W3s && _W3s.seedScale != null) ? +_W3s.seedScale : 1.0;
+  R.pending.push({ wx: wx, wz: wz, r: Math.max(20, radius), a: Math.max(-0.55, Math.min(0.55, amp * _k)) });   
   if (R.pending.length > 8) R.pending.shift();   
+}
+const _SW_BETA_REF = 0.3588;      // 20.6° = atan(2*13.5/72), the deadrise of the reference hull the v33.67 gate was tuned on
+const _SW_TANB_REF = 0.37566;     // tan(_SW_BETA_REF), precomputed
+function _swDeadrise(fp) {
+  if (!fp || !fp.BEAM) return _SW_BETA_REF;
+  const b = Math.atan2(2 * fp.DRAFT, Math.max(1e-3, fp.BEAM));
+  return Math.min(1.05, Math.max(0.12, b));   // clamp to 7°..60° - a real hull is never a knife or a dinner plate
+}
+function _swStagPsi(tau, beta) {
+  return Math.atan2(Math.tan(Math.max(0.004, tau)), Math.max(1e-4, Math.tan(beta || _SW_BETA_REF)));
+}
+function _swSprayRoot(Vn, Vt, beta) {
+  if (!(Vn > 0)) return 0;
+  const W3 = (typeof window !== 'undefined' && window.__water) ? window.__water : null;
+  const ob = (W3 && W3.oblique != null) ? +W3.oblique : 1;
+  if (!(ob > 0)) return Vn;
+  const th = Math.atan2(Vn, Math.max(1e-4, Vt));
+  const be = Math.max(0.105, (beta || _SW_BETA_REF) * Math.sin(th));   // 6° floor -> gain capped at 3.6x
+  const U = Vn * (_SW_TANB_REF / Math.tan(be));
+  return Vn + (U - Vn) * Math.min(1, ob);
+}
+const _swDropV = new THREE.Vector3();
+const _SW_DROP_COL = [0x8fb4cc, 0xb6d2e2, 0x6f97b0];
+const _SW_FXN = {};
+function _swFxN(k) { _SW_FXN[k] = (_SW_FXN[k] | 0) + 1; }
+const _swXB = { t: 0, n: 0 };   // (v41.00) weapon-crossing droplet budget, shared by every weapon (see _swWaterCrossSplash)
+function _swWetState(o) {
+  let st = o._swWet;
+  if (!st) st = o._swWet = { wet: 0, dripT: 0, entT: 0 };
+  return st;
+}
+function _swFxRoom() {
+  if (!game.particles) return 0;
+  const cap = (typeof _particleCap === 'function') ? _particleCap() : 500;
+  return cap * 0.62 - game.particles.length;
+}
+function _swShedDrops(px, py, pz, vel, fp, n, carry, spreadK, sizeK, lifeK) {
+  if (!game.particles || game._swSubmerged || !fp) return 0;
+  if (_swFxRoom() < n) return 0;
+  const vx = vel ? vel.x : 0, vy = vel ? vel.y : 0, vz = vel ? vel.z : 0;
+  const sp = Math.hypot(vx, vz);
+  const fx = sp > 1e-3 ? vx / sp : 0, fz = sp > 1e-3 ? vz / sp : 1;   // hull points roughly along its track
+  const rl = fp.half * 0.85 * spreadK, rw = fp.BEAM * 0.5 * spreadK, rh = fp.DRAFT * 1.2 * spreadK;
+  let m = 0;
+  for (let i = 0; i < n; i++) {
+    const a = (Math.random() - 0.5) * 2 * rl, b = (Math.random() - 0.5) * 2 * rw;
+    const c = carry * (0.72 + Math.random() * 0.34);
+    _swDropV.set(vx * c + (Math.random() - 0.5) * 64,
+                 vy * c * 0.75 - Math.random() * 26,
+                 vz * c + (Math.random() - 0.5) * 64);
+    game.particles.push({
+      position: new THREE.Vector3(px + fx * a - fz * b, py + (Math.random() - 0.5) * 2 * rh, pz + fz * a + fx * b),
+      velocity: _swDropV.clone(),
+      life: (0.42 + Math.random() * 0.86) * lifeK, maxLife: 1.30 * lifeK,
+      color: _SW_DROP_COL[(Math.random() * 3) | 0],
+      size: (1.5 + Math.random() * 2.5) * sizeK * (window.__splashSz || 1),
+      grav: 300 + Math.random() * 260,
+      splash: true,
+    });
+    m++;
+  }
+  return m;
+}
+const _SW_DRIPW_MAX = 24;
+function _swDripTrack(px, py, pz, vel, carry) {
+  const R = _swRipple; if (!R.gpu) return;
+  const A = R.dripW || (R.dripW = []);
+  if (A.length >= _SW_DRIPW_MAX) return;
+  A.push({ x: px, y: py, z: pz,
+           vx: (vel ? vel.x : 0) * carry, vy: (vel ? vel.y : 0) * carry * 0.75 - 18, vz: (vel ? vel.z : 0) * carry,
+           t: 0 });
+}
+function _swDripWTick(dt, WL) {
+  const R = _swRipple; const A = R.dripW; if (!A || !A.length) return;
+  const peak = (window.__water && window.__water.impactPeak != null) ? window.__water.impactPeak : 0.135;
+  for (let i = A.length - 1; i >= 0; i--) {
+    const d = A[i];
+    d.t += dt;
+    d.vy -= 380 * dt;
+    d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
+    d.vx *= 0.95; d.vy *= 0.95; d.vz *= 0.95;   // same per-frame drag the particle integrator applies
+    if (d.y <= WL || d.t > 4) {
+      if (d.y <= WL) { _swFxN('dripLand'); _swRippleSeed(d.x, d.z, 24 + Math.random() * 20, 0.020 * peak); }   // (v41.02) a droplet pock
+      const last = A.length - 1; if (i !== last) A[i] = A[last]; A.pop();
+    }
+  }
+}
+function _swWorthingtonJet(px, pz, WL, fp, vEntry, k) {
+  if (!game.particles || game._swSubmerged) return 0;
+  const n = Math.max(4, Math.min(46, Math.round((10 + 26 * k) * (fp.BEAM / 72))));
+  if (_swFxRoom() < n) return 0;
+  const base = Math.max(120, vEntry * 0.55) * (0.8 + 0.6 * k);
+  for (let i = 0; i < n; i++) {
+    const fat = (i < n * 0.22);
+    const ang = Math.random() * 6.2832;
+    const cone = fat ? (0.10 + Math.random() * 0.22) : (0.02 + Math.random() * Math.random() * 0.16);
+    const spd = base * (fat ? (0.35 + Math.random() * 0.35) : (0.85 + Math.random() * 1.5));
+    const sc = Math.sin(cone) * spd;
+    _swDropV.set(Math.cos(ang) * sc, Math.cos(cone) * spd, Math.sin(ang) * sc);
+    game.particles.push({
+      position: new THREE.Vector3(px + Math.cos(ang) * fp.BEAM * 0.10 * Math.random(), WL + 6,
+                                  pz + Math.sin(ang) * fp.BEAM * 0.10 * Math.random()),
+      velocity: _swDropV.clone(),
+      life: fat ? (0.45 + Math.random() * 0.55) : (0.75 + Math.random() * 0.85),
+      maxLife: 1.6,
+      color: (Math.random() < 0.45) ? 0xa6c8de : 0xc8dcea,
+      size: (fat ? (2.4 + Math.random() * 3.0) : (1.0 + Math.random() * 1.9)) * (window.__splashSz || 1),
+      grav: 300 + Math.random() * 240,
+      splash: true,
+    });
+  }
+  const peak = (window.__water && window.__water.impactPeak != null) ? window.__water.impactPeak : 0.135;
+  _swRippleSeed(px, pz, Math.max(24, fp.BEAM * 0.8), 0.55 * k * fp.heft * peak);
+  return n;
+}
+const _SW_BLASTS = [];
+function _swBlast(x, y, z, size) {
+  const w = game && game._hubWater; if (!w) return 0;
+  const W3 = window.__water || {};
+  const bk = (W3.blast != null) ? +W3.blast : 1;
+  if (!(bk > 0)) return 0;
+  const WL = w.userData.WL, d = y - WL;               // + above the surface, - below it
+  const R = Math.max(70, (size || 20) * 6);           // world radius the surface feels
+  const far = R * 2.2 + 140;
+  if (Math.abs(d) > far) return 0;
+  const reach = Math.pow(1 - Math.abs(d) / far, 0.7);   // a burst loses the surface with distance
+  const peak = (W3.impactPeak != null) ? +W3.impactPeak : 0.135;
+  const A = Math.min(2.8, 0.85 * Math.pow((size || 20) / 20, 0.75) * bk) * reach;
+  if (A < 0.01) return 0;
+  _swFxN('blast');
+  if (d <= 0) {
+    _swRippleSeed(x, z, R * 1.15, A * peak * 2.4);    // the dome
+    _swRippleSeed(x, z, R * 0.42, -A * peak * 1.0);   // vented through its middle
+  } else {
+    _swRippleSeed(x, z, R * 0.55, -A * peak * 2.0);   // the crater
+    _swRippleSeed(x, z, R * 1.30, A * peak * 1.0);    // and its rim
+  }
+  const _sp = 260 + 520 * Math.min(1, (size || 20) / 60);
+  const _D = Math.max(26, Math.min(90, R * 0.5));
+  const _now = performance.now();
+  if (_now - _swXB.t > 250) { _swXB.t = _now; _swXB.n = 0; }
+  if (_swXB.n < ((W3.wxCap != null) ? +W3.wxCap : 34) && !game._swSubmerged) {
+    _swXB.n += _swSpawnSplashV(x, WL, z, { x: 0, y: -_sp, z: 0 }, _D, 0.5 + 0.8 * reach) || 0;
+  }
+  _swCrestDots(x, WL, z, 0.5 + 0.9 * reach, 0, 0, _swDispWorld(A * peak * 2.4));
+  if (d < R * 0.35 && _SW_BLASTS.length < 6) {
+    _SW_BLASTS.push({ x: x, z: z, t: 0, R: R, k: Math.min(1, A * 1.4),
+                      delay: 0.14 + 0.30 * Math.min(1, R / 400) });
+  }
+  return 1;
+}
+function _swBlastTick(dt, WL) {
+  if (!_SW_BLASTS.length) return;
+  for (let i = _SW_BLASTS.length - 1; i >= 0; i--) {
+    const b = _SW_BLASTS[i];
+    b.t += dt;
+    if (b.t < b.delay) continue;
+    try {
+      _swFxN('blastColumn');
+      _swWorthingtonJet(b.x, b.z, WL, { BEAM: b.R * 0.85, DRAFT: b.R * 0.2, heft: 1, half: b.R },
+                        340 + b.R * 1.6, b.k);
+    } catch (_) {}
+    const last = _SW_BLASTS.length - 1; if (i !== last) _SW_BLASTS[i] = _SW_BLASTS[last];
+    _SW_BLASTS.pop();
+  }
+}
+function _swWetTick(o, px, py, pz, vel, fp, WL, dt) {
+  if (!o || !fp || !game._hubWater) return;
+  const W3 = (window.__water = window.__water || {});
+  const st = _swWetState(o);
+  const above = py - WL;
+  const sp = vel ? Math.hypot(vel.x, vel.z) : 0;
+  if (above < fp.DRAFT * 0.6) st.wet = 1;
+  else st.wet = Math.max(0, st.wet - dt * (0.42 + sp / 1100));
+  const ent = (W3.entrain != null) ? +W3.entrain : 1;
+  if (ent > 0 && above < 0 && above > -fp.LEN * 3.2) {
+    st.entT += dt;
+    const depth01 = Math.min(1, -above / (fp.LEN * 3.2));
+    const pull = (1 - depth01) * Math.min(1, (sp + Math.abs(vel ? vel.y : 0)) / 260);
+    if (st.entT > 0.055 && pull > 0.02) {
+      st.entT = 0;
+      const peak = (W3.impactPeak != null) ? W3.impactPeak : 0.135;
+      _swFxN('entrain');
+      _swRippleSeed(px, pz, Math.max(24, fp.BEAM * 1.25), -0.30 * pull * fp.heft * ent * peak);
+      if (!game._swSubmerged && _swFxRoom() > 4) {
+        const n = 1 + ((Math.random() * 2 * pull * ent) | 0);
+        for (let i = 0; i < n; i++) {
+          _swDropV.set((vel ? vel.x : 0) * 0.45 + (Math.random() - 0.5) * 46,
+                       -(55 + Math.random() * 115) * (0.4 + pull),
+                       (vel ? vel.z : 0) * 0.45 + (Math.random() - 0.5) * 46);
+          game.particles.push({
+            position: new THREE.Vector3(px + (Math.random() - 0.5) * fp.BEAM, WL + 2 - Math.random() * 18, pz + (Math.random() - 0.5) * fp.BEAM),
+            velocity: _swDropV.clone(),
+            life: 0.45 + Math.random() * 0.70, maxLife: 1.15,
+            color: 0xa8cadc,
+            size: (2.0 + Math.random() * 3.0) * (window.__splashSz || 1),
+            grav: -(120 + Math.random() * 160),   // buoyant: it is dragged down, slows, and floats back up
+            splash: true,
+          });
+        }
+      }
+    }
+  }
+  const cav = st.cav;
+  if (cav) {
+    cav.t += dt;
+    const jk = (W3.jet != null) ? +W3.jet : 1;
+    const delay = ((W3.jetDelay != null) ? +W3.jetDelay : 0.30) * Math.sqrt(Math.max(0.2, fp.BEAM / 72));
+    if (cav.t >= delay || above > fp.DRAFT || cav.t > 2.5) {
+      if (jk > 0 && cav.t >= delay && cav.t <= 2.5 && above < 0) { _swFxN('jet'); _swWorthingtonJet(cav.x, cav.z, WL, fp, cav.v, cav.k * jk); }
+      else if (cav.t >= delay) _swFxN('jetMissed');
+      st.cav = null;
+    }
+  }
+  const shed = (W3.shed != null) ? +W3.shed : 1;
+  if (shed > 0 && st.wet > 0.01 && above > 0 && !game._swSubmerged) {
+    st.dripT += dt;
+    const rate = st.wet * (5 + 18 * Math.min(1, sp / 320)) * shed;   // drops per second
+    const iv = 1 / Math.max(0.5, rate);
+    if (st.dripT > iv) {
+      const n = Math.min(4, Math.max(1, Math.round(st.dripT / iv)));
+      st.dripT = 0;
+      const carry = 0.55 + 0.30 * st.wet;
+      if (_swShedDrops(px, py, pz, vel, fp, n, carry, 1.0, 0.85, 1.0) && above < 900) { _swFxN('drip'); _swDripTrack(px, py, pz, vel, carry); }
+    }
+  }
 }
 const _swSplashTmp = new THREE.Vector3();
 function _swSpawnSplash(x, wl, z, n, power) {
@@ -16423,22 +16672,29 @@ function _swSpawnSplash(x, wl, z, n, power) {
   }
 }
 const _swSplV = new THREE.Vector3();
-function _swSpawnSplashV(x, wl, z, V, D, countScl) {
-  if (!game.particles || game._swSubmerged) return;
+function _swSpawnSplashV(x, wl, z, V, D, countScl, beta) {
+  if (!game.particles || game._swSubmerged) return 0;
   const W3 = window.__water || {};
   const vx = V ? V.x : 0, vyy = V ? V.y : 0, vz = V ? V.z : 0;
   const Vn = Math.max(0, -vyy);                                 
   const Tx = vx, Tz = vz, Vt = Math.hypot(Tx, Tz);             
   const thx = Vt > 1e-4 ? Tx / Vt : 0, thz = Vt > 1e-4 ? Tz / Vt : 0;   
   const D_REF = 72, K_MIN = 28, K_REF = 220;                   
-  const K = Vn * Math.sqrt(D / D_REF);                         
+  const _beta = (beta != null) ? beta : _SW_BETA_REF;
+  const U = _swSprayRoot(Vn, Vt, _beta);
+  const K = U * Math.sqrt(D / D_REF);                          
   const I = Math.min(1, Math.max(0, (K - K_MIN) / (K_REF - K_MIN)));
-  if (I <= 0) return;                                          
+  if (I <= 0) return 0;                                        
   const r = Vt / Math.max(Vn, 1e-3), lean = r / (1 + r);       
   let N = Math.round((3 + 13 * I) * (D / D_REF) * (D / D_REF) * (countScl || 1) * (W3.spray != null ? W3.spray : 1) * (window.__splashN != null ? window.__splashN : 1));
   N = Math.max(1, Math.min(78, Math.round(N * 3.0)));   
   const cap = (typeof _particleCap === 'function') ? _particleCap() : 1200;
-  if (game.particles.length > cap - N - 2) return;
+  if (game.particles.length > cap - N - 2) return 0;
+  const wFrac = Math.min(0.72, lean * lean);
+  let _made = 0;
+  const _trimMin = (W3.trim != null) ? +W3.trim : 0.10;   
+  const _psi = _swStagPsi(Math.max(_trimMin, Math.atan2(Vn, Math.max(1e-4, Vt))), _beta);
+  const _c2 = Math.cos(2 * _psi), _s2 = Math.sin(2 * _psi);
   let ax = thx * lean, ay = 1.0, az = thz * lean;
   const al = Math.hypot(ax, ay, az); ax /= al; ay /= al; az /= al;
   let e1x = thx, e1y = 0, e1z = thz;                          
@@ -16452,6 +16708,47 @@ function _swSpawnSplashV(x, wl, z, V, D, countScl) {
   const cAdv = 0.55 * lean;                                   
   for (let i = 0; i < N; i++) {
     const u1 = Math.random(), u2 = Math.random(), u3 = Math.random();
+    if (Math.random() < wFrac) {
+      const _W9 = W3;
+      const _sv = Math.random() * 2 - 1, _as = Math.abs(_sv), _sg = (_sv < 0) ? -1 : 1;
+      const ox = -thz * _sg, oz = thx * _sg;
+      const _bnd = (_W9.sheetBend != null) ? +_W9.sheetBend : 1;
+      const _psiS = _psi * (1 - 0.72 * _bnd * _as * _as);
+      const _cS = Math.cos(2 * _psiS), _sS = Math.sin(2 * _psiS);
+      let wx = thx * -_cS + ox * _sS, wz = thz * -_cS + oz * _sS;
+      const _frc = (_W9.sheetFrac != null) ? +_W9.sheetFrac : 1;
+      let _lv = 0; while (_lv < 4 && Math.random() < 0.55 * _frc) _lv++;
+      const _szK = Math.pow(0.72, _lv);                    
+      const _reach = 0.15 + 0.22 * _lv + Math.random() * 0.42;   
+      const _wrp = (_W9.sheetWarp != null) ? +_W9.sheetWarp : 1;
+      const _tw = (typeof game !== 'undefined' && game.time) ? game.time : (performance.now() * 0.001);
+      const _phase = _sv * 5.4 + _tw * 11.0;
+      const _flap = Math.sin(_phase) * 0.34 * _wrp * Math.min(1, _reach * 0.55);
+      const _snake = Math.cos(_phase * 0.7 + 1.1) * 0.26 * _wrp * Math.min(1, _reach * 0.55);
+      wx += ox * _snake; wz += oz * _snake;
+      const _wl2 = Math.hypot(wx, wz) || 1; wx /= _wl2; wz /= _wl2;
+      const se = Math.tan(_beta) * (0.35 + 0.55 * Math.random()) + 0.12 + _flap;
+      const _scat = (0.05 + 0.16 * _lv) * (1 - _as * 0.4);
+      const _sx = wx + (Math.random() - 0.5) * _scat, _sz = wz + (Math.random() - 0.5) * _scat;
+      _swSplV.set(Tx + Vt * _sx, Vt * Math.hypot(_sx, _sz) * se, Tz + Vt * _sz);
+      _swFxN('sheet');
+      const _rx = x + thx * D * 0.42 + ox * D * 0.42 * _as;
+      const _rz = z + thz * D * 0.42 + oz * D * 0.42 * _as;
+      const _out = D * _reach;
+      game.particles.push({
+        position: new THREE.Vector3(_rx + wx * _out + (Math.random() - 0.5) * 10,
+                                    wl + 3 + Math.max(0, se) * _out * 0.22,
+                                    _rz + wz * _out + (Math.random() - 0.5) * 10),
+        velocity: _swSplV.clone(),
+        life: (0.30 + Math.random() * 0.55) * (1 - 0.13 * _lv), maxLife: 0.92,
+        color: (_lv >= 2) ? ((Math.random() < 0.5) ? 0xc4dcea : 0xd8e8f2) : ((Math.random() < 0.6) ? 0x9dbfd6 : 0xb2cee0),
+        size: sizeMean * _szK * (0.85 + u1 * u1 * 1.9),
+        grav: (300 + Math.random() * 300) * (1 - 0.16 * _lv),   
+        splash: true,
+      });
+      _made++;
+      continue;
+    }
     let phi = 6.2832 * u3; phi -= lean * 0.6 * Math.sin(phi);   
     const fwd = Math.cos(phi);
     if (fwd < -0.3 && Math.random() < lean * 0.7) continue;     
@@ -16473,7 +16770,10 @@ function _swSpawnSplashV(x, wl, z, V, D, countScl) {
       grav: 270 + Math.random() * 320,
       splash: true,
     });
+    _swFxN('crown');
+    _made++;
   }
+  return _made;
 }
 function _swCrestSpray(x, wl, z, crestAmp, vx, vz, crestYOverride) {
   if (!game.particles || game._swSubmerged) return;
@@ -16488,10 +16788,7 @@ function _swCrestSpray(x, wl, z, crestAmp, vx, vz, crestYOverride) {
   if (n <= 0) return;
   const cap = (typeof _particleCap === 'function') ? _particleCap() : 1200;
   if (game.particles.length > cap - n - 2) return;
-  const dispS = (window.__water && window.__water.disp != null) ? window.__water.disp : 180;
-  const gainS = (window.__water && window.__water.gain != null) ? window.__water.gain : 180;
-  const _hx = crestAmp * gainS / Math.max(dispS, 0.01);
-  const crestY = (crestYOverride !== undefined) ? crestYOverride : dispS * (_hx / (1 + Math.abs(_hx)));   
+  const crestY = (crestYOverride !== undefined) ? crestYOverride : _swDispWorld(crestAmp);
   const spawnY = wl + 12 + crestY * 0.55;                                     
   for (let i = 0; i < n; i++) {
     const mist = Math.random() < 0.55;                                       
@@ -16509,6 +16806,381 @@ function _swCrestSpray(x, wl, z, crestAmp, vx, vz, crestYOverride) {
     });
   }
 }
+const _SW_SUBT = {};
+let _swTidN = 0;   // (v41.37) rolling id so each projectile gets its own trail clock
+function _swSubTrail(x0, y0, z0, x1, y1, z1, R, key) {
+  const w = game && game._hubWater; if (!w || !game.particles) return 0;
+  const W3 = window.__water || {};
+  const tk = (W3.subTrail != null) ? +W3.subTrail : 1;
+  if (!(tk > 0)) return 0;
+  const WL = w.userData.WL;
+  let ax = x0, ay = y0, az = z0, bx = x1, by = y1, bz = z1;
+  if (ay > WL && by > WL) return 0;
+  if (ay > WL || by > WL) {
+    const t = (WL - ay) / ((by - ay) || 1e-6);
+    const cx = ax + (bx - ax) * t, cy = WL, cz = az + (bz - az) * t;
+    if (ay > WL) { ax = cx; ay = cy; az = cz; } else { bx = cx; by = cy; bz = cz; }
+  }
+  const dx = bx - ax, dy = by - ay, dz = bz - az;
+  const len = Math.hypot(dx, dy, dz);
+  if (len < 1) return 0;
+  const kk = key || 'x';
+  const st = _SW_SUBT[kk] || (_SW_SUBT[kk] = { t: 0 });
+  const now = performance.now();
+  if (now - st.t < 28) return 0;
+  st.t = now;
+  const rad = Math.max(10, Math.min(70, R * 0.35));
+  const n = Math.max(2, Math.min(11, Math.round((2 + len / 90) * tk)));
+  if (_swFxRoom() < n) return 0;
+  const ilen = 1 / len, ux = dx * ilen, uy = dy * ilen, uz = dz * ilen;
+  for (let i = 0; i < n; i++) {
+    const f = (i + Math.random()) / n;
+    _swDropV.set(ux * 26 + (Math.random() - 0.5) * 34,
+                 16 + Math.random() * 26,
+                 uz * 26 + (Math.random() - 0.5) * 34);
+    game.particles.push({
+      position: new THREE.Vector3(ax + dx * f + (Math.random() - 0.5) * rad,
+                                  ay + dy * f + (Math.random() - 0.5) * rad * 0.6,
+                                  az + dz * f + (Math.random() - 0.5) * rad),
+      velocity: _swDropV.clone(),
+      life: 0.6 + Math.random() * 1.1, maxLife: 1.7,
+      color: (Math.random() < 0.72) ? 0xffffff : 0xeafcff,
+      size: (1.0 + Math.random() * 2.6) * (window.__splashSz || 1),
+      grav: -(70 + Math.random() * 120),   // buoyant: these RISE
+      splash: true,
+    });
+  }
+  _swFxN('subTrail');
+  return n;
+}
+function _swExitPlume(hx, wl, hz, dx, dy, dz, sp, radius, k) {
+  if (!game.particles) return 0;
+  const n = Math.max(3, Math.min(30, Math.round((5 + 22 * k) * Math.min(1.6, radius / 60))));
+  if (_swFxRoom() < n) return 0;
+  const spd = Math.min(900, Math.max(90, sp * 0.30));
+  let e1x = -dz, e1y = 0, e1z = dx;
+  const e1l = Math.hypot(e1x, e1y, e1z) || 1; e1x /= e1l; e1z /= e1l;
+  const e2x = dy * e1z - dz * e1y, e2y = dz * e1x - dx * e1z, e2z = dx * e1y - dy * e1x;
+  for (let i = 0; i < n; i++) {
+    const u1 = Math.random(), u2 = Math.random();
+    const cone = 0.05 + 0.42 * u1 * u1;
+    const ph = Math.random() * 6.2832, ca = Math.cos(cone), sa = Math.sin(cone);
+    const cx = Math.cos(ph) * sa, cy = Math.sin(ph) * sa;
+    const vx = dx * ca + (e1x * cx + e2x * cy), vy = dy * ca + (e1y * cx + e2y * cy), vz = dz * ca + (e1z * cx + e2z * cy);
+    const v = spd * (0.35 + 0.85 * (1 - u1) + 0.5 * u2);
+    _swDropV.set(vx * v, vy * v, vz * v);
+    game.particles.push({
+      position: new THREE.Vector3(hx + (Math.random() - 0.5) * radius * 0.5,
+                                  wl + 2 + Math.random() * 10,
+                                  hz + (Math.random() - 0.5) * radius * 0.5),
+      velocity: _swDropV.clone(),
+      life: 0.30 + Math.random() * 0.75, maxLife: 1.1,
+      color: (Math.random() < 0.5) ? 0xa6c8de : 0xd2e6f2,
+      size: (1.1 + Math.random() * 2.4) * (window.__splashSz || 1),
+      grav: 300 + Math.random() * 260,
+      splash: true,
+    });
+  }
+  _swFxN('exitPlume');
+  return n;
+}
+function _swWpnYield(dmg, splash, sizeMult) {
+  if (dmg > 0) return dmg;
+  if (splash > 0) return splash * 3;
+  return 120 * ((sizeMult > 0) ? sizeMult : 1);
+}
+const _swXS = { t: 0, n: 0 };
+const _SW_WPN_T = {};
+function _swWpnWake(o, x, y, z, vx, vz, R) {
+  const w = game && game._hubWater; if (!w) return 0;
+  const W3 = window.__water || {};
+  const wk = (W3.wpnWake != null) ? +W3.wpnWake : 1;
+  if (!(wk > 0)) return 0;
+  const WL = w.userData.WL, above = y - WL;
+  const ceil = R * 4 + 90;
+  if (above <= 0 || above > ceil) return 0;
+  const sp = Math.hypot(vx, vz);
+  if (sp < 60) return 0;
+  const st = o._swWk || (o._swWk = { x: 1e9, z: 0 });
+  const spacing = Math.max(26, R * 1.2);
+  const dx = x - st.x, dz = z - st.z;
+  if (dx * dx + dz * dz < spacing * spacing) return 0;
+  st.x = x; st.z = z;
+  const prox = 1 - above / ceil;
+  const peak = (W3.impactPeak != null) ? +W3.impactPeak : 0.135;
+  const a = 0.42 * prox * prox * Math.min(1, sp / 700) * wk * peak;
+  if (a < 0.0005) return 0;
+  const ih = 1 / sp, hx = vx * ih, hz = vz * ih;
+  _swRippleSeed(x, z, Math.max(20, R * 0.9), -a);                                   // pressed down under it
+  _swRippleSeed(x - hx * R * 1.7, z - hz * R * 1.7, Math.max(20, R * 1.25), a * 0.5);  // closing in behind
+  _swFxN('wpnWake');
+  return 1;
+}
+function _swWpnCross(x0, y0, z0, x1, y1, z1, Y, speed, src, minDt) {
+  const w = game && game._hubWater; if (!w) return 0;
+  const _wl0 = w.userData.WL;
+  if (y0 < _wl0 && y1 < _wl0) {
+    try { _swSubTrail(x0, y0, z0, x1, y1, z1, 60, src || 'p'); } catch (_) {}
+    return 0;
+  }
+  const W3 = window.__water || {};
+  const wk = (W3.wpn != null) ? +W3.wpn : 1;
+  if (!(wk > 0)) return 0;
+  const now = performance.now();
+  let yld = (Y > 0) ? Y : 85;
+  if (src && minDt > 0) {
+    const st = _SW_WPN_T[src] || (_SW_WPN_T[src] = { t: 0, hold: 0 });
+    if (now - st.t < minDt * 1000) { st.hold += yld; return 0; }
+    yld += st.hold * 0.5; st.hold = 0; st.t = now;
+  }
+  const rel = yld / 85;
+  const R = Math.max(40, Math.min(260, 45 * Math.pow(rel, 0.45)));
+  const A = Math.max(0.025, Math.min(0.30, 0.030 * Math.pow(rel, 0.55)));
+  let Ax = A;
+  if (A < 0.075) {
+    if (now - _swXS.t > 250) { _swXS.t = now; _swXS.n = 0; }
+    const cap = (W3.wxSeedCap != null) ? +W3.wxSeedCap : 60;
+    if (_swXS.n >= cap) Ax = A * 0.45;
+    else _swXS.n++;
+  }
+  const wl2 = game._hubWater.userData.WL;
+  const t2 = (Math.abs(y1 - y0) < 1e-6) ? 0.5 : (wl2 - y0) / (y1 - y0);
+  if (!(t2 >= 0 && t2 <= 1)) return 0;
+  const hx2 = x0 + (x1 - x0) * t2, hz2 = z0 + (z1 - z0) * t2;
+  let ux = x1 - x0, uy = y1 - y0, uz = z1 - z0;
+  const ul = Math.hypot(ux, uy, uz) || 1; ux /= ul; uy /= ul; uz /= ul;
+  const shotSp = (speed > 0) ? Math.min(4000, speed) : (240 + 1500 * Math.min(1, Ax * 5));
+  const fp2 = { BEAM: R, LEN: R * 1.3, DRAFT: R * 0.19, half: R * 0.65, heft: 1 };
+  try { _swSubTrail(x0, y0, z0, x1, y1, z1, R, src || 'p'); } catch (_) {}
+  _swFxN('wpnCross');
+  _swImpact(hx2, hz2, (uy > 0) ? -1 : 1, fp2, 1,
+            { x: ux * shotSp, y: uy * shotSp, z: uz * shotSp }, wl2, null,
+            0.55 * wk * (Ax / Math.max(1e-4, A)) * ((uy > 0) ? 1.61 : 1));
+  const vth = (W3.vent != null) ? +W3.vent : 0.009;
+  if (uy <= 0 && Ax * ((W3.impactPeak != null) ? +W3.impactPeak : 0.135) > vth &&
+      typeof _SW_BLASTS !== 'undefined' && _SW_BLASTS.length < 6) {
+    _swFxN('vent');
+    _SW_BLASTS.push({ x: hx2, z: hz2, t: 0, R: R * 1.5,
+                      k: Math.max(0.10, Math.min(0.9, (Ax * 0.135 - vth * 0.7) * 40)),
+                      delay: 0.10 + 0.16 * Math.min(1, R / 160) });
+  }
+  if (uy > 0) { try { _swExitPlume(hx2, wl2, hz2, ux, uy, uz, shotSp, R, 0.25 + 0.75 * Math.min(1, Ax * 6)); } catch (_) {} }
+  return 1;
+}
+function _swRooster(px, wl, pz, vel, fp, wet01) {
+  if (!game.particles || game._swSubmerged || !fp) return 0;
+  const W3 = window.__water || {};
+  const k = (W3.rooster != null) ? +W3.rooster : 1;
+  if (!(k > 0)) return 0;
+  const vx = vel ? vel.x : 0, vz = vel ? vel.z : 0, sp = Math.hypot(vx, vz);
+  if (sp < 60) return 0;
+  const n = Math.max(2, Math.min(22, Math.round((3 + 9 * wet01) * (fp.BEAM / 72))));
+  if (_swFxRoom() < n) return 0;
+  const bx = sp > 1e-3 ? vx / sp : 0, bz = sp > 1e-3 ? vz / sp : 1;   
+  const lx = -bz, lz = bx;                                            
+  for (let i = 0; i < n; i++) {
+    const u1 = Math.random(), u2 = Math.random();
+    const el = 0.79 + u1 * 0.52;
+    const side = (u2 - 0.5) * 1.35;                                   
+    const spd = sp * (0.34 + 0.42 * Math.random()) * k * (0.55 + 0.65 * wet01);
+    const ce = Math.cos(el), se = Math.sin(el);
+    _swDropV.set((-bx * ce + lx * side) * spd + vx * 0.30,
+                 se * spd,
+                 (-bz * ce + lz * side) * spd + vz * 0.30);
+    game.particles.push({
+      position: new THREE.Vector3(px + lx * (Math.random() - 0.5) * fp.BEAM * 0.7,
+                                  wl + 4 + Math.random() * fp.DRAFT,
+                                  pz + lz * (Math.random() - 0.5) * fp.BEAM * 0.7),
+      velocity: _swDropV.clone(),
+      life: 0.55 + Math.random() * 0.95, maxLife: 1.5,
+      color: (Math.random() < 0.5) ? 0xa6c8de : 0xcfe4f0,
+      size: (1.4 + Math.random() * 2.8) * (window.__splashSz || 1),
+      grav: 300 + Math.random() * 200,
+      splash: true,
+    });
+  }
+  _swFxN('rooster');
+  return n;
+}
+function _swCrestDots(px, wl, pz, k, vx, vz, crestY) {
+  if (!game.particles || game._swSubmerged) return 0;
+  const W3 = window.__water || {};
+  const dk = (W3.dots != null) ? +W3.dots : 1;
+  if (!(dk > 0) || !(k > 0.02)) return 0;
+  const n = Math.max(1, Math.min(20, Math.round((2 + 8 * Math.min(1, k)) * dk)));
+  const fk = (W3.dotsFine != null) ? +W3.dotsFine : 1.7;
+  const n2 = Math.max(0, Math.min(34, Math.round(n * fk)));
+  if (_swFxRoom() < n + n2) return 0;
+  const spawnY = function () {
+    return wl + 6 + Math.random() * 14 + (crestY || 0) * (0.55 + 0.45 * Math.random());
+  };
+  for (let i = 0; i < n; i++) {
+    const ang = Math.random() * 6.2832, out = Math.random() * Math.random() * 46;
+    _swDropV.set(Math.cos(ang) * out + (vx || 0) * 0.06,
+                 22 + Math.random() * 78 * Math.min(1, k * 1.6),
+                 Math.sin(ang) * out + (vz || 0) * 0.06);
+    game.particles.push({
+      position: new THREE.Vector3(px + (Math.random() - 0.5) * 40, spawnY(), pz + (Math.random() - 0.5) * 40),
+      velocity: _swDropV.clone(),
+      life: 0.7 + Math.random() * 1.1, maxLife: 1.8,
+      color: (Math.random() < 0.5) ? 0xe6faff : 0xbce4fb,   // (v41.31) a touch brighter than before
+      size: (0.7 + Math.random() * 1.5) * (window.__splashSz || 1),
+      grav: 55 + Math.random() * 95,                        
+      splash: true,
+    });
+  }
+  for (let i = 0; i < n2; i++) {
+    const ang = Math.random() * 6.2832, out = Math.random() * Math.random() * 78;
+    _swDropV.set(Math.cos(ang) * out + (vx || 0) * 0.10,
+                 26 + Math.random() * 104 * Math.min(1, k * 1.6),
+                 Math.sin(ang) * out + (vz || 0) * 0.10);
+    game.particles.push({
+      position: new THREE.Vector3(px + (Math.random() - 0.5) * 56, spawnY(), pz + (Math.random() - 0.5) * 56),
+      velocity: _swDropV.clone(),
+      life: 0.9 + Math.random() * 1.3, maxLife: 2.2,
+      color: (Math.random() < 0.55) ? 0xffffff : 0xeafcff,
+      size: (0.22 + Math.random() * 0.55) * (window.__splashSz || 1),
+      grav: 26 + Math.random() * 52,                        
+      splash: true,
+    });
+  }
+  _swFxN('dots');
+  if (n2) _swFxN('dotsFine');
+  return n + n2;
+}
+window.__blastTest = function (size, dy) {
+  const w = game && game._hubWater; if (!w) { console.log('[blastTest] no hub water'); return null; }
+  const WL = w.userData.WL;
+  let bx = player.position.x, bz = player.position.z;
+  try {
+    const f = new THREE.Vector3(0, 0, -1).applyEuler(player.euler);
+    const t = (Math.abs(f.y) > 1e-3) ? (WL - player.position.y) / f.y : -1;
+    if (t > 0 && t < 20000) { bx = player.position.x + f.x * t; bz = player.position.z + f.z * t; }
+    else { bx = player.position.x + f.x * 600; bz = player.position.z + f.z * 600; }
+  } catch (_) {}
+  const n = _swBlast(bx, WL + ((dy != null) ? +dy : 0), bz, (size != null) ? +size : 40);
+  const out = { at: [Math.round(bx), Math.round(bz)], dy: (dy != null) ? +dy : 0,
+                size: (size != null) ? +size : 40, fired: n,
+                water: window.__waterAt(bx, bz), pendingColumns: _SW_BLASTS.length };
+  try { console.log('[blastTest]', JSON.stringify(out)); } catch (_) {}
+  return out;
+};
+window.__groundY = function (x, z) {
+  try { return _stGroundYCarved(x, z, (game && game.sandwichTerrain) || null); } catch (e) { return NaN; }
+};
+window.__waterAt = function (x, z) {
+  const w = game && game._hubWater; if (!w) return null;
+  const WL = w.userData.WL, gy = window.__groundY(x, z);
+  return { WL: WL, groundY: Math.round(gy), depth: Math.round(WL - gy), water: (gy < WL) };
+};
+window.__waterFX = function (reset) {
+  const out = {};
+  for (const k in _SW_FXN) out[k] = _SW_FXN[k];
+  const w = game && game._hubWater;
+  if (w && typeof player !== 'undefined' && player) {
+    const fp = _swShipFootprint(), WL = w.userData.WL, above = player.position.y - WL;
+    const sp = player.velocity ? Math.hypot(player.velocity.x, player.velocity.z) : 0;
+    const st = _swRipple._swWet;
+    out._gate = { above: Math.round(above), sp: Math.round(sp),
+                  DRAFT: Math.round(fp.DRAFT), LEN: Math.round(fp.LEN), BEAM: Math.round(fp.BEAM),
+                  touching: (above < fp.DRAFT * 1.5 && above > -fp.DRAFT * 5),
+                  wet01: +Math.max(0, Math.min(1, (fp.DRAFT - above) / (2 * fp.DRAFT))).toFixed(2),
+                  wet: +((st && st.wet) || 0).toFixed(2), cav: !!(st && st.cav),
+                  submerged: !!game._swSubmerged,
+                  parts: game.particles ? game.particles.length : -1,
+                  room: Math.round(_swFxRoom()) };
+  }
+  const _we = window.__water || {};
+  if (_we.tickErrN) out._tickErr = { n: _we.tickErrN, msg: _we.tickErr };
+  if (reset) for (const k in _SW_FXN) delete _SW_FXN[k];
+  try { console.log('[waterFX]', JSON.stringify(out)); } catch (_) {}
+  return out;
+};
+window.__waterProbe = function () {
+  const R = _swRipple;
+  if (!R.gpu || !R.heightVar) return { err: 'no gpgpu water' };
+  const RES = _SW_RIPPLE_RES, buf = new Float32Array(RES * RES * 4);
+  const prev = renderer.getRenderTarget();
+  let rt = null;
+  try { rt = R.gpu.getCurrentRenderTarget ? R.gpu.getCurrentRenderTarget(R.heightVar) : R.gpu.getAlternateRenderTarget(R.heightVar); } catch (_) {}
+  if (!rt) return { err: 'no render target' };
+  try { renderer.readRenderTargetPixels(rt, 0, 0, RES, RES, buf); }
+  catch (e) { return { err: String(e && e.message || e) }; }
+  if (renderer.setRenderTarget) renderer.setRenderTarget(prev);
+  const W3 = window.__water || {};
+  let _dS = 180, _gS = 180;
+  try {
+    const _m = game._hubWaterDispMat;
+    if (_m && _m.uniforms && _m.uniforms.uDispScale) { _dS = _m.uniforms.uDispScale.value; _gS = _m.uniforms.uGain.value; }
+  } catch (_) {}
+  const relief = _dS, gain = _gS;
+  const kk = gain / Math.max(relief, 0.01);
+  let mn = 1e9, mx = -1e9, s2 = 0, live = 0, sat = 0;
+  for (let i = 0; i < RES * RES; i++) {
+    const h = buf[i * 4];
+    if (h < mn) mn = h;
+    if (h > mx) mx = h;
+    s2 += h * h;
+    const a = Math.abs(h);
+    if (a > 2e-4) live++;
+    if (a * kk > 2.0) sat++;   // tanh(2) = 0.964 : flat-topped for anything you can see
+  }
+  const dsp = function (h) { return +_swDispWorld(h).toFixed(2); };
+  let lo = 0, hi = 0, lr = -1;
+  try {
+    if (typeof player !== 'undefined' && player && game._hubWater) {
+      const cx = R.center.x, cz = R.center.y, B = R.bounds;
+      const rx = (player.position.x - cx) / B + 0.5, rz = (player.position.z - cz) / B + 0.5;
+      const rad = ((W3.probeRadius != null) ? +W3.probeRadius : 420) / B;   // world units -> uv
+      const i0 = Math.max(0, Math.floor((rx - rad) * RES)), i1 = Math.min(RES - 1, Math.ceil((rx + rad) * RES));
+      const j0 = Math.max(0, Math.floor((rz - rad) * RES)), j1 = Math.min(RES - 1, Math.ceil((rz + rad) * RES));
+      if (i1 >= i0 && j1 >= j0) {
+        lr = 0;
+        for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+          const h = buf[(j * RES + i) * 4];
+          if (h > hi) hi = h; if (h < lo) lo = h; lr++;
+        }
+      }
+    }
+  } catch (_) {}
+  const out = {
+    dispScale: relief, gain: gain, ceilingUnits: relief,
+    nearHull: { hCrest: +hi.toFixed(4), hTrough: +lo.toFixed(4),
+                crestUnits: dsp(hi), troughUnits: dsp(lo), texels: lr },
+    hMin: +mn.toFixed(4), hMax: +mx.toFixed(4), hRms: +Math.sqrt(s2 / (RES * RES)).toFixed(5),
+    dispMin: dsp(mn), dispMax: dsp(mx),
+    liveTexels: live, satTexels: sat, satPct: live ? +(100 * sat / live).toFixed(1) : 0,
+    seedScale: (W3.seedScale != null) ? W3.seedScale : 1.0,
+    impactPeak: (W3.impactPeak != null) ? W3.impactPeak : 0.135,
+    seedImpulse: (W3.seedImpulse != null) ? W3.seedImpulse : 0.25,
+    waveC2: (W3.waveC2 != null) ? W3.waveC2 : 0.26, crater: (W3.crater != null) ? W3.crater : 1,
+    skips: (window.__lssSkips | 0),
+  };
+  try { console.log('[waterProbe]', JSON.stringify(out)); } catch (_) {}
+  return out;
+};
+window.__obliqueTest = function (V, deg) {
+  V = (V != null) ? +V : 400; deg = (deg != null) ? +deg : 5;
+  const th = deg * Math.PI / 180, Vn = V * Math.sin(th), Vt = V * Math.cos(th);
+  const fp = (typeof _swShipFootprint === 'function') ? _swShipFootprint() : null;
+  const beta = _swDeadrise(fp);
+  const U = _swSprayRoot(Vn, Vt, beta), D = fp ? fp.BEAM : 72;
+  const I = function (k) { return Math.min(1, Math.max(0, (k - 28) / 192)); };
+  const W3o = window.__water || {};
+  const psi = _swStagPsi(Math.max((W3o.trim != null) ? +W3o.trim : 0.10, th), beta);
+  const c2 = Math.cos(2 * psi), s2 = Math.sin(2 * psi);
+  const wG = (W3o.waveG != null) ? +W3o.waveG : 1300, Frc = (W3o.waveFrc != null) ? +W3o.waveFrc : 0.5;
+  const L = fp ? fp.LEN : 90, Fr = V / Math.sqrt(Math.max(1, wG * L));
+  const out = { V: V, deg: deg, Vn: +Vn.toFixed(1), Vt: +Vt.toFixed(1),
+                beta: +(beta * 180 / Math.PI).toFixed(1), U: +U.toFixed(1),
+                oldI: +I(Vn * Math.sqrt(D / 72)).toFixed(3), newI: +I(U * Math.sqrt(D / 72)).toFixed(3),
+                psi: +(psi * 57.29578).toFixed(1),
+                sheet: (c2 > 0 ? 'aft-outboard (main spray)' : 'forward-outboard (whisker)'),
+                sheetSpeedX: +Math.hypot(1 - c2, s2).toFixed(2),   // world speed / ship speed: 0 at psi=0, 2 at psi=90deg
+                Fr: +Fr.toFixed(2),
+                wakeDeg: +((Fr <= Frc ? 0.33998 : 0.33998 * Frc / Fr) * 57.29578).toFixed(1) };
+  console.log('[oblique]', JSON.stringify(out)); return out;
+};
 window.__crestTest = function (amp) {
   const w = game._hubWater; if (!w) { console.log('[crestTest] no hub water — enter free-flight first'); return; }
   const px = player ? player.position.x : 0, pz = player ? player.position.z : 0;
@@ -16516,14 +17188,49 @@ window.__crestTest = function (amp) {
   _swCrestSpray(px, w.userData.WL, pz, amp != null ? amp : 0.45, 0, 0);
   console.log('[crestTest] fired at', px.toFixed(0), pz.toFixed(0), '| particles', before, '->', game.particles.length, '| __waterDisp=' + (window.__waterDisp || 0));
 };
-function _swWaterCrossSplash(x0, y0, z0, x1, y1, z1, radius, amp) {
+function _swWaterCrossSplash(x0, y0, z0, x1, y1, z1, radius, amp, speed) {
   const w = game._hubWater; if (!w) return;
   const WL = w.userData.WL;
+  try { _swSubTrail(x0, y0, z0, x1, y1, z1, radius, 'beam'); } catch (_) {}
   if ((y0 - WL) * (y1 - WL) > 0.0) return;   
   const dy = y1 - y0, t = (Math.abs(dy) < 1e-6) ? 0.5 : (WL - y0) / dy;
   const _hx = x0 + (x1 - x0) * t, _hz = z0 + (z1 - z0) * t;
-  _swRippleSeed(_hx, _hz, radius, amp * ((window.__water && window.__water.impactPeak) || 50));   
-  _swSpawnSplash(_hx, WL, _hz, 4, 0.6 + Math.min(1.2, amp * 4.0));   
+  const W3 = window.__water || {};
+  const _peak = (W3.impactPeak != null) ? W3.impactPeak : 0.135;   // (v41.03) recalibrated - see _swRippleSeed
+  let _dx = x1 - x0, _dvy = y1 - y0, _dz = z1 - z0;
+  const _dl = Math.hypot(_dx, _dvy, _dz) || 1; _dx /= _dl; _dvy /= _dl; _dz /= _dl;
+  const _sinT = Math.min(1, Math.abs(_dvy));   
+  const _nG = (W3.oblique === 0) ? 1 : (_sinT > 0.50 ? 1 : (_sinT > 0.28 ? 2 : (_sinT > 0.12 ? 3 : 4)));
+  const _step = radius * (0.85 + 1.7 * (1 - _sinT));
+  const _exiting = _dvy > 0;
+  for (let i = 0; i < _nG; i++) {
+    const _a = amp * _peak * (1 - 0.5 * (i / _nG)) * (1.35 / _nG) * (_exiting ? -0.75 : 1);
+    _swRippleSeed(_hx + _dx * _step * i, _hz + _dz * _step * i, radius * (1 - 0.16 * i), -_a);
+    if (i === 0) _swRippleSeed(_hx, _hz, radius * 2.3, _a * 0.55);
+  }
+  const _colA = amp * _peak;
+  const _vth = (W3.vent != null) ? +W3.vent : 0.009;
+  if (!_exiting && _colA > _vth && typeof _SW_BLASTS !== 'undefined' && _SW_BLASTS.length < 6) {
+    _swFxN('vent');
+    _SW_BLASTS.push({ x: _hx, z: _hz, t: 0, R: radius * 1.5,
+                      k: Math.max(0.10, Math.min(0.9, (_colA - _vth * 0.7) * 40)),
+                      delay: 0.10 + 0.16 * Math.min(1, radius / 160) });
+  }
+  try { _swCrestDots(_hx, WL, _hz, 0.30 + 1.5 * _colA, _dx * 40, _dz * 40, radius * 0.35); } catch (_) {}
+  const _now = performance.now();
+  if (_now - _swXB.t > 250) { _swXB.t = _now; _swXB.n = 0; }
+  const _wxCap = (W3.wxCap != null) ? +W3.wxCap : 90;
+  const _bScale = Math.max(0.30, 1 - _swXB.n / Math.max(1, _wxCap));
+  const _sp = (speed != null && speed > 0) ? Math.min(4000, speed) : (160 + 1100 * Math.min(1, amp * 4));
+  const _D = Math.max(22, Math.min(58, radius * 0.5));
+  _swFxN('weapon');
+  if (_exiting) {
+    _swXB.n += _swExitPlume(_hx, WL, _hz, _dx, _dvy, _dz, _sp, radius,
+                            (0.25 + 0.75 * Math.min(1, amp * 6)) * _bScale) || 0;
+  } else {
+    _swXB.n += _swSpawnSplashV(_hx, WL, _hz, { x: _dx * _sp, y: -Math.abs(_dvy) * _sp, z: _dz * _sp },
+                               _D, (0.22 + 0.50 * Math.min(1, amp * 5)) * _bScale) || 0;
+  }
 }
 function _swRippleBakeMaskRow(data, cx, cz, j, RES, B, T, WL, near) {
   let k = j * RES * 4;
@@ -16663,14 +17370,20 @@ function _swPeerFootprint(np) {
   np._swFP = { _k: c, LEN: LEN, BEAM: BEAM, DRAFT: DRAFT, half: LEN * 0.5, heft: heft };
   return np._swFP;
 }
-function _swImpact(px, pz, sign, fp, mass, vel, WL) {
+function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
   const vy = vel ? Math.abs(vel.y) : 0;
   const vh = vel ? Math.hypot(vel.x, vel.z) : 0;
   const p = Math.min(2.6, vy / 90);
   const k = (sign > 0) ? 1.0 : 0.62;                                  
   const baseR = (sign > 0 ? 1.0 : 0.85) * fp.BEAM * 1.6;             
-  const baseA = (0.10 + 0.10 * p) * (fp.DRAFT / 13.5) * fp.heft * mass * k * ((window.__water && window.__water.wake) || 1);
-  _swRippleSeed(px, pz, baseR + 50 * p, baseA * ((window.__water && window.__water.impactPeak) || 50));   
+  const baseA = (0.10 + 0.10 * p) * (fp.DRAFT / 13.5) * fp.heft * mass * k * ((window.__water && window.__water.wake) || 1) * ((ampK != null) ? ampK : 1);
+  const _cw = window.__water || {};
+  const _peakI = (_cw.impactPeak != null) ? +_cw.impactPeak : 0.135;
+  const _sd = ((_cw.crater != null) ? +_cw.crater : 1) ? ((sign > 0) ? -1 : 1) : 1;
+  _swFxN(sign > 0 ? 'entry' : 'exit');
+  const _cR = baseR + 50 * p;
+  _swRippleSeed(px, pz, _cR, _sd * baseA * _peakI);   
+  if (_sd < 0 || ((_cw.crater != null) ? +_cw.crater : 1)) _swRippleSeed(px, pz, _cR * 2.1, -_sd * baseA * _peakI * 0.45);
   if (typeof window !== 'undefined' && window.__waterDisp && !(window.__water && window.__water.crestBreak)) _swCrestSpray(px, WL, pz, baseA, vel ? vel.x : 0, vel ? vel.z : 0);   
   if (vh > 60) {                                                      
     const ih = 1 / vh, hx = vel.x * ih, hz = vel.z * ih;
@@ -16678,7 +17391,18 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL) {
     _swRippleSeed(px + hx * lead, pz + hz * lead, baseR * 0.75, baseA * 0.6);                       
     _swRippleSeed(px - hx * fp.half * 0.6, pz - hz * fp.half * 0.6, baseR * 0.7, -baseA * 0.4);     
   }
-  _swSpawnSplashV(px, WL, pz, { x: vel ? vel.x : 0, y: -vy, z: vel ? vel.z : 0 }, fp.BEAM, sign > 0 ? 1.0 : 0.7);
+  _swSpawnSplashV(px, WL, pz, { x: vel ? vel.x : 0, y: -vy, z: vel ? vel.z : 0 }, fp.BEAM, sign > 0 ? 1.0 : 0.7, _swDeadrise(fp));
+  if (sign > 0 && actor) {
+    const _st = _swWetState(actor);
+    const _jk = Math.min(1, Math.max(0, (vy - 40) / 420));
+    if (_jk > 0.02) _st.cav = { x: px, z: pz, t: 0, v: vy, k: _jk };
+  }
+  if (sign < 0) {
+    const _shed = (window.__water && window.__water.shed != null) ? +window.__water.shed : 1;
+    if (_shed > 0) _swFxN('exitSheet');
+    if (_shed > 0) _swShedDrops(px, WL + fp.DRAFT * 0.6, pz, vel, fp,
+                                Math.min(26, Math.round((8 + 16 * fp.heft) * _shed)), 0.92, 1.0, 1.15, 1.15);
+  }
 }
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
@@ -16690,6 +17414,7 @@ function _swRippleTick(dt) {
       const _u = R.heightVar.material.uniforms;
       if (_W3.waveC2 != null && _u.uWaveC2) _u.uWaveC2.value = _W3.waveC2;
       if (_W3.visc != null && _u.viscosity) _u.viscosity.value = _W3.visc;
+      if (_W3.seedImpulse != null && _u.uSeedImpulse) _u.uSeedImpulse.value = _W3.seedImpulse;   // (v41.02)
     }
   } catch (_) {}   
   
@@ -16754,14 +17479,58 @@ function _swRippleTick(dt) {
     if (W3.mass === undefined) W3.mass = 1.0;        
     if (W3.wake === undefined) W3.wake = 1.6;        
     if (W3.spray === undefined) W3.spray = 1.0;      
-    if (W3.kelvin === undefined) W3.kelvin = 0.34;   
+    if (W3.kelvin === undefined) W3.kelvin = 1.0;    
     if (W3.cut === undefined) W3.cut = 1.0;          
+    if (W3.oblique === undefined) W3.oblique = 1.0;   // spray-root correction (0 = the old vertical-only gate)
+    if (W3.plane === undefined) W3.plane = 1.0;       // continuous planing whisker spray while skimming
+    if (W3.entrain === undefined) W3.entrain = 1.0;   // water dragged under with a submerging hull
+    if (W3.shed === undefined) W3.shed = 1.0;         // water carried out of the lake and shed as drops
+    if (W3.wxCap === undefined) W3.wxCap = 90;        // (v41.26) 34 -> 90; a soft ceiling now, not a cliff
+    if (W3.blast === undefined) W3.blast = 1.0;       // (v41.19) explosion crater / dome / vented column
+    if (W3.wpn === undefined) W3.wpn = 1.0;           // (v41.21) weapon-crossing amplitude, scaled by yield
+    if (W3.wxSeedCap === undefined) W3.wxSeedCap = 60;   // (v41.26) 30 -> 60, and over it the seed shrinks rather than vanishing
+    if (W3.vent === undefined) W3.vent = 0.009;          // (v41.23) cavity depth at which a hit vents droplets
+    if (W3.wpnWake === undefined) W3.wpnWake = 1.0;      // (v41.27) trail left by a projectile skimming the surface
+    if (W3.chargeYield === undefined) W3.chargeYield = 3000;   // (v41.29) the Blaster charge shot's water yield
+    if (W3.seedScale === undefined) W3.seedScale = 1.0;      // global trim; 1 = no-op (see _swRippleSeed)
+    if (W3.impactPeak === undefined) W3.impactPeak = 0.135;  // was 50. MEASURED: puts a hard entry at 8.2 of the 9 units the display can show
+    if (W3.seedImpulse === undefined) W3.seedImpulse = 0.25; // momentum, not a pluck (0.65 was sticky - see the shader)
+    if (W3.crater === undefined) W3.crater = 1;             // entry digs down instead of jumping up
+    if (W3.trim === undefined) W3.trim = 0.10;         // nominal planing trim (rad, ~5.7deg) for the stagnation line
+    if (W3.sheetBend === undefined) W3.sheetBend = 1.0;   // curvature of the film across the spray root
+    if (W3.sheetWarp === undefined) W3.sheetWarp = 1.0;   // the flapping instability
+    if (W3.sheetFrac === undefined) W3.sheetFrac = 1.0;   // ligament -> droplet breakup cascade
+    if (W3.rooster === undefined) W3.rooster = 8.0;       // transom rooster-tail HEIGHT (the 'higher' dial)
+    if (W3.dots === undefined) W3.dots = 1.4;             // bright specks off wave/wake peaks (coarse layer)
+    if (W3.dotsFine === undefined) W3.dotsFine = 1.7;     // (v41.31) the finer, brighter second layer, as a multiple of the coarse count
+    if (W3.flow === undefined) W3.flow = 1.0;             // dipole (potential flow past the body)
+    if (W3.flowWake === undefined) W3.flowWake = 1.0;     // viscous entrainment behind it
+    if (W3.flowSwirl === undefined) W3.flowSwirl = 1.0;   // shed vorticity
+    if (W3.bubbleNose === undefined) W3.bubbleNose = 0.8; // (v41.34) share of recycled bubbles born at the nose
+    if (W3.bubbleSpeed === undefined) W3.bubbleSpeed = 140;   // (v41.34) speed at which the cloud is fully present
+    if (W3.subTrail === undefined) W3.subTrail = 1.0;         // (v41.36) cavitation trail behind underwater shots
+    if (W3.flowProj === undefined) W3.flowProj = 3;           // (v41.38) how many projectiles also push the bubbles
+    if (W3.waveG === undefined) W3.waveG = 1300;       // effective g for the wake Froude number (game units)
+    if (W3.waveFrc === undefined) W3.waveFrc = 0.5;    // Rabaud-Moisy Kelvin -> Mach crossover
+    if (W3.jet === undefined) W3.jet = 1.0;            // Worthington jet after cavity pinch-off
+    if (W3.jetDelay === undefined) W3.jetDelay = 0.30; // pinch-off delay, scaled by sqrt(beam)
+    if (W3.skip === undefined) W3.skip = 1.0;          // ricochet off a shallow fast entry (0 = never skip)
+    if (W3.skipAngle === undefined) W3.skipAngle = 20; // the magic angle, degrees
+    if (W3.skipSpeed === undefined) W3.skipSpeed = 190;
     
+    if (W3.disp === undefined) W3.disp = 180;      // soft-clip ceiling, world units
+    if (W3.gain === undefined) W3.gain = 100;      // slope as h -> 0 : this is CALM water
+    if (W3.crestQ === undefined) W3.crestQ = 11;   // crest-only expander : this is CREST HEIGHT
+    if (W3.foamSlope === undefined) W3.foamSlope = 0.50;    // (v41.18) slope at which a crest whitecaps
+    if (W3.steepFoam === undefined) W3.steepFoam = 0.55;    // (v41.18) how white a steep crest goes
+    if (W3.normK === undefined) W3.normK = 1.0;             // (v41.17) crest normal strength
+    if (W3.spdTail === undefined) W3.spdTail = 0.30;   // wake response above its speed knee
     if (W3.crestBreak === undefined) W3.crestBreak = 1;      
     if (W3.breakPeak === undefined) W3.breakPeak = 0.22;     
     if (W3.breakSlope === undefined) W3.breakSlope = 0.06;   
     if (W3.breakRate === undefined) W3.breakRate = 0.5;      
     if (W3.breakBudget === undefined) W3.breakBudget = 40;
+    if (W3.breakPool === undefined) W3.breakPool = 0.40;
     if (W3.breakEvery === undefined) W3.breakEvery = 4;
     if (W3.jetLean === undefined) W3.jetLean = 1.0;          
     if (W3.crestDebug === undefined) W3.crestDebug = 0;      
@@ -16778,10 +17547,16 @@ function _swRippleTick(dt) {
       const lwx = R.wakeX, moved = (lwx === undefined) ? 1e9 : ((px - lwx) * (px - lwx) + (pz - R.wakeZ) * (pz - R.wakeZ));
       if (moved > spacing * spacing && (touching || sp > 35)) {
         const prox = 1.0 - Math.min(1, Math.abs(above) / 200);
-        const amp = 0.16 * (fp.DRAFT / 13.5) * fp.heft * mass * (touching ? 1.0 : 0.35) * Math.min(1, sp / 420) * (0.45 + 0.55 * prox) * W3.wake;
+        const amp = 0.16 * (fp.DRAFT / 13.5) * fp.heft * mass * (touching ? 1.0 : 0.35) * _swSpdCurve(sp, 420, (W3.spdTail != null) ? +W3.spdTail : 0.30) * (0.45 + 0.55 * prox) * W3.wake;
         const lpx = -hz, lpz = hx;                   
-        const shoulder = fp.half * 1.1, off = shoulder * W3.kelvin + fp.BEAM * 0.5;
-        const spd = Math.min(1, sp / 350);   
+        const _wG = (W3.waveG != null) ? +W3.waveG : 1300;
+        const _Frc = (W3.waveFrc != null) ? +W3.waveFrc : 0.5;
+        const _Fr = sp / Math.sqrt(Math.max(1, _wG * fp.LEN));
+        const _alphaK = 0.33998;   // 19.47° in radians - Kelvin's half-angle
+        const _alpha = (_Fr <= _Frc) ? _alphaK : _alphaK * (_Frc / _Fr);
+        const shoulder = fp.half * 1.1 + Math.min(sp * 0.12, fp.LEN * 1.1);
+        const off = shoulder * Math.tan(_alpha) * W3.kelvin + fp.BEAM * 0.5;
+        const spd = _swSpdCurve(sp, 350, (W3.spdTail != null) ? +W3.spdTail : 0.30);   
         _swRippleSeed(px + hx * fp.half * 0.8, pz + hz * fp.half * 0.8, Math.max(20, fp.BEAM * 0.9), amp * 0.6);   
         
         
@@ -16793,21 +17568,74 @@ function _swRippleTick(dt) {
         const sx = px - hx * shoulder, sz = pz - hz * shoulder;
         _swRippleSeed(sx + lpx * off, sz + lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
         _swRippleSeed(sx - lpx * off, sz - lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
-        if (touching && sp > 90) _swSpawnSplashV(px - hx * fp.half, WL, pz - hz * fp.half, { x: player.velocity.x, y: -sp * 0.16, z: player.velocity.z }, fp.BEAM, 0.5);   
+        _swFxN('wake');
+        R.dotStep = (R.dotStep | 0) + 1;
+        if ((R.dotStep & 1) === 0) {
+          const _dk = amp * (0.45 + 0.95 * spd) * 3.4;
+          const _ha = amp * (0.45 + 0.95 * spd) * 2 * ((W3.seedScale != null) ? +W3.seedScale : 1);
+          const _cY = _swDispWorld(_ha);   // (v41.15) the shared mirror
+          _swCrestDots(px - hx * crestD, WL, pz - hz * crestD, _dk, player.velocity.x, player.velocity.z, _cY);
+          _swCrestDots(sx + lpx * off, WL, sz + lpz * off, _dk * 0.55, player.velocity.x, player.velocity.z, _cY * 0.6);
+          _swCrestDots(sx - lpx * off, WL, sz - lpz * off, _dk * 0.55, player.velocity.x, player.velocity.z, _cY * 0.6);
+        }
         R.wakeX = px; R.wakeZ = pz;
       }
     }
+    {
+      const _pl = (W3.plane != null) ? +W3.plane : 1;
+      const _wet01 = Math.max(0, Math.min(1, (fp.DRAFT - above) / (2 * fp.DRAFT)));
+      if (_pl > 0 && _wet01 > 0.02 && sp > 55 && !game._swSubmerged) {
+        R.planT = (R.planT || 0) + dt;
+        const _rate = (3 + 11 * _wet01 * Math.min(1, sp / 300)) * _pl;
+        if (R.planT > 1 / Math.max(0.5, _rate)) {
+          R.planT = 0;
+          if (_swFxRoom() > 12) {   // (v41.01) the same 62%-of-pool headroom every other water FX uses
+            _swFxN('plane');
+            _swSpawnSplashV(px + hx * fp.half * 0.55, WL, pz + hz * fp.half * 0.55,
+                            { x: player.velocity.x, y: -Math.max(14, sp * 0.10 * _wet01), z: player.velocity.z },
+                            fp.BEAM, 0.55 + 0.55 * _wet01, _swDeadrise(fp));
+          }
+        }
+      } else if (R.planT) R.planT = 0;
+      if (_pl > 0 && _wet01 > 0.04 && sp > 90 && !game._swSubmerged) {
+        R.roosT = (R.roosT || 0) + dt;
+        const _rr = (7 + 15 * _wet01 * Math.min(1, sp / 320)) * _pl;
+        if (R.roosT > 1 / Math.max(0.5, _rr)) {
+          R.roosT = 0;
+          if (_swFxRoom() > 10) _swRooster(px - hx * fp.half * 1.15, WL, pz - hz * fp.half * 1.15, player.velocity, fp, _wet01);
+        }
+      } else if (R.roosT) R.roosT = 0;
+    }
     if (touching && sp <= 8) {
       R.bobT = (R.bobT || 0) + dt;
-      if (R.bobT > 0.33) { R.bobT = 0; _swRippleSeed(px, pz, Math.max(60, (fp.LEN + fp.BEAM) * 0.55), 0.018 * (fp.DRAFT / 13.5) * fp.heft * mass); }
+      if (R.bobT > 0.33) { R.bobT = 0; _swFxN('rest'); _swRippleSeed(px, pz, Math.max(60, (fp.LEN + fp.BEAM) * 0.55), 0.018 * (fp.DRAFT / 13.5) * fp.heft * mass); }
     }
     const _wantHiss = touching && sp > 20;
     if (_wantHiss && !game._dragHiss) { try { game._dragHiss = _swStartDragHiss(); } catch (_) {} }
     else if (!_wantHiss && game._dragHiss) { try { _swStopDragHiss(game._dragHiss); } catch (_) {} game._dragHiss = null; }
     if (game._dragHiss && game._dragHiss.set) { try { game._dragHiss.set(sp); } catch (_) {} }
-    if (above < 0 && prevAbove >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
-    else if (above > 0 && prevAbove <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
+    if (above < 0 && prevAbove >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
+    else if (above > 0 && prevAbove <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
+    try { const _wx = (window.__water = window.__water || {});
+      _wx.xAbove = Math.round(above); _wx.xPrev = Math.round(prevAbove);
+      if (above < 0 && prevAbove >= 0) _wx.xEnter = (_wx.xEnter | 0) + 1;
+      else if (above > 0 && prevAbove <= 0) _wx.xExit = (_wx.xExit | 0) + 1; } catch (_) {}
+    if (above < 0 && prevAbove >= 0 && player.velocity) {
+      const _sk = (W3.skip != null) ? +W3.skip : 1;
+      const _vyIn = -player.velocity.y;
+      const _inc = Math.atan2(Math.max(0, _vyIn), Math.max(1e-4, sp)) * 57.29578;
+      const _skA = (W3.skipAngle != null) ? +W3.skipAngle : 20;
+      const _skV = (W3.skipSpeed != null) ? +W3.skipSpeed : 190;
+      if (_sk > 0 && _vyIn > 0 && _inc < _skA && sp > _skV) {
+        player.velocity.y = _vyIn * (0.34 + 0.30 * (1 - _inc / _skA)) * _sk;
+        _swFxN('skip');
+        try { window.__lssSkips = (window.__lssSkips | 0) + 1; } catch (_) {}
+      }
+    }
     R.prevAbove = above;
+    try { _swWetTick(R, px, player.position.y, pz, player.velocity, fp, WL, dt); } catch (_) {}
+    try { _swDripWTick(dt, WL); } catch (_) {}
+    try { _swBlastTick(dt, WL); } catch (_) {}   // (v41.19) deferred blast columns
   }
   R.acc += dt;
   if (R.acc >= (((typeof isXRPresenting === 'function') && isXRPresenting()) ? R.step * 2.0 : R.step)) {   
@@ -16899,6 +17727,8 @@ function _swRippleTick(dt) {
           const bSlope = (_Wc.breakSlope != null) ? _Wc.breakSlope : 0.06;
           const bRate = (_Wc.breakRate != null) ? _Wc.breakRate : 0.5;
           const budget = Math.max(1, (_Wc.breakBudget | 0) || 8);
+          const _crPool = ((typeof _particleCap === 'function') ? _particleCap() : 500) *
+                          ((_Wc.breakPool != null) ? +_Wc.breakPool : 0.40);
           const jet = (_Wc.jetLean != null) ? _Wc.jetLean : 1.0;
           const cx = R.center.x, cz = R.center.y, invR = 1 / RES;
           const svx = player.velocity ? player.velocity.x : 0, svz = player.velocity ? player.velocity.z : 0;
@@ -16906,7 +17736,7 @@ function _swRippleTick(dt) {
           let emitted = 0, nBreak = 0, maxV = 0;
           R._crScan = (((R._crScan || 0) + 7) % (RES - 2));                    
           const _scanT0 = performance.now();
-          for (let jj = 0; jj < RES - 2 && emitted < budget; jj++) {
+          for (let jj = 0; jj < RES - 2 && emitted < budget && game.particles.length < _crPool; jj++) {
             if ((jj & 7) === 7 && performance.now() - _scanT0 > 1.5) break;   // (v39.49) the scan + sprays stay under ~1.5 ms a frame
             const j = 1 + ((jj + R._crScan) % (RES - 2));
             const rvY = (j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
@@ -16926,10 +17756,12 @@ function _swRippleTick(dt) {
               const exceed = Math.min(1, (vD - bPeak) / Math.max(0.001, 1 - bPeak)) * Math.min(1, slope / Math.max(0.001, bSlope * 2));
               if (Math.random() > bRate * (0.3 + 0.7 * exceed)) continue;      
               const wx = cx + (rvX - 0.5) * B, wz = cz + (rvY - 0.5) * B;
-              const dispWorld = dispS * vD;                                    
+              const dispWorld = _swDispWorld(h) * wf;   // (v41.15) the shared mirror, from the RAW texel
               const ejx = -gx * jet * 2600 + svx * 0.10, ejz = -gz * jet * 2600 + svz * 0.10;   
+              _swFxN('crest');
               _swCrestSpray(wx, WLc, wz, vD * 0.26 + 0.04, ejx, ejz, dispWorld);   
-              if (++emitted >= budget) break;
+              if ((emitted % 3) === 0) _swCrestDots(wx, WLc, wz, vD * 1.6, ejx * 0.2, ejz * 0.2, dispWorld);
+              if (++emitted >= budget || game.particles.length >= _crPool) break;   // (v41.01) re-read the pool per burst
             }
           }
           if (_Wc.crestDebug) {
@@ -16963,6 +17795,10 @@ function _swRippleTick(dt) {
       const W2 = window.__water || {};
       if (W2.disp !== undefined) du.uDispScale.value = W2.disp;
       if (W2.gain !== undefined) du.uGain.value = W2.gain;
+      if (W2.crestQ !== undefined && du.uCrestQ) du.uCrestQ.value = W2.crestQ;   // (v41.15)
+      if (W2.foamSlope !== undefined && du.uFoamSlope) du.uFoamSlope.value = W2.foamSlope;   // (v41.17)
+      if (W2.steepFoam !== undefined && du.uSteepFoam) du.uSteepFoam.value = W2.steepFoam;   // (v41.18)
+      if (W2.normK !== undefined && du.uNormK) du.uNormK.value = W2.normK;                   // (v41.17)
       if (W2.sprayBreak !== undefined) du.uSprayBreak.value = W2.sprayBreak;   
       if (W2.mist !== undefined) du.uMist.value = W2.mist;                     
       if (W2.peakLo !== undefined) du.uPeakLo.value = W2.peakLo;               
@@ -18000,7 +18836,9 @@ function _swBuildHubWaterDispGet(WL) {
       THREE.UniformsLib.fog,
       { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: 4000 },
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() },
-        uDispScale: { value: 180.0 }, uGain: { value: 180.0 }, color: { value: new THREE.Color(0x16465c) },
+        uDispScale: { value: 180.0 }, uGain: { value: 100.0 }, uCrestQ: { value: 11.0 },
+        uFoamSlope: { value: 0.50 }, uSteepFoam: { value: 0.55 }, uNormK: { value: 1.0 },
+        color: { value: new THREE.Color(0x16465c) },
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 },
         uSprayBreak: { value: 1.4 }, uMist: { value: 0.4 }, uPeakLo: { value: 0.32 }, uSprayFreq: { value: 0.05 },
         tDiffuse: { value: null }, uReflMatrix: { value: new THREE.Matrix4() }, uReflMix: { value: 1.0 }, uReflLive: { value: 0.0 }, uReflPerturb: { value: 0.6 }, uReflBright: { value: 1.6 },
@@ -18014,7 +18852,8 @@ function _swBuildHubWaterDispGet(WL) {
         uRefract: { value: 0.0 }, uRefractK: { value: 0.045 } }   
     ]),
     vertexShader: [
-      'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform mat4 uReflMatrix;',
+      'uniform sampler2D uRippleTex; uniform vec2 uRippleCenter; uniform float uRippleBounds; uniform float uDispScale; uniform float uGain; uniform float uCrestQ; uniform float uNormK; uniform mat4 uReflMatrix;',
+      'float _swShape(float hh){ float sq = hh * (1.0 + uCrestQ * abs(hh)); float x = sq * uGain / max(uDispScale, 0.01); return uDispScale * (x / (1.0 + abs(x))); }',
       'varying vec3 vWP; varying vec3 vN; varying float vDisp; varying vec4 vReflUv; varying vec2 vRipUv; varying float vWinFade;',
       '#include <fog_pars_vertex>',
       'void main(){',
@@ -18026,14 +18865,15 @@ function _swBuildHubWaterDispGet(WL) {
       '  float winFade = smoothstep(0.0, 0.12, edge) * inWin;',                       
       '  vRipUv = rUV; vWinFade = winFade;',                                          
       '  float h = texture2D(uRippleTex, clamp(rUV,0.001,0.999)).x;',
-      '  float _hx = h * uGain / max(uDispScale, 0.01); float disp = uDispScale * (_hx / (1.0 + abs(_hx))) * winFade;', 
-      '  vDisp = (_hx / (1.0 + abs(_hx))) * winFade;',   
+      '  float disp = _swShape(h) * winFade;',
+      '  vDisp = (h / (1.0 + abs(h))) * winFade;',
       '  float dU = 2.0 / uRippleBounds;',
       '  float hL = texture2D(uRippleTex, clamp(rUV - vec2(dU,0.0),0.001,0.999)).x;',
       '  float hR = texture2D(uRippleTex, clamp(rUV + vec2(dU,0.0),0.001,0.999)).x;',
       '  float hD = texture2D(uRippleTex, clamp(rUV - vec2(0.0,dU),0.001,0.999)).x;',
       '  float hU = texture2D(uRippleTex, clamp(rUV + vec2(0.0,dU),0.001,0.999)).x;',
-      '  vN = normalize(vec3((hL-hR)*uGain*winFade, 2.0*uRippleBounds*dU, (hD-hU)*uGain*winFade));',   
+      '  float dL = _swShape(hL), dR = _swShape(hR), dDn = _swShape(hD), dUp = _swShape(hU);',
+      '  vN = normalize(vec3((dL-dR)*winFade*uNormK, 2.0*uRippleBounds*dU, (dDn-dUp)*winFade*uNormK));',
       '  vec3 transformed = position; transformed.z += disp;',                        
       '  vec4 mvPosition = modelViewMatrix * vec4(transformed,1.0);',
       '  vWP = (modelMatrix * vec4(transformed,1.0)).xyz;',
@@ -18042,7 +18882,7 @@ function _swBuildHubWaterDispGet(WL) {
       '}',
     ].join('\n'),
     fragmentShader: [
-      'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq;',
+      'uniform vec3 uCam; uniform vec3 color; uniform float uTime; uniform float uSprayBreak; uniform float uMist; uniform float uPeakLo; uniform float uSprayFreq; uniform float uFoamSlope; uniform float uSteepFoam;',
       'uniform float uWHorizStr; uniform float uWHorizA; uniform float uWHorizB;',
       'uniform sampler2D tDiffuse; uniform float uReflMix; uniform float uReflLive; uniform float uReflPerturb; uniform float uReflBright; uniform float uGrazeClear; uniform float uGrazeAlpha; uniform float uReflFloor; uniform float uSkyDark; uniform float uReflHot; uniform float uFoamLod; uniform float uReflFar;',   
       'uniform sampler2D uMaskTex; uniform float uShoreSoft; uniform float uShoreFade; uniform float uShoreFoam;',   
@@ -18093,7 +18933,9 @@ function _swBuildHubWaterDispGet(WL) {
       
       
       
-      '  float peak = smoothstep(uPeakLo, 1.0, vDisp);',                                  
+      '  float peak = smoothstep(uPeakLo, 1.0, vDisp);',
+      '  float steepF = smoothstep(uFoamSlope, uFoamSlope + 0.30, 1.0 - N.y);',
+      '  peak = max(peak, steepF * uSteepFoam);',
       '  float eW = max(exp(1.2) - log(1.0 + (1.0 - min(peak*4.0,1.0))*2.5) - 1.0, 0.0);', 
       '  float eM = max(exp(peak*7.0) - log(1.0 + (1.0 - min(peak*7.0,1.0))*5.0) - 1.0, 0.0);', 
       '  float mistW = eM / (eW + eM + 1e-4);',                                           
@@ -18144,6 +18986,7 @@ function _swBuildHubWaterDispGet(WL) {
   };
   mesh.onAfterRender = function () { try { const u = mesh.material.uniforms; if (u && u.uRefract) u.uRefract.value = 0.0; } catch (_) {} };
   _hubWaterDisp = mesh;
+  try { game._hubWaterDispMat = mat; } catch (_) {}
   return mesh;
 }
 function _swBuildHubWater(T) {
@@ -18917,7 +19760,9 @@ function _swSubmergedAudio(on) {
     f.setTargetAtTime(on ? cut : 3500, t, on ? 0.35 : 0.2);
   } catch (_) {}
 }
-const _swBub = { pts: null, n: 240, pos: null, spd: null, ph: null, box: 900, geo: null, mat: null, tex: null };
+const _swNoseV = new THREE.Vector3();   // (v41.34) camera forward, reused each tick
+const _SW_FSRC = new Float32Array(11 * 4);
+const _swBub = { pts: null, n: 240, pos: null, spd: null, ph: null, sz: null, box: 520, geo: null, mat: null, tex: null };
 function _swBubblesEnsure() {
   const B = _swBub; if (B.pts) return B.pts;
   try {
@@ -18929,7 +19774,13 @@ function _swBubblesEnsure() {
     r.addColorStop(0, 'rgba(215,242,255,0.95)'); r.addColorStop(0.45, 'rgba(160,212,240,0.35)'); r.addColorStop(1, 'rgba(120,180,220,0)');
     g.fillStyle = r; g.fillRect(0, 0, 32, 32);
     B.tex = new THREE.CanvasTexture(c);
-    B.mat = new THREE.PointsMaterial({ size: 9, map: B.tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.55, sizeAttenuation: true, fog: true, color: 0xbfe6ff });
+    B.sz = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const u = Math.random(); B.sz[i] = 0.32 + u * u * 1.18; }
+    B.geo.setAttribute('aSize', new THREE.BufferAttribute(B.sz, 1));
+    B.mat = new THREE.PointsMaterial({ size: 3.4, map: B.tex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.55, sizeAttenuation: true, fog: true, color: 0xbfe6ff });
+    B.mat.onBeforeCompile = function (sh) {
+      sh.vertexShader = 'attribute float aSize;\n' + sh.vertexShader.replace('gl_PointSize = size;', 'gl_PointSize = size * aSize;');
+    };
     B.mat.name = 'bubbles';
     B.pts = new THREE.Points(B.geo, B.mat); B.pts.frustumCulled = false; B.pts.renderOrder = 5; B.pts.visible = false;
     try { if (typeof _lssRetainMat === 'function') _lssRetainMat(B.mat); } catch (_) {}
@@ -18946,20 +19797,135 @@ function _swBubblesTick(dt, WL) {
   const B = _swBub; const pts = _swBubblesEnsure(); if (!pts) return;
   const K = (typeof window !== 'undefined' && window.__underwater) ? window.__underwater : null;
   if (K && K.bubbles === false) { pts.visible = false; return; }
-  const c = camera.position, half = B.box * 0.5, t = performance.now() * 0.001, p = B.pos;
+  const c = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
+  const half = B.box * 0.5, t = performance.now() * 0.001, p = B.pos;
   if (!pts.visible) { _swBubblesSeed(c); pts.visible = true; }
+  const W3f = window.__water || {};
+  const flowK = (W3f.flow != null) ? +W3f.flow : 1;
+  const F = _SW_FSRC;
+  let nSrc = 0;
+  if (flowK > 0 && typeof player !== 'undefined' && player && player.position) {
+    let fpB = 72;
+    try { const _f = _swShipFootprint(); if (_f && _f.BEAM) fpB = _f.BEAM; } catch (_) {}
+    const _u = player.velocity;
+    const _sp = _u ? Math.hypot(_u.x, _u.y, _u.z) : 0;
+    if (_sp > 4) {
+      const o = 0;
+      F[o] = player.position.x; F[o + 1] = player.position.y; F[o + 2] = player.position.z;
+      F[o + 3] = _u.x; F[o + 4] = _u.y; F[o + 5] = _u.z;
+      F[o + 6] = fpB * 0.70;              // the effective body radius the flow sees
+      F[o + 7] = _sp;
+      F[o + 8] = _u.x / _sp; F[o + 9] = _u.y / _sp; F[o + 10] = _u.z / _sp;
+      nSrc = 1;
+    }
+  }
+  if (flowK > 0 && game.projectiles && game.projectiles.length) {
+    const wl0 = WL, cx0 = c.x, cy0 = c.y, cz0 = c.z, reach = B.box * 0.75;
+    const maxP = Math.max(0, Math.min(3, (W3f.flowProj != null) ? (+W3f.flowProj | 0) : 3));
+    for (let pi = 0; pi < game.projectiles.length && nSrc < 1 + maxP; pi++) {
+      const pr = game.projectiles[pi];
+      if (!pr || !pr.position || !pr.velocity) continue;
+      if (pr.position.y > wl0) continue;                       // only what is actually in the water
+      const ddx = pr.position.x - cx0, ddy = pr.position.y - cy0, ddz = pr.position.z - cz0;
+      if (ddx * ddx + ddy * ddy + ddz * ddz > reach * reach) continue;
+      const psp = Math.hypot(pr.velocity.x, pr.velocity.y, pr.velocity.z);
+      if (psp < 40) continue;
+      const o = nSrc * 11;
+      F[o] = pr.position.x; F[o + 1] = pr.position.y; F[o + 2] = pr.position.z;
+      F[o + 3] = pr.velocity.x; F[o + 4] = pr.velocity.y; F[o + 5] = pr.velocity.z;
+      F[o + 6] = Math.max(12, Math.min(60, 22 * (pr.sizeMult || 1)));
+      F[o + 7] = psp;
+      F[o + 8] = pr.velocity.x / psp; F[o + 9] = pr.velocity.y / psp; F[o + 10] = pr.velocity.z / psp;
+      nSrc++;
+    }
+  }
+  const useFlow = (nSrc > 0);
+  const aR = nSrc > 0 ? F[6] : 0;   // the hull's radius, still used by the nose-birth geometry
+  let nfx = 0, nfy = 0, nfz = 0, haveNose = false;
+  try {
+    if (player && player.euler) _swNoseV.set(0, 0, -1).applyEuler(player.euler);
+    else _swNoseV.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    nfx = _swNoseV.x; nfy = _swNoseV.y; nfz = _swNoseV.z;
+    haveNose = (nfx * nfx + nfy * nfy + nfz * nfz) > 0.5;
+  } catch (_) {}
+  let _shipSp = 0;
+  try { if (player && player.velocity) _shipSp = Math.hypot(player.velocity.x, player.velocity.y, player.velocity.z); } catch (_) {}
+  const moveK = Math.min(1, _shipSp / ((W3f.bubbleSpeed != null) ? +W3f.bubbleSpeed : 140));
+  const nVis = Math.max(0, Math.min(B.n, Math.round(B.n * (0.06 + 0.94 * moveK))));
+  const noseBias = ((W3f.bubbleNose != null) ? +W3f.bubbleNose : 0.8) * (moveK > 0.15 ? 1 : 0);
+  const noseD = (aR > 0 ? aR : 50) * 1.7;
+  const noseSpread = (aR > 0 ? aR : 50) * 1.15;
+  const wakeK = (W3f.flowWake != null) ? +W3f.flowWake : 1;
+  const swirlK = (W3f.flowSwirl != null) ? +W3f.flowSwirl : 1;
   for (let i = 0; i < B.n; i++) {
     const k = i * 3;
+    let turb = 1;
+    if (useFlow) {
+      let vx = 0, vy = 0, vz = 0, nearest = 1e9;
+      const sgn = (B.ph[i] > 3.1416) ? 1 : -1;
+      for (let sI = 0; sI < nSrc; sI++) {
+        const o = sI * 11;
+        const sAR = F[o + 6], sSp = F[o + 7];
+        const sux = F[o + 3], suy = F[o + 4], suz = F[o + 5];
+        const sfx = F[o + 8], sfy = F[o + 9], sfz = F[o + 10];
+        let dx0 = p[k] - F[o], dy0 = p[k + 1] - F[o + 1], dz0 = p[k + 2] - F[o + 2];
+        let r2 = dx0 * dx0 + dy0 * dy0 + dz0 * dz0;
+        if (r2 < 1) r2 = 1;
+        const r = Math.sqrt(r2);
+        const rc = (r < sAR) ? sAR : r;                  // never evaluate inside the body
+        const rel = rc / sAR;
+        if (rel > 26) continue;                          // 1/r^3 has nothing left to give out here
+        if (rel < nearest) nearest = rel;
+        const inv = 1 / rc;
+        const rx = dx0 * inv, ry = dy0 * inv, rz = dz0 * inv;
+        const ur = sux * rx + suy * ry + suz * rz;
+        const sD = (sAR * sAR * sAR) / (2 * rc * rc * rc);
+        vx += sD * (3 * ur * rx - sux); vy += sD * (3 * ur * ry - suy); vz += sD * (3 * ur * rz - suz);
+        const along = -(rx * sfx + ry * sfy + rz * sfz);   // +1 directly astern
+        if (along > 0.15) {
+          const fall = sAR / (sAR + rc * 1.6);
+          const cone = (along - 0.15) / 0.85;
+          const wv = sSp * 0.55 * fall * cone * cone * wakeK;
+          vx += sfx * wv; vy += sfy * wv; vz += sfz * wv;
+        }
+        if (along > 0 && swirlK > 0) {
+          const tx = sfy * rz - sfz * ry, ty = sfz * rx - sfx * rz, tz = sfx * ry - sfy * rx;
+          const tl = Math.hypot(tx, ty, tz);
+          if (tl > 1e-3) {
+            const _env = sAR / (sAR + rc);
+            const sw = sgn * sSp * 0.42 * _env * _env * along * swirlK / tl;
+            vx += tx * sw; vy += ty * sw; vz += tz * sw;
+          }
+        }
+        if (r < sAR) {
+          const push = (sAR - r) + 1;
+          p[k] += rx * push; p[k + 1] += ry * push; p[k + 2] += rz * push;
+        }
+      }
+      p[k] += vx * dt; p[k + 1] += vy * dt; p[k + 2] += vz * dt;
+      turb = (nearest < 1e9) ? (1 / (1 + nearest * 1.1)) : 1;
+      turb = 1 - 0.85 * turb;
+    }
     p[k + 1] += B.spd[i] * dt;
-    p[k] += Math.sin(t * 1.3 + B.ph[i]) * 9 * dt;
-    p[k + 2] += Math.cos(t * 1.1 + B.ph[i]) * 9 * dt;
-    const dx = p[k] - c.x; if (dx > half) p[k] -= B.box; else if (dx < -half) p[k] += B.box;
-    const dz = p[k + 2] - c.z; if (dz > half) p[k + 2] -= B.box; else if (dz < -half) p[k + 2] += B.box;
-    const dy = p[k + 1] - c.y;
-    if (dy > half || p[k + 1] > WL - 4) p[k + 1] = c.y - half + Math.random() * 60;
-    else if (dy < -half) p[k + 1] += B.box;
+    p[k] += Math.sin(t * 1.3 + B.ph[i]) * 9 * dt * turb;
+    p[k + 2] += Math.cos(t * 1.1 + B.ph[i]) * 9 * dt * turb;
+    const dx = p[k] - c.x, dz = p[k + 2] - c.z, dy = p[k + 1] - c.y;
+    if (Math.abs(dx) > half || Math.abs(dz) > half || dy > half || dy < -half || p[k + 1] > WL - 4) {
+      if (haveNose && Math.random() < noseBias) {
+        p[k]     = c.x + nfx * noseD + (Math.random() - 0.5) * noseSpread;
+        p[k + 1] = c.y + nfy * noseD + (Math.random() - 0.5) * noseSpread;
+        p[k + 2] = c.z + nfz * noseD + (Math.random() - 0.5) * noseSpread;
+        if (p[k + 1] > WL - 12) p[k + 1] = WL - 12 - Math.random() * 40;
+      } else {
+        if (dx > half) p[k] -= B.box; else if (dx < -half) p[k] += B.box;
+        if (dz > half) p[k + 2] -= B.box; else if (dz < -half) p[k + 2] += B.box;
+        if (dy > half || p[k + 1] > WL - 4) p[k + 1] = c.y - half + Math.random() * 60;
+        else if (dy < -half) p[k + 1] += B.box;
+      }
+    }
   }
   B.geo.attributes.position.needsUpdate = true;
+  try { B.geo.setDrawRange(0, nVis); } catch (_) {}   // (v41.34) parked hulls do not fizz
 }
 function _swBubblesHide() { const B = _swBub; if (B.pts) B.pts.visible = false; }
 function _swExitUnderwater() {
@@ -29889,7 +30855,18 @@ class Bot {
     }
 
     if (weapon.mode === 'hitscan') {
-      const isChaingunBot = (weapon.fireRate <= 0.10);
+if (game._hubWater) {
+  try {
+    const _bd = (typeof camera !== 'undefined' && camera) ? fireOrigin.distanceTo(camera.position) : 0;
+    const _bmax = ((typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 1100 : 2600);
+    if (_bd < _bmax) {
+      _swWpnCross(fireOrigin.x, fireOrigin.y, fireOrigin.z,
+                  target.position.x, target.position.y, target.position.z,
+                  _swWpnYield(weapon.damage * 0.6, weapon.splash, 1), 0, 'bot' + this.id, 0.20);
+    }
+  } catch (_) {}
+}
+const isChaingunBot = (weapon.fireRate <= 0.10);
       spawnTracer(fireOrigin, target.position, flashColor, isChaingunBot ? 0.55 : 1.0);
 
       for (let i = 0; i < 2; i++) {
@@ -32998,10 +33975,7 @@ if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPus
 
 function spawnExplosion(pos, size) {
   size = size || 20;
-  if (game._hubWater && pos) {
-    const _wl = game._hubWater.userData.WL;
-    if (Math.abs(pos.y - _wl) < 110 + size * 3) { try { _swRippleSeed(pos.x, pos.z, 140 + size * 2, 0.11); } catch (_) {} }
-  }
+  if (game._hubWater && pos) { try { _swBlast(pos.x, pos.y, pos.z, size); } catch (_) {} }
   const _explFrameKey = (typeof game !== 'undefined' && game) ? game.time : 0;
   if (_explFrameKey !== spawnExplosion._frameKey) { spawnExplosion._frameKey = _explFrameKey; spawnExplosion._count = 0; }
   const _explOverBudget = (++spawnExplosion._count) > 4;
@@ -46548,7 +47522,8 @@ function fireHitscan(origin, dir, w) {
     if (_pwHit && _pwHit.dist < levelDist) levelDist = _pwHit.dist;
   }
   const end = origin.clone().add(aimDir.clone().multiplyScalar(levelDist));
-  if (game._hubWater) { try { _swWaterCrossSplash(origin.x, origin.y, origin.z, end.x, end.y, end.z, 78, 0.09); } catch (_) {} }
+  if (game._hubWater) { try { _swWpnCross(origin.x, origin.y, origin.z, end.x, end.y, end.z,
+                                          _swWpnYield(w.damage, w.splash, 1), 0, null, 0); } catch (_) {} }
   if (levelDist < w.range) {
     const _hsCol = (typeof chassisFlashColor === 'function')
       ? chassisFlashColor(player.loadoutKey) : 0x66ccff;
@@ -48023,7 +48998,11 @@ function executeAbility(slot, ability) {
 
 function firePowerShot() {
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-  if (game._hubWater && typeof _swWaterCrossSplash === 'function') { try { _swWaterCrossSplash(player.position.x, player.position.y, player.position.z, player.position.x + forward.x * 1500, player.position.y + forward.y * 1500, player.position.z + forward.z * 1500, 110, 0.12); } catch (_) {} }
+  if (game._hubWater && typeof _swWpnCross === 'function') { try {
+    _swWpnCross(player.position.x, player.position.y, player.position.z,
+                player.position.x + forward.x * 1500, player.position.y + forward.y * 1500, player.position.z + forward.z * 1500,
+                (window.__water && window.__water.chargeYield != null) ? +window.__water.chargeYield : 3000,
+                0, null, 0); } catch (_) {} }
   if (player.blasterMode === 'close') {
     const range = 1700;                    // (v38.40)
     const pelletCount = 12;
@@ -67001,7 +67980,9 @@ function gameLoop(timestamp) {
           _swU.uCam.value.set(camera.position.x, camera.position.y, camera.position.z);
           try { _swUpdateHubWater(); } catch (_) {}
           __pmark('cine:water');
-          try { _swRippleTick(_cdt); } catch (_) {}
+          try { _swRippleTick(_cdt); }
+          catch (e) { try { const _we = (window.__water = window.__water || {}); _we.tickErrN = (_we.tickErrN | 0) + 1;
+            if (!_we.tickErr) { _we.tickErr = String((e && e.message) || e); console.warn('[water] ripple tick threw (cinematic):', e); } } catch (_) {} }
           try { _swUpdateUnderwater(); } catch (_) {}
           __pmark('cine:ripple');
           try { _birdFlockTick(_cdt); } catch (_) {}
@@ -67216,7 +68197,14 @@ function gameLoop(timestamp) {
       try { _swUpdateHubWater(); } catch (_) {}   
       __pmark('hub:water');   // (v39.49) _swUpdateHubWater alone
       if (window.__f8seg) window.__f8seg('ripple');
-      try { _swRippleTick(dt); } catch (_) {}
+      try { _swRippleTick(dt); }
+      catch (e) {
+        try {
+          const _we = (window.__water = window.__water || {});
+          _we.tickErrN = (_we.tickErrN | 0) + 1;
+          if (!_we.tickErr) { _we.tickErr = String((e && e.message) || e); console.warn('[water] ripple tick threw:', e); }
+        } catch (_) {}
+      }
       if (window.__f8seg) window.__f8seg(null);
       __pmark('hub:ripple');   // (v39.49) the ripple tick alone now (see hub:clip / hub:stream / hub:water above)
       try { _swUpdateUnderwater(); } catch (_) {}
@@ -67367,7 +68355,13 @@ function gameLoop(timestamp) {
     let _wpx, _wpy, _wpz;
     if (_wTrack) { _wpx = p.position.x; _wpy = p.position.y; _wpz = p.position.z; }
     p.update(dt);
-    if (_wTrack && p.position) { try { _swWaterCrossSplash(_wpx, _wpy, _wpz, p.position.x, p.position.y, p.position.z, 65, 0.08); } catch (_) {} }
+    if (_wTrack && p.position) { try { const _sdx = p.position.x - _wpx, _sdy = p.position.y - _wpy, _sdz = p.position.z - _wpz;
+      const _wy = _swWpnYield(p.damage, p.splash, p.sizeMult);
+      const _wsp = Math.hypot(_sdx, _sdy, _sdz) / Math.max(1e-3, dt);
+      if (p._swTid === undefined) p._swTid = 'p' + ((_swTidN = (_swTidN + 1) & 1023));
+      _swWpnCross(_wpx, _wpy, _wpz, p.position.x, p.position.y, p.position.z, _wy, _wsp, p._swTid, 0);
+      _swWpnWake(p, p.position.x, p.position.y, p.position.z, _sdx / Math.max(1e-3, dt), _sdz / Math.max(1e-3, dt),
+                 Math.max(28, Math.min(200, 30 * Math.pow(Math.max(1, _wy) / 85, 0.45)))); } catch (_) {} }
     if (!p.alive) {
       const lastIdx = game.projectiles.length - 1;
       if (i !== lastIdx) game.projectiles[i] = game.projectiles[lastIdx];
