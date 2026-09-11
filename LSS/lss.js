@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.30';
+const LSS_BUILD = '42.35';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -41336,11 +41336,57 @@ async function _prebakeCloakWarmRoots(roots, budgetUntil, rep, withShadow) {
   try { if (rep) { rep.ms.cloak = Math.round(_pbNow() - _t); rep.cloakHulls = n; rep.cloakMats = mats; } } catch (_) {}
   return n;
 }
+const _XR_COVER = { mesh: null, timer: null, upAt: 0 };
+const _XR_COVER_CAP_MS = 12000;   // hard ceiling; the prebake's own cap is ~12 s of slices
+function _xrCoverUp() {
+  try {
+    if (typeof window !== 'undefined' && window.__xrCover === false) return false;
+    if (!(typeof isXRPresenting === 'function' && isXRPresenting())) return false;
+    if (typeof xrDolly === 'undefined' || !xrDolly) return false;
+    if (!_XR_COVER.mesh) {
+      const _g = new THREE.BoxGeometry(4, 4, 4);
+      const _m = new THREE.MeshBasicMaterial({
+        color: 0x000000, side: THREE.BackSide,
+        depthTest: false, depthWrite: false, fog: false, toneMapped: false,
+      });
+      const _mesh = new THREE.Mesh(_g, _m);
+      _mesh.frustumCulled = false;
+      _mesh.renderOrder = 100000;
+      _mesh.name = 'xrPrebakeCover';
+      _XR_COVER.mesh = _mesh;
+    }
+    if (!_XR_COVER.mesh.parent) xrDolly.add(_XR_COVER.mesh);
+    _XR_COVER.mesh.position.set(0, 0, 0);
+    _XR_COVER.mesh.visible = true;
+    _XR_COVER.upAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if (_XR_COVER.timer) { try { clearTimeout(_XR_COVER.timer); } catch (_) {} }
+    _XR_COVER.timer = setTimeout(() => {
+      console.warn('[xrCover] self-expiry hit - dropping the cover');
+      _xrCoverDown();
+    }, _XR_COVER_CAP_MS);
+    return true;
+  } catch (e) { try { _xrCoverDown(); } catch (_) {} return false; }
+}
+function _xrCoverDown() {
+  try { if (_XR_COVER.timer) { clearTimeout(_XR_COVER.timer); _XR_COVER.timer = null; } } catch (_) {}
+  _XR_COVER.upAt = 0;
+  try {
+    if (_XR_COVER.mesh) {
+      _XR_COVER.mesh.visible = false;
+      if (_XR_COVER.mesh.parent) _XR_COVER.mesh.parent.remove(_XR_COVER.mesh);
+    }
+  } catch (_) {}
+}
+function _xrCoverIsUp() {
+  try { return !!(_XR_COVER.mesh && _XR_COVER.mesh.visible && _XR_COVER.mesh.parent); } catch (_) { return false; }
+}
+
 async function _prebakeWorldForLaunch() {
   if (_PREBAKE.on) return _PREBAKE.last;
   try { if (typeof _cyberPrePlace === 'function') _cyberPrePlace(); } catch (_) {}
   _PREBAKE.on = true;
   game._worldPrebaking = true;
+  try { _xrCoverUp(); } catch (_) {}   // (v42.34) no-op off XR
   const t0 = _pbNow();
   const _cnt = () => (game.sandwichChunks ? game.sandwichChunks.size : 0);
   const _tb = () => { let n = 0; if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) if (c.treesBuilt) n++; return n; };
@@ -41520,6 +41566,7 @@ async function _prebakeWorldForLaunch() {
   } finally {
     _PREBAKE.on = false;
     game._worldPrebaking = false;
+    try { _xrCoverDown(); } catch (_) {}   // (v42.34) the primary way down - runs even on a throw
     rep.totalMs = Math.round(_pbNow() - t0);
     _PREBAKE.last = rep;
     try {
@@ -45696,7 +45743,16 @@ function commitLoadout(key) {
   document.getElementById('ship-class').textContent = loadout.className;
 
   if (typeof ANN !== 'undefined' && ANN.welcomeAboard && !midMatch) {
-    ANN.welcomeAboard(loadout.name);
+    _welcomeAboardDeferred = loadout.name;
+    setTimeout(() => {
+      try {
+        if (!_welcomeAboardDeferred) return;
+        if (typeof _loadingAudioHold !== 'undefined' && _loadingAudioHold) return;
+        const _wn = _welcomeAboardDeferred;
+        _welcomeAboardDeferred = null;
+        if (typeof ANN !== 'undefined' && ANN.welcomeAboard) ANN.welcomeAboard(_wn);
+      } catch (_) {}
+    }, 1200);
   }
   document.getElementById('weapon-name').textContent = loadout.weapon.name;
 
@@ -45818,10 +45874,6 @@ function commitLoadout(key) {
     if (typeof game !== 'undefined' && game && game.state === 'playing') return;
     if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
     if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && game._swPreloading) {
-      game._preLaunchWaiting = true;
-      return;
-    }
-    if (game._warmupDone === false) {
       game._preLaunchWaiting = true;
       return;
     }
@@ -46890,6 +46942,7 @@ function _lssEnsureCinematicStyles() {
   style.textContent =
     'body.lss-cinematic-active #crosshair,' +
     'body.lss-cinematic-active #circumpunct-hud,' +
+    'body.lss-cinematic-active #hud-world,' +
     'body.lss-cinematic-active #gun-layer,' +
     'body.lss-cinematic-active #ability-overlay-frame,' +
     'body.lss-cinematic-active #cockpit-frame,' +
@@ -47214,6 +47267,12 @@ function _cineHeavyWorkPending() {
   } catch (_) { return false; }
 }
 function _cineWhenSettled(fn, capMs) {
+  try {
+    if (typeof isXRPresenting === 'function' && isXRPresenting()) {
+      try { fn(); } catch (e) { console.warn('[cinematic] xr immediate start failed:', e && e.message); }
+      return;
+    }
+  } catch (_) {}
   const cap = (capMs != null) ? capMs : 8000;
   const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
   const t0 = _now();
@@ -55277,10 +55336,57 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   _hudFontCache = '';
 }
 
+let _hwCanvas = null, _hwCtx = null, _hwW = 0, _hwH = 0, _hwDPR = 0;
+let _hwPrev = null, _hwCur = null, _hwShown = false;
+function _hudWorldBegin(W, H, useIt) {
+  if (_hwCanvas === null) {                      // one lookup ever; false = no such element
+    _hwCanvas = document.getElementById('hud-world') || false;
+    if (_hwCanvas) { try { _hwCtx = _hwCanvas.getContext('2d'); } catch (_) { _hwCanvas = false; } }
+  }
+  if (!_hwCanvas || !_hwCtx) return null;
+  const dpr = _hudLastDPR || Math.min(1.25, window.devicePixelRatio || 1);
+  if (W !== _hwW || H !== _hwH || dpr !== _hwDPR) {
+    _hwCanvas.width = Math.max(1, Math.round(W * dpr));
+    _hwCanvas.height = Math.max(1, Math.round(H * dpr));
+    _hwCanvas.style.width = W + 'px';
+    _hwCanvas.style.height = H + 'px';
+    _hwW = W; _hwH = H; _hwDPR = dpr;
+    _hwPrev = null;                              // the resize already blanked the bitmap
+  }
+  _hwCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (_hwPrev) {
+    _hwCtx.clearRect(_hwPrev[0], _hwPrev[1], _hwPrev[2] - _hwPrev[0], _hwPrev[3] - _hwPrev[1]);
+    _hwPrev = null;
+  }
+  _hwCur = null;
+  return useIt ? _hwCtx : null;                  // not eligible: still cleared, still hidden below
+}
+function _hudWorldMark(x, y, r) {
+  const p = r + 12;
+  if (!_hwCur) { _hwCur = [x - p, y - p, x + p, y + p]; return; }
+  if (x - p < _hwCur[0]) _hwCur[0] = x - p;
+  if (y - p < _hwCur[1]) _hwCur[1] = y - p;
+  if (x + p > _hwCur[2]) _hwCur[2] = x + p;
+  if (y + p > _hwCur[3]) _hwCur[3] = y + p;
+}
+function _hudWorldEnd() {
+  if (!_hwCanvas || !_hwCtx) return;
+  _hwPrev = _hwCur; _hwCur = null;
+  const want = !!_hwPrev;
+  if (want !== _hwShown) {
+    _hwShown = want;
+    try { _hwCanvas.style.display = want ? 'block' : 'none'; } catch (_) {}
+  }
+}
+
 function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
   player.muzzleFlashTimer = Math.max(0, player.muzzleFlashTimer - (1 / 60));
   player.gunRecoilL = Math.max(0, player.gunRecoilL - (1 / 60) * 12);
   player.gunRecoilR = Math.max(0, player.gunRecoilR - (1 / 60) * 12);
+
+  const _wctx = _hudWorldBegin(W, H,
+    !((typeof isXRPresenting === 'function') && isXRPresenting()) &&
+    !!(typeof game !== 'undefined' && game && game._hudTf && game._hudTf !== 'none'));
 
   if (player.loadoutKey === 'TRACKER') {
     const halfW = W / 2, halfH = H / 2;
@@ -55339,6 +55445,7 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
       });
       _lockCands.length = _LOCK_RING_MAX;
     }
+    const lc = _wctx || ctx;
     for (const bot of _lockCands) {
       const locks = player.trackerLocks[bot.id] || 0;
       if (locks <= 0) continue;
@@ -55363,42 +55470,44 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
       const lockAlpha = locks >= 3 ? (0.7 + Math.sin(t * 8) * 0.3) : _ringA;
       const lockColor = 'rgba(255,170,0,' + lockAlpha + ')';
       const fullLockColor = 'rgba(255,80,0,' + lockAlpha + ')';
+      if (lc !== ctx) _hudWorldMark(sx, sy, baseR * 1.8 + 12 * _ringK);
 
-      ctx.fillStyle = locks >= 3 ? fullLockColor : lockColor;
-      ctx.beginPath(); ctx.arc(sx, sy, 3 * _ringK, 0, Math.PI * 2); ctx.fill();
+      lc.fillStyle = locks >= 3 ? fullLockColor : lockColor;
+      lc.beginPath(); lc.arc(sx, sy, 3 * _ringK, 0, Math.PI * 2); lc.fill();
 
       for (let ring = 0; ring < locks; ring++) {
         const ringR = baseR * (0.5 + ring * 0.4);
         const ringRotation = t * (2 + ring) * (ring % 2 === 0 ? 1 : -1);
         const dashLen = ring === 2 ? 0 : 0.15;
-        ctx.strokeStyle = ring === 2 && locks >= 3 ? fullLockColor : lockColor;
-        ctx.lineWidth = (ring === 2 && locks >= 3 ? 2.5 : 1.5) * _ringK;
+        lc.strokeStyle = ring === 2 && locks >= 3 ? fullLockColor : lockColor;
+        lc.lineWidth = (ring === 2 && locks >= 3 ? 2.5 : 1.5) * _ringK;
         if (dashLen > 0) {
           const gapStart = ringRotation % (Math.PI * 2);
           const gapSize = dashLen * Math.PI * 2;
-          ctx.beginPath();
-          ctx.arc(sx, sy, ringR, gapStart + gapSize, gapStart + Math.PI * 2);
-          ctx.stroke();
+          lc.beginPath();
+          lc.arc(sx, sy, ringR, gapStart + gapSize, gapStart + Math.PI * 2);
+          lc.stroke();
         } else {
-          ctx.beginPath(); ctx.arc(sx, sy, ringR, 0, Math.PI * 2); ctx.stroke();
+          lc.beginPath(); lc.arc(sx, sy, ringR, 0, Math.PI * 2); lc.stroke();
         }
         if (ring < 2) {
           const tickLen = 6 * _ringK;
           for (let ti = 0; ti < 4; ti++) {
             const ta = ringRotation + (ti / 4) * Math.PI * 2;
             const _c = Math.cos(ta), _s = Math.sin(ta);
-            ctx.beginPath();
-            ctx.moveTo(sx + _c * (ringR - tickLen), sy + _s * (ringR - tickLen));
-            ctx.lineTo(sx + _c * (ringR + tickLen), sy + _s * (ringR + tickLen));
-            ctx.stroke();
+            lc.beginPath();
+            lc.moveTo(sx + _c * (ringR - tickLen), sy + _s * (ringR - tickLen));
+            lc.lineTo(sx + _c * (ringR + tickLen), sy + _s * (ringR + tickLen));
+            lc.stroke();
           }
         }
       }
       if (locks >= 3) {
-        ctx.fillStyle = fullLockColor;
-        hudFont('bold ' + Math.round(10 * _ringK) + 'px Courier New');
-        ctx.textAlign = 'center';
-        ctx.fillText('LOCKED', sx, sy + baseR * 1.8 + 8 * _ringK);
+        lc.fillStyle = fullLockColor;
+        const _lf = 'bold ' + Math.round(10 * _ringK) + 'px Courier New';
+        if (lc === ctx) hudFont(_lf); else lc.font = _lf;
+        lc.textAlign = 'center';
+        lc.fillText('LOCKED', sx, sy + baseR * 1.8 + 8 * _ringK);
       }
     }
   }
@@ -55409,6 +55518,8 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
     ctx.lineWidth = vmin * 2.8;
     ctx.beginPath(); ctx.arc(cx, cy, _HL.health.r * vmin, 0, Math.PI * 2); ctx.stroke();
   }
+
+  _hudWorldEnd();
 }
 
 try {
@@ -57866,6 +57977,13 @@ function _lssAudioHoldRelease() {
     if (typeof _ambientBedDeferred !== 'undefined' && _ambientBedDeferred) {
       _ambientBedDeferred = false;
       if (typeof startAmbientBed === 'function') startAmbientBed();
+    }
+  } catch (_) {}
+  try {
+    if (_welcomeAboardDeferred) {
+      const _wn = _welcomeAboardDeferred;
+      _welcomeAboardDeferred = null;
+      if (typeof ANN !== 'undefined' && ANN.welcomeAboard) ANN.welcomeAboard(_wn);
     }
   } catch (_) {}
   setTimeout(() => {
@@ -70092,6 +70210,7 @@ function resumeAudio() {
 
 let ambientStarted = false;
 let _ambientBedDeferred = false;
+let _welcomeAboardDeferred = null;
 
 
 
@@ -70184,6 +70303,7 @@ function stopAmbientBed() {
   audio.phiLayers = [];
   ambientStarted = false;
   _ambientBedDeferred = false;   // (v36.24) an explicit stop cancels a pending hold-deferred start
+  _welcomeAboardDeferred = null;   // (v42.32) and the queued welcome line with it
 }
 
 const _envProbeDirs = [
