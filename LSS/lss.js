@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.05';
+const LSS_BUILD = '42.07';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -9251,10 +9251,15 @@ const _botSpreadDir = new THREE.Vector3();
 function emitDamageState(entity, dt) {
   if (!entity || !entity.position) return;
   if (entity.alive === false || entity.shipState === 'dead') return;
-  if ((entity.shield || 0) > 0.5) return;
   const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
   const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
-  if (hpFrac >= 1.0) return; 
+  if (hpFrac >= 1.0) return;
+  const _dk = (typeof window !== 'undefined' && window.__dmgFX) || null;
+  if ((entity.shield || 0) > 0.5) {
+    const _burnThrough = !!(_dk && _dk.burnThroughShield) &&
+                         hpFrac < ((_dk && _dk.heavyAt != null) ? _dk.heavyAt : 0.5);
+    if (!_burnThrough) return;
+  }
   
   let tier = 0;
   if (hpFrac < 0.75) tier = 1;

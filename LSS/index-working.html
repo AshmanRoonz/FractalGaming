@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.05';
+const LSS_BUILD = '42.07';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -17278,12 +17278,28 @@ function emitDamageState(entity, dt) {
   // collision and scoring behaviour far outside this function.
   if (!entity || !entity.position) return;
   if (entity.alive === false || entity.shipState === 'dead') return;
-  // Shield up = hide all hull damage. Threshold > 0.5 (not == 0)
-  // so flickering low-shield ticks don't strobe the effects on/off.
-  if ((entity.shield || 0) > 0.5) return;
   const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
   const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
-  if (hpFrac >= 1.0) return; 
+  if (hpFrac >= 1.0) return;
+  // Shield up = hide all hull damage. Threshold > 0.5 (not == 0) so flickering low-shield ticks
+  // don't strobe the effects on/off.
+  // ⚠ (v42.06) THIS IS DELIBERATE, NOT A BUG — it has been questioned once and upheld. Owner:
+  // "my ship stopped smoking and flaming, when i stayed still", then, on working out why:
+  // "oh the shield puts out the flames... it's probably my shield recharge ability i had on...
+  // that's acceptible then". So a ship that re-shields reads as repaired, and that is the intended
+  // language: the shield IS the ship's condition as far as the FX are concerned.
+  // The alternative was built and measured (smoke/fire track HULL integrity and burn through a
+  // shield, so a wreck that disengages still looks like a wreck) and is kept here as OPT-IN only,
+  // because it also changes every bot and peer — a shielded but badly hurt enemy would smoke, which
+  // is a real combat-readability change nobody asked for.
+  //   window.__dmgFX = { burnThroughShield: true }   // heavy tiers ignore the shield
+  //   window.__dmgFX = { burnThroughShield: true, heavyAt: 0.25 }   // fire only, not smoke
+  const _dk = (typeof window !== 'undefined' && window.__dmgFX) || null;
+  if ((entity.shield || 0) > 0.5) {
+    const _burnThrough = !!(_dk && _dk.burnThroughShield) &&
+                         hpFrac < ((_dk && _dk.heavyAt != null) ? _dk.heavyAt : 0.5);
+    if (!_burnThrough) return;
+  }
   
   let tier = 0;
   if (hpFrac < 0.75) tier = 1;
