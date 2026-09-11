@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.17';
+const LSS_BUILD = '42.19';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -8834,6 +8834,19 @@ function _endlessLivesCapFor(startLives) { return startLives * 2; }
 // owner meant the opposite direction, reorder the three numbers and nothing else.
 const _EAEGIS_RANK_XP = 100;
 const _EAEGIS_XP_MUL = { easy: 1.0, medium: 0.7, hard: 0.5 };
+// ⭐ (v42.19) ENDLESS STASIS DENSITY, per difficulty. Owner: "put none in hard mode, less in
+// medium". This is the fraction of halls that qualify to hold a shield pickup, consumed by
+// _lssEndlessStasisSpot's rarity gate. easy 0.42 is the shipped literal, so easy is unchanged.
+// ⚠ HARD = 0 IS A REAL VALUE, not "unset". Endless shields NEVER regen naturally - stasis
+// fields are the only refill in the run - so hard becomes a one-way bleed and gets no doomed
+// rescue from a field either. That is the owner's explicit instruction, flagged not softened.
+// ⚠ Hence `>= 0`, and NEVER `_ESTASIS_GATE[d] || 0.21`: `||` would silently promote hard's
+// legitimate zero to medium. (Do not copy _campSwarmCapFor's `|| 6` shape here.)
+const _ESTASIS_GATE = { easy: 0.42, medium: 0.21, hard: 0 };
+function _endlessStasisGateFor(d) {
+  const g = _ESTASIS_GATE[d];
+  return (typeof g === 'number' && g >= 0) ? g : _ESTASIS_GATE.medium;
+}
 function _endlessAegisXpMulFor(d) {
   const m = _EAEGIS_XP_MUL[d];
   return (typeof m === 'number' && m > 0) ? m : _EAEGIS_XP_MUL.medium;
@@ -8863,6 +8876,12 @@ const EndlessMode = {
     try { run.difficulty = (typeof _getStoredDifficulty === 'function') ? _getStoredDifficulty() : 'hard'; } catch (_) { run.difficulty = 'hard'; }
     try { run.lives = _endlessLivesFor(run.difficulty); } catch (_) { run.lives = 1; }
     run.boltXp = Math.round(_EAEGIS_RANK_XP * _endlessAegisXpMulFor(run.difficulty));
+    // (v42.19) Snapshot the stasis density with the rest, so a mid-run settings change cannot
+    // fork the route. ⚠ ITS OWN try/catch, deliberately NOT sharing the difficulty one above:
+    // that catch falls back to 'hard', and with hard = 0 a player whose localStorage merely threw
+    // (private-mode browser, locked-down headset) would silently get ZERO shield fields for the
+    // whole run through no choice of their own. Fall back to medium independently.
+    try { run.stasisGate = _endlessStasisGateFor(run.difficulty); } catch (_) { run.stasisGate = _ESTASIS_GATE.medium; }
     // (v36.38) The at-max Aegis reward grants lives; the ceiling is DOUBLE the
     // difficulty's own allowance so EASY/MEDIUM/HARD keep their exact ordering.
     run.startLives = run.lives; run.livesMax = _endlessLivesCapFor(run.lives);
@@ -10257,6 +10276,12 @@ if (typeof window !== 'undefined') window.__endlessMotes = function () {
 // its rarity-gate roll and forward/behind state, plus the shared replenish
 // timer. `spot` re-runs the placement picker against the live fields, so it
 // shows exactly where the NEXT spawn would land (null = no qualifying hall).
+// (v42.19) Live knobs for the endless stasis feature. Seeded at boot for the same reason
+// window.__cockpit and window.__muzzle are: `window.__estasis.gate = 0` must not throw.
+//   gate  - override the per-difficulty rarity gate (0 = none at all)
+//   bots  - also un-doom BOTS that take a field (default OFF; see the note in the bot branch)
+//   log   - console-log every _playerUndoom with its reason
+try { if (typeof window !== 'undefined') window.__estasis = window.__estasis || { gate: null, bots: false, log: false }; } catch (_) {}
 if (typeof window !== 'undefined') window.__endlessStasis = function () {
   try {
     const run = game.endlessRun; if (!run) return null;
@@ -10266,7 +10291,10 @@ if (typeof window !== 'undefined') window.__endlessStasis = function () {
       let hallGid = null;
       for (let i = 0; i < run.segs.length; i++) {
         const s = run.segs[i].sph; if (!s) continue;
-        const dx = f.position.x - s.cx, dy = f.position.y - s.cy, dz = f.position.z - s.cz;
+        // (v42.19) sph is FLAT, field positions are WORLD - this readout had the same space bug
+        // as the spawner and would have reported hallGid:null forever, hiding the fix.
+        const _wc = _bendToWorld(s.cx, s.cy, s.cz);
+        const dx = f.position.x - _wc.x, dy = f.position.y - _wc.y, dz = f.position.z - _wc.z;
         if (dx * dx + dy * dy + dz * dz < s.r * s.r) { hallGid = run.segs[i].gid; break; }
       }
       return { x: Math.round(f.position.x), y: Math.round(f.position.y), z: Math.round(f.position.z),
@@ -10276,8 +10304,9 @@ if (typeof window !== 'undefined') window.__endlessStasis = function () {
     const halls = [];
     for (let i = 0; i < run.segs.length; i++) {
       const seg = run.segs[i]; if (!seg.hall || !seg.sph) continue;
+      const _hw = _bendToWorld(seg.sph.cx, seg.sph.cy, seg.sph.cz);
       halls.push({ gid: seg.gid, r: Math.round(seg.sph.r),
-                   d: Math.round(Math.hypot(seg.sph.cx - p.x, seg.sph.cy - p.y, seg.sph.cz - p.z)),
+                   d: Math.round(Math.hypot(_hw.x - p.x, _hw.y - p.y, _hw.z - p.z)),
                    roll: +_lssEndlessBoltHash(seg.gid, 41).toFixed(3),
                    ahead: !(run.progGid >= 0 && seg.gid < run.progGid) });
     }
@@ -10287,6 +10316,14 @@ if (typeof window !== 'undefined') window.__endlessStasis = function () {
              shield: Math.round(player.shield), maxShield: player.maxShield,
              overShield: Math.round(player.overShield || 0),
              levelSpheres: game.levelSpheres.length, progGid: run.progGid,
+             // (v42.19) so a future space bug is visible in ONE call
+             difficulty: run.difficulty,
+             // the EFFECTIVE gate the spawner will use, override included - reporting the bare
+             // snapshot here would quietly lie whenever __estasis.gate is set
+             gate: ((window.__estasis && window.__estasis.gate != null) ? +window.__estasis.gate
+                    : (run.stasisGate != null ? run.stasisGate : 0.42)),
+             gateSnapshot: (run.stasisGate != null ? run.stasisGate : null),
+             bent: (typeof _bendOn === 'function') ? _bendOn() : null,
              fields, halls,
              spot: spot ? [Math.round(spot.x), Math.round(spot.y), Math.round(spot.z)] : null };
   } catch (e) { return String(e && e.stack || e); }
@@ -14655,48 +14692,46 @@ function tickScanlineTexture() {
 // (broadcast=true) and the effect_spawn receiver (broadcast=false). Same
 // pattern as Plasma Mines: ownerPeerId tag gates HP / damage logic to one peer.
 function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast) {
-  const wallGeo = new THREE.BoxGeometry(400, 300, 25);
-  const wallMat = new THREE.MeshBasicMaterial({
-    color: 0x44ccff, transparent: true, opacity: 0.35,
-    side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
-    map: getScanlineTexture(),
-  });
-  // (legacy scanline texture kept above for fallback; the wall now renders
-  // through a hex-hologram shader overlay on top of it via wallMesh.material
-  // swap below.)
-  // Replace flat MeshBasicMaterial with the hex hologram shader so the wall
-  // reads as a live energy field with damage cracks revealed as hp drops.
-  // The original scanline material is kept as wallMat and the geometry is
-  // unchanged so existing depth-test / sort behavior is preserved.
-  // Tracker's particle wall is now tinted orange ; the cyan was
-  // visually conflated with Blaster/Vortex's blue energy fields. Hex
-  // hologram + amber plasma backing give the wall a hot-membrane read.
-  const hexHologramMat = _makeHexHologramMaterial(LSS.CLASS_COLORS.TRACKER);
-  const wallMesh = new THREE.Mesh(wallGeo, hexHologramMat);
+  // ⭐ (v42.18) 4x BIGGER, CONTACT-LENS SHAPE. Owner: "let's make tracker's plasma shield 4x
+  // bigger, and contact lens shape". Was a flat BoxGeometry(400, 300, 25); now a shallow spherical
+  // cap scaled to 1600 x 1200, convex face toward whatever the deployer was aiming at. The unit
+  // lens and its rim are shared, cached geometry - the old code built a BoxGeometry AND an
+  // EdgesGeometry per wall and disposed neither.
+  // ⚠ The hit test stays PLANAR, on the rim plane at eff.position: the cap bulges ~90 u forward
+  // at default curvature, so a shot can clip the very centre of the bulge slightly before the
+  // plane. At this size that is a sub-frame difference for anything travelling at weapon speed,
+  // and a curved swept test is not worth its cost. Revisit only if the bulge knob is raised a lot.
+  const _wH = _wallHalf();
+  const _wK = _wallKnobs();
+  const wallMesh = new THREE.Mesh(_wallLensGeometry(), _makeHexHologramMaterial(LSS.CLASS_COLORS.TRACKER));
   wallMesh.position.copy(pos);
   wallMesh.lookAt(pos.clone().add(dir));
+  wallMesh.scale.set(_wH.w, _wH.h, _wH.w * _wK.bulge);
   scene.add(wallMesh);
-  // Inner plasma layer behind the hex grid. Switched
-  // from 'plasma_wall' (cyan) to 'plasma_amber' (orange) to match the
-  // wall's new color identity.
+  // Inner plasma layer behind the hex grid, the same lens a touch smaller so it reads as a second
+  // membrane rather than z-fighting with the first.
   let plasmaMesh = null;
   if (typeof _makeFXMaterial === 'function') {
-    const plasmaGeo = new THREE.BoxGeometry(390, 290, 18);
     const plasmaMat = _makeFXMaterial('plasma_amber');
     if (plasmaMat.uniforms && plasmaMat.uniforms.uPosScale) {
-      plasmaMat.uniforms.uPosScale.value = 1.0 / 200.0;
+      // Pattern density was tuned against a 200-unit half-width; keep it proportional so a 4x
+      // shield does not read as a 4x-coarser texture.
+      plasmaMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _wH.w);
     }
-    plasmaMesh = new THREE.Mesh(plasmaGeo, plasmaMat);
+    plasmaMesh = new THREE.Mesh(_wallLensGeometry(), plasmaMat);
     plasmaMesh.position.copy(pos);
     plasmaMesh.lookAt(pos.clone().add(dir));
-    plasmaMesh.renderOrder = 0;  
+    plasmaMesh.scale.set(_wH.w * 0.97, _wH.h * 0.97, _wH.w * _wK.bulge * 0.94);
+    plasmaMesh.renderOrder = 0;
     scene.add(plasmaMesh);
   }
-  const edgeGeo = new THREE.EdgesGeometry(wallGeo);
+  // Rim outline. EdgesGeometry on a 64x20 sphere cap would have drawn ~2,500 segments of wireframe
+  // noise; the lens only wants its edge, so this is one circle on the rim plane.
   const edgeMat = new THREE.LineBasicMaterial({ color: 0xffcc77, transparent: true, opacity: 0.6 });
-  const edgeMesh = new THREE.LineSegments(edgeGeo, edgeMat);
+  const edgeMesh = new THREE.Line(_wallRimGeometry(), edgeMat);
   edgeMesh.position.copy(pos);
   edgeMesh.lookAt(pos.clone().add(dir));
+  edgeMesh.scale.set(_wH.w, _wH.h, 1);
   scene.add(edgeMesh);
   game.worldEffects.push({
     type: 'particle_wall', position: pos.clone(), direction: dir.clone(),
@@ -14705,6 +14740,9 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
     // the wall popped before it felt tactical. 10000 lets it sponge a full
     // multikill volley while still expiring on the 10s timer or to Stun Bolt.
     hp: 10000, maxHp: 10000, timer: 10, owner, team,
+    // (v42.18) THIS wall's silhouette, captured at spawn. _wallBlockSegment prefers these over the
+    // live knob, so retuning window.__wall.scale mid-match cannot desync a standing wall.
+    halfW: _wH.w, halfH: _wH.h,
     // plasmaMesh is a sibling layered-FX backing mesh. Stashed here
     // so the destroy paths (timer, hp depletion, Stun Bolt breakage,
     // returnToRootMenu cleanup) can dispose it alongside the main wall.
@@ -39501,6 +39539,8 @@ function _owLocalFieldUI(dt) {
   if (inField && OW._fieldUI !== inField.idx) {
     OW._fieldUI = inField.idx;
     game.playerInChampionStasis = true;
+    // (v42.19) same short-circuit as the champion field - OVERWORLD CITIES never un-doomed either.
+    try { if (typeof _playerUndoom === 'function') _playerUndoom('ow-field'); } catch (_) {}
     try { const w = document.getElementById('stasis-warning'); const v = document.getElementById('stasis-vignette'); if (w) w.style.display = 'block'; if (v) v.style.display = 'block'; } catch (_) {}
     _owBanner('CLAIMING', 'Stay on the dot to take ' + inField.name);
   } else if (!inField && OW._fieldUI >= 0) _owFieldUIOff();
@@ -50008,6 +50048,23 @@ class Projectile {
       if (_pjHit && _pjHit.eff) {
         const eff = _pjHit.eff;
         const intersect = new THREE.Vector3(_pjHit.x, _pjHit.y, _pjHit.z);
+        // ⭐⭐ (v42.18) SLAYER'S STUN BOLT IS THE HARD COUNTER. Owner: "make slayer's stun bolt
+        // pass through and delete the plasma shield". It is NOT stopped and it is NOT absorbed -
+        // it pops the shield and keeps flying, so the bolt still reaches whatever was sheltering
+        // behind it. ⚠ This exemption is load-bearing after v42.17: before that change the arc
+        // wave was never tested against a wall at all (the block was gated `this.owner !== 'player'`),
+        // so generalising the test to every projectile would have silently turned Slayer's counter
+        // into the one weapon a Plasma Shield stops dead.
+        // The pre-existing proximity destroy further down only fires when the bolt HITS A BOT near
+        // a wall; this fires on the wall itself, which is what "pass through and delete" means.
+        if (this.isArcWave) {
+          try {
+            if (typeof spawnExplosion === 'function') spawnExplosion(intersect, 20);
+            _wallImpactFX(eff, intersect.x, intersect.y, intersect.z);
+          } catch (_) {}
+          _wallDestroy(eff);
+          // deliberately NO return - the bolt carries on through the hole it just made
+        } else {
         _wallHitRipple(eff, intersect.x, intersect.y, intersect.z, this.damage);
         spawnImpactSparks(intersect, 6);
         this.position.copy(intersect);
@@ -50016,6 +50073,7 @@ class Projectile {
         this.spawnImpactExplosion(intersect);
         this.destroy();
         return;
+        }
       }
     }
 
@@ -50121,15 +50179,12 @@ class Projectile {
           if (this.isArcWave) {
             for (let we = game.worldEffects.length - 1; we >= 0; we--) {
               const eff = game.worldEffects[we];
-              if (eff.type === 'particle_wall' && eff.team !== player.team && this.position.distanceToSquared(eff.position) < 400 * 400) {
-                eff.hp = 0; eff.timer = 0;
-                if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-                if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
-                // Tear down the plasma backing mesh too on Stun Bolt kill.
-                if (eff.plasmaMesh && eff.plasmaMesh.parent) {
-                  scene.remove(eff.plasmaMesh);
-                  if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
-                }
+              // (v42.18) radius scales with the shield - a fixed 400 was most of the old panel and
+              // is a corner of the 4x lens. Routed through the shared teardown so this copy cannot
+              // drift from the other destroy sites again.
+              const _sbR = Math.max(400, (eff.halfW != null ? eff.halfW : 400) * 0.75);
+              if (eff.type === 'particle_wall' && eff.team !== player.team && this.position.distanceToSquared(eff.position) < _sbR * _sbR) {
+                _wallDestroy(eff);
                 spawnExplosion(eff.position, 20);
               }
             }
@@ -72294,15 +72349,54 @@ const _spToTgt = new THREE.Vector3();
 // playerTakeDamage). Everything now routes through these helpers so the shield is ONE object with
 // ONE shape and ONE rule: a wall stops any shot whose travel segment crosses its panel, from EITHER
 // face, unless the shooter is on the wall's own team.
-const _WALL_HALF_W = 200;   // half of BoxGeometry(400, 300, 25) in the spawn helper
-const _WALL_HALF_H = 150;
+// (v42.18) The ORIGINAL panel was BoxGeometry(400, 300, 25) - a flat rectangle. Owner: "let's make
+// tracker's plasma shield 4x bigger, and contact lens shape". So the base half-extents stay as the
+// historical record and `scale` (default 4) is what actually sizes the thing, while the silhouette
+// becomes an ELLIPSE because a lens has no corners. Mesh and hit test are driven from the SAME
+// numbers - the whole point of the v42.17 collapse was that this mesh had three different
+// silhouettes, and a shape change is exactly where that would have drifted again.
+const _WALL_BASE_HALF_W = 200;
+const _WALL_BASE_HALF_H = 150;
 function _wallKnobs() {
   const K = (typeof window !== 'undefined' && window.__wall) || {};
   return {
     on:     (K.on !== false),                          // master A/B for the whole shield
-    margin: (K.margin != null) ? +K.margin : 0,        // uniform inflation of the rectangle
+    margin: (K.margin != null) ? +K.margin : 0,        // uniform inflation of the silhouette
     fx:     (K.fx !== false),                          // ripple + light on absorb
+    scale:  (K.scale != null) ? +K.scale : 4,          // ⭐ 4x, per the owner
+    bulge:  (K.bulge != null) ? +K.bulge : 0.5,        // lens curvature, as a fraction of half-width
   };
+}
+function _wallHalf() {
+  const K = _wallKnobs();
+  return { w: _WALL_BASE_HALF_W * K.scale, h: _WALL_BASE_HALF_H * K.scale };
+}
+// A unit contact lens: rim circle of radius 1 lying in the z = 0 plane, bulging toward +Z (which
+// lookAt() aims down the deployer's facing, so the convex face is the one pointing at the enemy).
+// Cached and shared - every wall scales this one geometry, where the old code allocated a fresh
+// BoxGeometry + EdgesGeometry per spawn and never disposed either.
+let _WALL_LENS_GEO = null;
+let _WALL_RIM_GEO = null;
+function _wallLensGeometry() {
+  if (_WALL_LENS_GEO) return _WALL_LENS_GEO;
+  const arc = 0.45;                                   // polar half-angle of the cap: shallow = lens
+  const g = new THREE.SphereGeometry(1, 64, 20, 0, Math.PI * 2, 0, arc);
+  g.rotateX(Math.PI / 2);                             // cap opens along +Z
+  const k = 1 / Math.sin(arc);                        // normalise the rim to radius 1
+  g.scale(k, k, k);
+  g.translate(0, 0, -Math.cos(arc) * k);              // drop the rim onto z = 0
+  _WALL_LENS_GEO = g;
+  return g;
+}
+function _wallRimGeometry() {
+  if (_WALL_RIM_GEO) return _WALL_RIM_GEO;
+  const pts = [];
+  for (let i = 0; i <= 72; i++) {
+    const a = (i / 72) * Math.PI * 2;
+    pts.push(new THREE.Vector3(Math.cos(a), Math.sin(a), 0));
+  }
+  _WALL_RIM_GEO = new THREE.BufferGeometry().setFromPoints(pts);
+  return _WALL_RIM_GEO;
 }
 // The mesh teardown was copy-pasted at four sites and they had already drifted - only two of them
 // disposed plasmaMesh, so the cyan backing glow leaked into the scene for the rest of the match
@@ -72364,9 +72458,16 @@ function _wallBlockSegment(from, to, shooterTeam) {
     if (_wbX.lengthSq() < 0.001) _wbX.set(1, 0, 0); else _wbX.normalize();
     _wbY.crossVectors(n, _wbX).normalize();
     _wbRel.subVectors(_wbPt, eff.position);
+    // (v42.18) ELLIPSE, not a rectangle - the panel is a contact lens now and a lens has no
+    // corners. Extents are read from the EFFECT, not from the live knob, so changing
+    // window.__wall.scale mid-match can never desync a standing wall's hit test from its mesh.
     const _wbM = _wallKnobs().margin;
-    if (Math.abs(_wbRel.dot(_wbX)) > _WALL_HALF_W + _wbM ||
-        Math.abs(_wbRel.dot(_wbY)) > _WALL_HALF_H + _wbM) continue;
+    const _wbHalf = _wallHalf();
+    const _wbHW = ((eff.halfW != null) ? eff.halfW : _wbHalf.w) + _wbM;
+    const _wbHH = ((eff.halfH != null) ? eff.halfH : _wbHalf.h) + _wbM;
+    const _wbEx = _wbRel.dot(_wbX) / _wbHW;
+    const _wbEy = _wbRel.dot(_wbY) / _wbHH;
+    if (_wbEx * _wbEx + _wbEy * _wbEy > 1) continue;
     if (!best || t < best.dist) {
       best = { eff, dist: t, x: _wbPt.x, y: _wbPt.y, z: _wbPt.z };
     }
@@ -94009,6 +94110,13 @@ function _lssEndlessStasisSpot(aliveFields) {
   const T = game.sandwichTerrain; if (!T || !T.ON) return null;
   const p = (typeof player !== 'undefined') ? player.position : null;
   if (!p) return null;
+  // ⭐ (v42.19) DIFFICULTY. Owner: "put none in hard mode, less in medium". The gate is the
+  // fraction of halls that qualify; 0 makes every hall fail, so spawnStasisField simply returns
+  // early on each 30 s tick - no orphan state, no special case anywhere else.
+  const _gate = (typeof window !== 'undefined' && window.__estasis && window.__estasis.gate != null)
+    ? +window.__estasis.gate
+    : ((run.stasisGate != null) ? run.stasisGate : 0.42);
+  if (!(_gate > 0)) return null;
   let best = null, bestD2 = Infinity;
   for (let i = 0; i < run.segs.length; i++) {
     const seg = run.segs[i];
@@ -94016,9 +94124,19 @@ function _lssEndlessStasisSpot(aliveFields) {
     // Never behind the pilot's tracked progress — a pickup back down the
     // cavern is a pickup nobody will ever fly to.
     if (run.progGid >= 0 && seg.gid < run.progGid) continue;
-    if (_lssEndlessBoltHash(seg.gid, 41) >= 0.42) continue;   // rarity gate, ~1 hall in 2.4
+    if (_lssEndlessBoltHash(seg.gid, 41) >= _gate) continue;   // rarity gate (difficulty-scaled)
     const s = seg.sph;
-    const dx = s.cx - p.x, dy = s.cy - p.y, dz = s.cz - p.z;
+    // ⚠⚠ (v42.19) THE BUG THAT MADE ENDLESS STASIS FIELDS DEAD. `seg.sph` is built from the FLAT
+    // hall centre (`sph = { cx: hcF.x, ... }` where hcF is the f-prefixed flat point, and it is
+    // pushed straight into game.levelSpheres, which is a flat-space table). `player.position` is
+    // WORLD. Endless is always endless_bend, so the two spaces diverge by kilometres as soon as
+    // the route pitches - and the [900, 9000] band below then rejects essentially every hall.
+    // It "worked" only in the first ~3.5 km, where the route is level and flat == world, which is
+    // exactly why it was never caught. Map the centre to world ONCE and use it for both tests.
+    // (_bendToWorld returns a fresh object when no `out` is passed, so this is safe to hold -
+    // unlike _bendUnmap / _bendMapPoint, which hand back shared scratch.)
+    const wc = _bendToWorld(s.cx, s.cy, s.cz);
+    const dx = wc.x - p.x, dy = wc.y - p.y, dz = wc.z - p.z;
     const d2 = dx * dx + dy * dy + dz * dz;
     // Not on top of the pilot (900u) and inside the reachable band (9000u).
     // The 9000 ceiling is load-bearing, not cosmetic: the route-window prune
@@ -94033,7 +94151,8 @@ function _lssEndlessStasisSpot(aliveFields) {
     let taken = false;
     for (let f = 0; f < aliveFields.length; f++) {
       const q = aliveFields[f].position;
-      const qx = q.x - s.cx, qy = q.y - s.cy, qz = q.z - s.cz;
+      // live field positions are WORLD, so compare against the world-mapped centre
+      const qx = q.x - wc.x, qy = q.y - wc.y, qz = q.z - wc.z;
       if (qx * qx + qy * qy + qz * qz < s.r * s.r) { taken = true; break; }
     }
     if (taken) continue;
@@ -94058,12 +94177,18 @@ function _lssEndlessStasisSpot(aliveFields) {
     if (cy < gy) return null;
     y = gy + (cy - gy) * (0.30 + 0.25 * _lssEndlessBoltHash(gid, 53));
     y = Math.max(gy, Math.min(cy, y));
-    if (typeof worldSDF === 'function') {
-      for (let k = 0; k < 6 && worldSDF(x, y, z) > -60; k++) y -= 230;
-      if (worldSDF(x, y, z) > -60) return null;
+    // ⚠ _flatSDF, NOT worldSDF: worldSDF UNBENDS whatever it is handed (`_bendUnmap` at its top),
+    // so feeding it these flat x/y/z double-unbends and reads the density of somewhere else
+    // entirely. The clearance clamp above is already correct - _stGroundYCarved / _stCeilYCarved
+    // are flat-space functions taking flat x/z - so only the probe and the return needed fixing.
+    if (typeof _flatSDF === 'function') {
+      for (let k = 0; k < 6 && _flatSDF(x, y, z) > -60; k++) y -= 230;
+      if (_flatSDF(x, y, z) > -60) return null;
     }
   } catch (_) { return null; }
-  return new THREE.Vector3(x, y, z);
+  // The caller (instantiateStasisField) consumes this as a WORLD position.
+  const w = _bendToWorld(x, y, z);
+  return new THREE.Vector3(w.x, w.y, w.z);
 }
 
 function spawnStasisField() {
@@ -94404,6 +94529,11 @@ function updateStasisFields(dt) {
             field.chargingTeam = player.team;
             field._championChargeStartShield = null;
             game.playerInChampionStasis = true;
+            // (v42.19) CAPTURE FIELDS RESCUE YOU TOO. game.playerInChampionStasis hard-returns out of
+            // updatePlayerStasis before its timer branch, so champion / assault / cyberpunk-city
+            // captures could never reach the un-doom. Idempotent, so claiming and then completing
+            // both calling it is harmless.
+            _playerUndoom('champion-claim');
             const w = document.getElementById('stasis-warning');
             const v = document.getElementById('stasis-vignette');
             if (w) w.style.display = 'block';
@@ -94535,8 +94665,49 @@ function updateRoomFog(dt) {
   scene.fog.density += (target - scene.fog.density) * k;
 }
 
+// ⭐⭐ (v42.19) ONE DOOMED RESCUE, CALLED FROM EVERY FIELD. Owner: "make them able to bring you
+// out of doomed state (in any mode)". The rescue already existed - but ONLY on the regular
+// shield-pickup path, at the end of updatePlayerStasis, and ONLY after the full 3 s charge. Every
+// CAPTURE field (champion, assault, cyberpunk city, overworld cities) sets
+// game.playerInChampionStasis, which hard-returns out of updatePlayerStasis before the timer
+// branch is ever reached, so those four modes could never un-doom you at all.
+//
+// ⚠ THE PLAYER'S DOOM IS NOT COSMETIC AND IT NEVER EXPIRES. Unlike a bot (which has a real 10 s
+// doomTimer death clock), player.doomTimer is decremented and read NOWHERE - doom is a permanent
+// latch that healing does not clear. While it is set, checkExecutions lets ANY enemy inside
+// hullLength * 1.2 kill you outright through hull, shield and overshield. So this is a genuine
+// rescue, not a UI nicety.
+//
+// ⚠ THE HEAL AND ITS ORDER ARE LOAD-BEARING, NOT STYLE. Clear the flag without lifting health
+// above the 15% trigger and the very next damage tick re-arms doom - and ANN.doomed() has a 30 s
+// cooldown, so that second, real doom is SILENT. A flapping flag also corrupts the music restore
+// (musicEnterMode stashes _patternBeforeDoomed; a second entry stashes 'doomed' itself and the
+// phrygian dirge is then restored under normal play). Math.max, never a plain assign, so a pilot
+// already healed above the safe line is not pushed back DOWN to it.
+function _playerUndoom(reason) {
+  if (typeof player === 'undefined' || !player || !player.doomed) return false;
+  const _dp = (typeof LSS !== 'undefined' && LSS.DOOMED_HEALTH_PCT) ? LSS.DOOMED_HEALTH_PCT : 0.15;
+  const safeFrac = Math.min(1.0, _dp * 1.10);
+  player.health = Math.max(player.health, player.maxHealth * safeFrac);
+  player.doomed = false;
+  player.doomTimer = 0;
+  if (player.shipState === 'doomed') player.shipState = 'flying';
+  // Everything else that reads the doomed state polls it fresh every frame - the postFX warp
+  // uniform, the HUD vignette/arc, the hull dim, the heat-trail suppression, the music mode and
+  // the peer mirror in the state broadcast - so the world corrects itself within a frame without
+  // any of them being poked here. Do NOT hand-write the postFX uniform to 0: it fights the
+  // every-frame lerp and the screenshot save/restore pair.
+  try { if (typeof window !== 'undefined' && window.__estasis && window.__estasis.log) console.log('[undoom]', reason); } catch (_) {}
+  return true;
+}
+
 function enterStasis(field) {
   game.playerInStasis = true;
+  // (v42.19) ON ENTRY, not on completion. Entering a field zeroes your velocity, and while doomed
+  // any enemy that touches you is an instant execution - so waiting out the 3 s charge meant a
+  // doomed pilot could be executed INSIDE the very thing that was rescuing them. The field
+  // destroys itself on contact, so there is nothing to farm here.
+  _playerUndoom('stasis-enter');
   game.playerStasisTimer = game.playerStasisDuration;
   game.playerPreStasisVelocity = player.velocity.clone();
   player.velocity.set(0, 0, 0); 
@@ -94607,13 +94778,8 @@ function updatePlayerStasis(dt) {
     player.shield = player.maxShield; 
     document.getElementById('stasis-warning').style.display = 'none';
     document.getElementById('stasis-vignette').style.display = 'none';
-    if (player.doomed && typeof LSS !== 'undefined' && LSS.DOOMED_HEALTH_PCT) {
-      const safeFrac = Math.min(1.0, LSS.DOOMED_HEALTH_PCT * 1.10);
-      player.health = Math.max(player.health, player.maxHealth * safeFrac);
-      player.doomed = false;
-      player.doomTimer = 0;
-      if (player.shipState === 'doomed') player.shipState = 'flying';
-    }
+    // (v42.19) was an inline copy of exactly this; now the shared helper.
+    _playerUndoom('stasis-complete');
   }
 }
 

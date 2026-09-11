@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.17';
+const LSS_BUILD = '42.19';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2910,6 +2910,11 @@ const _EAEGIS_DIST_BONUS = 250;
 function _endlessLivesCapFor(startLives) { return startLives * 2; }
 const _EAEGIS_RANK_XP = 100;
 const _EAEGIS_XP_MUL = { easy: 1.0, medium: 0.7, hard: 0.5 };
+const _ESTASIS_GATE = { easy: 0.42, medium: 0.21, hard: 0 };
+function _endlessStasisGateFor(d) {
+  const g = _ESTASIS_GATE[d];
+  return (typeof g === 'number' && g >= 0) ? g : _ESTASIS_GATE.medium;
+}
 function _endlessAegisXpMulFor(d) {
   const m = _EAEGIS_XP_MUL[d];
   return (typeof m === 'number' && m > 0) ? m : _EAEGIS_XP_MUL.medium;
@@ -2931,6 +2936,7 @@ const EndlessMode = {
     try { run.difficulty = (typeof _getStoredDifficulty === 'function') ? _getStoredDifficulty() : 'hard'; } catch (_) { run.difficulty = 'hard'; }
     try { run.lives = _endlessLivesFor(run.difficulty); } catch (_) { run.lives = 1; }
     run.boltXp = Math.round(_EAEGIS_RANK_XP * _endlessAegisXpMulFor(run.difficulty));
+    try { run.stasisGate = _endlessStasisGateFor(run.difficulty); } catch (_) { run.stasisGate = _ESTASIS_GATE.medium; }
     run.startLives = run.lives; run.livesMax = _endlessLivesCapFor(run.lives);
     run.dist = 0; run.progGid = -1; run.progT = 0; run.over = false; run.overT = 0;
     run.lastHall = { x: 0, y: 80, z: 0 };
@@ -3924,6 +3930,7 @@ if (typeof window !== 'undefined') window.__endlessMotes = function () {
     return out;
   } catch (e) { return String(e && e.stack || e); }
 };
+try { if (typeof window !== 'undefined') window.__estasis = window.__estasis || { gate: null, bots: false, log: false }; } catch (_) {}
 if (typeof window !== 'undefined') window.__endlessStasis = function () {
   try {
     const run = game.endlessRun; if (!run) return null;
@@ -3933,7 +3940,8 @@ if (typeof window !== 'undefined') window.__endlessStasis = function () {
       let hallGid = null;
       for (let i = 0; i < run.segs.length; i++) {
         const s = run.segs[i].sph; if (!s) continue;
-        const dx = f.position.x - s.cx, dy = f.position.y - s.cy, dz = f.position.z - s.cz;
+        const _wc = _bendToWorld(s.cx, s.cy, s.cz);
+        const dx = f.position.x - _wc.x, dy = f.position.y - _wc.y, dz = f.position.z - _wc.z;
         if (dx * dx + dy * dy + dz * dz < s.r * s.r) { hallGid = run.segs[i].gid; break; }
       }
       return { x: Math.round(f.position.x), y: Math.round(f.position.y), z: Math.round(f.position.z),
@@ -3943,8 +3951,9 @@ if (typeof window !== 'undefined') window.__endlessStasis = function () {
     const halls = [];
     for (let i = 0; i < run.segs.length; i++) {
       const seg = run.segs[i]; if (!seg.hall || !seg.sph) continue;
+      const _hw = _bendToWorld(seg.sph.cx, seg.sph.cy, seg.sph.cz);
       halls.push({ gid: seg.gid, r: Math.round(seg.sph.r),
-                   d: Math.round(Math.hypot(seg.sph.cx - p.x, seg.sph.cy - p.y, seg.sph.cz - p.z)),
+                   d: Math.round(Math.hypot(_hw.x - p.x, _hw.y - p.y, _hw.z - p.z)),
                    roll: +_lssEndlessBoltHash(seg.gid, 41).toFixed(3),
                    ahead: !(run.progGid >= 0 && seg.gid < run.progGid) });
     }
@@ -3954,6 +3963,11 @@ if (typeof window !== 'undefined') window.__endlessStasis = function () {
              shield: Math.round(player.shield), maxShield: player.maxShield,
              overShield: Math.round(player.overShield || 0),
              levelSpheres: game.levelSpheres.length, progGid: run.progGid,
+             difficulty: run.difficulty,
+             gate: ((window.__estasis && window.__estasis.gate != null) ? +window.__estasis.gate
+                    : (run.stasisGate != null ? run.stasisGate : 0.42)),
+             gateSnapshot: (run.stasisGate != null ? run.stasisGate : null),
+             bent: (typeof _bendOn === 'function') ? _bendOn() : null,
              fields, halls,
              spot: spot ? [Math.round(spot.x), Math.round(spot.y), Math.round(spot.z)] : null };
   } catch (e) { return String(e && e.stack || e); }
@@ -7217,39 +7231,36 @@ function tickScanlineTexture() {
 }
 
 function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast) {
-  const wallGeo = new THREE.BoxGeometry(400, 300, 25);
-  const wallMat = new THREE.MeshBasicMaterial({
-    color: 0x44ccff, transparent: true, opacity: 0.35,
-    side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
-    map: getScanlineTexture(),
-  });
-  const hexHologramMat = _makeHexHologramMaterial(LSS.CLASS_COLORS.TRACKER);
-  const wallMesh = new THREE.Mesh(wallGeo, hexHologramMat);
+  const _wH = _wallHalf();
+  const _wK = _wallKnobs();
+  const wallMesh = new THREE.Mesh(_wallLensGeometry(), _makeHexHologramMaterial(LSS.CLASS_COLORS.TRACKER));
   wallMesh.position.copy(pos);
   wallMesh.lookAt(pos.clone().add(dir));
+  wallMesh.scale.set(_wH.w, _wH.h, _wH.w * _wK.bulge);
   scene.add(wallMesh);
   let plasmaMesh = null;
   if (typeof _makeFXMaterial === 'function') {
-    const plasmaGeo = new THREE.BoxGeometry(390, 290, 18);
     const plasmaMat = _makeFXMaterial('plasma_amber');
     if (plasmaMat.uniforms && plasmaMat.uniforms.uPosScale) {
-      plasmaMat.uniforms.uPosScale.value = 1.0 / 200.0;
+      plasmaMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _wH.w);
     }
-    plasmaMesh = new THREE.Mesh(plasmaGeo, plasmaMat);
+    plasmaMesh = new THREE.Mesh(_wallLensGeometry(), plasmaMat);
     plasmaMesh.position.copy(pos);
     plasmaMesh.lookAt(pos.clone().add(dir));
-    plasmaMesh.renderOrder = 0;  
+    plasmaMesh.scale.set(_wH.w * 0.97, _wH.h * 0.97, _wH.w * _wK.bulge * 0.94);
+    plasmaMesh.renderOrder = 0;
     scene.add(plasmaMesh);
   }
-  const edgeGeo = new THREE.EdgesGeometry(wallGeo);
   const edgeMat = new THREE.LineBasicMaterial({ color: 0xffcc77, transparent: true, opacity: 0.6 });
-  const edgeMesh = new THREE.LineSegments(edgeGeo, edgeMat);
+  const edgeMesh = new THREE.Line(_wallRimGeometry(), edgeMat);
   edgeMesh.position.copy(pos);
   edgeMesh.lookAt(pos.clone().add(dir));
+  edgeMesh.scale.set(_wH.w, _wH.h, 1);
   scene.add(edgeMesh);
   game.worldEffects.push({
     type: 'particle_wall', position: pos.clone(), direction: dir.clone(),
     hp: 10000, maxHp: 10000, timer: 10, owner, team,
+    halfW: _wH.w, halfH: _wH.h,
     mesh: wallMesh, edgeMesh, plasmaMesh, spawnTime: game.time,
     ownerPeerId, netId,
   });
@@ -25095,6 +25106,7 @@ function _owLocalFieldUI(dt) {
   if (inField && OW._fieldUI !== inField.idx) {
     OW._fieldUI = inField.idx;
     game.playerInChampionStasis = true;
+    try { if (typeof _playerUndoom === 'function') _playerUndoom('ow-field'); } catch (_) {}
     try { const w = document.getElementById('stasis-warning'); const v = document.getElementById('stasis-vignette'); if (w) w.style.display = 'block'; if (v) v.style.display = 'block'; } catch (_) {}
     _owBanner('CLAIMING', 'Stay on the dot to take ' + inField.name);
   } else if (!inField && OW._fieldUI >= 0) _owFieldUIOff();
@@ -32607,6 +32619,13 @@ class Projectile {
       if (_pjHit && _pjHit.eff) {
         const eff = _pjHit.eff;
         const intersect = new THREE.Vector3(_pjHit.x, _pjHit.y, _pjHit.z);
+        if (this.isArcWave) {
+          try {
+            if (typeof spawnExplosion === 'function') spawnExplosion(intersect, 20);
+            _wallImpactFX(eff, intersect.x, intersect.y, intersect.z);
+          } catch (_) {}
+          _wallDestroy(eff);
+        } else {
         _wallHitRipple(eff, intersect.x, intersect.y, intersect.z, this.damage);
         spawnImpactSparks(intersect, 6);
         this.position.copy(intersect);
@@ -32614,6 +32633,7 @@ class Projectile {
         this.spawnImpactExplosion(intersect);
         this.destroy();
         return;
+        }
       }
     }
 
@@ -32690,14 +32710,9 @@ class Projectile {
           if (this.isArcWave) {
             for (let we = game.worldEffects.length - 1; we >= 0; we--) {
               const eff = game.worldEffects[we];
-              if (eff.type === 'particle_wall' && eff.team !== player.team && this.position.distanceToSquared(eff.position) < 400 * 400) {
-                eff.hp = 0; eff.timer = 0;
-                if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-                if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
-                if (eff.plasmaMesh && eff.plasmaMesh.parent) {
-                  scene.remove(eff.plasmaMesh);
-                  if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
-                }
+              const _sbR = Math.max(400, (eff.halfW != null ? eff.halfW : 400) * 0.75);
+              if (eff.type === 'particle_wall' && eff.team !== player.team && this.position.distanceToSquared(eff.position) < _sbR * _sbR) {
+                _wallDestroy(eff);
                 spawnExplosion(eff.position, 20);
               }
             }
@@ -48372,15 +48387,44 @@ const _spColTest = new THREE.Vector3();
 const _spColTemp = new THREE.Vector3();
 const _hsToTgt = new THREE.Vector3();
 const _spToTgt = new THREE.Vector3();
-const _WALL_HALF_W = 200;   // half of BoxGeometry(400, 300, 25) in the spawn helper
-const _WALL_HALF_H = 150;
+const _WALL_BASE_HALF_W = 200;
+const _WALL_BASE_HALF_H = 150;
 function _wallKnobs() {
   const K = (typeof window !== 'undefined' && window.__wall) || {};
   return {
     on:     (K.on !== false),                          // master A/B for the whole shield
-    margin: (K.margin != null) ? +K.margin : 0,        // uniform inflation of the rectangle
+    margin: (K.margin != null) ? +K.margin : 0,        // uniform inflation of the silhouette
     fx:     (K.fx !== false),                          // ripple + light on absorb
+    scale:  (K.scale != null) ? +K.scale : 4,          // ⭐ 4x, per the owner
+    bulge:  (K.bulge != null) ? +K.bulge : 0.5,        // lens curvature, as a fraction of half-width
   };
+}
+function _wallHalf() {
+  const K = _wallKnobs();
+  return { w: _WALL_BASE_HALF_W * K.scale, h: _WALL_BASE_HALF_H * K.scale };
+}
+let _WALL_LENS_GEO = null;
+let _WALL_RIM_GEO = null;
+function _wallLensGeometry() {
+  if (_WALL_LENS_GEO) return _WALL_LENS_GEO;
+  const arc = 0.45;                                   // polar half-angle of the cap: shallow = lens
+  const g = new THREE.SphereGeometry(1, 64, 20, 0, Math.PI * 2, 0, arc);
+  g.rotateX(Math.PI / 2);                             // cap opens along +Z
+  const k = 1 / Math.sin(arc);                        // normalise the rim to radius 1
+  g.scale(k, k, k);
+  g.translate(0, 0, -Math.cos(arc) * k);              // drop the rim onto z = 0
+  _WALL_LENS_GEO = g;
+  return g;
+}
+function _wallRimGeometry() {
+  if (_WALL_RIM_GEO) return _WALL_RIM_GEO;
+  const pts = [];
+  for (let i = 0; i <= 72; i++) {
+    const a = (i / 72) * Math.PI * 2;
+    pts.push(new THREE.Vector3(Math.cos(a), Math.sin(a), 0));
+  }
+  _WALL_RIM_GEO = new THREE.BufferGeometry().setFromPoints(pts);
+  return _WALL_RIM_GEO;
 }
 function _wallDestroy(eff) {
   if (!eff) return;
@@ -48434,8 +48478,12 @@ function _wallBlockSegment(from, to, shooterTeam) {
     _wbY.crossVectors(n, _wbX).normalize();
     _wbRel.subVectors(_wbPt, eff.position);
     const _wbM = _wallKnobs().margin;
-    if (Math.abs(_wbRel.dot(_wbX)) > _WALL_HALF_W + _wbM ||
-        Math.abs(_wbRel.dot(_wbY)) > _WALL_HALF_H + _wbM) continue;
+    const _wbHalf = _wallHalf();
+    const _wbHW = ((eff.halfW != null) ? eff.halfW : _wbHalf.w) + _wbM;
+    const _wbHH = ((eff.halfH != null) ? eff.halfH : _wbHalf.h) + _wbM;
+    const _wbEx = _wbRel.dot(_wbX) / _wbHW;
+    const _wbEy = _wbRel.dot(_wbY) / _wbHH;
+    if (_wbEx * _wbEx + _wbEy * _wbEy > 1) continue;
     if (!best || t < best.dist) {
       best = { eff, dist: t, x: _wbPt.x, y: _wbPt.y, z: _wbPt.z };
     }
@@ -64726,20 +64774,25 @@ function _lssEndlessStasisSpot(aliveFields) {
   const T = game.sandwichTerrain; if (!T || !T.ON) return null;
   const p = (typeof player !== 'undefined') ? player.position : null;
   if (!p) return null;
+  const _gate = (typeof window !== 'undefined' && window.__estasis && window.__estasis.gate != null)
+    ? +window.__estasis.gate
+    : ((run.stasisGate != null) ? run.stasisGate : 0.42);
+  if (!(_gate > 0)) return null;
   let best = null, bestD2 = Infinity;
   for (let i = 0; i < run.segs.length; i++) {
     const seg = run.segs[i];
     if (!seg.hall || !seg.sph) continue;
     if (run.progGid >= 0 && seg.gid < run.progGid) continue;
-    if (_lssEndlessBoltHash(seg.gid, 41) >= 0.42) continue;   // rarity gate, ~1 hall in 2.4
+    if (_lssEndlessBoltHash(seg.gid, 41) >= _gate) continue;   // rarity gate (difficulty-scaled)
     const s = seg.sph;
-    const dx = s.cx - p.x, dy = s.cy - p.y, dz = s.cz - p.z;
+    const wc = _bendToWorld(s.cx, s.cy, s.cz);
+    const dx = wc.x - p.x, dy = wc.y - p.y, dz = wc.z - p.z;
     const d2 = dx * dx + dy * dy + dz * dz;
     if (d2 < 900 * 900 || d2 > 9000 * 9000) continue;
     let taken = false;
     for (let f = 0; f < aliveFields.length; f++) {
       const q = aliveFields[f].position;
-      const qx = q.x - s.cx, qy = q.y - s.cy, qz = q.z - s.cz;
+      const qx = q.x - wc.x, qy = q.y - wc.y, qz = q.z - wc.z;
       if (qx * qx + qy * qy + qz * qz < s.r * s.r) { taken = true; break; }
     }
     if (taken) continue;
@@ -64757,12 +64810,13 @@ function _lssEndlessStasisSpot(aliveFields) {
     if (cy < gy) return null;
     y = gy + (cy - gy) * (0.30 + 0.25 * _lssEndlessBoltHash(gid, 53));
     y = Math.max(gy, Math.min(cy, y));
-    if (typeof worldSDF === 'function') {
-      for (let k = 0; k < 6 && worldSDF(x, y, z) > -60; k++) y -= 230;
-      if (worldSDF(x, y, z) > -60) return null;
+    if (typeof _flatSDF === 'function') {
+      for (let k = 0; k < 6 && _flatSDF(x, y, z) > -60; k++) y -= 230;
+      if (_flatSDF(x, y, z) > -60) return null;
     }
   } catch (_) { return null; }
-  return new THREE.Vector3(x, y, z);
+  const w = _bendToWorld(x, y, z);
+  return new THREE.Vector3(w.x, w.y, w.z);
 }
 
 function spawnStasisField() {
@@ -65022,6 +65076,7 @@ function updateStasisFields(dt) {
             field.chargingTeam = player.team;
             field._championChargeStartShield = null;
             game.playerInChampionStasis = true;
+            _playerUndoom('champion-claim');
             const w = document.getElementById('stasis-warning');
             const v = document.getElementById('stasis-vignette');
             if (w) w.style.display = 'block';
@@ -65129,8 +65184,21 @@ function updateRoomFog(dt) {
   scene.fog.density += (target - scene.fog.density) * k;
 }
 
+function _playerUndoom(reason) {
+  if (typeof player === 'undefined' || !player || !player.doomed) return false;
+  const _dp = (typeof LSS !== 'undefined' && LSS.DOOMED_HEALTH_PCT) ? LSS.DOOMED_HEALTH_PCT : 0.15;
+  const safeFrac = Math.min(1.0, _dp * 1.10);
+  player.health = Math.max(player.health, player.maxHealth * safeFrac);
+  player.doomed = false;
+  player.doomTimer = 0;
+  if (player.shipState === 'doomed') player.shipState = 'flying';
+  try { if (typeof window !== 'undefined' && window.__estasis && window.__estasis.log) console.log('[undoom]', reason); } catch (_) {}
+  return true;
+}
+
 function enterStasis(field) {
   game.playerInStasis = true;
+  _playerUndoom('stasis-enter');
   game.playerStasisTimer = game.playerStasisDuration;
   game.playerPreStasisVelocity = player.velocity.clone();
   player.velocity.set(0, 0, 0); 
@@ -65174,13 +65242,7 @@ function updatePlayerStasis(dt) {
     player.shield = player.maxShield; 
     document.getElementById('stasis-warning').style.display = 'none';
     document.getElementById('stasis-vignette').style.display = 'none';
-    if (player.doomed && typeof LSS !== 'undefined' && LSS.DOOMED_HEALTH_PCT) {
-      const safeFrac = Math.min(1.0, LSS.DOOMED_HEALTH_PCT * 1.10);
-      player.health = Math.max(player.health, player.maxHealth * safeFrac);
-      player.doomed = false;
-      player.doomTimer = 0;
-      if (player.shipState === 'doomed') player.shipState = 'flying';
-    }
+    _playerUndoom('stasis-complete');
   }
 }
 
