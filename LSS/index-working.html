@@ -4735,7 +4735,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.79';
+const LSS_BUILD = '42.83';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -44604,6 +44604,7 @@ function resolveCollision(pos, velocity, radius, entity) {
   if (game.hubCity) _hubCityCollide(pos, velocity, radius);
   if (_carrier.obj) _carrierCollide(pos, velocity, radius);   // (v37.77) the flying carrier is solid
   if (typeof _owCollide === 'function') _owCollide(pos, velocity, radius);   // (v38.78) overworld cities, their carriers, the leviathan
+  if (typeof _wildCollide === 'function') _wildCollide(pos, velocity, radius);   // (v42.82) the wild leviathan families
 
   const CONTAIN_RANGE = radius * 2.5;
   const CONTAIN_STRENGTH = 12000;
@@ -50441,7 +50442,9 @@ class Projectile {
       if (this.isSonar && typeof _spawnSonarPulse === 'function') {
         _spawnSonarPulse(this.position, this.owner);
       }
-      this.destroy(); return;
+      // (v42.81) silent: running out of lifetime is not an impact. The sonar pulse above is the one
+      // deliberate exception and keeps its own effect.
+      this.destroy(true); return;
     }
 
     if (this.smokeTrail && this.trailRibbon) {
@@ -51061,6 +51064,21 @@ class Projectile {
         let isHit;
         if (bot.isOwBoss && typeof bot.contains === 'function') {
           isHit = bot.contains(this.position, 30);   // (v38.88) the leviathan: its column, not a sphere round its centre
+        } else if (bot.isOwCarrier && typeof bot.hullDist === 'function') {
+          // ⚠⚠ (v42.80) A CITY CARRIER IS NOT A SPHERE EITHER. Owner: "i was shooting at the
+          // carrier, but it looked like my shots were exploding before it hit the hull".
+          // v38.78 taught the HITSCAN path to march against the carrier's measured hull box (see
+          // the `bot.isOwCarrier` branch beside the leviathan's in the beam code) and v38.89 taught
+          // the area effects the same thing via `_bodyDist`/`hullDist` - but the PROJECTILE path was
+          // never given the branch, so bolts fell through to the two lines below.
+          // Both of those are far too generous for this hull. `_attach` deliberately republishes the
+          // chassis as a SQUARE footprint of the LONG axis ("the sphere paths get the LONG extent
+          // and the box path gets a square footprint that the mesh ray test then trims"), so on a
+          // 2400 x 900 x 300 carrier `hullLength` is ~2400 and the splash/shield/network branch
+          // detonates at `hullLength * 1.2` = ~2880 units from the CENTRE - well over a thousand
+          // units off the side of the hull, and nearly ten times its half-height from above.
+          // The carrier already knows its real box; ask it, exactly as the leviathan is asked.
+          isHit = bot.hullDist(this.position) <= 30;
         } else if (hasShield || _usesSplashSlop || this.isNetwork || this._cheapHit) {   // (v39.49) see the player-side site
           isHit = this.position.distanceToSquared(bot.position) < hitRadius * hitRadius;
         } else {
@@ -51304,7 +51322,9 @@ class Projectile {
     // you can fly (still bounded, just at the real flyable edge, not 1/10th of it).
     const s = (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
     if (Math.abs(this.position.x) > s || Math.abs(this.position.y) > s || Math.abs(this.position.z) > s) {
-      this.destroy();
+      // (v42.81) ...and silent here too. The note above already named this symptom - "missiles hit an
+      // invisible wall at the map edge" - and raised the bound, but left the explosion AT the bound.
+      this.destroy(true);
     }
   }
 
@@ -51482,7 +51502,22 @@ class Projectile {
     }
   }
 
-  destroy() {
+  // (v42.81) `silent` SKIPS THE IMPACT FX. Owner: "there was a glitch before where if you go too
+  // far, shots hit an invisible wall".
+  // It is not a wall - it is this function. destroy() fires the impact explosion unconditionally and
+  // EVERY ending routes through it, including the two that are not impacts at all: the 5 s lifetime
+  // timeout and the arena bound. Worse, the size branch below keys on `_hitShipBot`, which is null
+  // when nothing was hit - so a shot that hits NOTHING makes a BIGGER fireball (15, or 22 on
+  // thermite) than one that hits a hull (6/9) - and then `spawnWallRipple` fires, whose own comment
+  // below reads "Force-field wall ripple on WALL HITS ONLY". Its condition is `!this._hitShipBot`,
+  // which a timeout satisfies, so the game paints its holographic force-field membrane impact in
+  // empty air. The player's words are the literal truth: there IS a wall ripple, and there is
+  // nothing there. Because lifetime is fixed and speed constant, that locus is a sphere of fixed
+  // radius centred on the muzzle that travels with you - an invisible wall at a consistent distance.
+  // The file already knows the distinction: `_despawnProjectileSilent` below exists precisely
+  // because "destroy() ... intentionally spawns the impact explosion / thermite flame / wall
+  // ripple" - but it is only ever used for round transitions, never for a timeout.
+  destroy(silent) {
     this.alive = false;
     if (this.mesh && this.mesh.parent) {
       scene.remove(this.mesh);
@@ -51513,6 +51548,7 @@ class Projectile {
       if (this.trailRibbon.geometry) this.trailRibbon.geometry.dispose();
       if (this.trailRibbon.material) _lssRetainMat(this.trailRibbon.material);
     }
+    if (silent) return;   // (v42.81) ran out of legs / left the world: teardown only, no impact FX
     let _exPos = this.position;
     let _exSize = this.isPyroThermite ? 22 : 15;
     if (this._hitShipBot && this._hitShipBot.position && this._hitShipBot.chassis) {
@@ -59660,6 +59696,18 @@ const _WILD = {
   step: 24,             // walking speed                               (was 46)
   charge: 68,           // speed once provoked                         (was 120)
   anim: 0.45,           // walk-cycle rate; applied every frame, so it is live-tunable
+  // (v42.82) owner: "the monsters don't try to attack my ship when i attack them, and i can fly
+  // through them". Two separate gaps, both mine.
+  // ATTACK: a provoked animal walks at `charge` (68 u/s) after a ship that flies at 300+, so it
+  // could never arrive, and the only damage it had was contact. A ground creature that cannot
+  // reach you needs REACH - so an angry one spits at you, the way the arena leviathans do.
+  zapR: 3000,           // how far a provoked one can strike
+  zapEvery: 2.0,        // seconds between strikes
+  zapDmg: 240,          // per strike (a baby hits for 45% of this)
+  // SOLID: the ram pass in the player collision sweep is deliberately ONE-WAY ("we deliberately do
+  // NOT add monsters to the symmetric bounce list") - it deals ram damage and lets you pass
+  // straight through. These are animals standing on the ground, so they get a real push-out.
+  solid: 1,
   aggroR: 3400,         // how far it will follow what hit it
   loseR: 6000,          // past this it gives up
   deAggro: 15,          // seconds of peace before it settles down
@@ -59913,6 +59961,25 @@ class WildLeviathan {
         try { if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.touch * (this.baby ? 0.45 : 1), this); } catch (_) {}
       }
     }
+    // (v42.82) THE STRIKE. Contact alone meant a provoked animal had no way to answer a ship that
+    // simply flew above it at four times its top speed - which is the whole of "they don't try to
+    // attack my ship when i attack them". It is still ground-bound; what it gains is reach.
+    this._zapT = (this._zapT || 0) - dt;
+    if (this.aggro && this._zapT <= 0 && typeof player !== 'undefined' && player &&
+        player.shipState !== 'dead' && player.shipState !== 'spawning' && player.position) {
+      const _zd = player.position.distanceTo(this.position);
+      if (_zd < _WILD.zapR) {
+        this._zapT = _WILD.zapEvery * (0.8 + Math.random() * 0.4);
+        try {
+          const from = this.position.clone(); from.y += this.footOff * 0.7;
+          const to = player.position.clone();
+          const col = (this.def && this.def.ghost != null) ? this.def.ghost : 0x8ad8ff;
+          if (typeof spawnLightningBolt === 'function') spawnLightningBolt(from, to, col, 1.3, 3, 3, true, 0.9);
+          if (typeof playSpatialSound === 'function') playSpatialSound('explosion', from, { refDistance: 900, maxDistance: 14000 });
+          if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.zapDmg * (this.baby ? 0.45 : 1), this);
+        } catch (_) {}
+      }
+    }
   }
 
   // PROVOKED, NOT HOSTILE. This is the only thing that can make one angry, which is the whole of
@@ -59984,6 +60051,38 @@ class WildLeviathan {
   }
 }
 
+// (v42.82) YOU CANNOT FLY THROUGH AN ANIMAL. Mirrors OwCarrier.collide, but a sphere - these have
+// no oriented box and a creature reads fine as one. Hooked from the same place the city/carrier/
+// leviathan colliders are (see the _owCollide call in the movement sweep), so it applies to the
+// player exactly like any other solid thing in the world.
+// ⚠ The existing monster pass in that sweep is deliberately one-way ram damage and does NOT push
+// anything out - its own comment says so - which is why these were pass-through until now.
+function _wildCollide(pos, velocity, radius) {
+  const L = _WILD._list;
+  if (!L || !L.length || !_WILD.solid) return;
+  for (let i = 0; i < L.length; i++) {
+    const m = L[i];
+    if (!m || !m.alive || !m.position) continue;
+    const rr = (m.collisionRadius || 0) + (radius || 0);
+    const dx = pos.x - m.position.x, dy = pos.y - m.position.y, dz = pos.z - m.position.z;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 >= rr * rr) continue;
+    // (v42.82) DEAD CENTRE HAS NO DIRECTION. Skipping the degenerate case leaves a ship that ends up
+    // exactly on the animal's origin stuck inside it forever (measured: placed at the centre, it
+    // stayed at distance 0). Pick a direction instead - back along the ship's own travel if it has
+    // any, straight up if it does not - so there is always a way out.
+    let nx, ny, nz;
+    if (d2 < 1e-6) {
+      const vl = velocity ? Math.hypot(velocity.x, velocity.y, velocity.z) : 0;
+      if (vl > 1e-3) { nx = -velocity.x / vl; ny = -velocity.y / vl; nz = -velocity.z / vl; }
+      else { nx = 0; ny = 1; nz = 0; }
+    } else {
+      const d = Math.sqrt(d2); nx = dx / d; ny = dy / d; nz = dz / d;
+    }
+    pos.set(m.position.x + nx * rr, m.position.y + ny * rr, m.position.z + nz * rr);
+    if (velocity) { const vn = velocity.x * nx + velocity.y * ny + velocity.z * nz; if (vn < 0) { velocity.x -= nx * vn; velocity.y -= ny * vn; velocity.z -= nz * vn; } }
+  }
+}
 function _wildDispose() {
   if (_WILD._list) {
     for (const m of _WILD._list) { try { m.destroy(); } catch (_) {} }
@@ -75031,6 +75130,19 @@ function fireProjectile(origin, dir, w) {
   let _projDmg = w.damage;
   if (player.loadoutKey === 'PYRO' && typeof _pyroBoltMult === 'function') _projDmg *= _pyroBoltMult();
   const proj = new Projectile(origin, vel, _projDmg, _splash, 'player', projColor);
+  // (v42.81) A ROUND SHOULD REACH THE RANGE ON ITS CARD. Projectile has no maxRange at all - its only
+  // limit is `lifetime = 5` times a constant speed, so its reach is whatever that multiplies out to
+  // and has nothing to do with `w.range`. PYRO thermite at 600 u/s dies at 3000 units against an
+  // advertised 3800. Raise the lifetime to cover the card (never lower it).
+  // (!) This lengthens effective reach for projectile weapons - a balance change, not just a visual
+  // one. window.__projRange = 0 restores the flat 5 s exactly.
+  try {
+    const _pr = (typeof window !== 'undefined' && window.__projRange != null) ? +window.__projRange : 1;
+    if (_pr > 0 && w && w.range > 0) {
+      const _sp = vel.length();
+      if (_sp > 1) proj.lifetime = Math.max(proj.lifetime, (w.range * 1.05) / _sp);
+    }
+  } catch (_) {}
   // Pyro projectiles are fire sources (ignite gas clouds on pass-through)
   if (player.loadoutKey === 'PYRO') {
     proj.isFireSource = true;

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.79';
+const LSS_BUILD = '42.83';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -28702,6 +28702,7 @@ function resolveCollision(pos, velocity, radius, entity) {
   if (game.hubCity) _hubCityCollide(pos, velocity, radius);
   if (_carrier.obj) _carrierCollide(pos, velocity, radius);   // (v37.77) the flying carrier is solid
   if (typeof _owCollide === 'function') _owCollide(pos, velocity, radius);   // (v38.78) overworld cities, their carriers, the leviathan
+  if (typeof _wildCollide === 'function') _wildCollide(pos, velocity, radius);   // (v42.82) the wild leviathan families
 
   const CONTAIN_RANGE = radius * 2.5;
   const CONTAIN_STRENGTH = 12000;
@@ -32598,7 +32599,7 @@ class Projectile {
       if (this.isSonar && typeof _spawnSonarPulse === 'function') {
         _spawnSonarPulse(this.position, this.owner);
       }
-      this.destroy(); return;
+      this.destroy(true); return;
     }
 
     if (this.smokeTrail && this.trailRibbon) {
@@ -33047,6 +33048,8 @@ class Projectile {
         let isHit;
         if (bot.isOwBoss && typeof bot.contains === 'function') {
           isHit = bot.contains(this.position, 30);   // (v38.88) the leviathan: its column, not a sphere round its centre
+        } else if (bot.isOwCarrier && typeof bot.hullDist === 'function') {
+          isHit = bot.hullDist(this.position) <= 30;
         } else if (hasShield || _usesSplashSlop || this.isNetwork || this._cheapHit) {   // (v39.49) see the player-side site
           isHit = this.position.distanceToSquared(bot.position) < hitRadius * hitRadius;
         } else {
@@ -33222,7 +33225,7 @@ class Projectile {
 
     const s = (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
     if (Math.abs(this.position.x) > s || Math.abs(this.position.y) > s || Math.abs(this.position.z) > s) {
-      this.destroy();
+      this.destroy(true);
     }
   }
 
@@ -33372,7 +33375,7 @@ class Projectile {
     }
   }
 
-  destroy() {
+  destroy(silent) {
     this.alive = false;
     if (this.mesh && this.mesh.parent) {
       scene.remove(this.mesh);
@@ -33403,6 +33406,7 @@ class Projectile {
       if (this.trailRibbon.geometry) this.trailRibbon.geometry.dispose();
       if (this.trailRibbon.material) _lssRetainMat(this.trailRibbon.material);
     }
+    if (silent) return;   // (v42.81) ran out of legs / left the world: teardown only, no impact FX
     let _exPos = this.position;
     let _exSize = this.isPyroThermite ? 22 : 15;
     if (this._hitShipBot && this._hitShipBot.position && this._hitShipBot.chassis) {
@@ -39659,6 +39663,10 @@ const _WILD = {
   step: 24,             // walking speed                               (was 46)
   charge: 68,           // speed once provoked                         (was 120)
   anim: 0.45,           // walk-cycle rate; applied every frame, so it is live-tunable
+  zapR: 3000,           // how far a provoked one can strike
+  zapEvery: 2.0,        // seconds between strikes
+  zapDmg: 240,          // per strike (a baby hits for 45% of this)
+  solid: 1,
   aggroR: 3400,         // how far it will follow what hit it
   loseR: 6000,          // past this it gives up
   deAggro: 15,          // seconds of peace before it settles down
@@ -39866,6 +39874,22 @@ class WildLeviathan {
         try { if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.touch * (this.baby ? 0.45 : 1), this); } catch (_) {}
       }
     }
+    this._zapT = (this._zapT || 0) - dt;
+    if (this.aggro && this._zapT <= 0 && typeof player !== 'undefined' && player &&
+        player.shipState !== 'dead' && player.shipState !== 'spawning' && player.position) {
+      const _zd = player.position.distanceTo(this.position);
+      if (_zd < _WILD.zapR) {
+        this._zapT = _WILD.zapEvery * (0.8 + Math.random() * 0.4);
+        try {
+          const from = this.position.clone(); from.y += this.footOff * 0.7;
+          const to = player.position.clone();
+          const col = (this.def && this.def.ghost != null) ? this.def.ghost : 0x8ad8ff;
+          if (typeof spawnLightningBolt === 'function') spawnLightningBolt(from, to, col, 1.3, 3, 3, true, 0.9);
+          if (typeof playSpatialSound === 'function') playSpatialSound('explosion', from, { refDistance: 900, maxDistance: 14000 });
+          if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.zapDmg * (this.baby ? 0.45 : 1), this);
+        } catch (_) {}
+      }
+    }
   }
 
   takeDamage(dmg, attacker, hitPoint) {
@@ -39929,6 +39953,28 @@ class WildLeviathan {
   }
 }
 
+function _wildCollide(pos, velocity, radius) {
+  const L = _WILD._list;
+  if (!L || !L.length || !_WILD.solid) return;
+  for (let i = 0; i < L.length; i++) {
+    const m = L[i];
+    if (!m || !m.alive || !m.position) continue;
+    const rr = (m.collisionRadius || 0) + (radius || 0);
+    const dx = pos.x - m.position.x, dy = pos.y - m.position.y, dz = pos.z - m.position.z;
+    const d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 >= rr * rr) continue;
+    let nx, ny, nz;
+    if (d2 < 1e-6) {
+      const vl = velocity ? Math.hypot(velocity.x, velocity.y, velocity.z) : 0;
+      if (vl > 1e-3) { nx = -velocity.x / vl; ny = -velocity.y / vl; nz = -velocity.z / vl; }
+      else { nx = 0; ny = 1; nz = 0; }
+    } else {
+      const d = Math.sqrt(d2); nx = dx / d; ny = dy / d; nz = dz / d;
+    }
+    pos.set(m.position.x + nx * rr, m.position.y + ny * rr, m.position.z + nz * rr);
+    if (velocity) { const vn = velocity.x * nx + velocity.y * ny + velocity.z * nz; if (vn < 0) { velocity.x -= nx * vn; velocity.y -= ny * vn; velocity.z -= nz * vn; } }
+  }
+}
 function _wildDispose() {
   if (_WILD._list) {
     for (const m of _WILD._list) { try { m.destroy(); } catch (_) {} }
@@ -49911,6 +49957,13 @@ function fireProjectile(origin, dir, w) {
   let _projDmg = w.damage;
   if (player.loadoutKey === 'PYRO' && typeof _pyroBoltMult === 'function') _projDmg *= _pyroBoltMult();
   const proj = new Projectile(origin, vel, _projDmg, _splash, 'player', projColor);
+  try {
+    const _pr = (typeof window !== 'undefined' && window.__projRange != null) ? +window.__projRange : 1;
+    if (_pr > 0 && w && w.range > 0) {
+      const _sp = vel.length();
+      if (_sp > 1) proj.lifetime = Math.max(proj.lifetime, (w.range * 1.05) / _sp);
+    }
+  } catch (_) {}
   if (player.loadoutKey === 'PYRO') {
     proj.isFireSource = true;
     proj.isPyroThermite = true;
