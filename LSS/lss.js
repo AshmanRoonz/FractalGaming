@@ -9,12 +9,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.07';
+const LSS_BUILD = '42.08';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '38.96';   // (v38.96) lean mobile set ; c1seat hulls, cockpit1 placed by the owner   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '42.08';   // (v42.08) owner's BUILT-IN COCKPIT hulls (blaster/pyro/slayer/syphon/vortex v04, tracker v06, puncture v07) rebuilt through compress_glb (weld+quantize, join per material 74->21 prims, no re-simplify) + lean mobile set   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
