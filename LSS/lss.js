@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.57';
+const LSS_BUILD = '42.58';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -55155,7 +55155,8 @@ function _hmDrawAll(ctx, m, W, H, v) {
   a = P('coreBar');   if (a) _hmBar(ctx, a[0], fit, W, H, v.corePct, 10, _HUD_C.a_08, _HUD_C.a_08);
   a = P('energy');    if (a && v.energyPct != null)
                         _hmBar(ctx, a[0], fit, W, H, v.energyPct, 6,
-                               v.energyPct < 0.2 ? _HUD_C.r_09 : _HUD_C.c_08, _HUD_C.c_08);
+                               _nrgLowCol(v.energyPct, v.t || 0)
+                                 || (v.energyPct < 0.2 ? _HUD_C.r_09 : _HUD_C.c_08), _HUD_C.c_08);
 
   a = P('dash');
   if (a) {
@@ -55240,6 +55241,19 @@ function _hlA(hex, a) {
   const h = hex.charAt(0) === '#' ? hex.slice(1) : hex;
   const n = parseInt(h.length === 3 ? (h[0]+h[0]+h[1]+h[1]+h[2]+h[2]) : h, 16);
   return (_hlColCache[key] = 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')');
+}
+
+const _NRG_LOW = 0.20;
+function _nrgLowCol(pct, t) {
+  if (typeof player === 'undefined' || !player) return null;
+  if (player.loadoutKey !== 'VORTEX' && player.loadoutKey !== 'PYRO') return null;
+  if (!(typeof pct === 'number') || !(pct < _NRG_LOW)) return null;
+  const urg = Math.max(0, Math.min(1, 1 - pct / _NRG_LOW));
+  const k = 0.5 + 0.5 * Math.sin(t * (22 + 22 * urg));
+  const lift = (Math.round(k * 16) / 16) * (0.45 + 0.55 * urg);
+  const g = Math.round(0x3c + (0xe0 - 0x3c) * lift);
+  const b = Math.round(0x1e + (0xd0 - 0x1e) * lift);
+  return '#ff' + (g < 16 ? '0' : '') + g.toString(16) + (b < 16 ? '0' : '') + b.toString(16);
 }
 
 function _hlScale() {
@@ -56075,13 +56089,13 @@ function drawCircumpunctHUD() {
     let _nrg = null, _nrgCol = null;
     if (player.loadoutKey === 'VORTEX' && player.vortexMaxEnergy) {
       _nrg = player.vortexEnergy / player.vortexMaxEnergy;
-      if (_nrg < 0.2) _nrgCol = '#ff3c1e';
+      _nrgCol = _nrgLowCol(_nrg, t);
     } else if (player.loadoutKey === 'PUNCTURE') {
       _nrg = player.railgunCharge;
       _nrgCol = _nrg >= 1 ? '#ff5014' : '#ff7828';
     } else if (player.loadoutKey === 'PYRO' && player.thermalShieldMaxHP) {
       _nrg = player.thermalShieldHP / player.thermalShieldMaxHP;
-      _nrgCol = _nrg < 0.2 ? '#ff3c1e' : '#ff6a20';
+      _nrgCol = _nrgLowCol(_nrg, t) || '#ff6a20';   // (v42.58) was a flat '#ff3c1e' below 0.2
     } else if (player.loadoutKey === 'BLASTER' && player.powerShotCharging) {
       _nrg = player.powerShotCharge;
       _nrgCol = _nrg >= 1 ? '#ff5014' : '#ff7828';

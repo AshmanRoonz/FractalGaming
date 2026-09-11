@@ -4727,7 +4727,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.57';
+const LSS_BUILD = '42.58';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -82310,8 +82310,11 @@ function _hmDrawAll(ctx, m, W, H, v) {
                                     player.reloading ? _HUD_C.a_055 : _HUD_C.w_045, null);
   a = P('coreBar');   if (a) _hmBar(ctx, a[0], fit, W, H, v.corePct, 10, _HUD_C.a_08, _HUD_C.a_08);
   a = P('energy');    if (a && v.energyPct != null)
+                        // (v42.58) same low-power flash as the halo HUD - this is the path the 3D
+                        // cockpit takes, so the two must agree or the warning would depend on view.
                         _hmBar(ctx, a[0], fit, W, H, v.energyPct, 6,
-                               v.energyPct < 0.2 ? _HUD_C.r_09 : _HUD_C.c_08, _HUD_C.c_08);
+                               _nrgLowCol(v.energyPct, v.t || 0)
+                                 || (v.energyPct < 0.2 ? _HUD_C.r_09 : _HUD_C.c_08), _HUD_C.c_08);
 
   // ---- DASH PIPS -------------------------------------------------------
   // Six sockets are painted; a hull only has maxDashes of them, so the
@@ -82473,6 +82476,37 @@ function _hlA(hex, a) {
   const h = hex.charAt(0) === '#' ? hex.slice(1) : hex;
   const n = parseInt(h.length === 3 ? (h[0]+h[0]+h[1]+h[1]+h[2]+h[2]) : h, 16);
   return (_hlColCache[key] = 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')');
+}
+
+// (v42.58) NRG LOW-POWER FLASH. Owner: "on vortex and pyro, their NRG bars, can we make the
+// remainder of the bar flash and get brighter when it gets below 20%".
+//
+// ONLY THOSE TWO, and the gate lives here rather than at the two call sites so the rule is stated
+// once. They are the only loadouts whose NRG slot is a POOL THAT DRAINS - Vortex's energy and
+// Pyro's fire-shield HP. Puncture and Blaster put a CHARGE-UP meter in the same slot, where "below
+// 20%" just means the shot has barely started charging: flashing it would warn about nothing and
+// would fire on every single trigger pull.
+//
+// Returns null when it does not apply, so a call site reads `_nrgLowCol(pct, t) || <steady colour>`.
+// The returned colour is used BOTH as strokeStyle and as _hlArcBar's shadowColor, so the glow
+// brightens with the flash instead of staying a dull halo behind it - which is what makes it read
+// as "brighter" and not merely "blinking".
+const _NRG_LOW = 0.20;
+function _nrgLowCol(pct, t) {
+  if (typeof player === 'undefined' || !player) return null;
+  if (player.loadoutKey !== 'VORTEX' && player.loadoutKey !== 'PYRO') return null;
+  if (!(typeof pct === 'number') || !(pct < _NRG_LOW)) return null;
+  // Urgency ramps 0 -> 1 across the last fifth, and drives BOTH rate and lift: a slow 3.5 Hz amber
+  // nudge as you cross the line, a hard 7 Hz near-white strobe as it empties. One knob, so the two
+  // cannot disagree about how bad it is.
+  const urg = Math.max(0, Math.min(1, 1 - pct / _NRG_LOW));
+  const k = 0.5 + 0.5 * Math.sin(t * (22 + 22 * urg));
+  // Quantized like the core ready-pulse above: the steady state mints one string, not one a frame.
+  const lift = (Math.round(k * 16) / 16) * (0.45 + 0.55 * urg);
+  // #ff3c1e, the existing steady low-power red, lifted toward #ffe0d0.
+  const g = Math.round(0x3c + (0xe0 - 0x3c) * lift);
+  const b = Math.round(0x1e + (0xd0 - 0x1e) * lift);
+  return '#ff' + (g < 16 ? '0' : '') + g.toString(16) + (b < 16 ? '0' : '') + b.toString(16);
 }
 
 // (v36.19) FLAT-SCREEN HUD SCALER (owner: "do a flat screen HUD scaler, the HUD
@@ -83737,7 +83771,8 @@ function drawCircumpunctHUD() {
     let _nrg = null, _nrgCol = null;
     if (player.loadoutKey === 'VORTEX' && player.vortexMaxEnergy) {
       _nrg = player.vortexEnergy / player.vortexMaxEnergy;
-      if (_nrg < 0.2) _nrgCol = '#ff3c1e';
+      // (v42.58) was a flat '#ff3c1e' below 0.2 ; now it pulses and brightens as it empties
+      _nrgCol = _nrgLowCol(_nrg, t);
     } else if (player.loadoutKey === 'PUNCTURE') {
       _nrg = player.railgunCharge;
       _nrgCol = _nrg >= 1 ? '#ff5014' : '#ff7828';
@@ -83745,7 +83780,7 @@ function drawCircumpunctHUD() {
       // (v37.10) Fire Shield power pool — drains while held, regens over
       // 10s; fire-orange, deep red when nearly spent.
       _nrg = player.thermalShieldHP / player.thermalShieldMaxHP;
-      _nrgCol = _nrg < 0.2 ? '#ff3c1e' : '#ff6a20';
+      _nrgCol = _nrgLowCol(_nrg, t) || '#ff6a20';   // (v42.58) was a flat '#ff3c1e' below 0.2
     } else if (player.loadoutKey === 'BLASTER' && player.powerShotCharging) {
       _nrg = player.powerShotCharge;
       _nrgCol = _nrg >= 1 ? '#ff5014' : '#ff7828';
