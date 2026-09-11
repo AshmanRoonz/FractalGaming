@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.08';
+const LSS_BUILD = '42.16';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -5764,6 +5764,15 @@ const input = {
   // at the `cockpit1` eye marker) instead of the PNG cockpit frames. Settings
   // checkbox, persisted ; window.__cockpit.on = true/false overrides live.
   cockpit3d: true,
+  // (v42.09) COCKPIT SOLIDITY. 0 = the ghost shell exactly as it has always looked, 1 = the hull
+  // drawn solid with its own materials (no shell at all). See _ghostHullKnobs for the ramp.
+  // (v42.14) DEFAULT 0.40, owner's pick after flying the sweep. That sits at the top of the x-ray
+  // phase (XRAY_END 0.45): the hologram tint, rim glow and flicker have rampeddown, the shell is
+  // still see-through, and depth writing has not yet come back. Read as "a real cockpit you can see
+  // through" rather than "a hologram".
+  // ⚠ Only reaches players with NO saved value - loadSettings keeps a persisted cockpitSolidity, and
+  // the key has existed since v42.09, so anyone who saved settings in between keeps what they had.
+  cockpitSolidity: 0.4,
   // (v37.30) Hull light strips glow (emissive map baked from the painted
   // class-colour strips). Off = the classic 4% team-tint emissive.
   hullGlow: true,
@@ -17134,13 +17143,123 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir, mine) {
   // and peer alike, a visible muzzle flare on the GLB's own gun sight.
   if (!(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) {
     try {
+      // ⚠⚠ (v42.15) THE PILOT'S OWN FLASH NEEDS TO BE SEEABLE FROM THE SEAT. Owner: "tracker doesn't
+      // have a muzzle flash when firing the main weapon and the core, or i don't see it" - then, on
+      // hearing the cause, "pyro too, huh, yeah, add that".
+      // It was always spawning. Measured on TRACKER in first person: the gun marker projects to NDC
+      // [-0.57, -0.29] - on screen, lower left - so it is neither missing nor off-camera. Three things
+      // stack against it, and ONLY on these two hulls:
+      //   1. scale 2.6 on a ship whose hullLength is ~100 world units is a very small billboard,
+      //   2. 0.055 s is ~6 frames at 120 Hz,
+      //   3. TRACKER and PYRO are the only ships with a SINGLE gun marker placed far off the
+      //      centreline (0.42 out on a wing, 0.17 below the eye). Every other hull has symmetric
+      //      pairs near the middle, so their flash lands under the crosshair where you cannot miss
+      //      it; these two put it in the periphery, 46 units away, behind the dashboard and the side
+      //      console - which in a SOLID 3D cockpit is opaque geometry in front of it.
+      // The v30.86 special case for exactly these two hulls used to route them to the painted barrel
+      // mouth, but it is gated `!game._cockpit3dLive` and the 3D cockpit is the default now, so it
+      // no longer runs. (Re-enabling it would not help either: _computeScreenMuzzleWorld returns the
+      // GLB marker when the 3D cockpit is live, so it lands right back here.)
+      // Fix the visibility instead of the position - the world position is CORRECT, and peers and the
+      // chase camera already see it properly. For the local pilot's own shot only: scale the billboard
+      // to the hull, hold it a little longer, and let it draw over the cockpit interior so the
+      // dashboard cannot swallow it. Hull-relative, so it is right on all seven ships rather than
+      // tuned for two.
+      // (v42.16) MEASURED, not guessed. v42.15's numbers were verified live on TRACKER in first
+      // person: the flash DID spawn, DID project on screen (NDC [-0.47,-0.24]) and WAS unoccluded
+      // - an A/B at a locked camera with the billboard frozen showed a real but FAINT salmon smudge.
+      // So the remaining fault was purely weight, and the owner's words fit exactly: "invisible or
+      // too fast". What moved it from a smudge to unmistakable, tested one variable at a time
+      // against the worst case (a blown-out hazy biome where everything is already near-white):
+      //   - size   0.075 -> 0.095 of hull length (TRACKER's hull is 100, so 7.5 -> 9.5 units),
+      //   - punch  1.0 -> 2.1 additive (see the explosionFlash branch of updateEffects),
+      //   - life   0.085 -> 0.12 s, which is the half the owner called "too fast",
+      //   - grow   2.5 -> 1.2 so it stays a dense flash instead of thinning into a haze.
+      // ⚠ Raising brightness toward WHITE made it WORSE, not better - additive white over a
+      // near-white scene has nowhere to go. The chassis hue is what carries it; keep the tint.
+      const _mk = (typeof window !== 'undefined' && window.__muzzle) || {};
+      const _fmMine = !!mine;
+      const _fmHull = (_fmMine && typeof player !== 'undefined' && player && player.chassis && player.chassis.hullLength)
+        ? player.chassis.hullLength : 0;
+      const _fmThird = _fmMine && (typeof game !== 'undefined' && game.thirdPerson);
+      // (v42.16) THE FLASH EVERYONE ELSE SEES was a FLAT 2.6 on every hull, so PYRO's 140-unit
+      // dreadnought fired the same little billboard as an 80-unit frigate. Measured on the black
+      // -scene bench (one bot, camera dead ahead at 300 u): ~15 px of flash against ~250 px of
+      // ship. Owner: "pyro's i guess is more for other people to see" - so it is now hull-relative
+      // for bots and peers too, with the old 2.6 as a FLOOR so no ship's flash ever shrinks.
+      // ⚠ 0.04 was NOT enough - measured on the bench, it is ~17 px of flash on a ~420 px ship
+      // and the owner could not see it fire at all. Swept live at a fixed 230 u: 5.6 invisible,
+      // 14 subtle, 21 unmistakable ("there it is"). So 0.15, which reads because an OBSERVER is
+      // 200+ u away while the pilot's own eye is only ~46 u from the gun - the pilot's smaller
+      // 0.095 fraction still subtends more screen angle (0.20 rad vs 0.105).
+      // FRIGATE 12.0, CORVETTE 15.0, DREADNOUGHT 21.0.
+      let _fmOther = 0;
+      if (!_fmMine) {
+        try {
+          const _ld = (typeof LOADOUTS !== 'undefined') ? LOADOUTS[loadoutKey] : null;
+          const _ch = (_ld && typeof CHASSIS !== 'undefined') ? CHASSIS[_ld.chassis] : null;
+          if (_ch && _ch.hullLength) _fmOther = _ch.hullLength;
+        } catch (_) {}
+      }
+      const _fmScale = (_fmHull && !_fmThird)
+        ? Math.max(2.6, _fmHull * (_mk.scale != null ? _mk.scale : 0.095))
+        : Math.max(2.6, _fmOther * (_mk.otherScale != null ? _mk.otherScale : 0.15));
+      const _fmLife = (_fmMine && !_fmThird) ? (_mk.life != null ? _mk.life : 0.12) : 0.055;
+      // ⚠⚠ (v42.16) FIRST PERSON ONLY. v42.15 keyed the draw-over-everything treatment off
+      // `mine` alone, which was wrong the moment the pilot pressed the view key: in THIRD person
+      // your own hull sits between the camera and your own guns, so depthTest:false at
+      // renderOrder 9999 punches the flash straight through the ship. Owner, immediately:
+      // "pyro's muzzle fire can be seen right through his ship in third person". The cockpit
+      // interior is the only thing this was ever meant to defeat, and that is a first-person
+      // problem, so the whole treatment is gated on the seat view.
+      const _fmSeat = _fmMine && (typeof game === 'undefined' || !game.thirdPerson);
+      const _fmCam = (typeof camera !== 'undefined') ? camera : null;
       const fm = _acquireExplosionMesh('flash');
-      fm.position.copy(pos).addScaledVector(dir, 1.5);
-      fm.scale.setScalar(2.6);
+      // (v42.16) FORWARD OFFSET, knobbed. Owner's diagnosis, and it is the right one: "it's just
+      // because the position of the cam and the gun, it's off screen, and the ship is big in 3rd
+      // person, so you can't see it there either". A gun marker that sits INSIDE a 140-unit hull
+      // puts the flash inside solid geometry - occluded by your own ship in third person, and far
+      // off the view axis in first. Pushing the flash out past the nose fixes BOTH honestly:
+      // it clears the hull so the chase camera can see it, and perspective convergence drags it
+      // back toward the view centre from the seat.
+      const _fmFwd = (_mk.fwd != null) ? _mk.fwd : 0.05;
+      fm.position.copy(pos).addScaledVector(dir, _fmHull ? _fmHull * _fmFwd : 1.5);
+      // ⚠⚠ (v42.16) PYRO IS NOT TRACKER. Measured at the instant of spawn, 5 consecutive shots:
+      // TRACKER's flash projects to NDC [-0.57,-0.29] - on screen, just peripheral, so weight alone
+      // fixes it. PYRO's lands at [-2.46,-1.38] on 3 of 5 shots - fully OUTSIDE the frame (its gun
+      // marker is ~45 deg off the view axis on a 140-unit dreadnought hull). No amount of size or
+      // brightness can show something that is off screen, so the pilot's own first-person flash is
+      // pulled radially back inside the frame when, and only when, it would fall outside it. A
+      // flash already in view (TRACKER, and PYRO's other 2 of 5) is not moved at all, and the bolt
+      // itself still leaves the true marker - this is the same intent as the v30.86 painted-barrel
+      // special case these two hulls used to get, minus the hard-coded ship names.
+      // Owner, on seeing PYRO's marker sit ~45 deg off the view axis: "pyro's i guess is more for
+      // other people to see". That is exactly right about the hull - so the pull is a knob, not a
+      // verdict: `window.__muzzle.pull = false` leaves PYRO's flash at its true marker (off screen
+      // from the seat, correct for peers and the chase camera), `pullLimit` moves the margin.
+      if (_fmSeat && _fmCam && _mk.pull !== false) {
+        try {
+          const _np = fm.position.clone().project(_fmCam);
+          const _LIM = (_mk.pullLimit != null) ? _mk.pullLimit : 0.78;
+          const _mx = Math.max(Math.abs(_np.x), Math.abs(_np.y));
+          if (_np.z < 1 && _mx > _LIM) {
+            const _k = _LIM / _mx;
+            _np.x *= _k; _np.y *= _k;
+            fm.position.copy(_np.unproject(_fmCam));
+          }
+        } catch (_) {}
+      }
+      fm.scale.setScalar(_fmScale);
       fm.material.color.setHex(flashColor);
       fm.material.opacity = 1;
-      game.effects.push({ mesh: fm, lifetime: 0.055, age: 0, type: 'explosionFlash',
-                          pooled: true, baseScale: 2.6, billboard: true });
+      // ⚠ depthTest off ONLY for the pilot's own shot FROM THE SEAT. On a bot, a peer, or the
+      // chase camera it must stay depth-tested or it shines through terrain and through hulls.
+      fm.material.depthTest = !_fmSeat;
+      fm.renderOrder = _fmSeat ? 9999 : 0;
+      game.effects.push({ mesh: fm, lifetime: _fmLife, age: 0, type: 'explosionFlash',
+                          pooled: true, baseScale: _fmScale, billboard: true,
+                          punch: (_fmMine && !_fmThird) ? (_mk.punch != null ? _mk.punch : 2.1) : 1.0,
+                          grow:  (_fmMine && !_fmThird) ? (_mk.grow  != null ? _mk.grow  : 1.2) : 2.5 });
     } catch (_) {}
   }
 
@@ -26767,6 +26886,84 @@ if (typeof window !== 'undefined') window.__dbg = {
       if (v != null) { const n = HOARD_SHIPS.length; _campShipRot = ((v % n) + n) % n; }
       return _campShipRot;
     } catch (_) { return null; }
+  },
+  // (v42.16) SHIP-FX TEST BENCH. `Bot` is module-scoped, so from the console there was no way
+  // to stand one ship in front of the camera and watch it shoot - and judging a muzzle flash
+  // inside a live round is hopeless: the round ends, the arena relights, and the ship's own
+  // weapon FX drown the thing you are looking at. Owner, after three bad tests: "just spawn one
+  // bot infront of a cam and make it shoot, in a black scene or something".
+  //   __dbg.spawnBot('PYRO', 180)  - one bot that far in front of the camera, facing you
+  //   __dbg.black(true / false)    - hide the world, keep lights, black background (reversible)
+  //   __dbg.holdFX(true / false)   - freeze every muzzle flash open so it can be photographed
+  // holdFX re-queries game.effects EVERY frame on purpose: effects expire and their meshes are
+  // recycled by the pool, so a held REFERENCE goes stale and you end up pinning a dead mesh
+  // parked at y = -1e7. That mistake cost two worthless test rounds.
+  spawnBot: (key, dist) => {
+    try {
+      const b = new Bot(key || 'PYRO', LSS.TEAM_FLEET_B, 7777);
+      const e = new THREE.Euler(player.euler.x, player.euler.y, 0, 'YXZ');
+      const f = new THREE.Vector3(0, 0, -1).applyEuler(e);
+      const at = player.position.clone().addScaledVector(f, (dist == null ? 180 : dist));
+      b.position.copy(at);
+      if (b.mesh) b.mesh.position.copy(at);
+      if (b.euler) b.euler.y = player.euler.y + Math.PI;   // face the camera
+      game.entities.push(b);
+      window.__dbgBot = b;
+      return b;
+    } catch (e) { console.warn('[dbg] spawnBot failed:', e); return null; }
+  },
+  // ⚠⚠ The world RE-SHOWS ITSELF every frame (terrain clipmap rings, streamed chunks and
+  // foliage all set .visible themselves), so a one-shot hide does not stick - this has to run
+  // per frame. And the keep-list must include EFFECT and PROJECTILE meshes: they are added to
+  // the scene the instant they spawn, so a keep-list built only from game.entities hides each
+  // muzzle flash the moment it is created. That is not hypothetical - it is what made the bench
+  // show no flash at all, and the owner caught it: "i didn't see a muzzle fire from pyro".
+  black: (on) => {
+    try {
+      if (window.__dbgBlack) { clearInterval(window.__dbgBlack); window.__dbgBlack = null; }
+      if (on === false) {
+        (window.__dbgHidden ? Array.from(window.__dbgHidden) : []).forEach((c) => { c.visible = true; });
+        window.__dbgHidden = null;
+        if (window.__dbgBg !== undefined) scene.background = window.__dbgBg;
+        if (window.__dbgFog !== undefined) scene.fog = window.__dbgFog;
+        return 'restored';
+      }
+      window.__dbgBg = scene.background; window.__dbgFog = scene.fog;
+      window.__dbgHidden = window.__dbgHidden || new Set();
+      const blk = new THREE.Color(0x000000);
+      window.__dbgBlack = setInterval(() => {
+        try {
+          const keep = new Set();
+          for (const en of (game.entities || [])) if (en.mesh) keep.add(en.mesh);
+          for (const fx of (game.effects || [])) if (fx.mesh) keep.add(fx.mesh);
+          for (const pr of (game.projectiles || [])) if (pr.mesh) keep.add(pr.mesh);
+          if (window.__dbgBot && window.__dbgBot.mesh) keep.add(window.__dbgBot.mesh);
+          const ch = scene.children;
+          for (let i = 0; i < ch.length; i++) {
+            const c = ch[i];
+            if (c.isLight || keep.has(c)) continue;
+            if (c.visible) { c.visible = false; window.__dbgHidden.add(c); }
+          }
+          scene.background = blk;
+          scene.fog = null;
+        } catch (_) {}
+      }, 16);
+      return 'black on (per-frame)';
+    } catch (e) { return 'failed: ' + e; }
+  },
+  holdFX: (on) => {
+    try {
+      if (window.__dbgHold) { clearInterval(window.__dbgHold); window.__dbgHold = null; }
+      if (on === false) return 'released';
+      window.__dbgHold = setInterval(() => {
+        try {
+          for (const e of (game.effects || [])) {
+            if (e.type === 'explosionFlash') { e.age = 0; e.lifetime = 999; }
+          }
+        } catch (_) {}
+      }, 16);
+      return 'holding';
+    } catch (e) { return 'failed: ' + e; }
   },
 };
 
@@ -52463,6 +52660,18 @@ function _acquireExplosionMesh(type) {
   if (!mesh.parent) scene.add(mesh);
   mesh.visible = true;
   mesh.rotation.set(0, 0, 0);
+  // ⚠⚠ (v42.16) RESET THE DRAW-ORDER STATE. This pool recycles one mesh across every
+  // effect type that shares its geometry, and until now `renderOrder` / `depthTest` were the
+  // only properties a call site could write that acquire never cleared. v42.15 started writing
+  // both (depthTest:false + renderOrder 9999, so the pilot's own muzzle flash could not be
+  // swallowed by the cockpit interior) - and every LATER effect that popped that same mesh
+  // inherited "draw through all geometry" for free. Measured: an explosion flash from the
+  // spawnExplosion path came back reading {dt:false, ro:9999} without ever asking for it.
+  // Owner saw it as "pyro's muzzle fire can be seen right through his ship in third person".
+  // Clearing here fixes it for every present and future call site at once; the two that
+  // genuinely want the override set it right after acquiring, as they already do.
+  mesh.renderOrder = 0;
+  if (mesh.material && mesh.material.depthTest === false) mesh.material.depthTest = true;
   return mesh;
 }
 
@@ -64723,9 +64932,20 @@ function updateEffects(dt) {
     // works via baseScale=1.
     else if (e.type === 'explosionFlash') {
       const base = e.baseScale || 1;
-      const s = (e.billboard ? (1 + t * 2.5) : (1 + t * 0.5)) * base;
+      // (v42.16) Two OPTIONAL per-effect fields, both absent at every pre-existing
+      // call site, so their fallbacks reproduce the old curve byte-for-byte:
+      //   e.grow  - how far the billboard balloons over its life (was always 2.5).
+      //             A muzzle flash wants to stay DENSE, not thin out to a haze.
+      //   e.punch - additive intensity multiplier. The orb material is additive
+      //             (`gl_FragColor = vec4(uColor, a)` with a = pow(fresnel,1.7)*uOpacity),
+      //             so uOpacity above 1 is legal and simply lands harder.
+      // ⚠ This assignment is what silently defeated every live A/B I tried through
+      // the console: it runs AFTER any interval that pokes .opacity/.scale, so the
+      // poke is overwritten before it ever reaches a frame.
+      const grow = (e.grow != null) ? e.grow : 2.5;
+      const s = (e.billboard ? (1 + t * grow) : (1 + t * 0.5)) * base;
       e.mesh.scale.set(s, s, s);
-      e.mesh.material.opacity = 1.0 * (1 - t * t); 
+      e.mesh.material.opacity = (e.punch || 1.0) * (1 - t * t);
       if (e.billboard) e.mesh.lookAt(camera.position);
     }
     // --- Fireball: expand + color shift orange->red->dark ---
@@ -70573,6 +70793,24 @@ const _ghostHullTimeU = { value: 0 };
 //   window.__cockpit.glass = { on: false }        // no canopy at all
 //   window.__cockpit.glass = { tint: 0x66ddff }   // one colour for the fleet
 //   __glassRefresh()                              // push it to every ship already in the world
+// ⚠ (v42.11) CREATE THE KNOB SO IT CAN BE TYPED AT. Every reader below is defensive
+// (`(window.__cockpit && window.__cockpit.ghost) || {}`), which is correct for robustness but meant
+// the object NEVER EXISTED until someone assigned the whole thing - so the documented one-liners
+// above and in the ghost block all died on `Cannot read properties of undefined (reading 'ghost')`.
+// Owner hit exactly that. Seeding the three sub-objects at boot makes `window.__cockpit.ghost.x = y`
+// work the way every comment in this file says it does, and changes nothing else: the readers still
+// fall back per FIELD, so an empty object is identical to no object.
+try {
+  if (typeof window !== 'undefined') {
+    window.__cockpit = window.__cockpit || {};
+    window.__cockpit.ghost = window.__cockpit.ghost || {};
+    window.__cockpit.glass = window.__cockpit.glass || {};
+    // (v42.16) Same reasoning for the pilot's own muzzle flash - seeded so
+    // `window.__muzzle.punch = 3` works live. Fields: scale (fraction of hull
+    // length), punch (additive multiplier), life (seconds), grow (expansion).
+    window.__muzzle = window.__muzzle || {};
+  }
+} catch (_) {}
 function _glassKnobs() {
   const G = (window.__cockpit && window.__cockpit.glass) || {};
   return {
@@ -70643,8 +70881,50 @@ function _ghostHullTint() {
 }
 function _ghostHullKnobs() {
   const G = (window.__cockpit && window.__cockpit.ghost) || {};
+  // ⚠⚠ (v42.09) COCKPIT SOLIDITY SLIDER (Settings > Display). Owner: "a slider ... transparency for
+  // the cockpit, to slide from the ghost mode its in, to fully solid normal view".
+  // One number drives the whole shell, because every term below is what MAKES it read as a ghost:
+  //   core/rim  the alpha itself (rim is fresnel-weighted, so it is the bright edge)
+  //   mix       how far the colour is pulled toward the hologram tint
+  //   glow      the ADDITIVE fresnel light - the thing that makes edges bloom
+  //   flicker   the hologram jitter + scanlines
+  // Ramping all five together is what makes the middle of the slider look like a progressively more
+  // real cockpit rather than a brighter hologram: alpha rises while the tint, glow and jitter fall.
+  // ⭐ THE TOP OF THE SLIDER IS NOT "ALPHA 1" - IT IS NO SHELL AT ALL. The fragment shader clamps
+  // alpha to 0.92 (`clamp(..., 0.0, 0.92)`), so the ghost path can never actually be opaque, and it
+  // also forces DoubleSide + depthWrite:false, which a solid cockpit must not have. Past `SOLID_AT`
+  // we hand `on: false` back instead, and _ghostHullSync's else-branch calls _ghostHullRestore -
+  // the hull returns to its OWN materials, which is exactly "fully solid normal view".
+  // Live override still wins: window.__cockpit.ghost.solidity, else the saved setting.
+  const _sRaw = (typeof G.solidity === 'number') ? G.solidity
+              : ((typeof input !== 'undefined' && input && typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0);
+  const s = Math.max(0, Math.min(1, _sRaw));
+  const SOLID_AT = 0.995;
+  // ⚠⚠ (v42.12) TWO PHASES, BECAUSE ALPHA ALONE CANNOT GET THERE. Owner, on the v42.09 ramp: "it
+  // seems to make it more white before it just pops into solidity". Exactly right, and the reason is
+  // `depthWrite:false` - the thing that MAKES it x-ray. With depth writing off, every layer of a
+  // double-sided hull composites: 6-8 surfaces between the eye and the sky on a gun pod. Raising
+  // `core` toward 1 therefore does not make one surface solid, it makes EIGHT nearly-opaque surfaces
+  // stack, and stacked bright alpha saturates to WHITE. Then the restore at the top swapped in the
+  // real materials, which is the pop.
+  // So the ramp has to remove the STACKING, not just raise the alpha:
+  //   PHASE A (0 .. XRAY_END)   still x-ray. Alpha barely moves; what falls away is the hologram
+  //                             language - tint mix, additive rim glow, flicker/scanlines. The shell
+  //                             gets cleaner and calmer, never brighter.
+  //   PHASE B (XRAY_END .. 1)   depth writing comes BACK ON, so only the nearest surface survives and
+  //                             nothing can accumulate. Now alpha means what it looks like it means,
+  //                             and it ramps to a true 1.0 (uGhMaxA lifts off the 0.92 x-ray cap).
+  // At s = 1 the shell is a single opaque depth-writing layer with no tint, no glow and no flicker -
+  // i.e. visually the material itself - so handing back to the real materials past SOLID_AT is
+  // continuous instead of a pop.
+  const XRAY_END = 0.45;
+  const pB = (s <= XRAY_END) ? 0 : (s - XRAY_END) / (1 - XRAY_END);   // 0..1 across phase B
+  const pA = Math.min(1, s / XRAY_END);                                // 0..1 across phase A
+  const _lerp = (from, to, t) => from + (to - from) * t;
+  // The hologram terms die during phase A and are gone before depth writing returns.
+  const _to = (from, to) => _lerp(from, to, pA);
   return {
-    on: G.on !== false,
+    on: (G.on !== false) && (s < SOLID_AT),
     // (v37.66) the eye sits at the hull CENTRE, so a look out passes through four to eight layers
     // of shell and the old 0.30 core compounded to nearly opaque - worse now that the shell draws
     // over the water and the city instead of being cut by them. Thin flats, edges still strong:
@@ -70660,32 +70940,53 @@ function _ghostHullKnobs() {
     // panels sit at `core` and were never the complaint, so core holds at 0.13. Dropping it would
     // thin the shell rather than dim it.
     //   pre-v38.44:  rim 0.32, glow 0.30
-    core: (typeof G.core === 'number') ? G.core : 0.13,
-    rim: (typeof G.rim === 'number') ? G.rim : 0.24,       // (v38.44) 0.32 -> 0.24
-    mix: (typeof G.mix === 'number') ? G.mix : 0.30,
+    // Phase A barely moves the alpha (0.13 -> 0.22): while layers still stack, more alpha = whiter,
+    // not more solid. Phase B owns the climb to a real 1.0, with depth writing on.
+    core: _lerp(_to((typeof G.core === 'number') ? G.core : 0.13, 0.22), 1.0, pB),
+    rim: _lerp(_to((typeof G.rim === 'number') ? G.rim : 0.24, 0.10), 0.0, pB),       // (v38.44) 0.32 -> 0.24
+    mix: _to((typeof G.mix === 'number') ? G.mix : 0.30, 0.0),
     // (v37.66) owner: "less flicker" - 1 was the monsters' full hologram jitter, 0.25 leaves a
     // trace of life in the shell. 0 = perfectly steady.
-    flicker: (typeof G.flicker === 'number') ? G.flicker : 0.25,
+    // ⚠ (v42.13) DEFAULT 0, WAS 0.25. Owner confirmed `flicker: 0` was half of what stopped the
+    // shimmer on Blaster's side pods. This term is a DELIBERATE hologram affectation - a 44 Hz
+    // brightness jitter plus scrolling scanlines - and on a thick multi-layer pod it beats against
+    // the transparency sort instead of reading as 'alive'. It costs nothing to lose: the shell still
+    // has its tint, fresnel rim and glow. Set window.__cockpit.ghost.flicker = 0.25 to get it back.
+    flicker: _to((typeof G.flicker === 'number') ? G.flicker : 0.0, 0.0),
     // (v37.66) how hard the rim ADDS light. Against a night city or dark water the additive
     // term was what made the shell dominate the view, not its alpha.
-    glow: (typeof G.glow === 'number') ? G.glow : 0.14,     // (v38.44) 0.30 -> 0.14
+    glow: _to((typeof G.glow === 'number') ? G.glow : 0.14, 0.0),     // (v38.44) 0.30 -> 0.14
     // (v37.66) draw the shell after every other transparent thing. The hub water plane FOLLOWS the
     // ship and the city's glass sorts by its own bounding centre, so both tied with the hull on
     // distance and won the toss about half the time (owner: "the water and the city cut through it").
     order: (typeof G.order === 'number') ? G.order : 4000,
     // (v37.62) the owner's glass cut-out = the MORE translucent zone of the ghost shell
-    glassCore: (typeof G.glassCore === 'number') ? G.glassCore : 0.10,
-    glassRim: (typeof G.glassRim === 'number') ? G.glassRim : 0.30,
+    // The canopy stays GLASS at every setting - it is a window, not a ghosted panel - so its two
+    // terms ramp only part way. Without this the windscreen frosts over as the slider comes up.
+    glassCore: _to((typeof G.glassCore === 'number') ? G.glassCore : 0.10, 0.35),
+    glassRim: _to((typeof G.glassRim === 'number') ? G.glassRim : 0.30, 0.10),
+    // (v42.12) depth writing returns across phase B - this is what stops the stack accumulating,
+    // and therefore what stops it going white. Alpha ceiling lifts with it.
+    depthWrite: pB > 0.02,
+    maxA: _lerp(0.92, 1.0, pB),
+    solidity: s,
     tint: _ghostHullTint()
   };
 }
 function _addGhostHull(mat, K, isGlass) {
   mat.transparent = true;
   mat.depthWrite = false;      // x-ray layering: the far wall glows through the near one
+  // (v42.12) remember what this material was before the shell took it over, so the solidity ramp can
+  // hand `depthWrite` back without guessing (see _ghostHullTune).
+  mat.userData._ghostOrigDepthWrite = true;
   mat.side = THREE.DoubleSide;
   const U = {
     uGhTint: { value: new THREE.Color(K.tint) }, uGhTime: _ghostHullTimeU,
-    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }, uGhGlow: { value: K.glow }
+    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }, uGhGlow: { value: K.glow },
+    // (v42.12) the alpha ceiling. 0.92 is the x-ray cap; the solidity ramp lifts it to 1.0 once
+    // depth writing is back on, so the shell can actually reach opaque instead of stopping short
+    // and then popping to the real material.
+    uGhMaxA: { value: 0.92 }
   };
   mat.userData._ghostU = U;
   mat.onBeforeCompile = (shader) => {
@@ -70695,7 +70996,7 @@ function _addGhostHull(mat, K, isGlass) {
       '#include <project_vertex>',
       '#include <project_vertex>\n  vGhN = normalize(normalMatrix * normal);\n  vGhV = normalize(-mvPosition.xyz);'
     );
-    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nuniform float uGhGlow;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
+    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nuniform float uGhGlow;\nuniform float uGhMaxA;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <opaque_fragment>',
       '#include <opaque_fragment>\n' +
@@ -70705,7 +71006,7 @@ function _addGhostHull(mat, K, isGlass) {
       '    float ghScan = 1.0 - uGhFlick * 0.05 * (1.0 - sin(gl_FragCoord.y * 0.28 - uGhTime * 14.0));\n' +
       '    gl_FragColor.rgb = mix(gl_FragColor.rgb, uGhTint * 0.55, uGhMix);\n' +
       '    gl_FragColor.rgb += uGhTint * ghFres * uGhGlow * (1.0 + 0.22 * uGhFlick * sin(uGhTime * 38.0));\n' +
-      '    gl_FragColor.a = clamp((uGhCore + uGhRim * ghFres) * ghFlick * ghScan, 0.0, 0.92); }'
+      '    gl_FragColor.a = clamp((uGhCore + uGhRim * ghFres) * ghFlick * ghScan, 0.0, uGhMaxA); }'
     );
   };
   mat.customProgramCacheKey = () => 'ghostHull';
@@ -70836,6 +71137,41 @@ function _ghostHullTune(mesh, K) {
       U.uGhTint.value.set(K.tint);
       U.uGhCore.value = K.core; U.uGhRim.value = K.rim; U.uGhMix.value = K.mix; U.uGhFlick.value = K.flicker;
       if (U.uGhGlow) U.uGhGlow.value = K.glow;
+      // ⚠⚠ (v42.10) ORDER-INDEPENDENT MODE - the fix for "blaster's model flickers from his side
+      // guns". Nothing is wrong with that model: the shell draws with `depthWrite:false` and
+      // DoubleSide ON PURPOSE (x-ray - the far wall glows through the near one), and normal alpha
+      // blending is ORDER-DEPENDENT. Through a flat panel that is two layers and stable; through a
+      // thick gun pod with structure inside it is six or eight, and which one wins changes as the
+      // camera moves, so the pod shimmers while the flat panels sit still. It reads as "that gun
+      // flickers" because the pods are simply where the layers stack.
+      // ADDITIVE blending is commutative, so the result cannot depend on draw order and the shimmer
+      // is gone by construction rather than by tuning. It does change the look - the shell can only
+      // add light, never darken - so it is OFF by default and offered as a knob:
+      //   window.__cockpit.ghost.additive = true
+      // Live: blending is render state, not a shader define, so no recompile and no rebuild.
+      // ⚠⚠ (v42.13) ADDITIVE IS NOW THE DEFAULT. Owner ran
+      //   window.__cockpit = { ghost: { additive: true, flicker: 0 } };
+      // and reported "fixed it" - then hit "still flickering" on the next reload, because a console
+      // knob does not persist. It was never a second bug; the fix simply evaporated. Baking it is the
+      // actual ship of that finding.
+      // Normal alpha blending is ORDER-DEPENDENT, and the shell is depthWrite:false + DoubleSide by
+      // design, so a thick gun pod stacks 6-8 surfaces whose draw order flips as the camera moves.
+      // Additive is commutative: the result cannot depend on order, so the shimmer is impossible
+      // rather than merely reduced. Trade-off is real and accepted - the shell can only add light,
+      // never darken, so it reads brighter and airier.
+      // window.__cockpit.ghost.additive = false restores the old order-dependent blend.
+      const _ga = (window.__cockpit && window.__cockpit.ghost) ? window.__cockpit.ghost.additive : undefined;
+      const _wantAdd = (_ga !== false);
+      const _bl = _wantAdd ? THREE.AdditiveBlending : THREE.NormalBlending;
+      if (m.blending !== _bl) m.blending = _bl;
+      // (v42.12) the solidity ramp's phase B - see the long note in _ghostHullKnobs. Both are render
+      // state, not shader defines, so they are free to flip live with no recompile.
+      // ⚠ ADDITIVE IS EXEMPT FROM THE DEPTH WRITE. Additive blending is order-independent precisely
+      // because everything accumulates; letting it write depth would cull the very layers it needs
+      // and turn the x-ray back into a solid shell at solidity 0.
+      const _dw = !!K.depthWrite && !_wantAdd;
+      if (m.depthWrite !== _dw) m.depthWrite = _dw;
+      if (U.uGhMaxA) U.uGhMaxA.value = (typeof K.maxA === 'number') ? K.maxA : 0.92;
     }
     o.renderOrder = K.order;
   });
@@ -87724,6 +88060,13 @@ function _refreshSettingsValues() {
   setChk('set-keep-warm', input.keepWarm !== false);
   setChk('set-hull-glow', input.hullGlow !== false);
   setChk('set-cockpit-vr', input.cockpitVR === true);
+  {
+    // (v42.09) same reopen-sync reason as HUD Size below - innerHTML is written once.
+    const _cs = (typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0;
+    setRange('set-cockpit-solidity', null, _cs);
+    const _cv = $('#val-cockpit-solidity');
+    if (_cv) _cv.textContent = (_cs * 100).toFixed(0) + '%';
+  }
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
   {
     // (v36.19) buildSettingsPage writes overlay.innerHTML once and is gated by
@@ -88022,6 +88365,14 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Seats your head at the pilot's eye inside the modelled cockpit while in the headset, with free head-look. Off: the classic VR view (ship hidden).</label>
+      </div>
+      <div class="setting-row">
+        <label>Cockpit Solidity</label>
+        <input type="range" id="set-cockpit-solidity" min="0" max="1" step="0.05" value="${(typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0}">
+        <div class="value-display" id="val-cockpit-solidity">${(((typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0) * 100).toFixed(0)}%</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">How solid your own ship looks from the pilot's seat. 0% is the x-ray ghost shell &mdash; you see through the airframe to the world outside. 100% draws the hull with its real materials, like any other ship. Applies live, first person and VR (and to the chase camera when it backs inside the hull). The canopy glass stays glass at every setting.</label>
       </div>
       <div class="setting-row">
         <label>Hull Lights</label>
@@ -89538,6 +89889,22 @@ function buildSettingsPage() {
     hudScaleSel.addEventListener('input', _applyHudScale);
     hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });
   }
+  // (v42.09) Cockpit solidity. Same shape as HUD Size: live on `input`, one localStorage write per
+  // drag on `change`. Nothing to re-apply by hand - _ghostHullSync calls _ghostHullTune every frame
+  // with fresh knobs, and crossing the top of the range makes _ghostSeatWanted() false, which makes
+  // the same tick restore the hull's own materials.
+  const cockSolSel = overlay.querySelector('#set-cockpit-solidity');
+  const cockSolVal = overlay.querySelector('#val-cockpit-solidity');
+  if (cockSolSel) {
+    const _applyCockSol = () => {
+      const v = parseFloat(cockSolSel.value);
+      if (!isFinite(v)) return;
+      input.cockpitSolidity = Math.max(0, Math.min(1, v));
+      if (cockSolVal) cockSolVal.textContent = (input.cockpitSolidity * 100).toFixed(0) + '%';
+    };
+    cockSolSel.addEventListener('input', _applyCockSol);
+    cockSolSel.addEventListener('change', () => { _applyCockSol(); saveSettings(); });
+  }
   const clipRecChk = overlay.querySelector('#set-clip-rec');
   if (clipRecChk) clipRecChk.addEventListener('change', () => {
     input.clipRec = !!clipRecChk.checked;
@@ -90230,6 +90597,7 @@ function saveSettings() {
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
+      cockpitSolidity: (typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0,
       vrHudMigrated: true,   // (v41.43) the one-time vrHudScale default bump has been applied
       vrWater: !!input.vrWater,   // (v41.43)
       vrWaterRefl: !!input.vrWaterRefl,   // (v41.82)
@@ -90509,6 +90877,7 @@ const SHIPPED_DEFAULTS = {
   "vrPerfMode": "standard",
   "vrStripFx": true,
   "hudScale": 1,
+  "cockpitSolidity": 0.4,
   "fovDeg": 120,
   "audioMaster": 1,
   "audioSfx": 1.5,
@@ -92140,6 +92509,9 @@ function loadSettings() {
     // (v36.19) Absent key keeps the 1 default, so every pre-v36.19 save loads at
     // the designed layout. Clamped on read as well as in _hlScale so a
     // hand-edited localStorage cannot wedge the HUD off-screen.
+    if (typeof data.cockpitSolidity === 'number' && isFinite(data.cockpitSolidity)) {
+      input.cockpitSolidity = Math.max(0, Math.min(1, data.cockpitSolidity));
+    }
     if (typeof data.hudScale === 'number' && isFinite(data.hudScale)) {
       input.hudScale = Math.max(0.75, Math.min(1.75, data.hudScale));
     }

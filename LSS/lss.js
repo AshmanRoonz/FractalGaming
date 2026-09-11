@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.08';
+const LSS_BUILD = '42.16';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -647,6 +647,7 @@ const input = {
   showFps: false,
   keepWarm: true,   // (v39.63) GPU keep-warm idle load (anti-stutter on power-capped laptops)
   cockpit3d: true,
+  cockpitSolidity: 0.4,
   hullGlow: true,
   cockpitVR: true,     // (v37.67) ON by default: the ghost shell IS the VR seat view now
   headlight: true,
@@ -9136,13 +9137,49 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir, mine) {
 
   if (!(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato())) {
     try {
+      const _mk = (typeof window !== 'undefined' && window.__muzzle) || {};
+      const _fmMine = !!mine;
+      const _fmHull = (_fmMine && typeof player !== 'undefined' && player && player.chassis && player.chassis.hullLength)
+        ? player.chassis.hullLength : 0;
+      const _fmThird = _fmMine && (typeof game !== 'undefined' && game.thirdPerson);
+      let _fmOther = 0;
+      if (!_fmMine) {
+        try {
+          const _ld = (typeof LOADOUTS !== 'undefined') ? LOADOUTS[loadoutKey] : null;
+          const _ch = (_ld && typeof CHASSIS !== 'undefined') ? CHASSIS[_ld.chassis] : null;
+          if (_ch && _ch.hullLength) _fmOther = _ch.hullLength;
+        } catch (_) {}
+      }
+      const _fmScale = (_fmHull && !_fmThird)
+        ? Math.max(2.6, _fmHull * (_mk.scale != null ? _mk.scale : 0.095))
+        : Math.max(2.6, _fmOther * (_mk.otherScale != null ? _mk.otherScale : 0.15));
+      const _fmLife = (_fmMine && !_fmThird) ? (_mk.life != null ? _mk.life : 0.12) : 0.055;
+      const _fmSeat = _fmMine && (typeof game === 'undefined' || !game.thirdPerson);
+      const _fmCam = (typeof camera !== 'undefined') ? camera : null;
       const fm = _acquireExplosionMesh('flash');
-      fm.position.copy(pos).addScaledVector(dir, 1.5);
-      fm.scale.setScalar(2.6);
+      const _fmFwd = (_mk.fwd != null) ? _mk.fwd : 0.05;
+      fm.position.copy(pos).addScaledVector(dir, _fmHull ? _fmHull * _fmFwd : 1.5);
+      if (_fmSeat && _fmCam && _mk.pull !== false) {
+        try {
+          const _np = fm.position.clone().project(_fmCam);
+          const _LIM = (_mk.pullLimit != null) ? _mk.pullLimit : 0.78;
+          const _mx = Math.max(Math.abs(_np.x), Math.abs(_np.y));
+          if (_np.z < 1 && _mx > _LIM) {
+            const _k = _LIM / _mx;
+            _np.x *= _k; _np.y *= _k;
+            fm.position.copy(_np.unproject(_fmCam));
+          }
+        } catch (_) {}
+      }
+      fm.scale.setScalar(_fmScale);
       fm.material.color.setHex(flashColor);
       fm.material.opacity = 1;
-      game.effects.push({ mesh: fm, lifetime: 0.055, age: 0, type: 'explosionFlash',
-                          pooled: true, baseScale: 2.6, billboard: true });
+      fm.material.depthTest = !_fmSeat;
+      fm.renderOrder = _fmSeat ? 9999 : 0;
+      game.effects.push({ mesh: fm, lifetime: _fmLife, age: 0, type: 'explosionFlash',
+                          pooled: true, baseScale: _fmScale, billboard: true,
+                          punch: (_fmMine && !_fmThird) ? (_mk.punch != null ? _mk.punch : 2.1) : 1.0,
+                          grow:  (_fmMine && !_fmThird) ? (_mk.grow  != null ? _mk.grow  : 1.2) : 2.5 });
     } catch (_) {}
   }
 
@@ -16279,6 +16316,67 @@ if (typeof window !== 'undefined') window.__dbg = {
       if (v != null) { const n = HOARD_SHIPS.length; _campShipRot = ((v % n) + n) % n; }
       return _campShipRot;
     } catch (_) { return null; }
+  },
+  spawnBot: (key, dist) => {
+    try {
+      const b = new Bot(key || 'PYRO', LSS.TEAM_FLEET_B, 7777);
+      const e = new THREE.Euler(player.euler.x, player.euler.y, 0, 'YXZ');
+      const f = new THREE.Vector3(0, 0, -1).applyEuler(e);
+      const at = player.position.clone().addScaledVector(f, (dist == null ? 180 : dist));
+      b.position.copy(at);
+      if (b.mesh) b.mesh.position.copy(at);
+      if (b.euler) b.euler.y = player.euler.y + Math.PI;   // face the camera
+      game.entities.push(b);
+      window.__dbgBot = b;
+      return b;
+    } catch (e) { console.warn('[dbg] spawnBot failed:', e); return null; }
+  },
+  black: (on) => {
+    try {
+      if (window.__dbgBlack) { clearInterval(window.__dbgBlack); window.__dbgBlack = null; }
+      if (on === false) {
+        (window.__dbgHidden ? Array.from(window.__dbgHidden) : []).forEach((c) => { c.visible = true; });
+        window.__dbgHidden = null;
+        if (window.__dbgBg !== undefined) scene.background = window.__dbgBg;
+        if (window.__dbgFog !== undefined) scene.fog = window.__dbgFog;
+        return 'restored';
+      }
+      window.__dbgBg = scene.background; window.__dbgFog = scene.fog;
+      window.__dbgHidden = window.__dbgHidden || new Set();
+      const blk = new THREE.Color(0x000000);
+      window.__dbgBlack = setInterval(() => {
+        try {
+          const keep = new Set();
+          for (const en of (game.entities || [])) if (en.mesh) keep.add(en.mesh);
+          for (const fx of (game.effects || [])) if (fx.mesh) keep.add(fx.mesh);
+          for (const pr of (game.projectiles || [])) if (pr.mesh) keep.add(pr.mesh);
+          if (window.__dbgBot && window.__dbgBot.mesh) keep.add(window.__dbgBot.mesh);
+          const ch = scene.children;
+          for (let i = 0; i < ch.length; i++) {
+            const c = ch[i];
+            if (c.isLight || keep.has(c)) continue;
+            if (c.visible) { c.visible = false; window.__dbgHidden.add(c); }
+          }
+          scene.background = blk;
+          scene.fog = null;
+        } catch (_) {}
+      }, 16);
+      return 'black on (per-frame)';
+    } catch (e) { return 'failed: ' + e; }
+  },
+  holdFX: (on) => {
+    try {
+      if (window.__dbgHold) { clearInterval(window.__dbgHold); window.__dbgHold = null; }
+      if (on === false) return 'released';
+      window.__dbgHold = setInterval(() => {
+        try {
+          for (const e of (game.effects || [])) {
+            if (e.type === 'explosionFlash') { e.age = 0; e.lifetime = 999; }
+          }
+        } catch (_) {}
+      }, 16);
+      return 'holding';
+    } catch (e) { return 'failed: ' + e; }
   },
 };
 
@@ -34408,6 +34506,8 @@ function _acquireExplosionMesh(type) {
   if (!mesh.parent) scene.add(mesh);
   mesh.visible = true;
   mesh.rotation.set(0, 0, 0);
+  mesh.renderOrder = 0;
+  if (mesh.material && mesh.material.depthTest === false) mesh.material.depthTest = true;
   return mesh;
 }
 
@@ -43310,9 +43410,10 @@ function updateEffects(dt) {
     }
     else if (e.type === 'explosionFlash') {
       const base = e.baseScale || 1;
-      const s = (e.billboard ? (1 + t * 2.5) : (1 + t * 0.5)) * base;
+      const grow = (e.grow != null) ? e.grow : 2.5;
+      const s = (e.billboard ? (1 + t * grow) : (1 + t * 0.5)) * base;
       e.mesh.scale.set(s, s, s);
-      e.mesh.material.opacity = 1.0 * (1 - t * t); 
+      e.mesh.material.opacity = (e.punch || 1.0) * (1 - t * t);
       if (e.billboard) e.mesh.lookAt(camera.position);
     }
     else if (e.type === 'explosionFire') {
@@ -47383,6 +47484,14 @@ function _lssCockpitLights() {
   return { key, fill };
 }
 const _ghostHullTimeU = { value: 0 };
+try {
+  if (typeof window !== 'undefined') {
+    window.__cockpit = window.__cockpit || {};
+    window.__cockpit.ghost = window.__cockpit.ghost || {};
+    window.__cockpit.glass = window.__cockpit.glass || {};
+    window.__muzzle = window.__muzzle || {};
+  }
+} catch (_) {}
 function _glassKnobs() {
   const G = (window.__cockpit && window.__cockpit.glass) || {};
   return {
@@ -47444,26 +47553,40 @@ function _ghostHullTint() {
 }
 function _ghostHullKnobs() {
   const G = (window.__cockpit && window.__cockpit.ghost) || {};
+  const _sRaw = (typeof G.solidity === 'number') ? G.solidity
+              : ((typeof input !== 'undefined' && input && typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0);
+  const s = Math.max(0, Math.min(1, _sRaw));
+  const SOLID_AT = 0.995;
+  const XRAY_END = 0.45;
+  const pB = (s <= XRAY_END) ? 0 : (s - XRAY_END) / (1 - XRAY_END);   // 0..1 across phase B
+  const pA = Math.min(1, s / XRAY_END);                                // 0..1 across phase A
+  const _lerp = (from, to, t) => from + (to - from) * t;
+  const _to = (from, to) => _lerp(from, to, pA);
   return {
-    on: G.on !== false,
-    core: (typeof G.core === 'number') ? G.core : 0.13,
-    rim: (typeof G.rim === 'number') ? G.rim : 0.24,       // (v38.44) 0.32 -> 0.24
-    mix: (typeof G.mix === 'number') ? G.mix : 0.30,
-    flicker: (typeof G.flicker === 'number') ? G.flicker : 0.25,
-    glow: (typeof G.glow === 'number') ? G.glow : 0.14,     // (v38.44) 0.30 -> 0.14
+    on: (G.on !== false) && (s < SOLID_AT),
+    core: _lerp(_to((typeof G.core === 'number') ? G.core : 0.13, 0.22), 1.0, pB),
+    rim: _lerp(_to((typeof G.rim === 'number') ? G.rim : 0.24, 0.10), 0.0, pB),       // (v38.44) 0.32 -> 0.24
+    mix: _to((typeof G.mix === 'number') ? G.mix : 0.30, 0.0),
+    flicker: _to((typeof G.flicker === 'number') ? G.flicker : 0.0, 0.0),
+    glow: _to((typeof G.glow === 'number') ? G.glow : 0.14, 0.0),     // (v38.44) 0.30 -> 0.14
     order: (typeof G.order === 'number') ? G.order : 4000,
-    glassCore: (typeof G.glassCore === 'number') ? G.glassCore : 0.10,
-    glassRim: (typeof G.glassRim === 'number') ? G.glassRim : 0.30,
+    glassCore: _to((typeof G.glassCore === 'number') ? G.glassCore : 0.10, 0.35),
+    glassRim: _to((typeof G.glassRim === 'number') ? G.glassRim : 0.30, 0.10),
+    depthWrite: pB > 0.02,
+    maxA: _lerp(0.92, 1.0, pB),
+    solidity: s,
     tint: _ghostHullTint()
   };
 }
 function _addGhostHull(mat, K, isGlass) {
   mat.transparent = true;
   mat.depthWrite = false;      // x-ray layering: the far wall glows through the near one
+  mat.userData._ghostOrigDepthWrite = true;
   mat.side = THREE.DoubleSide;
   const U = {
     uGhTint: { value: new THREE.Color(K.tint) }, uGhTime: _ghostHullTimeU,
-    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }, uGhGlow: { value: K.glow }
+    uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim }, uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }, uGhGlow: { value: K.glow },
+    uGhMaxA: { value: 0.92 }
   };
   mat.userData._ghostU = U;
   mat.onBeforeCompile = (shader) => {
@@ -47473,7 +47596,7 @@ function _addGhostHull(mat, K, isGlass) {
       '#include <project_vertex>',
       '#include <project_vertex>\n  vGhN = normalize(normalMatrix * normal);\n  vGhV = normalize(-mvPosition.xyz);'
     );
-    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nuniform float uGhGlow;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
+    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nuniform float uGhGlow;\nuniform float uGhMaxA;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <opaque_fragment>',
       '#include <opaque_fragment>\n' +
@@ -47483,7 +47606,7 @@ function _addGhostHull(mat, K, isGlass) {
       '    float ghScan = 1.0 - uGhFlick * 0.05 * (1.0 - sin(gl_FragCoord.y * 0.28 - uGhTime * 14.0));\n' +
       '    gl_FragColor.rgb = mix(gl_FragColor.rgb, uGhTint * 0.55, uGhMix);\n' +
       '    gl_FragColor.rgb += uGhTint * ghFres * uGhGlow * (1.0 + 0.22 * uGhFlick * sin(uGhTime * 38.0));\n' +
-      '    gl_FragColor.a = clamp((uGhCore + uGhRim * ghFres) * ghFlick * ghScan, 0.0, 0.92); }'
+      '    gl_FragColor.a = clamp((uGhCore + uGhRim * ghFres) * ghFlick * ghScan, 0.0, uGhMaxA); }'
     );
   };
   mat.customProgramCacheKey = () => 'ghostHull';
@@ -47572,6 +47695,13 @@ function _ghostHullTune(mesh, K) {
       U.uGhTint.value.set(K.tint);
       U.uGhCore.value = K.core; U.uGhRim.value = K.rim; U.uGhMix.value = K.mix; U.uGhFlick.value = K.flicker;
       if (U.uGhGlow) U.uGhGlow.value = K.glow;
+      const _ga = (window.__cockpit && window.__cockpit.ghost) ? window.__cockpit.ghost.additive : undefined;
+      const _wantAdd = (_ga !== false);
+      const _bl = _wantAdd ? THREE.AdditiveBlending : THREE.NormalBlending;
+      if (m.blending !== _bl) m.blending = _bl;
+      const _dw = !!K.depthWrite && !_wantAdd;
+      if (m.depthWrite !== _dw) m.depthWrite = _dw;
+      if (U.uGhMaxA) U.uGhMaxA.value = (typeof K.maxA === 'number') ? K.maxA : 0.92;
     }
     o.renderOrder = K.order;
   });
@@ -59327,6 +59457,12 @@ function _refreshSettingsValues() {
   setChk('set-keep-warm', input.keepWarm !== false);
   setChk('set-hull-glow', input.hullGlow !== false);
   setChk('set-cockpit-vr', input.cockpitVR === true);
+  {
+    const _cs = (typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0;
+    setRange('set-cockpit-solidity', null, _cs);
+    const _cv = $('#val-cockpit-solidity');
+    if (_cv) _cv.textContent = (_cs * 100).toFixed(0) + '%';
+  }
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
   {
     const _fs = (typeof input.hudScale === 'number') ? input.hudScale : 1;
@@ -59603,6 +59739,14 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Seats your head at the pilot's eye inside the modelled cockpit while in the headset, with free head-look. Off: the classic VR view (ship hidden).</label>
+      </div>
+      <div class="setting-row">
+        <label>Cockpit Solidity</label>
+        <input type="range" id="set-cockpit-solidity" min="0" max="1" step="0.05" value="${(typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0}">
+        <div class="value-display" id="val-cockpit-solidity">${(((typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0) * 100).toFixed(0)}%</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">How solid your own ship looks from the pilot's seat. 0% is the x-ray ghost shell &mdash; you see through the airframe to the world outside. 100% draws the hull with its real materials, like any other ship. Applies live, first person and VR (and to the chase camera when it backs inside the hull). The canopy glass stays glass at every setting.</label>
       </div>
       <div class="setting-row">
         <label>Hull Lights</label>
@@ -60993,6 +61137,18 @@ function buildSettingsPage() {
     hudScaleSel.addEventListener('input', _applyHudScale);
     hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });
   }
+  const cockSolSel = overlay.querySelector('#set-cockpit-solidity');
+  const cockSolVal = overlay.querySelector('#val-cockpit-solidity');
+  if (cockSolSel) {
+    const _applyCockSol = () => {
+      const v = parseFloat(cockSolSel.value);
+      if (!isFinite(v)) return;
+      input.cockpitSolidity = Math.max(0, Math.min(1, v));
+      if (cockSolVal) cockSolVal.textContent = (input.cockpitSolidity * 100).toFixed(0) + '%';
+    };
+    cockSolSel.addEventListener('input', _applyCockSol);
+    cockSolSel.addEventListener('change', () => { _applyCockSol(); saveSettings(); });
+  }
   const clipRecChk = overlay.querySelector('#set-clip-rec');
   if (clipRecChk) clipRecChk.addEventListener('change', () => {
     input.clipRec = !!clipRecChk.checked;
@@ -61583,6 +61739,7 @@ function saveSettings() {
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
+      cockpitSolidity: (typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0,
       vrHudMigrated: true,   // (v41.43) the one-time vrHudScale default bump has been applied
       vrWater: !!input.vrWater,   // (v41.43)
       vrWaterRefl: !!input.vrWaterRefl,   // (v41.82)
@@ -61833,6 +61990,7 @@ const SHIPPED_DEFAULTS = {
   "vrPerfMode": "standard",
   "vrStripFx": true,
   "hudScale": 1,
+  "cockpitSolidity": 0.4,
   "fovDeg": 120,
   "audioMaster": 1,
   "audioSfx": 1.5,
@@ -63404,6 +63562,9 @@ function loadSettings() {
     if (typeof data.cockpitVR === 'boolean') input.cockpitVR = data.cockpitVR;
     if (!data.cockpitVRv2) input.cockpitVR = true;
     if (typeof data.hudGaugeLabels === 'boolean') input.hudGaugeLabels = data.hudGaugeLabels;
+    if (typeof data.cockpitSolidity === 'number' && isFinite(data.cockpitSolidity)) {
+      input.cockpitSolidity = Math.max(0, Math.min(1, data.cockpitSolidity));
+    }
     if (typeof data.hudScale === 'number' && isFinite(data.hudScale)) {
       input.hudScale = Math.max(0.75, Math.min(1.75, data.hudScale));
     }
