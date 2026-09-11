@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.85';
+const LSS_BUILD = '41.86';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -40666,10 +40666,20 @@ async function _prebakeOverlayRehearsal(rep) {
   try {
     if (_lssOff('rehearse')) { window.__uiRehearsal = { skipped: 'off' }; return; }
     let _force = false;
-    try { _force = /[?&]rehearse/i.test(location.search || ''); } catch (_) {}
+    try { _force = /[?&]rehearse\b/i.test(location.search || ''); } catch (_) {}
     if (!_force && typeof _fxSmallDevice === 'function' && _fxSmallDevice()) {
       window.__uiRehearsal = { skipped: 'smallDevice' };
       return;
+    }
+    if (!_force) {
+      const _cap = (typeof window !== 'undefined' && window.__uiRehearsalMaxMP != null)
+        ? window.__uiRehearsalMaxMP : 4;
+      const _layerMP = (window.innerWidth * window.innerHeight *
+                        Math.pow(window.devicePixelRatio || 1, 2)) / 1e6;
+      if (_layerMP > _cap) {
+        window.__uiRehearsal = { skipped: 'layerBudget', layerMP: Math.round(_layerMP * 100) / 100, cap: _cap };
+        return;
+      }
     }
   } catch (_) {}
   const _t = _pbNow();
@@ -68079,7 +68089,7 @@ function __pmark(name) {
     R.alt = false;
     try {
       let _altOn = false;
-      try { _altOn = /[?&]pbalt/i.test(location.search || ''); } catch (_) {}
+      try { _altOn = /[?&]pbalt\b/i.test(location.search || ''); } catch (_) {}
       if (!_altOn) return R.alt;
       if (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) return R.alt;
       const c = document.createElement('canvas'); c.width = c.height = 1;

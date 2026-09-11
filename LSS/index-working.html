@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.85';
+const LSS_BUILD = '41.86';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -60557,10 +60557,45 @@ async function _prebakeOverlayRehearsal(rep) {
   try {
     if (_lssOff('rehearse')) { window.__uiRehearsal = { skipped: 'off' }; return; }
     let _force = false;
-    try { _force = /[?&]rehearse/i.test(location.search || ''); } catch (_) {}
+    try { _force = /[?&]rehearse\b/i.test(location.search || ''); } catch (_) {}
     if (!_force && typeof _fxSmallDevice === 'function' && _fxSmallDevice()) {
       window.__uiRehearsal = { skipped: 'smallDevice' };
       return;
+    }
+    // ⚠⚠ (v41.86) ...AND OFF ON BIG-PIXEL DISPLAYS, FOR THE SAME REASON. Owner, on the desktop's 4K
+    // 120Hz TV (3840x2160 at devicePixelRatio 2.25): the launch countdown never appears in
+    // fullscreen, callout tags and the fps meter flicker, and menu items go missing after the first
+    // round - then `?off=rehearse` fixed it, exactly as `?off=all` did on the phone.
+    // v40.99 read the phone finding as "phones are small" and gated on _fxSmallDevice(), which is a
+    // DEVICE-CLASS test (_LSS_IS_MOBILE / XR presenting). What actually ran out was the COMPOSITOR
+    // LAYER BUDGET, and that is driven by layer AREA, not by device class: ONE full-viewport layer
+    // is 2.07 MP on a 1080p laptop and 7.81 MP on that TV - 3.8x - so the same 37 rehearsed overlays
+    // blow on a "big" device the same budget they blew on a small one. Measured on the owner's
+    // machine before this fix: `__uiRehearsal = {ms:316, n:37, groups:8, frames:32, worst:34}` with a
+    // full-viewport layer of 7.81 MP. So gate on the measurement, not on the device.
+    // 4 MP keeps the rehearsal where it was always fine (1080p 2.07, 1440p 3.69) and drops it where
+    // it costs the UI (that TV 7.81, 4K-at-dpr-1 8.29). `window.__uiRehearsalMaxMP` overrides live.
+    // ⚠ The trade is deliberate and cheap: the v40.99 note above is explicit that this buys "a few
+    // milliseconds" on a desktop, and what it prevents is a first-use hitch. The HUD is not a fair
+    // price for that on any device.
+    // ⚠ WHY THIS KEEPS COSTING SESSIONS: the failure is indistinguishable from a paint/stacking bug
+    // and WILL send you chasing CSS - the overlays are laid out, computed-visible, hit-testable and
+    // simply not drawn, and a windowed round-trip "heals" it because that builds a fresh fullscreen
+    // surface with a fresh promotion decision. Two rounds of theory-driven fixes have now missed it:
+    // v40.91 settle ladder / v40.94 layer preservation / v40.96 forced reads / v40.97 canvas stacking
+    // on the phone, and on the desktop an un-scoped v40.97 canvas-stacking A/B, which was measured
+    // and FAILED. Reach for the `?off=` switchboard FIRST.
+    if (!_force) {
+      // Megapixels of ONE full-viewport composited layer. innerWidth/innerHeight are CSS px, so the
+      // dpr^2 term is what turns them into the pixels the compositor actually has to hold.
+      const _cap = (typeof window !== 'undefined' && window.__uiRehearsalMaxMP != null)
+        ? window.__uiRehearsalMaxMP : 4;
+      const _layerMP = (window.innerWidth * window.innerHeight *
+                        Math.pow(window.devicePixelRatio || 1, 2)) / 1e6;
+      if (_layerMP > _cap) {
+        window.__uiRehearsal = { skipped: 'layerBudget', layerMP: Math.round(_layerMP * 100) / 100, cap: _cap };
+        return;
+      }
     }
   } catch (_) {}
   const _t = _pbNow();
@@ -98083,7 +98118,7 @@ function __pmark(name) {
       // are hunting flicker and corruption; it is a variable in every measurement it appears in.
       // Now opt-in on its own flag. `?pbalt` brings it back for the specific question it answers.
       let _altOn = false;
-      try { _altOn = /[?&]pbalt/i.test(location.search || ''); } catch (_) {}
+      try { _altOn = /[?&]pbalt\b/i.test(location.search || ''); } catch (_) {}
       if (!_altOn) return R.alt;
       if (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) return R.alt;
       const c = document.createElement('canvas'); c.width = c.height = 1;
