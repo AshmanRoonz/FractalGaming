@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.36';
+const LSS_BUILD = '42.43';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6188,15 +6188,17 @@ function applyGameSyncConsensus() {
   game.scoreB        = sbMax;
   if (n < 2) return;
 
+  let _cyWarm = false;
+  try { _cyWarm = !!(typeof _isCyber === 'function' && _isCyber()); } catch (_) {}
   game.roundTimer    = rtSum / n;
-  game.warmupTimer   = wtSum / n;
+  if (!_cyWarm) game.warmupTimer = wtSum / n;
   game.roundEndTimer = etSum / n;
   game.matchEndTimer = mtSum / n;
   const _nowMs = Date.now();
   if (typeof game.roundTimerAnchorMs === 'number') {
     game.roundTimerAnchorMs = _nowMs; game.roundTimerTotal = game.roundTimer;
   }
-  if (typeof game.warmupTimerAnchorMs === 'number') {
+  if (!_cyWarm && typeof game.warmupTimerAnchorMs === 'number') {
     game.warmupTimerAnchorMs = _nowMs; game.warmupTimerTotal = game.warmupTimer;
   }
   if (typeof game.roundEndTimerAnchorMs === 'number') {
@@ -6767,6 +6769,31 @@ function handleNetEvent(evt, fromPeerId) {
     } catch (_) {}
     return;
   }
+  if (evt.type === 'team_set') {
+    const peer = net.peers.get(fromPeerId);
+    if (peer && typeof evt.team === 'number' && isFinite(evt.team)) {
+      peer.team = evt.team;
+      if (peer.networkPlayer) peer.networkPlayer.team = evt.team;
+    }
+    return;
+  }
+  if (evt.type === 'cyber_carrier') {
+    const C = game._cyber;
+    if (C && !C.authority && typeof _carrier !== 'undefined' && _carrier) {
+      try {
+        _carrier.from.set(evt.fx, evt.fy, evt.fz);
+        _carrier.dir.set(evt.dx, evt.dy, evt.dz);
+        if (_carrier.dir.lengthSq() > 1e-6) _carrier.dir.normalize();
+        if (typeof evt.ds === 'number') _carrier.dist = evt.ds;
+        const _tA = (typeof evt.t === 'number') ? evt.t : (_carrier.t || 0);
+        const _spd = (typeof _carrierSpeed === 'function') ? _carrierSpeed() : 95;
+        const _errU = Math.abs(_tA - (_carrier.t || 0)) * _spd;
+        _carrier.t = (_errU > 400) ? _tA : ((_carrier.t || 0) + (_tA - (_carrier.t || 0)) * 0.35);
+        if (typeof _carrierFaceRoute === 'function') _carrierFaceRoute();
+      } catch (_) {}
+    }
+    return;
+  }
   if (evt.type === 'cyber_start') {
     const C = game._cyber;
     if (C && !C.authority) {
@@ -6781,7 +6808,8 @@ function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'cyber_round') {
     const C = game._cyber;
     if (C && !C.authority) {
-      try { _cyberRoundEnd(C, evt.win, evt.title || 'ROUND OVER', evt.sub || '', true); } catch (_) {}
+      if (typeof evt.r === 'number' && (C.round || 1) !== evt.r) return;
+      try { _cyberRoundEnd(C, evt.win, evt.title || 'ROUND OVER', evt.sub || '', true, evt.at); } catch (_) {}
     }
     return;
   }
@@ -11043,6 +11071,7 @@ renderer.xr.addEventListener('sessionend', () => {
   try { console.log('[v11b VR] sessionend fired'); } catch (_) {}
   try { window._lssLastIntentionalXrEndMs = performance.now(); } catch (_) {}
   _xrSessionLifecycleActive = false;
+  if (typeof game !== 'undefined' && game) game._xrBlurred = false;
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
   if (xrAuxMesh) xrAuxMesh.visible = false;
@@ -22462,6 +22491,7 @@ function _hcTrafficRamPass(dt) {
   for (let i = 0; i < T.length; i++) {
     const o = T[i], e = o.ent;
     if (!e || !e.alive) continue;
+    if (e.team != null && player.team != null && e.team === player.team) continue;
     const dx = player.position.x - o.x, dy = player.position.y - o.y, dz = player.position.z - o.z;
     const rr = o.r + pr;
     const d2 = dx * dx + dy * dy + dz * dz;
@@ -23124,6 +23154,13 @@ function _carrierAimAt(pos) {
 const _csDir = new THREE.Vector3(), _csBest = new THREE.Vector3(), _csUp = new THREE.Vector3(0, 1, 0);
 const _csWant = new THREE.Vector3(), _csA = new THREE.Vector3(), _csB = new THREE.Vector3();
 const _CS_ANGLES = [0, 0.26, -0.26, 0.52, -0.52, 0.85, -0.85, 1.2, -1.2];
+function _carrierOwned() {
+  try {
+    if (!(typeof net !== 'undefined' && net && net.active)) return true;   // solo: always ours
+    if (!(typeof _isCyber === 'function' && _isCyber())) return true;      // only this mode replicates it
+    return !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.authority);
+  } catch (_) { return true; }
+}
 function _carrierSteer(dt) {
   const o = _carrier.obj;
   if (!o || !game.hubCity || typeof _hubCityRayHit !== 'function') return;
@@ -23172,8 +23209,9 @@ function _carrierSteer(dt) {
 function _carrierFrame(dt) {
   if (!_carrier.obj || !_carrier.ent) return;
   if (!_carrier.ent.alive) return;
+  if (game.state !== 'playing' && typeof _isCyber === 'function' && _isCyber()) { _carrierRide(dt, false); return; }
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) { _carrierRide(dt, false); return; }
-  try { _carrierSteer(dt); } catch (_) {}   // (v39.55) around the towers, not through them
+  if (_carrierOwned()) { try { _carrierSteer(dt); } catch (_) {} }   // (v39.55) around the towers, not through them
   _carrier.t += (dt || 0.016);
   const travelled = Math.min(_carrier.dist, _carrierSpeed() * _carrier.t);
   const o = _carrier.obj;
@@ -23564,6 +23602,7 @@ function _cyberPrePlace() {
     let team = C.teamA;
     try { team = (net.active ? _cyberTeamForPeer(net.myPeerId, C) : C.teamA); } catch (_) {}
     player.team = team;
+    try { _netSyncTeam(); } catch (_) {}
     if (team === _cyberAtkFleet(C)) {
       if (C.sector == null && (!net.active || C.authority)) C.sector = Math.floor(Math.random() * 6);
       if (C.sector != null) {
@@ -23614,6 +23653,15 @@ function _champChargeTime() {
   }
   if (typeof _isAssault === 'function' && _isAssault()) return LSS.ASSAULT_CHARGE_TIME;
   return LSS.CHAMPION_CHARGE_TIME;
+}
+function _netSyncTeam() {
+  try {
+    if (!(typeof net !== 'undefined' && net && net.active && net.sendEvent)) return;
+    if (typeof player === 'undefined' || !player || player.team == null) return;
+    if (net._sentTeam === player.team) return;
+    net._sentTeam = player.team;
+    net.sendEvent({ type: 'team_set', team: player.team });
+  } catch (_) {}
 }
 function _cyberAuthority() {
   return (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
@@ -23759,14 +23807,30 @@ function _cyberScoreLine(C) {
   try { mineA = (player.team === C.teamA); } catch (_) {}
   return 'captures ' + (mineA ? L.capsA : L.capsB) + ' - ' + (mineA ? L.capsB : L.capsA);
 }
-function _cyberRoundEnd(C, winnerTeam, title, sub, fromNet) {
+function _cyberScheduleNextRound(C, atMs, rebroadcast) {
+  try { if (C._nextT) { clearTimeout(C._nextT); C._nextT = null; } } catch (_) {}
+  try { if (C._nextRB) { clearInterval(C._nextRB); C._nextRB = null; } } catch (_) {}
+  const at = (typeof atMs === 'number' && isFinite(atMs)) ? atMs : (Date.now() + 5000);
+  const delay = Math.max(0, Math.min(at - Date.now(), 6500));
+  if (rebroadcast && C._roundMsg && typeof net !== 'undefined' && net && net.sendEvent) {
+    C._nextRB = setInterval(() => { try { net.sendEvent(C._roundMsg); } catch (_) {} }, 250);
+  }
+  C._nextT = setTimeout(() => {
+    C._nextT = null;
+    try { if (C._nextRB) { clearInterval(C._nextRB); C._nextRB = null; } } catch (_) {}
+    try { _cyberNextRound(C); } catch (e) { console.warn('[cyber] next round:', e); }
+  }, delay);
+}
+function _cyberRoundEnd(C, winnerTeam, title, sub, fromNet, atMs) {
   if (C.over || C.matchOver) return;
   if (!fromNet && net.active && !C.authority) return;
   C.over = true;
   _cyberLedgerApply(C, winnerTeam);            // BEFORE the round number moves - the ledger reads
   const champ = _cyberMatchWinner(C);          //   the ENDING round's attacker off it
+  const _nextAt = (typeof atMs === 'number' && isFinite(atMs)) ? atMs : (Date.now() + 5000);
   if (!fromNet && net.active && net.sendEvent) {
-    try { net.sendEvent({ type: 'cyber_round', win: winnerTeam, title: title, sub: sub }); } catch (_) {}
+    C._roundMsg = { type: 'cyber_round', win: winnerTeam, title: title, sub: sub, r: C.round, at: _nextAt };
+    try { net.sendEvent(C._roundMsg); } catch (_) {}
   }
   let mine = false;
   try { mine = (player.team === winnerTeam); } catch (_) {}
@@ -23786,7 +23850,7 @@ function _cyberRoundEnd(C, winnerTeam, title, sub, fromNet) {
     setTimeout(() => { try { _cyberEnd(C, win ? 'VICTORY' : 'DEFEAT', _cyberScoreLine(C), true); } catch (_) {} }, 3600);   // (v42.27) 3200 -> 3600: ~0.6 s of clean screen between the round verdict and VICTORY/DEFEAT, instead of the two cross-fading into each other
     return;
   }
-  setTimeout(() => { try { _cyberNextRound(C); } catch (e) { console.warn('[cyber] next round:', e); } }, 5000);
+  _cyberScheduleNextRound(C, _nextAt, !fromNet && !!(typeof net !== 'undefined' && net && net.active));
 }
 function _cyberNextRound(C) {
   if (!C || C.matchOver) return;
@@ -23805,7 +23869,8 @@ function _cyberNextRound(C) {
   C.started = false; C.over = false; C.lost = false; C.hold = 0; C.deadT = 0;
   C.sector = null; C.prePlaced = false;
   C._aimedAtField = false; C._wingLaunched = false; C._noSpawnSaid = false;
-  C._fieldT = 0; C._cityT = 0; C._shellSaidT = 0;
+  C._fieldT = 0; C._cityT = 0; C._shellSaidT = 0; C._carrT = 0;   // (v42.41) carrier route send
+  C._defPosts = null; C._defPostsFor = null;                      // (v42.42) defender lineup posts
   try {
     if (player.shipState === 'dead' && typeof respawnPlayer === 'function') respawnPlayer();
     if (player.maxHealth) player.health = player.maxHealth;
@@ -23833,7 +23898,7 @@ function _cyberRoundIntro(C) {
   const swap = (typeof K.swapSecs === 'number') ? K.swapSecs : _CY_SWAP_SECS;
   try { game.state = 'warmup'; } catch (_) {}
   try { game.currentRound = C.round || 1; } catch (_) {}
-  try { game.warmupTimer = swap + 11; } catch (_) {}
+  try { _anchorTimer('warmupTimer', swap + 11); } catch (_) {}
   try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
   try { if (typeof launchCountdown === 'function') launchCountdown(swap); } catch (_) {}
   setTimeout(() => {
@@ -23841,13 +23906,19 @@ function _cyberRoundIntro(C) {
     try {
       _cyberSetup(C);
       try { cine = !!(typeof _cyberCinematic === 'function' && _cyberCinematic(C)); } catch (_) {}
+      try { if (cine && typeof _lssArmCinematicWatchdog === 'function') _lssArmCinematicWatchdog(); } catch (_) {}
     } catch (e) { console.warn('[cyber] round build:', e); }
     const CN = (typeof window !== 'undefined' && window.__cine) ? window.__cine : {};
-    const cineSecs = cine ? (((CN.dur != null) ? CN.dur : 7.0) + 0.3) : 0;
-    try { game.warmupTimer = cineSecs + 3.4; } catch (_) {}   // trimmed now the lineup is known
+    const _mpRound = !!(typeof net !== 'undefined' && net && net.active) ||
+                     !!(typeof window !== 'undefined' && window.__cyberMpSim);
+    const CINE_MAX = _mpRound ? 7.3 : (((CN.dur != null) ? CN.dur : 7.0) + 0.3);
+    const cineSecs = _mpRound ? CINE_MAX : (cine ? CINE_MAX : 0);
+    try { _anchorTimer('warmupTimer', cineSecs + 3.4); } catch (_) {}   // trimmed now the lineup is known
+    const _cdN  = cine ? 3 : Math.max(3, Math.round(cineSecs + 3.0));
+    const _cdAt = cine ? (cineSecs * 1000) : Math.max(0, (cineSecs + 3.0 - _cdN) * 1000);
     setTimeout(() => {
-      try { if (typeof launchCountdown === 'function') launchCountdown(3); } catch (_) {}
-    }, cineSecs * 1000);
+      try { if (typeof launchCountdown === 'function') launchCountdown(_cdN); } catch (_) {}
+    }, _cdAt);
   }, swap * 1000 + 350);
 }
 function _cyberEnd(C, title, sub, fromNet) {
@@ -23914,10 +23985,11 @@ function _cyberCityDefence(C) {
   }
 }
 function _cyberCinematic(C) {
-  if (typeof _cinematic === 'undefined' || !_cinematic || !_carrier.obj) return false;
+  if (typeof _cinematic === 'undefined' || !_cinematic) return false;
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return true;
 
-  if (!_cyberPlayerAttacks(C)) return false;           // defenders are already in the city
+  if (!_cyberPlayerAttacks(C)) return _cyberDefendCinematic(C);
+  if (!_carrier.obj) return false;                    // the DECK shot is the one that needs a carrier
   const list = [];
   if (player && player.mesh) list.push({ mesh: player.mesh, isPlayer: true, ent: null });
   for (const b of C.bots) if (b && b._cyberAttacker && b.mesh) list.push({ mesh: b.mesh, isPlayer: false, ent: b });
@@ -23967,6 +24039,123 @@ function _cyberCinematic(C) {
   try { _lssEnsureCinematicStyles(); document.body.classList.add('lss-cinematic-active'); } catch (_) {}
   try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
   _cyberCineLightOn(P, L);
+  return true;
+}
+const _CY_DEF_SPACING = 210;
+function _cyberDefClear(p) {
+  try {
+    if (typeof _hubCityRayHit !== 'function' || !game.hubCity) return true;   // city not built: nothing to hit
+    for (const d of _CY_CLEAR_DIRS) { if (_hubCityRayHit(p, d, 240) < 240) return false; }
+    return true;
+  } catch (_) { return true; }
+}
+function _cyberDefPosts(C) {
+  const F = (C && C.field && C.field.position) ? C.field : null;
+  if (!F) return null;                       // no objective yet - the caller declines the shot
+  if (C._defPosts && C._defPostsFor === F) return C._defPosts;
+  const c = F.position;
+  const fwd = new THREE.Vector3(HUB_CITY.x - c.x, 0, HUB_CITY.z - c.z);
+  if (fwd.lengthSq() < 1) fwd.set(1, 0, 0);
+  fwd.normalize();
+  const side = new THREE.Vector3(-fwd.z, 0, fwd.x);
+  const K = window.__cyber || (window.__cyber = {});
+  const R = (K.defR != null) ? K.defR : 760;
+  const off = (i) => (i === 0) ? 0 : ((i % 2) ? _CY_DEF_SPACING : -_CY_DEF_SPACING);
+  const mk = (i, y) => new THREE.Vector3(
+    c.x - fwd.x * R + side.x * off(i), y, c.z - fwd.z * R + side.z * off(i));
+  let posts = null;
+  let y = c.y + ((K.defY != null) ? K.defY : 240);
+  for (let t = 0; t < 7 && !posts; t++) {
+    const ps = [mk(0, y), mk(1, y), mk(2, y)];
+    if (ps.every(_cyberDefClear)) posts = ps;
+    else y += 340;
+  }
+  if (!posts) {                              // last resort: over every roof in the city
+    y = HUB_CITY.padY + HUB_CITY.genome.towerH + 260;
+    posts = [mk(0, y), mk(1, y), mk(2, y)];
+  }
+  C._defPosts = posts; C._defPostsFor = F;
+  return posts;
+}
+function _cyberCityPlace(C) {
+  const posts = _cyberDefPosts(C);
+  if (!posts) return false;
+  try {
+    const p = posts[0];
+    player.position.copy(p);
+    player.velocity.set(0, 0, 0);
+    const F = C.field.position;
+    const hx = F.x - p.x, hz = F.z - p.z;
+    if (player.euler && (hx * hx + hz * hz) > 1) {
+      player.euler.y = Math.atan2(-hx, -hz); player.euler.x = 0; player.euler.z = 0;
+    }
+    return true;
+  } catch (_) { return false; }
+}
+function _cyberDefendCinematic(C) {
+  const posts = _cyberDefPosts(C);
+  if (!posts) return false;
+  const list = [];
+  if (player && player.mesh) list.push({ mesh: player.mesh, isPlayer: true, ent: null });
+  for (const b of C.bots) if (b && !b._cyberAttacker && b.mesh) list.push({ mesh: b.mesh, isPlayer: false, ent: b });
+  if (!list.length) return false;            // a peer has no bots and may have no hull yet
+  const F = C.field.position;
+  const _h = new THREE.Vector3(), _fz = new THREE.Vector3(0, 0, -1);
+  _cinematic.ships = [];
+  const n = Math.min(3, list.length);
+  for (let i = 0; i < n; i++) {
+    const rec = list[i], p = posts[i];
+    if (rec.isPlayer) {
+      player.position.copy(p);
+      if (player.velocity) player.velocity.set(0, 0, 0);
+      if (player.euler) { player.euler.y = Math.atan2(-(F.x - p.x), -(F.z - p.z)); player.euler.x = 0; player.euler.z = 0; }
+    } else if (rec.ent && rec.ent.position) {
+      rec.ent.position.copy(p);
+      if (rec.ent.velocity) rec.ent.velocity.set(0, 0, 0);
+    }
+    _h.set(F.x - p.x, 0, F.z - p.z);
+    if (_h.lengthSq() < 1) _h.set(0, 0, -1);
+    _h.normalize();
+    const q = new THREE.Quaternion().setFromUnitVectors(_fz, _h.clone().negate());
+    const sh = rec.mesh.userData && rec.mesh.userData.shieldMesh;
+    const fx = (typeof _lssShipEngineFX === 'function') ? _lssShipEngineFX(rec.mesh) : [];
+    _cinematic.ships.push({
+      mesh: rec.mesh, isPlayer: rec.isPlayer, deckIdx: null, ent: rec.ent || null,
+      origPos: p.clone(), origQuat: q.clone(), origVisible: rec.mesh.visible,
+      shield: sh || null, origShieldVisible: sh ? sh.visible : null,
+      engineFx: fx.map(o => ({ o, v: o.visible })),
+      pos: { x: p.x, y: p.y, z: p.z }, quat: q,
+    });
+  }
+  for (const sp of _cinematic.ships) {
+    sp.mesh.visible = true;
+    sp.mesh.position.set(sp.pos.x, sp.pos.y, sp.pos.z);
+    sp.mesh.quaternion.copy(sp.quat);
+    if (sp.shield) sp.shield.visible = false;
+    if (sp.engineFx) for (const e of sp.engineFx) e.o.visible = false;
+  }
+  const CN = window.__cine || (window.__cine = {});
+  const K = window.__cyber || (window.__cyber = {});
+  const p0 = posts[0];
+  const standoff = Math.hypot(p0.x - F.x, p0.z - F.z);
+  _cinematic.orbitR  = standoff + ((K.defCamR != null) ? K.defCamR : 460);
+  _cinematic.orbitY  = p0.y + ((K.defCamY != null) ? K.defCamY : 130);
+  _cinematic.orbitCX = F.x;
+  _cinematic.orbitCZ = F.z;
+  _cinematic.orbitA0 = Math.atan2(p0.z - F.z, p0.x - F.x);
+  _cinematic.orbitArc = (CN.arc != null) ? CN.arc : Math.PI * 0.5;
+  _cinematic.fovCine = (CN.fov != null) ? CN.fov : 65;
+  _cinematic.fov0 = (typeof camera !== 'undefined' && camera) ? camera.fov : 75;
+  _cinematic.camTarget.set(F.x + (p0.x - F.x) * 0.45, F.y + (p0.y - F.y) * 0.55, F.z + (p0.z - F.z) * 0.45);
+  _cinematic.camPos.set(F.x, _cinematic.orbitY, F.z);
+  _cinematic.baseY = _cinematic.orbitY;
+  _cinematic.duration = (CN.dur != null) ? CN.dur : 7.0;
+  _cinematic.startMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  _cinematic.after = null;
+  _cinematic.active = true;
+  try { _lssEnsureCinematicStyles(); document.body.classList.add('lss-cinematic-active'); } catch (_) {}
+  try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
+  try { _cyberCineLightOn(p0, 900); } catch (_) {}
   return true;
 }
 const _CY_CINE_BASE = { key: 2.6, rim: 1.5, amb: 1.1 };
@@ -24031,11 +24220,14 @@ function _cyberLineupTrack(C) {
   }
 }
 function _cyberHoldWing(C) {
-  if (!C || !C.bots || !_carrier.obj) return;
-  let i = 1;
+  if (!C || !C.bots) return;
+  const posts = _cyberDefPosts(C);
+  let i = 1, j = 1;
   for (const b of C.bots) {
-    if (!b || !b._cyberAttacker || !b.alive || !b.position) continue;
-    const d = _carrierDeckSpot(i++);
+    if (!b || !b.alive || !b.position) continue;
+    let d = null;
+    if (b._cyberAttacker) { if (_carrier.obj) d = _carrierDeckSpot(i++); }
+    else if (posts && j < posts.length) { d = posts[j++]; }
     if (!d) continue;
     b.position.copy(d);
     if (b.velocity) b.velocity.set(0, 0, 0);
@@ -24055,7 +24247,8 @@ function _cyberDeckPlace(C) {
   if (_carrier._cineLights && !(typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) {
     try { _cyberCineLightOff(); } catch (_) {}
   }
-  if (!C || !C.started || !_cyberPlayerAttacks(C)) return false;
+  if (!C || !C.started) return false;
+  if (!_cyberPlayerAttacks(C)) return _cyberCityPlace(C);   // (v42.42) a defender has a post now
   try {
     const d = _carrierDeckSpot(0);
     if (!d) return false;
@@ -24095,7 +24288,7 @@ function _cyberSetup(C) {
       }
       C.sector = _sector;
     }
-    C.placeT = _cyberPlayerAttacks(C) ? 0.5 : 0;    // (v38.23) a defender has no deck to hold
+    C.placeT = 0.5;
     try { _cyberDeckPlace(C); } catch (_) {}
     try {
       if (window.Overlays && Overlays.banner) {
@@ -24147,6 +24340,18 @@ function _cyberFrame(dt) {
   }
   C._cityT = (C._cityT || 0) - (dt || 0.016);
   if (C._cityT <= 0) { C._cityT = 1.0; try { _cyberCityDefence(C); } catch (_) {} }
+  if (net.active && C.authority && net.sendEvent && _carrier.obj) {
+    C._carrT = (C._carrT || 0) - (dt || 0.016);
+    if (C._carrT <= 0) {
+      C._carrT = 0.2;
+      try {
+        net.sendEvent({ type: 'cyber_carrier',
+          fx: _carrier.from.x, fy: _carrier.from.y, fz: _carrier.from.z,
+          dx: _carrier.dir.x,  dy: _carrier.dir.y,  dz: _carrier.dir.z,
+          ds: _carrier.dist,   t:  _carrier.t });
+      } catch (_) {}
+    }
+  }
   if (C.over) return;
   if (net.active && !C.authority) return;     // (v37.80) a joiner mirrors; it does not adjudicate
   try { _cyberReviveBots(C, dt || 0.016); } catch (_) {}
@@ -31147,6 +31352,7 @@ class Bot {
     const _ct = this.combatTarget;
     const _ctAlive = _ct && (_ct === player ? (player.shipState !== 'dead') : !!_ct.alive);
     let _fireTgt = _ctAlive ? _ct : null;
+    if (_fireTgt && _fireTgt.team != null && this.team != null && _fireTgt.team === this.team) _fireTgt = null;
     if (game.state === 'playing') {
       const _sh = game.championShell;
       if (_sh && _sh.alive && _sh.position && _botMayDamageMonster(this, _sh)) {
@@ -39209,6 +39415,10 @@ class ChampionShell {
 
   takeDamage(dmg, attacker, hitPoint) {
     if (!this.alive) return 0;
+    try {
+      if ((attacker === player || attacker === 'player') && game && game._cyber && game._cyber.armed &&
+          typeof _cyberPlayerAttacks === 'function' && !_cyberPlayerAttacks(game._cyber)) return 0;
+    } catch (_) {}
     if (attacker === player && typeof _aegisDmgOut === 'function') {
       try { dmg = _aegisDmgOut(dmg, this); } catch (_) {}
     }
@@ -41456,6 +41666,10 @@ function _xrCoverFrameRender() {
     if (!_XR_COVER.on) return false;
     if (typeof window !== 'undefined' && window.__xrCover === false) { _xrCoverDown(); return false; }
     const now = _pbNow();
+    try {
+      const _ov = document.getElementById('lss-loading-overlay');
+      if (_ov && _ov.classList.contains('active')) _xrCoverPing();
+    } catch (_) {}
     if (_XR_COVER.pingAt && now - _XR_COVER.pingAt > _XR_COVER_STALE_MS) {
       console.warn('[xrCover] nothing has pinged for ' + Math.round(now - _XR_COVER.pingAt) + ' ms - uncovering');
       _xrCoverDown(); return false;
@@ -45648,9 +45862,14 @@ function cycleHubShip(dir) {
 function _commitDeferOneFrame(fn) {
   const inXR   = !!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
   const hidden = !!(typeof document !== 'undefined' && document.hidden);
-  if (inXR || hidden || typeof requestAnimationFrame !== 'function') { fn(); return; }
   let done = false;
   const go = () => { if (done) return; done = true; fn(); };
+  if (inXR && typeof _lssYieldNextGameFrame === 'function') {
+    _lssYieldNextGameFrame().then(go);
+    setTimeout(go, 250);
+    return;
+  }
+  if (inXR || hidden || typeof requestAnimationFrame !== 'function') { go(); return; }
   requestAnimationFrame(() => requestAnimationFrame(go));
   setTimeout(go, 250);
 }
@@ -47381,16 +47600,45 @@ function _cineHeavyWorkPending() {
   } catch (_) { return false; }
 }
 function _cineWhenSettled(fn, capMs) {
+  try {
+    if (typeof window !== 'undefined' && window.__xrSettle === false &&
+        typeof isXRPresenting === 'function' && isXRPresenting()) {
+      try { fn(); } catch (e) { console.warn('[cinematic] xr immediate start failed:', e && e.message); }
+      return;
+    }
+  } catch (_) {}
   const cap = (capMs != null) ? capMs : 8000;
   const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
   const t0 = _now();
-  const go = () => { try { fn(); } catch (e) { console.warn('[cinematic] settled-start failed:', e && e.message); } };
+  let _fired = false;
+  const go = (why) => {
+    if (_fired) return;
+    _fired = true;
+    if (why) console.warn('[cinematic] ' + why);
+    try { fn(); } catch (e) { console.warn('[cinematic] settled-start failed:', e && e.message); }
+  };
+  const _hard = setTimeout(() => go('settle deadline hit with no frames - starting anyway'), cap + 500);
+  const _clear = () => { try { clearTimeout(_hard); } catch (_) {} };
+  const _nextFrame = (cb) => {
+    let called = false;
+    const once = () => { if (called) return; called = true; cb(); };
+    try {
+      if (typeof isXRPresenting === 'function' && isXRPresenting() && typeof _lssYieldNextGameFrame === 'function') {
+        _lssYieldNextGameFrame().then(once);
+        setTimeout(once, 250);
+        return;
+      }
+    } catch (_) {}
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(once); else setTimeout(once, 16);
+  };
   const tick = () => {
+    if (_fired) return;
+    try { if (typeof _xrCoverPing === 'function') _xrCoverPing(); } catch (_) {}
     let over = false;
     try { over = (_now() - t0) > cap; } catch (_) { over = true; }
-    if (over) { console.warn('[cinematic] settle cap hit - starting anyway'); go(); return; }
-    if (_cineHeavyWorkPending()) { requestAnimationFrame(tick); return; }
-    requestAnimationFrame(() => requestAnimationFrame(go));
+    if (over) { _clear(); go('settle cap hit - starting anyway'); return; }
+    if (_cineHeavyWorkPending()) { _nextFrame(tick); return; }
+    _nextFrame(() => _nextFrame(() => { _clear(); go(); }));
   };
   tick();
 }
@@ -69686,11 +69934,22 @@ function gameLoop(timestamp) {
       }
       __pmark('hub:clip');   // (v39.49) clipmap enable/update
       if (game._swPreloading) {
-        var _plBuilt = updateSandwichStream(_fX, _fZ, 28, 14, 14);   
+        if (game._xrBlurred) { /* hold - see above */ }
+        else {
+        var _plBuilt = updateSandwichStream(_fX, _fZ, 28, 14, 14);
         game._swPreloadFrames = (game._swPreloadFrames || 0) + 1;
         game._swPreloadZero = (_plBuilt === 0) ? ((game._swPreloadZero || 0) + 1) : 0;
-        if (game._swPreloadZero >= 3 || game._swPreloadFrames > 480) { game._swPreloading = false; try { _swHubLoadingOverlay(false); } catch (_) {} if (game._preLaunchWaiting) { game._preLaunchWaiting = false; try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {} } }   
+        if (game._swPreloadZero >= 3 || game._swPreloadFrames > 480) {
+          game._swPreloading = false;
+          if (game._preLaunchWaiting) {
+            game._preLaunchWaiting = false;
+            try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {}
+          } else {
+            try { _swHubLoadingOverlay(false); } catch (_) {}   // a plain hub entry: nothing else is coming
+          }
+        }
         else { try { _swHubLoadingOverlay(true); } catch (_) {} }
+        }
       } else if (game._swapStaging || game._rrStaging) {
       } else if (game.state === 'warmup' && !game._worldPrebaking) {
         let _drainMs = 3;

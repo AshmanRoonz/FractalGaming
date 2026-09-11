@@ -4713,7 +4713,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.36';
+const LSS_BUILD = '42.43';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -13354,15 +13354,38 @@ function applyGameSyncConsensus() {
   // an interval against it (the 5 s shield-regen gate, kill-feed expiry, bot
   // memory ages, the multikill window) went with it. Nothing cross-peer
   // reads it: the city traffic clock has its own net.cityT sync.
+  // ⭐⭐ (v42.39, upheld v42.40) WARMUP IS NOT A CONSENSUS VALUE IN CYBERPUNK CITY.
+  // v42.40 equalises the two roles' warmup LENGTH, which removes the original reason for this
+  // exclusion - and it still must not be removed, for two stronger ones found while checking:
+  //   · the blend averages a RAW `snap.wt` that is 100-300 ms stale and throws the age away, so it
+  //     adds roughly age/2 back onto the clock five times a second. At 50 ms latency that inflates a
+  //     10.7 s warmup toward ~17 s of wall time while the LAUNCH beat still paints on a real-time
+  //     setTimeout - the word appears and the controls stay locked, which is the launch-strand
+  //     symptom all over again;
+  //   · gameLoop early-returns above `broadcastGameSync` for the whole lineup, so the peer showing it
+  //     stops broadcasting while its last snapshot - stamped `s:'warmup'` - stays inside the 2 s
+  //     stale window and PINS every other peer's clock to a fixed value.
+  // The shared instant in `cyber_round` is what aligns the peers now; averaging is not needed for it
+  // and actively fights it. Historical note - the two roles used to arm different lengths outright: `_cyberCinematic` returns false for a defender ("defenders are already
+  // in the city"), so on the same frame an attacker arms ~10.7 s of lineup + 3-2-1 while a defender
+  // arms 3.4 s of 3-2-1 alone, exactly as _cyberRoundIntro's own comment intends. Both peers are in
+  // 'warmup', so the same-phase gate above lets them blend, and averaging them gives ~7 s - a number
+  // that is wrong for BOTH: the attacker's lineup outlives its own clock and the defender is held
+  // twice as long as their countdown. This was invisible until v42.39 because every cyberpunk peer's
+  // warmup clock was a dead 0; making the clock real is what would have introduced the desync, so
+  // the exclusion ships with it. Everything else here still blends - only this one field differs by
+  // role by design. ⚠ Solo never reaches this line at all (`if (n < 2) return;` above).
+  let _cyWarm = false;
+  try { _cyWarm = !!(typeof _isCyber === 'function' && _isCyber()); } catch (_) {}
   game.roundTimer    = rtSum / n;
-  game.warmupTimer   = wtSum / n;
+  if (!_cyWarm) game.warmupTimer = wtSum / n;
   game.roundEndTimer = etSum / n;
   game.matchEndTimer = mtSum / n;
   const _nowMs = Date.now();
   if (typeof game.roundTimerAnchorMs === 'number') {
     game.roundTimerAnchorMs = _nowMs; game.roundTimerTotal = game.roundTimer;
   }
-  if (typeof game.warmupTimerAnchorMs === 'number') {
+  if (!_cyWarm && typeof game.warmupTimerAnchorMs === 'number') {
     game.warmupTimerAnchorMs = _nowMs; game.warmupTimerTotal = game.warmupTimer;
   }
   if (typeof game.roundEndTimerAnchorMs === 'number') {
@@ -14113,6 +14136,41 @@ function handleNetEvent(evt, fromPeerId) {
     } catch (_) {}
     return;
   }
+  // ⭐⭐ (v42.43) A PEER'S REAL TEAM, after the mode has assigned it. See _netSyncTeam for why the
+  // loadout broadcast cannot carry it. Deliberately does NOT go through updateNetworkPlayer: that
+  // rebuilds the hull on a team change, and this fires right as the match is forming.
+  if (evt.type === 'team_set') {
+    const peer = net.peers.get(fromPeerId);
+    if (peer && typeof evt.team === 'number' && isFinite(evt.team)) {
+      peer.team = evt.team;
+      if (peer.networkPlayer) peer.networkPlayer.team = evt.team;
+    }
+    return;
+  }
+  // ⭐⭐ (v42.41) CYBERPUNK CITY: the authority's LIVE carrier route, 5 Hz. See _carrierOwned.
+  if (evt.type === 'cyber_carrier') {
+    const C = game._cyber;
+    if (C && !C.authority && typeof _carrier !== 'undefined' && _carrier) {
+      try {
+        // The route itself is adopted outright - it only changes when the authority steers, and a
+        // half-adopted route would aim the hull down one heading while it travelled along another.
+        _carrier.from.set(evt.fx, evt.fy, evt.fz);
+        _carrier.dir.set(evt.dx, evt.dy, evt.dz);
+        if (_carrier.dir.lengthSq() > 1e-6) _carrier.dir.normalize();
+        if (typeof evt.ds === 'number') _carrier.dist = evt.ds;
+        // ⚠ THE CLOCK IS EASED, NOT SNAPPED. Between packets the peer keeps integrating its own dt
+        // (that is what makes the hull move smoothly at 5 Hz), so each packet is a small correction;
+        // snapping it would make a 1367-unit hull twitch five times a second. A large error means
+        // something real happened - a round rebuild, a long stall, a joiner - and is taken whole.
+        const _tA = (typeof evt.t === 'number') ? evt.t : (_carrier.t || 0);
+        const _spd = (typeof _carrierSpeed === 'function') ? _carrierSpeed() : 95;
+        const _errU = Math.abs(_tA - (_carrier.t || 0)) * _spd;
+        _carrier.t = (_errU > 400) ? _tA : ((_carrier.t || 0) + (_tA - (_carrier.t || 0)) * 0.35);
+        if (typeof _carrierFaceRoute === 'function') _carrierFaceRoute();
+      } catch (_) {}
+    }
+    return;
+  }
   // (v37.80) CYBERPUNK CITY: the authority's launch portal, route clock and objective.
   if (evt.type === 'cyber_start') {
     const C = game._cyber;
@@ -14131,7 +14189,13 @@ function handleNetEvent(evt, fromPeerId) {
   if (evt.type === 'cyber_round') {
     const C = game._cyber;
     if (C && !C.authority) {
-      try { _cyberRoundEnd(C, evt.win, evt.title || 'ROUND OVER', evt.sub || '', true); } catch (_) {}
+      // (v42.40) The verdict is now re-broadcast every 250 ms until the advance fires, so this
+      // handler sees duplicates by design. Two layers: _cyberRoundEnd's own `if (C.over) return`
+      // makes a repeat inert WITHIN a round, and this round check stops a late duplicate re-entering
+      // AFTER _cyberNextRound has already advanced - which would rewind C.round and flip this peer's
+      // side, because the attack/defend roles are a pure function of it.
+      if (typeof evt.r === 'number' && (C.round || 1) !== evt.r) return;
+      try { _cyberRoundEnd(C, evt.win, evt.title || 'ROUND OVER', evt.sub || '', true, evt.at); } catch (_) {}
     }
     return;
   }
@@ -19794,6 +19858,13 @@ renderer.xr.addEventListener('sessionend', () => {
   // the page (which lands the user at the cold-boot lobby).
   try { window._lssLastIntentionalXrEndMs = performance.now(); } catch (_) {}
   _xrSessionLifecycleActive = false;
+  // ⭐ (v42.38) CLEAR THE BLUR FLAG. It is set from the visibilitychange handler when the Meta/system
+  // menu opens, and `updateSandwichStream` returns 0 immediately while it is set. Ending the session
+  // from inside that menu skipped the only clear, so the flag outlived the session and the terrain
+  // streamer stayed dead on the flat page for the rest of the page load - no chunk built, planted or
+  // disposed, and the prebake's phase B sees `built <= 0` and gives up. Water ripples, birds and fish
+  // are gated on it too. One line; the flag must never survive presentation.
+  if (typeof game !== 'undefined' && game) game._xrBlurred = false;
   document.body.classList.remove('vr-active');
   if (xrHudMesh) xrHudMesh.visible = false;
   if (xrAuxMesh) xrAuxMesh.visible = false;
@@ -36292,6 +36363,15 @@ function _hcTrafficRamPass(dt) {
   for (let i = 0; i < T.length; i++) {
     const o = T[i], e = o.ent;
     if (!e || !e.alive) continue;
+    // ⭐⭐ (v42.43) THIS PASS HAD NO TEAM TEST AT ALL - the one traffic damage path v38.24's team flip
+    // never reached. On a round the pilot DEFENDS, the whole city fleet is conscripted onto their
+    // side, so these freighters are teammates - yet brushing one dealt real damage BOTH ways, flipped
+    // it permanently `aggro`, and killing it paid out a kill plus Aegis XP. (The player half below is
+    // not even gated on whether the freighter took the hit - only on `dashActive`.) The ship-ship ram
+    // has had this gate all along via `enemyHit`; this is the same rule.
+    // ⚠ Damage only. The positional push-out in _hubCityCollide is untouched, so a friendly freighter
+    // still physically blocks you - it just does not cost either of you hull for the contact.
+    if (e.team != null && player.team != null && e.team === player.team) continue;
     const dx = player.position.x - o.x, dy = player.position.y - o.y, dz = player.position.z - o.z;
     const rr = o.r + pr;
     const d2 = dx * dx + dy * dy + dz * dz;
@@ -37132,6 +37212,28 @@ function _carrierAimAt(pos) {
 const _csDir = new THREE.Vector3(), _csBest = new THREE.Vector3(), _csUp = new THREE.Vector3(0, 1, 0);
 const _csWant = new THREE.Vector3(), _csA = new THREE.Vector3(), _csB = new THREE.Vector3();
 const _CS_ANGLES = [0, 0.26, -0.26, 0.52, -0.52, 0.85, -0.85, 1.2, -1.2];
+// ⭐⭐ (v42.41) WHO OWNS THE CARRIER'S ROUTE. Until now: everybody, separately. `_carrier.t` is
+// integrated from each peer's own `dt` and `_carrierSteer` REBASES the whole route off each peer's
+// own position (`from = o.position; dir = pick; dist = remain; t = 0`) using that peer's own
+// `_hubCityRayHit` against whatever of the city it has streamed - so two machines steered around
+// different buildings at different moments and never came back. `cyber_start` was the only resync
+// and it fires once, at match start.
+// MEASURED with two real peers (two tabs, one room): identical at the round start after v42.40's
+// freeze, then ~1000 units apart and still growing nine seconds into the round. That matters more
+// than a cosmetic drift - the carrier IS the objective in this mode (one side defends it, the other
+// destroys it), the attacker spawns on its deck, and "carrier down" resolves against where the
+// authority thinks it is.
+// So the route becomes authority-owned and replicated: only the authority steers, and it sends the
+// route + clock at 5 Hz. Everything else about the carrier stays local, which is deliberate -
+// altitude comes from `_carrierRide` sampling the terrain under the hull, and a peer whose chunks
+// are not built there must be free to lift its own carrier out of the ground.
+function _carrierOwned() {
+  try {
+    if (!(typeof net !== 'undefined' && net && net.active)) return true;   // solo: always ours
+    if (!(typeof _isCyber === 'function' && _isCyber())) return true;      // only this mode replicates it
+    return !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.authority);
+  } catch (_) { return true; }
+}
 function _carrierSteer(dt) {
   const o = _carrier.obj;
   if (!o || !game.hubCity || typeof _hubCityRayHit !== 'function') return;
@@ -37182,8 +37284,18 @@ function _carrierFrame(dt) {
   if (!_carrier.ent.alive) return;
   // (v37.82) hold station through the launch lineup: the ships are parked on the deck at fixed
   // world points for its duration, and a carrier that flew on would slide out from under them
+  // ⭐⭐ (v42.40) ...and hold station for the WHOLE of a cyberpunk warmup, not just the lineup. The
+  // carrier's route clock is per-peer `dt`, and it is resynced only by `cyber_start` at match start -
+  // so it was frozen on whichever peer happened to be running the ~7 s lineup and flying on every
+  // peer that was not. By FIGHT the two machines disagreed about where the carrier was by ~690 units
+  // (95 u/s x 7.3 s, against a 1367-unit hull) - and the attacker SPAWNS ON THAT DECK. Worse,
+  // _carrierSteer rebases the route from each peer's own position, so the gap never closed.
+  // Nobody's carrier moves until the round is live, which costs one comparison and needs no packet.
+  if (game.state !== 'playing' && typeof _isCyber === 'function' && _isCyber()) { _carrierRide(dt, false); return; }
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) { _carrierRide(dt, false); return; }
-  try { _carrierSteer(dt); } catch (_) {}   // (v39.55) around the towers, not through them
+  // (v42.41) ...and only on the machine that owns the route; a peer that steered locally would
+  // fight the replicated one every frame and win half of it.
+  if (_carrierOwned()) { try { _carrierSteer(dt); } catch (_) {} }   // (v39.55) around the towers, not through them
   _carrier.t += (dt || 0.016);
   const travelled = Math.min(_carrier.dist, _carrierSpeed() * _carrier.t);
   const o = _carrier.obj;
@@ -37694,6 +37806,22 @@ function _cyberPrePlace() {
     let team = C.teamA;
     try { team = (net.active ? _cyberTeamForPeer(net.myPeerId, C) : C.teamA); } catch (_) {}
     player.team = team;
+    // ⭐⭐⭐ (v42.43) TELL THE ROOM. This is the friendly-fire bug. Owner: "i see friendly fire going
+    // on."
+    // `commitLoadout` broadcasts `team: player.team` - and at that moment `player.team` is still the
+    // FREE-FLIGHT FFA team (`_ffaTeamForPeer` -> `100 + hash % 1000000`, which is where the 736102
+    // and 264429 I saw in the two-tab test came from), because Cyberpunk City IS freeflight and the
+    // real fleet team is not written until THIS line, inside the world prebake, which commitLoadout
+    // chains AFTER the broadcast. Nothing ever re-sent it. So every other machine stored a junk
+    // number as our team for the whole match, and since every friendly-fire guard in the game is an
+    // `=== team` comparison at the call site, ALL of them failed at once: the authority's own
+    // defending bots hunted and shot the peer standing on their side, and `handleHitClaim` has no
+    // team test, so that damage was real.
+    // ⚠ A team-only event, NOT a loadout re-send: v38.63 records that re-announcing the loadout
+    // makes every receiver tear down and rebuild our hull (GLB swap, ship reset to the origin), and
+    // `updateNetworkPlayer`'s "same ship, same team, same livery" fast path is defeated by the very
+    // thing we are changing.
+    try { _netSyncTeam(); } catch (_) {}
     if (team === _cyberAtkFleet(C)) {
       // the attackers' side: the carrier's launch ring. A joiner has no sector yet and waits for
       // the authority's cyber_start, so it stands off the city instead.
@@ -37762,6 +37890,17 @@ function _champChargeTime() {
 }
 // (v37.80) The mode's authority is the same peer the champion field and the campaign hoard already
 // trust: the lowest peer id. Solo, amStasisOwner() is true, so every path below is a no-op wrapper.
+// (v42.43) Broadcast a team CHANGE without touching the hull. Sent only when the value actually
+// moves, so this is silent on every frame that does not matter.
+function _netSyncTeam() {
+  try {
+    if (!(typeof net !== 'undefined' && net && net.active && net.sendEvent)) return;
+    if (typeof player === 'undefined' || !player || player.team == null) return;
+    if (net._sentTeam === player.team) return;
+    net._sentTeam = player.team;
+    net.sendEvent({ type: 'team_set', team: player.team });
+  } catch (_) {}
+}
 function _cyberAuthority() {
   return (typeof amStasisOwner === 'function') ? amStasisOwner() : true;
 }
@@ -37937,16 +38076,52 @@ function _cyberScoreLine(C) {
   try { mineA = (player.team === C.teamA); } catch (_) {}
   return 'captures ' + (mineA ? L.capsA : L.capsB) + ' - ' + (mineA ? L.capsB : L.capsA);
 }
+// ⭐⭐ (v42.40) THE SHARED ROUND-ADVANCE INSTANT. Owner: "everyone needs to start the round at the
+// same time." Until now every peer ran `setTimeout(_cyberNextRound, 5000)` from its OWN receipt of
+// the verdict, so the whole intro chain - swap window, build, lineup, 3-2-1 - ran offset by network
+// latency on every machine, and nothing ever pulled it back together.
+// This is the `launch_at` contract (~L12544), which is the codebase's own answer to exactly this
+// problem: an ABSOLUTE wall-clock moment travels in the packet and every peer schedules against
+// `max(0, at - Date.now())`, which also handles late receipt correctly (a relative duration would
+// restart the wait from receipt instead of firing immediately to catch up - launch_at's own comment
+// records that regression).
+// ⚠ RE-BROADCAST IS NOT OPTIONAL, and it is the half of the contract that is easy to skip. WebRTC
+// data channels drop messages under congestion, and `cyber_round` had NO delivery guarantee of any
+// kind - no ack, no repeat, no fallback - while `C.round` is advanced ONLY by it and the attack /
+// defend roles are a pure function of C.round. One dropped packet desynced the SIDES permanently.
+// ⚠ CLAMPED, because there is no clock synchronisation anywhere in this codebase - `launch_at`
+// compares raw Date.now() across machines too. A peer whose wall clock is badly off must not be
+// able to wait forever or fire instantly, so the delay is clamped into [0, 6500].
+function _cyberScheduleNextRound(C, atMs, rebroadcast) {
+  try { if (C._nextT) { clearTimeout(C._nextT); C._nextT = null; } } catch (_) {}
+  try { if (C._nextRB) { clearInterval(C._nextRB); C._nextRB = null; } } catch (_) {}
+  const at = (typeof atMs === 'number' && isFinite(atMs)) ? atMs : (Date.now() + 5000);
+  const delay = Math.max(0, Math.min(at - Date.now(), 6500));
+  if (rebroadcast && C._roundMsg && typeof net !== 'undefined' && net && net.sendEvent) {
+    C._nextRB = setInterval(() => { try { net.sendEvent(C._roundMsg); } catch (_) {} }, 250);
+  }
+  C._nextT = setTimeout(() => {
+    C._nextT = null;
+    try { if (C._nextRB) { clearInterval(C._nextRB); C._nextRB = null; } } catch (_) {}
+    try { _cyberNextRound(C); } catch (e) { console.warn('[cyber] next round:', e); }
+  }, delay);
+}
 // One round is over. Book it, and either swap the sides for the next one or call the match.
-function _cyberRoundEnd(C, winnerTeam, title, sub, fromNet) {
+// (v42.40) `atMs` is the shared advance instant: the authority mints it, peers receive it on the
+// packet. Absent (solo, or an older peer's packet) it falls back to the historical +5000 from here.
+function _cyberRoundEnd(C, winnerTeam, title, sub, fromNet, atMs) {
   if (C.over || C.matchOver) return;
   // (v37.80) one verdict per round: the authority decides and broadcasts, peers only mirror.
   if (!fromNet && net.active && !C.authority) return;
   C.over = true;
   _cyberLedgerApply(C, winnerTeam);            // BEFORE the round number moves - the ledger reads
   const champ = _cyberMatchWinner(C);          //   the ENDING round's attacker off it
+  const _nextAt = (typeof atMs === 'number' && isFinite(atMs)) ? atMs : (Date.now() + 5000);
   if (!fromNet && net.active && net.sendEvent) {
-    try { net.sendEvent({ type: 'cyber_round', win: winnerTeam, title: title, sub: sub }); } catch (_) {}
+    // Kept on C so the re-broadcast below repeats the IDENTICAL payload - same `at`, same round -
+    // rather than minting a fresh instant on every repeat and walking the deadline forward.
+    C._roundMsg = { type: 'cyber_round', win: winnerTeam, title: title, sub: sub, r: C.round, at: _nextAt };
+    try { net.sendEvent(C._roundMsg); } catch (_) {}
   }
   let mine = false;
   try { mine = (player.team === winnerTeam); } catch (_) {}
@@ -37983,7 +38158,7 @@ function _cyberRoundEnd(C, winnerTeam, title, sub, fromNet) {
     setTimeout(() => { try { _cyberEnd(C, win ? 'VICTORY' : 'DEFEAT', _cyberScoreLine(C), true); } catch (_) {} }, 3600);   // (v42.27) 3200 -> 3600: ~0.6 s of clean screen between the round verdict and VICTORY/DEFEAT, instead of the two cross-fading into each other
     return;
   }
-  setTimeout(() => { try { _cyberNextRound(C); } catch (e) { console.warn('[cyber] next round:', e); } }, 5000);
+  _cyberScheduleNextRound(C, _nextAt, !fromNet && !!(typeof net !== 'undefined' && net && net.active));
 }
 // Tear the round down and build the next one. Everything the round owns is rebuilt from scratch -
 // a new launch ring, a new objective, both wings - and because the roles are a function of the
@@ -38005,7 +38180,8 @@ function _cyberNextRound(C) {
   C.started = false; C.over = false; C.lost = false; C.hold = 0; C.deadT = 0;
   C.sector = null; C.prePlaced = false;
   C._aimedAtField = false; C._wingLaunched = false; C._noSpawnSaid = false;
-  C._fieldT = 0; C._cityT = 0; C._shellSaidT = 0;
+  C._fieldT = 0; C._cityT = 0; C._shellSaidT = 0; C._carrT = 0;   // (v42.41) carrier route send
+  C._defPosts = null; C._defPostsFor = null;                      // (v42.42) defender lineup posts
   // (v38.41) A NEW ROUND IS A FRESH SHIP. The reset rebuilt the carrier, the field and both wings
   // and never touched the pilot, so last round's damage - and its fires - came along.
   try {
@@ -38055,7 +38231,23 @@ function _cyberRoundIntro(C) {
   // meant the flip landed in the 350 ms between the picker closing and the round being built,
   // handing the pilot control over their own cinematic. Armed here it covers the whole sequence,
   // and the build step below trims it to what the lineup actually needs.
-  try { game.warmupTimer = swap + 11; } catch (_) {}
+  // ⭐⭐ (v42.39) IT MUST BE _anchorTimer, NOT A RAW ASSIGNMENT - and until now it was raw, which
+  // meant the protection this comment describes HAS NEVER WORKED. Two independent killers:
+  //   1. updateRoundSystem force-writes `game.warmupTimer = 0` on every warmup frame when the mode
+  //      is freeflight, and Cyberpunk City IS freeflight (startCyberpunkCity -> startFreeFlight);
+  //   2. one line later it calls `_tickTimer('warmupTimer')`, which RECOMPUTES the value from
+  //      `warmupTimerAnchorMs`/`Total` - and those still held round 1's SHORT_COUNTDOWN=3 anchor,
+  //      long expired, so the raw write was resolved back to 0 on the very same frame.
+  // That ordering is also the fix: because _tickTimer runs AFTER the force-zero, an ANCHORED clock
+  // beats it by construction. Round 1 of this very mode proves it - it anchors at commitLoadout and
+  // runs with a live clock in freeflight today. So the mode now reaches the flip the same way round
+  // 1 does, and neither the force-zero nor the flip condition needs touching.
+  // WHAT IT WAS COSTING: the flip was held by `!selectActive` alone, and finishLaunch drops that at
+  // exactly swap*1000 - 350 ms BEFORE _cyberSetup runs. So the round went live before it was built:
+  // the pilot got control and weapons, bots unfroze, the round clock started, and _cyberFrame's
+  // self-heal pulled _cyberSetup forward and launched the attack wing off the deck moments before
+  // the lineup cinematic that is supposed to show it parked there.
+  try { _anchorTimer('warmupTimer', swap + 11); } catch (_) {}
   try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
   try { if (typeof launchCountdown === 'function') launchCountdown(swap); } catch (_) {}
   // launchCountdown owns three things at its LAUNCH beat - the visible timer, the staged-ship
@@ -38085,19 +38277,58 @@ function _cyberRoundIntro(C) {
     try {
       _cyberSetup(C);
       try { cine = !!(typeof _cyberCinematic === 'function' && _cyberCinematic(C)); } catch (_) {}
+      // ⭐ (v42.38) ARM THE WATCHDOG. Every other cinematic start in the file goes through
+      // _lssRunCinematicThen, which calls _lssArmCinematicWatchdog() on success; this one calls
+      // _cyberCinematic directly, so the cyberpunk round 2+ lineup was the only flight with no
+      // second way out. While `_cinematic.active` is true gameLoop returns before updateRoundSystem
+      // AND before updatePlayerMovement, so a flight that fails to self-complete does not just look
+      // wrong - it locks the pilot in a frozen world with no way back.
+      try { if (cine && typeof _lssArmCinematicWatchdog === 'function') _lssArmCinematicWatchdog(); } catch (_) {}
     } catch (e) { console.warn('[cyber] round build:', e); }
-    // a defender gets no lineup - they are already in the city - so their countdown starts at once
+    // ⭐⭐ (v42.40) THE HOLD IS THE SAME FOR EVERY PEER, WHATEVER THEY HAPPEN TO BE WATCHING.
+    // `cine` says whether THIS machine is showing the lineup; it must not decide how long the ROUND
+    // is held, because it varies per peer for three different reasons - only one of them by design:
+    //   · a defender gets no lineup (by design - "they are already in the city"),
+    //   · a NON-AUTHORITY peer's carrier is null at this moment (`_carrierClear()` runs on every peer
+    //     in _cyberNextRound, but only the authority rebuilds it), so a peer ATTACKER silently gets
+    //     no lineup either,
+    //   · the attacker mesh list can be empty.
+    // So the attacker armed ~10.7 s and everyone else 3.4 s, on the same frame - a ~7 s spread in
+    // when the round actually went live. Under net.active the hold is now a constant every peer
+    // computes identically, and only the PRESENTATION differs.
+    // ⚠ Read from the constant, not `window.__cine.dur`: that is a live console knob, and this
+    //   project's own test-drive loop is exactly what would make two peers disagree about it.
+    // Solo is deliberately untouched - byte-identical to v42.39 on both roles.
     const CN = (typeof window !== 'undefined' && window.__cine) ? window.__cine : {};
-    const cineSecs = cine ? (((CN.dur != null) ? CN.dur : 7.0) + 0.3) : 0;
+    // ⚠ window.__cyberMpSim = true forces the multiplayer pacing in a SOLO session. There is no other
+    // way to exercise this branch from one machine - `net` is wrapper-scoped, so a console cannot
+    // fake a mesh - and the whole point of the branch is that every peer agrees, which is precisely
+    // what a single-machine test cannot observe by accident. It changes pacing only.
+    const _mpRound = !!(typeof net !== 'undefined' && net && net.active) ||
+                     !!(typeof window !== 'undefined' && window.__cyberMpSim);
+    const CINE_MAX = _mpRound ? 7.3 : (((CN.dur != null) ? CN.dur : 7.0) + 0.3);
+    const cineSecs = _mpRound ? CINE_MAX : (cine ? CINE_MAX : 0);
     // ⚠ DO NOT set game.state here. The arena round system owns the warmup -> playing flip and
     // makes it the moment warmupTimer hits 0 with the picker down - which, left at 0, fired
     // BEFORE the lineup had even started and handed the pilot control over their own cinematic.
     // Give it a timer that covers the lineup and the 3-2-1 and it flips itself, at the right beat,
     // through the same path round 1 uses (which is also what runs _warmRealCombatFX).
-    try { game.warmupTimer = cineSecs + 3.4; } catch (_) {}   // trimmed now the lineup is known
+    // (v42.39) anchored, same reason as the arm above. ⚠ The 0.4 s past the LAUNCH beat is
+    // deliberate slop, not an oversight: the `launchCountdown(3)` below is a setTimeout, and if it
+    // fires even slightly late against a clock that expired at exactly +3.0 the flip would be early
+    // again - the precise bug this is fixing. Late is a 0.4 s pause on LAUNCH; early is a round that
+    // starts before it is built.
+    try { _anchorTimer('warmupTimer', cineSecs + 3.4); } catch (_) {}   // trimmed now the lineup is known
+    // The ticker. A peer that IS showing the lineup starts its 3-2-1 when the flight ends, exactly
+    // as before. One that is NOT counts the whole wait down instead of staring at a motionless,
+    // weaponless, timerless screen for seven seconds - which is precisely what the launch-strand
+    // bugs looked like. Both LAUNCH on the same beat by construction.
+    // ⚠ launchCountdown's START must be an INTEGER or the digits paint "10.3".
+    const _cdN  = cine ? 3 : Math.max(3, Math.round(cineSecs + 3.0));
+    const _cdAt = cine ? (cineSecs * 1000) : Math.max(0, (cineSecs + 3.0 - _cdN) * 1000);
     setTimeout(() => {
-      try { if (typeof launchCountdown === 'function') launchCountdown(3); } catch (_) {}
-    }, cineSecs * 1000);
+      try { if (typeof launchCountdown === 'function') launchCountdown(_cdN); } catch (_) {}
+    }, _cdAt);
   }, swap * 1000 + 350);
 }
 function _cyberEnd(C, title, sub, fromNet) {
@@ -38206,7 +38437,10 @@ function _cyberCityDefence(C) {
 // Built by hand rather than through _lssStartSpectatorCinematic, which needs the arena's room data
 // and simply declines in the overworld.
 function _cyberCinematic(C) {
-  if (typeof _cinematic === 'undefined' || !_cinematic || !_carrier.obj) return false;
+  // (v42.42) the `!_carrier.obj` half of this gate moved BELOW the role split - the defender shot
+  // orbits the objective and needs no carrier, and leaving it here declined every defender lineup
+  // on a non-authority peer (whose carrier arrives later, on `cyber_start`).
+  if (typeof _cinematic === 'undefined' || !_cinematic) return false;
   // ⭐⭐ (v42.23) ALREADY RUNNING = DO NOT RESTART. Returning TRUE, not false: the caller reads
   // this as "a cinematic is playing", and a false here would make _lssRunCinematicThen fire its
   // andThen() immediately - launching the 3-2-1 countdown over a cinematic that is still flying.
@@ -38217,7 +38451,10 @@ function _cyberCinematic(C) {
   // position" - same root cause as the double, fixed by the same guard.
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return true;
 
-  if (!_cyberPlayerAttacks(C)) return false;           // defenders are already in the city
+  // ⭐⭐ (v42.42) ...and now they get their own. Entry is through THIS function only, so the v42.23
+  // "already running" guard above covers both roles and a second start remains impossible.
+  if (!_cyberPlayerAttacks(C)) return _cyberDefendCinematic(C);
+  if (!_carrier.obj) return false;                    // the DECK shot is the one that needs a carrier
   const list = [];
   if (player && player.mesh) list.push({ mesh: player.mesh, isPlayer: true, ent: null });
   for (const b of C.bots) if (b && b._cyberAttacker && b.mesh) list.push({ mesh: b.mesh, isPlayer: false, ent: b });
@@ -38272,6 +38509,163 @@ function _cyberCinematic(C) {
   try { _lssEnsureCinematicStyles(); document.body.classList.add('lss-cinematic-active'); } catch (_) {}
   try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
   _cyberCineLightOn(P, L);
+  return true;
+}
+// ⭐⭐ (v42.42) THE DEFENDER'S LINEUP. Owner: "the defenders don't have a cinematic, right? ... we
+// should give defenders a cinematic around the champion field, and have them spawn where they were
+// in the cinematic."
+// They had nothing: `_cyberCinematic`'s second line was `if (!_cyberPlayerAttacks(C)) return false;
+// // defenders are already in the city`. That is also the asymmetry v42.40 had to paper over - a
+// defender armed 3.4 s of warmup against the attacker's 10.7 and the two sides launched seven
+// seconds apart - so since v42.40 a defender is ALREADY held for the full lineup length and simply
+// watches a countdown. This shot costs no extra time; it fills the blankest stretch of the round.
+//
+// ⭐ THE RULE THIS RESTS ON: **THE CINEMATIC IS POSED FROM PHYSICS STATE, NEVER THE REVERSE.**
+// "Spawn where the cinematic put you" is NOT the teardown's mesh restore - that restore is
+// overwritten one frame later anyway, by `_lssApplyShipRig` re-driving the player's mesh from
+// `player.position` and by `Bot.update`'s warmup branch doing the same for bots. So the post is
+// written to the ENTITY first and the mesh is posed FROM it; the arrival blend then lerps mesh to
+// physics, which is a no-op because they already coincide. That is exactly how the attacker's deck
+// spot works, and it is why this cannot reproduce the v42.23 "ships change position" bug: nothing
+// here snapshots a mesh's current transform as the truth.
+//
+// ⚠ CLEARANCE IS THE REAL RISK, not the structure. The objective sits at HUB_CITY.padY + 300 - i.e.
+// 300 units above the city pad, down inside a canyon of 4,400-unit towers - and it is only
+// guaranteed 220 units of clear air along six axes. A fixed stand-off ring would put ships and
+// camera inside buildings, so the altitude is raised until the whole line is clear, with "above
+// every tower" as the last resort.
+const _CY_DEF_SPACING = 210;
+function _cyberDefClear(p) {
+  try {
+    if (typeof _hubCityRayHit !== 'function' || !game.hubCity) return true;   // city not built: nothing to hit
+    for (const d of _CY_CLEAR_DIRS) { if (_hubCityRayHit(p, d, 240) < 240) return false; }
+    return true;
+  } catch (_) { return true; }
+}
+// The three stand-off posts, resolved ONCE per round and cached against the field OBJECT so a
+// late-arriving objective (a peer's `cyber_start`, or `_cyberFrame`'s _fieldT self-heal rebuilding
+// it) re-resolves instead of going stale. ⚠ Never re-roll per call: the lineup and the spawn have to
+// be the same point, and a per-frame roll would jitter the pilot around the objective at 60 Hz.
+function _cyberDefPosts(C) {
+  const F = (C && C.field && C.field.position) ? C.field : null;
+  if (!F) return null;                       // no objective yet - the caller declines the shot
+  if (C._defPosts && C._defPostsFor === F) return C._defPosts;
+  const c = F.position;
+  // Stand off on the side the city centre is on, so the skyline is the backdrop rather than empty sky.
+  const fwd = new THREE.Vector3(HUB_CITY.x - c.x, 0, HUB_CITY.z - c.z);
+  if (fwd.lengthSq() < 1) fwd.set(1, 0, 0);
+  fwd.normalize();
+  const side = new THREE.Vector3(-fwd.z, 0, fwd.x);
+  const K = window.__cyber || (window.__cyber = {});
+  const R = (K.defR != null) ? K.defR : 760;
+  const off = (i) => (i === 0) ? 0 : ((i % 2) ? _CY_DEF_SPACING : -_CY_DEF_SPACING);
+  const mk = (i, y) => new THREE.Vector3(
+    c.x - fwd.x * R + side.x * off(i), y, c.z - fwd.z * R + side.z * off(i));
+  let posts = null;
+  let y = c.y + ((K.defY != null) ? K.defY : 240);
+  for (let t = 0; t < 7 && !posts; t++) {
+    const ps = [mk(0, y), mk(1, y), mk(2, y)];
+    if (ps.every(_cyberDefClear)) posts = ps;
+    else y += 340;
+  }
+  if (!posts) {                              // last resort: over every roof in the city
+    y = HUB_CITY.padY + HUB_CITY.genome.towerH + 260;
+    posts = [mk(0, y), mk(1, y), mk(2, y)];
+  }
+  C._defPosts = posts; C._defPostsFor = F;
+  return posts;
+}
+// The defender's answer to _cyberDeckPlace: put the pilot on post 0, facing the thing they are here
+// to hold. Same shape, same v37.89 euler lesson (set the heading once, or the rig swings the hull
+// back through it the moment it takes over).
+function _cyberCityPlace(C) {
+  const posts = _cyberDefPosts(C);
+  if (!posts) return false;
+  try {
+    const p = posts[0];
+    player.position.copy(p);
+    player.velocity.set(0, 0, 0);
+    const F = C.field.position;
+    const hx = F.x - p.x, hz = F.z - p.z;
+    if (player.euler && (hx * hx + hz * hz) > 1) {
+      player.euler.y = Math.atan2(-hx, -hz); player.euler.x = 0; player.euler.z = 0;
+    }
+    return true;
+  } catch (_) { return false; }
+}
+// The shot itself. Deliberately NOT a copy of the deck lineup's camera code - it does not need one:
+// _lssUpdateSpectatorCinematic is already a generic "orbit an arbitrary centre, look at an arbitrary
+// target" consumer that knows nothing about carriers. This is a second PRODUCER filling the same
+// nine fields, aimed at the objective.
+function _cyberDefendCinematic(C) {
+  const posts = _cyberDefPosts(C);
+  if (!posts) return false;
+  const list = [];
+  if (player && player.mesh) list.push({ mesh: player.mesh, isPlayer: true, ent: null });
+  for (const b of C.bots) if (b && !b._cyberAttacker && b.mesh) list.push({ mesh: b.mesh, isPlayer: false, ent: b });
+  if (!list.length) return false;            // a peer has no bots and may have no hull yet
+  const F = C.field.position;
+  const _h = new THREE.Vector3(), _fz = new THREE.Vector3(0, 0, -1);
+  _cinematic.ships = [];
+  const n = Math.min(3, list.length);
+  for (let i = 0; i < n; i++) {
+    const rec = list[i], p = posts[i];
+    // ⭐ PHYSICS FIRST - see the rule above. The entity is moved here; the mesh is posed FROM it.
+    if (rec.isPlayer) {
+      player.position.copy(p);
+      if (player.velocity) player.velocity.set(0, 0, 0);
+      if (player.euler) { player.euler.y = Math.atan2(-(F.x - p.x), -(F.z - p.z)); player.euler.x = 0; player.euler.z = 0; }
+    } else if (rec.ent && rec.ent.position) {
+      rec.ent.position.copy(p);
+      if (rec.ent.velocity) rec.ent.velocity.set(0, 0, 0);
+    }
+    _h.set(F.x - p.x, 0, F.z - p.z);
+    if (_h.lengthSq() < 1) _h.set(0, 0, -1);
+    _h.normalize();
+    const q = new THREE.Quaternion().setFromUnitVectors(_fz, _h.clone().negate());
+    const sh = rec.mesh.userData && rec.mesh.userData.shieldMesh;
+    const fx = (typeof _lssShipEngineFX === 'function') ? _lssShipEngineFX(rec.mesh) : [];
+    _cinematic.ships.push({
+      mesh: rec.mesh, isPlayer: rec.isPlayer, deckIdx: null, ent: rec.ent || null,
+      origPos: p.clone(), origQuat: q.clone(), origVisible: rec.mesh.visible,
+      shield: sh || null, origShieldVisible: sh ? sh.visible : null,
+      engineFx: fx.map(o => ({ o, v: o.visible })),
+      pos: { x: p.x, y: p.y, z: p.z }, quat: q,
+    });
+  }
+  for (const sp of _cinematic.ships) {
+    sp.mesh.visible = true;
+    sp.mesh.position.set(sp.pos.x, sp.pos.y, sp.pos.z);
+    sp.mesh.quaternion.copy(sp.quat);
+    if (sp.shield) sp.shield.visible = false;
+    if (sp.engineFx) for (const e of sp.engineFx) e.o.visible = false;
+  }
+  const CN = window.__cine || (window.__cine = {});
+  const K = window.__cyber || (window.__cyber = {});
+  const p0 = posts[0];
+  const standoff = Math.hypot(p0.x - F.x, p0.z - F.z);
+  // Orbit the OBJECTIVE, from outside the line, so the ships pass between the camera and the thing
+  // they are guarding. Target sits between the two so both are in frame at once.
+  _cinematic.orbitR  = standoff + ((K.defCamR != null) ? K.defCamR : 460);
+  _cinematic.orbitY  = p0.y + ((K.defCamY != null) ? K.defCamY : 130);
+  _cinematic.orbitCX = F.x;
+  _cinematic.orbitCZ = F.z;
+  _cinematic.orbitA0 = Math.atan2(p0.z - F.z, p0.x - F.x);
+  _cinematic.orbitArc = (CN.arc != null) ? CN.arc : Math.PI * 0.5;
+  _cinematic.fovCine = (CN.fov != null) ? CN.fov : 65;
+  _cinematic.fov0 = (typeof camera !== 'undefined' && camera) ? camera.fov : 75;
+  _cinematic.camTarget.set(F.x + (p0.x - F.x) * 0.45, F.y + (p0.y - F.y) * 0.55, F.z + (p0.z - F.z) * 0.45);
+  _cinematic.camPos.set(F.x, _cinematic.orbitY, F.z);
+  _cinematic.baseY = _cinematic.orbitY;
+  _cinematic.duration = (CN.dur != null) ? CN.dur : 7.0;
+  _cinematic.startMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  _cinematic.after = null;
+  _cinematic.active = true;
+  try { _lssEnsureCinematicStyles(); document.body.classList.add('lss-cinematic-active'); } catch (_) {}
+  try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
+  // The city's dusk is dark and this shot has no carrier floodlights, so it borrows the lineup's own
+  // key/rim rig - resident since v42.30, so switching it on is an intensity write and costs nothing.
+  try { _cyberCineLightOn(p0, 900); } catch (_) {}
   return true;
 }
 // (v38.03) THE LINEUP'S OWN LIGHT. v37.94 pinned the zone morph to the city so the biome would
@@ -38375,11 +38769,17 @@ function _cyberLineupTrack(C) {
 // and the collider ejected them the shortest way out - through the hull. Hold them where the
 // lineup left them until the match actually starts.
 function _cyberHoldWing(C) {
-  if (!C || !C.bots || !_carrier.obj) return;
-  let i = 1;
+  if (!C || !C.bots) return;
+  // (v42.42) ...and the DEFENDING wing too. Only the two bots that are actually in the defender
+  // lineup are held; the rest keep the ring _cyberSpawnBots gave them. Without this they fly their
+  // own AI out of shot during the countdown and the pilot is the only ship that honours the pose.
+  const posts = _cyberDefPosts(C);
+  let i = 1, j = 1;
   for (const b of C.bots) {
-    if (!b || !b._cyberAttacker || !b.alive || !b.position) continue;
-    const d = _carrierDeckSpot(i++);
+    if (!b || !b.alive || !b.position) continue;
+    let d = null;
+    if (b._cyberAttacker) { if (_carrier.obj) d = _carrierDeckSpot(i++); }
+    else if (posts && j < posts.length) { d = posts[j++]; }
     if (!d) continue;
     b.position.copy(d);
     if (b.velocity) b.velocity.set(0, 0, 0);
@@ -38400,7 +38800,8 @@ function _cyberDeckPlace(C) {
   if (_carrier._cineLights && !(typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) {
     try { _cyberCineLightOff(); } catch (_) {}
   }
-  if (!C || !C.started || !_cyberPlayerAttacks(C)) return false;
+  if (!C || !C.started) return false;
+  if (!_cyberPlayerAttacks(C)) return _cyberCityPlace(C);   // (v42.42) a defender has a post now
   try {
     const d = _carrierDeckSpot(0);
     if (!d) return false;
@@ -38454,7 +38855,13 @@ function _cyberSetup(C) {
     // (v38.00) Half a second, not two and a half. Since v37.94 the ship is already standing on
     // the deck before the world is baked, so this only has to survive the single frame in which
     // free flight places the player - and a longer pin reads as being stuck to the carrier.
-    C.placeT = _cyberPlayerAttacks(C) ? 0.5 : 0;    // (v38.23) a defender has no deck to hold
+    // (v42.42) BOTH roles hold now. The v38.23 note here read "a defender has no deck to hold" and
+    // that was true until this version - they stood wherever free flight's spawn had left them,
+    // which averaged ~4,000 units from the objective they were supposedly defending. They have a
+    // post around the field now, and it needs the same brief re-assert the deck spot gets to win
+    // against free flight placing the player on the frame after 'playing' begins. ⚠ The hold still
+    // releases on the pilot's first input - it is a race with the spawn, not a control lock.
+    C.placeT = 0.5;
     try { _cyberDeckPlace(C); } catch (_) {}
     try {
       if (window.Overlays && Overlays.banner) {
@@ -38521,6 +38928,24 @@ function _cyberFrame(dt) {
   // targeting fact, not a verdict, so a joiner and the gap between rounds both need it.
   C._cityT = (C._cityT || 0) - (dt || 0.016);
   if (C._cityT <= 0) { C._cityT = 1.0; try { _cyberCityDefence(C); } catch (_) {} }
+  // ⭐⭐ (v42.41) THE CARRIER'S ROUTE ON THE WIRE, 5 Hz - the same cadence as the game-sync snapshot,
+  // and deliberately NOT inside it: that one AVERAGES its fields across peers, which is exactly the
+  // wrong operation for a value one machine owns outright. Six numbers plus the clock fully describe
+  // the route (`_carrierFrame` is position = from + dir * min(dist, speed * t)), so a peer needs
+  // nothing else to reproduce it. Sent above the `C.over` gate so the last seconds of a round still
+  // agree, and above the authority gate's own `return` because this IS the authority's work.
+  if (net.active && C.authority && net.sendEvent && _carrier.obj) {
+    C._carrT = (C._carrT || 0) - (dt || 0.016);
+    if (C._carrT <= 0) {
+      C._carrT = 0.2;
+      try {
+        net.sendEvent({ type: 'cyber_carrier',
+          fx: _carrier.from.x, fy: _carrier.from.y, fz: _carrier.from.z,
+          dx: _carrier.dir.x,  dy: _carrier.dir.y,  dz: _carrier.dir.z,
+          ds: _carrier.dist,   t:  _carrier.t });
+      } catch (_) {}
+    }
+  }
   if (C.over) return;
   if (net.active && !C.authority) return;     // (v37.80) a joiner mirrors; it does not adjudicate
   try { _cyberReviveBots(C, dt || 0.016); } catch (_) {}
@@ -48107,6 +48532,13 @@ class Bot {
     // Ships always win. The shell is only shot when there is no live ship target, which is how a
     // human plays an objective: clear the escorts, then break the shell.
     let _fireTgt = _ctAlive ? _ct : null;
+    // ⭐ (v42.43) RE-CHECK THE TEAM AT THE FIRE GATE. Every friendly-fire guard a bot has lives at
+    // ACQUISITION (`_acquireCombatTarget`), and nothing downstream re-tests it: `fireAtShip` applies
+    // `takeDamage` / `playerTakeDamage` with no team check of its own. A target's team can move under
+    // a held pointer - the city traffic is conscripted onto the defending side each round, and in a
+    // room a peer's team is re-derived from the sorted peer list every round - and the pointer is only
+    // refreshed every 1-3 s. One comparison closes the whole class.
+    if (_fireTgt && _fireTgt.team != null && this.team != null && _fireTgt.team === this.team) _fireTgt = null;
     if (game.state === 'playing') {
       const _sh = game.championShell;
       if (_sh && _sh.alive && _sh.position && _botMayDamageMonster(this, _sh)) {
@@ -58696,6 +59128,15 @@ class ChampionShell {
 
   takeDamage(dmg, attacker, hitPoint) {
     if (!this.alive) return 0;
+    // ⭐ (v42.43) YOU CANNOT SHOOT THE THING YOU ARE DEFENDING. `_botMayDamageMonster` enforced the
+    // attacker-only rule for BOTS (it early-returns on anything that is not an object with a
+    // `_cyberAttacker` flag), so a defending PLAYER could freely shoot their own objective down.
+    // Gated here rather than at the ~9 player weapon loops that reach `game.monsters`: this is the
+    // one place all of them converge, so no future weapon can miss it.
+    try {
+      if ((attacker === player || attacker === 'player') && game && game._cyber && game._cyber.armed &&
+          typeof _cyberPlayerAttacks === 'function' && !_cyberPlayerAttacks(game._cyber)) return 0;
+    } catch (_) {}
     // (v36.67) Same aegis-rider gap as OutskirtsMonster — see the note there.
     if (attacker === player && typeof _aegisDmgOut === 'function') {
       try { dmg = _aegisDmgOut(dmg, this); } catch (_) {}
@@ -62088,6 +62529,16 @@ function _xrCoverFrameRender() {
     if (!_XR_COVER.on) return false;
     if (typeof window !== 'undefined' && window.__xrCover === false) { _xrCoverDown(); return false; }
     const now = _pbNow();
+    // (v42.38) The DOM curtain still being up IS a liveness signal - it is the same curtain, and the
+    // rule for this cover is that its lifetime matches. Without this, a legitimately IDLE launch
+    // phase with nothing to ping (multiplayer's 'WAITING FOR PEERS', which can sit for a minute on a
+    // slow join) tripped the staleness sweep at 12 s: the cover vanished onto a frozen, un-launched
+    // world and then flashed back to black on the next peer event - indistinguishable, in a headset,
+    // from the stranding bug. _XR_COVER_HARD_MS is still the ceiling over everything.
+    try {
+      const _ov = document.getElementById('lss-loading-overlay');
+      if (_ov && _ov.classList.contains('active')) _xrCoverPing();
+    } catch (_) {}
     if (_XR_COVER.pingAt && now - _XR_COVER.pingAt > _XR_COVER_STALE_MS) {
       console.warn('[xrCover] nothing has pinged for ' + Math.round(now - _XR_COVER.pingAt) + ' ms - uncovering');
       _xrCoverDown(); return false;
@@ -67995,9 +68446,22 @@ function cycleHubShip(dir) {
 function _commitDeferOneFrame(fn) {
   const inXR   = !!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
   const hidden = !!(typeof document !== 'undefined' && document.hidden);
-  if (inXR || hidden || typeof requestAnimationFrame !== 'function') { fn(); return; }
   let done = false;
   const go = () => { if (done) return; done = true; fn(); };
+  // ⭐ (v42.38) XR USED TO FALL STRAIGHT THROUGH TO fn(), on the reasoning that a DOM overlay is not
+  // composited into a headset so there was nothing to wait for. That stopped being true when the VR
+  // cover landed in v42.36: showLoadingOverlay now raises an IN-SCENE cover one line before this
+  // call, and a scene cover needs a rendered frame to exist. Running the whole synchronous world
+  // build inline meant the headset held its last pre-commit frame through all of it and the cover
+  // only appeared afterwards. One game frame is enough here (a scene render, not a DOM paint, so the
+  // flat path's two-rAF pre/post-paint dance does not apply), and it comes from the game loop's own
+  // yield queue because window rAF does not tick in an immersive session (see _cineWhenSettled).
+  if (inXR && typeof _lssYieldNextGameFrame === 'function') {
+    _lssYieldNextGameFrame().then(go);
+    setTimeout(go, 250);
+    return;
+  }
+  if (inXR || hidden || typeof requestAnimationFrame !== 'function') { go(); return; }
   requestAnimationFrame(() => requestAnimationFrame(go));
   setTimeout(go, 250);
 }
@@ -70834,19 +71298,73 @@ function _cineWhenSettled(fn, capMs) {
   // the flight - a 40 ms synchronous prebake slice - is a 3x overrun on a 72 Hz frame budget.
   // The cap below still applies, so a wedged stage cannot strand the launch, and the Quest warmup
   // watchdog still sits behind it.
+  // (v42.37) LIVE ESCAPE HATCH. This wait has now broken VR twice, so it can be switched off from
+  // the console without a rebuild: window.__xrSettle = false restores the v42.31 behaviour (XR starts
+  // the cinematic immediately and eats the hitch). Off XR it is ignored - the flat wait has never
+  // been the problem.
+  try {
+    if (typeof window !== 'undefined' && window.__xrSettle === false &&
+        typeof isXRPresenting === 'function' && isXRPresenting()) {
+      try { fn(); } catch (e) { console.warn('[cinematic] xr immediate start failed:', e && e.message); }
+      return;
+    }
+  } catch (_) {}
   const cap = (capMs != null) ? capMs : 8000;
   const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
   const t0 = _now();
-  const go = () => { try { fn(); } catch (e) { console.warn('[cinematic] settled-start failed:', e && e.message); } };
+  let _fired = false;
+  const go = (why) => {
+    if (_fired) return;
+    _fired = true;
+    if (why) console.warn('[cinematic] ' + why);
+    try { fn(); } catch (e) { console.warn('[cinematic] settled-start failed:', e && e.message); }
+  };
+  // ⚠⚠ (v42.37) TWO RULES, BOTH LEARNED THE HARD WAY IN A HEADSET.
+  //
+  // RULE 1: window.requestAnimationFrame IS NOT SERVICED DURING AN IMMERSIVE WebXR SESSION. The
+  // session drives its own XRSession.requestAnimationFrame, which is why _warmupYield (~L51820) has
+  // a dedicated XR branch on _lssYieldNextGameFrame instead of rAF. v42.36 polled this loop on a
+  // bare rAF, so in a headset the tick simply never ran: hideLoadingOverlay() was never reached, the
+  // cinematic never started, and game.state stayed 'warmup' - which locks the pilot in place. Owner:
+  // "it goes black screen for 10s. Then it sits in the ship in first person view, in the overworld,
+  // with no HUD... stuck and cannot move, can hear the music." Same stranding v42.31 hit, same
+  // cause: a wait whose clock cannot tick in XR.
+  //
+  // RULE 2: THE DEADLINE MUST NOT DEPEND ON THE THING THAT CAN FAIL. v42.36's cap was evaluated
+  // inside the rAF tick, so when frames stopped arriving the cap stopped being checked too - a
+  // safety net strung from the ceiling that was falling. The deadline below is a plain setTimeout,
+  // which fires whether or not a single frame is ever drawn. That is now the guarantee that this
+  // function CANNOT strand a launch, whatever the frame source does.
+  const _hard = setTimeout(() => go('settle deadline hit with no frames - starting anyway'), cap + 500);
+  const _clear = () => { try { clearTimeout(_hard); } catch (_) {} };
+  // One frame, from whichever source actually ticks here: the game loop's own yield queue inside an
+  // XR session, window rAF outside one - and never trusting either alone.
+  const _nextFrame = (cb) => {
+    let called = false;
+    const once = () => { if (called) return; called = true; cb(); };
+    try {
+      if (typeof isXRPresenting === 'function' && isXRPresenting() && typeof _lssYieldNextGameFrame === 'function') {
+        _lssYieldNextGameFrame().then(once);
+        setTimeout(once, 250);
+        return;
+      }
+    } catch (_) {}
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(once); else setTimeout(once, 16);
+  };
   const tick = () => {
+    if (_fired) return;
+    // Keep the VR cover alive across the wait: this loop is the only thing still working at this
+    // point, so it is the only honest liveness signal the cover has. If this loop dies, the cover's
+    // staleness sweep uncovers - and the deadline above launches anyway.
+    try { if (typeof _xrCoverPing === 'function') _xrCoverPing(); } catch (_) {}
     let over = false;
     try { over = (_now() - t0) > cap; } catch (_) { over = true; }
-    if (over) { console.warn('[cinematic] settle cap hit - starting anyway'); go(); return; }
-    if (_cineHeavyWorkPending()) { requestAnimationFrame(tick); return; }
+    if (over) { _clear(); go('settle cap hit - starting anyway'); return; }
+    if (_cineHeavyWorkPending()) { _nextFrame(tick); return; }
     // One further rendered frame before the curtain goes up: the LAST unit of work has landed but
     // its first draw (program link, texture upload) has not happened yet, and that draw is exactly
     // the spike we are trying to keep out of the flight.
-    requestAnimationFrame(() => requestAnimationFrame(go));
+    _nextFrame(() => _nextFrame(() => { _clear(); go(); }));
   };
   tick();
 }
@@ -101263,11 +101781,36 @@ function gameLoop(timestamp) {
       }
       __pmark('hub:clip');   // (v39.49) clipmap enable/update
       if (game._swPreloading) {
-        var _plBuilt = updateSandwichStream(_fX, _fZ, 28, 14, 14);   
+        // ⭐⭐ (v42.38) A BLURRED XR FRAME IS NOT AN EMPTY BUILD QUEUE. updateSandwichStream's very
+        // first line is `if (game._xrBlurred) return 0;` - so while the player has the Meta/system
+        // menu open, every frame reports "built nothing" and three of them in a row declare the
+        // preload finished. The hub then launches with only the 5x5 synchronous core built and the
+        // rest streams in under the pilot. A blurred frame carries no information either way: hold.
+        if (game._xrBlurred) { /* hold - see above */ }
+        else {
+        var _plBuilt = updateSandwichStream(_fX, _fZ, 28, 14, 14);
         game._swPreloadFrames = (game._swPreloadFrames || 0) + 1;
         game._swPreloadZero = (_plBuilt === 0) ? ((game._swPreloadZero || 0) + 1) : 0;
-        if (game._swPreloadZero >= 3 || game._swPreloadFrames > 480) { game._swPreloading = false; try { _swHubLoadingOverlay(false); } catch (_) {} if (game._preLaunchWaiting) { game._preLaunchWaiting = false; try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {} } }   
+        if (game._swPreloadZero >= 3 || game._swPreloadFrames > 480) {
+          game._swPreloading = false;
+          // ⭐⭐ (v42.38) THE CURTAIN IS THE LAUNCH PATH'S TO DROP - this line used to drop it here.
+          // The hub preload finishing is NOT the end of the launch: when `_preLaunchWaiting` is set,
+          // the shader warmup, the prebake and the settle are all still ahead. Dropping the curtain
+          // at this point uncovered a world that was still being built, with the pilot still in
+          // 'warmup' and therefore LOCKED IN PLACE - in a headset (where this arm is the mobile/Quest
+          // one and there is no DOM curtain to see anyway) that is exactly the owner's report: "it
+          // sits in the ship in first person view, in the overworld, with no HUD... stuck and cannot
+          // move, can hear the music". Same contract v42.25 wrote for the other lift sites: the
+          // single hideLoadingOverlay() inside _cineWhenSettled's callback owns the way down.
+          if (game._preLaunchWaiting) {
+            game._preLaunchWaiting = false;
+            try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {}
+          } else {
+            try { _swHubLoadingOverlay(false); } catch (_) {}   // a plain hub entry: nothing else is coming
+          }
+        }
         else { try { _swHubLoadingOverlay(true); } catch (_) {} }
+        }
       } else if (game._swapStaging || game._rrStaging) {
         // (v36.27) A staged world-swap traverse owns the streamer end to end: it
         // tears the outgoing chunks down in slices, builds, enables the clipmap
