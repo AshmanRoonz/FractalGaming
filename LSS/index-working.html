@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.16';
+const LSS_BUILD = '42.17';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -48892,6 +48892,28 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
       return amount;
     }
 
+    // ⭐⭐ (v42.17) PLASMA SHIELD, VICTIM SIDE FOR BOTS - this gate had NO equivalent before, so
+    // a wall deployed by a TRACKER bot stopped nothing from anyone: both absorb paths in the file
+    // hard-filtered `eff.owner === 'player'`, and nothing here consulted a wall at all. Combined
+    // with _wallHitRipple being dead, a bot-owned shield could neither block nor be broken - it was
+    // pure decoration for its whole 10 s.
+    // Placed AFTER the isProxy return on purpose: a proxy forwards the raw claim and the AUTHORITY
+    // drains its own copy of the wall, so the HP is only ever charged once.
+    // This is also the catch-all that covers the paths with no shooter-side test of their own -
+    // splash, abilities, cores, cluster children - because they all land here in the end.
+    if (typeof _wallAbsorbSegment === 'function') {
+      const _wFrom = (attacker === 'player')
+        ? ((typeof player !== 'undefined' && player) ? player.position : null)
+        : (attacker && attacker.position) ? attacker.position : null;
+      if (_wFrom) {
+        const _wTeam = (attacker === 'player')
+          ? ((typeof player !== 'undefined' && player) ? player.team : undefined)
+          : ((attacker && attacker.team != null) ? attacker.team : undefined);
+        amount = _wallAbsorbSegment(_wFrom, this.position, _wTeam, amount);
+        if (amount <= 0) return 0;
+      }
+    }
+
     // (v34.94) Aegis hub upgrades: player-outgoing damage tweaks + on-hit
     // effects (freeflight-only; _aegisDmgOut gates itself).
     if (attacker === 'player' && typeof _aegisDmgOut === 'function') {
@@ -49970,46 +49992,23 @@ class Projectile {
       return;
     }
 
-    if (this.owner !== 'player' && !this.isSonar) {
-      for (const eff of game.worldEffects) {
-        if (eff.type !== 'particle_wall' || eff.owner !== 'player' || eff.hp <= 0) continue;
-        const wallNormal = eff.direction;
-        // Signed distance from each end of this frame's movement step to the wall plane.
-        const dx1 = prevPos.x - eff.position.x;
-        const dy1 = prevPos.y - eff.position.y;
-        const dz1 = prevPos.z - eff.position.z;
-        const prevSide = dx1 * wallNormal.x + dy1 * wallNormal.y + dz1 * wallNormal.z;
-        const dx2 = this.position.x - eff.position.x;
-        const dy2 = this.position.y - eff.position.y;
-        const dz2 = this.position.z - eff.position.z;
-        const currSide = dx2 * wallNormal.x + dy2 * wallNormal.y + dz2 * wallNormal.z;
-        // Loosened from the old "outside-in only" check.
-        // ANY plane crossing this frame counts as a hit. Same-side is when
-        // prevSide and currSide have the same sign, i.e. their product > 0.
-        if (prevSide * currSide > 0) continue;
-        const denom = prevSide - currSide;
-        if (Math.abs(denom) < 1e-6) continue;     
-        const tParam = prevSide / denom;
-        if (tParam < 0 || tParam > 1) continue;   
-        const intersect = new THREE.Vector3().lerpVectors(prevPos, this.position, tParam);
-        // Inside wall extent? Project onto the wall plane and bound-check.
-        const offCenter = new THREE.Vector3().subVectors(intersect, eff.position);
-        offCenter.sub(wallNormal.clone().multiplyScalar(offCenter.dot(wallNormal)));
-        const wallRadius = 240;     
-        if (offCenter.lengthSq() > wallRadius * wallRadius) continue;
-        // Caught. Drain damage from wall HP, sparks at the surface, destroy.
-        const absorbed = Math.min(this.damage, eff.hp);
-        eff.hp -= absorbed;
-        if (eff.hp <= 0) {
-          if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-          if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
-          // Tear down the plasma backing mesh too on HP depletion.
-          if (eff.plasmaMesh && eff.plasmaMesh.parent) {
-            scene.remove(eff.plasmaMesh);
-            if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
-          }
-          eff.timer = 0;
-        }
+    // ⭐⭐ (v42.17) PROJECTILE vs PLASMA SHIELD, rewritten onto the shared primitive. This block
+    // used to hand-roll its own swept plane test with a THIRD silhouette for the same mesh - an
+    // r=240 disc, against the r=220 disc in playerTakeDamage and the true 400x300 rectangle in
+    // _wallBlockSegment - so a corner shot was blocked as a projectile but not as a beam, and a
+    // shot 200 u above the panel was blocked as neither. It was also doubly hard-gated:
+    // `this.owner !== 'player'` meant the player's own rockets ignored every enemy shield, and
+    // `eff.owner !== 'player'` meant bot- and peer-deployed shields blocked nothing at all.
+    // Now: any projectile, any wall, team decides friend from foe, one rectangle.
+    if (!this.isSonar && typeof _wallBlockSegment === 'function') {
+      const _pjTeam = (this.owner === 'player')
+        ? ((typeof player !== 'undefined' && player) ? player.team : undefined)
+        : ((this.ownerRef && this.ownerRef.team != null) ? this.ownerRef.team : undefined);
+      const _pjHit = _wallBlockSegment(prevPos, this.position, _pjTeam);
+      if (_pjHit && _pjHit.eff) {
+        const eff = _pjHit.eff;
+        const intersect = new THREE.Vector3(_pjHit.x, _pjHit.y, _pjHit.z);
+        _wallHitRipple(eff, intersect.x, intersect.y, intersect.z, this.damage);
         spawnImpactSparks(intersect, 6);
         this.position.copy(intersect);
         // Null-check : salvoGuided strips core mesh.
@@ -68615,49 +68614,29 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
     if (amount > 0) { try { playSound('vortex_absorb'); } catch (_) {} }
     return; 
   }
-  // Plasma Shield (TRACKER): deployed one-way shield with HP; absorbs ANY
-  // incoming damage when the projectile (or attacker, fallback) is on the
-  // outside of the wall plane and the player is on the inside.
-  if (player.loadoutKey === 'TRACKER') {
-    for (const eff of game.worldEffects) {
-      if (eff.type !== 'particle_wall' || eff.owner !== 'player' || eff.hp <= 0) continue;
-      const incomingPos = (projectile && projectile.position) ? projectile.position
-                        : (attacker && attacker.position)     ? attacker.position
-                        : null;
-      if (!incomingPos) continue;
-      const wallFacing = eff.direction.clone();   
-      const playerSide   = new THREE.Vector3().subVectors(player.position, eff.position).dot(wallFacing);
-      const incomingSide = new THREE.Vector3().subVectors(incomingPos,    eff.position).dot(wallFacing);
-      // Both must be on opposite sides of the wall plane (player inside, incoming outside).
-      if (!(playerSide < 0 && incomingSide > 0)) continue;
-      const denom = playerSide - incomingSide;     
-      const tParam = -incomingSide / denom;        
-      const intersect = new THREE.Vector3().lerpVectors(incomingPos, player.position, tParam);
-      // Project the intersection's offset from wall center onto the wall plane.
-      const offCenter = new THREE.Vector3().subVectors(intersect, eff.position);
-      offCenter.sub(wallFacing.clone().multiplyScalar(offCenter.dot(wallFacing)));
-      // The Plasma Shield mesh is BoxGeometry(400, 300, 25). Use 220 as a
-      // circular approx that catches the box silhouette (half-width 200,
-      // half-height 150 ; 220 leaves a small extra-margin halo so glancing
-      // shots on the edge still count as caught).
-      const wallRadius = 220;
-      if (offCenter.lengthSq() > wallRadius * wallRadius) continue;
-      // Absorb damage into the wall's HP.
-      const absorbed = Math.min(amount, eff.hp);
-      eff.hp -= absorbed;
-      amount -= absorbed;
-      if (eff.hp <= 0) {
-        if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-        if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
-        // Plasma backing mesh teardown ; was missed on this path,
-        // so the cyan glow lingered in the scene for the rest of the
-        // match every time a player wall ate a heavy hit.
-        if (eff.plasmaMesh && eff.plasmaMesh.parent) {
-          scene.remove(eff.plasmaMesh);
-          if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
-        }
-        eff.timer = 0;
-      }
+  // ⭐⭐ (v42.17) PLASMA SHIELD, VICTIM SIDE. Rewritten from a one-way, TRACKER-only,
+  // player-owned-only, radius-220 disc into one call on the shared resolver. What was wrong:
+  //   * `if (!(playerSide < 0 && incomingSide > 0)) continue;` made it ONE-WAY, against the
+  //     owner's "no enemy shots should get through either direction". Worse, the `playerSide < 0`
+  //     half was an outright bug: the wall is planted only 200 u ahead with no ship collider, so
+  //     you fly through your own shield within a second and it silently stopped working for the
+  //     rest of its 10 s life.
+  //   * `eff.owner !== 'player'` meant a wall deployed by a BOT or a peer protected nobody.
+  //   * `player.loadoutKey === 'TRACKER'` could go false while a live wall was still standing.
+  //   * the radius-220 disc left the drawn rectangle's four corners transparent (a box corner is
+  //     at r=250) while adding a 70-unit invisible halo above and below it.
+  // Team is the rule now, exactly as _wallBlockSegment has always had it: a wall never blocks its
+  // own team, so a TRACKER and their allies still shoot out through it from either face.
+  {
+    const _wIn = (projectile && projectile.position) ? projectile.position
+               : (hitOpts && hitOpts.splashFrom)     ? hitOpts.splashFrom
+               : (attacker && attacker.position)     ? attacker.position
+               : null;
+    // No origin => not a travelling shot (DoT you are standing inside, ram, debris). Those are
+    // deliberately NOT blocked; see the note on the damage-origin contract.
+    if (_wIn && typeof _wallAbsorbSegment === 'function') {
+      const _wTeam = (attacker && attacker.team != null) ? attacker.team : undefined;
+      amount = _wallAbsorbSegment(_wIn, player.position, _wTeam, amount);
       if (amount <= 0) return;
     }
   }
@@ -72306,8 +72285,64 @@ const _spColTemp = new THREE.Vector3();
 // spread), the dominant per-shot GC churn during sustained mobile combat.
 const _hsToTgt = new THREE.Vector3();
 const _spToTgt = new THREE.Vector3();
+// ⭐⭐ (v42.17) THE ONE PLASMA-SHIELD PRIMITIVE. Owner: "vortex's lasers ignore tracker's plasma
+// shield... tracker's shield should absorb all damage until its hitpoints are gone and its gone...
+// no enemy shots should get through either direction while it has hitpoints."
+// An 8-path audit found there was no choke point at all - FIVE partial, mutually inconsistent wall
+// mechanisms and a dozen damage paths consulting none of them, plus three different silhouettes for
+// the same mesh (the 400x300 rectangle here, an r=240 disc in Projectile.update, an r=220 disc in
+// playerTakeDamage). Everything now routes through these helpers so the shield is ONE object with
+// ONE shape and ONE rule: a wall stops any shot whose travel segment crosses its panel, from EITHER
+// face, unless the shooter is on the wall's own team.
+const _WALL_HALF_W = 200;   // half of BoxGeometry(400, 300, 25) in the spawn helper
+const _WALL_HALF_H = 150;
+function _wallKnobs() {
+  const K = (typeof window !== 'undefined' && window.__wall) || {};
+  return {
+    on:     (K.on !== false),                          // master A/B for the whole shield
+    margin: (K.margin != null) ? +K.margin : 0,        // uniform inflation of the rectangle
+    fx:     (K.fx !== false),                          // ripple + light on absorb
+  };
+}
+// The mesh teardown was copy-pasted at four sites and they had already drifted - only two of them
+// disposed plasmaMesh, so the cyan backing glow leaked into the scene for the rest of the match
+// every time a wall died on one of the other two. One helper, used everywhere.
+function _wallDestroy(eff) {
+  if (!eff) return;
+  eff.hp = 0;
+  try {
+    if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
+    if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+    if (eff.plasmaMesh && eff.plasmaMesh.parent) {
+      scene.remove(eff.plasmaMesh);
+      if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
+    }
+  } catch (_) {}
+  eff.timer = 0;
+}
+// THE RESOLVER every damage path should use. Given a damage event travelling from -> to for
+// shooterTeam carrying `amount`, drain it through whatever enemy walls lie on that segment
+// (nearest first) and return what survives. Returns `amount` unchanged when nothing blocks, so a
+// caller can always just reassign. The loop guard lets a big hit punch through a dying wall and
+// still be stopped by a second one behind it.
+function _wallAbsorbSegment(from, to, shooterTeam, amount) {
+  if (!(amount > 0) || !from || !to) return amount;
+  if (typeof _wallBlockSegment !== 'function') return amount;
+  for (let guard = 0; guard < 4 && amount > 0; guard++) {
+    const hit = _wallBlockSegment(from, to, shooterTeam);
+    if (!hit || !hit.eff || hit.eff.hp <= 0) break;
+    const eff = hit.eff;
+    const absorbed = Math.min(amount, eff.hp);
+    eff.hp -= absorbed;
+    amount -= absorbed;
+    if (_wallKnobs().fx) { try { _wallImpactFX(eff, hit.x, hit.y, hit.z); } catch (_) {} }
+    if (eff.hp <= 0) _wallDestroy(eff); else break;
+  }
+  return amount;
+}
 function _wallBlockSegment(from, to, shooterTeam) {
   if (typeof game === 'undefined' || !game.worldEffects || game.worldEffects.length === 0) return null;
+  if (!_wallKnobs().on) return null;
   _wbDir.subVectors(to, from);
   const segLen = _wbDir.length();
   if (segLen < 0.001) return null;
@@ -72329,7 +72364,9 @@ function _wallBlockSegment(from, to, shooterTeam) {
     if (_wbX.lengthSq() < 0.001) _wbX.set(1, 0, 0); else _wbX.normalize();
     _wbY.crossVectors(n, _wbX).normalize();
     _wbRel.subVectors(_wbPt, eff.position);
-    if (Math.abs(_wbRel.dot(_wbX)) > 200 || Math.abs(_wbRel.dot(_wbY)) > 150) continue;
+    const _wbM = _wallKnobs().margin;
+    if (Math.abs(_wbRel.dot(_wbX)) > _WALL_HALF_W + _wbM ||
+        Math.abs(_wbRel.dot(_wbY)) > _WALL_HALF_H + _wbM) continue;
     if (!best || t < best.dist) {
       best = { eff, dist: t, x: _wbPt.x, y: _wbPt.y, z: _wbPt.z };
     }
@@ -72341,9 +72378,16 @@ function _wallBlockSegment(from, to, shooterTeam) {
 // fades flat against the wall plane (v30.76 ; the old shockwave_ring
 // preset read as bright blue circles, wrong identity for the amber wall).
 let _WALL_RIPPLE_GEO = null;
-function _wallHitRipple(eff, px, py, pz, dmg) { return; 
+// ⚠⚠ (v42.17) THIS FUNCTION WAS DEAD. It shipped as
+//     function _wallHitRipple(eff, px, py, pz, dmg) { return;
+// - an unconditional `return;` on the SIGNATURE LINE, so the whole body, including the only HP
+// write it contains, was unreachable. Its two callers (fireHitscan :~72515 and Bot.fireAtShip
+// :~48715) correctly STOPPED the shot at the wall and then charged the wall nothing, which is why
+// a Plasma Shield could never be shot down by any beam in either direction and the advertised
+// 10000 HP pool was fiction. Split in two: _wallImpactFX is the visuals, _wallHitRipple is the
+// drain + teardown that the name always promised.
+function _wallImpactFX(eff, px, py, pz) {
   if (!eff) return;
-  eff.hp = Math.max(0, (eff.hp || 0) - Math.max(0, dmg || 0));
   try {
     if (typeof scene !== 'undefined' && game && game.effects) {
       // (v30.95) Shared unit ring ; per-hit geometry allocation was GC churn
@@ -72383,7 +72427,12 @@ function _wallHitRipple(eff, px, py, pz, dmg) { return;
       spawnDynamicLight(new THREE.Vector3(px, py, pz), 0xff8833, 1.6, 260, 0.12);
     }
   } catch (_) {}
-  if (eff.hp <= 0) { eff.hp = 0; eff.timer = 0; }
+}
+function _wallHitRipple(eff, px, py, pz, dmg) {
+  if (!eff) return;
+  eff.hp = Math.max(0, (eff.hp || 0) - Math.max(0, dmg || 0));
+  if (_wallKnobs().fx) { try { _wallImpactFX(eff, px, py, pz); } catch (_) {} }
+  if (eff.hp <= 0) _wallDestroy(eff);
 }
 
 function fireHitscan(origin, dir, w) {
@@ -73410,7 +73459,7 @@ function executeAbility(slot, ability) {
     // beam mass ; (2) stacked converging tracer streaks from the painted
     // muzzle tips ; (3) lightning arcs cracking off the beam length.
     if (ability.name === 'Laser') {
-      const range = 4400;      // (v38.40) was 2500, shorter than the gun it is mounted beside
+      let range = 4400;        // (v42.17) `let`, so the Plasma Shield probe below can clamp it
       // (v30.88) Anchor the whole effect (beam, arcs, embers, flash) at the
       // painted laserfire_VORTEX.png emitter (61%, 40% ; measured by Ashman on
       // the FIRING frame), converging on the crosshair. Damage stays on the
@@ -73429,6 +73478,24 @@ function executeAbility(slot, ability) {
         ? forward.clone()
         : (_vlGp2 ? player.position.clone().addScaledVector(forward, 1400).sub(_vlGp2).normalize()
                   : forward.clone());
+      // ⭐⭐ (v42.17) THE REPORTED BUG. Owner: "vortex's lasers ignore tracker's plasma shield".
+      // They did, completely. This ability's damage loop is a bare cylinder test over game.entities
+      // (`proj = toBot.dot(forward)` then a hullLength radius check) with NO occlusion of any kind -
+      // it never called _wallBlockSegment, never scanned game.worldEffects, and the one raycastLevel
+      // it does perform a few lines below is used ONLY to place a hit-fire decal, never to clamp
+      // damage. The engine already had the right primitive with the right silhouette and the right
+      // friend/foe rule; this path simply never asked it. Clamped BEFORE beamEnd so the drawn beam
+      // stops at the shield too - a beam that visibly passes through a shield it cannot damage
+      // reads as the same bug.
+      if (typeof _wallBlockSegment === 'function') {
+        const _vlWallHit = _wallBlockSegment(_vlOrigin,
+                             _vlOrigin.clone().addScaledVector(_vlDir, range), player.team);
+        if (_vlWallHit) {
+          range = _vlWallHit.dist;
+          _wallHitRipple(_vlWallHit.eff, _vlWallHit.x, _vlWallHit.y, _vlWallHit.z,
+                         2400 * ((typeof _aegisUpFor === 'function' && _aegisUpFor(11)) ? 1.35 : 1));
+        }
+      }
       const beamEnd = _vlOrigin.clone().addScaledVector(_vlDir, range);
       // (v38.38) the laser never asked the world where it stopped - it draws a fixed-length beam -
       // so there was no impact point to burn. One raycast, and it leaves the same flame the hitscan
@@ -77296,7 +77363,20 @@ function updateAbilities(dt) {
     // the visual mass ; the tracers add the from-the-barrels parallax
     // ; the arcs sell the high-voltage feel.
     if (coreName === 'Mega Laser') {
-      const range = 4800;      // (v38.40) the core out-reaches the ability, as it should
+      let range = 4800;        // (v42.17) `let`, so the Plasma Shield probe below can clamp it
+      // ⭐⭐ (v42.17) Same fault as the Laser ability, worse consequences: this is a CONTINUOUS
+      // beam whose damage loop runs every frame (`bot.takeDamage(3000 * dt, ...)`) against a plain
+      // cylinder test, so it poured 3000 dps straight through a Plasma Shield for its full 4 s.
+      // Clamping `range` here covers the ship, monster and obstacle loops below in one place, and
+      // the wall drains at the beam's real rate because the sponge is per-frame damage.
+      if (typeof _wallBlockSegment === 'function') {
+        const _mlWallHit = _wallBlockSegment(player.position,
+                             player.position.clone().addScaledVector(forward, range), player.team);
+        if (_mlWallHit) {
+          range = _mlWallHit.dist;
+          _wallHitRipple(_mlWallHit.eff, _mlWallHit.x, _mlWallHit.y, _mlWallHit.z, 3000 * dt);
+        }
+      }
       // (v38.69) the fire the beam leaves behind is Vortex purple everywhere it lands
       const _mlCol = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.VORTEX : 0xaa55ff;
       const end = _abTmpC.copy(player.position).addScaledVector(forward, range);

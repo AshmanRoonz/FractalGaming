@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.16';
+const LSS_BUILD = '42.17';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -31799,6 +31799,19 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
       return amount;
     }
 
+    if (typeof _wallAbsorbSegment === 'function') {
+      const _wFrom = (attacker === 'player')
+        ? ((typeof player !== 'undefined' && player) ? player.position : null)
+        : (attacker && attacker.position) ? attacker.position : null;
+      if (_wFrom) {
+        const _wTeam = (attacker === 'player')
+          ? ((typeof player !== 'undefined' && player) ? player.team : undefined)
+          : ((attacker && attacker.team != null) ? attacker.team : undefined);
+        amount = _wallAbsorbSegment(_wFrom, this.position, _wTeam, amount);
+        if (amount <= 0) return 0;
+      }
+    }
+
     if (attacker === 'player' && typeof _aegisDmgOut === 'function') {
       try { amount = _aegisDmgOut(amount, this); } catch (_) {}
     }
@@ -32586,39 +32599,15 @@ class Projectile {
       return;
     }
 
-    if (this.owner !== 'player' && !this.isSonar) {
-      for (const eff of game.worldEffects) {
-        if (eff.type !== 'particle_wall' || eff.owner !== 'player' || eff.hp <= 0) continue;
-        const wallNormal = eff.direction;
-        const dx1 = prevPos.x - eff.position.x;
-        const dy1 = prevPos.y - eff.position.y;
-        const dz1 = prevPos.z - eff.position.z;
-        const prevSide = dx1 * wallNormal.x + dy1 * wallNormal.y + dz1 * wallNormal.z;
-        const dx2 = this.position.x - eff.position.x;
-        const dy2 = this.position.y - eff.position.y;
-        const dz2 = this.position.z - eff.position.z;
-        const currSide = dx2 * wallNormal.x + dy2 * wallNormal.y + dz2 * wallNormal.z;
-        if (prevSide * currSide > 0) continue;
-        const denom = prevSide - currSide;
-        if (Math.abs(denom) < 1e-6) continue;     
-        const tParam = prevSide / denom;
-        if (tParam < 0 || tParam > 1) continue;   
-        const intersect = new THREE.Vector3().lerpVectors(prevPos, this.position, tParam);
-        const offCenter = new THREE.Vector3().subVectors(intersect, eff.position);
-        offCenter.sub(wallNormal.clone().multiplyScalar(offCenter.dot(wallNormal)));
-        const wallRadius = 240;     
-        if (offCenter.lengthSq() > wallRadius * wallRadius) continue;
-        const absorbed = Math.min(this.damage, eff.hp);
-        eff.hp -= absorbed;
-        if (eff.hp <= 0) {
-          if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-          if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
-          if (eff.plasmaMesh && eff.plasmaMesh.parent) {
-            scene.remove(eff.plasmaMesh);
-            if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
-          }
-          eff.timer = 0;
-        }
+    if (!this.isSonar && typeof _wallBlockSegment === 'function') {
+      const _pjTeam = (this.owner === 'player')
+        ? ((typeof player !== 'undefined' && player) ? player.team : undefined)
+        : ((this.ownerRef && this.ownerRef.team != null) ? this.ownerRef.team : undefined);
+      const _pjHit = _wallBlockSegment(prevPos, this.position, _pjTeam);
+      if (_pjHit && _pjHit.eff) {
+        const eff = _pjHit.eff;
+        const intersect = new THREE.Vector3(_pjHit.x, _pjHit.y, _pjHit.z);
+        _wallHitRipple(eff, intersect.x, intersect.y, intersect.z, this.damage);
         spawnImpactSparks(intersect, 6);
         this.position.copy(intersect);
         if (this.mesh) this.mesh.position.copy(intersect);
@@ -46117,36 +46106,14 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
     if (amount > 0) { try { playSound('vortex_absorb'); } catch (_) {} }
     return; 
   }
-  if (player.loadoutKey === 'TRACKER') {
-    for (const eff of game.worldEffects) {
-      if (eff.type !== 'particle_wall' || eff.owner !== 'player' || eff.hp <= 0) continue;
-      const incomingPos = (projectile && projectile.position) ? projectile.position
-                        : (attacker && attacker.position)     ? attacker.position
-                        : null;
-      if (!incomingPos) continue;
-      const wallFacing = eff.direction.clone();   
-      const playerSide   = new THREE.Vector3().subVectors(player.position, eff.position).dot(wallFacing);
-      const incomingSide = new THREE.Vector3().subVectors(incomingPos,    eff.position).dot(wallFacing);
-      if (!(playerSide < 0 && incomingSide > 0)) continue;
-      const denom = playerSide - incomingSide;     
-      const tParam = -incomingSide / denom;        
-      const intersect = new THREE.Vector3().lerpVectors(incomingPos, player.position, tParam);
-      const offCenter = new THREE.Vector3().subVectors(intersect, eff.position);
-      offCenter.sub(wallFacing.clone().multiplyScalar(offCenter.dot(wallFacing)));
-      const wallRadius = 220;
-      if (offCenter.lengthSq() > wallRadius * wallRadius) continue;
-      const absorbed = Math.min(amount, eff.hp);
-      eff.hp -= absorbed;
-      amount -= absorbed;
-      if (eff.hp <= 0) {
-        if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-        if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
-        if (eff.plasmaMesh && eff.plasmaMesh.parent) {
-          scene.remove(eff.plasmaMesh);
-          if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
-        }
-        eff.timer = 0;
-      }
+  {
+    const _wIn = (projectile && projectile.position) ? projectile.position
+               : (hitOpts && hitOpts.splashFrom)     ? hitOpts.splashFrom
+               : (attacker && attacker.position)     ? attacker.position
+               : null;
+    if (_wIn && typeof _wallAbsorbSegment === 'function') {
+      const _wTeam = (attacker && attacker.team != null) ? attacker.team : undefined;
+      amount = _wallAbsorbSegment(_wIn, player.position, _wTeam, amount);
       if (amount <= 0) return;
     }
   }
@@ -48405,8 +48372,47 @@ const _spColTest = new THREE.Vector3();
 const _spColTemp = new THREE.Vector3();
 const _hsToTgt = new THREE.Vector3();
 const _spToTgt = new THREE.Vector3();
+const _WALL_HALF_W = 200;   // half of BoxGeometry(400, 300, 25) in the spawn helper
+const _WALL_HALF_H = 150;
+function _wallKnobs() {
+  const K = (typeof window !== 'undefined' && window.__wall) || {};
+  return {
+    on:     (K.on !== false),                          // master A/B for the whole shield
+    margin: (K.margin != null) ? +K.margin : 0,        // uniform inflation of the rectangle
+    fx:     (K.fx !== false),                          // ripple + light on absorb
+  };
+}
+function _wallDestroy(eff) {
+  if (!eff) return;
+  eff.hp = 0;
+  try {
+    if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
+    if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+    if (eff.plasmaMesh && eff.plasmaMesh.parent) {
+      scene.remove(eff.plasmaMesh);
+      if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
+    }
+  } catch (_) {}
+  eff.timer = 0;
+}
+function _wallAbsorbSegment(from, to, shooterTeam, amount) {
+  if (!(amount > 0) || !from || !to) return amount;
+  if (typeof _wallBlockSegment !== 'function') return amount;
+  for (let guard = 0; guard < 4 && amount > 0; guard++) {
+    const hit = _wallBlockSegment(from, to, shooterTeam);
+    if (!hit || !hit.eff || hit.eff.hp <= 0) break;
+    const eff = hit.eff;
+    const absorbed = Math.min(amount, eff.hp);
+    eff.hp -= absorbed;
+    amount -= absorbed;
+    if (_wallKnobs().fx) { try { _wallImpactFX(eff, hit.x, hit.y, hit.z); } catch (_) {} }
+    if (eff.hp <= 0) _wallDestroy(eff); else break;
+  }
+  return amount;
+}
 function _wallBlockSegment(from, to, shooterTeam) {
   if (typeof game === 'undefined' || !game.worldEffects || game.worldEffects.length === 0) return null;
+  if (!_wallKnobs().on) return null;
   _wbDir.subVectors(to, from);
   const segLen = _wbDir.length();
   if (segLen < 0.001) return null;
@@ -48427,7 +48433,9 @@ function _wallBlockSegment(from, to, shooterTeam) {
     if (_wbX.lengthSq() < 0.001) _wbX.set(1, 0, 0); else _wbX.normalize();
     _wbY.crossVectors(n, _wbX).normalize();
     _wbRel.subVectors(_wbPt, eff.position);
-    if (Math.abs(_wbRel.dot(_wbX)) > 200 || Math.abs(_wbRel.dot(_wbY)) > 150) continue;
+    const _wbM = _wallKnobs().margin;
+    if (Math.abs(_wbRel.dot(_wbX)) > _WALL_HALF_W + _wbM ||
+        Math.abs(_wbRel.dot(_wbY)) > _WALL_HALF_H + _wbM) continue;
     if (!best || t < best.dist) {
       best = { eff, dist: t, x: _wbPt.x, y: _wbPt.y, z: _wbPt.z };
     }
@@ -48435,9 +48443,8 @@ function _wallBlockSegment(from, to, shooterTeam) {
   return best;
 }
 let _WALL_RIPPLE_GEO = null;
-function _wallHitRipple(eff, px, py, pz, dmg) { return; 
+function _wallImpactFX(eff, px, py, pz) {
   if (!eff) return;
-  eff.hp = Math.max(0, (eff.hp || 0) - Math.max(0, dmg || 0));
   try {
     if (typeof scene !== 'undefined' && game && game.effects) {
       if (!_WALL_RIPPLE_GEO) _WALL_RIPPLE_GEO = new THREE.RingGeometry(0.62, 1.0, 28);
@@ -48475,7 +48482,12 @@ function _wallHitRipple(eff, px, py, pz, dmg) { return;
       spawnDynamicLight(new THREE.Vector3(px, py, pz), 0xff8833, 1.6, 260, 0.12);
     }
   } catch (_) {}
-  if (eff.hp <= 0) { eff.hp = 0; eff.timer = 0; }
+}
+function _wallHitRipple(eff, px, py, pz, dmg) {
+  if (!eff) return;
+  eff.hp = Math.max(0, (eff.hp || 0) - Math.max(0, dmg || 0));
+  if (_wallKnobs().fx) { try { _wallImpactFX(eff, px, py, pz); } catch (_) {} }
+  if (eff.hp <= 0) _wallDestroy(eff);
 }
 
 function fireHitscan(origin, dir, w) {
@@ -49177,7 +49189,7 @@ function executeAbility(slot, ability) {
 
   if (ability.type === 'offensive') {
     if (ability.name === 'Laser') {
-      const range = 4400;      // (v38.40) was 2500, shorter than the gun it is mounted beside
+      let range = 4400;        // (v42.17) `let`, so the Plasma Shield probe below can clamp it
       const _vyK = _vortexYKnobs();
       const _vyPair = _vyK.on && _vortexGunPair(_vyGunA, _vyGunB);
       const _vlGp2 = _vyPair ? null : ((typeof _computeScreenMuzzleWorld === 'function')
@@ -49189,6 +49201,15 @@ function executeAbility(slot, ability) {
         ? forward.clone()
         : (_vlGp2 ? player.position.clone().addScaledVector(forward, 1400).sub(_vlGp2).normalize()
                   : forward.clone());
+      if (typeof _wallBlockSegment === 'function') {
+        const _vlWallHit = _wallBlockSegment(_vlOrigin,
+                             _vlOrigin.clone().addScaledVector(_vlDir, range), player.team);
+        if (_vlWallHit) {
+          range = _vlWallHit.dist;
+          _wallHitRipple(_vlWallHit.eff, _vlWallHit.x, _vlWallHit.y, _vlWallHit.z,
+                         2400 * ((typeof _aegisUpFor === 'function' && _aegisUpFor(11)) ? 1.35 : 1));
+        }
+      }
       const beamEnd = _vlOrigin.clone().addScaledVector(_vlDir, range);
       try {
         if (typeof raycastLevel === 'function' && typeof spawnHitFire === 'function') {
@@ -52116,7 +52137,15 @@ function updateAbilities(dt) {
     const coreName = player.loadout ? player.loadout.core.name : '';
 
     if (coreName === 'Mega Laser') {
-      const range = 4800;      // (v38.40) the core out-reaches the ability, as it should
+      let range = 4800;        // (v42.17) `let`, so the Plasma Shield probe below can clamp it
+      if (typeof _wallBlockSegment === 'function') {
+        const _mlWallHit = _wallBlockSegment(player.position,
+                             player.position.clone().addScaledVector(forward, range), player.team);
+        if (_mlWallHit) {
+          range = _mlWallHit.dist;
+          _wallHitRipple(_mlWallHit.eff, _mlWallHit.x, _mlWallHit.y, _mlWallHit.z, 3000 * dt);
+        }
+      }
       const _mlCol = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.VORTEX : 0xaa55ff;
       const end = _abTmpC.copy(player.position).addScaledVector(forward, range);
       try {
