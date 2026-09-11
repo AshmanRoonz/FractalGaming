@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.90';
+const LSS_BUILD = '42.05';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -11317,6 +11317,28 @@ async function _startHostedMode() {
 // the other fleet's net, checked only when both fleets have attacked equally.
 function _isAssault() { return typeof LSS !== 'undefined' && LSS.MODE === 'assault'; }
 function _assaultAttackerFleet() { return (((game.currentRound || 1) % 2) === 1) ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A; }
+// ⚠ (v41.92) MAY THIS BOT'S FIRE HURT THIS MONSTER? Gate for the bot projectile path opened in
+// Projectile.update - see the note there.
+// Pass mon === null as a cheap pre-check ("is this shooter a bot at all"); pass the monster to ask
+// about that specific body.
+// Everything in `game.monsters` is fair game for a bot EXCEPT the ChampionShell, which is an
+// OBJECTIVE rather than an enemy: in the modes that name a side, it belongs to the defenders, and a
+// defender bot must not shred the thing it is there to protect. Bots produce far more incidental
+// crossfire than a human does, so the player's ungated path is not a safe precedent to copy here.
+// Modes with no attacker/defender split (classic, race) leave it open - there the shell is a race
+// to break and every side is meant to be shooting it.
+function _botMayDamageMonster(shooter, mon) {
+  if (!shooter || typeof shooter !== 'object') return false;   // 'bot' string / unowned: no monster damage
+  if (!mon) return true;                                       // pre-check only
+  if (mon.name !== 'ChampionShell') return true;               // leviathans etc: always fair game
+  try {
+    if (_isAssault()) return shooter.team === _assaultAttackerFleet();
+    if (game && game._cyber && game._cyber.armed && shooter._cyberAttacker != null) {
+      return !!shooter._cyberAttacker;
+    }
+  } catch (_) {}
+  return true;
+}
 function _assaultDefenderFleet() { return (((game.currentRound || 1) % 2) === 1) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B; }
 // Map side for a fleet this round: side-'A' rooms are the champion/defender
 // end of every assault_ map, side 'B' the attacker staging end.
@@ -17243,7 +17265,19 @@ const _botFireOrigin = new THREE.Vector3();
 const _botFireDir = new THREE.Vector3();
 const _botSpreadDir = new THREE.Vector3();
 function emitDamageState(entity, dt) {
-  if (!entity || !entity.alive || !entity.position) return;
+  // ⚠⚠ (v42.02) THE LOCAL PLAYER HAS NO `alive` FIELD - THAT IS WHY YOUR OWN HULL NEVER SPARKED.
+  // Owner: "from third person view, i don't see my ship's health states, sparking, smoking, on fire".
+  // Bots and NetworkPlayers carry `alive`; the `player` singleton (L5505) does NOT - it tracks life
+  // through `shipState` instead, and `player.alive` appears exactly ONCE in the whole file (L76158,
+  // written defensively as `player.alive !== false` precisely because it is undefined).
+  // So `!entity.alive` was true on every single call for the player and this function returned before
+  // doing anything. The call site even says "Damage-state particles on the local player too (visible
+  // from third-person / death cam)" - the intent was always there, the guard silently discarded it.
+  // Test the two shapes separately rather than adding `alive` to the player: `alive` is read in ~40
+  // places as a bot/peer liveness flag, and inventing it on the player would change targeting,
+  // collision and scoring behaviour far outside this function.
+  if (!entity || !entity.position) return;
+  if (entity.alive === false || entity.shipState === 'dead') return;
   // Shield up = hide all hull damage. Threshold > 0.5 (not == 0)
   // so flickering low-shield ticks don't strobe the effects on/off.
   if ((entity.shield || 0) > 0.5) return;
@@ -17355,36 +17389,128 @@ function emitDamageState(entity, dt) {
       color: 0xff8833, size: 3 + Math.random() * 2,
     });
   } else {
-    // tier 3 ; FIRE: bigger, brighter flame fountain + dense smoke trail.
-    // Multiple flame particles per emit so the fire reads as a sustained
-    // body of flame engulfing the hull, not single popping sparks.
-    for (let k = 0; k < 3; k++) {
+    // ⚠⚠ (v42.03) tier 3 ; FIRE — SHADER FLAME, NOT DOTS. Owner: "make the fire stage of the ship look
+    // more like flames navier stokes rolling off the hull rather than dots".
+    // The old version pushed 3 billboarded sprites per emit into the legacy `game.particles` pool.
+    // Point sprites cannot read as fire: they have no internal structure, so a cluster of them is a
+    // cluster of DOTS however you colour it. The fix is not more particles - it is a medium that has
+    // structure, and this file already has one.
+    // `spawnFXBurst('fireball', ...)` is the LayeredFX volumetric shader: a turbulence base plus ridge
+    // accents plus a dark FBM subtract, with real VERTEX DISPLACEMENT (displaceAmount 0.32) and a soft
+    // edge, so each puff tongues out and billows asymmetrically instead of being a uniform blob. That
+    // domain-warped-noise-over-time look is the standard real-time stand-in for a fluid sim - it is
+    // what sells "rolling", and it is already tuned and pooled here.
+    // ⭐ THE OTHER HALF IS THE MOTION. Fire on a moving hull does not rise, it streams AFT along the
+    // airflow. Each puff is seeded into `wakeVel`, which updateEffects integrates and damps, so the
+    // flame is laid down along the ship's track and peels backwards off the hull. Standing still there
+    // is no airflow, so it rises instead - the one case where "up" is right.
+    // Knob: window.__fireFX ({ shader:false } restores the old dots for an A/B).
+    const _fk = (typeof window !== 'undefined' && window.__fireFX) || null;
+    const _shaderFire = !(_fk && _fk.shader === false);
+    // Distance gate: a burning ship across the map does not need a shader sphere every 44 ms. Beyond
+    // it we fall through to the cheap sprites, which read fine at range anyway.
+    let _camD2 = 0;
+    try { _camD2 = (typeof camera !== 'undefined' && camera) ? camera.position.distanceToSquared(entity.position) : 0; } catch (_) {}
+    const _fireMaxD = (_fk && _fk.maxDist != null) ? _fk.maxDist : 5000;
+    let _didShader = false;
+    if (_shaderFire && typeof spawnFXBurst === 'function' && _camD2 < _fireMaxD * _fireMaxD) {
+      // Aft = opposite the direction of travel. Below ~30 u/s there is no meaningful airflow.
+      const _v = entity.velocity;
+      const _sp = _v ? Math.hypot(_v.x, _v.y, _v.z) : 0;
+      let _ax = 0, _ay = 1, _az = 0;
+      if (_sp > 30) { _ax = -_v.x / _sp; _ay = -_v.y / _sp; _az = -_v.z / _sp; }
+      // (v42.04) Baked from a live A/B in the hub at 330 u/s, third person. The first pass (0.55 /
+      // 0.42 / aft 0.45) was a real flame but unplayable: in third person the trail trends toward the
+      // camera, so a big long-lived puff filled the bottom half of the screen. These values keep the
+      // flame ON the hull, peeling off it, with the ship still readable through it.
+      const _fSize = hullR * ((_fk && _fk.size != null) ? _fk.size : 0.22);
+      const _fLife = (_fk && _fk.life != null) ? _fk.life : (0.22 + Math.random() * 0.12);
+      const _puff = spawnFXBurst('fireball', pos, _fSize, _fLife, {
+        startScale: 0.35, endScale: 1.45,
+        // 10, not the default 24: this fires ~23x/sec per burning ship, so the sphere is a sustained
+        // cost rather than a one-off. Displacement carries the silhouette, not tessellation.
+        segs: (_fk && _fk.segs != null) ? _fk.segs : 10,
+      });
+      if (_puff) {
+        _didShader = true;
+        // spawnFXBurst pushes its effect record last; seed that record's wakeVel so the puff drifts.
+        const _fx = game.effects && game.effects[game.effects.length - 1];
+        if (_fx && _fx.mesh === _puff && _fx.wakeVel) {
+          // aft 0.10, not 0.45: the chase camera sits behind the ship, so aft drift is drift TOWARD
+          // the viewer. Enough to read as streaming, not enough to fly the fire into the lens.
+          const _drift = (_sp * ((_fk && _fk.aft != null) ? _fk.aft : 0.10)) + ((_fk && _fk.rise != null) ? _fk.rise : 22);
+          _fx.wakeVel.set(
+            _ax * _drift + (Math.random() - 0.5) * 40,
+            _ay * _drift + (Math.random() - 0.5) * 40 + 18,   // slight buoyancy on top of the airflow
+            _az * _drift + (Math.random() - 0.5) * 40
+          );
+        }
+      }
+    }
+    // ⚠ (v42.04) NO SPRITES ON THE SHADER PATH. Owner, on the first cut: "no dots". The embers were
+    // kept as a sparkle accent, but a point sprite is exactly the thing that reads as a dot - mixing
+    // even a couple back in puts the artifact straight back into the effect the change existed to
+    // remove. The flame now carries the whole look on its own.
+    // Sprites survive ONLY as the fallback for a ship nobody is looking closely at (past the distance
+    // gate, or a potato where spawnFXBurst returns null) - where the shader body would be wasted and
+    // the dots are never resolvable anyway.
+    if (!_didShader) {
+      for (let k = 0; k < 3; k++) {
+        game.particles.push({
+          position: pos.clone(),
+          velocity: _pVel(
+            (Math.random() - 0.5) * 50,
+            30 + Math.random() * 90,
+            (Math.random() - 0.5) * 50
+          ),
+          life: 0.5 + Math.random() * 0.4, maxLife: 0.9,
+          // Mix of hot orange and yellow so the flames have bloom variation.
+          color: Math.random() < 0.4 ? 0xff5022 : (Math.random() < 0.5 ? 0xffaa44 : 0xffd070),
+          size: 7 + Math.random() * 5,
+        });
+      }
+    }
+    // Trailing smoke. (v42.04) On the shader path this is a `cloud` burst too, so the whole tier-3
+    // look is one medium - a sprite plume behind a volumetric flame is exactly the seam that made the
+    // old effect read as dots. Spawned on only a THIRD of emits and given a longer, larger, slower
+    // puff: smoke wants to be sparse and persistent where flame is dense and brief, and it keeps the
+    // sustained mesh count down (~23 emits/sec becomes ~8 smoke puffs/sec).
+    if (_didShader) {
+      if (Math.random() < 0.34) {
+        const _sm = spawnFXBurst('cloud', { x: pos.x, y: pos.y + 18, z: pos.z },
+          hullR * 0.75, 1.1 + Math.random() * 0.5,
+          { startScale: 0.4, endScale: 2.0, segs: 8 });
+        if (_sm) {
+          if (_sm.material && _sm.material.uniforms && _sm.material.uniforms.uBaseColor) {
+            _sm.material.uniforms.uBaseColor.value.setHex(0x2a2420);
+          }
+          const _sfx = game.effects && game.effects[game.effects.length - 1];
+          if (_sfx && _sfx.mesh === _sm && _sfx.wakeVel) {
+            // Smoke lags the flame: less of the airflow, more buoyancy.
+            const _v2 = entity.velocity;
+            const _sp2 = _v2 ? Math.hypot(_v2.x, _v2.y, _v2.z) : 0;
+            const _d2 = _sp2 * 0.3;
+            _sfx.wakeVel.set(
+              (_sp2 > 30 ? -_v2.x / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24,
+              (_sp2 > 30 ? -_v2.y / _sp2 : 1) * _d2 + 40,
+              (_sp2 > 30 ? -_v2.z / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24
+            );
+          }
+        }
+      }
+    } else {
+      // Sprite fallback (far / potato) - see the note above.
       game.particles.push({
-        position: pos.clone(),
+        position: { x: pos.x, y: pos.y + 18, z: pos.z },
         velocity: _pVel(
-          (Math.random() - 0.5) * 50,
-          30 + Math.random() * 90,
-          (Math.random() - 0.5) * 50
+          (Math.random() - 0.5) * 28,
+          50 + Math.random() * 50,
+          (Math.random() - 0.5) * 28
         ),
-        life: 0.5 + Math.random() * 0.4, maxLife: 0.9,
-        // Mix of hot orange and yellow so the flames have bloom variation.
-        color: Math.random() < 0.4 ? 0xff5022 : (Math.random() < 0.5 ? 0xffaa44 : 0xffd070),
-        size: 7 + Math.random() * 5,
+        life: 1.0 + Math.random() * 0.6, maxLife: 1.6,
+        color: 0x252525, size: 10 + Math.random() * 5,
       });
     }
-    // Heavier trailing smoke above the flames. POJO position instead of
-    // pos.clone().add(new Vector3): two heap objects -> one, on a path
-    // that fires every ~45-110 ms per critically damaged ship.
-    game.particles.push({
-      position: { x: pos.x, y: pos.y + 18, z: pos.z },
-      velocity: _pVel(
-        (Math.random() - 0.5) * 28,
-        50 + Math.random() * 50,
-        (Math.random() - 0.5) * 28
-      ),
-      life: 1.0 + Math.random() * 0.6, maxLife: 1.6,
-      color: 0x252525, size: 10 + Math.random() * 5,
-    });
   }
 }
 
@@ -37676,7 +37802,18 @@ const _cyWp = new THREE.Vector3();
 function _cyberBotWaypoint(bot) {
   const C = game._cyber;
   if (!C || !C.armed || !bot || bot._cyberAttacker == null) return null;
-  const t = bot.target;
+  // ⚠⚠ (v41.91) THIS READ WAS DEAD, AND IT IS THE WHOLE "THEY JUST COME IN A STRAIGHT LINE" BUG.
+  // It used to say `bot.target`. Nothing in this file ever assigns `.target` on a bot - the class
+  // writes `combatTarget` (the entity it is fighting), `aiTarget` (a Vector3 waypoint) and
+  // `targetDir` (its heading), and the only `.target =` sites in the file are a render target, a
+  // DOM event and a counter. So `t` was always undefined, this guard never returned null, and the
+  // comment above it - "hand the bot back to its own dogfight AI the moment something is close" -
+  // described something that had never once happened.
+  // The cost is paid in Bot.update's steering fork (~L47361): a bot WITH a waypoint takes the
+  // beeline branch (`subVectors(goal,pos).normalize()`) and the entire combat-steering block below
+  // it - retreat, flank, strafe - is skipped. Every Cyberpunk City bot was handed a waypoint every
+  // frame, so no cyber bot could ever do anything but fly straight at its objective.
+  const t = bot.combatTarget;
   if (t && t.alive !== false && t.position && bot.position.distanceTo(t.position) < 1800) return null;
   const field = (C.field && C.field.alive && C.field.position) ? C.field.position : null;
   const carrier = (_carrier.obj && _carrier.ent && _carrier.ent.alive) ? _carrier.obj.position : null;
@@ -47176,9 +47313,14 @@ class Bot {
       if (this.doomTimer <= 0) { this.die(null); return; }
     }
 
-    // Retreat behavior when doomed
-    if (this.doomed && !this.aiRetreating) {
-      this.aiRetreating = true;
+    // Retreat behavior when doomed. (v41.99) Written from the phase EVERY frame rather than latched
+    // once - latching is what made the last stand impossible. The six branches below (cyber city,
+    // champion field, assault defender, Nemesis portal, race) all clear this later in the same tick
+    // and still win, so their behaviour is unchanged.
+    if (this.doomed) {
+      const _dph = this._doomPhase();
+      if (_dph === null) { if (!this.aiRetreating) this.aiRetreating = true; }
+      else this.aiRetreating = (_dph === 'run');
     }
 
     // AI: find target
@@ -47215,7 +47357,10 @@ class Bot {
           // charge. Fall back to a guard post on the approach side of the
           // field when unengaged; while an enemy is close, keep the full
           // dogfight AI (no waypoint shortcut, which skips fighting).
-          const _tgt = this.target;
+          // (v41.91) `this.target` was dead here too - see the note in _cyberBotWaypoint. `_engaged`
+          // was permanently false, so an assault DEFENDER always took the guard-post waypoint and
+          // never fought, which is the exact opposite of what the comment above asks for.
+          const _tgt = this.combatTarget;
           const _engaged = _tgt && _tgt.alive !== false && _tgt.position &&
                            this.position.distanceTo(_tgt.position) < 2400;
           if (!_engaged) {
@@ -47230,7 +47375,44 @@ class Bot {
           }
         } else {
           if (!this.aiTarget) this.aiTarget = new THREE.Vector3();
-          this.aiTarget.copy(game.championField.position);
+          // ⚠⚠ (v41.97) NEVER STEER AT A POINT INSIDE A LIVE SHELL. This is the ROOT CAUSE of
+          // "vortex just sitting with his nose in the shell", and stuck-awareness only ever treated
+          // its symptom: the bot escapes, then flies straight back in, because the goal it is chasing
+          // is physically unreachable. `ChampionShell.collideEntity` refuses entry by design - "the
+          // champion field stays physically unreachable until the shell is destroyed" - so aiming at
+          // the field centre while the shell lives asks the bot to fly somewhere no ship can go, and
+          // the collision solver pushes it back out every single frame, forever.
+          // Stand off the SKIN instead, on the bot's own approach bearing. That is a reachable point,
+          // it holds the bot at a sane firing position, and it dissolves the grind: once the shell
+          // dies this falls through to the field centre exactly as before.
+          const _shW = game.championShell;
+          if (_shW && _shW.alive && _shW.position) {
+            const _off = this._tempVec3d.subVectors(this.position, _shW.position);
+            if (_off.lengthSq() < 1) _off.set(1, 0.2, 0);
+            _off.normalize();
+            const _stand = (_shW.collisionRadius || 170) + 260;
+            this.aiTarget.copy(_shW.position).addScaledVector(_off, _stand);
+          } else if (this._fieldHeldByFriend()) {
+            // ⚠⚠ (v41.99) ONE SHIP CAPTURES, THE REST SCREEN IT. Owner: "there was like 3 of my team
+            // on the champion field and nobody was capturing it because we kept pushing each other
+            // off it". Exactly right, and it is a coordination failure, not a physics one: the field
+            // can only ever be held by ONE ship (`field.claimedBy`), but EVERY bot that is not the
+            // claimer was steered at the same centre point. `resolveShipShipCollisions` then does its
+            // job and the pile shoves the holder out of its own capture - so a team that has already
+            // WON the point talks itself out of it, and the more teammates arrive the worse it gets.
+            // A team that understands the objective posts ONE ship on it and rings the rest around it
+            // facing out. Slots are spread deterministically by bot id so they fan out instead of
+            // stacking, and the ring sits outside the claim radius so nobody nudges the holder.
+            const _fp = game.championField.position;
+            const _n = Math.max(1, (game.entities || []).length);
+            const _ang = ((this.id | 0) % _n) * (Math.PI * 2 / _n) + (this.id | 0) * 0.7;
+            const _ring = (game.championField.radius || 300) + 520;
+            this.aiTarget.set(_fp.x + Math.cos(_ang) * _ring,
+                              _fp.y + 90 + (((this.id | 0) % 3) - 1) * 140,
+                              _fp.z + Math.sin(_ang) * _ring);
+          } else {
+            this.aiTarget.copy(game.championField.position);
+          }
           this.aiRetreating = false;
           this.aiRole = 'engage';
           _raceWaypoint = this.aiTarget;
@@ -47425,6 +47607,25 @@ class Bot {
       this.targetDir.normalize();
     }
 
+    // ⚠⚠ (v41.95) STUCK AWARENESS. Owner: "the bots should be stuck aware, if they get stuck, they
+    // need to try to get unstuck", after watching "vortex just sitting with his nose in the shell"
+    // and "the other two bots are stuck on a wall".
+    // Both are the SAME failure, and it is structural rather than a tuning problem: a bot steers at
+    // a goal point with no idea whether it is making progress toward it. The champion-field branch
+    // aims every attacker at `game.championField.position` - which is INSIDE the ChampionShell, and
+    // `ChampionShell.collideEntity` explicitly refuses entry ("the champion field stays physically
+    // unreachable until the shell is destroyed"). So the bot flies at a point it can NEVER reach,
+    // the collision solver pushes it back out every frame, and it grinds against the hull forever.
+    // A wall does the same thing. Nothing in the AI could ever notice, because "am I moving?" was
+    // never asked.
+    // The rule: sample displacement on a slow clock, and if a bot that WANTS to move has not covered
+    // meaningful ground, declare it stuck and commit to an escape heading for a fixed burst. The
+    // escape is mostly LATERAL - sliding along the obstacle finds the way round it, where simply
+    // reversing just re-approaches from the same angle and re-sticks. A deterministic per-bot
+    // sideways bias (from the id) means two bots stuck on the same wall peel off in opposite
+    // directions instead of both picking the same side.
+    this._unstickTick(dt);
+
     // Arc slow effect (from SLAYER Stun Bolt). Avoid cloning targetDir just to
     // scale-and-add; apply component-wise to velocity.
     const accelK = (this.arcSlowTimer > 0)
@@ -47506,15 +47707,70 @@ class Bot {
     const _mayFire = !game.testMode || (typeof LSS !== 'undefined' && LSS.MODE === 'campaign');
     const _ct = this.combatTarget;
     const _ctAlive = _ct && (_ct === player ? (player.shipState !== 'dead') : !!_ct.alive);
-    if (this.fireTimer <= 0 && game.state === 'playing' && !this.aiRetreating && _ctAlive) {
-      const toTgt = this._tempVec3a.subVectors(_ct.position, this.position);
-      const distToTgt = toTgt.length() - (_ct.isOwBoss ? (_ct.collisionRadius || 0) * 0.85 : 0);   // (v38.78) range to the leviathan's skin
+    // ⚠ (v41.92) OBJECTIVE FIRE - the other half of "they just sit cluelessly in front of it".
+    // Opening the damage path in Projectile.update is not enough on its own: a bot only ever shoots
+    // its `combatTarget`, and `_acquireCombatTarget` scans `game.entities`, which the ChampionShell
+    // is not in (it lives in `game.monsters`). So an attacking bot arrived at the objective, found
+    // nothing it considered shootable, and held station with its guns idle.
+    // This is a FIRE-ONLY substitution and deliberately a separate variable from `_ct`: the core
+    // surge below and the whole ability block still read `this.combatTarget`, and several of those
+    // paths dereference `tgt.chassis`, which the shell does not have. `fireAtShip` is safe - it only
+    // touches `alive`, `position` and `takeDamage`.
+    // Ships always win. The shell is only shot when there is no live ship target, which is how a
+    // human plays an objective: clear the escorts, then break the shell.
+    let _fireTgt = _ctAlive ? _ct : null;
+    if (game.state === 'playing') {
+      const _sh = game.championShell;
+      if (_sh && _sh.alive && _sh.position && _botMayDamageMonster(this, _sh)) {
+        // ⚠ (v41.92b) COMMIT TO THE OBJECTIVE. The first cut only shot the shell when the bot had NO
+        // live ship target, and in a real assault there is essentially always an enemy alive
+        // somewhere - so `_ctAlive` was true nearly every frame and the shell was never deliberately
+        // engaged. It still died, but to stray crossfire, which is exactly the "they aren't trying to
+        // break the shell" the owner called out.
+        // The rule an attacker actually needs: shoot the objective whenever it is in weapon range and
+        // nothing is close enough to be a threat. `_OBJ_BREAK` is that "close enough" line - inside
+        // it the bot defends itself, outside it the bot does its job. Self-preservation still wins,
+        // so this never turns them into sitting ducks.
+        const _shD = this.position.distanceTo(_sh.position) - (_sh.collisionRadius || 0) * 0.85;
+        const _ctD = _ctAlive ? this.position.distanceTo(_ct.position) : Infinity;
+        const _objRange = this.loadout.weapon.range * ((this._rangeModeT > 0) ? 1.6 : 1.0);
+        const _OBJ_BREAK = (typeof window !== 'undefined' && window.__botAI && window.__botAI.objBreak != null)
+          ? window.__botAI.objBreak : 1500;
+        // ⚠⚠ (v41.93) BREAKER / ESCORT - the first real role split, and the fix for "they did break
+        // it, but it seemed more like accidental" followed by "vortex just sitting with his nose in
+        // the shell". A pure distance rule cannot work here: the fight HAPPENS at the objective, so
+        // there is always an enemy within any sane threshold and every attacker forever chooses the
+        // fighter over the shell. Measured: a VORTEX 51 u off the shell's skin with a target 493 u
+        // away never fired a shot at it.
+        // Splitting the attacking side is what a team actually does - half commit to the objective,
+        // half screen them. BREAKERS shoot the shell whenever it is in range, full stop; their
+        // self-preservation still comes from `aiRetreating`, which gates this whole block. ESCORTS
+        // keep the old rule and only touch the shell when nothing else is worth shooting.
+        // Role is derived from the bot id, NOT stored: stable for the bot's life, identical on every
+        // peer, and costs nothing to recompute after a host migration.
+        const _isBreaker = (((this.id | 0) % 2) === 0);
+        if (_shD < _objRange && (_isBreaker || !_fireTgt || _ctD > _OBJ_BREAK)) _fireTgt = _sh;
+      }
+    }
+    if (this.fireTimer <= 0 && game.state === 'playing' && this._mayFight() && _fireTgt) {
+      const toTgt = this._tempVec3a.subVectors(_fireTgt.position, this.position);
+      // Range to the SKIN, not the centre, for any big body - the leviathan rule (v38.78), which the
+      // shell needs just as much: its radius is CHAMP_SHELL_SIZE*0.5, so centre-distance would put a
+      // bot parked against the hull "out of range" of its own objective.
+      const _bigR = (_fireTgt.isOwBoss || _fireTgt.name === 'ChampionShell') ? (_fireTgt.collisionRadius || 0) * 0.85 : 0;
+      const distToTgt = toTgt.length() - _bigR;
       // Range Mode (BLASTER utility approximation) extends reach while active.
       const _rangeMul = (this._rangeModeT > 0) ? 1.6 : 1.0;
       if (distToTgt < this.loadout.weapon.range * _rangeMul) {
         // Range preference check: only fire if within optimal range or close enough (range * 1.3)
         const preferredDist = this.aiRangePreference;
-        const withinRange = distToTgt <= preferredDist * 1.3 * _rangeMul;
+        // (v41.94) The range PREFERENCE is a dogfighting idea - hold your hull's optimal distance
+        // from a ship that is manoeuvring against you. It is meaningless against a stationary
+        // objective, and it was throttling the breakers to ~5 dps: a bot parked past its preferred
+        // distance from the shell simply declined to shoot the thing it had flown there to destroy.
+        // Weapon range still gates it (the check above); this only drops the optimal-distance rule.
+        const withinRange = (_fireTgt.name === 'ChampionShell') ||
+                            distToTgt <= preferredDist * 1.3 * _rangeMul;
 
         const dot = toTgt.normalize().dot(this.targetDir);
         if (dot > 0.7 && withinRange) {
@@ -47530,7 +47786,7 @@ class Bot {
             // Test mode : bots fly the same AI patterns but never fire (except
             // in campaign, where the hoard must actually shoot back).
             if (_mayFire) {
-              this.fireAtShip(_ct, toTgt, distToTgt);
+              this.fireAtShip(_fireTgt, toTgt, distToTgt);
             }
             this.fireTimer = this.loadout.weapon.fireRate * (1 + Math.random() * 0.5);
           }
@@ -47548,7 +47804,7 @@ class Bot {
     // Abilities stay passive in campaign for now : dash/teleport AI flings the
     // hoard into the open-terrain mountains. Primary fire (above) is what the
     // journey needs ; ability use can come back once terrain-nav is improved.
-    if (game.state === 'playing' && !this.aiRetreating && _ctAlive &&
+    if (game.state === 'playing' && this._mayFight() && _ctAlive &&
         (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
       this.tryUseAbilities();   
     }
@@ -47557,7 +47813,7 @@ class Bot {
     // Spend the core when charged: ship-flavored surge (salvo + shield).
     // Probabilistic trigger so five charged bots don't all dump cores in
     // the same instant.
-    if (this.coreMeter >= 100 && _ctAlive && !this.aiRetreating &&
+    if (this.coreMeter >= 100 && _ctAlive && this._mayFight() &&
         game.state === 'playing' && !game.testMode &&
         this.position.distanceTo(_ct.position) < 1800 && Math.random() < dt * 0.5) {
       this._useCoreSurge(_ct);
@@ -47822,11 +48078,30 @@ class Bot {
       this.abilityCooldowns[0] = 0;
       this.abilityCooldowns[1] = Math.min(this.abilityCooldowns[1], 2);
       try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, LSS.CLASS_COLORS.SYPHON, 2.5, 450, 0.3); } catch (_) {}
+    } else if (ability.name === 'Sonar Pulse') {
+      // ⚠ (v41.91) TRACKER'S UTILITY SLOT - the game's other never-fired ability. There was simply
+      // no branch for it, so it fell to `used = false` and a TRACKER bot flew the whole match with
+      // two of its three abilities inert.
+      // Same beacon the player fires (see the 'Sonar Pulse' arm of executeAbility): a fast, harmless
+      // `isSonar` projectile. Kept deliberately thin - the player's version exists to feed the LOCK
+      // system, and bot-vs-bot has no lock bookkeeping (see the v37.05 note in _tryUseOffensive), so
+      // the honest bot version is the beacon and its tell, not an invented damage effect.
+      const vel = this._tempVec3b.copy(aim).multiplyScalar(2400);
+      const proj = new Projectile(this.position, vel, 0, 0, 'bot', LSS.CLASS_COLORS.TRACKER);
+      proj.isSonar = true;
+      proj.lifetime = 4.0;
+      proj.sizeMult = 0.5;
+      proj.ownerTeam = this.team; proj.ownerRef = this;
+      game.projectiles.push(proj);
     } else {
       used = false;
     }
     if (used) {
       this.abilityCooldowns[2] = (ability.cooldown || 12) * (1.4 + Math.random() * 0.6);
+    } else {
+      // (v41.91) see the matching note in _tryUseDefensive - an unhandled ability re-entered this
+      // path every frame for the rest of the match.
+      this.abilityCooldowns[2] = 0.5;
     }
   }
 
@@ -47861,11 +48136,32 @@ class Bot {
         this.shield = Math.min(this.maxShield, this.shield + steal);
         try { if (typeof spawnLightningBolt === 'function') spawnLightningBolt(t.position, this.position, 0x66ddaa, 0.3, 2, 1.6); } catch (_) {}
       } else used = false;
+    } else if (n === 'Plasma Shield') {
+      // ⚠ (v41.91) TRACKER'S DEFENSIVE SLOT, WHICH NO BOT HAS EVER FIRED. `Plasma Shield` had a
+      // working bot implementation all along - but it lived in _tryUseUtility, and TRACKER carries
+      // this ability in slot 1 (defensive), so the defensive handler fell straight through to
+      // `used = false` and the utility handler was never passed it. TRACKER was the only ship in
+      // the game flying with a dead defensive ability.
+      // Deployed to COVER, not ahead: the wall goes between this bot and whatever is shooting it,
+      // which is the whole point of a one-way shield and is what the player uses it for.
+      const _thr = this.combatTarget;
+      const _aim = (_thr && _thr.position)
+        ? this._tempVec3a.subVectors(_thr.position, this.position).normalize()
+        : this._tempVec3a.copy(this.targetDir);
+      const wallPos = this.position.clone().addScaledVector(_aim, 140);
+      if (typeof spawnParticleWall === 'function') {
+        try { spawnParticleWall(wallPos, _aim.clone(), 'bot', this.team, null, ++net.effectIdCounter, false); }
+        catch (_) { used = false; }
+      } else used = false;
     } else {
       used = false;
     }
     if (used) {
       this.abilityCooldowns[1] = (ability.cooldown || 14) * (1.4 + Math.random() * 0.6);
+    } else {
+      // (v41.91) An unhandled or refused ability used to leave the cooldown at 0, so tryUseAbilities
+      // re-entered this whole path EVERY FRAME for the rest of the match. Back off a beat instead.
+      this.abilityCooldowns[1] = 0.5;
     }
   }
 
@@ -47899,6 +48195,141 @@ class Bot {
   // squads still feel like they're hunting YOU, but a clearly closer
   // enemy bot gets engaged ; this is what makes friendly AI fight enemy
   // AI and enemy AI fight the friendlies.
+  // ⚠ (v41.95) See the call site in update() for WHY this exists. Knobs: window.__stuck.
+  //   on      - master switch (A/B against the old grind-forever behaviour)
+  //   minSpd  - below this fraction of the hull's flightSpeed the bot counts as not moving
+  //   sampleT - how long a window to judge progress over
+  //   needT   - how long it must look stuck before the escape fires
+  //   burstT  - how long to commit to the escape heading
+  //   lateral - how much of the escape is sideways vs backwards (1 = pure slide)
+  _unstickTick(dt) {
+    const K = (typeof window !== 'undefined' && window.__stuck) || null;
+    if (K && K.on === false) return;
+    const minSpdF = (K && K.minSpd != null) ? K.minSpd : 0.18;
+    const sampleT = (K && K.sampleT != null) ? K.sampleT : 0.5;
+    const needT   = (K && K.needT   != null) ? K.needT   : 1.1;
+    const burstT  = (K && K.burstT  != null) ? K.burstT  : 1.4;
+    const lateral = (K && K.lateral != null) ? K.lateral : 0.8;
+
+    // Already escaping: hold the committed heading so the bot actually clears the obstacle instead
+    // of snapping back into it the moment the goal direction wins again.
+    if (this._unstickT > 0) {
+      this._unstickT -= dt;
+      if (this._unstickDir) {
+        this.targetDir.lerp(this._unstickDir, Math.min(1, dt * 4));
+        this.targetDir.normalize();
+      }
+      return;
+    }
+
+    // Only judge bots that are TRYING to go somewhere. A bot with nothing to do is allowed to loiter.
+    const wantsToMove = !!(this.aiTarget || this.combatTarget);
+    if (!wantsToMove) { this._stuckAcc = 0; return; }
+
+    if (this._stuckT == null) { this._stuckT = 0; this._stuckAcc = 0; this._stuckPos = this.position.clone(); }
+    this._stuckT += dt;
+    if (this._stuckT < sampleT) return;
+
+    const moved = this.position.distanceTo(this._stuckPos);
+    const expect = (this.chassis.flightSpeed || 350) * this._stuckT * minSpdF;
+    this._stuckT = 0;
+    this._stuckPos.copy(this.position);
+
+    if (moved >= expect) { this._stuckAcc = 0; this._unstickFails = 0; return; }   // making ground - fine
+
+    this._stuckAcc = (this._stuckAcc || 0) + sampleT;
+    if (this._stuckAcc < needT) return;
+    this._stuckAcc = 0;
+
+    // Commit an escape. Sideways across the blocked heading, with a little backwards so we peel off
+    // the surface rather than scraping along it, and a little vertical because this is a 3D game and
+    // "over the top" is very often the shortest way past a wall or a shell.
+    const f = this._tempVec3a.copy(this.targetDir).normalize();
+    const up = this._tempVec3b.set(0, 1, 0);
+    let side = this._tempVec3c.crossVectors(f, up);
+    if (side.lengthSq() < 1e-4) side = this._tempVec3c.set(1, 0, 0);   // heading was vertical
+    side.normalize();
+    const sign = (((this.id | 0) % 2) === 0) ? 1 : -1;                 // two bots on one wall split
+    if (!this._unstickDir) this._unstickDir = new THREE.Vector3();
+    this._unstickDir.copy(side).multiplyScalar(sign * lateral)
+      .addScaledVector(f, -(1 - lateral))
+      .addScaledVector(up, 0.35 * sign);
+    if (this._unstickDir.lengthSq() < 1e-6) this._unstickDir.set(sign, 0.35, 0);
+    this._unstickDir.normalize();
+    this._unstickT = burstT;
+    // ⚠ STEERING ALONE IS NOT ENOUGH FOR A WEDGED BOT, measured: with only a heading change, three
+    // of five bots freed themselves and two stayed pinned at 3-5 u/s while the escape fired over and
+    // over. A bot pressed into geometry is being pushed back by resolveCollision every frame, and
+    // `targetDir` only feeds ACCELERATION - it has to out-accelerate the solver from a standing
+    // start, which it cannot. An impulse straight into velocity is what actually breaks contact.
+    // Escalating: each consecutive failed escape hits harder, so a badly wedged bot always gets out
+    // eventually, while a bot that was merely slowed gets the gentlest possible nudge.
+    this._unstickFails = Math.min(4, (this._unstickFails || 0) + 1);
+    const kick = (this.chassis.flightSpeed || 350) * (0.35 + 0.25 * this._unstickFails);
+    this.velocity.addScaledVector(this._unstickDir, kick);
+    // Reset the escalation once the bot is genuinely moving again (checked on the next sample).
+    if (this._unstickFails >= 4) this._unstickT = burstT * 1.8;
+    try { if (window.__stuck && window.__stuck.debug) console.log('[stuck]', this.loadoutKey, this.id, 'escaping'); } catch (_) {}
+    try { window.__stuckN = (window.__stuckN | 0) + 1; } catch (_) {}
+  }
+
+  // ⚠⚠ (v41.99) THE LAST TEN SECONDS. Owner: "when they run away, doomed, they seem to stop fighting,
+  // they just run...". They do, and it was not a tuning problem - `doomed` flipped `aiRetreating`
+  // permanently, and that ONE flag gates primary fire (the fire block), abilities and the core surge.
+  // A doomed bot was disarmed on every channel for a full DOOMED_TIMER (10 s) - a very long, very
+  // visible stretch of a ship doing nothing but run in a straight line.
+  // ⭐ It is also an ASYMMETRY, which is what makes it a bug rather than a design: the PLAYER's doomed
+  // state gates nothing at all. A doomed human keeps shooting, keeps using abilities, keeps surging.
+  // Whatever the player may do while dying, a bot must be able to do too.
+  // The shape is an arc, not a flat state, because a bot that always runs is boring and one that
+  // always charges is stupid:
+  //   BREAK - the first beat. Nose is still on the killer (the retreat vector is anti-parallel to the
+  //           old bearing, and `targetDir.lerp(moveDir)` needs time to swing round), so it fights.
+  //   RUN   - the withdrawal.
+  //   TURN  - the last stand. Clears `aiRetreating`, which restores the ENTIRE engaged AI in one
+  //           write - steering, strafe, fire, abilities, core. It turns around and comes at you.
+  // TURN triggers on the clock, on being cornered, OR on being jammed (`_unstickT > 0`): a bot that
+  // physically cannot run should turn and fight, which is both the human thing to do and a neat fix
+  // for a doomed bot burying itself in terrain while nominally fleeing.
+  _doomK() { try { return (typeof window !== 'undefined' && window.__doom) || null; } catch (_) { return null; } }
+  _doomPhase() {
+    const K = this._doomK();
+    if (K && K.on === false) return null;                 // knob off: today's behaviour, verbatim
+    if (!this.doomed || this.isNemesis) return null;      // the Nemesis is doomed-by-design; leave him
+    const T = (typeof LSS !== 'undefined' && LSS.DOOMED_TIMER) || 10;
+    const breakT  = (K && K.breakT  != null) ? K.breakT  : 1.2;
+    const turnAt  = (K && K.turnAt  != null) ? K.turnAt  : 3.0;
+    const cornerD = (K && K.cornerD != null) ? K.cornerD : 900;
+    if (this.doomTimer > T - breakT) return 'break';
+    if (this._doomTurn) return 'turn';                    // latched, so it cannot flicker on the edge
+    const ct = this.combatTarget;
+    const near = ct && ct.position && this.position.distanceTo(ct.position) < cornerD;
+    if (this.doomTimer <= turnAt || near || this._unstickT > 0) { this._doomTurn = true; return 'turn'; }
+    return 'run';
+  }
+  // The narrow replacement for the blunt `!this.aiRetreating` on the three combat gates.
+  _mayFight() {
+    if (!this.aiRetreating) return true;
+    const K = this._doomK();
+    if (K && K.on === false) return false;
+    return !(K && K.fireOnRun === false);
+  }
+
+  // (v41.99) Is the champion field already being held by someone on MY side - a teammate bot OR the
+  // human? If so I must stay off it; see the ring note at the champion-field waypoint.
+  // `claimedBy` is the single holder, so this is the whole test. The player counts: crowding a human
+  // off their own capture is the version of this the owner actually noticed.
+  _fieldHeldByFriend() {
+    try {
+      if (window.__squad && window.__squad.ring === false) return false;
+      const f = game.championField;
+      const c = f && f.claimedBy;
+      if (!c || c === this) return false;
+      const t = (c === player) ? player.team : c.team;
+      return t === this.team;
+    } catch (_) { return false; }
+  }
+
   _acquireCombatTarget() {
     // Squared distances throughout ; sqrt only existed for the compare.
     let best = null, bestScore = Infinity;
@@ -48297,6 +48728,7 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
     if (!this.doomed && this.health > 0 && this.health / this.maxHealth <= LSS.DOOMED_HEALTH_PCT) {
       this.doomed = true;
       this.doomTimer = LSS.DOOMED_TIMER;
+      this._doomTurn = false;   // (v41.99) fresh doom arc - see _doomPhase
     }
 
     if (this.health <= 0) { this.die(attacker); }
@@ -49615,6 +50047,40 @@ class Projectile {
           }
         }
       }
+      // ⚠⚠ (v41.92) BOT GUNS CAN NOW HIT MONSTERS - INCLUDING THE CHAMPION SHELL. Owner: "bot fire
+      // should damage the champion shell, otherwise they just sit cluelessly in front of it (like
+      // they've been doing)". That is precisely what was happening: the ONLY projectile path that
+      // could damage anything in `game.monsters` was the player's, ~130 lines up and sealed inside
+      // `if (this.owner === 'player')`. A bot could fly its entire assault run onto the shell and its
+      // guns did nothing at all - no damage, no impact, no way for an all-bot side to win the round.
+      // ⚠ The v34.71 note on ChampionShell ("3000 fell to incidental bot crossfire in ~25s") is NOT a
+      // contradiction and should not be read as proof this already worked: bot FIREWALLS and gas
+      // reach monsters through the worldEffects DoT loops, which pass `eff.owner` instead of a
+      // hardcoded 'player'. Only the GUN path was closed, which is why bots could burn the shell down
+      // with a PYRO wall but never shoot it.
+      if (game.monsters && _botMayDamageMonster(this.ownerRef, null)) {
+        for (const mon of game.monsters) {
+          if (!mon.alive || !mon.mesh) continue;
+          const _mr = mon.collisionRadius;
+          if (this.position.distanceToSquared(mon.position) >= _mr * _mr) continue;
+          if (!_botMayDamageMonster(this.ownerRef, mon)) continue;
+          if (this.isSonar) {
+            if (typeof _spawnSonarPulse === 'function') _spawnSonarPulse(mon.position, this.owner);
+            this.destroy();
+            return;
+          }
+          // Attribution is the firing BOT, not the string 'bot', so kill credit and the mon_dead
+          // claim path can name it - same reason the bot-vs-bot line above passes `this.ownerRef`.
+          // 0.6x mirrors that line too, so opening this up does not let a bot pack delete the shell
+          // faster than a player can.
+          mon.takeDamage(this.damage * 0.6, this.ownerRef || 'bot', this.position);
+          if (this.isCluster) this.spawnClusterChildren();
+          this.spawnImpactExplosion(this.position);
+          if (this.splash > 0) this.splashDamage();
+          this.destroy();
+          return;
+        }
+      }
     }
 
     // (bugfix) Projectiles despawned at ARENA_SIZE (25000) while the free-flight SHIP flies to
@@ -49769,6 +50235,21 @@ class Projectile {
             }
             if (player.trackerLocks[mon.id] >= 3) player.trackerLockedTarget = mon;
           }
+        }
+      }
+    } else if (this.owner !== 'player' && game.monsters && this.splash > 0 &&
+               _botMayDamageMonster(this.ownerRef, null)) {
+      // (v41.92) the splash half of the same gap - a bot's cluster/rocket bursting beside the shell
+      // did nothing either. Same 0.75 falloff shape as the player branch above, 0.6x scaled like
+      // every other bot damage line, and no player stat credit.
+      for (const mon of game.monsters) {
+        if (!mon.alive || !mon.mesh) continue;
+        if (!_botMayDamageMonster(this.ownerRef, mon)) continue;
+        const _mdSq = this.position.distanceToSquared(mon.position);
+        const _mReach = this.splash + mon.collisionRadius * 0.5;
+        if (_mdSq < _mReach * _mReach && _mdSq > 0) {
+          const _mfall = Math.max(0.1, 1 - Math.sqrt(_mdSq) / _mReach);
+          mon.takeDamage(this.damage * 0.75 * 0.6 * _mfall, this.ownerRef || 'bot', this.position);
         }
       }
     }
@@ -69803,9 +70284,16 @@ function updatePlayerMovement(dt) {
   // the Extra Dash perk's bonus charges actually refill. Previously the
   // regen cap was the chassis base, leaving the perk's extra slot empty
   // after the very first dash.
+  const _maxD = player.maxDashes || ch.maxDashes;
+  // (v42.02) SELF-HEALING GATE — see the long note on the trap-charge twin below.
+  // Same absorbing-state shape: charges missing while the clock sits at 0 / negative / NaN meant
+  // the regen never ran again. Drive recovery off the thing that must become true (charges below
+  // max), not off a clock that can be left in a dead value.
+  if (player.dashCharges < _maxD && !(player.dashCooldownTimer > 0)) {
+    player.dashCooldownTimer = ch.dashCooldown;
+  }
   if (player.dashCooldownTimer > 0) {
     player.dashCooldownTimer -= dt;
-    const _maxD = player.maxDashes || ch.maxDashes;
     if (player.dashCooldownTimer <= 0 && player.dashCharges < _maxD) {
       player.dashCharges++;
       if (player.dashCharges < _maxD) player.dashCooldownTimer = ch.dashCooldown;
@@ -69816,14 +70304,37 @@ function updatePlayerMovement(dt) {
   // (v36.68) SLAYER's Teleport at Aegis 8 / PUNCTURE's Stasis Trap at Aegis 11.
   // All three ride the SAME trapCharges counter — safe only because they are
   // three different ships, so no loadout ever wants two of them at once.
-  if ((player.loadoutKey === 'PYRO' ||
-       (player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(8)) ||
-       (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(11))) &&
-      player.trapCooldownTimer > 0) {
-    player.trapCooldownTimer -= dt;
-    if (player.trapCooldownTimer <= 0 && player.trapCharges < player.maxTrapCharges) {
-      player.trapCharges++;
-      if (player.trapCharges < player.maxTrapCharges) player.trapCooldownTimer = player.trapChargeCooldown;
+  if (player.loadoutKey === 'PYRO' ||
+      (player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(8)) ||
+      (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(11))) {
+    // ⚠⚠ (v42.02) SELF-HEALING GATE. This block used to be gated on `&& player.trapCooldownTimer > 0`,
+    // which made the CLOCK the thing that drives recovery. That is an ABSORBING state machine: any
+    // moment with `trapCharges < maxTrapCharges` AND the timer at 0, negative or NaN was permanent,
+    // because the regen refused to run (timer not > 0) and the ONLY other re-arm — `activateAbility`
+    // L72760 — sits BEHIND the `if ((player.trapCharges || 0) <= 0) return;` early return, so an
+    // empty counter could never re-arm it either. Charges never came back for the rest of the life.
+    //
+    // The two ways in are both real: the SYPHON tier-3 core zeroed the timer without refilling the
+    // charges (paired now, see 'AI Nanobots'), and a NaN dt would poison the timer absorbingly
+    // (`NaN > 0` false kills the regen, `NaN <= 0` false kills the re-arm).
+    //
+    // Rather than hunt every path that can strand it, the state now repairs ITSELF on the next
+    // frame — same house pattern as the v40.68 `_countdownActive` guard in launchCountdown. Drive
+    // recovery off the thing that must become true (charges below max), never off a clock that can
+    // be left in a dead value. Written `!(x > 0)` and not `x <= 0` so NaN heals too.
+    //
+    // ⚠ This is deliberately a no-op in normal play: the intended idle state is charges AT max with
+    // the timer left slightly negative (L70203 stops re-arming once the counter tops out), and that
+    // state fails `trapCharges < maxTrapCharges`, so the heal never fires there.
+    if (player.trapCharges < player.maxTrapCharges && !(player.trapCooldownTimer > 0)) {
+      player.trapCooldownTimer = player.trapChargeCooldown;
+    }
+    if (player.trapCooldownTimer > 0) {
+      player.trapCooldownTimer -= dt;
+      if (player.trapCooldownTimer <= 0 && player.trapCharges < player.maxTrapCharges) {
+        player.trapCharges++;
+        if (player.trapCharges < player.maxTrapCharges) player.trapCooldownTimer = player.trapChargeCooldown;
+      }
     }
   }
 
@@ -72358,7 +72869,22 @@ function activateAbility(slot) {
     const bucket = keyMap[(ability.name || '').toLowerCase()] || null;
     Overlays.abilityFlash(ability.name || 'ABILITY', bucket ? ABILITY_COLORS[bucket] : null);
   }
+  // ⚠ (v42.02) REFUND CHANNEL. The cost is paid at the BOTTOM of this function, after
+  // executeAbility has already run, and until now nothing could tell it "that press accomplished
+  // nothing, don't charge for it". An ability that can legitimately no-op needs to say so:
+  // SLAYER's Teleport can come back from `_teleportClampLen` with zero distance and would still
+  // burn a charge. Cleared before every activation so a stale flag can never suppress a real cost.
+  // (Note: the Fire Shield "refuse activation" at the top of executeAbility is NOT a precedent for
+  // this — it gets away with a bare `return` only because its cooldown is 0, so it reaches neither
+  // payment branch. Any ability with a real cost needs this flag.)
+  player._abilityNoOp = false;
   executeAbility(slot, ability);
+  if (player._abilityNoOp) {
+    player._abilityNoOp = false;
+    player.abilityActive[slot] = false;
+    player.abilityTimers[slot] = 0;
+    return;   // no core meter, no charge spent, no cooldown started
+  }
   // Per-ability "weapon out" overlay frame (slides in/out from off-screen
   // behind the cockpit-frame). No-op when the ability/ship pair isn't
   // registered in _abilityOverlayDescFor.
@@ -72421,21 +72947,68 @@ function _teleportClampLen(from, dir, maxLen) {
   // back an unclamped 400 — measured: 24u of clearance still allowed a full
   // dive straight through the surface. The escape hatch is for being genuinely
   // below the terrain, and nothing else.
-  let startBuried;
-  try { startBuried = from.y < _stGroundYCarved(from.x, from.z, T); } catch (_) { return maxLen; }
-  if (startBuried) return maxLen;
+  // ⚠⚠ (v42.01) THE HATCH MUST COVER THE CEILING TOO, NOT JUST THE GROUND. Owner: "slayer's teleport
+  // glitches, it stops working... it stopped when i was on endless mode, after i tried to teleport
+  // through leviathans" and, decisively, "it still fired, but didn't move me a distance".
+  // That last detail is the whole diagnosis: the ability was never blocked - it ran, paid its
+  // cooldown, played its FX, and translated the ship by ZERO. This function returned 0.
+  // ENDLESS is a SANDWICH world: ground AND ceiling. The step loop below already rejects a point
+  // above the ceiling (`cy > gy && y > cy`), but the escape hatch only ever asked about the GROUND.
+  // So a player who ends up ABOVE the ceiling fails the very first step, `lastOk` stays 0, and every
+  // blink from then on moves them nothing - permanently, because the one ability that could carry
+  // them back inside the slab is the one that has stopped working. A dead end that cannot be exited.
+  // The leviathan link is real, not a coincidence: a leviathan is a huge body whose collision
+  // push-out resolves along the outward radial, so blinking INTO one is an efficient way to get
+  // shoved up through the ceiling in the first place.
+  // Same reasoning as the original note - the hatch exists for being genuinely OUTSIDE the playable
+  // slab, and "outside" has two sides.
+  // ⚠⚠⚠ (v42.01) EVERY TERRAIN QUERY BELOW MUST BE IN **FLAT** SPACE. Owner: "it was on an angle area".
+  // That one detail is the whole bug. ENDLESS runs the BENT SANDWICH - the tube pitches up, down and
+  // diagonally - and `_stGroundYCarved` / `_stCeilYCarved` read the chunk field, which lives in FLAT
+  // space. Bend-aware callers unmap first and there is precedent everywhere (`_campHoardTerrainNavBent`
+  // keeps a whole separate variant that runs `_bendToFlat` before these same two calls; see also the
+  // `_mq` / `_lq` / `q` query points at L9468, L9812, L10626).
+  // This function did not. It passed WORLD x/z into a FLAT-space field and compared the result against
+  // a WORLD y - two different frames. On a flat segment world == flat, so it worked and hid the bug;
+  // on a PITCHED segment the heights come back from the wrong place, the very first step reads as
+  // solid rock, `lastOk` stays 0, and the blink translates the ship by ZERO while still firing and
+  // still paying its cooldown. Exactly "it still fired, but didn't move me a distance", and it
+  // persists for as long as you are in that bent stretch - which reads as "it stopped working".
+  const _bent = (typeof _bendOn === 'function') && _bendOn();
+  const _fq = _bent ? { x: 0, y: 0, z: 0 } : null;
+  // Returns the query point in the space the terrain field actually lives in.
+  const _flat = (x, y, z) => (_bent ? _bendToFlat(x, y, z, _fq) : { x: x, y: y, z: z });
+  let startOutside;
+  try {
+    const _f0 = _flat(from.x, from.y, from.z);
+    const _gy0 = _stGroundYCarved(_f0.x, _f0.z, T);
+    const _cy0 = (typeof _stCeilYCarved === 'function') ? _stCeilYCarved(_f0.x, _f0.z, T) : Infinity;
+    // ⚠ (v42.01) ...AND THE HATCH COVERS BOTH SIDES NOW. It only ever asked about the GROUND, but the
+    // step loop rejects a point above the CEILING too - so a player who ended up above the ceiling
+    // failed step 1 forever and could never blink back inside. A dead end with no exit, and blinking
+    // into a leviathan (a huge body whose push-out resolves along the outward radial) is an efficient
+    // way to get shoved up there. The hatch exists for being genuinely OUTSIDE the slab, and "outside"
+    // has two sides. The `_cy0 > _gy0` test is the same open-top guard the loop uses: the hub reports
+    // a ceiling that is not real, and without it every hub blink would take the hatch.
+    startOutside = (_f0.y < _gy0) || (_cy0 > _gy0 && _f0.y > _cy0);
+  } catch (_) { return maxLen; }
+  if (startOutside) return maxLen;
   let lastOk = 0;
   for (let s = 1; s <= STEPS; s++) {
     const t = (s / STEPS) * maxLen;
     const x = from.x + dir.x * t, y = from.y + dir.y * t, z = from.z + dir.z * t;
-    let gy, cy;
+    let gy, cy, fy;
     try {
-      gy = _stGroundYCarved(x, z, T) + _TP_CLEAR;
-      cy = (typeof _stCeilYCarved === 'function') ? _stCeilYCarved(x, z, T) - _TP_CLEAR : Infinity;
+      // (v42.01) unmap the stepped point too - see the note above. `fy` is the step's height in the
+      // SAME space as gy/cy; comparing the world y against a flat-space height is the original bug.
+      const _fs = _flat(x, y, z);
+      fy = _fs.y;
+      gy = _stGroundYCarved(_fs.x, _fs.z, T) + _TP_CLEAR;
+      cy = (typeof _stCeilYCarved === 'function') ? _stCeilYCarved(_fs.x, _fs.z, T) - _TP_CLEAR : Infinity;
     } catch (_) { return maxLen; }
     // Only treat the ceiling as real when it is actually above the floor —
     // the open-top hub reports one that isn't.
-    if (y < gy || (cy > gy && y > cy)) break;
+    if (fy < gy || (cy > gy && fy > cy)) break;   // (v42.01) fy, not y - same space as gy/cy
     lastOk = t;
   }
   return lastOk;
@@ -73314,6 +73887,60 @@ function executeAbility(slot, ability) {
             if (flatLen > dashLen) { moveDir = flat; dashLen = flatLen; }
           }
         }
+        // ⚠ (v42.01) LAST RESORT: AIM BACK INTO THE OPEN SLAB. The skim retry above only removes the
+        // VERTICAL component, so it rescues a blink aimed into the floor - but not one fired from a
+        // spot where the forward AND flattened directions are both blocked (a tight endless tunnel,
+        // wedged against a leviathan, tucked under an overhang). There the ability still fires, still
+        // pays its cooldown, and moves the ship zero units: the owner's "it still fired, but didn't
+        // move me a distance". An ESCAPE ability that cannot escape is the one thing it must never be.
+        // The mid-slab point at the player's own x/z is interior by construction, so steering at it is
+        // the one direction guaranteed to lead somewhere legal in a sandwich world.
+        if (dashLen < 40) {
+          try {
+            const _T2 = game.sandwichTerrain;
+            if (_T2 && _T2.ON && typeof _stGroundYCarved === 'function') {
+              // (v42.01) FLAT SPACE, same as _teleportClampLen - the heights come from the chunk
+              // field, which is flat even when the world is bent.
+              const _q2 = ((typeof _bendOn === 'function') && _bendOn())
+                ? _bendToFlat(dashStart.x, dashStart.y, dashStart.z, { x: 0, y: 0, z: 0 })
+                : { x: dashStart.x, y: dashStart.y, z: dashStart.z };
+              const _g2 = _stGroundYCarved(_q2.x, _q2.z, _T2);
+              const _c2 = (typeof _stCeilYCarved === 'function') ? _stCeilYCarved(_q2.x, _q2.z, _T2) : (_g2 + 2000);
+              const _mid = (_c2 > _g2) ? (_g2 + _c2) * 0.5 : (_g2 + 600);
+              // Only the SIGN is taken from flat space; the move itself is world-up/down, which still
+              // points across the slab once the tube is pitched. This is a last resort, not a nav
+              // solution - it just has to be a direction that is not into rock.
+              const _sgn = (_mid - _q2.y) >= 0 ? 1 : -1;
+              const _out = new THREE.Vector3(0, _sgn, 0);
+              const _outLen = _teleportClampLen(dashStart, _out, _tpReach);
+              if (_outLen > dashLen) { moveDir = _out; dashLen = _outLen; }
+            }
+          } catch (_) {}
+        }
+        // ⚠⚠ (v42.02) NEVER PAY FOR A BLINK THAT MOVES NOTHING — the backstop behind the three
+        // retries above. `_teleportClampLen` returns `lastOk`, which is 0 whenever the very first
+        // march step is already in rock, so a blink can legitimately come back as ZERO distance.
+        // Until now the ability still swallowed its charge (activateAbility pays AFTER
+        // executeAbility returns, and there is no refund channel), played its FX and translated the
+        // ship by nothing — the owner's "it still fired, but didn't move me a distance", which with
+        // both charges burned reads exactly like "teleport stopped working".
+        //
+        // v42.01 fixed the two geometric causes (ceiling-side escape hatch + flat-space queries), but
+        // zero is still reachable: a slab tighter than ~2*_TP_CLEAR+step leaves no legal step in ANY
+        // direction, and the last-resort probe takes its SIGN from flat space while moving along
+        // WORLD up/down, which on a steeply pitched segment is not across the slab at all.
+        //
+        // So make the failure SELF-HEALING instead of hunting every geometry that can produce it:
+        // refuse the activation and keep the charge. The player can fire again the instant they
+        // drift somewhere legal, rather than being left with an empty counter and a dead ability.
+        if (!(dashLen > 24)) {
+          player.phaseInvuln = false;
+          player.phaseInvulnTimer = 0;
+          player.abilityActive[slot] = false;
+          player.abilityTimers[slot] = 0;
+          player._abilityNoOp = true;   // tells activateAbility not to charge for this press
+          return;
+        }
         player.position.add(moveDir.clone().multiplyScalar(dashLen));
         spawnExplosion(player.position.clone().add(moveDir.clone().multiplyScalar(-200)), 15);
         // (v27) Broadcast the dash visual so peers see the cloud trail
@@ -73387,7 +74014,11 @@ function executeAbility(slot, ability) {
           // They can't be stunned, so the pass-through deals a one-shot hit.
           if (game.monsters) {
             for (const mon of game.monsters) {
-              if (!mon.alive || !mon.position) continue;
+              // (v42.02) `!mon` guard to match the bot loop above. Without it a null slot threw a
+              // TypeError straight into the empty `catch (_dashErr)` below, silently aborting the
+              // sweep — so every leviathan further along the blink took no damage at all, with no
+              // console trace. "Teleporting through leviathans did nothing" is a real symptom.
+              if (!mon || !mon.alive || !mon.position) continue;
               const _mvx = mon.position.x - dashStart.x;
               const _mvy = mon.position.y - dashStart.y;
               const _mvz = mon.position.z - dashStart.z;
@@ -73990,6 +74621,12 @@ function activateCore() {
       player.shield = player.maxShield;
       player.shieldRegenDelay = 0;
       if (player.abilityCooldowns) for (let _i = 0; _i < player.abilityCooldowns.length; _i++) player.abilityCooldowns[_i] = 0;
+      // ⚠ (v42.02) REFILL THE CHARGES, NOT JUST THE CLOCK. This was the one writer in the file that
+      // zeroed trapCooldownTimer WITHOUT restoring trapCharges — the exact input to the absorbing
+      // state the regen gate now heals (see updatePlayerMovement). Every other resetter writes the
+      // pair (loadout commit, respawnPlayer, and the dash lines right below). Left unpaired it also
+      // broke the banner's own promise: "COOLDOWNS RESET" while the charge counter stayed empty.
+      player.trapCharges = player.maxTrapCharges;
       player.trapCooldownTimer = 0;
       if (player.maxDashes) player.dashCharges = player.maxDashes;
       player.dashCooldownTimer = 0;
@@ -93545,8 +94182,15 @@ function checkExecutions(dt) {
     // Execute on contact with doomed enemy
     if (bot.doomed && dist < execRadius) {
       
-      const dealt = bot.health; 
-      bot.takeDamage(bot.health + 1, 'player');
+      // ⚠ (v41.99) PUNCH THROUGH THE SHIELD. `takeDamage` absorbs into shield BEFORE health, so
+      // `health + 1` against a doomed bot that still has any shield left it ALIVE - while the payout
+      // below (full player shields, +20 core, the explosion and the [EXEC] kill-feed line) had
+      // already been handed over. A fake execution. Reachable today wherever a doomed bot can still
+      // gain shield: a core surge grants maxShield*0.35 and a defensive ability maxShield*0.5, and
+      // the champion-field / cyber / assault branches all clear `aiRetreating` so doomed bots there
+      // are free to use both.
+      const dealt = bot.health;
+      bot.takeDamage(bot.health + (bot.shield || 0) + 1, 'player');
       player.damageDealt += dealt;
       player.coreMeter = Math.min(100, player.coreMeter + 20);
 
@@ -93720,12 +94364,23 @@ const MAP_DATA = {
     // lands INSIDE the central column and the -150-clearance rescue walk
     // cannot escape it — found live in v36.56).
     rooms: [
-      { id: 'spawn_a', team: 'A',  x: -1316, y: 1280, z:  280, r: 300 },
-      { id: 'spawn_b', team: 'B',  x:  1326, y: 1260, z:  -50, r: 300 },
+      // ⚠ (v42.00) THE SPIRE IS NOW FOUGHT VERTICALLY. Owner: "on spire, in elimination, one team
+      // should start at the bottom of the map instead of across at the top".
+      // Both spawns used to sit at y~1270 facing each other across the crown, so a three-storey
+      // arena built around a climbable central column played as a single flat room and the lower two
+      // storeys were scenery. Team B now starts in the PIT and fights UP the spire; the champion room
+      // (mid_high, y 430) sits between the two, so the contested ground is the middle storey.
+      // ⚠ COORDINATES ARE NOT FREE HERE. The note above is load-bearing: every centre is optimised
+      // against the seed-7 scale-2 field by tools/arena_room_opt_s2.cjs and measures 0.00% rock over
+      // the 0.7r sampling ball. So this does NOT invent a bottom spawn - it retags the pit, whose
+      // centre is already verified open, and hands the vacated crown room back as a neutral nav
+      // bubble. All six verified centres are still in use and none has moved.
+      { id: 'spawn_a',  team: 'A',  x: -1316, y: 1280, z:  280, r: 300 },
+      { id: 'crown_e',  team: null, x:  1326, y: 1260, z:  -50, r: 300 },   // was spawn_b
       { id: 'mid_high', team: null, champion: true, x: -80, y: 430, z: 1726, r: 280 },
       { id: 'mid_east', team: null, x: 1225, y:  460, z: -805, r: 280 },
       { id: 'mid_low',  team: null, x: -636, y: -400, z: -450, r: 280 },
-      { id: 'pit',      team: null, x:  736, y: -1250, z: -524, r: 260 },
+      { id: 'spawn_b',  team: 'B',  x:  736, y: -1250, z: -524, r: 260 },   // was the pit
     ],
     tunnels: []
   },
@@ -99357,7 +100012,43 @@ function gameLoop(timestamp) {
           }
         } catch (_) {}
       } else {
-        updateSandwichStream(_fX, _fZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
+        // ⚠⚠ (v42.00) STREAM AHEAD OF THE SHIP, NOT AROUND IT. Owner, on endless: "i can see the draw
+        // of the next part of the map, often, especially once i get going fast".
+        // The streamer centres on the player and sorts candidate chunks by distance from that centre,
+        // so the ring of un-built world sits the SAME distance ahead as behind - and endless only
+        // bakes 2 chunks/frame (each one ground AND ceiling, 11-14 ms on a fast desktop). Fly fast
+        // enough and you arrive at the edge before the budget has filled it, so you watch it draw.
+        // Pushing the centre forward along the direction of travel spends that same budget where it
+        // is actually needed: the disc is built ahead of you and dropped behind you, which is exactly
+        // the asymmetry a forward-flying mode wants. It costs NOTHING - same chunk count, same
+        // budget, just re-aimed.
+        // Velocity is measured from the STREAM CENTRE's own frame-to-frame motion rather than from
+        // player.velocity, because this point is already in flat (unbent) space - the bend unmap
+        // above ran on it - so the lead lands in the same space the chunk grid lives in. Smoothed,
+        // because a raw frame delta is noisy and would make the disc jitter.
+        let _sX = _fX, _sZ = _fZ;
+        try {
+          const _SL = game._swLead || (game._swLead = { x: _fX, z: _fZ, vx: 0, vz: 0 });
+          const _sdt = Math.max(1e-3, Math.min(0.1, dt || 0.016));
+          const _k = Math.min(1, _sdt * 3);
+          _SL.vx += (((_fX - _SL.x) / _sdt) - _SL.vx) * _k;
+          _SL.vz += (((_fZ - _SL.z) / _sdt) - _SL.vz) * _k;
+          _SL.x = _fX; _SL.z = _fZ;
+          const _leadK = (typeof window !== 'undefined' && window.__streamLead != null)
+            ? window.__streamLead
+            : ((typeof LSS !== 'undefined' && LSS.MODE === 'endless') ? 1.6 : 0);   // seconds of travel to lead by
+          if (_leadK > 0) {
+            const _sp = Math.hypot(_SL.vx, _SL.vz);
+            if (_sp > 50) {
+              // Capped at 2.5 chunks so the disc can never slide so far forward that the ground
+              // under the ship unloads - that would be a far worse bug than the one being fixed.
+              const _d = Math.min(_SW_CHUNK * 2.5, _sp * _leadK);
+              _sX += (_SL.vx / _sp) * _d;
+              _sZ += (_SL.vz / _sp) * _d;
+            }
+          }
+        } catch (_) { _sX = _fX; _sZ = _fZ; }
+        updateSandwichStream(_sX, _sZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
       }
       __pmark('hub:stream');   // (v39.49) chunk streamer / warmup drain alone
       try { _swUpdateHubWater(); } catch (_) {}   

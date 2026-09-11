@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.90';
+const LSS_BUILD = '42.05';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -4745,6 +4745,18 @@ async function _startHostedMode() {
 
 function _isAssault() { return typeof LSS !== 'undefined' && LSS.MODE === 'assault'; }
 function _assaultAttackerFleet() { return (((game.currentRound || 1) % 2) === 1) ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A; }
+function _botMayDamageMonster(shooter, mon) {
+  if (!shooter || typeof shooter !== 'object') return false;   // 'bot' string / unowned: no monster damage
+  if (!mon) return true;                                       // pre-check only
+  if (mon.name !== 'ChampionShell') return true;               // leviathans etc: always fair game
+  try {
+    if (_isAssault()) return shooter.team === _assaultAttackerFleet();
+    if (game && game._cyber && game._cyber.armed && shooter._cyberAttacker != null) {
+      return !!shooter._cyberAttacker;
+    }
+  } catch (_) {}
+  return true;
+}
 function _assaultDefenderFleet() { return (((game.currentRound || 1) % 2) === 1) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B; }
 function _assaultSpawnSide(team) { return (team === _assaultDefenderFleet()) ? 'A' : 'B'; }
 function _assaultLedgerApply(winnerTeam) {
@@ -9237,7 +9249,8 @@ const _botFireOrigin = new THREE.Vector3();
 const _botFireDir = new THREE.Vector3();
 const _botSpreadDir = new THREE.Vector3();
 function emitDamageState(entity, dt) {
-  if (!entity || !entity.alive || !entity.position) return;
+  if (!entity || !entity.position) return;
+  if (entity.alive === false || entity.shipState === 'dead') return;
   if ((entity.shield || 0) > 0.5) return;
   const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
   const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
@@ -9323,29 +9336,85 @@ function emitDamageState(entity, dt) {
       color: 0xff8833, size: 3 + Math.random() * 2,
     });
   } else {
-    for (let k = 0; k < 3; k++) {
+    const _fk = (typeof window !== 'undefined' && window.__fireFX) || null;
+    const _shaderFire = !(_fk && _fk.shader === false);
+    let _camD2 = 0;
+    try { _camD2 = (typeof camera !== 'undefined' && camera) ? camera.position.distanceToSquared(entity.position) : 0; } catch (_) {}
+    const _fireMaxD = (_fk && _fk.maxDist != null) ? _fk.maxDist : 5000;
+    let _didShader = false;
+    if (_shaderFire && typeof spawnFXBurst === 'function' && _camD2 < _fireMaxD * _fireMaxD) {
+      const _v = entity.velocity;
+      const _sp = _v ? Math.hypot(_v.x, _v.y, _v.z) : 0;
+      let _ax = 0, _ay = 1, _az = 0;
+      if (_sp > 30) { _ax = -_v.x / _sp; _ay = -_v.y / _sp; _az = -_v.z / _sp; }
+      const _fSize = hullR * ((_fk && _fk.size != null) ? _fk.size : 0.22);
+      const _fLife = (_fk && _fk.life != null) ? _fk.life : (0.22 + Math.random() * 0.12);
+      const _puff = spawnFXBurst('fireball', pos, _fSize, _fLife, {
+        startScale: 0.35, endScale: 1.45,
+        segs: (_fk && _fk.segs != null) ? _fk.segs : 10,
+      });
+      if (_puff) {
+        _didShader = true;
+        const _fx = game.effects && game.effects[game.effects.length - 1];
+        if (_fx && _fx.mesh === _puff && _fx.wakeVel) {
+          const _drift = (_sp * ((_fk && _fk.aft != null) ? _fk.aft : 0.10)) + ((_fk && _fk.rise != null) ? _fk.rise : 22);
+          _fx.wakeVel.set(
+            _ax * _drift + (Math.random() - 0.5) * 40,
+            _ay * _drift + (Math.random() - 0.5) * 40 + 18,   // slight buoyancy on top of the airflow
+            _az * _drift + (Math.random() - 0.5) * 40
+          );
+        }
+      }
+    }
+    if (!_didShader) {
+      for (let k = 0; k < 3; k++) {
+        game.particles.push({
+          position: pos.clone(),
+          velocity: _pVel(
+            (Math.random() - 0.5) * 50,
+            30 + Math.random() * 90,
+            (Math.random() - 0.5) * 50
+          ),
+          life: 0.5 + Math.random() * 0.4, maxLife: 0.9,
+          color: Math.random() < 0.4 ? 0xff5022 : (Math.random() < 0.5 ? 0xffaa44 : 0xffd070),
+          size: 7 + Math.random() * 5,
+        });
+      }
+    }
+    if (_didShader) {
+      if (Math.random() < 0.34) {
+        const _sm = spawnFXBurst('cloud', { x: pos.x, y: pos.y + 18, z: pos.z },
+          hullR * 0.75, 1.1 + Math.random() * 0.5,
+          { startScale: 0.4, endScale: 2.0, segs: 8 });
+        if (_sm) {
+          if (_sm.material && _sm.material.uniforms && _sm.material.uniforms.uBaseColor) {
+            _sm.material.uniforms.uBaseColor.value.setHex(0x2a2420);
+          }
+          const _sfx = game.effects && game.effects[game.effects.length - 1];
+          if (_sfx && _sfx.mesh === _sm && _sfx.wakeVel) {
+            const _v2 = entity.velocity;
+            const _sp2 = _v2 ? Math.hypot(_v2.x, _v2.y, _v2.z) : 0;
+            const _d2 = _sp2 * 0.3;
+            _sfx.wakeVel.set(
+              (_sp2 > 30 ? -_v2.x / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24,
+              (_sp2 > 30 ? -_v2.y / _sp2 : 1) * _d2 + 40,
+              (_sp2 > 30 ? -_v2.z / _sp2 : 0) * _d2 + (Math.random() - 0.5) * 24
+            );
+          }
+        }
+      }
+    } else {
       game.particles.push({
-        position: pos.clone(),
+        position: { x: pos.x, y: pos.y + 18, z: pos.z },
         velocity: _pVel(
-          (Math.random() - 0.5) * 50,
-          30 + Math.random() * 90,
-          (Math.random() - 0.5) * 50
+          (Math.random() - 0.5) * 28,
+          50 + Math.random() * 50,
+          (Math.random() - 0.5) * 28
         ),
-        life: 0.5 + Math.random() * 0.4, maxLife: 0.9,
-        color: Math.random() < 0.4 ? 0xff5022 : (Math.random() < 0.5 ? 0xffaa44 : 0xffd070),
-        size: 7 + Math.random() * 5,
+        life: 1.0 + Math.random() * 0.6, maxLife: 1.6,
+        color: 0x252525, size: 10 + Math.random() * 5,
       });
     }
-    game.particles.push({
-      position: { x: pos.x, y: pos.y + 18, z: pos.z },
-      velocity: _pVel(
-        (Math.random() - 0.5) * 28,
-        50 + Math.random() * 50,
-        (Math.random() - 0.5) * 28
-      ),
-      life: 1.0 + Math.random() * 0.6, maxLife: 1.6,
-      color: 0x252525, size: 10 + Math.random() * 5,
-    });
   }
 }
 
@@ -23676,7 +23745,7 @@ const _cyWp = new THREE.Vector3();
 function _cyberBotWaypoint(bot) {
   const C = game._cyber;
   if (!C || !C.armed || !bot || bot._cyberAttacker == null) return null;
-  const t = bot.target;
+  const t = bot.combatTarget;
   if (t && t.alive !== false && t.position && bot.position.distanceTo(t.position) < 1800) return null;
   const field = (C.field && C.field.alive && C.field.position) ? C.field.position : null;
   const carrier = (_carrier.obj && _carrier.ent && _carrier.ent.alive) ? _carrier.obj.position : null;
@@ -30670,8 +30739,10 @@ class Bot {
       if (this.doomTimer <= 0) { this.die(null); return; }
     }
 
-    if (this.doomed && !this.aiRetreating) {
-      this.aiRetreating = true;
+    if (this.doomed) {
+      const _dph = this._doomPhase();
+      if (_dph === null) { if (!this.aiRetreating) this.aiRetreating = true; }
+      else this.aiRetreating = (_dph === 'run');
     }
 
     this.aiTimer -= dt;
@@ -30696,7 +30767,7 @@ class Bot {
         game.championField && game.championField.alive && game.championField.position) {
       if (game.championField.claimedBy !== this) {
         if (_isAssault() && this.team !== _assaultAttackerFleet()) {
-          const _tgt = this.target;
+          const _tgt = this.combatTarget;
           const _engaged = _tgt && _tgt.alive !== false && _tgt.position &&
                            this.position.distanceTo(_tgt.position) < 2400;
           if (!_engaged) {
@@ -30711,7 +30782,24 @@ class Bot {
           }
         } else {
           if (!this.aiTarget) this.aiTarget = new THREE.Vector3();
-          this.aiTarget.copy(game.championField.position);
+          const _shW = game.championShell;
+          if (_shW && _shW.alive && _shW.position) {
+            const _off = this._tempVec3d.subVectors(this.position, _shW.position);
+            if (_off.lengthSq() < 1) _off.set(1, 0.2, 0);
+            _off.normalize();
+            const _stand = (_shW.collisionRadius || 170) + 260;
+            this.aiTarget.copy(_shW.position).addScaledVector(_off, _stand);
+          } else if (this._fieldHeldByFriend()) {
+            const _fp = game.championField.position;
+            const _n = Math.max(1, (game.entities || []).length);
+            const _ang = ((this.id | 0) % _n) * (Math.PI * 2 / _n) + (this.id | 0) * 0.7;
+            const _ring = (game.championField.radius || 300) + 520;
+            this.aiTarget.set(_fp.x + Math.cos(_ang) * _ring,
+                              _fp.y + 90 + (((this.id | 0) % 3) - 1) * 140,
+                              _fp.z + Math.sin(_ang) * _ring);
+          } else {
+            this.aiTarget.copy(game.championField.position);
+          }
           this.aiRetreating = false;
           this.aiRole = 'engage';
           _raceWaypoint = this.aiTarget;
@@ -30858,6 +30946,8 @@ class Bot {
       this.targetDir.normalize();
     }
 
+    this._unstickTick(dt);
+
     const accelK = (this.arcSlowTimer > 0)
       ? (this.chassis.acceleration * dt * 0.3)
       : (this.chassis.acceleration * dt);
@@ -30903,13 +30993,28 @@ class Bot {
     const _mayFire = !game.testMode || (typeof LSS !== 'undefined' && LSS.MODE === 'campaign');
     const _ct = this.combatTarget;
     const _ctAlive = _ct && (_ct === player ? (player.shipState !== 'dead') : !!_ct.alive);
-    if (this.fireTimer <= 0 && game.state === 'playing' && !this.aiRetreating && _ctAlive) {
-      const toTgt = this._tempVec3a.subVectors(_ct.position, this.position);
-      const distToTgt = toTgt.length() - (_ct.isOwBoss ? (_ct.collisionRadius || 0) * 0.85 : 0);   // (v38.78) range to the leviathan's skin
+    let _fireTgt = _ctAlive ? _ct : null;
+    if (game.state === 'playing') {
+      const _sh = game.championShell;
+      if (_sh && _sh.alive && _sh.position && _botMayDamageMonster(this, _sh)) {
+        const _shD = this.position.distanceTo(_sh.position) - (_sh.collisionRadius || 0) * 0.85;
+        const _ctD = _ctAlive ? this.position.distanceTo(_ct.position) : Infinity;
+        const _objRange = this.loadout.weapon.range * ((this._rangeModeT > 0) ? 1.6 : 1.0);
+        const _OBJ_BREAK = (typeof window !== 'undefined' && window.__botAI && window.__botAI.objBreak != null)
+          ? window.__botAI.objBreak : 1500;
+        const _isBreaker = (((this.id | 0) % 2) === 0);
+        if (_shD < _objRange && (_isBreaker || !_fireTgt || _ctD > _OBJ_BREAK)) _fireTgt = _sh;
+      }
+    }
+    if (this.fireTimer <= 0 && game.state === 'playing' && this._mayFight() && _fireTgt) {
+      const toTgt = this._tempVec3a.subVectors(_fireTgt.position, this.position);
+      const _bigR = (_fireTgt.isOwBoss || _fireTgt.name === 'ChampionShell') ? (_fireTgt.collisionRadius || 0) * 0.85 : 0;
+      const distToTgt = toTgt.length() - _bigR;
       const _rangeMul = (this._rangeModeT > 0) ? 1.6 : 1.0;
       if (distToTgt < this.loadout.weapon.range * _rangeMul) {
         const preferredDist = this.aiRangePreference;
-        const withinRange = distToTgt <= preferredDist * 1.3 * _rangeMul;
+        const withinRange = (_fireTgt.name === 'ChampionShell') ||
+                            distToTgt <= preferredDist * 1.3 * _rangeMul;
 
         const dot = toTgt.normalize().dot(this.targetDir);
         if (dot > 0.7 && withinRange) {
@@ -30921,7 +31026,7 @@ class Bot {
           const losDist = this._fireLosDist;
           if (losDist >= distToTgt - 5) {
             if (_mayFire) {
-              this.fireAtShip(_ct, toTgt, distToTgt);
+              this.fireAtShip(_fireTgt, toTgt, distToTgt);
             }
             this.fireTimer = this.loadout.weapon.fireRate * (1 + Math.random() * 0.5);
           }
@@ -30933,13 +31038,13 @@ class Bot {
     this.abilityCooldowns[0] = Math.max(0, this.abilityCooldowns[0] - dt);
     this.abilityCooldowns[1] = Math.max(0, this.abilityCooldowns[1] - dt);
     this.abilityCooldowns[2] = Math.max(0, this.abilityCooldowns[2] - dt);
-    if (game.state === 'playing' && !this.aiRetreating && _ctAlive &&
+    if (game.state === 'playing' && this._mayFight() && _ctAlive &&
         (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
       this.tryUseAbilities();   
     }
 
     this.coreMeter = Math.min(100, this.coreMeter + dt * 1.5);
-    if (this.coreMeter >= 100 && _ctAlive && !this.aiRetreating &&
+    if (this.coreMeter >= 100 && _ctAlive && this._mayFight() &&
         game.state === 'playing' && !game.testMode &&
         this.position.distanceTo(_ct.position) < 1800 && Math.random() < dt * 0.5) {
       this._useCoreSurge(_ct);
@@ -31141,11 +31246,21 @@ class Bot {
       this.abilityCooldowns[0] = 0;
       this.abilityCooldowns[1] = Math.min(this.abilityCooldowns[1], 2);
       try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, LSS.CLASS_COLORS.SYPHON, 2.5, 450, 0.3); } catch (_) {}
+    } else if (ability.name === 'Sonar Pulse') {
+      const vel = this._tempVec3b.copy(aim).multiplyScalar(2400);
+      const proj = new Projectile(this.position, vel, 0, 0, 'bot', LSS.CLASS_COLORS.TRACKER);
+      proj.isSonar = true;
+      proj.lifetime = 4.0;
+      proj.sizeMult = 0.5;
+      proj.ownerTeam = this.team; proj.ownerRef = this;
+      game.projectiles.push(proj);
     } else {
       used = false;
     }
     if (used) {
       this.abilityCooldowns[2] = (ability.cooldown || 12) * (1.4 + Math.random() * 0.6);
+    } else {
+      this.abilityCooldowns[2] = 0.5;
     }
   }
 
@@ -31174,11 +31289,23 @@ class Bot {
         this.shield = Math.min(this.maxShield, this.shield + steal);
         try { if (typeof spawnLightningBolt === 'function') spawnLightningBolt(t.position, this.position, 0x66ddaa, 0.3, 2, 1.6); } catch (_) {}
       } else used = false;
+    } else if (n === 'Plasma Shield') {
+      const _thr = this.combatTarget;
+      const _aim = (_thr && _thr.position)
+        ? this._tempVec3a.subVectors(_thr.position, this.position).normalize()
+        : this._tempVec3a.copy(this.targetDir);
+      const wallPos = this.position.clone().addScaledVector(_aim, 140);
+      if (typeof spawnParticleWall === 'function') {
+        try { spawnParticleWall(wallPos, _aim.clone(), 'bot', this.team, null, ++net.effectIdCounter, false); }
+        catch (_) { used = false; }
+      } else used = false;
     } else {
       used = false;
     }
     if (used) {
       this.abilityCooldowns[1] = (ability.cooldown || 14) * (1.4 + Math.random() * 0.6);
+    } else {
+      this.abilityCooldowns[1] = 0.5;
     }
   }
 
@@ -31203,6 +31330,97 @@ class Bot {
       if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, col, 4.0, 800, 0.4);
       if (typeof playSpatialSound === 'function') playSpatialSound('explosion', this.position.clone(), { refDistance: 300, maxDistance: 2500, rolloffFactor: 0.9 });
     } catch (_) {}
+  }
+
+  _unstickTick(dt) {
+    const K = (typeof window !== 'undefined' && window.__stuck) || null;
+    if (K && K.on === false) return;
+    const minSpdF = (K && K.minSpd != null) ? K.minSpd : 0.18;
+    const sampleT = (K && K.sampleT != null) ? K.sampleT : 0.5;
+    const needT   = (K && K.needT   != null) ? K.needT   : 1.1;
+    const burstT  = (K && K.burstT  != null) ? K.burstT  : 1.4;
+    const lateral = (K && K.lateral != null) ? K.lateral : 0.8;
+
+    if (this._unstickT > 0) {
+      this._unstickT -= dt;
+      if (this._unstickDir) {
+        this.targetDir.lerp(this._unstickDir, Math.min(1, dt * 4));
+        this.targetDir.normalize();
+      }
+      return;
+    }
+
+    const wantsToMove = !!(this.aiTarget || this.combatTarget);
+    if (!wantsToMove) { this._stuckAcc = 0; return; }
+
+    if (this._stuckT == null) { this._stuckT = 0; this._stuckAcc = 0; this._stuckPos = this.position.clone(); }
+    this._stuckT += dt;
+    if (this._stuckT < sampleT) return;
+
+    const moved = this.position.distanceTo(this._stuckPos);
+    const expect = (this.chassis.flightSpeed || 350) * this._stuckT * minSpdF;
+    this._stuckT = 0;
+    this._stuckPos.copy(this.position);
+
+    if (moved >= expect) { this._stuckAcc = 0; this._unstickFails = 0; return; }   // making ground - fine
+
+    this._stuckAcc = (this._stuckAcc || 0) + sampleT;
+    if (this._stuckAcc < needT) return;
+    this._stuckAcc = 0;
+
+    const f = this._tempVec3a.copy(this.targetDir).normalize();
+    const up = this._tempVec3b.set(0, 1, 0);
+    let side = this._tempVec3c.crossVectors(f, up);
+    if (side.lengthSq() < 1e-4) side = this._tempVec3c.set(1, 0, 0);   // heading was vertical
+    side.normalize();
+    const sign = (((this.id | 0) % 2) === 0) ? 1 : -1;                 // two bots on one wall split
+    if (!this._unstickDir) this._unstickDir = new THREE.Vector3();
+    this._unstickDir.copy(side).multiplyScalar(sign * lateral)
+      .addScaledVector(f, -(1 - lateral))
+      .addScaledVector(up, 0.35 * sign);
+    if (this._unstickDir.lengthSq() < 1e-6) this._unstickDir.set(sign, 0.35, 0);
+    this._unstickDir.normalize();
+    this._unstickT = burstT;
+    this._unstickFails = Math.min(4, (this._unstickFails || 0) + 1);
+    const kick = (this.chassis.flightSpeed || 350) * (0.35 + 0.25 * this._unstickFails);
+    this.velocity.addScaledVector(this._unstickDir, kick);
+    if (this._unstickFails >= 4) this._unstickT = burstT * 1.8;
+    try { if (window.__stuck && window.__stuck.debug) console.log('[stuck]', this.loadoutKey, this.id, 'escaping'); } catch (_) {}
+    try { window.__stuckN = (window.__stuckN | 0) + 1; } catch (_) {}
+  }
+
+  _doomK() { try { return (typeof window !== 'undefined' && window.__doom) || null; } catch (_) { return null; } }
+  _doomPhase() {
+    const K = this._doomK();
+    if (K && K.on === false) return null;                 // knob off: today's behaviour, verbatim
+    if (!this.doomed || this.isNemesis) return null;      // the Nemesis is doomed-by-design; leave him
+    const T = (typeof LSS !== 'undefined' && LSS.DOOMED_TIMER) || 10;
+    const breakT  = (K && K.breakT  != null) ? K.breakT  : 1.2;
+    const turnAt  = (K && K.turnAt  != null) ? K.turnAt  : 3.0;
+    const cornerD = (K && K.cornerD != null) ? K.cornerD : 900;
+    if (this.doomTimer > T - breakT) return 'break';
+    if (this._doomTurn) return 'turn';                    // latched, so it cannot flicker on the edge
+    const ct = this.combatTarget;
+    const near = ct && ct.position && this.position.distanceTo(ct.position) < cornerD;
+    if (this.doomTimer <= turnAt || near || this._unstickT > 0) { this._doomTurn = true; return 'turn'; }
+    return 'run';
+  }
+  _mayFight() {
+    if (!this.aiRetreating) return true;
+    const K = this._doomK();
+    if (K && K.on === false) return false;
+    return !(K && K.fireOnRun === false);
+  }
+
+  _fieldHeldByFriend() {
+    try {
+      if (window.__squad && window.__squad.ring === false) return false;
+      const f = game.championField;
+      const c = f && f.claimedBy;
+      if (!c || c === this) return false;
+      const t = (c === player) ? player.team : c.team;
+      return t === this.team;
+    } catch (_) { return false; }
   }
 
   _acquireCombatTarget() {
@@ -31515,6 +31733,7 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
     if (!this.doomed && this.health > 0 && this.health / this.maxHealth <= LSS.DOOMED_HEALTH_PCT) {
       this.doomed = true;
       this.doomTimer = LSS.DOOMED_TIMER;
+      this._doomTurn = false;   // (v41.99) fresh doom arc - see _doomPhase
     }
 
     if (this.health <= 0) { this.die(attacker); }
@@ -32492,6 +32711,25 @@ class Projectile {
           }
         }
       }
+      if (game.monsters && _botMayDamageMonster(this.ownerRef, null)) {
+        for (const mon of game.monsters) {
+          if (!mon.alive || !mon.mesh) continue;
+          const _mr = mon.collisionRadius;
+          if (this.position.distanceToSquared(mon.position) >= _mr * _mr) continue;
+          if (!_botMayDamageMonster(this.ownerRef, mon)) continue;
+          if (this.isSonar) {
+            if (typeof _spawnSonarPulse === 'function') _spawnSonarPulse(mon.position, this.owner);
+            this.destroy();
+            return;
+          }
+          mon.takeDamage(this.damage * 0.6, this.ownerRef || 'bot', this.position);
+          if (this.isCluster) this.spawnClusterChildren();
+          this.spawnImpactExplosion(this.position);
+          if (this.splash > 0) this.splashDamage();
+          this.destroy();
+          return;
+        }
+      }
     }
 
     const s = (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
@@ -32618,6 +32856,18 @@ class Projectile {
             }
             if (player.trackerLocks[mon.id] >= 3) player.trackerLockedTarget = mon;
           }
+        }
+      }
+    } else if (this.owner !== 'player' && game.monsters && this.splash > 0 &&
+               _botMayDamageMonster(this.ownerRef, null)) {
+      for (const mon of game.monsters) {
+        if (!mon.alive || !mon.mesh) continue;
+        if (!_botMayDamageMonster(this.ownerRef, mon)) continue;
+        const _mdSq = this.position.distanceToSquared(mon.position);
+        const _mReach = this.splash + mon.collisionRadius * 0.5;
+        if (_mdSq < _mReach * _mReach && _mdSq > 0) {
+          const _mfall = Math.max(0.1, 1 - Math.sqrt(_mdSq) / _mReach);
+          mon.takeDamage(this.damage * 0.75 * 0.6 * _mfall, this.ownerRef || 'bot', this.position);
         }
       }
     }
@@ -46981,23 +47231,30 @@ function updatePlayerMovement(dt) {
     }
   }
 
+  const _maxD = player.maxDashes || ch.maxDashes;
+  if (player.dashCharges < _maxD && !(player.dashCooldownTimer > 0)) {
+    player.dashCooldownTimer = ch.dashCooldown;
+  }
   if (player.dashCooldownTimer > 0) {
     player.dashCooldownTimer -= dt;
-    const _maxD = player.maxDashes || ch.maxDashes;
     if (player.dashCooldownTimer <= 0 && player.dashCharges < _maxD) {
       player.dashCharges++;
       if (player.dashCharges < _maxD) player.dashCooldownTimer = ch.dashCooldown;
     }
   }
 
-  if ((player.loadoutKey === 'PYRO' ||
-       (player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(8)) ||
-       (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(11))) &&
-      player.trapCooldownTimer > 0) {
-    player.trapCooldownTimer -= dt;
-    if (player.trapCooldownTimer <= 0 && player.trapCharges < player.maxTrapCharges) {
-      player.trapCharges++;
-      if (player.trapCharges < player.maxTrapCharges) player.trapCooldownTimer = player.trapChargeCooldown;
+  if (player.loadoutKey === 'PYRO' ||
+      (player.loadoutKey === 'SLAYER' && typeof _aegisUpFor === 'function' && _aegisUpFor(8)) ||
+      (player.loadoutKey === 'PUNCTURE' && typeof _aegisUpFor === 'function' && _aegisUpFor(11))) {
+    if (player.trapCharges < player.maxTrapCharges && !(player.trapCooldownTimer > 0)) {
+      player.trapCooldownTimer = player.trapChargeCooldown;
+    }
+    if (player.trapCooldownTimer > 0) {
+      player.trapCooldownTimer -= dt;
+      if (player.trapCooldownTimer <= 0 && player.trapCharges < player.maxTrapCharges) {
+        player.trapCharges++;
+        if (player.trapCharges < player.maxTrapCharges) player.trapCooldownTimer = player.trapChargeCooldown;
+      }
     }
   }
 
@@ -48697,7 +48954,14 @@ function activateAbility(slot) {
     const bucket = keyMap[(ability.name || '').toLowerCase()] || null;
     Overlays.abilityFlash(ability.name || 'ABILITY', bucket ? ABILITY_COLORS[bucket] : null);
   }
+  player._abilityNoOp = false;
   executeAbility(slot, ability);
+  if (player._abilityNoOp) {
+    player._abilityNoOp = false;
+    player.abilityActive[slot] = false;
+    player.abilityTimers[slot] = 0;
+    return;   // no core meter, no charge spent, no cooldown started
+  }
   try { triggerAbilityOverlay(player.loadoutKey, ability.name); } catch (_) {}
   if (isTrapCharges || ability.cooldown > 0) {
     player.coreMeter = Math.min(100, player.coreMeter + 2);
@@ -48717,19 +48981,29 @@ function _teleportClampLen(from, dir, maxLen) {
   const T = (typeof game !== 'undefined') ? game.sandwichTerrain : null;
   if (!T || !T.ON || typeof _stGroundYCarved !== 'function') return maxLen;
   const STEPS = 10;
-  let startBuried;
-  try { startBuried = from.y < _stGroundYCarved(from.x, from.z, T); } catch (_) { return maxLen; }
-  if (startBuried) return maxLen;
+  const _bent = (typeof _bendOn === 'function') && _bendOn();
+  const _fq = _bent ? { x: 0, y: 0, z: 0 } : null;
+  const _flat = (x, y, z) => (_bent ? _bendToFlat(x, y, z, _fq) : { x: x, y: y, z: z });
+  let startOutside;
+  try {
+    const _f0 = _flat(from.x, from.y, from.z);
+    const _gy0 = _stGroundYCarved(_f0.x, _f0.z, T);
+    const _cy0 = (typeof _stCeilYCarved === 'function') ? _stCeilYCarved(_f0.x, _f0.z, T) : Infinity;
+    startOutside = (_f0.y < _gy0) || (_cy0 > _gy0 && _f0.y > _cy0);
+  } catch (_) { return maxLen; }
+  if (startOutside) return maxLen;
   let lastOk = 0;
   for (let s = 1; s <= STEPS; s++) {
     const t = (s / STEPS) * maxLen;
     const x = from.x + dir.x * t, y = from.y + dir.y * t, z = from.z + dir.z * t;
-    let gy, cy;
+    let gy, cy, fy;
     try {
-      gy = _stGroundYCarved(x, z, T) + _TP_CLEAR;
-      cy = (typeof _stCeilYCarved === 'function') ? _stCeilYCarved(x, z, T) - _TP_CLEAR : Infinity;
+      const _fs = _flat(x, y, z);
+      fy = _fs.y;
+      gy = _stGroundYCarved(_fs.x, _fs.z, T) + _TP_CLEAR;
+      cy = (typeof _stCeilYCarved === 'function') ? _stCeilYCarved(_fs.x, _fs.z, T) - _TP_CLEAR : Infinity;
     } catch (_) { return maxLen; }
-    if (y < gy || (cy > gy && y > cy)) break;
+    if (fy < gy || (cy > gy && fy > cy)) break;   // (v42.01) fy, not y - same space as gy/cy
     lastOk = t;
   }
   return lastOk;
@@ -49376,6 +49650,31 @@ function executeAbility(slot, ability) {
             if (flatLen > dashLen) { moveDir = flat; dashLen = flatLen; }
           }
         }
+        if (dashLen < 40) {
+          try {
+            const _T2 = game.sandwichTerrain;
+            if (_T2 && _T2.ON && typeof _stGroundYCarved === 'function') {
+              const _q2 = ((typeof _bendOn === 'function') && _bendOn())
+                ? _bendToFlat(dashStart.x, dashStart.y, dashStart.z, { x: 0, y: 0, z: 0 })
+                : { x: dashStart.x, y: dashStart.y, z: dashStart.z };
+              const _g2 = _stGroundYCarved(_q2.x, _q2.z, _T2);
+              const _c2 = (typeof _stCeilYCarved === 'function') ? _stCeilYCarved(_q2.x, _q2.z, _T2) : (_g2 + 2000);
+              const _mid = (_c2 > _g2) ? (_g2 + _c2) * 0.5 : (_g2 + 600);
+              const _sgn = (_mid - _q2.y) >= 0 ? 1 : -1;
+              const _out = new THREE.Vector3(0, _sgn, 0);
+              const _outLen = _teleportClampLen(dashStart, _out, _tpReach);
+              if (_outLen > dashLen) { moveDir = _out; dashLen = _outLen; }
+            }
+          } catch (_) {}
+        }
+        if (!(dashLen > 24)) {
+          player.phaseInvuln = false;
+          player.phaseInvulnTimer = 0;
+          player.abilityActive[slot] = false;
+          player.abilityTimers[slot] = 0;
+          player._abilityNoOp = true;   // tells activateAbility not to charge for this press
+          return;
+        }
         player.position.add(moveDir.clone().multiplyScalar(dashLen));
         spawnExplosion(player.position.clone().add(moveDir.clone().multiplyScalar(-200)), 15);
         if (net && net.active && net.sendEvent) {
@@ -49440,7 +49739,7 @@ function executeAbility(slot, ability) {
           }
           if (game.monsters) {
             for (const mon of game.monsters) {
-              if (!mon.alive || !mon.position) continue;
+              if (!mon || !mon.alive || !mon.position) continue;
               const _mvx = mon.position.x - dashStart.x;
               const _mvy = mon.position.y - dashStart.y;
               const _mvz = mon.position.z - dashStart.z;
@@ -49885,6 +50184,7 @@ function activateCore() {
       player.shield = player.maxShield;
       player.shieldRegenDelay = 0;
       if (player.abilityCooldowns) for (let _i = 0; _i < player.abilityCooldowns.length; _i++) player.abilityCooldowns[_i] = 0;
+      player.trapCharges = player.maxTrapCharges;
       player.trapCooldownTimer = 0;
       if (player.maxDashes) player.dashCharges = player.maxDashes;
       player.dashCooldownTimer = 0;
@@ -64713,8 +65013,8 @@ function checkExecutions(dt) {
 
     if (bot.doomed && dist < execRadius) {
       
-      const dealt = bot.health; 
-      bot.takeDamage(bot.health + 1, 'player');
+      const dealt = bot.health;
+      bot.takeDamage(bot.health + (bot.shield || 0) + 1, 'player');
       player.damageDealt += dealt;
       player.coreMeter = Math.min(100, player.coreMeter + 20);
 
@@ -64823,12 +65123,12 @@ const MAP_DATA = {
     ],
     arena: { seed: 7, floors: 3, spikeAmt: 1.0, scale: 2 },
     rooms: [
-      { id: 'spawn_a', team: 'A',  x: -1316, y: 1280, z:  280, r: 300 },
-      { id: 'spawn_b', team: 'B',  x:  1326, y: 1260, z:  -50, r: 300 },
+      { id: 'spawn_a',  team: 'A',  x: -1316, y: 1280, z:  280, r: 300 },
+      { id: 'crown_e',  team: null, x:  1326, y: 1260, z:  -50, r: 300 },   // was spawn_b
       { id: 'mid_high', team: null, champion: true, x: -80, y: 430, z: 1726, r: 280 },
       { id: 'mid_east', team: null, x: 1225, y:  460, z: -805, r: 280 },
       { id: 'mid_low',  team: null, x: -636, y: -400, z: -450, r: 280 },
-      { id: 'pit',      team: null, x:  736, y: -1250, z: -524, r: 260 },
+      { id: 'spawn_b',  team: 'B',  x:  736, y: -1250, z: -524, r: 260 },   // was the pit
     ],
     tunnels: []
   },
@@ -68837,7 +69137,27 @@ function gameLoop(timestamp) {
           }
         } catch (_) {}
       } else {
-        updateSandwichStream(_fX, _fZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
+        let _sX = _fX, _sZ = _fZ;
+        try {
+          const _SL = game._swLead || (game._swLead = { x: _fX, z: _fZ, vx: 0, vz: 0 });
+          const _sdt = Math.max(1e-3, Math.min(0.1, dt || 0.016));
+          const _k = Math.min(1, _sdt * 3);
+          _SL.vx += (((_fX - _SL.x) / _sdt) - _SL.vx) * _k;
+          _SL.vz += (((_fZ - _SL.z) / _sdt) - _SL.vz) * _k;
+          _SL.x = _fX; _SL.z = _fZ;
+          const _leadK = (typeof window !== 'undefined' && window.__streamLead != null)
+            ? window.__streamLead
+            : ((typeof LSS !== 'undefined' && LSS.MODE === 'endless') ? 1.6 : 0);   // seconds of travel to lead by
+          if (_leadK > 0) {
+            const _sp = Math.hypot(_SL.vx, _SL.vz);
+            if (_sp > 50) {
+              const _d = Math.min(_SW_CHUNK * 2.5, _sp * _leadK);
+              _sX += (_SL.vx / _sp) * _d;
+              _sZ += (_SL.vz / _sp) * _d;
+            }
+          }
+        } catch (_) { _sX = _fX; _sZ = _fZ; }
+        updateSandwichStream(_sX, _sZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
       }
       __pmark('hub:stream');   // (v39.49) chunk streamer / warmup drain alone
       try { _swUpdateHubWater(); } catch (_) {}   
