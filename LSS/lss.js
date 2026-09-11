@@ -9,12 +9,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.43';
+const LSS_BUILD = '42.47';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '42.08';   // (v42.08) owner's BUILT-IN COCKPIT hulls (blaster/pyro/slayer/syphon/vortex v04, tracker v06, puncture v07) rebuilt through compress_glb (weld+quantize, join per material 74->21 prims, no re-simplify) + lean mobile set   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '42.47';   // (v42.47) blaster + slayer cockpit1 eye markers raised in the GLBs (+3 / +5 game units, tools/raise_cockpit_marker.py) - PC and mobile sets   // (v42.08) owner's BUILT-IN COCKPIT hulls (blaster/pyro/slayer/syphon/vortex v04, tracker v06, puncture v07) rebuilt through compress_glb (weld+quantize, join per material 74->21 prims, no re-simplify) + lean mobile set   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -647,7 +647,7 @@ const input = {
   showFps: false,
   keepWarm: true,   // (v39.63) GPU keep-warm idle load (anti-stutter on power-capped laptops)
   cockpit3d: true,
-  cockpitSolidity: 0.4,
+  cockpitSolidity: 0,
   hullGlow: true,
   cockpitVR: true,     // (v37.67) ON by default: the ghost shell IS the VR seat view now
   headlight: true,
@@ -24138,15 +24138,17 @@ function _cyberDefendCinematic(C) {
   const K = window.__cyber || (window.__cyber = {});
   const p0 = posts[0];
   const standoff = Math.hypot(p0.x - F.x, p0.z - F.z);
-  _cinematic.orbitR  = standoff + ((K.defCamR != null) ? K.defCamR : 460);
-  _cinematic.orbitY  = p0.y + ((K.defCamY != null) ? K.defCamY : 130);
-  _cinematic.orbitCX = F.x;
-  _cinematic.orbitCZ = F.z;
-  _cinematic.orbitA0 = Math.atan2(p0.z - F.z, p0.x - F.x);
-  _cinematic.orbitArc = (CN.arc != null) ? CN.arc : Math.PI * 0.5;
+  const _dfx = F.x - p0.x, _dfz = F.z - p0.z;
+  const _dfl = Math.hypot(_dfx, _dfz) || 1;
+  _cinematic.orbitR  = (K.defCamR != null) ? K.defCamR : 620;
+  _cinematic.orbitY  = p0.y + ((K.defCamY != null) ? K.defCamY : 110);
+  _cinematic.orbitCX = p0.x;
+  _cinematic.orbitCZ = p0.z;
+  _cinematic.orbitA0 = Math.atan2(-_dfz, -_dfx);            // behind the line, looking along it
+  _cinematic.orbitArc = (K.defCamArc != null) ? K.defCamArc : 0.6;
   _cinematic.fovCine = (CN.fov != null) ? CN.fov : 65;
   _cinematic.fov0 = (typeof camera !== 'undefined' && camera) ? camera.fov : 75;
-  _cinematic.camTarget.set(F.x + (p0.x - F.x) * 0.45, F.y + (p0.y - F.y) * 0.55, F.z + (p0.z - F.z) * 0.45);
+  _cinematic.camTarget.set(p0.x + (_dfx / _dfl) * _dfl * 0.34, p0.y - 30, p0.z + (_dfz / _dfl) * _dfl * 0.34);
   _cinematic.camPos.set(F.x, _cinematic.orbitY, F.z);
   _cinematic.baseY = _cinematic.orbitY;
   _cinematic.duration = (CN.dur != null) ? CN.dur : 7.0;
@@ -48061,6 +48063,18 @@ function _ghostHullKnobs() {
     tint: _ghostHullTint()
   };
 }
+const _GH_BLEND = {
+  normal: THREE.NormalBlending, additive: THREE.AdditiveBlending,
+  multiply: THREE.MultiplyBlending, subtractive: THREE.SubtractiveBlending,
+};
+function _ghostBlendMode(G) {
+  try {
+    const b = (G && typeof G.blend === 'string') ? G.blend.toLowerCase() : null;
+    if (b && _GH_BLEND[b]) return { mode: _GH_BLEND[b], additive: (b === 'additive') };
+  } catch (_) {}
+  const wantAdd = !(G && G.additive === false);
+  return { mode: wantAdd ? THREE.AdditiveBlending : THREE.NormalBlending, additive: wantAdd };
+}
 function _addGhostHull(mat, K, isGlass) {
   mat.transparent = true;
   mat.depthWrite = false;      // x-ray layering: the far wall glows through the near one
@@ -48178,13 +48192,17 @@ function _ghostHullTune(mesh, K) {
       U.uGhTint.value.set(K.tint);
       U.uGhCore.value = K.core; U.uGhRim.value = K.rim; U.uGhMix.value = K.mix; U.uGhFlick.value = K.flicker;
       if (U.uGhGlow) U.uGhGlow.value = K.glow;
-      const _ga = (window.__cockpit && window.__cockpit.ghost) ? window.__cockpit.ghost.additive : undefined;
-      const _wantAdd = (_ga !== false);
-      const _bl = _wantAdd ? THREE.AdditiveBlending : THREE.NormalBlending;
-      if (m.blending !== _bl) m.blending = _bl;
+      const _G = (window.__cockpit && window.__cockpit.ghost) || {};
+      const _bm = _ghostBlendMode(_G);
+      const _wantAdd = _bm.additive;
+      if (m.blending !== _bm.mode) m.blending = _bm.mode;
+      const _sd = (_G.side === 'front') ? THREE.FrontSide : (_G.side === 'back') ? THREE.BackSide : THREE.DoubleSide;
+      if (m.side !== _sd) m.side = _sd;
       const _dw = !!K.depthWrite && !_wantAdd;
       if (m.depthWrite !== _dw) m.depthWrite = _dw;
-      if (U.uGhMaxA) U.uGhMaxA.value = (typeof K.maxA === 'number') ? K.maxA : 0.92;
+      const _mA = (typeof _G.maxA === 'number') ? _G.maxA
+                : ((typeof K.maxA === 'number') ? K.maxA : 0.92);
+      if (U.uGhMaxA) U.uGhMaxA.value = _mA;
     }
     o.renderOrder = K.order;
   });
@@ -48321,8 +48339,9 @@ function _lssApplyShipRig(dt) {
         _eye.getWorldPosition(_cpEyeW);
         {
           const _E = window.__cockpit && window.__cockpit.eye;
-          if (_E && (_E.fwd || _E.up || _E.right)) {
-            _cpEyeOff.set(-(_E.fwd || 0), (_E.up || 0), -(_E.right || 0));   // model space: fwd -X, up +Y, right -Z
+          const _eF = (_E && _E.fwd) || 0, _eU = (_E && _E.up) || 0, _eR = (_E && _E.right) || 0;
+          if (_eF || _eU || _eR) {
+            _cpEyeOff.set(-_eF, _eU, -_eR);   // model space: fwd -X, up +Y, right -Z
             _eye.getWorldQuaternion(_cpEyeQ);
             camera.position.copy(_cpEyeW).add(_cpEyeOff.applyQuaternion(_cpEyeQ));
           } else {
@@ -62629,7 +62648,7 @@ const SHIPPED_DEFAULTS = {
   "vrPerfMode": "standard",
   "vrStripFx": true,
   "hudScale": 1,
-  "cockpitSolidity": 0.4,
+  "cockpitSolidity": 0,
   "fovDeg": 120,
   "audioMaster": 1,
   "audioSfx": 1.5,

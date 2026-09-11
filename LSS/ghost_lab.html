@@ -182,13 +182,25 @@ const SHIP_KEYS = Object.keys(SHIPS);
 // Change a default here ONLY when it has been changed in the game too.
 // ===========================================================================
 const GHOST_ROWS = [
+  // ⭐⭐ (v42.45) SOLIDITY IS THE MASTER, and this lab predated it. `input.cockpitSolidity` (Settings >
+  // Display, default 0.4) drives EVERY term below through a two-phase ramp, so tuning core/rim/mix
+  // against the wrong solidity tunes the wrong shell. The ramp is ported from _ghostHullKnobs:
+  //   PHASE A (0 .. 0.45)  alpha barely moves; the hologram language - tint mix, additive rim glow,
+  //                        flicker - falls away. The shell gets calmer, never brighter.
+  //   PHASE B (0.45 .. 1)  depthWrite comes back on so layers stop accumulating, and only then does
+  //                        alpha climb to a real 1.0 (the ceiling lifts off 0.92).
+  // Past 0.995 the game hands the hull back its OWN materials - no shell at all.
+  // ⚠ The five rows under it are the values AT SOLIDITY 0. The readout beside each shows what the
+  //   ramp is actually feeding the shader at the current solidity - that is the number in flight.
+  { k: 'solidity',  lo: 0, hi: 1.00, st: 0.01,  d: 0.40, t: 'THE MASTER. input.cockpitSolidity. 0 = full x-ray hologram, 0.995+ = the real materials with no shell.' },
   { k: 'core',      lo: 0, hi: 0.60, st: 0.005, d: 0.13, t: 'flat panels - how solid the hull skin reads. The eye sits at the hull centre, so a look out crosses four to eight layers of this and it compounds fast.' },
-  { k: 'rim',       lo: 0, hi: 1.50, st: 0.01,  d: 0.32, t: 'edges - alpha on the fresnel term. This is what draws the airframe: creases and silhouette solid, panels see-through.' },
+  { k: 'rim',       lo: 0, hi: 1.50, st: 0.01,  d: 0.24, t: 'edges - alpha on the fresnel term. This is what draws the airframe: creases and silhouette solid, panels see-through.' },
   { k: 'mix',       lo: 0, hi: 1.00, st: 0.01,  d: 0.30, t: 'how far the lit hull colour is pulled toward the tint, before any of the above.' },
-  { k: 'glow',      lo: 0, hi: 3.00, st: 0.01,  d: 0.30, t: 'how hard the rim ADDS light. Against a night city this term, not alpha, is what makes the shell dominate the view. Cut from 0.85 to 0.30 in v38.36 - with core raised and rim lowered to match - so the shell reads uniformly dull instead of blazing at every grazing edge.' },
-  { k: 'flicker',   lo: 0, hi: 1.00, st: 0.01,  d: 0.25, t: 'hologram jitter + scanline drift. 1 = the leviathans’ full jitter, 0 = perfectly steady.' },
+  { k: 'glow',      lo: 0, hi: 3.00, st: 0.01,  d: 0.14, t: 'how hard the rim ADDS light. Against a night city this term, not alpha, is what makes the shell dominate the view. Cut from 0.85 to 0.30 in v38.36 - with core raised and rim lowered to match - so the shell reads uniformly dull instead of blazing at every grazing edge.' },
+  { k: 'flicker',   lo: 0, hi: 1.00, st: 0.01,  d: 0.00, t: 'hologram jitter + scanline drift. 1 = the leviathans’ full jitter, 0 = perfectly steady.' },
   { k: 'glassCore', lo: 0, hi: 0.60, st: 0.005, d: 0.10, t: 'canopy zone: panels. INERT on today’s hulls - see the note under this section.' },
   { k: 'glassRim',  lo: 0, hi: 1.50, st: 0.01,  d: 0.30, t: 'canopy zone: edges. Same - inert until a hull ships a separate glass material again.' },
+  { k: 'maxA',      lo: 0, hi: 1.00, st: 0.01,  d: 0.92, t: 'THE ALPHA CEILING the fragment shader clamps to. 0.92 is the x-ray cap; phase B of the solidity ramp lifts it toward 1.0. Pull it DOWN to thin the shell without touching core/rim.' },
   { k: 'order',     lo: 0, hi: 8000, st: 100,   d: 4000, t: 'renderOrder. The hub water plane follows the ship and the city glass sorts by its own centre, so both tie with the hull on depth ; a high order settles the toss. No visible effect in this lab - nothing here ties with it.' },
 ];
 const EYE_ROWS = [
@@ -266,6 +278,8 @@ function resetAll() {
   for (const r of SCENE_ROWS) S.scene[r.k] = r.d;
   S.tintPin = null;
   S.ghost.on = true;
+  S.ghost.blend = 'additive';   // (v42.13) the game's default
+  S.ghost.side = 'double';
 }
 resetAll();
 
@@ -353,6 +367,13 @@ composer.addPass(new OutputPass());
 // here: a number tuned against a different shader does not transfer.
 // ===========================================================================
 const ghostTimeU = { value: 0 };
+// (v42.45) the shell's render state. `additive` has been the game's default since v42.13 - normal
+// alpha blending is ORDER-DEPENDENT and a thick gun pod stacks 6-8 double-sided surfaces whose draw
+// order flips as the camera moves, which is the shimmer. Additive is commutative, so the shimmer is
+// impossible rather than merely reduced - at the cost that the shell can only ADD light.
+const LAB_BLEND = { additive: THREE.AdditiveBlending, normal: THREE.NormalBlending,
+                    multiply: THREE.MultiplyBlending, subtractive: THREE.SubtractiveBlending };
+const LAB_SIDE  = { double: THREE.DoubleSide, front: THREE.FrontSide, back: THREE.BackSide };
 function addGhostHull(mat, K, isGlass) {
   mat.transparent = true;
   mat.depthWrite = false;      // x-ray layering: the far wall glows through the near one
@@ -360,7 +381,10 @@ function addGhostHull(mat, K, isGlass) {
   const U = {
     uGhTint: { value: new THREE.Color(K.tint) }, uGhTime: ghostTimeU,
     uGhCore: { value: isGlass ? K.glassCore : K.core }, uGhRim: { value: isGlass ? K.glassRim : K.rim },
-    uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }, uGhGlow: { value: K.glow }
+    uGhMix: { value: K.mix }, uGhFlick: { value: K.flicker }, uGhGlow: { value: K.glow },
+    // (v42.45) was a hard-coded 0.92 in this lab - the game has driven it from the solidity ramp
+    // since v42.12, so the lab was capping alpha where the game no longer does.
+    uGhMaxA: { value: (typeof K.maxA === 'number') ? K.maxA : 0.92 }
   };
   mat.userData._ghostU = U;
   mat.onBeforeCompile = (shader) => {
@@ -370,7 +394,7 @@ function addGhostHull(mat, K, isGlass) {
       '#include <project_vertex>',
       '#include <project_vertex>\n  vGhN = normalize(normalMatrix * normal);\n  vGhV = normalize(-mvPosition.xyz);'
     );
-    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nuniform float uGhGlow;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
+    shader.fragmentShader = 'uniform vec3 uGhTint;\nuniform float uGhTime;\nuniform float uGhCore;\nuniform float uGhRim;\nuniform float uGhMix;\nuniform float uGhFlick;\nuniform float uGhGlow;\nuniform float uGhMaxA;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <opaque_fragment>',
       '#include <opaque_fragment>\n' +
@@ -380,19 +404,39 @@ function addGhostHull(mat, K, isGlass) {
       '    float ghScan = 1.0 - uGhFlick * 0.05 * (1.0 - sin(gl_FragCoord.y * 0.28 - uGhTime * 14.0));\n' +
       '    gl_FragColor.rgb = mix(gl_FragColor.rgb, uGhTint * 0.55, uGhMix);\n' +
       '    gl_FragColor.rgb += uGhTint * ghFres * uGhGlow * (1.0 + 0.22 * uGhFlick * sin(uGhTime * 38.0));\n' +
-      '    gl_FragColor.a = clamp((uGhCore + uGhRim * ghFres) * ghFlick * ghScan, 0.0, 0.92); }'
+      '    gl_FragColor.a = clamp((uGhCore + uGhRim * ghFres) * ghFlick * ghScan, 0.0, uGhMaxA); }'
     );
   };
   mat.customProgramCacheKey = () => 'ghostHull';
   mat.needsUpdate = true;
   return mat;
 }
+// (v42.45) _ghostHullKnobs' two-phase solidity ramp, ported. The rows hold the values AT SOLIDITY 0;
+// this is what the shader actually receives.
 function ghostKnobs() {
+  const s = Math.max(0, Math.min(1, S.ghost.solidity));
+  const XRAY_END = 0.45, SOLID_AT = 0.995;
+  const pA = Math.min(1, s / XRAY_END);
+  const pB = (s <= XRAY_END) ? 0 : (s - XRAY_END) / (1 - XRAY_END);
+  const L = (a, b, t) => a + (b - a) * t;
+  const to = (from, target) => L(from, target, pA);
+  const additive = (S.ghost.blend === 'additive');
   return {
-    on: S.ghost.on !== false,
-    core: S.ghost.core, rim: S.ghost.rim, mix: S.ghost.mix,
-    flicker: S.ghost.flicker, glow: S.ghost.glow, order: S.ghost.order,
-    glassCore: S.ghost.glassCore, glassRim: S.ghost.glassRim,
+    on: S.ghost.on !== false && s < SOLID_AT,
+    core: L(to(S.ghost.core, 0.22), 1.0, pB),
+    rim:  L(to(S.ghost.rim, 0.10), 0.0, pB),
+    mix:  to(S.ghost.mix, 0.0),
+    flicker: to(S.ghost.flicker, 0.0),
+    glow: to(S.ghost.glow, 0.0),
+    order: S.ghost.order,
+    glassCore: to(S.ghost.glassCore, 0.35),
+    glassRim:  to(S.ghost.glassRim, 0.10),
+    // ⚠ ADDITIVE IS EXEMPT FROM THE DEPTH WRITE - it is order-independent precisely because every
+    // layer accumulates, so writing depth would cull the layers it needs.
+    depthWrite: (pB > 0.02) && !additive,
+    maxA: Math.min(S.ghost.maxA, L(S.ghost.maxA, 1.0, pB)),
+    blend: S.ghost.blend, side: S.ghost.side,
+    solidity: s,
     tint: tintHex(),
   };
 }
@@ -439,6 +483,13 @@ function ghostTune(mesh, K) {
       U.uGhTint.value.set(K.tint);
       U.uGhCore.value = K.core; U.uGhRim.value = K.rim; U.uGhMix.value = K.mix; U.uGhFlick.value = K.flicker;
       if (U.uGhGlow) U.uGhGlow.value = K.glow;
+      if (U.uGhMaxA) U.uGhMaxA.value = K.maxA;
+      // (v42.45) render state - free to flip live, no recompile, exactly as in _ghostHullTune.
+      const _bl = LAB_BLEND[K.blend] || THREE.AdditiveBlending;
+      if (m.blending !== _bl) m.blending = _bl;
+      const _sd = LAB_SIDE[K.side] || THREE.DoubleSide;
+      if (m.side !== _sd) m.side = _sd;
+      if (m.depthWrite !== K.depthWrite) m.depthWrite = K.depthWrite;
     }
     o.renderOrder = K.order;
   });
@@ -802,7 +853,32 @@ note('The hull decides the seat: a frigate’s canopy is inches from your face, 
 // --- shell ---
 h2('Ghost shell');
 note('Every knob here lands on the NEXT FRAME - the game re-reads them and re-tunes the cached materials every frame, so nothing is ever rebuilt. These are <b>window.__cockpit.ghost</b>.');
+// (v42.45) the render-state pickers the sliders cannot express. Both are live - blending and side
+// are render state, not shader defines, so nothing recompiles and nothing rebuilds.
+function mkPick(store, key, label, opts, desc) {
+  const wrap = document.createElement('div'); wrap.className = 'row';
+  const head = document.createElement('div'); head.className = 'head';
+  const lab = document.createElement('label'); lab.textContent = label;
+  const val = document.createElement('div'); val.className = 'val';
+  head.appendChild(lab); head.appendChild(val);
+  const d = document.createElement('div'); d.className = 'desc'; d.textContent = desc;
+  const sel = document.createElement('select');
+  opts.forEach(o => { const e = document.createElement('option'); e.value = o; e.textContent = o; sel.appendChild(e); });
+  sel.value = store[key];
+  val.textContent = store[key];
+  sel.addEventListener('change', () => { store[key] = sel.value; val.textContent = sel.value; refreshOut(); });
+  wrap.appendChild(head); wrap.appendChild(sel); wrap.appendChild(d);
+  panel.appendChild(wrap);
+  ctrls.push(() => { sel.value = store[key]; val.textContent = store[key]; });
+}
+
 for (const r of GHOST_ROWS) mkRow(S.ghost, r);
+mkPick(S.ghost, 'blend', 'blending',
+  ['additive', 'normal', 'multiply', 'subtractive'],
+  'ADDITIVE is the game default since v42.13 and the reason the gun pods stopped shimmering: normal alpha is order-dependent and a thick pod stacks 6-8 double-sided layers whose draw order flips as you turn. Additive is commutative so the shimmer cannot happen - at the cost that the shell can only ADD light, never darken. Multiply can only darken, which erases the shell against a night city.');
+mkPick(S.ghost, 'side', 'side',
+  ['double', 'front', 'back'],
+  'DoubleSide is what makes it x-ray - the far wall glows through the near one. FrontSide halves the layer count, which is the cheapest way to see whether the stacking inside a thick pod is what is bothering you.');
 note('<b>glassCore / glassRim</b> are inert today: all seven hulls ship a single opaque <b>hull</b> material, and the shell skips anything already transparent. They come alive the day a hull carries a separate canopy_glass again.');
 
 // --- canopy glass ---
@@ -888,7 +964,8 @@ function mkBtn(txt, fn, cls) {
   actions.appendChild(b); return b;
 }
 function buildCfg() {
-  const g = { on: S.ghost.on !== false, tint: S.tintPin ? S.tintPin : null };
+  const g = { on: S.ghost.on !== false, tint: S.tintPin ? S.tintPin : null,
+              blend: S.ghost.blend, side: S.ghost.side };
   for (const r of GHOST_ROWS) g[r.k] = +Number(S.ghost[r.k]).toFixed(4);
   const gl = {}; for (const r of GLASS_ROWS) gl[r.k] = +Number(S.glass[r.k]).toFixed(4);
   const e = {}; for (const r of EYE_ROWS) e[r.k] = +Number(S.eye[r.k]).toFixed(2);
