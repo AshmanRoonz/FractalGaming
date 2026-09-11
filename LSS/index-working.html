@@ -85,8 +85,10 @@ html.lss-touch canvas { position: fixed; top: 0; left: 0; z-index: 0; }
    just renders fully opaque, which is a safe failure rather than a wrong one. */
 /* (v42.57) #minimap is deliberately NOT in this list - the radar stays fully opaque, see the
    _hlRadar call in _hlDrawHUD. */
-#crosshair, #health-canvas, #ability-pie, #abilities, #core-fill,
+#health-canvas, #ability-pie, #abilities, #core-fill,
 #champ-capture-track, #champ-capture-fill, #doomed-vignette { opacity: var(--lss-hud-gfx, 1); }
+/* (v42.59) the crosshair has its own slider - see _hlCA() */
+#crosshair { opacity: var(--lss-hud-cross, 1); }
 #ship-name, #ship-class, #core-label, #core-value, #weapon-name, #ammo-display,
 #reload-indicator, #round-timer, #round-state, #score-display, #kill-feed, #speed-display,
 #gamepad-indicator, #doomed-warning, #champ-capture-label, #map-gen-hud { opacity: var(--lss-hud-txt, 1); }
@@ -649,6 +651,12 @@ body.lss-ghost #hit-marker-kill { display: none !important; }
 body:has(#ship-select.active) #minimap,
 body:has(#ship-select.active) #crosshair,
 body:has(#ship-select.active) #clip-save-btn,
+/* (v42.72) #ov-warp joins the list for exactly the reason the note above gives. A rift traverse
+   leaves the warp tunnel running and _rrCountdown raises the picker without going through
+   enterShipSelect, so the streaks drew over the hangar ("in exhibition, i went through a portal,
+   and in the ship selection screen, i could see the portal effects overtop"). The JS clears are
+   the real fix; this is the backstop that survives a future picker-raise path nobody updated. */
+body:has(#ship-select.active) #ov-warp,
 body:has(#ship-select.active) #lss-version-badge { display: none !important; }
 /* (v35.16) The header floats OVER the full-bleed stage: soft top fade, no
    hard bar. z 3 keeps its buttons above the stage + panels. */
@@ -4727,7 +4735,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.58';
+const LSS_BUILD = '42.79';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -5790,6 +5798,9 @@ const input = {
   // existing player's HUD on upgrade.
   hudOpacity: 0.72,
   hudTextOpacity: 1,
+  // (v42.59) The crosshair comes off the HUD slider onto its own. 0.72 is the value it drew at
+  // before, so the default is a no-op - it only changes once the player moves it.
+  crosshairOpacity: 0.72,
   // Additional VR-only load shedding. Standard preserves the normal render;
   // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
   vrPerfMode: 'standard',
@@ -8769,7 +8780,11 @@ const FreeFlightMode = {
       try { if (game._cavern && game._cavern.ring) game._cavern.ring.destroy(); } catch (_) {}
       game._cavern = null; game._cavernSalt = 0; game._cavernBiome = null;
       _HZ_CAVERN._returnPos = null; _HZ_CAVERN.coolBySector = {};
-      if (_HZ_CAVERN._pre) { _HZ_CAVERN._pre = false; if (window.Overlays && Overlays.warp) Overlays.warp(false); }
+      // (v42.70) unconditional - `_pre` only means "flew near a ring", so gating on it left the
+      // tunnel up for anyone who flew THROUGH one. The campaign hand-off deliberately keeps the
+      // tunnel running across the mode change, so that one case still opts out.
+      _HZ_CAVERN._pre = false;
+      if (!this._enteringCampaign) _ovWarpClear();
     } catch (_) {}
     // (v34.94) Hub-only ship-upgrade stats must not leak into other modes:
     // restore the never-chassis-reset fields to their base values.
@@ -11623,6 +11638,21 @@ function _applyStagedRoundShip() {
 }
 
 function enterShipSelect() {
+  // (v42.71) THE PORTAL WARP TUNNEL IS ONE OF THOSE OVERLAYS. Owner: "in exhibition, i went through
+  // a portal, and in the ship selection screen, i could see the portal effects overtop".
+  // A transit raises #ov-warp (show + tunnel, set straight on the element by all four transit
+  // sites) and the ONLY thing that lowers it again is _hzCavernFrame's `!cv._arrived` branch -
+  // which returns immediately unless `game.state === 'playing'`. So across the whole
+  // roundEnd -> world-swap -> warmup window the tunnel is up with nothing watching it, and the
+  // note below is exactly why that is fatal here: gameLoop's 'select' early return switches off
+  // the very poll that would have tidied it.
+  // MEASURED entering a cavern: t+0 roundEnd "show tunnel", t+1.5s warmup "show tunnel",
+  // t+6s warmup "show tunnel", with _HZ_CAVERN._pre = false throughout - which is also why the
+  // freeflight teardown's clear (gated on that flag) never fired: `_pre` only tracks flying NEAR
+  // a ring, never through one.
+  // This is the entry EVERY route to the picker goes through - startFreeFlight and the hosted
+  // path both end in enterShipSelect() - which the post-match `game.state = 'select'` site is not.
+  try { if (typeof _ovWarpClear === 'function') _ovWarpClear(); } catch (_) {}
   // (v40.49) The picker is going up, so the round-end SAVE CLIP prompt has to come down. Same
   // reasoning as the _shipSelectSetLaunching(false) a few lines below: raising the picker is a
   // TRANSITION, and every combat overlay the picker does not own must be told about it, because
@@ -26734,8 +26764,66 @@ function _hzDuskLights() {
 // the rift's roundEnd->warmup rebuild machinery; MODE stays 'freeflight'
 // throughout so Aegis XP + the freeflight respawn loop keep working inside.
 const _HZ_CAVERN = { portals: null, DIST: 21500, ALT: 1400, COOLDOWN: 120, coolBySector: {}, _pre: false, _returnPos: null };
+// (v42.70) THE WARP TUNNEL HAS TWO SWITCHES AND ONLY ONE OF THEM IS Overlays.warp.
+// Owner: "in exhibition, i went through a portal, and in the ship selection screen, i could see
+// the portal effects overtop".
+// `#ov-warp` is driven by TWO classes. `Overlays.warp(true/false)` owns `show`, but all four
+// transit sites (the campaign gate, the hub rift, _hzEnterCavern and _hzReturnToHub) also reach
+// past the helper and set `tunnel` straight on the element to restart the zoom animation:
+//     _w.classList.add('show'); _w.classList.remove('tunnel'); void _w.offsetWidth; _w.classList.add('tunnel');
+// so anything that clears the overlay has to clear BOTH, and every clear has to actually run.
+//
+// It did not. MEASURED by entering a cavern and sampling each frame:
+//     t+0      state=roundEnd  warp="show tunnel"   _pre=false
+//     t+1.5s   state=warmup    warp="show tunnel"   _pre=false
+//     t+6s     state=warmup    warp="show tunnel"   _pre=false
+// The only thing that takes it down after a transit is _hzCavernFrame's `!cv._arrived` branch, and
+// that function returns immediately unless `game.state === 'playing'` - so across the whole
+// roundEnd -> world-swap -> warmup window (six seconds and more) the tunnel is up and nothing is
+// watching it. Leave the mode in that window and it follows you to the picker, because the
+// freeflight teardown's clear is gated on `_HZ_CAVERN._pre`, which the transit never sets (measured
+// false above) - the flag only tracks flying NEAR a ring, not through one.
+function _ovWarpClear() {
+  try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}
+  try {
+    const _w = document.getElementById('ov-warp');
+    if (_w) { _w.classList.remove('show'); _w.classList.remove('tunnel'); }
+  } catch (_) {}
+}
 function _hzPortalsDispose() {
-  if (_HZ_CAVERN.portals) { for (const p of _HZ_CAVERN.portals) { try { p.ring.destroy(); } catch (_) {} } }
+  // (v42.73) THE RINGS OWN THEIR GUARDS. This used to destroy `p.ring` and then null the array,
+  // which dropped the only reference to `p._guardsUp` - the up-to-four rift-guard Bots that
+  // _hzGuardsFrame pushed into the SHARED `game.entities`. The bots went on living: still updated,
+  // still hostile, still shooting, and only cleaned up later by accident, either by
+  // FreeFlightMode._resetHub's `hoardModelKey` sweep or by returnToRootMenu. Every caller of this
+  // function is a moment the guards should be gone too - entering a cavern, the room going
+  // networked, Cyberpunk arming, mode teardown - so dispose them here.
+  // Same shape as the hoard sweep in _resetHub: destroy(), then splice out of game.entities.
+  if (_HZ_CAVERN.portals) {
+    for (const p of _HZ_CAVERN.portals) {
+      try { p.ring.destroy(); } catch (_) {}
+      const g = p && p._guardsUp;
+      if (g && g.length) {
+        for (const b of g) {
+          if (!b) continue;
+          // A DISPOSE is not a DEATH, so the death path's tracker-lock cleanup never ran for these.
+          // A stale lock on a destroyed bot keeps the player's reticle chasing a ghost id.
+          try {
+            if (typeof player !== 'undefined' && player) {
+              if (player.trackerLocks) delete player.trackerLocks[b.id];
+              if (player.trackerLockedTarget === b) player.trackerLockedTarget = null;
+            }
+          } catch (_) {}
+          try { b.destroy(); } catch (_) {}
+          try {
+            const ix = game.entities ? game.entities.indexOf(b) : -1;
+            if (ix >= 0) game.entities.splice(ix, 1);
+          } catch (_) {}
+        }
+      }
+      if (p) { p._guardsUp = null; p._guardsPending = false; }
+    }
+  }
   _HZ_CAVERN.portals = null;
 }
 // Enemy doctrine genome: everything derives from the visit salt, so every
@@ -27788,7 +27876,7 @@ function _swRippleInit() {
 // One helper, one set of defaults, read from the same window.__water keys the live-tune block writes.
 function _swDispWorld(h) {
   const W = window.__water || {};
-  const D = (W.disp != null) ? +W.disp : 180, G = (W.gain != null) ? +W.gain : 100;
+  const D = (W.disp != null) ? +W.disp : 100, G = (W.gain != null) ? +W.gain : 100;   // (v42.68) tracks uDispScale
   const Q = (W.crestQ != null) ? +W.crestQ : 11;
   const sq = h * (1 + Q * Math.abs(h));
   const x = sq * G / Math.max(D, 0.01);
@@ -29529,6 +29617,83 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
 // first value for a given mesh is kept, which is the hull's size to within a few percent and is all
 // this needs.
 const _swWingR = new THREE.Vector3();   // (v41.58) scratch for the wing-contact test
+// -------------------------------------------------------------------------------------------
+// (v42.63) THE HULL'S REAL BOX - AND ONLY THE HULL'S.
+//
+// Owner: "i also don't think the physics of how the boat sits in the water is correct... and
+// because the way it sits in the water isn't right, the way it moves through the water isn't
+// either", then "like just my wing tip touches the water, it should spray".
+//
+// Both halves of that are one root cause. The whole water system runs on ONE scalar,
+// `above = player.position.y - WL`, and treats it as the keel's height over the surface. It is
+// not. Two independent offsets sit between that number and the hull:
+//
+//   (a) THE ORIGIN IS AT THE HULL'S CENTRE. The model loader ends with `proto.position.sub(center)`
+//       (the ship-model fit, ~L45067), which re-centres the glTF on its bounding-box middle. So
+//       player.position.y is the height of the ship's WAIST, and the keel is half the hull's height
+//       BELOW it. MEASURED on Vortex: hull 178.2 wide x 38.9 tall x 157.7 long, keel 19.4 under the
+//       origin. `above = 0` - the value the code calls "crossing the surface" - is the ship
+//       submerged TO ITS MID-PLANE, water over the wings.
+//
+//   (b) fp.DRAFT/BEAM/LEN ARE NOT THE SHIP. _swShipFootprint derives them from chassis.hull*, which
+//       are gameplay numbers, while the VISIBLE hull is fitted to hullLength and then multiplied
+//       again by VISUAL_SCALE_BOOST 1.55 and the per-ship scaleMult. MEASURED on Vortex: fp.BEAM 72
+//       against a real 178.2 (2.5x narrow), fp.half 45 against 78.9 (1.75x short).
+//
+// Compounded, at the pose where the keel just kisses the water (`above` = +19.4) the old gates
+// returned `_wet01` = 0: no planing sheet, no rooster tail, no hiss. `_wet01` only reached 1 at
+// `above` = -13.5, which is the hull COMPLETELY under the surface with 6 units to spare. So to get
+// the spray of a boat on the water you had to sink the ship - which is exactly "the way it sits in
+// the water isn't right, so the way it moves through it isn't either".
+//
+// (!) player.mesh IS NOT THE SHIP EITHER. It also carries the SHIELD BUBBLE - a 396-unit sphere on
+// Blaster against a 158-unit hull - plus the engine orbs and the running lights. `_swHullSpan`
+// above walks all of it with Box3.setFromObject, so it has been handing every caller a force-field
+// radius (measured 117 against a true 89 half-span), v41.58's wing test included. The hull is the
+// one child the loader tagged with `bboxSize`; take that subtree and nothing else.
+//
+// Measured in player.mesh's OWN frame, so bank and pitch cannot inflate it - which is the flaw the
+// v41.57 note admits to in _swHullSpan - and cached per mesh, because this walks ~21 geometries.
+const _swHMInv = new THREE.Matrix4(), _swHMMat = new THREE.Matrix4();
+const _swHMBox = new THREE.Box3(), _swHMBB = new THREE.Box3();
+const _swHMV1 = new THREE.Vector3(), _swHMV2 = new THREE.Vector3();
+const _swHM = { key: null, v: null };
+function _swHullMetrics() {
+  try {
+    const M = (typeof player !== 'undefined' && player) ? player.mesh : null;
+    if (!M) return null;
+    if (_swHM.key === M && _swHM.v) return _swHM.v;
+    let hull = null;
+    for (let i = 0; i < M.children.length; i++) {
+      const c = M.children[i];
+      if (c && c.userData && c.userData.bboxSize) { hull = c; break; }
+    }
+    if (!hull) return null;
+    M.updateWorldMatrix(true, true);
+    _swHMInv.copy(M.matrixWorld).invert();
+    _swHMBox.makeEmpty();
+    hull.traverse(function (o) {
+      if (!o || !o.isMesh || !o.geometry) return;
+      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+      _swHMBB.copy(o.geometry.boundingBox);
+      _swHMMat.multiplyMatrices(_swHMInv, o.matrixWorld);
+      _swHMBB.applyMatrix4(_swHMMat);
+      _swHMBox.union(_swHMBB);
+    });
+    if (_swHMBox.isEmpty()) return null;
+    const sc = M.getWorldScale(_swHMV1);
+    const sz = _swHMBox.getSize(_swHMV2);
+    const v = {
+      halfW: Math.abs(sz.x * sc.x) * 0.5,               // across - the axis the wing test rides
+      halfH: Math.abs(sz.y * sc.y) * 0.5,
+      halfL: Math.abs(sz.z * sc.z) * 0.5,
+      keel: Math.abs(_swHMBox.min.y * sc.y),            // how far the keel sits BELOW player.position.y
+    };
+    if (!isFinite(v.halfH) || v.halfH <= 0 || !isFinite(v.halfW) || v.halfW <= 0) return null;
+    _swHM.key = M; _swHM.v = v;
+    return v;
+  } catch (_) { return null; }
+}
 function _swHullSpan() {
   try {
     const m = (typeof player !== 'undefined' && player) ? player.mesh : null;
@@ -29718,7 +29883,14 @@ function _swRippleTick(dt) {
     
     // (v41.14) the display transform, exposed so the crest height is one live number.
     // `disp` is the saturation ceiling (world units), `gain` is the slope and the one that matters.
-    if (W3.disp === undefined) W3.disp = 180;      // soft-clip ceiling, world units
+    // (v42.68) 180 -> 100. THIS is the authoritative default, not the uDispScale initializer:
+    // the tick writes du.uDispScale.value = W2.disp every frame, so whatever this line seeds wins.
+    // Owner picked 100 off a live ladder. At 180 a wake crest stood 175 units above the waterline
+    // while the chase camera rides ~65 above it, so the camera sat INSIDE the crest - and the sheet
+    // is transparent with depthWrite off, so that reads as a hard-edged wall of water across the view
+    // with the lake bed showing through, never as being underwater (_swSubmerged only tests the
+    // camera against the FLAT waterline). Same cause when a shot lands in the water.
+    if (W3.disp === undefined) W3.disp = 100;      // soft-clip ceiling, world units
     if (W3.gain === undefined) W3.gain = 100;      // slope as h -> 0 : this is CALM water
     if (W3.crestQ === undefined) W3.crestQ = 11;   // crest-only expander : this is CREST HEIGHT
     if (W3.foamSlope === undefined) W3.foamSlope = 0.50;    // (v41.18) slope at which a crest whitecaps
@@ -29744,19 +29916,62 @@ function _swRippleTick(dt) {
     if (W3.breakEvery === undefined) W3.breakEvery = 4;
     if (W3.jetLean === undefined) W3.jetLean = 1.0;          
     if (W3.crestDebug === undefined) W3.crestDebug = 0;      
-    const fp = _swShipFootprint();
-    const mass = fp.heft * W3.mass;                  
+    // (v42.63) the hydrodynamic footprint, then the REAL hull it is supposed to stand for.
+    // `window.__water.hullRef = 0` restores the pre-42.63 gates exactly, for an A/B against the
+    // tuned feel.
+    const _fp0 = _swShipFootprint();
+    const _hm = (W3.hullRef !== 0) ? _swHullMetrics() : null;
+    // Seed PLACEMENT and RADII move to the real hull; `beamF` blends (0 = old, 1 = measured).
+    // DRAFT deliberately stays the footprint's: it is an AMPLITUDE term (`fp.DRAFT / 13.5`) that
+    // every wake level in this file was tuned against, and this change is about WHERE and WHEN the
+    // water is disturbed, not how hard. Immersion gets its own `DR` below.
+    const _bF = (W3.beamF != null) ? +W3.beamF : 1;
+    const fp = _hm ? {
+      LEN: _fp0.LEN + (_hm.halfL * 2 - _fp0.LEN) * _bF,
+      BEAM: _fp0.BEAM + (_hm.halfW * 2 - _fp0.BEAM) * _bF,
+      DRAFT: _fp0.DRAFT,
+      half: _fp0.half + (_hm.halfL - _fp0.half) * _bF,
+      heft: _fp0.heft,
+    } : _fp0;
+    // KEEL-REFERENCED ALTITUDE. 0 = the keel exactly kissing the surface, which is the pose a boat
+    // sitting on water is actually in. Everything below gates on this instead of on `above`.
+    const _keelH = _hm ? _hm.keel : 0;
+    const keelA = above - _keelH;
+    const prevKeelA = (R.prevKeel === undefined) ? keelA : R.prevKeel;
+    // WORKING DRAFT: how deep the keel has to go for the hull to be fully wetted out. A planing
+    // hull rides on a fraction of its depth, so this is a fraction of the real half-height rather
+    // than the whole of it - `draftF` is the ramp's LENGTH, not a gate.
+    const DR = _hm ? Math.max(6, _hm.halfH * 2 * ((W3.draftF != null) ? +W3.draftF : 0.45)) : _fp0.DRAFT;
+    // (v42.66) WIDENING THE SEEDS MUST NOT ALSO RAISE THE WATER.
+    // The radii above now span the real hull (Vortex BEAM 72 -> 178.2, x2.47), but every amplitude
+    // in this block was tuned against the narrow ones, so each seed began injecting ~2.5x the volume
+    // it used to. MEASURED on one flight, only beamF changed: 0 -> hMax 0.303 / 76 units of water
+    // standing; 1 -> hMax 0.738 / 142 units. The hull is 38.9 units TALL, so the water was riding at
+    // three and a half times the height of the ship and cutting straight through it - and h = 0.74
+    // is deep inside the crest expander (1 + 11|h| = 9.1x), where small height differences become
+    // large slope differences and drive the per-vertex slope limiter into a hard min(), which is what
+    // shears the surface into flat angular shards.
+    // Going back to the wrong size is not the answer - the seeds SHOULD span the hull. Hold the
+    // displaced VOLUME instead: a wider hull spreads the same displacement over more water, so the
+    // crest comes out broader rather than taller. `beamComp` is the exponent (1 = full compensation,
+    // 0 = the v42.63-65 behaviour with no compensation).
+    const _bc = (W3.beamComp != null) ? +W3.beamComp : 1;
+    const _ampK = (_hm && fp.BEAM > 1e-3)
+      ? Math.pow(Math.max(0.05, Math.min(1, _fp0.BEAM / fp.BEAM)), _bc) : 1;
+    const mass = fp.heft * W3.mass * _ampK;                  
     const _spInv = sp > 1e-3 ? 1 / sp : 0;
     const hx = player.velocity ? player.velocity.x * _spInv : 0, hz = player.velocity ? player.velocity.z * _spInv : 0;   
-    const touching = above < fp.DRAFT * 1.5 && above > -fp.DRAFT * 5;   
+    // (v42.63) contact is the KEEL's business. The upper slack lets a hull riding just clear of
+    // the surface still count - the water under it is displaced and has waves standing in it.
+    const touching = keelA < DR * 0.5 && keelA > -DR * 5;   
     
     
     
     const spacing = Math.max(22, fp.LEN * 0.35);
-    if (above > -fp.DRAFT * 4 && above < 200 && sp > 8) {
+    if (keelA > -DR * 4 && keelA < 200 && sp > 8) {
       const lwx = R.wakeX, moved = (lwx === undefined) ? 1e9 : ((px - lwx) * (px - lwx) + (pz - R.wakeZ) * (pz - R.wakeZ));
       if (moved > spacing * spacing && (touching || sp > 35)) {
-        const prox = 1.0 - Math.min(1, Math.abs(above) / 200);
+        const prox = 1.0 - Math.min(1, Math.abs(keelA) / 200);
         const amp = 0.16 * (fp.DRAFT / 13.5) * fp.heft * mass * (touching ? 1.0 : 0.35) * _swSpdCurve(sp, 420, (W3.spdTail != null) ? +W3.spdTail : 0.30) * (0.45 + 0.55 * prox) * W3.wake;
         const lpx = -hz, lpz = hx;                   
         // ⚠⚠ (v41.04) THE 19.47° KELVIN V IS THE WRONG SHAPE AT THESE SPEEDS.
@@ -29799,44 +30014,9 @@ function _swRippleTick(dt) {
         const sx = px - hx * shoulder, sz = pz - hz * shoulder;
         _swRippleSeed(sx + lpx * off, sz + lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
         _swRippleSeed(sx - lpx * off, sz - lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
-        // ⚠⚠ (v41.58) THE WINGS ARE PART OF THE SHIP. Owner: "i noticed the spray/wake only happens
-        // off the middle of the ship, but if a wing hits the water, it doesn't affect the water".
-        // Every seed above is placed off fp.BEAM and fp.half, and _swShipFootprint builds those from
-        // chassis.hullLength/Width/Height - a hydrodynamic abstraction for the BODY. Measured on the
-        // live hull: fp.half is 45 world units while the ship's bounding box is 317 ACROSS. So the
-        // entire wake was being laid down by a 45-unit stub at the centre of a 317-unit aircraft, and a
-        // wing tip 159 units out could be under water and touch nothing. (The same mismatch is why the
-        // v41.54 hull exclusion above protected almost none of the hull.)
-        // A wing tip that is below the surface displaces water exactly like the hull does, and when the
-        // ship banks it is the ONLY part that is - which is the case the owner is describing. So the
-        // tips get their own contact test, at the real half-span, with their real height: the right
-        // vector comes off the ship's own quaternion, so roll carries into it for free.
-        // ⚠ Two more seeds a step, and R.pending only carries 8. They are gated on a tip actually
-        // being wet, so on level flight above the water this costs nothing and displaces nothing.
-        try {
-          const _wSpan = _swHullSpan();
-          if (_wSpan > fp.BEAM * 0.6) {
-            const _wm = player.mesh;
-            let _rx = lpx, _ry = 0, _rz = lpz;
-            if (_wm) { _swWingR.set(1, 0, 0).applyQuaternion(_wm.quaternion); _rx = _swWingR.x; _ry = _swWingR.y; _rz = _swWingR.z; }
-            const _wr = _wSpan * 0.88;                       // just inboard of the tip
-            const _wy = (player.mesh ? player.mesh.position.y : player.position.y);
-            for (let _sgn = -1; _sgn <= 1; _sgn += 2) {
-              const _tipY = _wy + _ry * _wr * _sgn;
-              const _dep = WL - _tipY;                        // >0 means this tip is under the surface
-              if (_dep <= 0) continue;
-              const _tx = px + _rx * _wr * _sgn, _tz = pz + _rz * _wr * _sgn;
-              // a wing is thin: a narrow seed, and its amplitude is how deep it is cutting, not how
-              // heavy the ship is. Saturates at one draft so a fully submerged wing does not run away.
-              const _wk = Math.min(1, _dep / Math.max(6, fp.DRAFT * 2));
-              _swRippleSeed(_tx, _tz, Math.max(22, fp.BEAM * 0.40), amp * _wk * (0.45 + 0.85 * spd) * 0.9);
-              _swFxN('wingCut');
-              if (window.__waterDisp && spd > 0.12 && ((R.dotStep | 0) & 1) === 0) {
-                _swCrestSpray(_tx, WL, _tz, amp * _wk * (0.4 + 0.9 * spd) * 0.8, player.velocity.x, player.velocity.z);
-              }
-            }
-          }
-        } catch (_) {}
+        // (v41.58) the wing-tip contact test used to live HERE, inside the wake step. See the
+        // rate-based emitter below the planing sheet - v42.63 moved it out, because nesting it here
+        // is most of why it never showed. (Left as a signpost: this is where you would look.)
         _swFxN('wake');
         // (v41.11) specks off the peaks we just made: the stern crest and both Kelvin shoulders. No
         // readback needed - these are the crests, we placed them. Every other wake step so the
@@ -29868,7 +30048,11 @@ function _swRippleTick(dt) {
     // and a starved spray is a better failure than a starved hit spark.
     {
       const _pl = (W3.plane != null) ? +W3.plane : 1;
-      const _wet01 = Math.max(0, Math.min(1, (fp.DRAFT - above) / (2 * fp.DRAFT)));
+      // (v42.63) 0 with the keel a whisker clear, `kiss` the moment it touches, 1 a working
+      // draft under. The old form measured the ship's WAIST against a draft a fifth of the
+      // hull, so it read 0 with the keel on the water and only reached 1 with the ship fully
+      // submerged - the owner's "the way it sits in the water isn't right".
+      const _wet01 = Math.max(0, Math.min(1, (DR * ((W3.kiss != null) ? +W3.kiss : 0.15) - keelA) / DR));
       if (_pl > 0 && _wet01 > 0.02 && sp > 55 && !game._swSubmerged) {
         R.planT = (R.planT || 0) + dt;
         const _rate = (3 + 11 * _wet01 * Math.min(1, sp / 300)) * _pl;
@@ -29896,6 +30080,101 @@ function _swRippleTick(dt) {
         }
       } else if (R.roosT) R.roosT = 0;
     }
+    // (v42.63) A WING TIP IN THE WATER IS ITS OWN CONTACT.
+    // Owner: "like just my wing tip touches the water, it should spray".
+    // v41.58 DID add a tip test, but nested it inside the body's WAKE STEP, and it inherited three
+    // things that between them made it invisible:
+    //   - it ran only on a wake seed - once per `spacing` = max(22, fp.LEN*0.35) of travel - and its
+    //     spray was halved again to every OTHER step, so ~4 puffs a second;
+    //   - its amplitude carried the BODY's `amp`, which is multiplied by 0.35 whenever the fuselage
+    //     is clear of the water, i.e. precisely when a tip is the only thing touching;
+    //   - and the tip RADIUS came from _swHullSpan(), which walks player.mesh and so measures the
+    //     SHIELD BUBBLE rather than the wing (see _swHullMetrics).
+    //   Measured on a banked skim, the result was ~6% of a wake seed four times a second, and no
+    //   sheet at all - the visible spray is _swSpawnSplashV, which the tip never reached.
+    // A submerged tip is a wetted contact like any other, so it now gets its OWN immersion, its OWN
+    // rate and the same sheet the planing hull throws. Rolled hard with the fuselage dry this is the
+    // only part of the ship in the water, and it is now the only thing driving the FX.
+    // The right vector comes off the ship's quaternion, so roll and pitch carry into it for free.
+    {
+      const _wg = (W3.wing != null) ? +W3.wing : 1;
+      const _wm = (typeof player !== 'undefined' && player) ? player.mesh : null;
+      // (v42.63) the gate state, live on window.__water - this emitter has three independent ways
+      // to do nothing (no metrics, no bank, no depth) and they are not distinguishable from outside.
+      W3.wHalfW = _hm ? Math.round(_hm.halfW) : -1;
+      W3.wGate = (_wg > 0 ? 1 : 0) | (_hm ? 2 : 0) | (_wm ? 4 : 0) | (sp > 20 ? 8 : 0) |
+                 (!game._swSubmerged ? 16 : 0) | ((_hm && keelA < _hm.halfW) ? 32 : 0);
+      // cheap reject: with the keel more than a half-span clear, no bank angle can dip a tip.
+      if (_wg > 0 && _hm && _wm && sp > 20 && !game._swSubmerged && keelA < _hm.halfW) {
+        _swWingR.set(1, 0, 0).applyQuaternion(_wm.quaternion);
+        const _wr = _hm.halfW * 0.90;                  // just inboard of the tip
+        const _tipBase = player.position.y - _keelH;   // the keel plane, on the centreline
+        const _sc = _swSpdCurve(sp, 350, (W3.spdTail != null) ? +W3.spdTail : 0.30);
+        // (v42.64) CONTACT STARTS AT THE SURFACE. Owner: "it shouldnt be 3.9 units under water, it
+        // should be 0 at the surface". Two separate things were making first contact silent:
+        //   - WL is the FLAT waterline, but the surface the tip actually meets is the DISPLACED one,
+        //     and near a moving hull it stands above WL. `wingKiss` is that allowance, so the tip
+        //     counts as touching when it reaches the water you can see rather than the datum plane.
+        //   - and the strength ran linearly from 0, so the first units of immersion emitted a spray
+        //     too weak to see. `_wk` now has a FLOOR: the moment a tip touches, it throws.
+        const _kW = DR * ((W3.wingKiss != null) ? +W3.wingKiss : 0.22);
+        let _deep = 0;
+        for (let _s = -1; _s <= 1; _s += 2) {
+          const _d = WL + _kW - (_tipBase + _swWingR.y * _wr * _s);
+          if (_d > _deep) _deep = _d;
+        }
+        W3.wRightY = +_swWingR.y.toFixed(3);
+        W3.wDeep = Math.round(_deep);
+        W3.wR = Math.round(_wr);
+        const _seedR = Math.max(18, fp.BEAM * 0.22);
+        if (_deep > 0) {
+          // (v42.65) SEED ON DISTANCE TRAVELLED, NOT ON A CLOCK.
+          // Owner: "i see bubbles but no ripples/wake, there should be a small one". The spray was
+          // firing and the ripple was not reading, and the reason is spacing rather than strength.
+          // MEASURED at v42.64, tip in the water 100% of frames: the timer emitted 11 seeds in 120
+          // frames = 5.5 Hz, and at 452 u/s that puts them 82 world units apart while the seed itself
+          // is only 39 units in RADIUS. So the tip laid a dotted line of isolated blips that never
+          // touched each other - each one a fine 7.2-unit dimple, none of them a cut.
+          // A wing slicing water leaves a CONTINUOUS line, so the gate has to be distance, exactly as
+          // the body wake's `spacing` is: step a fraction of the seed radius and consecutive seeds
+          // overlap into a trail at any speed and any frame rate. The time fallback keeps a slow or
+          // hovering tip dimpling the surface.
+          const _wStep = Math.max(10, _seedR * ((W3.wingStep != null) ? +W3.wingStep : 0.45));
+          const _wlx = R.wingX;
+          const _wMoved = (_wlx === undefined) ? 1e9
+                        : ((px - _wlx) * (px - _wlx) + (pz - R.wingZ) * (pz - R.wingZ));
+          R.wingT = (R.wingT || 0) + dt;
+          if (_wMoved > _wStep * _wStep || R.wingT > 0.30) {
+            R.wingT = 0; R.wingX = px; R.wingZ = pz;
+            // the SPRAY stays rate-limited - a sheet every seed would flood the particle pool for no
+            // gain - but the RIPPLE goes down every step, because that is what makes it a line.
+            R.wingS = (R.wingS | 0) + 1;
+            const _wSpray = (R.wingS & 1) === 0;
+            for (let _s = -1; _s <= 1; _s += 2) {
+              const _d = WL + _kW - (_tipBase + _swWingR.y * _wr * _s);
+              if (_d <= 0) continue;
+              const _wk = Math.min(1, Math.max(0.30, _d / Math.max(6, DR)));
+              const _tx = px + _swWingR.x * _wr * _s, _tz = pz + _swWingR.z * _wr * _s;
+              // a wing is THIN: a narrow seed, and an amplitude that is how deep it is cutting
+              // rather than how heavy the ship is. A tip knifes the surface, it does not displace
+              // like a hull, so this runs off _fp0 (the untouched footprint) at just over half.
+              const _wa = 0.16 * (_fp0.DRAFT / 13.5) * _fp0.heft * mass * _sc * _wk * W3.wake * 0.55
+                          * ((W3.wingAmp != null) ? +W3.wingAmp : 1);
+              _swRippleSeed(_tx, _tz, _seedR, _wa);
+              _swFxN('wingCut');
+              if (_wSpray && _swFxRoom() > 10) {
+                _swSpawnSplashV(_tx, WL, _tz,
+                                { x: player.velocity.x, y: -Math.max(12, sp * 0.09 * _wk), z: player.velocity.z },
+                                fp.BEAM * 0.34, 0.35 + 0.65 * _wk, _swDeadrise(_fp0));
+              }
+              if (_wSpray && window.__waterDisp && !W3.crestBreak) {
+                _swCrestSpray(_tx, WL, _tz, _wa, player.velocity.x, player.velocity.z);
+              }
+            }
+          }
+        } else if (R.wingT) R.wingT = 0;
+      } else if (R.wingT) R.wingT = 0;
+    }
     // (2) BUOYANT REST : a static bowl sized to the WATERPLANE + DRAFT (gentle, wide, time-spaced = no "X").
     //     Strict gate sp<=8 (mutually exclusive with planing sp>8) per the budget proof.
     if (touching && sp <= 8) {
@@ -29910,8 +30189,11 @@ function _swRippleTick(dt) {
     if (_wantHiss && !game._dragHiss) { try { game._dragHiss = _swStartDragHiss(); } catch (_) {} }
     else if (!_wantHiss && game._dragHiss) { try { _swStopDragHiss(game._dragHiss); } catch (_) {} game._dragHiss = null; }
     if (game._dragHiss && game._dragHiss.set) { try { game._dragHiss.set(sp); } catch (_) {} }
-    if (above < 0 && prevAbove >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
-    else if (above > 0 && prevAbove <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
+    // (v42.63) THE SPLASH BELONGS TO THE KEEL, not the waist. On `above` the entry crown fired
+    // with the ship already half under, and the exit crown once the waterline had climbed back to
+    // the mid-plane - both a full half-hull-height late.
+    if (keelA < 0 && prevKeelA >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
+    else if (keelA > 0 && prevKeelA <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
     // ⚠⚠ (v41.04) A SHALLOW FAST ENTRY SKIPS. Clanet, Hersen & Bocquet, "Secrets of successful
     // stone-skipping" (Nature 427:29): there is a MAGIC ANGLE of about 20° between the body and the
     // surface that minimises the speed needed to ricochet - below it a fast body bounces off the
@@ -29923,9 +30205,10 @@ function _swRippleTick(dt) {
     // down onto the water and you still land on it. `__water.skip = 0` turns it off outright.
     try { const _wx = (window.__water = window.__water || {});
       _wx.xAbove = Math.round(above); _wx.xPrev = Math.round(prevAbove);
-      if (above < 0 && prevAbove >= 0) _wx.xEnter = (_wx.xEnter | 0) + 1;
-      else if (above > 0 && prevAbove <= 0) _wx.xExit = (_wx.xExit | 0) + 1; } catch (_) {}
-    if (above < 0 && prevAbove >= 0 && player.velocity) {
+      _wx.xKeel = Math.round(keelA); _wx.xDraft = Math.round(DR); _wx.xKeelOff = Math.round(_keelH);   // (v42.63)
+      if (keelA < 0 && prevKeelA >= 0) _wx.xEnter = (_wx.xEnter | 0) + 1;
+      else if (keelA > 0 && prevKeelA <= 0) _wx.xExit = (_wx.xExit | 0) + 1; } catch (_) {}
+    if (keelA < 0 && prevKeelA >= 0 && player.velocity) {
       const _sk = (W3.skip != null) ? +W3.skip : 1;
       const _vyIn = -player.velocity.y;
       const _inc = Math.atan2(Math.max(0, _vyIn), Math.max(1e-4, sp)) * 57.29578;
@@ -29938,6 +30221,7 @@ function _swRippleTick(dt) {
       }
     }
     R.prevAbove = above;
+    R.prevKeel = keelA;   // (v42.63)
     // (v41.00) what the hull is carrying, either way through the surface.
     try { _swWetTick(R, px, player.position.y, pz, player.velocity, fp, WL, dt); } catch (_) {}
     try { _swDripWTick(dt, WL); } catch (_) {}
@@ -30118,9 +30402,31 @@ function _swRippleTick(dt) {
             _Wc.crCost = Math.round(_c * 10) / 10; }
         }
         if (!R._crErr && _scanNow) {
-          const dispS = (_Wc.disp != null) ? _Wc.disp : 180, gainS = (_Wc.gain != null) ? _Wc.gain : 180;
+          // (v42.68) gainS DEFAULTED TO 180 WHILE THE SHADER'S uGain IS 100.
+          // g2d = gainS/dispS is meant to reproduce the shader's x = h * uGain/uDispScale so the
+          // scan judges the crest the player can actually see. With 180/180 it computed 1.0 where
+          // the shader used 100/180 = 0.556, so every `vD` in this rule ran ~1.8x hot and the
+          // break gate was being applied to a curve that is not the one on screen.
+          const dispS = (_Wc.disp != null) ? _Wc.disp : 100, gainS = (_Wc.gain != null) ? _Wc.gain : 100;
           const g2d = gainS / Math.max(dispS, 0.01);
-          const bPeak = (_Wc.breakPeak != null) ? _Wc.breakPeak : 0.22;
+          // (v42.67) THE BREAK THRESHOLD HAS TO BE A REAL CREST HEIGHT.
+          // `vD` here is sc(h) = x/(1+|x|) with x = h * gain/disp - it is NORMALISED BY uDispScale,
+          // so it is not a height, it is a fraction of the display ceiling. A fixed 0.22 therefore
+          // means a completely different crest depending on what uDispScale happens to be, and the
+          // count of "breaking" texels moves with a knob that has nothing to do with breaking.
+          // MEASURED: dropping disp 180 -> 55 multiplies x by 3.3, so h = 0.15 goes vD 0.077 -> 0.214
+          // and h = 0.30 goes 0.143 -> 0.353 - i.e. crests that were nowhere near the gate sail past
+          // it, and the whole lake starts erupting. Owner: "you made them propagate/splash really far
+          // in random places".
+          // World height is `disp * vD` (see _swDispWorld), so a threshold of H world units is
+          // vD > H/disp. `breakHeight` 39.6 is exactly the shipped 0.22 at the shipped disp 180 - one
+          // hull height - so this is a no-op at the old settings and disp-invariant at any other.
+          // Historically this fired at roughly 24 world units (0.22 read off the 1.8x-hot curve
+          // above). 30 is deliberately a little higher - owner: "a little overkill with all those
+          // bubbles... some bubbles are cool".
+          const _bH = (_Wc.breakHeight != null) ? +_Wc.breakHeight : 30;
+          const bPeak = (_Wc.breakPeak != null) ? +_Wc.breakPeak
+                                                : Math.min(0.95, _bH / Math.max(1, dispS));
           const bSlope = (_Wc.breakSlope != null) ? _Wc.breakSlope : 0.06;
           const bRate = (_Wc.breakRate != null) ? _Wc.breakRate : 0.5;
           const budget = Math.max(1, (_Wc.breakBudget | 0) || 8);
@@ -30142,6 +30448,18 @@ function _swRippleTick(dt) {
                           ((_Wc.breakPool != null) ? +_Wc.breakPool : 0.40);
           const jet = (_Wc.jetLean != null) ? _Wc.jetLean : 1.0;
           const cx = R.center.x, cz = R.center.y, invR = 1 / RES;
+          // (v42.67) AND IT HAS TO STAY NEAR THE SHIP.
+          // The scan walks a 128-texel sub-rect of an 8000-unit window, so it reaches ~2000 units out
+          // in every direction, and the v41.11 note says so approvingly: "finds real breaking crests
+          // anywhere on the lake, not just under the hull". MEASURED while skimming: crestBreak on ->
+          // 222 live droplets, median 446 units from the hull, 90th percentile 1046, max 1079; off ->
+          // 30 droplets, median 227, max 253. So this rule IS the far-flung spray, and on an otherwise
+          // still lake bursts at that distance have no visible cause - they read as random.
+          // `breakR` bounds it; 1e9 restores the whole-window behaviour.
+          const _bR = (_Wc.breakR != null) ? +_Wc.breakR : 700;
+          const _bR2 = _bR * _bR;
+          const _spx = (player && player.position) ? player.position.x : cx;
+          const _spz = (player && player.position) ? player.position.z : cz;
           const svx = player.velocity ? player.velocity.x : 0, svz = player.velocity ? player.velocity.z : 0;
           const sc = function (hh, wf) { const x = hh * g2d; return (x / (1 + Math.abs(x))) * wf; };  
           let emitted = 0, nBreak = 0, maxV = 0;
@@ -30153,10 +30471,15 @@ function _swRippleTick(dt) {
             // (v41.46) sub-rect row j is global row CO+j, so the world mapping is untouched
             const rvY = (CO + j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
             const rowB = j * CRS;
+            // whole rows outside the radius cost one subtract, not 128 texel reads
+            const _dzr = (cz + (rvY - 0.5) * B) - _spz, _dz2 = _dzr * _dzr;
+            if (_dz2 > _bR2) continue;
             for (let i = 1; i < CRS - 1; i++) {
               const h = buf[(rowB + i) * 4];
               if (h < 0.12) continue;                                          
               const rvX = (CO + i + 0.5) * invR, ed = Math.min(Math.min(rvX, 1 - rvX), edY);
+              const _dxr = (cx + (rvX - 0.5) * B) - _spx;
+              if (_dxr * _dxr + _dz2 > _bR2) continue;
               const t = ed <= 0 ? 0 : (ed >= 0.12 ? 1 : ed / 0.12), wf = t * t * (3 - 2 * t);   
               const vD = sc(h, wf);
               if (vD < bPeak) continue;
@@ -31643,7 +31966,13 @@ function _swBuildHubWaterDispGet(WL) {
         // -> 5.1 units (was 27.5), crest h=0.41 -> 100 units (the height that was approved at
         // G=650), h=0.8 -> 144, h=1.2 -> 161. Taller crests, calm calm, and the speed range spreads
         // out again instead of bunching at the top.
-        uDispScale: { value: 180.0 }, uGain: { value: 100.0 }, uCrestQ: { value: 11.0 },
+        // (v42.68) 180 -> 100, owner's pick after an A/B ladder. 180 let a wake crest stand 175
+        // units above the waterline while the chase camera rides ~65 above it, so the camera was
+        // routinely INSIDE the crest - and because the sheet is transparent with depthWrite off,
+        // that reads as a hard-edged wall of water across the view with the lake bed showing
+        // through it, not as being underwater (`_swSubmerged` only ever tests the camera against
+        // the FLAT waterline, so it never notices). Same cause when you shoot the water.
+        uDispScale: { value: 100.0 }, uGain: { value: 100.0 }, uCrestQ: { value: 11.0 },
         // (v41.17) whitecapping by STEEPNESS, and how hard the true crest normals bite. See the
         // note on the vN line below.
         // (v41.18) uFoamSlope 0.085 -> 0.50 and a STRENGTH beside it. 0.085 whitened the entire lake:
@@ -39201,6 +39530,15 @@ const OW = {
   SPREAD: [0, -0.07, 0.07, -0.14, 0.14],   // ...and a fan of headings around it: 20 candidates per sector
   RADIUS: 3400,
   BUILD_DIST: 11500, DROP_DIST: 14000, ARM_DIST: 9500,
+  // (v42.79) owner: "can we get the 6 extra cities to load ahead so they don't pop in? we can make
+  // it take longer in the loading screen if needed". It does not need to: a city is CHEAP to build.
+  // MEASURED, all six on the live hub: EMBER REACH 3 ms, GILT HOLLOW 3, PRISM VAULT 5, FROSTMARCH 2,
+  // CAIRN DEEP 5, NULL SECTOR 5 - 23 ms for the set, and the heaviest of them is 101 buildings.
+  // So the pop was never a cost problem. The cities simply did not EXIST until the pilot was inside
+  // BUILD_DIST (11,500u), and were thrown away again past DROP_DIST - fly out and back and the same
+  // city pops a second time. With this on they are built once, one per frame, and never dropped.
+  // window.__cities.preload = 0 restores the streaming behaviour exactly.
+  PRELOAD: true,
   FLEET: 3, CARRIER_HP_X: 6,
   ZAP: { range: 1700, every: 3.2, dmg: 1400, charge: 1.6 },
   REGEN: { delay: 6, rate: 0.02 },   // (v38.81) an owned carrier repairs 2%/s of max after 6 s without a hit
@@ -40859,17 +41197,22 @@ function _owFrame(dt) {
   const playing = game.state === 'playing';
   const K = _owK();
   const buildD = K.buildDist || OW.BUILD_DIST, dropD = Math.max(buildD + 1500, K.dropDist || OW.DROP_DIST);
+  // (v42.79) PRELOAD: stock the whole overworld rather than streaming it in under the pilot. Still
+  // ONE city per frame - 6 frames at 2-5 ms each is invisible, whereas all six in one call would be
+  // a 23 ms spike - and with preload on nothing is ever dropped, which is what stops a city the
+  // pilot has already seen from popping again on the way back.
+  const _owPre = (K.preload != null) ? !!+K.preload : OW.PRELOAD;
   let builtThisFrame = false, nearest = -1, nearestD = Infinity;
   for (let i = 0; i < C.length; i++) {
     const c = C[i];
     const d = Math.hypot(px - c.x, pz - c.z);
     c._playerDist = d;
     if (d < nearestD) { nearestD = d; nearest = i; }
-    if (!c.built && d < buildD && !builtThisFrame) {
+    if (!c.built && (_owPre || d < buildD) && !builtThisFrame) {
       builtThisFrame = true;
       try { _owBuild(c); } catch (e) { console.warn('[cities] build failed:', c.name, e); c.built = { city: null, group: null, failed: true }; }
       try { if (typeof _carrierLoadProto === 'function') _carrierLoadProto(null); } catch (_) {}
-    } else if (c.built && d > dropD) _owDrop(c);
+    } else if (c.built && !_owPre && d > dropD) _owDrop(c);
   }
   // what _hubCityFrame does for the hub: camera-relative sun for the tower shader, the light sweep
   if (typeof camera !== 'undefined' && camera) {
@@ -59280,6 +59623,467 @@ function _preloadCyanRing() {
     err => { _cyanRingLoading = false; console.warn('[portal] cyanring.glb load failed:', err && err.message); });
 }
 const PORTAL_GATE_DIAMETER = 760;   
+// ── (v42.74) WILD LEVIATHANS ─────────────────────────────────────────────────────────────────
+// Owner: "in the overworld, in all the modes, i want to put our leviathans, but without the ghost
+// effect... just normal. i want them to walk around in packs of the same type, spread out randomly.
+// i want some of them to be smaller, like babies, and families of these creatures. if you attack
+// them, they will attack you, but they won't attack if you don't. they also can't fly in this mode,
+// they just walk on the ground. they will give aegis xp if you kill them."
+//
+// WHY THIS IS A NEW CLASS AND NOT A FLAG ON OutskirtsMonster.
+// OutskirtsMonster's whole brain is the ENDLESS ARENA: it homes on `_monsterArenaInfo()`, aggros on
+// ships leaving the carve radius, rolls "edge menace" dice against the arena rim, and blinks like a
+// Slayer. None of that exists in the overworld. What IS worth reusing is everything below the AI -
+// the def table, the GLB, the material prep, the guts, the damage plumbing - so this borrows those
+// and brings its own movement and its own temperament.
+//
+// WHY THEY LIVE IN `game.monsters`.
+// That array is what every weapon already tests against (the bolt loops, the splash loops, the
+// player's own collision sweep, and _botMayDamageMonster for bots), so joining it makes them
+// shootable with no new weapon code. It is safe here specifically because `updateMonsters` RETURNS
+// EARLY on `LSS.MODE === 'freeflight'` - and the overworld is freeflight-hosted in every mode that
+// visits it - so the endless brain never runs over them. Their `isWild` flag keeps them out of
+// anything that does walk the array with endless assumptions, and FreeFlightMode.onTeardown already
+// destroys everything in `game.monsters`, so they are torn down with the session for free.
+const _WILD = {
+  on: true,
+  packs: 5,             // family groups in the world at once
+  min: 3, max: 6,       // members per family
+  babyChance: 0.45,     // share of a family born small
+  babyScale: 0.42,      // a baby, as a fraction of the adult
+  rMin: 6500, rMax: 21000,   // spawn ring around the hub city
+  cityKeep: 5200,       // never inside this of the city centre
+  // (v42.78) owner: "make them spread out a little more, and make them animated slower, and move
+  // slower". `roam` is both the wander radius AND the radius each animal is scattered over at
+  // birth, so raising it spreads a family in place as well as widening where it drifts.
+  roam: 2700,           // how far from the family's patch they wander  (was 1500)
+  step: 24,             // walking speed                               (was 46)
+  charge: 68,           // speed once provoked                         (was 120)
+  anim: 0.45,           // walk-cycle rate; applied every frame, so it is live-tunable
+  aggroR: 3400,         // how far it will follow what hit it
+  loseR: 6000,          // past this it gives up
+  deAggro: 15,          // seconds of peace before it settles down
+  hp: 2600, hpBaby: 800,
+  touch: 240, touchCd: 1.5,   // contact damage while angry
+  size: 780,            // adult, longest axis, world units
+  turn: 1.6,            // radians/sec of heading change
+  _list: null, _built: 0, _loading: false,
+};
+
+// (v42.74) A SKINNED CLONE NEEDS ITS OWN SKELETON.
+// Object3D.clone() copies the hierarchy but SHARES the Skeleton, and a shared skeleton deforms
+// every copy to the ORIGINAL's bone world transforms - so a whole pack renders stacked on the
+// prototype instead of where each animal actually is. three's examples solve this with
+// SkeletonUtils.clone, which is not loaded in this build, so do what it does: clone, then rebind
+// each SkinnedMesh to a new Skeleton built from the CLONE's bones, matched by name.
+// A model with no skinning (transform-track animation only) needs none of this and returns early.
+function _wildRigClone(src) {
+  const out = src.clone(true);
+  const srcSkins = []; src.traverse(n => { if (n.isSkinnedMesh) srcSkins.push(n); });
+  if (!srcSkins.length) return out;
+  out.updateMatrixWorld(true);
+  const boneByName = {};
+  out.traverse(n => { if (n.isBone) boneByName[n.name] = n; });
+  const dstSkins = []; out.traverse(n => { if (n.isSkinnedMesh) dstSkins.push(n); });
+  for (let i = 0; i < dstSkins.length; i++) {
+    const s = srcSkins[i], d = dstSkins[i];
+    if (!s || !d || !s.skeleton) continue;
+    const bones = [];
+    for (const b of s.skeleton.bones) { const nb = boneByName[b.name]; if (nb) bones.push(nb); }
+    if (bones.length !== s.skeleton.bones.length) continue;   // names did not line up: leave it bound as-is
+    // (v42.76) BIND WITH THE SOURCE'S bindMatrix, NOT THE CLONE'S matrixWorld.
+    // three's SkeletonUtils passes the clone's matrixWorld because it binds a clone that already
+    // sits in a hierarchy matching the source's. Here the clone is still loose - it gets parented
+    // into a Group and scaled to the animal's size AFTERWARDS - so its matrixWorld at this moment
+    // is not the bind pose's frame. MEASURED on the first build: bindMatrix carried scale 0.01
+    // while the mesh ended at world scale 4.59, and the skinning composition (bindMatrixInverse *
+    // boneMatrix * bindMatrix) then resolved every vertex somewhere that is not on screen - bones
+    // in the right world position, creature invisible. The local hierarchy IS identical to the
+    // source's, so the source's own bindMatrix is the correct one and survives any later reparent.
+    try { d.bind(new THREE.Skeleton(bones, s.skeleton.boneInverses), s.bindMatrix); } catch (_) {}
+  }
+  return out;
+}
+
+// One parsed GLB per TYPE, shared by every member of every pack of that type. The monster GLBs are
+// 20-45 MB and the existing loader trickles them one at a time for exactly that reason, so loading
+// one per animal is not an option - five packs would be twenty parses.
+const _wildProtos = {};
+function _wildProto(key) {
+  if (_wildProtos[key]) return _wildProtos[key];
+  _wildProtos[key] = new Promise((resolve) => {
+    let loader = null;
+    try { loader = new THREE.GLTFLoader(); } catch (_) { resolve(null); return; }
+    loader.load(MONSTER_BASE_URL + key + '.glb' + _MODEL_CACHE_BUST,
+      (gltf) => {
+        try { if (typeof _lssCapModelTextures === 'function') _lssCapModelTextures(gltf.scene, 'wild ' + key); } catch (_) {}
+        // NORMAL SKIN, NOT THE GHOST. _addSpectralGhost exists because arena leviathans phase
+        // through walls and the hologram read makes that look deliberate (see its note). These
+        // walk on solid ground and never phase, so they get the pre-v35.92 treatment instead:
+        // the same full-bright MeshBasicMaterial conversion, with _addBasicRim's bioluminescent
+        // fresnel edge so the silhouette still reads without per-pixel lighting.
+        const def = MONSTER_DEFS.find(d => d.key === key) || null;
+        const rim = (def && def.ghost != null) ? def.ghost : 0x8ad8ff;
+        try {
+          gltf.scene.traverse(node => {
+            if (!node.isMesh || !node.material) return;
+            const mats = Array.isArray(node.material) ? node.material : [node.material];
+            const out = [];
+            for (const mat of mats) {
+              if (!mat) { out.push(mat); continue; }
+              try {
+                const flat = new THREE.MeshBasicMaterial({
+                  map: mat.map || null,
+                  color: (mat.color && mat.map) ? 0xffffff : ((mat.color && mat.color.getHex()) || 0x888888),
+                });
+                if (!mat.map) flat.color.multiplyScalar(0.85);
+                if (typeof _addBasicRim === 'function') _addBasicRim(flat, rim, 0.35);
+                out.push(flat);
+                if (mat.dispose) { try { mat.dispose(); } catch (_) {} }
+              } catch (_) { out.push(mat); }
+            }
+            node.material = Array.isArray(node.material) ? out : out[0];
+            // ⚠ NOT renderOrder 3 and NOT depthWrite false - those belong to the ghost, which is
+            // transparent and had to sort above the water. A solid creature standing on the ground
+            // must depth-test like any other opaque object or it draws through terrain.
+            node.castShadow = false; node.receiveShadow = false;
+          });
+        } catch (_) {}
+        // ⚠ (v42.76) MEASURE THE PROTOTYPE HERE, NOT THE CLONE LATER.
+        // The first build sized each animal from a Box3 of its own fresh clone, and measured
+        // scale 45882 instead of ~9 - because a SkinnedMesh's bounding box is its geometry in BIND
+        // space, and a clone's world matrices have not been resolved at that moment either, so the
+        // box comes back near-degenerate and `size / maxDim` explodes. OutskirtsMonster.attachModel
+        // gets away with the same call only because it measures the loader's own scene, fully set
+        // up, exactly once. Do that: one measurement per TYPE, reused by every member of every pack.
+        let maxDim = 1, ctr = new THREE.Vector3(), sy = 1;
+        try {
+          gltf.scene.updateMatrixWorld(true);
+          const b = new THREE.Box3().setFromObject(gltf.scene);
+          const sz = b.getSize(new THREE.Vector3());
+          maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+          sy = sz.y || maxDim;
+          ctr = b.getCenter(new THREE.Vector3());
+        } catch (_) {}
+        resolve({ scene: gltf.scene, clips: gltf.animations || [], maxDim: maxDim, ctr: ctr, sy: sy });
+      },
+      undefined,
+      (err) => { console.warn('[wild] load failed:', key, err && err.message); resolve(null); });
+  });
+  return _wildProtos[key];
+}
+
+class WildLeviathan {
+  constructor(def, home, baby, packId) {
+    this.isWild = true; this.isMonster = true;
+    this.def = def; this.name = def.key;
+    this.packId = packId; this.baby = !!baby;
+    this.alive = true;
+    this.maxHealth = baby ? _WILD.hpBaby : _WILD.hp;
+    this.health = this.maxHealth;
+    this.size = _WILD.size * (baby ? _WILD.babyScale : 1);
+    this.collisionRadius = this.size * 0.42;
+    this.team = 'wild';                 // its own faction: hostile to nobody until provoked
+    this.monId = -1;                    // never net-synced; the finds in the net layer key on real ids
+    this.id = 'wild' + packId + '_' + Math.floor(Math.random() * 1e6);
+    this.home = home.clone();
+    this.position = home.clone();
+    const a = Math.random() * Math.PI * 2, r = Math.random() * _WILD.roam;
+    this.position.x += Math.cos(a) * r; this.position.z += Math.sin(a) * r;
+    this.velocity = new THREE.Vector3();
+    this.mesh = null; this._mixer = null; this._gone = false;
+    this.footOff = this.size * 0.5;     // replaced with the model's real half-height on attach
+    this.heading = Math.random() * Math.PI * 2;
+    this.aggro = false; this._deAggroT = 0; this._foe = null;
+    this._touchCd = 0; this._hitFxTimer = 0; this._lastAttacker = null;
+    this._wanderT = Math.random() * 3;
+    this._wander = this.position.clone();
+    this.shipState = 'flying';          // the field other systems read; nothing here flies
+    this.damageDealt = 0; this.kills = 0; this.deaths = 0;
+    this._attach();
+  }
+
+  _attach() {
+    _wildProto(this.def.key).then((proto) => {
+      if (this._gone || !this.alive || !proto || !proto.scene) return;
+      let obj = null;
+      try { obj = _wildRigClone(proto.scene); } catch (_) { return; }
+      if (!obj) return;
+      // (v42.76) the type's measurement, taken once on the loader's own scene - see _wildProto
+      const maxDim = proto.maxDim || 1;
+      obj.position.sub(proto.ctr || new THREE.Vector3());
+      const g = new THREE.Group();
+      g.add(obj);
+      const k = this.size / maxDim;
+      g.scale.setScalar(k);
+      // how far the body's centre sits above its feet, in world units, so it stands ON the ground
+      this.footOff = ((proto.sy || maxDim) * 0.5) * k;
+      g.position.copy(this.position);
+      scene.add(g);
+      this.mesh = g;
+      try {
+        if (proto.clips && proto.clips.length && THREE.AnimationMixer) {
+          this._mixer = new THREE.AnimationMixer(obj);
+          const clip = (typeof _monStripRootMotion === 'function') ? _monStripRootMotion(proto.clips[0]) : proto.clips[0];
+          const act = this._mixer.clipAction(clip);
+          act.setLoop(THREE.LoopRepeat, Infinity);
+          // stagger phase + rate so a family does not march in lockstep
+          // keep the per-animal jitter, but scale it by the live `anim` knob every frame (see
+          // update) rather than baking a rate in here - otherwise retuning needs a respawn.
+          this._animJit = 0.85 + Math.random() * 0.3;
+          this._act = act;
+          act.timeScale = _WILD.anim * this._animJit;
+          act.play();
+          act.time = Math.random() * (clip.duration || 1);
+        }
+      } catch (_) {}
+    });
+  }
+
+  _groundY(x, z) {
+    try { return _stGroundYCarved(x, z, game.sandwichTerrain); } catch (_) { return this.position.y - this.footOff; }
+  }
+
+  update(dt) {
+    if (!this.alive) return;
+    if (this._hitFxTimer > 0) this._hitFxTimer -= dt;
+    if (this._touchCd > 0) this._touchCd -= dt;
+
+    // Temperament: angry only for as long as something keeps giving it a reason.
+    if (this.aggro) {
+      this._deAggroT -= dt;
+      const foe = this._foe;
+      const gone = !foe || !foe.position || (foe.shipState === 'dead') ||
+                   foe.position.distanceTo(this.position) > _WILD.loseR;
+      if (this._deAggroT <= 0 || gone) { this.aggro = false; this._foe = null; }
+    }
+
+    let tx, tz, spd;
+    if (this.aggro && this._foe && this._foe.position) {
+      tx = this._foe.position.x; tz = this._foe.position.z; spd = _WILD.charge * (this.baby ? 1.15 : 1);
+    } else {
+      // wander inside the family's patch
+      this._wanderT -= dt;
+      if (this._wanderT <= 0) {
+        this._wanderT = 3 + Math.random() * 5;
+        const a = Math.random() * Math.PI * 2, r = Math.random() * _WILD.roam;
+        this._wander.set(this.home.x + Math.cos(a) * r, 0, this.home.z + Math.sin(a) * r);
+      }
+      tx = this._wander.x; tz = this._wander.z; spd = _WILD.step * (this.baby ? 1.25 : 1);
+    }
+
+    // Steer: turn toward the target at a bounded rate, then walk forward. Turning rather than
+    // sliding is what makes a heavy animal read as heavy.
+    const want = Math.atan2(tx - this.position.x, tz - this.position.z);
+    let d = want - this.heading;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    const turn = _WILD.turn * dt;
+    this.heading += Math.max(-turn, Math.min(turn, d));
+    const dist = Math.hypot(tx - this.position.x, tz - this.position.z);
+    const go = (dist > this.size * 0.8) ? spd : 0;
+    this.position.x += Math.sin(this.heading) * go * dt;
+    this.position.z += Math.cos(this.heading) * go * dt;
+
+    // IT CANNOT FLY. Altitude is not a state it owns - it is read off the terrain every frame, so
+    // there is no way for one to drift upward and no airborne case to get wrong.
+    const gy = this._groundY(this.position.x, this.position.z);
+    this.position.y = gy + this.footOff;
+    this.velocity.set(Math.sin(this.heading) * go, 0, Math.cos(this.heading) * go);
+
+    if (this.mesh) {
+      this.mesh.position.copy(this.position);
+      this.mesh.rotation.y = this.heading;
+      if (this._mixer) {
+        const vis = (typeof camera !== 'undefined' && camera && camera.position)
+          ? this.position.distanceToSquared(camera.position) < 14000 * 14000 : true;
+        if (this.mesh.visible !== vis) this.mesh.visible = vis;
+        if (vis) {
+          if (this._act) this._act.timeScale = _WILD.anim * (this._animJit || 1);
+          this._mixer.update(dt);
+        }
+      }
+    }
+
+    // Contact damage, angry only. A calm animal you walk into does nothing.
+    if (this.aggro && this._touchCd <= 0 && typeof player !== 'undefined' && player &&
+        player.shipState !== 'dead' && player.position) {
+      if (player.position.distanceTo(this.position) < this.collisionRadius + 120) {
+        this._touchCd = _WILD.touchCd;
+        try { if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.touch * (this.baby ? 0.45 : 1), this); } catch (_) {}
+      }
+    }
+  }
+
+  // PROVOKED, NOT HOSTILE. This is the only thing that can make one angry, which is the whole of
+  // "if you attack them, they will attack you, but they won't attack if you don't". The family
+  // answers together - a pack that watched one of its own get shot does not keep grazing.
+  takeDamage(dmg, attacker, hitPoint) {
+    if (!this.alive) return 0;
+    if (attacker === player && typeof _aegisDmgOut === 'function') {
+      try { dmg = _aegisDmgOut(dmg, this); } catch (_) {}
+    }
+    if (this._hitFxTimer <= 0) {
+      this._hitFxTimer = 0.12;
+      const at = hitPoint || this.position;
+      try {
+        if (typeof v8SpawnSparks === 'function') v8SpawnSparks(at, 6, 1.4, 320, this.def.gut1, 0xffddee);
+        if (typeof spawnDynamicLight === 'function') spawnDynamicLight(at, this.def.gut1, 2.0, 420, 0.12);
+      } catch (_) {}
+    }
+    this._lastAttacker = attacker;
+    const foe = (attacker && attacker.position) ? attacker : ((attacker === player) ? player : null);
+    if (foe) {
+      this.aggro = true; this._foe = foe; this._deAggroT = _WILD.deAggro;
+      if (_WILD._list) {
+        for (const o of _WILD._list) {
+          if (o && o.alive && o !== this && o.packId === this.packId &&
+              o.position.distanceTo(this.position) < _WILD.aggroR) {
+            o.aggro = true; o._foe = foe; o._deAggroT = _WILD.deAggro;
+          }
+        }
+      }
+    }
+    this.health -= dmg;
+    if (this.health <= 0) this.die();
+    return dmg;
+  }
+
+  die() {
+    if (!this.alive) return;
+    this.alive = false;
+    try {
+      if (typeof player !== 'undefined' && player && player.trackerLocks && this.id != null) {
+        delete player.trackerLocks[this.id];
+        if (player.trackerLockedTarget === this) player.trackerLockedTarget = null;
+      }
+    } catch (_) {}
+    try { if (typeof spawnMonsterGuts === 'function') spawnMonsterGuts(this.position, this.size, this.def); } catch (_) {}
+    try { if (typeof showKillMarker === 'function') showKillMarker(); } catch (_) {}
+    // "they will give aegis xp if you kill them" - which the arena leviathans never did: their
+    // die() credits player.monKills (a scoreboard column) and drops an endless-only bolt, but
+    // never calls _aegisAwardKill. A player kill here awards it directly.
+    try {
+      if (this._lastAttacker === player || this._lastAttacker === 'player') {
+        player.monKills = (player.monKills | 0) + 1;
+        if (typeof _aegisAwardKill === 'function') _aegisAwardKill();
+      }
+    } catch (_) {}
+    this.destroy();
+  }
+
+  destroy() {
+    this._gone = true; this.alive = false;
+    if (this._mixer) { try { this._mixer.stopAllAction(); } catch (_) {} this._mixer = null; }
+    if (this.mesh) {
+      try { scene.remove(this.mesh); } catch (_) {}
+      // Geometry + textures belong to the shared per-type prototype, so dispose the CLONE's own
+      // nodes only - never the maps, or the next pack of this type loses its skin.
+      this.mesh = null;
+    }
+  }
+}
+
+function _wildDispose() {
+  if (_WILD._list) {
+    for (const m of _WILD._list) { try { m.destroy(); } catch (_) {} }
+    if (game.monsters) {
+      for (let i = game.monsters.length - 1; i >= 0; i--) {
+        if (game.monsters[i] && game.monsters[i].isWild) game.monsters.splice(i, 1);
+      }
+    }
+  }
+  _WILD._list = null; _WILD._built = 0;
+}
+
+// Where a family can stand: on land, clear of the water, and not on the city's doorstep.
+function _wildPickHome() {
+  const T = game.sandwichTerrain;
+  if (!T || typeof HUB_CITY === 'undefined') return null;
+  let WL = -1e9;
+  try { if (game._hubWater) WL = game._hubWater.userData.WL; } catch (_) {}
+  for (let i = 0; i < 40; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = _WILD.rMin + Math.random() * (_WILD.rMax - _WILD.rMin);
+    const x = HUB_CITY.x + Math.cos(a) * r, z = HUB_CITY.z + Math.sin(a) * r;
+    if (Math.hypot(x - HUB_CITY.x, z - HUB_CITY.z) < _WILD.cityKeep) continue;
+    let gy = NaN;
+    try { gy = _stGroundYCarved(x, z, T); } catch (_) { continue; }
+    if (!isFinite(gy) || gy < WL + 60) continue;          // in the lake, or too close to its edge
+    return new THREE.Vector3(x, gy, z);
+  }
+  return null;
+}
+
+// Per-frame driver. Self-gating like _owFrame: a no-op everywhere that is not the overworld.
+function _wildFrame(dt) {
+  const W = (typeof window !== 'undefined') ? (window.__wild = window.__wild || {}) : {};
+  for (const k in W) { if (k in _WILD) _WILD[k] = W[k]; }
+  const inOverworld = !!(game && game.selectedMap === 'hub_overworld' &&
+                         game.sandwichTerrain && game.sandwichTerrain.ON && !game._cavern);
+  if (!_WILD.on || !inOverworld) { if (_WILD._list) _wildDispose(); return; }
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) { if (_WILD._list) _wildDispose(); return; }
+
+  if (!_WILD._list) {
+    _WILD._list = [];
+    if (!game.monsters) game.monsters = [];
+    // One family at a time, on later frames, so a hub entry never pays for five packs at once.
+    _WILD._built = 0;
+  }
+  // Build one pack per frame until the world is stocked. Each family is ONE type ("packs of the
+  // same type"), so the prototype is fetched once and every member clones it.
+  // ⚠ (v42.75) SPAWN ONLY ONCE THE WORLD IS ACTUALLY THERE, AND NEVER LET A MISS COST A PACK.
+  // First build shipped two faults that cancelled the whole feature and reported success:
+  // `_built` was incremented on a FAILED placement too, and the loop ran during 'warmup' - where
+  // the terrain has not streamed, so _stGroundYCarved has nothing to answer with. MEASURED: all
+  // five slots were consumed inside warmup, every one of them a miss, and by the time the round
+  // went live (_wildPickHome then succeeds on 32 of 40 candidate points) the budget was gone and
+  // nothing ever spawned again. Count only what actually stands up, and back off on a miss rather
+  // than spinning 40 terrain queries every frame forever.
+  _WILD._retryT = (_WILD._retryT || 0) - dt;
+  if (_WILD._built < _WILD.packs && game.state === 'playing' && _WILD._retryT <= 0) {
+    const home = _wildPickHome();
+    if (home) {
+      const def = MONSTER_DEFS[Math.floor(Math.random() * MONSTER_DEFS.length)];
+      const n = _WILD.min + Math.floor(Math.random() * (_WILD.max - _WILD.min + 1));
+      const pid = _WILD._built;
+      for (let i = 0; i < n; i++) {
+        // at least one adult in every family, then babies by chance
+        const baby = (i > 0) && (Math.random() < _WILD.babyChance);
+        let m = null;
+        try { m = new WildLeviathan(def, home, baby, pid); } catch (e) { console.warn('[wild] spawn failed', e); continue; }
+        _WILD._list.push(m);
+        game.monsters.push(m);
+      }
+      _WILD._built++;
+    } else {
+      _WILD._retryT = 1.5;   // nowhere to stand this frame; try again shortly, keep the slot
+    }
+  }
+
+  for (let i = _WILD._list.length - 1; i >= 0; i--) {
+    const m = _WILD._list[i];
+    if (!m || !m.alive) {
+      _WILD._list.splice(i, 1);
+      if (game.monsters) { const ix = game.monsters.indexOf(m); if (ix >= 0) game.monsters.splice(ix, 1); }
+      continue;
+    }
+    try { m.update(dt); } catch (e) { if (!window._wildUpdErr) { window._wildUpdErr = String((e && e.stack) || e); console.warn('[wild] update threw:', e); } }
+  }
+}
+if (typeof window !== 'undefined') {
+  window.__wild = window.__wild || {};
+  window.__wildDbg = () => ({
+    on: _WILD.on, built: _WILD._built, packs: _WILD.packs,
+    alive: _WILD._list ? _WILD._list.filter(m => m && m.alive).length : 0,
+    withMesh: _WILD._list ? _WILD._list.filter(m => m && m.mesh).length : 0,
+    babies: _WILD._list ? _WILD._list.filter(m => m && m.baby).length : 0,
+    angry: _WILD._list ? _WILD._list.filter(m => m && m.aggro).length : 0,
+    types: _WILD._list ? [...new Set(_WILD._list.map(m => m && m.def && m.def.key))] : [],
+    inMonsters: (game.monsters || []).filter(m => m && m.isWild).length,
+  });
+}
+
 class BossPortal {
   constructor(pos) {
     this.position = pos.clone();
@@ -65267,7 +66071,12 @@ const _ptsColorScratch = new THREE.Color();
 // Additive (dst+src) is unbounded so a dense cluster summed to a blown-out white DOME ; alpha composite
 // (src*a + dst*(1-a)) is BOUNDED -> overlapping translucent beads cap at the drop colour instead of
 // saturating to white, so a splash reads as discrete water drops, not a snow-hill.
-const _SPL_MAX = 384;
+// (v42.61) 384 WAS BEING EXCEEDED, AND THE OVERFLOW WAS SILENTLY DROPPED. Measured 513 splash
+// particles alive while skimming, against a 384 cap - so roughly a quarter of the rooster tail was
+// discarded every frame, and which quarter changed frame to frame because the writer just fills a
+// packed cursor and stops. That is the owner's "the surface of the water DELETES the rooster tail":
+// not occlusion at all, the droplets were never submitted. 1536 costs ~49 KB of Float32Array.
+const _SPL_MAX = 768;
 const _splPos = new Float32Array(_SPL_MAX * 3);
 const _splCol = new Float32Array(_SPL_MAX * 3);
 const _splSize = new Float32Array(_SPL_MAX);
@@ -65293,10 +66102,38 @@ const _splDropTex = (function () {
   x.fillStyle = g; x.beginPath(); x.arc(sz * 0.5, sz * 0.5, sz * 0.5, 0, 6.2832); x.fill();
   const t = new THREE.CanvasTexture(c); t.needsUpdate = true; return t;
 })();
+// (v42.60) THE SPRAY HAD TO BE ABLE TO HIDE THE WATER. Owner, finally pinning down a bug we had
+// both been circling: "the surface of the water gets put in front of the wake that's spraying up...
+// the wake is too transparent... it should be hard to see the surface of the water through that
+// spray because it's in front of the surface."
+//
+// ⚠ IT IS NOT A SORT BUG, which is where I looked first and where this codebase has been bitten
+// before (v38.67: the camera-following water sorts as the NEAREST ro-0 transparent). The order here
+// is already right - water surface is renderOrder -1, this cloud is 3, so the droplets genuinely
+// paint after the water. The fault is that they had nothing to paint WITH: _splDropTex peaks at
+// alpha 0.50 dead centre and is down to 0.10 by 70% of the radius, and the shader multiplies that
+// by the particle's own life fade. A droplet at its brightest was half see-through, so a whole
+// rooster tail still read as a veil over the surface rather than a thing standing in front of it.
+//
+// So _splMat gets its own fragment shader with a uOpacity multiplier rather than sharing _ptsMat's.
+// A uniform, not a redrawn texture, so it stays live-tunable (window.__water.sprayOpacity) and the
+// other particle families that share that shader are untouched.
 const _splMat = new THREE.ShaderMaterial({
-  uniforms: { uMap: { value: _splDropTex }, uScale: { value: 600 } },
+  uniforms: { uMap: { value: _splDropTex }, uScale: { value: 600 }, uOpacity: { value: 100 } },
   vertexShader: _ptsMat.vertexShader,
-  fragmentShader: _ptsMat.fragmentShader,
+  fragmentShader: [
+    'uniform sampler2D uMap;',
+    'uniform float uOpacity;',
+    'varying vec3 vColor;',
+    'varying float vAlpha;',
+    'void main() {',
+    '  vec4 tex = texture2D(uMap, gl_PointCoord);',
+    // clamped: the whole point is to let a droplet reach a solid core, not to run alpha past 1
+    '  float a = min(1.0, tex.a * vAlpha * uOpacity);',
+    '  if (a < 0.004) discard;',
+    '  gl_FragColor = vec4(vColor * tex.rgb, a);',
+    '}',
+  ].join('\n'),
   transparent: true,
   blending: THREE.NormalBlending,
   depthWrite: false,
@@ -65422,8 +66259,15 @@ function updateParticles(dt) {
   // Match Sprite-scaling screen size: uScale = cot(fov/2) * halfBufferHeightPx.
   const _bufH = (typeof renderer !== 'undefined' && renderer && renderer.domElement)
     ? renderer.domElement.height : 1080;
-  _ptsMat.uniforms.uScale.value = _bufH * 0.5 *
+  const _uScale = _bufH * 0.5 *
     ((typeof camera !== 'undefined' && camera) ? camera.projectionMatrix.elements[5] : 2.4);
+  _ptsMat.uniforms.uScale.value = _uScale;
+  // (v42.61) ⚠ THE SPLASH CLOUD NEVER GOT THIS. _splMat shipped with a hard uScale: 600 and nothing
+  // ever wrote it, so while the ember cloud tracked buffer height and FOV the water droplets did
+  // not. On a 4K display the correct value is ~1100-1900, so every droplet was drawn at a third to
+  // a half of its intended screen size - a thin scatter of specks that the water reads straight
+  // through. Raising alpha cannot fix that ; the gaps BETWEEN droplets were the problem.
+  _splMat.uniforms.uScale.value = _uScale;
   let _w = 0;
   let _ws = 0;
   // Manual x/y/z math on velocity so POJO-typed
@@ -65487,6 +66331,18 @@ function updateParticles(dt) {
   }
   _splGeo.setDrawRange(0, _ws);
   _splashPts.visible = _ws > 0;
+  {
+    // (v42.60) live knob, read here so it can be dialled from the console mid-flight
+    // (v42.62) 100, the owner's pick after flying it: "allowed me to see the droplets really nicely".
+    // Not the absurd number it looks. The droplet texture peaks at alpha 0.50 and the writer above
+    // multiplies by __splashA (0.45), so a droplet's brightest pixel arrives here at 0.225 - and the
+    // shader CLAMPS to 1.0. So 100 does not mean "100x too bright"; it means every texel inside the
+    // droplet's soft falloff saturates and the sprite reads as a solid bead of water with a feathered
+    // rim, instead of a 22%-opaque smudge. Anything past ~4.5 is already clamping at the core ; the
+    // rest of the range is buying rim coverage, which is what actually closes the gaps between beads.
+    const _so = (window.__water && window.__water.sprayOpacity != null) ? +window.__water.sprayOpacity : 100;
+    if (isFinite(_so) && _splMat.uniforms.uOpacity.value !== _so) _splMat.uniforms.uOpacity.value = _so;
+  }
   if (_ws > 0) {
     _splPosAttr.needsUpdate = true;
     _splColAttr.needsUpdate = true;
@@ -80281,6 +81137,13 @@ function updateRoundSystem(dt) {
         // (v36.21) Mirror of enterShipSelect: cancel the launching state before
         // re-showing, or the between-rounds picker paints as an empty panel.
         try { _shipSelectSetLaunching(false); } catch (_) {}
+        // (v42.72) ...and the same mirror has to cover the PORTAL WARP TUNNEL. This is the path the
+        // owner actually hit: a rift traverse restarts #ov-warp and then _rrStagedSwap raises this
+        // picker a moment later, so the tunnel is still running when the hangar appears - and the
+        // picker paints transparent, so the streaks render straight over it. No quit to menu is
+        // needed; it is the normal traverse. The v42.71 clear in enterShipSelect cannot help here,
+        // because this function deliberately does NOT go through it.
+        try { if (typeof _ovWarpClear === 'function') _ovWarpClear(); } catch (_) {}
         if (sel) { sel.style.display = 'flex'; sel.classList.add('active'); }
         // Between-rounds : surface the VR ship-select
         // overlay again for the next pick. Mirror of enterShipSelect.
@@ -80872,6 +81735,10 @@ function returnToRootMenu(opts) {
   // Flip state first; _menuActive / Tab-intercept / gamepad hold all gate on
   // this, and the scoreboard's forced-visible condition checks it too.
   game.state = 'select';
+  // (v42.70) belt and braces: whatever route got us here, the ship picker is never a screen the
+  // portal warp tunnel should be drawing over. See _ovWarpClear for why the source-side clears
+  // were not enough on their own.
+  try { if (typeof _ovWarpClear === 'function') _ovWarpClear(); } catch (_) {}
   // (v33.99) Do NOT unlock orientation here. The landscape lock taken at ship-select
   // (lssAutoFullscreen) is meant to PERSIST for the whole mobile session, including
   // post-match returns to ship-select. (Was: v31.63 released the lock on match exit,
@@ -82732,14 +83599,30 @@ function _hlGA() {
 let _hudDomA = '';
 function _hudDomAlpha() {
   try {
-    const g = _hlGA(), t = _hlTA();
-    const key = g + '|' + t;
+    const g = _hlGA(), t = _hlTA(), c = _hlCA();
+    const key = g + '|' + t + '|' + c;
     if (key === _hudDomA) return;
     _hudDomA = key;
     const st = document.documentElement.style;
     st.setProperty('--lss-hud-gfx', String(g));
     st.setProperty('--lss-hud-txt', String(t));
+    st.setProperty('--lss-hud-cross', String(c));
   } catch (_) {}
+}
+
+// (v42.59) HOW OPAQUE THE CROSSHAIR IS. Owner: "make the opacity of the crosshair independent
+// slider in the settings". Independent of BOTH the others, for the obvious reason: the reticle is
+// the one part of the HUD you aim with, so wanting it solid over a ghosted instrument cluster (or
+// nearly gone, for a clean screenshot) is exactly the case the HUD slider cannot express.
+// Covers the canvas reticle - both shapes, the cross and the Blaster close-range circle - and the
+// DOM #crosshair, which is what carries the third-person parallax.
+function _hlCA() {
+  if (typeof input !== 'undefined' && input && typeof input.crosshairOpacity === 'number') {
+    const v = input.crosshairOpacity;
+    if (isFinite(v) && v >= 0 && v <= 1) return v;
+  }
+  const a = (typeof window !== 'undefined' && window.__hudCrossAlpha != null) ? +window.__hudCrossAlpha : 0.72;
+  return (a >= 0 && a <= 1) ? a : 0.72;
 }
 
 // (v42.56) HOW OPAQUE THE HUD'S TEXT IS - independent of _hlGA, not a multiple of it, so text can
@@ -83177,13 +84060,14 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   }
 
   r = _hlPlace(_HL.reticle, W, H);
+  ctx.globalAlpha = _hlCA();   // (v42.59) the crosshair has its own slider
   if (v.blasterClose) {
     // Close-range blaster keeps its circle reticle — it marks the spread, not
     // a point, so a crosshair would misreport where the shot lands.
     ctx.save();
     ctx.strokeStyle = _hlA(_HL.reticle.col, 0.7);
     ctx.lineWidth = Math.max(1, r.vmin * 0.16);
-    ctx.globalAlpha = _hlGA();   // (v41.40) re-arm after the ability label above
+    ctx.globalAlpha = _hlCA();   // (v42.59) crosshair slider ; re-arm after the ability label above
     ctx.beginPath(); ctx.arc(r.cx, r.cy, Math.min(r.w, r.h) / 2, 0, 7); ctx.stroke();
     ctx.beginPath(); ctx.arc(r.cx, r.cy, Math.max(1, r.vmin * 0.2), 0, 7);
     ctx.fillStyle = _HL.reticle.col; ctx.fill();
@@ -83191,6 +84075,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   } else {
     _hlReticle(ctx, r, _hlA(_HL.reticle.col, 0.75));
   }
+  ctx.globalAlpha = _hlGA();   // (v42.59) back to the HUD's own alpha for what follows
 
   if (v.aegisStr) {
     r = _hlPlace(_HL.aegis, W, H);
@@ -89632,6 +90517,10 @@ function _refreshSettingsValues() {
     setRange('set-hud-text-opacity', null, _ht);
     const _htv = $('#val-hud-text-opacity');
     if (_htv) _htv.textContent = (_ht * 100).toFixed(0) + '%';
+    const _hc = (typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72;
+    setRange('set-crosshair-opacity', null, _hc);
+    const _hcv = $('#val-crosshair-opacity');
+    if (_hcv) _hcv.textContent = (_hc * 100).toFixed(0) + '%';
   }
   setChk('set-clip-rec', !!input.clipRec);
 
@@ -89962,8 +90851,13 @@ function buildSettingsPage() {
         <input type="range" id="set-hud-text-opacity" min="0.15" max="1" step="0.01" value="${(typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1}">
         <div class="value-display" id="val-hud-text-opacity">${(((typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1) * 100).toFixed(0)}%</div>
       </div>
+      <div class="setting-row">
+        <label>Crosshair Opacity</label>
+        <input type="range" id="set-crosshair-opacity" min="0.15" max="1" step="0.01" value="${(typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72}">
+        <div class="value-display" id="val-crosshair-opacity">${(((typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72) * 100).toFixed(0)}%</div>
+      </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Two independent controls, not a master and a trim: the arcs, ticks and reticle follow the first, and every word and number on the HUD follows the second. The radar and its compass rose are exempt from both and always draw at full strength. Set text above the graphics to keep readouts legible over a faint instrument cluster, or below it to quieten the captions. Both apply live, on the flat HUD and in VR.</label>
+        <label style="flex:1;">Three independent controls, not a master and two trims. The arcs and ticks follow the first, every word and number on the HUD follows the second, and the reticle follows the third &mdash; so you can keep the thing you aim with solid over a ghosted instrument cluster, or take it almost to nothing for a clean shot. The radar and its compass rose are exempt from all three and always draw at full strength. All apply live, on the flat HUD and in VR.</label>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Scales the gauge cluster, ability bars, reticle and captions on flat screen. Applies live. The radar and compass rose stay at their designed size. Note the painted cockpit frames are drawn around the 1.00&times; layout, so first-person recesses stop lining up with the rings as you move away from it. VR has its own separate size slider below.</label>
@@ -91466,7 +92360,8 @@ function buildSettingsPage() {
   // _hlGA()/_hlTA() are read fresh every frame - but _hudDomAlpha() pushes the same two numbers
   // into CSS variables for the DOM HUD (round timer, scores, kill feed), which does not redraw.
   [['#set-hud-opacity', '#val-hud-opacity', 'hudOpacity', 0.72],
-   ['#set-hud-text-opacity', '#val-hud-text-opacity', 'hudTextOpacity', 1]].forEach(([sel, vsel, key, dflt]) => {
+   ['#set-hud-text-opacity', '#val-hud-text-opacity', 'hudTextOpacity', 1],
+   ['#set-crosshair-opacity', '#val-crosshair-opacity', 'crosshairOpacity', 0.72]].forEach(([sel, vsel, key, dflt]) => {
     const el = overlay.querySelector(sel);
     const vl = overlay.querySelector(vsel);
     if (!el) return;
@@ -92190,6 +93085,7 @@ function saveSettings() {
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
       hudOpacity: (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72,
       hudTextOpacity: (typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1,
+      crosshairOpacity: (typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72,
       cockpitSolidity: (typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0,
       vrHudMigrated: true,   // (v41.43) the one-time vrHudScale default bump has been applied
       vrWater: !!input.vrWater,   // (v41.43)
@@ -92472,6 +93368,7 @@ const SHIPPED_DEFAULTS = {
   "hudScale": 1,
   "hudOpacity": 0.72,
   "hudTextOpacity": 1,
+  "crosshairOpacity": 0.72,
   "cockpitSolidity": 0,
   "fovDeg": 120,
   "audioMaster": 1,
@@ -94115,6 +95012,9 @@ function loadSettings() {
     }
     if (typeof data.hudTextOpacity === 'number' && isFinite(data.hudTextOpacity)) {
       input.hudTextOpacity = Math.max(0, Math.min(1, data.hudTextOpacity));
+    }
+    if (typeof data.crosshairOpacity === 'number' && isFinite(data.crosshairOpacity)) {
+      input.crosshairOpacity = Math.max(0, Math.min(1, data.crosshairOpacity));
     }
     if (typeof data.clipRec === 'boolean') input.clipRec = data.clipRec;
     if (typeof data.fovDeg === 'number') {
@@ -102227,6 +103127,7 @@ function gameLoop(timestamp) {
       try { _hubCityFrame(dt); } catch (_) {}
       try { _carrierFrame(dt); } catch (_) {}   // (v37.72) no-op until a carrier is spawned
       try { _owFrame(dt); } catch (e) { if (!window._owErr) { window._owErr = String((e && e.stack) || e); console.warn('[cities] frame threw:', e); } }   // (v38.78) overworld cities
+      try { _wildFrame(dt); } catch (e) { if (!window._wildErr) { window._wildErr = String((e && e.stack) || e); console.warn('[wild] frame threw:', e); } }   // (v42.74) wild leviathan families
       try { _cyberFrame(dt); } catch (_) {}     // (v37.76) no-op unless CYBERPUNK CITY is running
       __pmark('hub:city');
       try { _wxFrame(dt); } catch (_) {}

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.58';
+const LSS_BUILD = '42.79';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -644,6 +644,7 @@ const input = {
   hudScale: 1,
   hudOpacity: 0.72,
   hudTextOpacity: 1,
+  crosshairOpacity: 0.72,
   vrPerfMode: 'standard',
   vrStripFx: false,
   showFps: false,
@@ -2882,7 +2883,8 @@ const FreeFlightMode = {
       try { if (game._cavern && game._cavern.ring) game._cavern.ring.destroy(); } catch (_) {}
       game._cavern = null; game._cavernSalt = 0; game._cavernBiome = null;
       _HZ_CAVERN._returnPos = null; _HZ_CAVERN.coolBySector = {};
-      if (_HZ_CAVERN._pre) { _HZ_CAVERN._pre = false; if (window.Overlays && Overlays.warp) Overlays.warp(false); }
+      _HZ_CAVERN._pre = false;
+      if (!this._enteringCampaign) _ovWarpClear();
     } catch (_) {}
     try {
       if (typeof player !== 'undefined' && player) {
@@ -4917,6 +4919,7 @@ function _applyStagedRoundShip() {
 }
 
 function enterShipSelect() {
+  try { if (typeof _ovWarpClear === 'function') _ovWarpClear(); } catch (_) {}
   try { if (typeof _clipHideSaveBtn === 'function') _clipHideSaveBtn(); } catch (_) {}
   _stagedRoundShip = null;
   try { if (window._lssLockLandscape) window._lssLockLandscape(true); } catch (_) {}
@@ -16118,8 +16121,37 @@ function _hzDuskLights() {
 }
 
 const _HZ_CAVERN = { portals: null, DIST: 21500, ALT: 1400, COOLDOWN: 120, coolBySector: {}, _pre: false, _returnPos: null };
+function _ovWarpClear() {
+  try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}
+  try {
+    const _w = document.getElementById('ov-warp');
+    if (_w) { _w.classList.remove('show'); _w.classList.remove('tunnel'); }
+  } catch (_) {}
+}
 function _hzPortalsDispose() {
-  if (_HZ_CAVERN.portals) { for (const p of _HZ_CAVERN.portals) { try { p.ring.destroy(); } catch (_) {} } }
+  if (_HZ_CAVERN.portals) {
+    for (const p of _HZ_CAVERN.portals) {
+      try { p.ring.destroy(); } catch (_) {}
+      const g = p && p._guardsUp;
+      if (g && g.length) {
+        for (const b of g) {
+          if (!b) continue;
+          try {
+            if (typeof player !== 'undefined' && player) {
+              if (player.trackerLocks) delete player.trackerLocks[b.id];
+              if (player.trackerLockedTarget === b) player.trackerLockedTarget = null;
+            }
+          } catch (_) {}
+          try { b.destroy(); } catch (_) {}
+          try {
+            const ix = game.entities ? game.entities.indexOf(b) : -1;
+            if (ix >= 0) game.entities.splice(ix, 1);
+          } catch (_) {}
+        }
+      }
+      if (p) { p._guardsUp = null; p._guardsPending = false; }
+    }
+  }
   _HZ_CAVERN.portals = null;
 }
 function _hzCavernGenome(salt) {
@@ -16813,7 +16845,7 @@ function _swRippleInit() {
 }
 function _swDispWorld(h) {
   const W = window.__water || {};
-  const D = (W.disp != null) ? +W.disp : 180, G = (W.gain != null) ? +W.gain : 100;
+  const D = (W.disp != null) ? +W.disp : 100, G = (W.gain != null) ? +W.gain : 100;   // (v42.68) tracks uDispScale
   const Q = (W.crestQ != null) ? +W.crestQ : 11;
   const sq = h * (1 + Q * Math.abs(h));
   const x = sq * G / Math.max(D, 0.01);
@@ -17893,6 +17925,46 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
   }
 }
 const _swWingR = new THREE.Vector3();   // (v41.58) scratch for the wing-contact test
+const _swHMInv = new THREE.Matrix4(), _swHMMat = new THREE.Matrix4();
+const _swHMBox = new THREE.Box3(), _swHMBB = new THREE.Box3();
+const _swHMV1 = new THREE.Vector3(), _swHMV2 = new THREE.Vector3();
+const _swHM = { key: null, v: null };
+function _swHullMetrics() {
+  try {
+    const M = (typeof player !== 'undefined' && player) ? player.mesh : null;
+    if (!M) return null;
+    if (_swHM.key === M && _swHM.v) return _swHM.v;
+    let hull = null;
+    for (let i = 0; i < M.children.length; i++) {
+      const c = M.children[i];
+      if (c && c.userData && c.userData.bboxSize) { hull = c; break; }
+    }
+    if (!hull) return null;
+    M.updateWorldMatrix(true, true);
+    _swHMInv.copy(M.matrixWorld).invert();
+    _swHMBox.makeEmpty();
+    hull.traverse(function (o) {
+      if (!o || !o.isMesh || !o.geometry) return;
+      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+      _swHMBB.copy(o.geometry.boundingBox);
+      _swHMMat.multiplyMatrices(_swHMInv, o.matrixWorld);
+      _swHMBB.applyMatrix4(_swHMMat);
+      _swHMBox.union(_swHMBB);
+    });
+    if (_swHMBox.isEmpty()) return null;
+    const sc = M.getWorldScale(_swHMV1);
+    const sz = _swHMBox.getSize(_swHMV2);
+    const v = {
+      halfW: Math.abs(sz.x * sc.x) * 0.5,               // across - the axis the wing test rides
+      halfH: Math.abs(sz.y * sc.y) * 0.5,
+      halfL: Math.abs(sz.z * sc.z) * 0.5,
+      keel: Math.abs(_swHMBox.min.y * sc.y),            // how far the keel sits BELOW player.position.y
+    };
+    if (!isFinite(v.halfH) || v.halfH <= 0 || !isFinite(v.halfW) || v.halfW <= 0) return null;
+    _swHM.key = M; _swHM.v = v;
+    return v;
+  } catch (_) { return null; }
+}
 function _swHullSpan() {
   try {
     const m = (typeof player !== 'undefined' && player) ? player.mesh : null;
@@ -18026,7 +18098,7 @@ function _swRippleTick(dt) {
     if (W3.skipAngle === undefined) W3.skipAngle = 20; // the magic angle, degrees
     if (W3.skipSpeed === undefined) W3.skipSpeed = 190;
     
-    if (W3.disp === undefined) W3.disp = 180;      // soft-clip ceiling, world units
+    if (W3.disp === undefined) W3.disp = 100;      // soft-clip ceiling, world units
     if (W3.gain === undefined) W3.gain = 100;      // slope as h -> 0 : this is CALM water
     if (W3.crestQ === undefined) W3.crestQ = 11;   // crest-only expander : this is CREST HEIGHT
     if (W3.foamSlope === undefined) W3.foamSlope = 0.50;    // (v41.18) slope at which a crest whitecaps
@@ -18042,19 +18114,35 @@ function _swRippleTick(dt) {
     if (W3.breakEvery === undefined) W3.breakEvery = 4;
     if (W3.jetLean === undefined) W3.jetLean = 1.0;          
     if (W3.crestDebug === undefined) W3.crestDebug = 0;      
-    const fp = _swShipFootprint();
-    const mass = fp.heft * W3.mass;                  
+    const _fp0 = _swShipFootprint();
+    const _hm = (W3.hullRef !== 0) ? _swHullMetrics() : null;
+    const _bF = (W3.beamF != null) ? +W3.beamF : 1;
+    const fp = _hm ? {
+      LEN: _fp0.LEN + (_hm.halfL * 2 - _fp0.LEN) * _bF,
+      BEAM: _fp0.BEAM + (_hm.halfW * 2 - _fp0.BEAM) * _bF,
+      DRAFT: _fp0.DRAFT,
+      half: _fp0.half + (_hm.halfL - _fp0.half) * _bF,
+      heft: _fp0.heft,
+    } : _fp0;
+    const _keelH = _hm ? _hm.keel : 0;
+    const keelA = above - _keelH;
+    const prevKeelA = (R.prevKeel === undefined) ? keelA : R.prevKeel;
+    const DR = _hm ? Math.max(6, _hm.halfH * 2 * ((W3.draftF != null) ? +W3.draftF : 0.45)) : _fp0.DRAFT;
+    const _bc = (W3.beamComp != null) ? +W3.beamComp : 1;
+    const _ampK = (_hm && fp.BEAM > 1e-3)
+      ? Math.pow(Math.max(0.05, Math.min(1, _fp0.BEAM / fp.BEAM)), _bc) : 1;
+    const mass = fp.heft * W3.mass * _ampK;                  
     const _spInv = sp > 1e-3 ? 1 / sp : 0;
     const hx = player.velocity ? player.velocity.x * _spInv : 0, hz = player.velocity ? player.velocity.z * _spInv : 0;   
-    const touching = above < fp.DRAFT * 1.5 && above > -fp.DRAFT * 5;   
+    const touching = keelA < DR * 0.5 && keelA > -DR * 5;   
     
     
     
     const spacing = Math.max(22, fp.LEN * 0.35);
-    if (above > -fp.DRAFT * 4 && above < 200 && sp > 8) {
+    if (keelA > -DR * 4 && keelA < 200 && sp > 8) {
       const lwx = R.wakeX, moved = (lwx === undefined) ? 1e9 : ((px - lwx) * (px - lwx) + (pz - R.wakeZ) * (pz - R.wakeZ));
       if (moved > spacing * spacing && (touching || sp > 35)) {
-        const prox = 1.0 - Math.min(1, Math.abs(above) / 200);
+        const prox = 1.0 - Math.min(1, Math.abs(keelA) / 200);
         const amp = 0.16 * (fp.DRAFT / 13.5) * fp.heft * mass * (touching ? 1.0 : 0.35) * _swSpdCurve(sp, 420, (W3.spdTail != null) ? +W3.spdTail : 0.30) * (0.45 + 0.55 * prox) * W3.wake;
         const lpx = -hz, lpz = hx;                   
         const _wG = (W3.waveG != null) ? +W3.waveG : 1300;
@@ -18076,28 +18164,6 @@ function _swRippleTick(dt) {
         const sx = px - hx * shoulder, sz = pz - hz * shoulder;
         _swRippleSeed(sx + lpx * off, sz + lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
         _swRippleSeed(sx - lpx * off, sz - lpz * off, Math.max(20, fp.BEAM * 0.7), amp * 0.42);   
-        try {
-          const _wSpan = _swHullSpan();
-          if (_wSpan > fp.BEAM * 0.6) {
-            const _wm = player.mesh;
-            let _rx = lpx, _ry = 0, _rz = lpz;
-            if (_wm) { _swWingR.set(1, 0, 0).applyQuaternion(_wm.quaternion); _rx = _swWingR.x; _ry = _swWingR.y; _rz = _swWingR.z; }
-            const _wr = _wSpan * 0.88;                       // just inboard of the tip
-            const _wy = (player.mesh ? player.mesh.position.y : player.position.y);
-            for (let _sgn = -1; _sgn <= 1; _sgn += 2) {
-              const _tipY = _wy + _ry * _wr * _sgn;
-              const _dep = WL - _tipY;                        // >0 means this tip is under the surface
-              if (_dep <= 0) continue;
-              const _tx = px + _rx * _wr * _sgn, _tz = pz + _rz * _wr * _sgn;
-              const _wk = Math.min(1, _dep / Math.max(6, fp.DRAFT * 2));
-              _swRippleSeed(_tx, _tz, Math.max(22, fp.BEAM * 0.40), amp * _wk * (0.45 + 0.85 * spd) * 0.9);
-              _swFxN('wingCut');
-              if (window.__waterDisp && spd > 0.12 && ((R.dotStep | 0) & 1) === 0) {
-                _swCrestSpray(_tx, WL, _tz, amp * _wk * (0.4 + 0.9 * spd) * 0.8, player.velocity.x, player.velocity.z);
-              }
-            }
-          }
-        } catch (_) {}
         _swFxN('wake');
         R.dotStep = (R.dotStep | 0) + 1;
         if ((R.dotStep & 1) === 0) {
@@ -18113,7 +18179,7 @@ function _swRippleTick(dt) {
     }
     {
       const _pl = (W3.plane != null) ? +W3.plane : 1;
-      const _wet01 = Math.max(0, Math.min(1, (fp.DRAFT - above) / (2 * fp.DRAFT)));
+      const _wet01 = Math.max(0, Math.min(1, (DR * ((W3.kiss != null) ? +W3.kiss : 0.15) - keelA) / DR));
       if (_pl > 0 && _wet01 > 0.02 && sp > 55 && !game._swSubmerged) {
         R.planT = (R.planT || 0) + dt;
         const _rate = (3 + 11 * _wet01 * Math.min(1, sp / 300)) * _pl;
@@ -18136,6 +18202,59 @@ function _swRippleTick(dt) {
         }
       } else if (R.roosT) R.roosT = 0;
     }
+    {
+      const _wg = (W3.wing != null) ? +W3.wing : 1;
+      const _wm = (typeof player !== 'undefined' && player) ? player.mesh : null;
+      W3.wHalfW = _hm ? Math.round(_hm.halfW) : -1;
+      W3.wGate = (_wg > 0 ? 1 : 0) | (_hm ? 2 : 0) | (_wm ? 4 : 0) | (sp > 20 ? 8 : 0) |
+                 (!game._swSubmerged ? 16 : 0) | ((_hm && keelA < _hm.halfW) ? 32 : 0);
+      if (_wg > 0 && _hm && _wm && sp > 20 && !game._swSubmerged && keelA < _hm.halfW) {
+        _swWingR.set(1, 0, 0).applyQuaternion(_wm.quaternion);
+        const _wr = _hm.halfW * 0.90;                  // just inboard of the tip
+        const _tipBase = player.position.y - _keelH;   // the keel plane, on the centreline
+        const _sc = _swSpdCurve(sp, 350, (W3.spdTail != null) ? +W3.spdTail : 0.30);
+        const _kW = DR * ((W3.wingKiss != null) ? +W3.wingKiss : 0.22);
+        let _deep = 0;
+        for (let _s = -1; _s <= 1; _s += 2) {
+          const _d = WL + _kW - (_tipBase + _swWingR.y * _wr * _s);
+          if (_d > _deep) _deep = _d;
+        }
+        W3.wRightY = +_swWingR.y.toFixed(3);
+        W3.wDeep = Math.round(_deep);
+        W3.wR = Math.round(_wr);
+        const _seedR = Math.max(18, fp.BEAM * 0.22);
+        if (_deep > 0) {
+          const _wStep = Math.max(10, _seedR * ((W3.wingStep != null) ? +W3.wingStep : 0.45));
+          const _wlx = R.wingX;
+          const _wMoved = (_wlx === undefined) ? 1e9
+                        : ((px - _wlx) * (px - _wlx) + (pz - R.wingZ) * (pz - R.wingZ));
+          R.wingT = (R.wingT || 0) + dt;
+          if (_wMoved > _wStep * _wStep || R.wingT > 0.30) {
+            R.wingT = 0; R.wingX = px; R.wingZ = pz;
+            R.wingS = (R.wingS | 0) + 1;
+            const _wSpray = (R.wingS & 1) === 0;
+            for (let _s = -1; _s <= 1; _s += 2) {
+              const _d = WL + _kW - (_tipBase + _swWingR.y * _wr * _s);
+              if (_d <= 0) continue;
+              const _wk = Math.min(1, Math.max(0.30, _d / Math.max(6, DR)));
+              const _tx = px + _swWingR.x * _wr * _s, _tz = pz + _swWingR.z * _wr * _s;
+              const _wa = 0.16 * (_fp0.DRAFT / 13.5) * _fp0.heft * mass * _sc * _wk * W3.wake * 0.55
+                          * ((W3.wingAmp != null) ? +W3.wingAmp : 1);
+              _swRippleSeed(_tx, _tz, _seedR, _wa);
+              _swFxN('wingCut');
+              if (_wSpray && _swFxRoom() > 10) {
+                _swSpawnSplashV(_tx, WL, _tz,
+                                { x: player.velocity.x, y: -Math.max(12, sp * 0.09 * _wk), z: player.velocity.z },
+                                fp.BEAM * 0.34, 0.35 + 0.65 * _wk, _swDeadrise(_fp0));
+              }
+              if (_wSpray && window.__waterDisp && !W3.crestBreak) {
+                _swCrestSpray(_tx, WL, _tz, _wa, player.velocity.x, player.velocity.z);
+              }
+            }
+          }
+        } else if (R.wingT) R.wingT = 0;
+      } else if (R.wingT) R.wingT = 0;
+    }
     if (touching && sp <= 8) {
       R.bobT = (R.bobT || 0) + dt;
       if (R.bobT > 0.33) { R.bobT = 0; _swFxN('rest'); _swRippleSeed(px, pz, Math.max(60, (fp.LEN + fp.BEAM) * 0.55), 0.018 * (fp.DRAFT / 13.5) * fp.heft * mass); }
@@ -18144,13 +18263,14 @@ function _swRippleTick(dt) {
     if (_wantHiss && !game._dragHiss) { try { game._dragHiss = _swStartDragHiss(); } catch (_) {} }
     else if (!_wantHiss && game._dragHiss) { try { _swStopDragHiss(game._dragHiss); } catch (_) {} game._dragHiss = null; }
     if (game._dragHiss && game._dragHiss.set) { try { game._dragHiss.set(sp); } catch (_) {} }
-    if (above < 0 && prevAbove >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
-    else if (above > 0 && prevAbove <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
+    if (keelA < 0 && prevKeelA >= 0)      { _swImpact(px, pz, +1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop', new THREE.Vector3(px, WL, pz), { refDistance: 300, maxDistance: 5200 }); } catch (_) {} }
+    else if (keelA > 0 && prevKeelA <= 0) { _swImpact(px, pz, -1, fp, mass, player.velocity, WL, R); try { if (typeof playSpatialSound === 'function') playSpatialSound('water_bloop_soft', new THREE.Vector3(px, WL, pz), { refDistance: 260, maxDistance: 4200 }); } catch (_) {} }
     try { const _wx = (window.__water = window.__water || {});
       _wx.xAbove = Math.round(above); _wx.xPrev = Math.round(prevAbove);
-      if (above < 0 && prevAbove >= 0) _wx.xEnter = (_wx.xEnter | 0) + 1;
-      else if (above > 0 && prevAbove <= 0) _wx.xExit = (_wx.xExit | 0) + 1; } catch (_) {}
-    if (above < 0 && prevAbove >= 0 && player.velocity) {
+      _wx.xKeel = Math.round(keelA); _wx.xDraft = Math.round(DR); _wx.xKeelOff = Math.round(_keelH);   // (v42.63)
+      if (keelA < 0 && prevKeelA >= 0) _wx.xEnter = (_wx.xEnter | 0) + 1;
+      else if (keelA > 0 && prevKeelA <= 0) _wx.xExit = (_wx.xExit | 0) + 1; } catch (_) {}
+    if (keelA < 0 && prevKeelA >= 0 && player.velocity) {
       const _sk = (W3.skip != null) ? +W3.skip : 1;
       const _vyIn = -player.velocity.y;
       const _inc = Math.atan2(Math.max(0, _vyIn), Math.max(1e-4, sp)) * 57.29578;
@@ -18163,6 +18283,7 @@ function _swRippleTick(dt) {
       }
     }
     R.prevAbove = above;
+    R.prevKeel = keelA;   // (v42.63)
     try { _swWetTick(R, px, player.position.y, pz, player.velocity, fp, WL, dt); } catch (_) {}
     try { _swDripWTick(dt, WL); } catch (_) {}
     try { _swBlastTick(dt, WL); } catch (_) {}   // (v41.19) deferred blast columns
@@ -18253,9 +18374,11 @@ function _swRippleTick(dt) {
             _Wc.crCost = Math.round(_c * 10) / 10; }
         }
         if (!R._crErr && _scanNow) {
-          const dispS = (_Wc.disp != null) ? _Wc.disp : 180, gainS = (_Wc.gain != null) ? _Wc.gain : 180;
+          const dispS = (_Wc.disp != null) ? _Wc.disp : 100, gainS = (_Wc.gain != null) ? _Wc.gain : 100;
           const g2d = gainS / Math.max(dispS, 0.01);
-          const bPeak = (_Wc.breakPeak != null) ? _Wc.breakPeak : 0.22;
+          const _bH = (_Wc.breakHeight != null) ? +_Wc.breakHeight : 30;
+          const bPeak = (_Wc.breakPeak != null) ? +_Wc.breakPeak
+                                                : Math.min(0.95, _bH / Math.max(1, dispS));
           const bSlope = (_Wc.breakSlope != null) ? _Wc.breakSlope : 0.06;
           const bRate = (_Wc.breakRate != null) ? _Wc.breakRate : 0.5;
           const budget = Math.max(1, (_Wc.breakBudget | 0) || 8);
@@ -18263,6 +18386,10 @@ function _swRippleTick(dt) {
                           ((_Wc.breakPool != null) ? +_Wc.breakPool : 0.40);
           const jet = (_Wc.jetLean != null) ? _Wc.jetLean : 1.0;
           const cx = R.center.x, cz = R.center.y, invR = 1 / RES;
+          const _bR = (_Wc.breakR != null) ? +_Wc.breakR : 700;
+          const _bR2 = _bR * _bR;
+          const _spx = (player && player.position) ? player.position.x : cx;
+          const _spz = (player && player.position) ? player.position.z : cz;
           const svx = player.velocity ? player.velocity.x : 0, svz = player.velocity ? player.velocity.z : 0;
           const sc = function (hh, wf) { const x = hh * g2d; return (x / (1 + Math.abs(x))) * wf; };  
           let emitted = 0, nBreak = 0, maxV = 0;
@@ -18273,10 +18400,14 @@ function _swRippleTick(dt) {
             const j = 1 + ((jj + R._crScan) % (CRS - 2));
             const rvY = (CO + j + 0.5) * invR, edY = Math.min(rvY, 1 - rvY);
             const rowB = j * CRS;
+            const _dzr = (cz + (rvY - 0.5) * B) - _spz, _dz2 = _dzr * _dzr;
+            if (_dz2 > _bR2) continue;
             for (let i = 1; i < CRS - 1; i++) {
               const h = buf[(rowB + i) * 4];
               if (h < 0.12) continue;                                          
               const rvX = (CO + i + 0.5) * invR, ed = Math.min(Math.min(rvX, 1 - rvX), edY);
+              const _dxr = (cx + (rvX - 0.5) * B) - _spx;
+              if (_dxr * _dxr + _dz2 > _bR2) continue;
               const t = ed <= 0 ? 0 : (ed >= 0.12 ? 1 : ed / 0.12), wf = t * t * (3 - 2 * t);   
               const vD = sc(h, wf);
               if (vD < bPeak) continue;
@@ -19428,7 +19559,7 @@ function _swBuildHubWaterDispGet(WL) {
       THREE.UniformsLib.fog,
       { uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: _SW_RIPPLE_BOUNDS },   // (v41.45) the constant, not a literal
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() },
-        uDispScale: { value: 180.0 }, uGain: { value: 100.0 }, uCrestQ: { value: 11.0 },
+        uDispScale: { value: 100.0 }, uGain: { value: 100.0 }, uCrestQ: { value: 11.0 },
         uFoamSlope: { value: 0.50 }, uSteepFoam: { value: 0.55 }, uNormK: { value: 1.0 },
         color: { value: new THREE.Color(0x16465c) },
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 },
@@ -24490,6 +24621,7 @@ const OW = {
   SPREAD: [0, -0.07, 0.07, -0.14, 0.14],   // ...and a fan of headings around it: 20 candidates per sector
   RADIUS: 3400,
   BUILD_DIST: 11500, DROP_DIST: 14000, ARM_DIST: 9500,
+  PRELOAD: true,
   FLEET: 3, CARRIER_HP_X: 6,
   ZAP: { range: 1700, every: 3.2, dmg: 1400, charge: 1.6 },
   REGEN: { delay: 6, rate: 0.02 },   // (v38.81) an owned carrier repairs 2%/s of max after 6 s without a hit
@@ -26025,17 +26157,18 @@ function _owFrame(dt) {
   const playing = game.state === 'playing';
   const K = _owK();
   const buildD = K.buildDist || OW.BUILD_DIST, dropD = Math.max(buildD + 1500, K.dropDist || OW.DROP_DIST);
+  const _owPre = (K.preload != null) ? !!+K.preload : OW.PRELOAD;
   let builtThisFrame = false, nearest = -1, nearestD = Infinity;
   for (let i = 0; i < C.length; i++) {
     const c = C[i];
     const d = Math.hypot(px - c.x, pz - c.z);
     c._playerDist = d;
     if (d < nearestD) { nearestD = d; nearest = i; }
-    if (!c.built && d < buildD && !builtThisFrame) {
+    if (!c.built && (_owPre || d < buildD) && !builtThisFrame) {
       builtThisFrame = true;
       try { _owBuild(c); } catch (e) { console.warn('[cities] build failed:', c.name, e); c.built = { city: null, group: null, failed: true }; }
       try { if (typeof _carrierLoadProto === 'function') _carrierLoadProto(null); } catch (_) {}
-    } else if (c.built && d > dropD) _owDrop(c);
+    } else if (c.built && !_owPre && d > dropD) _owDrop(c);
   }
   if (typeof camera !== 'undefined' && camera) {
     if (!OW._sunV) OW._sunV = new THREE.Vector3();
@@ -39514,6 +39647,374 @@ function _preloadCyanRing() {
     err => { _cyanRingLoading = false; console.warn('[portal] cyanring.glb load failed:', err && err.message); });
 }
 const PORTAL_GATE_DIAMETER = 760;   
+const _WILD = {
+  on: true,
+  packs: 5,             // family groups in the world at once
+  min: 3, max: 6,       // members per family
+  babyChance: 0.45,     // share of a family born small
+  babyScale: 0.42,      // a baby, as a fraction of the adult
+  rMin: 6500, rMax: 21000,   // spawn ring around the hub city
+  cityKeep: 5200,       // never inside this of the city centre
+  roam: 2700,           // how far from the family's patch they wander  (was 1500)
+  step: 24,             // walking speed                               (was 46)
+  charge: 68,           // speed once provoked                         (was 120)
+  anim: 0.45,           // walk-cycle rate; applied every frame, so it is live-tunable
+  aggroR: 3400,         // how far it will follow what hit it
+  loseR: 6000,          // past this it gives up
+  deAggro: 15,          // seconds of peace before it settles down
+  hp: 2600, hpBaby: 800,
+  touch: 240, touchCd: 1.5,   // contact damage while angry
+  size: 780,            // adult, longest axis, world units
+  turn: 1.6,            // radians/sec of heading change
+  _list: null, _built: 0, _loading: false,
+};
+
+function _wildRigClone(src) {
+  const out = src.clone(true);
+  const srcSkins = []; src.traverse(n => { if (n.isSkinnedMesh) srcSkins.push(n); });
+  if (!srcSkins.length) return out;
+  out.updateMatrixWorld(true);
+  const boneByName = {};
+  out.traverse(n => { if (n.isBone) boneByName[n.name] = n; });
+  const dstSkins = []; out.traverse(n => { if (n.isSkinnedMesh) dstSkins.push(n); });
+  for (let i = 0; i < dstSkins.length; i++) {
+    const s = srcSkins[i], d = dstSkins[i];
+    if (!s || !d || !s.skeleton) continue;
+    const bones = [];
+    for (const b of s.skeleton.bones) { const nb = boneByName[b.name]; if (nb) bones.push(nb); }
+    if (bones.length !== s.skeleton.bones.length) continue;   // names did not line up: leave it bound as-is
+    try { d.bind(new THREE.Skeleton(bones, s.skeleton.boneInverses), s.bindMatrix); } catch (_) {}
+  }
+  return out;
+}
+
+const _wildProtos = {};
+function _wildProto(key) {
+  if (_wildProtos[key]) return _wildProtos[key];
+  _wildProtos[key] = new Promise((resolve) => {
+    let loader = null;
+    try { loader = new THREE.GLTFLoader(); } catch (_) { resolve(null); return; }
+    loader.load(MONSTER_BASE_URL + key + '.glb' + _MODEL_CACHE_BUST,
+      (gltf) => {
+        try { if (typeof _lssCapModelTextures === 'function') _lssCapModelTextures(gltf.scene, 'wild ' + key); } catch (_) {}
+        const def = MONSTER_DEFS.find(d => d.key === key) || null;
+        const rim = (def && def.ghost != null) ? def.ghost : 0x8ad8ff;
+        try {
+          gltf.scene.traverse(node => {
+            if (!node.isMesh || !node.material) return;
+            const mats = Array.isArray(node.material) ? node.material : [node.material];
+            const out = [];
+            for (const mat of mats) {
+              if (!mat) { out.push(mat); continue; }
+              try {
+                const flat = new THREE.MeshBasicMaterial({
+                  map: mat.map || null,
+                  color: (mat.color && mat.map) ? 0xffffff : ((mat.color && mat.color.getHex()) || 0x888888),
+                });
+                if (!mat.map) flat.color.multiplyScalar(0.85);
+                if (typeof _addBasicRim === 'function') _addBasicRim(flat, rim, 0.35);
+                out.push(flat);
+                if (mat.dispose) { try { mat.dispose(); } catch (_) {} }
+              } catch (_) { out.push(mat); }
+            }
+            node.material = Array.isArray(node.material) ? out : out[0];
+            node.castShadow = false; node.receiveShadow = false;
+          });
+        } catch (_) {}
+        let maxDim = 1, ctr = new THREE.Vector3(), sy = 1;
+        try {
+          gltf.scene.updateMatrixWorld(true);
+          const b = new THREE.Box3().setFromObject(gltf.scene);
+          const sz = b.getSize(new THREE.Vector3());
+          maxDim = Math.max(sz.x, sz.y, sz.z) || 1;
+          sy = sz.y || maxDim;
+          ctr = b.getCenter(new THREE.Vector3());
+        } catch (_) {}
+        resolve({ scene: gltf.scene, clips: gltf.animations || [], maxDim: maxDim, ctr: ctr, sy: sy });
+      },
+      undefined,
+      (err) => { console.warn('[wild] load failed:', key, err && err.message); resolve(null); });
+  });
+  return _wildProtos[key];
+}
+
+class WildLeviathan {
+  constructor(def, home, baby, packId) {
+    this.isWild = true; this.isMonster = true;
+    this.def = def; this.name = def.key;
+    this.packId = packId; this.baby = !!baby;
+    this.alive = true;
+    this.maxHealth = baby ? _WILD.hpBaby : _WILD.hp;
+    this.health = this.maxHealth;
+    this.size = _WILD.size * (baby ? _WILD.babyScale : 1);
+    this.collisionRadius = this.size * 0.42;
+    this.team = 'wild';                 // its own faction: hostile to nobody until provoked
+    this.monId = -1;                    // never net-synced; the finds in the net layer key on real ids
+    this.id = 'wild' + packId + '_' + Math.floor(Math.random() * 1e6);
+    this.home = home.clone();
+    this.position = home.clone();
+    const a = Math.random() * Math.PI * 2, r = Math.random() * _WILD.roam;
+    this.position.x += Math.cos(a) * r; this.position.z += Math.sin(a) * r;
+    this.velocity = new THREE.Vector3();
+    this.mesh = null; this._mixer = null; this._gone = false;
+    this.footOff = this.size * 0.5;     // replaced with the model's real half-height on attach
+    this.heading = Math.random() * Math.PI * 2;
+    this.aggro = false; this._deAggroT = 0; this._foe = null;
+    this._touchCd = 0; this._hitFxTimer = 0; this._lastAttacker = null;
+    this._wanderT = Math.random() * 3;
+    this._wander = this.position.clone();
+    this.shipState = 'flying';          // the field other systems read; nothing here flies
+    this.damageDealt = 0; this.kills = 0; this.deaths = 0;
+    this._attach();
+  }
+
+  _attach() {
+    _wildProto(this.def.key).then((proto) => {
+      if (this._gone || !this.alive || !proto || !proto.scene) return;
+      let obj = null;
+      try { obj = _wildRigClone(proto.scene); } catch (_) { return; }
+      if (!obj) return;
+      const maxDim = proto.maxDim || 1;
+      obj.position.sub(proto.ctr || new THREE.Vector3());
+      const g = new THREE.Group();
+      g.add(obj);
+      const k = this.size / maxDim;
+      g.scale.setScalar(k);
+      this.footOff = ((proto.sy || maxDim) * 0.5) * k;
+      g.position.copy(this.position);
+      scene.add(g);
+      this.mesh = g;
+      try {
+        if (proto.clips && proto.clips.length && THREE.AnimationMixer) {
+          this._mixer = new THREE.AnimationMixer(obj);
+          const clip = (typeof _monStripRootMotion === 'function') ? _monStripRootMotion(proto.clips[0]) : proto.clips[0];
+          const act = this._mixer.clipAction(clip);
+          act.setLoop(THREE.LoopRepeat, Infinity);
+          this._animJit = 0.85 + Math.random() * 0.3;
+          this._act = act;
+          act.timeScale = _WILD.anim * this._animJit;
+          act.play();
+          act.time = Math.random() * (clip.duration || 1);
+        }
+      } catch (_) {}
+    });
+  }
+
+  _groundY(x, z) {
+    try { return _stGroundYCarved(x, z, game.sandwichTerrain); } catch (_) { return this.position.y - this.footOff; }
+  }
+
+  update(dt) {
+    if (!this.alive) return;
+    if (this._hitFxTimer > 0) this._hitFxTimer -= dt;
+    if (this._touchCd > 0) this._touchCd -= dt;
+
+    if (this.aggro) {
+      this._deAggroT -= dt;
+      const foe = this._foe;
+      const gone = !foe || !foe.position || (foe.shipState === 'dead') ||
+                   foe.position.distanceTo(this.position) > _WILD.loseR;
+      if (this._deAggroT <= 0 || gone) { this.aggro = false; this._foe = null; }
+    }
+
+    let tx, tz, spd;
+    if (this.aggro && this._foe && this._foe.position) {
+      tx = this._foe.position.x; tz = this._foe.position.z; spd = _WILD.charge * (this.baby ? 1.15 : 1);
+    } else {
+      this._wanderT -= dt;
+      if (this._wanderT <= 0) {
+        this._wanderT = 3 + Math.random() * 5;
+        const a = Math.random() * Math.PI * 2, r = Math.random() * _WILD.roam;
+        this._wander.set(this.home.x + Math.cos(a) * r, 0, this.home.z + Math.sin(a) * r);
+      }
+      tx = this._wander.x; tz = this._wander.z; spd = _WILD.step * (this.baby ? 1.25 : 1);
+    }
+
+    const want = Math.atan2(tx - this.position.x, tz - this.position.z);
+    let d = want - this.heading;
+    while (d > Math.PI) d -= Math.PI * 2;
+    while (d < -Math.PI) d += Math.PI * 2;
+    const turn = _WILD.turn * dt;
+    this.heading += Math.max(-turn, Math.min(turn, d));
+    const dist = Math.hypot(tx - this.position.x, tz - this.position.z);
+    const go = (dist > this.size * 0.8) ? spd : 0;
+    this.position.x += Math.sin(this.heading) * go * dt;
+    this.position.z += Math.cos(this.heading) * go * dt;
+
+    const gy = this._groundY(this.position.x, this.position.z);
+    this.position.y = gy + this.footOff;
+    this.velocity.set(Math.sin(this.heading) * go, 0, Math.cos(this.heading) * go);
+
+    if (this.mesh) {
+      this.mesh.position.copy(this.position);
+      this.mesh.rotation.y = this.heading;
+      if (this._mixer) {
+        const vis = (typeof camera !== 'undefined' && camera && camera.position)
+          ? this.position.distanceToSquared(camera.position) < 14000 * 14000 : true;
+        if (this.mesh.visible !== vis) this.mesh.visible = vis;
+        if (vis) {
+          if (this._act) this._act.timeScale = _WILD.anim * (this._animJit || 1);
+          this._mixer.update(dt);
+        }
+      }
+    }
+
+    if (this.aggro && this._touchCd <= 0 && typeof player !== 'undefined' && player &&
+        player.shipState !== 'dead' && player.position) {
+      if (player.position.distanceTo(this.position) < this.collisionRadius + 120) {
+        this._touchCd = _WILD.touchCd;
+        try { if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.touch * (this.baby ? 0.45 : 1), this); } catch (_) {}
+      }
+    }
+  }
+
+  takeDamage(dmg, attacker, hitPoint) {
+    if (!this.alive) return 0;
+    if (attacker === player && typeof _aegisDmgOut === 'function') {
+      try { dmg = _aegisDmgOut(dmg, this); } catch (_) {}
+    }
+    if (this._hitFxTimer <= 0) {
+      this._hitFxTimer = 0.12;
+      const at = hitPoint || this.position;
+      try {
+        if (typeof v8SpawnSparks === 'function') v8SpawnSparks(at, 6, 1.4, 320, this.def.gut1, 0xffddee);
+        if (typeof spawnDynamicLight === 'function') spawnDynamicLight(at, this.def.gut1, 2.0, 420, 0.12);
+      } catch (_) {}
+    }
+    this._lastAttacker = attacker;
+    const foe = (attacker && attacker.position) ? attacker : ((attacker === player) ? player : null);
+    if (foe) {
+      this.aggro = true; this._foe = foe; this._deAggroT = _WILD.deAggro;
+      if (_WILD._list) {
+        for (const o of _WILD._list) {
+          if (o && o.alive && o !== this && o.packId === this.packId &&
+              o.position.distanceTo(this.position) < _WILD.aggroR) {
+            o.aggro = true; o._foe = foe; o._deAggroT = _WILD.deAggro;
+          }
+        }
+      }
+    }
+    this.health -= dmg;
+    if (this.health <= 0) this.die();
+    return dmg;
+  }
+
+  die() {
+    if (!this.alive) return;
+    this.alive = false;
+    try {
+      if (typeof player !== 'undefined' && player && player.trackerLocks && this.id != null) {
+        delete player.trackerLocks[this.id];
+        if (player.trackerLockedTarget === this) player.trackerLockedTarget = null;
+      }
+    } catch (_) {}
+    try { if (typeof spawnMonsterGuts === 'function') spawnMonsterGuts(this.position, this.size, this.def); } catch (_) {}
+    try { if (typeof showKillMarker === 'function') showKillMarker(); } catch (_) {}
+    try {
+      if (this._lastAttacker === player || this._lastAttacker === 'player') {
+        player.monKills = (player.monKills | 0) + 1;
+        if (typeof _aegisAwardKill === 'function') _aegisAwardKill();
+      }
+    } catch (_) {}
+    this.destroy();
+  }
+
+  destroy() {
+    this._gone = true; this.alive = false;
+    if (this._mixer) { try { this._mixer.stopAllAction(); } catch (_) {} this._mixer = null; }
+    if (this.mesh) {
+      try { scene.remove(this.mesh); } catch (_) {}
+      this.mesh = null;
+    }
+  }
+}
+
+function _wildDispose() {
+  if (_WILD._list) {
+    for (const m of _WILD._list) { try { m.destroy(); } catch (_) {} }
+    if (game.monsters) {
+      for (let i = game.monsters.length - 1; i >= 0; i--) {
+        if (game.monsters[i] && game.monsters[i].isWild) game.monsters.splice(i, 1);
+      }
+    }
+  }
+  _WILD._list = null; _WILD._built = 0;
+}
+
+function _wildPickHome() {
+  const T = game.sandwichTerrain;
+  if (!T || typeof HUB_CITY === 'undefined') return null;
+  let WL = -1e9;
+  try { if (game._hubWater) WL = game._hubWater.userData.WL; } catch (_) {}
+  for (let i = 0; i < 40; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const r = _WILD.rMin + Math.random() * (_WILD.rMax - _WILD.rMin);
+    const x = HUB_CITY.x + Math.cos(a) * r, z = HUB_CITY.z + Math.sin(a) * r;
+    if (Math.hypot(x - HUB_CITY.x, z - HUB_CITY.z) < _WILD.cityKeep) continue;
+    let gy = NaN;
+    try { gy = _stGroundYCarved(x, z, T); } catch (_) { continue; }
+    if (!isFinite(gy) || gy < WL + 60) continue;          // in the lake, or too close to its edge
+    return new THREE.Vector3(x, gy, z);
+  }
+  return null;
+}
+
+function _wildFrame(dt) {
+  const W = (typeof window !== 'undefined') ? (window.__wild = window.__wild || {}) : {};
+  for (const k in W) { if (k in _WILD) _WILD[k] = W[k]; }
+  const inOverworld = !!(game && game.selectedMap === 'hub_overworld' &&
+                         game.sandwichTerrain && game.sandwichTerrain.ON && !game._cavern);
+  if (!_WILD.on || !inOverworld) { if (_WILD._list) _wildDispose(); return; }
+  if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) { if (_WILD._list) _wildDispose(); return; }
+
+  if (!_WILD._list) {
+    _WILD._list = [];
+    if (!game.monsters) game.monsters = [];
+    _WILD._built = 0;
+  }
+  _WILD._retryT = (_WILD._retryT || 0) - dt;
+  if (_WILD._built < _WILD.packs && game.state === 'playing' && _WILD._retryT <= 0) {
+    const home = _wildPickHome();
+    if (home) {
+      const def = MONSTER_DEFS[Math.floor(Math.random() * MONSTER_DEFS.length)];
+      const n = _WILD.min + Math.floor(Math.random() * (_WILD.max - _WILD.min + 1));
+      const pid = _WILD._built;
+      for (let i = 0; i < n; i++) {
+        const baby = (i > 0) && (Math.random() < _WILD.babyChance);
+        let m = null;
+        try { m = new WildLeviathan(def, home, baby, pid); } catch (e) { console.warn('[wild] spawn failed', e); continue; }
+        _WILD._list.push(m);
+        game.monsters.push(m);
+      }
+      _WILD._built++;
+    } else {
+      _WILD._retryT = 1.5;   // nowhere to stand this frame; try again shortly, keep the slot
+    }
+  }
+
+  for (let i = _WILD._list.length - 1; i >= 0; i--) {
+    const m = _WILD._list[i];
+    if (!m || !m.alive) {
+      _WILD._list.splice(i, 1);
+      if (game.monsters) { const ix = game.monsters.indexOf(m); if (ix >= 0) game.monsters.splice(ix, 1); }
+      continue;
+    }
+    try { m.update(dt); } catch (e) { if (!window._wildUpdErr) { window._wildUpdErr = String((e && e.stack) || e); console.warn('[wild] update threw:', e); } }
+  }
+}
+if (typeof window !== 'undefined') {
+  window.__wild = window.__wild || {};
+  window.__wildDbg = () => ({
+    on: _WILD.on, built: _WILD._built, packs: _WILD.packs,
+    alive: _WILD._list ? _WILD._list.filter(m => m && m.alive).length : 0,
+    withMesh: _WILD._list ? _WILD._list.filter(m => m && m.mesh).length : 0,
+    babies: _WILD._list ? _WILD._list.filter(m => m && m.baby).length : 0,
+    angry: _WILD._list ? _WILD._list.filter(m => m && m.aggro).length : 0,
+    types: _WILD._list ? [...new Set(_WILD._list.map(m => m && m.def && m.def.key))] : [],
+    inMonsters: (game.monsters || []).filter(m => m && m.isWild).length,
+  });
+}
+
 class BossPortal {
   constructor(pos) {
     this.position = pos.clone();
@@ -43366,7 +43867,7 @@ _particlePoints.visible = false;
 scene.add(_particlePoints);
 const _ptsColorScratch = new THREE.Color();
 
-const _SPL_MAX = 384;
+const _SPL_MAX = 768;
 const _splPos = new Float32Array(_SPL_MAX * 3);
 const _splCol = new Float32Array(_SPL_MAX * 3);
 const _splSize = new Float32Array(_SPL_MAX);
@@ -43393,9 +43894,20 @@ const _splDropTex = (function () {
   const t = new THREE.CanvasTexture(c); t.needsUpdate = true; return t;
 })();
 const _splMat = new THREE.ShaderMaterial({
-  uniforms: { uMap: { value: _splDropTex }, uScale: { value: 600 } },
+  uniforms: { uMap: { value: _splDropTex }, uScale: { value: 600 }, uOpacity: { value: 100 } },
   vertexShader: _ptsMat.vertexShader,
-  fragmentShader: _ptsMat.fragmentShader,
+  fragmentShader: [
+    'uniform sampler2D uMap;',
+    'uniform float uOpacity;',
+    'varying vec3 vColor;',
+    'varying float vAlpha;',
+    'void main() {',
+    '  vec4 tex = texture2D(uMap, gl_PointCoord);',
+    '  float a = min(1.0, tex.a * vAlpha * uOpacity);',
+    '  if (a < 0.004) discard;',
+    '  gl_FragColor = vec4(vColor * tex.rgb, a);',
+    '}',
+  ].join('\n'),
   transparent: true,
   blending: THREE.NormalBlending,
   depthWrite: false,
@@ -43497,8 +44009,10 @@ function updateParticles(dt) {
   const _pcz = (typeof player !== 'undefined' && player && player.position) ? player.position.z : 0;
   const _bufH = (typeof renderer !== 'undefined' && renderer && renderer.domElement)
     ? renderer.domElement.height : 1080;
-  _ptsMat.uniforms.uScale.value = _bufH * 0.5 *
+  const _uScale = _bufH * 0.5 *
     ((typeof camera !== 'undefined' && camera) ? camera.projectionMatrix.elements[5] : 2.4);
+  _ptsMat.uniforms.uScale.value = _uScale;
+  _splMat.uniforms.uScale.value = _uScale;
   let _w = 0;
   let _ws = 0;
   for (let i = game.particles.length - 1; i >= 0; i--) {
@@ -43552,6 +44066,10 @@ function updateParticles(dt) {
   }
   _splGeo.setDrawRange(0, _ws);
   _splashPts.visible = _ws > 0;
+  {
+    const _so = (window.__water && window.__water.sprayOpacity != null) ? +window.__water.sprayOpacity : 100;
+    if (isFinite(_so) && _splMat.uniforms.uOpacity.value !== _so) _splMat.uniforms.uOpacity.value = _so;
+  }
   if (_ws > 0) {
     _splPosAttr.needsUpdate = true;
     _splColAttr.needsUpdate = true;
@@ -53761,6 +54279,7 @@ function updateRoundSystem(dt) {
         }
         const sel = document.getElementById('ship-select');
         try { _shipSelectSetLaunching(false); } catch (_) {}
+        try { if (typeof _ovWarpClear === 'function') _ovWarpClear(); } catch (_) {}
         if (sel) { sel.style.display = 'flex'; sel.classList.add('active'); }
         try { _xrMenuForceHidden = false; } catch (_) {}
         try { buildShipSelect(); } catch (e) { console.warn('[round-swap] buildShipSelect failed, launching anyway:', e); }
@@ -54183,6 +54702,7 @@ function returnToRootMenu(opts) {
   }
 
   game.state = 'select';
+  try { if (typeof _ovWarpClear === 'function') _ovWarpClear(); } catch (_) {}
 
   if (document.exitPointerLock) {
     try { document.exitPointerLock(); } catch (e) {}
@@ -55397,14 +55917,24 @@ function _hlGA() {
 let _hudDomA = '';
 function _hudDomAlpha() {
   try {
-    const g = _hlGA(), t = _hlTA();
-    const key = g + '|' + t;
+    const g = _hlGA(), t = _hlTA(), c = _hlCA();
+    const key = g + '|' + t + '|' + c;
     if (key === _hudDomA) return;
     _hudDomA = key;
     const st = document.documentElement.style;
     st.setProperty('--lss-hud-gfx', String(g));
     st.setProperty('--lss-hud-txt', String(t));
+    st.setProperty('--lss-hud-cross', String(c));
   } catch (_) {}
+}
+
+function _hlCA() {
+  if (typeof input !== 'undefined' && input && typeof input.crosshairOpacity === 'number') {
+    const v = input.crosshairOpacity;
+    if (isFinite(v) && v >= 0 && v <= 1) return v;
+  }
+  const a = (typeof window !== 'undefined' && window.__hudCrossAlpha != null) ? +window.__hudCrossAlpha : 0.72;
+  return (a >= 0 && a <= 1) ? a : 0.72;
 }
 
 function _hlTA() {
@@ -55702,11 +56232,12 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   }
 
   r = _hlPlace(_HL.reticle, W, H);
+  ctx.globalAlpha = _hlCA();   // (v42.59) the crosshair has its own slider
   if (v.blasterClose) {
     ctx.save();
     ctx.strokeStyle = _hlA(_HL.reticle.col, 0.7);
     ctx.lineWidth = Math.max(1, r.vmin * 0.16);
-    ctx.globalAlpha = _hlGA();   // (v41.40) re-arm after the ability label above
+    ctx.globalAlpha = _hlCA();   // (v42.59) crosshair slider ; re-arm after the ability label above
     ctx.beginPath(); ctx.arc(r.cx, r.cy, Math.min(r.w, r.h) / 2, 0, 7); ctx.stroke();
     ctx.beginPath(); ctx.arc(r.cx, r.cy, Math.max(1, r.vmin * 0.2), 0, 7);
     ctx.fillStyle = _HL.reticle.col; ctx.fill();
@@ -55714,6 +56245,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   } else {
     _hlReticle(ctx, r, _hlA(_HL.reticle.col, 0.75));
   }
+  ctx.globalAlpha = _hlGA();   // (v42.59) back to the HUD's own alpha for what follows
 
   if (v.aegisStr) {
     r = _hlPlace(_HL.aegis, W, H);
@@ -60181,6 +60713,10 @@ function _refreshSettingsValues() {
     setRange('set-hud-text-opacity', null, _ht);
     const _htv = $('#val-hud-text-opacity');
     if (_htv) _htv.textContent = (_ht * 100).toFixed(0) + '%';
+    const _hc = (typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72;
+    setRange('set-crosshair-opacity', null, _hc);
+    const _hcv = $('#val-crosshair-opacity');
+    if (_hcv) _hcv.textContent = (_hc * 100).toFixed(0) + '%';
   }
   setChk('set-clip-rec', !!input.clipRec);
 
@@ -60492,8 +61028,13 @@ function buildSettingsPage() {
         <input type="range" id="set-hud-text-opacity" min="0.15" max="1" step="0.01" value="${(typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1}">
         <div class="value-display" id="val-hud-text-opacity">${(((typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1) * 100).toFixed(0)}%</div>
       </div>
+      <div class="setting-row">
+        <label>Crosshair Opacity</label>
+        <input type="range" id="set-crosshair-opacity" min="0.15" max="1" step="0.01" value="${(typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72}">
+        <div class="value-display" id="val-crosshair-opacity">${(((typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72) * 100).toFixed(0)}%</div>
+      </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Two independent controls, not a master and a trim: the arcs, ticks and reticle follow the first, and every word and number on the HUD follows the second. The radar and its compass rose are exempt from both and always draw at full strength. Set text above the graphics to keep readouts legible over a faint instrument cluster, or below it to quieten the captions. Both apply live, on the flat HUD and in VR.</label>
+        <label style="flex:1;">Three independent controls, not a master and two trims. The arcs and ticks follow the first, every word and number on the HUD follows the second, and the reticle follows the third &mdash; so you can keep the thing you aim with solid over a ghosted instrument cluster, or take it almost to nothing for a clean shot. The radar and its compass rose are exempt from all three and always draw at full strength. All apply live, on the flat HUD and in VR.</label>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Scales the gauge cluster, ability bars, reticle and captions on flat screen. Applies live. The radar and compass rose stay at their designed size. Note the painted cockpit frames are drawn around the 1.00&times; layout, so first-person recesses stop lining up with the rings as you move away from it. VR has its own separate size slider below.</label>
@@ -61866,7 +62407,8 @@ function buildSettingsPage() {
     hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });
   }
   [['#set-hud-opacity', '#val-hud-opacity', 'hudOpacity', 0.72],
-   ['#set-hud-text-opacity', '#val-hud-text-opacity', 'hudTextOpacity', 1]].forEach(([sel, vsel, key, dflt]) => {
+   ['#set-hud-text-opacity', '#val-hud-text-opacity', 'hudTextOpacity', 1],
+   ['#set-crosshair-opacity', '#val-crosshair-opacity', 'crosshairOpacity', 0.72]].forEach(([sel, vsel, key, dflt]) => {
     const el = overlay.querySelector(sel);
     const vl = overlay.querySelector(vsel);
     if (!el) return;
@@ -62484,6 +63026,7 @@ function saveSettings() {
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
       hudOpacity: (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72,
       hudTextOpacity: (typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1,
+      crosshairOpacity: (typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72,
       cockpitSolidity: (typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0,
       vrHudMigrated: true,   // (v41.43) the one-time vrHudScale default bump has been applied
       vrWater: !!input.vrWater,   // (v41.43)
@@ -62737,6 +63280,7 @@ const SHIPPED_DEFAULTS = {
   "hudScale": 1,
   "hudOpacity": 0.72,
   "hudTextOpacity": 1,
+  "crosshairOpacity": 0.72,
   "cockpitSolidity": 0,
   "fovDeg": 120,
   "audioMaster": 1,
@@ -64320,6 +64864,9 @@ function loadSettings() {
     }
     if (typeof data.hudTextOpacity === 'number' && isFinite(data.hudTextOpacity)) {
       input.hudTextOpacity = Math.max(0, Math.min(1, data.hudTextOpacity));
+    }
+    if (typeof data.crosshairOpacity === 'number' && isFinite(data.crosshairOpacity)) {
+      input.crosshairOpacity = Math.max(0, Math.min(1, data.crosshairOpacity));
     }
     if (typeof data.clipRec === 'boolean') input.clipRec = data.clipRec;
     if (typeof data.fovDeg === 'number') {
@@ -70139,6 +70686,7 @@ function gameLoop(timestamp) {
       try { _hubCityFrame(dt); } catch (_) {}
       try { _carrierFrame(dt); } catch (_) {}   // (v37.72) no-op until a carrier is spawned
       try { _owFrame(dt); } catch (e) { if (!window._owErr) { window._owErr = String((e && e.stack) || e); console.warn('[cities] frame threw:', e); } }   // (v38.78) overworld cities
+      try { _wildFrame(dt); } catch (e) { if (!window._wildErr) { window._wildErr = String((e && e.stack) || e); console.warn('[wild] frame threw:', e); } }   // (v42.74) wild leviathan families
       try { _cyberFrame(dt); } catch (_) {}     // (v37.76) no-op unless CYBERPUNK CITY is running
       __pmark('hub:city');
       try { _wxFrame(dt); } catch (_) {}
