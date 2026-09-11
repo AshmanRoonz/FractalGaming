@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.29';
+const LSS_BUILD = '42.30';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -8743,7 +8743,7 @@ const FreeFlightMode = {
     try { if (this._warpPre && !this._enteringCampaign && window.Overlays && Overlays.warp) Overlays.warp(false); this._warpPre = false; } catch (_) {}
     try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.freeflight = false; game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false; } catch (_) {}   
     try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   
-    try { game._cyber = null; net.cyber = false; if (typeof _carrierClear === 'function') _carrierClear(); } catch (_) {}   // (v37.76/80)
+    try { game._cyber = null; net.cyber = false; if (typeof _cyberCineLightsDispose === 'function') _cyberCineLightsDispose(); if (typeof _carrierClear === 'function') _carrierClear(); } catch (_) {}   // (v42.30) resident cine lights are this mode's, drop them with it   // (v37.76/80)
     try { game.thirdPerson = false; document.body.classList.remove('lss-thirdperson'); if (player.mesh) player.mesh.visible = false; } catch (_) {}   
     try { if (typeof _clearBossPortal === 'function') _clearBossPortal(); } catch (_) {}   
     try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}   
@@ -37658,6 +37658,10 @@ function _cyberPrefetch() { try { _carrierPreload(); } catch (_) {} }
 function _cyberPrePlace() {
   const C = (typeof game !== 'undefined' && game) ? game._cyber : null;
   if (!C || !C.armed || C.started || C.prePlaced) return;
+  // (v42.30) Build the cinematic's lights NOW, at zero intensity. This runs inside the world
+  // prebake, so the loading screen is still up and the light-count program variants are compiled
+  // on covered frames instead of on the first frame of the flight.
+  try { _cyberCineLightsEnsure(); } catch (_) {}
   try {
     C.teamA = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_A != null) ? LSS.TEAM_FLEET_A : 2;
     C.teamB = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_B != null) ? LSS.TEAM_FLEET_B : 3;
@@ -38249,30 +38253,69 @@ function _cyberCinematic(C) {
 // stop sliding mid-match - and the city's look is a dark dusk, so the launch ring is now lit like
 // midnight downtown and the shot went black (owner: "the cinematic is too dark"). Rather than
 // unpin it and bring the sliding back, the shot carries its own key and fill, torn down with it.
-function _cyberCineLightOn(P, L) {
+// ⭐⭐ (v42.30) RESIDENT CINE LIGHTS - THE HITCH MOVED INTO THE LOADING SCREEN. Owner: "let's put
+// that hitch in the loading screen?"
+// These three lights used to be ADDED when the cinematic started and REMOVED when it ended. In
+// three.js the light COUNTS are compiled into every material's program, so adding them invalidated
+// NUM_DIR_LIGHTS / NUM_HEMI_LIGHTS for everything in view and the first frame that rendered with
+// them had to compile a fresh variant of each material. Measured on the cinematic's very first
+// frame: renderer.info.programs.length jumped by ELEVEN, for 92 ms on a warm shader cache and
+// 1,173 ms on a cold one. That was the hitch.
+// Now they are created ONCE at zero intensity from _cyberPrePlace, which runs inside the world
+// prebake - i.e. while the loading screen is still up - so the covered frames pay the compile and
+// the cinematic only changes INTENSITIES, which costs nothing. Off is intensity 0, not removal,
+// because removing them would change the count back and re-key everything again.
+// ⚠ The cost is two DirectionalLights + one HemisphereLight resident in every material's fragment
+// loop for the duration of a cyberpunk match. That is the deliberate trade for a stall-free flight,
+// and it is confined to this mode - _cyberCineLightsDispose() drops them when the mode ends.
+const _CY_CINE_BASE = { key: 2.6, rim: 1.5, amb: 1.1 };
+function _cyberCineLightsEnsure() {
+  if (_carrier._cineLights) return true;
   try {
-    _cyberCineLightOff();
-    const CN = window.__cine || (window.__cine = {});
-    const k = (CN.fill != null) ? CN.fill : 1.0;
-    const key = new THREE.DirectionalLight(0xfff2e0, 2.6 * k);
-    key.position.set(P.x + L * 0.9, P.y + L * 0.8, P.z + L * 0.6);
-    key.target.position.copy(P);
+    const key = new THREE.DirectionalLight(0xfff2e0, 0);
     scene.add(key); scene.add(key.target);
-    const rim = new THREE.DirectionalLight(0x9fd8ff, 1.5 * k);
-    rim.position.set(P.x - L * 0.8, P.y + L * 0.35, P.z - L * 0.9);
-    rim.target.position.copy(P);
+    const rim = new THREE.DirectionalLight(0x9fd8ff, 0);
     scene.add(rim); scene.add(rim.target);
-    const amb = new THREE.HemisphereLight(0xbfd4ff, 0x2a2438, 1.1 * k);
-    amb.position.copy(P);
+    const amb = new THREE.HemisphereLight(0xbfd4ff, 0x2a2438, 0);
     scene.add(amb);
     _carrier._cineLights = [key, key.target, rim, rim.target, amb];
-  } catch (_) { _carrier._cineLights = null; }
+    _carrier._cineRig = { key, rim, amb };
+    _carrier._cineOn = false;
+    return true;
+  } catch (_) { _carrier._cineLights = null; _carrier._cineRig = null; return false; }
 }
-function _cyberCineLightOff() {
+function _cyberCineLightsDispose() {
   const A = _carrier._cineLights;
-  _carrier._cineLights = null;
+  _carrier._cineLights = null; _carrier._cineRig = null; _carrier._cineOn = false;
   if (!A) return;
   for (const o of A) { try { scene.remove(o); if (o.dispose) o.dispose(); } catch (_) {} }
+}
+function _cyberCineLightOn(P, L) {
+  if (!_cyberCineLightsEnsure()) return;
+  try {
+    const R = _carrier._cineRig;
+    const CN = window.__cine || (window.__cine = {});
+    const k = (CN.fill != null) ? CN.fill : 1.0;
+    R.key.position.set(P.x + L * 0.9, P.y + L * 0.8, P.z + L * 0.6);
+    R.key.target.position.copy(P);
+    R.rim.position.set(P.x - L * 0.8, P.y + L * 0.35, P.z - L * 0.9);
+    R.rim.target.position.copy(P);
+    R.amb.position.copy(P);
+    R.key.intensity = _CY_CINE_BASE.key * k;
+    R.rim.intensity = _CY_CINE_BASE.rim * k;
+    R.amb.intensity = _CY_CINE_BASE.amb * k;
+    _carrier._cineOn = true;
+  } catch (_) {}
+}
+function _cyberCineLightOff() {
+  // Idempotent on purpose: _cyberDeckPlace and _cyberFrame both call this EVERY FRAME while the
+  // cinematic is not running, and the lights are resident now so the old `if (!A) return` no longer
+  // short-circuits that.
+  if (!_carrier._cineOn) return;
+  const R = _carrier._cineRig;
+  if (!R) { _carrier._cineOn = false; return; }
+  try { R.key.intensity = 0; R.rim.intensity = 0; R.amb.intensity = 0; } catch (_) {}
+  _carrier._cineOn = false;
 }
 // (v37.85) Building the match is its own step so it can run from the CINEMATIC hook - which fires
 // before the countdown - instead of the first 'playing' frame, which is after it. Idempotent: the

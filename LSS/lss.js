@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.29';
+const LSS_BUILD = '42.30';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2891,7 +2891,7 @@ const FreeFlightMode = {
     try { if (this._warpPre && !this._enteringCampaign && window.Overlays && Overlays.warp) Overlays.warp(false); this._warpPre = false; } catch (_) {}
     try { game.testMode = false; game.raceNoTimer = false; LSS.MODE = 'classic'; net.freeflight = false; game._campJourney = false; game._campFinale = false; game._campFinaleShown = false; game._campRiftArmed = false; game._campV1Started = false; } catch (_) {}   
     try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   
-    try { game._cyber = null; net.cyber = false; if (typeof _carrierClear === 'function') _carrierClear(); } catch (_) {}   // (v37.76/80)
+    try { game._cyber = null; net.cyber = false; if (typeof _cyberCineLightsDispose === 'function') _cyberCineLightsDispose(); if (typeof _carrierClear === 'function') _carrierClear(); } catch (_) {}   // (v42.30) resident cine lights are this mode's, drop them with it   // (v37.76/80)
     try { game.thirdPerson = false; document.body.classList.remove('lss-thirdperson'); if (player.mesh) player.mesh.visible = false; } catch (_) {}   
     try { if (typeof _clearBossPortal === 'function') _clearBossPortal(); } catch (_) {}   
     try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}   
@@ -23554,6 +23554,7 @@ function _cyberPrefetch() { try { _carrierPreload(); } catch (_) {} }
 function _cyberPrePlace() {
   const C = (typeof game !== 'undefined' && game) ? game._cyber : null;
   if (!C || !C.armed || C.started || C.prePlaced) return;
+  try { _cyberCineLightsEnsure(); } catch (_) {}
   try {
     C.teamA = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_A != null) ? LSS.TEAM_FLEET_A : 2;
     C.teamB = (typeof LSS !== 'undefined' && LSS.TEAM_FLEET_B != null) ? LSS.TEAM_FLEET_B : 3;
@@ -23966,30 +23967,51 @@ function _cyberCinematic(C) {
   _cyberCineLightOn(P, L);
   return true;
 }
-function _cyberCineLightOn(P, L) {
+const _CY_CINE_BASE = { key: 2.6, rim: 1.5, amb: 1.1 };
+function _cyberCineLightsEnsure() {
+  if (_carrier._cineLights) return true;
   try {
-    _cyberCineLightOff();
-    const CN = window.__cine || (window.__cine = {});
-    const k = (CN.fill != null) ? CN.fill : 1.0;
-    const key = new THREE.DirectionalLight(0xfff2e0, 2.6 * k);
-    key.position.set(P.x + L * 0.9, P.y + L * 0.8, P.z + L * 0.6);
-    key.target.position.copy(P);
+    const key = new THREE.DirectionalLight(0xfff2e0, 0);
     scene.add(key); scene.add(key.target);
-    const rim = new THREE.DirectionalLight(0x9fd8ff, 1.5 * k);
-    rim.position.set(P.x - L * 0.8, P.y + L * 0.35, P.z - L * 0.9);
-    rim.target.position.copy(P);
+    const rim = new THREE.DirectionalLight(0x9fd8ff, 0);
     scene.add(rim); scene.add(rim.target);
-    const amb = new THREE.HemisphereLight(0xbfd4ff, 0x2a2438, 1.1 * k);
-    amb.position.copy(P);
+    const amb = new THREE.HemisphereLight(0xbfd4ff, 0x2a2438, 0);
     scene.add(amb);
     _carrier._cineLights = [key, key.target, rim, rim.target, amb];
-  } catch (_) { _carrier._cineLights = null; }
+    _carrier._cineRig = { key, rim, amb };
+    _carrier._cineOn = false;
+    return true;
+  } catch (_) { _carrier._cineLights = null; _carrier._cineRig = null; return false; }
 }
-function _cyberCineLightOff() {
+function _cyberCineLightsDispose() {
   const A = _carrier._cineLights;
-  _carrier._cineLights = null;
+  _carrier._cineLights = null; _carrier._cineRig = null; _carrier._cineOn = false;
   if (!A) return;
   for (const o of A) { try { scene.remove(o); if (o.dispose) o.dispose(); } catch (_) {} }
+}
+function _cyberCineLightOn(P, L) {
+  if (!_cyberCineLightsEnsure()) return;
+  try {
+    const R = _carrier._cineRig;
+    const CN = window.__cine || (window.__cine = {});
+    const k = (CN.fill != null) ? CN.fill : 1.0;
+    R.key.position.set(P.x + L * 0.9, P.y + L * 0.8, P.z + L * 0.6);
+    R.key.target.position.copy(P);
+    R.rim.position.set(P.x - L * 0.8, P.y + L * 0.35, P.z - L * 0.9);
+    R.rim.target.position.copy(P);
+    R.amb.position.copy(P);
+    R.key.intensity = _CY_CINE_BASE.key * k;
+    R.rim.intensity = _CY_CINE_BASE.rim * k;
+    R.amb.intensity = _CY_CINE_BASE.amb * k;
+    _carrier._cineOn = true;
+  } catch (_) {}
+}
+function _cyberCineLightOff() {
+  if (!_carrier._cineOn) return;
+  const R = _carrier._cineRig;
+  if (!R) { _carrier._cineOn = false; return; }
+  try { R.key.intensity = 0; R.rim.intensity = 0; R.amb.intensity = 0; } catch (_) {}
+  _carrier._cineOn = false;
 }
 function _cyberLineupTrack(C) {
   if (typeof _cinematic === 'undefined' || !_cinematic || !_cinematic.active || !_cinematic.ships) return;
