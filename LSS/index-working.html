@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.85';
+const LSS_BUILD = '41.90';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -44103,14 +44103,75 @@ const _shipPreview3D = {
   
   
   
+  // ⚠⚠ (v41.90) THESE ARE CAMERA ANGLES, NOT HULL ANGLES - azimuth and elevation of the eye on a
+  // sphere around the ship. Three attempts got here, and the two dead ends are worth keeping
+  // because both look correct on paper:
+  //   v41.87 euler yaw/pitch, clamped 85 deg -> owner: "that added tilt, but not all 6 degrees".
+  //   v41.88 quaternion trackball, unlimited -> owner: "it shouldn't be able to roll".
+  //   v41.89 euler again, Z pinned to 0      -> owner: "up and down is making it roll".
+  // A screen-space trackball cannot avoid roll: composing a horizontal and a vertical rotation in
+  // camera space leaves a twist about the view axis (drag a square loop and the hull comes back
+  // banked - that is the composition, not a bug). But v41.89 is the instructive one: it removed the
+  // roll TERM and still rolled, because LSS hulls are nose-along-X and the picker shows them
+  // broadside - so world X, the axis a vertical drag must turn about, IS the hull's roll axis.
+  // No choice of euler order fixes that; rotating the model is simply the wrong operation.
+  // Moving the EYE instead makes roll geometrically impossible: `up` is pinned to world +Y every
+  // frame, so the ship's mast is always vertical on screen no matter where you stand. That is what
+  // OrbitControls does in skin_lab, which is what the owner pointed at.
   yaw: 0,
+  pitch: 0,
+  // Orbit radius and base elevation, both derived from the per-hull dolly in _applyShipPreviewModel.
+  camR: 0,
+  camElev0: 0,
   isMouseDragging: false,
   lastMouseX: 0,
+  lastMouseY: 0,
+  // The pointerId of the drag in flight, so a second finger landing on the stage cannot fight the
+  // first one for the hull.
+  dragPointerId: null,
   
   
-  GAMEPAD_ROT_RATE: 2.6,   
-  MOUSE_ROT_RATE: 0.012,   
+  GAMEPAD_ROT_RATE: 2.6,
+  MOUSE_ROT_RATE: 0.012,
+  // Drag/stick DOWN tips the nose away so you see the hull's TOP, i.e. the model follows your hand
+  // the same way the horizontal axis does. Flip with window.__shipPreviewPitchSign = -1.
+  PITCH_SIGN: 1,
 };
+// (v41.87) Live knob for the vertical direction, matching how the rest of the file exposes feel.
+function _previewPitchSign() {
+  try {
+    if (typeof window !== 'undefined' && window.__shipPreviewPitchSign != null) {
+      return (window.__shipPreviewPitchSign < 0) ? -1 : 1;
+    }
+  } catch (_) {}
+  return _shipPreview3D.PITCH_SIGN;
+}
+// Just short of the pole - see the standoff note in _previewPlaceCamera.
+const _PREVIEW_ELEV_LIMIT = Math.PI / 2 - 0.02;
+// ⚠ (v41.90) THE ONLY THING THAT AIMS THE STAGE. Every input path - mouse, finger, stick and the
+// idle drift - comes through here, so they cannot disagree about what a rotation means.
+// These are CAMERA angles, not hull angles: `rx` swings the eye around the ship, `ry` raises and
+// lowers it. The hull itself is never rotated (see _previewPlaceCamera for why that is the whole
+// point), so there is no third axis to leak roll into.
+function _previewRotate(rx, ry) {
+  const s = _shipPreview3D;
+  if (rx) {
+    s.yaw += rx;
+    // Wrap so a long session cannot grow yaw until float precision starts to coarsen the drift.
+    if (s.yaw > Math.PI) s.yaw -= Math.PI * 2;
+    else if (s.yaw < -Math.PI) s.yaw += Math.PI * 2;
+  }
+  if (ry) {
+    // Clamp against the camera's ABSOLUTE elevation, not against pitch alone: the per-hull dolly
+    // already starts the eye slightly above the waterline (camElev0), and clamping the delta on
+    // its own would let pitch wind up past the limit and then sit there as dead travel you have to
+    // unwind before the ship moves again.
+    const lo = -_PREVIEW_ELEV_LIMIT - (s.camElev0 || 0);
+    const hi = _PREVIEW_ELEV_LIMIT - (s.camElev0 || 0);
+    const p = s.pitch + ry;
+    s.pitch = (p < lo) ? lo : (p > hi) ? hi : p;
+  }
+}
 
 // (v39.18) THE SINGLE OWNER of the preview's backbuffer scale. It MUST be the same
 // number in _initShipPreview3D's setPixelRatio and in _animateShipPreview's resize
@@ -44155,30 +44216,54 @@ const _ONE_CTX_PREVIEW = (function () {
 // at its own depth, with `object-fit: cover` reproduced in UV space so a wide phone crops the
 // hangar instead of stretching it — same as the CSS it replaces. Its texture is the very same
 // #ship-select-bg canvas the DOM version used, so the pixels (image + baked scrim) are identical.
-// Mouse-drag rotation: hold left button on the preview canvas and drag horizontally to spin
-// the ship. Listens for move/up on `window` so a drag that leaves the canvas still tracks until
-// release. Shared by both paths — in the one-context path #ship-preview-canvas has no GL context
-// at all and exists purely as this pointer target, so nothing here changes.
+// ⚠ (v41.87) POINTER EVENTS, NOT MOUSE EVENTS - that is what adds touch. `pointerdown/move/up`
+// are one stream for mouse, finger and stylus, so the drag maths below is written once and the
+// phone gets drag-to-rotate for free; there is deliberately no separate touchstart path to keep
+// in step with this one. Two things are load-bearing for the touch half:
+//   - `touch-action: none` on the canvas. Without it the browser claims the gesture as a scroll
+//     or a pinch BEFORE it sends pointermove, and it then fires pointercancel - the finger drag
+//     would simply do nothing. It is set on the canvas alone, so the chip rails and the ship list
+//     keep their own scrolling.
+//   - the pointerId guard. A second finger landing on the full-bleed stage would otherwise
+//     interleave its coordinates with the first one's and make the hull jump.
+// Still listens for move/up on `window` so a drag that leaves the canvas tracks until release
+// (unchanged from the mouse version, and the reason this does not use setPointerCapture).
+// Shared by both paths — in the one-context path #ship-preview-canvas has no GL context at all
+// and exists purely as this pointer target, so nothing here changes.
 function _bindShipPreviewDrag(canvas) {
   if (!canvas || canvas._lssDragBound) return;
   canvas._lssDragBound = true;
   canvas.style.cursor = 'grab';
-  canvas.addEventListener('mousedown', (e) => {
-    _shipPreview3D.isMouseDragging = true;
-    _shipPreview3D.lastMouseX = e.clientX;
+  canvas.style.touchAction = 'none';
+  const s = _shipPreview3D;
+  const _end = (e) => {
+    if (!s.isMouseDragging) return;
+    if (e && s.dragPointerId != null && e.pointerId !== s.dragPointerId) return;
+    s.isMouseDragging = false;
+    s.dragPointerId = null;
+    if (s.canvas) s.canvas.style.cursor = 'grab';
+  };
+  canvas.addEventListener('pointerdown', (e) => {
+    // Mouse: left button only (right/middle keep their menus). Touch/pen: any contact.
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (s.isMouseDragging) return;               // a drag is already in flight - ignore finger 2
+    s.isMouseDragging = true;
+    s.dragPointerId = e.pointerId;
+    s.lastMouseX = e.clientX;
+    s.lastMouseY = e.clientY;
     canvas.style.cursor = 'grabbing';
     e.preventDefault();
   });
-  window.addEventListener('mouseup', () => {
-    if (!_shipPreview3D.isMouseDragging) return;
-    _shipPreview3D.isMouseDragging = false;
-    if (_shipPreview3D.canvas) _shipPreview3D.canvas.style.cursor = 'grab';
-  });
-  window.addEventListener('mousemove', (e) => {
-    if (!_shipPreview3D.isMouseDragging) return;
-    const dx = e.clientX - _shipPreview3D.lastMouseX;
-    _shipPreview3D.lastMouseX = e.clientX;
-    _shipPreview3D.yaw += dx * _shipPreview3D.MOUSE_ROT_RATE;
+  window.addEventListener('pointerup', _end);
+  window.addEventListener('pointercancel', _end);
+  window.addEventListener('pointermove', (e) => {
+    if (!s.isMouseDragging) return;
+    if (s.dragPointerId != null && e.pointerId !== s.dragPointerId) return;
+    const dx = e.clientX - s.lastMouseX;
+    const dy = e.clientY - s.lastMouseY;
+    s.lastMouseX = e.clientX;
+    s.lastMouseY = e.clientY;
+    _previewRotate(dx * s.MOUSE_ROT_RATE, dy * s.MOUSE_ROT_RATE * _previewPitchSign());
   });
 }
 
@@ -44540,9 +44625,18 @@ function _applyShipPreviewModel(key) {
   // so the ship reads bigger and dead-center.
   cam.position.set(0, maxDim * 0.35, maxDim * 2.0);
   cam.lookAt(0, 0, 0);
-  // Reset rotation so every new ship starts facing camera.
+  // (v41.90) Re-express that same dolly as the orbit the camera now flies: the radius and the base
+  // elevation ARE this pose, so the hull is framed exactly as it always was on the first frame and
+  // _previewPlaceCamera simply carries it around the sphere from there. Derived rather than
+  // hard-coded so the per-hull bbox dolly above stays the single source of framing.
+  s.camR = Math.hypot(maxDim * 0.35, maxDim * 2.0);
+  s.camElev0 = Math.atan2(maxDim * 0.35, maxDim * 2.0);
+  // Reset the orbit so every new ship starts framed the same way, whatever angle you left the last
+  // one at. The HULL is never rotated any more - it stays at identity and the camera moves - so
+  // this is the only attitude there is to reset.
   modelRoot.rotation.set(0, 0, 0);
   s.yaw = 0;
+  s.pitch = 0;
   // (v39.30) PUT THE HULL ON THE STAGE WHEN ITS SHADERS ARE READY, NOT BEFORE.
   // Owner: "there's a lag spike usually when i get the last kill... it's like it starts loading
   // the next stuff right there... it can wait until the ship selection screen to load what it
@@ -44732,22 +44826,66 @@ function _spinShipPreview() {
   const dt = Math.min(0.1, (_now - _last) / 1000);
   s._lastAnimT = _now;
 
-  // Gamepad right-stick X (already deadzoned + curve-applied by pollGamepad).
-  // Positive = stick pushed right => ship rotates such that its right side
-  // comes toward the camera (model.rotation.y increases). Mouse drag adds
-  // into yaw directly via the mousemove handler.
-  const gpX = (typeof input !== 'undefined' && input && input.gpConnected) ? (input.gpLookX || 0) : 0;
-  const userActive = Math.abs(gpX) > 0.01 || s.isMouseDragging;
-  if (Math.abs(gpX) > 0.01) {
-    s.yaw += gpX * s.GAMEPAD_ROT_RATE * dt;
+  // Gamepad right stick, BOTH axes (already deadzoned + curve-applied by pollGamepad).
+  // X positive = stick pushed right => ship rotates such that its right side comes toward the
+  // camera (yaw increases). Y drives pitch as of v41.87 - see below. Drag adds into both directly
+  // via the pointermove handler.
+  const _gp = (typeof input !== 'undefined' && input && input.gpConnected) ? input : null;
+  const gpX = _gp ? (_gp.gpLookX || 0) : 0;
+  const gpY = _gp ? (_gp.gpLookY || 0) : 0;
+  const userActive = Math.abs(gpX) > 0.01 || Math.abs(gpY) > 0.01 || s.isMouseDragging;
+  // (v41.88) Both stick axes go through the same composer the drag does, so a stick push and a
+  // finger drag of the same size turn the hull identically - including past vertical, where the
+  // v41.87 euler used to stop. `gpLookY` has ALREADY been through pollGamepad's deadzone, response
+  // curve AND the player's `invertLookY` preference (L79125), so the stage tips the way their
+  // flight stick does instead of disagreeing with it - which is why this reads the processed value
+  // and not the raw axis.
+  if (Math.abs(gpX) > 0.01 || Math.abs(gpY) > 0.01) {
+    _previewRotate(gpX * s.GAMEPAD_ROT_RATE * dt,
+                   gpY * s.GAMEPAD_ROT_RATE * dt * _previewPitchSign());
   }
   // Auto-rotation continues only while neither input is active, so the ship
   // holds its pose the moment the user takes control and resumes drifting
   // after they let go.
+  // ⚠ The drift only moves the azimuth, so a stage the player has tipped keeps its elevation and
+  // simply orbits at that height rather than easing back to level.
   if (!userActive) {
-    s.yaw += s.rotationSpeed;
+    _previewRotate(s.rotationSpeed, 0);
   }
-  if (s.model) s.model.rotation.y = s.yaw;
+  _previewPlaceCamera();
+}
+
+// ⚠⚠ (v41.90) ORBIT THE CAMERA, DO NOT ROTATE THE HULL. Owner, on the v41.89 turntable:
+// "up and down is making it roll". Correct, and it is a property of the SHIP'S AXES, not a bug in
+// the euler: LSS hulls are canonically nose-along-X (forward -X) and the picker shows them
+// BROADSIDE, so the nose lies along the screen's horizontal - which is the exact axis a vertical
+// drag has to turn about. Rotating the MODEL about world X therefore spins it around its own
+// nose-tail line: roll, by construction, whatever euler order you pick. v41.89's `0` in the Z slot
+// removed the roll *term* while the rotation it was performing was still a roll.
+// Orbiting the camera cannot have that problem. The hull never rotates at all - it sits at
+// identity and we move the eye around it on a sphere, re-pointing at the target each frame with
+// `up` pinned to world +Y. A camera whose up-vector is pinned produces a view in which the ship's
+// mast is always vertical on screen, so roll is not merely unrepresentable, it is geometrically
+// impossible. This is precisely what OrbitControls does, and why the owner pointed at skin_lab.
+// `yaw` is the azimuth (negated so a drag still carries the hull the way your hand goes) and
+// `pitch` rides on top of the per-hull base elevation.
+function _previewPlaceCamera() {
+  const s = _shipPreview3D;
+  const cam = s.camera;
+  if (!cam || !s.camR) return;
+  // ⚠ Stop just short of the pole. AT exactly +-90 the view direction is parallel to `up` and
+  // lookAt() degenerates - the image snaps to an arbitrary spin, which reads as a violent roll at
+  // the top and bottom of the travel. The 0.02 rad standoff is what keeps the poles usable.
+  const LIM = Math.PI / 2 - 0.02;
+  let el = s.camElev0 + s.pitch;
+  if (el < -LIM) el = -LIM; else if (el > LIM) el = LIM;
+  const az = -s.yaw;
+  const ce = Math.cos(el);
+  cam.position.set(s.camR * ce * Math.sin(az),
+                   s.camR * Math.sin(el),
+                   s.camR * ce * Math.cos(az));
+  cam.up.set(0, 1, 0);
+  cam.lookAt(0, 0, 0);
 }
 
 // (v39.25) Draw the picker scene with the MAIN renderer, straight to the game canvas.
@@ -60557,10 +60695,45 @@ async function _prebakeOverlayRehearsal(rep) {
   try {
     if (_lssOff('rehearse')) { window.__uiRehearsal = { skipped: 'off' }; return; }
     let _force = false;
-    try { _force = /[?&]rehearse/i.test(location.search || ''); } catch (_) {}
+    try { _force = /[?&]rehearse\b/i.test(location.search || ''); } catch (_) {}
     if (!_force && typeof _fxSmallDevice === 'function' && _fxSmallDevice()) {
       window.__uiRehearsal = { skipped: 'smallDevice' };
       return;
+    }
+    // ⚠⚠ (v41.86) ...AND OFF ON BIG-PIXEL DISPLAYS, FOR THE SAME REASON. Owner, on the desktop's 4K
+    // 120Hz TV (3840x2160 at devicePixelRatio 2.25): the launch countdown never appears in
+    // fullscreen, callout tags and the fps meter flicker, and menu items go missing after the first
+    // round - then `?off=rehearse` fixed it, exactly as `?off=all` did on the phone.
+    // v40.99 read the phone finding as "phones are small" and gated on _fxSmallDevice(), which is a
+    // DEVICE-CLASS test (_LSS_IS_MOBILE / XR presenting). What actually ran out was the COMPOSITOR
+    // LAYER BUDGET, and that is driven by layer AREA, not by device class: ONE full-viewport layer
+    // is 2.07 MP on a 1080p laptop and 7.81 MP on that TV - 3.8x - so the same 37 rehearsed overlays
+    // blow on a "big" device the same budget they blew on a small one. Measured on the owner's
+    // machine before this fix: `__uiRehearsal = {ms:316, n:37, groups:8, frames:32, worst:34}` with a
+    // full-viewport layer of 7.81 MP. So gate on the measurement, not on the device.
+    // 4 MP keeps the rehearsal where it was always fine (1080p 2.07, 1440p 3.69) and drops it where
+    // it costs the UI (that TV 7.81, 4K-at-dpr-1 8.29). `window.__uiRehearsalMaxMP` overrides live.
+    // ⚠ The trade is deliberate and cheap: the v40.99 note above is explicit that this buys "a few
+    // milliseconds" on a desktop, and what it prevents is a first-use hitch. The HUD is not a fair
+    // price for that on any device.
+    // ⚠ WHY THIS KEEPS COSTING SESSIONS: the failure is indistinguishable from a paint/stacking bug
+    // and WILL send you chasing CSS - the overlays are laid out, computed-visible, hit-testable and
+    // simply not drawn, and a windowed round-trip "heals" it because that builds a fresh fullscreen
+    // surface with a fresh promotion decision. Two rounds of theory-driven fixes have now missed it:
+    // v40.91 settle ladder / v40.94 layer preservation / v40.96 forced reads / v40.97 canvas stacking
+    // on the phone, and on the desktop an un-scoped v40.97 canvas-stacking A/B, which was measured
+    // and FAILED. Reach for the `?off=` switchboard FIRST.
+    if (!_force) {
+      // Megapixels of ONE full-viewport composited layer. innerWidth/innerHeight are CSS px, so the
+      // dpr^2 term is what turns them into the pixels the compositor actually has to hold.
+      const _cap = (typeof window !== 'undefined' && window.__uiRehearsalMaxMP != null)
+        ? window.__uiRehearsalMaxMP : 4;
+      const _layerMP = (window.innerWidth * window.innerHeight *
+                        Math.pow(window.devicePixelRatio || 1, 2)) / 1e6;
+      if (_layerMP > _cap) {
+        window.__uiRehearsal = { skipped: 'layerBudget', layerMP: Math.round(_layerMP * 100) / 100, cap: _cap };
+        return;
+      }
     }
   } catch (_) {}
   const _t = _pbNow();
@@ -98083,7 +98256,7 @@ function __pmark(name) {
       // are hunting flicker and corruption; it is a variable in every measurement it appears in.
       // Now opt-in on its own flag. `?pbalt` brings it back for the specific question it answers.
       let _altOn = false;
-      try { _altOn = /[?&]pbalt/i.test(location.search || ''); } catch (_) {}
+      try { _altOn = /[?&]pbalt\b/i.test(location.search || ''); } catch (_) {}
       if (!_altOn) return R.alt;
       if (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) return R.alt;
       const c = document.createElement('canvas'); c.width = c.height = 1;

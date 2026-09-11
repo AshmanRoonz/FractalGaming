@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '41.85';
+const LSS_BUILD = '41.90';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -28705,13 +28705,42 @@ const _shipPreview3D = {
   
   
   yaw: 0,
+  pitch: 0,
+  camR: 0,
+  camElev0: 0,
   isMouseDragging: false,
   lastMouseX: 0,
+  lastMouseY: 0,
+  dragPointerId: null,
   
   
-  GAMEPAD_ROT_RATE: 2.6,   
-  MOUSE_ROT_RATE: 0.012,   
+  GAMEPAD_ROT_RATE: 2.6,
+  MOUSE_ROT_RATE: 0.012,
+  PITCH_SIGN: 1,
 };
+function _previewPitchSign() {
+  try {
+    if (typeof window !== 'undefined' && window.__shipPreviewPitchSign != null) {
+      return (window.__shipPreviewPitchSign < 0) ? -1 : 1;
+    }
+  } catch (_) {}
+  return _shipPreview3D.PITCH_SIGN;
+}
+const _PREVIEW_ELEV_LIMIT = Math.PI / 2 - 0.02;
+function _previewRotate(rx, ry) {
+  const s = _shipPreview3D;
+  if (rx) {
+    s.yaw += rx;
+    if (s.yaw > Math.PI) s.yaw -= Math.PI * 2;
+    else if (s.yaw < -Math.PI) s.yaw += Math.PI * 2;
+  }
+  if (ry) {
+    const lo = -_PREVIEW_ELEV_LIMIT - (s.camElev0 || 0);
+    const hi = _PREVIEW_ELEV_LIMIT - (s.camElev0 || 0);
+    const p = s.pitch + ry;
+    s.pitch = (p < lo) ? lo : (p > hi) ? hi : p;
+  }
+}
 
 function _shipPreviewDpr() {
   let cap = 2;
@@ -28731,22 +28760,35 @@ function _bindShipPreviewDrag(canvas) {
   if (!canvas || canvas._lssDragBound) return;
   canvas._lssDragBound = true;
   canvas.style.cursor = 'grab';
-  canvas.addEventListener('mousedown', (e) => {
-    _shipPreview3D.isMouseDragging = true;
-    _shipPreview3D.lastMouseX = e.clientX;
+  canvas.style.touchAction = 'none';
+  const s = _shipPreview3D;
+  const _end = (e) => {
+    if (!s.isMouseDragging) return;
+    if (e && s.dragPointerId != null && e.pointerId !== s.dragPointerId) return;
+    s.isMouseDragging = false;
+    s.dragPointerId = null;
+    if (s.canvas) s.canvas.style.cursor = 'grab';
+  };
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (s.isMouseDragging) return;               // a drag is already in flight - ignore finger 2
+    s.isMouseDragging = true;
+    s.dragPointerId = e.pointerId;
+    s.lastMouseX = e.clientX;
+    s.lastMouseY = e.clientY;
     canvas.style.cursor = 'grabbing';
     e.preventDefault();
   });
-  window.addEventListener('mouseup', () => {
-    if (!_shipPreview3D.isMouseDragging) return;
-    _shipPreview3D.isMouseDragging = false;
-    if (_shipPreview3D.canvas) _shipPreview3D.canvas.style.cursor = 'grab';
-  });
-  window.addEventListener('mousemove', (e) => {
-    if (!_shipPreview3D.isMouseDragging) return;
-    const dx = e.clientX - _shipPreview3D.lastMouseX;
-    _shipPreview3D.lastMouseX = e.clientX;
-    _shipPreview3D.yaw += dx * _shipPreview3D.MOUSE_ROT_RATE;
+  window.addEventListener('pointerup', _end);
+  window.addEventListener('pointercancel', _end);
+  window.addEventListener('pointermove', (e) => {
+    if (!s.isMouseDragging) return;
+    if (s.dragPointerId != null && e.pointerId !== s.dragPointerId) return;
+    const dx = e.clientX - s.lastMouseX;
+    const dy = e.clientY - s.lastMouseY;
+    s.lastMouseX = e.clientX;
+    s.lastMouseY = e.clientY;
+    _previewRotate(dx * s.MOUSE_ROT_RATE, dy * s.MOUSE_ROT_RATE * _previewPitchSign());
   });
 }
 
@@ -28988,8 +29030,11 @@ function _applyShipPreviewModel(key) {
   const cam = s.camera;
   cam.position.set(0, maxDim * 0.35, maxDim * 2.0);
   cam.lookAt(0, 0, 0);
+  s.camR = Math.hypot(maxDim * 0.35, maxDim * 2.0);
+  s.camElev0 = Math.atan2(maxDim * 0.35, maxDim * 2.0);
   modelRoot.rotation.set(0, 0, 0);
   s.yaw = 0;
+  s.pitch = 0;
   const _stage = () => {
     if (s.lastKey !== key || s.pendingKey !== key) return;   // superseded while compiling
     if (s.model && s.model !== modelRoot) { try { s.scene.remove(s.model); } catch (_) {} }
@@ -29062,15 +29107,34 @@ function _spinShipPreview() {
   const dt = Math.min(0.1, (_now - _last) / 1000);
   s._lastAnimT = _now;
 
-  const gpX = (typeof input !== 'undefined' && input && input.gpConnected) ? (input.gpLookX || 0) : 0;
-  const userActive = Math.abs(gpX) > 0.01 || s.isMouseDragging;
-  if (Math.abs(gpX) > 0.01) {
-    s.yaw += gpX * s.GAMEPAD_ROT_RATE * dt;
+  const _gp = (typeof input !== 'undefined' && input && input.gpConnected) ? input : null;
+  const gpX = _gp ? (_gp.gpLookX || 0) : 0;
+  const gpY = _gp ? (_gp.gpLookY || 0) : 0;
+  const userActive = Math.abs(gpX) > 0.01 || Math.abs(gpY) > 0.01 || s.isMouseDragging;
+  if (Math.abs(gpX) > 0.01 || Math.abs(gpY) > 0.01) {
+    _previewRotate(gpX * s.GAMEPAD_ROT_RATE * dt,
+                   gpY * s.GAMEPAD_ROT_RATE * dt * _previewPitchSign());
   }
   if (!userActive) {
-    s.yaw += s.rotationSpeed;
+    _previewRotate(s.rotationSpeed, 0);
   }
-  if (s.model) s.model.rotation.y = s.yaw;
+  _previewPlaceCamera();
+}
+
+function _previewPlaceCamera() {
+  const s = _shipPreview3D;
+  const cam = s.camera;
+  if (!cam || !s.camR) return;
+  const LIM = Math.PI / 2 - 0.02;
+  let el = s.camElev0 + s.pitch;
+  if (el < -LIM) el = -LIM; else if (el > LIM) el = LIM;
+  const az = -s.yaw;
+  const ce = Math.cos(el);
+  cam.position.set(s.camR * ce * Math.sin(az),
+                   s.camR * Math.sin(el),
+                   s.camR * ce * Math.cos(az));
+  cam.up.set(0, 1, 0);
+  cam.lookAt(0, 0, 0);
 }
 
 function _lssRenderPicker() {
@@ -40666,10 +40730,20 @@ async function _prebakeOverlayRehearsal(rep) {
   try {
     if (_lssOff('rehearse')) { window.__uiRehearsal = { skipped: 'off' }; return; }
     let _force = false;
-    try { _force = /[?&]rehearse/i.test(location.search || ''); } catch (_) {}
+    try { _force = /[?&]rehearse\b/i.test(location.search || ''); } catch (_) {}
     if (!_force && typeof _fxSmallDevice === 'function' && _fxSmallDevice()) {
       window.__uiRehearsal = { skipped: 'smallDevice' };
       return;
+    }
+    if (!_force) {
+      const _cap = (typeof window !== 'undefined' && window.__uiRehearsalMaxMP != null)
+        ? window.__uiRehearsalMaxMP : 4;
+      const _layerMP = (window.innerWidth * window.innerHeight *
+                        Math.pow(window.devicePixelRatio || 1, 2)) / 1e6;
+      if (_layerMP > _cap) {
+        window.__uiRehearsal = { skipped: 'layerBudget', layerMP: Math.round(_layerMP * 100) / 100, cap: _cap };
+        return;
+      }
     }
   } catch (_) {}
   const _t = _pbNow();
@@ -68079,7 +68153,7 @@ function __pmark(name) {
     R.alt = false;
     try {
       let _altOn = false;
-      try { _altOn = /[?&]pbalt/i.test(location.search || ''); } catch (_) {}
+      try { _altOn = /[?&]pbalt\b/i.test(location.search || ''); } catch (_) {}
       if (!_altOn) return R.alt;
       if (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) return R.alt;
       const c = document.createElement('canvas'); c.width = c.height = 1;
