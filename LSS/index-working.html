@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.20';
+const LSS_BUILD = '42.22';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -14692,9 +14692,10 @@ function tickScanlineTexture() {
 // (broadcast=true) and the effect_spawn receiver (broadcast=false). Same
 // pattern as Plasma Mines: ownerPeerId tag gates HP / damage logic to one peer.
 function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast) {
-  // ⭐ (v42.18) 4x BIGGER, CONTACT-LENS SHAPE. Owner: "let's make tracker's plasma shield 4x
-  // bigger, and contact lens shape". Was a flat BoxGeometry(400, 300, 25); now a shallow spherical
-  // cap scaled to 1600 x 1200, convex face toward whatever the deployer was aiming at. The unit
+  // ⭐ (v42.18) BIGGER, CONTACT-LENS SHAPE. Owner: "let's make tracker's plasma shield 4x
+  // bigger, and contact lens shape", then (v42.22) "too big, haha... half the size". Was a flat
+  // BoxGeometry(400, 300, 25); now a shallow spherical cap at 800 x 600, convex face toward
+  // whatever the deployer was aiming at. The unit
   // lens and its rim are shared, cached geometry - the old code built a BoxGeometry AND an
   // EdgesGeometry per wall and disposed neither.
   // ⚠ The hit test stays PLANAR, on the rim plane at eff.position: the cap bulges ~90 u forward
@@ -50998,8 +50999,26 @@ const _SHIPL = {
   // additive DoubleSide fills are pure overdraw on tile GPUs (the v35.89
   // god-ray rule; those tiers also run TRAF_N = 0 for the same family of
   // reasons).
-  CONE_N: ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
-           (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 0 : 6,
+  // ⭐⭐ (v42.21) QUEST GETS A POOL AGAIN. Owner: "none of the ships have headlights in VR".
+  // That was this constant. A standalone Quest is caught by isStandaloneQuest() - a pure USER-AGENT
+  // sniff evaluated at boot, before any XR session - and was lumped in with phones, so CONE_N = 0.
+  // With the pool at zero the build block below is skipped entirely (taking the PLAYER's own
+  // S.coneP with it), _shipLightsFrame early-returns, and `window.__shipCones` is read after that
+  // return - so there was not even a console lever to check it on-headset.
+  // ⚠ The tier ladder further down ALREADY expresses the policy this constant was defending:
+  // "desktop (incl. PCVR tier 0) all 6; VR lite (tier 1) 2; tier >= 2 sheds them entirely". That
+  // ladder was written FOR the headset and the boot constant pre-empted it, so it never ran on the
+  // one device it was meant for. A standalone Quest is always throttle tier >= 1, so it lands on
+  // the ladder's own 2 - which is why the pool is built at exactly 2 here rather than 6.
+  // ⚠ This DOES re-admit a real cost the original comment is right about: big additive DoubleSide
+  // fills are pure overdraw on a tile GPU. Two of them is the budget the ladder itself chose, and
+  // `window.__shipCones.cap = 0` is now a live off-switch on-headset (it is read at the coneCap
+  // line, which is reachable again). Phones stay at 0 - untouched.
+  CONE_N: (function () {
+    if ((typeof isStandaloneQuest === 'function') && isStandaloneQuest()) return 2;
+    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return 0;
+    return 6;
+  })(),
   cones: [],           // pooled cone meshes (CONE_N)
   coneAssign: [],      // per-cone assigned entity (null = free)
   coneCur: [],         // per-cone smoothed opacity
@@ -51180,7 +51199,18 @@ function _shipLightsFrame() {
   // 2200 is candela-scale because the spot runs decay=1 (see initShipLights);
   // it is NOT comparable to the decay-0 point intensities above.
   let hT = 0;
-  if (flying && tier < 3 && input.headlight !== false) hT = ((T && T.hI != null) ? T.hI : 2200.0) * (tier >= 1 ? 0.7 : 1);
+  // ⭐⭐ (v42.21) THE LAMP NOW SURVIVES EVERY TIER. It used to be `tier < 3`, which meant the
+  // "Max FPS (minimal effects)" VR preset (getVRPerfTier -> 3) zeroed the headlight outright - not
+  // just its visible beam, the actual illumination. Owner: "none of the ships have headlights in
+  // VR" and then "i tried the highest performance setting in VR already, no light" - and that
+  // setting is exactly the one that removes it, so the test could not have come back any other way.
+  // Seeing where you are going in a dark cavern is FUNCTION, not an effect: this is ONE SpotLight
+  // against a preset whose job is shedding fillrate and whole particle systems, and the engine-glow
+  // point light above still sheds at tier 3 as before. Dimmed rather than dropped at the top tier.
+  // Levers if it ever needs to go: window.__headlight(0) kills it, window.__shipLights.hI scales it.
+  if (flying && input.headlight !== false) {
+    hT = ((T && T.hI != null) ? T.hI : 2200.0) * (tier >= 3 ? 0.55 : (tier >= 1 ? 0.7 : 1));
+  }
   // (v39.64) DARK ROOMS AND DEEP WATER. The beam is tuned for the open overworld; under a near-black
   // cavern fog or below the water plane it barely reaches the walls (owner: "i wish the ship headlight
   // lit up dark rooms better, especially under water"). Scale with the fog's darkness (luminance under
@@ -72351,8 +72381,10 @@ const _spToTgt = new THREE.Vector3();
 // face, unless the shooter is on the wall's own team.
 // (v42.18) The ORIGINAL panel was BoxGeometry(400, 300, 25) - a flat rectangle. Owner: "let's make
 // tracker's plasma shield 4x bigger, and contact lens shape". So the base half-extents stay as the
-// historical record and `scale` (default 4) is what actually sizes the thing, while the silhouette
-// becomes an ELLIPSE because a lens has no corners. Mesh and hit test are driven from the SAME
+// historical record and `scale` is what actually sizes the thing, while the silhouette becomes an
+// ELLIPSE because a lens has no corners.
+// (v42.22) 4x was too much in the air - owner, on seeing it: "tracker's shield is too big, haha...
+// let's make it half the size". Halved to 2x, i.e. an 800 x 600 lens. Mesh and hit test are driven from the SAME
 // numbers - the whole point of the v42.17 collapse was that this mesh had three different
 // silhouettes, and a shape change is exactly where that would have drifted again.
 const _WALL_BASE_HALF_W = 200;
@@ -72363,7 +72395,7 @@ function _wallKnobs() {
     on:     (K.on !== false),                          // master A/B for the whole shield
     margin: (K.margin != null) ? +K.margin : 0,        // uniform inflation of the silhouette
     fx:     (K.fx !== false),                          // ripple + light on absorb
-    scale:  (K.scale != null) ? +K.scale : 4,          // ⭐ 4x, per the owner
+    scale:  (K.scale != null) ? +K.scale : 2,          // ⭐ 2x the original panel (was 4x in v42.18)
     bulge:  (K.bulge != null) ? +K.bulge : 0.5,        // lens curvature, as a fraction of half-width
   };
 }

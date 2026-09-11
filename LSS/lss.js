@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.20';
+const LSS_BUILD = '42.22';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -33313,8 +33313,11 @@ const _SHIPL = {
   engine: null, head: null, traffic: [],
   TRAF_N: ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
            (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 0 : 3,
-  CONE_N: ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
-           (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 0 : 6,
+  CONE_N: (function () {
+    if ((typeof isStandaloneQuest === 'function') && isStandaloneQuest()) return 2;
+    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return 0;
+    return 6;
+  })(),
   cones: [],           // pooled cone meshes (CONE_N)
   coneAssign: [],      // per-cone assigned entity (null = free)
   coneCur: [],         // per-cone smoothed opacity
@@ -33438,7 +33441,9 @@ function _shipLightsFrame() {
     S._lastMesh = null;   // drop the ref so a torn-down mesh can GC
   }
   let hT = 0;
-  if (flying && tier < 3 && input.headlight !== false) hT = ((T && T.hI != null) ? T.hI : 2200.0) * (tier >= 1 ? 0.7 : 1);
+  if (flying && input.headlight !== false) {
+    hT = ((T && T.hI != null) ? T.hI : 2200.0) * (tier >= 3 ? 0.55 : (tier >= 1 ? 0.7 : 1));
+  }
   let _hBoost = 1, _hReach = 1;
   try {
     const _f = scene.fog;
@@ -48395,7 +48400,7 @@ function _wallKnobs() {
     on:     (K.on !== false),                          // master A/B for the whole shield
     margin: (K.margin != null) ? +K.margin : 0,        // uniform inflation of the silhouette
     fx:     (K.fx !== false),                          // ripple + light on absorb
-    scale:  (K.scale != null) ? +K.scale : 4,          // ⭐ 4x, per the owner
+    scale:  (K.scale != null) ? +K.scale : 2,          // ⭐ 2x the original panel (was 4x in v42.18)
     bulge:  (K.bulge != null) ? +K.bulge : 0.5,        // lens curvature, as a fraction of half-width
   };
 }
