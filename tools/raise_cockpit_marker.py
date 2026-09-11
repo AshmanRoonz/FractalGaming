@@ -21,9 +21,15 @@ THE ONE THING TO GET RIGHT: UNITS.
   that stage too. This script exists for dialling a hull in against the real game, which is the only
   place the seat can actually be judged.
 
+⚠⚠ IT MUST WRITE assets_src/ TOO, NOT JUST LSS/. LSS/ships and LSS/ships/m are BUILD OUTPUTS -
+  `node tools/compress_glb.mjs --only ships` regenerates both from assets_src/ships, so a marker
+  written only into LSS/ is silently discarded the next time anything rebuilds the fleet. That is
+  exactly what happened to the v42.47 seat raises when the canopy frames were straightened: they
+  reverted to 0.09 with no error and no sign. All three copies are written here.
+
 USAGE
   python tools/raise_cockpit_marker.py blaster 3 slayer 5
-  (pairs of <ship> <up-in-game-units>; edits LSS/ships/<ship>.glb AND LSS/ships/m/<ship>.glb)
+  (pairs of <ship> <up-in-game-units>; edits assets_src/ships/, LSS/ships/ and LSS/ships/m/)
 """
 import struct, json, sys, os
 
@@ -93,7 +99,8 @@ if __name__ == '__main__':
         scale = BASE_SCALE.get(ship)
         if not scale:
             raise SystemExit('unknown ship %s' % ship)
-        for p in ('LSS/ships/%s.glb' % ship, 'LSS/ships/m/%s.glb' % ship):
+        for p in ('assets_src/ships/%s.glb' % ship, 'LSS/ships/%s.glb' % ship,
+                  'LSS/ships/m/%s.glb' % ship):
             if not os.path.exists(p):
                 print('  skip (missing) %s' % p)
                 continue
