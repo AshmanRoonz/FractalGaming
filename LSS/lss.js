@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.56';
+const LSS_BUILD = '42.57';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -55711,12 +55711,13 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
     _hlText(ctx, r, _HL.objective, v.objectiveStr, _HL.objective.col);
   }
 
-  ctx.globalAlpha = _hlGA();   // (v41.40)
+  ctx.globalAlpha = 1;
   _hlRadar(ctx, _hlPlace(_HL.minimap, W, H, 1));
   if (typeof window === 'undefined' || window.__hudCompass !== false) {
-    ctx.globalAlpha = _hlGA();   // (v41.40)
+    ctx.globalAlpha = 1;
     _hlCompass(ctx, _hlPlace(_HL.compass, W, H, 1), _HL.compass.col);
   }
+  ctx.globalAlpha = _hlGA();   // back to the dimmed HUD for anything drawn after
 
   if (typeof window !== 'undefined' && window.__hudNums) {
     const _num = (part, str, col) => {
@@ -60478,7 +60479,7 @@ function buildSettingsPage() {
         <div class="value-display" id="val-hud-text-opacity">${(((typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1) * 100).toFixed(0)}%</div>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">Two independent controls, not a master and a trim: the arcs, ticks, reticle, radar and compass follow the first, and every word and number on the HUD follows the second. Set text above the graphics to keep readouts legible over a faint instrument cluster, or below it to quieten the captions. Both apply live, on the flat HUD and in VR.</label>
+        <label style="flex:1;">Two independent controls, not a master and a trim: the arcs, ticks and reticle follow the first, and every word and number on the HUD follows the second. The radar and its compass rose are exempt from both and always draw at full strength. Set text above the graphics to keep readouts legible over a faint instrument cluster, or below it to quieten the captions. Both apply live, on the flat HUD and in VR.</label>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Scales the gauge cluster, ability bars, reticle and captions on flat screen. Applies live. The radar and compass rose stay at their designed size. Note the painted cockpit frames are drawn around the 1.00&times; layout, so first-person recesses stop lining up with the rings as you move away from it. VR has its own separate size slider below.</label>
