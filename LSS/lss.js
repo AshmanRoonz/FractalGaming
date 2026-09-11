@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.22';
+const LSS_BUILD = '42.29';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23769,14 +23769,18 @@ function _cyberRoundEnd(C, winnerTeam, title, sub, fromNet) {
   try { mine = (player.team === winnerTeam); } catch (_) {}
   try {
     if (window.Overlays && Overlays.banner) {
-      Overlays.banner(title, (sub ? sub + '  \u00b7  ' : '') + (mine ? 'round to you' : 'round to them'));
+      const _cl = _cyberScoreLine(C);
+      const _detail = (sub ? sub : title) + (_cl ? '  ·  ' + _cl : '');
+      Overlays.banner(mine ? 'ROUND WON' : 'ROUND LOST', _detail, champ ? 3 : 5);
     }
   } catch (_) {}
-  try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+  try {
+    if (typeof ANN !== 'undefined' && ANN) { if (mine) ANN.roundWon(); else ANN.roundLost(); }
+  } catch (_) {}
   if (champ) {
     let win = false;
     try { win = (player.team === champ); } catch (_) {}
-    setTimeout(() => { try { _cyberEnd(C, win ? 'VICTORY' : 'DEFEAT', _cyberScoreLine(C), true); } catch (_) {} }, 3200);
+    setTimeout(() => { try { _cyberEnd(C, win ? 'VICTORY' : 'DEFEAT', _cyberScoreLine(C), true); } catch (_) {} }, 3600);   // (v42.27) 3200 -> 3600: ~0.6 s of clean screen between the round verdict and VICTORY/DEFEAT, instead of the two cross-fading into each other
     return;
   }
   setTimeout(() => { try { _cyberNextRound(C); } catch (e) { console.warn('[cyber] next round:', e); } }, 5000);
@@ -23851,9 +23855,17 @@ function _cyberEnd(C, title, sub, fromNet) {
   if (!fromNet && net.active && net.sendEvent) {
     try { net.sendEvent({ type: 'cyber_end', title: title, sub: sub }); } catch (_) {}
   }
-  try { if (window.Overlays && Overlays.banner) Overlays.banner(title, sub); } catch (_) {}
-  try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
-  setTimeout(() => { try { if (typeof returnToRootMenu === 'function') returnToRootMenu(); } catch (_) {} }, 7000);
+  try { if (window.Overlays && Overlays.banner) Overlays.banner(title, sub, 6.5); } catch (_) {}
+  try {
+    if (typeof ANN !== 'undefined' && ANN) {
+      let _w = false; try { _w = (title === 'VICTORY'); } catch (_) {}
+      if (_w) ANN.victory(); else ANN.defeat();
+    }
+  } catch (_) {}
+  try { game.state = 'matchEnd'; } catch (_) {}
+  try { if (typeof _anchorTimer === 'function') _anchorTimer('matchEndTimer', 7); } catch (_) {}
+  try { if (typeof _refreshScoreboardVisibility === 'function') _refreshScoreboardVisibility(); } catch (_) {}
+  try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
 }
 const _cyWp = new THREE.Vector3();
 function _cyberBotWaypoint(bot) {
@@ -23900,6 +23912,8 @@ function _cyberCityDefence(C) {
 }
 function _cyberCinematic(C) {
   if (typeof _cinematic === 'undefined' || !_cinematic || !_carrier.obj) return false;
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return true;
+
   if (!_cyberPlayerAttacks(C)) return false;           // defenders are already in the city
   const list = [];
   if (player && player.mesh) list.push({ mesh: player.mesh, isPlayer: true, ent: null });
@@ -45779,13 +45793,22 @@ function commitLoadout(key) {
 
   const _launchSoloAfterCinematic = () => {
     if (_countdownActive) return;
+    if (typeof game !== 'undefined' && game && game.state === 'playing') return;
+    if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
     if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && game._swPreloading) {
       game._preLaunchWaiting = true;
       return;
     }
-    _lssRunCinematicThen(() => {
-      try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-      launchCountdown(LSS.SHORT_COUNTDOWN);
+    if (game._warmupDone === false) {
+      game._preLaunchWaiting = true;
+      return;
+    }
+    _cineWhenSettled(() => {
+      try { hideLoadingOverlay(); } catch (_) {}
+      _lssRunCinematicThen(() => {
+        try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+        launchCountdown(LSS.SHORT_COUNTDOWN);
+      });
     });
   };
   game._launchSoloAfterCinematic = _launchSoloAfterCinematic;
@@ -45796,8 +45819,8 @@ function commitLoadout(key) {
       if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
       if (game.state !== 'warmup' || !player.loadoutKey) return;
       console.warn('[v26VR] Quest warmup watchdog forced cinematic handoff');
+      _questWarmupWatchdog = null;
       try { _markLocalWarmupReady(); } catch (_) {}
-      try { hideLoadingOverlay(); } catch (_) {}
       _launchSoloAfterCinematic();
     }, 1800);
   }
@@ -45825,6 +45848,7 @@ function commitLoadout(key) {
     }, 1000);
   }
 
+  try { game._warmupDone = false; } catch (_) {}   // (v42.25) cleared by both promise arms below
   let _warmupPromise;
   try {
     _warmupPromise = warmupCombatShaders();
@@ -45841,6 +45865,7 @@ function commitLoadout(key) {
     );
   }
   _warmupPromise.then(() => {
+    try { game._warmupDone = true; } catch (_) {}   // (v42.25)
     if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
     if (net.active) _clearLaunchStall();   // (v36.21) MP owns its own handshake
     _markLocalWarmupReady();
@@ -45848,18 +45873,20 @@ function commitLoadout(key) {
       try { showShipSelectWaiting(); } catch (_) {}
       checkAllLoadoutsReady();
     } else {
-      try { hideLoadingOverlay(); } catch (_) {}
       if (!_countdownActive) {
         _launchSoloAfterCinematic();
+      } else {
+        try { hideLoadingOverlay(); } catch (_) {}
       }
     }
   }).catch((e) => {
+    try { game._warmupDone = true; } catch (_) {}   // (v42.25) failed counts as done - never strand the launch
     if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
     if (net.active) _clearLaunchStall();   // (v36.21) MP owns its own handshake
     console.warn('[commitLoadout] warmup failed, launching anyway:', e);
     _markLocalWarmupReady();
-    try { hideLoadingOverlay(); } catch (_) {}
     if (net.active) {
+      try { hideLoadingOverlay(); } catch (_) {}
       try { showShipSelectWaiting(); } catch (_) {}
       checkAllLoadoutsReady();
     } else if (!_countdownActive) {
@@ -46860,6 +46887,7 @@ function _lssEnsureCinematicStyles() {
 }
 
 function _lssStartSpectatorCinematic() {
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return true;
   if (typeof LSS !== 'undefined' && LSS.MODE === 'race') return false;
   if (typeof game !== 'undefined' && game && game._campJourney) return false;   
   if (typeof game !== 'undefined' && game && game._cyber && game._cyber.armed) {
@@ -47152,7 +47180,38 @@ function _lssUpdateSpectatorCinematic(frameMs) {
   return true;
 }
 
+function _cineHeavyWorkPending() {
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    if (game._warmupDone === false) return true;      // shader warmup promise still outstanding
+    if (game._swPreloading) return true;              // hub terrain preload (free flight)
+    if (game._worldPrebaking) return true;            // world prebake / GPU pose sweep
+    try { if (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on) return true; } catch (_) {}
+    if (game._swapStaging || game._rrStaging) return true;
+    return false;
+  } catch (_) { return false; }
+}
+function _cineWhenSettled(fn, capMs) {
+  const cap = (capMs != null) ? capMs : 8000;
+  const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  const t0 = _now();
+  const go = () => { try { fn(); } catch (e) { console.warn('[cinematic] settled-start failed:', e && e.message); } };
+  const tick = () => {
+    let over = false;
+    try { over = (_now() - t0) > cap; } catch (_) { over = true; }
+    if (over) { console.warn('[cinematic] settle cap hit - starting anyway'); go(); return; }
+    if (_cineHeavyWorkPending()) { requestAnimationFrame(tick); return; }
+    requestAnimationFrame(() => requestAnimationFrame(go));
+  };
+  tick();
+}
 function _lssRunCinematicThen(andThen) {
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
+    _cinematic.after = () => {
+      try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); }
+    };
+    return;
+  }
   let started = false;
   try {
     if (typeof _lssStartSpectatorCinematic === 'function') {
@@ -67102,15 +67161,20 @@ const Overlays = (() => {
     el.classList.remove('show');
   }
 
-  function banner(text, subtext) {
+  function banner(text, subtext, secs) {
     const el = $('ov-banner');
     if (!el) return;
     el.querySelector('.ban-text').textContent = text || '';
     const sub = el.querySelector('.ban-sub');
     sub.textContent = subtext || '';
     sub.style.display = subtext ? 'block' : 'none';
+    const _bd = (typeof secs === 'number' && secs > 0) ? secs : 3;
+    el.style.animationDuration = _bd + 's';
     replay(el, 'show');
-    el.querySelectorAll('.ban-line').forEach((ln) => { ln.style.animation = 'none'; void ln.offsetWidth; ln.style.animation = ''; });
+    el.querySelectorAll('.ban-line').forEach((ln) => {
+      ln.style.animation = 'none'; void ln.offsetWidth; ln.style.animation = '';
+      ln.style.animationDuration = _bd + 's';
+    });
   }
 
   return { damageVignette, warp, underwater, killStreak, countdown, medal, abilityFlash, respawn, hideRespawn, banner };   // (v40.57) endCountdown retired with #ov-countdown; launchCountdown calls _cdClear() instead
@@ -78724,7 +78788,8 @@ function updateScoreboard() {
   const _youName = 'YOU (' + (player.loadout ? player.loadout.name : '?') + ')';
 
   let html = '<h2>SCOREBOARD</h2>';
-  const _sbPvE = (_sbMode === 'campaign' || _sbMode === 'freeflight' || _sbMode === 'endless');
+  const _sbCyber = (typeof _isCyber === 'function') && _isCyber();
+  const _sbPvE = !_sbCyber && (_sbMode === 'campaign' || _sbMode === 'freeflight' || _sbMode === 'endless');
   const _sbEndless = (_sbMode === 'endless');
   html += '<div class="sb-header-row"><div class="sb-name sb-stat-header">SHIP</div><div class="sb-stat-header">STATUS</div><div class="sb-stat-header">KILLS</div>'
     + (_sbPvE ? '<div class="sb-stat-header">LEVIATHANS</div>' : '')
@@ -78768,6 +78833,39 @@ function updateScoreboard() {
       list.sort((a, b) => b.k - a.k);
       return list;
     };
+    if (_sbCyber) {
+      const _cC = game._cyber;
+      const _cL = (_cC && _cC.ledger) || { capsA: 0, capsB: 0 };
+      const _cAtk = (typeof _cyberAtkFleet === 'function') ? _cyberAtkFleet(_cC) : null;
+      const _cTag = (team) => (_cAtk == null) ? '' : (team === _cAtk ? ' — ATTACKING' : ' — DEFENDING');
+      const _cCaps = (team) => (team === _cC.teamA) ? (_cL.capsA || 0) : (_cL.capsB || 0);
+      const _cList = (team) => {
+        const list = [];
+        try {
+          for (const b of (_cC.bots || [])) {
+            if (!b || b.team !== team || !b.loadout) continue;
+            if (!b.alive) continue;
+            list.push({ n: b.loadout.name, s: statusOf(b), k: b.kills || 0, d: b.damageDealt || 0 });
+          }
+        } catch (_) {}
+        try {
+          for (const np of net.networkPlayers) {
+            if (np.team !== team) continue;
+            list.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, d: np.damageDealt || 0 });
+          }
+        } catch (_) {}
+        list.sort((a, b) => b.k - a.k);
+        return list;
+      };
+      const _cRound = ' — ROUND ' + ((_cC && _cC.round) || 1);
+      const _cA = _cC ? _cC.teamA : LSS.TEAM_FLEET_A, _cB = _cC ? _cC.teamB : LSS.TEAM_FLEET_B;
+      html += '<div class="sb-team-header sb-team-a">FLEET A' + _cTag(_cA) + ' (' + _cCaps(_cA) + ' captures)' + _cRound + '</div>';
+      if (player.team === _cA) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
+      for (const p of _cList(_cA)) html += row(p.n, p.s, p.k, p.d, false);
+      html += '<div class="sb-team-header sb-team-b">FLEET B' + _cTag(_cB) + ' (' + _cCaps(_cB) + ' captures)</div>';
+      if (player.team === _cB) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
+      for (const p of _cList(_cB)) html += row(p.n, p.s, p.k, p.d, false);
+    } else {
     const _atkF = (_asltSB && typeof _assaultAttackerFleet === 'function') ? _assaultAttackerFleet() : null;
     const tag = (team) => (!_asltSB || !_atkF) ? '' : (team === _atkF ? ' — ATTACKING' : ' — DEFENDING');
     html += '<div class="sb-team-header sb-team-a">FLEET A' + tag(LSS.TEAM_FLEET_A) + ' (' + game.scoreA + ' rounds)</div>';
@@ -78776,6 +78874,7 @@ function updateScoreboard() {
     html += '<div class="sb-team-header sb-team-b">FLEET B' + tag(LSS.TEAM_FLEET_B) + ' (' + game.scoreB + ' rounds)</div>';
     if (player.team === LSS.TEAM_FLEET_B) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
     for (const p of mkList(LSS.TEAM_FLEET_B)) html += row(p.n, p.s, p.k, p.d, false);
+    }
   }
 
   html += '<div style="text-align:center;color:#888;font-size:10px;margin-top:12px;letter-spacing:2px;">KILLS ' + (player.kills || 0) + '  &middot;  DEATHS ' + (player.deaths || 0) + '  &middot;  DAMAGE ' + Math.floor(player.damageDealt || 0) + '</div>';

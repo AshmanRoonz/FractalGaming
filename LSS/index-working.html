@@ -4700,7 +4700,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.22';
+const LSS_BUILD = '42.29';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -37921,16 +37921,37 @@ function _cyberRoundEnd(C, winnerTeam, title, sub, fromNet) {
   }
   let mine = false;
   try { mine = (player.team === winnerTeam); } catch (_) {}
+  // ⭐⭐ (v42.27) SAY WHO WON, IN THE BIG TEXT. Owner: "it's hard to tell who won the round, it
+  // flashes fast on the screen and switches sides".
+  // The headline used to be the EVENT - 'FIELD TAKEN', 'CARRIER DOWN' - in 28 px orange, while the
+  // actual verdict sat in the 12 px grey subtitle as "round to you". So you read FIELD TAKEN and
+  // could not tell whether that was good for you - worst of all right after the sides swapped.
+  // Flipped to the split the arena round-end already uses: the VERDICT is the headline, the event
+  // and the running capture score are the detail line. _cyberScoreLine is already oriented to the
+  // local player's team and until now was only ever shown at match end, so this is the first time
+  // the mode shows a running score at all.
   try {
     if (window.Overlays && Overlays.banner) {
-      Overlays.banner(title, (sub ? sub + '  \u00b7  ' : '') + (mine ? 'round to you' : 'round to them'));
+      const _cl = _cyberScoreLine(C);
+      const _detail = (sub ? sub : title) + (_cl ? '  ·  ' + _cl : '');
+      // 5.0 s holds the verdict right up to the swap at 5000 ms below, closing the 2 s of dead air
+      // where it had already faded and nothing had replaced it.
+      // ⚠ DO NOT EXCEED 5 s: at t=5 the ship picker (z 100) covers #ov-banner (z 65), and because
+      // the picker is painted transparent a longer banner bleeds through it half-visible.
+      // On the match-winning round keep 3 s - VICTORY/DEFEAT follows 600 ms later.
+      Overlays.banner(mine ? 'ROUND WON' : 'ROUND LOST', _detail, champ ? 3 : 5);
     }
   } catch (_) {}
-  try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+  // (v42.27) was playSound('round_start') - a round START sting, used for a round END. The
+  // announcer pair the arena uses says it out loud, which is the only cue that survives a pilot
+  // who is looking at a dogfight instead of at the middle of the screen.
+  try {
+    if (typeof ANN !== 'undefined' && ANN) { if (mine) ANN.roundWon(); else ANN.roundLost(); }
+  } catch (_) {}
   if (champ) {
     let win = false;
     try { win = (player.team === champ); } catch (_) {}
-    setTimeout(() => { try { _cyberEnd(C, win ? 'VICTORY' : 'DEFEAT', _cyberScoreLine(C), true); } catch (_) {} }, 3200);
+    setTimeout(() => { try { _cyberEnd(C, win ? 'VICTORY' : 'DEFEAT', _cyberScoreLine(C), true); } catch (_) {} }, 3600);   // (v42.27) 3200 -> 3600: ~0.6 s of clean screen between the round verdict and VICTORY/DEFEAT, instead of the two cross-fading into each other
     return;
   }
   setTimeout(() => { try { _cyberNextRound(C); } catch (e) { console.warn('[cyber] next round:', e); } }, 5000);
@@ -38016,6 +38037,21 @@ function _cyberRoundIntro(C) {
   // keeps _cyberFrame holding the wing on the deck instead of letting them fly their own AI out of
   // the carrier's collision body (the v38.00 lesson). Only the 3-2-1 releases them.
   setTimeout(() => {
+    // ⭐⭐ (v42.25) BUILD FIRST, THEN WAIT FOR THE WORLD TO GO QUIET, THEN FLY. This path fired the
+    // lineup off a FIXED timer (swap * 1000 + 350) and never asked whether anything was still
+    // building, so on a headset the flight opened straight into the shader warmup and the prebake.
+    // _cyberSetup stays synchronous and immediate - it is what puts the hull on the deck and the
+    // wing in formation - but the CINEMATIC now waits for _cineHeavyWorkPending() to clear plus one
+    // settled frame. Everything downstream (cineSecs, the warmup clock, the 3-2-1 timer) is
+    // computed AFTER the wait so the countdown still lines up with the flight it follows.
+    // ⚠⚠ (v42.28) DO NOT PUT A SETTLE WAIT HERE. v42.25 deferred this block until the world went
+    // quiet, to keep the shader warmup out of the cinematic - and it spawned the wing UNDERNEATH the
+    // carrier, twice. _cyberRoundIntro has already armed game.warmupTimer, opened the picker and
+    // started launchCountdown(swap) by this point, so the pilot is committed into the world on that
+    // clock; delaying the BUILD leaves them in it before the carrier, the deck and their own placement
+    // exist. The whole sequence is one timed chain and this step cannot slide inside it.
+    // Exhibition's equivalent fix lives in _launchSoloAfterCinematic, which owns its own handoff and
+    // has no such chain - that one is safe and stays.
     let cine = false;
     try {
       _cyberSetup(C);
@@ -38044,9 +38080,29 @@ function _cyberEnd(C, title, sub, fromNet) {
   if (!fromNet && net.active && net.sendEvent) {
     try { net.sendEvent({ type: 'cyber_end', title: title, sub: sub }); } catch (_) {}
   }
-  try { if (window.Overlays && Overlays.banner) Overlays.banner(title, sub); } catch (_) {}
-  try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
-  setTimeout(() => { try { if (typeof returnToRootMenu === 'function') returnToRootMenu(); } catch (_) {} }, 7000);
+  // ⭐⭐ (v42.27) THE MATCH END NOW RAISES THE REAL SCOREBOARD. Owner: "at the end of the match, i
+  // dont even know if there's a scoreboard that pops up". There wasn't - this showed one 3 s banner
+  // and then bounced you to the root menu on a bare setTimeout, never touching the #scoreboard
+  // overlay the rest of the game uses.
+  try { if (window.Overlays && Overlays.banner) Overlays.banner(title, sub, 6.5); } catch (_) {}
+  try {
+    if (typeof ANN !== 'undefined' && ANN) {
+      let _w = false; try { _w = (title === 'VICTORY'); } catch (_) {}
+      if (_w) ANN.victory(); else ANN.defeat();
+    }
+  } catch (_) {}
+  // The classic/assault match-end shape, verbatim: flip the state, anchor the dwell on the wall
+  // clock, and let _refreshScoreboardVisibility force-show the board.
+  // ⚠ THE setTimeout(returnToRootMenu, 7000) IS GONE ON PURPOSE, NOT BY OVERSIGHT. Once
+  // game.state === 'matchEnd', updateRoundSystem ticks matchEndTimer and calls returnToRootMenu
+  // ITSELF - keeping both would be two exits racing on two clocks. 7 s is this mode's own existing
+  // dwell, so the pacing the owner already knows is unchanged; only now there is a board in it.
+  // Multiplayer is free: _cyberEnd runs on every peer (each computes its own verdict locally in
+  // _cyberRoundEnd), so the board comes up identically everywhere with no new event.
+  try { game.state = 'matchEnd'; } catch (_) {}
+  try { if (typeof _anchorTimer === 'function') _anchorTimer('matchEndTimer', 7); } catch (_) {}
+  try { if (typeof _refreshScoreboardVisibility === 'function') _refreshScoreboardVisibility(); } catch (_) {}
+  try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
 }
 // (v37.79) Where a mode bot wants to be when it is not already in a fight. Returns null to hand
 // the bot back to its own dogfight AI, which is what should happen the moment something is close.
@@ -38122,6 +38178,16 @@ function _cyberCityDefence(C) {
 // and simply declines in the overworld.
 function _cyberCinematic(C) {
   if (typeof _cinematic === 'undefined' || !_cinematic || !_carrier.obj) return false;
+  // ⭐⭐ (v42.23) ALREADY RUNNING = DO NOT RESTART. Returning TRUE, not false: the caller reads
+  // this as "a cinematic is playing", and a false here would make _lssRunCinematicThen fire its
+  // andThen() immediately - launching the 3-2-1 countdown over a cinematic that is still flying.
+  // ⚠ THIS IS ALSO THE "SHIPS MOVE" BUG. _pushShip captures origPos/origQuat from each mesh's
+  // CURRENT transform, and the teardown copies them back. A second start therefore snapshots the
+  // LINEUP poses as "original", so when the cinematic ends every ship is restored to the lineup
+  // instead of its real spawn. Owner: "from cinematic to start, the ships shouldn't change
+  // position" - same root cause as the double, fixed by the same guard.
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return true;
+
   if (!_cyberPlayerAttacks(C)) return false;           // defenders are already in the city
   const list = [];
   if (player && player.mesh) list.push({ mesh: player.mesh, isPlayer: true, ent: null });
@@ -68145,6 +68211,10 @@ function commitLoadout(key) {
 
   const _launchSoloAfterCinematic = () => {
     if (_countdownActive) return;
+    // (v42.23) _countdownActive drops ~700 ms after LAUNCH, so a late-settling prebake or a
+    // straggling promise arm could otherwise start a cinematic over live gameplay.
+    if (typeof game !== 'undefined' && game && game.state === 'playing') return;
+    if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
     // (v33.47) Free-flight builds its terrain via the async preloader
     // (game._swPreloading). Don't run the intro cinematic over a still-building
     // world — defer until the main loop reports the preload finished, which
@@ -68155,9 +68225,23 @@ function commitLoadout(key) {
       game._preLaunchWaiting = true;
       return;
     }
-    _lssRunCinematicThen(() => {
-      try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-      launchCountdown(LSS.SHORT_COUNTDOWN);
+    // (v42.25) ...and the same for the shader warmup. Previously ONLY the preload could defer, so
+    // whichever finished first opened the cinematic - on a headset that is the preload, leaving the
+    // warmup to compile inside the flight. The promise arm calls this again when it resolves, and
+    // the preload-complete arm re-invokes via _preLaunchWaiting, so whichever is genuinely LAST
+    // starts it, in both orders.
+    if (game._warmupDone === false) {
+      game._preLaunchWaiting = true;
+      return;
+    }
+    // (v42.25) Wait out whatever is still building, give it one settled frame, and only then lift
+    // the loading screen and open the flight. Everything heavy now happens behind the cover.
+    _cineWhenSettled(() => {
+      try { hideLoadingOverlay(); } catch (_) {}
+      _lssRunCinematicThen(() => {
+        try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+        launchCountdown(LSS.SHORT_COUNTDOWN);
+      });
     });
   };
   game._launchSoloAfterCinematic = _launchSoloAfterCinematic;
@@ -68168,8 +68252,13 @@ function commitLoadout(key) {
       if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
       if (game.state !== 'warmup' || !player.loadoutKey) return;
       console.warn('[v26VR] Quest warmup watchdog forced cinematic handoff');
+      // (v42.23) Null it the moment it fires. The two clearTimeout sites in the promise arms are
+      // no-ops against an ALREADY-FIRED timer, so without this there is no way for the promise to
+      // know the watchdog beat it to the handoff.
+      _questWarmupWatchdog = null;
       try { _markLocalWarmupReady(); } catch (_) {}
-      try { hideLoadingOverlay(); } catch (_) {}
+      // (v42.25) no hideLoadingOverlay() here any more - _launchSoloAfterCinematic drops the
+      // curtain itself once the world has settled. Lifting it here just uncovered a building world.
       _launchSoloAfterCinematic();
     }, 1800);
   }
@@ -68227,6 +68316,7 @@ function commitLoadout(key) {
   // warmupCombatShaders is idempotent ; calling it again after the
   // first session resolves immediately so the loading overlay flashes
   // briefly then hides on subsequent commits.
+  try { game._warmupDone = false; } catch (_) {}   // (v42.25) cleared by both promise arms below
   let _warmupPromise;
   try {
     _warmupPromise = warmupCombatShaders();
@@ -68271,6 +68361,7 @@ function commitLoadout(key) {
   // with one leg left, the tail .catch below is the whole guarantee (and it
   // still launches the match rather than stranding the player).
   _warmupPromise.then(() => {
+    try { game._warmupDone = true; } catch (_) {}   // (v42.25)
     if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
     if (net.active) _clearLaunchStall();   // (v36.21) MP owns its own handshake
     // Local warmup is done ; mark ourselves ready and notify peers.
@@ -68287,13 +68378,22 @@ function commitLoadout(key) {
       // Solo: hand straight off to the short visible countdown. Anchor
       // warmupTimer to SHORT_COUNTDOWN so the round-system gate fires
       // at the same wall-clock moment as the LAUNCH tick.
-      try { hideLoadingOverlay(); } catch (_) {}
+      // ⭐⭐ (v42.25) THE CURTAIN IS NOW THE LAUNCH PATH'S TO DROP. Owner: "the loading screen is
+      // right before it... just stay there longer". Hiding here was the other half of the hitch:
+      // this arm lifted the cover and only THEN handed off, so if the handoff deferred (hub preload
+      // or prebake still going) the pilot sat looking at a live, still-building world with no
+      // cinematic - and when the flight finally opened, the stragglers stalled it. Deferring the
+      // hide into _launchSoloAfterCinematic keeps the loading screen up for exactly as long as
+      // there is work left, which is what the owner asked for.
       if (!_countdownActive) {
         // Cinematic before the 3-2-1. Solo warmup-success path.
         _launchSoloAfterCinematic();
+      } else {
+        try { hideLoadingOverlay(); } catch (_) {}
       }
     }
   }).catch((e) => {
+    try { game._warmupDone = true; } catch (_) {}   // (v42.25) failed counts as done - never strand the launch
     if (_questWarmupWatchdog) { clearTimeout(_questWarmupWatchdog); _questWarmupWatchdog = null; }
     if (net.active) _clearLaunchStall();   // (v36.21) MP owns its own handshake
     // Warmup failed unexpectedly ; don't strand the player on the
@@ -68301,11 +68401,13 @@ function commitLoadout(key) {
     // impact will hit a cold shader but at least the match starts.
     console.warn('[commitLoadout] warmup failed, launching anyway:', e);
     _markLocalWarmupReady();
-    try { hideLoadingOverlay(); } catch (_) {}
     if (net.active) {
+      try { hideLoadingOverlay(); } catch (_) {}
       try { showShipSelectWaiting(); } catch (_) {}
       checkAllLoadoutsReady();
     } else if (!_countdownActive) {
+      // (v42.25) as above - the launch path drops the curtain when the flight actually opens. The
+      // settle wait is capped, so a failed warmup still cannot leave the cover up indefinitely.
       // Cinematic before the 3-2-1. Solo warmup-failed fallback.
       _launchSoloAfterCinematic();
     }
@@ -69932,6 +70034,15 @@ function _lssEnsureCinematicStyles() {
 }
 
 function _lssStartSpectatorCinematic() {
+  // ⭐⭐ (v42.23) ALREADY RUNNING = DO NOT RESTART. Returning TRUE, not false: the caller reads
+  // this as "a cinematic is playing", and a false here would make _lssRunCinematicThen fire its
+  // andThen() immediately - launching the 3-2-1 countdown over a cinematic that is still flying.
+  // ⚠ THIS IS ALSO THE "SHIPS MOVE" BUG. _pushShip captures origPos/origQuat from each mesh's
+  // CURRENT transform, and the teardown copies them back. A second start therefore snapshots the
+  // LINEUP poses as "original", so when the cinematic ends every ship is restored to the lineup
+  // instead of its real spawn. Owner: "from cinematic to start, the ships shouldn't change
+  // position" - same root cause as the double, fixed by the same guard.
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return true;
   // Show only the player's team
   // arranged side by side in their spawn room. Previously we showed both
   // teams in a wedge, but that revealed the enemy loadouts before the
@@ -70330,7 +70441,75 @@ function _lssUpdateSpectatorCinematic(frameMs) {
   return true;
 }
 
+// ⭐⭐ (v42.25) HOLD THE FLIGHT UNTIL THE WORLD HAS STOPPED WORKING. Owner: "can't we just delay
+// the start, so it's not laggy during the cinematic? its laggy on both exhibition and cyberpunk, on
+// VR". Yes - and it is the right shape, because nothing about the cinematic itself is slow.
+// MEASURED on desktop exhibition: 721 cinematic frames at a median of 8 ms with ZERO spikes, while
+// the launch BEFORE it contained a 4,080 ms frame (the shader warmup compiling ~176 programs), a
+// 487 ms frame, and several 40-80 ms prebake frames. Desktop gets a clean flight purely by luck of
+// ordering: the warmup finishes LAST there, so everything heavy is already paid when the cinematic
+// opens. In a headset the hub preload finishes first (smaller _swHubView, slower warmup), so the
+// cinematic opens EARLY and all of that lands inside the flight instead.
+// So: whoever is ready first now waits for the stragglers rather than opening the curtain on them.
+// ⚠ CAPPED. If a stage wedges, a late cinematic is far better than no launch at all - the cap
+// expires and we fly anyway, which is the same philosophy as the Quest warmup watchdog.
+function _cineHeavyWorkPending() {
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    if (game._warmupDone === false) return true;      // shader warmup promise still outstanding
+    if (game._swPreloading) return true;              // hub terrain preload (free flight)
+    if (game._worldPrebaking) return true;            // world prebake / GPU pose sweep
+    // ⚠ _PREBAKE.on is the prebake's OWN flag and does not always move in lockstep with
+    // game._worldPrebaking. Phase B drains the streamer with a 40 ms synchronous slice per yielded
+    // frame for up to 12 s - on a 72 Hz headset that is a 3x frame-budget overrun on EVERY frame it
+    // runs, which is precisely the sustained judder the owner reported in VR rather than one stall.
+    try { if (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on) return true; } catch (_) {}
+    if (game._swapStaging || game._rrStaging) return true;
+    return false;
+  } catch (_) { return false; }
+}
+function _cineWhenSettled(fn, capMs) {
+  const cap = (capMs != null) ? capMs : 8000;
+  const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  const t0 = _now();
+  const go = () => { try { fn(); } catch (e) { console.warn('[cinematic] settled-start failed:', e && e.message); } };
+  const tick = () => {
+    let over = false;
+    try { over = (_now() - t0) > cap; } catch (_) { over = true; }
+    if (over) { console.warn('[cinematic] settle cap hit - starting anyway'); go(); return; }
+    if (_cineHeavyWorkPending()) { requestAnimationFrame(tick); return; }
+    // One further rendered frame before the curtain goes up: the LAST unit of work has landed but
+    // its first draw (program link, texture upload) has not happened yet, and that draw is exactly
+    // the spike we are trying to keep out of the flight.
+    requestAnimationFrame(() => requestAnimationFrame(go));
+  };
+  tick();
+}
 function _lssRunCinematicThen(andThen) {
+  // ⭐⭐ (v42.23) IDEMPOTENT. Owner, in VR: "the cinematic starts and then starts again cutting
+  // in at 1s into the starting of the first one".
+  // THREE things can start the solo cinematic and only ONE of them checked whether it was already
+  // running: the _warmupPromise.then handoff, the hub preload finishing
+  // (game._preLaunchWaiting -> _launchSoloAfterCinematic), and the Quest warmup watchdog - which
+  // DOES guard on _cinematic.active. The other two did not, and nothing below this line guarded
+  // either, so a second call simply re-ran _lssStartSpectatorCinematic() and the camera flight
+  // started over from the top.
+  // WHY IT IS A HEADSET/PHONE BUG. In free flight `_launchSoloAfterCinematic` DEFERS while
+  // game._swPreloading is true, so whichever of {warmup promise, hub preload} finishes LAST is the
+  // one that actually starts the flight. On a desktop the promise resolves first, defers on the
+  // preload, and the preload then starts it exactly once. On a Quest the shader warmup is slow AND
+  // the hub preload is smaller (_swHubView 8 vs 12), so the preload wins - it starts the cinematic,
+  // and ~1 s later the promise resolves, finds _swPreloading already false, and starts it AGAIN.
+  // That gap is the "1s into the first one".
+  // Re-arming `after` rather than just returning: the second caller is still owed its completion
+  // callback (all of them hand off to launchCountdown), and dropping it would strand the player in
+  // a finished cinematic with no 3-2-1.
+  if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
+    _cinematic.after = () => {
+      try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); }
+    };
+    return;
+  }
   let started = false;
   try {
     if (typeof _lssStartSpectatorCinematic === 'function') {
@@ -97382,16 +97561,29 @@ const Overlays = (() => {
   }
 
   // ---- Round banner ----
-  function banner(text, subtext) {
+  // (v42.27) `secs` is OPTIONAL and defaults to the CSS 3s, so all ~40 existing call sites are
+  // unchanged. The keyframes are percentage-based (0/10/80/100), so scaling the duration scales the
+  // hold with it: at 5s that is 0.5s in, 3.5s held, 1.0s out.
+  // ⚠ WRITTEN UNCONDITIONALLY - animationDuration is an inline style and STICKS on the element, so
+  // a 5s banner that did not reset it would leave the mode's ordinary chatter (SHELL UP, CARRIER ON
+  // STATION) silently running at 5s afterwards.
+  // ⚠ The .ban-line decorations run their OWN 3s animation and must be scaled too, or the rules
+  // snap away at 3s under a 5s headline - a visible mismatch, not a silent one.
+  function banner(text, subtext, secs) {
     const el = $('ov-banner');
     if (!el) return;
     el.querySelector('.ban-text').textContent = text || '';
     const sub = el.querySelector('.ban-sub');
     sub.textContent = subtext || '';
     sub.style.display = subtext ? 'block' : 'none';
+    const _bd = (typeof secs === 'number' && secs > 0) ? secs : 3;
+    el.style.animationDuration = _bd + 's';
     replay(el, 'show');
     // Lines have their own animation; restart them.
-    el.querySelectorAll('.ban-line').forEach((ln) => { ln.style.animation = 'none'; void ln.offsetWidth; ln.style.animation = ''; });
+    el.querySelectorAll('.ban-line').forEach((ln) => {
+      ln.style.animation = 'none'; void ln.offsetWidth; ln.style.animation = '';
+      ln.style.animationDuration = _bd + 's';
+    });
   }
 
   return { damageVignette, warp, underwater, killStreak, countdown, medal, abilityFlash, respawn, hideRespawn, banner };   // (v40.57) endCountdown retired with #ov-countdown; launchCountdown calls _cdClear() instead
@@ -111401,7 +111593,12 @@ function updateScoreboard() {
   // (v38.77) PvE boards (endless / campaign / hub) score ship kills AND leviathan kills, and
   // endless shows each pilot's Aegis level. Owner: "on the scoreboard we need score for ship kills
   // and for leviathan kills, and also display aegis level". Peers carry mk / al in their state.
-  const _sbPvE = (_sbMode === 'campaign' || _sbMode === 'freeflight' || _sbMode === 'endless');
+  // ⭐⭐ (v42.28) CYBERPUNK CITY IS A TEAM MODE WEARING FREEFLIGHT'S NAME. LSS.MODE reads
+  // 'freeflight' in this mode, so it fell into the PvE arm and the owner's match-end board came up
+  // with a LEVIATHANS column (there are no monsters here), a "PILOTS" heading instead of the two
+  // sides, no score, and no bots. Gate on _isCyber() - the mode's own predicate - not on LSS.MODE.
+  const _sbCyber = (typeof _isCyber === 'function') && _isCyber();
+  const _sbPvE = !_sbCyber && (_sbMode === 'campaign' || _sbMode === 'freeflight' || _sbMode === 'endless');
   const _sbEndless = (_sbMode === 'endless');
   html += '<div class="sb-header-row"><div class="sb-name sb-stat-header">SHIP</div><div class="sb-stat-header">STATUS</div><div class="sb-stat-header">KILLS</div>'
     + (_sbPvE ? '<div class="sb-stat-header">LEVIATHANS</div>' : '')
@@ -111445,6 +111642,44 @@ function updateScoreboard() {
       list.sort((a, b) => b.k - a.k);
       return list;
     };
+    if (_sbCyber) {
+      // (v42.28) The mode's own vocabulary and its own score. ⚠ Rows come from C.bots, NOT from
+      // game.entities: this mode also pushes the CARRIER entity (no .loadout) into game.entities,
+      // and in the hub the traffic pseudo-entities live there too - mkList would throw on the first
+      // one. ⚠ The score is C.ledger's capture counts, never game.scoreA/scoreB, which cyberpunk
+      // never increments and which would read "(0 rounds)" forever.
+      const _cC = game._cyber;
+      const _cL = (_cC && _cC.ledger) || { capsA: 0, capsB: 0 };
+      const _cAtk = (typeof _cyberAtkFleet === 'function') ? _cyberAtkFleet(_cC) : null;
+      const _cTag = (team) => (_cAtk == null) ? '' : (team === _cAtk ? ' — ATTACKING' : ' — DEFENDING');
+      const _cCaps = (team) => (team === _cC.teamA) ? (_cL.capsA || 0) : (_cL.capsB || 0);
+      const _cList = (team) => {
+        const list = [];
+        try {
+          for (const b of (_cC.bots || [])) {
+            if (!b || b.team !== team || !b.loadout) continue;
+            if (!b.alive) continue;
+            list.push({ n: b.loadout.name, s: statusOf(b), k: b.kills || 0, d: b.damageDealt || 0 });
+          }
+        } catch (_) {}
+        try {
+          for (const np of net.networkPlayers) {
+            if (np.team !== team) continue;
+            list.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, d: np.damageDealt || 0 });
+          }
+        } catch (_) {}
+        list.sort((a, b) => b.k - a.k);
+        return list;
+      };
+      const _cRound = ' — ROUND ' + ((_cC && _cC.round) || 1);
+      const _cA = _cC ? _cC.teamA : LSS.TEAM_FLEET_A, _cB = _cC ? _cC.teamB : LSS.TEAM_FLEET_B;
+      html += '<div class="sb-team-header sb-team-a">FLEET A' + _cTag(_cA) + ' (' + _cCaps(_cA) + ' captures)' + _cRound + '</div>';
+      if (player.team === _cA) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
+      for (const p of _cList(_cA)) html += row(p.n, p.s, p.k, p.d, false);
+      html += '<div class="sb-team-header sb-team-b">FLEET B' + _cTag(_cB) + ' (' + _cCaps(_cB) + ' captures)</div>';
+      if (player.team === _cB) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
+      for (const p of _cList(_cB)) html += row(p.n, p.s, p.k, p.d, false);
+    } else {
     const _atkF = (_asltSB && typeof _assaultAttackerFleet === 'function') ? _assaultAttackerFleet() : null;
     const tag = (team) => (!_asltSB || !_atkF) ? '' : (team === _atkF ? ' — ATTACKING' : ' — DEFENDING');
     html += '<div class="sb-team-header sb-team-a">FLEET A' + tag(LSS.TEAM_FLEET_A) + ' (' + game.scoreA + ' rounds)</div>';
@@ -111453,6 +111688,7 @@ function updateScoreboard() {
     html += '<div class="sb-team-header sb-team-b">FLEET B' + tag(LSS.TEAM_FLEET_B) + ' (' + game.scoreB + ' rounds)</div>';
     if (player.team === LSS.TEAM_FLEET_B) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
     for (const p of mkList(LSS.TEAM_FLEET_B)) html += row(p.n, p.s, p.k, p.d, false);
+    }
   }
 
   // Personal summary footer
