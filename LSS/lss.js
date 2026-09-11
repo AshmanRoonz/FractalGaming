@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.19';
+const LSS_BUILD = '42.20';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -66092,13 +66092,14 @@ function _lssEndlessBolts(run, seg) {
   if (seg.spur && seg.sph) {
     chamber = true;
     const sph = seg.sph;
-    const ox = sph.cx - seg.b.x, oz = sph.cz - seg.b.z, ol = Math.hypot(ox, oz) || 1;
+    const _sc = _bendToWorld(sph.cx, sph.cy, sph.cz);
+    const ox = _sc.x - seg.b.x, oz = _sc.z - seg.b.z, ol = Math.hypot(ox, oz) || 1;
     const ux = ox / ol, uz = oz / ol;
     const rr = sph.r * (0.15 + 0.3 * _lssEndlessBoltHash(gid, 13));
     const tj = (_lssEndlessBoltHash(gid, 11) - 0.5) * sph.r * 0.3;
-    x = sph.cx + ux * rr - uz * tj;
-    z = sph.cz + uz * rr + ux * tj;
-    y = sph.cy + sph.r * (0.2 + 0.35 * _lssEndlessBoltHash(gid, 17));
+    x = _sc.x + ux * rr - uz * tj;
+    z = _sc.z + uz * rr + ux * tj;
+    y = _sc.y + sph.r * (0.2 + 0.35 * _lssEndlessBoltHash(gid, 17));
   } else {
     const t = 0.25 + 0.5 * _lssEndlessBoltHash(gid, 11);
     const side = _lssEndlessBoltHash(gid, 13) < 0.5 ? -1 : 1;
