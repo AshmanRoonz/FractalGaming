@@ -4713,7 +4713,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.35';
+const LSS_BUILD = '42.36';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -24009,6 +24009,10 @@ function _lssHubDirectTonemap() {
   _lssHubDirectTonemap._on = want;
 }
 function renderFrame() {
+  // (v42.36) dev-only VR-loading-screen preview; see __xrCoverTest. One boolean read when off.
+  // try/catch because _XR_COVER is a const declared far below this function: a renderFrame call
+  // during module evaluation would hit its temporal dead zone, and typeof cannot guard a TDZ.
+  try { if (_XR_COVER.preview && _xrCoverPreviewFrame()) return; } catch (_) {}
   try { _lssHubDirectTonemap(); } catch (_) {}
   // (v36.03) Ship engine + headlight lights. Runs in renderFrame (not the
   // gameLoop playing-path) so every render path — playing, menus, settings,
@@ -24031,6 +24035,14 @@ function renderFrame() {
           'baseLayer=' + (renderer.xr.getBaseLayer ? !!renderer.xr.getBaseLayer() : 'n/a'));
       } catch (e) { console.warn('[v11b VR] log failed:', e); }
     }
+    // (v42.36) THE VR LOADING SCREEN OWNS THE WHOLE FRAME while it is up: a private scene with a
+    // solid backdrop and a head-locked caption, rendered INSTEAD of the world. Doing it here rather
+    // than as an object inside the scene is what makes it leak-proof - none of the world is in that
+    // scene to draw over it - and it is the XR equivalent of the flat path's `_rfPrebake` branch,
+    // which skips renderFrame entirely, so the headset also stops paying for a stereo world render
+    // on every frame of the heaviest part of the launch. Returns false if it has dropped the cover
+    // for any of its failsafe reasons, in which case we fall straight through to the normal render.
+    if (_xrCoverIsUp() && _xrCoverFrameRender()) return;
     // Wrap the per-frame XR work in try/catch so a thrown
     // exception inside the HUD / menu mirror updates doesn't silently
     // skip the render call. If anything throws, log it and still try
@@ -51801,6 +51813,10 @@ function _lssResolveFrameYields() {
 // driver flush each batch cleanly. We also use this to space out the
 // texture upload loop further down.
 function _warmupYield() {
+  // (v42.36) A yielded frame is the most honest "still working" signal there is, so it pings the VR
+  // cover's staleness clock. A slow-but-healthy launch therefore keeps its cover for as long as it
+  // needs; one that wedges between yields loses it and the player gets the world back.
+  try { if (typeof _xrCoverPing === 'function') _xrCoverPing(); } catch (_) {}
   return new Promise(r => {
     const inXR = !!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
     const pageHidden = !!(typeof document !== 'undefined' && document.hidden);
@@ -61884,67 +61900,238 @@ async function _prebakeCloakWarmRoots(roots, budgetUntil, rep, withShadow) {
   try { if (rep) { rep.ms.cloak = Math.round(_pbNow() - _t); rep.cloakHulls = n; rep.cloakMats = mats; } } catch (_) {}
   return n;
 }
-// ⭐⭐ (v42.34) THE VR PREBAKE COVER. Every other device gets a loading screen over the launch
-// build; a headset does not, because #lss-loading-overlay is a DOM element the headset never sees.
-// That is why the v42.25 "hold the curtain longer" fix had to be disabled for XR - there was no
-// curtain there, so it became a frozen world with no explanation (owner: "you just sit in your ship
-// in the starting position and nothing happens, and you're locked there"). The cover has to be IN
-// THE SCENE, so here it is: a black inward-facing box parked on xrDolly, drawn over everything.
+// ⭐⭐ (v42.36) THE VR LOADING SCREEN. v42.34 built this as a black box parked on xrDolly and it
+// did not work. Owner, in a headset: "i don't think there's a loading screen for VR... i see two
+// different scenes before the cinematic - sitting in the ship in first person in the overworld, and
+// then a dark screen with some dark objects, then the cinematic."
+// THREE separate defects, all confirmed in source:
+//   1. THE MATERIAL WAS OPAQUE. three.js r165 draws its render list as three sequential passes -
+//      opaque, then transmissive, then transparent - and `renderOrder` only sorts WITHIN a pass
+//      (painterSortStable / reversePainterSortStable). So renderOrder 100000 on an OPAQUE mesh buys
+//      exactly one thing: it is the last OPAQUE object. Every transparent object in the scene is
+//      then drawn over it, and depthWrite:false means it cannot even occlude them. The worst
+//      offender is the hub water family (transparent, renderOrder -1, frustumCulled:false, and it
+//      FOLLOWS THE CAMERA, so it is always in shot). Those were the "dark objects".
+//   2. IT WENT UP TOO LATE. The only raise site was inside _prebakeWorldForLaunch, but the flat
+//      curtain goes up far earlier - at commitLoadout's showLoadingOverlay('PREPARING ARENA'),
+//      before buildWorld() teleports the pilot into the world and before the shader warmup. All of
+//      that was uncovered in a headset: the "sitting in the ship in the overworld" phase.
+//   3. TWO OF THE FOUR ADVERTISED FAILSAFES DID NOT EXIST. "a check every time it is asked to be
+//      raised" was never written (a repeat raise RESET the expiry, extending the cover's life), and
+//      `window.__xrCover = false` was read only at raise time - so the documented panic switch could
+//      not drop a cover that was already up, which is the only situation anyone would reach for it.
 //
-// ⚠⚠ THIS CANNOT BE ALLOWED TO STICK. A cover that fails to lift is a black headset, which is far
-// worse than the hitch it exists to hide - and I cannot test it in a headset, so it is built to
-// fail open, with FOUR independent ways down:
-//   1. the prebake's own `finally` (the normal path),
-//   2. a hard self-expiry timer set when it is raised,
-//   3. a check every time it is asked to be raised,
-//   4. `window.__xrCover = false` kills it outright, live.
-// It is also never created outside an XR session, so a flat-screen player can never see it.
-const _XR_COVER = { mesh: null, timer: null, upAt: 0 };
-const _XR_COVER_CAP_MS = 12000;   // hard ceiling; the prebake's own cap is ~12 s of slices
-function _xrCoverUp() {
+// So this is no longer a box in the world. While the cover is up, renderFrame's XR branch renders a
+// PRIVATE SCENE INSTEAD OF THE GAME SCENE: a solid backdrop in #lss-loading-overlay's own colour
+// plus a head-locked caption plane carrying the same two lines the flat overlay is showing. Nothing
+// from the world is in that scene, so there is nothing left to leak through - the bug class is gone
+// by construction rather than by sorting - and it is the true equivalent of the flat path's
+// `else if (_rfPrebake) { /* nothing - see above */ }`, which skips rendering entirely. As a bonus
+// the headset stops paying for a full stereo world render on every frame of the heaviest part of
+// the launch, which is time the prebake gets back.
+//
+// Its lifetime is now the DOM curtain's BY CONSTRUCTION: showLoadingOverlay() raises it and
+// hideLoadingOverlay() lowers it, so the two can no longer drift apart the way they did in v42.34.
+//
+// ⚠⚠ IT STILL MUST NEVER STICK - a headset stuck black is far worse than any hitch, and I cannot
+// test this in a headset. So every failsafe is enforced from _xrCoverFrameRender, which runs inside
+// the XR render branch: the one place guaranteed to keep running no matter what else wedges.
+//   1. hideLoadingOverlay() - the normal way down,
+//   2. STALENESS - the cover drops if nothing has pinged it for _XR_COVER_STALE_MS. showLoadingOverlay
+//      (which _pbSub calls on nearly every prebake slice) and _warmupYield (every yielded frame)
+//      both ping, so a healthy-but-slow launch keeps its cover and a WEDGED one loses it. That is
+//      the property a fixed timer could not have: v42.34's 12 s cap was shorter than the prebake's
+//      own worst case, so it was near-guaranteed to uncover a perfectly healthy build mid-build,
+//   3. a hard ceiling measured from the raise, whatever happens,
+//   4. `window.__xrCover = false`, now re-read EVERY FRAME, so it genuinely kills it live,
+//   5. any throw in here drops the cover and falls back to rendering the world.
+const _XR_COVER = {
+  scene: null, rig: null, plate: null, tex: null, cv: null,
+  on: false, upAt: 0, pingAt: 0, main: '', sub: '', dirty: true,
+};
+const _XR_COVER_STALE_MS = 12000;   // no sign of progress for this long -> assume wedged, uncover
+const _XR_COVER_HARD_MS  = 90000;   // absolute ceiling from the raise, no matter what
+const _XR_COVER_BG = 0x02040c;      // #lss-loading-overlay's own background, so the two match
+
+function _xrCoverPing() { _XR_COVER.pingAt = _pbNow(); }
+
+function _xrCoverPaint() {
+  const cv = _XR_COVER.cv;
+  if (!cv) return;
+  const g = cv.getContext('2d');
+  if (!g) return;
+  g.clearRect(0, 0, cv.width, cv.height);
+  // A faint plate behind the text: text floating in a void reads as a glitch, a panel reads as a
+  // loading screen. Same palette as the DOM overlay.
+  g.fillStyle = 'rgba(10,18,38,0.82)';
+  g.fillRect(8, 8, cv.width - 16, cv.height - 16);
+  g.strokeStyle = 'rgba(120,180,255,0.28)';
+  g.lineWidth = 3;
+  g.strokeRect(8, 8, cv.width - 16, cv.height - 16);
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = '#d6e8ff';
+  g.font = 'bold 64px Courier New, monospace';
+  g.fillText(String(_XR_COVER.main || 'PREPARING ARENA'), cv.width / 2, 96);
+  g.fillStyle = '#7fa6d8';
+  g.font = '40px Courier New, monospace';
+  g.fillText(String(_XR_COVER.sub || ''), cv.width / 2, 172);
+  if (_XR_COVER.tex) _XR_COVER.tex.needsUpdate = true;
+}
+
+function _xrCoverEnsure() {
+  if (_XR_COVER.scene) return true;
+  try {
+    const cv = document.createElement('canvas');
+    cv.width = 1024; cv.height = 256;
+    _XR_COVER.cv = cv;
+    const tex = new THREE.CanvasTexture(cv);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    _XR_COVER.tex = tex;
+    const plate = new THREE.Mesh(
+      // 2.0 x 0.5 m at 2 m = ~53 deg of the eye's ~100 deg, with the 64 px headline landing at
+      // ~3.6 deg tall and ~20 texels per degree - crisp at Quest 3 pixel density and comfortably
+      // above the ~1.5 deg floor where VR text starts to fight the reader.
+      new THREE.PlaneGeometry(2.0, 0.5),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, toneMapped: false, depthTest: false, depthWrite: false })
+    );
+    plate.position.set(0, 0, -2);          // 2 m out, the distance the XR HUD quad already sits at
+    plate.frustumCulled = false;
+    _XR_COVER.plate = plate;
+    // Head-locked: the rig's matrix is copied from the XR camera's world pose every frame, so the
+    // caption stays in front of the eyes however the player turns. matrixAutoUpdate is off because
+    // we write `matrix` directly rather than position/quaternion.
+    const rig = new THREE.Group();
+    rig.matrixAutoUpdate = false;
+    rig.add(plate);
+    _XR_COVER.rig = rig;
+    const sc = new THREE.Scene();
+    sc.background = new THREE.Color(_XR_COVER_BG);   // a Color background force-clears, so this is
+    sc.add(rig);                                    // opaque regardless of renderer.autoClear
+    _XR_COVER.scene = sc;
+    _XR_COVER.dirty = true;
+    return true;
+  } catch (e) {
+    console.warn('[xrCover] build failed:', e && e.message);
+    _XR_COVER.scene = null;
+    return false;
+  }
+}
+
+// Raise (or refresh) the cover. Safe to call every frame - the text only repaints when it changes,
+// and every call is also a liveness ping. Does nothing outside an XR session, so the flat path can
+// call it unconditionally.
+function _xrCoverUp(mainText, subText) {
   try {
     if (typeof window !== 'undefined' && window.__xrCover === false) return false;
     if (!(typeof isXRPresenting === 'function' && isXRPresenting())) return false;
-    if (typeof xrDolly === 'undefined' || !xrDolly) return false;
-    if (!_XR_COVER.mesh) {
-      // Inward-facing box: the viewer is INSIDE it, so it fills the view whichever way the head
-      // turns. 4 m so leaning or room-scale stepping cannot put an eye outside it. depthTest off
-      // plus a huge renderOrder means it paints over the world regardless of what is in front.
-      const _g = new THREE.BoxGeometry(4, 4, 4);
-      const _m = new THREE.MeshBasicMaterial({
-        color: 0x000000, side: THREE.BackSide,
-        depthTest: false, depthWrite: false, fog: false, toneMapped: false,
-      });
-      const _mesh = new THREE.Mesh(_g, _m);
-      _mesh.frustumCulled = false;
-      _mesh.renderOrder = 100000;
-      _mesh.name = 'xrPrebakeCover';
-      _XR_COVER.mesh = _mesh;
-    }
-    if (!_XR_COVER.mesh.parent) xrDolly.add(_XR_COVER.mesh);
-    _XR_COVER.mesh.position.set(0, 0, 0);
-    _XR_COVER.mesh.visible = true;
-    _XR_COVER.upAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-    if (_XR_COVER.timer) { try { clearTimeout(_XR_COVER.timer); } catch (_) {} }
-    _XR_COVER.timer = setTimeout(() => {
-      console.warn('[xrCover] self-expiry hit - dropping the cover');
-      _xrCoverDown();
-    }, _XR_COVER_CAP_MS);
+    if (mainText != null && mainText !== _XR_COVER.main) { _XR_COVER.main = mainText; _XR_COVER.dirty = true; }
+    if (subText != null && subText !== _XR_COVER.sub) { _XR_COVER.sub = subText; _XR_COVER.dirty = true; }
+    if (!_xrCoverEnsure()) return false;
+    _xrCoverPing();
+    if (!_XR_COVER.on) { _XR_COVER.on = true; _XR_COVER.upAt = _pbNow(); }
     return true;
   } catch (e) { try { _xrCoverDown(); } catch (_) {} return false; }
 }
 function _xrCoverDown() {
-  try { if (_XR_COVER.timer) { clearTimeout(_XR_COVER.timer); _XR_COVER.timer = null; } } catch (_) {}
+  _XR_COVER.on = false;
   _XR_COVER.upAt = 0;
-  try {
-    if (_XR_COVER.mesh) {
-      _XR_COVER.mesh.visible = false;
-      if (_XR_COVER.mesh.parent) _XR_COVER.mesh.parent.remove(_XR_COVER.mesh);
-    }
-  } catch (_) {}
+  _XR_COVER.pingAt = 0;
+  // The scene/texture are kept: they are tiny, and a later launch raises the cover again.
 }
-function _xrCoverIsUp() {
-  try { return !!(_XR_COVER.mesh && _XR_COVER.mesh.visible && _XR_COVER.mesh.parent); } catch (_) { return false; }
+function _xrCoverIsUp() { return !!(_XR_COVER.on && _XR_COVER.scene); }
+
+// (v42.36) SEE IT ON A MONITOR. The whole reason v42.34 shipped broken is that it could only be
+// judged in a headset nobody here has, so this paints the real cover scene - same scene, same
+// backdrop, same caption texture - to the flat canvas for a few seconds:
+//     window.__xrCoverTest(4000, 'PREPARING ARENA', 'compiling shaders')
+// It does not touch the cover's live state, so it cannot interfere with a launch. renderFrame reads
+// one boolean for it; that is the entire cost when it is off.
+function _xrCoverPreviewFrame() {
+  try {
+    if (!_XR_COVER.preview || _pbNow() > _XR_COVER.preview) {
+      if (_XR_COVER.preview) { _XR_COVER.preview = 0; _xrCoverDown(); }
+      return false;
+    }
+    // Drive the SHIPPING frame function, failsafes and all, rather than a look-alike. If a failsafe
+    // fires it returns false and the world comes straight back - which is also how the failsafes
+    // get tested on a monitor (set window.__xrCover = false, or back-date __xrCoverDbg.pingAt).
+    _XR_COVER.on = true;
+    const _drew = _xrCoverFrameRender();
+    if (!_drew) { _XR_COVER.preview = 0; _xrCoverDown(); }   // a failsafe fired: end the preview too
+    return _drew;
+  } catch (e) { console.warn('[xrCoverTest]', e && e.message); _XR_COVER.preview = 0; _xrCoverDown(); return false; }
+}
+// The live state object, exposed for the same reason: in a headset this is inspectable over
+// chrome://inspect, and it is how the staleness failsafe can be provoked on a monitor.
+try { window.__xrCoverDbg = _XR_COVER; } catch (_) {}
+try {
+  window.__xrCoverTest = function (ms, main, sub) {
+    if (!_xrCoverEnsure()) return 'cover build FAILED';
+    _XR_COVER.main = main || _XR_COVER.main || 'PREPARING ARENA';
+    _XR_COVER.sub = sub || _XR_COVER.sub || 'compiling shaders';
+    _XR_COVER.dirty = true;
+    _XR_COVER.upAt = _pbNow();
+    _xrCoverPing();
+    _XR_COVER.preview = _pbNow() + (ms || 3000);
+    return 'previewing the VR loading screen for ' + (ms || 3000) + ' ms';
+  };
+} catch (_) {}
+
+// The whole XR frame while the cover is up. Returns TRUE when it has drawn (the caller must not
+// render the world), FALSE when the cover has been dropped for any reason and the world should be
+// drawn as normal.
+function _xrCoverFrameRender() {
+  try {
+    if (!_XR_COVER.on) return false;
+    if (typeof window !== 'undefined' && window.__xrCover === false) { _xrCoverDown(); return false; }
+    const now = _pbNow();
+    if (_XR_COVER.pingAt && now - _XR_COVER.pingAt > _XR_COVER_STALE_MS) {
+      console.warn('[xrCover] nothing has pinged for ' + Math.round(now - _XR_COVER.pingAt) + ' ms - uncovering');
+      _xrCoverDown(); return false;
+    }
+    if (_XR_COVER.upAt && now - _XR_COVER.upAt > _XR_COVER_HARD_MS) {
+      console.warn('[xrCover] hard ceiling hit - uncovering');
+      _xrCoverDown(); return false;
+    }
+    if (!_XR_COVER.scene) { _xrCoverDown(); return false; }
+    if (_XR_COVER.dirty) { _xrCoverPaint(); _XR_COVER.dirty = false; }
+    // ⚠ Everything below is written to run OFF XR as well, because __xrCoverTest drives this exact
+    // function on a monitor. That is deliberate: the only thing I can check by eye is the flat
+    // preview, so the preview has to be the shipping path and not a twin that can drift from it.
+    const _xrOn = !!(renderer.xr && renderer.xr.isPresenting);
+    // Keep the dolly current even though the world is not drawn, so the view cannot jump when the
+    // cover lifts. ⚠ XR ONLY - _xrSyncDollyBeforeRender zeroes camera.position/quaternion, which is
+    // correct under a dolly and destructive on a flat camera.
+    if (_xrOn) { try { _xrSyncDollyBeforeRender(); } catch (_) {} }
+    try {
+      // The eye pose in XR, the plain camera otherwise. getCamera()'s pose is one frame old here
+      // (three updates it inside render) - imperceptible on a caption, and it avoids duplicating
+      // the XR camera maths.
+      const _xc = (_xrOn && renderer.xr.getCamera) ? renderer.xr.getCamera() : camera;
+      // WRITING .matrix IS NOT ENOUGH. With matrixAutoUpdate off, Object3D.updateMatrixWorld only
+      // recomputes matrixWorld when matrixWorldNeedsUpdate is set or the parent forces it - so
+      // without this flag the caption is placed on the first frame and then frozen there while the
+      // head moves away from it. (Caught in the flat preview: the backdrop drew, the text did not.)
+      if (_xc && _XR_COVER.rig) {
+        _xc.updateMatrixWorld(true);
+        _XR_COVER.rig.matrix.copy(_xc.matrixWorld);
+        _XR_COVER.rig.matrixWorldNeedsUpdate = true;
+      }
+    } catch (_) {}
+    // The same XR-framebuffer re-assert the world render does: anything earlier in the tick (the
+    // water GPGPU compute) can have left the flat canvas bound, which would leave the headset black.
+    // Off XR getRenderTarget() is null, which is the flat canvas - the right answer there too.
+    try { renderer.setRenderTarget((_xrOn && renderer.xr.getRenderTarget) ? renderer.xr.getRenderTarget() : null); } catch (_) {}
+    renderer.render(_XR_COVER.scene, camera);
+    return true;
+  } catch (e) {
+    console.warn('[xrCover] frame failed - uncovering:', e && e.message);
+    try { _xrCoverDown(); } catch (_) {}
+    return false;
+  }
 }
 
 async function _prebakeWorldForLaunch() {
@@ -62249,7 +62436,11 @@ async function _prebakeWorldForLaunch() {
   } finally {
     _PREBAKE.on = false;
     game._worldPrebaking = false;
-    try { _xrCoverDown(); } catch (_) {}   // (v42.34) the primary way down - runs even on a throw
+    // (v42.36) NO _xrCoverDown() here any more. The prebake finishing is not the end of the launch -
+    // _cineWhenSettled still has to settle and the cinematic still has to open - and dropping the
+    // cover at this point re-exposed exactly the window v42.25 exists to hide. hideLoadingOverlay()
+    // owns the way down now, on the flat and the VR side alike, and the staleness sweep inside
+    // _xrCoverFrameRender is the backstop if that call never arrives.
     rep.totalMs = Math.round(_pbNow() - t0);
     _PREBAKE.last = rep;
     // (v39.44) WHAT THE WARM MISSED. Owner, testing in a Chrome INCOGNITO window: "so many
@@ -68393,21 +68584,37 @@ function commitLoadout(key) {
   };
   game._launchSoloAfterCinematic = _launchSoloAfterCinematic;
   let _questWarmupWatchdog = null;
+  let _questWatchdogRearms = 0;
+  const _questWatchdogFire = () => {
+    if (net.active || _countdownActive) return;
+    if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
+    if (game.state !== 'warmup' || !player.loadoutKey) return;
+    // ⭐ (v42.36) DO NOT HAND OFF INTO A RUNNING BUILD. This fires at 1.8 s and the prebake is
+    // routinely still going then, so the watchdog would open the cinematic while the VR cover was
+    // still up - the camera flight playing out where nobody can see it - and over a world that is
+    // still being built, which is the judder v42.25 exists to prevent. Wait for the build instead,
+    // but only for a BOUNDED number of re-arms: the entire reason this watchdog exists is that the
+    // promise chain can stall on a Quest, so a wedged prebake must still end in a launch.
+    let _building = false;
+    try { _building = !!(game._worldPrebaking || (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on)); } catch (_) {}
+    if (_building && _questWatchdogRearms < 20) {
+      _questWatchdogRearms++;
+      _questWarmupWatchdog = setTimeout(_questWatchdogFire, 1800);
+      return;
+    }
+    console.warn('[v26VR] Quest warmup watchdog forced cinematic handoff' +
+      (_questWatchdogRearms ? (' (after ' + _questWatchdogRearms + ' re-arms waiting on the build)') : ''));
+    // (v42.23) Null it the moment it fires. The two clearTimeout sites in the promise arms are
+    // no-ops against an ALREADY-FIRED timer, so without this there is no way for the promise to
+    // know the watchdog beat it to the handoff.
+    _questWarmupWatchdog = null;
+    try { _markLocalWarmupReady(); } catch (_) {}
+    // (v42.25) no hideLoadingOverlay() here any more - _launchSoloAfterCinematic drops the
+    // curtain itself once the world has settled. Lifting it here just uncovered a building world.
+    _launchSoloAfterCinematic();
+  };
   if (!net.active && typeof _xrQuestLaunchContext === 'function' && _xrQuestLaunchContext()) {
-    _questWarmupWatchdog = setTimeout(() => {
-      if (net.active || _countdownActive) return;
-      if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
-      if (game.state !== 'warmup' || !player.loadoutKey) return;
-      console.warn('[v26VR] Quest warmup watchdog forced cinematic handoff');
-      // (v42.23) Null it the moment it fires. The two clearTimeout sites in the promise arms are
-      // no-ops against an ALREADY-FIRED timer, so without this there is no way for the promise to
-      // know the watchdog beat it to the handoff.
-      _questWarmupWatchdog = null;
-      try { _markLocalWarmupReady(); } catch (_) {}
-      // (v42.25) no hideLoadingOverlay() here any more - _launchSoloAfterCinematic drops the
-      // curtain itself once the world has settled. Lifting it here just uncovered a building world.
-      _launchSoloAfterCinematic();
-    }, 1800);
+    _questWarmupWatchdog = setTimeout(_questWatchdogFire, 1800);
   }
 
   // (v36.21) SOLO LAUNCH STALL DETECTOR — the "chain never resolves" half of
@@ -70617,22 +70824,16 @@ function _cineHeavyWorkPending() {
   } catch (_) { return false; }
 }
 function _cineWhenSettled(fn, capMs) {
-  // ⚠⚠ (v42.31) ONLY WAIT BEHIND A COVER THAT ACTUALLY EXISTS. #lss-loading-overlay is a DOM
-  // element; in a headset the player never sees it, so "hold the loading screen longer" becomes
-  // "sit in a frozen world for several seconds with no explanation" - which is exactly what the
-  // owner hit: "in VR, the cinematic doesn't even start... you just sit in your ship in the
-  // starting position and nothing happens, and you're locked there" (game.state is 'warmup', and
-  // warmup locks the pilot in place).
-  // On a flat screen the wait is free and measurably worth it: it moves a 1,400 ms / 171-program
-  // compile out of the flight. In XR it buys nothing visual and costs the player a dead freeze,
-  // so XR keeps the old behaviour and takes the hitch. Giving VR a real in-scene cover is the
-  // proper fix and is a separate change.
-  try {
-    if (typeof isXRPresenting === 'function' && isXRPresenting()) {
-      try { fn(); } catch (e) { console.warn('[cinematic] xr immediate start failed:', e && e.message); }
-      return;
-    }
-  } catch (_) {}
+  // ⭐⭐ (v42.36) XR WAITS AGAIN. v42.31 made XR skip this wait entirely and take the hitch, for a
+  // good reason at the time: #lss-loading-overlay is a DOM element a headset never sees, so "hold
+  // the loading screen longer" became "sit in a frozen world with no explanation" - the owner's "in
+  // VR, the cinematic doesn't even start... you just sit in your ship in the starting position and
+  // nothing happens, and you're locked there". That note ended "giving VR a real in-scene cover is
+  // the proper fix and is a separate change"; _XR_COVER is now that change, so the reason to skip is
+  // gone. The wait is worth MORE in a headset than on a monitor, because the thing it moves out of
+  // the flight - a 40 ms synchronous prebake slice - is a 3x overrun on a 72 Hz frame budget.
+  // The cap below still applies, so a wedged stage cannot strand the launch, and the Quest warmup
+  // watchdog still sits behind it.
   const cap = (capMs != null) ? capMs : 8000;
   const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
   const t0 = _now();
@@ -85951,6 +86152,12 @@ function showLoadingOverlay(mainText, subText) {
   }
   ov.classList.add('active');
   _lssAudioHoldEngage();          // (v36.24) no music / ship audio behind the loading screen
+  // (v42.36) ...and the VR half of the same curtain. A headset never sees this DOM element, so the
+  // in-scene cover is raised from the SAME call rather than from its own set of call sites - that
+  // is what keeps the two from drifting apart (v42.34's cover went up only inside the prebake and
+  // left the whole world build uncovered). No-op outside an XR session. This is also the cover's
+  // liveness ping: _pbSub() routes through here on nearly every prebake slice.
+  try { _xrCoverUp(ov._lssMain, ov._lssSub); } catch (_) {}
 }
 let _lssCurtainTries = 0;
 function hideLoadingOverlay() {
@@ -85970,6 +86177,7 @@ function hideLoadingOverlay() {
   const ov = document.getElementById('lss-loading-overlay');
   if (ov) ov.classList.remove('active');
   _lssAudioHoldRelease();         // (v36.24)
+  try { _xrCoverDown(); } catch (_) {}   // (v42.36) the VR half of the curtain, down with it
 }
 
 // ============================================================================

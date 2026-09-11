@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.35';
+const LSS_BUILD = '42.36';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -14282,6 +14282,7 @@ function _lssHubDirectTonemap() {
   _lssHubDirectTonemap._on = want;
 }
 function renderFrame() {
+  try { if (_XR_COVER.preview && _xrCoverPreviewFrame()) return; } catch (_) {}
   try { _lssHubDirectTonemap(); } catch (_) {}
   try { if (typeof _shipLightsFrame === 'function') _shipLightsFrame(); } catch (_) {}
   try { if (typeof _ghostHullSync === 'function') _ghostHullSync(); } catch (_) {}
@@ -14298,6 +14299,7 @@ function renderFrame() {
           'baseLayer=' + (renderer.xr.getBaseLayer ? !!renderer.xr.getBaseLayer() : 'n/a'));
       } catch (e) { console.warn('[v11b VR] log failed:', e); }
     }
+    if (_xrCoverIsUp() && _xrCoverFrameRender()) return;
     try {
       _xrSyncDollyBeforeRender();
       const _xrShowHud = (typeof _xrShouldShowGameplayHud === 'function') ? _xrShouldShowGameplayHud() : true;
@@ -33835,6 +33837,7 @@ function _lssResolveFrameYields() {
   }
 }
 function _warmupYield() {
+  try { if (typeof _xrCoverPing === 'function') _xrCoverPing(); } catch (_) {}
   return new Promise(r => {
     const inXR = !!(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
     const pageHidden = !!(typeof document !== 'undefined' && document.hidden);
@@ -41336,49 +41339,151 @@ async function _prebakeCloakWarmRoots(roots, budgetUntil, rep, withShadow) {
   try { if (rep) { rep.ms.cloak = Math.round(_pbNow() - _t); rep.cloakHulls = n; rep.cloakMats = mats; } } catch (_) {}
   return n;
 }
-const _XR_COVER = { mesh: null, timer: null, upAt: 0 };
-const _XR_COVER_CAP_MS = 12000;   // hard ceiling; the prebake's own cap is ~12 s of slices
-function _xrCoverUp() {
+const _XR_COVER = {
+  scene: null, rig: null, plate: null, tex: null, cv: null,
+  on: false, upAt: 0, pingAt: 0, main: '', sub: '', dirty: true,
+};
+const _XR_COVER_STALE_MS = 12000;   // no sign of progress for this long -> assume wedged, uncover
+const _XR_COVER_HARD_MS  = 90000;   // absolute ceiling from the raise, no matter what
+const _XR_COVER_BG = 0x02040c;      // #lss-loading-overlay's own background, so the two match
+
+function _xrCoverPing() { _XR_COVER.pingAt = _pbNow(); }
+
+function _xrCoverPaint() {
+  const cv = _XR_COVER.cv;
+  if (!cv) return;
+  const g = cv.getContext('2d');
+  if (!g) return;
+  g.clearRect(0, 0, cv.width, cv.height);
+  g.fillStyle = 'rgba(10,18,38,0.82)';
+  g.fillRect(8, 8, cv.width - 16, cv.height - 16);
+  g.strokeStyle = 'rgba(120,180,255,0.28)';
+  g.lineWidth = 3;
+  g.strokeRect(8, 8, cv.width - 16, cv.height - 16);
+  g.textAlign = 'center';
+  g.textBaseline = 'middle';
+  g.fillStyle = '#d6e8ff';
+  g.font = 'bold 64px Courier New, monospace';
+  g.fillText(String(_XR_COVER.main || 'PREPARING ARENA'), cv.width / 2, 96);
+  g.fillStyle = '#7fa6d8';
+  g.font = '40px Courier New, monospace';
+  g.fillText(String(_XR_COVER.sub || ''), cv.width / 2, 172);
+  if (_XR_COVER.tex) _XR_COVER.tex.needsUpdate = true;
+}
+
+function _xrCoverEnsure() {
+  if (_XR_COVER.scene) return true;
+  try {
+    const cv = document.createElement('canvas');
+    cv.width = 1024; cv.height = 256;
+    _XR_COVER.cv = cv;
+    const tex = new THREE.CanvasTexture(cv);
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.colorSpace = THREE.SRGBColorSpace;
+    _XR_COVER.tex = tex;
+    const plate = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.0, 0.5),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, toneMapped: false, depthTest: false, depthWrite: false })
+    );
+    plate.position.set(0, 0, -2);          // 2 m out, the distance the XR HUD quad already sits at
+    plate.frustumCulled = false;
+    _XR_COVER.plate = plate;
+    const rig = new THREE.Group();
+    rig.matrixAutoUpdate = false;
+    rig.add(plate);
+    _XR_COVER.rig = rig;
+    const sc = new THREE.Scene();
+    sc.background = new THREE.Color(_XR_COVER_BG);   // a Color background force-clears, so this is
+    sc.add(rig);                                    // opaque regardless of renderer.autoClear
+    _XR_COVER.scene = sc;
+    _XR_COVER.dirty = true;
+    return true;
+  } catch (e) {
+    console.warn('[xrCover] build failed:', e && e.message);
+    _XR_COVER.scene = null;
+    return false;
+  }
+}
+
+function _xrCoverUp(mainText, subText) {
   try {
     if (typeof window !== 'undefined' && window.__xrCover === false) return false;
     if (!(typeof isXRPresenting === 'function' && isXRPresenting())) return false;
-    if (typeof xrDolly === 'undefined' || !xrDolly) return false;
-    if (!_XR_COVER.mesh) {
-      const _g = new THREE.BoxGeometry(4, 4, 4);
-      const _m = new THREE.MeshBasicMaterial({
-        color: 0x000000, side: THREE.BackSide,
-        depthTest: false, depthWrite: false, fog: false, toneMapped: false,
-      });
-      const _mesh = new THREE.Mesh(_g, _m);
-      _mesh.frustumCulled = false;
-      _mesh.renderOrder = 100000;
-      _mesh.name = 'xrPrebakeCover';
-      _XR_COVER.mesh = _mesh;
-    }
-    if (!_XR_COVER.mesh.parent) xrDolly.add(_XR_COVER.mesh);
-    _XR_COVER.mesh.position.set(0, 0, 0);
-    _XR_COVER.mesh.visible = true;
-    _XR_COVER.upAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-    if (_XR_COVER.timer) { try { clearTimeout(_XR_COVER.timer); } catch (_) {} }
-    _XR_COVER.timer = setTimeout(() => {
-      console.warn('[xrCover] self-expiry hit - dropping the cover');
-      _xrCoverDown();
-    }, _XR_COVER_CAP_MS);
+    if (mainText != null && mainText !== _XR_COVER.main) { _XR_COVER.main = mainText; _XR_COVER.dirty = true; }
+    if (subText != null && subText !== _XR_COVER.sub) { _XR_COVER.sub = subText; _XR_COVER.dirty = true; }
+    if (!_xrCoverEnsure()) return false;
+    _xrCoverPing();
+    if (!_XR_COVER.on) { _XR_COVER.on = true; _XR_COVER.upAt = _pbNow(); }
     return true;
   } catch (e) { try { _xrCoverDown(); } catch (_) {} return false; }
 }
 function _xrCoverDown() {
-  try { if (_XR_COVER.timer) { clearTimeout(_XR_COVER.timer); _XR_COVER.timer = null; } } catch (_) {}
+  _XR_COVER.on = false;
   _XR_COVER.upAt = 0;
-  try {
-    if (_XR_COVER.mesh) {
-      _XR_COVER.mesh.visible = false;
-      if (_XR_COVER.mesh.parent) _XR_COVER.mesh.parent.remove(_XR_COVER.mesh);
-    }
-  } catch (_) {}
+  _XR_COVER.pingAt = 0;
 }
-function _xrCoverIsUp() {
-  try { return !!(_XR_COVER.mesh && _XR_COVER.mesh.visible && _XR_COVER.mesh.parent); } catch (_) { return false; }
+function _xrCoverIsUp() { return !!(_XR_COVER.on && _XR_COVER.scene); }
+
+function _xrCoverPreviewFrame() {
+  try {
+    if (!_XR_COVER.preview || _pbNow() > _XR_COVER.preview) {
+      if (_XR_COVER.preview) { _XR_COVER.preview = 0; _xrCoverDown(); }
+      return false;
+    }
+    _XR_COVER.on = true;
+    const _drew = _xrCoverFrameRender();
+    if (!_drew) { _XR_COVER.preview = 0; _xrCoverDown(); }   // a failsafe fired: end the preview too
+    return _drew;
+  } catch (e) { console.warn('[xrCoverTest]', e && e.message); _XR_COVER.preview = 0; _xrCoverDown(); return false; }
+}
+try { window.__xrCoverDbg = _XR_COVER; } catch (_) {}
+try {
+  window.__xrCoverTest = function (ms, main, sub) {
+    if (!_xrCoverEnsure()) return 'cover build FAILED';
+    _XR_COVER.main = main || _XR_COVER.main || 'PREPARING ARENA';
+    _XR_COVER.sub = sub || _XR_COVER.sub || 'compiling shaders';
+    _XR_COVER.dirty = true;
+    _XR_COVER.upAt = _pbNow();
+    _xrCoverPing();
+    _XR_COVER.preview = _pbNow() + (ms || 3000);
+    return 'previewing the VR loading screen for ' + (ms || 3000) + ' ms';
+  };
+} catch (_) {}
+
+function _xrCoverFrameRender() {
+  try {
+    if (!_XR_COVER.on) return false;
+    if (typeof window !== 'undefined' && window.__xrCover === false) { _xrCoverDown(); return false; }
+    const now = _pbNow();
+    if (_XR_COVER.pingAt && now - _XR_COVER.pingAt > _XR_COVER_STALE_MS) {
+      console.warn('[xrCover] nothing has pinged for ' + Math.round(now - _XR_COVER.pingAt) + ' ms - uncovering');
+      _xrCoverDown(); return false;
+    }
+    if (_XR_COVER.upAt && now - _XR_COVER.upAt > _XR_COVER_HARD_MS) {
+      console.warn('[xrCover] hard ceiling hit - uncovering');
+      _xrCoverDown(); return false;
+    }
+    if (!_XR_COVER.scene) { _xrCoverDown(); return false; }
+    if (_XR_COVER.dirty) { _xrCoverPaint(); _XR_COVER.dirty = false; }
+    const _xrOn = !!(renderer.xr && renderer.xr.isPresenting);
+    if (_xrOn) { try { _xrSyncDollyBeforeRender(); } catch (_) {} }
+    try {
+      const _xc = (_xrOn && renderer.xr.getCamera) ? renderer.xr.getCamera() : camera;
+      if (_xc && _XR_COVER.rig) {
+        _xc.updateMatrixWorld(true);
+        _XR_COVER.rig.matrix.copy(_xc.matrixWorld);
+        _XR_COVER.rig.matrixWorldNeedsUpdate = true;
+      }
+    } catch (_) {}
+    try { renderer.setRenderTarget((_xrOn && renderer.xr.getRenderTarget) ? renderer.xr.getRenderTarget() : null); } catch (_) {}
+    renderer.render(_XR_COVER.scene, camera);
+    return true;
+  } catch (e) {
+    console.warn('[xrCover] frame failed - uncovering:', e && e.message);
+    try { _xrCoverDown(); } catch (_) {}
+    return false;
+  }
 }
 
 async function _prebakeWorldForLaunch() {
@@ -41566,7 +41671,6 @@ async function _prebakeWorldForLaunch() {
   } finally {
     _PREBAKE.on = false;
     game._worldPrebaking = false;
-    try { _xrCoverDown(); } catch (_) {}   // (v42.34) the primary way down - runs even on a throw
     rep.totalMs = Math.round(_pbNow() - t0);
     _PREBAKE.last = rep;
     try {
@@ -45887,16 +45991,26 @@ function commitLoadout(key) {
   };
   game._launchSoloAfterCinematic = _launchSoloAfterCinematic;
   let _questWarmupWatchdog = null;
+  let _questWatchdogRearms = 0;
+  const _questWatchdogFire = () => {
+    if (net.active || _countdownActive) return;
+    if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
+    if (game.state !== 'warmup' || !player.loadoutKey) return;
+    let _building = false;
+    try { _building = !!(game._worldPrebaking || (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on)); } catch (_) {}
+    if (_building && _questWatchdogRearms < 20) {
+      _questWatchdogRearms++;
+      _questWarmupWatchdog = setTimeout(_questWatchdogFire, 1800);
+      return;
+    }
+    console.warn('[v26VR] Quest warmup watchdog forced cinematic handoff' +
+      (_questWatchdogRearms ? (' (after ' + _questWatchdogRearms + ' re-arms waiting on the build)') : ''));
+    _questWarmupWatchdog = null;
+    try { _markLocalWarmupReady(); } catch (_) {}
+    _launchSoloAfterCinematic();
+  };
   if (!net.active && typeof _xrQuestLaunchContext === 'function' && _xrQuestLaunchContext()) {
-    _questWarmupWatchdog = setTimeout(() => {
-      if (net.active || _countdownActive) return;
-      if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return;
-      if (game.state !== 'warmup' || !player.loadoutKey) return;
-      console.warn('[v26VR] Quest warmup watchdog forced cinematic handoff');
-      _questWarmupWatchdog = null;
-      try { _markLocalWarmupReady(); } catch (_) {}
-      _launchSoloAfterCinematic();
-    }, 1800);
+    _questWarmupWatchdog = setTimeout(_questWatchdogFire, 1800);
   }
 
   let _launchStallTimer = null;
@@ -47267,12 +47381,6 @@ function _cineHeavyWorkPending() {
   } catch (_) { return false; }
 }
 function _cineWhenSettled(fn, capMs) {
-  try {
-    if (typeof isXRPresenting === 'function' && isXRPresenting()) {
-      try { fn(); } catch (e) { console.warn('[cinematic] xr immediate start failed:', e && e.message); }
-      return;
-    }
-  } catch (_) {}
   const cap = (capMs != null) ? capMs : 8000;
   const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
   const t0 = _now();
@@ -57933,6 +58041,7 @@ function showLoadingOverlay(mainText, subText) {
   }
   ov.classList.add('active');
   _lssAudioHoldEngage();          // (v36.24) no music / ship audio behind the loading screen
+  try { _xrCoverUp(ov._lssMain, ov._lssSub); } catch (_) {}
 }
 let _lssCurtainTries = 0;
 function hideLoadingOverlay() {
@@ -57948,6 +58057,7 @@ function hideLoadingOverlay() {
   const ov = document.getElementById('lss-loading-overlay');
   if (ov) ov.classList.remove('active');
   _lssAudioHoldRelease();         // (v36.24)
+  try { _xrCoverDown(); } catch (_) {}   // (v42.36) the VR half of the curtain, down with it
 }
 
 let _loadingAudioHold = false;
