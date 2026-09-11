@@ -76,6 +76,18 @@ html.lss-touch canvas { position: fixed; top: 0; left: 0; z-index: 0; }
 .lss-title { font-family: 'Orbitron', 'Rajdhani', sans-serif; font-weight: 700; }
 
 #hud { position: fixed; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; }
+/* (v42.56) HUD OPACITY + HUD TEXT OPACITY for the DOM half of the HUD - the round timer, state,
+   scores, kill feed and radar, which only appear in the objective modes. The canvas HUD does not
+   use these: it multiplies its own globalAlpha by _hlGA()/_hlTA() as it draws.
+   (!) SET ON THE LEAVES, NEVER ON #hud. opacity composites rather than inherits, so a value on the
+   container would multiply into every child and the two sliders would stop being independent -
+   text could then never be brighter than the graphics. An element missing from these two lists
+   just renders fully opaque, which is a safe failure rather than a wrong one. */
+#crosshair, #health-canvas, #minimap, #ability-pie, #abilities, #core-fill,
+#champ-capture-track, #champ-capture-fill, #doomed-vignette { opacity: var(--lss-hud-gfx, 1); }
+#ship-name, #ship-class, #core-label, #core-value, #weapon-name, #ammo-display,
+#reload-indicator, #round-timer, #round-state, #score-display, #kill-feed, #speed-display,
+#gamepad-indicator, #doomed-warning, #champ-capture-label, #map-gen-hud { opacity: var(--lss-hud-txt, 1); }
 
 
 #cockpit-frame {
@@ -4713,7 +4725,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.55';
+const LSS_BUILD = '42.56';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -5766,6 +5778,16 @@ const input = {
   // dimensioned off the disc); so are the DOM HUD bits and the cockpit frame art,
   // which is designed around the layout at 1x.
   hudScale: 1,
+  // (v42.56) HOW OPAQUE THE HUD IS, and how opaque its TEXT is, as two independent settings.
+  // Owner: "can we put a slider for HUD opacity, in the settings, make text opacity independent".
+  // The graphics side already existed as `window.__hudAlpha` (v41.40, default 0.72) - every
+  // graphics globalAlpha assignment in the layout HUD is multiplied by _hlGA(). What was missing
+  // was a slider for it and any control at all over text, which v41.40 pinned at a hard 1 in three
+  // helpers with the comment "the HUD dims, the text does not". Those three now read _hlTA().
+  // 0.72 is the default because that IS the shipped look - starting at 1 would brighten every
+  // existing player's HUD on upgrade.
+  hudOpacity: 0.72,
+  hudTextOpacity: 1,
   // Additional VR-only load shedding. Standard preserves the normal render;
   // Lite/Fast/Max progressively remove cosmetic work for standalone headsets.
   vrPerfMode: 'standard',
@@ -82658,8 +82680,42 @@ function _hlSegArc(ctx, r, p, pct, col) {
 // (v41.40) HOW OPAQUE THE HUD'S GRAPHICS ARE. Text is excluded - see _hlDrawHUD.
 // window.__hudAlpha, live, 1 = the pre-41.40 HUD.
 function _hlGA() {
+  // Settings first, then the live console knob, then the v41.40 default. window.__hudAlpha still
+  // works for tuning without opening the menu ; the slider writes input.hudOpacity.
+  if (typeof input !== 'undefined' && input && typeof input.hudOpacity === 'number') {
+    const v = input.hudOpacity;
+    if (isFinite(v) && v >= 0 && v <= 1) return v;
+  }
   const a = (typeof window !== 'undefined' && window.__hudAlpha != null) ? +window.__hudAlpha : 0.72;
   return (a >= 0 && a <= 1) ? a : 0.72;
+}
+// (v42.56) The DOM HUD does not redraw every frame, so it reads the two values off CSS variables
+// instead. Memoised: this runs from the settings sliders AND from the top of the HUD draw, so that
+// it lands whatever order settings-load and first-frame happen in, without writing style every
+// frame.
+let _hudDomA = '';
+function _hudDomAlpha() {
+  try {
+    const g = _hlGA(), t = _hlTA();
+    const key = g + '|' + t;
+    if (key === _hudDomA) return;
+    _hudDomA = key;
+    const st = document.documentElement.style;
+    st.setProperty('--lss-hud-gfx', String(g));
+    st.setProperty('--lss-hud-txt', String(t));
+  } catch (_) {}
+}
+
+// (v42.56) HOW OPAQUE THE HUD'S TEXT IS - independent of _hlGA, not a multiple of it, so text can
+// sit brighter OR dimmer than the graphics it labels. Every text helper below sets globalAlpha to
+// this instead of the hard 1 they carried since v41.40.
+function _hlTA() {
+  if (typeof input !== 'undefined' && input && typeof input.hudTextOpacity === 'number') {
+    const v = input.hudTextOpacity;
+    if (isFinite(v) && v >= 0 && v <= 1) return v;
+  }
+  const a = (typeof window !== 'undefined' && window.__hudTextAlpha != null) ? +window.__hudTextAlpha : 1;
+  return (a >= 0 && a <= 1) ? a : 1;
 }
 // (v41.40) ONE TICK PER ROUND. Owner: "make the yellow lines on the HUD ammo correspond to how many
 // rounds are in the weapon". The strip was a fixed `seg: 19` for every gun, so a 4-round Shotgun and
@@ -82770,7 +82826,7 @@ const _hlArcTextCache = new Map();
 // would spill out of its cooldown bar and into the neighbouring one.
 function _hlArcLabel(ctx, cx, cy, radPx, midDeg, str, col, fontPx, maxDeg) {
   if (!str) return;
-  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
+  ctx.globalAlpha = _hlTA();   // (v42.56) text has its own slider ; was a hard 1 in v41.40
   const key = str + '|' + radPx.toFixed(1) + '|' + midDeg.toFixed(1) + '|' + col + '|' +
               fontPx.toFixed(1) + '|' + (maxDeg || 0);
   let spr = _hlArcTextCache.get(key);
@@ -82839,7 +82895,7 @@ function _hlGaugeLabel(ctx, r, p, val) {
   // each call site so it covers exactly the six that go through this helper —
   // the ability names take the _hlArcLabel path directly and are unaffected.
   if (typeof input !== 'undefined' && input && input.hudGaugeLabels === false) return;
-  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
+  ctx.globalAlpha = _hlTA();   // (v42.56) text has its own slider ; was a hard 1 in v41.40
   const rad = (p.labR != null) ? p.labR * r.vmin : Math.min(r.w, r.h) / 2;
   // 0.88 vmin sits deliberately under the ability names (1.0 vmin at 0.95
   // alpha) so the captions read as secondary, but 0.76 was tested at 1:1 and
@@ -82879,7 +82935,7 @@ function _hlGaugeLabel(ctx, r, p, val) {
 
 function _hlText(ctx, r, p, str, col) {
   if (!str) return;
-  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
+  ctx.globalAlpha = _hlTA();   // (v42.56) text has its own slider ; was a hard 1 in v41.40
   // ⚠ hudFont BEFORE save(). ctx.restore() reverts ctx.font but cannot touch
   // _hudFontCache, so setting the font inside a save/restore pair leaves the
   // cache claiming a font the context no longer has — and the next request for
@@ -83135,6 +83191,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
       const rr = (part.r + part.tick + 1.6) * q.vmin;
       hudFont('700 ' + (q.vmin * 1.1).toFixed(1) + 'px Courier New');   // before save() — see _hlText
       ctx.save();
+      ctx.globalAlpha = _hlTA();   // (v42.56) these readouts are text, not graphics
       ctx.fillStyle = col;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(str, q.cx + Math.cos(mid) * rr, q.cy + Math.sin(mid) * rr);
@@ -83542,6 +83599,7 @@ function _champCaptureState() {
 }
 function drawCircumpunctHUD() {
   if (!player.chassis) return;
+  _hudDomAlpha();   // (v42.56) no-op unless one of the two opacity settings actually changed
 
   const dpr = Math.min(1.25, window.devicePixelRatio || 1);
   const W = window.innerWidth;
@@ -89517,6 +89575,18 @@ function _refreshSettingsValues() {
     const _fv = $('#val-hud-scale');
     if (_fv) _fv.textContent = _fs.toFixed(2) + 'x';
   }
+  {
+    // (v42.56) same reason as HUD Size above - innerHTML is written once, so without this the two
+    // opacity sliders show their build-time values every time the overlay is reopened.
+    const _ho = (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72;
+    setRange('set-hud-opacity', null, _ho);
+    const _hov = $('#val-hud-opacity');
+    if (_hov) _hov.textContent = (_ho * 100).toFixed(0) + '%';
+    const _ht = (typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1;
+    setRange('set-hud-text-opacity', null, _ht);
+    const _htv = $('#val-hud-text-opacity');
+    if (_htv) _htv.textContent = (_ht * 100).toFixed(0) + '%';
+  }
   setChk('set-clip-rec', !!input.clipRec);
 
   // Keyboard bind rows. The dynamic rows are built once ; window._refreshKbBindRows
@@ -89832,6 +89902,22 @@ function buildSettingsPage() {
         <label>HUD Size</label>
         <input type="range" id="set-hud-scale" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScale === 'number') ? input.hudScale : 1}">
         <div class="value-display" id="val-hud-scale">${((typeof input.hudScale === 'number') ? input.hudScale : 1).toFixed(2)}x</div>
+      </div>
+      <div class="setting-row">
+        <!-- step 0.01, not the 0.05 its neighbours use: the shipped default is 0.72, which is not
+             on a 0.05 grid, so a coarser step would park the thumb at 0.70 while the readout said
+             72% the moment the panel opened. -->
+        <label>HUD Opacity</label>
+        <input type="range" id="set-hud-opacity" min="0.15" max="1" step="0.01" value="${(typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72}">
+        <div class="value-display" id="val-hud-opacity">${(((typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72) * 100).toFixed(0)}%</div>
+      </div>
+      <div class="setting-row">
+        <label>HUD Text Opacity</label>
+        <input type="range" id="set-hud-text-opacity" min="0.15" max="1" step="0.01" value="${(typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1}">
+        <div class="value-display" id="val-hud-text-opacity">${(((typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1) * 100).toFixed(0)}%</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Two independent controls, not a master and a trim: the arcs, ticks, reticle, radar and compass follow the first, and every word and number on the HUD follows the second. Set text above the graphics to keep readouts legible over a faint instrument cluster, or below it to quieten the captions. Both apply live, on the flat HUD and in VR.</label>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Scales the gauge cluster, ability bars, reticle and captions on flat screen. Applies live. The radar and compass rose stay at their designed size. Note the painted cockpit frames are drawn around the 1.00&times; layout, so first-person recesses stop lining up with the rings as you move away from it. VR has its own separate size slider below.</label>
@@ -91329,6 +91415,25 @@ function buildSettingsPage() {
     hudScaleSel.addEventListener('input', _applyHudScale);
     hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });
   }
+  // (v42.56) HUD opacity + HUD text opacity. Same shape as HUD Size: live on `input`, one
+  // localStorage write per drag on `change`. Nothing to re-apply by hand for the canvas HUD -
+  // _hlGA()/_hlTA() are read fresh every frame - but _hudDomAlpha() pushes the same two numbers
+  // into CSS variables for the DOM HUD (round timer, scores, kill feed), which does not redraw.
+  [['#set-hud-opacity', '#val-hud-opacity', 'hudOpacity', 0.72],
+   ['#set-hud-text-opacity', '#val-hud-text-opacity', 'hudTextOpacity', 1]].forEach(([sel, vsel, key, dflt]) => {
+    const el = overlay.querySelector(sel);
+    const vl = overlay.querySelector(vsel);
+    if (!el) return;
+    const apply = () => {
+      const v = parseFloat(el.value);
+      if (!isFinite(v)) return;
+      input[key] = Math.max(0, Math.min(1, v));
+      if (vl) vl.textContent = (input[key] * 100).toFixed(0) + '%';
+      try { _hudDomAlpha(); } catch (_) {}
+    };
+    el.addEventListener('input', apply);
+    el.addEventListener('change', () => { apply(); saveSettings(); });
+  });
   // (v42.09) Cockpit solidity. Same shape as HUD Size: live on `input`, one localStorage write per
   // drag on `change`. Nothing to re-apply by hand - _ghostHullSync calls _ghostHullTune every frame
   // with fresh knobs, and crossing the top of the range makes _ghostSeatWanted() false, which makes
@@ -92037,6 +92142,8 @@ function saveSettings() {
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
+      hudOpacity: (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72,
+      hudTextOpacity: (typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1,
       cockpitSolidity: (typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0,
       vrHudMigrated: true,   // (v41.43) the one-time vrHudScale default bump has been applied
       vrWater: !!input.vrWater,   // (v41.43)
@@ -92317,6 +92424,8 @@ const SHIPPED_DEFAULTS = {
   "vrPerfMode": "standard",
   "vrStripFx": true,
   "hudScale": 1,
+  "hudOpacity": 0.72,
+  "hudTextOpacity": 1,
   "cockpitSolidity": 0,
   "fovDeg": 120,
   "audioMaster": 1,
@@ -93954,6 +94063,12 @@ function loadSettings() {
     }
     if (typeof data.hudScale === 'number' && isFinite(data.hudScale)) {
       input.hudScale = Math.max(0.75, Math.min(1.75, data.hudScale));
+    }
+    if (typeof data.hudOpacity === 'number' && isFinite(data.hudOpacity)) {
+      input.hudOpacity = Math.max(0, Math.min(1, data.hudOpacity));
+    }
+    if (typeof data.hudTextOpacity === 'number' && isFinite(data.hudTextOpacity)) {
+      input.hudTextOpacity = Math.max(0, Math.min(1, data.hudTextOpacity));
     }
     if (typeof data.clipRec === 'boolean') input.clipRec = data.clipRec;
     if (typeof data.fovDeg === 'number') {

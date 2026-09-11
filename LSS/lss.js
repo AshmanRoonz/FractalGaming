@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.55';
+const LSS_BUILD = '42.56';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -642,6 +642,8 @@ const input = {
   vrWater: false,
   vrWaterRefl: false,
   hudScale: 1,
+  hudOpacity: 0.72,
+  hudTextOpacity: 1,
   vrPerfMode: 'standard',
   vrStripFx: false,
   showFps: false,
@@ -55371,8 +55373,33 @@ function _hlSegArc(ctx, r, p, pct, col) {
 }
 
 function _hlGA() {
+  if (typeof input !== 'undefined' && input && typeof input.hudOpacity === 'number') {
+    const v = input.hudOpacity;
+    if (isFinite(v) && v >= 0 && v <= 1) return v;
+  }
   const a = (typeof window !== 'undefined' && window.__hudAlpha != null) ? +window.__hudAlpha : 0.72;
   return (a >= 0 && a <= 1) ? a : 0.72;
+}
+let _hudDomA = '';
+function _hudDomAlpha() {
+  try {
+    const g = _hlGA(), t = _hlTA();
+    const key = g + '|' + t;
+    if (key === _hudDomA) return;
+    _hudDomA = key;
+    const st = document.documentElement.style;
+    st.setProperty('--lss-hud-gfx', String(g));
+    st.setProperty('--lss-hud-txt', String(t));
+  } catch (_) {}
+}
+
+function _hlTA() {
+  if (typeof input !== 'undefined' && input && typeof input.hudTextOpacity === 'number') {
+    const v = input.hudTextOpacity;
+    if (isFinite(v) && v >= 0 && v <= 1) return v;
+  }
+  const a = (typeof window !== 'undefined' && window.__hudTextAlpha != null) ? +window.__hudTextAlpha : 1;
+  return (a >= 0 && a <= 1) ? a : 1;
 }
 function _hlAmmoSegs() {
   try {
@@ -55446,7 +55473,7 @@ function _hlReticle(ctx, r, col) {
 const _hlArcTextCache = new Map();
 function _hlArcLabel(ctx, cx, cy, radPx, midDeg, str, col, fontPx, maxDeg) {
   if (!str) return;
-  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
+  ctx.globalAlpha = _hlTA();   // (v42.56) text has its own slider ; was a hard 1 in v41.40
   const key = str + '|' + radPx.toFixed(1) + '|' + midDeg.toFixed(1) + '|' + col + '|' +
               fontPx.toFixed(1) + '|' + (maxDeg || 0);
   let spr = _hlArcTextCache.get(key);
@@ -55497,7 +55524,7 @@ function _hlArcLabel(ctx, cx, cy, radPx, midDeg, str, col, fontPx, maxDeg) {
 function _hlGaugeLabel(ctx, r, p, val) {
   if (!p.lab) return;
   if (typeof input !== 'undefined' && input && input.hudGaugeLabels === false) return;
-  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
+  ctx.globalAlpha = _hlTA();   // (v42.56) text has its own slider ; was a hard 1 in v41.40
   const rad = (p.labR != null) ? p.labR * r.vmin : Math.min(r.w, r.h) / 2;
   const fontPx = Math.max(7, r.vmin * 0.88);
   _hlArcLabel(ctx, r.cx, r.cy, rad, p.labAt, p.lab, 'rgba(226,244,255,0.72)', fontPx);
@@ -55526,7 +55553,7 @@ function _hlGaugeLabel(ctx, r, p, val) {
 
 function _hlText(ctx, r, p, str, col) {
   if (!str) return;
-  ctx.globalAlpha = 1;   // (v41.40) the HUD dims, the text does not
+  ctx.globalAlpha = _hlTA();   // (v42.56) text has its own slider ; was a hard 1 in v41.40
   hudFont('700 ' + ((p.size || 1.5) * r.vmin).toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif');
   ctx.save();
   if (p.rot) { ctx.translate(r.cx, r.cy); ctx.rotate(p.rot * _HL_D2R); ctx.translate(-r.cx, -r.cy); }
@@ -55698,6 +55725,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
       const rr = (part.r + part.tick + 1.6) * q.vmin;
       hudFont('700 ' + (q.vmin * 1.1).toFixed(1) + 'px Courier New');   // before save() — see _hlText
       ctx.save();
+      ctx.globalAlpha = _hlTA();   // (v42.56) these readouts are text, not graphics
       ctx.fillStyle = col;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(str, q.cx + Math.cos(mid) * rr, q.cy + Math.sin(mid) * rr);
@@ -55961,6 +55989,7 @@ function _champCaptureState() {
 }
 function drawCircumpunctHUD() {
   if (!player.chassis) return;
+  _hudDomAlpha();   // (v42.56) no-op unless one of the two opacity settings actually changed
 
   const dpr = Math.min(1.25, window.devicePixelRatio || 1);
   const W = window.innerWidth;
@@ -60128,6 +60157,16 @@ function _refreshSettingsValues() {
     const _fv = $('#val-hud-scale');
     if (_fv) _fv.textContent = _fs.toFixed(2) + 'x';
   }
+  {
+    const _ho = (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72;
+    setRange('set-hud-opacity', null, _ho);
+    const _hov = $('#val-hud-opacity');
+    if (_hov) _hov.textContent = (_ho * 100).toFixed(0) + '%';
+    const _ht = (typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1;
+    setRange('set-hud-text-opacity', null, _ht);
+    const _htv = $('#val-hud-text-opacity');
+    if (_htv) _htv.textContent = (_ht * 100).toFixed(0) + '%';
+  }
   setChk('set-clip-rec', !!input.clipRec);
 
   if (typeof window._refreshKbBindRows === 'function') {
@@ -60424,6 +60463,22 @@ function buildSettingsPage() {
         <label>HUD Size</label>
         <input type="range" id="set-hud-scale" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScale === 'number') ? input.hudScale : 1}">
         <div class="value-display" id="val-hud-scale">${((typeof input.hudScale === 'number') ? input.hudScale : 1).toFixed(2)}x</div>
+      </div>
+      <div class="setting-row">
+        <!-- step 0.01, not the 0.05 its neighbours use: the shipped default is 0.72, which is not
+             on a 0.05 grid, so a coarser step would park the thumb at 0.70 while the readout said
+             72% the moment the panel opened. -->
+        <label>HUD Opacity</label>
+        <input type="range" id="set-hud-opacity" min="0.15" max="1" step="0.01" value="${(typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72}">
+        <div class="value-display" id="val-hud-opacity">${(((typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72) * 100).toFixed(0)}%</div>
+      </div>
+      <div class="setting-row">
+        <label>HUD Text Opacity</label>
+        <input type="range" id="set-hud-text-opacity" min="0.15" max="1" step="0.01" value="${(typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1}">
+        <div class="value-display" id="val-hud-text-opacity">${(((typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1) * 100).toFixed(0)}%</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Two independent controls, not a master and a trim: the arcs, ticks, reticle, radar and compass follow the first, and every word and number on the HUD follows the second. Set text above the graphics to keep readouts legible over a faint instrument cluster, or below it to quieten the captions. Both apply live, on the flat HUD and in VR.</label>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">Scales the gauge cluster, ability bars, reticle and captions on flat screen. Applies live. The radar and compass rose stay at their designed size. Note the painted cockpit frames are drawn around the 1.00&times; layout, so first-person recesses stop lining up with the rings as you move away from it. VR has its own separate size slider below.</label>
@@ -61795,6 +61850,21 @@ function buildSettingsPage() {
     hudScaleSel.addEventListener('input', _applyHudScale);
     hudScaleSel.addEventListener('change', () => { _applyHudScale(); saveSettings(); });
   }
+  [['#set-hud-opacity', '#val-hud-opacity', 'hudOpacity', 0.72],
+   ['#set-hud-text-opacity', '#val-hud-text-opacity', 'hudTextOpacity', 1]].forEach(([sel, vsel, key, dflt]) => {
+    const el = overlay.querySelector(sel);
+    const vl = overlay.querySelector(vsel);
+    if (!el) return;
+    const apply = () => {
+      const v = parseFloat(el.value);
+      if (!isFinite(v)) return;
+      input[key] = Math.max(0, Math.min(1, v));
+      if (vl) vl.textContent = (input[key] * 100).toFixed(0) + '%';
+      try { _hudDomAlpha(); } catch (_) {}
+    };
+    el.addEventListener('input', apply);
+    el.addEventListener('change', () => { apply(); saveSettings(); });
+  });
   const cockSolSel = overlay.querySelector('#set-cockpit-solidity');
   const cockSolVal = overlay.querySelector('#val-cockpit-solidity');
   if (cockSolSel) {
@@ -62397,6 +62467,8 @@ function saveSettings() {
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
       hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
+      hudOpacity: (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72,
+      hudTextOpacity: (typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1,
       cockpitSolidity: (typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0,
       vrHudMigrated: true,   // (v41.43) the one-time vrHudScale default bump has been applied
       vrWater: !!input.vrWater,   // (v41.43)
@@ -62648,6 +62720,8 @@ const SHIPPED_DEFAULTS = {
   "vrPerfMode": "standard",
   "vrStripFx": true,
   "hudScale": 1,
+  "hudOpacity": 0.72,
+  "hudTextOpacity": 1,
   "cockpitSolidity": 0,
   "fovDeg": 120,
   "audioMaster": 1,
@@ -64225,6 +64299,12 @@ function loadSettings() {
     }
     if (typeof data.hudScale === 'number' && isFinite(data.hudScale)) {
       input.hudScale = Math.max(0.75, Math.min(1.75, data.hudScale));
+    }
+    if (typeof data.hudOpacity === 'number' && isFinite(data.hudOpacity)) {
+      input.hudOpacity = Math.max(0, Math.min(1, data.hudOpacity));
+    }
+    if (typeof data.hudTextOpacity === 'number' && isFinite(data.hudTextOpacity)) {
+      input.hudTextOpacity = Math.max(0, Math.min(1, data.hudTextOpacity));
     }
     if (typeof data.clipRec === 'boolean') input.clipRec = data.clipRec;
     if (typeof data.fovDeg === 'number') {
