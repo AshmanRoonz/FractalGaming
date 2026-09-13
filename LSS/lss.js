@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.93';
+const LSS_BUILD = '42.94';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13619,6 +13619,7 @@ const _LSSPAN = { d: 0, xmax: 1, ymax: 1, U: 1, V: 1, pref: 0, _d: -1, _fov: -1,
 try {
   const _pp = (typeof localStorage !== 'undefined') ? localStorage.getItem('lss_panini') : null;
   if (_pp != null && isFinite(+_pp)) _LSSPAN.pref = Math.max(0, Math.min(1, +_pp));
+  else if (!(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) _LSSPAN.pref = 1;
 } catch (_) {}
 function _lssPaniniD() {
   let d = (typeof window !== 'undefined' && window.__panini != null) ? +window.__panini : _LSSPAN.pref;
@@ -69635,8 +69636,10 @@ function initHbarPool(maxBars, maxMarkers) {
           '<polyline points="0,46 40,8 124,8"></polyline>' +
         '</svg>' +
         '<div class="cl-text"></div>' +
+        '<div class="cl-dist"></div>' +
       '</div>';
     div._text = div.querySelector('.cl-text');
+    div._dist = div.querySelector('.cl-dist');
     container.appendChild(div);
     hbarPool.labels.push(div);
   }
@@ -69789,6 +69792,11 @@ function updateEnemyHealthBars() {
     if (div._lx !== _lxi) { div.style.left = _lxi + 'px'; div._lx = _lxi; }
     if (div._ly !== _lyi) { div.style.top  = _lyi + 'px'; div._ly = _lyi; }
     if (div._text && div._lt !== visText) { div._text.textContent = visText; div._lt = visText; }
+    if (div._dist) {
+      const _dq = (dist < 1000) ? (Math.round(dist / 10) * 10) + 'm'
+                                : (Math.round(dist / 100) / 10).toFixed(1) + 'km';
+      if (div._ld !== _dq) { div._dist.textContent = _dq; div._ld = _dq; }
+    }
   };
   if (game.entities) {
     for (const bot of game.entities) _processShipForLabel(bot);

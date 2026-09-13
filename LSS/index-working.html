@@ -1860,6 +1860,31 @@ body.lss-litehud #lobby *, body.lss-litehud #lobby-room-hud * {
   transform-origin: center;
 }
 
+/* (v42.94) RANGE READOUT, under the callout's horizontal stub.
+   The stub sits at absolute y = -40 (.cl-svg top -48 + the polyline's y=8) and .cl-text rides
+   ABOVE it at -64, so the range hangs just below the line at -38 and the tag reads name-over-line,
+   range-under-line.
+   (!) position:absolute is load-bearing, not decoration. .cl-wrap is a fixed 130x56 box driven by
+   two infinite keyframe animations; a flow-positioned second line would resize it and make every
+   tag's geometry (and the SVG's viewBox mapping) depend on its own text. Absolute keeps the
+   callout geometry byte-identical to v42.93.
+   (!) Needs the same counter-mirror as .cl-text: .ship-name-label gets scaleX(-1) for a
+   right-edge ship, which would otherwise render the range backwards. */
+.ship-name-label .cl-dist {
+  position: absolute;
+  left: 56px; top: -38px;
+  padding: 0 6px 1px 6px;
+  font-size: 0.82em;
+  opacity: 0.78;
+  letter-spacing: 0.06em;
+  text-shadow: 0 0 4px currentColor;
+  background: rgba(5, 8, 18, 0.30);
+}
+.ship-name-label.flip-left .cl-dist {
+  transform: scaleX(-1);
+  transform-origin: center;
+}
+
 
 @keyframes shipLabelJitter {
   0%,100% { transform: translate(0, 0); }
@@ -4735,7 +4760,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.93';
+const LSS_BUILD = '42.94';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -23289,7 +23314,14 @@ function _getBloomRTSize() {
 const _LSSPAN = { d: 0, xmax: 1, ymax: 1, U: 1, V: 1, pref: 0, _d: -1, _fov: -1, _asp: -1 };
 try {
   const _pp = (typeof localStorage !== 'undefined') ? localStorage.getItem('lss_panini') : null;
+  // (v42.94) ON BY DEFAULT, AT FULL. Owner: "having full wide view correction is best", and
+  // "if my pc can handle it, then mega + panini is great". A stored value still wins, so anyone
+  // who has already moved the slider keeps their setting.
+  // (!) Phones stay at 0. _lssPaniniSuper() returns 0 on mobile, so there is no supersample budget
+  //     to pay for the centre magnification there - defaulting a phone on would hand it exactly the
+  //     soft image the owner rejected in v42.91.
   if (_pp != null && isFinite(+_pp)) _LSSPAN.pref = Math.max(0, Math.min(1, +_pp));
+  else if (!(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) _LSSPAN.pref = 1;
 } catch (_) {}
 // The live strength, readable before the first _lssPaniniSync().
 function _lssPaniniD() {
@@ -101367,8 +101399,10 @@ function initHbarPool(maxBars, maxMarkers) {
           '<polyline points="0,46 40,8 124,8"></polyline>' +
         '</svg>' +
         '<div class="cl-text"></div>' +
+        '<div class="cl-dist"></div>' +
       '</div>';
     div._text = div.querySelector('.cl-text');
+    div._dist = div.querySelector('.cl-dist');
     container.appendChild(div);
     hbarPool.labels.push(div);
   }
@@ -101636,6 +101670,17 @@ function updateEnemyHealthBars() {
     if (div._lx !== _lxi) { div.style.left = _lxi + 'px'; div._lx = _lxi; }
     if (div._ly !== _lyi) { div.style.top  = _lyi + 'px'; div._ly = _lyi; }
     if (div._text && div._lt !== visText) { div._text.textContent = visText; div._lt = visText; }
+    // (v42.94) RANGE. `dist` is already computed above for the range and LOS gates, so the
+    // number itself is free; the only cost that matters is how often the STRING changes, because
+    // each change is a DOM write the v32.87 note above measured as a real main-thread cost.
+    // So it is quantised: 10 m under a kilometre, 0.1 km above. At the 330 u/s cruise that is
+    // ~33 changes a second close in and ~3 far out — against style.left/top, which change EVERY
+    // frame for every visible tag. The range line is strictly cheaper than the tag already is.
+    if (div._dist) {
+      const _dq = (dist < 1000) ? (Math.round(dist / 10) * 10) + 'm'
+                                : (Math.round(dist / 100) / 10).toFixed(1) + 'km';
+      if (div._ld !== _dq) { div._dist.textContent = _dq; div._ld = _dq; }
+    }
   };
   if (game.entities) {
     for (const bot of game.entities) _processShipForLabel(bot);
