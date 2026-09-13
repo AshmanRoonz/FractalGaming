@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.94';
+const LSS_BUILD = '42.95';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -69706,6 +69706,54 @@ function _lblClaimSlot(ent, now, n) {
 
 const HBAR_LOS_INTERVAL = 0.067; 
 
+const _lblHullRCache = new WeakMap();
+const _lblHRInv = new THREE.Matrix4(), _lblHRMat = new THREE.Matrix4();
+const _lblHRBox = new THREE.Box3(), _lblHRBB = new THREE.Box3();
+const _lblHRV1 = new THREE.Vector3(), _lblHRV2 = new THREE.Vector3();
+function _lblHullR(o) {
+  const _fallback = function () {
+    const c = o && o.chassis;
+    const hl = (c && c.hullLength) ? c.hullLength : 0;
+    return hl > 0 ? hl * 0.5 : 45;
+  };
+  try {
+    const M = o && o.mesh;
+    if (!M) return _fallback();
+    const hit = _lblHullRCache.get(M);
+    if (hit !== undefined) return hit;
+    let hull = null;
+    for (let i = 0; i < M.children.length; i++) {
+      const c = M.children[i];
+      if (c && c.userData && c.userData.bboxSize) { hull = c; break; }
+    }
+    let r;
+    if (!hull) {
+      r = _fallback();
+    } else {
+      M.updateWorldMatrix(true, true);
+      _lblHRInv.copy(M.matrixWorld).invert();
+      _lblHRBox.makeEmpty();
+      hull.traverse(function (q) {
+        if (!q || !q.isMesh || !q.geometry) return;
+        if (!q.geometry.boundingBox) q.geometry.computeBoundingBox();
+        _lblHRBB.copy(q.geometry.boundingBox);
+        _lblHRMat.multiplyMatrices(_lblHRInv, q.matrixWorld);
+        _lblHRBB.applyMatrix4(_lblHRMat);
+        _lblHRBox.union(_lblHRBB);
+      });
+      if (_lblHRBox.isEmpty()) {
+        r = _fallback();
+      } else {
+        const sc = M.getWorldScale(_lblHRV1), sz = _lblHRBox.getSize(_lblHRV2);
+        r = Math.max(Math.abs(sz.x * sc.x), Math.abs(sz.z * sc.z)) * 0.5;
+        if (!isFinite(r) || r <= 0) r = _fallback();
+      }
+    }
+    _lblHullRCache.set(M, r);
+    return r;
+  } catch (_) { return _fallback(); }
+}
+
 function updateEnemyHealthBars() {
   if (!hbarPool.initialized) initHbarPool(24, 8);
 
@@ -69793,8 +69841,9 @@ function updateEnemyHealthBars() {
     if (div._ly !== _lyi) { div.style.top  = _lyi + 'px'; div._ly = _lyi; }
     if (div._text && div._lt !== visText) { div._text.textContent = visText; div._lt = visText; }
     if (div._dist) {
-      const _dq = (dist < 1000) ? (Math.round(dist / 10) * 10) + 'm'
-                                : (Math.round(dist / 100) / 10).toFixed(1) + 'km';
+      const _gap = Math.max(0, dist - _lblHullR(player) - _lblHullR(ent));
+      const _dq = (_gap < 1000) ? (Math.round(_gap / 10) * 10) + 'm'
+                                : (Math.round(_gap / 100) / 10).toFixed(1) + 'km';
       if (div._ld !== _dq) { div._dist.textContent = _dq; div._ld = _dq; }
     }
   };

@@ -4760,7 +4760,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.94';
+const LSS_BUILD = '42.95';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -101517,6 +101517,73 @@ function _lblClaimSlot(ent, now, n) {
 
 const HBAR_LOS_INTERVAL = 0.067; 
 
+// (v42.95) HOW BIG IS THAT SHIP? - for the callout's range readout.
+// Owner: "the ships were touching practically but still said 130m apart". The readout was measuring
+// player.position.distanceTo(ent.position), and BOTH of those are hull CENTRES - the loader centres
+// every model on its bbox (see the _swHullMetrics note above). chassis.hullLength is 80 / 100 / 140
+// for the three fighter classes, so two ships nose to nose genuinely sit 90-140 apart centre to
+// centre: the number was right and the question it answered was the wrong one. A player asking "how
+// far is that ship" means the gap between the hulls, and wants it to reach zero on contact.
+//
+// So: the same measurement _swHullMetrics does for the player, generalised to any entity, and cached
+// per mesh in a WeakMap because it walks ~21 geometries and must not run per frame.
+// (!) Takes the LARGEST horizontal half-extent, not the one along the line of sight. A directional
+//     extent would need the target's orientation every frame; this is a cached scalar. The trade is
+//     deliberate: it guarantees "touching reads 0m" in EVERY orientation, and the cost is
+//     under-reporting by at most a half-length at range, which is the harmless direction to err.
+// (!) The loader-tagged hull child only - `mesh` also carries the shield bubble, engine orbs and
+//     running lights, and measuring those hands back a force-field radius (the v41.58 trap).
+// (!) chassis.hullLength is the fallback, NOT the primary: capital hulls declare abstractions that
+//     do not match their art (see the v42.80 carrier note), so a real measurement wins where there
+//     is one.
+const _lblHullRCache = new WeakMap();
+const _lblHRInv = new THREE.Matrix4(), _lblHRMat = new THREE.Matrix4();
+const _lblHRBox = new THREE.Box3(), _lblHRBB = new THREE.Box3();
+const _lblHRV1 = new THREE.Vector3(), _lblHRV2 = new THREE.Vector3();
+function _lblHullR(o) {
+  const _fallback = function () {
+    const c = o && o.chassis;
+    const hl = (c && c.hullLength) ? c.hullLength : 0;
+    return hl > 0 ? hl * 0.5 : 45;
+  };
+  try {
+    const M = o && o.mesh;
+    if (!M) return _fallback();
+    const hit = _lblHullRCache.get(M);
+    if (hit !== undefined) return hit;
+    let hull = null;
+    for (let i = 0; i < M.children.length; i++) {
+      const c = M.children[i];
+      if (c && c.userData && c.userData.bboxSize) { hull = c; break; }
+    }
+    let r;
+    if (!hull) {
+      r = _fallback();
+    } else {
+      M.updateWorldMatrix(true, true);
+      _lblHRInv.copy(M.matrixWorld).invert();
+      _lblHRBox.makeEmpty();
+      hull.traverse(function (q) {
+        if (!q || !q.isMesh || !q.geometry) return;
+        if (!q.geometry.boundingBox) q.geometry.computeBoundingBox();
+        _lblHRBB.copy(q.geometry.boundingBox);
+        _lblHRMat.multiplyMatrices(_lblHRInv, q.matrixWorld);
+        _lblHRBB.applyMatrix4(_lblHRMat);
+        _lblHRBox.union(_lblHRBB);
+      });
+      if (_lblHRBox.isEmpty()) {
+        r = _fallback();
+      } else {
+        const sc = M.getWorldScale(_lblHRV1), sz = _lblHRBox.getSize(_lblHRV2);
+        r = Math.max(Math.abs(sz.x * sc.x), Math.abs(sz.z * sc.z)) * 0.5;
+        if (!isFinite(r) || r <= 0) r = _fallback();
+      }
+    }
+    _lblHullRCache.set(M, r);
+    return r;
+  } catch (_) { return _fallback(); }
+}
+
 function updateEnemyHealthBars() {
   if (!hbarPool.initialized) initHbarPool(24, 8);
 
@@ -101677,8 +101744,11 @@ function updateEnemyHealthBars() {
     // ~33 changes a second close in and ~3 far out — against style.left/top, which change EVERY
     // frame for every visible tag. The range line is strictly cheaper than the tag already is.
     if (div._dist) {
-      const _dq = (dist < 1000) ? (Math.round(dist / 10) * 10) + 'm'
-                                : (Math.round(dist / 100) / 10).toFixed(1) + 'km';
+      // the GAP, not the centre separation - `dist` itself is left alone because the range and
+      // LOS gates above are built on it.
+      const _gap = Math.max(0, dist - _lblHullR(player) - _lblHullR(ent));
+      const _dq = (_gap < 1000) ? (Math.round(_gap / 10) * 10) + 'm'
+                                : (Math.round(_gap / 100) / 10).toFixed(1) + 'km';
       if (div._ld !== _dq) { div._dist.textContent = _dq; div._ld = _dq; }
     }
   };
