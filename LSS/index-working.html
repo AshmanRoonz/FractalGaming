@@ -4760,7 +4760,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.99';
+const LSS_BUILD = '43.00';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -17594,6 +17594,13 @@ function emitDamageState(entity, dt) {
   // collision and scoring behaviour far outside this function.
   if (!entity || !entity.position) return;
   if (entity.alive === false || entity.shipState === 'dead') return;
+  // (v43.00) A HULL THAT IS NOT DRAWN DOES NOT SMOKE. Same ghost as the callout above: this tested
+  // liveness and never visibility, so a hidden proxy (or a freighter warped out and parked on its pad)
+  // went on emitting smoke and fire at a frozen world point. Note the separate leak this also covers:
+  // traffic health is restored ONLY on the death-revive path, so a freighter that is damaged and
+  // SURVIVES never heals and would otherwise smoke for the rest of the session, pad included.
+  if (entity._cloaked) return;
+  if (entity.mesh && entity.mesh.visible === false) return;
   const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
   const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
   if (hpFrac >= 1.0) return;
@@ -36883,7 +36890,21 @@ function _hcTrafficUpdate(dt) {
           _HC_TRAF.obbs.push({ x: e.position.x, y: e.position.y + 20, z: e.position.z,
                                r: 62 * ((e.trafClass && e.trafClass.scale) || 1), ent: e });
         } else {
+          // (v43.00) NO BROADCAST MEANS NOT PRESENT - and it has to say so, not just stop drawing.
+          // Owner: "i killed a city ship, while connected in multiplayer, and the ship tag is still
+          // there, and the smoke, but the ship is gone."
+          // Hiding the holder was the whole of this arm, and hiding a mesh tells nothing else in the
+          // game anything. `_cloaked` keeps whatever the last drawn frame left (false), `alive` stays
+          // true, and `position` freezes wherever the hull was - so the callout keeps drawing
+          // (_processShipForLabel never tested mesh visibility) and emitDamageState keeps smoking at
+          // that frozen point, over empty air, for the rest of the session.
+          // How you get here by shooting one: your FIRST hit sets aggro on your LOCAL copy (36758),
+          // but the authority's copy is not aggro and so is not in its `hot` broadcast set - so
+          // _hcApplyNetState nulls _netPos and the hull vanishes the instant you shoot it. Traffic
+          // damage is not replicated in either direction (there is no city_dmg, and bot_dmg requires
+          // instanceof Bot, which an object literal is not), so the authority never learns.
           s.holder.visible = false;
+          e._cloaked = true;   // the one write that tells the HUD and the FX this hull is not here
         }
         s.lastSeg = st.seg;
         continue;
@@ -101759,6 +101780,11 @@ function updateEnemyHealthBars() {
   // friendly/enemy branch stays in one place.
   const _processShipForLabel = (ent) => {
     if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
+    // (v43.00) ...and it must not be a hull that is not being drawn. The tracker-lock path has always
+    // had this test (_lockShown: "(!o.mesh || o.mesh.visible)"); the callout never did, which is why a
+    // hidden-but-alive entity kept its tag. Belt and braces with the _cloaked write above: either one
+    // alone fixes the reported ghost, and anything else that hides a hull without saying so is covered.
+    if (ent.mesh && ent.mesh.visible === false) return;
     ent._lblHeld = false;   // (v40.55) set by _lblSoftGate below; the draw point only clears the hold clock when NO gate held
     // (v40.61) what the LAST frame actually drew, which is the only thing that makes a hold
     // legitimate (see _lblSoftGate). Cleared here and set again only where the div is shown, so

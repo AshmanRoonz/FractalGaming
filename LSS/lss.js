@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.99';
+const LSS_BUILD = '43.00';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -9332,6 +9332,8 @@ const _botSpreadDir = new THREE.Vector3();
 function emitDamageState(entity, dt) {
   if (!entity || !entity.position) return;
   if (entity.alive === false || entity.shipState === 'dead') return;
+  if (entity._cloaked) return;
+  if (entity.mesh && entity.mesh.visible === false) return;
   const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
   const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
   if (hpFrac >= 1.0) return;
@@ -22676,6 +22678,7 @@ function _hcTrafficUpdate(dt) {
                                r: 62 * ((e.trafClass && e.trafClass.scale) || 1), ent: e });
         } else {
           s.holder.visible = false;
+          e._cloaked = true;   // the one write that tells the HUD and the FX this hull is not here
         }
         s.lastSeg = st.seg;
         continue;
@@ -69854,6 +69857,7 @@ function updateEnemyHealthBars() {
   _lblFrameId++;   // (v40.55) one stamp per frame; a slot left unstamped below is unused and gets hidden
   const _processShipForLabel = (ent) => {
     if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
+    if (ent.mesh && ent.mesh.visible === false) return;
     ent._lblHeld = false;   // (v40.55) set by _lblSoftGate below; the draw point only clears the hold clock when NO gate held
     ent._lblUpPrev = !!ent._lblUp;
     ent._lblUp = false;
