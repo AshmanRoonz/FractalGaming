@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.79';
+const LSS_BUILD = '43.80';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -68431,7 +68431,8 @@ const MAP_DATA = {
   },
 
   assault_shifting: {
-    name: 'The Shifting Causeway',   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
+    name: 'The Shifting Causeway',
+    thumb: 'map_thumbs/shifting_deep.webp',   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
     procedural: 'assault_shifting',
     description: 'Assault, re-rolled every round: a fresh cavern, the Champion Field dug in ahead of the defenders. Roles swap every round.',
     defaultTheme: 'Broken Simulation',
