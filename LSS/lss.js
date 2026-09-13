@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.32';
+const LSS_BUILD = '43.33';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5122,7 +5122,15 @@ function selectMap(mapKey) {
 
   try {
     const _gpanel = document.getElementById('gmaps-overlay-panel');
-    if (_gpanel) _gpanel.style.display = (mapData.type === 'gmaps') ? 'flex' : 'none';
+    const _isG = (mapData.type === 'gmaps');
+    if (_gpanel) {
+      _gpanel.style.display = _isG ? 'flex' : 'none';
+      const _win = document.getElementById('map-window');
+      const _host = document.getElementById('map-select');
+      if (_isG && _win && _gpanel.parentNode !== _win) _win.appendChild(_gpanel);
+      else if (!_isG && _host && _gpanel.parentNode !== _host) _host.appendChild(_gpanel);
+      if (descEl) descEl.style.display = _isG ? 'none' : '';
+    }
   } catch (_) {}
 
   if (net.active && net.sendEvent) {

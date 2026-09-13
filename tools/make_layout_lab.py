@@ -377,6 +377,13 @@ FILL = r'''
       .map(function(p,i){ return '<div class="perk-card'+(i===2?' selected':'')+'">'+p+'</div>'; }).join(''));
   set('perks-desc', 'Pick one. More room for wider hardpoints and core pressure.');
   set('teammates-strip', '<div class="tm-chip">YOU</div><div class="tm-chip">ashman</div>');
+  // (v43.33) selectMap moves the DROP panel INSIDE the orange box for gmaps_user. The lab has no
+  // game JS, so do the same move here or the lab would show a layout the game no longer has.
+  try {
+    var gp = document.getElementById('gmaps-overlay-panel'), mw = document.getElementById('map-window');
+    if (gp && mw){ gp.style.display='flex'; mw.appendChild(gp);
+                   var dsc=document.getElementById('map-window-desc'); if (dsc) dsc.style.display='none'; }
+  } catch(e){}
   var info = document.getElementById('ship-preview-info');
   if (info && !info.textContent.trim()) info.innerHTML =
     '<div class="spi-row"><span>HULL</span><b>1080</b></div>'+
