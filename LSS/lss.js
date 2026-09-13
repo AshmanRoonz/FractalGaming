@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.01';
+const LSS_BUILD = '43.03';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6738,6 +6738,16 @@ function handleNetEvent(evt, fromPeerId) {
       game.state = 'roundEnd';
       if (typeof _anchorTimer === 'function') _anchorTimer('roundEndTimer', 2);
     }
+    return;
+  }
+  if (evt.type === 'city_dmg' && typeof evt.i === 'number') {
+    try {
+      if (typeof amStasisOwner === 'function' && amStasisOwner() &&
+          typeof _HC_TRAF !== 'undefined' && _HC_TRAF.ships) {
+        const sh = _HC_TRAF.ships[evt.i | 0];
+        if (sh && sh.ent && sh.ent.alive) sh.ent.takeDamage(Math.max(0, +evt.d || 0), 'peer:' + fromPeerId, sh.ent.position);
+      }
+    } catch (_) {}
     return;
   }
   if (evt.type === 'mon_dmg' && typeof evt.i === 'number') {
@@ -22462,7 +22472,10 @@ function _hcNetSync(dt) {
     const hot = [];
     for (let i = 0; i < _HC_TRAF.ships.length; i++) {
       const sh = _HC_TRAF.ships[i];
-      if (!sh || !sh.ent || !sh.ent.aggro || !sh.ent.alive) continue;
+      if (!sh || !sh.ent) continue;
+      const _e = sh.ent;
+      const _justDied = !_e.alive && ((((game && game.time) || 0) - (_e._diedAt || -99)) < 1.5);
+      if (!_justDied && (!_e.aggro || !_e.alive)) continue;
       hot.push([i, Math.round(sh.ent.position.x), Math.round(sh.ent.position.y), Math.round(sh.ent.position.z),
                 Math.round(sh.ent.health)]);
     }
@@ -22483,6 +22496,9 @@ function _hcApplyNetState(rows) {
     sh.ent._netPos.set(r[1], r[2], r[3]);
     sh.ent.health = r[4];
     sh.ent.aggro = true;
+    if (r[4] <= 0 && sh.ent.alive) {
+      try { sh.ent.takeDamage((sh.ent.health || 0) + 1, 'net', sh.ent.position); } catch (_) {}
+    }
     sh.ent.alive = r[4] > 0;
   }
 }
@@ -22566,6 +22582,7 @@ function _hcTrafficInit(city, group) {
       const ent = {
         isHubTraffic: true, alive: true,
         id: 'hubtraf_' + i,
+        trafIdx: i,   // (v43.02) the wire key: _HC_TRAF.ships is built identically on every peer
         trafClass: _cls,
         health: Math.round(_cls.hp * _jit), maxHealth: Math.round(_cls.hp * _jit),
         position: new THREE.Vector3(),
@@ -22583,6 +22600,15 @@ function _hcTrafficInit(city, group) {
         takeDamage(amount, attacker) {
           if (!this.alive || !this.mesh || !this.mesh.visible) return 0;
           if (attacker === this || (attacker && attacker.owner === this)) return 0;
+
+          if (attacker !== 'net' && typeof _hcTrafIsProxy === 'function' && _hcTrafIsProxy()) {
+            try {
+              if (net && net.active && net.sendEvent) {
+                net.sendEvent({ type: 'city_dmg', i: this.trafIdx | 0, d: Math.max(0, amount || 0) });
+              }
+            } catch (_) {}
+            return Math.min(Math.max(0, this.health), Math.max(0, amount || 0));   // for the hit marker + core
+          }
           this._dmgLog = this._dmgLog || [];
           if (this._dmgLog.length < 12) {
             let an = 'unknown';
@@ -22599,6 +22625,7 @@ function _hcTrafficInit(city, group) {
           this.aggro = true;
           if (this.health <= 0) {
             this.alive = false;
+            this._diedAt = (game && game.time) || 0;   // (v43.02) so the authority can broadcast the death row
             this.deaths++;
             try {
               if (typeof spawnExplosion === 'function') {
@@ -69733,10 +69760,12 @@ function initHbarPool(maxBars, maxMarkers) {
         '<svg class="cl-svg" viewBox="0 0 124 48" preserveAspectRatio="none">' +
           '<polyline points="0,46 40,8 124,8"></polyline>' +
         '</svg>' +
-        '<div class="cl-text"></div>' +
+        '<div class="cl-text"><span class="cl-nm"></span><img class="cl-av" alt="" style="display:none"></div>' +
         '<div class="cl-dist"></div>' +
       '</div>';
     div._text = div.querySelector('.cl-text');
+    div._nm   = div.querySelector('.cl-nm');
+    div._av   = div.querySelector('.cl-av');
     div._dist = div.querySelector('.cl-dist');
     container.appendChild(div);
     hbarPool.labels.push(div);
@@ -69938,7 +69967,23 @@ function updateEnemyHealthBars() {
     const _lxi = sx | 0, _lyi = sy | 0;
     if (div._lx !== _lxi) { div.style.left = _lxi + 'px'; div._lx = _lxi; }
     if (div._ly !== _lyi) { div.style.top  = _lyi + 'px'; div._ly = _lyi; }
-    if (div._text && div._lt !== visText) { div._text.textContent = visText; div._lt = visText; }
+    if (div._nm && div._lt !== visText) { div._nm.textContent = visText; div._lt = visText; }
+    if (div._av) {
+      let _avUrl = null;
+      try {
+        if (ent.peerId && typeof net !== 'undefined' && net && net.peers) {
+          const _pr = net.peers.get(ent.peerId);
+          if (_pr && _pr.discord_id && typeof _discordAvatarUrlFor === 'function') {
+            _avUrl = _discordAvatarUrlFor({ id: _pr.discord_id, avatar: _pr.discord_avatar }, 32);
+          }
+        }
+      } catch (_) {}
+      if (div._avUrl !== _avUrl) {
+        div._avUrl = _avUrl;
+        if (_avUrl) { div._av.src = _avUrl; div._av.style.display = ''; }
+        else { div._av.removeAttribute('src'); div._av.style.display = 'none'; }
+      }
+    }
     if (div._dist) {
       const _gap = Math.max(0, dist - _lblHullR(player) - _lblHullR(ent));
       const _dq = _lssRangeStr(_gap);   // (v42.96) real metres

@@ -1885,6 +1885,23 @@ body.lss-litehud #lobby *, body.lss-litehud #lobby-room-hud * {
   transform-origin: center;
 }
 
+/* (v43.03) The pilot's Discord avatar, riding after the ship name.
+   (!) It lives INSIDE .cl-text on purpose: the name is variable width, so anything positioned
+   absolutely would either overlap a long name or float away from a short one. As a child it simply
+   flows after the text, and it inherits .cl-text's counter-mirror for free on a right-edge callout -
+   which is the whole reason the name is wrapped in .cl-nm rather than written straight into .cl-text.
+   (!) No layout cost when absent: the element is display:none until a URL resolves, so every bot,
+   freighter and leviathan tag is byte-identical to v43.02. */
+.ship-name-label .cl-av {
+  width: 15px; height: 15px;
+  border-radius: 50%;
+  margin-left: 6px;
+  vertical-align: -3px;
+  border: 1px solid currentColor;
+  box-shadow: 0 0 4px currentColor;
+  background: rgba(5, 8, 18, 0.6);
+}
+
 
 @keyframes shipLabelJitter {
   0%,100% { transform: translate(0, 0); }
@@ -4760,7 +4777,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.01';
+const LSS_BUILD = '43.03';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -14175,6 +14192,21 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   // A peer's weapon hit ; only the authority applies real HP damage.
+  // (v43.02) A PEER HIT A CITY SHIP. Mirrors mon_dmg exactly, including the 'peer:<id>' attacker
+  // tag so kill credit survives (the v38.77 lesson: claims applied as a bare 'net' credited nobody).
+  // Applying it here is what makes the ship fightable at all: takeDamage sets aggro on the
+  // AUTHORITY's copy, which puts it in the city_state feed, which gives the peer a _netPos to
+  // follow - so the hull stays on screen and fights back instead of evaporating when shot.
+  if (evt.type === 'city_dmg' && typeof evt.i === 'number') {
+    try {
+      if (typeof amStasisOwner === 'function' && amStasisOwner() &&
+          typeof _HC_TRAF !== 'undefined' && _HC_TRAF.ships) {
+        const sh = _HC_TRAF.ships[evt.i | 0];
+        if (sh && sh.ent && sh.ent.alive) sh.ent.takeDamage(Math.max(0, +evt.d || 0), 'peer:' + fromPeerId, sh.ent.position);
+      }
+    } catch (_) {}
+    return;
+  }
   if (evt.type === 'mon_dmg' && typeof evt.i === 'number') {
     if (game.monsters && typeof _monAuthority === 'function' && _monAuthority()) {
       const m = game.monsters.find(x => x.monId === evt.i);
@@ -36546,7 +36578,14 @@ function _hcNetSync(dt) {
     const hot = [];
     for (let i = 0; i < _HC_TRAF.ships.length; i++) {
       const sh = _HC_TRAF.ships[i];
-      if (!sh || !sh.ent || !sh.ent.aggro || !sh.ent.alive) continue;
+      if (!sh || !sh.ent) continue;
+      // (v43.02) ...and a ship that JUST died stays in the feed for a moment. The filter used to
+      // require `alive`, so a death could never be transmitted at all - it could only be inferred
+      // from a row going missing, and the receiver does not infer. Peers got a hull that silently
+      // ceased to exist instead of one that blew up.
+      const _e = sh.ent;
+      const _justDied = !_e.alive && ((((game && game.time) || 0) - (_e._diedAt || -99)) < 1.5);
+      if (!_justDied && (!_e.aggro || !_e.alive)) continue;
       hot.push([i, Math.round(sh.ent.position.x), Math.round(sh.ent.position.y), Math.round(sh.ent.position.z),
                 Math.round(sh.ent.health)]);
     }
@@ -36568,6 +36607,12 @@ function _hcApplyNetState(rows) {
     sh.ent._netPos.set(r[1], r[2], r[3]);
     sh.ent.health = r[4];
     sh.ent.aggro = true;
+    // (v43.02) ALIVE -> DEAD is an EVENT on this side, not just a flag. Replay the authority's
+    // kill through the real death path ('net' is exempt from the peer claim above) so the peer sees
+    // the same three explosions and hears the same bang, instead of a hull that quietly stops being.
+    if (r[4] <= 0 && sh.ent.alive) {
+      try { sh.ent.takeDamage((sh.ent.health || 0) + 1, 'net', sh.ent.position); } catch (_) {}
+    }
     sh.ent.alive = r[4] > 0;
   }
 }
@@ -36716,6 +36761,7 @@ function _hcTrafficInit(city, group) {
         // Unique id: tracker locks key on bot.id — without one, every
         // freighter shared the "undefined" key and locking one locked all.
         id: 'hubtraf_' + i,
+        trafIdx: i,   // (v43.02) the wire key: _HC_TRAF.ships is built identically on every peer
         // (v35.65) Per-class, per-ship stats. `trafClass` is read by the aggro
         // flight + gunnery code below and by the ram/death handlers.
         trafClass: _cls,
@@ -36746,6 +36792,29 @@ function _hcTrafficInit(city, group) {
           // the 150u chassis, so its own bolts (and their splash) can clip
           // its mesh right at the muzzle.
           if (attacker === this || (attacker && attacker.owner === this)) return 0;
+
+          // (v43.02) ON A PEER, DAMAGE BELONGS TO THE AUTHORITY.
+          // Owner: "you can't actually fight city ships in multiplayer". Traffic damage was never
+          // replicated in either direction - no city_dmg event existed, and bot_dmg requires
+          // `instanceof Bot`, which this object literal is not. So a peer's hit landed only on its
+          // own copy: the host went on flying an undamaged freighter, and worse, the local
+          // `aggro = true` below pushed this ship into _hcTrafficUpdate's proxy branch, which with
+          // no broadcast to follow HIDES it. That is the whole of "the ship is gone" (v43.00 stopped
+          // it leaving a tag and smoke behind; this stops it vanishing at all).
+          // Claim it instead and let the authority's next city_state row come back as truth.
+          // (!) Deliberately mutates NOTHING locally - not health, and above all NOT aggro. Setting
+          //     aggro here is precisely what hid the hull, and _hcApplyNetState sets it for us the
+          //     moment the authority answers.
+          // (!) attacker === 'net' is exempt: that is _hcApplyNetState replaying the authority's
+          //     death locally so the explosion still plays on this screen.
+          if (attacker !== 'net' && typeof _hcTrafIsProxy === 'function' && _hcTrafIsProxy()) {
+            try {
+              if (net && net.active && net.sendEvent) {
+                net.sendEvent({ type: 'city_dmg', i: this.trafIdx | 0, d: Math.max(0, amount || 0) });
+              }
+            } catch (_) {}
+            return Math.min(Math.max(0, this.health), Math.max(0, amount || 0));   // for the hit marker + core
+          }
           // Damage forensics (window.__mp3-style debugging): who hit us, how
           // hard, from where in the code. Read via entity._dmgLog.
           this._dmgLog = this._dmgLog || [];
@@ -36765,6 +36834,7 @@ function _hcTrafficInit(city, group) {
           this.aggro = true;
           if (this.health <= 0) {
             this.alive = false;
+            this._diedAt = (game && game.time) || 0;   // (v43.02) so the authority can broadcast the death row
             this.deaths++;
             // (v35.65) THIS is why freighters never appeared to explode: the
             // size argument was 2.0. spawnExplosion defaults to 20 and every
@@ -101604,10 +101674,12 @@ function initHbarPool(maxBars, maxMarkers) {
         '<svg class="cl-svg" viewBox="0 0 124 48" preserveAspectRatio="none">' +
           '<polyline points="0,46 40,8 124,8"></polyline>' +
         '</svg>' +
-        '<div class="cl-text"></div>' +
+        '<div class="cl-text"><span class="cl-nm"></span><img class="cl-av" alt="" style="display:none"></div>' +
         '<div class="cl-dist"></div>' +
       '</div>';
     div._text = div.querySelector('.cl-text');
+    div._nm   = div.querySelector('.cl-nm');
+    div._av   = div.querySelector('.cl-av');
     div._dist = div.querySelector('.cl-dist');
     container.appendChild(div);
     hbarPool.labels.push(div);
@@ -101947,7 +102019,29 @@ function updateEnemyHealthBars() {
     const _lxi = sx | 0, _lyi = sy | 0;
     if (div._lx !== _lxi) { div.style.left = _lxi + 'px'; div._lx = _lxi; }
     if (div._ly !== _lyi) { div.style.top  = _lyi + 'px'; div._ly = _lyi; }
-    if (div._text && div._lt !== visText) { div._text.textContent = visText; div._lt = visText; }
+    // (v43.03) the NAME goes to .cl-nm now, not to .cl-text - writing textContent on .cl-text would
+    // wipe the avatar out of the DOM on the first frame.
+    if (div._nm && div._lt !== visText) { div._nm.textContent = visText; div._lt = visText; }
+    // (v43.03) ...and the pilot's face after it. Peers only: the Discord identity arrives on the
+    // net.peers record with the loadout payload, and NetworkPlayer carries the peerId to find it by.
+    // Dirty-checked on the URL because assigning .src re-requests the image - at 120 fps that would
+    // be a request per frame per tag.
+    if (div._av) {
+      let _avUrl = null;
+      try {
+        if (ent.peerId && typeof net !== 'undefined' && net && net.peers) {
+          const _pr = net.peers.get(ent.peerId);
+          if (_pr && _pr.discord_id && typeof _discordAvatarUrlFor === 'function') {
+            _avUrl = _discordAvatarUrlFor({ id: _pr.discord_id, avatar: _pr.discord_avatar }, 32);
+          }
+        }
+      } catch (_) {}
+      if (div._avUrl !== _avUrl) {
+        div._avUrl = _avUrl;
+        if (_avUrl) { div._av.src = _avUrl; div._av.style.display = ''; }
+        else { div._av.removeAttribute('src'); div._av.style.display = 'none'; }
+      }
+    }
     // (v42.94) RANGE. `dist` is already computed above for the range and LOS gates, so the
     // number itself is free; the only cost that matters is how often the STRING changes, because
     // each change is a DOM write the v32.87 note above measured as a real main-thread cost.
