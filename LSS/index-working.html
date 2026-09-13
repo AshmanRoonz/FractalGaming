@@ -4851,7 +4851,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.27';
+const LSS_BUILD = '43.28';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -8018,6 +8018,10 @@ async function joinRoom() {
       // they can tell whether they are the joiner or we are. Targeted: a third peer arriving must not
       // restart the argument between the two who already agree.
       try { if (typeof _lssModeAnnounceBurst === 'function') _lssModeAnnounceBurst(peerId); } catch (_) {}
+      // (v43.28) ...and RE-DECIDE now that this peer is really in net.peers. A mode_set can land
+      // before onPeerJoin registers its sender, and a decider elected from an empty peer list is
+      // just us - which is how both clients ended up decreeing at each other.
+      try { if (typeof _lssModeDecide === 'function') _lssModeDecide(); } catch (_) {}
       if (net.sendEvent) {
         try {
           const _hdu = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
@@ -90564,18 +90568,28 @@ function _lssModeDecide() {
     }
     }
     if (!bestMode) return;
-    if (net._decreedMode === bestMode) return;                  // already said so
+    // (v43.28) the room agrees on a MAP too. Only send one when it actually belongs to the mode we
+    // are decreeing - if a peer outranked us we are about to change mode ourselves, and our current
+    // map is still the old mode's. The re-run at the foot of _lssApplyModeDecree sends the right one.
+    let _map;
+    try { if (LSS.MODE === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
+    let _seed;
+    try { if (net.worldSeed != null) _seed = net.worldSeed >>> 0; } catch (_) {}
+    const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed);
+    if (net._decreedKey === _key) return;                    // nothing moved
+    if (net._deciding) return;                               // re-entry guard for the re-run below
+    net._deciding = true;
+    net._decreedKey = _key;
     net._decreedMode = bestMode;
     net.roomMode = bestMode;
     const decree = {
       type: 'mode_decree', mode: bestMode,
       by: String(net.myPeerId), ago: bestAgo,
-      map: (typeof game !== 'undefined' && game) ? game.selectedMap : undefined,
-      seed: (net.worldSeed != null) ? (net.worldSeed >>> 0) : undefined,
+      map: _map, seed: _seed,
     };
-    _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode);
+    _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode + (_map ? ' / ' + _map : ''));
     try { net.sendEvent(decree); } catch (_) {}
-    _lssApplyModeDecree(decree, true);
+    try { _lssApplyModeDecree(decree, true); } finally { net._deciding = false; }
   } catch (_) {}
 }
 // Applied by EVERYONE, decider included. Idempotent.
@@ -90596,31 +90610,71 @@ function _lssRefreshModeUI() {
 function _lssApplyModeDecree(evt, mine) {
   try {
     if (!evt || !evt.mode || typeof LSS === 'undefined') return;
+    // (v43.28) ⚠⚠ ONLY THE DECIDER'S DECREE COUNTS. Owner: "they only sync'd when i started to change
+    // the MODE on one of them" - i.e. the JOIN-TIME convergence never fired at all; only the picker
+    // (mode_pick) worked.
+    // The race: _lssModeDecider() is the lowest id of [me, ...net.peers], but a mode_set can arrive
+    // BEFORE onPeerJoin has registered its sender (the file already documents that ordering hazard for
+    // `hello`). With an empty peer list BOTH clients compute themselves as the decider, so BOTH decree
+    // - and each then adopts the other's decree and they simply SWAP. Exactly the old symptom, one
+    // level up: I removed the negotiation between peers but left a negotiation between two would-be
+    // deciders.
+    // So a decree is authoritative only from whoever we currently believe the decider is. If our peer
+    // list is too stale to name one, we accept it (better a shared answer than none) - and the
+    // _lssModeDecide() now fired from onPeerJoin re-settles the room once everyone is really visible.
+    const _dec = _lssModeDecider();
+    if (!mine && evt.by && _dec && String(evt.by) !== String(_dec)) {
+      _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'IGNORED - not the decider (' + String(_dec).slice(0, 6) + ')');
+      return;
+    }
     net.roomMode = evt.mode;
     if (!mine) net._decreedMode = evt.mode;
-    // Inherit the winner's standing so a later arrival ranks the room correctly.
     try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
-    if (LSS.MODE === evt.mode) { _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'already on it'); return; }
+
+    // (v43.28) ⚠⚠ THE MAP IS PART OF THE ROOM, NOT A PER-CLIENT PREFERENCE. Owner: "i didn't change
+    // the map, so they were on different maps in the same mode."
+    // This used to `return` the moment the modes already agreed - before applying map or seed. So two
+    // clients that converged on a mode kept whatever map each happened to have, and nothing ever
+    // reconciled them: selectMap only broadcasts map_change when a HUMAN changes it, so the INITIAL
+    // map was never announced by anybody. (launch_at carries no map either, so the divergence
+    // survived all the way into the world build.)
+    const modeChanged = (LSS.MODE !== evt.mode);
     const live = (typeof game !== 'undefined' && game &&
                   (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
-    _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, (live ? 'ADOPT (live -> world rebuild)' : 'ADOPT'));
-    try { _lssClearModeSetup(); } catch (_) {}
-    try { _applyModeClientSetup(evt.mode); } catch (_) {}
-    LSS.MODE = evt.mode;
     if (evt.seed != null) { try { net.worldSeed = evt.seed >>> 0; } catch (_) {} }
+    if (modeChanged) {
+      try { _lssClearModeSetup(); } catch (_) {}
+      try { _applyModeClientSetup(evt.mode); } catch (_) {}
+      LSS.MODE = evt.mode;
+    }
+    let mapChanged = false;
+    try {
+      if (evt.map && game && game.selectedMap !== evt.map) { game.selectedMap = evt.map; mapChanged = true; }
+    } catch (_) {}
+    if (!modeChanged && !mapChanged) {
+      _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'already on it');
+      return;
+    }
+    _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by,
+                (live ? 'ADOPT live' : 'ADOPT') + (modeChanged ? ' mode' : '') + (mapChanged ? ' map=' + evt.map : ''));
     if (live) {
-      // A running match cannot be re-moded in place - go back through the drop-in machinery, which
-      // is the one path that rebuilds the world from a map+seed and returns us to ship select.
+      // A running match cannot be re-moded in place - the drop-in machinery is the one path that
+      // rebuilds a world from map+seed and hands us back to ship select.
       try { if (typeof applyWorldSync === 'function' && evt.map) applyWorldSync(evt.map, (evt.seed != null ? evt.seed : net.worldSeed) >>> 0); } catch (_) {}
       try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
     } else {
-      if (evt.map) { try { game.selectedMap = evt.map; } catch (_) {} }
+      // (!) buildMapSelector re-snaps game.selectedMap when it is not legal for the mode, so it must
+      //     run AFTER the map is written, not before.
       try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
     }
     _lssRefreshModeUI();
     try { _lssSayRoomMode(evt.mode); } catch (_) {}
+    // The decider's own map may have just been re-snapped by the mode change; re-run so the room is
+    // told the map that actually goes with the mode. The key dedupe below stops this recursing.
+    if (mine) { try { _lssModeDecide(); } catch (_) {} }
   } catch (_) {}
 }
+
 
 function _lssPeerOutranksMe(evt, fromPeerId) {
   try {
