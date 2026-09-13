@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.27';
+const LSS_BUILD = '43.28';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2283,6 +2283,7 @@ async function joinRoom() {
       }
 
       try { if (typeof _lssModeAnnounceBurst === 'function') _lssModeAnnounceBurst(peerId); } catch (_) {}
+      try { if (typeof _lssModeDecide === 'function') _lssModeDecide(); } catch (_) {}
       if (net.sendEvent) {
         try {
           const _hdu = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
@@ -60393,18 +60394,25 @@ function _lssModeDecide() {
     }
     }
     if (!bestMode) return;
-    if (net._decreedMode === bestMode) return;                  // already said so
+    let _map;
+    try { if (LSS.MODE === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
+    let _seed;
+    try { if (net.worldSeed != null) _seed = net.worldSeed >>> 0; } catch (_) {}
+    const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed);
+    if (net._decreedKey === _key) return;                    // nothing moved
+    if (net._deciding) return;                               // re-entry guard for the re-run below
+    net._deciding = true;
+    net._decreedKey = _key;
     net._decreedMode = bestMode;
     net.roomMode = bestMode;
     const decree = {
       type: 'mode_decree', mode: bestMode,
       by: String(net.myPeerId), ago: bestAgo,
-      map: (typeof game !== 'undefined' && game) ? game.selectedMap : undefined,
-      seed: (net.worldSeed != null) ? (net.worldSeed >>> 0) : undefined,
+      map: _map, seed: _seed,
     };
-    _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode);
+    _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode + (_map ? ' / ' + _map : ''));
     try { net.sendEvent(decree); } catch (_) {}
-    _lssApplyModeDecree(decree, true);
+    try { _lssApplyModeDecree(decree, true); } finally { net._deciding = false; }
   } catch (_) {}
 }
 function _lssRefreshModeUI() {
@@ -60416,28 +60424,46 @@ function _lssRefreshModeUI() {
 function _lssApplyModeDecree(evt, mine) {
   try {
     if (!evt || !evt.mode || typeof LSS === 'undefined') return;
+    const _dec = _lssModeDecider();
+    if (!mine && evt.by && _dec && String(evt.by) !== String(_dec)) {
+      _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'IGNORED - not the decider (' + String(_dec).slice(0, 6) + ')');
+      return;
+    }
     net.roomMode = evt.mode;
     if (!mine) net._decreedMode = evt.mode;
     try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
-    if (LSS.MODE === evt.mode) { _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'already on it'); return; }
+
+    const modeChanged = (LSS.MODE !== evt.mode);
     const live = (typeof game !== 'undefined' && game &&
                   (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
-    _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, (live ? 'ADOPT (live -> world rebuild)' : 'ADOPT'));
-    try { _lssClearModeSetup(); } catch (_) {}
-    try { _applyModeClientSetup(evt.mode); } catch (_) {}
-    LSS.MODE = evt.mode;
     if (evt.seed != null) { try { net.worldSeed = evt.seed >>> 0; } catch (_) {} }
+    if (modeChanged) {
+      try { _lssClearModeSetup(); } catch (_) {}
+      try { _applyModeClientSetup(evt.mode); } catch (_) {}
+      LSS.MODE = evt.mode;
+    }
+    let mapChanged = false;
+    try {
+      if (evt.map && game && game.selectedMap !== evt.map) { game.selectedMap = evt.map; mapChanged = true; }
+    } catch (_) {}
+    if (!modeChanged && !mapChanged) {
+      _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'already on it');
+      return;
+    }
+    _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by,
+                (live ? 'ADOPT live' : 'ADOPT') + (modeChanged ? ' mode' : '') + (mapChanged ? ' map=' + evt.map : ''));
     if (live) {
       try { if (typeof applyWorldSync === 'function' && evt.map) applyWorldSync(evt.map, (evt.seed != null ? evt.seed : net.worldSeed) >>> 0); } catch (_) {}
       try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
     } else {
-      if (evt.map) { try { game.selectedMap = evt.map; } catch (_) {} }
       try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
     }
     _lssRefreshModeUI();
     try { _lssSayRoomMode(evt.mode); } catch (_) {}
+    if (mine) { try { _lssModeDecide(); } catch (_) {} }
   } catch (_) {}
 }
+
 
 function _lssPeerOutranksMe(evt, fromPeerId) {
   try {
