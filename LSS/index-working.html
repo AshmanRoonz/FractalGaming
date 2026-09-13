@@ -4777,7 +4777,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.08';
+const LSS_BUILD = '43.10';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -59292,16 +59292,6 @@ class OutskirtsMonster {
 
   takeDamage(dmg, attacker, hitPoint) {
     if (!this.alive) return 0;
-    // (v43.05) ON A PEER, DAMAGE BELONGS TO THE AUTHORITY - same contract as the city ships.
-    // Mutating health here would be overwritten by the next packet anyway, and setting aggro locally
-    // would make this client's copy chase something the authority knows nothing about.
-    // 'net' is exempt so _wildApplyState can replay the authority's kill through die().
-    if (attacker !== 'net' && this.isProxy) {
-      try {
-        if (net && net.active && net.sendEvent) net.sendEvent({ type: 'wild_dmg', i: this.wildId, d: Math.max(0, dmg || 0) });
-      } catch (_) {}
-      return Math.min(Math.max(0, this.health), Math.max(0, dmg || 0));
-    }
     // ⚠ (v36.67) THE AEGIS RIDER REACHES LEVIATHANS NOW. `_aegisDmgOut` had
     // exactly ONE call site — Bot.takeDamage — so every ship's aegis damage
     // perk silently did nothing against monsters, the campaign boss and
@@ -60697,6 +60687,27 @@ class WildLeviathan {
   // answers together - a pack that watched one of its own get shot does not keep grazing.
   takeDamage(dmg, attacker, hitPoint) {
     if (!this.alive) return 0;
+    // (v43.09) ON A PEER, DAMAGE BELONGS TO THE AUTHORITY.
+    // ⚠⚠ THIS BLOCK WAS IN THE WRONG CLASS. v43.05 anchored on the first `takeDamage(dmg, attacker,
+    // hitPoint)` in the file, which is OutskirtsMonster's - a class that has no isProxy and no
+    // wildId, so the guard was permanently false and did nothing, while WildLeviathan (the class it
+    // was written for) had no guard at all. One paste in the wrong place produced BOTH reported
+    // symptoms from a single cause:
+    //   peer shoots -> no wild_dmg claim ever leaves the peer -> the authority never learns it was
+    //   hit -> never aggro -> this._foe stays null -> _vic is null -> the whole strike block is
+    //   skipped -> _wildDrawStrike never runs on the authority AND no wild_zap is emitted, so no
+    //   other client draws either.
+    // Hence "they only go aggro against one of the players" AND "we both couldn't see the attack
+    // lightning" - the bolt was never broken, it was never reached.
+    // It also stopped a second, quieter bug: without the return, a peer's shots mutated the proxy's
+    // health and could KILL it locally - a phantom kill, phantom Aegis XP, and an animal that
+    // vanished and popped back on the next 4 Hz packet while the host still had it at full health.
+    if (attacker !== 'net' && this.isProxy) {
+      try {
+        if (net && net.active && net.sendEvent) net.sendEvent({ type: 'wild_dmg', i: this.wildId, d: Math.max(0, dmg || 0) });
+      } catch (_) {}
+      return Math.min(Math.max(0, this.health), Math.max(0, dmg || 0));   // hit marker + core only
+    }
     if (attacker === player && typeof _aegisDmgOut === 'function') {
       try { dmg = _aegisDmgOut(dmg, this); } catch (_) {}
     }
@@ -60958,7 +60969,19 @@ function _wildFrame(dt) {
   if (!_wAuth) {
     for (let q = _WILD._list.length - 1; q >= 0; q--) {
       const m = _WILD._list[q];
-      if (!m || !m.alive) {
+      // (v43.09) ⚠⚠ DROP ANYTHING THIS CLIENT SPAWNED ITSELF. amStasisOwner() elects the lowest peer
+      // id, but until the peer list is populated `allIds` is just [myPeerId] - so for the first
+      // moments of a room EVERY client is the authority and every client rolls its own families.
+      // v43.05 then kept them: the non-authority branch ticked them as proxies with no _netPos, so
+      // they stood frozen forever while the real authority's creatures arrived ON TOP with different
+      // wildIds. Measured across two clients: 14 animals on the host, a different 23 on the peer.
+      // The damage it does is worse than the duplicates. A peer shooting one of these ghosts hits a
+      // creature with isProxy false, so takeDamage sends NO claim (the claim is gated on isProxy)
+      // and update() never runs on a non-authority - so it cannot answer, cannot chase, cannot
+      // strike. That is exactly the owner's "they only go aggro against one of the players... they
+      // ignored my laptop": half the animals on his laptop were phantoms of its own making.
+      // Only what _wildApplyState built (isProxy true) is real here.
+      if (!m || !m.alive || !m.isProxy) {
         if (m) { try { m.destroy(); } catch (_) {} }
         _WILD._list.splice(q, 1);
         if (game.monsters) { const ix = game.monsters.indexOf(m); if (ix >= 0) game.monsters.splice(ix, 1); }
@@ -60967,6 +60990,12 @@ function _wildFrame(dt) {
       try { m.tickProxy(dt); } catch (_) {}
     }
     return;
+  }
+  // (v43.09) ...and the mirror case: this client has just BECOME the authority (the host left).
+  // Adopt the proxies it was following rather than dropping them - they are the only record of where
+  // the families were, and re-rolling would teleport every animal in the world.
+  for (const m of _WILD._list) {
+    if (m && m.isProxy) { m.isProxy = false; m._netPos = null; m._netHeading = null; }
   }
 
   // (v42.99) THE BUDGET IS A LIVE POPULATION, NOT A TALLY.

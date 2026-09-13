@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.08';
+const LSS_BUILD = '43.10';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -39181,12 +39181,6 @@ class OutskirtsMonster {
 
   takeDamage(dmg, attacker, hitPoint) {
     if (!this.alive) return 0;
-    if (attacker !== 'net' && this.isProxy) {
-      try {
-        if (net && net.active && net.sendEvent) net.sendEvent({ type: 'wild_dmg', i: this.wildId, d: Math.max(0, dmg || 0) });
-      } catch (_) {}
-      return Math.min(Math.max(0, this.health), Math.max(0, dmg || 0));
-    }
     if (attacker === player && typeof _aegisDmgOut === 'function') {
       try { dmg = _aegisDmgOut(dmg, this); } catch (_) {}
     }
@@ -40244,6 +40238,12 @@ class WildLeviathan {
 
   takeDamage(dmg, attacker, hitPoint) {
     if (!this.alive) return 0;
+    if (attacker !== 'net' && this.isProxy) {
+      try {
+        if (net && net.active && net.sendEvent) net.sendEvent({ type: 'wild_dmg', i: this.wildId, d: Math.max(0, dmg || 0) });
+      } catch (_) {}
+      return Math.min(Math.max(0, this.health), Math.max(0, dmg || 0));   // hit marker + core only
+    }
     if (attacker === player && typeof _aegisDmgOut === 'function') {
       try { dmg = _aegisDmgOut(dmg, this); } catch (_) {}
     }
@@ -40451,7 +40451,7 @@ function _wildFrame(dt) {
   if (!_wAuth) {
     for (let q = _WILD._list.length - 1; q >= 0; q--) {
       const m = _WILD._list[q];
-      if (!m || !m.alive) {
+      if (!m || !m.alive || !m.isProxy) {
         if (m) { try { m.destroy(); } catch (_) {} }
         _WILD._list.splice(q, 1);
         if (game.monsters) { const ix = game.monsters.indexOf(m); if (ix >= 0) game.monsters.splice(ix, 1); }
@@ -40460,6 +40460,9 @@ function _wildFrame(dt) {
       try { m.tickProxy(dt); } catch (_) {}
     }
     return;
+  }
+  for (const m of _WILD._list) {
+    if (m && m.isProxy) { m.isProxy = false; m._netPos = null; m._netHeading = null; }
   }
 
   const _liveP = new Set();
