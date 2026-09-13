@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.91';
+const LSS_BUILD = '42.92';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13604,7 +13604,7 @@ function _getBloomRTSize() {
   let dpr = Math.min(window.devicePixelRatio, cap);
   const _bw = Math.floor(window.innerWidth * dpr), _bh = Math.floor(window.innerHeight * dpr);
   try {
-    const _super = _lssTierSuper();
+    const _super = Math.max(_lssTierSuper(), _lssPaniniSuper(true));   // (v42.92) true = size for the FOV SETTING, not the live zoom
     if (_super > dpr) {
       dpr = _super;
       const _px = window.innerWidth * window.innerHeight * dpr * dpr;
@@ -13615,6 +13615,34 @@ function _getBloomRTSize() {
   return { w: Math.floor(window.innerWidth * dpr), h: Math.floor(window.innerHeight * dpr),
            bw: Math.floor(_bw / 2), bh: Math.floor(_bh / 2), base: Math.min(window.devicePixelRatio, cap) };
 }
+const _LSSPAN = { d: 0, xmax: 1, ymax: 1, U: 1, V: 1, pref: 0, _d: -1, _fov: -1, _asp: -1 };
+try {
+  const _pp = (typeof localStorage !== 'undefined') ? localStorage.getItem('lss_panini') : null;
+  if (_pp != null && isFinite(+_pp)) _LSSPAN.pref = Math.max(0, Math.min(1, +_pp));
+} catch (_) {}
+function _lssPaniniD() {
+  let d = (typeof window !== 'undefined' && window.__panini != null) ? +window.__panini : _LSSPAN.pref;
+  if (!(d > 0)) return 0;
+  return Math.min(1, d);
+}
+function _lssPaniniSuper(forAlloc) {
+  try {
+    const d = _lssPaniniD();
+    if (!d) return 0;
+    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return 0;   // phones cannot pay this
+    if (renderer && renderer.xr && renderer.xr.isPresenting) return 0;
+    const cap = (typeof QUALITY !== 'undefined' && typeof QUALITY.bloomDPR === 'function') ? QUALITY.bloomDPR() : 1.0;
+    const base = Math.min(window.devicePixelRatio, cap);
+    const asp = (camera && camera.aspect) || (window.innerWidth / window.innerHeight) || 1.6;
+    const fov = forAlloc ? (((typeof input !== "undefined" && input && input.fovDeg) || (camera && camera.fov) || 90))
+                         : ((camera && camera.fov) || 90);
+    const srcH = Math.atan(Math.tan(fov * Math.PI / 360) * asp);
+    const xmax = (d + 1) * Math.sin(srcH) / (d + Math.cos(srcH));
+    const zoom = Math.min(2.2, Math.tan(srcH) / xmax);   // capped; the 16 MP cap below also applies
+    return base * zoom;
+  } catch (_) { return 0; }
+}
+
 function _lssTierSuper() {
   try {
     if (typeof QUALITY === 'undefined' || !QUALITY) return 0;
@@ -13637,6 +13665,13 @@ function _lssSceneActive(rt) {
       const s = (_sc >= 0) ? base + (Math.max(base, _super) - base) * _sc : base * (1 + 0.5 * _sc);
       w = Math.min(W, Math.max(1, Math.floor(window.innerWidth * s)));
       h = Math.min(H, Math.max(1, Math.floor(window.innerHeight * s)));
+    }
+  } catch (_) {}
+  try {
+    const _pn = _lssPaniniSuper();
+    if (_pn > 0) {
+      w = Math.min(W, Math.max(w, Math.floor(window.innerWidth * _pn)));
+      h = Math.min(H, Math.max(h, Math.floor(window.innerHeight * _pn)));
     }
   } catch (_) {}
   _sceneActive.w = w; _sceneActive.h = h; _sceneActive.sx = w / W; _sceneActive.sy = h / H;
@@ -14199,11 +14234,6 @@ function _waterRefractBind(rnd, scn, cam) {
     I.frames++; I.res = [bw, bh]; I.target = [rt.width, rt.height]; I.live = [A.w, A.h]; I.k = u.uRefractK.value; I.inline = true;
   } catch (_) { u.uRefract.value = 0.0; }
 }
-const _LSSPAN = { d: 0, xmax: 1, ymax: 1, U: 1, V: 1, pref: 0, _d: -1, _fov: -1, _asp: -1 };
-try {
-  const _pp = (typeof localStorage !== 'undefined') ? localStorage.getItem('lss_panini') : null;
-  if (_pp != null && isFinite(+_pp)) _LSSPAN.pref = Math.max(0, Math.min(1, +_pp));
-} catch (_) {}
 
 function _lssPaniniSync() {
   try {
@@ -14245,6 +14275,7 @@ if (typeof window !== 'undefined') {
   window.__paniniSet = function (d) {
     d = Math.max(0, Math.min(1, +d || 0));
     window.__panini = d; _LSSPAN.pref = d; _LSSPAN._d = -1;
+    try { if (typeof _doPostFXResize === 'function') _doPostFXResize(); } catch (_) {}
     try { localStorage.setItem('lss_panini', String(d)); } catch (_) {}
     return window.__paniniInfo();
   };
@@ -14257,7 +14288,11 @@ if (typeof window !== 'undefined') {
     return { strength: P.d, fovSetting: camera.fov,
              presented: oh.toFixed(0) + 'h / ' + ov.toFixed(0) + 'v deg',
              edgeMagnification: ((P.d > 0) ? dP(srcH) / dP(0) : 1 / Math.pow(Math.cos(srcH), 2)).toFixed(2) + 'x',
-             centreZoom: (Math.tan(srcH) / P.xmax).toFixed(2) + 'x' };
+             centreZoom: (Math.tan(srcH) / P.xmax).toFixed(2) + 'x',
+             superNeed: _lssPaniniSuper().toFixed(2),
+             sceneTarget: (function () { try { const A = _lssSceneActive(postFX.rtScene);
+               return A.w + 'x' + A.h + ' of ' + postFX.rtScene.width + 'x' + postFX.rtScene.height; }
+               catch (_) { return null; } })() };
   };
 }
 
