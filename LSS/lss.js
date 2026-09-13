@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.63';
+const LSS_BUILD = '43.68';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -60738,6 +60738,30 @@ try {
   else setTimeout(_ssInfoUnstick, 0);
 } catch (_) {}
 let _ssSpreadBusy = false;
+function _ssPerkArrows() {
+  try {
+    const grid = document.getElementById('perks-grid');
+    const prev = document.getElementById('perk-prev');
+    const next = document.getElementById('perk-next');
+    if (!grid || !prev || !next) return;
+    if (!grid._ssBound) {
+      grid._ssBound = true;
+      const step = () => Math.max(80, Math.round(grid.clientWidth * 0.75));
+      prev.addEventListener('click', () => { grid.scrollLeft -= step(); setTimeout(_ssPerkArrows, 260); });
+      next.addEventListener('click', () => { grid.scrollLeft += step(); setTimeout(_ssPerkArrows, 260); });
+      grid.addEventListener('scroll', () => {
+        prev.disabled = grid.scrollLeft <= 1;
+        next.disabled = grid.scrollLeft >= grid.scrollWidth - grid.clientWidth - 1;
+      });
+    }
+    const overflows = grid.scrollWidth > grid.clientWidth + 2;
+    prev.classList.toggle('on', overflows);
+    next.classList.toggle('on', overflows);
+    prev.disabled = grid.scrollLeft <= 1;
+    next.disabled = grid.scrollLeft >= grid.scrollWidth - grid.clientWidth - 1;
+  } catch (_) {}
+}
+
 function _ssSpreadRails() {
   if (_ssSpreadBusy) return;
   _ssSpreadBusy = true;
@@ -60753,7 +60777,7 @@ function _ssSpreadRails() {
     const dock  = document.getElementById('ss-header-right');
     const diff  = document.getElementById('ship-preview-difficulty');
     const desc  = document.getElementById('perks-desc');
-    const vw = window.innerWidth;
+    const vw = window.innerWidth, vh = window.innerHeight;
     const EDGE = 12, GAP = 16, MID = 28;
 
     if (col) {
@@ -60772,25 +60796,72 @@ function _ssSpreadRails() {
     if (vis(dock)) rightObs.push(dock.getBoundingClientRect().left);
     const rightEdge = rightObs.length ? Math.min.apply(null, rightObs) - 12 : vw - EDGE;
 
-    let pw = 232, iw = 272;
-    const band = rightEdge - leftEdge;
-    if (pw + iw + MID > band) {
-      const k = Math.max(0, band - MID) / (pw + iw);
-      pw = Math.max(120, Math.floor(pw * k));
-      iw = Math.max(140, Math.floor(iw * k));
-    }
-    if (perks) {
-      perks.style.setProperty('left', Math.round(leftEdge) + 'px', 'important');
-      perks.style.setProperty('width', pw + 'px', 'important');
-    }
+    const band = Math.max(120, rightEdge - leftEdge);
+
     if (info) {
+      const hero = document.getElementById('ship-hero-name') || document.getElementById('ship-hero');
+      let top = 100;
+      if (hero && vis(hero)) top = Math.round(hero.getBoundingClientRect().bottom) + 14;
+      info.style.setProperty('left', Math.round(leftEdge) + 'px', 'important');
       info.style.setProperty('right', Math.round(vw - rightEdge) + 'px', 'important');
-      info.style.setProperty('width', iw + 'px', 'important');
+      info.style.setProperty('width', 'auto', 'important');
+      info.style.setProperty('top', top + 'px', 'important');
+      info.style.setProperty('bottom', 'auto', 'important');
+      const stats = document.getElementById('ship-preview-stats');
+      const SGAP = 24;
+      let sw = 210;
+      if (band < sw + 160 + SGAP) sw = Math.max(140, Math.round(band * 0.45));
+      if (stats) stats.style.setProperty('width', sw + 'px', 'important');
+      const proseW = Math.max(120, Math.round(band - sw - SGAP));
+      ['ship-preview-weapon', 'ship-preview-abilities', 'ship-preview-core', 'btn-aegis-select']
+        .forEach(id => {
+          const e = document.getElementById(id);
+          if (!e) return;
+          e.style.setProperty('max-width', proseW + 'px', 'important');
+          e.style.removeProperty('width');
+        });
+      let trunk = document.getElementById('ss-spec-left-trunk');
+      if (!trunk) {
+        trunk = document.createElement('div');
+        trunk.id = 'ss-spec-left-trunk';
+        info.appendChild(trunk);
+      }
+      const last = document.getElementById('btn-aegis-select');
+      const proseBottom = (last && vis(last))
+        ? last.getBoundingClientRect().bottom - info.getBoundingClientRect().top
+        : 0;
+      trunk.style.height = Math.max(0, Math.round(proseBottom) - 9 + 8) + 'px';
+      trunk.style.left = '0px';   // (v43.67) the trunk lives at the column's left edge again
+    }
+
+    if (perks) {
+      const rails = document.getElementById('ss-rails');
+      perks.style.setProperty('left', Math.round(leftEdge) + 'px', 'important');
+      perks.style.setProperty('width', Math.round(band) + 'px', 'important');
+      perks.style.setProperty('top', 'auto', 'important');
+      let gapUp = 92;
+      if (rails && vis(rails)) gapUp = Math.round(vh - rails.getBoundingClientRect().top) + 10;
+      perks.style.setProperty('bottom', gapUp + 'px', 'important');
+      try { _ssPerkArrows(); } catch (_) {}
     }
 
     if (desc && vis(desc)) {
-      const avail = (rightEdge - iw) - (leftEdge + 26) - 8;   // 14 rail padding + 12 blurb margin
-      const w = Math.min(320, Math.round(avail));
+      const avail = Math.max(120, rightEdge - leftEdge);   // (v43.64) the blurb spans the whole rail
+      const w = Math.round(avail);   // (v43.64) no 320 cap - the rail is as wide as the band
+      try {
+        const cs = getComputedStyle(desc);
+        const probe = document.createElement('div');
+        probe.style.cssText = 'position:absolute;visibility:hidden;left:-9999px;top:0;white-space:normal;' +
+          'width:' + w + 'px;font:' + cs.font + ';line-height:' + cs.lineHeight + ';letter-spacing:' + cs.letterSpacing;
+        document.body.appendChild(probe);
+        let tallest = 0;
+        for (const k in PILOT_PERKS) {
+          probe.textContent = (PILOT_PERKS[k] && PILOT_PERKS[k].desc) || '';
+          tallest = Math.max(tallest, probe.getBoundingClientRect().height);
+        }
+        probe.remove();
+        if (tallest > 0) desc.style.setProperty('min-height', Math.ceil(tallest) + 'px', 'important');
+      } catch (_) {}
       if (w < 120) {
         desc.style.setProperty('display', 'none', 'important');
       } else {
