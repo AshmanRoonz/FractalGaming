@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.78';
+const LSS_BUILD = '43.79';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -68406,7 +68406,7 @@ const MAP_DATA = {
 
   shifting_deep: {
     name: 'The Shifting Deep',
-    thumb: 'map_thumbs/shifting_deep.gif',
+    thumb: 'map_thumbs/shifting_deep.webp',
     procedural: 'shifting_deep',
     description: 'The cavern re-renders itself every round — new halls, new tunnels, new rock. Learn fast; it will never be the same twice.',
     defaultTheme: 'Broken Simulation',
