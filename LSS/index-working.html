@@ -4777,7 +4777,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.03';
+const LSS_BUILD = '43.04';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -36055,8 +36055,27 @@ const _HC_TRAF = { ships: [], obbs: [], ready: false };
 // with a loadoutKey; never traffic, a carrier or the leviathan, whose hulls the standoff chase
 // cannot handle - inside _HC_TRAF_HUNT_R, and with none in reach it stands down to its schedule.
 const _HC_TRAF_HUNT_R = 4200;     // units a pilot-friendly hot ship looks for a hostile before standing down
+const _HC_TRAF_GRUDGE = 14;   // (v43.04) seconds a traffic ship keeps hunting whoever shot it
 const _hcTrafZeroV = new THREE.Vector3();
 function _hcTrafTarget(e) {
+  // (v43.04) THE SHIP FIGHTS WHOEVER SHOT IT. Owner: "the city ships when i attacked one, the other
+  // player was closer to it, and it attacked them, it should attack the aggressor."
+  // The line below this block returns the LOCAL player whenever teams differ - and the traffic AI
+  // only runs on the authority, so "the local player" is always the HOST. A peer could empty a
+  // magazine into a freighter and watch it chase the host instead. Proximity never came into it;
+  // the nearest-hostile scan underneath was only ever reached when no local player existed.
+  // _wildResolveFoe turns the attacker TAG into a ship ('player', 'peer:<id>', or an object), which
+  // is what makes this work across the wire: a peer's hit arrives on the authority as
+  // 'peer:<id>' (see city_dmg) and resolves to that peer's NetworkPlayer.
+  // The grudge is time-boxed so a freighter that has lost its attacker eventually goes back to
+  // defending its lane rather than flying at a ship on the far side of the map forever.
+  try {
+    const g = e._foe;
+    if (g && (game.time - (e._foeT || -99)) < _HC_TRAF_GRUDGE && _hcTrafTargetUp(g) && g.position &&
+        g.position.distanceToSquared(e.position) < _HC_TRAF_HUNT_R * _HC_TRAF_HUNT_R * 4) {
+      return g;
+    }
+  } catch (_) {}
   const _p = (typeof player !== 'undefined' && player && player.position) ? player : null;
   if (_p && _p.team !== e.team) return _p;
   const E = (typeof game !== 'undefined' && game && game.entities) ? game.entities : null;
@@ -36832,6 +36851,12 @@ function _hcTrafficInit(city, group) {
           const _applied = Math.min(Math.max(0, this.health), Math.max(0, amount || 0));
           this.health -= Math.max(0, amount || 0);
           this.aggro = true;
+          // (v43.04) ...and REMEMBER WHO. Without this the ship had no idea who hit it and
+          // _hcTrafTarget fell straight through to "the local player", i.e. the host.
+          try {
+            const _g = (typeof _wildResolveFoe === 'function') ? _wildResolveFoe(attacker) : null;
+            if (_g) { this._foe = _g; this._foeT = (game && game.time) || 0; }
+          } catch (_) {}
           if (this.health <= 0) {
             this.alive = false;
             this._diedAt = (game && game.time) || 0;   // (v43.02) so the authority can broadcast the death row
@@ -36984,7 +37009,7 @@ function _hcTrafficUpdate(dt) {
       // and let the next frame's scheduled branch pick the ship up again.
       const T = _hcTrafTarget(e);
       if (!T) {
-        e.aggro = false; e._dmgLog = null; e._fireT = 1.5;
+        e.aggro = false; e._dmgLog = null; e._fireT = 1.5; e._foe = null; e._foeT = 0;   // (v43.04) let the grudge go with the aggro
         s.lastSeg = st.seg;
         continue;
       }
@@ -102031,14 +102056,24 @@ function updateEnemyHealthBars() {
       try {
         if (ent.peerId && typeof net !== 'undefined' && net && net.peers) {
           const _pr = net.peers.get(ent.peerId);
-          if (_pr && _pr.discord_id && typeof _discordAvatarUrlFor === 'function') {
+          // (v43.04) A REAL PICTURE OR NOTHING. Owner: "the one without a picture, the name tag
+          // flickers and there's no other default discord pic, should just have no pic at all."
+          // _discordAvatarUrlFor falls back to Discord's generic embed avatar when the hash is
+          // missing, so a peer with no picture got a placeholder that loads late (or 404s), and the
+          // tag jitters as the image box appears and resizes the row. Require the HASH, not just
+          // the id, and there is simply no element to lay out.
+          if (_pr && _pr.discord_id && _pr.discord_avatar && typeof _discordAvatarUrlFor === 'function') {
             _avUrl = _discordAvatarUrlFor({ id: _pr.discord_id, avatar: _pr.discord_avatar }, 32);
           }
         }
       } catch (_) {}
       if (div._avUrl !== _avUrl) {
         div._avUrl = _avUrl;
-        if (_avUrl) { div._av.src = _avUrl; div._av.style.display = ''; }
+        if (_avUrl) {
+          // a 404 or an offline CDN must not leave a broken-image box jittering the row
+          div._av.onerror = function () { this.onerror = null; this.removeAttribute('src'); this.style.display = 'none'; };
+          div._av.src = _avUrl; div._av.style.display = '';
+        }
         else { div._av.removeAttribute('src'); div._av.style.display = 'none'; }
       }
     }
@@ -102052,7 +102087,17 @@ function updateEnemyHealthBars() {
       // the GAP, not the centre separation - `dist` itself is left alone because the range and
       // LOS gates above are built on it.
       const _gap = Math.max(0, dist - _lblHullR(player) - _lblHullR(ent));
-      const _dq = _lssRangeStr(_gap);   // (v42.96) real metres
+      // (v43.04) THE PILOT, BESIDE THE RANGE. Owner: "we could also put the player's name beside
+      // the distance readout." Peers only, and only when they have a name to show - a freighter or a
+      // leviathan keeps a bare range, because its name is already the line above.
+      let _who = '';
+      try {
+        if (ent.peerId && typeof net !== 'undefined' && net && net.peers) {
+          const _pr2 = net.peers.get(ent.peerId);
+          if (_pr2 && _pr2.discord_name) _who = String(_pr2.discord_name).slice(0, 18);
+        }
+      } catch (_) {}
+      const _dq = _lssRangeStr(_gap) + (_who ? '  ' + _who : '');
       if (div._ld !== _dq) { div._dist.textContent = _dq; div._ld = _dq; }
     }
   };

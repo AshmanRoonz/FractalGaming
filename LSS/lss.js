@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.03';
+const LSS_BUILD = '43.04';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -22118,8 +22118,16 @@ function _hcMakeMeshes(city, site) {
 
 const _HC_TRAF = { ships: [], obbs: [], ready: false };
 const _HC_TRAF_HUNT_R = 4200;     // units a pilot-friendly hot ship looks for a hostile before standing down
+const _HC_TRAF_GRUDGE = 14;   // (v43.04) seconds a traffic ship keeps hunting whoever shot it
 const _hcTrafZeroV = new THREE.Vector3();
 function _hcTrafTarget(e) {
+  try {
+    const g = e._foe;
+    if (g && (game.time - (e._foeT || -99)) < _HC_TRAF_GRUDGE && _hcTrafTargetUp(g) && g.position &&
+        g.position.distanceToSquared(e.position) < _HC_TRAF_HUNT_R * _HC_TRAF_HUNT_R * 4) {
+      return g;
+    }
+  } catch (_) {}
   const _p = (typeof player !== 'undefined' && player && player.position) ? player : null;
   if (_p && _p.team !== e.team) return _p;
   const E = (typeof game !== 'undefined' && game && game.entities) ? game.entities : null;
@@ -22623,6 +22631,10 @@ function _hcTrafficInit(city, group) {
           const _applied = Math.min(Math.max(0, this.health), Math.max(0, amount || 0));
           this.health -= Math.max(0, amount || 0);
           this.aggro = true;
+          try {
+            const _g = (typeof _wildResolveFoe === 'function') ? _wildResolveFoe(attacker) : null;
+            if (_g) { this._foe = _g; this._foeT = (game && game.time) || 0; }
+          } catch (_) {}
           if (this.health <= 0) {
             this.alive = false;
             this._diedAt = (game && game.time) || 0;   // (v43.02) so the authority can broadcast the death row
@@ -22712,7 +22724,7 @@ function _hcTrafficUpdate(dt) {
       }
       const T = _hcTrafTarget(e);
       if (!T) {
-        e.aggro = false; e._dmgLog = null; e._fireT = 1.5;
+        e.aggro = false; e._dmgLog = null; e._fireT = 1.5; e._foe = null; e._foeT = 0;   // (v43.04) let the grudge go with the aggro
         s.lastSeg = st.seg;
         continue;
       }
@@ -69973,20 +69985,30 @@ function updateEnemyHealthBars() {
       try {
         if (ent.peerId && typeof net !== 'undefined' && net && net.peers) {
           const _pr = net.peers.get(ent.peerId);
-          if (_pr && _pr.discord_id && typeof _discordAvatarUrlFor === 'function') {
+          if (_pr && _pr.discord_id && _pr.discord_avatar && typeof _discordAvatarUrlFor === 'function') {
             _avUrl = _discordAvatarUrlFor({ id: _pr.discord_id, avatar: _pr.discord_avatar }, 32);
           }
         }
       } catch (_) {}
       if (div._avUrl !== _avUrl) {
         div._avUrl = _avUrl;
-        if (_avUrl) { div._av.src = _avUrl; div._av.style.display = ''; }
+        if (_avUrl) {
+          div._av.onerror = function () { this.onerror = null; this.removeAttribute('src'); this.style.display = 'none'; };
+          div._av.src = _avUrl; div._av.style.display = '';
+        }
         else { div._av.removeAttribute('src'); div._av.style.display = 'none'; }
       }
     }
     if (div._dist) {
       const _gap = Math.max(0, dist - _lblHullR(player) - _lblHullR(ent));
-      const _dq = _lssRangeStr(_gap);   // (v42.96) real metres
+      let _who = '';
+      try {
+        if (ent.peerId && typeof net !== 'undefined' && net && net.peers) {
+          const _pr2 = net.peers.get(ent.peerId);
+          if (_pr2 && _pr2.discord_name) _who = String(_pr2.discord_name).slice(0, 18);
+        }
+      } catch (_) {}
+      const _dq = _lssRangeStr(_gap) + (_who ? '  ' + _who : '');
       if (div._ld !== _dq) { div._dist.textContent = _dq; div._ld = _dq; }
     }
   };
