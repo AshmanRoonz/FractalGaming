@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.18';
+const LSS_BUILD = '43.19';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2283,6 +2283,7 @@ async function joinRoom() {
         try {
           const _hdu = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
           net.sendEvent({ type: 'hello',
+            mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : undefined,
             discord_id:     _hdu ? _hdu.id : undefined,
             discord_name:   _hdu ? (_hdu.global_name || _hdu.username) : undefined,
             discord_avatar: _hdu ? _hdu.avatar : undefined }, peerId);
@@ -2732,7 +2733,7 @@ const CampaignMode = {
                   if (!net.active && game._campJourney && (typeof window !== 'undefined' && window.__campBetweenLegSelect)) _advToShipSelect = true;
                 } else {
                   try { if (window.Overlays) Overlays.banner('SIMULATION FREED', 'The trap is broken — back to the overworld'); } catch (_) {}
-                  LSS.MODE = 'freeflight';
+  LSS.MODE = 'freeflight';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
                   game.selectedMap = 'hub_overworld';
                   game.testMode = false; game.raceNoTimer = true;
                   try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('camp-finale', 'RETURNING TO THE OVERWORLD'); } catch (_) {}
@@ -3714,7 +3715,7 @@ function _campInitState() {
 }
 
 function startCampaign() {
-  LSS.MODE = 'campaign';
+  LSS.MODE = _lssRoomModeOr('campaign');   // (v43.19) a room has one mode
   _campInitState();
   let _code = '';
   try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
@@ -3757,7 +3758,7 @@ function _applyStartView() {
   if (!_tp && typeof player !== 'undefined' && player && player.mesh) player.mesh.visible = false;
 }
 function startFreeFlight() {
-  LSS.MODE = 'freeflight';
+  LSS.MODE = _lssRoomModeOr('freeflight');   // (v43.19) a room has one mode
   try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}   // (v38.78) every free flight starts with six hostile cities
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}   
   
@@ -3792,7 +3793,7 @@ function startFreeFlight() {
 if (typeof window !== 'undefined') window.startFreeFlight = startFreeFlight;
 
 function startEndless() {
-  LSS.MODE = 'endless';
+  LSS.MODE = _lssRoomModeOr('endless');   // (v43.19) a room has one mode
   game.testMode = false;
   game.raceNoTimer = true;
   game.currentRound = 1;
@@ -3985,7 +3986,7 @@ if (typeof window !== 'undefined') window.__endlessStasis = function () {
 };
 
 function _campHubSetup() {
-  LSS.MODE = 'freeflight';
+  LSS.MODE = 'freeflight';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}
   try { game.thirdPerson = true; document.body.classList.add('lss-thirdperson'); } catch (_) {}
   game._campJourney = true;
@@ -4014,7 +4015,7 @@ function startCampaignJourney() {
   let _hasProgress = false;
   try { _hasProgress = (_campLoadLegs().length > 0); } catch (_) { _hasProgress = false; }
   if (_hasProgress) {
-    LSS.MODE = 'campaign';
+  LSS.MODE = 'campaign';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
     net.freeflight = false; net.campaign = false;
     _cancelRoomForLocalPlay();
     net.active = false; net.solo = true;
@@ -4703,7 +4704,7 @@ function startTest() {
 
 function _applyModeClientSetup(mode) {
   if (typeof LSS === 'undefined') return;
-  LSS.MODE = mode || 'classic';
+  LSS.MODE = _lssRoomModeOr(mode || 'classic');   // (v43.19) a room has one mode
   if (mode === 'race') {
     try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
     try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
@@ -4802,7 +4803,7 @@ function _assaultMatchWinner() {
 }
 function startAssault() {
   game.testMode = false;
-  LSS.MODE = 'assault';
+  LSS.MODE = _lssRoomModeOr('assault');   // (v43.19) a room has one mode
   try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
   let _code = '';
   try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
@@ -4819,7 +4820,7 @@ if (typeof window !== 'undefined') window.startAssault = startAssault;
 
 function startRace() {
   game.testMode = false;
-  LSS.MODE = 'race';
+  LSS.MODE = _lssRoomModeOr('race');   // (v43.19) a room has one mode
   try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
   try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
   let _code = '';
@@ -6639,6 +6640,21 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'hello') {
+    try {
+      const _allIds = [net.myPeerId].concat(Array.from(net.peers ? net.peers.keys() : [])).sort();
+      const _authId = _allIds[0];
+      if (typeof evt.mode === 'string' && evt.mode && fromPeerId === _authId && _authId !== net.myPeerId) {
+        net.roomMode = evt.mode;
+        const _inPlay = (typeof game !== 'undefined' && game &&
+                         (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
+        if (!_inPlay && typeof LSS !== 'undefined' && LSS.MODE !== evt.mode) {
+          console.log('[net] room mode is', evt.mode, '- switching from', LSS.MODE);
+          LSS.MODE = evt.mode;
+          try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
+          try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
+        }
+      }
+    } catch (_) {}
     const peer = net.peers.get(fromPeerId);
     if (peer) {
       if (evt.discord_id) {
@@ -47035,7 +47051,7 @@ function commitLoadout(key) {
     if (_selLvl === 'hub_overworld') {
       _campHubSetup();
     } else if (typeof _selLvl === 'string' && _selLvl.indexOf('camp_') === 0 && MAP_DATA[_selLvl]) {
-      LSS.MODE = 'campaign';
+  LSS.MODE = 'campaign';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
       try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   // (v38.68) the view is _applyStartView's call now, not a forced cockpit
       game.testMode = true; game.raceNoTimer = true; game.currentRound = 1;
       if (!game.campaign) game.campaign = { sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel', unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY', unlockedLegs: (function () { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); })(), nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false }, waveCount: 3, _ended: false, _needFirstWave: false, difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()) };
@@ -60096,6 +60112,28 @@ function _lssSetInsaneSpeed(on, fromNet) {
   }
 }
 if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
+
+function _lssRoomModeOr(want) {
+  try {
+    if (typeof net === 'undefined' || !net) return want;
+    if (!net.roomMode) return want;
+    const others = (net.peers && net.peers.size) ? net.peers.size : 0;
+    try {
+      const _ids = [net.myPeerId].concat(Array.from(net.peers ? net.peers.keys() : [])).sort();
+      if (_ids[0] === net.myPeerId) return want;
+    } catch (_) {}
+    if (others <= 0) return want;
+    if (net.roomMode !== want) {
+      try {
+        console.log('[net] joining an existing room: mode', want, '->', net.roomMode);
+        if (typeof showAnnouncement === 'function') {
+          showAnnouncement('JOINED ' + String(net.roomMode).toUpperCase() + ' ROOM');
+        }
+      } catch (_) {}
+    }
+    return net.roomMode;
+  } catch (_) { return want; }
+}
 
 function _lssDispatchBound(k, down) {
   const kb = input.kbBindings;

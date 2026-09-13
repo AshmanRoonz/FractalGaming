@@ -4814,7 +4814,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.18';
+const LSS_BUILD = '43.19';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -7976,6 +7976,9 @@ async function joinRoom() {
         try {
           const _hdu = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
           net.sendEvent({ type: 'hello',
+            // (v43.19) tell the joiner what this room is actually playing, so their mode
+            // button cannot put them in a different world from everyone else.
+            mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : undefined,
             discord_id:     _hdu ? _hdu.id : undefined,
             discord_name:   _hdu ? (_hdu.global_name || _hdu.username) : undefined,
             discord_avatar: _hdu ? _hdu.avatar : undefined }, peerId);
@@ -8627,7 +8630,7 @@ const CampaignMode = {
                   // + the hub map ; the roundEnd rebuild below builds the hub and FreeFlightMode
                   // re-arms the persistent rift (the freed sim stays re-enterable through it).
                   try { if (window.Overlays) Overlays.banner('SIMULATION FREED', 'The trap is broken — back to the overworld'); } catch (_) {}
-                  LSS.MODE = 'freeflight';
+  LSS.MODE = 'freeflight';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
                   game.selectedMap = 'hub_overworld';
                   game.testMode = false; game.raceNoTimer = true;
                   try { if (typeof _beginWorldSwap === 'function') _beginWorldSwap('camp-finale', 'RETURNING TO THE OVERWORLD'); } catch (_) {}
@@ -10133,7 +10136,7 @@ function _campInitState() {
 }
 
 function startCampaign() {
-  LSS.MODE = 'campaign';
+  LSS.MODE = _lssRoomModeOr('campaign');   // (v43.19) a room has one mode
   _campInitState();
   // (v32.76) Co-op : if a room code is entered (or we're already in a room), host a
   // NETWORKED campaign — host-authoritative PvE (only amStasisOwner spawns the
@@ -10196,7 +10199,7 @@ function _applyStartView() {
 // world with no enemies. Endless like campaign (testMode + raceNoTimer) but no bots /
 // no win-gate. Solo for P1 (no co-op handshake). Mirrors startCampaign's solo path.
 function startFreeFlight() {
-  LSS.MODE = 'freeflight';
+  LSS.MODE = _lssRoomModeOr('freeflight');   // (v43.19) a room has one mode
   try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}   // (v38.78) every free flight starts with six hostile cities
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}   
   
@@ -10240,7 +10243,7 @@ if (typeof window !== 'undefined') window.startFreeFlight = startFreeFlight;
 // amStasisOwner authority and proxied to peers via bot_roster/bot_state.
 // Blank code + no room = solo, byte-identical to v35.71.
 function startEndless() {
-  LSS.MODE = 'endless';
+  LSS.MODE = _lssRoomModeOr('endless');   // (v43.19) a room has one mode
   game.testMode = false;
   game.raceNoTimer = true;
   game.currentRound = 1;
@@ -10493,7 +10496,7 @@ if (typeof window !== 'undefined') window.__endlessStasis = function () {
 // Used by BOTH the brand-new direct path (this + commitLoadout('VORTEX')) and the CONFIRM-from-
 // picker hub path (this, called inside commitLoadout, + the chosen ship).
 function _campHubSetup() {
-  LSS.MODE = 'freeflight';
+  LSS.MODE = 'freeflight';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}
   try { game.thirdPerson = true; document.body.classList.add('lss-thirdperson'); } catch (_) {}
   game._campJourney = true;
@@ -10533,7 +10536,7 @@ function startCampaignJourney() {
     // [hub + unlocked legs] and the ship list filters to the unlocked roster. The actual
     // mode/flag switch for the chosen LEVEL happens in commitLoadout's early _campPicker
     // block on CONFIRM (so getNextMap builds the right thing).
-    LSS.MODE = 'campaign';
+  LSS.MODE = 'campaign';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
     net.freeflight = false; net.campaign = false;
     _cancelRoomForLocalPlay();
     net.active = false; net.solo = true;
@@ -11406,7 +11409,7 @@ function startTest() {
 // startRace does). Mode-agnostic for classic.
 function _applyModeClientSetup(mode) {
   if (typeof LSS === 'undefined') return;
-  LSS.MODE = mode || 'classic';
+  LSS.MODE = _lssRoomModeOr(mode || 'classic');   // (v43.19) a room has one mode
   if (mode === 'race') {
     try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
     try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
@@ -11562,7 +11565,7 @@ function _assaultMatchWinner() {
 }
 function startAssault() {
   game.testMode = false;
-  LSS.MODE = 'assault';
+  LSS.MODE = _lssRoomModeOr('assault');   // (v43.19) a room has one mode
   // The field spawns at round start, so the shell model must be warm by then.
   try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
   let _code = '';
@@ -11580,7 +11583,7 @@ if (typeof window !== 'undefined') window.startAssault = startAssault;
 
 function startRace() {
   game.testMode = false;
-  LSS.MODE = 'race';
+  LSS.MODE = _lssRoomModeOr('race');   // (v43.19) a room has one mode
   try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
   // (v32.73) Warm the Champion Shell model NOW : the race finish field + its shell
   // spawn the instant the round goes 'playing', so without a head start the shell
@@ -14114,6 +14117,30 @@ function handleNetEvent(evt, fromPeerId) {
   // (v30.63) Identity hello from a roommate ; lets the fleet strip show
   // their card before they commit a loadout.
   if (evt.type === 'hello') {
+    // (v43.19) adopt the room's mode. This arrives from a peer who was already here, so it is the
+    // room's truth; record it for _lssRoomModeOr and switch now if we have not started yet.
+    try {
+      // (v43.19b) ⚠ ONLY FROM THE ROOM'S AUTHORITY. First cut adopted the mode from ANY hello -
+      // but hello is exchanged BOTH ways when a peer joins, so each side adopted the other's and the
+      // last arrival won. Measured: the host picked FREE FLIGHT and landed on an elimination map,
+      // because the joiner's default 'classic' overwrote it. Backwards from the intent.
+      // The lowest peer id is already this game's authority for everything else (amStasisOwner), so
+      // it decides the room's mode too: deterministic, and it matches "the room's mode" as the owner
+      // means it - whoever was there first keeps the lowest id.
+      const _allIds = [net.myPeerId].concat(Array.from(net.peers ? net.peers.keys() : [])).sort();
+      const _authId = _allIds[0];
+      if (typeof evt.mode === 'string' && evt.mode && fromPeerId === _authId && _authId !== net.myPeerId) {
+        net.roomMode = evt.mode;
+        const _inPlay = (typeof game !== 'undefined' && game &&
+                         (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
+        if (!_inPlay && typeof LSS !== 'undefined' && LSS.MODE !== evt.mode) {
+          console.log('[net] room mode is', evt.mode, '- switching from', LSS.MODE);
+          LSS.MODE = evt.mode;
+          try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
+          try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
+        }
+      }
+    } catch (_) {}
     // (v38.60) `peerId` was never in scope here (the parameter is fromPeerId), so
     // every hello threw a ReferenceError inside Trystero's dispatch and the
     // pre-commit identity card never appeared. Same latent bug in the two
@@ -70657,7 +70684,7 @@ function commitLoadout(key) {
       _campHubSetup();
     } else if (typeof _selLvl === 'string' && _selLvl.indexOf('camp_') === 0 && MAP_DATA[_selLvl]) {
       // A COMBAT LEG chosen -> start that leg directly in campaign mode.
-      LSS.MODE = 'campaign';
+  LSS.MODE = 'campaign';   // (v43.19) NOT room-deferred: internal setup, not a lobby mode button
       try { document.body.classList.remove('lss-freeflight'); } catch (_) {}   // (v38.68) the view is _applyStartView's call now, not a forced cockpit
       game.testMode = true; game.raceNoTimer = true; game.currentRound = 1;
       if (!game.campaign) game.campaign = { sceneIndex: 0, waveIndex: 0, bossActive: false, phase: 'travel', unlockedLoadouts: _campLoadUnlocks(), bodyKey: 'VORTEX_BODY', unlockedLegs: (function () { const s = _campLoadLegs(); s.unshift('camp_approach'); return s.filter((k, i) => s.indexOf(k) === i); })(), nemesis: { seen: false, escapes: 0, alive: false, monId: -1, unlocked8: false }, waveCount: 3, _ended: false, _needFirstWave: false, difficulty: _getStoredDifficulty(), swarmCap: _campSwarmCapFor(_getStoredDifficulty()) };
@@ -89987,6 +90014,41 @@ function _lssSetInsaneSpeed(on, fromNet) {
   }
 }
 if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
+
+// (v43.19) A ROOM HAS ONE MODE. Owner: "one device i accidentally joined with the wrong mode, and
+// they are connected but separated lol ... if you're joining a room that is already made, then it
+// should go to the room's mode no matter what mode you click on."
+// Every mode entry point (startElimination, startFreeFlight, startCampaign, endless, assault, race)
+// simply wrote LSS.MODE from whichever button was pressed, with nothing asking what the room was
+// already doing. Two peers could sit in the same trystero room, exchanging state happily, while
+// running different modes and different worlds - connected and separated, exactly as described.
+// The room's mode arrives on the `hello` handshake, which existing peers already send TO a joiner.
+// (!) It applies only when someone else is ALREADY here. The first person into a room is the one who
+//     decides its mode; they must not be overridden by a stale value from a previous session.
+// (!) It is cleared on leaving a room, so the next thing you start is your own choice again.
+function _lssRoomModeOr(want) {
+  try {
+    if (typeof net === 'undefined' || !net) return want;
+    if (!net.roomMode) return want;
+    // only defer to a room that actually has someone else in it
+    const others = (net.peers && net.peers.size) ? net.peers.size : 0;
+    // the authority IS the room's mode - never override the person who set it
+    try {
+      const _ids = [net.myPeerId].concat(Array.from(net.peers ? net.peers.keys() : [])).sort();
+      if (_ids[0] === net.myPeerId) return want;
+    } catch (_) {}
+    if (others <= 0) return want;
+    if (net.roomMode !== want) {
+      try {
+        console.log('[net] joining an existing room: mode', want, '->', net.roomMode);
+        if (typeof showAnnouncement === 'function') {
+          showAnnouncement('JOINED ' + String(net.roomMode).toUpperCase() + ' ROOM');
+        }
+      } catch (_) {}
+    }
+    return net.roomMode;
+  } catch (_) { return want; }
+}
 
 // (v43.12) ONE PLACE THAT TURNS A BOUND INPUT INTO AN ACTION - keyboard OR mouse.
 // The rebind UI has always been happy to write 'mouse0'..'mouse4' into any action, and for FIRE,
