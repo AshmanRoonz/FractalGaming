@@ -5881,7 +5881,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.81';
+const LSS_BUILD = '43.82';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -16484,6 +16484,45 @@ function tickScanlineTexture() {
   }
 }
 
+// ===================== (v43.82) FRIEND/FOE COLOURS FOR WORLD EFFECTS =====================
+// Owner: "i'd like to make friendly pyro fire look different from enemy pyro fire, and same with
+// tracker's plasma shield / if it's friendly flames it will be more red than orange / for tracker's
+// shield, friendly will be more neon orange than what's there now", then "same with puncture's
+// tether trap... make the enemy one darker yellow".
+//
+// ONE test, so the three effects can never disagree about what "friendly" means. It is the same
+// expression _tickOutlineOptics already uses for the ally/enemy outline (`ship.team === playerTeam`),
+// which is the closest thing this file has to a canon for a VISUAL friend/foe call.
+// ⚠ Perspective is deliberately LOCAL: each client tints from its own player.team, so the same wall
+// is orange to its owner's side and plain to the other. That is the point - it is a readability aid,
+// not shared state, and nothing here is broadcast.
+// ⚠ FREE FLIGHT NEEDS NO SPECIAL CASE: exhibition gives every pilot their own team (100 + hash), so
+// `team === player.team` is false for everyone else and all of it reads as enemy, which is correct
+// for a free-for-all.
+// ⚠ A null/undefined team (world hazards, unowned effects) is NOT friendly - hence the explicit
+// null checks rather than a bare ===, which would make two undefineds match.
+function _fxFriendly(team) {
+  try {
+    if (team == null) return false;
+    if (typeof player === 'undefined' || !player || player.team == null) return false;
+    return team === player.team;
+  } catch (_) { return false; }
+}
+// The palette. Enemy values are the ones that were already on screen, so an enemy effect looks
+// exactly as it did before this change; only the friendly variants are new.
+const _FXFF = {
+  // PYRO: "friendly flames more red than orange". Preset 'fireball' is #ff7722.
+  fireFriendly:    0xff3311,
+  // TRACKER shield: "friendly will be more neon orange than what's there now" (was CLASS_COLORS
+  // .TRACKER 0xff8800). Same hue family, pushed up in chroma and value so it reads as neon.
+  shieldFriendly:  0xffa11a,
+  shieldRimEnemy:  0xffcc77,
+  shieldRimFriend: 0xffb347,
+  // PUNCTURE tether: "make the enemy one darker yellow". Here it is the ENEMY that changes -
+  // friendly keeps CLASS_COLORS.PUNCTURE (0xffee44).
+  tetherEnemy:     0xb39a12,
+};
+
 // Plasma Shield spawn helper, shared between the local fire path
 // (broadcast=true) and the effect_spawn receiver (broadcast=false). Same
 // pattern as Plasma Mines: ownerPeerId tag gates HP / damage logic to one peer.
@@ -16500,7 +16539,12 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
   // and a curved swept test is not worth its cost. Revisit only if the bulge knob is raised a lot.
   const _wH = _wallHalf();
   const _wK = _wallKnobs();
-  const wallMesh = new THREE.Mesh(_wallLensGeometry(), _makeHexHologramMaterial(LSS.CLASS_COLORS.TRACKER));
+  // (v43.82) friendly shields burn neon orange; enemy shields keep the class colour they had.
+  // _makeHexHologramMaterial builds a NEW ShaderMaterial per call with uColor as a per-instance
+  // uniform, so this tints one wall and nothing else.
+  const _wallFriendly = _fxFriendly(team);
+  const _wallCol = _wallFriendly ? _FXFF.shieldFriendly : LSS.CLASS_COLORS.TRACKER;
+  const wallMesh = new THREE.Mesh(_wallLensGeometry(), _makeHexHologramMaterial(_wallCol));
   wallMesh.position.copy(pos);
   wallMesh.lookAt(pos.clone().add(dir));
   wallMesh.scale.set(_wH.w, _wH.h, _wH.w * _wK.bulge);
@@ -16510,6 +16554,11 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
   let plasmaMesh = null;
   if (typeof _makeFXMaterial === 'function') {
     const plasmaMat = _makeFXMaterial('plasma_amber');
+    // (v43.82) the inner membrane follows the shell. _makeFXMaterial returns a FRESH material (it is
+    // not the _acquireFXBurstMaterial pool), so this write cannot leak into another effect.
+    if (_wallFriendly && plasmaMat.uniforms && plasmaMat.uniforms.uBaseColor) {
+      try { plasmaMat.uniforms.uBaseColor.value.set(_FXFF.shieldFriendly); } catch (_) {}
+    }
     if (plasmaMat.uniforms && plasmaMat.uniforms.uPosScale) {
       // Pattern density was tuned against a 200-unit half-width; keep it proportional so a 4x
       // shield does not read as a 4x-coarser texture.
@@ -16524,7 +16573,11 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
   }
   // Rim outline. EdgesGeometry on a 64x20 sphere cap would have drawn ~2,500 segments of wireframe
   // noise; the lens only wants its edge, so this is one circle on the rim plane.
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0xffcc77, transparent: true, opacity: 0.6 });
+  // (v43.82) and the rim, so the whole shield reads as one colour rather than a tinted face in a
+  // pale frame.
+  const edgeMat = new THREE.LineBasicMaterial({
+    color: _wallFriendly ? _FXFF.shieldRimFriend : _FXFF.shieldRimEnemy,
+    transparent: true, opacity: 0.6 });
   const edgeMesh = new THREE.Line(_wallRimGeometry(), edgeMat);
   edgeMesh.position.copy(pos);
   edgeMesh.lookAt(pos.clone().add(dir));
@@ -18582,7 +18635,10 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
   });
   const tetherGeo = new THREE.OctahedronGeometry(14, 0);
   const tetherMat = _makeFXMaterial('orb_core');
-  if (tetherMat.uniforms.uBaseColor) tetherMat.uniforms.uBaseColor.value.set(LSS.CLASS_COLORS.PUNCTURE);
+  // (v43.82) owner asked for the ENEMY one to change here, not the friendly one: an enemy trap is
+  // a darker, duller yellow, so your own traps stay the bright class yellow you already know.
+  const _tethCol = _fxFriendly(team) ? LSS.CLASS_COLORS.PUNCTURE : _FXFF.tetherEnemy;
+  if (tetherMat.uniforms.uBaseColor) tetherMat.uniforms.uBaseColor.value.set(_tethCol);
   if (tetherMat.uniforms.uPosScale)  tetherMat.uniforms.uPosScale.value = 1.0 / 14;
   const tetherMesh = new THREE.Mesh(tetherGeo, tetherMat);
   tetherMesh.position.copy(pos);
@@ -18595,7 +18651,7 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
   const haloRadius = 36;
   const haloGeo = new THREE.SphereGeometry(haloRadius, 24, 16);
   const haloMat = _makeFXMaterial('gravity_halo');
-  if (haloMat.uniforms.uBaseColor) haloMat.uniforms.uBaseColor.value.set(LSS.CLASS_COLORS.PUNCTURE);
+  if (haloMat.uniforms.uBaseColor) haloMat.uniforms.uBaseColor.value.set(_tethCol);   // (v43.82)
   if (haloMat.uniforms.uPosScale)  haloMat.uniforms.uPosScale.value = 1.0 / haloRadius;
   const haloMesh = new THREE.Mesh(haloGeo, haloMat);
   haloMesh.position.copy(pos);
@@ -19410,6 +19466,17 @@ function emitDamageState(entity, dt) {
       });
       if (_puff) {
         _didShader = true;
+        // (v43.82) friendly flames run red. `entity` is the BURNING ship, so entity.team is whose
+        // fire this is to look at.
+        // ⚠ This material comes from _acquireFXBurstMaterial - a POOL shared by every fireball - so a
+        // tint here would normally bleed into the next explosion that borrows it. It is safe only
+        // because _releaseFXBurstMaterial resets uBaseColor to the preset's base on the way back in,
+        // which is the same contract Slayer's teleport-dash puffs already rely on for 'cloud'. If
+        // that reset is ever removed, this must go with it.
+        if (_puff.material && _puff.material.uniforms && _puff.material.uniforms.uBaseColor &&
+            _fxFriendly(entity && entity.team)) {
+          try { _puff.material.uniforms.uBaseColor.value.set(_FXFF.fireFriendly); } catch (_) {}
+        }
         // spawnFXBurst pushes its effect record last; seed that record's wakeVel so the puff drifts.
         const _fx = game.effects && game.effects[game.effects.length - 1];
         if (_fx && _fx.mesh === _puff && _fx.wakeVel) {
@@ -81870,24 +81937,37 @@ function updateWorldEffects(dt) {
         // Hue drifts in a tight orange band (red-orange ↔ amber)
         // instead of cycling the full spectrum, so Tracker's wall reads
         // as a hot membrane rather than a rainbow energy field.
-        const hue = 0.04 + 0.04 * (0.5 + 0.5 * Math.sin(age * 0.6));
+        // (v43.82) ⚠⚠ THIS IS WHERE THE SHIELD'S COLOUR ACTUALLY LIVES. The shell and the rim are
+        // re-written from HSL on EVERY FRAME, so the colour chosen at spawn survives exactly one
+        // frame and is then overwritten. Measured before this fix: a friendly wall spawned with
+        // uColor #ffa11a read back as #f7a372 a moment later, because this line had taken it over.
+        // (The inner plasma membrane is NOT animated, which is why its spawn tint DID stick.)
+        // So the friend/foe split has to be made here, not only at spawn.
+        const _wFriend = _fxFriendly(eff.team);
+        const _osc = (0.5 + 0.5 * Math.sin(age * 0.6));
+        // Enemy keeps the exact band it always had (0.04..0.08 - red-orange to amber, s .85, l .55).
+        // Friendly sits higher and hotter: a tighter band further into orange, full saturation and a
+        // touch more light, which is what reads as "neon" rather than simply "brighter".
+        const hue = _wFriend ? (0.070 + 0.020 * _osc) : (0.04 + 0.04 * _osc);
+        const _sat = _wFriend ? 1.00 : 0.85;
+        const _lit = _wFriend ? 0.60 : 0.55;
         // Hex hologram shader path: drive uniforms instead of color/opacity.
         if (eff.mesh.material && eff.mesh.material.uniforms) {
           eff.mesh.material.uniforms.time.value = game.time;
           eff.mesh.material.uniforms.uHp.value = hpPct;
           if (eff.mesh.material.uniforms.uColor) {
-            eff.mesh.material.uniforms.uColor.value.setHSL(hue, 0.85, 0.55);
+            eff.mesh.material.uniforms.uColor.value.setHSL(hue, _sat, _lit);
           }
         } else {
           // Legacy MeshBasicMaterial fallback (if shader factory was unavailable)
-          eff.mesh.material.color.setHSL(hue, 0.85, 0.55);
+          eff.mesh.material.color.setHSL(hue, _sat, _lit);
           eff.mesh.material.opacity = 0.12 + 0.2 * hpPct + Math.sin(age * 3) * 0.04;
         }
         if (eff.edgeMesh) {
           // Edge ring stays in the warm range too (slightly lighter
           // amber) ; the previous +0.3 hue offset would push it into
           // green and break the orange identity.
-          eff.edgeMesh.material.color.setHSL(0.10, 0.7, 0.7);
+          eff.edgeMesh.material.color.setHSL(_wFriend ? 0.085 : 0.10, _wFriend ? 0.95 : 0.7, 0.7);
           eff.edgeMesh.material.opacity = 0.3 + 0.4 * hpPct;
         }
       }

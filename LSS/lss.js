@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.81';
+const LSS_BUILD = '43.82';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -7531,10 +7531,27 @@ function tickScanlineTexture() {
   }
 }
 
+function _fxFriendly(team) {
+  try {
+    if (team == null) return false;
+    if (typeof player === 'undefined' || !player || player.team == null) return false;
+    return team === player.team;
+  } catch (_) { return false; }
+}
+const _FXFF = {
+  fireFriendly:    0xff3311,
+  shieldFriendly:  0xffa11a,
+  shieldRimEnemy:  0xffcc77,
+  shieldRimFriend: 0xffb347,
+  tetherEnemy:     0xb39a12,
+};
+
 function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast) {
   const _wH = _wallHalf();
   const _wK = _wallKnobs();
-  const wallMesh = new THREE.Mesh(_wallLensGeometry(), _makeHexHologramMaterial(LSS.CLASS_COLORS.TRACKER));
+  const _wallFriendly = _fxFriendly(team);
+  const _wallCol = _wallFriendly ? _FXFF.shieldFriendly : LSS.CLASS_COLORS.TRACKER;
+  const wallMesh = new THREE.Mesh(_wallLensGeometry(), _makeHexHologramMaterial(_wallCol));
   wallMesh.position.copy(pos);
   wallMesh.lookAt(pos.clone().add(dir));
   wallMesh.scale.set(_wH.w, _wH.h, _wH.w * _wK.bulge);
@@ -7542,6 +7559,9 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
   let plasmaMesh = null;
   if (typeof _makeFXMaterial === 'function') {
     const plasmaMat = _makeFXMaterial('plasma_amber');
+    if (_wallFriendly && plasmaMat.uniforms && plasmaMat.uniforms.uBaseColor) {
+      try { plasmaMat.uniforms.uBaseColor.value.set(_FXFF.shieldFriendly); } catch (_) {}
+    }
     if (plasmaMat.uniforms && plasmaMat.uniforms.uPosScale) {
       plasmaMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _wH.w);
     }
@@ -7552,7 +7572,9 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
     plasmaMesh.renderOrder = 0;
     scene.add(plasmaMesh);
   }
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0xffcc77, transparent: true, opacity: 0.6 });
+  const edgeMat = new THREE.LineBasicMaterial({
+    color: _wallFriendly ? _FXFF.shieldRimFriend : _FXFF.shieldRimEnemy,
+    transparent: true, opacity: 0.6 });
   const edgeMesh = new THREE.Line(_wallRimGeometry(), edgeMat);
   edgeMesh.position.copy(pos);
   edgeMesh.lookAt(pos.clone().add(dir));
@@ -9162,7 +9184,8 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
   });
   const tetherGeo = new THREE.OctahedronGeometry(14, 0);
   const tetherMat = _makeFXMaterial('orb_core');
-  if (tetherMat.uniforms.uBaseColor) tetherMat.uniforms.uBaseColor.value.set(LSS.CLASS_COLORS.PUNCTURE);
+  const _tethCol = _fxFriendly(team) ? LSS.CLASS_COLORS.PUNCTURE : _FXFF.tetherEnemy;
+  if (tetherMat.uniforms.uBaseColor) tetherMat.uniforms.uBaseColor.value.set(_tethCol);
   if (tetherMat.uniforms.uPosScale)  tetherMat.uniforms.uPosScale.value = 1.0 / 14;
   const tetherMesh = new THREE.Mesh(tetherGeo, tetherMat);
   tetherMesh.position.copy(pos);
@@ -9171,7 +9194,7 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
   const haloRadius = 36;
   const haloGeo = new THREE.SphereGeometry(haloRadius, 24, 16);
   const haloMat = _makeFXMaterial('gravity_halo');
-  if (haloMat.uniforms.uBaseColor) haloMat.uniforms.uBaseColor.value.set(LSS.CLASS_COLORS.PUNCTURE);
+  if (haloMat.uniforms.uBaseColor) haloMat.uniforms.uBaseColor.value.set(_tethCol);   // (v43.82)
   if (haloMat.uniforms.uPosScale)  haloMat.uniforms.uPosScale.value = 1.0 / haloRadius;
   const haloMesh = new THREE.Mesh(haloGeo, haloMat);
   haloMesh.position.copy(pos);
@@ -9711,6 +9734,10 @@ function emitDamageState(entity, dt) {
       });
       if (_puff) {
         _didShader = true;
+        if (_puff.material && _puff.material.uniforms && _puff.material.uniforms.uBaseColor &&
+            _fxFriendly(entity && entity.team)) {
+          try { _puff.material.uniforms.uBaseColor.value.set(_FXFF.fireFriendly); } catch (_) {}
+        }
         const _fx = game.effects && game.effects[game.effects.length - 1];
         if (_fx && _fx.mesh === _puff && _fx.wakeVel) {
           const _drift = (_sp * ((_fk && _fk.aft != null) ? _fk.aft : 0.10)) + ((_fk && _fk.rise != null) ? _fk.rise : 22);
@@ -53769,19 +53796,23 @@ function updateWorldEffects(dt) {
       if (eff.mesh && eff.hp > 0) {
         const hpPct = eff.hp / eff.maxHp;
         const age = game.time - (eff.spawnTime || 0);
-        const hue = 0.04 + 0.04 * (0.5 + 0.5 * Math.sin(age * 0.6));
+        const _wFriend = _fxFriendly(eff.team);
+        const _osc = (0.5 + 0.5 * Math.sin(age * 0.6));
+        const hue = _wFriend ? (0.070 + 0.020 * _osc) : (0.04 + 0.04 * _osc);
+        const _sat = _wFriend ? 1.00 : 0.85;
+        const _lit = _wFriend ? 0.60 : 0.55;
         if (eff.mesh.material && eff.mesh.material.uniforms) {
           eff.mesh.material.uniforms.time.value = game.time;
           eff.mesh.material.uniforms.uHp.value = hpPct;
           if (eff.mesh.material.uniforms.uColor) {
-            eff.mesh.material.uniforms.uColor.value.setHSL(hue, 0.85, 0.55);
+            eff.mesh.material.uniforms.uColor.value.setHSL(hue, _sat, _lit);
           }
         } else {
-          eff.mesh.material.color.setHSL(hue, 0.85, 0.55);
+          eff.mesh.material.color.setHSL(hue, _sat, _lit);
           eff.mesh.material.opacity = 0.12 + 0.2 * hpPct + Math.sin(age * 3) * 0.04;
         }
         if (eff.edgeMesh) {
-          eff.edgeMesh.material.color.setHSL(0.10, 0.7, 0.7);
+          eff.edgeMesh.material.color.setHSL(_wFriend ? 0.085 : 0.10, _wFriend ? 0.95 : 0.7, 0.7);
           eff.edgeMesh.material.opacity = 0.3 + 0.4 * hpPct;
         }
       }
