@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.34';
+const LSS_BUILD = '43.35';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5504,7 +5504,7 @@ function _renderRoomBox(force) {
   try {
     const _jb = document.getElementById('lobby-room-join-btn');
     if (_jb) {
-      _jb.textContent = inRoom ? 'SELECT GAME MODE BELOW' : 'CREATE / JOIN';
+      _jb.textContent = inRoom ? 'SELECT A GAME MODE' : 'CREATE / JOIN';
       _jb.classList.toggle('lss-room-joined', inRoom);
     }
   } catch (_) {}
