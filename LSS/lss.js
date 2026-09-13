@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.91';
+const LSS_BUILD = '43.92';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -61050,8 +61050,29 @@ function _ssSpreadRails() {
       const proseBottom = (last && vis(last))
         ? last.getBoundingClientRect().bottom - info.getBoundingClientRect().top
         : 0;
-      trunk.style.height = Math.max(0, Math.round(proseBottom) - 9 + 8) + 'px';
+      trunk.style.height = Math.max(0, Math.round(proseBottom) + 8) + 'px';
       trunk.style.left = '0px';   // (v43.67) the trunk lives at the column's left edge again
+
+      let _lkL = document.getElementById('ss-spec-link-l');
+      let _lkR = document.getElementById('ss-spec-link-r');
+      if (!_lkL) { _lkL = document.createElement('div'); _lkL.id = 'ss-spec-link-l'; info.appendChild(_lkL); }
+      if (!_lkR) { _lkR = document.createElement('div'); _lkR.id = 'ss-spec-link-r'; info.appendChild(_lkR); }
+      const _hn = document.getElementById('ship-hero-name');
+      if (_hn && vis(_hn)) {
+        const _hb = _hn.getBoundingClientRect();
+        const _ib = info.getBoundingClientRect();
+        const _GX = 14;   // the same 14px every branch in this screen spans
+        const _nL = Math.round(_hb.left  - _ib.left - _GX);
+        const _nR = Math.round(_hb.right - _ib.left + _GX);
+        const _wL = _nL, _wR = Math.round(_ib.width) - _nR;
+        _lkL.style.left = '0px';       _lkL.style.width = Math.max(0, _wL) + 'px';
+        _lkR.style.left = _nR + 'px';  _lkR.style.width = Math.max(0, _wR) + 'px';
+        _lkL.style.display = (_wL >= 8) ? '' : 'none';
+        _lkR.style.display = (_wR >= 8) ? '' : 'none';
+      } else {
+        _lkL.style.display = 'none';
+        _lkR.style.display = 'none';
+      }
     }
 
     if (perks) {
@@ -61060,12 +61081,23 @@ function _ssSpreadRails() {
         const _lbl = perks.querySelector('.perks-label');
         const _lw = (_lbl && vis(_lbl)) ? Math.round(_lbl.getBoundingClientRect().width) : 0;
         const _gap = parseFloat(getComputedStyle(perks).columnGap) || 0;
-        perks.style.setProperty('--ss-perk-lbl', (_lw ? Math.round(_lw + _gap) : 0) + 'px');
+        perks.style.setProperty('--ss-perk-lbl', (_lw ? Math.round(_lw) : 0) + 'px');
       } catch (_) {}
       if (rails && vis(rails)) {
         const _rr = rails.getBoundingClientRect();
-        perks.style.setProperty('left', Math.round(_rr.left) + 'px', 'important');
-        perks.style.setProperty('width', Math.round(_rr.width) + 'px', 'important');
+        let _bl = _rr.left, _bw = _rr.width;
+        const _ca = document.getElementById('ship-car-prev');
+        const _cb = document.getElementById('ship-car-next');
+        if (_ca && _cb && vis(_ca) && vis(_cb)) {
+          const _a = _ca.getBoundingClientRect(), _b = _cb.getBoundingClientRect();
+          const _bL = Math.min(_a.left, _b.left), _bR = Math.max(_a.right, _b.right);
+          if (_bR - _bL >= 160) {
+            _bl = Math.max(_rr.left, _bL);
+            _bw = Math.min(_rr.width, _bR - _bL);
+          }
+        }
+        perks.style.setProperty('left', Math.round(_bl) + 'px', 'important');
+        perks.style.setProperty('width', Math.round(_bw) + 'px', 'important');
       } else {
         perks.style.setProperty('left', Math.round(leftEdge) + 'px', 'important');
         perks.style.setProperty('width', Math.round(band) + 'px', 'important');
@@ -61079,7 +61111,24 @@ function _ssSpreadRails() {
 
     if (desc && vis(desc)) {
       const avail = Math.max(120, rightEdge - leftEdge);   // (v43.64) the blurb spans the whole rail
-      const w = Math.round(avail);   // (v43.64) no 320 cap - the rail is as wide as the band
+      let _rw = avail, _ind = 0;
+      try {
+        const _pk = document.getElementById('ship-preview-perks');
+        const _gr = document.getElementById('perks-grid');
+        if (_pk && vis(_pk)) {
+          const _pr = _pk.getBoundingClientRect();
+          const _pcs = getComputedStyle(_pk);
+          const _pad = (parseFloat(_pcs.paddingLeft) || 0) + (parseFloat(_pcs.paddingRight) || 0);
+          if (_pr.width - _pad > 0) _rw = _pr.width - _pad;
+          if (_gr && vis(_gr)) {
+            _ind = Math.max(0, Math.round(_gr.getBoundingClientRect().left - _pr.left
+                                          - (parseFloat(_pcs.paddingLeft) || 0)));
+            if (_ind > _rw - 120) _ind = 0;
+          }
+          _pk.style.setProperty('--ss-perk-ind', _ind + 'px');
+        }
+      } catch (_) {}
+      const w = Math.round(_rw - _ind);
       try {
         const cs = getComputedStyle(desc);
         const probe = document.createElement('div');
