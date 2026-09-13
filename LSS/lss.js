@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.10';
+const LSS_BUILD = '43.11';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5907,7 +5907,8 @@ class NetworkPlayer {
           _updateThermalShieldFlameSpheres(this, this.position, this.mesh && this.mesh.quaternion, this.chassis, (typeof dt === 'number' ? dt : 1/60));
         }
       }
-    } else {
+        } else {
+          if (typeof _hideThermalShieldFlameSpheres === 'function') _hideThermalShieldFlameSpheres(this);
       if (this._thermalShieldMesh) {
         if (typeof _clearShipShieldEmissive === 'function') _clearShipShieldEmissive(this.mesh);
         if (typeof _disposeShieldClone === 'function') _disposeShieldClone(this._thermalShieldMesh);
@@ -6020,6 +6021,7 @@ class NetworkPlayer {
   }
 
   destroy() {
+    try { if (typeof _disposeThermalShieldFlameSpheres === 'function') _disposeThermalShieldFlameSpheres(this); } catch (_) {}
     if (typeof _disposeShipGroup === 'function') _disposeShipGroup(this.mesh);
     else if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
     const dispose = (m) => {
@@ -46491,15 +46493,19 @@ function abilityInputPress(slot) {
     return;
   }
   if (!_canPrimeAbility(slot, ability)) return;
+  player._abilityPrimes = player._abilityPrimes || {};
+  player._abilityPrimes[slot] = { slot: slot, abilityName: ability.name };
   player._abilityPrime = { slot: slot, abilityName: ability.name };
   triggerAbilityOverlayPrime(player.loadoutKey, ability.name);
 }
 
 function abilityInputRelease(slot) {
-  if (!player || !player._abilityPrime) return;
-  if (player._abilityPrime.slot !== slot) return;
+  if (!player) return;
+  const _pm = player._abilityPrimes && player._abilityPrimes[slot];
+  if (!_pm) return;                                   // (v43.11) this slot was never primed
+  delete player._abilityPrimes[slot];
+  if (player._abilityPrime && player._abilityPrime.slot === slot) player._abilityPrime = null;
   const ability = player.abilities && player.abilities[slot];
-  player._abilityPrime = null;
   if (!ability) return;
   if (!_canPrimeAbility(slot, ability)) {
     cancelAbilityOverlayPrime();
@@ -46660,14 +46666,20 @@ function tickAbilityOverlayFrame() {
     el.style.backgroundImage = '';
     el._currentUrl = null;
     player._abilityOverlayTrigger = null;
-    player._abilityPrime = null;
+    player._abilityPrime = null;  player._abilityPrimes = {};   // (v43.11) reset both
     return;
+  }
+  if (player._abilityPrimes) {
+    for (const _s in player._abilityPrimes) {
+      const _aa = player.abilities && player.abilities[_s];
+      if (!_aa || !_canPrimeAbility(+_s, _aa)) delete player._abilityPrimes[_s];
+    }
   }
   if (player._abilityPrime) {
     const a = player.abilities && player.abilities[player._abilityPrime.slot];
     if (!a || !_canPrimeAbility(player._abilityPrime.slot, a)) {
       cancelAbilityOverlayPrime();
-      player._abilityPrime = null;
+    player._abilityPrime = null;  player._abilityPrimes = {};   // (v43.11) reset both
     }
   }
   const trig = player._abilityOverlayTrigger;
@@ -46991,7 +47003,7 @@ function commitLoadout(key) {
     _preloadGunLayer(key);
     player._abilityOverlayTrigger = null;
     player._coreOverlayTrigger = null;
-    player._abilityPrime = null;
+    player._abilityPrime = null;  player._abilityPrimes = {};   // (v43.11) reset both
     const _aof = document.getElementById('ability-overlay-frame');
     if (_aof) {
       _aof.classList.remove('active');
@@ -52840,6 +52852,13 @@ function _releaseVortexShieldBurst(playBurstSound) {
 }
 
 function updateWorldEffects(dt) {
+  try {
+    if (typeof player !== 'undefined' && player && typeof _hideThermalShieldFlameSpheres === 'function') {
+      const _pyroShieldUp = (player.loadoutKey === 'PYRO' && player.shipState !== 'dead' &&
+                             player.abilityActive && player.abilityActive[1]);
+      if (!_pyroShieldUp) _hideThermalShieldFlameSpheres(player);
+    }
+  } catch (_) {}
   if (player._bcgOn) {
     player._bcgTTL = (player._bcgTTL || 0) - dt;
     if (player._bcgTTL <= 0) { try { _blasterChargeGlowOff(); } catch (_) {} }
@@ -71019,6 +71038,7 @@ function __pmark(name) {
 })();
 
 function gameLoop(timestamp) {
+  try { _lssLastLoopAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); } catch (_) {}
   if (typeof timestamp !== 'number') timestamp = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   if (typeof _lssResolveFrameYields === 'function') _lssResolveFrameYields();
   if (typeof _tickLaunchCountdownWatchdog === 'function') _tickLaunchCountdownWatchdog(timestamp);
@@ -81012,6 +81032,9 @@ document.addEventListener('keydown', _lssUnlockAnnouncerAudio, { once: false });
 
 renderer.setAnimationLoop(gameLoop);
 
+let _lssLastLoopAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+const _LSS_STALL_MS = 120;   // ~7 missed frames at 60 Hz: long enough never to fight a healthy rAF
+
 (function setupBackgroundTick() {
   let bgWorker = null;
   let bgActive = false;          
@@ -81029,7 +81052,8 @@ renderer.setAnimationLoop(gameLoop);
         if (renderer && renderer.xr && renderer.xr.isPresenting) return;
         try {
           const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-          gameLoop(t);
+          const _nowW = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+          if (bgActive || (_nowW - _lssLastLoopAt) > _LSS_STALL_MS) gameLoop(t);
         } catch (err) {
         }
       };
@@ -81038,6 +81062,11 @@ renderer.setAnimationLoop(gameLoop);
     }
     return bgWorker;
   }
+  try {
+    const _w0 = _ensureWorker();
+    if (_w0) _w0.postMessage({ cmd: 'start', ms: Math.round(1000 / TICK_HZ) });
+  } catch (_) {}
+
   document.addEventListener('visibilitychange', () => {
     const inXR = (typeof _xrLifecycleActive === 'function')
       ? _xrLifecycleActive()

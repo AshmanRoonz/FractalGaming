@@ -4777,7 +4777,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.10';
+const LSS_BUILD = '43.11';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -13088,7 +13088,18 @@ class NetworkPlayer {
           _updateThermalShieldFlameSpheres(this, this.position, this.mesh && this.mesh.quaternion, this.chassis, (typeof dt === 'number' ? dt : 1/60));
         }
       }
-    } else {
+        } else {
+          // (v43.11) ⚠ AND TURN IT OFF AGAIN. Owner: "just one of pyro's fireballs from his thermite
+          // launcher didn't get cleared... it was on my mobile device, after i had closed the game on
+          // all the other devices". It is not the thermite projectile (that self-expires on a local
+          // timer); it is THIS - the Fire Shield flame sphere, a hull-sized volumetric fire mesh added
+          // straight to `scene` with frustumCulled false and visible written true every frame. On the
+          // peer path nothing ever turned it off: this else branch skipped it, NetworkPlayer.destroy
+          // skipped it, and _disposeThermalShieldFlameSpheres - written for exactly this - had ZERO
+          // call sites in the whole file. One reused mesh per peer is one stuck fireball, and when
+          // that peer disconnects onPeerLeave drops the last reference to it, so nothing can ever
+          // reach it again.
+          if (typeof _hideThermalShieldFlameSpheres === 'function') _hideThermalShieldFlameSpheres(this);
       if (this._thermalShieldMesh) {
         if (typeof _clearShipShieldEmissive === 'function') _clearShipShieldEmissive(this.mesh);
         if (typeof _disposeShieldClone === 'function') _disposeShieldClone(this._thermalShieldMesh);
@@ -13217,6 +13228,12 @@ class NetworkPlayer {
   }
 
   destroy() {
+    // (v43.11) The Fire Shield sphere lives on `scene`, not on this ship's group, so tearing the
+    // ship down does NOT take it with it. _disposeThermalShieldFlameSpheres exists for precisely
+    // this and had no callers anywhere in the file - which is why a peer's fireball outlived the
+    // peer, and why quitting on the other devices is what finally made it permanent: onPeerLeave
+    // drops the last reference to the object holding the mesh.
+    try { if (typeof _disposeThermalShieldFlameSpheres === 'function') _disposeThermalShieldFlameSpheres(this); } catch (_) {}
     // (leak fix 2026-06-12) Peer is gone for good; dispose the whole ship
     // group's per-build resources, not just unlink it.
     if (typeof _disposeShipGroup === 'function') _disposeShipGroup(this.mesh);
@@ -69827,6 +69844,21 @@ function abilityInputPress(slot) {
     return;
   }
   if (!_canPrimeAbility(slot, ability)) return;
+  // (v43.11) ⚠⚠ PER-SLOT, because this latch was SHARED. Owner: "after a while of using tracker, the
+  // sonar pulse stopped being able to be used, it wouldn't shoot it anymore."
+  // Sonar Pulse is a HOLD-PRIME ability: pressing F fires nothing, it only sets this latch, and the
+  // shot happens on key-UP. TRACKER is the only ship with TWO hold-prime abilities - Tracker Rockets
+  // on Q and Sonar Pulse on F - and with one shared latch, tapping Q while holding F overwrote it.
+  // The F release then hit `if (_abilityPrime.slot !== slot) return;` and the sonar was swallowed in
+  // complete silence: no shot, no cooldown spent, no sound, no HUD change. Indistinguishable from a
+  // dead ability, which is exactly how it was reported.
+  // It gets worse the longer you fly TRACKER, which is the "after a while": Q can only prime on a
+  // 3/3 lock, tracker locks NEVER expire, so late in a match Q is nearly always primeable and gets
+  // mashed constantly.
+  // _abilityPrime stays as the MOST RECENT prime because the overlay and HUD read it; the firing
+  // decision now reads the per-slot map, so two held abilities cannot eat each other.
+  player._abilityPrimes = player._abilityPrimes || {};
+  player._abilityPrimes[slot] = { slot: slot, abilityName: ability.name };
   player._abilityPrime = { slot: slot, abilityName: ability.name };
   triggerAbilityOverlayPrime(player.loadoutKey, ability.name);
 }
@@ -69838,10 +69870,13 @@ function abilityInputPress(slot) {
 // restarting the cycle. The visual transitions prime -> muzzle -> slide-out
 // while activateAbility runs the gameplay effect.
 function abilityInputRelease(slot) {
-  if (!player || !player._abilityPrime) return;
-  if (player._abilityPrime.slot !== slot) return;
+  if (!player) return;
+  const _pm = player._abilityPrimes && player._abilityPrimes[slot];
+  if (!_pm) return;                                   // (v43.11) this slot was never primed
+  delete player._abilityPrimes[slot];
+  if (player._abilityPrime && player._abilityPrime.slot === slot) player._abilityPrime = null;
   const ability = player.abilities && player.abilities[slot];
-  player._abilityPrime = null;
+  // (v43.11) the latch for this slot is already cleared above
   if (!ability) return;
   // Final prereq check at release time : if a Tracker Rockets player lost
   // all locks WHILE holding, cancel silently per user spec ("nothing will
@@ -70035,18 +70070,25 @@ function tickAbilityOverlayFrame() {
     el.style.backgroundImage = '';
     el._currentUrl = null;
     player._abilityOverlayTrigger = null;
-    player._abilityPrime = null;
+    player._abilityPrime = null;  player._abilityPrimes = {};   // (v43.11) reset both
     return;
   }
   // Live prereq re-check for an in-flight prime. If the player loses
   // the lock state mid-hold (e.g. their last full-locked Tracker target
   // dies while they're holding), silently cancel the slide and skip the
   // muzzle frame, per spec.
+  // (v43.11) prune per-slot primes that stopped being legal while held
+  if (player._abilityPrimes) {
+    for (const _s in player._abilityPrimes) {
+      const _aa = player.abilities && player.abilities[_s];
+      if (!_aa || !_canPrimeAbility(+_s, _aa)) delete player._abilityPrimes[_s];
+    }
+  }
   if (player._abilityPrime) {
     const a = player.abilities && player.abilities[player._abilityPrime.slot];
     if (!a || !_canPrimeAbility(player._abilityPrime.slot, a)) {
       cancelAbilityOverlayPrime();
-      player._abilityPrime = null;
+    player._abilityPrime = null;  player._abilityPrimes = {};   // (v43.11) reset both
     }
   }
   const trig = player._abilityOverlayTrigger;
@@ -70480,7 +70522,7 @@ function commitLoadout(key) {
     _preloadGunLayer(key);
     player._abilityOverlayTrigger = null;
     player._coreOverlayTrigger = null;
-    player._abilityPrime = null;
+    player._abilityPrime = null;  player._abilityPrimes = {};   // (v43.11) reset both
     const _aof = document.getElementById('ability-overlay-frame');
     if (_aof) {
       _aof.classList.remove('active');
@@ -79295,6 +79337,18 @@ function _releaseVortexShieldBurst(playBurstSound) {
 // player.coreMeter in 13 places and updateAbilities' core-meter freeze/edge
 // detect at its tail must still see those writes in the same order.
 function updateWorldEffects(dt) {
+  // (v43.11) BACKSTOP FOR THE LOCAL PILOT. The hide lives in the else arm of updateShieldVisuals,
+  // which only updateAbilities reaches - and gameLoop skips updateAbilities the instant
+  // deathCam.active goes true. So dying with Fire Shield up left your own hull-sized fire sphere
+  // burning in the world. updateWorldEffects is the tick that always runs (it already carries the
+  // charge-glow backstop for the same reason), so the guarantee belongs here.
+  try {
+    if (typeof player !== 'undefined' && player && typeof _hideThermalShieldFlameSpheres === 'function') {
+      const _pyroShieldUp = (player.loadoutKey === 'PYRO' && player.shipState !== 'dead' &&
+                             player.abilityActive && player.abilityActive[1]);
+      if (!_pyroShieldUp) _hideThermalShieldFlameSpheres(player);
+    }
+  } catch (_) {}
   // (v39.47) THE CHARGE GLOW EXPIRES IF NOTHING IS FEEDING IT. playerDie clears it outright, but
   // death is only the path we hit — the tubes are scene-owned world-space meshes whose only
   // hide-me call lives in updateAbilities, so ANY future branch that stops that tick with a charge
@@ -103735,6 +103789,8 @@ function __pmark(name) {
 })();
 
 function gameLoop(timestamp) {
+  // (v43.11) THE HEARTBEAT THE WATCHDOG WATCHES. See setupBackgroundTick.
+  try { _lssLastLoopAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); } catch (_) {}
   // VR fork: renderer.setAnimationLoop drives this every frame (in both
   // flat and immersive modes), so we no longer self-schedule via
   // requestAnimationFrame. setAnimationLoop also gives us correct
@@ -115415,6 +115471,30 @@ document.addEventListener('keydown', _lssUnlockAnnouncerAudio, { once: false });
 // frames (XR device rAF cadence). Three.js handles the dispatch internally.
 renderer.setAnimationLoop(gameLoop);
 
+// (v43.11) ⚠⚠ document.hidden IS NOT THE DANGEROUS STATE. Owner: "if somebody alt tabs during a
+// match, wont it mess everyone up?" - and the honest answer turned out to be no, because
+// setupBackgroundTick below already hands the WHOLE gameLoop to a 30 Hz Worker when the page hides.
+// Measured on this build: 30.4 Hz hidden against 115.2 Hz visible, dt ~33 ms, under the 50 ms clamp.
+// A real alt-tab simulates in real time and costs the other players nothing.
+//
+// The state that DOES freeze a room is a page that stops being PAINTED while
+// document.visibilityState is still 'visible' - a fully occluded window, some minimised states, a
+// backgrounded tab in an embedded pane. The compositor suspends rAF, but `visibilitychange` never
+// fires, so the handoff below never arms and the loop simply stops. Measured: 0 ticks for 38
+// consecutive seconds while a control Worker kept ticking throughout. That is a TOTAL stall of
+// everything the authority owns - bots, city fleets, hub traffic and the leviathan families - for
+// every other player in the room, and nothing notices, because a frozen client keeps its
+// datachannel and so never "leaves".
+// (The owner's six-player exhibition had three clients in the background; this is the regime that
+// matches the ~4% simulation speed measured there.)
+//
+// So the trigger is no longer "am I hidden" but "has the loop actually run lately". The Worker is
+// kept alive permanently and is a pure no-op while rAF is healthy: it only calls gameLoop when the
+// main loop has not run for _LSS_STALL_MS. It composes with the visibilitychange path below - that
+// path keeps driving the loop, which keeps the stamp fresh, which keeps the watchdog quiet.
+let _lssLastLoopAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+const _LSS_STALL_MS = 120;   // ~7 missed frames at 60 Hz: long enough never to fight a healthy rAF
+
 (function setupBackgroundTick() {
   let bgWorker = null;
   let bgActive = false;          
@@ -115433,7 +115513,10 @@ renderer.setAnimationLoop(gameLoop);
         if (renderer && renderer.xr && renderer.xr.isPresenting) return;
         try {
           const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-          gameLoop(t);
+          // (v43.11) the Worker is now permanent, so it must not double-drive a healthy rAF:
+          // only step the loop when the main thread has actually stalled.
+          const _nowW = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+          if (bgActive || (_nowW - _lssLastLoopAt) > _LSS_STALL_MS) gameLoop(t);
         } catch (err) {
           // Silent ; the next tick will try again. Logging here would spam.
         }
@@ -115443,6 +115526,14 @@ renderer.setAnimationLoop(gameLoop);
     }
     return bgWorker;
   }
+  // (v43.11) Arm the watchdog immediately and leave it armed. While rAF is healthy every tick is a
+  // timestamp comparison that does nothing; the instant the compositor stops painting us it takes
+  // over, whether or not the browser ever tells us we are hidden.
+  try {
+    const _w0 = _ensureWorker();
+    if (_w0) _w0.postMessage({ cmd: 'start', ms: Math.round(1000 / TICK_HZ) });
+  } catch (_) {}
+
   document.addEventListener('visibilitychange', () => {
     const inXR = (typeof _xrLifecycleActive === 'function')
       ? _xrLifecycleActive()
