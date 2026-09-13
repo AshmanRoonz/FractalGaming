@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.75';
+const LSS_BUILD = '43.76';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -68428,7 +68428,7 @@ const MAP_DATA = {
   },
 
   assault_shifting: {
-    name: 'Assault ; The Shifting Causeway',
+    name: 'The Shifting Causeway',   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
     procedural: 'assault_shifting',
     description: 'Assault, re-rolled every round: a fresh cavern, the Champion Field dug in ahead of the defenders. Roles swap every round.',
     defaultTheme: 'Broken Simulation',
@@ -68449,7 +68449,7 @@ const MAP_DATA = {
     ]
   },
   race_shifting: {
-    name: 'Race ; The Shifting Run',
+    name: 'The Shifting Run',   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
     procedural: 'race_shifting',
     description: 'A new track every round: line up across the start, thread the rings through a cavern that has never existed before, dive for the finish.',
     defaultTheme: 'Snow',
@@ -68511,7 +68511,7 @@ const MAP_DATA = {
 
 
   race_pole_position: {
-    name: 'Race ; Pole Position',
+    name: 'Pole Position',   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
     defaultTheme: 'Grassy',
     description: 'Hand-built sweep ; spawns at the eastern start, climb to the cathedral roof, descend through the western spine, dive into the central finish.',
     palette: [
@@ -68555,7 +68555,7 @@ const MAP_DATA = {
   },
 
   race_straightaway: {
-    name: 'Race ; The Straightaway',
+    name: 'The Straightaway',   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
     defaultTheme: 'Snow',
     description: 'Find your own way through open mountainous caverns. Line up across the start, then weave to the finish.',
     palette: [
@@ -68619,7 +68619,7 @@ const CAMPAIGN_LEG_MAP = {
 MAP_DATA.camp_approach = CAMPAIGN_LEG_MAP;
 
 MAP_DATA.endless_caverns = {
-  name: 'ENDLESS ; The Long Dark (flat, retired)',   // (v38.77) base for endless_bend only
+  name: 'The Long Dark (flat)',   // (v38.77) base for endless_bend only
   defaultTheme: 'Rocky',
   description: 'A cavern without end. Fly as far as you can on the lives you chose.',
   procedural: 'endless',
@@ -68634,7 +68634,7 @@ MAP_DATA.endless_caverns = {
 
 MAP_DATA.endless_bend = {
   ...MAP_DATA.endless_caverns,
-  name: 'ENDLESS ; The Long Dark',   // (v38.77) the one endless map
+  name: 'The Long Dark',   // (v38.77) the one endless map   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
   bend: true,
 };
 function _lssEndlessNextSeg(run) {
