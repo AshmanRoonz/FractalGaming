@@ -718,6 +718,7 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
    hero nameplate), so `#ss-rails > div` no longer reaches either. This replaces
    the v36.30 `#ss-options-row > div` entry, whose row no longer exists. */
 #ss-rails > div, #ship-preview-difficulty, #ship-preview-skin,
+#ship-preview-perks, #ss-speed-box,   /* (v43.13) now grandchildren of #ss-rails */
 #ship-preview-info, #teammates-strip, #map-select {
   background: rgba(10,14,26,0.42);
   border: 1px solid rgba(120,150,200,0.22);
@@ -726,6 +727,33 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
           backdrop-filter: blur(10px) saturate(120%);
   box-shadow: 0 6px 24px rgba(0,0,0,0.35);
 }
+
+/* (v43.13) The perk rail and the speed toggle, side by side. The ROW is deliberately bare: the
+   shared translucent-box skin above names its two children directly, so wrapping them did not
+   quietly strip the perk box of its own panel look. */
+#ss-perk-row {
+  display: flex; align-items: stretch; justify-content: center; gap: 8px;
+  max-width: 100%; background: none; border: none; box-shadow: none;
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+}
+#ss-speed-box {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+  padding: 7px 12px 6px; flex: 0 0 auto;
+}
+#ss-speed-desc {
+  font-family: 'Orbitron', sans-serif; font-size: 8px; letter-spacing: 1px;
+  color: #9fb6d8; opacity: 0.7; text-align: center; max-width: 140px;
+}
+#insane-speed-toggle {
+  font-family: 'Orbitron', sans-serif; font-size: 10px; letter-spacing: 2px;
+  padding: 7px 12px; border-radius: 8px; cursor: pointer; white-space: nowrap;
+  background: rgba(20,20,40,0.6); color: #7fd4ff;
+  border: 1px solid rgba(100,170,220,0.35); transition: all 0.15s ease;
+}
+#insane-speed-toggle:hover:not(:disabled) { border-color: #7fd4ff; background: rgba(30,35,60,0.8); }
+#insane-speed-toggle:disabled { opacity: 0.35; cursor: not-allowed; }
+#insane-speed-toggle.active { color: #ffd166; border-color: #ffd166; background: rgba(60,45,10,0.85); }
+#insane-speed-toggle.active:hover:not(:disabled) { border-color: #ffe6a8; background: rgba(80,60,18,0.95); }
 /* (v35.10) Ship carousel — horizontal chip rail, now a floating bar in the
    bottom dock (v35.16). */
 #ship-carousel {
@@ -4341,10 +4369,19 @@ body.vr-active #camp-video { display: none !important; }
          #ss-right-col bottom reservation was re-derived for the shorter dock
          (262 -> 196); see that block. -->
     <div id="ss-rails">
-      <div id="ship-preview-perks" style="display:none;">
-        <div class="perks-label">PILOT PERK</div>
-        <div id="perks-grid"></div>
-        <div id="perks-desc"></div>
+      <!-- (v43.13) perks and the speed toggle sit side by side; the row itself is unstyled so
+           each child keeps the shared translucent-box skin. -->
+      <div id="ss-perk-row">
+        <div id="ship-preview-perks" style="display:none;">
+          <div class="perks-label">PILOT PERK</div>
+          <div id="perks-grid"></div>
+          <div id="perks-desc"></div>
+        </div>
+        <div id="ss-speed-box">
+          <div class="perks-label">MATCH SPEED</div>
+          <button id="insane-speed-toggle" type="button" data-on="0">INSANE SPEED: OFF</button>
+          <div id="ss-speed-desc">Everyone flies at race speed.</div>
+        </div>
       </div>
       <div id="ship-carousel">
         <button class="sc-arrow" id="ship-car-prev" title="Previous ship">&#9664;</button>
@@ -4777,7 +4814,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.12';
+const LSS_BUILD = '43.13';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -5001,6 +5038,9 @@ const LSS = {
   MODE: 'classic',           
   RACE_SPEED: 900,           
   RACE_DASH_SPEED: 1400,     
+  // (v43.13) INSANE SPEED: race velocity in any lobby. A room setting, not a saved
+  // preference - it is broadcast so every ship in the match flies by the same rules.
+  INSANE_SPEED: false,
 };
 
 // Cloudflare Worker base URL ; the API behind lss.fractalreality.ca's
@@ -7836,6 +7876,12 @@ async function joinRoom() {
         // or a peer who never opened the picker) — updateNetworkPlayer hands it
         // straight to _shipSkinDef, which resolves anything unknown to FACTORY.
         peer.skinId = data.skinId;
+        // (v43.13) and adopt the room's speed rule from whoever committed
+        try {
+          if (typeof data.insaneSpeed === 'boolean' && typeof _lssSetInsaneSpeed === 'function') {
+            _lssSetInsaneSpeed(data.insaneSpeed, true);
+          }
+        } catch (_) {}
         // Capture peer's Discord identity if they sent it ; lets
         // the lobby chips show their avatar + display name instead of
         // generic "PEER" text. May be undefined if the peer isn't
@@ -7910,6 +7956,13 @@ async function joinRoom() {
           // (v36.31) Same livery field as the commit-time broadcast, so a peer
           // who joins AFTER we committed still builds our ship skinned.
           skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
+      // match is live, but in the LOBBY it did not cross - measured with two clients both
+      // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
+      // channel's timing, the flag travels on the broadcast that is already proven at exactly
+      // the moment it matters - commit time, and again to every joiner - so nobody can reach
+      // the grid flying by different rules. An old client simply ignores the field.
+      insaneSpeed: !!LSS.INSANE_SPEED,
           discord_id:     _du ? _du.id : undefined,
           discord_name:   _du ? (_du.global_name || _du.username) : undefined,
           discord_avatar: _du ? _du.avatar : undefined,
@@ -14236,6 +14289,13 @@ function handleNetEvent(evt, fromPeerId) {
     } catch (_) {}
     return;
   }
+  // (v43.13) MATCH SPEED, room-wide. Mirrors the race-mode broadcast: apply it and update the
+  // button, but do NOT re-broadcast (fromNet true) or two clients would ping-pong the event forever.
+  if (evt.type === 'speed_mode') {
+    try { if (typeof _lssSetInsaneSpeed === 'function') _lssSetInsaneSpeed(!!evt.on, true); } catch (_) {}
+    return;
+  }
+
   if (evt.type === 'wild_state') {
     try { if (typeof _wildApplyState === 'function') _wildApplyState(evt.s); } catch (_) {}
     return;
@@ -49390,7 +49450,9 @@ class Bot {
     // all chassis so the field stays bunched together regardless of
     // ship choice. Arc-slow debuff still applies (debuffs aren't removed
     // by mode), just to the race speed instead of the chassis speed.
-    const _baseSpd = (LSS.MODE === 'race') ? LSS.RACE_SPEED : this.chassis.flightSpeed;
+    // (v43.13) bots ride the same rule, or insane speed turns every fight into shooting
+    // parked cars - the player would simply outrun the entire roster.
+    const _baseSpd = (LSS.MODE === 'race' || _lssInsaneSpeed()) ? LSS.RACE_SPEED : this.chassis.flightSpeed;
     const maxSpd = this.arcSlowTimer > 0 ? _baseSpd * 0.3 : _baseSpd;
     if (speed > maxSpd) {
       this.velocity.multiplyScalar(maxSpd / speed);
@@ -70424,6 +70486,13 @@ function _lssAnnounceLoadout() {
       team: player.team,
       peerId: net.myPeerId,
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
+      // match is live, but in the LOBBY it did not cross - measured with two clients both
+      // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
+      // channel's timing, the flag travels on the broadcast that is already proven at exactly
+      // the moment it matters - commit time, and again to every joiner - so nobody can reach
+      // the grid flying by different rules. An old client simply ignores the field.
+      insaneSpeed: !!LSS.INSANE_SPEED,
       discord_id:     _du ? _du.id : undefined,
       discord_name:   _du ? (_du.global_name || _du.username) : undefined,
       discord_avatar: _du ? _du.avatar : undefined,
@@ -70927,6 +70996,13 @@ function commitLoadout(key) {
       // so peers build our ship in the right colors on the first try instead of
       // popping from factory to skinned. An old build simply ignores the field.
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
+      // match is live, but in the LOBBY it did not cross - measured with two clients both
+      // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
+      // channel's timing, the flag travels on the broadcast that is already proven at exactly
+      // the moment it matters - commit time, and again to every joiner - so nobody can reach
+      // the grid flying by different rules. An old client simply ignores the field.
+      insaneSpeed: !!LSS.INSANE_SPEED,
       discord_id:     _du ? _du.id : undefined,
       discord_name:   _du ? (_du.global_name || _du.username) : undefined,
       discord_avatar: _du ? _du.avatar : undefined,
@@ -73444,7 +73520,7 @@ function updatePlayerMovement(dt) {
     return;
   }
 
-  const ch = (LSS.MODE === 'race')
+  const ch = (LSS.MODE === 'race' || _lssInsaneSpeed())   // (v43.13) same stats, any lobby
     ? Object.assign({}, player.chassis, {
         flightSpeed:    LSS.RACE_SPEED,
         strafeSpeed:    LSS.RACE_SPEED * 0.85,
@@ -73591,7 +73667,7 @@ function updatePlayerMovement(dt) {
   // In race mode the afterburner cap rises to RACE_DASH_SPEED so
   // afterburner-equipped ships can lean on it without dropping below
   // base race velocity.
-  const _ab = (LSS.MODE === 'race') ? LSS.RACE_DASH_SPEED : 600;
+  const _ab = (LSS.MODE === 'race' || _lssInsaneSpeed()) ? LSS.RACE_DASH_SPEED : 600;   // (v43.13)
   let maxSpeed = player.dashActive ? ch.dashSpeed : (player.afterburnerActive ? _ab : ch.flightSpeed);
   if (swordBlockActive) maxSpeed = ch.flightSpeed * 0.4;
   // Stun Bolt slow caps top speed too, so the player can't outrun
@@ -88106,6 +88182,7 @@ let _previewedKey = null;
 function buildShipSelect() {
   if (typeof window !== 'undefined' && typeof window._refreshRaceModeLock === 'function') {
     try { window._refreshRaceModeLock(); } catch (_) {}
+    try { if (typeof _lssRefreshInsaneSpeedBtn === 'function') _lssRefreshInsaneSpeedBtn(); } catch (_) {}   // (v43.13)
   }
   // (v35.10) Carousel chips under the hero stage (the old left-hand list is
   // gone). Same data + click behavior, new home.
@@ -116865,6 +116942,56 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     }
   });
 
+// (v43.13) INSANE SPEED MODE. Owner: "we could try an insane speed mode, for each lobby (other than
+// race) and match it to race mode for that toggle... make sure toggling it toggles it for all the
+// network."
+// It reuses race mode's numbers exactly (RACE_SPEED 900 / RACE_DASH_SPEED 1400) rather than inventing
+// a second speed scale, so there is one definition of "fast" in the game and the two can never drift.
+// (!) Race mode itself already flies at these numbers, so the toggle is meaningless there and the box
+//     hides - which is the owner's "for each lobby (other than race)".
+// (!) It deliberately does NOT persist. Speed is a property of the match everyone agreed to, not of
+//     the pilot, so it is broadcast and it resets with the room rather than following one player in.
+function _lssInsaneSpeed() {
+  try { return !!LSS.INSANE_SPEED && LSS.MODE !== 'race'; } catch (_) { return false; }
+}
+function _lssInsaneSpeedLocked() {
+  // Same rule race mode uses, for the same reason: flipping the speed under a live round
+  // half-converts the match (ships change speed, bots do not re-plan) - see _raceModeLocked.
+  return typeof game !== 'undefined' && game &&
+         (game.state === 'playing' || game.state === 'roundEnd' ||
+          (game.state === 'warmup' && (game.currentRound | 0) > 1));
+}
+function _lssRefreshInsaneSpeedBtn() {
+  const b = document.getElementById('insane-speed-toggle');
+  const box = document.getElementById('ss-speed-box');
+  if (!b) return;
+  const on = !!LSS.INSANE_SPEED;
+  b.dataset.on = on ? '1' : '0';
+  b.textContent = on ? 'INSANE SPEED: ON' : 'INSANE SPEED: OFF';
+  b.classList.toggle('active', on);
+  const locked = _lssInsaneSpeedLocked();
+  b.disabled = locked;
+  b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
+                   : 'Everyone flies at race speed (900 / 1400 boost). Applies to the whole room.';
+  if (box) box.style.display = (LSS.MODE === 'race') ? 'none' : '';
+}
+function _lssSetInsaneSpeed(on, fromNet) {
+  LSS.INSANE_SPEED = !!on;
+  _lssRefreshInsaneSpeedBtn();
+  if (!fromNet) {
+    try {
+      // (v43.13) NOT gated on net.active. The toggle lives in ship select, and a room can be formed
+      // and peered while net.active is still false (it flips when the match goes live) - gating on it
+      // meant the click applied locally and reached nobody, which is exactly what a two-client test
+      // showed: the clicker flipped to ON and the peer sat at OFF.
+      if (typeof net !== 'undefined' && net && net.sendEvent) {
+        net.sendEvent({ type: 'speed_mode', on: !!on });
+      }
+    } catch (_) {}
+  }
+}
+if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
+
   // Race-mode toggle: flip LSS.MODE and rebroadcast the current
   // map_change so peers stay in sync. When flipping ON, if the current
   // map isn't a race_* map, auto-select Pole Position so race mode is
@@ -116887,6 +117014,17 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     b.title = locked ? 'Race mode is locked during a match' : 'Toggle Race Mode';
   }
   if (typeof window !== 'undefined') window._refreshRaceModeLock = _refreshRaceModeLock;
+  // (v43.13) the match-speed toggle. Broadcast on click so the whole room flips together - a match
+  // where one ship is at 900 and the rest are at their chassis speed is not a match.
+  const _spdBtn = document.getElementById('insane-speed-toggle');
+  if (_spdBtn) {
+    _spdBtn.addEventListener('click', () => {
+      if (_lssInsaneSpeedLocked()) return;
+      _lssSetInsaneSpeed(_spdBtn.dataset.on !== '1', false);
+    });
+  }
+  try { _lssRefreshInsaneSpeedBtn(); } catch (_) {}
+
   const raceBtn = document.getElementById('race-mode-toggle');
   if (raceBtn) {
     raceBtn.addEventListener('click', () => {

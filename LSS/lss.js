@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.12';
+const LSS_BUILD = '43.13';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -80,6 +80,7 @@ const LSS = {
   MODE: 'classic',           
   RACE_SPEED: 900,           
   RACE_DASH_SPEED: 1400,     
+  INSANE_SPEED: false,
 };
 
 const LSS_API_BASE = 'https://lss-backend.ashroney.workers.dev';
@@ -2218,6 +2219,11 @@ async function joinRoom() {
         peer.loadoutKey = data.loadoutKey;
         peer.team = data.team;
         peer.skinId = data.skinId;
+        try {
+          if (typeof data.insaneSpeed === 'boolean' && typeof _lssSetInsaneSpeed === 'function') {
+            _lssSetInsaneSpeed(data.insaneSpeed, true);
+          }
+        } catch (_) {}
         if (data.discord_id) {
           peer.discord_id     = data.discord_id;
           peer.discord_name   = data.discord_name;
@@ -2266,6 +2272,7 @@ async function joinRoom() {
           team: player.team,
           peerId: net.myPeerId,
           skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      insaneSpeed: !!LSS.INSANE_SPEED,
           discord_id:     _du ? _du.id : undefined,
           discord_name:   _du ? (_du.global_name || _du.username) : undefined,
           discord_avatar: _du ? _du.avatar : undefined,
@@ -6758,6 +6765,11 @@ function handleNetEvent(evt, fromPeerId) {
     } catch (_) {}
     return;
   }
+  if (evt.type === 'speed_mode') {
+    try { if (typeof _lssSetInsaneSpeed === 'function') _lssSetInsaneSpeed(!!evt.on, true); } catch (_) {}
+    return;
+  }
+
   if (evt.type === 'wild_state') {
     try { if (typeof _wildApplyState === 'function') _wildApplyState(evt.s); } catch (_) {}
     return;
@@ -31708,7 +31720,7 @@ class Bot {
     this.velocity.z += this.targetDir.z * accelK;
 
     const speed = this.velocity.length();
-    const _baseSpd = (LSS.MODE === 'race') ? LSS.RACE_SPEED : this.chassis.flightSpeed;
+    const _baseSpd = (LSS.MODE === 'race' || _lssInsaneSpeed()) ? LSS.RACE_SPEED : this.chassis.flightSpeed;
     const maxSpd = this.arcSlowTimer > 0 ? _baseSpd * 0.3 : _baseSpd;
     if (speed > maxSpd) {
       this.velocity.multiplyScalar(maxSpd / speed);
@@ -46940,6 +46952,7 @@ function _lssAnnounceLoadout() {
       team: player.team,
       peerId: net.myPeerId,
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      insaneSpeed: !!LSS.INSANE_SPEED,
       discord_id:     _du ? _du.id : undefined,
       discord_name:   _du ? (_du.global_name || _du.username) : undefined,
       discord_avatar: _du ? _du.avatar : undefined,
@@ -47244,6 +47257,7 @@ function commitLoadout(key) {
       team: player.team,
       peerId: net.myPeerId,
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      insaneSpeed: !!LSS.INSANE_SPEED,
       discord_id:     _du ? _du.id : undefined,
       discord_name:   _du ? (_du.global_name || _du.username) : undefined,
       discord_avatar: _du ? _du.avatar : undefined,
@@ -48777,7 +48791,7 @@ function updatePlayerMovement(dt) {
     return;
   }
 
-  const ch = (LSS.MODE === 'race')
+  const ch = (LSS.MODE === 'race' || _lssInsaneSpeed())   // (v43.13) same stats, any lobby
     ? Object.assign({}, player.chassis, {
         flightSpeed:    LSS.RACE_SPEED,
         strafeSpeed:    LSS.RACE_SPEED * 0.85,
@@ -48879,7 +48893,7 @@ function updatePlayerMovement(dt) {
     }
   }
 
-  const _ab = (LSS.MODE === 'race') ? LSS.RACE_DASH_SPEED : 600;
+  const _ab = (LSS.MODE === 'race' || _lssInsaneSpeed()) ? LSS.RACE_DASH_SPEED : 600;   // (v43.13)
   let maxSpeed = player.dashActive ? ch.dashSpeed : (player.afterburnerActive ? _ab : ch.flightSpeed);
   if (swordBlockActive) maxSpeed = ch.flightSpeed * 0.4;
   if (arcSlowed) maxSpeed *= 0.3;
@@ -58919,6 +58933,7 @@ let _previewedKey = null;
 function buildShipSelect() {
   if (typeof window !== 'undefined' && typeof window._refreshRaceModeLock === 'function') {
     try { window._refreshRaceModeLock(); } catch (_) {}
+    try { if (typeof _lssRefreshInsaneSpeedBtn === 'function') _lssRefreshInsaneSpeedBtn(); } catch (_) {}   // (v43.13)
   }
   const track = document.getElementById('ship-carousel-track');
   if (!track) return;
@@ -82137,6 +82152,41 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     }
   });
 
+function _lssInsaneSpeed() {
+  try { return !!LSS.INSANE_SPEED && LSS.MODE !== 'race'; } catch (_) { return false; }
+}
+function _lssInsaneSpeedLocked() {
+  return typeof game !== 'undefined' && game &&
+         (game.state === 'playing' || game.state === 'roundEnd' ||
+          (game.state === 'warmup' && (game.currentRound | 0) > 1));
+}
+function _lssRefreshInsaneSpeedBtn() {
+  const b = document.getElementById('insane-speed-toggle');
+  const box = document.getElementById('ss-speed-box');
+  if (!b) return;
+  const on = !!LSS.INSANE_SPEED;
+  b.dataset.on = on ? '1' : '0';
+  b.textContent = on ? 'INSANE SPEED: ON' : 'INSANE SPEED: OFF';
+  b.classList.toggle('active', on);
+  const locked = _lssInsaneSpeedLocked();
+  b.disabled = locked;
+  b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
+                   : 'Everyone flies at race speed (900 / 1400 boost). Applies to the whole room.';
+  if (box) box.style.display = (LSS.MODE === 'race') ? 'none' : '';
+}
+function _lssSetInsaneSpeed(on, fromNet) {
+  LSS.INSANE_SPEED = !!on;
+  _lssRefreshInsaneSpeedBtn();
+  if (!fromNet) {
+    try {
+      if (typeof net !== 'undefined' && net && net.sendEvent) {
+        net.sendEvent({ type: 'speed_mode', on: !!on });
+      }
+    } catch (_) {}
+  }
+}
+if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
+
   function _raceModeLocked() {
     return typeof game !== 'undefined' && game &&
            (game.state === 'playing' || game.state === 'roundEnd' ||
@@ -82151,6 +82201,15 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     b.title = locked ? 'Race mode is locked during a match' : 'Toggle Race Mode';
   }
   if (typeof window !== 'undefined') window._refreshRaceModeLock = _refreshRaceModeLock;
+  const _spdBtn = document.getElementById('insane-speed-toggle');
+  if (_spdBtn) {
+    _spdBtn.addEventListener('click', () => {
+      if (_lssInsaneSpeedLocked()) return;
+      _lssSetInsaneSpeed(_spdBtn.dataset.on !== '1', false);
+    });
+  }
+  try { _lssRefreshInsaneSpeedBtn(); } catch (_) {}
+
   const raceBtn = document.getElementById('race-mode-toggle');
   if (raceBtn) {
     raceBtn.addEventListener('click', () => {
