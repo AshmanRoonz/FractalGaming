@@ -4851,7 +4851,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.28';
+const LSS_BUILD = '43.29';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -14260,7 +14260,7 @@ function handleNetEvent(evt, fromPeerId) {
     // (v43.24) an announcement is now EVIDENCE, not a decision. Record it; if we are the decider,
     // re-evaluate and decree. A non-decider does nothing at all here, which is the whole point.
     _lssModeLog('rx', 'mode_set', evt.mode, (typeof evt.ago === 'number' ? evt.ago : null), fromPeerId, 'noted');
-    _lssNotePeerMode(fromPeerId, evt.mode, evt.ago);
+    _lssNotePeerMode(fromPeerId, evt);
     _lssModeDecide();
     return;
   }
@@ -90459,6 +90459,10 @@ function _lssModeAnnounce(targetPeerId) {
       mode: LSS.MODE,
       ago: _lssModeAgo(),                  // -1 = "I have not chosen a mode"
       cyber: !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed),
+      // (v43.29) the host signals: how long I have been in this room, and the map I am showing.
+      // The decider needs BOTH to hand the room the host's map instead of its own.
+      inRoom: (net.roomJoinedAt ? Math.round(Math.max(0, performance.now() - net.roomJoinedAt)) : 0),
+      map: (typeof game !== 'undefined' && game && game.selectedMap) ? game.selectedMap : undefined,
     };
     // The seed travels WITH the mode. Endless is the case that proves why: its cavern is a pure
     // function of net.worldSeed (_lssGenEndlessLevel), so two peers agreeing on 'endless' with
@@ -90531,48 +90535,76 @@ function _lssAmModeDecider() {
   try { const d = _lssModeDecider(); return !!d && d === String(net.myPeerId); } catch (_) { return false; }
 }
 // Remember what every peer says it is playing, so the decider has the full picture.
-function _lssNotePeerMode(peerId, mode, ago) {
+function _lssNotePeerMode(peerId, evt) {
   try {
     if (!net._peerModes) net._peerModes = new Map();
-    net._peerModes.set(String(peerId), { mode: mode, ago: (typeof ago === 'number' ? ago : -1), at: performance.now() });
+    if (!evt || typeof evt !== 'object') return;
+    net._peerModes.set(String(peerId), {
+      mode: evt.mode,
+      ago: (typeof evt.ago === 'number') ? evt.ago : -1,
+      // (v43.29) how long they have been in this ROOM - the host signal. Absent from pre-v43.29
+      // clients, which then rank as brand-new arrivals; harmless, since `ago` still separates them.
+      inRoom: (typeof evt.inRoom === 'number') ? evt.inRoom : 0,
+      map: (typeof evt.map === 'string') ? evt.map : null,
+      at: performance.now(),
+    });
   } catch (_) {}
 }
+
 // Run on the decider only. Picks the room's mode and, if it has changed, tells everyone.
 function _lssModeDecide() {
   try {
     if (typeof net === 'undefined' || !net || !net.active || !net.sendEvent) return;
     if (!_lssAmModeDecider()) return;
-    let bestMode = null, bestAgo = -1, bestId = null;
-    // (v43.26) A DELIBERATE PICK OUTRANKS THE JOIN-TIME RULE. `ago` answers "who committed first",
-    // which is the right question when two people arrive having pressed different buttons. It is the
-    // WRONG question once somebody stands in the room and chooses - that is last-writer-wins, like
-    // changing the map. _forcedMode carries the most recent pick this client has seen.
-    if (net._forcedMode) {
-      net._decreedMode = null;
-      bestMode = net._forcedMode; bestAgo = Math.max(0, _lssModeAgo()); bestId = String(net.myPeerId);
-      net._forcedMode = null;
-    } else {
-    const myAgo = _lssModeAgo();
-    if (myAgo >= 0) { bestMode = LSS.MODE; bestAgo = myAgo; bestId = String(net.myPeerId); }
-    if (net._peerModes) {
-      net._peerModes.forEach((v, id) => {
-        if (!v || !v.mode || v.ago < 0) return;                 // never chose - cannot decide the room
-        if (!net.peers || !net.peers.has(id)) return;           // gone
-        // (!) The peer's `ago` was sampled when they SENT it; age it forward so a peer who announced
-        //     a while back is not unfairly ranked as a late chooser.
-        const aged = v.ago + Math.max(0, performance.now() - v.at);
-        if (aged > bestAgo || (aged === bestAgo && bestId !== null && id < bestId)) {
-          bestMode = v.mode; bestAgo = aged; bestId = id;
-        }
+    let bestMode = null, bestAgo = -1, bestId = null, _bestHostMap = null;
+    // (v43.29) ⚠⚠ THE ROOM FOLLOWS ITS HOST. Owner: "the map got locked, and it got locked to a
+    // different map than the host."
+    // v43.24 established the right principle - the lowest peer id picks WHO COMPUTES, never what the
+    // answer is - and then v43.28 had that computer answer with its OWN map. The lowest random
+    // trystero id is not the host, so a joiner could impose its default map on an established room,
+    // and the commit lock then froze everyone onto it.
+    // The honest "host" is whoever has been in this ROOM longest - which is exactly what net.roomJoinedAt
+    // (v43.22) measures and what nobody was using. Each client reports its own elapsed time, so there
+    // is no clock to synchronise, and only the DECIDER compares them, so the antisymmetry trap that
+    // killed v43.22/23 cannot apply: one client does the comparison, once, for everybody.
+    // Layered tie-breaks: longest in the room -> chose first (`ago`) -> lowest id.
+    const _cands = [];
+    try {
+      const _myIn = (net.roomJoinedAt ? Math.max(0, performance.now() - net.roomJoinedAt) : 0);
+      const _myAgo = _lssModeAgo();
+      if (_myAgo >= 0) _cands.push({ id: String(net.myPeerId), mode: LSS.MODE, ago: _myAgo, inRoom: _myIn,
+                                     map: (game && game.selectedMap) || null, mine: true });
+      if (net._peerModes) {
+        net._peerModes.forEach((v, id) => {
+          if (!v || !v.mode || v.ago < 0) return;                 // never chose - cannot decide the room
+          if (!net.peers || !net.peers.has(id)) return;           // gone
+          // Age both stamps forward: they were sampled when the peer SENT them.
+          const _age = Math.max(0, performance.now() - v.at);
+          _cands.push({ id: String(id), mode: v.mode, ago: v.ago + _age,
+                        inRoom: (typeof v.inRoom === 'number' ? v.inRoom + _age : 0),
+                        map: v.map || null, mine: false });
+        });
+      }
+    } catch (_) {}
+    if (_cands.length) {
+      _cands.sort((a, b) => {
+        if (Math.abs(b.inRoom - a.inRoom) > 1500) return b.inRoom - a.inRoom;   // longest in the room
+        if (Math.abs(b.ago - a.ago) > 1200) return b.ago - a.ago;               // else: chose first
+        return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);                        // else: stable
       });
+      const _host = _cands[0];
+      bestMode = _host.mode; bestAgo = _host.ago; bestId = _host.id; _bestHostMap = _host.map;
     }
-    }
+
     if (!bestMode) return;
     // (v43.28) the room agrees on a MAP too. Only send one when it actually belongs to the mode we
     // are decreeing - if a peer outranked us we are about to change mode ourselves, and our current
     // map is still the old mode's. The re-run at the foot of _lssApplyModeDecree sends the right one.
     let _map;
-    try { if (LSS.MODE === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
+    // (v43.29) the HOST's map, not ours. Owner: "the map got locked, and it got locked to a
+    // different map than the host". _bestHostMap is set by the host election above.
+    try { if (_bestHostMap && LSS.MODE === bestMode) _map = _bestHostMap; } catch (_) {}
+    try { if (!_map && LSS.MODE === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
     let _seed;
     try { if (net.worldSeed != null) _seed = net.worldSeed >>> 0; } catch (_) {}
     const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed);
@@ -90625,6 +90657,14 @@ function _lssApplyModeDecree(evt, mine) {
     const _dec = _lssModeDecider();
     if (!mine && evt.by && _dec && String(evt.by) !== String(_dec)) {
       _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'IGNORED - not the decider (' + String(_dec).slice(0, 6) + ')');
+      // (v43.29) ⚠⚠ AND BREAK THE STANDOFF. Ignoring is only safe if SOMEBODY still decides. Two
+      // clients whose peer lists are both still empty each name THEMSELVES decider and each ignore
+      // the other - a permanent split, which is worse than the swap it replaced. So on every
+      // ignore: record what they told us, re-announce ourselves (the real decider needs our data
+      // to rule), and rule now if we believe we are it. All three are cheap and idempotent.
+      try { _lssNotePeerMode(evt.by, evt); } catch (_) {}
+      try { _lssModeAnnounce(); } catch (_) {}
+      try { _lssModeDecide(); } catch (_) {}
       return;
     }
     net.roomMode = evt.mode;
