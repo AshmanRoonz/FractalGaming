@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.54';
+const LSS_BUILD = '43.57';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -4977,6 +4977,7 @@ function _applyStagedRoundShip() {
 }
 
 function enterShipSelect() {
+  try { setTimeout(_ssSpreadRails, 0); } catch (_) {}
   try { if (typeof _lssModeAnnounceBurst === 'function') _lssModeAnnounceBurst(); } catch (_) {}
   try { if (typeof _ovWarpClear === 'function') _ovWarpClear(); } catch (_) {}
   try { if (typeof _clipHideSaveBtn === 'function') _clipHideSaveBtn(); } catch (_) {}
@@ -60737,6 +60738,81 @@ try {
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _ssInfoUnstick);
   else setTimeout(_ssInfoUnstick, 0);
 } catch (_) {}
+let _ssSpreadBusy = false;
+function _ssSpreadRails() {
+  if (_ssSpreadBusy) return;
+  _ssSpreadBusy = true;
+  try {
+    const sel = document.getElementById('ship-select');
+    if (!sel || getComputedStyle(sel).display === 'none') { _ssSpreadBusy = false; return; }
+    const vis = el => !!el && getComputedStyle(el).display !== 'none' &&
+                      el.getBoundingClientRect().width > 0;
+    const perks = document.getElementById('ship-preview-perks');
+    const info  = document.getElementById('ship-preview-info');
+    const strip = document.getElementById('teammates-strip');
+    const col   = document.getElementById('ss-right-col');
+    const dock  = document.getElementById('ss-header-right');
+    const diff  = document.getElementById('ship-preview-difficulty');
+    const desc  = document.getElementById('perks-desc');
+    const vw = window.innerWidth;
+    const EDGE = 12, GAP = 16, MID = 28;
+
+    if (col) {
+      col.style.removeProperty('top');
+      const base = parseFloat(getComputedStyle(col).top) || 0;
+      let stack = 0;
+      if (vis(dock)) stack = dock.getBoundingClientRect().bottom;
+      if (vis(diff)) stack = Math.max(stack, diff.getBoundingClientRect().bottom);
+      const want = Math.max(base, stack + 12);
+      if (want > base + 0.5) col.style.setProperty('top', Math.round(want) + 'px', 'important');
+    }
+
+    const leftEdge  = vis(strip) ? strip.getBoundingClientRect().right + GAP : EDGE;
+    const rightEdge = vis(col)   ? col.getBoundingClientRect().left - 12     : vw - EDGE;
+
+    let pw = 232, iw = 272;
+    const band = rightEdge - leftEdge;
+    if (pw + iw + MID > band) {
+      const k = Math.max(0, band - MID) / (pw + iw);
+      pw = Math.max(120, Math.floor(pw * k));
+      iw = Math.max(140, Math.floor(iw * k));
+    }
+    if (perks) {
+      perks.style.setProperty('left', Math.round(leftEdge) + 'px', 'important');
+      perks.style.setProperty('width', pw + 'px', 'important');
+    }
+    if (info) {
+      info.style.setProperty('right', Math.round(vw - rightEdge) + 'px', 'important');
+      info.style.setProperty('width', iw + 'px', 'important');
+    }
+
+    if (desc && vis(desc)) {
+      const avail = (rightEdge - iw) - (leftEdge + 26) - 8;   // 14 rail padding + 12 blurb margin
+      desc.style.setProperty('width', Math.max(200, Math.min(320, Math.round(avail))) + 'px', 'important');
+      desc.style.setProperty('max-width', 'none', 'important');
+    }
+  } catch (_) {}
+  _ssSpreadBusy = false;
+}
+try {
+  const _ssSpreadSoon = () => { try { requestAnimationFrame(_ssSpreadRails); } catch (_) {} };
+  window.addEventListener('resize', _ssSpreadSoon);
+  window.addEventListener('orientationchange', () => setTimeout(_ssSpreadSoon, 60));
+  const _ssWatch = () => {
+    try {
+      if (typeof ResizeObserver !== 'function') return;
+      const ro = new ResizeObserver(_ssSpreadSoon);
+      ['teammates-strip', 'ss-header-right', 'ship-preview-difficulty', 'ss-launch-row']
+        .forEach(id => { const e = document.getElementById(id); if (e) ro.observe(e); });
+      const sel = document.getElementById('ship-select');
+      if (sel) new MutationObserver(_ssSpreadSoon)
+        .observe(sel, { attributes: true, attributeFilter: ['class', 'style'] });
+    } catch (_) {}
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _ssWatch);
+  else setTimeout(_ssWatch, 0);
+} catch (_) {}
+
 function _lssRoomModeChoose(want) {
   const m = _lssRoomModeOr(want);
   try { _lssModeChosen(); } catch (_) {}
