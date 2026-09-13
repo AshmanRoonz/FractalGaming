@@ -4851,7 +4851,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.29';
+const LSS_BUILD = '43.30';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -89298,6 +89298,8 @@ function _lssLoadingImgEnsure() {
   } catch (_) {}
 }
 function showLoadingOverlay(mainText, subText) {
+  // (v43.30) every raise arms the failsafe; it disarms itself the moment the curtain is down.
+  try { _lssCurtainFailsafe(); } catch (_) {}
   const ov = document.getElementById('lss-loading-overlay');
   if (!ov) return;
   _lssLoadingImgEnsure();
@@ -89324,6 +89326,43 @@ function showLoadingOverlay(mainText, subText) {
   try { _xrCoverUp(ov._lssMain, ov._lssSub); } catch (_) {}
 }
 let _lssCurtainTries = 0;
+// (v43.30) ⚠⚠ THE CURTAIN CAN NEVER TRAP YOU. Owner: "i dropped a match and rejoined and it glitched
+// at the loading screen... could hear ships flying around, and looked like it connected... but didn't
+// get past that loading screen."
+// That is the exact signature of a live world behind a curtain that never lifted: the match IS
+// running (hence the ships) and only the overlay is wrong. There IS a stall watchdog for this
+// (_clearLaunchStall, ~71559) but it returns early the moment net.active is true - "MP owns its own
+// handshake" - so multiplayer, the one case with a network to stall on, is the one case with no
+// rescue. Every lift of this curtain hangs off a handshake step, and any of them can be missed:
+// sendEvent is documented unreliable, a dropped launch_at strands the receiver, and a re-join lands
+// in a state none of the paths expected.
+// So: while the curtain is up, watch. If the game is actually PLAYING and has been for a good while,
+// the curtain is a bug by definition - lift it. Deliberately generous (6 s of live play) so it cannot
+// pre-empt a legitimate hold: the cyberpunk build-hold is handled inside hideLoadingOverlay itself,
+// and round transitions re-show it briefly.
+let _lssCurtainWatch = null;
+function _lssCurtainFailsafe() {
+  try {
+    if (_lssCurtainWatch) return;
+    let _playingFor = 0;
+    _lssCurtainWatch = setInterval(() => {
+      try {
+        const ov = document.getElementById('lss-loading-overlay');
+        const up = !!(ov && ov.classList.contains('active'));
+        if (!up) { clearInterval(_lssCurtainWatch); _lssCurtainWatch = null; return; }
+        const live = (typeof game !== 'undefined' && game && game.state === 'playing');
+        _playingFor = live ? _playingFor + 500 : 0;
+        if (_playingFor >= 6000) {
+          console.warn('[curtain] loading overlay still up after 6s of live play - lifting it (failsafe)');
+          try { _lssModeLog('rx', 'curtain', (typeof LSS !== 'undefined' ? LSS.MODE : '?'), null, null, 'FAILSAFE lift'); } catch (_) {}
+          clearInterval(_lssCurtainWatch); _lssCurtainWatch = null;
+          try { hideLoadingOverlay(); } catch (_) {}
+        }
+      } catch (_) { try { clearInterval(_lssCurtainWatch); } catch (__) {} _lssCurtainWatch = null; }
+    }, 500);
+  } catch (_) {}
+}
+
 function hideLoadingOverlay() {
   // (v38.03) CYBERPUNK CITY: hold the curtain until the mode has built itself. It used to lift a
   // beat before the lineup started, and that beat is the free-flight camera sitting at the launch
@@ -90689,7 +90728,35 @@ function _lssApplyModeDecree(evt, mine) {
     }
     let mapChanged = false;
     try {
-      if (evt.map && game && game.selectedMap !== evt.map) { game.selectedMap = evt.map; mapChanged = true; }
+      // (v43.30) ⚠⚠ A MAP MUST BE LEGAL FOR ITS MODE. Owner: "if someone joins on elimination, they
+      // are stuck on nexus, because there's no way to change the map in exhibition, and there's just
+      // the 1 map selection."
+      // EXHIBITION has exactly ONE legal map (hub_overworld), so a client left holding a classic map
+      // has no control that can fix it - the carousel it would use has a single entry. Two ways in:
+      // a decree could carry the decider's classic map while decreeing freeflight, and
+      // _applyModeClientSetup's own selectedMap write could then be overwritten by it.
+      // So: refuse a map that is not in this mode's list, and afterwards ASSERT that whatever we are
+      // holding is legal - snapping to the mode's first map if not. buildMapSelector does the same
+      // snap, but only on the paths that call it; this is the invariant, stated once.
+      let _want = evt.map;
+      try {
+        if (_want && typeof _visibleMapKeys === 'function') {
+          const _legal = _visibleMapKeys();
+          if (_legal && _legal.length && _legal.indexOf(_want) === -1) {
+            _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'map ' + _want + ' is not legal for ' + evt.mode + ' - ignored');
+            _want = null;
+          }
+        }
+      } catch (_) {}
+      if (_want && game && game.selectedMap !== _want) { game.selectedMap = _want; mapChanged = true; }
+      try {
+        if (typeof _visibleMapKeys === 'function' && game) {
+          const _legal = _visibleMapKeys();
+          if (_legal && _legal.length && _legal.indexOf(game.selectedMap) === -1) {
+            game.selectedMap = _legal[0]; mapChanged = true;
+          }
+        }
+      } catch (_) {}
     } catch (_) {}
     if (!modeChanged && !mapChanged) {
       _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'already on it');

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.29';
+const LSS_BUILD = '43.30';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -59658,6 +59658,7 @@ function _lssLoadingImgEnsure() {
   } catch (_) {}
 }
 function showLoadingOverlay(mainText, subText) {
+  try { _lssCurtainFailsafe(); } catch (_) {}
   const ov = document.getElementById('lss-loading-overlay');
   if (!ov) return;
   _lssLoadingImgEnsure();
@@ -59676,6 +59677,29 @@ function showLoadingOverlay(mainText, subText) {
   try { _xrCoverUp(ov._lssMain, ov._lssSub); } catch (_) {}
 }
 let _lssCurtainTries = 0;
+let _lssCurtainWatch = null;
+function _lssCurtainFailsafe() {
+  try {
+    if (_lssCurtainWatch) return;
+    let _playingFor = 0;
+    _lssCurtainWatch = setInterval(() => {
+      try {
+        const ov = document.getElementById('lss-loading-overlay');
+        const up = !!(ov && ov.classList.contains('active'));
+        if (!up) { clearInterval(_lssCurtainWatch); _lssCurtainWatch = null; return; }
+        const live = (typeof game !== 'undefined' && game && game.state === 'playing');
+        _playingFor = live ? _playingFor + 500 : 0;
+        if (_playingFor >= 6000) {
+          console.warn('[curtain] loading overlay still up after 6s of live play - lifting it (failsafe)');
+          try { _lssModeLog('rx', 'curtain', (typeof LSS !== 'undefined' ? LSS.MODE : '?'), null, null, 'FAILSAFE lift'); } catch (_) {}
+          clearInterval(_lssCurtainWatch); _lssCurtainWatch = null;
+          try { hideLoadingOverlay(); } catch (_) {}
+        }
+      } catch (_) { try { clearInterval(_lssCurtainWatch); } catch (__) {} _lssCurtainWatch = null; }
+    }, 500);
+  } catch (_) {}
+}
+
 function hideLoadingOverlay() {
   try {
     if (game && game._cyber && game._cyber.armed && !game._cyber.started &&
@@ -60467,7 +60491,25 @@ function _lssApplyModeDecree(evt, mine) {
     }
     let mapChanged = false;
     try {
-      if (evt.map && game && game.selectedMap !== evt.map) { game.selectedMap = evt.map; mapChanged = true; }
+      let _want = evt.map;
+      try {
+        if (_want && typeof _visibleMapKeys === 'function') {
+          const _legal = _visibleMapKeys();
+          if (_legal && _legal.length && _legal.indexOf(_want) === -1) {
+            _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'map ' + _want + ' is not legal for ' + evt.mode + ' - ignored');
+            _want = null;
+          }
+        }
+      } catch (_) {}
+      if (_want && game && game.selectedMap !== _want) { game.selectedMap = _want; mapChanged = true; }
+      try {
+        if (typeof _visibleMapKeys === 'function' && game) {
+          const _legal = _visibleMapKeys();
+          if (_legal && _legal.length && _legal.indexOf(game.selectedMap) === -1) {
+            game.selectedMap = _legal[0]; mapChanged = true;
+          }
+        }
+      } catch (_) {}
     } catch (_) {}
     if (!modeChanged && !mapChanged) {
       _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'already on it');
