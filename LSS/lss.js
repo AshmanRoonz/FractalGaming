@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.92';
+const LSS_BUILD = '42.93';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -61210,6 +61210,20 @@ function buildSettingsPage() {
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
         <label style="flex:1;">FOV applies to flat-screen rendering. The headset's native FOV is used in VR (slider has no visible effect there).</label>
       </div>
+      <div class="setting-row">
+        <label>Wide View Correction</label>
+        <input type="range" id="set-panini" min="0" max="1" step="0.05" value="${(function(){try{return _lssPaniniD();}catch(_){return 0;}})()}">
+        <div class="value-display" id="val-panini">${(function(){try{const d=_lssPaniniD();return d>0?d.toFixed(2):'Off';}catch(_){return 'Off';}})()}</div>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">Straightens the stretched periphery a wide FOV produces. At 120&deg; the frame edge is
+        magnified 10.5&times; versus the centre and pulled 3.2&times; wider than tall &mdash; that is ordinary perspective,
+        not a fault, and it is why 90&deg; looks natural and 120&deg; does not. This trades it away: at full strength
+        the edge drops to 1.5&times; and shapes are exact everywhere. It keeps the full horizontal field and pays in
+        VERTICAL field (120&deg;&rarr;83&deg; at full), and magnifies the centre to match, so the scene is rendered at a
+        higher resolution to suit &mdash; measured at 3 fps for 3.9&times; the pixels. 0 is the classic image, unchanged.
+        No effect in VR, where the headset owns the projection.</label>
+      </div>
     </div>
 
     <div class="settings-section">
@@ -62634,6 +62648,25 @@ function buildSettingsPage() {
     input.hudGaugeLabels = !!gaugeLabelChk.checked;
     saveSettings();
   });
+  const paniniSel = overlay.querySelector('#set-panini');
+  const paniniVal = overlay.querySelector('#val-panini');
+  if (paniniSel) {
+    const _showPanini = (v) => { if (paniniVal) paniniVal.textContent = (v > 0) ? v.toFixed(2) : 'Off'; };
+    paniniSel.addEventListener('input', () => {
+      const v = parseFloat(paniniSel.value);
+      if (!isFinite(v)) return;
+      window.__panini = v;
+      try { _LSSPAN._d = -1; } catch (_) {}   // force the next sync to recompute
+      _showPanini(v);
+    });
+    paniniSel.addEventListener('change', () => {
+      const v = parseFloat(paniniSel.value);
+      if (!isFinite(v)) return;
+      try { window.__paniniSet(v); } catch (_) {}
+      _showPanini(v);
+    });
+  }
+
   const hudScaleSel = overlay.querySelector('#set-hud-scale');
   const hudScaleVal = overlay.querySelector('#val-hud-scale');
   if (hudScaleSel) {
