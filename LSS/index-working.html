@@ -4814,7 +4814,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.14';
+const LSS_BUILD = '43.16';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -103957,7 +103957,17 @@ function __pmark(name) {
 
 function gameLoop(timestamp) {
   // (v43.11) THE HEARTBEAT THE WATCHDOG WATCHES. See setupBackgroundTick.
-  try { _lssLastLoopAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); } catch (_) {}
+  // (v43.16) TWO stamps, and the difference is the whole mechanism. _lssLastLoopAt says the loop ran
+  // at all; _lssLastRafAt says the COMPOSITOR ran it. The watchdog has to key on the second, because
+  // once it starts driving the loop itself the first is always fresh - which is why v43.15 could only
+  // manage ~7.6 Hz: each of its own frames reset the very clock it was watching, so it had to wait out
+  // another full stall before firing again. Measured at 0.37x real time; now it holds the loop at
+  // TICK_HZ for as long as the compositor stays away.
+  try {
+    const _lt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    _lssLastLoopAt = _lt;
+    if (!_lssFromWatchdog) _lssLastRafAt = _lt;
+  } catch (_) {}
   // VR fork: renderer.setAnimationLoop drives this every frame (in both
   // flat and immersive modes), so we no longer self-schedule via
   // requestAnimationFrame. setAnimationLoop also gives us correct
@@ -115660,6 +115670,8 @@ renderer.setAnimationLoop(gameLoop);
 // main loop has not run for _LSS_STALL_MS. It composes with the visibilitychange path below - that
 // path keeps driving the loop, which keeps the stamp fresh, which keeps the watchdog quiet.
 let _lssLastLoopAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+let _lssLastRafAt = _lssLastLoopAt;   // (v43.16) last frame the COMPOSITOR drove
+let _lssFromWatchdog = false;         // (v43.16) true only while the Worker is stepping the loop
 const _LSS_STALL_MS = 120;   // ~7 missed frames at 60 Hz: long enough never to fight a healthy rAF
 
 (function setupBackgroundTick() {
@@ -115674,19 +115686,22 @@ const _LSS_STALL_MS = 120;   // ~7 missed frames at 60 Hz: long enough never to 
       const url  = URL.createObjectURL(blob);
       bgWorker = new Worker(url);
       bgWorker.onmessage = () => {
-        if (!bgActive) return;
-        if (!document.hidden) return;
-        // Skip if we're in an XR session ; XR drives its own loop.
+        // XR drives its own loop and must never be stepped from here.
         if (renderer && renderer.xr && renderer.xr.isPresenting) return;
-        try {
-          const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-          // (v43.11) the Worker is now permanent, so it must not double-drive a healthy rAF:
-          // only step the loop when the main thread has actually stalled.
-          const _nowW = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-          if (bgActive || (_nowW - _lssLastLoopAt) > _LSS_STALL_MS) gameLoop(t);
-        } catch (err) {
-          // Silent ; the next tick will try again. Logging here would spam.
-        }
+        const _now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        const _stalled = (_now - _lssLastRafAt) > _LSS_STALL_MS;   // (v43.16) the compositor, not ourselves
+        // (v43.15) THE GUARD THAT MADE v43.11 INERT. The handler used to open with
+        //     if (!bgActive) return;  if (!document.hidden) return;
+        // so the stall check added in v43.11 sat BELOW two returns that already excluded the only
+        // situation it was written for - a page that is still 'visible' but has stopped being
+        // painted. The watchdog could never fire. Both conditions are folded into one test now:
+        //   hidden + handed off  -> drive at TICK_HZ, exactly as before
+        //   visible + stalled    -> drive (this is the case that was unreachable)
+        //   visible + healthy    -> do nothing, so a healthy rAF is never double-driven
+        if (!_stalled && !(bgActive && document.hidden)) return;
+        _lssFromWatchdog = true;
+        try { gameLoop(_now); } catch (err) { /* silent; the next tick retries */ }
+        finally { _lssFromWatchdog = false; }
       };
     } catch (err) {
       console.warn('[v9b] bg-tick worker failed to spawn:', err && err.message);

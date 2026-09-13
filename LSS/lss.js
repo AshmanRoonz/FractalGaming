@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.14';
+const LSS_BUILD = '43.16';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -71103,7 +71103,11 @@ function __pmark(name) {
 })();
 
 function gameLoop(timestamp) {
-  try { _lssLastLoopAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now(); } catch (_) {}
+  try {
+    const _lt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    _lssLastLoopAt = _lt;
+    if (!_lssFromWatchdog) _lssLastRafAt = _lt;
+  } catch (_) {}
   if (typeof timestamp !== 'number') timestamp = (typeof performance !== 'undefined' ? performance.now() : Date.now());
   if (typeof _lssResolveFrameYields === 'function') _lssResolveFrameYields();
   if (typeof _tickLaunchCountdownWatchdog === 'function') _tickLaunchCountdownWatchdog(timestamp);
@@ -81098,6 +81102,8 @@ document.addEventListener('keydown', _lssUnlockAnnouncerAudio, { once: false });
 renderer.setAnimationLoop(gameLoop);
 
 let _lssLastLoopAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+let _lssLastRafAt = _lssLastLoopAt;   // (v43.16) last frame the COMPOSITOR drove
+let _lssFromWatchdog = false;         // (v43.16) true only while the Worker is stepping the loop
 const _LSS_STALL_MS = 120;   // ~7 missed frames at 60 Hz: long enough never to fight a healthy rAF
 
 (function setupBackgroundTick() {
@@ -81112,15 +81118,13 @@ const _LSS_STALL_MS = 120;   // ~7 missed frames at 60 Hz: long enough never to 
       const url  = URL.createObjectURL(blob);
       bgWorker = new Worker(url);
       bgWorker.onmessage = () => {
-        if (!bgActive) return;
-        if (!document.hidden) return;
         if (renderer && renderer.xr && renderer.xr.isPresenting) return;
-        try {
-          const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-          const _nowW = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
-          if (bgActive || (_nowW - _lssLastLoopAt) > _LSS_STALL_MS) gameLoop(t);
-        } catch (err) {
-        }
+        const _now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        const _stalled = (_now - _lssLastRafAt) > _LSS_STALL_MS;   // (v43.16) the compositor, not ourselves
+        if (!_stalled && !(bgActive && document.hidden)) return;
+        _lssFromWatchdog = true;
+        try { gameLoop(_now); } catch (err) { /* silent; the next tick retries */ }
+        finally { _lssFromWatchdog = false; }
       };
     } catch (err) {
       console.warn('[v9b] bg-tick worker failed to spawn:', err && err.message);
