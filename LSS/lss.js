@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.06';
+const LSS_BUILD = '43.07';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -22727,7 +22727,11 @@ function _hcTrafficUpdate(dt) {
       const e = s.ent;
       if (_trafProxy) {
         if (e._netPos) {
-          e.position.copy(e._netPos);
+          const _pk = Math.min(1, dt * 10);
+          e.position.x += (e._netPos.x - e.position.x) * _pk;
+          e.position.y += (e._netPos.y - e.position.y) * _pk;
+          e.position.z += (e._netPos.z - e.position.z) * _pk;
+          try { _hubCityCollide(e.position, e.velocity, 55); } catch (_) {}
           s.holder.visible = true;
           s.holder.position.copy(e.position);
           _HC_TRAF.obbs.push({ x: e.position.x, y: e.position.y + 20, z: e.position.z,
