@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.70';
+const LSS_BUILD = '43.71';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -83139,7 +83139,7 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
         } else {
           if (lbl) lbl.textContent = 'DROP ON LOCATION';
           if (fin) fin.style.display = 'none';
-          if (startInp) startInp.placeholder = 'Empire State Building';
+          if (startInp) startInp.placeholder = 'ENTER LOCATION NAME';   // (v43.71)
         }
       } catch (_) {}
       if (on && typeof setWallPattern === 'function') {
