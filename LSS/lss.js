@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.95';
+const LSS_BUILD = '42.96';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -29207,6 +29207,16 @@ function getWallNormal(point) {
 }
 
 
+const LSS_UNITS_PER_METRE = 12.8;
+function _lssMetres(u) { return u / LSS_UNITS_PER_METRE; }
+function _lssKmh(unitsPerSec) { return _lssMetres(unitsPerSec) * 3.6; }
+function _lssRangeStr(u) {
+  const m = _lssMetres(u);
+  if (m < 100) return Math.round(m) + 'm';
+  if (m < 1000) return (Math.round(m / 5) * 5) + 'm';
+  return (Math.round(m / 100) / 10).toFixed(1) + 'km';
+}
+
 const VISUAL_SCALE_BOOST = 1.55;
 function _shipsVariant() {
   if (_shipsVariant._v === undefined) {
@@ -56903,7 +56913,7 @@ function drawCircumpunctHUD() {
       speedPct: speedPct,
       ammoPct: _infAmmo ? 1 : player.clipAmmo / player.maxClip,
       ammoStr: _infAmmo ? 'INF' : String(player.clipAmmo),
-      speedStr: Math.round(player.velocity ? player.velocity.length() : 0) + 'km/h',
+      speedStr: Math.round(_lssKmh(player.velocity ? player.velocity.length() : 0)) + 'km/h',   // (v42.96) real km/h, not raw units wearing a unit's name
       ammoFull: _infAmmo ? 'INF' : (player.clipAmmo + '/' + player.maxClip),
       ammoCol: player.reloading ? '#ffb020' : null,
       corePct: _corePctDraw, coreCol: _coreCol,
@@ -69842,8 +69852,7 @@ function updateEnemyHealthBars() {
     if (div._text && div._lt !== visText) { div._text.textContent = visText; div._lt = visText; }
     if (div._dist) {
       const _gap = Math.max(0, dist - _lblHullR(player) - _lblHullR(ent));
-      const _dq = (_gap < 1000) ? (Math.round(_gap / 10) * 10) + 'm'
-                                : (Math.round(_gap / 100) / 10).toFixed(1) + 'km';
+      const _dq = _lssRangeStr(_gap);   // (v42.96) real metres
       if (div._ld !== _dq) { div._dist.textContent = _dq; div._ld = _dq; }
     }
   };

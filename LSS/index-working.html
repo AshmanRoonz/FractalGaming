@@ -4760,7 +4760,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.95';
+const LSS_BUILD = '42.96';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -45419,6 +45419,42 @@ function getWallNormal(point) {
 // axes. Previously the visual width was noticeably thinner than the hit
 // sphere ; ships looked smaller than they actually were collision-wise, so
 // pilots would aim for a tunnel that "looked" big enough and bounce off.
+// (v42.96) THE REAL-WORLD SCALE OF A GAME UNIT.
+// Owner: "the sizing of everything looks fine in the game, but the numbers are not realistic... the
+// cockpit is probably only as wide as a regular car's cabin, like 3m max".
+//
+// He was right, and the art agrees with him. MEASURED on VORTEX: the cockpit tub
+// (LIN13_vortex_ConformalCabinShell - the enclosed volume the pilot sits in, not the canopy glass
+// and not the seat) is 38.4 game units across. Taking that as the owner's 3 m puts a game unit at
+// 7.8 cm, and every other dimension then lands where a real aircraft's does:
+//     VORTEX   13.9 m long, 12.3 m span, 3.0 m tall, canopy glass 1.23 m, seat + harness 1.09 m
+//     F-16     15.0 m long,  9.8 m span
+// Nothing was rescaled to achieve that - the models were always built coherently. The READOUTS were
+// simply never converted: `speedStr` was velocity.length() with 'km/h' glued on the end, so the HUD
+// has been reporting raw units under a real unit's name since v38.75.
+//
+// (!) THE SPEED GETS SLOWER, AND THAT IS THE ARITHMETIC, NOT A BUG. A 14 m ship covering 330 units
+// a second is doing 93 km/h, not 330. The owner was shown this and chose one consistent scale over
+// a flattering number ("Real scale everywhere, accept 93 km/h"). Do not quietly re-inflate it.
+//
+// (!) Calibrated from ONE hull, because it is one global constant; the other six cockpits differ by
+// a few percent. If the anchor ever needs revisiting, re-measure ConformalCabinShell, not the hull
+// bbox - the hull bbox includes wings and the shield bubble (the v41.58 trap).
+//
+// (!) Deliberately NOT applied to stored scores. The endless distance leaderboard holds records in
+// raw units; converting the display would silently make new entries incomparable with old ones.
+const LSS_UNITS_PER_METRE = 12.8;
+function _lssMetres(u) { return u / LSS_UNITS_PER_METRE; }
+function _lssKmh(unitsPerSec) { return _lssMetres(unitsPerSec) * 3.6; }
+// Range, formatted for reading at a glance. Finer close in, where a metre matters, and coarser far
+// out - which also keeps the DOM write rate down (see the note at the callout's range readout).
+function _lssRangeStr(u) {
+  const m = _lssMetres(u);
+  if (m < 100) return Math.round(m) + 'm';
+  if (m < 1000) return (Math.round(m / 5) * 5) + 'm';
+  return (Math.round(m / 100) / 10).toFixed(1) + 'km';
+}
+
 const VISUAL_SCALE_BOOST = 1.55;
 // Ships base, mirrors _framesBaseUrl: when the page is served from inside
 // /LSS/ the models sit beside it at ./ships/; when served from the parent
@@ -85181,7 +85217,7 @@ function drawCircumpunctHUD() {
       ammoPct: _infAmmo ? 1 : player.clipAmmo / player.maxClip,
       ammoStr: _infAmmo ? 'INF' : String(player.clipAmmo),
       // (v38.75) the readouts beside the arc captions
-      speedStr: Math.round(player.velocity ? player.velocity.length() : 0) + 'km/h',
+      speedStr: Math.round(_lssKmh(player.velocity ? player.velocity.length() : 0)) + 'km/h',   // (v42.96) real km/h, not raw units wearing a unit's name
       ammoFull: _infAmmo ? 'INF' : (player.clipAmmo + '/' + player.maxClip),
       ammoCol: player.reloading ? '#ffb020' : null,
       corePct: _corePctDraw, coreCol: _coreCol,
@@ -101747,8 +101783,7 @@ function updateEnemyHealthBars() {
       // the GAP, not the centre separation - `dist` itself is left alone because the range and
       // LOS gates above are built on it.
       const _gap = Math.max(0, dist - _lblHullR(player) - _lblHullR(ent));
-      const _dq = (_gap < 1000) ? (Math.round(_gap / 10) * 10) + 'm'
-                                : (Math.round(_gap / 100) / 10).toFixed(1) + 'km';
+      const _dq = _lssRangeStr(_gap);   // (v42.96) real metres
       if (div._ld !== _dq) { div._dist.textContent = _dq; div._ld = _dq; }
     }
   };
