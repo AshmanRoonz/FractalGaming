@@ -5901,7 +5901,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.84';
+const LSS_BUILD = '43.85';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -16571,6 +16571,34 @@ const _FXFF = {
 // (flames already burning keep the colour they were built with).
 const _FIRE_RAMP_BASE   = { c0: 0x3a0a02, c1: 0xcc2a00, c2: 0xff6a18, c3: 0xffe39a };
 const _FIRE_RAMP_SHIELD = { c0: 0x2a0600, c1: 0xcc2a00, c2: 0xff7a22, c3: 0xffe39a };
+// ⭐ (v43.85) THE FRIENDLY RAMPS ARE NOW HAND-AUTHORED, NOT DERIVED - and the reason the last two
+// builds failed is STRUCTURAL, not timid.
+// The fire shader ends with `col *= (0.7 + dens*1.9)` - up to 2.6x - and the scene render target is
+// 8-bit (_rtSceneOpts is RGBAFormat with NO type, so UnsignedByteType), so everything above 1.0 is
+// destroyed in hardware. Pushed through the shader's own arithmetic, the v43.84 friendly ramp and
+// the enemy ramp resolve to the SAME PIXEL in the hot core:
+//     dens 0.85   friendly #ffc9a7   enemy #ffffa7
+//     dens 0.95   friendly #ffffe1   enemy #ffffe1     <- identical
+//     dens 1.00   friendly #ffffec   enemy #ffffec     <- identical
+// The brightest, largest-reading part of every flame was byte-for-byte the same on both sides.
+// Nobody could see the change because at the place the eye goes, there was nothing to see.
+// ⚠ AND HUE ROTATION CANNOT EVER FIX THAT. setHSL preserves lightness and saturation, so it
+// preserves min(r,g,b) exactly, so it can only move the MIDDLE channel: the pale tip's blue is 0x9a
+// before the rotation and 0x9a after it. Even a full rotation to pure red leaves dens 0.9 washing
+// out. That is why "rotate further" was the wrong instrument twice.
+// So the two stops the clip was eating are written DIRECTLY, pre-compensated for the multiply.
+// Measured friendly gradient now: #dc1600 at dens 0.3, #ff2e02 at 0.5, #ff4104 at 0.7, #ff540d at
+// 0.85, #ff6514 at the tip - a deep red plume with a red-orange EMBER core, against the enemy's
+// unchanged orange-to-white. c0/c1 are the v43.84 values kept as-is: the body was already rendering
+// unclipped and was never the problem.
+// What sells it as FIRE rather than a flat red blob is now the alpha ramp (alpha = dens * uBaseAlpha,
+// untouched) and the red-to-ember walk, instead of a white tip.
+// ⚠ KEEP THESE OBJECTS TO c0..c3 ONLY. A ramp is Object.assign'd SECOND at all three merge sites, so
+// any extra key here would silently blanket-override the call site's own value at all three at once
+// (thermite alpha 0.55, flame-chain 0.6, fire-shield 0.5). If the friendly flame ever needs its
+// brightness back, thread a SEPARATE argument - never a key on the ramp.
+const _FIRE_RAMP_BASE_RED   = { c0: 0x3a0200, c1: 0xcc1400, c2: 0xff2d02, c3: 0xff3f09 };
+const _FIRE_RAMP_SHIELD_RED = { c0: 0x2a0400, c1: 0xcc1400, c2: 0xff3305, c3: 0xff3f09 };
 // Keyed by the ramp OBJECT, so the constants above must be referenced, never rebuilt inline at a
 // call site - a fresh literal every spawn would miss the cache and re-run the conversion per flame.
 const _FIRE_RED_CACHE = new Map();
@@ -16594,10 +16622,21 @@ function _fireRedden(ramp) {
 // Returns {c0,c1,c2,c3} to merge into a _makeFireCloudMaterial options object.
 function _fireRamp(team, ramp) {
   ramp = ramp || _FIRE_RAMP_BASE;
-  return _fxFriendly(team) ? _fireRedden(ramp) : ramp;
+  if (!_fxFriendly(team)) return ramp;   // enemy fire is byte-identical to before, by construction
+  // (v43.85) the hand-authored table is the default. The old hue derivation stays reachable as a
+  // LIVE DIAL for A/B-ing without a rebuild: window.__fireRed.set(0.15) engages it, .h = null comes
+  // back to the table. Both paths are the same shader program - only uniform VALUES differ - so
+  // neither adds a link and the existing prewarm covers both.
+  const _frk = (typeof window !== 'undefined' && window.__fireRed) || null;
+  if (_frk && _frk.h != null) return _fireRedden(ramp);
+  return (ramp === _FIRE_RAMP_SHIELD) ? _FIRE_RAMP_SHIELD_RED : _FIRE_RAMP_BASE_RED;
 }
 if (typeof window !== 'undefined') {
-  window.__fireRed = { h: 0.30, s: 1.05, set(h, s) { if (h != null) this.h = h; if (s != null) this.s = s; _FIRE_RED_CACHE.clear(); } };
+  // (v43.85) h defaults to null = use the hand-authored red tables above. .set(0.15) re-engages the
+  // old hue derivation live; .h = null returns to the tables. `s` is kept only so .set(h, s) keeps
+  // its shape - it has never had any effect, because in the LINEAR working space the saturation of
+  // c1/c2/c3 is already exactly 1.0 and Math.min(1, s * 1.05) is a no-op on every stop that matters.
+  window.__fireRed = { h: null, s: 1.05, set(h, s) { if (h != null) this.h = h; if (s != null) this.s = s; _FIRE_RED_CACHE.clear(); } };
 }
 
 // Plasma Shield spawn helper, shared between the local fire path
@@ -16640,6 +16679,60 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
       // Pattern density was tuned against a 200-unit half-width; keep it proportional so a 4x
       // shield does not read as a 4x-coarser texture.
       plasmaMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _wH.w);
+    }
+    // ⭐ (v43.85) ENEMY SHIELDS GET A DIFFERENT PATTERN, NOT A DIFFERENT COLOUR.
+    // Owner: "make enemy plasma shields have a different pattern on them". v43.82 put the friend/foe
+    // split on COLOUR and had to make it in updateWorldEffects, because the SHELL's uColor is
+    // re-derived from HSL every single frame. The MEMBRANE is the opposite case, and that is exactly
+    // why the pattern lives here: the particle_wall branch of updateWorldEffects does not contain the
+    // string `plasmaMesh` at all, _shTake (water reflection) touches only .opacity which this GLSL
+    // never reads, _layeredFXTick writes uTime and updateGasLighting writes uDynLight* - so this
+    // spawn-time write is the LAST write to these uniforms for the wall's whole 10 s life.
+    // ⚠ WHY NOT THE HEX SHELL, WHICH WOULD BE THE BOLDER READ: its pattern is GLSL literals (cell
+    // size 0.07, the 0.42/0.50 outline), so changing it means a NEW SOURCE STRING = a new program,
+    // and a program links on its first DRAW. _pinCombatEffectPrograms only calls renderer.compile(),
+    // _warmRealCombatFXInner (which does draw) has no shield entry, and BOTH return early on
+    // _fxSmallDevice() - so a phone would pay that link mid-fight. Not shippable under the owner's
+    // "if its a shader, make sure its prebaked".
+    // THIS COSTS NO PROGRAM AT ALL. samplePatternLFX is a uniform-indexed if-chain over all eight
+    // generators inside ONE module constant (_LAYERED_FX_FRAG) that every LayeredFX material shares,
+    // so picking different generators is a UNIFORM VALUE upload, not a source change. That program is
+    // already compiled AND DRAWN behind the loading curtain by the spawnFXBurst('fireball') /
+    // ('cloud') / core_beam entries in _warmRealCombatFXInner, whose _drawPasses issues three real
+    // renderer.render() calls. There is nothing to add to any warm.
+    // WHAT IT LOOKS LIKE: friendly keeps plasma_amber exactly. Enemy layer 0 becomes pattern 3
+    // (inverted 3D Worley) so the fill is hard crystalline PLATES with dark seams, and layer 1
+    // becomes pattern 4 (waveLFX) which, left on the preset's MULTIPLY blend, paints DARK bands
+    // sweeping across those plates about every 1.3 s. Dark on purpose: the shell above is additive
+    // and bloomed and its colour is rewashed every frame, so only shadow survives - anything
+    // brighter just gets swallowed. Layer 2 (turbulence / subtract), hue and sat are untouched.
+    // ⚠ THE SCALES ARE NOT THE PRESET'S, AND THAT IS THE WHOLE LEVER. uPosScale above normalises
+    // world coords to ~1 across the entire 800-unit lens, so the preset's 0.7 / 1.5 would give
+    // roughly ONE Worley cell and ONE band across the whole shield - a flat wash, i.e. it would ship
+    // invisible. 4.0 gives about 8 plates across, 2.2 about 3 bands.
+    // ⚠ ALPHA IS GAMEPLAY, NOT LOOK. The membrane is NormalBlending, so alpha is how much you can see
+    // THROUGH an enemy shield. Layer 1 drops 0.85 -> 0.65 so the enemy membrane's peak accumulated
+    // alpha stays BELOW the friendly preset's, never above it.
+    if (!_wallFriendly && plasmaMat.uniforms && plasmaMat.uniforms.uLayerPattern) {
+      const _fu = plasmaMat.uniforms;
+      _fu.uLayerPattern.value  = [3, 4, 2];
+      _fu.uLayerScale.value    = [4.0, 2.2, 0.4];
+      _fu.uLayerTimeRate.value = [0.55, 3.2, 1.78];
+      _fu.uLayerAlpha.value    = [1.05, 0.65, 0.4];
+      // Live knob so the look can be dialled in a real match without a rebuild. Created inert on the
+      // first enemy shield of the session; set any field to override, e.g.
+      //   __wallFoe.scale = [6, 3, 0.4]      __wallFoe.pattern = [3, 6, 2]
+      // Pattern ids: 0 fbm, 1 plasma, 2 turbulence, 3 voronoi plates, 4 wave bands, 5 ridges,
+      // 6 caustic, 7 stars. Every one of them is in the same already-warmed program.
+      try {
+        if (typeof window !== 'undefined') {
+          const _k = (window.__wallFoe = window.__wallFoe || { pattern: null, scale: null, timeRate: null, alpha: null });
+          if (_k.pattern)  _fu.uLayerPattern.value  = _k.pattern;
+          if (_k.scale)    _fu.uLayerScale.value    = _k.scale;
+          if (_k.timeRate) _fu.uLayerTimeRate.value = _k.timeRate;
+          if (_k.alpha)    _fu.uLayerAlpha.value    = _k.alpha;
+        }
+      } catch (_) {}
     }
     plasmaMesh = new THREE.Mesh(_wallLensGeometry(), plasmaMat);
     plasmaMesh.position.copy(pos);
@@ -16700,7 +16793,7 @@ function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast)
 //   uRadius   sphere radius in world units, used for the edge falloff
 // (fire-cloud) Volumetric fire shader ported from fire_cloud_lab.html ; reused
 // for Pyro fire (impact flame, flame chain, thermal shield, ignited gas).
-function _makeFireCloudMaterial(o){o=o||{};return new THREE.ShaderMaterial({transparent:true,depthWrite:false,side:THREE.DoubleSide,blending:(o.additive===false?THREE.NormalBlending:THREE.AdditiveBlending),uniforms:{time:{value:0},uRadius:{value:o.radius||40},uOctaves:{value:o.oct||5},uScale:{value:o.scale||2.0},uRise:{value:o.rise!=null?o.rise:1.3},uDisp:{value:o.disp!=null?o.disp:0.55},uGain:{value:o.gain!=null?o.gain:1.5},uBaseAlpha:{value:o.alpha!=null?o.alpha:0.55},uC0:{value:new THREE.Color(o.c0!=null?o.c0:0x3a0a02)},uC1:{value:new THREE.Color(o.c1!=null?o.c1:0xcc2a00)},uC2:{value:new THREE.Color(o.c2!=null?o.c2:0xff6a18)},uC3:{value:new THREE.Color(o.c3!=null?o.c3:0xffe39a)}},vertexShader:["varying vec3 vWorldPos;","varying vec3 vNormal;","uniform float time;","uniform float uDisp;","float vH(vec3 p){p=fract(p*0.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}","float vN(vec3 x){vec3 i=floor(x),f=fract(x);f=f*f*(3.0-2.0*f);return mix(mix(mix(vH(i),vH(i+vec3(1,0,0)),f.x),mix(vH(i+vec3(0,1,0)),vH(i+vec3(1,1,0)),f.x),f.y),mix(mix(vH(i+vec3(0,0,1)),vH(i+vec3(1,0,1)),f.x),mix(vH(i+vec3(0,1,1)),vH(i+vec3(1,1,1)),f.x),f.y),f.z);}","float vFbm(vec3 p){float a=0.5,v=0.0;for(int k=0;k<4;k++){v+=a*vN(p);p*=2.0;a*=0.5;}return v;}","void main(){","vec3 n=normalize(normal);vec3 d=position;","if(uDisp>0.0001){","vec3 nP=position*1.6+vec3(time*0.3,time*0.5,time*-0.24);","float disp=(vFbm(nP)-0.5)*2.0+max(0.0,n.y)*0.35;","d=position+n*disp*uDisp*max(length(position),0.01);","}","vWorldPos=(modelMatrix*vec4(d,1.0)).xyz;vNormal=normalize(normalMatrix*n);","gl_Position=projectionMatrix*viewMatrix*modelMatrix*vec4(d,1.0);","}"].join("\n"),fragmentShader:["uniform float time,uRadius,uScale,uRise,uGain,uBaseAlpha;uniform int uOctaves;","uniform vec3 uC0,uC1,uC2,uC3;varying vec3 vWorldPos;varying vec3 vNormal;","float h13(vec3 p){p=fract(p*0.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}","float n3(vec3 p){vec3 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(mix(h13(i),h13(i+vec3(1,0,0)),f.x),mix(h13(i+vec3(0,1,0)),h13(i+vec3(1,1,0)),f.x),f.y),mix(mix(h13(i+vec3(0,0,1)),h13(i+vec3(1,0,1)),f.x),mix(h13(i+vec3(0,1,1)),h13(i+vec3(1,1,1)),f.x),f.y),f.z);}","float fbm(vec3 p,int oct){float v=0.0,a=0.5;for(int k=0;k<8;k++){if(k>=oct)break;v+=a*n3(p);p*=2.0;a*=0.5;}return v;}","void main(){","float camD=distance(cameraPosition,vWorldPos);","int oct=uOctaves;if(camD<uRadius*1.5)oct=(uOctaves-3<2?2:uOctaves-3);else if(camD<uRadius*4.0)oct=(uOctaves-1<3?3:uOctaves-1);","vec3 rise=vec3(0.0,-time*0.20*uRise,time*0.10);","vec3 q1=vWorldPos*0.018*uScale+rise;","vec3 q2=vWorldPos*0.055*uScale+vec3(time*0.10,-time*0.08*uRise,0.0);","float v1=smoothstep(0.30,0.80,fbm(q1,oct));","float v2=smoothstep(0.35,0.75,fbm(q2,oct));","float v=v1*0.72+v2*0.40;","float dens=clamp(v*uGain-0.25,0.0,1.0);","vec3 vd=normalize(cameraPosition-vWorldPos);","float fres=pow(1.0-abs(dot(vNormal,vd)),1.6);","dens=clamp(dens*(1.0+fres*0.5),0.0,1.0);","if(dens<0.05)discard;","vec3 col=mix(uC0,uC1,smoothstep(0.05,0.35,dens));","col=mix(col,uC2,smoothstep(0.35,0.65,dens));","col=mix(col,uC3,smoothstep(0.70,1.0,dens));","col*=(0.7+dens*1.9);","gl_FragColor=vec4(col,dens*uBaseAlpha);","}"].join("\n")});}function _spawnFireCloudCluster(pos,opts){opts=opts||{};if(typeof scene==="undefined"||!scene)return null;if(!window._fireCloudGeo)window._fireCloudGeo=new THREE.SphereGeometry(1,16,12);const n=opts.count||3;const R=opts.radius||44;const out=[];for(let i=0;i<n;i++){const mat=_makeFireCloudMaterial(opts);const m=new THREE.Mesh(window._fireCloudGeo,mat);const t=n>1?i/(n-1):0;const r=R*(1.0-t*0.45);m.scale.setScalar(r);m.position.set(pos.x+(Math.random()-.5)*R*0.4,pos.y+t*R*0.5,pos.z+(Math.random()-.5)*R*0.4);m.userData._fcBaseY=m.position.y;m.userData._fcR=r;m.renderOrder=1;m.frustumCulled=true;scene.add(m);out.push(m)}return out;}function _spawnExplosionFireCloud(pos,size){if(typeof game==="undefined"||!game||!game.worldEffects)return;if(typeof _makeFireCloudMaterial!=="function"||typeof scene==="undefined"||!scene)return;if(!window._fireCloudGeo)window._fireCloudGeo=new THREE.SphereGeometry(1,16,12);const n=size>26?2:1;const fm=[];for(let i=0;i<n;i++){const mat=_makeFireCloudMaterial({radius:size*2.2,alpha:.85,oct:5,gain:1.0,rise:2.0,c0:0x200400,c1:0xcc2200,c2:0xff6a18,c3:0xffe39a});const m=new THREE.Mesh(window._fireCloudGeo,mat);m.position.set(pos.x+(Math.random()-.5)*size*.5,pos.y+(Math.random()-.5)*size*.5,pos.z+(Math.random()-.5)*size*.5);m.scale.setScalar(size*(.7+i*.3));m.renderOrder=1;m.frustumCulled=true;scene.add(m);fm.push(m)}game.worldEffects.push({type:"explFireCloud",position:pos.clone(),timer:.5,duration:.5,fireMeshes:fm,_explSize:size})}
+function _makeFireCloudMaterial(o){o=o||{};return new THREE.ShaderMaterial({transparent:true,depthWrite:false,side:THREE.DoubleSide,blending:(o.additive===false?THREE.NormalBlending:THREE.AdditiveBlending),uniforms:{time:{value:0},uRadius:{value:o.radius||40},uOctaves:{value:o.oct||5},uScale:{value:o.scale||2.0},uRise:{value:o.rise!=null?o.rise:1.3},uDisp:{value:o.disp!=null?o.disp:0.55},uGain:{value:o.gain!=null?o.gain:1.5},uBaseAlpha:{value:o.alpha!=null?o.alpha:0.55},uC0:{value:new THREE.Color(o.c0!=null?o.c0:0x3a0a02)},uC1:{value:new THREE.Color(o.c1!=null?o.c1:0xcc2a00)},uC2:{value:new THREE.Color(o.c2!=null?o.c2:0xff6a18)},uC3:{value:new THREE.Color(o.c3!=null?o.c3:0xffe39a)}},vertexShader:["varying vec3 vWorldPos;","varying vec3 vNormal;","uniform float time;","uniform float uDisp;","float vH(vec3 p){p=fract(p*0.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}","float vN(vec3 x){vec3 i=floor(x),f=fract(x);f=f*f*(3.0-2.0*f);return mix(mix(mix(vH(i),vH(i+vec3(1,0,0)),f.x),mix(vH(i+vec3(0,1,0)),vH(i+vec3(1,1,0)),f.x),f.y),mix(mix(vH(i+vec3(0,0,1)),vH(i+vec3(1,0,1)),f.x),mix(vH(i+vec3(0,1,1)),vH(i+vec3(1,1,1)),f.x),f.y),f.z);}","float vFbm(vec3 p){float a=0.5,v=0.0;for(int k=0;k<4;k++){v+=a*vN(p);p*=2.0;a*=0.5;}return v;}","void main(){","vec3 n=normalize(normal);vec3 d=position;","if(uDisp>0.0001){","vec3 nP=position*1.6+vec3(time*0.3,time*0.5,time*-0.24);","float disp=(vFbm(nP)-0.5)*2.0+max(0.0,n.y)*0.35;","d=position+n*disp*uDisp*max(length(position),0.01);","}","vWorldPos=(modelMatrix*vec4(d,1.0)).xyz;vNormal=normalize(normalMatrix*n);","gl_Position=projectionMatrix*viewMatrix*modelMatrix*vec4(d,1.0);","}"].join("\n"),fragmentShader:["uniform float time,uRadius,uScale,uRise,uGain,uBaseAlpha;uniform int uOctaves;","uniform vec3 uC0,uC1,uC2,uC3;varying vec3 vWorldPos;varying vec3 vNormal;","float h13(vec3 p){p=fract(p*0.1031);p+=dot(p,p.yzx+33.33);return fract((p.x+p.y)*p.z);}","float n3(vec3 p){vec3 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);return mix(mix(mix(h13(i),h13(i+vec3(1,0,0)),f.x),mix(h13(i+vec3(0,1,0)),h13(i+vec3(1,1,0)),f.x),f.y),mix(mix(h13(i+vec3(0,0,1)),h13(i+vec3(1,0,1)),f.x),mix(h13(i+vec3(0,1,1)),h13(i+vec3(1,1,1)),f.x),f.y),f.z);}","float fbm(vec3 p,int oct){float v=0.0,a=0.5;for(int k=0;k<8;k++){if(k>=oct)break;v+=a*n3(p);p*=2.0;a*=0.5;}return v;}","void main(){","float camD=distance(cameraPosition,vWorldPos);","int oct=uOctaves;if(camD<uRadius*1.5)oct=(uOctaves-3<2?2:uOctaves-3);else if(camD<uRadius*4.0)oct=(uOctaves-1<3?3:uOctaves-1);","vec3 rise=vec3(0.0,-time*0.20*uRise,time*0.10);","vec3 q1=vWorldPos*0.018*uScale+rise;","vec3 q2=vWorldPos*0.055*uScale+vec3(time*0.10,-time*0.08*uRise,0.0);","float v1=smoothstep(0.30,0.80,fbm(q1,oct));","float v2=smoothstep(0.35,0.75,fbm(q2,oct));","float v=v1*0.72+v2*0.40;","float dens=clamp(v*uGain-0.25,0.0,1.0);","vec3 vd=normalize(cameraPosition-vWorldPos);","float fres=pow(1.0-abs(dot(vNormal,vd)),1.6);","dens=clamp(dens*(1.0+fres*0.5),0.0,1.0);","if(dens<0.05)discard;","vec3 col=mix(uC0,uC1,smoothstep(0.05,0.35,dens));","col=mix(col,uC2,smoothstep(0.35,0.65,dens));","col=mix(col,uC3,smoothstep(0.70,1.0,dens));","col*=(0.7+dens*1.9);","gl_FragColor=vec4(col,dens*uBaseAlpha);","}"].join("\n")});}function _spawnFireCloudCluster(pos,opts){opts=opts||{};if(typeof scene==="undefined"||!scene)return null;if(!window._fireCloudGeo)window._fireCloudGeo=new THREE.SphereGeometry(1,16,12);const n=opts.count||3;const R=opts.radius||44;const out=[];for(let i=0;i<n;i++){const mat=_makeFireCloudMaterial(opts);const m=new THREE.Mesh(window._fireCloudGeo,mat);const t=n>1?i/(n-1):0;const r=R*(1.0-t*0.45);m.scale.setScalar(r);m.position.set(pos.x+(Math.random()-.5)*R*0.4,pos.y+t*R*0.5,pos.z+(Math.random()-.5)*R*0.4);m.userData._fcBaseY=m.position.y;m.userData._fcR=r;m.renderOrder=1;m.frustumCulled=true;scene.add(m);out.push(m)}return out;}function _spawnExplosionFireCloud(pos,size,ramp){if(typeof game==="undefined"||!game||!game.worldEffects)return;if(typeof _makeFireCloudMaterial!=="function"||typeof scene==="undefined"||!scene)return;if(!window._fireCloudGeo)window._fireCloudGeo=new THREE.SphereGeometry(1,16,12);const n=size>26?2:1;const fm=[];for(let i=0;i<n;i++){const mat=_makeFireCloudMaterial(Object.assign({radius:size*2.2,alpha:.85,oct:5,gain:1.0,rise:2.0,c0:0x200400,c1:0xcc2200,c2:0xff6a18,c3:0xffe39a},ramp||{}));const m=new THREE.Mesh(window._fireCloudGeo,mat);m.position.set(pos.x+(Math.random()-.5)*size*.5,pos.y+(Math.random()-.5)*size*.5,pos.z+(Math.random()-.5)*size*.5);m.scale.setScalar(size*(.7+i*.3));m.renderOrder=1;m.frustumCulled=true;scene.add(m);fm.push(m)}game.worldEffects.push({type:"explFireCloud",position:pos.clone(),timer:.5,duration:.5,fireMeshes:fm,_explSize:size})}
 // (fire eats clouds) Fire pulls nearby ambient gas in and consumes it at the
 // bright core (eat radius < visual radius hides the removal). Client-side, reads
 // synced fire + seed-built gas, so it is consistent in multiplayer.
@@ -18730,6 +18823,53 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
   const haloMat = _makeFXMaterial('gravity_halo');
   if (haloMat.uniforms.uBaseColor) haloMat.uniforms.uBaseColor.value.set(_tethCol);   // (v43.82)
   if (haloMat.uniforms.uPosScale)  haloMat.uniforms.uPosScale.value = 1.0 / haloRadius;
+  // ⭐ (v43.85) FRIENDLY TETHER TRAPS WEAR A DIFFERENT PATTERN.
+  // Owner: "make friendly tether traps have a different pattern on them". v43.82 already gave the
+  // ENEMY trap its own darker yellow, so the PATTERN change belongs on the friendly side and the
+  // enemy trap must stay exactly as it is - hence the one-sided guard. An enemy trap executes zero
+  // statements in here and is byte-identical to v43.84 by construction.
+  // WHAT CHANGES: layer 0 goes from pattern 4 (waveLFX - the smooth concentric collapsing rings you
+  // see today) to pattern 3 (voronoi CELLS), on the halo AND on the core, so your own trap reads as
+  // a cracked crystal shell instead of a ringed ball. Layers 1 and 2 keep their preset values, so
+  // the star pinpoints and the plasma underbreath are untouched.
+  // ⚠ THE SCALE DROP IS THE WHOLE POINT - DO NOT TIDY IT BACK UP. The frag does
+  // `vec3 p = vWorldPos * uPosScale;` then `vec3 q = p * uLayerScale[i];`, so at uPosScale 1/36 a
+  // cell is 36/scale world units and there are 2*scale of them across the 72-unit halo. The preset's
+  // 3.5 gives seven fine features that mush into grey past a few hundred units - that is exactly the
+  // "I cannot see it" failure mode, and FEATURE COUNT, not feature type, is what survives distance.
+  // 2.6 was picked by eye in fx_lab.html against this exact layer stack, not by arithmetic: at 1.6
+  // the cells are so large that the dark SEAMS stop reading and it degenerates into three soft
+  // glowing lobes - coarse, but no longer a pattern. 2.6 keeps roughly five 14-unit cells across the
+  // ball WITH their seams intact, which is what makes it read as cracked crystal rather than blobs.
+  // If it ever needs tuning this is the one number to move, and the seam test is the thing to judge:
+  // go lower only until the seams start to vanish.
+  // WHY THIS IS FREE, AND ALREADY PREBAKED: every LayeredFX preset shares ONE _LAYERED_FX_VERT /
+  // _LAYERED_FX_FRAG pair, and uLayerPattern[3] is a runtime `uniform int` array dispatched by
+  // samplePatternLFX - branch `id == 3` is already compiled into the linked program. These are value
+  // writes into uniforms that already exist, so no GLSL source string changes and nothing new links.
+  // The existing warm (the `for (const presetName in EFFECT_PRESETS)` loop in
+  // _warmupCombatShadersBody, which calls the FACTORY and is then really RENDERED, not merely
+  // compiled) and the per-round pin (_tp(() => _makeFXMaterial('fireball'))) both already cover it,
+  // and because both go through the factory neither can go stale.
+  // ⚠ Do NOT add a voronoi warm mesh as belt-and-braces: the warm cleanup hands every LayeredFX warm
+  // material to _releaseFXBurstMaterial, which restores only uBrightness and uBaseColor and then
+  // POOLS it - a patterned warm material would be handed back to a later burst still voronoi'd.
+  // NOTHING STOMPS THIS: the per-frame tether branch writes exactly two uniforms on this effect, the
+  // core's uIntensity and the halo's uIntensity, and nothing else. It does not re-derive colour from
+  // HSL the way the Plasma Shield does - which is why v43.82's uBaseColor write above has held ever
+  // since. We deliberately do not claim uIntensity, and its 1.0 -> 1.6/1.7 jump on trigger still
+  // works: the frag multiplies time by it, so a triggered friendly trap just creeps its cells faster.
+  // ⚠ voronoiLFX is 27 taps x 3 hashes = 81, about 2.5x the ridgesLFX this halo already ran. Keep it
+  // on layer 0 only; do not put pattern 3 on a second layer.
+  if (_fxFriendly(team)) {
+    if (haloMat.uniforms.uLayerPattern)    haloMat.uniforms.uLayerPattern.value    = [3, 5, 1];
+    if (haloMat.uniforms.uLayerScale)      haloMat.uniforms.uLayerScale.value      = [2.6, 2.8, 1.0];
+    if (haloMat.uniforms.uLayerTimeRate)   haloMat.uniforms.uLayerTimeRate.value   = [0.45, 1.2, 0.6];
+    if (haloMat.uniforms.uSoftEdge)        haloMat.uniforms.uSoftEdge.value        = 0.20;
+    if (tetherMat.uniforms.uLayerPattern)  tetherMat.uniforms.uLayerPattern.value  = [3, 7, 1];
+    if (tetherMat.uniforms.uLayerScale)    tetherMat.uniforms.uLayerScale.value    = [2.0, 5.0, 1.5];
+    if (tetherMat.uniforms.uLayerTimeRate) tetherMat.uniforms.uLayerTimeRate.value = [0.5, 2.0, 0.8];
+  }
   const haloMesh = new THREE.Mesh(haloGeo, haloMat);
   haloMesh.position.copy(pos);
   haloMesh.renderOrder = 1;
@@ -54000,7 +54140,14 @@ class Projectile {
       }
       _exSize = this.isPyroThermite ? 9 : 6;  
     }
-    spawnExplosion(_exPos, _exSize);
+    // (v43.85) a FRIENDLY thermite burst carries the red ramp into its impact cloud too - otherwise
+    // the brightest half-second of the hit stays enemy-orange and buries the flame underneath it.
+    // Deliberately null for enemies and for every non-thermite round: _spawnExplosionFireCloud's own
+    // c0/c1 (0x200400 / 0xcc2200) differ slightly from _FIRE_RAMP_BASE, so handing it the enemy ramp
+    // would CHANGE enemy explosions, which this change must not do.
+    const _thermRamp = (this.isPyroThermite &&
+      _fxFriendly(this.owner === 'player' ? player.team : this.ownerTeam)) ? _FIRE_RAMP_BASE_RED : null;
+    spawnExplosion(_exPos, _exSize, _thermRamp);
     // Pyro thermite leaves a small lingering flame at the impact point.
     if (this.isPyroThermite && typeof spawnPyroFlame === 'function') {
       // (v43.84) the file's standing idiom for a projectile's team (see splashDamage, igniteNearbyGas).
@@ -56603,7 +56750,14 @@ function applyExplosionPush(pos, force, radius) {
 }
 if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPush;
 
-function spawnExplosion(pos, size) {
+// (v43.85) `fireRamp` IS PASSED BY EXACTLY ONE CALLER and is null everywhere else, so every other
+// explosion in the game is byte-identical. It exists because of a confound that was hiding the whole
+// Pyro red change at the one moment the player is looking: _spawnExplosionFireCloud below fires on
+// EVERY explosion with hard-coded c2 0xff6a18 / c3 0xffe39a - the enemy ramp's exact hot stops - at
+// alpha 0.85, i.e. BRIGHTER than the pyro flame's 0.55, for 0.5 s, at the same position. Thermite
+// impact therefore painted an orange-to-white cloud on top of the red flame on both sides, so the
+// first half-second of every hit looked unchanged no matter what the flame ramp said.
+function spawnExplosion(pos, size, fireRamp) {
   size = size || 20;
   // (v41.19) every explosion in the game funnels through here, so ONE hook covers projectiles,
   // cluster kills, gas ignition, ship deaths and monster attacks alike. See _swBlast for the shape.
@@ -56652,7 +56806,7 @@ function spawnExplosion(pos, size) {
   if (typeof applyExplosionPush === 'function') {
     applyExplosionPush(pos, 40 + size * 2.5, 200 + size * 12);
   }
-  if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(pos, size);
+  if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(pos, size, fireRamp);
   // Dynamic point light at every explosion ≥ 8 units. Lights up
   // walls / ships / other FX so the blast actually illuminates the scene
   // instead of being a self-glowing decal.
