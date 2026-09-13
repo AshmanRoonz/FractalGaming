@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.82';
+const LSS_BUILD = '43.83';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -60907,8 +60907,20 @@ function _ssSpreadRails() {
 
     if (perks) {
       const rails = document.getElementById('ss-rails');
-      perks.style.setProperty('left', Math.round(leftEdge) + 'px', 'important');
-      perks.style.setProperty('width', Math.round(band) + 'px', 'important');
+      try {
+        const _lbl = perks.querySelector('.perks-label');
+        const _lw = (_lbl && vis(_lbl)) ? Math.round(_lbl.getBoundingClientRect().width) : 0;
+        const _gap = parseFloat(getComputedStyle(perks).columnGap) || 0;
+        perks.style.setProperty('--ss-perk-lbl', (_lw ? Math.round(_lw + _gap) : 0) + 'px');
+      } catch (_) {}
+      if (rails && vis(rails)) {
+        const _rr = rails.getBoundingClientRect();
+        perks.style.setProperty('left', Math.round(_rr.left) + 'px', 'important');
+        perks.style.setProperty('width', Math.round(_rr.width) + 'px', 'important');
+      } else {
+        perks.style.setProperty('left', Math.round(leftEdge) + 'px', 'important');
+        perks.style.setProperty('width', Math.round(band) + 'px', 'important');
+      }
       perks.style.setProperty('top', 'auto', 'important');
       let gapUp = 92;
       if (rails && vis(rails)) gapUp = Math.round(vh - rails.getBoundingClientRect().top) + 10;
