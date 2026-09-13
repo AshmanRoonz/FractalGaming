@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.21';
+const LSS_BUILD = '43.22';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -692,6 +692,8 @@ const net = {
   openSoloHostId: null,
   campaign: false,
   endless: false,             // (v35.85) co-op ENDLESS room (mirrors net.campaign)
+  roomMode: null,             // (v43.22) the mode this ROOM is playing, once someone outranks us
+  roomJoinedAt: 0,            // (v43.22) performance.now() at the trystero join
   _dropin: null,              
 
   
@@ -2156,6 +2158,7 @@ async function joinRoom() {
 
     net.room = trysteroJoin(_joinCfg, code);
     net.roomCode = code;
+    net.roomJoinedAt = (typeof performance !== 'undefined') ? performance.now() : 0;
     net.roomId = code;   // (v38.60) the lobby dedupe reads roomId; it was never set
     if (typeof startRoomHeartbeat === 'function') startRoomHeartbeat();
 
@@ -2279,11 +2282,11 @@ async function joinRoom() {
         }, peerId);
       }
 
+      try { if (typeof _lssModeAnnounceBurst === 'function') _lssModeAnnounceBurst(peerId); } catch (_) {}
       if (net.sendEvent) {
         try {
           const _hdu = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
           net.sendEvent({ type: 'hello',
-            mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : undefined,
             discord_id:     _hdu ? _hdu.id : undefined,
             discord_name:   _hdu ? (_hdu.global_name || _hdu.username) : undefined,
             discord_avatar: _hdu ? _hdu.avatar : undefined }, peerId);
@@ -2390,6 +2393,7 @@ function _cancelRoomForLocalPlay() {
       net.active = false;
       net.openSolo = false;
       net.roomMode = null;   // (v43.20) this room is gone; its mode must not outlive it
+      net.roomJoinedAt = 0;   // (v43.22) the room's clock dies with the room
       net.campaign = false;
       net.endless = false;
     }
@@ -2479,6 +2483,7 @@ function _setEliminationBots(on, broadcast) {
   try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
 }
 async function startElimination() {
+  LSS.MODE = _lssRoomModeChoose('classic');
   game.testMode = false;
   try { if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen(); } catch (_) {}
   const wantBots = _elimWantBots();
@@ -3716,7 +3721,7 @@ function _campInitState() {
 }
 
 function startCampaign() {
-  LSS.MODE = _lssRoomModeOr('campaign');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose('campaign');   // (v43.19) a room has one mode
   _campInitState();
   let _code = '';
   try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
@@ -3759,7 +3764,7 @@ function _applyStartView() {
   if (!_tp && typeof player !== 'undefined' && player && player.mesh) player.mesh.visible = false;
 }
 function startFreeFlight() {
-  LSS.MODE = _lssRoomModeOr('freeflight');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose('freeflight');   // (v43.19) a room has one mode
   try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}   // (v38.78) every free flight starts with six hostile cities
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}   
   
@@ -3794,7 +3799,7 @@ function startFreeFlight() {
 if (typeof window !== 'undefined') window.startFreeFlight = startFreeFlight;
 
 function startEndless() {
-  LSS.MODE = _lssRoomModeOr('endless');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose('endless');   // (v43.19) a room has one mode
   game.testMode = false;
   game.raceNoTimer = true;
   game.currentRound = 1;
@@ -4805,7 +4810,7 @@ function _assaultMatchWinner() {
 }
 function startAssault() {
   game.testMode = false;
-  LSS.MODE = _lssRoomModeOr('assault');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose('assault');   // (v43.19) a room has one mode
   try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
   let _code = '';
   try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
@@ -4822,7 +4827,7 @@ if (typeof window !== 'undefined') window.startAssault = startAssault;
 
 function startRace() {
   game.testMode = false;
-  LSS.MODE = _lssRoomModeOr('race');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose('race');   // (v43.19) a room has one mode
   try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
   try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
   let _code = '';
@@ -4929,6 +4934,7 @@ function _applyStagedRoundShip() {
 }
 
 function enterShipSelect() {
+  try { if (typeof _lssModeAnnounceBurst === 'function') _lssModeAnnounceBurst(); } catch (_) {}
   try { if (typeof _ovWarpClear === 'function') _ovWarpClear(); } catch (_) {}
   try { if (typeof _clipHideSaveBtn === 'function') _clipHideSaveBtn(); } catch (_) {}
   _stagedRoundShip = null;
@@ -6484,7 +6490,7 @@ function handleNetEvent(evt, fromPeerId) {
     }
     if (typeof selectMap === 'function') selectMap(evt.mapKey);
     if (typeof evt.mode === 'string' && (evt.mode === 'classic' || evt.mode === 'race' || evt.mode === 'campaign' || evt.mode === 'endless')) {
-      LSS.MODE = evt.mode;
+      _lssModeFromPeer({ mode: evt.mode, ago: -1 }, fromPeerId);
       try {
         const btn = document.getElementById('race-mode-toggle');
         if (btn) {
@@ -6641,6 +6647,10 @@ function handleNetEvent(evt, fromPeerId) {
     }
     return;
   }
+  if (evt.type === 'mode_set') {
+    _lssModeFromPeer(evt, fromPeerId);
+    return;
+  }
   if (evt.type === 'hello') {
     try {
       const _allIds = [net.myPeerId].concat(Array.from(net.peers ? net.peers.keys() : [])).sort();
@@ -6651,7 +6661,7 @@ function handleNetEvent(evt, fromPeerId) {
                          (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
         if (!_inPlay && typeof LSS !== 'undefined' && LSS.MODE !== evt.mode) {
           console.log('[net] room mode is', evt.mode, '- switching from', LSS.MODE);
-          _lssAdoptRoomMode(evt.mode);   // (v43.20) the mode alone left the wrong map + flags
+          _lssModeFromPeer({ mode: evt.mode, ago: -1 }, fromPeerId);   // inert by design: ago -1 never wins
         }
       }
     } catch (_) {}
@@ -16639,6 +16649,24 @@ function _hzPortalsFrame(dt) {
 }
 if (typeof window !== 'undefined') window.__cavern = { st: _HZ_CAVERN, enter: (i) => { const p = _HZ_CAVERN.portals && _HZ_CAVERN.portals[i]; if (p) _hzEnterCavern(p); } };
 if (typeof window !== 'undefined') window.__dbg = {
+  modeFromPeer: (mode, ago, fromId, seed) => {
+    try {
+      const before = { mode: LSS.MODE, ago: _lssModeAgo(), map: game.selectedMap, seed: net.worldSeed };
+      _lssModeFromPeer({ type: 'mode_set', mode: mode, ago: (ago == null ? 0 : ago), seed: seed },
+                       fromId || 'zzzzzzzz');
+      return { before: before,
+               after: { mode: LSS.MODE, ago: _lssModeAgo(), map: game.selectedMap, seed: net.worldSeed },
+               adopted: before.mode !== LSS.MODE };
+    } catch (e) { return { error: String(e) }; }
+  },
+  modeChoose: (mode, agoMs) => {
+    try {
+      if (mode) LSS.MODE = mode;
+      if (agoMs === null) { LSS._modeChosen = false; LSS._modeChosenAt = 0; }
+      else { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - (agoMs || 0); }
+      return { mode: LSS.MODE, ago: _lssModeAgo(), chosen: !!LSS._modeChosen };
+    } catch (e) { return { error: String(e) }; }
+  },
   roomMode: (m) => {
     try {
       if (m) _lssAdoptRoomMode(m);
@@ -16654,6 +16682,12 @@ if (typeof window !== 'undefined') window.__dbg = {
         ffBodyClass: (typeof document !== 'undefined') ? document.body.classList.contains('lss-freeflight') : null,
         team: (typeof player !== 'undefined' && player) ? player.team : null,
         peers: (typeof net !== 'undefined' && net && net.peers) ? net.peers.size : 0,
+        chosen: (typeof LSS !== 'undefined') ? !!LSS._modeChosen : null,
+        ago: (typeof _lssModeAgo === 'function') ? _lssModeAgo() : null,
+        inRoomMs: (typeof net !== 'undefined' && net && net.roomJoinedAt)
+          ? Math.round(performance.now() - net.roomJoinedAt) : 0,
+        seed: (typeof net !== 'undefined' && net) ? net.worldSeed : null,
+        myPeerId: (typeof net !== 'undefined' && net) ? net.myPeerId : null,
       };
     } catch (e) { return { error: String(e) }; }
   },
@@ -55183,6 +55217,8 @@ function returnToRootMenu(opts) {
   try { activeMode().onTeardown(); } catch (_) {}
   try { if (typeof LSS !== 'undefined') LSS.MODE = 'classic'; } catch (_) {}
   try { if (typeof net !== 'undefined' && net) net.roomMode = null; } catch (_) {}
+  try { if (typeof LSS !== 'undefined') { LSS._modeChosen = false; LSS._modeChosenAt = 0; } } catch (_) {}
+  try { if (typeof net !== 'undefined' && net) net.roomJoinedAt = 0; } catch (_) {}
   try { game._campPicker = false; } catch (_) {}   
   
   
@@ -60132,6 +60168,69 @@ function _lssSetInsaneSpeed(on, fromNet) {
 }
 if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
 
+function _lssModeChosen(mode) {
+  try {
+    LSS._modeChosen = true;
+    LSS._modeChosenAt = performance.now();
+    if (mode) LSS.MODE = mode;
+  } catch (_) {}
+}
+function _lssModeAgo() {
+  try {
+    if (!LSS._modeChosen || typeof LSS._modeChosenAt !== 'number') return -1;
+    return Math.max(0, Math.round(performance.now() - LSS._modeChosenAt));
+  } catch (_) { return -1; }
+}
+function _lssModeAnnounce(targetPeerId) {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active || !net.sendEvent) return;
+    if (typeof LSS === 'undefined' || !LSS.MODE) return;
+    const msg = {
+      type: 'mode_set',
+      mode: LSS.MODE,
+      ago: _lssModeAgo(),                  // -1 = "I have not chosen a mode"
+      cyber: !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed),
+    };
+    try { if (net.worldSeed != null) msg.seed = net.worldSeed >>> 0; } catch (_) {}
+    if (targetPeerId) net.sendEvent(msg, targetPeerId); else net.sendEvent(msg);
+  } catch (_) {}
+}
+function _lssModeAnnounceBurst(targetPeerId) {
+  try {
+    _lssModeAnnounce(targetPeerId);
+    setTimeout(() => { try { _lssModeAnnounce(targetPeerId); } catch (_) {} }, 250);
+    setTimeout(() => { try { _lssModeAnnounce(targetPeerId); } catch (_) {} }, 800);
+  } catch (_) {}
+}
+function _lssModeFromPeer(evt, fromPeerId) {
+  try {
+    if (!evt || typeof evt.mode !== 'string' || !evt.mode) return;
+    if (typeof net === 'undefined' || !net || typeof LSS === 'undefined') return;
+    const theirAgo = (typeof evt.ago === 'number') ? evt.ago : -1;
+    if (theirAgo < 0) return;                      // they never chose; they do not get to decide
+    const myAgo = _lssModeAgo();
+    let theyWin;
+    if (myAgo < 0) {
+      theyWin = true;                              // we never chose and they did - no contest
+    } else if (Math.abs(theirAgo - myAgo) > 1200) {
+      theyWin = theirAgo > myAgo;                  // a real difference in who committed first
+    } else {
+      theyWin = String(fromPeerId) < String(net.myPeerId);
+    }
+    if (!theyWin) return;                          // we are the room; our own announce convinces them
+    try { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - theirAgo; } catch (_) {}
+    if (evt.seed != null) { try { net.worldSeed = evt.seed >>> 0; } catch (_) {} }
+    net.roomMode = evt.mode;
+    if (LSS.MODE === evt.mode) return;
+    try {
+      if (evt.cyber && typeof game !== 'undefined' && game) {
+        game._cyber = { armed: true }; net.cyber = true;
+      }
+    } catch (_) {}
+    _lssAdoptRoomMode(evt.mode);
+  } catch (_) {}
+}
+
 function _lssClearModeSetup() {
   try {
     if (typeof net !== 'undefined' && net) { net.freeflight = false; net.campaign = false; net.endless = false; }
@@ -60141,6 +60240,10 @@ function _lssClearModeSetup() {
       game._campJourney = false;
     }
     if (typeof player !== 'undefined' && player && typeof LSS !== 'undefined') player.team = LSS.TEAM_FLEET_A;
+    try { if (typeof game !== 'undefined' && game) game.endlessRun = null; } catch (_) {}
+    try { if (typeof game !== 'undefined' && game) game._cyber = null; } catch (_) {}
+    try { if (typeof net !== 'undefined' && net) net.cyber = false; } catch (_) {}
+    try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}
   } catch (_) {}
 }
 function _lssAdoptRoomMode(mode) {
@@ -60170,20 +60273,21 @@ function _lssSayRoomMode(mode) {
   try { if (typeof _owBanner === 'function') _owBanner('ROOM MODE', String(mode).toUpperCase()); } catch (_) {}
 }
 
+function _lssRoomModeChoose(want) {
+  const m = _lssRoomModeOr(want);
+  try { _lssModeChosen(); } catch (_) {}
+  try { if (typeof net !== 'undefined' && net && net.active) _lssModeAnnounceBurst(); } catch (_) {}
+  return m;
+}
+
 function _lssRoomModeOr(want) {
   try {
     if (typeof net === 'undefined' || !net) return want;
     if (!net.roomMode) return want;
-    const others = (net.peers && net.peers.size) ? net.peers.size : 0;
-    try {
-      const _ids = [net.myPeerId].concat(Array.from(net.peers ? net.peers.keys() : [])).sort();
-      if (_ids[0] === net.myPeerId) return want;
-    } catch (_) {}
-    if (others <= 0) return want;
     if (net.roomMode !== want) {
       try {
         console.log('[net] joining an existing room: mode', want, '->', net.roomMode);
-        if (typeof showAnnouncement === 'function') {
+        {   // (v43.22) v43.20 fixed the CALL but left this `typeof showAnnouncement` guard around it
           _lssSayRoomMode(net.roomMode);   // (v43.20) showAnnouncement() does not exist in this file
         }
       } catch (_) {}
@@ -82384,6 +82488,7 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
       raceBtn.textContent = on ? 'RACE MODE: ON' : 'RACE MODE: OFF';
       raceBtn.classList.toggle('active', on);
       LSS.MODE = on ? 'race' : 'classic';
+      try { _lssModeChosen(); _lssModeAnnounceBurst(); } catch (_) {}
       if (typeof buildMapSelector === 'function') {
         try { buildMapSelector(); } catch (_) {}
       }

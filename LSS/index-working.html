@@ -4814,7 +4814,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.21';
+const LSS_BUILD = '43.22';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -5967,6 +5967,8 @@ const net = {
   openSoloHostId: null,
   campaign: false,
   endless: false,             // (v35.85) co-op ENDLESS room (mirrors net.campaign)
+  roomMode: null,             // (v43.22) the mode this ROOM is playing, once someone outranks us
+  roomJoinedAt: 0,            // (v43.22) performance.now() at the trystero join
   _dropin: null,              
 
   
@@ -7783,6 +7785,9 @@ async function joinRoom() {
     // include it in /heartbeat posts and so returnToRootMenu can DELETE
     // the room when we leave.
     net.roomCode = code;
+    // (v43.22) the instant we entered this room. Nothing recorded it before, which is why every
+    // 'who was here first' question in the file degenerated into sorting random peer ids.
+    net.roomJoinedAt = (typeof performance !== 'undefined') ? performance.now() : 0;
     net.roomId = code;   // (v38.60) the lobby dedupe reads roomId; it was never set
     // Start heartbeat ticker (~30s) so this room shows up
     // in lss.fractalreality.ca/rooms.html. Skipped silently if user not
@@ -7972,13 +7977,17 @@ async function joinRoom() {
       // (v30.63) Identity hello : introduce ourselves to the newcomer
       // immediately, so their fleet strip shows our card BEFORE anyone
       // commits (loadout broadcasts used to be the only identity carrier).
+      // (v43.22) tell the newcomer what this room is playing, with how long ago we committed to it so
+      // they can tell whether they are the joiner or we are. Targeted: a third peer arriving must not
+      // restart the argument between the two who already agree.
+      try { if (typeof _lssModeAnnounceBurst === 'function') _lssModeAnnounceBurst(peerId); } catch (_) {}
       if (net.sendEvent) {
         try {
           const _hdu = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
           net.sendEvent({ type: 'hello',
             // (v43.19) tell the joiner what this room is actually playing, so their mode
             // button cannot put them in a different world from everyone else.
-            mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : undefined,
+            // (v43.22) mode moved off hello onto its own mode_set event - see _lssModeAnnounce.
             discord_id:     _hdu ? _hdu.id : undefined,
             discord_name:   _hdu ? (_hdu.global_name || _hdu.username) : undefined,
             discord_avatar: _hdu ? _hdu.avatar : undefined }, peerId);
@@ -8122,6 +8131,7 @@ function _cancelRoomForLocalPlay() {
       net.active = false;
       net.openSolo = false;
       net.roomMode = null;   // (v43.20) this room is gone; its mode must not outlive it
+      net.roomJoinedAt = 0;   // (v43.22) the room's clock dies with the room
       net.campaign = false;
       net.endless = false;
     }
@@ -8239,6 +8249,11 @@ function _setEliminationBots(on, broadcast) {
   try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
 }
 async function startElimination() {
+  // (v43.22) ELIMINATION never set LSS.MODE at all - it relied on returnToRootMenu having reset it to
+  // 'classic'. That left it the one mode button whose announcement could carry a stale mode, and made
+  // its choice indistinguishable from "this player has not chosen anything yet".
+  LSS.MODE = _lssRoomModeChoose('classic');
+  // (v43.22) _lssRoomModeChoose above already stamped the choice.
   game.testMode = false;
   try { if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen(); } catch (_) {}
   const wantBots = _elimWantBots();
@@ -10137,7 +10152,7 @@ function _campInitState() {
 }
 
 function startCampaign() {
-  LSS.MODE = _lssRoomModeOr('campaign');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose('campaign');   // (v43.19) a room has one mode
   _campInitState();
   // (v32.76) Co-op : if a room code is entered (or we're already in a room), host a
   // NETWORKED campaign — host-authoritative PvE (only amStasisOwner spawns the
@@ -10200,7 +10215,7 @@ function _applyStartView() {
 // world with no enemies. Endless like campaign (testMode + raceNoTimer) but no bots /
 // no win-gate. Solo for P1 (no co-op handshake). Mirrors startCampaign's solo path.
 function startFreeFlight() {
-  LSS.MODE = _lssRoomModeOr('freeflight');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose('freeflight');   // (v43.19) a room has one mode
   try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}   // (v38.78) every free flight starts with six hostile cities
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}   
   
@@ -10244,7 +10259,7 @@ if (typeof window !== 'undefined') window.startFreeFlight = startFreeFlight;
 // amStasisOwner authority and proxied to peers via bot_roster/bot_state.
 // Blank code + no room = solo, byte-identical to v35.71.
 function startEndless() {
-  LSS.MODE = _lssRoomModeOr('endless');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose('endless');   // (v43.19) a room has one mode
   game.testMode = false;
   game.raceNoTimer = true;
   game.currentRound = 1;
@@ -11570,7 +11585,7 @@ function _assaultMatchWinner() {
 }
 function startAssault() {
   game.testMode = false;
-  LSS.MODE = _lssRoomModeOr('assault');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose('assault');   // (v43.19) a room has one mode
   // The field spawns at round start, so the shell model must be warm by then.
   try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
   let _code = '';
@@ -11588,7 +11603,7 @@ if (typeof window !== 'undefined') window.startAssault = startAssault;
 
 function startRace() {
   game.testMode = false;
-  LSS.MODE = _lssRoomModeOr('race');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose('race');   // (v43.19) a room has one mode
   try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
   // (v32.73) Warm the Champion Shell model NOW : the race finish field + its shell
   // spawn the instant the round goes 'playing', so without a head start the shell
@@ -11741,6 +11756,11 @@ function _applyStagedRoundShip() {
 }
 
 function enterShipSelect() {
+  // (v43.22) ANNOUNCE THE ROOM'S MODE. This is the one hook every mode entry point reaches
+  // (startFreeFlight/startRace/... -> _startHostedMode -> enterShipSelect, or directly on the solo
+  // path), which is what makes it the right place: `hello` only ever fires on a peer-join edge, so a
+  // player who connects FIRST and presses a mode button SECOND was never announced at all.
+  try { if (typeof _lssModeAnnounceBurst === 'function') _lssModeAnnounceBurst(); } catch (_) {}
   // (v42.71) THE PORTAL WARP TUNNEL IS ONE OF THOSE OVERLAYS. Owner: "in exhibition, i went through
   // a portal, and in the ship selection screen, i could see the portal effects overtop".
   // A transit raises #ov-warp (show + tunnel, set straight on the element by all four transit
@@ -13930,7 +13950,12 @@ function handleNetEvent(evt, fromPeerId) {
     // 'classic' so a peer running a stale (no-mode) v12m client doesn't
     // accidentally drag race-mode peers into classic mid-race.
     if (typeof evt.mode === 'string' && (evt.mode === 'classic' || evt.mode === 'race' || evt.mode === 'campaign' || evt.mode === 'endless')) {
-      LSS.MODE = evt.mode;
+      // (v43.22) ⚠ THIS WAS A RAW STOMP. No authority check, no roomMode check, no client setup -
+      // just LSS.MODE = evt.mode, so an endless peer cycling the map silently dragged a freeflight
+      // peer into 'endless' while leaving every freeflight flag set. (Its allow-list also omits
+      // 'freeflight' and 'assault', so the reverse was ignored - divergence in one direction only.)
+      // Route it through the same arbiter as everything else; a map cycle is not a mode decision.
+      _lssModeFromPeer({ mode: evt.mode, ago: -1 }, fromPeerId);
       try {
         const btn = document.getElementById('race-mode-toggle');
         if (btn) {
@@ -14121,6 +14146,13 @@ function handleNetEvent(evt, fromPeerId) {
   }
   // (v30.63) Identity hello from a roommate ; lets the fleet strip show
   // their card before they commit a loadout.
+  // (v43.22) THE ROOM'S MODE. Placed beside hello because they arrive on the same peer-join edge,
+  // but this one also arrives whenever someone picks a mode while already in the room - which hello,
+  // being a join-edge event, can never do.
+  if (evt.type === 'mode_set') {
+    _lssModeFromPeer(evt, fromPeerId);
+    return;
+  }
   if (evt.type === 'hello') {
     // (v43.19) adopt the room's mode. This arrives from a peer who was already here, so it is the
     // room's truth; record it for _lssRoomModeOr and switch now if we have not started yet.
@@ -14140,7 +14172,10 @@ function handleNetEvent(evt, fromPeerId) {
                          (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
         if (!_inPlay && typeof LSS !== 'undefined' && LSS.MODE !== evt.mode) {
           console.log('[net] room mode is', evt.mode, '- switching from', LSS.MODE);
-          _lssAdoptRoomMode(evt.mode);   // (v43.20) the mode alone left the wrong map + flags
+          // (v43.22) hello no longer decides the mode. It fired on the same onPeerJoin edge as
+          // mode_set, so there were TWO racing mode handshakes that agreed only because both sorted
+          // random peer ids. hello is identity now; mode_set is the single arbiter.
+          _lssModeFromPeer({ mode: evt.mode, ago: -1 }, fromPeerId);   // inert by design: ago -1 never wins
         }
       }
     } catch (_) {}
@@ -27663,6 +27698,31 @@ if (typeof window !== 'undefined') window.__dbg = {
   //   __dbg.roomMode('race')    - drive the adopt exactly as an authority's `hello` would
   // The report is deliberately the FLAGS, not just LSS.MODE, because "connected but separated" was
   // never a wrong mode string - it was a right mode string sitting on another mode's map and flags.
+  // (v43.22) Simulate an announcement arriving FROM A PEER, exactly as mode_set delivers it:
+  //   __dbg.modeFromPeer('endless', 45000, 'zzzz')   - they chose endless 45s ago, id 'zzzz'
+  // The point of the 'ago' argument is that it is the whole rule. A peer who chose EARLIER than you
+  // is the room; you are the joiner. Pass ago -1 for "they never chose" (must never win).
+  modeFromPeer: (mode, ago, fromId, seed) => {
+    try {
+      const before = { mode: LSS.MODE, ago: _lssModeAgo(), map: game.selectedMap, seed: net.worldSeed };
+      _lssModeFromPeer({ type: 'mode_set', mode: mode, ago: (ago == null ? 0 : ago), seed: seed },
+                       fromId || 'zzzzzzzz');
+      return { before: before,
+               after: { mode: LSS.MODE, ago: _lssModeAgo(), map: game.selectedMap, seed: net.worldSeed },
+               adopted: before.mode !== LSS.MODE };
+    } catch (e) { return { error: String(e) }; }
+  },
+  // Force the local "I chose X, N ms ago" state, so both sides of an argument can be set up here.
+  // agoMs === null means "clear the choice" - the boot state, where LSS.MODE is the untouched
+  // default 'classic' and nobody has pressed anything. That state must never win an argument.
+  modeChoose: (mode, agoMs) => {
+    try {
+      if (mode) LSS.MODE = mode;
+      if (agoMs === null) { LSS._modeChosen = false; LSS._modeChosenAt = 0; }
+      else { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - (agoMs || 0); }
+      return { mode: LSS.MODE, ago: _lssModeAgo(), chosen: !!LSS._modeChosen };
+    } catch (e) { return { error: String(e) }; }
+  },
   roomMode: (m) => {
     try {
       if (m) _lssAdoptRoomMode(m);
@@ -27678,6 +27738,13 @@ if (typeof window !== 'undefined') window.__dbg = {
         ffBodyClass: (typeof document !== 'undefined') ? document.body.classList.contains('lss-freeflight') : null,
         team: (typeof player !== 'undefined' && player) ? player.team : null,
         peers: (typeof net !== 'undefined' && net && net.peers) ? net.peers.size : 0,
+        // (v43.22) the arbitration state - this is what decides who the room is
+        chosen: (typeof LSS !== 'undefined') ? !!LSS._modeChosen : null,
+        ago: (typeof _lssModeAgo === 'function') ? _lssModeAgo() : null,
+        inRoomMs: (typeof net !== 'undefined' && net && net.roomJoinedAt)
+          ? Math.round(performance.now() - net.roomJoinedAt) : 0,
+        seed: (typeof net !== 'undefined' && net) ? net.worldSeed : null,
+        myPeerId: (typeof net !== 'undefined' && net) ? net.myPeerId : null,
       };
     } catch (e) { return { error: String(e) }; }
   },
@@ -82836,6 +82903,9 @@ function returnToRootMenu(opts) {
   // and cleared in none, so after leaving a race room the next room you opened would still read
   // 'race' the moment a peer connected - deferring you to a mode nobody in it had chosen.
   try { if (typeof net !== 'undefined' && net) net.roomMode = null; } catch (_) {}
+  // (v43.22) the mode CHOICE is per-room too - back at the main menu we have chosen nothing.
+  try { if (typeof LSS !== 'undefined') { LSS._modeChosen = false; LSS._modeChosenAt = 0; } } catch (_) {}
+  try { if (typeof net !== 'undefined' && net) net.roomJoinedAt = 0; } catch (_) {}
   try { game._campPicker = false; } catch (_) {}   
   
   
@@ -90070,6 +90140,103 @@ if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
 //     it needs the previous mode's flags stripped first, or free flight's leak into race.
 // (!) buildMapSelector() already snaps game.selectedMap to the first legal map when the current one
 //     is not valid for the mode, so the map corrects itself for free once LSS.MODE is right.
+// (v43.22) THE ROOM BROADCASTS ITS MODE. Owner: "it has to be able to detect that a room already
+// exists, and when joining check the mode of the room... the room has to broadcast the mode, i guess?"
+// Exactly right, and it needed three things that did not exist.
+//
+// 1. A SIGNAL FOR "WHO IS THE ROOM". There was none. Every authority question in this file -
+//    amStasisOwner, _botAuthority, the launch proposer, open_solo_start's tie-break and v43.19's own
+//    rule - reduces to [myPeerId, ...peers].sort()[0], and trystero's selfId is RANDOM. So "the room"
+//    was a coin flip, and half the time the established room adopted the newcomer's mode.
+//    The honest signal is HOW LONG AGO YOU CHOSE. Each client measures its own elapsed time and puts
+//    it on the wire, so there is no clock to synchronise (the file warns at ~39111 that there is
+//    none). Longer = chose earlier = you are the room. It also covers the second scenario that room-
+//    join order does not: two people ALREADY in a room who then press different buttons.
+// 2. AN ANNOUNCE THAT IS NOT A JOIN EDGE. `hello` fires only from onPeerJoin, once per peer pair,
+//    ever. If you connect first and press a mode button second, the room never hears about it. So the
+//    announce also fires whenever the mode changes (via enterShipSelect, which every mode entry point
+//    routes through), and repeats briefly - the file's own pattern for its unreliable channels
+//    (launch_at and cyber_round both repeat rather than trust one send).
+// 3. A WAY TO SAY "I HAVE NOT CHOSEN". LSS.MODE defaults to the truthy string 'classic', so a peer
+//    sitting at the main menu asserted 'classic' with exactly the same authority as a deliberate
+//    press. That poisoned net.roomMode and then forced the OTHER player's ENDLESS button to
+//    'classic' - a regression v43.19 introduced. `chosen` is the fix, and an unchosen mode never wins.
+function _lssModeChosen(mode) {
+  try {
+    LSS._modeChosen = true;
+    LSS._modeChosenAt = performance.now();
+    if (mode) LSS.MODE = mode;
+  } catch (_) {}
+}
+function _lssModeAgo() {
+  try {
+    if (!LSS._modeChosen || typeof LSS._modeChosenAt !== 'number') return -1;
+    return Math.max(0, Math.round(performance.now() - LSS._modeChosenAt));
+  } catch (_) { return -1; }
+}
+// Sent targeted on peer-join and broadcast on every mode change while in a room.
+function _lssModeAnnounce(targetPeerId) {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active || !net.sendEvent) return;
+    if (typeof LSS === 'undefined' || !LSS.MODE) return;
+    const msg = {
+      type: 'mode_set',
+      mode: LSS.MODE,
+      ago: _lssModeAgo(),                  // -1 = "I have not chosen a mode"
+      cyber: !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed),
+    };
+    // The seed travels WITH the mode. Endless is the case that proves why: its cavern is a pure
+    // function of net.worldSeed (_lssGenEndlessLevel), so two peers agreeing on 'endless' with
+    // different seeds are still in different worlds - connected and separated, one layer down.
+    try { if (net.worldSeed != null) msg.seed = net.worldSeed >>> 0; } catch (_) {}
+    if (targetPeerId) net.sendEvent(msg, targetPeerId); else net.sendEvent(msg);
+  } catch (_) {}
+}
+// A brief repeat, stopping on its own. sendEvent is documented unreliable in this file, and both
+// delivery-critical events already ship with a repeat rather than trusting one send.
+function _lssModeAnnounceBurst(targetPeerId) {
+  try {
+    _lssModeAnnounce(targetPeerId);
+    setTimeout(() => { try { _lssModeAnnounce(targetPeerId); } catch (_) {} }, 250);
+    setTimeout(() => { try { _lssModeAnnounce(targetPeerId); } catch (_) {} }, 800);
+  } catch (_) {}
+}
+// The arbiter. Runs on BOTH sides of every join, and both sides reach the same verdict because the
+// comparison is antisymmetric.
+function _lssModeFromPeer(evt, fromPeerId) {
+  try {
+    if (!evt || typeof evt.mode !== 'string' || !evt.mode) return;
+    if (typeof net === 'undefined' || !net || typeof LSS === 'undefined') return;
+    const theirAgo = (typeof evt.ago === 'number') ? evt.ago : -1;
+    if (theirAgo < 0) return;                      // they never chose; they do not get to decide
+    const myAgo = _lssModeAgo();
+    let theyWin;
+    if (myAgo < 0) {
+      theyWin = true;                              // we never chose and they did - no contest
+    } else if (Math.abs(theirAgo - myAgo) > 1200) {
+      theyWin = theirAgo > myAgo;                  // a real difference in who committed first
+    } else {
+      // Chose within ~1.2s of each other: nobody was meaningfully "first", so all that matters is
+      // that both sides pick the SAME winner. The id sort is fine here - it is only wrong when it
+      // pretends to mean join order.
+      theyWin = String(fromPeerId) < String(net.myPeerId);
+    }
+    if (!theyWin) return;                          // we are the room; our own announce convinces them
+    // Inherit their standing rather than restamping to now, or a third peer would see us as a late
+    // chooser and try to overrule the room we just joined.
+    try { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - theirAgo; } catch (_) {}
+    if (evt.seed != null) { try { net.worldSeed = evt.seed >>> 0; } catch (_) {} }
+    net.roomMode = evt.mode;
+    if (LSS.MODE === evt.mode) return;
+    try {
+      if (evt.cyber && typeof game !== 'undefined' && game) {
+        game._cyber = { armed: true }; net.cyber = true;
+      }
+    } catch (_) {}
+    _lssAdoptRoomMode(evt.mode);
+  } catch (_) {}
+}
+
 function _lssClearModeSetup() {
   try {
     if (typeof net !== 'undefined' && net) { net.freeflight = false; net.campaign = false; net.endless = false; }
@@ -90080,6 +90247,18 @@ function _lssClearModeSetup() {
     }
     // the FFA team is free-flight-only; _applyModeClientSetup re-assigns it if we land back there
     if (typeof player !== 'undefined' && player && typeof LSS !== 'undefined') player.team = LSS.TEAM_FLEET_A;
+    // (v43.22) the three misses found by audit, each of which survives an adopt:
+    // - game.endlessRun is nulled ONLY by EndlessMode.onTeardown, whose single call site is
+    //   returnToRootMenu - so adopting away from endless left the run object live.
+    // - _owReset() is called ONLY by startFreeFlight, and _owEnsureSites early-returns on a
+    //   non-null OW.cities, so adopting INTO freeflight reused a stale city fleet (owners,
+    //   armed state and bossDone from an earlier session this page load).
+    // - game._cyber / net.cyber are what make CYBERPUNK CITY different from EXHIBITION; both are
+    //   LSS.MODE === 'freeflight', so the mode string alone cannot tell them apart.
+    try { if (typeof game !== 'undefined' && game) game.endlessRun = null; } catch (_) {}
+    try { if (typeof game !== 'undefined' && game) game._cyber = null; } catch (_) {}
+    try { if (typeof net !== 'undefined' && net) net.cyber = false; } catch (_) {}
+    try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}
   } catch (_) {}
 }
 function _lssAdoptRoomMode(mode) {
@@ -90115,6 +90294,18 @@ function _lssSayRoomMode(mode) {
   try { if (typeof _owBanner === 'function') _owBanner('ROOM MODE', String(mode).toUpperCase()); } catch (_) {}
 }
 
+// (v43.22) A HUMAN PRESSED A MODE BUTTON. This is the read-only resolve PLUS the stamp that says so,
+// and the split matters: _applyModeClientSetup keeps calling the plain _lssRoomModeOr, because
+// adopting someone else's mode is not choosing one. If adopting restamped us to "chose just now" we
+// would outrank the very peer we just adopted from, and a third arrival would then be told the room
+// is whatever the LAST joiner adopted - the same inversion, one level further out.
+function _lssRoomModeChoose(want) {
+  const m = _lssRoomModeOr(want);
+  try { _lssModeChosen(); } catch (_) {}
+  try { if (typeof net !== 'undefined' && net && net.active) _lssModeAnnounceBurst(); } catch (_) {}
+  return m;
+}
+
 // (v43.19) A ROOM HAS ONE MODE. Owner: "one device i accidentally joined with the wrong mode, and
 // they are connected but separated lol ... if you're joining a room that is already made, then it
 // should go to the room's mode no matter what mode you click on."
@@ -90129,19 +90320,20 @@ function _lssSayRoomMode(mode) {
 function _lssRoomModeOr(want) {
   try {
     if (typeof net === 'undefined' || !net) return want;
+    // (v43.22) ⚠ THE ID SORT IS GONE. v43.19 decided "whose mode wins" with
+    //     [net.myPeerId, ...net.peers.keys()].sort()[0]
+    // and my own comment claimed "whoever was there first keeps the lowest id". That is FALSE -
+    // trystero's selfId is random, so the winner was a coin flip per session and roughly half the
+    // time the room adopted the JOINER's mode. Owner: "it has to be able to detect that a room
+    // already exists, and when joining check the mode of the room."
+    // net.roomMode is now written ONLY by _lssModeFromPeer, i.e. only when a peer who genuinely
+    // outranks us announced a mode they genuinely chose. So if it is set at all, the question is
+    // already settled and this is a plain read.
     if (!net.roomMode) return want;
-    // only defer to a room that actually has someone else in it
-    const others = (net.peers && net.peers.size) ? net.peers.size : 0;
-    // the authority IS the room's mode - never override the person who set it
-    try {
-      const _ids = [net.myPeerId].concat(Array.from(net.peers ? net.peers.keys() : [])).sort();
-      if (_ids[0] === net.myPeerId) return want;
-    } catch (_) {}
-    if (others <= 0) return want;
     if (net.roomMode !== want) {
       try {
         console.log('[net] joining an existing room: mode', want, '->', net.roomMode);
-        if (typeof showAnnouncement === 'function') {
+        {   // (v43.22) v43.20 fixed the CALL but left this `typeof showAnnouncement` guard around it
           _lssSayRoomMode(net.roomMode);   // (v43.20) showAnnouncement() does not exist in this file
         }
       } catch (_) {}
@@ -117348,6 +117540,10 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
       raceBtn.textContent = on ? 'RACE MODE: ON' : 'RACE MODE: OFF';
       raceBtn.classList.toggle('active', on);
       LSS.MODE = on ? 'race' : 'classic';
+      // (v43.22) this toggle writes LSS.MODE directly, bypassing the six lobby buttons - so
+      // without this the room would never hear about it. It IS a deliberate press, so it stamps
+      // the choice and announces, exactly like _lssRoomModeChoose does for the buttons.
+      try { _lssModeChosen(); _lssModeAnnounceBurst(); } catch (_) {}
       // Rebuild the carousel so the dots / arrows reflect the new
       // mode's filtered map list. buildMapSelector also re-snaps the
       // selection if the previous map is no longer eligible.
