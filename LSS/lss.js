@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.85';
+const LSS_BUILD = '43.86';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -45153,7 +45153,8 @@ function _disposeOrReleaseEffect(e) {
   if (e.type === 'fx_burst') {
     if (e.mesh) {
       if (e.mesh.parent) scene.remove(e.mesh);
-      if (!e._fxSharedGeo && e.mesh.geometry && e.mesh.geometry.dispose) {
+      const _fxShared = e._fxSharedGeo || !!(e.mesh.userData && e.mesh.userData._fxSharedGeo);
+      if (!_fxShared && e.mesh.geometry && e.mesh.geometry.dispose) {
         try { e.mesh.geometry.dispose(); } catch (_) {}
       }
       if (e.mesh.material) _releaseFXBurstMaterial(e.mesh.material);
@@ -45161,7 +45162,7 @@ function _disposeOrReleaseEffect(e) {
     return;
   }
   scene.remove(e.mesh);
-  if (e.mesh.geometry) e.mesh.geometry.dispose();
+  if (e.mesh.geometry && !e.mesh.isSprite && !_isSharedEffectGeometry(e.mesh.geometry)) e.mesh.geometry.dispose();
   _lssRetainMat(e.mesh.material);
 }
 const _fxArcFrom = new THREE.Vector3();
@@ -50448,6 +50449,11 @@ function _wallLensGeometry() {
 function _isSharedWallGeometry(g) {
   return !!g && (g === _WALL_LENS_GEO || g === _WALL_RIM_GEO);
 }
+function _isSharedEffectGeometry(g) {
+  if (!g) return false;
+  return g === _WALL_LENS_GEO || g === _WALL_RIM_GEO || g === _WALL_RIPPLE_GEO ||
+         g === _VORTEX_CORE_BEAM_GEO || g === _VORTEX_CORE_BEAM_CONE_GEO;
+}
 function _wallRimGeometry() {
   if (_WALL_RIM_GEO) return _WALL_RIM_GEO;
   const pts = [];
@@ -54034,7 +54040,7 @@ function updateWorldEffects(dt) {
       }
       if (eff.mesh && eff.mesh.parent) {
         scene.remove(eff.mesh);
-        if (!_isSharedWallGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
+        if (eff.mesh.geometry && !_isSharedEffectGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
         if (eff.mesh.userData && eff.mesh.userData._fireCloud && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
         else eff.mesh.material.dispose();
       }
@@ -55236,12 +55242,12 @@ function updateRoundSystem(dt) {
           if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _lssRetainMat(m.material); } eff.fireMeshes = null; }
           if (eff.mesh && eff.mesh.parent) {
             scene.remove(eff.mesh);
-            if (eff.mesh.geometry) eff.mesh.geometry.dispose();
+            if (eff.mesh.geometry && !_isSharedEffectGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
             if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
           }
           if (eff.plasmaMesh && eff.plasmaMesh.parent) {
             scene.remove(eff.plasmaMesh);
-            if (eff.plasmaMesh.geometry) eff.plasmaMesh.geometry.dispose();
+            if (eff.plasmaMesh.geometry && !_isSharedEffectGeometry(eff.plasmaMesh.geometry)) eff.plasmaMesh.geometry.dispose();
             if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
           }
           if (eff.coreMesh && eff.coreMesh.parent) {
@@ -55251,7 +55257,7 @@ function updateRoundSystem(dt) {
           }
           if (eff.edgeMesh && eff.edgeMesh.parent) {
             scene.remove(eff.edgeMesh);
-            if (eff.edgeMesh.geometry) eff.edgeMesh.geometry.dispose();
+            if (eff.edgeMesh.geometry && !_isSharedEffectGeometry(eff.edgeMesh.geometry)) eff.edgeMesh.geometry.dispose();
             if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
           }
           if (eff.glow && eff.glow.parent) {
@@ -55656,12 +55662,12 @@ function returnToRootMenu(opts) {
     if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _lssRetainMat(m.material); } eff.fireMeshes = null; }
     if (eff.mesh && eff.mesh.parent) {
       scene.remove(eff.mesh);
-      if (eff.mesh.geometry) eff.mesh.geometry.dispose();
+      if (eff.mesh.geometry && !_isSharedEffectGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
       if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
     }
     if (eff.plasmaMesh && eff.plasmaMesh.parent) {
       scene.remove(eff.plasmaMesh);
-      if (eff.plasmaMesh.geometry) eff.plasmaMesh.geometry.dispose();
+      if (eff.plasmaMesh.geometry && !_isSharedEffectGeometry(eff.plasmaMesh.geometry)) eff.plasmaMesh.geometry.dispose();
       if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
     }
     if (eff.coreMesh && eff.coreMesh.parent) {
@@ -55671,7 +55677,7 @@ function returnToRootMenu(opts) {
     }
     if (eff.edgeMesh && eff.edgeMesh.parent) {
       scene.remove(eff.edgeMesh);
-      if (eff.edgeMesh.geometry) eff.edgeMesh.geometry.dispose();
+      if (eff.edgeMesh.geometry && !_isSharedEffectGeometry(eff.edgeMesh.geometry)) eff.edgeMesh.geometry.dispose();
       if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
     }
     if (eff.glow && eff.glow.parent) {

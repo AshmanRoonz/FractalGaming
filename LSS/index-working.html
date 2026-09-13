@@ -5901,7 +5901,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.85';
+const LSS_BUILD = '43.86';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -69620,7 +69620,21 @@ function _disposeOrReleaseEffect(e) {
   if (e.type === 'fx_burst') {
     if (e.mesh) {
       if (e.mesh.parent) scene.remove(e.mesh);
-      if (!e._fxSharedGeo && e.mesh.geometry && e.mesh.geometry.dispose) {
+      // ⭐⭐ (v43.86) THE _fxSharedGeo FLAG LIVES AT TWO LEVELS AND THIS READ ONLY ONE.
+      // spawnFXBurst sets `_fxSharedGeo: true` on the EFFECT object, so its bursts were safe. But
+      // _wallImpactFX - the ring that flashes when a shot hits a Plasma Shield - sets it on the MESH
+      // (`ring.userData._fxSharedGeo = true`) and pushes an effect WITHOUT it. So this test read
+      // undefined and disposed _WALL_RIPPLE_GEO, the single cached RingGeometry every shield-hit ring
+      // reuses, 0.55 s after EVERY hit on EVERY shield. _WALL_RIPPLE_GEO is never nulled, so the same
+      // dead geometry was handed straight back to the next ring and re-uploaded - a re-upload per hit,
+      // for as long as anyone is shooting a shield. Unlike the round-end walks above, this one fires
+      // in the middle of a fight, which is where hitches are least acceptable.
+      // ⚠ This reads BOTH levels rather than moving the flag, because the three `eff.meshes` loops
+      // already read the MESH form and spawnFXBurst already writes the EFFECT form - changing either
+      // convention would break the other. spawnSupershapeBurst sets neither and owns a per-burst
+      // geometry, so it still frees correctly.
+      const _fxShared = e._fxSharedGeo || !!(e.mesh.userData && e.mesh.userData._fxSharedGeo);
+      if (!_fxShared && e.mesh.geometry && e.mesh.geometry.dispose) {
         try { e.mesh.geometry.dispose(); } catch (_) {}
       }
       if (e.mesh.material) _releaseFXBurstMaterial(e.mesh.material);
@@ -69628,7 +69642,16 @@ function _disposeOrReleaseEffect(e) {
     return;
   }
   scene.remove(e.mesh);
-  if (e.mesh.geometry) e.mesh.geometry.dispose();
+  // ⭐⭐ (v43.86) ⚠ NEVER DISPOSE A SPRITE'S GEOMETRY. In three.js 0.165 every THREE.Sprite ever
+  // constructed shares ONE class-level quad, so disposing it here flushes the GPU buffers behind
+  // EVERY sprite in the game at once - enemy callouts, both hit splashes, heat haze, smoke.
+  // The file already knew this and guarded exactly one type ('playerHitSplash', a few branches up).
+  // 'electricSmoke' is also a Sprite, has no branch of its own, and therefore fell through to here -
+  // so a damaged cluster smoking nearby was flushing the shared quad every 1.4-2.3 s. Testing
+  // `isSprite` fixes the type rather than the instance, so the next Sprite effect added cannot
+  // reintroduce it. `isSprite` is a three.js own-property flag, not a class check, so it survives
+  // minification and cross-realm objects.
+  if (e.mesh.geometry && !e.mesh.isSprite && !_isSharedEffectGeometry(e.mesh.geometry)) e.mesh.geometry.dispose();
   _lssRetainMat(e.mesh.material);
 }
 const _fxArcFrom = new THREE.Vector3();
@@ -77599,6 +77622,27 @@ function _wallLensGeometry() {
 function _isSharedWallGeometry(g) {
   return !!g && (g === _WALL_LENS_GEO || g === _WALL_RIM_GEO);
 }
+// ⭐⭐ (v43.86) ONE answer to "is this geometry a module-level singleton?", for every teardown walk.
+// v43.81 fixed this bug at ONE of the four near-identical worldEffects teardowns and looked complete.
+// It was not: the round-end walk and the return-to-menu walk both still freed the shared wall lens,
+// and neither knew about the vortex cone at all. The reason a partial fix was so easy to ship is that
+// the file had FOUR competing idioms for the same question - identity-compare against an accessor
+// (the vortex line just above the v43.81 fix), a wall-only named predicate, an opt-OUT userData flag
+// (_fxSharedGeo / _sharedGeo) and an opt-IN one (_ownsGeoForCleanup). This is the single identity
+// test the effect teardowns share, so the copies cannot drift apart again.
+// ⚠ IDENTITY ONLY, SO IT CANNOT OVER-FIRE. A geometry that is not literally one of these objects is
+// a per-instance allocation and MUST still be disposed or it leaks - which would be trading a
+// corruption bug for a memory leak. Every one of these is meant to live for the whole session.
+// ⚠ Deliberately tests the VARIABLES, not the _get*Geometry() accessors: the accessors build their
+// geometry on first call, and a teardown must never allocate a singleton that was never needed.
+// An unbuilt lazy singleton is null, and null matches nothing, which is the correct answer.
+// Scope: every name below is a column-0 module-level `let` in the one <script> block, and this runs
+// only at teardown time, long after module init, so there is no TDZ hazard.
+function _isSharedEffectGeometry(g) {
+  if (!g) return false;
+  return g === _WALL_LENS_GEO || g === _WALL_RIM_GEO || g === _WALL_RIPPLE_GEO ||
+         g === _VORTEX_CORE_BEAM_GEO || g === _VORTEX_CORE_BEAM_CONE_GEO;
+}
 function _wallRimGeometry() {
   if (_WALL_RIM_GEO) return _WALL_RIM_GEO;
   const pts = [];
@@ -82470,7 +82514,10 @@ function updateWorldEffects(dt) {
       // The material is still disposed: that one really is built per wall (_makeHexHologramMaterial).
       if (eff.mesh && eff.mesh.parent) {
         scene.remove(eff.mesh);
-        if (!_isSharedWallGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
+        // (v43.86) unified onto the shared predicate with the same null-check its plasmaMesh twin
+        // already had - the v43.81 form would have thrown on a mesh with a null geometry, and having
+        // one of the four copies use a different test is exactly how they drifted apart before.
+        if (eff.mesh.geometry && !_isSharedEffectGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
         if (eff.mesh.userData && eff.mesh.userData._fireCloud && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
         else eff.mesh.material.dispose();
       }
@@ -84306,12 +84353,23 @@ function updateRoundSystem(dt) {
           if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _lssRetainMat(m.material); } eff.fireMeshes = null; }
           if (eff.mesh && eff.mesh.parent) {
             scene.remove(eff.mesh);
-            if (eff.mesh.geometry) eff.mesh.geometry.dispose();
+            // (v43.86) ⚠ SHARED SINGLETONS REACH THIS LINE. This walk has no type test, so eff.mesh
+            // is _WALL_LENS_GEO for a Plasma Shield still standing when the round ends, and
+            // _VORTEX_CORE_BEAM_CONE_GEO for a peer's Mega Laser still inside its 4 s timer. Both are
+            // the one cached object every future spawn reuses. updateWorldEffects guards both; this
+            // copy guarded neither. Per-instance geometry still frees: the Plasma Mine sphere, the
+            // Stasis Trap octahedron, the gas cloud sphere and the sonar pulse are all fresh
+            // allocations, so none of them is identical to any singleton and none is exempted.
+            // The MATERIAL is still disposed either way - that one really is built per wall.
+            if (eff.mesh.geometry && !_isSharedEffectGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
             if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
           }
           if (eff.plasmaMesh && eff.plasmaMesh.parent) {
             scene.remove(eff.plasmaMesh);
-            if (eff.plasmaMesh.geometry) eff.plasmaMesh.geometry.dispose();
+            // (v43.86) plasmaMesh has exactly ONE producer in the whole file - the Plasma Shield's
+            // inner membrane - and it draws the SAME cached lens as the outer wall, so this dispose
+            // could never have been correct for anything.
+            if (eff.plasmaMesh.geometry && !_isSharedEffectGeometry(eff.plasmaMesh.geometry)) eff.plasmaMesh.geometry.dispose();
             if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
           }
           if (eff.coreMesh && eff.coreMesh.parent) {
@@ -84321,7 +84379,11 @@ function updateRoundSystem(dt) {
           }
           if (eff.edgeMesh && eff.edgeMesh.parent) {
             scene.remove(eff.edgeMesh);
-            if (eff.edgeMesh.geometry) eff.edgeMesh.geometry.dispose();
+            // (v43.86) the shield's rim Line draws the shared _WALL_RIM_GEO - one 73-point circle every
+            // shield reuses. This one was never in the original bug report: v43.81 only looked at the
+            // lens. Guarded rather than deleted (updateWorldEffects dropped its dispose outright) so a
+            // future worldEffect that grows a per-instance edgeMesh still gets freed.
+            if (eff.edgeMesh.geometry && !_isSharedEffectGeometry(eff.edgeMesh.geometry)) eff.edgeMesh.geometry.dispose();
             if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
           }
           if (eff.glow && eff.glow.parent) {
@@ -84919,14 +84981,18 @@ function returnToRootMenu(opts) {
     if (eff.fireMeshes) { for (const m of eff.fireMeshes) { if (m && m.parent) scene.remove(m); if (m && m.material && typeof _lssRetainMat === 'function') _lssRetainMat(m.material); } eff.fireMeshes = null; }
     if (eff.mesh && eff.mesh.parent) {
       scene.remove(eff.mesh);
-      if (eff.mesh.geometry) eff.mesh.geometry.dispose();
+      // (v43.86) same shared-singleton trap as the round-end walk, and this one is reachable from
+      // free flight and the hub too, not just match end - anywhere a shield can be standing when you
+      // quit out. Everything else on this array owns its geometry and still frees.
+      if (eff.mesh.geometry && !_isSharedEffectGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
       if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
     }
     // Plasma Shield now ships a sibling plasma backing mesh ; clean
     // it up alongside the main wall so it doesn't leak across match-end.
     if (eff.plasmaMesh && eff.plasmaMesh.parent) {
       scene.remove(eff.plasmaMesh);
-      if (eff.plasmaMesh.geometry) eff.plasmaMesh.geometry.dispose();
+      // (v43.86) the inner membrane draws the SAME cached lens - see the round-end twin.
+      if (eff.plasmaMesh.geometry && !_isSharedEffectGeometry(eff.plasmaMesh.geometry)) eff.plasmaMesh.geometry.dispose();
       if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
     }
     if (eff.coreMesh && eff.coreMesh.parent) {
@@ -84936,7 +85002,8 @@ function returnToRootMenu(opts) {
     }
     if (eff.edgeMesh && eff.edgeMesh.parent) {
       scene.remove(eff.edgeMesh);
-      if (eff.edgeMesh.geometry) eff.edgeMesh.geometry.dispose();
+      // (v43.86) the shield rim's shared _WALL_RIM_GEO - see the round-end twin.
+      if (eff.edgeMesh.geometry && !_isSharedEffectGeometry(eff.edgeMesh.geometry)) eff.edgeMesh.geometry.dispose();
       if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
     }
     if (eff.glow && eff.glow.parent) {
