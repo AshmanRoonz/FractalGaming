@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.96';
+const LSS_BUILD = '42.97';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -39863,7 +39863,9 @@ const _WILD = {
   charge: 68,           // speed once provoked                         (was 120)
   anim: 0.45,           // walk-cycle rate; applied every frame, so it is live-tunable
   zapR: 3000,           // how far a provoked one can strike
-  zapEvery: 2.0,        // seconds between strikes
+  zapEvery: 1.1,        // seconds between strikes  (v42.97: was 2.0 - a storm, not a metronome)
+  zapWake: 0.25,        // (v42.97) delay between being provoked and the first strike
+  zapBolts: 3,          // (v42.97) bolts drawn per strike; damage is applied once regardless
   zapDmg: 240,          // per strike (a baby hits for 45% of this)
   solid: 1,
   aggroR: 3400,         // how far it will follow what hit it
@@ -39943,6 +39945,21 @@ function _wildProto(key) {
       (err) => { console.warn('[wild] load failed:', key, err && err.message); resolve(null); });
   });
   return _wildProtos[key];
+}
+
+function _wildResolveFoe(attacker) {
+  try {
+    if (!attacker) return null;
+    if (typeof attacker === 'object') return attacker.position ? attacker : null;
+    if (attacker === 'player') return (typeof player !== 'undefined' && player && player.position) ? player : null;
+    if (typeof attacker === 'string' && attacker.indexOf('peer:') === 0) {
+      const pid = attacker.slice(5);
+      const list = (typeof net !== 'undefined' && net && net.networkPlayers) ? net.networkPlayers : null;
+      if (list) for (const np of list) { if (np && (np.id === pid || np.peerId === pid) && np.position) return np; }
+      return null;
+    }
+    return null;   // a bare 'bot' tag names no particular ship; the pack stays calm
+  } catch (_) { return null; }
 }
 
 class WildLeviathan {
@@ -40083,7 +40100,16 @@ class WildLeviathan {
           const from = this.position.clone(); from.y += this.footOff * 0.7;
           const to = player.position.clone();
           const col = (this.def && this.def.ghost != null) ? this.def.ghost : 0x8ad8ff;
-          if (typeof spawnLightningBolt === 'function') spawnLightningBolt(from, to, col, 1.3, 3, 3, true, 0.9);
+          if (typeof spawnLightningBolt === 'function') {
+            for (let _b = 0; _b < _WILD.zapBolts; _b++) {
+              const _t = to.clone();
+              if (_b > 0) {
+                const _j = this.collisionRadius * 0.35;
+                _t.x += (Math.random() - 0.5) * _j; _t.y += (Math.random() - 0.5) * _j; _t.z += (Math.random() - 0.5) * _j;
+              }
+              spawnLightningBolt(from, _t, col, 1.3 + _b * 0.25, 3, 3, true, 0.9);
+            }
+          }
           if (typeof playSpatialSound === 'function') playSpatialSound('explosion', from, { refDistance: 900, maxDistance: 14000 });
           if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.zapDmg * (this.baby ? 0.45 : 1), this);
         } catch (_) {}
@@ -40105,14 +40131,16 @@ class WildLeviathan {
       } catch (_) {}
     }
     this._lastAttacker = attacker;
-    const foe = (attacker && attacker.position) ? attacker : ((attacker === player) ? player : null);
+    const foe = _wildResolveFoe(attacker);   // (v42.97) the weapon paths pass a TAG, not a reference
     if (foe) {
       this.aggro = true; this._foe = foe; this._deAggroT = _WILD.deAggro;
+      this._zapT = Math.min(this._zapT || 0, _WILD.zapWake);
       if (_WILD._list) {
         for (const o of _WILD._list) {
           if (o && o.alive && o !== this && o.packId === this.packId &&
               o.position.distanceTo(this.position) < _WILD.aggroR) {
             o.aggro = true; o._foe = foe; o._deAggroT = _WILD.deAggro;
+            o._zapT = Math.min(o._zapT || 0, _WILD.zapWake + Math.random() * 0.5);
           }
         }
       }

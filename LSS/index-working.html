@@ -4760,7 +4760,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.96';
+const LSS_BUILD = '42.97';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -60103,7 +60103,9 @@ const _WILD = {
   // could never arrive, and the only damage it had was contact. A ground creature that cannot
   // reach you needs REACH - so an angry one spits at you, the way the arena leviathans do.
   zapR: 3000,           // how far a provoked one can strike
-  zapEvery: 2.0,        // seconds between strikes
+  zapEvery: 1.1,        // seconds between strikes  (v42.97: was 2.0 - a storm, not a metronome)
+  zapWake: 0.25,        // (v42.97) delay between being provoked and the first strike
+  zapBolts: 3,          // (v42.97) bolts drawn per strike; damage is applied once regardless
   zapDmg: 240,          // per strike (a baby hits for 45% of this)
   // SOLID: the ram pass in the player collision sweep is deliberately ONE-WAY ("we deliberately do
   // NOT add monsters to the symmetric bounce list") - it deals ram damage and lets you pass
@@ -60220,6 +60222,30 @@ function _wildProto(key) {
       (err) => { console.warn('[wild] load failed:', key, err && err.message); resolve(null); });
   });
   return _wildProtos[key];
+}
+
+// (v42.97) WHO HIT ME? - and why nothing was ever angry.
+// Owner: "the leviathans are not going aggro when you attack them".
+// takeDamage set aggro from `(attacker === player)`. Every player weapon path in this file passes
+// the STRING 'player', not the player object - 15+ call sites, e.g. index-working.html:51559,
+// 52173, 76417, 77476, 78411. A string is never === the player object, so `foe` resolved to null
+// on every single hit and nothing ever became hostile. The zap added in v42.82 was gated behind
+// `this.aggro`, so that never fired either: the whole retaliation feature was dead on arrival.
+// The convention here is a TAG, not a reference: 'player', 'bot', 'peer:<id>', or sometimes a real
+// object (bot-vs-monster passes `this`). Resolve all four.
+function _wildResolveFoe(attacker) {
+  try {
+    if (!attacker) return null;
+    if (typeof attacker === 'object') return attacker.position ? attacker : null;
+    if (attacker === 'player') return (typeof player !== 'undefined' && player && player.position) ? player : null;
+    if (typeof attacker === 'string' && attacker.indexOf('peer:') === 0) {
+      const pid = attacker.slice(5);
+      const list = (typeof net !== 'undefined' && net && net.networkPlayers) ? net.networkPlayers : null;
+      if (list) for (const np of list) { if (np && (np.id === pid || np.peerId === pid) && np.position) return np; }
+      return null;
+    }
+    return null;   // a bare 'bot' tag names no particular ship; the pack stays calm
+  } catch (_) { return null; }
 }
 
 class WildLeviathan {
@@ -60375,7 +60401,18 @@ class WildLeviathan {
           const from = this.position.clone(); from.y += this.footOff * 0.7;
           const to = player.position.clone();
           const col = (this.def && this.def.ghost != null) ? this.def.ghost : 0x8ad8ff;
-          if (typeof spawnLightningBolt === 'function') spawnLightningBolt(from, to, col, 1.3, 3, 3, true, 0.9);
+          // (v42.97) a FAN, not a single line - three bolts with jittered strike points read as a
+          // discharge rather than a laser. Damage is still applied once, below; this is only look.
+          if (typeof spawnLightningBolt === 'function') {
+            for (let _b = 0; _b < _WILD.zapBolts; _b++) {
+              const _t = to.clone();
+              if (_b > 0) {
+                const _j = this.collisionRadius * 0.35;
+                _t.x += (Math.random() - 0.5) * _j; _t.y += (Math.random() - 0.5) * _j; _t.z += (Math.random() - 0.5) * _j;
+              }
+              spawnLightningBolt(from, _t, col, 1.3 + _b * 0.25, 3, 3, true, 0.9);
+            }
+          }
           if (typeof playSpatialSound === 'function') playSpatialSound('explosion', from, { refDistance: 900, maxDistance: 14000 });
           if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.zapDmg * (this.baby ? 0.45 : 1), this);
         } catch (_) {}
@@ -60400,14 +60437,21 @@ class WildLeviathan {
       } catch (_) {}
     }
     this._lastAttacker = attacker;
-    const foe = (attacker && attacker.position) ? attacker : ((attacker === player) ? player : null);
+    const foe = _wildResolveFoe(attacker);   // (v42.97) the weapon paths pass a TAG, not a reference
     if (foe) {
+      // (v42.97) owner: "they need to go full lightning bolt mode". Being provoked has to be
+      // ANSWERED, not merely noted: without this the first strike waited out whatever was left of a
+      // up-to-2 s cadence timer, so the animal you just shot stood there. Snap the clock so the
+      // reply lands within a quarter second.
       this.aggro = true; this._foe = foe; this._deAggroT = _WILD.deAggro;
+      this._zapT = Math.min(this._zapT || 0, _WILD.zapWake);
       if (_WILD._list) {
         for (const o of _WILD._list) {
           if (o && o.alive && o !== this && o.packId === this.packId &&
               o.position.distanceTo(this.position) < _WILD.aggroR) {
             o.aggro = true; o._foe = foe; o._deAggroT = _WILD.deAggro;
+            // the family answers together - staggered so it reads as a storm, not one flat volley
+            o._zapT = Math.min(o._zapT || 0, _WILD.zapWake + Math.random() * 0.5);
           }
         }
       }
