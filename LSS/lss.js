@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.80';
+const LSS_BUILD = '43.81';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -47911,7 +47911,10 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
       if (eff.type === 'particle_wall' && eff.owner === 'player' && eff.hp > 0) {
         eff.hp = 0; eff.timer = 0;
         if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-        if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+      if (eff.edgeMesh && eff.edgeMesh.parent) {
+        scene.remove(eff.edgeMesh);
+        if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
+      }
         if (eff.plasmaMesh && eff.plasmaMesh.parent) {
           scene.remove(eff.plasmaMesh);
           if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
@@ -50341,6 +50344,9 @@ function _wallLensGeometry() {
   g.translate(0, 0, -Math.cos(arc) * k);              // drop the rim onto z = 0
   _WALL_LENS_GEO = g;
   return g;
+}
+function _isSharedWallGeometry(g) {
+  return !!g && (g === _WALL_LENS_GEO || g === _WALL_RIM_GEO);
 }
 function _wallRimGeometry() {
   if (_WALL_RIM_GEO) return _WALL_RIM_GEO;
@@ -53920,13 +53926,21 @@ function updateWorldEffects(dt) {
         try { if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose(); } catch (_) {}
         eff.mesh = null;
       }
-      if (eff.mesh && eff.mesh.parent) { scene.remove(eff.mesh); eff.mesh.geometry.dispose(); if (eff.mesh.userData && eff.mesh.userData._fireCloud && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material); else eff.mesh.material.dispose(); }
+      if (eff.mesh && eff.mesh.parent) {
+        scene.remove(eff.mesh);
+        if (!_isSharedWallGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
+        if (eff.mesh.userData && eff.mesh.userData._fireCloud && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
+        else eff.mesh.material.dispose();
+      }
       if (eff.coreMesh && eff.coreMesh.parent) { scene.remove(eff.coreMesh); eff.coreMesh.geometry.dispose(); eff.coreMesh.material.dispose(); }
       if (eff.glow && eff.glow.parent) { scene.remove(eff.glow); eff.glow.geometry.dispose(); eff.glow.material.dispose(); }
-      if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+      if (eff.edgeMesh && eff.edgeMesh.parent) {
+        scene.remove(eff.edgeMesh);
+        if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
+      }
       if (eff.plasmaMesh && eff.plasmaMesh.parent) {
         scene.remove(eff.plasmaMesh);
-        if (eff.plasmaMesh.geometry) eff.plasmaMesh.geometry.dispose();
+        if (eff.plasmaMesh.geometry && !_isSharedWallGeometry(eff.plasmaMesh.geometry)) eff.plasmaMesh.geometry.dispose();
         if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
       }
       if (eff.meshes) {

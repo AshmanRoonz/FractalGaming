@@ -5881,7 +5881,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.80';
+const LSS_BUILD = '43.81';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -73253,7 +73253,13 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
       if (eff.type === 'particle_wall' && eff.owner === 'player' && eff.hp > 0) {
         eff.hp = 0; eff.timer = 0;
         if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-        if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+        // (v43.81) the rim was removed from the scene but its LineBasicMaterial was never disposed -
+      // one leaked material per shield, for the life of the match. Its GEOMETRY is the shared
+      // _WALL_RIM_GEO and must survive, so only the material goes.
+      if (eff.edgeMesh && eff.edgeMesh.parent) {
+        scene.remove(eff.edgeMesh);
+        if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
+      }
         // Tear down the plasma backing mesh too on Stun Bolt kill.
         if (eff.plasmaMesh && eff.plasmaMesh.parent) {
           scene.remove(eff.plasmaMesh);
@@ -77235,6 +77241,14 @@ function _wallLensGeometry() {
   g.translate(0, 0, -Math.cos(arc) * k);              // drop the rim onto z = 0
   _WALL_LENS_GEO = g;
   return g;
+}
+// (v43.81) Is this one of the two CACHED wall geometries? Both are module-level singletons handed
+// to every shield that ever spawns, so disposing either frees GPU buffers that later walls still
+// point at - three.js then silently re-uploads them on the next draw, in the middle of a fight.
+// updateWorldEffects already guards the vortex beam's shared geometry exactly this way
+// (`eff.mesh.geometry !== _getVortexCoreBeamGeometry()`); this is the same idiom for the wall.
+function _isSharedWallGeometry(g) {
+  return !!g && (g === _WALL_LENS_GEO || g === _WALL_RIM_GEO);
 }
 function _wallRimGeometry() {
   if (_WALL_RIM_GEO) return _WALL_RIM_GEO;
@@ -82079,14 +82093,31 @@ function updateWorldEffects(dt) {
         try { if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose(); } catch (_) {}
         eff.mesh = null;
       }
-      if (eff.mesh && eff.mesh.parent) { scene.remove(eff.mesh); eff.mesh.geometry.dispose(); if (eff.mesh.userData && eff.mesh.userData._fireCloud && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material); else eff.mesh.material.dispose(); }
+      // (v43.81) ⚠ THIS DISPOSED A SHARED SINGLETON. For a particle_wall (TRACKER's Plasma Shield)
+      // `eff.mesh.geometry` IS `_WALL_LENS_GEO` - the one cached lens every shield reuses - so a wall
+      // expiring mid-fight freed the GPU buffers out from under every future wall, and three.js
+      // re-uploaded them on the next deploy. The shield has a 10s timer, so this recurred all match.
+      // The material is still disposed: that one really is built per wall (_makeHexHologramMaterial).
+      if (eff.mesh && eff.mesh.parent) {
+        scene.remove(eff.mesh);
+        if (!_isSharedWallGeometry(eff.mesh.geometry)) eff.mesh.geometry.dispose();
+        if (eff.mesh.userData && eff.mesh.userData._fireCloud && typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
+        else eff.mesh.material.dispose();
+      }
       if (eff.coreMesh && eff.coreMesh.parent) { scene.remove(eff.coreMesh); eff.coreMesh.geometry.dispose(); eff.coreMesh.material.dispose(); }
       if (eff.glow && eff.glow.parent) { scene.remove(eff.glow); eff.glow.geometry.dispose(); eff.glow.material.dispose(); }
-      if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+      // (v43.81) the rim was removed from the scene but its LineBasicMaterial was never disposed -
+      // one leaked material per shield, for the life of the match. Its GEOMETRY is the shared
+      // _WALL_RIM_GEO and must survive, so only the material goes.
+      if (eff.edgeMesh && eff.edgeMesh.parent) {
+        scene.remove(eff.edgeMesh);
+        if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
+      }
       // Plasma Shield plasma backing layer ; tear it down too.
       if (eff.plasmaMesh && eff.plasmaMesh.parent) {
         scene.remove(eff.plasmaMesh);
-        if (eff.plasmaMesh.geometry) eff.plasmaMesh.geometry.dispose();
+        // (v43.81) the inner membrane draws the SAME cached lens - same reason as above.
+        if (eff.plasmaMesh.geometry && !_isSharedWallGeometry(eff.plasmaMesh.geometry)) eff.plasmaMesh.geometry.dispose();
         if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
       }
       // Clean up firewall line meshes / sprites
