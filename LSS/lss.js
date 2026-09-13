@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.71';
+const LSS_BUILD = '43.72';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -29901,7 +29901,19 @@ function _previewFitBackdrop(aspect) {
   }
 }
 
-const _PICKER_LIGHTS = { amb: 0.48, key: 1.25, fill: 0.55, rim: 0.42, hemi: 0.45 };
+/* (v43.72) owner: "increase the lighting on the ship model in the lobby". Every light here is
+   x2.2 on what it was - amb .48, key 1.25, fill .55, rim .42, hemi .45 - tuned live through the
+   `window.__pickerLights(mult)` knob that already existed for exactly this, then baked.
+   WHY 2.2: A/B'd at 1.0 / 1.6 / 2.2 / 3.0 on VORTEX and PYRO. At 1.0 the hull is a silhouette
+   with a few emissive strips; 1.6 brings the plating back; 2.2 reads the panel detail and the
+   accent colours while the stage still feels like a dim hangar; by 3.0 the engine bells clip to
+   white and the hull goes flat. 2.2 is the last stop before it stops looking lit and starts
+   looking washed.
+   ⚠ SAFE BY SCOPE, and this is the part worth checking before touching light values in this
+   file: _PICKER_LIGHTS is read ONLY by _pickerLightsAdd(), which adds these five to the
+   PICKER'S OWN scene (_shipPreview3D). Nothing here is shared with the game world, so the
+   arena, the hub and the weather system's light bookkeeping are all untouched. */
+const _PICKER_LIGHTS = { amb: 1.06, key: 2.75, fill: 1.21, rim: 0.92, hemi: 0.99 };
 function _pickerLightsAdd(scene) {
   const L = {};
   L.amb = new THREE.AmbientLight(0xffffff, _PICKER_LIGHTS.amb); scene.add(L.amb);
