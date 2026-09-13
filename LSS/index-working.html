@@ -5901,7 +5901,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.90';
+const LSS_BUILD = '43.91';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -11343,7 +11343,20 @@ function startFreeFlight() {
   game.testMode = false;      
   game.raceNoTimer = true;    
   game.currentRound = 1;
-  game.selectedMap = 'hub_overworld';
+  // ⭐⭐ (v43.91) THE PRESS CAN BE REFUSED; THIS WRITE COULD NOT BE. Owner: "i joined multiplayer,
+  // just through the room join on the main menu, and then on the mobile i clicked exhibition...
+  // it's glitching the map changing, it keeps switching."
+  // A ROOM HAS ONE MODE (v43.19), so _lssRoomModeChoose -> _lssRoomModeOr returns the ROOM's mode
+  // whenever net.roomMode is set - pressing EXHIBITION inside someone else's classic room leaves
+  // LSS.MODE as 'classic'. But this line ran anyway, so the client ended up in classic holding
+  // 'hub_overworld', which _visibleMapKeys() does not list for classic. buildMapSelector then snaps
+  // it back and (since v43.75 repaints on a snap) ANNOUNCES the snap; the peer paints that, echoes
+  // it, and snaps to its own keys[0] - a self-feeding 2-cycle. One device, one press, no packet loss
+  // required: this is the generator, and everything else in this commit is containment.
+  // ⚠ ONLY the map is guarded here. What a refused EXHIBITION press should do about the rest of the
+  // free-flight state (the lss-freeflight body class, thirdPerson, raceNoTimer) is a behaviour
+  // question for the owner, not something to decide silently - flagged, deliberately not changed.
+  if (LSS.MODE === 'freeflight') game.selectedMap = 'hub_overworld';
   try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}   
   
   
@@ -11385,7 +11398,9 @@ function startEndless() {
   // (v38.77) THE BENT WORLD IS THE ENDLESS MAP. Owner's verdict on the v36.96 feel-test: "endless
   // map the long dark (bent) should be the only option... i like bent better". The flat caverns
   // base stays in MAP_DATA (the bent level generates from it) but is no longer launchable.
-  game.selectedMap = 'endless_bend';
+  // (v43.91) Same refused-press guard as startFreeFlight - endless/classic is one of the three
+  // oscillating pairs (the others are classic/race/assault vs freeflight/campaign).
+  if (LSS.MODE === 'endless') game.selectedMap = 'endless_bend';
   let _code = '';
   try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
   if ((net.active && net.room) || _code) {
@@ -13152,7 +13167,10 @@ function buildMapSelector() {
   // case where THIS function did the snapping, and the owner's ENDLESS/EXHIBITION cases were not that
   // - those modes raw-assign game.selectedMap themselves before ever getting here, so nothing was
   // "snapped" and the window still went unpainted. selectMap's own guard handles every variant now.
-  selectMap(game.selectedMap);
+  // (v43.91) SILENT. This repaint exists because the key above may have been re-snapped for legality
+  // or raw-written by a mode entry point. It is a local assertion, not a decision - every peer on the
+  // same mode computes the same answer - and broadcasting it supplied one edge of the thrash.
+  selectMap(game.selectedMap, { silent: true });
   // Sync disabled state after rebinding ; buildMapSelector can run
   // mid-countdown (e.g. race-mode toggle) and the freshly-cloned buttons
   // would otherwise render fully clickable.
@@ -13180,7 +13198,7 @@ let _mapSelectorRendered = false;
 // on a different map from game.selectedMap - see the echo guard below.
 let _mapPaintedKey = null;
 
-function selectMap(mapKey) {
+function selectMap(mapKey, opts) {
   if (!MAP_DATA[mapKey]) return;
   if (typeof game !== 'undefined' && game && game._campReentry) return;   
   
@@ -13280,14 +13298,25 @@ function selectMap(mapKey) {
     }
   } catch (_) {}
 
-  if (net.active && net.sendEvent) {
+  // ⭐ (v43.91) A MACHINE SNAP IS NOT A HUMAN PRESS. v43.75 deliberately weakened the echo guard
+  // above so a key that moved WITHOUT being painted falls through and repaints - and the
+  // fall-through lands here, which quietly turned buildMapSelector's legality re-snap into a NETWORK
+  // ANNOUNCEMENT. On the wire it became indistinguishable from someone clicking the map arrow, so
+  // two peers holding different modes could each paint the other's key, each snap back to their own
+  // mode's keys[0], and each announce it - forever. The snap is a PURE FUNCTION of an already-agreed
+  // mode, so it is never news; only a human choice is. `opts.silent` is passed by exactly two
+  // callers: the map_change receiver and buildMapSelector's foot.
+  // ⚠ THE `mode` FIELD IS GONE, and it was already dead: the receiver fed it to _lssModeFromPeer
+  // with a hard-coded ago:-1, and _lssPeerOutranksMe answers that 'they-never-chose' EVERY time,
+  // returning before net.roomMode can even be written. It decided nothing in either direction. A
+  // dead lever that reads like an override is worse than no lever - it is why a map bug sends people
+  // hunting through the mode system. The decree is the mode channel; there is no other.
+  if (net.active && net.sendEvent && !(opts && opts.silent)) {
     const ov = game.pendingGmapsOverlay;
     net.sendEvent({
       type: 'map_change',
       mapKey,
-      gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null,
-      // Tag along the current race-mode flag so peers stay in sync.
-      mode: LSS.MODE || 'classic'
+      gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null
     });
   }
 }
@@ -15310,17 +15339,35 @@ function handleNetEvent(evt, fromPeerId) {
         if (inp) { inp.disabled = false; }
       } catch(_) {}
     }
-    if (typeof selectMap === 'function') selectMap(evt.mapKey);
+    // (v43.91) A MAP MUST BE LEGAL FOR *MY* MODE - the same invariant the mode decree already
+    // asserts, now applied to the one channel that bypassed it. This is NOT a second decider: it
+    // writes no shared value and sends nothing, it only refuses inbound data that is illegal under
+    // the mode this client has already been decreed. When the two modes agree it never fires.
+    // Without it a freeflight peer could paint 'hub_overworld' into a classic peer, which echoed it
+    // and then snapped back to 'hourglass' - the other edge of the 2-cycle.
+    try {
+      if (typeof _visibleMapKeys === 'function') {
+        const _legal = _visibleMapKeys();
+        if (_legal && _legal.length && _legal.indexOf(evt.mapKey) === -1) {
+          try { _lssModeLog('rx', 'map_change', (typeof LSS !== 'undefined' ? LSS.MODE : '?'), null, fromPeerId,
+                            'map ' + evt.mapKey + ' is not legal here - ignored'); } catch (_) {}
+          return;
+        }
+      }
+    } catch (_) {}
+    // Painting what a peer just told us is not news TO THAT PEER; re-announcing it is the amplifier.
+    if (typeof selectMap === 'function') selectMap(evt.mapKey, { silent: true });
     // Apply the broadcast race-mode flag, if present. Falls back to
     // 'classic' so a peer running a stale (no-mode) v12m client doesn't
     // accidentally drag race-mode peers into classic mid-race.
-    if (typeof evt.mode === 'string' && (evt.mode === 'classic' || evt.mode === 'race' || evt.mode === 'campaign' || evt.mode === 'endless')) {
-      // (v43.22) ⚠ THIS WAS A RAW STOMP. No authority check, no roomMode check, no client setup -
-      // just LSS.MODE = evt.mode, so an endless peer cycling the map silently dragged a freeflight
-      // peer into 'endless' while leaving every freeflight flag set. (Its allow-list also omits
-      // 'freeflight' and 'assault', so the reverse was ignored - divergence in one direction only.)
-      // Route it through the same arbiter as everything else; a map cycle is not a mode decision.
-      _lssModeFromPeer({ mode: evt.mode, ago: -1 }, fromPeerId);
+    // (v43.91) map_change NO LONGER CARRIES A MODE AT ALL. v43.22 routed it through the pairwise
+    // arbiter with a hard-coded ago:-1, and _lssPeerOutranksMe answers that with 'they-never-chose'
+    // every single time - returning before _lssModeFromPeer can even write net.roomMode. So the
+    // guard was correct AND completely inert, in both directions, not just the one its own comment
+    // admitted. Removed rather than kept: the decree is the only mode decision on the wire, and a
+    // channel that merely looks like it carries a mode is what makes a map bug read as a mode bug.
+    // The race-toggle repaint below stays - it reads OUR LSS.MODE and never touched the packet.
+    {
       try {
         const btn = document.getElementById('race-mode-toggle');
         if (btn) {
@@ -92669,6 +92716,15 @@ function _lssModeDecide() {
     };
     _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode + (_map ? ' / ' + _map : ''));
     try { net.sendEvent(decree); } catch (_) {}
+    // (v43.91) ⚠ A DECREE REPEAT WAS TRIED HERE AND BACKED OUT. The defect it targets is real - this
+    // is one unrepeated send on a channel the rest of the file treats as unreliable, and
+    // net._decreedKey is written BEFORE it and never cleared, so a dropped decree can never be
+    // retried. But re-sending it measurably produced a NEW slow oscillation in the two-tab harness
+    // (_lssAdoptRoomMode and _lssApplyModeDecree trading the map back and forth a few times a
+    // second), so the re-send is not idempotent in practice the way the early-return suggests.
+    // Left alone deliberately: the map thrash this build fixes does not need it, and shipping an
+    // unvalidated consensus change on top of a validated one is how this file got four failed
+    // fixes. Wants its own pass, with the two-tab harness.
     try { _lssApplyModeDecree(decree, true); } finally { net._deciding = false; }
   } catch (_) {}
 }
@@ -92787,6 +92843,13 @@ function _lssApplyModeDecree(evt, mine) {
     try { _lssSayRoomMode(evt.mode); } catch (_) {}
     // The decider's own map may have just been re-snapped by the mode change; re-run so the room is
     // told the map that actually goes with the mode. The key dedupe below stops this recursing.
+    // (v43.91) ⚠ DEFERRING THIS BY A TICK WAS TRIED AND BACKED OUT, with the decree repeat above.
+    // The observation is still true and worth fixing one day: _lssModeDecide calls us from inside
+    // `try { ... } finally { net._deciding = false; }`, so net._deciding is STILL TRUE here and this
+    // re-entry is swallowed by the guard at the top of _lssModeDecide - the comment promising "the
+    // re-run at the foot of _lssApplyModeDecree sends the right one" is false. Waking it made the
+    // decider re-decide while peers were still adopting, which showed up as map churn. Needs its own
+    // pass and its own two-tab measurement, not a ride-along.
     if (mine) { try { _lssModeDecide(); } catch (_) {} }
   } catch (_) {}
 }

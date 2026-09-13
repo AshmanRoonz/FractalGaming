@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.90';
+const LSS_BUILD = '43.91';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -3793,7 +3793,7 @@ function startFreeFlight() {
   game.testMode = false;      
   game.raceNoTimer = true;    
   game.currentRound = 1;
-  game.selectedMap = 'hub_overworld';
+  if (LSS.MODE === 'freeflight') game.selectedMap = 'hub_overworld';
   try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}   
   
   
@@ -3821,7 +3821,7 @@ function startEndless() {
   game.testMode = false;
   game.raceNoTimer = true;
   game.currentRound = 1;
-  game.selectedMap = 'endless_bend';
+  if (LSS.MODE === 'endless') game.selectedMap = 'endless_bend';
   let _code = '';
   try { const el = document.getElementById('room-code'); _code = el && el.value ? el.value.trim() : ''; } catch (_) {}
   if ((net.active && net.room) || _code) {
@@ -5090,7 +5090,7 @@ function buildMapSelector() {
   if (typeof _bindSkyArrows === 'function') _bindSkyArrows();
   if (typeof _updateSkyUI === 'function')   _updateSkyUI();
 
-  selectMap(game.selectedMap);
+  selectMap(game.selectedMap, { silent: true });
   _syncMapButtonsDisabled();
 }
 
@@ -5099,7 +5099,7 @@ const MAP_DEFAULT_THEME_NAMES = new Set(['Grassy','Rocky','Snow','Volcanic','Gol
 let _mapSelectorRendered = false;
 let _mapPaintedKey = null;
 
-function selectMap(mapKey) {
+function selectMap(mapKey, opts) {
   if (!MAP_DATA[mapKey]) return;
   if (typeof game !== 'undefined' && game && game._campReentry) return;   
   
@@ -5155,13 +5155,12 @@ function selectMap(mapKey) {
     }
   } catch (_) {}
 
-  if (net.active && net.sendEvent) {
+  if (net.active && net.sendEvent && !(opts && opts.silent)) {
     const ov = game.pendingGmapsOverlay;
     net.sendEvent({
       type: 'map_change',
       mapKey,
-      gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null,
-      mode: LSS.MODE || 'classic'
+      gmapsOverlay: ov ? { lat: ov.lat, lng: ov.lng, name: ov.name } : null
     });
   }
 }
@@ -6620,9 +6619,18 @@ function handleNetEvent(evt, fromPeerId) {
         if (inp) { inp.disabled = false; }
       } catch(_) {}
     }
-    if (typeof selectMap === 'function') selectMap(evt.mapKey);
-    if (typeof evt.mode === 'string' && (evt.mode === 'classic' || evt.mode === 'race' || evt.mode === 'campaign' || evt.mode === 'endless')) {
-      _lssModeFromPeer({ mode: evt.mode, ago: -1 }, fromPeerId);
+    try {
+      if (typeof _visibleMapKeys === 'function') {
+        const _legal = _visibleMapKeys();
+        if (_legal && _legal.length && _legal.indexOf(evt.mapKey) === -1) {
+          try { _lssModeLog('rx', 'map_change', (typeof LSS !== 'undefined' ? LSS.MODE : '?'), null, fromPeerId,
+                            'map ' + evt.mapKey + ' is not legal here - ignored'); } catch (_) {}
+          return;
+        }
+      }
+    } catch (_) {}
+    if (typeof selectMap === 'function') selectMap(evt.mapKey, { silent: true });
+    {
       try {
         const btn = document.getElementById('race-mode-toggle');
         if (btn) {
