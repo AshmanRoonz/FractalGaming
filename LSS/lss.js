@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.97';
+const LSS_BUILD = '43.98';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -60784,6 +60784,7 @@ function _lssRefreshModeUI() {
   try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
   try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
   try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
+  try { if (typeof _renderDifficultyPicker === 'function') _renderDifficultyPicker(); } catch (_) {}
 }
 function _lssApplyModeDecree(evt, mine) {
   try {

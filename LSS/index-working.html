@@ -6083,7 +6083,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.97';
+const LSS_BUILD = '43.98';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -92919,11 +92919,44 @@ function _lssModeDecide() {
 // mode this client pressed rather than the mode it is actually in.
 // ⚠ A display that lies about shared state is worse than no display: it sent us hunting a sync bug
 // that was already fixed, twice.
+// (v43.98) ...AND THE DIFFICULTY PICKER IS PART OF THE MODE UI. Owner: "when I swap through modes
+// from the ship selection screen, it doesn't bring up the difficulty selector for some modes".
+//
+// _renderDifficultyPicker had exactly ONE caller in the whole file - previewLoadout() - so the
+// SWARM DIFFICULTY box only ever repainted when a SHIP was previewed. Every mode entry point off the
+// main menu happens to end in a ship preview, which is why it looked correct from there and only
+// from there; the ROOM MODE arrows change LSS.MODE without touching the fleet, so the box was left
+// showing whatever the last previewed ship's mode wanted. Measured on the arrow path at 43.97,
+// stepping ELIMINATION -> EXHIBITION -> ENDLESS -> RACE -> ASSAULT:
+//
+//   arrow into ENDLESS ............. display:none, h=0, .ss-diff-on false   <- the reported symptom
+//   then click any ship chip ....... display:flex, h=48, .ss-diff-on true   <- previewLoadout, the only refresher
+//   then arrow away to RACE ........ display:flex, h=48, STILL "2 lives for the run. Aegis bolts..."
+//
+// so the second half is the worse half and was never reported: an ENDLESS-only control stays live and
+// clickable in RACE and ASSAULT, offering endless lives text for a mode that has no such thing, and
+// `.ss-diff-on` stays set - which held #ss-right-col 54px lower (169 vs 115) in a mode with nothing
+// to make room for. Both directions are the same missing call.
+//
+// This is the funnel it always belonged in, and the file said so: the note above _lssRenderLobbyMode
+// records the rule as "_lssRefreshModeUI() already calls this, so defining it wires the picker into
+// EVERY mode adoption path (decree, adopt, drop-in) for free - it can never show a mode we are not
+// in." That is true of the difficulty picker word for word, and putting it here fixes the NETWORK
+// cases in the same stroke: a peer's mode_decree landing while you sit in ship select (_lssApplyModeDecree,
+// the other caller) had the identical stale box, and no ship click was coming to repair it.
+// (!) _renderDifficultyPicker is self-gating - it hides itself and clears the flag for any mode that
+//     is not campaign/endless - so there is nothing to decide here and no mode list to keep in sync.
+// (!) Safe to run with ship select closed, like the three calls beside it: the panel is inside the
+//     hidden #ship-select, so this only pre-settles the box for the next time it opens.
+// (!) The relayout is already wired - _ssSpreadRails observes #ship-preview-difficulty with a
+//     ResizeObserver AND #ship-select's class with a MutationObserver (for exactly this flag), so
+//     the rails and the right column re-measure on their own.
 function _lssRefreshModeUI() {
   try { if (typeof _ssModeLabel === 'function') _ssModeLabel(); } catch (_) {}
   try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
   try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
   try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
+  try { if (typeof _renderDifficultyPicker === 'function') _renderDifficultyPicker(); } catch (_) {}
 }
 function _lssApplyModeDecree(evt, mine) {
   try {
