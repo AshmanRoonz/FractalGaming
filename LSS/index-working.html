@@ -5901,7 +5901,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.83';
+const LSS_BUILD = '43.84';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -16532,7 +16532,10 @@ function _fxFriendly(team) {
 // exactly as it did before this change; only the friendly variants are new.
 const _FXFF = {
   // PYRO: "friendly flames more red than orange". Preset 'fireball' is #ff7722.
-  fireFriendly:    0xff3311,
+  // (v43.84) "a bit more red" - this is the BURNING-HULL damage state (see the ramp block below),
+  // the one v43.82 actually changed. Kept, because a friendly wreck reading red beside an enemy
+  // wreck reading orange is the same call the fire ramp makes; pushed further red to match it.
+  fireFriendly:    0xff1a05,
   // TRACKER shield: "friendly will be more neon orange than what's there now" (was CLASS_COLORS
   // .TRACKER 0xff8800). Same hue family, pushed up in chroma and value so it reads as neon.
   shieldFriendly:  0xffa11a,
@@ -16542,6 +16545,60 @@ const _FXFF = {
   // friendly keeps CLASS_COLORS.PUNCTURE (0xffee44).
   tetherEnemy:     0xb39a12,
 };
+
+// ===================== (v43.84) PYRO'S FIRE, FRIEND VS FOE =====================
+// Owner: "i think my fire should be a bit more red, and the enemy's fire should be more orange like
+// the way it is".
+// ⚠ v43.82 tinted the WRONG fire. `spawnFXBurst('fireball')` in emitDamageState is the BURNING-HULL
+// damage state - a wreck at low health - not anything Pyro fires. Pyro's actual flame bodies all go
+// through _makeFireCloudMaterial, which mixes a FOUR-STOP RAMP (uC0 shadowed root -> uC1 body ->
+// uC2 hot core -> uC3 near-white tip) rather than a single colour, so one uBaseColor write could
+// never have reached them. There are exactly four: the thermite impact flame (spawnPyroFlame), the
+// Flame Chain licks (_buildFlameChainFlameLicks), the Fire Shield envelope
+// (_ensureThermalFlameMeshes) and an ignited gas cloud.
+//
+// The enemy ramps below are the literals those four already used, moved here unchanged - an enemy's
+// fire must look EXACTLY as it did, which is what "like the way it is" asks for. Only the friendly
+// variant is new, and it is DERIVED rather than hand-picked: each stop keeps its lightness and
+// saturation (so the fire keeps its value structure and still reads as fire) and only its HUE is
+// pulled toward red. Measured in the running game (three.js works in LINEAR space, so the rotation
+// lands milder than an sRGB calculator predicts - take the numbers from the page, not from the
+// arithmetic): 0.30 turns the base ramp #3a0a02 #cc2a00 #ff6a18 #ffe39a into
+// #3a0200 #cc1400 #ff3e18 #ffb49a. Red, but not the flat blood red of a full rotation to 0, which
+// loses the hot-core-to-pale-tip read that makes it look like fire at all.
+// Live knob for dialling it without a rebuild: window.__fireRed.set(0.45) backs off toward orange,
+// .set(0.15) goes further red. It clears the cache, so the next flame spawned uses the new value
+// (flames already burning keep the colour they were built with).
+const _FIRE_RAMP_BASE   = { c0: 0x3a0a02, c1: 0xcc2a00, c2: 0xff6a18, c3: 0xffe39a };
+const _FIRE_RAMP_SHIELD = { c0: 0x2a0600, c1: 0xcc2a00, c2: 0xff7a22, c3: 0xffe39a };
+// Keyed by the ramp OBJECT, so the constants above must be referenced, never rebuilt inline at a
+// call site - a fresh literal every spawn would miss the cache and re-run the conversion per flame.
+const _FIRE_RED_CACHE = new Map();
+const _fireRedTmp = new THREE.Color(), _fireRedHSL = {};
+function _fireRedden(ramp) {
+  let out = _FIRE_RED_CACHE.get(ramp);
+  if (out) return out;
+  const k = (typeof window !== 'undefined' && window.__fireRed) || null;
+  const hMul = (k && k.h != null) ? k.h : 0.30;
+  const sMul = (k && k.s != null) ? k.s : 1.05;
+  out = {};
+  for (const key of ['c0', 'c1', 'c2', 'c3']) {
+    _fireRedTmp.setHex(ramp[key]);
+    _fireRedTmp.getHSL(_fireRedHSL);
+    _fireRedTmp.setHSL(_fireRedHSL.h * hMul, Math.min(1, _fireRedHSL.s * sMul), _fireRedHSL.l);
+    out[key] = _fireRedTmp.getHex();
+  }
+  _FIRE_RED_CACHE.set(ramp, out);
+  return out;
+}
+// Returns {c0,c1,c2,c3} to merge into a _makeFireCloudMaterial options object.
+function _fireRamp(team, ramp) {
+  ramp = ramp || _FIRE_RAMP_BASE;
+  return _fxFriendly(team) ? _fireRedden(ramp) : ramp;
+}
+if (typeof window !== 'undefined') {
+  window.__fireRed = { h: 0.30, s: 1.05, set(h, s) { if (h != null) this.h = h; if (s != null) this.s = s; _FIRE_RED_CACHE.clear(); } };
+}
 
 // Plasma Shield spawn helper, shared between the local fire path
 // (broadcast=true) and the effect_spawn receiver (broadcast=false). Same
@@ -18706,7 +18763,11 @@ function _buildFlameChainFlameLicks(effData, pos, dir, length) {
     // reads as a row of distinct flames rather than uniform blobs.
     const radius = 80 + Math.random() * 30;
     // (fire-cloud) Flame Chain licks use the volumetric fire shader.
-    const mat = _makeFireCloudMaterial({ radius: radius, alpha: 0.6, oct: 5 });
+    // (v43.84) FLAME CHAIN / firewall licks run red for your own side. effData.team is already the
+    // firewall's team on both spawn paths - `team: player.team` locally, the broadcast `evt.team`
+    // through spawnFlameChainVisual - so nothing needed threading to reach it.
+    const mat = _makeFireCloudMaterial(Object.assign(
+      { radius: radius, alpha: 0.6, oct: 5 }, _fireRamp(effData && effData.team)));
     const geo = _getFXBurstGeometry(16, 10);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.scale.setScalar(radius);
@@ -19615,6 +19676,34 @@ function spawnNetworkProjectile(data, fromPeerId) {
   // damage flows via the hit-claim path, NetworkPlayer.takeDamage).
   const proj = new Projectile(origin, vel, 0, 0, 'network', color);
   proj.isNetwork = true;
+  // ⭐ (v43.84) WHOSE SHOT THIS IS. Every other projectile in the file carries `ownerTeam`; this one
+  // never did, even though `fromPeerId` was right there in the signature. `ownerTeam == null` reads
+  // as "no team" everywhere it is tested, which is not neutral - it means ENEMY:
+  //   1. the player-hit guard (`this.ownerTeam == null || player.team !== this.ownerTeam`) let a
+  //      TEAMMATE's shot burst on your hull. Zero damage, so it was never a health bug - but
+  //      playerTakeDamage runs regardless of amount, and its very first act is
+  //      `player.lastDamageTime = game.time`, which is what gates the shield refill. A friendly
+  //      flying past you held your shields down. It also fired the directional damage indicator.
+  //      This is the harmonics rule besides ("our ships are tuned so they don't take friendly
+  //      fire") - a friendly round should pass straight through.
+  //   2. isFireSource rounds call igniteNearbyGas(pos, 150, owner, ownerTeam) and v35.63 made that
+  //      hand the blaze to the igniter. With no team the transfer half-completed: the cloud took
+  //      owner 'network' and KEPT the planter's team, so a teammate lighting an enemy's gas left a
+  //      fire that still burned you.
+  // Perspective is the peer's own team, not a guess: peer.team is the authoritative value the
+  // `team_set` event carries (v42.43), networkPlayer.team its mirror. If neither has arrived we
+  // leave it undefined and behave exactly as before rather than infer one - _teamForPeerId is a
+  // sorted-peer-id fallback, and sorted peer ids are not join order.
+  {
+    const _npTeamPeer = net.peers.get(fromPeerId);
+    if (_npTeamPeer) {
+      const _npTeam = (_npTeamPeer.networkPlayer && _npTeamPeer.networkPlayer.team != null)
+        ? _npTeamPeer.networkPlayer.team
+        : (_npTeamPeer.team != null ? _npTeamPeer.team : null);
+      if (_npTeam != null) proj.ownerTeam = _npTeam;
+      proj.ownerPeerId = fromPeerId;
+    }
+  }
   // Carry pyro-style fire-source flag so gas clouds still ignite
   // visually when a remote pyro's projectile passes through them.
   if (data.isFireSource) proj.isFireSource = true;
@@ -53607,7 +53696,14 @@ class Projectile {
       }
       // Bot-vs-bot: enemy bots of the firing team take projectile hits.
       // 0.6x mirrors the bot weapon damage scaling so AI fights don't melt.
-      if (this.ownerTeam != null) {
+      // (v43.84) ⚠ `!this.isNetwork` PINS TODAY'S BEHAVIOUR HERE. This loop was dead for remote
+      // shots only because they had no ownerTeam; tagging one above would have switched it on as a
+      // side effect, and it is not a loop a cosmetic projectile may enter: Bot.takeDamage does not
+      // early-out at 0 damage, so every peer round grazing a bot would have fired a `bot_dmg` claim
+      // onto the wire (`d: 0`) and credited `this.ownerRef || 'bot'` - junk, from the authority's
+      // own aggro bookkeeping outward. Remote projectiles deal no local damage by design; the
+      // shooter's client resolves its own hits.
+      if (this.ownerTeam != null && !this.isNetwork) {
         for (const bot of game.entities) {
           if (!bot || !bot.alive || bot === this.ownerRef || bot.team === this.ownerTeam) continue;
           const r = bot.chassis.hullLength * 1.1;
@@ -53907,7 +54003,8 @@ class Projectile {
     spawnExplosion(_exPos, _exSize);
     // Pyro thermite leaves a small lingering flame at the impact point.
     if (this.isPyroThermite && typeof spawnPyroFlame === 'function') {
-      spawnPyroFlame(_exPos);
+      // (v43.84) the file's standing idiom for a projectile's team (see splashDamage, igniteNearbyGas).
+      spawnPyroFlame(_exPos, this.owner === 'player' ? player.team : this.ownerTeam);
     }
     // Force-field wall ripple on wall hits only. The
     // wall is a holographic force-field membrane ; impacts ring outward
@@ -54110,7 +54207,11 @@ function _chargeFireTick(dt, t, tint) {
     if (game.worldEffects.length > n0) { const fe = game.worldEffects[game.worldEffects.length - 1]; fe._classFlame = true; fe._grow = 1.25; }
   } catch (_) {}
 }
-function spawnPyroFlame(pos) {
+// (v43.84) `team` = whose thermite this was, so the lingering flame reads red on your own side.
+// Optional on purpose: the warmup prebake calls this with no team and gets the enemy ramp, which is
+// the right thing to compile - the shader program is identical either way, only uniform VALUES
+// differ, so neither ramp adds a link.
+function spawnPyroFlame(pos, team) {
   const eff = {
     type: 'pyro_flame',
     position: pos.clone(),
@@ -54124,7 +54225,8 @@ function spawnPyroFlame(pos) {
   if (typeof spawnDynamicLight === 'function') {
     spawnDynamicLight(pos, 0xff5520, 2.5, 350, 0.3);
   }
-  eff.fireMeshes = _spawnFireCloudCluster(pos, { count: 3, radius: 48, alpha: 0.55 });
+  eff.fireMeshes = _spawnFireCloudCluster(pos, Object.assign(
+    { count: 3, radius: 48, alpha: 0.55 }, _fireRamp(team)));
 }
 
 // Ignite any Explosive Gas gas clouds near a fire source position. If the cloud
@@ -54192,7 +54294,13 @@ function igniteNearbyGas(pos, radius, igniter, igniterTeam) {
       if (eff.mesh && eff.mesh.material) {
         if (eff.mesh.material.uniforms && eff.mesh.material.uniforms.uC0) {
           const _gu = eff.mesh.material.uniforms;
-          _gu.uC0.value.setHex(0x3a0a02); _gu.uC1.value.setHex(0xcc2a00); _gu.uC2.value.setHex(0xff6a18); _gu.uC3.value.setHex(0xffe39a);
+          // (v43.84) ⚠ AN IGNITED CLOUD REWRITES THE RAMP AFTER CONSTRUCTION - the gas is built green
+          // and only becomes fire here, so this is the one fire body whose colour is NOT decided by
+          // its material's constructor. It runs AFTER the ownership transfer a dozen lines up, so
+          // eff.team is already the igniter's: light an enemy's gas and the blaze turns red as it
+          // changes hands.
+          const _gr = _fireRamp(eff.team);
+          _gu.uC0.value.setHex(_gr.c0); _gu.uC1.value.setHex(_gr.c1); _gu.uC2.value.setHex(_gr.c2); _gu.uC3.value.setHex(_gr.c3);
           if (_gu.uBaseAlpha) _gu.uBaseAlpha.value = 0.8;
           if (_gu.uRise) _gu.uRise.value = 1.3;
           eff.mesh.material.blending = THREE.AdditiveBlending; eff.mesh.material.needsUpdate = true;
@@ -80392,7 +80500,11 @@ function _ensureThermalFlameMeshes(ship, chassis) {
   const radius = hLen * 1.10;
   const geo = new THREE.SphereGeometry(radius, 32, 24);
   // (fire-cloud) Thermal shield uses the volumetric fire shader.
-  const mat = _makeFireCloudMaterial({ radius: radius, alpha: 0.5, oct: 5, c0: 0x2a0600, c1: 0xcc2a00, c2: 0xff7a22, c3: 0xffe39a });
+  // (v43.84) FIRE SHIELD envelope. `ship` is the player, a bot or a NetworkPlayer and all three
+  // carry .team. The mesh is cached on the ship for its lifetime, so this resolves once - which is
+  // correct, a ship does not change sides mid-match.
+  const mat = _makeFireCloudMaterial(Object.assign(
+    { radius: radius, alpha: 0.5, oct: 5 }, _fireRamp(ship.team, _FIRE_RAMP_SHIELD)));
   mat.userData._fireCloud = true;
   // Brighter than default so the inner walls read strongly against
   // close-camera view.
@@ -81556,7 +81668,11 @@ function updateWorldEffects(dt) {
                   // were 1.0 the dense spots would just clamp opaque and
                   // the cloud would read as a solid orange shell.
                   const _gu = eff.mesh.material.uniforms;
-                  if (_gu.uC0) { _gu.uC0.value.setHex(0x3a0a02); _gu.uC1.value.setHex(0xcc2a00); _gu.uC2.value.setHex(0xff6a18); _gu.uC3.value.setHex(0xffe39a); if (_gu.uBaseAlpha) _gu.uBaseAlpha.value = 0.8; eff.mesh.material.blending = THREE.AdditiveBlending; eff.mesh.material.needsUpdate = true; }
+                  // (v43.84) the SECOND ignition path - a firewall sweeping over the cloud rather
+                  // than a fire round touching it. Same ramp, so both routes light the same colour.
+                  // ⚠ this one does NOT transfer ownership, so eff.team is still the planter's.
+                  const _gr2 = _fireRamp(eff.team);
+                  if (_gu.uC0) { _gu.uC0.value.setHex(_gr2.c0); _gu.uC1.value.setHex(_gr2.c1); _gu.uC2.value.setHex(_gr2.c2); _gu.uC3.value.setHex(_gr2.c3); if (_gu.uBaseAlpha) _gu.uBaseAlpha.value = 0.8; eff.mesh.material.blending = THREE.AdditiveBlending; eff.mesh.material.needsUpdate = true; }
                   else if (_gu.uColor) { _gu.uColor.value.setHex(0xff5520); if (_gu.uBaseAlpha) _gu.uBaseAlpha.value = 0.75; }
                 }
                 // Core swapped from green-gas to fire-orange on

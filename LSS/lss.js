@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.83';
+const LSS_BUILD = '43.84';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -7539,12 +7539,40 @@ function _fxFriendly(team) {
   } catch (_) { return false; }
 }
 const _FXFF = {
-  fireFriendly:    0xff3311,
+  fireFriendly:    0xff1a05,
   shieldFriendly:  0xffa11a,
   shieldRimEnemy:  0xffcc77,
   shieldRimFriend: 0xffb347,
   tetherEnemy:     0xb39a12,
 };
+
+const _FIRE_RAMP_BASE   = { c0: 0x3a0a02, c1: 0xcc2a00, c2: 0xff6a18, c3: 0xffe39a };
+const _FIRE_RAMP_SHIELD = { c0: 0x2a0600, c1: 0xcc2a00, c2: 0xff7a22, c3: 0xffe39a };
+const _FIRE_RED_CACHE = new Map();
+const _fireRedTmp = new THREE.Color(), _fireRedHSL = {};
+function _fireRedden(ramp) {
+  let out = _FIRE_RED_CACHE.get(ramp);
+  if (out) return out;
+  const k = (typeof window !== 'undefined' && window.__fireRed) || null;
+  const hMul = (k && k.h != null) ? k.h : 0.30;
+  const sMul = (k && k.s != null) ? k.s : 1.05;
+  out = {};
+  for (const key of ['c0', 'c1', 'c2', 'c3']) {
+    _fireRedTmp.setHex(ramp[key]);
+    _fireRedTmp.getHSL(_fireRedHSL);
+    _fireRedTmp.setHSL(_fireRedHSL.h * hMul, Math.min(1, _fireRedHSL.s * sMul), _fireRedHSL.l);
+    out[key] = _fireRedTmp.getHex();
+  }
+  _FIRE_RED_CACHE.set(ramp, out);
+  return out;
+}
+function _fireRamp(team, ramp) {
+  ramp = ramp || _FIRE_RAMP_BASE;
+  return _fxFriendly(team) ? _fireRedden(ramp) : ramp;
+}
+if (typeof window !== 'undefined') {
+  window.__fireRed = { h: 0.30, s: 1.05, set(h, s) { if (h != null) this.h = h; if (s != null) this.s = s; _FIRE_RED_CACHE.clear(); } };
+}
 
 function spawnParticleWall(pos, dir, owner, team, ownerPeerId, netId, broadcast) {
   const _wH = _wallHalf();
@@ -9226,7 +9254,8 @@ function _buildFlameChainFlameLicks(effData, pos, dir, length) {
       .add(dir.clone().multiplyScalar(tAlong))
       .add(perp.clone().multiplyScalar(lateral));
     const radius = 80 + Math.random() * 30;
-    const mat = _makeFireCloudMaterial({ radius: radius, alpha: 0.6, oct: 5 });
+    const mat = _makeFireCloudMaterial(Object.assign(
+      { radius: radius, alpha: 0.6, oct: 5 }, _fireRamp(effData && effData.team)));
     const geo = _getFXBurstGeometry(16, 10);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.scale.setScalar(radius);
@@ -9833,6 +9862,16 @@ function spawnNetworkProjectile(data, fromPeerId) {
   const color = data.color || 0xffaa00;
   const proj = new Projectile(origin, vel, 0, 0, 'network', color);
   proj.isNetwork = true;
+  {
+    const _npTeamPeer = net.peers.get(fromPeerId);
+    if (_npTeamPeer) {
+      const _npTeam = (_npTeamPeer.networkPlayer && _npTeamPeer.networkPlayer.team != null)
+        ? _npTeamPeer.networkPlayer.team
+        : (_npTeamPeer.team != null ? _npTeamPeer.team : null);
+      if (_npTeam != null) proj.ownerTeam = _npTeam;
+      proj.ownerPeerId = fromPeerId;
+    }
+  }
   if (data.isFireSource) proj.isFireSource = true;
   if (data.isArcWave) proj.isArcWave = true;
   if (data.isCluster) {
@@ -33794,7 +33833,7 @@ class Projectile {
           return;
         }
       }
-      if (this.ownerTeam != null) {
+      if (this.ownerTeam != null && !this.isNetwork) {
         for (const bot of game.entities) {
           if (!bot || !bot.alive || bot === this.ownerRef || bot.team === this.ownerTeam) continue;
           const r = bot.chassis.hullLength * 1.1;
@@ -34029,7 +34068,7 @@ class Projectile {
     }
     spawnExplosion(_exPos, _exSize);
     if (this.isPyroThermite && typeof spawnPyroFlame === 'function') {
-      spawnPyroFlame(_exPos);
+      spawnPyroFlame(_exPos, this.owner === 'player' ? player.team : this.ownerTeam);
     }
     if (!this._hitShipBot && typeof spawnWallRipple === 'function') {
       const _rc = (this.trailColor != null) ? this.trailColor : 0x66ccff;
@@ -34185,7 +34224,7 @@ function _chargeFireTick(dt, t, tint) {
     if (game.worldEffects.length > n0) { const fe = game.worldEffects[game.worldEffects.length - 1]; fe._classFlame = true; fe._grow = 1.25; }
   } catch (_) {}
 }
-function spawnPyroFlame(pos) {
+function spawnPyroFlame(pos, team) {
   const eff = {
     type: 'pyro_flame',
     position: pos.clone(),
@@ -34198,7 +34237,8 @@ function spawnPyroFlame(pos) {
   if (typeof spawnDynamicLight === 'function') {
     spawnDynamicLight(pos, 0xff5520, 2.5, 350, 0.3);
   }
-  eff.fireMeshes = _spawnFireCloudCluster(pos, { count: 3, radius: 48, alpha: 0.55 });
+  eff.fireMeshes = _spawnFireCloudCluster(pos, Object.assign(
+    { count: 3, radius: 48, alpha: 0.55 }, _fireRamp(team)));
 }
 
 function _pyroGasIgniteBlast(pos) {
@@ -34243,7 +34283,8 @@ function igniteNearbyGas(pos, radius, igniter, igniterTeam) {
       if (eff.mesh && eff.mesh.material) {
         if (eff.mesh.material.uniforms && eff.mesh.material.uniforms.uC0) {
           const _gu = eff.mesh.material.uniforms;
-          _gu.uC0.value.setHex(0x3a0a02); _gu.uC1.value.setHex(0xcc2a00); _gu.uC2.value.setHex(0xff6a18); _gu.uC3.value.setHex(0xffe39a);
+          const _gr = _fireRamp(eff.team);
+          _gu.uC0.value.setHex(_gr.c0); _gu.uC1.value.setHex(_gr.c1); _gu.uC2.value.setHex(_gr.c2); _gu.uC3.value.setHex(_gr.c3);
           if (_gu.uBaseAlpha) _gu.uBaseAlpha.value = 0.8;
           if (_gu.uRise) _gu.uRise.value = 1.3;
           eff.mesh.material.blending = THREE.AdditiveBlending; eff.mesh.material.needsUpdate = true;
@@ -52595,7 +52636,8 @@ function _ensureThermalFlameMeshes(ship, chassis) {
   const hLen = chassis.hullLength || 100;
   const radius = hLen * 1.10;
   const geo = new THREE.SphereGeometry(radius, 32, 24);
-  const mat = _makeFireCloudMaterial({ radius: radius, alpha: 0.5, oct: 5, c0: 0x2a0600, c1: 0xcc2a00, c2: 0xff7a22, c3: 0xffe39a });
+  const mat = _makeFireCloudMaterial(Object.assign(
+    { radius: radius, alpha: 0.5, oct: 5 }, _fireRamp(ship.team, _FIRE_RAMP_SHIELD)));
   mat.userData._fireCloud = true;
   if (mat.uniforms && mat.uniforms.uBrightness) {
     mat.uniforms.uBrightness.value = 2.8;
@@ -53493,7 +53535,8 @@ function updateWorldEffects(dt) {
                 spawnExplosion(eff.position, 30);
                 if (eff.mesh && eff.mesh.material && eff.mesh.material.uniforms) {
                   const _gu = eff.mesh.material.uniforms;
-                  if (_gu.uC0) { _gu.uC0.value.setHex(0x3a0a02); _gu.uC1.value.setHex(0xcc2a00); _gu.uC2.value.setHex(0xff6a18); _gu.uC3.value.setHex(0xffe39a); if (_gu.uBaseAlpha) _gu.uBaseAlpha.value = 0.8; eff.mesh.material.blending = THREE.AdditiveBlending; eff.mesh.material.needsUpdate = true; }
+                  const _gr2 = _fireRamp(eff.team);
+                  if (_gu.uC0) { _gu.uC0.value.setHex(_gr2.c0); _gu.uC1.value.setHex(_gr2.c1); _gu.uC2.value.setHex(_gr2.c2); _gu.uC3.value.setHex(_gr2.c3); if (_gu.uBaseAlpha) _gu.uBaseAlpha.value = 0.8; eff.mesh.material.blending = THREE.AdditiveBlending; eff.mesh.material.needsUpdate = true; }
                   else if (_gu.uColor) { _gu.uColor.value.setHex(0xff5520); if (_gu.uBaseAlpha) _gu.uBaseAlpha.value = 0.75; }
                 }
                 if (eff.coreMesh && eff.coreMesh.material) {
