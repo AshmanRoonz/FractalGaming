@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.62';
+const LSS_BUILD = '43.63';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -4896,8 +4896,7 @@ function _ssModeName() {
     if (M === 'campaign') return 'CAMPAIGN';
     if (M === 'endless') return 'ENDLESS';
     if (M === 'freeflight') return 'EXHIBITION';
-    if (net && net.active) return 'ELIMINATION';
-    return 'SKIRMISH';
+    return 'ELIMINATION';
   } catch (_) { return ''; }
 }
 function _ssModeLabel() {
@@ -60822,9 +60821,22 @@ try {
   else setTimeout(_ssWatch, 0);
 } catch (_) {}
 
+function _ssEnsureLegalMap() {
+  try {
+    if (typeof _visibleMapKeys !== 'function' || typeof selectMap !== 'function') return;
+    const keys = _visibleMapKeys();
+    if (!keys || !keys.length) return;
+    const cur = (typeof game !== 'undefined' && game) ? game.selectedMap : null;
+    if (cur && keys.indexOf(cur) !== -1) return;          // still legal, leave it alone
+    console.log('[map] mode changed; "' + cur + '" is not available here -> ' + keys[0]);
+    selectMap(keys[0]);
+  } catch (_) {}
+}
+
 function _lssRoomModeChoose(want) {
   const m = _lssRoomModeOr(want);
   try { _lssModeChosen(); } catch (_) {}
+  try { _ssEnsureLegalMap(); } catch (_) {}
   try { if (typeof net !== 'undefined' && net && net.active) _lssModeDecide(); } catch (_) {}
   try { if (typeof net !== 'undefined' && net && net.active) _lssModeAnnounceBurst(); } catch (_) {}
   return m;
