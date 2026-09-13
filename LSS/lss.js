@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.33';
+const LSS_BUILD = '43.34';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5378,6 +5378,72 @@ function _roomChip(name, ready) {
   return '<span style="display:inline-flex;align-items:center;gap:5px;background:rgba(15,22,32,0.55);border-radius:5px;padding:3px 9px;font-size:11px;color:#cde;">'
     + '<span style="width:7px;height:7px;border-radius:50%;background:' + (ready ? '#66cc66' : '#5a5f48') + ';display:inline-block;"></span>' + _roomBoxEsc(name) + '</span>';
 }
+let _landOn = null;
+const _landHome = new Map();
+function _landRemember(el) {
+  if (!el || _landHome.has(el)) return;
+  _landHome.set(el, { parent: el.parentNode, next: el.nextSibling });
+}
+function _landRestore(el) {
+  const h = _landHome.get(el);
+  if (!h || !h.parent) return;
+  if (el.parentNode !== h.parent || el.nextSibling !== h.next) h.parent.insertBefore(el, h.next);
+}
+function _lobbyLandscape(force) {
+  try {
+    const lob = document.getElementById('lobby');
+    if (!lob) return;
+    if (typeof _lssOff === 'function' && _lssOff('land')) return;   // ?off=land bisects it out
+    const want = (window.innerWidth > window.innerHeight * 1.15) && window.innerWidth >= 700;
+    if (!force && want === _landOn) return;
+    _landOn = want;
+    try { _unifyLobbyBox(); } catch (_) {}
+    const right = document.getElementById('lobby-right');
+    const howto = document.getElementById('btn-howto');
+    const userRow = document.getElementById('lobby-user-row');
+    const roomBox = document.getElementById('lobby-room-box');
+    const secGame = document.getElementById('lobby-sec-game');
+    [howto, roomBox, secGame].forEach(_landRemember);
+    try {
+      const _h1 = document.querySelector('#lobby-wordmark h1');
+      if (_h1) {
+        if (want) {
+          const _br = _h1.querySelector('br');
+          if (_br) { _h1._lssBr = _br; _br.replaceWith(document.createTextNode(' ')); }
+        } else if (_h1._lssBr) {
+          const _sp = [..._h1.childNodes].find(n => n.nodeType === 3 && n.textContent === ' ');
+          if (_sp) _sp.replaceWith(_h1._lssBr);
+          _h1._lssBr = null;
+        }
+      }
+    } catch (_) {}
+    let side = document.getElementById('lobby-side');
+    if (want) {
+      if (!side && right) {
+        side = document.createElement('div');
+        side.id = 'lobby-side';
+        right.appendChild(side);
+      }
+      if (howto && userRow && howto.parentNode !== userRow) userRow.appendChild(howto);
+      if (side) {
+        if (roomBox && roomBox.parentNode !== side) side.appendChild(roomBox);
+        if (secGame && secGame.parentNode !== side) side.appendChild(secGame);
+      }
+      lob.classList.add('lss-land');
+    } else {
+      lob.classList.remove('lss-land');
+      [howto, roomBox, secGame].forEach(_landRestore);
+      if (side && side.parentNode) side.parentNode.removeChild(side);
+    }
+  } catch (_) {}
+}
+try {
+  window.addEventListener('resize', () => { try { _lobbyLandscape(); } catch (_) {} });
+  window.addEventListener('orientationchange', () => { setTimeout(() => { try { _lobbyLandscape(true); } catch (_) {} }, 60); });
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => _lobbyLandscape(true));
+  else setTimeout(() => { try { _lobbyLandscape(true); } catch (_) {} }, 0);
+} catch (_) {}
+
 function _unifyLobbyBox() {
   if (_lobbyUnified) return;
   const box = document.getElementById('lobby-room-box');
