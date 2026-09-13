@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.30';
+const LSS_BUILD = '43.31';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -68078,6 +68078,7 @@ const MAP_DATA = {
 
   colonnade: {
     name: 'The Colonnade',
+    thumb: 'map_thumbs/colonnade.png',
     description: 'Pillar-karst cathedral. Great halls held up by rock columns — new columns every round. Orbit a pillar or die in the open.',
     defaultTheme: 'Crystal Cavern',
     terrain: {
@@ -68112,6 +68113,7 @@ const MAP_DATA = {
 
   shifting_deep: {
     name: 'The Shifting Deep',
+    thumb: 'map_thumbs/shifting_deep.gif',
     procedural: 'shifting_deep',
     description: 'The cavern re-renders itself every round — new halls, new tunnels, new rock. Learn fast; it will never be the same twice.',
     defaultTheme: 'Broken Simulation',
@@ -68300,6 +68302,7 @@ const MAP_DATA = {
   gmaps_user: {
     type: 'gmaps',
     name: 'Custom Location',
+    thumb: 'map_thumbs/toronto.jpg',
     description: 'Type a location in the DROP panel and click GO, then LAUNCH.',
     lat: 40.7484,
     lng: -73.9857,
