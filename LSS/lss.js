@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.97';
+const LSS_BUILD = '42.98';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13464,7 +13464,7 @@ try {
 if (typeof window !== 'undefined') window.__onBattery = () => _lssOnBattery;
 function _lssSupersampleActive() {
   try {
-    return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega() || (_lssOnBattery && QUALITY.level === 'high')) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
+    return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega() || _lssPaniniD() > 0 || (_lssOnBattery && QUALITY.level === 'high')) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&   // (v42.98) Panini brings the governor with it
            !(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
   } catch (_) { return false; }
 }
@@ -13658,7 +13658,7 @@ function _lssSceneActive(rt) {
   const W = rt.width, H = rt.height;
   let w = W, h = H;
   try {
-    const _super = _lssTierSuper();
+    const _super = Math.max(_lssTierSuper(), _lssPaniniSuper());
     if (_lssSupersampleActive()) {   // (v39.49c) also HIGH on battery (super 0: sub-native only)
       const cap = (typeof QUALITY.bloomDPR === 'function') ? QUALITY.bloomDPR() : 1.0;
       const base = Math.min(window.devicePixelRatio, cap);
@@ -13666,13 +13666,6 @@ function _lssSceneActive(rt) {
       const s = (_sc >= 0) ? base + (Math.max(base, _super) - base) * _sc : base * (1 + 0.5 * _sc);
       w = Math.min(W, Math.max(1, Math.floor(window.innerWidth * s)));
       h = Math.min(H, Math.max(1, Math.floor(window.innerHeight * s)));
-    }
-  } catch (_) {}
-  try {
-    const _pn = _lssPaniniSuper();
-    if (_pn > 0) {
-      w = Math.min(W, Math.max(w, Math.floor(window.innerWidth * _pn)));
-      h = Math.min(H, Math.max(h, Math.floor(window.innerHeight * _pn)));
     }
   } catch (_) {}
   _sceneActive.w = w; _sceneActive.h = h; _sceneActive.sx = w / W; _sceneActive.sy = h / H;

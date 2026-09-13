@@ -4760,7 +4760,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.97';
+const LSS_BUILD = '42.98';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -22975,7 +22975,7 @@ try {
 if (typeof window !== 'undefined') window.__onBattery = () => _lssOnBattery;
 function _lssSupersampleActive() {
   try {
-    return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega() || (_lssOnBattery && QUALITY.level === 'high')) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
+    return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega() || _lssPaniniD() > 0 || (_lssOnBattery && QUALITY.level === 'high')) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&   // (v42.98) Panini brings the governor with it
            !(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
   } catch (_) { return false; }
 }
@@ -23371,7 +23371,8 @@ function _lssSceneActive(rt) {
   const W = rt.width, H = rt.height;
   let w = W, h = H;
   try {
-    const _super = _lssTierSuper();
+    // (v42.98) Panini's need is a TARGET the governor climbs toward, not a floor that overrides it.
+    const _super = Math.max(_lssTierSuper(), _lssPaniniSuper());
     if (_lssSupersampleActive()) {   // (v39.49c) also HIGH on battery (super 0: sub-native only)
       const cap = (typeof QUALITY.bloomDPR === 'function') ? QUALITY.bloomDPR() : 1.0;
       const base = Math.min(window.devicePixelRatio, cap);
@@ -23382,15 +23383,19 @@ function _lssSceneActive(rt) {
       h = Math.min(H, Math.max(1, Math.floor(window.innerHeight * s)));
     }
   } catch (_) {}
-  // (v42.92) Panini floor. _lssSupersampleActive() is false on HIGH, so without this the
-  // bigger target allocated above would never actually be rendered into.
-  try {
-    const _pn = _lssPaniniSuper();
-    if (_pn > 0) {
-      w = Math.min(W, Math.max(w, Math.floor(window.innerWidth * _pn)));
-      h = Math.min(H, Math.max(h, Math.floor(window.innerHeight * _pn)));
-    }
-  } catch (_) {}
+  // (v42.98) THE v42.92 FLOOR IS GONE, AND THAT WAS THE BUG.
+  // Owner: "on my laptop, when i put wide view correction to full, it felt like i had input lag, i
+  // turned it right off and it was fine."
+  // v42.92 clamped the viewport UP to Panini's need and said so in its own comment - "a floor, NOT
+  // subject to the adaptive governor". That disabled, for the one setting that costs the most fill,
+  // the single system whose entire job is to shed resolution when frames get expensive. Pinned at
+  // ~3.9x the pixels with no way down, a thermally-capped laptop cannot drop frames gracefully; the
+  // CPU races ahead, the driver queues, and the result is presented as INPUT LAG rather than as a
+  // lower framerate. Framerate alone would never have shown it - the queue absorbs it.
+  // Now Panini raises the governor's TARGET (see _super above) and _lssSupersampleActive() lets the
+  // governor run, so a machine with headroom still climbs to full sharpness and one without it
+  // settles lower and stays responsive. The cost is the honest one: the first seconds after a reset
+  // render nearer native and sharpen as headroom is earned, exactly as ULTRA and MEGA already do.
   _sceneActive.w = w; _sceneActive.h = h; _sceneActive.sx = w / W; _sceneActive.sy = h / H;
   return _sceneActive;
 }
