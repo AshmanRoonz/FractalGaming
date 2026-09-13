@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.60';
+const LSS_BUILD = '43.62';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -60768,7 +60768,10 @@ function _ssSpreadRails() {
     }
 
     const leftEdge  = vis(strip) ? strip.getBoundingClientRect().right + GAP : EDGE;
-    const rightEdge = vis(col)   ? col.getBoundingClientRect().left - 12     : vw - EDGE;
+    const rightObs  = [];
+    if (vis(col))  rightObs.push(col.getBoundingClientRect().left);
+    if (vis(dock)) rightObs.push(dock.getBoundingClientRect().left);
+    const rightEdge = rightObs.length ? Math.min.apply(null, rightObs) - 12 : vw - EDGE;
 
     let pw = 232, iw = 272;
     const band = rightEdge - leftEdge;
@@ -60788,8 +60791,14 @@ function _ssSpreadRails() {
 
     if (desc && vis(desc)) {
       const avail = (rightEdge - iw) - (leftEdge + 26) - 8;   // 14 rail padding + 12 blurb margin
-      desc.style.setProperty('width', Math.max(200, Math.min(320, Math.round(avail))) + 'px', 'important');
-      desc.style.setProperty('max-width', 'none', 'important');
+      const w = Math.min(320, Math.round(avail));
+      if (w < 120) {
+        desc.style.setProperty('display', 'none', 'important');
+      } else {
+        desc.style.removeProperty('display');
+        desc.style.setProperty('width', w + 'px', 'important');
+        desc.style.setProperty('max-width', 'none', 'important');
+      }
     }
   } catch (_) {}
   _ssSpreadBusy = false;
