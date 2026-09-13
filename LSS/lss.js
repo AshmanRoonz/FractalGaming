@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.41';
+const LSS_BUILD = '43.43';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -37,6 +37,23 @@ try {
   };
   if (document.getElementById('lobby') || document.body) _mount();
   else document.addEventListener('DOMContentLoaded', _mount);
+} catch (_) {}
+try {
+  const _cr = document.createElement('div');
+  _cr.id = 'lobby-credit';
+  const _lg = document.createElement('img');
+  _lg.src = 'FractalGaming_128.webp'; _lg.alt = ''; _lg.width = 56; _lg.height = 56;
+  _lg.style.cssText = 'border-radius:10px;object-fit:contain;flex:0 0 auto;opacity:0.9;';
+  _lg.onerror = function () { this.style.display = 'none'; };   // same guard the COMMUNITY row uses
+  const _tx = document.createElement('span');
+  _tx.textContent = 'by Ashman Roonz & Claude';
+  _cr.appendChild(_lg); _cr.appendChild(_tx);
+  const _mountCr = () => {
+    const lob = document.getElementById('lobby');
+    (lob || document.body).appendChild(_cr);
+  };
+  if (document.getElementById('lobby') || document.body) _mountCr();
+  else document.addEventListener('DOMContentLoaded', _mountCr);
 } catch (_) {}
 try {
   const _ph = document.createElement('div');
@@ -5425,6 +5442,10 @@ function _lobbyLandscape(force) {
         right.appendChild(side);
       }
       if (howto && userRow && howto.parentNode !== userRow) userRow.appendChild(howto);
+      try {
+        const _cr = document.getElementById('lobby-credit');
+        if (_cr && _cr.parentNode !== lob) lob.appendChild(_cr);
+      } catch (_) {}
       if (side) {
         if (roomBox && roomBox.parentNode !== side) side.appendChild(roomBox);
         if (secGame && secGame.parentNode !== side) side.appendChild(secGame);
@@ -5433,6 +5454,11 @@ function _lobbyLandscape(force) {
     } else {
       lob.classList.remove('lss-land');
       [howto, roomBox, secGame].forEach(_landRestore);
+      try {
+        const _cr = document.getElementById('lobby-credit');
+        const _grid = document.getElementById('lobby-grid');
+        if (_cr && _grid && _cr.parentNode !== _grid) _grid.appendChild(_cr);
+      } catch (_) {}
       if (side && side.parentNode) side.parentNode.removeChild(side);
     }
   } catch (_) {}
