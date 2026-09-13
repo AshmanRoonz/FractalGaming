@@ -5901,7 +5901,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.86';
+const LSS_BUILD = '43.87';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -69460,7 +69460,34 @@ function _lssRetainMat(mat) {
         if (!window._fxRetainKeys) window._fxRetainKeys = new Map();
         let held = false;
         for (const key of progs.keys()) {
-          if (!window._fxRetainKeys.has(key)) { window._fxRetainKeys.set(key, mat); held = true; }
+          // ⭐⭐⭐ (v43.87) THIS FUNCTION USED TO DISPOSE THE MATERIAL IT WAS ITSELF RETAINING.
+          // Submit a material once and it is registered as the holder for its program key. Submit
+          // the SAME OBJECT again and the old `has(key)` test saw the key present, left `held`
+          // false, and destroyed it - the retainer killed by its own retention. Two consequences,
+          // and the second is the bad one:
+          //   1. the object dies while live things still point at it. The Vortex beam-end glow is a
+          //      module SINGLETON handed to 1-or-3 quads per shot AND to three permanent scene
+          //      meshes (player._vortexCoreGlows, which have no teardown at all), and all of a
+          //      shot's quads expire in the same updateEffects pass - so from the second shot on,
+          //      every shot disposed it, re-rendered it, and disposed it again.
+          //   2. ⚠ THE MAP IS THEN POISONED FOREVER. The entry still points at the corpse, and
+          //      nothing revalidates it, so every FUTURE material with that key is also disposed as
+          //      a "duplicate" with no live holder at all. One bad submit permanently converts a
+          //      retained program into a cold relink on every spawn - the 1612 ms class.
+          // Measured example of (2) with no shared-sibling escape hatch: _swBub.mat carries an
+          // onBeforeCompile, and r165's default customProgramCacheKey returns
+          // onBeforeCompile.toString(), so the bubbles own their program BY CONSTRUCTION and
+          // usedTimes is necessarily 1. _prebakeGpuPrime draws it and retains it - and the swap
+          // stage calls _prebakeGpuPrime TWICE by design, so the second pass disposed the very
+          // program the first pass had just warmed, inside the same loading screen.
+          // ⚠ THE FIX IS STRICTLY SUBTRACTIVE: dispose() is now called on a SUBSET of the inputs it
+          // was called on before (everything except "this object is already the registered holder").
+          // No material's program can therefore end up with a LOWER refcount than it has today, for
+          // any input sequence - so this cannot drop a program. A genuinely DIFFERENT duplicate
+          // object still disposes, exactly as before, so the map still holds one material per key.
+          const _cur = window._fxRetainKeys.get(key);
+          if (_cur === undefined) { window._fxRetainKeys.set(key, mat); held = true; }
+          else if (_cur === mat) held = true;
         }
         if (!held && mat.dispose) mat.dispose();
         return;
@@ -69484,7 +69511,11 @@ function _lssRetainMat(mat) {
       // player rebuild (round start / respawn) relinked 7 programs cold - a 2.3 s frame on the pane,
       // blamed on player+weapons by the profiler.
       + '|' + (typeof mat.customProgramCacheKey === 'function' ? String(mat.customProgramCacheKey()).slice(0, 48) : '');
-    if (window._fxRetain[sig]) { if (mat.dispose) mat.dispose(); }
+    // (v43.87) same self-dispose as branch A, on the fallback path - and this is the branch a
+    // material takes when it has NEVER BEEN RENDERED (renderer.properties holds no programs for it
+    // yet), which is exactly how a singleton gets destroyed at construction time. Narrowing the
+    // guard to "a DIFFERENT object already holds this signature" is again strictly subtractive.
+    if (window._fxRetain[sig] && window._fxRetain[sig] !== mat) { if (mat.dispose) mat.dispose(); }
     else { window._fxRetain[sig] = mat; }
   } catch (_) { try { if (mat.dispose) mat.dispose(); } catch (__) {} }
 }
@@ -73623,20 +73654,13 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
     for (let we = game.worldEffects.length - 1; we >= 0; we--) {
       const eff = game.worldEffects[we];
       if (eff.type === 'particle_wall' && eff.owner === 'player' && eff.hp > 0) {
-        eff.hp = 0; eff.timer = 0;
-        if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-        // (v43.81) the rim was removed from the scene but its LineBasicMaterial was never disposed -
-      // one leaked material per shield, for the life of the match. Its GEOMETRY is the shared
-      // _WALL_RIM_GEO and must survive, so only the material goes.
-      if (eff.edgeMesh && eff.edgeMesh.parent) {
-        scene.remove(eff.edgeMesh);
-        if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
-      }
-        // Tear down the plasma backing mesh too on Stun Bolt kill.
-        if (eff.plasmaMesh && eff.plasmaMesh.parent) {
-          scene.remove(eff.plasmaMesh);
-          if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
-        }
+        // (v43.87) this was a hand-rolled FOURTH copy of the wall teardown - the Stun Bolt kill -
+        // and it was the copy that never freed the shell's ShaderMaterial at all, while also
+        // un-parenting the shell so the `.parent`-gated dispose in updateWorldEffects could not
+        // catch it either. Deleting the copy is the fix; repairing it in place would just re-create
+        // the drift that produced four copies of one teardown in the first place.
+        // _wallDestroy is a hoisted module-level declaration, so it is in scope here.
+        _wallDestroy(eff);
         spawnExplosion(eff.position, 20);
       }
     }
@@ -73930,8 +73954,29 @@ function playerDie(attacker) {
                  (net.active && eff.ownerPeerId === net.myPeerId);
     if (!mine) continue;
     try {
-      if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-      if (eff.meshes) for (const m of eff.meshes) { if (m && m.parent) scene.remove(m); }
+      // (v43.87) THIS SPLICE IS A TERMINATOR, so whatever the expiry walk would have freed has to
+      // be freed here - once it is off game.worldEffects nothing can ever reach these again. It was
+      // removing the meshes and freeing nothing, leaking one _makeFireCloudMaterial per flame lick
+      // (5-10 per firewall) for every firewall you owned when you died.
+      if (eff.mesh && eff.mesh.parent) {
+        scene.remove(eff.mesh);
+        if (typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
+      }
+      if (eff.meshes) for (const m of eff.meshes) {
+        if (!m) continue;
+        if (m.parent) scene.remove(m);
+        // Copied verbatim from the three teardowns that already run on these same objects, so the
+        // death path cannot disagree with them: the licks carry BOTH flags, so the shared burst
+        // geometry is never disposed and the fire-cloud material is RETAINED (one per program key,
+        // duplicates freed) rather than hard-disposed - which is what keeps the program resident.
+        const _shared = m.userData && m.userData._fxSharedGeo;
+        if (!_shared && m.geometry && m.geometry.dispose) m.geometry.dispose();
+        if (m.material) {
+          if (m.userData && m.userData._fireCloud) { if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); }
+          else if (_shared && typeof _releaseFXBurstMaterial === 'function') _releaseFXBurstMaterial(m.material);
+          else if (m.material.dispose) m.material.dispose();
+        }
+      }
     } catch (_) {}
     game.worldEffects.splice(we, 1);
   }
@@ -77660,12 +77705,38 @@ function _wallDestroy(eff) {
   if (!eff) return;
   eff.hp = 0;
   try {
-    if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-    if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+    // ⭐ (v43.87) UN-PARENTING HERE IS PRECISELY WHY NOTHING EVER FREED THESE. This function
+    // scene.remove()s the meshes and sets timer = 0, expecting the expiry walk to finish the job -
+    // but EVERY branch of that walk (and of the round-end and return-to-menu walks) is `.parent`
+    // gated, so by the time they run there is nothing left for them to see. The shell's per-wall
+    // ShaderMaterial and the rim's per-wall LineBasicMaterial were stranded, once per shield killed
+    // by damage rather than by its timer.
+    // ⚠ RETAIN, DO NOT DISPOSE - and this is the opposite of what it looks like it should be.
+    // _pinCombatEffectPrograms returns early on _fxSmallDevice(), so on a PHONE or in a HEADSET
+    // nothing pins the hex program and the live walls' own materials are its only holders. A hard
+    // dispose of the last one would take usedTimes to 0 and relink it cold on the next deploy,
+    // mid-fight, on exactly the hardware least able to absorb it. _lssRetainMat keeps one material
+    // per program key and disposes only genuine duplicates, which bounds the memory AND keeps the
+    // program resident - the invariant the rest of the file already runs on.
+    if (eff.mesh && eff.mesh.parent) {
+      scene.remove(eff.mesh);
+      if (typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
+      else if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
+      eff.mesh = null;
+    }
+    if (eff.edgeMesh && eff.edgeMesh.parent) {
+      scene.remove(eff.edgeMesh);
+      if (typeof _lssRetainMat === 'function') _lssRetainMat(eff.edgeMesh.material);
+      else if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
+      eff.edgeMesh = null;
+    }
     if (eff.plasmaMesh && eff.plasmaMesh.parent) {
       scene.remove(eff.plasmaMesh);
       if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
+      eff.plasmaMesh = null;
     }
+    // Nulling each mesh is load-bearing: it makes the later `.parent`-gated walks provably no-ops
+    // rather than merely unlikely, so nothing can be handed in a second time.
   } catch (_) {}
   eff.timer = 0;
 }

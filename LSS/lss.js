@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.86';
+const LSS_BUILD = '43.87';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -45046,7 +45046,9 @@ function _lssRetainMat(mat) {
         if (!window._fxRetainKeys) window._fxRetainKeys = new Map();
         let held = false;
         for (const key of progs.keys()) {
-          if (!window._fxRetainKeys.has(key)) { window._fxRetainKeys.set(key, mat); held = true; }
+          const _cur = window._fxRetainKeys.get(key);
+          if (_cur === undefined) { window._fxRetainKeys.set(key, mat); held = true; }
+          else if (_cur === mat) held = true;
         }
         if (!held && mat.dispose) mat.dispose();
         return;
@@ -45062,7 +45064,7 @@ function _lssRetainMat(mat) {
       + '|' + ['map', 'normalMap', 'emissiveMap', 'alphaMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'envMap']
         .map((k) => (mat[k] ? 1 : 0)).join('') + '|' + (mat.alphaTest > 0 ? 1 : 0)
       + '|' + (typeof mat.customProgramCacheKey === 'function' ? String(mat.customProgramCacheKey()).slice(0, 48) : '');
-    if (window._fxRetain[sig]) { if (mat.dispose) mat.dispose(); }
+    if (window._fxRetain[sig] && window._fxRetain[sig] !== mat) { if (mat.dispose) mat.dispose(); }
     else { window._fxRetain[sig] = mat; }
   } catch (_) { try { if (mat.dispose) mat.dispose(); } catch (__) {} }
 }
@@ -48010,16 +48012,7 @@ function playerTakeDamage(amount, attacker, projectile, hitOpts) {
     for (let we = game.worldEffects.length - 1; we >= 0; we--) {
       const eff = game.worldEffects[we];
       if (eff.type === 'particle_wall' && eff.owner === 'player' && eff.hp > 0) {
-        eff.hp = 0; eff.timer = 0;
-        if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-      if (eff.edgeMesh && eff.edgeMesh.parent) {
-        scene.remove(eff.edgeMesh);
-        if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
-      }
-        if (eff.plasmaMesh && eff.plasmaMesh.parent) {
-          scene.remove(eff.plasmaMesh);
-          if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
-        }
+        _wallDestroy(eff);
         spawnExplosion(eff.position, 20);
       }
     }
@@ -48206,8 +48199,21 @@ function playerDie(attacker) {
                  (net.active && eff.ownerPeerId === net.myPeerId);
     if (!mine) continue;
     try {
-      if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-      if (eff.meshes) for (const m of eff.meshes) { if (m && m.parent) scene.remove(m); }
+      if (eff.mesh && eff.mesh.parent) {
+        scene.remove(eff.mesh);
+        if (typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
+      }
+      if (eff.meshes) for (const m of eff.meshes) {
+        if (!m) continue;
+        if (m.parent) scene.remove(m);
+        const _shared = m.userData && m.userData._fxSharedGeo;
+        if (!_shared && m.geometry && m.geometry.dispose) m.geometry.dispose();
+        if (m.material) {
+          if (m.userData && m.userData._fireCloud) { if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); }
+          else if (_shared && typeof _releaseFXBurstMaterial === 'function') _releaseFXBurstMaterial(m.material);
+          else if (m.material.dispose) m.material.dispose();
+        }
+      }
     } catch (_) {}
     game.worldEffects.splice(we, 1);
   }
@@ -50468,11 +50474,22 @@ function _wallDestroy(eff) {
   if (!eff) return;
   eff.hp = 0;
   try {
-    if (eff.mesh && eff.mesh.parent) scene.remove(eff.mesh);
-    if (eff.edgeMesh && eff.edgeMesh.parent) scene.remove(eff.edgeMesh);
+    if (eff.mesh && eff.mesh.parent) {
+      scene.remove(eff.mesh);
+      if (typeof _lssRetainMat === 'function') _lssRetainMat(eff.mesh.material);
+      else if (eff.mesh.material && eff.mesh.material.dispose) eff.mesh.material.dispose();
+      eff.mesh = null;
+    }
+    if (eff.edgeMesh && eff.edgeMesh.parent) {
+      scene.remove(eff.edgeMesh);
+      if (typeof _lssRetainMat === 'function') _lssRetainMat(eff.edgeMesh.material);
+      else if (eff.edgeMesh.material && eff.edgeMesh.material.dispose) eff.edgeMesh.material.dispose();
+      eff.edgeMesh = null;
+    }
     if (eff.plasmaMesh && eff.plasmaMesh.parent) {
       scene.remove(eff.plasmaMesh);
       if (eff.plasmaMesh.material && eff.plasmaMesh.material.dispose) eff.plasmaMesh.material.dispose();
+      eff.plasmaMesh = null;
     }
   } catch (_) {}
   eff.timer = 0;
