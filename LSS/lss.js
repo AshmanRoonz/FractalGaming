@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.13';
+const LSS_BUILD = '43.14';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -59997,6 +59997,42 @@ function _captureKbKey(e) {
   if (typeof _refreshKbBindRows === 'function') _refreshKbBindRows();
   return true;
 }
+
+function _lssInsaneSpeed() {
+  try { return !!LSS.INSANE_SPEED && LSS.MODE !== 'race'; } catch (_) { return false; }
+}
+function _lssInsaneSpeedLocked() {
+  return typeof game !== 'undefined' && game &&
+         (game.state === 'playing' || game.state === 'roundEnd' ||
+          (game.state === 'warmup' && (game.currentRound | 0) > 1));
+}
+function _lssRefreshInsaneSpeedBtn() {
+  const b = document.getElementById('insane-speed-toggle');
+  const box = document.getElementById('ss-speed-box');
+  if (!b) return;
+  const on = !!LSS.INSANE_SPEED;
+  b.dataset.on = on ? '1' : '0';
+  b.textContent = on ? 'INSANE SPEED: ON' : 'INSANE SPEED: OFF';
+  b.classList.toggle('active', on);
+  const locked = _lssInsaneSpeedLocked();
+  b.disabled = locked;
+  b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
+                   : 'Everyone flies at race speed (900 / 1400 boost). Applies to the whole room.';
+  if (box) box.style.display = (LSS.MODE === 'race') ? 'none' : '';
+}
+function _lssSetInsaneSpeed(on, fromNet) {
+  LSS.INSANE_SPEED = !!on;
+  _lssRefreshInsaneSpeedBtn();
+  if (!fromNet) {
+    try {
+      if (typeof net !== 'undefined' && net && net.sendEvent) {
+        net.sendEvent({ type: 'speed_mode', on: !!on });
+      }
+    } catch (_) {}
+  }
+}
+if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
+
 function _lssDispatchBound(k, down) {
   const kb = input.kbBindings;
   if (!kb || !k) return;
@@ -82152,40 +82188,6 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     }
   });
 
-function _lssInsaneSpeed() {
-  try { return !!LSS.INSANE_SPEED && LSS.MODE !== 'race'; } catch (_) { return false; }
-}
-function _lssInsaneSpeedLocked() {
-  return typeof game !== 'undefined' && game &&
-         (game.state === 'playing' || game.state === 'roundEnd' ||
-          (game.state === 'warmup' && (game.currentRound | 0) > 1));
-}
-function _lssRefreshInsaneSpeedBtn() {
-  const b = document.getElementById('insane-speed-toggle');
-  const box = document.getElementById('ss-speed-box');
-  if (!b) return;
-  const on = !!LSS.INSANE_SPEED;
-  b.dataset.on = on ? '1' : '0';
-  b.textContent = on ? 'INSANE SPEED: ON' : 'INSANE SPEED: OFF';
-  b.classList.toggle('active', on);
-  const locked = _lssInsaneSpeedLocked();
-  b.disabled = locked;
-  b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
-                   : 'Everyone flies at race speed (900 / 1400 boost). Applies to the whole room.';
-  if (box) box.style.display = (LSS.MODE === 'race') ? 'none' : '';
-}
-function _lssSetInsaneSpeed(on, fromNet) {
-  LSS.INSANE_SPEED = !!on;
-  _lssRefreshInsaneSpeedBtn();
-  if (!fromNet) {
-    try {
-      if (typeof net !== 'undefined' && net && net.sendEvent) {
-        net.sendEvent({ type: 'speed_mode', on: !!on });
-      }
-    } catch (_) {}
-  }
-}
-if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
 
   function _raceModeLocked() {
     return typeof game !== 'undefined' && game &&

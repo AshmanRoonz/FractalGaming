@@ -4814,7 +4814,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.13';
+const LSS_BUILD = '43.14';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -89802,6 +89802,68 @@ function _captureKbKey(e) {
   if (typeof _refreshKbBindRows === 'function') _refreshKbBindRows();
   return true;
 }
+// (v43.14) ⚠⚠ THESE MUST BE TOP-LEVEL. v43.13 defined them beside _raceModeLocked, which lives
+// INSIDE a closure - so updatePlayerMovement, Bot.update and the net event handler, all of which are
+// outside it, could not see them. The movement path is the one that runs every frame:
+//     Uncaught ReferenceError: _lssInsaneSpeed is not defined  at updatePlayerMovement
+// and a throw inside setAnimationLoop stops the loop dead, which is the owner's "frozen at LAUNCH".
+// Measured before the fix: simulation rate 1.0 through warmup, then 0.0 the instant state went
+// 'playing'. It also explains, in one stroke, why the lobby toggle never synced - the wild_state-
+// adjacent receiver calls _lssSetInsaneSpeed and was equally blind to it, so the arriving event was
+// swallowed by its own try/catch. One scope mistake, three symptoms, and only the freeze was loud.
+// (The console handle kept working throughout, because window.__insaneSpeed is assigned from inside
+// the closure where the function IS visible - which is exactly why hand-testing looked fine.)
+
+// (v43.13) INSANE SPEED MODE. Owner: "we could try an insane speed mode, for each lobby (other than
+// race) and match it to race mode for that toggle... make sure toggling it toggles it for all the
+// network."
+// It reuses race mode's numbers exactly (RACE_SPEED 900 / RACE_DASH_SPEED 1400) rather than inventing
+// a second speed scale, so there is one definition of "fast" in the game and the two can never drift.
+// (!) Race mode itself already flies at these numbers, so the toggle is meaningless there and the box
+//     hides - which is the owner's "for each lobby (other than race)".
+// (!) It deliberately does NOT persist. Speed is a property of the match everyone agreed to, not of
+//     the pilot, so it is broadcast and it resets with the room rather than following one player in.
+function _lssInsaneSpeed() {
+  try { return !!LSS.INSANE_SPEED && LSS.MODE !== 'race'; } catch (_) { return false; }
+}
+function _lssInsaneSpeedLocked() {
+  // Same rule race mode uses, for the same reason: flipping the speed under a live round
+  // half-converts the match (ships change speed, bots do not re-plan) - see _raceModeLocked.
+  return typeof game !== 'undefined' && game &&
+         (game.state === 'playing' || game.state === 'roundEnd' ||
+          (game.state === 'warmup' && (game.currentRound | 0) > 1));
+}
+function _lssRefreshInsaneSpeedBtn() {
+  const b = document.getElementById('insane-speed-toggle');
+  const box = document.getElementById('ss-speed-box');
+  if (!b) return;
+  const on = !!LSS.INSANE_SPEED;
+  b.dataset.on = on ? '1' : '0';
+  b.textContent = on ? 'INSANE SPEED: ON' : 'INSANE SPEED: OFF';
+  b.classList.toggle('active', on);
+  const locked = _lssInsaneSpeedLocked();
+  b.disabled = locked;
+  b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
+                   : 'Everyone flies at race speed (900 / 1400 boost). Applies to the whole room.';
+  if (box) box.style.display = (LSS.MODE === 'race') ? 'none' : '';
+}
+function _lssSetInsaneSpeed(on, fromNet) {
+  LSS.INSANE_SPEED = !!on;
+  _lssRefreshInsaneSpeedBtn();
+  if (!fromNet) {
+    try {
+      // (v43.13) NOT gated on net.active. The toggle lives in ship select, and a room can be formed
+      // and peered while net.active is still false (it flips when the match goes live) - gating on it
+      // meant the click applied locally and reached nobody, which is exactly what a two-client test
+      // showed: the clicker flipped to ON and the peer sat at OFF.
+      if (typeof net !== 'undefined' && net && net.sendEvent) {
+        net.sendEvent({ type: 'speed_mode', on: !!on });
+      }
+    } catch (_) {}
+  }
+}
+if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
+
 // (v43.12) ONE PLACE THAT TURNS A BOUND INPUT INTO AN ACTION - keyboard OR mouse.
 // The rebind UI has always been happy to write 'mouse0'..'mouse4' into any action, and for FIRE,
 // RELOAD and MOVEMENT that works, because those read the binding through _kbActionHeld ->
@@ -116942,55 +117004,6 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     }
   });
 
-// (v43.13) INSANE SPEED MODE. Owner: "we could try an insane speed mode, for each lobby (other than
-// race) and match it to race mode for that toggle... make sure toggling it toggles it for all the
-// network."
-// It reuses race mode's numbers exactly (RACE_SPEED 900 / RACE_DASH_SPEED 1400) rather than inventing
-// a second speed scale, so there is one definition of "fast" in the game and the two can never drift.
-// (!) Race mode itself already flies at these numbers, so the toggle is meaningless there and the box
-//     hides - which is the owner's "for each lobby (other than race)".
-// (!) It deliberately does NOT persist. Speed is a property of the match everyone agreed to, not of
-//     the pilot, so it is broadcast and it resets with the room rather than following one player in.
-function _lssInsaneSpeed() {
-  try { return !!LSS.INSANE_SPEED && LSS.MODE !== 'race'; } catch (_) { return false; }
-}
-function _lssInsaneSpeedLocked() {
-  // Same rule race mode uses, for the same reason: flipping the speed under a live round
-  // half-converts the match (ships change speed, bots do not re-plan) - see _raceModeLocked.
-  return typeof game !== 'undefined' && game &&
-         (game.state === 'playing' || game.state === 'roundEnd' ||
-          (game.state === 'warmup' && (game.currentRound | 0) > 1));
-}
-function _lssRefreshInsaneSpeedBtn() {
-  const b = document.getElementById('insane-speed-toggle');
-  const box = document.getElementById('ss-speed-box');
-  if (!b) return;
-  const on = !!LSS.INSANE_SPEED;
-  b.dataset.on = on ? '1' : '0';
-  b.textContent = on ? 'INSANE SPEED: ON' : 'INSANE SPEED: OFF';
-  b.classList.toggle('active', on);
-  const locked = _lssInsaneSpeedLocked();
-  b.disabled = locked;
-  b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
-                   : 'Everyone flies at race speed (900 / 1400 boost). Applies to the whole room.';
-  if (box) box.style.display = (LSS.MODE === 'race') ? 'none' : '';
-}
-function _lssSetInsaneSpeed(on, fromNet) {
-  LSS.INSANE_SPEED = !!on;
-  _lssRefreshInsaneSpeedBtn();
-  if (!fromNet) {
-    try {
-      // (v43.13) NOT gated on net.active. The toggle lives in ship select, and a room can be formed
-      // and peered while net.active is still false (it flips when the match goes live) - gating on it
-      // meant the click applied locally and reached nobody, which is exactly what a two-client test
-      // showed: the clicker flipped to ON and the peer sat at OFF.
-      if (typeof net !== 'undefined' && net && net.sendEvent) {
-        net.sendEvent({ type: 'speed_mode', on: !!on });
-      }
-    } catch (_) {}
-  }
-}
-if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
 
   // Race-mode toggle: flip LSS.MODE and rebroadcast the current
   // map_change so peers stay in sync. When flipping ON, if the current
