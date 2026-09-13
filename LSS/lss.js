@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.07';
+const LSS_BUILD = '43.08';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6738,6 +6738,22 @@ function handleNetEvent(evt, fromPeerId) {
       game.state = 'roundEnd';
       if (typeof _anchorTimer === 'function') _anchorTimer('roundEndTimer', 2);
     }
+    return;
+  }
+  if (evt.type === 'wild_zap') {
+    try {
+      const from = new THREE.Vector3(evt.f[0], evt.f[1], evt.f[2]);
+      let vicPos = null;
+      if (evt.to === net.myPeerId) {
+        if (player && player.position) vicPos = player.position;
+        let _src = null;
+        try { if (_WILD && _WILD._list) _src = _WILD._list.find(x => x && x.wildId === (evt.i | 0)) || null; } catch (_) {}
+        if (typeof playerTakeDamage === 'function') playerTakeDamage(Math.max(0, +evt.d || 0), _src);
+      } else if (net.networkPlayers) {
+        for (const np of net.networkPlayers) { if (np && np.peerId === evt.to && np.position) { vicPos = np.position; break; } }
+      }
+      if (vicPos && (evt.b | 0) > 0) _wildDrawStrike(from, vicPos, evt.c | 0, evt.b | 0, 300);
+    } catch (_) {}
     return;
   }
   if (evt.type === 'wild_state') {
@@ -40011,6 +40027,40 @@ function _wildProto(key) {
   return _wildProtos[key];
 }
 
+function _wildVictimUp(v) {
+  if (!v || !v.position) return false;
+  if (typeof player !== 'undefined' && v === player) return player.shipState !== 'dead' && player.shipState !== 'spawning';
+  return v.alive !== false;
+}
+function _wildDeliverStrike(from, victim, dmg, col, bolts, src) {
+  try {
+    const local = (typeof player !== 'undefined' && victim === player);
+    if (local && typeof playerTakeDamage === 'function') playerTakeDamage(dmg, src || null);
+    if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+      const to = local ? net.myPeerId : (victim && victim.peerId);
+      if (to) {
+        net.sendEvent({ type: 'wild_zap', to: to, d: dmg, i: (src && src.wildId) | 0,
+                        f: [Math.round(from.x), Math.round(from.y), Math.round(from.z)],
+                        c: col | 0, b: bolts | 0 });
+      }
+    }
+  } catch (_) {}
+}
+function _wildDrawStrike(from, to, col, bolts, radius) {
+  try {
+    if (typeof spawnLightningBolt !== 'function') return;
+    for (let b = 0; b < Math.max(1, bolts); b++) {
+      const t = to.clone();
+      if (b > 0) {
+        const j = (radius || 300) * 0.35;
+        t.x += (Math.random() - 0.5) * j; t.y += (Math.random() - 0.5) * j; t.z += (Math.random() - 0.5) * j;
+      }
+      spawnLightningBolt(from, t, col, 1.3 + b * 0.25, 3, 3, true, 0.9);
+    }
+    if (typeof playSpatialSound === 'function') playSpatialSound('explosion', from, { refDistance: 900, maxDistance: 14000 });
+  } catch (_) {}
+}
+
 function _wildResolveFoe(attacker) {
   try {
     if (!attacker) return null;
@@ -40172,36 +40222,22 @@ class WildLeviathan {
       }
     }
 
-    if (this.aggro && this._touchCd <= 0 && typeof player !== 'undefined' && player &&
-        player.shipState !== 'dead' && player.position) {
-      if (player.position.distanceTo(this.position) < this.collisionRadius + 120) {
+    const _vic = _wildVictimUp(this._foe) ? this._foe : null;   // (v43.08) whoever it is angry at
+    if (this.aggro && _vic && this._touchCd <= 0) {
+      if (_vic.position.distanceTo(this.position) < this.collisionRadius + 120) {
         this._touchCd = _WILD.touchCd;
-        try { if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.touch * (this.baby ? 0.45 : 1), this); } catch (_) {}
+        _wildDeliverStrike(this.position, _vic, _WILD.touch * (this.baby ? 0.45 : 1), 0x8ad8ff, 0, this);
       }
     }
     this._zapT = (this._zapT || 0) - dt;
-    if (this.aggro && this._zapT <= 0 && typeof player !== 'undefined' && player &&
-        player.shipState !== 'dead' && player.shipState !== 'spawning' && player.position) {
-      const _zd = player.position.distanceTo(this.position);
+    if (this.aggro && _vic && this._zapT <= 0) {
+      const _zd = _vic.position.distanceTo(this.position);
       if (_zd < _WILD.zapR) {
         this._zapT = _WILD.zapEvery * (0.8 + Math.random() * 0.4);
-        try {
-          const from = this.position.clone(); from.y += this.footOff * 0.7;
-          const to = player.position.clone();
-          const col = (this.def && this.def.ghost != null) ? this.def.ghost : 0x8ad8ff;
-          if (typeof spawnLightningBolt === 'function') {
-            for (let _b = 0; _b < _WILD.zapBolts; _b++) {
-              const _t = to.clone();
-              if (_b > 0) {
-                const _j = this.collisionRadius * 0.35;
-                _t.x += (Math.random() - 0.5) * _j; _t.y += (Math.random() - 0.5) * _j; _t.z += (Math.random() - 0.5) * _j;
-              }
-              spawnLightningBolt(from, _t, col, 1.3 + _b * 0.25, 3, 3, true, 0.9);
-            }
-          }
-          if (typeof playSpatialSound === 'function') playSpatialSound('explosion', from, { refDistance: 900, maxDistance: 14000 });
-          if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.zapDmg * (this.baby ? 0.45 : 1), this);
-        } catch (_) {}
+        const from = this.position.clone(); from.y += this.footOff * 0.7;
+        const col = (this.def && this.def.ghost != null) ? this.def.ghost : 0x8ad8ff;
+        _wildDrawStrike(from, _vic.position, col, _WILD.zapBolts, this.collisionRadius);
+        _wildDeliverStrike(from, _vic, _WILD.zapDmg * (this.baby ? 0.45 : 1), col, _WILD.zapBolts, this);
       }
     }
   }

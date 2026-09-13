@@ -4777,7 +4777,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.07';
+const LSS_BUILD = '43.08';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -14198,6 +14198,27 @@ function handleNetEvent(evt, fromPeerId) {
   // AUTHORITY's copy, which puts it in the city_state feed, which gives the peer a _netPos to
   // follow - so the hull stays on screen and fights back instead of evaporating when shot.
   // (v43.05) the wild families: state from the authority, damage claims back to it
+  // (v43.08) A leviathan struck someone. The victim's own client applies the damage - the authority
+  // cannot call playerTakeDamage for a pilot on another machine - and EVERY client draws the bolt,
+  // so a peer being mauled is visible to the other player instead of happening invisibly.
+  if (evt.type === 'wild_zap') {
+    try {
+      const from = new THREE.Vector3(evt.f[0], evt.f[1], evt.f[2]);
+      let vicPos = null;
+      if (evt.to === net.myPeerId) {
+        if (player && player.position) vicPos = player.position;
+        // the striking animal exists on this client too (wild_state builds it), so hand it over:
+        // showDirectionalDamage needs a position to point the screen-edge pulse at.
+        let _src = null;
+        try { if (_WILD && _WILD._list) _src = _WILD._list.find(x => x && x.wildId === (evt.i | 0)) || null; } catch (_) {}
+        if (typeof playerTakeDamage === 'function') playerTakeDamage(Math.max(0, +evt.d || 0), _src);
+      } else if (net.networkPlayers) {
+        for (const np of net.networkPlayers) { if (np && np.peerId === evt.to && np.position) { vicPos = np.position; break; } }
+      }
+      if (vicPos && (evt.b | 0) > 0) _wildDrawStrike(from, vicPos, evt.c | 0, evt.b | 0, 300);
+    } catch (_) {}
+    return;
+  }
   if (evt.type === 'wild_state') {
     try { if (typeof _wildApplyState === 'function') _wildApplyState(evt.s); } catch (_) {}
     return;
@@ -60402,6 +60423,59 @@ function _wildProto(key) {
   return _wildProtos[key];
 }
 
+// (v43.08) WHO CAN THIS ANIMAL ACTUALLY HURT?
+// Owner: "they only go aggro against one of the players... they ignored my laptop."
+// Both the contact damage and the strike were written against the bare `player` singleton - the
+// LOCAL pilot. The consequences compound badly once the families are replicated (v43.05):
+//   - on the AUTHORITY an angry leviathan zapped its own local pilot no matter who provoked it
+//   - on a PEER the creature is a proxy running tickProxy, so update() never runs and it struck
+//     nobody at all
+// So the peer could shoot one, watch it turn and come for them (the chase reads this._foe, which
+// was always right), and never once be touched by it.
+// A victim is now whatever the animal is actually angry at, and a remote victim is hit over the
+// wire - the authority cannot call playerTakeDamage for a pilot on another machine.
+function _wildVictimUp(v) {
+  if (!v || !v.position) return false;
+  if (typeof player !== 'undefined' && v === player) return player.shipState !== 'dead' && player.shipState !== 'spawning';
+  return v.alive !== false;
+}
+// The strike, delivered. `to` is always a peer id - the victim's own client is the one that applies
+// the damage, and every other client draws the bolt so the fight is legible from the outside.
+function _wildDeliverStrike(from, victim, dmg, col, bolts, src) {
+  try {
+    const local = (typeof player !== 'undefined' && victim === player);
+    // (!) PASS THE ATTACKER. playerTakeDamage immediately calls showDirectionalDamage(attacker, ...)
+    // to pulse the screen edge you were hit from; handing it null threw, the throw was swallowed by
+    // the catch below, and the strike silently did nothing. Measured: aggro, chase and the whole
+    // pack all correct, player health untouched at 10000 for the entire fight.
+    if (local && typeof playerTakeDamage === 'function') playerTakeDamage(dmg, src || null);
+    if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+      const to = local ? net.myPeerId : (victim && victim.peerId);
+      if (to) {
+        net.sendEvent({ type: 'wild_zap', to: to, d: dmg, i: (src && src.wildId) | 0,
+                        f: [Math.round(from.x), Math.round(from.y), Math.round(from.z)],
+                        c: col | 0, b: bolts | 0 });
+      }
+    }
+  } catch (_) {}
+}
+// Draw one strike locally. Shared by the authority and by every receiver, so the fan looks the same
+// on every screen instead of only where the damage happened to be applied.
+function _wildDrawStrike(from, to, col, bolts, radius) {
+  try {
+    if (typeof spawnLightningBolt !== 'function') return;
+    for (let b = 0; b < Math.max(1, bolts); b++) {
+      const t = to.clone();
+      if (b > 0) {
+        const j = (radius || 300) * 0.35;
+        t.x += (Math.random() - 0.5) * j; t.y += (Math.random() - 0.5) * j; t.z += (Math.random() - 0.5) * j;
+      }
+      spawnLightningBolt(from, t, col, 1.3 + b * 0.25, 3, 3, true, 0.9);
+    }
+    if (typeof playSpatialSound === 'function') playSpatialSound('explosion', from, { refDistance: 900, maxDistance: 14000 });
+  } catch (_) {}
+}
+
 // (v42.97) WHO HIT ME? - and why nothing was ever angry.
 // Owner: "the leviathans are not going aggro when you attack them".
 // takeDamage set aggro from `(attacker === player)`. Every player weapon path in this file passes
@@ -60595,41 +60669,25 @@ class WildLeviathan {
     }
 
     // Contact damage, angry only. A calm animal you walk into does nothing.
-    if (this.aggro && this._touchCd <= 0 && typeof player !== 'undefined' && player &&
-        player.shipState !== 'dead' && player.position) {
-      if (player.position.distanceTo(this.position) < this.collisionRadius + 120) {
+    const _vic = _wildVictimUp(this._foe) ? this._foe : null;   // (v43.08) whoever it is angry at
+    if (this.aggro && _vic && this._touchCd <= 0) {
+      if (_vic.position.distanceTo(this.position) < this.collisionRadius + 120) {
         this._touchCd = _WILD.touchCd;
-        try { if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.touch * (this.baby ? 0.45 : 1), this); } catch (_) {}
+        _wildDeliverStrike(this.position, _vic, _WILD.touch * (this.baby ? 0.45 : 1), 0x8ad8ff, 0, this);
       }
     }
     // (v42.82) THE STRIKE. Contact alone meant a provoked animal had no way to answer a ship that
     // simply flew above it at four times its top speed - which is the whole of "they don't try to
     // attack my ship when i attack them". It is still ground-bound; what it gains is reach.
     this._zapT = (this._zapT || 0) - dt;
-    if (this.aggro && this._zapT <= 0 && typeof player !== 'undefined' && player &&
-        player.shipState !== 'dead' && player.shipState !== 'spawning' && player.position) {
-      const _zd = player.position.distanceTo(this.position);
+    if (this.aggro && _vic && this._zapT <= 0) {
+      const _zd = _vic.position.distanceTo(this.position);
       if (_zd < _WILD.zapR) {
         this._zapT = _WILD.zapEvery * (0.8 + Math.random() * 0.4);
-        try {
-          const from = this.position.clone(); from.y += this.footOff * 0.7;
-          const to = player.position.clone();
-          const col = (this.def && this.def.ghost != null) ? this.def.ghost : 0x8ad8ff;
-          // (v42.97) a FAN, not a single line - three bolts with jittered strike points read as a
-          // discharge rather than a laser. Damage is still applied once, below; this is only look.
-          if (typeof spawnLightningBolt === 'function') {
-            for (let _b = 0; _b < _WILD.zapBolts; _b++) {
-              const _t = to.clone();
-              if (_b > 0) {
-                const _j = this.collisionRadius * 0.35;
-                _t.x += (Math.random() - 0.5) * _j; _t.y += (Math.random() - 0.5) * _j; _t.z += (Math.random() - 0.5) * _j;
-              }
-              spawnLightningBolt(from, _t, col, 1.3 + _b * 0.25, 3, 3, true, 0.9);
-            }
-          }
-          if (typeof playSpatialSound === 'function') playSpatialSound('explosion', from, { refDistance: 900, maxDistance: 14000 });
-          if (typeof playerTakeDamage === 'function') playerTakeDamage(_WILD.zapDmg * (this.baby ? 0.45 : 1), this);
-        } catch (_) {}
+        const from = this.position.clone(); from.y += this.footOff * 0.7;
+        const col = (this.def && this.def.ghost != null) ? this.def.ghost : 0x8ad8ff;
+        _wildDrawStrike(from, _vic.position, col, _WILD.zapBolts, this.collisionRadius);
+        _wildDeliverStrike(from, _vic, _WILD.zapDmg * (this.baby ? 0.45 : 1), col, _WILD.zapBolts, this);
       }
     }
   }
