@@ -719,7 +719,7 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
    the v36.30 `#ss-options-row > div` entry, whose row no longer exists. */
 #ss-rails > div, #ship-preview-difficulty, #ship-preview-skin,
 #ship-preview-perks, #ss-speed-box,   /* (v43.13) now grandchildren of #ss-rails */
-#ship-preview-info, #teammates-strip, #map-select {
+#ship-preview-info, #teammates-strip, #map-select, #ss-mode-box {   /* (v43.26) */
   background: rgba(10,14,26,0.42);
   border: 1px solid rgba(120,150,200,0.22);
   border-radius: 11px;
@@ -754,6 +754,30 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
 #insane-speed-toggle:disabled { opacity: 0.35; cursor: not-allowed; }
 #insane-speed-toggle.active { color: #ffd166; border-color: #ffd166; background: rgba(60,45,10,0.85); }
 #insane-speed-toggle.active:hover:not(:disabled) { border-color: #ffe6a8; background: rgba(80,60,18,0.95); }
+/* (v43.26) ROOM MODE picker - same box language as MATCH SPEED beside it. */
+#ss-mode-box {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+  padding: 7px 12px 6px; flex: 0 0 auto;
+}
+#ss-mode-row { display: flex; align-items: center; justify-content: center; gap: 8px; }
+#ss-mode-current {
+  font-family: 'Orbitron', sans-serif; font-size: 10px; letter-spacing: 2px; font-weight: bold;
+  color: #ffd27a; min-width: 104px; text-align: center; white-space: nowrap;
+}
+#ss-mode-desc {
+  font-family: 'Orbitron', sans-serif; font-size: 8px; letter-spacing: 1px;
+  color: #9fb6d8; opacity: 0.7; text-align: center; max-width: 140px;
+}
+.ss-mode-arrow {
+  font-family: 'Orbitron', sans-serif; font-size: 10px; line-height: 1;
+  padding: 6px 8px; border-radius: 7px; cursor: pointer;
+  background: rgba(20,20,40,0.6); color: #7fd4ff;
+  border: 1px solid rgba(100,170,220,0.35); transition: all 0.15s ease;
+}
+.ss-mode-arrow:hover:not(:disabled) { border-color: #7fd4ff; background: rgba(30,35,60,0.8); }
+.ss-mode-arrow:disabled { opacity: 0.35; cursor: not-allowed; }
+#ss-mode-box.ss-mode-locked #ss-mode-current { opacity: 0.45; }
+
 /* (v35.10) Ship carousel — horizontal chip rail, now a floating bar in the
    bottom dock (v35.16). */
 #ship-carousel {
@@ -4382,6 +4406,17 @@ body.vr-active #camp-video { display: none !important; }
           <button id="insane-speed-toggle" type="button" data-on="0">INSANE SPEED: OFF</button>
           <div id="ss-speed-desc">Everyone flies at race speed.</div>
         </div>
+        <!-- (v43.26) ROOM MODE. The room's mode as a visible, shared control rather than an
+             implicit consequence of whichever menu button each player pressed. -->
+        <div id="ss-mode-box">
+          <div class="perks-label">ROOM MODE</div>
+          <div id="ss-mode-row">
+            <button class="ss-mode-arrow" id="ss-mode-prev" type="button" title="Previous mode">&#9664;</button>
+            <div id="ss-mode-current">ELIMINATION</div>
+            <button class="ss-mode-arrow" id="ss-mode-next" type="button" title="Next mode">&#9654;</button>
+          </div>
+          <div id="ss-mode-desc">Team elimination.</div>
+        </div>
       </div>
       <div id="ship-carousel">
         <button class="sc-arrow" id="ship-car-prev" title="Previous ship">&#9664;</button>
@@ -4814,7 +4849,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.25';
+const LSS_BUILD = '43.26';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -11692,6 +11727,12 @@ function _ssModeLabel() {
     // (v38.02) no hub progression in this mode, so no rank button either
     const ag = document.getElementById('btn-aegis-select');
     if (ag) ag.style.display = (typeof _aegisModeAllowed === 'function' && !_aegisModeAllowed()) ? 'none' : '';
+    // (v43.26) ⚠ AND PAINT THE PICKER. _lssRenderLobbyMode is otherwise only reached from the mode
+    // ADOPTION paths, so on a normal entry to ship select it never ran: the box sat showing its
+    // hard-coded markup default, and - worse - its arrows were never bound, because the bind lives
+    // inside the render. A control that renders only when someone else changes the value is a
+    // control you can never use first.
+    try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
   } catch (_) {}
 }
 function _shipSelectSetLaunching(on) {
@@ -14150,6 +14191,17 @@ function handleNetEvent(evt, fromPeerId) {
   // but this one also arrives whenever someone picks a mode while already in the room - which hello,
   // being a join-edge event, can never do.
   // (v43.24) the decree - one client's decision, obeyed by everyone including itself.
+  // (v43.26) somebody used the ROOM MODE picker. Apply it (last pick wins, so the click is
+  // immediate everywhere) and let the decider turn it into the decree that makes it stick.
+  if (evt.type === 'mode_pick' && typeof evt.mode === 'string' && evt.mode) {
+    _lssModeLog('rx', 'mode_pick', evt.mode, null, fromPeerId, 'peer picked');
+    net._forcedMode = evt.mode;
+    net._decreedMode = null;
+    try { if (LSS.MODE !== evt.mode) { _lssAdoptRoomMode(evt.mode); _lssModeChosen(evt.mode); } } catch (_) {}
+    try { _lssModeDecide(); } catch (_) {}
+    try { _lssRenderLobbyMode(); } catch (_) {}
+    return;
+  }
   if (evt.type === 'mode_decree') {
     _lssApplyModeDecree(evt, false);
     return;
@@ -90129,6 +90181,109 @@ function _captureKbKey(e) {
 function _lssInsaneSpeed() {
   try { return !!LSS.INSANE_SPEED && LSS.MODE !== 'race'; } catch (_) { return false; }
 }
+// (v43.26) THE ROOM MODE, AS A THING YOU CAN SEE AND CHANGE. Owner: "maybe put the mode selector in
+// the lobby" (and "lobby=ship selection screen").
+// Until now the room's mode was implicit - decided by whichever menu button each player happened to
+// press, then reconciled behind their backs. That is what produced five versions of "connected but
+// separated": the two players had no shared surface showing what the room was actually playing, so a
+// disagreement was invisible until they were already flying. #ss-mode-label existed but is a CAPTION
+// (pointer-events: none) and, until v43.25, one that could silently go stale.
+// Modelled on MATCH SPEED (v43.13) - the existing room-wide ship-select control - and carrying its
+// hard-won lesson: the send is NOT gated on net.active, because a room can be formed and peered while
+// net.active is still false, and gating on it means the click applies locally and reaches nobody.
+const _LSS_PICKABLE_MODES = ['classic', 'freeflight', 'endless', 'race', 'assault'];
+function _lssModeDisplayName(m) {
+  if (m === 'race') return 'RACE MODE';
+  if (m === 'assault') return 'ASSAULT';
+  if (m === 'endless') return 'ENDLESS';
+  if (m === 'freeflight') return 'EXHIBITION';
+  if (m === 'campaign') return 'CAMPAIGN';
+  return 'ELIMINATION';
+}
+function _lssModeBlurb(m) {
+  if (m === 'race') return 'Sprint the track.';
+  if (m === 'assault') return 'Storm or hold the field.';
+  if (m === 'endless') return 'A cavern without end.';
+  if (m === 'freeflight') return 'Patrol the open overworld.';
+  return 'Team elimination.';
+}
+// Same lock rule as MATCH SPEED and race mode, for the same reason: changing it under a live round
+// half-converts the match.
+function _lssRoomModeLocked() {
+  try { return _lssInsaneSpeedLocked(); } catch (_) { return false; }
+}
+// (!) _lssRefreshModeUI() already calls this, so defining it wires the picker into EVERY mode
+//     adoption path (decree, adopt, drop-in) for free - it can never show a mode we are not in.
+function _lssRenderLobbyMode() {
+  try {
+    const box = document.getElementById('ss-mode-box');
+    if (!box) return;
+    const cur = document.getElementById('ss-mode-current');
+    const desc = document.getElementById('ss-mode-desc');
+    const m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
+    // Campaign + Cyberpunk are their own journeys, not room modes you cycle into.
+    const pickable = _LSS_PICKABLE_MODES.indexOf(m) !== -1;
+    const cyber = !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed);
+    box.style.display = (cyber || m === 'campaign') ? 'none' : '';
+    // (v43.26) ⚠ USE THE CAPTION'S OWN NAME FUNCTION. _ssModeName distinguishes SKIRMISH (classic,
+    // solo) from ELIMINATION (classic, networked); a second name table got that wrong and the two
+    // surfaces disagreed on the same screen. After v43.25 that is exactly the bug class to avoid -
+    // one value, one renderer. _lssModeDisplayName survives only for the blurb + step list.
+    if (cur) cur.textContent = (typeof _ssModeName === 'function') ? _ssModeName() : _lssModeDisplayName(m);
+    if (desc) {
+      const peers = (typeof net !== 'undefined' && net && net.peers) ? net.peers.size : 0;
+      desc.textContent = peers > 0 ? 'The whole room plays this.' : _lssModeBlurb(m);
+    }
+    const locked = _lssRoomModeLocked() || !pickable;
+    ['ss-mode-prev', 'ss-mode-next'].forEach((id) => {
+      const b = document.getElementById(id);
+      if (!b) return;
+      b.disabled = locked;
+      b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
+                       : 'Change the mode for everyone in the room';
+    });
+    box.classList.toggle('ss-mode-locked', locked);
+    // Rebind by clone, the buildMapSelector pattern (11936-11953): repeated renders must not stack
+    // handlers, and tabindex -1 + blur stops SPACE re-firing the focused arrow in flight.
+    const rebind = (id, dir) => {
+      const btn = document.getElementById(id);
+      if (!btn) return;
+      const fresh = btn.cloneNode(true);
+      fresh.setAttribute('tabindex', '-1');
+      btn.parentNode.replaceChild(fresh, btn);
+      fresh.addEventListener('mousedown', (e) => { try { e.preventDefault(); fresh.blur(); } catch (_) {} });
+      fresh.addEventListener('click', () => _lssStepRoomMode(dir));
+    };
+    rebind('ss-mode-prev', -1);
+    rebind('ss-mode-next', 1);
+  } catch (_) {}
+}
+function _lssStepRoomMode(dir) {
+  try {
+    if (_lssRoomModeLocked()) return;
+    const list = _LSS_PICKABLE_MODES;
+    let i = list.indexOf((typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic');
+    if (i < 0) i = 0;
+    const next = list[((i + dir) % list.length + list.length) % list.length];
+    _lssPickRoomMode(next);
+  } catch (_) {}
+}
+// A DELIBERATE pick is different from a join-time choice: it is last-writer-wins, the way a host
+// changing the map is. It applies locally at once (so the click feels immediate) and rides
+// `mode_pick` to the room, where the decider turns it into the authoritative decree.
+function _lssPickRoomMode(mode) {
+  try {
+    if (!mode || _lssRoomModeLocked()) return;
+    if (typeof net !== 'undefined' && net) { net._forcedMode = mode; net._decreedMode = null; }
+    _lssAdoptRoomMode(mode);
+    _lssModeChosen(mode);
+    _lssModeLog('tx', 'mode_pick', mode, _lssModeAgo(), null, 'picked in ship select');
+    try { if (typeof net !== 'undefined' && net && net.sendEvent) net.sendEvent({ type: 'mode_pick', mode: mode }); } catch (_) {}
+    try { _lssModeDecide(); } catch (_) {}
+    _lssRenderLobbyMode();
+  } catch (_) {}
+}
+
 function _lssInsaneSpeedLocked() {
   // Same rule race mode uses, for the same reason: flipping the speed under a live round
   // half-converts the match (ships change speed, bots do not re-plan) - see _raceModeLocked.
@@ -90319,6 +90474,15 @@ function _lssModeDecide() {
     if (typeof net === 'undefined' || !net || !net.active || !net.sendEvent) return;
     if (!_lssAmModeDecider()) return;
     let bestMode = null, bestAgo = -1, bestId = null;
+    // (v43.26) A DELIBERATE PICK OUTRANKS THE JOIN-TIME RULE. `ago` answers "who committed first",
+    // which is the right question when two people arrive having pressed different buttons. It is the
+    // WRONG question once somebody stands in the room and chooses - that is last-writer-wins, like
+    // changing the map. _forcedMode carries the most recent pick this client has seen.
+    if (net._forcedMode) {
+      net._decreedMode = null;
+      bestMode = net._forcedMode; bestAgo = Math.max(0, _lssModeAgo()); bestId = String(net.myPeerId);
+      net._forcedMode = null;
+    } else {
     const myAgo = _lssModeAgo();
     if (myAgo >= 0) { bestMode = LSS.MODE; bestAgo = myAgo; bestId = String(net.myPeerId); }
     if (net._peerModes) {
@@ -90332,6 +90496,7 @@ function _lssModeDecide() {
           bestMode = v.mode; bestAgo = aged; bestId = id;
         }
       });
+    }
     }
     if (!bestMode) return;
     if (net._decreedMode === bestMode) return;                  // already said so

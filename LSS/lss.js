@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.25';
+const LSS_BUILD = '43.26';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -4897,6 +4897,7 @@ function _ssModeLabel() {
     el.classList.add('on');
     const ag = document.getElementById('btn-aegis-select');
     if (ag) ag.style.display = (typeof _aegisModeAllowed === 'function' && !_aegisModeAllowed()) ? 'none' : '';
+    try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
   } catch (_) {}
 }
 function _shipSelectSetLaunching(on) {
@@ -6645,6 +6646,15 @@ function handleNetEvent(evt, fromPeerId) {
         }
       } catch (_) {}
     }
+    return;
+  }
+  if (evt.type === 'mode_pick' && typeof evt.mode === 'string' && evt.mode) {
+    _lssModeLog('rx', 'mode_pick', evt.mode, null, fromPeerId, 'peer picked');
+    net._forcedMode = evt.mode;
+    net._decreedMode = null;
+    try { if (LSS.MODE !== evt.mode) { _lssAdoptRoomMode(evt.mode); _lssModeChosen(evt.mode); } } catch (_) {}
+    try { _lssModeDecide(); } catch (_) {}
+    try { _lssRenderLobbyMode(); } catch (_) {}
     return;
   }
   if (evt.type === 'mode_decree') {
@@ -60162,6 +60172,85 @@ function _captureKbKey(e) {
 function _lssInsaneSpeed() {
   try { return !!LSS.INSANE_SPEED && LSS.MODE !== 'race'; } catch (_) { return false; }
 }
+const _LSS_PICKABLE_MODES = ['classic', 'freeflight', 'endless', 'race', 'assault'];
+function _lssModeDisplayName(m) {
+  if (m === 'race') return 'RACE MODE';
+  if (m === 'assault') return 'ASSAULT';
+  if (m === 'endless') return 'ENDLESS';
+  if (m === 'freeflight') return 'EXHIBITION';
+  if (m === 'campaign') return 'CAMPAIGN';
+  return 'ELIMINATION';
+}
+function _lssModeBlurb(m) {
+  if (m === 'race') return 'Sprint the track.';
+  if (m === 'assault') return 'Storm or hold the field.';
+  if (m === 'endless') return 'A cavern without end.';
+  if (m === 'freeflight') return 'Patrol the open overworld.';
+  return 'Team elimination.';
+}
+function _lssRoomModeLocked() {
+  try { return _lssInsaneSpeedLocked(); } catch (_) { return false; }
+}
+function _lssRenderLobbyMode() {
+  try {
+    const box = document.getElementById('ss-mode-box');
+    if (!box) return;
+    const cur = document.getElementById('ss-mode-current');
+    const desc = document.getElementById('ss-mode-desc');
+    const m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
+    const pickable = _LSS_PICKABLE_MODES.indexOf(m) !== -1;
+    const cyber = !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed);
+    box.style.display = (cyber || m === 'campaign') ? 'none' : '';
+    if (cur) cur.textContent = (typeof _ssModeName === 'function') ? _ssModeName() : _lssModeDisplayName(m);
+    if (desc) {
+      const peers = (typeof net !== 'undefined' && net && net.peers) ? net.peers.size : 0;
+      desc.textContent = peers > 0 ? 'The whole room plays this.' : _lssModeBlurb(m);
+    }
+    const locked = _lssRoomModeLocked() || !pickable;
+    ['ss-mode-prev', 'ss-mode-next'].forEach((id) => {
+      const b = document.getElementById(id);
+      if (!b) return;
+      b.disabled = locked;
+      b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
+                       : 'Change the mode for everyone in the room';
+    });
+    box.classList.toggle('ss-mode-locked', locked);
+    const rebind = (id, dir) => {
+      const btn = document.getElementById(id);
+      if (!btn) return;
+      const fresh = btn.cloneNode(true);
+      fresh.setAttribute('tabindex', '-1');
+      btn.parentNode.replaceChild(fresh, btn);
+      fresh.addEventListener('mousedown', (e) => { try { e.preventDefault(); fresh.blur(); } catch (_) {} });
+      fresh.addEventListener('click', () => _lssStepRoomMode(dir));
+    };
+    rebind('ss-mode-prev', -1);
+    rebind('ss-mode-next', 1);
+  } catch (_) {}
+}
+function _lssStepRoomMode(dir) {
+  try {
+    if (_lssRoomModeLocked()) return;
+    const list = _LSS_PICKABLE_MODES;
+    let i = list.indexOf((typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic');
+    if (i < 0) i = 0;
+    const next = list[((i + dir) % list.length + list.length) % list.length];
+    _lssPickRoomMode(next);
+  } catch (_) {}
+}
+function _lssPickRoomMode(mode) {
+  try {
+    if (!mode || _lssRoomModeLocked()) return;
+    if (typeof net !== 'undefined' && net) { net._forcedMode = mode; net._decreedMode = null; }
+    _lssAdoptRoomMode(mode);
+    _lssModeChosen(mode);
+    _lssModeLog('tx', 'mode_pick', mode, _lssModeAgo(), null, 'picked in ship select');
+    try { if (typeof net !== 'undefined' && net && net.sendEvent) net.sendEvent({ type: 'mode_pick', mode: mode }); } catch (_) {}
+    try { _lssModeDecide(); } catch (_) {}
+    _lssRenderLobbyMode();
+  } catch (_) {}
+}
+
 function _lssInsaneSpeedLocked() {
   return typeof game !== 'undefined' && game &&
          (game.state === 'playing' || game.state === 'roundEnd' ||
@@ -60250,6 +60339,11 @@ function _lssModeDecide() {
     if (typeof net === 'undefined' || !net || !net.active || !net.sendEvent) return;
     if (!_lssAmModeDecider()) return;
     let bestMode = null, bestAgo = -1, bestId = null;
+    if (net._forcedMode) {
+      net._decreedMode = null;
+      bestMode = net._forcedMode; bestAgo = Math.max(0, _lssModeAgo()); bestId = String(net.myPeerId);
+      net._forcedMode = null;
+    } else {
     const myAgo = _lssModeAgo();
     if (myAgo >= 0) { bestMode = LSS.MODE; bestAgo = myAgo; bestId = String(net.myPeerId); }
     if (net._peerModes) {
@@ -60261,6 +60355,7 @@ function _lssModeDecide() {
           bestMode = v.mode; bestAgo = aged; bestId = id;
         }
       });
+    }
     }
     if (!bestMode) return;
     if (net._decreedMode === bestMode) return;                  // already said so
