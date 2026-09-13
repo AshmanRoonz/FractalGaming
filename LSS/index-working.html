@@ -4814,7 +4814,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.19';
+const LSS_BUILD = '43.21';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -8121,6 +8121,7 @@ function _cancelRoomForLocalPlay() {
       net.roomId = null;
       net.active = false;
       net.openSolo = false;
+      net.roomMode = null;   // (v43.20) this room is gone; its mode must not outlive it
       net.campaign = false;
       net.endless = false;
     }
@@ -11409,6 +11410,10 @@ function startTest() {
 // startRace does). Mode-agnostic for classic.
 function _applyModeClientSetup(mode) {
   if (typeof LSS === 'undefined') return;
+  // (v43.20) this call IS the room's mode arriving from its authority (open_solo_start /
+  // dropin_state / _lssAdoptRoomMode). Record it BEFORE deferring, or _lssRoomModeOr below can
+  // answer from a stale roomMode and override the very instruction we are applying.
+  try { if (typeof net !== 'undefined' && net && mode) net.roomMode = mode; } catch (_) {}
   LSS.MODE = _lssRoomModeOr(mode || 'classic');   // (v43.19) a room has one mode
   if (mode === 'race') {
     try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
@@ -14135,9 +14140,7 @@ function handleNetEvent(evt, fromPeerId) {
                          (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
         if (!_inPlay && typeof LSS !== 'undefined' && LSS.MODE !== evt.mode) {
           console.log('[net] room mode is', evt.mode, '- switching from', LSS.MODE);
-          LSS.MODE = evt.mode;
-          try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
-          try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
+          _lssAdoptRoomMode(evt.mode);   // (v43.20) the mode alone left the wrong map + flags
         }
       }
     } catch (_) {}
@@ -27654,6 +27657,30 @@ if (typeof window !== 'undefined') window.__cavern = { st: _HZ_CAVERN, enter: (i
 // player/rift-home aren't reachable from devtools without this. Same spirit
 // as __cavern.enter above.
 if (typeof window !== 'undefined') window.__dbg = {
+  // (v43.21) ROOM MODE probe. The rule in v43.19/20 is a cross-CLIENT one, and the local two-tab
+  // lobby only half-forms here, so this is how it gets judged rather than assumed:
+  //   __dbg.roomMode()          - what mode am I in, what does the room say, what are my flags
+  //   __dbg.roomMode('race')    - drive the adopt exactly as an authority's `hello` would
+  // The report is deliberately the FLAGS, not just LSS.MODE, because "connected but separated" was
+  // never a wrong mode string - it was a right mode string sitting on another mode's map and flags.
+  roomMode: (m) => {
+    try {
+      if (m) _lssAdoptRoomMode(m);
+      return {
+        LSS_MODE: (typeof LSS !== 'undefined') ? LSS.MODE : null,
+        roomMode: (typeof net !== 'undefined' && net) ? (net.roomMode || null) : null,
+        map: (typeof game !== 'undefined' && game) ? game.selectedMap : null,
+        freeflight: (typeof net !== 'undefined' && net) ? !!net.freeflight : null,
+        campaign: (typeof net !== 'undefined' && net) ? !!net.campaign : null,
+        endless: (typeof net !== 'undefined' && net) ? !!net.endless : null,
+        raceNoTimer: (typeof game !== 'undefined' && game) ? !!game.raceNoTimer : null,
+        testMode: (typeof game !== 'undefined' && game) ? !!game.testMode : null,
+        ffBodyClass: (typeof document !== 'undefined') ? document.body.classList.contains('lss-freeflight') : null,
+        team: (typeof player !== 'undefined' && player) ? player.team : null,
+        peers: (typeof net !== 'undefined' && net && net.peers) ? net.peers.size : 0,
+      };
+    } catch (e) { return { error: String(e) }; }
+  },
   get player() { return (typeof player !== 'undefined') ? player : null; },
   returnHub: () => _hzReturnToHub(),
   // (v36.28) Entity-prime audit handles. `models()` is which ship/hoard GLBs are
@@ -82805,6 +82832,10 @@ function returnToRootMenu(opts) {
   // mode (now a main-menu entry, not a reset-on-toggle) would leak into the next
   // plain Multiplayer/Bots match. Joining a peer's room re-syncs mode via map_change.
   try { if (typeof LSS !== 'undefined') LSS.MODE = 'classic'; } catch (_) {}
+  // (v43.20) ...and forget the ROOM's mode with it. net.roomMode was written in exactly one place
+  // and cleared in none, so after leaving a race room the next room you opened would still read
+  // 'race' the moment a peer connected - deferring you to a mode nobody in it had chosen.
+  try { if (typeof net !== 'undefined' && net) net.roomMode = null; } catch (_) {}
   try { game._campPicker = false; } catch (_) {}   
   
   
@@ -90015,6 +90046,75 @@ function _lssSetInsaneSpeed(on, fromNet) {
 }
 if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
 
+// (v43.20) ...AND RUN THE ROOM'S SETUP, not merely its mode string.
+// Owner: "i entered one in race mode and one in exhibition."
+// v43.19 deferred LSS.MODE and that was necessary but NOT sufficient, for two compounding reasons.
+//
+// 1. TIMING. _lssRoomModeOr runs at the TOP of each entry point - before the room is joined. In the
+//    owner's actual scenario (two devices, same code typed, different buttons) net.peers is EMPTY at
+//    that moment on both sides, so the guard returns `want` and both run their own setup in full.
+//    The peers only appear later, on the `hello` handshake. So `hello` is the only place that can
+//    reconcile them, and v43.19 reached it with nothing but an assignment.
+// 2. AN ENTRY POINT IS MOSTLY SETUP. startFreeFlight also does _owReset(), adds the lss-freeflight
+//    body class, and sets net.freeflight / raceNoTimer / selectedMap='hub_overworld'; startRace
+//    applies wall pattern 22 and preloads the champion shell. Writing LSS.MODE='race' over a client
+//    that already ran the free-flight setup leaves it in race mode ON THE OVERWORLD with free-flight
+//    flags - still separated, just differently.
+//
+// The setup half already exists: _applyModeClientSetup(mode) is the "adopt the host's MODE" routine,
+// and it covers all six modes. It was simply never reachable from here - it is called only from
+// open_solo_start and dropin_state, which fire when a match STARTS. Two people sitting in ship select
+// having pressed different buttons never exchange either one. (open_solo_start is additionally
+// skipped outright when net.peers is empty, which is exactly the moment this bug is created.)
+// (!) _applyModeClientSetup is purely ADDITIVE - it sets the new mode's flags and clears nothing - so
+//     it needs the previous mode's flags stripped first, or free flight's leak into race.
+// (!) buildMapSelector() already snaps game.selectedMap to the first legal map when the current one
+//     is not valid for the mode, so the map corrects itself for free once LSS.MODE is right.
+function _lssClearModeSetup() {
+  try {
+    if (typeof net !== 'undefined' && net) { net.freeflight = false; net.campaign = false; net.endless = false; }
+    try { document.body.classList.remove('lss-freeflight'); } catch (_) {}
+    if (typeof game !== 'undefined' && game) {
+      game.testMode = false; game.raceNoTimer = false; game.currentRound = 1;
+      game._campJourney = false;
+    }
+    // the FFA team is free-flight-only; _applyModeClientSetup re-assigns it if we land back there
+    if (typeof player !== 'undefined' && player && typeof LSS !== 'undefined') player.team = LSS.TEAM_FLEET_A;
+  } catch (_) {}
+}
+function _lssAdoptRoomMode(mode) {
+  try {
+    if (!mode || typeof LSS === 'undefined') return;
+    if (LSS.MODE === mode) return;
+    // Never yank the world out from under a match already running - a mid-match adopt would rewrite
+    // flags for a mode whose level is not loaded. Live arrivals are dropin_state's job.
+    const inPlay = (typeof game !== 'undefined' && game &&
+                    (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
+    if (inPlay) return;
+    console.log('[net] room is playing', mode, '- adopting its setup (was', LSS.MODE + ')');
+    _lssClearModeSetup();
+    try { if (typeof _applyModeClientSetup === 'function') _applyModeClientSetup(mode); } catch (_) {}
+    LSS.MODE = mode;   // _applyModeClientSetup routes through _lssRoomModeOr; make the result explicit
+    try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
+    try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
+    _lssSayRoomMode(mode);
+  } catch (_) {}
+}
+// (v43.20) this is also v43.19's quiet failure: it announced through showAnnouncement(), which DOES
+// NOT EXIST in this file - so the typeof-guarded call was a silent no-op and the owner would have
+// been switched with no explanation at all. The lobby status line is what every other lobby message
+// uses, and _owBanner is the in-world surface if we are past the menu.
+function _lssSayRoomMode(mode) {
+  try {
+    const el = document.getElementById('lobby-status');
+    if (el) {
+      el.textContent = 'ROOM IS PLAYING ' + String(mode).toUpperCase() + ' — JOINED THAT';
+      el.style.color = '#ffd36e';
+    }
+  } catch (_) {}
+  try { if (typeof _owBanner === 'function') _owBanner('ROOM MODE', String(mode).toUpperCase()); } catch (_) {}
+}
+
 // (v43.19) A ROOM HAS ONE MODE. Owner: "one device i accidentally joined with the wrong mode, and
 // they are connected but separated lol ... if you're joining a room that is already made, then it
 // should go to the room's mode no matter what mode you click on."
@@ -90042,7 +90142,7 @@ function _lssRoomModeOr(want) {
       try {
         console.log('[net] joining an existing room: mode', want, '->', net.roomMode);
         if (typeof showAnnouncement === 'function') {
-          showAnnouncement('JOINED ' + String(net.roomMode).toUpperCase() + ' ROOM');
+          _lssSayRoomMode(net.roomMode);   // (v43.20) showAnnouncement() does not exist in this file
         }
       } catch (_) {}
     }

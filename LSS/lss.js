@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.19';
+const LSS_BUILD = '43.21';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2389,6 +2389,7 @@ function _cancelRoomForLocalPlay() {
       net.roomId = null;
       net.active = false;
       net.openSolo = false;
+      net.roomMode = null;   // (v43.20) this room is gone; its mode must not outlive it
       net.campaign = false;
       net.endless = false;
     }
@@ -4704,6 +4705,7 @@ function startTest() {
 
 function _applyModeClientSetup(mode) {
   if (typeof LSS === 'undefined') return;
+  try { if (typeof net !== 'undefined' && net && mode) net.roomMode = mode; } catch (_) {}
   LSS.MODE = _lssRoomModeOr(mode || 'classic');   // (v43.19) a room has one mode
   if (mode === 'race') {
     try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
@@ -6649,9 +6651,7 @@ function handleNetEvent(evt, fromPeerId) {
                          (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
         if (!_inPlay && typeof LSS !== 'undefined' && LSS.MODE !== evt.mode) {
           console.log('[net] room mode is', evt.mode, '- switching from', LSS.MODE);
-          LSS.MODE = evt.mode;
-          try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
-          try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
+          _lssAdoptRoomMode(evt.mode);   // (v43.20) the mode alone left the wrong map + flags
         }
       }
     } catch (_) {}
@@ -16639,6 +16639,24 @@ function _hzPortalsFrame(dt) {
 }
 if (typeof window !== 'undefined') window.__cavern = { st: _HZ_CAVERN, enter: (i) => { const p = _HZ_CAVERN.portals && _HZ_CAVERN.portals[i]; if (p) _hzEnterCavern(p); } };
 if (typeof window !== 'undefined') window.__dbg = {
+  roomMode: (m) => {
+    try {
+      if (m) _lssAdoptRoomMode(m);
+      return {
+        LSS_MODE: (typeof LSS !== 'undefined') ? LSS.MODE : null,
+        roomMode: (typeof net !== 'undefined' && net) ? (net.roomMode || null) : null,
+        map: (typeof game !== 'undefined' && game) ? game.selectedMap : null,
+        freeflight: (typeof net !== 'undefined' && net) ? !!net.freeflight : null,
+        campaign: (typeof net !== 'undefined' && net) ? !!net.campaign : null,
+        endless: (typeof net !== 'undefined' && net) ? !!net.endless : null,
+        raceNoTimer: (typeof game !== 'undefined' && game) ? !!game.raceNoTimer : null,
+        testMode: (typeof game !== 'undefined' && game) ? !!game.testMode : null,
+        ffBodyClass: (typeof document !== 'undefined') ? document.body.classList.contains('lss-freeflight') : null,
+        team: (typeof player !== 'undefined' && player) ? player.team : null,
+        peers: (typeof net !== 'undefined' && net && net.peers) ? net.peers.size : 0,
+      };
+    } catch (e) { return { error: String(e) }; }
+  },
   get player() { return (typeof player !== 'undefined') ? player : null; },
   returnHub: () => _hzReturnToHub(),
   models: () => { try { return Object.keys(shipModelCache.loaded); } catch (_) { return null; } },
@@ -55164,6 +55182,7 @@ function returnToRootMenu(opts) {
   const _keepRoom = !!(opts && opts.keepRoom);
   try { activeMode().onTeardown(); } catch (_) {}
   try { if (typeof LSS !== 'undefined') LSS.MODE = 'classic'; } catch (_) {}
+  try { if (typeof net !== 'undefined' && net) net.roomMode = null; } catch (_) {}
   try { game._campPicker = false; } catch (_) {}   
   
   
@@ -60113,6 +60132,44 @@ function _lssSetInsaneSpeed(on, fromNet) {
 }
 if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
 
+function _lssClearModeSetup() {
+  try {
+    if (typeof net !== 'undefined' && net) { net.freeflight = false; net.campaign = false; net.endless = false; }
+    try { document.body.classList.remove('lss-freeflight'); } catch (_) {}
+    if (typeof game !== 'undefined' && game) {
+      game.testMode = false; game.raceNoTimer = false; game.currentRound = 1;
+      game._campJourney = false;
+    }
+    if (typeof player !== 'undefined' && player && typeof LSS !== 'undefined') player.team = LSS.TEAM_FLEET_A;
+  } catch (_) {}
+}
+function _lssAdoptRoomMode(mode) {
+  try {
+    if (!mode || typeof LSS === 'undefined') return;
+    if (LSS.MODE === mode) return;
+    const inPlay = (typeof game !== 'undefined' && game &&
+                    (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
+    if (inPlay) return;
+    console.log('[net] room is playing', mode, '- adopting its setup (was', LSS.MODE + ')');
+    _lssClearModeSetup();
+    try { if (typeof _applyModeClientSetup === 'function') _applyModeClientSetup(mode); } catch (_) {}
+    LSS.MODE = mode;   // _applyModeClientSetup routes through _lssRoomModeOr; make the result explicit
+    try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
+    try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
+    _lssSayRoomMode(mode);
+  } catch (_) {}
+}
+function _lssSayRoomMode(mode) {
+  try {
+    const el = document.getElementById('lobby-status');
+    if (el) {
+      el.textContent = 'ROOM IS PLAYING ' + String(mode).toUpperCase() + ' — JOINED THAT';
+      el.style.color = '#ffd36e';
+    }
+  } catch (_) {}
+  try { if (typeof _owBanner === 'function') _owBanner('ROOM MODE', String(mode).toUpperCase()); } catch (_) {}
+}
+
 function _lssRoomModeOr(want) {
   try {
     if (typeof net === 'undefined' || !net) return want;
@@ -60127,7 +60184,7 @@ function _lssRoomModeOr(want) {
       try {
         console.log('[net] joining an existing room: mode', want, '->', net.roomMode);
         if (typeof showAnnouncement === 'function') {
-          showAnnouncement('JOINED ' + String(net.roomMode).toUpperCase() + ' ROOM');
+          _lssSayRoomMode(net.roomMode);   // (v43.20) showAnnouncement() does not exist in this file
         }
       } catch (_) {}
     }
