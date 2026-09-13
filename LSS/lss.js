@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.47';
+const LSS_BUILD = '43.48';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -60726,46 +60726,16 @@ function _lssSayRoomMode(mode) {
   try { if (typeof _owBanner === 'function') _owBanner('ROOM MODE', String(mode).toUpperCase()); } catch (_) {}
 }
 
-function _ssInfoDrag() {
-  try {
-    const el = document.getElementById('ship-preview-info');
-    if (!el || el._ssDragBound) return;
-    el._ssDragBound = true;
-    const KEY = 'lss_ss_info_pos_v1';
-    const place = (x, y) => {
-      const w = el.offsetWidth || 244, h = el.offsetHeight || 120;
-      const cx = Math.max(4, Math.min(x, window.innerWidth - w - 4));
-      const cy = Math.max(4, Math.min(y, window.innerHeight - h - 4));
-      el.style.setProperty('left', cx + 'px', 'important');
-      el.style.setProperty('top', cy + 'px', 'important');
-      el.style.setProperty('right', 'auto', 'important');
-      el.style.setProperty('bottom', 'auto', 'important');
-      try { localStorage.setItem(KEY, JSON.stringify({ x: cx, y: cy })); } catch (_) {}
-    };
-    el.addEventListener('mousedown', (e) => {
-      if (e.target.closest('button, a, input, select')) return;   // never steal a control's click
-      e.preventDefault();
-      const r = el.getBoundingClientRect();
-      const off = { x: e.clientX - r.left, y: e.clientY - r.top };
-      el.classList.add('ss-dragging');
-      const mv = (ev) => place(ev.clientX - off.x, ev.clientY - off.y);
-      const up = () => { el.classList.remove('ss-dragging');
-        window.removeEventListener('mousemove', mv); window.removeEventListener('mouseup', up); };
-      window.addEventListener('mousemove', mv); window.addEventListener('mouseup', up);
-    });
-    window.addEventListener('resize', () => {
-      const r = el.getBoundingClientRect();
-      if (r.width && el.style.left) place(r.left, r.top);
-    });
-    try {
-      const sp = JSON.parse(localStorage.getItem(KEY) || 'null');
-      if (sp) place(sp.x, sp.y);
-    } catch (_) {}
-  } catch (_) {}
-}
 try {
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _ssInfoDrag);
-  else setTimeout(_ssInfoDrag, 0);
+  const _ssInfoUnstick = () => {
+    try {
+      localStorage.removeItem('lss_ss_info_pos_v1');
+      const el = document.getElementById('ship-preview-info');
+      if (el) ['left', 'top', 'right', 'bottom'].forEach(p => el.style.removeProperty(p));
+    } catch (_) {}
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _ssInfoUnstick);
+  else setTimeout(_ssInfoUnstick, 0);
 } catch (_) {}
 function _lssRoomModeChoose(want) {
   const m = _lssRoomModeOr(want);
