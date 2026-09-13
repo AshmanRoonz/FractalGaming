@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.24';
+const LSS_BUILD = '43.25';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -60277,6 +60277,12 @@ function _lssModeDecide() {
     _lssApplyModeDecree(decree, true);
   } catch (_) {}
 }
+function _lssRefreshModeUI() {
+  try { if (typeof _ssModeLabel === 'function') _ssModeLabel(); } catch (_) {}
+  try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
+  try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
+  try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
+}
 function _lssApplyModeDecree(evt, mine) {
   try {
     if (!evt || !evt.mode || typeof LSS === 'undefined') return;
@@ -60298,7 +60304,7 @@ function _lssApplyModeDecree(evt, mine) {
       if (evt.map) { try { game.selectedMap = evt.map; } catch (_) {} }
       try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
     }
-    try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
+    _lssRefreshModeUI();
     try { _lssSayRoomMode(evt.mode); } catch (_) {}
   } catch (_) {}
 }
@@ -60384,7 +60390,7 @@ function _lssAdoptRoomMode(mode) {
     try { if (typeof _applyModeClientSetup === 'function') _applyModeClientSetup(mode); } catch (_) {}
     LSS.MODE = mode;   // _applyModeClientSetup routes through _lssRoomModeOr; make the result explicit
     try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
-    try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
+    _lssRefreshModeUI();
     _lssSayRoomMode(mode);
   } catch (_) {}
 }
