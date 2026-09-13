@@ -4777,7 +4777,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.05';
+const LSS_BUILD = '43.06';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -36631,7 +36631,15 @@ function _hcNetSync(dt) {
 // Receiver side: remember where the authority says its chasing ships are.
 function _hcApplyNetState(rows) {
   if (!_HC_TRAF.ships || !_HC_TRAF.ships.length) return;
-  for (const sh of _HC_TRAF.ships) if (sh && sh.ent) sh.ent._netPos = null;
+  // (v43.06) NO ROW MEANS "BACK ON SCHEDULE", NOT "HIDDEN". Owner: "the city ships are not in sync now".
+  // This function sets aggro = true for every ship in the feed and never once cleared it, while the
+  // peer-side stand-down (e.aggro = false ...) sits BELOW the `continue` in _hcTrafficUpdate's proxy
+  // branch and therefore never runs on a peer at all. So the moment the authority stood a ship down,
+  // the peer was left holding aggro = true with no _netPos to follow - which is the proxy branch's
+  // hide-it arm, permanently. Ships accumulated in that state and the peer's city quietly emptied.
+  // It was always latent; v43.02 made it the RULE by removing the peer's local aggro, so a row is now
+  // the only thing that can set it - and nothing could ever unset it.
+  for (const sh of _HC_TRAF.ships) if (sh && sh.ent) { sh.ent._netPos = null; sh.ent._netRow = false; }
   if (!Array.isArray(rows)) return;
   for (const r of rows) {
     const sh = _HC_TRAF.ships[r[0] | 0];
@@ -36639,7 +36647,7 @@ function _hcApplyNetState(rows) {
     sh.ent._netPos = sh.ent._netPos || new THREE.Vector3();
     sh.ent._netPos.set(r[1], r[2], r[3]);
     sh.ent.health = r[4];
-    sh.ent.aggro = true;
+    sh.ent.aggro = true; sh.ent._netRow = true;
     // (v43.02) ALIVE -> DEAD is an EVENT on this side, not just a flag. Replay the authority's
     // kill through the real death path ('net' is exempt from the peer claim above) so the peer sees
     // the same three explosions and hears the same bang, instead of a hull that quietly stops being.
@@ -36647,6 +36655,12 @@ function _hcApplyNetState(rows) {
       try { sh.ent.takeDamage((sh.ent.health || 0) + 1, 'net', sh.ent.position); } catch (_) {}
     }
     sh.ent.alive = r[4] > 0;
+  }
+  // Anything the authority stopped sending is no longer chasing: drop the aggro so the scheduled
+  // branch picks it up again off the shared clock, exactly as it does for a ship that never fought.
+  for (const sh of _HC_TRAF.ships) {
+    if (!sh || !sh.ent || sh.ent._netRow) continue;
+    if (sh.ent.aggro) { sh.ent.aggro = false; sh.ent._foe = null; sh.ent._foeT = 0; sh.ent._fireT = 1.5; }
   }
 }
 // (v38.61) The smoothstep lerp pair, hoisted out of _hcPadSched (they were

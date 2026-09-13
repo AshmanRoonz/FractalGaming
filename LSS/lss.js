@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.05';
+const LSS_BUILD = '43.06';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -22508,7 +22508,7 @@ function _hcNetSync(dt) {
 }
 function _hcApplyNetState(rows) {
   if (!_HC_TRAF.ships || !_HC_TRAF.ships.length) return;
-  for (const sh of _HC_TRAF.ships) if (sh && sh.ent) sh.ent._netPos = null;
+  for (const sh of _HC_TRAF.ships) if (sh && sh.ent) { sh.ent._netPos = null; sh.ent._netRow = false; }
   if (!Array.isArray(rows)) return;
   for (const r of rows) {
     const sh = _HC_TRAF.ships[r[0] | 0];
@@ -22516,11 +22516,15 @@ function _hcApplyNetState(rows) {
     sh.ent._netPos = sh.ent._netPos || new THREE.Vector3();
     sh.ent._netPos.set(r[1], r[2], r[3]);
     sh.ent.health = r[4];
-    sh.ent.aggro = true;
+    sh.ent.aggro = true; sh.ent._netRow = true;
     if (r[4] <= 0 && sh.ent.alive) {
       try { sh.ent.takeDamage((sh.ent.health || 0) + 1, 'net', sh.ent.position); } catch (_) {}
     }
     sh.ent.alive = r[4] > 0;
+  }
+  for (const sh of _HC_TRAF.ships) {
+    if (!sh || !sh.ent || sh.ent._netRow) continue;
+    if (sh.ent.aggro) { sh.ent.aggro = false; sh.ent._foe = null; sh.ent._foeT = 0; sh.ent._fireT = 1.5; }
   }
 }
 function _hcSm(a, b, u) { u = u < 0 ? 0 : (u > 1 ? 1 : u); u = u * u * (3 - 2 * u); return a + (b - a) * u; }
