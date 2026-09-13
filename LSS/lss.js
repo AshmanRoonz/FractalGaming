@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.72';
+const LSS_BUILD = '43.73';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -55186,7 +55186,16 @@ function updateRoundSystem(dt) {
         try {
           const _mapWas = game.selectedMap;
           buildMapSelector();
-          if (game.selectedMap !== _mapWas) game.selectedMap = _mapWas;
+          if (game.selectedMap !== _mapWas) {
+            let _stillLegal = true;
+            try {
+              const _legal = (typeof _visibleMapKeys === 'function') ? _visibleMapKeys() : null;
+              if (_legal && _legal.length) _stillLegal = _legal.indexOf(_mapWas) !== -1;
+            } catch (_) {}
+            if (_stillLegal) game.selectedMap = _mapWas;
+            else console.log('[map] mode changed between rounds; "' + _mapWas +
+                             '" is no longer available -> keeping "' + game.selectedMap + '"');
+          }
         } catch (_) {}
         try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
         try { if (typeof _clipHideSaveBtn === 'function') _clipHideSaveBtn(); } catch (_) {}
@@ -69241,7 +69250,18 @@ function getNextMap() {
     if (sel && sel.indexOf('camp_') === 0 && MAP_DATA[sel]) return MAP_DATA[sel];
     return MAP_DATA.camp_approach || CAMPAIGN_LEG_MAP;
   }
-  const selectedMapKey = game.selectedMap || 'hourglass';
+  let selectedMapKey = game.selectedMap || 'hourglass';
+  try {
+    if (typeof _visibleMapKeys === 'function') {
+      const legal = _visibleMapKeys();
+      if (legal && legal.length && legal.indexOf(selectedMapKey) === -1) {
+        console.warn('[map] "' + selectedMapKey + '" is not available in mode "' +
+                     ((typeof LSS !== 'undefined' && LSS.MODE) || '?') + '" -> building "' + legal[0] + '"');
+        selectedMapKey = legal[0];
+        game.selectedMap = legal[0];   // keep the picker and the world telling the same story
+      }
+    }
+  } catch (_) {}
   const mapData = MAP_DATA[selectedMapKey];
   if (!mapData) return MAP_DATA.hourglass;
   return mapData;

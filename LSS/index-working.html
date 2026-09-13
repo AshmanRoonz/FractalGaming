@@ -5881,7 +5881,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.72';
+const LSS_BUILD = '43.73';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -83972,10 +83972,28 @@ function updateRoundSystem(dt) {
         // is pure and never writes the key itself, so this restore is the only writer to undo.
         // The selectMap() at the foot of buildMapSelector early-returns on its echo guard here, so
         // this re-applies no theme and adds no map_change packet in multiplayer.
+        //
+        // (v43.73) ⚠⚠ ...BUT ONLY IF THE OLD KEY IS STILL LEGAL. Owner: "changing the room mode, it
+        // doesn't change the map, it stays on the map it was on". THIS restore is why. The picker
+        // comes back up BETWEEN ROUNDS, so changing ROOM MODE there runs this code: buildMapSelector
+        // correctly re-snapped to a map the new mode offers, and the line below immediately put the
+        // old, now-illegal one back. The map looked stuck because it was being un-stuck and then
+        // re-stuck within the same frame.
+        // Keeping the committed arena across a rebuild is right; resurrecting a map the mode no
+        // longer offers is not. So the restore now asks whether the old key survived the mode change.
         try {
           const _mapWas = game.selectedMap;
           buildMapSelector();
-          if (game.selectedMap !== _mapWas) game.selectedMap = _mapWas;
+          if (game.selectedMap !== _mapWas) {
+            let _stillLegal = true;
+            try {
+              const _legal = (typeof _visibleMapKeys === 'function') ? _visibleMapKeys() : null;
+              if (_legal && _legal.length) _stillLegal = _legal.indexOf(_mapWas) !== -1;
+            } catch (_) {}
+            if (_stillLegal) game.selectedMap = _mapWas;
+            else console.log('[map] mode changed between rounds; "' + _mapWas +
+                             '" is no longer available -> keeping "' + game.selectedMap + '"');
+          }
         } catch (_) {}
         try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
         // (v40.49) the round-end SAVE CLIP prompt is a combat overlay and raising the picker is a
@@ -102677,7 +102695,32 @@ function getNextMap() {
     if (sel && sel.indexOf('camp_') === 0 && MAP_DATA[sel]) return MAP_DATA[sel];
     return MAP_DATA.camp_approach || CAMPAIGN_LEG_MAP;
   }
-  const selectedMapKey = game.selectedMap || 'hourglass';
+  let selectedMapKey = game.selectedMap || 'hourglass';
+  // (v43.73) ⭐ THE LEGALITY GATE LIVES HERE, because this is the ONE place every world build reads
+  // the map key - both `const level = getNextMap()` call sites, for the first launch and for every
+  // round after it. Owner: "i tried to start it on the wrong map, and it diD".
+  // Until now this validated only that the key EXISTS in MAP_DATA, never that the ACTIVE MODE offers
+  // it. Reproduced on 43.72: set game.selectedMap = 'race_pole_position' while the mode is
+  // ELIMINATION, press CONFIRM & LAUNCH, and the match builds the race track's world (16 spheres) and
+  // runs elimination rules inside it - no error, no correction.
+  // Guarding at the picker alone could never be enough: game.selectedMap is written directly in a
+  // dozen places (applyWorldSync from a peer's world sync, the campaign leg advance, the net
+  // map_change handler, the mode entry points), and none of them route through selectMap().
+  // ⚠ MULTIPLAYER-SAFE for the same reason the v43.63 guard was: _visibleMapKeys() is a PURE
+  // FUNCTION OF THE MODE, so every peer resolves the same first key for the same mode. This is not a
+  // second decider - it is a deterministic fallback from an already-agreed mode.
+  // ⚠ Campaign returns above this, so unlocked legs are never touched by it.
+  try {
+    if (typeof _visibleMapKeys === 'function') {
+      const legal = _visibleMapKeys();
+      if (legal && legal.length && legal.indexOf(selectedMapKey) === -1) {
+        console.warn('[map] "' + selectedMapKey + '" is not available in mode "' +
+                     ((typeof LSS !== 'undefined' && LSS.MODE) || '?') + '" -> building "' + legal[0] + '"');
+        selectedMapKey = legal[0];
+        game.selectedMap = legal[0];   // keep the picker and the world telling the same story
+      }
+    }
+  } catch (_) {}
   const mapData = MAP_DATA[selectedMapKey];
   if (!mapData) return MAP_DATA.hourglass;
   return mapData;
