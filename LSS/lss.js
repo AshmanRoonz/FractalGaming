@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.83';
+const LSS_BUILD = '42.90';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10481,6 +10481,9 @@ function updateBCSLighting() {
 }
 
 game.levelWorker = null;
+try {
+  THREE.ShaderChunk.fog_vertex = '#ifdef USE_FOG\n\tvFogDepth = length( mvPosition.xyz );\n#endif';
+} catch (_) {}
 scene.fog = new THREE.FogExp2(0x0a0520, 0.000015); 
 
 const camera = new THREE.PerspectiveCamera((input && input.fovDeg) || 90, window.innerWidth / window.innerHeight, 1, 25000);
@@ -12718,7 +12721,7 @@ const MAP_PRESETS = [
   { name: 'Gold Mine', biome: 'goldmine', cloudTheme: 'golden', cloudBlend: 'additive', cloudBrightness: 1.0 },
   { name: 'Broken Simulation', biome: 'brokensim', cloudTheme: 'midnight', cloudBlend: 'additive', cloudBrightness: 0.7 },
   { name: 'Crystal Cavern', biome: 'crystalcave', cloudTheme: 'frost', cloudBlend: 'additive', cloudBrightness: 1.1 },
-  { name: 'Mossy', biome: 'mossy', cloudTheme: 'frost', cloudBlend: 'additive', cloudBrightness: 1.0 },
+  { name: 'Mossy', biome: 'mossy', cloudTheme: 'frost', cloudBlend: 'normal', cloudBrightness: 1.0 },
 ];
 
 function _updateSkyUI() {
@@ -14315,7 +14318,33 @@ function _lssHubDirectTonemap() {
   }
   _lssHubDirectTonemap._on = want;
 }
+const _LSS_CAM_REACH = 25000;          // design radial view distance
+const _LSS_CAM_DEPTH_RATIO = 25000;    // far/near: the depth precision the game has always had
+function _lssCamReach() {
+  let r = _LSS_CAM_REACH;
+  try { if (typeof LSS !== 'undefined' && LSS && +LSS._camReach > r) r = +LSS._camReach; } catch (_) {}
+  try { if (window.__camReach > 0) r = Math.max(r, +window.__camReach); } catch (_) {}
+  return r;
+}
+function _lssCameraDepthForFov(force) {
+  try {
+    if (!camera || !camera.isPerspectiveCamera) return;
+    if (renderer && renderer.xr && renderer.xr.isPresenting) return;   // the headset owns its own depth range
+    const reach = _lssCamReach();
+    const vHalf = camera.fov * Math.PI / 360;
+    const hHalf = Math.atan(Math.tan(vHalf) * Math.max(0.2, camera.aspect || 1.6));
+    const want = Math.min(400000, reach / Math.max(0.12, Math.cos(hHalf)));
+    if (!force && Math.abs(camera.far - want) <= want * 0.01) return;
+    camera.far = want;
+    camera.near = Math.max(0.5, Math.min(3, want / _LSS_CAM_DEPTH_RATIO));
+    camera.updateProjectionMatrix();
+    try { window.__camDepth = { fov: camera.fov, aspect: camera.aspect, reach: reach, near: camera.near, far: camera.far }; } catch (_) {}
+  } catch (_) {}
+}
+
+
 function renderFrame() {
+  _lssCameraDepthForFov();
   try { if (_XR_COVER.preview && _xrCoverPreviewFrame()) return; } catch (_) {}
   try { _lssHubDirectTonemap(); } catch (_) {}
   try { if (typeof _shipLightsFrame === 'function') _shipLightsFrame(); } catch (_) {}
@@ -37818,7 +37847,8 @@ function spawnDynamicObjects(rooms) {
   
   
   
-  if (false 
+  const _hbOn = (typeof window === 'undefined' || window.__hubClouds == null) ? true : !!+window.__hubClouds;
+  if (_hbOn
       && typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem && typeof GasCloud === 'function'
       && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && (typeof QUALITY === 'undefined' || typeof QUALITY.basinClouds !== 'function' || QUALITY.basinClouds())) {
     try {
@@ -37826,10 +37856,26 @@ function spawnDynamicObjects(rooms) {
       const _hbT = game.sandwichTerrain, _hbCarve = _hbT && typeof _stGroundYCarved === 'function';
       const _hbN = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 60 : 42;
       const _hbSpread = 17000;   
+      const _hbBanks = Math.max(1, (typeof window !== 'undefined' && window.__hubCloudBanks != null)
+        ? +window.__hubCloudBanks : 7);
+      const _hbBankR = (typeof window !== 'undefined' && window.__hubCloudBankR != null)
+        ? +window.__hubCloudBankR : 2100;
+      const _hbBank = [];
+      for (let b = 0; b < _hbBanks; b++) {
+        const _bx = (Math.random() - 0.5) * 2 * _hbSpread, _bz = (Math.random() - 0.5) * 2 * _hbSpread;
+        let _by = 700 + Math.random() * 1700;
+        if (_hbCarve) { try { _by = _stGroundYCarved(_bx, _bz, _hbT) + 420 + Math.random() * 1300; } catch (_) {} }
+        const _bs = 5 + Math.random() * 7, _ba = Math.random() * Math.PI * 2;
+        _hbBank.push({ x: _bx, y: _by, z: _bz,
+                       r: _hbBankR * (0.65 + Math.random() * 0.7),
+                       vel: new THREE.Vector3(Math.cos(_ba) * _bs, (Math.random() - 0.5) * 1.2, Math.sin(_ba) * _bs) });
+      }
       for (let i = 0; i < _hbN; i++) {
-        const _hbx = (Math.random() - 0.5) * 2 * _hbSpread, _hbz = (Math.random() - 0.5) * 2 * _hbSpread;
-        let _hby = 700 + Math.random() * 1700;
-        if (_hbCarve) { try { _hby = _stGroundYCarved(_hbx, _hbz, _hbT) + 280 + Math.random() * 1500; } catch (_) {} }   
+        const _bk = _hbBank[i % _hbBank.length];
+        const _ang = Math.random() * Math.PI * 2, _rr = Math.sqrt(Math.random()) * _bk.r;
+        const _hbx = _bk.x + Math.cos(_ang) * _rr, _hbz = _bk.z + Math.sin(_ang) * _rr;
+        let _hby = _bk.y + (Math.random() - 0.5) * 420;
+        if (_hbCarve) { try { _hby = Math.max(_hby, _stGroundYCarved(_hbx, _hbz, _hbT) + 260); } catch (_) {} }
         const _hbSize = 190 + Math.random() * 230, _hbV = 0.62 + Math.random() * 0.22;
         const _hbSeed = new THREE.Color(_hbV, _hbV * 0.98, _hbV * 0.95);
         const _hbCloud = new GasCloud(billboardCloudSystem, new THREE.Vector3(_hbx, _hby, _hbz), {
@@ -37837,7 +37883,8 @@ function spawnDynamicObjects(rooms) {
           alpha: 0.5, color: _getEffectiveCloudColor(_hbSeed), baseColor: _hbSeed, colorJitter: 0.18,
           segments: (typeof getVRGasSegments === 'function') ? getVRGasSegments(9, 'basinSegments') : 9,
         });
-        const _hbVel = new THREE.Vector3((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 8);
+        const _hbVel = _bk.vel.clone().add(new THREE.Vector3(
+          (Math.random() - 0.5) * 1.6, (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 1.6));
         _pushDetachedGasPocket({ gasCloud: _hbCloud, velocity: _hbVel });
       }
     } catch (e) { console.warn('[hub-clouds] spawn failed', e); }
@@ -80496,6 +80543,18 @@ window.camera   = camera;
 window.renderer = renderer;
 window.input    = input;
 window.audio    = audio;
+try {
+  window.__cineAPI = {
+    GasCloud: (typeof GasCloud !== 'undefined') ? GasCloud : null,
+    bcs: (typeof billboardCloudSystem !== 'undefined') ? billboardCloudSystem : null,
+    lightning: (typeof spawnLightningBolt === 'function') ? spawnLightningBolt : null,
+    explosion: (typeof spawnExplosion === 'function') ? spawnExplosion : null,
+    fxBurst: (typeof spawnFXBurst === 'function') ? spawnFXBurst : null,
+    light: (typeof spawnDynamicLight === 'function') ? spawnDynamicLight : null,
+    groundY: (typeof _stGroundYCarved === 'function')
+      ? function (x, z) { try { return _stGroundYCarved(x, z, game.sandwichTerrain); } catch (_) { return NaN; } } : null,
+  };
+} catch (_) {}
 window.lssPerfSnapshot = function lssPerfSnapshot() {
   const bcs = (typeof billboardCloudSystem !== 'undefined') ? billboardCloudSystem : null;
   let bcsActive = 0;
@@ -80752,12 +80811,13 @@ async function _lssGmapsBuildLevel(level) {
       console.log('[lss-gmaps] race ARENA_SIZE expanded to', _raceArena.toFixed(0),
         '(orig', LSS._origArenaSize, ', race dist', dist.toFixed(0) + ')');
     }
-    if (typeof LSS._origCameraFar !== 'number') LSS._origCameraFar = camera.far;
-    const _raceFar = Math.max(LSS._origCameraFar, dist * 1.6);
-    if (_raceFar > camera.far) {
-      camera.far = _raceFar;
-      camera.updateProjectionMatrix();
-      console.log('[lss-gmaps] race camera.far expanded to', _raceFar.toFixed(0));
+    if (typeof LSS._origCamReach !== 'number') LSS._origCamReach = _lssCamReach();
+    const _raceReach = Math.max(LSS._origCamReach, dist * 1.6);
+    if (_raceReach > _lssCamReach()) {
+      LSS._camReach = _raceReach;
+      _lssCameraDepthForFov(true);
+      console.log('[lss-gmaps] race view reach expanded to', _raceReach.toFixed(0),
+        '-> camera.far', camera.far.toFixed(0));
     }
     if (scene.fog && typeof LSS._origFogDensity !== 'number' && typeof scene.fog.density === 'number') {
       LSS._origFogDensity = scene.fog.density;
@@ -81448,9 +81508,9 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     game.raceNoTimer = false;
     if (MAP_DATA && MAP_DATA.race_custom) delete MAP_DATA.race_custom;
     if (typeof LSS._origArenaSize === 'number') LSS.ARENA_SIZE = LSS._origArenaSize;
-    if (typeof LSS._origCameraFar === 'number') {
-      camera.far = LSS._origCameraFar;
-      camera.updateProjectionMatrix();
+    if (typeof LSS._origCamReach === 'number') {
+      LSS._camReach = LSS._origCamReach;      // (v42.90) hand the far plane back to the FOV
+      _lssCameraDepthForFov(true);
     }
     if (scene.fog && typeof LSS._origFogDensity === 'number') {
       scene.fog.density = LSS._origFogDensity;

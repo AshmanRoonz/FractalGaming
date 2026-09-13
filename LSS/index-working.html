@@ -4735,7 +4735,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.83';
+const LSS_BUILD = '42.90';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -19067,6 +19067,29 @@ function updateBCSLighting() {
 // recomputed a discarded mesh every round. Worker disabled to stop wasted
 // background compute. (Dispatch + terminate guards already handle null.)
 game.levelWorker = null;
+// ⭐⭐ (v42.89) RADIAL FOG. Owner: "as you spin around, you can see the peripheral coming into the
+// center... when it looked closer it was rendered in the peripheral, but then when you spin so it
+// moves into the center, it disappears because it is actually further".
+// It was not a culling bug and not an LOD bug - the periphery genuinely WAS being rendered closer.
+// three.js ships fog keyed on `- mvPosition.z`, the PLANAR depth (distance to the camera PLANE),
+// not the radial distance to the camera. That approximation is invisible at a normal field of view
+// and falls apart at a wide one: an object at angle theta off-axis is fogged as if it were at
+// distance * cos(theta). At the edge of a 140-degree frame that is cos(70) = 34% of its real
+// distance.
+// MEASURED at the live fog density, one object at 10,000 units:
+//     screen centre : 86.1% fogged  (effectively gone)
+//     screen edge    : 20.6% fogged  (plainly visible)
+//   - fogged as though it stood at 3,420 units instead of 10,000.
+// Spin, and the same object crosses that whole gradient and fades out as it reaches the middle.
+// Fog is a property of how far light travelled, which is the RADIAL distance; the planar form is a
+// performance-era shortcut. One `length()` in the vertex shader buys the correct answer everywhere.
+// ⚠ MUST be patched before any material compiles - a ShaderChunk edit only reaches programs linked
+// afterwards. Here, before the scene's first material exists, is early enough.
+// ⚠ Expect the far periphery to sit slightly FOGGIER now. That is the correction, not a regression:
+// it was previously under-fogged by up to 3x out there.
+try {
+  THREE.ShaderChunk.fog_vertex = '#ifdef USE_FOG\n\tvFogDepth = length( mvPosition.xyz );\n#endif';
+} catch (_) {}
 scene.fog = new THREE.FogExp2(0x0a0520, 0.000015); 
 
 const camera = new THREE.PerspectiveCamera((input && input.fovDeg) || 90, window.innerWidth / window.innerHeight, 1, 25000);
@@ -21936,7 +21959,10 @@ const MAP_PRESETS = [
   { name: 'Broken Simulation', biome: 'brokensim', cloudTheme: 'midnight', cloudBlend: 'additive', cloudBrightness: 0.7 },
   { name: 'Crystal Cavern', biome: 'crystalcave', cloudTheme: 'frost', cloudBlend: 'additive', cloudBrightness: 1.1 },
   // (v33.00) The open-world HUB theme (its own biome ; open blue sky + lush moss).
-  { name: 'Mossy', biome: 'mossy', cloudTheme: 'frost', cloudBlend: 'additive', cloudBrightness: 1.0 },
+  // (v42.86) 'additive' -> 'normal'. This is the only biome with an open BLUE-SKY daylight world;
+  // every other preset is a dark arena or cave where additive reads. Additive clouds against a
+  // bright sky are invisible - see the note at the hub cloud band.
+  { name: 'Mossy', biome: 'mossy', cloudTheme: 'frost', cloudBlend: 'normal', cloudBrightness: 1.0 },
 ];
 
 function _updateSkyUI() {
@@ -24135,7 +24161,76 @@ function _lssHubDirectTonemap() {
   }
   _lssHubDirectTonemap._on = want;
 }
+// ============================================================================
+// (v42.90) THE FAR PLANE HAS TO FOLLOW THE FIELD OF VIEW.
+//
+// Owner: "it's something to do with 120 fov... there's no compensation for it" - which is precisely
+// what the code said. camera.fov is written in twelve places; camera.far was fixed at 25000 from
+// construction and nothing ever reconsidered it.
+//
+// That matters because THE FAR PLANE IS A PLANE, NOT A SPHERE. Clipping tests planar depth (the z
+// component in view space), so the distance you can actually see depends on the angle off-axis, and
+// therefore on the FOV. With far = 25000:
+//        75 deg vertical  ->  centre reaches 25,000, screen edge ~37,000
+//       120 deg vertical  ->  centre reaches 25,000, screen edge  73,551
+// At 120 that is a 48,000-unit band in which an object is DRAWN at the edge of frame and HARD-CLIPPED
+// the moment it rotates to the middle. Measured live on the hub: 33 objects sat inside that band.
+// Spin, and they wink out as they reach the centre - the owner's "it disappears because it is
+// actually further and too far to be rendered". Exactly right, and it is why every wide-FOV change
+// made it worse rather than better: widening the FOV widens the band.
+//
+// So `far` is derived from the FOV: the CENTRE is given the reach the EDGE already had. What is held
+// constant is REACH, the intended radial view distance - that number never changed and was never the
+// problem.
+//
+// (!) NEAR MOVES WITH IT, AND THAT HALF IS NOT OPTIONAL. Depth-buffer precision is governed by the
+// RATIO far/near, which has always been 25000:1 here. Raising far alone would trade this pop for
+// z-fighting on distant coplanar terrain; scaling near by the same factor keeps the z-buffer exactly
+// as good as it has always shipped. Owner-confirmed values: near 3 / far 75000, which is this
+// formula evaluated at their 120 deg.
+//
+// (!) near is capped at 3 so the first-person seat and the ghost shell cannot clip into it, and XR is
+// left entirely alone - WebXRManager owns the headset's projection and its own comfortable near.
+//
+// (!) It uses the HORIZONTAL half-angle, not the corner. The corner reaches ~25% further still, but
+// hub fog is 90% saturated by 10,800 units (_hubEdge = view radius x chunk) so the residual corner
+// band holds nothing that can be seen. What DOES show out there are the fog-exempt things - sky,
+// billboard cloud banks - and the horizontal form already covers those to past 73k.
+//
+// Systems that need to see further than REACH raise LSS._camReach (see the gmaps race route, which
+// used to poke camera.far directly - a per-frame derivation would have stomped it every frame).
+// Live knob: window.__camReach. Readback: window.__camDepth.
+const _LSS_CAM_REACH = 25000;          // design radial view distance
+const _LSS_CAM_DEPTH_RATIO = 25000;    // far/near: the depth precision the game has always had
+function _lssCamReach() {
+  let r = _LSS_CAM_REACH;
+  try { if (typeof LSS !== 'undefined' && LSS && +LSS._camReach > r) r = +LSS._camReach; } catch (_) {}
+  try { if (window.__camReach > 0) r = Math.max(r, +window.__camReach); } catch (_) {}
+  return r;
+}
+function _lssCameraDepthForFov(force) {
+  try {
+    if (!camera || !camera.isPerspectiveCamera) return;
+    if (renderer && renderer.xr && renderer.xr.isPresenting) return;   // the headset owns its own depth range
+    const reach = _lssCamReach();
+    const vHalf = camera.fov * Math.PI / 360;
+    const hHalf = Math.atan(Math.tan(vHalf) * Math.max(0.2, camera.aspect || 1.6));
+    const want = Math.min(400000, reach / Math.max(0.12, Math.cos(hHalf)));
+    // 1% hysteresis: ADS ramps the FOV every frame and there is no point rebuilding the
+    // projection matrix for a far-plane move nothing can see.
+    if (!force && Math.abs(camera.far - want) <= want * 0.01) return;
+    camera.far = want;
+    camera.near = Math.max(0.5, Math.min(3, want / _LSS_CAM_DEPTH_RATIO));
+    camera.updateProjectionMatrix();
+    try { window.__camDepth = { fov: camera.fov, aspect: camera.aspect, reach: reach, near: camera.near, far: camera.far }; } catch (_) {}
+  } catch (_) {}
+}
+
+
 function renderFrame() {
+  // (v42.90) far/near tracked to the live FOV, before anything draws. renderFrame is the one
+  // choke point every render path goes through, and every camera.fov write is final by here.
+  _lssCameraDepthForFov();
   // (v42.36) dev-only VR-loading-screen preview; see __xrCoverTest. One boolean read when off.
   // try/catch because _XR_COVER is a const declared far below this function: a renderFrame call
   // during module evaluation would hit its temporal dead zone, and typeof cannot guard a TDZ.
@@ -57267,7 +57362,22 @@ function spawnDynamicObjects(rooms) {
   
   
   
-  if (false 
+  // (v42.86) THE HUB CLOUD BAND, BACK ON. Owner: "those clouds you just put in, we should add more
+  // of those throughout all the modes... in the theme they need to be in."
+  // The band below was already written, already themed through _getEffectiveCloudColor, and already
+  // registered with _pushDetachedGasPocket (which gives it drift, the FIFO budget and a teardown) -
+  // and then killed with a bare `if (false` and no note. The overworld was the ONE bare mode: basin
+  // clouds are explicitly skipped in freeflight (the line just above), so with this off the biggest
+  // and most-filmed world had no ambient clouds at all.
+  // ⚠⚠ WHY IT PROBABLY LOOKED BROKEN AND GOT SWITCHED OFF: the Mossy preset set cloudBlend
+  // 'additive', and the pool's blend is GLOBAL per map. Additive is right where clouds are normally
+  // used - dark arena shafts, caves - but against the hub's bright blue sky, adding light to an
+  // already-bright background does almost nothing. The clouds were there, slots claimed and drawing,
+  // and invisible. (Measured independently while building the cine fork: identical symptom, and
+  // setBlendMode('normal') was the whole fix.) The Mossy preset is now 'normal' to match.
+  // window.__hubClouds = 0 turns the band back off.
+  const _hbOn = (typeof window === 'undefined' || window.__hubClouds == null) ? true : !!+window.__hubClouds;
+  if (_hbOn
       && typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem && typeof GasCloud === 'function'
       && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && (typeof QUALITY === 'undefined' || typeof QUALITY.basinClouds !== 'function' || QUALITY.basinClouds())) {
     try {
@@ -57275,10 +57385,42 @@ function spawnDynamicObjects(rooms) {
       const _hbT = game.sandwichTerrain, _hbCarve = _hbT && typeof _stGroundYCarved === 'function';
       const _hbN = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 60 : 42;
       const _hbSpread = 17000;   
+      // (v42.87) CLOUDS GATHER, AND A BANK MOVES AS ONE. Owner: "they are too randomly spread out
+      // in the overworld... clouds fly together."
+      // Every cloud used to draw its own uniform-random x/z across the whole 34,000-unit spread AND
+      // its own random drift velocity. Two separate reasons that reads wrong: uniform random is the
+      // one distribution the sky never produces - real cloud is clumpy, with clear air between
+      // bodies - and independent drift means even a clump that did form would pull itself apart
+      // within a minute.
+      // So: pick a handful of BANK centres, give each a shared altitude and a shared drift, and
+      // scatter that bank's clouds tightly around its centre. The sky then has weather in it -
+      // bodies of cloud with gaps to fly between - and each body holds together as it moves.
+      // The shared ALTITUDE matters as much as the shared centre: cloud of a given type forms at a
+      // level, and a vertically-smeared clump reads as fog rather than as a cloud.
+      // Knobs: window.__hubCloudBanks (how many bodies), .__hubCloudBankR (how tight each is).
+      const _hbBanks = Math.max(1, (typeof window !== 'undefined' && window.__hubCloudBanks != null)
+        ? +window.__hubCloudBanks : 7);
+      const _hbBankR = (typeof window !== 'undefined' && window.__hubCloudBankR != null)
+        ? +window.__hubCloudBankR : 2100;
+      const _hbBank = [];
+      for (let b = 0; b < _hbBanks; b++) {
+        const _bx = (Math.random() - 0.5) * 2 * _hbSpread, _bz = (Math.random() - 0.5) * 2 * _hbSpread;
+        let _by = 700 + Math.random() * 1700;
+        if (_hbCarve) { try { _by = _stGroundYCarved(_bx, _bz, _hbT) + 420 + Math.random() * 1300; } catch (_) {} }
+        // ONE drift for the whole body - this is the "fly together" half
+        const _bs = 5 + Math.random() * 7, _ba = Math.random() * Math.PI * 2;
+        _hbBank.push({ x: _bx, y: _by, z: _bz,
+                       r: _hbBankR * (0.65 + Math.random() * 0.7),
+                       vel: new THREE.Vector3(Math.cos(_ba) * _bs, (Math.random() - 0.5) * 1.2, Math.sin(_ba) * _bs) });
+      }
       for (let i = 0; i < _hbN; i++) {
-        const _hbx = (Math.random() - 0.5) * 2 * _hbSpread, _hbz = (Math.random() - 0.5) * 2 * _hbSpread;
-        let _hby = 700 + Math.random() * 1700;
-        if (_hbCarve) { try { _hby = _stGroundYCarved(_hbx, _hbz, _hbT) + 280 + Math.random() * 1500; } catch (_) {} }   
+        const _bk = _hbBank[i % _hbBank.length];
+        // inside the bank, biased toward its middle (sqrt stops it forming a ring)
+        const _ang = Math.random() * Math.PI * 2, _rr = Math.sqrt(Math.random()) * _bk.r;
+        const _hbx = _bk.x + Math.cos(_ang) * _rr, _hbz = _bk.z + Math.sin(_ang) * _rr;
+        // shared level, with only a little vertical play so the bank stays a LAYER
+        let _hby = _bk.y + (Math.random() - 0.5) * 420;
+        if (_hbCarve) { try { _hby = Math.max(_hby, _stGroundYCarved(_hbx, _hbz, _hbT) + 260); } catch (_) {} }
         const _hbSize = 190 + Math.random() * 230, _hbV = 0.62 + Math.random() * 0.22;
         const _hbSeed = new THREE.Color(_hbV, _hbV * 0.98, _hbV * 0.95);
         const _hbCloud = new GasCloud(billboardCloudSystem, new THREE.Vector3(_hbx, _hby, _hbz), {
@@ -57286,7 +57428,9 @@ function spawnDynamicObjects(rooms) {
           alpha: 0.5, color: _getEffectiveCloudColor(_hbSeed), baseColor: _hbSeed, colorJitter: 0.18,
           segments: (typeof getVRGasSegments === 'function') ? getVRGasSegments(9, 'basinSegments') : 9,
         });
-        const _hbVel = new THREE.Vector3((Math.random() - 0.5) * 8, (Math.random() - 0.5) * 2, (Math.random() - 0.5) * 8);
+        // the bank's own drift, plus a whisper of individual variation so it is not a rigid sheet
+        const _hbVel = _bk.vel.clone().add(new THREE.Vector3(
+          (Math.random() - 0.5) * 1.6, (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 1.6));
         _pushDetachedGasPocket({ gasCloud: _hbCloud, velocity: _hbVel });
       }
     } catch (e) { console.warn('[hub-clouds] spawn failed', e); }
@@ -114433,6 +114577,37 @@ window.camera   = camera;
 window.renderer = renderer;
 window.input    = input;
 window.audio    = audio;
+// (v42.85) THE CINE FORK'S DOOR.
+// cine.html loads the whole engine and then cine.js on top, so the trailer rig
+// can already reach anything published on window - game, player, scene, camera,
+// renderer above. But the cloud machinery the owner wants to film with ("the
+// clouds we funnily named dots", the basin clouds, the rock-and-lightning
+// clouds) is declared INSIDE this script's scope and is therefore invisible to
+// any file loaded after it: measured from cine.js, GasCloud /
+// billboardCloudSystem / spawnLightningBolt all read as UNREACHABLE.
+// So the fork gets a door rather than a copy of the engine. This publishes
+// REFERENCES only - no cinematic logic lives in the game, and nothing here
+// changes behaviour for a normal index.html session; it is a handful of
+// pointers that cost one object literal at boot.
+try {
+  window.__cineAPI = {
+    // clouds: the shared GPU-instanced billboard pool + the cloud that claims
+    // slots in it. new GasCloud(bcs, pos, { boundsRadius, spriteScale,
+    // spriteScaleVar, alpha, color, colorJitter, segments }) - and it already
+    // ships applyWake/tickWake, which is the "pushed out of the way by the
+    // ships" behaviour, so a cinematic needs to invent none of it.
+    GasCloud: (typeof GasCloud !== 'undefined') ? GasCloud : null,
+    bcs: (typeof billboardCloudSystem !== 'undefined') ? billboardCloudSystem : null,
+    // FX a trailer shot wants to trigger on cue
+    lightning: (typeof spawnLightningBolt === 'function') ? spawnLightningBolt : null,
+    explosion: (typeof spawnExplosion === 'function') ? spawnExplosion : null,
+    fxBurst: (typeof spawnFXBurst === 'function') ? spawnFXBurst : null,
+    light: (typeof spawnDynamicLight === 'function') ? spawnDynamicLight : null,
+    // the ground, for placing things on terrain
+    groundY: (typeof _stGroundYCarved === 'function')
+      ? function (x, z) { try { return _stGroundYCarved(x, z, game.sandwichTerrain); } catch (_) { return NaN; } } : null,
+  };
+} catch (_) {}
 window.lssPerfSnapshot = function lssPerfSnapshot() {
   const bcs = (typeof billboardCloudSystem !== 'undefined') ? billboardCloudSystem : null;
   let bcsActive = 0;
@@ -114739,12 +114914,16 @@ async function _lssGmapsBuildLevel(level) {
       console.log('[lss-gmaps] race ARENA_SIZE expanded to', _raceArena.toFixed(0),
         '(orig', LSS._origArenaSize, ', race dist', dist.toFixed(0) + ')');
     }
-    if (typeof LSS._origCameraFar !== 'number') LSS._origCameraFar = camera.far;
-    const _raceFar = Math.max(LSS._origCameraFar, dist * 1.6);
-    if (_raceFar > camera.far) {
-      camera.far = _raceFar;
-      camera.updateProjectionMatrix();
-      console.log('[lss-gmaps] race camera.far expanded to', _raceFar.toFixed(0));
+    // (v42.90) A long race route needs to see further than the design REACH. It used to write
+    // camera.far here; that value is now derived from the FOV every frame (_lssCameraDepthForFov),
+    // so it has to raise the REACH instead or the next frame would stomp it straight back.
+    if (typeof LSS._origCamReach !== 'number') LSS._origCamReach = _lssCamReach();
+    const _raceReach = Math.max(LSS._origCamReach, dist * 1.6);
+    if (_raceReach > _lssCamReach()) {
+      LSS._camReach = _raceReach;
+      _lssCameraDepthForFov(true);
+      console.log('[lss-gmaps] race view reach expanded to', _raceReach.toFixed(0),
+        '-> camera.far', camera.far.toFixed(0));
     }
     if (scene.fog && typeof LSS._origFogDensity !== 'number' && typeof scene.fog.density === 'number') {
       LSS._origFogDensity = scene.fog.density;
@@ -115584,9 +115763,9 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
     if (MAP_DATA && MAP_DATA.race_custom) delete MAP_DATA.race_custom;
     // Restore the default arena clamp.
     if (typeof LSS._origArenaSize === 'number') LSS.ARENA_SIZE = LSS._origArenaSize;
-    if (typeof LSS._origCameraFar === 'number') {
-      camera.far = LSS._origCameraFar;
-      camera.updateProjectionMatrix();
+    if (typeof LSS._origCamReach === 'number') {
+      LSS._camReach = LSS._origCamReach;      // (v42.90) hand the far plane back to the FOV
+      _lssCameraDepthForFov(true);
     }
     if (scene.fog && typeof LSS._origFogDensity === 'number') {
       scene.fog.density = LSS._origFogDensity;
