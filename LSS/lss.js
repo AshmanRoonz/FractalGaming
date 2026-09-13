@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.26';
+const LSS_BUILD = '43.27';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -4900,6 +4900,30 @@ function _ssModeLabel() {
     try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
   } catch (_) {}
 }
+function _lssWillWaitForPeers() {
+  try {
+    return !!(net && net.active && typeof nonJudgePeerCount === 'function' && nonJudgePeerCount() > 0);
+  } catch (_) { return false; }
+}
+function _lssSetConfirmWaiting(on, rdy, tot) {
+  try {
+    if (net) net._waitingForPeers = !!on;
+    const b = document.getElementById('ship-preview-confirm');
+    if (!b) return;
+    if (on) {
+      b.disabled = true;
+      b.classList.add('ss-waiting');
+      b.textContent = (tot ? ('WAITING  ' + rdy + '/' + tot) : 'WAITING');
+      b.title = 'Everyone launches together - waiting for the rest of the room';
+    } else {
+      b.disabled = false;
+      b.classList.remove('ss-waiting');
+      b.textContent = 'CONFIRM & LAUNCH';
+      b.title = '';
+    }
+  } catch (_) {}
+}
+
 function _shipSelectSetLaunching(on) {
   try {
     const sel = document.getElementById('ship-select');
@@ -4942,6 +4966,7 @@ function enterShipSelect() {
   try { if (window._lssLockLandscape) window._lssLockLandscape(true); } catch (_) {}
   document.getElementById('lobby').style.display = 'none';
   _shipSelectSetLaunching(false);
+  try { _lssSetConfirmWaiting(false); } catch (_) {}   // (v43.27) a raised picker is never mid-wait
   const sel = document.getElementById('ship-select');
   sel.style.display = 'flex';
   sel.classList.add('active');
@@ -5588,7 +5613,8 @@ function checkAllLoadoutsReady() {
         for (const [, peer] of nonJudgePeerEntries()) { _tot++; if (peer && peer.warmupReady) _rdy++; }
       } catch (_) {}
       const _sub = _tot ? ((_rdy + 1) + '/' + (_tot + 1) + ' ready') : 'syncing match start';
-      try { showLoadingOverlay('WAITING FOR PEERS', _sub); } catch (_) {}
+      try { hideLoadingOverlay(); } catch (_) {}
+      try { _lssSetConfirmWaiting(true, _rdy + 1, _tot + 1); } catch (_) {}
     }
     return;
   }
@@ -5633,6 +5659,8 @@ function scheduleLaunch(launchAt) {
   }
 
   net.launchTimer = setTimeout(() => {
+    try { _lssSetConfirmWaiting(false); } catch (_) {}
+    try { if (typeof _shipSelectSetLaunching === 'function') _shipSelectSetLaunching(true); } catch (_) {}
     net.launchTimer = null;
     net.launchScheduledAt = null;
     if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
@@ -16723,6 +16751,12 @@ if (typeof window !== 'undefined') window.__dbg = {
           ? Math.round(performance.now() - net.roomJoinedAt) : 0,
         seed: (typeof net !== 'undefined' && net) ? net.worldSeed : null,
         myPeerId: (typeof net !== 'undefined' && net) ? net.myPeerId : null,
+        netActive: (typeof net !== 'undefined' && net) ? !!net.active : null,
+        openSolo: (typeof net !== 'undefined' && net) ? !!net.openSolo : null,
+        waitingForPeers: (typeof net !== 'undefined' && net) ? !!net._waitingForPeers : null,
+        localWarmupReady: (typeof _localWarmupReady !== 'undefined') ? !!_localWarmupReady : null,
+        nonJudgePeers: (typeof nonJudgePeerCount === 'function') ? nonJudgePeerCount() : null,
+        peerCommitted: (function(){ try { const o=[]; net.peers.forEach((p,id)=>o.push(String(id).slice(0,6)+':'+(p.loadoutKey||'-')+'/'+(p.warmupReady?'wr':'--'))); return o; } catch(e){ return null; } })(),
         log: (typeof net !== 'undefined' && net && net._modeLog) ? net._modeLog.slice() : [],
       };
     } catch (e) { return { error: String(e) }; }
@@ -47346,7 +47380,7 @@ function commitLoadout(key) {
     return;
   }
 
-  if (!midMatch) _shipSelectSetLaunching(true);
+  if (!midMatch && !_lssWillWaitForPeers()) _shipSelectSetLaunching(true);
 
   const _finishCommit = () => {
   if (!midMatch) {
@@ -59142,6 +59176,7 @@ function buildShipSelect() {
 }
 
 function previewLoadout(key) {
+  try { if (net && net._waitingForPeers) return; } catch (_) {}
   const loadout = LOADOUTS[key];
   if (!loadout) return;
   const ch = CHASSIS[loadout.chassis];

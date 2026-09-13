@@ -752,6 +752,8 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
 }
 #insane-speed-toggle:hover:not(:disabled) { border-color: #7fd4ff; background: rgba(30,35,60,0.8); }
 #insane-speed-toggle:disabled { opacity: 0.35; cursor: not-allowed; }
+/* (v43.27) the CONFIRM button while the room finishes committing */
+#ship-preview-confirm.ss-waiting { opacity: 0.75; cursor: default; color: #ffd27a; border-color: #ffd27a; }
 #insane-speed-toggle.active { color: #ffd166; border-color: #ffd166; background: rgba(60,45,10,0.85); }
 #insane-speed-toggle.active:hover:not(:disabled) { border-color: #ffe6a8; background: rgba(80,60,18,0.95); }
 /* (v43.26) ROOM MODE picker - same box language as MATCH SPEED beside it. */
@@ -4849,7 +4851,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.26';
+const LSS_BUILD = '43.27';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -11735,6 +11737,39 @@ function _ssModeLabel() {
     try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
   } catch (_) {}
 }
+// (v43.27) WAITING ON THE ROOM, WITHOUT LEAVING IT. The launch gate already required every
+// non-judge peer to commit before the proposer broadcasts launch_at - what it did NOT do was look
+// like a gate. It built the world, stripped the picker and dropped an opaque loading overlay, so a
+// player who hit CONFIRM appeared to launch by themselves. Owner: "how about it just says 'wait' on
+// the button, until everyone has hit that button?"
+// (!) The world still builds on commit, exactly as before. The only change is that the SCREEN stays
+//     put, so the wait reads as a lobby state instead of a loading screen.
+function _lssWillWaitForPeers() {
+  try {
+    return !!(net && net.active && typeof nonJudgePeerCount === 'function' && nonJudgePeerCount() > 0);
+  } catch (_) { return false; }
+}
+function _lssSetConfirmWaiting(on, rdy, tot) {
+  try {
+    if (net) net._waitingForPeers = !!on;
+    // Looked up fresh every time: previewLoadout re-clones this button, so a cached reference is a
+    // reference to a node that is no longer in the document.
+    const b = document.getElementById('ship-preview-confirm');
+    if (!b) return;
+    if (on) {
+      b.disabled = true;
+      b.classList.add('ss-waiting');
+      b.textContent = (tot ? ('WAITING  ' + rdy + '/' + tot) : 'WAITING');
+      b.title = 'Everyone launches together - waiting for the rest of the room';
+    } else {
+      b.disabled = false;
+      b.classList.remove('ss-waiting');
+      b.textContent = 'CONFIRM & LAUNCH';
+      b.title = '';
+    }
+  } catch (_) {}
+}
+
 function _shipSelectSetLaunching(on) {
   try {
     const sel = document.getElementById('ship-select');
@@ -11832,6 +11867,7 @@ function enterShipSelect() {
   // return trip (round end, campaign death re-entry, a failed build) would paint
   // an empty, click-through panel.
   _shipSelectSetLaunching(false);
+  try { _lssSetConfirmWaiting(false); } catch (_) {}   // (v43.27) a raised picker is never mid-wait
   const sel = document.getElementById('ship-select');
   // (v35.58) Clear the inline display as well as adding .active. The stylesheet
   // is `#ship-select{display:none}` + `#ship-select.active{display:flex}`, but
@@ -12733,7 +12769,13 @@ function checkAllLoadoutsReady() {
         for (const [, peer] of nonJudgePeerEntries()) { _tot++; if (peer && peer.warmupReady) _rdy++; }
       } catch (_) {}
       const _sub = _tot ? ((_rdy + 1) + '/' + (_tot + 1) + ' ready') : 'syncing match start';
-      try { showLoadingOverlay('WAITING FOR PEERS', _sub); } catch (_) {}
+      // (v43.27) ⚠ NO CURTAIN. This used to drop an OPAQUE full-screen overlay reading
+      // "WAITING FOR PEERS", which is what the owner saw as "i hit confirm and launch, and it went
+      // to the loading screen". The readiness pips it was covering live in #teammates-strip, INSIDE
+      // #ship-select - i.e. underneath it. Keeping the picker up shows those pips again for free and
+      // makes the wait look like what it is: still in the lobby, with everyone's ships on screen.
+      try { hideLoadingOverlay(); } catch (_) {}
+      try { _lssSetConfirmWaiting(true, _rdy + 1, _tot + 1); } catch (_) {}
     }
     return;
   }
@@ -12813,6 +12855,10 @@ function scheduleLaunch(launchAt) {
   }
 
   net.launchTimer = setTimeout(() => {
+    // (v43.27) the room is going. Release the waiting label and gut the picker now - this is the
+    // moment the old code reached straight after commit.
+    try { _lssSetConfirmWaiting(false); } catch (_) {}
+    try { if (typeof _shipSelectSetLaunching === 'function') _shipSelectSetLaunching(true); } catch (_) {}
     net.launchTimer = null;
     net.launchScheduledAt = null;
     if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
@@ -27846,6 +27892,13 @@ if (typeof window !== 'undefined') window.__dbg = {
           ? Math.round(performance.now() - net.roomJoinedAt) : 0,
         seed: (typeof net !== 'undefined' && net) ? net.worldSeed : null,
         myPeerId: (typeof net !== 'undefined' && net) ? net.myPeerId : null,
+        // (v43.27) the launch-gate state, so a failed wait says WHY
+        netActive: (typeof net !== 'undefined' && net) ? !!net.active : null,
+        openSolo: (typeof net !== 'undefined' && net) ? !!net.openSolo : null,
+        waitingForPeers: (typeof net !== 'undefined' && net) ? !!net._waitingForPeers : null,
+        localWarmupReady: (typeof _localWarmupReady !== 'undefined') ? !!_localWarmupReady : null,
+        nonJudgePeers: (typeof nonJudgePeerCount === 'function') ? nonJudgePeerCount() : null,
+        peerCommitted: (function(){ try { const o=[]; net.peers.forEach((p,id)=>o.push(String(id).slice(0,6)+':'+(p.loadoutKey||'-')+'/'+(p.warmupReady?'wr':'--'))); return o; } catch(e){ return null; } })(),
         // (v43.23) the handshake itself - every mode-bearing packet in/out with its verdict
         log: (typeof net !== 'undefined' && net && net._modeLog) ? net._modeLog.slice() : [],
       };
@@ -71220,7 +71273,14 @@ function commitLoadout(key) {
   // 252404 ms) leaving the countdown digits floating over the live arena for the
   // remaining 6 s. That is exactly "it automatically closes the ship selection
   // screen and goes to the in-game arena and continues the countdown there".
-  if (!midMatch) _shipSelectSetLaunching(true);
+  // (v43.27) ...UNLESS WE ARE ABOUT TO WAIT FOR THE ROOM. Owner: "i hit confirm and launch, and it
+  // went to the loading screen... how about it just says wait on the button, until everyone has hit
+  // that button?" - exactly right, and much smaller than the restructure I was proposing.
+  // `.lss-launching` hides #ship-select-header and #ship-select-body, which is where the CONFIRM
+  // button lives. Stripping the chrome here is what made a networked commit LOOK like a solo launch:
+  // the picker gutted itself and an opaque overlay dropped, so you appeared to launch alone while
+  // actually sitting in a peer handshake. Hold the chrome while we wait; the launch itself strips it.
+  if (!midMatch && !_lssWillWaitForPeers()) _shipSelectSetLaunching(true);
 
   const _finishCommit = () => {
   if (!midMatch) {
@@ -88585,6 +88645,11 @@ function buildShipSelect() {
 // Render the stats/weapon/abilities/core of a loadout into the center preview panel.
 // Pure UI; does NOT mutate game state. The player only commits by clicking CONFIRM.
 function previewLoadout(key) {
+  // (v43.27) Once you have committed and are waiting on the room, the picker stays up - so the ship
+  // chips are still clickable, and this function RE-CLONES #ship-preview-confirm on every call. That
+  // would wipe the WAITING label and re-arm a second commitLoadout on a button that is meant to be
+  // inert. Committing is committing.
+  try { if (net && net._waitingForPeers) return; } catch (_) {}
   const loadout = LOADOUTS[key];
   if (!loadout) return;
   const ch = CHASSIS[loadout.chassis];
