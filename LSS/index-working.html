@@ -4777,7 +4777,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.11';
+const LSS_BUILD = '43.12';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -89725,6 +89725,39 @@ function _captureKbKey(e) {
   if (typeof _refreshKbBindRows === 'function') _refreshKbBindRows();
   return true;
 }
+// (v43.12) ONE PLACE THAT TURNS A BOUND INPUT INTO AN ACTION - keyboard OR mouse.
+// The rebind UI has always been happy to write 'mouse0'..'mouse4' into any action, and for FIRE,
+// RELOAD and MOVEMENT that works, because those read the binding through _kbActionHeld ->
+// input.keys[k], and the mouse handlers do set input.keys['mouse'+button]. But abilities, dash,
+// core, view and the ship cycle were dispatched ONLY from keydown/keyup, comparing against
+// e.key.toLowerCase() - and 'mouse0' can never equal a keyboard key name. So binding any of those
+// to a mouse button made it permanently, silently dead, AND saveSettings persisted it, so it stayed
+// dead across reloads. That asymmetry is also what hid the bug: mouse binding visibly works for the
+// trigger, so it looks supported everywhere.
+// Routing both input paths through one function is what makes 'supported everywhere' true.
+function _lssDispatchBound(k, down) {
+  const kb = input.kbBindings;
+  if (!kb || !k) return;
+  if (down) {
+    // Hold-prime abilities route through abilityInputPress, which starts the primer and defers the
+    // fire to release; non-prime abilities tap-fire inside it.
+    if (k === kb.ability0) abilityInputPress(0);
+    if (k === kb.ability1) abilityInputPress(1);
+    if (k === kb.ability2) abilityInputPress(2);
+    if (k === kb.core) activateCore();
+    if (k === kb.dash) dash();
+    if (k === (kb.view || 'v')) { try { _toggleThirdPerson(); } catch (_) {} }
+    if (k === (kb.shipPrev || '[')) { try { cycleHubShip(-1); } catch (_) {} }
+    if (k === (kb.shipNext || ']')) { try { cycleHubShip(1); } catch (_) {} }
+  } else {
+    if (k === kb.ability0) abilityInputRelease(0);
+    if (k === kb.ability1) abilityInputRelease(1);
+    if (k === kb.ability2) abilityInputRelease(2);
+  }
+}
+// (v43.12) console handle for checking a binding by hand: window.__dispatchBound('mouse3', true)
+if (typeof window !== 'undefined') window.__dispatchBound = _lssDispatchBound;   // (v43.12) bind-testing handle
+
 // (v33.61) Mouse-button capture for the rebind UI : while a row is armed (Rebind
 // clicked), the next mouse-button press binds that button (mouse0/1/2) to the
 // action, exactly like a key. Capture phase + preventDefault so the click doesn't
@@ -89739,7 +89772,12 @@ function _captureMouseBtn(e) {
 }
 document.addEventListener('mousedown', function (e) {
   if (!_kbRebindAction) return;
-  if (e.target && e.target.closest && e.target.closest('.kb-rebind')) return; 
+  if (e.target && e.target.closest && e.target.closest('.kb-rebind')) return;
+  // (v43.12) ...and neither does a click on any other CONTROL. The capture ran on any mousedown
+  // anywhere, so arming a row and then clicking Close, a slider, or the backdrop silently bound that
+  // action to mouse0 and saved it. Deliberate mouse binding still works - click empty panel space or
+  // the canvas - but the ordinary way out of the dialog no longer rebinds anything.
+  if (e.target && e.target.closest && e.target.closest('button, input, select, textarea, a, label')) return;
   if (_captureMouseBtn(e)) { e.preventDefault(); e.stopPropagation(); }
 }, true);
 // True if the action's bound key is currently held.
@@ -90245,18 +90283,7 @@ document.addEventListener('keydown', e => {
     // Hold-prime abilities route through abilityInputPress, which
     // starts a slide-in primer and defers the actual fire to keyup.
     // Non-prime abilities still tap-fire immediately via activateAbility.
-    if (k === kb.ability0) abilityInputPress(0);
-    if (k === kb.ability1) abilityInputPress(1);
-    if (k === kb.ability2) abilityInputPress(2);
-    if (k === kb.core) activateCore();
-    if (k === kb.dash) dash();
-    // (v33.56) View toggle + ship cycle now route through the REBINDABLE
-    // bindings (Settings -> Controls). Defaults: view=V, shipPrev=[, shipNext=].
-    // Core moved off V to G to free it. Fallbacks keep these working if a
-    // pre-v33.56 save lacks the keys.
-    if (k === (kb.view || 'v')) { try { _toggleThirdPerson(); } catch (_) {} }
-    if (k === (kb.shipPrev || '[')) { try { cycleHubShip(-1); } catch (_) {} }
-    if (k === (kb.shipNext || ']')) { try { cycleHubShip(1); } catch (_) {} }
+    _lssDispatchBound(k, true);   // (v43.12) one dispatcher, shared with the mouse path
   }
   // Skybox cycle (B): rotates through _skyboxLabels including the
   // empty 'Stars only' entry so users can return to no-backdrop without
@@ -90350,9 +90377,7 @@ document.addEventListener('keyup', e => {
   // ignored by the release handler (no primer is ever set for them).
   const kb = input.kbBindings;
   if (kb) {
-    if (k === kb.ability0) abilityInputRelease(0);
-    if (k === kb.ability1) abilityInputRelease(1);
-    if (k === kb.ability2) abilityInputRelease(2);
+    _lssDispatchBound(k, false);   // (v43.12) one dispatcher, shared with the mouse path
   }
 });
 
@@ -90374,6 +90399,8 @@ document.addEventListener('mousedown', e => {
   // shot ; touch users fire via the FIRE button only.
   if (!isUI && (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight'))) && !input.touchActive && !input.touchSuppressMouse) {
     input.keys['mouse' + e.button] = true;   
+    // (v43.12) ...and a mouse button bound to an ability now actually fires it.
+    try { _lssDispatchBound('mouse' + e.button, true); } catch (_) {}
     if (e.button === 2) input.rightMouseDown = true;
   }
   // Don't grab pointer lock while ship-select is showing (between-rounds swap
@@ -90394,6 +90421,7 @@ document.addEventListener('mouseup', e => {
   
   
   input.keys['mouse' + e.button] = false;   
+  try { _lssDispatchBound('mouse' + e.button, false); } catch (_) {}   // (v43.12) hold-prime release
   input.mouseDown = false;   
   if (e.button === 2) input.rightMouseDown = false;
 });

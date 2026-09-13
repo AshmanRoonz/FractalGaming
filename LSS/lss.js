@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.11';
+const LSS_BUILD = '43.12';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -59982,6 +59982,26 @@ function _captureKbKey(e) {
   if (typeof _refreshKbBindRows === 'function') _refreshKbBindRows();
   return true;
 }
+function _lssDispatchBound(k, down) {
+  const kb = input.kbBindings;
+  if (!kb || !k) return;
+  if (down) {
+    if (k === kb.ability0) abilityInputPress(0);
+    if (k === kb.ability1) abilityInputPress(1);
+    if (k === kb.ability2) abilityInputPress(2);
+    if (k === kb.core) activateCore();
+    if (k === kb.dash) dash();
+    if (k === (kb.view || 'v')) { try { _toggleThirdPerson(); } catch (_) {} }
+    if (k === (kb.shipPrev || '[')) { try { cycleHubShip(-1); } catch (_) {} }
+    if (k === (kb.shipNext || ']')) { try { cycleHubShip(1); } catch (_) {} }
+  } else {
+    if (k === kb.ability0) abilityInputRelease(0);
+    if (k === kb.ability1) abilityInputRelease(1);
+    if (k === kb.ability2) abilityInputRelease(2);
+  }
+}
+if (typeof window !== 'undefined') window.__dispatchBound = _lssDispatchBound;   // (v43.12) bind-testing handle
+
 function _captureMouseBtn(e) {
   if (!_kbRebindAction) return false;
   input.kbBindings[_kbRebindAction] = 'mouse' + e.button;
@@ -59992,7 +60012,8 @@ function _captureMouseBtn(e) {
 }
 document.addEventListener('mousedown', function (e) {
   if (!_kbRebindAction) return;
-  if (e.target && e.target.closest && e.target.closest('.kb-rebind')) return; 
+  if (e.target && e.target.closest && e.target.closest('.kb-rebind')) return;
+  if (e.target && e.target.closest && e.target.closest('button, input, select, textarea, a, label')) return;
   if (_captureMouseBtn(e)) { e.preventDefault(); e.stopPropagation(); }
 }, true);
 function _kbActionHeld(action) {
@@ -60422,14 +60443,7 @@ document.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   const kb = input.kbBindings;
   if (kb) {
-    if (k === kb.ability0) abilityInputPress(0);
-    if (k === kb.ability1) abilityInputPress(1);
-    if (k === kb.ability2) abilityInputPress(2);
-    if (k === kb.core) activateCore();
-    if (k === kb.dash) dash();
-    if (k === (kb.view || 'v')) { try { _toggleThirdPerson(); } catch (_) {} }
-    if (k === (kb.shipPrev || '[')) { try { cycleHubShip(-1); } catch (_) {} }
-    if (k === (kb.shipNext || ']')) { try { cycleHubShip(1); } catch (_) {} }
+    _lssDispatchBound(k, true);   // (v43.12) one dispatcher, shared with the mouse path
   }
   if (k === 'b') {
     if (typeof cycleSky === 'function') cycleSky(1);
@@ -60501,9 +60515,7 @@ document.addEventListener('keyup', e => {
   input.keys[k] = false;
   const kb = input.kbBindings;
   if (kb) {
-    if (k === kb.ability0) abilityInputRelease(0);
-    if (k === kb.ability1) abilityInputRelease(1);
-    if (k === kb.ability2) abilityInputRelease(2);
+    _lssDispatchBound(k, false);   // (v43.12) one dispatcher, shared with the mouse path
   }
 });
 
@@ -60519,6 +60531,7 @@ document.addEventListener('mousedown', e => {
   ));
   if (!isUI && (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight'))) && !input.touchActive && !input.touchSuppressMouse) {
     input.keys['mouse' + e.button] = true;   
+    try { _lssDispatchBound('mouse' + e.button, true); } catch (_) {}
     if (e.button === 2) input.rightMouseDown = true;
   }
   const selectActive = document.getElementById('ship-select') &&
@@ -60533,6 +60546,7 @@ document.addEventListener('mouseup', e => {
   
   
   input.keys['mouse' + e.button] = false;   
+  try { _lssDispatchBound('mouse' + e.button, false); } catch (_) {}   // (v43.12) hold-prime release
   input.mouseDown = false;   
   if (e.button === 2) input.rightMouseDown = false;
 });
