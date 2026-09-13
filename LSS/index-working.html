@@ -4814,7 +4814,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.16';
+const LSS_BUILD = '43.18';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -14296,6 +14296,20 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
 
+  // (v43.17) a wild leviathan died on the authority. Replay the real death so the peer sees the
+  // guts and hears the burst, instead of the animal simply ceasing to exist.
+  if (evt.type === 'wild_dead' && typeof evt.i === 'number') {
+    try {
+      if (_WILD && _WILD._list) {
+        const m = _WILD._list.find(x => x && x.wildId === (evt.i | 0) && x.alive);
+        if (m) {
+          if (typeof evt.x === 'number') m.position.set(evt.x, evt.y, evt.z);   // die where it actually died
+          m.die();
+        }
+      }
+    } catch (_) {}
+    return;
+  }
   if (evt.type === 'wild_state') {
     try { if (typeof _wildApplyState === 'function') _wildApplyState(evt.s); } catch (_) {}
     return;
@@ -14612,6 +14626,24 @@ function handleNetEvent(evt, fromPeerId) {
   // Peer triggered a dash; spawn the booster effect from their
   // NetworkPlayer's engine plumes pointing along the broadcast dash direction.
   if (evt.type === 'dash_burst' && typeof evt.dx === 'number') {
+    // (v43.17) ⚠ AND MAKE A NOISE. Owner: "i can't hear other player's dashes."
+    // This handler drew the boosters and returned - there was no audio call at all, so a peer dash
+    // was silent by construction, not merely unspatialised. The local dash is playSound('dash'),
+    // the flat 2D bus, which is right for your own ship and unusable for anyone else's.
+    // Shape copied from the peer weapon-fire handlers, which DO carry audio: same relevance gate,
+    // same __enemyFireSfx kill switch. The radius is wider than their 1800 because `dash` is a
+    // ~1.4 s rising whoosh rather than a click, and a dasher covers 550-900 u/s - you want to hear
+    // it before it arrives, not after it has gone past.
+    // (!) Placed BEFORE the mesh guard: a dash should still be audible while the peer's hull is
+    //     mid-build or occluded.
+    try {
+      const _dbP = (typeof evt.px === 'number') ? new THREE.Vector3(evt.px, evt.py, evt.pz) : null;
+      if (_dbP && (typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
+          typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+          player.position && player.position.distanceToSquared(_dbP) < 4000 * 4000) {
+        playSpatialSound('dash', _dbP, { refDistance: 300, maxDistance: 4000, rolloffFactor: 1.0 });
+      }
+    } catch (_) {}
     const peer = net.peers.get(fromPeerId);
     const np = peer && peer.networkPlayer;
     if (np && np.mesh) {
@@ -48878,6 +48910,10 @@ class Bot {
     this.shieldRegenDelay = 0;
     this.spawnProtection = LSS.SPAWN_PROTECTION;
     this.doomed = false;
+    // (v43.18) dash state. dashActive is READ by the ship-ship ram solver (s.dashing = !!bot.dashActive)
+    // and was NEVER written, so that whole ram/shove asymmetry has been unreachable for bots.
+    this.dashActive = false; this._botDashActiveT = 0;
+    this._botDashCd = 2 + Math.random() * 4;   // staggered so a fresh squad does not dash in unison
     this.doomTimer = 0;
     this.coreMeter = 0;
     // Stun timer ; set by Slayer Teleport sweep when the dashing
@@ -49445,6 +49481,67 @@ class Bot {
     this.velocity.y += this.targetDir.y * accelK;
     this.velocity.z += this.targetDir.z * accelK;
 
+    // (v43.18) BOTS DASH. Owner: "i'm not sure bots dash, either, they should have dash
+    // periodically" - and they never could. `dash()` is written entirely against the `player`
+    // singleton, and `player.dashActive = true` is the ONLY write to any dashActive field in the
+    // file. The Bot constructor declares no dash state at all.
+    // ⚠ There is a DEAD READ waiting for this: the ship-ship ram solver already does
+    //   s.dashing = !!bot.dashActive;
+    // and the whole asymmetric dash-ram/shove path behind it has been unreachable for bots since it
+    // was written. Setting the flag here brings that consumer to life for free.
+    // ⚠ The clamp below is why a bot could never move faster than its chassis, which is also why
+    //   PUNCTURE's bot Afterburner is inert - it adds flightSpeed*1.6 into velocity AFTER the clamp
+    //   has already run, so the next frame rescales it away before the bot moves a single unit.
+    //   Teaching the clamp about dashSpeed fixes that too.
+    // The trigger is deliberately legible rather than a twitch: a bot dashes to CLOSE a gap it is
+    // actually trying to cross, or to BREAK AWAY when it is doomed. Cooldown comes from its own
+    // chassis and is jittered per bot so a squad never dashes in unison.
+    this._botDashActiveT = (this._botDashActiveT || 0) - dt;
+    if (this.dashActive && this._botDashActiveT <= 0) this.dashActive = false;
+    this._botDashCd = (this._botDashCd || 0) - dt;
+    // (v43.18c) ⚠ `this.arcSlowTimer <= 0` blocked EVERY dash: the field is undefined on a Bot, and
+    // `undefined <= 0` is false. Written the safe way round, so an absent field reads as "not slowed"
+    // rather than as "never allowed" - the same trap the clamp below already avoids with `> 0`.
+    if (!this.dashActive && this._botDashCd <= 0 && this.alive && !(this.arcSlowTimer > 0) &&
+        !this._stuckEscapeT && this.targetDir) {
+      const _ct = this.combatTarget;
+      const _gap = (_ct && _ct.position) ? _ct.position.distanceTo(this.position) : 0;
+      // (v43.18b) MEASURED: this fired almost never. Bots dogfight CLOSE - live gaps were 162-359
+      // against a 800-2400 threshold - so "closing a large gap" is a case that barely occurs, and
+      // `doomed` is rare. The owner asked for a dash PERIODICALLY, so the rule is simply: if it is
+      // fighting someone and its cooldown is up, dash. The chassis cooldown (4-7 s, jittered per
+      // bot) is what makes it periodic rather than constant.
+      // The direction still carries the intent, because targetDir already encodes what the bot is
+      // trying to do this frame - close, strafe, or break off - so a dash reads as a committed
+      // version of the move it was making anyway rather than a random twitch.
+      const _closing = !!(_ct && _ct.position);
+      const _fleeing = !!this.doomed;
+      if (_closing || _fleeing) {
+        const _dl = Math.hypot(this.targetDir.x, this.targetDir.y, this.targetDir.z);
+        if (_dl > 1e-3) {
+          const _ds = this.chassis.dashSpeed || 750;
+          this.dashActive = true;
+          this._botDashActiveT = this.chassis.dashDuration || 0.45;
+          this._botDashCd = (this.chassis.dashCooldown || 5) * (0.8 + Math.random() * 0.7);
+          // a real burst, the way the player's dash sets velocity outright rather than accelerating
+          this.velocity.set((this.targetDir.x / _dl) * _ds,
+                            (this.targetDir.y / _dl) * _ds,
+                            (this.targetDir.z / _dl) * _ds);
+          try {
+            if (typeof spawnDashBoosters === 'function' && this.mesh) {
+              spawnDashBoosters(this.mesh, this.targetDir.clone().multiplyScalar(1 / _dl), 0xaaeeff);
+            }
+            // heard the same way a peer's dash is (v43.17), so a bot closing on you sounds like one
+            if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+                player.position && player.position.distanceToSquared(this.position) < 4000 * 4000 &&
+                (typeof window === 'undefined' || window.__enemyFireSfx !== false)) {
+              playSpatialSound('dash', this.position, { refDistance: 300, maxDistance: 4000, rolloffFactor: 1.0 });
+            }
+          } catch (_) {}
+        }
+      }
+    }
+
     const speed = this.velocity.length();
     // Race mode normalizes bot top speed to LSS.RACE_SPEED across
     // all chassis so the field stays bunched together regardless of
@@ -49453,7 +49550,9 @@ class Bot {
     // (v43.13) bots ride the same rule, or insane speed turns every fight into shooting
     // parked cars - the player would simply outrun the entire roster.
     const _baseSpd = (LSS.MODE === 'race' || _lssInsaneSpeed()) ? LSS.RACE_SPEED : this.chassis.flightSpeed;
-    const maxSpd = this.arcSlowTimer > 0 ? _baseSpd * 0.3 : _baseSpd;
+    // (v43.18) ...and the cap has to know about it, or the burst above is erased before it moves.
+    const _dashCap = this.dashActive ? Math.max(_baseSpd, this.chassis.dashSpeed || _baseSpd) : _baseSpd;
+    const maxSpd = this.arcSlowTimer > 0 ? _dashCap * 0.3 : _dashCap;
     if (speed > maxSpd) {
       this.velocity.multiplyScalar(maxSpd / speed);
     }
@@ -60825,6 +60924,28 @@ class WildLeviathan {
 
   die() {
     if (!this.alive) return;
+    // (v43.17) ⚠⚠ TELL THE ROOM, BECAUSE THE SNAPSHOT NEVER CAN. Owner: "one player, the laptop,
+    // couldn't see the guts after i exploded a monster".
+    // The gore is spawnMonsterGuts(), called from here - so a peer only sees it if it reaches die().
+    // v43.05 tried to arrange that: _wildApplyState replays die() on an alive->dead transition. But
+    // that row can never arrive. _wildFrame culls the corpse out of _WILD._list in its per-frame
+    // sweep, and _wildNetSend builds its rows from _WILD._list ONE LINE LATER - and a weapon kill
+    // lands in the projectile step, which runs AFTER _wildFrame, so the next frame culls the animal
+    // before any packet carrying alive:0 can be assembled. That is deterministic, not a race: the
+    // death row is never sent. The peer falls through to the reaper instead and calls destroy(),
+    // which removes the mesh in silence.
+    // The city fleet, which this feed was modelled on, avoids it by keeping corpses in the packet
+    // (OW.dying). An explicit event is the smaller change and it also fixes the second half: a PEER
+    // that lands the killing blow never reaches die() either, because takeDamage returns early on a
+    // proxy - so today the gore plays on the authority's screen and ONLY when the authority is also
+    // the shooter. With this, everyone gets the death off the wire.
+    try {
+      if (!this.isProxy && typeof _wildAuthority === 'function' && _wildAuthority() &&
+          typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+        net.sendEvent({ type: 'wild_dead', i: this.wildId,
+                        x: Math.round(this.position.x), y: Math.round(this.position.y), z: Math.round(this.position.z) });
+      }
+    } catch (_) {}
     this.alive = false;
     try {
       if (typeof player !== 'undefined' && player && player.trackerLocks && this.id != null) {
@@ -81496,6 +81617,9 @@ function dash() {
     net.sendEvent({
       type: 'dash_burst',
       dx: dashDir.x, dy: dashDir.y, dz: dashDir.z,
+      // (v43.17) the ORIGIN travels too, so the sound is placed where the dash actually
+      // happened rather than at whatever the receiver's interpolated copy has drifted to.
+      px: player.position.x, py: player.position.y, pz: player.position.z,
       color: dashColor,
     });
   }

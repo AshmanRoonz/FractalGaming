@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.16';
+const LSS_BUILD = '43.18';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6770,6 +6770,18 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
 
+  if (evt.type === 'wild_dead' && typeof evt.i === 'number') {
+    try {
+      if (_WILD && _WILD._list) {
+        const m = _WILD._list.find(x => x && x.wildId === (evt.i | 0) && x.alive);
+        if (m) {
+          if (typeof evt.x === 'number') m.position.set(evt.x, evt.y, evt.z);   // die where it actually died
+          m.die();
+        }
+      }
+    } catch (_) {}
+    return;
+  }
   if (evt.type === 'wild_state') {
     try { if (typeof _wildApplyState === 'function') _wildApplyState(evt.s); } catch (_) {}
     return;
@@ -7002,6 +7014,14 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'dash_burst' && typeof evt.dx === 'number') {
+    try {
+      const _dbP = (typeof evt.px === 'number') ? new THREE.Vector3(evt.px, evt.py, evt.pz) : null;
+      if (_dbP && (typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
+          typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+          player.position && player.position.distanceToSquared(_dbP) < 4000 * 4000) {
+        playSpatialSound('dash', _dbP, { refDistance: 300, maxDistance: 4000, rolloffFactor: 1.0 });
+      }
+    } catch (_) {}
     const peer = net.peers.get(fromPeerId);
     const np = peer && peer.networkPlayer;
     if (np && np.mesh) {
@@ -31316,6 +31336,8 @@ class Bot {
     this.shieldRegenDelay = 0;
     this.spawnProtection = LSS.SPAWN_PROTECTION;
     this.doomed = false;
+    this.dashActive = false; this._botDashActiveT = 0;
+    this._botDashCd = 2 + Math.random() * 4;   // staggered so a fresh squad does not dash in unison
     this.doomTimer = 0;
     this.coreMeter = 0;
     this.stunTimer = 0;
@@ -31719,9 +31741,43 @@ class Bot {
     this.velocity.y += this.targetDir.y * accelK;
     this.velocity.z += this.targetDir.z * accelK;
 
+    this._botDashActiveT = (this._botDashActiveT || 0) - dt;
+    if (this.dashActive && this._botDashActiveT <= 0) this.dashActive = false;
+    this._botDashCd = (this._botDashCd || 0) - dt;
+    if (!this.dashActive && this._botDashCd <= 0 && this.alive && !(this.arcSlowTimer > 0) &&
+        !this._stuckEscapeT && this.targetDir) {
+      const _ct = this.combatTarget;
+      const _gap = (_ct && _ct.position) ? _ct.position.distanceTo(this.position) : 0;
+      const _closing = !!(_ct && _ct.position);
+      const _fleeing = !!this.doomed;
+      if (_closing || _fleeing) {
+        const _dl = Math.hypot(this.targetDir.x, this.targetDir.y, this.targetDir.z);
+        if (_dl > 1e-3) {
+          const _ds = this.chassis.dashSpeed || 750;
+          this.dashActive = true;
+          this._botDashActiveT = this.chassis.dashDuration || 0.45;
+          this._botDashCd = (this.chassis.dashCooldown || 5) * (0.8 + Math.random() * 0.7);
+          this.velocity.set((this.targetDir.x / _dl) * _ds,
+                            (this.targetDir.y / _dl) * _ds,
+                            (this.targetDir.z / _dl) * _ds);
+          try {
+            if (typeof spawnDashBoosters === 'function' && this.mesh) {
+              spawnDashBoosters(this.mesh, this.targetDir.clone().multiplyScalar(1 / _dl), 0xaaeeff);
+            }
+            if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+                player.position && player.position.distanceToSquared(this.position) < 4000 * 4000 &&
+                (typeof window === 'undefined' || window.__enemyFireSfx !== false)) {
+              playSpatialSound('dash', this.position, { refDistance: 300, maxDistance: 4000, rolloffFactor: 1.0 });
+            }
+          } catch (_) {}
+        }
+      }
+    }
+
     const speed = this.velocity.length();
     const _baseSpd = (LSS.MODE === 'race' || _lssInsaneSpeed()) ? LSS.RACE_SPEED : this.chassis.flightSpeed;
-    const maxSpd = this.arcSlowTimer > 0 ? _baseSpd * 0.3 : _baseSpd;
+    const _dashCap = this.dashActive ? Math.max(_baseSpd, this.chassis.dashSpeed || _baseSpd) : _baseSpd;
+    const maxSpd = this.arcSlowTimer > 0 ? _dashCap * 0.3 : _dashCap;
     if (speed > maxSpd) {
       this.velocity.multiplyScalar(maxSpd / speed);
     }
@@ -40291,6 +40347,13 @@ class WildLeviathan {
 
   die() {
     if (!this.alive) return;
+    try {
+      if (!this.isProxy && typeof _wildAuthority === 'function' && _wildAuthority() &&
+          typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+        net.sendEvent({ type: 'wild_dead', i: this.wildId,
+                        x: Math.round(this.position.x), y: Math.round(this.position.y), z: Math.round(this.position.z) });
+      }
+    } catch (_) {}
     this.alive = false;
     try {
       if (typeof player !== 'undefined' && player && player.trackerLocks && this.id != null) {
@@ -54394,6 +54457,7 @@ function dash() {
     net.sendEvent({
       type: 'dash_burst',
       dx: dashDir.x, dy: dashDir.y, dz: dashDir.z,
+      px: player.position.x, py: player.position.y, pz: player.position.z,
       color: dashColor,
     });
   }
