@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.89';
+const LSS_BUILD = '43.90';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -14609,6 +14609,24 @@ function _lssPaniniSync() {
     try { postFX.compositeMat.uniforms.uPan.value.set(d, xmax, _LSSPAN.U, _LSSPAN.V); } catch (_) {}
   } catch (_) {}
   return _LSSPAN;
+}
+
+function _lssTpBoomK() {
+  try {
+    const d = (typeof _lssPaniniD === 'function') ? _lssPaniniD() : 0;
+    if (!(d > 0)) return 1;
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return 1;
+    if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return 1;
+    const K = (typeof window !== 'undefined' && window.__par) || {};
+    const f = (K.panBoom != null) ? +K.panBoom : 0.35;
+    if (!(f > 0)) return 1;
+    const fov = ((typeof input !== 'undefined' && input && input.fovDeg) || (camera && camera.fov) || 90);
+    const asp = (camera && camera.aspect) || 1.6;
+    const c = Math.cos(Math.atan(Math.tan(fov * Math.PI / 360) * asp));
+    if (!(c > 0.0001)) return 1;
+    const M = (d + c) / ((d + 1) * c);
+    return 1 + Math.max(0, Math.min(1, f)) * (M - 1);
+  } catch (_) { return 1; }
 }
 
 const _panTmpV = new THREE.Vector3();
@@ -49111,7 +49129,7 @@ function _lssUpdateSpectatorCinematic(frameMs) {
     b = b * b * (3 - 2 * b);
     _cineQ.setFromEuler(player.euler);
     _cineP.copy(player.position);
-    _cineOff.set(0, 42, 150).applyQuaternion(_cineQ);
+    _cineOff.set(0, 42, 150 * _lssTpBoomK()).applyQuaternion(_cineQ);
     _cineP.add(_cineOff);
     camera.position.lerp(_cineP, b);
     camera.quaternion.slerp(_cineQ, b);
@@ -49793,7 +49811,7 @@ function _cockpitVRWanted() {
 }
 function _lssApplyShipRig(dt) {
   {
-    const P = window.__par || (window.__par = { on: true, gain: 0, circle: 110, dot: 0.35, ship: 34, shipMax: 64, spring: 7 });
+    const P = window.__par || (window.__par = { on: true, gain: 0, circle: 110, dot: 0.35, ship: 34, shipMax: 64, spring: 7, panBoom: 0.35 });
     const ey = player.euler ? player.euler.y : 0, ex = player.euler ? player.euler.x : 0;
     let dy = ey - (game._parPrevYaw != null ? game._parPrevYaw : ey);
     if (dy > Math.PI) dy -= Math.PI * 2; else if (dy < -Math.PI) dy += Math.PI * 2;
@@ -49837,7 +49855,7 @@ function _lssApplyShipRig(dt) {
       const _pMax = (_pP.shipMax != null) ? _pP.shipMax : 64;
       const _pox = Math.max(-_pMax, Math.min(_pMax, (game._parYawEff || 0) * _pS)) * _pAct;
       const _poy = Math.max(-_pMax, Math.min(_pMax, -(game._parPitchEff || 0) * _pS * 0.5)) * _pAct;
-      _tpOff.set(_pox, 42 + _poy, 150).applyQuaternion(camera.quaternion);
+      _tpOff.set(_pox, 42 + _poy, 150 * _lssTpBoomK()).applyQuaternion(camera.quaternion);
       const _bLen = _tpOff.length();
       _tpDir.copy(_tpOff).multiplyScalar(1 / _bLen);
       let _bSafe = _bLen;

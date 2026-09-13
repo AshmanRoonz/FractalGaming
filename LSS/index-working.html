@@ -5901,7 +5901,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.89';
+const LSS_BUILD = '43.90';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -26086,6 +26086,69 @@ function _lssPaniniSync() {
     try { postFX.compositeMat.uniforms.uPan.value.set(d, xmax, _LSSPAN.U, _LSSPAN.V); } catch (_) {}
   } catch (_) {}
   return _LSSPAN;
+}
+
+// ⭐⭐ (v43.90) THE THIRD-PERSON BOOM vs PANINI'S CENTRE MAGNIFICATION.
+// Owner: "in our wide view correction, in third person view, the ships look too big and pyro and
+// blaster even go off the screen." Both halves are one mechanism.
+//
+// Conformal Panini keeps the full HORIZONTAL field by trading VERTICAL field, and the price is a
+// uniform centre magnification. Taking panMap to p -> 0 (cl -> 1, S -> 1) gives source_ndc =
+// p * (xmax/T) on both axes, so the centre is magnified by
+//     M = T / xmax = (d + cos h) / ((d + 1) * cos h),  h = atan(tan(fov*PI/360) * aspect)
+// which reproduces the 2.12x this file already quotes for d=1 at 120 deg / 16:9. Measured live at
+// the owner's actual window (fov 120, aspect 1.58): M = 1.55 at d=0.4 and 1.96 at d=1.
+// The WORLD has no size reference so that reads as the correction working. The player's own hull IS
+// the reference, and it sits dead centre, so it takes the full ~2x - and on a DREADNOUGHT (PYRO,
+// BLASTER) the 150u boom leaves the tail close enough to the lens that 2x pushes it off frame.
+//
+// (!) THIS IS NOT FIXABLE BY FOV, and that is a proof rather than a preference. At d=1,
+//     xmax = 2*tan(h/2) with h < 90 for any rectilinear source, so ymax < 2/aspect - a ceiling of
+//     1.125 at 16:9, against the ~1.164 a dreadnought tail needs. No fov on either side of 120
+//     helps, and narrowing it makes the vertical crop WORSE. The camera has to move.
+//
+// So: scale the boom's DISTANCE, and deliberately NOT its height.
+// Because ymax = ymax_rect / M exactly, a hull centre at camera-space (0, -H, -D) has
+//     y_ndc = (H/D)/ymax = (H/D) * M / ymax_rect
+// and scaling D by M while HOLDING H returns that to (H/150)/ymax_rect - identically the
+// pre-Panini value, for every fov, aspect and d, with no tuning constant. Lateral size cancels the
+// same way: (W/(150M))/(T/M) = (W/150)/T. Scaling the whole vector instead would preserve the
+// 42/150 look-down ANGLE, which Panini then magnifies, pinning the ship low in frame at every
+// strength - which is why only the z moves here.
+//
+// (!) WHY A FRACTION AND NOT FULL CANCELLATION. The boom (150) is shorter than the hull's own
+//     half-length, so changing distance rewrites the FORESHORTENING as well as the scale: f=1
+//     restores lateral width to 1.00x but collapses the nose-tail span to ~0.23x, and the ship
+//     reads flat and far. f = 0.35 is where the on-screen FOOTPRINT returns to what it was before
+//     the correction shipped, with the tail comfortably inside the frame.
+//     Ladder, for flying it: 0 = v43.89 exactly | 0.25 timid | 0.35 default | 0.5 bold | 1 too far.
+//
+// (!) input.fovDeg, NOT camera.fov. Third-person ADS drives camera.fov down to ~72 at 2.4x zoom,
+//     which would drop M and dolly the camera IN as you zoom - a brand-new artifact. Same setting-
+//     vs-live split _lssPaniniSuper already makes for the same reason.
+// (!) Returns exactly 1 at d=0, so with the correction off this is byte-identical to v43.89.
+// (!) Potato renders straight to the canvas and never runs the composite, so there is no warp to
+//     compensate. Deliberately NOT gated on _shouldUseCineFXFrame(): that flips per frame at round
+//     end and the boom would pump.
+// (!) NOTHING ABOUT PANINI ITSELF CHANGES - d, xmax, ymax, uPan and _lssProjectV are untouched, so
+//     no HUD marker drifts and no render target is reallocated. __paniniInfo().centreZoom must read
+//     the same before and after; if it moved, something turned the correction down instead.
+function _lssTpBoomK() {
+  try {
+    const d = (typeof _lssPaniniD === 'function') ? _lssPaniniD() : 0;
+    if (!(d > 0)) return 1;
+    if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return 1;
+    if (typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting) return 1;
+    const K = (typeof window !== 'undefined' && window.__par) || {};
+    const f = (K.panBoom != null) ? +K.panBoom : 0.35;
+    if (!(f > 0)) return 1;
+    const fov = ((typeof input !== 'undefined' && input && input.fovDeg) || (camera && camera.fov) || 90);
+    const asp = (camera && camera.aspect) || 1.6;
+    const c = Math.cos(Math.atan(Math.tan(fov * Math.PI / 360) * asp));
+    if (!(c > 0.0001)) return 1;
+    const M = (d + c) / ((d + 1) * c);
+    return 1 + Math.max(0, Math.min(1, f)) * (M - 1);
+  } catch (_) { return 1; }
 }
 
 const _panTmpV = new THREE.Vector3();
@@ -75451,7 +75514,9 @@ function _lssUpdateSpectatorCinematic(frameMs) {
     // the rig's first control frame, after the swing has settled behind
     // the ship — the same cut as toggling views, never an interior
     // flythrough. Third person stays perfectly seamless (poses coincide).
-    _cineOff.set(0, 42, 150).applyQuaternion(_cineQ);
+    // (v43.90) MIRROR THE RIG. This pose has to match the resting boom above exactly or the 3-2-1
+    // hands over with a visible jump - the note here already promises the poses coincide.
+    _cineOff.set(0, 42, 150 * _lssTpBoomK()).applyQuaternion(_cineQ);
     _cineP.add(_cineOff);
     camera.position.lerp(_cineP, b);
     camera.quaternion.slerp(_cineQ, b);
@@ -76638,7 +76703,7 @@ function _lssApplyShipRig(dt) {
     // even though the camera itself is responding immediately. The ship-lead
     // boom (ship / shipMax) is a separate effect and is left ON; set
     // window.__par.ship = 0 to kill that too, or gain = 0.55 to restore this.
-    const P = window.__par || (window.__par = { on: true, gain: 0, circle: 110, dot: 0.35, ship: 34, shipMax: 64, spring: 7 });
+    const P = window.__par || (window.__par = { on: true, gain: 0, circle: 110, dot: 0.35, ship: 34, shipMax: 64, spring: 7, panBoom: 0.35 });
     const ey = player.euler ? player.euler.y : 0, ex = player.euler ? player.euler.x : 0;
     let dy = ey - (game._parPrevYaw != null ? game._parPrevYaw : ey);
     if (dy > Math.PI) dy -= Math.PI * 2; else if (dy < -Math.PI) dy += Math.PI * 2;
@@ -76712,7 +76777,9 @@ function _lssApplyShipRig(dt) {
       const _pMax = (_pP.shipMax != null) ? _pP.shipMax : 64;
       const _pox = Math.max(-_pMax, Math.min(_pMax, (game._parYawEff || 0) * _pS)) * _pAct;
       const _poy = Math.max(-_pMax, Math.min(_pMax, -(game._parPitchEff || 0) * _pS * 0.5)) * _pAct;
-      _tpOff.set(_pox, 42 + _poy, 150).applyQuaternion(camera.quaternion);
+      // (v43.90) the 150 scales with Panini's centre magnification; the 42 deliberately does NOT
+      // (see _lssTpBoomK). window.__par.panBoom dials it live; 0 restores the v43.89 boom exactly.
+      _tpOff.set(_pox, 42 + _poy, 150 * _lssTpBoomK()).applyQuaternion(camera.quaternion);
       // (v34.36) CAMERA-VS-WALL: the boom raycasts from the ship (the same trace
       // weapons use — SDF cave walls + level boxes + megacity buildings) and the
       // camera pulls IN to the hit point instantly, then eases back out — so the
