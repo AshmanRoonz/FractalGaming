@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LSS — Projection Lab (rectilinear / Panini / cylindrical)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  html,body { margin:0; height:100%; background:#05070c; color:#cfe3f5;
+              font:13px/1.45 ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif; overflow:hidden; }
+  canvas { display:block; }
+  #ui { position:fixed; left:14px; top:14px; width:308px; padding:14px 16px 16px;
+        background:rgba(8,12,20,.82); border:1px solid rgba(120,190,255,.20); border-radius:12px;
+        backdrop-filter:blur(8px); z-index:10; }
+  h1 { margin:0 0 2px; font-size:14px; letter-spacing:.04em; color:#9fd4ff; font-weight:600; }
+  .sub { margin:0 0 12px; font-size:11.5px; color:#7d94ab; }
+  .modes { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin:0 0 12px; }
+  .modes button { padding:7px 4px; font:600 11.5px/1 inherit; letter-spacing:.03em; cursor:pointer;
+                  color:#b8d4ec; background:#111a26; border:1px solid #22344a; border-radius:7px; }
+  .modes button.on { background:#15436b; border-color:#3f8fd0; color:#eaf6ff; }
+  label { display:block; margin:11px 0 3px; font-size:11.5px; color:#8fa8bf; }
+  label b { color:#cfe3f5; font-weight:600; font-variant-numeric:tabular-nums; }
+  input[type=range] { width:100%; accent-color:#3f8fd0; }
+  .row { display:flex; gap:8px; align-items:center; margin-top:11px; font-size:11.5px; color:#8fa8bf; }
+  .row input { accent-color:#3f8fd0; }
+  table { width:100%; border-collapse:collapse; margin-top:12px; font-size:11.5px; }
+  td { padding:3px 0; color:#8fa8bf; }
+  td:last-child { text-align:right; color:#cfe3f5; font-variant-numeric:tabular-nums; }
+  .warn { color:#ffb27a; }
+  .hint { margin-top:12px; padding-top:10px; border-top:1px solid rgba(120,190,255,.14);
+          font-size:11px; color:#7d94ab; }
+  #wipeLabel { position:fixed; top:14px; left:50%; transform:translateX(-50%); z-index:10;
+               font-size:11.5px; letter-spacing:.06em; color:#8fa8bf; pointer-events:none;
+               background:rgba(8,12,20,.7); padding:5px 12px; border-radius:20px; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <h1>Projection Lab</h1>
+  <p class="sub">Same scene, same field of view — three ways of flattening it onto a screen.</p>
+
+  <div class="modes">
+    <button data-m="0">Rectilinear</button>
+    <button data-m="1" class="on">Panini</button>
+    <button data-m="2">Cylindrical</button>
+  </div>
+
+  <label>Horizontal FOV <b id="fovV">140°</b></label>
+  <input type="range" id="fov" min="60" max="200" step="1" value="140">
+
+  <label>Panini compression <b id="dV">1.00</b> <span style="color:#6b8298">(0 = rectilinear, 1 = full)</span></label>
+  <input type="range" id="d" min="0" max="1" step="0.01" value="1">
+
+  <label>Wipe vs rectilinear <b id="wV">50%</b></label>
+  <input type="range" id="wipe" min="0" max="100" step="1" value="50">
+
+  <div class="row"><input type="checkbox" id="spin" checked><label for="spin" style="margin:0">auto-orbit</label>
+    <input type="checkbox" id="grid" checked><label for="grid" style="margin:0">pillars</label></div>
+
+  <table>
+    <tr><td>vertical FOV</td><td id="vf">—</td></tr>
+    <tr><td>edge stretch — sides</td><td id="es" class="warn">—</td></tr>
+    <tr><td>edge stretch — top/bottom</td><td id="et">—</td></tr>
+    <tr><td>centre scale vs 75°</td><td id="cs">—</td></tr>
+  </table>
+
+  <div class="hint">The spheres are placed at <b>equal angles</b> apart, so in a distortion-free
+  projection they'd all look the same size. Watch the outer ones as you raise the FOV.</div>
+</div>
+<div id="wipeLabel">← RECTILINEAR &nbsp;|&nbsp; SELECTED →</div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.165.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+/* ───────────────────────────────────────────────────────────────────────────
+   HOW THIS WORKS
+
+   You cannot get Panini or cylindrical out of a PerspectiveCamera - that camera
+   IS the rectilinear projection, by construction: it projects onto a flat plane,
+   which is exactly what makes screen position go as tan(theta) and blows the
+   edges up at wide angle.
+
+   So the scene is rendered into a CUBEMAP (six 90-degree faces, no wide-angle
+   distortion anywhere), and then a fullscreen shader decides, per pixel, which
+   direction that pixel looks along - and samples the cube. Changing projection
+   is then just changing that one function. Same scene, same FOV, three different
+   ways of mapping angle to pixel.
+   ─────────────────────────────────────────────────────────────────────────── */
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xcfe2f0);
+scene.fog = new THREE.FogExp2(0xcfe2f0, 0.000075);
+
+scene.add(new THREE.HemisphereLight(0xbcd8f0, 0x35414a, 2.4));
+const key = new THREE.DirectionalLight(0xfff0dc, 3.0); key.position.set(-1800, 1500, 900); scene.add(key);
+const rim = new THREE.DirectionalLight(0x8ec6ff, 1.4); rim.position.set(1400, 600, -1600); scene.add(rim);
+
+/* ── the test scene ───────────────────────────────────────────────────────
+   Built to MAKE DISTORTION MEASURABLE rather than to look pretty:
+     - a ground grid and a colonnade, because rectilinear's one promise is that
+       straight lines stay straight — that is what Panini and cylindrical give
+       up, and you should be able to see exactly how much;
+     - spheres at EQUAL ANGULAR SPACING around the camera, all the same size and
+       the same distance. Any difference in their on-screen size is the
+       projection's doing and nothing else. That is the whole demo in one row of
+       objects.                                                                */
+const world = new THREE.Group(); scene.add(world);
+
+/* ── procedural mountains ──────────────────────────────────────────────────
+   The horizon is the single best test of these projections. A horizon is a
+   straight line, and straight-lines-stay-straight is exactly the promise
+   rectilinear keeps and the other two break - so a real skyline tells you more
+   in one glance than any amount of abstract geometry.
+   Ridged fractal noise, because ordinary fBm gives rolling hills and it is the
+   sharp ridge lines that show bending clearly.                               */
+function hash2(x, y) {
+  let h = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+  return h - Math.floor(h);
+}
+function vnoise(x, y) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = hash2(xi, yi),     b = hash2(xi + 1, yi);
+  const c = hash2(xi, yi + 1), d = hash2(xi + 1, yi + 1);
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+function ridged(x, y, oct) {
+  let sum = 0, amp = 1, f = 1, norm = 0;
+  for (let i = 0; i < oct; i++) {
+    let n = vnoise(x * f, y * f) * 2 - 1;        // -1..1
+    n = 1 - Math.abs(n);                          // ridge
+    n *= n;                                       // sharpen the crest
+    sum += n * amp; norm += amp;
+    amp *= 0.5; f *= 2.03;
+  }
+  return sum / norm;
+}
+
+const TERRAIN_SPAN = 16000, TERRAIN_SEG = 300, PEAK = 1500;
+function heightAt(x, z) {
+  const s = 0.00035;
+  const base = ridged(x * s, z * s, 6);
+  // push the valleys down and the peaks up so ridges read against the sky
+  const shaped = Math.pow(base, 1.9);
+  // a broad roll so the range is not uniformly tall
+  const roll = vnoise(x * 0.00007 + 11, z * 0.00007 + 7);
+  return shaped * PEAK * (0.45 + 0.9 * roll) - 120;
+}
+
+const terrGeo = new THREE.PlaneGeometry(TERRAIN_SPAN, TERRAIN_SPAN, TERRAIN_SEG, TERRAIN_SEG);
+terrGeo.rotateX(-Math.PI / 2);
+{
+  const p = terrGeo.attributes.position;
+  const col = new Float32Array(p.count * 3);
+  const cLow  = new THREE.Color(0x4a7350), cMid = new THREE.Color(0x8b98a3);
+  const cHigh = new THREE.Color(0xf2f7fc), cDeep = new THREE.Color(0x35513f);
+  const tmp = new THREE.Color();
+  for (let i = 0; i < p.count; i++) {
+    const x = p.getX(i), z = p.getZ(i);
+    const h = heightAt(x, z);
+    p.setY(i, h);
+    const t = Math.max(0, Math.min(1, (h + 120) / PEAK));
+    if (t < 0.18) tmp.copy(cDeep).lerp(cLow, t / 0.18);
+    else if (t < 0.55) tmp.copy(cLow).lerp(cMid, (t - 0.18) / 0.37);
+    else tmp.copy(cMid).lerp(cHigh, Math.min(1, (t - 0.55) / 0.33));
+    col[i * 3] = tmp.r; col[i * 3 + 1] = tmp.g; col[i * 3 + 2] = tmp.b;
+  }
+  terrGeo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  terrGeo.computeVertexNormals();
+}
+const terrain = new THREE.Mesh(terrGeo, new THREE.MeshStandardMaterial({
+  vertexColors: true, roughness: 0.95, metalness: 0.0, flatShading: false }));
+world.add(terrain);
+
+// sky dome, so there is a real horizon to bend rather than flat fog
+const skyGeo = new THREE.SphereGeometry(9000, 32, 20);
+const skyMat = new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false,
+  uniforms: { uTop: { value: new THREE.Color(0x3d76b8) }, uBot: { value: new THREE.Color(0xcfe2f0) } },
+  vertexShader: 'varying float vH; void main(){ vH = normalize(position).y; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+  fragmentShader: 'uniform vec3 uTop,uBot; varying float vH; void main(){ gl_FragColor = vec4(mix(uBot,uTop,smoothstep(-0.05,0.55,vH)),1.0); }',
+});
+scene.add(new THREE.Mesh(skyGeo, skyMat));
+
+const gridGroup = new THREE.Group(); world.add(gridGroup);
+// colonnade: straight vertical lines the eye knows should be straight. Kept as
+// a toggle beside the mountains - the horizon shows horizontal bending, these
+// show that verticals survive in Panini and cylindrical but not the framing.
+const pillarGeo = new THREE.CylinderGeometry(14, 14, 620, 12);
+const pillarMat = new THREE.MeshStandardMaterial({ color: 0xb8c9da, roughness: .7, metalness: .12 });
+for (let s = -1; s <= 1; s += 2) {
+  for (let i = 0; i < 14; i++) {
+    const px = s * 430, pz = -i * 330 + 500;
+    const p = new THREE.Mesh(pillarGeo, pillarMat);
+    p.position.set(px, heightAt(px, pz) + 300, pz);
+    gridGroup.add(p);
+  }
+}
+
+// the measuring row: identical spheres, identical distance, equal angles apart
+const ringMat = new THREE.MeshStandardMaterial({ color: 0xffc061, roughness: .35, metalness: .25,
+                                                 emissive: 0x3a2200, emissiveIntensity: .6 });
+const ringGeo = new THREE.SphereGeometry(70, 28, 20);
+for (let a = -100; a <= 100; a += 12.5) {
+  const r = THREE.MathUtils.degToRad(a);
+  const m = new THREE.Mesh(ringGeo, ringMat);
+  m.position.set(Math.sin(r) * 1500, 620, -Math.cos(r) * 1500);
+  world.add(m);
+}
+// and a second row higher up, so vertical distortion reads too
+const ring2 = new THREE.MeshStandardMaterial({ color: 0x6fd4ff, roughness: .35, metalness: .25,
+                                               emissive: 0x06283a, emissiveIntensity: .6 });
+for (let a = -100; a <= 100; a += 25) {
+  const r = THREE.MathUtils.degToRad(a);
+  const m = new THREE.Mesh(ringGeo, ring2);
+  m.position.set(Math.sin(r) * 1500, 1180, -Math.cos(r) * 1500);
+  world.add(m);
+}
+
+// a real LSS hull in the middle, so the distortion is judged on something the
+// eye actually knows the shape of. Falls back to a block if the GLB is missing.
+let ship = null;
+new GLTFLoader().load('ships/vortex.glb', (g) => {
+  ship = g.scene;
+  const b = new THREE.Box3().setFromObject(ship);
+  const sz = b.getSize(new THREE.Vector3());
+  ship.scale.setScalar(430 / (Math.max(sz.x, sz.y, sz.z) || 1));
+  ship.position.set(0, 760, -900);
+  world.add(ship);
+}, undefined, () => {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(430, 110, 250),
+    new THREE.MeshStandardMaterial({ color: 0x8f6bd0, roughness: .4, metalness: .3 }));
+  m.position.set(0, 760, -900); world.add(m); ship = m;
+});
+
+/* ── render the world into a cubemap ───────────────────────────────────── */
+const CUBE = 1024;
+const cubeRT = new THREE.WebGLCubeRenderTarget(CUBE, { generateMipmaps: false, minFilter: THREE.LinearFilter });
+const cubeCam = new THREE.CubeCamera(1, 12000, cubeRT);
+scene.add(cubeCam);
+
+/* ── the projection shader ─────────────────────────────────────────────── */
+const quadMat = new THREE.ShaderMaterial({
+  uniforms: {
+    uCube:   { value: cubeRT.texture },
+    uMode:   { value: 1 },     // ...and Panini as the default view
+    uHFov:   { value: THREE.MathUtils.degToRad(140) },
+    uD:      { value: 1.0 },   // owner picked FULL panini
+    uAspect: { value: innerWidth / innerHeight },
+    uWipe:   { value: 0.5 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }
+  `,
+  fragmentShader: `
+    precision highp float;
+    uniform samplerCube uCube;
+    uniform float uMode, uHFov, uD, uAspect, uWipe;
+    varying vec2 vUv;
+
+    // Screen point -> view direction, per projection.
+    // The VERTICAL extent is deliberately identical in all three (derived from
+    // the rectilinear relation) so the framing matches and the only thing that
+    // changes between modes is how the HORIZONTAL angle is laid down.
+    vec3 dirFor(int mode, vec2 p){
+      float hf = uHFov * 0.5;
+      float ymax = tan(hf) / uAspect;
+      float xmax;
+      if (mode == 0)      xmax = tan(hf);                                   // flat plane
+      else if (mode == 1) xmax = (uD + 1.0) * sin(hf) / (uD + cos(hf));     // Panini
+      else                xmax = hf;                                        // arc: angle IS distance
+
+      float x = p.x * xmax, y = p.y * ymax;
+
+      if (mode == 0) return normalize(vec3(x, y, -1.0));
+
+      if (mode == 1) {
+        // Inverse general Panini. Forward is x = S*sin(lon), y = S*tan(lat)
+        // with S = (d+1)/(d+cos lon); solving the quadratic for cos(lon):
+        float d = uD;
+        float k  = x / (d + 1.0);
+        float k2 = k * k;
+        float disc = 1.0 + k2 * (1.0 - d * d);
+        float clon = (-k2 * d + sqrt(max(0.0, disc))) / (k2 + 1.0);
+        float slon = k * (d + clon);
+        float S    = (d + 1.0) / (d + clon);
+        return normalize(vec3(slon, y / S, -clon));
+      }
+
+      // Cylindrical: horizontal angle maps LINEARLY to x (that is the whole
+      // idea - no tan, so no blow-up), verticals stay straight via tan(lat).
+      return normalize(vec3(sin(x), y, -cos(x)));
+    }
+
+    void main(){
+      vec2 p = vUv * 2.0 - 1.0;
+      int mode = (vUv.x < uWipe) ? 0 : int(uMode + 0.5);
+      vec3 d = dirFor(mode, p);
+      vec3 col = textureCube(uCube, d).rgb;
+      // a hairline at the wipe so you can see which half is which
+      float e = abs(vUv.x - uWipe);
+      if (uWipe > 0.001 && uWipe < 0.999 && e < 0.0012) col = mix(col, vec3(0.45,0.75,1.0), 0.9);
+      gl_FragColor = vec4(col, 1.0);
+    }
+  `,
+  depthTest: false, depthWrite: false,
+});
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), quadMat);
+quad.frustumCulled = false;
+const quadScene = new THREE.Scene(); quadScene.add(quad);
+const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+/* ── UI ────────────────────────────────────────────────────────────────── */
+const $ = (id) => document.getElementById(id);
+let mode = 1, spin = true;
+
+document.querySelectorAll('.modes button').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('.modes button').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    mode = +b.dataset.m;
+    quadMat.uniforms.uMode.value = mode;
+    readout();
+  };
+});
+$('fov').oninput  = e => { quadMat.uniforms.uHFov.value = THREE.MathUtils.degToRad(+e.target.value);
+                           $('fovV').textContent = e.target.value + '°'; readout(); };
+$('d').oninput    = e => { quadMat.uniforms.uD.value = +e.target.value;
+                           $('dV').textContent = (+e.target.value).toFixed(2); };
+$('wipe').oninput = e => { quadMat.uniforms.uWipe.value = +e.target.value / 100;
+                           $('wV').textContent = e.target.value + '%'; };
+$('spin').onchange = e => spin = e.target.checked;
+$('grid').onchange = e => { gridGroup.visible = e.target.checked; };
+
+function readout() {
+  const h = +$('fov').value, asp = innerWidth / innerHeight;
+  const rad = d => d * Math.PI / 180, deg = r => r * 180 / Math.PI;
+  const v = 2 * deg(Math.atan(Math.tan(rad(h / 2)) / asp));
+  $('vf').textContent = v.toFixed(0) + '°';
+  // 1/cos^2 is the local magnification of the rectilinear map
+  const stretch = t => 1 / Math.pow(Math.cos(rad(t)), 2);
+  $('es').textContent = stretch(h / 2).toFixed(1) + '×';
+  $('et').textContent = stretch(v / 2).toFixed(1) + '×';
+  const span = f => 2 * Math.tan(rad(f / 2));
+  $('cs').textContent = (span(75) / span(v)).toFixed(2) + '×';
+}
+readout();
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  quadMat.uniforms.uAspect.value = innerWidth / innerHeight;
+  readout();
+});
+
+/* ── loop ──────────────────────────────────────────────────────────────── */
+let t = 0;
+renderer.setAnimationLoop(() => {
+  t += 0.0016;
+  if (spin) world.rotation.y = Math.sin(t) * 0.16;
+  if (ship) { ship.rotation.y = Math.sin(t * 2.1) * 0.22; ship.position.y = 760 + Math.sin(t * 3.3) * 26; }
+
+  // The cube camera sits where the viewer is; it never sees any wide-angle
+  // distortion because each of its six faces is exactly 90 degrees.
+  cubeCam.position.set(0, 980, 1750);
+  quad.visible = false;
+  cubeCam.update(renderer, scene);
+  quad.visible = true;
+
+  renderer.setRenderTarget(null);
+  renderer.render(quadScene, quadCam);
+});
+</script>
+</body>
+</html>
