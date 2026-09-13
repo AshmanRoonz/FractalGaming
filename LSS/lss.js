@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.98';
+const LSS_BUILD = '43.99';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -594,7 +594,7 @@ const input = {
   touchActive: false,           
   touchSuppressMouse: false,    
   touchMoveX: 0, touchMoveY: 0, 
-  touchMoveUp: false, touchMoveDown: false,
+  touchMoveVert: 0,
   touchFire: false, touchAltFire: false,
   touchLookScale: 6.0,          
   
@@ -49342,8 +49342,7 @@ function updatePlayerMovement(dt) {
   if (input.touchActive) {
     if (Math.abs(input.touchMoveY) > 0.001) moveDir.addScaledVector(forward, -input.touchMoveY * ch.flightSpeed);
     if (Math.abs(input.touchMoveX) > 0.001) moveDir.addScaledVector(right, input.touchMoveX * ch.strafeSpeed);
-    if (input.touchMoveUp)   moveDir.addScaledVector(up, ch.verticalSpeed);
-    if (input.touchMoveDown) moveDir.addScaledVector(up, -ch.verticalSpeed);
+    if (Math.abs(input.touchMoveVert) > 0.001) moveDir.addScaledVector(up, input.touchMoveVert * ch.verticalSpeed);
   }
 
   if (player.afterburnerActive) moveDir.multiplyScalar(player.afterburnerSpeedMult);
@@ -54985,7 +54984,7 @@ function updateRoundSystem(dt) {
         input.touchFire = false;
         input.touchAltFire = false;
         input.touchMoveX = 0; input.touchMoveY = 0;
-        input.touchMoveUp = false; input.touchMoveDown = false;
+        input.touchMoveVert = 0;
       }
       const _ffHub = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');
       if (typeof musicSetPattern === 'function' && !_ffHub) {
@@ -61277,7 +61276,7 @@ function _howtoBindLabel(scheme, action) {
     const t = {
       fire: 'RT', altFire: 'LT', dash: 'STICK RIM', reload: 'R',
       ability0: 'LB', ability1: 'RB', ability2: 'F', core: 'CORE',
-      moveUp: '▲', moveDown: '▼', view: '◳', shipPrev: '⇄', shipNext: '⇄', menu: '⚙',
+      moveUp: 'VTOL STICK', moveDown: 'VTOL STICK', view: '◳', shipPrev: '⇄', shipNext: '⇄', menu: '⚙',   // (v43.99)
     };
     return t[action] || '';
   }
@@ -61562,7 +61561,7 @@ function _howtoRender(ov) {
     rows.push(['ABILITIES', 'LB / RB / F']);
     rows.push(['CORE', 'CORE (TOP CENTRE)']);
     rows.push(['RELOAD', 'R']);
-    rows.push(['UP / DOWN', '▲ / ▼']);
+    rows.push(['UP / DOWN', 'VTOL STICK (UNDER ⚙)']);   // (v43.99)
     rows.push(['VIEW', '◳']);
     rows.push(['CYCLE SHIP', '⇄']);
     rows.push(['FULLSCREEN', '⛶']);
@@ -61835,7 +61834,14 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     '#tc-move-knob { position: absolute; left: 50%; top: 50%; width: 38%; height: 38%;',
     '  margin: -19% 0 0 -19%; border-radius: 50%; background: rgba(120, 220, 255, 0.18);',
     '  border: 1px solid rgba(170, 240, 255, 0.55); pointer-events: none; }',
-    '.tc-chip { font-size: 4vmin; }',
+    '#tc-vt::before, #tc-vt::after { position: absolute; left: 0; right: 0; text-align: center;',
+    '  font-size: 2.2vmin; line-height: 1; opacity: 0.4; pointer-events: none; }',
+    '#tc-vt::before { content: "▲"; top: 0.9vmin; }',
+    '#tc-vt::after  { content: "▼"; bottom: 0.9vmin; }',
+    '#tc-vt-knob { position: absolute; left: 14%; right: 14%; top: 50%; height: 24%;',
+    '  transform: translateY(-50%); border-radius: 2.4vmin;',
+    '  background: rgba(120, 220, 255, 0.26); border: 1px solid rgba(170, 240, 255, 0.6);',
+    '  pointer-events: none; }',
     '.tc-top { font-size: 3vmin; }',
     '#touch-controls #tc-move-zone, #touch-controls #tc-look-zone { background: none; border: none; }',
   ].join('\n');
@@ -61850,8 +61856,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     'tc-fd':        { ax:'right',  x:28.6, ay:'top',    y:2.5,  w:24,   h:15,   shape:'rect' },
     'tc-rd':        { ax:'right',  x:55.1, ay:'top',    y:20,   w:22.4, h:14.4, shape:'rect' },
     'tc-core':      { ax:'center', x:-2.7, ay:'top',    y:12,   w:24,   h:9,    shape:'rect' },
-    'tc-up':        { ax:'left',   x:0.8,  ay:'bottom', y:32.5, w:13.9, h:27.1, shape:'rect' },
-    'tc-dn':        { ax:'left',   x:0.4,  ay:'bottom', y:1.3,  w:13.9, h:28.7, shape:'rect' },
+    'tc-vt':        { ax:'left',   x:0.7,  ay:'top',    y:9,    w:11,   h:26,   shape:'rect' },
     'tc-set':       { ax:'left',   x:0.7,  ay:'top',    y:0,    w:7,    h:7,    shape:'rect' },
     'tc-fs':        { ax:'left',   x:8.7,  ay:'top',    y:0,    w:7,    h:7,    shape:'rect' },
     'tc-view':      { ax:'left',   x:17.5, ay:'top',    y:0.1,  w:7,    h:7,    shape:'rect' },
@@ -61921,6 +61926,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 
   let root = null, moveEl = null, knobEl = null;
   let _dragReset = null;
+  let _vtDead = 0.10;
   let _moveDragging = false;
 
   let _lsBox = { w: 0, h: 0, l: 0, t: 0 };
@@ -61997,6 +62003,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       };
       if (!_moveDragging) pin('tc-move');
       pin('tc-look');
+      pin('tc-vt');
       pin('tc-move-zone');
       pin('tc-look-zone');
       pin('tc-core');
@@ -62097,8 +62104,10 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 
     const coreEl = _el('tc-core', '', 'CORE', _tcStyle('tc-core'), 'CORE');
 
-    const upEl = _el('tc-up', 'tc-chip', '▲', _tcStyle('tc-up'));
-    const dnEl = _el('tc-dn', 'tc-chip', '▼', _tcStyle('tc-dn'));
+    const vtEl = _el('tc-vt', '', '', _tcStyle('tc-vt', { borderRadius: '5.5vmin' }));
+    const vtKnob = document.createElement('div');
+    vtKnob.id = 'tc-vt-knob';
+    vtEl.appendChild(vtKnob);
 
     const setEl = _el('tc-set', 'tc-top', '⚙', _tcStyle('tc-set', { opacity: 0.8 }));
     const shipEl = _el('tc-ship', 'tc-top', '⇄', _tcStyle('tc-ship', { opacity: 0.8 }));
@@ -62109,7 +62118,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const lookZone = _el('tc-look-zone', '', '');
     moveEl.style.pointerEvents = 'none';
     lookEl.style.pointerEvents = 'none';
-    const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, rdEl, fdEl, coreEl, upEl, dnEl, setEl, shipEl, viewEl, fsEl];
+    const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, rdEl, fdEl, coreEl, vtEl, setEl, shipEl, viewEl, fsEl];
     for (const e of els) root.appendChild(e);
     document.body.appendChild(root);
     _refreshTouchLabels();
@@ -62155,8 +62164,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     _hold(rdEl, () => { const k = input.kbBindings && input.kbBindings.reload; if (k) input.keys[k] = true; },
                 () => { const k = input.kbBindings && input.kbBindings.reload; if (k) input.keys[k] = false; });
     _hold(coreEl, () => { try { activateCore(); } catch (_) {} }, null);
-    _hold(upEl, () => { input.touchMoveUp = true; },   () => { input.touchMoveUp = false; });
-    _hold(dnEl, () => { input.touchMoveDown = true; }, () => { input.touchMoveDown = false; });
     _hold(setEl, () => { try { buildSettingsPage(); openSettings(); } catch (_) {} }, null);
     _hold(fsEl, () => {
       try {
@@ -62234,12 +62241,53 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     lookZone.addEventListener('pointerup', _lookEnd);
     lookZone.addEventListener('pointercancel', _lookEnd);
 
+    let _vtPid = null, _vtR = 1, _vtMid = 0;
+    function _vtGeom() {
+      const r = vtEl.getBoundingClientRect();
+      if (r.height > 8) { _vtR = r.height / 2; _vtMid = r.top + _vtR; }
+    }
+    function _vtTo(y) {
+      let v = (_vtMid - y) / _vtR;
+      if (v > 1) v = 1; else if (v < -1) v = -1;
+      const d = _vtDead;
+      v = (Math.abs(v) <= d) ? 0 : (v - (v > 0 ? d : -d)) / (1 - d);
+      input.touchMoveVert = v;
+      vtKnob.style.transform = 'translateY(calc(-50% + ' + (-v * _vtR * 0.74).toFixed(1) + 'px))';
+    }
+    function _vtRelease() {
+      _vtPid = null;
+      input.touchMoveVert = 0;
+      vtKnob.style.transform = '';
+      vtEl.classList.remove('tc-pressed');
+    }
+    vtEl.addEventListener('pointerdown', ev => {
+      ev.preventDefault(); ev.stopPropagation();
+      try { vtEl.setPointerCapture(ev.pointerId); } catch (_) {}
+      _vtPid = ev.pointerId;
+      vtEl.classList.add('tc-pressed');
+      _vtGeom();
+      _vtTo(ev.clientY);
+    });
+    vtEl.addEventListener('pointermove', ev => {
+      if (ev.pointerId !== _vtPid) return;
+      ev.preventDefault();
+      _vtGeom();
+      _vtTo(ev.clientY);
+    });
+    const _vtEnd = ev => {
+      if (ev.pointerId !== _vtPid) return;
+      _vtRelease();
+    };
+    vtEl.addEventListener('pointerup', _vtEnd);
+    vtEl.addEventListener('pointercancel', _vtEnd);
+
     _dragReset = function () {
       _movePid = null; _lookPid = null;
       _moveDragging = false;
       _dashArmed = true;
       knobEl.style.transform = '';
       lookEl.classList.remove('tc-pressed');
+      _vtRelease();
       _layoutSticks();
     };
 
@@ -62248,7 +62296,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 
   function _zeroTouchInputs() {
     input.touchMoveX = 0; input.touchMoveY = 0;
-    input.touchMoveUp = false; input.touchMoveDown = false;
+    input.touchMoveVert = 0;   // (v43.99)
     input.touchFire = false; input.touchAltFire = false;
   }
 
@@ -62295,6 +62343,9 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     get enabled() { return _enabled; },
     set lookScale(v) { if (v > 0) input.touchLookScale = v; },
     get lookScale() { return input.touchLookScale; },
+    set vertDead(v) { v = +v; if (v >= 0 && v <= 0.4) _vtDead = v; },
+    get vertDead() { return _vtDead; },
+    get vert() { return input.touchMoveVert; },
     get dbg() {
       try { _visBox(); } catch (_) {}
       let scr = null;
@@ -82087,8 +82138,7 @@ function updateDeathCam(dt) {
   if (typeof input !== 'undefined' && input.touchActive) {
     mvF += (input.touchMoveY || 0);
     mvR += (input.touchMoveX || 0);
-    if (input.touchMoveUp)   mvU += 1;
-    if (input.touchMoveDown) mvU -= 1;
+    mvU += (input.touchMoveVert || 0);
   }
   
   const _ghostSpeed = 800; 

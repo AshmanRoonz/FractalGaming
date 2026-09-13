@@ -6083,7 +6083,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.98';
+const LSS_BUILD = '43.99';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -7049,7 +7049,19 @@ const input = {
   touchActive: false,           
   touchSuppressMouse: false,    
   touchMoveX: 0, touchMoveY: 0, 
-  touchMoveUp: false, touchMoveDown: false,
+  // ⭐ (v43.99) VTOL IS ONE ANALOG AXIS NOW. Owner: "On the left we have up and down buttons for
+  // vtol, I was thinking a little one axis control stick instead, actually raised on the screen to
+  // the top under the settings button". +1 = CLIMB, -1 = DIVE, 0 = no vertical thrust.
+  // ⚠ RENAMED, NOT RE-TYPED. The two booleans this replaces were consumed with bare truthiness
+  //   (`if (input.touchMoveUp)`), so writing a float into the old names would have made -0.3 read as
+  //   FULL thrust at both read sites. A new name turns any call site I missed into a visible zero
+  //   instead of a silent full-deflection bug. All six reads/writes moved in this same commit.
+  // ⚠ SIGN, AND IT IS NOT ITS NEIGHBOUR'S. touchMoveY above is SCREEN-DOWN-POSITIVE (it is the
+  //   raw drag dy) and gets negated at each consumer. This one is WORLD-UP-POSITIVE and is negated
+  //   exactly once, at the write site in _vtTo(). Its two readers sit 43,000 lines apart -
+  //   updatePlayerMovement and the death-cam ghost flight - which is precisely how one of a pair
+  //   ends up inverted. Never negate it again.
+  touchMoveVert: 0,
   touchFire: false, touchAltFire: false,
   touchLookScale: 6.0,          
   
@@ -76086,11 +76098,22 @@ function updatePlayerMovement(dt) {
 
   // Touch virtual stick: raw -1..1, no deadzone / curve / sensitivity
   // multiplier by design (see TOUCH CONTROLS section).
+  // ⚠ (v43.99) THAT "NO DEADZONE" CONTRACT IS ABOUT X/Y, AND IT HOLDS BECAUSE OF THE FLOATING
+  // ORIGIN. tc-move re-centres under the thumb wherever it lands (`_moveCx = ev.clientX`), so its
+  // value is exactly 0 at touchdown and a deadzone would be dead weight. The new VTOL stick has a
+  // FIXED centre - it is a drawn track, and where you touch IS the value - so its raw reading is
+  // never exactly 0 with a thumb on it. Its deadzone lives at the WRITE site in _vtTo(); what
+  // arrives here is already clean, and the 0.001 tests below stay what they always were: math-skip
+  // guards, not deadzones.
+  // (!) ANALOG GENUINELY WORKS HERE, which is the whole reason this could stop being two buttons:
+  //     moveDir is a velocity TARGET (see the accel block below - accelDir = moveDir - velocity) and
+  //     is never normalised, so half deflection really is half the climb rate. verticalSpeed runs
+  //     350 / 280 / 180 by chassis, so even 0.2 of the track is a usable hover trim that no button
+  //     could ever express.
   if (input.touchActive) {
     if (Math.abs(input.touchMoveY) > 0.001) moveDir.addScaledVector(forward, -input.touchMoveY * ch.flightSpeed);
     if (Math.abs(input.touchMoveX) > 0.001) moveDir.addScaledVector(right, input.touchMoveX * ch.strafeSpeed);
-    if (input.touchMoveUp)   moveDir.addScaledVector(up, ch.verticalSpeed);
-    if (input.touchMoveDown) moveDir.addScaledVector(up, -ch.verticalSpeed);
+    if (Math.abs(input.touchMoveVert) > 0.001) moveDir.addScaledVector(up, input.touchMoveVert * ch.verticalSpeed);
   }
 
   // Puncture Afterburner speed boost
@@ -84280,7 +84303,11 @@ function updateRoundSystem(dt) {
         input.touchFire = false;
         input.touchAltFire = false;
         input.touchMoveX = 0; input.touchMoveY = 0;
-        input.touchMoveUp = false; input.touchMoveDown = false;
+        // (v43.99) The VTOL axis flushes with everything else at FIGHT. ⚠ A finger already
+        // resting on the stick emits no pointermove, so it stays at 0 until the thumb actually
+        // moves - exactly what a held W does two lines above when the keys map is cleared. Same
+        // semantics, on purpose.
+        input.touchMoveVert = 0;
       }
       // (v33.01) The OVERWORLD HUB is a peaceful free-flight space — suppress every
       // combat cue (combat music, the round-start tone, the FIGHT banner, and the
@@ -93773,7 +93800,7 @@ function _howtoBindLabel(scheme, action) {
     const t = {
       fire: 'RT', altFire: 'LT', dash: 'STICK RIM', reload: 'R',
       ability0: 'LB', ability1: 'RB', ability2: 'F', core: 'CORE',
-      moveUp: '▲', moveDown: '▼', view: '◳', shipPrev: '⇄', shipNext: '⇄', menu: '⚙',
+      moveUp: 'VTOL STICK', moveDown: 'VTOL STICK', view: '◳', shipPrev: '⇄', shipNext: '⇄', menu: '⚙',   // (v43.99)
     };
     return t[action] || '';
   }
@@ -94095,7 +94122,7 @@ function _howtoRender(ov) {
     rows.push(['ABILITIES', 'LB / RB / F']);
     rows.push(['CORE', 'CORE (TOP CENTRE)']);
     rows.push(['RELOAD', 'R']);
-    rows.push(['UP / DOWN', '▲ / ▼']);
+    rows.push(['UP / DOWN', 'VTOL STICK (UNDER ⚙)']);   // (v43.99)
     rows.push(['VIEW', '◳']);
     rows.push(['CYCLE SHIP', '⇄']);
     rows.push(['FULLSCREEN', '⛶']);
@@ -94369,10 +94396,12 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 // Raw input everywhere: stick = literal normalized thumb offset (no
 // deadzone, no curve), look pad = 1:1 px deltas into input.mouseDX/DY,
 // gyro = device rotation applied 1:1 to view rotation.
+// ⚠ (v43.99) "no deadzone" IS TRUE OF THE FLOATING STICKS ONLY. tc-vt, the VTOL track added
+// under the gear, has a fixed centre and therefore does have one (LSS_TOUCH.vertDead). See _vtTo().
 //
 // Integration points (all patched above):
 //   look   -> input.mouseDX/DY  (gate widened to input.touchActive)
-//   move   -> input.touchMoveX/Y, touchMoveUp/Down (read in updatePlayerMovement)
+//   move   -> input.touchMoveX/Y + touchMoveVert (read in updatePlayerMovement)
 //   fire   -> input.touchFire / touchAltFire (read in updateWeapon)
 //   Q/E/F  -> abilityInputPress/Release + input.keys[binding] (hold paths)
 //   R      -> input.keys[kbBindings.reload]
@@ -94490,7 +94519,28 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     '#tc-move-knob { position: absolute; left: 50%; top: 50%; width: 38%; height: 38%;',
     '  margin: -19% 0 0 -19%; border-radius: 50%; background: rgba(120, 220, 255, 0.18);',
     '  border: 1px solid rgba(170, 240, 255, 0.55); pointer-events: none; }',
-    '.tc-chip { font-size: 4vmin; }',
+    // (v43.99) THE VTOL TRACK. Owner: "a little one axis control stick... raised on the screen to
+    // the top under the settings button". A capsule with a knob that rides it - the knob is the
+    // only moving part and it moves on `transform`, same as #tc-move-knob.
+    // ⚠ translateY(-50%) IS THE KNOB'S RESTING TRANSFORM, not a margin. A percentage margin
+    //   would have been the obvious copy of #tc-move-knob's `margin: -19% 0 0 -19%`, and it would
+    //   have been wrong here: percentage margins resolve against the containing block's WIDTH on
+    //   EVERY axis, and #tc-move-knob only gets away with it because that stick is SQUARE. This
+    //   track is 11x26, so a -13% top margin would have offset the knob by 13% of ELEVEN.
+    // ⚠ NO `will-change`, NO transition. The v41.86 fullscreen paint loss was the compositor
+    //   layer budget going over on this exact overlay; a promoted layer per control is how that
+    //   comes back. A plain transform write on an already-composited overlay costs nothing.
+    '#tc-vt::before, #tc-vt::after { position: absolute; left: 0; right: 0; text-align: center;',
+    '  font-size: 2.2vmin; line-height: 1; opacity: 0.4; pointer-events: none; }',
+    '#tc-vt::before { content: "▲"; top: 0.9vmin; }',
+    '#tc-vt::after  { content: "▼"; bottom: 0.9vmin; }',
+    '#tc-vt-knob { position: absolute; left: 14%; right: 14%; top: 50%; height: 24%;',
+    '  transform: translateY(-50%); border-radius: 2.4vmin;',
+    '  background: rgba(120, 220, 255, 0.26); border: 1px solid rgba(170, 240, 255, 0.6);',
+    '  pointer-events: none; }',
+    // (v43.99) `.tc-chip` retired with ▲/▼ - they were its only two users in the file. The
+    // stylesheet doctrine four lines down is that this array carries only what the layout table
+    // cannot say, and a selector with no elements is the opposite of that.
     '.tc-top { font-size: 3vmin; }',
     // Invisible capture zones (genre standard: stick responds to the whole
     // bottom-left region, aim to the whole right half). Styled controls are
@@ -94522,9 +94572,14 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   //     △ 17.5, ⇄ 26.7), which now holds on every aspect instead of one.
   //   - ⚙ and ⛶ exported y of -0.2 / -0.3, hanging off the top edge. Clamped
   //     to 0; a negative offset is drag slop, never intent.
-  //   - ▲/▼ changed circle -> rect in the studio, but they carry `.tc-chip`
-  //     whose `border-radius:50%` an id rule does not undo. `shape` is applied
-  //     explicitly in _tcStyle so they render as the rects they were drawn as.
+  //   - (v43.99) ▲/▼ are GONE - tc-up/tc-dn are replaced by the single tc-vt track. The
+  //     old note here was about their `.tc-chip` border-radius fight, which no longer exists.
+  // ⚠⚠ (v43.99) tools/touch_studio.html's own SHIPPED table is STALE - it still holds the
+  //    pre-v35.48 seed positions (tc-move at left 2.5/bottom 3 against the live 31.2/14.7, the top
+  //    chips still centre-anchored against the live LEFT anchors this very comment records
+  //    re-anchoring). It is a scratch pad you drag in, not a mirror of this table, and it has been
+  //    a version behind since v35.48. It was re-baked from THIS table in v43.99 so the new stick can
+  //    be dragged; if you hand-edit the numbers below again, it goes stale again.
   // ═══════════════════════════════════════════════════════════════════════
   const _TC_LAYOUT = {
     'tc-move':      { ax:'left',   x:31.2, ay:'bottom', y:14.7, w:30,   h:30,   shape:'circle' },
@@ -94538,8 +94593,20 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     // (v39.16) y 2.1 -> 12. This is only the DEFAULT now — _layoutSticks pins the
     // real top against the measured bottom of the round-clock block; see there.
     'tc-core':      { ax:'center', x:-2.7, ay:'top',    y:12,   w:24,   h:9,    shape:'rect' },
-    'tc-up':        { ax:'left',   x:0.8,  ay:'bottom', y:32.5, w:13.9, h:27.1, shape:'rect' },
-    'tc-dn':        { ax:'left',   x:0.4,  ay:'bottom', y:1.3,  w:13.9, h:28.7, shape:'rect' },
+    // ⭐ (v43.99) THE VTOL STICK, where the ▲/▼ chips used to be two bottom-left slabs.
+    // x 0.7 is ⚙'s own x, so it is literally the gear's column; y 9 leaves a 2 vmin gap under
+    // the chip row (⚙ and ⛶ are the two that share this column and both end at 7.0).
+    // ⚠ THE WIDTH CEILING IS SET BY A 4:3 TABLET, NOT BY A PHONE. tc-move-zone is `pct`, so its
+    //   left edge is 10% of WIDTH - which in vmin is 10 x aspect: 22.5 on a 2.25:1 phone but only
+    //   13.3 on 4:3. Sizing against the two viewports I could measure would have allowed w 21 and
+    //   collided on the aspect I could not. 0.7 + 11 = 11.7 clears 13.3 everywhere. (An overlap
+    //   would only have cost the zone, not the stick - the zones are appended first so controls
+    //   hit-test above them - but a control sitting inside the move capture region is a trap for
+    //   whoever reads it next.)
+    // Resolved: 53x126 px @1090x485, 43x101 @844x390, 85x200 @1024x768. Bottom edge 35 vmin vs the
+    // move zone's top at 38 vmin. Nothing in the HUD is anchored top-left (fps and the gamepad chip
+    // are top-RIGHT, #minimap has been display:none since v35.40), so it covers nothing.
+    'tc-vt':        { ax:'left',   x:0.7,  ay:'top',    y:9,    w:11,   h:26,   shape:'rect' },
     'tc-set':       { ax:'left',   x:0.7,  ay:'top',    y:0,    w:7,    h:7,    shape:'rect' },
     'tc-fs':        { ax:'left',   x:8.7,  ay:'top',    y:0,    w:7,    h:7,    shape:'rect' },
     'tc-view':      { ax:'left',   x:17.5, ay:'top',    y:0.1,  w:7,    h:7,    shape:'rect' },
@@ -94620,6 +94687,11 @@ document.addEventListener('contextmenu', e => e.preventDefault());
   // Set inside _build() ; the visibility poll calls it on hide to clear a
   // drag the browser never finished (see v35.04 note in _layoutSticks).
   let _dragReset = null;
+  // (v43.99) VTOL deadzone, as a fraction of the half-track. 0.10 is ~5 px on a 844x390 phone and
+  // ~6 px at 1090x485. Module scope so LSS_TOUCH can tune it ON THE DEVICE, because the right value
+  // is a hardware feel judgement - thumb size, screen size, how much that hand is already doing -
+  // and is not something that can be settled from here. Clamped where it is set.
+  let _vtDead = 0.10;
   // (v35.06) True while a floating-origin move-stick drag is in flight.
   // Module scope so _layoutSticks can leave the dragged stick alone — the
   // FIGHT-moment re-layout used to yank the circle home mid-drag.
@@ -94762,6 +94834,19 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       // release re-homes it via _moveEnd -> _layoutSticks.
       if (!_moveDragging) pin('tc-move');
       pin('tc-look');
+      // ⭐ (v43.99) THE VTOL TRACK IS PINNED IN PX TOO, even though every other fixed button gets
+      // by on _tcStyle's vmin. Two reasons, and the second is the real one:
+      //   1. Its only geometric neighbour, tc-move-zone, is px-pinned from _visBox(). Leaving the
+      //      track in CSS vmin would mean its clearance was two different units resolved against two
+      //      different ideas of the viewport - and this whole module exists because CSS vmin
+      //      demonstrably lies exactly when it matters (see the v30.99 and v35.15 notes above).
+      //   2. It is the only fixed control whose PIXEL HEIGHT is an INPUT SCALE, not just a look:
+      //      _vtTo divides by half that height. A stale box is a mis-scaled axis, not a cosmetic
+      //      nudge. Pinning makes the number _vtGeom reads the same number this function wrote.
+      // (!) No _moveDragging-style suppression is needed: tc-vt has a FIXED origin, so it never owns
+      //     its own position mid-drag the way the floating move stick does. Re-pinning under a
+      //     pressed thumb is safe - _vtGeom re-reads on the next pointermove.
+      pin('tc-vt');
       pin('tc-move-zone');
       pin('tc-look-zone');
       // (v39.16) CORE is the only overlay button on the CENTRE line, so it is the
@@ -94975,10 +95060,13 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 
     const coreEl = _el('tc-core', '', 'CORE', _tcStyle('tc-core'), 'CORE');
 
-    // Vertical thrust chips beside the move stick. (v35.48) Drawn as tall rects
-    // now, not chips — _tcStyle writes the radius so `.tc-chip`'s 50% can't win.
-    const upEl = _el('tc-up', 'tc-chip', '▲', _tcStyle('tc-up'));
-    const dnEl = _el('tc-dn', 'tc-chip', '▼', _tcStyle('tc-dn'));
+    // (v43.99) VTOL: one analog track under the gear, replacing the two ▲/▼ slabs.
+    // The 5.5vmin radius rides in through _tcStyle's `extra`, which is applied AFTER the shape's
+    // borderRadius - that is the only way to get a capsule out of a table that knows two shapes.
+    const vtEl = _el('tc-vt', '', '', _tcStyle('tc-vt', { borderRadius: '5.5vmin' }));
+    const vtKnob = document.createElement('div');
+    vtKnob.id = 'tc-vt-knob';
+    vtEl.appendChild(vtKnob);
 
     // Settings ⚙ sits top-middle. (Gyro removed ; Lb now fills the
     // bottom slot of the L's right arm.)
@@ -95000,7 +95088,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const lookZone = _el('tc-look-zone', '', '');
     moveEl.style.pointerEvents = 'none';
     lookEl.style.pointerEvents = 'none';
-    const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, rdEl, fdEl, coreEl, upEl, dnEl, setEl, shipEl, viewEl, fsEl];
+    const els = [moveZone, lookZone, moveEl, lookEl, ltEl, lbEl, rtEl, rbEl, rdEl, fdEl, coreEl, vtEl, setEl, shipEl, viewEl, fsEl];
     for (const e of els) root.appendChild(e);
     document.body.appendChild(root);
     _refreshTouchLabels();
@@ -95072,8 +95160,6 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     _hold(rdEl, () => { const k = input.kbBindings && input.kbBindings.reload; if (k) input.keys[k] = true; },
                 () => { const k = input.kbBindings && input.kbBindings.reload; if (k) input.keys[k] = false; });
     _hold(coreEl, () => { try { activateCore(); } catch (_) {} }, null);
-    _hold(upEl, () => { input.touchMoveUp = true; },   () => { input.touchMoveUp = false; });
-    _hold(dnEl, () => { input.touchMoveDown = true; }, () => { input.touchMoveDown = false; });
     _hold(setEl, () => { try { buildSettingsPage(); openSettings(); } catch (_) {} }, null);
     _hold(fsEl, () => {
       try {
@@ -95171,6 +95257,73 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     lookZone.addEventListener('pointerup', _lookEnd);
     lookZone.addEventListener('pointercancel', _lookEnd);
 
+    // ---- VTOL: one axis, fixed centre, springs back to zero ----------------
+    // Owner: "a little one axis control stick instead" of the ▲/▼ buttons.
+    //
+    // FIXED CENTRE, NOT FLOATING, and that is the one real design choice here. tc-move floats
+    // because it answers to a whole invisible quadrant and you grab it blind; this is a small DRAWN
+    // track, so where you touch has to BE the value or the picture lies. The cost is a deadzone (a
+    // floating origin gets its zero for free) and a fat-finger risk at the ends - both priced below.
+    //
+    // (!) SPRINGS BACK, never parks. Vertical thrust is a HOLD everywhere else in this file - the
+    //     keyboard, the gamepad d-pad and the chips this replaces are all momentary - and moveDir is
+    //     rebuilt from zero every frame. A parked throttle would also desync from the two flush
+    //     sites that zero the axis behind its back (FIGHT, and the visibility poll).
+    // (!) IT COPIES THE STICK'S POINTER PATH, NOT _hold's. _hold's end handler has no pointerId
+    //     check, so a SECOND finger lifting anywhere releases the press - survivable for a fire
+    //     button, not for a control you hold while flying with the other thumb.
+    // (!) DEADZONE, applied here at the write site so every reader gets a clean value. A thumb
+    //     resting a few px off centre would otherwise push moveDir.lengthSq() above zero forever,
+    //     which flips the ship out of its coast/drag branch into accelerate - it would read as "the
+    //     ship stopped gliding". Rescaled, not just clipped, so the first millimetre past the
+    //     deadzone is still a small number and not a step. LSS_TOUCH.vertDead tunes it live.
+    let _vtPid = null, _vtR = 1, _vtMid = 0;
+    function _vtGeom() {
+      const r = vtEl.getBoundingClientRect();
+      if (r.height > 8) { _vtR = r.height / 2; _vtMid = r.top + _vtR; }
+    }
+    function _vtTo(y) {
+      // Screen y grows DOWNWARD; the axis is world-up-positive. This minus is the only negation in
+      // the VTOL path - see the note on input.touchMoveVert.
+      let v = (_vtMid - y) / _vtR;
+      if (v > 1) v = 1; else if (v < -1) v = -1;
+      const d = _vtDead;
+      v = (Math.abs(v) <= d) ? 0 : (v - (v > 0 ? d : -d)) / (1 - d);
+      input.touchMoveVert = v;
+      // 0.74 of the half-track + the knob's own 0.24 half-height = 0.98, so full deflection parks
+      // the knob just inside the capsule instead of straddling its rim.
+      vtKnob.style.transform = 'translateY(calc(-50% + ' + (-v * _vtR * 0.74).toFixed(1) + 'px))';
+    }
+    function _vtRelease() {
+      _vtPid = null;
+      input.touchMoveVert = 0;
+      vtKnob.style.transform = '';
+      vtEl.classList.remove('tc-pressed');
+    }
+    vtEl.addEventListener('pointerdown', ev => {
+      ev.preventDefault(); ev.stopPropagation();
+      try { vtEl.setPointerCapture(ev.pointerId); } catch (_) {}
+      _vtPid = ev.pointerId;
+      vtEl.classList.add('tc-pressed');
+      _vtGeom();
+      _vtTo(ev.clientY);
+    });
+    vtEl.addEventListener('pointermove', ev => {
+      if (ev.pointerId !== _vtPid) return;
+      ev.preventDefault();
+      // Re-measured per move, not cached at touchdown: _layoutSticksSoon re-pins this overlay at
+      // +0/250/700/1500/3000 ms after every reveal, rotation and fullscreen settle, and one of those
+      // ladders fires at the cinematic->countdown handover with a thumb plausibly already down.
+      _vtGeom();
+      _vtTo(ev.clientY);
+    });
+    const _vtEnd = ev => {
+      if (ev.pointerId !== _vtPid) return;
+      _vtRelease();
+    };
+    vtEl.addEventListener('pointerup', _vtEnd);
+    vtEl.addEventListener('pointercancel', _vtEnd);
+
     // (v35.15) Called by the visibility poll when the overlay hides.
     // display:none releases pointer capture WITHOUT delivering pointerup
     // on Chrome, so a drag in flight when the cinematic hid the overlay
@@ -95182,6 +95335,11 @@ document.addEventListener('contextmenu', e => e.preventDefault());
       _dashArmed = true;
       knobEl.style.transform = '';
       lookEl.classList.remove('tc-pressed');
+      // (v43.99) The VTOL stick has to join this, and it is the WORST of the three to lose a
+      // pointerup on: the other two clear themselves to zero on release of a drag that is re-read
+      // every frame, while a latched touchMoveVert is a permanent climb command with no finger on
+      // the screen and nothing left to lift.
+      _vtRelease();
       _layoutSticks();
     };
 
@@ -95191,7 +95349,7 @@ document.addEventListener('contextmenu', e => e.preventDefault());
 
   function _zeroTouchInputs() {
     input.touchMoveX = 0; input.touchMoveY = 0;
-    input.touchMoveUp = false; input.touchMoveDown = false;
+    input.touchMoveVert = 0;   // (v43.99)
     input.touchFire = false; input.touchAltFire = false;
   }
 
@@ -95270,6 +95428,12 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     get enabled() { return _enabled; },
     set lookScale(v) { if (v > 0) input.touchLookScale = v; },
     get lookScale() { return input.touchLookScale; },
+    // (v43.99) VTOL stick. `vertDead` is the deadzone as a fraction of the half-track (0..0.4);
+    // `vert` is the live axis, so the stick can be judged by NUMBER on a device with no console
+    // worth reading - hold it at the top and this should say 1.
+    set vertDead(v) { v = +v; if (v >= 0 && v <= 0.4) _vtDead = v; },
+    get vertDead() { return _vtDead; },
+    get vert() { return input.touchMoveVert; },
     // (v35.08) Console-only viewport diagnostic (replaces the removed
     // on-screen strip) : live _visBox decision + raw sources.
     get dbg() {
@@ -119253,11 +119417,13 @@ function updateDeathCam(dt) {
   // (v32.1) Touch virtual stick + vertical chips, so ghost mode is flyable on a
   // phone (touch input was ignored here entirely before). Signs mirror live
   // flight: stick up = forward, up-chip = ascend.
+  // (v43.99) The chips are one analog axis now and it is ALREADY world-up-positive, so it adds
+  // straight - no negation here, unlike touchMoveY on the line above. clampLength(0,1) below keeps a
+  // diagonal from outrunning a pure axis, so a fractional value survives intact.
   if (typeof input !== 'undefined' && input.touchActive) {
     mvF += (input.touchMoveY || 0);
     mvR += (input.touchMoveX || 0);
-    if (input.touchMoveUp)   mvU += 1;
-    if (input.touchMoveDown) mvU -= 1;
+    mvU += (input.touchMoveVert || 0);
   }
   
   const _ghostSpeed = 800; 
