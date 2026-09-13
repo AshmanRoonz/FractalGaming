@@ -4814,7 +4814,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.22';
+const LSS_BUILD = '43.23';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -8018,7 +8018,7 @@ async function joinRoom() {
       // handshake). Roster follows so their bot proxies appear.
       if (net.openSolo && game.state !== 'select' && net.sendEvent) {
         try {
-          net.sendEvent({ type: 'dropin_state', host: net.myPeerId,
+          net.sendEvent({ type: 'dropin_state', ago: _lssModeAgo(), host: net.myPeerId,
             map: game.selectedMap, seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
             mst: (typeof net.matchStartedAt === 'number') ? net.matchStartedAt : undefined,   // (v38.60)
             mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
@@ -8030,7 +8030,7 @@ async function joinRoom() {
       // straight in too (no READY dance ; bots fill the empty seats).
       if (net.openSolo && game.state === 'select' && net.sendEvent) {
         try {
-          net.sendEvent({ type: 'open_solo_start',
+          net.sendEvent({ type: 'open_solo_start', ago: _lssModeAgo(),
             host: net.openSoloHostId || net.myPeerId,
             seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
             mst: (typeof net.matchStartedAt === 'number') ? net.matchStartedAt : undefined,   // (v38.60)
@@ -8163,7 +8163,7 @@ async function startOpenSolo() {
     net.matchStartedAt = Date.now();   // (v38.60) shared match id stamp (see scheduleMatchStart)
     if (net.peers && net.peers.size > 0 && net.sendEvent) {
       try {
-        net.sendEvent({ type: 'open_solo_start', host: net.myPeerId,
+        net.sendEvent({ type: 'open_solo_start', ago: _lssModeAgo(), host: net.myPeerId,
           seed: net.worldSeed >>> 0, mst: net.matchStartedAt,
           mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
           cyber: !!(game._cyber && game._cyber.armed) });   // (v37.80)
@@ -8237,7 +8237,7 @@ function _setEliminationBots(on, broadcast) {
       if (on) {
         // Reuse the existing, well-tested ON event.
         if (!net.matchStartedAt) net.matchStartedAt = Date.now();   // (v38.60)
-        net.sendEvent({ type: 'open_solo_start', host: net.myPeerId,
+        net.sendEvent({ type: 'open_solo_start', ago: _lssModeAgo(), host: net.myPeerId,
           seed: (net.worldSeed >>> 0), mst: net.matchStartedAt,
           mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
           cyber: !!(game._cyber && game._cyber.armed) });   // (v37.80)
@@ -11492,7 +11492,7 @@ async function _startHostedMode() {
     net.worldSeed = (Math.random() * 0xffffffff) >>> 0;
     net.matchStartedAt = Date.now();   // (v38.60) shared match id stamp (see scheduleMatchStart)
     if (net.peers && net.peers.size > 0 && net.sendEvent) {
-      try { net.sendEvent({ type: 'open_solo_start', host: net.myPeerId, seed: net.worldSeed >>> 0, mode: _mode,
+      try { net.sendEvent({ type: 'open_solo_start', ago: _lssModeAgo(), host: net.myPeerId, seed: net.worldSeed >>> 0, mode: _mode,
                             mst: net.matchStartedAt,
                             cyber: !!(game._cyber && game._cyber.armed) }); } catch (_) {}   // (v37.80)
     }
@@ -14199,8 +14199,14 @@ function handleNetEvent(evt, fromPeerId) {
   // the lowest peerId wins (same tie-break style as the launch proposer).
   if (evt.type === 'open_solo_start') {
     const evtHost = evt.host || fromPeerId;
-    if (net.openSolo && net.openSoloHostId &&
-        String(net.openSoloHostId) <= String(evtHost)) return;
+    // (v43.23) was: String(net.openSoloHostId) <= String(evtHost) - a sort of RANDOM trystero ids,
+    // so which of two simultaneous hosts won was a coin flip with no join-order meaning.
+    // (!) Same precondition the original guard had - only arbitrate when we are ALSO an open-solo
+    // host. A plain joiner accepts the briefing, exactly as before; only the ago rule changed.
+    if (net.openSolo && net.openSoloHostId && !_lssPeerOutranksMe(evt, fromPeerId)) return;
+    try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
+    try { if (evt.mode) net.roomMode = evt.mode; } catch (_) {}
+    try { if (evt.mode && evt.mode !== LSS.MODE) _lssClearModeSetup(); } catch (_) {}
     net.openSolo = true;
     net.openSoloHostId = evtHost;
     net.solo = false;
@@ -14251,6 +14257,24 @@ function handleNetEvent(evt, fromPeerId) {
   }
   // Joiner briefing: the open-solo host describes the match in progress.
   if (evt.type === 'dropin_state') {
+    // (v43.23) THE MISSING GUARD. See _lssPeerOutranksMe. Without this, two players who both launched
+    // before their peers connected each rebuilt the other's world and swapped modes.
+    // When they DO outrank us this is exactly the right machinery to let through: it carries the mode,
+    // the map AND the seed, and drops us back into ship select in their world - which is what an
+    // outranked client stuck mid-match actually needs, since mode_set's adopt cannot rebuild a live one.
+    // (!) ONLY arbitrate when WE are mid-match too. A live match always beats a lobby choice -
+    // otherwise a player who picked their mode ten minutes ago would outrank a host who started
+    // thirty seconds ago and REJECT the world sync, breaking ordinary drop-in. The argument this
+    // guard exists for is the one where BOTH sides already launched.
+    const _iAmLive = (typeof game !== 'undefined' && game &&
+                      (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
+    if (_iAmLive && !_lssPeerOutranksMe(evt, fromPeerId)) {
+      _lssModeLog('rx', 'dropin_state', evt.mode, (typeof evt.ago === 'number' ? evt.ago : null), fromPeerId, 'IGNORED - my match outranks');
+      return;
+    }
+    try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
+    try { net.roomMode = evt.mode || net.roomMode; } catch (_) {}
+    try { if (evt.mode && evt.mode !== LSS.MODE) _lssClearModeSetup(); } catch (_) {}
     net.openSoloHostId = evt.host || null;
     net._dropin = evt;
     if (typeof evt.mst === 'number' && isFinite(evt.mst)) net.matchStartedAt = evt.mst;   // (v38.60) shared match id
@@ -27745,6 +27769,8 @@ if (typeof window !== 'undefined') window.__dbg = {
           ? Math.round(performance.now() - net.roomJoinedAt) : 0,
         seed: (typeof net !== 'undefined' && net) ? net.worldSeed : null,
         myPeerId: (typeof net !== 'undefined' && net) ? net.myPeerId : null,
+        // (v43.23) the handshake itself - every mode-bearing packet in/out with its verdict
+        log: (typeof net !== 'undefined' && net && net._modeLog) ? net._modeLog.slice() : [],
       };
     } catch (e) { return { error: String(e) }; }
   },
@@ -90189,6 +90215,7 @@ function _lssModeAnnounce(targetPeerId) {
     // function of net.worldSeed (_lssGenEndlessLevel), so two peers agreeing on 'endless' with
     // different seeds are still in different worlds - connected and separated, one layer down.
     try { if (net.worldSeed != null) msg.seed = net.worldSeed >>> 0; } catch (_) {}
+    _lssModeLog('tx', 'mode_set', msg.mode, msg.ago, targetPeerId, targetPeerId ? 'targeted' : 'broadcast');
     if (targetPeerId) net.sendEvent(msg, targetPeerId); else net.sendEvent(msg);
   } catch (_) {}
 }
@@ -90203,25 +90230,73 @@ function _lssModeAnnounceBurst(targetPeerId) {
 }
 // The arbiter. Runs on BOTH sides of every join, and both sides reach the same verdict because the
 // comparison is antisymmetric.
+// (v43.23) ⚠⚠ ONE RULE, THREE CHANNELS. v43.22 built the elapsed-time arbiter and then applied it to
+// mode_set only - but there are THREE join-time channels that carry a mode, and the other two kept
+// their own (random-id) rules. Owner, after v43.22 shipped: "somehow managed to join different modes
+// again."
+//   dropin_state  - had NO GUARD AT ALL. It ran _applyModeClientSetup(evt.mode) + applyWorldSync(map,
+//                   seed) + enterShipSelect() unconditionally. onPeerJoin sends it whenever
+//                   `net.openSolo && game.state !== 'select'`, and BOTH players set net.openSolo in
+//                   _startHostedMode - so once both had launched, each adopted the OTHER's mode and
+//                   world and they simply SWAPPED. Still separated, and it looks identical to the
+//                   original bug.
+//   open_solo_start - guarded, but on String(net.openSoloHostId) <= String(evtHost): the same random
+//                   peer-id sort, carrying no join-order meaning.
+// Why this is the path that actually bites in real life: peer discovery here is Nostr signalling plus
+// WebRTC across two networks, which takes many seconds. Both players click through ship select and
+// launch long before onPeerJoin fires. By then game.state is 'playing' on both, mode_set's adopt is
+// refused by the in-play guard (correctly - you cannot rebuild the world under a live match), and
+// dropin_state is the ONLY channel still live. So the one channel that fires in the real timing was
+// the one with no rule at all.
+// `ago` now rides all three payloads. Old clients omit it and fall back to the id sort, which is no
+// worse than what they had.
+function _lssPeerOutranksMe(evt, fromPeerId) {
+  try {
+    if (typeof net === 'undefined' || !net || typeof LSS === 'undefined') return false;
+    const theirAgo = (evt && typeof evt.ago === 'number') ? evt.ago : null;
+    const myAgo = _lssModeAgo();
+    let out, why;
+    if (theirAgo === null) {
+      // Pre-v43.23 peer: no standing on the wire. Fall back to the old sort rather than letting an
+      // un-rankable peer win by default.
+      out = String(fromPeerId) < String(net.myPeerId); why = 'no-ago/id-sort';
+    } else if (theirAgo < 0) {
+      out = false; why = 'they-never-chose';
+    } else if (myAgo < 0) {
+      out = true;  why = 'i-never-chose';
+    } else if (Math.abs(theirAgo - myAgo) > 1200) {
+      out = theirAgo > myAgo; why = 'chose-' + (out ? 'earlier' : 'later');
+    } else {
+      out = String(fromPeerId) < String(net.myPeerId); why = 'tie/id-sort';
+    }
+    _lssModeLog('rx', evt && evt.type, evt && evt.mode, theirAgo, fromPeerId, (out ? 'THEY WIN' : 'i win') + ' (' + why + ', mine=' + myAgo + ')');
+    return out;
+  } catch (_) { return false; }
+}
+// (v43.23) A handshake log. This bug has now survived three fixes because it can only be reproduced
+// on two real machines, and every round of guessing cost a version. Every mode-bearing packet in and
+// out is recorded with its standing and the verdict, so ONE run answers where it broke:
+//   __dbg.roomMode().log
+function _lssModeLog(dir, type, mode, ago, peer, verdict) {
+  try {
+    if (!net._modeLog) net._modeLog = [];
+    net._modeLog.push({
+      t: Math.round(performance.now() / 100) / 10,
+      dir: dir, type: type || '?', mode: mode || '?', ago: (ago == null ? null : ago),
+      peer: peer ? String(peer).slice(0, 6) : null,
+      state: (typeof game !== 'undefined' && game) ? game.state : '?',
+      v: verdict || '',
+    });
+    if (net._modeLog.length > 60) net._modeLog.shift();
+  } catch (_) {}
+}
+
 function _lssModeFromPeer(evt, fromPeerId) {
   try {
     if (!evt || typeof evt.mode !== 'string' || !evt.mode) return;
     if (typeof net === 'undefined' || !net || typeof LSS === 'undefined') return;
+    if (!_lssPeerOutranksMe(evt, fromPeerId)) return;
     const theirAgo = (typeof evt.ago === 'number') ? evt.ago : -1;
-    if (theirAgo < 0) return;                      // they never chose; they do not get to decide
-    const myAgo = _lssModeAgo();
-    let theyWin;
-    if (myAgo < 0) {
-      theyWin = true;                              // we never chose and they did - no contest
-    } else if (Math.abs(theirAgo - myAgo) > 1200) {
-      theyWin = theirAgo > myAgo;                  // a real difference in who committed first
-    } else {
-      // Chose within ~1.2s of each other: nobody was meaningfully "first", so all that matters is
-      // that both sides pick the SAME winner. The id sort is fine here - it is only wrong when it
-      // pretends to mean join order.
-      theyWin = String(fromPeerId) < String(net.myPeerId);
-    }
-    if (!theyWin) return;                          // we are the room; our own announce convinces them
     // Inherit their standing rather than restamping to now, or a third peer would see us as a late
     // chooser and try to overrule the room we just joined.
     try { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - theirAgo; } catch (_) {}

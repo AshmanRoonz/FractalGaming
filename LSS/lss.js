@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.22';
+const LSS_BUILD = '43.23';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2307,7 +2307,7 @@ async function joinRoom() {
 
       if (net.openSolo && game.state !== 'select' && net.sendEvent) {
         try {
-          net.sendEvent({ type: 'dropin_state', host: net.myPeerId,
+          net.sendEvent({ type: 'dropin_state', ago: _lssModeAgo(), host: net.myPeerId,
             map: game.selectedMap, seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
             mst: (typeof net.matchStartedAt === 'number') ? net.matchStartedAt : undefined,   // (v38.60)
             mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
@@ -2317,7 +2317,7 @@ async function joinRoom() {
       }
       if (net.openSolo && game.state === 'select' && net.sendEvent) {
         try {
-          net.sendEvent({ type: 'open_solo_start',
+          net.sendEvent({ type: 'open_solo_start', ago: _lssModeAgo(),
             host: net.openSoloHostId || net.myPeerId,
             seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
             mst: (typeof net.matchStartedAt === 'number') ? net.matchStartedAt : undefined,   // (v38.60)
@@ -2419,7 +2419,7 @@ async function startOpenSolo() {
     net.matchStartedAt = Date.now();   // (v38.60) shared match id stamp (see scheduleMatchStart)
     if (net.peers && net.peers.size > 0 && net.sendEvent) {
       try {
-        net.sendEvent({ type: 'open_solo_start', host: net.myPeerId,
+        net.sendEvent({ type: 'open_solo_start', ago: _lssModeAgo(), host: net.myPeerId,
           seed: net.worldSeed >>> 0, mst: net.matchStartedAt,
           mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
           cyber: !!(game._cyber && game._cyber.armed) });   // (v37.80)
@@ -2471,7 +2471,7 @@ function _setEliminationBots(on, broadcast) {
     try {
       if (on) {
         if (!net.matchStartedAt) net.matchStartedAt = Date.now();   // (v38.60)
-        net.sendEvent({ type: 'open_solo_start', host: net.myPeerId,
+        net.sendEvent({ type: 'open_solo_start', ago: _lssModeAgo(), host: net.myPeerId,
           seed: (net.worldSeed >>> 0), mst: net.matchStartedAt,
           mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
           cyber: !!(game._cyber && game._cyber.armed) });   // (v37.80)
@@ -4747,7 +4747,7 @@ async function _startHostedMode() {
     net.worldSeed = (Math.random() * 0xffffffff) >>> 0;
     net.matchStartedAt = Date.now();   // (v38.60) shared match id stamp (see scheduleMatchStart)
     if (net.peers && net.peers.size > 0 && net.sendEvent) {
-      try { net.sendEvent({ type: 'open_solo_start', host: net.myPeerId, seed: net.worldSeed >>> 0, mode: _mode,
+      try { net.sendEvent({ type: 'open_solo_start', ago: _lssModeAgo(), host: net.myPeerId, seed: net.worldSeed >>> 0, mode: _mode,
                             mst: net.matchStartedAt,
                             cyber: !!(game._cyber && game._cyber.armed) }); } catch (_) {}   // (v37.80)
     }
@@ -6678,8 +6678,10 @@ function handleNetEvent(evt, fromPeerId) {
   }
   if (evt.type === 'open_solo_start') {
     const evtHost = evt.host || fromPeerId;
-    if (net.openSolo && net.openSoloHostId &&
-        String(net.openSoloHostId) <= String(evtHost)) return;
+    if (net.openSolo && net.openSoloHostId && !_lssPeerOutranksMe(evt, fromPeerId)) return;
+    try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
+    try { if (evt.mode) net.roomMode = evt.mode; } catch (_) {}
+    try { if (evt.mode && evt.mode !== LSS.MODE) _lssClearModeSetup(); } catch (_) {}
     net.openSolo = true;
     net.openSoloHostId = evtHost;
     net.solo = false;
@@ -6717,6 +6719,15 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'dropin_state') {
+    const _iAmLive = (typeof game !== 'undefined' && game &&
+                      (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
+    if (_iAmLive && !_lssPeerOutranksMe(evt, fromPeerId)) {
+      _lssModeLog('rx', 'dropin_state', evt.mode, (typeof evt.ago === 'number' ? evt.ago : null), fromPeerId, 'IGNORED - my match outranks');
+      return;
+    }
+    try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
+    try { net.roomMode = evt.mode || net.roomMode; } catch (_) {}
+    try { if (evt.mode && evt.mode !== LSS.MODE) _lssClearModeSetup(); } catch (_) {}
     net.openSoloHostId = evt.host || null;
     net._dropin = evt;
     if (typeof evt.mst === 'number' && isFinite(evt.mst)) net.matchStartedAt = evt.mst;   // (v38.60) shared match id
@@ -16688,6 +16699,7 @@ if (typeof window !== 'undefined') window.__dbg = {
           ? Math.round(performance.now() - net.roomJoinedAt) : 0,
         seed: (typeof net !== 'undefined' && net) ? net.worldSeed : null,
         myPeerId: (typeof net !== 'undefined' && net) ? net.myPeerId : null,
+        log: (typeof net !== 'undefined' && net && net._modeLog) ? net._modeLog.slice() : [],
       };
     } catch (e) { return { error: String(e) }; }
   },
@@ -60192,6 +60204,7 @@ function _lssModeAnnounce(targetPeerId) {
       cyber: !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed),
     };
     try { if (net.worldSeed != null) msg.seed = net.worldSeed >>> 0; } catch (_) {}
+    _lssModeLog('tx', 'mode_set', msg.mode, msg.ago, targetPeerId, targetPeerId ? 'targeted' : 'broadcast');
     if (targetPeerId) net.sendEvent(msg, targetPeerId); else net.sendEvent(msg);
   } catch (_) {}
 }
@@ -60202,22 +60215,47 @@ function _lssModeAnnounceBurst(targetPeerId) {
     setTimeout(() => { try { _lssModeAnnounce(targetPeerId); } catch (_) {} }, 800);
   } catch (_) {}
 }
+function _lssPeerOutranksMe(evt, fromPeerId) {
+  try {
+    if (typeof net === 'undefined' || !net || typeof LSS === 'undefined') return false;
+    const theirAgo = (evt && typeof evt.ago === 'number') ? evt.ago : null;
+    const myAgo = _lssModeAgo();
+    let out, why;
+    if (theirAgo === null) {
+      out = String(fromPeerId) < String(net.myPeerId); why = 'no-ago/id-sort';
+    } else if (theirAgo < 0) {
+      out = false; why = 'they-never-chose';
+    } else if (myAgo < 0) {
+      out = true;  why = 'i-never-chose';
+    } else if (Math.abs(theirAgo - myAgo) > 1200) {
+      out = theirAgo > myAgo; why = 'chose-' + (out ? 'earlier' : 'later');
+    } else {
+      out = String(fromPeerId) < String(net.myPeerId); why = 'tie/id-sort';
+    }
+    _lssModeLog('rx', evt && evt.type, evt && evt.mode, theirAgo, fromPeerId, (out ? 'THEY WIN' : 'i win') + ' (' + why + ', mine=' + myAgo + ')');
+    return out;
+  } catch (_) { return false; }
+}
+function _lssModeLog(dir, type, mode, ago, peer, verdict) {
+  try {
+    if (!net._modeLog) net._modeLog = [];
+    net._modeLog.push({
+      t: Math.round(performance.now() / 100) / 10,
+      dir: dir, type: type || '?', mode: mode || '?', ago: (ago == null ? null : ago),
+      peer: peer ? String(peer).slice(0, 6) : null,
+      state: (typeof game !== 'undefined' && game) ? game.state : '?',
+      v: verdict || '',
+    });
+    if (net._modeLog.length > 60) net._modeLog.shift();
+  } catch (_) {}
+}
+
 function _lssModeFromPeer(evt, fromPeerId) {
   try {
     if (!evt || typeof evt.mode !== 'string' || !evt.mode) return;
     if (typeof net === 'undefined' || !net || typeof LSS === 'undefined') return;
+    if (!_lssPeerOutranksMe(evt, fromPeerId)) return;
     const theirAgo = (typeof evt.ago === 'number') ? evt.ago : -1;
-    if (theirAgo < 0) return;                      // they never chose; they do not get to decide
-    const myAgo = _lssModeAgo();
-    let theyWin;
-    if (myAgo < 0) {
-      theyWin = true;                              // we never chose and they did - no contest
-    } else if (Math.abs(theirAgo - myAgo) > 1200) {
-      theyWin = theirAgo > myAgo;                  // a real difference in who committed first
-    } else {
-      theyWin = String(fromPeerId) < String(net.myPeerId);
-    }
-    if (!theyWin) return;                          // we are the room; our own announce convinces them
     try { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - theirAgo; } catch (_) {}
     if (evt.seed != null) { try { net.worldSeed = evt.seed >>> 0; } catch (_) {} }
     net.roomMode = evt.mode;
