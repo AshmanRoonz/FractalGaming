@@ -5901,7 +5901,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.87';
+const LSS_BUILD = '43.88';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -14672,6 +14672,11 @@ class NetworkPlayer {
     // peer, and why quitting on the other devices is what finally made it permanent: onPeerLeave
     // drops the last reference to the object holding the mesh.
     try { if (typeof _disposeThermalShieldFlameSpheres === 'function') _disposeThermalShieldFlameSpheres(this); } catch (_) {}
+    // (v43.88) The four hull-hug shells come off BEFORE the group teardown. They are
+    // children of this.mesh, so the `dispose` helper below never reached them via
+    // scene.remove - and its geometry.dispose() would have freed the mirror's SHARED
+    // hull geometry outright, which is the same bug commitLoadout had.
+    if (typeof _clearHullHugShieldsOn === 'function') _clearHullHugShieldsOn(this);
     // (leak fix 2026-06-12) Peer is gone for good; dispose the whole ship
     // group's per-build resources, not just unlink it.
     if (typeof _disposeShipGroup === 'function') _disposeShipGroup(this.mesh);
@@ -14685,15 +14690,18 @@ class NetworkPlayer {
       if (m.geometry) m.geometry.dispose();
       if (m.material) m.material.dispose();
     };
-    dispose(this._vortexShieldMesh);  this._vortexShieldMesh = null;
+    // (v43.88) The hull-hug shells (_vortexShieldMesh / _gunShieldMesh /
+    // _thermalShieldMesh / _swordBlockMesh) are gone by now - _clearHullHugShieldsOn
+    // above detached them off this.mesh and disposed their plasma materials, which is
+    // strictly more than this helper managed: a mirror clone's root is a Group, so
+    // `m.material.dispose()` found nothing and the material leaked with every peer
+    // that left wearing a shield. What is left here is the legacy ring / edge / back
+    // meshes, which really were per-build scene children.
     dispose(this._vortexShieldRing);  this._vortexShieldRing = null;
-    dispose(this._gunShieldMesh);     this._gunShieldMesh = null;
     dispose(this._gunShieldBack);     this._gunShieldBack = null;
     dispose(this._gunShieldEdge);     this._gunShieldEdge = null;
-    dispose(this._thermalShieldMesh); this._thermalShieldMesh = null;
     dispose(this._thermalShieldRing); this._thermalShieldRing = null;
-    // Slayer Absorption dome / ring ; same dispose pattern.
-    dispose(this._swordBlockMesh);    this._swordBlockMesh = null;
+    // Slayer Absorption ring ; same dispose pattern.
     dispose(this._swordBlockRing);    this._swordBlockRing = null;
   }
 }
@@ -50100,7 +50108,12 @@ function _disposeShipGroup(group) {
     // geometry every other ship built from that GLB is still drawing with.
     // Reached on the Bot dispose branch, NetworkPlayer.destroy (peer leaves mid
     // match with the perk on) and the GLB swap-in in swapToModelMeshWhenReady.
-    if (typeof _stripOutlineHug === 'function') _stripOutlineHug(group);
+    // (v43.88) ...and the four hull-hug SHIELD shells are the same clone from the
+    // same helper, so the sweep is by `userData.shieldClone` now - it catches the rim
+    // (which sets that flag too) and the Vortex / Body / Fire / Absorption shells.
+    // commitLoadout used to reach this line with a live shell still attached, because
+    // its cleanup called scene.remove on something parented to player.mesh.
+    if (typeof _stripHullHugClones === 'function') _stripHullHugClones(group);
     if (group.parent) group.parent.remove(group);
     group.traverse((o) => {
       if (!(o.isMesh || o.isSprite || o.isLine || o.isPoints)) return;
@@ -50190,6 +50203,13 @@ function swapToModelMeshWhenReady(owner, teamColor) {
     const wasAwaitingGlb = !!(oldMesh.userData && oldMesh.userData.awaitingGlb);
     const visible = wasAwaitingGlb ? true : oldMesh.visible;
     const botRef = oldMesh.userData && oldMesh.userData.bot;
+    // (v43.88) Take the hull-hug shield shells off the OUTGOING hull and null the
+    // owner's fields first. The owner SURVIVES this swap, so the by-mesh sweep inside
+    // _disposeShipGroup is not enough on its own: it would free the shell while
+    // owner.vortexShieldMesh still pointed at it, and updateShieldVisuals only
+    // rebuilds when that field is null - the shield would stay gone for the rest of
+    // the activation while every frame wrote uniforms into a disposed material.
+    if (typeof _clearHullHugShieldsOn === 'function') _clearHullHugShieldsOn(owner);
     // (leak fix 2026-06-12) Dispose the replaced group, don't just unlink it.
     _disposeShipGroup(oldMesh);
     // (v36.31) Carry the owner's livery across the GLB swap-in. This is the
@@ -72824,12 +72844,19 @@ function commitLoadout(key) {
     player._railgunChargeAudio = null;
   }
   player._railgunChargingPrev = false;
-  // Clean up shield visual meshes from previous loadout
-  if (player.vortexShieldMesh) { scene.remove(player.vortexShieldMesh); player.vortexShieldMesh = null; }
+  // Clean up shield visual meshes from previous loadout.
+  // (v43.88) The four hull-hug shells are children of player.mesh, NOT of the scene -
+  // every _makeHullHugShield caller does player.mesh.add(m). So `scene.remove` here
+  // was a no-op that nulled the ONLY field which could still find the clone, and nine
+  // lines later _disposeShipGroup traversed straight through the still-attached shell
+  // and disposed the hull GLB geometry it SHARES with every other ship of that key
+  // (bots, peers, the picker preview) - they keep drawing it and three.js silently
+  // re-uploads. SLAYER's Absorption shell was never even listed here.
+  _clearHullHugShieldsOn(player);
+  // Legacy ring / edge meshes (older saved sessions may still have one set). Nothing
+  // builds these any more, and unlike the shells they really were scene children.
   if (player.vortexShieldRing) { scene.remove(player.vortexShieldRing); player.vortexShieldRing = null; }
-  if (player.gunShieldMesh) { scene.remove(player.gunShieldMesh); player.gunShieldMesh = null; }
   if (player.gunShieldEdge) { scene.remove(player.gunShieldEdge); player.gunShieldEdge = null; }
-  if (player.thermalShieldMesh) { scene.remove(player.thermalShieldMesh); player.thermalShieldMesh = null; }
   if (player.thermalShieldRing) { scene.remove(player.thermalShieldRing); player.thermalShieldRing = null; }
 
   // (v38.60) DISPOSE the outgoing hull, don't just detach it. Every commit
@@ -74417,6 +74444,61 @@ function _clearAllOutlineOptics() {
   // has nothing left to do; if the perk is STILL outline the next tick sees
   // _outlineActive true and re-attaches from scratch.
   try { _tickPerkEffects._outlineWasActive = false; } catch (_) {}
+}
+
+// (v43.88) HULL-HUG SHIELD CLONES ARE THE SAME HAZARD AS THE OUTLINE RIM, ONE FLAG
+// WIDER. _makeHullHugShield builds its shell with _mirrorMeshTree too, so every mesh
+// in it SHARES the hull's GLB geometry while carrying none of the
+// userData._sharedGLBGeo flags the guard in _disposeShipGroup looks for - and the
+// caller parents it under the SHIP (player.mesh.add / this.mesh.add), never the
+// scene. A group torn down with a shield up therefore walked its own hull's shared
+// geometry into geometry.dispose(), and every other ship built from that GLB (bots,
+// peers, the picker preview) kept drawing it - three.js silently re-uploads, which
+// is the v43.86 failure mode on hull models instead of effect meshes.
+// Broader than _stripOutlineHug on purpose: this one runs on the DESTROY path, so it
+// takes every hull-hug clone off, rims included. _stripOutlineHug stays narrow
+// because _clearOutlineOpticsOn runs it on a LIVE ship at every perk swap, and that
+// ship may be wearing a shield that has to survive the swap.
+function _stripHullHugClones(root) {
+  if (!root || !root.children) return;
+  // Clones are added directly to the ship group, so direct children is enough - and
+  // the loop runs backwards because _disposeShieldClone splices the array.
+  for (let i = root.children.length - 1; i >= 0; i--) {
+    const c = root.children[i];
+    if (c && c.userData && c.userData.shieldClone) {
+      try { _disposeShieldClone(c); } catch (_) { try { root.remove(c); } catch (__) {} }
+    }
+  }
+}
+
+// (v43.88) BY-OWNER CLEAR, the companion to the by-mesh sweep above - the same
+// pairing _clearOutlineOpticsOn / _stripOutlineHug already use. Stripping the group
+// frees the clone but leaves the owner's field pointing at a detached,
+// material-disposed mesh, and updateShieldVisuals only rebuilds when that field is
+// null - so an owner that SURVIVES the swap (commitLoadout, the GLB swap-in) would
+// lose its shield for the rest of the activation and keep writing uniforms into a
+// disposed material. Handles BOTH field-name conventions: the player uses
+// `vortexShieldMesh`, NetworkPlayer uses `_vortexShieldMesh`.
+function _clearHullHugShieldsOn(ship) {
+  if (!ship) return;
+  const keys = ['vortexShieldMesh',  '_vortexShieldMesh',
+                'gunShieldMesh',     '_gunShieldMesh',
+                'thermalShieldMesh', '_thermalShieldMesh',
+                'swordBlockMesh',    '_swordBlockMesh'];
+  let had = false;
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (!ship[k]) continue;
+    had = true;
+    // Detaches from the REAL parent and disposes only the plasma material; the
+    // mirrored geometries are shared with the source hull and are left alone.
+    try { _disposeShieldClone(ship[k]); } catch (_) {}
+    ship[k] = null;
+  }
+  // The hull's own materials keep the shield's boosted emissive until this runs.
+  if (had && ship.mesh && typeof _clearShipShieldEmissive === 'function') {
+    try { _clearShipShieldEmissive(ship.mesh); } catch (_) {}
+  }
 }
 
 // Apply opacity to all visible mesh materials on a ship root. Used by the

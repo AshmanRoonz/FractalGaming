@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.87';
+const LSS_BUILD = '43.88';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6173,6 +6173,7 @@ class NetworkPlayer {
 
   destroy() {
     try { if (typeof _disposeThermalShieldFlameSpheres === 'function') _disposeThermalShieldFlameSpheres(this); } catch (_) {}
+    if (typeof _clearHullHugShieldsOn === 'function') _clearHullHugShieldsOn(this);
     if (typeof _disposeShipGroup === 'function') _disposeShipGroup(this.mesh);
     else if (this.mesh && this.mesh.parent) scene.remove(this.mesh);
     const dispose = (m) => {
@@ -6181,14 +6182,10 @@ class NetworkPlayer {
       if (m.geometry) m.geometry.dispose();
       if (m.material) m.material.dispose();
     };
-    dispose(this._vortexShieldMesh);  this._vortexShieldMesh = null;
     dispose(this._vortexShieldRing);  this._vortexShieldRing = null;
-    dispose(this._gunShieldMesh);     this._gunShieldMesh = null;
     dispose(this._gunShieldBack);     this._gunShieldBack = null;
     dispose(this._gunShieldEdge);     this._gunShieldEdge = null;
-    dispose(this._thermalShieldMesh); this._thermalShieldMesh = null;
     dispose(this._thermalShieldRing); this._thermalShieldRing = null;
-    dispose(this._swordBlockMesh);    this._swordBlockMesh = null;
     dispose(this._swordBlockRing);    this._swordBlockRing = null;
   }
 }
@@ -31178,7 +31175,7 @@ if (shipModelCache.ready && typeof shipModelCache.ready.then === 'function') {
 function _disposeShipGroup(group) {
   if (!group) return;
   try {
-    if (typeof _stripOutlineHug === 'function') _stripOutlineHug(group);
+    if (typeof _stripHullHugClones === 'function') _stripHullHugClones(group);
     if (group.parent) group.parent.remove(group);
     group.traverse((o) => {
       if (!(o.isMesh || o.isSprite || o.isLine || o.isPoints)) return;
@@ -31239,6 +31236,7 @@ function swapToModelMeshWhenReady(owner, teamColor) {
     const wasAwaitingGlb = !!(oldMesh.userData && oldMesh.userData.awaitingGlb);
     const visible = wasAwaitingGlb ? true : oldMesh.visible;
     const botRef = oldMesh.userData && oldMesh.userData.bot;
+    if (typeof _clearHullHugShieldsOn === 'function') _clearHullHugShieldsOn(owner);
     _disposeShipGroup(oldMesh);
     owner.mesh = createShipMesh(owner.chassis, capturedTeam, capturedKey, owner.skinId);
     owner.mesh.position.copy(pos);
@@ -47558,11 +47556,9 @@ function commitLoadout(key) {
     player._railgunChargeAudio = null;
   }
   player._railgunChargingPrev = false;
-  if (player.vortexShieldMesh) { scene.remove(player.vortexShieldMesh); player.vortexShieldMesh = null; }
+  _clearHullHugShieldsOn(player);
   if (player.vortexShieldRing) { scene.remove(player.vortexShieldRing); player.vortexShieldRing = null; }
-  if (player.gunShieldMesh) { scene.remove(player.gunShieldMesh); player.gunShieldMesh = null; }
   if (player.gunShieldEdge) { scene.remove(player.gunShieldEdge); player.gunShieldEdge = null; }
-  if (player.thermalShieldMesh) { scene.remove(player.thermalShieldMesh); player.thermalShieldMesh = null; }
   if (player.thermalShieldRing) { scene.remove(player.thermalShieldRing); player.thermalShieldRing = null; }
 
   if (player.mesh) { try { _disposeShipGroup(player.mesh); } catch (_) { try { scene.remove(player.mesh); } catch (__) {} } }
@@ -48509,6 +48505,35 @@ function _clearAllOutlineOptics() {
   } catch (_) {}
   try { if (typeof player !== 'undefined' && player) _clearOutlineOpticsOn(player); } catch (_) {}
   try { _tickPerkEffects._outlineWasActive = false; } catch (_) {}
+}
+
+function _stripHullHugClones(root) {
+  if (!root || !root.children) return;
+  for (let i = root.children.length - 1; i >= 0; i--) {
+    const c = root.children[i];
+    if (c && c.userData && c.userData.shieldClone) {
+      try { _disposeShieldClone(c); } catch (_) { try { root.remove(c); } catch (__) {} }
+    }
+  }
+}
+
+function _clearHullHugShieldsOn(ship) {
+  if (!ship) return;
+  const keys = ['vortexShieldMesh',  '_vortexShieldMesh',
+                'gunShieldMesh',     '_gunShieldMesh',
+                'thermalShieldMesh', '_thermalShieldMesh',
+                'swordBlockMesh',    '_swordBlockMesh'];
+  let had = false;
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (!ship[k]) continue;
+    had = true;
+    try { _disposeShieldClone(ship[k]); } catch (_) {}
+    ship[k] = null;
+  }
+  if (had && ship.mesh && typeof _clearShipShieldEmissive === 'function') {
+    try { _clearShipShieldEmissive(ship.mesh); } catch (_) {}
+  }
 }
 
 function _setShipMeshOpacity(root, opacity) {
