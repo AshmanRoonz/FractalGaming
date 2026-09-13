@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.77';
+const LSS_BUILD = '43.78';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -68371,7 +68371,7 @@ const MAP_DATA = {
 
   colonnade: {
     name: 'The Colonnade',
-    thumb: 'map_thumbs/colonnade.png',
+    thumb: 'map_thumbs/colonnade2.png',
     description: 'Pillar-karst cathedral. Great halls held up by rock columns — new columns every round. Orbit a pillar or die in the open.',
     defaultTheme: 'Crystal Cavern',
     terrain: {
@@ -68452,7 +68452,8 @@ const MAP_DATA = {
     ]
   },
   race_shifting: {
-    name: 'The Shifting Run',   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
+    name: 'The Shifting Run',
+    thumb: 'map_thumbs/shifting_run.png',   // (v43.78) owner's concept art, resized to the 468x220 the other thumbs use   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
     procedural: 'race_shifting',
     description: 'A new track every round: line up across the start, thread the rings through a cavern that has never existed before, dive for the finish.',
     defaultTheme: 'Snow',
@@ -68481,6 +68482,7 @@ const MAP_DATA = {
 
   assault_causeway: {
     name: 'The Causeway',
+    thumb: 'map_thumbs/causeway.png',   // (v43.78) owner's concept art, resized to the 468x220 the other thumbs use
     description: 'Assault. Storm the causeway and charge the Champion Field — or hold the line until the clock runs out. Roles swap every round.',
     defaultTheme: 'Gold Mine',
     terrain: { wallPinch: 0.22 },
@@ -68514,7 +68516,8 @@ const MAP_DATA = {
 
 
   race_pole_position: {
-    name: 'Pole Position',   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
+    name: 'Pole Position',
+    thumb: 'map_thumbs/pole_position.png',   // (v43.78) owner's concept art, resized to the 468x220 the other thumbs use   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
     defaultTheme: 'Grassy',
     description: 'Hand-built sweep ; spawns at the eastern start, climb to the cathedral roof, descend through the western spine, dive into the central finish.',
     palette: [
@@ -68558,7 +68561,8 @@ const MAP_DATA = {
   },
 
   race_straightaway: {
-    name: 'The Straightaway',   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
+    name: 'The Straightaway',
+    thumb: 'map_thumbs/straightaway.png',   // (v43.78) owner's concept art, resized to the 468x220 the other thumbs use   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
     defaultTheme: 'Snow',
     description: 'Find your own way through open mountainous caverns. Line up across the start, then weave to the finish.',
     palette: [
@@ -68623,6 +68627,7 @@ MAP_DATA.camp_approach = CAMPAIGN_LEG_MAP;
 
 MAP_DATA.endless_caverns = {
   name: 'The Long Dark (flat)',   // (v38.77) base for endless_bend only
+  thumb: 'map_thumbs/endless_flat.png',   // (v43.78) owner's concept art, resized to the 468x220 the other thumbs use
   defaultTheme: 'Rocky',
   description: 'A cavern without end. Fly as far as you can on the lives you chose.',
   procedural: 'endless',
@@ -68637,7 +68642,8 @@ MAP_DATA.endless_caverns = {
 
 MAP_DATA.endless_bend = {
   ...MAP_DATA.endless_caverns,
-  name: 'The Long Dark',   // (v38.77) the one endless map   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
+  name: 'The Long Dark',   // (v38.77) the one endless map
+  thumb: 'map_thumbs/endless_bend.png',   // (v43.78) owner's concept art, resized to the 468x220 the other thumbs use   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
   bend: true,
 };
 function _lssEndlessNextSeg(run) {
