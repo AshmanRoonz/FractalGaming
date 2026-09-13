@@ -5881,7 +5881,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.73';
+const LSS_BUILD = '43.75';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -13026,6 +13026,20 @@ function buildMapSelector() {
   // Default selection on first entry; otherwise keep the player's last choice
   // IF it's still valid for the current mode. If not, snap to the first
   // visible map so race mode doesn't keep a classic map selected.
+  // (v43.74) ⭐⭐ THE SNAP HAS ALWAYS WORKED. THE REPAINT NEVER DID. Owner: "changing the room mode,
+  // it doesn't change the map, it stays on the map it was on".
+  // This assignment is a RAW write, and the `selectMap(game.selectedMap)` at the foot of this
+  // function is therefore called with a key that ALREADY equals game.selectedMap. selectMap's echo
+  // guard - `if (game.selectedMap === mapKey && _mapSelectorRendered) return;` - fires on exactly
+  // that condition and returns before painting anything. So the KEY changed and the WINDOW did not:
+  // the old map's name, its thumbnail and its theme all stayed, and in multiplayer no map_change
+  // packet went out either. The map looked stuck because everything the player can SEE was stuck,
+  // while game.selectedMap had quietly moved underneath it.
+  // (The state guards above the echo guard never fired here for the same reason - they only act when
+  // `game.selectedMap !== mapKey`, and the raw write had already made them equal.)
+  // Remember that we snapped, and force the repaint at the foot. selectMap's own comment already
+  // says a same-key call is MEANT to fall through and re-paint; `_mapSelectorRendered` is the only
+  // thing stopping it.
   if (!game.selectedMap || !MAP_DATA[game.selectedMap] || keys.indexOf(game.selectedMap) === -1) {
     game.selectedMap = keys[0];
   }
@@ -13103,6 +13117,10 @@ function buildMapSelector() {
   if (typeof _updateSkyUI === 'function')   _updateSkyUI();
 
   // Render the window contents for the currently-selected map.
+  // (v43.75) the v43.74 `if (_mapSnapped) _mapSelectorRendered = false;` was here. It fixed only the
+  // case where THIS function did the snapping, and the owner's ENDLESS/EXHIBITION cases were not that
+  // - those modes raw-assign game.selectedMap themselves before ever getting here, so nothing was
+  // "snapped" and the window still went unpainted. selectMap's own guard handles every variant now.
   selectMap(game.selectedMap);
   // Sync disabled state after rebinding ; buildMapSelector can run
   // mid-countdown (e.g. race-mode toggle) and the freshly-cloned buttons
@@ -13126,6 +13144,10 @@ const MAP_DEFAULT_THEME_NAMES = new Set(['Grassy','Rocky','Snow','Volcanic','Gol
 // buildMapSelector), leaving the map name/preview/theme blank until the
 // user manually cycles maps.
 let _mapSelectorRendered = false;
+// (v43.75) WHICH key the map window is actually showing. `_mapSelectorRendered` only ever said
+// "something has been painted", which is not the same question and is why the window could sit
+// on a different map from game.selectedMap - see the echo guard below.
+let _mapPaintedKey = null;
 
 function selectMap(mapKey) {
   if (!MAP_DATA[mapKey]) return;
@@ -13156,8 +13178,26 @@ function selectMap(mapKey) {
   // ...except on the very first call, when the UI hasn't been
   // rendered yet ; in that case fall through so the name/preview/theme
   // get painted even though the key matches the boot default.
-  if (game.selectedMap === mapKey && _mapSelectorRendered) return;
+  //
+  // (v43.75) ⭐⭐⭐ AND EXCEPT WHENEVER THE KEY MOVED WITHOUT BEING PAINTED - which is the whole of
+  // the owner's "changing the room mode, it doesn't change the map, it stays on the map it was on".
+  // `game.selectedMap` is RAW-ASSIGNED in about a dozen places that never go through this function:
+  // buildMapSelector's own re-snap, the endless/freeflight/campaign mode entry points, applyWorldSync
+  // from a peer's world sync, the campaign leg advance. After any of those, the caller does the
+  // natural thing and calls selectMap(game.selectedMap) to refresh - and this guard saw key ===
+  // key, concluded "echo", and returned WITHOUT painting. The name, the thumbnail, the theme and the
+  // map_change broadcast were all skipped, so the window kept showing the previous arena while the
+  // key had silently moved underneath it. Measured on 43.74: mode ENDLESS, key endless_bend, window
+  // still reading "The Nexus" with nexus.png.
+  // The guard was asking the wrong question. An echo is not "this key is current" - it is "this key
+  // is current AND it is already on screen". _mapPaintedKey answers the second half.
+  // ⚠ NO STORM: a real network echo arrives for a key this client already painted, so
+  // _mapPaintedKey === mapKey and it still returns exactly as before. The only calls that now fall
+  // through are the ones where the window is genuinely out of date, where painting - and telling
+  // peers - is the correct thing to do.
+  if (game.selectedMap === mapKey && _mapSelectorRendered && _mapPaintedKey === mapKey) return;
   _mapSelectorRendered = true;
+  _mapPaintedKey = mapKey;
   game.selectedMap = mapKey;
   const mapData = MAP_DATA[mapKey];
   // Auto-apply the map's default theme unless the user has picked a
@@ -92402,22 +92442,22 @@ try {
 // no value for two peers to disagree about. (See [[lss-distributed-consensus]] - the rule is never
 // let two peers independently decide a SHARED value; a deterministic fallback from an already-agreed
 // mode is not that.)
-function _ssEnsureLegalMap() {
-  try {
-    if (typeof _visibleMapKeys !== 'function' || typeof selectMap !== 'function') return;
-    const keys = _visibleMapKeys();
-    if (!keys || !keys.length) return;
-    const cur = (typeof game !== 'undefined' && game) ? game.selectedMap : null;
-    if (cur && keys.indexOf(cur) !== -1) return;          // still legal, leave it alone
-    console.log('[map] mode changed; "' + cur + '" is not available here -> ' + keys[0]);
-    selectMap(keys[0]);
-  } catch (_) {}
-}
+// (v43.74) _ssEnsureLegalMap() removed - see the note in _lssRoomModeChoose below.
 
 function _lssRoomModeChoose(want) {
   const m = _lssRoomModeOr(want);
   try { _lssModeChosen(); } catch (_) {}
-  try { _ssEnsureLegalMap(); } catch (_) {}
+  // (v43.74) ⚠ THE v43.63 CALL TO _ssEnsureLegalMap() WAS HERE, AND IT NEVER DID ANYTHING. Every
+  // caller of this function is written `LSS.MODE = _lssRoomModeChoose('race')` - the assignment
+  // happens on RETURN - so inside here LSS.MODE is still the mode being LEFT. _ssEnsureLegalMap asks
+  // _visibleMapKeys(), which branches entirely on LSS.MODE, so it was judging the current map against
+  // the OLD mode's list, always finding it legal, and returning without doing anything.
+  // It also was not on the path the owner was actually using: the ROOM MODE arrows go
+  // _lssStepRoomMode -> _lssPickRoomMode -> _lssAdoptRoomMode and never come through here at all.
+  // Removed rather than repaired, because the two guards that DO work now make it redundant:
+  // buildMapSelector snaps AND repaints (v43.74 above), and getNextMap refuses to build an illegal
+  // map whatever the UI did (v43.73). A guard that looks like protection but is a no-op is worse
+  // than none - it is what let me report v43.63 as fixed when it was not.
   try { if (typeof net !== 'undefined' && net && net.active) _lssModeDecide(); } catch (_) {}
   try { if (typeof net !== 'undefined' && net && net.active) _lssModeAnnounceBurst(); } catch (_) {}
   return m;

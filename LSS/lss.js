@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.73';
+const LSS_BUILD = '43.75';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5094,6 +5094,7 @@ function buildMapSelector() {
 const MAP_DEFAULT_THEME_NAMES = new Set(['Grassy','Rocky','Snow','Volcanic','Gold Mine','Broken Simulation','Crystal Cavern','Mossy']);
 
 let _mapSelectorRendered = false;
+let _mapPaintedKey = null;
 
 function selectMap(mapKey) {
   if (!MAP_DATA[mapKey]) return;
@@ -5115,8 +5116,9 @@ function selectMap(mapKey) {
       typeof game !== 'undefined' && game.state && game.state !== 'select') {
     return;
   }
-  if (game.selectedMap === mapKey && _mapSelectorRendered) return;
+  if (game.selectedMap === mapKey && _mapSelectorRendered && _mapPaintedKey === mapKey) return;
   _mapSelectorRendered = true;
+  _mapPaintedKey = mapKey;
   game.selectedMap = mapKey;
   const mapData = MAP_DATA[mapKey];
   try {
@@ -60913,22 +60915,10 @@ try {
   else setTimeout(_ssWatch, 0);
 } catch (_) {}
 
-function _ssEnsureLegalMap() {
-  try {
-    if (typeof _visibleMapKeys !== 'function' || typeof selectMap !== 'function') return;
-    const keys = _visibleMapKeys();
-    if (!keys || !keys.length) return;
-    const cur = (typeof game !== 'undefined' && game) ? game.selectedMap : null;
-    if (cur && keys.indexOf(cur) !== -1) return;          // still legal, leave it alone
-    console.log('[map] mode changed; "' + cur + '" is not available here -> ' + keys[0]);
-    selectMap(keys[0]);
-  } catch (_) {}
-}
 
 function _lssRoomModeChoose(want) {
   const m = _lssRoomModeOr(want);
   try { _lssModeChosen(); } catch (_) {}
-  try { _ssEnsureLegalMap(); } catch (_) {}
   try { if (typeof net !== 'undefined' && net && net.active) _lssModeDecide(); } catch (_) {}
   try { if (typeof net !== 'undefined' && net && net.active) _lssModeAnnounceBurst(); } catch (_) {}
   return m;
