@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.90';
+const LSS_BUILD = '42.91';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13772,14 +13772,57 @@ postFX.compositeMat = new THREE.ShaderMaterial({
     time: { value: 0.0 },
     godrayStrength: { value: 0.15 },   // (v34.63) 0.40->0.15 (user-tuned): far less directional bright-pixel smear (the "ghosting/doubling"), keeps a touch of glow. Live: tunePostFX({godray})
     gradeSat: { value: 1.0 }, gradeContrast: { value: 1.0 }, gradeWarmth: { value: 1.0 }, gradeLift: { value: 0.0 },
-    uSceneScale: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) }   // (v39.49) the used sub-rectangle of rtScene (viewport supersample)
+    uSceneScale: { value: new THREE.Vector2(1, 1) }, uSceneMax: { value: new THREE.Vector2(1, 1) },   // (v39.49) the used sub-rectangle of rtScene (viewport supersample)
+    uPan: { value: new THREE.Vector4(0, 1, 1, 1) }   // (v42.91) conformal Panini: x=strength d, y=xmax, z=1/tan(srcHalfH), w=ymax*aspect/tan(srcHalfH). d=0 = identity.
   },
   vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tScene;
     uniform sampler2D tBloom;
     uniform vec2 uSceneScale, uSceneMax;
-    #define SCENE(uv) texture2D(tScene, clamp((uv) * uSceneScale, vec2(0.0), uSceneMax))
+    uniform vec4 uPan;
+    // (v42.91) CONFORMAL PANINI. Maps an OUTPUT pixel to the SOURCE pixel it should show.
+    //
+    // Owner: "the peripheral looks closer at 120 fov... in 90 fov everything looks fine". Not a bug -
+    // rectilinear projection maps angle as tan(theta), so local magnification runs as 1/cos^2(theta).
+    // Measured at the owner's 120 deg vertical (144 deg horizontal): the frame edge is magnified
+    // 10.48x relative to centre and stretched 3.24x wider than tall. At 90 deg it is only 4.2x, which
+    // is exactly why 90 looks fine and 120 does not.
+    //
+    // Panini maps horizontal angle as 2*tan(lon/2) instead of tan(lon), which takes that 10.48x down
+    // to 1.53x at full strength.
+    //
+    // (!) WHY CONFORMAL, AND NOT THE FORM IN cine.js. The trailer fork holds ymax at the rectilinear
+    // value, which makes Panini ANAMORPHIC - at these settings a ship on the crosshair would render
+    // 2.12x wider than tall - and, worse, it asks for source content the scene pass never rendered:
+    // the output corners need source v = 2.119, i.e. 17.6% of the frame has no pixel to sample. That
+    // is why cine can only do it with a SIX-RENDER CUBEMAP, which no gameplay frame can afford.
+    // Setting ymax = xmax/aspect makes the projection conformal (shapes exactly preserved, 1.00x) AND
+    // exactly inscribes it in the rectilinear frustum - the four corners land on u=1.000, v=1.000 to
+    // within float epsilon, at EVERY strength. Verified numerically for d = 0, 0.4, 0.6, 1.0.
+    // So there is no missing data, no smear, no widened render target, and no extra pass. The whole
+    // correction is this function, about seven ALU ops, on a buffer the game already draws.
+    //
+    // What it costs: the full horizontal field is always kept, and VERTICAL field is what trades -
+    // 120 deg at d=0, 93 at d=0.4, 79 at d=1. The centre is correspondingly magnified (2.12x at d=1),
+    // so it upsamples from the source and looks softer unless supersampled.
+    //
+    // (!) d=0 returns uv untouched, bit-for-bit, so the setting off is the old image exactly.
+    // (!) The JS half is _lssProjectV(); the two are exact inverses (checked to 1e-16). If only this
+    //     shader moves, the world warps correctly and every HUD marker sits in the wrong place.
+    vec2 panMap(vec2 uv) {
+      if (uPan.x <= 0.0) return uv;
+      vec2 p = uv * 2.0 - 1.0;
+      float d = uPan.x;
+      float k = (p.x * uPan.y) / (d + 1.0);
+      float k2 = k * k;
+      float cl = (-k2 * d + sqrt(max(0.0, 1.0 + k2 * (1.0 - d * d)))) / (k2 + 1.0);
+      float sl = k * (d + cl);
+      float S  = (d + 1.0) / (d + cl);
+      return vec2((sl / cl) * uPan.z, (p.y * uPan.w) / (S * cl)) * 0.5 + 0.5;
+    }
+    #define SCENE(uv) texture2D(tScene, clamp(panMap(uv) * uSceneScale, vec2(0.0), uSceneMax))
+    #define BLOOM(uv) texture2D(tBloom, panMap(uv))
     uniform float bloomStrength;
     uniform float vignetteIntensity;
     uniform float vignetteSize;
@@ -13866,7 +13909,7 @@ postFX.compositeMat = new THREE.ShaderMaterial({
       }
 
       // Bloom add (lens-dirt path removed ; see lensDirtMask comment above).
-      vec3 bloom = texture2D(tBloom, warpedUv).rgb;
+      vec3 bloom = BLOOM(warpedUv).rgb;
       col += bloom * bloomStrength;
 
       // God-rays: radial blur of bloom toward shockCenter during an explosion's
@@ -13884,7 +13927,7 @@ postFX.compositeMat = new THREE.ShaderMaterial({
         for (int i = 0; i < RAY_SAMPLES; i++) {
           float t = float(i) / float(RAY_SAMPLES);
           vec2 sUv = vUv + rayDir * (t * 0.30);
-          rays += texture2D(tBloom, sUv).rgb * (1.0 - t);
+          rays += BLOOM(sUv).rgb * (1.0 - t);
         }
         rays /= float(RAY_SAMPLES);
         float rayStrength = shockIntensity * (1.0 - shockAge) * 0.75;
@@ -13895,13 +13938,13 @@ postFX.compositeMat = new THREE.ShaderMaterial({
         vec2 toCenter = vec2(0.5, 0.5) - vUv;
         // Single probe sample to skip the full pass when the bloom along
         // this fragment's ray is dim. Mid-march point catches most cases.
-        vec3 probe = texture2D(tBloom, vUv + toCenter * 0.25).rgb;
+        vec3 probe = BLOOM(vUv + toCenter * 0.25).rgb;
         float probeLum = dot(probe, vec3(0.2126, 0.7152, 0.0722));
         if (probeLum > 0.10) {
           vec3 emRays = vec3(0.0);
-          emRays += texture2D(tBloom, vUv + toCenter * 0.137).rgb * 0.75;
+          emRays += BLOOM(vUv + toCenter * 0.137).rgb * 0.75;
           emRays += probe * 0.50;
-          emRays += texture2D(tBloom, vUv + toCenter * 0.395).rgb * 0.25;
+          emRays += BLOOM(vUv + toCenter * 0.395).rgb * 0.25;
           emRays /= 1.50;  // 0.75 + 0.50 + 0.25
           float emLum = dot(emRays, vec3(0.2126, 0.7152, 0.0722));
           float emGate = smoothstep(0.18, 0.55, emLum);
@@ -14156,7 +14199,70 @@ function _waterRefractBind(rnd, scn, cam) {
     I.frames++; I.res = [bw, bh]; I.target = [rt.width, rt.height]; I.live = [A.w, A.h]; I.k = u.uRefractK.value; I.inline = true;
   } catch (_) { u.uRefract.value = 0.0; }
 }
+const _LSSPAN = { d: 0, xmax: 1, ymax: 1, U: 1, V: 1, pref: 0, _d: -1, _fov: -1, _asp: -1 };
+try {
+  const _pp = (typeof localStorage !== 'undefined') ? localStorage.getItem('lss_panini') : null;
+  if (_pp != null && isFinite(+_pp)) _LSSPAN.pref = Math.max(0, Math.min(1, +_pp));
+} catch (_) {}
+
+function _lssPaniniSync() {
+  try {
+    if (typeof camera === 'undefined' || !camera || !camera.isPerspectiveCamera) return _LSSPAN;
+    let d = (typeof window !== 'undefined' && window.__panini != null) ? +window.__panini : _LSSPAN.pref;
+    if (!(d > 0)) d = 0; else d = Math.min(1, d);
+    if (renderer && renderer.xr && renderer.xr.isPresenting) d = 0;
+    const fov = camera.fov, asp = camera.aspect || 1.6;
+    if (d === _LSSPAN._d && fov === _LSSPAN._fov && asp === _LSSPAN._asp) return _LSSPAN;
+    _LSSPAN._d = d; _LSSPAN._fov = fov; _LSSPAN._asp = asp; _LSSPAN.d = d;
+    const srcH = Math.atan(Math.tan(fov * Math.PI / 360) * asp);   // source horizontal HALF-angle
+    const T = Math.tan(srcH);
+    const xmax = (d > 0) ? (d + 1) * Math.sin(srcH) / (d + Math.cos(srcH)) : T;
+    const ymax = xmax / asp;      // CONFORMAL. This one line is what preserves shape AND makes the
+    _LSSPAN.xmax = xmax; _LSSPAN.ymax = ymax; _LSSPAN.U = 1 / T; _LSSPAN.V = ymax * asp / T;
+    try { postFX.compositeMat.uniforms.uPan.value.set(d, xmax, _LSSPAN.U, _LSSPAN.V); } catch (_) {}
+  } catch (_) {}
+  return _LSSPAN;
+}
+
+const _panTmpV = new THREE.Vector3();
+function _lssProjectV(v, cam) {
+  cam = cam || camera;
+  const P = _lssPaniniSync();
+  if (!(P.d > 0) || cam !== camera) return v.project(cam);
+  _panTmpV.copy(v).applyMatrix4(cam.matrixWorldInverse);
+  const vx = _panTmpV.x, vy = _panTmpV.y, vz = _panTmpV.z;
+  v.project(cam);                       // z (and the behind-camera gates) stay exactly as they were
+  if (vz < 0) {
+    const lon = Math.atan2(vx, -vz), hyp = Math.hypot(vx, vz);
+    const S = (P.d + 1) / (P.d + Math.cos(lon));
+    v.x = S * Math.sin(lon) / P.xmax;
+    v.y = (hyp > 1e-9 ? S * (vy / hyp) : 0) / P.ymax;
+  }
+  return v;
+}
+
+if (typeof window !== 'undefined') {
+  window.__paniniSet = function (d) {
+    d = Math.max(0, Math.min(1, +d || 0));
+    window.__panini = d; _LSSPAN.pref = d; _LSSPAN._d = -1;
+    try { localStorage.setItem('lss_panini', String(d)); } catch (_) {}
+    return window.__paniniInfo();
+  };
+  window.__paniniInfo = function () {
+    const P = _lssPaniniSync();
+    const srcH = Math.atan(Math.tan(camera.fov * Math.PI / 360) * (camera.aspect || 1.6));
+    const oh = (P.d > 0) ? 2 * srcH * 180 / Math.PI : 2 * srcH * 180 / Math.PI;
+    const ov = 2 * Math.atan(P.ymax) * 180 / Math.PI;
+    const dP = function (l) { return (P.d + 1) * (1 + P.d * Math.cos(l)) / Math.pow(P.d + Math.cos(l), 2); };
+    return { strength: P.d, fovSetting: camera.fov,
+             presented: oh.toFixed(0) + 'h / ' + ov.toFixed(0) + 'v deg',
+             edgeMagnification: ((P.d > 0) ? dP(srcH) / dP(0) : 1 / Math.pow(Math.cos(srcH), 2)).toFixed(2) + 'x',
+             centreZoom: (Math.tan(srcH) / P.xmax).toFixed(2) + 'x' };
+  };
+}
+
 function renderPostFX() {
+  _lssPaniniSync();   // (v42.91) keep the Panini uniform matched to the live FOV/aspect
   const cinematicActive =
     (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
   const lowQuality = !postFX.enabled
@@ -14188,7 +14294,7 @@ function renderPostFX() {
       postFX.compositeMat.uniforms.shockAge.value = 1.0;
     } else {
       const _sv = _postFXScratchV.copy(sw.origin);
-      _sv.project(camera);
+      _lssProjectV(_sv, camera);   // (v42.91) shockwave centre is consumed in WARPED uv space
       if (_sv.z > 1.0 || _sv.z < -1.0) {
         postFX.compositeMat.uniforms.shockIntensity.value = 0.0;
       } else {
@@ -56509,7 +56615,7 @@ function _hudSharedTail(ctx, W, H, cx, cy, t, isDoomed) {
         sx = ((_eyeX + (_tp.x - _eyeX) * _u) / _hpW + 0.5) * W;
         sy = (0.5 - (_eyeY + (_tp.y - _eyeY) * _u) / _hpH) * H;
       } else {
-        _tp.copy(bot.position).project(camera);
+        _lssProjectV(_tp.copy(bot.position), camera);   // (v42.91)
         if (_tp.z > 1) continue;
         sx = (_tp.x * halfW) + halfW;
         sy = -(_tp.y * halfH) + halfH;
@@ -57478,7 +57584,7 @@ function drawCircumpunctHUD() {
       if (locks <= 0) continue;
 
       const worldPos = bot.position.clone();
-      const projected = worldPos.clone().project(camera);
+      const projected = _lssProjectV(worldPos.clone(), camera);   // (v42.91) tracker lock boxes
       if (projected.z > 1) continue;
       const sx = (projected.x * halfW) + halfW;
       const sy = -(projected.y * halfH) + halfH;
@@ -69563,7 +69669,7 @@ function updateEnemyHealthBars() {
     const dist = player.position.distanceTo(ent.position);
     if (!_lblSoftGate(ent, dist <= ((ent.isCarrier || ent.isOwCarrier || ent.isOwBoss) ? 30000 : 3500), now)) { ent._labelSpotTime = null; return; }   // (v38.78)
     const wp = _hbTmpA.copy(ent.position);
-    const proj = _hbTmpB.copy(wp).project(camera);
+    const proj = _lssProjectV(_hbTmpB.copy(wp), camera);   // (v42.91) ship callouts
     if (proj.z > 1) { ent._labelSpotTime = null; ent._lblDropT = null; ent._lblDown = false; ent._lblClearT = null; return; }   // (v40.58) the re-acquire clock clears with the rest
     const sx = (proj.x * halfW) + halfW;
     const sy = -(proj.y * halfH) + halfH;
@@ -69637,7 +69743,7 @@ function updateEnemyHealthBars() {
 
     const worldPos = _hbTmpA.copy(field.position);
     worldPos.y += 60;
-    const projected = _hbTmpB.copy(worldPos).project(camera);
+    const projected = _lssProjectV(_hbTmpB.copy(worldPos), camera);   // (v42.91) field waypoints
     if (projected.z > 1) continue;
 
     const sx = (projected.x * halfW) + halfW;
