@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '42.98';
+const LSS_BUILD = '42.99';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -39851,6 +39851,7 @@ const _WILD = {
   babyScale: 0.42,      // a baby, as a fraction of the adult
   rMin: 6500, rMax: 21000,   // spawn ring around the hub city
   cityKeep: 5200,       // never inside this of the city centre
+  keepR: 34000,         // retire a family whose nearest member is further than this
   roam: 2700,           // how far from the family's patch they wander  (was 1500)
   step: 24,             // walking speed                               (was 46)
   charge: 68,           // speed once provoked                         (was 120)
@@ -40207,7 +40208,7 @@ function _wildDispose() {
   _WILD._list = null; _WILD._built = 0;
 }
 
-function _wildPickHome() {
+function _wildPickHome(cx, cz) {
   const T = game.sandwichTerrain;
   if (!T || typeof HUB_CITY === 'undefined') return null;
   let WL = -1e9;
@@ -40215,14 +40216,30 @@ function _wildPickHome() {
   for (let i = 0; i < 40; i++) {
     const a = Math.random() * Math.PI * 2;
     const r = _WILD.rMin + Math.random() * (_WILD.rMax - _WILD.rMin);
-    const x = HUB_CITY.x + Math.cos(a) * r, z = HUB_CITY.z + Math.sin(a) * r;
-    if (Math.hypot(x - HUB_CITY.x, z - HUB_CITY.z) < _WILD.cityKeep) continue;
+    const x = cx + Math.cos(a) * r, z = cz + Math.sin(a) * r;
+    if (Math.hypot(x - HUB_CITY.x, z - HUB_CITY.z) < _WILD.cityKeep) continue;   // never on the city
     let gy = NaN;
     try { gy = _stGroundYCarved(x, z, T); } catch (_) { continue; }
     if (!isFinite(gy) || gy < WL + 60) continue;          // in the lake, or too close to its edge
     return new THREE.Vector3(x, gy, z);
   }
   return null;
+}
+
+function _wildArriveFX(at) {
+  try {
+    const col = 0x8ad8ff;
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(at, col, 6.0, 4200, 0.55);
+    if (typeof spawnLightningBolt === 'function') {
+      for (let k = 0; k < 3; k++) {
+        const from = at.clone(); from.y += 2600 + Math.random() * 900;
+        from.x += (Math.random() - 0.5) * 900; from.z += (Math.random() - 0.5) * 900;
+        spawnLightningBolt(from, at, col, 2.0, 4, 3, true, 1.1);
+      }
+    }
+    if (typeof v8SpawnSparks === 'function') v8SpawnSparks(at, 26, 3.2, 900, col, 0xffffff);
+    if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', at, { refDistance: 2600, maxDistance: 34000 });
+  } catch (_) {}
 }
 
 function _wildFrame(dt) {
@@ -40238,23 +40255,50 @@ function _wildFrame(dt) {
     if (!game.monsters) game.monsters = [];
     _WILD._built = 0;
   }
+  const _liveP = new Set();
+  for (const _m of _WILD._list) { if (_m && _m.alive) _liveP.add(_m.packId); }
+  if (_WILD.keepR > 0 && player && player.position) {
+    const _far = new Map();
+    for (const _m of _WILD._list) {
+      if (!_m || !_m.alive) continue;
+      const _d = Math.hypot(_m.position.x - player.position.x, _m.position.z - player.position.z);
+      const _cur = _far.get(_m.packId);
+      if (_cur == null || _d < _cur) _far.set(_m.packId, _d);   // the NEAREST member decides the pack
+    }
+    for (const [_pid, _d] of _far) {
+      if (_d <= _WILD.keepR) continue;
+      for (let q = _WILD._list.length - 1; q >= 0; q--) {
+        const _m = _WILD._list[q];
+        if (!_m || _m.packId !== _pid) continue;
+        try { _m.destroy(); } catch (_) {}
+        _WILD._list.splice(q, 1);
+        if (game.monsters) { const ix = game.monsters.indexOf(_m); if (ix >= 0) game.monsters.splice(ix, 1); }
+      }
+      _liveP.delete(_pid);
+    }
+  }
   _WILD._retryT = (_WILD._retryT || 0) - dt;
-  if (_WILD._built < _WILD.packs && game.state === 'playing' && _WILD._retryT <= 0) {
-    const home = _wildPickHome();
+  if (_liveP.size < _WILD.packs && game.state === 'playing' && _WILD._retryT <= 0) {
+    const _cx = (player && player.position) ? player.position.x : HUB_CITY.x;
+    const _cz = (player && player.position) ? player.position.z : HUB_CITY.z;
+    const home = _wildPickHome(_cx, _cz);
     if (home) {
       const def = MONSTER_DEFS[Math.floor(Math.random() * MONSTER_DEFS.length)];
       const n = _WILD.min + Math.floor(Math.random() * (_WILD.max - _WILD.min + 1));
-      const pid = _WILD._built;
+      const pid = (_WILD._nextPid = (_WILD._nextPid | 0) + 1);
+      let _made = 0;
       for (let i = 0; i < n; i++) {
         const baby = (i > 0) && (Math.random() < _WILD.babyChance);
         let m = null;
         try { m = new WildLeviathan(def, home, baby, pid); } catch (e) { console.warn('[wild] spawn failed', e); continue; }
         _WILD._list.push(m);
         game.monsters.push(m);
+        _made++;
       }
-      _WILD._built++;
+      if (_made) _wildArriveFX(home);
+      else _WILD._retryT = 1.5;
     } else {
-      _WILD._retryT = 1.5;   // nowhere to stand this frame; try again shortly, keep the slot
+      _WILD._retryT = 1.5;   // nowhere to stand this frame; try again shortly
     }
   }
 
@@ -40271,7 +40315,9 @@ function _wildFrame(dt) {
 if (typeof window !== 'undefined') {
   window.__wild = window.__wild || {};
   window.__wildDbg = () => ({
-    on: _WILD.on, built: _WILD._built, packs: _WILD.packs,
+    on: _WILD.on, packs: _WILD.packs,   // (v42.99) `built` retired with the monotonic counter
+    livePacks: (function () { const s = new Set(); for (const m of (_WILD._list || [])) { if (m && m.alive) s.add(m.packId); } return s.size; })(),
+    nextPid: _WILD._nextPid | 0, keepR: _WILD.keepR,
     alive: _WILD._list ? _WILD._list.filter(m => m && m.alive).length : 0,
     withMesh: _WILD._list ? _WILD._list.filter(m => m && m.mesh).length : 0,
     babies: _WILD._list ? _WILD._list.filter(m => m && m.baby).length : 0,
