@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.88';
+const LSS_BUILD = '43.89';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -52841,8 +52841,8 @@ function updateShieldVisuals(dt) {
         player.mesh.add(m); 
       }
     }
-    if (player.vortexShieldMesh && player.vortexShieldMesh.material && player.vortexShieldMesh.material.uniforms) {
-      const u = player.vortexShieldMesh.material.uniforms;
+      if (player.vortexShieldMesh && player.vortexShieldMesh.userData && player.vortexShieldMesh.userData._shieldMat) {
+      const u = player.vortexShieldMesh.userData._shieldMat.uniforms;
       const eFrac = (player.vortexMaxEnergy > 0)
         ? Math.max(0, Math.min(1, player.vortexEnergy / player.vortexMaxEnergy)) : 1.0;
       if (u.time)  u.time.value  = game.time;
@@ -52886,8 +52886,8 @@ function updateShieldVisuals(dt) {
       }
     }
     const hpPct = player.gunShieldHP / player.gunShieldMaxHP;
-    if (player.gunShieldMesh && player.gunShieldMesh.material && player.gunShieldMesh.material.uniforms) {
-      const u = player.gunShieldMesh.material.uniforms;
+      if (player.gunShieldMesh && player.gunShieldMesh.userData && player.gunShieldMesh.userData._shieldMat) {
+      const u = player.gunShieldMesh.userData._shieldMat.uniforms;
       if (u.time)  u.time.value  = game.time;
       if (u.uTime) u.uTime.value = game.time;
       if (u.uHp)   u.uHp.value   = hpPct;
@@ -52932,8 +52932,8 @@ function updateShieldVisuals(dt) {
     }
     const hpFrac = (player.thermalShieldMaxHP > 0)
       ? Math.max(0, Math.min(1, player.thermalShieldHP / player.thermalShieldMaxHP)) : 1.0;
-    if (player.thermalShieldMesh && player.thermalShieldMesh.material && player.thermalShieldMesh.material.uniforms) {
-      const u = player.thermalShieldMesh.material.uniforms;
+      if (player.thermalShieldMesh && player.thermalShieldMesh.userData && player.thermalShieldMesh.userData._shieldMat) {
+      const u = player.thermalShieldMesh.userData._shieldMat.uniforms;
       if (u.time)  u.time.value  = game.time;
       if (u.uTime) u.uTime.value = game.time;
       if (u.uHp)   u.uHp.value   = hpFrac;
