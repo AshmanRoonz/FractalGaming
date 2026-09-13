@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.76';
+const LSS_BUILD = '43.77';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5017,7 +5017,10 @@ function _visibleMapKeys() {
     return all.filter(k => k.indexOf('hub_') === 0);
   }
   if (LSS.MODE === 'endless') {
-    return all.filter(k => k.indexOf('endless_') === 0);
+    const eks = all.filter(k => k.indexOf('endless_') === 0);
+    const lead = eks.indexOf('endless_bend');
+    if (lead > 0) { eks.splice(lead, 1); eks.unshift('endless_bend'); }
+    return eks;
   }
   return all.filter(k => {
     if (k.indexOf('camp_') === 0) return false;
