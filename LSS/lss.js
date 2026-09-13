@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.23';
+const LSS_BUILD = '43.24';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6647,8 +6647,14 @@ function handleNetEvent(evt, fromPeerId) {
     }
     return;
   }
+  if (evt.type === 'mode_decree') {
+    _lssApplyModeDecree(evt, false);
+    return;
+  }
   if (evt.type === 'mode_set') {
-    _lssModeFromPeer(evt, fromPeerId);
+    _lssModeLog('rx', 'mode_set', evt.mode, (typeof evt.ago === 'number' ? evt.ago : null), fromPeerId, 'noted');
+    _lssNotePeerMode(fromPeerId, evt.mode, evt.ago);
+    _lssModeDecide();
     return;
   }
   if (evt.type === 'hello') {
@@ -6689,6 +6695,10 @@ function handleNetEvent(evt, fromPeerId) {
     try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
     if (evt.seed != null) net.worldSeed = evt.seed >>> 0;
     if (typeof evt.mst === 'number' && isFinite(evt.mst)) net.matchStartedAt = evt.mst;   // (v38.60) shared match id
+    try { if (net._decreedMode && evt.mode && evt.mode !== net._decreedMode) {
+      _lssModeLog('rx', evt.type, evt.mode, null, fromPeerId, 'mode OVERRIDDEN by decree ' + net._decreedMode);
+      evt.mode = net._decreedMode;
+    } } catch (_) {}
     try { if (evt.mode) _applyModeClientSetup(evt.mode); } catch (_) {}
     try {
       if (evt.cyber) {
@@ -6731,6 +6741,10 @@ function handleNetEvent(evt, fromPeerId) {
     net.openSoloHostId = evt.host || null;
     net._dropin = evt;
     if (typeof evt.mst === 'number' && isFinite(evt.mst)) net.matchStartedAt = evt.mst;   // (v38.60) shared match id
+    try { if (net._decreedMode && evt.mode && evt.mode !== net._decreedMode) {
+      _lssModeLog('rx', evt.type, evt.mode, null, fromPeerId, 'mode OVERRIDDEN by decree ' + net._decreedMode);
+      evt.mode = net._decreedMode;
+    } } catch (_) {}
     try { if (evt.mode) _applyModeClientSetup(evt.mode); } catch (_) {}
     try { applyWorldSync(evt.map, evt.seed >>> 0); } catch (e) { console.warn('[dropin] world sync failed:', e); }
     try {
@@ -60215,6 +60229,80 @@ function _lssModeAnnounceBurst(targetPeerId) {
     setTimeout(() => { try { _lssModeAnnounce(targetPeerId); } catch (_) {} }, 800);
   } catch (_) {}
 }
+function _lssModeDecider() {
+  try {
+    if (typeof net === 'undefined' || !net || !net.myPeerId) return null;
+    const ids = [String(net.myPeerId)].concat(Array.from(net.peers ? net.peers.keys() : []).map(String)).sort();
+    return ids[0];
+  } catch (_) { return null; }
+}
+function _lssAmModeDecider() {
+  try { const d = _lssModeDecider(); return !!d && d === String(net.myPeerId); } catch (_) { return false; }
+}
+function _lssNotePeerMode(peerId, mode, ago) {
+  try {
+    if (!net._peerModes) net._peerModes = new Map();
+    net._peerModes.set(String(peerId), { mode: mode, ago: (typeof ago === 'number' ? ago : -1), at: performance.now() });
+  } catch (_) {}
+}
+function _lssModeDecide() {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active || !net.sendEvent) return;
+    if (!_lssAmModeDecider()) return;
+    let bestMode = null, bestAgo = -1, bestId = null;
+    const myAgo = _lssModeAgo();
+    if (myAgo >= 0) { bestMode = LSS.MODE; bestAgo = myAgo; bestId = String(net.myPeerId); }
+    if (net._peerModes) {
+      net._peerModes.forEach((v, id) => {
+        if (!v || !v.mode || v.ago < 0) return;                 // never chose - cannot decide the room
+        if (!net.peers || !net.peers.has(id)) return;           // gone
+        const aged = v.ago + Math.max(0, performance.now() - v.at);
+        if (aged > bestAgo || (aged === bestAgo && bestId !== null && id < bestId)) {
+          bestMode = v.mode; bestAgo = aged; bestId = id;
+        }
+      });
+    }
+    if (!bestMode) return;
+    if (net._decreedMode === bestMode) return;                  // already said so
+    net._decreedMode = bestMode;
+    net.roomMode = bestMode;
+    const decree = {
+      type: 'mode_decree', mode: bestMode,
+      by: String(net.myPeerId), ago: bestAgo,
+      map: (typeof game !== 'undefined' && game) ? game.selectedMap : undefined,
+      seed: (net.worldSeed != null) ? (net.worldSeed >>> 0) : undefined,
+    };
+    _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode);
+    try { net.sendEvent(decree); } catch (_) {}
+    _lssApplyModeDecree(decree, true);
+  } catch (_) {}
+}
+function _lssApplyModeDecree(evt, mine) {
+  try {
+    if (!evt || !evt.mode || typeof LSS === 'undefined') return;
+    net.roomMode = evt.mode;
+    if (!mine) net._decreedMode = evt.mode;
+    try { if (typeof evt.ago === 'number' && evt.ago >= 0) { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - evt.ago; } } catch (_) {}
+    if (LSS.MODE === evt.mode) { _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'already on it'); return; }
+    const live = (typeof game !== 'undefined' && game &&
+                  (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
+    _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, (live ? 'ADOPT (live -> world rebuild)' : 'ADOPT'));
+    try { _lssClearModeSetup(); } catch (_) {}
+    try { _applyModeClientSetup(evt.mode); } catch (_) {}
+    LSS.MODE = evt.mode;
+    if (evt.seed != null) { try { net.worldSeed = evt.seed >>> 0; } catch (_) {} }
+    if (live) {
+      try { if (typeof applyWorldSync === 'function' && evt.map) applyWorldSync(evt.map, (evt.seed != null ? evt.seed : net.worldSeed) >>> 0); } catch (_) {}
+      try { if (typeof enterShipSelect === 'function') enterShipSelect(); } catch (_) {}
+    } else {
+      if (evt.map) { try { game.selectedMap = evt.map; } catch (_) {} }
+      try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
+    }
+    try { if (typeof _refreshRaceModeLock === 'function') _refreshRaceModeLock(); } catch (_) {}
+    try { _lssSayRoomMode(evt.mode); } catch (_) {}
+  } catch (_) {}
+}
+
 function _lssPeerOutranksMe(evt, fromPeerId) {
   try {
     if (typeof net === 'undefined' || !net || typeof LSS === 'undefined') return false;
@@ -60314,6 +60402,7 @@ function _lssSayRoomMode(mode) {
 function _lssRoomModeChoose(want) {
   const m = _lssRoomModeOr(want);
   try { _lssModeChosen(); } catch (_) {}
+  try { if (typeof net !== 'undefined' && net && net.active) _lssModeDecide(); } catch (_) {}
   try { if (typeof net !== 'undefined' && net && net.active) _lssModeAnnounceBurst(); } catch (_) {}
   return m;
 }
