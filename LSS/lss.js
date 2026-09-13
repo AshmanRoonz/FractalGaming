@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.04';
+const LSS_BUILD = '43.05';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -6738,6 +6738,19 @@ function handleNetEvent(evt, fromPeerId) {
       game.state = 'roundEnd';
       if (typeof _anchorTimer === 'function') _anchorTimer('roundEndTimer', 2);
     }
+    return;
+  }
+  if (evt.type === 'wild_state') {
+    try { if (typeof _wildApplyState === 'function') _wildApplyState(evt.s); } catch (_) {}
+    return;
+  }
+  if (evt.type === 'wild_dmg' && typeof evt.i === 'number') {
+    try {
+      if (typeof _wildAuthority === 'function' && _wildAuthority() && _WILD && _WILD._list) {
+        const m = _WILD._list.find(x => x && x.wildId === (evt.i | 0) && x.alive);
+        if (m) m.takeDamage(Math.max(0, +evt.d || 0), 'peer:' + fromPeerId, m.position);
+      }
+    } catch (_) {}
     return;
   }
   if (evt.type === 'city_dmg' && typeof evt.i === 'number') {
@@ -39144,6 +39157,12 @@ class OutskirtsMonster {
 
   takeDamage(dmg, attacker, hitPoint) {
     if (!this.alive) return 0;
+    if (attacker !== 'net' && this.isProxy) {
+      try {
+        if (net && net.active && net.sendEvent) net.sendEvent({ type: 'wild_dmg', i: this.wildId, d: Math.max(0, dmg || 0) });
+      } catch (_) {}
+      return Math.min(Math.max(0, this.health), Math.max(0, dmg || 0));
+    }
     if (attacker === player && typeof _aegisDmgOut === 'function') {
       try { dmg = _aegisDmgOut(dmg, this); } catch (_) {}
     }
@@ -39894,6 +39913,7 @@ const _WILD = {
   rMin: 6500, rMax: 21000,   // spawn ring around the hub city
   cityKeep: 5200,       // never inside this of the city centre
   keepR: 34000,         // retire a family whose nearest member is further than this
+  netHz: 4,             // (v43.05) authority snapshot rate, matching the city fleet feed
   roam: 2700,           // how far from the family's patch they wander  (was 1500)
   step: 24,             // walking speed                               (was 46)
   charge: 68,           // speed once provoked                         (was 120)
@@ -39999,7 +40019,7 @@ function _wildResolveFoe(attacker) {
 }
 
 class WildLeviathan {
-  constructor(def, home, baby, packId) {
+  constructor(def, home, baby, packId, mix) {
     this.isWild = true; this.isMonster = true;
     this.def = def; this.name = def.key;
     this.packId = packId; this.baby = !!baby;
@@ -40010,7 +40030,10 @@ class WildLeviathan {
     this.collisionRadius = this.size * 0.42;
     this.team = 'wild';                 // its own faction: hostile to nobody until provoked
     this.monId = -1;                    // never net-synced; the finds in the net layer key on real ids
-    this.id = 'wild' + packId + '_' + Math.floor(Math.random() * 1e6);
+    this.mix = mix | 0;
+    this.wildId = (packId | 0) * 1000 + this.mix;
+    this.id = 'wild' + this.wildId;
+    this.isProxy = false;   // set by _wildApplyState on a peer: follow the authority, do not think
     this.home = home.clone();
     this.position = home.clone();
     const a = Math.random() * Math.PI * 2, r = Math.random() * _WILD.roam;
@@ -40058,6 +40081,28 @@ class WildLeviathan {
         }
       } catch (_) {}
     });
+  }
+
+  tickProxy(dt) {
+    if (!this.alive) return;
+    if (this._netPos) {
+      const k = Math.min(1, dt * 9);
+      this.position.x += (this._netPos.x - this.position.x) * k;
+      this.position.z += (this._netPos.z - this.position.z) * k;
+    }
+    const gy = this._groundY(this.position.x, this.position.z);
+    this.position.y = gy + this.footOff;
+    if (this._netHeading != null) {
+      let d = this._netHeading - this.heading;
+      while (d > Math.PI) d -= Math.PI * 2;
+      while (d < -Math.PI) d += Math.PI * 2;
+      this.heading += d * Math.min(1, dt * 6);
+    }
+    if (this.mesh) {
+      this.mesh.position.copy(this.position);
+      this.mesh.rotation.y = this.heading;
+    }
+    if (this._mixer) { try { this._mixer.update(dt); } catch (_) {} }
   }
 
   _groundY(x, z) {
@@ -40250,6 +40295,67 @@ function _wildDispose() {
   _WILD._list = null; _WILD._built = 0;
 }
 
+function _wildAuthority() {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active) return true;
+    return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : true;
+  } catch (_) { return true; }
+}
+function _wildNetSend(dt) {
+  try {
+    if (!net || !net.active || !net.sendEvent || !_WILD._list || !_WILD._list.length) return;
+    _WILD._sendT = (_WILD._sendT || 0) - (dt || 0.016);
+    if (_WILD._sendT > 0) return;
+    _WILD._sendT = 1 / (_WILD.netHz || 4);
+    const rows = [];
+    for (const m of _WILD._list) {
+      if (!m) continue;
+      const di = MONSTER_DEFS.indexOf(m.def);
+      if (di < 0) continue;
+      rows.push([m.wildId, di, m.baby ? 1 : 0,
+                 Math.round(m.position.x), Math.round(m.position.y), Math.round(m.position.z),
+                 Math.round((m.heading || 0) * 100), Math.round(m.health), m.alive ? 1 : 0]);
+    }
+    net.sendEvent({ type: 'wild_state', s: rows });
+  } catch (_) {}
+}
+function _wildApplyState(rows) {
+  try {
+    if (!Array.isArray(rows) || _wildAuthority()) return;
+    if (!_WILD._list) { _WILD._list = []; if (!game.monsters) game.monsters = []; }
+    const seen = new Set();
+    for (const r of rows) {
+      const id = r[0] | 0;
+      seen.add(id);
+      let m = _WILD._list.find(x => x && x.wildId === id);
+      if (!m) {
+        if (!r[8]) continue;                       // a death for an animal we never met
+        const def = MONSTER_DEFS[r[1] | 0];
+        if (!def) continue;
+        const home = new THREE.Vector3(r[3], r[4], r[5]);
+        try { m = new WildLeviathan(def, home, !!r[2], Math.floor(id / 1000), id % 1000); } catch (_) { continue; }
+        m.isProxy = true;
+        m.position.set(r[3], r[4], r[5]);          // the ctor scatters from home; the wire wins
+        _WILD._list.push(m);
+        game.monsters.push(m);
+      }
+      m.isProxy = true;
+      m._netPos = m._netPos || new THREE.Vector3();
+      m._netPos.set(r[3], r[4], r[5]);
+      m._netHeading = (r[6] || 0) / 100;
+      m.health = r[7];
+      if (!r[8] && m.alive) { try { m.die(); } catch (_) {} }
+    }
+    for (let q = _WILD._list.length - 1; q >= 0; q--) {
+      const m = _WILD._list[q];
+      if (!m || seen.has(m.wildId)) continue;
+      try { m.destroy(); } catch (_) {}
+      _WILD._list.splice(q, 1);
+      if (game.monsters) { const ix = game.monsters.indexOf(m); if (ix >= 0) game.monsters.splice(ix, 1); }
+    }
+  } catch (_) {}
+}
+
 function _wildPickHome(cx, cz) {
   const T = game.sandwichTerrain;
   if (!T || typeof HUB_CITY === 'undefined') return null;
@@ -40297,6 +40403,21 @@ function _wildFrame(dt) {
     if (!game.monsters) game.monsters = [];
     _WILD._built = 0;
   }
+  const _wAuth = _wildAuthority();
+  if (!_wAuth) {
+    for (let q = _WILD._list.length - 1; q >= 0; q--) {
+      const m = _WILD._list[q];
+      if (!m || !m.alive) {
+        if (m) { try { m.destroy(); } catch (_) {} }
+        _WILD._list.splice(q, 1);
+        if (game.monsters) { const ix = game.monsters.indexOf(m); if (ix >= 0) game.monsters.splice(ix, 1); }
+        continue;
+      }
+      try { m.tickProxy(dt); } catch (_) {}
+    }
+    return;
+  }
+
   const _liveP = new Set();
   for (const _m of _WILD._list) { if (_m && _m.alive) _liveP.add(_m.packId); }
   if (_WILD.keepR > 0 && player && player.position) {
@@ -40332,7 +40453,7 @@ function _wildFrame(dt) {
       for (let i = 0; i < n; i++) {
         const baby = (i > 0) && (Math.random() < _WILD.babyChance);
         let m = null;
-        try { m = new WildLeviathan(def, home, baby, pid); } catch (e) { console.warn('[wild] spawn failed', e); continue; }
+        try { m = new WildLeviathan(def, home, baby, pid, i); } catch (e) { console.warn('[wild] spawn failed', e); continue; }
         _WILD._list.push(m);
         game.monsters.push(m);
         _made++;
@@ -40353,6 +40474,7 @@ function _wildFrame(dt) {
     }
     try { m.update(dt); } catch (e) { if (!window._wildUpdErr) { window._wildUpdErr = String((e && e.stack) || e); console.warn('[wild] update threw:', e); } }
   }
+  try { _wildNetSend(dt); } catch (_) {}   // (v43.05) publish after the tick, so the rows are this frame's truth
 }
 if (typeof window !== 'undefined') {
   window.__wild = window.__wild || {};
