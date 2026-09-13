@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.00';
+const LSS_BUILD = '43.01';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -46710,6 +46710,24 @@ function _commitDeferOneFrame(fn) {
   requestAnimationFrame(() => requestAnimationFrame(go));
   setTimeout(go, 250);
 }
+function _lssAnnounceLoadout() {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active || !net.sendLoadout) return false;
+    if (!player || typeof player.loadoutKey !== 'string') return false;
+    const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
+    net.sendLoadout({
+      loadoutKey: player.loadoutKey,
+      team: player.team,
+      peerId: net.myPeerId,
+      skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      discord_id:     _du ? _du.id : undefined,
+      discord_name:   _du ? (_du.global_name || _du.username) : undefined,
+      discord_avatar: _du ? _du.avatar : undefined,
+    });
+    return true;
+  } catch (_) { return false; }
+}
+
 
 function commitLoadout(key) {
   if (_commitPending && !game._liveSwap) return;
@@ -46918,7 +46936,7 @@ function commitLoadout(key) {
 
   buildAbilityHUD();
 
-  if (game._liveSwap) return;
+  if (game._liveSwap) { _lssAnnounceLoadout(); return; }
 
   if (game._campReentry) {
     game._campReentry = false;

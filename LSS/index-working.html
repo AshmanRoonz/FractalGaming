@@ -4760,7 +4760,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.00';
+const LSS_BUILD = '43.01';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -69992,6 +69992,41 @@ function _commitDeferOneFrame(fn) {
   requestAnimationFrame(() => requestAnimationFrame(go));
   setTimeout(go, 250);
 }
+// (v43.01) ANNOUNCE THE HULL WE ARE FLYING. Owner, mid-session over multiplayer: "i noticed when i
+// changed ships, it didn't change the glb or the tag for the other player" - then, live: "you see me
+// as vortex, i am pyro".
+//
+// commitLoadout broadcasts the loadout, but an IN-PLACE swap never reaches that code: every live
+// swap (cycleCampaignShip and the hub cycler) sets game._liveSwap around the call, and commitLoadout
+// bails on `if (game._liveSwap) return;` BEFORE the net.sendLoadout block further down. So the new
+// ship was applied locally and announced to nobody, for as long as the session lasted.
+//
+// The receiving half was never broken: updateNetworkPlayer already destroys and rebuilds a peer's
+// hull when loadoutKey/team/skin change, and has carried an idempotence guard since v38.63. One
+// missing send cost BOTH symptoms, because the callout tag reads loadout.name off that same
+// rebuilt NetworkPlayer.
+//
+// (!) Deliberately NOT the full commit block. That one also sets net.mapCommitLocked and re-runs
+// _syncMapButtonsDisabled - lobby "I have committed, freeze the map" semantics that have no business
+// firing because someone cycled hulls mid-flight. This sends the payload and nothing else.
+function _lssAnnounceLoadout() {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active || !net.sendLoadout) return false;
+    if (!player || typeof player.loadoutKey !== 'string') return false;
+    const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
+    net.sendLoadout({
+      loadoutKey: player.loadoutKey,
+      team: player.team,
+      peerId: net.myPeerId,
+      skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      discord_id:     _du ? _du.id : undefined,
+      discord_name:   _du ? (_du.global_name || _du.username) : undefined,
+      discord_avatar: _du ? _du.avatar : undefined,
+    });
+    return true;
+  } catch (_) { return false; }
+}
+
 
 function commitLoadout(key) {
   // (v36.20) Re-entrancy latch, ABOVE the picker block below so a second call
@@ -70320,7 +70355,9 @@ function commitLoadout(key) {
   // cycleCampaignShip() restores position/velocity + carries damage forward (no
   // heal, no free spawn-protection) right after this returns. game.state stays
   // 'playing'.
-  if (game._liveSwap) return;
+  // (v43.01) ...but tell the room first. This return is the whole reason a mid-session hull swap
+  // was invisible to every other player - see _lssAnnounceLoadout above.
+  if (game._liveSwap) { _lssAnnounceLoadout(); return; }
 
   // (v32.98) CAMPAIGN DEATH-REENTRY : the player died, re-picked a ship/perk on the
   // ship-select screen, and confirmed. The leg is still live — apply the new ship
