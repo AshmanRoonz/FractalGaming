@@ -5885,6 +5885,33 @@ window.__lssOff = (function () {
 })();
 function _lssOff(n) { try { return !!(window.__lssOff && (window.__lssOff.all || window.__lssOff[n])); } catch (_) { return false; } }
 
+// ⭐⭐ (v44.09) `?texcap=N` - THE TEXTURE CAP, TESTABLE AT LAST, AND WITHOUT THE v39.49 TRAP.
+// Desktop HIGH has capped hull textures at 1024 since v39.34; ULTRA and MEGA are exempt ("they
+// exist to spend GPU") and upload the full 2048 maps - by that commit's own per-texture inventory,
+// 14 textures at 2048x2048 = 300 MB against 20 at 1024 = 107 MB. That is the largest single VRAM
+// number in the file, and whether ULTRA/MEGA should keep paying it is a LOOK judgement, not mine.
+// ⚠⚠ AND THE EXISTING KNOB CANNOT MAKE THAT JUDGEMENT, because it does two things at once.
+//   `_shipsVariant()` tests `window.__texCap.max <= 1024` and switches the DOWNLOAD to the lean
+//   ships/m/ set - base colour only, no normal maps, Standard instead of Physical. That is exactly
+//   the v39.49 regression whose note records the owner catching it: "the owner's 2k art was gone on
+//   the owner's own machine". So anyone reaching for the obvious knob to A/B the cap reproduces a
+//   known-rejected bug and judges the wrong thing: different ART, not the same art capped.
+//   `art: 'full'` says cap the UPLOAD, never change the DOWNLOAD - and _shipsVariant honours it.
+// (!) Parsed here, beside the ?off switchboard, because it has to beat _shipsVariant's memo and the
+//     manifest preloader. window.__texCap set by hand still works exactly as before.
+// (!) A cap only applies as textures are uploaded, so this is a boot-time question - which is why it
+//     needed a URL route at all: setting window.__texCap in a console and reloading loses it.
+// Clamped 256..4096. `?texcap=0` removes the cap (the ULTRA/MEGA behaviour) on any tier.
+try {
+  const _tc = /[?&]texcap=(\d+)/i.exec(location.search || '');
+  if (_tc) {
+    const _n = parseInt(_tc[1], 10) || 0;
+    const _v = (_n === 0) ? 0 : Math.max(256, Math.min(4096, _n));
+    window.__texCap = (_v === 0) ? { on: false, art: 'full' } : { max: _v, art: 'full' };
+    try { console.warn('[texcap] forced to ' + (_v || 'OFF (no cap)') + ' by ?texcap - hull ART set is unchanged (art:full)'); } catch (_) {}
+  }
+} catch (_) {}
+
 window.lssRequestFullscreen = function () {
   try {
     const el = document.documentElement;
@@ -6083,7 +6110,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.08';
+const LSS_BUILD = '44.09';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -25880,17 +25907,29 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
   } catch (e) { return String(e); }
 };
 // Bloom: extract bright pixels, blur, composite
+// ⭐ (v44.09) THREE DEPTH BUFFERS NOTHING HAS EVER READ. Every one of these targets takes a
+// single fullscreen quad with no depth test and no depth write - bright-pass, blur H, blur V - but
+// none of them passed `depthBuffer`, so three r165's `depthBuffer: true` DEFAULT applied and each
+// allocated a DEPTH_COMPONENT24 renderbuffer alongside its colour. Pure waste, and it is held at
+// LOW and MEDIUM too, where `postFX.enabled` is false and these passes never execute at all.
+// Reclaimed: 3 x (w x h x 4 B). At a 1920x1080 DPR-1 canvas the chain is 960x540, so ~6.2 MB; at
+// 4K DPR-1 or 1080p DPR-2 it is 1920x1080 and ~24.9 MB; at MEGA it scales with the tier again.
+// (!) rtScene deliberately KEEPS its default depth buffer - it is the one target the world is
+//     rendered into, and it depth-tests everything. Only the post chain is flat.
+// (!) With no depth attachment a depth test always passes, which is exactly what these quads want.
+const _rtBloomOpts = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+                       format: THREE.RGBAFormat, depthBuffer: false, stencilBuffer: false };
 postFX.rtBright = new THREE.WebGLRenderTarget(
   _initBloomRT.bw, _initBloomRT.bh,   // (v39.49) half the BASE size, never half the supersampled target
-  { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
+  _rtBloomOpts
 );
 postFX.rtBlurH = new THREE.WebGLRenderTarget(
   postFX.rtBright.width, postFX.rtBright.height,
-  { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
+  _rtBloomOpts
 );
 postFX.rtBlurV = new THREE.WebGLRenderTarget(
   postFX.rtBright.width, postFX.rtBright.height,
-  { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
+  _rtBloomOpts
 );
 
 // Fullscreen quad for shader passes
@@ -48170,8 +48209,13 @@ function _shipsVariant() {
       // memoised at boot, before the stored MEGA/ULTRA tier is restored, even those tiers got it.
       // The 1024 cap still shrinks the 2k maps at upload on HIGH; only a phone, a standalone
       // Quest, or an explicit window.__texCap.max <= 1024 preview gets ships/m/.
+      // ⚠ (v44.09) `art: 'full'` OPTS OUT OF THIS TEST. The cap and the art SET are two different
+      // decisions and this line is the only thing that ever conflated them; `?texcap=` sets the flag
+      // so a cap can be A/B'd on a PC with the owner's own 2k hulls still downloading. Without it,
+      // any attempt to measure the cap silently measures the mobile art instead - which is the
+      // v39.49 bug this very comment block was written about.
       const K = (typeof window !== 'undefined') ? window.__texCap : null;
-      const explicit = !!(K && typeof K.max === 'number' && K.max <= 1024);
+      const explicit = !!(K && K.art !== 'full' && typeof K.max === 'number' && K.max <= 1024);
       let small = false;
       try {
         small = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ||

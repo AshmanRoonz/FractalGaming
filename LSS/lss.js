@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.08';
+const LSS_BUILD = '44.09';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -14115,17 +14115,19 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
 };
+const _rtBloomOpts = { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+                       format: THREE.RGBAFormat, depthBuffer: false, stencilBuffer: false };
 postFX.rtBright = new THREE.WebGLRenderTarget(
   _initBloomRT.bw, _initBloomRT.bh,   // (v39.49) half the BASE size, never half the supersampled target
-  { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
+  _rtBloomOpts
 );
 postFX.rtBlurH = new THREE.WebGLRenderTarget(
   postFX.rtBright.width, postFX.rtBright.height,
-  { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
+  _rtBloomOpts
 );
 postFX.rtBlurV = new THREE.WebGLRenderTarget(
   postFX.rtBright.width, postFX.rtBright.height,
-  { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat }
+  _rtBloomOpts
 );
 
 postFX.quadGeo = new THREE.PlaneGeometry(2, 2);
@@ -29733,7 +29735,7 @@ function _shipsVariant() {
   if (_shipsVariant._v === undefined) {
     try {
       const K = (typeof window !== 'undefined') ? window.__texCap : null;
-      const explicit = !!(K && typeof K.max === 'number' && K.max <= 1024);
+      const explicit = !!(K && K.art !== 'full' && typeof K.max === 'number' && K.max <= 1024);
       let small = false;
       try {
         small = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ||
