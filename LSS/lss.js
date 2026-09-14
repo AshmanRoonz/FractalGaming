@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.23';
+const LSS_BUILD = '44.24';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -17795,7 +17795,7 @@ function _swShedDrops(px, py, pz, vel, fp, n, carry, spreadK, sizeK, lifeK) {
       velocity: _swDropV.clone(),
       life: (0.42 + Math.random() * 0.86) * lifeK, maxLife: 1.30 * lifeK,
       color: _SW_DROP_COL[(Math.random() * 3) | 0],
-      size: (1.5 + Math.random() * 2.5) * sizeK * (window.__splashSz || 1),
+      size: (0.9 + Math.random() * 1.5) * sizeK * (window.__splashSz || 1),   // (v44.24)
       grav: 300 + Math.random() * 260,
       splash: true,
     });
@@ -17846,7 +17846,7 @@ function _swWorthingtonJet(px, pz, WL, fp, vEntry, k) {
       life: fat ? (0.45 + Math.random() * 0.55) : (0.75 + Math.random() * 0.85),
       maxLife: 1.6,
       color: (Math.random() < 0.45) ? 0xa6c8de : 0xc8dcea,
-      size: (fat ? (2.4 + Math.random() * 3.0) : (1.0 + Math.random() * 1.9)) * (window.__splashSz || 1),
+      size: (fat ? (1.4 + Math.random() * 1.8) : (0.6 + Math.random() * 1.1)) * (window.__splashSz || 1),   // (v44.24)
       grav: 300 + Math.random() * 240,
       splash: true,
     });
@@ -18002,7 +18002,7 @@ function _swSpawnSplash(x, wl, z, n, power) {
       color: (Math.random() < 0.5) ? 0x7ba6c4 : 0xa6c8de,
       
       
-      size: (1.3 + Math.random() * 2.4) * (window.__splashSz || 1),   
+      size: (0.7 + Math.random() * 1.4) * (window.__splashSz || 1),   // (v44.24)   
       grav: 270 + Math.random() * 320,
       splash: true,
     });
@@ -18024,7 +18024,7 @@ function _swSpawnSplashV(x, wl, z, V, D, countScl, beta) {
   if (I <= 0) return 0;                                        
   const r = Vt / Math.max(Vn, 1e-3), lean = r / (1 + r);       
   let N = Math.round((3 + 13 * I) * (D / D_REF) * (D / D_REF) * (countScl || 1) * (W3.spray != null ? W3.spray : 1) * (window.__splashN != null ? window.__splashN : 1));
-  N = Math.max(1, Math.min(78, Math.round(N * 3.0)));   
+  N = Math.max(1, Math.min(120, Math.round(N * 4.5)));   // (v44.24) x3 -> x4.5, cap 78 -> 120: smaller drops, more of them   
   const cap = (typeof _particleCap === 'function') ? _particleCap() : 1200;
   if (game.particles.length > cap - N - 2) return 0;
   const wFrac = Math.min(0.72, lean * lean);
@@ -18041,7 +18041,7 @@ function _swSpawnSplashV(x, wl, z, V, D, countScl, beta) {
   e1x /= e1l; e1y /= e1l; e1z /= e1l;
   const e2x = ay * e1z - az * e1y, e2y = az * e1x - ax * e1z, e2z = ax * e1y - ay * e1x;   
   const coneHalf = 0.96 * (1 - 0.6 * lean);                   
-  const sizeMean = 1.5 * (D / D_REF) * (window.__splashSz || 1);
+  const sizeMean = 0.9 * (D / D_REF) * (window.__splashSz || 1);   // (v44.24) 1.5 -> 0.9
   const cAdv = 0.55 * lean;                                   
   for (let i = 0; i < N; i++) {
     const u1 = Math.random(), u2 = Math.random(), u3 = Math.random();
@@ -45245,7 +45245,7 @@ function _particleCap() {
   if (typeof game !== 'undefined' && game.sandwichTerrain && game.sandwichTerrain.biome === 'mossy') {   
     return ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 1500 : 4000;
   }
-  return (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 800 : 500;
+  return (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 1200 : 800;   // (v44.24) room for the finer spray
 }
 const _sharedParticleGeo = new THREE.SphereGeometry(1, 4, 3); 
 
@@ -45344,49 +45344,87 @@ _particlePoints.visible = false;
 scene.add(_particlePoints);
 const _ptsColorScratch = new THREE.Color();
 
-const _SPL_MAX = 768;
+const _SPL_MAX = 1536;   // (v44.24) smaller drops, more of them
 const _splPos = new Float32Array(_SPL_MAX * 3);
 const _splCol = new Float32Array(_SPL_MAX * 3);
 const _splSize = new Float32Array(_SPL_MAX);
 const _splAlpha = new Float32Array(_SPL_MAX);
+const _splVel = new Float32Array(_SPL_MAX * 3);   // (v44.24) world velocity, for the streak
 const _splGeo = new THREE.BufferGeometry();
 const _splPosAttr = new THREE.BufferAttribute(_splPos, 3).setUsage(THREE.DynamicDrawUsage);
 const _splColAttr = new THREE.BufferAttribute(_splCol, 3).setUsage(THREE.DynamicDrawUsage);
 const _splSizeAttr = new THREE.BufferAttribute(_splSize, 1).setUsage(THREE.DynamicDrawUsage);
 const _splAlphaAttr = new THREE.BufferAttribute(_splAlpha, 1).setUsage(THREE.DynamicDrawUsage);
+const _splVelAttr = new THREE.BufferAttribute(_splVel, 3).setUsage(THREE.DynamicDrawUsage);   // (v44.24)
 _splGeo.setAttribute('position', _splPosAttr);
 _splGeo.setAttribute('aColor', _splColAttr);
 _splGeo.setAttribute('aSize', _splSizeAttr);
 _splGeo.setAttribute('aAlpha', _splAlphaAttr);
+_splGeo.setAttribute('aVel', _splVelAttr);   // (v44.24)
 _splGeo.setDrawRange(0, 0);
 const _splDropTex = (function () {
   const sz = 48, c = document.createElement('canvas'); c.width = c.height = sz;
   const x = c.getContext('2d');
-  const g = x.createRadialGradient(sz * 0.5, sz * 0.42, 0, sz * 0.5, sz * 0.5, sz * 0.5);
-  g.addColorStop(0.00, 'rgba(236,248,255,0.50)');
-  g.addColorStop(0.35, 'rgba(198,226,245,0.26)');
-  g.addColorStop(0.70, 'rgba(150,196,224,0.10)');
-  g.addColorStop(1.00, 'rgba(120,170,205,0.00)');
+  const g = x.createRadialGradient(sz * 0.5, sz * 0.5, 0, sz * 0.5, sz * 0.5, sz * 0.5);
+  g.addColorStop(0.00, 'rgba(255,255,255,0.90)');
+  g.addColorStop(0.50, 'rgba(255,255,255,0.35)');
+  g.addColorStop(1.00, 'rgba(255,255,255,0.00)');
   x.fillStyle = g; x.beginPath(); x.arc(sz * 0.5, sz * 0.5, sz * 0.5, 0, 6.2832); x.fill();
   const t = new THREE.CanvasTexture(c); t.needsUpdate = true; return t;
 })();
 const _splMat = new THREE.ShaderMaterial({
-  uniforms: { uMap: { value: _splDropTex }, uScale: { value: 600 }, uOpacity: { value: 100 } },
-  vertexShader: _ptsMat.vertexShader,
+  uniforms: { uMap: { value: _splDropTex }, uScale: { value: 600 }, uOpacity: { value: 1.0 },
+              uViewH: { value: 1080 }, uStretch: { value: 0.05 }, uStretchMax: { value: 6.0 } },
+  vertexShader: [
+    'attribute vec3 aColor;',
+    'attribute float aSize;',
+    'attribute float aAlpha;',
+    'attribute vec3 aVel;',
+    'varying vec3 vColor;',
+    'varying float vAlpha;',
+    'varying vec2 vDir;',
+    'varying float vStretch;',
+    'uniform float uScale; uniform float uViewH; uniform float uStretch; uniform float uStretchMax;',
+    'void main() {',
+    '  vColor = aColor;',
+    '  vAlpha = aAlpha;',
+    '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
+    '  vec4 c0 = projectionMatrix * mv;',
+    '  vec4 c1 = projectionMatrix * (modelViewMatrix * vec4(position - aVel * uStretch, 1.0));',
+    '  vec2 n0 = c0.xy / max(c0.w, 1e-4);',
+    '  vec2 n1 = c1.xy / max(c1.w, 1e-4);',
+    '  float aspect = projectionMatrix[1][1] / max(projectionMatrix[0][0], 1e-6);',
+    '  vec2 dpx = vec2((n1.x - n0.x) * aspect, n1.y - n0.y) * 0.5 * uViewH;',   // head -> tail, in pixels, y up
+    '  float px = aSize * uScale / max(1.0, -mv.z);',
+    '  float tailPx = length(dpx);',
+    '  vDir = (tailPx > 1e-3) ? (dpx / tailPx) : vec2(1.0, 0.0);',
+    '  vStretch = clamp(1.0 + tailPx / max(px, 1.0), 1.0, uStretchMax);',
+    '  gl_PointSize = min(190.0, px * vStretch);',
+    '  gl_Position = c0;',
+    '}',
+  ].join('\n'),
   fragmentShader: [
     'uniform sampler2D uMap;',
     'uniform float uOpacity;',
     'varying vec3 vColor;',
     'varying float vAlpha;',
+    'varying vec2 vDir;',
+    'varying float vStretch;',
     'void main() {',
-    '  vec4 tex = texture2D(uMap, gl_PointCoord);',
-    '  float a = min(1.0, tex.a * vAlpha * uOpacity);',
+    '  vec2 q = gl_PointCoord - 0.5; q.y = -q.y;',                     // y up, like the streak direction
+    '  float along = q.x * vDir.x + q.y * vDir.y;',                     // -0.5 = head, +0.5 = tail
+    '  float across = -q.x * vDir.y + q.y * vDir.x;',
+    '  vec2 uv = vec2(along + 0.5, across * vStretch + 0.5);',
+    '  if (uv.y < 0.0 || uv.y > 1.0) discard;',
+    '  vec4 tex = texture2D(uMap, uv);',
+    '  float tail = 1.0 - 0.8 * smoothstep(0.3, 1.0, uv.x);',            // the tail thins out
+    '  float a = min(1.0, tex.a * vAlpha * uOpacity * tail);',
     '  if (a < 0.004) discard;',
-    '  gl_FragColor = vec4(vColor * tex.rgb, a);',
+    '  gl_FragColor = vec4(vColor * tex.rgb * a, a);',                   // premultiplied for additive
     '}',
   ].join('\n'),
   transparent: true,
-  blending: THREE.NormalBlending,
+  blending: THREE.AdditiveBlending,
   depthWrite: false,
   depthTest: true,
 });
@@ -45490,6 +45528,14 @@ function updateParticles(dt) {
     ((typeof camera !== 'undefined' && camera) ? camera.projectionMatrix.elements[5] : 2.4);
   _ptsMat.uniforms.uScale.value = _uScale;
   _splMat.uniforms.uScale.value = _uScale;
+  {   // (v44.24) the streak needs the buffer height for its pixel maths, and its knobs
+    const _W7 = window.__water || {};
+    const _su = _splMat.uniforms;
+    _su.uViewH.value = _bufH;
+    _su.uStretch.value = (_W7.sprayStretch != null) ? +_W7.sprayStretch : 0.05;
+    _su.uStretchMax.value = (_W7.sprayStretchMax != null) ? +_W7.sprayStretchMax : 6.0;
+    _su.uOpacity.value = (_W7.sprayOp != null) ? +_W7.sprayOp : 1.0;
+  }
   let _w = 0;
   let _ws = 0;
   const _W6 = window.__water || {};
@@ -45526,8 +45572,9 @@ function updateParticles(dt) {
         const _s3 = _ws * 3;
         _splPos[_s3] = pos.x; _splPos[_s3 + 1] = pos.y; _splPos[_s3 + 2] = pos.z;
         _splCol[_s3] = p._colR; _splCol[_s3 + 1] = p._colG; _splCol[_s3 + 2] = p._colB;
+        _splVel[_s3] = _pv.x; _splVel[_s3 + 1] = _pv.y; _splVel[_s3 + 2] = _pv.z;   // (v44.24)
         _splSize[_ws]  = p.size * 2.2 * (0.5 + alpha * 0.5);
-        _splAlpha[_ws] = alpha * (window.__splashA != null ? window.__splashA : 0.45);   
+        _splAlpha[_ws] = alpha * (window.__splashA != null ? window.__splashA : 0.20);   // (v44.24) 0.45 -> 0.20: additive now, and a fresh crown is ~100 overlapping drops   
         _ws++;
       }
     } else if (_w < _PTS_MAX) {
@@ -45558,6 +45605,7 @@ function updateParticles(dt) {
     _splColAttr.needsUpdate = true;
     _splSizeAttr.needsUpdate = true;
     _splAlphaAttr.needsUpdate = true;
+    _splVelAttr.needsUpdate = true;   // (v44.24)
   }
 }
 
