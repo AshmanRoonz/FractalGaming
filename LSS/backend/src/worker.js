@@ -47,6 +47,21 @@ const MAX_REPORTED_SCORE = 10_000_000;
 // and NaN sails through every comparison, so the finiteness test matters as much as the ceiling.
 // Ceilings are deliberately generous - they exist to reject nonsense, not to balance the game. A
 // long endless run is the yardstick: the owner has gone past 41 km in one.
+// ⭐⭐⭐ (v4) THE TWO WINDOWS THAT STOP A MATCH BEING LOST. The rule used to be "every human
+// named in the match must report, or nothing happens, forever" - and nothing in the system could
+// ever move a row out of that state. One player closing a laptop at the final scoreboard destroyed
+// the match for everybody in it. Owner: "i don't want future matches to be lost."
+//   SETTLE is the short wait before a NETWORKED match seals, so a peer whose report is a few seconds
+// behind still gets counted rather than arriving at an already-sealed match. Solo matches skip it
+// entirely - nobody else is ever going to report, so waiting buys nothing and would only delay the
+// one path that already works.
+//   GRACE is the hard stop. Once a match is this old it seals with whoever actually reported, and
+// the absent player is simply not credited. A match that sits unvalidated is lost for EVERYONE in
+// it; sealing late costs only the player who never reported.
+// (!) Neither window does anything on its own - a row still needs something to re-examine it once
+//     the window passes. That is the scheduled sweep at the bottom of this file.
+const MATCH_SETTLE_MS = 2 * 60 * 1000;        // networked: let a late peer in
+const MATCH_GRACE_MS  = 15 * 60 * 1000;       // then seal with whoever is here
 const MAX_REPORTED_TALLY  = 100_000;      // kills / deaths in one match
 const MAX_REPORTED_DAMAGE = 100_000_000;  // damage dealt / taken in one match
 function _clampTally(v, cap) {
@@ -114,7 +129,15 @@ async function requireAuth(request) {
   const res = await fetch(DISCORD_API + '/users/@me', {
     headers: { Authorization: auth },
   });
-  if (!res.ok) throw new ApiError(401, 'invalid_token');
+  // ⭐ (v4) A DISCORD OUTAGE IS NOT A REVOKED TOKEN. Every non-ok response used to collapse into
+  // 401 invalid_token, so a 429 or a 503 from Discord during the thirty seconds after a match ended
+  // was indistinguishable from a genuinely dead token. A client cannot retry what looks permanent,
+  // and the match was gone. 401/403 stay terminal; everything else is explicitly temporary, which
+  // is what lets the client keep the match in its outbox and try again later.
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) throw new ApiError(401, 'invalid_token');
+    throw new ApiError(503, 'auth_upstream_unavailable', 'discord ' + res.status);
+  }
   return await res.json();
 }
 
@@ -184,10 +207,49 @@ async function tryValidateMatch(env, matchId, opts) {
     byReporter.get(r.reported_by).push(r);
   }
 
-  if (byReporter.size < matchRow.human_count) return; // still waiting
-  for (const list of byReporter.values()) {
-    if (list.length !== matchRow.participant_count) return; // partial report
+  // ⭐⭐⭐ (v4) THE QUORUM, REBUILT. Two gates used to live here and both stranded matches
+  // permanently, because NOTHING in the system could move a row out of validated = 0.
+  //
+  // GATE 1 was `byReporter.size < matchRow.human_count`. human_count is frozen from whichever
+  // client POSTed first (the match row is INSERT ... ON CONFLICT DO NOTHING), so it is one client's
+  // opinion of the roster, enforced forever against everyone else. It is now derived from the
+  // reports themselves - the union of humans any reporter named - and, far more importantly, it
+  // EXPIRES. See MATCH_GRACE_MS.
+  //
+  // GATE 2 was `list.length !== matchRow.participant_count`: every reporter had to report exactly
+  // as many rows as the first reporter did. That one is simply deleted. Two honest clients disagree
+  // about the entity list constantly - bots die and are spliced out of game.entities at different
+  // ticks, a peer connects or drops between the two posts, reinforcements spawn - so a count
+  // comparison is a coin flip, not a check. What it was protecting (nobody sneaking an unseen
+  // account into the rollup) is already covered by the human roster guard below, which compares the
+  // human id SETS across reporters and is the only surface that reaches career totals.
+  const expected = new Set();
+  for (const [, list] of byReporter) {
+    for (const r of list) if (isHumanDiscordId(r.discord_id)) expected.add(String(r.discord_id));
   }
+  // You cannot validate a match nobody reported. Reachable: the matches row and the participant
+  // rows are two separate writes, so a failure between them leaves a match with an empty roster -
+  // there is one such row in production. Sealing it would mark a match validated while crediting
+  // nobody and would hide it from the client's retry; leaving it pending costs one row per sweep
+  // and lets the report land when it finally arrives.
+  if (byReporter.size === 0) return;
+
+  const _age = Date.now() - (Number(matchRow.ended_at) || 0);
+  const _allIn = byReporter.size >= expected.size;
+  // "A peer might still report." mode === 'multiplayer' is exactly that statement: it is set when a
+  // reporter saw two or more humans, and RAISED by any later reporter (see handlePostMatch), so one
+  // client's view of an opponent who already left cannot un-say it. Genuine solo matches never take
+  // this branch and keep the instant-seal behaviour they have today - that is the one path that has
+  // always worked and it must not get slower.
+  const _networked = (matchRow.mode === 'multiplayer');
+  if (!_allIn && _age < MATCH_GRACE_MS) return;             // stragglers still have time
+  // The settle wait is ONLY for the ambiguous case: a networked match in which the reports so far
+  // name just one human. That is either a genuine one-human room or - the case that loses matches -
+  // a player reporting after their opponent already left, which seals 'solo' before the opponent's
+  // report lands. When two or more humans have been named and all of them reported, the roster is
+  // not in doubt and the match seals immediately; making every multiplayer match wait out the
+  // window would be a latency cost with nothing bought.
+  if (_networked && expected.size < 2 && _age < MATCH_SETTLE_MS) return;
 
   // ⭐⭐⭐ (v2) CROSS-CHECK THE OUTCOME, NOT THE TALLIES - THIS IS WHY NO MULTIPLAYER MATCH HAS
   // EVER VALIDATED. The original rule required every reporter to agree EXACTLY on every field,
@@ -280,6 +342,32 @@ async function tryValidateMatch(env, matchId, opts) {
   // lets every player in the match mark their own row and mvp_count inflates once per reporter. The
   // tie-break is deterministic (kills, then damage, then id) so a re-run cannot pick a different one.
   // Solo is untouched by construction: one human cannot be two.
+  // ⭐⭐ (v4) WHO IS ACTUALLY CREDITED, now that a match can seal without everyone reporting.
+  // A human is credited if their own client attested to their stats, OR if two independent
+  // reporters described them. With a single reporter that means only the reporter is credited -
+  // which matters, because the roster guard cannot cross-check a set of one, and without this a
+  // lone client could name any discord_id in the world and hand it a match. Forging your OWN stats
+  // is already possible in solo and always has been; forging SOMEBODY ELSE'S would be new.
+  const _selfReported = new Set();
+  const _namedBy = new Map();
+  for (const [reporter, list] of byReporter) {
+    for (const r of list) {
+      if (!isHumanDiscordId(r.discord_id)) continue;
+      if (String(r.reported_by) === String(r.discord_id)) _selfReported.add(String(r.discord_id));
+      if (!_namedBy.has(String(r.discord_id))) _namedBy.set(String(r.discord_id), new Set());
+      _namedBy.get(String(r.discord_id)).add(String(reporter));
+    }
+  }
+  const _creditable = (id) => {
+    const k = String(id);
+    if (_selfReported.has(k)) return true;
+    const n = _namedBy.get(k);
+    return !!(n && n.size >= 2);
+  };
+  for (const id of [...canonical.keys()]) {
+    if (isHumanDiscordId(id) && !_creditable(id)) canonical.delete(id);
+  }
+
   const _mvps = [...canonical.entries()].filter(([id, s]) => s.is_mvp && isHumanDiscordId(id));
   if (_mvps.length > 1) {
     _mvps.sort((a, b) => (b[1].kills - a[1].kills)
@@ -322,7 +410,10 @@ async function tryValidateMatch(env, matchId, opts) {
   `).bind(now, matchId).run();
   if (!claim.meta || claim.meta.changes !== 1) return;   // another caller owns this rollup
 
-  const isMp = (matchRow.mode === 'multiplayer');
+  // (v4) Derived, not frozen. matchRow.mode is the FIRST reporter's headcount; `expected` is the
+  // union of humans every reporter named, so a match where one peer's report arrived late is still
+  // filed as the multiplayer match it was.
+  const isMp = (matchRow.mode === 'multiplayer') || (expected.size >= 2);
   const stmts = [];
 
   for (const [discordId, snap] of canonical) {
@@ -330,6 +421,20 @@ async function tryValidateMatch(env, matchId, opts) {
     // their stats live only in match_participants for the historical
     // record (so the match scoreboard renders correctly).
     if (!isHumanDiscordId(discordId)) continue;
+
+    // ⚠⚠ (v4) THE ROW HAS TO EXIST OR THE CREDIT EVAPORATES SILENTLY. Every rollup statement
+    // below is `UPDATE players ... WHERE discord_id = ?`, and upsertPlayer only ever runs for the
+    // authenticated REPORTER (handlePostMatch). A participant who was corroborated by two peers but
+    // has never signed in on this backend has no players row, so all three UPDATEs match zero rows,
+    // report success, and credit nothing - while player_loadout_stats happily INSERTs an orphan.
+    // That was unreachable while every credited human had to be a reporter; the relaxed quorum
+    // above makes it reachable. The placeholder name is overwritten by upsertPlayer the moment they
+    // do sign in.
+    stmts.push(env.DB.prepare(`
+      INSERT INTO players (discord_id, username, display_name, avatar_hash, created_at, last_seen)
+      VALUES (?, ?, ?, NULL, ?, ?)
+      ON CONFLICT(discord_id) DO NOTHING
+    `).bind(discordId, 'player_' + String(discordId).slice(-4), String(discordId).slice(-4), now, now));
 
     // Bump player career totals (combined + mode-specific).
     if (isMp) {
@@ -438,9 +543,15 @@ async function tryValidateMatch(env, matchId, opts) {
       await env.DB.batch(stmts);
     } catch (err) {
       // Nothing was credited (the batch is all-or-nothing), but the claim above already flipped the
-      // match to 1 - which would hide it from every future retry. Hand it back as disputed so the
-      // revalidate route can pick it up again, and let the error surface rather than swallowing it.
-      try { await markDisputed(env, matchId); } catch (_) {}
+      // match to 1 - which would hide it from every future retry.
+      // (v4) Hand it back to PENDING, not disputed. Disputed is a terminal state that only a manual
+      // admin call can leave; pending is swept automatically every few minutes, so a D1 blip costs
+      // the match a few minutes instead of costing it an operator. A match that fails this way
+      // repeatedly stays visible as a stuck `pending` in /admin/audit.
+      try {
+        await env.DB.prepare('UPDATE matches SET validated = 0 WHERE id = ? AND validated = 1')
+          .bind(matchId).run();
+      } catch (_) {}
       throw err;
     }
   }
@@ -497,6 +608,10 @@ async function handlePostMatch(request, env, origin) {
     throw new ApiError(400, 'no_participants');
   }
   if (body.participants.length > 12) throw new ApiError(400, 'too_many_participants');
+  // (v4) Hoisted out of the write loop below, where throwing left a half-written report.
+  for (const p of body.participants) {
+    if (!p || !p.discord_id) throw new ApiError(400, 'participant_missing_discord_id');
+  }
 
   // The reporter must be among the participants ; prevents random
   // accounts from posting matches they weren't in.
@@ -538,11 +653,31 @@ async function handlePostMatch(request, env, origin) {
     gameMode,
   ).run();
 
+  // ⭐⭐ (v4) `mode` IS RAISED, NEVER FROZEN. The row above is INSERT ... ON CONFLICT DO NOTHING,
+  // so every column in it belongs to whichever client posted FIRST - including `mode`, which is
+  // derived from that one client's headcount. A player whose opponent rage-quit before the final
+  // scoreboard reports one human; the match is filed 'solo' and seals on the spot; the opponent's
+  // report then arrives at a sealed match and is discarded with a 200 OK, and their match is gone.
+  //   Any reporter that saw two or more humans - or that says outright it was a networked session
+  // (`networked`, v44.15+, set only when another human peer was actually connected) - promotes the
+  // row to 'multiplayer'. It only ever goes up, so a late report describing an emptier room cannot
+  // undo it. In tryValidateMatch this is what holds the settle window open.
+  if (mode === 'multiplayer' || body.networked) {
+    await env.DB.prepare(
+      "UPDATE matches SET mode = 'multiplayer' WHERE id = ? AND mode != 'multiplayer'"
+    ).bind(String(body.match_id)).run();
+  }
+
   // Insert / replace this reporter's view of every participant.
+  // ⭐ (v4) ONE BATCH, NOT N AWAITED WRITES. The loop used to commit rows one at a time AND throw
+  // from inside itself on a missing discord_id, so a bad participant halfway down left this
+  // reporter's view half-written - a partial report that no consensus rule can interpret and that
+  // the client never retries. The id check is hoisted into the shape validation above; the writes
+  // now land together or not at all.
   const now = Date.now();
+  const _pStmts = [];
   for (const p of body.participants) {
-    if (!p.discord_id) throw new ApiError(400, 'participant_missing_discord_id');
-    await env.DB.prepare(`
+    _pStmts.push(env.DB.prepare(`
       INSERT INTO match_participants (
         match_id, discord_id, reported_by, team, loadout_key,
         kills, deaths, damage_dealt, damage_taken,
@@ -581,8 +716,9 @@ async function handlePostMatch(request, env, origin) {
         : Math.max(0, Math.min(MAX_REPORTED_SCORE, Math.floor(Number(p.score)))),
       p.survived_sec == null || !Number.isFinite(Number(p.survived_sec)) ? null
         : Math.max(0, Number(p.survived_sec)),
-    ).run();
+    ));
   }
+  if (_pStmts.length) await env.DB.batch(_pStmts);
 
   // Try to validate (no-op if not all reports are in yet).
   await tryValidateMatch(env, String(body.match_id));
@@ -1578,6 +1714,38 @@ async function handleRoomsScoop(request, env, origin, code) {
   return jsonResponse(200, { room, scooped }, env, origin);
 }
 
+// ---------- The sweep ------------------------------------------------
+// ⭐⭐⭐ (v4) THE PART THAT MAKES THE WINDOWS REAL. tryValidateMatch only ever runs when
+// somebody POSTs. That is fine while a match is waiting for a report that is coming, and useless
+// for a match waiting for one that is NOT: the settle and grace windows in tryValidateMatch expire
+// with nothing watching, and the row sits at validated = 0 until an operator notices. On the live
+// database that was nine matches, the oldest four months old.
+//   This runs on a cron trigger (see wrangler.toml) and re-examines pending matches whose settle
+// window has passed. It is deliberately dumb: it does not decide anything, it just gives
+// tryValidateMatch another look at rows whose circumstances have changed by the passage of time.
+// (!) Bounded per run. The subrequest ceiling, not CPU, is the binding constraint, and every
+//     validated match inside the loop costs a CAS plus a rollup batch.
+async function sweepPendingMatches(env, limit) {
+  const n = Math.max(1, Math.min(40, limit || 25));
+  const cutoff = Date.now() - MATCH_SETTLE_MS;
+  const rows = await env.DB.prepare(`
+    SELECT id FROM matches
+    WHERE validated = 0 AND ended_at < ?
+    ORDER BY ended_at ASC LIMIT ?
+  `).bind(cutoff, n).all();
+  const ids = (rows.results || []).map(r => r.id);
+  let validated = 0, errors = 0;
+  for (const id of ids) {
+    try {
+      await tryValidateMatch(env, id, { skipCacheBust: true });
+      const after = await env.DB.prepare('SELECT validated FROM matches WHERE id = ?').bind(id).first();
+      if (after && after.validated === 1) validated++;
+    } catch (_) { errors++; }
+  }
+  if (validated) { try { await invalidateLeaderboardCache(env); } catch (_) {} }
+  return { examined: ids.length, validated, errors };
+}
+
 // ---------- Admin: audit + one-shot revalidation ----------------------
 // The consensus rule above changed, and every multiplayer match ever posted was disputed under the
 // OLD rule (validated = 2) and never rolled up. Those rows are still in D1 with their full
@@ -1707,6 +1875,14 @@ async function handleAdminRevalidate(request, env, origin) {
 // ---------- Router ---------------------------------------------------
 
 export default {
+  // (v4) Cron entry point. See `[triggers]` in wrangler.toml - without that stanza this never runs
+  // and every match still depends on somebody happening to POST.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(sweepPendingMatches(env).catch(err => {
+      console.error('[lss-backend] sweep failed:', err && err.stack || err);
+    }));
+  },
+
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
 
