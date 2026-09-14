@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.02';
+const LSS_BUILD = '44.03';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -27973,7 +27973,7 @@ function initSandwichTerrain() {
   if (!game._swapStaging) { try { _hubCityInit(); } catch (e) { console.warn('[hubcity] init failed:', e); } }
   if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && T && T.biome === 'mossy') {
     game._clipWantHub = !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && typeof _clipBuild === 'function';
-    if (!game._clipWantHub) { game._swPreloading = true; game._swPreloadZero = 0; game._swPreloadFrames = 0; game._swPreloadStart = (game.time || 0); game._preLaunchWaiting = false; }
+    if (!game._clipWantHub) { game._swPreloading = true; game._swPreloadZero = 0; game._swPreloadFrames = 0; game._swPreloadStart = (game.time || 0); game._preLaunchWaiting = false; game._swPreloadHoldT = 0; }   // (v44.03) a fresh preload gets a fresh hold clock
     try { if (typeof _clipmap !== 'undefined') _clipmap.on = false; } catch (_) {}
   } else if (T && T.biome !== 'mossy') {
     try {
@@ -72637,7 +72637,16 @@ function gameLoop(timestamp) {
             game._preLaunchWaiting = false;
             try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {}
           } else {
-            try { _swHubLoadingOverlay(false); } catch (_) {}   // a plain hub entry: nothing else is coming
+            var _ssel = document.getElementById('ship-select');
+            var _launchHoldsCurtain = !!(_ssel && _ssel.classList.contains('lss-launching'));
+            var _nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            if (!game._swPreloadHoldT) game._swPreloadHoldT = _nowMs;
+            if (_launchHoldsCurtain && (_nowMs - game._swPreloadHoldT) < 60000) {
+              game._swPreloading = true;   // re-arm; the launch owns the curtain and will lower it
+            } else {
+              game._swPreloadHoldT = 0;
+              try { _swHubLoadingOverlay(false); } catch (_) {}
+            }
           }
         }
         else { try { _swHubLoadingOverlay(true); } catch (_) {} }

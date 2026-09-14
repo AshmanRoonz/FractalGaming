@@ -6083,7 +6083,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.02';
+const LSS_BUILD = '44.03';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -45633,7 +45633,7 @@ function initSandwichTerrain() {
     // _prebakeWorldForLaunch, chained onto commitLoadout's warmup promise. This
     // branch is left intact because the mobile path still uses it and the two
     // compose (the prebake finds nothing left to build after it, or vice versa).
-    if (!game._clipWantHub) { game._swPreloading = true; game._swPreloadZero = 0; game._swPreloadFrames = 0; game._swPreloadStart = (game.time || 0); game._preLaunchWaiting = false; }
+    if (!game._clipWantHub) { game._swPreloading = true; game._swPreloadZero = 0; game._swPreloadFrames = 0; game._swPreloadStart = (game.time || 0); game._preLaunchWaiting = false; game._swPreloadHoldT = 0; }   // (v44.03) a fresh preload gets a fresh hold clock
     // (v34.96) Force a FRESH full clipmap bake for THIS build. A hub rebuild
     // (e.g. returning from a zone-rift cavern) otherwise reuses the previous
     // build's baked height rings — stale ghost mountains with no collision
@@ -108536,7 +108536,49 @@ function gameLoop(timestamp) {
             game._preLaunchWaiting = false;
             try { if (game._launchSoloAfterCinematic) game._launchSoloAfterCinematic(); } catch (_) {}
           } else {
-            try { _swHubLoadingOverlay(false); } catch (_) {}   // a plain hub entry: nothing else is coming
+            // ⭐⭐ (v44.03) "NOTHING ELSE IS COMING" WAS NEVER TESTED, AND DURING A LAUNCH IT IS FALSE.
+            // Owner: "the game actually loads after the loading screen the ship in a generic cinematic,
+            // then goes back to a loading screen and then shows the ship in the proper cinematic. It's
+            // been doing this on all devices. It shouldn't do that double loading screen."
+            // NOTHING RUNS TWICE - one world build, one prebake, one cinematic. What runs twice is the
+            // CURTAIN, and this line is the lower that splits it in two. Measured on the touch arm at
+            // 375x812 (MutationObserver on #lss-loading-overlay's class):
+            //    8932  UP   "PREPARING ARENA | compiling shaders"
+            //   10131  DOWN "ENTERING THE OVERWORLD | drawing the world..."     <- HERE
+            //   10340  UP   "ENTERING THE OVERWORLD | linking shaders 119/122"  <- _pbSub re-raises
+            //   20414  DOWN "ENTERING THE OVERWORLD | warming the overlays"     <- the real lift
+            // Ten seconds of launch left after this line let go of the curtain. The gap is 209 ms on a
+            // fast machine, which is why it has read as a flicker for so long; on the owner's console it
+            // is a whole prebake phase, and it reads as two loading screens with a silent stretch of
+            // parked ship between them.
+            // ⚠⚠ v42.38 FIXED EXACTLY THIS, FOUR LINES ABOVE, AND LEFT THIS BRANCH ALONE. Its
+            //   comment - "THE CURTAIN IS THE LAUNCH PATH'S TO DROP - this line used to drop it here" -
+            //   describes this line's behaviour precisely. It removed the lower from the
+            //   `_preLaunchWaiting` branch and left the `else` doing the thing it had just removed. The
+            //   else reaches here whenever the preload finishes BEFORE the launch sets that flag, which
+            //   is the ordinary case: the prebake drains `game.sandwichChunks` itself, so this arm sees
+            //   `updateSandwichStream` return 0 three frames running and declares itself done early.
+            // ⚠ DEFERRED, NOT DECLINED - the distinction is the whole safety argument. `_swPreloading`
+            //   is cleared five lines above, so a branch that merely SKIPS the lower would kill this arm
+            //   for the rest of the session and the curtain could hang forever on any path the launch
+            //   fails to lift (multiplayer free flight reaches no _cineWhenSettled at all). Re-arming
+            //   keeps the arm alive and re-tests every frame, so the lift still happens - just after the
+            //   launch is finished with it. The queue is empty by now, so the re-test is free.
+            // (!) A PLAIN HUB ENTRY IS BYTE-IDENTICAL: no launch means no `lss-launching`, so it lowers
+            //     on this very tick exactly as before.
+            // (!) AND IT CANNOT WAIT FOREVER. 60 s of wall clock is the backstop; past it this lowers
+            //     regardless of what the launch thinks it is doing. _lssCurtainFailsafe is still behind
+            //     that, untouched.
+            var _ssel = document.getElementById('ship-select');
+            var _launchHoldsCurtain = !!(_ssel && _ssel.classList.contains('lss-launching'));
+            var _nowMs = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            if (!game._swPreloadHoldT) game._swPreloadHoldT = _nowMs;
+            if (_launchHoldsCurtain && (_nowMs - game._swPreloadHoldT) < 60000) {
+              game._swPreloading = true;   // re-arm; the launch owns the curtain and will lower it
+            } else {
+              game._swPreloadHoldT = 0;
+              try { _swHubLoadingOverlay(false); } catch (_) {}
+            }
           }
         }
         else { try { _swHubLoadingOverlay(true); } catch (_) {} }
