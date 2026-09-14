@@ -6110,7 +6110,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.16';
+const LSS_BUILD = '44.17';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -6809,7 +6809,10 @@ const LOADOUTS = {
     name: 'PUNCTURE', className: 'Frigate Sniper', chassis: 'FRIGATE',
     weapon: { name: 'Sodium Railgun', mode: 'hitscan', damage: 1000, fireRate: 1.5, clipSize: 6, range: 10000, splash: 50, projSpeed: 0, pellets: 1, spinup: 0 },
     abilities: [
-      { name: 'Cluster Missile', cooldown: 8, duration: 0.3, desc: 'Impact 800 + 500 DPS for 5s', type: 'offensive', dmg: 3300 },
+      // (v44.17) `desc` is shared with the ship-select card AND the XR picker (which wraps at a
+      // fixed width), so the airburst note is one short clause, not a sentence. The long-form
+      // explanation lives in the how-to's COMBAT MECHANICS cards instead.
+      { name: 'Cluster Missile', cooldown: 8, duration: 0.3, desc: 'Impact 800 + 500 DPS for 5s - tap fire to airburst', type: 'offensive', dmg: 3300 },
       { name: 'Afterburner', cooldown: 10, duration: 3, desc: 'Speed boost to 600', type: 'defensive' },
       { name: 'Stasis Trap', cooldown: 12, duration: 4, desc: 'Slow and root enemies', type: 'utility' },
     ],
@@ -14940,6 +14943,41 @@ class NetworkPlayer {
         ((this.chassis && this.chassis.hullLength) || 60) * 0.7,
         Math.min(1, s.va / 9), dt);
     }
+    // ⭐⭐⭐ (v44.17) ...AND EVERY OTHER CHARGE VISUAL, WHICH UNTIL NOW WAS LOCAL-ONLY. Owner:
+    // "i can't see other player's electricity when vortex holds his laser shot, or when puncture
+    // charges, stun bolt on slayer ... blaster's charge shot charging needs to be made visible
+    // multiplayer". Three separate complaints, one cause: the helpers below read the module-global
+    // `player`, so they could only ever describe this machine's pilot.
+    // ⚠ `targetQuat`, NOT `mesh.quaternion`. The mesh carries a 180-degree flip (_npFlipY) so the
+    //   model's nose points +Z; feeding the mesh quaternion here would grow the charge glow out of
+    //   the ship's TAIL. targetQuat is the un-flipped aim and is what the body-shield code beside
+    //   this already uses for the same reason.
+    if (this.alive && this.mesh) {
+      if (!this._chFwd) this._chFwd = new THREE.Vector3();
+      this._chFwd.set(0, 0, -1).applyQuaternion(this.targetQuat);
+      // Held ability: the muzzle crackle (VORTEX Laser, SLAYER Stun Bolt, ...).
+      if (typeof _primeArcTick === 'function') {
+        try { _primeArcTick(dt, this, !!(s && s.pa)); } catch (_) {}
+      }
+      // Weapon charge: the glowing barrels plus the fire inside them.
+      const _cg = (s && s.cg) ? Math.min(1, s.cg / 9) : 0;
+      if (_cg > 0) {
+        const _tint = (this.loadoutKey === 'PUNCTURE' && typeof chassisFlashColor === 'function')
+          ? chassisFlashColor('PUNCTURE') : null;
+        try { _blasterChargeGlow(_cg, _tint, this, this._chFwd); } catch (_) {}
+        try { _chargeFireTick(dt, _cg, _tint, this, this._chFwd); } catch (_) {}
+        this._cgWasOn = true;
+      } else if (this._cgWasOn) {
+        // Tear the tubes down the moment the charge releases or the packet stops saying so, the
+        // same way the local player's release path calls _blasterChargeGlowOff. Without this the
+        // barrels would stay lit on a peer who fired, died, or simply walked out of range.
+        this._cgWasOn = false;
+        try { if (this._bcgOn && typeof _blasterChargeGlowOff === 'function') _blasterChargeGlowOff(this); } catch (_) {}
+      }
+    } else if (this._cgWasOn) {
+      this._cgWasOn = false;
+      try { if (this._bcgOn && typeof _blasterChargeGlowOff === 'function') _blasterChargeGlowOff(this); } catch (_) {}
+    }
     this._updateAbilityShieldVisual(s, dt);
   }
 
@@ -15254,6 +15292,12 @@ const _broadcastState = {
   spawnProt: 0,
   cloak: false,
   va: 0,
+  // (v44.17) pa = a HOLD-PRIME ability is being held (VORTEX Laser, SLAYER Stun Bolt, PUNCTURE
+  // Cluster Missile...). cg = weapon charge level, quantised 0-9, covering BLASTER's Charge Shot and
+  // PUNCTURE's railgun. Both are one byte on a 20 Hz packet that already carries 23 fields; a hold
+  // needs a DURATION, and a state field self-heals when a tick is dropped where an event would not.
+  pa: 0,
+  cg: 0,
 };
 function broadcastPlayerState(dt) {
   if (!net.active || !net.sendState) return;
@@ -15304,6 +15348,13 @@ function broadcastPlayerState(dt) {
   // selected perkId may be any of the five, still broadcasts its cloak.
   s.cloak = !!(player.perkCloakActive && (_perkEffectiveBag() || {}).cloakDuration);
   // (v30.67) Vortex Shield soak level 0-9 ; peers draw warning arcs from it.
+  // (v44.17) Held-prime bit, and the charge nibble. Sent for every ship rather than gated on a
+  // loadout, because which abilities are hold-prime is _isHoldPrimeAbility's business, not the
+  // broadcaster's - gating here would silently drop any ability later added to that list.
+  s.pa = (player._abilityPrime && player.shipState !== 'dead') ? 1 : 0;
+  const _cgRaw = player.powerShotCharging ? (player.powerShotCharge || 0)
+               : ((player.loadoutKey === 'PUNCTURE') ? (player.railgunCharge || 0) : 0);
+  s.cg = Math.max(0, Math.min(9, Math.round(Math.min(1, _cgRaw) * 9)));
   s.va = (player.loadoutKey === 'VORTEX' && typeof _vortexChargeFrac === 'function')
     ? Math.round(_vortexChargeFrac() * 9) : 0;
 
@@ -16620,6 +16671,35 @@ function handleNetEvent(evt, fromPeerId) {
         playSpatialSound(_shooterLoadout === 'PUNCTURE' ? 'fire_railgun' : 'fire_hitscan', from,
           { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 });
       } catch (_) {}
+    }
+    return;
+  }
+  // (v44.17) A peer burst their cluster missile early - burst our mirror of it in the same place.
+  if (evt.type === 'proj_detonate') {
+    if (typeof game !== 'undefined' && game.projectiles && evt.pid != null) {
+      for (let i = game.projectiles.length - 1; i >= 0; i--) {
+        const p = game.projectiles[i];
+        if (!p || !p.alive || p.netProjId !== evt.pid) continue;
+        if (typeof evt.px === 'number') {
+          p.position.set(evt.px, evt.py, evt.pz);       // snap: our copy has dead-reckoned away
+          if (p.mesh) p.mesh.position.copy(p.position);
+        }
+        try {
+          if (typeof p.spawnClusterChildren === 'function') p.spawnClusterChildren();
+          if (typeof p.spawnImpactExplosion === 'function') p.spawnImpactExplosion(p.position);
+          p.destroy();                                   // no splashDamage: mirrors carry damage 0
+        } catch (_) {}
+        break;
+      }
+    }
+    return;
+  }
+  // (v44.17) A peer's Inner Spark: same wash on their hull.
+  if (evt.type === 'inner_spark') {
+    const _isPeer = net.peers.get(fromPeerId);
+    const _isNp = _isPeer && _isPeer.networkPlayer;
+    if (_isNp && _isNp.mesh && typeof _innerSparkRipple === 'function') {
+      try { _innerSparkRipple(_isNp); } catch (_) {}
     }
     return;
   }
@@ -19682,12 +19762,21 @@ function _adsAnchor(v) {
   return v;
 }
 if (typeof window !== 'undefined') window.__adsAnchor = _adsAnchor;
-function _blasterChargeGlow(t, tintOverride) {
-  const mesh = player.mesh;
+// ⭐⭐ (v44.17) OWNER-AWARE, for the same reason as _primeArcTick above. This is the glowing
+// barrel that BLASTER's Charge Shot and PUNCTURE's charge both ride, and it hard-referenced
+// `player` in eleven places. Owner: "blaster's charge shot charging needs to be made visible
+// multiplayer", and the same was true of puncture charging.
+// ⚠ THE FORWARD VECTOR IS THE TRAP. This took its aim from `camera.quaternion`, which is the
+//   LOCAL pilot's eye - for a peer that would point every tube down YOUR line of sight. A peer's
+//   aim is `targetQuat`, deliberately NOT the mesh quaternion: the mesh carries a 180-degree flip
+//   (_npFlipY, "model nose +Z") and using it would fire the glow out of the ship's tail.
+function _blasterChargeGlow(t, tintOverride, owner, fwdOverride) {
+  owner = owner || player;
+  const mesh = owner.mesh;
   const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
   if (!nodes || !nodes.length) return;
   const K = window.__blasterCharge || (window.__blasterCharge = {});
-  const hull = (player.chassis && player.chassis.hullLength) || 60;
+  const hull = (owner.chassis && owner.chassis.hullLength) || 60;
   // (v37.68b) stays the Blaster's CYAN all the way up (owner: "make it cyan to match") - the heat
   // comes from the overdriven brightness below, not from washing the hue out to white.
   // The class cyan carries a red component (0x44eeff), and once the additive overdrive clips green
@@ -19699,14 +19788,14 @@ function _blasterChargeGlow(t, tintOverride) {
   // Build the tubes once. They live in the SCENE, not on the ship: the marker nodes carry their own
   // export rotation, so orienting a child of one is guesswork - a world-space tube aimed down the
   // aim vector is exact. They are transparent, so the ghost shell skips them.
-  if (!player._bcgTubes || player._bcgTubes.length !== nodes.length) {
+  if (!owner._bcgTubes || owner._bcgTubes.length !== nodes.length) {
     // (v39.53) RETAIN, DO NOT DISPOSE. Disposing the old tubes freed their two programs (the
     // transparent DoubleSide material draws as BackSide + FrontSide passes), and the next charge
     // linked them cold: the owner's F8 marks on 39.52 - 1.4 s (Puncture railgun charge), 0.4 s
     // (Blaster) - were exactly this material, an 18-vertex open cylinder in the class colour.
-    if (player._bcgTubes) for (const m of player._bcgTubes) { scene.remove(m); if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else m.material.dispose(); }
+    if (owner._bcgTubes) for (const m of owner._bcgTubes) { scene.remove(m); if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else m.material.dispose(); }
     if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.82, 1, 24, 1, true);
-    player._bcgTubes = nodes.map(() => {
+    owner._bcgTubes = nodes.map(() => {
       const m = new THREE.Mesh(_blasterChargeGlow._geo, _makeFXMaterial('charge_glow'));   // (v39.71) soft body, no cone
       m.renderOrder = 3;
       m.frustumCulled = false;
@@ -19716,14 +19805,15 @@ function _blasterChargeGlow(t, tintOverride) {
     });
   }
   // the guns point where the ship aims
-  _bcgFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  if (fwdOverride) _bcgFwd.copy(fwdOverride);
+  else _bcgFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
   _bcgQuat.setFromUnitVectors(_mvUp, _bcgFwd).multiply(_BCG_FLIP);   // (v39.71) +Y points back down the barrel: the preset's axial falloff fades the rear
   const len = hull * ((K.len != null) ? K.len : 0.16) * (0.35 + 0.65 * t);   // the hot stretch grows back down the barrel
   // wider than the barrel on purpose: the owner wants "some glow that exceeds the physical edge"
   const rad = hull * ((K.rad != null) ? K.rad : 0.034) * (0.5 + 0.5 * t);
   const flick = 1 + 0.10 * Math.sin((game.time || 0) * 30) * t;
   for (let i = 0; i < nodes.length; i++) {
-    const m = player._bcgTubes[i];
+    const m = owner._bcgTubes[i];
     nodes[i].getWorldPosition(_bcgPos);
     // centre it just BEHIND the muzzle so the glow sits on the gun, not in the air ahead of it
     m.position.copy(_bcgPos).addScaledVector(_bcgFwd, -len * 0.42);
@@ -19745,9 +19835,9 @@ function _blasterChargeGlow(t, tintOverride) {
   }
   // plus a light per POD so the hull around the guns picks it up
   const half = Math.max(1, Math.floor(nodes.length / 2));
-  player._bcgLightT = (player._bcgLightT || 0) - (game._dtLast || 0.016);
-  if (player._bcgLightT <= 0 && typeof spawnDynamicLight === 'function') {
-    player._bcgLightT = 0.07;
+  owner._bcgLightT = (owner._bcgLightT || 0) - (game._dtLast || 0.016);
+  if (owner._bcgLightT <= 0 && typeof spawnDynamicLight === 'function') {
+    owner._bcgLightT = 0.07;
     for (let pod = 0; pod * half < nodes.length; pod++) {
       _bcgPos.set(0, 0, 0);
       let n = 0;
@@ -19761,8 +19851,8 @@ function _blasterChargeGlow(t, tintOverride) {
       spawnDynamicLight(_bcgPos, col.getHex(), ((K.light != null) ? K.light : 5.0) * (0.2 + t * t), 130, 0.10);
     }
   }
-  player._bcgOn = true;
-  player._bcgTTL = 0.2;   // (v39.47) fed every frame by the charge tick; see updateWorldEffects
+  owner._bcgOn = true;
+  owner._bcgTTL = 0.2;   // (v39.47) fed every frame by the charge tick; see updateWorldEffects
 }
 // (v39.53) THE CHARGE GLOW LINKS AT LOAD, NOT AT THE FIRST CHARGE. The tubes above are built
 // lazily on the first charge of a match, and a fresh material with this recipe (transparent,
@@ -19792,10 +19882,14 @@ function _warmChargeGlowOnce() {
     return 1;
   } catch (e) { console.warn('[warm] charge glow failed:', e); return 0; }
 }
-function _blasterChargeGlowOff() {
-  player._bcgOn = false;
-  if (!player._bcgTubes) return;
-  for (const m of player._bcgTubes) { m.visible = false; m.material.opacity = 0; }
+// (v44.17) Owner-aware to match _blasterChargeGlow. Every existing caller passes nothing and keeps
+// meaning the local player; the peer teardown in NetworkPlayer.update passes the NetworkPlayer.
+function _blasterChargeGlowOff(owner) {
+  owner = owner || player;
+  if (!owner) return;
+  owner._bcgOn = false;
+  if (!owner._bcgTubes) return;
+  for (const m of owner._bcgTubes) { m.visible = false; m.material.opacity = 0; }
 }
 function emitChassisMuzzleFlash(loadoutKey, pos, dir, mine) {
   if (!pos || !dir) return;
@@ -20426,6 +20520,7 @@ function spawnNetworkProjectile(data, fromPeerId) {
   }
   // Carry pyro-style fire-source flag so gas clouds still ignite
   // visually when a remote pyro's projectile passes through them.
+  if (data.pid != null) proj.netProjId = data.pid;   // (v44.17) addressable for manual detonation
   if (data.isFireSource) proj.isFireSource = true;
   if (data.isArcWave) proj.isArcWave = true;
   if (data.isCluster) {
@@ -20502,9 +20597,51 @@ function spawnNetworkProjectile(data, fromPeerId) {
 // Missile, anything in executeAbility that creates a Projectile). Carries the
 // flags receivers need to reproduce the visual; damage stays at 0 on receivers
 // because actual HP changes flow through the hit-claim path.
+// ⭐⭐ (v44.17) TAP FIRE AGAIN TO BURST THE CLUSTER EARLY. Owner: "puncture should be able to
+// detonate the cluster missile by tapping the button again after it shoots".
+//   The burst is not a new code path - it is exactly the sequence Projectile.update runs on a real
+// impact (cluster children, impact explosion, splash, destroy). Hand-rolling a teardown instead
+// would skip destroy()'s material-retention work and leak the program residency the FX pool depends
+// on, so this calls destroy() with NO argument and lets the normal fireball play.
+// ⚠ ALL of them, not the first. PUNCTURE's Twin Cluster (Aegis 20) launches two missiles, and
+//   bursting only the nearest would strand the other to fly on alone.
+// ⚠ THE PEER MUST BE TOLD WHERE, not just when. A peer's mirror flies its own dead-reckoned
+//   simulation, so by the time the event lands its copy has drifted - roughly latency x 1000 u/s,
+//   ~50 units at 50 ms. The event carries the burst position and the receiver SNAPS the mirror to
+//   it before bursting, so both machines put the fireball in the same place.
+function _punctureDetonateClusters() {
+  if (typeof game === 'undefined' || !game.projectiles) return 0;
+  let n = 0;
+  for (let i = game.projectiles.length - 1; i >= 0; i--) {
+    const p = game.projectiles[i];
+    if (!p || !p.alive || p.owner !== 'player' || !p.isCluster) continue;
+    const _pos = p.position.clone();
+    try {
+      if (net.active && net.sendEvent) {
+        net.sendEvent({ type: 'proj_detonate', pid: (p.netProjId != null ? p.netProjId : -1),
+                        px: _pos.x, py: _pos.y, pz: _pos.z });
+      }
+    } catch (_) {}
+    try {
+      if (typeof p.spawnClusterChildren === 'function') p.spawnClusterChildren();
+      if (typeof p.spawnImpactExplosion === 'function') p.spawnImpactExplosion(_pos);
+      if (p.splash > 0 && typeof p.splashDamage === 'function') p.splashDamage();
+      p.destroy();
+    } catch (_) {}
+    n++;
+  }
+  return n;
+}
+
 function broadcastAbilityProjectile(proj) {
   if (!net.active || !net.sendProjectile || !proj) return;
+  // ⭐ (v44.17) A NETWORK ID, so one specific projectile can be addressed later. Until now nothing
+  // on the wire identified a projectile at all: peers spawned an independent mirror that flew its
+  // own simulation, and there was no way to say "that one, burst it now". Cluster missiles need it
+  // for manual detonation; the id costs one integer per launch and is ignored by older clients.
+  if (proj.netProjId == null) proj.netProjId = ++net.effectIdCounter;
   net.sendProjectile({
+    pid: proj.netProjId,
     ox: proj.position.x, oy: proj.position.y, oz: proj.position.z,
     vx: proj.velocity.x, vy: proj.velocity.y, vz: proj.velocity.z,
     color: proj.trailColor || proj.color || 0xffaa00,
@@ -54919,10 +55056,20 @@ class Projectile {
     } catch (_) {}
     const dmgPerSec = this.clusterDmg || 80;
     const duration = this.clusterDuration || 3;
+    // ⚠⚠ (v44.17) THE ZONE BELONGS TO WHOEVER FIRED THE MISSILE, NOT TO WHOEVER IS WATCHING.
+    // `team` was a hard `player.team` even when `this.owner === 'network'` - so a peer's cluster
+    // missile bursting on YOUR machine laid a 500 dps zone flagged as YOUR team, quietly fighting
+    // your enemies for you. spawnNetworkProjectile already resolves the shooter's real team onto
+    // `ownerTeam` (it has to, for the same reason); this just uses it.
+    // Pre-existing - a mirrored missile has always exploded locally on impact - but manual
+    // detonation (v44.17) makes it happen on demand, so it gets fixed here rather than noted.
+    const _clTeam = (this.owner === 'network' && this.ownerTeam != null)
+      ? this.ownerTeam
+      : (player ? player.team : 0);
     game.worldEffects.push({
       type: 'cluster', position: this.position.clone(),
       timer: duration, dmgPerSec: dmgPerSec, radius: 250,
-      owner: this.owner, team: player.team, fxTimer: 0,
+      owner: this.owner, team: _clTeam, fxTimer: 0,
     });
     spawnExplosion(this.position, 25);
     if (typeof spawnFireworksBurst === 'function') {
@@ -55297,29 +55444,32 @@ function _classMuzzleFire(key, pos, dir, mine) {
   } catch (_) {}
 }
 const _cfTmp = new THREE.Vector3(), _cfFwd = new THREE.Vector3(), _cfR1 = new THREE.Vector3(), _cfR2 = new THREE.Vector3();
-function _chargeFireTick(dt, t, tint) {
+// (v44.17) ...and the fire inside those barrels, same treatment, same forward-vector trap.
+function _chargeFireTick(dt, t, tint, owner, fwdOverride) {
   try {
     const CF = (typeof window !== 'undefined') ? window.__classFire : null;
     if (CF && CF.on === false) return;
     if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
-    const mesh = player.mesh;
+    owner = owner || player;
+    const mesh = owner.mesh;
     const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
     if (!nodes || !nodes.length || typeof _spawnClassFireBurst !== 'function') return;
     t = Math.max(0, Math.min(1, t || 0));
-    player._cfChargeT = (player._cfChargeT || 0) - dt;
-    if (player._cfChargeT > 0) return;
+    owner._cfChargeT = (owner._cfChargeT || 0) - dt;
+    if (owner._cfChargeT > 0) return;
     const hz = 5 + 15 * t;
-    player._cfChargeT = 1 / hz;
+    owner._cfChargeT = 1 / hz;
     if (_classFireLive() >= 12) return;
     const K = (typeof window !== 'undefined' && window.__blasterCharge) ? window.__blasterCharge : {};
-    const hull = (player.chassis && player.chassis.hullLength) || 60;
+    const hull = (owner.chassis && owner.chassis.hullLength) || 60;
     const len = hull * ((K.len != null) ? K.len : 0.16) * (0.35 + 0.65 * t);   // the glow tube's own shape
     const rad = hull * ((K.rad != null) ? K.rad : 0.034) * (0.5 + 0.5 * t);
-    _cfFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    if (fwdOverride) _cfFwd.copy(fwdOverride);
+    else _cfFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
     const ax = (Math.abs(_cfFwd.y) < 0.9) ? _cfR1.set(0, 1, 0) : _cfR1.set(1, 0, 0);
     _cfR2.crossVectors(_cfFwd, ax).normalize(); _cfR1.crossVectors(_cfFwd, _cfR2).normalize();
-    player._cfChargeSide = ((player._cfChargeSide || 0) + 1) % nodes.length;
-    nodes[player._cfChargeSide].getWorldPosition(_cfTmp);
+    owner._cfChargeSide = ((owner._cfChargeSide || 0) + 1) % nodes.length;
+    nodes[owner._cfChargeSide].getWorldPosition(_cfTmp);
     const a = Math.random() * 6.283, rr = rad * Math.random();
     _cfTmp.addScaledVector(_cfFwd, -len * (0.05 + 0.8 * Math.random())).addScaledVector(_cfR1, Math.cos(a) * rr).addScaledVector(_cfR2, Math.sin(a) * rr);
     const mul = (CF && CF.mul != null) ? CF.mul : 1.0;
@@ -72843,22 +72993,42 @@ function _fxSmallDevice() {
   return false;
 }
 const _paA = new THREE.Vector3(), _paB = new THREE.Vector3();
-function _primeArcTick(dt) {
-  if (typeof player === 'undefined' || !player) return;
-  if (!player._abilityPrime || player.shipState === 'dead') { player._primeArcT = 0; return; }
-  const mesh = player.mesh;
+// ⭐⭐⭐ (v44.17) THIS NOW RUNS FOR ANY SHIP, NOT JUST YOURS. Owner: "i can't see other player's
+// electricity when vortex holds his laser shot ... stun bolt on slayer". Both are HOLD-PRIME
+// abilities (_isHoldPrimeAbility) and both crackle through this one function - which read the
+// module-global `player` in three places and so could only ever describe the local pilot. There was
+// no gate to remove and nothing to fix on the wire: the network layer had simply never been told
+// that a charge was being held.
+//   `owner` supplies .mesh / .chassis / .loadoutKey / ._primeArcT, all of which a NetworkPlayer
+// already has, and `primed` is passed in rather than read off the owner because a peer's prime
+// state arrives in the 20 Hz state packet instead of living on the object.
+// ⚠ A HOLD HAS A DURATION, SO IT RIDES THE STATE PACKET, NOT AN EVENT. A 'prime started' event
+//   that dropped would strand the crackle on forever or omit it entirely; a dropped state packet
+//   self-heals 50 ms later on the next tick. This is the same reasoning - and the same shape - as
+//   the VORTEX soak arcs (`s.va` -> _vortexChargeArcs), which is the one charge visual that has
+//   always worked for peers, and is the template being copied here.
+// ⚠ Bots show none of these effects and never did, so there is no bot path to reuse or keep in
+//   step - do not go looking for one.
+function _primeArcTick(dt, owner, primed) {
+  owner = owner || ((typeof player !== 'undefined') ? player : null);
+  if (!owner) return;
+  if (primed === undefined) primed = owner._abilityPrime;
+  // A peer carries `alive`; the local player carries `shipState`. Accept either.
+  const _dead = (owner.shipState === 'dead') || (owner.alive === false);
+  if (!primed || _dead) { owner._primeArcT = 0; return; }
+  const mesh = owner.mesh;
   const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
   if (!nodes || !nodes.length) return;
   const K = (typeof window !== 'undefined' && window.__primeArc) ? window.__primeArc : null;
   if (K && K.on === false) return;
-  player._primeArcT = (player._primeArcT || 0) - (dt || 0.016);
-  if (player._primeArcT > 0) return;
+  owner._primeArcT = (owner._primeArcT || 0) - (dt || 0.016);
+  if (owner._primeArcT > 0) return;
   const _small = _fxSmallDevice();
   // 16 tube-geometry builds a second is a desktop's idea of cheap, not a phone's
-  player._primeArcT = (K && K.every != null) ? K.every : (_small ? 0.18 : 0.06);
+  owner._primeArcT = (K && K.every != null) ? K.every : (_small ? 0.18 : 0.06);
   const col = (typeof chassisFlashColor === 'function')
-    ? chassisFlashColor(player.loadoutKey) : 0x88ddff;
-  const hull = (player.chassis && player.chassis.hullLength) || 60;
+    ? chassisFlashColor(owner.loadoutKey) : 0x88ddff;
+  const hull = (owner.chassis && owner.chassis.hullLength) || 60;
   const reach = hull * ((K && K.reach != null) ? K.reach : 0.09);
   const i = (Math.random() * nodes.length) | 0;
   nodes[i].getWorldPosition(_paA);
@@ -78445,6 +78615,15 @@ function updateWeapon(dt) {
 
   // Block firing during Blaster mode switch transition
   if (player.blasterSwitchTimer > 0) firing = false;
+  // ⭐ (v44.17) THE SECOND TAP. A rising edge on the fire input, latched every tick so a frame
+  // spent dead / reloading / in warmup cannot leave it stale and fake a press on the next pull.
+  // It is read BEFORE the fireTimer gate below, because detonating is not firing: it must work
+  // during the weapon's cooldown, which is exactly when a player would reach for it.
+  const _fireEdge = firing && !player._firePrev;
+  player._firePrev = firing;
+  if (_fireEdge && player.loadoutKey === 'PUNCTURE') {
+    try { if (_punctureDetonateClusters() > 0) return; } catch (_) {}
+  }
   if (firing && player.fireTimer <= 0) {
     // AI Assist: unlimited ammo (no consumption, no reload needed)
     const smartCoreActive = player.coreActive && player.loadoutKey === 'BLASTER';
@@ -81039,6 +81218,12 @@ function executeAbility(slot, ability) {
       // Three rising beeps + resolve chord so the player hears
       // their cooldowns rack back up.
       try { playSound('rearm_reset'); } catch (_) {}
+      // (v44.17) ...and now something to SEE, on your hull and on every peer's screen. This is an
+      // instant, not a hold, so it rides a one-shot event rather than the state packet - the exact
+      // opposite call from the charge visuals, and for the opposite reason: there is no duration to
+      // re-sync, so a dropped packet would cost one missed flash rather than a stuck effect.
+      try { _innerSparkRipple(player); } catch (_) {}
+      try { if (net.active && net.sendEvent) net.sendEvent({ type: 'inner_spark' }); } catch (_) {}
     }
     // VORTEX: Plasma Mines (deploy 5 proximity orbs in a + pattern: center
     // plus four arms (right, left, up, down) for area coverage).
@@ -82731,7 +82916,76 @@ function _releaseVortexShieldBurst(playBurstSound) {
 // ⚠ Called BEFORE the deathCam branch in gameLoop, not after: this block writes
 // player.coreMeter in 13 places and updateAbilities' core-meter freeze/edge
 // detect at its tail must still see those writes in the same order.
+// ⭐⭐ (v44.17) INNER SPARK GETS A BODY. Owner: "inner spark should cause a hull effect like what
+// blaster's body shield looks like but have it just ripple across his body for 1s (can use an
+// already warmed shader)". SYPHON's Inner Spark resets every cooldown and, until now, showed
+// nothing at all for it - three rising beeps and no picture.
+//   It borrows BLASTER's body shield wholesale: `_makeHullHugShield(owner, 'plasma_cyan')` mirrors
+// the ship's own mesh tree into an additive shell that rides the real silhouette. Taking the SAME
+// preset is the point of the owner's "already warmed" note - plasma_cyan is compiled the first time
+// any Blaster raises a shield, so this adds no new shader program and cannot hitch on first use.
+// ⚠ WHAT MAKES IT A RIPPLE RATHER THAN A SHIELD: the shell is up for one second, and a hit
+//   ripple is walked from nose to tail across that second (flashFXMaterialHit seeds an expanding
+//   ring at a world point - the same primitive a real impact uses). The shell's own opacity arcs up
+//   and back down so it never reads as a steady field.
+// ⚠ NEVER DISPOSE THE MIRRORED GEOMETRIES. _makeHullHugShield's own comment says it: the clone
+//   SHARES its geometry with the source ship, so disposing here would blank the ship that cast it -
+//   and, because geometry is shared per-chassis, every other ship of that class too. Only the
+//   material is ours to release. See the shared-geometry disposal notes.
+const _ISR_LIVE = [];
+const _ISR_DUR = 1.0;
+function _innerSparkRipple(owner) {
+  try {
+    if (!owner || !owner.mesh || typeof _makeHullHugShield !== 'function') return;
+    // One at a time per ship; re-triggering restarts the wash rather than stacking shells.
+    for (let i = _ISR_LIVE.length - 1; i >= 0; i--) {
+      if (_ISR_LIVE[i].owner === owner) { _innerSparkEnd(_ISR_LIVE[i]); _ISR_LIVE.splice(i, 1); }
+    }
+    const shell = _makeHullHugShield(owner, 'plasma_cyan');
+    if (!shell) return;
+    shell.scale.set(1.035, 1.035, 1.035);   // tighter than the shield: this is the hull glowing, not a bubble
+    owner.mesh.add(shell);
+    _ISR_LIVE.push({ owner, shell, mat: shell.userData && shell.userData._shieldMat, t: 0 });
+  } catch (_) {}
+}
+function _innerSparkEnd(e) {
+  try {
+    if (e.shell && e.shell.parent) e.shell.parent.remove(e.shell);
+    // Material only - the geometries belong to the ship.
+    if (e.mat) { if (typeof _lssRetainMat === 'function') _lssRetainMat(e.mat); else e.mat.dispose(); }
+  } catch (_) {}
+}
+function _innerSparkTick(dt) {
+  if (!_ISR_LIVE.length) return;
+  for (let i = _ISR_LIVE.length - 1; i >= 0; i--) {
+    const e = _ISR_LIVE[i];
+    e.t += dt;
+    const k = e.t / _ISR_DUR;
+    if (k >= 1 || !e.owner || !e.owner.mesh || !e.shell.parent) {
+      _innerSparkEnd(e); _ISR_LIVE.splice(i, 1); continue;
+    }
+    const u = e.mat && e.mat.uniforms;
+    if (u) {
+      if (u.uTime) u.uTime.value = (typeof game !== 'undefined' && game.time) ? game.time : e.t;
+      // Up fast, down slow - a discharge, not a fade-in.
+      if (e.mat.opacity !== undefined) e.mat.opacity = Math.sin(Math.min(1, k) * Math.PI) * 0.9;
+      // Walk the ripple nose -> tail so it reads as travelling ACROSS the body.
+      const hull = (e.owner.chassis && e.owner.chassis.hullLength) || 90;
+      if (!e._fwd) { e._fwd = new THREE.Vector3(); e._at = new THREE.Vector3(); }
+      const q = e.owner.targetQuat || (e.owner.mesh && e.owner.mesh.quaternion);
+      e._fwd.set(0, 0, -1); if (q) e._fwd.applyQuaternion(q);
+      e._at.copy(e.owner.position || e.owner.mesh.position)
+           .addScaledVector(e._fwd, hull * (0.5 - k));
+      if (typeof flashFXMaterialHit === 'function' && (e._hitT = (e._hitT || 0) - dt) <= 0) {
+        e._hitT = 0.12;
+        try { flashFXMaterialHit(e.mat, e._at, 0x66f0ff, hull * 0.55); } catch (_) {}
+      }
+    }
+  }
+}
+
 function updateWorldEffects(dt) {
+  try { _innerSparkTick(dt); } catch (_) {}
   // (v43.11) BACKSTOP FOR THE LOCAL PILOT. The hide lives in the else arm of updateShieldVisuals,
   // which only updateAbilities reaches - and gameLoop skips updateAbilities the instant
   // deathCam.active goes true. So dying with Fire Shield up left your own hull-sized fire sphere
@@ -94915,6 +95169,18 @@ function _howtoRender(ov) {
   // activateCore + Bot.die (+15 kill) are the sources of truth. ----
   h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:14px 0 8px;'>COMBAT MECHANICS</div>";
   const _mechs = [
+    // (v44.17) Three entries for features that were either undocumented or new. The double zoom has
+    // existed since v39.54 and was never written down anywhere; the other two shipped in v44.16/17.
+    ['ZOOM &amp; DOUBLE ZOOM', '#9fe8ff',
+     'Hold the zoom control for 2.4&#215; optics. TAP it once, then press and HOLD again straight away, for a 4.8&#215; second stage. ' +
+     'Aim sensitivity scales down with magnification so the same hand movement stays precise at both levels.'],
+    ['SLAYER &#183; AIMED SHOT', '#ff8fd6',
+     'Zooming does more than magnify for the scattergun: the pellet cone tightens to roughly a third of its hip-fire spread and the ' +
+     'pellets carry over half again as far. Double zoom tightens it further still and doubles the reach. Fire from the hip up close, ' +
+     'zoom for anything past knife range.'],
+    ['PUNCTURE &#183; AIRBURST', '#ffc46b',
+     'The Cluster Missile answers to the trigger after it leaves the rail &#8212; tap fire again mid-flight and it bursts where it is, ' +
+     'dropping its sustained zone early. Use it for a target that is about to break line of sight, or to catch something under the arc.'],
     ['DASH &amp; DOOMED STATE', '#4fd1ff',
      'DASH is a burst of raw speed along your current vector (straight ahead from a standstill). Charges are per-hull — Frigate 3, Corvette 2, Dreadnought 1 — shown as the pips beside the ring; spent charges refill one at a time on a per-hull cooldown. Dash does NOT restore shields: shields never recharge on their own — only riding out a STASIS FIELD (you are locked in place while they refill) or EXECUTING a doomed enemy brings them back. Enter a stasis field with shields already full or partly charged and the leftover charge banks as an OVERSHIELD — a white-cyan band over the shield arc, up to half your max shield — spent before your shields when you next take damage, and slowly bleeding away outside a field. At 15% hull you are DOOMED: the health ring pulses red and your view warps. Any enemy that touches you now executes you instantly — and doomed enemies are yours to ram-execute the same way: instant kill, full shields, +20 core. Keep your distance until you reach a stasis field; riding one out patches your hull and clears the doomed state. Doomed bots self-destruct after 10 seconds — your ship holds on until something reaches you.'],
     ['CORE CHARGING', '#f0ff1f',

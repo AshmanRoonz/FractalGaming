@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.16';
+const LSS_BUILD = '44.17';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -368,7 +368,7 @@ const LOADOUTS = {
     name: 'PUNCTURE', className: 'Frigate Sniper', chassis: 'FRIGATE',
     weapon: { name: 'Sodium Railgun', mode: 'hitscan', damage: 1000, fireRate: 1.5, clipSize: 6, range: 10000, splash: 50, projSpeed: 0, pellets: 1, spinup: 0 },
     abilities: [
-      { name: 'Cluster Missile', cooldown: 8, duration: 0.3, desc: 'Impact 800 + 500 DPS for 5s', type: 'offensive', dmg: 3300 },
+      { name: 'Cluster Missile', cooldown: 8, duration: 0.3, desc: 'Impact 800 + 500 DPS for 5s - tap fire to airburst', type: 'offensive', dmg: 3300 },
       { name: 'Afterburner', cooldown: 10, duration: 3, desc: 'Speed boost to 600', type: 'defensive' },
       { name: 'Stasis Trap', cooldown: 12, duration: 4, desc: 'Slow and root enemies', type: 'utility' },
     ],
@@ -6079,6 +6079,27 @@ class NetworkPlayer {
         ((this.chassis && this.chassis.hullLength) || 60) * 0.7,
         Math.min(1, s.va / 9), dt);
     }
+    if (this.alive && this.mesh) {
+      if (!this._chFwd) this._chFwd = new THREE.Vector3();
+      this._chFwd.set(0, 0, -1).applyQuaternion(this.targetQuat);
+      if (typeof _primeArcTick === 'function') {
+        try { _primeArcTick(dt, this, !!(s && s.pa)); } catch (_) {}
+      }
+      const _cg = (s && s.cg) ? Math.min(1, s.cg / 9) : 0;
+      if (_cg > 0) {
+        const _tint = (this.loadoutKey === 'PUNCTURE' && typeof chassisFlashColor === 'function')
+          ? chassisFlashColor('PUNCTURE') : null;
+        try { _blasterChargeGlow(_cg, _tint, this, this._chFwd); } catch (_) {}
+        try { _chargeFireTick(dt, _cg, _tint, this, this._chFwd); } catch (_) {}
+        this._cgWasOn = true;
+      } else if (this._cgWasOn) {
+        this._cgWasOn = false;
+        try { if (this._bcgOn && typeof _blasterChargeGlowOff === 'function') _blasterChargeGlowOff(this); } catch (_) {}
+      }
+    } else if (this._cgWasOn) {
+      this._cgWasOn = false;
+      try { if (this._bcgOn && typeof _blasterChargeGlowOff === 'function') _blasterChargeGlowOff(this); } catch (_) {}
+    }
     this._updateAbilityShieldVisual(s, dt);
   }
 
@@ -6324,6 +6345,8 @@ const _broadcastState = {
   spawnProt: 0,
   cloak: false,
   va: 0,
+  pa: 0,
+  cg: 0,
 };
 function broadcastPlayerState(dt) {
   if (!net.active || !net.sendState) return;
@@ -6363,6 +6386,10 @@ function broadcastPlayerState(dt) {
   );
   s.spawnProt = Math.max(0, Math.round((player.spawnProtection || 0) * 10) / 10);
   s.cloak = !!(player.perkCloakActive && (_perkEffectiveBag() || {}).cloakDuration);
+  s.pa = (player._abilityPrime && player.shipState !== 'dead') ? 1 : 0;
+  const _cgRaw = player.powerShotCharging ? (player.powerShotCharge || 0)
+               : ((player.loadoutKey === 'PUNCTURE') ? (player.railgunCharge || 0) : 0);
+  s.cg = Math.max(0, Math.min(9, Math.round(Math.min(1, _cgRaw) * 9)));
   s.va = (player.loadoutKey === 'VORTEX' && typeof _vortexChargeFrac === 'function')
     ? Math.round(_vortexChargeFrac() * 9) : 0;
 
@@ -7282,6 +7309,33 @@ function handleNetEvent(evt, fromPeerId) {
         playSpatialSound(_shooterLoadout === 'PUNCTURE' ? 'fire_railgun' : 'fire_hitscan', from,
           { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 });
       } catch (_) {}
+    }
+    return;
+  }
+  if (evt.type === 'proj_detonate') {
+    if (typeof game !== 'undefined' && game.projectiles && evt.pid != null) {
+      for (let i = game.projectiles.length - 1; i >= 0; i--) {
+        const p = game.projectiles[i];
+        if (!p || !p.alive || p.netProjId !== evt.pid) continue;
+        if (typeof evt.px === 'number') {
+          p.position.set(evt.px, evt.py, evt.pz);       // snap: our copy has dead-reckoned away
+          if (p.mesh) p.mesh.position.copy(p.position);
+        }
+        try {
+          if (typeof p.spawnClusterChildren === 'function') p.spawnClusterChildren();
+          if (typeof p.spawnImpactExplosion === 'function') p.spawnImpactExplosion(p.position);
+          p.destroy();                                   // no splashDamage: mirrors carry damage 0
+        } catch (_) {}
+        break;
+      }
+    }
+    return;
+  }
+  if (evt.type === 'inner_spark') {
+    const _isPeer = net.peers.get(fromPeerId);
+    const _isNp = _isPeer && _isPeer.networkPlayer;
+    if (_isNp && _isNp.mesh && typeof _innerSparkRipple === 'function') {
+      try { _innerSparkRipple(_isNp); } catch (_) {}
     }
     return;
   }
@@ -9537,20 +9591,21 @@ function _adsAnchor(v) {
   return v;
 }
 if (typeof window !== 'undefined') window.__adsAnchor = _adsAnchor;
-function _blasterChargeGlow(t, tintOverride) {
-  const mesh = player.mesh;
+function _blasterChargeGlow(t, tintOverride, owner, fwdOverride) {
+  owner = owner || player;
+  const mesh = owner.mesh;
   const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
   if (!nodes || !nodes.length) return;
   const K = window.__blasterCharge || (window.__blasterCharge = {});
-  const hull = (player.chassis && player.chassis.hullLength) || 60;
+  const hull = (owner.chassis && owner.chassis.hullLength) || 60;
   const tint = (tintOverride != null) ? tintOverride
     : ((window.__blasterCharge && window.__blasterCharge.tint != null)
         ? window.__blasterCharge.tint : 0x00d8ff);
   const col = new THREE.Color(tint);
-  if (!player._bcgTubes || player._bcgTubes.length !== nodes.length) {
-    if (player._bcgTubes) for (const m of player._bcgTubes) { scene.remove(m); if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else m.material.dispose(); }
+  if (!owner._bcgTubes || owner._bcgTubes.length !== nodes.length) {
+    if (owner._bcgTubes) for (const m of owner._bcgTubes) { scene.remove(m); if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material); else m.material.dispose(); }
     if (!_blasterChargeGlow._geo) _blasterChargeGlow._geo = new THREE.CylinderGeometry(1, 0.82, 1, 24, 1, true);
-    player._bcgTubes = nodes.map(() => {
+    owner._bcgTubes = nodes.map(() => {
       const m = new THREE.Mesh(_blasterChargeGlow._geo, _makeFXMaterial('charge_glow'));   // (v39.71) soft body, no cone
       m.renderOrder = 3;
       m.frustumCulled = false;
@@ -9559,13 +9614,14 @@ function _blasterChargeGlow(t, tintOverride) {
       return m;
     });
   }
-  _bcgFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+  if (fwdOverride) _bcgFwd.copy(fwdOverride);
+  else _bcgFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
   _bcgQuat.setFromUnitVectors(_mvUp, _bcgFwd).multiply(_BCG_FLIP);   // (v39.71) +Y points back down the barrel: the preset's axial falloff fades the rear
   const len = hull * ((K.len != null) ? K.len : 0.16) * (0.35 + 0.65 * t);   // the hot stretch grows back down the barrel
   const rad = hull * ((K.rad != null) ? K.rad : 0.034) * (0.5 + 0.5 * t);
   const flick = 1 + 0.10 * Math.sin((game.time || 0) * 30) * t;
   for (let i = 0; i < nodes.length; i++) {
-    const m = player._bcgTubes[i];
+    const m = owner._bcgTubes[i];
     nodes[i].getWorldPosition(_bcgPos);
     m.position.copy(_bcgPos).addScaledVector(_bcgFwd, -len * 0.42);
     m.quaternion.copy(_bcgQuat);
@@ -9583,9 +9639,9 @@ function _blasterChargeGlow(t, tintOverride) {
     m.visible = true;
   }
   const half = Math.max(1, Math.floor(nodes.length / 2));
-  player._bcgLightT = (player._bcgLightT || 0) - (game._dtLast || 0.016);
-  if (player._bcgLightT <= 0 && typeof spawnDynamicLight === 'function') {
-    player._bcgLightT = 0.07;
+  owner._bcgLightT = (owner._bcgLightT || 0) - (game._dtLast || 0.016);
+  if (owner._bcgLightT <= 0 && typeof spawnDynamicLight === 'function') {
+    owner._bcgLightT = 0.07;
     for (let pod = 0; pod * half < nodes.length; pod++) {
       _bcgPos.set(0, 0, 0);
       let n = 0;
@@ -9599,8 +9655,8 @@ function _blasterChargeGlow(t, tintOverride) {
       spawnDynamicLight(_bcgPos, col.getHex(), ((K.light != null) ? K.light : 5.0) * (0.2 + t * t), 130, 0.10);
     }
   }
-  player._bcgOn = true;
-  player._bcgTTL = 0.2;   // (v39.47) fed every frame by the charge tick; see updateWorldEffects
+  owner._bcgOn = true;
+  owner._bcgTTL = 0.2;   // (v39.47) fed every frame by the charge tick; see updateWorldEffects
 }
 function _warmChargeGlowOnce() {
   try {
@@ -9624,10 +9680,12 @@ function _warmChargeGlowOnce() {
     return 1;
   } catch (e) { console.warn('[warm] charge glow failed:', e); return 0; }
 }
-function _blasterChargeGlowOff() {
-  player._bcgOn = false;
-  if (!player._bcgTubes) return;
-  for (const m of player._bcgTubes) { m.visible = false; m.material.opacity = 0; }
+function _blasterChargeGlowOff(owner) {
+  owner = owner || player;
+  if (!owner) return;
+  owner._bcgOn = false;
+  if (!owner._bcgTubes) return;
+  for (const m of owner._bcgTubes) { m.visible = false; m.material.opacity = 0; }
 }
 function emitChassisMuzzleFlash(loadoutKey, pos, dir, mine) {
   if (!pos || !dir) return;
@@ -10010,6 +10068,7 @@ function spawnNetworkProjectile(data, fromPeerId) {
       proj.ownerPeerId = fromPeerId;
     }
   }
+  if (data.pid != null) proj.netProjId = data.pid;   // (v44.17) addressable for manual detonation
   if (data.isFireSource) proj.isFireSource = true;
   if (data.isArcWave) proj.isArcWave = true;
   if (data.isCluster) {
@@ -10065,9 +10124,35 @@ function spawnNetworkProjectile(data, fromPeerId) {
   }
 }
 
+function _punctureDetonateClusters() {
+  if (typeof game === 'undefined' || !game.projectiles) return 0;
+  let n = 0;
+  for (let i = game.projectiles.length - 1; i >= 0; i--) {
+    const p = game.projectiles[i];
+    if (!p || !p.alive || p.owner !== 'player' || !p.isCluster) continue;
+    const _pos = p.position.clone();
+    try {
+      if (net.active && net.sendEvent) {
+        net.sendEvent({ type: 'proj_detonate', pid: (p.netProjId != null ? p.netProjId : -1),
+                        px: _pos.x, py: _pos.y, pz: _pos.z });
+      }
+    } catch (_) {}
+    try {
+      if (typeof p.spawnClusterChildren === 'function') p.spawnClusterChildren();
+      if (typeof p.spawnImpactExplosion === 'function') p.spawnImpactExplosion(_pos);
+      if (p.splash > 0 && typeof p.splashDamage === 'function') p.splashDamage();
+      p.destroy();
+    } catch (_) {}
+    n++;
+  }
+  return n;
+}
+
 function broadcastAbilityProjectile(proj) {
   if (!net.active || !net.sendProjectile || !proj) return;
+  if (proj.netProjId == null) proj.netProjId = ++net.effectIdCounter;
   net.sendProjectile({
+    pid: proj.netProjId,
     ox: proj.position.x, oy: proj.position.y, oz: proj.position.z,
     vx: proj.velocity.x, vy: proj.velocity.y, vz: proj.velocity.z,
     color: proj.trailColor || proj.color || 0xffaa00,
@@ -34130,10 +34215,13 @@ class Projectile {
     } catch (_) {}
     const dmgPerSec = this.clusterDmg || 80;
     const duration = this.clusterDuration || 3;
+    const _clTeam = (this.owner === 'network' && this.ownerTeam != null)
+      ? this.ownerTeam
+      : (player ? player.team : 0);
     game.worldEffects.push({
       type: 'cluster', position: this.position.clone(),
       timer: duration, dmgPerSec: dmgPerSec, radius: 250,
-      owner: this.owner, team: player.team, fxTimer: 0,
+      owner: this.owner, team: _clTeam, fxTimer: 0,
     });
     spawnExplosion(this.position, 25);
     if (typeof spawnFireworksBurst === 'function') {
@@ -34418,29 +34506,31 @@ function _classMuzzleFire(key, pos, dir, mine) {
   } catch (_) {}
 }
 const _cfTmp = new THREE.Vector3(), _cfFwd = new THREE.Vector3(), _cfR1 = new THREE.Vector3(), _cfR2 = new THREE.Vector3();
-function _chargeFireTick(dt, t, tint) {
+function _chargeFireTick(dt, t, tint, owner, fwdOverride) {
   try {
     const CF = (typeof window !== 'undefined') ? window.__classFire : null;
     if (CF && CF.on === false) return;
     if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
-    const mesh = player.mesh;
+    owner = owner || player;
+    const mesh = owner.mesh;
     const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
     if (!nodes || !nodes.length || typeof _spawnClassFireBurst !== 'function') return;
     t = Math.max(0, Math.min(1, t || 0));
-    player._cfChargeT = (player._cfChargeT || 0) - dt;
-    if (player._cfChargeT > 0) return;
+    owner._cfChargeT = (owner._cfChargeT || 0) - dt;
+    if (owner._cfChargeT > 0) return;
     const hz = 5 + 15 * t;
-    player._cfChargeT = 1 / hz;
+    owner._cfChargeT = 1 / hz;
     if (_classFireLive() >= 12) return;
     const K = (typeof window !== 'undefined' && window.__blasterCharge) ? window.__blasterCharge : {};
-    const hull = (player.chassis && player.chassis.hullLength) || 60;
+    const hull = (owner.chassis && owner.chassis.hullLength) || 60;
     const len = hull * ((K.len != null) ? K.len : 0.16) * (0.35 + 0.65 * t);   // the glow tube's own shape
     const rad = hull * ((K.rad != null) ? K.rad : 0.034) * (0.5 + 0.5 * t);
-    _cfFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
+    if (fwdOverride) _cfFwd.copy(fwdOverride);
+    else _cfFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
     const ax = (Math.abs(_cfFwd.y) < 0.9) ? _cfR1.set(0, 1, 0) : _cfR1.set(1, 0, 0);
     _cfR2.crossVectors(_cfFwd, ax).normalize(); _cfR1.crossVectors(_cfFwd, _cfR2).normalize();
-    player._cfChargeSide = ((player._cfChargeSide || 0) + 1) % nodes.length;
-    nodes[player._cfChargeSide].getWorldPosition(_cfTmp);
+    owner._cfChargeSide = ((owner._cfChargeSide || 0) + 1) % nodes.length;
+    nodes[owner._cfChargeSide].getWorldPosition(_cfTmp);
     const a = Math.random() * 6.283, rr = rad * Math.random();
     _cfTmp.addScaledVector(_cfFwd, -len * (0.05 + 0.8 * Math.random())).addScaledVector(_cfR1, Math.cos(a) * rr).addScaledVector(_cfR2, Math.sin(a) * rr);
     const mul = (CF && CF.mul != null) ? CF.mul : 1.0;
@@ -47040,21 +47130,24 @@ function _fxSmallDevice() {
   return false;
 }
 const _paA = new THREE.Vector3(), _paB = new THREE.Vector3();
-function _primeArcTick(dt) {
-  if (typeof player === 'undefined' || !player) return;
-  if (!player._abilityPrime || player.shipState === 'dead') { player._primeArcT = 0; return; }
-  const mesh = player.mesh;
+function _primeArcTick(dt, owner, primed) {
+  owner = owner || ((typeof player !== 'undefined') ? player : null);
+  if (!owner) return;
+  if (primed === undefined) primed = owner._abilityPrime;
+  const _dead = (owner.shipState === 'dead') || (owner.alive === false);
+  if (!primed || _dead) { owner._primeArcT = 0; return; }
+  const mesh = owner.mesh;
   const nodes = mesh && mesh.userData && mesh.userData.muzzleNodes;
   if (!nodes || !nodes.length) return;
   const K = (typeof window !== 'undefined' && window.__primeArc) ? window.__primeArc : null;
   if (K && K.on === false) return;
-  player._primeArcT = (player._primeArcT || 0) - (dt || 0.016);
-  if (player._primeArcT > 0) return;
+  owner._primeArcT = (owner._primeArcT || 0) - (dt || 0.016);
+  if (owner._primeArcT > 0) return;
   const _small = _fxSmallDevice();
-  player._primeArcT = (K && K.every != null) ? K.every : (_small ? 0.18 : 0.06);
+  owner._primeArcT = (K && K.every != null) ? K.every : (_small ? 0.18 : 0.06);
   const col = (typeof chassisFlashColor === 'function')
-    ? chassisFlashColor(player.loadoutKey) : 0x88ddff;
-  const hull = (player.chassis && player.chassis.hullLength) || 60;
+    ? chassisFlashColor(owner.loadoutKey) : 0x88ddff;
+  const hull = (owner.chassis && owner.chassis.hullLength) || 60;
   const reach = hull * ((K && K.reach != null) ? K.reach : 0.09);
   const i = (Math.random() * nodes.length) | 0;
   nodes[i].getWorldPosition(_paA);
@@ -50501,6 +50594,11 @@ function updateWeapon(dt) {
   }
 
   if (player.blasterSwitchTimer > 0) firing = false;
+  const _fireEdge = firing && !player._firePrev;
+  player._firePrev = firing;
+  if (_fireEdge && player.loadoutKey === 'PUNCTURE') {
+    try { if (_punctureDetonateClusters() > 0) return; } catch (_) {}
+  }
   if (firing && player.fireTimer <= 0) {
     const smartCoreActive = player.coreActive && player.loadoutKey === 'BLASTER';
     if (!smartCoreActive && player.clipAmmo <= 0) { startReload(); return; }
@@ -52288,6 +52386,8 @@ function executeAbility(slot, ability) {
       player.dashCharges = player.maxDashes;
       player.dashCooldownTimer = 0;
       try { playSound('rearm_reset'); } catch (_) {}
+      try { _innerSparkRipple(player); } catch (_) {}
+      try { if (net.active && net.sendEvent) net.sendEvent({ type: 'inner_spark' }); } catch (_) {}
     }
     else if (ability.name === 'Plasma Mines') {
       try { playSound('trip_wire_deploy'); } catch (_) {}
@@ -53564,7 +53664,56 @@ function _releaseVortexShieldBurst(playBurstSound) {
   player.vortexRecentAbsorb = 0;
 }
 
+const _ISR_LIVE = [];
+const _ISR_DUR = 1.0;
+function _innerSparkRipple(owner) {
+  try {
+    if (!owner || !owner.mesh || typeof _makeHullHugShield !== 'function') return;
+    for (let i = _ISR_LIVE.length - 1; i >= 0; i--) {
+      if (_ISR_LIVE[i].owner === owner) { _innerSparkEnd(_ISR_LIVE[i]); _ISR_LIVE.splice(i, 1); }
+    }
+    const shell = _makeHullHugShield(owner, 'plasma_cyan');
+    if (!shell) return;
+    shell.scale.set(1.035, 1.035, 1.035);   // tighter than the shield: this is the hull glowing, not a bubble
+    owner.mesh.add(shell);
+    _ISR_LIVE.push({ owner, shell, mat: shell.userData && shell.userData._shieldMat, t: 0 });
+  } catch (_) {}
+}
+function _innerSparkEnd(e) {
+  try {
+    if (e.shell && e.shell.parent) e.shell.parent.remove(e.shell);
+    if (e.mat) { if (typeof _lssRetainMat === 'function') _lssRetainMat(e.mat); else e.mat.dispose(); }
+  } catch (_) {}
+}
+function _innerSparkTick(dt) {
+  if (!_ISR_LIVE.length) return;
+  for (let i = _ISR_LIVE.length - 1; i >= 0; i--) {
+    const e = _ISR_LIVE[i];
+    e.t += dt;
+    const k = e.t / _ISR_DUR;
+    if (k >= 1 || !e.owner || !e.owner.mesh || !e.shell.parent) {
+      _innerSparkEnd(e); _ISR_LIVE.splice(i, 1); continue;
+    }
+    const u = e.mat && e.mat.uniforms;
+    if (u) {
+      if (u.uTime) u.uTime.value = (typeof game !== 'undefined' && game.time) ? game.time : e.t;
+      if (e.mat.opacity !== undefined) e.mat.opacity = Math.sin(Math.min(1, k) * Math.PI) * 0.9;
+      const hull = (e.owner.chassis && e.owner.chassis.hullLength) || 90;
+      if (!e._fwd) { e._fwd = new THREE.Vector3(); e._at = new THREE.Vector3(); }
+      const q = e.owner.targetQuat || (e.owner.mesh && e.owner.mesh.quaternion);
+      e._fwd.set(0, 0, -1); if (q) e._fwd.applyQuaternion(q);
+      e._at.copy(e.owner.position || e.owner.mesh.position)
+           .addScaledVector(e._fwd, hull * (0.5 - k));
+      if (typeof flashFXMaterialHit === 'function' && (e._hitT = (e._hitT || 0) - dt) <= 0) {
+        e._hitT = 0.12;
+        try { flashFXMaterialHit(e.mat, e._at, 0x66f0ff, hull * 0.55); } catch (_) {}
+      }
+    }
+  }
+}
+
 function updateWorldEffects(dt) {
+  try { _innerSparkTick(dt); } catch (_) {}
   try {
     if (typeof player !== 'undefined' && player && typeof _hideThermalShieldFlameSpheres === 'function') {
       const _pyroShieldUp = (player.loadoutKey === 'PYRO' && player.shipState !== 'dead' &&
@@ -61747,6 +61896,16 @@ function _howtoRender(ov) {
   }
   h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:14px 0 8px;'>COMBAT MECHANICS</div>";
   const _mechs = [
+    ['ZOOM &amp; DOUBLE ZOOM', '#9fe8ff',
+     'Hold the zoom control for 2.4&#215; optics. TAP it once, then press and HOLD again straight away, for a 4.8&#215; second stage. ' +
+     'Aim sensitivity scales down with magnification so the same hand movement stays precise at both levels.'],
+    ['SLAYER &#183; AIMED SHOT', '#ff8fd6',
+     'Zooming does more than magnify for the scattergun: the pellet cone tightens to roughly a third of its hip-fire spread and the ' +
+     'pellets carry over half again as far. Double zoom tightens it further still and doubles the reach. Fire from the hip up close, ' +
+     'zoom for anything past knife range.'],
+    ['PUNCTURE &#183; AIRBURST', '#ffc46b',
+     'The Cluster Missile answers to the trigger after it leaves the rail &#8212; tap fire again mid-flight and it bursts where it is, ' +
+     'dropping its sustained zone early. Use it for a target that is about to break line of sight, or to catch something under the arc.'],
     ['DASH &amp; DOOMED STATE', '#4fd1ff',
      'DASH is a burst of raw speed along your current vector (straight ahead from a standstill). Charges are per-hull — Frigate 3, Corvette 2, Dreadnought 1 — shown as the pips beside the ring; spent charges refill one at a time on a per-hull cooldown. Dash does NOT restore shields: shields never recharge on their own — only riding out a STASIS FIELD (you are locked in place while they refill) or EXECUTING a doomed enemy brings them back. Enter a stasis field with shields already full or partly charged and the leftover charge banks as an OVERSHIELD — a white-cyan band over the shield arc, up to half your max shield — spent before your shields when you next take damage, and slowly bleeding away outside a field. At 15% hull you are DOOMED: the health ring pulses red and your view warps. Any enemy that touches you now executes you instantly — and doomed enemies are yours to ram-execute the same way: instant kill, full shields, +20 core. Keep your distance until you reach a stasis field; riding one out patches your hull and clears the doomed state. Doomed bots self-destruct after 10 seconds — your ship holds on until something reaches you.'],
     ['CORE CHARGING', '#f0ff1f',
