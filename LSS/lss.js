@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.37';
+const LSS_BUILD = '44.38';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -59494,6 +59494,12 @@ function _hudText(el, key, v) {
   _hudLast[key] = v;
   el.textContent = v;
 }
+function _hudDigi(el, key, v) {   // (v44.38) _hudText, but the change digitizes in like a spotted ship
+  if (!el) return;
+  if (_hudLast[key] === v) return;
+  _hudLast[key] = v;
+  _lssDigitizeIn(el, v);
+}
 function _hudWidth(el, key, v) {
   if (!el) return;
   if (_hudLast[key] === v) return;
@@ -59579,7 +59585,6 @@ function updateHUD() {
 
   const isDoomed = player.doomed && player.shipState !== 'dead';
   const doomDisp = isDoomed ? 'block' : 'none';
-  _hudDisplay(_hudEl('doomed-warning'), 'doomed-warning:d', doomDisp);
   _hudDisplay(_hudEl('doomed-vignette'), 'doomed-vignette:d', doomDisp);
 
   let maxEnemyLocks = _hudForceLock;
@@ -59624,12 +59629,14 @@ function updateHUD() {
     game.state === 'playing' ? 'ROUND ' + game.currentRound :
     game.state === 'roundEnd' ? 'ROUND OVER' :
     game.state === 'matchEnd' ? (game.scoreA >= LSS.ROUNDS_TO_WIN ? 'FLEET A WINS' : 'FLEET B WINS') : '';
-  _hudText(_hudEl('round-state'), 'round-state:t', stateText);
+  _hudDigi(_hudEl('round-state'), 'round-state:t', stateText);   // (v44.38)
 
   const teamA = _hudLast['team-a:el'] || (_hudLast['team-a:el'] = document.querySelector('.team-a'));
   const teamB = _hudLast['team-b:el'] || (_hudLast['team-b:el'] = document.querySelector('.team-b'));
-  _hudText(teamA, 'team-a:t', 'FLEET A: ' + game.scoreA);
-  _hudText(teamB, 'team-b:t', 'FLEET B: ' + game.scoreB);
+  const nmA = _hudLast['team-a:nm'] || (_hudLast['team-a:nm'] = (teamA && teamA.querySelector('.ts-nm')) || teamA);
+  const nmB = _hudLast['team-b:nm'] || (_hudLast['team-b:nm'] = (teamB && teamB.querySelector('.ts-nm')) || teamB);
+  _hudDigi(nmA, 'team-a:t', 'FLEET A: ' + game.scoreA);
+  _hudDigi(nmB, 'team-b:t', 'FLEET B: ' + game.scoreB);
   const _palKey = (player && player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
   if (_hudLast['team:pal'] !== _palKey) {
     _hudLast['team:pal'] = _palKey;
@@ -61303,6 +61310,25 @@ let _cdOwner = null;             // 'launch' | 'round' | null - who painted last
 let _cdPrio = 0;
 let _cdHoldT = null;
 let _cdHoldUntil = 0;
+const _DIGI_GLYPHS = '!@#$%^&*<>?/{}[]+=';
+function _lssDigitizeIn(el, text, dur) {
+  if (!el) return;
+  text = (text == null) ? '' : String(text);
+  const tok = (el._digiTok = (el._digiTok || 0) + 1);
+  if (!text || (typeof _lssOff === 'function' && _lssOff('digitize')) || (typeof document !== 'undefined' && document.hidden)) { el.textContent = text; return; }
+  dur = dur || (text.length <= 2 ? 0.2 : 0.45);
+  const t0 = performance.now();
+  const step = () => {
+    if (el._digiTok !== tok) return;
+    const now = performance.now(), age = (now - t0) / 1000;
+    if (age >= dur) { el.textContent = text; return; }
+    const reveal = Math.min(text.length - 1, Math.floor(text.length * (age / dur)));
+    el.textContent = text.substring(0, reveal) + _DIGI_GLYPHS[(Math.floor(now * 0.03) + reveal) % _DIGI_GLYPHS.length];
+    requestAnimationFrame(step);
+  };
+  step();
+}
+if (typeof window !== 'undefined') window.__digitizeIn = _lssDigitizeIn;
 function _cdPaint(owner, text, sub, opts) {
   const o = opts || {};
   const prio = o.prio || 1;
@@ -61315,8 +61341,8 @@ function _cdPaint(owner, text, sub, opts) {
   try { (window.__cdLog = window.__cdLog || []).push(['P', owner, String(text).slice(0, 6), Math.round(now / 100) / 10]); if (window.__cdLog.length > 8) window.__cdLog.shift(); } catch (_) {}
   _cdOwner = owner; _cdPrio = prio;
   el.classList.toggle('fight', !!o.fight);
-  num.textContent = text;
-  sb.textContent = sub || '';
+  _lssDigitizeIn(num, text);            // (v44.38) the callout tags' digitize-in, see _lssDigitizeIn
+  _lssDigitizeIn(sb, sub || '');
   sb.style.display = sub ? '' : 'none';   // FIGHT carries no sub-line (the white one hid its label too)
   el.classList.add('active');
   try { if (!_lssOff('flush')) void el.offsetHeight; } catch (_) {}   // (v40.98) `?off=flush`
@@ -71229,8 +71255,8 @@ const Overlays = (() => {
     if (!el || count < 2) return;
     const d = STREAK_DATA[Math.min(count, STREAK_DATA.length - 1)] || STREAK_DATA[STREAK_DATA.length - 1];
     el.classList.toggle('godlike', !!d.glow);
-    el.querySelector('.ks-label').textContent = d.label;
-    el.querySelector('.ks-count').textContent = count + ' KILLS';
+    _lssDigitizeIn(el.querySelector('.ks-label'), d.label);        // (v44.38) callout digitize-in
+    _lssDigitizeIn(el.querySelector('.ks-count'), count + ' KILLS');
     const soft = d.color + '88';
     const faint = d.color + '44';
     el.style.setProperty('--ks-color', d.color);
@@ -71305,9 +71331,9 @@ const Overlays = (() => {
   function banner(text, subtext, secs) {
     const el = $('ov-banner');
     if (!el) return;
-    el.querySelector('.ban-text').textContent = text || '';
+    _lssDigitizeIn(el.querySelector('.ban-text'), text || '');   // (v44.38) callout digitize-in
     const sub = el.querySelector('.ban-sub');
-    sub.textContent = subtext || '';
+    _lssDigitizeIn(sub, subtext || '');
     sub.style.display = subtext ? 'block' : 'none';
     const _bd = (typeof secs === 'number' && secs > 0) ? secs : 3;
     el.style.animationDuration = _bd + 's';
