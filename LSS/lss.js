@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.09';
+const LSS_BUILD = '44.10';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -14162,27 +14162,34 @@ postFX.blurMat = new THREE.ShaderMaterial({
     tDiffuse: { value: null },
     direction: { value: new THREE.Vector2(1, 0) },
     resolution: { value: new THREE.Vector2(postFX.rtBright.width, postFX.rtBright.height) },
-    spread: { value: 0.9 }   
+    uSrcScale: { value: new THREE.Vector2(1, 1) }, uSrcMax: { value: new THREE.Vector2(1, 1) },
+    spread: { value: 0.9 }
   },
   vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tDiffuse;
     uniform vec2 direction;
     uniform vec2 resolution;
+    uniform vec2 uSrcScale, uSrcMax;
     uniform float spread;
     varying vec2 vUv;
+    // (v44.10) vUv spans the DESTINATION's live rect; the source's live rect is the same fraction of
+    // its own texture, so one multiply by uSrcScale moves a destination UV into source space. The
+    // clamp stops the outermost taps reading the dead margin beyond the live rect - without it the
+    // rim of every frame would blur in whatever the last full-size pass left there.
+    vec4 tapS(vec2 uv) { return texture2D(tDiffuse, clamp(uv * uSrcScale, vec2(0.0), uSrcMax)); }
     void main() {
       vec2 off = direction / resolution * spread;
       vec4 c = vec4(0.0);
-      c += texture2D(tDiffuse, vUv - 4.0 * off) * 0.0162;
-      c += texture2D(tDiffuse, vUv - 3.0 * off) * 0.0540;
-      c += texture2D(tDiffuse, vUv - 2.0 * off) * 0.1216;
-      c += texture2D(tDiffuse, vUv - 1.0 * off) * 0.1945;
-      c += texture2D(tDiffuse, vUv)              * 0.2270;
-      c += texture2D(tDiffuse, vUv + 1.0 * off) * 0.1945;
-      c += texture2D(tDiffuse, vUv + 2.0 * off) * 0.1216;
-      c += texture2D(tDiffuse, vUv + 3.0 * off) * 0.0540;
-      c += texture2D(tDiffuse, vUv + 4.0 * off) * 0.0162;
+      c += tapS(vUv - 4.0 * off) * 0.0162;
+      c += tapS(vUv - 3.0 * off) * 0.0540;
+      c += tapS(vUv - 2.0 * off) * 0.1216;
+      c += tapS(vUv - 1.0 * off) * 0.1945;
+      c += tapS(vUv)              * 0.2270;
+      c += tapS(vUv + 1.0 * off) * 0.1945;
+      c += tapS(vUv + 2.0 * off) * 0.1216;
+      c += tapS(vUv + 3.0 * off) * 0.0540;
+      c += tapS(vUv + 4.0 * off) * 0.0162;
       gl_FragColor = c;
     }
   `
@@ -14192,6 +14199,7 @@ postFX.compositeMat = new THREE.ShaderMaterial({
   uniforms: {
     tScene: { value: null },
     tBloom: { value: null },
+    uBloomScale: { value: new THREE.Vector2(1, 1) }, uBloomMax: { value: new THREE.Vector2(1, 1) },   // (v44.10) rtBlurV's live sub-rect
     bloomStrength: { value: 0.6 },   // (v34.63) 1.0->0.6 (user-tuned): softer bloom add. Live: tunePostFX({bloomStrength})      
     vignetteIntensity: { value: 0.0 },  
     vignetteSize: { value: 0.42 },
@@ -14216,6 +14224,7 @@ postFX.compositeMat = new THREE.ShaderMaterial({
   fragmentShader: `
     uniform sampler2D tScene;
     uniform sampler2D tBloom;
+    uniform vec2 uBloomScale, uBloomMax;
     uniform vec2 uSceneScale, uSceneMax;
     uniform vec4 uPan;
     // (v42.91) CONFORMAL PANINI. Maps an OUTPUT pixel to the SOURCE pixel it should show.
@@ -14259,7 +14268,7 @@ postFX.compositeMat = new THREE.ShaderMaterial({
       return vec2((sl / cl) * uPan.z, (p.y * uPan.w) / (S * cl)) * 0.5 + 0.5;
     }
     #define SCENE(uv) texture2D(tScene, clamp(panMap(uv) * uSceneScale, vec2(0.0), uSceneMax))
-    #define BLOOM(uv) texture2D(tBloom, panMap(uv))
+    #define BLOOM(uv) texture2D(tBloom, clamp(panMap(uv) * uBloomScale, vec2(0.0), uBloomMax))
     uniform float bloomStrength;
     uniform float vignetteIntensity;
     uniform float vignetteSize;
@@ -14788,6 +14797,20 @@ function renderPostFX() {
       postFX.brightMat.uniforms.uSceneMax.value.set(_mx, _my);
       postFX.compositeMat.uniforms.uSceneScale.value.set(_A.sx, _A.sy);
       postFX.compositeMat.uniforms.uSceneMax.value.set(_mx, _my);
+      const _br = postFX.rtBright;
+      const _bw = Math.max(1, Math.round(_br.width * _A.sx)), _bh = Math.max(1, Math.round(_br.height * _A.sy));
+      const _bPart = (_bw < _br.width || _bh < _br.height);
+      for (const _t of [postFX.rtBright, postFX.rtBlurH, postFX.rtBlurV]) {
+        _t.viewport.set(0, 0, _bw, _bh);
+        _t.scissor.set(0, 0, _bw, _bh);
+        _t.scissorTest = _bPart;
+      }
+      const _bmx = (_bw - 0.5) / _br.width, _bmy = (_bh - 0.5) / _br.height;
+      postFX.blurMat.uniforms.resolution.value.set(_bw, _bh);
+      postFX.blurMat.uniforms.uSrcScale.value.set(_A.sx, _A.sy);
+      postFX.blurMat.uniforms.uSrcMax.value.set(_bmx, _bmy);
+      postFX.compositeMat.uniforms.uBloomScale.value.set(_A.sx, _A.sy);
+      postFX.compositeMat.uniforms.uBloomMax.value.set(_bmx, _bmy);
     }
   }
   if (window.__f8seg) window.__f8seg('scene');   // (v40.59) shadow map + world + mirror + water live in here

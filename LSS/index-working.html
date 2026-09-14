@@ -6110,7 +6110,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.09';
+const LSS_BUILD = '44.10';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -25966,28 +25966,44 @@ postFX.blurMat = new THREE.ShaderMaterial({
   uniforms: {
     tDiffuse: { value: null },
     direction: { value: new THREE.Vector2(1, 0) },
+    // ⚠ (v44.10) `resolution` IS NOW THE ACTIVE RECT, NOT THE TEXTURE. It only ever appears as
+    // `direction / resolution * spread`, i.e. the size of ONE STEP - so feeding it the live
+    // sub-rectangle keeps the blur a constant fraction of the IMAGE as the governor sheds. Feeding
+    // it the full texture instead would hold the step at one texel, which is twice as wide relative
+    // to an image at half scale: the glow would visibly widen and narrow as the scale stepped. This
+    // file spends a paragraph in _lssSupersampleTick on not letting the picture pump; a pumping
+    // bloom would be the same defect wearing a different hat.
     resolution: { value: new THREE.Vector2(postFX.rtBright.width, postFX.rtBright.height) },
-    spread: { value: 0.9 }   
+    // (v44.10) which part of the SOURCE target is live, same contract as the scene's
+    // uSceneScale/uSceneMax. Both blur passes read a target the governor has sub-rectangled.
+    uSrcScale: { value: new THREE.Vector2(1, 1) }, uSrcMax: { value: new THREE.Vector2(1, 1) },
+    spread: { value: 0.9 }
   },
   vertexShader: `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tDiffuse;
     uniform vec2 direction;
     uniform vec2 resolution;
+    uniform vec2 uSrcScale, uSrcMax;
     uniform float spread;
     varying vec2 vUv;
+    // (v44.10) vUv spans the DESTINATION's live rect; the source's live rect is the same fraction of
+    // its own texture, so one multiply by uSrcScale moves a destination UV into source space. The
+    // clamp stops the outermost taps reading the dead margin beyond the live rect - without it the
+    // rim of every frame would blur in whatever the last full-size pass left there.
+    vec4 tapS(vec2 uv) { return texture2D(tDiffuse, clamp(uv * uSrcScale, vec2(0.0), uSrcMax)); }
     void main() {
       vec2 off = direction / resolution * spread;
       vec4 c = vec4(0.0);
-      c += texture2D(tDiffuse, vUv - 4.0 * off) * 0.0162;
-      c += texture2D(tDiffuse, vUv - 3.0 * off) * 0.0540;
-      c += texture2D(tDiffuse, vUv - 2.0 * off) * 0.1216;
-      c += texture2D(tDiffuse, vUv - 1.0 * off) * 0.1945;
-      c += texture2D(tDiffuse, vUv)              * 0.2270;
-      c += texture2D(tDiffuse, vUv + 1.0 * off) * 0.1945;
-      c += texture2D(tDiffuse, vUv + 2.0 * off) * 0.1216;
-      c += texture2D(tDiffuse, vUv + 3.0 * off) * 0.0540;
-      c += texture2D(tDiffuse, vUv + 4.0 * off) * 0.0162;
+      c += tapS(vUv - 4.0 * off) * 0.0162;
+      c += tapS(vUv - 3.0 * off) * 0.0540;
+      c += tapS(vUv - 2.0 * off) * 0.1216;
+      c += tapS(vUv - 1.0 * off) * 0.1945;
+      c += tapS(vUv)              * 0.2270;
+      c += tapS(vUv + 1.0 * off) * 0.1945;
+      c += tapS(vUv + 2.0 * off) * 0.1216;
+      c += tapS(vUv + 3.0 * off) * 0.0540;
+      c += tapS(vUv + 4.0 * off) * 0.0162;
       gl_FragColor = c;
     }
   `
@@ -25998,6 +26014,7 @@ postFX.compositeMat = new THREE.ShaderMaterial({
   uniforms: {
     tScene: { value: null },
     tBloom: { value: null },
+    uBloomScale: { value: new THREE.Vector2(1, 1) }, uBloomMax: { value: new THREE.Vector2(1, 1) },   // (v44.10) rtBlurV's live sub-rect
     bloomStrength: { value: 0.6 },   // (v34.63) 1.0->0.6 (user-tuned): softer bloom add. Live: tunePostFX({bloomStrength})      
     vignetteIntensity: { value: 0.0 },  
     vignetteSize: { value: 0.42 },
@@ -26022,6 +26039,7 @@ postFX.compositeMat = new THREE.ShaderMaterial({
   fragmentShader: `
     uniform sampler2D tScene;
     uniform sampler2D tBloom;
+    uniform vec2 uBloomScale, uBloomMax;
     uniform vec2 uSceneScale, uSceneMax;
     uniform vec4 uPan;
     // (v42.91) CONFORMAL PANINI. Maps an OUTPUT pixel to the SOURCE pixel it should show.
@@ -26065,7 +26083,7 @@ postFX.compositeMat = new THREE.ShaderMaterial({
       return vec2((sl / cl) * uPan.z, (p.y * uPan.w) / (S * cl)) * 0.5 + 0.5;
     }
     #define SCENE(uv) texture2D(tScene, clamp(panMap(uv) * uSceneScale, vec2(0.0), uSceneMax))
-    #define BLOOM(uv) texture2D(tBloom, panMap(uv))
+    #define BLOOM(uv) texture2D(tBloom, clamp(panMap(uv) * uBloomScale, vec2(0.0), uBloomMax))
     uniform float bloomStrength;
     uniform float vignetteIntensity;
     uniform float vignetteSize;
@@ -26786,6 +26804,34 @@ function renderPostFX() {
       postFX.brightMat.uniforms.uSceneMax.value.set(_mx, _my);
       postFX.compositeMat.uniforms.uSceneScale.value.set(_A.sx, _A.sy);
       postFX.compositeMat.uniforms.uSceneMax.value.set(_mx, _my);
+      // ⭐⭐ (v44.10) ...AND THE BLOOM CHAIN FOLLOWS THE GOVERNOR TOO. It never did: bw/bh come
+      // from the BASE dpr in _getBloomRTSize and never moved with _ssDyn.scale, so when the governor
+      // shed the scene to 49% of its pixels the three post passes carried on at full size - 1.55 MP
+      // a frame at a 1080p canvas, 6.22 MP at 4K - ungoverned at exactly the moment the machine was
+      // in trouble. The shed is a response to a GPU that cannot keep up; leaving a third of the post
+      // stack out of it is leaving the response half-made.
+      // Same mechanism as the scene, for the same reason: a VIEWPORT change, never a reallocation
+      // (v39.49b). Three setSize() calls per governor step would cost ~14 ms/MP by this file's own
+      // measurement and would hitch on every step - the exact thing the sub-rectangle exists to
+      // avoid. The targets stay their allocated size; only the live rect moves.
+      // (!) The bloom rect uses the SCENE's fractions, so source and destination live rects are
+      //     always the same shape and one uSrcScale moves a UV between them.
+      // (!) `resolution` becomes the ACTIVE size so the blur stays a constant fraction of the image.
+      //     See the note on the uniform - a texel-constant blur would make the glow pump.
+      const _br = postFX.rtBright;
+      const _bw = Math.max(1, Math.round(_br.width * _A.sx)), _bh = Math.max(1, Math.round(_br.height * _A.sy));
+      const _bPart = (_bw < _br.width || _bh < _br.height);
+      for (const _t of [postFX.rtBright, postFX.rtBlurH, postFX.rtBlurV]) {
+        _t.viewport.set(0, 0, _bw, _bh);
+        _t.scissor.set(0, 0, _bw, _bh);
+        _t.scissorTest = _bPart;
+      }
+      const _bmx = (_bw - 0.5) / _br.width, _bmy = (_bh - 0.5) / _br.height;
+      postFX.blurMat.uniforms.resolution.value.set(_bw, _bh);
+      postFX.blurMat.uniforms.uSrcScale.value.set(_A.sx, _A.sy);
+      postFX.blurMat.uniforms.uSrcMax.value.set(_bmx, _bmy);
+      postFX.compositeMat.uniforms.uBloomScale.value.set(_A.sx, _A.sy);
+      postFX.compositeMat.uniforms.uBloomMax.value.set(_bmx, _bmy);
     }
   }
   if (window.__f8seg) window.__f8seg('scene');   // (v40.59) shadow map + world + mirror + water live in here
