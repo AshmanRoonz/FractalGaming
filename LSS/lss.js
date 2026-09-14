@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.00';
+const LSS_BUILD = '44.01';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -61795,7 +61795,9 @@ document.addEventListener('contextmenu', e => e.preventDefault());
     const saved = localStorage.getItem('lss_touch_enabled');
     _enabled = _touchForced ? true
       : (saved != null) ? (saved === '1')
-      : (window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+      : !!(typeof _LSS_IS_MOBILE !== 'undefined' ? _LSS_IS_MOBILE
+           : ((navigator.maxTouchPoints > 0) &&
+              window.matchMedia && window.matchMedia('(pointer: coarse)').matches));
   } catch (_) { _enabled = true; }
 
   if ((navigator.maxTouchPoints > 0) || ('ontouchstart' in window)) {
