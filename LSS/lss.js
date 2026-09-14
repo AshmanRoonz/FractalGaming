@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.29';
+const LSS_BUILD = '44.30';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -17451,7 +17451,7 @@ function _swWaterReflectShader() {
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() }, uFade: { value: 1 },   
         uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: _SW_RIPPLE_BOUNDS }, uRippleScale: { value: 0 },   
         uMaskTex: { value: null }, uFoamGain: { value: 1 }, uFoamLit: { value: 1 }, uReliefScale: { value: 28.0 }, uReliefShade: { value: 0.7 },   
-        uSnellTint: { value: new THREE.Color(0x9fd0e6) }, uDeepTint: { value: new THREE.Color(0x0a3a44) }, uSubmerge: { value: 0 }, uEye: { value: new THREE.Vector3() }, uUnderMirror: { value: 1.0 }, uUnderDeep: { value: 0.35 }, uUnderThru: { value: 0.0 }, uReflLive: { value: 1 }, uFlipFace: { value: 0 },   
+        uSnellTint: { value: new THREE.Color(0x9fd0e6) }, uDeepTint: { value: new THREE.Color(0x0a3a44) }, uSubmerge: { value: 0 }, uEye: { value: new THREE.Vector3() }, uUnderMirror: { value: 1.0 }, uUnderDeep: { value: 0.35 }, uUnderThru: { value: 0.0 }, uAboveTex: { value: null }, uAboveWorld: { value: new THREE.Matrix4() }, uAboveOn: { value: 0.0 }, uAboveMix: { value: 0.8 }, uReflLive: { value: 1 }, uFlipFace: { value: 0 },   
         uShallowTint: { value: new THREE.Color(0x2e7a6a) }, uShoreSoft: { value: 0.05 }, uFoamThresh: { value: 0.18 },
         uReflWorld: { value: new THREE.Matrix4() }, uReflWorldOn: { value: 0 },
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 } },
@@ -17459,10 +17459,12 @@ function _swWaterReflectShader() {
     vertexShader: [
       'uniform mat4 textureMatrix;',
       'uniform mat4 uReflWorld; uniform float uReflWorldOn;',
+      'uniform mat4 uAboveWorld; varying vec4 vUvAbove;',   // (v44.30) the snapshot's world->uv, see _swReflSnapshotAbove
       'varying vec4 vUv;', 'varying vec3 vWP;', '#include <fog_pars_vertex>',
       'void main(){',
       '  vWP = (modelMatrix * vec4(position,1.0)).xyz;',
       '  vUv = mix(textureMatrix * vec4(position,1.0), uReflWorld * vec4(vWP,1.0), uReflWorldOn);',
+      '  vUvAbove = uAboveWorld * vec4(vWP, 1.0);',   // (v44.30)
       '  vec4 mvPosition = modelViewMatrix * vec4(position,1.0);',
       '  gl_Position = projectionMatrix * mvPosition;',
       '  #include <fog_vertex>',
@@ -17474,9 +17476,9 @@ function _swWaterReflectShader() {
       'uniform float uWHorizStr;', 'uniform float uWHorizA;', 'uniform float uWHorizB;',
       'uniform sampler2D uRippleTex;', 'uniform vec2 uRippleCenter;', 'uniform float uRippleBounds;', 'uniform float uRippleScale;',
       'uniform sampler2D uMaskTex; uniform float uFoamGain; uniform float uFoamLit; uniform float uReliefScale; uniform float uReliefShade;',   
-      'uniform vec3 uSnellTint; uniform vec3 uDeepTint; uniform float uSubmerge; uniform vec3 uEye; uniform float uUnderMirror; uniform float uUnderDeep; uniform float uUnderThru; uniform float uReflLive; uniform float uFlipFace;',   
+      'uniform vec3 uSnellTint; uniform vec3 uDeepTint; uniform float uSubmerge; uniform vec3 uEye; uniform float uUnderMirror; uniform float uUnderDeep; uniform float uUnderThru; uniform sampler2D uAboveTex; uniform float uAboveOn; uniform float uAboveMix; uniform float uReflLive; uniform float uFlipFace;',   
       'uniform vec3 uShallowTint; uniform float uShoreSoft; uniform float uFoamThresh;',   
-      'varying vec4 vUv;', 'varying vec3 vWP;', '#include <fog_pars_fragment>',
+      'varying vec4 vUv;', 'varying vec3 vWP;', 'varying vec4 vUvAbove;', '#include <fog_pars_fragment>',
       'void main(){',
       '  float t = uTime; vec2 q = vWP.xz;',
       '  float dist = length(vWP - uCam);',
@@ -17578,13 +17580,18 @@ function _swWaterReflectShader() {
       '  } else {',
       '    vec3 Nb = normalize(vec3(N.x, -1.0, N.z));',                      
       '    vec3 toEye = normalize(uEye - vWP);',                            
-      '    float ct = clamp(dot(toEye, -Nb), 0.0, 1.0);',                  
+      '    float ct = clamp(dot(toEye, Nb), 0.0, 1.0);',                  
       '    float win = smoothstep(0.60, 0.76, ct);',                       
       '    vec4 uvr = vUv; uvr.xy += N.xz * uvr.w * 0.10 * fade;',         
       '    vec3 mirror = texture2DProj(tDiffuse, uvr).rgb;',
-      '    vec3 thru = mix(uSnellTint, mirror, (uUnderMirror > 0.5) ? uUnderThru : uReflLive);',   
+      '    vec3 thru = mix(uSnellTint, mirror, (uUnderMirror > 0.5) ? uUnderThru : uReflLive);',
+      '    if (uAboveOn > 0.5) {',
+      '      vec4 uva = vUvAbove; uva.xy += N.xz * uva.w * 0.10 * fade;',
+      '      vec3 above = texture2DProj(uAboveTex, uva).rgb;',
+      '      thru = mix(thru, above, uAboveMix * step(1e-4, uva.w));',
+      '    }',   
       '    vec3 deep = (uUnderMirror > 0.5) ? mix(mirror, uDeepTint, uUnderDeep) : uDeepTint;',   // (v44.26) the mirror, a little murky
-      '    vec3 snell = mix(deep, mix(uSnellTint, thru, 0.6), win);',  
+      '    vec3 snell = mix(deep, mix(uSnellTint, thru, (uAboveOn > 0.5) ? 0.85 : 0.6), win);',   // (v44.30) more image, less tint, when there is an image  
       '    snell += uSnellTint * smoothstep(0.10, 0.0, abs(ct - 0.68)) * 0.5;',   
       '    vec3 ucol = mix(snell, _dist, clamp(foam * 0.35 * caustic, 0.0, 0.6));',   
       '    gl_FragColor = vec4(ucol, 0.93 * clamp(uSubmerge, 0.0, 1.0));',  
@@ -19611,6 +19618,36 @@ function _swRippleUpsample() {
   R.gpu.doRenderTarget(R.upMat, R.upRT);
   R.upTex = R.upRT.texture;
 }
+const _swAboveCopy = { mat: null };
+function _swReflSnapshotAbove(mesh) {
+  const R = _swRipple; if (!R.gpu || !mesh || !mesh.material || !mesh.material.uniforms || !mesh._reflWorld) return false;
+  const U = mesh.material.uniforms;
+  if (!(U.uReflWorldOn && U.uReflWorldOn.value > 0)) return false;   // nothing captured yet
+  const src = U.tDiffuse && U.tDiffuse.value;
+  if (!src || !src.image || !U.uAboveTex) return false;
+  const w = src.image.width, h = src.image.height;
+  if (!mesh._aboveRT || mesh._aboveRT.width !== w || mesh._aboveRT.height !== h) {
+    try { if (mesh._aboveRT) mesh._aboveRT.dispose(); } catch (_) {}
+    mesh._aboveRT = new THREE.WebGLRenderTarget(w, h, {
+      type: src.type, format: THREE.RGBAFormat, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+      wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+      depthBuffer: false, stencilBuffer: false, generateMipmaps: false });
+  }
+  if (!_swAboveCopy.mat) {
+    _swAboveCopy.mat = new THREE.ShaderMaterial({
+      uniforms: { uSrc: { value: null }, uOut: { value: new THREE.Vector2(1, 1) } },
+      vertexShader: 'void main(){ gl_Position = vec4(position, 1.0); }',
+      fragmentShader: 'uniform sampler2D uSrc; uniform vec2 uOut; void main(){ gl_FragColor = texture2D(uSrc, gl_FragCoord.xy / uOut); }',
+      depthTest: false, depthWrite: false, toneMapped: false });
+  }
+  const m = _swAboveCopy.mat;
+  m.uniforms.uSrc.value = src; m.uniforms.uOut.value.set(w, h);
+  R.gpu.doRenderTarget(m, mesh._aboveRT);
+  U.uAboveTex.value = mesh._aboveRT.texture;
+  U.uAboveWorld.value.copy(mesh._reflWorld);
+  U.uAboveOn.value = (window.__water && window.__water.aboveOn === 0) ? 0.0 : 1.0;
+  return true;
+}
 function _swRippleRenderTex() {
   const R = _swRipple;
   return R.upTex || R.gpu.getCurrentRenderTarget(R.heightVar).texture;
@@ -21165,6 +21202,8 @@ function _swBuildHubWater(T) {
       const _underNow = !!(cam && cam.position && typeof game._hubWaterWL === 'number' &&
                            cam.position.y < game._hubWaterWL - 2.0 &&
                            !(window.__water && window.__water.underMirror === 0));
+      if (_underNow && !this._reflWasUnder) { try { _swReflSnapshotAbove(this); } catch (_) {} }
+      this._reflWasUnder = _underNow;
       const _rxWas = this.rotation.x;
       if (_underNow) { this.rotation.x = _rxWas + Math.PI; this.updateMatrix(); this.updateMatrixWorld(true); }
       this._reflFlipped = _underNow;
@@ -21638,6 +21677,8 @@ function _swUpdateHubWater() {
         if (U.uUnderMirror) U.uUnderMirror.value = (_WU.underMirror === 0) ? 0.0 : 1.0;
         if (U.uUnderDeep) U.uUnderDeep.value = (_WU.underDeep != null) ? +_WU.underDeep : 0.35;
         if (U.uUnderThru) U.uUnderThru.value = (_WU.underThru != null) ? +_WU.underThru : 0.0;
+        if (U.uAboveMix) U.uAboveMix.value = (_WU.aboveMix != null) ? +_WU.aboveMix : 0.8;      // (v44.30)
+        if (U.uAboveOn && _WU.aboveOn === 0) U.uAboveOn.value = 0.0;                             // (v44.30) kill switch
       }
     }
   }
