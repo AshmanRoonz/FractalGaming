@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.12';
+const LSS_BUILD = '44.14';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -1797,6 +1797,11 @@ function _teamMatchScore(team) {
     if (typeof _isAssault === 'function' && _isAssault() && game.assaultLedger) {
       return (team === LSS.TEAM_FLEET_A) ? (game.assaultLedger.capsA | 0) : (game.assaultLedger.capsB | 0);
     }
+    if (typeof _isCyber === 'function' && _isCyber() && game._cyber && game._cyber.ledger) {
+      const _C = game._cyber, _L = _C.ledger;
+      const _A = (_C.teamA != null) ? _C.teamA : LSS.TEAM_FLEET_A;
+      return (team === _A) ? (_L.capsA | 0) : (_L.capsB | 0);
+    }
     return (team === LSS.TEAM_FLEET_A) ? (game.scoreA | 0) : (game.scoreB | 0);
   } catch (_) { return null; }
 }
@@ -2070,6 +2075,9 @@ async function postMatchResultToBackend() {
     const _aw = _assaultMatchWinner();
     if (_aw) winningTeam = _aw;
   }
+  if (typeof _isCyber === 'function' && _isCyber() && typeof _cyberMatchWinner === 'function') {
+    try { const _cw = _cyberMatchWinner(game._cyber); if (_cw) winningTeam = _cw; } catch (_) {}
+  }
   const participants = _gatherMatchParticipants(winningTeam);
 
   const payload = {
@@ -2077,7 +2085,7 @@ async function postMatchResultToBackend() {
     started_at:   game._matchStartedAtMs || (Date.now() - Math.floor((game.matchEndTimer || 0) * 1000)),
     ended_at:     Date.now(),
     map_key:      game.selectedMap || 'unknown',
-    mode:         (typeof LSS !== 'undefined' && LSS.MODE) || 'classic',
+    mode:         (typeof _lssRoomTag === 'function' ? _lssRoomTag() : ((typeof LSS !== 'undefined' && LSS.MODE) || 'classic')),
     winning_team: winningTeam,
     duration_sec: game._matchStartedAtMs ? Math.max(0, Math.round((Date.now() - game._matchStartedAtMs) / 1000)) : null,
     participants,
@@ -24783,6 +24791,7 @@ function _cyberEnd(C, title, sub, fromNet) {
   try { game.state = 'matchEnd'; } catch (_) {}
   try { if (typeof _anchorTimer === 'function') _anchorTimer('matchEndTimer', 7); } catch (_) {}
   try { if (typeof _refreshScoreboardVisibility === 'function') _refreshScoreboardVisibility(); } catch (_) {}
+  try { if (typeof postMatchResultToBackend === 'function') postMatchResultToBackend(); } catch (_) {}
   try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
 }
 const _cyWp = new THREE.Vector3();

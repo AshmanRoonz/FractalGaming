@@ -6110,7 +6110,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.12';
+const LSS_BUILD = '44.14';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -8641,6 +8641,20 @@ function _teamMatchScore(team) {
     if (typeof _isAssault === 'function' && _isAssault() && game.assaultLedger) {
       return (team === LSS.TEAM_FLEET_A) ? (game.assaultLedger.capsA | 0) : (game.assaultLedger.capsB | 0);
     }
+    // ⭐⭐ (v44.13) CYBERPUNK KEEPS ITS OWN LEDGER AND NEVER TOUCHES scoreA/scoreB. Owner: "we
+    // should fix the cyberpunk leaderboard". Without this the fall-through below reported (0) for
+    // every cyberpunk participant forever - game.scoreA/scoreB are never incremented anywhere in
+    // the cyber code (grepped: zero writes in the whole block).
+    // ⚠ THE SCOREBOARD ALREADY KNEW THIS AND THE POST DID NOT. v42.28 fixed the same fault on the
+    //   end-of-match scoreboard and left this line alone; its comment reads "The score is C.ledger's
+    //   capture counts, never game.scoreA/scoreB, which cyberpunk never increments and which would
+    //   read '(0 rounds)' forever." Same bug, second surface - exactly the shape Assault was given a
+    //   branch for above and cyberpunk never was.
+    if (typeof _isCyber === 'function' && _isCyber() && game._cyber && game._cyber.ledger) {
+      const _C = game._cyber, _L = _C.ledger;
+      const _A = (_C.teamA != null) ? _C.teamA : LSS.TEAM_FLEET_A;
+      return (team === _A) ? (_L.capsA | 0) : (_L.capsB | 0);
+    }
     return (team === LSS.TEAM_FLEET_A) ? (game.scoreA | 0) : (game.scoreB | 0);
   } catch (_) { return null; }
 }
@@ -8977,6 +8991,12 @@ async function postMatchResultToBackend() {
     const _aw = _assaultMatchWinner();
     if (_aw) winningTeam = _aw;
   }
+  // (v44.13) ...and cyberpunk ends on its OWN net-capture spread, the same way. Without this the
+  // gate above (scoreA/scoreB >= ROUNDS_TO_WIN) can never fire for this mode, so every cyberpunk
+  // match posted winning_team: null - no winner, for either side, ever.
+  if (typeof _isCyber === 'function' && _isCyber() && typeof _cyberMatchWinner === 'function') {
+    try { const _cw = _cyberMatchWinner(game._cyber); if (_cw) winningTeam = _cw; } catch (_) {}
+  }
   const participants = _gatherMatchParticipants(winningTeam);
 
   const payload = {
@@ -8986,7 +9006,16 @@ async function postMatchResultToBackend() {
     map_key:      game.selectedMap || 'unknown',
     // (v34.82) Game mode rides along so the backend/leaderboard can segment
     // classic vs race vs assault (extra field; ignored by older backends).
-    mode:         (typeof LSS !== 'undefined' && LSS.MODE) || 'classic',
+    // ⭐ (v44.13) THE TAG, NOT THE MODE STRING. LSS.MODE is 'freeflight' for CYBERPUNK CITY (the
+    // mode is a flag on free flight - see _lssRoomTag, v44.11), so every cyberpunk match arrived at
+    // the backend indistinguishable from a plain EXHIBITION one. Worse: the Worker's GAME_MODES
+    // allow-list holds only classic/race/assault/endless/campaign, so 'freeflight' fails it and
+    // falls through to the map-prefix inference and lands on 'classic' - cyberpunk and exhibition
+    // matches have both been filed as ELIMINATION.
+    // ⚠ THE WORKER HAS TO LEARN THE NAMES TOO. Sending 'cyberpunk' alone changes nothing until
+    //   'cyberpunk' and 'freeflight' are added to GAME_MODES in backend/src/worker.js; until then
+    //   this still falls back to 'classic', which is exactly what it does today. Client half first.
+    mode:         (typeof _lssRoomTag === 'function' ? _lssRoomTag() : ((typeof LSS !== 'undefined' && LSS.MODE) || 'classic')),
     winning_team: winningTeam,
     // (v38.60) `game._matchDurationSec` was never written anywhere — derive it.
     duration_sec: game._matchStartedAtMs ? Math.max(0, Math.round((Date.now() - game._matchStartedAtMs) / 1000)) : null,
@@ -41836,6 +41865,21 @@ function _cyberEnd(C, title, sub, fromNet) {
   try { game.state = 'matchEnd'; } catch (_) {}
   try { if (typeof _anchorTimer === 'function') _anchorTimer('matchEndTimer', 7); } catch (_) {}
   try { if (typeof _refreshScoreboardVisibility === 'function') _refreshScoreboardVisibility(); } catch (_) {}
+  // ⭐⭐ (v44.14) ...AND POST IT. THIS IS WHY CYBERPUNK HAS NEVER APPEARED ON THE LEADERBOARD.
+  // Owner: "look at the leaderboard, there's barely anything there... i've played so much".
+  // postMatchResultToBackend has exactly ONE other call site in the file, and it lives inside
+  //     if (_isAssault() ? (_asltWin !== 0) : (game.scoreA >= ROUNDS_TO_WIN || game.scoreB >= ...))
+  // - a gate cyberpunk can never satisfy, because it keeps its own C.ledger and never increments
+  // scoreA/scoreB at all (grepped: zero writes in the whole cyber block). So the post was not
+  // arriving with bad data; it was never being CALLED. v44.13 corrected the payload of a call that
+  // did not happen - this is the half that makes it happen.
+  // ⚠ The comment above calls this function "the classic/assault match-end shape, verbatim".
+  //   v42.27 copied the SCOREBOARD half of that shape and not the POSTING half, and the omission
+  //   has been silent ever since - a match that ends correctly, shows a board, and records nothing.
+  // (!) Safe to call on every peer: _cyberEnd already early-returns on C.matchOver, and
+  //     postMatchResultToBackend is independently idempotent on _lastPostedMatchId. Each client
+  //     posting its own view is exactly what the backend's consensus expects.
+  try { if (typeof postMatchResultToBackend === 'function') postMatchResultToBackend(); } catch (_) {}
   try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
 }
 // (v37.79) Where a mode bot wants to be when it is not already in a fight. Returns null to hand
