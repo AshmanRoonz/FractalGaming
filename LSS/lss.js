@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.33';
+const LSS_BUILD = '44.34';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -35146,6 +35146,20 @@ function _shipLightsFrame() {
   let hT = 0;
   if (flying && input.headlight !== false) {
     hT = ((T && T.hI != null) ? T.hI : 2200.0) * (tier >= 3 ? 0.55 : (tier >= 1 ? 0.7 : 1));
+    try {
+      if (!(T && T.auto === 0)) {
+        const _f = scene.fog, _fc = _f && _f.color;
+        if (_fc) {
+          const _lum = 0.2126 * _fc.r + 0.7152 * _fc.g + 0.0722 * _fc.b;
+          const _C0 = window.__shipCones || {};
+          const _l0 = (_C0.l0 != null) ? _C0.l0 : 0.16, _l1 = (_C0.l1 != null) ? _C0.l1 : 0.50;
+          let _a = 1 - (_lum - _l0) / Math.max(1e-6, _l1 - _l0);
+          _a = Math.max(0, Math.min(1, _a)); _a = _a * _a * (3 - 2 * _a);
+          if (game._swSubmerged) _a = 1;   // under water is always dark enough (the fog colour there is not a reliable signal - the zone tick keeps rewriting it)
+          hT *= _a;
+        }
+      }
+    } catch (_) {}
   }
   let _hBoost = 1, _hReach = 1;
   try {
@@ -61343,6 +61357,7 @@ function _captureKbKey(e) {
 function _lssSpeedMix() {
   try {
     if (LSS.MODE === 'race') return 1;
+    if (LSS.MODE === 'endless') return 0;
     const m = Number(LSS.SPEED_MIX);
     return Number.isFinite(m) ? Math.max(0, Math.min(1, m)) : 0;
   } catch (_) { return 0; }
@@ -61522,7 +61537,7 @@ function _lssRefreshInsaneSpeedBtn() {
       desc.textContent = pct + '% of the way to race speed (' + LSS.RACE_SPEED + ').';
     }
   }
-  if (box) box.style.display = (LSS.MODE === 'race') ? 'none' : '';
+  if (box) box.style.display = (LSS.MODE === 'race' || LSS.MODE === 'endless') ? 'none' : '';   // (v44.34) endless: drops set the pace
 }
 function _lssSetSpeedMix(mix, fromNet) {
   let m = Number(mix);
@@ -63778,11 +63793,11 @@ function buildSettingsPage() {
         <label style="flex:1;">The painted light strips on every hull glow in the dark.</label>
       </div>
       <div class="setting-row">
-        <label>Headlight</label>
+        <label>Headlight (auto)</label>
         <input type="checkbox" id="set-headlight" ${input.headlight !== false ? 'checked' : ''}>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">The beam under the nose, and its cone of light in third person.</label>
+        <label style="flex:1;">Comes on by itself when it gets dark &mdash; night, caverns, under water &mdash; and stays off in daylight. The cone of light shows in third person.</label>
       </div>
       <div class="setting-row">
         <label>HUD Gauge Labels</label>
