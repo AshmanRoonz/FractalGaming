@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.35';
+const LSS_BUILD = '44.36';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -22887,9 +22887,92 @@ function _hcNeonMat() {
   return mat;
 }
 
+const _LSS_ADS = [
+  { b: 'PEPSU',           t: 'REFRESH YOUR REACTOR',                 c: '#3fa9ff' },
+  { b: 'COCA-NOVA',       t: 'OPEN A WORMHOLE OF HAPPINESS',         c: '#ff3b3b' },
+  { b: 'NIKEY',           t: 'JUST FLY IT.',                         c: '#ffffff' },
+  { b: 'ADIDDAS',         t: 'IMPOSSIBLE IS A SETTING',              c: '#dfe7ff' },
+  { b: 'STARBUX',         t: 'FUEL FOR PILOTS, 24 / 7',              c: '#39e08a' },
+  { b: 'McDONUTS',        t: 'OVER 9 BILLION SERVED IN ORBIT',       c: '#ffcc33' },
+  { b: 'BURGER QUEEN',    t: 'HAVE IT YOUR WAVE',                    c: '#ff8a3d' },
+  { b: 'AMAZOOM',         t: 'DELIVERED BEFORE YOU ORDER',           c: '#ffb347' },
+  { b: 'GOOGLR',          t: 'DON\'T BE EVIL-ISH',                   c: '#7dd3ff' },
+  { b: 'MICROSOFTLY',     t: 'WHERE DO YOU WANT TO WARP TODAY?',     c: '#8ef0a0' },
+  { b: 'TESLO',           t: 'AUTOPILOT SOLD SEPARATELY',            c: '#ff4d6d' },
+  { b: 'RED BOLT',        t: 'GIVES YOU WINGS. YOU HAVE WINGS.',     c: '#ff5c5c' },
+  { b: 'NETFLUX',         t: 'BINGE IN ZERO-G',                      c: '#ff2d55' },
+  { b: 'SPOTIFLY',        t: 'MUSIC FOR THE VOID',                   c: '#4cf08a' },
+  { b: 'UBERHOVER',       t: 'YOUR RIDE IS 4 LIGHT-YEARS AWAY',      c: '#e6e6e6' },
+  { b: 'SANSUNG',         t: 'GALAXY EDITION. LITERALLY.',           c: '#5fa8ff' },
+  { b: 'PAPPLE',          t: 'THINK DIFFERENTLY. THEN THINK AGAIN.', c: '#f2f2f2' },
+  { b: 'KFCy',            t: 'KENTUCKY FRIED CYBORG',                c: '#ff6b6b' },
+  { b: 'DORITOZ',         t: 'NOW WITH 40% MORE CRUNCH PHYSICS',     c: '#ffa53d' },
+  { b: 'BLOKO',           t: 'STEP ON IT IN THE DARK',               c: '#ffd23f' },
+  { b: 'IKEAO',           t: 'SOME ASSEMBLY REQUIRED. HULL NOT INCLUDED.', c: '#ffe14d' },
+  { b: 'OREOH',           t: 'TWIST. LICK. LAUNCH.',                 c: '#c8d8ff' },
+  { b: 'TACO BELLS',      t: 'LIVE MÁS. FLY MÁS.',                 c: '#c77dff' },
+  { b: "DUNKIN' DRONUTS", t: 'AMERICA RUNS ON ANTIMATTER',           c: '#ff9de2' },
+];
+const _ADS_COLS = 4, _ADS_ROWS = 6;
+let _adsTex = null, _adsCanvas = null;
+function _lssAdPaint() {
+  const cv = _adsCanvas; if (!cv) return;
+  const CW = cv.width / _ADS_COLS, CH = cv.height / _ADS_ROWS;
+  const x = cv.getContext('2d');
+  x.setTransform(1, 0, 0, 1, 0, 0);
+  x.fillStyle = '#000'; x.fillRect(0, 0, cv.width, cv.height);
+  for (let i = 0; i < _LSS_ADS.length && i < _ADS_COLS * _ADS_ROWS; i++) {
+    const ad = _LSS_ADS[i];
+    const cx = (i % _ADS_COLS) * CW, cy = Math.floor(i / _ADS_COLS) * CH;
+    x.save(); x.translate(cx, cy);
+    x.globalAlpha = 0.5; x.strokeStyle = ad.c; x.lineWidth = Math.max(2, CW * 0.012);
+    x.strokeRect(CW * 0.035, CH * 0.06, CW * 0.93, CH * 0.88);
+    x.globalAlpha = 0.85; x.fillStyle = ad.c;
+    const nb = 3 + (i % 4);
+    for (let k = 0; k < nb; k++) x.fillRect(CW * 0.07 + k * CW * 0.035, CH * 0.12, CW * 0.022, CH * 0.10 * (0.5 + ((i * 7 + k * 3) % 5) / 5));
+    x.globalAlpha = 1; x.textAlign = 'center'; x.textBaseline = 'middle';
+    let fs = Math.round(CH * 0.34);
+    x.font = '700 ' + fs + "px Orbitron, Rajdhani, 'Helvetica Neue', sans-serif";
+    let w = x.measureText(ad.b).width;
+    if (w > CW * 0.88) { fs = Math.max(10, Math.floor(fs * (CW * 0.88) / w)); x.font = '700 ' + fs + "px Orbitron, Rajdhani, 'Helvetica Neue', sans-serif"; }
+    x.shadowColor = ad.c; x.shadowBlur = CW * 0.035; x.fillStyle = ad.c;
+    x.fillText(ad.b, CW * 0.5, CH * 0.45);
+    x.shadowBlur = 0;
+    let ts = Math.round(CH * 0.13);
+    x.font = '600 ' + ts + "px Rajdhani, Inter, 'Helvetica Neue', sans-serif";
+    w = x.measureText(ad.t).width;
+    if (w > CW * 0.9) { ts = Math.max(8, Math.floor(ts * (CW * 0.9) / w)); x.font = '600 ' + ts + "px Rajdhani, Inter, 'Helvetica Neue', sans-serif"; }
+    x.fillStyle = '#ffffff'; x.globalAlpha = 0.92;
+    x.fillText(ad.t, CW * 0.5, CH * 0.78);
+    x.restore();
+  }
+}
+function _lssAdAtlas() {
+  if (_adsTex) return _adsTex;
+  try {
+    const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+    const CW = small ? 256 : 512, CH = small ? 128 : 256;
+    _adsCanvas = document.createElement('canvas');
+    _adsCanvas.width = CW * _ADS_COLS; _adsCanvas.height = CH * _ADS_ROWS;
+    _lssAdPaint();
+    _adsTex = new THREE.CanvasTexture(_adsCanvas);
+    if ('colorSpace' in _adsTex) _adsTex.colorSpace = THREE.SRGBColorSpace;
+    _adsTex.minFilter = THREE.LinearMipmapLinearFilter; _adsTex.magFilter = THREE.LinearFilter;
+    _adsTex.generateMipmaps = true; _adsTex.anisotropy = 4;
+    _adsTex.wrapS = _adsTex.wrapT = THREE.ClampToEdgeWrapping;
+    try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { try { _lssAdPaint(); _adsTex.needsUpdate = true; } catch (_) {} }); } catch (_) {}
+  } catch (_) { _adsTex = null; }
+  return _adsTex;
+}
+if (typeof window !== 'undefined') window.__adsAtlas = _lssAdAtlas;
 function _hcHoloMat() {
+  const _A = (typeof window !== 'undefined' && window.__ads) || {};
+  const _atlas = (_A.on === 0) ? null : _lssAdAtlas();
   return new THREE.ShaderMaterial({
-    uniforms: { uHcT: _swU.uTime, uHcLodOn: HUB_CITY._uLodOn },
+    uniforms: { uHcT: _swU.uTime, uHcLodOn: HUB_CITY._uLodOn,
+                uAds: { value: _atlas }, uAdsOn: { value: _atlas ? 1.0 : 0.0 },   // (v44.36)
+                uAdsGrid: { value: new THREE.Vector3(_ADS_COLS, _ADS_ROWS, Math.min(_LSS_ADS.length, _ADS_COLS * _ADS_ROWS)) },
+                uAdsFrac: { value: (_A.frac != null) ? +_A.frac : 0.55 } },
     transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
     side: THREE.DoubleSide,
     vertexShader: `
@@ -22908,6 +22991,7 @@ function _hcHoloMat() {
     fragmentShader: `
       uniform float uHcT;
       uniform float uHcLodOn;
+      uniform sampler2D uAds; uniform float uAdsOn; uniform vec3 uAdsGrid; uniform float uAdsFrac;
       varying vec2 vUv2; varying vec3 vCol; varying float vRnd;
       float h21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
       void main() {
@@ -22937,7 +23021,20 @@ function _hcHoloMat() {
         // hLod = 0, expression identical to before.
         float hLod = smoothstep(0.5, 1.2, max(fwidth(uv.x * cols), fwidth(uv.y * rows))) * uHcLodOn;
         float a = mix(0.10 + 0.9 * glyph * inner, 0.378, hLod) * mix(scan, 0.82, hLod) * edge * flick;
-        gl_FragColor = vec4(vCol * a * 1.6, a * 0.85);
+        vec3 outC = vCol * a * 1.6; float outA = a * 0.85;
+        // (v44.36) about uAdsFrac of the panels are ads: a cell of the atlas, still scanned, edged
+        // and flickered like the projection it replaces, and tinted a little by the panel's neon.
+        if (uAdsOn > 0.5 && fract(rnd * 13.17) > (1.0 - uAdsFrac)) {
+          float idx = floor(fract(rnd * 29.31) * uAdsGrid.z);
+          float cx = mod(idx, uAdsGrid.x), cy = floor(idx / uAdsGrid.x);
+          vec2 auv = vec2((cx + uv.x) / uAdsGrid.x, 1.0 - (cy + 1.0 - uv.y) / uAdsGrid.y);
+          vec3 ad = texture2D(uAds, auv).rgb;
+          float lum = dot(ad, vec3(0.299, 0.587, 0.114));
+          float k = mix(scan, 0.82, hLod) * edge * flick;
+          outC = (ad * 1.45 + vCol * 0.10) * k;
+          outA = (0.05 + lum) * k;
+        }
+        gl_FragColor = vec4(outC, outA);
       }`,
   });
 }
@@ -23510,6 +23607,44 @@ function _hcPadSched(pad, i, t, lift, cache) {
   o.seg = 5; o.pos = null; return o;
 }
 
+function _hcAttachBanner(holder, i, sc) {
+  const atlas = _lssAdAtlas(); if (!atlas) return;
+  const idx = (i * 7 + 3) % Math.min(_LSS_ADS.length, _ADS_COLS * _ADS_ROWS);
+  const W = 460 * sc, H = 160 * sc, cable = 180 * sc, tail = 150 * sc * 0.55;
+  const geo = new THREE.PlaneGeometry(W, H, 16, 1); geo.rotateY(Math.PI / 2);   // now spans z (length) and y
+  const mat = new THREE.ShaderMaterial({
+    uniforms: { uAds: { value: atlas }, uCell: { value: new THREE.Vector4(idx % _ADS_COLS, Math.floor(idx / _ADS_COLS), _ADS_COLS, _ADS_ROWS) },
+                uT: _swU.uTime, uAmp: { value: H * 0.05 }, uSeed: { value: (i * 0.37) % 6.28 } },
+    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+    vertexShader: [
+      'uniform float uT; uniform float uAmp; uniform float uSeed; varying vec2 vUv;',
+      'void main(){ vUv = uv; vec3 p = position;',
+      '  p.x += sin(uv.x * 7.0 - uT * 5.0 + uSeed) * uAmp * (0.25 + 0.75 * uv.x);',   // flutter grows toward the free end
+      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0); }'
+    ].join('\n'),
+    fragmentShader: [
+      'uniform sampler2D uAds; uniform vec4 uCell; uniform float uT; varying vec2 vUv;',
+      'void main(){',
+      '  float ux = gl_FrontFacing ? vUv.x : 1.0 - vUv.x;',   // readable from BOTH sides: the back face mirrors the cell (a real banner would read backwards from behind)
+      '  vec2 auv = vec2((uCell.x + ux) / uCell.z, 1.0 - (uCell.y + 1.0 - vUv.y) / uCell.w);',
+      '  vec3 ad = texture2D(uAds, auv).rgb;',
+      '  float lum = dot(ad, vec3(0.299, 0.587, 0.114));',
+      '  float scan = 0.85 + 0.15 * sin(vUv.y * 90.0 + uT * 7.0);',
+      '  float edge = smoothstep(0.0, 0.04, vUv.x) * smoothstep(1.0, 0.96, vUv.x) * smoothstep(0.0, 0.08, vUv.y) * smoothstep(1.0, 0.92, vUv.y);',
+      '  gl_FragColor = vec4((ad * 1.4 + vec3(0.05, 0.12, 0.16)) * scan * edge, (0.10 + lum) * scan * edge);',
+      '}'
+    ].join('\n'),
+  });
+  const banner = new THREE.Mesh(geo, mat);
+  banner.position.set(0, -8 * sc, -(tail + cable + W * 0.5));
+  banner.frustumCulled = false;
+  banner.userData.isHubCity = true; banner.userData._adBanner = true;
+  holder.add(banner);
+  const cg = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, -tail), new THREE.Vector3(0, -8 * sc, -(tail + cable))]);
+  const line = new THREE.Line(cg, new THREE.LineBasicMaterial({ color: 0x9fc4d8, transparent: true, opacity: 0.55, fog: false }));
+  line.frustumCulled = false;
+  holder.add(line);
+}
 function _hcTrafficInit(city, group) {
   _HC_TRAF.ships = []; _HC_TRAF.obbs = []; _HC_TRAF.ready = false;
   const _full = !((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
@@ -23547,6 +23682,7 @@ function _hcTrafficInit(city, group) {
       const _jit = 0.82 + _stHash2(i * 5.09, 1.77) * 0.42;   // +/-~20% per ship
       const _sc = _cls.scale;
       if (_sc !== 1) cl.scale.multiplyScalar(_sc);
+      try { if (i % 3 === 1 && !(window.__ads && (window.__ads.banners === 0 || window.__ads.on === 0))) _hcAttachBanner(holder, i, _sc); } catch (_) {}
       holder.visible = false;
       holder.userData.isHubCity = true;
       group.add(holder);
