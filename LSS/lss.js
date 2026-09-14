@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.04';
+const LSS_BUILD = '44.05';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -15661,6 +15661,13 @@ function _stGapSDFCarved(px,py,pz,T){
 const _SW_CHUNK = 900;       
 const _SW_CELLS = 40;        
 const _SW_VIEW  = 5;         
+try {
+  const _hv = /[?&]hubview=(\d+)/.exec((typeof location !== 'undefined' && location.search) || '');
+  if (_hv) {
+    const _n = Math.max(3, Math.min(16, parseInt(_hv[1], 10) || 0));
+    if (_n >= 3) { window.__hubView = _n; try { console.warn('[hub] view radius forced to ' + _n + ' (' + Math.pow(2 * _n + 1, 2) + ' chunks) by ?hubview'); } catch (_) {} }
+  }
+} catch (_) {}
 function _swHubView() { return window.__hubView || (((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE) ? 8 : 12); }   // (perf) hub terrain view radius: desktop 12 (was 16), mobile/Quest 8 (was 9/16). Streams as one draw call per chunk, so radius^2 drives draw-call + triangle count; 16->12 cuts hub terrain draws ~40%, the #1 hub GPU cost. Live override: window.__hubView
 function _lssEndlessMobile() { return !!window.__endlessMobileSim || (typeof isStandaloneQuest === 'function' && isStandaloneQuest()) || _LSS_IS_MOBILE; }
 const _SW_HUB_VIEW = 11;
