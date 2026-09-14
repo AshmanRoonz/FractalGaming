@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.24';
+const LSS_BUILD = '44.25';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18131,14 +18131,14 @@ function _swCrestSpray(x, wl, z, crestAmp, vx, vz, crestYOverride) {
     const mist = Math.random() < 0.55;                                       
     const ang = Math.random() * 6.2832, out = (mist ? 6 : 14) + Math.random() * Math.random() * (mist ? 38 : 70);
     const up = mist ? (35 + Math.random() * 75) : (95 + Math.random() * 160);
-    _swSplV.set(Math.cos(ang) * out + (vx || 0) * 0.12, up, Math.sin(ang) * out + (vz || 0) * 0.12);
+    _swSplV.set(Math.cos(ang) * out + (vx || 0) * 0.45, up, Math.sin(ang) * out + (vz || 0) * 0.45);
     game.particles.push({
       position: new THREE.Vector3(x + (Math.random() - 0.5) * 34, spawnY, z + (Math.random() - 0.5) * 34),
       velocity: _swSplV.clone(),
-      life: mist ? (0.55 + Math.random() * 0.95) : (0.3 + Math.random() * 0.6), maxLife: 1.5,
+      life: mist ? (0.45 + Math.random() * 0.7) : (0.3 + Math.random() * 0.6), maxLife: 1.5,
       color: (Math.random() < 0.5) ? 0x9fc0d8 : 0xc8dcea,
-      size: mist ? (2.2 + Math.random() * 3.6) : (0.9 + Math.random() * 1.7),  
-      grav: mist ? (110 + Math.random() * 120) : (260 + Math.random() * 280),  
+      size: mist ? (0.8 + Math.random() * 1.4) : (0.5 + Math.random() * 1.0),   // (v44.25)  
+      grav: mist ? (200 + Math.random() * 220) : (260 + Math.random() * 280),   // (v44.25) mist that falls  
       splash: true,
     });
   }
