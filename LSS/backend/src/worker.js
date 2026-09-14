@@ -26,7 +26,11 @@ const DISCORD_API = 'https://discord.com/api/v10';
 // they drifted apart before, a mode could be stored but never queryable.
 // endless + campaign are PvE: they post with a single human participant and
 // are ranked on `score`, not wins.
-const GAME_MODES = new Set(['classic', 'race', 'assault', 'endless', 'campaign']);
+// (v2) 'freeflight' and 'cyberpunk' joined the list. Both run as LSS.MODE 'freeflight' in the
+// client - CYBERPUNK CITY is free flight plus a flag - so the game sends the distinguishing TAG
+// (_lssRoomTag, client v44.11). Without them here both fail this allow-list, fall through to the
+// map-prefix inference below, and are filed as 'classic'.
+const GAME_MODES = new Set(['classic', 'race', 'assault', 'endless', 'campaign', 'freeflight', 'cyberpunk']);
 // Modes ranked by score (distance / run length) rather than kills or wins.
 const SCORE_RANKED_MODES = new Set(['endless']);
 // Cap on a single reported score, so a fat-fingered or forged client can't
@@ -35,6 +39,21 @@ const SCORE_RANKED_MODES = new Set(['endless']);
 // re-anchors, so 10 million is loose enough to never bite a real player and
 // tight enough to keep Number.MAX_SAFE_INTEGER off the board.
 const MAX_REPORTED_SCORE = 10_000_000;
+// (v3) THE TALLIES NEED THE SAME TREATMENT THE SCORE ALWAYS HAD. They never used to: under the old
+// consensus every field had to match across reporters, so a forged kill count could not survive a
+// second witness. The new rule takes kills/deaths/damage from the player's OWN report, which is more
+// accurate but also unwitnessed - so the raw `Number(p.kills || 0)` below became the only thing
+// standing between a hand-edited payload and a permanent career total. Note `Number('abc')` is NaN
+// and NaN sails through every comparison, so the finiteness test matters as much as the ceiling.
+// Ceilings are deliberately generous - they exist to reject nonsense, not to balance the game. A
+// long endless run is the yardstick: the owner has gone past 41 km in one.
+const MAX_REPORTED_TALLY  = 100_000;      // kills / deaths in one match
+const MAX_REPORTED_DAMAGE = 100_000_000;  // damage dealt / taken in one match
+function _clampTally(v, cap) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(cap, Math.floor(n)));
+}
 const LEADERBOARD_TTL_SEC = 60;       // KV cache TTL for top-N
 const ROOM_TTL_SEC        = 90;       // KV TTL for room heartbeats
 const RECENT_ROOM_WINDOW_MS = 75_000; // older rooms filtered out of /rooms
@@ -139,13 +158,18 @@ function isHumanDiscordId(id) {
 // If reports are in but disagree, mark disputed. Bots / unsigned peers
 // don't report (no token), so consensus uses human_count, not the
 // total participant_count.
-async function tryValidateMatch(env, matchId) {
+async function tryValidateMatch(env, matchId, opts) {
   const matchRow = await env.DB.prepare('SELECT * FROM matches WHERE id = ?').bind(matchId).first();
   if (!matchRow) return;
   if (matchRow.validated !== 0) return;     // already settled
 
+  // (v3) ORDER MATTERS NOW, so it is stated rather than inherited from D1's row order. The fallback
+  // path below ("no self-report - use another reporter's view") picks whichever reporter comes
+  // first, and with no ORDER BY that is whatever the storage engine returns: the same rows could
+  // validate to different career numbers on different runs. Earliest report wins, deterministically.
   const reports = await env.DB.prepare(`
     SELECT * FROM match_participants WHERE match_id = ?
+    ORDER BY reported_at ASC, reported_by ASC
   `).bind(matchId).all();
   if (!reports.results) return;
 
@@ -165,46 +189,141 @@ async function tryValidateMatch(env, matchId) {
     if (list.length !== matchRow.participant_count) return; // partial report
   }
 
-  // Cross-check: does every reporter agree on every participant's stats?
-  const canonical = new Map(); // discord_id -> stat snapshot from first reporter
-  let firstReporter = true;
+  // ⭐⭐⭐ (v2) CROSS-CHECK THE OUTCOME, NOT THE TALLIES - THIS IS WHY NO MULTIPLAYER MATCH HAS
+  // EVER VALIDATED. The original rule required every reporter to agree EXACTLY on every field,
+  // kills / deaths / damage_dealt / damage_taken included, and any mismatch called markDisputed
+  // permanently (validated = 2, no retry anywhere). Two peers in a P2P game never agree on damage:
+  // each client accumulates what IT witnessed, with its own float arithmetic and its own view of
+  // lag-compensated hits. So the disagreement the rule was built to catch is the ordinary state of
+  // an honest match. Owner: "look at the leaderboard, there's barely anything there... i've played
+  // so much" - solo showed 203 matches and every multiplayer board was empty, because one human
+  // cannot disagree with themselves and two humans always do.
+  //
+  // The rule now splits the fields by what they actually mean:
+  //   OUTCOME  - team, loadout_key, is_winner. Discrete, derived from synced events, and the thing
+  //              a cheat would want to forge. Still cross-checked exactly; a mismatch still disputes.
+  //   TALLIES  - kills, deaths, damage_dealt, damage_taken, is_mvp. Legitimately divergent, so they
+  //              are taken from each player's OWN report of themselves rather than from whichever
+  //              client happened to report first.
+  //
+  // SELF-REPORT IS ALSO MORE ACCURATE, not merely more permissive: your own client is the one that
+  // saw every hit you landed and every hit you took, while a peer only saw what reached it.
+  // (!) A participant with no self-report (a peer who left before posting, or a bot) falls back to
+  //     the EARLIEST reporter's view of them. The old rule had no fallback - it disputed instead -
+  //     so this is new behaviour, not restored behaviour.
+  // (!) The outcome fields still have to agree, so a client cannot award itself the win, and the
+  //     tallies are clamped at the insert (MAX_REPORTED_TALLY / _DAMAGE) since self-report means
+  //     nobody else witnesses them.
+  const OUTCOME_KEYS = ['team', 'loadout_key', 'is_winner'];
+  const snapOf = (r) => ({
+    team: r.team,
+    loadout_key: r.loadout_key,
+    kills: r.kills,
+    deaths: r.deaths,
+    damage_dealt: r.damage_dealt,
+    damage_taken: r.damage_taken,
+    is_mvp: r.is_mvp,
+    is_winner: r.is_winner,
+  });
+
+  // ⭐⭐ (v3) THE ROSTER GUARD, KEPT. The old rule enforced this as a side effect - a second
+  // reporter naming somebody the first had never listed hit `if (!c) return markDisputed(...)`. The
+  // field-by-field cross-check is gone, so that guard has to be stated on its own, or Pass 2 below
+  // would silently ADMIT an unknown id and credit an account no other client ever saw in the match.
+  // ⚠ HUMANS ONLY. Bot ids legitimately differ between peers: the client mints them as
+  //   'bot:' + loadoutKey + ':' + (botIdx++) walking its OWN game.entities order, so two honest
+  //   clients routinely disagree on which bot is bot:blaster:0. Comparing the full roster would
+  //   dispute nearly every match with bots in it - which is most of them. Humans are the only ids
+  //   that reach the career-total rollup anyway (see the isHumanDiscordId skip below), so the human
+  //   set is exactly the surface that needs protecting.
+  const _rosters = [];
+  for (const [, list] of byReporter) {
+    _rosters.push(list.filter(r => isHumanDiscordId(r.discord_id))
+                      .map(r => String(r.discord_id)).sort().join('|'));
+  }
+  if (_rosters.some(s => s !== _rosters[0])) return markDisputed(env, matchId);
+
+  const canonical = new Map();   // discord_id -> the stats we will roll up
+  const outcomeSeen = new Map(); // discord_id -> the first reporter's OUTCOME fields
+
+  // Pass 1: a player's own report of themselves wins.
   for (const [, list] of byReporter) {
     for (const r of list) {
-      const key = r.discord_id;
-      const snap = {
-        team: r.team,
-        loadout_key: r.loadout_key,
-        kills: r.kills,
-        deaths: r.deaths,
-        damage_dealt: r.damage_dealt,
-        damage_taken: r.damage_taken,
-        is_mvp: r.is_mvp,
-        is_winner: r.is_winner,
-      };
-      if (firstReporter) {
-        canonical.set(key, snap);
-      } else {
-        const c = canonical.get(key);
-        if (!c) return markDisputed(env, matchId);
-        for (const k of Object.keys(snap)) {
-          if (c[k] !== snap[k]) return markDisputed(env, matchId);
-        }
+      if (String(r.reported_by) === String(r.discord_id)) canonical.set(r.discord_id, snapOf(r));
+    }
+  }
+  // Pass 2: fill anyone with no self-report, and cross-check the OUTCOME across every reporter.
+  // ⭐⭐⭐ HUMANS ONLY, FOR THE SAME REASON THE ROSTER GUARD IS. This is not a theoretical
+  // concern - it is what the live table says. Match solo_1778693765057_fpmc and its twin hold the
+  // same three participants, and the two humans agree exactly (team 3 / is_winner 0 and team 2 /
+  // is_winner 1 on both reports). The BOT does not: one client files bot:SYPHON:0 on team 2 as a
+  // winner, the other files the same id on team 3 as a loser. Neither is wrong - the id is minted
+  // from each client's own entity order, so the two reports are describing DIFFERENT bots that
+  // happen to collide on a name. Cross-checking that name's team would dispute every match with a
+  // bot in it, which is nearly all of them, and the relaxed rule would have been no better than the
+  // strict one it replaced. Bots never reach the career rollup (isHumanDiscordId skips them), so
+  // their outcome fields have nothing to protect.
+  for (const [, list] of byReporter) {
+    for (const r of list) {
+      if (!canonical.has(r.discord_id)) canonical.set(r.discord_id, snapOf(r));
+      if (!isHumanDiscordId(r.discord_id)) continue;
+      const prev = outcomeSeen.get(r.discord_id);
+      if (!prev) { outcomeSeen.set(r.discord_id, r); continue; }
+      for (const k of OUTCOME_KEYS) {
+        if (prev[k] !== r[k]) return markDisputed(env, matchId);
       }
     }
-    firstReporter = false;
   }
 
-  // All reports agreed. Roll up to player career totals (one statement
-  // per participant ; D1 doesn't expose multi-statement transactions yet
-  // for non-batch APIs, but each upsert is atomic). Career totals are
-  // tracked three ways: combined (total_*) + solo-mode + multiplayer-
-  // mode. The mode-specific columns drive separate solo / mp leaderboards.
+  // (v3) AT MOST ONE HUMAN MVP. is_mvp sits with the tallies because each client derives it from its
+  // own kill view - but unlike damage it is DISCRETE and mutually exclusive, so self-reporting it
+  // lets every player in the match mark their own row and mvp_count inflates once per reporter. The
+  // tie-break is deterministic (kills, then damage, then id) so a re-run cannot pick a different one.
+  // Solo is untouched by construction: one human cannot be two.
+  const _mvps = [...canonical.entries()].filter(([id, s]) => s.is_mvp && isHumanDiscordId(id));
+  if (_mvps.length > 1) {
+    _mvps.sort((a, b) => (b[1].kills - a[1].kills)
+                      || (b[1].damage_dealt - a[1].damage_dealt)
+                      || String(a[0]).localeCompare(String(b[0])));
+    for (let i = 1; i < _mvps.length; i++) _mvps[i][1].is_mvp = 0;
+  }
+
+  // ⭐⭐⭐ (v3) CLAIM THE MATCH FIRST, THEN CREDIT IT IN ONE BATCH. Both halves of that are
+  // load-bearing, and the previous version had neither.
+  //
+  // THE CLAIM. The seal used to be a bare `UPDATE ... WHERE id = ?`, and the only thing stopping a
+  // second rollup was the `validated !== 0` READ at the top of this function - roughly eighty lines
+  // and four awaits earlier. A read that early is not a lock: two callers can both pass it, both
+  // reach here, and both add the same match to the same career totals, permanently and with nothing
+  // to detect it afterwards. That was never reachable while POST /match was the only caller and each
+  // match had one live reporter; POST /admin/revalidate makes it reachable by design, because it
+  // deliberately puts rows back into validated = 0 - the exact state that lets this function proceed
+  // - and holds them there across two full D1 round-trips.
+  //   `AND validated = 0` turns the write itself into the mutex, which is the only place a mutex can
+  // live without transactions: exactly one caller gets changes === 1, and everybody else bails
+  // BEFORE crediting anything. Career totals are additive and irreversible, so this is the one
+  // invariant in the file worth spending a round-trip on.
+  //
+  // THE BATCH. The rollup is three statements per participant and used to be awaited one at a time,
+  // AFTER the match was already marked validated. A throw in the middle - a D1 blip, a timeout, the
+  // Worker hitting its subrequest ceiling - left the match flagged as fully rolled up with only some
+  // of its players credited, and the `validated !== 0` read above then blocked every retry forever.
+  // env.DB.batch() is D1's transaction (the comment that used to sit here said as much and then did
+  // not use it): all statements commit or none do. A failed batch now credits nobody, and the match
+  // is handed back as disputed so a later revalidate can retry it cleanly.
+  // (!) It also collapses ~36 subrequests into one, which is what makes the backfill loop fit inside
+  //     a Worker invocation at all.
+  //
+  // Career totals are tracked three ways: combined (total_*) + solo-mode + multiplayer-mode. The
+  // mode-specific columns drive separate solo / mp leaderboards.
   const now = Date.now();
-  await env.DB.prepare(`
-    UPDATE matches SET validated = 1, validated_at = ? WHERE id = ?
+  const claim = await env.DB.prepare(`
+    UPDATE matches SET validated = 1, validated_at = ? WHERE id = ? AND validated = 0
   `).bind(now, matchId).run();
+  if (!claim.meta || claim.meta.changes !== 1) return;   // another caller owns this rollup
 
   const isMp = (matchRow.mode === 'multiplayer');
+  const stmts = [];
 
   for (const [discordId, snap] of canonical) {
     // Skip non-human participants ; they don't have player rows and
@@ -214,7 +333,7 @@ async function tryValidateMatch(env, matchId) {
 
     // Bump player career totals (combined + mode-specific).
     if (isMp) {
-      await env.DB.prepare(`
+      stmts.push(env.DB.prepare(`
         UPDATE players
         SET total_matches = total_matches + 1,
             total_wins    = total_wins    + ?,
@@ -233,9 +352,9 @@ async function tryValidateMatch(env, matchId) {
         snap.is_winner ? 1 : 0,
         snap.kills, snap.deaths, snap.damage_dealt,
         discordId,
-      ).run();
+      ));
     } else {
-      await env.DB.prepare(`
+      stmts.push(env.DB.prepare(`
         UPDATE players
         SET total_matches = total_matches + 1,
             total_wins    = total_wins    + ?,
@@ -254,7 +373,7 @@ async function tryValidateMatch(env, matchId) {
         snap.is_winner ? 1 : 0,
         snap.kills, snap.deaths, snap.damage_dealt,
         discordId,
-      ).run();
+      ));
     }
 
     // Per-match peaks + floors (combined + mode-specific). Splits the
@@ -262,7 +381,7 @@ async function tryValidateMatch(env, matchId) {
     // same value as the combined columns, since this match is one or
     // the other (never both).
     const modePrefix = isMp ? 'mp_' : 'solo_';
-    await env.DB.prepare(`
+    stmts.push(env.DB.prepare(`
       UPDATE players SET
         max_kills_match  = max(max_kills_match,  ?),
         min_kills_match  = min(coalesce(min_kills_match, ?),  ?),
@@ -288,11 +407,11 @@ async function tryValidateMatch(env, matchId) {
       snap.damage_dealt, snap.damage_dealt, snap.damage_dealt,
       // WHERE
       discordId,
-    ).run();
+    ));
 
     // Bump per-loadout aggregates (combined across modes for now ;
     // could split solo/mp here later if useful).
-    await env.DB.prepare(`
+    stmts.push(env.DB.prepare(`
       INSERT INTO player_loadout_stats (
         discord_id, loadout_key, matches, wins, kills, deaths,
         damage_dealt, damage_taken, mvp_count
@@ -311,11 +430,26 @@ async function tryValidateMatch(env, matchId) {
       snap.is_winner ? 1 : 0,
       snap.kills, snap.deaths, snap.damage_dealt, snap.damage_taken,
       snap.is_mvp ? 1 : 0,
-    ).run();
+    ));
+  }
+
+  if (stmts.length) {
+    try {
+      await env.DB.batch(stmts);
+    } catch (err) {
+      // Nothing was credited (the batch is all-or-nothing), but the claim above already flipped the
+      // match to 1 - which would hide it from every future retry. Hand it back as disputed so the
+      // revalidate route can pick it up again, and let the error surface rather than swallowing it.
+      try { await markDisputed(env, matchId); } catch (_) {}
+      throw err;
+    }
   }
 
   // Bust the leaderboard cache so the next read picks up new totals.
-  await invalidateLeaderboardCache(env);
+  // (v3) ...unless the caller is doing this in bulk and will bust once at the end. The bust is a KV
+  // list plus a delete per key; running it once per match inside a backfill loop is most of that
+  // loop's subrequest budget, spent re-clearing a cache nobody read in between.
+  if (!opts || !opts.skipCacheBust) await invalidateLeaderboardCache(env);
 }
 
 async function markDisputed(env, matchId) {
@@ -433,10 +567,10 @@ async function handlePostMatch(request, env, origin) {
       user.id,
       Number(p.team || 0),
       String(p.loadout_key || ''),
-      Number(p.kills || 0),
-      Number(p.deaths || 0),
-      Number(p.damage_dealt || 0),
-      Number(p.damage_taken || 0),
+      _clampTally(p.kills,        MAX_REPORTED_TALLY),
+      _clampTally(p.deaths,       MAX_REPORTED_TALLY),
+      _clampTally(p.damage_dealt, MAX_REPORTED_DAMAGE),
+      _clampTally(p.damage_taken, MAX_REPORTED_DAMAGE),
       p.is_mvp ? 1 : 0,
       p.is_winner ? 1 : 0,
       p.signature || null,
@@ -1444,6 +1578,132 @@ async function handleRoomsScoop(request, env, origin, code) {
   return jsonResponse(200, { room, scooped }, env, origin);
 }
 
+// ---------- Admin: audit + one-shot revalidation ----------------------
+// The consensus rule above changed, and every multiplayer match ever posted was disputed under the
+// OLD rule (validated = 2) and never rolled up. Those rows are still in D1 with their full
+// participant reports - the history is recoverable, not lost. These two endpoints let it be
+// recovered deliberately rather than by a migration nobody can dry-run.
+//
+// ⚠ GUARDED BY A SECRET, NOT BY A DISCORD LOGIN. Set it once with:
+//     wrangler secret put ADMIN_KEY
+// and send it as `Authorization: Bearer <key>`. If ADMIN_KEY is unset both routes 404 as though
+// they do not exist, so deploying this cannot expose anything on its own.
+function _adminOk(request, env) {
+  try {
+    const key = env.ADMIN_KEY;
+    if (!key) return false;                                  // unset = routes do not exist
+    const h = request.headers.get('Authorization') || '';
+    return h === 'Bearer ' + key;
+  } catch (_) { return false; }
+}
+
+// (v3) ...and refuse in the router's OWN 404 shape. `throw new ApiError(404, 'not_found')` renders
+// as {"error":"not_found"} because JSON.stringify drops the undefined detail, while a genuinely
+// unrouted path answers {"error":"not_found","path":"/whatever"} - so the two are distinguishable
+// and a scan could tell a disabled admin route from a nonexistent one. Cheap to make identical.
+function _adminRefuse(request, env, origin) {
+  return jsonResponse(404, { error: 'not_found', path: new URL(request.url).pathname }, env, origin);
+}
+
+// READ-ONLY. Counts what a revalidation would touch, and changes nothing. Run this first.
+async function handleAdminAudit(request, env, origin) {
+  if (!_adminOk(request, env)) return _adminRefuse(request, env, origin);
+  const rows = await env.DB.prepare(`
+    SELECT validated, mode, game_mode, COUNT(*) AS n
+    FROM matches GROUP BY validated, mode, game_mode
+  `).all();
+  const disputed = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM matches WHERE validated = 2'
+  ).first();
+  const pending = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM matches WHERE validated = 0'
+  ).first();
+  // ⭐⭐ THE ONE THAT ACTUALLY MATTERS, and the reason this route exists in this shape. When the
+  // multiplayer boards were found empty the assumption was that matches were being DISPUTED by the
+  // old exact-agreement rule. The table said otherwise: zero rows at validated = 2, and every stuck
+  // multiplayer match sitting at 0 with ONE reporter against a human_count of 2. They are not
+  // failing consensus - they never reach it, because the second player's report went somewhere
+  // else. (Historically: to a different match_id, since each peer minted its own before v38.60.)
+  // A row in this bucket can never validate under any consensus rule, so it is worth counting
+  // separately from ordinary pending rows, which are just waiting and will resolve on their own.
+  const orphaned = await env.DB.prepare(`
+    SELECT COUNT(*) AS n FROM matches m
+    WHERE m.validated = 0
+      AND (SELECT COUNT(DISTINCT reported_by) FROM match_participants p WHERE p.match_id = m.id)
+          < m.human_count
+  `).first();
+  return jsonResponse(200, {
+    breakdown: rows.results || [],
+    disputed: (disputed && disputed.n) || 0,
+    pending:  (pending && pending.n) || 0,
+    missingReporters: (orphaned && orphaned.n) || 0,
+    note: 'disputed = what POST /admin/revalidate re-examines. missingReporters = pending matches ' +
+          'short a human report; those can never validate and a revalidate will not touch them.',
+  }, env, origin);
+}
+
+// MUTATING. Resets disputed matches to pending and re-runs the CURRENT consensus on each.
+//
+// ⚠⚠ DOUBLE-COUNTING IS PREVENTED BY THE CAS IN tryValidateMatch, NOT BY THIS LOOP. An earlier
+//   draft of this comment claimed the opposite - that the flag read at the top of tryValidateMatch
+//   made a second rollup impossible "by construction" - and that was simply wrong: a read eighty
+//   lines and four awaits before the write is not a lock, and this route is what makes the gap
+//   reachable, since it deliberately parks rows in validated = 0 and holds them there across two D1
+//   round-trips. The real guard is `AND validated = 0` on the seal. Career totals are additive and
+//   irreversible, so the failure mode was silent, permanent inflation.
+//
+// Three things keep this loop honest:
+//   1. IT ONLY TOUCHES WHAT IT CLAIMED. The 2 -> 0 reset is itself a CAS and its result is checked;
+//      a row somebody else moved first is skipped, not re-examined.
+//   2. IT PUTS BACK WHAT IT RESET. tryValidateMatch has several early returns that are neither
+//      "validated" nor "disputed" - waiting on reports, a partial report, a missing row. Those leave
+//      the flag exactly as found, and since this loop just wrote 0, "as found" means STRANDED AT 0:
+//      invisible to a later revalidate (which selects 2) and invisible to the leaderboards (which
+//      require 1). Anything that does not come back as 1 is written back to 2 explicitly.
+//   3. IT BUSTS THE CACHE ONCE. Per-match cache busting is a KV list plus a delete per key and would
+//      dominate the subrequest budget for a route whose whole job is a loop.
+// `?limit=N` bounds one call. The ceiling is deliberately low: the binding constraint is the Worker
+// subrequest cap, not CPU, and a run that dies mid-loop is the messiest state this file can reach.
+async function handleAdminRevalidate(request, env, origin) {
+  if (!_adminOk(request, env)) return _adminRefuse(request, env, origin);
+  const url = new URL(request.url);
+  // parseInt('abc') is NaN, and Math.max(1, NaN) is NaN - the floor does not catch it, so it is
+  // tested for rather than leaned on.
+  const _n = parseInt(url.searchParams.get('limit') || '40', 10);
+  const limit = Number.isFinite(_n) ? Math.max(1, Math.min(60, _n)) : 40;
+  const rows = await env.DB.prepare(
+    'SELECT id FROM matches WHERE validated = 2 ORDER BY ended_at ASC LIMIT ?'
+  ).bind(limit).all();
+  const ids = (rows.results || []).map(r => r.id);
+  let validated = 0, stillDisputed = 0, skipped = 0, errors = 0;
+  for (const id of ids) {
+    const claimed = await env.DB.prepare('UPDATE matches SET validated = 0 WHERE id = ? AND validated = 2')
+      .bind(id).run();
+    if (!claimed.meta || claimed.meta.changes !== 1) { skipped++; continue; }  // not ours to touch
+    try { await tryValidateMatch(env, id, { skipCacheBust: true }); }
+    catch (_) { errors++; }
+    const after = await env.DB.prepare('SELECT validated FROM matches WHERE id = ?').bind(id).first();
+    if (after && after.validated === 1) { validated++; continue; }
+    // Not validated. If it is not sitting at 2 either, this loop's own reset stranded it - put it back.
+    if (!after || after.validated !== 2) await markDisputed(env, id);
+    stillDisputed++;
+  }
+  await invalidateLeaderboardCache(env);
+  const remaining = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM matches WHERE validated = 2'
+  ).first();
+  const stranded = await env.DB.prepare(
+    'SELECT COUNT(*) AS n FROM matches WHERE validated = 0'
+  ).first();
+  return jsonResponse(200, {
+    examined: ids.length, validated, stillDisputed, skipped, errors,
+    remainingDisputed: (remaining && remaining.n) || 0,
+    // Reported so a mid-run death is visible rather than inferred. Normally this is just matches
+    // waiting on a second reporter; a jump after a run means rows were left behind.
+    pending: (stranded && stranded.n) || 0,
+  }, env, origin);
+}
+
 // ---------- Router ---------------------------------------------------
 
 export default {
@@ -1466,6 +1726,8 @@ export default {
         const id = decodeURIComponent(path.slice('/match/'.length));
         return await handleGetMatch(env, origin, id);
       }
+      if (request.method === 'GET'    && path === '/admin/audit')  return await handleAdminAudit(request, env, origin);
+      if (request.method === 'POST'   && path === '/admin/revalidate') return await handleAdminRevalidate(request, env, origin);
       if (request.method === 'GET'    && path === '/leaderboard')  return await handleGetLeaderboard(request, env, origin);
       if (request.method === 'GET'    && path.startsWith('/player/')) {
         const id = decodeURIComponent(path.slice('/player/'.length));
