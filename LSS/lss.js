@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.11';
+const LSS_BUILD = '44.12';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -60693,7 +60693,10 @@ function _lssModeBlurb(m) {
   return 'Team elimination.';
 }
 function _lssRoomModeLocked() {
-  try { return _lssInsaneSpeedLocked(); } catch (_) { return false; }
+  try {
+    return typeof game !== 'undefined' && game &&
+           (game.state === 'playing' || game.state === 'roundEnd');
+  } catch (_) { return false; }
 }
 function _lssRenderLobbyMode() {
   try {
