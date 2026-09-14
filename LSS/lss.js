@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.07';
+const LSS_BUILD = '44.08';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13783,9 +13783,14 @@ const QUALITY = {
     if (this.level === 'potato') return 0.7;
     if (this.level === 'mega')   return 2.0;
     if (this.level === 'ultra')  return 1.6; 
+    if (!_lssOff('tierscene')) {
+      if (this.level === 'low')    return 0.65;
+      if (this.level === 'medium') return 0.85;
+    }
     return 1.0;
   },
 };
+let _qByUser = false;
 function applyQualityPreset(level) {
   if (level === 'potato') level = 'low';
   const valid = ['low', 'medium', 'high', 'ultra', 'mega'];
@@ -13814,6 +13819,7 @@ function applyQualityPreset(level) {
   } catch (_) {}
   try {
     localStorage.setItem('lss_quality', QUALITY.level);
+    if (_qByUser) { localStorage.setItem('lss_quality_user', QUALITY.level); _qByUser = false; }
     if (localStorage.getItem('lss_quality_ctx') !== QUALITY.level) localStorage.removeItem('lss_quality_ctx');
   } catch (e) {}
 }
@@ -13823,9 +13829,10 @@ try {
     stored = 'low';
     try { localStorage.setItem('lss_quality', 'low'); } catch (_) {}
   }
-  let _ctxPick = null;
+  let _ctxPick = null, _userPick = null;
   try { _ctxPick = localStorage.getItem('lss_quality_ctx'); } catch (_) {}
-  if ((stored === 'low' || stored === 'medium') && stored !== _ctxPick &&
+  try { _userPick = localStorage.getItem('lss_quality_user'); } catch (_) {}
+  if ((stored === 'low' || stored === 'medium') && stored !== _ctxPick && stored !== _userPick &&
       !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) {
     stored = 'high';
     try { localStorage.setItem('lss_quality', 'high'); } catch (_) {}
@@ -62849,31 +62856,26 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Preset</label>
         <select id="set-quality" style="flex:1;">
-          <!-- (v35.22) Low + Medium removed: both kill bloom for almost no
-               framerate back, because the bottleneck is draw calls, not fill.
-               Saved settings on those tiers migrate to High at load. -->
-          <!-- ⭐ (v44.00) A TIER THE CRASH LADDER CHOSE HAS TO BE SHOWABLE. LOW and MEDIUM are
-               still not OFFERED - nothing below is selectable and the v35.22 reasoning stands - but
-               with the step-down finally surviving its reload, a device that lost the GPU context
-               genuinely boots on one of them, and a <select> whose value matches no <option>
-               renders EMPTY. Measured on this build before this line existed: landing on MEDIUM,
-               #set-quality.value came back as "" and the Preset row showed a blank box, which
-               reads as a broken settings page rather than as "you are on a reduced tier".
-               So the current tier is added as a DISABLED option when it is below high: it can be
-               displayed and it cannot be picked, which is exactly the status it has. Choosing High
-               is the way out, and doing so releases the ladder's hold (see applyQualityPreset). -->
-          ${(QUALITY.level === 'low' || QUALITY.level === 'medium')
-            ? '<option value="' + QUALITY.level + '" selected disabled>'
-              + QUALITY.level.charAt(0).toUpperCase() + QUALITY.level.slice(1)
-              + ' — set automatically after a GPU crash. Pick High to restore.</option>'
-            : ''}
+          <!-- ⭐⭐ (v44.08) LOW AND MEDIUM ARE BACK, AS REAL OPTIONS. Owner: "We should open up
+               medium and low in the settings, for all devices."
+               v35.22 removed them arguing "both kill bloom for almost no framerate back, because the
+               bottleneck is draw calls, not fill" - and the experiment behind that could not have
+               measured a fill saving, because the tier moved the CANVAS and never the scene (see the
+               note on QUALITY.bloomDPR). As of v44.08 they lower the render itself, so the sentence
+               that retired them is no longer true of the thing it described.
+               v44.00's disabled-option hack goes with them: it existed only so a laddered-down tier
+               had something to display, real options do that better, and it carried a live bug -
+               it had no stamp test, so EVERY phone on its first-run LOW default was shown
+               "set automatically after a GPU crash" having never crashed. -->
+          <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, fewer particles, 0.65× render)</option>
+          <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke, 0.85× render)</option>
           <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke) — recommended, incl. phones</option>
           <option value="ultra" ${QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
           <option value="mega" ${QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>
         </select>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">High is the baseline everywhere, phones included — the lower tiers used to sit below it but they disabled bloom for almost no framerate gain, so they were removed. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
+        <label style="flex:1;">High is the baseline everywhere, phones included. Low and Medium sit below it: they turn bloom off and render the world at 0.65× / 0.85× before it is scaled to your screen — so they trade the glow and some sharpness for fill rate. Try them if the frame rate is poor; the picture gets plainer, not broken. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
       </div>
       <div class="setting-row">
         <label>Field of View</label>
@@ -63627,7 +63629,8 @@ function buildSettingsPage() {
   const qSel = overlay.querySelector('#set-quality');
   if (qSel) {
     qSel.addEventListener('change', e => {
-      applyQualityPreset(e.target.value);
+      _qByUser = true;            // (v44.08) a deliberate pick - applyQualityPreset stamps it
+      try { applyQualityPreset(e.target.value); } finally { _qByUser = false; }
     });
   }
   const wallOpEl = overlay.querySelector('#set-wall-opacity');

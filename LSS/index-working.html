@@ -6083,7 +6083,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.07';
+const LSS_BUILD = '44.08';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -25100,13 +25100,53 @@ const QUALITY = {
   // Ultra bumped 1.5x to 2.0x for crisper highlights ; pairs with the
   // scene supersampling bump (renderer.setPixelRatio also 1.5x on Ultra) so
   // the bloom texture isn't downsampling the supersampled scene.
+  // ⭐⭐⭐ (v44.08) LOW AND MEDIUM NOW LOWER THE RENDER, AND UNTIL TODAY THEY NEVER HAD.
+  // This function sizes the SCENE - _getBloomRTSize (the allocation), _lssPaniniSuper and
+  // _lssSceneActive (the rectangle the frame actually renders into) are its only consumers - and it
+  // returned 1.0 for low, medium AND high alike. The tier scale `_rs` (0.65 / 0.85 / 1.0) lives at
+  // exactly two lines and both feed renderer.setPixelRatio, i.e. the CANVAS. So the tiers moved the
+  // composite blit and left the world render untouched.
+  // ⚠⚠ AND THAT MADE "LOW" COST MORE FILL PER DISPLAYED PIXEL THAN "HIGH". Measured on a
+  //   1920x1080 DPR-1 desktop at LOW: canvas 1248x702 (0.876 MP) with the scene rendered at
+  //   1920x1080 (2.074 MP) - 2.37x the pixels the canvas can display, single-bilinear-tap
+  //   downsampled to fit. The owner's Xbox crash lines show the same shape end to end:
+  //     MEDIUM  canvas 1468x826 | scene 1152x648
+  //     LOW     canvas 1123x631 | scene 1152x648
+  //   The canvas shrank; the scene never did. A performance tier was paying a supersample.
+  // ⚠⚠ THIS IS ALSO WHY v35.22'S MEASUREMENT SAID NOTHING. It retired LOW and MEDIUM from
+  //   the UI because "dropping the render-resolution tier was measured to not move hub fps at all" -
+  //   and it could not have moved it, because the world render had not moved a pixel. That null
+  //   result has governed the quality architecture for nine major versions. The file contradicts it
+  //   twice with real numbers and nobody reconciled them: v40.13 ("on shifting_deep at MEGA this
+  //   machine is plainly fill-bound: 20.8 ms frames with 3 ms of CPU in them") and v39.28 (the
+  //   owner's own "leaving fullscreen improved the fps quite a bit. So the device is FILL bound").
+  // (!) THE NUMBERS MATCH `_rs` EXACTLY, on purpose. Scene == canvas means the composite is a 1:1
+  //     blit and the tier is coherent: 0.65 asks for 0.65 everywhere. Any other pair re-creates a
+  //     smaller version of the same bug (0.70 against a 0.65 canvas is still a 1.16x supersample).
+  //     ⚠ The two tables must now be kept in step - `_rs` in applyQualityPreset and these.
+  // (!) NOT GATED ON WHO CHOSE THE TIER. An earlier design gated this on a human having picked the
+  //     tier, to spare phones (LOW is their first-run default). Two things killed that: the
+  //     crash-ladder stamp it keyed on is immortal at the LOW floor, so one context loss would have
+  //     pinned a phone permanently; and a phone boots ON low, so re-picking low fires no `change`
+  //     event and the gate was unreachable anyway. It is also unnecessary - a phone keeps the same
+  //     DISPLAYED resolution (the canvas is untouched) and merely stops paying for scene pixels the
+  //     canvas cannot show. It loses the incidental downsample AA, which is the honest cost.
+  // (!) `?off=tierscene` restores the old behaviour for an A/B without a rebuild.
   bloomDPR() {
     if (this.level === 'potato') return 0.7;
     if (this.level === 'mega')   return 2.0;
     if (this.level === 'ultra')  return 1.6; 
+    if (!_lssOff('tierscene')) {
+      if (this.level === 'low')    return 0.65;
+      if (this.level === 'medium') return 0.85;
+    }
     return 1.0;
   },
 };
+// (v44.08) set by the Settings dropdown for exactly one call, so applyQualityPreset can tell a
+// human pick from the boot restore. It has two callers in the whole file and this is the only bit
+// of state that separates them.
+let _qByUser = false;
 function applyQualityPreset(level) {
   // Potato tier removed ; migrate legacy callers to 'low'.
   if (level === 'potato') level = 'low';
@@ -25161,6 +25201,11 @@ function applyQualityPreset(level) {
   } catch (_) {}
   try {
     localStorage.setItem('lss_quality', QUALITY.level);
+    // (v44.08) The human-authorship stamp rides the SAME try as the tier it describes. Writing it
+    // from the Settings handler instead would make the two independently failable, and the failure
+    // that matters re-opens the exact revert this commit closes: tier written, stamp thrown, next
+    // reload promotes it. `_qByUser` is set immediately before the call and cleared here.
+    if (_qByUser) { localStorage.setItem('lss_quality_user', QUALITY.level); _qByUser = false; }
     // (v44.00) A STAMP IS ONLY GOOD FOR THE VALUE IT STAMPED. This is the single place every tier
     // change is persisted - the Settings dropdown, the boot restore and any programmatic call all
     // land here - so it is the one place that can tell "the stored tier moved" from "the stored
@@ -25204,9 +25249,21 @@ try {
   // (!) `stored !== _ctxPick` and not merely "a stamp exists": if anything at all moved the tier
   //     since the ladder ran, the stamp no longer describes the stored value and the migration is
   //     free to do its job again.
-  let _ctxPick = null;
+  // ⭐⭐ (v44.08) ...AND NEVER OVER A TIER THE PLAYER CHOSE. Owner: "We should open up medium
+  // and low in the settings, for all devices." Exposing them without this ships a control that
+  // LIES: pick LOW, reload, and this block silently rewrites it to HIGH in localStorage. v44.00
+  // taught the migration to respect the crash ladder's choice; a human's choice needs the same
+  // standing, and for the same reason.
+  // ⚠ A SECOND STAMP, NOT A REUSE OF `lss_quality_ctx`. They answer different questions and have
+  //   different lifetimes: applyQualityPreset drops the ctx stamp whenever it persists a DIFFERENT
+  //   level (that is what lets a human leave the ladder's hold), so a human picking LOW would clear
+  //   the very stamp it needed. Two keys, written by two authors, both honoured here.
+  // (!) THE `!_LSS_IS_MOBILE` CLAUSE STAYS. A phone's first-run LOW is unstamped by design and
+  //     v39.01 exists to keep it - widening this must not become a route to promoting phones.
+  let _ctxPick = null, _userPick = null;
   try { _ctxPick = localStorage.getItem('lss_quality_ctx'); } catch (_) {}
-  if ((stored === 'low' || stored === 'medium') && stored !== _ctxPick &&
+  try { _userPick = localStorage.getItem('lss_quality_user'); } catch (_) {}
+  if ((stored === 'low' || stored === 'medium') && stored !== _ctxPick && stored !== _userPick &&
       !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) {
     stored = 'high';
     try { localStorage.setItem('lss_quality', 'high'); } catch (_) {}
@@ -96228,31 +96285,26 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Preset</label>
         <select id="set-quality" style="flex:1;">
-          <!-- (v35.22) Low + Medium removed: both kill bloom for almost no
-               framerate back, because the bottleneck is draw calls, not fill.
-               Saved settings on those tiers migrate to High at load. -->
-          <!-- ⭐ (v44.00) A TIER THE CRASH LADDER CHOSE HAS TO BE SHOWABLE. LOW and MEDIUM are
-               still not OFFERED - nothing below is selectable and the v35.22 reasoning stands - but
-               with the step-down finally surviving its reload, a device that lost the GPU context
-               genuinely boots on one of them, and a <select> whose value matches no <option>
-               renders EMPTY. Measured on this build before this line existed: landing on MEDIUM,
-               #set-quality.value came back as "" and the Preset row showed a blank box, which
-               reads as a broken settings page rather than as "you are on a reduced tier".
-               So the current tier is added as a DISABLED option when it is below high: it can be
-               displayed and it cannot be picked, which is exactly the status it has. Choosing High
-               is the way out, and doing so releases the ladder's hold (see applyQualityPreset). -->
-          ${(QUALITY.level === 'low' || QUALITY.level === 'medium')
-            ? '<option value="' + QUALITY.level + '" selected disabled>'
-              + QUALITY.level.charAt(0).toUpperCase() + QUALITY.level.slice(1)
-              + ' — set automatically after a GPU crash. Pick High to restore.</option>'
-            : ''}
+          <!-- ⭐⭐ (v44.08) LOW AND MEDIUM ARE BACK, AS REAL OPTIONS. Owner: "We should open up
+               medium and low in the settings, for all devices."
+               v35.22 removed them arguing "both kill bloom for almost no framerate back, because the
+               bottleneck is draw calls, not fill" - and the experiment behind that could not have
+               measured a fill saving, because the tier moved the CANVAS and never the scene (see the
+               note on QUALITY.bloomDPR). As of v44.08 they lower the render itself, so the sentence
+               that retired them is no longer true of the thing it described.
+               v44.00's disabled-option hack goes with them: it existed only so a laddered-down tier
+               had something to display, real options do that better, and it carried a live bug -
+               it had no stamp test, so EVERY phone on its first-run LOW default was shown
+               "set automatically after a GPU crash" having never crashed. -->
+          <option value="low" ${QUALITY.level === 'low' ? 'selected' : ''}>Low (no bloom, 1-octave smoke, fewer particles, 0.65× render)</option>
+          <option value="medium" ${QUALITY.level === 'medium' ? 'selected' : ''}>Medium (no bloom, 2-octave smoke, 0.85× render)</option>
           <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke) — recommended, incl. phones</option>
           <option value="ultra" ${QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
           <option value="mega" ${QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>
         </select>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">High is the baseline everywhere, phones included — the lower tiers used to sit below it but they disabled bloom for almost no framerate gain, so they were removed. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
+        <label style="flex:1;">High is the baseline everywhere, phones included. Low and Medium sit below it: they turn bloom off and render the world at 0.65× / 0.85× before it is scaled to your screen — so they trade the glow and some sharpness for fill rate. Try them if the frame rate is poor; the picture gets plainer, not broken. If your GPU has headroom, push to Ultra or Mega. The change applies to newly-spawned effects ; existing smoke plumes keep their settings until they fade out. Quality change applies to clouds + bloom on the next round-start. Window-resize also rebinds bloom RT size to the new tier.</label>
       </div>
       <div class="setting-row">
         <label>Field of View</label>
@@ -97035,7 +97087,8 @@ function buildSettingsPage() {
   const qSel = overlay.querySelector('#set-quality');
   if (qSel) {
     qSel.addEventListener('change', e => {
-      applyQualityPreset(e.target.value);
+      _qByUser = true;            // (v44.08) a deliberate pick - applyQualityPreset stamps it
+      try { applyQualityPreset(e.target.value); } finally { _qByUser = false; }
     });
   }
   // Pure Black Base checkbox
