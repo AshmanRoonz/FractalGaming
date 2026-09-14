@@ -6124,7 +6124,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.26';
+const LSS_BUILD = '44.27';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -77921,7 +77921,7 @@ function _ghostHullTint() {
   } catch (_) {}
   return 0x8ad8ff;
 }
-function _ghostHullKnobs() {
+function _ghostHullKnobs(sOverride) {   // (v44.27) sOverride: the zoom's solidity, see _ghostZoomSolidity
   const G = (window.__cockpit && window.__cockpit.ghost) || {};
   // ⚠⚠ (v42.09) COCKPIT SOLIDITY SLIDER (Settings > Display). Owner: "a slider ... transparency for
   // the cockpit, to slide from the ghost mode its in, to fully solid normal view".
@@ -77938,7 +77938,8 @@ function _ghostHullKnobs() {
   // we hand `on: false` back instead, and _ghostHullSync's else-branch calls _ghostHullRestore -
   // the hull returns to its OWN materials, which is exactly "fully solid normal view".
   // Live override still wins: window.__cockpit.ghost.solidity, else the saved setting.
-  const _sRaw = (typeof G.solidity === 'number') ? G.solidity
+  const _sRaw = (typeof sOverride === 'number') ? sOverride   // (v44.27) the zoom asks for its own
+              : (typeof G.solidity === 'number') ? G.solidity
               : ((typeof input !== 'undefined' && input && typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0);
   const s = Math.max(0, Math.min(1, _sRaw));
   const SOLID_AT = 0.995;
@@ -78084,6 +78085,18 @@ function _addGhostHull(mat, K, isGlass) {
 // frame survived into a view that shows the hull from outside. The gate is now checked from the
 // RENDER side instead (_ghostHullSync in renderFrame, after every camera is final): whichever
 // path drew the frame, the shell is on only while the pilot's own seat camera is the view.
+// (v44.27) The zoom ghost's solidity: undefined when the zoom is not asking for one (the seat's own
+// setting rules), otherwise a ramp from solid (1.0) at the first frame of zoom down to
+// __zoom.ghostSolidity at full zoom - which runs the hull down the shell's existing two-phase ramp
+// (translucent-solid first, x-ray last), so it fades rather than pops. Third person, flat only.
+function _ghostZoomSolidity() {
+  if (typeof game === 'undefined' || !game || !game.thirdPerson) return undefined;
+  const z = game._adsGhostZ || 0;
+  if (!(z > 0.002)) return undefined;
+  const Z = (typeof window !== 'undefined' && window.__zoom) || {};
+  const s1 = (typeof Z.ghostSolidity === 'number') ? Z.ghostSolidity : 0.22;
+  return 1.0 - Math.min(1, z) * (1.0 - s1);
+}
 function _ghostSeatWanted() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
   // (v37.69) MIRROR THE RIG'S OWN BRANCH. _lssApplyShipRig takes the chase view on
@@ -78099,7 +78112,7 @@ function _ghostSeatWanted() {
   // centre when a wall is behind it, i.e. into the tail; game._tpGhost is the rig's hysteresis
   // flag for exactly that, and the seat shell (abs(N.V), so the inner skin reads like the outer)
   // is the right look for it.
-  if (game.thirdPerson && !_vr) return !!game._tpGhost && _ghostHullKnobs().on;
+  if (game.thirdPerson && !_vr) return (!!game._tpGhost || (game._adsGhostZ || 0) > 0.002) && _ghostHullKnobs(_ghostZoomSolidity()).on;   // (v44.27)
   if (!game._cockpit3dLive) return false;
   return _ghostHullKnobs().on;
 }
@@ -78129,7 +78142,7 @@ function _ghostHullSync() {
     _ghostHullSync._t = now;
     _ghostHullTimeU.value += Math.min(0.1, (now - prev) / 1000);
     _ghostHullApply(mesh);
-    _ghostHullTune(mesh, _ghostHullKnobs());
+    _ghostHullTune(mesh, _ghostHullKnobs(_ghostZoomSolidity()));   // (v44.27)
   } else if (mesh.userData && mesh.userData._ghostOn) {
     _ghostHullRestore(mesh);
   }
@@ -78721,8 +78734,21 @@ function _lssApplyShipRig(dt) {
   // 'steady'; dMax/frac only matter to 'hybrid'.
   {
     const _zVr = (typeof isXRPresenting === 'function') && isXRPresenting();
-    const Z = window.__zoom || (window.__zoom = { mode: 'steady', mMax: 2.4, dMax: 420, frac: 0.55, rate: 12 });
-    const _zm = (Z.mode === 'classic' || Z.mode === 'hybrid') ? Z.mode : 'steady';
+    // ⭐⭐ (v44.27) 'through' IS THE DEFAULT NOW. Owner: "zooming in 3rd person should go through
+    // the ship instead of pushing the ship and making it look small or move away... we can turn the
+    // ship ghost mode from outside when zooming (and it will only be visible to player zooming)".
+    // 'steady' (v36.78) kept the hull un-zoomed on a layer-5 overlay while the world magnified, so
+    // the hull read as shrinking and receding; 'classic' let it magnify with the world and it
+    // swelled into the view (the owner's original objection). 'through' does what the owner asked:
+    // the boom stays where it is, hull and world magnify together, and the hull goes to the ghost
+    // shell (the first-person x-ray, see _ghostSeatWanted / _ghostZoomSolidity) in proportion to the
+    // zoom, so you are looking THROUGH your own ship. Local only by construction - it is this
+    // client's player.mesh materials; nothing about it is sent to peers. 'steady', 'classic' and
+    // 'hybrid' remain one knob away: window.__zoom.mode. __zoom.ghostSolidity (0.22) is how
+    // see-through the hull becomes at full zoom.
+    const Z = window.__zoom || (window.__zoom = { mode: 'through', mMax: 2.4, dMax: 420, frac: 0.55, rate: 12 });
+    const _zm = (Z.mode === 'classic' || Z.mode === 'hybrid' || Z.mode === 'steady') ? Z.mode : 'through';
+    if (_zVr) game._adsGhostZ = 0;   // (v44.27) never in a headset: the seat view has its own ghost
     const _zAim = !!(typeof input !== 'undefined' && input &&
                      (input.rightMouseDown || input.gpAltFire || input.touchAltFire));
     const _zk = Math.min(1, (dt || 0.016) * (Z.rate || 12));
@@ -78764,6 +78790,7 @@ function _lssApplyShipRig(dt) {
         camera.fov += (_ct - camera.fov) * Math.min(1, (dt || 0.016) * 12);
         camera.updateProjectionMatrix();
         game._adsDolly = 0;
+        game._adsGhostZ = 0;   // (v44.27)
         if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(false);
       } else {
       if (z > 0 && (_z3p || _zm === 'steady')) {
@@ -78820,7 +78847,14 @@ function _lssApplyShipRig(dt) {
       // after a round win made the ship vanish. In those frames the hull stays
       // on layer 0 and zooms the classic way (drawn by the zoomed camera).
       const _ovOk = !(typeof _shouldUseCineFXFrame === 'function' && _shouldUseCineFXFrame());
-      if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p && _ovOk);
+      if (_zm === 'through') {
+        // (v44.27) no un-zoomed overlay - the hull magnifies with the world - and the ghost follows z.
+        if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(false);
+        game._adsGhostZ = (_z3p && _ovOk) ? z : 0;
+      } else {
+        game._adsGhostZ = 0;
+        if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p && _ovOk);
+      }
       }
     }
   }

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.26';
+const LSS_BUILD = '44.27';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -50176,9 +50176,10 @@ function _ghostHullTint() {
   } catch (_) {}
   return 0x8ad8ff;
 }
-function _ghostHullKnobs() {
+function _ghostHullKnobs(sOverride) {   // (v44.27) sOverride: the zoom's solidity, see _ghostZoomSolidity
   const G = (window.__cockpit && window.__cockpit.ghost) || {};
-  const _sRaw = (typeof G.solidity === 'number') ? G.solidity
+  const _sRaw = (typeof sOverride === 'number') ? sOverride   // (v44.27) the zoom asks for its own
+              : (typeof G.solidity === 'number') ? G.solidity
               : ((typeof input !== 'undefined' && input && typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0);
   const s = Math.max(0, Math.min(1, _sRaw));
   const SOLID_AT = 0.995;
@@ -50250,11 +50251,19 @@ function _addGhostHull(mat, K, isGlass) {
   mat.needsUpdate = true;
   return mat;
 }
+function _ghostZoomSolidity() {
+  if (typeof game === 'undefined' || !game || !game.thirdPerson) return undefined;
+  const z = game._adsGhostZ || 0;
+  if (!(z > 0.002)) return undefined;
+  const Z = (typeof window !== 'undefined' && window.__zoom) || {};
+  const s1 = (typeof Z.ghostSolidity === 'number') ? Z.ghostSolidity : 0.22;
+  return 1.0 - Math.min(1, z) * (1.0 - s1);
+}
 function _ghostSeatWanted() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
   const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
-  if (game.thirdPerson && !_vr) return !!game._tpGhost && _ghostHullKnobs().on;
+  if (game.thirdPerson && !_vr) return (!!game._tpGhost || (game._adsGhostZ || 0) > 0.002) && _ghostHullKnobs(_ghostZoomSolidity()).on;   // (v44.27)
   if (!game._cockpit3dLive) return false;
   return _ghostHullKnobs().on;
 }
@@ -50277,7 +50286,7 @@ function _ghostHullSync() {
     _ghostHullSync._t = now;
     _ghostHullTimeU.value += Math.min(0.1, (now - prev) / 1000);
     _ghostHullApply(mesh);
-    _ghostHullTune(mesh, _ghostHullKnobs());
+    _ghostHullTune(mesh, _ghostHullKnobs(_ghostZoomSolidity()));   // (v44.27)
   } else if (mesh.userData && mesh.userData._ghostOn) {
     _ghostHullRestore(mesh);
   }
@@ -50604,8 +50613,9 @@ function _lssApplyShipRig(dt) {
 
   {
     const _zVr = (typeof isXRPresenting === 'function') && isXRPresenting();
-    const Z = window.__zoom || (window.__zoom = { mode: 'steady', mMax: 2.4, dMax: 420, frac: 0.55, rate: 12 });
-    const _zm = (Z.mode === 'classic' || Z.mode === 'hybrid') ? Z.mode : 'steady';
+    const Z = window.__zoom || (window.__zoom = { mode: 'through', mMax: 2.4, dMax: 420, frac: 0.55, rate: 12 });
+    const _zm = (Z.mode === 'classic' || Z.mode === 'hybrid' || Z.mode === 'steady') ? Z.mode : 'through';
+    if (_zVr) game._adsGhostZ = 0;   // (v44.27) never in a headset: the seat view has its own ghost
     const _zAim = !!(typeof input !== 'undefined' && input &&
                      (input.rightMouseDown || input.gpAltFire || input.touchAltFire));
     const _zk = Math.min(1, (dt || 0.016) * (Z.rate || 12));
@@ -50638,6 +50648,7 @@ function _lssApplyShipRig(dt) {
         camera.fov += (_ct - camera.fov) * Math.min(1, (dt || 0.016) * 12);
         camera.updateProjectionMatrix();
         game._adsDolly = 0;
+        game._adsGhostZ = 0;   // (v44.27)
         if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(false);
       } else {
       if (z > 0 && (_z3p || _zm === 'steady')) {
@@ -50670,7 +50681,13 @@ function _lssApplyShipRig(dt) {
         game._adsDolly = 0;
       }
       const _ovOk = !(typeof _shouldUseCineFXFrame === 'function' && _shouldUseCineFXFrame());
-      if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p && _ovOk);
+      if (_zm === 'through') {
+        if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(false);
+        game._adsGhostZ = (_z3p && _ovOk) ? z : 0;
+      } else {
+        game._adsGhostZ = 0;
+        if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(z > 0.02 && _z3p && _ovOk);
+      }
       }
     }
   }
