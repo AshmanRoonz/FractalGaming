@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.28';
+const LSS_BUILD = '44.29';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -31275,7 +31275,10 @@ function _skinPatchHueShader(m) {
       .replace('void main() {', _SKIN_HUE_PARS + '\nvoid main() {')
       .replace('#include <map_fragment>',
         '#include <map_fragment>\n\tdiffuseColor.rgb = lssSkinHue(diffuseColor.rgb, uSkinHue, uSkinMix, uSkinSat, uSkinLift);'
-        + '\n\tif (uSkinPatMix > 0.001) diffuseColor.rgb = lssSkinPattern(diffuseColor.rgb);');
+        + '\n\tif (uSkinPatMix > 0.001) diffuseColor.rgb = lssSkinPattern(diffuseColor.rgb);')
+      .replace('#include <emissivemap_fragment>',
+        '#include <emissivemap_fragment>\n\ttotalEmissiveRadiance = lssSkinHue(totalEmissiveRadiance, uSkinHue, uSkinMix, uSkinSat, 0.0);'
+        + '\n\tif (uSkinPatMix > 0.001) totalEmissiveRadiance = lssSkinPattern(totalEmissiveRadiance);');
   };
   const prevKey = m.customProgramCacheKey;
   m.customProgramCacheKey = function () {
