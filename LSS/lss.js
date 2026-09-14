@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.32';
+const LSS_BUILD = '44.33';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -21204,8 +21204,8 @@ function _swBuildHubWater(T) {
           if (_fc) _day = Math.max(0, Math.min(1, ((0.299 * _fc.r + 0.587 * _fc.g + 0.114 * _fc.b) - 0.10) / 0.35));
         } catch (_) {}
         const _dk = (_C && _C.dayDim != null) ? _C.dayDim : 0.25;
-        const _b = ((_C && _C.reflBoost != null) ? _C.reflBoost : 8.0) * (1 - _day * (1 - _dk));
-        const _g = ((_C && _C.reflGain != null) ? _C.reflGain : 2.6) * (1 - _day * (1 - Math.sqrt(_dk)));
+        const _b = ((_C && _C.reflBoost != null) ? _C.reflBoost : 4.0) * (1 - _day * (1 - _dk));
+        const _g = ((_C && _C.reflGain != null) ? _C.reflGain : 1.8) * (1 - _day * (1 - Math.sqrt(_dk)));
         if (_cp.material) {
           _cp.material.opacity = Math.min(1, _cpOp * _b);
           if (_g !== 1) _cp.material.color.multiplyScalar(_g);
