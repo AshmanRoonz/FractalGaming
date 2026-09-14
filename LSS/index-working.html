@@ -6124,7 +6124,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.19';
+const LSS_BUILD = '44.21';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -31114,6 +31114,7 @@ const _SW_FARMASK_RES = 96;
 const _SW_FARMASK_BOUNDS = 24000;    
 const _swRipple = {
   gpu: null, heightVar: null,
+  upRT: null, upMat: null, upTex: null,   // (v44.21) the smooth-reconstruction pass, see _swRippleUpsample
   center: new THREE.Vector2(0, 0),   
   acc: 0, step: 1 / 60,              
   pending: [],                       
@@ -33875,6 +33876,11 @@ function _swRippleTick(dt) {
     // null in flatscreen (so flat behaviour is identical). Same save/restore idiom used by the postFX path.
     const _xrPrevRT = (renderer && renderer.getRenderTarget) ? renderer.getRenderTarget() : null;
     R.gpu.compute();
+    // (v44.21) the smooth reconstruction, inside the same save/restore. A failure disables it for
+    // the session (the sheet falls back to the raw texture) and says so once, like the crest-break
+    // readback does.
+    try { _swRippleUpsample(); }
+    catch (e) { R.upTex = null; R._upErr = 1; try { console.warn('[water] upsample pass failed - falling back to the bilinear read:', e && e.message); } catch (_) {} }
     if (renderer && renderer.setRenderTarget) renderer.setRenderTarget(_xrPrevRT);
     // (v33.75) CREST-BREAKING SURFACE RULE — breaking is now a PROPERTY OF THE SURFACE, not a scripted spawn.
     // Read the freshest wave heightfield back to the CPU and shed real 3D spray at every texel whose crest is
@@ -34132,7 +34138,7 @@ function _swRippleTick(dt) {
   // hand the freshest height texture + window params to the Reflector material
   const wu = w && w.material && w.material.uniforms;
   if (wu && wu.uRippleTex) {
-    wu.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
+    wu.uRippleTex.value = _swRippleRenderTex();   // (v44.21) the smooth copy
     wu.uRippleCenter.value.set(R.center.x, R.center.y);
     wu.uRippleScale.value = R.scale;
     if (wu.uRippleBounds) wu.uRippleBounds.value = R.bounds;   // (v41.45) see the note at its declaration
@@ -34151,6 +34157,44 @@ function _swRippleTick(dt) {
       // (v41.42) THE BIG ONE - this is the mesh every crest, sheet and foam pass in v41 draws into.
       const _vrR = _swVrLite();
       dm.visible = !game._swSubmerged && !_vrR;
+      // ⭐⭐⭐ (v44.21) THE SAWTOOTH, PART TWO: THE SHEET DREW OVER ITSELF. Owner, watching a
+      // splash ring from low over the water: "in that dome, we can see triangles i think on the front
+      // or back about mid way in the dome... i think we're seeing the inside of dome geometry made of
+      // triangles" - exactly right. The sheet was double-sided, semi-transparent and wrote no depth,
+      // so its triangles composited in index order, not depth order: the far side of a ring (and the
+      // underside of its crest) painted OVER the near crest, and a slanted edge in the reflection was
+      // cut into shelves wherever the two overlapped. Flat water never overlaps itself, which is why
+      // this only ever appeared with waves. depthWrite alone had been tried and read as WORSE, because
+      // with the pyramid reconstruction (part one, _swRippleUpsample) a hard silhouette is a hard
+      // pyramid silhouette; with a smooth field it is what it should be, and the owner's verdict on
+      // the pair was "fixed".
+      //   FrontSide finishes it: the underside of a crest has no business in the frame. It is only
+      // safe once the eye is above every crest the field can raise (uDispScale, the _swShape
+      // ceiling): lower than that the camera can be INSIDE a crest, and culling its far wall would
+      // open a window onto the water behind it - so below that height the sheet stays DoubleSide,
+      // and just under the surface (the 12-unit band before _swSubmerged latches) the underside is
+      // the only water there is. When submerged the sheet is hidden anyway (the line above).
+      //   depthWrite is what actually kills the double image, and it has two guards of its own:
+      //   - the eye must be above the surface, or the sheet drawn from below would stamp its depth
+      //     over the entire above-water FX layer (plumes, shields, sun, birds) for those frames;
+      //   - in first person with the hull at the waterline the ghost shell (v37.66) must keep
+      //     glowing THROUGH the water, so the sheet does not write depth while the cockpit eye is
+      //     within 30 units of the surface. That is the one place the old sawtooth can still be
+      //     seen; the cockpit's own floor is in the way of most of it.
+      //   ⚠ `side` is a program define, so it is only written when it changes, with needsUpdate
+      //   (both programs end up cached); depthWrite is plain GL state.
+      //   window.__water.selfOcclude = 0 restores the pre-44.21 flags exactly.
+      try {
+        const _W4 = window.__water || {};
+        const _so = (_W4.selfOcclude == null) ? true : (+_W4.selfOcclude > 0);
+        const _camClear = (camera && camera.position) ? (camera.position.y - WL2) : 1e6;
+        const _ceil = (dm.material.uniforms.uDispScale && dm.material.uniforms.uDispScale.value) || 100;
+        const _fp = !game.thirdPerson;
+        const _dw = _so && _camClear > 6.0 && !(_fp && _camClear < 30.0);
+        const _side = (_so && _camClear > _ceil + 6.0) ? THREE.FrontSide : THREE.DoubleSide;
+        if (dm.material.side !== _side) { dm.material.side = _side; dm.material.needsUpdate = true; }
+        if (dm.material.depthWrite !== _dw) dm.material.depthWrite = _dw;
+      } catch (_) {}
       // ⚠⚠ (v41.70) SNAP THE SHEET TO ITS OWN GRID. Owner: "when i hit p to freeze, the water
       // goes back to normal". That one sentence is the diagnosis - the artefact needs MOTION.
       // This line moved the sheet to the ship's exact position every frame. Its vertices sit at fixed
@@ -34174,7 +34218,7 @@ function _swRippleTick(dt) {
                         _snap ? Math.round(pz / _q) * _q : pz);
       }
       const du = dm.material.uniforms;
-      du.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
+      du.uRippleTex.value = _swRippleRenderTex();   // (v44.21) the smooth copy
       du.uRippleCenter.value.set(R.center.x, R.center.y);
       du.uRippleBounds.value = R.bounds;
       if (_swU) { if (_swU.uTime) du.uTime.value = _swU.uTime.value; if (_swU.uCam) du.uCam.value.copy(_swU.uCam.value); }
@@ -34357,8 +34401,108 @@ function _swRippleTick(dt) {
     _hubWaterDisp.visible = false;   
   }
 }
+// ⭐⭐⭐ (v44.21) THE SAWTOOTH, PART ONE OF TWO: A BILINEAR TENT IS A PYRAMID.
+// Owner: "i hate the look of the sawtooth reflection, it break immersion" / "see the L in the wake
+// there" / "always the same x" / "when something hits the water, it makes a dome shape in the water...
+// in that dome, we can see triangles". Long-standing (since the displaced sheet, v33), and every
+// earlier attempt went after the REFLECTION: the shear, the projection point, the off-mirror fade,
+// the slope brake, the shoreline mask, a crest taper by distance (rejected: "you turned down the
+// waves size too much"), wider normal taps (v41.61), the 5-tap low-pass (v41.67), finer tessellation
+// ("its just smaller"). None of them could work, because the sheet was being built from the
+// heightfield with the GPU's bilinear filter, and bilinear interpolation of ONE texel's height is a
+// square pyramid with axis-aligned edges. A ripple ridge one or two texels wide is therefore a row of
+// pyramids; the crest expander (uCrestQ 11) sharpens them; a low camera sees their silhouettes as a
+// literal sawtooth, the ring's side as a wall with a comb on its edge, and the corner where a ring
+// turns as an L. It is invisible with tiny waves (nothing tall enough to have a silhouette), and it
+// survives a finer mesh (the mesh only follows the pyramids more faithfully).
+//   Measured live before this went in: the raw 256x256 sim field of a splash ring is perfectly round
+// (read back and drawn on screen), and the reflection render target is clean - the teeth are made at
+// reconstruction time, between the texture and the vertices.
+//   The fix is to reconstruct the field with a C2 kernel instead of the bilinear one. Rather than pay
+// 16 taps at every one of the 590k vertices and again per fragment, the sim output is resampled ONCE
+// per frame into a 4x finer texture with a cubic kernel (Mitchell-Netravali family: B=1,C=0 is the
+// B-spline the owner approved; B=C=1/3 Mitchell and B=0,C=0.5 Catmull-Rom stay one knob away). The
+// sheet and the flat reflector then read that texture through the same bilinear filter as before -
+// at 7.8 world units a texel the remaining tents are smaller than a mesh quad and cannot show.
+//   B-spline is an approximating spline, so it takes a little off the peaks: measured 0.951 of the
+// raw maximum on a splash ring, hence uGainK 1.05 by default so the owner's wave size is unchanged.
+//   ⚠ Only the RENDER reads the upsampled copy. The sim keeps stepping on its own 256x256 texture,
+//   and every CPU readback (the ship's waterline, the crest dots) keeps reading the raw field.
+//   ⚠ Rendered through R.gpu.doRenderTarget so XR, shadow auto-update and the bound render
+//   target are saved and restored exactly the way the sim's own passes are (the v41.xx VR-in-freeflight
+//   lesson: a stray setRenderTarget(null) in WebXR steals the eye framebuffer).
+//   Part two of the fix - why the far side of a dome drew over its near side - is at the sheet's
+//   material flags in _swRippleTick ("self-occlusion").
+// Knobs, live: window.__water.upsample (1; 0 = the pre-44.21 bilinear read, for an A/B),
+//   .upRes (1024 desktop / 512 small devices), .upGain (1.05), .upB / .upC (1 / 0 = B-spline).
+const _SW_UP_FRAG = [
+  'uniform sampler2D uSrc; uniform float uRes; uniform vec2 uOut; uniform float uGainK; uniform float uB; uniform float uC;',
+  'float _mn(float x){ x = abs(x); float x2 = x * x; float x3 = x2 * x;',
+  '  if (x < 1.0) return ((12.0 - 9.0 * uB - 6.0 * uC) * x3 + (-18.0 + 12.0 * uB + 6.0 * uC) * x2 + (6.0 - 2.0 * uB)) / 6.0;',
+  '  if (x < 2.0) return ((-uB - 6.0 * uC) * x3 + (6.0 * uB + 30.0 * uC) * x2 + (-12.0 * uB - 48.0 * uC) * x + (8.0 * uB + 24.0 * uC)) / 6.0;',
+  '  return 0.0; }',
+  'void main(){',
+  '  vec2 uv = gl_FragCoord.xy / uOut;',
+  '  vec2 c = uv * uRes - 0.5; vec2 f = fract(c); vec2 b = c - f;',
+  '  vec4 acc = vec4(0.0); float ws = 0.0;',
+  '  for (int j = -1; j <= 2; j++) {',
+  '    float wy = _mn(float(j) - f.y);',
+  '    for (int i = -1; i <= 2; i++) {',
+  '      float wx = _mn(float(i) - f.x); float w = wx * wy;',
+  '      vec2 p = (b + vec2(float(i), float(j)) + 0.5) / uRes;',
+  '      acc += texture2D(uSrc, clamp(p, 0.0, 1.0)) * w; ws += w;',
+  '    }',
+  '  }',
+  '  acc /= max(ws, 1e-6);',
+  '  acc.x *= uGainK; acc.y *= uGainK;',   // height and previous height; foam (z) is not a height
+  '  gl_FragColor = acc;',
+  '}'
+].join('\n');
+function _swRippleUpsample() {
+  const R = _swRipple; if (!R.gpu || !R.heightVar || !renderer) { R.upTex = null; return; }
+  const W = window.__water || {};
+  const on = (W.upsample == null) ? 1 : +W.upsample;
+  // VR-lite never draws the displaced sheet (v41.42), so there is nothing for the copy to feed.
+  if (!(on > 0) || R._upErr || _swVrLite()) { R.upTex = null; return; }
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  const res = Math.max(256, Math.round((W.upRes != null) ? +W.upRes : (small ? 512 : 1024)));
+  // FloatType like the sim's own targets: the one float format this codebase has ever probed for.
+  // 512^2 is 4 MB on a phone, 1024^2 16 MB on a desktop.
+  const type = THREE.FloatType;
+  if (!R.upRT || R.upRT.width !== res || R.upRT.texture.type !== type) {
+    try { if (R.upRT) R.upRT.dispose(); } catch (_) {}
+    R.upRT = new THREE.WebGLRenderTarget(res, res, {
+      type: type, format: THREE.RGBAFormat, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+      wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+      depthBuffer: false, stencilBuffer: false, generateMipmaps: false });
+  }
+  if (!R.upMat) {
+    R.upMat = new THREE.ShaderMaterial({
+      uniforms: { uSrc: { value: null }, uRes: { value: _SW_RIPPLE_RES }, uOut: { value: new THREE.Vector2(res, res) },
+                  uGainK: { value: 1.05 }, uB: { value: 1.0 }, uC: { value: 0.0 } },
+      vertexShader: 'void main(){ gl_Position = vec4(position, 1.0); }',
+      fragmentShader: _SW_UP_FRAG,
+      depthTest: false, depthWrite: false, toneMapped: false });
+  }
+  const u = R.upMat.uniforms;
+  u.uSrc.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
+  u.uRes.value = _SW_RIPPLE_RES;
+  u.uOut.value.set(res, res);
+  u.uGainK.value = (W.upGain != null) ? +W.upGain : 1.05;
+  u.uB.value = (W.upB != null) ? +W.upB : 1.0;
+  u.uC.value = (W.upC != null) ? +W.upC : 0.0;
+  R.gpu.doRenderTarget(R.upMat, R.upRT);
+  R.upTex = R.upRT.texture;
+}
+// What the renderers read: the smooth copy when it exists, the raw sim texture otherwise.
+function _swRippleRenderTex() {
+  const R = _swRipple;
+  return R.upTex || R.gpu.getCurrentRenderTarget(R.heightVar).texture;
+}
 function _swRippleDispose() {
   const R = _swRipple;
+  try { if (R.upRT && R.upRT.dispose) R.upRT.dispose(); } catch (_) {}   // (v44.21)
+  R.upRT = null; R.upTex = null;
   try { if (R.gpu && R.gpu.dispose) R.gpu.dispose(); } catch (_) {}
   try { if (R.maskTex && R.maskTex.dispose) R.maskTex.dispose(); } catch (_) {}   
   try { if (R.farTex && R.farTex.dispose) R.farTex.dispose(); } catch (_) {}      
@@ -36373,7 +36517,14 @@ function _swBuildHubWaterDispGet(WL) {
       '    else if (uDebugTerm < 7.5) dc = vec3(_dbgCap);',
       '    gl_FragColor = vec4(dc, 1.0); return;',
       '  }',
-      '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',
+      // (v44.21) Now that the sheet writes depth, a fragment that contributes no colour must not
+      // leave a depth behind either: the shore band fades to alpha 0 and so does the far rim, and
+      // without this they would be invisible walls that cut off every later transparent behind them
+      // (a projectile trail in the shallows, an explosion flash under a faded band). Discarding also
+      // skips the blend for those pixels. 0.01 is below anything the eye can register at 8 bits.
+      '  float _aOut = aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade;',
+      '  if (_aOut < 0.01) discard;',
+      '  gl_FragColor = vec4(c, _aOut);',
       '  #include <fog_fragment>',
       '}',
     ].join('\n'),

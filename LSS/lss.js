@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.19';
+const LSS_BUILD = '44.21';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -17607,6 +17607,7 @@ const _SW_FARMASK_RES = 96;
 const _SW_FARMASK_BOUNDS = 24000;    
 const _swRipple = {
   gpu: null, heightVar: null,
+  upRT: null, upMat: null, upTex: null,   // (v44.21) the smooth-reconstruction pass, see _swRippleUpsample
   center: new THREE.Vector2(0, 0),   
   acc: 0, step: 1 / 60,              
   pending: [],                       
@@ -19278,6 +19279,8 @@ function _swRippleTick(dt) {
     R.pending.length = 0;
     const _xrPrevRT = (renderer && renderer.getRenderTarget) ? renderer.getRenderTarget() : null;
     R.gpu.compute();
+    try { _swRippleUpsample(); }
+    catch (e) { R.upTex = null; R._upErr = 1; try { console.warn('[water] upsample pass failed - falling back to the bilinear read:', e && e.message); } catch (_) {} }
     if (renderer && renderer.setRenderTarget) renderer.setRenderTarget(_xrPrevRT);
     const _Wc = window.__water || {};
     const _crAlt = (function () {
@@ -19405,7 +19408,7 @@ function _swRippleTick(dt) {
   }
   const wu = w && w.material && w.material.uniforms;
   if (wu && wu.uRippleTex) {
-    wu.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
+    wu.uRippleTex.value = _swRippleRenderTex();   // (v44.21) the smooth copy
     wu.uRippleCenter.value.set(R.center.x, R.center.y);
     wu.uRippleScale.value = R.scale;
     if (wu.uRippleBounds) wu.uRippleBounds.value = R.bounds;   // (v41.45) see the note at its declaration
@@ -19418,6 +19421,17 @@ function _swRippleTick(dt) {
     if (dm) {
       const _vrR = _swVrLite();
       dm.visible = !game._swSubmerged && !_vrR;
+      try {
+        const _W4 = window.__water || {};
+        const _so = (_W4.selfOcclude == null) ? true : (+_W4.selfOcclude > 0);
+        const _camClear = (camera && camera.position) ? (camera.position.y - WL2) : 1e6;
+        const _ceil = (dm.material.uniforms.uDispScale && dm.material.uniforms.uDispScale.value) || 100;
+        const _fp = !game.thirdPerson;
+        const _dw = _so && _camClear > 6.0 && !(_fp && _camClear < 30.0);
+        const _side = (_so && _camClear > _ceil + 6.0) ? THREE.FrontSide : THREE.DoubleSide;
+        if (dm.material.side !== _side) { dm.material.side = _side; dm.material.needsUpdate = true; }
+        if (dm.material.depthWrite !== _dw) dm.material.depthWrite = _dw;
+      } catch (_) {}
       {
         const _q = (dm.geometry.userData && dm.geometry.userData.swQuad) || 0;
         const _snap = (_q > 0.01 && !(window.__water && window.__water.sheetSnap === 0));
@@ -19425,7 +19439,7 @@ function _swRippleTick(dt) {
                         _snap ? Math.round(pz / _q) * _q : pz);
       }
       const du = dm.material.uniforms;
-      du.uRippleTex.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
+      du.uRippleTex.value = _swRippleRenderTex();   // (v44.21) the smooth copy
       du.uRippleCenter.value.set(R.center.x, R.center.y);
       du.uRippleBounds.value = R.bounds;
       if (_swU) { if (_swU.uTime) du.uTime.value = _swU.uTime.value; if (_swU.uCam) du.uCam.value.copy(_swU.uCam.value); }
@@ -19524,8 +19538,70 @@ function _swRippleTick(dt) {
     _hubWaterDisp.visible = false;   
   }
 }
+const _SW_UP_FRAG = [
+  'uniform sampler2D uSrc; uniform float uRes; uniform vec2 uOut; uniform float uGainK; uniform float uB; uniform float uC;',
+  'float _mn(float x){ x = abs(x); float x2 = x * x; float x3 = x2 * x;',
+  '  if (x < 1.0) return ((12.0 - 9.0 * uB - 6.0 * uC) * x3 + (-18.0 + 12.0 * uB + 6.0 * uC) * x2 + (6.0 - 2.0 * uB)) / 6.0;',
+  '  if (x < 2.0) return ((-uB - 6.0 * uC) * x3 + (6.0 * uB + 30.0 * uC) * x2 + (-12.0 * uB - 48.0 * uC) * x + (8.0 * uB + 24.0 * uC)) / 6.0;',
+  '  return 0.0; }',
+  'void main(){',
+  '  vec2 uv = gl_FragCoord.xy / uOut;',
+  '  vec2 c = uv * uRes - 0.5; vec2 f = fract(c); vec2 b = c - f;',
+  '  vec4 acc = vec4(0.0); float ws = 0.0;',
+  '  for (int j = -1; j <= 2; j++) {',
+  '    float wy = _mn(float(j) - f.y);',
+  '    for (int i = -1; i <= 2; i++) {',
+  '      float wx = _mn(float(i) - f.x); float w = wx * wy;',
+  '      vec2 p = (b + vec2(float(i), float(j)) + 0.5) / uRes;',
+  '      acc += texture2D(uSrc, clamp(p, 0.0, 1.0)) * w; ws += w;',
+  '    }',
+  '  }',
+  '  acc /= max(ws, 1e-6);',
+  '  acc.x *= uGainK; acc.y *= uGainK;',   // height and previous height; foam (z) is not a height
+  '  gl_FragColor = acc;',
+  '}'
+].join('\n');
+function _swRippleUpsample() {
+  const R = _swRipple; if (!R.gpu || !R.heightVar || !renderer) { R.upTex = null; return; }
+  const W = window.__water || {};
+  const on = (W.upsample == null) ? 1 : +W.upsample;
+  if (!(on > 0) || R._upErr || _swVrLite()) { R.upTex = null; return; }
+  const small = (typeof _fxSmallDevice === 'function' && _fxSmallDevice());
+  const res = Math.max(256, Math.round((W.upRes != null) ? +W.upRes : (small ? 512 : 1024)));
+  const type = THREE.FloatType;
+  if (!R.upRT || R.upRT.width !== res || R.upRT.texture.type !== type) {
+    try { if (R.upRT) R.upRT.dispose(); } catch (_) {}
+    R.upRT = new THREE.WebGLRenderTarget(res, res, {
+      type: type, format: THREE.RGBAFormat, minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+      wrapS: THREE.ClampToEdgeWrapping, wrapT: THREE.ClampToEdgeWrapping,
+      depthBuffer: false, stencilBuffer: false, generateMipmaps: false });
+  }
+  if (!R.upMat) {
+    R.upMat = new THREE.ShaderMaterial({
+      uniforms: { uSrc: { value: null }, uRes: { value: _SW_RIPPLE_RES }, uOut: { value: new THREE.Vector2(res, res) },
+                  uGainK: { value: 1.05 }, uB: { value: 1.0 }, uC: { value: 0.0 } },
+      vertexShader: 'void main(){ gl_Position = vec4(position, 1.0); }',
+      fragmentShader: _SW_UP_FRAG,
+      depthTest: false, depthWrite: false, toneMapped: false });
+  }
+  const u = R.upMat.uniforms;
+  u.uSrc.value = R.gpu.getCurrentRenderTarget(R.heightVar).texture;
+  u.uRes.value = _SW_RIPPLE_RES;
+  u.uOut.value.set(res, res);
+  u.uGainK.value = (W.upGain != null) ? +W.upGain : 1.05;
+  u.uB.value = (W.upB != null) ? +W.upB : 1.0;
+  u.uC.value = (W.upC != null) ? +W.upC : 0.0;
+  R.gpu.doRenderTarget(R.upMat, R.upRT);
+  R.upTex = R.upRT.texture;
+}
+function _swRippleRenderTex() {
+  const R = _swRipple;
+  return R.upTex || R.gpu.getCurrentRenderTarget(R.heightVar).texture;
+}
 function _swRippleDispose() {
   const R = _swRipple;
+  try { if (R.upRT && R.upRT.dispose) R.upRT.dispose(); } catch (_) {}   // (v44.21)
+  R.upRT = null; R.upTex = null;
   try { if (R.gpu && R.gpu.dispose) R.gpu.dispose(); } catch (_) {}
   try { if (R.maskTex && R.maskTex.dispose) R.maskTex.dispose(); } catch (_) {}   
   try { if (R.farTex && R.farTex.dispose) R.farTex.dispose(); } catch (_) {}      
@@ -20753,7 +20829,9 @@ function _swBuildHubWaterDispGet(WL) {
       '    else if (uDebugTerm < 7.5) dc = vec3(_dbgCap);',
       '    gl_FragColor = vec4(dc, 1.0); return;',
       '  }',
-      '  gl_FragColor = vec4(c, aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade);',
+      '  float _aOut = aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade;',
+      '  if (_aOut < 0.01) discard;',
+      '  gl_FragColor = vec4(c, _aOut);',
       '  #include <fog_fragment>',
       '}',
     ].join('\n'),
