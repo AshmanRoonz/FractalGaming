@@ -9,12 +9,12 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.30';
+const LSS_BUILD = '44.31';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
 const _FRAMES_VERSION = '36.24';   // cockpit frame art (frames/**)
-const _MODELS_VERSION = '42.55';   // (v42.55) VORTEX: the aperture is now cut with a real BOOLEAN against a lofted prism instead of deleting whole triangles, so the rim is a clean line rather than a jagged saw-tooth (owner: "jagged triangles on some spots remaining"); and the AftCanopyArch's two legs, which stopped 40mm short in mid-air, are extended down to the sill and the arch re-symmetrised (owner: "the windshield bars are not connected to each other"). Authored in Blender and exported - the established path for these hulls   // (v42.54) VORTEX: everything around the window SYMMETRISED in place (frame/gasket/arch/glass entire, hull + cabin shell by region with a falloff) - worst mirror error 8-12mm -> under 1mm, tools/symmetrize_canopy.py. Surface-average, topology untouched, so no cracks. Plus the aperture prism widened 0.04 (--widen). Owner: the shapes he boxed are the OPENING, not geometry - rays through them miss - so its outline had to be made symmetric, not deleted   // (v42.53) VORTEX: the InnerSillLiner pair made symmetric (680 vs 624 verts, two different shapes either side of the seat) by mirroring the larger onto the smaller - tools/mirror_ship_part.py --pair. NOTE the mirror plane is solved from the pair, NOT z=0: every L/R pair on this hull sits about z = -0.0004, so reflecting about the origin lands the copy ~1.6mm out and it still reads wrong   // (v42.52) VORTEX: the same triangular prism applied to the CABIN SIDE - cabin shell 231 tris, sill liners 263+244 - owner: "the cut out needs to include the geometry inside the cabin that was next to it, because it protrudes up in the same spot". Deliberately NOT the seat/harness/HUD: the eye sits 40mm above this sill, so a blanket above-the-sill cut would take the headrest   // (v42.51) VORTEX: canopy aperture opened out to a RIGHT-ANGLE TRIANGLE - 235 hull tris deleted from the wedge under the old ragged lower rim, so the window keeps its raked top, gains a vertical aft edge and a level sill (tools/cut_canopy_aperture.py --triangle). That wedge WAS the purple: rays cast down through the window found hull 704 times vs glass 364   // (v42.50) VORTEX: the Vortex_v04_L/R_FrameInterfaceTrim pair DROPPED - owner: "the purple shit is the old window". They are the only purple geometry touching the windshield (material 17 Vortex_Cabin_Trim, base .12/.10/.20, sitting 1-2.5mm off the glass rim) and the pair never matched (671 vs 539 verts, up to 9.8mm out of line), so they read as purple slivers down both inner edges of the window   // (v42.48) canopy window frames straightened - the swept tube's path is mirror-averaged then low-passed, rings moved rigidly (tools/straighten_canopy_frame.py) ; blaster/puncture/pyro/syphon got the full mirror pass, slayer/tracker/vortex the de-wobble only   // (v42.47) blaster + slayer cockpit1 eye markers raised in the GLBs (+3 / +5 game units, tools/raise_cockpit_marker.py) - PC and mobile sets   // (v42.08) owner's BUILT-IN COCKPIT hulls (blaster/pyro/slayer/syphon/vortex v04, tracker v06, puncture v07) rebuilt through compress_glb (weld+quantize, join per material 74->21 prims, no re-simplify) + lean mobile set   // GLB models (ships/, objects/, objects/hoard/, rings/)
+const _MODELS_VERSION = '44.31';   // (v44.31) PUNCTURE: Puncture_Cabin_Emission was BLUE (0.03,0.5,0.95) in a yellow-class ship - every other hull's cabin glow is its class colour - recoloured to (1,0.85,0.08) in both sets with tools/glb_set_material.py (no Blender round trip; JSON chunk only). Owner: "puncture has some blue inside the cockpit, that needs to be changed to yellow"   // (v42.55) VORTEX: the aperture is now cut with a real BOOLEAN against a lofted prism instead of deleting whole triangles, so the rim is a clean line rather than a jagged saw-tooth (owner: "jagged triangles on some spots remaining"); and the AftCanopyArch's two legs, which stopped 40mm short in mid-air, are extended down to the sill and the arch re-symmetrised (owner: "the windshield bars are not connected to each other"). Authored in Blender and exported - the established path for these hulls   // (v42.54) VORTEX: everything around the window SYMMETRISED in place (frame/gasket/arch/glass entire, hull + cabin shell by region with a falloff) - worst mirror error 8-12mm -> under 1mm, tools/symmetrize_canopy.py. Surface-average, topology untouched, so no cracks. Plus the aperture prism widened 0.04 (--widen). Owner: the shapes he boxed are the OPENING, not geometry - rays through them miss - so its outline had to be made symmetric, not deleted   // (v42.53) VORTEX: the InnerSillLiner pair made symmetric (680 vs 624 verts, two different shapes either side of the seat) by mirroring the larger onto the smaller - tools/mirror_ship_part.py --pair. NOTE the mirror plane is solved from the pair, NOT z=0: every L/R pair on this hull sits about z = -0.0004, so reflecting about the origin lands the copy ~1.6mm out and it still reads wrong   // (v42.52) VORTEX: the same triangular prism applied to the CABIN SIDE - cabin shell 231 tris, sill liners 263+244 - owner: "the cut out needs to include the geometry inside the cabin that was next to it, because it protrudes up in the same spot". Deliberately NOT the seat/harness/HUD: the eye sits 40mm above this sill, so a blanket above-the-sill cut would take the headrest   // (v42.51) VORTEX: canopy aperture opened out to a RIGHT-ANGLE TRIANGLE - 235 hull tris deleted from the wedge under the old ragged lower rim, so the window keeps its raked top, gains a vertical aft edge and a level sill (tools/cut_canopy_aperture.py --triangle). That wedge WAS the purple: rays cast down through the window found hull 704 times vs glass 364   // (v42.50) VORTEX: the Vortex_v04_L/R_FrameInterfaceTrim pair DROPPED - owner: "the purple shit is the old window". They are the only purple geometry touching the windshield (material 17 Vortex_Cabin_Trim, base .12/.10/.20, sitting 1-2.5mm off the glass rim) and the pair never matched (671 vs 539 verts, up to 9.8mm out of line), so they read as purple slivers down both inner edges of the window   // (v42.48) canopy window frames straightened - the swept tube's path is mirror-averaged then low-passed, rings moved rigidly (tools/straighten_canopy_frame.py) ; blaster/puncture/pyro/syphon got the full mirror pass, slayer/tracker/vortex the de-wobble only   // (v42.47) blaster + slayer cockpit1 eye markers raised in the GLBs (+3 / +5 game units, tools/raise_cockpit_marker.py) - PC and mobile sets   // (v42.08) owner's BUILT-IN COCKPIT hulls (blaster/pyro/slayer/syphon/vortex v04, tracker v06, puncture v07) rebuilt through compress_glb (weld+quantize, join per material 74->21 prims, no re-simplify) + lean mobile set   // GLB models (ships/, objects/, objects/hoard/, rings/)
 const _MODEL_CACHE_BUST = '?v=' + _MODELS_VERSION;
 const _LSS_CORNER_CSS = "font-family:'Rajdhani',monospace;font-size:11px;"
   + 'letter-spacing:2px;color:rgba(150,200,255,0.55);pointer-events:none;';
@@ -31562,6 +31562,10 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
           params.depthWrite = false;
         }
         const mat = new THREE.MeshStandardMaterial(params);
+        try {
+          const _themeHex = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : null;
+          if (_themeHex != null && m && m.map && !(typeof m.name === 'string' && m.name.indexOf('cockpit') === 0) && !params.transparent) _lssThemeStripHook(mat, _themeHex);
+        } catch (_) {}
         if (_hullStrip) {   // (v44.23) see _lssApplyHullGlow
           mat.userData._hullEmis = { map: m.emissiveMap,
                                      intensity: (typeof m.emissiveIntensity === 'number') ? m.emissiveIntensity : 1.0,
@@ -35012,6 +35016,35 @@ function _shipScanInsert(top, topD, e, d) {
   while (i > 0 && topD[i - 1] > d) { top[i] = top[i - 1]; topD[i] = topD[i - 1]; i--; }
   top[i] = e; topD[i] = d;
 }
+function _lssThemeStripHook(m, themeHex) {
+  if (!m || !m.map || m.userData._themeU) return null;
+  const G = (typeof window !== 'undefined' && window.__theme) || {};
+  const on = !(typeof input !== 'undefined' && input && input.hullGlow === false);
+  const u = {
+    uThemeCol: { value: new THREE.Color(themeHex) },
+    uThemeGlow: { value: on ? ((G.glow != null) ? +G.glow : 2.0) : 0.0 },
+    uThemeTight: { value: (G.tight != null) ? +G.tight : 0.985 },
+    uThemeSat: { value: (G.sat != null) ? +G.sat : 0.22 },
+  };
+  m.userData._themeU = u;
+  const prev = m.onBeforeCompile;
+  m.onBeforeCompile = function (shader, renderer) {
+    if (prev) { try { prev.call(this, shader, renderer); } catch (_) {} }
+    for (const k in u) shader.uniforms[k] = u[k];
+    shader.fragmentShader = shader.fragmentShader
+      .replace('void main() {', 'uniform vec3 uThemeCol; uniform float uThemeGlow; uniform float uThemeTight; uniform float uThemeSat;\nvoid main() {')
+      .replace('#include <emissivemap_fragment>',
+        '#include <emissivemap_fragment>\n#ifdef USE_MAP\n\t{ vec3 _ta = texture2D(map, vMapUv).rgb;'
+        + ' float _tsat = max(_ta.r, max(_ta.g, _ta.b)) - min(_ta.r, min(_ta.g, _ta.b));'
+        + ' float _tm = dot(normalize(_ta + 1e-4), normalize(uThemeCol + 1e-4));'
+        + ' float _tk = smoothstep(uThemeTight, 1.0, _tm) * smoothstep(uThemeSat * 0.5, uThemeSat, _tsat);'
+        + ' totalEmissiveRadiance += diffuseColor.rgb * _tk * uThemeGlow; }\n#endif');
+  };
+  const prevKey = m.customProgramCacheKey;
+  m.customProgramCacheKey = function () { return 'lssTheme|' + (prevKey ? prevKey.call(this) : ''); };
+  m.needsUpdate = true;
+  return u;
+}
 function _lssApplyHullGlow() {
   const on = !(typeof input !== 'undefined' && input && input.hullGlow === false);
   if (typeof scene === 'undefined' || !scene) return 0;
@@ -35020,6 +35053,14 @@ function _lssApplyHullGlow() {
     const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : null;
     if (!mats) return;
     for (const mat of mats) {
+      const TU = mat && mat.userData && mat.userData._themeU;   // (v44.31) the theme strips follow the same switch
+      if (TU) {
+        const G = (typeof window !== 'undefined' && window.__theme) || {};
+        TU.uThemeGlow.value = on ? ((G.glow != null) ? +G.glow : 2.0) : 0.0;
+        if (G.tight != null) TU.uThemeTight.value = +G.tight;
+        if (G.sat != null) TU.uThemeSat.value = +G.sat;
+        n++;
+      }
       const E = mat && mat.userData && mat.userData._hullEmis;
       if (!E) continue;
       const want = on ? E.map : null;
