@@ -6124,7 +6124,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.18';
+const LSS_BUILD = '44.19';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -33172,6 +33172,156 @@ function _swHullSpan() {
     return v;
   } catch (_) { return 0; }
 }
+// ⭐⭐⭐ (v44.19) EVERYTHING ELSE IN THE WORLD MOVES THE WATER TOO. Owner: "i noticed bots ships
+// dont affect the water" and "bots, and overworld monsters affect the water, let's do it".
+// Until now the entire hull-interaction block in _swRippleTick was hard-wired to the module-global
+// `player` - there was no loop over game.entities anywhere in the water system - so a bot could fly
+// through a lake and leave it mirror-flat. Peers were a half case: NetworkPlayer.update calls
+// _swImpact and _swWetTick, so a peer SPLASHED going in and dripped coming out, but left no wake
+// while cruising. Wild leviathans did nothing at all.
+//
+// ⚠⚠ THE REAL CONSTRAINT IS THE SEED QUEUE, NOT THE CPU. The sim consumes at most EIGHT seeds
+//   per 1/60s step (uniform vec4 uSeeds[8]), and the player's own wake already lays up to five of
+//   them. Pushing a full five-seed wake per bot would shift the player's own seeds out of the queue
+//   - _swRippleSeed drops the OLDEST when it overflows - and the player's wake is the one the player
+//   is actually looking at. So this pass:
+//     - never pushes into the last slots: it stops while headroom remains, so the player always wins;
+//     - gives each entity ONE wake seed, not five;
+//     - round-robins, so with more entities than budget they take turns rather than the first two
+//       always winning;
+//     - culls by camera distance, reusing the budget the bots' own WEAPON splashes already use.
+// ⚠ CAVERN MONSTERS ARE EXCLUDED BY DESIGN, not by oversight. Owner: "the monsters in the caverns
+//   are ghosts and can go through walls and water so we dont need to touch those". `isWild` is
+//   exactly that line - it is the flag the overworld leviathans carry and the spectral ones do not.
+// ⚠ VELOCITY IS DERIVED FROM A POSITION DELTA, never read off `.velocity`. On a non-authority peer
+//   every bot is a proxy and _updateProxyBot lerps `position` toward the networked target WITHOUT
+//   ever writing `velocity` - it would read as a permanently stationary ship, so every proxy bot
+//   would silently make no wake on the machine that is watching them most.
+const _SW_ENT = { cursor: 0, list: [], t: 0 };
+function _swEntFootprint(e) {
+  // Ships have a chassis and can reuse the peer footprint wholesale. A leviathan has none, so one
+  // is synthesised from its body size - it only needs to be the right ORDER, since everything the
+  // footprint feeds is a multiplier on a disturbance that is already speed-scaled.
+  if (e.chassis && e.chassis.hullLength) return _swPeerFootprint(e);
+  if (e._swEntFP) return e._swEntFP;
+  const S = Math.max(8, Number(e.size) || Number(e.collisionRadius) * 2 || 60);
+  const LEN = S, BEAM = S * 0.55, DRAFT = S * 0.28;
+  const refVol = 90 * (90 * 0.8) * (90 * 0.3 * 0.5);
+  e._swEntFP = { _k: e, LEN: LEN, BEAM: BEAM, DRAFT: DRAFT, half: LEN * 0.5,
+                 heft: Math.pow((LEN * BEAM * DRAFT) / refVol, 0.34) };
+  return e._swEntFP;
+}
+function _swEntState(e) {
+  if (!e._swEnt) e._swEnt = { px: e.position.x, py: e.position.y, pz: e.position.z,
+                              vx: 0, vy: 0, vz: 0, prevKeel: undefined, seedT: 0 };
+  return e._swEnt;
+}
+const _swEntVel = { x: 0, y: 0, z: 0, length: 0 };
+function _swEntityWaterTick(dt, WL) {
+  const R = _swRipple; if (!R || !R.gpu) return;
+  const K = (window.__water = window.__water || {});
+  if (K.entWake === 0) return;                      // live kill switch for A/B
+  if (K.entWake === undefined) K.entWake = 1;       // amplitude multiplier for the whole pass
+  const L = _SW_ENT.list; L.length = 0;
+
+  // --- gather: ships that are not me, then the overworld leviathans ---
+  try {
+    const ents = game.entities;
+    if (ents) for (let i = 0; i < ents.length; i++) {
+      const e = ents[i];
+      if (!e || e === player || !e.position || !e.mesh) continue;
+      if (e.alive === false) continue;
+      if (!e.chassis || !e.chassis.hullLength) continue;   // skips traffic/carrier pseudo-entities
+      L.push(e);
+    }
+  } catch (_) {}
+  try {
+    const mons = game.monsters;
+    if (mons) for (let i = 0; i < mons.length; i++) {
+      const m = mons[i];
+      // isWild = the OVERWORLD leviathans. The cavern monsters are spectral and pass through
+      // everything including the surface, so they are deliberately not here.
+      if (!m || !m.isWild || m.alive === false || !m.position || !m.mesh) continue;
+      L.push(m);
+    }
+  } catch (_) {}
+  if (!L.length) return;
+
+  // --- cull + budget ---
+  // Same camera-distance budget the bots' weapon splashes already use, so the two systems agree
+  // about what is "near enough to be worth a ripple".
+  const far = (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) ? 1100 : 2600;
+  const far2 = far * far;
+  const cam = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+  // Leave headroom so the player's own wake is never shifted out of the queue.
+  let budget = Math.max(0, 8 - (R.pending ? R.pending.length : 0) - 2);
+  if (budget <= 0) return;
+
+  const n = L.length;
+  for (let k = 0; k < n && budget > 0; k++) {
+    const e = L[(_SW_ENT.cursor + k) % n];
+    const st = _swEntState(e);
+    // velocity from the position delta (see the note above - never trust .velocity here)
+    const idt = dt > 1e-4 ? (1 / dt) : 0;
+    _swEntVel.x = (e.position.x - st.px) * idt;
+    _swEntVel.y = (e.position.y - st.py) * idt;
+    _swEntVel.z = (e.position.z - st.pz) * idt;
+    st.px = e.position.x; st.py = e.position.y; st.pz = e.position.z;
+    if (cam) {
+      const dx = e.position.x - cam.x, dy = e.position.y - cam.y, dz = e.position.z - cam.z;
+      if (dx * dx + dy * dy + dz * dz > far2) { st.prevKeel = undefined; continue; }
+    }
+    const fp = _swEntFootprint(e);
+    // How far the bottom of the body sits below its origin. A leviathan carries its real
+    // half-height (footOff, written when the model attaches); a ship is approximated from its
+    // chassis draft, which is still far better than measuring from the hull's WAIST.
+    const keelOff = (typeof e.footOff === 'number' && e.footOff > 0) ? e.footOff : fp.DRAFT;
+    const keelA = (e.position.y - keelOff) - WL;
+    const prevKeel = (st.prevKeel === undefined) ? keelA : st.prevKeel;
+    st.prevKeel = keelA;
+    const sp = Math.hypot(_swEntVel.x, _swEntVel.z);
+
+    // Surface crossing: the same unified impact the player gets, at this body's scale.
+    // ⚠ PEERS ALREADY DO THEIR OWN. NetworkPlayer.update has called _swImpact on its own crossing
+    //   since v38.77 (and _swWetTick for the drips), so firing one here too would double every peer's
+    //   entry splash. What a peer has never had is the CRUISING wake below - that is what this pass
+    //   adds for them. The actor passed is the ENTITY, not the scratch state: _swImpact hangs the
+    //   cavity/wet state off it via _swWetState, and peers already key that on themselves.
+    const _selfImpacts = !!e.peerId;
+    if (!_selfImpacts && keelA < 0 && prevKeel >= 0) {
+      try { _swImpact(e.position.x, e.position.z, +1, fp, 1.0, _swEntVel, WL, e, 0.8 * K.entWake); } catch (_) {}
+      budget--;
+      continue;
+    }
+    if (!_selfImpacts && keelA > 0 && prevKeel <= 0) {
+      try { _swImpact(e.position.x, e.position.z, -1, fp, 1.0, _swEntVel, WL, e, 0.7 * K.entWake); } catch (_) {}
+      budget--;
+      continue;
+    }
+    // Cruising wake: ONE seed, only while the body is actually in the water and moving.
+    if (keelA < 0 && keelA > -fp.DRAFT * 4 && sp > 25) {
+      st.seedT -= dt;
+      if (st.seedT <= 0) {
+        // Stipple per entity so twelve bots cannot each seed every step; the cadence is the same
+        // 0.2 s the bots' weapon splashes settled on.
+        st.seedT = 0.2;
+        const amp = Math.min(0.9, (sp / 900) * 0.55) * fp.heft * K.entWake;
+        if (amp > 0.004) {
+          // Seeded slightly AHEAD of the body so it reads as a bow wave being pushed, not as a
+          // disturbance welling up underneath it.
+          const ux = sp > 1 ? (_swEntVel.x / sp) : 0, uz = sp > 1 ? (_swEntVel.z / sp) : 0;
+          _swRippleSeed(e.position.x + ux * fp.half * 0.6,
+                        e.position.z + uz * fp.half * 0.6,
+                        fp.BEAM * 1.25, -amp);
+          if (typeof _swFxN === 'function') _swFxN('entWake');
+          budget--;
+        }
+      }
+    }
+  }
+  _SW_ENT.cursor = (_SW_ENT.cursor + 1) % n;
+}
+
 // Per-frame driver — runs in the master tick BEFORE renderer.render.
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
@@ -33692,6 +33842,10 @@ function _swRippleTick(dt) {
     try { _swWetTick(R, px, player.position.y, pz, player.velocity, fp, WL, dt); } catch (_) {}
     try { _swDripWTick(dt, WL); } catch (_) {}
     try { _swBlastTick(dt, WL); } catch (_) {}   // (v41.19) deferred blast columns
+    // (v44.19) ...and everyone else. Deliberately LAST inside this block: the player's seeds are
+    // already in the queue by now, so the headroom check in there sees the true remaining budget
+    // and can never displace them. It is also inside `if (w)` because WL only exists here.
+    try { _swEntityWaterTick(dt, WL); } catch (_) {}
   }
   R.acc += dt;
   if (R.acc >= (_swVrLite() ? R.step * 2.0 : R.step)) {   // (v41.42) full-rate sim when VR water is on

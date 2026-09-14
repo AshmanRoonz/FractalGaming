@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.18';
+const LSS_BUILD = '44.19';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18844,6 +18844,106 @@ function _swHullSpan() {
     return v;
   } catch (_) { return 0; }
 }
+const _SW_ENT = { cursor: 0, list: [], t: 0 };
+function _swEntFootprint(e) {
+  if (e.chassis && e.chassis.hullLength) return _swPeerFootprint(e);
+  if (e._swEntFP) return e._swEntFP;
+  const S = Math.max(8, Number(e.size) || Number(e.collisionRadius) * 2 || 60);
+  const LEN = S, BEAM = S * 0.55, DRAFT = S * 0.28;
+  const refVol = 90 * (90 * 0.8) * (90 * 0.3 * 0.5);
+  e._swEntFP = { _k: e, LEN: LEN, BEAM: BEAM, DRAFT: DRAFT, half: LEN * 0.5,
+                 heft: Math.pow((LEN * BEAM * DRAFT) / refVol, 0.34) };
+  return e._swEntFP;
+}
+function _swEntState(e) {
+  if (!e._swEnt) e._swEnt = { px: e.position.x, py: e.position.y, pz: e.position.z,
+                              vx: 0, vy: 0, vz: 0, prevKeel: undefined, seedT: 0 };
+  return e._swEnt;
+}
+const _swEntVel = { x: 0, y: 0, z: 0, length: 0 };
+function _swEntityWaterTick(dt, WL) {
+  const R = _swRipple; if (!R || !R.gpu) return;
+  const K = (window.__water = window.__water || {});
+  if (K.entWake === 0) return;                      // live kill switch for A/B
+  if (K.entWake === undefined) K.entWake = 1;       // amplitude multiplier for the whole pass
+  const L = _SW_ENT.list; L.length = 0;
+
+  try {
+    const ents = game.entities;
+    if (ents) for (let i = 0; i < ents.length; i++) {
+      const e = ents[i];
+      if (!e || e === player || !e.position || !e.mesh) continue;
+      if (e.alive === false) continue;
+      if (!e.chassis || !e.chassis.hullLength) continue;   // skips traffic/carrier pseudo-entities
+      L.push(e);
+    }
+  } catch (_) {}
+  try {
+    const mons = game.monsters;
+    if (mons) for (let i = 0; i < mons.length; i++) {
+      const m = mons[i];
+      if (!m || !m.isWild || m.alive === false || !m.position || !m.mesh) continue;
+      L.push(m);
+    }
+  } catch (_) {}
+  if (!L.length) return;
+
+  const far = (typeof _fxSmallDevice === 'function' && _fxSmallDevice()) ? 1100 : 2600;
+  const far2 = far * far;
+  const cam = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+  let budget = Math.max(0, 8 - (R.pending ? R.pending.length : 0) - 2);
+  if (budget <= 0) return;
+
+  const n = L.length;
+  for (let k = 0; k < n && budget > 0; k++) {
+    const e = L[(_SW_ENT.cursor + k) % n];
+    const st = _swEntState(e);
+    const idt = dt > 1e-4 ? (1 / dt) : 0;
+    _swEntVel.x = (e.position.x - st.px) * idt;
+    _swEntVel.y = (e.position.y - st.py) * idt;
+    _swEntVel.z = (e.position.z - st.pz) * idt;
+    st.px = e.position.x; st.py = e.position.y; st.pz = e.position.z;
+    if (cam) {
+      const dx = e.position.x - cam.x, dy = e.position.y - cam.y, dz = e.position.z - cam.z;
+      if (dx * dx + dy * dy + dz * dz > far2) { st.prevKeel = undefined; continue; }
+    }
+    const fp = _swEntFootprint(e);
+    const keelOff = (typeof e.footOff === 'number' && e.footOff > 0) ? e.footOff : fp.DRAFT;
+    const keelA = (e.position.y - keelOff) - WL;
+    const prevKeel = (st.prevKeel === undefined) ? keelA : st.prevKeel;
+    st.prevKeel = keelA;
+    const sp = Math.hypot(_swEntVel.x, _swEntVel.z);
+
+    const _selfImpacts = !!e.peerId;
+    if (!_selfImpacts && keelA < 0 && prevKeel >= 0) {
+      try { _swImpact(e.position.x, e.position.z, +1, fp, 1.0, _swEntVel, WL, e, 0.8 * K.entWake); } catch (_) {}
+      budget--;
+      continue;
+    }
+    if (!_selfImpacts && keelA > 0 && prevKeel <= 0) {
+      try { _swImpact(e.position.x, e.position.z, -1, fp, 1.0, _swEntVel, WL, e, 0.7 * K.entWake); } catch (_) {}
+      budget--;
+      continue;
+    }
+    if (keelA < 0 && keelA > -fp.DRAFT * 4 && sp > 25) {
+      st.seedT -= dt;
+      if (st.seedT <= 0) {
+        st.seedT = 0.2;
+        const amp = Math.min(0.9, (sp / 900) * 0.55) * fp.heft * K.entWake;
+        if (amp > 0.004) {
+          const ux = sp > 1 ? (_swEntVel.x / sp) : 0, uz = sp > 1 ? (_swEntVel.z / sp) : 0;
+          _swRippleSeed(e.position.x + ux * fp.half * 0.6,
+                        e.position.z + uz * fp.half * 0.6,
+                        fp.BEAM * 1.25, -amp);
+          if (typeof _swFxN === 'function') _swFxN('entWake');
+          budget--;
+        }
+      }
+    }
+  }
+  _SW_ENT.cursor = (_SW_ENT.cursor + 1) % n;
+}
+
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
   if (game._xrBlurred) return;
@@ -19154,6 +19254,7 @@ function _swRippleTick(dt) {
     try { _swWetTick(R, px, player.position.y, pz, player.velocity, fp, WL, dt); } catch (_) {}
     try { _swDripWTick(dt, WL); } catch (_) {}
     try { _swBlastTick(dt, WL); } catch (_) {}   // (v41.19) deferred blast columns
+    try { _swEntityWaterTick(dt, WL); } catch (_) {}
   }
   R.acc += dt;
   if (R.acc >= (_swVrLite() ? R.step * 2.0 : R.step)) {   // (v41.42) full-rate sim when VR water is on
