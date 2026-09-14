@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.39';
+const LSS_BUILD = '44.40';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -31719,7 +31719,8 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
         const mat = new THREE.MeshStandardMaterial(params);
         try {
           const _themeHex = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[loadoutKey] != null) ? LSS.CLASS_COLORS[loadoutKey] : null;
-          if (_themeHex != null && m && m.map && !(typeof m.name === 'string' && m.name.indexOf('cockpit') === 0) && !params.transparent) _lssThemeStripHook(mat, _themeHex);
+          const _paintHex = (_THEME_PAINT_HEX[loadoutKey] != null) ? _THEME_PAINT_HEX[loadoutKey] : _themeHex;   // (v44.40) match the PAINT's hue where it differs from the class colour
+          if (_themeHex != null && m && m.map && !(typeof m.name === 'string' && m.name.indexOf('cockpit') === 0) && !params.transparent) _lssThemeStripHook(mat, _paintHex);
         } catch (_) {}
         if (_hullStrip) {   // (v44.23) see _lssApplyHullGlow
           mat.userData._hullEmis = { map: m.emissiveMap,
@@ -35171,15 +35172,16 @@ function _shipScanInsert(top, topD, e, d) {
   while (i > 0 && topD[i - 1] > d) { top[i] = top[i - 1]; topD[i] = topD[i - 1]; i--; }
   top[i] = e; topD[i] = d;
 }
+const _THEME_PAINT_HEX = { SLAYER: 0xbbff44 };
 function _lssThemeStripHook(m, themeHex) {
   if (!m || !m.map || m.userData._themeU) return null;
   const G = (typeof window !== 'undefined' && window.__theme) || {};
   const on = !(typeof input !== 'undefined' && input && input.hullGlow === false);
   const u = {
     uThemeCol: { value: new THREE.Color(themeHex) },
-    uThemeGlow: { value: on ? ((G.glow != null) ? +G.glow : 2.0) : 0.0 },
-    uThemeTight: { value: (G.tight != null) ? +G.tight : 0.985 },
-    uThemeSat: { value: (G.sat != null) ? +G.sat : 0.22 },
+    uThemeGlow: { value: on ? ((G.glow != null) ? +G.glow : 4.0) : 0.0 },   // (v44.40) 2.0 -> 4.0: the panels are dark paint, so the glow is diffuse x4 (~0.4-0.8 linear) - reads by day, shines at night
+    uThemeTight: { value: (G.tight != null) ? +G.tight : 0.975 },   // (v44.40) 0.985 -> 0.975
+    uThemeSat: { value: (G.sat != null) ? +G.sat : 0.35 },           // (v44.40) RELATIVE saturation, 0.22 abs -> 0.35 rel
   };
   m.userData._themeU = u;
   const prev = m.onBeforeCompile;
@@ -35190,7 +35192,7 @@ function _lssThemeStripHook(m, themeHex) {
       .replace('void main() {', 'uniform vec3 uThemeCol; uniform float uThemeGlow; uniform float uThemeTight; uniform float uThemeSat;\nvoid main() {')
       .replace('#include <emissivemap_fragment>',
         '#include <emissivemap_fragment>\n#ifdef USE_MAP\n\t{ vec3 _ta = texture2D(map, vMapUv).rgb;'
-        + ' float _tsat = max(_ta.r, max(_ta.g, _ta.b)) - min(_ta.r, min(_ta.g, _ta.b));'
+        + ' float _tmx = max(_ta.r, max(_ta.g, _ta.b)); float _tsat = (_tmx - min(_ta.r, min(_ta.g, _ta.b))) / max(_tmx, 1e-4);'   // (v44.40) relative saturation: a dark teal panel is as saturated as a bright one
         + ' float _tm = dot(normalize(_ta + 1e-4), normalize(uThemeCol + 1e-4));'
         + ' float _tk = smoothstep(uThemeTight, 1.0, _tm) * smoothstep(uThemeSat * 0.5, uThemeSat, _tsat);'
         + ' totalEmissiveRadiance += diffuseColor.rgb * _tk * uThemeGlow; }\n#endif');
@@ -35211,7 +35213,7 @@ function _lssApplyHullGlow() {
       const TU = mat && mat.userData && mat.userData._themeU;   // (v44.31) the theme strips follow the same switch
       if (TU) {
         const G = (typeof window !== 'undefined' && window.__theme) || {};
-        TU.uThemeGlow.value = on ? ((G.glow != null) ? +G.glow : 2.0) : 0.0;
+        TU.uThemeGlow.value = on ? ((G.glow != null) ? +G.glow : 4.0) : 0.0;   // (v44.40)
         if (G.tight != null) TU.uThemeTight.value = +G.tight;
         if (G.sat != null) TU.uThemeSat.value = +G.sat;
         n++;
