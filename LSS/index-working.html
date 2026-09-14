@@ -6110,7 +6110,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.10';
+const LSS_BUILD = '44.11';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -12782,7 +12782,15 @@ function _applyModeClientSetup(mode) {
   // dropin_state / _lssAdoptRoomMode). Record it BEFORE deferring, or _lssRoomModeOr below can
   // answer from a stale roomMode and override the very instruction we are applying.
   try { if (typeof net !== 'undefined' && net && mode) net.roomMode = mode; } catch (_) {}
-  LSS.MODE = _lssRoomModeOr(mode || 'classic');   // (v43.19) a room has one mode
+  // ⭐⭐ (v44.11) THE PROJECTION POINT. Every path that applies a ROOM decision funnels through
+  // here - _lssAdoptRoomMode, _lssApplyModeDecree, open_solo_start, dropin_state - so this is the
+  // one place that turns the room's single agreed tag into local state. The mode and the flag are
+  // written in two consecutive synchronous statements with no await and no callback between them,
+  // so no code in the file can observe them disagreeing.
+  const _tag = _lssRoomModeOr(mode || 'classic');
+  LSS.MODE = _lssTagMode(_tag);                   // (v43.19) a room has one mode
+  _lssSyncCyberToTag(_tag);                       // (v44.11) ...and the flag is its projection
+  mode = LSS.MODE;                                // the rest of this function switches on the MODE
   if (mode === 'race') {
     try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
     try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
@@ -15786,10 +15794,21 @@ function handleNetEvent(evt, fromPeerId) {
   // (v43.26) somebody used the ROOM MODE picker. Apply it (last pick wins, so the click is
   // immediate everywhere) and let the decider turn it into the decree that makes it stick.
   if (evt.type === 'mode_pick' && typeof evt.mode === 'string' && evt.mode) {
-    _lssModeLog('rx', 'mode_pick', evt.mode, null, fromPeerId, 'peer picked');
-    net._forcedMode = evt.mode;
+    // ⭐⭐ (v44.11) NORMALISE AT THE DOOR, AND COMPARE IN TAG SPACE. This receiver was the hole
+    // in the first draft of this change, and adversarial review found it twice independently: it
+    // reads evt.mode on its own, so a peer picking CYBERPUNK CITY sent mode:'freeflight' and this
+    // guard - LSS.MODE !== evt.mode - was FALSE for a peer already in exhibition. The adopt never
+    // ran, the flag never armed, and because _lssPickRoomMode does not announce, the decider's
+    // picture of that peer was never refreshed either: a permanent two-tab split on the one path
+    // the whole one-decider design exists to prevent.
+    // _lssNotePeerMode here is the repair channel - it is what makes the decider's next ranking see
+    // the pick even when the picker is not the decider.
+    const _t = _lssTagOf(evt) || evt.mode;
+    _lssModeLog('rx', 'mode_pick', _t, null, fromPeerId, 'peer picked');
+    net._forcedMode = _t;
     net._decreedMode = null;
-    try { if (LSS.MODE !== evt.mode) { _lssAdoptRoomMode(evt.mode); _lssModeChosen(evt.mode); } } catch (_) {}
+    try { _lssNotePeerMode(fromPeerId, { mode: _t, ago: 0, inRoom: 0 }); } catch (_) {}
+    try { if (_lssRoomTag() !== _t) { _lssAdoptRoomMode(_t); _lssModeChosen(_t); } } catch (_) {}
     try { _lssModeDecide(); } catch (_) {}
     try { _lssRenderLobbyMode(); } catch (_) {}
     return;
@@ -92922,12 +92941,85 @@ function _lssInsaneSpeed() {
 // Modelled on MATCH SPEED (v43.13) - the existing room-wide ship-select control - and carrying its
 // hard-won lesson: the send is NOT gated on net.active, because a room can be formed and peered while
 // net.active is still false, and gating on it means the click applies locally and reaches nobody.
-const _LSS_PICKABLE_MODES = ['classic', 'freeflight', 'endless', 'race', 'assault'];
+// ⭐⭐⭐ (v44.11) CYBERPUNK CITY IS A ROOM *TAG*, NOT A MODE. Owner: "in the room mode
+// selection, cyberpunk city is missing from the rotation."
+// It was missing for a structural reason: startCyberpunkCity() sets game._cyber = {armed:true} and
+// net.cyber = true and then calls startFreeFlight(), so LSS.MODE is 'freeflight' and the string
+// 'cyberpunk' does not exist anywhere. The rotation iterates mode STRINGS, so it could not offer
+// something that is not one.
+// ⚠⚠ AND IT MUST NOT BECOME ONE. Costed before choosing this shape: _visibleMapKeys branches
+//   entirely on LSS.MODE and its freeflight arm is what returns the hub_ maps; a 'cyberpunk' string
+//   would miss that arm, the classic filter at the tail explicitly drops hub_ keys, and getNextMap's
+//   v43.73 legality gate would then reassign game.selectedMap - CYBERPUNK CITY would build on an
+//   elimination arena with no city and no carrier, and the decree would push that map to the room.
+//   `MODE === 'freeflight'` also appears 51 times; v38.02 already hit this trap and its fix
+//   (_aegisModeAllowed) deliberately keys on the FLAG, not the string.
+// So: LSS.MODE never holds 'cyberpunk'. The ROOM agrees on a tag, and
+//     tag 'cyberpunk'  ===  LSS.MODE 'freeflight' + game._cyber.armed
+// ⚠⚠⚠ THE FLAG IS NOT A SECOND AGREED VALUE. That is the shape of the four failed
+//   pairwise fixes this file records (v43.19-43.30). It is a local PROJECTION of the one decided
+//   string, recomputed only where LSS.MODE is written from a room decision - see
+//   _applyModeClientSetup, which sets both in three consecutive synchronous statements with nothing
+//   able to run between them. There is still exactly one decider emitting exactly one scalar.
+// (!) _lssRoomTag refuses to report 'cyberpunk' unless LSS.MODE is actually 'freeflight', so the
+//     tag can never assert a state the mode contradicts even if a flag is left armed by some path.
+function _lssRoomTag() {
+  try {
+    const armed = !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed);
+    const m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
+    return (armed && m === 'freeflight') ? 'cyberpunk' : m;
+  } catch (_) { return 'classic'; }
+}
+// tag -> the LSS.MODE string it runs as. The ONLY unmapper; every write of LSS.MODE from a tag goes
+// through it, or a raw 'cyberpunk' poisons 51 `MODE === 'freeflight'` tests at once.
+function _lssTagMode(tag) { return (tag === 'cyberpunk') ? 'freeflight' : tag; }
+// What an arriving packet MEANS, in one expression. Reads the new `tag` field and the legacy
+// mode+cyber pair the v37.80 senders have shipped since long before this commit, so open_solo_start
+// and dropin_state need no edit to keep working.
+function _lssTagOf(evt) {
+  try {
+    if (!evt) return null;
+    if (typeof evt.tag === 'string' && evt.tag) return evt.tag;
+    if (evt.cyber && evt.mode === 'freeflight') return 'cyberpunk';
+    return evt.mode || null;
+  } catch (_) { return null; }
+}
+// Write one tag onto an outgoing packet as all three spellings, from ONE argument. Three fields
+// authored by one sender inside one packet cannot half-arrive; two fields on two different events
+// can, and that is what the room has today (cyber rides open_solo_start, the mode rides the decree).
+function _lssTagPut(msg, tag) {
+  try { msg.mode = _lssTagMode(tag); msg.cyber = (tag === 'cyberpunk'); msg.tag = tag; } catch (_) {}
+  return msg;
+}
+// THE PROJECTION. Idempotent: when the flag already matches it returns without touching the object,
+// so a re-applied decree cannot re-roll msalt or wipe a live match's ledger.
+function _lssSyncCyberToTag(tag) {
+  try {
+    const want = (tag === 'cyberpunk');
+    const have = !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed);
+    if (want === have) return;
+    if (want) {
+      if (typeof game !== 'undefined' && game) {
+        game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false,
+                        round: 1, ledger: { capsA: 0, capsB: 0, attA: 0, attB: 0 },
+                        msalt: (Math.random() * 1e9) | 0 };
+      }
+      try { if (typeof net !== 'undefined' && net) net.cyber = true; } catch (_) {}
+    } else {
+      // the full teardown, not just two nulls - it also drops the cine lights and the carrier
+      try { if (typeof _lssClearModeSetup === 'function') _lssClearModeSetup(); } catch (_) {}
+      try { if (typeof game !== 'undefined' && game) game._cyber = null; } catch (_) {}
+      try { if (typeof net !== 'undefined' && net) net.cyber = false; } catch (_) {}
+    }
+  } catch (_) {}
+}
+const _LSS_PICKABLE_MODES = ['classic', 'freeflight', 'cyberpunk', 'endless', 'race', 'assault'];
 function _lssModeDisplayName(m) {
   if (m === 'race') return 'RACE MODE';
   if (m === 'assault') return 'ASSAULT';
   if (m === 'endless') return 'ENDLESS';
   if (m === 'freeflight') return 'EXHIBITION';
+  if (m === 'cyberpunk') return 'CYBERPUNK CITY';   // (v44.11)
   if (m === 'campaign') return 'CAMPAIGN';
   return 'ELIMINATION';
 }
@@ -92936,6 +93028,7 @@ function _lssModeBlurb(m) {
   if (m === 'assault') return 'Storm or hold the field.';
   if (m === 'endless') return 'A cavern without end.';
   if (m === 'freeflight') return 'Patrol the open overworld.';
+  if (m === 'cyberpunk') return 'Storm the carrier, or hold the city.';   // (v44.11)
   return 'Team elimination.';
 }
 // Same lock rule as MATCH SPEED and race mode, for the same reason: changing it under a live round
@@ -92951,11 +93044,10 @@ function _lssRenderLobbyMode() {
     if (!box) return;
     const cur = document.getElementById('ss-mode-current');
     const desc = document.getElementById('ss-mode-desc');
-    const m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
-    // Campaign + Cyberpunk are their own journeys, not room modes you cycle into.
+    // (v44.11) the TAG, so CYBERPUNK CITY is a rung of the rotation and not a hidden box.
+    const m = _lssRoomTag();
     const pickable = _LSS_PICKABLE_MODES.indexOf(m) !== -1;
-    const cyber = !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed);
-    box.style.display = (cyber || m === 'campaign') ? 'none' : '';
+    box.style.display = (m === 'campaign') ? 'none' : '';
     // (v43.26) ⚠ USE THE CAPTION'S OWN NAME FUNCTION. _ssModeName distinguishes SKIRMISH (classic,
     // solo) from ELIMINATION (classic, networked); a second name table got that wrong and the two
     // surfaces disagreed on the same screen. After v43.25 that is exactly the bug class to avoid -
@@ -92993,7 +93085,11 @@ function _lssStepRoomMode(dir) {
   try {
     if (_lssRoomModeLocked()) return;
     const list = _LSS_PICKABLE_MODES;
-    let i = list.indexOf((typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic');
+    // ⚠ (v44.11) INDEX ON THE TAG. On LSS.MODE, EXHIBITION and CYBERPUNK CITY both answer
+    // 'freeflight' and therefore the same index - so `next` from exhibition would land on
+    // cyberpunk's own slot and read as a dead press, and `prev` from cyberpunk would skip
+    // exhibition entirely. The tag is a bijection with the list, so both arrows step both ways.
+    let i = list.indexOf(_lssRoomTag());
     if (i < 0) i = 0;
     const next = list[((i + dir) % list.length + list.length) % list.length];
     _lssPickRoomMode(next);
@@ -93009,7 +93105,8 @@ function _lssPickRoomMode(mode) {
     _lssAdoptRoomMode(mode);
     _lssModeChosen(mode);
     _lssModeLog('tx', 'mode_pick', mode, _lssModeAgo(), null, 'picked in ship select');
-    try { if (typeof net !== 'undefined' && net && net.sendEvent) net.sendEvent({ type: 'mode_pick', mode: mode }); } catch (_) {}
+    // (v44.11) all three spellings from one tag - see _lssTagPut.
+    try { if (typeof net !== 'undefined' && net && net.sendEvent) net.sendEvent(_lssTagPut({ type: 'mode_pick' }, mode)); } catch (_) {}
     try { _lssModeDecide(); } catch (_) {}
     _lssRenderLobbyMode();
   } catch (_) {}
@@ -93102,7 +93199,9 @@ function _lssModeChosen(mode) {
   try {
     LSS._modeChosen = true;
     LSS._modeChosenAt = performance.now();
-    if (mode) LSS.MODE = mode;
+    // (v44.11) `mode` may be a TAG here (the picker and the mode_pick receiver both pass one).
+    // Unmap it: a raw 'cyberpunk' in LSS.MODE breaks 51 `=== 'freeflight'` tests at once.
+    if (mode) LSS.MODE = _lssTagMode(mode);
   } catch (_) {}
 }
 function _lssModeAgo() {
@@ -93202,7 +93301,7 @@ function _lssNotePeerMode(peerId, evt) {
     if (!net._peerModes) net._peerModes = new Map();
     if (!evt || typeof evt !== 'object') return;
     net._peerModes.set(String(peerId), {
-      mode: evt.mode,
+      mode: _lssTagOf(evt) || evt.mode,   // (v44.11) record the peer's TAG
       ago: (typeof evt.ago === 'number') ? evt.ago : -1,
       // (v43.29) how long they have been in this ROOM - the host signal. Absent from pre-v43.29
       // clients, which then rank as brand-new arrivals; harmless, since `ago` still separates them.
@@ -93234,7 +93333,7 @@ function _lssModeDecide() {
     try {
       const _myIn = (net.roomJoinedAt ? Math.max(0, performance.now() - net.roomJoinedAt) : 0);
       const _myAgo = _lssModeAgo();
-      if (_myAgo >= 0) _cands.push({ id: String(net.myPeerId), mode: LSS.MODE, ago: _myAgo, inRoom: _myIn,
+      if (_myAgo >= 0) _cands.push({ id: String(net.myPeerId), mode: _lssRoomTag(), ago: _myAgo, inRoom: _myIn,   // (v44.11) my TAG
                                      map: (game && game.selectedMap) || null, mine: true });
       if (net._peerModes) {
         net._peerModes.forEach((v, id) => {
@@ -93277,10 +93376,14 @@ function _lssModeDecide() {
     net._decreedMode = bestMode;
     net.roomMode = bestMode;
     const decree = {
-      type: 'mode_decree', mode: bestMode,
       by: String(net.myPeerId), ago: bestAgo,
       map: _map, seed: _seed,
     };
+    // (v44.11) bestMode is a TAG. Spelling it with _lssTagPut means an older client reads
+    // mode:'freeflight' and lands in plain EXHIBITION - degraded but coherent - instead of writing
+    // 'cyberpunk' into its own LSS.MODE, which has no recovery path.
+    _lssTagPut(decree, bestMode);
+    decree.type = 'mode_decree';
     _lssModeLog('tx', 'mode_decree', bestMode, bestAgo, bestId, 'I AM DECIDER -> ' + bestMode + (_map ? ' / ' + _map : ''));
     try { net.sendEvent(decree); } catch (_) {}
     // (v43.91) ⚠ A DECREE REPEAT WAS TRIED HERE AND BACKED OUT. The defect it targets is real - this
@@ -93358,6 +93461,8 @@ function _lssApplyModeDecree(evt, mine) {
     // So a decree is authoritative only from whoever we currently believe the decider is. If our peer
     // list is too stale to name one, we accept it (better a shared answer than none) - and the
     // _lssModeDecide() now fired from onPeerJoin re-settles the room once everyone is really visible.
+    // (v44.11) normalise the packet to a tag ONCE, at the door, so every test below is in tag space.
+    try { const _t = _lssTagOf(evt); if (_t) evt.mode = _t; } catch (_) {}
     const _dec = _lssModeDecider();
     if (!mine && evt.by && _dec && String(evt.by) !== String(_dec)) {
       _lssModeLog('rx', 'mode_decree', evt.mode, evt.ago, evt.by, 'IGNORED - not the decider (' + String(_dec).slice(0, 6) + ')');
@@ -93382,7 +93487,7 @@ function _lssApplyModeDecree(evt, mine) {
     // reconciled them: selectMap only broadcasts map_change when a HUMAN changes it, so the INITIAL
     // map was never announced by anybody. (launch_at carries no map either, so the divergence
     // survived all the way into the world build.)
-    const modeChanged = (LSS.MODE !== evt.mode);
+    const modeChanged = (_lssRoomTag() !== evt.mode);   // (v44.11) tag space
     const live = (typeof game !== 'undefined' && game &&
                   (game.state === 'playing' || game.state === 'warmup' || game.state === 'roundEnd'));
     if (evt.seed != null) { try { net.worldSeed = evt.seed >>> 0; } catch (_) {} }
@@ -93544,7 +93649,7 @@ function _lssClearModeSetup() {
 function _lssAdoptRoomMode(mode) {
   try {
     if (!mode || typeof LSS === 'undefined') return;
-    if (LSS.MODE === mode) return;
+    if (_lssRoomTag() === mode) return;   // (v44.11) tag space: freeflight and cyberpunk differ here
     // Never yank the world out from under a match already running - a mid-match adopt would rewrite
     // flags for a mode whose level is not loaded. Live arrivals are dropin_state's job.
     const inPlay = (typeof game !== 'undefined' && game &&
@@ -93553,7 +93658,11 @@ function _lssAdoptRoomMode(mode) {
     console.log('[net] room is playing', mode, '- adopting its setup (was', LSS.MODE + ')');
     _lssClearModeSetup();
     try { if (typeof _applyModeClientSetup === 'function') _applyModeClientSetup(mode); } catch (_) {}
-    LSS.MODE = mode;   // _applyModeClientSetup routes through _lssRoomModeOr; make the result explicit
+    // ⚠ (v44.11) UNMAP. `mode` is a TAG on every caller now, and this line writes LSS.MODE
+    // directly - a raw 'cyberpunk' here would break all 51 `MODE === 'freeflight'` tests at once.
+    // _applyModeClientSetup already set both halves correctly one line above; this restates the
+    // MODE, so it must restate the unmapped one.
+    LSS.MODE = _lssTagMode(mode);   // _applyModeClientSetup routes through _lssRoomModeOr; make the result explicit
     try { if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
     _lssRefreshModeUI();
     _lssSayRoomMode(mode);
@@ -93981,7 +94090,11 @@ try {
 // (v43.74) _ssEnsureLegalMap() removed - see the note in _lssRoomModeChoose below.
 
 function _lssRoomModeChoose(want) {
-  const m = _lssRoomModeOr(want);
+  // (v44.11) `want` and the room's answer are both TAGS now; callers assign the result straight to
+  // LSS.MODE, so this unmaps before returning and projects the flag alongside it.
+  const _t = _lssRoomModeOr(want);
+  const m = _lssTagMode(_t);
+  try { _lssSyncCyberToTag(_t); } catch (_) {}
   try { _lssModeChosen(); } catch (_) {}
   // (v43.74) ⚠ THE v43.63 CALL TO _ssEnsureLegalMap() WAS HERE, AND IT NEVER DID ANYTHING. Every
   // caller of this function is written `LSS.MODE = _lssRoomModeChoose('race')` - the assignment
