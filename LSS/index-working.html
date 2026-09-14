@@ -6110,7 +6110,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.15';
+const LSS_BUILD = '44.16';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -16558,11 +16558,18 @@ function handleNetEvent(evt, fromPeerId) {
     // (gun1/gun2) instead of the networked hull-center origin. Cosmetic ; the
     // hit-claim path is unaffected. Overrides `from` in place when we have the
     // shooter's mesh + markers ; otherwise keeps the networked origin.
-    if (peerForWidth && peerForWidth.mesh && typeof shipMuzzleWorld === 'function') {
-      const _pmn = peerForWidth.mesh.userData && peerForWidth.mesh.userData.muzzleNodes;
+    // ⚠⚠ (v44.16) THIS BLOCK HAD NEVER RUN ONCE. A `net.peers` record is created with exactly
+    // eleven fields (state, prevState, lastUpdate, interpT, loadoutKey, team, networkPlayer, ready,
+    // warmupReady, isJudge) and `mesh` is not among them - the ship lives one level down, on
+    // `peer.networkPlayer.mesh`. So `peerForWidth.mesh` has been undefined since v32.21 and every
+    // peer tracer has originated from the networked HULL CENTRE, which is also why peer fire looks
+    // like it comes out of the middle of the ship rather than out of its guns.
+    const _pfMesh = peerForWidth && peerForWidth.networkPlayer && peerForWidth.networkPlayer.mesh;
+    if (_pfMesh && typeof shipMuzzleWorld === 'function') {
+      const _pmn = _pfMesh.userData && _pfMesh.userData.muzzleNodes;
       if (_pmn && _pmn.length) {
         peerForWidth._muzzleShot = (peerForWidth._muzzleShot | 0) + 1;
-        shipMuzzleWorld(peerForWidth.mesh, peerForWidth._muzzleShot, from);
+        shipMuzzleWorld(_pfMesh, peerForWidth._muzzleShot, from);
       }
     }
     // (v33.88) splash the lake where a PEER's beam/tracer crosses the surface — was local-only, so other
@@ -16623,11 +16630,14 @@ function handleNetEvent(evt, fromPeerId) {
     const dir = new THREE.Vector3(evt.dx, evt.dy, evt.dz);
     // (v32.21) Originate the spread burst at the shooter's real GLB gun muzzle.
     const _pbPeer = net.peers.get(fromPeerId);
-    if (_pbPeer && _pbPeer.mesh && typeof shipMuzzleWorld === 'function') {
-      const _pbmn = _pbPeer.mesh.userData && _pbPeer.mesh.userData.muzzleNodes;
+    // (v44.16) `.mesh` on a peer RECORD is undefined - the ship is at peer.networkPlayer.mesh. See
+    // the matching note in the fire_tracer handler; this is the same dead block, second of three.
+    const _pbMesh = _pbPeer && _pbPeer.networkPlayer && _pbPeer.networkPlayer.mesh;
+    if (_pbMesh && typeof shipMuzzleWorld === 'function') {
+      const _pbmn = _pbMesh.userData && _pbMesh.userData.muzzleNodes;
       if (_pbmn && _pbmn.length) {
         _pbPeer._muzzleShot = (_pbPeer._muzzleShot | 0) + 1;
-        shipMuzzleWorld(_pbPeer.mesh, _pbPeer._muzzleShot, origin);
+        shipMuzzleWorld(_pbMesh, _pbPeer._muzzleShot, origin);
       }
     }
     spawnPelletBurst(origin, dir, evt.range || 600);
@@ -19880,8 +19890,28 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir, mine) {
       // off the view axis in first. Pushing the flash out past the nose fixes BOTH honestly:
       // it clears the hull so the chase camera can see it, and perspective convergence drags it
       // back toward the view centre from the seat.
+      // ⭐⭐⭐ (v44.16) ...AND THAT PUSH ONLY EVER HAPPENED FOR THE LOCAL PILOT, WHICH IS WHY
+      // NOBODY COULD SEE ANYONE ELSE'S MUZZLE FLASH. Owner: "muzzle effects are not seen in
+      // multiplayer on other ships". The reasoning in the paragraph above applies with MORE force to
+      // a peer or a bot than to yourself - you are always looking at their hull from outside, so a
+      // flash inside it is occluded every single frame - but `_fmHull` is deliberately zero for
+      // anyone but the local pilot (see its declaration), so every peer and every bot got the bare
+      // `1.5` fallback. On a 140-unit dreadnought that is still deep inside the nose, and since the
+      // billboard stays depth-tested for anyone but the first-person pilot (see the renderOrder note
+      // below), their own opaque hull wins the depth test and the flash is simply never drawn.
+      // Nothing was missing from the wire: the receiver has always called this function for peer
+      // shots. The flash spawned, inside the ship, every time.
+      // ⚠ `_fmOther` - the real hull length for a non-local shooter - was already being computed
+      //   right above for the SCALE, and was the one thing this line needed. It was sitting there.
+      // ⚠ The fraction is the observer's, not the pilot's. The pilot's 0.05 is tuned for an eye
+      //   ~46 u from the gun; an observer is 200+ u away, which is exactly why the scale term above
+      //   already uses a separate `otherScale` of 0.15. Same reasoning, same number: the owner's own
+      //   sweep at 230 u read 5.6 invisible / 14 subtle / 21 unmistakable, and 0.15 of a 140-unit
+      //   hull is 21. Do NOT "fix" this with depthTest:false - that regression is documented below.
       const _fmFwd = (_mk.fwd != null) ? _mk.fwd : 0.05;
-      fm.position.copy(pos).addScaledVector(dir, _fmHull ? _fmHull * _fmFwd : 1.5);
+      const _fmFwdO = (_mk.otherFwd != null) ? _mk.otherFwd : 0.15;
+      const _fmPush = _fmHull ? (_fmHull * _fmFwd) : (_fmOther ? (_fmOther * _fmFwdO) : 1.5);
+      fm.position.copy(pos).addScaledVector(dir, _fmPush);
       // ⚠⚠ (v42.16) PYRO IS NOT TRACKER. Measured at the instant of spawn, 5 consecutive shots:
       // TRACKER's flash projects to NDC [-0.57,-0.29] - on screen, just peripheral, so weight alone
       // fixes it. PYRO's lands at [-2.46,-1.38] on 3 of 5 shots - fully OUTSIDE the frame (its gun
@@ -20348,11 +20378,15 @@ function spawnNetworkProjectile(data, fromPeerId) {
   // real GLB gun muzzle (gun1/gun2) instead of the networked hull center.
   {
     const _npPeer = net.peers.get(fromPeerId);
-    if (_npPeer && _npPeer.mesh && typeof shipMuzzleWorld === 'function') {
-      const _npmn = _npPeer.mesh.userData && _npPeer.mesh.userData.muzzleNodes;
+    // (v44.16) Third and last of the dead re-anchors - see the fire_tracer note. This one also
+    // moves the projectile's own spawn point, not just its flash, so peer rockets and bolts have
+    // been leaving the middle of the ship rather than its gun pods.
+    const _npMesh = _npPeer && _npPeer.networkPlayer && _npPeer.networkPlayer.mesh;
+    if (_npMesh && typeof shipMuzzleWorld === 'function') {
+      const _npmn = _npMesh.userData && _npMesh.userData.muzzleNodes;
       if (_npmn && _npmn.length) {
         _npPeer._muzzleShot = (_npPeer._muzzleShot | 0) + 1;
-        shipMuzzleWorld(_npPeer.mesh, _npPeer._muzzleShot, origin);
+        shipMuzzleWorld(_npMesh, _npPeer._muzzleShot, origin);
       }
     }
   }
@@ -79425,10 +79459,35 @@ function _slayerFireBurst(pt, col, i) {
   try { _spawnClassFireBurst(pt, col, sz); } catch (_) {}
 }
 function fireSpread(origin, dir, w) {
+  // ⭐⭐ (v44.16) AIMING TIGHTENS THE PATTERN AND MAKES IT REACH. Owner: "when slayer aims/zooms
+  // his gun will narrow his shotgun cone, and shoot further, with double zoom even a little bit
+  // more". Both terms were hard constants: the cone was a literal 0.08 and the reach was the
+  // weapon's flat `w.range` (1400).
+  // ⚠ NEVER WRITE THESE BACK ONTO `w`. `w` IS `player.weapon`, which is a live reference into the
+  //   shared LOADOUTS literal - not a copy. Mutating `w.range` here would permanently rewrite
+  //   LOADOUTS.SLAYER.weapon for the rest of the session, following the player through respawns and
+  //   into every later match. These are locals for exactly that reason.
+  // ⚠ THE DOUBLE ZOOM ALREADY EXISTED (v39.54 double-tap-and-hold, 2.4x -> 4.8x) and was simply
+  //   never wired to anything but the camera. `game._adsZoom` is the smoothed 0..1 ramp and
+  //   `game._adsDouble` says the second stage is engaged, so this reads them rather than
+  //   re-deriving the aim from raw input - the ramp survives a frame of input jitter.
+  // ⚠ MULTIPLAYER NEEDS NO PROTOCOL CHANGE, and that is worth stating because it looks like it
+  //   should. Damage is resolved entirely on the SHOOTER's machine and crosses the wire only as an
+  //   already-computed number in a hit claim, so a peer never recomputes this cone. The visual is
+  //   safe too: the `pellet_burst` event below sends each pellet's direction EXPLICITLY, so a
+  //   narrowed cone renders correctly on every peer for free.
+  const _adsZ = Math.max(0, Math.min(1, (typeof game !== 'undefined' && game._adsZoom) || 0));
+  const _adsD = !!(typeof game !== 'undefined' && game._adsDouble);
+  const _SK = (typeof window !== 'undefined')
+    ? (window.__slayerAds || (window.__slayerAds = { cone1: 0.45, cone2: 0.26, range1: 1.6, range2: 2.0 }))
+    : { cone1: 0.45, cone2: 0.26, range1: 1.6, range2: 2.0 };
+  const _coneMul  = 1 - _adsZ * (1 - (_adsD ? _SK.cone2 : _SK.cone1));
+  const _rangeMul = 1 + _adsZ * ((_adsD ? _SK.range2 : _SK.range1) - 1);
+  const _slRange  = w.range * _rangeMul;
   for (let i = 0; i < w.pellets; i++) {
     
     
-    const spreadAngle = 0.08; 
+    const spreadAngle = 0.08 * _coneMul; 
     const pitch = (Math.random() - 0.5) * spreadAngle;
     const heading = (Math.random() - 0.5) * spreadAngle;
     const bank = (Math.random() - 0.5) * spreadAngle * 0.5;
@@ -79437,7 +79496,7 @@ function fireSpread(origin, dir, w) {
     rotQ.setFromEuler(euler);
     const spreadDir = dir.clone().applyQuaternion(rotQ).normalize();
 
-    const levelDist = raycastLevel(origin, spreadDir, w.range);
+    const levelDist = raycastLevel(origin, spreadDir, _slRange);
     const end = origin.clone().add(spreadDir.clone().multiplyScalar(levelDist));
     // (v38.55) hoisted out of the wall branch below - the hull and leviathan branches want it too
     const _slCol = (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0xff66ff;
@@ -79448,7 +79507,7 @@ function fireSpread(origin, dir, w) {
     spawnPelletBurst(origin, spreadDir, levelDist);
     // Wall ripple for every Slayer pellet that hits a
     // wall before max range.
-    if (levelDist < w.range) {
+    if (levelDist < _slRange) {
       if (typeof spawnWallRipple === 'function') spawnWallRipple(end, _slCol);
       _slayerFireBurst(end, _slCol, i);      // (v38.55) fire on the surface it stopped against
     }
@@ -79469,7 +79528,7 @@ function fireSpread(origin, dir, w) {
       if (!obj.alive) continue;
       const toObj = _spToTgt.subVectors(obj.position, origin);
       const proj = toObj.dot(spreadDir);
-      if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
+      if (proj < 0 || proj > Math.min(_slRange, levelDist)) continue;
       const closest = _spColTest.copy(origin).addScaledVector(spreadDir, proj);
       if (closest.distanceTo(obj.position) < (obj.collisionRadius || 60) && proj < bestObstDist) {
         bestObst = obj;
@@ -79482,7 +79541,7 @@ function fireSpread(origin, dir, w) {
         if (!mon.alive || !mon.mesh) continue;
         const toMon = _spToTgt.subVectors(mon.position, origin);
         const proj = toMon.dot(spreadDir);
-        if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
+        if (proj < 0 || proj > Math.min(_slRange, levelDist)) continue;
         const closest = _spColTemp.copy(origin).addScaledVector(spreadDir, proj);
         if (closest.distanceTo(mon.position) < mon.collisionRadius && proj < bestObstDist) {
           bestObst = mon;
@@ -79495,10 +79554,10 @@ function fireSpread(origin, dir, w) {
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === player.team) continue;
       if (bot.isOwBoss && typeof bot.rayDist === 'function') {   // (v38.90) the leviathan: the pellet meets its body, range to the skin
-        const _bd = bot.rayDist(origin, spreadDir, Math.min(w.range, levelDist));
+        const _bd = bot.rayDist(origin, spreadDir, Math.min(_slRange, levelDist));
         if (_bd >= 0) {
           if (bestObst && bestObstDist < _bd) break;
-          const rangeFalloff = Math.max(0.3, 1 - (_bd / w.range) * 0.7);
+          const rangeFalloff = Math.max(0.3, 1 - (_bd / _slRange) * 0.7);
           let finalDmg = w.damage * rangeFalloff;
           if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
           const _hp = _spColTest.copy(origin).addScaledVector(spreadDir, _bd);
@@ -79517,13 +79576,13 @@ function fireSpread(origin, dir, w) {
       }
       const toBot = _spToTgt.subVectors(bot.position, origin);
       const proj = toBot.dot(spreadDir);
-      if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
+      if (proj < 0 || proj > Math.min(_slRange, levelDist)) continue;
       const closest = _spColTest.copy(origin).addScaledVector(spreadDir, proj);
       if (closest.distanceTo(bot.position) < bot.chassis.hullLength * 1.2) {
         // Obstacle blocks this pellet if it's closer
         if (bestObst && bestObstDist < proj) break;
         // Spread damage falloff: significant drop-off at range (shotgun behavior)
-        const rangeFalloff = Math.max(0.3, 1 - (proj / w.range) * 0.7);
+        const rangeFalloff = Math.max(0.3, 1 - (proj / _slRange) * 0.7);
         let finalDmg = w.damage * rangeFalloff;
         if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
         const hadShield = bot.shield > 0;
@@ -79549,7 +79608,7 @@ function fireSpread(origin, dir, w) {
 
     // If obstacle was closer and no bot was hit, damage the obstacle
     if (bestObst && !hitBot) {
-      const rangeRatio = bestObstDist / w.range;
+      const rangeRatio = bestObstDist / _slRange;
       const proximityBoost = Math.max(0.3, 1 - rangeRatio * 0.7);
       const dealt = bestObst.takeDamage(w.damage * proximityBoost);
       if (dealt > 0) {
@@ -80347,12 +80406,51 @@ function executeAbility(slot, ability) {
     // SLAYER: Stun Bolt (electric projectile, pierces ships, drops green
     // lightning chain along its path. Mega Stun Bolt boost applies as before.)
     else if (ability.name === 'Stun Bolt') {
+      // ⭐⭐ (v44.16) TWO BOLTS, FROM THE GUNS, HALF DAMAGE EACH. Owner: "stun bolt on slayer (and
+      // it also looks like it comes out his nose, not his weapons... make it two bolts that come out
+      // at the same time from both weapon muzzles (half the damage each bolt, and they will fly in
+      // parallel)".
+      // The nose problem was literal: this spawned at `player.position`, which the loader centres on
+      // the model's bounding box - so the bolt left the middle of the hull and read as coming out of
+      // the ship's face. Every sibling ability already resolves a real gun marker; this one never
+      // did. `shipMuzzleWorld` walks `userData.muzzleNodes` (the GLB's gun1..gunN markers).
+      // PARALLEL, not converging: both bolts take the SAME `forward`, so they hold their muzzle
+      // separation all the way out instead of crossing at a focal point.
+      // ⚠ TOTAL DAMAGE IS UNCHANGED - each bolt carries half. Landing both on one target is
+      //   identical to the old single bolt; the trade is that a glancing angle can now land only
+      //   one. That is the intended cost of the spread, not an accident.
+      // ⚠ MULTIPLAYER IS FREE HERE. broadcastAbilityProjectile is called per projectile and peers
+      //   spawn arc-wave mirrors from `data.isArcWave` with damage forced to 0, so peers see both
+      //   bolts leave both guns while damage stays resolved on this machine.
       const arcDmg = player.coreActive && player.loadout.core.name === 'Mega Stun Bolt' ? 3000 : 2000;
       const vel = forward.clone().multiplyScalar(800);
-      const proj = new Projectile(player.position.clone(), vel, arcDmg, 150, 'player', LSS.CLASS_COLORS.SLAYER);
-      proj.isArcWave = true; 
-      game.projectiles.push(proj);
-      broadcastAbilityProjectile(proj);
+      const _sbHalf = arcDmg * 0.5;
+      // Resolve the two muzzles. A hull with a single gun marker would otherwise stack both bolts on
+      // the same point, so they are pushed apart along the ship's right axis by a slice of the hull
+      // beam - still parallel, still leaving the gun, just visibly two.
+      const _sbOrigins = [];
+      try {
+        const _sbNodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
+        if (_sbNodes && _sbNodes.length >= 2) {
+          _sbOrigins.push(shipMuzzleWorld(player.mesh, 0, new THREE.Vector3()));
+          _sbOrigins.push(shipMuzzleWorld(player.mesh, 1, new THREE.Vector3()));
+        } else if (_sbNodes && _sbNodes.length === 1) {
+          const _c = shipMuzzleWorld(player.mesh, 0, new THREE.Vector3());
+          const _right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0));
+          if (_right.lengthSq() < 1e-6) _right.set(1, 0, 0);
+          _right.normalize().multiplyScalar(Math.max(4, (player.chassis && player.chassis.hullLength || 90) * 0.09));
+          _sbOrigins.push(_c.clone().add(_right), _c.clone().sub(_right));
+        }
+      } catch (_) {}
+      if (!_sbOrigins.length) {                       // no markers on this hull - old behaviour
+        _sbOrigins.push(player.position.clone(), player.position.clone());
+      }
+      for (const _o of _sbOrigins) {
+        const proj = new Projectile(_o.clone(), vel.clone(), _sbHalf, 150, 'player', LSS.CLASS_COLORS.SLAYER);
+        proj.isArcWave = true;
+        game.projectiles.push(proj);
+        broadcastAbilityProjectile(proj);
+      }
       // Reuse the siphon_drain pluck for the Stun Bolt fire sfx ;
       // its shimmery upper-mid pluck reads as an electric arc launching.
       try { playSound('siphon_drain'); } catch (_) {}

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.15';
+const LSS_BUILD = '44.16';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -7243,11 +7243,12 @@ function handleNetEvent(evt, fromPeerId) {
     const peerLoadout  = peerForWidth && peerForWidth.loadoutKey ? LOADOUTS[peerForWidth.loadoutKey] : null;
     const peerFireRate = peerLoadout && peerLoadout.weapon ? peerLoadout.weapon.fireRate : 0.5;
     const peerWScale   = (peerFireRate <= 0.10) ? 0.55 : 1.0;
-    if (peerForWidth && peerForWidth.mesh && typeof shipMuzzleWorld === 'function') {
-      const _pmn = peerForWidth.mesh.userData && peerForWidth.mesh.userData.muzzleNodes;
+    const _pfMesh = peerForWidth && peerForWidth.networkPlayer && peerForWidth.networkPlayer.mesh;
+    if (_pfMesh && typeof shipMuzzleWorld === 'function') {
+      const _pmn = _pfMesh.userData && _pfMesh.userData.muzzleNodes;
       if (_pmn && _pmn.length) {
         peerForWidth._muzzleShot = (peerForWidth._muzzleShot | 0) + 1;
-        shipMuzzleWorld(peerForWidth.mesh, peerForWidth._muzzleShot, from);
+        shipMuzzleWorld(_pfMesh, peerForWidth._muzzleShot, from);
       }
     }
     if (game._hubWater && typeof _swWpnCross === 'function') { try {
@@ -7288,11 +7289,12 @@ function handleNetEvent(evt, fromPeerId) {
     const origin = new THREE.Vector3(evt.ox, evt.oy, evt.oz);
     const dir = new THREE.Vector3(evt.dx, evt.dy, evt.dz);
     const _pbPeer = net.peers.get(fromPeerId);
-    if (_pbPeer && _pbPeer.mesh && typeof shipMuzzleWorld === 'function') {
-      const _pbmn = _pbPeer.mesh.userData && _pbPeer.mesh.userData.muzzleNodes;
+    const _pbMesh = _pbPeer && _pbPeer.networkPlayer && _pbPeer.networkPlayer.mesh;
+    if (_pbMesh && typeof shipMuzzleWorld === 'function') {
+      const _pbmn = _pbMesh.userData && _pbMesh.userData.muzzleNodes;
       if (_pbmn && _pbmn.length) {
         _pbPeer._muzzleShot = (_pbPeer._muzzleShot | 0) + 1;
-        shipMuzzleWorld(_pbPeer.mesh, _pbPeer._muzzleShot, origin);
+        shipMuzzleWorld(_pbMesh, _pbPeer._muzzleShot, origin);
       }
     }
     spawnPelletBurst(origin, dir, evt.range || 600);
@@ -9655,7 +9657,9 @@ function emitChassisMuzzleFlash(loadoutKey, pos, dir, mine) {
       const _fmCam = (typeof camera !== 'undefined') ? camera : null;
       const fm = _acquireExplosionMesh('flash');
       const _fmFwd = (_mk.fwd != null) ? _mk.fwd : 0.05;
-      fm.position.copy(pos).addScaledVector(dir, _fmHull ? _fmHull * _fmFwd : 1.5);
+      const _fmFwdO = (_mk.otherFwd != null) ? _mk.otherFwd : 0.15;
+      const _fmPush = _fmHull ? (_fmHull * _fmFwd) : (_fmOther ? (_fmOther * _fmFwdO) : 1.5);
+      fm.position.copy(pos).addScaledVector(dir, _fmPush);
       if (_fmSeat && _fmCam && _mk.pull !== false) {
         try {
           const _np = fm.position.clone().project(_fmCam);
@@ -9983,11 +9987,12 @@ function spawnNetworkProjectile(data, fromPeerId) {
   const origin = new THREE.Vector3(data.ox, data.oy, data.oz);
   {
     const _npPeer = net.peers.get(fromPeerId);
-    if (_npPeer && _npPeer.mesh && typeof shipMuzzleWorld === 'function') {
-      const _npmn = _npPeer.mesh.userData && _npPeer.mesh.userData.muzzleNodes;
+    const _npMesh = _npPeer && _npPeer.networkPlayer && _npPeer.networkPlayer.mesh;
+    if (_npMesh && typeof shipMuzzleWorld === 'function') {
+      const _npmn = _npMesh.userData && _npMesh.userData.muzzleNodes;
       if (_npmn && _npmn.length) {
         _npPeer._muzzleShot = (_npPeer._muzzleShot | 0) + 1;
-        shipMuzzleWorld(_npPeer.mesh, _npPeer._muzzleShot, origin);
+        shipMuzzleWorld(_npMesh, _npPeer._muzzleShot, origin);
       }
     }
   }
@@ -51187,10 +51192,18 @@ function _slayerFireBurst(pt, col, i) {
   try { _spawnClassFireBurst(pt, col, sz); } catch (_) {}
 }
 function fireSpread(origin, dir, w) {
+  const _adsZ = Math.max(0, Math.min(1, (typeof game !== 'undefined' && game._adsZoom) || 0));
+  const _adsD = !!(typeof game !== 'undefined' && game._adsDouble);
+  const _SK = (typeof window !== 'undefined')
+    ? (window.__slayerAds || (window.__slayerAds = { cone1: 0.45, cone2: 0.26, range1: 1.6, range2: 2.0 }))
+    : { cone1: 0.45, cone2: 0.26, range1: 1.6, range2: 2.0 };
+  const _coneMul  = 1 - _adsZ * (1 - (_adsD ? _SK.cone2 : _SK.cone1));
+  const _rangeMul = 1 + _adsZ * ((_adsD ? _SK.range2 : _SK.range1) - 1);
+  const _slRange  = w.range * _rangeMul;
   for (let i = 0; i < w.pellets; i++) {
     
     
-    const spreadAngle = 0.08; 
+    const spreadAngle = 0.08 * _coneMul; 
     const pitch = (Math.random() - 0.5) * spreadAngle;
     const heading = (Math.random() - 0.5) * spreadAngle;
     const bank = (Math.random() - 0.5) * spreadAngle * 0.5;
@@ -51199,11 +51212,11 @@ function fireSpread(origin, dir, w) {
     rotQ.setFromEuler(euler);
     const spreadDir = dir.clone().applyQuaternion(rotQ).normalize();
 
-    const levelDist = raycastLevel(origin, spreadDir, w.range);
+    const levelDist = raycastLevel(origin, spreadDir, _slRange);
     const end = origin.clone().add(spreadDir.clone().multiplyScalar(levelDist));
     const _slCol = (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0xff66ff;
     spawnPelletBurst(origin, spreadDir, levelDist);
-    if (levelDist < w.range) {
+    if (levelDist < _slRange) {
       if (typeof spawnWallRipple === 'function') spawnWallRipple(end, _slCol);
       _slayerFireBurst(end, _slCol, i);      // (v38.55) fire on the surface it stopped against
     }
@@ -51223,7 +51236,7 @@ function fireSpread(origin, dir, w) {
       if (!obj.alive) continue;
       const toObj = _spToTgt.subVectors(obj.position, origin);
       const proj = toObj.dot(spreadDir);
-      if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
+      if (proj < 0 || proj > Math.min(_slRange, levelDist)) continue;
       const closest = _spColTest.copy(origin).addScaledVector(spreadDir, proj);
       if (closest.distanceTo(obj.position) < (obj.collisionRadius || 60) && proj < bestObstDist) {
         bestObst = obj;
@@ -51235,7 +51248,7 @@ function fireSpread(origin, dir, w) {
         if (!mon.alive || !mon.mesh) continue;
         const toMon = _spToTgt.subVectors(mon.position, origin);
         const proj = toMon.dot(spreadDir);
-        if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
+        if (proj < 0 || proj > Math.min(_slRange, levelDist)) continue;
         const closest = _spColTemp.copy(origin).addScaledVector(spreadDir, proj);
         if (closest.distanceTo(mon.position) < mon.collisionRadius && proj < bestObstDist) {
           bestObst = mon;
@@ -51248,10 +51261,10 @@ function fireSpread(origin, dir, w) {
     for (const bot of game.entities) {
       if (!bot.alive || bot.team === player.team) continue;
       if (bot.isOwBoss && typeof bot.rayDist === 'function') {   // (v38.90) the leviathan: the pellet meets its body, range to the skin
-        const _bd = bot.rayDist(origin, spreadDir, Math.min(w.range, levelDist));
+        const _bd = bot.rayDist(origin, spreadDir, Math.min(_slRange, levelDist));
         if (_bd >= 0) {
           if (bestObst && bestObstDist < _bd) break;
-          const rangeFalloff = Math.max(0.3, 1 - (_bd / w.range) * 0.7);
+          const rangeFalloff = Math.max(0.3, 1 - (_bd / _slRange) * 0.7);
           let finalDmg = w.damage * rangeFalloff;
           if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
           const _hp = _spColTest.copy(origin).addScaledVector(spreadDir, _bd);
@@ -51270,11 +51283,11 @@ function fireSpread(origin, dir, w) {
       }
       const toBot = _spToTgt.subVectors(bot.position, origin);
       const proj = toBot.dot(spreadDir);
-      if (proj < 0 || proj > Math.min(w.range, levelDist)) continue;
+      if (proj < 0 || proj > Math.min(_slRange, levelDist)) continue;
       const closest = _spColTest.copy(origin).addScaledVector(spreadDir, proj);
       if (closest.distanceTo(bot.position) < bot.chassis.hullLength * 1.2) {
         if (bestObst && bestObstDist < proj) break;
-        const rangeFalloff = Math.max(0.3, 1 - (proj / w.range) * 0.7);
+        const rangeFalloff = Math.max(0.3, 1 - (proj / _slRange) * 0.7);
         let finalDmg = w.damage * rangeFalloff;
         if (player.syphonDmgMult > 1) finalDmg *= player.syphonDmgMult;
         const hadShield = bot.shield > 0;
@@ -51292,7 +51305,7 @@ function fireSpread(origin, dir, w) {
     }
 
     if (bestObst && !hitBot) {
-      const rangeRatio = bestObstDist / w.range;
+      const rangeRatio = bestObstDist / _slRange;
       const proximityBoost = Math.max(0.3, 1 - rangeRatio * 0.7);
       const dealt = bestObst.takeDamage(w.damage * proximityBoost);
       if (dealt > 0) {
@@ -51834,10 +51847,30 @@ function executeAbility(slot, ability) {
     else if (ability.name === 'Stun Bolt') {
       const arcDmg = player.coreActive && player.loadout.core.name === 'Mega Stun Bolt' ? 3000 : 2000;
       const vel = forward.clone().multiplyScalar(800);
-      const proj = new Projectile(player.position.clone(), vel, arcDmg, 150, 'player', LSS.CLASS_COLORS.SLAYER);
-      proj.isArcWave = true; 
-      game.projectiles.push(proj);
-      broadcastAbilityProjectile(proj);
+      const _sbHalf = arcDmg * 0.5;
+      const _sbOrigins = [];
+      try {
+        const _sbNodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
+        if (_sbNodes && _sbNodes.length >= 2) {
+          _sbOrigins.push(shipMuzzleWorld(player.mesh, 0, new THREE.Vector3()));
+          _sbOrigins.push(shipMuzzleWorld(player.mesh, 1, new THREE.Vector3()));
+        } else if (_sbNodes && _sbNodes.length === 1) {
+          const _c = shipMuzzleWorld(player.mesh, 0, new THREE.Vector3());
+          const _right = new THREE.Vector3().crossVectors(forward, new THREE.Vector3(0, 1, 0));
+          if (_right.lengthSq() < 1e-6) _right.set(1, 0, 0);
+          _right.normalize().multiplyScalar(Math.max(4, (player.chassis && player.chassis.hullLength || 90) * 0.09));
+          _sbOrigins.push(_c.clone().add(_right), _c.clone().sub(_right));
+        }
+      } catch (_) {}
+      if (!_sbOrigins.length) {                       // no markers on this hull - old behaviour
+        _sbOrigins.push(player.position.clone(), player.position.clone());
+      }
+      for (const _o of _sbOrigins) {
+        const proj = new Projectile(_o.clone(), vel.clone(), _sbHalf, 150, 'player', LSS.CLASS_COLORS.SLAYER);
+        proj.isArcWave = true;
+        game.projectiles.push(proj);
+        broadcastAbilityProjectile(proj);
+      }
       try { playSound('siphon_drain'); } catch (_) {}
     }
     else if (ability.name === 'Tracker Rockets') {
