@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.01';
+const LSS_BUILD = '44.02';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -11050,7 +11050,9 @@ try {
         }
         const _fx = (_d.fx && typeof _d.fx === 'object') ? _d.fx : null;
         _diagText = (_lvl || '?') + ' | ' + (_d.mobile ? 'mobile' : 'desktop') + ' dpr ' + (+_d.dpr).toFixed(2) +
-          (_fx ? ' | canvas ' + _fx.canvas.join('x') + ' | scene ' + _fx.scene[0] + 'x' + _fx.scene[1] + ' s' + _fx.scene[3] + ' | bloom ' + _fx.bloom.join('x') : '') +
+          (_fx ? ' | canvas ' + _fx.canvas.join('x') + ' | scene ' + _fx.scene[0] + 'x' + _fx.scene[1] + ' s' + _fx.scene[3] +
+                 ((_fx.active && _fx.active.length > 3) ? ' | live ' + _fx.active[0] + 'x' + _fx.active[1] + ' @' + (+_fx.active[3]).toFixed(2) : '') +
+                 ' | bloom ' + _fx.bloom.join('x') : '') +
           (_d.mem ? ' | tex ' + _d.mem.tex + ' geo ' + _d.mem.geo : '') + (_d.draw ? ' | calls ' + _d.draw.calls : '') +
           ' | ' + (_d.mode || '') + '/' + (_d.state || '') + (_d.tp ? ' 3p' : ' 1p') + ' | up ' + _d.up + 's' +
           (function () { try {
@@ -14077,6 +14079,16 @@ function _lssSyncSceneRTSamples() {
   postFX.rtScene = new THREE.WebGLRenderTarget(old.width, old.height, Object.assign({}, _rtSceneOpts, { samples: want }));
   try { old.dispose(); } catch (_) {}
 }
+function _lssResTag() {
+  try {
+    if (typeof postFX === 'undefined' || !postFX || !postFX.rtScene) return '';
+    const A = _lssSceneActive(postFX.rtScene);
+    if (!A || !(A.w > 0)) return '';
+    const _s = (typeof _ssDyn !== 'undefined' && _ssDyn && typeof _ssDyn.scale === 'number') ? _ssDyn.scale : 0;
+    return '  ' + A.w + 'x' + A.h + ' s' + (_s >= 0 ? '+' : '') + _s.toFixed(2);
+  } catch (_) { return ''; }
+}
+if (typeof window !== 'undefined') window.__lssResTag = _lssResTag;
 if (typeof window !== 'undefined') window.__ss = _ssDyn;   // (v38.71) adaptive supersample state
 if (typeof window !== 'undefined') window.__postFXInfo = function () {
   try {
@@ -14084,7 +14096,9 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
              canvas: [renderer.domElement.width, renderer.domElement.height],
              scene: [postFX.rtScene.width, postFX.rtScene.height, 'samples', postFX.rtScene.samples | 0],
              cine: [_ssDyn.cineSaved != null, (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : null],   // (v39.87) off by default
-             active: [_sceneActive.w, _sceneActive.h, 'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
+             active: [(function(){ try { return _lssSceneActive(postFX.rtScene).w; } catch (_) { return _sceneActive.w; } })(),
+                      (function(){ try { return _lssSceneActive(postFX.rtScene).h; } catch (_) { return _sceneActive.h; } })(),
+                      'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
 };
@@ -72400,7 +72414,7 @@ function gameLoop(timestamp) {
       const el = _hudEl('fps-counter');   // (v38.61) cached lookup
       if (el) {
         if (el.style.display !== 'block') el.style.display = 'block';
-        const _fpsTxt = fps + ' fps';
+        const _fpsTxt = fps + ' fps' + _lssResTag();
         if (game._fpsText !== _fpsTxt) { game._fpsText = _fpsTxt; el.textContent = _fpsTxt; }
       }
     }

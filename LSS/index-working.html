@@ -6083,7 +6083,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.01';
+const LSS_BUILD = '44.02';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -21637,7 +21637,13 @@ try {
         }
         const _fx = (_d.fx && typeof _d.fx === 'object') ? _d.fx : null;
         _diagText = (_lvl || '?') + ' | ' + (_d.mobile ? 'mobile' : 'desktop') + ' dpr ' + (+_d.dpr).toFixed(2) +
-          (_fx ? ' | canvas ' + _fx.canvas.join('x') + ' | scene ' + _fx.scene[0] + 'x' + _fx.scene[1] + ' s' + _fx.scene[3] + ' | bloom ' + _fx.bloom.join('x') : '') +
+          // (v44.02) `scene` is the ALLOCATED target; `live` is the rectangle the frame actually
+          // rendered into, with the adaptive governor's scale beside it. Three Xbox crash lines were
+          // photographed before anyone noticed the printed number could not answer "what resolution
+          // is it running at" - __postFXInfo has computed `active` since v39.49 and nothing printed it.
+          (_fx ? ' | canvas ' + _fx.canvas.join('x') + ' | scene ' + _fx.scene[0] + 'x' + _fx.scene[1] + ' s' + _fx.scene[3] +
+                 ((_fx.active && _fx.active.length > 3) ? ' | live ' + _fx.active[0] + 'x' + _fx.active[1] + ' @' + (+_fx.active[3]).toFixed(2) : '') +
+                 ' | bloom ' + _fx.bloom.join('x') : '') +
           (_d.mem ? ' | tex ' + _d.mem.tex + ' geo ' + _d.mem.geo : '') + (_d.draw ? ' | calls ' + _d.draw.calls : '') +
           ' | ' + (_d.mode || '') + '/' + (_d.state || '') + (_d.tp ? ' 3p' : ' 1p') + ' | up ' + _d.up + 's' +
           // (v39.02) what is resident when it dies: programs, JS heap, geometry bytes, terrain chunks, budget tier
@@ -25708,6 +25714,45 @@ function _lssSyncSceneRTSamples() {
   postFX.rtScene = new THREE.WebGLRenderTarget(old.width, old.height, Object.assign({}, _rtSceneOpts, { samples: want }));
   try { old.dispose(); } catch (_) {}
 }
+// ⭐⭐ (v44.02) THE ONE NUMBER EVERY PERFORMANCE QUESTION NEEDS, AND IT HAS NEVER BEEN ON SCREEN.
+// Owner, on an Xbox One: "It's slow on the Xbox One. We could open up low. Bump the resolution down
+// or something."
+// Before spending a single edit on that, it has to be possible to know what resolution the game is
+// ALREADY rendering at - and on this build it is not, from anywhere a console can reach.
+// ⚠⚠ THE CRASH LINE'S `scene 1152x648` IS THE ALLOCATION, NOT THE RENDER. It prints
+//   postFX.rtScene.width/height (see __postFXInfo above), which is the size of the TARGET. What the
+//   frame actually draws into is `_sceneActive`, a sub-rectangle of it chosen every frame by the
+//   adaptive governor, and the governor can take it down to 70% per axis (__ssMin -0.6 = 49% of the
+//   pixels). So three photographed crash lines all said 1152x648 while the machine may have been
+//   rendering 806x453 the whole time. Reading a resolution lever as "not pulled" when it is already
+//   at its floor is how you ship a fix that cannot work.
+// ⚠ AND IT DECIDES THE DIAGNOSIS, not just the tuning. If this console is already at the floor
+//   and still slow, then scene resolution is NOT the lever and every tier edit is wasted; if it is
+//   sitting at scale 0, the governor is not engaging and THAT is the bug. Opposite conclusions,
+//   opposite work, and one glance separates them.
+// Costs nothing: two field reads inside the existing 4 Hz dirty-checked write (v40.55), no DOM work
+// when the string has not changed, and the counter only renders when it is switched on.
+// Reads as `28 fps  806x453 s-0.60` - framerate, the rectangle actually rendered, governor scale.
+// ⚠⚠ COMPUTES FRESH, NEVER READS `_sceneActive` DIRECTLY - and that distinction is the whole
+// reason this function is trustworthy. `_sceneActive` is ONE module-level object that
+// _lssSceneActive(rt) overwrites on every call, and it has four callers passing three different
+// targets. Whoever ran last wins, so reading the object gives you that caller's answer, not this
+// frame's. Caught in the act on the first test of this very readout: with the governor parked at
+// its -0.60 floor, `_sceneActive` still said 975x550 (the value from when the scale was 0) while
+// __paniniInfo, which recomputes, correctly said 682x385. A resolution readout that under-reports
+// the shed by 2x is worse than no readout - it would have "proved" the governor was doing nothing.
+// (!) The call writes `_sceneActive` as a side effect, and that is safe: all four real consumers use
+//     _lssSceneActive's RETURN VALUE from their own fresh call, never the cached object.
+function _lssResTag() {
+  try {
+    if (typeof postFX === 'undefined' || !postFX || !postFX.rtScene) return '';
+    const A = _lssSceneActive(postFX.rtScene);
+    if (!A || !(A.w > 0)) return '';
+    const _s = (typeof _ssDyn !== 'undefined' && _ssDyn && typeof _ssDyn.scale === 'number') ? _ssDyn.scale : 0;
+    return '  ' + A.w + 'x' + A.h + ' s' + (_s >= 0 ? '+' : '') + _s.toFixed(2);
+  } catch (_) { return ''; }
+}
+if (typeof window !== 'undefined') window.__lssResTag = _lssResTag;
 // (v38.64) console probe: what the tiers actually render at.
 if (typeof window !== 'undefined') window.__ss = _ssDyn;   // (v38.71) adaptive supersample state
 if (typeof window !== 'undefined') window.__postFXInfo = function () {
@@ -25716,7 +25761,13 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
              canvas: [renderer.domElement.width, renderer.domElement.height],
              scene: [postFX.rtScene.width, postFX.rtScene.height, 'samples', postFX.rtScene.samples | 0],
              cine: [_ssDyn.cineSaved != null, (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : null],   // (v39.87) off by default
-             active: [_sceneActive.w, _sceneActive.h, 'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
+             // (v44.02) FRESH, not the cached object. `_sceneActive` is overwritten by every
+             // _lssSceneActive() caller, so this field has been reporting whichever target ran last
+             // since v39.49 - measured stale by 2x (975x550 reported against a real 682x385) the
+             // first time anything printed it. The crash line prints this now, so it has to be true.
+             active: [(function(){ try { return _lssSceneActive(postFX.rtScene).w; } catch (_) { return _sceneActive.w; } })(),
+                      (function(){ try { return _lssSceneActive(postFX.rtScene).h; } catch (_) { return _sceneActive.h; } })(),
+                      'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
 };
@@ -108130,7 +108181,9 @@ function gameLoop(timestamp) {
         // ⚠ HARDENING ONLY — NOT a proven cause of the owner's fps flicker. #fps-counter is a
         // top-level body child and appears in NO body.lss-* hide list, so nothing display-toggles
         // it; that half of the report is still OPEN. Do not close it on the strength of this.
-        const _fpsTxt = fps + ' fps';
+        // (v44.02) ...and the resolution it is rendering at. Rides the same dirty check, so a
+        // steady frame rate at a steady resolution still writes nothing.
+        const _fpsTxt = fps + ' fps' + _lssResTag();
         if (game._fpsText !== _fpsTxt) { game._fpsText = _fpsTxt; el.textContent = _fpsTxt; }
       }
     }
