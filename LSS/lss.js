@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.27';
+const LSS_BUILD = '44.28';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -50256,8 +50256,9 @@ function _ghostZoomSolidity() {
   const z = game._adsGhostZ || 0;
   if (!(z > 0.002)) return undefined;
   const Z = (typeof window !== 'undefined' && window.__zoom) || {};
+  const s0 = (typeof Z.ghostFrom === 'number') ? Z.ghostFrom : 0.45;
   const s1 = (typeof Z.ghostSolidity === 'number') ? Z.ghostSolidity : 0.22;
-  return 1.0 - Math.min(1, z) * (1.0 - s1);
+  return s0 - Math.min(1, z) * (s0 - s1);
 }
 function _ghostSeatWanted() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
@@ -50642,7 +50643,7 @@ function _lssApplyShipRig(dt) {
     if (!_zVr) {
       const z = game._adsZoom;
       const _z3p = !!(game.thirdPerson && player && player.mesh && player.mesh.visible);
-      if (_z3p && game._adsOvWarmMesh !== player.mesh && (game.state === 'warmup' || player.shipState === 'spawning')) _adsOverlayPrewarm();
+      if (_zm !== 'through' && _z3p && game._adsOvWarmMesh !== player.mesh && (game.state === 'warmup' || player.shipState === 'spawning')) _adsOverlayPrewarm();   // (v44.28) 'through' never draws the layer-5 overlay
       if (_zm === 'classic') {
         const _ct = _zAim ? 65 : _zBase;
         camera.fov += (_ct - camera.fov) * Math.min(1, (dt || 0.016) * 12);
