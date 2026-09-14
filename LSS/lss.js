@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.17';
+const LSS_BUILD = '44.18';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -97,6 +97,7 @@ const LSS = {
   MODE: 'classic',           
   RACE_SPEED: 900,           
   RACE_DASH_SPEED: 1400,     
+  SPEED_MIX: 0,
   INSANE_SPEED: false,
 };
 
@@ -2326,7 +2327,9 @@ async function joinRoom() {
         peer.team = data.team;
         peer.skinId = data.skinId;
         try {
-          if (typeof data.insaneSpeed === 'boolean' && typeof _lssSetInsaneSpeed === 'function') {
+          if (typeof data.speedMix === 'number' && isFinite(data.speedMix) && typeof _lssSetSpeedMix === 'function') {
+            _lssSetSpeedMix(data.speedMix, true);
+          } else if (typeof data.insaneSpeed === 'boolean' && typeof _lssSetInsaneSpeed === 'function') {
             _lssSetInsaneSpeed(data.insaneSpeed, true);
           }
         } catch (_) {}
@@ -2379,6 +2382,7 @@ async function joinRoom() {
           peerId: net.myPeerId,
           skinId: player.skinId || SHIP_SKIN_DEFAULT,
       insaneSpeed: !!LSS.INSANE_SPEED,
+      speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
           discord_id:     _du ? _du.id : undefined,
           discord_name:   _du ? (_du.global_name || _du.username) : undefined,
           discord_avatar: _du ? _du.avatar : undefined,
@@ -7091,7 +7095,13 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   if (evt.type === 'speed_mode') {
-    try { if (typeof _lssSetInsaneSpeed === 'function') _lssSetInsaneSpeed(!!evt.on, true); } catch (_) {}
+    try {
+      if (typeof evt.mix === 'number' && isFinite(evt.mix) && typeof _lssSetSpeedMix === 'function') {
+        _lssSetSpeedMix(evt.mix, true);
+      } else if (typeof _lssSetInsaneSpeed === 'function') {
+        _lssSetInsaneSpeed(!!evt.on, true);
+      }
+    } catch (_) {}
     return;
   }
 
@@ -32407,7 +32417,7 @@ class Bot {
     }
 
     const speed = this.velocity.length();
-    const _baseSpd = (LSS.MODE === 'race' || _lssInsaneSpeed()) ? LSS.RACE_SPEED : this.chassis.flightSpeed;
+    const _baseSpd = _lssSpeedLerp(this.chassis.flightSpeed, LSS.RACE_SPEED, _lssSpeedMix());
     const _dashCap = this.dashActive ? Math.max(_baseSpd, this.chassis.dashSpeed || _baseSpd) : _baseSpd;
     const maxSpd = this.arcSlowTimer > 0 ? _dashCap * 0.3 : _dashCap;
     if (speed > maxSpd) {
@@ -47663,6 +47673,7 @@ function _lssAnnounceLoadout() {
       peerId: net.myPeerId,
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
       insaneSpeed: !!LSS.INSANE_SPEED,
+      speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
       discord_id:     _du ? _du.id : undefined,
       discord_name:   _du ? (_du.global_name || _du.username) : undefined,
       discord_avatar: _du ? _du.avatar : undefined,
@@ -47967,6 +47978,7 @@ function commitLoadout(key) {
       peerId: net.myPeerId,
       skinId: player.skinId || SHIP_SKIN_DEFAULT,
       insaneSpeed: !!LSS.INSANE_SPEED,
+      speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
       discord_id:     _du ? _du.id : undefined,
       discord_name:   _du ? (_du.global_name || _du.username) : undefined,
       discord_avatar: _du ? _du.avatar : undefined,
@@ -49536,13 +49548,15 @@ function updatePlayerMovement(dt) {
     return;
   }
 
-  const ch = (LSS.MODE === 'race' || _lssInsaneSpeed())   // (v43.13) same stats, any lobby
+  const _spdMix = _lssSpeedMix();
+  const ch = (_spdMix > 0)
     ? Object.assign({}, player.chassis, {
-        flightSpeed:    LSS.RACE_SPEED,
-        strafeSpeed:    LSS.RACE_SPEED * 0.85,
-        verticalSpeed:  LSS.RACE_SPEED * 0.7,
-        dashSpeed:      LSS.RACE_DASH_SPEED,
-        acceleration:   Math.max(player.chassis.acceleration, LSS.RACE_SPEED * 2),
+        flightSpeed:    _lssSpeedLerp(player.chassis.flightSpeed,   LSS.RACE_SPEED,        _spdMix),
+        strafeSpeed:    _lssSpeedLerp(player.chassis.strafeSpeed,   LSS.RACE_SPEED * 0.85, _spdMix),
+        verticalSpeed:  _lssSpeedLerp(player.chassis.verticalSpeed, LSS.RACE_SPEED * 0.7,  _spdMix),
+        dashSpeed:      _lssSpeedLerp(player.chassis.dashSpeed,     LSS.RACE_DASH_SPEED,   _spdMix),
+        acceleration:   _lssSpeedLerp(player.chassis.acceleration,
+                                      Math.max(player.chassis.acceleration, LSS.RACE_SPEED * 2), _spdMix),
       })
     : player.chassis;
 
@@ -49637,7 +49651,7 @@ function updatePlayerMovement(dt) {
     }
   }
 
-  const _ab = (LSS.MODE === 'race' || _lssInsaneSpeed()) ? LSS.RACE_DASH_SPEED : 600;   // (v43.13)
+  const _ab = _lssSpeedLerp(600, LSS.RACE_DASH_SPEED, _lssSpeedMix());   // (v43.13, blended v44.18)
   let maxSpeed = player.dashActive ? ch.dashSpeed : (player.afterburnerActive ? _ab : ch.flightSpeed);
   if (swordBlockActive) maxSpeed = ch.flightSpeed * 0.4;
   if (arcSlowed) maxSpeed *= 0.3;
@@ -60910,8 +60924,19 @@ function _captureKbKey(e) {
   return true;
 }
 
+function _lssSpeedMix() {
+  try {
+    if (LSS.MODE === 'race') return 1;
+    const m = Number(LSS.SPEED_MIX);
+    return Number.isFinite(m) ? Math.max(0, Math.min(1, m)) : 0;
+  } catch (_) { return 0; }
+}
 function _lssInsaneSpeed() {
-  try { return !!LSS.INSANE_SPEED && LSS.MODE !== 'race'; } catch (_) { return false; }
+  try { return _lssSpeedMix() > 0 && LSS.MODE !== 'race'; } catch (_) { return false; }
+}
+function _lssSpeedLerp(base, target, mix) {
+  const b = Number(base) || 0, t = Number(target) || 0;
+  return b + (t - b) * mix;
 }
 function _lssRoomTag() {
   try {
@@ -61043,30 +61068,67 @@ function _lssInsaneSpeedLocked() {
 }
 function _lssRefreshInsaneSpeedBtn() {
   const b = document.getElementById('insane-speed-toggle');
+  const sl = document.getElementById('insane-speed-slider');
   const box = document.getElementById('ss-speed-box');
+  const desc = document.getElementById('ss-speed-desc');
   if (!b) return;
-  const on = !!LSS.INSANE_SPEED;
+  const mix = (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0;
+  const pct = Math.round(mix * 100);
+  const on = mix > 0;
   b.dataset.on = on ? '1' : '0';
-  b.textContent = on ? 'INSANE SPEED: ON' : 'INSANE SPEED: OFF';
+  b.textContent = (pct === 0) ? 'MATCH SPEED: NORMAL'
+                : (pct === 100) ? 'MATCH SPEED: INSANE'
+                : ('MATCH SPEED: ' + pct + '%');
   b.classList.toggle('active', on);
   const locked = _lssInsaneSpeedLocked();
   b.disabled = locked;
+  if (sl) {
+    if (String(pct) !== sl.value) sl.value = String(pct);
+    sl.disabled = locked;
+  }
   b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
-                   : 'Everyone flies at race speed (900 / 1400 boost). Applies to the whole room.';
+                   : 'Drag toward INSANE. 0% = every ship at its own speed, 100% = race speed (900 / 1400 boost). Applies to the whole room.';
+  if (desc) {
+    let base = null;
+    try {
+      const lk = (typeof _shipPreview3D !== 'undefined' && _shipPreview3D && _shipPreview3D.lastKey) ||
+                 (typeof player !== 'undefined' && player && player.loadoutKey) || null;
+      const ld = lk && typeof LOADOUTS !== 'undefined' ? LOADOUTS[lk] : null;
+      const ch = ld && typeof CHASSIS !== 'undefined' ? CHASSIS[ld.chassis] : null;
+      if (ch && ch.flightSpeed) base = ch.flightSpeed;
+    } catch (_) {}
+    if (pct === 0) {
+      desc.textContent = 'Everyone flies at their own speed.';
+    } else if (base) {
+      desc.textContent = 'This ship: ' + Math.round(base + (LSS.RACE_SPEED - base) * mix) +
+                         ' (normal ' + Math.round(base) + ', insane ' + LSS.RACE_SPEED + ').';
+    } else {
+      desc.textContent = pct + '% of the way to race speed (' + LSS.RACE_SPEED + ').';
+    }
+  }
   if (box) box.style.display = (LSS.MODE === 'race') ? 'none' : '';
 }
-function _lssSetInsaneSpeed(on, fromNet) {
-  LSS.INSANE_SPEED = !!on;
+function _lssSetSpeedMix(mix, fromNet) {
+  let m = Number(mix);
+  if (!Number.isFinite(m)) m = 0;
+  m = Math.max(0, Math.min(1, m));
+  m = Math.round(m * 20) / 20;
+  LSS.SPEED_MIX = m;
+  LSS.INSANE_SPEED = m > 0;        // derived; kept in step for the commit field and older peers
   _lssRefreshInsaneSpeedBtn();
   if (!fromNet) {
     try {
       if (typeof net !== 'undefined' && net && net.sendEvent) {
-        net.sendEvent({ type: 'speed_mode', on: !!on });
+        net.sendEvent({ type: 'speed_mode', on: m >= 0.5, mix: m });
       }
     } catch (_) {}
   }
 }
-if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
+function _lssSetInsaneSpeed(on, fromNet) { return _lssSetSpeedMix(on ? 1 : 0, fromNet); }
+if (typeof window !== 'undefined') {
+  window.__insaneSpeed = _lssSetInsaneSpeed;
+  window.__speedMix = _lssSetSpeedMix;
+}
 
 function _lssModeChosen(mode) {
   try {
@@ -83890,8 +83952,18 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
   if (_spdBtn) {
     _spdBtn.addEventListener('click', () => {
       if (_lssInsaneSpeedLocked()) return;
-      _lssSetInsaneSpeed(_spdBtn.dataset.on !== '1', false);
+      const m = (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0;
+      _lssSetSpeedMix(m >= 1 ? 0 : 1, false);
     });
+  }
+  const _spdSlider = document.getElementById('insane-speed-slider');
+  if (_spdSlider) {
+    const _spdApply = () => {
+      if (_lssInsaneSpeedLocked()) { _lssRefreshInsaneSpeedBtn(); return; }
+      _lssSetSpeedMix((Number(_spdSlider.value) || 0) / 100, false);
+    };
+    _spdSlider.addEventListener('input', _spdApply);
+    _spdSlider.addEventListener('change', _spdApply);
   }
   try { _lssRefreshInsaneSpeedBtn(); } catch (_) {}
 

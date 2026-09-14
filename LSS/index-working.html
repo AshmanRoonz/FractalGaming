@@ -876,6 +876,14 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
 #insane-speed-toggle:hover:not(:disabled) { color: #fff !important; background: transparent !important; }
 #insane-speed-toggle.active { color: #7fd4ff !important; background: transparent !important; border: none !important; }
 #insane-speed-toggle:disabled { opacity: 0.35; }
+/* (v44.18) The dial. accent-color matches the readout's own active cyan so the two read as one
+   control rather than two stacked ones. */
+#insane-speed-slider {
+  width: 100% !important; margin: 2px 0 0 !important; padding: 0 !important;
+  accent-color: #7fd4ff; background: transparent !important; cursor: pointer;
+  border: none !important; height: 14px !important;
+}
+#insane-speed-slider:disabled { opacity: 0.3; cursor: not-allowed; }
 #ss-speed-desc { font-size: 10px !important; color: #7d93b2 !important; text-align: center !important; max-width: none !important; }
 
 /* ---- ROOM MODE: one line above the map ---- */
@@ -5666,8 +5674,14 @@ body.vr-active #camp-video { display: none !important; }
          mode selector box is huge... it can just be a line above the map selector". -->
 <div id="ss-speed-box">
           <div class="perks-label">MATCH SPEED</div>
-          <button id="insane-speed-toggle" type="button" data-on="0">INSANE SPEED: OFF</button>
-          <div id="ss-speed-desc">Everyone flies at race speed.</div>
+          <!-- (v44.18) A DIAL, NOT A SWITCH. The button is kept as the READOUT (it still carries
+               .active and data-on so the existing stylesheet and any muscle memory survive) and the
+               range below it is what actually sets the value. Clicking the readout still works and
+               snaps to the nearer end, so the old one-click "just make it fast" is not lost. -->
+          <button id="insane-speed-toggle" type="button" data-on="0">MATCH SPEED: NORMAL</button>
+          <input id="insane-speed-slider" type="range" min="0" max="100" step="5" value="0"
+                 aria-label="Match speed" title="Drag toward INSANE for a faster room">
+          <div id="ss-speed-desc">Everyone flies at their own speed.</div>
         </div>
 <div id="ss-mode-box">
           <div class="perks-label">ROOM MODE</div>
@@ -6110,7 +6124,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.17';
+const LSS_BUILD = '44.18';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -6362,6 +6376,19 @@ const LSS = {
   RACE_DASH_SPEED: 1400,     
   // (v43.13) INSANE SPEED: race velocity in any lobby. A room setting, not a saved
   // preference - it is broadcast so every ship in the match flies by the same rules.
+  // ⭐⭐ (v44.18) MATCH SPEED IS A DIAL NOW, NOT A SWITCH. Owner: "make the insane speed instead
+  // of a toggle a slider... the max speed is what it toggles to on, but we could slider it lower
+  // back to normal, so we need more in between speeds".
+  // SPEED_MIX is the single source of truth: 0 = every ship at its own chassis speed, 1 = the race
+  // numbers (RACE_SPEED / RACE_DASH_SPEED), and anything between is a straight blend of the two.
+  // The endpoints are therefore EXACTLY the old OFF and ON, so nothing about the extremes changes.
+  // (!) The blend is per-ship, which is the whole point of mixing toward a target rather than
+  //     scaling: at mix 1 a heavy hull and a light one both arrive at 900, so the speed floor the
+  //     mode exists to create still holds, while at 0.5 each ship sits halfway from its OWN speed.
+  //     A flat multiplier would have kept the hulls as far apart at "half insane" as at normal.
+  // INSANE_SPEED is kept in step as a derived boolean so the loadout-commit field and any older
+  // peer still see something meaningful; SPEED_MIX is what the game actually reads.
+  SPEED_MIX: 0,
   INSANE_SPEED: false,
 };
 
@@ -9441,7 +9468,10 @@ async function joinRoom() {
         peer.skinId = data.skinId;
         // (v43.13) and adopt the room's speed rule from whoever committed
         try {
-          if (typeof data.insaneSpeed === 'boolean' && typeof _lssSetInsaneSpeed === 'function') {
+          // (v44.18) The loadout commit carries the dial too - same precedence as speed_mode.
+          if (typeof data.speedMix === 'number' && isFinite(data.speedMix) && typeof _lssSetSpeedMix === 'function') {
+            _lssSetSpeedMix(data.speedMix, true);
+          } else if (typeof data.insaneSpeed === 'boolean' && typeof _lssSetInsaneSpeed === 'function') {
             _lssSetInsaneSpeed(data.insaneSpeed, true);
           }
         } catch (_) {}
@@ -9526,6 +9556,7 @@ async function joinRoom() {
       // the moment it matters - commit time, and again to every joiner - so nobody can reach
       // the grid flying by different rules. An old client simply ignores the field.
       insaneSpeed: !!LSS.INSANE_SPEED,
+      speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
           discord_id:     _du ? _du.id : undefined,
           discord_name:   _du ? (_du.global_name || _du.username) : undefined,
           discord_avatar: _du ? _du.avatar : undefined,
@@ -16371,7 +16402,14 @@ function handleNetEvent(evt, fromPeerId) {
   // (v43.13) MATCH SPEED, room-wide. Mirrors the race-mode broadcast: apply it and update the
   // button, but do NOT re-broadcast (fromNet true) or two clients would ping-pong the event forever.
   if (evt.type === 'speed_mode') {
-    try { if (typeof _lssSetInsaneSpeed === 'function') _lssSetInsaneSpeed(!!evt.on, true); } catch (_) {}
+    // (v44.18) Prefer the dial; fall back to the switch for a peer on an older build.
+    try {
+      if (typeof evt.mix === 'number' && isFinite(evt.mix) && typeof _lssSetSpeedMix === 'function') {
+        _lssSetSpeedMix(evt.mix, true);
+      } else if (typeof _lssSetInsaneSpeed === 'function') {
+        _lssSetInsaneSpeed(!!evt.on, true);
+      }
+    } catch (_) {}
     return;
   }
 
@@ -52517,7 +52555,10 @@ class Bot {
     // by mode), just to the race speed instead of the chassis speed.
     // (v43.13) bots ride the same rule, or insane speed turns every fight into shooting
     // parked cars - the player would simply outrun the entire roster.
-    const _baseSpd = (LSS.MODE === 'race' || _lssInsaneSpeed()) ? LSS.RACE_SPEED : this.chassis.flightSpeed;
+    // (v44.18) Blended with the same mix the player uses, so a half-speed match is half-speed for
+    // EVERYONE. Splitting these - bots switched, player dialled - would be worse than the original
+    // problem: at any stop below full the player would simply outrun the entire roster.
+    const _baseSpd = _lssSpeedLerp(this.chassis.flightSpeed, LSS.RACE_SPEED, _lssSpeedMix());
     // (v43.18) ...and the cap has to know about it, or the burst above is erased before it moves.
     const _dashCap = this.dashActive ? Math.max(_baseSpd, this.chassis.dashSpeed || _baseSpd) : _baseSpd;
     const maxSpd = this.arcSlowTimer > 0 ? _dashCap * 0.3 : _dashCap;
@@ -73702,6 +73743,7 @@ function _lssAnnounceLoadout() {
       // the moment it matters - commit time, and again to every joiner - so nobody can reach
       // the grid flying by different rules. An old client simply ignores the field.
       insaneSpeed: !!LSS.INSANE_SPEED,
+      speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
       discord_id:     _du ? _du.id : undefined,
       discord_name:   _du ? (_du.global_name || _du.username) : undefined,
       discord_avatar: _du ? _du.avatar : undefined,
@@ -74234,6 +74276,7 @@ function commitLoadout(key) {
       // the moment it matters - commit time, and again to every joiner - so nobody can reach
       // the grid flying by different rules. An old client simply ignores the field.
       insaneSpeed: !!LSS.INSANE_SPEED,
+      speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
       discord_id:     _du ? _du.id : undefined,
       discord_name:   _du ? (_du.global_name || _du.username) : undefined,
       discord_avatar: _du ? _du.avatar : undefined,
@@ -76828,13 +76871,20 @@ function updatePlayerMovement(dt) {
     return;
   }
 
-  const ch = (LSS.MODE === 'race' || _lssInsaneSpeed())   // (v43.13) same stats, any lobby
+  // (v44.18) Blended rather than switched - see LSS.SPEED_MIX. At mix 1 these are byte-identical to
+  // the old race-speed override; at 0 the branch is skipped entirely and the ship's own chassis is
+  // used unchanged, so normal flight is untouched by construction rather than by arithmetic.
+  const _spdMix = _lssSpeedMix();
+  const ch = (_spdMix > 0)
     ? Object.assign({}, player.chassis, {
-        flightSpeed:    LSS.RACE_SPEED,
-        strafeSpeed:    LSS.RACE_SPEED * 0.85,
-        verticalSpeed:  LSS.RACE_SPEED * 0.7,
-        dashSpeed:      LSS.RACE_DASH_SPEED,
-        acceleration:   Math.max(player.chassis.acceleration, LSS.RACE_SPEED * 2),
+        flightSpeed:    _lssSpeedLerp(player.chassis.flightSpeed,   LSS.RACE_SPEED,        _spdMix),
+        strafeSpeed:    _lssSpeedLerp(player.chassis.strafeSpeed,   LSS.RACE_SPEED * 0.85, _spdMix),
+        verticalSpeed:  _lssSpeedLerp(player.chassis.verticalSpeed, LSS.RACE_SPEED * 0.7,  _spdMix),
+        dashSpeed:      _lssSpeedLerp(player.chassis.dashSpeed,     LSS.RACE_DASH_SPEED,   _spdMix),
+        // The old line was a max() so a already-brisk hull never got SLOWER when the mode came on.
+        // Blending toward that same max keeps the guarantee at every stop on the dial.
+        acceleration:   _lssSpeedLerp(player.chassis.acceleration,
+                                      Math.max(player.chassis.acceleration, LSS.RACE_SPEED * 2), _spdMix),
       })
     : player.chassis;
 
@@ -76986,7 +77036,7 @@ function updatePlayerMovement(dt) {
   // In race mode the afterburner cap rises to RACE_DASH_SPEED so
   // afterburner-equipped ships can lean on it without dropping below
   // base race velocity.
-  const _ab = (LSS.MODE === 'race' || _lssInsaneSpeed()) ? LSS.RACE_DASH_SPEED : 600;   // (v43.13)
+  const _ab = _lssSpeedLerp(600, LSS.RACE_DASH_SPEED, _lssSpeedMix());   // (v43.13, blended v44.18)
   let maxSpeed = player.dashActive ? ch.dashSpeed : (player.afterburnerActive ? _ab : ch.flightSpeed);
   if (swordBlockActive) maxSpeed = ch.flightSpeed * 0.4;
   // Stun Bolt slow caps top speed too, so the player can't outrun
@@ -93554,8 +93604,24 @@ function _captureKbKey(e) {
 //     hides - which is the owner's "for each lobby (other than race)".
 // (!) It deliberately does NOT persist. Speed is a property of the match everyone agreed to, not of
 //     the pilot, so it is broadcast and it resets with the room rather than following one player in.
+// (v44.18) 0..1, and RACE IS 1 BY DEFINITION - race mode already flies these numbers, which is why
+// the box hides there. Returning 1 rather than a special case lets every consumer below collapse
+// its old `(LSS.MODE === 'race' || _lssInsaneSpeed())` two-branch test into one blend.
+function _lssSpeedMix() {
+  try {
+    if (LSS.MODE === 'race') return 1;
+    const m = Number(LSS.SPEED_MIX);
+    return Number.isFinite(m) ? Math.max(0, Math.min(1, m)) : 0;
+  } catch (_) { return 0; }
+}
+// Kept for the callers that only want to know "is the match speed modified at all".
 function _lssInsaneSpeed() {
-  try { return !!LSS.INSANE_SPEED && LSS.MODE !== 'race'; } catch (_) { return false; }
+  try { return _lssSpeedMix() > 0 && LSS.MODE !== 'race'; } catch (_) { return false; }
+}
+// One blend, used by the player, the bots and the dash so they can never drift apart.
+function _lssSpeedLerp(base, target, mix) {
+  const b = Number(base) || 0, t = Number(target) || 0;
+  return b + (t - b) * mix;
 }
 // (v43.26) THE ROOM MODE, AS A THING YOU CAN SEE AND CHANGE. Owner: "maybe put the mode selector in
 // the lobby" (and "lobby=ship selection screen").
@@ -93775,34 +93841,89 @@ function _lssInsaneSpeedLocked() {
 }
 function _lssRefreshInsaneSpeedBtn() {
   const b = document.getElementById('insane-speed-toggle');
+  const sl = document.getElementById('insane-speed-slider');
   const box = document.getElementById('ss-speed-box');
+  const desc = document.getElementById('ss-speed-desc');
   if (!b) return;
-  const on = !!LSS.INSANE_SPEED;
+  const mix = (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0;
+  const pct = Math.round(mix * 100);
+  const on = mix > 0;
   b.dataset.on = on ? '1' : '0';
-  b.textContent = on ? 'INSANE SPEED: ON' : 'INSANE SPEED: OFF';
+  // (v44.18) The two ends keep their old names - the owner's mental model is still NORMAL..INSANE -
+  // and everything between is stated as a percentage of the way there.
+  b.textContent = (pct === 0) ? 'MATCH SPEED: NORMAL'
+                : (pct === 100) ? 'MATCH SPEED: INSANE'
+                : ('MATCH SPEED: ' + pct + '%');
   b.classList.toggle('active', on);
   const locked = _lssInsaneSpeedLocked();
   b.disabled = locked;
+  if (sl) {
+    // Never fight a drag in progress: writing .value mid-gesture yanks the thumb out from under the
+    // finger. Only correct it when it actually disagrees, which is what a peer's update looks like.
+    if (String(pct) !== sl.value) sl.value = String(pct);
+    sl.disabled = locked;
+  }
   b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
-                   : 'Everyone flies at race speed (900 / 1400 boost). Applies to the whole room.';
+                   : 'Drag toward INSANE. 0% = every ship at its own speed, 100% = race speed (900 / 1400 boost). Applies to the whole room.';
+  if (desc) {
+    // Show what it actually MEANS at this stop, using the previewed ship where we have one, because
+    // "70%" is not a speed and the whole point of the dial is the numbers between the ends.
+    let base = null;
+    try {
+      // The ship currently on the preview stage, falling back to the one you are flying. `lastKey`
+      // is what the 3D picker itself tracks (see the _shipPreview3D debug dump), so it follows the
+      // chips as they are clicked rather than lagging a selection behind.
+      const lk = (typeof _shipPreview3D !== 'undefined' && _shipPreview3D && _shipPreview3D.lastKey) ||
+                 (typeof player !== 'undefined' && player && player.loadoutKey) || null;
+      const ld = lk && typeof LOADOUTS !== 'undefined' ? LOADOUTS[lk] : null;
+      const ch = ld && typeof CHASSIS !== 'undefined' ? CHASSIS[ld.chassis] : null;
+      if (ch && ch.flightSpeed) base = ch.flightSpeed;
+    } catch (_) {}
+    if (pct === 0) {
+      desc.textContent = 'Everyone flies at their own speed.';
+    } else if (base) {
+      desc.textContent = 'This ship: ' + Math.round(base + (LSS.RACE_SPEED - base) * mix) +
+                         ' (normal ' + Math.round(base) + ', insane ' + LSS.RACE_SPEED + ').';
+    } else {
+      desc.textContent = pct + '% of the way to race speed (' + LSS.RACE_SPEED + ').';
+    }
+  }
   if (box) box.style.display = (LSS.MODE === 'race') ? 'none' : '';
 }
-function _lssSetInsaneSpeed(on, fromNet) {
-  LSS.INSANE_SPEED = !!on;
+// (v44.18) THE DIAL. `mix` is 0..1 - see LSS.SPEED_MIX for what the two ends mean.
+function _lssSetSpeedMix(mix, fromNet) {
+  let m = Number(mix);
+  if (!Number.isFinite(m)) m = 0;
+  m = Math.max(0, Math.min(1, m));
+  // Quantised to 5%. Two reasons: a value that goes out on the wire, comes back from a peer and is
+  // re-sent cannot drift by float error, and two people dragging to roughly the same place land on
+  // the SAME number instead of trading 0.47 / 0.48 back and forth forever.
+  m = Math.round(m * 20) / 20;
+  LSS.SPEED_MIX = m;
+  LSS.INSANE_SPEED = m > 0;        // derived; kept in step for the commit field and older peers
   _lssRefreshInsaneSpeedBtn();
   if (!fromNet) {
     try {
-      // (v43.13) NOT gated on net.active. The toggle lives in ship select, and a room can be formed
+      // (v43.13) NOT gated on net.active. The control lives in ship select, and a room can be formed
       // and peered while net.active is still false (it flips when the match goes live) - gating on it
-      // meant the click applied locally and reached nobody, which is exactly what a two-client test
+      // meant the change applied locally and reached nobody, which is exactly what a two-client test
       // showed: the clicker flipped to ON and the peer sat at OFF.
       if (typeof net !== 'undefined' && net && net.sendEvent) {
-        net.sendEvent({ type: 'speed_mode', on: !!on });
+        // `on` rides along for clients older than v44.18, which only understand the switch. It is the
+        // NEAREST endpoint rather than `m > 0`, so an old peer lands on whichever of the two speeds
+        // the room is actually closer to instead of jumping to full race speed at one notch.
+        net.sendEvent({ type: 'speed_mode', on: m >= 0.5, mix: m });
       }
     } catch (_) {}
   }
 }
-if (typeof window !== 'undefined') window.__insaneSpeed = _lssSetInsaneSpeed;
+// The old switch, preserved as the two ENDPOINTS of the dial so every existing caller - the
+// loadout-commit receiver, the speed_mode handler, the console handle - keeps working untouched.
+function _lssSetInsaneSpeed(on, fromNet) { return _lssSetSpeedMix(on ? 1 : 0, fromNet); }
+if (typeof window !== 'undefined') {
+  window.__insaneSpeed = _lssSetInsaneSpeed;
+  window.__speedMix = _lssSetSpeedMix;
+}
 
 // (v43.20) ...AND RUN THE ROOM'S SETUP, not merely its mode string.
 // Owner: "i entered one in race mode and one in exhibition."
@@ -122277,10 +122398,27 @@ function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
   // where one ship is at 900 and the rest are at their chassis speed is not a match.
   const _spdBtn = document.getElementById('insane-speed-toggle');
   if (_spdBtn) {
+    // (v44.18) The readout is still clickable and still means "the other end", so the old
+    // one-click habit keeps working: from anywhere below full it goes to INSANE, from full to
+    // NORMAL. The dial is for the values in between.
     _spdBtn.addEventListener('click', () => {
       if (_lssInsaneSpeedLocked()) return;
-      _lssSetInsaneSpeed(_spdBtn.dataset.on !== '1', false);
+      const m = (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0;
+      _lssSetSpeedMix(m >= 1 ? 0 : 1, false);
     });
+  }
+  const _spdSlider = document.getElementById('insane-speed-slider');
+  if (_spdSlider) {
+    // `input` so the readout tracks the thumb while dragging; the broadcast rides along with it.
+    // That is deliberate rather than waiting for `change`: the room should watch the value move, and
+    // the 5% quantisation in _lssSetSpeedMix keeps the send rate to at most twenty events per full
+    // sweep of the control.
+    const _spdApply = () => {
+      if (_lssInsaneSpeedLocked()) { _lssRefreshInsaneSpeedBtn(); return; }
+      _lssSetSpeedMix((Number(_spdSlider.value) || 0) / 100, false);
+    };
+    _spdSlider.addEventListener('input', _spdApply);
+    _spdSlider.addEventListener('change', _spdApply);
   }
   try { _lssRefreshInsaneSpeedBtn(); } catch (_) {}
 
