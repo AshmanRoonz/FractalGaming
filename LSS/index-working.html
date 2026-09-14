@@ -6124,7 +6124,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.21';
+const LSS_BUILD = '44.22';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -31690,7 +31690,28 @@ function _swWorthingtonJet(px, pz, WL, fp, vEntry, k) {
 // does. The column is deferred through _SW_BLASTS because the delay is most of what sells it: the
 // surface heaves, settles, and only then erupts.
 const _SW_BLASTS = [];
-function _swBlast(x, y, z, size) {
+// (v44.22) A blast's spray used to be launched straight up ({0, -sp, 0}): the crown of a shot that
+// skimmed into the lake looked exactly like one dropped from above. The spray model in
+// _swSpawnSplashV has understood oblique entry since v41 (the lean, the stagnation angle) - it only
+// ever needed to be TOLD the projectile's velocity. This builds that velocity: the size-driven jet
+// speed stays as the minimum downward component, and the horizontal part inherits a share of the
+// shot's own speed, capped so a 3000 u/s bolt does not throw water across the lake.
+// window.__water.blastLean (0.55) / .blastLeanMax (900), live.
+function _swBlastSprayV(vel, sp) {
+  const V = { x: 0, y: -sp, z: 0 };
+  if (!vel) return V;
+  const vx = +vel.x || 0, vy = +vel.y || 0, vz = +vel.z || 0;
+  const h = Math.hypot(vx, vz);
+  if (!(h > 1e-3)) return V;
+  const W = window.__water || {};
+  const lean = (W.blastLean != null) ? +W.blastLean : 0.55;
+  const hmax = (W.blastLeanMax != null) ? +W.blastLeanMax : 900;
+  const hs = Math.min(hmax, h * lean);
+  V.x = vx / h * hs; V.z = vz / h * hs;
+  V.y = -Math.max(sp, Math.max(0, -vy) * lean);
+  return V;
+}
+function _swBlast(x, y, z, size, vel) {
   const w = game && game._hubWater; if (!w) return 0;
   const W3 = window.__water || {};
   const bk = (W3.blast != null) ? +W3.blast : 1;
@@ -31728,7 +31749,7 @@ function _swBlast(x, y, z, size) {
   const _now = performance.now();
   if (_now - _swXB.t > 250) { _swXB.t = _now; _swXB.n = 0; }
   if (_swXB.n < ((W3.wxCap != null) ? +W3.wxCap : 34) && !game._swSubmerged) {
-    _swXB.n += _swSpawnSplashV(x, WL, z, { x: 0, y: -_sp, z: 0 }, _D, 0.5 + 0.8 * reach) || 0;
+    _swXB.n += _swSpawnSplashV(x, WL, z, _swBlastSprayV(vel, _sp), _D, 0.5 + 0.8 * reach) || 0;   // (v44.22)
   }
   _swCrestDots(x, WL, z, 0.5 + 0.9 * reach, 0, 0, _swDispWorld(A * peak * 2.4));
   // a burst at or under the surface vents a column once the cavity closes
@@ -32447,6 +32468,9 @@ function _swCrestDots(px, wl, pz, k, vx, vz, crestY) {
   // a puff that vanishes.
   const n = Math.max(1, Math.min(20, Math.round((2 + 8 * Math.min(1, k)) * dk)));
   const fk = (W3.dotsFine != null) ? +W3.dotsFine : 1.7;
+  // (v44.22) the crest dots were the one emitter with mist-like gravity (26..150 u/s^2, a fifth of
+  // what every other splash uses) and they read as floating. window.__water.dotsGrav, live.
+  const _dg = (W3.dotsGrav != null) ? +W3.dotsGrav : 2.5;
   const n2 = Math.max(0, Math.min(34, Math.round(n * fk)));
   if (_swFxRoom() < n + n2) return 0;
   const spawnY = function () {
@@ -32463,7 +32487,7 @@ function _swCrestDots(px, wl, pz, k, vx, vz, crestY) {
       life: 0.7 + Math.random() * 1.1, maxLife: 1.8,
       color: (Math.random() < 0.5) ? 0xe6faff : 0xbce4fb,   // (v41.31) a touch brighter than before
       size: (0.7 + Math.random() * 1.5) * (window.__splashSz || 1),
-      grav: 55 + Math.random() * 95,                        
+      grav: (55 + Math.random() * 95) * _dg,                        
       splash: true,
     });
   }
@@ -32479,7 +32503,7 @@ function _swCrestDots(px, wl, pz, k, vx, vz, crestY) {
       life: 0.9 + Math.random() * 1.3, maxLife: 2.2,
       color: (Math.random() < 0.55) ? 0xffffff : 0xeafcff,
       size: (0.22 + Math.random() * 0.55) * (window.__splashSz || 1),
-      grav: 26 + Math.random() * 52,                        
+      grav: (26 + Math.random() * 52) * _dg,                        
       splash: true,
     });
   }
@@ -55385,7 +55409,7 @@ class Projectile {
   spawnImpactExplosion(pos) {
     const size = this.impactExplosionSize();
     if (size <= 0 || typeof spawnExplosion !== 'function') return;
-    spawnExplosion(pos, size);
+    spawnExplosion(pos, size, undefined, this.velocity);   // (v44.22) the water wants the direction
   }
 
   spawnClusterChildren() {
@@ -55417,7 +55441,7 @@ class Projectile {
       timer: duration, dmgPerSec: dmgPerSec, radius: 250,
       owner: this.owner, team: _clTeam, fxTimer: 0,
     });
-    spawnExplosion(this.position, 25);
+    spawnExplosion(this.position, 25, undefined, this.velocity);   // (v44.22)
     if (typeof spawnFireworksBurst === 'function') {
       spawnFireworksBurst(this.position, 280);
     }
@@ -55616,7 +55640,7 @@ class Projectile {
     // would CHANGE enemy explosions, which this change must not do.
     const _thermRamp = (this.isPyroThermite &&
       _fxFriendly(this.owner === 'player' ? player.team : this.ownerTeam)) ? _FIRE_RAMP_BASE_RED : null;
-    spawnExplosion(_exPos, _exSize, _thermRamp);
+    spawnExplosion(_exPos, _exSize, _thermRamp, this.velocity);   // (v44.22)
     // Pyro thermite leaves a small lingering flame at the impact point.
     if (this.isPyroThermite && typeof spawnPyroFlame === 'function') {
       // (v43.84) the file's standing idiom for a projectile's team (see splashDamage, igniteNearbyGas).
@@ -58229,11 +58253,11 @@ if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPus
 // alpha 0.85, i.e. BRIGHTER than the pyro flame's 0.55, for 0.5 s, at the same position. Thermite
 // impact therefore painted an orange-to-white cloud on top of the red flame on both sides, so the
 // first half-second of every hit looked unchanged no matter what the flame ramp said.
-function spawnExplosion(pos, size, fireRamp) {
+function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing that exploded, for the water
   size = size || 20;
   // (v41.19) every explosion in the game funnels through here, so ONE hook covers projectiles,
   // cluster kills, gas ignition, ship deaths and monster attacks alike. See _swBlast for the shape.
-  if (game._hubWater && pos) { try { _swBlast(pos.x, pos.y, pos.z, size); } catch (_) {} }
+  if (game._hubWater && pos) { try { _swBlast(pos.x, pos.y, pos.z, size, vel); } catch (_) {} }
   // Burst guard: a missile into a rock cluster destroys many rocks in one
   // frame, and each full explosion spawns fireball + smoke + debris + a light.
   // N of them at once spiked the GPU (~244ms) and blocked the main thread on
@@ -70826,6 +70850,25 @@ function updateParticles(dt) {
   _splMat.uniforms.uScale.value = _uScale;
   let _w = 0;
   let _ws = 0;
+  // ⭐⭐ (v44.22) DRAG WAS PER FRAME, NOT PER SECOND. Owner: "i feel like the water droplets fall
+  // too slowly, and are not ejected in relation to how the object is hitting the water".
+  // The three `*= 0.95` lines below used to run once per FRAME, so at 60 fps a particle kept 4.6% of
+  // its velocity after a second and at 120 fps 0.2% - twice the drag on a fast monitor, and it
+  // capped the fall at a terminal speed of grav*dt/0.05: ~130 u/s at 60 fps, ~65 u/s at 120 fps,
+  // which is 5 m/s at this world's scale (1 u = 7.8 cm). Every splash emitter in the water system
+  // already launches drops with the impact's own velocity (the oblique-entry model in
+  // _swSpawnSplashV), but with that drag the launch was erased within four or five frames, so the
+  // spray looked the same whichever way the object hit.
+  //   Two retentions now, both per SECOND and raised to dt:
+  //   - every other particle keeps the old 60 fps behaviour exactly (0.95^60 per second), so the
+  //     explosion pools and tracers look as they always did, at any frame rate;
+  //   - water drops (splash: true, falling) keep `__water.dropDrag` of their velocity per second
+  //     (0.25: a 0.7 s time constant - a 400 u/s launch carries ~290 u instead of ~130), and fall
+  //     under `grav * __water.dropGrav`. Buoyant bubbles (negative grav) stay on the old drag.
+  const _W6 = window.__water || {};
+  const _pkLegacy = Math.pow(0.95, dt * 60);
+  const _pkDrop = Math.pow((_W6.dropDrag != null) ? Math.max(0.001, +_W6.dropDrag) : 0.25, dt);
+  const _dropG = (_W6.dropGrav != null) ? +_W6.dropGrav : 1.0;
   // Manual x/y/z math on velocity so POJO-typed
   // velocities work alongside any remaining Vector3-typed ones
   // (gas-cloud particles). Replaces p.velocity.multiplyScalar(0.95).
@@ -70844,13 +70887,15 @@ function updateParticles(dt) {
       continue;
     }
     const _pv = p.velocity;
-    if (p.grav) _pv.y -= p.grav * dt;   
+    const _drop = !!(p.splash && p.grav > 0);   // (v44.22) a falling water drop
+    if (p.grav) _pv.y -= p.grav * (_drop ? _dropG : 1.0) * dt;   
     pos.x += _pv.x * dt;
     pos.y += _pv.y * dt;
     pos.z += _pv.z * dt;
-    _pv.x *= 0.95;
-    _pv.y *= 0.95;
-    _pv.z *= 0.95;
+    const _pk = _drop ? _pkDrop : _pkLegacy;   // (v44.22) see the note above the loop
+    _pv.x *= _pk;
+    _pv.y *= _pk;
+    _pv.z *= _pk;
     const alpha = p.life / p.maxLife;
     // Write straight into the Points attributes at a packed cursor; no
     // slot bookkeeping. Color hex is converted once per particle and

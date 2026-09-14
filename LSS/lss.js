@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.21';
+const LSS_BUILD = '44.22';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -17856,7 +17856,21 @@ function _swWorthingtonJet(px, pz, WL, fp, vEntry, k) {
   return n;
 }
 const _SW_BLASTS = [];
-function _swBlast(x, y, z, size) {
+function _swBlastSprayV(vel, sp) {
+  const V = { x: 0, y: -sp, z: 0 };
+  if (!vel) return V;
+  const vx = +vel.x || 0, vy = +vel.y || 0, vz = +vel.z || 0;
+  const h = Math.hypot(vx, vz);
+  if (!(h > 1e-3)) return V;
+  const W = window.__water || {};
+  const lean = (W.blastLean != null) ? +W.blastLean : 0.55;
+  const hmax = (W.blastLeanMax != null) ? +W.blastLeanMax : 900;
+  const hs = Math.min(hmax, h * lean);
+  V.x = vx / h * hs; V.z = vz / h * hs;
+  V.y = -Math.max(sp, Math.max(0, -vy) * lean);
+  return V;
+}
+function _swBlast(x, y, z, size, vel) {
   const w = game && game._hubWater; if (!w) return 0;
   const W3 = window.__water || {};
   const bk = (W3.blast != null) ? +W3.blast : 1;
@@ -17882,7 +17896,7 @@ function _swBlast(x, y, z, size) {
   const _now = performance.now();
   if (_now - _swXB.t > 250) { _swXB.t = _now; _swXB.n = 0; }
   if (_swXB.n < ((W3.wxCap != null) ? +W3.wxCap : 34) && !game._swSubmerged) {
-    _swXB.n += _swSpawnSplashV(x, WL, z, { x: 0, y: -_sp, z: 0 }, _D, 0.5 + 0.8 * reach) || 0;
+    _swXB.n += _swSpawnSplashV(x, WL, z, _swBlastSprayV(vel, _sp), _D, 0.5 + 0.8 * reach) || 0;   // (v44.22)
   }
   _swCrestDots(x, WL, z, 0.5 + 0.9 * reach, 0, 0, _swDispWorld(A * peak * 2.4));
   if (d < R * 0.35 && _SW_BLASTS.length < 6) {
@@ -18332,6 +18346,7 @@ function _swCrestDots(px, wl, pz, k, vx, vz, crestY) {
   if (!(dk > 0) || !(k > 0.02)) return 0;
   const n = Math.max(1, Math.min(20, Math.round((2 + 8 * Math.min(1, k)) * dk)));
   const fk = (W3.dotsFine != null) ? +W3.dotsFine : 1.7;
+  const _dg = (W3.dotsGrav != null) ? +W3.dotsGrav : 2.5;
   const n2 = Math.max(0, Math.min(34, Math.round(n * fk)));
   if (_swFxRoom() < n + n2) return 0;
   const spawnY = function () {
@@ -18348,7 +18363,7 @@ function _swCrestDots(px, wl, pz, k, vx, vz, crestY) {
       life: 0.7 + Math.random() * 1.1, maxLife: 1.8,
       color: (Math.random() < 0.5) ? 0xe6faff : 0xbce4fb,   // (v41.31) a touch brighter than before
       size: (0.7 + Math.random() * 1.5) * (window.__splashSz || 1),
-      grav: 55 + Math.random() * 95,                        
+      grav: (55 + Math.random() * 95) * _dg,                        
       splash: true,
     });
   }
@@ -18363,7 +18378,7 @@ function _swCrestDots(px, wl, pz, k, vx, vz, crestY) {
       life: 0.9 + Math.random() * 1.3, maxLife: 2.2,
       color: (Math.random() < 0.55) ? 0xffffff : 0xeafcff,
       size: (0.22 + Math.random() * 0.55) * (window.__splashSz || 1),
-      grav: 26 + Math.random() * 52,                        
+      grav: (26 + Math.random() * 52) * _dg,                        
       splash: true,
     });
   }
@@ -34394,7 +34409,7 @@ class Projectile {
   spawnImpactExplosion(pos) {
     const size = this.impactExplosionSize();
     if (size <= 0 || typeof spawnExplosion !== 'function') return;
-    spawnExplosion(pos, size);
+    spawnExplosion(pos, size, undefined, this.velocity);   // (v44.22) the water wants the direction
   }
 
   spawnClusterChildren() {
@@ -34412,7 +34427,7 @@ class Projectile {
       timer: duration, dmgPerSec: dmgPerSec, radius: 250,
       owner: this.owner, team: _clTeam, fxTimer: 0,
     });
-    spawnExplosion(this.position, 25);
+    spawnExplosion(this.position, 25, undefined, this.velocity);   // (v44.22)
     if (typeof spawnFireworksBurst === 'function') {
       spawnFireworksBurst(this.position, 280);
     }
@@ -34570,7 +34585,7 @@ class Projectile {
     }
     const _thermRamp = (this.isPyroThermite &&
       _fxFriendly(this.owner === 'player' ? player.team : this.ownerTeam)) ? _FIRE_RAMP_BASE_RED : null;
-    spawnExplosion(_exPos, _exSize, _thermRamp);
+    spawnExplosion(_exPos, _exSize, _thermRamp, this.velocity);   // (v44.22)
     if (this.isPyroThermite && typeof spawnPyroFlame === 'function') {
       spawnPyroFlame(_exPos, this.owner === 'player' ? player.team : this.ownerTeam);
     }
@@ -36420,9 +36435,9 @@ function applyExplosionPush(pos, force, radius) {
 }
 if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPush;
 
-function spawnExplosion(pos, size, fireRamp) {
+function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing that exploded, for the water
   size = size || 20;
-  if (game._hubWater && pos) { try { _swBlast(pos.x, pos.y, pos.z, size); } catch (_) {} }
+  if (game._hubWater && pos) { try { _swBlast(pos.x, pos.y, pos.z, size, vel); } catch (_) {} }
   const _explFrameKey = (typeof game !== 'undefined' && game) ? game.time : 0;
   if (_explFrameKey !== spawnExplosion._frameKey) { spawnExplosion._frameKey = _explFrameKey; spawnExplosion._count = 0; }
   const _explOverBudget = (++spawnExplosion._count) > 4;
@@ -45445,6 +45460,10 @@ function updateParticles(dt) {
   _splMat.uniforms.uScale.value = _uScale;
   let _w = 0;
   let _ws = 0;
+  const _W6 = window.__water || {};
+  const _pkLegacy = Math.pow(0.95, dt * 60);
+  const _pkDrop = Math.pow((_W6.dropDrag != null) ? Math.max(0.001, +_W6.dropDrag) : 0.25, dt);
+  const _dropG = (_W6.dropGrav != null) ? +_W6.dropGrav : 1.0;
   for (let i = game.particles.length - 1; i >= 0; i--) {
     const p = game.particles[i];
     p.life -= dt;
@@ -45456,13 +45475,15 @@ function updateParticles(dt) {
       continue;
     }
     const _pv = p.velocity;
-    if (p.grav) _pv.y -= p.grav * dt;   
+    const _drop = !!(p.splash && p.grav > 0);   // (v44.22) a falling water drop
+    if (p.grav) _pv.y -= p.grav * (_drop ? _dropG : 1.0) * dt;   
     pos.x += _pv.x * dt;
     pos.y += _pv.y * dt;
     pos.z += _pv.z * dt;
-    _pv.x *= 0.95;
-    _pv.y *= 0.95;
-    _pv.z *= 0.95;
+    const _pk = _drop ? _pkDrop : _pkLegacy;   // (v44.22) see the note above the loop
+    _pv.x *= _pk;
+    _pv.y *= _pk;
+    _pv.z *= _pk;
     const alpha = p.life / p.maxLife;
     if (p._colR === undefined) {
       _ptsColorScratch.setHex(p.color || 0xffffff);
