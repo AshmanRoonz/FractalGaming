@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.06';
+const LSS_BUILD = '44.07';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -11051,7 +11051,8 @@ try {
         const _fx = (_d.fx && typeof _d.fx === 'object') ? _d.fx : null;
         _diagText = (_lvl || '?') + ' | ' + (_d.mobile ? 'mobile' : 'desktop') + ' dpr ' + (+_d.dpr).toFixed(2) +
           (_fx ? ' | canvas ' + _fx.canvas.join('x') + ' | scene ' + _fx.scene[0] + 'x' + _fx.scene[1] + ' s' + _fx.scene[3] +
-                 ((_fx.active && _fx.active.length > 3) ? ' | live ' + _fx.active[0] + 'x' + _fx.active[1] + ' @' + (+_fx.active[3]).toFixed(2) : '') +
+                 ((_fx.active && _fx.active.length > 3) ? ' | live ' + _fx.active[0] + 'x' + _fx.active[1] + ' @' + (+_fx.active[3]).toFixed(2) +
+                    ((_fx.active.length > 7) ? ' ema ' + (+_fx.active[7]).toFixed(1) : '') : '') +
                  ' | bloom ' + _fx.bloom.join('x') : '') +
           (_d.mem ? ' | tex ' + _d.mem.tex + ' geo ' + _d.mem.geo : '') + (_d.draw ? ' | calls ' + _d.draw.calls : '') +
           ' | ' + (_d.mode || '') + '/' + (_d.state || '') + (_d.tp ? ' 3p' : ' 1p') + ' | up ' + _d.up + 's' +
