@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.22';
+const LSS_BUILD = '44.23';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -31473,6 +31473,7 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
         const _keepEmis = m && m.emissiveMap && (
           (typeof m.name === 'string' && m.name.indexOf('cockpit') === 0) ||
           !(typeof input !== 'undefined' && input && input.hullGlow === false));
+        const _hullStrip = !!(m && m.emissiveMap && !(typeof m.name === 'string' && m.name.indexOf('cockpit') === 0));
         if (_keepEmis) {
           params.emissiveMap = m.emissiveMap;
           params.emissive = new THREE.Color(0xffffff);
@@ -31502,6 +31503,11 @@ function buildModelShipMesh(chassisData, teamColor, loadoutKey, skinId) {
           params.depthWrite = false;
         }
         const mat = new THREE.MeshStandardMaterial(params);
+        if (_hullStrip) {   // (v44.23) see _lssApplyHullGlow
+          mat.userData._hullEmis = { map: m.emissiveMap,
+                                     intensity: (typeof m.emissiveIntensity === 'number') ? m.emissiveIntensity : 1.0,
+                                     off: teamCol.clone().multiplyScalar(0.04) };
+        }
         if (m && m.name === 'canopy_glass') { try { _glassApply(mat); } catch (_) {} }   // (v38.34)
         if (!params.transparent) hullMats.push(mat);
         return mat;
@@ -34868,7 +34874,7 @@ const _SHIPL = {
            (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) ? 0 : 3,
   CONE_N: (function () {
     if ((typeof isStandaloneQuest === 'function') && isStandaloneQuest()) return 2;
-    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return 0;
+    if (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) return 2;
     return 6;
   })(),
   cones: [],           // pooled cone meshes (CONE_N)
@@ -34947,6 +34953,32 @@ function _shipScanInsert(top, topD, e, d) {
   while (i > 0 && topD[i - 1] > d) { top[i] = top[i - 1]; topD[i] = topD[i - 1]; i--; }
   top[i] = e; topD[i] = d;
 }
+function _lssApplyHullGlow() {
+  const on = !(typeof input !== 'undefined' && input && input.hullGlow === false);
+  if (typeof scene === 'undefined' || !scene) return 0;
+  let n = 0;
+  scene.traverse(o => {
+    const mats = o.material ? (Array.isArray(o.material) ? o.material : [o.material]) : null;
+    if (!mats) return;
+    for (const mat of mats) {
+      const E = mat && mat.userData && mat.userData._hullEmis;
+      if (!E) continue;
+      const want = on ? E.map : null;
+      if (mat.emissiveMap !== want) { mat.emissiveMap = want; mat.needsUpdate = true; }
+      if (on) { mat.emissive.set(0xffffff); mat.emissiveIntensity = E.intensity; }
+      else { mat.emissive.copy(E.off); mat.emissiveIntensity = 1.0; }
+      n++;
+    }
+  });
+  return n;
+}
+window.__hullGlow = function (v) {
+  if (v !== undefined) {
+    input.hullGlow = !!(+v);
+    try { if (typeof saveSettings === 'function') saveSettings(); } catch (_) {}
+  }
+  return { on: input.hullGlow !== false, materials: _lssApplyHullGlow() };
+};
 window.__headlight = function (v) {
   if (v !== undefined) {
     input.headlight = !!(+v);
@@ -63223,6 +63255,7 @@ function _refreshSettingsValues() {
   setChk('set-show-fps', input.showFps);
   setChk('set-keep-warm', input.keepWarm !== false);
   setChk('set-hull-glow', input.hullGlow !== false);
+  setChk('set-headlight', input.headlight !== false);   // (v44.23)
   setChk('set-cockpit-vr', input.cockpitVR === true);
   {
     const _cs = (typeof input.cockpitSolidity === 'number') ? input.cockpitSolidity : 0;
@@ -63558,7 +63591,14 @@ function buildSettingsPage() {
         <input type="checkbox" id="set-hull-glow" ${input.hullGlow !== false ? 'checked' : ''}>
       </div>
       <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
-        <label style="flex:1;">The painted light strips on every hull glow in the dark. Applies to ships built after the change (next launch / respawn).</label>
+        <label style="flex:1;">The painted light strips on every hull glow in the dark.</label>
+      </div>
+      <div class="setting-row">
+        <label>Headlight</label>
+        <input type="checkbox" id="set-headlight" ${input.headlight !== false ? 'checked' : ''}>
+      </div>
+      <div class="setting-row" style="opacity:0.7; font-size:0.85em;">
+        <label style="flex:1;">The beam under the nose, and its cone of light in third person.</label>
       </div>
       <div class="setting-row">
         <label>HUD Gauge Labels</label>
@@ -64939,6 +64979,12 @@ function buildSettingsPage() {
   const hullGlowChk = overlay.querySelector('#set-hull-glow');
   if (hullGlowChk) hullGlowChk.addEventListener('change', () => {
     input.hullGlow = !!hullGlowChk.checked;
+    try { _lssApplyHullGlow(); } catch (_) {}   // (v44.23) live, not "next respawn"
+    saveSettings();
+  });
+  const headlightChk = overlay.querySelector('#set-headlight');   // (v44.23)
+  if (headlightChk) headlightChk.addEventListener('change', () => {
+    input.headlight = !!headlightChk.checked;
     saveSettings();
   });
   const cockpitVrChk = overlay.querySelector('#set-cockpit-vr');
@@ -65597,6 +65643,7 @@ function saveSettings() {
       keepWarm: input.keepWarm !== false,
       cockpit3d: input.cockpit3d !== false,
       hullGlow: input.hullGlow !== false,
+      headlight2: input.headlight !== false,   // (v44.23) a NEW key: v37.08 deliberately ignores the old one
       cockpitVR: input.cockpitVR === true,
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
@@ -67427,6 +67474,7 @@ function loadSettings() {
     if (typeof data.showFps === 'boolean') input.showFps = data.showFps;
     if (typeof data.keepWarm === 'boolean') input.keepWarm = data.keepWarm;
     if (typeof data.hullGlow === 'boolean') input.hullGlow = data.hullGlow;
+    if (typeof data.headlight2 === 'boolean') input.headlight = data.headlight2;   // (v44.23)
     if (typeof data.cockpitVR === 'boolean') input.cockpitVR = data.cockpitVR;
     if (!data.cockpitVRv2) input.cockpitVR = true;
     if (typeof data.hudGaugeLabels === 'boolean') input.hudGaugeLabels = data.hudGaugeLabels;
