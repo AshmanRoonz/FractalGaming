@@ -6083,7 +6083,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.03';
+const LSS_BUILD = '44.04';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -25249,9 +25249,47 @@ try {
   }).catch(() => {});
 } catch (_) {}
 if (typeof window !== 'undefined') window.__onBattery = () => _lssOnBattery;
+// ⭐⭐⭐ (v44.04) THE ONE FLAG THAT SWITCHED OFF ADAPTIVE RESOLUTION ON EVERY WEAK DEVICE.
+// This function gates BOTH halves of the governor - the sampler (L25418 `if
+// (!_lssSupersampleActive()) return;`) and the application (_lssSceneActive) - and its
+// `&& !_LSS_IS_MOBILE` term meant that on a phone, a tablet or a TV browser the scale never left 0
+// and the scene ALWAYS rendered at the full allocated target, no matter how badly the frame was
+// going. The devices with the least headroom in the game were the only ones with no way down.
+//
+// ⚠ MEASURED, NOT REASONED. The owner's Xbox One (Edge, which this build classifies `mobile`)
+//   printed it on a v44.03 context-loss line, in the field this very session added for the purpose:
+//     low | mobile dpr 1.50 | canvas 853x420 | scene 1152x567 s0 | live 1152x567 @0.00
+//   `live` IDENTICAL to `scene`, scale @0.00, on a console at the LOW tier that had just crashed
+//   after 149 s of play. The readout was built to separate "already at the floor and still slow"
+//   from "the governor is not engaging", and it answered on the first photograph: not engaging.
+//
+// WHY THE TERM WAS THERE, AND WHY REMOVING IT CANNOT SUPERSAMPLE A PHONE. The flag's purpose was to
+// stop phones paying for a supersample. But that is ALREADY impossible on this path, twice over:
+//   1. `_super = Math.max(_lssTierSuper(), _lssPaniniSuper())` and BOTH return 0 on mobile by their
+//      own explicit tests - _lssTierSuper's comment says "0 where there is none (HIGH and below,
+//      phones, XR)" and _lssPaniniSuper has a literal `if (_LSS_IS_MOBILE) return 0; // phones
+//      cannot pay this`. With _super 0, `s = base + (max(base,_super) - base) * _sc` is base for ANY
+//      positive scale - the supersample branch is arithmetically inert.
+//   2. The climb cap is `_cap = (_lssTierSuper() > 0) ? 1 : 0`, so on mobile the scale can never
+//      become positive in the first place.
+// So the term was redundant for its stated job and load-bearing for a job nobody intended: it also
+// blocked the SUB-NATIVE shed, which is the only direction a struggling device ever needs.
+//
+// (!) THE PRECEDENT IS ALREADY IN THIS FILE, one line down. v39.49c enabled exactly this for HIGH on
+//     battery and its comment says why in five words: "super 0: sub-native only". That is the same
+//     configuration a phone is in, permanently. This extends the same treatment to the same shape.
+// (!) XR IS STILL EXCLUDED. A headset owns its own budget ladder and must not be governed from here.
+// (!) DESKTOP IS BYTE-IDENTICAL: every term it evaluates is unchanged and _LSS_IS_MOBILE is false,
+//     so the added disjunct can never fire there.
+// What this buys the weak device: the governor may now shed to window.__ssMin (-0.6 = 70% per axis,
+// 49% of the pixels) when the frame EMA runs 40% over budget, and creep back at 0.1 a tick once it
+// is holding. On the owner's console that is 1152x567 -> 806x396 under load, automatically.
 function _lssSupersampleActive() {
   try {
-    return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega() || _lssPaniniD() > 0 || (_lssOnBattery && QUALITY.level === 'high')) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&   // (v42.98) Panini brings the governor with it
+    return typeof QUALITY !== 'undefined' &&
+           (QUALITY.isUltra() || QUALITY.isMega() || _lssPaniniD() > 0 ||
+            (_lssOnBattery && QUALITY.level === 'high') ||   // (v39.49c) super 0: sub-native only
+            (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) &&   // (v44.04) ditto, permanently
            !(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
   } catch (_) { return false; }
 }

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.03';
+const LSS_BUILD = '44.04';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -13845,7 +13845,10 @@ try {
 if (typeof window !== 'undefined') window.__onBattery = () => _lssOnBattery;
 function _lssSupersampleActive() {
   try {
-    return typeof QUALITY !== 'undefined' && (QUALITY.isUltra() || QUALITY.isMega() || _lssPaniniD() > 0 || (_lssOnBattery && QUALITY.level === 'high')) && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&   // (v42.98) Panini brings the governor with it
+    return typeof QUALITY !== 'undefined' &&
+           (QUALITY.isUltra() || QUALITY.isMega() || _lssPaniniD() > 0 ||
+            (_lssOnBattery && QUALITY.level === 'high') ||   // (v39.49c) super 0: sub-native only
+            (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) &&   // (v44.04) ditto, permanently
            !(typeof renderer !== 'undefined' && renderer && renderer.xr && renderer.xr.isPresenting);
   } catch (_) { return false; }
 }
