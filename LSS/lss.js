@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.14';
+const LSS_BUILD = '44.15';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -1783,9 +1783,95 @@ function _discordRenderIdentity() {
 
 let _lastPostedMatchId = null;
 
+const _LSS_OUTBOX_KEY = 'lss_match_outbox';
+const _LSS_OUTBOX_MAX = 24;          // a hard cap; the oldest fall off rather than filling storage
+const _LSS_OUTBOX_TRIES = 40;        // ...and a bad entry cannot retry forever
+
+function _lssOutboxRead() {
+  try {
+    const a = JSON.parse(localStorage.getItem(_LSS_OUTBOX_KEY) || '[]');
+    return Array.isArray(a) ? a.filter(e => e && e.payload && e.payload.match_id) : [];
+  } catch (_) { return []; }
+}
+function _lssOutboxWrite(list) {
+  try { localStorage.setItem(_LSS_OUTBOX_KEY, JSON.stringify(list.slice(-_LSS_OUTBOX_MAX))); }
+  catch (_) {}    // quota / private mode: the in-flight post below still gets its chance
+}
+function _lssOutboxPut(payload) {
+  const list = _lssOutboxRead();
+  const i = list.findIndex(e => e.payload.match_id === payload.match_id);
+  const entry = { payload, tries: 0, queuedAt: Date.now() };
+  if (i >= 0) list[i] = entry; else list.push(entry);
+  _lssOutboxWrite(list);
+}
+function _lssOutboxDrop(matchId) {
+  _lssOutboxWrite(_lssOutboxRead().filter(e => e.payload.match_id !== matchId));
+}
+
+async function _lssPostMatchPayload(payload, token) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 12000);   // the old fetch had no timeout at all
+    let res;
+    try {
+      res = await fetch(LSS_API_BASE + '/match', {
+        method:  'POST',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+        keepalive: true,
+        signal: ctrl.signal,
+      });
+    } finally { clearTimeout(t); }
+    if (res.ok) return 'ok';
+    if (res.status === 400 || res.status === 403 || res.status === 413) {
+      console.warn('[lss-outbox] permanent rejection', res.status, payload.match_id);
+      return 'permanent';
+    }
+    return 'transient';                                 // 401 / 429 / 5xx - try again later
+  } catch (_) {
+    return 'transient';                                 // offline, DNS, abort, CORS
+  }
+}
+
+let _lssOutboxFlushing = false;
+async function _lssOutboxFlush() {
+  if (_lssOutboxFlushing) return;
+  _lssOutboxFlushing = true;
+  try {
+    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    if (!token) return;                                 // signed out: hold everything, lose nothing
+    for (const entry of _lssOutboxRead()) {
+      const r = await _lssPostMatchPayload(entry.payload, token);
+      if (r === 'ok' || r === 'permanent') { _lssOutboxDrop(entry.payload.match_id); continue; }
+      const list = _lssOutboxRead();
+      const i = list.findIndex(e => e.payload.match_id === entry.payload.match_id);
+      if (i >= 0) {
+        list[i].tries = (list[i].tries | 0) + 1;
+        if (list[i].tries >= _LSS_OUTBOX_TRIES) list.splice(i, 1);
+        _lssOutboxWrite(list);
+      }
+      break;
+    }
+  } finally { _lssOutboxFlushing = false; }
+}
+
+try {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('online', () => { _lssOutboxFlush(); });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') _lssOutboxFlush();
+    });
+    setTimeout(() => { _lssOutboxFlush(); }, 4000);     // after boot settles + auth is readable
+    setInterval(() => { _lssOutboxFlush(); }, 120000);
+    window.lssOutbox = { read: _lssOutboxRead, flush: _lssOutboxFlush, drop: _lssOutboxDrop };
+  }
+} catch (_) {}
+
 function _buildMatchIdForCurrentMatch() {
-  if (net.active && net.worldSeed != null && net.matchStartedAt != null) {
-    return 'mp_' + net.worldSeed + '_' + net.matchStartedAt;
+  if (net.active && net.worldSeed != null) {
+    const _mst = (typeof net.matchStartedAt === 'number' && isFinite(net.matchStartedAt))
+      ? net.matchStartedAt : 0;
+    return 'mp_' + (net.worldSeed >>> 0) + '_' + _mst;
   }
   if (game._soloMatchId) return game._soloMatchId;
   game._soloMatchId = 'solo_' + Date.now() + '_' + Math.floor(Math.random() * 1e6).toString(36);
@@ -1825,6 +1911,8 @@ function _gatherMatchParticipants(winningTeam) {
   let botIdx = 0;
   for (const b of (game.entities || [])) {
     if (!b || !b.loadoutKey) continue;
+    if (b.peerId) continue;                       // a peer - counted once, below, as themselves
+    if (b.alive === false) continue;              // a corpse still in the array; each client
     out.push({
       discord_id:   'bot:' + b.loadoutKey + ':' + (botIdx++),
       team:         b.team || LSS.TEAM_FLEET_A,
@@ -1854,13 +1942,23 @@ function _gatherMatchParticipants(winningTeam) {
       score:        _teamMatchScore(np.team || LSS.TEAM_FLEET_A),   // (v38.73)
     });
   }
+  let list = out;
+  if (list.length > 12) {
+    const isSynthetic = (p) => /^(bot|peer|local):/.test(String(p.discord_id || ''));
+    const humans = list.filter(p => !isSynthetic(p));
+    const rest   = list.filter(isSynthetic)
+                       .sort((a, b) => (b.damage_dealt | 0) - (a.damage_dealt | 0));
+    list = humans.concat(rest).slice(0, 12);
+    if (humans.length > 12) console.warn('[lss-backend] more than 12 humans ; match will be rejected');
+  }
+
   let mvp = null;
-  for (const p of out) {
+  for (const p of list) {
     if (!p.is_winner) continue;
     if (!mvp || p.kills > mvp.kills) mvp = p;
   }
   if (mvp) mvp.is_mvp = 1;
-  return out;
+  return list;
 }
 
 
@@ -1916,10 +2014,8 @@ function stopRoomHeartbeat() {
 async function postEndlessRunToBackend(run) {
   try {
     if (!run || run._posted) return;
-    run._posted = true;
-    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
-    const me    = (typeof discordCurrentUser  === 'function') && discordCurrentUser();
-    if (!token || !me || !me.id) return;    // signed out: local best only
+    const me = (typeof discordCurrentUser === 'function') && discordCurrentUser();
+    if (!me || !me.id) return;              // never signed in: local best only, nothing to file under
 
     const diff = (typeof _getStoredDifficulty === 'function') ? _getStoredDifficulty() : 'hard';
     const endedAt   = Date.now();
@@ -1949,15 +2045,12 @@ async function postEndlessRunToBackend(run) {
       }],
     };
 
-    const res = await fetch(LSS_API_BASE + '/match', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) console.warn('[lss-backend] endless POST failed', res.status);
-    else console.log('[lss-backend] endless run posted ; dist=' + Math.round(run.dist || 0));
+    _lssOutboxPut(payload);
+    run._posted = true;
+    console.log('[lss-backend] endless run queued ; dist=' + Math.round(run.dist || 0));
+    await _lssOutboxFlush();
   } catch (err) {
-    console.warn('[lss-backend] endless POST threw', err);
+    console.warn('[lss-backend] endless queue threw', err);
   }
 }
 
@@ -2056,8 +2149,8 @@ try {
 } catch (_) {}
 
 async function postMatchResultToBackend() {
-  const token = discordCurrentToken();
-  if (!token) {
+  const _me = (typeof discordCurrentUser === 'function') && discordCurrentUser();
+  if (!_me || !_me.id) {
     console.log('[lss-backend] not signed in to Discord ; skipping match post');
     return;
   }
@@ -2088,27 +2181,12 @@ async function postMatchResultToBackend() {
     mode:         (typeof _lssRoomTag === 'function' ? _lssRoomTag() : ((typeof LSS !== 'undefined' && LSS.MODE) || 'classic')),
     winning_team: winningTeam,
     duration_sec: game._matchStartedAtMs ? Math.max(0, Math.round((Date.now() - game._matchStartedAtMs) / 1000)) : null,
+    networked:    !!(game && game._sawHumanPeer),
     participants,
   };
 
-  try {
-    const res = await fetch(LSS_API_BASE + '/match', {
-      method:  'POST',
-      headers: {
-        'Authorization': 'Bearer ' + token,
-        'Content-Type':  'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) {
-      console.warn('[lss-backend] match POST failed', res.status, json);
-    } else {
-      console.log('[lss-backend] match posted ; id=' + matchId);
-    }
-  } catch (err) {
-    console.warn('[lss-backend] match POST threw', err);
-  }
+  _lssOutboxPut(payload);
+  await _lssOutboxFlush();
 }
 
 
@@ -2475,6 +2553,7 @@ async function startOpenSolo() {
   net.solo = false;
   player.team = LSS.TEAM_FLEET_A;
   net.worldSeed = (Math.random() * 0xffffffff) >>> 0;
+  net.matchStartedAt = Date.now();
   const ls = document.getElementById('lobby-status');
   if (ls) { ls.textContent = 'OPEN ROOM ' + code + ' — CHALLENGERS CAN DROP IN'; ls.style.color = '#7dffa8'; }
   enterShipSelect();
@@ -3697,6 +3776,12 @@ const EndlessMode = {
     return run.rays;
   },
   onTeardown() {
+    try {
+      const _r = game.endlessRun;
+      if (_r && !_r._posted && (_r.dist || 0) > 0 && typeof postEndlessRunToBackend === 'function') {
+        postEndlessRunToBackend(_r);
+      }
+    } catch (_) {}
     try {
       const run = game.endlessRun;
       if (run && run.rays) for (let i = 0; i < run.rays.length; i++) {
@@ -6222,6 +6307,7 @@ function updateNetworkPlayer(peerId, data) {
   const np = new NetworkPlayer(peerId, data.loadoutKey, data.team || LSS.TEAM_FLEET_B, data.skinId);
   peer.networkPlayer = np;
   net.networkPlayers.push(np);
+  try { game._sawHumanPeer = true; } catch (_) {}
   game.entities.push(np);
 }
 
@@ -47760,6 +47846,7 @@ function commitLoadout(key) {
     game._matchStartedAtMs = Date.now();
     game._soloMatchId      = null;
     _lastPostedMatchId     = null;
+    game._sawHumanPeer     = false;
     game.championField = null;
     game.championSpawned = false;
     game.championResult = null;

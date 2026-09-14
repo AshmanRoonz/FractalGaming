@@ -6110,7 +6110,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.14';
+const LSS_BUILD = '44.15';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -8622,10 +8622,153 @@ function _discordRenderIdentity() {
 
 let _lastPostedMatchId = null;
 
+// ⭐⭐⭐ (v44.15) THE MATCH OUTBOX - WHY A FINISHED MATCH IS NO LONGER THROWN AWAY.
+// Owner: "i don't want future matches to be lost."
+//
+// The old path did this: latch `_lastPostedMatchId = matchId`, fetch, and on ANY failure
+// `console.warn` and return. The payload existed only as a local variable, so a 502, a dropped
+// connection, an expired Discord token, or the tab being backgrounded mid-request destroyed the
+// match permanently - and the latch made sure the same match could never be built again. Every
+// failure mode ended in silence: the player saw VICTORY, the row never existed.
+//
+// The inversion is the whole fix: WRITE THE PAYLOAD TO DISK BEFORE THE NETWORK IS INVOLVED, and
+// delete it only when the server has confirmed it. Everything else here is bookkeeping on top.
+//
+// ⚠ REPLAY IS SAFE, and that is a property of the backend, not a hope. `INSERT INTO matches ...
+//   ON CONFLICT(id) DO NOTHING` and `INSERT INTO match_participants ... ON CONFLICT(match_id,
+//   discord_id, reported_by) DO UPDATE` mean a re-post of the same payload overwrites this
+//   reporter's own rows and touches nothing else, and tryValidateMatch early-returns on any match
+//   that is no longer pending. So the worst case for a duplicate send is wasted bytes.
+// ⚠ A 4xx IS NOT RETRYABLE. 400 (malformed / too many participants) and 403 (reporter not in the
+//   match) will fail identically forever; retrying them would pin the queue head and starve every
+//   match behind it. They are dropped. 401 is deliberately NOT in that set - it usually means the
+//   Discord token expired, which is temporary from the player's point of view: the match waits in
+//   the queue and goes out the moment they sign in again.
+const _LSS_OUTBOX_KEY = 'lss_match_outbox';
+const _LSS_OUTBOX_MAX = 24;          // a hard cap; the oldest fall off rather than filling storage
+const _LSS_OUTBOX_TRIES = 40;        // ...and a bad entry cannot retry forever
+
+function _lssOutboxRead() {
+  try {
+    const a = JSON.parse(localStorage.getItem(_LSS_OUTBOX_KEY) || '[]');
+    return Array.isArray(a) ? a.filter(e => e && e.payload && e.payload.match_id) : [];
+  } catch (_) { return []; }
+}
+function _lssOutboxWrite(list) {
+  try { localStorage.setItem(_LSS_OUTBOX_KEY, JSON.stringify(list.slice(-_LSS_OUTBOX_MAX))); }
+  catch (_) {}    // quota / private mode: the in-flight post below still gets its chance
+}
+// Idempotent on match_id: a re-post of the same match REPLACES its queued payload rather than
+// queueing a second copy, so the newest view of a match is the one that ships.
+function _lssOutboxPut(payload) {
+  const list = _lssOutboxRead();
+  const i = list.findIndex(e => e.payload.match_id === payload.match_id);
+  const entry = { payload, tries: 0, queuedAt: Date.now() };
+  if (i >= 0) list[i] = entry; else list.push(entry);
+  _lssOutboxWrite(list);
+}
+function _lssOutboxDrop(matchId) {
+  _lssOutboxWrite(_lssOutboxRead().filter(e => e.payload.match_id !== matchId));
+}
+
+// One POST. Returns 'ok' | 'permanent' | 'transient' - the caller decides what that means.
+async function _lssPostMatchPayload(payload, token) {
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 12000);   // the old fetch had no timeout at all
+    let res;
+    try {
+      res = await fetch(LSS_API_BASE + '/match', {
+        method:  'POST',
+        headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+        // (v44.15) keepalive lets the request outlive the page. A player who swipes away from the
+        // browser on the victory screen - or closes the tab during the 10 s scoreboard - used to
+        // have the request torn down with the document. The payload is a few KB, far inside
+        // keepalive's 64 KB budget.
+        keepalive: true,
+        signal: ctrl.signal,
+      });
+    } finally { clearTimeout(t); }
+    if (res.ok) return 'ok';
+    if (res.status === 400 || res.status === 403 || res.status === 413) {
+      console.warn('[lss-outbox] permanent rejection', res.status, payload.match_id);
+      return 'permanent';
+    }
+    return 'transient';                                 // 401 / 429 / 5xx - try again later
+  } catch (_) {
+    return 'transient';                                 // offline, DNS, abort, CORS
+  }
+}
+
+let _lssOutboxFlushing = false;
+async function _lssOutboxFlush() {
+  if (_lssOutboxFlushing) return;
+  _lssOutboxFlushing = true;
+  try {
+    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
+    if (!token) return;                                 // signed out: hold everything, lose nothing
+    for (const entry of _lssOutboxRead()) {
+      const r = await _lssPostMatchPayload(entry.payload, token);
+      if (r === 'ok' || r === 'permanent') { _lssOutboxDrop(entry.payload.match_id); continue; }
+      // Transient. Count the attempt and STOP - if the network is down for one match it is down
+      // for all of them, and hammering the rest of the queue achieves nothing.
+      const list = _lssOutboxRead();
+      const i = list.findIndex(e => e.payload.match_id === entry.payload.match_id);
+      if (i >= 0) {
+        list[i].tries = (list[i].tries | 0) + 1;
+        if (list[i].tries >= _LSS_OUTBOX_TRIES) list.splice(i, 1);
+        _lssOutboxWrite(list);
+      }
+      break;
+    }
+  } finally { _lssOutboxFlushing = false; }
+}
+
+// The queue is only as good as the moments it is drained. Boot covers the reload after a crash;
+// `online` covers the flaky hotel wifi; `visibilitychange` covers coming back to a backgrounded
+// tab; and a slow timer covers a client that just sits in the lobby.
+try {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('online', () => { _lssOutboxFlush(); });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') _lssOutboxFlush();
+    });
+    setTimeout(() => { _lssOutboxFlush(); }, 4000);     // after boot settles + auth is readable
+    setInterval(() => { _lssOutboxFlush(); }, 120000);
+    window.lssOutbox = { read: _lssOutboxRead, flush: _lssOutboxFlush, drop: _lssOutboxDrop };
+  }
+} catch (_) {}
+
 function _buildMatchIdForCurrentMatch() {
-  // Multiplayer: use the synced world seed + match start time.
-  if (net.active && net.worldSeed != null && net.matchStartedAt != null) {
-    return 'mp_' + net.worldSeed + '_' + net.matchStartedAt;
+  // ⭐⭐⭐ (v44.15) IN A ROOM, THIS MUST NEVER FALL THROUGH TO THE SOLO BRANCH - AND IT DID.
+  // The solo id ends in `Math.random()`, so two peers taking that branch mint two DIFFERENT ids for
+  // the same match. Their reports then land in two separate match rows, each holding one report
+  // against a human_count of two, and both wait forever for a second reporter that is posting
+  // somewhere else. That is not a hypothetical: the live database holds four such TWIN PAIRS -
+  // same map, same winner, same roster, ids stamped 1.3 seconds apart - and they are the reason no
+  // multiplayer match has ever validated.
+  //
+  // The old guard required BOTH worldSeed and matchStartedAt to be non-null. worldSeed is reliably
+  // synced; matchStartedAt is stamped by only some of the six launch paths (the fresh-room mint in
+  // startOpenSolo and _startHostedMode never did, nor does elimination with bots OFF), so on the
+  // ordinary "open a room, friend joins" flow it stayed null on every client and the guard failed.
+  //
+  // Two changes make the id agree by construction rather than by remembering to stamp it:
+  //   1. While net.active the solo branch is unreachable, so a missing stamp can no longer turn
+  //      into a per-client random id.
+  //   2. The stamp is OPTIONAL and defaults to 0. Every client in a room either adopts the host's
+  //      value from a briefing (open_solo_start / dropin_state carry `mst`) or has none at all -
+  //      and "none at all" now produces the same string on every client instead of six different
+  //      ones. The stamp still earns its place when it IS present: it separates two matches that
+  //      happen to roll the same world seed.
+  // ⚠ The one thing that must never happen is a client MINTING a stamp without broadcasting it.
+  //   Every site that sets net.matchStartedAt either sends it in the same breath or is the
+  //   proposer's scheduleMatchStart, whose startAt reaches every peer verbatim.
+  if (net.active && net.worldSeed != null) {
+    const _mst = (typeof net.matchStartedAt === 'number' && isFinite(net.matchStartedAt))
+      ? net.matchStartedAt : 0;
+    return 'mp_' + (net.worldSeed >>> 0) + '_' + _mst;
   }
   // Solo: use a session-local timestamp + a random salt set at match start.
   if (game._soloMatchId) return game._soloMatchId;
@@ -8677,9 +8820,32 @@ function _gatherMatchParticipants(winningTeam) {
     });
   }
   // Bots.
+  // ⭐⭐⭐ (v44.15) A CONNECTED PEER IS NOT A BOT, AND THIS LOOP USED TO FILE THEM AS ONE.
+  // NetworkPlayer instances are pushed into game.entities (see _netApplyLoadout) and they carry a
+  // `loadoutKey`, so the only test here admitted every peer - and the networkPlayers loop below
+  // then added the SAME player again under their real discord_id. Every human in a multiplayer
+  // match was reported twice.
+  //   This is not a tidiness problem, it is why multiplayer never recorded:
+  //     - participant_count was inflated by one row per peer, and the backend required every
+  //       reporter to submit exactly the count the FIRST reporter had sent. Two clients that
+  //       disagree by one connected peer at match end disagree on that count, and the match was
+  //       stranded pending forever.
+  //     - the phantom's team/is_winner is each client's view of the OTHER player, so the two
+  //       reports contradict each other on a row that the consensus rule was cross-checking.
+  //   It is visible in the live database. In match solo_1778693765057_fpmc peer A filed
+  //   bot:SYPHON:0 as team 2 / winner and peer B filed the same id as team 3 / loser - those are
+  //   exactly the teams each client reported for the other HUMAN. There was never a SYPHON bot in
+  //   that match; it was the opponent, twice.
+  // ⚠ `peerId` is the discriminator rather than `instanceof NetworkPlayer` because the class is
+  //   declared far below this function and hoisting a class binding is a temporal-dead-zone throw,
+  //   not a `false`. Real bots have no peerId.
   let botIdx = 0;
   for (const b of (game.entities || [])) {
     if (!b || !b.loadoutKey) continue;
+    if (b.peerId) continue;                       // a peer - counted once, below, as themselves
+    if (b.alive === false) continue;              // a corpse still in the array; each client
+                                                  // splices at a different tick, so counting them
+                                                  // makes two honest reports disagree
     out.push({
       discord_id:   'bot:' + b.loadoutKey + ':' + (botIdx++),
       team:         b.team || LSS.TEAM_FLEET_A,
@@ -8710,14 +8876,34 @@ function _gatherMatchParticipants(winningTeam) {
       score:        _teamMatchScore(np.team || LSS.TEAM_FLEET_A),   // (v38.73)
     });
   }
+  // ⭐⭐ (v44.15) THE BACKEND REJECTS MORE THAN TWELVE PARTICIPANTS, AND THE CLIENT NEVER
+  // CHECKED. `if (body.participants.length > 12) throw new ApiError(400, 'too_many_participants')`
+  // - a 400, which the old fire-and-forget post logged and discarded, losing the whole match. An
+  // assault match cycling reinforcements, or a long free-flight session, walks past twelve without
+  // anything noticing.
+  //   Humans are kept unconditionally: they are the only rows that reach career totals, and
+  //   dropping one would strand the match on the roster guard. Bots are ranked by the damage they
+  //   did, so what survives the cut is the part of the fight worth recording.
+  let list = out;
+  if (list.length > 12) {
+    const isSynthetic = (p) => /^(bot|peer|local):/.test(String(p.discord_id || ''));
+    const humans = list.filter(p => !isSynthetic(p));
+    const rest   = list.filter(isSynthetic)
+                       .sort((a, b) => (b.damage_dealt | 0) - (a.damage_dealt | 0));
+    list = humans.concat(rest).slice(0, 12);
+    // Humans alone can exceed the cap in a full room; that is the backend's limit to raise, not
+    // something to paper over by silently dropping a player's match.
+    if (humans.length > 12) console.warn('[lss-backend] more than 12 humans ; match will be rejected');
+  }
+
   // MVP: highest kills on the winning team.
   let mvp = null;
-  for (const p of out) {
+  for (const p of list) {
     if (!p.is_winner) continue;
     if (!mvp || p.kills > mvp.kills) mvp = p;
   }
   if (mvp) mvp.is_mvp = 1;
-  return out;
+  return list;
 }
 
 // ---- LOBBY HEARTBEAT (v10 Phase 6) ----
@@ -8796,10 +8982,11 @@ function stopRoomHeartbeat() {
 async function postEndlessRunToBackend(run) {
   try {
     if (!run || run._posted) return;
-    run._posted = true;
-    const token = (typeof discordCurrentToken === 'function') && discordCurrentToken();
-    const me    = (typeof discordCurrentUser  === 'function') && discordCurrentUser();
-    if (!token || !me || !me.id) return;    // signed out: local best only
+    // (v44.15) Set AFTER the payload reaches the outbox, not before the token check - this used to
+    // burn the run on a signed-out player or a 500 and the run-over tick would never try again.
+    // The match_id is deterministic ('endless_' + id + '_' + startedAt), so a replay is a no-op.
+    const me = (typeof discordCurrentUser === 'function') && discordCurrentUser();
+    if (!me || !me.id) return;              // never signed in: local best only, nothing to file under
 
     const diff = (typeof _getStoredDifficulty === 'function') ? _getStoredDifficulty() : 'hard';
     const endedAt   = Date.now();
@@ -8829,15 +9016,16 @@ async function postEndlessRunToBackend(run) {
       }],
     };
 
-    const res = await fetch(LSS_API_BASE + '/match', {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) console.warn('[lss-backend] endless POST failed', res.status);
-    else console.log('[lss-backend] endless run posted ; dist=' + Math.round(run.dist || 0));
+    // (v44.15) Same contract as the classic post: the run reaches disk before it reaches the
+    // network, and `_posted` is set only once it is safely queued. A 40-minute run used to be
+    // destroyed by a single 500 - `run._posted` was already true by then, so the run-over tick that
+    // keeps ticking through the 6 s banner would never build the payload again.
+    _lssOutboxPut(payload);
+    run._posted = true;
+    console.log('[lss-backend] endless run queued ; dist=' + Math.round(run.dist || 0));
+    await _lssOutboxFlush();
   } catch (err) {
-    console.warn('[lss-backend] endless POST threw', err);
+    console.warn('[lss-backend] endless queue threw', err);
   }
 }
 
@@ -8970,8 +9158,18 @@ try {
 } catch (_) {}
 
 async function postMatchResultToBackend() {
-  const token = discordCurrentToken();
-  if (!token) {
+  // ⭐⭐ (v44.15) AN IDENTITY IS THE REQUIREMENT, NOT A LIVE CREDENTIAL. This used to bail on a
+  // missing TOKEN, which conflates two very different players:
+  //   - never signed in: there is genuinely nothing to do. Their participant row would be filed
+  //     under 'local:<loadout>', which belongs to no account and can never be credited. Still bails.
+  //   - signed in, token expired: Discord access tokens last about a week and nothing here refreshes
+  //     them, while the UI keeps painting their avatar because discordCurrentUser() reads a cached
+  //     object that never expires. Every match after day seven was silently dropped by this line
+  //     while the player believed they were signed in.
+  // The second player's match is now built and queued exactly like anyone else's - the outbox holds
+  // it, and it ships the moment they sign in again.
+  const _me = (typeof discordCurrentUser === 'function') && discordCurrentUser();
+  if (!_me || !_me.id) {
     console.log('[lss-backend] not signed in to Discord ; skipping match post');
     return;
   }
@@ -8980,6 +9178,9 @@ async function postMatchResultToBackend() {
     console.log('[lss-backend] match', matchId, 'already posted ; skipping');
     return;
   }
+  // (v44.15) This latch now means "already QUEUED this session", which is a statement about work
+  // done rather than a promise about the network. It used to be set here and then relied upon as
+  // proof of delivery, so a failed POST burned the match forever.
   _lastPostedMatchId = matchId;
 
   let winningTeam = (game.scoreA >= LSS.ROUNDS_TO_WIN) ? LSS.TEAM_FLEET_A
@@ -9019,27 +9220,18 @@ async function postMatchResultToBackend() {
     winning_team: winningTeam,
     // (v38.60) `game._matchDurationSec` was never written anywhere — derive it.
     duration_sec: game._matchStartedAtMs ? Math.max(0, Math.round((Date.now() - game._matchStartedAtMs) / 1000)) : null,
+    // (v44.15) "Hold this match open for a moment, a peer may still report it." The backend keeps a
+    // short settle window on any match flagged this way and will not seal it as a finished solo
+    // game on the strength of one report. Older backends ignore the field.
+    networked:    !!(game && game._sawHumanPeer),
     participants,
   };
 
-  try {
-    const res = await fetch(LSS_API_BASE + '/match', {
-      method:  'POST',
-      headers: {
-        'Authorization': 'Bearer ' + token,
-        'Content-Type':  'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
-    const json = await res.json().catch(() => null);
-    if (!res.ok) {
-      console.warn('[lss-backend] match POST failed', res.status, json);
-    } else {
-      console.log('[lss-backend] match posted ; id=' + matchId);
-    }
-  } catch (err) {
-    console.warn('[lss-backend] match POST threw', err);
-  }
+  // ⭐ (v44.15) DISK FIRST, NETWORK SECOND. Everything above is pure computation over state that
+  // is about to be torn down by the return to the lobby; once it is in the outbox the match exists
+  // independently of this tab, this connection and this sign-in session.
+  _lssOutboxPut(payload);
+  await _lssOutboxFlush();
 }
 
 // ---- LOBBY FUNCTIONS ----
@@ -9562,6 +9754,12 @@ async function startOpenSolo() {
   // Pre-seed the world build: drop-ins replay this exact seed to land in
   // an identical arena. (The zero-peer launch path never proposes one.)
   net.worldSeed = (Math.random() * 0xffffffff) >>> 0;
+  // (v44.15) ...and the match stamp with it. This is the FRESH-ROOM branch - the one taken by the
+  // ordinary "open a room and wait for a friend" flow - and it was the only one of the pair that
+  // never stamped, so the whole room ran with matchStartedAt null. Harmless now that the id falls
+  // back to 0 rather than to a random string, but a real stamp still separates two matches that
+  // roll the same seed, and every joiner adopts this value from the briefing in onPeerJoin.
+  net.matchStartedAt = Date.now();
   const ls = document.getElementById('lobby-status');
   if (ls) { ls.textContent = 'OPEN ROOM ' + code + ' — CHALLENGERS CAN DROP IN'; ls.style.color = '#7dffa8'; }
   enterShipSelect();
@@ -11454,6 +11652,20 @@ const EndlessMode = {
     return run.rays;
   },
   onTeardown() {
+    // ⭐⭐ (v44.15) A RUN YOU WALK AWAY FROM IS STILL A RUN. postEndlessRunToBackend was only
+    // ever called from the out-of-lives branch, so quitting at 22 km on your last life - opening
+    // Settings and pressing EXIT TO MAIN MENU - recorded nothing at all. Not the distance, not the
+    // kills; even the localStorage personal best is written on the death path only. That is why the
+    // whole production database holds exactly ONE endless row against months of play, and why the
+    // owner has "definitely gone further than 41km" than the board shows.
+    //   run._posted makes this idempotent against the death-path call that has usually already
+    //   fired, and postEndlessRunToBackend itself returns early on a signed-out player.
+    try {
+      const _r = game.endlessRun;
+      if (_r && !_r._posted && (_r.dist || 0) > 0 && typeof postEndlessRunToBackend === 'function') {
+        postEndlessRunToBackend(_r);
+      }
+    } catch (_) {}
     try {
       const run = game.endlessRun;
       if (run && run.rays) for (let i = 0; i < run.rays.length; i++) {
@@ -15022,6 +15234,9 @@ function updateNetworkPlayer(peerId, data) {
   const np = new NetworkPlayer(peerId, data.loadoutKey, data.team || LSS.TEAM_FLEET_B, data.skinId);
   peer.networkPlayer = np;
   net.networkPlayers.push(np);
+  // (v44.15) A peer's ship exists, so this match is networked no matter who is still here at the
+  // end. See the reset in the match-start block for why this is a latch and not a live query.
+  try { game._sawHumanPeer = true; } catch (_) {}
   game.entities.push(np);
 }
 
@@ -73765,6 +73980,14 @@ function commitLoadout(key) {
     game._matchStartedAtMs = Date.now();
     game._soloMatchId      = null;
     _lastPostedMatchId     = null;
+    // ⭐ (v44.15) Cleared per match, latched true the moment a peer's ship exists (NetworkPlayer's
+    // constructor). It is the only honest answer to "might another client still report this
+    // match?", because by the time the match ENDS the peer may already have gone - and that is
+    // precisely the case that used to lose the match: the remaining player reports one human, the
+    // backend files it solo and seals it, and the departed player's report arrives at a sealed
+    // match and is dropped with a 200 OK. Asking `net.peers.size` at post time would answer "no"
+    // in exactly the situation the flag exists for.
+    game._sawHumanPeer     = false;
     // Champion-mode reset for fresh-match start.
     game.championField = null;
     game.championSpawned = false;
