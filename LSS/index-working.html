@@ -15801,13 +15801,20 @@ function handleNetEvent(evt, fromPeerId) {
     // ran, the flag never armed, and because _lssPickRoomMode does not announce, the decider's
     // picture of that peer was never refreshed either: a permanent two-tab split on the one path
     // the whole one-decider design exists to prevent.
-    // _lssNotePeerMode here is the repair channel - it is what makes the decider's next ranking see
-    // the pick even when the picker is not the decider.
+    // ⚠⚠ THE REPAIR CHANNEL IS THE PICKER'S OWN ANNOUNCE, NOT A SYNTHETIC NOTE HERE. The first
+    // version of this fix called _lssNotePeerMode with a hand-built { ago: 0, inRoom: 0 }, because
+    // mode_pick carries neither field. A two-tab test caught what that does: `ago 0` makes every
+    // received pick look like the FRESHEST choice in the room and `inRoom 0` makes its author look
+    // brand new, so the decider's layered tie-break (longest in room -> chose first -> lowest id)
+    // ranked on invented data and the two clients settled on DIFFERENT answers - each stable, i.e.
+    // a permanent split. Measured: A stable on EXHIBITION|false, B stable on CYBERPUNK CITY|true.
+    // The real repair is that _lssPickRoomMode now announces (see there), which sends a properly
+    // formed mode_set carrying the true ago / inRoom / map / seed down the path _lssNotePeerMode was
+    // built for. Nothing is invented here any more.
     const _t = _lssTagOf(evt) || evt.mode;
     _lssModeLog('rx', 'mode_pick', _t, null, fromPeerId, 'peer picked');
     net._forcedMode = _t;
     net._decreedMode = null;
-    try { _lssNotePeerMode(fromPeerId, { mode: _t, ago: 0, inRoom: 0 }); } catch (_) {}
     try { if (_lssRoomTag() !== _t) { _lssAdoptRoomMode(_t); _lssModeChosen(_t); } } catch (_) {}
     try { _lssModeDecide(); } catch (_) {}
     try { _lssRenderLobbyMode(); } catch (_) {}
@@ -93107,6 +93114,12 @@ function _lssPickRoomMode(mode) {
     _lssModeLog('tx', 'mode_pick', mode, _lssModeAgo(), null, 'picked in ship select');
     // (v44.11) all three spellings from one tag - see _lssTagPut.
     try { if (typeof net !== 'undefined' && net && net.sendEvent) net.sendEvent(_lssTagPut({ type: 'mode_pick' }, mode)); } catch (_) {}
+    // ⭐⭐ (v44.11) ...AND ANNOUNCE, which this path never did. _lssRoomModeChoose - the MENU
+    // BUTTON route - has burst-announced since v43.x; the ARROWS only ever sent mode_pick, which
+    // carries no `ago` and no `inRoom`, so a pick made here was invisible to the decider's ranking.
+    // That is why a peer could be re-decreed back to the mode it had just left. One line, and it
+    // reuses the mode_set path every other mode decision already travels.
+    try { if (typeof net !== 'undefined' && net && net.active) _lssModeAnnounceBurst(); } catch (_) {}
     try { _lssModeDecide(); } catch (_) {}
     _lssRenderLobbyMode();
   } catch (_) {}

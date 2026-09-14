@@ -6795,7 +6795,6 @@ function handleNetEvent(evt, fromPeerId) {
     _lssModeLog('rx', 'mode_pick', _t, null, fromPeerId, 'peer picked');
     net._forcedMode = _t;
     net._decreedMode = null;
-    try { _lssNotePeerMode(fromPeerId, { mode: _t, ago: 0, inRoom: 0 }); } catch (_) {}
     try { if (_lssRoomTag() !== _t) { _lssAdoptRoomMode(_t); _lssModeChosen(_t); } } catch (_) {}
     try { _lssModeDecide(); } catch (_) {}
     try { _lssRenderLobbyMode(); } catch (_) {}
@@ -60750,6 +60749,7 @@ function _lssPickRoomMode(mode) {
     _lssModeChosen(mode);
     _lssModeLog('tx', 'mode_pick', mode, _lssModeAgo(), null, 'picked in ship select');
     try { if (typeof net !== 'undefined' && net && net.sendEvent) net.sendEvent(_lssTagPut({ type: 'mode_pick' }, mode)); } catch (_) {}
+    try { if (typeof net !== 'undefined' && net && net.active) _lssModeAnnounceBurst(); } catch (_) {}
     try { _lssModeDecide(); } catch (_) {}
     _lssRenderLobbyMode();
   } catch (_) {}
