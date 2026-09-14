@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.05';
+const LSS_BUILD = '44.06';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -11089,6 +11089,8 @@ try {
               ' | ctxL ' + ((typeof window.__glCtxAtLoss === 'number') ? window.__glCtxAtLoss : '?') +
               ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
               ' | lost ' + ((window.__glLost && window.__glLost.length) ? window.__glLost.join(',') : '-') +
+              ((typeof window !== 'undefined' && window.__curtainLog && window.__curtainLog.length)
+                 ? ' | reraise ' + window.__curtainLog.length : '') +
               ' | ctx ' + ((typeof window !== 'undefined' && window.__glCtx) ? window.__glCtx.size : '?') +
               ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
               (_d.jsHeapMB != null ? ' | heap ' + _d.jsHeapMB + 'MB' : '') + ' | geoMB ' + (gb / 1048576).toFixed(0) +
@@ -60023,6 +60025,19 @@ function showLoadingOverlay(mainText, subText) {
     const s = document.getElementById('lss-loading-sub');
     if (s) s.textContent = subText;
   }
+  try {
+    if (!ov.classList.contains('active') &&
+        typeof game !== 'undefined' && game && game.state !== 'playing' && game.state !== 'select') {
+      const _L = (window.__curtainLog = window.__curtainLog || []);
+      if (_L.length < 12) {
+        _L.push({ t: Math.round(performance.now()), state: game.state,
+                  main: ov._lssMain || null, sub: subText || ov._lssSub || null,
+                  launching: !!(document.getElementById('ship-select') || { classList: { contains: () => false } }).classList.contains('lss-launching') });
+        console.warn('[curtain] RE-RAISE #' + _L.length + ' - the loading screen came back up mid-load. ' +
+                     'This is the double-screen signature; window.__curtainLog has the details.', _L[_L.length - 1]);
+      }
+    }
+  } catch (_) {}
   ov.classList.add('active');
   _lssAudioHoldEngage();          // (v36.24) no music / ship audio behind the loading screen
   try { _xrCoverUp(ov._lssMain, ov._lssSub); } catch (_) {}

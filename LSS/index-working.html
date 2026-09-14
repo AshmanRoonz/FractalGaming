@@ -6083,7 +6083,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.05';
+const LSS_BUILD = '44.06';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -21702,6 +21702,10 @@ try {
               ' | ctxL ' + ((typeof window.__glCtxAtLoss === 'number') ? window.__glCtxAtLoss : '?') +
               ' | prev ' + (_pv ? (_pv.width + 'x' + _pv.height) : '-') +
               ' | lost ' + ((window.__glLost && window.__glLost.length) ? window.__glLost.join(',') : '-') +
+              // (v44.06) a non-zero `reraise` means the loading curtain was lowered and came back up
+              // mid-load during this session - the double-screen signature. window.__curtainLog names it.
+              ((typeof window !== 'undefined' && window.__curtainLog && window.__curtainLog.length)
+                 ? ' | reraise ' + window.__curtainLog.length : '') +
               ' | ctx ' + ((typeof window !== 'undefined' && window.__glCtx) ? window.__glCtx.size : '?') +
               ' | prog ' + ((renderer.info && renderer.info.programs) ? renderer.info.programs.length : '?') +
               (_d.jsHeapMB != null ? ' | heap ' + _d.jsHeapMB + 'MB' : '') + ' | geoMB ' + (gb / 1048576).toFixed(0) +
@@ -91754,6 +91758,31 @@ function showLoadingOverlay(mainText, subText) {
     const s = document.getElementById('lss-loading-sub');
     if (s) s.textContent = subText;
   }
+  // ⭐⭐ (v44.06) A SECOND LOADING SCREEN REPORTS ITSELF NOW.
+  // v44.03 fixed the one stray lower that split the launch curtain in two, and an adversarial pass
+  // over all fifteen hideLoadingOverlay() sites found no other that can fire mid-launch. But "we
+  // found none" is a weaker claim than "none happened", and the last one went unnoticed for years
+  // because on a fast machine the gap is a 209 ms flicker - it took the owner's Xbox One stretching
+  // it to seconds before anyone could see it at all. So instead of a mechanism that PREVENTS a
+  // second screen (see the v44.06 note in the commit: a launch-scoped hold would have armoured the
+  // solo path, which already has four rescues, and skipped multiplayer, which has none), this
+  // records one if it ever happens, with enough context to name the site.
+  // A re-raise is only interesting when the curtain was DOWN and comes back UP while the game is
+  // still loading - that is the exact signature, and it is free to test: the hub preload calls this
+  // every frame with the curtain already up and never reaches the branch.
+  try {
+    if (!ov.classList.contains('active') &&
+        typeof game !== 'undefined' && game && game.state !== 'playing' && game.state !== 'select') {
+      const _L = (window.__curtainLog = window.__curtainLog || []);
+      if (_L.length < 12) {
+        _L.push({ t: Math.round(performance.now()), state: game.state,
+                  main: ov._lssMain || null, sub: subText || ov._lssSub || null,
+                  launching: !!(document.getElementById('ship-select') || { classList: { contains: () => false } }).classList.contains('lss-launching') });
+        console.warn('[curtain] RE-RAISE #' + _L.length + ' - the loading screen came back up mid-load. ' +
+                     'This is the double-screen signature; window.__curtainLog has the details.', _L[_L.length - 1]);
+      }
+    }
+  } catch (_) {}
   ov.classList.add('active');
   _lssAudioHoldEngage();          // (v36.24) no music / ship audio behind the loading screen
   // (v42.36) ...and the VR half of the same curtain. A headset never sees this DOM element, so the
