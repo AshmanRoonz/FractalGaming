@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.34';
+const LSS_BUILD = '44.35';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -27522,7 +27522,7 @@ function _wxMakeSun() {
   const disc = mk(1500,
     'uniform vec3 uCol; varying vec2 vUv; void main(){ float r = length(vUv - 0.5) * 2.0; float a = smoothstep(0.55, 0.42, r); gl_FragColor = vec4(uCol * 2.4, a); }');
   const halo = mk(6200,
-    'uniform vec3 uCol; varying vec2 vUv; void main(){ float r = length(vUv - 0.5) * 2.0; float a = exp(-r * 3.2) * 0.5; gl_FragColor = vec4(uCol, a); }');
+    'uniform vec3 uCol; varying vec2 vUv; void main(){ float r = length(vUv - 0.5) * 2.0; float a = max(0.0, exp(-r * 3.2) - exp(-3.2)) * 0.5 * smoothstep(1.0, 0.8, r); gl_FragColor = vec4(uCol, a); }');
   disc.renderOrder = 3; halo.renderOrder = 3;
   return { disc, halo };
 }
