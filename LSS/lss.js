@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.31';
+const LSS_BUILD = '44.32';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -11414,6 +11414,21 @@ document.body.appendChild(renderer.domElement);
   }
 })();
 
+function _hangarRebake() {
+  const cv = document.getElementById('ship-select-bg');
+  if (!cv || !cv._lssBaked) return false;
+  const _bd = (typeof _shipPreview3D !== 'undefined' && _shipPreview3D) ? _shipPreview3D.backdrop : null;
+  if (!_bd || !_bd.material) return false;
+  const _old = _bd.material.map;
+  const _nt = new THREE.CanvasTexture(cv);
+  if ('colorSpace' in _nt) _nt.colorSpace = THREE.SRGBColorSpace;
+  _nt.wrapS = _nt.wrapT = THREE.ClampToEdgeWrapping;
+  _bd.material.map = _nt;
+  _bd.material.needsUpdate = true;
+  try { if (_old && _old.dispose) _old.dispose(); } catch (_) {}
+  return true;
+}
+if (typeof window !== 'undefined') window.__hangarRebake = _hangarRebake;
 (function () {
   try {
     const cv = document.getElementById('ship-select-bg');
@@ -11451,13 +11466,16 @@ document.body.appendChild(renderer.domElement);
         cv._lssBaked = true;
         _rep.baked = true; _rep.w = _bw; _rep.h = _bh;
         _rep.ms = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : 0) - _t0);
-        try {
-          const _bd = _shipPreview3D && _shipPreview3D.backdrop;
-          const _m = _bd && _bd.material && _bd.material.map;
-          if (_m) { _m.needsUpdate = true; _rep.repoked = true; }
-        } catch (_) {}
+        try { _rep.rebaked = _hangarRebake(); } catch (_) {}
       } catch (_) {}
     };
+    const _stall = () => {
+      if (_rep.baked || _rep.tries >= 2) return;
+      const _n = ++_rep.tries; _rep.err = 'stalled';
+      try { img.src = 'hangar.webp?r=' + _n; } catch (_) {}
+      setTimeout(_stall, 6000);
+    };
+    setTimeout(_stall, 6000);
     img.src = 'hangar.webp';   // (v38.64) 2.13 MB PNG -> 0.20 MB WebP, same pixels
   } catch (_) {}
 })();

@@ -6124,7 +6124,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.31';
+const LSS_BUILD = '44.32';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -22369,6 +22369,24 @@ document.body.appendChild(renderer.domElement);
   }
 })();
 
+// (v44.32) Re-point the picker stage's backdrop at the baked canvas with a NEW texture (see the
+// note in the bake below for why needsUpdate is not enough). Safe to call any time; returns true
+// when a backdrop existed and was replaced.
+function _hangarRebake() {
+  const cv = document.getElementById('ship-select-bg');
+  if (!cv || !cv._lssBaked) return false;
+  const _bd = (typeof _shipPreview3D !== 'undefined' && _shipPreview3D) ? _shipPreview3D.backdrop : null;
+  if (!_bd || !_bd.material) return false;
+  const _old = _bd.material.map;
+  const _nt = new THREE.CanvasTexture(cv);
+  if ('colorSpace' in _nt) _nt.colorSpace = THREE.SRGBColorSpace;
+  _nt.wrapS = _nt.wrapT = THREE.ClampToEdgeWrapping;
+  _bd.material.map = _nt;
+  _bd.material.needsUpdate = true;
+  try { if (_old && _old.dispose) _old.dispose(); } catch (_) {}
+  return true;
+}
+if (typeof window !== 'undefined') window.__hangarRebake = _hangarRebake;
 // ---- (v37.23) HANGAR BACKDROP BAKE — decode hangar.png exactly once, at
 // boot, into the #ship-select-bg canvas together with its readability scrim
 // (strong fade top/bottom, hangar clear through the middle). The canvas owns
@@ -22435,13 +22453,29 @@ document.body.appendChild(renderer.domElement);
         cv._lssBaked = true;
         _rep.baked = true; _rep.w = _bw; _rep.h = _bh;
         _rep.ms = Math.round(((typeof performance !== 'undefined' && performance.now) ? performance.now() : 0) - _t0);
-        try {
-          const _bd = _shipPreview3D && _shipPreview3D.backdrop;
-          const _m = _bd && _bd.material && _bd.material.map;
-          if (_m) { _m.needsUpdate = true; _rep.repoked = true; }
-        } catch (_) {}
+        // ⭐⭐ (v44.32) THE MISSING HANGAR. Owner: "There's still the glitch that sometimes doesn't
+        // show hangar.png in the lobby, it usually happens when I reload a next version". The picker's
+        // 3D stage builds its backdrop as a CanvasTexture of THIS canvas whenever it initialises; on a
+        // slow load (a new build = a fresh 3 MB lss.js, so the image lands later than usual) that can
+        // happen BEFORE this onload, while the canvas is still the blank 300x150 default. three r165
+        // then allocates the GL texture at that size with immutable storage, and the `needsUpdate`
+        // poke that used to live here cannot grow it: the re-upload fails with INVALID_VALUE and the
+        // backdrop stays black. Measured in the pane: a CanvasTexture uploaded at 300x150, canvas
+        // resized and repainted red, needsUpdate -> reads back (0,0,0,0); a NEW CanvasTexture of the
+        // same canvas -> (255,0,0,255). So the bake now REPLACES the backdrop's texture instead of
+        // poking it. window.__hangarRebake() does the same on demand.
+        try { _rep.rebaked = _hangarRebake(); } catch (_) {}
       } catch (_) {}
     };
+    // (v44.32) a stalled request (no load, no error) used to leave the canvas blank forever; give it
+    // the same two retries the error path has.
+    const _stall = () => {
+      if (_rep.baked || _rep.tries >= 2) return;
+      const _n = ++_rep.tries; _rep.err = 'stalled';
+      try { img.src = 'hangar.webp?r=' + _n; } catch (_) {}
+      setTimeout(_stall, 6000);
+    };
+    setTimeout(_stall, 6000);
     img.src = 'hangar.webp';   // (v38.64) 2.13 MB PNG -> 0.20 MB WebP, same pixels
   } catch (_) {}
 })();
