@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.25';
+const LSS_BUILD = '44.26';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -17451,7 +17451,7 @@ function _swWaterReflectShader() {
         uTime: { value: 0 }, uCam: { value: new THREE.Vector3() }, uFade: { value: 1 },   
         uRippleTex: { value: null }, uRippleCenter: { value: new THREE.Vector2() }, uRippleBounds: { value: _SW_RIPPLE_BOUNDS }, uRippleScale: { value: 0 },   
         uMaskTex: { value: null }, uFoamGain: { value: 1 }, uFoamLit: { value: 1 }, uReliefScale: { value: 28.0 }, uReliefShade: { value: 0.7 },   
-        uSnellTint: { value: new THREE.Color(0x9fd0e6) }, uDeepTint: { value: new THREE.Color(0x0a3a44) }, uSubmerge: { value: 0 }, uEye: { value: new THREE.Vector3() }, uReflLive: { value: 1 }, uFlipFace: { value: 0 },   
+        uSnellTint: { value: new THREE.Color(0x9fd0e6) }, uDeepTint: { value: new THREE.Color(0x0a3a44) }, uSubmerge: { value: 0 }, uEye: { value: new THREE.Vector3() }, uUnderMirror: { value: 1.0 }, uUnderDeep: { value: 0.35 }, uUnderThru: { value: 0.0 }, uReflLive: { value: 1 }, uFlipFace: { value: 0 },   
         uShallowTint: { value: new THREE.Color(0x2e7a6a) }, uShoreSoft: { value: 0.05 }, uFoamThresh: { value: 0.18 },
         uReflWorld: { value: new THREE.Matrix4() }, uReflWorldOn: { value: 0 },
         uWHorizStr: { value: 0.75 }, uWHorizA: { value: 12000.0 }, uWHorizB: { value: 30000.0 } },
@@ -17474,7 +17474,7 @@ function _swWaterReflectShader() {
       'uniform float uWHorizStr;', 'uniform float uWHorizA;', 'uniform float uWHorizB;',
       'uniform sampler2D uRippleTex;', 'uniform vec2 uRippleCenter;', 'uniform float uRippleBounds;', 'uniform float uRippleScale;',
       'uniform sampler2D uMaskTex; uniform float uFoamGain; uniform float uFoamLit; uniform float uReliefScale; uniform float uReliefShade;',   
-      'uniform vec3 uSnellTint; uniform vec3 uDeepTint; uniform float uSubmerge; uniform vec3 uEye; uniform float uReflLive; uniform float uFlipFace;',   
+      'uniform vec3 uSnellTint; uniform vec3 uDeepTint; uniform float uSubmerge; uniform vec3 uEye; uniform float uUnderMirror; uniform float uUnderDeep; uniform float uUnderThru; uniform float uReflLive; uniform float uFlipFace;',   
       'uniform vec3 uShallowTint; uniform float uShoreSoft; uniform float uFoamThresh;',   
       'varying vec4 vUv;', 'varying vec3 vWP;', '#include <fog_pars_fragment>',
       'void main(){',
@@ -17581,8 +17581,10 @@ function _swWaterReflectShader() {
       '    float ct = clamp(dot(toEye, -Nb), 0.0, 1.0);',                  
       '    float win = smoothstep(0.60, 0.76, ct);',                       
       '    vec4 uvr = vUv; uvr.xy += N.xz * uvr.w * 0.10 * fade;',         
-      '    vec3 thru = mix(uSnellTint, texture2DProj(tDiffuse, uvr).rgb, uReflLive);',   
-      '    vec3 snell = mix(uDeepTint, mix(uSnellTint, thru, 0.6), win);',  
+      '    vec3 mirror = texture2DProj(tDiffuse, uvr).rgb;',
+      '    vec3 thru = mix(uSnellTint, mirror, (uUnderMirror > 0.5) ? uUnderThru : uReflLive);',   
+      '    vec3 deep = (uUnderMirror > 0.5) ? mix(mirror, uDeepTint, uUnderDeep) : uDeepTint;',   // (v44.26) the mirror, a little murky
+      '    vec3 snell = mix(deep, mix(uSnellTint, thru, 0.6), win);',  
       '    snell += uSnellTint * smoothstep(0.10, 0.0, abs(ct - 0.68)) * 0.5;',   
       '    vec3 ucol = mix(snell, _dist, clamp(foam * 0.35 * caustic, 0.0, 0.6));',   
       '    gl_FragColor = vec4(ucol, 0.93 * clamp(uSubmerge, 0.0, 1.0));',  
@@ -21160,6 +21162,12 @@ function _swBuildHubWater(T) {
       if (_wOv) _wO.visible = false;
       if (_wUv) _wU.visible = false;
       if (window.__f8seg) window.__f8seg('mirror');
+      const _underNow = !!(cam && cam.position && typeof game._hubWaterWL === 'number' &&
+                           cam.position.y < game._hubWaterWL - 2.0 &&
+                           !(window.__water && window.__water.underMirror === 0));
+      const _rxWas = this.rotation.x;
+      if (_underNow) { this.rotation.x = _rxWas + Math.PI; this.updateMatrix(); this.updateMatrixWorld(true); }
+      this._reflFlipped = _underNow;
       try { _reflOBR.call(this, rnd, scn, cam, geo2, mat2, grp); }
       finally {
         if (window.__f8seg) window.__f8seg('scene');   // (v40.59) back to the pass that contains us
@@ -21183,6 +21191,7 @@ function _swBuildHubWater(T) {
         this._reflGap = 0;
         cam.matrixWorld.decompose(_reflEyeP, _reflEyeQ, _reflNowS);
       }
+      if (_underNow) { this.rotation.x = _rxWas; this.updateMatrix(); this.updateMatrixWorld(true); }   // (v44.26) back upright for the draw
     };
     
     const undMat = new THREE.MeshBasicMaterial({ color: 0x12455a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false });   
@@ -21624,6 +21633,12 @@ function _swUpdateHubWater() {
       if (U.uEye) U.uEye.value.copy(camera.position);
       if (U.uReflLive) U.uReflLive.value = _swVrNoRefl() ? 0.0 : 1.0;   // (v41.82) mirror tier
       if (U.uFlipFace) U.uFlipFace.value = (window.__water && window.__water.flip) ? 1.0 : 0.0;
+      {   // (v44.26) the underwater mirror, live: __water.underMirror (1), .underDeep (0.35), .underThru (0)
+        const _WU = window.__water || {};
+        if (U.uUnderMirror) U.uUnderMirror.value = (_WU.underMirror === 0) ? 0.0 : 1.0;
+        if (U.uUnderDeep) U.uUnderDeep.value = (_WU.underDeep != null) ? +_WU.underDeep : 0.35;
+        if (U.uUnderThru) U.uUnderThru.value = (_WU.underThru != null) ? +_WU.underThru : 0.0;
+      }
     }
   }
 }
