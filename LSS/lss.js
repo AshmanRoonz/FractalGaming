@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.36';
+const LSS_BUILD = '44.37';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23027,7 +23027,8 @@ function _hcHoloMat() {
         if (uAdsOn > 0.5 && fract(rnd * 13.17) > (1.0 - uAdsFrac)) {
           float idx = floor(fract(rnd * 29.31) * uAdsGrid.z);
           float cx = mod(idx, uAdsGrid.x), cy = floor(idx / uAdsGrid.x);
-          vec2 auv = vec2((cx + uv.x) / uAdsGrid.x, 1.0 - (cy + 1.0 - uv.y) / uAdsGrid.y);
+          float ux = gl_FrontFacing ? uv.x : 1.0 - uv.x;   // the panels are DoubleSide and mostly seen from their back: mirror the cell per face so the text reads left-to-right from either side (owner: "the mcdonuts sign is backwards")
+          vec2 auv = vec2((cx + ux) / uAdsGrid.x, 1.0 - (cy + 1.0 - uv.y) / uAdsGrid.y);
           vec3 ad = texture2D(uAds, auv).rgb;
           float lum = dot(ad, vec3(0.299, 0.587, 0.114));
           float k = mix(scan, 0.82, hLod) * edge * flick;
