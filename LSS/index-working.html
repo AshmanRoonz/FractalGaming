@@ -6083,7 +6083,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.99';
+const LSS_BUILD = '44.00';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -21598,9 +21598,41 @@ try {
         try {
           const _li = _ladder.indexOf(_lvl);
           if (_li > 0) _down = ((typeof _fxSmallDevice === 'function' && _fxSmallDevice()) && _li > 1) ? 'low' : _ladder[_li - 1];
+          // (v44.00) FLOOR AT LOW, never 'potato'. From 'low' the line above used to write
+          // _ladder[0] = 'potato', and potato is a tier no path can reach: applyQualityPreset
+          // migrates it to 'low' on arrival and the boot block rewrites the stored value to 'low'
+          // before anything reads it. That migration would then leave the stamp below pointing at
+          // 'potato' while the stored value said 'low' - a mismatch that hands the very promotion
+          // this commit is fixing a fresh excuse to fire. A write that is always migrated away is
+          // not a step down, it is a hole.
+          if (_down === 'potato') _down = 'low';
         } catch (_) { _down = null; }
         if (_down) {
           try { localStorage.setItem('lss_quality', _down); } catch (_) {}
+          // ⭐⭐ (v44.00) STAMP WHO WROTE IT, because the write alone has never been enough.
+          // Owner, on an Xbox One in Edge: a "GPU CONTEXT LOST" overlay reading `high | desktop dpr
+          // 1.50`, promising "Reloading at MEDIUM quality (was HIGH)". That promise was false, and
+          // had been on every non-touch device since v39.01.
+          // What happens without this stamp: this line writes 'medium', location.reload() fires ~100
+          // lines below, and ~3,400 lines later in the same script evaluation the v35.22 legacy
+          // migration sees a stored 'medium', decides it is someone parked on a retired tier, and
+          // rewrites it to 'high' - in localStorage, not just in memory. So the reload came up in
+          // exactly the configuration that had just died, the next crash stepped down to 'medium'
+          // again, and the loop is closed. On the owner's console MEDIUM was unreachable by ANY
+          // path: not from here, and not from Settings either, whose dropdown has offered only
+          // HIGH / ULTRA / MEGA since v35.22.
+          // ⚠ v39.01 FOUND THIS EXACT BUG AND FIXED IT ON THE WRONG AXIS. Its note three
+          //   thousand lines down says the promotion "threw away ... the LOW the context-loss ladder
+          //   just wrote", and it exempted `_LSS_IS_MOBILE`. But the question was never WHAT KIND OF
+          //   DEVICE this is - it is WHO WROTE THIS VALUE. A phone was exempted; a console, a TV
+          //   browser, a laptop with a flaky driver and every other non-touch machine was not. So
+          //   the stamp records the value, and the promotion below skips a stored tier that this
+          //   ladder is still standing behind. Device class does not enter into it.
+          // (!) IT EXPIRES BY ITSELF. applyQualityPreset drops the stamp the moment it persists a
+          //     DIFFERENT level, so a human picking HIGH in Settings releases the hold in the same
+          //     write - and "Settings can put it back", which this message has always claimed,
+          //     becomes true for the first time.
+          try { localStorage.setItem('lss_quality_ctx', _down); } catch (_) {}
           _stepMsg = ' Reloading at ' + _down.toUpperCase() + ' quality (was ' + _lvl.toUpperCase() + '); Settings can put it back.';
         }
         const _fx = (_d.fx && typeof _d.fx === 'object') ? _d.fx : null;
@@ -25108,7 +25140,18 @@ function applyQualityPreset(level) {
       try { if (typeof _lssSyncSceneRTSamples === 'function') _lssSyncSceneRTSamples(); } catch (_) {}
     }
   } catch (_) {}
-  try { localStorage.setItem('lss_quality', QUALITY.level); } catch (e) {}
+  try {
+    localStorage.setItem('lss_quality', QUALITY.level);
+    // (v44.00) A STAMP IS ONLY GOOD FOR THE VALUE IT STAMPED. This is the single place every tier
+    // change is persisted - the Settings dropdown, the boot restore and any programmatic call all
+    // land here - so it is the one place that can tell "the stored tier moved" from "the stored
+    // tier was re-applied". If what we are writing is no longer what the context-loss ladder chose,
+    // the ladder is no longer the author and its hold is released.
+    // ⚠ THE EQUALITY TEST IS LOAD-BEARING, not defensive. The boot restore calls this function
+    //   with the ladder's own value, so an unconditional removeItem here would wipe the stamp on the
+    //   very reload it exists to protect - and the bug would survive this commit wearing a fix.
+    if (localStorage.getItem('lss_quality_ctx') !== QUALITY.level) localStorage.removeItem('lss_quality_ctx');
+  } catch (e) {}
 }
 try {
   let stored = localStorage.getItem('lss_quality');
@@ -25128,7 +25171,24 @@ try {
   // default, threw away every LOW/MEDIUM the owner picked in Settings AND the LOW the context-loss
   // ladder just wrote - every crash overlay read "high | mobile". A phone keeps what is stored ;
   // the desktop legacy promotion is unchanged.
-  if ((stored === 'low' || stored === 'medium') && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) {
+  // ⭐⭐ (v44.00) ...AND NEVER OVER THE CONTEXT-LOSS LADDER, ON ANY DEVICE. v39.01 got the
+  // bug right and the axis wrong: it read the symptom on a phone and exempted phones, when the thing
+  // that must not be overwritten is a tier THE CRASH HANDLER CHOSE, wherever it was chosen.
+  // The device that proved it was an Xbox One in Edge, which is non-touch and therefore "desktop" to
+  // every test in this file. Its overlay said "Reloading at MEDIUM quality (was HIGH)"; four lines
+  // below, this block turned that back into HIGH and wrote it to storage. Every reload the owner
+  // did was byte-identical to the run that had just died, and with LOW/MEDIUM absent from the
+  // Settings dropdown since v35.22 there was no way down from anywhere else either.
+  // The legacy migration itself is still right and still wanted - someone parked on a v35.22-era
+  // MEDIUM should come up to HIGH. It just must not outrank a decision made four lines after a GPU
+  // context died. The stamp says which of the two wrote the stored value.
+  // (!) `stored !== _ctxPick` and not merely "a stamp exists": if anything at all moved the tier
+  //     since the ladder ran, the stamp no longer describes the stored value and the migration is
+  //     free to do its job again.
+  let _ctxPick = null;
+  try { _ctxPick = localStorage.getItem('lss_quality_ctx'); } catch (_) {}
+  if ((stored === 'low' || stored === 'medium') && stored !== _ctxPick &&
+      !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) {
     stored = 'high';
     try { localStorage.setItem('lss_quality', 'high'); } catch (_) {}
   }
@@ -95993,6 +96053,21 @@ function buildSettingsPage() {
           <!-- (v35.22) Low + Medium removed: both kill bloom for almost no
                framerate back, because the bottleneck is draw calls, not fill.
                Saved settings on those tiers migrate to High at load. -->
+          <!-- ⭐ (v44.00) A TIER THE CRASH LADDER CHOSE HAS TO BE SHOWABLE. LOW and MEDIUM are
+               still not OFFERED - nothing below is selectable and the v35.22 reasoning stands - but
+               with the step-down finally surviving its reload, a device that lost the GPU context
+               genuinely boots on one of them, and a <select> whose value matches no <option>
+               renders EMPTY. Measured on this build before this line existed: landing on MEDIUM,
+               #set-quality.value came back as "" and the Preset row showed a blank box, which
+               reads as a broken settings page rather than as "you are on a reduced tier".
+               So the current tier is added as a DISABLED option when it is below high: it can be
+               displayed and it cannot be picked, which is exactly the status it has. Choosing High
+               is the way out, and doing so releases the ladder's hold (see applyQualityPreset). -->
+          ${(QUALITY.level === 'low' || QUALITY.level === 'medium')
+            ? '<option value="' + QUALITY.level + '" selected disabled>'
+              + QUALITY.level.charAt(0).toUpperCase() + QUALITY.level.slice(1)
+              + ' — set automatically after a GPU crash. Pick High to restore.</option>'
+            : ''}
           <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke) — recommended, incl. phones</option>
           <option value="ultra" ${QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
           <option value="mega" ${QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>

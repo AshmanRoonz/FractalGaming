@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '43.99';
+const LSS_BUILD = '44.00';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -11041,9 +11041,11 @@ try {
         try {
           const _li = _ladder.indexOf(_lvl);
           if (_li > 0) _down = ((typeof _fxSmallDevice === 'function' && _fxSmallDevice()) && _li > 1) ? 'low' : _ladder[_li - 1];
+          if (_down === 'potato') _down = 'low';
         } catch (_) { _down = null; }
         if (_down) {
           try { localStorage.setItem('lss_quality', _down); } catch (_) {}
+          try { localStorage.setItem('lss_quality_ctx', _down); } catch (_) {}
           _stepMsg = ' Reloading at ' + _down.toUpperCase() + ' quality (was ' + _lvl.toUpperCase() + '); Settings can put it back.';
         }
         const _fx = (_d.fx && typeof _d.fx === 'object') ? _d.fx : null;
@@ -13805,7 +13807,10 @@ function applyQualityPreset(level) {
       try { if (typeof _lssSyncSceneRTSamples === 'function') _lssSyncSceneRTSamples(); } catch (_) {}
     }
   } catch (_) {}
-  try { localStorage.setItem('lss_quality', QUALITY.level); } catch (e) {}
+  try {
+    localStorage.setItem('lss_quality', QUALITY.level);
+    if (localStorage.getItem('lss_quality_ctx') !== QUALITY.level) localStorage.removeItem('lss_quality_ctx');
+  } catch (e) {}
 }
 try {
   let stored = localStorage.getItem('lss_quality');
@@ -13813,7 +13818,10 @@ try {
     stored = 'low';
     try { localStorage.setItem('lss_quality', 'low'); } catch (_) {}
   }
-  if ((stored === 'low' || stored === 'medium') && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) {
+  let _ctxPick = null;
+  try { _ctxPick = localStorage.getItem('lss_quality_ctx'); } catch (_) {}
+  if ((stored === 'low' || stored === 'medium') && stored !== _ctxPick &&
+      !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE)) {
     stored = 'high';
     try { localStorage.setItem('lss_quality', 'high'); } catch (_) {}
   }
@@ -62802,6 +62810,21 @@ function buildSettingsPage() {
           <!-- (v35.22) Low + Medium removed: both kill bloom for almost no
                framerate back, because the bottleneck is draw calls, not fill.
                Saved settings on those tiers migrate to High at load. -->
+          <!-- ⭐ (v44.00) A TIER THE CRASH LADDER CHOSE HAS TO BE SHOWABLE. LOW and MEDIUM are
+               still not OFFERED - nothing below is selectable and the v35.22 reasoning stands - but
+               with the step-down finally surviving its reload, a device that lost the GPU context
+               genuinely boots on one of them, and a <select> whose value matches no <option>
+               renders EMPTY. Measured on this build before this line existed: landing on MEDIUM,
+               #set-quality.value came back as "" and the Preset row showed a blank box, which
+               reads as a broken settings page rather than as "you are on a reduced tier".
+               So the current tier is added as a DISABLED option when it is below high: it can be
+               displayed and it cannot be picked, which is exactly the status it has. Choosing High
+               is the way out, and doing so releases the ladder's hold (see applyQualityPreset). -->
+          ${(QUALITY.level === 'low' || QUALITY.level === 'medium')
+            ? '<option value="' + QUALITY.level + '" selected disabled>'
+              + QUALITY.level.charAt(0).toUpperCase() + QUALITY.level.slice(1)
+              + ' — set automatically after a GPU crash. Pick High to restore.</option>'
+            : ''}
           <option value="high" ${QUALITY.level === 'high' ? 'selected' : ''}>High (full bloom + 3-octave smoke) — recommended, incl. phones</option>
           <option value="ultra" ${QUALITY.level === 'ultra' ? 'selected' : ''}>Ultra (4-octave smoke, 1.5× particles, dense basin pools, 1.5× bloom RT)</option>
           <option value="mega" ${QUALITY.level === 'mega' ? 'selected' : ''}>Mega Ultra (2.5x supersample, 8-octave smoke, max particles - high-end GPUs)</option>
