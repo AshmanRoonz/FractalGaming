@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.38';
+const LSS_BUILD = '44.39';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -57516,6 +57516,7 @@ const hudCanvas = document.getElementById('circumpunct-hud');
 const hudCtx = hudCanvas.getContext('2d');
 let _hudLastW = 0, _hudLastH = 0, _hudLastDPR = 0;
 let _hudFontCache = '';
+const _hudRF = { arr: null, cd: [0, 0, 0], core: false, t0: [-1e9, -1e9, -1e9, -1e9] };
 function hudFont(s) {
   if (s === _hudFontCache) return;
   _hudFontCache = s;
@@ -57942,6 +57943,36 @@ function _hlSegArc(ctx, r, p, pct, col) {
   ctx.restore();
 }
 
+function _hlReadyFlash(ctx, r, p, idx, t, col) {
+  const F = (typeof window !== 'undefined') ? (window.__hudFlash || (window.__hudFlash = { on: true, dur: 0.12, gap: 0.10, gain: 1 })) : null;
+  if (!F || F.on === false || t == null) return;
+  const age = t - _hudRF.t0[idx];
+  const dur = F.dur > 0 ? F.dur : 0.12, gap = F.gap >= 0 ? F.gap : 0.10;
+  if (!(age >= 0) || age >= dur * 2 + gap) return;
+  if (age >= dur && age < dur + gap) return;            // the dark gap between the two pulses
+  const rad = Math.min(r.w, r.h) / 2;
+  const seg = p.kind === 'segarc';
+  const n = Math.max(1, p.seg || (seg ? 8 : 1));
+  const rot = p.rot || 0;
+  const a0 = (seg ? (p.a0 || 200) : (p.a0 || 0)) + rot, a1 = (p.a1 != null ? p.a1 : (seg ? 340 : 360)) + rot;
+  const gapDeg = p.gapDeg != null ? p.gapDeg : (seg ? 2.5 : 0);
+  const span = (a1 - a0 - gapDeg * (n - 1)) / n;
+  const th = seg ? Math.max(1.5, (p.thick != null ? p.thick : 1.2) * r.vmin)
+                 : Math.max(3, (p.thick != null ? p.thick : 0.95) * r.vmin);
+  const lw = seg ? th * 2.2 : th * 1.3;                 // segarc is thin - fatten it; arcbar covers its capsule
+  if (!(rad - lw / 2 > 0)) return;                      // (v38.66) a negative arc radius throws
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(1, (F.gain != null ? F.gain : 1))) * _hlGA();
+  ctx.lineCap = 'butt';
+  ctx.strokeStyle = col; ctx.shadowColor = col; ctx.shadowBlur = th * 1.6;
+  ctx.lineWidth = lw;
+  for (let i = 0; i < n; i++) {
+    const s = (a0 + i * (span + gapDeg)) * _HL_D2R, e = s + span * _HL_D2R;
+    ctx.beginPath(); ctx.arc(r.cx, r.cy, rad, s, e); ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function _hlGA() {
   if (typeof input !== 'undefined' && input && typeof input.hudOpacity === 'number') {
     const v = input.hudOpacity;
@@ -58243,6 +58274,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
 
   r = _hlPlace(_HL.core, W, H);
   _hlSegArc(ctx, r, _HL.core, v.corePct, v.coreCol || _HL.core.col);
+  _hlReadyFlash(ctx, r, _HL.core, 3, v.t, '#fffdb4');   // (v44.39)
   _hlGaugeLabel(ctx, r, _HL.core);
 
   r = _hlPlace(_HL.dash, W, H);
@@ -58261,6 +58293,7 @@ function _hlDrawHUD(ctx, W, H, cx, cy, v) {
     const cdp = _HL[m.cd];
     r = _hlPlace(cdp, W, H);
     _hlArcBar(ctx, r, cdp, pct, _hlA(col, ready || active ? 1 : 0.45));
+    _hlReadyFlash(ctx, r, cdp, m.slot, v.t, '#c4ffd4');   // (v44.39)
     _hlArcLabel(ctx, r.cx, r.cy, _HL_AB_LABEL_R * r.vmin,
       (cdp.a0 + cdp.a1) / 2, String(ab.name || '').toUpperCase(),
       _hlA(col, ready || active ? 0.95 : 0.45),
@@ -58594,6 +58627,25 @@ function drawCircumpunctHUD() {
   const cx = W / 2 + hudShakeX;
   const cy = H / 2 + hudShakeY;
   const t = game.time;
+  {
+    const RF = _hudRF, cds = player.abilityCooldowns || null;
+    const alive = player.shipState !== 'dead';
+    const coreNow = player.coreMeter >= 100 && !player.coreActive;
+    if (RF.arr !== cds) {
+      RF.arr = cds;
+      for (let i = 0; i < 3; i++) { RF.cd[i] = cds ? (cds[i] || 0) : 0; RF.t0[i] = -1e9; }
+      RF.core = coreNow; RF.t0[3] = -1e9;
+    } else {
+      for (let i = 0; i < 3; i++) {
+        const c = cds ? (cds[i] || 0) : 0;
+        const ab = player.abilities && player.abilities[i];
+        if (alive && RF.cd[i] > 0 && c <= 0 && ab && (ab.cooldown || 0) >= 1) RF.t0[i] = t;
+        RF.cd[i] = c;
+      }
+      if (alive && coreNow && !RF.core) RF.t0[3] = t;
+      RF.core = coreNow;
+    }
+  }
 
   const healthPct = Math.max(0, player.health / player.maxHealth);
   const shieldPct = player.maxShield > 0 ? Math.max(0, player.shield / player.maxShield) : 0;
@@ -58701,6 +58753,7 @@ function drawCircumpunctHUD() {
       ammoFull: _infAmmo ? 'INF' : (player.clipAmmo + '/' + player.maxClip),
       ammoCol: player.reloading ? '#ffb020' : null,
       corePct: _corePctDraw, coreCol: _coreCol,
+      t: t,   // (v44.39) for the ready double-flash
       dashN: player.dashCharges, dashMax: player.maxDashes,
       aegisStr: _aegisStr, objectiveStr: _objStr,
       blasterClose: player.loadoutKey === 'BLASTER' && player.blasterMode === 'close',
