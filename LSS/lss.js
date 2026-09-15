@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.60';
+const LSS_BUILD = '44.61';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2288,6 +2288,13 @@ async function joinRoom() {
         peer.state = data;
         peer.lastUpdate = performance.now();
         peer.interpT = 0;
+        if (!_lssNpUsable(peer.networkPlayer) && net.sendEvent) {
+          const _n = performance.now();
+          if (_n - (peer._loReqT || 0) > 1500) {
+            peer._loReqT = _n;
+            try { net.sendEvent({ type: 'loadout_req' }, peerId); } catch (_) {}
+          }
+        }
       }
     });
 
@@ -2374,20 +2381,7 @@ async function joinRoom() {
       
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
 
-      if (player.loadoutKey && net.sendLoadout) {
-        const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
-        net.sendLoadout({
-          loadoutKey: player.loadoutKey,
-          team: player.team,
-          peerId: net.myPeerId,
-          skinId: player.skinId || SHIP_SKIN_DEFAULT,
-      insaneSpeed: !!LSS.INSANE_SPEED,
-      speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
-          discord_id:     _du ? _du.id : undefined,
-          discord_name:   _du ? (_du.global_name || _du.username) : undefined,
-          discord_avatar: _du ? _du.avatar : undefined,
-        }, peerId);
-      }
+      if (typeof _lssSendLoadoutTo === 'function') _lssSendLoadoutTo(peerId);
 
       try { if (typeof _lssModeAnnounceBurst === 'function') _lssModeAnnounceBurst(peerId); } catch (_) {}
       try { if (typeof _lssModeDecide === 'function') _lssModeDecide(); } catch (_) {}
@@ -2395,6 +2389,7 @@ async function joinRoom() {
         try {
           const _hdu = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
           net.sendEvent({ type: 'hello',
+            inRoom: (net.roomJoinedAt ? Math.round(Math.max(0, performance.now() - net.roomJoinedAt)) : 0),
             discord_id:     _hdu ? _hdu.id : undefined,
             discord_name:   _hdu ? (_hdu.global_name || _hdu.username) : undefined,
             discord_avatar: _hdu ? _hdu.avatar : undefined }, peerId);
@@ -6318,6 +6313,30 @@ class NetworkPlayer {
   }
 }
 
+function _lssNpUsable(np) {
+  return !!(np && np.mesh
+    && !(np.mesh.userData && np.mesh.userData.isProceduralFallback)
+    && (np.alive ? !!np.mesh.parent : true));
+}
+
+function _lssSendLoadoutTo(peerId) {
+  if (!player.loadoutKey || !net.sendLoadout) return;
+  const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
+  try {
+    net.sendLoadout({
+      loadoutKey: player.loadoutKey,
+      team: player.team,
+      peerId: net.myPeerId,
+      skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      insaneSpeed: !!LSS.INSANE_SPEED,
+      speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
+      discord_id:     _du ? _du.id : undefined,
+      discord_name:   _du ? (_du.global_name || _du.username) : undefined,
+      discord_avatar: _du ? _du.avatar : undefined,
+    }, peerId);
+  } catch (_) {}
+}
+
 function updateNetworkPlayer(peerId, data) {
   const peer = net.peers.get(peerId);
   if (!peer) return;
@@ -6326,7 +6345,7 @@ function updateNetworkPlayer(peerId, data) {
     const np0 = peer.networkPlayer;
     const _team = data.team || LSS.TEAM_FLEET_B;
     const _skin = (typeof _shipSkinDef === 'function') ? _shipSkinDef(data.skinId).id : data.skinId;
-    if (np0.loadoutKey === data.loadoutKey && np0.team === _team && np0.skinId === _skin) return;
+    if (_lssNpUsable(np0) && np0.loadoutKey === data.loadoutKey && np0.team === _team && np0.skinId === _skin) return;
   }
 
   if (peer.networkPlayer) {
@@ -6943,6 +6962,10 @@ function handleNetEvent(evt, fromPeerId) {
     _lssModeDecide();
     return;
   }
+  if (evt.type === 'loadout_req') {
+    try { if (typeof _lssSendLoadoutTo === 'function') _lssSendLoadoutTo(fromPeerId); } catch (_) {}
+    return;
+  }
   if (evt.type === 'hello') {
     try {
       const _allIds = [net.myPeerId].concat(Array.from(net.peers ? net.peers.keys() : [])).sort();
@@ -6963,6 +6986,10 @@ function handleNetEvent(evt, fromPeerId) {
         peer.discord_id     = evt.discord_id;
         peer.discord_name   = evt.discord_name;
         peer.discord_avatar = evt.discord_avatar;
+      }
+      if (typeof evt.inRoom === 'number' && evt.inRoom >= 0) {
+        peer.inRoom = evt.inRoom;
+        peer.inRoomAt = (typeof performance !== 'undefined') ? performance.now() : 0;
       }
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     }
@@ -26072,9 +26099,43 @@ function _owK() { return window.__cities || (window.__cities = {}); }
 function _owBanner(t, s) { try { if (window.Overlays && Overlays.banner) Overlays.banner(t, s || ''); } catch (_) {} }
 function _owTowerTop(c) { return c.padY + c.site.genome.towerH * 0.75 + 320; }
 function _owNet() { return !!(typeof net !== 'undefined' && net && net.active && net.sendEvent); }
+function _owElect() {
+  if (typeof net === 'undefined' || !net || !net.active) return true;
+  if (typeof window !== 'undefined' && window.__owElect != null && !+window.__owElect) {
+    try { return !!amStasisOwner(); } catch (_) { return false; }
+  }
+  let peers = [];
+  try { peers = (typeof nonJudgePeerIds === 'function') ? nonJudgePeerIds() : []; } catch (_) {}
+  if (!peers.length) return true;
+  const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+  const mine = net.roomJoinedAt ? Math.max(0, now - net.roomJoinedAt) : 0;
+  const cands = [{ id: String(net.myPeerId), inRoom: mine }];
+  let unknown = false;
+  for (const id of peers) {
+    let v = null;
+    try {
+      const m = net._peerModes && net._peerModes.get(id);
+      if (m && typeof m.inRoom === 'number' && m.inRoom >= 0) v = m.inRoom + Math.max(0, now - (m.at || now));
+    } catch (_) {}
+    if (v == null) {
+      try {
+        const pr = net.peers && net.peers.get(id);
+        if (pr && typeof pr.inRoom === 'number' && pr.inRoom >= 0) v = pr.inRoom + Math.max(0, now - (pr.inRoomAt || now));
+      } catch (_) {}
+    }
+    if (v == null) { unknown = true; continue; }
+    cands.push({ id: String(id), inRoom: v });
+  }
+  if (unknown) return (OW._auth === true);   // never take authority I do not already hold
+  cands.sort((a, b) => {
+    if (Math.abs(b.inRoom - a.inRoom) > 1500) return b.inRoom - a.inRoom;   // longest in the room
+    return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);                        // else: stable
+  });
+  return cands[0].id === String(net.myPeerId);
+}
 function _owAuthority() {
   if (typeof net === 'undefined' || !net || !net.active) return true;
-  try { return !!amStasisOwner(); } catch (_) { return false; }
+  try { return !!_owElect(); } catch (_) { return false; }
 }
 function _owSend(evt) { if (!_owNet()) return; try { net.sendEvent(evt); } catch (_) {} }
 function _owTeamOfPeer(pid) {
@@ -27408,6 +27469,7 @@ function _owBossSpawn() {
 }
 function _owNetSend(dt) {
   if (!_owNet()) return;
+  if (!OW._everRx && OW._promotedAt && (performance.now() - OW._promotedAt) < 4000) return;
   OW._sendT -= dt; if (OW._sendT > 0) return; OW._sendT = 1 / (OW.NET.hz || 4);
   const C = OW.cities; if (!C) return;
   const c = C.map(x => {
@@ -27427,6 +27489,8 @@ function _owNetSend(dt) {
 }
 function _owApplyState(m) {
   if (!OW.cities || _owAuthority()) return;
+  if (OW._demotePending) { try { _owDemoteFinish(); } catch (_) {} }
+  OW._everRx = true;
   OW._lastPkt = performance.now();
   for (const r of (m.c || [])) {
     const c = OW.cities[r[0]]; if (!c) continue;
@@ -27493,6 +27557,7 @@ function _owOnDamage(evt, fromPeerId) {
 function _owAuthTransition(auth) {
   if (OW._auth === auth) return;
   const was = OW._auth; OW._auth = auth;
+  if (auth) { OW._promotedAt = (typeof performance !== 'undefined') ? performance.now() : 0; OW._demotePending = false; }
   if (was === null) return;
   try { if (auth) _owAdopt(); else _owDemote(); } catch (e) { console.warn('[cities] authority handoff threw:', e); }
 }
@@ -27532,6 +27597,13 @@ function _owAdopt() {
   OW._sendT = 0;
 }
 function _owDemote() {
+  OW._demotePending = true;
+  OW._demoteAt = (typeof performance !== 'undefined') ? performance.now() : 0;
+}
+function _owDemoteFinish() {
+  if (!OW._demotePending) return;
+  OW._demotePending = false;
+  if (!OW.cities) return;
   for (const c of OW.cities) {
     if (c.carrier) c.carrier.isProxy = true;
     _owKillFleet(c, false);   // the new authority's roster brings the proxies
@@ -32653,7 +32725,24 @@ class Bot {
     this.mesh.userData.bot = this;
     scene.add(this.mesh);
     if (hoardModelKey) {
-      this.hoardModelKey = hoardModelKey;   
+      this.hoardModelKey = hoardModelKey;
+      if (typeof loadHoardModel === 'function' && !(typeof shipModelCache !== 'undefined' && shipModelCache.loaded && shipModelCache.loaded[hoardModelKey])) {
+        const _hmK = hoardModelKey, _hmC = teamColor;
+        try {
+          loadHoardModel(_hmK).then((proto) => {
+            if (!proto || !this.alive || this.hoardModelKey !== _hmK) return;
+            const old = this.mesh;
+            if (!old || !(old.userData && old.userData.isProceduralFallback)) return;   // already a real hull
+            try {
+              const next = createShipMesh(this.chassis, _hmC, _hmK, this.skinId);
+              next.position.copy(old.position); next.quaternion.copy(old.quaternion);
+              next.userData.bot = this;
+              if (old.parent) old.parent.remove(old);
+              this.mesh = next; scene.add(next);
+            } catch (_) {}
+          }).catch(() => {});
+        } catch (_) {}
+      }
     } else {
       swapToModelMeshWhenReady(this, teamColor);
     }
@@ -49118,7 +49207,7 @@ function _botNetSync(dt) {
 function _botAuthority() {
   if (typeof net === 'undefined' || !net || !net.active) return true;
   if (net.campaign || net.endless || net.cyber) return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : true;
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : false;
+  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return (typeof _owAuthority === 'function') ? !!_owAuthority() : false;
   if (net.openSolo) return !!(net.openSoloHostId && net.myPeerId === net.openSoloHostId);
   return false;
 }

@@ -6344,7 +6344,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.60';
+const LSS_BUILD = '44.61';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -9629,6 +9629,28 @@ async function joinRoom() {
         peer.state = data;
         peer.lastUpdate = performance.now();
         peer.interpT = 0;
+        // ⭐⭐ (v44.61) ASK FOR A HULL WE NEVER GOT. Owner: "the joiner couldn't see the original
+        // player's ship." A remote ship only ever comes into being when `updateNetworkPlayer` runs,
+        // and for a peer who was ALREADY FLYING when we joined the only thing that calls it is one
+        // targeted `loadout` fired inside their `onPeerJoin` - unrepeated, unacknowledged, and
+        // dropped in silence by BOTH receivers if it lands before our own onPeerJoin has registered
+        // the sender (`onLoadout`'s bare `if (peer)` and `updateNetworkPlayer`'s `if (!peer) return`,
+        // neither with an else). Our own hull reaches them fine, because we announce from
+        // commitLoadout seconds later - hence the asymmetry the owner saw. Every other replicated
+        // actor in this game self-heals on a timer (bot_roster 2 s, ow_state 4 Hz, launch_at 150 ms);
+        // the peer's own ship was the one actor class with a single-shot announcement.
+        // These 20 Hz packets are live proof the channel to them works, so use it to ask again.
+        // ⚠ "no hull" is not only a MISSING networkPlayer. A stale one - torn down by
+        // returnToRootMenu's bot.destroy(), or stuck on the invisible GLB placeholder - leaves
+        // peer.networkPlayer truthy while nothing is drawn, and that is the state that used to last
+        // the whole session. Ask on `not usable`, not on `not present`. See _lssNpUsable.
+        if (!_lssNpUsable(peer.networkPlayer) && net.sendEvent) {
+          const _n = performance.now();
+          if (_n - (peer._loReqT || 0) > 1500) {
+            peer._loReqT = _n;
+            try { net.sendEvent({ type: 'loadout_req' }, peerId); } catch (_) {}
+          }
+        }
       }
     });
 
@@ -9756,32 +9778,9 @@ async function joinRoom() {
       // If we already have a loadout, announce it. (v10) Bundle our
       // Discord identity into the same payload so the new peer can
       // render our avatar + handle in their lobby chips.
-      if (player.loadoutKey && net.sendLoadout) {
-        const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
-        // (v38.63) TO THE JOINER ONLY. This re-announce went to the whole room,
-        // and every receiver rebuilt our NetworkPlayer from scratch (GLB swap,
-        // a ship reset to the origin) — on the open-solo host it also seated
-        // us AGAIN via _dropinReplaceBot, deleting another bot per join.
-        net.sendLoadout({
-          loadoutKey: player.loadoutKey,
-          team: player.team,
-          peerId: net.myPeerId,
-          // (v36.31) Same livery field as the commit-time broadcast, so a peer
-          // who joins AFTER we committed still builds our ship skinned.
-          skinId: player.skinId || SHIP_SKIN_DEFAULT,
-      // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
-      // match is live, but in the LOBBY it did not cross - measured with two clients both
-      // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
-      // channel's timing, the flag travels on the broadcast that is already proven at exactly
-      // the moment it matters - commit time, and again to every joiner - so nobody can reach
-      // the grid flying by different rules. An old client simply ignores the field.
-      insaneSpeed: !!LSS.INSANE_SPEED,
-      speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
-          discord_id:     _du ? _du.id : undefined,
-          discord_name:   _du ? (_du.global_name || _du.username) : undefined,
-          discord_avatar: _du ? _du.avatar : undefined,
-        }, peerId);
-      }
+      // (v44.61) the payload moved into _lssSendLoadoutTo so the loadout_req pull can re-send the
+      // identical thing. See the onState handler for why one shot was never enough.
+      if (typeof _lssSendLoadoutTo === 'function') _lssSendLoadoutTo(peerId);
 
       // (v30.63) Identity hello : introduce ourselves to the newcomer
       // immediately, so their fleet strip shows our card BEFORE anyone
@@ -9801,6 +9800,10 @@ async function joinRoom() {
             // (v43.19) tell the joiner what this room is actually playing, so their mode
             // button cannot put them in a different world from everyone else.
             // (v43.22) mode moved off hello onto its own mode_set event - see _lssModeAnnounce.
+            // (v44.61) how long I have been in this room, for _owElect. It rides the mode announce
+            // too; this is the second carrier, because an election with missing data cannot decide
+            // and a peer that never announced a mode would stall the overworld authority.
+            inRoom: (net.roomJoinedAt ? Math.round(Math.max(0, performance.now() - net.roomJoinedAt)) : 0),
             discord_id:     _hdu ? _hdu.id : undefined,
             discord_name:   _hdu ? (_hdu.global_name || _hdu.username) : undefined,
             discord_avatar: _hdu ? _hdu.avatar : undefined }, peerId);
@@ -15527,6 +15530,51 @@ class NetworkPlayer {
   }
 }
 
+// (v44.61) IS THIS PEER'S SHIP ACTUALLY DRAWABLE? The v38.63 idempotence guard and the loadout_req
+// pull both need this same question, and both used to ask a weaker one ("does the object exist?").
+// Three states look alive and draw nothing: the invisible GLB placeholder `createShipMesh` returns
+// when the model is not cached yet, a hull detached from the scene by `returnToRootMenu`'s
+// `bot.destroy()` (which clears game.entities and never touches net.networkPlayers or
+// peer.networkPlayer), and a NetworkPlayer whose group was disposed under it.
+// The `np.alive ? ... : true` half matters: a peer killed by die() legitimately has no mesh.parent
+// and is correctly restored by the revive branch in NetworkPlayer.update - that is not broken.
+function _lssNpUsable(np) {
+  return !!(np && np.mesh
+    && !(np.mesh.userData && np.mesh.userData.isProceduralFallback)
+    && (np.alive ? !!np.mesh.parent : true));
+}
+
+// (v44.61) OUR HULL, ADDRESSED TO ONE PEER. Lifted verbatim out of onPeerJoin so the `loadout_req`
+// pull can re-send exactly the same payload; the behaviour on the join edge is unchanged.
+// ⚠ Keep it TARGETED. v38.63 made this a per-peer send rather than a broadcast because every
+// receiver rebuilt our NetworkPlayer from scratch on a re-announce (GLB swap, ship reset to the
+// origin) and the open-solo host also re-seated us through _dropinReplaceBot, eating a bot per join.
+function _lssSendLoadoutTo(peerId) {
+  if (!player.loadoutKey || !net.sendLoadout) return;
+  const _du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
+  try {
+    net.sendLoadout({
+      loadoutKey: player.loadoutKey,
+      team: player.team,
+      peerId: net.myPeerId,
+      // (v36.31) Same livery field as the commit-time broadcast, so a peer
+      // who joins AFTER we committed still builds our ship skinned.
+      skinId: player.skinId || SHIP_SKIN_DEFAULT,
+      // (v43.13) MATCH SPEED RIDES THE LOADOUT. The standalone speed_mode event works once a
+      // match is live, but in the LOBBY it did not cross - measured with two clients both
+      // showing PEER: the clicker flipped, the other sat at OFF. Rather than chase that
+      // channel's timing, the flag travels on the broadcast that is already proven at exactly
+      // the moment it matters - commit time, and again to every joiner - so nobody can reach
+      // the grid flying by different rules. An old client simply ignores the field.
+      insaneSpeed: !!LSS.INSANE_SPEED,
+      speedMix: (typeof LSS.SPEED_MIX === 'number') ? LSS.SPEED_MIX : 0,   // (v44.18) the dial
+      discord_id:     _du ? _du.id : undefined,
+      discord_name:   _du ? (_du.global_name || _du.username) : undefined,
+      discord_avatar: _du ? _du.avatar : undefined,
+    }, peerId);
+  } catch (_) {}
+}
+
 function updateNetworkPlayer(peerId, data) {
   const peer = net.peers.get(peerId);
   if (!peer) return;
@@ -15540,7 +15588,14 @@ function updateNetworkPlayer(peerId, data) {
     const np0 = peer.networkPlayer;
     const _team = data.team || LSS.TEAM_FLEET_B;
     const _skin = (typeof _shipSkinDef === 'function') ? _shipSkinDef(data.skinId).id : data.skinId;
-    if (np0.loadoutKey === data.loadoutKey && np0.team === _team && np0.skinId === _skin) return;
+    // ⚠ (v44.61) ...but only if the ship it is protecting is actually drawable. The guard keyed on
+    // the DATA alone, never on the hull, so any state where `peer.networkPlayer` existed but was
+    // useless - stuck on the invisible GLB placeholder, or a corpse left behind by
+    // returnToRootMenu's `bot.destroy()` (which clears game.entities and never touches
+    // net.networkPlayers or peer.networkPlayer) - was frozen for the whole session: re-announcing
+    // the identical loadout returned right here and rebuilt nothing. That is what made the v44.61
+    // loadout_req pull necessary AND insufficient on its own.
+    if (_lssNpUsable(np0) && np0.loadoutKey === data.loadoutKey && np0.team === _team && np0.skinId === _skin) return;
   }
 
   // Remove old NetworkPlayer if loadout changed
@@ -16411,6 +16466,12 @@ function handleNetEvent(evt, fromPeerId) {
     _lssModeDecide();
     return;
   }
+  // (v44.61) a peer is receiving our state packets but has no hull for us - send it again. See the
+  // onState handler for the whole mechanism. Cheap, idempotent, and rate-limited by the asker.
+  if (evt.type === 'loadout_req') {
+    try { if (typeof _lssSendLoadoutTo === 'function') _lssSendLoadoutTo(fromPeerId); } catch (_) {}
+    return;
+  }
   if (evt.type === 'hello') {
     // (v43.19) adopt the room's mode. This arrives from a peer who was already here, so it is the
     // room's truth; record it for _lssRoomModeOr and switch now if we have not started yet.
@@ -16447,6 +16508,12 @@ function handleNetEvent(evt, fromPeerId) {
         peer.discord_id     = evt.discord_id;
         peer.discord_name   = evt.discord_name;
         peer.discord_avatar = evt.discord_avatar;
+      }
+      // (v44.61) how long this peer has been in the room, stamped on arrival so _owElect can age it
+      // forward. The elapsed time is the peer's own measurement, so no clock is being synchronised.
+      if (typeof evt.inRoom === 'number' && evt.inRoom >= 0) {
+        peer.inRoom = evt.inRoom;
+        peer.inRoomAt = (typeof performance !== 'undefined') ? performance.now() : 0;
       }
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     }
@@ -44238,9 +44305,66 @@ function _owBanner(t, s) { try { if (window.Overlays && Overlays.banner) Overlay
 function _owTowerTop(c) { return c.padY + c.site.genome.towerH * 0.75 + 320; }
 // ── who is who (teams, peers, authority) ──────────────────────────────────────────────────────
 function _owNet() { return !!(typeof net !== 'undefined' && net && net.active && net.sendEvent); }
+// ⭐⭐⭐ (v44.61) THE OVERWORLD AUTHORITY IS THE PEER WHO HAS BEEN HERE LONGEST, NOT THE LOWEST ID.
+// Owner: "I joined a game in exhibition where I had taken over all the cities... when I joined with
+// my other device, the joiner couldn't see the original player's ship or my fleet ships that came
+// with the carriers I captured."
+// `amStasisOwner()` sorts RANDOM trystero peer ids, so join order has nothing to do with it: about
+// half the time the brand-new joiner sorted lower and became the authority for the cities, the
+// carriers, the fields, the boss AND the fleet bots - the instant its data channel opened, while it
+// was still sitting in the lobby. Everything then follows: the incumbent demoted (and _owDemote
+// DELETES its fleets), the joiner's `_owApplyState` early-returns on its own authority so it
+// discards every packet the real host sends, and the joiner broadcasts its own virgin six-hostile-
+// city world back over the top. Two clients, two different worlds, with the newcomer's blank one
+// winning - and no fleet in either.
+// This is the same fault v43.29 fixed for the room's mode and map, and the same fix: `roomJoinedAt`
+// (v43.22) already measures how long each client has been in this room, each client reports its own
+// elapsed time so there is no clock to synchronise, and the 1.5 s band means two clients whose
+// numbers are within measurement noise both fall through to the SAME deterministic tie-break.
+// ⚠ THE LOAD-BEARING LINE IS THE `unknown` GUARD. A pairwise rule cannot stay antisymmetric under
+// latency, so when this client is missing a connected peer's age it refuses to decide at all and
+// keeps whatever it already holds. An incumbent holds true, a newcomer holds false-or-null, and
+// neither can flip on absent data - which is exactly the split the random-id sort produced.
+// window.__owElect = 0 falls back to the old lowest-id rule.
+function _owElect() {
+  if (typeof net === 'undefined' || !net || !net.active) return true;
+  if (typeof window !== 'undefined' && window.__owElect != null && !+window.__owElect) {
+    try { return !!amStasisOwner(); } catch (_) { return false; }
+  }
+  let peers = [];
+  try { peers = (typeof nonJudgePeerIds === 'function') ? nonJudgePeerIds() : []; } catch (_) {}
+  if (!peers.length) return true;
+  const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+  const mine = net.roomJoinedAt ? Math.max(0, now - net.roomJoinedAt) : 0;
+  const cands = [{ id: String(net.myPeerId), inRoom: mine }];
+  let unknown = false;
+  for (const id of peers) {
+    let v = null;
+    // `inRoom` already rides the mode announce (v43.22), which bursts with retries and is the
+    // channel v43.29's host election trusts. The peer record is the fallback (see the hello handler).
+    try {
+      const m = net._peerModes && net._peerModes.get(id);
+      if (m && typeof m.inRoom === 'number' && m.inRoom >= 0) v = m.inRoom + Math.max(0, now - (m.at || now));
+    } catch (_) {}
+    if (v == null) {
+      try {
+        const pr = net.peers && net.peers.get(id);
+        if (pr && typeof pr.inRoom === 'number' && pr.inRoom >= 0) v = pr.inRoom + Math.max(0, now - (pr.inRoomAt || now));
+      } catch (_) {}
+    }
+    if (v == null) { unknown = true; continue; }
+    cands.push({ id: String(id), inRoom: v });
+  }
+  if (unknown) return (OW._auth === true);   // never take authority I do not already hold
+  cands.sort((a, b) => {
+    if (Math.abs(b.inRoom - a.inRoom) > 1500) return b.inRoom - a.inRoom;   // longest in the room
+    return a.id < b.id ? -1 : (a.id > b.id ? 1 : 0);                        // else: stable
+  });
+  return cands[0].id === String(net.myPeerId);
+}
 function _owAuthority() {
   if (typeof net === 'undefined' || !net || !net.active) return true;
-  try { return !!amStasisOwner(); } catch (_) { return false; }
+  try { return !!_owElect(); } catch (_) { return false; }
 }
 function _owSend(evt) { if (!_owNet()) return; try { net.sendEvent(evt); } catch (_) {} }
 function _owTeamOfPeer(pid) {
@@ -45713,6 +45837,14 @@ function _owBossSpawn() {
 // ── network: the authority's packet, the proxies' mirror ──────────────────────────────────────
 function _owNetSend(dt) {
   if (!_owNet()) return;
+  // ⚠ (v44.61) A FRESHLY PROMOTED PEER MUST NOT BROADCAST A VIRGIN WORLD. `ow_state` is a full
+  // snapshot, not a delta, and a peer that has just built its cities has owner -1 on all six and no
+  // carriers at all. On the incumbent that reads as "every city just went neutral" and its proxy
+  // carriers fail the `seen` test and are destroyed - a conquered overworld wiped by a client that
+  // has never received a packet. So a peer promoted in the last few seconds that has never heard
+  // state stays quiet and listens first. An original host never transitions false->true, so
+  // _promotedAt is 0 for it and this gate is inert.
+  if (!OW._everRx && OW._promotedAt && (performance.now() - OW._promotedAt) < 4000) return;
   OW._sendT -= dt; if (OW._sendT > 0) return; OW._sendT = 1 / (OW.NET.hz || 4);
   const C = OW.cities; if (!C) return;
   const c = C.map(x => {
@@ -45732,6 +45864,9 @@ function _owNetSend(dt) {
 }
 function _owApplyState(m) {
   if (!OW.cities || _owAuthority()) return;
+  // (v44.61) the successor has spoken - NOW it is safe to hand our objects over. See _owDemote.
+  if (OW._demotePending) { try { _owDemoteFinish(); } catch (_) {} }
+  OW._everRx = true;
   OW._lastPkt = performance.now();
   for (const r of (m.c || [])) {
     const c = OW.cities[r[0]]; if (!c) continue;
@@ -45801,6 +45936,9 @@ function _owOnDamage(evt, fromPeerId) {
 function _owAuthTransition(auth) {
   if (OW._auth === auth) return;
   const was = OW._auth; OW._auth = auth;
+  // (v44.61) when this client was PROMOTED, so _owNetSend can stay quiet until it has something
+  // real to say. An original host never transitions false->true, so it is never quarantined.
+  if (auth) { OW._promotedAt = (typeof performance !== 'undefined') ? performance.now() : 0; OW._demotePending = false; }
   if (was === null) return;
   try { if (auth) _owAdopt(); else _owDemote(); } catch (e) { console.warn('[cities] authority handoff threw:', e); }
 }
@@ -45845,7 +45983,24 @@ function _owAdopt() {
   if (OW.boss) OW.boss.isProxy = false;
   OW._sendT = 0;
 }
+// ⚠⚠ (v44.61) DEMOTION IS LAZY NOW. The body below reads "the new authority's roster brings the
+// proxies" - and that is only true once a new authority is actually broadcasting. When it ran the
+// frame a peer connected, the peer was still in ship-select: its `_owFrame` returns at the state
+// gate, its OW.cities do not exist yet and it is sending nothing. So the incumbent destroyed three
+// real fighters per owned city, froze its carriers as proxies with no packets to glide toward, and
+// waited on a peer that would not speak for as long as the joiner took to pick a ship. _owAdopt
+// cannot undo it either: it looks for surviving bots to re-take, and they have been spliced out.
+// With v44.61's election a joiner no longer steals authority in the first place, but a real handover
+// (the host quits) still has to be survivable - so keep simulating until the successor speaks, and
+// only then hand the objects over.
 function _owDemote() {
+  OW._demotePending = true;
+  OW._demoteAt = (typeof performance !== 'undefined') ? performance.now() : 0;
+}
+function _owDemoteFinish() {
+  if (!OW._demotePending) return;
+  OW._demotePending = false;
+  if (!OW.cities) return;
   for (const c of OW.cities) {
     if (c.carrier) c.carrier.isProxy = true;
     _owKillFleet(c, false);   // the new authority's roster brings the proxies
@@ -53284,7 +53439,37 @@ class Bot {
     this.mesh.userData.bot = this;
     scene.add(this.mesh);
     if (hoardModelKey) {
-      this.hoardModelKey = hoardModelKey;   
+      this.hoardModelKey = hoardModelKey;
+      // ⭐⭐ (v44.61) A FLEET PROXY WHOSE GLB IS NOT CACHED WAS INVISIBLE FOR THE SESSION. Owner:
+      // "the joiner couldn't see... my fleet ships that came with the carriers I captured."
+      // Hoard keys ('bumblebee', 'concord'...) are not in SHIP_MODELS, so `createShipMesh` above
+      // returned an empty `Group` with `visible = false` and `awaitingGlb: false`, and this branch
+      // then skipped `swapToModelMeshWhenReady` outright - nothing anywhere ever upgraded it. Every
+      // OTHER hoard spawn site awaits `loadHoardModel` first (`_owSpawnFleet` and five more, all
+      // `Promise.all(...).then` with an `if (!protos[i]) continue;` guard); `_botApplyRoster`, the
+      // path a PEER's copy of a city fleet takes, is the one site that does not - which is exactly
+      // the host-sees-it / joiner-does-not asymmetry the owner hit. Carriers were unaffected because
+      // OwCarrier._build has a real placeholder-then-swap, which is why the carriers showed up and
+      // the fleet riding on them did not.
+      // Fixing it HERE rather than in _botApplyRoster closes the hole for every present and future
+      // caller, and costs nothing when the model is already parsed (the common case).
+      if (typeof loadHoardModel === 'function' && !(typeof shipModelCache !== 'undefined' && shipModelCache.loaded && shipModelCache.loaded[hoardModelKey])) {
+        const _hmK = hoardModelKey, _hmC = teamColor;
+        try {
+          loadHoardModel(_hmK).then((proto) => {
+            if (!proto || !this.alive || this.hoardModelKey !== _hmK) return;
+            const old = this.mesh;
+            if (!old || !(old.userData && old.userData.isProceduralFallback)) return;   // already a real hull
+            try {
+              const next = createShipMesh(this.chassis, _hmC, _hmK, this.skinId);
+              next.position.copy(old.position); next.quaternion.copy(old.quaternion);
+              next.userData.bot = this;
+              if (old.parent) old.parent.remove(old);
+              this.mesh = next; scene.add(next);
+            } catch (_) {}
+          }).catch(() => {});
+        } catch (_) {}
+      }
     } else {
       swapToModelMeshWhenReady(this, teamColor);
     }
@@ -76504,8 +76689,11 @@ function _botNetSync(dt) {
 function _botAuthority() {
   if (typeof net === 'undefined' || !net || !net.active) return true;
   if (net.campaign || net.endless || net.cyber) return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : true;
-  // (v38.79) the overworld cities' fleets in a free-flight room: the same lowest-id authority
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : false;
+  // (v38.79) the overworld cities' fleets in a free-flight room: the same authority as the cities.
+  // (v44.61) ...which is now _owElect (longest in the room), NOT amStasisOwner (lowest random id).
+  // These two MUST agree: the city fleets are bots, so if the roster and the ow_state feed disagreed
+  // about who simulates, one peer would own the carriers and the other the fighters riding on them.
+  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return (typeof _owAuthority === 'function') ? !!_owAuthority() : false;
   if (net.openSolo) return !!(net.openSoloHostId && net.myPeerId === net.openSoloHostId);
   return false;
 }
