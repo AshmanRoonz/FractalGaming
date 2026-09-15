@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.64';
+const LSS_BUILD = '44.65';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -51470,7 +51470,7 @@ function _lssApplyShipRig(dt) {
         game._adsGhostZ = 0;   // (v44.27)
         if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(false);
       } else {
-      if (z > 0 && (_z3p || _zm === 'steady')) {
+      if (z > 0 && (_z3p || _zm !== 'hybrid')) {
         game._adsDolly = 0;
         const _mTot = 1 + z * ((game._adsMag || (Z.mMax != null ? Z.mMax : 2.4)) - 1);   // (v39.54) double-tap zoom
         camera.fov = 2 * Math.atan(Math.tan(_zBase * Math.PI / 360) / _mTot) * 180 / Math.PI;
