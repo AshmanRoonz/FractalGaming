@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.65';
+const LSS_BUILD = '44.66';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -35007,10 +35007,16 @@ class Projectile {
     return Math.min(42, size);
   }
 
+  rocketSmokeK() {
+    const F = (typeof window !== 'undefined' && window.__fx) || {};
+    const k = (F.rocketSmoke != null) ? +F.rocketSmoke : 0.1;
+    return (this.tracking || this.salvoGuided || this.isPyroThermite || this.isTrackerMain) ? k : 1;
+  }
+
   spawnImpactExplosion(pos) {
     const size = this.impactExplosionSize();
     if (size <= 0 || typeof spawnExplosion !== 'function') return;
-    spawnExplosion(pos, size, undefined, this.velocity);   // (v44.22) the water wants the direction
+    spawnExplosion(pos, size, undefined, this.velocity, { smokeK: this.rocketSmokeK() });   // (v44.22) the water wants the direction
   }
 
   spawnClusterChildren() {
@@ -35186,7 +35192,7 @@ class Projectile {
     }
     const _thermRamp = (this.isPyroThermite &&
       _fxFriendly(this.owner === 'player' ? player.team : this.ownerTeam)) ? _FIRE_RAMP_BASE_RED : null;
-    spawnExplosion(_exPos, _exSize, _thermRamp, this.velocity);   // (v44.22)
+    spawnExplosion(_exPos, _exSize, _thermRamp, this.velocity, { smokeK: this.rocketSmokeK() });   // (v44.22, v44.66)
     if (this.isPyroThermite && typeof spawnPyroFlame === 'function') {
       spawnPyroFlame(_exPos, this.owner === 'player' ? player.team : this.ownerTeam);
     }
@@ -37141,7 +37147,8 @@ function applyExplosionPush(pos, force, radius) {
 }
 if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPush;
 
-function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing that exploded, for the water
+function spawnExplosion(pos, size, fireRamp, vel, opts) {   // (v44.22) vel: the thing that exploded, for the water
+  const _smK = (opts && typeof opts.smokeK === 'number') ? Math.max(0, opts.smokeK) : 1;
   size = size || 20;
   if (game._hubWater && pos) { try { _swBlast(pos.x, pos.y, pos.z, size, vel); } catch (_) {} }
   const _explFrameKey = (typeof game !== 'undefined' && game) ? game.time : 0;
@@ -37319,18 +37326,18 @@ function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing
     }
     const smokeMesh = new THREE.Mesh(_SMOKE_GEO, smokeMat);
     smokeMesh.position.copy(pos);
-    smokeMesh.scale.setScalar(size * 0.7);
+    smokeMesh.scale.setScalar(size * 0.7 * _smK);
     smokeMesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
     smokeMesh.frustumCulled = true;
     smokeMesh.renderOrder = 1; 
     scene.add(smokeMesh);
     game.effects.push({
       mesh: smokeMesh, lifetime: 1.0, age: 0, type: 'shaderSmoke',
-      maxSize: size * 4, baseScale: size * 0.7,
+      maxSize: size * 4 * _smK, baseScale: size * 0.7 * _smK,
       rotVel: new THREE.Vector3((Math.random()-0.5)*2, (Math.random()-0.5)*2, (Math.random()-0.5)*2),
     });
     if (typeof spawnFXBurst === 'function' && size >= 12) {
-      spawnFXBurst('cloud', pos, size * 2.2, 1.6, {
+      spawnFXBurst('cloud', pos, size * 2.2 * _smK, 1.6, {
         startScale: 0.4, endScale: 1.0,
       });
     }
