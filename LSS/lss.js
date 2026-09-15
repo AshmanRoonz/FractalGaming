@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.56';
+const LSS_BUILD = '44.57';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -11747,6 +11747,7 @@ renderer.xr.addEventListener('sessionend', () => {
       const _vrScale = getEffectiveVRRenderScale();
       try { renderer.xr.setFramebufferScaleFactor(_vrScale); } catch (_) {}
       try { if (getVRPerfMode() === 'auto' && typeof renderer.xr.setFoveation === 'function') renderer.xr.setFoveation(0); } catch (_) {}   // (v44.42) full-res periphery to start; the governor raises it on demand
+      try { setTimeout(() => { try { _xrApplyModeFoveation(); } catch (_) {} }, 0); } catch (_) {}   // (v44.57) fixed modes claim their foveation once the layer exists
       renderer.xr.enabled = true;
       await renderer.xr.setSession(session);
       btn.textContent = 'EXIT VR';
@@ -12607,16 +12608,31 @@ const _XR_VR_PERF_LABELS = {
 };
 let _xrSettingsFocusIdx = 0;
 
+function _xrModeFoveation(mode) {
+  if (mode === 'max') return 1.0;
+  if (mode === 'fast') return 0.85;
+  return null;   // standard / lite / auto: do not touch
+}
+function _xrApplyModeFoveation() {
+  try {
+    if (!renderer.xr || !renderer.xr.isPresenting) return false;
+    const f = _xrModeFoveation(getVRPerfMode());
+    if (f == null) return false;
+    if (typeof renderer.xr.setFoveation === 'function') { renderer.xr.setFoveation(f); return true; }
+  } catch (_) {}
+  return false;
+}
 function _xrSetVRPerfMode(mode) {
   if (!input) return;
   input.vrPerfMode = mode || 'standard';
   if (input.vrPerfMode !== 'standard' && input.vrPerfMode !== 'auto' && typeof clearAmbientCloudDots === 'function') clearAmbientCloudDots();   // (v44.42) auto sheds on demand, not at selection
   if (typeof saveSettings === 'function') saveSettings();
   try {
-    if (renderer.xr && renderer.xr.isPresenting && typeof renderer.xr.setFramebufferScaleFactor === 'function') {
+    if (renderer.xr && typeof renderer.xr.setFramebufferScaleFactor === 'function' && !renderer.xr.isPresenting) {
       renderer.xr.setFramebufferScaleFactor(getEffectiveVRRenderScale());
     }
   } catch (_) {}
+  _xrApplyModeFoveation();   // ...and this is what the pilot feels immediately.
 }
 
 function _xrStepVRScale(dir) {
@@ -64241,7 +64257,7 @@ function buildSettingsPage() {
         </select>
       </div>
       <div class="setting-row">
-        <label>VR Render Scale</label>
+        <label>VR Render Scale <span style="font-size:9px;color:#7799bb;letter-spacing:1px;">(applies next VR entry)</span></label>
         <input type="range" id="set-vr-scale" min="0.35" max="1.2" step="0.05" value="${(typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7}">
         <div class="value-display" id="val-vr-scale">${getEffectiveVRRenderScale().toFixed(2)}</div>
       </div>
@@ -65501,10 +65517,11 @@ function buildSettingsPage() {
     const vrScaleVal = overlay.querySelector('#val-vr-scale');
     if (vrScaleVal) vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2);
     try {
-      if (renderer.xr && renderer.xr.isPresenting && typeof renderer.xr.setFramebufferScaleFactor === 'function') {
+      if (renderer.xr && typeof renderer.xr.setFramebufferScaleFactor === 'function' && !renderer.xr.isPresenting) {
         renderer.xr.setFramebufferScaleFactor(getEffectiveVRRenderScale());
       }
     } catch (_) {}
+    try { _xrApplyModeFoveation(); } catch (_) {}   // (v44.57) the live half
   });
 
   const vrWaterChk = overlay.querySelector('#set-vr-water');
