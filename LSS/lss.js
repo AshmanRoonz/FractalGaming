@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.59';
+const LSS_BUILD = '44.60';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -10340,6 +10340,11 @@ class BillboardCloudSystem {
         'uniform float uLightStrength[8];',
         'uniform float uVRLite;',
         'uniform float uBrightness;',
+        'uniform float uAerial;',
+        'uniform vec3  uFogColor;',
+        'uniform float uFogD;',
+        'uniform float uFarIn;',
+        'uniform float uFarOut;',
         'uniform float uBlendMode;',
         'float bcsHash(vec2 p) {',
         '  p = fract(p * vec2(123.34, 456.21));',
@@ -10400,6 +10405,13 @@ class BillboardCloudSystem {
         '    float atten = 1.0 / (1.0 + d2 * 0.0002);',
         '    lit += uLightColor[li] * atten * uLightStrength[li];',
         '  }',
+        '  if (uAerial > 0.5) {',
+        '    float _ad = distance(vSpritePos, cameraPosition);',
+        '    float _af = _ad * uFogD;',
+        '    lit = mix(lit, uFogColor, clamp(1.0 - exp(-_af * _af), 0.0, 1.0));',
+        '    a *= 1.0 - smoothstep(uFarIn, uFarOut, _ad);',
+        '    if (a < 0.005) discard;',
+        '  }',
         '  float aOut = a * uBrightness;',
         '  if (uBlendMode < 0.5) {',
         '    gl_FragColor = vec4(lit * aOut, aOut);',                            
@@ -10425,6 +10437,11 @@ class BillboardCloudSystem {
         uBlendMode:     { value: 0.0 },
         uTime:          { value: 0.0 },
         uChurn:         { value: 1.0 },
+        uAerial:        { value: 0.0 },
+        uFogColor:      { value: new THREE.Color(0xb8d4ea) },
+        uFogD:          { value: 0.00014 },
+        uFarIn:         { value: 12000.0 },
+        uFarOut:        { value: 17000.0 },
       },
       transparent: true,
       blending: THREE.AdditiveBlending,
@@ -39544,41 +39561,60 @@ function spawnDynamicObjects(rooms) {
       && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && (typeof QUALITY === 'undefined' || typeof QUALITY.basinClouds !== 'function' || QUALITY.basinClouds())) {
     try {
       if (!game.detachedGasPockets) game.detachedGasPockets = [];
-      const _hbT = game.sandwichTerrain, _hbCarve = _hbT && typeof _stGroundYCarved === 'function';
-      const _hbN = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) ? 60 : 42;
-      const _hbSpread = 17000;   
-      const _hbBanks = Math.max(1, (typeof window !== 'undefined' && window.__hubCloudBanks != null)
-        ? +window.__hubCloudBanks : 7);
-      const _hbBankR = (typeof window !== 'undefined' && window.__hubCloudBankR != null)
-        ? +window.__hubCloudBankR : 2100;
-      const _hbBank = [];
-      for (let b = 0; b < _hbBanks; b++) {
-        const _bx = (Math.random() - 0.5) * 2 * _hbSpread, _bz = (Math.random() - 0.5) * 2 * _hbSpread;
-        let _by = 700 + Math.random() * 1700;
-        if (_hbCarve) { try { _by = _stGroundYCarved(_bx, _bz, _hbT) + 420 + Math.random() * 1300; } catch (_) {} }
-        const _bs = 5 + Math.random() * 7, _ba = Math.random() * Math.PI * 2;
-        _hbBank.push({ x: _bx, y: _by, z: _bz,
-                       r: _hbBankR * (0.65 + Math.random() * 0.7),
-                       vel: new THREE.Vector3(Math.cos(_ba) * _bs, (Math.random() - 0.5) * 1.2, Math.sin(_ba) * _bs) });
+      const _hbT = game.sandwichTerrain;
+      const _hbUltra = (typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra());
+      const _hbLvl = (typeof QUALITY !== 'undefined' && QUALITY.level) ? QUALITY.level : 'high';
+      const _hbHi = (_hbLvl === 'high');
+      let _hbN = _hbUltra ? 170 : (_hbHi ? 130 : 84);
+      if (typeof window !== 'undefined' && window.__hubCloudN != null) _hbN = Math.max(1, +window.__hubCloudN);
+      if (typeof _detachedGasPocketLimit === 'function') {
+        const _lim = _detachedGasPocketLimit();
+        if (Number.isFinite(_lim)) _hbN = Math.min(_hbN, Math.max(8, Math.floor(_lim * 0.62)));
       }
+      let _hbWL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -720;
+      if (_hbT && typeof _hbT.YFLOOR === 'number') _hbWL = Math.max(_hbWL, _hbT.YFLOOR);
+      HUB_WX.baseY = _hbWL + 2900;
+      HUB_WX._primed = false; HUB_WX._bear = null; HUB_WX._dir = null;
+      if (typeof window !== 'undefined' && window.__hubWxCover != null) HUB_WX.cover = +window.__hubWxCover;
+      try { _hwxWind(0); _hwxCalibrate(); } catch (_) {}
+      const _hbSeed = new THREE.Color(0.72, 0.71, 0.69);
+      let _hbCol = _hbSeed;
+      try { _hbCol = _getEffectiveCloudColor(_hbSeed) || _hbSeed; } catch (_) {}
+      if (_hbCol && _hbCol.clone) _hbCol = _hbCol.clone();
+      const _hbSeg = (typeof getVRGasSegments === 'function') ? getVRGasSegments(9, 'basinSegments') : 9;
       for (let i = 0; i < _hbN; i++) {
-        const _bk = _hbBank[i % _hbBank.length];
-        const _ang = Math.random() * Math.PI * 2, _rr = Math.sqrt(Math.random()) * _bk.r;
-        const _hbx = _bk.x + Math.cos(_ang) * _rr, _hbz = _bk.z + Math.sin(_ang) * _rr;
-        let _hby = _bk.y + (Math.random() - 0.5) * 420;
-        if (_hbCarve) { try { _hby = Math.max(_hby, _stGroundYCarved(_hbx, _hbz, _hbT) + 260); } catch (_) {} }
-        const _hbSize = 190 + Math.random() * 230, _hbV = 0.62 + Math.random() * 0.22;
-        const _hbSeed = new THREE.Color(_hbV, _hbV * 0.98, _hbV * 0.95);
-        const _hbCloud = new GasCloud(billboardCloudSystem, new THREE.Vector3(_hbx, _hby, _hbz), {
-          boundsRadius: _hbSize, spriteScale: _hbSize * 1.5, spriteScaleVar: 0.50,
-          alpha: 0.5, color: _getEffectiveCloudColor(_hbSeed), baseColor: _hbSeed, colorJitter: 0.18,
-          segments: (typeof getVRGasSegments === 'function') ? getVRGasSegments(9, 'basinSegments') : 9,
+        const _hbSize = 320 + Math.random() * 300;
+        const _hbCloud = new GasCloud(billboardCloudSystem, new THREE.Vector3(0, HUB_WX.baseY, 0), {
+          boundsRadius: _hbSize, spriteScale: _hbSize * 1.6, spriteScaleVar: 0.50,
+          alpha: 0.5, color: _hbCol, baseColor: _hbSeed, colorJitter: 0.16,
+          segments: _hbSeg,
         });
-        const _hbVel = _bk.vel.clone().add(new THREE.Vector3(
-          (Math.random() - 0.5) * 1.6, (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 1.6));
-        _pushDetachedGasPocket({ gasCloud: _hbCloud, velocity: _hbVel });
+        if (!_hbCloud.slots.length) { try { _hbCloud.dispose(); } catch (_) {} break; }   // pool exhausted
+        _pushDetachedGasPocket({
+          gasCloud: _hbCloud, velocity: new THREE.Vector3(),
+          _wx: true,
+          _wxG: 0.86 + Math.random() * 0.28,   // a mild per-cloud gust spread
+          _wxP: Math.random() * 6.283,         // lift phase
+        });
       }
+      HUB_WX.n = _hbN;
+      try {
+        const _u = billboardCloudSystem.material && billboardCloudSystem.material.uniforms;
+        if (_u && _u.uAerial) {
+          _u.uAerial.value = 1;
+          _u.uFarIn.value = HUB_WX.R * 0.72; _u.uFarOut.value = HUB_WX.R * 1.02;
+        }
+      } catch (_) {}
+      console.log('[hub-wx] deck ' + _hbN + ' clouds, base ' + Math.round(HUB_WX.baseY)
+        + ', wind ' + Math.round((HUB_WX._bear || 0) * 57.3) + 'deg @' + HUB_WX.speed
+        + ' u/s, cover ' + HUB_WX.cover + ' (thr ' + HUB_WX._thr.toFixed(3) + ')');
     } catch (e) { console.warn('[hub-clouds] spawn failed', e); }
+  } else if (typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem) {
+    try {
+      const _u = billboardCloudSystem.material && billboardCloudSystem.material.uniforms;
+      if (_u && _u.uAerial) _u.uAerial.value = 0;
+      HUB_WX.n = 0; HUB_WX._primed = false;
+    } catch (_) {}
   }
   if (typeof game.voxelRoomsEnabled !== 'boolean') game.voxelRoomsEnabled = true;
   if (typeof game.voxelTexturesEnabled !== 'boolean') game.voxelTexturesEnabled = true;
@@ -39797,6 +39833,108 @@ function _enforceDetachedGasBudget() {
   }
 }
 
+const HUB_WX = {
+  ON: true,
+  n: 0,                // live deck size, set at spawn
+  speed: 34,           // u/s along the wind. Perceived drift is ANGULAR: at a ~2,100 u deck height
+  cell: 2600,          // coverage feature size ACROSS the wind
+  stretch: 3.2,        // ...and the along-wind elongation that makes it streets rather than spots
+  cover: 0.42,         // fraction of sky that is cloud (calibrated, not nominal). Measured on the
+  soft: 0.06,          // threshold half-width, so bodies have soft edges
+  fogMul: 0.55,        // how hard the haze takes the deck, as a fraction of the terrain's own fog.
+  R: 15000,            // active radius around the pilot
+  baseY: 1500,         // absolute deck altitude, re-derived at spawn from the waterline
+  layer: 320,          // deck thickness
+  roll: 280,           // slow undulation of the base
+  veer: 0.30,          // +-17 deg of slow veer about the seeded mean bearing
+  veerHz: 0.013,
+  _dir: null, _bear: null, _thr: 0.5, _primed: false,
+};
+if (typeof window !== 'undefined') window.__hubWx = HUB_WX;
+
+function _hwxWind(t) {
+  const W = HUB_WX;
+  if (W._bear == null) {
+    let b = 0.7;
+    try { b = _stFbm(1234.5, 6789.0, 2, 1 / 4000, 3.3); } catch (_) {}
+    W._bear = b * Math.PI * 2;
+  }
+  const a = W._bear + Math.sin(t * W.veerHz) * W.veer;
+  if (!W._dir) W._dir = new THREE.Vector3();
+  W._dir.set(Math.cos(a), 0, Math.sin(a));
+  return W._dir;
+}
+function _hwxCover(x, z, t) {
+  const W = HUB_WX, d = W._dir || _hwxWind(t);
+  const ax = x - d.x * W.speed * t, az = z - d.z * W.speed * t;
+  const al = (ax * d.x + az * d.z) / W.stretch;
+  const cr = (-ax * d.z + az * d.x);
+  return _stFbm(al, cr, 3, 1 / W.cell, 41.7);
+}
+function _hwxCalibrate() {
+  const W = HUB_WX, S = [];
+  for (let i = 0; i < 512; i++) {
+    const a = (i * 2.3999632) % (Math.PI * 2), r = Math.sqrt((i + 0.5) / 512) * W.R * 1.6;
+    S.push(_hwxCover(Math.cos(a) * r, Math.sin(a) * r, 0));
+  }
+  S.sort((p, q) => p - q);
+  const k = Math.max(0, Math.min(S.length - 1, Math.floor((1 - W.cover) * S.length)));
+  W._thr = S[k];
+}
+const _hwxV = new THREE.Vector3();
+function _hwxPlace(p, ref, fwd, t, anywhere) {
+  const W = HUB_WX, R = W.R;
+  let bx = 0, bz = 0, bv = -9;
+  for (let k = 0; k < 8; k++) {
+    let a, r;
+    if (anywhere) { a = Math.random() * Math.PI * 2; r = Math.sqrt(Math.random()) * R * 0.95; }
+    else {
+      a = Math.atan2(fwd.z, fwd.x) + (Math.random() - 0.5) * 3.5;
+      r = R * (0.62 + Math.random() * 0.34);
+    }
+    const x = ref.x + Math.cos(a) * r, z = ref.z + Math.sin(a) * r;
+    const v = _hwxCover(x, z, t) - W._thr;
+    if (v > bv) { bv = v; bx = x; bz = z; }
+    if (v > 0.03) break;
+  }
+  let y = W.baseY + (_stFbm(bx, bz, 2, 1 / 9000, 5.5) - 0.5) * 2 * W.roll
+                  + (Math.random() - 0.5) * W.layer;
+  const gc = p.gasCloud;
+  if (!gc || !gc.slots || !gc.slots.length) return;
+  p.velocity.set(0, 0, 0);
+  p._splatTimer = undefined;
+  for (let i = 0; i < gc.slots.length; i++) gc.slots[i].wakeOff.set(0, 0, 0);
+  gc._wakeUntil = 0;
+  gc._writeFlip = false;
+  gc.setPosition(bx, y, bz);
+  gc._writeFlip = Math.random() < 0.5;
+}
+function _hwxFrame(dt) {
+  const W = HUB_WX;
+  if (!W.ON || !W.n) return;
+  const ref = (typeof player !== 'undefined' && player && player.position) ? player.position : null;
+  if (!ref) return;
+  const t = (typeof game !== 'undefined' && game) ? (game.time || 0) : 0;
+  _hwxWind(t);
+  _hwxV.set(ref.x, 0, ref.z);
+  let fwd = _hwxV;
+  try {
+    const v = player.velocity;
+    if (v && (v.x * v.x + v.z * v.z) > 400) { _hwxV.set(v.x, 0, v.z).normalize(); fwd = _hwxV; }
+    else { _hwxV.copy(W._dir); fwd = _hwxV; }
+  } catch (_) { _hwxV.copy(W._dir); fwd = _hwxV; }
+  const gp = game.detachedGasPockets, R2 = W.R * W.R, WARP2 = R2 * 2.25;
+  for (let i = 0; i < gp.length; i++) {
+    const p = gp[i];
+    if (!p || !p._wx || !p.gasCloud) continue;
+    const c = p.gasCloud.position;
+    const dx = c.x - ref.x, dz = c.z - ref.z, d2 = dx * dx + dz * dz;
+    if (d2 <= R2 && W._primed) continue;
+    _hwxPlace(p, ref, fwd, t, !W._primed || d2 > WARP2);
+  }
+  W._primed = true;
+}
+
 function _pushDetachedGasPocket(p) {
   if (!game || !game.detachedGasPockets) {
     _disposeDetachedGasPocket(p);
@@ -39821,6 +39959,7 @@ function updateDetachedGasPockets(dt) {
     dt = Math.min(0.12, updateDetachedGasPockets._dt || dt || 0.016);
     updateDetachedGasPockets._dt = 0;
   }
+  if (typeof _hwxFrame === 'function') { try { _hwxFrame(dt); } catch (_) {} }
   for (let i = game.detachedGasPockets.length - 1; i >= 0; i--) {
     const p = game.detachedGasPockets[i];
     if (!p) continue;
@@ -39845,9 +39984,16 @@ function updateDetachedGasPockets(dt) {
 
     const center = p.gasCloud ? p.gasCloud.position : (p.mesh && p.mesh.position);
     if (!center) continue;
-    center.x += (p.velocity.x + p._driftVelocity.x) * dt;
-    center.y += (p.velocity.y + p._driftVelocity.y) * dt;
-    center.z += (p.velocity.z + p._driftVelocity.z) * dt;
+    let _wxx = 0, _wxy = 0, _wxz = 0, _dk = 1;
+    if (p._wx && HUB_WX.ON && HUB_WX._dir) {
+      const _sp = HUB_WX.speed * (p._wxG || 1);
+      _wxx = HUB_WX._dir.x * _sp; _wxz = HUB_WX._dir.z * _sp;
+      _wxy = Math.sin((game.time || 0) * 0.13 + (p._wxP || 0)) * 1.8;   // bounded lift, not a random walk
+      _dk = 0.14;
+    }
+    center.x += (p.velocity.x + p._driftVelocity.x * _dk + _wxx) * dt;
+    center.y += (p.velocity.y + p._driftVelocity.y * _dk + _wxy) * dt;
+    center.z += (p.velocity.z + p._driftVelocity.z * _dk + _wxz) * dt;
     p.velocity.multiplyScalar(Math.pow(0.97, dt));
 
     if (game._hubWater) {
@@ -39860,7 +40006,7 @@ function updateDetachedGasPockets(dt) {
       }
     }
 
-    if (typeof worldSDF !== 'function' || typeof sdfNormal !== 'function') {
+    if (p._wx || typeof worldSDF !== 'function' || typeof sdfNormal !== 'function') {
       if (p.gasCloud) p.gasCloud.setPosition(center.x, center.y, center.z);
       continue;
     }
@@ -46286,6 +46432,12 @@ function _syncVRLiteMaterialUniforms() {
     const _bu = billboardCloudSystem.material.uniforms;
     if (_bu.uTime) _bu.uTime.value = (typeof game !== 'undefined' && game && typeof game.time === 'number') ? game.time : 0;
     if (_bu.uChurn) _bu.uChurn.value = (typeof QUALITY === 'undefined' || (QUALITY.cloudChurn && QUALITY.cloudChurn())) ? 1.0 : 0.0;
+    if (_bu.uAerial && _bu.uAerial.value > 0.5 && typeof scene !== 'undefined' && scene && scene.fog) {
+      if (_bu.uFogColor && scene.fog.color) _bu.uFogColor.value.copy(scene.fog.color);
+      if (_bu.uFogD && typeof scene.fog.density === 'number') {
+        _bu.uFogD.value = scene.fog.density * ((typeof HUB_WX !== 'undefined' && HUB_WX.fogMul != null) ? HUB_WX.fogMul : 1);
+      }
+    }
   }
   return _vrLiteForMaterials;
 }
