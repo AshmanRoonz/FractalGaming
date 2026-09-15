@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.41';
+const LSS_BUILD = '44.42';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -11738,6 +11738,7 @@ renderer.xr.addEventListener('sessionend', () => {
       try { renderer.xr.setReferenceSpaceType('local'); } catch (_) {}
       const _vrScale = getEffectiveVRRenderScale();
       try { renderer.xr.setFramebufferScaleFactor(_vrScale); } catch (_) {}
+      try { if (getVRPerfMode() === 'auto' && typeof renderer.xr.setFoveation === 'function') renderer.xr.setFoveation(0); } catch (_) {}   // (v44.42) full-res periphery to start; the governor raises it on demand
       renderer.xr.enabled = true;
       await renderer.xr.setSession(session);
       btn.textContent = 'EXIT VR';
@@ -12588,8 +12589,9 @@ function _xrDrawShipSelectContent(ctx, W, H) {
     W / 2, H - 38, '24px Orbitron, sans-serif', '#bbccdd', 'center');
 }
 
-const _XR_VR_PERF_MODES = ['standard', 'lite', 'fast', 'max'];
+const _XR_VR_PERF_MODES = ['auto', 'standard', 'lite', 'fast', 'max'];   // (v44.42) + auto
 const _XR_VR_PERF_LABELS = {
+  auto: 'Quest Auto',
   standard: 'Standard',
   lite: 'Quest Lite',
   fast: 'Quest Fast',
@@ -12600,7 +12602,7 @@ let _xrSettingsFocusIdx = 0;
 function _xrSetVRPerfMode(mode) {
   if (!input) return;
   input.vrPerfMode = mode || 'standard';
-  if (input.vrPerfMode !== 'standard' && typeof clearAmbientCloudDots === 'function') clearAmbientCloudDots();
+  if (input.vrPerfMode !== 'standard' && input.vrPerfMode !== 'auto' && typeof clearAmbientCloudDots === 'function') clearAmbientCloudDots();   // (v44.42) auto sheds on demand, not at selection
   if (typeof saveSettings === 'function') saveSettings();
   try {
     if (renderer.xr && renderer.xr.isPresenting && typeof renderer.xr.setFramebufferScaleFactor === 'function') {
@@ -13714,9 +13716,46 @@ function getVRPerfMode() {
   return getStoredVRPerfMode() || live;
 }
 
+const _XR_GOV_STEPS = [[0, 0], [0.5, 0], [1, 0], [1, 1], [1, 2], [1, 3]];   // [fixed foveation, throttle tier], top to bottom
+const _xrGov = { step: 0, tier: 0, fov: 0, ema: 0, hz: 0, over: 0, quiet: 0, sinceUp: -1, restoreWait: 6000, lastT: 0, applied: -1, sheds: 0, ups: 0 };
+if (typeof window !== 'undefined') window.__xrGovState = _xrGov;
+function _xrGovTick() {
+  const S = _xrGov, now = performance.now();
+  const on = isXRPresenting() && getVRPerfMode() === 'auto';
+  if (!on) {
+    if (S.lastT) { S.lastT = 0; S.applied = -1; }
+    if (!isXRPresenting()) { S.step = 0; S.tier = 0; S.fov = 0; S.ema = 0; S.over = 0; S.quiet = 0; S.sinceUp = -1; S.restoreWait = 6000; }
+    return;
+  }
+  const G = (typeof window !== 'undefined' && window.__xrGov) || {};
+  if (S.lastT) {
+    const gap = Math.min(100, now - S.lastT);
+    S.ema = S.ema ? S.ema + (gap - S.ema) * 0.08 : gap;
+    let hz = 0;
+    try { const ses = renderer.xr.getSession(); hz = (ses && ses.frameRate) || 0; } catch (_) {}
+    S.hz = G.hz || hz || 72;
+    const budget = 1000 / S.hz;
+    if (S.sinceUp >= 0) S.sinceUp += gap;
+    if (S.ema > budget * (G.hi || 1.10)) { S.over += gap; S.quiet = 0; }
+    else { S.over = 0; S.quiet += gap; }
+    if (S.over > (G.shedMs || 600) && S.step < _XR_GOV_STEPS.length - 1) {
+      S.step++; S.sheds++; S.over = 0; S.quiet = 0; S.ema = budget;
+      if (S.sinceUp >= 0 && S.sinceUp < 3000) S.restoreWait = Math.min(60000, S.restoreWait * 2);   // the probe failed fast: back off
+      S.sinceUp = -1;
+    } else if (S.quiet > S.restoreWait && S.step > 0) {
+      S.step--; S.ups++; S.quiet = 0; S.over = 0; S.sinceUp = 0;
+    } else if (S.sinceUp > 10000) { S.sinceUp = -1; S.restoreWait = 6000; }   // the probe held: forgive the backoff
+  }
+  S.lastT = now;
+  const st = _XR_GOV_STEPS[S.step]; S.fov = st[0]; S.tier = st[1];
+  if (S.applied !== S.fov) {
+    try { if (renderer.xr && typeof renderer.xr.setFoveation === 'function') { renderer.xr.setFoveation(S.fov); S.applied = S.fov; } } catch (_) {}
+  }
+}
 function getVRPerfTier() {
   if (!isXRPresenting()) return 0;
   const mode = getVRPerfMode();
+  if (mode === 'auto') return _xrGov.tier;   // (v44.42) the governor's tier
   if (mode === 'max') return 3;
   if (mode === 'fast') return 2;
   if (mode === 'lite') return 1;
@@ -13743,6 +13782,7 @@ function getVRBudgetTier() {
 
 function getVRThrottleTier() {
   if (!isXRPresenting()) return 0;
+  if (getVRPerfMode() === 'auto') return _xrGov.tier;   // (v44.42) starts at 0 even on a Quest; the governor sheds on demand
   const perfTier = getVRPerfTier();
   if (perfTier > 0) return perfTier;
   return isStandaloneQuest() ? 1 : 0;
@@ -13880,6 +13920,7 @@ function getVRLevelGridRes(defaultRes) {
 function getEffectiveVRRenderScale() {
   const base = (typeof input !== 'undefined' && input && typeof input.vrRenderScale === 'number') ? input.vrRenderScale : 0.7;
   const mode = getVRPerfMode();
+  if (mode === 'auto') return Math.max(base, 1.0);   // (v44.42) native framebuffer or the slider above it; the governor sheds elsewhere
   if (mode === 'max') return Math.min(base, 0.42);
   if (mode === 'fast') return Math.min(base, 0.50);
   if (mode === 'lite') return Math.min(base, 0.60);
@@ -64078,6 +64119,7 @@ function buildSettingsPage() {
       <div class="setting-row">
         <label>Performance Mode</label>
         <select id="set-vr-perf" style="flex:1;">
+          <option value="auto" ${input.vrPerfMode === 'auto' ? 'selected' : ''}>Quest Auto (max fidelity, scales on demand)</option>
           <option value="standard" ${input.vrPerfMode === 'standard' || !input.vrPerfMode ? 'selected' : ''}>Standard (normal VR visuals)</option>
           <option value="lite" ${input.vrPerfMode === 'lite' ? 'selected' : ''}>Quest Lite (cuts ambient extras)</option>
           <option value="fast" ${input.vrPerfMode === 'fast' ? 'selected' : ''}>Quest Fast (smoke and particles heavily reduced)</option>
@@ -65340,7 +65382,7 @@ function buildSettingsPage() {
   const vrPerfSel = overlay.querySelector('#set-vr-perf');
   if (vrPerfSel) vrPerfSel.addEventListener('change', () => {
     input.vrPerfMode = vrPerfSel.value || 'standard';
-    if (input.vrPerfMode !== 'standard') clearAmbientCloudDots();
+    if (input.vrPerfMode !== 'standard' && input.vrPerfMode !== 'auto') clearAmbientCloudDots();   // (v44.42)
     saveSettings();
     const vrScaleVal = overlay.querySelector('#val-vr-scale');
     if (vrScaleVal) vrScaleVal.textContent = getEffectiveVRRenderScale().toFixed(2);
@@ -73701,6 +73743,7 @@ function gameLoop(timestamp) {
 
   const _wallDt = game.deltaTime;
   const dt = (typeof updateHitstop === 'function') ? updateHitstop(_wallDt) : _wallDt;
+  try { _xrGovTick(); } catch (_) {}   // (v44.42) Quest Auto governor, before the tiers are read
   const _vrPerfTier = getVRPerfTier();
   const _vrThrottleTier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : _vrPerfTier;
   const _xrPresentingForOverlays = (typeof isXRPresenting === 'function') && isXRPresenting();
