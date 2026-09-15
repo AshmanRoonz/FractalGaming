@@ -6247,7 +6247,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.47';
+const LSS_BUILD = '44.48';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -57005,6 +57005,28 @@ function _shipLightSampleColor(mesh, light, defHex) {
   if (u && u.uBaseColor && u.uBaseColor.value) { light.color.copy(u.uBaseColor.value); done = true; }
   if (!done) light.color.setHex(defHex);
 }
+// ⭐⭐ (v44.48) HOW DARK IS THIS WATER? Owner: "way brighter in dark water" - dark being the whole
+// point. A flat underwater boost is wrong: the hub's shallows are a bright blue (fog luminance
+// ~0.75) and an additive beam there just fogs the screen white, which is exactly what the first
+// cut did. This returns 0 in bright water and 1 in the dark, and every underwater term below
+// interpolates between TODAY'S value and the boosted one across it - so shallow water is
+// unchanged by construction and only the deep dark gets the big lamp.
+// Knobs: window.__headBoost = { dark0, dark1, sub, reach, coneOp, coneLen, fpBeam, fpOp, fpPush }.
+function _swSubDark() {
+  try {
+    if (!(typeof game !== 'undefined' && game && game._swSubmerged)) return 0;
+    const f = (typeof scene !== 'undefined' && scene) ? scene.fog : null;
+    const c = f && f.color;
+    if (!c) return 1;
+    const lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const H = (typeof window !== 'undefined' && window.__headBoost) ? window.__headBoost : null;
+    const d0 = (H && H.dark0 != null) ? H.dark0 : 0.10;
+    const d1 = (H && H.dark1 != null) ? H.dark1 : 0.45;
+    let k = 1 - (lum - d0) / Math.max(1e-6, d1 - d0);
+    if (k < 0) k = 0; else if (k > 1) k = 1;
+    return k * k * (3 - 2 * k);
+  } catch (_) { return 0; }
+}
 function _shipLightsFrame() {
   const S = _SHIPL;
   if (!S.engine) return;
@@ -57086,7 +57108,21 @@ function _shipLightsFrame() {
     if (_f && _f.color) { const _fc = _f.color, _lm = 0.2126 * _fc.r + 0.7152 * _fc.g + 0.0722 * _fc.b; if (_lm < 0.16) _hBoost *= 1 + 0.7 * (1 - _lm / 0.16); }
     const _K = (typeof window !== 'undefined' && window.__headBoost) ? window.__headBoost : null;
     if (_K && _K.dark != null) _hBoost = Math.min(_hBoost, 1 + _K.dark);
-    if (game._swSubmerged) { _hBoost *= (_K && _K.sub != null) ? _K.sub : 2.3; _hReach *= 1.5; }
+    // ⭐⭐ (v44.48) DARK WATER. Owner: "when i'm deep under water in endless and it's dark, the
+    // headlight in the dark water feels useless... it needs to be way brighter in dark water".
+    // The lamp already got 2.3x and 1.5x reach under water, and it was still nothing, for a reason
+    // the numbers make plain: down there almost nothing is in range to LIGHT. A spotlight only
+    // exists where it lands on a surface, and in open water there is no surface - so the lamp was
+    // lighting silt and empty blue. What reads as a headlight under water is the BEAM ITSELF, the
+    // shaft hanging in the particulate, which is what the owner's reference photo is entirely made
+    // of. So this raises the lamp AND (below) the cone: brighter, longer, and - the real change -
+    // visible from the seat, which it never was.
+    if (game._swSubmerged) {
+      // 2.3x / 1.5x are what shipped for ALL water; the extra only arrives as the water goes dark.
+      const _dk = _swSubDark();
+      _hBoost *= 2.3 + (((_K && _K.sub != null) ? _K.sub : 6.0) - 2.3) * _dk;
+      _hReach *= 1.5 + (((_K && _K.reach != null) ? _K.reach : 2.6) - 1.5) * _dk;
+    }
   } catch (_) {}
   hT *= _hBoost;
   S.hCur += (hT - S.hCur) * k;
@@ -57229,6 +57265,11 @@ function _shipLightsFrame() {
       if (lk < 0) lk = 0; else if (lk > 1) lk = 1;
       visK = dk * lk;
     }
+    // (v44.48) Under water the beam is ALWAYS wanted, for the same reason the auto-headlight forces
+    // its gate open there: both terms of visK come from scene.fog, and the zone tick rewrites the
+    // underwater fog colour every frame, so a bright blue tint was reading as "too light for a
+    // visible beam" exactly where the beam matters most.
+    if (game && game._swSubmerged) visK = Math.max(visK, 0.25 + 0.75 * _swSubDark());
     if (C && C.on != null && !C.on) visK = 0;
   }
   // Shape defaults: the cone HALF-angle follows the live SpotLight angle
@@ -57237,16 +57278,27 @@ function _shipLightsFrame() {
   // full 0.5 rad silhouette read as a glowing fan, not a headlight, when
   // judged live. Length 1150 sits in the 900-1400 band and matches where
   // the decay-1 beam has fallen to ~2 candela-per-unit.
-  const cAng = (C && C.ang != null) ? C.ang : ((S.head.angle || 0.5) * 0.62);
-  const cLen = (C && C.len != null) ? C.len : 1150;
+  // (v44.48) UNDER WATER THE BEAM NARROWS. The lamp deliberately WIDENS its spot down there (a wider
+  // pool of lit silt), but the visible shaft wants the opposite: at the lamp's own angle the cone is
+  // a pale cloud filling half the screen, and it was the width - not the brightness - that made it
+  // read as fog rather than as a headlight. Narrowing it to roughly half concentrates the same light
+  // into a defined shaft, which is what the owner's reference photo actually shows.
+  let cAng = (C && C.ang != null) ? C.ang : ((S.head.angle || 0.5) * 0.62);
+  const _subB = !!(game && game._swSubmerged);
+  const _HB = (typeof window !== 'undefined' && window.__headBoost) ? window.__headBoost : null;
+  // (v44.48) under water the shaft IS the headlight - longer reach and a much stronger core.
+  const _subDk = _subB ? _swSubDark() : 0;
+  if (C == null || C.ang == null) cAng *= 1 + (((_HB && _HB.coneAng != null) ? _HB.coneAng : 0.55) - 1) * _subDk;
+  const cLen = ((C && C.len != null) ? C.len : 1150) * (1 + (((_HB && _HB.coneLen != null) ? _HB.coneLen : 1.8) - 1) * _subDk);
   const cR = Math.tan(cAng) * cLen;
   // 0.16 was calibrated LIVE in a volcanic endless reach (visK 0.61 there →
   // material opacity ~0.10): the first pass shipped 0.085 and an in-scene
   // A/B screenshot pair came back pixel-identical — invisible is not
   // "faint". The 0.12 ceiling keeps the very darkest+densest contexts
   // (underwater 1.8e-3, full dusk city) from climbing past a whisper.
-  const opBase = (C && C.op != null) ? C.op : 0.16;
-  const opMax = (C && C.max != null) ? C.max : 0.12;
+  const _cOpK = 1 + (((_HB && _HB.coneOp != null) ? _HB.coneOp : 3.0) - 1) * _subDk;   // (v44.48) 1x in bright water, 3x in the dark
+  const opBase = ((C && C.op != null) ? C.op : 0.16) * _cOpK;
+  const opMax = ((C && C.max != null) ? C.max : 0.12) * _cOpK;
   const kc = Math.min(1, dt * 5);   // ~250 ms cone fade, slower than lights
   for (let i = 0; i < S.CONE_N; i++) {
     const m = S.cones[i];
@@ -57325,13 +57377,22 @@ function _shipLightsFrame() {
     else {
       mP.userData._lit = true;
       // unchanged for what you actually look at: from inside the volume it would fill the screen
-      mP.visible = !!game.thirdPerson && !xr;
-      mP.material.opacity = o;
+      // ⭐ (v44.48) THE BEAM IN FIRST PERSON, UNDER WATER ONLY. This cone has been third-person
+      // only since it was written, for the reason recorded at mkCone: from inside, the apex sits on
+      // the camera and an additive cone fills the screen. That reason is about the APEX, not the
+      // beam - so under water the cone is PUSHED FORWARD along the view axis (__headBoost.fpPush,
+      // 260u, set below) so the camera sits outside it and only the shaft ahead draws, with its
+      // opacity scaled back (.fpOp). Above water nothing changes: still third-person only.
+      const _fpBeam = _subB && _subDk > 0.15 && !xr && !game.thirdPerson && !(_HB && _HB.fpBeam === 0);
+      mP.visible = (!!game.thirdPerson && !xr) || _fpBeam;
+      mP.material.opacity = _fpBeam ? o * ((_HB && _HB.fpOp != null) ? _HB.fpOp : 0.55) : o;
       // S.head.position is fresh whenever hCur > 0.01 (set in the headlight
       // block above); aim with the camera forward exactly like the spot's
       // target, so cone and lit footprint stay glued.
       mP.position.copy(S.head.position);
       camera.getWorldDirection(S._d);
+      // (v44.48) first-person under water: start the shaft ahead of the eye, never on it.
+      if (_fpBeam) mP.position.copy(camera.position).addScaledVector(S._d, (_HB && _HB.fpPush != null) ? _HB.fpPush : 260);
       mP.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
       mP.scale.set(cR, cR, cLen);
     }

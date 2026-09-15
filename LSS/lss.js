@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.47';
+const LSS_BUILD = '44.48';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -35375,6 +35375,21 @@ function _shipLightSampleColor(mesh, light, defHex) {
   if (u && u.uBaseColor && u.uBaseColor.value) { light.color.copy(u.uBaseColor.value); done = true; }
   if (!done) light.color.setHex(defHex);
 }
+function _swSubDark() {
+  try {
+    if (!(typeof game !== 'undefined' && game && game._swSubmerged)) return 0;
+    const f = (typeof scene !== 'undefined' && scene) ? scene.fog : null;
+    const c = f && f.color;
+    if (!c) return 1;
+    const lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+    const H = (typeof window !== 'undefined' && window.__headBoost) ? window.__headBoost : null;
+    const d0 = (H && H.dark0 != null) ? H.dark0 : 0.10;
+    const d1 = (H && H.dark1 != null) ? H.dark1 : 0.45;
+    let k = 1 - (lum - d0) / Math.max(1e-6, d1 - d0);
+    if (k < 0) k = 0; else if (k > 1) k = 1;
+    return k * k * (3 - 2 * k);
+  } catch (_) { return 0; }
+}
 function _shipLightsFrame() {
   const S = _SHIPL;
   if (!S.engine) return;
@@ -35430,7 +35445,11 @@ function _shipLightsFrame() {
     if (_f && _f.color) { const _fc = _f.color, _lm = 0.2126 * _fc.r + 0.7152 * _fc.g + 0.0722 * _fc.b; if (_lm < 0.16) _hBoost *= 1 + 0.7 * (1 - _lm / 0.16); }
     const _K = (typeof window !== 'undefined' && window.__headBoost) ? window.__headBoost : null;
     if (_K && _K.dark != null) _hBoost = Math.min(_hBoost, 1 + _K.dark);
-    if (game._swSubmerged) { _hBoost *= (_K && _K.sub != null) ? _K.sub : 2.3; _hReach *= 1.5; }
+    if (game._swSubmerged) {
+      const _dk = _swSubDark();
+      _hBoost *= 2.3 + (((_K && _K.sub != null) ? _K.sub : 6.0) - 2.3) * _dk;
+      _hReach *= 1.5 + (((_K && _K.reach != null) ? _K.reach : 2.6) - 1.5) * _dk;
+    }
   } catch (_) {}
   hT *= _hBoost;
   S.hCur += (hT - S.hCur) * k;
@@ -35542,13 +35561,19 @@ function _shipLightsFrame() {
       if (lk < 0) lk = 0; else if (lk > 1) lk = 1;
       visK = dk * lk;
     }
+    if (game && game._swSubmerged) visK = Math.max(visK, 0.25 + 0.75 * _swSubDark());
     if (C && C.on != null && !C.on) visK = 0;
   }
-  const cAng = (C && C.ang != null) ? C.ang : ((S.head.angle || 0.5) * 0.62);
-  const cLen = (C && C.len != null) ? C.len : 1150;
+  let cAng = (C && C.ang != null) ? C.ang : ((S.head.angle || 0.5) * 0.62);
+  const _subB = !!(game && game._swSubmerged);
+  const _HB = (typeof window !== 'undefined' && window.__headBoost) ? window.__headBoost : null;
+  const _subDk = _subB ? _swSubDark() : 0;
+  if (C == null || C.ang == null) cAng *= 1 + (((_HB && _HB.coneAng != null) ? _HB.coneAng : 0.55) - 1) * _subDk;
+  const cLen = ((C && C.len != null) ? C.len : 1150) * (1 + (((_HB && _HB.coneLen != null) ? _HB.coneLen : 1.8) - 1) * _subDk);
   const cR = Math.tan(cAng) * cLen;
-  const opBase = (C && C.op != null) ? C.op : 0.16;
-  const opMax = (C && C.max != null) ? C.max : 0.12;
+  const _cOpK = 1 + (((_HB && _HB.coneOp != null) ? _HB.coneOp : 3.0) - 1) * _subDk;   // (v44.48) 1x in bright water, 3x in the dark
+  const opBase = ((C && C.op != null) ? C.op : 0.16) * _cOpK;
+  const opMax = ((C && C.max != null) ? C.max : 0.12) * _cOpK;
   const kc = Math.min(1, dt * 5);   // ~250 ms cone fade, slower than lights
   for (let i = 0; i < S.CONE_N; i++) {
     const m = S.cones[i];
@@ -35597,10 +35622,12 @@ function _shipLightsFrame() {
     if (o <= 0.004) { if (mP.visible) mP.visible = false; mP.userData._lit = false; }
     else {
       mP.userData._lit = true;
-      mP.visible = !!game.thirdPerson && !xr;
-      mP.material.opacity = o;
+      const _fpBeam = _subB && _subDk > 0.15 && !xr && !game.thirdPerson && !(_HB && _HB.fpBeam === 0);
+      mP.visible = (!!game.thirdPerson && !xr) || _fpBeam;
+      mP.material.opacity = _fpBeam ? o * ((_HB && _HB.fpOp != null) ? _HB.fpOp : 0.55) : o;
       mP.position.copy(S.head.position);
       camera.getWorldDirection(S._d);
+      if (_fpBeam) mP.position.copy(camera.position).addScaledVector(S._d, (_HB && _HB.fpPush != null) ? _HB.fpPush : 260);
       mP.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
       mP.scale.set(cR, cR, cLen);
     }
