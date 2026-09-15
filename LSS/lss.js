@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.66';
+const LSS_BUILD = '44.65';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -15143,7 +15143,6 @@ function renderPostFX() {
   renderer.render(scene, camera);   // (v39.79) the water is back inside this pass; it binds its own refraction source
   if (window.__f8seg) window.__f8seg('ads');
   if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
-  if (typeof _gooRender === 'function') _gooRender(postFX.rtScene);
 
   if (lowQuality) {
     postFX.compositeMat.uniforms.tScene.value = postFX.rtScene.texture;
@@ -15378,7 +15377,6 @@ function renderFrame() {
     renderer.setRenderTarget(null);
     renderer.render(scene, camera);
     if (typeof game !== 'undefined' && game && game._adsOvOn && typeof _adsOverlayRender === 'function') _adsOverlayRender();
-    if (typeof _gooRender === 'function') _gooRender(null);   // (v44.66) composites straight to the canvas here
     return;
   }
   renderPostFX();
@@ -46261,242 +46259,6 @@ _splashPts.visible = false;
 _splashPts.renderOrder = 3;
 scene.add(_splashPts);
 
-const _GOO = { rt: null, sc: null, pts: null, mat: null, qSc: null, qCam: null, qMat: null, w: 0, h: 0 };
-const _gooClearC = new THREE.Color();
-const _gooSizeV = new THREE.Vector2();
-function _gooKnobs() {
-  const G = window.__goo || (window.__goo = {});
-  if (G.mode === undefined)   G.mode = 'off';
-  if (G.thresh === undefined) G.thresh = 0.039;  // density at which a surface forms
-  if (G.soft === undefined)   G.soft = 0.012;    // edge softness; soft ~= 0.5 / goopling's contrast
-  if (G.blur === undefined)   G.blur = 3.2;      // blur radius, in density-buffer texels
-  if (G.gain === undefined)   G.gain = 3.0;      // aAlpha arrives pre-scaled by __splashA (0.20)
-  if (G.scale === undefined)  G.scale = 0.5;     // density RT resolution vs the composite target
-  if (G.op === undefined)     G.op = 1.0;
-  if (G.lit === undefined)    G.lit = 1.0;       // 0 = flat goopling white, 1 = wet-blob shading
-  if (G.bright === undefined) G.bright = 1.25;
-  if (G.tint === undefined)   G.tint = 0xdceaf4;
-  if (G.minPx === undefined)  G.minPx = 4.0;     // density-texel floor on a drop's splat
-  return G;
-}
-function _gooOn() {
-  let G; try { G = _gooKnobs(); } catch (_) { return false; }
-  if (G.mode !== 'spray') return false;
-  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return false; } catch (_) {}
-  try { if (typeof _shouldUseCineFXFrame === 'function' && _shouldUseCineFXFrame()) return false; } catch (_) {}
-  return true;
-}
-function _gooBuild(w, h) {
-  if (!_GOO.sc) {
-    _GOO.sc = new THREE.Scene();
-    _GOO.sc.background = null;
-    _GOO.mat = new THREE.ShaderMaterial({
-      uniforms: {
-        uMap: { value: _splDropTex },
-        uScale: { value: 300 }, uViewH: { value: 540 }, uMinPx: { value: 4.0 },
-        uStretch: _splMat.uniforms.uStretch,         // shared: unitless, and the goo must lean the
-        uStretchMax: _splMat.uniforms.uStretchMax,   // same way the drops do
-        uGain: { value: 3.0 },
-      },
-      vertexShader: [
-        'attribute float aSize;',
-        'attribute float aAlpha;',
-        'attribute vec3 aVel;',
-        'varying float vAlpha;',
-        'varying vec2 vDir;',
-        'varying float vStretch;',
-        'uniform float uScale; uniform float uViewH; uniform float uStretch; uniform float uStretchMax;',
-        'uniform float uMinPx;',
-        'void main() {',
-        '  vAlpha = aAlpha;',
-        '  vec4 mv = modelViewMatrix * vec4(position, 1.0);',
-        '  vec4 c0 = projectionMatrix * mv;',
-        '  vec4 c1 = projectionMatrix * (modelViewMatrix * vec4(position - aVel * uStretch, 1.0));',
-        '  vec2 n0 = c0.xy / max(c0.w, 1e-4);',
-        '  vec2 n1 = c1.xy / max(c1.w, 1e-4);',
-        '  float aspect = projectionMatrix[1][1] / max(projectionMatrix[0][0], 1e-6);',
-        '  vec2 dpx = vec2((n1.x - n0.x) * aspect, n1.y - n0.y) * 0.5 * uViewH;',
-        '  float px = aSize * uScale / max(1.0, -mv.z);',
-        '  float tailPx = length(dpx);',
-        '  vDir = (tailPx > 1e-3) ? (dpx / tailPx) : vec2(1.0, 0.0);',
-        '  vStretch = clamp(1.0 + tailPx / max(px, 1.0), 1.0, uStretchMax);',
-        '  gl_PointSize = max(uMinPx, min(190.0, px * vStretch));',
-        '  gl_Position = c0;',
-        '}',
-      ].join('\n'),
-      fragmentShader: [
-        'uniform sampler2D uMap;',
-        'uniform float uGain;',
-        'varying float vAlpha;',
-        'varying vec2 vDir;',
-        'varying float vStretch;',
-        'void main() {',
-        '  vec2 q = gl_PointCoord - 0.5; q.y = -q.y;',
-        '  float along = q.x * vDir.x + q.y * vDir.y;',
-        '  float across = -q.x * vDir.y + q.y * vDir.x;',
-        '  vec2 uv = vec2(along + 0.5, across * vStretch + 0.5);',
-        '  if (uv.y < 0.0 || uv.y > 1.0) discard;',
-        '  float tail = 1.0 - 0.8 * smoothstep(0.3, 1.0, uv.x);',
-        '  float d = texture2D(uMap, uv).a * vAlpha * uGain * tail;',
-        '  if (d < 0.002) discard;',
-        '  gl_FragColor = vec4(0.0, 0.0, 0.0, d);',
-        '}',
-      ].join('\n'),
-      transparent: true,
-      blending: THREE.CustomBlending,
-      blendEquation: THREE.AddEquation,
-      blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor,
-      blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneFactor,
-      depthWrite: false,
-      depthTest: false,
-    });
-    _GOO.pts = new THREE.Points(_splGeo, _GOO.mat);   // SHARED geometry - see the note above
-    _GOO.pts.frustumCulled = false;
-    _GOO.pts.matrixAutoUpdate = false;
-    _GOO.sc.add(_GOO.pts);
-
-    _GOO.qCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-    _GOO.qMat = new THREE.ShaderMaterial({
-      uniforms: {
-        tGoo: { value: null }, uTexel: { value: new THREE.Vector2(1 / 960, 1 / 540) },
-        uThresh: { value: 0.039 }, uSoft: { value: 0.012 }, uBlur: { value: 3.2 },
-        uOp: { value: 1.0 }, uLit: { value: 1.0 }, uBright: { value: 1.25 },
-        uTint: { value: new THREE.Color(0xdceaf4) },
-      },
-      vertexShader: [
-        'varying vec2 vUv;',
-        'void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-      ].join('\n'),
-      fragmentShader: [
-        'uniform sampler2D tGoo;',
-        'uniform vec2 uTexel;',
-        'uniform float uThresh; uniform float uSoft; uniform float uBlur;',
-        'uniform float uOp; uniform float uLit; uniform float uBright;',
-        'uniform vec3 uTint;',
-        'varying vec2 vUv;',
-        'float D(vec2 uv) { return texture2D(tGoo, uv).a; }',
-        'void main() {',
-        '  vec2 r = uTexel * uBlur;',
-        '  float xp = D(vUv + vec2(r.x, 0.0)), xm = D(vUv - vec2(r.x, 0.0));',
-        '  float yp = D(vUv + vec2(0.0, r.y)), ym = D(vUv - vec2(0.0, r.y));',
-        '  float d = D(vUv) * 4.0 + (xp + xm + yp + ym) * 2.0',
-        '          + D(vUv + r) + D(vUv - r) + D(vUv + vec2(r.x, -r.y)) + D(vUv + vec2(-r.x, r.y));',
-        '  d /= 16.0;',
-        '  float a = smoothstep(uThresh - uSoft, uThresh + uSoft, d);',
-        '  if (a <= 0.003) discard;',
-        '  vec3 n = normalize(vec3(-(xp - xm) * 6.0, -(yp - ym) * 6.0, 0.35));',
-        '  float diff = clamp(0.45 + 0.40 * n.y + 0.45 * n.z, 0.0, 1.6);',
-        '  float rim = pow(1.0 - clamp(n.z, 0.0, 1.0), 3.0);',
-        '  vec3 col = uTint * (0.85 + 0.35 * smoothstep(uThresh, uThresh + 0.6, d));',
-        '  col = mix(col, col * diff * uBright + vec3(rim * 0.30), uLit);',
-        '  gl_FragColor = vec4(col, a * uOp);',
-        '}',
-      ].join('\n'),
-      transparent: true,
-      blending: THREE.NormalBlending,
-      depthWrite: false,
-      depthTest: false,
-    });
-    _GOO.qSc = new THREE.Scene();
-    const qm = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), _GOO.qMat);
-    qm.frustumCulled = false;
-    _GOO.qSc.add(qm);
-  }
-  if (_GOO.rt && _GOO.w === w && _GOO.h === h) return;
-  if (_GOO.rt) { try { _GOO.rt.dispose(); } catch (_) {} }
-  _GOO.rt = new THREE.WebGLRenderTarget(w, h, {
-    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
-    format: THREE.RGBAFormat, depthBuffer: false, stencilBuffer: false,
-  });
-  _GOO.w = w; _GOO.h = h;
-  _GOO.qMat.uniforms.uTexel.value.set(1 / w, 1 / h);
-}
-function _gooRender(target) {
-  if (!_gooOn()) return;
-  let G;
-  try {
-    G = _gooKnobs();
-    if (typeof _splGeo === 'undefined' || !_splGeo) return;
-    const n = _splGeo.drawRange.count | 0;
-    if (n <= 0) return;   // no drops this frame - nothing to threshold, skip the whole pass
-    const sc = Math.max(0.25, Math.min(1, +G.scale || 0.5));
-    let tw, th;
-    if (target && target.width) { tw = target.width; th = target.height; }
-    else { renderer.getDrawingBufferSize(_gooSizeV); tw = _gooSizeV.x; th = _gooSizeV.y; }
-    const w = Math.max(16, Math.round(tw * sc)), h = Math.max(16, Math.round(th * sc));
-    _gooBuild(w, h);
-
-    const mu = _GOO.mat.uniforms;
-    mu.uScale.value = h * 0.5 * (camera ? camera.projectionMatrix.elements[5] : 2.4);
-    mu.uViewH.value = h;
-    mu.uGain.value = +G.gain || 3.0;
-    mu.uMinPx.value = (G.minPx != null) ? +G.minPx : 4.0;
-
-    const qu = _GOO.qMat.uniforms;
-    qu.tGoo.value = _GOO.rt.texture;
-    qu.uThresh.value = +G.thresh; qu.uSoft.value = Math.max(1e-3, +G.soft);
-    qu.uBlur.value = +G.blur; qu.uOp.value = +G.op;
-    qu.uLit.value = +G.lit; qu.uBright.value = +G.bright;
-    qu.uTint.value.set(G.tint);
-
-    renderer.getClearColor(_gooClearC);
-    const ca = renderer.getClearAlpha(), ac = renderer.autoClear;
-    renderer.setRenderTarget(_GOO.rt);
-    renderer.setClearColor(0x000000, 0);
-    renderer.clear(true, false, false);
-    renderer.autoClear = false;
-    renderer.render(_GOO.sc, camera);
-    renderer.setClearColor(_gooClearC, ca);
-
-    renderer.setRenderTarget(target || null);
-    renderer.render(_GOO.qSc, _GOO.qCam);
-    renderer.autoClear = ac;
-  } catch (e) {
-    if (!_GOO._warned) { _GOO._warned = true; console.warn('[goo] disabled after an error:', e); }
-    try { window.__goo.mode = 'off'; } catch (_) {}
-    try { renderer.autoClear = true; } catch (_) {}
-    try { renderer.setRenderTarget(target || null); } catch (_) {}
-  }
-}
-if (typeof window !== 'undefined') window.__gooStat = function () {
-  if (!_GOO.rt) return 'goo: not built yet - set window.__goo.mode = "spray" and fly a moment';
-  const w = _GOO.w, h = _GOO.h, buf = new Uint8Array(w * h * 4);
-  try { renderer.readRenderTargetPixels(_GOO.rt, 0, 0, w, h, buf); }
-  catch (e) { return 'goo: readback failed: ' + e; }
-  const G = _gooKnobs();
-  const A = (x, y) => buf[((y * w + x) << 2) + 3] / 255;
-  const raw = [], blurred = [];
-  let sat = 0;
-  const r = Math.max(1, Math.round(+G.blur || 1.7));
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const c = A(x, y);
-      if (c > 0) { raw.push(c); if (c >= 0.996) sat++; }
-      if (x < r || y < r || x >= w - r || y >= h - r) continue;
-      const d = (c * 4
-        + (A(x + r, y) + A(x - r, y) + A(x, y + r) + A(x, y - r)) * 2
-        + A(x + r, y + r) + A(x - r, y - r) + A(x + r, y - r) + A(x - r, y + r)) / 16;
-      if (d > 0) blurred.push(d);
-    }
-  }
-  if (!raw.length) return 'goo: density buffer empty (no drops in frame)';
-  raw.sort((a, b) => a - b); blurred.sort((a, b) => a - b);
-  const q = (arr, f) => arr.length ? +arr[Math.min(arr.length - 1, Math.floor(f * arr.length))].toFixed(3) : 0;
-  const fi = blurred.findIndex(x => x >= G.thresh);
-  const over = (fi < 0) ? 0 : (blurred.length - fi);
-  return {
-    rt: w + 'x' + h, texels: w * h,
-    thresh: G.thresh, soft: G.soft, blur: G.blur, gain: G.gain,
-    p50: q(blurred, 0.50), p75: q(blurred, 0.75), p90: q(blurred, 0.90),
-    p99: q(blurred, 0.99), max: q(blurred, 1.0),
-    aboveThresh: +(100 * over / Math.max(1, blurred.length)).toFixed(2) + '% of non-empty texels',
-    gooCoverage: +(100 * over / (w * h)).toFixed(3) + '% of screen',
-    raw: { p50: q(raw, 0.50), p90: q(raw, 0.90), p99: q(raw, 0.99), max: q(raw, 1.0),
-           coverage: +(100 * raw.length / (w * h)).toFixed(2) + '%',
-           saturated: +(100 * sat / raw.length).toFixed(2) + '%' },
-  };
-};
-
 let _shadersWarmed = false;
 function _warmupEffectShaders() {
   if (_shadersWarmed) return;
@@ -46657,7 +46419,7 @@ function updateParticles(dt) {
     _ptsAlphaAttr.needsUpdate = true;
   }
   _splGeo.setDrawRange(0, _ws);
-  _splashPts.visible = _ws > 0 && !_gooOn();
+  _splashPts.visible = _ws > 0;
   {
     const _so = (window.__water && window.__water.sprayOpacity != null) ? +window.__water.sprayOpacity : 100;
     if (isFinite(_so) && _splMat.uniforms.uOpacity.value !== _so) _splMat.uniforms.uOpacity.value = _so;
