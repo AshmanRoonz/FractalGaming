@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.40';
+const LSS_BUILD = '44.41';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -20931,9 +20931,12 @@ function _swBuildHubWaterDispGet(WL) {
   return mesh;
 }
 function _swBuildHubWater(T) {
-  if (game._hubWater) return game._hubWater;
   if (typeof THREE === 'undefined' || !scene) return null;
   const WL = (T && T.WL != null) ? T.WL : ((T && T.YFLOOR != null) ? T.YFLOOR : 0);
+  if (game._hubWater) {
+    if (game._hubWaterWL === WL) { game._hubWaterT = T; return game._hubWater; }
+    try { _swDisposeHubWater(); } catch (_) {}
+  }
   game._hubWaterT = T; game._hubWaterWL = WL;   
   const geo = new THREE.PlaneGeometry(48000, 48000, 32, 32);
   const _cavSmall = _cavernWaterCheap(T);
