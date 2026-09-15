@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.51';
+const LSS_BUILD = '44.53';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5500,14 +5500,8 @@ function _roomChip(name, ready) {
     + '<span style="width:7px;height:7px;border-radius:50%;background:' + (ready ? '#66cc66' : '#5a5f48') + ';display:inline-block;"></span>' + _roomBoxEsc(name) + '</span>';
 }
 let _landOn = null;
-let _landSecsOn = null;
+
 const _landHome = new Map();
-function _sideFitsSecs() {
-  try {
-    const t = (typeof window !== 'undefined' && window.__lobbySecsH != null) ? +window.__lobbySecsH : 660;
-    return window.innerHeight >= t;
-  } catch (_) { return true; }
-}
 function _landRemember(el) {
   if (!el || _landHome.has(el)) return;
   _landHome.set(el, { parent: el.parentNode, next: el.nextSibling });
@@ -5523,9 +5517,8 @@ function _lobbyLandscape(force) {
     if (!lob) return;
     if (typeof _lssOff === 'function' && _lssOff('land')) return;   // ?off=land bisects it out
     const want = (window.innerWidth > window.innerHeight * 1.15) && window.innerWidth >= 700;
-    const wantSecs = want && _sideFitsSecs();   // (v44.49)
-    if (!force && want === _landOn && wantSecs === _landSecsOn) return;
-    _landOn = want; _landSecsOn = wantSecs;
+    if (!force && want === _landOn) return;
+    _landOn = want;
     try { _unifyLobbyBox(); } catch (_) {}
     const right = document.getElementById('lobby-right');
     const howto = document.getElementById('btn-howto');
@@ -5559,20 +5552,15 @@ function _lobbyLandscape(force) {
         right.appendChild(side);
       }
       if (howto && soloRow && howto.parentNode !== soloRow) soloRow.insertBefore(howto, soloRow.firstChild);
-      if (roomStack && modeWrap && roomStack.parentNode !== modeWrap) modeWrap.appendChild(roomStack);
+      if (roomBox && modeWrap && roomBox.parentNode !== modeWrap) modeWrap.appendChild(roomBox);
       try {
         const _cr = document.getElementById('lobby-credit');
         if (_cr && _cr.parentNode !== lob) lob.appendChild(_cr);
       } catch (_) {}
       if (side) {
-        if (roomBox && roomBox.parentNode !== side) side.appendChild(roomBox);
         if (secGame && secGame.parentNode !== side) side.appendChild(secGame);
-        if (wantSecs) {   // (v44.49) see _sideFitsSecs - a short window keeps them on the left
-          if (secCommunity && secCommunity.parentNode !== side) side.appendChild(secCommunity);
-          if (secTools && secTools.parentNode !== side) side.appendChild(secTools);
-        } else {
-          _landRestore(secCommunity); _landRestore(secTools);
-        }
+        if (secCommunity && secCommunity.parentNode !== side) side.appendChild(secCommunity);
+        if (secTools && secTools.parentNode !== side) side.appendChild(secTools);
       }
       lob.classList.add('lss-land');
     } else {
