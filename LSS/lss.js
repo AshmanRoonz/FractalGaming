@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.62';
+const LSS_BUILD = '44.63';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -40548,7 +40548,11 @@ const _monArena = { key: null, radius: 0, center: new THREE.Vector3() };
 function _monsterArenaInfo() {
   const spheres = (game && game.levelSpheres) || [];
   const cyls = (game && game.levelCylinders) || [];
-  const key = spheres.length * 131071 + cyls.length;
+  const _s0 = spheres.length ? spheres[0] : null, _sN = spheres.length ? spheres[spheres.length - 1] : null;
+  const _c0 = cyls.length ? cyls[0] : null, _cN = cyls.length ? cyls[cyls.length - 1] : null;
+  const key = spheres.length * 131071 + cyls.length
+            + (_s0 ? _s0.cx * 3 + _s0.cz * 7 : 0) + (_sN ? _sN.cx * 11 + _sN.cz * 13 : 0)
+            + (_c0 ? _c0.ax * 17 + _c0.az * 19 : 0) + (_cN ? _cN.bx * 23 + _cN.bz * 29 : 0);
   if (_monArena.key === key && _monArena.radius > 0) return _monArena;
   let n = 0, cx = 0, cy = 0, cz = 0;
   for (const s of spheres) { cx += s.cx; cy += s.cy; cz += s.cz; n++; }
@@ -41102,8 +41106,9 @@ class OutskirtsMonster {
           }
           if (placed) {
             const sx = this.position.x, sy = this.position.y, sz = this.position.z;
+            this._tpFail = 0;   // (v44.63) it moved - clear the stranded counter
             this.position.set(lx, ly, lz);
-            this.velocity.multiplyScalar(0.25);   
+            this.velocity.multiplyScalar(0.25);
             this._tpCd = 9 + Math.random() * 7;
             this._tpFx(sx, sy, sz);
             if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
@@ -41114,10 +41119,19 @@ class OutskirtsMonster {
               } catch (_) {}
             }
           } else {
-            this._tpCd = 3;   
+            this._tpCd = 3;
+            this._tpFail = (this._tpFail || 0) + 1;
+            if (this._tpFail >= 8) {
+              this._tpFail = 0;
+              const sx2 = this.position.x, sy2 = this.position.y, sz2 = this.position.z;
+              this.position.set(lx, ly, lz);
+              this.velocity.multiplyScalar(0.25);
+              this._tpCd = 9 + Math.random() * 7;
+              this._tpFx(sx2, sy2, sz2);
+            }
           }
         } else {
-          this._tpCd = 4 + Math.random() * 4;   
+          this._tpCd = 4 + Math.random() * 4;
         }
       }
       this.zapTimer -= dt;
