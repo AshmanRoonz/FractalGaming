@@ -35009,7 +35009,7 @@ class Projectile {
 
   rocketSmokeK() {
     const F = (typeof window !== 'undefined' && window.__fx) || {};
-    const k = (F.rocketSmoke != null) ? +F.rocketSmoke : 0.1;
+    const k = (F.rocketSmoke != null) ? +F.rocketSmoke : 0.35;   // (v44.66b) 0.1 read as nothing
     return (this.tracking || this.salvoGuided || this.isPyroThermite || this.isTrackerMain) ? k : 1;
   }
 
@@ -37149,6 +37149,7 @@ if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPus
 
 function spawnExplosion(pos, size, fireRamp, vel, opts) {   // (v44.22) vel: the thing that exploded, for the water
   const _smK = (opts && typeof opts.smokeK === 'number') ? Math.max(0, opts.smokeK) : 1;
+  const _smBirth = Math.max(_smK, 0.55);
   size = size || 20;
   if (game._hubWater && pos) { try { _swBlast(pos.x, pos.y, pos.z, size, vel); } catch (_) {} }
   const _explFrameKey = (typeof game !== 'undefined' && game) ? game.time : 0;
@@ -37326,18 +37327,18 @@ function spawnExplosion(pos, size, fireRamp, vel, opts) {   // (v44.22) vel: the
     }
     const smokeMesh = new THREE.Mesh(_SMOKE_GEO, smokeMat);
     smokeMesh.position.copy(pos);
-    smokeMesh.scale.setScalar(size * 0.7 * _smK);
+    smokeMesh.scale.setScalar(size * 0.7 * _smBirth);
     smokeMesh.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
     smokeMesh.frustumCulled = true;
     smokeMesh.renderOrder = 1; 
     scene.add(smokeMesh);
     game.effects.push({
       mesh: smokeMesh, lifetime: 1.0, age: 0, type: 'shaderSmoke',
-      maxSize: size * 4 * _smK, baseScale: size * 0.7 * _smK,
+      maxSize: Math.max(size * 4 * _smK, size * 0.7 * _smBirth * 1.15), baseScale: size * 0.7 * _smBirth,
       rotVel: new THREE.Vector3((Math.random()-0.5)*2, (Math.random()-0.5)*2, (Math.random()-0.5)*2),
     });
     if (typeof spawnFXBurst === 'function' && size >= 12) {
-      spawnFXBurst('cloud', pos, size * 2.2 * _smK, 1.6, {
+      spawnFXBurst('cloud', pos, size * 2.2 * _smBirth, 1.6, {   // (v44.66b) the haze IS the shockwave read - gentler cut
         startScale: 0.4, endScale: 1.0,
       });
     }
