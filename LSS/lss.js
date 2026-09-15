@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.67';
+const LSS_BUILD = '44.68';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18082,8 +18082,12 @@ function _wgooKnobs() {
   if (G.reform === undefined)  G.reform = 1.6; // the lab defaults to 0 ("stays torn"); water beads back
   if (G.lift === undefined)    G.lift = 0.35;  // share of the push that throws water UP at the rim
   if (G.height === undefined)  G.height = 60;  // world units per unit of areal strain
-  if (G.maxUp === undefined)   G.maxUp = 55;
-  if (G.maxDown === undefined) G.maxDown = 70;
+  if (G.maxUp === undefined)   G.maxUp = 900;   // (v44.68) accel caps now, not height caps
+  if (G.maxDown === undefined) G.maxDown = 900;
+  if (G.grav === undefined)    G.grav = 520;    // (v44.68) gravity on a particle that has left the water
+  if (G.buoy === undefined)    G.buoy = 26;     // restoring stiffness under the surface
+  if (G.airDrag === undefined) G.airDrag = 0.995;
+  if (G.rise === undefined)    G.rise = 70;     // (v44.68) units above WL over which pressure fades out
   return G;
 }
 function _wgooDispose() {
@@ -18217,6 +18221,8 @@ function _wgooTick(dt) {
   const dragK = Math.pow(Math.max(0.01, Math.min(0.999, +G.drag || 0.92)), dt * 60);
   const reform = Math.max(0, +G.reform || 0);
   const push = +G.push || 0, swirl = +G.swirl || 0, lift = +G.lift || 0;
+  const gravK = +G.grav || 520, buoyK = +G.buoy || 26;
+  const airK = Math.pow(Math.max(0.5, Math.min(0.9999, +G.airDrag || 0.995)), dt * 60);
   const V = N * N;
   for (let k = 0; k < V; k++) {
     const k3 = k * 3;
@@ -18237,14 +18243,17 @@ function _wgooTick(dt) {
     const hx = home[k * 2], hz = home[k * 2 + 1];
     vx += (hx - x) * reform * dt;
     vz += (hz - z) * reform * dt;
-    vy += (WL - y) * reform * dt;
-    vx *= dragK; vy *= dragK; vz *= dragK;
+    if (y > WL) vy -= gravK * dt;                    // airborne: real gravity
+    else vy += (WL - y) * buoyK * dt;                // submerged: buoyant restore
+    vx *= dragK; vz *= dragK;
+    vy *= (y > WL) ? airK : dragK;                   // air barely damps; water does
     x += vx * dt; y += vy * dt; z += vz * dt;
     pos[k3] = x; pos[k3 + 1] = y; pos[k3 + 2] = z;
     vel[k3] = vx; vel[k3 + 1] = vy; vel[k3 + 2] = vz;
   }
 
-  const hK = +G.height || 60, up = +G.maxUp || 55, dn = +G.maxDown || 70;
+  const hK = +G.height || 60, up = +G.maxUp || 900, dn = +G.maxDown || 900;
+  const riseK = Math.max(4, +G.rise || 70);
   for (let j = 1; j < N - 1; j++) {
     for (let i = 1; i < N - 1; i++) {
       const k = j * N + i, k3 = k * 3;
@@ -18254,8 +18263,20 @@ function _wgooTick(dt) {
       const stretch = Math.max(0.15, du * dv);
       const fi = Math.min(i, N - 1 - i), fj = Math.min(j, N - 1 - j);
       const edge = Math.min(1, Math.min(fi, fj) / Math.max(1, N * 0.2));
-      const h = hK * (1 / stretch - 1) * edge * edge;
-      pos[k3 + 1] += (Math.max(-dn, Math.min(up, h)) + WL - pos[k3 + 1]) * Math.min(1, dt * 14);
+      {
+        const hAbove = pos[k3 + 1] - WL;
+        const pk = (hAbove <= 0) ? 1 : Math.max(0, 1 - hAbove / riseK);
+        if (pk > 0) {
+          const a = hK * (1 / stretch - 1) * edge * edge * pk;
+          vel[k3 + 1] += Math.max(-dn, Math.min(up, a)) * dt;
+        }
+      }
+      const vmax = cell / Math.max(dt, 1e-3) * 0.5;
+      const sp2 = vel[k3] * vel[k3] + vel[k3 + 1] * vel[k3 + 1] + vel[k3 + 2] * vel[k3 + 2];
+      if (sp2 > vmax * vmax) {
+        const sc = vmax / Math.sqrt(sp2);
+        vel[k3] *= sc; vel[k3 + 1] *= sc; vel[k3 + 2] *= sc;
+      }
     }
   }
   _WGOO.geo.attributes.position.needsUpdate = true;
