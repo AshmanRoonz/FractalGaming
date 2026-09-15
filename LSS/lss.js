@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.66';
+const LSS_BUILD = '44.67';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18067,6 +18067,200 @@ function _swBlast(x, y, z, size, vel) {
                       delay: 0.14 + 0.30 * Math.min(1, R / 400) });
   }
   return 1;
+}
+const _WGOO = { geo: null, mesh: null, mat: null, pos: null, vel: null, home: null,
+                N: 0, span: 0, cell: 0, cx: 0, cz: 0, i0: 0, j0: 0, built: false };
+function _wgooKnobs() {
+  const G = window.__wgoo || (window.__wgoo = {});
+  if (G.on === undefined)      G.on = 0;
+  if (G.n === undefined)       G.n = 64;       // vertices a side
+  if (G.span === undefined)    G.span = 1600;  // world units a side -> 25 u a vertex
+  if (G.push === undefined)    G.push = 1600;  // the lab's shipped value
+  if (G.swirl === undefined)   G.swirl = 900;  // the lab's shipped value
+  if (G.r === undefined)       G.r = 2.2;      // displacer radius, in hull beams
+  if (G.drag === undefined)    G.drag = 0.92;  // the lab's, but per SECOND here - see the note below
+  if (G.reform === undefined)  G.reform = 1.6; // the lab defaults to 0 ("stays torn"); water beads back
+  if (G.lift === undefined)    G.lift = 0.35;  // share of the push that throws water UP at the rim
+  if (G.height === undefined)  G.height = 60;  // world units per unit of areal strain
+  if (G.maxUp === undefined)   G.maxUp = 55;
+  if (G.maxDown === undefined) G.maxDown = 70;
+  return G;
+}
+function _wgooDispose() {
+  try { if (_WGOO.mesh && _WGOO.mesh.parent) scene.remove(_WGOO.mesh); } catch (_) {}
+  try { if (_WGOO.geo) _WGOO.geo.dispose(); } catch (_) {}
+  try { if (_WGOO.mat) _WGOO.mat.dispose(); } catch (_) {}
+  _WGOO.geo = _WGOO.mesh = _WGOO.mat = _WGOO.pos = _WGOO.vel = _WGOO.home = null;
+  _WGOO.built = false;
+}
+function _wgooBuild(N, span, WL, cx, cz) {
+  _wgooDispose();
+  const cell = span / (N - 1);
+  const V = N * N;
+  const pos = new Float32Array(V * 3);
+  const vel = new Float32Array(V * 3);
+  const home = new Float32Array(V * 2);
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const k = j * N + i, k3 = k * 3;
+      const hx = cx + (i - (N - 1) * 0.5) * cell;
+      const hz = cz + (j - (N - 1) * 0.5) * cell;
+      home[k * 2] = hx; home[k * 2 + 1] = hz;
+      pos[k3] = hx; pos[k3 + 1] = WL; pos[k3 + 2] = hz;
+    }
+  }
+  const idx = [];
+  for (let j = 0; j < N - 1; j++) {
+    for (let i = 0; i < N - 1; i++) {
+      const a = j * N + i, b = a + 1, c = a + N, d = c + 1;
+      idx.push(a, c, b, b, c, d);
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  geo.setIndex(idx);
+  geo.computeVertexNormals();
+  const wm = (typeof game !== 'undefined' && game && game._hubWaterDispMat) ? game._hubWaterDispMat : null;
+  const uni = {
+    uTint: { value: new THREE.Color(0x14384f) },   // (v44.67) the ocean is darker than this was
+    uReflBright: { value: 1.0 },
+    tDiffuse: (wm && wm.uniforms.tDiffuse) ? wm.uniforms.tDiffuse : { value: null },
+    uReflMatrix: (wm && wm.uniforms.uReflMatrix) ? wm.uniforms.uReflMatrix : { value: new THREE.Matrix4() },
+    uReflLive: (wm && wm.uniforms.uReflLive) ? wm.uniforms.uReflLive : { value: 0 },
+  };
+  const mat = new THREE.ShaderMaterial({
+    uniforms: uni,
+    vertexShader: [
+      'varying vec3 vN; varying vec3 vW; varying vec4 vRefl;',
+      'uniform mat4 uReflMatrix;',
+      'void main() {',
+      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
+      '  vW = wp.xyz;',
+      '  vN = normalize(normalMatrix * normal);',
+      '  vRefl = uReflMatrix * wp;',
+      '  gl_Position = projectionMatrix * viewMatrix * wp;',
+      '}',
+    ].join('\n'),
+    fragmentShader: [
+      'varying vec3 vN; varying vec3 vW; varying vec4 vRefl;',
+      'uniform vec3 uTint; uniform float uReflBright; uniform float uReflLive;',
+      'uniform sampler2D tDiffuse;',
+      'void main() {',
+      '  vec3 n = normalize(vN);',
+      '  vec3 v = normalize(cameraPosition - vW);',
+      '  float fres = pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 3.0);',
+      '  vec3 col = uTint;',
+      '  if (uReflLive > 0.5 && vRefl.w > 0.0) {',
+      '    vec2 ruv = vRefl.xy / vRefl.w;',
+      '    if (ruv.x > 0.0 && ruv.x < 1.0 && ruv.y > 0.0 && ruv.y < 1.0) {',
+      '      col = mix(uTint, texture2D(tDiffuse, ruv).rgb * uReflBright, clamp(fres, 0.0, 1.0));',
+      '    }',
+      '  }',
+      '  gl_FragColor = vec4(col, 1.0);',
+      '}',
+    ].join('\n'),
+    side: THREE.DoubleSide,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.frustumCulled = false;
+  mesh.matrixAutoUpdate = false;
+  mesh.renderOrder = 0;
+  scene.add(mesh);
+  Object.assign(_WGOO, { geo, mesh, mat, pos, vel, home, N, span, cell, cx, cz, built: true });
+}
+function _wgooRecentre(cx, cz, WL) {
+  const N = _WGOO.N, cell = _WGOO.cell;
+  const di = Math.round((cx - _WGOO.cx) / cell), dj = Math.round((cz - _WGOO.cz) / cell);
+  if (!di && !dj) return;
+  _WGOO.cx += di * cell; _WGOO.cz += dj * cell;
+  const pos = _WGOO.pos, vel = _WGOO.vel, home = _WGOO.home;
+  for (let j = 0; j < N; j++) {
+    for (let i = 0; i < N; i++) {
+      const k = j * N + i;
+      const hx = _WGOO.cx + (i - (N - 1) * 0.5) * cell;
+      const hz = _WGOO.cz + (j - (N - 1) * 0.5) * cell;
+      home[k * 2] = hx; home[k * 2 + 1] = hz;
+      const k3 = k * 3;
+      if (Math.abs(pos[k3] - hx) > cell * 6 || Math.abs(pos[k3 + 2] - hz) > cell * 6) {
+        pos[k3] = hx; pos[k3 + 1] = WL; pos[k3 + 2] = hz;
+        vel[k3] = vel[k3 + 1] = vel[k3 + 2] = 0;
+      }
+    }
+  }
+}
+const _wgooDisp = [];   // the displacers this frame: {x, z, r, vx, vz}
+function _wgooTick(dt) {
+  let G; try { G = _wgooKnobs(); } catch (_) { return; }
+  if (!G.on) { if (_WGOO.built) _wgooDispose(); return; }
+  const w = game && game._hubWater; if (!w || !player || !player.position) return;
+  const WL = w.userData.WL;
+  const N = Math.max(16, Math.min(128, G.n | 0));
+  const span = Math.max(200, +G.span || 1600);
+  const px = player.position.x, pz = player.position.z;
+  if (!_WGOO.built || _WGOO.N !== N || _WGOO.span !== span) _wgooBuild(N, span, WL, px, pz);
+  else _wgooRecentre(px, pz, WL);
+  if (!_WGOO.built) return;
+  const wet = (typeof _swWetAt === 'function') ? _swWetAt(px, pz) : true;
+  _WGOO.mesh.visible = wet;
+  if (!wet) return;
+
+  _wgooDisp.length = 0;
+  const fp = (typeof _swShipFootprint === 'function') ? _swShipFootprint() : null;
+  const above = player.position.y - WL;
+  if (fp && above < fp.DRAFT * 2.0 && above > -fp.DRAFT * 6) {
+    _wgooDisp.push({ x: px, z: pz, r: Math.max(40, (+G.r || 2.2) * fp.BEAM),
+                     vx: player.velocity ? player.velocity.x : 0,
+                     vz: player.velocity ? player.velocity.z : 0 });
+  }
+
+  const pos = _WGOO.pos, vel = _WGOO.vel, home = _WGOO.home, cell = _WGOO.cell;
+  const dragK = Math.pow(Math.max(0.01, Math.min(0.999, +G.drag || 0.92)), dt * 60);
+  const reform = Math.max(0, +G.reform || 0);
+  const push = +G.push || 0, swirl = +G.swirl || 0, lift = +G.lift || 0;
+  const V = N * N;
+  for (let k = 0; k < V; k++) {
+    const k3 = k * 3;
+    let x = pos[k3], y = pos[k3 + 1], z = pos[k3 + 2];
+    let vx = vel[k3], vy = vel[k3 + 1], vz = vel[k3 + 2];
+    for (let m = 0; m < _wgooDisp.length; m++) {
+      const D = _wgooDisp[m];
+      const dx = x - D.x, dz = z - D.z, d2 = dx * dx + dz * dz, R = D.r;
+      if (d2 >= R * R) continue;
+      const d = Math.sqrt(d2) || 1, nx = dx / d, nz = dz / d, fall = 1 - d / R;
+      vx += nx * push * fall * dt;
+      vz += nz * push * fall * dt;
+      const sgn = (D.vx * -nz + D.vz * nx) >= 0 ? 1 : -1;   // swirl follows the way it is travelling
+      vx += -nz * swirl * fall * dt * sgn;
+      vz += nx * swirl * fall * dt * sgn;
+      vy += lift * push * fall * fall * dt;                  // the rim is thrown up
+    }
+    const hx = home[k * 2], hz = home[k * 2 + 1];
+    vx += (hx - x) * reform * dt;
+    vz += (hz - z) * reform * dt;
+    vy += (WL - y) * reform * dt;
+    vx *= dragK; vy *= dragK; vz *= dragK;
+    x += vx * dt; y += vy * dt; z += vz * dt;
+    pos[k3] = x; pos[k3 + 1] = y; pos[k3 + 2] = z;
+    vel[k3] = vx; vel[k3 + 1] = vy; vel[k3 + 2] = vz;
+  }
+
+  const hK = +G.height || 60, up = +G.maxUp || 55, dn = +G.maxDown || 70;
+  for (let j = 1; j < N - 1; j++) {
+    for (let i = 1; i < N - 1; i++) {
+      const k = j * N + i, k3 = k * 3;
+      const e = (k + 1) * 3, wq = (k - 1) * 3, nq = (k + N) * 3, sq = (k - N) * 3;
+      const du = Math.hypot(pos[e] - pos[wq], pos[e + 2] - pos[wq + 2]) / (2 * cell);
+      const dv = Math.hypot(pos[nq] - pos[sq], pos[nq + 2] - pos[sq + 2]) / (2 * cell);
+      const stretch = Math.max(0.15, du * dv);
+      const fi = Math.min(i, N - 1 - i), fj = Math.min(j, N - 1 - j);
+      const edge = Math.min(1, Math.min(fi, fj) / Math.max(1, N * 0.2));
+      const h = hK * (1 / stretch - 1) * edge * edge;
+      pos[k3 + 1] += (Math.max(-dn, Math.min(up, h)) + WL - pos[k3 + 1]) * Math.min(1, dt * 14);
+    }
+  }
+  _WGOO.geo.attributes.position.needsUpdate = true;
+  _WGOO.geo.computeVertexNormals();
+  _WGOO.geo.computeBoundingSphere();
 }
 function _swBlastTick(dt, WL) {
   if (!_SW_BLASTS.length) return;
@@ -74391,6 +74585,10 @@ function gameLoop(timestamp) {
       try { _swUpdateHubWater(); } catch (_) {}   
       __pmark('hub:water');   // (v39.49) _swUpdateHubWater alone
       if (window.__f8seg) window.__f8seg('ripple');
+      try { _wgooTick(dt); } catch (e) {
+        if (!_WGOO._warned) { _WGOO._warned = true; try { console.warn('[wgoo] disabled after an error:', e); } catch (_) {} }
+        try { window.__wgoo.on = 0; } catch (_) {}
+      }
       try { _swRippleTick(dt); }
       catch (e) {
         try {
