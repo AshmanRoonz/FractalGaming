@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.46';
+const LSS_BUILD = '44.47';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -369,7 +369,7 @@ const LOADOUTS = {
     name: 'PUNCTURE', className: 'Frigate Sniper', chassis: 'FRIGATE',
     weapon: { name: 'Sodium Railgun', mode: 'hitscan', damage: 1000, fireRate: 1.5, clipSize: 6, range: 10000, splash: 50, projSpeed: 0, pellets: 1, spinup: 0 },
     abilities: [
-      { name: 'Cluster Missile', cooldown: 8, duration: 0.3, desc: 'Impact 800 + 500 DPS for 5s - tap fire to airburst', type: 'offensive', dmg: 3300 },
+      { name: 'Cluster Missile', cooldown: 8, duration: 0.3, desc: 'Impact 800 + 500 DPS for 5s - tap again to airburst', type: 'offensive', dmg: 3300 },
       { name: 'Afterburner', cooldown: 10, duration: 3, desc: 'Speed boost to 600', type: 'defensive' },
       { name: 'Stasis Trap', cooldown: 12, duration: 4, desc: 'Slow and root enemies', type: 'utility' },
     ],
@@ -47895,6 +47895,9 @@ function _canPrimeAbility(slot, ability) {
 function abilityInputPress(slot) {
   if (!player || !player.abilities || !player.abilities[slot]) return;
   const ability = player.abilities[slot];
+  if (player.loadoutKey === 'PUNCTURE' && ability.name === 'Cluster Missile' && player.shipState !== 'dead') {
+    try { if (_punctureDetonateClusters() > 0) return; } catch (_) {}
+  }
   if (!_isHoldPrimeAbility(player.loadoutKey, ability.name)) {
     activateAbility(slot);
     return;
@@ -51301,11 +51304,6 @@ function updateWeapon(dt) {
   }
 
   if (player.blasterSwitchTimer > 0) firing = false;
-  const _fireEdge = firing && !player._firePrev;
-  player._firePrev = firing;
-  if (_fireEdge && player.loadoutKey === 'PUNCTURE') {
-    try { if (_punctureDetonateClusters() > 0) return; } catch (_) {}
-  }
   if (firing && player.fireTimer <= 0) {
     const smartCoreActive = player.coreActive && player.loadoutKey === 'BLASTER';
     if (!smartCoreActive && player.clipAmmo <= 0) { startReload(); return; }
@@ -62740,7 +62738,7 @@ function _howtoRender(ov) {
      'pellets carry over half again as far. Double zoom tightens it further still and doubles the reach. Fire from the hip up close, ' +
      'zoom for anything past knife range.'],
     ['PUNCTURE &#183; AIRBURST', '#ffc46b',
-     'The Cluster Missile answers to the trigger after it leaves the rail &#8212; tap fire again mid-flight and it bursts where it is, ' +
+     'The Cluster Missile still answers to its own key after it leaves the rail &#8212; tap that key again mid-flight and it bursts where it is, ' +
      'dropping its sustained zone early. Use it for a target that is about to break line of sight, or to catch something under the arc.'],
     ['DASH &amp; DOOMED STATE', '#4fd1ff',
      'DASH is a burst of raw speed along your current vector (straight ahead from a standstill). Charges are per-hull — Frigate 3, Corvette 2, Dreadnought 1 — shown as the pips beside the ring; spent charges refill one at a time on a per-hull cooldown. Dash does NOT restore shields: shields never recharge on their own — only riding out a STASIS FIELD (you are locked in place while they refill) or EXECUTING a doomed enemy brings them back. Enter a stasis field with shields already full or partly charged and the leftover charge banks as an OVERSHIELD — a white-cyan band over the shield arc, up to half your max shield — spent before your shields when you next take damage, and slowly bleeding away outside a field. At 15% hull you are DOOMED: the health ring pulses red and your view warps. Any enemy that touches you now executes you instantly — and doomed enemies are yours to ram-execute the same way: instant kill, full shields, +20 core. Keep your distance until you reach a stasis field; riding one out patches your hull and clears the doomed state. Doomed bots self-destruct after 10 seconds — your ship holds on until something reaches you.'],

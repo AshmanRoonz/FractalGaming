@@ -6247,7 +6247,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.46';
+const LSS_BUILD = '44.47';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -6962,7 +6962,7 @@ const LOADOUTS = {
       // (v44.17) `desc` is shared with the ship-select card AND the XR picker (which wraps at a
       // fixed width), so the airburst note is one short clause, not a sentence. The long-form
       // explanation lives in the how-to's COMBAT MECHANICS cards instead.
-      { name: 'Cluster Missile', cooldown: 8, duration: 0.3, desc: 'Impact 800 + 500 DPS for 5s - tap fire to airburst', type: 'offensive', dmg: 3300 },
+      { name: 'Cluster Missile', cooldown: 8, duration: 0.3, desc: 'Impact 800 + 500 DPS for 5s - tap again to airburst', type: 'offensive', dmg: 3300 },
       { name: 'Afterburner', cooldown: 10, duration: 3, desc: 'Speed boost to 600', type: 'defensive' },
       { name: 'Stasis Trap', cooldown: 12, duration: 4, desc: 'Slow and root enemies', type: 'utility' },
     ],
@@ -74354,6 +74354,20 @@ function _canPrimeAbility(slot, ability) {
 function abilityInputPress(slot) {
   if (!player || !player.abilities || !player.abilities[slot]) return;
   const ability = player.abilities[slot];
+  // ⭐ (v44.47) THE SECOND TAP IS ON THE ABILITY KEY. Owner: "the puncture cluster missile detonate
+  // is the wrong button, it needs to be the same button that launches it". v44.17 put the airburst
+  // on the TRIGGER, which is a different control from the one that fires the missile (Cluster
+  // Missile is hold-prime: the ability key primes on press and launches on release), so the pilot
+  // had to change hands mid-flight to use it. Now the same key does both: press once to launch,
+  // press again while it is in the air to burst it where it is.
+  // ⚠ This runs BEFORE _canPrimeAbility and before any cooldown test, because detonating is not
+  // activating - the ability is always on cooldown while its missile is flying, which is exactly
+  // when the pilot reaches for the burst.
+  // ⚠ It returns WITHOUT priming, so the matching release finds no prime for this slot and
+  // early-returns (see abilityInputRelease) - a burst tap can never also launch.
+  if (player.loadoutKey === 'PUNCTURE' && ability.name === 'Cluster Missile' && player.shipState !== 'dead') {
+    try { if (_punctureDetonateClusters() > 0) return; } catch (_) {}
+  }
   if (!_isHoldPrimeAbility(player.loadoutKey, ability.name)) {
     activateAbility(slot);
     return;
@@ -79906,15 +79920,8 @@ function updateWeapon(dt) {
 
   // Block firing during Blaster mode switch transition
   if (player.blasterSwitchTimer > 0) firing = false;
-  // ⭐ (v44.17) THE SECOND TAP. A rising edge on the fire input, latched every tick so a frame
-  // spent dead / reloading / in warmup cannot leave it stale and fake a press on the next pull.
-  // It is read BEFORE the fireTimer gate below, because detonating is not firing: it must work
-  // during the weapon's cooldown, which is exactly when a player would reach for it.
-  const _fireEdge = firing && !player._firePrev;
-  player._firePrev = firing;
-  if (_fireEdge && player.loadoutKey === 'PUNCTURE') {
-    try { if (_punctureDetonateClusters() > 0) return; } catch (_) {}
-  }
+  // (v44.47) The airburst moved OFF the trigger and onto the ability key that launches the missile
+  // (see abilityInputPress). v44.17's rising-edge latch lived here; the trigger now only fires.
   if (firing && player.fireTimer <= 0) {
     // AI Assist: unlimited ammo (no consumption, no reload needed)
     const smartCoreActive = player.coreActive && player.loadoutKey === 'BLASTER';
@@ -96650,7 +96657,7 @@ function _howtoRender(ov) {
      'pellets carry over half again as far. Double zoom tightens it further still and doubles the reach. Fire from the hip up close, ' +
      'zoom for anything past knife range.'],
     ['PUNCTURE &#183; AIRBURST', '#ffc46b',
-     'The Cluster Missile answers to the trigger after it leaves the rail &#8212; tap fire again mid-flight and it bursts where it is, ' +
+     'The Cluster Missile still answers to its own key after it leaves the rail &#8212; tap that key again mid-flight and it bursts where it is, ' +
      'dropping its sustained zone early. Use it for a target that is about to break line of sight, or to catch something under the arc.'],
     ['DASH &amp; DOOMED STATE', '#4fd1ff',
      'DASH is a burst of raw speed along your current vector (straight ahead from a standstill). Charges are per-hull — Frigate 3, Corvette 2, Dreadnought 1 — shown as the pips beside the ring; spent charges refill one at a time on a per-hull cooldown. Dash does NOT restore shields: shields never recharge on their own — only riding out a STASIS FIELD (you are locked in place while they refill) or EXECUTING a doomed enemy brings them back. Enter a stasis field with shields already full or partly charged and the leftover charge banks as an OVERSHIELD — a white-cyan band over the shield arc, up to half your max shield — spent before your shields when you next take damage, and slowly bleeding away outside a field. At 15% hull you are DOOMED: the health ring pulses red and your view warps. Any enemy that touches you now executes you instantly — and doomed enemies are yours to ram-execute the same way: instant kill, full shields, +20 core. Keep your distance until you reach a stasis field; riding one out patches your hull and clears the doomed state. Doomed bots self-destruct after 10 seconds — your ship holds on until something reaches you.'],
