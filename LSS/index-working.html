@@ -6344,7 +6344,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.61';
+const LSS_BUILD = '44.62';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -39981,7 +39981,14 @@ function _lssAdAtlas() {
     _lssAdPaint();
     _adsTex = new THREE.CanvasTexture(_adsCanvas);
     if ('colorSpace' in _adsTex) _adsTex.colorSpace = THREE.SRGBColorSpace;
-    _adsTex.minFilter = THREE.LinearMipmapLinearFilter; _adsTex.magFilter = THREE.LinearFilter;
+    // ⚠ (v44.62) THE ATLAS IS PACKED WITH NO GUTTERS, AND IT MIPMAPS. 24 cells share one texture
+    // with no padding, so from mip 2 onward a cell's texels average with its NEIGHBOUR'S - at
+    // distance an ad smears the ad next to it into its own frame, which is its own kind of
+    // "hard to see". Full gutters would mean re-laying out the canvas; the cheap 90% is a half-texel
+    // inset per cell at the sample site (see uAdsInset below) plus capping the mip chain so the
+    // coarsest levels - the ones that average across whole cells - are never reached. LinearMipmap
+    // NEAREST keeps the cost identical and stops the cross-cell blend of trilinear's second tap.
+    _adsTex.minFilter = THREE.LinearMipmapNearestFilter; _adsTex.magFilter = THREE.LinearFilter;
     _adsTex.generateMipmaps = true; _adsTex.anisotropy = 4;
     _adsTex.wrapS = _adsTex.wrapT = THREE.ClampToEdgeWrapping;
     // the display fonts arrive from Google Fonts after boot; repaint once they are in (same canvas
@@ -39998,8 +40005,30 @@ function _hcHoloMat() {
     uniforms: { uHcT: _swU.uTime, uHcLodOn: HUB_CITY._uLodOn,
                 uAds: { value: _atlas }, uAdsOn: { value: _atlas ? 1.0 : 0.0 },   // (v44.36)
                 uAdsGrid: { value: new THREE.Vector3(_ADS_COLS, _ADS_ROWS, Math.min(_LSS_ADS.length, _ADS_COLS * _ADS_ROWS)) },
-                uAdsFrac: { value: (_A.frac != null) ? +_A.frac : 0.55 } },
-    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+                uAdsFrac: { value: (_A.frac != null) ? +_A.frac : 0.55 },
+                uAdsGround: { value: (_A.ground != null) ? +_A.ground : 0.95 } },   // (v44.62) the sign's panel opacity
+    // ⭐⭐ (v44.62) AN ADDITIVE SURFACE CANNOT DARKEN, SO AN AD ON A BRIGHT TOWER HAS NO GROUND.
+    // Owner, over a screenshot of a yellow/black pixel-pattern skyscraper: "some of the ads are hard
+    // to see on some buildings." The panel was AdditiveBlending, and the atlas cell's ground is pure
+    // #000 (_lssAdPaint fills the whole canvas black first) — which under additive contributes
+    // literally nothing. So the tower's own emissive window pattern showed through the ad at full
+    // strength everywhere the art is dark, i.e. the whole panel except the lettering.
+    // And the lettering itself is asymmetric: the tagline is #ffffff and lifts all three channels,
+    // while a brand wordmark is a saturated ONE-CHANNEL neon. On a sodium/amber tower the
+    // destination red is already at or above 1.0, and postFX.rtScene is RGBAFormat with NO type =
+    // UnsignedByteType, so it CLIPS IN HARDWARE before ACES ever sees it — a red add onto a clamped
+    // red channel is a no-op. That is why the white tagline survived and the wordmark vanished on
+    // exactly the towers the owner circled. Same mechanism this file already records for the fire
+    // ramp ("resolve to the SAME PIXEL") and for the v42.86 additive cloud band over a bright sky.
+    // Only an operation that SCALES THE DESTINATION can make contrast here, so the panel gets a
+    // premultiplied-alpha composite. CustomBlending rather than `premultipliedAlpha: true` on
+    // purpose: that flag is not just a cache-key bit, it injects `#define PREMULTIPLIED_ALPHA` into
+    // the prefix, i.e. a genuinely separate compile+link — and this material is pinned by the city
+    // warmup. OneFactor/OneMinusSrcAlphaFactor reaches the identical GL state with the program key
+    // provably unchanged. `transparent` stays true (flipping it IS a key change).
+    transparent: true, depthWrite: false,
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
     side: THREE.DoubleSide,
     vertexShader: `
       attribute vec2 aPrm;
@@ -40017,7 +40046,7 @@ function _hcHoloMat() {
     fragmentShader: `
       uniform float uHcT;
       uniform float uHcLodOn;
-      uniform sampler2D uAds; uniform float uAdsOn; uniform vec3 uAdsGrid; uniform float uAdsFrac;
+      uniform sampler2D uAds; uniform float uAdsOn; uniform vec3 uAdsGrid; uniform float uAdsFrac; uniform float uAdsGround;
       varying vec2 vUv2; varying vec3 vCol; varying float vRnd;
       float h21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
       void main() {
@@ -40048,20 +40077,43 @@ function _hcHoloMat() {
         float hLod = smoothstep(0.5, 1.2, max(fwidth(uv.x * cols), fwidth(uv.y * rows))) * uHcLodOn;
         float a = mix(0.10 + 0.9 * glyph * inner, 0.378, hLod) * mix(scan, 0.82, hLod) * edge * flick;
         vec3 outC = vCol * a * 1.6; float outA = a * 0.85;
+        // (v44.62) premultiplied COVERAGE. 0 = pure additive, which is what every hologram-glyph
+        // panel stays. Only the ad branch below raises it, and that is the whole readability fix.
+        float outO = 0.0;
         // (v44.36) about uAdsFrac of the panels are ads: a cell of the atlas, still scanned, edged
         // and flickered like the projection it replaces, and tinted a little by the panel's neon.
         if (uAdsOn > 0.5 && fract(rnd * 13.17) > (1.0 - uAdsFrac)) {
           float idx = floor(fract(rnd * 29.31) * uAdsGrid.z);
           float cx = mod(idx, uAdsGrid.x), cy = floor(idx / uAdsGrid.x);
           float ux = gl_FrontFacing ? uv.x : 1.0 - uv.x;   // the panels are DoubleSide and mostly seen from their back: mirror the cell per face so the text reads left-to-right from either side (owner: "the mcdonuts sign is backwards")
-          vec2 auv = vec2((cx + ux) / uAdsGrid.x, 1.0 - (cy + 1.0 - uv.y) / uAdsGrid.y);
+          // (v44.62) inset the cell by ~1.5% so a filtered tap near the edge cannot reach into the
+          // neighbouring ad - the atlas is packed with no gutters. See _lssAdAtlas.
+          vec2 auv = vec2((cx + 0.015 + ux * 0.97) / uAdsGrid.x,
+                          1.0 - (cy + 1.0 - (0.015 + uv.y * 0.97)) / uAdsGrid.y);
           vec3 ad = texture2D(uAds, auv).rgb;
           float lum = dot(ad, vec3(0.299, 0.587, 0.114));
           float k = mix(scan, 0.82, hLod) * edge * flick;
           outC = (ad * 1.45 + vCol * 0.10) * k;
           outA = (0.05 + lum) * k;
+          // (v44.62) THE GROUND THE AD NEVER HAD. The dark part of the cell now dims the tower
+          // behind it instead of letting it through, so the wordmark has something to read against.
+          // Released back toward pure additive with hLod: once the panel is far enough that its
+          // glyph cells go subpixel, a dark rectangle on the skyline would be its own artefact, and
+          // at that range the facade behind it is fogged flat anyway.
+          // WARNING: edge, NOT k. k carries the hologram's flick (a 25% strobe) and its 220 Hz scan,
+          // and multiplying the GROUND by those left the panel only ~55-90% opaque and pulsing - the
+          // tower still read through it, which is why the first cut was only "a bit better". A real
+          // sign's PANEL does not flicker; only what is projected on it does, and the ad's emissive
+          // term above still carries k in full. edge is kept so the panel still fades at its border
+          // instead of ending on a hard rectangle.
+          outO = edge * uAdsGround * (1.0 - hLod);
         }
-        gl_FragColor = vec4(outC, outA);
+        // ⚠ CLAMP BEFORE PREMULTIPLYING. outC exceeds 1.0 on ad text (ad is LINEAR — the atlas is
+        // tagged SRGBColorSpace, so the hardware decodes it — and 1.45x a warm brand is already over
+        // 1) and on bright glyphs (vCol * 1.6). The old additive path clamped at the fragment output
+        // before blending, so multiplying the RAW product here would be a silent ~19% brightening of
+        // exactly the pixels that matter. Clamping first reproduces the old look term for term.
+        gl_FragColor = vec4(clamp(outC, 0.0, 1.0) * outA, outO);
       }`,
   });
 }
@@ -40917,7 +40969,12 @@ function _hcAttachBanner(holder, i, sc) {
   const mat = new THREE.ShaderMaterial({
     uniforms: { uAds: { value: atlas }, uCell: { value: new THREE.Vector4(idx % _ADS_COLS, Math.floor(idx / _ADS_COLS), _ADS_COLS, _ADS_ROWS) },
                 uT: _swU.uTime, uAmp: { value: H * 0.05 }, uSeed: { value: (i * 0.37) % 6.28 } },
-    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+    // (v44.62) same defect as the holo panels, and always-on rather than situational: a towed banner
+    // hangs against the hub's bright sky, where an additive black ground is pure transparency. Same
+    // premultiplied composite, same reasoning - see _hcHoloMat.
+    transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: false,
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
     vertexShader: [
       'uniform float uT; uniform float uAmp; uniform float uSeed; varying vec2 vUv;',
       'void main(){ vUv = uv; vec3 p = position;',
@@ -40928,12 +40985,20 @@ function _hcAttachBanner(holder, i, sc) {
       'uniform sampler2D uAds; uniform vec4 uCell; uniform float uT; varying vec2 vUv;',
       'void main(){',
       '  float ux = gl_FrontFacing ? vUv.x : 1.0 - vUv.x;',   // readable from BOTH sides: the back face mirrors the cell (a real banner would read backwards from behind)
-      '  vec2 auv = vec2((uCell.x + ux) / uCell.z, 1.0 - (uCell.y + 1.0 - vUv.y) / uCell.w);',
+      '  vec2 auv = vec2((uCell.x + 0.015 + ux * 0.97) / uCell.z, 1.0 - (uCell.y + 1.0 - (0.015 + vUv.y * 0.97)) / uCell.w);',   // (v44.62) cell inset - see _lssAdAtlas
       '  vec3 ad = texture2D(uAds, auv).rgb;',
       '  float lum = dot(ad, vec3(0.299, 0.587, 0.114));',
       '  float scan = 0.85 + 0.15 * sin(vUv.y * 90.0 + uT * 7.0);',
       '  float edge = smoothstep(0.0, 0.04, vUv.x) * smoothstep(1.0, 0.96, vUv.x) * smoothstep(0.0, 0.08, vUv.y) * smoothstep(1.0, 0.92, vUv.y);',
-      '  gl_FragColor = vec4((ad * 1.4 + vec3(0.05, 0.12, 0.16)) * scan * edge, (0.10 + lum) * scan * edge);',
+      // (v44.62) a dark sheet with the ad glowing on it, instead of pure light added to the sky.
+      // ⚠ The emissive term keeps its OWN luminance-weighted alpha (identical to the old additive
+      // contribution); the sheet's coverage is separate. Multiplying the tint by the coverage
+      // instead would premultiply a near-black cell to ~0 and leave an opaque black card hanging in
+      // a pale sky - a hole punched in the world, not a banner.
+      '  float A = edge * 0.78;',   // (v44.62) the sheet does not strobe - see the uAdsGround note in _hcHoloMat
+      '  float aAdd = (0.10 + lum) * scan * edge;',
+      '  vec3 sheet = vec3(0.045, 0.065, 0.095) * A;',
+      '  gl_FragColor = vec4(clamp(ad * 1.4 + vec3(0.05, 0.12, 0.16), 0.0, 1.0) * aAdd + sheet, A);',
       '}'
     ].join('\n'),
   });

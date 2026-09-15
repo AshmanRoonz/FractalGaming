@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.61';
+const LSS_BUILD = '44.62';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23090,7 +23090,7 @@ function _lssAdAtlas() {
     _lssAdPaint();
     _adsTex = new THREE.CanvasTexture(_adsCanvas);
     if ('colorSpace' in _adsTex) _adsTex.colorSpace = THREE.SRGBColorSpace;
-    _adsTex.minFilter = THREE.LinearMipmapLinearFilter; _adsTex.magFilter = THREE.LinearFilter;
+    _adsTex.minFilter = THREE.LinearMipmapNearestFilter; _adsTex.magFilter = THREE.LinearFilter;
     _adsTex.generateMipmaps = true; _adsTex.anisotropy = 4;
     _adsTex.wrapS = _adsTex.wrapT = THREE.ClampToEdgeWrapping;
     try { if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { try { _lssAdPaint(); _adsTex.needsUpdate = true; } catch (_) {} }); } catch (_) {}
@@ -23105,8 +23105,11 @@ function _hcHoloMat() {
     uniforms: { uHcT: _swU.uTime, uHcLodOn: HUB_CITY._uLodOn,
                 uAds: { value: _atlas }, uAdsOn: { value: _atlas ? 1.0 : 0.0 },   // (v44.36)
                 uAdsGrid: { value: new THREE.Vector3(_ADS_COLS, _ADS_ROWS, Math.min(_LSS_ADS.length, _ADS_COLS * _ADS_ROWS)) },
-                uAdsFrac: { value: (_A.frac != null) ? +_A.frac : 0.55 } },
-    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+                uAdsFrac: { value: (_A.frac != null) ? +_A.frac : 0.55 },
+                uAdsGround: { value: (_A.ground != null) ? +_A.ground : 0.95 } },   // (v44.62) the sign's panel opacity
+    transparent: true, depthWrite: false,
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
     side: THREE.DoubleSide,
     vertexShader: `
       attribute vec2 aPrm;
@@ -23124,7 +23127,7 @@ function _hcHoloMat() {
     fragmentShader: `
       uniform float uHcT;
       uniform float uHcLodOn;
-      uniform sampler2D uAds; uniform float uAdsOn; uniform vec3 uAdsGrid; uniform float uAdsFrac;
+      uniform sampler2D uAds; uniform float uAdsOn; uniform vec3 uAdsGrid; uniform float uAdsFrac; uniform float uAdsGround;
       varying vec2 vUv2; varying vec3 vCol; varying float vRnd;
       float h21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
       void main() {
@@ -23155,20 +23158,43 @@ function _hcHoloMat() {
         float hLod = smoothstep(0.5, 1.2, max(fwidth(uv.x * cols), fwidth(uv.y * rows))) * uHcLodOn;
         float a = mix(0.10 + 0.9 * glyph * inner, 0.378, hLod) * mix(scan, 0.82, hLod) * edge * flick;
         vec3 outC = vCol * a * 1.6; float outA = a * 0.85;
+        // (v44.62) premultiplied COVERAGE. 0 = pure additive, which is what every hologram-glyph
+        // panel stays. Only the ad branch below raises it, and that is the whole readability fix.
+        float outO = 0.0;
         // (v44.36) about uAdsFrac of the panels are ads: a cell of the atlas, still scanned, edged
         // and flickered like the projection it replaces, and tinted a little by the panel's neon.
         if (uAdsOn > 0.5 && fract(rnd * 13.17) > (1.0 - uAdsFrac)) {
           float idx = floor(fract(rnd * 29.31) * uAdsGrid.z);
           float cx = mod(idx, uAdsGrid.x), cy = floor(idx / uAdsGrid.x);
           float ux = gl_FrontFacing ? uv.x : 1.0 - uv.x;   // the panels are DoubleSide and mostly seen from their back: mirror the cell per face so the text reads left-to-right from either side (owner: "the mcdonuts sign is backwards")
-          vec2 auv = vec2((cx + ux) / uAdsGrid.x, 1.0 - (cy + 1.0 - uv.y) / uAdsGrid.y);
+          // (v44.62) inset the cell by ~1.5% so a filtered tap near the edge cannot reach into the
+          // neighbouring ad - the atlas is packed with no gutters. See _lssAdAtlas.
+          vec2 auv = vec2((cx + 0.015 + ux * 0.97) / uAdsGrid.x,
+                          1.0 - (cy + 1.0 - (0.015 + uv.y * 0.97)) / uAdsGrid.y);
           vec3 ad = texture2D(uAds, auv).rgb;
           float lum = dot(ad, vec3(0.299, 0.587, 0.114));
           float k = mix(scan, 0.82, hLod) * edge * flick;
           outC = (ad * 1.45 + vCol * 0.10) * k;
           outA = (0.05 + lum) * k;
+          // (v44.62) THE GROUND THE AD NEVER HAD. The dark part of the cell now dims the tower
+          // behind it instead of letting it through, so the wordmark has something to read against.
+          // Released back toward pure additive with hLod: once the panel is far enough that its
+          // glyph cells go subpixel, a dark rectangle on the skyline would be its own artefact, and
+          // at that range the facade behind it is fogged flat anyway.
+          // WARNING: edge, NOT k. k carries the hologram's flick (a 25% strobe) and its 220 Hz scan,
+          // and multiplying the GROUND by those left the panel only ~55-90% opaque and pulsing - the
+          // tower still read through it, which is why the first cut was only "a bit better". A real
+          // sign's PANEL does not flicker; only what is projected on it does, and the ad's emissive
+          // term above still carries k in full. edge is kept so the panel still fades at its border
+          // instead of ending on a hard rectangle.
+          outO = edge * uAdsGround * (1.0 - hLod);
         }
-        gl_FragColor = vec4(outC, outA);
+        // ⚠ CLAMP BEFORE PREMULTIPLYING. outC exceeds 1.0 on ad text (ad is LINEAR — the atlas is
+        // tagged SRGBColorSpace, so the hardware decodes it — and 1.45x a warm brand is already over
+        // 1) and on bright glyphs (vCol * 1.6). The old additive path clamped at the fragment output
+        // before blending, so multiplying the RAW product here would be a silent ~19% brightening of
+        // exactly the pixels that matter. Clamping first reproduces the old look term for term.
+        gl_FragColor = vec4(clamp(outC, 0.0, 1.0) * outA, outO);
       }`,
   });
 }
@@ -23749,7 +23775,9 @@ function _hcAttachBanner(holder, i, sc) {
   const mat = new THREE.ShaderMaterial({
     uniforms: { uAds: { value: atlas }, uCell: { value: new THREE.Vector4(idx % _ADS_COLS, Math.floor(idx / _ADS_COLS), _ADS_COLS, _ADS_ROWS) },
                 uT: _swU.uTime, uAmp: { value: H * 0.05 }, uSeed: { value: (i * 0.37) % 6.28 } },
-    transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide, fog: false,
+    transparent: true, depthWrite: false, side: THREE.DoubleSide, fog: false,
+    blending: THREE.CustomBlending,
+    blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
     vertexShader: [
       'uniform float uT; uniform float uAmp; uniform float uSeed; varying vec2 vUv;',
       'void main(){ vUv = uv; vec3 p = position;',
@@ -23760,12 +23788,15 @@ function _hcAttachBanner(holder, i, sc) {
       'uniform sampler2D uAds; uniform vec4 uCell; uniform float uT; varying vec2 vUv;',
       'void main(){',
       '  float ux = gl_FrontFacing ? vUv.x : 1.0 - vUv.x;',   // readable from BOTH sides: the back face mirrors the cell (a real banner would read backwards from behind)
-      '  vec2 auv = vec2((uCell.x + ux) / uCell.z, 1.0 - (uCell.y + 1.0 - vUv.y) / uCell.w);',
+      '  vec2 auv = vec2((uCell.x + 0.015 + ux * 0.97) / uCell.z, 1.0 - (uCell.y + 1.0 - (0.015 + vUv.y * 0.97)) / uCell.w);',   // (v44.62) cell inset - see _lssAdAtlas
       '  vec3 ad = texture2D(uAds, auv).rgb;',
       '  float lum = dot(ad, vec3(0.299, 0.587, 0.114));',
       '  float scan = 0.85 + 0.15 * sin(vUv.y * 90.0 + uT * 7.0);',
       '  float edge = smoothstep(0.0, 0.04, vUv.x) * smoothstep(1.0, 0.96, vUv.x) * smoothstep(0.0, 0.08, vUv.y) * smoothstep(1.0, 0.92, vUv.y);',
-      '  gl_FragColor = vec4((ad * 1.4 + vec3(0.05, 0.12, 0.16)) * scan * edge, (0.10 + lum) * scan * edge);',
+      '  float A = edge * 0.78;',   // (v44.62) the sheet does not strobe - see the uAdsGround note in _hcHoloMat
+      '  float aAdd = (0.10 + lum) * scan * edge;',
+      '  vec3 sheet = vec3(0.045, 0.065, 0.095) * A;',
+      '  gl_FragColor = vec4(clamp(ad * 1.4 + vec3(0.05, 0.12, 0.16), 0.0, 1.0) * aAdd + sheet, A);',
       '}'
     ].join('\n'),
   });
