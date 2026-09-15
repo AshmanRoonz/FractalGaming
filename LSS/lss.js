@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.66';
+const LSS_BUILD = '44.65';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -17782,9 +17782,6 @@ const _SW_RIPPLE_FRAG = [
   'uniform float uSeedImpulse;',   // (v41.02) 0 = the v41.01 displacement pluck, 1 = a pure velocity impulse
   'uniform float uFoamDecay; uniform float uSeedFoamK;',   // (v41.53) the foam field - see the note below
   'uniform float uShoreDamp; uniform float uShoreDampD;',   // (v41.72) shallow-water absorption
-  'uniform vec2 uHullXZ; uniform float uHullR; uniform float uHullDepth; uniform float uHullGrip;',
-  'uniform vec2 uCloseDir; uniform float uCloseLen; uniform float uCloseW;',
-  'uniform float uHealK; uniform float uHealAmt;',
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -17816,30 +17813,6 @@ const _SW_RIPPLE_FRAG = [
   '  nh += (1.0 - uSeedImpulse) * sA;',
   '  h.y = h.x - uSeedImpulse * sA;',  
   '  h.x = nh;',                      
-  '  float _hcOld = hC;',
-  '  if (uHealAmt > 0.0) {',
-  '    vec2 _rel = wpos - uHullXZ;',
-  '    float _along = -dot(_rel, uCloseDir);',                                  // >0 = behind the hull
-  '    float _across = abs(dot(_rel, vec2(-uCloseDir.y, uCloseDir.x)));',
-  '    float _band = step(0.0, _along)',
-  '                * (1.0 - smoothstep(0.0, uCloseLen, max(_along, 0.0)))',
-  '                * (1.0 - smoothstep(uCloseW * 0.45, uCloseW, _across));',
-  '    if (_band > 0.0) {',
-  '      float _diff = _hcOld + uHealK * ((n + s + e + w) - 4.0 * _hcOld);',
-  '      float _k = _band * uHealAmt;',
-  '      h.x = mix(h.x, _diff, _k);',
-  '      h.y = mix(h.y, _hcOld, _k);',
-  '    }',
-  '  }',
-  '  if (uHullGrip > 0.0 && uHullR > 0.0) {',
-  '    float _hg = 1.0 - smoothstep(uHullR * 0.35, uHullR, length(wpos - uHullXZ));',
-  '    if (_hg > 0.0) {',
-  '      float _t = -uHullDepth * _hg;',
-  '      float _g = clamp(uHullGrip * _hg, 0.0, 1.0);',
-  '      h.x = mix(h.x, _t, _g);',
-  '      h.y = mix(h.y, _t, _g);',
-  '    }',
-  '  }',
   '  h.z = min(1.6, (h.z * uFoamDecay + fAcc * uSeedFoamK) * edg);',
   '  gl_FragColor = h;',
   '}'
@@ -17864,15 +17837,6 @@ function _swRippleInit() {
     v.material.uniforms.uShoreDampD = { value: 0.28 };
     v.material.uniforms.uFoamDecay = { value: 0.9930 };   // (v41.56) ~1.6 s half-life, was ~3 s
     v.material.uniforms.uSeedFoamK = { value: 0.10 };
-    v.material.uniforms.uHullXZ = { value: new THREE.Vector2(0, 0) };
-    v.material.uniforms.uHullR = { value: 0 };
-    v.material.uniforms.uHullDepth = { value: 0 };
-    v.material.uniforms.uHullGrip = { value: 0 };
-    v.material.uniforms.uCloseDir = { value: new THREE.Vector2(0, 1) };
-    v.material.uniforms.uCloseLen = { value: 0 };
-    v.material.uniforms.uCloseW = { value: 0 };
-    v.material.uniforms.uHealK = { value: 0.18 };
-    v.material.uniforms.uHealAmt = { value: 0 };
     v.material.uniforms.uSeeds = { value: seeds };
     v.material.uniforms.uSeedCount = { value: 0 };
     v.material.uniforms.uScroll = { value: new THREE.Vector2(0, 0) };   
@@ -19151,46 +19115,6 @@ function _swEntityWaterTick(dt, WL) {
   _SW_ENT.cursor = (_SW_ENT.cursor + 1) % n;
 }
 
-const _swHealDir = new THREE.Vector2(0, 1);
-function _swHealH(worldD) {
-  let dS = 180, gS = 180;
-  try {
-    const m = game._hubWaterDispMat;
-    if (m && m.uniforms && m.uniforms.uDispScale) { dS = m.uniforms.uDispScale.value; gS = m.uniforms.uGain.value; }
-  } catch (_) {}
-  const r = Math.min(0.92, Math.abs(worldD) / Math.max(dS, 0.01));
-  return (r / (1 - r)) * dS / Math.max(gS, 0.01);
-}
-function _swHealFeed(u, cx, cz) {
-  if (!u || !u.uHealAmt) return;
-  const H = window.__heal || (window.__heal = {});
-  if (H.on === undefined) H.on = 0;
-  if (!H.on || !player || !player.position || game._swSubmerged) {
-    u.uHealAmt.value = 0; u.uHullGrip.value = 0; u.uHullR.value = 0;
-    return;
-  }
-  const w = game && game._hubWater; if (!w) { u.uHealAmt.value = 0; u.uHullGrip.value = 0; return; }
-  const WL = w.userData.WL;
-  const fp = (typeof _swShipFootprint === 'function') ? _swShipFootprint() : null;
-  if (!fp) { u.uHealAmt.value = 0; u.uHullGrip.value = 0; return; }
-  const above = player.position.y - WL;
-  const wet = Math.max(0, Math.min(1, (fp.DRAFT - above) / (2 * fp.DRAFT)));
-  if (wet <= 0.01) { u.uHealAmt.value = 0; u.uHullGrip.value = 0; u.uHullR.value = 0; return; }
-  const vx = player.velocity ? player.velocity.x : 0, vz = player.velocity ? player.velocity.z : 0;
-  const sp = Math.hypot(vx, vz);
-  if (sp > 12) _swHealDir.set(vx / sp, vz / sp);   // keep the last heading when parked
-  const spK = Math.min(1, sp / 260);
-  u.uHullXZ.value.set(player.position.x - cx, player.position.z - cz);
-  u.uHullR.value = ((H.r != null) ? +H.r : 1.15) * fp.BEAM;
-  const _dW = Math.min(fp.DRAFT, ((H.depth != null) ? +H.depth : 0.55) * fp.DRAFT) * wet;   // world units
-  u.uHullDepth.value = _swHealH(_dW);                                                        // -> sim height
-  u.uHullGrip.value = Math.max(0, Math.min(1, ((H.grip != null) ? +H.grip : 0.75) * wet));
-  u.uCloseDir.value.copy(_swHealDir);
-  u.uCloseLen.value = ((H.len != null) ? +H.len : 3.2) * fp.BEAM * (0.35 + 0.65 * spK);
-  u.uCloseW.value = ((H.w != null) ? +H.w : 1.5) * fp.BEAM;
-  u.uHealK.value = Math.max(0, Math.min(0.24, (H.k != null) ? +H.k : 0.18));   // 0.25 = the stencil's stability limit
-  u.uHealAmt.value = Math.max(0, Math.min(1, ((H.amt != null) ? +H.amt : 0.85) * wet));
-}
 function _swRippleTick(dt) {
   const R = _swRipple; if (!R.gpu) return;
   if (game._xrBlurred) return;
@@ -19523,7 +19447,6 @@ function _swRippleTick(dt) {
     }
     u.uSeedCount.value = n;
     R.pending.length = 0;
-    _swHealFeed(u, _cx, _cz);
     const _xrPrevRT = (renderer && renderer.getRenderTarget) ? renderer.getRenderTarget() : null;
     R.gpu.compute();
     try { _swRippleUpsample(); }
