@@ -6344,7 +6344,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.65';
+const LSS_BUILD = '44.66';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -32251,8 +32251,28 @@ function _swBlastSprayV(vel, sp) {
   V.y = -Math.max(sp, Math.max(0, -vy) * lean);
   return V;
 }
+// ⭐ (v44.66) IS THERE ACTUALLY WATER HERE? Owner: "if i shoot at land that's low to the water, i
+// see water splashes off the land".
+// The whole water FX layer keys off the GLOBAL waterline and nothing else - `|y - WL|` for a blast,
+// a sign change across WL for a crossing - so it never asks whether the (x,z) it is splashing at has
+// any water under it. The ripple SEEDS get away with that: the sim's land mask kills them cell by
+// cell on the GPU (see the v33.20 note in _SW_RIPPLE_FRAG). The PARTICLES do not. They are built on
+// the CPU, positioned at WL, and nothing downstream re-checks - so a round into a hillside that
+// happens to sit near the waterline threw a crown of water droplets off dry rock.
+// `_stGroundYCarved` is the same height the ripple mask is baked from, so this asks exactly the
+// question the mask would answer, on the side of the fence where the particles are made.
+// ⚠ Fails OPEN: if the terrain is not resolvable it returns true, i.e. the pre-44.66 behaviour, so a
+// missing sandwichTerrain can never silently delete every splash in the game.
+function _swWetAt(x, z) {
+  const w = game && game._hubWater; if (!w) return false;
+  try {
+    const gy = _stGroundYCarved(x, z, (game && game.sandwichTerrain) || null);
+    return !(gy === gy) || gy < w.userData.WL;   // NaN => unknown => behave as before
+  } catch (_) { return true; }
+}
 function _swBlast(x, y, z, size, vel) {
   const w = game && game._hubWater; if (!w) return 0;
+  if (!_swWetAt(x, z)) return 0;   // (v44.66) dry land does not splash
   const W3 = window.__water || {};
   const bk = (W3.blast != null) ? +W3.blast : 1;
   if (!(bk > 0)) return 0;
@@ -33341,6 +33361,10 @@ function _swWaterCrossSplash(x0, y0, z0, x1, y1, z1, radius, amp, speed) {
   if ((y0 - WL) * (y1 - WL) > 0.0) return;   
   const dy = y1 - y0, t = (Math.abs(dy) < 1e-6) ? 0.5 : (WL - y0) / dy;
   const _hx = x0 + (x1 - x0) * t, _hz = z0 + (z1 - z0) * t;
+  // (v44.66) ...and the crossing has the same hole: a round punching through the WL PLANE over a
+  // hillside was spraying water off it. Tested at the crossing point, after the trail call above so
+  // the v41.37 fix is untouched.
+  if (!_swWetAt(_hx, _hz)) return;
   const W3 = window.__water || {};
   const _peak = (W3.impactPeak != null) ? W3.impactPeak : 0.135;   // (v41.03) recalibrated - see _swRippleSeed
   let _dx = x1 - x0, _dvy = y1 - y0, _dz = z1 - z0;

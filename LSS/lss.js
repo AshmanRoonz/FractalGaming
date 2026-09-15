@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.65';
+const LSS_BUILD = '44.66';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18025,8 +18025,16 @@ function _swBlastSprayV(vel, sp) {
   V.y = -Math.max(sp, Math.max(0, -vy) * lean);
   return V;
 }
+function _swWetAt(x, z) {
+  const w = game && game._hubWater; if (!w) return false;
+  try {
+    const gy = _stGroundYCarved(x, z, (game && game.sandwichTerrain) || null);
+    return !(gy === gy) || gy < w.userData.WL;   // NaN => unknown => behave as before
+  } catch (_) { return true; }
+}
 function _swBlast(x, y, z, size, vel) {
   const w = game && game._hubWater; if (!w) return 0;
+  if (!_swWetAt(x, z)) return 0;   // (v44.66) dry land does not splash
   const W3 = window.__water || {};
   const bk = (W3.blast != null) ? +W3.blast : 1;
   if (!(bk > 0)) return 0;
@@ -18753,6 +18761,7 @@ function _swWaterCrossSplash(x0, y0, z0, x1, y1, z1, radius, amp, speed) {
   if ((y0 - WL) * (y1 - WL) > 0.0) return;   
   const dy = y1 - y0, t = (Math.abs(dy) < 1e-6) ? 0.5 : (WL - y0) / dy;
   const _hx = x0 + (x1 - x0) * t, _hz = z0 + (z1 - z0) * t;
+  if (!_swWetAt(_hx, _hz)) return;
   const W3 = window.__water || {};
   const _peak = (W3.impactPeak != null) ? W3.impactPeak : 0.135;   // (v41.03) recalibrated - see _swRippleSeed
   let _dx = x1 - x0, _dvy = y1 - y0, _dz = z1 - z0;
