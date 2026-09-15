@@ -6247,7 +6247,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.43';
+const LSS_BUILD = '44.45';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -28963,6 +28963,8 @@ const _swU = { uTime:{value:0}, uYMid:{value:0}, uAMP:{value:1}, uSnow:{value:0.
                // (v34.66) zero-cost visual pass: strata band strength (0.14 = the
                // pre-pass ground-rock constant, kept for the hub) + fresnel rim.
                uStrata:{value:0.14}, uRim:{value:0.0},
+               uRelief:{value:0.0},   // (v44.45) high-end terrain relief, 0 = exactly the shipped look
+               uSunDir:{value:new THREE.Vector3(0.29,0.86,0.43)},   // (v44.45) world sun, kept in step with _WX.sunDir
                // (v36.99) 1 = bent-sandwich mode: height bands read the
                // pre-bend height attribute (aFlatY) instead of world y.
                uBendFlat:{value:0},
@@ -29063,6 +29065,15 @@ function _swSyncFX() {
   // pre-pass constants, which the hub keeps).
   { const _lk2 = _SW_BIOME_LOOK[T.biome];
     _swU.uStrata.value = (_lk2 && _lk2.strata != null) ? _lk2.strata : 0.14;
+    // (v44.45) terrain relief: high-end desktop only, and a live knob (window.__relief = 0..1.5).
+    try {
+      const _rk = (typeof window !== 'undefined') ? window.__relief : undefined;
+      _swU.uRelief.value = (typeof _rk === 'number') ? _rk
+        : ((typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) &&
+           !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
+           !(typeof isStandaloneQuest === 'function' && isStandaloneQuest()) &&
+           !(typeof isXRPresenting === 'function' && isXRPresenting())) ? 1.0 : 0.0;
+    } catch (_) {}
     _swU.uRim.value = (_lk2 && _lk2.rim != null) ? _lk2.rim : 0.0; }
   const _P = _swPal(T);
   _swU.uColGrass.value.set(_P.tGrass !== undefined ? _P.tGrass : 0x5fae4e);
@@ -29095,7 +29106,7 @@ function _swSyncFX() {
 // actual flying (EndlessMode._world drives it off run.dist). The shader's
 // biome gates were softened (>0.02 + strength multipliers) so a lerped
 // uGold/uLava fades in instead of popping at 0.5.
-const _SW_ATMO_NUMS = ['uLava','uRocky','uGold','uCrystal','uMossy','uGlitch','uStrata','uRim',
+const _SW_ATMO_NUMS = ['uLava','uRocky','uGold','uCrystal','uMossy','uGlitch','uStrata','uRim','uRelief',
                        'uAerial','uAerialStart','uAerialFar','uSnowRough','uLavaGlow'];
 const _SW_ATMO_COLS = ['uColGrass','uColRock','uColSnow','uColMoss','uAerialColor'];
 function _swAtmoSnap(out) {
@@ -29266,7 +29277,7 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // attribute (reads 0) and uBendFlat stays 0 — byte-identical look.
       sh.vertexShader='attribute float aFlatY;\nuniform float uBendFlat;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=mix(position.y, aFlatY, uBendFlat); vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
-    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt;\n'
+    sh.fragmentShader='varying float vWY; varying vec3 vWPos; varying vec3 vSN;\nuniform float uTime,uYMid,uAMP,uSnow,uSnowVary,uSnowSlope,uLava,uSnowRough,uLavaGlow,uSlopeGrass,uSlopeRock,uCeil,uRocky,uGlitch,uGold,uCrystal,uMossy,uSmooth,uDetail,uAerial,uAerialStart,uAerialFar,uAO,uSat,uStrata,uRim,uPatchScale,uWaterY,uWaterOn,uRelief;\nuniform vec3 uColGrass,uColRock,uColSnow,uColMoss,uCam,uAerialColor,uPatchMix,uColDirt,uSunDir;\n'
       +'float _thsh(vec2 p){return fract(sin(p.x*127.1+p.y*311.7)*43758.5453);}\n'
       +'float _tvn(vec2 p){vec2 i=floor(p),f=fract(p);vec2 u=f*f*(3.0-2.0*f);float a=_thsh(i),b=_thsh(i+vec2(1.0,0.0)),c=_thsh(i+vec2(0.0,1.0)),d=_thsh(i+vec2(1.0,1.0));return mix(mix(a,b,u.x),mix(c,d,u.x),u.y)*2.0-1.0;}\n'
       +'float _tpatch(vec2 p){float n=_tvn(p*0.0016+vec2(5.1,-2.3))*0.62+_tvn(p*0.0041+vec2(11.0,7.0))*0.38;return clamp((n+1.0)*0.5,0.0,1.0);}\n'
@@ -29284,13 +29295,13 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // always sit next to bare earth). Rubble is slope-biased: it collects on
       // the steeper grass near rock, the way scree actually does.
       +' if(uMossy>0.5){\n float _sA=_tvn(vWPos.xz*0.0030*uPatchScale+vec2(21.0,9.0));\n float _sB=_tvn(vWPos.xz*0.0105*uPatchScale+vec2(3.0,17.0));\n float _sC=_tvn(vWPos.xz*0.0330*uPatchScale+vec2(9.0,2.0));\n float _sN=_sA*0.55+_sB*0.32+_sC*0.13;\n float _rN=_tvn(vWPos.xz*0.0062*uPatchScale+vec2(41.0,-13.0))*0.62+_tvn(vWPos.xz*0.0210*uPatchScale+vec2(7.0,29.0))*0.38;\n float _spk=clamp(0.5+0.5*_tvn(vWPos.xz*1.15),0.0,1.0);\n float _grit=clamp(0.5+0.5*_tvn(vWPos.xz*0.42+vec2(5.0,23.0)),0.0,1.0);\n float _dirtM=smoothstep(0.16,0.46,_sN)*uPatchMix.x;\n float _ovgM=smoothstep(0.14,0.44,-_sN)*uPatchMix.z;\n float _rubM=smoothstep(0.20,0.52,_rN)*uPatchMix.y*(0.45+0.55*(1.0-fl));\n vec3 _dirtC=uColDirt*(1.55+1.45*_grit);\n vec3 _rubC=uColRock*(0.70+1.05*_spk);\n vec3 _ovgC=mix(uColMoss,uColGrass,0.30)*(0.46+0.32*mott);\n grass=mix(grass,_ovgC,clamp(_ovgM,0.0,0.80));\n grass=mix(grass,_dirtC,clamp(_dirtM,0.0,0.90));\n grass=mix(grass,_rubC,clamp(_rubM,0.0,0.78));\n terr=mix(rock,grass,fl);\n }\n'
-      +' float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_snowWander(vWPos.xz)*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
+      +' float th=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _sl=uSnow+_snowWander(vWPos.xz)*uSnowVary+(1.0-fl)*uSnowSlope;\n float snow=smoothstep(_sl,_sl+0.10+0.07*(1.0-fl),th);\n terr=mix(terr,uColSnow,snow*max(fl,0.30));\n if(uAO>0.001){ float _aoCav=mix(0.62,1.0,smoothstep(uSlopeRock,1.0,clamp(fn.y,0.0,1.0))); float _aoDet=mix(0.74,1.06,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0)); float _aoVal=mix(0.80,1.0,th); float _aoBlob=mix(0.86,1.04,_tpatch(vWPos.xz*0.6+vec2(17.0,5.0))); float _aoRaw=clamp(_aoCav*_aoDet*_aoVal*_aoBlob,0.45,1.08); float _aoFade=1.0-smoothstep(900.0,2200.0,length(uCam.xz-vWPos.xz)); float _ao=mix(1.0,_aoRaw,uAO*_aoFade*(1.0-snow*0.6)); terr*=_ao; }\n if(uRelief>0.001 && uCeil<0.5){ float _rD=length(uCam.xz-vWPos.xz); float _rW=(1.0-smoothstep(700.0,2400.0,_rD))*uRelief; if(_rW>0.001){ float _e2=9.0; float _c0=_detN(vWPos.xz); float _cx=_detN(vWPos.xz+vec2(_e2,0.0))+_detN(vWPos.xz-vec2(_e2,0.0)); float _cz=_detN(vWPos.xz+vec2(0.0,_e2))+_detN(vWPos.xz-vec2(0.0,_e2)); float _curv=(_cx+_cz)*0.25-_c0; float _cav=clamp(-_curv*9.0,0.0,1.0); float _ridge=clamp(_curv*7.0,0.0,1.0); vec2 _sg=vec2(_detN(vWPos.xz+vec2(_e2,0.0))-_c0,_detN(vWPos.xz+vec2(0.0,_e2))-_c0); float _sunFace=clamp(0.5-dot(normalize(_sg+vec2(1e-5)),normalize(uSunDir.xz+vec2(1e-5)))*0.5,0.0,1.0); float _shade=1.0-(_cav*(0.30+0.22*_sunFace))*_rW+_ridge*0.10*_rW; terr*=clamp(_shade,0.45,1.15); } }\n if(uAerial>0.001){ float _camD=length(uCam.xz-vWPos.xz); float _ap=smoothstep(uAerialStart,uAerialFar,_camD)*uAerial; _ap*=(1.0-clamp((vWY-(uYMid-uAMP*0.2))/(uAMP*1.4),0.0,1.0)*0.55); terr=mix(terr,uAerialColor,clamp(_ap,0.0,0.85)); }\n  if(uWaterOn>0.001 && vWPos.y<uWaterY){ float _cdp=uWaterY-vWPos.y; float _cf=(1.0-smoothstep(80.0,1100.0,_cdp))*smoothstep(0.0,30.0,_cdp)*uWaterOn; vec2 _cq=vWPos.xz*0.021; float _c1=sin(_cq.x*2.3+_cq.y*1.1+uTime*1.35)*sin(_cq.y*1.9-_cq.x*1.3-uTime*1.05); float _c2=sin((_cq.x+_cq.y)*1.45+uTime*0.85)*sin((_cq.x-_cq.y*0.7)*1.7-uTime*0.65); float _cc=pow(clamp(0.5+0.5*(_c1*0.6+_c2*0.4),0.0,1.0),3.5); terr*=1.0+_cf*_cc*1.15*clamp(fn.y,0.0,1.0); }\n diffuseColor.rgb=terr;\n }\n if(uCeil>0.5){ float _cm1=_tvn(vWPos.xz*0.045+vec2(vWPos.y*0.03));\n float _cm2=_tvn(vWPos.xz*0.12+vec2(13.0,7.0));\n float _cmott=clamp(0.5+0.5*(_cm1*0.6+_cm2*0.4),0.0,1.0);\n float _cstr=0.5+0.5*sin(vWPos.y*0.05+_tvn(vWPos.xz*0.025)*3.0);\n diffuseColor.rgb*=(0.80+0.36*_cmott)*(1.0-uStrata*0.57+uStrata*_cstr);\n if(uAO>0.001){ vec3 _cn2=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n float _cao=mix(0.68,1.0,smoothstep(0.0,0.85,abs(_cn2.y)));\n float _caoD=mix(0.80,1.05,clamp(0.5+0.5*_detN(vWPos.xz),0.0,1.0));\n diffuseColor.rgb*=mix(1.0,clamp(_cao*_caoD,0.5,1.05),uAO); }\n if(uAerial>0.001){ float _cad=length(uCam.xz-vWPos.xz);\n float _cap=smoothstep(uAerialStart,uAerialFar,_cad)*uAerial;\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor,clamp(_cap,0.0,0.85)); }\n }\n if(uRim>0.001){ vec3 _rn=normalize(cross(dFdx(vWPos),dFdy(vWPos)));\n vec3 _rv=normalize(uCam-vWPos);\n float _rf=pow(1.0-abs(dot(_rn,_rv)),3.0);\n diffuseColor.rgb=mix(diffuseColor.rgb,uAerialColor*1.25,_rf*uRim); }\n if(uGlitch>0.5 && uCeil>0.5){ float zone=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); vec2 gid=floor(vWPos.xz/240.0); float r=_thsh(gid+floor(uTime*0.8)); float r2=_thsh(gid*1.93+floor(uTime*1.5)); if(zone>0.62 && r>0.45) discard; if(zone>0.5){ if(r2>0.55) diffuseColor.rgb=diffuseColor.rgb.gbr; diffuseColor.rgb*=mix(0.75,1.25,r2); } }');
     sh.fragmentShader=sh.fragmentShader.replace('#include <roughnessmap_fragment>',
       '#include <roughnessmap_fragment>\n float _tr=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float _rsl=uSnow+_snowWander(vWPos.xz)*uSnowVary;\n float _snow=smoothstep(_rsl,_rsl+0.12,_tr);\n roughnessFactor=mix(roughnessFactor,uSnowRough,_snow);');
     // lava: glowing icing on the peaks + drips running down (volcanic biome, ground only)
     sh.fragmentShader=sh.fragmentShader.replace('#include <emissivemap_fragment>',
       '#include <emissivemap_fragment>\n if(uLava>0.02 && uCeil<0.5){\n float _h=clamp((vWY-(uYMid-uAMP*0.5))/(uAMP*1.15),0.0,1.0);\n float capStart=0.66;\n float cap=smoothstep(capStart,capStart+0.12,_h);\n float c1=_tvn(vWPos.xz*0.020);\n float c2=_tvn(vWPos.xz*0.055+vec2(13.0,5.0));\n float colId=clamp(0.5+0.5*(c1*0.6+c2*0.4),0.0,1.0);\n float dripCols=smoothstep(0.50,0.74,colId);\n float dripLen=0.14+0.32*colId;\n float dripBot=capStart-dripLen;\n float wob=0.03*_tvn(vWPos.xz*0.12);\n float band=smoothstep(dripBot+wob,dripBot+wob+0.05,_h)*(1.0-smoothstep(capStart-0.02,capStart+0.04,_h));\n float tip=smoothstep(dripBot+wob,dripBot+wob+0.025,_h)*(1.0-smoothstep(dripBot+wob+0.025,dripBot+wob+0.09,_h));\n float drips=(band+tip*0.8)*dripCols;\n float pool=(1.0-smoothstep(0.04,0.17,_h)); float poolN=_tvn(vWPos.xz*0.012)*0.6+_tvn(vWPos.xz*0.03+vec2(9.0,4.0))*0.4; float poolMask=smoothstep(0.12,0.5,0.5+0.5*poolN); float poolGlow=pool*poolMask;\n float _pulse=0.72+0.28*sin(uTime*1.6+vWY*0.02);\n float glow=clamp(cap+drips+poolGlow*1.15,0.0,1.7)*_pulse;\n vec3 lavaCol=mix(vec3(1.2,0.08,0.0),vec3(1.7,0.5,0.08),smoothstep(0.0,0.08,_h)); float emInt=glow*mix(0.78,1.0,smoothstep(0.0,0.08,_h)); totalEmissiveRadiance+=lavaCol*emInt*uLavaGlow*clamp(uLava,0.0,1.0);\n }\n if(uRocky>0.02 && uCeil<0.5){ vec3 ffn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos))); float ffl=clamp((abs(ffn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0); float fA=_tvn(vWPos.xz*0.02)*0.55+_tvn(vWPos.xz*0.05+vec2(19.0,7.0))*0.30+_tvn(vWPos.xz*0.11+vec2(3.0,11.0))*0.15; float fung=smoothstep(0.60,0.78,0.5+0.5*fA); float spore=smoothstep(0.82,0.97,0.5+0.5*_tvn(vWPos.xz*0.6)); float breathe=0.6+0.4*sin(uTime*0.7+fA*6.0+vWPos.x*0.012); vec3 glowCol=mix(vec3(0.16,0.95,0.55),vec3(0.20,0.70,1.0),0.5+0.5*_tvn(vWPos.xz*0.03)); float fglow=fung*(0.18+spore*1.2)*breathe*(1.0-ffl); totalEmissiveRadiance+=glowCol*fglow*clamp(uRocky,0.0,1.0); }if(uGold>0.02){vec3 gfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float gfl=clamp((abs(gfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float gA=_tvn(vWPos.xz*0.016+vec2(vWPos.y*0.05,3.0))*0.55+_tvn(vWPos.xz*0.044+vec2(17.0,9.0))*0.30+_tvn(vWPos.xz*0.11+vec2(5.0,13.0))*0.15;float vein=smoothstep(0.56,0.72,0.5+0.5*gA);float glint=smoothstep(0.86,0.985,0.5+0.5*_tvn(vWPos.xz*0.9+vec2(vWPos.y*0.2,0.0)));float shimmer=0.82+0.18*sin(uTime*1.1+gA*7.0+vWPos.y*0.03);vec3 goldCol=mix(vec3(1.0,0.72,0.18),vec3(1.5,1.18,0.6),0.4+0.6*glint);float gglow=(vein*0.30+glint*1.2*vein)*shimmer*(1.0-gfl*0.7);totalEmissiveRadiance+=goldCol*gglow*uGold;}if(uCrystal>0.02){vec3 cfn = uSmooth>0.5 ? normalize(vSN) : normalize(cross(dFdx(vWPos),dFdy(vWPos)));float cfl=clamp((abs(cfn.y)-uSlopeRock)/max(0.001,uSlopeGrass-uSlopeRock),0.0,1.0);float cA=_tvn(vWPos.xz*0.02+vec2(vWPos.y*0.06,4.0))*0.5+_tvn(vWPos.xz*0.05+vec2(13.0,17.0))*0.3+_tvn(vWPos.xz*0.12+vec2(5.0,9.0))*0.2;float cryst=smoothstep(0.62,0.82,0.5+0.5*cA);float facet=smoothstep(0.80,0.97,0.5+0.5*_tvn(vWPos.xz*0.7+vec2(vWPos.y*0.15,0.0)));float twinkle=0.6+0.4*sin(uTime*1.6+cA*9.0+vWPos.y*0.04);vec3 crysCol=mix(vec3(0.25,0.85,1.2),vec3(0.7,0.4,1.3),0.5+0.5*sin(uTime*0.5+cA*4.0+vWPos.x*0.01));float cglow=(cryst*0.30+facet*1.3*cryst)*twinkle*(1.0-cfl*0.6);totalEmissiveRadiance+=crysCol*cglow*uCrystal;}\n if(uGlitch>0.5 && uCeil>0.5){ float gz=_tpatch(vWPos.xz+vec2(uTime*2.5,0.0)); float scan=step(0.92,fract(vWPos.y*0.04+uTime*1.5)); totalEmissiveRadiance+=vec3(0.45,0.12,0.85)*scan*step(0.45,gz)*0.7; }');
-    sh.fragmentShader=sh.fragmentShader.replace('#include <normal_fragment_begin>','#include <normal_fragment_begin>\n if(uCeil<0.5 && uSmooth>0.5){ vec3 _bn=normalize(vSN); float _dC=length(uCam.xz-vWPos.xz); float _ds=uDetail*(1.0-smoothstep(900.0,2600.0,_dC)); if(_ds>0.001){ float _e=2.5; float _d0=_detN(vWPos.xz); float _gx=_detN(vWPos.xz+vec2(_e,0.0))-_d0; float _gz=_detN(vWPos.xz+vec2(0.0,_e))-_d0; _bn=normalize(_bn - vec3(_gx,0.0,_gz)*(_ds*3.0/_e)); } normal = normalize((viewMatrix * vec4(_bn,0.0)).xyz); }');
+    sh.fragmentShader=sh.fragmentShader.replace('#include <normal_fragment_begin>','#include <normal_fragment_begin>\n if(uCeil<0.5 && uSmooth>0.5){ vec3 _bn=normalize(vSN); float _dC=length(uCam.xz-vWPos.xz); float _ds=uDetail*(1.0-smoothstep(900.0,2600.0,_dC)); if(_ds>0.001){ float _e=2.5; float _d0=_detN(vWPos.xz); float _gx=_detN(vWPos.xz+vec2(_e,0.0))-_d0; float _gz=_detN(vWPos.xz+vec2(0.0,_e))-_d0; _bn=normalize(_bn - vec3(_gx,0.0,_gz)*(_ds*3.0/_e)); if(uRelief>0.001){ float _fw=(1.0-smoothstep(260.0,900.0,_dC))*uRelief; if(_fw>0.001){ float _fe=0.7; float _f0=_tvn(vWPos.xz*0.55); float _fx=_tvn((vWPos.xz+vec2(_fe,0.0))*0.55)-_f0; float _fz=_tvn((vWPos.xz+vec2(0.0,_fe))*0.55)-_f0; _bn=normalize(_bn - vec3(_fx,0.0,_fz)*(_fw*0.9/_fe)); } } } normal = normalize((viewMatrix * vec4(_bn,0.0)).xyz); }');
   };
   return m;
 }
@@ -45953,12 +45964,72 @@ function _wxMakeBow() {
 // heightfield mesh on LAYER 7, which only the sun's shadow camera has
 // enabled — invisible to every view camera, but it casts true mountain
 // shadows onto the moss. Rebaked when the player travels ~120u.
+// ⭐⭐ (v44.44) HIGH-END TERRAIN SHADOWS. Owner, for high-end PCs: "something to make those
+// mountains and textures really look amazing". Measured on this machine first, because the numbers
+// name the problem exactly: the shadow map is ONE 2048² ortho over ±6800 = 6.64 world units per
+// texel, its normalBias is 4.8 units (0.72 of a texel - correct for that texel, enormous in world
+// terms), and the mountains' only caster is this 104² proxy over the same 13600 units = 130.8 units
+// per cell. A ridge 60 units wide cannot exist in any of those three numbers, so the hub reads
+// shadowless and flat however low the sun goes.
+// The fix is resolution, not a new technique: on ULTRA/MEGA desktop the map goes 4096² (3.32 u per
+// texel) and the proxy 208² (65.4 u per cell), and the normalBias is DERIVED from the texel instead
+// of being a constant, so it shrinks with it. Everything else - the layer-7 trick, the texel snap,
+// the incremental rebake - is untouched, and every tier below ULTRA keeps today's exact numbers.
+// ⚠ No shader is edited here on purpose: _swPatchTerrainMat has no customProgramCacheKey, so a
+// runtime-conditional injected source would hand one terrain material another's program.
+// Knobs: window.__shadowHi = 0 forces the old rig; __shadowRes(4096) / __shadowProxyN(208) / the
+// existing __shadowExt() A/B live.
+function _wxHiShadow() {
+  try {
+    if (typeof window !== 'undefined' && window.__shadowHi === 0) return false;
+    return !!(typeof QUALITY !== 'undefined' && QUALITY.isUltra && QUALITY.isUltra()) &&
+           !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) &&
+           !(typeof isStandaloneQuest === 'function' && isStandaloneQuest()) &&
+           !(typeof isXRPresenting === 'function' && isXRPresenting());
+  } catch (_) { return false; }
+}
+// ⚠⚠ (v44.45) THE RESOLUTION UPGRADE IS PARKED, AND HERE IS WHY - it is worth more written down
+// than shipped. v44.44 raised this to 4096 and the proxy to 208 and MEASURED NO DIFFERENCE, at any
+// sun angle or altitude. The reason is upstream of resolution: the terrain never samples this
+// shadow map at all. Proof, in order: the 6 clipmap materials do compile with a directional shadow
+// (`uniform sampler2D directionalShadowMap[ 1 ]`, USE_SHADOWMAP defined, receiveShadow true); the
+// proxy IS a real displaced heightfield (Y spans -1371..3084 around the player, 43681 verts); and
+// with shadow.bias AND shadow.normalBias both forced to 0 there is NO ACNE ANYWHERE - which cannot
+// happen if a receiver is sampling a populated map. So the map is empty of terrain. The strongest
+// suspect is the layer-7 trick: three.js's WebGLShadowMap culls casters with
+// `object.layers.test( camera.layers )` where `camera` is the VIEW camera, not the shadow camera,
+// so a caster on layer 7 alone is skipped no matter what `shadow.camera.layers.enable(7)` says.
+// Moving the proxy to layer 0 with colorWrite off did NOT restore shadows on its own either, so
+// there is at least one more term (the depth material for a MeshBasicMaterial caster, or the
+// shadow pass being skipped by whatever holds the saved render reference - the game does not call
+// renderer.render, a console wrapper on it never fires). That is a real investigation, not a knob,
+// and it should not ride along with a look change. Defaults therefore stay exactly as shipped;
+// __shadowRes() / __shadowProxyN() / __shadowExt() remain as the live A/B for that work.
+function _wxShadowRes() {
+  const w = (typeof window !== 'undefined') ? window : {};
+  if (typeof w.__shadowResV === 'number' && w.__shadowResV >= 512) return w.__shadowResV;
+  return 2048;
+}
+function _wxProxyN() {
+  const w = (typeof window !== 'undefined') ? window : {};
+  if (typeof w.__shadowProxyNV === 'number' && w.__shadowProxyNV >= 32) return w.__shadowProxyNV | 0;
+  return _WX_PROXY_N;
+}
+// One place decides the bias, from the texel it is meant to hide. 4.8 at the shipped 6.64 u texel
+// is 0.723 of a texel; keep that ratio at every extent and resolution.
+function _wxShadowNormalBias() {
+  const ext = (dirLight && dirLight.shadow && dirLight.shadow.camera) ? Math.abs(dirLight.shadow.camera.right) : _WX_SHADOW_EXT;
+  return 0.7229 * ((2 * ext) / _wxShadowRes());
+}
 const _WX_PROXY_N = 104;   // (v35.13) 88 -> 104: keeps cell size ~same as the wider window
 function _wxBuildTerrProxy() {
-  const EXT = _WX_SHADOW_EXT, N = _WX_PROXY_N;
+  const EXT = _WX_SHADOW_EXT, N = _wxProxyN();   // (v44.44) tier-sized
   const geo = new THREE.PlaneGeometry(EXT * 2, EXT * 2, N, N);
   geo.rotateX(-Math.PI / 2);
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
+  mesh.userData.proxyN = N;   // (v44.44) the grid this mesh was BUILT with - _wxUpdateTerrProxy and
+  // the rebuild check in _wxShadowsOn both read it, so a tier change mid-session cannot resample a
+  // 208-grid through 104-grid indices (that would scramble the heightfield, not just coarsen it).
   mesh.castShadow = true;
   mesh.receiveShadow = false;
   mesh.layers.set(7);
@@ -45974,7 +46045,7 @@ function _wxUpdateTerrProxy() {
   // at a shifted phase — the whole mountain-shadow field subtly MORPHED each
   // rebake (travel flicker). On a fixed world lattice, overlapping cells
   // sample identical points every time.
-  const N = _WX_PROXY_N, R = N + 1;
+  const N = (mesh.userData && mesh.userData.proxyN) || _WX_PROXY_N, R = N + 1;   // (v44.44) the mesh's own grid
   const cell = (2 * _WX_SHADOW_EXT) / N;
   const sx = Math.round(p.x / cell) * cell, sz = Math.round(p.z / cell) * cell;
   if (sx === _WX.proxyAt.x && sz === _WX.proxyAt.z) return;
@@ -46079,15 +46150,26 @@ function _wxShadowsOn() {
       renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     }
     dirLight.castShadow = true;
-    dirLight.shadow.mapSize.set(2048, 2048);
+    // (v44.44) resolution is a tier number now. Changing mapSize on a live shadow needs the old
+    // render target thrown away - three.js allocates it once and never re-reads mapSize otherwise.
+    const _res = _wxShadowRes();
+    if (dirLight.shadow.mapSize.width !== _res) {
+      dirLight.shadow.mapSize.set(_res, _res);
+      try { if (dirLight.shadow.map) { dirLight.shadow.map.dispose(); dirLight.shadow.map = null; } } catch (_) {}
+    }
     const sc = dirLight.shadow.camera;
     sc.left = -_WX_SHADOW_EXT; sc.right = _WX_SHADOW_EXT; sc.top = _WX_SHADOW_EXT; sc.bottom = -_WX_SHADOW_EXT;
     sc.near = 500; sc.far = 16000;
     dirLight.shadow.bias = -0.0006;
-    dirLight.shadow.normalBias = 4.8;
+    dirLight.shadow.normalBias = _wxShadowNormalBias();   // (v44.44) 4.8 at 2048/6800, 2.4 at 4096
     sc.updateProjectionMatrix();
     if (!dirLight.target.parent) scene.add(dirLight.target);
     sc.layers.enable(7);
+    // (v44.44) a tier change (or __shadowProxyN) re-grids the caster: drop the old mesh, build again.
+    if (_WX.terrProxy && _WX.terrProxy.userData.proxyN !== _wxProxyN()) {
+      try { scene.remove(_WX.terrProxy); _WX.terrProxy.geometry.dispose(); _WX.terrProxy.material.dispose(); } catch (_) {}
+      _WX.terrProxy = null;
+    }
     if (!_WX.terrProxy) { _WX.terrProxy = _wxBuildTerrProxy(); scene.add(_WX.terrProxy); _WX.proxyAt = { x: 1e9, z: 1e9 }; }
     return true;
   } catch (_) { return false; }
@@ -46100,11 +46182,56 @@ window.__shadowExt = function (v) {
     const sc = dirLight.shadow.camera;
     if (typeof v === 'number' && v > 500) {
       sc.left = -v; sc.right = v; sc.top = v; sc.bottom = -v;
-      dirLight.shadow.normalBias = 4.8 * (v / _WX_SHADOW_EXT);
+      dirLight.shadow.normalBias = _wxShadowNormalBias();   // (v44.44) derived, and now resolution-aware
       sc.updateProjectionMatrix();
     }
     return sc.right;
   } catch (_) { return 0; }
+};
+// (v44.44) the two new halves of the same A/B. __shadowRes(2048|4096) re-allocates the map;
+// __shadowProxyN(104|208|312) re-grids the caster on the next _wxShadowsOn. Pass nothing to read.
+window.__shadowRes = function (v) {
+  if (typeof v === 'number' && v >= 512) {
+    window.__shadowResV = v | 0;
+    try {
+      dirLight.shadow.mapSize.set(v | 0, v | 0);
+      if (dirLight.shadow.map) { dirLight.shadow.map.dispose(); dirLight.shadow.map = null; }
+      dirLight.shadow.normalBias = _wxShadowNormalBias();
+    } catch (_) {}
+  }
+  return _wxShadowRes();
+};
+window.__shadowProxyN = function (v) {
+  if (typeof v === 'number' && v >= 32) { window.__shadowProxyNV = v | 0; try { _wxShadowsOn(); } catch (_) {} }
+  return _wxProxyN();
+};
+// ⭐ (v44.44) THE SUN HAS AN ANGLE NOW. _WX.sunDir was written once, at (1000, 3000, 1500) - a
+// permanent 59° noon, which is the flattest light a mountain can be given, and no shadow rig can
+// undo it. This does not change the default by a degree; it makes the angle steerable so the owner
+// can judge a lower sun against the shipped one in the same frame:
+//   __sunAngle()          -> { elev, azim } in degrees
+//   __sunAngle(28)        -> keep the compass bearing, drop the sun to 28° (long raking shadows)
+//   __sunAngle(28, 120)   -> both
+// The dome's uSunDir is a CLONE of the vector (not a reference), so it is copied here; the sun
+// disc, halo, rainbow and the shadow light all re-read _WX.sunDir every frame and follow for free.
+// _WX.snapR/_WX.snapU are the texel-snap basis built FROM the direction, so they are dropped and
+// rebuilt, or the snap quantises along the old sun's axes and shadow edges crawl.
+window.__sunAngle = function (elev, azim) {
+  try {
+    const d = _WX.sunDir;
+    if (!d) return null;
+    const curElev = Math.atan2(d.y, Math.hypot(d.x, d.z)) * 180 / Math.PI;
+    const curAzim = Math.atan2(d.z, d.x) * 180 / Math.PI;
+    if (typeof elev === 'number') {
+      const e = Math.max(2, Math.min(89, elev)) * Math.PI / 180;
+      const a = ((typeof azim === 'number') ? azim : curAzim) * Math.PI / 180;
+      d.set(Math.cos(e) * Math.cos(a), Math.sin(e), Math.cos(e) * Math.sin(a)).normalize();
+      try { if (_WX.dome && _WX.dome.material.uniforms.uSunDir) _WX.dome.material.uniforms.uSunDir.value.copy(d); } catch (_) {}
+      _WX.snapR = null; _WX.snapU = null;
+      return { elev: Math.max(2, Math.min(89, elev)), azim: (typeof azim === 'number') ? azim : curAzim };
+    }
+    return { elev: +curElev.toFixed(1), azim: +curAzim.toFixed(1) };
+  } catch (_) { return null; }
 };
 function _wxShadowsOff() {
   try {
@@ -46189,6 +46316,7 @@ function _wxFrame(dt) {
   _WX.dome.position.copy(camP);
   // sun quads pinned at "infinity" along the light direction
   const sd = _WX.sunDir;
+  try { if (_swU && _swU.uSunDir) _swU.uSunDir.value.copy(sd); } catch (_) {}   // (v44.45) the terrain relief lights from the real sun
   _WX.sunDisc.position.set(camP.x + sd.x * 17500, camP.y + sd.y * 17500, camP.z + sd.z * 17500);
   _WX.sunHalo.position.copy(_WX.sunDisc.position);
   // real-rainbow behavior: the bow is an OPTICAL effect centered on the
@@ -46236,7 +46364,7 @@ function _wxFrame(dt) {
       _WX.snapR = new THREE.Vector3().crossVectors(sd, new THREE.Vector3(0, 1, 0)).normalize();
       _WX.snapU = new THREE.Vector3().crossVectors(_WX.snapR, sd).normalize();
     }
-    const texel = (2 * _WX_SHADOW_EXT) / 2048;
+    const texel = (2 * _WX_SHADOW_EXT) / _wxShadowRes();   // (v44.44) snap in REAL texels, or a 4096 map shimmers
     const r = _WX.snapR, u = _WX.snapU;
     const pr = p.x * r.x + p.y * r.y + p.z * r.z;
     const pu = p.x * u.x + p.y * u.y + p.z * u.z;
