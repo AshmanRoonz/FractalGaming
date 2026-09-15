@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.45';
+const LSS_BUILD = '44.46';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -27864,11 +27864,14 @@ function _wxBuildTerrProxy() {
   const EXT = _WX_SHADOW_EXT, N = _wxProxyN();   // (v44.44) tier-sized
   const geo = new THREE.PlaneGeometry(EXT * 2, EXT * 2, N, N);
   geo.rotateX(-Math.PI / 2);
-  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
+  const mat = new THREE.MeshBasicMaterial();
+  mat.colorWrite = false; mat.depthWrite = false;
+  const mesh = new THREE.Mesh(geo, mat);
   mesh.userData.proxyN = N;   // (v44.44) the grid this mesh was BUILT with - _wxUpdateTerrProxy and
   mesh.castShadow = true;
   mesh.receiveShadow = false;
-  mesh.layers.set(7);
+  mesh.layers.set(0);   // (v44.46) layer 0 = the shadow pass can actually see it; see the note above
+  mesh.renderOrder = -3;   // before the terrain, so the no-op draw never sits mid-transparency
   mesh.frustumCulled = false;
   return mesh;
 }

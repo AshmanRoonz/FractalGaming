@@ -6247,7 +6247,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.45';
+const LSS_BUILD = '44.46';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -46026,13 +46026,32 @@ function _wxBuildTerrProxy() {
   const EXT = _WX_SHADOW_EXT, N = _wxProxyN();   // (v44.44) tier-sized
   const geo = new THREE.PlaneGeometry(EXT * 2, EXT * 2, N, N);
   geo.rotateX(-Math.PI / 2);
-  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial());
+  // ⭐⭐⭐ (v44.46) THE MOUNTAINS CAST AGAIN - LAYER 7 WAS NEVER IN THE SHADOW MAP.
+  // This proxy has been invisible to the shadow pass since it was written. three.js r165 culls
+  // shadow casters against the VIEW camera, not the shadow camera:
+  //   three165.js:29479  shadowMap.render( shadowsArray, scene, camera );
+  //   three165.js:22264  renderObject( scene, camera, shadow.camera, light, this.type );
+  //   three165.js:22420  const visible = object.layers.test( camera.layers );   <- camera, not shadowCamera
+  // so `mesh.layers.set(7)` + `shadow.camera.layers.enable(7)` reads like a private caster channel
+  // and is in fact a mute button: the view camera's mask is layer 0, the proxy is layer 7 only, the
+  // test fails, and the mountains were never rendered into the depth map. Everything downstream
+  // was therefore measuring an empty map - which is why v44.44's 4096 map and 208 proxy changed
+  // nothing at any sun angle, and why forcing both bias values to 0 produced no acne anywhere.
+  // The caster has to be on a layer the VIEW camera tests true for. It must also draw NOTHING in
+  // the colour pass, and `visible = false` cannot do that (renderObject returns early on it, so the
+  // shadow pass would skip it too). colorWrite + depthWrite off is the combination that renders a
+  // real depth map while contributing no pixel and no depth: one extra draw of 21k-43k tris with
+  // no fragment work.
+  const mat = new THREE.MeshBasicMaterial();
+  mat.colorWrite = false; mat.depthWrite = false;
+  const mesh = new THREE.Mesh(geo, mat);
   mesh.userData.proxyN = N;   // (v44.44) the grid this mesh was BUILT with - _wxUpdateTerrProxy and
   // the rebuild check in _wxShadowsOn both read it, so a tier change mid-session cannot resample a
   // 208-grid through 104-grid indices (that would scramble the heightfield, not just coarsen it).
   mesh.castShadow = true;
   mesh.receiveShadow = false;
-  mesh.layers.set(7);
+  mesh.layers.set(0);   // (v44.46) layer 0 = the shadow pass can actually see it; see the note above
+  mesh.renderOrder = -3;   // before the terrain, so the no-op draw never sits mid-transparency
   mesh.frustumCulled = false;
   return mesh;
 }
