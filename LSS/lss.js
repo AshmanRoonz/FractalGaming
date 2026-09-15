@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.57';
+const LSS_BUILD = '44.58';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -15194,14 +15194,23 @@ function _lssCamReach() {
 function _lssCameraDepthForFov(force) {
   try {
     if (!camera || !camera.isPerspectiveCamera) return;
-    if (renderer && renderer.xr && renderer.xr.isPresenting) return;   // the headset owns its own depth range
+    if (renderer && renderer.xr && renderer.xr.isPresenting) {
+      const _xrFar = _lssCamReach();
+      if (camera.near !== 1 || camera.far !== _xrFar) {
+        camera.near = 1; camera.far = _xrFar;
+        camera.updateProjectionMatrix();
+        try { window.__camDepth = { fov: camera.fov, aspect: camera.aspect, reach: _xrFar, near: camera.near, far: camera.far, xr: true }; } catch (_) {}
+      }
+      return;
+    }
     const reach = _lssCamReach();
     const vHalf = camera.fov * Math.PI / 360;
     const hHalf = Math.atan(Math.tan(vHalf) * Math.max(0.2, camera.aspect || 1.6));
     const want = Math.min(400000, reach / Math.max(0.12, Math.cos(hHalf)));
-    if (!force && Math.abs(camera.far - want) <= want * 0.01) return;
+    const wantNear = Math.max(0.5, Math.min(3, want / _LSS_CAM_DEPTH_RATIO));
+    if (!force && camera.near === wantNear && Math.abs(camera.far - want) <= want * 0.01) return;
     camera.far = want;
-    camera.near = Math.max(0.5, Math.min(3, want / _LSS_CAM_DEPTH_RATIO));
+    camera.near = wantNear;
     camera.updateProjectionMatrix();
     try { window.__camDepth = { fov: camera.fov, aspect: camera.aspect, reach: reach, near: camera.near, far: camera.far }; } catch (_) {}
   } catch (_) {}

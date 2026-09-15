@@ -6344,7 +6344,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.57';
+const LSS_BUILD = '44.58';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -27868,16 +27868,47 @@ function _lssCamReach() {
 function _lssCameraDepthForFov(force) {
   try {
     if (!camera || !camera.isPerspectiveCamera) return;
-    if (renderer && renderer.xr && renderer.xr.isPresenting) return;   // the headset owns its own depth range
+    // ⭐⭐⭐ (v44.58) THE HEADSET DOES NOT OWN ITS NEAR, AND THAT IS WHY THE VR HUD VANISHED.
+    // Owner: "seems like the HUD disappeared from VR". v42.90 made near a function of the FOV, and
+    // left XR alone on the belief quoted above. But three r165's WebXRManager.updateCamera COPIES
+    // camera.near/far into the session every XR frame - read out of the shipped build:
+    //   T.near=b.near=S.near=t.near ... i.updateRenderState({depthNear:T.near, depthFar:T.far})
+    // and xr.cameraAutoUpdate is true (never cleared anywhere in this file), so the flat-screen
+    // near went straight into the headset's projection. At the shipped fov 120 that is near 2.49.
+    // EVERY VR panel is a child of xrDolly 1.5-2.0 units in front of the eye (HUD -2.0, score -1.6,
+    // aux -1.7, minimap -1.55, menu -1.5), and xrDolly is UNSCALED - so all of them sat inside the
+    // near plane and were geometrically clipped. Measured on the live camera: a point at 2.0 units
+    // projects to NDC z -1.494, at 1.5 to -2.325 (anything under -1 is clipped); 3.5 gives -0.425
+    // and renders. depthTest:false and renderOrder 999 cannot save a clipped vertex.
+    // The world kept looking right because the ship and terrain are in GAME units (1 unit ~ 7.8 cm),
+    // so a cockpit wall 0.5 m away is ~6 units - comfortably past 2.49. Only the metre-authored
+    // dolly panels disappeared, which is exactly "the HUD is gone and everything else works".
+    // The fix restores what VR had before v42.90: the camera's own construction values, near 1 /
+    // far 25000 (L22089), held for the life of the session. three dedupes updateRenderState on its
+    // own last depthNear/depthFar, so this costs one call per session, not one per frame.
+    if (renderer && renderer.xr && renderer.xr.isPresenting) {
+      const _xrFar = _lssCamReach();
+      if (camera.near !== 1 || camera.far !== _xrFar) {
+        camera.near = 1; camera.far = _xrFar;
+        camera.updateProjectionMatrix();
+        try { window.__camDepth = { fov: camera.fov, aspect: camera.aspect, reach: _xrFar, near: camera.near, far: camera.far, xr: true }; } catch (_) {}
+      }
+      return;
+    }
     const reach = _lssCamReach();
     const vHalf = camera.fov * Math.PI / 360;
     const hHalf = Math.atan(Math.tan(vHalf) * Math.max(0.2, camera.aspect || 1.6));
     const want = Math.min(400000, reach / Math.max(0.12, Math.cos(hHalf)));
     // 1% hysteresis: ADS ramps the FOV every frame and there is no point rebuilding the
     // projection matrix for a far-plane move nothing can see.
-    if (!force && Math.abs(camera.far - want) <= want * 0.01) return;
+    // ⚠ (v44.58) near is part of the hysteresis now. It used to compare FAR only, which was fine
+    // while near was derived from the same number - but leaving a headset writes near 1 / far 25000,
+    // and on the way back out `want` can land within 1% of that far and early-return, stranding the
+    // flat screen on the headset's near for the rest of the session.
+    const wantNear = Math.max(0.5, Math.min(3, want / _LSS_CAM_DEPTH_RATIO));
+    if (!force && camera.near === wantNear && Math.abs(camera.far - want) <= want * 0.01) return;
     camera.far = want;
-    camera.near = Math.max(0.5, Math.min(3, want / _LSS_CAM_DEPTH_RATIO));
+    camera.near = wantNear;
     camera.updateProjectionMatrix();
     try { window.__camDepth = { fov: camera.fov, aspect: camera.aspect, reach: reach, near: camera.near, far: camera.far }; } catch (_) {}
   } catch (_) {}
