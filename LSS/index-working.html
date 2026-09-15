@@ -6344,7 +6344,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.58';
+const LSS_BUILD = '44.59';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -44173,8 +44173,18 @@ const OW = {
   // (v38.84) owner: "i don't like how the carrier travels vertically as fast as i do, and stays always above me...
   // more approximate than exact": the slot sits 2,200u back and 700u off to one side with a slow wander, and the
   // altitude is a cruise BAND (+-900u of the pilot) drifted at 80 u/s, not a tether
+  // (v44.59) spd 70 -> 40 and anim 0.35 -> 0.20. Owner: "it needs to move slower." Root motion is
+  // STRIPPED (_monStripRootMotion), so travel is entirely game-driven and the eye reads
+  // spd / (size * timeScale) — distance covered per animation cycle, normalised by body length.
+  // Cutting spd alone makes the titan moonwalk worse, so the playback rate comes down with it:
+  // 40/(15000*0.20) = 70/(15000*0.35), i.e. the SAME foot-to-ground relationship at 43% less travel.
+  // `anim` is a live knob because it is the one that actually controls perceived slowness and the
+  // v38.83 code kept no handle on the AnimationAction at all (see this._act in _attach/tick).
+  // `dist` was a hard-coded 11000 literal inside _owBossSpawn with no declared default, which is
+  // almost certainly why the placement was never retuned; it is read with != null so 0 is expressible.
   BOSS: { key: 'GraveTitan', hpX: 80, size: 15000, rise: 14, zapEvery: 1.2, zapN: 4, zapDmg: 900, zapRange: 4200,
-          lanceEvery: 9, lanceRange: 10500, lanceDmg: 1600, touchDmg: 600, spd: 70, touch: 0.42 },
+          lanceEvery: 9, lanceRange: 10500, lanceDmg: 1600, touchDmg: 600, spd: 40, anim: 0.20, turn: 0.45,
+          dist: 9800, solidify: 2.6, touch: 0.42 },
   // (v38.83) owner: "zap a lot more of the ships" -> up to 4 bolts every 1.2 s at the nearest ships; "randomly have a
   // longer ranged attack" -> the lance, every 6-14 s at a ship out to 10,500u; "if you touch it... you get damaged"
   // -> 600 on contact for every ship, 0.8 s per ship; "the lightning causes explosions where it hits" -> _owZapFx
@@ -45202,6 +45212,26 @@ function _owCityTick(c, dt, playing) {
   _owFleetTick(c, dt);
 }
 // ── the leviathan ─────────────────────────────────────────────────────────────────────────────
+// (v44.59) the animation playback rate, live off window.__cities.boss.anim. `!= null` rather than
+// `||` so anim: 0 (freeze the pose) is expressible — the rest of the boss knobs use `||` and
+// therefore silently fall back to the default on 0.
+function _owBossAnim() {
+  const K = _owK().boss || {};
+  return (K.anim != null) ? K.anim : (OW.BOSS.anim != null ? OW.BOSS.anim : 0.35);
+}
+// (v44.59) THE GHOST SKIN'S CLOCK HAD STOPPED IN THE OVERWORLD. _monGhostTimeU is ticked by
+// updateMonsters — which returns immediately in free flight — and the boss's own fallback tick was
+// guarded on `!game.monsters.length`, written when the assumption was "monsters present => something
+// is ticking it". The hub wild leviathan families (v42.74-77) DO push into game.monsters (5 packs of
+// 3-6), so in exhibition the guard is false, updateMonsters has already returned, and the uniform sat
+// frozen at 0: the titan's hologram flicker and scanline drift were static. The wild families wear
+// _addBasicRim, not the ghost, so nothing else reads this clock here — the boss owns it.
+function _owGhostClock(dt) {
+  if (typeof _monGhostTimeU === 'undefined') return;
+  const mine = (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'assault'))
+            || !game.monsters || !game.monsters.length;
+  if (mine) _monGhostTimeU.value = (_monGhostTimeU.value + Math.min(dt, 0.1)) % 3600;
+}
 class OwBoss {
   constructor(at, groundY, defKey) {   // (v38.90) defKey: which leviathan (the authority's pick, carried to the proxies)
     this.isOwBoss = true; this.alive = true; this.id = 'owboss'; this.team = 'boss'; this.isProxy = false;
@@ -45213,6 +45243,10 @@ class OwBoss {
     this.size = K.size || OW.BOSS.size;
     this.position = at.clone(); this.velocity = new THREE.Vector3();
     this.groundY = groundY; this.riseT = 0; this.risen = false;
+    // (v44.59) the ghost -> solid transform. solidT is null until the body is fully out of the
+    // ground; then it counts up and drives uGhostMix 1 -> 0 over BOSS.solidify seconds.
+    // _ghMats / _ghMeshes are gathered once in _attach so the fade never traverses per frame.
+    this.solidT = null; this._ghostMix = 1; this._ghMats = null; this._ghMeshes = null; this._act = null;
     this.kills = 0; this.deaths = 0; this.damageDealt = 0; this.damageTaken = 0; this.shipState = 'flying'; this.doomed = false; this.spawnProtection = 0;
     this.halfH = this.size * 0.4;
     this.chassis = { hullWidth: this.size * 0.5, hullHeight: this.size * 0.8, hullLength: this.size * 0.33, hullRadius: this.size * 0.33, flightSpeed: 70 };
@@ -45285,13 +45319,58 @@ class OwBoss {
       if (clips && clips.length && THREE.AnimationMixer) {
         this._mixer = new THREE.AnimationMixer(obj);
         const act = this._mixer.clipAction((typeof _monStripRootMotion === 'function') ? _monStripRootMotion(clips[0]) : clips[0]);
-        act.setLoop(THREE.LoopRepeat, Infinity); act.timeScale = 0.35; act.play();
+        act.setLoop(THREE.LoopRepeat, Infinity); act.timeScale = _owBossAnim(); act.play();
+        this._act = act;   // (v44.59) keep the handle so window.__cities.boss.anim is live
       }
     } catch (_) {}
+    // (v44.59) gather what the ghost -> solid fade drives, then apply the CURRENT mix straight away.
+    // ⚠ The GLB is 20-45 MB and loads async, so _attach can land after the rise has already finished
+    // (and on a late-joining peer it lands on a leviathan that has been solid for minutes). Seeding
+    // from _wantGhostMix() rather than from 1.0 is what stops the fade replaying for those.
+    this._ghMats = []; this._ghMeshes = [];
+    obj.traverse(n => {
+      if (!n.isMesh || !n.material) return;
+      this._ghMeshes.push(n);
+      const ms = Array.isArray(n.material) ? n.material : [n.material];
+      for (const m of ms) if (m && m.userData && m.userData.__ghostMixU) this._ghMats.push(m);
+    });
+    this._setGhostMix(this._wantGhostMix());
+  }
+  // (v44.59) 1 = hologram, 0 = solid. Held at 1 for the whole rise so the titan comes OUT of the
+  // ground as a ghost, then eased to 0 once it stands — the payoff of the 'THE LEVIATHAN RISES'
+  // banner, which fires on every machine in the same 250 ms window.
+  _wantGhostMix() {
+    if (!this.risen || this.solidT == null) return 1;
+    const K = _owK().boss || {};
+    const dur = (K.solidify != null) ? K.solidify : (OW.BOSS.solidify || 2.6);
+    if (!(dur > 0)) return 0;
+    const u = Math.min(1, this.solidT / dur);
+    return 1 - u * u * (3 - 2 * u);
+  }
+  _setGhostMix(v) {
+    this._ghostMix = v;
+    const solid = (v <= 0.001);
+    // ⚠ depthWrite is per-draw GL state, free to flip. `transparent` is a PROGRAM-KEY field and is
+    // deliberately left alone — at mix 0 the shader already writes alpha 1.0, which depth-tests
+    // against the terrain exactly like an opaque body and only gives up early-Z.
+    if (this._ghMats) for (const m of this._ghMats) {
+      if (m.userData && m.userData.__ghostMixU) m.userData.__ghostMixU.value = v;
+      if (m.depthWrite !== solid) m.depthWrite = solid;
+    }
+    // renderOrder 3 is part of the ghost (it sorts the hologram above the transparent tier); a solid
+    // body belongs back at 0 with everything else.
+    if (this._ghMeshes) for (const n of this._ghMeshes) n.renderOrder = solid ? 0 : 3;
+  }
+  _solidifyTick(dt) {
+    if (this.solidT == null || this._ghostMix <= 0) return;
+    this.solidT += dt;
+    this._setGhostMix(this._wantGhostMix());
   }
   update() {}
   tickProxy(dt) {
+    if (this._act) this._act.timeScale = _owBossAnim();
     if (this._mixer) this._mixer.update(dt * (this.risen ? 1 : 0.5));
+    this._solidifyTick(dt);   // (v44.59) risen arrives as b[1]; the fade runs locally from that edge
     if (this._netX != null) {
       _owV1.set(this._netX, this._netY, this._netZ);
       const d = this.position.distanceTo(_owV1);
@@ -45303,7 +45382,7 @@ class OwBoss {
     this.mesh.rotation.y += dy * Math.min(1, dt * 3);
     this.mesh.position.copy(this.position);
     if (!this.risen && Math.random() < dt * 9) this._riseDust();
-    if (typeof _monGhostTimeU !== 'undefined' && (!game.monsters || !game.monsters.length)) _monGhostTimeU.value = (_monGhostTimeU.value + Math.min(dt, 0.1)) % 3600;
+    _owGhostClock(dt);
   }
   _riseDust() {
     const a = Math.random() * Math.PI * 2, r = this.size * (0.12 + Math.random() * 0.3);
@@ -45314,6 +45393,7 @@ class OwBoss {
     if (!this.alive) return;
     if (this.isProxy) { this.tickProxy(dt); return; }
     const K = _owK().boss || {}, B = OW.BOSS;
+    if (this._act) this._act.timeScale = _owBossAnim();
     if (this._mixer) this._mixer.update(dt * (this.risen ? 1 : 0.5));
     const halfH = this.halfH;
     if (!this.risen) {
@@ -45323,9 +45403,12 @@ class OwBoss {
       this.position.y = this.groundY - halfH * 1.05 + (halfH * 0.75 + halfH * 1.05) * e;
       this.mesh.position.copy(this.position);
       if (Math.random() < dt * 9) this._riseDust();
-      if (u >= 1) { this.risen = true; _owAnnounce({ k: 'rise' }); }
+      // (v44.59) solidT starts here, on the same beat as the 'THE LEVIATHAN RISES' banner. The proxies
+      // start theirs off the b[1] edge in _owApplyState, so authority and peers fade together.
+      if (u >= 1) { this.risen = true; this.solidT = 0; _owAnnounce({ k: 'rise' }); }
       return;
     }
+    this._solidifyTick(dt);
     const tgt = _owBossTarget(this);
     if (tgt) {
       const dx = tgt.pos.x - this.position.x, dz = tgt.pos.z - this.position.z;
@@ -45339,7 +45422,9 @@ class OwBoss {
       const yaw = Math.atan2(dx, dz);
       let dy = yaw - this.mesh.rotation.y;
       while (dy > Math.PI) dy -= Math.PI * 2; while (dy < -Math.PI) dy += Math.PI * 2;
-      this.mesh.rotation.y += dy * Math.min(1, dt * 0.8);
+      // (v44.59) 0.8 -> 0.45: a 1.17 km body that snapped its heading in ~1.25 s read small. Live as
+      // window.__cities.boss.turn.
+      this.mesh.rotation.y += dy * Math.min(1, dt * ((K.turn != null) ? K.turn : B.turn));
     }
     // (v38.83) THE STORM: up to zapN bolts a cycle at the nearest ships in reach, and now and then the
     // LANCE - one far bolt at a ship beyond the storm's reach
@@ -45366,7 +45451,7 @@ class OwBoss {
     this.position.y += (wantY - this.position.y) * Math.min(1, dt * 1.5);
     this.mesh.position.copy(this.position);
     this._contact(dt);
-    if (typeof _monGhostTimeU !== 'undefined' && (!game.monsters || !game.monsters.length)) _monGhostTimeU.value = (_monGhostTimeU.value + Math.min(dt, 0.1)) % 3600;   // the ghost skin's clock, when no leviathan pack runs it
+    _owGhostClock(dt);   // the ghost skin's clock - see _owGhostClock for why this is not conditional any more
   }
   // (v38.83) CONTACT. Owner: "if you touch it or it touches your ship then you get damaged". Every ship
   // (the pilot, other pilots, fleets, carriers) inside the column takes touchDmg every 0.8 s and is shoved.
@@ -45554,19 +45639,45 @@ function _owBossCheck() {
 }
 function _owBossSpawn() {
   const T = game.sandwichTerrain;
-  // rises 11,000u from the last conqueror (the authority's pilot when forced), away from the hub city
+  const KB = _owK().boss || {}, B = OW.BOSS;
+  // (v44.59) RISES BESIDE THE MAIN CITY. Owner: "make the giant leviathan rise near the center city."
+  // It used to rise BOSS.dist from the last conqueror on the ray pointing AWAY from HUB_CITY - and the
+  // last city captured is always a SATELLITE, which sit on OW.DIST (27,500-36,500u from the hub), so
+  // the titan landed 38,500-47,500u out: a body scaled to the megacity's own diameter, standing in
+  // empty terrain nowhere near it.
+  // Now the ANCHOR is HUB_CITY and the BEARING points at whoever took the sixth city, so the titan
+  // stands on the pilot's side of the megacity - between them and the city as they fly home, rather
+  // than hidden behind it. The hub city's flat ground ends at 8,550u (the MAP_DATA room sphere that
+  // carves it); BOSS.dist 9,800 clears that and the column (colR ~2,600) by a comfortable margin
+  // while staying inside the city traffic ring, so the titan reads as looming over the skyline.
   let src = player.position;
   try { const last = OW.cities && OW.cities.slice().sort((a, b) => (b._ownedAt || 0) - (a._ownedAt || 0))[0]; const ent = last ? _owOwnerEntity(last.owner) : null; if (ent && ent.position) src = ent.position; } catch (_) {}
   let ax = src.x - HUB_CITY.x, az = src.z - HUB_CITY.z;
   let L = Math.hypot(ax, az); if (L < 1) { ax = 1; az = 0; L = 1; }
-  ax /= L; az /= L;
-  const D = (_owK().boss && _owK().boss.dist) || 11000;
-  const x = src.x + ax * D, z = src.z + az * D;
-  let gy = 0; try { gy = _stGroundYCarved(x, z, T); } catch (_) {}
-  if (!isFinite(gy)) gy = 0;
+  const a0 = Math.atan2(az, ax);
   const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -1e9;
+  const D = (KB.dist != null) ? KB.dist : ((B.dist != null) ? B.dist : 9800);
+  // Roughly a third of the ring around the city is lake, and the per-frame clamp below only stops the
+  // titan VANISHING under it (it wades). Rising out of open water is not the image, so scan a fan the
+  // way _owEnsureSites scans its city sites and take the driest candidate nearest the wanted bearing.
+  const RADS = [D, D + 900, D - 700, D + 1900];
+  const FAN = [0, -0.11, 0.11, -0.23, 0.23, -0.36, 0.36, -0.52, 0.52, -0.7, 0.7];
+  let x = HUB_CITY.x + Math.cos(a0) * D, z = HUB_CITY.z + Math.sin(a0) * D, gy = 0, best = null;
+  for (let ri = 0; ri < RADS.length && !best; ri++) {
+    for (let fi = 0; fi < FAN.length; fi++) {
+      const a = a0 + FAN[fi];
+      const cx = HUB_CITY.x + Math.cos(a) * RADS[ri], cz = HUB_CITY.z + Math.sin(a) * RADS[ri];
+      let h = NaN; try { h = _stGroundYCarved(cx, cz, T); } catch (_) {}
+      if (!isFinite(h) || h < WL + 60) continue;   // wet: the same dryness rule the city sites use
+      best = { x: cx, z: cz, y: h };
+      break;
+    }
+  }
+  if (best) { x = best.x; z = best.z; gy = best.y; }
+  else { try { gy = _stGroundYCarved(x, z, T); } catch (_) {} }
+  if (!isFinite(gy)) gy = 0;
   if (gy < WL - 400) gy = WL - 400;
-  const size = (_owK().boss && _owK().boss.size) || OW.BOSS.size;
+  const size = (KB.size != null) ? KB.size : B.size;
   const boss = new OwBoss(new THREE.Vector3(x, gy - size * 0.42, z), gy);
   OW.boss = boss;
   game.entities.push(boss);
@@ -45634,10 +45745,16 @@ function _owApplyState(m) {
   for (let i = OW.dying.length - 1; i >= 0; i--) { const car = OW.dying[i]; if (car.isProxy && !seen.has(car.id)) { try { car.destroy(); } catch (_) {} } }
   const b = m.b;
   if (b) {
-    if (!OW.boss) { const boss = new OwBoss(new THREE.Vector3(b[2], b[3], b[4]), b[7], b[8] || null); boss.isProxy = true; OW.boss = boss; game.entities.push(boss); }   // (v38.90) the same leviathan as the authority's
+    if (!OW.boss) {
+      const boss = new OwBoss(new THREE.Vector3(b[2], b[3], b[4]), b[7], b[8] || null); boss.isProxy = true;   // (v38.90) the same leviathan as the authority's
+      // (v44.59) LATE JOINER: if the very FIRST packet already says risen, this titan has been solid
+      // for minutes - seed it past the fade so the b[1] edge below cannot replay the ghost.
+      if (b[1]) { boss.risen = true; boss.solidT = 1e9; boss._setGhostMix(0); }
+      OW.boss = boss; game.entities.push(boss);
+    }
     const B = OW.boss;
     B._netX = b[2]; B._netY = b[3]; B._netZ = b[4]; B.health = b[5]; B._netRot = (b[6] || 0) / 100; B.groundY = b[7];
-    if (!B.risen && b[1]) B.risen = true;
+    if (!B.risen && b[1]) { B.risen = true; if (B.solidT == null) B.solidT = 0; }   // (v44.59) the fade's shared start edge
     if (B.alive && !b[0]) { B.alive = false; B.dieFx(); B._sink = 0; }
   } else if (OW.boss && OW.boss.isProxy) {
     try { OW.boss.destroy(); } catch (_) {}
@@ -63336,31 +63453,50 @@ function _addGutsShader(mat, gut1Hex, gut2Hex) {
 // Material-level only: no extra passes, no render targets, mobile-safe. The
 // time uniform is ONE shared object ticked once per frame in updateMonsters.
 const _monGhostTimeU = { value: 0 };
+// (v44.59) GHOST -> SOLID IS ONE UNIFORM. Owner: "the giant leviathan should come out of the ground
+// as a ghost but then transform solid." The two skins this file already ships for a leviathan are the
+// SAME material class patched at the SAME injection point: _addSpectralGhost (hologram) and
+// _addBasicRim (the wild-leviathan solid, `_addBasicRim(flat, rim, 0.35)` at _wildProto). So "solid"
+// needs no second material set and no MeshStandardMaterial rebuild — it is the mix=0 end of one
+// expression, and the rim colour is uGhostTint, which is already the same `def.ghost` value _wildProto
+// passes as `rim`. `uGhostMix` is PER MATERIAL like uGhostTint above it, NOT a module singleton like
+// uGhostTime below it (_monGhostTimeU is ONE shared object across every leviathan in the game).
+// Default 1.0 = the v35.92 look, fragment-for-fragment, so every other ghost is untouched.
+// ⚠ DO NOT reach "solid" by flipping mat.transparent: `opaque` is its own three.js program-key layer
+// (measured, see the warmup audit), so a cold flip would link a fresh program in the frame the boss
+// next draws. Alpha 1.0 + depthWrite (plain GL state) gets there with no link.
 function _addSpectralGhost(mat, tintHex) {
   if (!mat) return mat;
   mat.transparent = true;
   // depthWrite false: hologram x-ray layering (far limbs glow through the
   // body). Verified against terrain/FX in screenshots — see v35.92 notes.
   mat.depthWrite = false;
+  const mixU = { value: 1 };
+  try { mat.userData = mat.userData || {}; mat.userData.__ghostMixU = mixU; } catch (_) {}
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uGhostTint = { value: new THREE.Color(tintHex) };
     shader.uniforms.uGhostTime = _monGhostTimeU;
+    shader.uniforms.uGhostMix = mixU;
     shader.vertexShader = 'varying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.vertexShader;
     shader.vertexShader = shader.vertexShader.replace(
       '#include <project_vertex>',
       '#include <project_vertex>\n  vGhN = normalize(normalMatrix * normal);\n  vGhV = normalize(-mvPosition.xyz);'
     );
-    shader.fragmentShader = 'uniform vec3 uGhostTint;\nuniform float uGhostTime;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
+    shader.fragmentShader = 'uniform vec3 uGhostTint;\nuniform float uGhostTime;\nuniform float uGhostMix;\nvarying vec3 vGhN;\nvarying vec3 vGhV;\n' + shader.fragmentShader;
     shader.fragmentShader = shader.fragmentShader.replace(
       '#include <opaque_fragment>',
       '#include <opaque_fragment>\n' +
       '  { vec3 ghN = normalize(vGhN); vec3 ghV = normalize(vGhV);\n' +
-      '    float ghFres = pow(1.0 - clamp(dot(ghN, ghV), 0.0, 1.0), 2.0);\n' +
+      '    float ghDot = clamp(dot(ghN, ghV), 0.0, 1.0);\n' +
+      '    float ghFres = pow(1.0 - ghDot, 2.0);\n' +
       '    float ghFlick = 0.92 + 0.08 * sin(uGhostTime * 44.0) * (0.55 + 0.45 * sin(uGhostTime * 9.7));\n' +
       '    float ghScan = 0.95 + 0.05 * sin(gl_FragCoord.y * 0.28 - uGhostTime * 14.0);\n' +
-      '    gl_FragColor.rgb = mix(gl_FragColor.rgb, uGhostTint * 0.55, 0.4);\n' +
-      '    gl_FragColor.rgb += uGhostTint * ghFres * (1.15 + 0.25 * sin(uGhostTime * 38.0));\n' +
-      '    gl_FragColor.a = clamp((0.42 + 0.55 * ghFres) * ghFlick * ghScan, 0.0, 0.92); }'
+      '    vec3 ghBase = gl_FragColor.rgb;\n' +
+      '    vec3 ghCol = mix(ghBase, uGhostTint * 0.55, 0.4) + uGhostTint * ghFres * (1.15 + 0.25 * sin(uGhostTime * 38.0));\n' +
+      '    float ghA = clamp((0.42 + 0.55 * ghFres) * ghFlick * ghScan, 0.0, 0.92);\n' +
+      '    vec3 soCol = ghBase + uGhostTint * (pow(1.0 - ghDot, 2.4) * 0.35);\n' +
+      '    gl_FragColor.rgb = mix(soCol, ghCol, uGhostMix);\n' +
+      '    gl_FragColor.a = mix(1.0, ghA, uGhostMix); }'
     );
   };
   mat.customProgramCacheKey = () => 'spectralGhost';
