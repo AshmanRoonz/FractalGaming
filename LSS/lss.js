@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.42';
+const LSS_BUILD = '44.43';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -21969,6 +21969,8 @@ function _swDisposeHubWater() {
   try { _fishSchoolDispose(); } catch (_) {}   
   try { _wxDispose(); } catch (_) {}
   try { if (game._dragHiss) { _swStopDragHiss(game._dragHiss); game._dragHiss = null; } } catch (_) {}
+  game._hubWaterWL = undefined; game._hubWaterT = null;
+  try { if (typeof _swU !== 'undefined' && _swU) { if (_swU.uWaterY) _swU.uWaterY.value = -1e9; if (_swU.uWaterOn) _swU.uWaterOn.value = 0; } } catch (_) {}
   if (game && game._hubWater) {
     try {
       if (game._hubWater.parent) scene.remove(game._hubWater);
@@ -56581,6 +56583,7 @@ document.addEventListener('keydown', (e) => {
 function returnToRootMenu(opts) {
   const _keepRoom = !!(opts && opts.keepRoom);
   try { activeMode().onTeardown(); } catch (_) {}
+  try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}   // (v44.43) no world's sea outlives its match: classic's teardown is empty, only free flight's disposed the water (idempotent after it)
   try { if (typeof LSS !== 'undefined') LSS.MODE = 'classic'; } catch (_) {}
   try { if (typeof net !== 'undefined' && net) net.roomMode = null; } catch (_) {}
   try { if (typeof LSS !== 'undefined') { LSS._modeChosen = false; LSS._modeChosenAt = 0; } } catch (_) {}
