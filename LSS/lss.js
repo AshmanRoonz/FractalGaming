@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.63';
+const LSS_BUILD = '44.64';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -23106,14 +23106,17 @@ function _hcHoloMat() {
                 uAds: { value: _atlas }, uAdsOn: { value: _atlas ? 1.0 : 0.0 },   // (v44.36)
                 uAdsGrid: { value: new THREE.Vector3(_ADS_COLS, _ADS_ROWS, Math.min(_LSS_ADS.length, _ADS_COLS * _ADS_ROWS)) },
                 uAdsFrac: { value: (_A.frac != null) ? +_A.frac : 0.55 },
-                uAdsGround: { value: (_A.ground != null) ? +_A.ground : 0.95 } },   // (v44.62) the sign's panel opacity
+                uAdsGround: { value: (_A.ground != null) ? +_A.ground : 0.95 },   // (v44.62) the sign's panel opacity
+                uAdsGFade: { value: new THREE.Vector2(
+                  (_A.gfadeOut != null) ? +_A.gfadeOut : 0.06,
+                  (_A.gfadeIn != null) ? +_A.gfadeIn : 0.16) } },
     transparent: true, depthWrite: false,
     blending: THREE.CustomBlending,
     blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
     side: THREE.DoubleSide,
     vertexShader: `
       attribute vec2 aPrm;
-      varying vec2 vUv2; varying vec3 vCol; varying float vRnd;
+      varying vec2 vUv2; varying vec3 vCol; varying float vRnd; varying float vAng;
       void main() {
         vUv2 = uv; vRnd = aPrm.y;
         #ifdef USE_INSTANCING_COLOR
@@ -23122,13 +23125,19 @@ function _hcHoloMat() {
           vCol = vec3(0.2, 1.0, 0.9);
         #endif
         vec4 mv = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+        // (v44.63) the panel's APPARENT SIZE - its world height over the view depth, i.e. roughly the
+        // angle it subtends. The ad's dark ground is faded out on this, so a sign stops being an
+        // opaque black rectangle at exactly the range where it stops being readable, and a BIG panel
+        // keeps its ground further out than a small one. Resolution-independent by construction.
+        vAng = length(instanceMatrix[1].xyz) / max(1.0, -mv.z);
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: `
       uniform float uHcT;
       uniform float uHcLodOn;
       uniform sampler2D uAds; uniform float uAdsOn; uniform vec3 uAdsGrid; uniform float uAdsFrac; uniform float uAdsGround;
-      varying vec2 vUv2; varying vec3 vCol; varying float vRnd;
+      uniform vec2 uAdsGFade;
+      varying vec2 vUv2; varying vec3 vCol; varying float vRnd; varying float vAng;
       float h21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
       void main() {
         vec2 uv = vUv2;
@@ -23187,7 +23196,14 @@ function _hcHoloMat() {
           // sign's PANEL does not flicker; only what is projected on it does, and the ad's emissive
           // term above still carries k in full. edge is kept so the panel still fades at its border
           // instead of ending on a hard rectangle.
-          outO = edge * uAdsGround * (1.0 - hLod);
+          // ⚠ AND IT MUST LET GO WITH DISTANCE. Owner: "the ad signs on the city you can see the dark
+          // black backgrounds from really far away, it's not pretty." The first cut released the
+          // ground on hLod alone, which only saturates once a GLYPH CELL goes subpixel - kilometres
+          // past the range where the ad art itself is too small to read. Between those two distances
+          // you get the worst of both: text you cannot read on a black rectangle you can. The fade
+          // now runs on the panel's own apparent size (see vAng), so the ground is gone by the time
+          // the sign is a smudge and the ad reverts to the additive glow it always was at range.
+          outO = edge * uAdsGround * (1.0 - hLod) * smoothstep(uAdsGFade.x, uAdsGFade.y, vAng);
         }
         // ⚠ CLAMP BEFORE PREMULTIPLYING. outC exceeds 1.0 on ad text (ad is LINEAR — the atlas is
         // tagged SRGBColorSpace, so the hardware decodes it — and 1.45x a warm brand is already over
@@ -23779,13 +23795,14 @@ function _hcAttachBanner(holder, i, sc) {
     blending: THREE.CustomBlending,
     blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
     vertexShader: [
-      'uniform float uT; uniform float uAmp; uniform float uSeed; varying vec2 vUv;',
+      'uniform float uT; uniform float uAmp; uniform float uSeed; varying vec2 vUv; varying float vDep;',
       'void main(){ vUv = uv; vec3 p = position;',
       '  p.x += sin(uv.x * 7.0 - uT * 5.0 + uSeed) * uAmp * (0.25 + 0.75 * uv.x);',   // flutter grows toward the free end
-      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0); }'
+      '  vec4 _mv = modelViewMatrix * vec4(p, 1.0); vDep = -_mv.z;',   // (v44.63) for the sheet's distance fade
+      '  gl_Position = projectionMatrix * _mv; }'
     ].join('\n'),
     fragmentShader: [
-      'uniform sampler2D uAds; uniform vec4 uCell; uniform float uT; varying vec2 vUv;',
+      'uniform sampler2D uAds; uniform vec4 uCell; uniform float uT; varying vec2 vUv; varying float vDep;',
       'void main(){',
       '  float ux = gl_FrontFacing ? vUv.x : 1.0 - vUv.x;',   // readable from BOTH sides: the back face mirrors the cell (a real banner would read backwards from behind)
       '  vec2 auv = vec2((uCell.x + 0.015 + ux * 0.97) / uCell.z, 1.0 - (uCell.y + 1.0 - (0.015 + vUv.y * 0.97)) / uCell.w);',   // (v44.62) cell inset - see _lssAdAtlas
@@ -23793,7 +23810,7 @@ function _hcAttachBanner(holder, i, sc) {
       '  float lum = dot(ad, vec3(0.299, 0.587, 0.114));',
       '  float scan = 0.85 + 0.15 * sin(vUv.y * 90.0 + uT * 7.0);',
       '  float edge = smoothstep(0.0, 0.04, vUv.x) * smoothstep(1.0, 0.96, vUv.x) * smoothstep(0.0, 0.08, vUv.y) * smoothstep(1.0, 0.92, vUv.y);',
-      '  float A = edge * 0.78;',   // (v44.62) the sheet does not strobe - see the uAdsGround note in _hcHoloMat
+      '  float A = edge * 0.78 * (1.0 - smoothstep(2600.0, 6200.0, vDep));',
       '  float aAdd = (0.10 + lum) * scan * edge;',
       '  vec3 sheet = vec3(0.045, 0.065, 0.095) * A;',
       '  gl_FragColor = vec4(clamp(ad * 1.4 + vec3(0.05, 0.12, 0.16), 0.0, 1.0) * aAdd + sheet, A);',

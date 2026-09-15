@@ -6344,7 +6344,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.63';
+const LSS_BUILD = '44.64';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -40006,24 +40006,30 @@ function _hcHoloMat() {
                 uAds: { value: _atlas }, uAdsOn: { value: _atlas ? 1.0 : 0.0 },   // (v44.36)
                 uAdsGrid: { value: new THREE.Vector3(_ADS_COLS, _ADS_ROWS, Math.min(_LSS_ADS.length, _ADS_COLS * _ADS_ROWS)) },
                 uAdsFrac: { value: (_A.frac != null) ? +_A.frac : 0.55 },
-                uAdsGround: { value: (_A.ground != null) ? +_A.ground : 0.95 } },   // (v44.62) the sign's panel opacity
+                uAdsGround: { value: (_A.ground != null) ? +_A.ground : 0.95 },   // (v44.62) the sign's panel opacity
+                // (v44.63) apparent-size band over which the ground fades out. x = gone below,
+                // y = full above, in world-height-over-view-depth. For a 300u panel that is
+                // ~5,000u and ~1,900u; a 600u panel keeps its ground to twice those ranges.
+                uAdsGFade: { value: new THREE.Vector2(
+                  (_A.gfadeOut != null) ? +_A.gfadeOut : 0.06,
+                  (_A.gfadeIn != null) ? +_A.gfadeIn : 0.16) } },
     // ⭐⭐ (v44.62) AN ADDITIVE SURFACE CANNOT DARKEN, SO AN AD ON A BRIGHT TOWER HAS NO GROUND.
     // Owner, over a screenshot of a yellow/black pixel-pattern skyscraper: "some of the ads are hard
     // to see on some buildings." The panel was AdditiveBlending, and the atlas cell's ground is pure
-    // #000 (_lssAdPaint fills the whole canvas black first) — which under additive contributes
+    // #000 (_lssAdPaint fills the whole canvas black first) - which under additive contributes
     // literally nothing. So the tower's own emissive window pattern showed through the ad at full
     // strength everywhere the art is dark, i.e. the whole panel except the lettering.
     // And the lettering itself is asymmetric: the tagline is #ffffff and lifts all three channels,
     // while a brand wordmark is a saturated ONE-CHANNEL neon. On a sodium/amber tower the
     // destination red is already at or above 1.0, and postFX.rtScene is RGBAFormat with NO type =
-    // UnsignedByteType, so it CLIPS IN HARDWARE before ACES ever sees it — a red add onto a clamped
+    // UnsignedByteType, so it CLIPS IN HARDWARE before ACES ever sees it - a red add onto a clamped
     // red channel is a no-op. That is why the white tagline survived and the wordmark vanished on
     // exactly the towers the owner circled. Same mechanism this file already records for the fire
     // ramp ("resolve to the SAME PIXEL") and for the v42.86 additive cloud band over a bright sky.
     // Only an operation that SCALES THE DESTINATION can make contrast here, so the panel gets a
     // premultiplied-alpha composite. CustomBlending rather than `premultipliedAlpha: true` on
     // purpose: that flag is not just a cache-key bit, it injects `#define PREMULTIPLIED_ALPHA` into
-    // the prefix, i.e. a genuinely separate compile+link — and this material is pinned by the city
+    // the prefix, i.e. a genuinely separate compile+link - and this material is pinned by the city
     // warmup. OneFactor/OneMinusSrcAlphaFactor reaches the identical GL state with the program key
     // provably unchanged. `transparent` stays true (flipping it IS a key change).
     transparent: true, depthWrite: false,
@@ -40032,7 +40038,7 @@ function _hcHoloMat() {
     side: THREE.DoubleSide,
     vertexShader: `
       attribute vec2 aPrm;
-      varying vec2 vUv2; varying vec3 vCol; varying float vRnd;
+      varying vec2 vUv2; varying vec3 vCol; varying float vRnd; varying float vAng;
       void main() {
         vUv2 = uv; vRnd = aPrm.y;
         #ifdef USE_INSTANCING_COLOR
@@ -40041,13 +40047,19 @@ function _hcHoloMat() {
           vCol = vec3(0.2, 1.0, 0.9);
         #endif
         vec4 mv = modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+        // (v44.63) the panel's APPARENT SIZE - its world height over the view depth, i.e. roughly the
+        // angle it subtends. The ad's dark ground is faded out on this, so a sign stops being an
+        // opaque black rectangle at exactly the range where it stops being readable, and a BIG panel
+        // keeps its ground further out than a small one. Resolution-independent by construction.
+        vAng = length(instanceMatrix[1].xyz) / max(1.0, -mv.z);
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: `
       uniform float uHcT;
       uniform float uHcLodOn;
       uniform sampler2D uAds; uniform float uAdsOn; uniform vec3 uAdsGrid; uniform float uAdsFrac; uniform float uAdsGround;
-      varying vec2 vUv2; varying vec3 vCol; varying float vRnd;
+      uniform vec2 uAdsGFade;
+      varying vec2 vUv2; varying vec3 vCol; varying float vRnd; varying float vAng;
       float h21(vec2 p){ p=fract(p*vec2(123.34,456.21)); p+=dot(p,p+45.32); return fract(p.x*p.y); }
       void main() {
         vec2 uv = vUv2;
@@ -40106,7 +40118,14 @@ function _hcHoloMat() {
           // sign's PANEL does not flicker; only what is projected on it does, and the ad's emissive
           // term above still carries k in full. edge is kept so the panel still fades at its border
           // instead of ending on a hard rectangle.
-          outO = edge * uAdsGround * (1.0 - hLod);
+          // ⚠ AND IT MUST LET GO WITH DISTANCE. Owner: "the ad signs on the city you can see the dark
+          // black backgrounds from really far away, it's not pretty." The first cut released the
+          // ground on hLod alone, which only saturates once a GLYPH CELL goes subpixel - kilometres
+          // past the range where the ad art itself is too small to read. Between those two distances
+          // you get the worst of both: text you cannot read on a black rectangle you can. The fade
+          // now runs on the panel's own apparent size (see vAng), so the ground is gone by the time
+          // the sign is a smudge and the ad reverts to the additive glow it always was at range.
+          outO = edge * uAdsGround * (1.0 - hLod) * smoothstep(uAdsGFade.x, uAdsGFade.y, vAng);
         }
         // ⚠ CLAMP BEFORE PREMULTIPLYING. outC exceeds 1.0 on ad text (ad is LINEAR — the atlas is
         // tagged SRGBColorSpace, so the hardware decodes it — and 1.45x a warm brand is already over
@@ -40976,13 +40995,14 @@ function _hcAttachBanner(holder, i, sc) {
     blending: THREE.CustomBlending,
     blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
     vertexShader: [
-      'uniform float uT; uniform float uAmp; uniform float uSeed; varying vec2 vUv;',
+      'uniform float uT; uniform float uAmp; uniform float uSeed; varying vec2 vUv; varying float vDep;',
       'void main(){ vUv = uv; vec3 p = position;',
       '  p.x += sin(uv.x * 7.0 - uT * 5.0 + uSeed) * uAmp * (0.25 + 0.75 * uv.x);',   // flutter grows toward the free end
-      '  gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0); }'
+      '  vec4 _mv = modelViewMatrix * vec4(p, 1.0); vDep = -_mv.z;',   // (v44.63) for the sheet's distance fade
+      '  gl_Position = projectionMatrix * _mv; }'
     ].join('\n'),
     fragmentShader: [
-      'uniform sampler2D uAds; uniform vec4 uCell; uniform float uT; varying vec2 vUv;',
+      'uniform sampler2D uAds; uniform vec4 uCell; uniform float uT; varying vec2 vUv; varying float vDep;',
       'void main(){',
       '  float ux = gl_FrontFacing ? vUv.x : 1.0 - vUv.x;',   // readable from BOTH sides: the back face mirrors the cell (a real banner would read backwards from behind)
       '  vec2 auv = vec2((uCell.x + 0.015 + ux * 0.97) / uCell.z, 1.0 - (uCell.y + 1.0 - (0.015 + vUv.y * 0.97)) / uCell.w);',   // (v44.62) cell inset - see _lssAdAtlas
@@ -40995,7 +41015,11 @@ function _hcAttachBanner(holder, i, sc) {
       // contribution); the sheet's coverage is separate. Multiplying the tint by the coverage
       // instead would premultiply a near-black cell to ~0 and leave an opaque black card hanging in
       // a pale sky - a hole punched in the world, not a banner.
-      '  float A = edge * 0.78;',   // (v44.62) the sheet does not strobe - see the uAdsGround note in _hcHoloMat
+      // (v44.62) the sheet does not strobe - see the uAdsGround note in _hcHoloMat.
+      // (v44.63) ...and it lets go with distance, so a towed banner never reads as a black card on
+      // the horizon. A banner is ~460x160 units and is always near the lane it flies in, so a plain
+      // depth fade is enough here - no apparent-size term needed.
+      '  float A = edge * 0.78 * (1.0 - smoothstep(2600.0, 6200.0, vDep));',
       '  float aAdd = (0.10 + lum) * scan * edge;',
       '  vec3 sheet = vec3(0.045, 0.065, 0.095) * A;',
       '  gl_FragColor = vec4(clamp(ad * 1.4 + vec3(0.05, 0.12, 0.16), 0.0, 1.0) * aAdd + sheet, A);',
