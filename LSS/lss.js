@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.17';
+const LSS_BUILD = '45.18';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -58184,7 +58184,10 @@ function returnToRootMenu(opts) {
   try { if (typeof _clipHideSaveBtn === 'function') _clipHideSaveBtn(); } catch (_) {}
   try { _xrMenuForceHidden = false; } catch (_) {}
   buildShipSelect();
-  if (typeof buildMapSelector === 'function') { try { buildMapSelector(); } catch (_) {} }
+  try { if (typeof _lssRefreshModeUI === 'function') _lssRefreshModeUI(); else if (typeof buildMapSelector === 'function') buildMapSelector(); } catch (_) {}
+  try { if (typeof _syncMapButtonsDisabled === 'function') _syncMapButtonsDisabled(); } catch (_) {}
+  try { if (typeof _lssRefreshInsaneSpeedBtn === 'function') _lssRefreshInsaneSpeedBtn(); } catch (_) {}
+  try { if (typeof _lssRefreshLaunchRow === 'function') _lssRefreshLaunchRow(); } catch (_) {}
   if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
 }
 
