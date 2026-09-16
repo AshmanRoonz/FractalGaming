@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.88';
+const LSS_BUILD = '44.90';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -14170,7 +14170,8 @@ try {
 } catch (e) {}
 
 const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0,
-  stallT: 0, stallN: 0 };   // (v40.13) the frames the EMA is not allowed to see
+  stallT: 0, stallN: 0,   // (v40.13) the frames the EMA is not allowed to see
+  pf: { nSum: 0, nN: 0, sSum: 0, sN: 0, nat: 0, sub: 0, latched: false, unlatched: 0 } };
 let _lssOnBattery = false;
 try {
   if (navigator.getBattery) navigator.getBattery().then((b) => {
@@ -14282,7 +14283,11 @@ function _lssSupersampleTick(ts) {
     }
   }
   if (game.state !== 'playing' || settingsOpen || game._worldPrebaking ||
-      (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) { S.ema = 0; return; }
+      (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) {
+    S.ema = 0;
+    S.pf.nSum = 0; S.pf.nN = 0; S.pf.sSum = 0; S.pf.sN = 0; S.pf.latched = false;
+    return;
+  }
   if (dt > 250) {
     if (document.visibilityState === 'visible') { S.stallT = ts; S.stallN++; }
     return;
@@ -14303,7 +14308,23 @@ function _lssSupersampleTick(ts) {
   S.acc += dt; if (S.acc < 500) return; S.acc = 0;   // decide twice a second
   const period = 1000 / S.hz;
   let sc = S.scale;
-  const _floor = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
+  const _floorRaw = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
+  const _pfNeedRaw = (typeof window !== 'undefined' && window.__ssProof !== undefined) ? window.__ssProof : 0.08;
+  const _pfOn = (typeof _pfNeedRaw === 'number') && _pfNeedRaw > 0;
+  if (_pfOn) {
+    const _P = S.pf;
+    if (sc >= 0) { _P.nSum += S.ema; _P.nN++; } else { _P.sSum += S.ema; _P.sN++; }
+    if (!_P.latched && _P.nN >= 6 && _P.sN >= 6) {
+      const _nat = _P.nSum / _P.nN, _sub = _P.sSum / _P.sN;
+      _P.nat = +_nat.toFixed(2); _P.sub = +_sub.toFixed(2);
+      if (_sub > _nat * (1 - _pfNeedRaw)) _P.latched = true;
+    }
+    if (_P.latched && sc >= 0 && S.ema > period * 1.40) {
+      _P.latched = false; _P.nSum = 0; _P.nN = 0; _P.sSum = 0; _P.sN = 0; _P.unlatched++;
+    }
+  }
+  if (S.pf.latched && sc < 0) sc = 0;
+  const _floor = S.pf.latched ? 0 : _floorRaw;
   const _stalled = !!(S.stallT && (ts - S.stallT) < 4000);
   const _over = _stalled || S.ema > period * 1.10, _far = _stalled || S.ema > period * 1.40;
   if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
@@ -14437,7 +14458,8 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
              cine: [_ssDyn.cineSaved != null, (typeof window !== 'undefined' && window.__ssCine !== undefined) ? window.__ssCine : null],   // (v39.87) off by default
              active: [(function(){ try { return _lssSceneActive(postFX.rtScene).w; } catch (_) { return _sceneActive.w; } })(),
                       (function(){ try { return _lssSceneActive(postFX.rtScene).h; } catch (_) { return _sceneActive.h; } })(),
-                      'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
+                      'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps,
+                      'pf', (_ssDyn.pf.latched ? 'latched' : (_ssDyn.pf.nat + 'ms native vs ' + _ssDyn.pf.sub + 'ms shed'))],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
 };
@@ -15057,7 +15079,7 @@ function renderPostFX() {
     (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
   const lowQuality = !postFX.enabled
     || cinematicActive
-    || (typeof game !== 'undefined' && (game.state === 'select' || game.state === 'matchEnd'))
+    || (typeof game !== 'undefined' && game.state === 'select')
     || (typeof settingsOpen !== 'undefined' && settingsOpen);
 
   const damageMax = Math.max(

@@ -6441,7 +6441,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.88';
+const LSS_BUILD = '44.90';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -26379,7 +26379,10 @@ try {
 // Starting at 0 and creeping up (0.05 per half-second while the refresh is held) reaches full
 // resolution in ~10 s on a GPU that can hold it, and never over-spends on one that cannot.
 const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0,
-  stallT: 0, stallN: 0 };   // (v40.13) the frames the EMA is not allowed to see
+  stallT: 0, stallN: 0,   // (v40.13) the frames the EMA is not allowed to see
+  // (v44.90) the sub-native shed's payoff ledger - see THE SHED HAS TO PROVE ITSELF, below.
+  // nSum/nN = frame-time EMA samples taken at native or above, sSum/sN = samples taken below it.
+  pf: { nSum: 0, nN: 0, sSum: 0, sN: 0, nat: 0, sub: 0, latched: false, unlatched: 0 } };
 // (v39.49c) ON BATTERY, HIGH MAY GO BELOW NATIVE TOO. Measured on the owner's laptop unplugged (RTX
 // 5050 power-limited): MEGA at the 70% floor held 49 fps, HIGH at full native held 60 - and HIGH had
 // no adaptive path at all (the sampler only ran for ULTRA/MEGA). With the battery flag set the
@@ -26646,7 +26649,13 @@ function _lssSupersampleTick(ts) {
     }
   }
   if (game.state !== 'playing' || settingsOpen || game._worldPrebaking ||
-      (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) { S.ema = 0; return; }
+      (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active)) {
+    S.ema = 0;
+    // (v44.90) the payoff verdict is about THIS scene, so it dies with it. Every round re-tests
+    // once (two steps and back, ~1 s) rather than carrying a stale conclusion into a new map.
+    S.pf.nSum = 0; S.pf.nN = 0; S.pf.sSum = 0; S.pf.sN = 0; S.pf.latched = false;
+    return;
+  }
   // ⚠ (v40.13) THE FILTER WAS HIDING THE ONLY FRAMES THAT MATTERED. Everything over 250 ms is
   // discarded as "not a sample" - which is right, a tab switch or a load hitch would poison an EMA -
   // but the owner's 40.12 session is a 1.5-2.9 s stall every ~3.9 s, and every one of them went
@@ -26686,7 +26695,81 @@ function _lssSupersampleTick(ts) {
   // hold the refresh even at native (owner: bursts of six 21 ms frames with the CPU at 7 ms during
   // heavy FX, felt as stutter and as sound cutting), the scene rectangle may shrink to
   // window.__ssMin (default -0.6 = 70% of native each axis) and creep back the same way.
-  const _floor = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
+  const _floorRaw = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
+  // ⭐⭐⭐ (v44.90) THE SUB-NATIVE SHED HAS TO PROVE IT IS BUYING FRAMES, OR IT GIVES THE PIXELS BACK.
+  // Owner: "the limiter that keeps framerate high ... should be lowering the resolution of the
+  // things farther away and in the peripheral vision the most ... not the ship at all."
+  //
+  // ⚠ MEASURED FIRST, AND THE MEASUREMENT IS THE WHOLE REASON THIS EXISTS. Four back-to-back 1.8 s
+  //   samples in ONE stretch of `playing`, same arena (rocky), same scene, this governor PINNED so
+  //   it could not move under the test, on the dev RTX 5050 at 144 Hz:
+  //       native res, full terrain ......... 584 draw calls   2543k tris   137.9 fps
+  //       THIS GOVERNOR'S FLOOR (-0.6) ..... 561 draw calls   2495k tris   137.4 fps
+  //       native res, far terrain culled .... 323 draw calls  1878k tris   143.6 fps
+  //   The shed's ENTIRE range - native down to 70% per axis, i.e. 49% of the pixels, the whole
+  //   picture and the player's own ship with it - bought HALF A FRAME PER SECOND. Removing draw
+  //   calls bought six. The frame is draw-call bound, exactly as v35.22 said of the hub ("this game
+  //   is DRAW-CALL bound, not fill bound"), and v40.13's fill-bound counter-evidence (shifting_deep
+  //   at MEGA) is a different scene, not a general truth. Worse, the scale was found PARKED at the
+  //   -0.6 floor in three separate samples of ordinary play: the ratchet had walked it all the way
+  //   down and left it there, so the game was permanently rendering at 49% of the pixels in
+  //   exchange for nothing at all. That is the softness the owner is looking at.
+  //
+  // WHAT THIS DOES. Above native the shed is untouched - a supersample step is real fill and it
+  // always pays. Below native, every step now files a PREDICTION and is audited on the next
+  // decision tick: `pred` is the fraction of PIXELS the step removed, and a step that was really
+  // fill-bound should hand back a comparable fraction of the frame time. If the EMA does not
+  // return at least __ssProof (default 0.25) of what the step promised, twice running, the verdict
+  // is "this scene is not fill-bound", the floor snaps back to native and the sub-native branch is
+  // shut for the rest of the round. Two steps and back, about a second, once per round.
+  //
+  // (!) SELF-PROVING, NOT A BLANKET DISABLE. This is deliberately NOT "turn the sub-native shed off
+  //     on desktop". A phone or the owner's Xbox (v44.04 put both on this path) genuinely IS fill
+  //     bound, the audit passes there, and the shed keeps working exactly as it does today. The
+  //     test asks the machine instead of assuming.
+  // (!) IT ADDS NO PUMPING. The audit reads the steps the governor was already taking; it never
+  //     takes an extra one to measure with. This file spends a page on not letting the picture pump
+  //     and a probe that dipped the resolution on a timer would be that defect wearing a new hat.
+  // (!) TWO CONSECUTIVE FAILURES, never one. A single tick can be spoiled by an explosion, a bot
+  //     spawning or a chunk landing; a scene that is truly fill-bound will not miss twice in a row.
+  // (!) window.__ssProof = 0 (or null) restores the pre-v44.90 behaviour exactly; raising it makes
+  //     the audit stricter. window.__ss.pf is the live ledger.
+  const _pfNeedRaw = (typeof window !== 'undefined' && window.__ssProof !== undefined) ? window.__ssProof : 0.08;
+  const _pfOn = (typeof _pfNeedRaw === 'number') && _pfNeedRaw > 0;
+  if (_pfOn) {
+    // The ledger: mean frame time at native-or-above vs mean frame time below native, this round.
+    // ⚠ WHY NOT THE OBVIOUS TEST. The first version of this audited each step against its own
+    //   prediction - "the step removed 19% of the pixels, did the EMA fall?" - and it passed on its
+    //   very first try in play, wrongly. A shed only ever fires BECAUSE the EMA spiked, and a spike
+    //   decays on its own; the step gets the credit for a recovery it may not have caused. Caught in
+    //   the act on the first 20 s log: ema 11.6 -> shed -> 7.7, scored a 26% win against a 4.75%
+    //   bar, and then the governor crept back to native at 11 s and the EMA sat at 6.9-7.6 - the
+    //   SAME frame time it had just "won" by shedding. Regression to the mean, exactly the trap
+    //   this file has walked into before (see measure-the-baseline notes in lss.map.md).
+    //   Averaging each scale over the whole round cannot be fooled that way: a spike lands in
+    //   whichever bucket is live and its decay lands in the other, so over enough ticks the
+    //   comparison is between the two RESOLUTIONS, not between a bad moment and its aftermath.
+    const _P = S.pf;
+    if (sc >= 0) { _P.nSum += S.ema; _P.nN++; } else { _P.sSum += S.ema; _P.sN++; }
+    if (!_P.latched && _P.nN >= 6 && _P.sN >= 6) {
+      const _nat = _P.nSum / _P.nN, _sub = _P.sSum / _P.sN;
+      _P.nat = +_nat.toFixed(2); _P.sub = +_sub.toFixed(2);
+      // Half the pixels should not cost the same milliseconds. If it does, the frame is bound by
+      // something this governor cannot touch, and the softness is being paid for nothing.
+      if (_sub > _nat * (1 - _pfNeedRaw)) _P.latched = true;
+    }
+    // ⚠ THE SAFETY VALVE, AND IT IS LOAD-BEARING FOR WEAK DEVICES. v44.04 put phones, tablets and
+    // the owner's Xbox on this same sub-native path, and there the shed is the only thing standing
+    // between the player and a slideshow. If a latched scene then cannot hold the frame at native -
+    // 40% over budget, the same bar the shed itself uses - the verdict is wrong for this scene and
+    // is torn up, counters and all, so the shed gets to try again and prove itself on the numbers.
+    if (_P.latched && sc >= 0 && S.ema > period * 1.40) {
+      _P.latched = false; _P.nSum = 0; _P.nN = 0; _P.sSum = 0; _P.sN = 0; _P.unlatched++;
+    }
+  }
+  // Latched = the pixels go back now, not over the 3 s creep - a viewport change is free (v39.49b).
+  if (S.pf.latched && sc < 0) sc = 0;
+  const _floor = S.pf.latched ? 0 : _floorRaw;
   // Above native: shed at 10% over budget. Below native: only when the frame is 40% over budget
   // (~100 fps at 144 Hz) - a mild 130 fps at native beats 144 at 70% resolution.
   // (v40.13) a stall inside the last 4 s is over budget by itself, at both thresholds - it is the
@@ -26949,7 +27032,11 @@ if (typeof window !== 'undefined') window.__postFXInfo = function () {
              // first time anything printed it. The crash line prints this now, so it has to be true.
              active: [(function(){ try { return _lssSceneActive(postFX.rtScene).w; } catch (_) { return _sceneActive.w; } })(),
                       (function(){ try { return _lssSceneActive(postFX.rtScene).h; } catch (_) { return _sceneActive.h; } })(),
-                      'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
+                      'scale', _ssDyn.scale, 'hz', _ssDyn.hz, 'ema', +(_ssDyn.ema || 0).toFixed(2), 'hold', _ssDyn.hold, 'backoff', _ssDyn.backoff, 'steps', _ssDyn.steps,
+                      // (v44.90) the sub-native shed's payoff ledger: won/tries, and whether the
+                      // audit has shut it for this round. `latched` here with a soft picture means
+                      // the softness is NOT this governor's doing - look at draw calls instead.
+                      'pf', (_ssDyn.pf.latched ? 'latched' : (_ssDyn.pf.nat + 'ms native vs ' + _ssDyn.pf.sub + 'ms shed'))],   // (v39.49) the viewport actually rendered this frame; (v39.51) + the sampler state
              bloom: [postFX.rtBright.width, postFX.rtBright.height] };
   } catch (e) { return String(e); }
 };
@@ -27767,11 +27854,21 @@ function renderPostFX() {
   // GPU cost from 5 fullscreen passes to 2 on menus / settings and when the
   // user has disabled postFX. The composite still runs so tonemap + vignette +
   // chromatic aberration stay consistent between the menu and combat looks.
+  // ⚠ (v44.89) 'matchEnd' IS NOT IN THIS LIST, DELIBERATELY. It used to be, and the
+  // arena is still fully on screen behind the 10 s scoreboard — so the frame you won or
+  // lost on lost every glow it had (engines, tracers, city windows, the sun) the instant
+  // the banner appeared. Owner: "let's not change the lighting after a win/loss, to keep
+  // it consistent with the lighting in the match." 'roundEnd' was never listed here, so
+  // the between-rounds board already kept bloom; the final board was the odd one out and
+  // the change read as the lights going down on the match. The other three entries all
+  // describe frames where the arena is NOT what you are looking at ('select' = the root
+  // menu), or where the user has opted out — those stay. Cost: the three bloom passes for
+  // the 10 s the final board is up, which is the same cost the round board already pays.
   const cinematicActive =
     (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active);
   const lowQuality = !postFX.enabled
     || cinematicActive
-    || (typeof game !== 'undefined' && (game.state === 'select' || game.state === 'matchEnd'))
+    || (typeof game !== 'undefined' && game.state === 'select')
     || (typeof settingsOpen !== 'undefined' && settingsOpen);
 
   const damageMax = Math.max(
