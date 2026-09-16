@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.72';
+const LSS_BUILD = '44.73';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18093,6 +18093,7 @@ function _wgooKnobs() {
   if (G.curl === undefined)    G.curl = 0.9;    // (v44.72) forward shear per unit of height - the overturn
   if (G.splashV === undefined)   G.splashV = 60;   // (v44.72) downward speed a landing lip needs to splash
   if (G.splashMax === undefined) G.splashMax = 5;  // crossings allowed to splash per frame
+  if (G.fadeD === undefined)     G.fadeD = 9;      // (v44.73) displacement for full opacity
   return G;
 }
 function _wgooDispose() {
@@ -18132,7 +18133,11 @@ function _wgooBuild(N, span, WL, cx, cz) {
   geo.computeVertexNormals();
   const wm = (typeof game !== 'undefined' && game && game._hubWaterDispMat) ? game._hubWaterDispMat : null;
   const uni = {
-    uTint: { value: new THREE.Color(0x14384f) },   // (v44.67) the ocean is darker than this was
+    uTint: { value: new THREE.Color(0x1d4e6b) },
+    uWL: { value: 0 },
+    uFadeD: { value: 9 },
+    uCentre: { value: new THREE.Vector2(0, 0) },
+    uHalf: { value: 800 },
     uReflBright: { value: 1.0 },
     tDiffuse: (wm && wm.uniforms.tDiffuse) ? wm.uniforms.tDiffuse : { value: null },
     uReflMatrix: (wm && wm.uniforms.uReflMatrix) ? wm.uniforms.uReflMatrix : { value: new THREE.Matrix4() },
@@ -18154,6 +18159,7 @@ function _wgooBuild(N, span, WL, cx, cz) {
     fragmentShader: [
       'varying vec3 vN; varying vec3 vW; varying vec4 vRefl;',
       'uniform vec3 uTint; uniform float uReflBright; uniform float uReflLive;',
+      'uniform float uWL; uniform float uFadeD; uniform vec2 uCentre; uniform float uHalf;',
       'uniform sampler2D tDiffuse;',
       'void main() {',
       '  vec3 n = normalize(vN);',
@@ -18166,10 +18172,17 @@ function _wgooBuild(N, span, WL, cx, cz) {
       '      col = mix(uTint, texture2D(tDiffuse, ruv).rgb * uReflBright, clamp(fres, 0.0, 1.0));',
       '    }',
       '  }',
-      '  gl_FragColor = vec4(col, 1.0);',
+      '  float disp = abs(vW.y - uWL);',
+      '  float a = clamp(disp / max(uFadeD, 0.01), 0.0, 1.0);',
+      '  vec2 ed = abs(vW.xz - uCentre) / max(uHalf, 1.0);',
+      '  a *= 1.0 - smoothstep(0.72, 1.0, max(ed.x, ed.y));',
+      '  if (a < 0.004) discard;',
+      '  gl_FragColor = vec4(col, a);',
       '}',
     ].join('\n'),
     side: THREE.DoubleSide,
+    transparent: true,
+    depthWrite: false,
   });
   const mesh = new THREE.Mesh(geo, mat);
   mesh.frustumCulled = false;
@@ -18213,6 +18226,13 @@ function _wgooTick(dt) {
   if (!_WGOO.built) return;
   const wet = (typeof _swWetAt === 'function') ? _swWetAt(px, pz) : true;
   _WGOO.mesh.visible = wet;
+  {   // (v44.73) the fade needs the live waterline and the patch's current centre - it scrolls
+    const mu2 = _WGOO.mat.uniforms;
+    mu2.uWL.value = WL;
+    mu2.uFadeD.value = (G.fadeD != null) ? +G.fadeD : 9;
+    mu2.uCentre.value.set(_WGOO.cx, _WGOO.cz);
+    mu2.uHalf.value = _WGOO.span * 0.5;
+  }
   if (!wet) return;
 
   _wgooDisp.length = 0;
@@ -46531,7 +46551,7 @@ function _gooKnobs() {
   if (G.blur === undefined)   G.blur = 2.6;      // blur radius, in density-buffer texels
   if (G.gain === undefined)   G.gain = 3.0;      // aAlpha arrives pre-scaled by __splashA (0.20)
   if (G.scale === undefined)  G.scale = 0.5;     // density RT resolution vs the composite target
-  if (G.op === undefined)     G.op = 1.0;
+  if (G.op === undefined)     G.op = 0.55;
   if (G.lit === undefined)    G.lit = 1.0;       // 0 = flat goopling white, 1 = wet-blob shading
   if (G.bright === undefined) G.bright = 1.25;
   if (G.tint === undefined)   G.tint = 0xdceaf4;
