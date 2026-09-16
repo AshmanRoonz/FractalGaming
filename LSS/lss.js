@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.41';
+const LSS_BUILD = '45.42';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -33514,8 +33514,33 @@ class Bot {
     
     
     
-    this._fireLosT = 0;    
-    this._fireLosDist = 0; 
+    this._fireLosT = 0;
+    this._fireLosDist = 0;
+
+    this._underFireT = 0;                       // (1) seconds left of "someone is shooting at me"
+    this._fireFromDir = new THREE.Vector3(0, 0, 1);   // unit vector pointing FROM the threat TO me
+    this._evadeDir = new THREE.Vector3();       // (2) committed juke heading
+    this._evadeT = 0;                           // how long to hold it before re-rolling
+    this._incScanT = Math.random() * 0.12;      // staggered incoming-projectile scan clock
+    this._railCharge = 0;                       // (4) PUNCTURE: 0..1, mirrors player.railgunCharge
+    this._railWant = 0.35 + Math.random() * 0.65;   // the charge THIS shot is holding out for
+    this._railHeld = false;                     // "the trigger was down this frame" (per-frame flag)
+    this._railFxT = 0;                          // charge-glow throttle
+    this._shotMul = 1;                          // damage multiplier the next fireAtShip applies
+    this._botLocks = Object.create(null);       // (5) TRACKER lock marks on non-player targets
+    this._botLockDecay = 0;
+    this._coreName = null;                      // (3) live core: name / time left / accumulators
+    this._coreT = 0;
+    this._coreAcc = 0;
+    this._coreFired = 0;
+    this._coreTarget = null;
+    this._coreFxT = 0;
+    this._aiAssistT = 0;                        // (6) BLASTER core: perfect aim + no reload gaps
+    this._syphonTier = 0;                       // (6) SYPHON core: the nanobot ladder
+    this._botSalvo = null;                      // bot-side staggered rocket queue (see _botSalvoTick)
+    this._csT = 0;                              // BLASTER Charge Shot: seconds of spool left
+    this._csAim = new THREE.Vector3();          // the heading it spooled up on
+    this._surgeT = 0; this._surgeSpd = 0;
   }
 
   getLoadoutRangePreference() {
@@ -33803,11 +33828,14 @@ class Bot {
       this._arenaOn = false; this._arenaSlab = -1;
     }
 
+    this._threatTick(dt);
+
     this.aiStrafeTimer -= dt;
     if (this.aiStrafeTimer <= 0) {
-      this.aiStrafe = Math.random() < 0.5;
+      const _uf = this._underFireT > 0;
+      this.aiStrafe = _uf ? true : (Math.random() < 0.5);
       this.aiStrafeDir = Math.random() < 0.5 ? 1 : -1;
-      this.aiStrafeTimer = 1 + Math.random() * 2; 
+      this.aiStrafeTimer = _uf ? (0.5 + Math.random()) : (1 + Math.random() * 2);
     }
 
     let moveDir = this._tempVec3c.copy(this.aiWanderDir);
@@ -33858,8 +33886,17 @@ class Bot {
       }
     }
 
+    if (!_raceWaypoint && !_arenaVia && this._underFireT > 0 && this._evadeT > 0 && !this.aiRetreating) {
+      const k = 0.85;
+      moveDir.x += this._evadeDir.x * k;
+      moveDir.y += this._evadeDir.y * k;
+      moveDir.z += this._evadeDir.z * k;
+      moveDir.normalize();
+    }
+
     if (!_raceWaypoint && !_arenaVia) {
-      this.targetDir.lerp(moveDir, dt * 2);
+      const _turnK = (this._underFireT > 0 && this._evadeT > 0) ? 5 : 2;
+      this.targetDir.lerp(moveDir, dt * _turnK);
       this.targetDir.normalize();
     }
 
@@ -33908,7 +33945,8 @@ class Bot {
 
     const speed = this.velocity.length();
     const _baseSpd = _lssSpeedLerp(this.chassis.flightSpeed, LSS.RACE_SPEED, _lssSpeedMix());
-    const _dashCap = this.dashActive ? Math.max(_baseSpd, this.chassis.dashSpeed || _baseSpd) : _baseSpd;
+    let _dashCap = this.dashActive ? Math.max(_baseSpd, this.chassis.dashSpeed || _baseSpd) : _baseSpd;
+    if (this._surgeT > 0) { this._surgeT -= dt; _dashCap = Math.max(_dashCap, this._surgeSpd || 0); }
     const maxSpd = this.arcSlowTimer > 0 ? _dashCap * 0.3 : _dashCap;
     if (speed > maxSpd) {
       this.velocity.multiplyScalar(maxSpd / speed);
@@ -33977,10 +34015,15 @@ class Bot {
           }
           const losDist = this._fireLosDist;
           if (losDist >= distToTgt - 5) {
-            if (_mayFire) {
-              this.fireAtShip(_fireTgt, toTgt, distToTgt);
+            let _shoot = true;
+            if (this.loadoutKey === 'PUNCTURE') _shoot = this._railWind(dt, distToTgt);
+            if (_shoot) {
+              if (_mayFire) {
+                this.fireAtShip(_fireTgt, toTgt, distToTgt);
+              }
+              this.fireTimer = this.loadout.weapon.fireRate *
+                               ((this._aiAssistT > 0) ? 1 : (1 + Math.random() * 0.5));
             }
-            this.fireTimer = this.loadout.weapon.fireRate * (1 + Math.random() * 0.5);
           }
         }
       }
@@ -33990,16 +34033,22 @@ class Bot {
     this.abilityCooldowns[0] = Math.max(0, this.abilityCooldowns[0] - dt);
     this.abilityCooldowns[1] = Math.max(0, this.abilityCooldowns[1] - dt);
     this.abilityCooldowns[2] = Math.max(0, this.abilityCooldowns[2] - dt);
-    if (game.state === 'playing' && this._mayFight() && _ctAlive &&
+    if (game.state === 'playing' && this._mayFight() && (_ctAlive || this._underFireT > 0) &&
         (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
-      this.tryUseAbilities();   
+      this.tryUseAbilities();
     }
 
-    this.coreMeter = Math.min(100, this.coreMeter + dt * 1.5);
-    if (this.coreMeter >= 100 && _ctAlive && this._mayFight() &&
+    if (this._coreT > 0) this.coreMeter = 0;
+    this._coreTick(dt);          // sustained cores (beam / barrage / storm / missile stream)
+    this._botSalvoTick(dt);      // staggered rocket volleys, one rocket per frame
+    this._chargeShotTick(dt);    // BLASTER's 1 s Charge Shot spool
+    this._botLockTick(dt);       // TRACKER lock marks aging out, bot-vs-bot
+    this._railTick(dt);          // PUNCTURE's railgun charge bleed-off + its glow tell
+    if (this._aiAssistT > 0) this._aiAssistT -= dt;
+    if (this.coreMeter >= 100 && this._coreT <= 0 && _ctAlive && this._mayFight() &&
         game.state === 'playing' && !game.testMode &&
         this.position.distanceTo(_ct.position) < 1800 && Math.random() < dt * 0.5) {
-      this._useCoreSurge(_ct);
+      this._activateCore(_ct);
     }
   }
 
@@ -34019,8 +34068,14 @@ class Bot {
   }
 
   _dealAbilityDamage(tgt, dmg) {
-    if (tgt === player) { try { playerTakeDamage(dmg, this, null); } catch (_) {} }
-    else if (tgt && tgt.takeDamage) { try { tgt.takeDamage(dmg, this, this.position); } catch (_) {} }
+    let dealt = 0;
+    if (tgt === player) {
+      const _before = (player.health || 0) + (player.shield || 0);
+      try { playerTakeDamage(dmg, this, null); } catch (_) {}
+      dealt = Math.max(0, _before - ((player.health || 0) + (player.shield || 0)));
+    }
+    else if (tgt && tgt.takeDamage) { try { dealt = tgt.takeDamage(dmg, this, this.position) || 0; } catch (_) {} }
+    if (dealt > 0) this.coreMeter = Math.min(100, this.coreMeter + dealt / 100);
   }
 
   _tryUseOffensive(ability) {
@@ -34057,59 +34112,85 @@ class Bot {
       }
     } else if (ability.name === 'Cluster Missile') {
       const vel = this._tempVec3b.copy(aim).multiplyScalar(900);
-      const proj = new Projectile(this.position, vel, 800, 200, 'bot', LSS.CLASS_COLORS.PUNCTURE);
+      const proj = new Projectile(this.position, vel, 800, 250, 'bot', LSS.CLASS_COLORS.PUNCTURE);
       proj.cluster = true;
-      proj.sizeMult = 2.4;
+      proj.clusterDmg = 500;
+      proj.clusterDuration = 5;
+      proj.sizeMult = 3.0;
       proj.smokeTrail = true;
       proj.ownerTeam = this.team; proj.ownerRef = this;
       proj.removeHaze();
       game.projectiles.push(proj);
     } else if (ability.name === 'Stun Bolt') {
+      const _sbHalf = 2000 * 0.5;
       const vel = this._tempVec3b.copy(aim).multiplyScalar(800);
-      const proj = new Projectile(this.position, vel, 1200, 150, 'bot', LSS.CLASS_COLORS.SLAYER);
-      proj.isArcWave = true;
-      proj.ownerTeam = this.team; proj.ownerRef = this;
-      game.projectiles.push(proj);
-    } else if (ability.name === 'Charge Shot') {
-      const vel = this._tempVec3b.copy(aim).multiplyScalar(1200);
-      const proj = new Projectile(this.position, vel, 1900, 100, 'bot', LSS.CLASS_COLORS.BLASTER);
-      proj.sizeMult = 1.8;
-      proj.ownerTeam = this.team; proj.ownerRef = this;
-      game.projectiles.push(proj);
-    } else if (ability.name === 'Tracker Rockets' || ability.name === 'Rocket Salvo') {
-      const _rkColor = (ability.name === 'Rocket Salvo') ? LSS.CLASS_COLORS.SYPHON : LSS.CLASS_COLORS.TRACKER;
-      let _rkTgt = tgt, _rkAim = aim;
-      if (ability.name === 'Tracker Rockets' && tgt !== player &&
-          typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
-          player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3) {
-        const _toP = new THREE.Vector3().subVectors(player.position, this.position);
-        const _dP = _toP.length();
-        if (_dP <= 2400 && _dP > 0) {
-          const _aimP = _toP.clone().normalize();
-          let _losP = _dP;
-          try { _losP = raycastLevel(this.position, _aimP, _dP + 10, true); } catch (_) {}
-          if (_losP >= _dP - 5) { _rkTgt = player; _rkAim = _aimP; }
-        }
-      }
-      const _rkHome = (ability.name === 'Tracker Rockets') &&
-        (_rkTgt !== player || (player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3));
-      for (let i = 0; i < 3; i++) {
-        const vel = this._tempVec3b.set(
-          _rkAim.x + (Math.random()-0.5)*0.10,
-          _rkAim.y + (Math.random()-0.5)*0.10,
-          _rkAim.z
-        ).normalize().multiplyScalar(700);
-        const proj = new Projectile(this.position, vel, 1100, 100, 'bot', _rkColor);
-        proj.smokeTrail = true;
+      for (let _s = 0; _s < 2; _s++) {
+        const _o = (this.mesh && typeof shipMuzzleWorld === 'function')
+          ? shipMuzzleWorld(this.mesh, _s, this._tempVec3c) : this._tempVec3c.copy(this.position);
+        const proj = new Projectile(_o, vel, _sbHalf, 150, 'bot', LSS.CLASS_COLORS.SLAYER);
+        proj.isArcWave = true;
         proj.ownerTeam = this.team; proj.ownerRef = this;
-        if (_rkHome) { proj.tracking = true; proj.trackTarget = _rkTgt; }
-        proj.removeHaze();
         game.projectiles.push(proj);
       }
-      if (_rkHome && _rkTgt === player) {
-        delete player.enemyToneLocks[this.id];
-        if (player._enemyLockDecayTimers) delete player._enemyLockDecayTimers[this.id];
+    } else if (ability.name === 'Charge Shot') {
+      this._csT = 1.0;
+      this._csAim = this._csAim || new THREE.Vector3();
+      this._csAim.copy(aim);
+      try {
+        if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+            player.position && player.position.distanceToSquared(this.position) < 2200 * 2200 &&
+            (typeof window === 'undefined' || window.__enemyFireSfx !== false)) {
+          playSpatialSound('powershot_charge', this.position, { refDistance: 200, maxDistance: 2200, rolloffFactor: 1.0 });
+        }
+      } catch (_) {}
+    } else if (ability.name === 'Tracker Rockets') {
+      const _locked = this._lockedTargets();
+      if (_locked.length === 0) {
+        this.abilityCooldowns[0] = 0.6;
+        return;
       }
+      const _trQueue = [];
+      for (const _lt of _locked) {
+        for (let m = 0; m < 5; m++) {
+          _trQueue.push({
+            speed: 900, damage: 1000, splash: 80,
+            color: LSS.CLASS_COLORS.TRACKER,
+            smokeTrail: true, removeHaze: true,
+            tracking: true, trackTarget: _lt,
+            spreadX: (Math.random() - 0.5) * 0.2,
+            spreadY: (Math.random() - 0.5) * 0.2,
+          });
+        }
+        this._consumeLock(_lt);
+      }
+      this._botSalvoStart(_trQueue, 0.035);
+      try {
+        if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+            player.position && player.position.distanceToSquared(this.position) < 3000 * 3000 &&
+            (typeof window === 'undefined' || window.__enemyFireSfx !== false)) {
+          playSpatialSound('tracker_rockets', this.position, { refDistance: 300, maxDistance: 3000, rolloffFactor: 1.0 });
+        }
+      } catch (_) {}
+    } else if (ability.name === 'Rocket Salvo') {
+      const _rsQueue = [];
+      for (let r = 0; r < 5; r++) {
+        _rsQueue.push({
+          speed: 800, damage: 700, splash: 100,
+          color: LSS.CLASS_COLORS.SYPHON,
+          smokeTrail: true, removeHaze: true,
+          aimX: aim.x, aimY: aim.y, aimZ: aim.z,
+          spreadX: (Math.random() - 0.5) * 0.12,
+          spreadY: (Math.random() - 0.5) * 0.12,
+        });
+      }
+      this._botSalvoStart(_rsQueue, 0.035);
+      try {
+        if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+            player.position && player.position.distanceToSquared(this.position) < 3000 * 3000 &&
+            (typeof window === 'undefined' || window.__enemyFireSfx !== false)) {
+          playSpatialSound('rocket_salvo', this.position, { refDistance: 300, maxDistance: 3000, rolloffFactor: 1.0 });
+        }
+      } catch (_) {}
     } else if (ability.name === 'Energy Syphon') {
       const range = 1500;
       const reach = Math.min(range, losDist);
@@ -34137,9 +34218,10 @@ class Bot {
       used = false;
     }
     if (used) {
-      let _baseCd = ability.cooldown;
-      if (ability.name === 'Tracker Rockets') _baseCd = 7;
-      this.abilityCooldowns[0] = _baseCd * (1.4 + Math.random() * 0.6);
+      this.abilityCooldowns[0] = ability.cooldown * (1.0 + Math.random() * 0.25);
+      this._creditAbilityCore();
+    } else {
+      this.abilityCooldowns[0] = 0.5;
     }
   }
 
@@ -34178,6 +34260,7 @@ class Bot {
         try { spawnTetherTrap(trapPos, 'bot', this.team, null, ++net.effectIdCounter, false); } catch (_) { used = false; }
       } else used = false;
     } else if (ability.name === 'Teleport') {
+      if (this._underFireT > 0) { this.abilityCooldowns[2] = 0.4; return; }
       const from = this.position.clone();
       const hop = this._tempVec3b.copy(this.targetDir).multiplyScalar(700);
       hop.x += (Math.random() - 0.5) * 300;
@@ -34223,7 +34306,8 @@ class Bot {
       used = false;
     }
     if (used) {
-      this.abilityCooldowns[2] = (ability.cooldown || 12) * (1.4 + Math.random() * 0.6);
+      this.abilityCooldowns[2] = (ability.cooldown || 12) * (1.0 + Math.random() * 0.25);
+      this._creditAbilityCore();
     } else {
       this.abilityCooldowns[2] = 0.5;
     }
@@ -34232,7 +34316,7 @@ class Bot {
   _tryUseDefensive(ability) {
     const hurting = this.health < this.maxHealth * 0.55 ||
                     (this.shield <= 0 && this.health < this.maxHealth * 0.9);
-    if (!hurting) return;
+    if (!hurting && this._underFireT <= 0) return;
     let used = true;
     const n = ability.name;
     if (n === 'Vortex Shield' || n === 'Absorption' || n === 'Fire Shield' || n === 'Body Shield') {
@@ -34243,6 +34327,8 @@ class Bot {
         if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, c, 2.5, 500, 0.25);
       } catch (_) {}
     } else if (n === 'Afterburner') {
+      this._surgeSpd = Math.max(600, this.chassis.flightSpeed * 1.6);
+      this._surgeT = (ability.duration || 3);
       this.velocity.addScaledVector(this.targetDir, this.chassis.flightSpeed * 1.6);
       try { if (typeof spawnDashBoosters === 'function') spawnDashBoosters(this.mesh, this.targetDir, 0xffaa33); } catch (_) {}
     } else if (n === 'Energy Syphon') {
@@ -34268,33 +34354,434 @@ class Bot {
       used = false;
     }
     if (used) {
-      this.abilityCooldowns[1] = (ability.cooldown || 14) * (1.4 + Math.random() * 0.6);
+      const _hold = !(ability.cooldown > 0);
+      this.abilityCooldowns[1] = _hold ? (6 * (0.85 + Math.random() * 0.4))
+                                       : (ability.cooldown * (1.0 + Math.random() * 0.25));
+      if (!_hold) this._creditAbilityCore();
     } else {
       this.abilityCooldowns[1] = 0.5;
     }
   }
 
-  _useCoreSurge(target) {
-    this.coreMeter = 0;
-    const aim = this._tempVec3a.subVectors(target.position, this.position).normalize();
-    const col = (typeof chassisFlashColor === 'function') ? chassisFlashColor(this.loadout.name) : 0xffdd44;
-    for (let i = 0; i < 5; i++) {
-      const vel = this._tempVec3b.set(
-        aim.x + (Math.random() - 0.5) * 0.16,
-        aim.y + (Math.random() - 0.5) * 0.16,
-        aim.z + (Math.random() - 0.5) * 0.16
-      ).normalize().multiplyScalar(850);
-      const proj = new Projectile(this.position, vel, 700, 120, 'bot', col);
-      proj.smokeTrail = true;
-      proj.ownerTeam = this.team; proj.ownerRef = this;
-      try { proj.removeHaze(); } catch (_) {}
-      game.projectiles.push(proj);
+  _creditAbilityCore() {
+    this.coreMeter = Math.min(100, this.coreMeter + 2);
+  }
+
+
+  _botSalvoStart(queue, interval) {
+    if (!queue || !queue.length) return;
+    this._botSalvo = { queue: queue, t: 0, interval: (interval > 0) ? interval : 0.035, idx: 0 };
+  }
+  _botSalvoTick(dt) {
+    const q = this._botSalvo;
+    if (!q) return;
+    if (!this.alive || !q.queue.length) { this._botSalvo = null; return; }
+    q.t -= dt;
+    if (q.t > 0) return;
+    q.t = q.interval;
+    const cfg = q.queue.shift();
+    if (!cfg) { this._botSalvo = null; return; }
+    let tracking = !!cfg.tracking;
+    let trackTarget = cfg.trackTarget;
+    const _ttAlive = trackTarget && (trackTarget === player ? (player.shipState !== 'dead') : !!trackTarget.alive);
+    if (tracking && !_ttAlive) { tracking = false; trackTarget = null; }
+    const dir = this._tempVec3a;
+    if (trackTarget && trackTarget.position) dir.subVectors(trackTarget.position, this.position);
+    else dir.set(cfg.aimX || 0, cfg.aimY || 0, cfg.aimZ || -1);
+    if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1);
+    dir.normalize();
+    dir.x += (cfg.spreadX || 0); dir.y += (cfg.spreadY || 0);
+    dir.normalize();
+    const origin = (this.mesh && typeof shipMuzzleWorld === 'function')
+      ? shipMuzzleWorld(this.mesh, q.idx++, this._tempVec3c)
+      : this._tempVec3c.copy(this.position);
+    const vel = this._tempVec3b.copy(dir).multiplyScalar(cfg.speed || 800);
+    const proj = new Projectile(origin, vel, cfg.damage || 700, cfg.splash || 100, 'bot', cfg.color || 0xffaa00);
+    proj.smokeTrail = !!cfg.smokeTrail;
+    proj.ownerTeam = this.team; proj.ownerRef = this;
+    if (cfg.sizeMult) proj.sizeMult = cfg.sizeMult;
+    if (cfg.lifetime) proj.lifetime = cfg.lifetime;
+    if (cfg.bustsRocks) proj.bustsRocks = true;
+    if (tracking) { proj.tracking = true; proj.trackTarget = trackTarget; }
+    if (cfg.removeHaze) { try { proj.removeHaze(); } catch (_) {} }
+    game.projectiles.push(proj);
+  }
+
+  _addLock(target) {
+    if (!target || this.loadoutKey !== 'TRACKER') return;
+    if (target === player) {
+      const prev = player.enemyToneLocks[this.id] || 0;
+      player.enemyToneLocks[this.id] = Math.min(3, prev + 1);
+      if (player._enemyLockDecayTimers) player._enemyLockDecayTimers[this.id] = 0;
+      return;
     }
-    this.shield = Math.min(this.maxShield, this.shield + this.maxShield * 0.35);
+    if (target.id == null) return;
+    this._botLocks[target.id] = Math.min(3, (this._botLocks[target.id] || 0) + 1);
+  }
+  _consumeLock(target) {
+    if (!target) return;
+    if (target === player) {
+      delete player.enemyToneLocks[this.id];
+      if (player._enemyLockDecayTimers) delete player._enemyLockDecayTimers[this.id];
+      return;
+    }
+    if (target.id != null) delete this._botLocks[target.id];
+  }
+  _botLockTick(dt) {
+    if (this.loadoutKey !== 'TRACKER') return;
+    this._botLockDecay += dt;
+    if (this._botLockDecay < 5) return;            // one mark per 5 s, matching the player's decay
+    this._botLockDecay = 0;
+    for (const k in this._botLocks) {
+      const v = this._botLocks[k] - 1;
+      if (v > 0) this._botLocks[k] = v; else delete this._botLocks[k];
+    }
+  }
+  _lockedTargets() {
+    const out = [];
+    const _ok = (t) => {
+      if (!t || !t.position) return false;
+      const d = this.position.distanceTo(t.position);
+      if (d > 2400 || d <= 0) return false;
+      const dir = this._tempVec3b.subVectors(t.position, this.position).normalize();
+      let los = d;
+      try { los = raycastLevel(this.position, dir, d + 10, true); } catch (_) {}
+      return los >= d - 5;
+    };
+    if (typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
+        player.team !== this.team && (player.enemyToneLocks[this.id] || 0) >= 3 && _ok(player)) {
+      out.push(player);
+    }
+    for (const k in this._botLocks) {
+      if (this._botLocks[k] < 3) continue;
+      let t = null;
+      for (const b of game.entities) { if (b && b.alive && b.id != null && b.id == k) { t = b; break; } }
+      if (!t && game.monsters) { for (const m of game.monsters) { if (m && m.alive && m.id != null && m.id == k) { t = m; break; } } }
+      if (!t || t.team === this.team) { delete this._botLocks[k]; continue; }
+      if (_ok(t)) out.push(t);
+    }
+    return out;
+  }
+
+  _chargeShotTick(dt) {
+    if (this._csT <= 0) return;
+    this._csT -= dt;
+    this._coreFxT -= dt;
+    if (this._coreFxT <= 0) {
+      this._coreFxT = 0.08;
+      try {
+        if (typeof spawnDynamicLight === 'function') {
+          const k = 1 - Math.max(0, this._csT);
+          spawnDynamicLight(this.position, LSS.CLASS_COLORS.BLASTER, 1.0 + k * 2.5, 260 + k * 240, 0.12);
+        }
+      } catch (_) {}
+    }
+    if (this._csT > 0) return;
+    this._csT = 0;
+    if (!this.alive) return;
+    const vel = this._tempVec3b.copy(this._csAim).multiplyScalar(1200);
+    const origin = (this.mesh && typeof shipMuzzleWorld === 'function')
+      ? shipMuzzleWorld(this.mesh, this._muzzleShot = (this._muzzleShot | 0) + 1, this._tempVec3c)
+      : this._tempVec3c.copy(this.position);
+    const proj = new Projectile(origin, vel, 3200 * 0.6, 100, 'bot', LSS.CLASS_COLORS.BLASTER);
+    proj.sizeMult = 1.8;
+    proj.ownerTeam = this.team; proj.ownerRef = this;
+    game.projectiles.push(proj);
     try {
-      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, col, 4.0, 800, 0.4);
-      if (typeof playSpatialSound === 'function') playSpatialSound('explosion', this.position.clone(), { refDistance: 300, maxDistance: 2500, rolloffFactor: 0.9 });
+      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(origin, LSS.CLASS_COLORS.BLASTER, 4.0, 600, 0.18);
     } catch (_) {}
+  }
+
+  _railWind(dt, dist) {
+    this._railHeld = true;
+    this._railCharge = Math.min(1.0, this._railCharge + dt / 2.5);
+    const _snap = dist < 500;
+    const _dump = this._underFireT > 0 && this._railCharge >= 0.25;
+    if (this._railCharge >= this._railWant || _snap || _dump) {
+      this._shotMul = 1.0 + this._railCharge * 3.0;
+      this._railCharge = 0;
+      this._railWant = 0.35 + Math.random() * 0.65;
+      return true;
+    }
+    return false;
+  }
+  _railTick(dt) {
+    if (this.loadoutKey !== 'PUNCTURE') return;
+    if (!this._railHeld && this._railCharge > 0) {
+      this._railCharge = Math.max(0, this._railCharge - dt * 0.2);   // the player's bleed-off rate
+    }
+    this._railHeld = false;
+    if (this._railCharge <= 0.08) return;
+    this._railFxT -= dt;
+    if (this._railFxT > 0) return;
+    this._railFxT = 0.09;
+    try {
+      if (typeof spawnDynamicLight === 'function') {
+        const c = this._railCharge;
+        spawnDynamicLight(this.position, LSS.CLASS_COLORS.PUNCTURE, 0.8 + c * 3.0, 240 + c * 320, 0.13);
+      }
+    } catch (_) {}
+  }
+
+  _enemiesWithin(radius) {
+    const out = [];
+    if (typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
+        player.team !== this.team && this.position.distanceTo(player.position) < radius) {
+      out.push(player);
+    }
+    for (const b of game.entities) {
+      if (!b || b === this || !b.alive || b.team === this.team || !b.position) continue;
+      if (this.position.distanceTo(b.position) < radius) out.push(b);
+    }
+    if (game.monsters) {
+      for (const m of game.monsters) {
+        if (!m || !m.alive || !m.position) continue;
+        if (typeof _botMayDamageMonster === 'function' && !_botMayDamageMonster(this, m)) continue;
+        if (this.position.distanceTo(m.position) < radius + (m.collisionRadius || 0)) out.push(m);
+      }
+    }
+    return out;
+  }
+
+  _activateCore(target) {
+    this.coreMeter = 0;
+    const coreName = (this.loadout.core && this.loadout.core.name) || '';
+    const dur = (this.loadout.core && this.loadout.core.duration) || 3;
+    this._coreName = coreName;
+    this._coreT = dur;
+    this._coreAcc = 0;
+    this._coreFired = 0;
+    this._coreTarget = target || this.combatTarget;
+    const aim = this._tempVec3a.subVectors(
+      (this._coreTarget && this._coreTarget.position) ? this._coreTarget.position : this.position,
+      this.position);
+    if (aim.lengthSq() < 1e-6) aim.copy(this.targetDir);
+    aim.normalize();
+    const col = (typeof chassisFlashColor === 'function') ? chassisFlashColor(this.loadout.name) : 0xffdd44;
+    const _cue = (snd) => {
+      try {
+        if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, col, 4.0, 900, 0.4);
+        if (snd && typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+            player.position && player.position.distanceToSquared(this.position) < 4000 * 4000 &&
+            (typeof window === 'undefined' || window.__enemyFireSfx !== false)) {
+          playSpatialSound(snd, this.position, { refDistance: 300, maxDistance: 4000, rolloffFactor: 0.9 });
+        }
+      } catch (_) {}
+    };
+
+    if (coreName === 'Mega Flame Chain') {
+      _cue('flame_core_blast');
+      const radius = 1200;
+      for (const t of this._enemiesWithin(radius)) {
+        const d = this.position.distanceTo(t.position);
+        const falloff = 1 - Math.min(1, d / radius);
+        this._dealAbilityDamage(t, 9000 * 0.6 * falloff);
+      }
+      try { if (typeof igniteNearbyGas === 'function') igniteNearbyGas(this.position, radius, 'bot', this.team); } catch (_) {}
+      try {
+        const spine = this._tempVec3b.copy(aim); spine.y = 0;
+        if (spine.lengthSq() < 0.001) spine.set(0, 0, -1);
+        spine.normalize();
+        const yAx = new THREE.Vector3(0, 1, 0);
+        for (const ang of [0, (2 * Math.PI) / 3, -(2 * Math.PI) / 3]) {
+          const dir = spine.clone().applyAxisAngle(yAx, ang);
+          const start = this.position.clone().addScaledVector(dir, 60);
+          const id = ++net.effectIdCounter;
+          if (typeof spawnFlameChainVisual === 'function') spawnFlameChainVisual(start, dir, 700, this.team, null, id);
+        }
+        spawnExplosion(this.position, 80);
+      } catch (_) {}
+      this._coreT = 0;                            // instant core; nothing to tick
+      this._coreName = null;
+    } else if (coreName === 'Mega Barrage') {
+      _cue('barrage_core_thrust');
+      this._surgeSpd = Math.max(600, this.chassis.flightSpeed * 1.6);
+      this._surgeT = dur;
+      this.velocity.addScaledVector(this.targetDir, 600);
+    } else if (coreName === 'Mega Stun Bolt') {
+      _cue('stun_core_zap');
+      try { if (typeof _spawnSlayerCoreStormFX === 'function') _spawnSlayerCoreStormFX(this.position, null); } catch (_) {}
+    } else if (coreName === 'Mega Laser') {
+      _cue('laser_core_beam');
+    } else if (coreName === 'Mega Tracker Rockets') {
+      _cue('salvo_core_burst');
+      const q = [];
+      for (let m = 0; m < 8; m++) {
+        q.push({
+          speed: (typeof _mtrSpeed === 'function') ? _mtrSpeed() : 360,
+          damage: 250, splash: 120, color: LSS.CLASS_COLORS.TRACKER,
+          smokeTrail: true, removeHaze: true, bustsRocks: true,
+          lifetime: (typeof _mtrLife === 'function') ? _mtrLife() : 6.5,
+          tracking: true, trackTarget: this._coreTarget,
+          aimX: aim.x, aimY: aim.y, aimZ: aim.z,
+          spreadX: (Math.random() - 0.5) * 0.3, spreadY: (Math.random() - 0.5) * 0.3,
+        });
+      }
+      this._botSalvoStart(q, 0.05);
+    } else if (coreName === 'AI Assist') {
+      _cue('upgrade_core');
+      this._aiAssistT = (this.loadout.core && this.loadout.core.duration) || 10;
+      this._coreT = 0; this._coreName = null;
+    } else if (coreName === 'AI Nanobots') {
+      _cue('upgrade_core');
+      this.shield = this.maxShield;
+      this.shieldRegenDelay = 0;
+      this.abilityCooldowns[0] = 0; this.abilityCooldowns[1] = 0; this.abilityCooldowns[2] = 0;
+      if (this._syphonTier < 3) {
+        this._syphonTier++;
+        if (this._syphonTier === 2) { this.maxShield = this.chassis.maxShield + 500; this.shield = this.maxShield; }
+        if (this._syphonTier === 3) { this._syphonDmgMult = 1.25; }
+      }
+      this._coreT = 0; this._coreName = null;
+    } else {
+      this._coreT = 0; this._coreName = null;
+    }
+  }
+
+  _coreTick(dt) {
+    if (this._coreT <= 0 || !this._coreName) return;
+    this._coreT -= dt;
+    const done = this._coreT <= 0;
+    let tgt = this._coreTarget;
+    const tgtAlive = tgt && (tgt === player ? (player.shipState !== 'dead') : !!tgt.alive);
+    if (!tgtAlive) { tgt = this.combatTarget; this._coreTarget = tgt; }
+    const name = this._coreName;
+
+    if (name === 'Mega Laser') {
+      if (tgt && tgt.position) {
+        const aim = this._tempVec3a.subVectors(tgt.position, this.position);
+        const d = aim.length();
+        if (d > 1 && d < 3000) {
+          aim.multiplyScalar(1 / d);
+          let los = d;
+          try { los = raycastLevel(this.position, aim, d + 10, true); } catch (_) {}
+          if (los >= d - 5) {
+            const dps = (((this.loadout.core && this.loadout.core.damage) || 12000) /
+                         ((this.loadout.core && this.loadout.core.duration) || 4)) * 0.6;
+            this._dealAbilityDamage(tgt, dps * dt);
+          }
+          this._coreFxT -= dt;
+          if (this._coreFxT <= 0) {
+            this._coreFxT = 0.05;
+            const end = this._tempVec3c.copy(this.position).addScaledVector(aim, Math.min(los, 3000));
+            try {
+              spawnTracer(this.position, end, LSS.CLASS_COLORS.VORTEX, 2.2);
+              spawnTracer(this.position, end, 0xffffff, 1.0);
+            } catch (_) {}
+          }
+        }
+      }
+    } else if (name === 'Mega Barrage') {
+      this._coreAcc += dt;
+      while (this._coreFired < 15 && this._coreAcc >= 0.2) {
+        this._coreAcc -= 0.2;
+        this._coreFired++;
+        const dir = this._tempVec3a;
+        if (tgt && tgt.position) dir.subVectors(tgt.position, this.position).normalize();
+        else dir.copy(this.targetDir);
+        const vel = this._tempVec3b.set(
+          dir.x + (Math.random() - 0.5) * 0.14,
+          dir.y + (Math.random() - 0.5) * 0.14,
+          dir.z + (Math.random() - 0.5) * 0.14
+        ).normalize().multiplyScalar(900);
+        const origin = (this.mesh && typeof shipMuzzleWorld === 'function')
+          ? shipMuzzleWorld(this.mesh, this._coreFired, this._tempVec3c)
+          : this._tempVec3c.copy(this.position);
+        const proj = new Projectile(origin, vel, 7000 / 15 * 0.6, 150, 'bot', LSS.CLASS_COLORS.PUNCTURE);
+        proj.smokeTrail = true;
+        proj.ownerTeam = this.team; proj.ownerRef = this;
+        try { proj.removeHaze(); } catch (_) {}
+        game.projectiles.push(proj);
+      }
+      this.velocity.addScaledVector(this.targetDir, this.chassis.acceleration * dt * 0.6);
+    } else if (name === 'Mega Stun Bolt') {
+      for (const t of this._enemiesWithin(500)) this._dealAbilityDamage(t, 1800 * 0.6 * dt);
+      this._coreFxT -= dt;
+      if (this._coreFxT <= 0) {
+        this._coreFxT = 0.06;
+        try {
+          if (typeof spawnLightningBolt === 'function') {
+            const ang = Math.random() * Math.PI * 2;
+            const r = 200 + Math.random() * 300;
+            const end = this._tempVec3c.set(
+              this.position.x + Math.cos(ang) * r,
+              this.position.y + (Math.random() - 0.5) * 220,
+              this.position.z + Math.sin(ang) * r);
+            spawnLightningBolt(this._tempVec3a.copy(this.position), end, LSS.CLASS_COLORS.SLAYER, 0.45, 3, 4);
+          }
+        } catch (_) {}
+      }
+      if (Math.random() < dt * 2 && tgt && tgt.position) {
+        const dir = this._tempVec3a.subVectors(tgt.position, this.position).normalize();
+        const vel = this._tempVec3b.copy(dir).multiplyScalar(800);
+        const proj = new Projectile(this.position, vel, 600 * 0.6, 150, 'bot', LSS.CLASS_COLORS.SLAYER);
+        proj.isArcWave = true;
+        proj.ownerTeam = this.team; proj.ownerRef = this;
+        game.projectiles.push(proj);
+      }
+    } else if (name === 'Mega Tracker Rockets') {
+      if (Math.random() < dt * 10 && tgt && !this._botSalvo) {
+        this._botSalvoStart([{
+          speed: (typeof _mtrSpeed === 'function') ? _mtrSpeed() : 360,
+          damage: 200, splash: 120, color: LSS.CLASS_COLORS.TRACKER,
+          smokeTrail: true, removeHaze: true, bustsRocks: true,
+          lifetime: (typeof _mtrLife === 'function') ? _mtrLife() : 6.5,
+          tracking: true, trackTarget: tgt,
+          spreadX: (Math.random() - 0.5) * 0.25, spreadY: (Math.random() - 0.5) * 0.25,
+        }], 0.01);
+      }
+    }
+    if (done) { this._coreT = 0; this._coreName = null; this._coreTarget = null; }
+  }
+
+
+  _threatTick(dt) {
+    if (this._underFireT > 0) this._underFireT -= dt;
+    if (this._evadeT > 0) this._evadeT -= dt;
+
+    this._incScanT -= dt;
+    if (this._incScanT <= 0) {
+      this._incScanT = 0.12;
+      const projs = (typeof game !== 'undefined' && game.projectiles) ? game.projectiles : null;
+      if (projs && projs.length) {
+        const _dangerR = Math.max(260, this.chassis.hullLength * 2.2);
+        for (let i = 0; i < projs.length; i++) {
+          const p = projs[i];
+          if (!p || !p.alive || !p.position || !p.velocity) continue;
+          const _pTeam = (p.ownerTeam != null) ? p.ownerTeam
+                       : (p.owner === 'player' && typeof player !== 'undefined' && player) ? player.team : null;
+          if (_pTeam == null || _pTeam === this.team) continue;
+          if (p.ownerRef === this) continue;
+          const rx = this.position.x - p.position.x;
+          const ry = this.position.y - p.position.y;
+          const rz = this.position.z - p.position.z;
+          const d2 = rx * rx + ry * ry + rz * rz;
+          if (d2 > 4000 * 4000) continue;
+          const vx = p.velocity.x, vy = p.velocity.y, vz = p.velocity.z;
+          const v2 = vx * vx + vy * vy + vz * vz;
+          if (v2 < 1) continue;
+          const lead = (rx * vx + ry * vy + rz * vz) / v2;   // seconds to closest approach
+          if (lead <= 0 || lead > 1.6) continue;             // behind us, or too far out to react to
+          const mx = rx - vx * lead, my = ry - vy * lead, mz = rz - vz * lead;
+          if (mx * mx + my * my + mz * mz > _dangerR * _dangerR) continue;
+          this._underFireT = Math.max(this._underFireT, 1.4);
+          this._fireFromDir.set(-vx, -vy, -vz).normalize();   // the round's axis, reversed
+          break;                                             // one confirmed threat is enough
+        }
+      }
+    }
+
+    if (this._underFireT > 0 && this._evadeT <= 0) {
+      this._evadeT = 0.45 + Math.random() * 0.25;
+      const up = this._tempVec3d.set(0, 1, 0);
+      this._evadeDir.crossVectors(up, this._fireFromDir);
+      if (this._evadeDir.lengthSq() < 1e-4) this._evadeDir.set(1, 0, 0);   // fire straight down the Y axis
+      this._evadeDir.normalize();
+      const side = (((this.id | 0) % 2) === 0 ? 1 : -1) * (Math.random() < 0.75 ? 1 : -1);
+      this._evadeDir.multiplyScalar(side);
+      this._evadeDir.y += (Math.random() - 0.5) * 0.9;
+      this._evadeDir.normalize();
+    }
   }
 
   _unstickTick(dt) {
@@ -34551,7 +35038,7 @@ class Bot {
     }
     const weapon = this.loadout.weapon;
     const rangeRatio = Math.max(0, 1 - dist / weapon.range);
-    const accuracy = 0.25 + rangeRatio * 0.45; 
+    const accuracy = (this._aiAssistT > 0) ? 1 : (0.25 + rangeRatio * 0.45);
     if (Math.random() > accuracy) return;
 
     let damage = weapon.damage;
@@ -34566,6 +35053,11 @@ class Bot {
       const falloff = 0.7 + rangeRatio * 0.3;
       damage *= falloff;
     }
+
+    if (this._shotMul !== 1) { damage *= this._shotMul; }
+    const _shotMulUsed = this._shotMul;
+    this._shotMul = 1;
+    if (this._syphonDmgMult) damage *= this._syphonDmgMult;
 
     const fireOrigin = (this.mesh && typeof shipMuzzleWorld === 'function')
       ? shipMuzzleWorld(this.mesh, this._muzzleShot = (this._muzzleShot | 0) + 1, _botFireOrigin)
@@ -34594,6 +35086,14 @@ if (game._hubWater) {
   } catch (_) {}
 }
 const isChaingunBot = (weapon.fireRate <= 0.10);
+      if (weapon.name === 'Sodium Railgun' && typeof _spawnRailgunSpiral === 'function') {
+        try { _spawnRailgunSpiral(fireOrigin, target.position, flashColor); } catch (_) {
+          spawnTracer(fireOrigin, target.position, flashColor, 1.0);
+        }
+        if (_shotMulUsed > 1.8) {
+          try { spawnTracer(fireOrigin, target.position, 0xffffff, Math.min(2.2, _shotMulUsed * 0.55)); } catch (_) {}
+        }
+      } else
       spawnTracer(fireOrigin, target.position, flashColor, isChaingunBot ? 0.55 : 1.0);
 
       for (let i = 0; i < 2; i++) {
@@ -34638,13 +35138,10 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
 
     if (_tgtIsPlayer) {
       playerTakeDamage(damage, this, null, { splashFrom: fireOrigin, splashColor: flashColor });
-      if (this.loadoutKey === 'TRACKER') {
-        const prevEnemyLocks = player.enemyToneLocks[this.id] || 0;
-        player.enemyToneLocks[this.id] = Math.min(3, prevEnemyLocks + 1);
-        if (player._enemyLockDecayTimers) player._enemyLockDecayTimers[this.id] = 0; 
-      }
+      this._addLock(player);   // (v45.42) one ladder for every target - see _addLock
     } else {
       target.takeDamage(damage, this, target.position);
+      this._addLock(target);
     }
     this.coreMeter = Math.min(100, this.coreMeter + damage / 100);
   }
@@ -34661,6 +35158,19 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
       _hitMarkFor(attacker, amount);   // (v45.38)
       return amount;
     }
+
+    this._underFireT = 2.2;
+    try {
+      const _srcPos = (attacker === 'player')
+        ? ((typeof player !== 'undefined' && player) ? player.position : null)
+        : (attacker && attacker.position) ? attacker.position
+        : (hitPoint || null);
+      if (_srcPos) {
+        this._fireFromDir.subVectors(this.position, _srcPos);
+        if (this._fireFromDir.lengthSq() > 1e-4) this._fireFromDir.normalize();
+        else this._fireFromDir.set(0, 0, 1);
+      }
+    } catch (_) {}
 
     if (typeof _wallAbsorbSegment === 'function') {
       const _wFrom = (attacker === 'player')
@@ -34810,6 +35320,7 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
         if (!attacker._streakCount) attacker._streakCount = 0;
         attacker._streakCount++;
         attacker.kills = (attacker.kills || 0) + 1;
+        if (attacker.coreMeter != null) attacker.coreMeter = Math.min(100, attacker.coreMeter + 15);
       }
     }
   }
@@ -50620,6 +51131,9 @@ function playerDie(attacker) {
   player.powerShotCharge = 0;
   try { if (player._bcgOn) _blasterChargeGlowOff(); } catch (_) {}
   if (player.mesh) player.mesh.visible = false;
+  if (attacker && typeof attacker === 'object' && attacker.coreMeter != null && attacker.alive) {
+    attacker.coreMeter = Math.min(100, attacker.coreMeter + 15);
+  }
   if (attacker && attacker.loadout) addKillFeed(attacker.loadout.name, 'You');
   if (typeof triggerScreenShake === 'function') triggerScreenShake(12);
   if (typeof triggerHitFeedback === 'function') {

@@ -6725,7 +6725,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.41';
+const LSS_BUILD = '45.42';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -55526,8 +55526,56 @@ class Bot {
     
     
     
-    this._fireLosT = 0;    
-    this._fireLosDist = 0; 
+    this._fireLosT = 0;
+    this._fireLosDist = 0;
+
+    // ⭐⭐ (v45.42) THE COMBAT BRAIN'S MISSING STATE. Owner: "i don't think the bots really know how
+    // to use their abilities... or they aren't setup so they can use them". Six separate gaps, and
+    // every one of them needed a piece of per-bot state that simply did not exist:
+    //   1. UNDER FIRE. Nothing anywhere asked "am I being shot at?" - the defensive slot fired on a
+    //      HEALTH threshold, which is a different question and answers it far too late.
+    //   2. EVASION. Nothing asked "where is it coming from?", so a bot could not break the firing
+    //      line even in principle.
+    //   3. THE CORE. `coreMeter` charged on a flat dt*1.5 wall-clock trickle (full in 66 s whether
+    //      the bot ever fought or not - humans have NO passive charge) and was spent on a generic
+    //      5-rocket salvo that belongs to no ship in the game.
+    //   4. PUNCTURE'S RAILGUN. The human holds the trigger to wind a 2.5 s charge worth up to 4x
+    //      damage; the bot fired uncharged base shots forever.
+    //   5. TRACKER'S LOCK, bot-vs-bot. Locks were only ever kept on the PLAYER, so the ability's own
+    //      rule ("volley at every 3/3-locked ship") had nothing to read when the target was a bot.
+    //   6. BLASTER / SYPHON cores are BUFFS, which needs somewhere to hold the buff.
+    // ⚠ All of it is plain fields on the bot. Nothing here is replicated: `bot_state` carries pose
+    //   and HP, and the AUTHORITY is the only side that runs `update()`, so proxies never read them.
+    this._underFireT = 0;                       // (1) seconds left of "someone is shooting at me"
+    this._fireFromDir = new THREE.Vector3(0, 0, 1);   // unit vector pointing FROM the threat TO me
+    this._evadeDir = new THREE.Vector3();       // (2) committed juke heading
+    this._evadeT = 0;                           // how long to hold it before re-rolling
+    this._incScanT = Math.random() * 0.12;      // staggered incoming-projectile scan clock
+    this._railCharge = 0;                       // (4) PUNCTURE: 0..1, mirrors player.railgunCharge
+    this._railWant = 0.35 + Math.random() * 0.65;   // the charge THIS shot is holding out for
+    this._railHeld = false;                     // "the trigger was down this frame" (per-frame flag)
+    this._railFxT = 0;                          // charge-glow throttle
+    this._shotMul = 1;                          // damage multiplier the next fireAtShip applies
+    this._botLocks = Object.create(null);       // (5) TRACKER lock marks on non-player targets
+    this._botLockDecay = 0;
+    this._coreName = null;                      // (3) live core: name / time left / accumulators
+    this._coreT = 0;
+    this._coreAcc = 0;
+    this._coreFired = 0;
+    this._coreTarget = null;
+    this._coreFxT = 0;
+    this._aiAssistT = 0;                        // (6) BLASTER core: perfect aim + no reload gaps
+    this._syphonTier = 0;                       // (6) SYPHON core: the nanobot ladder
+    this._botSalvo = null;                      // bot-side staggered rocket queue (see _botSalvoTick)
+    this._csT = 0;                              // BLASTER Charge Shot: seconds of spool left
+    this._csAim = new THREE.Vector3();          // the heading it spooled up on
+    // ⚠ (v45.42) A SPEED SURGE HAS TO RAISE THE CAP OR IT DOES NOTHING. v43.18 spotted this and only
+    //   half-fixed it: it taught the clamp about `dashSpeed` when `dashActive`, which rescued the
+    //   dash - but PUNCTURE's Afterburner (its DEFENSIVE ability, the one the owner now wants fired
+    //   under fire) sets no such flag, so `velocity += flightSpeed * 1.6` was still being rescaled
+    //   away by the very next frame's clamp. Same for Mega Barrage's "speed boost". One timer, read
+    //   by the clamp beside `_dashCap`.
+    this._surgeT = 0; this._surgeSpd = 0;
   }
 
   getLoadoutRangePreference() {
@@ -55929,12 +55977,19 @@ class Bot {
       this._arenaOn = false; this._arenaSlab = -1;
     }
 
+    // (v45.42) Threat awareness runs BEFORE the steering block - it owns `_tempVec3d` for one
+    // cross-product and the flank/strafe maths below reuses that same scratch.
+    this._threatTick(dt);
+
     // Strafe timer for combat movement
     this.aiStrafeTimer -= dt;
     if (this.aiStrafeTimer <= 0) {
-      this.aiStrafe = Math.random() < 0.5;
+      // (v45.42) Under fire a bot ALWAYS strafes and flips sides twice as often. The old coin flip
+      // left half the squad flying a straight line through a stream of rockets.
+      const _uf = this._underFireT > 0;
+      this.aiStrafe = _uf ? true : (Math.random() < 0.5);
       this.aiStrafeDir = Math.random() < 0.5 ? 1 : -1;
-      this.aiStrafeTimer = 1 + Math.random() * 2; 
+      this.aiStrafeTimer = _uf ? (0.5 + Math.random()) : (1 + Math.random() * 2);
     }
 
     // moveDir starts as the wander direction. Previously this used .clone(),
@@ -56003,8 +56058,30 @@ class Bot {
       }
     }
 
+    // ⭐⭐ (v45.42) BREAK THE FIRING LINE. The juke `_threatTick` committed to is blended into the
+    // steering heading rather than replacing it - a bot that abandons the fight every time it is
+    // shot at is not dodging, it is fleeing, and the owner asked for the former ("try to get out of
+    // fire", not "run away"). At 0.85 the evasion dominates the approach for the ~0.5 s the heading
+    // is held, and then a new one is rolled; the bot still ends up where it was going.
+    // ⚠ Only on the plain combat path. `_raceWaypoint` / `_arenaVia` exist precisely BECAUSE a
+    //   straight line to the goal is not flyable (the v36.61 vertical router), so jinking there
+    //   throws the bot back into the rock it was routing around.
+    // ⚠ NOT a teleport, a blink or a warp - the owner was explicit. This only ever writes a
+    //   direction; SLAYER's Teleport is separately locked out while under fire (see _tryUseUtility).
+    if (!_raceWaypoint && !_arenaVia && this._underFireT > 0 && this._evadeT > 0 && !this.aiRetreating) {
+      const k = 0.85;
+      moveDir.x += this._evadeDir.x * k;
+      moveDir.y += this._evadeDir.y * k;
+      moveDir.z += this._evadeDir.z * k;
+      moveDir.normalize();
+    }
+
     if (!_raceWaypoint && !_arenaVia) {
-      this.targetDir.lerp(moveDir, dt * 2);
+      // (v45.42) Turn harder while dodging. The dt*2 lerp is a ~0.5 s heading change, which is
+      // slower than the 0.45-0.7 s the juke is even held for - so without this the bot would only
+      // ever get halfway into each break before the next one replaced it, and visibly wallow.
+      const _turnK = (this._underFireT > 0 && this._evadeT > 0) ? 5 : 2;
+      this.targetDir.lerp(moveDir, dt * _turnK);
       this.targetDir.normalize();
     }
 
@@ -56110,7 +56187,10 @@ class Bot {
     // problem: at any stop below full the player would simply outrun the entire roster.
     const _baseSpd = _lssSpeedLerp(this.chassis.flightSpeed, LSS.RACE_SPEED, _lssSpeedMix());
     // (v43.18) ...and the cap has to know about it, or the burst above is erased before it moves.
-    const _dashCap = this.dashActive ? Math.max(_baseSpd, this.chassis.dashSpeed || _baseSpd) : _baseSpd;
+    let _dashCap = this.dashActive ? Math.max(_baseSpd, this.chassis.dashSpeed || _baseSpd) : _baseSpd;
+    // (v45.42) The same rule for a timed speed surge - Afterburner and Mega Barrage. See `_surgeT`
+    // in the constructor for why this had to exist for those two to work at all.
+    if (this._surgeT > 0) { this._surgeT -= dt; _dashCap = Math.max(_dashCap, this._surgeSpd || 0); }
     const maxSpd = this.arcSlowTimer > 0 ? _dashCap * 0.3 : _dashCap;
     if (speed > maxSpd) {
       this.velocity.multiplyScalar(maxSpd / speed);
@@ -56259,12 +56339,24 @@ class Bot {
           }
           const losDist = this._fireLosDist;
           if (losDist >= distToTgt - 5) {
-            // Test mode : bots fly the same AI patterns but never fire (except
-            // in campaign, where the hoard must actually shoot back).
-            if (_mayFire) {
-              this.fireAtShip(_fireTgt, toTgt, distToTgt);
+            // ⭐ (v45.42) PUNCTURE HOLDS THE TRIGGER. Everything above has already established
+            // range, facing and line of sight - i.e. this bot HAS the shot - which is exactly the
+            // moment a human starts winding the railgun. `_railWind` returns false while it is still
+            // charging, so the gun simply does not go off yet; see its header for the two
+            // partial-charge releases.
+            let _shoot = true;
+            if (this.loadoutKey === 'PUNCTURE') _shoot = this._railWind(dt, distToTgt);
+            if (_shoot) {
+              // Test mode : bots fly the same AI patterns but never fire (except
+              // in campaign, where the hoard must actually shoot back).
+              if (_mayFire) {
+                this.fireAtShip(_fireTgt, toTgt, distToTgt);
+              }
+              // (v45.42) AI Assist ("unlimited ammo") drops the fire-rate jitter for its duration -
+              // a bot has no clip to refill, so a perfectly-paced gun is the honest equivalent.
+              this.fireTimer = this.loadout.weapon.fireRate *
+                               ((this._aiAssistT > 0) ? 1 : (1 + Math.random() * 0.5));
             }
-            this.fireTimer = this.loadout.weapon.fireRate * (1 + Math.random() * 0.5);
           }
         }
       }
@@ -56280,19 +56372,38 @@ class Bot {
     // Abilities stay passive in campaign for now : dash/teleport AI flings the
     // hoard into the open-terrain mountains. Primary fire (above) is what the
     // journey needs ; ability use can come back once terrain-nav is improved.
-    if (game.state === 'playing' && this._mayFight() && _ctAlive &&
+    // (v45.42) `|| this._underFireT > 0` - a bot being shot at by something it has not ACQUIRED yet
+    // (hit from behind, hit by splash, hit by a peer it has no pointer to) still has to be allowed to
+    // raise its shield, which is the owner's whole "under fire, they use their defensive ability".
+    // The other two slots bail on a missing target inside their own handlers, so nothing else changes.
+    if (game.state === 'playing' && this._mayFight() && (_ctAlive || this._underFireT > 0) &&
         (!game.testMode || (typeof LSS !== 'undefined' && (LSS.MODE === 'campaign' || LSS.MODE === 'freeflight')))) {
-      this.tryUseAbilities();   
+      this.tryUseAbilities();
     }
 
-    this.coreMeter = Math.min(100, this.coreMeter + dt * 1.5);
-    // Spend the core when charged: ship-flavored surge (salvo + shield).
-    // Probabilistic trigger so five charged bots don't all dump cores in
-    // the same instant.
-    if (this.coreMeter >= 100 && _ctAlive && this._mayFight() &&
+    // ⭐⭐ (v45.42) THE CORE, AS THE HUMAN HAS IT. The `coreMeter += dt * 1.5` that used to be on
+    // this line is GONE: it was a wall clock (full in 66 s whether the bot ever fought or not) and
+    // the player has no passive charge at all. A bot's meter now fills the same three ways a human's
+    // does - damage dealt (fireAtShip / _dealAbilityDamage, ÷100), a kill (+15, in die()), and
+    // spending a cooldown ability (+2, _creditAbilityCore) - so a core is something a bot EARNS in
+    // the fight you are watching.
+    // ⚠ Frozen while a core is running, exactly like updateAbilities' `if (player.coreActive)
+    //   player.coreMeter = 0;`, or a sustained core's own damage would re-charge the next one.
+    if (this._coreT > 0) this.coreMeter = 0;
+    // Per-frame bodies for everything that now has DURATION. All four are no-ops when idle.
+    this._coreTick(dt);          // sustained cores (beam / barrage / storm / missile stream)
+    this._botSalvoTick(dt);      // staggered rocket volleys, one rocket per frame
+    this._chargeShotTick(dt);    // BLASTER's 1 s Charge Shot spool
+    this._botLockTick(dt);       // TRACKER lock marks aging out, bot-vs-bot
+    this._railTick(dt);          // PUNCTURE's railgun charge bleed-off + its glow tell
+    if (this._aiAssistT > 0) this._aiAssistT -= dt;
+    // Spend the core when it is charged - the ship's OWN core (see _activateCore). The
+    // probabilistic trigger stays: it is what stops five simultaneously-charged bots from dumping
+    // their ults on the same frame, and it averages ~2 s, which reads as a human hesitating.
+    if (this.coreMeter >= 100 && this._coreT <= 0 && _ctAlive && this._mayFight() &&
         game.state === 'playing' && !game.testMode &&
         this.position.distanceTo(_ct.position) < 1800 && Math.random() < dt * 0.5) {
-      this._useCoreSurge(_ct);
+      this._activateCore(_ct);
     }
   }
 
@@ -56312,9 +56423,25 @@ class Bot {
   }
 
   // Route ability damage to whatever ship we're fighting.
+  // ⭐ (v45.42) ...and CHARGE THE CORE with it. Every one of the player's damage sites carries
+  // `player.coreMeter += dealt / 100` - abilities and cores included - and this one, the single
+  // place a bot's ability damage lands, did not. With the wall-clock trickle gone (see the core
+  // block) that omission would have meant a PYRO's Flame Chain, a VORTEX's Laser and a SLAYER's
+  // Stun Bolt all earned their pilot nothing at all.
+  // ⚠ The gate is `dealt > 0`, not `dmg > 0`: shields, Plasma Shield walls and spawn protection can
+  //   all eat the hit outright, and the player's sites credit the RETURN value for that reason.
   _dealAbilityDamage(tgt, dmg) {
-    if (tgt === player) { try { playerTakeDamage(dmg, this, null); } catch (_) {} }
-    else if (tgt && tgt.takeDamage) { try { tgt.takeDamage(dmg, this, this.position); } catch (_) {} }
+    let dealt = 0;
+    if (tgt === player) {
+      // ⚠ `playerTakeDamage` returns NOTHING (every one of its four exits is a bare `return`), so
+      //   the only honest measure of what landed is the pool it drained. Absorption, Body Shield,
+      //   a Plasma Shield wall and i-frames all show up correctly in this delta.
+      const _before = (player.health || 0) + (player.shield || 0);
+      try { playerTakeDamage(dmg, this, null); } catch (_) {}
+      dealt = Math.max(0, _before - ((player.health || 0) + (player.shield || 0)));
+    }
+    else if (tgt && tgt.takeDamage) { try { dealt = tgt.takeDamage(dmg, this, this.position) || 0; } catch (_) {} }
+    if (dealt > 0) this.coreMeter = Math.min(100, this.coreMeter + dealt / 100);
   }
 
   _tryUseOffensive(ability) {
@@ -56357,90 +56484,125 @@ class Bot {
         }
       }
     } else if (ability.name === 'Cluster Missile') {
+      // (v45.42) To the human's numbers (see the 'Cluster Missile' arm of executeAbility): 800
+      // impact, 250 splash, and the 500-DPS/5 s cluster ZONE on impact - `cluster = true` alone only
+      // asked for the zone, it never said how hard or how long, so the bot's version was leaving a
+      // weaker field than the ability's own card advertises ("Impact 800 + 500 DPS for 5s").
       const vel = this._tempVec3b.copy(aim).multiplyScalar(900);
       // Projectile constructor clones origin + velocity ; passing scratches
       // is safe because they're not retained.
-      const proj = new Projectile(this.position, vel, 800, 200, 'bot', LSS.CLASS_COLORS.PUNCTURE);
+      const proj = new Projectile(this.position, vel, 800, 250, 'bot', LSS.CLASS_COLORS.PUNCTURE);
       proj.cluster = true;
-      proj.sizeMult = 2.4;
+      proj.clusterDmg = 500;
+      proj.clusterDuration = 5;
+      proj.sizeMult = 3.0;
       proj.smokeTrail = true;
       proj.ownerTeam = this.team; proj.ownerRef = this;
       proj.removeHaze();
       game.projectiles.push(proj);
     } else if (ability.name === 'Stun Bolt') {
+      // (v45.42) The human fires TWO half-damage bolts, one out of each gun, totalling the listed
+      // 2000. The bot fired one 1200 bolt out of the hull centre - 60% of the damage and none of
+      // the read. Same shape now: `_sbHalf` each, from the two muzzle markers.
+      const _sbHalf = 2000 * 0.5;
       const vel = this._tempVec3b.copy(aim).multiplyScalar(800);
-      const proj = new Projectile(this.position, vel, 1200, 150, 'bot', LSS.CLASS_COLORS.SLAYER);
-      proj.isArcWave = true;
-      proj.ownerTeam = this.team; proj.ownerRef = this;
-      game.projectiles.push(proj);
-    } else if (ability.name === 'Charge Shot') {
-      const vel = this._tempVec3b.copy(aim).multiplyScalar(1200);
-      const proj = new Projectile(this.position, vel, 1900, 100, 'bot', LSS.CLASS_COLORS.BLASTER);
-      proj.sizeMult = 1.8;
-      proj.ownerTeam = this.team; proj.ownerRef = this;
-      game.projectiles.push(proj);
-    } else if (ability.name === 'Tracker Rockets' || ability.name === 'Rocket Salvo') {
-      // Three rockets in a tight cone toward the target. Rocket Salvo
-      // (SYPHON) shares the recipe with its own color.
-      const _rkColor = (ability.name === 'Rocket Salvo') ? LSS.CLASS_COLORS.SYPHON : LSS.CLASS_COLORS.TRACKER;
-      // (v37.05) TRACKER bot rockets actually TRACK (owner: "tracker as a
-      // bot had a lock on me, but his missiles don't actually track, they
-      // just fly in a line"). Same rule as the player's own missiles:
-      // homing requires the FULL lock — the 3 marks that flip the HUD to
-      // ENEMY LOCKED-ON. Partial/no lock keeps the old straight rockets,
-      // so the warning pips are the real tell. Bot-vs-bot has no lock
-      // bookkeeping and homes outright (invisible to the player, keeps
-      // bot fights honest). Rocket Salvo (SYPHON) stays dumbfire.
-      // ⭐⭐ (v45.40) THE LOCK DECIDES WHO THE VOLLEY IS FOR. Owner: "tracker i noticed locked onto me
-      // and then he fired a homing rocket at another bot... then he fired what looked like a rocket
-      // salvo at me."
-      // Both halves of that are one defect. The volley always went at `this.combatTarget`, which has
-      // nothing to do with the lock: the bot spent its locked-on volley on whichever bot it happened
-      // to be dogfighting (and that one DID home, because bot-vs-bot homes outright), and by the time
-      // its ~10-14 s cooldown came round again the player's lock had decayed below 3 - locks lose one
-      // every 5 s - so the shot that finally came at the player was dumbfire. A lock that announces
-      // itself on your HUD and is then spent on someone else is worse than no lock at all.
-      // So: a FULL lock on the player retargets this volley at the player, provided the player is a
-      // legal target by the same two rules the ability already uses - inside 2400 u and in line of
-      // sight. If they are not, nothing changes and the bot fires at whatever it was fighting.
-      // ⚠ Fresh vectors, not the _tempVec3 scratches: `aim` IS _tempVec3a and `vel` below uses
-      //   _tempVec3b. This branch runs at most once per ability cooldown, so the allocation is noise.
-      let _rkTgt = tgt, _rkAim = aim;
-      if (ability.name === 'Tracker Rockets' && tgt !== player &&
-          typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
-          player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3) {
-        const _toP = new THREE.Vector3().subVectors(player.position, this.position);
-        const _dP = _toP.length();
-        if (_dP <= 2400 && _dP > 0) {
-          const _aimP = _toP.clone().normalize();
-          let _losP = _dP;
-          try { _losP = raycastLevel(this.position, _aimP, _dP + 10, true); } catch (_) {}
-          if (_losP >= _dP - 5) { _rkTgt = player; _rkAim = _aimP; }
-        }
-      }
-      const _rkHome = (ability.name === 'Tracker Rockets') &&
-        (_rkTgt !== player || (player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3));
-      for (let i = 0; i < 3; i++) {
-        const vel = this._tempVec3b.set(
-          _rkAim.x + (Math.random()-0.5)*0.10,
-          _rkAim.y + (Math.random()-0.5)*0.10,
-          _rkAim.z
-        ).normalize().multiplyScalar(700);
-        const proj = new Projectile(this.position, vel, 1100, 100, 'bot', _rkColor);
-        proj.smokeTrail = true;
+      for (let _s = 0; _s < 2; _s++) {
+        const _o = (this.mesh && typeof shipMuzzleWorld === 'function')
+          ? shipMuzzleWorld(this.mesh, _s, this._tempVec3c) : this._tempVec3c.copy(this.position);
+        const proj = new Projectile(_o, vel, _sbHalf, 150, 'bot', LSS.CLASS_COLORS.SLAYER);
+        proj.isArcWave = true;
         proj.ownerTeam = this.team; proj.ownerRef = this;
-        if (_rkHome) { proj.tracking = true; proj.trackTarget = _rkTgt; }
-        proj.removeHaze();
         game.projectiles.push(proj);
       }
-      // (v37.06) Firing the homing volley CONSUMES the lock (owner: "3 hits
-      // for a lock, and then after the tracker missiles fire the lock is
-      // gone") — the pips reset and the bot must land 3 fresh hits to lock
-      // again. Straight (unlocked) volleys consume nothing.
-      if (_rkHome && _rkTgt === player) {
-        delete player.enemyToneLocks[this.id];
-        if (player._enemyLockDecayTimers) delete player._enemyLockDecayTimers[this.id];
+    } else if (ability.name === 'Charge Shot') {
+      // ⭐ (v45.42) IT IS CALLED CHARGE SHOT. The human presses it, the guns spool for a full second
+      // (`powerShotCharging` in updateAbilities, with `_blasterChargeGlow` lighting the barrels) and
+      // THEN the shot goes. The bot's fired instantly with no tell at all, which is both unfair - a
+      // 3200-damage shot you cannot see coming - and the opposite of "behave the same as the humans".
+      // The spool is armed here and released by `_chargeShotTick`; `used` is still true, so the
+      // cooldown starts now exactly as the player's does.
+      this._csT = 1.0;
+      this._csAim = this._csAim || new THREE.Vector3();
+      this._csAim.copy(aim);
+      try {
+        if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+            player.position && player.position.distanceToSquared(this.position) < 2200 * 2200 &&
+            (typeof window === 'undefined' || window.__enemyFireSfx !== false)) {
+          playSpatialSound('powershot_charge', this.position, { refDistance: 200, maxDistance: 2200, rolloffFactor: 1.0 });
+        }
+      } catch (_) {}
+    } else if (ability.name === 'Tracker Rockets') {
+      // ⭐⭐ (v45.42) THE HUMAN'S TRACKER ROCKETS, NOT AN APPROXIMATION OF THEM. Owner: "they should
+      // not use weapons that are not part of their ship class loadout, and all usage of weapons
+      // should behave the same as the humans (ie, tracker rockets fire a volley of rockets that auto
+      // seek)".
+      // What the player's ability actually is (see the 'Tracker Rockets' arm of executeAbility):
+      // for EVERY ship at a full 3/3 lock, FIVE homing rockets - 1000 damage, 80 splash, 900 speed,
+      // staggered 35 ms apart - and the lock is consumed. With no full lock it does NOTHING: no
+      // projectiles, no sound, partial locks preserved, press again the moment one saturates.
+      // What the bot's was: three rockets in a cone at 1100/100/700 that flew STRAIGHT unless the
+      // player happened to be at 3/3 - i.e. the common experience was a dumbfire volley from an
+      // ability whose entire identity is homing. That is the "tracker rockets don't seek" report.
+      // ⚠ THE LOCK NOW EXISTS BOT-vs-BOT. Every previous cut said "bot-vs-bot has no lock
+      //   bookkeeping and homes outright", which is exactly why the ability could not simply be
+      //   given the human's rule - there was nothing to read. `_botLocks` (built in fireAtShip, aged
+      //   in _botLockTick) is that bookkeeping, so all three cases - bot->player, bot->bot,
+      //   bot->monster - now run one rule.
+      const _locked = this._lockedTargets();
+      if (_locked.length === 0) {
+        // Same no-op as the player's: nothing fires, partial locks are kept, and we come back
+        // shortly. The 0.6 s (rather than the ability's 0.25 s) is purely to keep an unlocked
+        // TRACKER from re-running the range + LOS raycast above four times a second for nothing.
+        this.abilityCooldowns[0] = 0.6;
+        return;
       }
+      const _trQueue = [];
+      for (const _lt of _locked) {
+        for (let m = 0; m < 5; m++) {
+          _trQueue.push({
+            speed: 900, damage: 1000, splash: 80,
+            color: LSS.CLASS_COLORS.TRACKER,
+            smokeTrail: true, removeHaze: true,
+            tracking: true, trackTarget: _lt,
+            spreadX: (Math.random() - 0.5) * 0.2,
+            spreadY: (Math.random() - 0.5) * 0.2,
+          });
+        }
+        this._consumeLock(_lt);
+      }
+      this._botSalvoStart(_trQueue, 0.035);
+      try {
+        if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+            player.position && player.position.distanceToSquared(this.position) < 3000 * 3000 &&
+            (typeof window === 'undefined' || window.__enemyFireSfx !== false)) {
+          playSpatialSound('tracker_rockets', this.position, { refDistance: 300, maxDistance: 3000, rolloffFactor: 1.0 });
+        }
+      } catch (_) {}
+    } else if (ability.name === 'Rocket Salvo') {
+      // (v45.42) SYPHON's salvo, to the human's numbers: FIVE rockets (was three), 700 damage,
+      // 100 splash, 800 speed, staggered 35 ms apart, dumbfire. It shares the bot salvo queue with
+      // Tracker Rockets for the same reason the player shares _enqueueStaggeredRocketSalvo - five
+      // Projectile constructors on one frame is a visible hitch, and a salvo that leaves the tubes
+      // one rocket at a time is what a salvo looks like.
+      const _rsQueue = [];
+      for (let r = 0; r < 5; r++) {
+        _rsQueue.push({
+          speed: 800, damage: 700, splash: 100,
+          color: LSS.CLASS_COLORS.SYPHON,
+          smokeTrail: true, removeHaze: true,
+          aimX: aim.x, aimY: aim.y, aimZ: aim.z,
+          spreadX: (Math.random() - 0.5) * 0.12,
+          spreadY: (Math.random() - 0.5) * 0.12,
+        });
+      }
+      this._botSalvoStart(_rsQueue, 0.035);
+      try {
+        if (typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+            player.position && player.position.distanceToSquared(this.position) < 3000 * 3000 &&
+            (typeof window === 'undefined' || window.__enemyFireSfx !== false)) {
+          playSpatialSound('rocket_salvo', this.position, { refDistance: 300, maxDistance: 3000, rolloffFactor: 1.0 });
+        }
+      } catch (_) {}
     } else if (ability.name === 'Energy Syphon') {
       // Beam that pulls + damages. Skip implementation complexity ; bots
       // just fire a high-damage hitscan to mimic the gameplay impact.
@@ -56477,10 +56639,20 @@ class Bot {
       used = false;
     }
     if (used) {
-      // 1.5x to 2x the listed cooldown so bots don't spam abilities perfectly.
-      let _baseCd = ability.cooldown;
-      if (ability.name === 'Tracker Rockets') _baseCd = 7;
-      this.abilityCooldowns[0] = _baseCd * (1.4 + Math.random() * 0.6);
+      // ⭐⭐ (v45.42) "WHEN THEY CAN, THEY USE THEIR OFFENSIVE ABILITIES" (owner). The 1.4-2.0x
+      // inflation was the single biggest reason bots looked like they had no abilities: a PYRO's
+      // Flame Chain went from a 10 s cooldown to 14-20 s, a Laser from 5 to 7-10. Over a 3-minute
+      // round that is the difference between a dozen uses and four. A light 1.0-1.25x jitter keeps a
+      // squad from firing in unison without pretending their abilities cost twice what they do.
+      // ⚠ The Tracker Rockets 7 s override is GONE. It existed to pace a volley that fired on no
+      //   condition at all; the ability's real gate is the 3/3 LOCK (see the branch above), which is
+      //   what paces the human's, so the listed 0.25 s cooldown is now the honest number.
+      this.abilityCooldowns[0] = ability.cooldown * (1.0 + Math.random() * 0.25);
+      this._creditAbilityCore();
+    } else {
+      // (v45.42) Same back-off the other two slots have had since v41.91: an ability with no branch
+      // here would otherwise re-enter this whole path (range test, LOS raycast) every single frame.
+      this.abilityCooldowns[0] = 0.5;
     }
   }
 
@@ -56528,6 +56700,14 @@ class Bot {
         try { spawnTetherTrap(trapPos, 'bot', this.team, null, ++net.effectIdCounter, false); } catch (_) { used = false; }
       } else used = false;
     } else if (ability.name === 'Teleport') {
+      // ⛔⭐ (v45.42) NO WARPING OUT OF FIRE. Owner, spelling it out: bots "aren't allowed to warp or
+      // teleport out of fire, they must try to move". This is the only ability in the game that
+      // could break that rule, and the AI would otherwise reach for it exactly when it is banned -
+      // `_underFireT` is set by the same hits that make a bot want to leave.
+      // The blink is NOT disabled: SLAYER still uses it to close, to reposition and to reach a
+      // target, all of which are offensive. It is only refused while under fire, where the answer
+      // has to be the evasion steer (see `_threatTick`).
+      if (this._underFireT > 0) { this.abilityCooldowns[2] = 0.4; return; }
       // SLAYER utility approximation: blink ~700u along current heading
       // with a jitter, FX at both ends. Repositions out of bad fights.
       const from = this.position.clone();
@@ -56600,7 +56780,10 @@ class Bot {
       used = false;
     }
     if (used) {
-      this.abilityCooldowns[2] = (ability.cooldown || 12) * (1.4 + Math.random() * 0.6);
+      // (v45.42) 1.0-1.25x, not 1.4-2.0x - see the matching note in _tryUseOffensive. A Stasis Trap
+      // that costs 17-24 s instead of its listed 12 is an ability the bot effectively does not have.
+      this.abilityCooldowns[2] = (ability.cooldown || 12) * (1.0 + Math.random() * 0.25);
+      this._creditAbilityCore();
     } else {
       // (v41.91) see the matching note in _tryUseDefensive - an unhandled ability re-entered this
       // path every frame for the rest of the match.
@@ -56614,7 +56797,14 @@ class Bot {
   _tryUseDefensive(ability) {
     const hurting = this.health < this.maxHealth * 0.55 ||
                     (this.shield <= 0 && this.health < this.maxHealth * 0.9);
-    if (!hurting) return;
+    // ⭐⭐ (v45.42) "UNDER FIRE, THEY USE THEIR DEFENSIVE ABILITY" (owner). This gate used to read
+    // HEALTH alone, which is a different question and answers it far too late: a bot at full HP
+    // being raked by a Gatling sat there with its shield ability on a full cooldown until it had
+    // already lost half its hull. A human puts the shield up when the shooting STARTS.
+    // `_underFireT` is the signal (a hit landed, or a round is inbound - see _threatTick); the health
+    // test stays as the second trigger, for the bot that is quietly bleeding out from a DoT or has
+    // just disengaged badly.
+    if (!hurting && this._underFireT <= 0) return;
     let used = true;
     const n = ability.name;
     if (n === 'Vortex Shield' || n === 'Absorption' || n === 'Fire Shield' || n === 'Body Shield') {
@@ -56627,6 +56817,13 @@ class Bot {
       } catch (_) {}
     } else if (n === 'Afterburner') {
       // Burst of speed along the current heading + booster visuals.
+      // ⭐ (v45.42) ...and now it actually moves the ship. The line below has been here since the
+      // ability was written and has NEVER had an effect: the speed clamp runs earlier in update()
+      // and rescales anything above `flightSpeed` straight back down, which v43.18 noticed in
+      // passing ("which is also why PUNCTURE's bot Afterburner is inert") and did not fix. The card
+      // says "Speed boost to 600" for `duration` seconds; `_surgeT` is what makes that true.
+      this._surgeSpd = Math.max(600, this.chassis.flightSpeed * 1.6);
+      this._surgeT = (ability.duration || 3);
       this.velocity.addScaledVector(this.targetDir, this.chassis.flightSpeed * 1.6);
       try { if (typeof spawnDashBoosters === 'function') spawnDashBoosters(this.mesh, this.targetDir, 0xffaa33); } catch (_) {}
     } else if (n === 'Energy Syphon') {
@@ -56660,7 +56857,20 @@ class Bot {
       used = false;
     }
     if (used) {
-      this.abilityCooldowns[1] = (ability.cooldown || 14) * (1.4 + Math.random() * 0.6);
+      // ⭐ (v45.42) THE HOLD SHIELDS ARE NOT COOLDOWN ABILITIES. Vortex Shield, Absorption, Fire
+      // Shield and Body Shield all carry `cooldown: 0` in LOADOUTS because a human HOLDS them - they
+      // are paid for with an energy pool, not a timer. `(ability.cooldown || 14)` read that 0 as
+      // "fall back to 14", then inflated it to 20-28 s, so the four ships whose whole defensive
+      // identity is a held shield could raise it roughly twice a round.
+      // A hold shield now re-arms on its own duty cycle (6 s) and the real cooldown abilities keep a
+      // light 1.0-1.25x jitter instead of 1.4-2.0x - the owner asked for bots that use their
+      // abilities, and an inflated cooldown is exactly the thing that stops them.
+      const _hold = !(ability.cooldown > 0);
+      this.abilityCooldowns[1] = _hold ? (6 * (0.85 + Math.random() * 0.4))
+                                       : (ability.cooldown * (1.0 + Math.random() * 0.25));
+      // ⚠ A hold shield earns NO core, exactly like the player's: the +2 is gated on
+      //   `ability.cooldown > 0` there too, for the reason given at that line.
+      if (!_hold) this._creditAbilityCore();
     } else {
       // (v41.91) An unhandled or refused ability used to leave the cooldown at 0, so tryUseAbilities
       // re-entered this whole path EVERY FRAME for the rest of the match. Back off a beat instead.
@@ -56668,29 +56878,561 @@ class Bot {
     }
   }
 
-  // Core meter spend: a ship-flavored approximation (missile salvo in the
-  // ship's palette + emergency shield) instead of 7 bespoke core ports.
-  _useCoreSurge(target) {
-    this.coreMeter = 0;
-    const aim = this._tempVec3a.subVectors(target.position, this.position).normalize();
-    const col = (typeof chassisFlashColor === 'function') ? chassisFlashColor(this.loadout.name) : 0xffdd44;
-    for (let i = 0; i < 5; i++) {
-      const vel = this._tempVec3b.set(
-        aim.x + (Math.random() - 0.5) * 0.16,
-        aim.y + (Math.random() - 0.5) * 0.16,
-        aim.z + (Math.random() - 0.5) * 0.16
-      ).normalize().multiplyScalar(850);
-      const proj = new Projectile(this.position, vel, 700, 120, 'bot', col);
-      proj.smokeTrail = true;
-      proj.ownerTeam = this.team; proj.ownerRef = this;
-      try { proj.removeHaze(); } catch (_) {}
-      game.projectiles.push(proj);
+  // ⭐ (v45.42) CORE CHARGE FROM SPENDING AN ABILITY - the human's rule, ported. `executeAbility`
+  // grants `player.coreMeter += 2` for any ability that costs a cooldown or a trap charge (and
+  // deliberately nothing for a free shield tap, "a free tap pays nothing, so it now earns nothing").
+  // Bots never had it. See `_useCoreSurge`'s header for why the whole charge model changed.
+  _creditAbilityCore() {
+    this.coreMeter = Math.min(100, this.coreMeter + 2);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+  // ⭐⭐⭐ (v45.42) THE BOT COMBAT BRAIN — cores, locks, charges, salvos.
+  // Owner, in full: "they should each have a core meter that charges, just like the humans / they
+  // should use their core when it is charged / they should not use weapons that are not part of
+  // their ship class loadout, and all usage of weapons should behave the same as the humans".
+  //
+  // WHAT WAS THERE: `_useCoreSurge`, one function, the SAME for all seven ships — five 700-damage
+  // rockets in the hull's palette plus a 35% shield top-up. Not one ship in the game has that
+  // weapon. A VORTEX has a four-second beam, a PYRO a 9000-damage blast, a SLAYER a lightning
+  // storm, a BLASTER and a SYPHON have no offensive core at all (theirs are BUFFS) — and every one
+  // of them fired rockets instead. That is the clearest case of "a weapon that is not part of
+  // their ship class loadout" in the file.
+  // And it was charged by `coreMeter += dt * 1.5`: a wall clock, full in 66 s, ticking whether the
+  // bot ever found a target or not. The human has NO passive charge whatsoever — every point comes
+  // from damage dealt (÷100), a kill (+15) or spending a cooldown ability (+2). A bot that never
+  // fired a shot still got a core; a bot carrying a whole round got no credit for it.
+  //
+  // WHAT IS HERE NOW: the charge model is the human's, literally (see `fireAtShip`,
+  // `_dealAbilityDamage`, `_creditAbilityCore`, `die`), and `_activateCore` dispatches on
+  // `loadout.core.name` to seven real cores, each built from the same helpers, damage numbers and
+  // projectile flags as the player's in `activateCore` / `updateAbilities`.
+  // ⚠ Bot damage keeps its long-standing 0.6 handicap on the DIRECT-damage cores, the same one
+  //   `fireAtShip` and `_tryUseOffensive` apply. It is the one deliberate difference from the human
+  //   version and it is what stops seven full-power ults a round from being unplayable.
+  // ⚠ Sustained cores (Mega Laser, Mega Barrage, Mega Stun Bolt, Mega Tracker Rockets) run out of
+  //   `_coreTick`, which is called once per frame from update(). `_coreT` is the whole state; a bot
+  //   that dies mid-core simply stops being ticked.
+  // ══════════════════════════════════════════════════════════════════════════════════════════════
+
+  // ---- bot-side staggered rocket salvo ----------------------------------------------------------
+  // The player's `_enqueueStaggeredRocketSalvo` / `_drainStaggeredRocketSalvo` pair is written
+  // entirely against the `player` singleton (camera-relative aim, screen-fraction launchers), so
+  // bots need their own. Same contract: one rocket per drain, `interval` seconds apart, out of the
+  // hull's real gun markers.
+  _botSalvoStart(queue, interval) {
+    if (!queue || !queue.length) return;
+    this._botSalvo = { queue: queue, t: 0, interval: (interval > 0) ? interval : 0.035, idx: 0 };
+  }
+  _botSalvoTick(dt) {
+    const q = this._botSalvo;
+    if (!q) return;
+    if (!this.alive || !q.queue.length) { this._botSalvo = null; return; }
+    q.t -= dt;
+    if (q.t > 0) return;
+    q.t = q.interval;
+    const cfg = q.queue.shift();
+    if (!cfg) { this._botSalvo = null; return; }
+    // Re-validate the homing target: it may have died during the burst (the player's drain does
+    // exactly this, and for the same reason — a Projectile holding a dead ref never re-acquires).
+    let tracking = !!cfg.tracking;
+    let trackTarget = cfg.trackTarget;
+    const _ttAlive = trackTarget && (trackTarget === player ? (player.shipState !== 'dead') : !!trackTarget.alive);
+    if (tracking && !_ttAlive) { tracking = false; trackTarget = null; }
+    // Aim: at the live target if we have one (it has moved since the volley was queued), else the
+    // heading stored at queue time.
+    const dir = this._tempVec3a;
+    if (trackTarget && trackTarget.position) dir.subVectors(trackTarget.position, this.position);
+    else dir.set(cfg.aimX || 0, cfg.aimY || 0, cfg.aimZ || -1);
+    if (dir.lengthSq() < 1e-6) dir.set(0, 0, -1);
+    dir.normalize();
+    dir.x += (cfg.spreadX || 0); dir.y += (cfg.spreadY || 0);
+    dir.normalize();
+    const origin = (this.mesh && typeof shipMuzzleWorld === 'function')
+      ? shipMuzzleWorld(this.mesh, q.idx++, this._tempVec3c)
+      : this._tempVec3c.copy(this.position);
+    const vel = this._tempVec3b.copy(dir).multiplyScalar(cfg.speed || 800);
+    const proj = new Projectile(origin, vel, cfg.damage || 700, cfg.splash || 100, 'bot', cfg.color || 0xffaa00);
+    proj.smokeTrail = !!cfg.smokeTrail;
+    proj.ownerTeam = this.team; proj.ownerRef = this;
+    if (cfg.sizeMult) proj.sizeMult = cfg.sizeMult;
+    if (cfg.lifetime) proj.lifetime = cfg.lifetime;
+    if (cfg.bustsRocks) proj.bustsRocks = true;
+    if (tracking) { proj.tracking = true; proj.trackTarget = trackTarget; }
+    if (cfg.removeHaze) { try { proj.removeHaze(); } catch (_) {} }
+    game.projectiles.push(proj);
+  }
+
+  // ---- TRACKER lock bookkeeping, bot side -------------------------------------------------------
+  // ⚠ Every previous cut of the bot Tracker said "bot-vs-bot has no lock bookkeeping", and that was
+  //   true — locks lived only on `player.enemyToneLocks[botId]`. So the ability's own rule ("volley
+  //   at every 3/3-locked ship") was unreadable whenever the target was not the human, and the code
+  //   had to invent a second rule for that case. This is the missing half: the same 3-hit ladder,
+  //   keyed by target id, aged on the same 5 s-per-mark clock the player's decay timers use.
+  _addLock(target) {
+    if (!target || this.loadoutKey !== 'TRACKER') return;
+    if (target === player) {
+      const prev = player.enemyToneLocks[this.id] || 0;
+      player.enemyToneLocks[this.id] = Math.min(3, prev + 1);
+      if (player._enemyLockDecayTimers) player._enemyLockDecayTimers[this.id] = 0;
+      return;
     }
-    this.shield = Math.min(this.maxShield, this.shield + this.maxShield * 0.35);
+    if (target.id == null) return;
+    this._botLocks[target.id] = Math.min(3, (this._botLocks[target.id] || 0) + 1);
+  }
+  _consumeLock(target) {
+    if (!target) return;
+    if (target === player) {
+      delete player.enemyToneLocks[this.id];
+      if (player._enemyLockDecayTimers) delete player._enemyLockDecayTimers[this.id];
+      return;
+    }
+    if (target.id != null) delete this._botLocks[target.id];
+  }
+  _botLockTick(dt) {
+    if (this.loadoutKey !== 'TRACKER') return;
+    this._botLockDecay += dt;
+    if (this._botLockDecay < 5) return;            // one mark per 5 s, matching the player's decay
+    this._botLockDecay = 0;
+    for (const k in this._botLocks) {
+      const v = this._botLocks[k] - 1;
+      if (v > 0) this._botLocks[k] = v; else delete this._botLocks[k];
+    }
+  }
+  // Every ship this bot holds a FULL 3/3 lock on, that is a legal target for the volley. The two
+  // extra rules are the ability's own and have been there since v45.40: inside 2400 u and in line
+  // of sight. Monsters resolve too — the player's version explicitly supports leviathan ids.
+  _lockedTargets() {
+    const out = [];
+    const _ok = (t) => {
+      if (!t || !t.position) return false;
+      const d = this.position.distanceTo(t.position);
+      if (d > 2400 || d <= 0) return false;
+      const dir = this._tempVec3b.subVectors(t.position, this.position).normalize();
+      let los = d;
+      try { los = raycastLevel(this.position, dir, d + 10, true); } catch (_) {}
+      return los >= d - 5;
+    };
+    if (typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
+        player.team !== this.team && (player.enemyToneLocks[this.id] || 0) >= 3 && _ok(player)) {
+      out.push(player);
+    }
+    for (const k in this._botLocks) {
+      if (this._botLocks[k] < 3) continue;
+      let t = null;
+      for (const b of game.entities) { if (b && b.alive && b.id != null && b.id == k) { t = b; break; } }
+      if (!t && game.monsters) { for (const m of game.monsters) { if (m && m.alive && m.id != null && m.id == k) { t = m; break; } } }
+      if (!t || t.team === this.team) { delete this._botLocks[k]; continue; }
+      if (_ok(t)) out.push(t);
+    }
+    return out;
+  }
+
+  // ---- BLASTER Charge Shot spool ----------------------------------------------------------------
+  _chargeShotTick(dt) {
+    if (this._csT <= 0) return;
+    this._csT -= dt;
+    // The barrels light as it spools, the same tell the human's `_blasterChargeGlow` gives. Cheap,
+    // once per bot, and it is the whole reason the spool exists: a 3200-damage shot has to be
+    // readable before it lands.
+    this._coreFxT -= dt;
+    if (this._coreFxT <= 0) {
+      this._coreFxT = 0.08;
+      try {
+        if (typeof spawnDynamicLight === 'function') {
+          const k = 1 - Math.max(0, this._csT);
+          spawnDynamicLight(this.position, LSS.CLASS_COLORS.BLASTER, 1.0 + k * 2.5, 260 + k * 240, 0.12);
+        }
+      } catch (_) {}
+    }
+    if (this._csT > 0) return;
+    this._csT = 0;
+    if (!this.alive) return;
+    const vel = this._tempVec3b.copy(this._csAim).multiplyScalar(1200);
+    const origin = (this.mesh && typeof shipMuzzleWorld === 'function')
+      ? shipMuzzleWorld(this.mesh, this._muzzleShot = (this._muzzleShot | 0) + 1, this._tempVec3c)
+      : this._tempVec3c.copy(this.position);
+    const proj = new Projectile(origin, vel, 3200 * 0.6, 100, 'bot', LSS.CLASS_COLORS.BLASTER);
+    proj.sizeMult = 1.8;
+    proj.ownerTeam = this.team; proj.ownerRef = this;
+    game.projectiles.push(proj);
     try {
-      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, col, 4.0, 800, 0.4);
-      if (typeof playSpatialSound === 'function') playSpatialSound('explosion', this.position.clone(), { refDistance: 300, maxDistance: 2500, rolloffFactor: 0.9 });
+      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(origin, LSS.CLASS_COLORS.BLASTER, 4.0, 600, 0.18);
     } catch (_) {}
+  }
+
+  // ---- PUNCTURE: the Sodium Railgun charge ------------------------------------------------------
+  // ⭐⭐ (v45.42) Owner: "puncture needs to charge and partial charge his shots".
+  // The human's mechanic, from updatePlayerMovement + the fire path: holding the trigger winds
+  // `railgunCharge` to 1.0 over 2.5 s, RELEASE fires, the shot is worth `1 + charge * 3` (a tap is
+  // exactly the base 1000, a full wind-up 4000), the charge is spent by the shot hit or miss, and it
+  // bleeds off at 0.2/s once the trigger is let go.
+  // The bot had none of it - it fired uncharged base shots forever, which is why a bot PUNCTURE hit
+  // like a quarter of a human one and never showed the tell.
+  // `_railWant` is the thing that makes this read as a PILOT rather than a timer: each shot rolls
+  // its own target charge in 0.35..1.0, so the same bot mixes snap shots and full slugs. It is
+  // re-rolled on every release.
+  // Called from the fire gate, which has ALREADY established range, facing and line of sight -
+  // i.e. the bot only winds up while it actually has the shot, exactly like a human holding the
+  // trigger on a target it can see. Returns true when the shot goes.
+  _railWind(dt, dist) {
+    this._railHeld = true;
+    this._railCharge = Math.min(1.0, this._railCharge + dt / 2.5);
+    // THE TWO PARTIAL-CHARGE RELEASES, and they are the interesting half of the ask:
+    //   point blank - nobody holds a 2.5 s wind-up on something in their face;
+    //   under fire  - dump what you have and get moving, which is the same instinct the evasion
+    //                 steer is acting on. A quarter charge is the floor: below that the shot is not
+    //                 worth spending the fire-rate cooldown on.
+    const _snap = dist < 500;
+    const _dump = this._underFireT > 0 && this._railCharge >= 0.25;
+    if (this._railCharge >= this._railWant || _snap || _dump) {
+      this._shotMul = 1.0 + this._railCharge * 3.0;
+      this._railCharge = 0;
+      this._railWant = 0.35 + Math.random() * 0.65;
+      return true;
+    }
+    return false;
+  }
+  // Decay + the visible tell. A charged railgun has to be readable or it is just an unfair shot -
+  // the player's own barrels light up for the same reason (`_blasterChargeGlow` on railgunCharge).
+  _railTick(dt) {
+    if (this.loadoutKey !== 'PUNCTURE') return;
+    if (!this._railHeld && this._railCharge > 0) {
+      this._railCharge = Math.max(0, this._railCharge - dt * 0.2);   // the player's bleed-off rate
+    }
+    this._railHeld = false;
+    if (this._railCharge <= 0.08) return;
+    this._railFxT -= dt;
+    if (this._railFxT > 0) return;
+    this._railFxT = 0.09;
+    try {
+      if (typeof spawnDynamicLight === 'function') {
+        const c = this._railCharge;
+        spawnDynamicLight(this.position, LSS.CLASS_COLORS.PUNCTURE, 0.8 + c * 3.0, 240 + c * 320, 0.13);
+      }
+    } catch (_) {}
+  }
+
+  // ---- enemies of this bot within a radius ------------------------------------------------------
+  // Shared by the AoE cores. Returns the player too when the player is on the other side, which the
+  // player's own equivalents never have to think about.
+  _enemiesWithin(radius) {
+    const out = [];
+    if (typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
+        player.team !== this.team && this.position.distanceTo(player.position) < radius) {
+      out.push(player);
+    }
+    for (const b of game.entities) {
+      if (!b || b === this || !b.alive || b.team === this.team || !b.position) continue;
+      if (this.position.distanceTo(b.position) < radius) out.push(b);
+    }
+    if (game.monsters) {
+      for (const m of game.monsters) {
+        if (!m || !m.alive || !m.position) continue;
+        if (typeof _botMayDamageMonster === 'function' && !_botMayDamageMonster(this, m)) continue;
+        if (this.position.distanceTo(m.position) < radius + (m.collisionRadius || 0)) out.push(m);
+      }
+    }
+    return out;
+  }
+
+  // ---- THE CORE ---------------------------------------------------------------------------------
+  // Dispatch on the ship's OWN core, the way the player's `activateCore` does.
+  _activateCore(target) {
+    this.coreMeter = 0;
+    const coreName = (this.loadout.core && this.loadout.core.name) || '';
+    const dur = (this.loadout.core && this.loadout.core.duration) || 3;
+    this._coreName = coreName;
+    this._coreT = dur;
+    this._coreAcc = 0;
+    this._coreFired = 0;
+    this._coreTarget = target || this.combatTarget;
+    const aim = this._tempVec3a.subVectors(
+      (this._coreTarget && this._coreTarget.position) ? this._coreTarget.position : this.position,
+      this.position);
+    if (aim.lengthSq() < 1e-6) aim.copy(this.targetDir);
+    aim.normalize();
+    const col = (typeof chassisFlashColor === 'function') ? chassisFlashColor(this.loadout.name) : 0xffdd44;
+    // One shared "the core just went off" cue: a bright light at the hull plus the ship's own core
+    // stinger, heard positionally the way every other bot weapon is (v36.71's rule).
+    const _cue = (snd) => {
+      try {
+        if (typeof spawnDynamicLight === 'function') spawnDynamicLight(this.position, col, 4.0, 900, 0.4);
+        if (snd && typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
+            player.position && player.position.distanceToSquared(this.position) < 4000 * 4000 &&
+            (typeof window === 'undefined' || window.__enemyFireSfx !== false)) {
+          playSpatialSound(snd, this.position, { refDistance: 300, maxDistance: 4000, rolloffFactor: 0.9 });
+        }
+      } catch (_) {}
+    };
+
+    if (coreName === 'Mega Flame Chain') {
+      // PYRO: instant 9000-falloff blast in a 1200 radius, three ground-flat flame trails, and it
+      // ignites deployed gas — all three are what the player's does.
+      _cue('flame_core_blast');
+      const radius = 1200;
+      for (const t of this._enemiesWithin(radius)) {
+        const d = this.position.distanceTo(t.position);
+        const falloff = 1 - Math.min(1, d / radius);
+        this._dealAbilityDamage(t, 9000 * 0.6 * falloff);
+      }
+      try { if (typeof igniteNearbyGas === 'function') igniteNearbyGas(this.position, radius, 'bot', this.team); } catch (_) {}
+      try {
+        const spine = this._tempVec3b.copy(aim); spine.y = 0;
+        if (spine.lengthSq() < 0.001) spine.set(0, 0, -1);
+        spine.normalize();
+        const yAx = new THREE.Vector3(0, 1, 0);
+        for (const ang of [0, (2 * Math.PI) / 3, -(2 * Math.PI) / 3]) {
+          const dir = spine.clone().applyAxisAngle(yAx, ang);
+          const start = this.position.clone().addScaledVector(dir, 60);
+          const id = ++net.effectIdCounter;
+          if (typeof spawnFlameChainVisual === 'function') spawnFlameChainVisual(start, dir, 700, this.team, null, id);
+        }
+        spawnExplosion(this.position, 80);
+      } catch (_) {}
+      this._coreT = 0;                            // instant core; nothing to tick
+      this._coreName = null;
+    } else if (coreName === 'Mega Barrage') {
+      // PUNCTURE: a speed surge plus 15 rockets at 0.2 s spacing (v36.71's deterministic dump).
+      _cue('barrage_core_thrust');
+      this._surgeSpd = Math.max(600, this.chassis.flightSpeed * 1.6);
+      this._surgeT = dur;
+      this.velocity.addScaledVector(this.targetDir, 600);
+    } else if (coreName === 'Mega Stun Bolt') {
+      // SLAYER: the lightning storm follows the caster for the full 5 s. The player's version pushes
+      // a `slayer_core_damage_fx` worldEffect, but that handler resolves its caster as the player or
+      // a peer and has no bot arm at all — so the bolts are emitted from `_coreTick` instead, which
+      // follows this hull for free.
+      _cue('stun_core_zap');
+      try { if (typeof _spawnSlayerCoreStormFX === 'function') _spawnSlayerCoreStormFX(this.position, null); } catch (_) {}
+    } else if (coreName === 'Mega Laser') {
+      _cue('laser_core_beam');
+    } else if (coreName === 'Mega Tracker Rockets') {
+      // TRACKER: the opening burst of 8, then more per tick. The player's are `salvoGuided` (they
+      // steer to the crosshair, which a bot does not have); a bot's home on the target instead,
+      // which is the same promise kept with the tool a bot actually has.
+      _cue('salvo_core_burst');
+      const q = [];
+      for (let m = 0; m < 8; m++) {
+        q.push({
+          speed: (typeof _mtrSpeed === 'function') ? _mtrSpeed() : 360,
+          damage: 250, splash: 120, color: LSS.CLASS_COLORS.TRACKER,
+          smokeTrail: true, removeHaze: true, bustsRocks: true,
+          lifetime: (typeof _mtrLife === 'function') ? _mtrLife() : 6.5,
+          tracking: true, trackTarget: this._coreTarget,
+          aimX: aim.x, aimY: aim.y, aimZ: aim.z,
+          spreadX: (Math.random() - 0.5) * 0.3, spreadY: (Math.random() - 0.5) * 0.3,
+        });
+      }
+      this._botSalvoStart(q, 0.05);
+    } else if (coreName === 'AI Assist') {
+      // BLASTER: "auto-aim + unlimited ammo" for 10 s. For a bot that is perfect accuracy and no
+      // fire-rate jitter — read by `fireAtShip` and the fire gate. It is a BUFF, so there is nothing
+      // to tick and nothing to shoot.
+      _cue('upgrade_core');
+      this._aiAssistT = (this.loadout.core && this.loadout.core.duration) || 10;
+      this._coreT = 0; this._coreName = null;
+    } else if (coreName === 'AI Nanobots') {
+      // SYPHON: the tier ladder, then full restores. Same three steps as the player's, scaled to
+      // what a bot actually has (no clip, no trap charges, no dash charges).
+      _cue('upgrade_core');
+      this.shield = this.maxShield;
+      this.shieldRegenDelay = 0;
+      this.abilityCooldowns[0] = 0; this.abilityCooldowns[1] = 0; this.abilityCooldowns[2] = 0;
+      if (this._syphonTier < 3) {
+        this._syphonTier++;
+        if (this._syphonTier === 2) { this.maxShield = this.chassis.maxShield + 500; this.shield = this.maxShield; }
+        if (this._syphonTier === 3) { this._syphonDmgMult = 1.25; }
+      }
+      this._coreT = 0; this._coreName = null;
+    } else {
+      // No such core. Refuse rather than inventing a weapon for it — that is the whole defect this
+      // rewrite exists to remove.
+      this._coreT = 0; this._coreName = null;
+    }
+  }
+
+  // Per-frame body of a sustained core. Called from update() while `_coreT > 0`.
+  _coreTick(dt) {
+    if (this._coreT <= 0 || !this._coreName) return;
+    this._coreT -= dt;
+    const done = this._coreT <= 0;
+    let tgt = this._coreTarget;
+    const tgtAlive = tgt && (tgt === player ? (player.shipState !== 'dead') : !!tgt.alive);
+    if (!tgtAlive) { tgt = this.combatTarget; this._coreTarget = tgt; }
+    const name = this._coreName;
+
+    if (name === 'Mega Laser') {
+      // VORTEX: a continuous beam for the core's duration. The player's is 12000 over 4 s; this is
+      // the same DPS with the standard bot 0.6, applied per frame and gated on line of sight, so
+      // flying behind cover still works against it.
+      if (tgt && tgt.position) {
+        const aim = this._tempVec3a.subVectors(tgt.position, this.position);
+        const d = aim.length();
+        if (d > 1 && d < 3000) {
+          aim.multiplyScalar(1 / d);
+          let los = d;
+          try { los = raycastLevel(this.position, aim, d + 10, true); } catch (_) {}
+          if (los >= d - 5) {
+            const dps = (((this.loadout.core && this.loadout.core.damage) || 12000) /
+                         ((this.loadout.core && this.loadout.core.duration) || 4)) * 0.6;
+            this._dealAbilityDamage(tgt, dps * dt);
+          }
+          // Beam visual at ~20 Hz. Two tracers a frame for four seconds would be 500+ pooled
+          // tracers; the pool would simply eat them and every other effect would starve.
+          this._coreFxT -= dt;
+          if (this._coreFxT <= 0) {
+            this._coreFxT = 0.05;
+            const end = this._tempVec3c.copy(this.position).addScaledVector(aim, Math.min(los, 3000));
+            try {
+              spawnTracer(this.position, end, LSS.CLASS_COLORS.VORTEX, 2.2);
+              spawnTracer(this.position, end, 0xffffff, 1.0);
+            } catch (_) {}
+          }
+        }
+      }
+    } else if (name === 'Mega Barrage') {
+      // PUNCTURE: 15 rockets, 0.2 s apart, so the dump is over inside 3 s of the 5 s core — the
+      // player's `_pbFired`/`_pbAcc` cadence exactly.
+      this._coreAcc += dt;
+      while (this._coreFired < 15 && this._coreAcc >= 0.2) {
+        this._coreAcc -= 0.2;
+        this._coreFired++;
+        const dir = this._tempVec3a;
+        if (tgt && tgt.position) dir.subVectors(tgt.position, this.position).normalize();
+        else dir.copy(this.targetDir);
+        const vel = this._tempVec3b.set(
+          dir.x + (Math.random() - 0.5) * 0.14,
+          dir.y + (Math.random() - 0.5) * 0.14,
+          dir.z + (Math.random() - 0.5) * 0.14
+        ).normalize().multiplyScalar(900);
+        const origin = (this.mesh && typeof shipMuzzleWorld === 'function')
+          ? shipMuzzleWorld(this.mesh, this._coreFired, this._tempVec3c)
+          : this._tempVec3c.copy(this.position);
+        const proj = new Projectile(origin, vel, 7000 / 15 * 0.6, 150, 'bot', LSS.CLASS_COLORS.PUNCTURE);
+        proj.smokeTrail = true;
+        proj.ownerTeam = this.team; proj.ownerRef = this;
+        try { proj.removeHaze(); } catch (_) {}
+        game.projectiles.push(proj);
+      }
+      // The speed boost half of "speed boost + rocket barrage".
+      this.velocity.addScaledVector(this.targetDir, this.chassis.acceleration * dt * 0.6);
+    } else if (name === 'Mega Stun Bolt') {
+      // SLAYER: 1800 DPS melee aura inside 500 u, plus the Stun Bolt flurry, plus the storm that
+      // makes the damage zone visible. All three, for the full duration, like the player's.
+      for (const t of this._enemiesWithin(500)) this._dealAbilityDamage(t, 1800 * 0.6 * dt);
+      this._coreFxT -= dt;
+      if (this._coreFxT <= 0) {
+        this._coreFxT = 0.06;
+        try {
+          if (typeof spawnLightningBolt === 'function') {
+            const ang = Math.random() * Math.PI * 2;
+            const r = 200 + Math.random() * 300;
+            const end = this._tempVec3c.set(
+              this.position.x + Math.cos(ang) * r,
+              this.position.y + (Math.random() - 0.5) * 220,
+              this.position.z + Math.sin(ang) * r);
+            spawnLightningBolt(this._tempVec3a.copy(this.position), end, LSS.CLASS_COLORS.SLAYER, 0.45, 3, 4);
+          }
+        } catch (_) {}
+      }
+      if (Math.random() < dt * 2 && tgt && tgt.position) {
+        const dir = this._tempVec3a.subVectors(tgt.position, this.position).normalize();
+        const vel = this._tempVec3b.copy(dir).multiplyScalar(800);
+        const proj = new Projectile(this.position, vel, 600 * 0.6, 150, 'bot', LSS.CLASS_COLORS.SLAYER);
+        proj.isArcWave = true;
+        proj.ownerTeam = this.team; proj.ownerRef = this;
+        game.projectiles.push(proj);
+      }
+    } else if (name === 'Mega Tracker Rockets') {
+      // TRACKER: keep spawning guided missiles for the duration, at the player's 10/s.
+      if (Math.random() < dt * 10 && tgt && !this._botSalvo) {
+        this._botSalvoStart([{
+          speed: (typeof _mtrSpeed === 'function') ? _mtrSpeed() : 360,
+          damage: 200, splash: 120, color: LSS.CLASS_COLORS.TRACKER,
+          smokeTrail: true, removeHaze: true, bustsRocks: true,
+          lifetime: (typeof _mtrLife === 'function') ? _mtrLife() : 6.5,
+          tracking: true, trackTarget: tgt,
+          spreadX: (Math.random() - 0.5) * 0.25, spreadY: (Math.random() - 0.5) * 0.25,
+        }], 0.01);
+      }
+    }
+    if (done) { this._coreT = 0; this._coreName = null; this._coreTarget = null; }
+  }
+
+
+  // ⭐⭐ (v45.42) THREAT AWARENESS - "bots should avoid fire and try to get out of fire if in it
+  // (they aren't allowed to warp or teleport out of fire, they must try to move)" (owner).
+  // Two inputs, one output:
+  //   TAKING HITS       - Bot.takeDamage sets `_underFireT` + `_fireFromDir`. Covers every hitscan
+  //                       weapon in the game, which spawn no projectile at all.
+  //   INCOMING ROUNDS   - this scan. A rocket, a thermite bolt, a cluster missile or a tracking
+  //                       volley is visible in `game.projectiles` for a second or more BEFORE it
+  //                       lands, which is what makes dodging (rather than reacting) possible. This
+  //                       is the "avoid fire" half of the ask.
+  // The output is a committed lateral juke, re-rolled every ~0.55 s so it reads as a break rather
+  // than a drift, and always PERPENDICULAR to the incoming axis: flying straight away from a shooter
+  // keeps you in the beam, sliding across it does not.
+  // ⚠ COST. The scan is throttled to ~8 Hz per bot with a randomised phase from the constructor, so
+  //   a six-bot squad spreads its scans across frames instead of all paying on the same one. Worst
+  //   realistic case (6 bots x ~200 live projectiles x 8 Hz) is ~10k squared-distance tests a second,
+  //   which is noise next to one terrain raycast.
+  // ⚠ It reads `ownerTeam` and falls back to `owner === 'player'` - ability projectiles set
+  //   ownerTeam/ownerRef, the player's plain weapon fire is hitscan (no projectile) or carries
+  //   owner 'player'. A projectile with neither is ignored rather than guessed at.
+  _threatTick(dt) {
+    if (this._underFireT > 0) this._underFireT -= dt;
+    if (this._evadeT > 0) this._evadeT -= dt;
+
+    this._incScanT -= dt;
+    if (this._incScanT <= 0) {
+      this._incScanT = 0.12;
+      const projs = (typeof game !== 'undefined' && game.projectiles) ? game.projectiles : null;
+      if (projs && projs.length) {
+        // A round only counts as a threat if it is closing AND would pass near the hull. `lead` is
+        // the time to closest approach along its own velocity; `miss` is how far off it would be.
+        const _dangerR = Math.max(260, this.chassis.hullLength * 2.2);
+        for (let i = 0; i < projs.length; i++) {
+          const p = projs[i];
+          if (!p || !p.alive || !p.position || !p.velocity) continue;
+          const _pTeam = (p.ownerTeam != null) ? p.ownerTeam
+                       : (p.owner === 'player' && typeof player !== 'undefined' && player) ? player.team : null;
+          if (_pTeam == null || _pTeam === this.team) continue;
+          if (p.ownerRef === this) continue;
+          const rx = this.position.x - p.position.x;
+          const ry = this.position.y - p.position.y;
+          const rz = this.position.z - p.position.z;
+          const d2 = rx * rx + ry * ry + rz * rz;
+          if (d2 > 4000 * 4000) continue;
+          const vx = p.velocity.x, vy = p.velocity.y, vz = p.velocity.z;
+          const v2 = vx * vx + vy * vy + vz * vz;
+          if (v2 < 1) continue;
+          const lead = (rx * vx + ry * vy + rz * vz) / v2;   // seconds to closest approach
+          if (lead <= 0 || lead > 1.6) continue;             // behind us, or too far out to react to
+          const mx = rx - vx * lead, my = ry - vy * lead, mz = rz - vz * lead;
+          if (mx * mx + my * my + mz * mz > _dangerR * _dangerR) continue;
+          this._underFireT = Math.max(this._underFireT, 1.4);
+          this._fireFromDir.set(-vx, -vy, -vz).normalize();   // the round's axis, reversed
+          break;                                             // one confirmed threat is enough
+        }
+      }
+    }
+
+    // Commit a fresh break heading. Mostly lateral with a real vertical component - a flat slide is
+    // the one a leading shooter is already correcting for, and every ship in this game flies in 3D.
+    if (this._underFireT > 0 && this._evadeT <= 0) {
+      this._evadeT = 0.45 + Math.random() * 0.25;
+      const up = this._tempVec3d.set(0, 1, 0);
+      this._evadeDir.crossVectors(up, this._fireFromDir);
+      if (this._evadeDir.lengthSq() < 1e-4) this._evadeDir.set(1, 0, 0);   // fire straight down the Y axis
+      this._evadeDir.normalize();
+      // Deterministic-per-bot side bias with a coin flip on top: two wingmen caught in the same
+      // stream peel apart instead of both sliding into each other (the v41.95 unstick rule).
+      const side = (((this.id | 0) % 2) === 0 ? 1 : -1) * (Math.random() < 0.75 ? 1 : -1);
+      this._evadeDir.multiplyScalar(side);
+      this._evadeDir.y += (Math.random() - 0.5) * 0.9;
+      this._evadeDir.normalize();
+    }
   }
 
   // Pick the best enemy SHIP to fight: the player (if on the other team)
@@ -57020,7 +57762,11 @@ class Bot {
     const weapon = this.loadout.weapon;
     // Distance-based accuracy: better up close, worse at range
     const rangeRatio = Math.max(0, 1 - dist / weapon.range);
-    const accuracy = 0.25 + rangeRatio * 0.45; 
+    // (v45.42) BLASTER's core is "AI Assist - auto-aim + unlimited ammo". For a bot that is exactly
+    // this: while the core runs it does not miss. (The unlimited-ammo half is free - bots have no
+    // clip - so the fire-rate jitter is dropped at the fire gate instead, which is the closest thing
+    // a bot has to "never stops to reload".)
+    const accuracy = (this._aiAssistT > 0) ? 1 : (0.25 + rangeRatio * 0.45);
     if (Math.random() > accuracy) return;
 
     let damage = weapon.damage;
@@ -57038,6 +57784,19 @@ class Bot {
       const falloff = 0.7 + rangeRatio * 0.3;
       damage *= falloff;
     }
+
+    // ⭐⭐ (v45.42) THE RAILGUN'S CHARGE. Owner: "puncture needs to charge and partial charge his
+    // shots". The human's rule, from the fire path: `_railShotMul = 1.0 + player.railgunCharge * 3.0`
+    // - a tap is exactly the base shot, a full 2.5 s wind-up is four times it - and the charge is
+    // spent by the SHOT, hit or miss (v30.72's correction). `_shotMul` is set by `_railTick`, which
+    // is where the holding-the-trigger half lives; here it is just applied and cleared.
+    // Generic on purpose: nothing about this line is PUNCTURE-specific, so any future charged weapon
+    // gets it for free.
+    if (this._shotMul !== 1) { damage *= this._shotMul; }
+    const _shotMulUsed = this._shotMul;
+    this._shotMul = 1;
+    // SYPHON's core tier 3 is a permanent +25% (`syphonDmgMult` on the player).
+    if (this._syphonDmgMult) damage *= this._syphonDmgMult;
 
     // ---- BOT FIRING VFX ----
     // Scratch vectors, not clones: this path fires for every bot at its
@@ -57088,6 +57847,19 @@ if (game._hubWater) {
   } catch (_) {}
 }
 const isChaingunBot = (weapon.fireRate <= 0.10);
+      // ⭐ (v45.42) A RAILGUN LOOKS LIKE A RAILGUN. The human's Sodium Railgun fires
+      // `_spawnRailgunSpiral` - the twisting electric slug - and the bot's fired a plain tracer, the
+      // same one a Gatling round leaves. Owner: "all usage of weapons should behave the same as the
+      // humans". The spiral now carries the shot, and its width rides the charge so a wound-up slug
+      // reads bigger than a tap (the charge is already in `_shotMulUsed`: 1 = tap, 4 = full).
+      if (weapon.name === 'Sodium Railgun' && typeof _spawnRailgunSpiral === 'function') {
+        try { _spawnRailgunSpiral(fireOrigin, target.position, flashColor); } catch (_) {
+          spawnTracer(fireOrigin, target.position, flashColor, 1.0);
+        }
+        if (_shotMulUsed > 1.8) {
+          try { spawnTracer(fireOrigin, target.position, 0xffffff, Math.min(2.2, _shotMulUsed * 0.55)); } catch (_) {}
+        }
+      } else
       spawnTracer(fireOrigin, target.position, flashColor, isChaingunBot ? 0.55 : 1.0);
 
       // Muzzle particles (POJO position/velocity ; no Vector3 churn)
@@ -57152,16 +57924,19 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
       // you-lock), not for enemy lock progression onto you; the on-screen
       // "ENEMY LOCKED-ON" warning pips already communicate incoming threat
       // visually. Otherwise every ship being TRACKER-shot would hear lock pings.
-      if (this.loadoutKey === 'TRACKER') {
-        const prevEnemyLocks = player.enemyToneLocks[this.id] || 0;
-        player.enemyToneLocks[this.id] = Math.min(3, prevEnemyLocks + 1);
-        if (player._enemyLockDecayTimers) player._enemyLockDecayTimers[this.id] = 0; 
-      }
+      this._addLock(player);   // (v45.42) one ladder for every target - see _addLock
     } else {
       // Bot-vs-bot: same damage model, attacker credited for kill stats.
       target.takeDamage(damage, this, target.position);
+      // ⭐ (v45.42) ...AND THE LOCK BUILDS HERE TOO. This is the half that never existed: a TRACKER
+      // bot only ever accumulated marks on the HUMAN, so bot-vs-bot had no lock to read and the
+      // Tracker Rockets branch had to invent a second rule ("bot-vs-bot homes outright"). Now the
+      // main gun builds the same 3-hit ladder against anything it shoots, which is what lets the
+      // ability run the human's single rule against every target.
+      this._addLock(target);
     }
-    // Bot core meter charges from dealing damage
+    // Bot core meter charges from dealing damage - the human's ÷100, and now the ONLY passive-free
+    // way it fills alongside kills and ability spends (see the core block).
     this.coreMeter = Math.min(100, this.coreMeter + damage / 100);
   }
 
@@ -57187,6 +57962,32 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
       _hitMarkFor(attacker, amount);   // (v45.38)
       return amount;
     }
+
+    // ⭐⭐ (v45.42) "I AM UNDER FIRE." The single most important thing a bot never knew. Taking a hit
+    // is the one threat signal that costs nothing to collect and that no weapon can hide from - a
+    // hitscan beam spawns no projectile for the v45.42 incoming scan to see, so this is the ONLY way
+    // a bot learns it is being shot by a Gatling, a Zapper, a Laser or a railgun.
+    // The direction is stored as "from the shooter toward me", which is the axis the evasion steer
+    // breaks PERPENDICULAR to (see _threatTick) - flying straight away from it just stays in the
+    // beam a little longer.
+    // ⚠ Placed AFTER the isProxy return: a proxy runs no AI at all, and the authority gets its own
+    //   copy of this call through the bot_dmg claim.
+    // ⚠ `attacker` is a STRING ('player', 'peer:<id>', 'debris') as often as it is an object; the
+    //   position lookup handles both and simply keeps the last known bearing when it can find
+    //   neither. The TIMER is set either way - not knowing where it came from is no reason to stand
+    //   still while being shot.
+    this._underFireT = 2.2;
+    try {
+      const _srcPos = (attacker === 'player')
+        ? ((typeof player !== 'undefined' && player) ? player.position : null)
+        : (attacker && attacker.position) ? attacker.position
+        : (hitPoint || null);
+      if (_srcPos) {
+        this._fireFromDir.subVectors(this.position, _srcPos);
+        if (this._fireFromDir.lengthSq() > 1e-4) this._fireFromDir.normalize();
+        else this._fireFromDir.set(0, 0, 1);
+      }
+    } catch (_) {}
 
     // ⭐⭐ (v42.17) PLASMA SHIELD, VICTIM SIDE FOR BOTS - this gate had NO equivalent before, so
     // a wall deployed by a TRACKER bot stopped nothing from anyone: both absorb paths in the file
@@ -57411,6 +58212,10 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
         if (!attacker._streakCount) attacker._streakCount = 0;
         attacker._streakCount++;
         attacker.kills = (attacker.kills || 0) + 1;
+        // (v45.42) ...and the kill's +15 core, the human's number (see `_lssAwardKill`). Guarded on
+        // the field rather than on the class so a NetworkPlayer attacker - which charges its core on
+        // its own machine - is left alone.
+        if (attacker.coreMeter != null) attacker.coreMeter = Math.min(100, attacker.coreMeter + 15);
       }
     }
   }
@@ -79861,6 +80666,15 @@ function playerDie(attacker) {
   // person never showed it. The rig re-shows it on respawn (its every-frame
   // visible=true in the seat / chase branches), so nothing else changes.
   if (player.mesh) player.mesh.visible = false;
+  // ⭐ (v45.42) A BOT THAT KILLS YOU EARNS ITS CORE, the same +15 `_lssAwardKill` gives you for
+  // killing one. With the bot's wall-clock trickle removed (see the bot core block), kills are one
+  // of only three ways the meter fills, and this is the one that happens to the player - leaving it
+  // out would mean the bot that just beat you got nothing for it.
+  // ⚠ `attacker.coreMeter != null` is the whole test: NetworkPlayer has no core meter of its own
+  //   (a peer charges theirs on their own machine and sends it), so this lands on bots only.
+  if (attacker && typeof attacker === 'object' && attacker.coreMeter != null && attacker.alive) {
+    attacker.coreMeter = Math.min(100, attacker.coreMeter + 15);
+  }
   if (attacker && attacker.loadout) addKillFeed(attacker.loadout.name, 'You');
   // Stronger shake when YOU die ; sells the moment more than a
   // generic peer kill. Same trigger function; bigger amplitude.
