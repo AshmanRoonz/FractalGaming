@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.98';
+const LSS_BUILD = '45.06';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2414,8 +2414,9 @@ async function joinRoom() {
             map: game.selectedMap, seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
             mst: (typeof net.matchStartedAt === 'number') ? net.matchStartedAt : undefined,   // (v38.60)
             mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
-            round: game.currentRound || 1, scoreA: game.scoreA || 0, scoreB: game.scoreB || 0 });
-          if (typeof _botSendRoster === 'function') _botSendRoster();
+            round: game.currentRound || 1, scoreA: game.scoreA || 0, scoreB: game.scoreB || 0 },
+            peerId);   // (v45.02) to the joiner only
+          if (typeof _botSendRoster === 'function') _botSendRoster(peerId);   // (v45.02) ditto
         } catch (_) {}
       }
       if (net.openSolo && game.state === 'select' && net.sendEvent) {
@@ -5017,10 +5018,66 @@ function _lssWillWaitForPeers() {
     return !!(net && net.active && typeof nonJudgePeerCount === 'function' && nonJudgePeerCount() > 0);
   } catch (_) { return false; }
 }
+function _lssConfirmed() { try { return !!game._ssConfirmed; } catch (_) { return false; } }
+function _lssLaunchReady() {
+  try {
+    if (!_lssConfirmed()) return false;
+    if (!net || !net.active) return true;                                  // solo
+    if (typeof nonJudgePeerCount === 'function' && nonJudgePeerCount() === 0) return true;   // alone in the room
+    return (typeof allPeersReady === 'function') ? !!allPeersReady() : false;
+  } catch (_) { return false; }
+}
+function _lssRefreshLaunchRow() {
+  try {
+    const c = document.getElementById('ship-preview-confirm');
+    const l = document.getElementById('ship-preview-launch');
+    const on = _lssConfirmed();
+    if (c) {
+      c.classList.toggle('ss-checked', on);
+      c.innerHTML = on ? '&#10003; CONFIRMED' : '&#10003; CONFIRM';
+      c.title = on ? 'Locked in - click to unlock and change ship, map, mode or speed'
+                   : 'Lock in your ship and pilot perk';
+    }
+    if (l) {
+      const ready = _lssLaunchReady();
+      l.disabled = !ready;
+      if (!on) l.title = 'Confirm your ship first';
+      else if (!ready) {
+        let r = 0, t = 0;
+        try { t = 1 + (typeof nonJudgePeerCount === 'function' ? nonJudgePeerCount() : 0);
+              r = (net.myReady ? 1 : 0);
+              if (typeof nonJudgePeerEntries === 'function') for (const [, pr] of nonJudgePeerEntries()) if (pr && pr.ready) r++;
+        } catch (_) {}
+        l.textContent = t > 1 ? ('LAUNCH  ' + r + '/' + t) : 'LAUNCH';
+        l.title = 'Waiting for the rest of the room to confirm';
+        return;
+      }
+      l.textContent = 'LAUNCH';
+      l.title = 'Take the room in';
+    }
+  } catch (_) {}
+}
+function _lssToggleConfirm() {
+  try {
+    game._ssConfirmed = !game._ssConfirmed;
+    if (net && net.active) {
+      net.myReady = !!game._ssConfirmed;
+      try { if (net.sendEvent) net.sendEvent({ type: 'ready', ready: net.myReady }); } catch (_) {}
+      try { if (typeof updateLobbyPeers === 'function') updateLobbyPeers(); } catch (_) {}
+    }
+    _lssRefreshLaunchRow();
+    try { if (typeof _syncMapButtonsDisabled === 'function') _syncMapButtonsDisabled(); } catch (_) {}
+    try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
+    try { if (typeof _lssRefreshInsaneSpeedBtn === 'function') _lssRefreshInsaneSpeedBtn(); } catch (_) {}
+    try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
+  } catch (_) {}
+}
+if (typeof window !== 'undefined') window.__lssRefreshLaunchRow = _lssRefreshLaunchRow;
+
 function _lssSetConfirmWaiting(on, rdy, tot) {
   try {
     if (net) net._waitingForPeers = !!on;
-    const b = document.getElementById('ship-preview-confirm');
+    const b = document.getElementById('ship-preview-launch');
     if (!b) return;
     if (on) {
       b.disabled = true;
@@ -5028,10 +5085,8 @@ function _lssSetConfirmWaiting(on, rdy, tot) {
       b.textContent = (tot ? ('WAITING  ' + rdy + '/' + tot) : 'WAITING');
       b.title = 'Everyone launches together - waiting for the rest of the room';
     } else {
-      b.disabled = false;
       b.classList.remove('ss-waiting');
-      b.textContent = 'CONFIRM & LAUNCH';
-      b.title = '';
+      _lssRefreshLaunchRow();   // label + disabled come from state, not from here
     }
   } catch (_) {}
 }
@@ -5701,6 +5756,8 @@ function allPeersReady() {
 
 function checkAllReady() {
   if (!net.active) return;
+  try { const _sel = document.getElementById('ship-select');
+        if (_sel && _sel.classList.contains('active')) return; } catch (_) {}
   if (!allPeersReady()) {
     if (net.startTimer) {
       clearTimeout(net.startTimer);
@@ -5747,7 +5804,7 @@ function _syncMapButtonsDisabled() {
                     (net.launchScheduledAt || net.mapCommitLocked));
   let _mapFrozen = false;
   try { _mapFrozen = !!(typeof game !== 'undefined' && game && game.state && game.state !== 'select'); } catch (_) {}
-  try { if (_lssJoinedMatchInProgress()) _mapFrozen = true; } catch (_) {}
+  try { if (_lssRoomSettingsFrozen()) _mapFrozen = true; } catch (_) {}
   const mapLocked = locked || _mapFrozen;
   const prev = document.getElementById('map-prev');
   const next = document.getElementById('map-next');
@@ -5778,6 +5835,7 @@ function tickStartCountdown() {
 function checkAllLoadoutsReady() {
   if (!net.active) return;
   if (typeof _countdownActive !== 'undefined' && _countdownActive) return;
+  if (game._launchCommitted) return;
   if (!player.loadoutKey) return;
   if (typeof game !== 'undefined' && game && game.state === 'warmup' && (game.currentRound || 1) > 1) return;
   
@@ -5791,6 +5849,7 @@ function checkAllLoadoutsReady() {
     game.scoreA = d.scoreA || 0;
     game.scoreB = d.scoreB || 0;
     try { hideLoadingOverlay(); } catch (_) {}
+    game._launchCommitted = true;   // (v45.05) drop-in: committed, no second ticker
     _lssRunCinematicThen(() => {
       _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
       launchCountdown(LSS.SHORT_COUNTDOWN);
@@ -5803,6 +5862,7 @@ function checkAllLoadoutsReady() {
   if (nonJudgePeerCount() === 0) {
     if (_localWarmupReady) {
       try { hideLoadingOverlay(); } catch (_) {}
+      game._launchCommitted = true;   // (v45.05) solo fallback: committed
       _lssRunCinematicThen(() => {
         _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
         launchCountdown(LSS.SHORT_COUNTDOWN);
@@ -5876,6 +5936,7 @@ function scheduleLaunch(launchAt) {
     if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
     _syncMapButtonsDisabled();
     try { hideLoadingOverlay(); } catch (_) {}
+    game._launchCommitted = true;   // (v45.05) the room is going: committed
     _lssRunCinematicThen(() => {
       try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
       launchCountdown(LSS.SHORT_COUNTDOWN);
@@ -6645,12 +6706,24 @@ function handleNetEvent(evt, fromPeerId) {
     }
     return;
   }
+  if (evt.type === 'launch_now') {
+    try {
+      const _sel = document.getElementById('ship-select');
+      const _inPicker = !!(_sel && _sel.classList.contains('active'));
+      if (_inPicker && game._ssConfirmed && game.state === 'select' && !game._launchCommitted) {
+        const _k = game._ssKey || (player && player.loadoutKey) || null;
+        if (_k && typeof commitLoadout === 'function') commitLoadout(_k);
+      }
+    } catch (_) {}
+    return;
+  }
   if (evt.type === 'ready') {
     const peer = net.peers.get(fromPeerId);
     if (peer) {
       peer.ready = !!evt.ready;
       updateLobbyPeers();
       checkAllReady();
+      try { if (typeof _lssRefreshLaunchRow === 'function') _lssRefreshLaunchRow(); } catch (_) {}   // (v45.06) the last confirm lights LAUNCH
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     }
     return;
@@ -17485,6 +17558,44 @@ if (typeof window !== 'undefined') window.__dbg = {
   get player() { return (typeof player !== 'undefined') ? player : null; },
   returnHub: () => _hzReturnToHub(),
   models: () => { try { return Object.keys(shipModelCache.loaded); } catch (_) { return null; } },
+  city: () => {
+    try {
+      const S = (typeof _HC_TRAF !== 'undefined' && _HC_TRAF.ships) ? _HC_TRAF.ships : [];
+      const rows = [];
+      for (let i = 0; i < S.length; i++) {
+        const e = S[i] && S[i].ent;
+        rows.push(e ? [i, e.trafIdx, e.name || '?', Math.round(e.health), e.alive ? 1 : 0,
+                       (e.mesh && e.mesh.visible) ? 1 : 0, e.aggro ? 1 : 0,
+                       S[i].modelKey || '-'] : [i, null]);   // (v45.03) [7] = the hull
+      }
+      let sig = 0;
+      for (const r of rows) { const t = String(r[2]) + ':' + String(r[7]); for (let k = 0; k < t.length; k++) sig = (sig * 31 + t.charCodeAt(k)) | 0; }   // (v45.03) class + HULL, not aggro (which is live state)
+      const ids = (typeof nonJudgePeerIds === 'function') ? [net.myPeerId, ...nonJudgePeerIds()].sort() : null;
+      return {
+        n: S.length, ready: (typeof _HC_TRAF !== 'undefined') ? !!_HC_TRAF.ready : null,
+        seed: (typeof HUB_CITY !== 'undefined' && HUB_CITY.genome) ? HUB_CITY.genome.seed : null,
+        worldSeed: (net && net.worldSeed != null) ? (net.worldSeed >>> 0) : null,
+        authority: (typeof amStasisOwner === 'function') ? amStasisOwner() : null,
+        trafProxy: (typeof _hcTrafIsProxy === 'function') ? _hcTrafIsProxy() : null,
+        myPeerId: net ? net.myPeerId : null, sortedIds: ids,
+        mobile: (typeof _LSS_IS_MOBILE !== 'undefined') ? !!_LSS_IS_MOBILE : null,
+        state: (typeof game !== 'undefined') ? game.state : null,
+        mode: (typeof LSS !== 'undefined') ? LSS.MODE : null,
+        sig: sig, rows: rows,
+      };
+    } catch (e) { return { error: String(e) }; }
+  },
+  cityHit: (i, dmg) => {
+    try {
+      const sh = _HC_TRAF.ships[i | 0];
+      if (!sh || !sh.ent) return 'no ship at index ' + i;
+      const before = sh.ent.health;
+      const ret = sh.ent.takeDamage(Math.max(1, +dmg || 500), (typeof player !== 'undefined') ? player : null, sh.ent.position);
+      return { idx: i | 0, name: sh.ent.name, returned: ret, healthBefore: Math.round(before),
+               healthAfter: Math.round(sh.ent.health), aggro: !!sh.ent.aggro,
+               wasProxy: (typeof _hcTrafIsProxy === 'function') ? _hcTrafIsProxy() : null };
+    } catch (e) { return { error: String(e) }; }
+  },
   waveRot: (v) => {
     try {
       if (v != null) { const n = HOARD_SHIPS.length; _campShipRot = ((v % n) + n) % n; }
@@ -24008,10 +24119,12 @@ function _hcTrafficInit(city, group) {
   _HC_TRAF.ships = []; _HC_TRAF.obbs = []; _HC_TRAF.ready = false;
   const _full = !((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
                   (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE));
-  const maxShips = _full ? 34 : 16;
-  const parkPads = city.pads.filter(p => p.park).slice(0, maxShips);
+  const _rosterMax = (typeof window !== 'undefined' && window.__cityShips != null) ? (+window.__cityShips | 0) : 34;
+  const _renderMax = (typeof window !== 'undefined' && window.__cityRender != null) ? (+window.__cityRender | 0) : _rosterMax;
+  const parkPads = city.pads.filter(p => p.park).slice(0, _rosterMax);
   if (!parkPads.length || typeof loadHoardModel !== 'function') return;
-  const modelCount = Math.min(HOARD_SHIPS.length, _full ? 14 : 6);
+  const modelCount = Math.min(HOARD_SHIPS.length,
+    (typeof window !== 'undefined' && window.__cityModels != null) ? (+window.__cityModels | 0) : 14);
   const keys = [];
   for (let i = 0; i < modelCount; i++) keys.push(HOARD_SHIPS[(HUB_CITY.genome.seed + i * 5) % HOARD_SHIPS.length]);
   Promise.all(keys.map(k => loadHoardModel(k))).then((protos) => {
@@ -24019,10 +24132,16 @@ function _hcTrafficInit(city, group) {
     const live = protos.filter(Boolean);
     if (!live.length) return;
     for (let i = 0; i < parkPads.length; i++) {
-      const proto = live[i % live.length];
+      const _mi = i % protos.length;
+      const proto = protos[_mi] || live[_mi % live.length];
       if (!proto) continue;
       const holder = new THREE.Group();
-      const cl = proto.clone(true);
+      const _cls = _hcTrafClass(i);
+      const _jit = 0.82 + _stHash2(i * 5.09, 1.77) * 0.42;   // +/-~20% per ship
+      const _sc = _cls.scale;
+      const _render = (i < _renderMax);
+      const cl = _render ? proto.clone(true) : null;
+      if (cl) {
       cl.traverse((o) => {
         if (!o.isMesh) return;
         o.castShadow = true;
@@ -24037,11 +24156,9 @@ function _hcTrafficInit(city, group) {
         }
       });
       holder.add(cl);
-      const _cls = _hcTrafClass(i);
-      const _jit = 0.82 + _stHash2(i * 5.09, 1.77) * 0.42;   // +/-~20% per ship
-      const _sc = _cls.scale;
       if (_sc !== 1) cl.scale.multiplyScalar(_sc);
       try { if (i % 3 === 1 && !(window.__ads && (window.__ads.banners === 0 || window.__ads.on === 0))) _hcAttachBanner(holder, i, _sc); } catch (_) {}
+      }   // (v45.01) end of the mesh-only work
       holder.visible = false;
       holder.userData.isHubCity = true;
       group.add(holder);
@@ -24064,7 +24181,10 @@ function _hcTrafficInit(city, group) {
         aggro: false, _fireT: 1.5,
         update() {},
         takeDamage(amount, attacker) {
-          if (!this.alive || !this.mesh || !this.mesh.visible) return 0;
+          const _remote = (typeof attacker === 'string') &&
+                          (attacker === 'net' || attacker.slice(0, 5) === 'peer:');
+          if (!this.alive) return 0;
+          if (!_remote && (!this.mesh || !this.mesh.visible)) return 0;
           if (attacker === this || (attacker && attacker.owner === this)) return 0;
 
           if (attacker !== 'net' && typeof _hcTrafIsProxy === 'function' && _hcTrafIsProxy()) {
@@ -24131,7 +24251,7 @@ function _hcTrafficInit(city, group) {
         const bb = new THREE.Box3().setFromObject(cl);
         if (isFinite(bb.min.y)) lift = Math.max(56, -bb.min.y + 24);
       } catch (_) {}
-      _HC_TRAF.ships.push({ holder, pad: parkPads[i], idx: i, lastSeg: -1, ent, lift });
+      _HC_TRAF.ships.push({ holder, pad: parkPads[i], idx: i, lastSeg: -1, ent, lift, modelKey: keys[_mi] || null });   // (v45.03) modelKey: which hull this slot wears, so parity is checkable
     }
     _HC_TRAF.ready = true;
   }).catch(() => {});
@@ -49612,6 +49732,7 @@ function commitLoadout(key) {
     player._railgunChargeAudio = null;
   }
   player._railgunChargingPrev = false;
+  player._puncTrigPrev = false;   // (v44.99) the trigger latch dies with the charge - a stale one would fire a release on respawn
   _clearHullHugShieldsOn(player);
   if (player.vortexShieldRing) { scene.remove(player.vortexShieldRing); player.vortexShieldRing = null; }
   if (player.gunShieldEdge) { scene.remove(player.gunShieldEdge); player.gunShieldEdge = null; }
@@ -49666,7 +49787,7 @@ function commitLoadout(key) {
       spawnOrganics(game.sdfRoomData);
 
       const teamCode = _isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A');
-      player.position.copy(getValidSpawnPoint(teamCode));
+      player.position.copy(_spawnPickSet(getValidSpawnPoint(teamCode)));
       try { if (typeof _aegisApply === 'function') _aegisApply(); } catch (_) {}
 
       game.stasisFields.forEach(f => f.destroy());
@@ -49719,7 +49840,7 @@ function commitLoadout(key) {
     if (typeof _clearChampionShell === 'function') _clearChampionShell();
     startAmbientBed();
   } else {
-    player.position.copy(getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A')));
+    player.position.copy(_spawnPickSet(getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'))));   // (v45.04) remembered
     if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
   }
 
@@ -50209,6 +50330,7 @@ function playerDie(attacker) {
     try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
     player._railgunChargeAudio = null;
     player._railgunChargingPrev = false;
+    player._puncTrigPrev = false;   // (v44.99) the trigger latch dies with the charge - a stale one would fire a release on respawn
   }
   player.railgunCharge = 0;
   player.powerShotCharging = false;
@@ -50321,6 +50443,7 @@ function respawnPlayer() {
     player._railgunChargeAudio = null;
   }
   player._railgunChargingPrev = false;
+  player._puncTrigPrev = false;   // (v44.99) the trigger latch dies with the charge - a stale one would fire a release on respawn
   player.vortexStored = 0;
   player.vortexRecentAbsorb = 0;
   player.vortexEnergy = player.vortexMaxEnergy;
@@ -50335,7 +50458,8 @@ function respawnPlayer() {
   player.abilityCooldowns = [0, 0, 0];
   player.coreActive = false;
   player.coreTimer = 0;
-  let sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'));
+  let sp = _spawnPickTake() ||
+           getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'));
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
     sp = new THREE.Vector3(0, 0, -CAMPAIGN_LEG_HALF_Z);
   }
@@ -52322,8 +52446,9 @@ function updateWeapon(dt) {
     }
   }
 
+  const _trigHeld = !!(input.mouseDown || _kbActionHeld('fire') || input.gpFire || input.touchFire);
   if (player.loadoutKey === 'PUNCTURE') {
-    const _wantTone = aiming || player.railgunCharge > 0.02;
+    const _wantTone = _trigHeld || player.railgunCharge > 0.02;
     if (_wantTone && !player._railgunChargeAudio) {
       try { player._railgunChargeAudio = _startRailgunChargeSound(player.railgunCharge); } catch (e) {}
     } else if (!_wantTone && player._railgunChargeAudio) {
@@ -52333,13 +52458,13 @@ function updateWeapon(dt) {
     if (player._railgunChargeAudio && typeof player._railgunChargeAudio.set === 'function') {
       try { player._railgunChargeAudio.set(player.railgunCharge); } catch (e) {}
     }
-    player._railgunChargingPrev = aiming;
-    if (aiming) {
+    player._railgunChargingPrev = _trigHeld;
+    if (_trigHeld) {
       player.railgunCharge = Math.min(1.0, player.railgunCharge + dt / ((typeof _aegisUpFor === 'function' && _aegisUpFor(8) && player.loadoutKey === 'PUNCTURE') ? 1.6 : 2.5));
-    } else if (!aiming && player.railgunCharge > 0 && player.railgunCharge < 0.05) {
+    } else if (!_trigHeld && player.railgunCharge > 0 && player.railgunCharge < 0.05) {
       player.railgunCharge = 0; 
     }
-    if (!aiming) player.railgunCharge = Math.max(0, player.railgunCharge - dt * 0.2);
+    if (!_trigHeld) player.railgunCharge = Math.max(0, player.railgunCharge - dt * 0.2);
   } else {
     player._railgunChargingPrev = false;
     if (player._railgunChargeAudio) {
@@ -52349,10 +52474,15 @@ function updateWeapon(dt) {
   }
 
 
-  let firing = input.mouseDown || _kbActionHeld('fire') || input.gpFire || input.touchFire;
+  let firing = _trigHeld;   // (v44.99) read once above, so charging and firing cannot disagree
   if (firing && player.coreActive && player.loadoutKey === 'VORTEX' &&
       player.loadout && player.loadout.core && player.loadout.core.name === 'Mega Laser') {
     firing = false;
+  }
+  if (player.loadoutKey === 'PUNCTURE') {
+    const _wasHeld = !!player._puncTrigPrev;
+    player._puncTrigPrev = _trigHeld;
+    firing = (!_trigHeld && _wasHeld);
   }
   if (w.spinup > 0 && firing) {
     if (!player.spunUp) {
@@ -57765,6 +57895,8 @@ function returnToRootMenu(opts) {
   try { if (typeof LSS !== 'undefined') { LSS._modeChosen = false; LSS._modeChosenAt = 0; } } catch (_) {}
   try { if (typeof net !== 'undefined' && net) net.roomJoinedAt = 0; } catch (_) {}
   try { if (typeof net !== 'undefined' && net) net._dropin = null; } catch (_) {}
+  try { game._launchCommitted = false; } catch (_) {}
+  try { game._ssConfirmed = false; } catch (_) {}   // (v45.06) back at the menu, nothing is locked in
   try { game._campPicker = false; } catch (_) {}   
   
   
@@ -61799,11 +61931,22 @@ function previewLoadout(key) {
     confirmBtn.style.display = 'inline-block';
     const newBtn = confirmBtn.cloneNode(true);
     confirmBtn.parentNode.replaceChild(newBtn, confirmBtn);
-    newBtn.addEventListener('click', () => {
+    newBtn.addEventListener('click', () => { _lssToggleConfirm(); });
+  }
+  const launchBtn = document.getElementById('ship-preview-launch');
+  if (launchBtn) {
+    launchBtn.style.display = 'inline-block';
+    const newLaunch = launchBtn.cloneNode(true);
+    launchBtn.parentNode.replaceChild(newLaunch, launchBtn);
+    newLaunch.addEventListener('click', () => {
+      if (newLaunch.disabled) return;
       if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen();
+      try { if (net && net.active && net.sendEvent) net.sendEvent({ type: 'launch_now' }); } catch (_) {}
       commitLoadout(key);
     });
   }
+  try { game._ssKey = key; } catch (_) {}   // (v45.06) what a remote LAUNCH will commit on our behalf
+  try { _lssRefreshLaunchRow(); } catch (_) {}
   const vrBtn = document.getElementById('ship-preview-confirm-vr');
   if (vrBtn) {
     const floatingVR = document.getElementById('vr-enter-btn');
@@ -62871,12 +63014,15 @@ function _lssModeBlurb(m) {
 function _lssJoinedMatchInProgress() {
   try { return !!(typeof net !== 'undefined' && net && net.active && net._dropin); } catch (_) { return false; }
 }
+function _lssRoomSettingsFrozen() {
+  try { return _lssJoinedMatchInProgress() || !!game._ssConfirmed; } catch (_) { return false; }
+}
 
 function _lssRoomModeLocked() {
   try {
     return (typeof game !== 'undefined' && game &&
             (game.state === 'playing' || game.state === 'roundEnd')) ||
-           _lssJoinedMatchInProgress();   // (v44.92) a late joiner does not re-mode a live room
+           _lssRoomSettingsFrozen();   // (v44.92/45.06) a late joiner, or anyone who has confirmed
   } catch (_) { return false; }
 }
 function _lssRenderLobbyMode() {
@@ -62942,7 +63088,7 @@ function _lssPickRoomMode(mode) {
 }
 
 function _lssInsaneSpeedLocked() {
-  if (_lssJoinedMatchInProgress()) return true;   // (v44.92) joined a match already running
+  if (_lssRoomSettingsFrozen()) return true;   // (v44.92/45.06) late joiner, or confirmed
   return typeof game !== 'undefined' && game &&
          (game.state === 'playing' || game.state === 'roundEnd' ||
           (game.state === 'warmup' && (game.currentRound | 0) > 1));
@@ -72443,6 +72589,9 @@ function _spawnClearanceScore(x, y, z) {
   return { score, worst, worstR };
 }
 
+let _spawnPick = null;
+function _spawnPickSet(v) { try { _spawnPick = v ? v.clone() : null; } catch (_) { _spawnPick = null; } return v; }
+function _spawnPickTake() { const v = _spawnPick; _spawnPick = null; return v; }
 function getValidSpawnPoint(team, spread) {
   spread = spread || 80;
   const pts = game.corridorPoints;

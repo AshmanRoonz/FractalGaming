@@ -1339,6 +1339,7 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
    #ffaa00 slab with a 3.5px-tracked 12px label - the last orange left after the v43.44 sweep.
    The tighter tracking is load-bearing, not only cosmetic: the two buttons share one row now, so
    CONFIRM's label has to fit the dock width minus IN VR. */
+#ship-preview-launch,
 #ship-preview-confirm {
   margin: 0; padding: 8px 12px 7px;
   background: rgba(25,50,75,0.85);
@@ -1360,12 +1361,14 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   /* (v43.55) align-self retired - the launch ROW owns horizontal placement now. */
   box-shadow: 0 0 14px rgba(80,180,255,0.28), inset 0 0 12px rgba(80,180,255,0.12);
 }
+#ship-preview-launch:not(:disabled):hover,
 #ship-preview-confirm:hover {
   /* (v43.55) = .ship-chip:hover, keeping the 1px lift this button already had. */
   border-color: rgba(127,212,255,0.9); background: rgba(30,45,70,0.9); color: #fff;
   box-shadow: 0 0 22px rgba(80,180,255,0.45);
   transform: translateY(-1px);
 }
+#ship-preview-launch:disabled,
 #ship-preview-confirm:disabled { opacity: 0.3; cursor: not-allowed; }
 
 /* (v35.20) ELIMINATION opponents toggle.
@@ -3184,7 +3187,11 @@ body.vr-active #camp-video { display: none !important; }
   display: flex !important; flex-direction: row !important; align-items: stretch !important;
   gap: 8px !important; width: 100% !important; min-width: 0 !important;
 }
-#ss-launch-row > #ship-preview-confirm { flex: 1 1 auto !important; min-width: 0 !important; }
+/* (v45.06) the CHECK is compact, LAUNCH takes the room it leaves. */
+#ss-launch-row > #ship-preview-confirm { flex: 0 0 auto !important; min-width: 0 !important; }
+#ss-launch-row > #ship-preview-launch { flex: 1 1 auto !important; min-width: 0 !important; }
+#ship-preview-confirm.ss-checked { color: #7cf58a !important; border-color: rgba(124,245,138,0.9) !important;
+  background: rgba(20,60,28,0.85) !important; }
 #ss-launch-row > #ship-preview-confirm-vr { flex: 0 0 auto !important; }
 
 /* (v43.50) RESERVE THE PERK DESCRIPTION'S SPACE. Owner: "make enough room for the text at the
@@ -4172,8 +4179,10 @@ body.vr-active #camp-video { display: none !important; }
 
 
 #ship-select-header h1 { text-shadow: 0 0 20px rgba(255,170,0,0.40); }
-#ship-preview-confirm { animation: lssConfirmPulse 2.2s ease-in-out infinite; }
-#ship-preview-confirm:hover { animation-play-state: paused; box-shadow: 0 0 30px rgba(255,170,0,0.6); }
+/* (v45.06) the pulse moved to LAUNCH - a checkbox that throbs reads as unfinished business, and
+   LAUNCH is the one that is actually waiting to be pressed. */
+#ship-preview-launch:not(:disabled) { animation: lssConfirmPulse 2.2s ease-in-out infinite; }
+#ship-preview-launch:not(:disabled):hover { animation-play-state: paused; box-shadow: 0 0 30px rgba(255,170,0,0.6); }
 /* (v43.55) repointed from orange to the chip blue - the button is a lit ship chip now, and an
    orange breath under a blue border read as a mistake. Kept AS a pulse: it is the only thing left
    marking the primary action once the loud face is gone. */
@@ -5802,7 +5811,13 @@ body.vr-active #camp-video { display: none !important; }
            parentNode it replaces into. Each button still carries its own inline display, so the VR twin
            staying hidden leaves a one-child row that lays out exactly like the old single button. -->
       <div id="ss-launch-row">
-        <button id="ship-preview-confirm" style="display:none;">CONFIRM &amp; LAUNCH</button>
+        <!-- (v45.06) TWO BUTTONS, NOT ONE. Owner: "i want confirm and launch to be two buttons, can
+             just divide them side by side... confirm will be a check mark button/box... confirming
+             locks your ability to change map, mode, speed... you can uncheck confirm... if there's
+             other players in the lobby, when they are all confirmed, launch will be available... the
+             first person who hits it brings everyone into the start the match" -->
+        <button id="ship-preview-confirm" style="display:none;" title="Lock in your ship and pilot perk">&#10003; CONFIRM</button>
+        <button id="ship-preview-launch" style="display:none;" disabled>LAUNCH</button>
         <button id="ship-preview-confirm-vr" style="display:none;">IN VR</button>
       </div>
       <!-- (v43.49) ROOM CODE docks UNDER CONFIRM & LAUNCH - owner: "room code can go under
@@ -6445,7 +6460,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.98';
+const LSS_BUILD = '45.06';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -9933,14 +9948,36 @@ async function joinRoom() {
       // Open-solo: brief the challenger on the match in progress so they
       // can build the same world and drop straight in (no launch
       // handshake). Roster follows so their bot proxies appear.
+      // ⭐⭐⭐ (v45.02) THE BRIEFING GOES TO THE JOINER, NOT TO THE ROOM.
+      // Owner: "joining with the third device made the game go back to the ship selection screen for
+      // everyone and move back to the original spawn to start over in a countdown."
+      // This block is a BRIEFING for the peer that just arrived - its own comment says so, and the
+      // line above it already ships the world manifest with `broadcastWorldObjects(peerId)`,
+      // "(v38.63) to the joiner only". But `dropin_state` was sent with no target, so trystero
+      // broadcast it to EVERY peer in the room.
+      // With two people that is mostly harmless. With three it is the bug: when C joins, A and B
+      // BOTH fire this, and each one receives the OTHER's briefing. The receiver only ignores it
+      // while `_iAmLive && !_lssPeerOutranksMe(...)`, so the moment one of two already-playing peers
+      // outranks the other, the outranked one runs the full adopt - _applyModeClientSetup,
+      // applyWorldSync(map, seed), back to ship select, fresh countdown, respawn at the original
+      // spawn. Two live matches tearing each other down over a third party's arrival.
+      // ⚠ TARGETING DOES NOT LOSE THE RECONCILIATION THE BROADCAST WAS CARRYING. The guard's own
+      //   note says it exists for "the one where BOTH sides already launched" - two people who each
+      //   started solo and then connected. That still works, because on that first connection EACH
+      //   sees the other as a new peer and sends this to them: A briefs B, B briefs A, the pairwise
+      //   arbitration runs exactly as before and one of them adopts. What targeting removes is only
+      //   the case that was never wanted - A and B re-arbitrating with each other because C arrived.
+      // (!) The roster follows the same rule; `_botSendRoster` has taken a target since v38.x and was
+      //     simply being called without one here.
       if (net.openSolo && game.state !== 'select' && net.sendEvent) {
         try {
           net.sendEvent({ type: 'dropin_state', ago: _lssModeAgo(), host: net.myPeerId,
             map: game.selectedMap, seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
             mst: (typeof net.matchStartedAt === 'number') ? net.matchStartedAt : undefined,   // (v38.60)
             mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic',
-            round: game.currentRound || 1, scoreA: game.scoreA || 0, scoreB: game.scoreB || 0 });
-          if (typeof _botSendRoster === 'function') _botSendRoster();
+            round: game.currentRound || 1, scoreA: game.scoreA || 0, scoreB: game.scoreB || 0 },
+            peerId);   // (v45.02) to the joiner only
+          if (typeof _botSendRoster === 'function') _botSendRoster(peerId);   // (v45.02) ditto
         } catch (_) {}
       }
       // (v30.62) Open-solo host still in the hangar : pull the newcomer
@@ -13675,12 +13712,89 @@ function _lssWillWaitForPeers() {
     return !!(net && net.active && typeof nonJudgePeerCount === 'function' && nonJudgePeerCount() > 0);
   } catch (_) { return false; }
 }
+// ⭐⭐⭐ (v45.06) CONFIRM AND LAUNCH ARE TWO DECISIONS.
+// CONFIRM is "this is my ship, lock me and the bots in" - a checkbox, reversible, and it is what
+// freezes the room-wide settings. LAUNCH is "take us in", and it only lights up once everyone in the
+// room has confirmed; whoever presses it first carries the whole room.
+// ⚠ THIS IS NOT NEW WIRE. `net.myReady` + the `ready` event + `allPeersReady()` have existed since
+//   the mesh-networking doc; committing a loadout used to set ready implicitly and the match then
+//   auto-started. All that changes is that the player now flips ready themselves (so they can flip it
+//   BACK), and the start is a button press instead of an automatic consequence.
+// (!) SOLO COUNTS AS CONFIRMED-ALONE. `allPeersReady()` deliberately returns false with no peers
+//     ("alone in a room, use SOLO+BOTS instead"), so solo and an empty room are handled here rather
+//     than by loosening that function, which the auto-start path still relies on.
+function _lssConfirmed() { try { return !!game._ssConfirmed; } catch (_) { return false; } }
+function _lssLaunchReady() {
+  try {
+    if (!_lssConfirmed()) return false;
+    if (!net || !net.active) return true;                                  // solo
+    if (typeof nonJudgePeerCount === 'function' && nonJudgePeerCount() === 0) return true;   // alone in the room
+    return (typeof allPeersReady === 'function') ? !!allPeersReady() : false;
+  } catch (_) { return false; }
+}
+// Repaints both buttons from state. Called on every toggle, every peer ready event, and every
+// re-render of the picker - it is cheap and it is the only thing that writes their labels.
+function _lssRefreshLaunchRow() {
+  try {
+    const c = document.getElementById('ship-preview-confirm');
+    const l = document.getElementById('ship-preview-launch');
+    const on = _lssConfirmed();
+    if (c) {
+      c.classList.toggle('ss-checked', on);
+      c.innerHTML = on ? '&#10003; CONFIRMED' : '&#10003; CONFIRM';
+      c.title = on ? 'Locked in - click to unlock and change ship, map, mode or speed'
+                   : 'Lock in your ship and pilot perk';
+    }
+    if (l) {
+      const ready = _lssLaunchReady();
+      l.disabled = !ready;
+      if (!on) l.title = 'Confirm your ship first';
+      else if (!ready) {
+        let r = 0, t = 0;
+        try { t = 1 + (typeof nonJudgePeerCount === 'function' ? nonJudgePeerCount() : 0);
+              r = (net.myReady ? 1 : 0);
+              if (typeof nonJudgePeerEntries === 'function') for (const [, pr] of nonJudgePeerEntries()) if (pr && pr.ready) r++;
+        } catch (_) {}
+        l.textContent = t > 1 ? ('LAUNCH  ' + r + '/' + t) : 'LAUNCH';
+        l.title = 'Waiting for the rest of the room to confirm';
+        return;
+      }
+      l.textContent = 'LAUNCH';
+      l.title = 'Take the room in';
+    }
+  } catch (_) {}
+}
+// The CONFIRM toggle. Mirrors into net.myReady when networked so peers see the pip flip, and
+// refreshes the three room-wide locks (map / mode / speed) that confirming owns.
+function _lssToggleConfirm() {
+  try {
+    game._ssConfirmed = !game._ssConfirmed;
+    if (net && net.active) {
+      // ⚠ DELIBERATELY NOT toggleReady(). That helper also calls checkAllReady(), which is the
+      //   LOBBY handshake - it schedules a match start whose payload is `enterShipSelect()`. Before
+      //   v45.06 nothing ever called toggleReady, so `net.myReady` was always false and that path
+      //   was dormant; confirming through it would have woken it and re-entered the picker for the
+      //   whole room the moment the last person confirmed. Set the flag and announce it, nothing else.
+      net.myReady = !!game._ssConfirmed;
+      try { if (net.sendEvent) net.sendEvent({ type: 'ready', ready: net.myReady }); } catch (_) {}
+      try { if (typeof updateLobbyPeers === 'function') updateLobbyPeers(); } catch (_) {}
+    }
+    _lssRefreshLaunchRow();
+    try { if (typeof _syncMapButtonsDisabled === 'function') _syncMapButtonsDisabled(); } catch (_) {}
+    try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
+    try { if (typeof _lssRefreshInsaneSpeedBtn === 'function') _lssRefreshInsaneSpeedBtn(); } catch (_) {}
+    try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
+  } catch (_) {}
+}
+if (typeof window !== 'undefined') window.__lssRefreshLaunchRow = _lssRefreshLaunchRow;
+
 function _lssSetConfirmWaiting(on, rdy, tot) {
   try {
     if (net) net._waitingForPeers = !!on;
     // Looked up fresh every time: previewLoadout re-clones this button, so a cached reference is a
     // reference to a node that is no longer in the document.
-    const b = document.getElementById('ship-preview-confirm');
+    // (v45.06) the waiting state is LAUNCH's - CONFIRM stays pressable so you can always unlock.
+    const b = document.getElementById('ship-preview-launch');
     if (!b) return;
     if (on) {
       b.disabled = true;
@@ -13688,10 +13802,8 @@ function _lssSetConfirmWaiting(on, rdy, tot) {
       b.textContent = (tot ? ('WAITING  ' + rdy + '/' + tot) : 'WAITING');
       b.title = 'Everyone launches together - waiting for the rest of the room';
     } else {
-      b.disabled = false;
       b.classList.remove('ss-waiting');
-      b.textContent = 'CONFIRM & LAUNCH';
-      b.title = '';
+      _lssRefreshLaunchRow();   // label + disabled come from state, not from here
     }
   } catch (_) {}
 }
@@ -14740,6 +14852,11 @@ function allPeersReady() {
 
 function checkAllReady() {
   if (!net.active) return;
+  // (v45.06) This handshake's whole payload is `enterShipSelect()` - it exists to GET the room to
+  // the picker. Since v45.06 the picker's CONFIRM sets `net.myReady`, so without this guard the last
+  // person confirming would schedule a re-entry into the screen everyone is already looking at.
+  try { const _sel = document.getElementById('ship-select');
+        if (_sel && _sel.classList.contains('active')) return; } catch (_) {}
   if (!allPeersReady()) {
     // The set is not (or no longer) complete. Cancel any pending start and
     // restore the waiting message so users see why nothing is happening.
@@ -14818,7 +14935,7 @@ function _syncMapButtonsDisabled() {
   let _mapFrozen = false;
   try { _mapFrozen = !!(typeof game !== 'undefined' && game && game.state && game.state !== 'select'); } catch (_) {}
   // (v44.92) ...and for the late joiner, whose own state IS 'select' while the room plays on.
-  try { if (_lssJoinedMatchInProgress()) _mapFrozen = true; } catch (_) {}
+  try { if (_lssRoomSettingsFrozen()) _mapFrozen = true; } catch (_) {}
   const mapLocked = locked || _mapFrozen;
   const prev = document.getElementById('map-prev');
   const next = document.getElementById('map-next');
@@ -14862,6 +14979,24 @@ function tickStartCountdown() {
 function checkAllLoadoutsReady() {
   if (!net.active) return;
   if (typeof _countdownActive !== 'undefined' && _countdownActive) return;
+  // ⭐⭐⭐ (v45.05) ONE COUNTDOWN PER ENTRY. THIS FUNCTION WAS SCHEDULING SIX.
+  // Owner: "after hitting confirm and launch, you will see the loading screen, then the cinematic and
+  // zoom around into your ship, then 3, 2, 1 launch... nothing else in between is seen."
+  // ⚠ MEASURED on a late joiner (two tabs, one room, Elimination), logging every overlay's
+  //   visibility through the entry. The joiner sat in `warmup` for 31 s and got the 3-2-1 restarted
+  //   SIX times - at 12.0, 18.4, 21.2, 29.5, 32.4 and 35.4 s - before the match finally began.
+  // WHY. This function is re-entered on every inbound loadout/ready/peer-join (seven call sites),
+  // and every guard it had lets a joiner through:
+  //   - `_countdownActive` only holds while one is RUNNING, so each finished countdown reopens it;
+  //   - the round guard below is scoped to `currentRound > 1`, and a round-1 entry is not that;
+  //   - the openSolo guard lists 'playing' and 'roundEnd' but NOT 'warmup', which is where a joiner
+  //     lives for the whole entry;
+  //   - and the drop-in branch CONSUMES `net._dropin` (sets it null) on its first run, so every
+  //     later call falls straight past it into the general handshake and schedules another one.
+  // The fix is a latch on the DECISION, not on any one symptom: once this client has committed to a
+  // launch it is committed, and nothing that arrives afterwards gets to restart the ticker. It is
+  // released only by returnToRootMenu - the one place a genuinely new launch can begin.
+  if (game._launchCommitted) return;
   if (!player.loadoutKey) return;
   // (v36.36) A ROUND TRANSITION IS NOT A LAUNCH HANDSHAKE. Every peer drives its
   // own between-rounds countdown locally (see the roundEnd branch); there is no
@@ -14886,6 +15021,7 @@ function checkAllLoadoutsReady() {
     game.scoreA = d.scoreA || 0;
     game.scoreB = d.scoreB || 0;
     try { hideLoadingOverlay(); } catch (_) {}
+    game._launchCommitted = true;   // (v45.05) drop-in: committed, no second ticker
     _lssRunCinematicThen(() => {
       _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
       launchCountdown(LSS.SHORT_COUNTDOWN);
@@ -14904,6 +15040,7 @@ function checkAllLoadoutsReady() {
   if (nonJudgePeerCount() === 0) {
     if (_localWarmupReady) {
       try { hideLoadingOverlay(); } catch (_) {}
+      game._launchCommitted = true;   // (v45.05) solo fallback: committed
       // Cinematic before the 3-2-1. Solo / no-peers fallback path.
       _lssRunCinematicThen(() => {
         _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
@@ -15029,6 +15166,7 @@ function scheduleLaunch(launchAt) {
     if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
     _syncMapButtonsDisabled();
     try { hideLoadingOverlay(); } catch (_) {}
+    game._launchCommitted = true;   // (v45.05) the room is going: committed
     _lssRunCinematicThen(() => {
       try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
       launchCountdown(LSS.SHORT_COUNTDOWN);
@@ -16135,12 +16273,28 @@ function handleNetEvent(evt, fromPeerId) {
     return;
   }
   // Lobby ready toggle from a peer.
+  // ⭐ (v45.06) Someone in the room pressed LAUNCH. Everyone who has CONFIRMED goes with them.
+  // (!) Gated on being confirmed AND still in the picker: a peer who has not confirmed is not part
+  //     of this launch (LAUNCH could not have lit up if they were), and one already past the picker
+  //     is either launching or playing, where a second commit would restart what is under way.
+  if (evt.type === 'launch_now') {
+    try {
+      const _sel = document.getElementById('ship-select');
+      const _inPicker = !!(_sel && _sel.classList.contains('active'));
+      if (_inPicker && game._ssConfirmed && game.state === 'select' && !game._launchCommitted) {
+        const _k = game._ssKey || (player && player.loadoutKey) || null;
+        if (_k && typeof commitLoadout === 'function') commitLoadout(_k);
+      }
+    } catch (_) {}
+    return;
+  }
   if (evt.type === 'ready') {
     const peer = net.peers.get(fromPeerId);
     if (peer) {
       peer.ready = !!evt.ready;
       updateLobbyPeers();
       checkAllReady();
+      try { if (typeof _lssRefreshLaunchRow === 'function') _lssRefreshLaunchRow(); } catch (_) {}   // (v45.06) the last confirm lights LAUNCH
       // Refresh the fleet strip so the peer's chip pip flips colour.
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     }
@@ -31465,6 +31619,52 @@ if (typeof window !== 'undefined') window.__dbg = {
   // 236 ms) ; `waveRot()` reads or sets _campWaveShips' rotation cursor, which is
   // the only way to stage a deliberately COLD garrison from the console.
   models: () => { try { return Object.keys(shipModelCache.loaded); } catch (_) { return null; } },
+  // (v45.00) THE CITY-TRAFFIC WIRE KEY, from both sides. `city_dmg` addresses a freighter by
+  // `trafIdx`, which is an index into _HC_TRAF.ships - an array whose LENGTH depends on the device
+  // class (maxShips 34 vs 16, modelCount 14 vs 6) and whose CONTENTS depend on the city layout, i.e.
+  // on the world seed. If two peers disagree by one entry the authority applies a peer's damage to a
+  // different ship, or to none. Run this on both screens and compare `n`, `seed` and `sig`.
+  city: () => {
+    try {
+      const S = (typeof _HC_TRAF !== 'undefined' && _HC_TRAF.ships) ? _HC_TRAF.ships : [];
+      const rows = [];
+      for (let i = 0; i < S.length; i++) {
+        const e = S[i] && S[i].ent;
+        rows.push(e ? [i, e.trafIdx, e.name || '?', Math.round(e.health), e.alive ? 1 : 0,
+                       (e.mesh && e.mesh.visible) ? 1 : 0, e.aggro ? 1 : 0,
+                       S[i].modelKey || '-'] : [i, null]);   // (v45.03) [7] = the hull
+      }
+      // a cheap content signature - if this differs, the index means different things per peer
+      let sig = 0;
+      for (const r of rows) { const t = String(r[2]) + ':' + String(r[7]); for (let k = 0; k < t.length; k++) sig = (sig * 31 + t.charCodeAt(k)) | 0; }   // (v45.03) class + HULL, not aggro (which is live state)
+      const ids = (typeof nonJudgePeerIds === 'function') ? [net.myPeerId, ...nonJudgePeerIds()].sort() : null;
+      return {
+        n: S.length, ready: (typeof _HC_TRAF !== 'undefined') ? !!_HC_TRAF.ready : null,
+        seed: (typeof HUB_CITY !== 'undefined' && HUB_CITY.genome) ? HUB_CITY.genome.seed : null,
+        worldSeed: (net && net.worldSeed != null) ? (net.worldSeed >>> 0) : null,
+        authority: (typeof amStasisOwner === 'function') ? amStasisOwner() : null,
+        trafProxy: (typeof _hcTrafIsProxy === 'function') ? _hcTrafIsProxy() : null,
+        myPeerId: net ? net.myPeerId : null, sortedIds: ids,
+        mobile: (typeof _LSS_IS_MOBILE !== 'undefined') ? !!_LSS_IS_MOBILE : null,
+        state: (typeof game !== 'undefined') ? game.state : null,
+        mode: (typeof LSS !== 'undefined') ? LSS.MODE : null,
+        sig: sig, rows: rows,
+      };
+    } catch (e) { return { error: String(e) }; }
+  },
+  // Fire a synthetic hit at a given index, exactly as a weapon would, so the wire path can be
+  // exercised without having to aim: __dbg.cityHit(3, 500) on the joiner, then __dbg.city() on both.
+  cityHit: (i, dmg) => {
+    try {
+      const sh = _HC_TRAF.ships[i | 0];
+      if (!sh || !sh.ent) return 'no ship at index ' + i;
+      const before = sh.ent.health;
+      const ret = sh.ent.takeDamage(Math.max(1, +dmg || 500), (typeof player !== 'undefined') ? player : null, sh.ent.position);
+      return { idx: i | 0, name: sh.ent.name, returned: ret, healthBefore: Math.round(before),
+               healthAfter: Math.round(sh.ent.health), aggro: !!sh.ent.aggro,
+               wasProxy: (typeof _hcTrafIsProxy === 'function') ? _hcTrafIsProxy() : null };
+    } catch (e) { return { error: String(e) }; }
+  },
   waveRot: (v) => {
     try {
       if (v != null) { const n = HOARD_SHIPS.length; _campShipRot = ((v % n) + n) % n; }
@@ -41644,8 +41844,37 @@ function _hcTrafficInit(city, group) {
   // (v35.65) 34 / 16. Paired with the 26-pad guarantee above and the shorter
   // parked window in _hcPadSched, this is what actually fills the air-streets
   // — the old numbers left most of the fleet sitting on pads or warped out.
-  const maxShips = _full ? 34 : 16;
-  const parkPads = city.pads.filter(p => p.park).slice(0, maxShips);
+  // ⭐⭐⭐ (v45.01) THE ROSTER IS WORLD STATE. THE MESHES ARE A LOCAL BUDGET.
+  // Owner: "i joined with my mobile and i got the same glitch... i can't harm the city bots."
+  // `city_dmg` and `city_state` address a freighter by `trafIdx`, which is an index into
+  // _HC_TRAF.ships - and this line made that array's LENGTH depend on the device. Measured in a
+  // two-peer room (desktop + mobile preset, same fixed city seed 2077): desktop 26 ships, mobile 16.
+  // Then a hit fired down the real damage path from the proxy:
+  //     index 3  (exists on both) -> authority applied it, 3708 -> 2808, aggro true.   correct
+  //     index 20 (desktop only)   -> authority has NO SUCH SHIP. Dropped in silence.   the bug
+  // That second line is the whole report: hits land, nothing takes damage, nothing turns on you.
+  // ⚠ AND IT IS NOT "the phone is the odd one out" - `amStasisOwner()` picks the authority by
+  //   sorting RANDOM trystero peer ids, not by who hosted, so the phone frequently IS the authority.
+  //   Caught exactly that in the repro: the mobile joined SECOND and took authority from the desktop
+  //   that was already playing. When it does, its 16-ship roster becomes the truth and every
+  //   desktop's ships 16-25 are invulnerable ghosts for everyone in the room.
+  // THE SPLIT: every peer now builds the SAME 34-slot roster, because that is shared world state and
+  // the wire key indexes it. What stays per-device is how many of those slots get a GLB clone - the
+  // mesh is the cost, the entity is an object literal. A phone still renders 16 and allocates no
+  // extra clones; it simply knows the other ten exist.
+  // (!) The CLASS was already shared and did not need fixing: `_hcTrafClass(i)` hashes the index
+  //     alone, which is why both sides read index 3 as ESCORT 3708 in the repro. Only length was wrong.
+  // ⭐ (v45.03) ...AND THE MESH NERF IS GONE TOO. Owner: "mobile didn't need the ship number nerf."
+  // v45.01 kept a per-device mesh budget (`_full ? 34 : 16`) on the assumption a phone could not
+  // carry the full fleet - the roster was shared but ten of its slots wore no hull on mobile. The
+  // owner has flown it and says otherwise, so there is no split left: every device builds the same
+  // roster AND draws all of it. The v45.01 machinery stays because it is what makes the counts
+  // shared in the first place; `_renderMax` is simply no longer smaller than the roster.
+  // (!) window.__cityShips dials BOTH (it is the roster size, so it must match on every peer);
+  //     window.__cityRender can still hold meshes back on one device without breaking the wire.
+  const _rosterMax = (typeof window !== 'undefined' && window.__cityShips != null) ? (+window.__cityShips | 0) : 34;
+  const _renderMax = (typeof window !== 'undefined' && window.__cityRender != null) ? (+window.__cityRender | 0) : _rosterMax;
+  const parkPads = city.pads.filter(p => p.park).slice(0, _rosterMax);
   if (!parkPads.length || typeof loadHoardModel !== 'function') return;
   // (v35.66) 14 distinct models on desktop, was 6 — with 26 ships in the air
   // a 6-model pool meant seeing the same four hulls over and over. Stride 5
@@ -41653,7 +41882,23 @@ function _hcTrafficInit(city, group) {
   // Quest keep 6: each GLB is 2-4.7 MB and loadHoardModel caches them for the
   // whole session. `_hoardLoading` dedupes, and the campaign shares the cache,
   // so a model already pulled in elsewhere costs nothing here.
-  const modelCount = Math.min(HOARD_SHIPS.length, _full ? 14 : 6);
+  // ⭐⭐⭐ (v45.03) THE HULLS HAVE TO MATCH TOO, NOT JUST THE ROSTER.
+  // Owner, after v45.01: "we definitely not seeing the same ships from pc to mobile, still."
+  // v45.01 made every peer agree on HOW MANY slots exist and what CLASS each one is. It left this
+  // line alone, and this line decides WHICH HULL a slot wears: the model for pad i was
+  // `live[i % live.length]`, and `live` held 14 models on a PC and 6 on a phone. The first six pads
+  // therefore matched and everything from pad 6 on did not - the same freighter, the same health
+  // bar, a different ship. Cosmetic in the damage sense, and completely wrong in the "are we looking
+  // at the same world" sense, which is the one that matters when two people are flying in it.
+  // So the model count is SHARED now. Measured before choosing which way to move it: the hoard GLBs
+  // average 0.51 MB and are EXCLUDED from the preload manifest (`excludedGroups: ['hoard','music']`),
+  // so they are lazy-loaded on demand - bringing a phone from 6 to 14 costs 8 extra fetches, about
+  // 4.1 MB, with `_lssCapModelTextures` already capping their textures on that device. That is small
+  // against a 62 MB preload, and the alternative was cutting the PC city from 14 hull types to 6.
+  // (!) window.__cityModels dials it: set it to 6 to hand phones the old budget back if the city
+  //     ever costs one a context, at the price of parity again. It must be the SAME on every peer.
+  const modelCount = Math.min(HOARD_SHIPS.length,
+    (typeof window !== 'undefined' && window.__cityModels != null) ? (+window.__cityModels | 0) : 14);
   const keys = [];
   for (let i = 0; i < modelCount; i++) keys.push(HOARD_SHIPS[(HUB_CITY.genome.seed + i * 5) % HOARD_SHIPS.length]);
   Promise.all(keys.map(k => loadHoardModel(k))).then((protos) => {
@@ -41664,10 +41909,28 @@ function _hcTrafficInit(city, group) {
     const live = protos.filter(Boolean);
     if (!live.length) return;
     for (let i = 0; i < parkPads.length; i++) {
-      const proto = live[i % live.length];
+      // (v45.03) ⚠ INDEX THE FULL LIST, NOT THE SURVIVORS. `live` drops models that failed to load,
+      // so `live[i % live.length]` meant ONE missing fetch on ONE device re-dealt every pad after it
+      // and silently broke hull parity for the whole city. Pad i now always asks for model slot
+      // `i % modelCount`, and only borrows a loaded hull when that exact slot is missing here - so a
+      // failed load costs parity on the pads that wanted it, instead of on all of them.
+      const _mi = i % protos.length;
+      const proto = protos[_mi] || live[_mi % live.length];
       if (!proto) continue;
       const holder = new THREE.Group();
-      const cl = proto.clone(true);
+      // (v45.01) the class roll is hoisted above the clone because the ENTITY needs it whether or
+      // not this device draws a hull for this slot. It is a pure function of `i`, so every peer
+      // agrees on it regardless of where the mesh budget falls.
+      const _cls = _hcTrafClass(i);
+      const _jit = 0.82 + _stHash2(i * 5.09, 1.77) * 0.42;   // +/-~20% per ship
+      const _sc = _cls.scale;
+      // (v45.01) Out past this device's mesh budget the slot still EXISTS - same index, same class,
+      // same health, damageable by anyone who can see it - it just has no hull here. `holder` stays
+      // an empty Group so every downstream consumer (the scheduler, the OBB pass, the dispose path)
+      // keeps working on a real Object3D, and `lift` keeps its 56 default since no bbox is measured.
+      const _render = (i < _renderMax);
+      const cl = _render ? proto.clone(true) : null;
+      if (cl) {
       cl.traverse((o) => {
         if (!o.isMesh) return;
         o.castShadow = true;
@@ -41689,9 +41952,7 @@ function _hcTrafficInit(city, group) {
       // (v35.65) Class-scaled hull. Applied to the CLONE, not the holder, so the
       // holder's own transform stays a clean position/yaw carrier for the
       // scheduler — and so the bbox lift measured below already includes it.
-      const _cls = _hcTrafClass(i);
-      const _jit = 0.82 + _stHash2(i * 5.09, 1.77) * 0.42;   // +/-~20% per ship
-      const _sc = _cls.scale;
+      // (v45.01) _cls / _jit / _sc are hoisted above the clone now - see there.
       // (v35.66) MULTIPLY, never assign. loadHoardModel normalises each GLB to
       // a per-model fit scale (~73x for these) and the clone carries it. v35.65
       // used setScalar(_sc), which THREW THAT AWAY and left the hull at 1.06 or
@@ -41701,6 +41962,7 @@ function _hcTrafficInit(city, group) {
       if (_sc !== 1) cl.scale.multiplyScalar(_sc);
       // (v44.36) every third freighter tows an ad banner (owner: "some of the ships pulling ad banners")
       try { if (i % 3 === 1 && !(window.__ads && (window.__ads.banners === 0 || window.__ads.on === 0))) _hcAttachBanner(holder, i, _sc); } catch (_) {}
+      }   // (v45.01) end of the mesh-only work
       holder.visible = false;
       holder.userData.isHubCity = true;
       group.add(holder);
@@ -41741,7 +42003,20 @@ function _hcTrafficInit(city, group) {
           // (v35.65) Returns the damage actually applied (0 when the hit was
           // rejected), so callers can credit core / damageDealt honestly
           // instead of assuming the hit landed. The ram pass relies on this.
-          if (!this.alive || !this.mesh || !this.mesh.visible) return 0;
+          // ⭐⭐ (v45.01) "INVISIBLE" MEANS TWO DIFFERENT THINGS AND ONLY ONE OF THEM IS UNTOUCHABLE.
+          // The guard below exists for a ship that is absent - parked out of the streamed city, or
+          // warped out - and that is still right for a LOCAL shot: you cannot hit what is not there.
+          // But since v45.01 a slot past this device's mesh budget is also `visible === false`, and
+          // for damage arriving from the NETWORK that reading is wrong: the peer that sent it was
+          // looking straight at the ship. If the authority applied its own render budget to a
+          // peer's claim, the fix above would have moved the hole rather than closed it - the
+          // ten ships a phone does not draw would still be invulnerable, just for a new reason.
+          // So a remote source (`'net'` = the authority's own death replay, `'peer:<id>'` = a peer's
+          // claim, both strings) skips the visibility test and is judged only on being alive.
+          const _remote = (typeof attacker === 'string') &&
+                          (attacker === 'net' || attacker.slice(0, 5) === 'peer:');
+          if (!this.alive) return 0;
+          if (!_remote && (!this.mesh || !this.mesh.visible)) return 0;
           // Never self-damage: the freighter GLBs are visually larger than
           // the 150u chassis, so its own bolts (and their splash) can clip
           // its mesh right at the muzzle.
@@ -41855,7 +42130,7 @@ function _hcTrafficInit(city, group) {
         const bb = new THREE.Box3().setFromObject(cl);
         if (isFinite(bb.min.y)) lift = Math.max(56, -bb.min.y + 24);
       } catch (_) {}
-      _HC_TRAF.ships.push({ holder, pad: parkPads[i], idx: i, lastSeg: -1, ent, lift });
+      _HC_TRAF.ships.push({ holder, pad: parkPads[i], idx: i, lastSeg: -1, ent, lift, modelKey: keys[_mi] || null });   // (v45.03) modelKey: which hull this slot wears, so parity is checkable
     }
     _HC_TRAF.ready = true;
   }).catch(() => {});
@@ -77560,6 +77835,7 @@ function commitLoadout(key) {
     player._railgunChargeAudio = null;
   }
   player._railgunChargingPrev = false;
+  player._puncTrigPrev = false;   // (v44.99) the trigger latch dies with the charge - a stale one would fire a release on respawn
   // Clean up shield visual meshes from previous loadout.
   // (v43.88) The four hull-hug shells are children of player.mesh, NOT of the scene -
   // every _makeHullHugShield caller does player.mesh.add(m). So `scene.remove` here
@@ -77703,7 +77979,8 @@ function commitLoadout(key) {
       spawnOrganics(game.sdfRoomData);
 
       const teamCode = _isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A');
-      player.position.copy(getValidSpawnPoint(teamCode));
+      // (v45.04) REMEMBER THE PICK - see the note on _spawnPick in respawnPlayer.
+      player.position.copy(_spawnPickSet(getValidSpawnPoint(teamCode)));
       // (v34.90) Hub: apply always-active Aegis upgrades on the fresh spawn.
       try { if (typeof _aegisApply === 'function') _aegisApply(); } catch (_) {}
 
@@ -77794,7 +78071,7 @@ function commitLoadout(key) {
   } else {
     // Between-rounds swap: place player at their team's spawn; the map is already
     // built from the round-end transition; scores/round counter are preserved.
-    player.position.copy(getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A')));
+    player.position.copy(_spawnPickSet(getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'))));   // (v45.04) remembered
     // (v36.71) Race runs every round on the same course: re-aim each round's
     // spawn at the first gate (this path never called the facing helpers, so
     // round 2+ left you pointing wherever round 1 ended). Race-gated inside
@@ -78639,6 +78916,7 @@ function playerDie(attacker) {
     try { _stopRailgunChargeSound(player._railgunChargeAudio); } catch (_) {}
     player._railgunChargeAudio = null;
     player._railgunChargingPrev = false;
+    player._puncTrigPrev = false;   // (v44.99) the trigger latch dies with the charge - a stale one would fire a release on respawn
   }
   player.railgunCharge = 0;
   // (v39.47) ...and the CHARGE GLOW, for exactly the reason the tone above needed this spot.
@@ -78810,6 +79088,7 @@ function respawnPlayer() {
     player._railgunChargeAudio = null;
   }
   player._railgunChargingPrev = false;
+  player._puncTrigPrev = false;   // (v44.99) the trigger latch dies with the charge - a stale one would fire a release on respawn
   player.vortexStored = 0;
   player.vortexRecentAbsorb = 0;
   player.vortexEnergy = player.vortexMaxEnergy;
@@ -78827,8 +79106,29 @@ function respawnPlayer() {
   player.coreActive = false;
   player.coreTimer = 0;
   // Syphon upgrades persist across respawns
-  // Spawn at a valid corridor position in the player's team territory
-  let sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'));
+  // ⭐⭐⭐ (v45.04) ONE SPAWN PER ENTRY, NOT TWO. THIS IS THE WARP.
+  // Owner: "when you load into a map/game-mode, your ship is in one location in the spawn area...
+  // then when you start, it's in a second location... i saw it when a player joined, he was in one
+  // location, and then warped to a second location."
+  // `getValidSpawnPoint` is RANDOM - `pool[floor(random()*pool.length)]` plus a random +/-spread -
+  // so calling it twice gives two different points. And entering a round calls it twice: once when
+  // the world is built, and again from the respawn that the round reset runs.
+  // ⚠ CAUGHT IN THE ACT by wrapping player.position on a late joiner (two tabs, one room,
+  //   Elimination). Two writes, 53 s apart, and the second one moved the ship 211 units:
+  //     t 51.0  state select   buildWorld -> withSeededRandom -> _finishCommit    [-87, -91, 1158]
+  //     t 104.1 state warmup   respawnPlayer -> _rrReset -> _rrStagedRound        [ 60,  48, 1219]
+  //   The second lands during WARMUP - while the cinematic and the 3-2-1 are on screen - which is
+  //   exactly why it reads as "spawned here, then warped there", and why a slow device shows it: the
+  //   cinematic no longer covers the gap.
+  // The fix is not to stop respawning, it is to stop RE-ROLLING. The world build now records the
+  // point it chose and the next respawn CONSUMES it instead of drawing a new one. A death later in
+  // the round finds the latch empty and rolls fresh, exactly as before - only the first respawn
+  // after a build is pinned, and that is the one that had already been decided.
+  // (!) The build-time write is load-bearing and must stay: the terrain streamer reads
+  //     player.position, so leaving it at the origin while the world builds streams the wrong chunks.
+  //     That is why this pins the value rather than removing the first write.
+  let sp = _spawnPickTake() ||
+           getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'));
   // (M2) Campaign : always respawn at the START of the leg (the spawn arena at
   // -HALF_Z), not wherever the team-spawn logic lands on the Z-oriented leg map.
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
@@ -82180,14 +82480,24 @@ function updateWeapon(dt) {
     }
   }
 
-  // Puncture Railgun charge: hold alt-fire to charge over 2.5s, boosted damage
+  // ⭐⭐⭐ (v44.99) PUNCTURE CHARGES ON THE TRIGGER NOW, NOT ON ZOOM.
+  // Owner: "i don't want zoom/aim to be charge anymore... i want it to be holding shoot charges,
+  // releasing it fires."
+  // The railgun used to charge off `aiming` (ADS) and fire off the trigger, which made the two hands
+  // do different halves of one shot and tied a weapon mechanic to a camera mode. Now the trigger owns
+  // the whole thing: hold to wind up, let go to shoot. Zoom goes back to being only zoom.
+  // ⚠ THE TRIGGER IS READ ONCE, HERE, AND REUSED. `firing` was computed ~40 lines below out of the
+  //   same four inputs; charging needs the same signal and a second copy of that expression is a
+  //   second thing to keep in step. `firing` is now assigned from this.
+  const _trigHeld = !!(input.mouseDown || _kbActionHeld('fire') || input.gpFire || input.touchFire);
+  // Puncture Railgun charge: hold the TRIGGER to charge over 2.5s, boosted damage on release
   if (player.loadoutKey === 'PUNCTURE') {
     // Level-driven charge tone (see _startRailgunChargeSound). The tone
     // lives whenever there's charge to express: while aiming it climbs,
     // after release-without-firing it slides back DOWN with the decaying
     // charge, and a mid-hold shot restarts it from zero alongside the
     // recharge. Starting mid-charge resumes at the matching pitch.
-    const _wantTone = aiming || player.railgunCharge > 0.02;
+    const _wantTone = _trigHeld || player.railgunCharge > 0.02;
     if (_wantTone && !player._railgunChargeAudio) {
       try { player._railgunChargeAudio = _startRailgunChargeSound(player.railgunCharge); } catch (e) {}
     } else if (!_wantTone && player._railgunChargeAudio) {
@@ -82197,15 +82507,15 @@ function updateWeapon(dt) {
     if (player._railgunChargeAudio && typeof player._railgunChargeAudio.set === 'function') {
       try { player._railgunChargeAudio.set(player.railgunCharge); } catch (e) {}
     }
-    player._railgunChargingPrev = aiming;
-    if (aiming) {
+    player._railgunChargingPrev = _trigHeld;
+    if (_trigHeld) {
       // (v34.94) PUNCTURE Quick Charge (Aegis 8): the railgun charges faster.
       player.railgunCharge = Math.min(1.0, player.railgunCharge + dt / ((typeof _aegisUpFor === 'function' && _aegisUpFor(8) && player.loadoutKey === 'PUNCTURE') ? 1.6 : 2.5));
-    } else if (!aiming && player.railgunCharge > 0 && player.railgunCharge < 0.05) {
+    } else if (!_trigHeld && player.railgunCharge > 0 && player.railgunCharge < 0.05) {
       player.railgunCharge = 0; 
     }
-    // Charge decays slowly if not aiming
-    if (!aiming) player.railgunCharge = Math.max(0, player.railgunCharge - dt * 0.2);
+    // Charge decays slowly if not _trigHeld
+    if (!_trigHeld) player.railgunCharge = Math.max(0, player.railgunCharge - dt * 0.2);
   } else {
     player._railgunChargingPrev = false;
     // Loadout no longer Puncture ; kill any leftover charge audio.
@@ -82222,7 +82532,7 @@ function updateWeapon(dt) {
   // `aiming` above still drives every gameplay flag exactly as before.
 
   // Spinup
-  let firing = input.mouseDown || _kbActionHeld('fire') || input.gpFire || input.touchFire;
+  let firing = _trigHeld;   // (v44.99) read once above, so charging and firing cannot disagree
   // VORTEX Mega Laser core already fires the dual main lasers
   // AND the laser-shot visually as one channeled beam. Block primary fire
   // while the core is active so the player isn't double-spending ammo /
@@ -82231,6 +82541,19 @@ function updateWeapon(dt) {
   if (firing && player.coreActive && player.loadoutKey === 'VORTEX' &&
       player.loadout && player.loadout.core && player.loadout.core.name === 'Mega Laser') {
     firing = false;
+  }
+  // ⭐⭐ (v44.99) HOLD CHARGES, RELEASE FIRES. While the trigger is down Puncture never fires - the
+  // block above is winding `railgunCharge` up instead - and the shot goes off on the EDGE where the
+  // trigger comes back up.
+  // (!) A TAP STILL FIRES, and it should: `_railShotMul` is `1 + charge * 3`, so zero charge is
+  //     exactly the base shot and a full wind-up is four times it. Gating release on some minimum
+  //     charge would turn a quick tap into a dead trigger, which reads as the gun being broken.
+  // (!) The rate limit is untouched - the release still has to pass `player.fireTimer <= 0` below,
+  //     so this cannot be used to out-run the weapon's fire rate by drumming the trigger.
+  if (player.loadoutKey === 'PUNCTURE') {
+    const _wasHeld = !!player._puncTrigPrev;
+    player._puncTrigPrev = _trigHeld;
+    firing = (!_trigHeld && _wasHeld);
   }
   if (w.spinup > 0 && firing) {
     if (!player.spunUp) {
@@ -90001,6 +90324,10 @@ function returnToRootMenu(opts) {
   // an unconsumed _dropin makes the NEXT launch take the challenger fork and adopt a finished
   // match's round number and score instead of starting fresh.
   try { if (typeof net !== 'undefined' && net) net._dropin = null; } catch (_) {}
+  // (v45.05) ...and the launch latch. This is the ONE place a genuinely new launch can begin, so it
+  // is the one place the latch may be released - see checkAllLoadoutsReady.
+  try { game._launchCommitted = false; } catch (_) {}
+  try { game._ssConfirmed = false; } catch (_) {}   // (v45.06) back at the menu, nothing is locked in
   try { game._campPicker = false; } catch (_) {}   
   
   
@@ -95779,14 +96106,31 @@ function previewLoadout(key) {
     // Reset any prior click binding by cloning the node.
     const newBtn = confirmBtn.cloneNode(true);
     confirmBtn.parentNode.replaceChild(newBtn, confirmBtn);
-    newBtn.addEventListener('click', () => {
-      // Re-request fullscreen on launch in case the user dropped
-      // out between clicking startSolo/joinRoom and confirming. No-op
-      // if already fullscreen or if they've opted out.
+    // (v45.06) CONFIRM only locks in. Launching is the other button's job.
+    newBtn.addEventListener('click', () => { _lssToggleConfirm(); });
+  }
+  // (v45.06) LAUNCH. Re-cloned alongside CONFIRM because previewLoadout re-renders this row per
+  // previewed ship, so a handler bound once would be lost with the node it was bound to.
+  const launchBtn = document.getElementById('ship-preview-launch');
+  if (launchBtn) {
+    launchBtn.style.display = 'inline-block';
+    const newLaunch = launchBtn.cloneNode(true);
+    launchBtn.parentNode.replaceChild(newLaunch, launchBtn);
+    newLaunch.addEventListener('click', () => {
+      if (newLaunch.disabled) return;
+      // Re-request fullscreen on launch in case the user dropped out between clicking
+      // startSolo/joinRoom and confirming. No-op if already fullscreen or if they've opted out.
       if (typeof lssAutoFullscreen === 'function') lssAutoFullscreen();
+      // ⭐ (v45.06) "the first person who hits it brings everyone into the start the match".
+      // commitLoadout only commits THIS client - measured with two peers: the presser reached
+      // warmup and the other sat in the picker. So the press is announced first, and every
+      // confirmed peer commits its own previewed ship on receipt.
+      try { if (net && net.active && net.sendEvent) net.sendEvent({ type: 'launch_now' }); } catch (_) {}
       commitLoadout(key);
     });
   }
+  try { game._ssKey = key; } catch (_) {}   // (v45.06) what a remote LAUNCH will commit on our behalf
+  try { _lssRefreshLaunchRow(); } catch (_) {}
   const vrBtn = document.getElementById('ship-preview-confirm-vr');
   if (vrBtn) {
     const floatingVR = document.getElementById('vr-enter-btn');
@@ -97519,12 +97863,18 @@ function _lssModeBlurb(m) {
 function _lssJoinedMatchInProgress() {
   try { return !!(typeof net !== 'undefined' && net && net.active && net._dropin); } catch (_) { return false; }
 }
+// (v45.06) ...and CONFIRMING freezes the same three. Owner: "confirming locks your ability to change
+// map, mode, speed". Folded in beside the late-joiner rule rather than added to each lock separately,
+// so the three controls keep asking ONE question about whether room settings are open.
+function _lssRoomSettingsFrozen() {
+  try { return _lssJoinedMatchInProgress() || !!game._ssConfirmed; } catch (_) { return false; }
+}
 
 function _lssRoomModeLocked() {
   try {
     return (typeof game !== 'undefined' && game &&
             (game.state === 'playing' || game.state === 'roundEnd')) ||
-           _lssJoinedMatchInProgress();   // (v44.92) a late joiner does not re-mode a live room
+           _lssRoomSettingsFrozen();   // (v44.92/45.06) a late joiner, or anyone who has confirmed
   } catch (_) { return false; }
 }
 // (!) _lssRefreshModeUI() already calls this, so defining it wires the picker into EVERY mode
@@ -97614,7 +97964,7 @@ function _lssPickRoomMode(mode) {
 function _lssInsaneSpeedLocked() {
   // Same rule race mode uses, for the same reason: flipping the speed under a live round
   // half-converts the match (ships change speed, bots do not re-plan) - see _raceModeLocked.
-  if (_lssJoinedMatchInProgress()) return true;   // (v44.92) joined a match already running
+  if (_lssRoomSettingsFrozen()) return true;   // (v44.92/45.06) late joiner, or confirmed
   return typeof game !== 'undefined' && game &&
          (game.state === 'playing' || game.state === 'roundEnd' ||
           (game.state === 'warmup' && (game.currentRound | 0) > 1));
@@ -109845,6 +110195,12 @@ function _spawnClearanceScore(x, y, z) {
   return { score, worst, worstR };
 }
 
+// (v45.04) The spawn a world build already chose, held for the respawn that follows it. See the
+// long note in respawnPlayer - this exists so entering a round does not pick two different points.
+// Cleared by the taker, so it can only ever be consumed once.
+let _spawnPick = null;
+function _spawnPickSet(v) { try { _spawnPick = v ? v.clone() : null; } catch (_) { _spawnPick = null; } return v; }
+function _spawnPickTake() { const v = _spawnPick; _spawnPick = null; return v; }
 function getValidSpawnPoint(team, spread) {
   spread = spread || 80;
   const pts = game.corridorPoints;
