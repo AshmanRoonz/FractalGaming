@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.27';
+const LSS_BUILD = '45.28';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -3878,8 +3878,8 @@ function _applyStartView() {
   try { document.body.classList.toggle('lss-thirdperson', _tp); } catch (_) {}
   if (!_tp && typeof player !== 'undefined' && player && player.mesh) player.mesh.visible = false;
 }
-function startFreeFlight() {
-  LSS.MODE = _lssRoomModeChoose('freeflight');   // (v43.19) a room has one mode
+function startFreeFlight(_tag) {
+  LSS.MODE = _lssRoomModeChoose(_tag === 'cyberpunk' ? 'cyberpunk' : 'freeflight');   // (v43.19) a room has one mode
   try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}   // (v38.78) every free flight starts with six hostile cities
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}   
   
@@ -25665,7 +25665,7 @@ function startCyberpunkCity() {
                   round: 1, ledger: { capsA: 0, capsB: 0, attA: 0, attB: 0 },
                   msalt: (Math.random() * 1e9) | 0 };
   try { net.cyber = true; } catch (_) {}     // (v37.80) marks the ROOM, so peers and the bot
-  startFreeFlight();                          //          roster authority both behave
+  startFreeFlight('cyberpunk');               //          roster authority both behave
 }
 function _cyberAtkFleet(C) {
   C = C || (typeof game !== 'undefined' ? game._cyber : null);
