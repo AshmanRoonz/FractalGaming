@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.31';
+const LSS_BUILD = '45.32';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2054,6 +2054,24 @@ async function postEndlessRunToBackend(run) {
     console.warn('[lss-backend] endless queue threw', err);
   }
 }
+
+function _lssPostEndlessInFlight(why) {
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    const run = game.endlessRun;
+    if (!run || run._posted || !((run.dist || 0) > 0)) return false;
+    if (typeof postEndlessRunToBackend !== 'function') return false;
+    console.log('[lss-backend] endless run in flight at ' + (why || '?') + ' ; filing dist=' + Math.round(run.dist));
+    postEndlessRunToBackend(run);      // deliberately not awaited: the disk write is already done
+    return true;
+  } catch (_) { return false; }
+}
+try {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pagehide', () => { _lssPostEndlessInFlight('pagehide'); });
+    window.__lssPostEndlessInFlight = _lssPostEndlessInFlight;   // test hook: see the harness in the map
+  }
+} catch (_) {}
 
 const _LSS_ACCOUNT_PREF_KEYS = ['lss_ship_skin', 'lss_perk_id', 'lss_camp_difficulty'];
 
@@ -58263,6 +58281,7 @@ function returnToRootMenu(opts) {
 
 function returnToMainMenu(opts) {
   if (opts && opts.hard) {
+    try { _lssPostEndlessInFlight('exit'); } catch (_) {}
     try {
       if (typeof net !== 'undefined' && net && net.room && typeof net.room.leave === 'function') {
         net.room.leave();
@@ -63619,6 +63638,7 @@ function _lssClearModeSetup() {
       game._campJourney = false;
     }
     if (typeof player !== 'undefined' && player && typeof LSS !== 'undefined') player.team = LSS.TEAM_FLEET_A;
+    try { _lssPostEndlessInFlight('mode-change'); } catch (_) {}
     try { if (typeof game !== 'undefined' && game) game.endlessRun = null; } catch (_) {}
     try { if (typeof game !== 'undefined' && game) game._cyber = null; } catch (_) {}
     try { if (typeof net !== 'undefined' && net) net.cyber = false; } catch (_) {}

@@ -6563,7 +6563,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.31';
+const LSS_BUILD = '45.32';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -9497,6 +9497,43 @@ async function postEndlessRunToBackend(run) {
     console.warn('[lss-backend] endless queue threw', err);
   }
 }
+
+// ⭐⭐⭐ (v45.32) EVERY WAY AN ENDLESS RUN CAN END, NOT JUST THE ONE THAT KILLS YOU.
+// postEndlessRunToBackend had two call sites and both are DEATHS-or-teardowns: the out-of-lives
+// branch, and EndlessMode.onTeardown (whose only caller is returnToRootMenu). Between them they
+// miss every ending a bored pilot actually uses:
+//   - EXIT TO MAIN MENU    -> returnToMainMenu({hard:true}) -> location.reload(). No teardown.
+//   - closing the tab, hitting F5, following a link, the phone discarding a backgrounded tab.
+//   - the SETTINGS quality-preset change, which reloads the page on purpose (see _qualityReload).
+// Measured on 45.31 before this landed: a live run at dist 700000, press EXIT TO MAIN MENU, and
+// afterwards lss_match_outbox is `[]` - the run left no trace anywhere, on disk or on the wire.
+//
+// This is the one helper both the exit button and `pagehide` call. It is SYNCHRONOUS up to the
+// localStorage write inside postEndlessRunToBackend (nothing is awaited before _lssOutboxPut), so
+// it is safe in an unload handler where a promise would never resolve. `run._posted` makes it
+// idempotent against the death-path call that has usually already fired, and against pagehide
+// firing right behind the exit button's own call.
+//
+// ⚠ `pagehide`, NOT `beforeunload`. beforeunload is skipped outright on mobile Safari and on any
+//   backgrounded tab the OS discards - exactly the sessions most likely to be a long endless run on
+//   a phone. pagehide fires for both, including the bfcache path.
+function _lssPostEndlessInFlight(why) {
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    const run = game.endlessRun;
+    if (!run || run._posted || !((run.dist || 0) > 0)) return false;
+    if (typeof postEndlessRunToBackend !== 'function') return false;
+    console.log('[lss-backend] endless run in flight at ' + (why || '?') + ' ; filing dist=' + Math.round(run.dist));
+    postEndlessRunToBackend(run);      // deliberately not awaited: the disk write is already done
+    return true;
+  } catch (_) { return false; }
+}
+try {
+  if (typeof window !== 'undefined') {
+    window.addEventListener('pagehide', () => { _lssPostEndlessInFlight('pagehide'); });
+    window.__lssPostEndlessInFlight = _lssPostEndlessInFlight;   // test hook: see the harness in the map
+  }
+} catch (_) {}
 
 // (v36.50) CROSS-DEVICE ACCOUNT STATE — aegis ranks + the account subset of
 // settings. Everything used to live in localStorage, so a new browser or a
@@ -91168,6 +91205,23 @@ function returnToRootMenu(opts) {
 // {hard:true}. The soft path stays available internally / for future use.
 function returnToMainMenu(opts) {
   if (opts && opts.hard) {
+    // ⭐⭐⭐ (v45.32) THE HARD EXIT IS THE ENDLESS EXIT, AND IT THREW THE RUN AWAY.
+    // v44.15 taught EndlessMode.onTeardown to file a run you walk away from ("A RUN YOU WALK AWAY
+    // FROM IS STILL A RUN") - but onTeardown has exactly ONE call site, returnToRootMenu, and the
+    // button a player actually presses to walk away does not go there. EXIT TO MAIN MENU calls
+    // returnToMainMenu({hard:true}), which is `window.location.reload()` (owner-directed revert,
+    // v35.83): no teardown, no hook, no post. So the fix landed on a path the exit button skips,
+    // and the walked-away run has been evaporating ever since - which is why the production table
+    // held ONE endless row against months of play, and why the owner's 700 km run is not on the
+    // board. The only endless runs that ever reached D1 are the ones that ended in death.
+    //   Reached HERE the run survives, because _lssOutboxPut writes localStorage SYNCHRONOUSLY and
+    // everything in postEndlessRunToBackend before its first `await` runs before we return. The
+    // payload is on disk before reload() is called; the next boot's flush ships it (and the POST
+    // itself is keepalive, so an already-started one outlives the document too).
+    // ⚠ ENDLESS ONLY, DELIBERATELY. An abandoned elimination/race/assault match has no result to
+    //   file - its score is the round tally of a match that never finished. Endless is different:
+    //   the distance flown IS the score, and it is just as true at the moment you quit.
+    try { _lssPostEndlessInFlight('exit'); } catch (_) {}
     try {
       // Best-effort: leave the Trystero room cleanly so peers see us drop
       // immediately rather than waiting for WebRTC timeout.
@@ -99222,6 +99276,11 @@ function _lssClearModeSetup() {
     //   armed state and bossDone from an earlier session this page load).
     // - game._cyber / net.cyber are what make CYBERPUNK CITY different from EXHIBITION; both are
     //   LSS.MODE === 'freeflight', so the mode string alone cannot tell them apart.
+    // (v45.32) ...and FILE the run before dropping it. This line is a third way an endless run can
+    // end without anyone posting it (the exit button and the tab-close are the other two - see
+    // _lssPostEndlessInFlight): adopting a room's mode away from endless discards the run object
+    // outright, and the distance flown up to that moment is a real result.
+    try { _lssPostEndlessInFlight('mode-change'); } catch (_) {}
     try { if (typeof game !== 'undefined' && game) game.endlessRun = null; } catch (_) {}
     try { if (typeof game !== 'undefined' && game) game._cyber = null; } catch (_) {}
     try { if (typeof net !== 'undefined' && net) net.cyber = false; } catch (_) {}
