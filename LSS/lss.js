@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.95';
+const LSS_BUILD = '44.96';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -14171,7 +14171,7 @@ try {
 } catch (e) {}
 
 const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0,
-  stallT: 0, stallN: 0, overN: 0, capN: 0,   // (v40.13) the frames the EMA is not allowed to see; (v44.93) consecutive over-budget / at-cap decisions
+  stallT: 0, stallN: 0,   // (v40.13) the frames the EMA is not allowed to see
   pf: { nSum: 0, nN: 0, sSum: 0, sN: 0, nat: 0, sub: 0, latched: false, unlatched: 0 } };
 let _lssOnBattery = false;
 try {
@@ -14309,8 +14309,7 @@ function _lssSupersampleTick(ts) {
   S.acc += dt; if (S.acc < 500) return; S.acc = 0;   // decide twice a second
   const period = 1000 / S.hz;
   let sc = S.scale;
-  const _floorRaw = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin
-                    : ((typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? -0.6 : 0);
+  const _floorRaw = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
   const _pfNeedRaw = (typeof window !== 'undefined' && window.__ssProof !== undefined) ? window.__ssProof : 0.08;
   const _pfOn = (typeof _pfNeedRaw === 'number') && _pfNeedRaw > 0;
   if (_pfOn) {
@@ -14328,34 +14327,16 @@ function _lssSupersampleTick(ts) {
   if (S.pf.latched && sc < 0) sc = 0;
   const _floor = S.pf.latched ? 0 : _floorRaw;
   const _stalled = !!(S.stallT && (ts - S.stallT) < 4000);
-  const _onTime = (typeof window !== 'undefined' && typeof window.__ssOnTime === 'number')
-                  ? Math.max(0.5, Math.min(1, window.__ssOnTime)) : 0.95;
-  const _climbAt = 2 - _onTime;                              // 0.95 -> 1.05
-  const _shedAt  = 2 - Math.max(0.5, _onTime - 0.10);        // 0.95 -> 1.15
-  const _over = _stalled || S.ema > period * _shedAt, _far = _stalled || S.ema > period * 1.40;
-  const _jump = !(typeof window !== 'undefined' && window.__ssJump === false);
-  const _overN = (typeof window !== 'undefined' && typeof window.__ssOverN === 'number') ? window.__ssOverN : 2;
-  const _capHoldN = (typeof window !== 'undefined' && typeof window.__ssHoldN === 'number') ? window.__ssHoldN : 6;
-  S.overN = _over ? ((S.overN || 0) + 1) : 0;
-  const _shedNow = _stalled || (S.overN >= _overN);
-  if ((sc > 0 && _shedNow) || (sc <= 0 && sc > _floor && _far)) {
-    if (sc > 0) { sc = _jump ? 0 : Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); S.overN = 0; S.capN = 0; }
+  const _over = _stalled || S.ema > period * 1.10, _far = _stalled || S.ema > period * 1.40;
+  if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
+    if (sc > 0) { sc = Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
     else { sc = Math.max(_floor, sc - 0.2); S.hold = 2; }
-  } else if (S.ema <= period * _climbAt && !_stalled) {   // (v40.13) never climb out of a stalling patch
-    let _cap = 0;
-    try {
-      if (_lssOnBattery && typeof QUALITY !== 'undefined' && QUALITY.level === 'high') _cap = 0;
-      else {
-        const _bd = (typeof QUALITY !== 'undefined' && typeof QUALITY.bloomDPR === 'function') ? QUALITY.bloomDPR() : 1.0;
-        const _base = Math.min(window.devicePixelRatio, _bd);
-        _cap = (Math.max(_lssTierSuper(), _lssPaniniSuper()) > _base + 1e-6) ? 1 : 0;
-      }
-    } catch (_) { _cap = (_lssTierSuper() > 0) ? 1 : 0; }
+  } else if (S.ema <= period * 1.02 && !_stalled) {   // (v40.13) never climb out of a stalling patch
+    const _cap = (_lssTierSuper() > 0) ? 1 : 0;   // (v39.49c) HIGH on battery creeps back to native, never above
     if (S.hold > 0) S.hold -= 0.5;
     else if (sc < 0) sc = Math.min(0, sc + 0.1);
-    else if (sc < _cap) sc = _jump ? _cap : Math.min(_cap, sc + 0.05);
-    if (sc >= _cap) { S.capN = (S.capN || 0) + 1; if (S.capN >= _capHoldN) S.backoff = 4; }
-    else S.capN = 0;
+    else if (sc < _cap) sc = Math.min(_cap, sc + 0.05);
+    if (sc >= _cap) S.backoff = 4;
   }
   if (sc !== S.scale) { S.scale = sc; S.steps++; }
 }

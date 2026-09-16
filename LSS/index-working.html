@@ -6445,7 +6445,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.95';
+const LSS_BUILD = '44.96';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -26385,7 +26385,7 @@ try {
 // Starting at 0 and creeping up (0.05 per half-second while the refresh is held) reaches full
 // resolution in ~10 s on a GPU that can hold it, and never over-spends on one that cannot.
 const _ssDyn = { scale: 0.0, minDt: 1000, hz: 60, ema: 0, last: 0, acc: 0, hold: 0, backoff: 4, steps: 0,
-  stallT: 0, stallN: 0, overN: 0, capN: 0,   // (v40.13) the frames the EMA is not allowed to see; (v44.93) consecutive over-budget / at-cap decisions
+  stallT: 0, stallN: 0,   // (v40.13) the frames the EMA is not allowed to see
   // (v44.90) the sub-native shed's payoff ledger - see THE SHED HAS TO PROVE ITSELF, below.
   // nSum/nN = frame-time EMA samples taken at native or above, sSum/sN = samples taken below it.
   pf: { nSum: 0, nN: 0, sSum: 0, sN: 0, nat: 0, sub: 0, latched: false, unlatched: 0 } };
@@ -26701,14 +26701,36 @@ function _lssSupersampleTick(ts) {
   // hold the refresh even at native (owner: bursts of six 21 ms frames with the CPU at 7 ms during
   // heavy FX, felt as stutter and as sound cutting), the scene rectangle may shrink to
   // window.__ssMin (default -0.6 = 70% of native each axis) and creep back the same way.
-  // (v44.93) NO SUB-NATIVE PROBE ON DESKTOP AT ALL. v44.90 made the shed prove itself and latch off
-  // after it failed twice; measured a THIRD time here, pinned and parked, it was not merely useless
-  // but backwards - the -0.6 floor (800x478) ran 130.2 fps against native's (1143x684) 140.8. Fewer
-  // pixels, slower frames. So desktop does not spend two probe steps finding that out every round.
-  // Mobile and the consoles KEEP it: v44.04 put them on this path deliberately and they are the
-  // machines where shedding fill is the only lever that works. window.__ssMin overrides either way.
-  const _floorRaw = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin
-                    : ((typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? -0.6 : 0);
+  // ⛔⛔⛔ (v44.96) v44.93 IS REVERTED. IT CAUSED HITCHES AND RUBBERBANDING AND THE METRIC I TUNED
+  // IT AGAINST COULD NOT SEE THAT. Owner: "whatever you did this time to the framerate and
+  // resolution, we are getting hitches and rubberbanding."
+  // v44.93 did three things that compound into exactly the v42.98 failure, whose note is thirty
+  // lines up in _lssSceneActive and says it outright:
+  //   "Pinned at ~3.9x the pixels with no way down, a thermally-capped laptop cannot drop frames
+  //    gracefully; the CPU races ahead, the driver queues, and the result is presented as INPUT LAG
+  //    rather than as a lower framerate. FRAMERATE ALONE WOULD NEVER HAVE SHOWN IT - the queue
+  //    absorbs it."
+  //   1. It taught the climb cap about Panini, so HIGH could reach Panini's full 2.03x need - the
+  //      same ~4x fill v42.98 is about. On the dev PANE that target is 3.2 MP; on a real fullscreen
+  //      display it is ~8.5 MP. The measurement behind v44.93 was taken at pane size. I flagged that
+  //      caveat and shipped the defaults anyway, which was the mistake.
+  //   2. It JUMPED straight from native to that setting instead of creeping, so the GPU load swings
+  //      by 4x in one tick. The queue depth swings with it, and swinging queue depth IS the
+  //      rubberbanding - it is felt as the ship's position lagging and snapping, not as fps.
+  //   3. It relaxed the shed bar (1.10 -> 1.15) and added a two-tick delay before shedding, so the
+  //      too-expensive setting is HELD LONGER before being given up. On a machine in trouble that is
+  //      the wrong direction on every axis.
+  // ⚠ AND THE DEEPER LESSON, which is why this is a revert and not a retune: the whole v44.93 policy
+  //   was built on the frame-time EMA and the share of frames hitting vsync. v42.98 states that this
+  //   failure is invisible to exactly that signal. Optimising harder against a blind metric cannot
+  //   find the problem; it walks straight into it. Any future attempt at this needs a latency or
+  //   queue-depth measurement taken AT THE OWNER'S REAL RESOLUTION, not fps at pane size.
+  // (!) The sharper picture is still reachable the way the game already offers it - the ULTRA and
+  //     MEGA tiers size the scene target for a supersample deliberately and the player opts in.
+  //     Lifting the cap made HIGH behave like a supersampled tier without anyone asking for it.
+  // (!) v44.90's payoff audit is NOT part of this revert - it is below/around this block and only
+  //     ever STOPS a shed that has been measured not to help, which cannot cause this.
+  const _floorRaw = (typeof window !== 'undefined' && typeof window.__ssMin === 'number') ? window.__ssMin : -0.6;
   // ⭐⭐⭐ (v44.90) THE SUB-NATIVE SHED HAS TO PROVE IT IS BUYING FRAMES, OR IT GIVES THE PIXELS BACK.
   // Owner: "the limiter that keeps framerate high ... should be lowering the resolution of the
   // things farther away and in the peripheral vision the most ... not the ship at all."
@@ -26788,35 +26810,7 @@ function _lssSupersampleTick(ts) {
   // (v40.13) a stall inside the last 4 s is over budget by itself, at both thresholds - it is the
   // strongest evidence available that this machine cannot hold what it is being asked to draw.
   const _stalled = !!(S.stallT && (ts - S.stallT) < 4000);
-  // ⭐⭐⭐ (v44.93) THE BUDGET IS DROPPED FRAMES, NOT FRAMES PER SECOND.
-  // Owner: "i feel like the resolution scaling is too aggressive... it keeps us at max fps, but i
-  // think maybe some drop in framerate is acceptable... what do you think the acceptable amount is?"
-  //
-  // ⚠ THERE IS NO SUCH THING AS A SMALL DROP HERE, AND THAT IS THE WHOLE ANSWER. Measured the rAF
-  //   interval over 530 frames in a live match: 7.0 ms x457, 14.0 ms x44, 21.0 ms x1. Nothing in
-  //   between - exactly 1x, 2x and 3x the 6.94 ms vsync period. There is no VRR in this pane, so a
-  //   frame either makes the deadline or is DOUBLED. "137 fps" is not a smooth 137; it is 89% of
-  //   frames at 144 and 11% at 72, which is felt as micro-stutter, not as softness traded away.
-  // So the honest budget is the fraction of frames that land on time, and the conversion is exact:
-  // if a fraction f arrives on time and the rest are doubled, the mean period is P*(2 - f). The
-  // ratio this governor compares the EMA against IS 2 - f. 0.95 on time -> 1.05. That is the number.
-  //
-  // WHY 0.95. Measured parked and interleaved, native vs the full Panini supersample:
-  //       native ........... 1143x684    143.1 fps   99.5% on time
-  //       full supersample . 2321x1389   137.1 fps   95.0% on time
-  //   4.1x the pixels for 6 fps and 4.5 points of on-time. One dropped frame in twenty buys the
-  //   whole supersample. Below about that the doubled frames start reading as a stutter CADENCE
-  //   rather than as a picture that cost something, which is the line worth defending.
-  // (!) The old numbers were 1.02 to climb (~100% on time, i.e. perfection) and 1.10 to shed. On a
-  //     machine sitting at 97-99% the climb gate could never open, so the scale parked at 0 forever.
-  // (!) SELF-LEVELLING BY CONSTRUCTION. At a bigger window the same supersample costs more and the
-  //     governor settles lower on its own - the policy is a quality bar, not a resolution.
-  // window.__ssOnTime tunes it (1.0 = the old strictness); the shed bar sits 10 points below.
-  const _onTime = (typeof window !== 'undefined' && typeof window.__ssOnTime === 'number')
-                  ? Math.max(0.5, Math.min(1, window.__ssOnTime)) : 0.95;
-  const _climbAt = 2 - _onTime;                              // 0.95 -> 1.05
-  const _shedAt  = 2 - Math.max(0.5, _onTime - 0.10);        // 0.95 -> 1.15
-  const _over = _stalled || S.ema > period * _shedAt, _far = _stalled || S.ema > period * 1.40;
+  const _over = _stalled || S.ema > period * 1.10, _far = _stalled || S.ema > period * 1.40;
   // (v39.51) BELOW NATIVE IS A BURST RESPONSE, NOT A RATCHET. Measured in the owner's session (144 Hz,
   // plugged in): 141 fps with the scene parked at the -0.6 floor (1344x707 on a 1920 canvas). Every
   // shed doubled the hold (up to 60 ticks = 30 s with no creep-back) and the backoff never reset, so
@@ -26825,73 +26819,15 @@ function _lssSupersampleTick(ts) {
   // a shed stops at native and keeps the exponential hold (a step there is a real supersample cost);
   // below native only the 40%-over rule sheds, the hold is 1 s, and the creep back is 0.1 a tick
   // (3 s from the floor to native); the backoff resets once the scale is back at its cap.
-  // ⭐⭐ (v44.93) SHARPNESS HERE IS A STEP, NOT A SLOPE - SO STOP CREEPING THROUGH THE MIDDLE.
-  // Measured parked, same scene, 3.5 s each: scale 0 = 140.8 fps, 0.5 = 130.5, 1.0 = 129.3. Half the
-  // supersample costs what ALL of it costs. The price is paid for rendering into a bigger-than-native
-  // target at all; what you then put in it is nearly free. So every intermediate stop is strictly the
-  // worst deal on the board - it pays full price for part of the picture - and the old 0.05-a-tick
-  // creep spent TEN SECONDS walking up through exactly that dead zone before reaching anything worth
-  // having. Now the climb jumps straight to the cap and a shed drops straight back to native.
-  // (!) THE EXPONENTIAL HOLD IS WHAT STOPS THIS PUMPING, and it already existed. A shed sets
-  //     hold = backoff and doubles the backoff (4, 8, 16 ... 60 ticks = up to 30 s), and the backoff
-  //     only resets once the cap is actually being held. A machine that cannot hold the supersample
-  //     therefore tries it rarely, not twice a second. window.__ssJump = false restores the creep.
-  const _jump = !(typeof window !== 'undefined' && window.__ssJump === false);
-  // ⭐⭐ (v44.93) TWO THINGS A BINARY STEP NEEDS THAT A CREEP DID NOT. First cut of this change
-  // pumped 0 -> 1 -> 0 every 2-4 seconds in play (logged: climb at 5 s, shed at 9 s, climb at 13 s,
-  // shed at 15 s, climb at 19 s, shed at 20 s) - the single most visible defect this governor can
-  // have, and the one the rest of this file is written to avoid. Both causes:
-  //   1. ONE BAD TICK WAS A VERDICT. At full supersample the steady EMA in that scene was 6.95-7.10
-  //      against a 7.98 shed bar - comfortably held - but a combat spike (one tick read 10.61) tipped
-  //      it instantly, and a binary shed then costs the WHOLE supersample rather than one step of it.
-  //      A spike is weather. Shedding now needs the bar to be missed on two consecutive decisions,
-  //      unless a real stall was seen, which is evidence on its own (v40.13).
-  //   2. THE BACKOFF RESET FIRED ON ARRIVAL, NOT ON SURVIVAL. `if (sc >= _cap) S.backoff = 4` made
-  //      sense when reaching the cap took ten seconds of creeping - getting there PROVED comfort. A
-  //      jump reaches it in one tick and proves nothing, so every brief visit reset the backoff to 4
-  //      and the next shed held for only 2 s. The exponential guard could never engage. The cap must
-  //      now be HELD for six ticks (3 s) before the backoff is forgiven.
-  // window.__ssOverN tunes the first (1 = the old instant shed), window.__ssHoldN the second.
-  const _overN = (typeof window !== 'undefined' && typeof window.__ssOverN === 'number') ? window.__ssOverN : 2;
-  const _capHoldN = (typeof window !== 'undefined' && typeof window.__ssHoldN === 'number') ? window.__ssHoldN : 6;
-  S.overN = _over ? ((S.overN || 0) + 1) : 0;
-  const _shedNow = _stalled || (S.overN >= _overN);
-  if ((sc > 0 && _shedNow) || (sc <= 0 && sc > _floor && _far)) {
-    if (sc > 0) { sc = _jump ? 0 : Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); S.overN = 0; S.capN = 0; }
+  if ((sc > 0 && _over) || (sc <= 0 && sc > _floor && _far)) {
+    if (sc > 0) { sc = Math.max(0, sc - 0.2); S.hold = S.backoff; S.backoff = Math.min(60, S.backoff * 2); }
     else { sc = Math.max(_floor, sc - 0.2); S.hold = 2; }
-  } else if (S.ema <= period * _climbAt && !_stalled) {   // (v40.13) never climb out of a stalling patch
-    // ⭐⭐⭐ (v44.93) THE CAP HAD NEVER HEARD OF PANINI, AND THAT IS WHY THE PICTURE WAS SOFT.
-    // `_lssTierSuper() > 0` is true only for ULTRA and MEGA. At HIGH it is 0, so the cap was 0 and
-    // the scale was FORBIDDEN from ever going above native - on a build where wide-view correction
-    // is on at full by default (v42.94) and declares a supersample need of its own.
-    // The consequence, measured on this machine at HIGH: _getBloomRTSize allocates a 2321x1389 scene
-    // target because `max(_lssTierSuper(), _lssPaniniSuper(true))` is 2.03 - the VRAM is spent - and
-    // then the governor renders 1143x684 into it forever. Panini magnifies the centre 2.03x, so the
-    // middle of the screen, where the ship is, is permanently a 2x upscale of a native buffer. That
-    // is not the governor shedding under load; it is a ceiling it could never reach. It is exactly
-    // the softness the owner has been looking at, and pinning the scale to 1.0 by hand renders
-    // 2321x1389 and costs six frames per second.
-    // The cap is now "is there any supersample need at all", which is the same question
-    // _lssSceneActive asks when it builds the viewport - one value, one rule, tier or Panini.
-    // (!) THE v39.49c BATTERY CARVE-OUT IS PRESERVED DELIBERATELY: HIGH on battery stays sub-native
-    //     only. That was a measurement on real power-limited hardware (HIGH at native held 60 fps
-    //     where MEGA at the floor managed 49), and this is not the change to overturn it in. The new
-    //     on-time policy would very likely handle it - say the word and it comes out.
-    let _cap = 0;
-    try {
-      if (_lssOnBattery && typeof QUALITY !== 'undefined' && QUALITY.level === 'high') _cap = 0;
-      else {
-        const _bd = (typeof QUALITY !== 'undefined' && typeof QUALITY.bloomDPR === 'function') ? QUALITY.bloomDPR() : 1.0;
-        const _base = Math.min(window.devicePixelRatio, _bd);
-        _cap = (Math.max(_lssTierSuper(), _lssPaniniSuper()) > _base + 1e-6) ? 1 : 0;
-      }
-    } catch (_) { _cap = (_lssTierSuper() > 0) ? 1 : 0; }
+  } else if (S.ema <= period * 1.02 && !_stalled) {   // (v40.13) never climb out of a stalling patch
+    const _cap = (_lssTierSuper() > 0) ? 1 : 0;   // (v39.49c) HIGH on battery creeps back to native, never above
     if (S.hold > 0) S.hold -= 0.5;
     else if (sc < 0) sc = Math.min(0, sc + 0.1);
-    else if (sc < _cap) sc = _jump ? _cap : Math.min(_cap, sc + 0.05);
-    // (v44.93) forgiven only after the cap has been SURVIVED, not merely reached - see above.
-    if (sc >= _cap) { S.capN = (S.capN || 0) + 1; if (S.capN >= _capHoldN) S.backoff = 4; }
-    else S.capN = 0;
+    else if (sc < _cap) sc = Math.min(_cap, sc + 0.05);
+    if (sc >= _cap) S.backoff = 4;
   }
   // (v39.49) a step is a viewport change now (renderPostFX reads S.scale every frame) - no
   // render-target reallocation, no _doPostFXResize, no hitch. See _getBloomRTSize.
