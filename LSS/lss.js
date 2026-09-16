@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.75';
+const LSS_BUILD = '44.76';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18094,6 +18094,7 @@ function _wgooKnobs() {
   if (G.splashV === undefined)   G.splashV = 60;   // (v44.72) downward speed a landing lip needs to splash
   if (G.splashMax === undefined) G.splashMax = 5;  // crossings allowed to splash per frame
   if (G.fadeD === undefined)     G.fadeD = 9;      // (v44.73) displacement for full opacity
+  if (G.nBlend === undefined)    G.nBlend = 14;    // (v44.76) displacement over which the fold owns the normal
   return G;
 }
 function _wgooDispose() {
@@ -18142,13 +18143,22 @@ function _wgooBuild(N, span, WL, cx, cz) {
       uni.uWgFadeD = { value: 9 };
       uni.uWgCentre = { value: new THREE.Vector2(0, 0) };
       uni.uWgHalf = { value: 800 };
+      uni.uWgNBlend = { value: 14 };   // (v44.76) displacement over which the fold's own normal takes over
       let vs = wm.vertexShader;
       const vsHead = 'attribute float aDisp;\nvarying float vWgD;\n';
       if (vs.indexOf('void main(){') >= 0) vs = vs.replace('void main(){', vsHead + 'void main(){');
       else vs = vs.replace('void main() {', vsHead + 'void main() {');
       const dispLine = 'vec3 transformed = position; transformed.z += disp;';
       if (vs.indexOf(dispLine) < 0) throw new Error('water vertex shader changed: displacement line not found');
-      vs = vs.replace(dispLine, 'vec3 transformed = position; transformed.y += disp + aDisp; vWgD = aDisp;');
+      vs = vs.replace(dispLine, 'vec3 transformed = position; transformed.y += disp; vWgD = aDisp;');
+      const nKey = 'vN = normalize(vec3((dL-dR)';
+      const nIdx = vs.indexOf(nKey);
+      if (nIdx < 0) throw new Error('water vertex shader changed: vN line not found');
+      const nEnd = vs.indexOf('\n', nIdx);
+      const nCut = (nEnd < 0) ? vs.length : nEnd;
+      vs = vs.slice(0, nCut)
+         + '\n  vN = normalize(mix(vN, normalize(normal), clamp(abs(aDisp) / max(uWgNBlend, 0.01), 0.0, 1.0)));'
+         + vs.slice(nCut);
       let fs = wm.fragmentShader;
       const fsHead = 'varying float vWgD;\nuniform float uWgFadeD;\nuniform vec2 uWgCentre;\nuniform float uWgHalf;\n';
       if (fs.indexOf('void main(){') >= 0) fs = fs.replace('void main(){', fsHead + 'void main(){');
@@ -18237,6 +18247,7 @@ function _wgooTick(dt) {
     const mu2 = _WGOO.mat.uniforms;
     const fd = (G.fadeD != null) ? +G.fadeD : 9;
     if (mu2.uWgFadeD) { mu2.uWgFadeD.value = fd; mu2.uWgCentre.value.set(_WGOO.cx, _WGOO.cz); mu2.uWgHalf.value = _WGOO.span * 0.5; }
+    if (mu2.uWgNBlend) mu2.uWgNBlend.value = Math.max(0.01, (G.nBlend != null) ? +G.nBlend : 14);
     if (mu2.uWL) { mu2.uWL.value = WL; mu2.uFadeD.value = fd; mu2.uCentre.value.set(_WGOO.cx, _WGOO.cz); mu2.uHalf.value = _WGOO.span * 0.5; }
   }
   if (!wet) return;
