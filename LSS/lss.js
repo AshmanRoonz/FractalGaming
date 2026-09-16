@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.76';
+const LSS_BUILD = '44.77';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18077,7 +18077,7 @@ function _wgooKnobs() {
   if (G.on === undefined)      G.on = 0;
   if (G.n === undefined)       G.n = 64;       // vertices a side
   if (G.span === undefined)    G.span = 1600;  // world units a side -> 25 u a vertex
-  if (G.push === undefined)    G.push = 1600;  // the lab's shipped value
+  if (G.push === undefined)    G.push = 0.5;   // (v44.77) constraint stiffness 0..1, not an acceleration
   if (G.swirl === undefined)   G.swirl = 900;  // the lab's shipped value
   if (G.r === undefined)       G.r = 2.2;      // displacer radius, in hull beams
   if (G.drag === undefined)    G.drag = 0.92;  // the lab's, but per SECOND here - see the note below
@@ -18264,7 +18264,8 @@ function _wgooTick(dt) {
   const pos = _WGOO.pos, vel = _WGOO.vel, home = _WGOO.home, cell = _WGOO.cell;
   const dragK = Math.pow(Math.max(0.01, Math.min(0.999, +G.drag || 0.92)), dt * 60);
   const reform = Math.max(0, +G.reform || 0);
-  const push = +G.push || 0, swirl = +G.swirl || 0, lift = +G.lift || 0;
+  const swirl = +G.swirl || 0, lift = +G.lift || 0;
+  const pushK = Math.max(0, Math.min(1, (G.push != null) ? +G.push : 0.5));
   const gravK = +G.grav || 520, buoyK = +G.buoy || 26;
   const curlK = Math.max(0, (G.curl != null) ? +G.curl : 0.9);
   const airK = Math.pow(Math.max(0.5, Math.min(0.9999, +G.airDrag || 0.995)), dt * 60);
@@ -18278,12 +18279,16 @@ function _wgooTick(dt) {
       const dx = x - D.x, dz = z - D.z, d2 = dx * dx + dz * dz, R = D.r;
       if (d2 >= R * R) continue;
       const d = Math.sqrt(d2) || 1, nx = dx / d, nz = dz / d, fall = 1 - d / R;
-      vx += nx * push * fall * dt;
-      vz += nz * push * fall * dt;
-      const sgn = (D.vx * -nz + D.vz * nx) >= 0 ? 1 : -1;   // swirl follows the way it is travelling
+      const over = R - d;
+      const corr = over * pushK;
+      x += nx * corr; z += nz * corr;
+      const vn = vx * nx + vz * nz;
+      if (vn < 0) { vx -= vn * nx; vz -= vn * nz; }   // cancel, do not reflect
+      const sgn = (D.vx * -nz + D.vz * nx) >= 0 ? 1 : -1;
       vx += -nz * swirl * fall * dt * sgn;
       vz += nx * swirl * fall * dt * sgn;
-      vy += lift * push * fall * fall * dt;                  // the rim is thrown up
+      const sweep = Math.min(1, Math.hypot(D.vx, D.vz) / 260);
+      vy += lift * fall * fall * sweep * 900 * dt;
     }
     const hx = home[k * 2], hz = home[k * 2 + 1];
     if (curlK > 0 && y > WL) {
