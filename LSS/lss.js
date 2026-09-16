@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.73';
+const LSS_BUILD = '44.74';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -46552,9 +46552,11 @@ function _gooKnobs() {
   if (G.gain === undefined)   G.gain = 3.0;      // aAlpha arrives pre-scaled by __splashA (0.20)
   if (G.scale === undefined)  G.scale = 0.5;     // density RT resolution vs the composite target
   if (G.op === undefined)     G.op = 0.55;
+  if (G.thick === undefined)  G.thick = 0.22;   // density above thresh for full opacity
+  if (G.minA === undefined)   G.minA = 0.10;    // opacity of the thinnest surviving sheet
   if (G.lit === undefined)    G.lit = 1.0;       // 0 = flat goopling white, 1 = wet-blob shading
-  if (G.bright === undefined) G.bright = 1.25;
-  if (G.tint === undefined)   G.tint = 0xdceaf4;
+  if (G.bright === undefined) G.bright = 1.05;
+  if (G.tint === undefined)   G.tint = 0xbcd2e2;
   if (G.minPx === undefined)  G.minPx = 4.0;     // density-texel floor on a drop's splat
   return G;
 }
@@ -46639,8 +46641,9 @@ function _gooBuild(w, h) {
       uniforms: {
         tGoo: { value: null }, uTexel: { value: new THREE.Vector2(1 / 960, 1 / 540) },
         uThresh: { value: 0.085 }, uSoft: { value: 0.022 }, uBlur: { value: 2.6 },
-        uOp: { value: 1.0 }, uLit: { value: 1.0 }, uBright: { value: 1.25 },
-        uTint: { value: new THREE.Color(0xdceaf4) },
+        uOp: { value: 0.55 }, uLit: { value: 1.0 }, uBright: { value: 1.05 },
+        uThick: { value: 0.22 }, uMinA: { value: 0.10 },
+        uTint: { value: new THREE.Color(0xbcd2e2) },   // (v44.74) was 0xdceaf4 - near-white, and uBright then drove it over 1.0 into a flat blowout
       },
       vertexShader: [
         'varying vec2 vUv;',
@@ -46651,6 +46654,7 @@ function _gooBuild(w, h) {
         'uniform vec2 uTexel;',
         'uniform float uThresh; uniform float uSoft; uniform float uBlur;',
         'uniform float uOp; uniform float uLit; uniform float uBright;',
+        'uniform float uThick; uniform float uMinA;',
         'uniform vec3 uTint;',
         'varying vec2 vUv;',
         'float D(vec2 uv) { return texture2D(tGoo, uv).a; }',
@@ -46668,7 +46672,8 @@ function _gooBuild(w, h) {
         '  float rim = pow(1.0 - clamp(n.z, 0.0, 1.0), 3.0);',
         '  vec3 col = uTint * (0.85 + 0.35 * smoothstep(uThresh, uThresh + 0.6, d));',
         '  col = mix(col, col * diff * uBright + vec3(rim * 0.30), uLit);',
-        '  gl_FragColor = vec4(col, a * uOp);',
+        '  float thick = clamp((d - uThresh) / max(uThick, 1e-4), 0.0, 1.0);',
+        '  gl_FragColor = vec4(col, a * mix(uMinA, 1.0, thick) * uOp);',
         '}',
       ].join('\n'),
       transparent: true,
@@ -46716,6 +46721,8 @@ function _gooRender(target) {
     qu.uThresh.value = +G.thresh; qu.uSoft.value = Math.max(1e-3, +G.soft);
     qu.uBlur.value = +G.blur; qu.uOp.value = +G.op;
     qu.uLit.value = +G.lit; qu.uBright.value = +G.bright;
+    qu.uThick.value = Math.max(1e-4, (G.thick != null) ? +G.thick : 0.22);
+    qu.uMinA.value = Math.max(0, Math.min(1, (G.minA != null) ? +G.minA : 0.10));
     qu.uTint.value.set(G.tint);
 
     renderer.getClearColor(_gooClearC);
