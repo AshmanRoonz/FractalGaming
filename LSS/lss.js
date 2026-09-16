@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.12';
+const LSS_BUILD = '45.16';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5027,6 +5027,10 @@ function _lssLaunchReady() {
     return (typeof allPeersReady === 'function') ? !!allPeersReady() : false;
   } catch (_) { return false; }
 }
+function _lssBtnLabel(el, text) {
+  if (!el) return;
+  try { el.textContent = text; el.setAttribute('data-label', text); } catch (_) {}
+}
 function _lssRefreshLaunchRow() {
   try {
     const c = document.getElementById('ship-preview-confirm');
@@ -5039,6 +5043,14 @@ function _lssRefreshLaunchRow() {
                    : 'Lock in your ship and pilot perk';
     }
     if (l) {
+      let _midMatch = false;
+      try { _midMatch = !!(game && game.state !== 'select'); } catch (_) {}
+      if (_midMatch) {
+        l.disabled = true;
+        _lssBtnLabel(l, (game && game._rrPickLeft) ? ('STARTING IN ' + game._rrPickLeft) : 'LAUNCH');
+        l.title = 'The round starts on its own';
+        return;
+      }
       const ready = _lssLaunchReady();
       l.disabled = !ready;
       if (!on) l.title = 'Confirm your ship first';
@@ -5048,11 +5060,11 @@ function _lssRefreshLaunchRow() {
               r = (net.myReady ? 1 : 0);
               if (typeof nonJudgePeerEntries === 'function') for (const [, pr] of nonJudgePeerEntries()) if (pr && pr.ready) r++;
         } catch (_) {}
-        l.textContent = t > 1 ? ('LAUNCH  ' + r + '/' + t) : 'LAUNCH';
+        _lssBtnLabel(l, t > 1 ? ('LAUNCH  ' + r + '/' + t) : 'LAUNCH');
         l.title = 'Waiting for the rest of the room to confirm';
         return;
       }
-      l.textContent = 'LAUNCH';
+      _lssBtnLabel(l, 'LAUNCH');
       l.title = 'Take the room in';
     }
   } catch (_) {}
@@ -5921,6 +5933,25 @@ function checkAllLoadoutsReady() {
   }
 }
 
+function _lssCineWindowMs() {
+  let d = 7.0;   // the same default _lssStartSpectatorCinematic uses; window.__cine.dur overrides both
+  try { const CN = (typeof window !== 'undefined' && window.__cine) ? window.__cine : null;
+        if (CN && CN.dur != null) d = +CN.dur; } catch (_) {}
+  if (!(d > 0)) d = 7.0;
+  return d * 1000;
+}
+function _lssArmSyncedCountdown(atMs) {
+  const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  setTimeout(() => {
+    try {
+      if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active &&
+          typeof _lssCompleteSpectatorCinematic === 'function') _lssCompleteSpectatorCinematic();
+    } catch (_) {}
+    try { hideLoadingOverlay(); } catch (_) {}
+    try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+    try { launchCountdown(LSS.SHORT_COUNTDOWN); } catch (_) {}
+  }, Math.max(0, atMs - _now()));
+}
 function scheduleLaunch(launchAt) {
   if (net.launchTimer) clearTimeout(net.launchTimer);
   if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
@@ -5944,12 +5975,16 @@ function scheduleLaunch(launchAt) {
     net.launchScheduledAt = null;
     if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
     _syncMapButtonsDisabled();
-    try { hideLoadingOverlay(); } catch (_) {}
     game._launchCommitted = true;   // (v45.05) the room is going: committed
-    _lssRunCinematicThen(() => {
-      try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-      launchCountdown(LSS.SHORT_COUNTDOWN);
-    });
+    const _cdAt = ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now())
+                  + _lssCineWindowMs();
+    _lssRunCinematicThen(() => {});          // plays inside the window; it no longer owns the 3-2-1
+    let _cineOn = false;
+    try { _cineOn = !!(typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active); } catch (_) {}
+    if (_cineOn) { try { hideLoadingOverlay(); } catch (_) {} }
+    else { try { const _ls = document.getElementById('lss-loading-sub');
+                 if (_ls) _ls.textContent = 'syncing match start'; } catch (_) {} }
+    _lssArmSyncedCountdown(_cdAt);
   }, delay);
 }
 
@@ -57705,7 +57740,8 @@ function updateRoundSystem(dt) {
         try { if (typeof _clipHideSaveBtn === 'function') _clipHideSaveBtn(); } catch (_) {}
         const _rrArenaSecs = (LSS.SHORT_COUNTDOWN || 3) + 1;
         const _rrPickSecs  = Math.max(3, (LSS.LAUNCH_COUNTDOWN || 10) - _rrArenaSecs);
-        launchCountdown((typeof _dur === 'number' && _dur > 0) ? _dur : _rrPickSecs);
+        const _rrDur = (typeof _dur === 'number' && _dur > 0);
+        launchCountdown(_rrDur ? _dur : _rrPickSecs, _rrDur ? null : { silent: true });
         };
         if (_swap && typeof _rrStagedSwap === 'function') {
           _rrStagedSwap(_swap, { world: _rrWorld, wave: _rrWave, warpBeat: _rrWarpBeat,
@@ -62758,7 +62794,7 @@ function _markLocalWarmupReady() {
   let _networked = false;
   try { _networked = !!(typeof net !== 'undefined' && net && net.active); } catch (_) {}
   if (!_networked) { _announce(); return; }
-  const _cap = (typeof window !== 'undefined' && typeof window.__readyCapMs === 'number') ? window.__readyCapMs : 20000;
+  const _cap = (typeof window !== 'undefined' && typeof window.__readyCapMs === 'number') ? window.__readyCapMs : 120000;
   if (typeof _cineWhenSettled === 'function') { try { _cineWhenSettled(_announce, _cap); return; } catch (_) {} }
   _announce();
 }
@@ -62838,13 +62874,22 @@ function _cdClear(owner) {
   const el = document.getElementById('ship-select-countdown');
   if (el) { el.classList.remove('active'); el.classList.remove('fight'); }
 }
+function _rrPickClock(secs) {
+  try {
+    game._rrPickLeft = secs || '';
+    const l = document.getElementById('ship-preview-launch');
+    if (!l) return;
+    _lssBtnLabel(l, secs ? ('STARTING IN ' + secs) : 'LAUNCH');
+  } catch (_) {}
+}
 function _cdRound(n, label) {
   try { if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return; } catch (_) {}
   if (n === 0 || n === 'FIGHT') { _cdPaint('round', 'FIGHT', '', { fight: true, prio: 2, hold: _CDHOLD_FIGHT_MS }); return; }
   try { if (game && game._launchCdOwnsDigits && _launchCountdownRuntime && !_launchCountdownRuntime.launched) return; } catch (_) {}
   _cdPaint('round', String(n), label || '', { hold: _CDHOLD_DIGIT_MS });
 }
-function launchCountdown(duration) {
+function launchCountdown(duration, opts) {
+  const _silent = !!(opts && opts.silent);
   if (_countdownActive) {
     let _stale = true;
     try {
@@ -62858,7 +62903,7 @@ function launchCountdown(duration) {
   }
   _clearLaunchCountdown();
   _countdownActive = true;
-  try { game._launchCdOwnsDigits = true; } catch (_) {}
+  try { game._launchCdOwnsDigits = !_silent; } catch (_) {}
   try { _cdClear(); } catch (_) {}
   try { hideLoadingOverlay(); } catch (_) {}
   const overlay = document.getElementById('ship-select-countdown');
@@ -62867,6 +62912,7 @@ function launchCountdown(duration) {
   if (!overlay || !numEl || !subEl) { _countdownActive = false; try { game._launchCdOwnsDigits = false; } catch (_) {} return; }
 
   function tick(text, sub) {
+    if (_silent) { _rrPickClock(text); return; }
     _cdPaint('launch', text, sub, {});
   }
 
@@ -62889,17 +62935,17 @@ function launchCountdown(duration) {
   }
   _activeLaunchTimers.push(setTimeout(() => {
     tick('3', 'LAUNCH IN');
-    try { playSound('sonar_ping_1'); } catch (e) {}
+    if (!_silent) { try { playSound('sonar_ping_1'); } catch (e) {} }
   }, (START - 3) * 1000));
 
   _activeLaunchTimers.push(setTimeout(() => {
     tick('2', 'LAUNCH IN');
-    try { playSound('sonar_ping_2'); } catch (e) {}
+    if (!_silent) { try { playSound('sonar_ping_2'); } catch (e) {} }
   }, (START - 2) * 1000));
 
   _activeLaunchTimers.push(setTimeout(() => {
     tick('1', 'LAUNCH IN');
-    try { playSound('sonar_ping_3'); } catch (e) {}
+    if (!_silent) { try { playSound('sonar_ping_3'); } catch (e) {} }
   }, (START - 1) * 1000));
 
   function hideLaunchOverlay() {
@@ -62913,8 +62959,8 @@ function launchCountdown(duration) {
     countdownRuntime.launched = true;
     try { _applyStagedRoundShip(); } catch (_) {}
     try { game._launchCdOwnsDigits = false; } catch (_) {}
-    tick('LAUNCH', 'WARP-IN');
-    try { playSound('round_start'); } catch (e) {}
+    if (_silent) { _rrPickClock(''); }
+    else { tick('LAUNCH', 'WARP-IN'); try { playSound('round_start'); } catch (e) {} }
     try { game._rrToneDone = true; } catch (_) {}
     const sel = document.getElementById('ship-select');
     if (sel) {

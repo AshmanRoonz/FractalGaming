@@ -4525,10 +4525,19 @@ body.vr-active #camp-video { display: none !important; }
   #ship-preview-confirm::after {
     content: '✓'; font-size: 13px; letter-spacing: 0;   /* (v45.07) the literal glyph - the CSS hex escape rendered as garbage here */
   }
+  /* (v45.15) ...and the label is now ATTRIBUTE-DRIVEN, because the button stopped being a fixed
+     word: between rounds it carries the pick clock (v45.14) and in a full room it carries the
+     confirm tally ("LAUNCH 2/3"). `font-size: 0` blanks the real text node, so a hardcoded
+     `content` here would have shown a phone LAUNCH through both of those - the same class of bug
+     as v45.06, where a stale `content: 'LAUNCH'` made the CONFIRM button read as a second launch.
+     `data-label` is written beside every textContent write (see _lssBtnLabel); the fallback keeps
+     the button legible if some future path forgets one. */
   #ship-preview-launch { font-size: 0 !important; }
   #ship-preview-launch::after {
-    content: 'LAUNCH'; font-size: 10px; letter-spacing: 1.6px;
+    content: attr(data-label); font-size: 10px; letter-spacing: 1.6px;
   }
+  #ship-preview-launch:not([data-label])::after { content: 'LAUNCH'; }
+  #ship-preview-launch[data-label='']::after { content: 'LAUNCH'; }
   /* (v43.57) A LANDSCAPE PHONE CANNOT HOLD THE PROSE LINES, so it stops pretending it can.
      Measured at 844x390 with the difficulty panel up: the details rail runs 218px tall, and the
      space between the dock stack (ends y=140) and the rail's own bottom anchor (y=286) is 134px.
@@ -6471,7 +6480,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.12';
+const LSS_BUILD = '45.16';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -13745,6 +13754,13 @@ function _lssLaunchReady() {
 }
 // Repaints both buttons from state. Called on every toggle, every peer ready event, and every
 // re-render of the picker - it is cheap and it is the only thing that writes their labels.
+// (v45.15) The launch button's text is written in four places and a landscape phone reads it from
+// `content: attr(data-label)` (the real text node is font-size 0 there). One helper keeps the two in
+// step; every write goes through it.
+function _lssBtnLabel(el, text) {
+  if (!el) return;
+  try { el.textContent = text; el.setAttribute('data-label', text); } catch (_) {}
+}
 function _lssRefreshLaunchRow() {
   try {
     const c = document.getElementById('ship-preview-confirm');
@@ -13757,6 +13773,21 @@ function _lssRefreshLaunchRow() {
                    : 'Lock in your ship and pilot perk';
     }
     if (l) {
+      // ⭐ (v45.13) BETWEEN ROUNDS THERE IS NOTHING TO LAUNCH. Owner: "i noticed two countdowns in
+      // round 2." The between-rounds picker raises itself and runs its OWN countdown
+      // (`_rrCountdown` -> launchCountdown at the foot of it) - its comment even says "between
+      // rounds nobody has to click CONFIRM". But v45.06 left `_ssConfirmed` set from round 1 (it
+      // only clears at returnToRootMenu), so that picker came up with LAUNCH lit and inviting a
+      // press, and a press there is `commitLoadout` - a SECOND countdown on top of the round's own.
+      // Off whenever this is not a fresh launch from the menu.
+      let _midMatch = false;
+      try { _midMatch = !!(game && game.state !== 'select'); } catch (_) {}
+      if (_midMatch) {
+        l.disabled = true;
+        _lssBtnLabel(l, (game && game._rrPickLeft) ? ('STARTING IN ' + game._rrPickLeft) : 'LAUNCH');
+        l.title = 'The round starts on its own';
+        return;
+      }
       const ready = _lssLaunchReady();
       l.disabled = !ready;
       if (!on) l.title = 'Confirm your ship first';
@@ -13766,11 +13797,11 @@ function _lssRefreshLaunchRow() {
               r = (net.myReady ? 1 : 0);
               if (typeof nonJudgePeerEntries === 'function') for (const [, pr] of nonJudgePeerEntries()) if (pr && pr.ready) r++;
         } catch (_) {}
-        l.textContent = t > 1 ? ('LAUNCH  ' + r + '/' + t) : 'LAUNCH';
+        _lssBtnLabel(l, t > 1 ? ('LAUNCH  ' + r + '/' + t) : 'LAUNCH');
         l.title = 'Waiting for the rest of the room to confirm';
         return;
       }
-      l.textContent = 'LAUNCH';
+      _lssBtnLabel(l, 'LAUNCH');
       l.title = 'Take the room in';
     }
   } catch (_) {}
@@ -15197,6 +15228,52 @@ function checkAllLoadoutsReady() {
   // Non-proposers wait for the launch_at event in handleNetEvent.
 }
 
+// ⭐⭐⭐ (v45.16) THE ROOM AGREES ON THE COUNTDOWN, NOT ON THE CINEMATIC. Owner, after v45.12:
+//   "they weren't in sync for that countdown before the first round" - PC and phone.
+// `launch_at` below is a genuine clock handshake and it works: every peer fires its launch timer on
+// the same wall-clock instant. But what that instant STARTED was the cinematic, and the 3-2-1 was
+// chained to the cinematic's COMPLETION - so the synchronised moment was seven seconds upstream of
+// the thing that has to be in sync, with a per-device flight in between. Everything that makes one
+// device's flight differ from another's lands straight on the countdown:
+//   - `_lssStartSpectatorCinematic` has THREE ways to decline - no `sdfRoomData`, no ships on the
+//     player's team, or a `_cyberCinematic` that returns false - and `_lssRunCinematicThen` then
+//     calls its callback IMMEDIATELY. That device counts down a full cinematic-length EARLY. It is
+//     world state that decides, so a phone and a PC can genuinely disagree about it.
+//   - completion is detected on the frame where elapsed passes duration, so a device at 10 fps
+//     lands it up to a frame late, and a device that stalls mid-flight lands it much later.
+// So the countdown no longer waits for the flight. It is armed for `launchAt + one cinematic` on
+// the peer's OWN monotonic clock the moment the launch timer fires, and the flight plays inside
+// that window. Whatever the cinematic does - runs, overruns, never starts - the 3-2-1 lands where
+// the room agreed. An overrunning flight is cut at the deadline (the countdown is what matters);
+// a flight that never started holds the loading curtain instead of staring at a parked ship.
+// (!) SOLO IS DELIBERATELY NOT CHANGED. The no-peers fallback above still chains to the cinematic:
+//     there is nobody to be out of step with, and when the flight declines there, starting at once
+//     is the RIGHT answer rather than a seven-second wait for an agreement with no one.
+// (!) RESIDUAL. This removes the cinematic from the error budget; it does not fix SYSTEM CLOCK SKEW
+//     between two devices, which is what `launchAt` is measured in (Date.now). Two tabs on one
+//     machine share a clock exactly - which is why this never showed up in a two-tab test - while a
+//     phone and a PC agree only as well as their NTP does. If a visible gap survives this, that is
+//     the next thing to measure, and the fix is a ping/pong offset estimate per peer.
+function _lssCineWindowMs() {
+  let d = 7.0;   // the same default _lssStartSpectatorCinematic uses; window.__cine.dur overrides both
+  try { const CN = (typeof window !== 'undefined' && window.__cine) ? window.__cine : null;
+        if (CN && CN.dur != null) d = +CN.dur; } catch (_) {}
+  if (!(d > 0)) d = 7.0;
+  return d * 1000;
+}
+function _lssArmSyncedCountdown(atMs) {
+  const _now = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+  setTimeout(() => {
+    // Cut an overrunning flight rather than let it push the countdown.
+    try {
+      if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active &&
+          typeof _lssCompleteSpectatorCinematic === 'function') _lssCompleteSpectatorCinematic();
+    } catch (_) {}
+    try { hideLoadingOverlay(); } catch (_) {}
+    try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
+    try { launchCountdown(LSS.SHORT_COUNTDOWN); } catch (_) {}
+  }, Math.max(0, atMs - _now()));
+}
 function scheduleLaunch(launchAt) {
   if (net.launchTimer) clearTimeout(net.launchTimer);
   if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
@@ -15236,12 +15313,21 @@ function scheduleLaunch(launchAt) {
     net.launchScheduledAt = null;
     if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
     _syncMapButtonsDisabled();
-    try { hideLoadingOverlay(); } catch (_) {}
     game._launchCommitted = true;   // (v45.05) the room is going: committed
-    _lssRunCinematicThen(() => {
-      try { _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN); } catch (_) {}
-      launchCountdown(LSS.SHORT_COUNTDOWN);
-    });
+    // (v45.16) Deadline first, from THIS peer's own clock at the shared launch instant, so nothing
+    // the flight does can move it. See the block above scheduleLaunch.
+    const _cdAt = ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now())
+                  + _lssCineWindowMs();
+    _lssRunCinematicThen(() => {});          // plays inside the window; it no longer owns the 3-2-1
+    // The curtain comes down when there is a flight to show. When the cinematic declined, holding it
+    // is what the player should see for the wait - not a parked ship and a still camera. Either way
+    // launchCountdown hides it at the deadline, so this cannot strand anyone behind it.
+    let _cineOn = false;
+    try { _cineOn = !!(typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active); } catch (_) {}
+    if (_cineOn) { try { hideLoadingOverlay(); } catch (_) {} }
+    else { try { const _ls = document.getElementById('lss-loading-sub');
+                 if (_ls) _ls.textContent = 'syncing match start'; } catch (_) {} }
+    _lssArmSyncedCountdown(_cdAt);
   }, delay);
 }
 
@@ -90147,7 +90233,11 @@ function updateRoundSystem(dt) {
         // number, so splitting it would strand the traverse mid-countdown.
         const _rrArenaSecs = (LSS.SHORT_COUNTDOWN || 3) + 1;
         const _rrPickSecs  = Math.max(3, (LSS.LAUNCH_COUNTDOWN || 10) - _rrArenaSecs);
-        launchCountdown((typeof _dur === 'number' && _dur > 0) ? _dur : _rrPickSecs);
+        // (v45.14) The plain between-rounds pick window runs SILENT so the arena's ROUND N 3-2-1 is
+        // the only countdown; a traverse's explicit `_dur` keeps its digits, because it has no arena
+        // countdown behind it. See the block above launchCountdown.
+        const _rrDur = (typeof _dur === 'number' && _dur > 0);
+        launchCountdown(_rrDur ? _dur : _rrPickSecs, _rrDur ? null : { silent: true });
         };
         // ---- run them ----
         if (_swap && typeof _rrStagedSwap === 'function') {
@@ -97424,7 +97514,16 @@ function _markLocalWarmupReady() {
   let _networked = false;
   try { _networked = !!(typeof net !== 'undefined' && net && net.active); } catch (_) {}
   if (!_networked) { _announce(); return; }
-  const _cap = (typeof window !== 'undefined' && typeof window.__readyCapMs === 'number') ? window.__readyCapMs : 20000;
+  // ⚠⚠ (v45.13) THE CAP WAS TUNED WHERE IT COULD NEVER FIRE. Owner, after v45.12: "they weren't in
+  //   sync for that countdown before the first round" - on a PC + PHONE room, which is the case the
+  //   20 s I first picked does not survive. Two desktop tabs settle in well under it, so the cap
+  //   never fired in any test and the fix looked total; a phone building a world can pass 20 s
+  //   easily, and when it does `_cineWhenSettled` flies anyway and announces ready WHILE STILL
+  //   LOADING - which is precisely the bug v45.12 set out to remove, just harder to hit.
+  // The cap exists so one wedged peer cannot hold the room forever, not to bound honest load time.
+  // 120 s is past any real device's world build; a peer still unsettled after two minutes is broken,
+  // not slow, and the room is better off launching without it.
+  const _cap = (typeof window !== 'undefined' && typeof window.__readyCapMs === 'number') ? window.__readyCapMs : 120000;
   if (typeof _cineWhenSettled === 'function') { try { _cineWhenSettled(_announce, _cap); return; } catch (_) {} }
   _announce();
 }
@@ -97566,6 +97665,18 @@ function _cdClear(owner) {
   const el = document.getElementById('ship-select-countdown');
   if (el) { el.classList.remove('active'); el.classList.remove('fight'); }
 }
+// (v45.14) Where the between-rounds seconds went. The big digits are the round's now (see the
+// silent mode in launchCountdown), so the pick window shows its remaining time on the LAUNCH button
+// - which v45.13 already parks as disabled mid-match, so nothing is being talked over. Empty text
+// restores the plain label.
+function _rrPickClock(secs) {
+  try {
+    game._rrPickLeft = secs || '';
+    const l = document.getElementById('ship-preview-launch');
+    if (!l) return;
+    _lssBtnLabel(l, secs ? ('STARTING IN ' + secs) : 'LAUNCH');
+  } catch (_) {}
+}
 // The ROUND side. Overlays.countdown() is a straight delegate to this, kept here beside
 // launchCountdown so both owners and the arbitration rule read as one thing.
 function _cdRound(n, label) {
@@ -97582,7 +97693,29 @@ function _cdRound(n, label) {
   try { if (game && game._launchCdOwnsDigits && _launchCountdownRuntime && !_launchCountdownRuntime.launched) return; } catch (_) {}
   _cdPaint('round', String(n), label || '', { hold: _CDHOLD_DIGIT_MS });
 }
-function launchCountdown(duration) {
+// ⭐ (v45.14) `opts.silent` runs the whole ticker with NO DIGITS AND NO PINGS - the schedule, the
+//   finishLaunch handoff and the ownership bookkeeping are untouched, only the painting stops.
+//   Owner: "i noticed two countdowns in round 2". Measured, round 2, solo, one arena:
+//       t 166.7-171.9  picker up,  digits 6 5 4 3 2 1  sub "LAUNCH IN"
+//       t 172.9        LAUNCH / WARP-IN, picker closes
+//       t 173.7-175.9  arena,      digits 3 2 1        sub "ROUND 2"
+//       t 176.9        FIGHT
+//   ...against round 1, which paints 3 2 1 -> FIGHT and nothing else. So round 2 counts down twice,
+//   and the second run repeats the same three digits. This is v36.36's two-phase split doing exactly
+//   what it says (picker digits then arena digits) - it only became WRONG when the launch button
+//   split gave round 1 a single SHORT_COUNTDOWN run to be inconsistent with, and it contradicts the
+//   spec the owner set for this whole redesign: "loading screen, then the cinematic and zoom around
+//   into your ship, then 3, 2, 1 launch - nothing else in between is seen."
+//   The pick window still has to EXIST (it is when ships can be swapped) and finishLaunch still has
+//   to fire at t=6; it just must not narrate. So it runs silent and the arena's ROUND N 3-2-1 is the
+//   only countdown in the round, same as round 1.
+// (!) The seconds are not lost, they move: the silent tick writes them into the LAUNCH button, which
+//     is inert mid-match anyway (v45.13), so the picker still shows how long is left to choose.
+// (!) A STAGED WORLD-SWAP TRAVERSE IS NOT SILENCED. It passes an explicit `_dur` and _rrStagedSwap
+//     anchors warmupTimer to that SAME number, so its picker countdown is the whole countdown -
+//     there is no arena 3-2-1 behind it to take over, and silencing it would leave none at all.
+function launchCountdown(duration, opts) {
+  const _silent = !!(opts && opts.silent);
   // ⚠ (v40.68) THIS GUARD COULD KILL EVERY LATER COUNTDOWN, ON BOTH TICKERS. Owner: the countdown is
   // missing on the phone, on the laptop ("it missed the 3") and on the desktop - but a FRESH LOAD is
   // always fine, which is the signature of latched state, not of rendering. Here is the latch:
@@ -97621,7 +97754,9 @@ function launchCountdown(duration) {
   // (v40.57) The flag SURVIVES the merge and is still the ownership signal - see the block above
   // _cdPaint for why it is not _countdownActive (that one lives 700 ms longer and would eat the
   // between-rounds "3": the picker hands over at t=6, the arena's 3-crossing is at t=7).
-  try { game._launchCdOwnsDigits = true; } catch (_) {}
+  // (v45.14) ...but only when this ticker is actually PAINTING. A silent run claims nothing, so the
+  // round clock is free the instant it wants the screen instead of at the t=6 handback below.
+  try { game._launchCdOwnsDigits = !_silent; } catch (_) {}
   // (v40.57) Take the one countdown outright. This replaces Overlays.endCountdown(), which existed
   // only to lift the body.lss-round-cd hold - same job, one element: drop any hold still standing
   // (a FIGHT's 1.6 s included) so this ticker's first digit can never be refused below.
@@ -97650,6 +97785,7 @@ function launchCountdown(duration) {
   // overlay / numEl / subEl above stay as the missing-element bail's evidence; the writes are
   // _cdPaint's, so exactly one place in the file knows how this element is painted.
   function tick(text, sub) {
+    if (_silent) { _rrPickClock(text); return; }
     _cdPaint('launch', text, sub, {});
   }
 
@@ -97683,17 +97819,17 @@ function launchCountdown(duration) {
   // Final three: pings on 3, 2, 1.
   _activeLaunchTimers.push(setTimeout(() => {
     tick('3', 'LAUNCH IN');
-    try { playSound('sonar_ping_1'); } catch (e) {}
+    if (!_silent) { try { playSound('sonar_ping_1'); } catch (e) {} }
   }, (START - 3) * 1000));
 
   _activeLaunchTimers.push(setTimeout(() => {
     tick('2', 'LAUNCH IN');
-    try { playSound('sonar_ping_2'); } catch (e) {}
+    if (!_silent) { try { playSound('sonar_ping_2'); } catch (e) {} }
   }, (START - 2) * 1000));
 
   _activeLaunchTimers.push(setTimeout(() => {
     tick('1', 'LAUNCH IN');
-    try { playSound('sonar_ping_3'); } catch (e) {}
+    if (!_silent) { try { playSound('sonar_ping_3'); } catch (e) {} }
   }, (START - 1) * 1000));
 
   function hideLaunchOverlay() {
@@ -97734,8 +97870,10 @@ function launchCountdown(duration) {
     // The one visible difference from the old hide: LAUNCH can be on screen for up to a frame
     // before FIGHT paints over it, instead of vanishing the instant FIGHT appeared.
     try { game._launchCdOwnsDigits = false; } catch (_) {}
-    tick('LAUNCH', 'WARP-IN');
-    try { playSound('round_start'); } catch (e) {}
+    // (v45.14) Silent: no LAUNCH word and no sting - the arena's 3-2-1 is three seconds away and
+    // owns the beat. `round_start` still plays on a fresh launch and on a traverse.
+    if (_silent) { _rrPickClock(''); }
+    else { tick('LAUNCH', 'WARP-IN'); try { playSound('round_start'); } catch (e) {} }
     // (v36.36) Tell the round system the launch tone is spent. It used to infer
     // that from "#ship-select was still .active at the warmup->playing flip",
     // which stopped being true once the between-rounds picker started clearing
