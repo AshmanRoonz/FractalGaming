@@ -6344,7 +6344,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.71';
+const LSS_BUILD = '44.72';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -32377,6 +32377,9 @@ function _wgooKnobs() {
   if (G.buoy === undefined)    G.buoy = 26;     // restoring stiffness under the surface
   if (G.airDrag === undefined) G.airDrag = 0.995;
   if (G.rise === undefined)    G.rise = 70;     // (v44.68) units above WL over which pressure fades out
+  if (G.curl === undefined)    G.curl = 0.9;    // (v44.72) forward shear per unit of height - the overturn
+  if (G.splashV === undefined)   G.splashV = 60;   // (v44.72) downward speed a landing lip needs to splash
+  if (G.splashMax === undefined) G.splashMax = 5;  // crossings allowed to splash per frame
   return G;
 }
 function _wgooDispose() {
@@ -32392,6 +32395,7 @@ function _wgooBuild(N, span, WL, cx, cz) {
   const V = N * N;
   const pos = new Float32Array(V * 3);
   const vel = new Float32Array(V * 3);
+  const py = new Float32Array(V);   // (v44.72) last frame's height, for the landing test
   const home = new Float32Array(V * 2);
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
@@ -32467,7 +32471,8 @@ function _wgooBuild(N, span, WL, cx, cz) {
   mesh.matrixAutoUpdate = false;
   mesh.renderOrder = 0;
   scene.add(mesh);
-  Object.assign(_WGOO, { geo, mesh, mat, pos, vel, home, N, span, cell, cx, cz, built: true });
+  py.fill(WL);
+  Object.assign(_WGOO, { geo, mesh, mat, pos, vel, home, py, N, span, cell, cx, cz, built: true });
 }
 // The patch SCROLLS with the hull instead of being rebuilt, the same way the terrain clipmap does.
 // When the centre moves a whole cell, the home grid shifts by that many cells and only the rows and
@@ -32532,6 +32537,7 @@ function _wgooTick(dt) {
   const reform = Math.max(0, +G.reform || 0);
   const push = +G.push || 0, swirl = +G.swirl || 0, lift = +G.lift || 0;
   const gravK = +G.grav || 520, buoyK = +G.buoy || 26;
+  const curlK = Math.max(0, (G.curl != null) ? +G.curl : 0.9);
   const airK = Math.pow(Math.max(0.5, Math.min(0.9999, +G.airDrag || 0.995)), dt * 60);
   const V = N * N;
   for (let k = 0; k < V; k++) {
@@ -32551,6 +32557,27 @@ function _wgooTick(dt) {
       vy += lift * push * fall * fall * dt;                  // the rim is thrown up
     }
     const hx = home[k * 2], hz = home[k * 2 + 1];
+    // ⭐⭐ (v44.72) THE CREST OUTRUNS ITS OWN FOOT, WHICH IS WHAT CURLING IS.
+    // Owner: "it doesn't need to break off... it just needs to curl and then curl back in".
+    // That is a FOLD, not a topology change - vertices pass over each other and come back - and a
+    // grid mesh can do a fold perfectly well. Breaking OFF is the part that would have needed free
+    // particles, and it is the part not being asked for, so the patch stays a mesh and gains one
+    // term instead of being rewritten.
+    // A real wave overturns because of SHEAR: orbital velocity increases with height, so the water
+    // at the top is moving forward faster than the water underneath it, runs out past its own base
+    // and topples. So the forward drive here scales with height above the waterline. The direction
+    // is the particle's own displacement from home, which is a free, persistent "outward" that keeps
+    // pointing the right way long after the hull that made it has gone - the crest keeps curling as
+    // it travels instead of only while it is inside the displacer's radius.
+    // Coming back in is then free: gravity brings the overturned lip down and `reform` walks it home.
+    if (curlK > 0 && y > WL) {
+      const ox = x - hx, oz = z - hz;
+      const ol = Math.sqrt(ox * ox + oz * oz);
+      if (ol > 1e-3) {
+        const ck = curlK * (y - WL) * dt / ol;
+        vx += ox * ck; vz += oz * ck;
+      }
+    }
     vx += (hx - x) * reform * dt;
     vz += (hz - z) * reform * dt;
     // ⭐ (v44.68) Y IS A REAL COORDINATE NOW. Owner: "to make 2D displacement 3D, isn't it just a
@@ -32627,6 +32654,35 @@ function _wgooTick(dt) {
         const sc = vmax / Math.sqrt(sp2);
         vel[k3] *= sc; vel[k3 + 1] *= sc; vel[k3 + 2] *= sc;
       }
+    }
+  }
+  // ⭐ (v44.72) WHEN THE CURL LANDS, IT SPLASHES. Owner: "and we can use the splash when it does".
+  // A vertex that was airborne and has just crossed back down through the waterline carrying real
+  // downward speed IS the plunging lip hitting the water - so it seeds the ordinary splash emitter
+  // at that spot, with its own velocity. That hands the impact straight to the drop system, which
+  // since v44.69/44.70 coheres and since v44.71 carries a surface, so a breaking crest throws
+  // spray that blobs instead of rice.
+  // Budgeted: `splashMax` crossings a frame and the shared particle-room check, because a whole
+  // curling ring can land within a few frames and would otherwise flood the pool in one go.
+  {
+    const py = _WGOO.py;
+    const minV = (G.splashV != null) ? +G.splashV : 60;
+    let budget = (G.splashMax != null) ? (G.splashMax | 0) : 5;
+    const room = (typeof _swFxRoom === 'function') ? _swFxRoom() : 999;
+    const fpS = (typeof _swShipFootprint === 'function') ? _swShipFootprint() : null;
+    for (let k = 0; k < V && budget > 0; k++) {
+      const k3 = k * 3, y = pos[k3 + 1], vy = vel[k3 + 1];
+      if (py[k] > WL + 6 && y <= WL + 1 && vy < -minV && room > 30) {
+        budget--;
+        if (typeof _swSpawnSplashV === 'function' && fpS && !game._swSubmerged) {
+          try {
+            _swSpawnSplashV(pos[k3], WL, pos[k3 + 2],
+                            { x: vel[k3], y: vy, z: vel[k3 + 2] },
+                            fpS.BEAM * 0.30, Math.min(1, -vy / 260), _swDeadrise(fpS));
+          } catch (_) {}
+        }
+      }
+      py[k] = y;
     }
   }
   _WGOO.geo.attributes.position.needsUpdate = true;

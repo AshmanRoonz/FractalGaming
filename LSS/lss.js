@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.71';
+const LSS_BUILD = '44.72';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18090,6 +18090,9 @@ function _wgooKnobs() {
   if (G.buoy === undefined)    G.buoy = 26;     // restoring stiffness under the surface
   if (G.airDrag === undefined) G.airDrag = 0.995;
   if (G.rise === undefined)    G.rise = 70;     // (v44.68) units above WL over which pressure fades out
+  if (G.curl === undefined)    G.curl = 0.9;    // (v44.72) forward shear per unit of height - the overturn
+  if (G.splashV === undefined)   G.splashV = 60;   // (v44.72) downward speed a landing lip needs to splash
+  if (G.splashMax === undefined) G.splashMax = 5;  // crossings allowed to splash per frame
   return G;
 }
 function _wgooDispose() {
@@ -18105,6 +18108,7 @@ function _wgooBuild(N, span, WL, cx, cz) {
   const V = N * N;
   const pos = new Float32Array(V * 3);
   const vel = new Float32Array(V * 3);
+  const py = new Float32Array(V);   // (v44.72) last frame's height, for the landing test
   const home = new Float32Array(V * 2);
   for (let j = 0; j < N; j++) {
     for (let i = 0; i < N; i++) {
@@ -18172,7 +18176,8 @@ function _wgooBuild(N, span, WL, cx, cz) {
   mesh.matrixAutoUpdate = false;
   mesh.renderOrder = 0;
   scene.add(mesh);
-  Object.assign(_WGOO, { geo, mesh, mat, pos, vel, home, N, span, cell, cx, cz, built: true });
+  py.fill(WL);
+  Object.assign(_WGOO, { geo, mesh, mat, pos, vel, home, py, N, span, cell, cx, cz, built: true });
 }
 function _wgooRecentre(cx, cz, WL) {
   const N = _WGOO.N, cell = _WGOO.cell;
@@ -18224,6 +18229,7 @@ function _wgooTick(dt) {
   const reform = Math.max(0, +G.reform || 0);
   const push = +G.push || 0, swirl = +G.swirl || 0, lift = +G.lift || 0;
   const gravK = +G.grav || 520, buoyK = +G.buoy || 26;
+  const curlK = Math.max(0, (G.curl != null) ? +G.curl : 0.9);
   const airK = Math.pow(Math.max(0.5, Math.min(0.9999, +G.airDrag || 0.995)), dt * 60);
   const V = N * N;
   for (let k = 0; k < V; k++) {
@@ -18243,6 +18249,14 @@ function _wgooTick(dt) {
       vy += lift * push * fall * fall * dt;                  // the rim is thrown up
     }
     const hx = home[k * 2], hz = home[k * 2 + 1];
+    if (curlK > 0 && y > WL) {
+      const ox = x - hx, oz = z - hz;
+      const ol = Math.sqrt(ox * ox + oz * oz);
+      if (ol > 1e-3) {
+        const ck = curlK * (y - WL) * dt / ol;
+        vx += ox * ck; vz += oz * ck;
+      }
+    }
     vx += (hx - x) * reform * dt;
     vz += (hz - z) * reform * dt;
     if (y > WL) vy -= gravK * dt;                    // airborne: real gravity
@@ -18279,6 +18293,27 @@ function _wgooTick(dt) {
         const sc = vmax / Math.sqrt(sp2);
         vel[k3] *= sc; vel[k3 + 1] *= sc; vel[k3 + 2] *= sc;
       }
+    }
+  }
+  {
+    const py = _WGOO.py;
+    const minV = (G.splashV != null) ? +G.splashV : 60;
+    let budget = (G.splashMax != null) ? (G.splashMax | 0) : 5;
+    const room = (typeof _swFxRoom === 'function') ? _swFxRoom() : 999;
+    const fpS = (typeof _swShipFootprint === 'function') ? _swShipFootprint() : null;
+    for (let k = 0; k < V && budget > 0; k++) {
+      const k3 = k * 3, y = pos[k3 + 1], vy = vel[k3 + 1];
+      if (py[k] > WL + 6 && y <= WL + 1 && vy < -minV && room > 30) {
+        budget--;
+        if (typeof _swSpawnSplashV === 'function' && fpS && !game._swSubmerged) {
+          try {
+            _swSpawnSplashV(pos[k3], WL, pos[k3 + 2],
+                            { x: vel[k3], y: vy, z: vel[k3 + 2] },
+                            fpS.BEAM * 0.30, Math.min(1, -vy / 260), _swDeadrise(fpS));
+          } catch (_) {}
+        }
+      }
+      py[k] = y;
     }
   }
   _WGOO.geo.attributes.position.needsUpdate = true;
