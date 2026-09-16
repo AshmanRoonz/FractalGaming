@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.68';
+const LSS_BUILD = '44.69';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -46547,7 +46547,77 @@ function cullOldestParticle() {
 
 function _pVel(x, y, z) { return { x: x || 0, y: y || 0, z: z || 0 }; }
 
+const _COH = { keys: new Int32Array(0), next: new Int32Array(0), heads: new Map(), idx: [] };
+function _cohKnobs() {
+  const C = window.__coh || (window.__coh = {});
+  if (C.on === undefined)  C.on = 0;
+  if (C.h === undefined)   C.h = 26;     // cohesion radius, world units
+  if (C.k === undefined)   C.k = 190;    // pull toward the neighbourhood
+  if (C.r0 === undefined)  C.r0 = 9;     // below this, drops push apart instead
+  if (C.rep === undefined) C.rep = 320;  // how hard
+  if (C.max === undefined) C.max = 1200; // drops past this are left alone (cost ceiling)
+  return C;
+}
+function _cohTick(dt) {
+  let C; try { C = _cohKnobs(); } catch (_) { return; }
+  if (!C.on || !game || !game.particles) return;
+  const h = Math.max(2, +C.h || 26), h2 = h * h;
+  const r0 = Math.max(0.5, +C.r0 || 9), r02 = r0 * r0;
+  const K = +C.k || 0, REP = +C.rep || 0;
+  const cap = Math.max(0, C.max | 0);
+  const idx = _COH.idx; idx.length = 0;
+  const parts = game.particles;
+  for (let i = 0; i < parts.length && idx.length < cap; i++) if (parts[i].splash) idx.push(i);
+  const n = idx.length;
+  if (n < 2) return;
+  const heads = _COH.heads; heads.clear();
+  if (_COH.next.length < n) _COH.next = new Int32Array(Math.max(n, 2048));
+  const next = _COH.next;
+  const inv = 1 / h;
+  const key = (x, y, z) => (Math.floor(x * inv) * 73856093) ^ (Math.floor(y * inv) * 19349663) ^ (Math.floor(z * inv) * 83492791);
+  for (let a = 0; a < n; a++) {
+    const pp = parts[idx[a]].position;
+    const kk = key(pp.x, pp.y, pp.z);
+    const prev = heads.get(kk);
+    next[a] = (prev === undefined) ? -1 : prev;
+    heads.set(kk, a);
+  }
+  for (let a = 0; a < n; a++) {
+    const pa = parts[idx[a]], A = pa.position;
+    let cx = 0, cy = 0, cz = 0, cn = 0, rx = 0, ry = 0, rz = 0;
+    const bx = Math.floor(A.x * inv), by = Math.floor(A.y * inv), bz = Math.floor(A.z * inv);
+    for (let ox = -1; ox <= 1; ox++) for (let oy = -1; oy <= 1; oy++) for (let oz = -1; oz <= 1; oz++) {
+      const kk = ((bx + ox) * 73856093) ^ ((by + oy) * 19349663) ^ ((bz + oz) * 83492791);
+      let b = heads.get(kk);
+      if (b === undefined) continue;
+      while (b !== -1) {
+        if (b !== a) {
+          const B = parts[idx[b]].position;
+          const dx = B.x - A.x, dy = B.y - A.y, dz = B.z - A.z;
+          const d2 = dx * dx + dy * dy + dz * dz;
+          if (d2 < h2 && d2 > 1e-6) {
+            if (d2 < r02) {
+              const d = Math.sqrt(d2), f = (1 - d / r0) / d;
+              rx -= dx * f; ry -= dy * f; rz -= dz * f;
+            } else {
+              const w = 1 - Math.sqrt(d2) / h;   // linear kernel; smooth enough for a read
+              cx += dx * w; cy += dy * w; cz += dz * w; cn += w;
+            }
+          }
+        }
+        b = next[b];
+      }
+    }
+    const v = pa.velocity;
+    if (cn > 0) { const s = K * dt / cn; v.x += cx * s; v.y += cy * s; v.z += cz * s; }
+    if (rx || ry || rz) { const s = REP * dt; v.x += rx * s; v.y += ry * s; v.z += rz * s; }
+  }
+}
 function updateParticles(dt) {
+  try { _cohTick(dt); } catch (e) {
+    if (!_COH._warned) { _COH._warned = true; try { console.warn('[coh] disabled after an error:', e); } catch (_) {} }
+    try { window.__coh.on = 0; } catch (_) {}
+  }
   const _vrTier = (typeof getVRThrottleTier === 'function') ? getVRThrottleTier() : getVRPerfTier();
   if (_vrTier >= 3) {
     let _k = 0;
