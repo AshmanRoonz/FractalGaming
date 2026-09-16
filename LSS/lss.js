@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.32';
+const LSS_BUILD = '45.34';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2412,6 +2412,7 @@ async function joinRoom() {
           const _hdu = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
           net.sendEvent({ type: 'hello',
             inRoom: (net.roomJoinedAt ? Math.round(Math.max(0, performance.now() - net.roomJoinedAt)) : 0),
+            ship: (typeof game !== 'undefined' && game && game._ssKey) ? game._ssKey : undefined,
             discord_id:     _hdu ? _hdu.id : undefined,
             discord_name:   _hdu ? (_hdu.global_name || _hdu.username) : undefined,
             discord_avatar: _hdu ? _hdu.avatar : undefined }, peerId);
@@ -2448,6 +2449,7 @@ async function joinRoom() {
             seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
             mst: (typeof net.matchStartedAt === 'number') ? net.matchStartedAt : undefined,   // (v38.60)
             mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic' }, peerId);
+          if (typeof _lssBotDealAnnounce === 'function') _lssBotDealAnnounce(peerId);
         } catch (_) {}
       }
     });
@@ -2608,6 +2610,8 @@ function _setEliminationBots(on, broadcast) {
     } catch (_) {}
   }
   try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
+  try { if (typeof _lssBotDealAnnounce === 'function') _lssBotDealAnnounce(); } catch (_) {}
+  try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
 }
 async function startElimination() {
   LSS.MODE = _lssRoomModeChoose('classic');
@@ -5188,6 +5192,7 @@ function enterShipSelect() {
   try { if (typeof _setSkinPanelOpen === 'function') _setSkinPanelOpen(false); } catch (_) {}
   buildShipSelect();
   buildMapSelector();
+  try { if (typeof _lssBotDealPrep === 'function') _lssBotDealPrep(); } catch (_) {}
   updateTeammatesStrip();
   try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
 }
@@ -6846,6 +6851,15 @@ function handleNetEvent(evt, fromPeerId) {
     } catch (_) {}
     return;
   }
+  if (evt.type === 'ship_pick') {
+    const peer = net.peers.get(fromPeerId);
+    if (peer) {
+      peer.pickShip = (typeof evt.ship === 'string' &&
+                       Object.prototype.hasOwnProperty.call(LOADOUTS, evt.ship)) ? evt.ship : null;
+      try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
+    }
+    return;
+  }
   if (evt.type === 'ready') {
     const peer = net.peers.get(fromPeerId);
     if (peer) {
@@ -6856,6 +6870,26 @@ function handleNetEvent(evt, fromPeerId) {
       try { if (typeof _lssRefreshLaunchRow === 'function') _lssRefreshLaunchRow(); } catch (_) {}   // (v45.06) the last confirm lights LAUNCH
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     }
+    return;
+  }
+  if (evt.type === 'bot_deal') {
+    try {
+      if (typeof _botAuthority === 'function' && _botAuthority()) {
+        if (!net._botDealFixT) net._botDealFixT = {};
+        const _now = Date.now();
+        if (!(net._botDealFixT[fromPeerId] > _now - 3000)) {
+          net._botDealFixT[fromPeerId] = _now;
+          _lssBotDealAnnounce(fromPeerId);
+        }
+        return;
+      }
+      if (net.openSoloHostId && fromPeerId !== net.openSoloHostId) return;
+      const _ok = (k) => typeof k === 'string' && Object.prototype.hasOwnProperty.call(LOADOUTS, k);
+      if (!game._botShipDeal) game._botShipDeal = { enemy: [], friendly: [] };
+      if (Array.isArray(evt.e)) game._botShipDeal.enemy = evt.e.slice(0, 3).filter(_ok);
+      if (Array.isArray(evt.f)) game._botShipDeal.friendly = evt.f.slice(0, 2).filter(_ok);
+      if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
+    } catch (_) {}
     return;
   }
   if (evt.type === 'team_pick') {
@@ -7206,6 +7240,9 @@ function handleNetEvent(evt, fromPeerId) {
         peer.inRoom = evt.inRoom;
         peer.inRoomAt = (typeof performance !== 'undefined') ? performance.now() : 0;
       }
+      if (typeof evt.ship === 'string' && Object.prototype.hasOwnProperty.call(LOADOUTS, evt.ship)) {
+        peer.pickShip = evt.ship;
+      }
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     }
     return;
@@ -7221,6 +7258,7 @@ function handleNetEvent(evt, fromPeerId) {
     net.solo = false;
     game.eliminationBots = true;
     try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
+    try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     if (evt.seed != null) net.worldSeed = evt.seed >>> 0;
     if (typeof evt.mst === 'number' && isFinite(evt.mst)) net.matchStartedAt = evt.mst;   // (v38.60) shared match id
     try { if (net._decreedMode && evt.mode && evt.mode !== net._decreedMode) {
@@ -7254,6 +7292,7 @@ function handleNetEvent(evt, fromPeerId) {
     net.openSoloHostId = null;
     game.eliminationBots = false;
     try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
+    try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}   // (v45.33) the bot cards go with them
     return;
   }
   if (evt.type === 'dropin_state') {
@@ -17628,6 +17667,23 @@ function _hzPortalsFrame(dt) {
 }
 if (typeof window !== 'undefined') window.__cavern = { st: _HZ_CAVERN, enter: (i) => { const p = _HZ_CAVERN.portals && _HZ_CAVERN.portals[i]; if (p) _hzEnterCavern(p); } };
 if (typeof window !== 'undefined') window.__dbg = {
+  bots: (side, idx, dir) => {
+    try {
+      if (side) _lssBotCycleShip(side, idx | 0, (dir < 0) ? -1 : 1);
+      return {
+        deal: game._botShipDeal ? JSON.parse(JSON.stringify(game._botShipDeal)) : null,
+        seats: _lssBotSeats(),
+        mine: _lssBotDealMine(), editable: _lssBotPickAllowed(),
+        authority: (typeof _botAuthority === 'function') ? _botAuthority() : null,
+        netActive: !!(net && net.active), openSolo: !!(net && net.openSolo),
+        hostId: net ? net.openSoloHostId : null, me: net ? net.myPeerId : null,
+        peers: (net && net.peers) ? Array.from(net.peers.keys()) : [],
+        team: player ? player.team : null, state: game.state,
+        confirmed: !!game._ssConfirmed, botsOn: game.eliminationBots !== false,
+        mode: (typeof LSS !== 'undefined') ? LSS.MODE : null,
+      };
+    } catch (e) { return { error: String(e) }; }
+  },
   modeFromPeer: (mode, ago, fromId, seed) => {
     try {
       const before = { mode: LSS.MODE, ago: _lssModeAgo(), map: game.selectedMap, seed: net.worldSeed };
@@ -50263,8 +50319,8 @@ function spawnBots() {
   const _prevStats = {};
   for (const bot of game.entities) {
     if (!(bot instanceof Bot)) continue;
-    if (bot.loadoutKey) {
-      _prevStats[bot.loadoutKey] = {
+    if (bot.id != null) {
+      _prevStats[bot.id] = {
         kills: bot.kills || 0,
         damageDealt: bot.damageDealt || 0,
       };
@@ -50279,21 +50335,17 @@ function spawnBots() {
   }
 
   const applyPrev = (bot) => {
-    const p = _prevStats[bot.loadoutKey];
+    const p = _prevStats[bot.id];
     if (p) {
       bot.kills = p.kills;
       bot.damageDealt = p.damageDealt;
     }
   };
 
-  if (!game._botShipDeal || (game.currentRound || 1) <= 1) {
-    const keys = Object.keys(LOADOUTS);
-    for (let i = keys.length - 1; i > 0; i--) {
-      const j = (Math.random() * (i + 1)) | 0;
-      const t = keys[i]; keys[i] = keys[j]; keys[j] = t;
-    }
-    game._botShipDeal = { enemy: keys.slice(0, 3), friendly: keys.slice(3, 5) };
+  if (!game._botShipDeal || ((game.currentRound || 1) <= 1 && !game._botShipDeal.fromPicker)) {
+    _lssDealBotShips();
   }
+  game._botShipDeal.fromPicker = false;
   let _enemyN = 3, _friendN = 2;
   if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
     const _hB = net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
@@ -58276,6 +58328,7 @@ function returnToRootMenu(opts) {
   try { if (typeof _syncMapButtonsDisabled === 'function') _syncMapButtonsDisabled(); } catch (_) {}
   try { if (typeof _lssRefreshInsaneSpeedBtn === 'function') _lssRefreshInsaneSpeedBtn(); } catch (_) {}
   try { if (typeof _lssRefreshLaunchRow === 'function') _lssRefreshLaunchRow(); } catch (_) {}
+  try { if (typeof _lssBotDealPrep === 'function') _lssBotDealPrep(); } catch (_) {}
   if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
 }
 
@@ -62115,6 +62168,9 @@ function previewLoadout(key) {
       net.sendEvent({ type: 'ready', ready: true, ship: key });
     }
   } catch (_) {}
+  try {
+    if (net && net.active && net.sendEvent) net.sendEvent({ type: 'ship_pick', ship: key });
+  } catch (_) {}
   try { _lssRefreshLaunchRow(); } catch (_) {}
   const vrBtn = document.getElementById('ship-preview-confirm-vr');
   if (vrBtn) {
@@ -62335,6 +62391,92 @@ function _renderSkinPicker() {
 
 function selectLoadout(key) { commitLoadout(key); }
 
+function _lssDealBotShips() {
+  const keys = Object.keys(LOADOUTS);
+  for (let i = keys.length - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    const t = keys[i]; keys[i] = keys[j]; keys[j] = t;
+  }
+  game._botShipDeal = { enemy: keys.slice(0, 3), friendly: keys.slice(3, 5) };
+  return game._botShipDeal;
+}
+function _lssBotDealPrep() {
+  try {
+    if (typeof game === 'undefined' || !game || game.state !== 'select') return;
+    if (typeof _botAuthority === 'function' && !_botAuthority()) return;
+    _lssDealBotShips();
+    game._botShipDeal.fromPicker = true;
+    _lssBotDealAnnounce();
+  } catch (_) {}
+}
+function _lssBotSeats() {
+  const out = { friendly: [], enemy: [] };
+  try {
+    if (typeof game === 'undefined' || !game) return out;
+    if (game.eliminationBots === false) return out;
+    const _m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
+    if (_m === 'campaign' || _m === 'freeflight' || _m === 'endless') return out;
+    const deal = game._botShipDeal;
+    if (!deal || !deal.enemy || !deal.friendly) return out;
+    let eN = 3, fN = 2;
+    if (net && net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
+      eN = Math.max(0, 3 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length);
+      fN = Math.max(0, 2 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length);
+    }
+    for (let i = 0; i < eN && i < deal.enemy.length; i++) if (deal.enemy[i]) out.enemy.push(deal.enemy[i]);
+    for (let i = 0; i < fN && i < deal.friendly.length; i++) if (deal.friendly[i]) out.friendly.push(deal.friendly[i]);
+  } catch (_) {}
+  return out;
+}
+function _lssBotDealMine() {
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    if (game.eliminationBots === false) return false;
+    if (typeof _botAuthority === 'function' && !_botAuthority()) return false;
+    if (typeof _lssJoinedMatchInProgress === 'function' && _lssJoinedMatchInProgress()) return false;
+    return true;
+  } catch (_) { return false; }
+}
+function _lssBotPickAllowed() {
+  try {
+    if (!_lssBotDealMine()) return false;
+    if (game.state !== 'select') return false;                      // launch picker only
+    if (game._ssConfirmed || game._launchCommitted) return false;   // CONFIRM is the lock
+    return true;
+  } catch (_) { return false; }
+}
+function _lssBotCycleShip(side, idx, dir) {
+  try {
+    if (!_lssBotPickAllowed()) return;
+    const deal = game._botShipDeal;
+    if (!deal) return;
+    const arr = (side === 'enemy') ? deal.enemy : deal.friendly;
+    if (!arr || idx < 0 || idx >= arr.length) return;
+    const keys = Object.keys(LOADOUTS);
+    if (!keys.length) return;
+    let at = keys.indexOf(arr[idx]);
+    if (at < 0) at = 0;
+    const step = (dir < 0) ? -1 : 1;
+    arr[idx] = keys[((at + step) % keys.length + keys.length) % keys.length];
+    _lssBotDealAnnounce();
+    try { if (typeof playSound === 'function') playSound('mode_switch'); } catch (_) {}
+    try { updateTeammatesStrip(); } catch (_) {}
+  } catch (_) {}
+}
+function _lssBotDealAnnounce(toPeerId) {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active || !net.sendEvent) return;
+    if (typeof _botAuthority === 'function' && !_botAuthority()) return;
+    const d = (typeof game !== 'undefined' && game) ? game._botShipDeal : null;
+    if (!d || !d.enemy || !d.friendly) return;
+    const p = { type: 'bot_deal', e: d.enemy.slice(0, 3), f: d.friendly.slice(0, 2) };
+    if (toPeerId) net.sendEvent(p, toPeerId); else net.sendEvent(p);
+  } catch (_) {}
+}
+function _lssIsBot(e) {
+  try { return !!(e && e instanceof Bot); } catch (_) { return false; }
+}
+
 function updateTeammatesStrip() {
   const yourList = document.getElementById('teammates-list');
   const enemyList = document.getElementById('enemies-list');
@@ -62354,49 +62496,78 @@ function updateTeammatesStrip() {
     if (opts.isEmpty) chip.classList.add('empty');
     if (!opts.showPip) chip.classList.add('no-pip');
     if (opts.isReady) chip.classList.add('is-ready');
+    if (opts.botSide) chip.classList.add('bot-seat');
+    if (opts.botSide && opts.botLocked) chip.classList.add('bot-locked');
 
+    const _thumbSrc = (!opts.isEmpty && opts.ship && opts.ship !== '---' && _shipThumbCache[opts.ship])
+      ? _shipThumbCache[opts.ship] : null;
+    const _hasShip = !!(!opts.isEmpty && opts.ship && opts.ship !== '---');
     let thumbHTML;
-    if (!opts.isEmpty && opts.discordAvatarUrl) {
-      const shipMini = opts.ship && opts.ship !== '---'
-        ? `<span class="chip-ship-mini">${opts.ship}</span>`
+    if (_thumbSrc || (_hasShip && !opts.discordAvatarUrl)) {
+      const art = _thumbSrc
+        ? `<img class="chip-thumb" src="${_thumbSrc}" alt="${opts.ship}">`
+        : `<div class="chip-thumb-empty">${_roomBoxEsc(opts.ship)}</div>`;
+      const badge = opts.discordAvatarUrl
+        ? `<img class="chip-avatar-badge" src="${opts.discordAvatarUrl}" alt="${_roomBoxEsc(opts.name || '')}">`
         : '';
+      const arrows = opts.botSide
+        ? `<button class="chip-ship-arrow left" type="button" data-bot-dir="-1" title="Previous hull">&#9664;</button>` +
+          `<button class="chip-ship-arrow right" type="button" data-bot-dir="1" title="Next hull">&#9654;</button>`
+        : '';
+      thumbHTML = `<div class="chip-art">` + art + badge + arrows + `</div>`;
+    } else if (!opts.isEmpty && opts.discordAvatarUrl) {
       thumbHTML = `<div class="chip-avatar-wrap">` +
-        `<img class="chip-avatar" src="${opts.discordAvatarUrl}" alt="${opts.name || ''}">` +
-        shipMini +
+        `<img class="chip-avatar" src="${opts.discordAvatarUrl}" alt="${_roomBoxEsc(opts.name || '')}">` +
       `</div>`;
     } else {
-      const thumbSrc = (!opts.isEmpty && opts.ship && _shipThumbCache[opts.ship])
-        ? _shipThumbCache[opts.ship] : null;
-      if (thumbSrc) {
-        thumbHTML = `<img class="chip-thumb" src="${thumbSrc}" alt="${opts.ship}">`;
-      } else if (opts.isEmpty) {
-        thumbHTML = `<div class="chip-thumb-empty">EMPTY</div>`;
-      } else {
-        thumbHTML = `<div class="chip-thumb-empty">${opts.ship || '---'}</div>`;
-      }
+      thumbHTML = `<div class="chip-thumb-empty">EMPTY</div>`;
     }
 
     const nameTxt = _roomBoxEsc(opts.name || '---');
-    const shipTxt = _roomBoxEsc(opts.label || opts.ship || '---');
+    const _shipKey = (opts.ship && opts.ship !== '---') ? opts.ship : '';
+    const shipTxt = _roomBoxEsc(
+      (_shipKey && opts.label) ? (_shipKey + ' \u00b7 ' + opts.label)
+                               : (opts.label || _shipKey || '---'));
+    const pipTxt = opts.pipText || (opts.isReady ? 'READY' : 'WAIT');
     chip.innerHTML = `
       ${thumbHTML}
       <span class="chip-name">${nameTxt}</span>
       <span class="chip-ship">${shipTxt}</span>
-      <span class="chip-ready-pip">${opts.isReady ? 'READY' : 'WAIT'}</span>
+      <span class="chip-ready-pip">${pipTxt}</span>
     `;
+    if (opts.botSide) {
+      chip.dataset.botSide = opts.botSide;
+      chip.dataset.botIdx = String(opts.botIdx | 0);
+    }
     return chip;
+  }
+  function makeBotSeat(side, idx, key, isEnemyHalf) {
+    const lo = (typeof LOADOUTS !== 'undefined') ? LOADOUTS[key] : null;
+    const mine = _lssBotDealMine();
+    const locked = !_lssBotPickAllowed();
+    return makeChip({
+      name: (lo && lo.name) ? lo.name + ' BOT' : 'BOT',
+      ship: key || '---',
+      isEnemy: !!isEnemyHalf,
+      showPip: mine,
+      isReady: locked,
+      pipText: locked ? 'LOCKED' : 'SWAP',
+      botSide: mine ? side : null, botIdx: idx, botLocked: locked,
+    });
   }
 
   const _youConfirmed = !!(game && game._ssConfirmed);
   const yourShip = (player && player.loadoutKey) ? player.loadoutKey
-                 : (_youConfirmed && game._ssKey) ? game._ssKey : '---';
+                 : (game && game._ssKey) ? game._ssKey : '---';
   const youCommitted = !!(player && player.loadoutKey);
   const yourLabel = youCommitted ? null : (_youConfirmed ? 'CONFIRMED' : 'PICKING');
   function _peerCard(peer) {
     const committed = !!(peer && peer.loadoutKey);
     const confirmed = !!(peer && peer.ready);
     return {
-      ship: committed ? peer.loadoutKey : ((confirmed && peer.readyShip) ? peer.readyShip : '---'),
+      ship: committed ? peer.loadoutKey
+          : (confirmed && peer.readyShip) ? peer.readyShip
+          : (peer.pickShip || '---'),
       label: committed ? null : (confirmed ? 'CONFIRMED' : 'PICKING'),
       isReady: committed || confirmed,
     };
@@ -62435,13 +62606,21 @@ function updateTeammatesStrip() {
     }
   }
 
-  const friendlies = (game.entities || []).filter(b => b.team === myTeam);
-  for (const bot of friendlies) {
-    yourList.appendChild(makeChip({
-      name: (bot.loadout && bot.loadout.name) ? bot.loadout.name + ' BOT' : 'BOT',
-      ship: bot.loadoutKey || '---',
-      showPip: false,
-    }));
+  const _seats = _lssBotSeats();
+  const _myHand   = (myTeam === LSS.TEAM_FLEET_B) ? 'enemy' : 'friendly';
+  const _theirHand = (myTeam === LSS.TEAM_FLEET_B) ? 'friendly' : 'enemy';
+  const friendlies = (game.entities || []).filter(b => _lssIsBot(b) && b.team === myTeam);
+  if (friendlies.length) {
+    for (const bot of friendlies) {
+      yourList.appendChild(makeChip({
+        name: (bot.loadout && bot.loadout.name) ? bot.loadout.name + ' BOT' : 'BOT',
+        ship: bot.loadoutKey || '---',
+        showPip: false,
+      }));
+    }
+  } else {
+    const _mine = _seats[_myHand] || [];
+    for (let i = 0; i < _mine.length; i++) yourList.appendChild(makeBotSeat(_myHand, i, _mine[i], false));
   }
 
   while (yourList.children.length < 3) {
@@ -62472,20 +62651,55 @@ function updateTeammatesStrip() {
     }
   }
 
-  const enemies = (game.entities || []).filter(b => b.team === otherTeam);
-  for (const bot of enemies) {
-    enemyList.appendChild(makeChip({
-      name: (bot.loadout && bot.loadout.name) ? bot.loadout.name + ' BOT' : 'BOT',
-      ship: bot.loadoutKey || '---',
-      isEnemy: true,
-      showPip: false,
-    }));
+  const enemies = (game.entities || []).filter(b => _lssIsBot(b) && b.team === otherTeam);
+  if (enemies.length) {
+    for (const bot of enemies) {
+      enemyList.appendChild(makeChip({
+        name: (bot.loadout && bot.loadout.name) ? bot.loadout.name + ' BOT' : 'BOT',
+        ship: bot.loadoutKey || '---',
+        isEnemy: true,
+        showPip: false,
+      }));
+    }
+  } else {
+    const _theirs = _seats[_theirHand] || [];
+    for (let i = 0; i < _theirs.length; i++) enemyList.appendChild(makeBotSeat(_theirHand, i, _theirs[i], true));
   }
 
   while (enemyList.children.length < 3) {
     enemyList.appendChild(makeChip({
       name: 'EMPTY', ship: '---', isEnemy: true, isEmpty: true, showPip: false,
     }));
+  }
+
+  for (const _list of [yourList, enemyList]) {
+    for (const _chip of _list.children) {
+      if (!_chip.dataset || !_chip.dataset.botSide) continue;
+      const _side = _chip.dataset.botSide, _idx = (+_chip.dataset.botIdx) | 0;
+      for (const _ar of _chip.querySelectorAll('.chip-ship-arrow')) {
+        _ar.addEventListener('click', (e) => {
+          e.stopPropagation(); e.preventDefault();
+          _lssBotCycleShip(_side, _idx, (+_ar.dataset.botDir < 0) ? -1 : 1);
+        });
+      }
+    }
+    if (!_list._lssBotWheelBound) {
+      _list._lssBotWheelBound = true;
+      _list.addEventListener('wheel', (e) => {
+        try {
+          const chip = e.target && e.target.closest ? e.target.closest('.fleet-chip') : null;
+          if (!chip || !chip.dataset || !chip.dataset.botSide) return;
+          if (!_lssBotPickAllowed()) return;
+          const d = (Math.abs(e.deltaX) > Math.abs(e.deltaY)) ? e.deltaX : e.deltaY;
+          if (!d) return;
+          e.preventDefault();   // #fleet-scroll would otherwise scroll the column out from under you
+          const _now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+          if (_now - (_list._lssBotWheelT || 0) < 110) return;
+          _list._lssBotWheelT = _now;
+          _lssBotCycleShip(chip.dataset.botSide, (+chip.dataset.botIdx) | 0, (d > 0) ? 1 : -1);
+        } catch (_) {}
+      }, { passive: false });
+    }
   }
 
   try {

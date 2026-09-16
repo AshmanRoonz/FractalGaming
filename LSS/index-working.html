@@ -1663,6 +1663,8 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
 #teammates-strip .fleet-chip .chip-thumb,
 #teammates-strip .fleet-chip .chip-avatar-wrap,
 #teammates-strip .fleet-chip .chip-thumb-empty { height: 64px; }
+/* (v45.33) .chip-art WRAPS the thumb, so it never needs its own height - it takes the one above.
+   Listing it here anyway would double-apply the breakpoints and is exactly how they drift. */
 #teammates-strip .fleet-chip .chip-avatar { width: 48px; height: 48px; }
 #teammates-strip .fleet-chip .chip-name { font-size: 10px; padding: 3px 7px 0; }
 #teammates-strip .fleet-chip .chip-ship { font-size: 8px; padding: 1px 7px 5px; }
@@ -1705,6 +1707,47 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   background: rgba(0,0,0,0.55);
   padding: 1px 4px; border-radius: 2px;
   pointer-events: none;
+}
+
+/* ---- (v45.33) THE CARD'S PICTURE IS THE SHIP ----------------------------------------
+   .chip-art is a positioning context around the baked hull thumbnail; the Discord avatar
+   rides it as a corner badge and the hull arrows sit on its left/right edges. It has NO
+   height of its own on purpose - the .chip-thumb / .chip-thumb-empty rules (and their two
+   responsive overrides) still own that, so there is one place the card's art height lives. */
+.fleet-chip .chip-art { position: relative; display: block; width: 100%; }
+.fleet-chip .chip-avatar-badge {
+  position: absolute; top: 4px; left: 4px;
+  width: 22px; height: 22px; border-radius: 50%;
+  object-fit: cover; background: #1a1a30;
+  border: 1.5px solid #5865F2;
+  box-shadow: 0 0 6px rgba(88,101,242,0.45), 0 1px 3px rgba(0,0,0,0.6);
+  pointer-events: none;
+}
+/* Always painted on a bot seat, never hover-gated: a phone has no hover, and an invisible
+   control is not a control. They dim rather than vanish once the fleet is locked, so the
+   card does not change shape at the moment you press CONFIRM. */
+.fleet-chip .chip-ship-arrow {
+  position: absolute; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 30px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 10px; line-height: 1; color: #cfe6ff;
+  background: rgba(8,12,26,0.62);
+  border: 1px solid rgba(120,170,220,0.35);
+  border-radius: 4px; cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.fleet-chip .chip-ship-arrow.left  { left: 3px; }
+.fleet-chip .chip-ship-arrow.right { right: 3px; }
+.fleet-chip .chip-ship-arrow:hover {
+  background: rgba(30,70,120,0.85); border-color: #7fd4ff; color: #fff;
+}
+.fleet-chip .chip-ship-arrow:active { transform: translateY(-50%) scale(0.92); }
+.fleet-chip.bot-seat { border-color: rgba(120,170,220,0.4); }
+.fleet-chip.bot-locked .chip-ship-arrow { opacity: 0.18; pointer-events: none; }
+/* A locked bot seat is not READY-green - it is just closed. Green is the human pip's word. */
+.fleet-chip.bot-seat.is-ready .chip-ready-pip {
+  background: rgba(0,0,0,0.6); color: #8fb6d8;
+  border-color: rgba(120,170,220,0.45); box-shadow: none;
 }
 .fleet-chip .chip-thumb-empty {
   width: 100%; height: 78px;
@@ -4637,6 +4680,17 @@ body.vr-active #camp-video { display: none !important; }
   #teammates-strip .fleet-chip .chip-avatar { width: 32px !important; height: 32px !important; }
   #teammates-strip .fleet-chip .chip-name { font-size: 9px !important; }
   #teammates-strip .fleet-chip .chip-ship { font-size: 7px !important; }
+  /* (v45.33) The hull arrows and the Discord badge shrink with the card. At 148px wide and 42px of
+     art, the default 20px arrows would leave the ship itself about 90px - readable, but only just,
+     and this is the breakpoint where the card is already at its smallest. */
+  #teammates-strip .fleet-chip .chip-ship-arrow {
+    width: 15px !important; height: 22px !important; font-size: 8px !important;
+  }
+  #teammates-strip .fleet-chip .chip-ship-arrow.left  { left: 2px !important; }
+  #teammates-strip .fleet-chip .chip-ship-arrow.right { right: 2px !important; }
+  #teammates-strip .fleet-chip .chip-avatar-badge {
+    width: 16px !important; height: 16px !important; top: 2px !important; left: 2px !important;
+  }
   .fleet-half-header { font-size: 8px !important; letter-spacing: 1.2px !important; }
   .fleet-half-header .fleet-side { display: none !important; }
   /* (v36.30) ADD BOTS lives at the foot of this column, and this is the ONE
@@ -6563,7 +6617,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.32';
+const LSS_BUILD = '45.34';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -10068,6 +10122,9 @@ async function joinRoom() {
             // too; this is the second carrier, because an election with missing data cannot decide
             // and a peer that never announced a mode would stall the overworld authority.
             inRoom: (net.roomJoinedAt ? Math.round(Math.max(0, performance.now() - net.roomJoinedAt)) : 0),
+            // (v45.33) the hull we are looking at. `ship_pick` only fires on a carousel change, so
+            // without this a joiner would see blank cards until everyone already here touched theirs.
+            ship: (typeof game !== 'undefined' && game && game._ssKey) ? game._ssKey : undefined,
             discord_id:     _hdu ? _hdu.id : undefined,
             discord_name:   _hdu ? (_hdu.global_name || _hdu.username) : undefined,
             discord_avatar: _hdu ? _hdu.avatar : undefined }, peerId);
@@ -10137,6 +10194,9 @@ async function joinRoom() {
             seed: (net.worldSeed != null ? net.worldSeed : 0) >>> 0,
             mst: (typeof net.matchStartedAt === 'number') ? net.matchStartedAt : undefined,   // (v38.60)
             mode: (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic' }, peerId);
+          // (v45.33) ...and the bot hand with it, so the joiner's fleet cards show the same
+          // opponents we are looking at rather than an empty enemy half.
+          if (typeof _lssBotDealAnnounce === 'function') _lssBotDealAnnounce(peerId);
         } catch (_) {}
       }
     });
@@ -10355,6 +10415,11 @@ function _setEliminationBots(on, broadcast) {
     } catch (_) {}
   }
   try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
+  // (v45.33) The toggle decides who fills the seats rendered right above it, so the cards follow
+  // it: OFF empties the bot half, ON brings the hand back - and turning bots on is also what makes
+  // this client the bot authority, so the room is told the hand at the same moment.
+  try { if (typeof _lssBotDealAnnounce === 'function') _lssBotDealAnnounce(); } catch (_) {}
+  try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
 }
 async function startElimination() {
   // (v43.22) ELIMINATION never set LSS.MODE at all - it relied on returnToRootMenu having reset it to
@@ -14141,6 +14206,9 @@ function enterShipSelect() {
   try { if (typeof _setSkinPanelOpen === 'function') _setSkinPanelOpen(false); } catch (_) {}
   buildShipSelect();
   buildMapSelector();
+  // (v45.33) Deal the bots BEFORE the strip is painted - it reads the hand. Self-gates on
+  // `game.state === 'select'`, so the between-rounds picker keeps the hulls already flying.
+  try { if (typeof _lssBotDealPrep === 'function') _lssBotDealPrep(); } catch (_) {}
   updateTeammatesStrip();
   // (v35.20) ELIMINATION opponents toggle — self-hides unless this is a
   // networked classic match.
@@ -16725,6 +16793,17 @@ function handleNetEvent(evt, fromPeerId) {
     } catch (_) {}
     return;
   }
+  // (v45.33) a peer is browsing the carousel. Display only - it says nothing about readiness, and
+  // the ready/loadout events above still own what they always owned.
+  if (evt.type === 'ship_pick') {
+    const peer = net.peers.get(fromPeerId);
+    if (peer) {
+      peer.pickShip = (typeof evt.ship === 'string' &&
+                       Object.prototype.hasOwnProperty.call(LOADOUTS, evt.ship)) ? evt.ship : null;
+      try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
+    }
+    return;
+  }
   if (evt.type === 'ready') {
     const peer = net.peers.get(fromPeerId);
     if (peer) {
@@ -16736,6 +16815,46 @@ function handleNetEvent(evt, fromPeerId) {
       // Refresh the fleet strip so the peer's chip pip flips colour.
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     }
+    return;
+  }
+  // (v45.33) the bot authority's hand, so every card in the room shows the same opponents before
+  // the world exists. DISPLAY ONLY here: both spawnBots call sites are gated on _botAuthority(), so
+  // a mirrored hand cannot fork the simulation, and once the round opens bot_roster is the truth.
+  // Filtered through LOADOUTS and length-capped - this is another client's payload.
+  if (evt.type === 'bot_deal') {
+    try {
+      // ⭐⭐ (v45.33) THE AUTHORITY NEVER ADOPTS SOMEONE ELSE'S HAND - IT CORRECTS THEM.
+      // Measured in a two-tab room: the host's fleet silently became the JOINER's hand between one
+      // read and the next. startElimination's join path calls `_setEliminationBots(wantBots, false)`
+      // before enterShipSelect, and that helper seats the caller as host when no host is known yet
+      // (`net.openSoloHostId || net.myPeerId`) - so for the few hundred ms before the host's
+      // `open_solo_start` lands, a joiner IS the bot authority as far as its own code can tell. It
+      // deals, it announces, and the real host obeyed.
+      // Answering with our own hand (rather than just dropping theirs) is also what makes the
+      // ordering not matter: the onPeerJoin briefing may arrive before the joiner has dealt, and
+      // this reply lands after, whichever way the race goes.
+      if (typeof _botAuthority === 'function' && _botAuthority()) {
+        if (!net._botDealFixT) net._botDealFixT = {};
+        const _now = Date.now();
+        // Rate-limited because two clients that BOTH believe they are the authority (a split-brain
+        // the open-solo arbitration resolves on its own) would otherwise correct each other in a
+        // tight loop for as long as it lasted.
+        if (!(net._botDealFixT[fromPeerId] > _now - 3000)) {
+          net._botDealFixT[fromPeerId] = _now;
+          _lssBotDealAnnounce(fromPeerId);
+        }
+        return;
+      }
+      // ...and from anyone else, only the client we believe owns the bots. (openSoloHostId is null
+      // in the co-op modes, where the authority is amStasisOwner and no id is tracked here - those
+      // modes deal no picker bots at all, see _lssBotSeats.)
+      if (net.openSoloHostId && fromPeerId !== net.openSoloHostId) return;
+      const _ok = (k) => typeof k === 'string' && Object.prototype.hasOwnProperty.call(LOADOUTS, k);
+      if (!game._botShipDeal) game._botShipDeal = { enemy: [], friendly: [] };
+      if (Array.isArray(evt.e)) game._botShipDeal.enemy = evt.e.slice(0, 3).filter(_ok);
+      if (Array.isArray(evt.f)) game._botShipDeal.friendly = evt.f.slice(0, 2).filter(_ok);
+      if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
+    } catch (_) {}
     return;
   }
   // (v45.27) someone moved fleets in the picker. Idempotent and last-writer-wins, like the map.
@@ -17224,6 +17343,10 @@ function handleNetEvent(evt, fromPeerId) {
         peer.inRoom = evt.inRoom;
         peer.inRoomAt = (typeof performance !== 'undefined') ? performance.now() : 0;
       }
+      // (v45.33) their current carousel pick - same field the ship_pick event writes.
+      if (typeof evt.ship === 'string' && Object.prototype.hasOwnProperty.call(LOADOUTS, evt.ship)) {
+        peer.pickShip = evt.ship;
+      }
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     }
     return;
@@ -17247,6 +17370,9 @@ function handleNetEvent(evt, fromPeerId) {
     // (v35.20) Keep the ADD BOTS toggle's source of truth in step with the host.
     game.eliminationBots = true;
     try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
+    // (v45.33) ...and repaint the seats it fills. The host's `bot_deal` names the actual hulls a
+    // moment later; this is what puts the cards on screen in the first place.
+    try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     if (evt.seed != null) net.worldSeed = evt.seed >>> 0;
     if (typeof evt.mst === 'number' && isFinite(evt.mst)) net.matchStartedAt = evt.mst;   // (v38.60) shared match id
     // (v32.75) Adopt the host's MODE (race/campaign/classic) so the joiner builds the
@@ -17295,6 +17421,7 @@ function handleNetEvent(evt, fromPeerId) {
     net.openSoloHostId = null;
     game.eliminationBots = false;
     try { if (typeof _renderEliminationBotsBtn === 'function') _renderEliminationBotsBtn(); } catch (_) {}
+    try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}   // (v45.33) the bot cards go with them
     return;
   }
   // Joiner briefing: the open-solo host describes the match in progress.
@@ -31970,6 +32097,30 @@ if (typeof window !== 'undefined') window.__cavern = { st: _HZ_CAVERN, enter: (i
 // player/rift-home aren't reachable from devtools without this. Same spirit
 // as __cavern.enter above.
 if (typeof window !== 'undefined') window.__dbg = {
+  // (v45.33) THE PICKER'S BOT HAND, drivable. The cards are dealt on ONE client (the bot authority)
+  // and mirrored to the room, and none of that is visible from the DOM - a card with no arrows
+  // could mean "bots are off", "someone else deals these" or "you already confirmed".
+  //   __dbg.bots()                - the hand, whether it is mine to deal, and every input to that
+  //   __dbg.bots('enemy', 0, 1)   - step seat 0 of the enemy hand one hull right, as a press would
+  // `side` is the DEAL's side, not the strip half: 'enemy' is always Fleet B's three, 'friendly'
+  // always Fleet A's two, whichever fleet this player is sitting on.
+  bots: (side, idx, dir) => {
+    try {
+      if (side) _lssBotCycleShip(side, idx | 0, (dir < 0) ? -1 : 1);
+      return {
+        deal: game._botShipDeal ? JSON.parse(JSON.stringify(game._botShipDeal)) : null,
+        seats: _lssBotSeats(),
+        mine: _lssBotDealMine(), editable: _lssBotPickAllowed(),
+        authority: (typeof _botAuthority === 'function') ? _botAuthority() : null,
+        netActive: !!(net && net.active), openSolo: !!(net && net.openSolo),
+        hostId: net ? net.openSoloHostId : null, me: net ? net.myPeerId : null,
+        peers: (net && net.peers) ? Array.from(net.peers.keys()) : [],
+        team: player ? player.team : null, state: game.state,
+        confirmed: !!game._ssConfirmed, botsOn: game.eliminationBots !== false,
+        mode: (typeof LSS !== 'undefined') ? LSS.MODE : null,
+      };
+    } catch (e) { return { error: String(e) }; }
+  },
   // (v43.21) ROOM MODE probe. The rule in v43.19/20 is a cross-CLIENT one, and the local two-tab
   // lobby only half-forms here, so this is how it gets judged rather than assumed:
   //   __dbg.roomMode()          - what mode am I in, what does the room say, what are my flags
@@ -79045,17 +79196,27 @@ function _dropinReplaceBot(team, toPeerId) {
 }
 
 function spawnBots() {
-  // Snapshot existing bot match stats by loadoutKey so respawning between
-  // rounds does not wipe the scoreboard. Fresh-match callers have no
-  // existing entities, so the map is empty and new bots start at zero.
+  // Snapshot existing bot match stats so respawning between rounds does not wipe the scoreboard.
+  // Fresh-match callers have no existing entities, so the map is empty and new bots start at zero.
+  // ⭐⭐ (v45.34) KEYED BY SEAT ID, NOT BY HULL. This was `_prevStats[bot.loadoutKey]`, and that
+  // single line was the only thing in the game requiring the five bots to fly five DIFFERENT hulls:
+  // two bots on one key overwrite each other in the snapshot and are then both handed the survivor's
+  // totals. Owner: "it seems the bot ship selection is limited to less than 7 ships" - correct, and
+  // this was why. Each card skipped the four hulls its neighbours held, leaving three of seven
+  // reachable.
+  // The ids are positional and deterministic (`i + 1` enemy, `i + 10` friendly, assigned below), so
+  // the same seat gets the same id every round - which is what "this bot's running total" actually
+  // means. Duplicate hulls were never otherwise a problem: an endless wave has spawned six bots from
+  // a three-hull pool since v35.x (`pool[i % pool.length]`), so everything downstream - the ship
+  // group pool, the roster wire, the scoreboard's one-row-per-entity build - already handles them.
   const _prevStats = {};
   // Only recycle BOTS. NetworkPlayers (open-solo challengers) live in the
   // same entities list and must survive round transitions — wiping them
   // here is how the host went blind to a connected human.
   for (const bot of game.entities) {
     if (!(bot instanceof Bot)) continue;
-    if (bot.loadoutKey) {
-      _prevStats[bot.loadoutKey] = {
+    if (bot.id != null) {
+      _prevStats[bot.id] = {
         kills: bot.kills || 0,
         damageDealt: bot.damageDealt || 0,
       };
@@ -79072,7 +79233,7 @@ function spawnBots() {
   }
 
   const applyPrev = (bot) => {
-    const p = _prevStats[bot.loadoutKey];
+    const p = _prevStats[bot.id];
     if (p) {
       bot.kills = p.kills;
       bot.damageDealt = p.damageDealt;
@@ -79083,14 +79244,14 @@ function spawnBots() {
   // of the same hardcoded 3+2 every match. Shuffled once per match (round
   // 1) so mid-match respawns keep the same ships and per-loadout carry-over
   // stats stay coherent ; a fresh match deals a fresh hand.
-  if (!game._botShipDeal || (game.currentRound || 1) <= 1) {
-    const keys = Object.keys(LOADOUTS);
-    for (let i = keys.length - 1; i > 0; i--) {
-      const j = (Math.random() * (i + 1)) | 0;
-      const t = keys[i]; keys[i] = keys[j]; keys[j] = t;
-    }
-    game._botShipDeal = { enemy: keys.slice(0, 3), friendly: keys.slice(3, 5) };
+  // (v45.33) ...and `fromPicker` is round 1's exception: the LAUNCH picker already dealt this hand
+  // and the player may have scrolled it, so re-dealing here would throw their choices away between
+  // the last frame of the picker and the first frame of the world. The flag is CONSUMED, so a
+  // second match that somehow reaches this without a picker visit still deals fresh.
+  if (!game._botShipDeal || ((game.currentRound || 1) <= 1 && !game._botShipDeal.fromPicker)) {
+    _lssDealBotShips();
   }
+  game._botShipDeal.fromPicker = false;
   // Open-solo: humans hold seats. Every connected challenger on a team
   // means one fewer bot on that team, so the 3v3 (2 friendly + you vs 3)
   // shape survives any mix of silicon and flesh.
@@ -91179,6 +91340,12 @@ function returnToRootMenu(opts) {
   try { if (typeof _syncMapButtonsDisabled === 'function') _syncMapButtonsDisabled(); } catch (_) {}
   try { if (typeof _lssRefreshInsaneSpeedBtn === 'function') _lssRefreshInsaneSpeedBtn(); } catch (_) {}
   try { if (typeof _lssRefreshLaunchRow === 'function') _lssRefreshLaunchRow(); } catch (_) {}
+  // (v45.33) ...and the same asymmetry applies to the BOT HAND. This is a fresh launch picker
+  // (state 'select', round 1) that deliberately does not go through enterShipSelect, so without
+  // this it would come up showing the hand the match that just ended was flying - and spawnBots,
+  // which only honours a hand a picker dealt, would then re-roll it at LAUNCH. The cards would have
+  // been promising opponents that never arrived.
+  try { if (typeof _lssBotDealPrep === 'function') _lssBotDealPrep(); } catch (_) {}
   if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
 }
 
@@ -96685,6 +96852,14 @@ function previewLoadout(key) {
       net.sendEvent({ type: 'ready', ready: true, ship: key });
     }
   } catch (_) {}
+  // (v45.33) ...and announce it even UNCONFIRMED, so the room's fleet cards show what everyone is
+  // looking at rather than a row of blanks until the last person locks in.
+  // ⚠ ITS OWN EVENT, deliberately not a `ready` with `ready:false`. The ready handler nulls
+  //   `readyShip` whenever ready is false and then runs checkAllReady() - the LOBBY handshake - so
+  //   browsing the carousel would have poked the match-start machinery once per arrow press.
+  try {
+    if (net && net.active && net.sendEvent) net.sendEvent({ type: 'ship_pick', ship: key });
+  } catch (_) {}
   try { _lssRefreshLaunchRow(); } catch (_) {}
   const vrBtn = document.getElementById('ship-preview-confirm-vr');
   if (vrBtn) {
@@ -96994,6 +97169,152 @@ function _renderSkinPicker() {
 // the commit path (existing keyboard shortcuts, net sync, etc.).
 function selectLoadout(key) { commitLoadout(key); }
 
+// ============================================================
+// (v45.33) THE BOTS ARE DEALT AT THE PICKER, NOT AT WORLD BUILD
+// ============================================================
+// Owner: "if there are bots on either team, they should fill those player cards with their ship
+// selection, you can change their ship by scrolling that icon left or right... bot ships lock when
+// player hits confirm".
+//
+// The hand ALREADY existed - `game._botShipDeal`, five distinct hulls shuffled once per match - it
+// was just dealt inside spawnBots(), which runs at WORLD BUILD, i.e. after CONFIRM & LAUNCH. So the
+// picker had nothing to show and nothing to edit. All that moves here is the DEAL; spawnBots still
+// owns the spawn, and still deals for itself on any path that reaches it without a picker visit.
+//
+// (v45.34) The opening hand is five DISTINCT hulls because it comes off a shuffle, and variety is a
+// good default - but it is not an invariant. v45.33 enforced it in _lssBotCycleShip on the strength
+// of spawnBots' `_prevStats` keying on loadoutKey; that key is the seat id now, so every card can
+// reach all seven ships and two bots may fly the same one.
+function _lssDealBotShips() {
+  const keys = Object.keys(LOADOUTS);
+  for (let i = keys.length - 1; i > 0; i--) {
+    const j = (Math.random() * (i + 1)) | 0;
+    const t = keys[i]; keys[i] = keys[j]; keys[j] = t;
+  }
+  game._botShipDeal = { enemy: keys.slice(0, 3), friendly: keys.slice(3, 5) };
+  return game._botShipDeal;
+}
+// Called once per visit to the LAUNCH picker (enterShipSelect). `game.state === 'select'` is what
+// separates the launch screen from the between-rounds swap window - there the match is live, the
+// bots exist, and re-dealing would swap the hulls out from under a running scoreboard.
+// `fromPicker` is the handshake with spawnBots: it says "round 1's hand is already chosen", and
+// spawnBots consumes it so a later match still deals fresh.
+function _lssBotDealPrep() {
+  try {
+    if (typeof game === 'undefined' || !game || game.state !== 'select') return;
+    // Not our hand to deal: in a room only the bot authority spawns these ships, and everyone else
+    // is showing a mirror of its `bot_deal`. Dealing here would put a different enemy fleet on
+    // every screen until that broadcast landed.
+    if (typeof _botAuthority === 'function' && !_botAuthority()) return;
+    _lssDealBotShips();
+    game._botShipDeal.fromPicker = true;
+    _lssBotDealAnnounce();
+  } catch (_) {}
+}
+// The seats bots will actually fill in the round about to launch - the same arithmetic spawnBots()
+// runs at world build (3 enemy / 2 friendly, minus every human already holding one), read one
+// screen earlier. Returns empty arrays wherever no bot will spawn, so the cards can never promise
+// an opponent that is not coming.
+function _lssBotSeats() {
+  const out = { friendly: [], enemy: [] };
+  try {
+    if (typeof game === 'undefined' || !game) return out;
+    if (game.eliminationBots === false) return out;
+    // Mirrors the spawnBots CALL gate, not the function itself: campaign/freeflight/endless run
+    // their own opponent rules and never reach it.
+    const _m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
+    if (_m === 'campaign' || _m === 'freeflight' || _m === 'endless') return out;
+    const deal = game._botShipDeal;
+    if (!deal || !deal.enemy || !deal.friendly) return out;
+    let eN = 3, fN = 2;
+    if (net && net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
+      eN = Math.max(0, 3 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length);
+      fN = Math.max(0, 2 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length);
+    }
+    for (let i = 0; i < eN && i < deal.enemy.length; i++) if (deal.enemy[i]) out.enemy.push(deal.enemy[i]);
+    for (let i = 0; i < fN && i < deal.friendly.length; i++) if (deal.friendly[i]) out.friendly.push(deal.friendly[i]);
+  } catch (_) {}
+  return out;
+}
+// "Are these my bots to deal?" - everything below EXCEPT the two questions about timing. The split
+// is what keeps the cards honest: on a client that can never change this hand (it is not the bot
+// authority) the card carries no arrows and no badge at all, rather than a LOCKED badge implying
+// this player locked it. Only the seats you could have changed are told they are shut.
+// It is also the stable half of the predicate - it turns over on authority changes, and every one
+// of those (open_solo_start, elim_bots_off, onPeerLeave's migration, bot_deal) repaints the strip.
+function _lssBotDealMine() {
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    if (game.eliminationBots === false) return false;
+    // Only the client that actually spawns these bots may deal them. Everyone else is looking at a
+    // mirror of the authority's hand (see the `bot_deal` handler).
+    if (typeof _botAuthority === 'function' && !_botAuthority()) return false;
+    if (typeof _lssJoinedMatchInProgress === 'function' && _lssJoinedMatchInProgress()) return false;
+    return true;
+  } catch (_) { return false; }
+}
+// ASKED AT CLICK TIME, NEVER AT PAINT TIME - the v45.30 lesson from the team-swap cards. A strip
+// painted a moment before `game.state` flips to 'select' would otherwise get dead arrows that
+// nothing repaints. The arrows are drawn on any seat that is ours; THIS decides whether a press
+// does anything.
+function _lssBotPickAllowed() {
+  try {
+    if (!_lssBotDealMine()) return false;
+    if (game.state !== 'select') return false;                      // launch picker only
+    if (game._ssConfirmed || game._launchCommitted) return false;   // CONFIRM is the lock
+    return true;
+  } catch (_) { return false; }
+}
+// One step left/right through the WHOLE roster for one seat.
+// (v45.34) It used to skip every hull another seat was holding, which left three of the seven
+// reachable from any given card - the owner noticed immediately. The reason for the skip was
+// spawnBots' stat carry-over keying on loadoutKey; that now keys on the seat id, so nothing is left
+// that cares whether two bots fly the same ship. The opening DEAL is still five distinct hulls
+// (it comes off a shuffle), because variety is a good default - it is just no longer a rule.
+function _lssBotCycleShip(side, idx, dir) {
+  try {
+    if (!_lssBotPickAllowed()) return;
+    const deal = game._botShipDeal;
+    if (!deal) return;
+    const arr = (side === 'enemy') ? deal.enemy : deal.friendly;
+    if (!arr || idx < 0 || idx >= arr.length) return;
+    const keys = Object.keys(LOADOUTS);
+    if (!keys.length) return;
+    let at = keys.indexOf(arr[idx]);
+    if (at < 0) at = 0;
+    const step = (dir < 0) ? -1 : 1;
+    arr[idx] = keys[((at + step) % keys.length + keys.length) % keys.length];
+    _lssBotDealAnnounce();
+    // 'mode_switch' is the closest thing the recipe bank has to a UI click - the VR pointer's
+    // click site says the same thing, and _playSoundFromLabRecipe returns silently on a name
+    // that has no recipe, so a made-up 'ui_click' here would just be a dead line.
+    try { if (typeof playSound === 'function') playSound('mode_switch'); } catch (_) {}
+    try { updateTeammatesStrip(); } catch (_) {}
+  } catch (_) {}
+}
+// The authority's hand, mirrored to the room so everyone's cards show the same opponents before the
+// world exists. DISPLAY ONLY on a receiver: spawnBots is gated on _botAuthority() at both call
+// sites, so a mirrored hand can never fork the simulation, and once the round opens `bot_roster`
+// is the truth either way.
+function _lssBotDealAnnounce(toPeerId) {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active || !net.sendEvent) return;
+    if (typeof _botAuthority === 'function' && !_botAuthority()) return;
+    const d = (typeof game !== 'undefined' && game) ? game._botShipDeal : null;
+    if (!d || !d.enemy || !d.friendly) return;
+    const p = { type: 'bot_deal', e: d.enemy.slice(0, 3), f: d.friendly.slice(0, 2) };
+    if (toPeerId) net.sendEvent(p, toPeerId); else net.sendEvent(p);
+  } catch (_) {}
+}
+// `e instanceof Bot` behind a try/catch: NetworkPlayers live in game.entities beside the bots, and
+// the fleet halves used to filter on `.team` alone - so between rounds a connected human was drawn
+// TWICE, once from net.peers and once more as a card reading "BOT".
+// (try/catch, not `typeof Bot`: a class declaration is in the temporal dead zone until its line
+// runs, and `typeof` does not shield a TDZ read - see the v39.02 boot failure.)
+function _lssIsBot(e) {
+  try { return !!(e && e instanceof Bot); } catch (_) { return false; }
+}
+
 function updateTeammatesStrip() {
   const yourList = document.getElementById('teammates-list');
   const enemyList = document.getElementById('enemies-list');
@@ -97007,8 +97328,8 @@ function updateTeammatesStrip() {
 
   // ---- Helper: build a single chip element ----
   function makeChip(opts) {
-    // opts: { name, ship, isYou, isEnemy, isEmpty, showPip, isReady,
-    //         discordAvatarUrl }
+    // opts: { name, ship, label, isYou, isEnemy, isEmpty, showPip, isReady, pipText,
+    //         discordAvatarUrl, botSide, botIdx, botLocked }
     const chip = document.createElement('div');
     chip.className = 'fleet-chip';
     if (opts.isYou) chip.classList.add('you');
@@ -97016,33 +97337,43 @@ function updateTeammatesStrip() {
     if (opts.isEmpty) chip.classList.add('empty');
     if (!opts.showPip) chip.classList.add('no-pip');
     if (opts.isReady) chip.classList.add('is-ready');
+    if (opts.botSide) chip.classList.add('bot-seat');
+    if (opts.botSide && opts.botLocked) chip.classList.add('bot-locked');
 
-    // Thumb area: prefer the player's Discord avatar (signed-in
-    // humans), fall back to the baked GLB ship thumbnail (bots,
-    // unsigned players), fall back to a dashed empty placeholder.
+    // (v45.33) THE SHIP IS THE PICTURE. Owner: "the player's ship(s) should always be displayed in
+    // the player cards, for everyone to see" / "i want the mini ship model selection to show there".
+    // It used to be the other way round: a signed-in pilot's card was their Discord avatar at 64px
+    // and their HULL was eight orange pixels of text in the corner - so on a room full of
+    // signed-in players not one ship was actually visible. The two swap places. The avatar is
+    // still there, as the badge that says whose ship this is, which is all it was ever telling you.
+    // The no-ship cases are unchanged: nothing picked yet and signed in = the old big avatar,
+    // nothing picked and not signed in = the dashed EMPTY plate.
+    const _thumbSrc = (!opts.isEmpty && opts.ship && opts.ship !== '---' && _shipThumbCache[opts.ship])
+      ? _shipThumbCache[opts.ship] : null;
+    const _hasShip = !!(!opts.isEmpty && opts.ship && opts.ship !== '---');
     let thumbHTML;
-    if (!opts.isEmpty && opts.discordAvatarUrl) {
-      // Discord avatar as a centered circle ; tiny ship-loadout
-      // marker overlaid in the corner so we still see what they
-      // picked at a glance.
-      const shipMini = opts.ship && opts.ship !== '---'
-        ? `<span class="chip-ship-mini">${opts.ship}</span>`
+    if (_thumbSrc || (_hasShip && !opts.discordAvatarUrl)) {
+      const art = _thumbSrc
+        ? `<img class="chip-thumb" src="${_thumbSrc}" alt="${opts.ship}">`
+        // Picked, but the GLB thumbnails have not been baked yet (bakeShipThumbnails repaints the
+        // strip when they land). Its key on the same plate, so the card keeps its shape.
+        : `<div class="chip-thumb-empty">${_roomBoxEsc(opts.ship)}</div>`;
+      const badge = opts.discordAvatarUrl
+        ? `<img class="chip-avatar-badge" src="${opts.discordAvatarUrl}" alt="${_roomBoxEsc(opts.name || '')}">`
         : '';
+      // The arrows are painted on every bot seat while a picker is up; _lssBotPickAllowed decides
+      // at PRESS time whether they do anything (see its note).
+      const arrows = opts.botSide
+        ? `<button class="chip-ship-arrow left" type="button" data-bot-dir="-1" title="Previous hull">&#9664;</button>` +
+          `<button class="chip-ship-arrow right" type="button" data-bot-dir="1" title="Next hull">&#9654;</button>`
+        : '';
+      thumbHTML = `<div class="chip-art">` + art + badge + arrows + `</div>`;
+    } else if (!opts.isEmpty && opts.discordAvatarUrl) {
       thumbHTML = `<div class="chip-avatar-wrap">` +
-        `<img class="chip-avatar" src="${opts.discordAvatarUrl}" alt="${opts.name || ''}">` +
-        shipMini +
+        `<img class="chip-avatar" src="${opts.discordAvatarUrl}" alt="${_roomBoxEsc(opts.name || '')}">` +
       `</div>`;
     } else {
-      const thumbSrc = (!opts.isEmpty && opts.ship && _shipThumbCache[opts.ship])
-        ? _shipThumbCache[opts.ship] : null;
-      if (thumbSrc) {
-        thumbHTML = `<img class="chip-thumb" src="${thumbSrc}" alt="${opts.ship}">`;
-      } else if (opts.isEmpty) {
-        thumbHTML = `<div class="chip-thumb-empty">EMPTY</div>`;
-      } else {
-        // Ship picked but thumb not yet baked ; show its key as a fallback.
-        thumbHTML = `<div class="chip-thumb-empty">${opts.ship || '---'}</div>`;
-      }
+      thumbHTML = `<div class="chip-thumb-empty">EMPTY</div>`;
     }
 
     // (v38.60) Peer display names come straight off the loadout / hello payloads
@@ -97050,14 +97381,48 @@ function updateTeammatesStrip() {
     const nameTxt = _roomBoxEsc(opts.name || '---');
     // (v45.17) `label` is the STATUS line; `ship` stays the ship key the thumbnail and the mini
     // badge are looked up by, so a card can read CONFIRMED and still show the hull they picked.
-    const shipTxt = _roomBoxEsc(opts.label || opts.ship || '---');
+    // (v45.33) ...and now it shows BOTH. v45.17 had `label` REPLACE the hull key here, which was
+    // right while the card's picture was a Discord avatar - the status was the only thing this line
+    // could usefully add. The picture is the hull now, so the line names it and reports the pilot's
+    // progress beside it: "VORTEX · PICKING" -> "VORTEX · CONFIRMED" -> "VORTEX".
+    const _shipKey = (opts.ship && opts.ship !== '---') ? opts.ship : '';
+    const shipTxt = _roomBoxEsc(
+      (_shipKey && opts.label) ? (_shipKey + ' \u00b7 ' + opts.label)
+                               : (opts.label || _shipKey || '---'));
+    // (v45.33) the pip's WORDS are an option now. A bot seat is not waiting on anyone - its two
+    // states are "you can still change this" and "locked in with the rest of the fleet".
+    const pipTxt = opts.pipText || (opts.isReady ? 'READY' : 'WAIT');
     chip.innerHTML = `
       ${thumbHTML}
       <span class="chip-name">${nameTxt}</span>
       <span class="chip-ship">${shipTxt}</span>
-      <span class="chip-ready-pip">${opts.isReady ? 'READY' : 'WAIT'}</span>
+      <span class="chip-ready-pip">${pipTxt}</span>
     `;
+    if (opts.botSide) {
+      chip.dataset.botSide = opts.botSide;
+      chip.dataset.botIdx = String(opts.botIdx | 0);
+    }
     return chip;
+  }
+  // (v45.33) One planned-bot card. `side` is the DEAL's side ('enemy' / 'friendly'), which is not
+  // the same thing as the card's half of the strip: the deal is written from Fleet A's point of
+  // view (it always has), so a player sitting on Fleet B sees the deal's "enemy" hand as their own
+  // fleet. Resolving that here keeps the two callers below symmetrical.
+  function makeBotSeat(side, idx, key, isEnemyHalf) {
+    const lo = (typeof LOADOUTS !== 'undefined') ? LOADOUTS[key] : null;
+    const mine = _lssBotDealMine();
+    const locked = !_lssBotPickAllowed();
+    return makeChip({
+      name: (lo && lo.name) ? lo.name + ' BOT' : 'BOT',
+      ship: key || '---',
+      isEnemy: !!isEnemyHalf,
+      // Not our hand (a peer watching the authority's fleet): a plain informational card, the same
+      // shape the in-match bot cards have. SWAP invites the scroll; LOCKED reports the CONFIRM.
+      showPip: mine,
+      isReady: locked,
+      pipText: locked ? 'LOCKED' : 'SWAP',
+      botSide: mine ? side : null, botIdx: idx, botLocked: locked,
+    });
   }
 
   // ---- YOUR FLEET ----
@@ -97077,9 +97442,14 @@ function updateTeammatesStrip() {
   // the third time the original author had written down what they were protecting.
   // So: committed (LAUNCH pressed) shows the HULL, confirmed-not-yet-launched shows CONFIRMED, and
   // anything else is still PICKING. The pip goes green on either, because both mean locked in.
+  // (v45.33) ...and the HULL is shown from the moment you are looking at it. Owner: "the player's
+  // ship(s) should always be displayed in the player cards". `game._ssKey` is the carousel's live
+  // pick (previewLoadout writes it), and the picker auto-previews a ship on entry, so this card is
+  // never blank. The STATUS line is untouched - it still reads PICKING until CONFIRM, which is the
+  // v45.17 split: `label` says how far along you are, `ship` says what you are flying.
   const _youConfirmed = !!(game && game._ssConfirmed);
   const yourShip = (player && player.loadoutKey) ? player.loadoutKey
-                 : (_youConfirmed && game._ssKey) ? game._ssKey : '---';
+                 : (game && game._ssKey) ? game._ssKey : '---';
   const youCommitted = !!(player && player.loadoutKey);
   const yourLabel = youCommitted ? null : (_youConfirmed ? 'CONFIRMED' : 'PICKING');
   // One reading of a peer's card, used by both fleets so the two halves can never disagree.
@@ -97087,7 +97457,11 @@ function updateTeammatesStrip() {
     const committed = !!(peer && peer.loadoutKey);
     const confirmed = !!(peer && peer.ready);
     return {
-      ship: committed ? peer.loadoutKey : ((confirmed && peer.readyShip) ? peer.readyShip : '---'),
+      // (v45.33) `pickShip` is the peer's LIVE carousel pick (the `ship_pick` announce). The three
+      // fall back in order of certainty: flying it > locked it in > currently looking at it.
+      ship: committed ? peer.loadoutKey
+          : (confirmed && peer.readyShip) ? peer.readyShip
+          : (peer.pickShip || '---'),
       label: committed ? null : (confirmed ? 'CONFIRMED' : 'PICKING'),
       isReady: committed || confirmed,
     };
@@ -97134,14 +97508,26 @@ function updateTeammatesStrip() {
     }
   }
 
-  // 3) Friendly bots from game.entities.
-  const friendlies = (game.entities || []).filter(b => b.team === myTeam);
-  for (const bot of friendlies) {
-    yourList.appendChild(makeChip({
-      name: (bot.loadout && bot.loadout.name) ? bot.loadout.name + ' BOT' : 'BOT',
-      ship: bot.loadoutKey || '---',
-      showPip: false,
-    }));
+  // 3) Friendly bots. Once the world exists they come from game.entities; in the picker, where the
+  // world does not exist yet, they come from the HAND (see _lssBotSeats) - which is the same hand
+  // spawnBots will deal from in a few seconds, so the cards are a promise the round keeps.
+  // (v45.33) `_lssIsBot` replaces a bare `.team === myTeam` filter that also matched every
+  // NetworkPlayer in the list, i.e. drew connected humans a second time as "BOT".
+  const _seats = _lssBotSeats();
+  const _myHand   = (myTeam === LSS.TEAM_FLEET_B) ? 'enemy' : 'friendly';
+  const _theirHand = (myTeam === LSS.TEAM_FLEET_B) ? 'friendly' : 'enemy';
+  const friendlies = (game.entities || []).filter(b => _lssIsBot(b) && b.team === myTeam);
+  if (friendlies.length) {
+    for (const bot of friendlies) {
+      yourList.appendChild(makeChip({
+        name: (bot.loadout && bot.loadout.name) ? bot.loadout.name + ' BOT' : 'BOT',
+        ship: bot.loadoutKey || '---',
+        showPip: false,
+      }));
+    }
+  } else {
+    const _mine = _seats[_myHand] || [];
+    for (let i = 0; i < _mine.length; i++) yourList.appendChild(makeBotSeat(_myHand, i, _mine[i], false));
   }
 
   // 4) Pad to 3 slots so the strip doesn't collapse pre-spawn.
@@ -97176,15 +97562,20 @@ function updateTeammatesStrip() {
     }
   }
 
-  // 2) Enemy bots.
-  const enemies = (game.entities || []).filter(b => b.team === otherTeam);
-  for (const bot of enemies) {
-    enemyList.appendChild(makeChip({
-      name: (bot.loadout && bot.loadout.name) ? bot.loadout.name + ' BOT' : 'BOT',
-      ship: bot.loadoutKey || '---',
-      isEnemy: true,
-      showPip: false,
-    }));
+  // 2) Enemy bots - same live-then-planned pair as the friendly half above.
+  const enemies = (game.entities || []).filter(b => _lssIsBot(b) && b.team === otherTeam);
+  if (enemies.length) {
+    for (const bot of enemies) {
+      enemyList.appendChild(makeChip({
+        name: (bot.loadout && bot.loadout.name) ? bot.loadout.name + ' BOT' : 'BOT',
+        ship: bot.loadoutKey || '---',
+        isEnemy: true,
+        showPip: false,
+      }));
+    }
+  } else {
+    const _theirs = _seats[_theirHand] || [];
+    for (let i = 0; i < _theirs.length; i++) enemyList.appendChild(makeBotSeat(_theirHand, i, _theirs[i], true));
   }
 
   // 3) Pad enemy side to 3 slots too.
@@ -97192,6 +97583,47 @@ function updateTeammatesStrip() {
     enemyList.appendChild(makeChip({
       name: 'EMPTY', ship: '---', isEnemy: true, isEmpty: true, showPip: false,
     }));
+  }
+
+  // ⭐ (v45.33) SCROLL THE ICON LEFT OR RIGHT - the owner's words, wired as both halves of that
+  // gesture: the arrows are the tap target (a phone has no wheel) and the wheel is the desktop one.
+  // A trackpad swipe over a card arrives as deltaX, a mouse wheel as deltaY, so both count.
+  // ⚠ THE ARROW CLICK MUST STOP PROPAGATING. The enemy list's own click handler is the v45.27
+  //   TEAM SWAP; without it, changing a bot's hull would also move you to the other fleet.
+  //   Per-button rather than delegated for exactly that reason - a second delegated listener on the
+  //   same node cannot stop the first one (that needs stopImmediatePropagation, and ordering two
+  //   independent features by registration order is not a contract worth having).
+  //   Handlers cannot stack: this function rebuilds both lists from innerHTML = '' every time.
+  for (const _list of [yourList, enemyList]) {
+    for (const _chip of _list.children) {
+      if (!_chip.dataset || !_chip.dataset.botSide) continue;
+      const _side = _chip.dataset.botSide, _idx = (+_chip.dataset.botIdx) | 0;
+      for (const _ar of _chip.querySelectorAll('.chip-ship-arrow')) {
+        _ar.addEventListener('click', (e) => {
+          e.stopPropagation(); e.preventDefault();
+          _lssBotCycleShip(_side, _idx, (+_ar.dataset.botDir < 0) ? -1 : 1);
+        });
+      }
+    }
+    if (!_list._lssBotWheelBound) {
+      _list._lssBotWheelBound = true;
+      _list.addEventListener('wheel', (e) => {
+        try {
+          const chip = e.target && e.target.closest ? e.target.closest('.fleet-chip') : null;
+          if (!chip || !chip.dataset || !chip.dataset.botSide) return;
+          if (!_lssBotPickAllowed()) return;
+          const d = (Math.abs(e.deltaX) > Math.abs(e.deltaY)) ? e.deltaX : e.deltaY;
+          if (!d) return;
+          e.preventDefault();   // #fleet-scroll would otherwise scroll the column out from under you
+          // One hull per gesture, not one per wheel tick: a single notch on a free-spinning wheel
+          // reports a dozen events and would blur the whole roster past you.
+          const _now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+          if (_now - (_list._lssBotWheelT || 0) < 110) return;
+          _list._lssBotWheelT = _now;
+          _lssBotCycleShip(chip.dataset.botSide, (+chip.dataset.botIdx) | 0, (d > 0) ? 1 : -1);
+        } catch (_) {}
+      }, { passive: false });
+    }
   }
 
   // ⭐ (v45.27) THE WHOLE ENEMY HALF IS THE BUTTON. Owner: "i should be able to swap teams by
