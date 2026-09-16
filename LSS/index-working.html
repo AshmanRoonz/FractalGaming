@@ -6344,7 +6344,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.83';
+const LSS_BUILD = '44.84';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -33719,8 +33719,25 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
     // more than two half-lengths of clear water between the ship and its own bow spray.
     // Scaled by `__water.lead` (0.45) so the pile-up sits just off the nose where a bow wave forms.
     // 1.0 restores the pre-44.80 distance exactly.
-    const _leadK = (W3.lead != null) ? +W3.lead : 0.45;
-    const lead = fp.half * Math.min(1.4, vh / 240) * _leadK;
+    // ⭐⭐ (v44.84) THE BOW WAVE SITS ON WHATEVER PART OF THE SHIP IS LEADING.
+    // Owner: "it's not spawning ahead, but it looks like it is ... the spray should stay attached"
+    // -> "not necessarily the nose ... whatever part of the ship is leading".
+    // Measured, which is what named the cause: the drops were never ahead of the hull - at -22 deg
+    // the furthest fresh drop sat +38 along the heading while the nose reached +76. What moves is
+    // the SHIP, not the spray. `lead` was `fp.half * up to 1.4`: a fixed multiple of a hydrodynamic
+    // half-length, pointed along the horizontal heading, with no idea of the hull's real shape or
+    // attitude. Pitch the nose 22 deg down and it goes ~21 units UNDER the waterline while the seed
+    // stays up on the surface at the spot the nose would have occupied level - attached to nothing.
+    // So ask the hull directly: project its real box onto the direction of travel and take the
+    // furthest corner. That is the nose in level flight, a wingtip in a hard yaw, the tail flying
+    // backwards, and it shortens by itself as the leading part tucks under - no pitch term needed,
+    // because the geometry already contains the pitch. The speed ramp is capped at 1.0 (was 1.4) so
+    // the seed lands ON the leading edge at speed and never past it.
+    // `__water.lead` (1.0) scales the whole thing.
+    const _leadK = (W3.lead != null) ? +W3.lead : 1.0;
+    const _le = _swLeadingExtent(actor, hx, hz);
+    const _leadBase = (_le > 0) ? _le : fp.half;
+    const lead = _leadBase * Math.min(1.0, vh / 240) * _leadK;
     // ⚠⚠ (v44.82) A `bowAmp` SCALE WENT HERE AND DID NOTHING. MEASURED: with spray settled, the
     // near-hull crest read 98.91 / 98.68 / 98.91 at bowAmp 1.0 / 0.35 / 0.6 - identical. This
     // forward seed is NOT the wall that stands in front of the ship; the hull's own wake seeds are,
@@ -33848,6 +33865,59 @@ function _swHullMetrics() {
     _swHM.key = M; _swHM.v = v;
     return v;
   } catch (_) { return null; }
+}
+// (v44.84) HOW FAR THE HULL REACHES IN THE DIRECTION IT IS TRAVELLING - "whatever part of the ship
+// is leading". Projects the hull's real box onto a horizontal direction and returns the furthest
+// corner's distance ahead of the actor's own origin.
+//
+// ⚠ The LOCAL box is cached per mesh and the CORNERS are transformed per call, which is the whole
+// point: `Box3.setFromObject` returns a world AXIS-ALIGNED box, and an AABB grows as the object
+// rotates. _swHullSpan has that flaw and it is why a first pass at this measured a 90-unit hull as
+// 128 units long the moment it pitched. Eight transforms a call is cheaper than being wrong.
+const _swLeadBox = new WeakMap();
+const _swLeadV = new THREE.Vector3(), _swLeadInv = new THREE.Matrix4(), _swLeadM = new THREE.Matrix4();
+const _swLeadQ = new THREE.Quaternion();
+function _swLeadingExtent(actor, dx, dz) {
+  try {
+    const m = actor && actor.mesh; if (!m) return 0;
+    const pos = actor.position; if (!pos) return 0;
+    let box = _swLeadBox.get(m);
+    if (!box) {
+      m.updateWorldMatrix(true, true);
+      _swLeadInv.copy(m.matrixWorld).invert();
+      box = new THREE.Box3();
+      m.traverse(o => {
+        if (!o.isMesh || !o.geometry) return;
+        if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+        const bb = o.geometry.boundingBox; if (!bb) return;
+        _swLeadM.multiplyMatrices(_swLeadInv, o.matrixWorld);
+        for (let i = 0; i < 8; i++) {
+          _swLeadV.set((i & 1) ? bb.max.x : bb.min.x, (i & 2) ? bb.max.y : bb.min.y, (i & 4) ? bb.max.z : bb.min.z);
+          box.expandByPoint(_swLeadV.applyMatrix4(_swLeadM));
+        }
+      });
+      if (box.isEmpty()) return 0;
+      _swLeadBox.set(m, box);
+    }
+    // ⚠⚠ (v44.84) NOT THE BOX'S CORNERS - measured, and they are a trap. A corner is a fictitious
+    // point out at nose+wingtip+belly, not a part of the ship, and rotating the box SWEEPS it
+    // forward: this returned 96 units at level, 125 nose-down 22 deg and 154 yawed 35 deg, i.e. the
+    // hull appeared to grow as it turned, and the corner it picked at level sat 93 units UNDERWATER.
+    // The support function of the ellipsoid inscribed in the box is the honest version: for a
+    // direction expressed in the hull's own axes it is sqrt((a*lx)^2 + (b*ly)^2 + (c*lz)^2), which
+    // returns the half-LENGTH when the ship points along its travel and falls smoothly toward the
+    // half-BEAM as it turns across it. No corners, no growth, and it shortens by itself when the
+    // leading part pitches under - which is the whole point.
+    _swLeadV.set(dx, 0, dz).applyQuaternion(_swLeadQ.copy(m.quaternion).invert());
+    const ax = (box.max.x - box.min.x) * 0.5, ay = (box.max.y - box.min.y) * 0.5, az = (box.max.z - box.min.z) * 0.5;
+    const sx = ax * _swLeadV.x, sy = ay * _swLeadV.y, sz = az * _swLeadV.z;
+    let best = Math.sqrt(sx * sx + sy * sy + sz * sz);
+    // the box is rarely centred on the actor's origin, so carry its offset along the same direction
+    _swLeadV.set((box.max.x + box.min.x) * 0.5, (box.max.y + box.min.y) * 0.5, (box.max.z + box.min.z) * 0.5)
+            .applyMatrix4(m.matrixWorld);
+    best += (_swLeadV.x - pos.x) * dx + (_swLeadV.z - pos.z) * dz;
+    return (best > 0 && isFinite(best)) ? best : 0;
+  } catch (_) { return 0; }
 }
 function _swHullSpan() {
   try {
