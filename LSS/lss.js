@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.18';
+const LSS_BUILD = '45.24';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5146,6 +5146,7 @@ function enterShipSelect() {
   _stagedRoundShip = null;
   try { if (window._lssLockLandscape) window._lssLockLandscape(true); } catch (_) {}
   document.getElementById('lobby').style.display = 'none';
+  try { document.body.classList.remove('lss-land-lobby'); } catch (_) {}
   _shipSelectSetLaunching(false);
   try { _lssSetConfirmWaiting(false); } catch (_) {}   // (v43.27) a raised picker is never mid-wait
   const sel = document.getElementById('ship-select');
@@ -5582,6 +5583,7 @@ function _lobbyLandscape(force) {
     const want = (window.innerWidth > window.innerHeight * 1.15) && window.innerWidth >= 700;
     if (!force && want === _landOn) return;
     _landOn = want;
+    try { document.body.classList.toggle('lss-land-lobby', !!want); } catch (_) {}
     try { _unifyLobbyBox(); } catch (_) {}
     const right = document.getElementById('lobby-right');
     const howto = document.getElementById('btn-howto');
@@ -5615,7 +5617,15 @@ function _lobbyLandscape(force) {
         right.appendChild(side);
       }
       if (howto && soloRow && howto.parentNode !== soloRow) soloRow.insertBefore(howto, soloRow.firstChild);
-      if (roomBox && modeWrap && roomBox.parentNode !== modeWrap) modeWrap.appendChild(roomBox);
+      if (roomBox && roomBox.parentNode !== lob) lob.appendChild(roomBox);
+      try {
+        const _rc = document.getElementById('room-code');
+        if (_rc) {
+          _rc.style.setProperty('flex', '1 1 0%', 'important');
+          if (!_rc._lssPh) _rc._lssPh = _rc.getAttribute('placeholder') || 'ENTER A ROOM CODE';
+          _rc.setAttribute('placeholder', 'ROOM CODE');
+        }
+      } catch (_) {}
       try {
         const _cr = document.getElementById('lobby-credit');
         if (_cr && _cr.parentNode !== lob) lob.appendChild(_cr);
@@ -5629,6 +5639,13 @@ function _lobbyLandscape(force) {
     } else {
       lob.classList.remove('lss-land');
       [howto, roomBox, secGame, secCommunity, secTools, roomStack].forEach(_landRestore);   // (v44.49)
+      try {
+        const _rc = document.getElementById('room-code');
+        if (_rc) {
+          _rc.style.setProperty('flex', '0 0 auto', 'important');
+          if (_rc._lssPh) _rc.setAttribute('placeholder', _rc._lssPh);
+        }
+      } catch (_) {}
       try {
         const _cr = document.getElementById('lobby-credit');
         const _grid = document.getElementById('lobby-grid');
