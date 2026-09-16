@@ -9,7 +9,14 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.34';
+const LSS_BUILD = '45.37';
+try {
+  const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
+  if (_st) {
+    const _v = Math.max(0, Math.min(240, parseInt(_st[1], 10) || 0));
+    document.documentElement.style.setProperty('--ss-top-safe', _v + 'px');
+  }
+} catch (_) {}
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5031,14 +5038,33 @@ function _ssModeLabel() {
     const el = document.getElementById('ss-mode-label');
     if (!el) return;
     const name = _ssModeName();
-    if (!name) { el.classList.remove('on'); el.textContent = ''; return; }
+    if (!name) { el.classList.remove('on'); el.innerHTML = ''; el._ssmBuilt = false; return; }
     let sub = '';
     if (game && game._cyber && game._cyber.armed) {
       sub = (player && game._cyber.teamA != null && player.team === game._cyber.teamB)
         ? 'HOLD THE FIELD' : 'TAKE THE FIELD';
     }
-    el.innerHTML = name + (sub ? '<small>' + sub + '</small>' : '');
+    if (!el._ssmBuilt) {
+      el.innerHTML =
+        '<div class="lss-tag"><div class="lt-text">' +
+          '<span class="ssm-title">LAST SHIP SAILING</span>' +
+          '<span class="ssm-sep">:</span>' +
+          '<span class="ssm-mode"></span>' +
+        '</div><div class="lt-sub ssm-sub" style="display:none;"></div></div>';
+      el._ssmBuilt = true;
+    }
+    const _mEl = el.querySelector('.ssm-mode');
+    if (_mEl && _mEl.textContent !== name) {
+      if (typeof _lssDigitizeIn === 'function') _lssDigitizeIn(_mEl, name);
+      else _mEl.textContent = name;
+    }
+    const _sEl = el.querySelector('.ssm-sub');
+    if (_sEl) { _sEl.textContent = sub; _sEl.style.display = sub ? '' : 'none'; }
     el.classList.add('on');
+    try {
+      requestAnimationFrame(() => { try { _ssSpreadRails(); } catch (_) {} });
+      setTimeout(() => { try { _ssSpreadRails(); } catch (_) {} }, 520);
+    } catch (_) {}
     const ag = document.getElementById('btn-aegis-select');
     if (ag) ag.style.display = (typeof _aegisModeAllowed === 'function' && !_aegisModeAllowed()) ? 'none' : '';
     try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
@@ -5062,8 +5088,23 @@ function _lssBtnLabel(el, text) {
   if (!el) return;
   try { el.textContent = text; el.setAttribute('data-label', text); } catch (_) {}
 }
+function _lssSyncVrLaunchBtn() {
+  try {
+    const v = document.getElementById('ship-preview-confirm-vr');
+    if (!v) return;
+    let _midMatch = false;
+    try { _midMatch = !!(game && game.state !== 'select'); } catch (_) {}
+    const ready = !_midMatch && _lssLaunchReady();
+    v.disabled = !ready;
+    v.title = _midMatch      ? 'The round starts on its own'
+            : !_lssConfirmed() ? 'Confirm your ship first'
+            : !ready         ? 'Waiting for the rest of the room to confirm'
+            :                  'Take the room in, in VR';
+  } catch (_) {}
+}
 function _lssRefreshLaunchRow() {
   try {
+    _lssSyncVrLaunchBtn();
     const c = document.getElementById('ship-preview-confirm');
     const l = document.getElementById('ship-preview-launch');
     const on = _lssConfirmed();
@@ -11868,6 +11909,19 @@ function _xrOnSessionVisibilityChange() {
   } catch (_) {}
 }
 
+function _xrConfirmBeforeLaunch(key) {
+  try {
+    if (typeof game === 'undefined' || !game) return;
+    game._ssConfirmed = true;
+    if (typeof net !== 'undefined' && net && net.active) {
+      net.myReady = true;
+      try { if (net.sendEvent) net.sendEvent({ type: 'ready', ready: true, ship: key || game._ssKey || null }); } catch (_) {}
+    }
+    try { if (typeof _lssRefreshLaunchRow === 'function') _lssRefreshLaunchRow(); } catch (_) {}
+    try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
+  } catch (_) {}
+}
+
 function _xrTrustedUnlockMedia() {
   try { if (typeof _lssUnlockAnnouncerAudio === 'function') _lssUnlockAnnouncerAudio(); } catch (_) {}
   try {
@@ -11895,6 +11949,7 @@ function _xrHandleTrustedMenuActivation() {
     handled = true;
     try {
       if (_previewedKey && LOADOUTS[_previewedKey]) {
+        _xrConfirmBeforeLaunch(_previewedKey);
         commitLoadout(_previewedKey);
       } else {
         const first = document.querySelector('.ship-chip');
@@ -12888,7 +12943,7 @@ function _xrDrawShipSelectContent(ctx, W, H) {
     _xrText(ctx, 'LAUNCH', bx + bw / 2, by + 52, 'bold 44px Orbitron, sans-serif', on ? '#fff6e0' : '#ffe8b0', 'center');
     _xrHit(bx, by, bw, bh, 'launch', () => {
       const k = _xrSelectedLoadoutKey();
-      if (k && LOADOUTS[k]) commitLoadout(k);
+      if (k && LOADOUTS[k]) { _xrConfirmBeforeLaunch(k); commitLoadout(k); }
     });
   }
 
@@ -59480,7 +59535,7 @@ function _hlNanoOverlay(ctx, r, p) {
   const th = Math.max(3, (p.thick != null ? p.thick : 0.95) * r.vmin);
   const fillW = Math.max(2, th - th * 0.4);
   const overFrac = Math.min(1, (h - max) / (max * (perk.overhealMult - 1)));
-  _hlNanoSpan(ctx, r, p, 0, overFrac, '#b264ff', fillW, 0.95);
+  _hlNanoSpan(ctx, r, p, 0, overFrac, '#5dff8d', fillW, 0.95);
 }
 
 function _hlOverShieldOverlay(ctx, r, p) {
@@ -62183,6 +62238,7 @@ function previewLoadout(key) {
       const newVR = vrBtn.cloneNode(true);
       vrBtn.parentNode.replaceChild(newVR, vrBtn);
       newVR.addEventListener('click', () => {
+        try { if (typeof _lssLaunchReady === 'function' && !_lssLaunchReady()) return; } catch (_) {}
         try {
           const fv = document.getElementById('vr-enter-btn');
           if (fv && !fv.disabled) fv.click();
@@ -62200,6 +62256,7 @@ function previewLoadout(key) {
         try { renderer.xr.addEventListener('sessionstart', _vlOnStart); } catch (_) {}
         setTimeout(_vlBuild, 1600);
       });
+      try { _lssSyncVrLaunchBtn(); } catch (_) {}
     } else {
       vrBtn.style.display = 'none';
     }
@@ -63949,6 +64006,36 @@ function _ssSpreadRails() {
       const want = Math.max(base, stack + 12);
       if (want > base + 0.5) col.style.setProperty('top', Math.round(want) + 'px', 'important');
     }
+
+    try {
+      const ml = document.getElementById('ss-mode-label');
+      const tag = ml && ml.querySelector('.lss-tag');
+      if (tag && vis(ml)) {
+        const _natural = () => {
+          tag.style.removeProperty('font-size');
+          ml.style.setProperty('--ssm-dx', '0px');
+          return ml.getBoundingClientRect().width;
+        };
+        const bandL = EDGE;
+        const bandR = vis(dock) ? (dock.getBoundingClientRect().left - 14) : (vw - EDGE);
+        const band = Math.max(40, bandR - bandL);
+        const FLOOR = 13;   // below this it has stopped being a title - stack it instead
+        ml.classList.remove('ssm-stack');
+        let w = _natural();
+        const baseFs = parseFloat(getComputedStyle(tag).fontSize) || 20;
+        if (w > band && vh >= 480) { ml.classList.add('ssm-stack'); w = _natural(); }
+        if (w > band) {
+          const fs = Math.max(9, Math.floor(baseFs * (band / w)));
+          tag.style.setProperty('font-size', fs + 'px', 'important');
+          w = ml.getBoundingClientRect().width;
+        }
+        let dx = 0;
+        const cL = vw / 2 - w / 2, cR = vw / 2 + w / 2;
+        if (cR > bandR) dx = bandR - cR;
+        if (cL + dx < bandL) dx = bandL - cL;
+        ml.style.setProperty('--ssm-dx', Math.round(dx) + 'px');
+      }
+    } catch (_) {}
 
     const leftEdge  = vis(strip) ? strip.getBoundingClientRect().right + GAP : EDGE;
     const rightObs  = [];

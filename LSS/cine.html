@@ -670,6 +670,29 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   pointer-events: none;
 }
 #ship-select-header > * { pointer-events: auto; }
+/* (v45.35) THE TOP EDGE OF THE VIEWPORT IS NOT A PLACE TO PUT THE ONLY WAY OUT.
+   Owner, on a Meta Quest in the flat 2D browser: "i wasn't able to click on the settings or main
+   menu button from the ship selection screen... other devices are fine".
+   MEASURED, and it is the one thing those two buttons have in common: at every viewport size they
+   sit at y=4 with a height of 23, i.e. entirely inside the first 27px of the page. They are the ONLY
+   interactive elements in the game that do. The next control down, CONFIRM, starts at y=32 and
+   works there; on the MAIN MENU - which also works there - the topmost control is FULLSCREEN at
+   y=81. So the boundary between "works on Quest" and "does not" runs between 27px and 32px from the
+   top edge, which is the browser window's own chrome: in the headset a ray aimed at the top strip of
+   a windowed page is taken by the window furniture, not the page.
+   ⚠ NOT AN OVERLAP BUG - that was checked first and ruled out. elementFromPoint over the centre of
+     both buttons returns the buttons themselves at 1280x720, 1100x700, 1024x640, 1024x480 and
+     880x700, with the VR twin forced visible. Nothing in the page is on top of them; the page just
+     does not get the press.
+   The title keeps the 4px top it was given in v43.44 - only the BUTTON ROW moves - so the header
+   looks the same everywhere except that its two escape hatches are now reachable. _ssSpreadRails
+   measures this dock's bottom edge and pushes #ss-right-col down from it, so the right column
+   follows on its own with no second number to keep in step.
+   (!) THE SIZE OF THE STRIP IS A GUESS, so it is a KNOB, not a constant: `?safetop=64` in the URL
+   overrides it. A headset has no devtools and the owner reaches the game by typing a URL, so that is
+   the one control surface that actually exists on the device. */
+:root { --ss-top-safe: 28px; }
+#ss-header-btns { margin-top: var(--ss-top-safe); }
 /* (v35.16) Header right dock: MAIN MENU + SETTINGS row, CONFIRM stacked under. */
 /* (v36.39) position:relative — #ship-preview-difficulty is absolutely docked at
    `top:100%` of this box, i.e. directly under CONFIRM & LAUNCH. */
@@ -677,6 +700,9 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   position: relative;
   display: flex; flex-direction: column; align-items: stretch; gap: 8px;
   flex-shrink: 0;
+  /* (v45.36) the header's `justify-content: space-between` has nothing to space against now that
+     the title has moved to the centre label - see the note in the markup. */
+  margin-left: auto;
 }
 #ss-header-btns { display: flex; gap: 10px; align-items: center; justify-content: flex-end; }
 #ship-select-header h1 {
@@ -2524,6 +2550,11 @@ body.lss-litehud #lobby *, body.lss-litehud #lobby-room-hud * {
    #round-info's own height is in fixed px and does not scale with vmin.
    translateX only, so `top` means the TOP EDGE like every other tenant of the
    band; the value below is just the pre-measure default. */
+/* (v45.37) RETIRED - see the note in the markup. `display: none !important` beats the eleven
+   `style.display = 'block'` writers that still turn it on, exactly as the v44.38 #doomed-warning
+   retirement does; the rest of the rule is kept so the element can be brought back by deleting one
+   line rather than reconstructing it. */
+#stasis-warning { display: none !important; }
 #stasis-warning {
   position: fixed; top: 116px; left: 50%; transform: translateX(-50%);
   z-index: 16; pointer-events: none; color: #00ccff; font-size: 13px;
@@ -3551,8 +3582,16 @@ body.vr-active #camp-video { display: none !important; }
 
 
 <!-- (v35.93) Charge-bar child removed: the HUD shield arc IS the recharge
-     display, the bar said the same thing twice. -->
-<div id="stasis-warning">STASIS FIELD: SHIELDS RECHARGING</div>
+     display, the bar said the same thing twice.
+     (v45.37) ...and so did the TEXT. Owner: "let's get rid of the stasis field text messages, like
+     'charging shields' because it's obvious that shield is charging" - which is the v35.93 argument
+     reaching its conclusion: the shield arc is already filling in front of you and the blue
+     #stasis-vignette is already up, so the line was a third telling of the same fact.
+     ⚠ THE ELEMENT STAYS, EMPTIED AND UNDISPLAYED - the same retirement #doomed-warning got in
+     v44.38. Eleven places write `stasis-warning`'s style.display (the pickup, the champion claim,
+     three teardowns, the HUD layout walker, the lss-nodom / lss-litehud strip lists), and deleting
+     the node would turn every one of them into a null dereference for no gain. -->
+<div id="stasis-warning"></div>
 <div id="stasis-vignette"></div>
 <div id="ov-underwater"></div>
 
@@ -3586,8 +3625,6 @@ body.vr-active #camp-video { display: none !important; }
       var hint = document.getElementById('lobby-scroll-hint');
       if (!grid || !hint) return;
       // The menu's scroller differs by layout: the grid itself (wide desktop,
-      // scrollbar hidden), #lobby-right (mid widths), or #lobby (mobile).
-      // Walk the candidates and hint on whichever actually overflows.
       var right = document.getElementById('lobby-right');
       function upd() {
         var vis = grid.offsetParent !== null && grid.clientHeight > 0;
@@ -3599,10 +3636,6 @@ body.vr-active #camp-video { display: none !important; }
             if (el && (el.scrollHeight - el.clientHeight) > 8) { sc = el; break; }
           }
           if (sc) {
-            // (v45.23) 40 -> 10. The threshold assumed the only interesting overflow was a large
-            // one, so a list cut by 29px - most of ASSAULT - showed a half-row and no chevron at
-            // all, which reads as a broken layout rather than a scrollable one. Anything that
-            // clips a row is worth an affordance; 10px still ignores sub-pixel rounding.
             more = (sc.scrollHeight - sc.clientHeight - sc.scrollTop) > 10;
             var rr = (sc === document.documentElement) ? { left: 0, width: window.innerWidth, bottom: window.innerHeight } : sc.getBoundingClientRect();
             x = rr.left + Math.min(sc.clientWidth || rr.width, rr.width) / 2 - 30;
@@ -4111,12 +4144,6 @@ body.vr-active #camp-video { display: none !important; }
 </div>
 
 <script>
-  // (v30.60) Lobby background art probe, orientation-aware.
-  // Landscape viewport -> LSS_landscape.png ; portrait viewport -> the
-  // LSS.png poster, shown SHARP. The orange CSS wordmark stays visible
-  // in both orientations. The blurred
-  // portrait-fallback only applies when the landscape art is missing and
-  // the poster has to stand in on a wide screen. Re-applies on rotate.
   (function () {
     var hasLand = false, hasPort = false;
     function apply() {
@@ -4129,8 +4156,6 @@ body.vr-active #camp-video { display: none !important; }
       bg.classList.remove('portrait-fallback');
       bg.style.backgroundPosition = '';
       if (wm) wm.style.display = '';
-      // (v38.64) WebP: the same art at ~10% of the PNG bytes (LSS 2.2 -> 0.21 MB,
-      // landscape 2.35 -> 0.18 MB). The PNG originals stay in the repo.
       if (portrait && hasPort) {
         bg.style.backgroundImage = "url('LSS.webp')";
         bg.style.backgroundPosition = 'center top';
@@ -4141,11 +4166,6 @@ body.vr-active #camp-video { display: none !important; }
         bg.classList.add('portrait-fallback');
       }
     }
-    // (v38.60) Probe only the art this orientation will show. LSS.png is on
-    // the page anyway (the lobby logo <img>), so its probe is free; the 2.35 MB
-    // landscape art used to be fetched on every portrait phone that never
-    // displays it. It is probed lazily when the device rotates to landscape
-    // (or when the portrait art fails and it has to stand in).
     var probing = {};
     function probeLand() {
       if (probing.land) return; probing.land = true;
@@ -4538,6 +4558,10 @@ body.vr-active #camp-video { display: none !important; }
 
 @media (max-height: 560px), (max-width: 760px) {
   #ship-select-header { padding: 6px 14px 5px !important; }
+  /* (v45.35) a short viewport has no height to give away - keep the buttons off the very edge, but
+     spend less of the screen doing it. Overriding the CUSTOM PROPERTY rather than the margin means
+     the `?safetop=` knob still wins here, because it is set on :root's style attribute. */
+  :root { --ss-top-safe: 14px; }
   #ship-select-header h1 { font-size: 16px !important; letter-spacing: 3px !important; }
   .ship-chip .sc-name { font-size: 10px !important; letter-spacing: 1.2px !important; }
   #ss-right-col { width: 195px !important; }
@@ -4614,6 +4638,7 @@ body.vr-active #camp-video { display: none !important; }
      details rail (which ends at 632) then clears it by 26px and can be as tall as it likes.
      Measured with everything restored at 844x390: zero overlaps. */
   #ship-select-header { padding: 4px 10px 3px !important; }
+  :root { --ss-top-safe: 12px; }   /* (v45.35) landscape phone - see the note on the base rule */
   #ship-select-header h1 { font-size: 14px !important; letter-spacing: 2px !important; }
   #ship-select-header h2 { display: none !important; }
   #ship-hero { top: 40px !important; }
@@ -4721,15 +4746,31 @@ body.vr-active #camp-video { display: none !important; }
   transform: scale(1.12);
 }
 #lobby-wordmark { position: absolute; top: 34px; left: 48px; z-index: 3; pointer-events: none; }
+/* (v45.36) the same chromatic treatment as the picker's masthead and the callout tags: the red/cyan
+   channel split plus a currentColor glow. Offsets are 2px here rather than the component's 1px
+   because this is a 34px wordmark, which is the scale #ov-banner's 28px text uses - a 1px split
+   vanishes at this size. The black drop stays; it is what holds the title against the city art.
+   ⚠ NO .lss-tag here, so no jitter/glitch: those animations are for TRANSIENT callouts, and this
+   masthead is on screen for the whole time the menu is. The chromatic text is the shared part, and
+   it is what the owner named. */
 #lobby-wordmark h1 {
   font-family: 'Orbitron', sans-serif; font-size: 34px; line-height: 1.12;
   letter-spacing: 6px; color: #ffaa00; margin: 0;
-  text-shadow: 0 0 26px rgba(255,170,0,0.35), 0 2px 10px rgba(0,0,0,0.85);
+  text-shadow:
+    -2px 0 0 rgba(255, 64, 96, 0.6),
+     2px 0 0 rgba(64, 220, 255, 0.6),
+     0 0 10px currentColor,
+     0 0 26px currentColor,
+     0 2px 12px rgba(0,0,0,0.85);
 }
 #lobby-wordmark span {
   display: block; margin-top: 8px;
   font-family: 'Rajdhani', 'Orbitron', sans-serif; font-size: 11px;
   letter-spacing: 7px; color: rgba(190,210,230,0.8);
+  text-shadow:
+    -1px 0 0 rgba(255, 64, 96, 0.45),
+     1px 0 0 rgba(64, 220, 255, 0.45),
+     0 0 6px rgba(190,210,230,0.5);
 }
 #lobby-left, #lobby-title-row { display: none !important; }
 
@@ -4947,14 +4988,42 @@ body.vr-active #camp-video { display: none !important; }
   text-shadow: 0 0 24px rgba(240,108,255,0.7);
   background: transparent !important; border: none !important;
 }
+/* (v45.36) TITLE: GAME MODE, in the callout tags' chromatic style.
+   Owner: "move the title ... to be part of the top middle where it says the game mode, it will be
+   Title: Game Mode" + "change the style of the title on the main page and the ship selection page
+   to match the recent style change, the chromatic style".
+   The style is the v44.38 component verbatim - `.lss-tag > .lt-text` brings the red/cyan split, the
+   glow and the dark plate, and _ssModeLabel digitises the MODE half on change (the title half never
+   changes, so it stays put while the mode types itself in).
+   Colours are the two this line replaces: #ffaa00 was the header <h1>, #ffd27a was this label. */
 #ss-mode-label {
-  position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+  position: absolute; top: 12px; left: 50%;
+  /* (v45.36) --ssm-dx is how far _ssSpreadRails has had to slide the masthead LEFT of true centre to
+     clear the MAIN MENU / SETTINGS dock. Zero on any window with room, which is every desktop size.
+     ⚠ The transform lives on THIS element, never on the .lss-tag inside it - that tag's transform is
+     owned by its jitter/glitch keyframes (the v40.55 lesson, restated in the v44.38 component note). */
+  transform: translateX(calc(-50% + var(--ssm-dx, 0px)));
   z-index: 6; pointer-events: none;
-  font-size: 13px; letter-spacing: 6px; font-weight: bold;
-  color: #ffd27a; text-shadow: 0 0 18px rgba(255,190,90,0.55);
+  color: #ffaa00;
   white-space: nowrap; text-align: center; opacity: 0; transition: opacity 0.25s ease;
 }
 #ss-mode-label.on { opacity: 1; }
+#ss-mode-label .lss-tag { font-size: 20px; letter-spacing: 5px; }
+#ss-mode-label .lt-text { padding: 1px 12px 3px 12px; }
+#ss-mode-label .ssm-sep { opacity: 0.45; margin: 0 0.35em 0 0.1em; }
+#ss-mode-label .ssm-mode { color: #ffd27a; }
+/* (v45.36) THE NARROW FALLBACK. One centred line of "LAST SHIP SAILING: ELIMINATION" cannot always
+   clear a right-pinned dock - at 760px wide the fit below ran out of room at its 9px floor, and a
+   9px masthead is not a masthead. Stacked, the widest thing that has to fit is the NAME (17 chars)
+   rather than the whole sentence, which buys back more than the shrink ever could.
+   Applied by _ssSpreadRails from a MEASUREMENT, not a width breakpoint - the dock's width depends on
+   the mode, the room chip and whether the VR button is up, so a hand-set breakpoint would be wrong
+   for half of them. */
+#ss-mode-label.ssm-stack .ssm-sep { display: none; }
+#ss-mode-label.ssm-stack .ssm-title,
+#ss-mode-label.ssm-stack .ssm-mode { display: block; }
+#ss-mode-label.ssm-stack .ssm-mode { font-size: 0.78em; letter-spacing: 0.22em; margin-top: 2px; }
+#ss-mode-label.ssm-stack .lt-text { padding: 2px 10px 3px 10px; line-height: 1.18; }
 /* (v38.03) the picker keeps its element through the launch with the chrome stripped off it
    (.lss-launching), so the mode line has to be stripped with the rest or it hangs over the
    cinematic */
@@ -4963,7 +5032,17 @@ body.vr-active #camp-video { display: none !important; }
   display: block; font-size: 8px; letter-spacing: 3px; font-weight: normal;
   color: rgba(255,255,255,0.45); margin-top: 3px;
 }
-@media (max-width: 900px) { #ss-mode-label { font-size: 10px; letter-spacing: 3px; top: 8px; } }
+/* (v45.36) the line is 30-odd characters of Orbitron and it is CENTRED ON THE VIEWPORT while the
+   MAIN MENU / SETTINGS dock sits on the right, so it has to come down in steps or the two meet.
+   The sizes below are measured, not guessed - see the clearance check in the v45.36 notes. */
+@media (max-width: 1200px) { #ss-mode-label .lss-tag { font-size: 17px; letter-spacing: 4px; } }
+@media (max-width: 900px)  { #ss-mode-label { top: 8px; } #ss-mode-label .lss-tag { font-size: 13px; letter-spacing: 2.5px; } }
+@media (max-height: 560px), (max-width: 760px) { #ss-mode-label .lss-tag { font-size: 12px; letter-spacing: 2px; } }
+@media (max-height: 500px) and (orientation: landscape) {
+  #ss-mode-label { top: 6px; }
+  #ss-mode-label .lss-tag { font-size: 11px; letter-spacing: 1.6px; }
+  #ss-mode-label .lt-text { padding: 1px 7px 2px 7px; }
+}
 #btn-freeflight { color: #5fd39a !important; }
 #btn-freeflight:hover {
   color: #8fe9bc !important; transform: translateX(12px);
@@ -5946,10 +6025,16 @@ body.lss-land-lobby #lss-version-badge {
        middle when you are connected. -->
   <div id="ss-mode-label"></div>
   <div id="ship-select-header" style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
-    <div>
-      <h1>LAST SHIP SAILING</h1>
-      <!-- (v43.46) "CHOOSE YOUR SHIP" removed - owner: "it's out of place, just delete it". -->
-    </div>
+    <!-- (v45.36) THE TITLE MOVED INTO #ss-mode-label. Owner: "let's move the title 'Last Ship
+         Sailing' to be part of the top middle where it says the game mode, it will be
+         Title: Game Mode". So the left-hand <h1> is gone and _ssModeLabel paints
+         "LAST SHIP SAILING: ELIMINATION" as one centred line.
+         ⚠ This row is `justify-content: space-between` (inline, above). With the title gone it has
+         ONE child, and space-between parks a lone child at the START - so #ss-header-right carries
+         `margin-left: auto` in the sheet to stay on the right. The `#ship-select-header h1`
+         rules in the base sheet and the three media blocks are now inert; they are left where they
+         are, exactly as the `h2` rules were when "CHOOSE YOUR SHIP" went in v43.46.
+         (v43.46) "CHOOSE YOUR SHIP" removed - owner: "it's out of place, just delete it". -->
     
     
     <!-- (v35.16) Right dock: MAIN MENU + SETTINGS row with CONFIRM & LAUNCH stacked
@@ -6507,7 +6592,7 @@ window._lssLockLandscape = function () {};
 
 
 
-<script src="lss.js?v=45.34"></script>
-<script src="cine.js?v=45.34"></script>
+<script src="lss.js?v=45.37"></script>
+<script src="cine.js?v=45.37"></script>
 </body>
 </html>
