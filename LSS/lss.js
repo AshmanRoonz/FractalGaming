@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.90';
+const LSS_BUILD = '44.92';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5747,6 +5747,7 @@ function _syncMapButtonsDisabled() {
                     (net.launchScheduledAt || net.mapCommitLocked));
   let _mapFrozen = false;
   try { _mapFrozen = !!(typeof game !== 'undefined' && game && game.state && game.state !== 'select'); } catch (_) {}
+  try { if (_lssJoinedMatchInProgress()) _mapFrozen = true; } catch (_) {}
   const mapLocked = locked || _mapFrozen;
   const prev = document.getElementById('map-prev');
   const next = document.getElementById('map-next');
@@ -15230,7 +15231,8 @@ function _xrHudUpdateCadence() {
 }
 function _shouldUseCineFXFrame() {
   if (!cineFX.enabled || !cineFX.composer) return false;
-  if (typeof game !== 'undefined' && game && (game.state === 'playing' || game.state === 'warmup')) {
+  if (typeof game !== 'undefined' && game && (game.state === 'playing' || game.state === 'warmup' ||
+      game.state === 'roundEnd' || game.state === 'matchEnd')) {
     return false;
   }
   return true;
@@ -17429,6 +17431,24 @@ if (typeof window !== 'undefined') window.__dbg = {
       if (agoMs === null) { LSS._modeChosen = false; LSS._modeChosenAt = 0; }
       else { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - (agoMs || 0); }
       return { mode: LSS.MODE, ago: _lssModeAgo(), chosen: !!LSS._modeChosen };
+    } catch (e) { return { error: String(e) }; }
+  },
+  dropin: (on) => {
+    try {
+      if (on === true) {
+        if (!net.active) { net._dbgFakeActive = true; net.active = true; }
+        net._dropin = net._dropin || { mode: LSS.MODE, map: game.selectedMap, seed: 1, round: 2, _dbg: true };
+      } else if (on === false) {
+        net._dropin = null;
+        if (net._dbgFakeActive) { net._dbgFakeActive = false; net.active = false; }
+      }
+      try { if (typeof _syncMapButtonsDisabled === 'function') _syncMapButtonsDisabled(); } catch (_) {}
+      try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
+      try { if (typeof _lssRefreshInsaneSpeedBtn === 'function') _lssRefreshInsaneSpeedBtn(); } catch (_) {}
+      const el = (id) => { const e = document.getElementById(id); return e ? (e.disabled ? 'LOCKED' : 'live') : null; };
+      return { joinedMatchInProgress: _lssJoinedMatchInProgress(), netActive: !!net.active,
+               map: el('map-prev'), mode: el('ss-mode-prev'),
+               speed: el('insane-speed-toggle'), speedSlider: el('insane-speed-slider') };
     } catch (e) { return { error: String(e) }; }
   },
   roomMode: (m) => {
@@ -22164,6 +22184,7 @@ function _swDisposeHubWater() {
 }
 
 function resetSandwichTerrain() {
+  try { _swMergeClear(); } catch (_) {}
   try { _hubCityDispose(); } catch (_) {}
   try { if (typeof _owDispose === 'function') _owDispose(); } catch (_) {}   // (v38.78) the overworld cities go with the terrain
   if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) _swDisposeChunk(c);
@@ -28896,9 +28917,152 @@ function _swHubLoadingOverlay(show) {
   else { try { hideLoadingOverlay(); } catch (_) {} }
 }
 
+const _SW_MERGE_BLK = 4;      // chunks per block per axis: 16 chunks -> 2 draws instead of 32
+const _SW_MERGE_HOLD = 900;   // ms a block's membership must hold still before it is worth merging
+const _swMerge = { T: null, blocks: new Map(), seen: new Map(), lastBuild: 0, builds: 0, drops: 0, ms: 0 };
+
+function _swMergeActive() {
+  try {
+    if (!(typeof window !== 'undefined' && window.__swMerge === true)) return false;   // (v44.91) OPT-IN: measured a loss on desktop
+    const T = game.sandwichTerrain;
+    if (!T || !T.ON) return false;
+    if (T.biome === 'mossy') return false;                                    // the hub's ground is the clipmap's
+    if (typeof _clipmap !== 'undefined' && _clipmap && _clipmap.on) return false;
+    return true;
+  } catch (_) { return false; }
+}
+
+function _swMergeGeos(geos) {
+  let nv = 0, ni = 0, flat = true;
+  for (const g of geos) {
+    if (!g.index || !g.attributes.position || !g.attributes.color) return null;
+    nv += g.attributes.position.count;
+    ni += g.index.count;
+    if (!g.attributes.aFlatY) flat = false;
+  }
+  if (!nv || !ni) return null;
+  const pos = new Float32Array(nv * 3), col = new Float32Array(nv * 3);
+  const fy = flat ? new Float32Array(nv) : null;
+  const idx = (nv > 65535) ? new Uint32Array(ni) : new Uint16Array(ni);
+  let vo = 0, io = 0;
+  for (const g of geos) {
+    const n = g.attributes.position.count, gi = g.index.array;
+    pos.set(g.attributes.position.array, vo * 3);
+    col.set(g.attributes.color.array, vo * 3);
+    if (fy) fy.set(g.attributes.aFlatY.array, vo);
+    for (let i = 0; i < gi.length; i++) idx[io + i] = gi[i] + vo;   // rebase into the merged buffer
+    vo += n; io += gi.length;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  if (fy) out.setAttribute('aFlatY', new THREE.BufferAttribute(fy, 1));
+  out.setIndex(new THREE.BufferAttribute(idx, 1));
+  out.computeBoundingSphere();   // frustum culling still works, one block at a time
+  return out;
+}
+
+function _swMergeDrop(blk) {
+  for (const m of [blk.ground, blk.ceiling]) {
+    if (!m) continue;
+    try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); } catch (_) {}
+  }
+  try {
+    for (const k of blk.keys) {
+      const c = game.sandwichChunks && game.sandwichChunks.get(k);
+      if (!c) continue;
+      if (c.ground) c.ground.visible = true;
+      if (c.ceiling) c.ceiling.visible = true;
+    }
+  } catch (_) {}
+  _swMerge.drops++;
+}
+
+function _swMergeClear() {
+  for (const blk of _swMerge.blocks.values()) _swMergeDrop(blk);
+  _swMerge.blocks.clear(); _swMerge.seen.clear();
+}
+if (typeof window !== 'undefined') window.__swMergeClear = _swMergeClear;
+
+function _swMergeBuild(key, list, sig) {
+  const t0 = performance.now();
+  const gGeo = _swMergeGeos(list.filter(function (c) { return c.ground; }).map(function (c) { return c.ground.geometry; }));
+  const cGeo = _swMergeGeos(list.filter(function (c) { return c.ceiling; }).map(function (c) { return c.ceiling.geometry; }));
+  if (!gGeo && !cGeo) return false;
+  const blk = { keys: [], ground: null, ceiling: null, sig: sig };
+  const mk = function (geo, src, recv) {
+    const m = new THREE.Mesh(geo, src.material);
+    m.receiveShadow = recv; m.renderOrder = -2;
+    m.userData = { isSandwichTerrain: true, isSandwichMerge: true };
+    scene.add(m);
+    return m;
+  };
+  const g0 = list.find(function (c) { return c.ground; }), c0 = list.find(function (c) { return c.ceiling; });
+  if (gGeo && g0) blk.ground = mk(gGeo, g0.ground, true);
+  if (cGeo && c0) blk.ceiling = mk(cGeo, c0.ceiling, false);
+  for (const c of list) {
+    blk.keys.push(c.cx + ',' + c.cz);
+    if (c.ground) c.ground.visible = false;
+    if (c.ceiling) c.ceiling.visible = false;
+  }
+  _swMerge.blocks.set(key, blk);
+  _swMerge.builds++;
+  _swMerge.ms = +(performance.now() - t0).toFixed(2);
+  return true;
+}
+
+function _swMergeTick() {
+  const M = _swMerge;
+  if (!_swMergeActive()) { if (M.blocks.size) _swMergeClear(); M.T = null; return; }
+  const T = game.sandwichTerrain;
+  if (M.T !== T) { _swMergeClear(); M.T = T; }
+  const B = Math.max(1, (typeof window !== 'undefined' && window.__swMergeBlock) || _SW_MERGE_BLK);
+  const now = performance.now();
+
+  const want = new Map();
+  for (const c of game.sandwichChunks.values()) {
+    if (c._job) continue;                          // a shell still being built is not a member yet
+    if (!c.ground && !c.ceiling) continue;
+    const k = Math.floor(c.cx / B) + ',' + Math.floor(c.cz / B);
+    let a = want.get(k); if (!a) want.set(k, a = []); a.push(c);
+  }
+  const sigOf = function (a) {
+    const parts = [];
+    for (const c of a) parts.push((c.ground ? c.ground.geometry.id : 0) + '.' + (c.ceiling ? c.ceiling.geometry.id : 0));
+    return parts.sort().join('|');
+  };
+
+  for (const [k, blk] of M.blocks) {
+    const a = want.get(k);
+    if (!a || sigOf(a) !== blk.sig) { _swMergeDrop(blk); M.blocks.delete(k); }
+  }
+  for (const k of Array.from(M.seen.keys())) if (!want.has(k)) M.seen.delete(k);
+
+  if (now - M.lastBuild < 16) return;
+  for (const [k, a] of want) {
+    if (M.blocks.has(k)) continue;
+    const sig = sigOf(a);
+    const s = M.seen.get(k);
+    if (!s || s.sig !== sig) { M.seen.set(k, { sig: sig, t: now }); continue; }
+    if (now - s.t < _SW_MERGE_HOLD) continue;
+    if (_swMergeBuild(k, a, sig)) { M.lastBuild = now; return; }
+  }
+}
+if (typeof window !== 'undefined') window.__swMergeInfo = function () {
+  let merged = 0, saved = 0;
+  for (const blk of _swMerge.blocks.values()) {
+    merged += blk.keys.length;
+    saved += blk.keys.length * 2 - ((blk.ground ? 1 : 0) + (blk.ceiling ? 1 : 0));
+  }
+  return { active: _swMergeActive(), blocks: _swMerge.blocks.size, chunksMerged: merged,
+           drawsSaved: saved, builds: _swMerge.builds, drops: _swMerge.drops, lastBuildMs: _swMerge.ms,
+           blockSize: (typeof window !== 'undefined' && window.__swMergeBlock) || _SW_MERGE_BLK };
+};
+
 const _swStreamIdle = { idle: false, T: null, scx: 0, scz: 0, view: 0, size: -1, grass: false, trees: false, clip: false };   // (v38.61) see the idle early-out
 function updateSandwichStream(px, pz, budget, gLim, tLim) {
   if (game._xrBlurred) return 0;
+  try { _swMergeTick(); } catch (_) {}   // (v44.91) merged terrain blocks - above the idle early-out on purpose
   const T = game.sandwichTerrain;
   if (!T || !T.ON) { if (game.sandwichChunks && game.sandwichChunks.size) resetSandwichTerrain(); return; }
   if (!game.sandwichChunks) game.sandwichChunks = new Map();
@@ -55200,6 +55364,17 @@ function _releaseVortexShieldBurst(playBurstSound) {
   if (playBurstSound) {
     try { playSound('vortex_reflect'); } catch (_) {}
   }
+  const _vrCd = (typeof window !== 'undefined' && typeof window.__vortexReturnCd === 'number')
+                ? window.__vortexReturnCd : 2.0;
+  if (_vrCd > 0 && player.abilities && player.abilityCooldowns) {
+    for (let _s = 0; _s < player.abilities.length; _s++) {
+      const _ab = player.abilities[_s];
+      if (_ab && _ab.name === 'Vortex Shield') {
+        player.abilityCooldowns[_s] = Math.max(player.abilityCooldowns[_s] || 0, _vrCd);
+        break;
+      }
+    }
+  }
   player.vortexStored = 0;
   player.vortexRecentAbsorb = 0;
 }
@@ -57511,6 +57686,7 @@ function returnToRootMenu(opts) {
   try { if (typeof net !== 'undefined' && net) net.roomMode = null; } catch (_) {}
   try { if (typeof LSS !== 'undefined') { LSS._modeChosen = false; LSS._modeChosenAt = 0; } } catch (_) {}
   try { if (typeof net !== 'undefined' && net) net.roomJoinedAt = 0; } catch (_) {}
+  try { if (typeof net !== 'undefined' && net) net._dropin = null; } catch (_) {}
   try { game._campPicker = false; } catch (_) {}   
   
   
@@ -62614,10 +62790,15 @@ function _lssModeBlurb(m) {
   if (m === 'cyberpunk') return 'Storm the carrier, or hold the city.';   // (v44.11)
   return 'Team elimination.';
 }
+function _lssJoinedMatchInProgress() {
+  try { return !!(typeof net !== 'undefined' && net && net.active && net._dropin); } catch (_) { return false; }
+}
+
 function _lssRoomModeLocked() {
   try {
-    return typeof game !== 'undefined' && game &&
-           (game.state === 'playing' || game.state === 'roundEnd');
+    return (typeof game !== 'undefined' && game &&
+            (game.state === 'playing' || game.state === 'roundEnd')) ||
+           _lssJoinedMatchInProgress();   // (v44.92) a late joiner does not re-mode a live room
   } catch (_) { return false; }
 }
 function _lssRenderLobbyMode() {
@@ -62639,7 +62820,9 @@ function _lssRenderLobbyMode() {
       const b = document.getElementById(id);
       if (!b) return;
       b.disabled = locked;
-      b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
+      b.title = locked ? (_lssJoinedMatchInProgress()
+                          ? 'This match was already running when you joined - room settings unlock when it ends'
+                          : 'Locked once a round is live - set it from a fresh ship select')
                        : 'Change the mode for everyone in the room';
     });
     box.classList.toggle('ss-mode-locked', locked);
@@ -62681,6 +62864,7 @@ function _lssPickRoomMode(mode) {
 }
 
 function _lssInsaneSpeedLocked() {
+  if (_lssJoinedMatchInProgress()) return true;   // (v44.92) joined a match already running
   return typeof game !== 'undefined' && game &&
          (game.state === 'playing' || game.state === 'roundEnd' ||
           (game.state === 'warmup' && (game.currentRound | 0) > 1));
@@ -62705,7 +62889,9 @@ function _lssRefreshInsaneSpeedBtn() {
     if (String(pct) !== sl.value) sl.value = String(pct);
     sl.disabled = locked;
   }
-  b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
+  b.title = locked ? (_lssJoinedMatchInProgress()
+                      ? 'This match was already running when you joined - room settings unlock when it ends'
+                      : 'Locked once a round is live - set it from a fresh ship select')
                    : 'Drag toward INSANE. 0% = every ship at its own speed, 100% = race speed (900 / 1400 boost). Applies to the whole room.';
   if (desc) {
     let base = null;

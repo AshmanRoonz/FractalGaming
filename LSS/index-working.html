@@ -6441,7 +6441,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.90';
+const LSS_BUILD = '44.92';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -14813,6 +14813,8 @@ function _syncMapButtonsDisabled() {
   // before its line has run — this function is reachable from lobby paths on the boot road.
   let _mapFrozen = false;
   try { _mapFrozen = !!(typeof game !== 'undefined' && game && game.state && game.state !== 'select'); } catch (_) {}
+  // (v44.92) ...and for the late joiner, whose own state IS 'select' while the room plays on.
+  try { if (_lssJoinedMatchInProgress()) _mapFrozen = true; } catch (_) {}
   const mapLocked = locked || _mapFrozen;
   const prev = document.getElementById('map-prev');
   const next = document.getElementById('map-next');
@@ -28086,9 +28088,35 @@ function _xrHudUpdateCadence() {
   if (n > 1 && _xrTrackerLocksLive()) n = (tier >= 3) ? 2 : 1;
   return n;
 }
+// ⭐⭐⭐ (v44.92) THE MATCH KEEPS ITS OWN LENS AND ITS OWN GRADE, RIGHT THROUGH THE END OF THE ROUND.
+// Owner: "it still gets brighter when the round ends, and the fov widens."
+// Both symptoms, one cause, and it is this function. cineFX is ON by default (Showcase forces it),
+// and this gate handed the WHOLE FRAME to the cinematic EffectComposer for any state that was not
+// `playing` or `warmup` — so the instant the round resolved, the game stopped rendering through
+// renderPostFX and started rendering through a completely different post chain. Measured live by
+// wrapping cineFX.composer.render and holding each state open: playing 0 cinematic frames,
+// roundEnd 87, matchEnd 82.
+// What swaps, and why the owner sees exactly the two things they named:
+//   • THE FIELD OF VIEW. renderPostFX's composite applies the conformal Panini map; cineFX does not.
+//     Panini keeps the full horizontal field by trading VERTICAL field, and __paniniInfo() on this
+//     machine reads `142h / 81v deg` at strength 1 against a 120 deg FOV setting. Drop the map and
+//     the frame snaps back to the raw rectilinear 120 v — the view visibly WIDENS, mid-match, with
+//     the arena still on screen behind the banner.
+//   • THE BRIGHTNESS. The gameplay composite is ACES + colour grade + vignette + chromatic
+//     aberration; the cinematic chain is UnrealBloom + SMAA + OutputPass at exposure 0.78, with no
+//     grade and no vignette. Less edge falloff and a different curve reads as brighter and flatter.
+// roundEnd and matchEnd are not menus — the arena is still the picture, the player is still in the
+// world, and it is the same shot it was a frame earlier. So they belong to the gameplay chain, and
+// the cinematic chain keeps what it was always described as owning: "menus/showcase only" (v32.17).
+// (!) This is what v44.89 was reaching for and could not touch. That change took `matchEnd` out of
+//     renderPostFX's lowQuality gate so the final scoreboard would keep its bloom — correct, but
+//     DEAD, because renderPostFX was never called in that state at all. With this gate fixed the two
+//     compose: matchEnd now runs the gameplay chain, bloom included.
+// (!) 'select' and 'lobby' still go to cineFX, unchanged — those really are menus.
 function _shouldUseCineFXFrame() {
   if (!cineFX.enabled || !cineFX.composer) return false;
-  if (typeof game !== 'undefined' && game && (game.state === 'playing' || game.state === 'warmup')) {
+  if (typeof game !== 'undefined' && game && (game.state === 'playing' || game.state === 'warmup' ||
+      game.state === 'roundEnd' || game.state === 'matchEnd')) {
     return false;
   }
   return true;
@@ -31335,6 +31363,32 @@ if (typeof window !== 'undefined') window.__dbg = {
       if (agoMs === null) { LSS._modeChosen = false; LSS._modeChosenAt = 0; }
       else { LSS._modeChosen = true; LSS._modeChosenAt = performance.now() - (agoMs || 0); }
       return { mode: LSS.MODE, ago: _lssModeAgo(), chosen: !!LSS._modeChosen };
+    } catch (e) { return { error: String(e) }; }
+  },
+  // (v44.92) THE LATE-JOINER LOCK, drivable. `__dbg.dropin(true)` puts this client in the exact
+  // state a drop-in handshake leaves it in - the room's match is running, we are still in ship
+  // select - and refreshes the three room-wide controls so the lock can be read off the DOM.
+  // `__dbg.dropin(false)` is "the match ended and everyone came back". With no argument it reports.
+  // Same affordance as roomMode() above, for the same reason: this path is multiplayer-only and
+  // otherwise needs two live peers and a running match to reach at all.
+  dropin: (on) => {
+    try {
+      // A real drop-in only ever happens inside a room, so simulating one has to simulate that too
+      // (the predicate takes net.active as belt-and-braces against a stale lock after a disconnect).
+      if (on === true) {
+        if (!net.active) { net._dbgFakeActive = true; net.active = true; }
+        net._dropin = net._dropin || { mode: LSS.MODE, map: game.selectedMap, seed: 1, round: 2, _dbg: true };
+      } else if (on === false) {
+        net._dropin = null;
+        if (net._dbgFakeActive) { net._dbgFakeActive = false; net.active = false; }
+      }
+      try { if (typeof _syncMapButtonsDisabled === 'function') _syncMapButtonsDisabled(); } catch (_) {}
+      try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
+      try { if (typeof _lssRefreshInsaneSpeedBtn === 'function') _lssRefreshInsaneSpeedBtn(); } catch (_) {}
+      const el = (id) => { const e = document.getElementById(id); return e ? (e.disabled ? 'LOCKED' : 'live') : null; };
+      return { joinedMatchInProgress: _lssJoinedMatchInProgress(), netActive: !!net.active,
+               map: el('map-prev'), mode: el('ss-mode-prev'),
+               speed: el('insane-speed-toggle'), speedSlider: el('insane-speed-slider') };
     } catch (e) { return { error: String(e) }; }
   },
   roomMode: (m) => {
@@ -39104,6 +39158,9 @@ function _swDisposeHubWater() {
 
 // Drop every built chunk (map change / terrain off), restoring atmosphere too.
 function resetSandwichTerrain() {
+  // (v44.91) merged blocks hold COPIES of the shells' triangles, so they have to go before the
+  // shells do - otherwise the old terrain keeps drawing over the new one until the next stream tick.
+  try { _swMergeClear(); } catch (_) {}
   try { _hubCityDispose(); } catch (_) {}
   try { if (typeof _owDispose === 'function') _owDispose(); } catch (_) {}   // (v38.78) the overworld cities go with the terrain
   if (game.sandwichChunks) for (const c of game.sandwichChunks.values()) _swDisposeChunk(c);
@@ -48016,9 +48073,251 @@ function _swHubLoadingOverlay(show) {
   else { try { hideLoadingOverlay(); } catch (_) {} }
 }
 
+// ═══ (v44.91) MERGED TERRAIN BLOCKS — the far field costs DRAW CALLS, not pixels ═════════════════
+// Owner, on the adaptive governor: "it should be lowering the resolution of the things farther away
+// and in the peripheral vision the most ... not the ship at all."
+//
+// v44.90 answered the second half by proving the resolution shed was buying nothing and making it
+// give the pixels back. THIS is the first half, and the measurement says the lever is not
+// resolution at all — it is the number of draw calls the terrain costs:
+//     rocky arena, dev RTX 5050, 144 Hz, one stretch of `playing`, governor pinned
+//       native res, full terrain ............ 584 calls  2543k tris  137.9 fps
+//       the governor's whole shed range ..... 561 calls  2495k tris  137.4 fps   (+0.5 fps)
+//       far terrain culled .................. 323 calls  1878k tris  143.6 fps   (+5.7 fps)
+//     and the census: terrain is 218 of 672 visible draw calls (32%); hiding ALL of it is +13.2 fps.
+// A chunk is TWO draws (ground shell + ceiling shell) and there are ~143 of them resident, so the
+// terrain alone submits ~286 meshes to reach ~218 draws after frustum culling. That is the cost.
+//
+// WHY MERGING, AND NOT CULLING, AND NOT THE CLIPMAP.
+//   - Culling the far ones was measured first and is WRONG here: an arena's chunks are the MAP
+//     FOOTPRINT (T.FOOT), not a ring around the player — cx spanned -6..5 with the player sitting
+//     at chunk -5 — so "far" chunks are ordinary map the pilot can see and fly to, and the arena
+//     haze is nowhere near thick enough to cover the seam (`rocky`: strength 0.3, ramp 700->5200,
+//     while a 3-chunk radius is 768 u). It buys frames by deleting the level.
+//   - The hub's `_clipmap` cannot take arenas: it is a HEIGHTFIELD (one height per x,z cell, baked
+//     from _clipCellH) and the sandwich shells are an SDF surface with a ceiling over them. It also
+//     only replaces GROUND, which is half the draws here.
+//   - Merging changes NOTHING about what is drawn. Same triangles, same material, same shader, same
+//     render order — just handed to the GPU in a dozen buffers instead of three hundred.
+//
+// WHAT MAKES IT A CONCATENATION AND NOT A PROJECT (all four verified live before this was written):
+//   1. Every ground shell shares ONE material and every ceiling shell shares another
+//      (`_swTerrainMatShared`, `_swShared`), so a merge crosses no material boundary.
+//   2. Shell geometry is already in WORLD SPACE — every chunk mesh sits at the origin with an
+//      identity transform — so vertices need no rebasing.
+//   3. Every shell carries the same attributes (`position`, `color`, plus `aFlatY` when the world
+//      is bent), so the buffers line up.
+//   4. Grounds do not cast shadows (only `receiveShadow`), so the shadow pass is not involved.
+//
+// ⛔⛔⛔ (v44.91) THE VERDICT: DEFAULT OFF. IT WORKS, AND IT DOES NOT HELP - AND FINDING THAT OUT IS
+// WHAT THIS CODE IS FOR. Built, verified correct (12 blocks, all 110 resident chunks, 196 draw calls
+// saved, 0.3 ms a block), then measured against itself with the ship PARKED so chunk membership
+// could not move, the governor pinned at native, and the conditions INTERLEAVED so combat drift
+// could not favour one side. Eight paired reps at block 3:
+//     -131 draw calls   -0.27 ms CPU in renderer.render   +132k triangles   and merging won 2 of 8.
+// Then the isolating run, which is the one that matters - collapse the WHOLE MAP into one block so
+// draw calls go to the floor and triangles to the ceiling:
+//       merge OFF ................. 467 calls   2355k tris   134.4 fps
+//       block 3 ................... 362 calls   2564k tris   134.1 fps
+//       whole map, one block ...... 352 calls   2776k tris   123.2 fps
+// Draw calls from 467 down to 352 changed NOTHING. Triangles from 2355k to 2776k cost ELEVEN FPS.
+//
+// ⚠ AND IT CORRECTS THE READING THAT MOTIVATED IT. The census said "hiding all terrain is +13.2 fps
+//   and terrain is 218 of 672 draw calls", and that was taken as a draw-call result. It was not:
+//   hiding terrain removes 218 calls AND 662k triangles at once, and this experiment separates them.
+//   Removing the calls alone is worth nothing. THE TERRAIN IS TRIANGLE-BOUND. Together with v44.90
+//   (the resolution shed, worth +0.5 fps across its whole range) the frame's three candidate
+//   bottlenecks are now measured and two are ruled out: not pixels, not draw calls, TRIANGLES -
+//   ~2.3M a frame, of which the terrain is ~660k.
+//   The real "lower the resolution of the things farther away" is therefore a GEOMETRIC LOD: far
+//   shells built on a coarser grid (`_SW_CELLS` is global today, so every chunk near or far carries
+//   the same 3200 triangles). A half-res far shell is a QUARTER of the triangles, and it can be
+//   decimated from the full-res grid already in memory - no new SDF sampling, which is the expensive
+//   half - with a skirt on the rim to hide the LOD seam.
+//
+// KEPT, NOT DELETED, AND OFF: a phone or the owner's Xbox is a different machine - far more CPU
+// constrained, where 0.27 ms out of a 16 ms budget is worth more than out of 7 ms - and that case is
+// genuinely untested. `window.__swMerge = true` switches it on; everything below is live and
+// correct. The precedent is v39.87's cinematic foveation: built, measured, left default off with the
+// numbers written down so nobody has to derive them twice.
+//
+// THE SHAPE. Chunks are grouped into fixed WORLD-SPACE blocks of B x B chunks (not player-relative,
+// so a block's identity does not move when the pilot does). A block whose membership has held still
+// for `_SW_MERGE_HOLD` ms is merged into one ground mesh and one ceiling mesh, and its source shells
+// are hidden. The instant anything in the block changes — a chunk streams in, streams out, or is
+// rebuilt — the block drops straight back to its raw shells (a visibility flip, free) and re-earns
+// the merge a second later. At most ONE block is built per frame.
+//
+// (!) THE SIGNATURE IS GEOMETRY IDS, NOT CHUNK COORDINATES. A chunk can be REBUILT in place at the
+//     same cx,cz — the bend-world toggle re-bakes every shell, `_swInvalidateChunksInRect` re-bakes
+//     endless chunks behind a route append — and a coordinate-only signature would hold a merged
+//     block full of stale terrain next to freshly-baked neighbours. That is the v35.81 tear class
+//     wearing a new hat. Geometry ids change on every rebake, so they catch all of it for free.
+// (!) SOURCE GEOMETRY IS KEPT, NOT DISPOSED. Freeing the sources' GPU buffers after a merge would
+//     hold VRAM flat (~17 MB for a full arena), but three would have to re-upload all of them the
+//     moment the block un-merges — which is exactly when the pilot crosses a chunk boundary. A
+//     hitch at that moment is worth more than the memory.
+// (!) ARENAS, ENDLESS AND CAVERNS ONLY. The hub (`mossy`) is excluded: its ground is the clipmap's
+//     and its draw cost is the per-chunk TREE InstancedMeshes, which this does not touch.
+// (!) window.__swMerge = true turns it ON (it is OFF by default - see the verdict above);
+//     window.__swMergeBlock resizes the block; window.__swMergeInfo() reports blocks, draws saved
+//     and the last build's cost.
+const _SW_MERGE_BLK = 4;      // chunks per block per axis: 16 chunks -> 2 draws instead of 32
+const _SW_MERGE_HOLD = 900;   // ms a block's membership must hold still before it is worth merging
+const _swMerge = { T: null, blocks: new Map(), seen: new Map(), lastBuild: 0, builds: 0, drops: 0, ms: 0 };
+
+function _swMergeActive() {
+  try {
+    if (!(typeof window !== 'undefined' && window.__swMerge === true)) return false;   // (v44.91) OPT-IN: measured a loss on desktop
+    const T = game.sandwichTerrain;
+    if (!T || !T.ON) return false;
+    if (T.biome === 'mossy') return false;                                    // the hub's ground is the clipmap's
+    if (typeof _clipmap !== 'undefined' && _clipmap && _clipmap.on) return false;
+    return true;
+  } catch (_) { return false; }
+}
+
+// One block's worth of shells -> one BufferGeometry. Indexed, world-space, no transform to fold in.
+function _swMergeGeos(geos) {
+  let nv = 0, ni = 0, flat = true;
+  for (const g of geos) {
+    if (!g.index || !g.attributes.position || !g.attributes.color) return null;
+    nv += g.attributes.position.count;
+    ni += g.index.count;
+    if (!g.attributes.aFlatY) flat = false;
+  }
+  if (!nv || !ni) return null;
+  const pos = new Float32Array(nv * 3), col = new Float32Array(nv * 3);
+  const fy = flat ? new Float32Array(nv) : null;
+  const idx = (nv > 65535) ? new Uint32Array(ni) : new Uint16Array(ni);
+  let vo = 0, io = 0;
+  for (const g of geos) {
+    const n = g.attributes.position.count, gi = g.index.array;
+    pos.set(g.attributes.position.array, vo * 3);
+    col.set(g.attributes.color.array, vo * 3);
+    if (fy) fy.set(g.attributes.aFlatY.array, vo);
+    for (let i = 0; i < gi.length; i++) idx[io + i] = gi[i] + vo;   // rebase into the merged buffer
+    vo += n; io += gi.length;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  out.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  if (fy) out.setAttribute('aFlatY', new THREE.BufferAttribute(fy, 1));
+  out.setIndex(new THREE.BufferAttribute(idx, 1));
+  out.computeBoundingSphere();   // frustum culling still works, one block at a time
+  return out;
+}
+
+function _swMergeDrop(blk) {
+  for (const m of [blk.ground, blk.ceiling]) {
+    if (!m) continue;
+    try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); } catch (_) {}
+  }
+  // Show the raw shells again — by KEY, because a chunk in this block may since have been disposed.
+  try {
+    for (const k of blk.keys) {
+      const c = game.sandwichChunks && game.sandwichChunks.get(k);
+      if (!c) continue;
+      if (c.ground) c.ground.visible = true;
+      if (c.ceiling) c.ceiling.visible = true;
+    }
+  } catch (_) {}
+  _swMerge.drops++;
+}
+
+function _swMergeClear() {
+  for (const blk of _swMerge.blocks.values()) _swMergeDrop(blk);
+  _swMerge.blocks.clear(); _swMerge.seen.clear();
+}
+if (typeof window !== 'undefined') window.__swMergeClear = _swMergeClear;
+
+function _swMergeBuild(key, list, sig) {
+  const t0 = performance.now();
+  const gGeo = _swMergeGeos(list.filter(function (c) { return c.ground; }).map(function (c) { return c.ground.geometry; }));
+  const cGeo = _swMergeGeos(list.filter(function (c) { return c.ceiling; }).map(function (c) { return c.ceiling.geometry; }));
+  if (!gGeo && !cGeo) return false;
+  const blk = { keys: [], ground: null, ceiling: null, sig: sig };
+  // The shared materials come off the shells themselves, so a merged block can never diverge from
+  // what the raw shells were drawing — including whatever _swPatchTerrainMat has done to them.
+  const mk = function (geo, src, recv) {
+    const m = new THREE.Mesh(geo, src.material);
+    m.receiveShadow = recv; m.renderOrder = -2;
+    m.userData = { isSandwichTerrain: true, isSandwichMerge: true };
+    scene.add(m);
+    return m;
+  };
+  const g0 = list.find(function (c) { return c.ground; }), c0 = list.find(function (c) { return c.ceiling; });
+  if (gGeo && g0) blk.ground = mk(gGeo, g0.ground, true);
+  if (cGeo && c0) blk.ceiling = mk(cGeo, c0.ceiling, false);
+  for (const c of list) {
+    blk.keys.push(c.cx + ',' + c.cz);
+    if (c.ground) c.ground.visible = false;
+    if (c.ceiling) c.ceiling.visible = false;
+  }
+  _swMerge.blocks.set(key, blk);
+  _swMerge.builds++;
+  _swMerge.ms = +(performance.now() - t0).toFixed(2);
+  return true;
+}
+
+// Runs from the top of updateSandwichStream, ABOVE its idle early-out — a settled world is exactly
+// when there is something to merge, and a settled world is the branch that early-out takes.
+function _swMergeTick() {
+  const M = _swMerge;
+  if (!_swMergeActive()) { if (M.blocks.size) _swMergeClear(); M.T = null; return; }
+  const T = game.sandwichTerrain;
+  if (M.T !== T) { _swMergeClear(); M.T = T; }
+  const B = Math.max(1, (typeof window !== 'undefined' && window.__swMergeBlock) || _SW_MERGE_BLK);
+  const now = performance.now();
+
+  // What each block holds right now, keyed by GEOMETRY ID so an in-place rebake is not missed.
+  const want = new Map();
+  for (const c of game.sandwichChunks.values()) {
+    if (c._job) continue;                          // a shell still being built is not a member yet
+    if (!c.ground && !c.ceiling) continue;
+    const k = Math.floor(c.cx / B) + ',' + Math.floor(c.cz / B);
+    let a = want.get(k); if (!a) want.set(k, a = []); a.push(c);
+  }
+  const sigOf = function (a) {
+    const parts = [];
+    for (const c of a) parts.push((c.ground ? c.ground.geometry.id : 0) + '.' + (c.ceiling ? c.ceiling.geometry.id : 0));
+    return parts.sort().join('|');
+  };
+
+  // Any merged block whose contents moved goes straight back to raw shells. A visibility flip.
+  for (const [k, blk] of M.blocks) {
+    const a = want.get(k);
+    if (!a || sigOf(a) !== blk.sig) { _swMergeDrop(blk); M.blocks.delete(k); }
+  }
+  // Forget stability timers for blocks that no longer exist.
+  for (const k of Array.from(M.seen.keys())) if (!want.has(k)) M.seen.delete(k);
+
+  // Merge one settled block per frame, at most.
+  if (now - M.lastBuild < 16) return;
+  for (const [k, a] of want) {
+    if (M.blocks.has(k)) continue;
+    const sig = sigOf(a);
+    const s = M.seen.get(k);
+    if (!s || s.sig !== sig) { M.seen.set(k, { sig: sig, t: now }); continue; }
+    if (now - s.t < _SW_MERGE_HOLD) continue;
+    if (_swMergeBuild(k, a, sig)) { M.lastBuild = now; return; }
+  }
+}
+if (typeof window !== 'undefined') window.__swMergeInfo = function () {
+  let merged = 0, saved = 0;
+  for (const blk of _swMerge.blocks.values()) {
+    merged += blk.keys.length;
+    saved += blk.keys.length * 2 - ((blk.ground ? 1 : 0) + (blk.ceiling ? 1 : 0));
+  }
+  return { active: _swMergeActive(), blocks: _swMerge.blocks.size, chunksMerged: merged,
+           drawsSaved: saved, builds: _swMerge.builds, drops: _swMerge.drops, lastBuildMs: _swMerge.ms,
+           blockSize: (typeof window !== 'undefined' && window.__swMergeBlock) || _SW_MERGE_BLK };
+};
+
 const _swStreamIdle = { idle: false, T: null, scx: 0, scz: 0, view: 0, size: -1, grass: false, trees: false, clip: false };   // (v38.61) see the idle early-out
 function updateSandwichStream(px, pz, budget, gLim, tLim) {
   if (game._xrBlurred) return 0;
+  try { _swMergeTick(); } catch (_) {}   // (v44.91) merged terrain blocks - above the idle early-out on purpose
   const T = game.sandwichTerrain;
   if (!T || !T.ON) { if (game.sandwichChunks && game.sandwichChunks.size) resetSandwichTerrain(); return; }
   if (!game.sandwichChunks) game.sandwichChunks = new Map();
@@ -86054,6 +86353,31 @@ function _releaseVortexShieldBurst(playBurstSound) {
   if (playBurstSound) {
     try { playSound('vortex_reflect'); } catch (_) {}
   }
+  // (v44.92) A RETURNED SHOT COSTS TWO SECONDS. AN EMPTY RELEASE COSTS NOTHING.
+  // Owner: "if you catch something and shoot it back, with vortex shield, then there should be a
+  // 2sec delay before you can use it again. if you didn't catch anything when you release, then no
+  // delay to use it again."
+  // The gate is free, and it is the line at the top of this function: `vortexStored <= 0` returns
+  // before anything happens, so simply BEING HERE means the shield caught something and has just
+  // sent it back. A dry raise-and-drop never reaches this code and never pays.
+  // (!) NOT CONDITIONAL ON HITTING ANYTHING. The aimed redirect fizzles at the nose when nothing is
+  //     under the crosshair (the `else` branch above), and that still spent the catch - "didn't
+  //     catch anything" is the owner's condition, not "didn't hit anything". A miss is a miss.
+  // This is a normal ability cooldown, so the HUD arc draws it with no extra work, and it is
+  // independent of `vortexShieldLockout` (the separate, longer gate for draining the pool to zero) -
+  // whichever is longer wins, which is why this takes a max rather than an assignment.
+  // window.__vortexReturnCd tunes it; 0 restores the pre-v44.92 behaviour.
+  const _vrCd = (typeof window !== 'undefined' && typeof window.__vortexReturnCd === 'number')
+                ? window.__vortexReturnCd : 2.0;
+  if (_vrCd > 0 && player.abilities && player.abilityCooldowns) {
+    for (let _s = 0; _s < player.abilities.length; _s++) {
+      const _ab = player.abilities[_s];
+      if (_ab && _ab.name === 'Vortex Shield') {
+        player.abilityCooldowns[_s] = Math.max(player.abilityCooldowns[_s] || 0, _vrCd);
+        break;
+      }
+    }
+  }
   player.vortexStored = 0;
   player.vortexRecentAbsorb = 0;
 }
@@ -89497,6 +89821,11 @@ function returnToRootMenu(opts) {
   // (v43.22) the mode CHOICE is per-room too - back at the main menu we have chosen nothing.
   try { if (typeof LSS !== 'undefined') { LSS._modeChosen = false; LSS._modeChosenAt = 0; } } catch (_) {}
   try { if (typeof net !== 'undefined' && net) net.roomJoinedAt = 0; } catch (_) {}
+  // (v44.92) the drop-in handshake is MATCH-scoped and was cleared nowhere. Two consequences: the
+  // v44.92 lobby lock would never release after the match it described, and - the older latent one -
+  // an unconsumed _dropin makes the NEXT launch take the challenger fork and adopt a finished
+  // match's round number and score instead of starting fresh.
+  try { if (typeof net !== 'undefined' && net) net._dropin = null; } catch (_) {}
   try { game._campPicker = false; } catch (_) {}   
   
   
@@ -96988,10 +97317,39 @@ function _lssModeBlurb(m) {
 //     it safe rather than merely convenient.
 // (!) INSANE SPEED is untouched: _lssRefreshInsaneSpeedBtn still calls _lssInsaneSpeedLocked
 //     directly, so its between-rounds lock stands exactly as v43.x tuned it.
+// ⭐⭐⭐ (v44.92) YOU JOINED SOMEONE ELSE'S MATCH. YOU DO NOT GET TO RE-DEAL IT.
+// Owner: "a bug in multiplayer... if you join a match already in progress, you should not be able to
+// change any lobby settings, besides your own ship and pilot perk... shouldn't be able to change the
+// map, the mode, or the speed... not until the match is over and everyone returns to the lobby."
+//
+// Every one of those three controls ALREADY had a lock, and all three asked the same question -
+// `game.state === 'playing' || 'roundEnd'` (`_lssRoomModeLocked`, `_lssInsaneSpeedLocked`, and the
+// `_mapFrozen` term in refreshLobbyLockUI). That question is right for someone who is IN the match
+// and wrong for exactly one person: the late joiner, who is sitting in ship select at state
+// 'select' while everyone else is mid-round. For them all three locks read "unlocked", so the map
+// arrows, the mode arrows and the speed dial were live - and those are ROOM-WIDE settings, so a
+// player who arrived thirty seconds ago could re-map, re-mode or re-speed a match already running.
+//
+// `net._dropin` is precisely that state and nothing else. It is set when a `dropin_state` arrives -
+// an event the room only sends when a match IS underway, carrying its mode, map and seed - and it
+// is consumed the moment this client launches into that match (see the open-solo challenger fork in
+// the launch path). So it is non-null for exactly the window between "I can see there is a match
+// here" and "I am in it", which is the window the owner is describing.
+// After that the existing game.state tests take over, and when the match really is over
+// returnToRootMenu clears it (added in the same version - it was never cleared anywhere, which also
+// meant a stale drop-in could make the NEXT launch adopt a finished match's round and score).
+//
+// (!) SHIP AND PILOT PERK STAY LIVE, as asked. They are per-player and are not touched here - this
+//     only feeds the three room-wide locks.
+function _lssJoinedMatchInProgress() {
+  try { return !!(typeof net !== 'undefined' && net && net.active && net._dropin); } catch (_) { return false; }
+}
+
 function _lssRoomModeLocked() {
   try {
-    return typeof game !== 'undefined' && game &&
-           (game.state === 'playing' || game.state === 'roundEnd');
+    return (typeof game !== 'undefined' && game &&
+            (game.state === 'playing' || game.state === 'roundEnd')) ||
+           _lssJoinedMatchInProgress();   // (v44.92) a late joiner does not re-mode a live room
   } catch (_) { return false; }
 }
 // (!) _lssRefreshModeUI() already calls this, so defining it wires the picker into EVERY mode
@@ -97020,7 +97378,9 @@ function _lssRenderLobbyMode() {
       const b = document.getElementById(id);
       if (!b) return;
       b.disabled = locked;
-      b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
+      b.title = locked ? (_lssJoinedMatchInProgress()
+                          ? 'This match was already running when you joined - room settings unlock when it ends'
+                          : 'Locked once a round is live - set it from a fresh ship select')
                        : 'Change the mode for everyone in the room';
     });
     box.classList.toggle('ss-mode-locked', locked);
@@ -97079,6 +97439,7 @@ function _lssPickRoomMode(mode) {
 function _lssInsaneSpeedLocked() {
   // Same rule race mode uses, for the same reason: flipping the speed under a live round
   // half-converts the match (ships change speed, bots do not re-plan) - see _raceModeLocked.
+  if (_lssJoinedMatchInProgress()) return true;   // (v44.92) joined a match already running
   return typeof game !== 'undefined' && game &&
          (game.state === 'playing' || game.state === 'roundEnd' ||
           (game.state === 'warmup' && (game.currentRound | 0) > 1));
@@ -97107,7 +97468,9 @@ function _lssRefreshInsaneSpeedBtn() {
     if (String(pct) !== sl.value) sl.value = String(pct);
     sl.disabled = locked;
   }
-  b.title = locked ? 'Locked once a round is live - set it from a fresh ship select'
+  b.title = locked ? (_lssJoinedMatchInProgress()
+                      ? 'This match was already running when you joined - room settings unlock when it ends'
+                      : 'Locked once a round is live - set it from a fresh ship select')
                    : 'Drag toward INSANE. 0% = every ship at its own speed, 100% = race speed (900 / 1400 boost). Applies to the whole room.';
   if (desc) {
     // Show what it actually MEANS at this stop, using the previewed ship where we have one, because
