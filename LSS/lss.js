@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.06';
+const LSS_BUILD = '45.11';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2348,7 +2348,7 @@ async function joinRoom() {
         const _hadShip = !!peer.networkPlayer;   // (v38.63)
         updateNetworkPlayer(peerId, data);
         if (!_hadShip && net.openSolo && game.state !== 'select' && typeof _dropinReplaceBot === 'function') {
-          try { _dropinReplaceBot(data.team); } catch (_) {}
+          try { _dropinReplaceBot(data.team, peerId); } catch (_) {}   // (v45.09) so the seat can be sent back
         }
         checkAllLoadoutsReady();
         try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
@@ -5756,8 +5756,12 @@ function allPeersReady() {
 
 function checkAllReady() {
   if (!net.active) return;
-  try { const _sel = document.getElementById('ship-select');
-        if (_sel && _sel.classList.contains('active')) return; } catch (_) {}
+  try {
+    if (game._ssConfirmed || game._launchCommitted) return;
+    if (game.state !== 'select') return;
+    const _sel = document.getElementById('ship-select');
+    if (_sel && _sel.classList.contains('active')) return;
+  } catch (_) {}
   if (!allPeersReady()) {
     if (net.startTimer) {
       clearTimeout(net.startTimer);
@@ -5848,12 +5852,17 @@ function checkAllLoadoutsReady() {
     game.currentRound = d.round || 1;
     game.scoreA = d.scoreA || 0;
     game.scoreB = d.scoreB || 0;
-    try { hideLoadingOverlay(); } catch (_) {}
     game._launchCommitted = true;   // (v45.05) drop-in: committed, no second ticker
-    _lssRunCinematicThen(() => {
-      _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
-      launchCountdown(LSS.SHORT_COUNTDOWN);
-    });
+    game._lateJoin = true;          // (v45.10) arms the spawn grace at FIGHT - see there
+    try {
+      const _sel = document.getElementById('ship-select');
+      if (_sel) { _sel.classList.remove('active'); _sel.style.display = 'none'; }
+    } catch (_) {}
+    try { if (typeof stopShipPreviewLoop === 'function') stopShipPreviewLoop(); } catch (_) {}
+    try { game._launchCdOwnsDigits = false; } catch (_) {}
+    try { if (typeof _safeRequestPointerLock === 'function') _safeRequestPointerLock(); } catch (_) {}
+    try { hideLoadingOverlay(); } catch (_) {}
+    try { _anchorTimer('warmupTimer', 0); } catch (_) {}
     return;
   }
 
@@ -5883,7 +5892,7 @@ function checkAllLoadoutsReady() {
         for (const [, peer] of nonJudgePeerEntries()) { _tot++; if (peer && peer.warmupReady) _rdy++; }
       } catch (_) {}
       const _sub = _tot ? ((_rdy + 1) + '/' + (_tot + 1) + ' ready') : 'syncing match start';
-      try { hideLoadingOverlay(); } catch (_) {}
+      try { const _ls = document.getElementById('lss-loading-sub'); if (_ls) _ls.textContent = _sub; } catch (_) {}
       try { _lssSetConfirmWaiting(true, _rdy + 1, _tot + 1); } catch (_) {}
     }
     return;
@@ -6713,6 +6722,17 @@ function handleNetEvent(evt, fromPeerId) {
       if (_inPicker && game._ssConfirmed && game.state === 'select' && !game._launchCommitted) {
         const _k = game._ssKey || (player && player.loadoutKey) || null;
         if (_k && typeof commitLoadout === 'function') commitLoadout(_k);
+      }
+    } catch (_) {}
+    return;
+  }
+  if (evt.type === 'dropin_seat') {
+    try {
+      if (game.state !== 'playing') {
+        const _p = new THREE.Vector3(+evt.x || 0, +evt.y || 0, +evt.z || 0);
+        game._dropinSeat = _p;   // (v45.09) observable: which seat we were given
+        if (typeof _spawnPickSet === 'function') _spawnPickSet(_p);
+        if (player && player.position) player.position.copy(_p);
       }
     } catch (_) {}
     return;
@@ -50090,12 +50110,14 @@ function _botApplyRoster(rows) {
   }
 }
 
-function _dropinReplaceBot(team) {
+function _dropinReplaceBot(team, toPeerId) {
   if (!net || !net.openSolo) return;
+  let _seat = null;
   for (let i = 0; i < game.entities.length; i++) {
     const b = game.entities[i];
     if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
     if (b.team !== team) continue;
+    try { _seat = b.position ? b.position.clone() : null; } catch (_) { _seat = null; }
     try {
       if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', b.position, 70, 0.7, { startScale: 1.0, endScale: 0.2 });
       if (typeof playSpatialSound === 'function') playSpatialSound('phase_dash', b.position.clone(), { refDistance: 400, maxDistance: 5000 });
@@ -50104,6 +50126,11 @@ function _dropinReplaceBot(team) {
     game.entities.splice(i, 1);
     break;
   }
+  try {
+    if (_seat && toPeerId && net.sendEvent) {
+      net.sendEvent({ type: 'dropin_seat', x: _seat.x, y: _seat.y, z: _seat.z }, toPeerId);
+    }
+  } catch (_) {}
   _botSendRoster();
   try { if (window.Overlays) Overlays.banner('A CHALLENGER APPROACHES', 'A pilot took a bot\'s seat'); } catch (_) {}
 }
@@ -50175,6 +50202,7 @@ function spawnBots() {
 
 function playerTakeDamage(amount, attacker, projectile, hitOpts) {
   if (player.shipState === 'dead' || player.spawnProtection > 0) return;
+  if (typeof game !== 'undefined' && game && game.state === 'warmup') return;
   if (player.phaseInvuln) return;
   player.lastDamageTime = game.time;
   showDirectionalDamage(attacker, projectile);
@@ -57268,6 +57296,12 @@ function updateRoundSystem(dt) {
         if (!_ffHub) Overlays.countdown('FIGHT', '');
         game._firstBloodClaimed = false;
       }
+      try {
+        if (game._lateJoin) {
+          game._lateJoin = false;
+          player.spawnProtection = LSS.SPAWN_PROTECTION;
+        }
+      } catch (_) {}
       if (typeof ANN !== 'undefined' && !_ffHub) ANN.roundStart();
       if (typeof _v8tryStartCinemaFlyover === 'function') _v8tryStartCinemaFlyover();
     }

@@ -4382,7 +4382,7 @@ body.vr-active #camp-video { display: none !important; }
   #ship-preview-difficulty { padding: 5px 8px 5px !important; gap: 4px !important; margin-top: 6px !important; }
   #ship-preview-difficulty .perks-label { font-size: 9px !important; letter-spacing: 2px !important; }
   #diff-grid { gap: 5px !important; }
-  #ship-preview-confirm, #ship-preview-confirm-vr {
+  #ship-preview-confirm, #ship-preview-launch, #ship-preview-confirm-vr {
     padding: 8px 14px !important; font-size: 10px !important;
   }
   #ss-header-right { gap: 5px !important; }
@@ -4514,8 +4514,19 @@ body.vr-active #camp-video { display: none !important; }
      needs no explaining, and it keeps the owner's one-row layout instead of wrapping back to two.
      ⚠ font-size:0 + ::after rather than editing the text, so the button's accessible name stays
      the full CONFIRM & LAUNCH and no JS has to know about this. */
+  /* ⚠⚠ (v45.07) THIS RULE USED TO RENAME THE ONLY BUTTON AND IT SURVIVED THE SPLIT.
+     Owner: "mobile has two launch buttons, but the one on the left that supposed to be confirm
+     seems to act like confirm even tho it says launch." Exactly - the BEHAVIOUR was already
+     CONFIRM's, this stylesheet was still painting v43.57's shortened label over the top of it,
+     because in v43.57 there was one button and it needed a phone-sized name.
+     Now the shortened name belongs to the button that really is LAUNCH, and the checkbox shows a
+     checkmark - the tightest possible label, and the state is carried by .ss-checked's colour. */
   #ship-preview-confirm { font-size: 0 !important; }
   #ship-preview-confirm::after {
+    content: '✓'; font-size: 13px; letter-spacing: 0;   /* (v45.07) the literal glyph - the CSS hex escape rendered as garbage here */
+  }
+  #ship-preview-launch { font-size: 0 !important; }
+  #ship-preview-launch::after {
     content: 'LAUNCH'; font-size: 10px; letter-spacing: 1.6px;
   }
   /* (v43.57) A LANDSCAPE PHONE CANNOT HOLD THE PROSE LINES, so it stops pretending it can.
@@ -6460,7 +6471,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.06';
+const LSS_BUILD = '45.11';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -9850,7 +9861,7 @@ async function joinRoom() {
         // (v38.63) ...on their FIRST commit only. A re-announce or a ship
         // change between rounds is the same human, not another seat.
         if (!_hadShip && net.openSolo && game.state !== 'select' && typeof _dropinReplaceBot === 'function') {
-          try { _dropinReplaceBot(data.team); } catch (_) {}
+          try { _dropinReplaceBot(data.team, peerId); } catch (_) {}   // (v45.09) so the seat can be sent back
         }
         // A peer just committed in ship-select; if everyone now has a
         // loadout, this triggers the synced launchAt proposal.
@@ -14852,11 +14863,24 @@ function allPeersReady() {
 
 function checkAllReady() {
   if (!net.active) return;
-  // (v45.06) This handshake's whole payload is `enterShipSelect()` - it exists to GET the room to
-  // the picker. Since v45.06 the picker's CONFIRM sets `net.myReady`, so without this guard the last
-  // person confirming would schedule a re-entry into the screen everyone is already looking at.
-  try { const _sel = document.getElementById('ship-select');
-        if (_sel && _sel.classList.contains('active')) return; } catch (_) {}
+  // ⚠⚠ (v45.07) THIS GUARD WAS TOO NARROW AND IT PUT THE PICKER BACK ON SCREEN MID-LAUNCH.
+  // Owner: "the pc went back to the ship selection screen after the loading screen, that is out of
+  // order." This handshake's whole payload is `scheduleMatchStart -> enterShipSelect()` - it exists
+  // to GET a room to the picker - and before v45.06 it was DEAD, because nothing ever set
+  // `net.myReady`. CONFIRM sets it now, so it woke up.
+  // v45.06 guarded it on "is the picker currently visible", which holds right up until the loading
+  // overlay hides the picker - and that is precisely when the delayed start timer fires and drags
+  // everyone back to ship select, on top of a launch already in flight.
+  // The right question is not "is the picker up" but "is a launch under way", and that is answered
+  // by state the launch itself owns: `_ssConfirmed` from the moment CONFIRM is ticked until
+  // returnToRootMenu, and `_launchCommitted` from the moment a countdown is scheduled. Either one
+  // means this handshake has no business running.
+  try {
+    if (game._ssConfirmed || game._launchCommitted) return;
+    if (game.state !== 'select') return;
+    const _sel = document.getElementById('ship-select');
+    if (_sel && _sel.classList.contains('active')) return;
+  } catch (_) {}
   if (!allPeersReady()) {
     // The set is not (or no longer) complete. Cancel any pending start and
     // restore the waiting message so users see why nothing is happening.
@@ -15011,21 +15035,52 @@ function checkAllLoadoutsReady() {
   
   
   if (net.openSolo && (game.state === 'playing' || game.state === 'roundEnd')) return;
-  // Open-solo challenger: the match is already running on the host. Skip
-  // the launch handshake entirely — adopt the briefed round state, run the
-  // cinematic + short countdown, and fly into the live round.
+  // ⭐⭐⭐ (v45.10) A LATE JOINER GOES STRAIGHT IN. NO CINEMATIC, NO 3-2-1.
+  // Owner: "the 3, 2, 1 fight on a late joiner has to sit there and take damage waiting for that
+  // countdown", then: "just skip the cinematic and countdown? and throw them right in?"
+  // Yes - and it is the right call, not just the simple one. The cinematic and the countdown are
+  // CEREMONY FOR A MATCH THAT IS ABOUT TO BEGIN. A drop-in is not that: the match began minutes ago,
+  // and every second of ceremony is spent parked in someone else's firefight with movement locked
+  // (that is what `warmup` does) while the host's bots shoot at a stationary target. The ceremony
+  // was actively harmful in exactly this one case.
+  // So this path now hides the picker, drops the curtain and lets the round system take the very
+  // next tick into 'playing'. The FIGHT beat still paints - that is the "you are in" read, and it is
+  // one frame, not a three-second wait - and it is also where the late-join spawn grace is armed.
+  // (!) THE STATE MACHINE STILL OWNS THE TRANSITION. warmupTimer is anchored to 0 rather than
+  //     game.state being written here, so the warmup -> playing arm runs with all of its guards
+  //     (staging, arena mesh build) intact. Hand-setting the state would skip them.
+  // (!) The picker has to come down HERE. Normally `launchCountdown` drops it at the LAUNCH beat,
+  //     and that beat no longer happens on this path - and the transition itself refuses to fire
+  //     while ship-select is still `.active`, so leaving it up would wedge the joiner in warmup.
   if (net._dropin && net.openSoloHostId && net.myPeerId !== net.openSoloHostId) {
     const d = net._dropin;
     net._dropin = null;   
     game.currentRound = d.round || 1;
     game.scoreA = d.scoreA || 0;
     game.scoreB = d.scoreB || 0;
-    try { hideLoadingOverlay(); } catch (_) {}
     game._launchCommitted = true;   // (v45.05) drop-in: committed, no second ticker
-    _lssRunCinematicThen(() => {
-      _anchorTimer('warmupTimer', LSS.SHORT_COUNTDOWN);
-      launchCountdown(LSS.SHORT_COUNTDOWN);
-    });
+    game._lateJoin = true;          // (v45.10) arms the spawn grace at FIGHT - see there
+    // ⚠⚠ (v45.11) THIS IS finishLaunch's HANDOFF, DONE BY HAND - and it has to be ALL of it.
+    // Owner, on the v45.10 drop-in: "hud and callout tags are missing... from the late joiner."
+    // Skipping the countdown skipped `finishLaunch`, and that function does far more than paint
+    // LAUNCH: it is where the picker is torn down and the combat HUD is handed back. The piece that
+    // bit is `stopShipPreviewLoop()`, whose own comment spells the trap out - "The loop is what
+    // un-hides the combat HUD, so it cannot be left holding the class", and "finishLaunch drops the
+    // picker's `active` class and calls this in the SAME synchronous block, so no rAF fires in
+    // between". The picker's render loop owns `body.lss-picker-3d`, which hides #hud,
+    // #circumpunct-hud, #crosshair, #minimap, #kill-feed and the callout tags. Drop `.active` alone
+    // and that loop's next frame takes its `!visible` early-out BEFORE the line that would clear the
+    // class - so it is never cleared, and the joiner flies with no HUD at all.
+    // Same synchronous block, in finishLaunch's order, for exactly that reason.
+    try {
+      const _sel = document.getElementById('ship-select');
+      if (_sel) { _sel.classList.remove('active'); _sel.style.display = 'none'; }
+    } catch (_) {}
+    try { if (typeof stopShipPreviewLoop === 'function') stopShipPreviewLoop(); } catch (_) {}
+    try { game._launchCdOwnsDigits = false; } catch (_) {}
+    try { if (typeof _safeRequestPointerLock === 'function') _safeRequestPointerLock(); } catch (_) {}
+    try { hideLoadingOverlay(); } catch (_) {}
+    try { _anchorTimer('warmupTimer', 0); } catch (_) {}
     return;
   }
 
@@ -15071,12 +15126,28 @@ function checkAllLoadoutsReady() {
         for (const [, peer] of nonJudgePeerEntries()) { _tot++; if (peer && peer.warmupReady) _rdy++; }
       } catch (_) {}
       const _sub = _tot ? ((_rdy + 1) + '/' + (_tot + 1) + ' ready') : 'syncing match start';
-      // (v43.27) ⚠ NO CURTAIN. This used to drop an OPAQUE full-screen overlay reading
-      // "WAITING FOR PEERS", which is what the owner saw as "i hit confirm and launch, and it went
-      // to the loading screen". The readiness pips it was covering live in #teammates-strip, INSIDE
-      // #ship-select - i.e. underneath it. Keeping the picker up shows those pips again for free and
-      // makes the wait look like what it is: still in the lobby, with everyone's ships on screen.
-      try { hideLoadingOverlay(); } catch (_) {}
+      // ⭐⭐⭐ (v45.08) THE CURTAIN STAYS DOWN NOW, AND v43.27's REASONING IS WHY.
+      // Owner: "the pc went back to the ship selection screen after the loading screen, that is out
+      // of order", and the spec above it: "after hitting confirm and launch, you will see the
+      // loading screen, then the cinematic and zoom around into your ship, then 3, 2, 1 launch...
+      // nothing else in between is seen."
+      // v43.27 lifted the overlay here ON PURPOSE - its note is directly below - because at the time
+      // one button meant CONFIRM AND LAUNCH together, so this wait was still lobby time and hiding
+      // the lobby behind a loading screen was the bug. That argument was right then and is wrong now:
+      // v45.06 split the button, and the waiting-for-everyone part moved to CONFIRM (the LAUNCH
+      // button sits disabled reading `LAUNCH n/m` until the room is ready). By the time this branch
+      // can run, LAUNCH has been pressed and this client has committed - `_localWarmupReady` is set
+      // by commitLoadout's warmup, which nothing but a commit reaches - so lifting the curtain here
+      // drops the player back onto the picker mid-launch.
+      // ⚠ MEASURED: wrapping the overlay's own classList on the peer who did NOT press LAUNCH gave
+      //   `t=31.06 HIDE <- hideLoadingOverlay <- checkAllLoadoutsReady`, with the cinematic not
+      //   arriving until t=72.7 - THIRTY-FIVE SECONDS of ship-select after the loading screen.
+      // The readiness feedback v43.27 wanted is kept, just written onto the loading screen's own
+      // subtitle instead of by uncovering the picker to reach the pips underneath it. Written
+      // directly to the element rather than through showLoadingOverlay(), because this branch
+      // re-runs on every inbound warmup_ready and re-showing an already-shown overlay would restart
+      // its fade.
+      try { const _ls = document.getElementById('lss-loading-sub'); if (_ls) _ls.textContent = _sub; } catch (_) {}
       try { _lssSetConfirmWaiting(true, _rdy + 1, _tot + 1); } catch (_) {}
     }
     return;
@@ -16284,6 +16355,23 @@ function handleNetEvent(evt, fromPeerId) {
       if (_inPicker && game._ssConfirmed && game.state === 'select' && !game._launchCommitted) {
         const _k = game._ssKey || (player && player.loadoutKey) || null;
         if (_k && typeof commitLoadout === 'function') commitLoadout(_k);
+      }
+    } catch (_) {}
+    return;
+  }
+  // ⭐ (v45.09) The authority vacated a bot's seat for us. Fly in where it was standing.
+  // ⚠ Applied to `_spawnPick` as well as to the live position: v45.04 made the world build record
+  //   its spawn choice so the round's respawn consumes it instead of re-rolling, and this seat has
+  //   to win that same consumption or the pilot is moved straight back to the random team spawn.
+  // (!) Ignored once we are actually playing - by then this is a stale packet, and teleporting a
+  //     flying ship is worse than spawning slightly away from the puff.
+  if (evt.type === 'dropin_seat') {
+    try {
+      if (game.state !== 'playing') {
+        const _p = new THREE.Vector3(+evt.x || 0, +evt.y || 0, +evt.z || 0);
+        game._dropinSeat = _p;   // (v45.09) observable: which seat we were given
+        if (typeof _spawnPickSet === 'function') _spawnPickSet(_p);
+        if (player && player.position) player.position.copy(_p);
       }
     } catch (_) {}
     return;
@@ -78551,12 +78639,21 @@ function _botApplyRoster(rows) {
 // The host removes one bot from the challenger's team so the human takes
 // its slot mid-round. Prefers an alive bot ; broadcast keeps every peer's
 // roster in step.
-function _dropinReplaceBot(team) {
+// ⭐⭐ (v45.09) A LATE JOINER TAKES THE BOT'S SEAT, not just its slot on the roster.
+// Owner: "late joiners don't cause everyone or anyone to go into a countdown... they will just take
+// a bot's position, delete the bot with their ship."
+// The bot removal and the phase-out puff have been here since v38.63; what was missing is the second
+// half - the joiner spawned at its own randomly-chosen team spawn, so the puff happened in one place
+// and the pilot appeared somewhere else entirely. The authority now sends the seat it just vacated
+// to that specific peer, and they spawn into it.
+function _dropinReplaceBot(team, toPeerId) {
   if (!net || !net.openSolo) return;
+  let _seat = null;
   for (let i = 0; i < game.entities.length; i++) {
     const b = game.entities[i];
     if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
     if (b.team !== team) continue;
+    try { _seat = b.position ? b.position.clone() : null; } catch (_) { _seat = null; }
     try {
       if (typeof spawnFXBurst === 'function') spawnFXBurst('cloud', b.position, 70, 0.7, { startScale: 1.0, endScale: 0.2 });
       if (typeof playSpatialSound === 'function') playSpatialSound('phase_dash', b.position.clone(), { refDistance: 400, maxDistance: 5000 });
@@ -78565,6 +78662,12 @@ function _dropinReplaceBot(team) {
     game.entities.splice(i, 1);
     break;
   }
+  // To that peer only: this is their seat, nobody else's business.
+  try {
+    if (_seat && toPeerId && net.sendEvent) {
+      net.sendEvent({ type: 'dropin_seat', x: _seat.x, y: _seat.y, z: _seat.z }, toPeerId);
+    }
+  } catch (_) {}
   _botSendRoster();
   try { if (window.Overlays) Overlays.banner('A CHALLENGER APPROACHES', 'A pilot took a bot\'s seat'); } catch (_) {}
 }
@@ -78661,6 +78764,18 @@ function spawnBots() {
 // wall-side test below, which needs the real incoming-shot position).
 function playerTakeDamage(amount, attacker, projectile, hitOpts) {
   if (player.shipState === 'dead' || player.spawnProtection > 0) return;
+  // ⭐⭐⭐ (v45.10) YOU CANNOT BE SHOT DURING YOUR OWN COUNTDOWN.
+  // Owner: "the 3, 2, 1 fight on a late joiner has to sit there and take damage waiting for that
+  // countdown." Exactly - and it is the one case where `warmup` is not a quiet room. A late joiner
+  // drops into a LIVE match: their state is 'warmup' for the cinematic and the 3-2-1, movement is
+  // locked for that whole window (that is what warmup means), and meanwhile the host's bots are
+  // already shooting. So they sit still, unable to move or fire, and get hit.
+  // `spawnProtection` did not save them: it is 3 s, set back in commitLoadout, and it ticks down in
+  // updatePlayerMovement - so it had already burned off during the loading screen and the cinematic
+  // long before the 3-2-1 even started.
+  // ⚠ COSTS NOTHING IN A NORMAL ROUND. Everyone is in warmup together there and nothing is firing,
+  //   so this can only ever matter in the asymmetric case it exists for.
+  if (typeof game !== 'undefined' && game && game.state === 'warmup') return;
   // Teleport invulnerability (SLAYER)
   if (player.phaseInvuln) return;
   player.lastDamageTime = game.time;
@@ -89302,6 +89417,16 @@ function updateRoundSystem(dt) {
         if (!_ffHub) Overlays.countdown('FIGHT', '');
         game._firstBloodClaimed = false;
       }
+      // (v45.10) A LATE JOINER'S GRACE STARTS AT FIGHT, not at commit. Everyone else spent warmup in
+      // an empty room, so their spawn protection expiring during it costs nothing; a drop-in spent it
+      // parked in a live firefight. Re-armed here, once, for that entry only - a normal round never
+      // sets `_lateJoin` and is untouched.
+      try {
+        if (game._lateJoin) {
+          game._lateJoin = false;
+          player.spawnProtection = LSS.SPAWN_PROTECTION;
+        }
+      } catch (_) {}
       // v8VR: ship-AI announces the round transition.
       if (typeof ANN !== 'undefined' && !_ffHub) ANN.roundStart();
       // v8VR: cinematic flyover with BokehPass (Showcase mode only).
