@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.84';
+const LSS_BUILD = '44.85';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18997,10 +18997,8 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
   if (typeof window !== 'undefined' && window.__waterDisp && !(window.__water && window.__water.crestBreak)) _swCrestSpray(px, WL, pz, baseA, vel ? vel.x : 0, vel ? vel.z : 0);   
   if (vh > 60) {                                                      
     const ih = 1 / vh, hx = vel.x * ih, hz = vel.z * ih;
-    const _leadK = (W3.lead != null) ? +W3.lead : 1.0;
-    const _le = _swLeadingExtent(actor, hx, hz);
-    const _leadBase = (_le > 0) ? _le : fp.half;
-    const lead = _leadBase * Math.min(1.0, vh / 240) * _leadK;
+    const _leadK = (W3.lead != null) ? +W3.lead : 0.25;
+    const lead = fp.half * Math.min(1.0, vh / 240) * _leadK;
     _swRippleSeed(px + hx * lead, pz + hz * lead, baseR * 0.75, baseA * 0.6);
     _swRippleSeed(px - hx * fp.half * 0.6, pz - hz * fp.half * 0.6, baseR * 0.7, -baseA * 0.4);     
   }
@@ -19057,41 +19055,6 @@ function _swHullMetrics() {
     _swHM.key = M; _swHM.v = v;
     return v;
   } catch (_) { return null; }
-}
-const _swLeadBox = new WeakMap();
-const _swLeadV = new THREE.Vector3(), _swLeadInv = new THREE.Matrix4(), _swLeadM = new THREE.Matrix4();
-const _swLeadQ = new THREE.Quaternion();
-function _swLeadingExtent(actor, dx, dz) {
-  try {
-    const m = actor && actor.mesh; if (!m) return 0;
-    const pos = actor.position; if (!pos) return 0;
-    let box = _swLeadBox.get(m);
-    if (!box) {
-      m.updateWorldMatrix(true, true);
-      _swLeadInv.copy(m.matrixWorld).invert();
-      box = new THREE.Box3();
-      m.traverse(o => {
-        if (!o.isMesh || !o.geometry) return;
-        if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
-        const bb = o.geometry.boundingBox; if (!bb) return;
-        _swLeadM.multiplyMatrices(_swLeadInv, o.matrixWorld);
-        for (let i = 0; i < 8; i++) {
-          _swLeadV.set((i & 1) ? bb.max.x : bb.min.x, (i & 2) ? bb.max.y : bb.min.y, (i & 4) ? bb.max.z : bb.min.z);
-          box.expandByPoint(_swLeadV.applyMatrix4(_swLeadM));
-        }
-      });
-      if (box.isEmpty()) return 0;
-      _swLeadBox.set(m, box);
-    }
-    _swLeadV.set(dx, 0, dz).applyQuaternion(_swLeadQ.copy(m.quaternion).invert());
-    const ax = (box.max.x - box.min.x) * 0.5, ay = (box.max.y - box.min.y) * 0.5, az = (box.max.z - box.min.z) * 0.5;
-    const sx = ax * _swLeadV.x, sy = ay * _swLeadV.y, sz = az * _swLeadV.z;
-    let best = Math.sqrt(sx * sx + sy * sy + sz * sz);
-    _swLeadV.set((box.max.x + box.min.x) * 0.5, (box.max.y + box.min.y) * 0.5, (box.max.z + box.min.z) * 0.5)
-            .applyMatrix4(m.matrixWorld);
-    best += (_swLeadV.x - pos.x) * dx + (_swLeadV.z - pos.z) * dz;
-    return (best > 0 && isFinite(best)) ? best : 0;
-  } catch (_) { return 0; }
 }
 function _swHullSpan() {
   try {
