@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.96';
+const LSS_BUILD = '44.98';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -19126,10 +19126,11 @@ function _swEntFootprint(e) {
 }
 function _swEntState(e) {
   if (!e._swEnt) e._swEnt = { px: e.position.x, py: e.position.y, pz: e.position.z,
-                              vx: 0, vy: 0, vz: 0, prevKeel: undefined, seedT: 0 };
+                              vx: 0, vy: 0, vz: 0, prevKeel: undefined, seedT: 0, roosT: 0, planT: 0, wingT: 0, dotStep: 0 };
   return e._swEnt;
 }
 const _swEntVel = { x: 0, y: 0, z: 0, length: 0 };
+const _swEntRight = new THREE.Vector3();   // (v44.98) scratch for the wing-tip roll axis
 function _swEntityWaterTick(dt, WL) {
   const R = _swRipple; if (!R || !R.gpu) return;
   const K = (window.__water = window.__water || {});
@@ -19162,9 +19163,11 @@ function _swEntityWaterTick(dt, WL) {
   const cam = (typeof camera !== 'undefined' && camera) ? camera.position : null;
   let budget = Math.max(0, 8 - (R.pending ? R.pending.length : 0) - 2);
   if (budget <= 0) return;
+  const _spN = (K.entSprayMax != null) ? +K.entSprayMax : 2;
+  let _capRoos = _spN, _capSheet = _spN, _capCrest = _spN, _capWing = Math.max(1, _spN >> 1);
 
   const n = L.length;
-  for (let k = 0; k < n && budget > 0; k++) {
+  for (let k = 0; k < n; k++) {
     const e = L[(_SW_ENT.cursor + k) % n];
     const st = _swEntState(e);
     const idt = dt > 1e-4 ? (1 / dt) : 0;
@@ -19184,17 +19187,17 @@ function _swEntityWaterTick(dt, WL) {
     const sp = Math.hypot(_swEntVel.x, _swEntVel.z);
 
     const _selfImpacts = !!e.peerId;
-    if (!_selfImpacts && keelA < 0 && prevKeel >= 0) {
+    if (budget > 0 && !_selfImpacts && keelA < 0 && prevKeel >= 0) {
       try { _swImpact(e.position.x, e.position.z, +1, fp, 1.0, _swEntVel, WL, e, 0.8 * K.entWake); } catch (_) {}
       budget--;
       continue;
     }
-    if (!_selfImpacts && keelA > 0 && prevKeel <= 0) {
+    if (budget > 0 && !_selfImpacts && keelA > 0 && prevKeel <= 0) {
       try { _swImpact(e.position.x, e.position.z, -1, fp, 1.0, _swEntVel, WL, e, 0.7 * K.entWake); } catch (_) {}
       budget--;
       continue;
     }
-    if (keelA < 0 && keelA > -fp.DRAFT * 4 && sp > 25) {
+    if (budget > 0 && keelA < 0 && keelA > -fp.DRAFT * 4 && sp > 25) {
       st.seedT -= dt;
       if (st.seedT <= 0) {
         st.seedT = 0.2;
@@ -19206,9 +19209,84 @@ function _swEntityWaterTick(dt, WL) {
                         fp.BEAM * 1.25, -amp);
           if (typeof _swFxN === 'function') _swFxN('entWake');
           budget--;
+          if (_capCrest > 0 && _swFxRoom() > 40) {
+            const _spd = Math.min(1, sp / 420);
+            const _cA = amp * (0.45 + 0.95 * _spd);
+            const _crestD = fp.half + fp.BEAM * 0.45 + Math.min(sp * 0.10, fp.LEN);
+            const _cx = e.position.x - ux * _crestD, _cz = e.position.z - uz * _crestD;
+            if (window.__waterDisp && !K.crestBreak) {
+              try { _swCrestSpray(_cx, WL, _cz, _cA, _swEntVel.x, _swEntVel.z); _capCrest--; } catch (_) {}
+            }
+            st.dotStep = (st.dotStep | 0) + 1;
+            if ((st.dotStep & 1) === 0) {
+              try {
+                const _ha = _cA * 2 * ((K.seedScale != null) ? +K.seedScale : 1);
+                _swCrestDots(_cx, WL, _cz, _cA * 3.4, _swEntVel.x, _swEntVel.z, _swDispWorld(_ha));
+              } catch (_) {}
+            }
+          }
         }
       }
     }
+    const _rk = (K.entSpray != null) ? +K.entSpray : ((K.entRooster != null) ? +K.entRooster : 1);
+    if (_rk > 0 && _capRoos > 0 && !game._swSubmerged &&
+        keelA < 0 && keelA > -fp.DRAFT * 3 && sp > 90) {
+      st.roosT = (st.roosT || 0) - dt;
+      if (st.roosT <= 0) {
+        const _wet = Math.max(0, Math.min(1, -keelA / Math.max(1, fp.DRAFT)));
+        st.roosT = 1 / Math.max(0.5, (4 + 8 * _wet * Math.min(1, sp / 320)) * _rk);
+        if (typeof _swFxRoom === 'function' && _swFxRoom() > 40) {
+          const _ux = sp > 1 ? (_swEntVel.x / sp) : 0, _uz = sp > 1 ? (_swEntVel.z / sp) : 0;
+          try {
+            _swRooster(e.position.x - _ux * fp.half * 1.15, WL, e.position.z - _uz * fp.half * 1.15,
+                       _swEntVel, fp, _wet);
+            _capRoos--;
+          } catch (_) {}
+        }
+      }
+    }
+    if (_rk > 0 && _capSheet > 0 && !game._swSubmerged &&
+        keelA < 0 && keelA > -fp.DRAFT * 3 && sp > 90) {
+      st.planT = (st.planT || 0) - dt;
+      if (st.planT <= 0) {
+        const _wet = Math.max(0, Math.min(1, -keelA / Math.max(1, fp.DRAFT)));
+        st.planT = 1 / Math.max(0.5, (3 + 6 * _wet * Math.min(1, sp / 300)) * _rk);
+        if (_swFxRoom() > 40) {
+          const _ux = sp > 1 ? (_swEntVel.x / sp) : 0, _uz = sp > 1 ? (_swEntVel.z / sp) : 0;
+          try {
+            _swSpawnSplashV(e.position.x + _ux * fp.half * 0.55, WL, e.position.z + _uz * fp.half * 0.55,
+                            { x: _swEntVel.x, y: -Math.max(14, sp * 0.10 * _wet), z: _swEntVel.z },
+                            fp.BEAM, 0.55 + 0.55 * _wet, _swDeadrise(fp));
+            _capSheet--;
+          } catch (_) {}
+        }
+      }
+    } else if (st.planT) st.planT = 0;
+    if (_rk > 0 && _capWing > 0 && !game._swSubmerged && e.mesh && sp > 90 &&
+        keelA > -fp.DRAFT * 0.5 && keelA < fp.BEAM * 0.9) {
+      st.wingT = (st.wingT || 0) - dt;
+      if (st.wingT <= 0) {
+        try {
+          _swEntRight.set(1, 0, 0).applyQuaternion(e.mesh.quaternion);
+          const _span = fp.BEAM * 0.5;
+          let _deep = 0, _tx = 0, _tz = 0;
+          for (let _s = -1; _s <= 1; _s += 2) {
+            const _ty = e.position.y + _swEntRight.y * _span * _s;
+            const _d = WL - _ty;
+            if (_d > _deep) { _deep = _d; _tx = e.position.x + _swEntRight.x * _span * _s; _tz = e.position.z + _swEntRight.z * _span * _s; }
+          }
+          if (_deep > 0 && _swFxRoom() > 40) {
+            st.wingT = 1 / Math.max(0.5, 6 * _rk);
+            const _wk = Math.min(1, Math.max(0.30, _deep / Math.max(6, fp.DRAFT)));
+            _swSpawnSplashV(_tx, WL, _tz,
+                            { x: _swEntVel.x, y: -Math.max(12, sp * 0.09 * _wk), z: _swEntVel.z },
+                            fp.BEAM * 0.34, 0.35 + 0.65 * _wk, _swDeadrise(fp));
+            if (typeof _swFxN === 'function') _swFxN('entWing');   // (v44.98) its own counter - the spray it throws is shared with the sheet's
+            _capWing--;
+          }
+        } catch (_) {}
+      }
+    } else if (st.wingT) st.wingT = 0;
   }
   _SW_ENT.cursor = (_SW_ENT.cursor + 1) % n;
 }
