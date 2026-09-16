@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.85';
+const LSS_BUILD = '44.86';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18524,10 +18524,12 @@ function _swRooster(px, wl, pz, vel, fp, wet01) {
     const u1 = Math.random(), u2 = Math.random();
     const el = 0.79 + u1 * 0.52;
     const side = (u2 - 0.5) * 1.35;                                   
-    const spd = sp * (0.34 + 0.42 * Math.random()) * k * (0.55 + 0.65 * wet01);
+    const _spdBase = sp * (0.34 + 0.42 * Math.random()) * (0.55 + 0.65 * wet01);
+    const spd = _spdBase;                 // horizontal - the fan, unscaled
+    const _spdUp = _spdBase * k;          // vertical - the 'higher' dial doing what it says
     const ce = Math.cos(el), se = Math.sin(el);
     _swDropV.set((-bx * ce + lx * side) * spd + vx * 0.30,
-                 se * spd,
+                 se * _spdUp,
                  (-bz * ce + lz * side) * spd + vz * 0.30);
     game.particles.push({
       position: new THREE.Vector3(px + lx * (Math.random() - 0.5) * fp.BEAM * 0.7,
