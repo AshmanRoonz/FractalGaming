@@ -6725,7 +6725,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.40';
+const LSS_BUILD = '45.41';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -17034,7 +17034,7 @@ function handleNetEvent(evt, fromPeerId) {
       const _ok = (k) => typeof k === 'string' && Object.prototype.hasOwnProperty.call(LOADOUTS, k);
       if (!game._botShipDeal) game._botShipDeal = { enemy: [], friendly: [] };
       if (Array.isArray(evt.e)) game._botShipDeal.enemy = evt.e.slice(0, 3).filter(_ok);
-      if (Array.isArray(evt.f)) game._botShipDeal.friendly = evt.f.slice(0, 2).filter(_ok);
+      if (Array.isArray(evt.f)) game._botShipDeal.friendly = evt.f.slice(0, 3).filter(_ok);   // (v45.41) 3 per side
       if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
     } catch (_) {}
     return;
@@ -79516,16 +79516,30 @@ function spawnBots() {
     _lssDealBotShips();
   }
   game._botShipDeal.fromPicker = false;
-  // Open-solo: humans hold seats. Every connected challenger on a team
-  // means one fewer bot on that team, so the 3v3 (2 friendly + you vs 3)
-  // shape survives any mix of silicon and flesh.
-  let _enemyN = 3, _friendN = 2;
+  // ⭐⭐ (v45.41) THE LOCAL PLAYER HOLDS A SEAT TOO. Owner: "i somehow managed to get it to be 4 vs 2,
+  // i had 3 other bots on my team... i saw in the lobby, that of the 3 enemy player cards, one spot
+  // was empty."
+  // `_friendN = 2` was not a count, it was an ASSUMPTION - "Fleet A is the player's fleet, so it only
+  // needs two bots". Nothing enforced that: the v45.27 team-swap cards let you sit on Fleet B, and
+  // the open-solo challenger rule seats joiners there by itself. Sit on B and the arithmetic hands B
+  // three bots (+ you = FOUR) and A two, which is the 4v2 exactly, with A's third card left EMPTY -
+  // the picker was telling the truth about a broken spawn.
+  // Both fleets are three seats. Count the humans in each - INCLUDING THE ONE AT THIS KEYBOARD, which
+  // is the line that was missing - and fill the rest with bots. On Fleet A that reproduces the old
+  // numbers exactly (3 enemy / 2 friendly), so nothing changes for the common case.
+  // (!) The human tally is no longer gated on `net.openSolo`: the local player exists offline too,
+  //     and that gate is what kept this arithmetic from ever noticing them.
+  let _hB = 0, _hA = 0;
+  try {
+    if (player && player.team === LSS.TEAM_FLEET_B) _hB++;
+    else if (player && player.team === LSS.TEAM_FLEET_A) _hA++;
+  } catch (_) { _hA++; }
   if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-    const _hB = net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
-    const _hA = net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
-    _enemyN = Math.max(0, 3 - _hB);
-    _friendN = Math.max(0, 2 - _hA);
+    _hB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
+    _hA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
   }
+  const _enemyN = Math.max(0, 3 - _hB);
+  const _friendN = Math.max(0, 3 - _hA);
   const enemyLoadouts = game._botShipDeal.enemy;
   for (let i = 0; i < _enemyN; i++) {
     const bot = new Bot(enemyLoadouts[i], LSS.TEAM_FLEET_B, i + 1);
@@ -90302,11 +90316,19 @@ function updateRoundSystem(dt) {
       if (_rAtkDue) game._asltReinforceT = 0;
       if (_rDefDue) game._asltReinforceTD = 0;
       if (_rAtkDue || _rDefDue) {
-        let _needB = 3, _needA = 2;
+        // (v45.41) same correction as spawnBots - the local player holds a seat on whichever fleet
+        // they are on, so the top-up cannot assume Fleet A is theirs. Without this the reinforcement
+        // loop would keep restoring the 4v2 every few seconds even after spawnBots got it right.
+        let _rhB = 0, _rhA = 0;
+        try {
+          if (player && player.team === LSS.TEAM_FLEET_B) _rhB++;
+          else if (player && player.team === LSS.TEAM_FLEET_A) _rhA++;
+        } catch (_) { _rhA++; }
         if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-          _needB = Math.max(0, 3 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length);
-          _needA = Math.max(0, 2 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length);
+          _rhB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
+          _rhA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
         }
+        const _needB = Math.max(0, 3 - _rhB), _needA = Math.max(0, 3 - _rhA);
         const _deal = game._botShipDeal || { enemy: ['SLAYER', 'PYRO', 'TRACKER'], friendly: ['VORTEX', 'BLASTER'] };
         let _addedAny = false;
         for (const _fl of [LSS.TEAM_FLEET_B, LSS.TEAM_FLEET_A]) {
@@ -97484,7 +97506,11 @@ function _lssDealBotShips() {
     const j = (Math.random() * (i + 1)) | 0;
     const t = keys[i]; keys[i] = keys[j]; keys[j] = t;
   }
-  game._botShipDeal = { enemy: keys.slice(0, 3), friendly: keys.slice(3, 5) };
+  // (v45.41) THREE PER SIDE, not 3 + 2. The hands are per-FLEET (enemy = Fleet B's ships, friendly =
+  // Fleet A's) and EITHER fleet can be the one that needs three bots - it is whichever the local
+  // player is NOT on. `friendly` held only two, so a player sitting on Fleet B made spawnBots read
+  // `friendlyLoadouts[2]` -> undefined -> a Bot with no loadout. See the seat note in spawnBots.
+  game._botShipDeal = { enemy: keys.slice(0, 3), friendly: keys.slice(3, 6) };
   return game._botShipDeal;
 }
 // Called once per visit to the LAUNCH picker (enterShipSelect). `game.state === 'select'` is what
@@ -97519,11 +97545,17 @@ function _lssBotSeats() {
     if (_m === 'campaign' || _m === 'freeflight' || _m === 'endless') return out;
     const deal = game._botShipDeal;
     if (!deal || !deal.enemy || !deal.friendly) return out;
-    let eN = 3, fN = 2;
+    // (v45.41) the same arithmetic spawnBots runs, local player included - see the seat note there.
+    // Keeping the two in step is the whole point of this function; when they drifted, the cards
+    // faithfully drew the 4v2 the spawn was about to produce.
+    let _hB = 0, _hA = 0;
+    if (player && player.team === LSS.TEAM_FLEET_B) _hB++;
+    else if (player && player.team === LSS.TEAM_FLEET_A) _hA++;
     if (net && net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-      eN = Math.max(0, 3 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length);
-      fN = Math.max(0, 2 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length);
+      _hB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
+      _hA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
     }
+    const eN = Math.max(0, 3 - _hB), fN = Math.max(0, 3 - _hA);
     for (let i = 0; i < eN && i < deal.enemy.length; i++) if (deal.enemy[i]) out.enemy.push(deal.enemy[i]);
     for (let i = 0; i < fN && i < deal.friendly.length; i++) if (deal.friendly[i]) out.friendly.push(deal.friendly[i]);
   } catch (_) {}
@@ -97595,7 +97627,7 @@ function _lssBotDealAnnounce(toPeerId) {
     if (typeof _botAuthority === 'function' && !_botAuthority()) return;
     const d = (typeof game !== 'undefined' && game) ? game._botShipDeal : null;
     if (!d || !d.enemy || !d.friendly) return;
-    const p = { type: 'bot_deal', e: d.enemy.slice(0, 3), f: d.friendly.slice(0, 2) };
+    const p = { type: 'bot_deal', e: d.enemy.slice(0, 3), f: d.friendly.slice(0, 3) };   // (v45.41) 3 per side
     if (toPeerId) net.sendEvent(p, toPeerId); else net.sendEvent(p);
   } catch (_) {}
 }
@@ -97878,9 +97910,15 @@ function updateTeammatesStrip() {
     }));
   }
 
-  // ⭐ (v45.33) SCROLL THE ICON LEFT OR RIGHT - the owner's words, wired as both halves of that
-  // gesture: the arrows are the tap target (a phone has no wheel) and the wheel is the desktop one.
-  // A trackpad swipe over a card arrives as deltaX, a mouse wheel as deltaY, so both count.
+  // ⭐ THE ARROWS ARE THE WHOLE CONTROL. Owner: "the scrolling on the player cards needs to be
+  // removed, the buttons are fine to change the ship... scrolling confuses the scrolling up and down
+  // if there's not enough room for the 6 cards".
+  // (v45.41) The v45.33 WHEEL HANDLER IS GONE, and the reason is worth keeping: it called
+  // preventDefault so a wheel over a card would change the hull instead of scrolling - which is
+  // exactly right when the column fits, and exactly wrong when it does not. Six cards past the
+  // column's height make #fleet-scroll a scroller, and then most of what you can point at is a card,
+  // so the gesture for "see the rest of my fleet" was being eaten by "change this bot's ship". A
+  // control that steals the scrollbar is not worth the convenience.
   // ⚠ THE ARROW CLICK MUST STOP PROPAGATING. The enemy list's own click handler is the v45.27
   //   TEAM SWAP; without it, changing a bot's hull would also move you to the other fleet.
   //   Per-button rather than delegated for exactly that reason - a second delegated listener on the
@@ -97897,25 +97935,6 @@ function updateTeammatesStrip() {
           _lssBotCycleShip(_side, _idx, (+_ar.dataset.botDir < 0) ? -1 : 1);
         });
       }
-    }
-    if (!_list._lssBotWheelBound) {
-      _list._lssBotWheelBound = true;
-      _list.addEventListener('wheel', (e) => {
-        try {
-          const chip = e.target && e.target.closest ? e.target.closest('.fleet-chip') : null;
-          if (!chip || !chip.dataset || !chip.dataset.botSide) return;
-          if (!_lssBotPickAllowed()) return;
-          const d = (Math.abs(e.deltaX) > Math.abs(e.deltaY)) ? e.deltaX : e.deltaY;
-          if (!d) return;
-          e.preventDefault();   // #fleet-scroll would otherwise scroll the column out from under you
-          // One hull per gesture, not one per wheel tick: a single notch on a free-spinning wheel
-          // reports a dozen events and would blur the whole roster past you.
-          const _now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
-          if (_now - (_list._lssBotWheelT || 0) < 110) return;
-          _list._lssBotWheelT = _now;
-          _lssBotCycleShip(chip.dataset.botSide, (+chip.dataset.botIdx) | 0, (d > 0) ? 1 : -1);
-        } catch (_) {}
-      }, { passive: false });
     }
   }
 

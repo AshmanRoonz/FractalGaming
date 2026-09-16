@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.40';
+const LSS_BUILD = '45.41';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -6928,7 +6928,7 @@ function handleNetEvent(evt, fromPeerId) {
       const _ok = (k) => typeof k === 'string' && Object.prototype.hasOwnProperty.call(LOADOUTS, k);
       if (!game._botShipDeal) game._botShipDeal = { enemy: [], friendly: [] };
       if (Array.isArray(evt.e)) game._botShipDeal.enemy = evt.e.slice(0, 3).filter(_ok);
-      if (Array.isArray(evt.f)) game._botShipDeal.friendly = evt.f.slice(0, 2).filter(_ok);
+      if (Array.isArray(evt.f)) game._botShipDeal.friendly = evt.f.slice(0, 3).filter(_ok);   // (v45.41) 3 per side
       if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
     } catch (_) {}
     return;
@@ -50421,13 +50421,17 @@ function spawnBots() {
     _lssDealBotShips();
   }
   game._botShipDeal.fromPicker = false;
-  let _enemyN = 3, _friendN = 2;
+  let _hB = 0, _hA = 0;
+  try {
+    if (player && player.team === LSS.TEAM_FLEET_B) _hB++;
+    else if (player && player.team === LSS.TEAM_FLEET_A) _hA++;
+  } catch (_) { _hA++; }
   if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-    const _hB = net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
-    const _hA = net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
-    _enemyN = Math.max(0, 3 - _hB);
-    _friendN = Math.max(0, 2 - _hA);
+    _hB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
+    _hA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
   }
+  const _enemyN = Math.max(0, 3 - _hB);
+  const _friendN = Math.max(0, 3 - _hA);
   const enemyLoadouts = game._botShipDeal.enemy;
   for (let i = 0; i < _enemyN; i++) {
     const bot = new Bot(enemyLoadouts[i], LSS.TEAM_FLEET_B, i + 1);
@@ -57592,11 +57596,16 @@ function updateRoundSystem(dt) {
       if (_rAtkDue) game._asltReinforceT = 0;
       if (_rDefDue) game._asltReinforceTD = 0;
       if (_rAtkDue || _rDefDue) {
-        let _needB = 3, _needA = 2;
+        let _rhB = 0, _rhA = 0;
+        try {
+          if (player && player.team === LSS.TEAM_FLEET_B) _rhB++;
+          else if (player && player.team === LSS.TEAM_FLEET_A) _rhA++;
+        } catch (_) { _rhA++; }
         if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-          _needB = Math.max(0, 3 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length);
-          _needA = Math.max(0, 2 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length);
+          _rhB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
+          _rhA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
         }
+        const _needB = Math.max(0, 3 - _rhB), _needA = Math.max(0, 3 - _rhA);
         const _deal = game._botShipDeal || { enemy: ['SLAYER', 'PYRO', 'TRACKER'], friendly: ['VORTEX', 'BLASTER'] };
         let _addedAny = false;
         for (const _fl of [LSS.TEAM_FLEET_B, LSS.TEAM_FLEET_A]) {
@@ -62470,7 +62479,7 @@ function _lssDealBotShips() {
     const j = (Math.random() * (i + 1)) | 0;
     const t = keys[i]; keys[i] = keys[j]; keys[j] = t;
   }
-  game._botShipDeal = { enemy: keys.slice(0, 3), friendly: keys.slice(3, 5) };
+  game._botShipDeal = { enemy: keys.slice(0, 3), friendly: keys.slice(3, 6) };
   return game._botShipDeal;
 }
 function _lssBotDealPrep() {
@@ -62491,11 +62500,14 @@ function _lssBotSeats() {
     if (_m === 'campaign' || _m === 'freeflight' || _m === 'endless') return out;
     const deal = game._botShipDeal;
     if (!deal || !deal.enemy || !deal.friendly) return out;
-    let eN = 3, fN = 2;
+    let _hB = 0, _hA = 0;
+    if (player && player.team === LSS.TEAM_FLEET_B) _hB++;
+    else if (player && player.team === LSS.TEAM_FLEET_A) _hA++;
     if (net && net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-      eN = Math.max(0, 3 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length);
-      fN = Math.max(0, 2 - net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length);
+      _hB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
+      _hA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
     }
+    const eN = Math.max(0, 3 - _hB), fN = Math.max(0, 3 - _hA);
     for (let i = 0; i < eN && i < deal.enemy.length; i++) if (deal.enemy[i]) out.enemy.push(deal.enemy[i]);
     for (let i = 0; i < fN && i < deal.friendly.length; i++) if (deal.friendly[i]) out.friendly.push(deal.friendly[i]);
   } catch (_) {}
@@ -62542,7 +62554,7 @@ function _lssBotDealAnnounce(toPeerId) {
     if (typeof _botAuthority === 'function' && !_botAuthority()) return;
     const d = (typeof game !== 'undefined' && game) ? game._botShipDeal : null;
     if (!d || !d.enemy || !d.friendly) return;
-    const p = { type: 'bot_deal', e: d.enemy.slice(0, 3), f: d.friendly.slice(0, 2) };
+    const p = { type: 'bot_deal', e: d.enemy.slice(0, 3), f: d.friendly.slice(0, 3) };   // (v45.41) 3 per side
     if (toPeerId) net.sendEvent(p, toPeerId); else net.sendEvent(p);
   } catch (_) {}
 }
@@ -62755,23 +62767,6 @@ function updateTeammatesStrip() {
           _lssBotCycleShip(_side, _idx, (+_ar.dataset.botDir < 0) ? -1 : 1);
         });
       }
-    }
-    if (!_list._lssBotWheelBound) {
-      _list._lssBotWheelBound = true;
-      _list.addEventListener('wheel', (e) => {
-        try {
-          const chip = e.target && e.target.closest ? e.target.closest('.fleet-chip') : null;
-          if (!chip || !chip.dataset || !chip.dataset.botSide) return;
-          if (!_lssBotPickAllowed()) return;
-          const d = (Math.abs(e.deltaX) > Math.abs(e.deltaY)) ? e.deltaX : e.deltaY;
-          if (!d) return;
-          e.preventDefault();   // #fleet-scroll would otherwise scroll the column out from under you
-          const _now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
-          if (_now - (_list._lssBotWheelT || 0) < 110) return;
-          _list._lssBotWheelT = _now;
-          _lssBotCycleShip(chip.dataset.botSide, (+chip.dataset.botIdx) | 0, (d > 0) ? 1 : -1);
-        } catch (_) {}
-      }, { passive: false });
     }
   }
 
