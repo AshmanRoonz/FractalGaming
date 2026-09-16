@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.16';
+const LSS_BUILD = '45.17';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -5074,7 +5074,8 @@ function _lssToggleConfirm() {
     game._ssConfirmed = !game._ssConfirmed;
     if (net && net.active) {
       net.myReady = !!game._ssConfirmed;
-      try { if (net.sendEvent) net.sendEvent({ type: 'ready', ready: net.myReady }); } catch (_) {}
+      try { if (net.sendEvent) net.sendEvent({ type: 'ready', ready: net.myReady,
+                                              ship: (net.myReady && game._ssKey) ? game._ssKey : null }); } catch (_) {}
       try { if (typeof updateLobbyPeers === 'function') updateLobbyPeers(); } catch (_) {}
     }
     _lssRefreshLaunchRow();
@@ -5094,7 +5095,7 @@ function _lssSetConfirmWaiting(on, rdy, tot) {
     if (on) {
       b.disabled = true;
       b.classList.add('ss-waiting');
-      b.textContent = (tot ? ('WAITING  ' + rdy + '/' + tot) : 'WAITING');
+      _lssBtnLabel(b, tot ? ('WAITING  ' + rdy + '/' + tot) : 'WAITING');   // (v45.17) data-label too, or a landscape phone shows the fallback
       b.title = 'Everyone launches together - waiting for the rest of the room';
     } else {
       b.classList.remove('ss-waiting');
@@ -6776,6 +6777,7 @@ function handleNetEvent(evt, fromPeerId) {
     const peer = net.peers.get(fromPeerId);
     if (peer) {
       peer.ready = !!evt.ready;
+      peer.readyShip = peer.ready ? (evt.ship || null) : null;   // (v45.17) their locked-in pick
       updateLobbyPeers();
       checkAllReady();
       try { if (typeof _lssRefreshLaunchRow === 'function') _lssRefreshLaunchRow(); } catch (_) {}   // (v45.06) the last confirm lights LAUNCH
@@ -62016,6 +62018,11 @@ function previewLoadout(key) {
     });
   }
   try { game._ssKey = key; } catch (_) {}   // (v45.06) what a remote LAUNCH will commit on our behalf
+  try {
+    if (game._ssConfirmed && net && net.active && net.sendEvent) {
+      net.sendEvent({ type: 'ready', ready: true, ship: key });
+    }
+  } catch (_) {}
   try { _lssRefreshLaunchRow(); } catch (_) {}
   const vrBtn = document.getElementById('ship-preview-confirm-vr');
   if (vrBtn) {
@@ -62278,7 +62285,7 @@ function updateTeammatesStrip() {
     }
 
     const nameTxt = _roomBoxEsc(opts.name || '---');
-    const shipTxt = _roomBoxEsc(opts.ship || '---');
+    const shipTxt = _roomBoxEsc(opts.label || opts.ship || '---');
     chip.innerHTML = `
       ${thumbHTML}
       <span class="chip-name">${nameTxt}</span>
@@ -62288,15 +62295,27 @@ function updateTeammatesStrip() {
     return chip;
   }
 
-  const yourShip = (player && player.loadoutKey) ? player.loadoutKey : '---';
+  const _youConfirmed = !!(game && game._ssConfirmed);
+  const yourShip = (player && player.loadoutKey) ? player.loadoutKey
+                 : (_youConfirmed && game._ssKey) ? game._ssKey : '---';
   const youCommitted = !!(player && player.loadoutKey);
+  const yourLabel = youCommitted ? null : (_youConfirmed ? 'CONFIRMED' : 'PICKING');
+  function _peerCard(peer) {
+    const committed = !!(peer && peer.loadoutKey);
+    const confirmed = !!(peer && peer.ready);
+    return {
+      ship: committed ? peer.loadoutKey : ((confirmed && peer.readyShip) ? peer.readyShip : '---'),
+      label: committed ? null : (confirmed ? 'CONFIRMED' : 'PICKING'),
+      isReady: committed || confirmed,
+    };
+  }
   const _meDc = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null;
   const _meAvatar = _meDc ? _discordAvatarUrlFor(_meDc, 64) : null;
   const _meName = _meDc ? (_meDc.global_name || _meDc.username) : 'YOU';
   yourList.appendChild(makeChip({
-    name: _meName, ship: yourShip, isYou: true,
+    name: _meName, ship: yourShip, label: yourLabel, isYou: true,
     showPip: inMultiplayer,
-    isReady: youCommitted,
+    isReady: youCommitted || _youConfirmed,
     discordAvatarUrl: _meAvatar,
   }));
 
@@ -62313,11 +62332,12 @@ function updateTeammatesStrip() {
       const peerAvatar = peer.discord_id
         ? _discordAvatarUrlFor({ id: peer.discord_id, avatar: peer.discord_avatar }, 64)
         : null;
+      const _pc = _peerCard(peer);
       yourList.appendChild(makeChip({
         name: peer.discord_name || 'PEER',
-        ship: peer.loadoutKey || 'PICKING',
+        ship: _pc.ship, label: _pc.label,
         showPip: true,
-        isReady: !!peer.loadoutKey,
+        isReady: _pc.isReady,
         discordAvatarUrl: peerAvatar,
       }));
     }
@@ -62348,12 +62368,13 @@ function updateTeammatesStrip() {
       const peerAvatar = peer.discord_id
         ? _discordAvatarUrlFor({ id: peer.discord_id, avatar: peer.discord_avatar }, 64)
         : null;
+      const _pc = _peerCard(peer);
       enemyList.appendChild(makeChip({
         name: peer.discord_name || 'PEER',
-        ship: peer.loadoutKey || 'PICKING',
+        ship: _pc.ship, label: _pc.label,
         isEnemy: true,
         showPip: true,
-        isReady: !!peer.loadoutKey,
+        isReady: _pc.isReady,
         discordAvatarUrl: peerAvatar,
       }));
     }

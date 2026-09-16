@@ -6480,7 +6480,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.16';
+const LSS_BUILD = '45.17';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -13818,7 +13818,10 @@ function _lssToggleConfirm() {
       //   was dormant; confirming through it would have woken it and re-entered the picker for the
       //   whole room the moment the last person confirmed. Set the flag and announce it, nothing else.
       net.myReady = !!game._ssConfirmed;
-      try { if (net.sendEvent) net.sendEvent({ type: 'ready', ready: net.myReady }); } catch (_) {}
+      // (v45.17) ...and WHICH ship, so the room's fleet cards can show the pick the moment it is
+      // locked instead of waiting for the commit broadcast that only LAUNCH sends.
+      try { if (net.sendEvent) net.sendEvent({ type: 'ready', ready: net.myReady,
+                                              ship: (net.myReady && game._ssKey) ? game._ssKey : null }); } catch (_) {}
       try { if (typeof updateLobbyPeers === 'function') updateLobbyPeers(); } catch (_) {}
     }
     _lssRefreshLaunchRow();
@@ -13841,7 +13844,7 @@ function _lssSetConfirmWaiting(on, rdy, tot) {
     if (on) {
       b.disabled = true;
       b.classList.add('ss-waiting');
-      b.textContent = (tot ? ('WAITING  ' + rdy + '/' + tot) : 'WAITING');
+      _lssBtnLabel(b, tot ? ('WAITING  ' + rdy + '/' + tot) : 'WAITING');   // (v45.17) data-label too, or a landscape phone shows the fallback
       b.title = 'Everyone launches together - waiting for the rest of the room';
     } else {
       b.classList.remove('ss-waiting');
@@ -16466,6 +16469,7 @@ function handleNetEvent(evt, fromPeerId) {
     const peer = net.peers.get(fromPeerId);
     if (peer) {
       peer.ready = !!evt.ready;
+      peer.readyShip = peer.ready ? (evt.ship || null) : null;   // (v45.17) their locked-in pick
       updateLobbyPeers();
       checkAllReady();
       try { if (typeof _lssRefreshLaunchRow === 'function') _lssRefreshLaunchRow(); } catch (_) {}   // (v45.06) the last confirm lights LAUNCH
@@ -96345,6 +96349,13 @@ function previewLoadout(key) {
     });
   }
   try { game._ssKey = key; } catch (_) {}   // (v45.06) what a remote LAUNCH will commit on our behalf
+  // (v45.17) If this preview changed while already confirmed, the room is holding a stale pick on
+  // our card. Re-announce; `ready` is idempotent on the receiving side.
+  try {
+    if (game._ssConfirmed && net && net.active && net.sendEvent) {
+      net.sendEvent({ type: 'ready', ready: true, ship: key });
+    }
+  } catch (_) {}
   try { _lssRefreshLaunchRow(); } catch (_) {}
   const vrBtn = document.getElementById('ship-preview-confirm-vr');
   if (vrBtn) {
@@ -96708,7 +96719,9 @@ function updateTeammatesStrip() {
     // (v38.60) Peer display names come straight off the loadout / hello payloads
     // of other clients — escape before they hit innerHTML.
     const nameTxt = _roomBoxEsc(opts.name || '---');
-    const shipTxt = _roomBoxEsc(opts.ship || '---');
+    // (v45.17) `label` is the STATUS line; `ship` stays the ship key the thumbnail and the mini
+    // badge are looked up by, so a card can read CONFIRMED and still show the hull they picked.
+    const shipTxt = _roomBoxEsc(opts.label || opts.ship || '---');
     chip.innerHTML = `
       ${thumbHTML}
       <span class="chip-name">${nameTxt}</span>
@@ -96724,8 +96737,32 @@ function updateTeammatesStrip() {
   // player.loadoutKey, NOT net.myReady, because myReady is the lobby READY
   // toggle that already flipped before we ever entered ship-select. The
   // ship-select "ready" signal is the loadout broadcast.
-  const yourShip = (player && player.loadoutKey) ? player.loadoutKey : '---';
+  // ⭐⭐ (v45.17) THE CARDS READ THE CONFIRM, AND THE COMMENT BELOW IS WHY THEY DIDN'T. Owner: "it
+  // should show the confirm status ('picking' should change to 'confirmed')".
+  // The note under this block said to use `player.loadoutKey` and NOT `net.myReady`, "because
+  // myReady is the lobby READY toggle that already flipped before we ever entered ship-select". That
+  // was true and is no longer: v45.06 made CONFIRM the only writer of `net.myReady` (nothing called
+  // toggleReady before it, so the flag sat false for the whole session), so the flag now means
+  // exactly "locked in at the picker" - which is the signal these cards wanted all along. Third time
+  // in this redesign that correct code was left standing on a premise a later change removed, and
+  // the third time the original author had written down what they were protecting.
+  // So: committed (LAUNCH pressed) shows the HULL, confirmed-not-yet-launched shows CONFIRMED, and
+  // anything else is still PICKING. The pip goes green on either, because both mean locked in.
+  const _youConfirmed = !!(game && game._ssConfirmed);
+  const yourShip = (player && player.loadoutKey) ? player.loadoutKey
+                 : (_youConfirmed && game._ssKey) ? game._ssKey : '---';
   const youCommitted = !!(player && player.loadoutKey);
+  const yourLabel = youCommitted ? null : (_youConfirmed ? 'CONFIRMED' : 'PICKING');
+  // One reading of a peer's card, used by both fleets so the two halves can never disagree.
+  function _peerCard(peer) {
+    const committed = !!(peer && peer.loadoutKey);
+    const confirmed = !!(peer && peer.ready);
+    return {
+      ship: committed ? peer.loadoutKey : ((confirmed && peer.readyShip) ? peer.readyShip : '---'),
+      label: committed ? null : (confirmed ? 'CONFIRMED' : 'PICKING'),
+      isReady: committed || confirmed,
+    };
+  }
   // Use the signed-in Discord identity for YOU's chip:
   //   - Display name replaces "YOU"
   //   - Avatar shows in the chip's thumb area
@@ -96734,9 +96771,9 @@ function updateTeammatesStrip() {
   const _meAvatar = _meDc ? _discordAvatarUrlFor(_meDc, 64) : null;
   const _meName = _meDc ? (_meDc.global_name || _meDc.username) : 'YOU';
   yourList.appendChild(makeChip({
-    name: _meName, ship: yourShip, isYou: true,
+    name: _meName, ship: yourShip, label: yourLabel, isYou: true,
     showPip: inMultiplayer,
-    isReady: youCommitted,
+    isReady: youCommitted || _youConfirmed,
     discordAvatarUrl: _meAvatar,
   }));
 
@@ -96757,11 +96794,12 @@ function updateTeammatesStrip() {
       const peerAvatar = peer.discord_id
         ? _discordAvatarUrlFor({ id: peer.discord_id, avatar: peer.discord_avatar }, 64)
         : null;
+      const _pc = _peerCard(peer);
       yourList.appendChild(makeChip({
         name: peer.discord_name || 'PEER',
-        ship: peer.loadoutKey || 'PICKING',
+        ship: _pc.ship, label: _pc.label,
         showPip: true,
-        isReady: !!peer.loadoutKey,
+        isReady: _pc.isReady,
         discordAvatarUrl: peerAvatar,
       }));
     }
@@ -96797,12 +96835,13 @@ function updateTeammatesStrip() {
       const peerAvatar = peer.discord_id
         ? _discordAvatarUrlFor({ id: peer.discord_id, avatar: peer.discord_avatar }, 64)
         : null;
+      const _pc = _peerCard(peer);
       enemyList.appendChild(makeChip({
         name: peer.discord_name || 'PEER',
-        ship: peer.loadoutKey || 'PICKING',
+        ship: _pc.ship, label: _pc.label,
         isEnemy: true,
         showPip: true,
-        isReady: !!peer.loadoutKey,
+        isReady: _pc.isReady,
         discordAvatarUrl: peerAvatar,
       }));
     }
