@@ -1768,8 +1768,49 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   background: rgba(30,70,120,0.85); border-color: #7fd4ff; color: #fff;
 }
 .fleet-chip .chip-ship-arrow:active { transform: translateY(-50%) scale(0.92); }
+/* ---- (v45.43) REMOVE / ADD BACK A BOT SEAT -------------------------------------------
+   Owner: "should be able to click x on a bot's picture card to remove a specific bot, in case i
+   want to do a 2v2 or 1v1... x will become a + to add it back in if needed".
+   ⚠ IT IS NOT ON THE ART. Owner, on the first cut: "dont put remove right over the center" - a
+   bottom-centre pill sat squarely across the hull it was labelling. So it lives in the card's
+   BOTTOM-RIGHT corner, down on the text rows, and the picture is never covered at all.
+   Everything else on the card is already spoken for: the top-right is the ready pip, and both
+   left/right EDGES of .chip-art belong to the hull arrows for their whole vertically-centred band
+   (which is why the art's corners are not available either - .chip-art is 78px or 64px depending on
+   the breakpoint, and a 30px arrow centred in it reaches into every corner at one size or the
+   other). The text rows are the one region nothing else occupies.
+   A glyph, not a word: the owner asked for an x, and the card's own status line already says
+   REMOVED. `title` carries the sentence. */
+.fleet-chip .chip-seat-btn {
+  position: absolute; bottom: 4px; right: 5px;
+  width: 19px; height: 19px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'Orbitron', sans-serif; font-size: 10px; line-height: 1; font-weight: bold;
+  color: #ffb0a0;
+  background: rgba(8,12,26,0.72);
+  border: 1px solid rgba(220,120,110,0.45);
+  border-radius: 50%; cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s;
+}
+.fleet-chip .chip-seat-btn:hover { background: rgba(120,30,30,0.85); border-color: #ff8877; color: #fff; }
+.fleet-chip .chip-seat-btn:active { transform: scale(0.9); }
+.fleet-chip .chip-seat-btn.add { color: #9fe6b0; border-color: rgba(110,220,150,0.45); }
+.fleet-chip .chip-seat-btn.add:hover { background: rgba(25,95,55,0.85); border-color: #7fffb0; color: #fff; }
+/* The two text rows now share the line with a button, so they give up its width rather than run
+   underneath it - "VORTEX · REMOVED" is the longest thing either of them ever says. */
+.fleet-chip.bot-seat .chip-name,
+.fleet-chip.bot-seat .chip-ship { padding-right: 27px; }
+/* A removed seat still occupies its card - that card IS the way back. The art greys out and the
+   hull arrows go dead, because a seat that is not coming has no hull to choose. */
+.fleet-chip.bot-off .chip-thumb,
+.fleet-chip.bot-off .chip-thumb-empty { filter: grayscale(1) brightness(0.45); }
+.fleet-chip.bot-off .chip-ship-arrow { opacity: 0.12; pointer-events: none; }
+.fleet-chip.bot-off .chip-name { color: #6b6b7a; }
+.fleet-chip.bot-off .chip-ship { color: #8a6a66; }
+.fleet-chip.bot-off { border-color: rgba(120,80,80,0.4); background: rgba(20,14,18,0.55); }
 .fleet-chip.bot-seat { border-color: rgba(120,170,220,0.4); }
 .fleet-chip.bot-locked .chip-ship-arrow { opacity: 0.18; pointer-events: none; }
+.fleet-chip.bot-locked .chip-seat-btn { opacity: 0.18; pointer-events: none; }
 /* A locked bot seat is not READY-green - it is just closed. Green is the human pip's word. */
 .fleet-chip.bot-seat.is-ready .chip-ready-pip {
   background: rgba(0,0,0,0.6); color: #8fb6d8;
@@ -6725,7 +6766,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.42';
+const LSS_BUILD = '45.43';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -17035,6 +17076,19 @@ function handleNetEvent(evt, fromPeerId) {
       if (!game._botShipDeal) game._botShipDeal = { enemy: [], friendly: [] };
       if (Array.isArray(evt.e)) game._botShipDeal.enemy = evt.e.slice(0, 3).filter(_ok);
       if (Array.isArray(evt.f)) game._botShipDeal.friendly = evt.f.slice(0, 3).filter(_ok);   // (v45.41) 3 per side
+      // (v45.43) ...and which of those seats the authority switched OFF, so a joiner's cards show
+      // the same 3v1 the host set up. DISPLAY ONLY on this side for the same reason the hulls are:
+      // only the authority reaches spawnBots, so a mirrored flag cannot fork the spawn.
+      // ⚠ Written positionally into the EXISTING array, never assigned wholesale - the array is the
+      //   one `_lssBotSeatOff` hands out, and replacing it would strand any live reference.
+      try {
+        const _wr = (side, src) => {
+          if (!Array.isArray(src)) return;
+          const dst = _lssBotSeatOff(side);
+          for (let i = 0; i < dst.length; i++) dst[i] = !!src[i];
+        };
+        _wr('enemy', evt.eo); _wr('friendly', evt.fo);
+      } catch (_) {}
       if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
     } catch (_) {}
     return;
@@ -32308,13 +32362,16 @@ if (typeof window !== 'undefined') window.__dbg = {
   // could mean "bots are off", "someone else deals these" or "you already confirmed".
   //   __dbg.bots()                - the hand, whether it is mine to deal, and every input to that
   //   __dbg.bots('enemy', 0, 1)   - step seat 0 of the enemy hand one hull right, as a press would
+  //   __dbg.bots('enemy', 0, 'x') - (v45.43) toggle that seat REMOVED / back in, as the X / + does
   // `side` is the DEAL's side, not the strip half: 'enemy' is always Fleet B's three, 'friendly'
-  // always Fleet A's two, whichever fleet this player is sitting on.
+  // always Fleet A's three, whichever fleet this player is sitting on.
   bots: (side, idx, dir) => {
     try {
-      if (side) _lssBotCycleShip(side, idx | 0, (dir < 0) ? -1 : 1);
+      if (side && (dir === 'x' || dir === 'X')) _lssBotToggleSeat(side, idx | 0);
+      else if (side) _lssBotCycleShip(side, idx | 0, (dir < 0) ? -1 : 1);
       return {
         deal: game._botShipDeal ? JSON.parse(JSON.stringify(game._botShipDeal)) : null,
+        off: game._botSeatOff ? JSON.parse(JSON.stringify(game._botSeatOff)) : null,   // (v45.43)
         seats: _lssBotSeats(),
         mine: _lssBotDealMine(), editable: _lssBotPickAllowed(),
         authority: (typeof _botAuthority === 'function') ? _botAuthority() : null,
@@ -80345,8 +80402,20 @@ function spawnBots() {
   }
   const _enemyN = Math.max(0, 3 - _hB);
   const _friendN = Math.max(0, 3 - _hA);
+  // ⭐⭐ (v45.43) A SEAT THE OWNER SWITCHED OFF IN THE PICKER DOES NOT SPAWN. Owner: "click x on a
+  // bot's picture card to remove a specific bot, in case i want to do a 2v2 or 1v1, or 2v1 or 3v1".
+  // ⚠ SKIP, NEVER COMPACT. `i` is the bot's IDENTITY here - it becomes `bot.id` (i + 1 / i + 10),
+  //   which v45.34 made the key of the `_prevStats` between-rounds carry-over. Closing the gap by
+  //   filtering the loadout array down would hand seat 2's running kills to seat 1 next round. The
+  //   loop still runs 0.._N-1 and simply builds nothing on an off index.
+  // ⚠ Reading the flag through the helper (not `game._botSeatOff` directly) so the lazy default
+  //   exists on every path that reaches spawnBots without a picker visit.
+  const _seatOff = (side, i) => {
+    try { return (typeof _lssBotSeatIsOff === 'function') && _lssBotSeatIsOff(side, i); } catch (_) { return false; }
+  };
   const enemyLoadouts = game._botShipDeal.enemy;
   for (let i = 0; i < _enemyN; i++) {
+    if (_seatOff('enemy', i)) continue;
     const bot = new Bot(enemyLoadouts[i], LSS.TEAM_FLEET_B, i + 1);
     const sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(LSS.TEAM_FLEET_B) : 'B');
     bot.position.copy(sp);
@@ -80356,6 +80425,7 @@ function spawnBots() {
 
   const friendlyLoadouts = game._botShipDeal.friendly;
   for (let i = 0; i < _friendN; i++) {
+    if (_seatOff('friendly', i)) continue;
     const bot = new Bot(friendlyLoadouts[i], LSS.TEAM_FLEET_A, i + 10);
     const sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(LSS.TEAM_FLEET_A) : 'A');
     bot.position.copy(sp);
@@ -91142,7 +91212,16 @@ function updateRoundSystem(dt) {
           _rhB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
           _rhA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
         }
-        const _needB = Math.max(0, 3 - _rhB), _needA = Math.max(0, 3 - _rhA);
+        let _needB = Math.max(0, 3 - _rhB), _needA = Math.max(0, 3 - _rhA);
+        // ⭐ (v45.43) ...and the seats the owner REMOVED in the picker stay removed. Without this the
+        // reinforcement loop would put a deleted bot straight back every few seconds - the same
+        // shape of bug v45.41 fixed here for the 4v2, and the reason that fix is written down two
+        // comments up. `_lssBotSeatsOffIn` counts only inside the bot window, so an off seat a human
+        // is already holding subtracts nothing.
+        try {
+          _needB = Math.max(0, _needB - _lssBotSeatsOffIn('enemy', _needB));
+          _needA = Math.max(0, _needA - _lssBotSeatsOffIn('friendly', _needA));
+        } catch (_) {}
         const _deal = game._botShipDeal || { enemy: ['SLAYER', 'PYRO', 'TRACKER'], friendly: ['VORTEX', 'BLASTER'] };
         let _addedAny = false;
         for (const _fl of [LSS.TEAM_FLEET_B, LSS.TEAM_FLEET_A]) {
@@ -98344,10 +98423,58 @@ function _lssBotDealPrep() {
     _lssBotDealAnnounce();
   } catch (_) {}
 }
+// ⭐⭐ (v45.43) A SEAT CAN BE SWITCHED OFF. Owner: "should be able to click x on a bot's picture card
+// to remove a specific bot, in case i want to do a 2v2 or 1v1, or 2v1 or 3v1 or whatever way / x will
+// become a + to add it back in if needed."
+// `#btn-ss-bots` was already all-or-nothing (`game.eliminationBots`); this is the per-seat version,
+// and it is what makes an UNEVEN match reachable at all - 3v1 has no expression in a single toggle.
+//
+// ⚠ THE FLAG IS KEYED BY SEAT INDEX, NOT BY HULL. Turning a seat off must not renumber the seats
+//   around it: `spawnBots` derives each bot's id from its index (`i + 1` enemy, `i + 10` friendly)
+//   and v45.34 made that id the key of the between-rounds `_prevStats` carry-over. Compacting the
+//   array would hand seat 2's running kills to seat 1 on the next round. So both readers below
+//   ITERATE ALL THREE and skip, rather than filtering the array down.
+//
+// ⚠ IT LIVES ON `game`, NOT ON `game._botShipDeal` - deliberately. The deal is re-shuffled on every
+//   visit to the picker (`_lssBotDealPrep`), and an owner who set up a 1v1 does not want it undone
+//   by starting the next match. It resets on reload, which is the right scope for a match setting.
+function _lssBotSeatOff(side) {
+  if (typeof game === 'undefined' || !game) return [false, false, false];
+  if (!game._botSeatOff) game._botSeatOff = { enemy: [false, false, false], friendly: [false, false, false] };
+  return (side === 'enemy') ? game._botSeatOff.enemy : game._botSeatOff.friendly;
+}
+function _lssBotSeatIsOff(side, idx) { return !!_lssBotSeatOff(side)[idx | 0]; }
+// How many of the first `n` seats are switched off. `n` is the bot-seat count the human tally left
+// (3 minus the humans on that fleet), and the window matters: with a human already holding seat 2,
+// seat 2 was never a bot seat, so switching it off must subtract NOTHING. Counting the whole array
+// would quietly shrink the fleet by a seat that was not there.
+function _lssBotSeatsOffIn(side, n) {
+  const a = _lssBotSeatOff(side);
+  let c = 0;
+  for (let i = 0; i < n && i < a.length; i++) if (a[i]) c++;
+  return c;
+}
+// The X / + press. Same permission gate as the hull arrows (`_lssBotPickAllowed` - launch picker,
+// my hand, not yet confirmed) and the same three follow-ups: mirror to the room, click cue, repaint.
+function _lssBotToggleSeat(side, idx) {
+  try {
+    if (!_lssBotPickAllowed()) return;
+    const arr = _lssBotSeatOff(side);
+    idx = idx | 0;
+    if (idx < 0 || idx >= arr.length) return;
+    arr[idx] = !arr[idx];
+    _lssBotDealAnnounce();
+    try { if (typeof playSound === 'function') playSound('mode_switch'); } catch (_) {}
+    try { updateTeammatesStrip(); } catch (_) {}
+  } catch (_) {}
+}
 // The seats bots will actually fill in the round about to launch - the same arithmetic spawnBots()
-// runs at world build (3 enemy / 2 friendly, minus every human already holding one), read one
-// screen earlier. Returns empty arrays wherever no bot will spawn, so the cards can never promise
-// an opponent that is not coming.
+// runs at world build (3 per fleet, minus every human already holding one), read one screen earlier.
+// Returns empty arrays wherever no bot will spawn, so the cards can never promise an opponent that
+// is not coming.
+// (v45.43) Each entry is now `{ key, idx, off }` rather than a bare hull string: the card has to
+// draw a REMOVED seat too (that card is the only way to put it back), and it needs the seat's real
+// index to address the flag. `idx` is the deal index, so it survives any number of seats being off.
 function _lssBotSeats() {
   const out = { friendly: [], enemy: [] };
   try {
@@ -98370,8 +98497,10 @@ function _lssBotSeats() {
       _hA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
     }
     const eN = Math.max(0, 3 - _hB), fN = Math.max(0, 3 - _hA);
-    for (let i = 0; i < eN && i < deal.enemy.length; i++) if (deal.enemy[i]) out.enemy.push(deal.enemy[i]);
-    for (let i = 0; i < fN && i < deal.friendly.length; i++) if (deal.friendly[i]) out.friendly.push(deal.friendly[i]);
+    // (v45.43) `off` rides along instead of filtering: a removed seat still gets a card, because
+    // that card carries the + that brings it back. See _lssBotSeatOff for why the index is the key.
+    for (let i = 0; i < eN && i < deal.enemy.length; i++) if (deal.enemy[i]) out.enemy.push({ key: deal.enemy[i], idx: i, off: _lssBotSeatIsOff('enemy', i) });
+    for (let i = 0; i < fN && i < deal.friendly.length; i++) if (deal.friendly[i]) out.friendly.push({ key: deal.friendly[i], idx: i, off: _lssBotSeatIsOff('friendly', i) });
   } catch (_) {}
   return out;
 }
@@ -98441,7 +98570,14 @@ function _lssBotDealAnnounce(toPeerId) {
     if (typeof _botAuthority === 'function' && !_botAuthority()) return;
     const d = (typeof game !== 'undefined' && game) ? game._botShipDeal : null;
     if (!d || !d.enemy || !d.friendly) return;
-    const p = { type: 'bot_deal', e: d.enemy.slice(0, 3), f: d.friendly.slice(0, 3) };   // (v45.41) 3 per side
+    // (v45.43) `eo`/`fo` carry the per-seat REMOVED flags as 0/1. They ride the existing hand event
+    // rather than getting one of their own: the two are read together by every card in the room and
+    // a separate event could only ever arrive out of step with the hulls it describes.
+    const _off = (side) => {
+      try { return _lssBotSeatOff(side).slice(0, 3).map(v => v ? 1 : 0); } catch (_) { return [0, 0, 0]; }
+    };
+    const p = { type: 'bot_deal', e: d.enemy.slice(0, 3), f: d.friendly.slice(0, 3),   // (v45.41) 3 per side
+                eo: _off('enemy'), fo: _off('friendly') };
     if (toPeerId) net.sendEvent(p, toPeerId); else net.sendEvent(p);
   } catch (_) {}
 }
@@ -98478,6 +98614,7 @@ function updateTeammatesStrip() {
     if (opts.isReady) chip.classList.add('is-ready');
     if (opts.botSide) chip.classList.add('bot-seat');
     if (opts.botSide && opts.botLocked) chip.classList.add('bot-locked');
+    if (opts.botOff) chip.classList.add('bot-off');   // (v45.43) removed seat: greyed, arrows dead, + to restore
 
     // (v45.33) THE SHIP IS THE PICTURE. Owner: "the player's ship(s) should always be displayed in
     // the player cards, for everyone to see" / "i want the mini ship model selection to show there".
@@ -98531,11 +98668,22 @@ function updateTeammatesStrip() {
     // (v45.33) the pip's WORDS are an option now. A bot seat is not waiting on anyone - its two
     // states are "you can still change this" and "locked in with the rest of the fleet".
     const pipTxt = opts.pipText || (opts.isReady ? 'READY' : 'WAIT');
+    // (v45.43) The X / + that takes this bot out of the match or puts it back. A SIBLING of the
+    // art, not a child of it - see the CSS: it sits in the card's bottom-right corner, on the text
+    // rows, so it never covers the ship. Painted on every seat that is ours, exactly like the
+    // arrows, and dimmed (never removed) once the fleet is locked - a control that vanishes would
+    // change the card's shape at the moment you press CONFIRM.
+    const seatBtn = opts.botSide
+      ? (opts.botOff
+          ? `<button class="chip-seat-btn add" type="button" data-bot-seat="1" title="Add this bot back to the match">&#43;</button>`
+          : `<button class="chip-seat-btn" type="button" data-bot-seat="1" title="Remove this bot from the match">&#10005;</button>`)
+      : '';
     chip.innerHTML = `
       ${thumbHTML}
       <span class="chip-name">${nameTxt}</span>
       <span class="chip-ship">${shipTxt}</span>
       <span class="chip-ready-pip">${pipTxt}</span>
+      ${seatBtn}
     `;
     if (opts.botSide) {
       chip.dataset.botSide = opts.botSide;
@@ -98547,20 +98695,30 @@ function updateTeammatesStrip() {
   // the same thing as the card's half of the strip: the deal is written from Fleet A's point of
   // view (it always has), so a player sitting on Fleet B sees the deal's "enemy" hand as their own
   // fleet. Resolving that here keeps the two callers below symmetrical.
-  function makeBotSeat(side, idx, key, isEnemyHalf) {
+  // (v45.43) `seat` is `{ key, idx, off }` from _lssBotSeats - it used to be a bare hull string, and
+  // the index used to be the card's position in the list. Both had to change together: a removed
+  // seat is still drawn (its card is the way back), so position no longer equals seat index.
+  function makeBotSeat(side, seat, isEnemyHalf) {
+    const key = seat && seat.key;
+    const off = !!(seat && seat.off);
+    const idx = seat ? (seat.idx | 0) : 0;
     const lo = (typeof LOADOUTS !== 'undefined') ? LOADOUTS[key] : null;
     const mine = _lssBotDealMine();
     const locked = !_lssBotPickAllowed();
     return makeChip({
       name: (lo && lo.name) ? lo.name + ' BOT' : 'BOT',
+      // (v45.43) The hull still shows on a removed seat - it is the ship that COMES BACK when you
+      // press +, so blanking it would throw away the choice the owner already made on this card.
+      // The status line says REMOVED beside it, which is the v45.17 label/ship split doing its job.
       ship: key || '---',
+      label: off ? 'REMOVED' : null,
       isEnemy: !!isEnemyHalf,
       // Not our hand (a peer watching the authority's fleet): a plain informational card, the same
-      // shape the in-match bot cards have. SWAP invites the scroll; LOCKED reports the CONFIRM.
+      // shape the in-match bot cards have. SWAP invites the arrows; LOCKED reports the CONFIRM.
       showPip: mine,
       isReady: locked,
-      pipText: locked ? 'LOCKED' : 'SWAP',
-      botSide: mine ? side : null, botIdx: idx, botLocked: locked,
+      pipText: off ? 'OUT' : (locked ? 'LOCKED' : 'SWAP'),
+      botSide: mine ? side : null, botIdx: idx, botLocked: locked, botOff: off,
     });
   }
 
@@ -98666,7 +98824,7 @@ function updateTeammatesStrip() {
     }
   } else {
     const _mine = _seats[_myHand] || [];
-    for (let i = 0; i < _mine.length; i++) yourList.appendChild(makeBotSeat(_myHand, i, _mine[i], false));
+    for (let i = 0; i < _mine.length; i++) yourList.appendChild(makeBotSeat(_myHand, _mine[i], false));
   }
 
   // 4) Pad to 3 slots so the strip doesn't collapse pre-spawn.
@@ -98714,7 +98872,7 @@ function updateTeammatesStrip() {
     }
   } else {
     const _theirs = _seats[_theirHand] || [];
-    for (let i = 0; i < _theirs.length; i++) enemyList.appendChild(makeBotSeat(_theirHand, i, _theirs[i], true));
+    for (let i = 0; i < _theirs.length; i++) enemyList.appendChild(makeBotSeat(_theirHand, _theirs[i], true));
   }
 
   // 3) Pad enemy side to 3 slots too.
@@ -98747,6 +98905,15 @@ function updateTeammatesStrip() {
         _ar.addEventListener('click', (e) => {
           e.stopPropagation(); e.preventDefault();
           _lssBotCycleShip(_side, _idx, (+_ar.dataset.botDir < 0) ? -1 : 1);
+        });
+      }
+      // (v45.43) The X / + rides the same per-button, stop-propagation treatment as the arrows, and
+      // for the same reason spelled out above: the enemy list's own delegated click is the v45.27
+      // TEAM SWAP, so removing an enemy bot would otherwise also move you onto their fleet.
+      for (const _sb of _chip.querySelectorAll('.chip-seat-btn')) {
+        _sb.addEventListener('click', (e) => {
+          e.stopPropagation(); e.preventDefault();
+          _lssBotToggleSeat(_side, _idx);
         });
       }
     }

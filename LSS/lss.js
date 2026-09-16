@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.42';
+const LSS_BUILD = '45.43';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -6929,6 +6929,14 @@ function handleNetEvent(evt, fromPeerId) {
       if (!game._botShipDeal) game._botShipDeal = { enemy: [], friendly: [] };
       if (Array.isArray(evt.e)) game._botShipDeal.enemy = evt.e.slice(0, 3).filter(_ok);
       if (Array.isArray(evt.f)) game._botShipDeal.friendly = evt.f.slice(0, 3).filter(_ok);   // (v45.41) 3 per side
+      try {
+        const _wr = (side, src) => {
+          if (!Array.isArray(src)) return;
+          const dst = _lssBotSeatOff(side);
+          for (let i = 0; i < dst.length; i++) dst[i] = !!src[i];
+        };
+        _wr('enemy', evt.eo); _wr('friendly', evt.fo);
+      } catch (_) {}
       if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip();
     } catch (_) {}
     return;
@@ -17724,9 +17732,11 @@ if (typeof window !== 'undefined') window.__cavern = { st: _HZ_CAVERN, enter: (i
 if (typeof window !== 'undefined') window.__dbg = {
   bots: (side, idx, dir) => {
     try {
-      if (side) _lssBotCycleShip(side, idx | 0, (dir < 0) ? -1 : 1);
+      if (side && (dir === 'x' || dir === 'X')) _lssBotToggleSeat(side, idx | 0);
+      else if (side) _lssBotCycleShip(side, idx | 0, (dir < 0) ? -1 : 1);
       return {
         deal: game._botShipDeal ? JSON.parse(JSON.stringify(game._botShipDeal)) : null,
+        off: game._botSeatOff ? JSON.parse(JSON.stringify(game._botSeatOff)) : null,   // (v45.43)
         seats: _lssBotSeats(),
         mine: _lssBotDealMine(), editable: _lssBotPickAllowed(),
         authority: (typeof _botAuthority === 'function') ? _botAuthority() : null,
@@ -50943,8 +50953,12 @@ function spawnBots() {
   }
   const _enemyN = Math.max(0, 3 - _hB);
   const _friendN = Math.max(0, 3 - _hA);
+  const _seatOff = (side, i) => {
+    try { return (typeof _lssBotSeatIsOff === 'function') && _lssBotSeatIsOff(side, i); } catch (_) { return false; }
+  };
   const enemyLoadouts = game._botShipDeal.enemy;
   for (let i = 0; i < _enemyN; i++) {
+    if (_seatOff('enemy', i)) continue;
     const bot = new Bot(enemyLoadouts[i], LSS.TEAM_FLEET_B, i + 1);
     const sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(LSS.TEAM_FLEET_B) : 'B');
     bot.position.copy(sp);
@@ -50954,6 +50968,7 @@ function spawnBots() {
 
   const friendlyLoadouts = game._botShipDeal.friendly;
   for (let i = 0; i < _friendN; i++) {
+    if (_seatOff('friendly', i)) continue;
     const bot = new Bot(friendlyLoadouts[i], LSS.TEAM_FLEET_A, i + 10);
     const sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(LSS.TEAM_FLEET_A) : 'A');
     bot.position.copy(sp);
@@ -58119,7 +58134,11 @@ function updateRoundSystem(dt) {
           _rhB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
           _rhA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
         }
-        const _needB = Math.max(0, 3 - _rhB), _needA = Math.max(0, 3 - _rhA);
+        let _needB = Math.max(0, 3 - _rhB), _needA = Math.max(0, 3 - _rhA);
+        try {
+          _needB = Math.max(0, _needB - _lssBotSeatsOffIn('enemy', _needB));
+          _needA = Math.max(0, _needA - _lssBotSeatsOffIn('friendly', _needA));
+        } catch (_) {}
         const _deal = game._botShipDeal || { enemy: ['SLAYER', 'PYRO', 'TRACKER'], friendly: ['VORTEX', 'BLASTER'] };
         let _addedAny = false;
         for (const _fl of [LSS.TEAM_FLEET_B, LSS.TEAM_FLEET_A]) {
@@ -63005,6 +63024,30 @@ function _lssBotDealPrep() {
     _lssBotDealAnnounce();
   } catch (_) {}
 }
+function _lssBotSeatOff(side) {
+  if (typeof game === 'undefined' || !game) return [false, false, false];
+  if (!game._botSeatOff) game._botSeatOff = { enemy: [false, false, false], friendly: [false, false, false] };
+  return (side === 'enemy') ? game._botSeatOff.enemy : game._botSeatOff.friendly;
+}
+function _lssBotSeatIsOff(side, idx) { return !!_lssBotSeatOff(side)[idx | 0]; }
+function _lssBotSeatsOffIn(side, n) {
+  const a = _lssBotSeatOff(side);
+  let c = 0;
+  for (let i = 0; i < n && i < a.length; i++) if (a[i]) c++;
+  return c;
+}
+function _lssBotToggleSeat(side, idx) {
+  try {
+    if (!_lssBotPickAllowed()) return;
+    const arr = _lssBotSeatOff(side);
+    idx = idx | 0;
+    if (idx < 0 || idx >= arr.length) return;
+    arr[idx] = !arr[idx];
+    _lssBotDealAnnounce();
+    try { if (typeof playSound === 'function') playSound('mode_switch'); } catch (_) {}
+    try { updateTeammatesStrip(); } catch (_) {}
+  } catch (_) {}
+}
 function _lssBotSeats() {
   const out = { friendly: [], enemy: [] };
   try {
@@ -63022,8 +63065,8 @@ function _lssBotSeats() {
       _hA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
     }
     const eN = Math.max(0, 3 - _hB), fN = Math.max(0, 3 - _hA);
-    for (let i = 0; i < eN && i < deal.enemy.length; i++) if (deal.enemy[i]) out.enemy.push(deal.enemy[i]);
-    for (let i = 0; i < fN && i < deal.friendly.length; i++) if (deal.friendly[i]) out.friendly.push(deal.friendly[i]);
+    for (let i = 0; i < eN && i < deal.enemy.length; i++) if (deal.enemy[i]) out.enemy.push({ key: deal.enemy[i], idx: i, off: _lssBotSeatIsOff('enemy', i) });
+    for (let i = 0; i < fN && i < deal.friendly.length; i++) if (deal.friendly[i]) out.friendly.push({ key: deal.friendly[i], idx: i, off: _lssBotSeatIsOff('friendly', i) });
   } catch (_) {}
   return out;
 }
@@ -63068,7 +63111,11 @@ function _lssBotDealAnnounce(toPeerId) {
     if (typeof _botAuthority === 'function' && !_botAuthority()) return;
     const d = (typeof game !== 'undefined' && game) ? game._botShipDeal : null;
     if (!d || !d.enemy || !d.friendly) return;
-    const p = { type: 'bot_deal', e: d.enemy.slice(0, 3), f: d.friendly.slice(0, 3) };   // (v45.41) 3 per side
+    const _off = (side) => {
+      try { return _lssBotSeatOff(side).slice(0, 3).map(v => v ? 1 : 0); } catch (_) { return [0, 0, 0]; }
+    };
+    const p = { type: 'bot_deal', e: d.enemy.slice(0, 3), f: d.friendly.slice(0, 3),   // (v45.41) 3 per side
+                eo: _off('enemy'), fo: _off('friendly') };
     if (toPeerId) net.sendEvent(p, toPeerId); else net.sendEvent(p);
   } catch (_) {}
 }
@@ -63097,6 +63144,7 @@ function updateTeammatesStrip() {
     if (opts.isReady) chip.classList.add('is-ready');
     if (opts.botSide) chip.classList.add('bot-seat');
     if (opts.botSide && opts.botLocked) chip.classList.add('bot-locked');
+    if (opts.botOff) chip.classList.add('bot-off');   // (v45.43) removed seat: greyed, arrows dead, + to restore
 
     const _thumbSrc = (!opts.isEmpty && opts.ship && opts.ship !== '---' && _shipThumbCache[opts.ship])
       ? _shipThumbCache[opts.ship] : null;
@@ -63128,11 +63176,17 @@ function updateTeammatesStrip() {
       (_shipKey && opts.label) ? (_shipKey + ' \u00b7 ' + opts.label)
                                : (opts.label || _shipKey || '---'));
     const pipTxt = opts.pipText || (opts.isReady ? 'READY' : 'WAIT');
+    const seatBtn = opts.botSide
+      ? (opts.botOff
+          ? `<button class="chip-seat-btn add" type="button" data-bot-seat="1" title="Add this bot back to the match">&#43;</button>`
+          : `<button class="chip-seat-btn" type="button" data-bot-seat="1" title="Remove this bot from the match">&#10005;</button>`)
+      : '';
     chip.innerHTML = `
       ${thumbHTML}
       <span class="chip-name">${nameTxt}</span>
       <span class="chip-ship">${shipTxt}</span>
       <span class="chip-ready-pip">${pipTxt}</span>
+      ${seatBtn}
     `;
     if (opts.botSide) {
       chip.dataset.botSide = opts.botSide;
@@ -63140,18 +63194,22 @@ function updateTeammatesStrip() {
     }
     return chip;
   }
-  function makeBotSeat(side, idx, key, isEnemyHalf) {
+  function makeBotSeat(side, seat, isEnemyHalf) {
+    const key = seat && seat.key;
+    const off = !!(seat && seat.off);
+    const idx = seat ? (seat.idx | 0) : 0;
     const lo = (typeof LOADOUTS !== 'undefined') ? LOADOUTS[key] : null;
     const mine = _lssBotDealMine();
     const locked = !_lssBotPickAllowed();
     return makeChip({
       name: (lo && lo.name) ? lo.name + ' BOT' : 'BOT',
       ship: key || '---',
+      label: off ? 'REMOVED' : null,
       isEnemy: !!isEnemyHalf,
       showPip: mine,
       isReady: locked,
-      pipText: locked ? 'LOCKED' : 'SWAP',
-      botSide: mine ? side : null, botIdx: idx, botLocked: locked,
+      pipText: off ? 'OUT' : (locked ? 'LOCKED' : 'SWAP'),
+      botSide: mine ? side : null, botIdx: idx, botLocked: locked, botOff: off,
     });
   }
 
@@ -63219,7 +63277,7 @@ function updateTeammatesStrip() {
     }
   } else {
     const _mine = _seats[_myHand] || [];
-    for (let i = 0; i < _mine.length; i++) yourList.appendChild(makeBotSeat(_myHand, i, _mine[i], false));
+    for (let i = 0; i < _mine.length; i++) yourList.appendChild(makeBotSeat(_myHand, _mine[i], false));
   }
 
   while (yourList.children.length < 3) {
@@ -63262,7 +63320,7 @@ function updateTeammatesStrip() {
     }
   } else {
     const _theirs = _seats[_theirHand] || [];
-    for (let i = 0; i < _theirs.length; i++) enemyList.appendChild(makeBotSeat(_theirHand, i, _theirs[i], true));
+    for (let i = 0; i < _theirs.length; i++) enemyList.appendChild(makeBotSeat(_theirHand, _theirs[i], true));
   }
 
   while (enemyList.children.length < 3) {
@@ -63279,6 +63337,12 @@ function updateTeammatesStrip() {
         _ar.addEventListener('click', (e) => {
           e.stopPropagation(); e.preventDefault();
           _lssBotCycleShip(_side, _idx, (+_ar.dataset.botDir < 0) ? -1 : 1);
+        });
+      }
+      for (const _sb of _chip.querySelectorAll('.chip-seat-btn')) {
+        _sb.addEventListener('click', (e) => {
+          e.stopPropagation(); e.preventDefault();
+          _lssBotToggleSeat(_side, _idx);
         });
       }
     }
