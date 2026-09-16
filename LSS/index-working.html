@@ -6563,7 +6563,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.28';
+const LSS_BUILD = '45.31';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -13588,7 +13588,14 @@ function _applyModeClientSetup(mode) {
     net.freeflight = true;
     try { document.body.classList.add('lss-freeflight'); } catch (_) {}
     game.testMode = false; game.raceNoTimer = true; game.selectedMap = 'hub_overworld';
-    try { if (typeof player !== 'undefined' && player && typeof _ffaTeamForPeer === 'function') player.team = _ffaTeamForPeer(net.myPeerId); } catch (_) {}
+    // (v45.31) ...and the FFA team only for EXHIBITION - see assignTeamFromPeerOrder. `mode` is the
+    // unmapped string here, so it cannot tell the two apart; the tag can.
+    try {
+      if (typeof player !== 'undefined' && player && typeof _ffaTeamForPeer === 'function' &&
+          (typeof _lssRoomTag !== 'function' || _lssRoomTag() === 'freeflight')) {
+        player.team = _ffaTeamForPeer(net.myPeerId);
+      }
+    } catch (_) {}
   }
 }
 
@@ -15516,7 +15523,18 @@ function assignTeamFromPeerOrder() {
   // is what silently made a campaign co-op joiner hostile to the host and
   // friendly to the hoard ("join the team" was broken at team assignment).
   if (net.campaign || net.endless) { player.team = LSS.TEAM_FLEET_A; return; }
-  if (LSS.MODE === 'freeflight' && typeof _ffaTeamForPeer === 'function') { player.team = _ffaTeamForPeer(net.myPeerId); return; }   // (v38.79) FFA: one team per pilot, on every path
+  // ⭐⭐⭐ (v45.31) EXHIBITION IS FFA. CYBERPUNK CITY IS NOT. Owner: "even tho we selected the same
+  // team, i think it put us on opposite sides, in cyberpunk city."
+  // Both modes answer LSS.MODE === 'freeflight' (that is the whole point of the tag), so this gate
+  // handed a CYBERPUNK pilot a unique FFA team id - `100 + hash % 1000000` - in a mode that is two
+  // FLEETS, attackers against defenders, keyed on TEAM_FLEET_A/B. The v42.43 note inside _cyberSetup
+  // describes the damage from the other end: it had to re-broadcast the team because commitLoadout
+  // had already shipped "the FREE-FLIGHT FFA team ... which is where the 736102 and 264429 I saw in
+  // the two-tab test came from". That whole window exists because of this line. Tag space closes it:
+  // cyberpunk now falls through to the ordinary A/B assignment below, which is the SAME id-parity
+  // rule _cyberTeamForPeer uses, so the two agree instead of one overwriting junk from the other.
+  if ((typeof _lssRoomTag === 'function' ? _lssRoomTag() : LSS.MODE) === 'freeflight' &&
+      typeof _ffaTeamForPeer === 'function') { player.team = _ffaTeamForPeer(net.myPeerId); return; }   // (v38.79) FFA: one team per pilot, on every path
   // ⭐ (v45.27) A DELIBERATE PICK OUTRANKS THE DERIVATION. Below this line teams are a pure
   // function of the sorted peer ids - which is exactly why they were never on the wire, and why
   // swapping needs an override rather than a message that says "my team is now B". Placed AFTER the
@@ -15578,7 +15596,9 @@ function _lssTeamSwapAllowed() {
   try {
     if (typeof net === 'undefined' || !net || !net.active) return false;
     if (net.campaign || net.endless) return false;
-    if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return false;
+    // (v45.31) EXHIBITION only. Cyberpunk shares its LSS.MODE but is two fleets, and _cyberTeamForPeer
+    // now honours the pick - so the cards are live there. Asking the TAG is the difference.
+    if ((typeof _lssRoomTag === 'function' ? _lssRoomTag() : (typeof LSS !== 'undefined' ? LSS.MODE : '')) === 'freeflight') return false;
     if (typeof _lssJoinedMatchInProgress === 'function' && _lssJoinedMatchInProgress()) return false;
     if (typeof game === 'undefined' || !game) return false;
     if (game._ssConfirmed || game._launchCommitted) return false;
@@ -44395,6 +44415,15 @@ function _cyberCityPoint(i) {
 // the same answer without anyone broadcasting it.
 function _cyberTeamForPeer(id, C) {
   const A = C ? C.teamA : LSS.TEAM_FLEET_A, B = C ? C.teamB : LSS.TEAM_FLEET_B;
+  try {
+    // ⭐ (v45.31) A PICK OUTRANKS THE PARITY, here as well as in _teamForPeerId. This is the line
+    // that put two players who chose the same fleet on opposite sides: `_cyberSetup` writes
+    // `player.team = _cyberTeamForPeer(...)` during the WORLD PREBAKE, i.e. after the picker is
+    // gone, so whatever the room agreed in the lobby was silently overwritten by id parity.
+    // C.teamA / C.teamB ARE LSS.TEAM_FLEET_A / B, so a stored pick maps straight onto them.
+    const _tp = net._teamPick && net._teamPick[id];
+    if (_tp === A || _tp === B) return _tp;
+  } catch (_) {}
   try {
     if (!net.active || !net.myPeerId) return A;
     const ids = [net.myPeerId, ...(typeof nonJudgePeerIds === 'function' ? nonJudgePeerIds() : [])].sort();
@@ -97119,14 +97148,38 @@ function updateTeammatesStrip() {
   // Handlers cannot stack: this function rebuilds both lists from innerHTML = '' every time.
   // The strip is relative to player.team ("YOUR FLEET" is always yours), so after the swap the two
   // halves trade places and the tap target is the side you just left - which is how you swap back.
+  // ⚠⚠ (v45.30) THE CLICK IS DELEGATED, AND DECIDED AT CLICK TIME - NOT AT PAINT TIME. Owner:
+  //   "player 1 wasn't able to change teams until player 2 changed teams."
+  //   v45.27 bound a listener per chip, but only inside `if (_lssTeamSwapAllowed())`. That predicate
+  //   asks for `game.state === 'select'` and a live room, and this strip is painted on paths that
+  //   run BEFORE both are true - so a strip painted a moment too early got no listeners at all, and
+  //   nothing repaints it on its own. What repaired it was an inbound event: the peer's `team_pick`
+  //   calls updateTeammatesStrip, which is why player 1 came back to life the instant player 2
+  //   swapped. A tap that works only if the strip happened to be painted late is not a control.
+  //   So the handler lives on the CONTAINER, is installed once, and re-asks the question when the
+  //   tap actually happens. `otherTeam` is read live from player.team for the same reason - a stale
+  //   closure from an earlier paint would send you to the team you are already on.
+  // The class below is now PURELY COSMETIC (cursor + hover). If it is stale the tap still works and
+  // repaints, so the two can no longer disagree about whether the control exists.
   try {
     if (typeof _lssTeamSwapAllowed === 'function' && _lssTeamSwapAllowed()) {
       const _name = (otherTeam === LSS.TEAM_FLEET_B) ? 'FLEET B' : 'FLEET A';
       for (const chip of enemyList.children) {
         chip.classList.add('can-pick');
         chip.title = 'Tap to switch to ' + _name;
-        chip.addEventListener('click', () => { try { _lssPickTeam(otherTeam); } catch (_) {} });
       }
+    }
+    if (!enemyList._lssPickBound) {
+      enemyList._lssPickBound = true;
+      enemyList.addEventListener('click', (e) => {
+        try {
+          if (typeof _lssTeamSwapAllowed !== 'function' || !_lssTeamSwapAllowed()) return;
+          const chip = e.target && e.target.closest ? e.target.closest('.fleet-chip') : null;
+          if (!chip || chip.parentNode !== enemyList) return;
+          const _mine = (player && player.team !== undefined) ? player.team : LSS.TEAM_FLEET_A;
+          _lssPickTeam((_mine === LSS.TEAM_FLEET_B) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B);
+        } catch (_) {}
+      });
     }
   } catch (_) {}
 }
@@ -98873,8 +98926,14 @@ function _lssModeDecide() {
     let _map;
     // (v43.29) the HOST's map, not ours. Owner: "the map got locked, and it got locked to a
     // different map than the host". _bestHostMap is set by the host election above.
-    try { if (_bestHostMap && LSS.MODE === bestMode) _map = _bestHostMap; } catch (_) {}
-    try { if (!_map && LSS.MODE === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
+    // ⚠⚠ (v45.29) TAG SPACE, NOT MODE SPACE. `bestMode` is a TAG (v44.11) and LSS.MODE is the
+    //   unmapped string, so for the one tag where they differ - cyberpunk, whose MODE is
+    //   'freeflight' - BOTH of these tests were false and the decree went out with `map: undefined`.
+    //   That is the line the owner's adopting peer logged: "ADOPT mode map=undefined". The question
+    //   these guards are asking is "is the map I am holding already this mode's?", which is a
+    //   question about the TAG. Every other mode is unaffected: its tag IS its mode string.
+    try { if (_bestHostMap && _lssRoomTag() === bestMode) _map = _bestHostMap; } catch (_) {}
+    try { if (!_map && _lssRoomTag() === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
     let _seed;
     try { if (net.worldSeed != null) _seed = net.worldSeed >>> 0; } catch (_) {}
     const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed);
@@ -99003,7 +99062,21 @@ function _lssApplyModeDecree(evt, mine) {
     if (modeChanged) {
       try { _lssClearModeSetup(); } catch (_) {}
       try { _applyModeClientSetup(evt.mode); } catch (_) {}
-      LSS.MODE = evt.mode;
+      // ⭐⭐⭐ (v45.29) UNMAP - THE SAME UNMAP _lssAdoptRoomMode ALREADY HAD, AND THIS PATH DID NOT.
+      // Owner: "one client was correct, the other had the correct mode but wrong map."
+      // `evt.mode` was normalised to a TAG at the door of this function, so this line was writing a
+      // raw 'cyberpunk' into LSS.MODE - precisely what the note on the twin line in
+      // _lssAdoptRoomMode says "would break all 51 `MODE === 'freeflight'` tests at once". The one
+      // that bit here is `_visibleMapKeys()`: with LSS.MODE 'cyberpunk' it matches none of its
+      // campaign / freeflight / endless / race branches and falls through to the CLASSIC list. So
+      // the legality assert forty lines below - the guard whose whole job is to stop a client
+      // holding a map its mode does not offer - looked at the correct `hub_overworld` that
+      // _applyModeClientSetup had just written, judged it illegal against the classic list, and
+      // "corrected" it to keys[0]. MEASURED on the adopting peer: `LSS_MODE: "cyberpunk"`,
+      // `map: "hourglass"` while the presser sat on hub_overworld / The Overworld.
+      // _applyModeClientSetup already wrote the correct MODE one line above; this restates it, so
+      // it must restate the unmapped one.
+      LSS.MODE = _lssTagMode(evt.mode);
     }
     let mapChanged = false;
     try {
@@ -99605,6 +99678,27 @@ function _lssRoomModeChoose(want) {
   const m = _lssTagMode(_t);
   try { _lssSyncCyberToTag(_t); } catch (_) {}
   try { _lssModeChosen(); } catch (_) {}
+  // ⭐⭐⭐ (v45.30) APPLY BEFORE ANNOUNCING, OR THE PRESS DECREES THE MODE IT IS LEAVING.
+  // Owner: pressing CYBERPUNK CITY in a settled two-peer room put BOTH clients in ELIMINATION,
+  // with `roomMode` null beforehand - nobody had chosen anything.
+  // The v43.74 note twenty lines down already recorded the fact that breaks this, without noticing
+  // it broke anything: "Every caller of this function is written `LSS.MODE = _lssRoomModeChoose(...)`
+  // - the assignment happens on RETURN - so inside here LSS.MODE is still the mode being LEFT."
+  // `_lssModeChosen()` one line up stamps "I chose, just now" (ago 0), and then _lssModeDecide()
+  // below builds this peer's candidate as `{ mode: _lssRoomTag(), ago: 0 }` - and _lssRoomTag() is
+  // still reading the OLD LSS.MODE. So the presser decrees its PREVIOUS mode as a brand-new
+  // deliberate choice. MEASURED, one press of CYBERPUNK CITY:
+  //     t 66.7  tx mode_decree classic    ago 0   "I AM DECIDER -> classic / hourglass"
+  //     t 66.7  tx mode_decree cyberpunk  ago 22  "I AM DECIDER -> cyberpunk / hub_overworld"
+  // Two decrees, 22 ms apart, the first one wrong. It usually loses to the correction, which is why
+  // this reads as flaky rather than broken - but while it stands it does lasting damage, because
+  // _lssApplyModeDecree BACKDATES a receiver's own `_modeChosen` stamp to the decree's `ago`. So
+  // every peer that hears the bogus decree is recorded as having deliberately chosen the old mode,
+  // its `ago` then grows, and the "chose first" tiebreak means a later genuine press (ago 0) can
+  // never outrank it. Measured on the peer that pressed NOTHING: `chosen: true, ago: 38098`.
+  // One line: make the new mode true BEFORE anyone is told about it. The caller's assignment on
+  // return then re-assigns the same value and is a no-op.
+  try { LSS.MODE = m; } catch (_) {}
   // (v43.74) ⚠ THE v43.63 CALL TO _ssEnsureLegalMap() WAS HERE, AND IT NEVER DID ANYTHING. Every
   // caller of this function is written `LSS.MODE = _lssRoomModeChoose('race')` - the assignment
   // happens on RETURN - so inside here LSS.MODE is still the mode being LEFT. _ssEnsureLegalMap asks

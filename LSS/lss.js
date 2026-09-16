@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.28';
+const LSS_BUILD = '45.31';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -4846,7 +4846,12 @@ function _applyModeClientSetup(mode) {
     net.freeflight = true;
     try { document.body.classList.add('lss-freeflight'); } catch (_) {}
     game.testMode = false; game.raceNoTimer = true; game.selectedMap = 'hub_overworld';
-    try { if (typeof player !== 'undefined' && player && typeof _ffaTeamForPeer === 'function') player.team = _ffaTeamForPeer(net.myPeerId); } catch (_) {}
+    try {
+      if (typeof player !== 'undefined' && player && typeof _ffaTeamForPeer === 'function' &&
+          (typeof _lssRoomTag !== 'function' || _lssRoomTag() === 'freeflight')) {
+        player.team = _ffaTeamForPeer(net.myPeerId);
+      }
+    } catch (_) {}
   }
 }
 
@@ -6021,7 +6026,8 @@ function applyWorldSync(mapKey, seed) {
 function assignTeamFromPeerOrder() {
   if (typeof player === 'undefined' || !net.myPeerId) return;
   if (net.campaign || net.endless) { player.team = LSS.TEAM_FLEET_A; return; }
-  if (LSS.MODE === 'freeflight' && typeof _ffaTeamForPeer === 'function') { player.team = _ffaTeamForPeer(net.myPeerId); return; }   // (v38.79) FFA: one team per pilot, on every path
+  if ((typeof _lssRoomTag === 'function' ? _lssRoomTag() : LSS.MODE) === 'freeflight' &&
+      typeof _ffaTeamForPeer === 'function') { player.team = _ffaTeamForPeer(net.myPeerId); return; }   // (v38.79) FFA: one team per pilot, on every path
   try { const _tp = net._teamPick && net._teamPick[net.myPeerId];
         if (_tp) { _owSetPlayerTeam(_tp); return; } } catch (_) {}
   if (net.openSoloHostId) {
@@ -6057,7 +6063,7 @@ function _lssTeamSwapAllowed() {
   try {
     if (typeof net === 'undefined' || !net || !net.active) return false;
     if (net.campaign || net.endless) return false;
-    if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return false;
+    if ((typeof _lssRoomTag === 'function' ? _lssRoomTag() : (typeof LSS !== 'undefined' ? LSS.MODE : '')) === 'freeflight') return false;
     if (typeof _lssJoinedMatchInProgress === 'function' && _lssJoinedMatchInProgress()) return false;
     if (typeof game === 'undefined' || !game) return false;
     if (game._ssConfirmed || game._launchCommitted) return false;
@@ -25769,6 +25775,10 @@ function _cyberCityPoint(i) {
 }
 function _cyberTeamForPeer(id, C) {
   const A = C ? C.teamA : LSS.TEAM_FLEET_A, B = C ? C.teamB : LSS.TEAM_FLEET_B;
+  try {
+    const _tp = net._teamPick && net._teamPick[id];
+    if (_tp === A || _tp === B) return _tp;
+  } catch (_) {}
   try {
     if (!net.active || !net.myPeerId) return A;
     const ids = [net.myPeerId, ...(typeof nonJudgePeerIds === 'function' ? nonJudgePeerIds() : [])].sort();
@@ -62465,8 +62475,19 @@ function updateTeammatesStrip() {
       for (const chip of enemyList.children) {
         chip.classList.add('can-pick');
         chip.title = 'Tap to switch to ' + _name;
-        chip.addEventListener('click', () => { try { _lssPickTeam(otherTeam); } catch (_) {} });
       }
+    }
+    if (!enemyList._lssPickBound) {
+      enemyList._lssPickBound = true;
+      enemyList.addEventListener('click', (e) => {
+        try {
+          if (typeof _lssTeamSwapAllowed !== 'function' || !_lssTeamSwapAllowed()) return;
+          const chip = e.target && e.target.closest ? e.target.closest('.fleet-chip') : null;
+          if (!chip || chip.parentNode !== enemyList) return;
+          const _mine = (player && player.team !== undefined) ? player.team : LSS.TEAM_FLEET_A;
+          _lssPickTeam((_mine === LSS.TEAM_FLEET_B) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B);
+        } catch (_) {}
+      });
     }
   } catch (_) {}
 }
@@ -63440,8 +63461,8 @@ function _lssModeDecide() {
 
     if (!bestMode) return;
     let _map;
-    try { if (_bestHostMap && LSS.MODE === bestMode) _map = _bestHostMap; } catch (_) {}
-    try { if (!_map && LSS.MODE === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
+    try { if (_bestHostMap && _lssRoomTag() === bestMode) _map = _bestHostMap; } catch (_) {}
+    try { if (!_map && _lssRoomTag() === bestMode && game && game.selectedMap) _map = game.selectedMap; } catch (_) {}
     let _seed;
     try { if (net.worldSeed != null) _seed = net.worldSeed >>> 0; } catch (_) {}
     const _key = bestMode + '|' + (_map || '') + '|' + (_seed == null ? '' : _seed);
@@ -63492,7 +63513,7 @@ function _lssApplyModeDecree(evt, mine) {
     if (modeChanged) {
       try { _lssClearModeSetup(); } catch (_) {}
       try { _applyModeClientSetup(evt.mode); } catch (_) {}
-      LSS.MODE = evt.mode;
+      LSS.MODE = _lssTagMode(evt.mode);
     }
     let mapChanged = false;
     try {
@@ -63864,6 +63885,7 @@ function _lssRoomModeChoose(want) {
   const m = _lssTagMode(_t);
   try { _lssSyncCyberToTag(_t); } catch (_) {}
   try { _lssModeChosen(); } catch (_) {}
+  try { LSS.MODE = m; } catch (_) {}
   try { if (typeof net !== 'undefined' && net && net.active) _lssModeDecide(); } catch (_) {}
   try { if (typeof net !== 'undefined' && net && net.active) _lssModeAnnounceBurst(); } catch (_) {}
   return m;
