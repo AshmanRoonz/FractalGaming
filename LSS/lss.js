@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.24';
+const LSS_BUILD = '45.27';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -2384,6 +2384,10 @@ async function joinRoom() {
       if (typeof _lssSendLoadoutTo === 'function') _lssSendLoadoutTo(peerId);
 
       try { if (typeof _lssModeAnnounceBurst === 'function') _lssModeAnnounceBurst(peerId); } catch (_) {}
+      try {
+        const _mine = net._teamPick && net._teamPick[net.myPeerId];
+        if (_mine && net.sendEvent) net.sendEvent({ type: 'team_pick', team: _mine }, peerId);
+      } catch (_) {}
       try { if (typeof _lssModeDecide === 'function') _lssModeDecide(); } catch (_) {}
       if (net.sendEvent) {
         try {
@@ -6018,6 +6022,8 @@ function assignTeamFromPeerOrder() {
   if (typeof player === 'undefined' || !net.myPeerId) return;
   if (net.campaign || net.endless) { player.team = LSS.TEAM_FLEET_A; return; }
   if (LSS.MODE === 'freeflight' && typeof _ffaTeamForPeer === 'function') { player.team = _ffaTeamForPeer(net.myPeerId); return; }   // (v38.79) FFA: one team per pilot, on every path
+  try { const _tp = net._teamPick && net._teamPick[net.myPeerId];
+        if (_tp) { _owSetPlayerTeam(_tp); return; } } catch (_) {}
   if (net.openSoloHostId) {
     if (net.myPeerId === net.openSoloHostId) { _owSetPlayerTeam(LSS.TEAM_FLEET_A); return; }   // (v39.55)
     const others = [net.myPeerId, ...nonJudgePeerIds()].filter(id => id !== net.openSoloHostId).sort();
@@ -6033,6 +6039,7 @@ function assignTeamFromPeerOrder() {
 function _teamForPeerId(id) {
   if (!id || typeof net === 'undefined' || !net.myPeerId) return undefined;
   if (net.campaign || net.endless) return LSS.TEAM_FLEET_A;
+  try { const _tp = net._teamPick && net._teamPick[id]; if (_tp) return _tp; } catch (_) {}
   if (net.openSoloHostId) {
     if (id === net.openSoloHostId) return LSS.TEAM_FLEET_A;
     const others = [net.myPeerId, ...nonJudgePeerIds()].filter(x => x !== net.openSoloHostId).sort();
@@ -6046,6 +6053,31 @@ function _teamForPeerId(id) {
   return (i % 2 === 0) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B;
 }
 
+function _lssTeamSwapAllowed() {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active) return false;
+    if (net.campaign || net.endless) return false;
+    if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return false;
+    if (typeof _lssJoinedMatchInProgress === 'function' && _lssJoinedMatchInProgress()) return false;
+    if (typeof game === 'undefined' || !game) return false;
+    if (game._ssConfirmed || game._launchCommitted) return false;
+    if (game.state !== 'select') return false;
+    return true;
+  } catch (_) { return false; }
+}
+function _lssPickTeam(t) {
+  try {
+    if (!_lssTeamSwapAllowed()) return;
+    if (t !== LSS.TEAM_FLEET_A && t !== LSS.TEAM_FLEET_B) return;
+    if (player && player.team === t) return;
+    if (!net._teamPick) net._teamPick = {};
+    net._teamPick[net.myPeerId] = t;
+    if (typeof _owSetPlayerTeam === 'function') _owSetPlayerTeam(t); else player.team = t;
+    try { if (net.sendEvent) net.sendEvent({ type: 'team_pick', team: t }); } catch (_) {}
+    try { updateTeammatesStrip(); } catch (_) {}
+    try { if (typeof updateLobbyPeers === 'function') updateLobbyPeers(); } catch (_) {}
+  } catch (_) {}
+}
 function mulberry32(seed) {
   let s = seed >>> 0;
   return function() {
@@ -6800,6 +6832,16 @@ function handleNetEvent(evt, fromPeerId) {
       try { if (typeof _lssRefreshLaunchRow === 'function') _lssRefreshLaunchRow(); } catch (_) {}   // (v45.06) the last confirm lights LAUNCH
       try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
     }
+    return;
+  }
+  if (evt.type === 'team_pick') {
+    if (!net._teamPick) net._teamPick = {};
+    if (evt.team) net._teamPick[fromPeerId] = evt.team;
+    else delete net._teamPick[fromPeerId];
+    const _pk = net.peers.get(fromPeerId);
+    if (_pk && evt.team) _pk.team = evt.team;
+    try { if (typeof updateTeammatesStrip === 'function') updateTeammatesStrip(); } catch (_) {}
+    try { if (typeof updateLobbyPeers === 'function') updateLobbyPeers(); } catch (_) {}
     return;
   }
   if (evt.type === 'warmup_ready') {
@@ -57986,6 +58028,7 @@ function returnToRootMenu(opts) {
   try { if (typeof net !== 'undefined' && net) net._dropin = null; } catch (_) {}
   try { game._launchCommitted = false; } catch (_) {}
   try { game._ssConfirmed = false; } catch (_) {}   // (v45.06) back at the menu, nothing is locked in
+  try { if (typeof net !== 'undefined' && net) net._teamPick = null; } catch (_) {}
   try { game._campPicker = false; } catch (_) {}   
   
   
@@ -62415,6 +62458,17 @@ function updateTeammatesStrip() {
       name: 'EMPTY', ship: '---', isEnemy: true, isEmpty: true, showPip: false,
     }));
   }
+
+  try {
+    if (typeof _lssTeamSwapAllowed === 'function' && _lssTeamSwapAllowed()) {
+      const _name = (otherTeam === LSS.TEAM_FLEET_B) ? 'FLEET B' : 'FLEET A';
+      for (const chip of enemyList.children) {
+        chip.classList.add('can-pick');
+        chip.title = 'Tap to switch to ' + _name;
+        chip.addEventListener('click', () => { try { _lssPickTeam(otherTeam); } catch (_) {} });
+      }
+    }
+  } catch (_) {}
 }
 
 let _activeLaunchTimers = [];
