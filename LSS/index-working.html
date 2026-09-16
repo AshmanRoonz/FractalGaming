@@ -3218,8 +3218,91 @@ body.vr-active #camp-video { display: none !important; }
 #ship-hero { top: 40px !important; }
 
 </style>
+<style>
+/* (v44.87) BOOT COVER - the menu's real shape is assembled by JavaScript, so the page paints its
+   unassembled markup first. Owner: "why do i sometimes see the previous style of menu, when it loads
+   on slower machines?"
+   MEASURED on a local server with a fast disk: first contentful paint 328 ms, lss.js (3.67 MB)
+   finishes at 3463 ms, DOMContentLoaded 3721 ms. _lobbyLandscape - which adds `lss-land` and
+   re-parents GAME / COMMUNITY / TOOLS into a #lobby-side column that does not exist in the HTML at
+   all - cannot run until that whole bundle has parsed. So the pre-assembly menu is on screen for
+   about 3.4 SECONDS here, and longer wherever the download or parse is slower, which is exactly
+   where it was noticed.
+   THE COVER IS CSS, NOT THE IMAGE. The owner's idea was the LSS_loading art, and the art is the nice
+   part - but a 305 KB fetch races 3.67 MB of engine for bandwidth on precisely the slow machines
+   this is for, and if it loses you get wrong menu -> splash -> right menu, which is worse than the
+   bug. So the cover is a zero-byte gradient guaranteed to paint in the first frame, and the art
+   fades in ON TOP if and when it arrives. Works with images blocked or the file missing.
+   (This partly reverses v38.60, which stopped that image loading at parse time because it was 2.6 MB
+   competing with the engine. It is a 305 KB webp now - about an eighth - and it is being fetched for
+   something the player looks at immediately rather than "nobody sees until PREPARING ARENA".) */
+#lss-boot-cover {
+  position: fixed; inset: 0; z-index: 99999;
+  background: radial-gradient(ellipse at 50% 38%, #0d2b3e 0%, #071722 55%, #030a11 100%);
+  display: flex; align-items: center; justify-content: center;
+  opacity: 1; transition: opacity .45s ease;
+  pointer-events: none;
+}
+#lss-boot-cover.gone { opacity: 0; }
+#lss-boot-cover-img {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; opacity: 0; transition: opacity .6s ease;
+}
+#lss-boot-cover-img.in { opacity: 1; }
+#lss-boot-cover-title {
+  position: relative; z-index: 1;
+  font: 700 clamp(18px, 4.2vmin, 44px)/1.2 ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: .34em; color: #bfe6ff; text-transform: uppercase;
+  text-shadow: 0 0 18px rgba(90,190,255,.45); opacity: .93;
+}
+#lss-boot-cover-sub {
+  position: absolute; left: 0; right: 0; bottom: 8vmin; z-index: 1; text-align: center;
+  font: 600 clamp(9px, 1.5vmin, 14px)/1.4 ui-monospace, Menlo, Consolas, monospace;
+  letter-spacing: .28em; color: rgba(150,205,235,.62); text-transform: uppercase;
+}
+</style>
 </head>
 <body>
+
+<!-- (v44.87) FIRST ELEMENT IN THE BODY ON PURPOSE - it has to paint before the lobby markup does. -->
+<div id="lss-boot-cover">
+  <img id="lss-boot-cover-img" alt="">
+  <div id="lss-boot-cover-title">Last Ship Sailing</div>
+  <div id="lss-boot-cover-sub">loading</div>
+</div>
+<script>
+/* (v44.87) Inline and BEFORE lss.js on purpose. The dismissal cannot live inside the engine bundle:
+   the whole reason the cover exists is that the bundle has not run yet, and if the bundle throws or
+   404s the cover would sit there forever. So the failsafe timer is armed here, in a script the
+   browser reaches in the first few milliseconds, and _lobbyLandscape calls hide() early when it gets
+   there. Whichever happens first wins; hide() is idempotent. */
+(function () {
+  var el = document.getElementById('lss-boot-cover');
+  if (!el) return;
+  var done = false;
+  function hide() {
+    if (done) return; done = true;
+    try {
+      el.classList.add('gone');
+      setTimeout(function () { if (el && el.parentNode) el.parentNode.removeChild(el); }, 600);
+    } catch (e) {}
+  }
+  window.__lssBootCover = { hide: hide, el: el };
+  // the art, if it makes it in time - never blocking, never required
+  try {
+    var img = document.getElementById('lss-boot-cover-img');
+    if (img) {
+      img.onload = function () { img.classList.add('in'); };
+      img.onerror = function () { img.style.display = 'none'; };
+      img.src = 'LSS_loading.webp';
+    }
+  } catch (e) {}
+  // FAILSAFE: never trap anyone behind it, whatever happens to the bundle
+  setTimeout(hide, 12000);
+  window.addEventListener('error', function () { setTimeout(hide, 400); });
+})();
+</script>
+
 
 
 <div id="crosshair"><div id="crosshair-dot"></div></div>
@@ -6344,7 +6427,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.86';
+const LSS_BUILD = '44.87';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -14458,6 +14541,9 @@ function _lobbyLandscape(force) {
       if (side && side.parentNode) side.parentNode.removeChild(side);
     }
   } catch (_) {}
+  // (v44.87) the menu is assembled now, in whichever orientation - drop the boot cover. Outside the
+  // try above so a thrown layout still lifts it; the inline failsafe backstops this either way.
+  try { if (window.__lssBootCover) window.__lssBootCover.hide(); } catch (_) {}
 }
 try {
   window.addEventListener('resize', () => { try { _lobbyLandscape(); } catch (_) {} });
