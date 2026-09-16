@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.11';
+const LSS_BUILD = '45.12';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -62746,10 +62746,21 @@ if (typeof window !== 'undefined') window.__kickAssetPreload = _kickAssetPreload
 
 let _localWarmupReady = false;
 function _markLocalWarmupReady() {
-  _localWarmupReady = true;
-  if (typeof net !== 'undefined' && net.active && net.sendEvent) {
-    try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
-  }
+  if (_localWarmupReady) return;                 // idempotent: several paths call this
+  const _announce = () => {
+    if (_localWarmupReady) return;
+    _localWarmupReady = true;
+    if (typeof net !== 'undefined' && net.active && net.sendEvent) {
+      try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
+    }
+    try { if (typeof net !== 'undefined' && net.active && typeof checkAllLoadoutsReady === 'function') checkAllLoadoutsReady(); } catch (_) {}
+  };
+  let _networked = false;
+  try { _networked = !!(typeof net !== 'undefined' && net && net.active); } catch (_) {}
+  if (!_networked) { _announce(); return; }
+  const _cap = (typeof window !== 'undefined' && typeof window.__readyCapMs === 'number') ? window.__readyCapMs : 20000;
+  if (typeof _cineWhenSettled === 'function') { try { _cineWhenSettled(_announce, _cap); return; } catch (_) {} }
+  _announce();
 }
 function _allPeersWarmupReady() {
   if (typeof net === 'undefined' || !net.active) return true;       

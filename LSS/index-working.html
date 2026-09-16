@@ -6471,7 +6471,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.11';
+const LSS_BUILD = '45.12';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -97387,11 +97387,46 @@ function _kickAssetPreloadOnPageLoad() {
 if (typeof window !== 'undefined') window.__kickAssetPreload = _kickAssetPreloadOnPageLoad;
 
 let _localWarmupReady = false;
+// ⭐⭐⭐ (v45.12) "READY" HAS TO MEAN LOADED, NOT MERELY WARM.
+// Owner: "they aren't in sync... we need to wait for everyone to be loaded before we start the
+// 3, 2, 1 launch."
+// The launch DOES wait - `checkAllLoadoutsReady` holds until `_localWarmupReady &&
+// _allPeersWarmupReady()` - but it was waiting on the wrong fact. This function was called straight
+// out of the SHADER WARMUP promise, so a peer announced `warmup_ready` with its world prebake, hub
+// preload and terrain streaming all still running. Everyone else believed it and started the
+// countdown; that peer was still building for tens of seconds afterwards.
+// ⚠ MEASURED, two peers, LAUNCH pressed at T: the peer that did NOT press started its countdown at
+//   T+2.8s - before any world build could finish - while the presser did not reach play until T+49s.
+//   The presser's record on the other side already carried the warm flag, which is exactly how the
+//   gate let it through.
+// The predicate for "actually ready to fly" already existed and is used by the solo path:
+// `_cineHeavyWorkPending()` - shader warmup, hub terrain preload, world prebake, _PREBAKE's own
+// flag, and swap/round staging. Announcing through `_cineWhenSettled` means every peer's
+// `warmup_ready` now carries the same meaning the solo launch already waited for.
+// (!) THE CAP IS WHY THIS CANNOT WEDGE THE ROOM. _cineWhenSettled flies anyway after its cap
+//     (default below), so one peer with a stuck stage delays the launch, it does not cancel it.
+// (!) `_localWarmupReady` is set at the SAME moment as the announcement, not before it - the two
+//     are the same claim, and the gate reads both. Setting the local flag early would let this
+//     client sail past a gate it is telling everyone else to wait at.
 function _markLocalWarmupReady() {
-  _localWarmupReady = true;
-  if (typeof net !== 'undefined' && net.active && net.sendEvent) {
-    try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
-  }
+  if (_localWarmupReady) return;                 // idempotent: several paths call this
+  const _announce = () => {
+    if (_localWarmupReady) return;
+    _localWarmupReady = true;
+    if (typeof net !== 'undefined' && net.active && net.sendEvent) {
+      try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
+    }
+    // Re-run the gate locally: our own readiness is the last thing it was waiting on.
+    try { if (typeof net !== 'undefined' && net.active && typeof checkAllLoadoutsReady === 'function') checkAllLoadoutsReady(); } catch (_) {}
+  };
+  // Solo needs no handshake and must not pay a settle wait here - its own launch path already
+  // runs one (_launchSoloAfterCinematic), and doubling it would just delay the cinematic.
+  let _networked = false;
+  try { _networked = !!(typeof net !== 'undefined' && net && net.active); } catch (_) {}
+  if (!_networked) { _announce(); return; }
+  const _cap = (typeof window !== 'undefined' && typeof window.__readyCapMs === 'number') ? window.__readyCapMs : 20000;
+  if (typeof _cineWhenSettled === 'function') { try { _cineWhenSettled(_announce, _cap); return; } catch (_) {} }
+  _announce();
 }
 function _allPeersWarmupReady() {
   if (typeof net === 'undefined' || !net.active) return true;       
