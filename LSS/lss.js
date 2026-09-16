@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.81';
+const LSS_BUILD = '44.82';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18999,7 +18999,7 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
     const ih = 1 / vh, hx = vel.x * ih, hz = vel.z * ih;
     const _leadK = (W3.lead != null) ? +W3.lead : 0.45;
     const lead = fp.half * Math.min(1.4, vh / 240) * _leadK;
-    _swRippleSeed(px + hx * lead, pz + hz * lead, baseR * 0.75, baseA * 0.6);                       
+    _swRippleSeed(px + hx * lead, pz + hz * lead, baseR * 0.75, baseA * 0.6);
     _swRippleSeed(px - hx * fp.half * 0.6, pz - hz * fp.half * 0.6, baseR * 0.7, -baseA * 0.4);     
   }
   _swSpawnSplashV(px, WL, pz, { x: vel ? vel.x : 0, y: -vy, z: vel ? vel.z : 0 }, fp.BEAM, sign > 0 ? 1.0 : 0.7, _swDeadrise(fp));
@@ -19370,7 +19370,7 @@ function _swRippleTick(dt) {
     }
     {
       const _pl = (W3.plane != null) ? +W3.plane : 1;
-      const _wet01 = Math.max(0, Math.min(1, (DR * ((W3.kiss != null) ? +W3.kiss : 0.15) - keelA) / DR));
+      const _wet01 = Math.max(0, Math.min(1, (DR * ((W3.kiss != null) ? +W3.kiss : 0.5) - keelA) / DR));
       if (_pl > 0 && _wet01 > 0.02 && sp > 55 && !game._swSubmerged) {
         R.planT = (R.planT || 0) + dt;
         const _rate = (3 + 11 * _wet01 * Math.min(1, sp / 300)) * _pl;
@@ -57463,6 +57463,18 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'F9') {
     e.preventDefault();
     try { _clipSave(); } catch (_) {}
+  }
+  if (e.code === 'KeyO' && !e.ctrlKey && !e.altKey && !e.metaKey) {
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    try {
+      const O = window.__orbitCam;
+      if (O) {
+        O.on = !O.on;
+        if (O.on) { if (!O.dist) O.dist = 260; if (O.el == null) O.el = 14; O.spin = O.spin || 16; }
+        if (window.Overlays && Overlays.banner) Overlays.banner(O.on ? 'ORBIT VIEW' : 'ORBIT OFF', '(O) to toggle');
+      }
+    } catch (_) {}
   }
 });
 
