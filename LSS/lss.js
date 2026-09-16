@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.82';
+const LSS_BUILD = '44.83';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18985,7 +18985,7 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
   const p = Math.min(2.6, vy / 90);
   const k = (sign > 0) ? 1.0 : 0.62;                                  
   const baseR = (sign > 0 ? 1.0 : 0.85) * fp.BEAM * 1.6;             
-  const baseA = (0.10 + 0.10 * p) * (fp.DRAFT / 13.5) * fp.heft * mass * k * ((window.__water && window.__water.wake) || 1) * ((ampK != null) ? ampK : 1);
+  const baseA = (0.10 + 0.10 * p) * (fp.DRAFT / 13.5) * fp.heft * mass * k * (((window.__water && window.__water.wake) != null) ? +window.__water.wake : 1)   /* (v44.83) `|| 1` made wake:0 mean FULL wake */ * ((ampK != null) ? ampK : 1);
   const _cw = window.__water || {};
   const W3 = _cw;   // (v44.80) the knob bag, named as the rest of the water code names it
   const _peakI = (_cw.impactPeak != null) ? +_cw.impactPeak : 0.135;
@@ -19245,7 +19245,7 @@ function _swRippleTick(dt) {
     const dyv = player.velocity ? Math.abs(player.velocity.y) : Math.abs(above - prevAbove);
     const W3 = (window.__water = window.__water || {});
     if (W3.mass === undefined) W3.mass = 1.0;        
-    if (W3.wake === undefined) W3.wake = 1.6;        
+    if (W3.wake === undefined) W3.wake = 0.05;
     if (W3.spray === undefined) W3.spray = 1.0;      
     if (W3.kelvin === undefined) W3.kelvin = 1.0;    
     if (W3.cut === undefined) W3.cut = 1.0;          
