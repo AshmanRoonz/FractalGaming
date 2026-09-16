@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.74';
+const LSS_BUILD = '44.75';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -18129,68 +18129,75 @@ function _wgooBuild(N, span, WL, cx, cz) {
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  const adisp = new Float32Array(V);
+  geo.setAttribute('aDisp', new THREE.BufferAttribute(adisp, 1).setUsage(THREE.DynamicDrawUsage));
   geo.setIndex(idx);
   geo.computeVertexNormals();
+  let mat = null;
   const wm = (typeof game !== 'undefined' && game && game._hubWaterDispMat) ? game._hubWaterDispMat : null;
-  const uni = {
-    uTint: { value: new THREE.Color(0x1d4e6b) },
-    uWL: { value: 0 },
-    uFadeD: { value: 9 },
-    uCentre: { value: new THREE.Vector2(0, 0) },
-    uHalf: { value: 800 },
-    uReflBright: { value: 1.0 },
-    tDiffuse: (wm && wm.uniforms.tDiffuse) ? wm.uniforms.tDiffuse : { value: null },
-    uReflMatrix: (wm && wm.uniforms.uReflMatrix) ? wm.uniforms.uReflMatrix : { value: new THREE.Matrix4() },
-    uReflLive: (wm && wm.uniforms.uReflLive) ? wm.uniforms.uReflLive : { value: 0 },
-  };
-  const mat = new THREE.ShaderMaterial({
-    uniforms: uni,
-    vertexShader: [
-      'varying vec3 vN; varying vec3 vW; varying vec4 vRefl;',
-      'uniform mat4 uReflMatrix;',
-      'void main() {',
-      '  vec4 wp = modelMatrix * vec4(position, 1.0);',
-      '  vW = wp.xyz;',
-      '  vN = normalize(normalMatrix * normal);',
-      '  vRefl = uReflMatrix * wp;',
-      '  gl_Position = projectionMatrix * viewMatrix * wp;',
-      '}',
-    ].join('\n'),
-    fragmentShader: [
-      'varying vec3 vN; varying vec3 vW; varying vec4 vRefl;',
-      'uniform vec3 uTint; uniform float uReflBright; uniform float uReflLive;',
-      'uniform float uWL; uniform float uFadeD; uniform vec2 uCentre; uniform float uHalf;',
-      'uniform sampler2D tDiffuse;',
-      'void main() {',
-      '  vec3 n = normalize(vN);',
-      '  vec3 v = normalize(cameraPosition - vW);',
-      '  float fres = pow(1.0 - clamp(dot(n, v), 0.0, 1.0), 3.0);',
-      '  vec3 col = uTint;',
-      '  if (uReflLive > 0.5 && vRefl.w > 0.0) {',
-      '    vec2 ruv = vRefl.xy / vRefl.w;',
-      '    if (ruv.x > 0.0 && ruv.x < 1.0 && ruv.y > 0.0 && ruv.y < 1.0) {',
-      '      col = mix(uTint, texture2D(tDiffuse, ruv).rgb * uReflBright, clamp(fres, 0.0, 1.0));',
-      '    }',
-      '  }',
-      '  float disp = abs(vW.y - uWL);',
-      '  float a = clamp(disp / max(uFadeD, 0.01), 0.0, 1.0);',
-      '  vec2 ed = abs(vW.xz - uCentre) / max(uHalf, 1.0);',
-      '  a *= 1.0 - smoothstep(0.72, 1.0, max(ed.x, ed.y));',
-      '  if (a < 0.004) discard;',
-      '  gl_FragColor = vec4(col, a);',
-      '}',
-    ].join('\n'),
-    side: THREE.DoubleSide,
-    transparent: true,
-    depthWrite: false,
-  });
+  if (wm && wm.vertexShader && wm.fragmentShader && wm.uniforms) {
+    try {
+      const uni = {};
+      for (const k in wm.uniforms) uni[k] = wm.uniforms[k];   // BY REFERENCE - see the note above
+      uni.uWgFadeD = { value: 9 };
+      uni.uWgCentre = { value: new THREE.Vector2(0, 0) };
+      uni.uWgHalf = { value: 800 };
+      let vs = wm.vertexShader;
+      const vsHead = 'attribute float aDisp;\nvarying float vWgD;\n';
+      if (vs.indexOf('void main(){') >= 0) vs = vs.replace('void main(){', vsHead + 'void main(){');
+      else vs = vs.replace('void main() {', vsHead + 'void main() {');
+      const dispLine = 'vec3 transformed = position; transformed.z += disp;';
+      if (vs.indexOf(dispLine) < 0) throw new Error('water vertex shader changed: displacement line not found');
+      vs = vs.replace(dispLine, 'vec3 transformed = position; transformed.y += disp + aDisp; vWgD = aDisp;');
+      let fs = wm.fragmentShader;
+      const fsHead = 'varying float vWgD;\nuniform float uWgFadeD;\nuniform vec2 uWgCentre;\nuniform float uWgHalf;\n';
+      if (fs.indexOf('void main(){') >= 0) fs = fs.replace('void main(){', fsHead + 'void main(){');
+      else fs = fs.replace('void main() {', fsHead + 'void main() {');
+      const aLine = 'float _aOut = aGraze * mix(1.0, shoreA, uShoreFade) * edgeFade;';
+      if (fs.indexOf(aLine) < 0) throw new Error('water fragment shader changed: _aOut line not found');
+      fs = fs.replace(aLine, aLine +
+        '\n  _aOut *= clamp(abs(vWgD) / max(uWgFadeD, 0.01), 0.0, 1.0);' +
+        '\n  { vec2 _wgE = abs(vWP.xz - uWgCentre) / max(uWgHalf, 1.0);' +
+        ' _aOut *= 1.0 - smoothstep(0.72, 1.0, max(_wgE.x, _wgE.y)); }');
+      mat = new THREE.ShaderMaterial({
+        uniforms: uni, vertexShader: vs, fragmentShader: fs,
+        defines: Object.assign({}, wm.defines || {}),
+        fog: !!wm.fog, lights: !!wm.lights,
+        transparent: true, depthWrite: false, side: THREE.DoubleSide,
+      });
+      _WGOO.wore = true;
+    } catch (e) {
+      mat = null; _WGOO.wore = false;
+      if (!_WGOO._matWarned) { _WGOO._matWarned = true; try { console.warn('[wgoo] could not wear the water shader:', e && e.message); } catch (_) {} }
+    }
+  }
+  if (!mat) {
+    mat = new THREE.ShaderMaterial({
+      uniforms: { uTint: { value: new THREE.Color(0x1d4e6b) }, uWL: { value: 0 },
+                  uFadeD: { value: 9 }, uCentre: { value: new THREE.Vector2(0, 0) }, uHalf: { value: 800 } },
+      vertexShader: ['varying vec3 vW;',
+        'void main() { vec4 wp = modelMatrix * vec4(position,1.0); vW = wp.xyz; gl_Position = projectionMatrix * viewMatrix * wp; }'].join('\n'),
+      fragmentShader: ['varying vec3 vW;',
+        'uniform vec3 uTint; uniform float uWL; uniform float uFadeD; uniform vec2 uCentre; uniform float uHalf;',
+        'void main() {',
+        '  float a = clamp(abs(vW.y - uWL) / max(uFadeD, 0.01), 0.0, 1.0);',
+        '  vec2 ed = abs(vW.xz - uCentre) / max(uHalf, 1.0);',
+        '  a *= 1.0 - smoothstep(0.72, 1.0, max(ed.x, ed.y));',
+        '  if (a < 0.004) discard;',
+        '  gl_FragColor = vec4(uTint, a);',
+        '}'].join('\n'),
+      transparent: true, depthWrite: false, side: THREE.DoubleSide,
+    });
+    _WGOO.wore = false;
+  }
+
   const mesh = new THREE.Mesh(geo, mat);
   mesh.frustumCulled = false;
   mesh.matrixAutoUpdate = false;
   mesh.renderOrder = 0;
   scene.add(mesh);
   py.fill(WL);
-  Object.assign(_WGOO, { geo, mesh, mat, pos, vel, home, py, N, span, cell, cx, cz, built: true });
+  Object.assign(_WGOO, { geo, mesh, mat, pos, vel, home, py, adisp, N, span, cell, cx, cz, built: true });
 }
 function _wgooRecentre(cx, cz, WL) {
   const N = _WGOO.N, cell = _WGOO.cell;
@@ -18226,12 +18233,11 @@ function _wgooTick(dt) {
   if (!_WGOO.built) return;
   const wet = (typeof _swWetAt === 'function') ? _swWetAt(px, pz) : true;
   _WGOO.mesh.visible = wet;
-  {   // (v44.73) the fade needs the live waterline and the patch's current centre - it scrolls
+  {   // (v44.73/75) the fade needs the patch's current centre - it scrolls. Uniform names differ
     const mu2 = _WGOO.mat.uniforms;
-    mu2.uWL.value = WL;
-    mu2.uFadeD.value = (G.fadeD != null) ? +G.fadeD : 9;
-    mu2.uCentre.value.set(_WGOO.cx, _WGOO.cz);
-    mu2.uHalf.value = _WGOO.span * 0.5;
+    const fd = (G.fadeD != null) ? +G.fadeD : 9;
+    if (mu2.uWgFadeD) { mu2.uWgFadeD.value = fd; mu2.uWgCentre.value.set(_WGOO.cx, _WGOO.cz); mu2.uWgHalf.value = _WGOO.span * 0.5; }
+    if (mu2.uWL) { mu2.uWL.value = WL; mu2.uFadeD.value = fd; mu2.uCentre.value.set(_WGOO.cx, _WGOO.cz); mu2.uHalf.value = _WGOO.span * 0.5; }
   }
   if (!wet) return;
 
@@ -18335,6 +18341,11 @@ function _wgooTick(dt) {
       }
       py[k] = y;
     }
+  }
+  if (_WGOO.adisp) {
+    const ad = _WGOO.adisp;
+    for (let k = 0; k < V; k++) { const k3 = k * 3; ad[k] = pos[k3 + 1] - WL; }
+    _WGOO.geo.attributes.aDisp.needsUpdate = true;
   }
   _WGOO.geo.attributes.position.needsUpdate = true;
   _WGOO.geo.computeVertexNormals();
