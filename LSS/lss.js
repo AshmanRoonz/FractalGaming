@@ -46491,9 +46491,9 @@ const _gooSizeV = new THREE.Vector2();
 function _gooKnobs() {
   const G = window.__goo || (window.__goo = {});
   if (G.mode === undefined)   G.mode = 'off';
-  if (G.thresh === undefined) G.thresh = 0.039;  // density at which a surface forms
-  if (G.soft === undefined)   G.soft = 0.012;    // edge softness; soft ~= 0.5 / goopling's contrast
-  if (G.blur === undefined)   G.blur = 3.2;      // blur radius, in density-buffer texels
+  if (G.thresh === undefined) G.thresh = 0.085;  // density at which a surface forms
+  if (G.soft === undefined)   G.soft = 0.022;    // edge softness; soft ~= 0.5 / goopling's contrast
+  if (G.blur === undefined)   G.blur = 2.6;      // blur radius, in density-buffer texels
   if (G.gain === undefined)   G.gain = 3.0;      // aAlpha arrives pre-scaled by __splashA (0.20)
   if (G.scale === undefined)  G.scale = 0.5;     // density RT resolution vs the composite target
   if (G.op === undefined)     G.op = 1.0;
@@ -46583,7 +46583,7 @@ function _gooBuild(w, h) {
     _GOO.qMat = new THREE.ShaderMaterial({
       uniforms: {
         tGoo: { value: null }, uTexel: { value: new THREE.Vector2(1 / 960, 1 / 540) },
-        uThresh: { value: 0.039 }, uSoft: { value: 0.012 }, uBlur: { value: 3.2 },
+        uThresh: { value: 0.085 }, uSoft: { value: 0.022 }, uBlur: { value: 2.6 },
         uOp: { value: 1.0 }, uLit: { value: 1.0 }, uBright: { value: 1.25 },
         uTint: { value: new THREE.Color(0xdceaf4) },
       },
