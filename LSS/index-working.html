@@ -2139,6 +2139,10 @@ body:has(#ship-select.active) #lss-version-badge { display: none !important; }
   animation: lockonPulse 0.3s infinite alternate;
   text-shadow: 0 1px 2px rgba(0,0,0,0.95), 0 0 10px rgba(255,68,0,0.8);
 }
+/* (v45.39) RETIRED with the partial-lock states - see the note in updateHUD. The warning only
+   appears at 3/3 now, where all three pips are filled and tell you nothing the line does not. The
+   markup and the rules below stay so the progress display can be restored by deleting one line. */
+#enemy-lockon-warning .lockon-pips { display: none !important; }
 #enemy-lockon-warning .lockon-pips {
   display: flex; align-items: center; justify-content: center; gap: 6px;
 }
@@ -3502,7 +3506,7 @@ body.vr-active #camp-video { display: none !important; }
   <div id="doomed-warning">! HULL CRITICAL !</div>
   <div id="doomed-vignette"></div>
   <div id="enemy-lockon-warning">
-    <div class="lockon-text">WARNING: ENEMY LOCKED-ON</div>
+    <div class="lockon-text">WARNING! TRACKER IS LOCKED ON!</div>
     <div class="lockon-pips">
       <div class="lockon-pip" id="lockon-pip-1"></div>
       <div class="lockon-pip" id="lockon-pip-2"></div>
@@ -6721,7 +6725,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.37';
+const LSS_BUILD = '45.40';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -56387,18 +56391,45 @@ class Bot {
       // so the warning pips are the real tell. Bot-vs-bot has no lock
       // bookkeeping and homes outright (invisible to the player, keeps
       // bot fights honest). Rocket Salvo (SYPHON) stays dumbfire.
+      // ⭐⭐ (v45.40) THE LOCK DECIDES WHO THE VOLLEY IS FOR. Owner: "tracker i noticed locked onto me
+      // and then he fired a homing rocket at another bot... then he fired what looked like a rocket
+      // salvo at me."
+      // Both halves of that are one defect. The volley always went at `this.combatTarget`, which has
+      // nothing to do with the lock: the bot spent its locked-on volley on whichever bot it happened
+      // to be dogfighting (and that one DID home, because bot-vs-bot homes outright), and by the time
+      // its ~10-14 s cooldown came round again the player's lock had decayed below 3 - locks lose one
+      // every 5 s - so the shot that finally came at the player was dumbfire. A lock that announces
+      // itself on your HUD and is then spent on someone else is worse than no lock at all.
+      // So: a FULL lock on the player retargets this volley at the player, provided the player is a
+      // legal target by the same two rules the ability already uses - inside 2400 u and in line of
+      // sight. If they are not, nothing changes and the bot fires at whatever it was fighting.
+      // ⚠ Fresh vectors, not the _tempVec3 scratches: `aim` IS _tempVec3a and `vel` below uses
+      //   _tempVec3b. This branch runs at most once per ability cooldown, so the allocation is noise.
+      let _rkTgt = tgt, _rkAim = aim;
+      if (ability.name === 'Tracker Rockets' && tgt !== player &&
+          typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
+          player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3) {
+        const _toP = new THREE.Vector3().subVectors(player.position, this.position);
+        const _dP = _toP.length();
+        if (_dP <= 2400 && _dP > 0) {
+          const _aimP = _toP.clone().normalize();
+          let _losP = _dP;
+          try { _losP = raycastLevel(this.position, _aimP, _dP + 10, true); } catch (_) {}
+          if (_losP >= _dP - 5) { _rkTgt = player; _rkAim = _aimP; }
+        }
+      }
       const _rkHome = (ability.name === 'Tracker Rockets') &&
-        (tgt !== player || (player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3));
+        (_rkTgt !== player || (player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3));
       for (let i = 0; i < 3; i++) {
         const vel = this._tempVec3b.set(
-          aim.x + (Math.random()-0.5)*0.10,
-          aim.y + (Math.random()-0.5)*0.10,
-          aim.z
+          _rkAim.x + (Math.random()-0.5)*0.10,
+          _rkAim.y + (Math.random()-0.5)*0.10,
+          _rkAim.z
         ).normalize().multiplyScalar(700);
         const proj = new Projectile(this.position, vel, 1100, 100, 'bot', _rkColor);
         proj.smokeTrail = true;
         proj.ownerTeam = this.team; proj.ownerRef = this;
-        if (_rkHome) { proj.tracking = true; proj.trackTarget = tgt; }
+        if (_rkHome) { proj.tracking = true; proj.trackTarget = _rkTgt; }
         proj.removeHaze();
         game.projectiles.push(proj);
       }
@@ -56406,7 +56437,7 @@ class Bot {
       // for a lock, and then after the tracker missiles fire the lock is
       // gone") — the pips reset and the bot must land 3 fresh hits to lock
       // again. Straight (unlocked) volleys consume nothing.
-      if (_rkHome && tgt === player) {
+      if (_rkHome && _rkTgt === player) {
         delete player.enemyToneLocks[this.id];
         if (player._enemyLockDecayTimers) delete player._enemyLockDecayTimers[this.id];
       }
@@ -57148,6 +57179,12 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
       if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
         try { net.sendEvent({ type: 'bot_dmg', i: this.id, d: Math.round(amount) }); } catch (_) {}
       }
+      // (v45.38) On the CLAIM, not on the confirmation - the same contract NetworkPlayer.takeDamage
+      // has used since v41.80. A proxy's HP only moves when the authority's bot_state comes back, so
+      // waiting for it would put the marker a round-trip behind the shot (and drop it entirely if the
+      // packet is lost). The monster's proxy branch above says the same thing in its own words:
+      // "Returning dmg keeps local hit markers + damage-dealt feel responsive".
+      _hitMarkFor(attacker, amount);   // (v45.38)
       return amount;
     }
 
@@ -57226,6 +57263,26 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
     }
 
     if (this.health <= 0) { this.die(attacker); }
+    // ⭐⭐ (v45.38) BOTS GIVE HIT MARKERS. Owner: "i don't think i'm getting hit markers when bots go
+    // in my fire... what about players?" Players were fine - NetworkPlayer.takeDamage has had this
+    // exact line since v41.80. BOT.takeDamage never got it, and it is the most-shot thing in the
+    // game.
+    // That v41.80 pass is the one that moved the marker off the call sites and onto the damage
+    // contract, precisely because "the marker was fired from 29 REMEMBERED call sites out of 86
+    // damage sites, so every new damage source had to opt in and most did not". It put the line
+    // beside seven `return dealt`s and MISSED THIS CLASS - so a bot only flashed a marker when the
+    // particular weapon that hit it happened to be one of the 29. That is why it read as
+    // intermittent rather than broken: the same shot gives a marker on a human and nothing on a bot.
+    // ⚠ The other three implementations without this line are NOT the same defect and are left
+    //   alone: OutskirtsMonster, ChampionShell and WildLeviathan are damaged from a handful of
+    //   places that each wrap the call in `if (dealt > 0) { ... showHitMarker(); }`, and their own
+    //   comments say so ("hit marker + core only", "Returning dmg keeps local hit markers ...
+    //   responsive"). Bot is hit from every weapon, splash, DoT, ability, core and cluster child in
+    //   the file, which is exactly why it needed the contract instead.
+    // ⚠ Harmless where a call site already fires one: _hitMarkFor runs a few microseconds later and
+    //   showHitMarker's 25 ms throttle collapses the pair - the v41.80 reasoning for leaving all 29
+    //   legacy calls in place.
+    _hitMarkFor(attacker, amount);   // (v45.38)
     return amount;
   }
 
@@ -66529,11 +66586,13 @@ class OutskirtsMonster {
       if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
         try { net.sendEvent({ type: 'mon_dmg', i: this.monId, d: Math.round(dmg) }); } catch (_) {}
       }
+      _hitMarkFor(attacker, dmg);   // (v45.40)
       return dmg;
     }
     this._lastAttacker = attacker;   // (v38.77) for the kill credit in die()
     this.health -= dmg;
     if (this.health <= 0) this.die(true);
+    _hitMarkFor(attacker, dmg);   // (v45.40)
     return dmg;
   }
 
@@ -67381,6 +67440,7 @@ class ChampionShell {
       } catch (_) {}
     }
     if (this.health <= 0) this.die(true);
+    _hitMarkFor(attacker, dmg);   // (v45.40)
     return dmg;
   }
 
@@ -67933,6 +67993,7 @@ class WildLeviathan {
       try {
         if (net && net.active && net.sendEvent) net.sendEvent({ type: 'wild_dmg', i: this.wildId, d: Math.max(0, dmg || 0) });
       } catch (_) {}
+      _hitMarkFor(attacker, dmg);   // (v45.40)
       return Math.min(Math.max(0, this.health), Math.max(0, dmg || 0));   // hit marker + core only
     }
     if (attacker === player && typeof _aegisDmgOut === 'function') {
@@ -67968,6 +68029,7 @@ class WildLeviathan {
     }
     this.health -= dmg;
     if (this.health <= 0) this.die();
+    _hitMarkFor(attacker, dmg);   // (v45.40)
     return dmg;
   }
 
@@ -90441,7 +90503,14 @@ function updateRoundSystem(dt) {
         if (player && (player.team === LSS.TEAM_FLEET_A || player.team === LSS.TEAM_FLEET_B)) {
           title = (player.team === winnerTeam) ? 'Round Won!' : 'Round Lost';
         }
-        Overlays.banner(title, winnerLabel + '  |  FLEET A: ' + game.scoreA + '  FLEET B: ' + game.scoreB);
+        // (v45.39) NO SUB-LINE. Owner: "under 'round won' there's another line of text... it's hard
+        // to read because there's a lot and it's too fast, let's just remove it". It read
+        // "FLEET A WINS THE ROUND  |  FLEET A: 1  FLEET B: 0" in 12px for ~3s over a dogfight - and
+        // every word of it is already on screen permanently: the two fleet scores live at the top of
+        // the HUD, and WHO won is what the headline now says (v42.27 made the verdict the headline
+        // precisely because the detail line was not being read).
+        // `banner()` hides .ban-sub when subtext is falsy, so dropping the argument is the whole fix.
+        Overlays.banner(title);
       }
       // v8VR: ship-AI personal callout on round end. Mirrors the banner
       // logic above (only fires for assigned players, not spectators).
@@ -95753,16 +95822,22 @@ function updateHUD() {
   }
   player.enemyToneLockMax = maxEnemyLocks;
   const lockonEl = _hudEl('enemy-lockon-warning');
-  if (maxEnemyLocks > 0 && player.shipState !== 'dead') {
+  // ⭐ (v45.39) FULL LOCK ONLY. Owner: "when tracker gets a partial lock 1/2, 2/3, it tells you on
+  // your hud he is locking on... how about it just says if he's fully locked only, 3/3 only,
+  // 'Warning! Tracker is locked on!'"
+  // This also makes the warning HONEST, which is the part worth writing down: a bot's Tracker
+  // Rockets only home at a full 3/3 lock (the `_rkHome` gate in _tryUseOffensive, v37.05), so the
+  // partial states were announcing a threat that did not exist yet - you were told "ENEMY LOCKING"
+  // and then took a volley of dumbfire rockets. Now the warning appears exactly when the next volley
+  // will actually chase you, and disappears when the volley consumes the lock (v37.06).
+  // The pips went with it: they existed to show 1/3 and 2/3 progress, and at the only state left
+  // all three are filled, which says nothing the line does not.
+  if (maxEnemyLocks >= 3 && player.shipState !== 'dead') {
     _hudDisplay(lockonEl, 'lockon:d', 'flex');
-    _hudClass(lockonEl, 'lockon:c', maxEnemyLocks >= 3 ? 'full-lock' : '');
+    _hudClass(lockonEl, 'lockon:c', 'full-lock');
     if (lockonEl) {
       const textEl = _hudLast['lockon:textEl'] || (_hudLast['lockon:textEl'] = lockonEl.querySelector('.lockon-text'));
-      _hudText(textEl, 'lockon:t', maxEnemyLocks >= 3 ? 'WARNING: ENEMY LOCKED-ON' : 'WARNING: ENEMY LOCKING');
-    }
-    for (let p = 1; p <= 3; p++) {
-      const pip = _hudEl('lockon-pip-' + p);
-      _hudClass(pip, 'lockon-pip:c:' + p, p <= maxEnemyLocks ? 'lockon-pip filled' : 'lockon-pip');
+      _hudText(textEl, 'lockon:t', 'WARNING! TRACKER IS LOCKED ON!');
     }
   } else {
     _hudDisplay(lockonEl, 'lockon:d', 'none');
@@ -125946,6 +126021,23 @@ function showHitMarker() {
 // ⚠ The 29 existing calls are LEFT ALONE. They now fire a few microseconds before this one and
 // the 25 ms throttle above collapses the pair, which is why the throttle had to come first. Removing
 // them would be 29 chances to break something for no visible gain.
+// ⭐⭐ (v45.40) AND NOW IT REALLY IS EVERY DAMAGEABLE THING. Owner: "we should also make hit markers
+// work for leviathans, too, make sure all the weapons that do damage give hit markers on enemy
+// ships, and monsters."
+// v41.80 put this beside seven `return dealt`s and v45.38 found it had missed Bot. A full audit of
+// every `takeDamage` implementation in the file found three more, and they are exactly the ones the
+// owner named: OutskirtsMonster (the arena / hub leviathans), WildLeviathan and ChampionShell. All
+// five returns are covered now - NetworkPlayer, OwCarrier, OwBoss, Bot, OutskirtsMonster,
+// ChampionShell, WildLeviathan - so a new weapon gets markers on all of them for free, which was the
+// whole point of moving off the call sites.
+// (!) The forward-to-the-authority returns are covered too (mon_dmg / wild_dmg / bot_dmg). The
+//     marker belongs on the CLAIM: a proxy's HP only moves when the authority's snapshot comes back,
+//     so waiting would put it a round-trip late. The monster's own branch already said as much:
+//     "Returning dmg keeps local hit markers + damage-dealt feel responsive".
+// (!) `attacker` here is the STRING 'player' - the weapon paths pass a TAG, not a reference
+//     (v42.97 says so in WildLeviathan). ⚠ Which is why `attacker === player` at the aegis hook in
+//     that same class is dead code, comparing a string to the player object. NOT touched here: it
+//     gates a damage PERK, so repairing it changes damage numbers, and that is the owner's call.
 // ⚠ Rocks are deliberately not covered: DestructibleObstacle.takeDamage(dmg, hitDir) carries no
 // attacker at all, so it cannot tell your shot from a bot's. Its four existing markers still fire.
 // ⚠ The dead guard matches the v36.19 precedent already on two sites: a mine or a burn you left

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.37';
+const LSS_BUILD = '45.40';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -34078,22 +34078,35 @@ class Bot {
       game.projectiles.push(proj);
     } else if (ability.name === 'Tracker Rockets' || ability.name === 'Rocket Salvo') {
       const _rkColor = (ability.name === 'Rocket Salvo') ? LSS.CLASS_COLORS.SYPHON : LSS.CLASS_COLORS.TRACKER;
+      let _rkTgt = tgt, _rkAim = aim;
+      if (ability.name === 'Tracker Rockets' && tgt !== player &&
+          typeof player !== 'undefined' && player && player.shipState !== 'dead' &&
+          player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3) {
+        const _toP = new THREE.Vector3().subVectors(player.position, this.position);
+        const _dP = _toP.length();
+        if (_dP <= 2400 && _dP > 0) {
+          const _aimP = _toP.clone().normalize();
+          let _losP = _dP;
+          try { _losP = raycastLevel(this.position, _aimP, _dP + 10, true); } catch (_) {}
+          if (_losP >= _dP - 5) { _rkTgt = player; _rkAim = _aimP; }
+        }
+      }
       const _rkHome = (ability.name === 'Tracker Rockets') &&
-        (tgt !== player || (player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3));
+        (_rkTgt !== player || (player.enemyToneLocks && (player.enemyToneLocks[this.id] || 0) >= 3));
       for (let i = 0; i < 3; i++) {
         const vel = this._tempVec3b.set(
-          aim.x + (Math.random()-0.5)*0.10,
-          aim.y + (Math.random()-0.5)*0.10,
-          aim.z
+          _rkAim.x + (Math.random()-0.5)*0.10,
+          _rkAim.y + (Math.random()-0.5)*0.10,
+          _rkAim.z
         ).normalize().multiplyScalar(700);
         const proj = new Projectile(this.position, vel, 1100, 100, 'bot', _rkColor);
         proj.smokeTrail = true;
         proj.ownerTeam = this.team; proj.ownerRef = this;
-        if (_rkHome) { proj.tracking = true; proj.trackTarget = tgt; }
+        if (_rkHome) { proj.tracking = true; proj.trackTarget = _rkTgt; }
         proj.removeHaze();
         game.projectiles.push(proj);
       }
-      if (_rkHome && tgt === player) {
+      if (_rkHome && _rkTgt === player) {
         delete player.enemyToneLocks[this.id];
         if (player._enemyLockDecayTimers) delete player._enemyLockDecayTimers[this.id];
       }
@@ -34645,6 +34658,7 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
       if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
         try { net.sendEvent({ type: 'bot_dmg', i: this.id, d: Math.round(amount) }); } catch (_) {}
       }
+      _hitMarkFor(attacker, amount);   // (v45.38)
       return amount;
     }
 
@@ -34702,6 +34716,7 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
     }
 
     if (this.health <= 0) { this.die(attacker); }
+    _hitMarkFor(attacker, amount);   // (v45.38)
     return amount;
   }
 
@@ -41652,11 +41667,13 @@ class OutskirtsMonster {
       if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
         try { net.sendEvent({ type: 'mon_dmg', i: this.monId, d: Math.round(dmg) }); } catch (_) {}
       }
+      _hitMarkFor(attacker, dmg);   // (v45.40)
       return dmg;
     }
     this._lastAttacker = attacker;   // (v38.77) for the kill credit in die()
     this.health -= dmg;
     if (this.health <= 0) this.die(true);
+    _hitMarkFor(attacker, dmg);   // (v45.40)
     return dmg;
   }
 
@@ -42310,6 +42327,7 @@ class ChampionShell {
       } catch (_) {}
     }
     if (this.health <= 0) this.die(true);
+    _hitMarkFor(attacker, dmg);   // (v45.40)
     return dmg;
   }
 
@@ -42708,6 +42726,7 @@ class WildLeviathan {
       try {
         if (net && net.active && net.sendEvent) net.sendEvent({ type: 'wild_dmg', i: this.wildId, d: Math.max(0, dmg || 0) });
       } catch (_) {}
+      _hitMarkFor(attacker, dmg);   // (v45.40)
       return Math.min(Math.max(0, this.health), Math.max(0, dmg || 0));   // hit marker + core only
     }
     if (attacker === player && typeof _aegisDmgOut === 'function') {
@@ -42738,6 +42757,7 @@ class WildLeviathan {
     }
     this.health -= dmg;
     if (this.health <= 0) this.die();
+    _hitMarkFor(attacker, dmg);   // (v45.40)
     return dmg;
   }
 
@@ -57692,7 +57712,7 @@ function updateRoundSystem(dt) {
         if (player && (player.team === LSS.TEAM_FLEET_A || player.team === LSS.TEAM_FLEET_B)) {
           title = (player.team === winnerTeam) ? 'Round Won!' : 'Round Lost';
         }
-        Overlays.banner(title, winnerLabel + '  |  FLEET A: ' + game.scoreA + '  FLEET B: ' + game.scoreB);
+        Overlays.banner(title);
       }
       if (typeof ANN !== 'undefined' && player &&
           (player.team === LSS.TEAM_FLEET_A || player.team === LSS.TEAM_FLEET_B) &&
@@ -61285,16 +61305,12 @@ function updateHUD() {
   }
   player.enemyToneLockMax = maxEnemyLocks;
   const lockonEl = _hudEl('enemy-lockon-warning');
-  if (maxEnemyLocks > 0 && player.shipState !== 'dead') {
+  if (maxEnemyLocks >= 3 && player.shipState !== 'dead') {
     _hudDisplay(lockonEl, 'lockon:d', 'flex');
-    _hudClass(lockonEl, 'lockon:c', maxEnemyLocks >= 3 ? 'full-lock' : '');
+    _hudClass(lockonEl, 'lockon:c', 'full-lock');
     if (lockonEl) {
       const textEl = _hudLast['lockon:textEl'] || (_hudLast['lockon:textEl'] = lockonEl.querySelector('.lockon-text'));
-      _hudText(textEl, 'lockon:t', maxEnemyLocks >= 3 ? 'WARNING: ENEMY LOCKED-ON' : 'WARNING: ENEMY LOCKING');
-    }
-    for (let p = 1; p <= 3; p++) {
-      const pip = _hudEl('lockon-pip-' + p);
-      _hudClass(pip, 'lockon-pip:c:' + p, p <= maxEnemyLocks ? 'lockon-pip filled' : 'lockon-pip');
+      _hudText(textEl, 'lockon:t', 'WARNING! TRACKER IS LOCKED ON!');
     }
   } else {
     _hudDisplay(lockonEl, 'lockon:d', 'none');
