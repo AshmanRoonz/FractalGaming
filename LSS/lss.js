@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.69';
+const LSS_BUILD = '44.70';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -46555,7 +46555,9 @@ function _cohKnobs() {
   if (C.k === undefined)   C.k = 190;    // pull toward the neighbourhood
   if (C.r0 === undefined)  C.r0 = 9;     // below this, drops push apart instead
   if (C.rep === undefined) C.rep = 320;  // how hard
-  if (C.max === undefined) C.max = 1200; // drops past this are left alone (cost ceiling)
+  if (C.max === undefined) C.max = 2400; // (v44.70) was 1200, which excluded 40% of a live splash
+  if (C.streak === undefined) C.streak = 0.55;   // (v44.70) crowding shortens the velocity streak
+  if (C.swell === undefined)  C.swell = 0.22;    // ...and swells the sprite, so a crowd reads as one surface
   return C;
 }
 function _cohTick(dt) {
@@ -46567,7 +46569,7 @@ function _cohTick(dt) {
   const cap = Math.max(0, C.max | 0);
   const idx = _COH.idx; idx.length = 0;
   const parts = game.particles;
-  for (let i = 0; i < parts.length && idx.length < cap; i++) if (parts[i].splash) idx.push(i);
+  for (let i = parts.length - 1; i >= 0 && idx.length < cap; i--) if (parts[i].splash) idx.push(i);
   const n = idx.length;
   if (n < 2) return;
   const heads = _COH.heads; heads.clear();
@@ -46611,6 +46613,7 @@ function _cohTick(dt) {
     const v = pa.velocity;
     if (cn > 0) { const s = K * dt / cn; v.x += cx * s; v.y += cy * s; v.z += cz * s; }
     if (rx || ry || rz) { const s = REP * dt; v.x += rx * s; v.y += ry * s; v.z += rz * s; }
+    pa._cohN = cn;
   }
 }
 function updateParticles(dt) {
@@ -46654,6 +46657,9 @@ function updateParticles(dt) {
     _su.uStretchMax.value = (_W7.sprayStretchMax != null) ? +_W7.sprayStretchMax : 6.0;
     _su.uOpacity.value = (_W7.sprayOp != null) ? +_W7.sprayOp : 1.0;
   }
+  const _COHK = window.__coh || {};
+  const _COH_STREAK = (_COHK.streak != null) ? +_COHK.streak : 0.55;
+  const _COH_SWELL = (_COHK.swell != null) ? +_COHK.swell : 0.22;
   let _w = 0;
   let _ws = 0;
   const _W6 = window.__water || {};
@@ -46690,8 +46696,11 @@ function updateParticles(dt) {
         const _s3 = _ws * 3;
         _splPos[_s3] = pos.x; _splPos[_s3 + 1] = pos.y; _splPos[_s3 + 2] = pos.z;
         _splCol[_s3] = p._colR; _splCol[_s3 + 1] = p._colG; _splCol[_s3 + 2] = p._colB;
-        _splVel[_s3] = _pv.x; _splVel[_s3 + 1] = _pv.y; _splVel[_s3 + 2] = _pv.z;   // (v44.24)
-        _splSize[_ws]  = p.size * 2.2 * (0.5 + alpha * 0.5);
+        const _cn = p._cohN || 0;
+        const _cs = 1 / (1 + _cn * _COH_STREAK);
+        const _cw = 1 + Math.min(1.5, _cn * _COH_SWELL);
+        _splVel[_s3] = _pv.x * _cs; _splVel[_s3 + 1] = _pv.y * _cs; _splVel[_s3 + 2] = _pv.z * _cs;   // (v44.24, v44.70)
+        _splSize[_ws]  = p.size * 2.2 * (0.5 + alpha * 0.5) * _cw;
         _splAlpha[_ws] = alpha * (window.__splashA != null ? window.__splashA : 0.20);   // (v44.24) 0.45 -> 0.20: additive now, and a fresh crown is ~100 overlapping drops   
         _ws++;
       }

@@ -6344,7 +6344,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.69';
+const LSS_BUILD = '44.70';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -72953,7 +72953,9 @@ function _cohKnobs() {
   if (C.k === undefined)   C.k = 190;    // pull toward the neighbourhood
   if (C.r0 === undefined)  C.r0 = 9;     // below this, drops push apart instead
   if (C.rep === undefined) C.rep = 320;  // how hard
-  if (C.max === undefined) C.max = 1200; // drops past this are left alone (cost ceiling)
+  if (C.max === undefined) C.max = 2400; // (v44.70) was 1200, which excluded 40% of a live splash
+  if (C.streak === undefined) C.streak = 0.55;   // (v44.70) crowding shortens the velocity streak
+  if (C.swell === undefined)  C.swell = 0.22;    // ...and swells the sprite, so a crowd reads as one surface
   return C;
 }
 function _cohTick(dt) {
@@ -72966,7 +72968,12 @@ function _cohTick(dt) {
   // collect the water drops
   const idx = _COH.idx; idx.length = 0;
   const parts = game.particles;
-  for (let i = 0; i < parts.length && idx.length < cap; i++) if (parts[i].splash) idx.push(i);
+  // ⚠ (v44.70) WALK BACKWARDS. Forwards, the cap kept the OLDEST drops and dropped the newest -
+  // and new drops are appended, so the ones it silently excluded were the fresh spray at the bow,
+  // i.e. exactly the ones in front of the camera. Measured at the default cap of 1200: 814 of 2014
+  // drops got no cohesion at all, and the excluded set was on average NEARER the camera than the
+  // included one. Newest first is the right bias for a visual effect.
+  for (let i = parts.length - 1; i >= 0 && idx.length < cap; i--) if (parts[i].splash) idx.push(i);
   const n = idx.length;
   if (n < 2) return;
   // spatial hash - the cell IS the kernel radius, so one 3x3x3 query covers every neighbour in range
@@ -73012,6 +73019,8 @@ function _cohTick(dt) {
     const v = pa.velocity;
     if (cn > 0) { const s = K * dt / cn; v.x += cx * s; v.y += cy * s; v.z += cz * s; }
     if (rx || ry || rz) { const s = REP * dt; v.x += rx * s; v.y += ry * s; v.z += rz * s; }
+    // (v44.70) how much of a CROWD this drop is in, kept for the renderer - see the splash writer
+    pa._cohN = cn;
   }
 }
 function updateParticles(dt) {
@@ -73079,6 +73088,10 @@ function updateParticles(dt) {
     _su.uStretchMax.value = (_W7.sprayStretchMax != null) ? +_W7.sprayStretchMax : 6.0;
     _su.uOpacity.value = (_W7.sprayOp != null) ? +_W7.sprayOp : 1.0;
   }
+  // (v44.70) how hard a crowd shortens a drop's streak and swells its sprite
+  const _COHK = window.__coh || {};
+  const _COH_STREAK = (_COHK.streak != null) ? +_COHK.streak : 0.55;
+  const _COH_SWELL = (_COHK.swell != null) ? +_COHK.swell : 0.22;
   let _w = 0;
   let _ws = 0;
   // ⭐⭐ (v44.22) DRAG WAS PER FRAME, NOT PER SECOND. Owner: "i feel like the water droplets fall
@@ -73140,8 +73153,23 @@ function updateParticles(dt) {
         const _s3 = _ws * 3;
         _splPos[_s3] = pos.x; _splPos[_s3 + 1] = pos.y; _splPos[_s3 + 2] = pos.z;
         _splCol[_s3] = p._colR; _splCol[_s3 + 1] = p._colG; _splCol[_s3 + 2] = p._colB;
-        _splVel[_s3] = _pv.x; _splVel[_s3 + 1] = _pv.y; _splVel[_s3 + 2] = _pv.z;   // (v44.24)
-        _splSize[_ws]  = p.size * 2.2 * (0.5 + alpha * 0.5);
+        // ⭐⭐ (v44.70) A DROP IN A CROWD IS PART OF A MASS, AND A MASS IS NOT A STREAK.
+        // Owner, with cohesion already on: "the ones i see coming off the front of the ship
+        // travelling forward, while in first person, they still look like rice".
+        // Measured: those drops are NOT isolated - 8.8 neighbours inside the cohesion radius each -
+        // so cohesion was reaching them. The grain is the SHAPE. v44.24 stretches every sprite along
+        // its screen velocity and caps at 6x, and bow spray averages 331 u/s, so each one is drawn
+        // as a 6:1 ellipse. Pulling grains together just makes a tidy pile of grains.
+        // Real water does the opposite as it crowds: a lone bead tears into a streak, a crowd merges
+        // into a sheet. So the streak is now scaled DOWN by how crowded the drop is (its velocity is
+        // what the shader stretches along, so shortening the vector shortens the tail) and the sprite
+        // swells slightly, which is what lets neighbours overlap into one surface instead of lying
+        // side by side. Lone fast drops are untouched and still streak.
+        const _cn = p._cohN || 0;
+        const _cs = 1 / (1 + _cn * _COH_STREAK);
+        const _cw = 1 + Math.min(1.5, _cn * _COH_SWELL);
+        _splVel[_s3] = _pv.x * _cs; _splVel[_s3 + 1] = _pv.y * _cs; _splVel[_s3 + 2] = _pv.z * _cs;   // (v44.24, v44.70)
+        _splSize[_ws]  = p.size * 2.2 * (0.5 + alpha * 0.5) * _cw;
         _splAlpha[_ws] = alpha * (window.__splashA != null ? window.__splashA : 0.20);   // (v44.24) 0.45 -> 0.20: additive now, and a fresh crown is ~100 overlapping drops   
         _ws++;
       }
