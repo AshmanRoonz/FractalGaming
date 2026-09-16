@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.79';
+const LSS_BUILD = '44.81';
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
 try { window.LSS_BUILD = LSS_BUILD; } catch (_) {}
 
@@ -15262,12 +15262,52 @@ function _lssCameraDepthForFov(force) {
 }
 
 
+
+const _ORB = { v: new THREE.Vector3(), t: new THREE.Vector3(), last: 0 };
+function _orbitCamApply() {
+  let O;
+  try { O = window.__orbitCam; } catch (_) { return; }
+  if (!O || !O.on) return;
+  if (typeof player === 'undefined' || !player || !player.position) return;
+  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return; } catch (_) {}
+  const now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+  const dt = (_ORB.last ? Math.min(0.1, (now - _ORB.last) / 1000) : 0);
+  _ORB.last = now;
+  if (O.spin) O.az = ((O.az || 0) + O.spin * dt) % 360;
+  _ORB.t.copy(player.position);
+  if ((O.target === undefined || O.target === 'ship') && player.mesh) {
+    try { player.mesh.getWorldPosition(_ORB.t); } catch (_) { _ORB.t.copy(player.position); }
+  }
+  const az = ((O.az != null) ? O.az : 0) * Math.PI / 180;
+  const el = ((O.el != null) ? O.el : 12) * Math.PI / 180;
+  const d = Math.max(8, (O.dist != null) ? O.dist : 220);
+  const yaw = (player.euler ? player.euler.y : 0) + az;
+  const ce = Math.cos(el);
+  _ORB.v.set(Math.sin(yaw) * ce, Math.sin(el), Math.cos(yaw) * ce).multiplyScalar(d);
+  camera.position.copy(_ORB.t).add(_ORB.v);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(_ORB.t);
+  camera.updateMatrixWorld();
+}
+if (typeof window !== 'undefined') {
+  window.__orbitCam = window.__orbitCam || { on: false, az: 0, el: 12, dist: 220, spin: 0 };
+  window.__orbit = function (az, dist, el) {
+    const O = window.__orbitCam;
+    O.on = true;
+    if (az != null) O.az = az;
+    if (dist != null) O.dist = dist;
+    if (el != null) O.el = el;
+    return O;
+  };
+  window.__orbitOff = function () { window.__orbitCam.on = false; return 'orbit cam off'; };
+}
 function renderFrame() {
   _lssCameraDepthForFov();
   try { if (_XR_COVER.preview && _xrCoverPreviewFrame()) return; } catch (_) {}
   try { _lssHubDirectTonemap(); } catch (_) {}
   try { if (typeof _shipLightsFrame === 'function') _shipLightsFrame(); } catch (_) {}
   try { if (typeof _ghostHullSync === 'function') _ghostHullSync(); } catch (_) {}
+  try { _orbitCamApply(); } catch (_) {}   // (v44.81) dev orbit camera; one property read when off
   if (renderer.xr.isPresenting) {
     if (!renderFrame._xrLogged) {
       renderFrame._xrLogged = true;
@@ -18947,6 +18987,7 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
   const baseR = (sign > 0 ? 1.0 : 0.85) * fp.BEAM * 1.6;             
   const baseA = (0.10 + 0.10 * p) * (fp.DRAFT / 13.5) * fp.heft * mass * k * ((window.__water && window.__water.wake) || 1) * ((ampK != null) ? ampK : 1);
   const _cw = window.__water || {};
+  const W3 = _cw;   // (v44.80) the knob bag, named as the rest of the water code names it
   const _peakI = (_cw.impactPeak != null) ? +_cw.impactPeak : 0.135;
   const _sd = ((_cw.crater != null) ? +_cw.crater : 1) ? ((sign > 0) ? -1 : 1) : 1;
   _swFxN(sign > 0 ? 'entry' : 'exit');
@@ -18956,7 +18997,8 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
   if (typeof window !== 'undefined' && window.__waterDisp && !(window.__water && window.__water.crestBreak)) _swCrestSpray(px, WL, pz, baseA, vel ? vel.x : 0, vel ? vel.z : 0);   
   if (vh > 60) {                                                      
     const ih = 1 / vh, hx = vel.x * ih, hz = vel.z * ih;
-    const lead = fp.half * Math.min(1.4, vh / 240);
+    const _leadK = (W3.lead != null) ? +W3.lead : 0.45;
+    const lead = fp.half * Math.min(1.4, vh / 240) * _leadK;
     _swRippleSeed(px + hx * lead, pz + hz * lead, baseR * 0.75, baseA * 0.6);                       
     _swRippleSeed(px - hx * fp.half * 0.6, pz - hz * fp.half * 0.6, baseR * 0.7, -baseA * 0.4);     
   }

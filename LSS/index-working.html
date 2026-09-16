@@ -6344,7 +6344,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '44.79';
+const LSS_BUILD = '44.81';
 // (v36.96) BENT SANDWICH feel-test opt-in: ?bend in the URL (or set
 // window.__bend = true in the console) before launching ENDLESS.
 if (typeof location !== 'undefined' && /[?&]bend/.test(location.search)) window.__bend = true;
@@ -28018,6 +28018,69 @@ function _lssCameraDepthForFov(force) {
 }
 
 
+
+// ⭐ (v44.81) ORBIT CAM - circle the ship and look at it, for judging how anything around the hull
+// actually reads. Owner: "in selfie view, you should be able to rotate around the ship in a circle,
+// and move closer and further, and the cam always points at the ship".
+//
+// Written because a whole session's worth of water work was judged from ASTERN, where the camera
+// sits by default - and the one thing that finally condemned it (a bow wave standing taller than
+// the ship) is invisible from directly behind and obvious from the beam. A view you cannot move is
+// a view that will agree with you.
+//
+//   window.__orbitCam = { on, az, el, dist, spin, target, up }
+//     az    degrees around the ship, 0 = dead astern, 90 = off the port beam, 180 = dead ahead
+//     el    degrees above the horizon, negative looks up from below the waterline
+//     dist  world units from the target
+//     spin  degrees per second, for a slow circle without touching anything
+//     target 'ship' (the hull's own centre) or 'pos' (player.position)
+//
+// Runs in renderFrame AFTER _ghostHullSync and therefore after _lssApplyShipRig, which is what
+// positions the camera in gameLoop - so this wins without having to fight it. It only moves the
+// camera: nothing else in the frame knows or cares, and `on:false` costs one property read.
+// ⚠ Not for VR - the headset owns its pose, and overriding it is how you make someone ill.
+const _ORB = { v: new THREE.Vector3(), t: new THREE.Vector3(), last: 0 };
+function _orbitCamApply() {
+  let O;
+  try { O = window.__orbitCam; } catch (_) { return; }
+  if (!O || !O.on) return;
+  if (typeof player === 'undefined' || !player || !player.position) return;
+  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return; } catch (_) {}
+  const now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+  const dt = (_ORB.last ? Math.min(0.1, (now - _ORB.last) / 1000) : 0);
+  _ORB.last = now;
+  if (O.spin) O.az = ((O.az || 0) + O.spin * dt) % 360;
+  // aim at the hull itself when it exists - player.position is the flight origin, not the
+  // silhouette's centre, and on the big hulls they are far enough apart to frame badly
+  _ORB.t.copy(player.position);
+  if ((O.target === undefined || O.target === 'ship') && player.mesh) {
+    try { player.mesh.getWorldPosition(_ORB.t); } catch (_) { _ORB.t.copy(player.position); }
+  }
+  const az = ((O.az != null) ? O.az : 0) * Math.PI / 180;
+  const el = ((O.el != null) ? O.el : 12) * Math.PI / 180;
+  const d = Math.max(8, (O.dist != null) ? O.dist : 220);
+  // az is measured from the ship's own heading, so the framing holds while it manoeuvres
+  const yaw = (player.euler ? player.euler.y : 0) + az;
+  const ce = Math.cos(el);
+  _ORB.v.set(Math.sin(yaw) * ce, Math.sin(el), Math.cos(yaw) * ce).multiplyScalar(d);
+  camera.position.copy(_ORB.t).add(_ORB.v);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(_ORB.t);
+  camera.updateMatrixWorld();
+}
+if (typeof window !== 'undefined') {
+  window.__orbitCam = window.__orbitCam || { on: false, az: 0, el: 12, dist: 220, spin: 0 };
+  // one-liners for the common judging moves
+  window.__orbit = function (az, dist, el) {
+    const O = window.__orbitCam;
+    O.on = true;
+    if (az != null) O.az = az;
+    if (dist != null) O.dist = dist;
+    if (el != null) O.el = el;
+    return O;
+  };
+  window.__orbitOff = function () { window.__orbitCam.on = false; return 'orbit cam off'; };
+}
 function renderFrame() {
   // (v42.90) far/near tracked to the live FOV, before anything draws. renderFrame is the one
   // choke point every render path goes through, and every camera.fov write is final by here.
@@ -28035,6 +28098,7 @@ function renderFrame() {
   try { if (typeof _shipLightsFrame === 'function') _shipLightsFrame(); } catch (_) {}
   // (v37.64) ghost seat shell on/off, judged against the camera that is about to draw
   try { if (typeof _ghostHullSync === 'function') _ghostHullSync(); } catch (_) {}
+  try { _orbitCamApply(); } catch (_) {}   // (v44.81) dev orbit camera; one property read when off
   if (renderer.xr.isPresenting) {
     if (!renderFrame._xrLogged) {
       renderFrame._xrLogged = true;
@@ -33632,6 +33696,7 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
   // uSeedImpulse the crater opens over several steps instead of appearing whole); exit lifts water
   // with the hull, so it stays positive. `window.__water.crater = 0` restores the always-up seed.
   const _cw = window.__water || {};
+  const W3 = _cw;   // (v44.80) the knob bag, named as the rest of the water code names it
   const _peakI = (_cw.impactPeak != null) ? +_cw.impactPeak : 0.135;
   const _sd = ((_cw.crater != null) ? +_cw.crater : 1) ? ((sign > 0) ? -1 : 1) : 1;
   // (v41.03) ...and the crater gets a RIM. A lone negative bump is a dent; what an entry actually
@@ -33645,7 +33710,17 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
   if (typeof window !== 'undefined' && window.__waterDisp && !(window.__water && window.__water.crestBreak)) _swCrestSpray(px, WL, pz, baseA, vel ? vel.x : 0, vel ? vel.z : 0);   
   if (vh > 60) {                                                      
     const ih = 1 / vh, hx = vel.x * ih, hz = vel.z * ih;
-    const lead = fp.half * Math.min(1.4, vh / 240);
+    // ⭐ (v44.80) HOW FAR AHEAD THE BOW WAVE SITS. Owner, on the three white sprays off the nose:
+    // "it's too far in front".
+    // This seed is the bow wave - the water a hull piles up BEFORE it, so it belongs ahead of the
+    // hull, not at it. But it was `fp.half * up to 1.4`, i.e. up to 1.4 HULL HALF-LENGTHS ahead: 63
+    // units on this chassis, and the crest-break scan then throws spray wherever that seed steepens.
+    // Measured along the heading at 420 u/s, drops reached +100 units ahead of the hull, which is
+    // more than two half-lengths of clear water between the ship and its own bow spray.
+    // Scaled by `__water.lead` (0.45) so the pile-up sits just off the nose where a bow wave forms.
+    // 1.0 restores the pre-44.80 distance exactly.
+    const _leadK = (W3.lead != null) ? +W3.lead : 0.45;
+    const lead = fp.half * Math.min(1.4, vh / 240) * _leadK;
     _swRippleSeed(px + hx * lead, pz + hz * lead, baseR * 0.75, baseA * 0.6);                       
     _swRippleSeed(px - hx * fp.half * 0.6, pz - hz * fp.half * 0.6, baseR * 0.7, -baseA * 0.4);     
   }
