@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.92';
+const LSS_BUILD = '46.00';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -66136,7 +66136,18 @@ function spawnDynamicObjects(rooms) {
       // +2900 puts the base around 2,180 on the stock hub. Measured on the pane: much lower and the
       // deck is seen almost edge-on from cruising altitude and reads as horizon haze rather than as
       // cloud; this is high enough to look UP at and still low enough to climb into.
-      HUB_WX.baseY = _hbWL + 2900;
+      // ⚠ BEFORE _hwxCalibrate, which fits the coverage threshold to the field
+      // that `cell` and `speed` define. Calibrating first and resizing after
+      // would leave the deck at the wrong cover fraction.
+      // Written from the literals every time, so the hub (factor 1) is restored
+      // exactly after an Earth session has scaled them.
+      const _hbS = _lssWorldUnitsPerMetre();
+      HUB_WX.R     = 15000 * _hbS;
+      HUB_WX.cell  = 2600  * _hbS;
+      HUB_WX.speed = 34    * _hbS;
+      HUB_WX.layer = 320   * _hbS;
+      HUB_WX.roll  = 280   * _hbS;
+      HUB_WX.baseY = _hbWL + 2900 * _hbS;
       HUB_WX._primed = false; HUB_WX._bear = null; HUB_WX._dir = null;
       if (typeof window !== 'undefined' && window.__hubWxCover != null) HUB_WX.cover = +window.__hubWxCover;
       try { _hwxWind(0); _hwxCalibrate(); } catch (_) {}
@@ -66152,7 +66163,9 @@ function spawnDynamicObjects(rooms) {
       for (let i = 0; i < _hbN; i++) {
         // Bigger and more overlapping than the old 190-420: a deck has to CLOSE overhead to read as
         // one sky rather than as separate puffs.
-        const _hbSize = 320 + Math.random() * 300;
+        // 320-620 units on the hub; 2,240-4,340 on Earth, which is 320-620
+        // METRES across - the size of real cumulus rather than of a house.
+        const _hbSize = (320 + Math.random() * 300) * _hbS;
         const _hbCloud = new GasCloud(billboardCloudSystem, new THREE.Vector3(0, HUB_WX.baseY, 0), {
           boundsRadius: _hbSize, spriteScale: _hbSize * 1.6, spriteScaleVar: 0.50,
           alpha: 0.5, color: _hbCol, baseColor: _hbSeed, colorJitter: 0.16,
@@ -66176,7 +66189,7 @@ function spawnDynamicObjects(rooms) {
           _u.uFarIn.value = HUB_WX.R * 0.72; _u.uFarOut.value = HUB_WX.R * 1.02;
         }
       } catch (_) {}
-      console.log('[hub-wx] deck ' + _hbN + ' clouds, base ' + Math.round(HUB_WX.baseY)
+      console.log('[hub-wx] deck ' + _hbN + ' clouds, x' + _hbS + ' scale, base ' + Math.round(HUB_WX.baseY)
         + ', wind ' + Math.round((HUB_WX._bear || 0) * 57.3) + 'deg @' + HUB_WX.speed
         + ' u/s, cover ' + HUB_WX.cover + ' (thr ' + HUB_WX._thr.toFixed(3) + ')');
     } catch (e) { console.warn('[hub-clouds] spawn failed', e); }
@@ -66502,6 +66515,105 @@ function _enforceDetachedGasBudget() {
 //     the coverage field says is cloudy, so the sky is never empty however far you fly.
 // Knobs: window.__hubWx (speed / cover / cell / stretch / baseY / R / n ...), window.__hubClouds = 0
 // still turns the whole deck off.
+// ⭐⭐ (v45.98) HOW MANY WORLD UNITS ARE A METRE HERE?
+// Every number in HUB_WX below is in WORLD UNITS and was calibrated on the hub,
+// where a unit is about a metre. A streamed gmaps level is built in TRUE metres
+// and then scaled (7 units/m, the figure that matches the hub city), so the same
+// constants mean something seven times smaller there. Owner: "the purple basin
+// clouds look kinda silly in this mode, sparsely spread out... i think we solved
+// that in exhibition mode" - and we did: the v44.60 deck IS the exhibition fix.
+// It just arrived on Earth measured in the wrong unit. Read in metres, the
+// unscaled deck is clouds 46-89 m across, sitting 311 m up, inside a 2.1 km
+// bubble, in a world you can see fifty kilometres across. That is the whole
+// complaint, and it is arithmetic rather than art.
+// Scaling R, cell, speed, layer, roll, the base height AND the cloud size by the
+// same factor keeps every RATIO the hub was tuned on - the angular drift rate,
+// the cover fraction, the number of clouds per unit of sky - so Earth gets the
+// exhibition deck at Earth's size. On the hub this returns 1 and nothing moves.
+// ⭐⭐⭐ (v45.99) THE PREBAKE CANNOT REACH THE EARTH, SO THE CURTAIN DOES.
+//
+// _prebakeWorldForLaunch is the thing that makes a launch smooth: twelve wide
+// prime renders plus a compile, so every program the first frames need is
+// already linked. On a streamed gmaps level it runs with almost nothing to do -
+// `game.sandwichTerrain` is null, so its terrain phase is a no-op (measured:
+// `terrain 0` in the prebake line) - and, far more importantly, IT RUNS BEFORE
+// THE WORLD EXISTS. The patches are DEM, imagery and Overpass fetches; they land
+// seconds later.
+// So the earth's own materials were never in the scene when anything warmed it,
+// and they linked on the first frame that drew them - IN PLAY. Measured with
+// ?pbhud over Toronto: `getProgramParameter` (the blocking LINK_STATUS query)
+// for 94 ms on the building walls, 30 ms on the holo ads and 265 ms on the
+// earth-life GLB material, all inside one 924 ms frame, at 99.1-99.45 s with the
+// game already playing.
+// The curtain ALREADY waits here for exactly these things - the patches, the
+// spawn, the city - so this is the one moment in the whole sequence when the
+// world is complete and nobody is looking at it. Compile, then DRAW: ANGLE
+// builds its vertex executable per input layout at the first draw call rather
+// than at link, which v39.83 established and v41.65 acted on, so a compile with
+// no draw is only half a warm.
+// One shot per world, flagged on the world object itself so a new level (or a
+// warp) gets its own without any reset bookkeeping.
+function _lssEarthWarmOnce(w) {
+  if (!w || w.__warmed) return;
+  w.__warmed = true;
+  try {
+    if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' ||
+        !scene || typeof camera === 'undefined' || !camera) return;
+    const t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
+    const p0 = renderer.info.programs ? renderer.info.programs.length : 0;
+    try { renderer.compile(scene, camera); } catch (_) {}
+    try { renderer.render(scene, camera); } catch (_) {}
+    // ⭐ ...AND THE POPULATION, WHICH IS NOT IN THE SCENE YET.
+    // The traffic, carriers and monsters spawn from _lssEarthLifeTick once play
+    // begins, so the pass above cannot see them: measured, the walls and the ads
+    // went quiet and `Material_0.001` / `Material_0.002` still linked in play for
+    // 282 ms. Those are the GLB materials.
+    // Object3D.clone() SHARES materials by reference - _elCloneRigged is a
+    // clone(true) - so warming the SOURCE scene warms every creature cut from
+    // it. Park each source in front of the camera for one render (ANGLE builds
+    // its vertex executable at the draw call, not at link) and take it out
+    // again; nothing is on screen but the curtain.
+    try {
+      const src = [];
+      if (typeof _LSS_EL !== 'undefined' && _LSS_EL) {
+        if (_LSS_EL.carrier && _LSS_EL.carrier.scene) src.push(_LSS_EL.carrier.scene);
+        else if (_LSS_EL.carrier && _LSS_EL.carrier.isObject3D) src.push(_LSS_EL.carrier);
+        for (const k in (_LSS_EL.mon || {})) {
+          const r = _LSS_EL.mon[k];
+          if (r && r.scene) src.push(r.scene);
+        }
+      }
+      if (src.length) {
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const at = camera.position.clone().addScaledVector(fwd, 600);
+        const held = [];
+        for (const o of src) {
+          if (!o || o.parent) continue;            // already somewhere; leave it
+          held.push([o, o.position.clone(), o.visible]);
+          o.position.copy(at); o.visible = true;
+          scene.add(o);
+        }
+        if (held.length) {
+          try { renderer.compile(scene, camera); } catch (_) {}
+          try { renderer.render(scene, camera); } catch (_) {}
+          for (const [o, p, v] of held) { scene.remove(o); o.position.copy(p); o.visible = v; }
+        }
+        try { window.__earthWarmLife = held.length; } catch (_) {}
+      }
+    } catch (e) { console.warn('[earth-warm] life warm skipped:', e); }
+    const p1 = renderer.info.programs ? renderer.info.programs.length : 0;
+    console.log('[earth-warm] ' + Math.round(((typeof performance !== 'undefined') ? performance.now() : 0) - t0)
+      + ' ms behind the curtain, programs ' + p0 + ' -> ' + p1);
+  } catch (e) { console.warn('[earth-warm] failed:', e); }
+}
+
+function _lssWorldUnitsPerMetre() {
+  try {
+    const L = (typeof MAP_DATA !== 'undefined' && MAP_DATA) ? MAP_DATA[game.selectedMap] : null;
+    if (L && L.type === 'gmaps' && typeof L.scale === 'number' && L.scale > 0) return L.scale;
+  } catch (_) {}
+  return 1;
+}
 const HUB_WX = {
   ON: true,
   n: 0,                // live deck size, set at spawn
@@ -99659,6 +99771,14 @@ function hideLoadingOverlay() {
         setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
         return;
       }
+      // Everything the curtain was holding for has arrived. Warm it before the
+      // lift, then come back round and lift on the next poll. See
+      // _lssEarthWarmOnce for why this cannot live in the prebake.
+      if (_w && !_w.__warmed) {
+        _lssEarthWarmOnce(_w);
+        setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
+        return;
+      }
     }
     _lssEarthCurtainTries = 0;
     _lssEarthCurtainT0 = 0;
@@ -129549,6 +129669,26 @@ function _lssEarthNightLights(on) {
  * API-compatible stand-in for 3d-tiles-renderer's GoogleTilesRenderer.
  * See the block comment above for the contract.
  */
+// (v45.95) Is there a frame worth protecting right now? Behind the loading
+// curtain there is not - see _publish. Anything that throws here answers "no",
+// which is the pre-45.95 behaviour.
+// (v45.97) canvas -> the one CanvasTexture built from it. See _makeTexture.
+const _leTexCache = new WeakMap();
+function _leDeferPublish() {
+  try {
+    if (typeof window !== 'undefined' && window.__earthPublish === 0) return false;
+    if (typeof game === 'undefined' || !game || game.state !== 'playing') return false;
+    const ov = document.getElementById('loading-overlay');
+    if (ov && getComputedStyle(ov).display !== 'none' && +getComputedStyle(ov).opacity > 0.01) return false;
+    return true;
+  } catch (_) { return false; }
+}
+// Meshes published per frame, across every patch. Measured at ~1-1.5 ms of
+// upload each on the dev RTX 5050, so four is ~5 ms of headroom on a 6.94 ms
+// budget at 144 Hz and clears a 64-chunk patch in 16 frames (~110 ms). Raise it
+// with window.__earthPublish if a patch is visibly late; 0 restores v45.94.
+const _LE_PUBLISH_PER_FRAME = 4;
+
 class LSSEarthTiles {
   constructor(opts = {}) {
     // --- the eight members the gmaps code touches -------------------------
@@ -129594,6 +129734,24 @@ class LSSEarthTiles {
     // Raw DEM metres, set by LSSEarthWorld so every patch and the water plane
     // agree on one surface. See _fetchDemRing.
     this.forceWaterLevel    = opts.forceWaterLevel    ?? null;
+    // ⭐⭐ (v45.95) MESHES ARE PUBLISHED OVER SEVERAL FRAMES, NOT ALL AT ONCE.
+    // Measured with ?pbhud over Toronto: 149 s of flight, 20,703 frames, 141
+    // frames over 55 ms totalling 12.5 s - 8.4% of wall clock - and only TWO
+    // new shader programs in the whole run, so this is NOT the v39.49b cold-link
+    // class. It is GEOMETRY UPLOAD. A patch builds `chunkDivisions`^2 = 64
+    // ring-0 chunks (plus up to 128 building chunks) and adds every one of them
+    // to the group inside one call, so the very next render uploads ~3.6 MB and
+    // 131k triangles in a single frame: 22 such frames measured, worst 512 ms,
+    // median `renderFrame` 59.9 ms with `outside` only 4-10 ms, i.e. squarely on
+    // the main thread. The GPU process then stalls the compositor for another
+    // 1-5 s in a burst of 90-186 ms frames - 61 of 66 of those landed within 5 s
+    // of an upload frame, 41 within 2 s, so the two shapes are ONE event.
+    // `group.add` itself is free; the cost is the FIRST DRAW. So the fix is to
+    // hand the renderer a few meshes per frame instead of sixty-four, which is
+    // what the hub streamer has always done (`hub:stream`, the v39.49 budget
+    // lane) and what this class never had - maxConcurrent budgets the FETCH,
+    // not the publish.
+    this._pubQ = [];
     // Raw DEM metres, same idea for the y=0 datum. _baseH defaults to the
     // elevation at the SHARED origin -- but _sampleRing CLAMPS to the patch's
     // own DEM window, so a patch whose window does not contain the origin
@@ -129654,9 +129812,39 @@ class LSSEarthTiles {
     return this.ready;
   }
 
+  /**
+   * Add a built mesh, either now or on one of the next few frames.
+   *
+   * ⚠ IMMEDIATE WHILE THE CURTAIN IS UP. There is no frame to protect behind a
+   * loading screen - the same reasoning as the v45.87 shore-mask budget - and
+   * the curtain already waits on the patches, so deferring there would only make
+   * the wait longer for no one's benefit. It matters only in play.
+   */
+  _publish(mesh) {
+    if (_leDeferPublish()) this._pubQ.push(mesh);
+    else this.group.add(mesh);
+  }
+  /** Drain up to `budget` queued meshes. Returns how many were spent. */
+  publishTick(budget) {
+    let n = 0;
+    while (n < budget && this._pubQ.length) { this.group.add(this._pubQ.shift()); n++; }
+    return n;
+  }
+  get publishPending() { return this._pubQ.length; }
+
   dispose() {
     this._disposed = true;
     try { this._abort.abort(); } catch (_) {}
+    // Anything still queued never reached the group, so the traverse below
+    // cannot see it and it would leak its buffers.
+    try {
+      for (const m of this._pubQ) {
+        if (m.geometry) m.geometry.dispose();
+        const mm = Array.isArray(m.material) ? m.material : (m.material ? [m.material] : []);
+        for (const x of mm) { if (x.map) x.map.dispose(); x.dispose(); }
+      }
+    } catch (_) {}
+    this._pubQ = [];
     this.group.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
@@ -130167,6 +130355,40 @@ class LSSEarthTiles {
         }
         wet.set(keep);
       }
+      // ⭐ FILL THE HOLES THE EROSION CANNOT. Owner: "when we carve out the
+      // lakes, we shouldn't draw noise in there, like no peaks in the lake".
+      // The terrain here carries NO procedural noise - every height is the DEM.
+      // The peaks are texels INSIDE the body that the detector never marked:
+      // they miss the band by a hair, so the carve leaves them at their raw
+      // height while everything around them drops to the bed, and each one
+      // stands up as a spike in the lake.
+      // The erosion above is the opposite operation - it deletes scattered WET
+      // texels (land coincidences) and is exactly why a body's interior holes
+      // survive it. This closes them: a DRY texel with three or more wet
+      // 4-neighbours is a hole in the water, not an island.
+      // ⚠ THREE neighbours, not two. A real shoreline texel has at most two,
+      // so this cannot walk the mask up the beach; an interior pinhole has four
+      // and a one-texel notch has three. Two passes, because a 2x2 hole needs
+      // its first ring closed before its centre qualifies.
+      {
+        for (let pass = 0; pass < 2; pass++) {
+          const fill = new Uint8Array(w * h);
+          fill.set(wet);
+          for (let y = 1; y < h - 1; y++) {
+            for (let x = 1; x < w - 1; x++) {
+              const i = y * w + x;
+              if (wet[i]) continue;
+              let n = 0;
+              if (wet[i - 1]) n++;
+              if (wet[i + 1]) n++;
+              if (wet[i - w]) n++;
+              if (wet[i + w]) n++;
+              if (n >= 3) { fill[i] = 1; nWet++; }
+            }
+          }
+          wet.set(fill);
+        }
+      }
       if (nWet > heights.length * 0.004) {
         // Blur the mask to get distance-from-shore for free: the blurred value
         // is ~0 at the waterline and ~1 in open water, which is exactly the ramp
@@ -130202,6 +130424,39 @@ class LSSEarthTiles {
         // water plane that covers them all.
         const surface = (typeof this.forceWaterLevel === 'number') ? this.forceWaterLevel : level;
         for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = surface - D * Math.min(1, amt[i] * 1.25);
+        // ⭐ AND FLATTEN WHAT IS LEFT STANDING IN IT. Owner: "when we carve out
+        // the lakes, we shouldn't draw noise in there, like no peaks in the
+        // lake".
+        // The mask hole-fill above closes pinholes, but a texel the detector
+        // missed by a hair is not a pinhole in the MASK sense - it can sit in a
+        // small clump whose members each see only two wet neighbours. Left
+        // alone it keeps its raw DEM height while everything around it drops to
+        // the bed, and that is a spike from the seabed almost to the surface:
+        // measured on Lake Ontario, 16-242 per patch standing ~34 m off a 34 m
+        // bed, which is a 238-unit tower at 7 units/metre.
+        // This pass works on the CARVED HEIGHTS instead of the mask, and its
+        // three conditions make it impossible to creep up a beach: the texel
+        // must be UNDER the water, must be well ABOVE the bed, and must be
+        // ringed by texels that are already ON the bed. A shoreline texel fails
+        // all three.
+        {
+          const _bed = surface - D;
+          for (let pass = 0; pass < 2; pass++) {
+            for (let y = 1; y < h - 1; y++) {
+              for (let x = 1; x < w - 1; x++) {
+                const i = y * w + x;
+                if (heights[i] > surface) continue;       // dry land, or an island
+                if (heights[i] <= _bed + 1.0) continue;   // already the bed
+                let low = 0;
+                if (heights[i - 1] <= _bed + 1.0) low++;
+                if (heights[i + 1] <= _bed + 1.0) low++;
+                if (heights[i - w] <= _bed + 1.0) low++;
+                if (heights[i + w] <= _bed + 1.0) low++;
+                if (low >= 3) heights[i] = _bed;
+              }
+            }
+          }
+        }
         this._hasSea = true;
         // A body the horizon patch does not know about gets a LOCAL surface:
         // the one global plane is at sea level and a mountain river is 1,380 m
@@ -130381,21 +130636,71 @@ class LSSEarthTiles {
         ctx.drawImage(img, i * 256, j * 256, 256, 256);
       }
       this.stats.imgTiles = (this.stats.imgTiles || 0) + got;
+      // ⭐⭐ (v45.97) ...AND THE CAP HAS TO ACTUALLY CAP. `cap` above only
+      // limits how far the mosaic may zoom IN: once `nx` alone is wide enough,
+      // `step` stays 0 and the canvas comes out at nx*256 no matter what the cap
+      // said. Measured: outer rings landing at 3072x3072 (36 MB each, 48 with
+      // mipmaps) despite a stated 1024 budget, and 16 such terrain textures
+      // resident at once - 940 MB of imagery in total, which is past what this
+      // card keeps resident, so the driver pages. That paging is the 63 hitch
+      // frames with NOTHING in JS (5.6 s of the 11.3 s measured), and no amount
+      // of spreading the geometry out can touch it.
+      // Ring 0 keeps its detail - that is the ground you fly over. An outer ring
+      // is seen at distance through the haze, so it is downscaled to the budget
+      // it was always supposed to have.
+      if (k > 0 && px > cap) {
+        const sm = document.createElement('canvas');
+        sm.width = sm.height = cap;
+        const sctx = sm.getContext('2d');
+        sctx.imageSmoothingEnabled = true; sctx.imageSmoothingQuality = 'high';
+        sctx.drawImage(cv, 0, 0, px, px, 0, 0, cap, cap);
+        g.img = sm;
+        continue;
+      }
       g.img = cv;
       if (k === 0) {
         this._imgCanvas = cv;
         // Kept for per-building roof-colour sampling. Only possible because
         // every imagery source here is CORS-clean, so the canvas is not tainted.
-        try { this._imgData = ctx.getImageData(0, 0, px, px); } catch (_) { this._imgData = null; }
+        // ⚠ (v45.97) SAMPLED DOWN FIRST. This is read ONCE per building, for a
+        // single average roof pixel (see the wall tint in _extrudeBuilding), and
+        // at full size it is a 36 MB ImageData per patch on the JS heap - 288 MB
+        // across a resident set of eight. 512 is finer than a building footprint
+        // at 2.6 km across, so the tint is unchanged.
+        try {
+          const dp = Math.min(px, 512);
+          if (dp < px) {
+            const dc = document.createElement('canvas');
+            dc.width = dc.height = dp;
+            const dx = dc.getContext('2d', { willReadFrequently: true });
+            dx.drawImage(cv, 0, 0, px, px, 0, 0, dp, dp);
+            this._imgData = dx.getImageData(0, 0, dp, dp);
+          } else {
+            this._imgData = ctx.getImageData(0, 0, px, px);
+          }
+        } catch (_) { this._imgData = null; }
       }
     }
   }
 
   _makeTexture(canvas) {
-    const tex = new THREE.CanvasTexture(canvas);
+    // ⭐⭐ (v45.97) ONE GPU TEXTURE PER CANVAS. The roofs take ring 0's imagery
+    // canvas (`_imgCanvas`) and this used to build a SECOND CanvasTexture over
+    // it - identical pixels, uploaded twice. Measured in play over Toronto: 10
+    // extra 3072x3072 textures, 360 MB of VRAM, for nothing.
+    // ⚠ And the duplicate was not only memory. Each one is a 36 MB upload that
+    // lands on whatever frame first draws that mesh, which is exactly the 43-64
+    // ms `renderFrame` spikes tagged `dTex: 1` in the ?pbhud profile.
+    // A WeakMap rather than a field on the patch, because the roofs can be built
+    // BEFORE the terrain (that is what _backfillBuildings does) and a field
+    // would still be null on that path.
+    let tex = _leTexCache.get(canvas);
+    if (tex) return tex;
+    tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    _leTexCache.set(canvas, tex);
     return tex;
   }
 
@@ -130488,7 +130793,7 @@ class LSSEarthTiles {
       const mesh = new THREE.Mesh(geo, mat);
       mesh.name = 'earth-terrain-' + k + '-' + (cj * D + ci);
       mesh.receiveShadow = (k === 0);
-      this.group.add(mesh);
+      this._publish(mesh);
     }
   }
 
@@ -130618,7 +130923,11 @@ class LSSEarthTiles {
    * Banff would be ~0.
    */
   buildingDensity() {
-    const b = this._bldBounds || this._bounds;
+    // ⚠ (v45.96) THE PATCH'S OWN CELL, not _bldBounds. Since ownership became
+    // exclusive the reach is 3.4 cells wide while the buildings in _bldList are
+    // overwhelmingly this cell's own, so dividing by the reach would report
+    // Toronto as open country and hand the sky a wilderness daylight.
+    const b = this._bounds || this._bldBounds;
     if (!b || !this._bldList) return 0;
     const km2 = Math.max(0.01, ((b.X1 - b.X0) / 1000) * ((b.Z1 - b.Z0) / 1000));
     return this._bldList.length / km2;
@@ -130936,7 +131245,7 @@ class LSSEarthTiles {
         const m = new THREE.Mesh(geo, roofMat);
         m.name = 'earth-roofs-' + c;
         m.castShadow = true; m.receiveShadow = true;
-        this.group.add(m);
+        this._publish(m);
       }
       if (walls[c].length) {
         const geo = _leMergeGeos(walls[c]);
@@ -130944,7 +131253,7 @@ class LSSEarthTiles {
         const m = new THREE.Mesh(geo, wallMat);
         m.name = 'earth-walls-' + c;
         m.castShadow = true; m.receiveShadow = true;
-        this.group.add(m);
+        this._publish(m);
       }
     }
     if (this.ads) { try { this._buildAdPanels(); } catch (e) { console.warn('[lss-earth] ads skipped:', e); } }
@@ -131574,6 +131883,47 @@ class LSSEarthWorld {
         if (seen.has(el.id)) return false;
         seen.add(el.id); return true;
       });
+      // ⭐⭐⭐ (v45.96) EXACTLY ONE PATCH DRAWS EACH BUILDING.
+      // Owner: "i saw some buildings look like they are cut in half". Measured
+      // over downtown Toronto by bucketing every wall vertex into 300-unit
+      // cells and counting DISTINCT contributing patches: 79.5% of cells had
+      // geometry from more than one patch - 51 from four, 22 from six, 4 from
+      // NINE. The same tower, extruded up to nine times.
+      // WHY: `_bldBounds` is the patch's own cell widened by buildingExtentMul
+      // (2.2), while patches sit one cell (2.6 km) apart - so each patch's
+      // building area overlaps two cells in every direction, and every patch it
+      // reaches extrudes the building independently. Each copy takes its base
+      // from its OWN `heightAt` (different grids, clamped differently near the
+      // edges) and, where the building falls outside that patch's core ring, a
+      // different roof treatment. Several copies, metres apart, z-fighting: a
+      // tower with a slab of another copy cutting across it.
+      // ⚠ THE WIDENING ITSELF IS NOT THE BUG - it is what draws the skyline
+      // BEYOND the near ring, and the horizon patch cannot help because it is
+      // built with `buildings: false`. So ownership is resolved HERE, where the
+      // ring is known, instead of being left to nine patches to guess at:
+      // a way belongs to the cell its centroid falls in, CLAMPED into the ring,
+      // which sends everything past the edge to the edge patch nearest it. That
+      // is a partition - no gaps, no overlap - and it is computed once per
+      // region rather than once per patch.
+      try {
+        const _pr = this._any() || this._mkProbe();
+        if (_pr && typeof _pr.project === 'function') {
+          const R = this.nearRadius;
+          for (const el of ways) {
+            const g = el.geometry;
+            let mx = 0, mz = 0, n = 0;
+            for (let i = 0; i < g.length; i++) {
+              const q = g[i]; if (!q) continue;
+              const p = _pr.project(q.lat, q.lon);
+              mx += p.x; mz += p.z; n++;
+            }
+            if (!n) { el.__oc = null; continue; }
+            const c = this._cellOf(mx / n, mz / n);
+            el.__oc = this._key(Math.max(cx - R, Math.min(cx + R, c.cx)),
+                                Math.max(cy - R, Math.min(cy + R, c.cy)));
+          }
+        }
+      } catch (e) { console.warn('[lss-earth-world] ownership tag failed:', e); }
       this._bldWays = ways;
       this._bldRegionKey = key;
       this._bldRegionPending = null;
@@ -131588,6 +131938,17 @@ class LSSEarthWorld {
       return ways;
     })();
     return this._bldWaysPromise;
+  }
+
+  /**
+   * The subset of a region's ways that patch `k` owns. An untagged region (the
+   * probe was missing, or the tag threw) returns everything, which is exactly
+   * the pre-45.96 behaviour rather than an empty city.
+   */
+  _waysFor(ways, k) {
+    if (!ways || !ways.length) return ways || [];
+    if (ways[0].__oc === undefined) return ways;
+    return ways.filter((el) => el.__oc === k);
   }
 
   /**
@@ -131617,11 +131978,11 @@ class LSSEarthWorld {
    */
   async _backfillBuildings(ways) {
     let n = 0;
-    for (const p of this._patches.values()) {
+    for (const [pk, p] of this._patches.entries()) {
       if (this._disposed) return;
       if (p._bldList && p._bldList.length) continue;   // this one already has its city
       try {
-        p.prefetchedWays = ways;
+        p.prefetchedWays = this._waysFor(ways, pk);
         await p._loadBuildings();
         // The day/night blend has long since run; a patch built now would sit
         // at the material default without this. See _lssEarthApplyDayNight.
@@ -131689,7 +132050,13 @@ class LSSEarthWorld {
       ]);
       const t = this._mkPatch(ll.lat, ll.lng, {
         extentMetres: this.patchMetres, ringCount: 1, water: false, ads: true,
-        prefetchedWays: ways, ownsFog: false,
+        prefetchedWays: this._waysFor(ways, k), ownsFog: false,
+        // (v45.96) With ownership exclusive, a WIDER building box no longer
+        // duplicates anything - it only lets an edge patch reach the band the
+        // clamp assigned to it, out to (nearRadius + 1.5) cells from the region
+        // centre. At 2.2 that band was clipped by _chunkOf and the far skyline
+        // would have thinned as soon as the duplicates stopped covering for it.
+        buildingExtentMul: 3.4,
         forceWaterLevel: (typeof this._waterLevel === 'number') ? this._waterLevel : null,
         forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null
       });
@@ -131770,6 +132137,24 @@ class LSSEarthWorld {
    */
   streamUpdate(focus) {
     if (this._disposed || !focus || !this.origin) return;
+    // ⭐ (v45.95) DRAIN FIRST, AND BEFORE THE _farReady GATE. A patch that
+    // finished building while the horizon was still re-centring would otherwise
+    // sit fully built and invisible until the gate opened.
+    // One budget for the WHOLE world, not per patch: two patches landing
+    // together are exactly the case this exists to spread, and a per-patch
+    // budget would double the burst.
+    {
+      let b = (typeof window !== 'undefined' && typeof window.__earthPublish === 'number')
+        ? window.__earthPublish : _LE_PUBLISH_PER_FRAME;
+      if (b > 0) {
+        for (const p of this._patches.values()) {
+          if (b <= 0) break;
+          b -= p.publishTick(b);
+        }
+        if (b > 0 && this._far) this._far.publishTick(b);
+      }
+    }
+    if (this._disposed) return;
     // ⚠ THE TICK RACES THE BOOT. _lssGmaps.tiles is assigned the moment the
     // world is CONSTRUCTED, so _lssGmapsTick starts calling this while _boot is
     // still awaiting the horizon patch — and a patch created in that window is

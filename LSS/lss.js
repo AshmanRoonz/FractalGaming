@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.92';
+const LSS_BUILD = '46.00';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -41071,7 +41071,13 @@ function spawnDynamicObjects(rooms) {
       }
       let _hbWL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : -720;
       if (_hbT && typeof _hbT.YFLOOR === 'number') _hbWL = Math.max(_hbWL, _hbT.YFLOOR);
-      HUB_WX.baseY = _hbWL + 2900;
+      const _hbS = _lssWorldUnitsPerMetre();
+      HUB_WX.R     = 15000 * _hbS;
+      HUB_WX.cell  = 2600  * _hbS;
+      HUB_WX.speed = 34    * _hbS;
+      HUB_WX.layer = 320   * _hbS;
+      HUB_WX.roll  = 280   * _hbS;
+      HUB_WX.baseY = _hbWL + 2900 * _hbS;
       HUB_WX._primed = false; HUB_WX._bear = null; HUB_WX._dir = null;
       if (typeof window !== 'undefined' && window.__hubWxCover != null) HUB_WX.cover = +window.__hubWxCover;
       try { _hwxWind(0); _hwxCalibrate(); } catch (_) {}
@@ -41081,7 +41087,7 @@ function spawnDynamicObjects(rooms) {
       if (_hbCol && _hbCol.clone) _hbCol = _hbCol.clone();
       const _hbSeg = (typeof getVRGasSegments === 'function') ? getVRGasSegments(9, 'basinSegments') : 9;
       for (let i = 0; i < _hbN; i++) {
-        const _hbSize = 320 + Math.random() * 300;
+        const _hbSize = (320 + Math.random() * 300) * _hbS;
         const _hbCloud = new GasCloud(billboardCloudSystem, new THREE.Vector3(0, HUB_WX.baseY, 0), {
           boundsRadius: _hbSize, spriteScale: _hbSize * 1.6, spriteScaleVar: 0.50,
           alpha: 0.5, color: _hbCol, baseColor: _hbSeed, colorJitter: 0.16,
@@ -41103,7 +41109,7 @@ function spawnDynamicObjects(rooms) {
           _u.uFarIn.value = HUB_WX.R * 0.72; _u.uFarOut.value = HUB_WX.R * 1.02;
         }
       } catch (_) {}
-      console.log('[hub-wx] deck ' + _hbN + ' clouds, base ' + Math.round(HUB_WX.baseY)
+      console.log('[hub-wx] deck ' + _hbN + ' clouds, x' + _hbS + ' scale, base ' + Math.round(HUB_WX.baseY)
         + ', wind ' + Math.round((HUB_WX._bear || 0) * 57.3) + 'deg @' + HUB_WX.speed
         + ' u/s, cover ' + HUB_WX.cover + ' (thr ' + HUB_WX._thr.toFixed(3) + ')');
     } catch (e) { console.warn('[hub-clouds] spawn failed', e); }
@@ -41331,6 +41337,57 @@ function _enforceDetachedGasBudget() {
   }
 }
 
+function _lssEarthWarmOnce(w) {
+  if (!w || w.__warmed) return;
+  w.__warmed = true;
+  try {
+    if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' ||
+        !scene || typeof camera === 'undefined' || !camera) return;
+    const t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
+    const p0 = renderer.info.programs ? renderer.info.programs.length : 0;
+    try { renderer.compile(scene, camera); } catch (_) {}
+    try { renderer.render(scene, camera); } catch (_) {}
+    try {
+      const src = [];
+      if (typeof _LSS_EL !== 'undefined' && _LSS_EL) {
+        if (_LSS_EL.carrier && _LSS_EL.carrier.scene) src.push(_LSS_EL.carrier.scene);
+        else if (_LSS_EL.carrier && _LSS_EL.carrier.isObject3D) src.push(_LSS_EL.carrier);
+        for (const k in (_LSS_EL.mon || {})) {
+          const r = _LSS_EL.mon[k];
+          if (r && r.scene) src.push(r.scene);
+        }
+      }
+      if (src.length) {
+        const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+        const at = camera.position.clone().addScaledVector(fwd, 600);
+        const held = [];
+        for (const o of src) {
+          if (!o || o.parent) continue;            // already somewhere; leave it
+          held.push([o, o.position.clone(), o.visible]);
+          o.position.copy(at); o.visible = true;
+          scene.add(o);
+        }
+        if (held.length) {
+          try { renderer.compile(scene, camera); } catch (_) {}
+          try { renderer.render(scene, camera); } catch (_) {}
+          for (const [o, p, v] of held) { scene.remove(o); o.position.copy(p); o.visible = v; }
+        }
+        try { window.__earthWarmLife = held.length; } catch (_) {}
+      }
+    } catch (e) { console.warn('[earth-warm] life warm skipped:', e); }
+    const p1 = renderer.info.programs ? renderer.info.programs.length : 0;
+    console.log('[earth-warm] ' + Math.round(((typeof performance !== 'undefined') ? performance.now() : 0) - t0)
+      + ' ms behind the curtain, programs ' + p0 + ' -> ' + p1);
+  } catch (e) { console.warn('[earth-warm] failed:', e); }
+}
+
+function _lssWorldUnitsPerMetre() {
+  try {
+    const L = (typeof MAP_DATA !== 'undefined' && MAP_DATA) ? MAP_DATA[game.selectedMap] : null;
+    if (L && L.type === 'gmaps' && typeof L.scale === 'number' && L.scale > 0) return L.scale;
+  } catch (_) {}
+  return 1;
+}
 const HUB_WX = {
   ON: true,
   n: 0,                // live deck size, set at spawn
@@ -63627,6 +63684,11 @@ function hideLoadingOverlay() {
       if (_noWorld || _noSpawn || _building || _regionUnknown || _cityPending) {
         if (_lssEarthCurtainT0 === 0) _lssEarthCurtainT0 = Date.now();
         _lssEarthCurtainTries++;
+        setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
+        return;
+      }
+      if (_w && !_w.__warmed) {
+        _lssEarthWarmOnce(_w);
         setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
         return;
       }
@@ -87146,6 +87208,18 @@ function _lssEarthNightLights(on) {
  * API-compatible stand-in for 3d-tiles-renderer's GoogleTilesRenderer.
  * See the block comment above for the contract.
  */
+const _leTexCache = new WeakMap();
+function _leDeferPublish() {
+  try {
+    if (typeof window !== 'undefined' && window.__earthPublish === 0) return false;
+    if (typeof game === 'undefined' || !game || game.state !== 'playing') return false;
+    const ov = document.getElementById('loading-overlay');
+    if (ov && getComputedStyle(ov).display !== 'none' && +getComputedStyle(ov).opacity > 0.01) return false;
+    return true;
+  } catch (_) { return false; }
+}
+const _LE_PUBLISH_PER_FRAME = 4;
+
 class LSSEarthTiles {
   constructor(opts = {}) {
     this.group = new THREE.Group();
@@ -87173,6 +87247,7 @@ class LSSEarthTiles {
     this.prefetchedWays     = opts.prefetchedWays     ?? null;
     this.ownsFog            = opts.ownsFog            ?? true;
     this.forceWaterLevel    = opts.forceWaterLevel    ?? null;
+    this._pubQ = [];
     this.forceBaseH         = opts.forceBaseH         ?? null;
     this.overpassUrl     = opts.overpassUrl     ?? 'https://overpass-api.de/api/interpreter';
     this.overpassMirrors = opts.overpassMirrors ?? [
@@ -87225,9 +87300,37 @@ class LSSEarthTiles {
     return this.ready;
   }
 
+  /**
+   * Add a built mesh, either now or on one of the next few frames.
+   *
+   * ⚠ IMMEDIATE WHILE THE CURTAIN IS UP. There is no frame to protect behind a
+   * loading screen - the same reasoning as the v45.87 shore-mask budget - and
+   * the curtain already waits on the patches, so deferring there would only make
+   * the wait longer for no one's benefit. It matters only in play.
+   */
+  _publish(mesh) {
+    if (_leDeferPublish()) this._pubQ.push(mesh);
+    else this.group.add(mesh);
+  }
+  /** Drain up to `budget` queued meshes. Returns how many were spent. */
+  publishTick(budget) {
+    let n = 0;
+    while (n < budget && this._pubQ.length) { this.group.add(this._pubQ.shift()); n++; }
+    return n;
+  }
+  get publishPending() { return this._pubQ.length; }
+
   dispose() {
     this._disposed = true;
     try { this._abort.abort(); } catch (_) {}
+    try {
+      for (const m of this._pubQ) {
+        if (m.geometry) m.geometry.dispose();
+        const mm = Array.isArray(m.material) ? m.material : (m.material ? [m.material] : []);
+        for (const x of mm) { if (x.map) x.map.dispose(); x.dispose(); }
+      }
+    } catch (_) {}
+    this._pubQ = [];
     this.group.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
@@ -87597,6 +87700,25 @@ class LSSEarthTiles {
         }
         wet.set(keep);
       }
+      {
+        for (let pass = 0; pass < 2; pass++) {
+          const fill = new Uint8Array(w * h);
+          fill.set(wet);
+          for (let y = 1; y < h - 1; y++) {
+            for (let x = 1; x < w - 1; x++) {
+              const i = y * w + x;
+              if (wet[i]) continue;
+              let n = 0;
+              if (wet[i - 1]) n++;
+              if (wet[i + 1]) n++;
+              if (wet[i - w]) n++;
+              if (wet[i + w]) n++;
+              if (n >= 3) { fill[i] = 1; nWet++; }
+            }
+          }
+          wet.set(fill);
+        }
+      }
       if (nWet > heights.length * 0.004) {
         let amt = new Float32Array(w * h);
         for (let i = 0; i < wet.length; i++) amt[i] = wet[i];
@@ -87623,6 +87745,24 @@ class LSSEarthTiles {
         const D = this.seaDepth;
         const surface = (typeof this.forceWaterLevel === 'number') ? this.forceWaterLevel : level;
         for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = surface - D * Math.min(1, amt[i] * 1.25);
+        {
+          const _bed = surface - D;
+          for (let pass = 0; pass < 2; pass++) {
+            for (let y = 1; y < h - 1; y++) {
+              for (let x = 1; x < w - 1; x++) {
+                const i = y * w + x;
+                if (heights[i] > surface) continue;       // dry land, or an island
+                if (heights[i] <= _bed + 1.0) continue;   // already the bed
+                let low = 0;
+                if (heights[i - 1] <= _bed + 1.0) low++;
+                if (heights[i + 1] <= _bed + 1.0) low++;
+                if (heights[i - w] <= _bed + 1.0) low++;
+                if (heights[i + w] <= _bed + 1.0) low++;
+                if (low >= 3) heights[i] = _bed;
+              }
+            }
+          }
+        }
         this._hasSea = true;
         if (k === 0 && !this.water && typeof this.forceWaterLevel !== 'number' &&
             (typeof window !== 'undefined' && window.__earthRivers)) {
@@ -87787,19 +87927,42 @@ class LSSEarthTiles {
         ctx.drawImage(img, i * 256, j * 256, 256, 256);
       }
       this.stats.imgTiles = (this.stats.imgTiles || 0) + got;
+      if (k > 0 && px > cap) {
+        const sm = document.createElement('canvas');
+        sm.width = sm.height = cap;
+        const sctx = sm.getContext('2d');
+        sctx.imageSmoothingEnabled = true; sctx.imageSmoothingQuality = 'high';
+        sctx.drawImage(cv, 0, 0, px, px, 0, 0, cap, cap);
+        g.img = sm;
+        continue;
+      }
       g.img = cv;
       if (k === 0) {
         this._imgCanvas = cv;
-        try { this._imgData = ctx.getImageData(0, 0, px, px); } catch (_) { this._imgData = null; }
+        try {
+          const dp = Math.min(px, 512);
+          if (dp < px) {
+            const dc = document.createElement('canvas');
+            dc.width = dc.height = dp;
+            const dx = dc.getContext('2d', { willReadFrequently: true });
+            dx.drawImage(cv, 0, 0, px, px, 0, 0, dp, dp);
+            this._imgData = dx.getImageData(0, 0, dp, dp);
+          } else {
+            this._imgData = ctx.getImageData(0, 0, px, px);
+          }
+        } catch (_) { this._imgData = null; }
       }
     }
   }
 
   _makeTexture(canvas) {
-    const tex = new THREE.CanvasTexture(canvas);
+    let tex = _leTexCache.get(canvas);
+    if (tex) return tex;
+    tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    _leTexCache.set(canvas, tex);
     return tex;
   }
 
@@ -87869,7 +88032,7 @@ class LSSEarthTiles {
       const mesh = new THREE.Mesh(geo, mat);
       mesh.name = 'earth-terrain-' + k + '-' + (cj * D + ci);
       mesh.receiveShadow = (k === 0);
-      this.group.add(mesh);
+      this._publish(mesh);
     }
   }
 
@@ -87997,7 +88160,7 @@ class LSSEarthTiles {
    * Banff would be ~0.
    */
   buildingDensity() {
-    const b = this._bldBounds || this._bounds;
+    const b = this._bounds || this._bldBounds;
     if (!b || !this._bldList) return 0;
     const km2 = Math.max(0.01, ((b.X1 - b.X0) / 1000) * ((b.Z1 - b.Z0) / 1000));
     return this._bldList.length / km2;
@@ -88263,7 +88426,7 @@ class LSSEarthTiles {
         const m = new THREE.Mesh(geo, roofMat);
         m.name = 'earth-roofs-' + c;
         m.castShadow = true; m.receiveShadow = true;
-        this.group.add(m);
+        this._publish(m);
       }
       if (walls[c].length) {
         const geo = _leMergeGeos(walls[c]);
@@ -88271,7 +88434,7 @@ class LSSEarthTiles {
         const m = new THREE.Mesh(geo, wallMat);
         m.name = 'earth-walls-' + c;
         m.castShadow = true; m.receiveShadow = true;
-        this.group.add(m);
+        this._publish(m);
       }
     }
     if (this.ads) { try { this._buildAdPanels(); } catch (e) { console.warn('[lss-earth] ads skipped:', e); } }
@@ -88756,6 +88919,25 @@ class LSSEarthWorld {
         if (seen.has(el.id)) return false;
         seen.add(el.id); return true;
       });
+      try {
+        const _pr = this._any() || this._mkProbe();
+        if (_pr && typeof _pr.project === 'function') {
+          const R = this.nearRadius;
+          for (const el of ways) {
+            const g = el.geometry;
+            let mx = 0, mz = 0, n = 0;
+            for (let i = 0; i < g.length; i++) {
+              const q = g[i]; if (!q) continue;
+              const p = _pr.project(q.lat, q.lon);
+              mx += p.x; mz += p.z; n++;
+            }
+            if (!n) { el.__oc = null; continue; }
+            const c = this._cellOf(mx / n, mz / n);
+            el.__oc = this._key(Math.max(cx - R, Math.min(cx + R, c.cx)),
+                                Math.max(cy - R, Math.min(cy + R, c.cy)));
+          }
+        }
+      } catch (e) { console.warn('[lss-earth-world] ownership tag failed:', e); }
       this._bldWays = ways;
       this._bldRegionKey = key;
       this._bldRegionPending = null;
@@ -88767,6 +88949,17 @@ class LSSEarthWorld {
       return ways;
     })();
     return this._bldWaysPromise;
+  }
+
+  /**
+   * The subset of a region's ways that patch `k` owns. An untagged region (the
+   * probe was missing, or the tag threw) returns everything, which is exactly
+   * the pre-45.96 behaviour rather than an empty city.
+   */
+  _waysFor(ways, k) {
+    if (!ways || !ways.length) return ways || [];
+    if (ways[0].__oc === undefined) return ways;
+    return ways.filter((el) => el.__oc === k);
   }
 
   /**
@@ -88795,11 +88988,11 @@ class LSSEarthWorld {
    */
   async _backfillBuildings(ways) {
     let n = 0;
-    for (const p of this._patches.values()) {
+    for (const [pk, p] of this._patches.entries()) {
       if (this._disposed) return;
       if (p._bldList && p._bldList.length) continue;   // this one already has its city
       try {
-        p.prefetchedWays = ways;
+        p.prefetchedWays = this._waysFor(ways, pk);
         await p._loadBuildings();
         if (typeof this._glow === 'number' && typeof p.setWindowGlow === 'function') {
           p.setWindowGlow(this._glow);
@@ -88835,7 +89028,8 @@ class LSSEarthWorld {
       ]);
       const t = this._mkPatch(ll.lat, ll.lng, {
         extentMetres: this.patchMetres, ringCount: 1, water: false, ads: true,
-        prefetchedWays: ways, ownsFog: false,
+        prefetchedWays: this._waysFor(ways, k), ownsFog: false,
+        buildingExtentMul: 3.4,
         forceWaterLevel: (typeof this._waterLevel === 'number') ? this._waterLevel : null,
         forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null
       });
@@ -88887,6 +89081,18 @@ class LSSEarthWorld {
    */
   streamUpdate(focus) {
     if (this._disposed || !focus || !this.origin) return;
+    {
+      let b = (typeof window !== 'undefined' && typeof window.__earthPublish === 'number')
+        ? window.__earthPublish : _LE_PUBLISH_PER_FRAME;
+      if (b > 0) {
+        for (const p of this._patches.values()) {
+          if (b <= 0) break;
+          b -= p.publishTick(b);
+        }
+        if (b > 0 && this._far) this._far.publishTick(b);
+      }
+    }
+    if (this._disposed) return;
     if (!this._farReady) return;
     const s = this._unitsPerMetre();
     const lx = (focus.x - this.group.position.x) / s;
