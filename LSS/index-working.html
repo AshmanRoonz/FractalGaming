@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.62';
+const LSS_BUILD = '45.68';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -128684,6 +128684,378 @@ let _lssEarthNightK = -1;
  * and every later call re-derives from it — applying a blend on top of a
  * blended state would compound and never come back.
  */
+
+// ════════════════════════════════════════════════════════════════════════════
+// ⭐ LIFE IN THE STREAMED WORLD - city traffic, carriers, monsters
+//
+// Owner, scoping free flight: "city ships flying around everywhere, a few
+// carriers too, monsters...".
+//
+// ⚠ NONE OF THE THREE EXISTING SYSTEMS PORTS, and it is worth writing down why
+// so nobody spends the afternoon trying again:
+//   - _hcTrafficInit(city, group) wants `city.pads.filter(p => p.park)` and
+//     guards on `game.hubCity.group === group`. Its fleet is BOUND TO PADS in
+//     one generated city, on a schedule that parks and relaunches each ship.
+//     A streamed Earth has OSM buildings and no pads, and the player leaves the
+//     city entirely - there is nothing for that fleet to be anchored to.
+//   - the carrier is a SINGLETON: `_carrier` is one object and _carrierSpawn
+//     calls _carrierClear before it builds. "a few carriers" is not something it
+//     can express, and it flies a route to a campaign city sector.
+//   - OutskirtsMonster / WildLeviathan re-home against the arena and overworld.
+// What DOES port is the ASSETS and the ENTITY CONTRACT, so that is all this
+// borrows: hoard hulls through loadHoardModel, carrier.glb through
+// _carrierLoadProto, the MONSTER_DEFS glbs, and the object-literal entity shape
+// v34.87 established for hub traffic - position / velocity / chassis / health /
+// mesh / takeDamage - which every weapon, hit test and health bar already reads.
+//
+// The one thing a streamed world genuinely changes: POPULATION IS RELATIVE TO
+// THE PLAYER. Nothing is placed in the world once. Everything spawns in a ring
+// around the ship, is recycled when it falls behind, and traffic is gated on the
+// building density the patch under you already reports (see buildingDensity) -
+// so Toronto is busy and Banff is empty without either being a special case.
+// ════════════════════════════════════════════════════════════════════════════
+
+// Distances are WORLD UNITS at the gmaps scale of 7 per metre, so 7000 is a
+// kilometre. `per` is how much building density buys one more ship.
+const _EL_KIND = {
+  traffic: { max: 22, ringIn: 5200, ringOut: 9500, killR: 17000,
+             altLo:  420, altHi: 2900, spdLo: 230, spdHi: 540,
+             hp: 900, rad: 70, per: 9, clear: 260 },
+  carrier: { max:  2, ringIn: 11000, ringOut: 17000, killR: 38000,
+             altLo: 4200, altHi: 7400, spdLo: 65, spdHi: 105,
+             hp: 40000, rad: 900, per: 0, clear: 1200 },
+  monster: { max:  5, ringIn: 3800, ringOut: 8200, killR: 16000,
+             altLo:  240, altHi: 1500, spdLo: 90, spdHi: 200,
+             hp: 2600, rad: 280, per: 0, clear: 200 },
+};
+
+const _LSS_EL = { on: false, group: null, ents: [], n: 0,
+                  hoard: [], carrier: null, mon: {}, dens: 0, densT: 0, budget: 0 };
+
+/** Scale an arbitrary GLB clone so its longest axis is `target` world units. */
+function _elFit(obj, target) {
+  try {
+    obj.updateMatrixWorld(true);
+    const b = new THREE.Box3().setFromObject(obj);
+    const sz = b.getSize(new THREE.Vector3());
+    const m = Math.max(sz.x, sz.y, sz.z) || 1;
+    obj.scale.multiplyScalar(target / m);
+  } catch (_) {}
+  return obj;
+}
+
+function _lssEarthLifeInit() {
+  _lssEarthLifeDispose();
+  if (typeof scene === 'undefined' || !scene || typeof THREE === 'undefined') return;
+  const g = new THREE.Group();
+  g.name = 'earthLife';
+  scene.add(g);
+  _LSS_EL.group = g; _LSS_EL.on = true; _LSS_EL.ents = [];
+  _LSS_EL.dens = 0; _LSS_EL.densT = 0; _LSS_EL.budget = 0;
+
+  // Hulls: the same hoard pool the hub city flies. loadHoardModel caches for the
+  // session and the campaign shares that cache, so anything already pulled in is
+  // free here. Eight is plenty of variety for scenery at traffic distances.
+  try {
+    if (typeof loadHoardModel === 'function' && typeof HOARD_SHIPS !== 'undefined') {
+      const keys = [];
+      for (let i = 0; i < 8; i++) keys.push(HOARD_SHIPS[(i * 5 + 3) % HOARD_SHIPS.length]);
+      Promise.all(keys.map((k) => Promise.resolve()
+        .then(() => loadHoardModel(k)).catch(() => null)))
+        .then((ps) => { _LSS_EL.hoard = (ps || []).filter(Boolean); })
+        .catch(() => {});
+    }
+  } catch (_) {}
+
+  // The carrier hull comes from the campaign loader, but every carrier here is a
+  // CLONE - the singleton `_carrier` entity is left completely alone.
+  try {
+    if (typeof _carrierLoadProto === 'function') {
+      _carrierLoadProto(() => {
+        try { _LSS_EL.carrier = (typeof _carrier !== 'undefined' && _carrier) ? _carrier.proto : null; } catch (_) {}
+      });
+    }
+  } catch (_) {}
+
+  // Two monster types. MONSTER_DEFS entries are just {key, colours}; the glb is
+  // objects/<key>.glb, the same file OutskirtsMonster loads.
+  try {
+    if (typeof MONSTER_DEFS !== 'undefined' && THREE.GLTFLoader) {
+      const bust = (typeof _MODEL_CACHE_BUST === 'string') ? _MODEL_CACHE_BUST : '';
+      for (const def of [MONSTER_DEFS[1], MONSTER_DEFS[5]]) {
+        if (!def) continue;
+        new THREE.GLTFLoader().load(MONSTER_BASE_URL + def.key + '.glb' + bust,
+          (gltf) => {
+            try { _lssCapModelTextures(gltf.scene, 'earthlife ' + def.key); } catch (_) {}
+            _LSS_EL.mon[def.key] = gltf.scene;
+          }, undefined, () => {});
+      }
+    }
+  } catch (_) {}
+  console.log('[earth-life] on');
+}
+
+function _lssEarthLifeDispose() {
+  try { for (const e of _LSS_EL.ents.slice()) _elDetach(e); } catch (_) {}
+  _LSS_EL.ents = [];
+  // ⚠ NEVER dispose geometry here. Every hull is a clone of a CACHED proto and
+  // clones share their geometry with it, so a dispose would gut loadHoardModel's
+  // cache for the rest of the session (and for the campaign, which shares it).
+  if (_LSS_EL.group) {
+    try { if (typeof scene !== 'undefined' && scene) scene.remove(_LSS_EL.group); } catch (_) {}
+  }
+  _LSS_EL.group = null; _LSS_EL.on = false;
+}
+
+function _elDetach(e) {
+  if (!e) return;
+  e.alive = false;
+  try { if (e.mesh && e.mesh.parent) e.mesh.parent.remove(e.mesh); } catch (_) {}
+  try {
+    if (typeof game !== 'undefined' && game && game.entities) {
+      const i = game.entities.indexOf(e);
+      if (i >= 0) game.entities.splice(i, 1);
+    }
+  } catch (_) {}
+  const j = _LSS_EL.ents.indexOf(e);
+  if (j >= 0) _LSS_EL.ents.splice(j, 1);
+}
+
+function _elKill(e) {
+  try {
+    if (typeof spawnExplosion === 'function') {
+      const sz = (e.earthKind === 'carrier') ? 420 : (e.earthKind === 'monster' ? 190 : 120);
+      spawnExplosion(e.position.clone(), sz);
+    }
+    if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', e.position);
+  } catch (_) {}
+  _elDetach(e);
+}
+
+/** The visible hull for one spawn, or null when its proto has not landed yet. */
+function _elMesh(kind) {
+  const holder = new THREE.Group();
+  if (kind === 'traffic') {
+    const pool = _LSS_EL.hoard;
+    if (!pool || !pool.length) return null;
+    const cl = pool[(Math.random() * pool.length) | 0].clone(true);
+    // Same treatment the hub gives these GLBs: their dark metal reads near-black
+    // without a lift, and the materials must be CLONED, never mutated in place -
+    // they belong to the shared cache.
+    cl.traverse((o) => {
+      if (!o.isMesh) return;
+      o.castShadow = false;
+      const one = !Array.isArray(o.material);
+      const mats = one ? [o.material] : o.material;
+      const out = mats.map((mm) => (mm && mm.clone) ? mm.clone() : mm);
+      for (const mm of out) {
+        if (!mm) continue;
+        if ('envMapIntensity' in mm) mm.envMapIntensity = 1.6;
+        if (typeof mm.metalness === 'number') mm.metalness = Math.min(mm.metalness, 0.15);
+        if (typeof mm.roughness === 'number') mm.roughness = Math.min(mm.roughness, 0.8);
+      }
+      o.material = one ? out[0] : out;
+    });
+    cl.scale.multiplyScalar(0.9 + Math.random() * 0.8);
+    holder.add(cl);
+    return holder;
+  }
+  if (kind === 'carrier') {
+    if (_LSS_EL.carrier) holder.add(_elFit(_LSS_EL.carrier.clone(true), 2600));
+    else {
+      // The route is worth flying before the hull lands, same as the campaign's
+      // placeholder: a box of the right footprint reads correctly at altitude.
+      // Flagged so the tick can swap in the real hull the moment it arrives -
+      // carrier.glb is async and the first carriers always launch ahead of it,
+      // so without the swap they stay boxes for the whole session.
+      const m = new THREE.Mesh(new THREE.BoxGeometry(900, 200, 2400),
+        new THREE.MeshStandardMaterial({ color: 0x2a3140, metalness: 0.4, roughness: 0.7 }));
+      holder.add(m);
+      holder.userData.elPlaceholder = true;
+    }
+    return holder;
+  }
+  const keys = Object.keys(_LSS_EL.mon);
+  if (!keys.length) return null;
+  const src = _LSS_EL.mon[keys[(Math.random() * keys.length) | 0]];
+  holder.add(_elFit(src.clone(true), (typeof MONSTER_SIZE === 'number' ? MONSTER_SIZE : 520)));
+  return holder;
+}
+
+function _elSpawn(kind) {
+  const K = _EL_KIND[kind];
+  const t = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
+  if (!K || !_LSS_EL.group || !t) return null;
+  const p = (typeof player !== 'undefined' && player && player.position) ? player.position
+          : ((typeof camera !== 'undefined' && camera) ? camera.position : null);
+  if (!p) return null;
+  const mesh = _elMesh(kind);
+  if (!mesh) return null;
+
+  const a = Math.random() * Math.PI * 2;
+  const r = K.ringIn + Math.random() * (K.ringOut - K.ringIn);
+  const x = p.x + Math.cos(a) * r, z = p.z + Math.sin(a) * r;
+  let gy = 0;
+  try { const v = t.groundYWorld(x, z); if (isFinite(v)) gy = v; } catch (_) {}
+  const y = gy + K.altLo + Math.random() * (K.altHi - K.altLo);
+
+  const head = Math.random() * Math.PI * 2;
+  const spd = K.spdLo + Math.random() * (K.spdHi - K.spdLo);
+  const hp = Math.round(K.hp * (0.8 + Math.random() * 0.4));
+
+  mesh.position.set(x, y, z);
+  _LSS_EL.group.add(mesh);
+
+  const ent = {
+    isEarthLife: true, earthKind: kind, alive: true,
+    id: 'earthlife_' + kind + '_' + (++_LSS_EL.n),
+    position: new THREE.Vector3(x, y, z),
+    velocity: new THREE.Vector3(Math.sin(head) * spd, 0, Math.cos(head) * spd),
+    team: 9300, name: kind.toUpperCase(), loadout: { name: kind.toUpperCase() },
+    chassis: { hullWidth: K.rad * 2, hullHeight: K.rad, hullLength: K.rad * 2.4,
+               flightSpeed: spd },
+    collisionRadius: K.rad, shipState: 'flying', doomed: false,
+    health: hp, maxHealth: hp, kills: 0, deaths: 0, damageDealt: 0,
+    mesh: mesh,
+    _head: head, _spd: spd, _bob: Math.random() * Math.PI * 2, _alt: y - gy,
+    update() {},
+    takeDamage(amount, attacker) {
+      if (!this.alive || attacker === this) return 0;
+      if (!(amount > 0)) return 0;
+      const before = this.health;
+      this.health = Math.max(0, this.health - amount);
+      if (this.health <= 0) _elKill(this);
+      return before - this.health;
+    },
+  };
+  _LSS_EL.ents.push(ent);
+  try { if (typeof game !== 'undefined' && game && game.entities) game.entities.push(ent); } catch (_) {}
+  return ent;
+}
+
+function _lssEarthLifeTick(dt) {
+  if (!_LSS_EL.on || !_LSS_EL.group) return;
+  const t = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
+  if (!t) return;
+  const p = (typeof player !== 'undefined' && player && player.position) ? player.position
+          : ((typeof camera !== 'undefined' && camera) ? camera.position : null);
+  if (!p) return;
+  dt = Math.min(0.1, Math.max(0, dt || 0));
+
+  // ⚠ POLL DENSITY, DO NOT ASK EVERY FRAME. buildingDensity walks the patch's
+  // list, and it returns NULL while the patch under you is still streaming - in
+  // which case the last reading has to stand, or the traffic would drain to zero
+  // every time you crossed into a cell that had not arrived. Same reasoning as
+  // the sky blend in _lssEarthApplyDayNight.
+  _LSS_EL.densT -= dt;
+  if (_LSS_EL.densT <= 0) {
+    _LSS_EL.densT = 0.5;
+    try {
+      const d = (typeof t.buildingDensity === 'function') ? t.buildingDensity(p) : null;
+      if (typeof d === 'number' && isFinite(d)) _LSS_EL.dens = d;
+    } catch (_) {}
+  }
+
+  // Move and recycle.
+  for (const e of _LSS_EL.ents.slice()) {
+    if (!e.alive) { _elDetach(e); continue; }
+    const K = _EL_KIND[e.earthKind];
+    if (e.earthKind === 'monster') {
+      // A slow heading wander, so they read as roaming rather than commuting.
+      e._head += (Math.random() - 0.5) * dt * 0.9;
+      e.velocity.set(Math.sin(e._head) * e._spd, e.velocity.y, Math.cos(e._head) * e._spd);
+    }
+    e._bob += dt * (e.earthKind === 'carrier' ? 0.25 : 0.7);
+    e.position.x += e.velocity.x * dt;
+    e.position.z += e.velocity.z * dt;
+
+    // Hold altitude over the ground that is actually under them. Without this a
+    // ship on a straight line flies into the first ridge it meets, which over
+    // Banff is immediately.
+    let gy = 0;
+    try { const v = t.groundYWorld(e.position.x, e.position.z); if (isFinite(v)) gy = v; } catch (_) {}
+    const wantY = gy + e._alt + Math.sin(e._bob) * (e.earthKind === 'carrier' ? 40 : 18);
+    e.position.y += (wantY - e.position.y) * Math.min(1, dt * 1.6);
+    if (e.position.y < gy + K.clear) e.position.y = gy + K.clear;
+
+    e.mesh.position.copy(e.position);
+    // The hoard holders fly +z forward, the same convention _hcTrafficUpdate uses.
+    e.mesh.rotation.y = Math.atan2(e.velocity.x, e.velocity.z);
+
+    const dx = e.position.x - p.x, dz = e.position.z - p.z;
+    if (dx * dx + dz * dz > K.killR * K.killR) _elDetach(e);
+  }
+
+  // Take the real carrier hull as soon as it lands - one swap per frame. These
+  // box geometries and materials are OURS (not from a shared proto cache), so
+  // unlike the hull clones they can and should be disposed.
+  if (_LSS_EL.carrier) {
+    for (const e of _LSS_EL.ents) {
+      if (e.earthKind !== 'carrier' || !e.mesh.userData.elPlaceholder) continue;
+      try {
+        for (const ch of e.mesh.children.slice()) {
+          e.mesh.remove(ch);
+          if (ch.geometry) ch.geometry.dispose();
+          if (ch.material && ch.material.dispose) ch.material.dispose();
+        }
+        e.mesh.add(_elFit(_LSS_EL.carrier.clone(true), 2600));
+        e.mesh.userData.elPlaceholder = false;
+      } catch (_) {}
+      break;
+    }
+  }
+
+  // Top up, at most one per frame: a clone plus its material copies is the kind
+  // of work that shows as a hitch if a whole fleet arrives in one go.
+  _LSS_EL.budget -= dt;
+  if (_LSS_EL.budget > 0) return;
+  const have = { traffic: 0, carrier: 0, monster: 0 };
+  for (const e of _LSS_EL.ents) have[e.earthKind]++;
+  const dens = _LSS_EL.dens;
+  const want = {
+    traffic: Math.max(0, Math.min(_EL_KIND.traffic.max, Math.round(dens / _EL_KIND.traffic.per))),
+    carrier: _EL_KIND.carrier.max,
+    // Wilderness belongs to the monsters; a dense city keeps one as a rumour.
+    // A RAMP, not a step: the first cut cut over at density 20, and Banff reads
+    // 24 - so the Rockies, which is exactly where you want things roaming, got
+    // the single city monster. Toronto is 67, open country is 0.
+    monster: Math.max(1, Math.min(_EL_KIND.monster.max,
+             Math.round(_EL_KIND.monster.max * (1 - Math.min(1, dens / 60))))),
+  };
+  for (const k of ['traffic', 'carrier', 'monster']) {
+    if (have[k] < want[k]) { if (_elSpawn(k)) _LSS_EL.budget = 0.12; return; }
+  }
+  // ...AND DRAIN WHEN THE TARGET FALLS. Topping up alone is not a population:
+  // the monsters spawn while density still reads 0 (the first patch has not
+  // reported yet), so flying into Toronto kept all five instead of the one a
+  // dense city is meant to keep. Retire the FARTHEST of the surplus kind, which
+  // is the one nobody is looking at.
+  for (const k of ['traffic', 'carrier', 'monster']) {
+    if (have[k] <= want[k]) continue;
+    let far = null, fd = -1;
+    for (const e of _LSS_EL.ents) {
+      if (e.earthKind !== k) continue;
+      const dx = e.position.x - p.x, dz = e.position.z - p.z;
+      const d = dx * dx + dz * dz;
+      if (d > fd) { fd = d; far = e; }
+    }
+    if (far) { _elDetach(far); _LSS_EL.budget = 0.12; }
+    return;
+  }
+}
+
+try {
+  if (typeof window !== 'undefined') {
+    window.__earthLife = {
+      cfg: _EL_KIND, state: _LSS_EL,
+      count() { const c = { traffic: 0, carrier: 0, monster: 0 };
+                for (const e of _LSS_EL.ents) c[e.earthKind]++;
+                return { counts: c, density: Math.round(_LSS_EL.dens), total: _LSS_EL.ents.length }; },
+      clear() { for (const e of _LSS_EL.ents.slice()) _elDetach(e); },
+    };
+  }
+} catch (_) {}
+
 function _lssEarthApplyDayNight(k) {
   if (typeof scene === 'undefined' || !scene) return;
   const D = (typeof _HUB_ZONES !== 'undefined' && _HUB_ZONES && _HUB_ZONES.DUSK) || null;
@@ -129318,9 +129690,38 @@ class LSSEarthTiles {
       //     water is solid and loses only its rim; scattered land matches vanish.
       // (Cost: a river or pond at a DIFFERENT elevation is not detected. It could
       // not be rendered anyway — the LSS water plane is one global level.)
+      // ⚠ THE BAND IS ASYMMETRIC, AND IT HAS TO BE.
+      // Owner, over Toronto: "we could see their shitty water picture before our
+      // water loaded in... i had to get pretty close for it to load".
+      // ONE water body can span clusters much further apart than the 1/256 m
+      // quantisation suggests, because neighbouring source tiles round to
+      // different values. Measured on Lake Ontario against the shared surface
+      // 74.8125: the near patches carve 35-100% of themselves, but each southern
+      // one leaves a large cluster BELOW it untouched -
+      //     patch 1,1   8.73% at 74.0625  (-0.75 m)
+      //     patch 0,1   2.94% at 74.125   (-0.69 m)
+      //     patch -1,1  3.85% at 74.2344  (-0.58 m)
+      // - all outside a +/-0.5 m band. Those texels end up ~0.6 m under the
+      // plane instead of 34, and LSS water is depth-transparent, so what you see
+      // through them is the satellite photo of the lake.
+      //
+      // Widening the band symmetrically is NOT safe: downtown Toronto holds
+      // ~0.77% of its texels at exactly 76.25 (+1.44 m), so the 0.25% count test
+      // cannot separate city from lake - only the band can. Flat urban ground
+      // really does pile onto one quantised value.
+      //
+      // But the two failures are not symmetric. A false positive ABOVE the
+      // surface floods DRY LAND, which is the bug that ate the city. A texel
+      // BELOW the surface is already under the water plane: carving it cannot
+      // flood anything, it only stops a 0.6 m puddle reading as a transparent
+      // window onto the lakebed. So: stay tight above, open up below.
       const levels = new Set([level]);
       for (const [v, c] of hist) {
-        if (v !== level && Math.abs(v - level) <= 0.5 && c >= heights.length * 0.0025) levels.add(v);
+        if (v === level) continue;
+        if (c < heights.length * 0.0025) continue;
+        const d = v - level;
+        if (d > 0.5 || d < -3.0) continue;
+        levels.add(v);
       }
       const wet = new Uint8Array(w * h);
       for (let i = 0; i < heights.length; i++) if (levels.has(heights[i])) wet[i] = 1;
@@ -130891,17 +131292,50 @@ class LSSEarthWorld {
   }
 
   /**
-   * Density of the patch the ship is actually over — see _lssEarthApplyDayNight.
-   * ⚠ Returns null, NOT 0, when that patch has not arrived yet. Falling back to
-   * "any patch" would report the city you just left while flying over unloaded
-   * country, and falling back to 0 would strobe the sky to daylight every time
-   * you crossed into a cell that is still streaming. null means "don't know",
-   * and the caller holds the last value.
+   * Buildings per km2 UNDER THE SHIP, bilinear across the four nearest patch
+   * CENTRES — see _lssEarthApplyDayNight.
+   *
+   * ⚠ IT USED TO RETURN ONE PATCH'S FIGURE, AND THAT IS A STEP FUNCTION.
+   * Each patch reports a single number for its whole 2.6 km cell, so crossing a
+   * cell line changed the sky in one frame. Owner: "i don't like how there is a
+   * hard boundary that changes the atmosphere from day to night... it needs to
+   * be more gradual". Smoothstepping the ramp could not help: the INPUT was
+   * quantised, not the curve.
+   * Treating the per-patch figures as samples at their cell centres and
+   * interpolating between them makes density continuous everywhere, so the sky
+   * now walks up as you approach a city instead of switching at its edge.
+   *
+   * ⚠ Still returns null, NOT 0, when nothing around you has arrived. Falling
+   * back to 0 would strobe the sky to daylight every time you crossed into a
+   * cell that is still streaming; null means "don't know" and the caller holds
+   * the last value. Partially-loaded neighbourhoods renormalise over whatever
+   * HAS landed, so the field degrades smoothly instead of dropping out.
    */
   buildingDensity(worldPos) {
-    const p = worldPos ? this._patchAt(worldPos.x, worldPos.z) : this._any();
-    if (!p || typeof p.buildingDensity !== 'function') return null;
-    return p.buildingDensity();
+    if (!worldPos) {
+      const q = this._any();
+      return (q && typeof q.buildingDensity === 'function') ? q.buildingDensity() : null;
+    }
+    const s = this._unitsPerMetre();
+    const fx = ((worldPos.x - this.group.position.x) / s) / this._cell;
+    const fz = ((worldPos.z - this.group.position.z) / s) / this._cell;
+    // Cell centres sit at whole multiples of _cell (see _cellLatLng), so the two
+    // that bracket fx are floor(fx) and floor(fx)+1.
+    const i0 = Math.floor(fx), j0 = Math.floor(fz);
+    const wx = fx - i0, wz = fz - j0;
+    let sum = 0, wsum = 0;
+    for (let dj = 0; dj <= 1; dj++) {
+      for (let di = 0; di <= 1; di++) {
+        const w = (di ? wx : 1 - wx) * (dj ? wz : 1 - wz);
+        if (w <= 0) continue;
+        const p = this._patches.get(this._key(i0 + di, j0 + dj));
+        if (!p || typeof p.buildingDensity !== 'function') continue;
+        sum += p.buildingDensity() * w;
+        wsum += w;
+      }
+    }
+    if (wsum <= 0) return null;
+    return sum / wsum;
   }
 
   /** LOCAL metres in, like a patch's heightAt. */
@@ -131362,6 +131796,11 @@ async function _lssGmapsBuildLevel(level) {
       _WX.distMul = Math.max(1, Math.min(8, Math.min(_far * 1.35, _cap) / 20500));
     } catch (_) {}
     try { _lssEarthNightLights(true); } catch (_) {}
+    // Traffic, carriers and monsters, but only where the world streams: a
+    // single-location gmaps level has a fixed extent and no reason to recycle a
+    // population around the player.
+    try { if (typeof tiles.streamUpdate === 'function') _lssEarthLifeInit(); } catch (_) {}
+    _lssGmaps._dayK = null;   // seed the day/night ease on this level's first frame
     _lssGmaps.cleanup = () => {
       try { scene.remove(tiles.group); } catch(_) {}
       try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
@@ -131371,6 +131810,7 @@ async function _lssGmapsBuildLevel(level) {
       try { if (typeof LSS !== 'undefined' && LSS) LSS._camReach = 0; } catch (_) {}
       try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(true); } catch (_) {}
       try { _WX.distMul = 1; } catch (_) {}
+      try { if (typeof _lssEarthLifeDispose === 'function') _lssEarthLifeDispose(); } catch (_) {}
       try { if (typeof _wxDispose === 'function') _wxDispose(); } catch (_) {}
       try { _lssEarthNightLights(false); } catch (_) {}
       try { if (typeof clearSky === 'function') clearSky(); } catch (_) {}
@@ -131591,12 +132031,28 @@ function _lssGmapsTick(dt) {
         const _d = t.buildingDensity(_pp);
         if (_d !== null && _d !== undefined) {
           const _u = Math.max(0, Math.min(1, (_d - 6) / (45 - 6)));
-          const _k = _u * _u * (3 - 2 * _u);
+          const _kT = _u * _u * (3 - 2 * _u);
+          // ⭐ EASE, DO NOT SNAP. buildingDensity is a smooth field now, but a
+          // patch ARRIVING still rewrites it under you in one frame, and the
+          // ship crosses a 2.6 km cell in seconds. A ~1.5 s time constant is
+          // slow enough that nothing pops and fast enough that the sky meets
+          // you as you reach a city. Seeded on the first frame so arriving at a
+          // level does not ramp from wherever the last one ended.
+          const _prev = _lssGmaps._dayK;
+          const _k = (typeof _prev === 'number' && isFinite(_prev))
+            ? _prev + (_kT - _prev) * Math.min(1, (dt || 0.016) / 1.5)
+            : _kT;
+          _lssGmaps._dayK = _k;
           _lssEarthApplyDayNight(_k);
           // The SAME k lights the windows, so the sky and the city can never
-          // disagree about whether this is a city. The 0.10 floor keeps a hint
-          // of interior light in open country without lighting it up.
-          if (typeof t.setWindowGlow === 'function') t.setWindowGlow(0.10 + 0.90 * _k);
+          // disagree about whether this is a city.
+          // ⚠ THE FLOOR IS 0.50, NOT 0.10. Owner: "the cyberpunk lights need to
+          // stay on in the day". At 0.10 a sunlit facade washed the windows out
+          // completely - the overlay was only really visible once the sky had
+          // already gone to dusk, which is the opposite of a city that never
+          // sleeps. Half brightness in full daylight, full at night, so the
+          // contrast still reads without the lights ever going out.
+          if (typeof t.setWindowGlow === 'function') t.setWindowGlow(0.50 + 0.50 * _k);
         }
       }
     } catch (_) {}
@@ -131632,6 +132088,7 @@ function _lssGmapsTick(dt) {
     if (typeof t.streamUpdate === 'function') {
       const _f = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
       t.streamUpdate(_f);
+      try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
     }
     // ⭐ (v45.46) THE SKY HAS TO BE DRIVEN TOO. _wxFrame is called only from the
     // hub branch of gameLoop (`game.sandwichTerrain.ON`), exactly like the water
