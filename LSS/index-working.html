@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.68';
+const LSS_BUILD = '45.73';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -29394,7 +29394,50 @@ function _lssCameraDepthForFov(force) {
 // positions the camera in gameLoop - so this wins without having to fight it. It only moves the
 // camera: nothing else in the frame knows or cares, and `on:false` costs one property read.
 // ⚠ Not for VR - the headset owns its pose, and overriding it is how you make someone ill.
-const _ORB = { v: new THREE.Vector3(), t: new THREE.Vector3(), last: 0, hud: false };
+const _ORB = { v: new THREE.Vector3(), t: new THREE.Vector3(), last: 0, hud: false, stickLast: 0 };
+
+// ⭐ (v45.69) THE RIGHT STICK FLIES THE ORBIT, NOT THE SHIP - BUT ONLY IN SELFIE.
+// Owner: "in selfie mode, activated by the o key, the camera orbits, but we should
+// make the right stick stop controlling look and control the orbit, while the
+// selfie mode is activated only".
+//
+// Called from pollGamepad, and shaped exactly like the VR pad line beside it:
+// consume the stick FIRST, then the caller zeroes gpLookX/gpLookY, so one stick
+// can never do both jobs on the same frame. Returning false is what hands the
+// stick straight back to look, and it is deliberately false in every case where
+// _orbitCamApply would DECLINE to move the camera (no player yet, a headset
+// owning the pose) - otherwise the stick would go dead in exactly the situations
+// where the orbit is not running.
+//
+// pollGamepad has no dt of its own, so this keeps its own clock rather than
+// taking one from a caller that does not have it.
+const _ORBIT_STICK_AZ = 110;   // degrees per second at full deflection
+const _ORBIT_STICK_EL = 70;
+function _orbitStickTick() {
+  let O;
+  try { O = window.__orbitCam; } catch (_) { return false; }
+  if (!O || !O.on) { _ORB.stickLast = 0; return false; }
+  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return false; } catch (_) {}
+  if (typeof player === 'undefined' || !player || !player.position) return false;
+
+  const now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+  const dt = _ORB.stickLast ? Math.min(0.1, (now - _ORB.stickLast) / 1000) : 0;
+  _ORB.stickLast = now;
+
+  const lx = input.gpLookX || 0;
+  const ly = input.gpLookY || 0;
+  if (dt > 0 && (lx || ly)) {
+    // Taking hold of it stops the idle circle: you are driving now. O.spin can
+    // be set again from the console, and toggling the view off and on restores
+    // it (the O key re-seeds spin).
+    if (O.spin) O.spin = 0;
+    O.az = ((((O.az || 0) - lx * _ORBIT_STICK_AZ * dt) % 360) + 360) % 360;
+    // Clamped short of the poles: at +/-90 the camera is straight over the hull
+    // and its up vector is undefined, which spins the framing on its own.
+    O.el = Math.max(-85, Math.min(85, (O.el || 0) - ly * _ORBIT_STICK_EL * dt));
+  }
+  return true;
+}
 function _orbitCamApply() {
   let O;
   try { O = window.__orbitCam; } catch (_) { return; }
@@ -93545,6 +93588,11 @@ function pollGamepad() {
   // pad first, then zeroes look — otherwise flicking right to change ship would
   // yaw you at the same time. Flat screen never reaches this (isPresenting).
   if (_xrStickDpadTick()) { input.gpLookX = 0; input.gpLookY = 0; }
+  // (v45.69) ...and in the selfie view the stick swings the CAMERA round the
+  // ship instead of steering it. Same order for the same reason. See
+  // _orbitStickTick, which returns false whenever the orbit is not actually
+  // running so the stick falls straight back to look.
+  if (_orbitStickTick()) { input.gpLookX = 0; input.gpLookY = 0; }
 
   // Helper to read a bound button
   function gpBtn(actionName) {
@@ -128959,6 +129007,25 @@ function _lssEarthLifeTick(dt) {
   // Move and recycle.
   for (const e of _LSS_EL.ents.slice()) {
     if (!e.alive) { _elDetach(e); continue; }
+    // A TAG WITH NOTHING UNDER IT IS WORSE THAN A MISSING SHIP. Owner: "some of
+    // the ships have a tag but a missing glb body... in free flight earth mode
+    // only". Every entity here is registered in game.entities, so it draws a
+    // nameplate and a health bar whether or not its hull ever materialised - and
+    // a hull can fail to arrive in ways that are invisible from here: a proto
+    // that resolved but cloned empty, a skinned clone whose bind-space bbox
+    // measures degenerate and scales to nothing, a placeholder swap that lost
+    // its child. Rather than chase each of those, refuse to keep an entity that
+    // has no visible mesh after a couple of seconds. Costs one traverse per
+    // entity only until its body is confirmed, then nothing.
+    if (!e._bodyOk) {
+      let _vis = 0;
+      e.mesh.traverse((o) => { if (o.isMesh && o.visible) _vis++; });
+      if (_vis > 0) e._bodyOk = true;
+      else if ((e._bodyT = (e._bodyT || 0) + dt) > 2) {
+        console.warn('[earth-life] retiring bodyless', e.earthKind, e.id);
+        _elDetach(e); continue;
+      }
+    }
     const K = _EL_KIND[e.earthKind];
     if (e.earthKind === 'monster') {
       // A slow heading wander, so they read as roaming rather than commuting.
@@ -131051,6 +131118,12 @@ class LSSEarthWorld {
       this._bldRegionPending = null;
       this._bldFail = 0; this._bldFailAt = 0; this._bldCooldown = 0;
       this.stats.regionWays = ways.length;
+      // Patches that were built while this was still in flight - or that gave up
+      // on it at the 6 s deadline in _ensurePatch - have no city on them. Put it
+      // in, off this call so nothing here blocks on the extrusion.
+      if (ways.length) {
+        setTimeout(() => { try { this._backfillBuildings(ways); } catch (_) {} }, 0);
+      }
       return ways;
     })();
     return this._bldWaysPromise;
@@ -131124,8 +131197,35 @@ class LSSEarthWorld {
       // ⚠ Near patches carry NO water plane and NO far rings. The water plane is
       // global (one level, one mesh) and belongs to the horizon patch; a ring
       // per near patch would draw the same distant ground nine times.
-      const ways = await this._ensureBldRegion(this._bldCentre ? this._bldCentre.cx : 0,
-                                               this._bldCentre ? this._bldCentre.cy : 0);
+      // ⚠⚠ TERRAIN MUST NOT WAIT ON OVERPASS. This used to `await` the region
+      // outright, and _ensureBldRegion can sit for a very long time -
+      // _overpassFetch alone spends three tries with 0/3/8 s backoff and then
+      // two mirrors, each under a 30 s timeout. streamUpdate starts exactly ONE
+      // patch at a time (maxConcurrent 1), so a single slow region query holds
+      // the only slot, and while it is held:
+      //   · no new near patch can be created, while retirement keeps running -
+      //     so the ring DRAINS TO ZERO as you fly;
+      //   · the horizon patch cannot re-centre either, because _ensureFar is
+      //     gated on `this._pending.size === 0`.
+      // i.e. the entire world silently stops streaming and never restarts.
+      // Measured flying east from Toronto: 9 patches at spawn -> 6 -> 4 -> 0 by
+      // 12 km, stuck on one pending cell behind one pending region, with the
+      // horizon still parked on cell 0:0 at 24 km out. With no ground left, what
+      // you see is the bare sky dome and the water reflector - owner: "why did a
+      // skybox pop into the sky suddenly when i got to a certain distance away
+      // from the spawn?".
+      // So RACE it. Whatever has arrived by the deadline is what this patch
+      // builds with; the region keeps loading in the background and
+      // _backfillBuildings puts the city in when it lands. The timeout resolves
+      // to [] and NOT null on purpose: an empty array is truthy, so the patch
+      // takes "no buildings" and does not fall through to running its own
+      // Overpass query - nine patches each querying is what prefetchedWays
+      // exists to prevent.
+      const ways = await Promise.race([
+        this._ensureBldRegion(this._bldCentre ? this._bldCentre.cx : 0,
+                              this._bldCentre ? this._bldCentre.cy : 0),
+        new Promise((r) => setTimeout(() => r([]), 6000)),
+      ]);
       const t = this._mkPatch(ll.lat, ll.lng, {
         extentMetres: this.patchMetres, ringCount: 1, water: false, ads: true,
         prefetchedWays: ways, ownsFog: false,
@@ -131156,7 +131256,26 @@ class LSSEarthWorld {
     const t = this._mkPatch(ll.lat, ll.lng, {
       extentMetres: this.farMetres, ringCount: 3, buildings: false, ads: false, water: true,
       holeHalfMetres: Math.max(0, nearHalf),
-      forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null
+      forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null,
+      // ⚠⚠ AND THE SAME WATER LEVEL, OR RE-CENTRING TEARS THE WORLD DOWN.
+      // Near patches have always been handed this; the horizon was not, so each
+      // replacement detected its OWN level a few centimetres off the last. That
+      // is not cosmetic, because of what _swBuildHubWater does with it:
+      //     if (game._hubWaterWL === WL) { ...reuse... }
+      //     else _swDisposeHubWater();
+      // and _swDisposeHubWater tears down the ripple sim, the mirror, the birds,
+      // the fish AND calls _wxDispose(). Its comment says "the hub branch
+      // re-inits those right after" - and the hub branch does. THE EARTH BRANCH
+      // DOES NOT. So one horizon re-centre took the whole sky and the working
+      // water with it: owner, "i went a distance from the spawn and the skybox
+      // popped in and our sky disappeared", "it also made our water go
+      // invisible". Verified in the pane: no `hubWeather` group left in the
+      // scene at all.
+      // It stayed hidden until v45.71, because before that the horizon was
+      // starved and never re-centred even once.
+      // One level for the whole world means _swBuildHubWater takes its REUSE
+      // branch every time and nothing is ever disposed.
+      forceWaterLevel: (typeof this._waterLevel === 'number') ? this._waterLevel : null
     });
     this._farCell = k;
     await t.ready;
@@ -131164,8 +131283,13 @@ class LSSEarthWorld {
     const old = this._far;
     this.group.add(t.group);
     this._far = t;
-    // The horizon patch owns the water plane, so its level is THE level.
-    if (typeof t._waterLevelRaw === 'number') this._waterLevel = t._waterLevelRaw;
+    // The horizon patch owns the water plane, so its level is THE level -
+    // latched ONCE, for the same reason _baseH is. Re-latching would let a
+    // replacement move the surface under a world already carved to the old one,
+    // which is exactly the dispose above.
+    if (typeof this._waterLevel !== 'number' && typeof t._waterLevelRaw === 'number') {
+      this._waterLevel = t._waterLevelRaw;
+    }
     // ...and its base is THE datum, latched ONCE. Re-latching on a re-centred
     // horizon would move y=0 under a world full of already-built patches.
     if (typeof this._baseH !== 'number' && typeof t._baseH === 'number') this._baseH = t._baseH;
@@ -131254,14 +131378,33 @@ class LSSEarthWorld {
       }
     }
 
-    // Re-centre once the player is half a far-patch from its middle, and only
-    // while nothing else is building — the horizon is the most expensive fetch
-    // in the world and must never compete with the ground under the ship.
+    // Re-centre once the player is half a far-patch from its middle. The
+    // horizon is the most expensive fetch in the world, so it waits for the
+    // ground under the ship to finish first.
     const step = this.farMetres * 0.5;
     const fcx = Math.round(lx / step), fcy = Math.round(lz / step);
     const fk = fcx + ':' + fcy;
-    if (fk !== this._farCell && this._pending.size === 0) {
-      this._ensureFar(fcx * step / this._cell, fcy * step / this._cell, fk);
+    if (fk !== this._farCell) {
+      // ⚠⚠ BUT POLITENESS CANNOT BE UNCONDITIONAL, OR IT STARVES.
+      // The gate used to be `this._pending.size === 0` alone. While the ship is
+      // actually FLYING there is almost always a near patch building, so that
+      // condition is essentially never true and the horizon never moves at all:
+      // measured flying east from Toronto, _farCell was still 0:0 at 24 km out.
+      // Once you pass its ~5 km reach the ground simply ENDS, and what is left
+      // on screen is the bare sky dome and the 46 km water reflector - owner:
+      // "why did a skybox pop into the sky suddenly when i got to a certain
+      // distance away from the spawn?".
+      // Past the edge of its own coverage there is no longer any ground to
+      // compete with, so the horizon stops yielding and goes.
+      let urgent = false;
+      if (this._farCell) {
+        const pr = String(this._farCell).split(':');
+        const dx = lx - (+pr[0]) * step, dz = lz - (+pr[1]) * step;
+        urgent = Math.sqrt(dx * dx + dz * dz) > this.farMetres * 0.45;
+      }
+      if (this._pending.size === 0 || urgent) {
+        this._ensureFar(fcx * step / this._cell, fcy * step / this._cell, fk);
+      }
     }
   }
 
@@ -132090,6 +132233,18 @@ function _lssGmapsTick(dt) {
       t.streamUpdate(_f);
       try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
     }
+    // ⭐ THE SKY CANNOT BE ALLOWED TO STAY GONE. The cause above is fixed, but
+    // _swBuildHubWater disposes the weather on ANY water-level change and only
+    // the hub re-inits it - so if anything else ever moves the level under a
+    // gmaps level, this puts the dome, sun, clouds and rainbow straight back
+    // instead of leaving the player under a bare skybox for the rest of the
+    // flight. Costs one boolean read per frame while the weather is up.
+    try {
+      if (typeof _WX !== 'undefined' && _WX && !_WX.on && typeof _wxInit === 'function') {
+        console.warn('[lss-gmaps] weather vanished - re-initialising');
+        _wxInit(null);
+      }
+    } catch (_) {}
     // ⭐ (v45.46) THE SKY HAS TO BE DRIVEN TOO. _wxFrame is called only from the
     // hub branch of gameLoop (`game.sandwichTerrain.ON`), exactly like the water
     // ticks — so on a real-world level the dome never followed the camera and

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.68';
+const LSS_BUILD = '45.73';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -15613,7 +15613,30 @@ function _lssCameraDepthForFov(force) {
 
 
 
-const _ORB = { v: new THREE.Vector3(), t: new THREE.Vector3(), last: 0, hud: false };
+const _ORB = { v: new THREE.Vector3(), t: new THREE.Vector3(), last: 0, hud: false, stickLast: 0 };
+
+const _ORBIT_STICK_AZ = 110;   // degrees per second at full deflection
+const _ORBIT_STICK_EL = 70;
+function _orbitStickTick() {
+  let O;
+  try { O = window.__orbitCam; } catch (_) { return false; }
+  if (!O || !O.on) { _ORB.stickLast = 0; return false; }
+  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return false; } catch (_) {}
+  if (typeof player === 'undefined' || !player || !player.position) return false;
+
+  const now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
+  const dt = _ORB.stickLast ? Math.min(0.1, (now - _ORB.stickLast) / 1000) : 0;
+  _ORB.stickLast = now;
+
+  const lx = input.gpLookX || 0;
+  const ly = input.gpLookY || 0;
+  if (dt > 0 && (lx || ly)) {
+    if (O.spin) O.spin = 0;
+    O.az = ((((O.az || 0) - lx * _ORBIT_STICK_AZ * dt) % 360) + 360) % 360;
+    O.el = Math.max(-85, Math.min(85, (O.el || 0) - ly * _ORBIT_STICK_EL * dt));
+  }
+  return true;
+}
 function _orbitCamApply() {
   let O;
   try { O = window.__orbitCam; } catch (_) { return; }
@@ -59518,6 +59541,7 @@ function pollGamepad() {
   input.gpLookY = Math.sign(rawLY) * Math.pow(Math.abs(rawLY), lc);
   if (input.invertLookY) input.gpLookY = -input.gpLookY;
   if (_xrStickDpadTick()) { input.gpLookX = 0; input.gpLookY = 0; }
+  if (_orbitStickTick()) { input.gpLookX = 0; input.gpLookY = 0; }
 
   function gpBtn(actionName) {
     const idx = input.gpBindings[actionName];
@@ -86778,6 +86802,15 @@ function _lssEarthLifeTick(dt) {
 
   for (const e of _LSS_EL.ents.slice()) {
     if (!e.alive) { _elDetach(e); continue; }
+    if (!e._bodyOk) {
+      let _vis = 0;
+      e.mesh.traverse((o) => { if (o.isMesh && o.visible) _vis++; });
+      if (_vis > 0) e._bodyOk = true;
+      else if ((e._bodyT = (e._bodyT || 0) + dt) > 2) {
+        console.warn('[earth-life] retiring bodyless', e.earthKind, e.id);
+        _elDetach(e); continue;
+      }
+    }
     const K = _EL_KIND[e.earthKind];
     if (e.earthKind === 'monster') {
       e._head += (Math.random() - 0.5) * dt * 0.9;
@@ -88487,6 +88520,9 @@ class LSSEarthWorld {
       this._bldRegionPending = null;
       this._bldFail = 0; this._bldFailAt = 0; this._bldCooldown = 0;
       this.stats.regionWays = ways.length;
+      if (ways.length) {
+        setTimeout(() => { try { this._backfillBuildings(ways); } catch (_) {} }, 0);
+      }
       return ways;
     })();
     return this._bldWaysPromise;
@@ -88551,8 +88587,11 @@ class LSSEarthWorld {
     this._pending.add(k);
     try {
       const ll = this._cellLatLng(cx, cy);
-      const ways = await this._ensureBldRegion(this._bldCentre ? this._bldCentre.cx : 0,
-                                               this._bldCentre ? this._bldCentre.cy : 0);
+      const ways = await Promise.race([
+        this._ensureBldRegion(this._bldCentre ? this._bldCentre.cx : 0,
+                              this._bldCentre ? this._bldCentre.cy : 0),
+        new Promise((r) => setTimeout(() => r([]), 6000)),
+      ]);
       const t = this._mkPatch(ll.lat, ll.lng, {
         extentMetres: this.patchMetres, ringCount: 1, water: false, ads: true,
         prefetchedWays: ways, ownsFog: false,
@@ -88580,7 +88619,8 @@ class LSSEarthWorld {
     const t = this._mkPatch(ll.lat, ll.lng, {
       extentMetres: this.farMetres, ringCount: 3, buildings: false, ads: false, water: true,
       holeHalfMetres: Math.max(0, nearHalf),
-      forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null
+      forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null,
+      forceWaterLevel: (typeof this._waterLevel === 'number') ? this._waterLevel : null
     });
     this._farCell = k;
     await t.ready;
@@ -88588,7 +88628,9 @@ class LSSEarthWorld {
     const old = this._far;
     this.group.add(t.group);
     this._far = t;
-    if (typeof t._waterLevelRaw === 'number') this._waterLevel = t._waterLevelRaw;
+    if (typeof this._waterLevel !== 'number' && typeof t._waterLevelRaw === 'number') {
+      this._waterLevel = t._waterLevelRaw;
+    }
     if (typeof this._baseH !== 'number' && typeof t._baseH === 'number') this._baseH = t._baseH;
     this._farReady = true;
     this._holeSig = null;   // force the hole onto the replacement next frame
@@ -88658,8 +88700,16 @@ class LSSEarthWorld {
     const step = this.farMetres * 0.5;
     const fcx = Math.round(lx / step), fcy = Math.round(lz / step);
     const fk = fcx + ':' + fcy;
-    if (fk !== this._farCell && this._pending.size === 0) {
-      this._ensureFar(fcx * step / this._cell, fcy * step / this._cell, fk);
+    if (fk !== this._farCell) {
+      let urgent = false;
+      if (this._farCell) {
+        const pr = String(this._farCell).split(':');
+        const dx = lx - (+pr[0]) * step, dz = lz - (+pr[1]) * step;
+        urgent = Math.sqrt(dx * dx + dz * dz) > this.farMetres * 0.45;
+      }
+      if (this._pending.size === 0 || urgent) {
+        this._ensureFar(fcx * step / this._cell, fcy * step / this._cell, fk);
+      }
     }
   }
 
@@ -89278,6 +89328,12 @@ function _lssGmapsTick(dt) {
       t.streamUpdate(_f);
       try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
     }
+    try {
+      if (typeof _WX !== 'undefined' && _WX && !_WX.on && typeof _wxInit === 'function') {
+        console.warn('[lss-gmaps] weather vanished - re-initialising');
+        _wxInit(null);
+      }
+    } catch (_) {}
     try { if (typeof _wxFrame === 'function') _wxFrame(dt); } catch (_) {}
   } catch (_) {  }
   if (t.group && t.group.children && t.group.children.length > 0) {
