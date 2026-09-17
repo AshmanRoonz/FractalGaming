@@ -1,0 +1,1406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- No-store: this file is iterated on constantly and python's http.server sends
+     no Cache-Control, so browsers happily serve a stale copy from the disk cache
+     and you end up debugging code that is not running. -->
+<meta http-equiv="Cache-Control" content="no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<title>LSS Earth Lab</title>
+<!--
+  LSS EARTH LAB — a keyless, free, drop-in replacement for Google Photorealistic 3D Tiles.
+
+  WHY THIS EXISTS
+  ---------------
+  index-working.html streams real-world levels from Google's Map Tiles API. That SKU is
+  $6.00 per 1,000 root-tileset requests with a 1,000/month free allowance, and it is gated
+  behind a per-player Google Cloud key (_lssGmapsPromptKey), which in practice means no
+  player ever sees those maps. This lab builds the same thing out of free, keyless,
+  CORS-enabled open data:
+
+    terrain   Re:Earth terrarium DEM      terrain.reearth.land        CC BY 4.0 (Mapterhorn)
+    imagery   Esri World Imagery          services.arcgisonline.com   attribution
+              or EOX Sentinel-2 cloudless tiles.maps.eox.at           CC BY 4.0
+    buildings OpenStreetMap via Overpass  overpass-api.de             ODbL
+
+  (AWS elevation-tiles-prod serves the same terrarium PNGs but sends NO
+  Access-Control-Allow-Origin header, so its pixels cannot be read back in a browser.
+  Re:Earth sends `*`. That is the whole reason Re:Earth is the DEM source here.)
+
+  THE CONTRACT — THIS IS THE POINT OF THE LAB
+  -------------------------------------------
+  LSS only ever touches EIGHT members of the tiles object it gets back from
+  `new GoogleTilesRenderer(key)`:
+
+      .group                        (17 uses)   Object3D added to the scene
+      .errorTarget / .errorThreshold ( 6 each)  numbers, written only
+      .setResolutionFromRenderer()  ( 4 uses)
+      .setLatLonToYUp()             ( 4 uses)
+      .setCamera()                  ( 4 uses)
+      .dispose()                    ( 4 uses)
+      .update()                     ( 2 uses)
+      .addEventListener()           ( 2 uses)
+
+  Everything downstream — _lssGmapsCollideEntity, _lssGmapsTick, _lssGmapsRefinePivot,
+  _lssGmapsApplyTerrainFollow, the sdfRaycast override, worldSDF's short-circuit, race
+  routes, the DROP ON LOCATION panel, Nominatim geocoding — works by traversing
+  `tiles.group` for anything `isMesh` and raycasting it. NONE of it knows or cares where
+  the meshes came from.
+
+  So LSSEarthTiles below implements exactly those eight members. Dropping it into
+  index-working.html is a ONE-LINE change at the `new GTR(key)` call site. Nothing else
+  in the game moves.
+
+  DEPENDENCIES: three only. No addons, no CDN ESM import at runtime, no API key.
+  (BufferGeometryUtils is deliberately NOT used — _mergeGeos below is 30 lines and keeps
+  the pasteable class import-free. ShapeUtils and ExtrudeGeometry are core THREE.)
+
+  THREE VERSION: pinned to 0.165.0, the exact version index-working.html's importmap
+  loads. A lab on a different Three is a lab that lies to you.
+
+  TEST HOOKS: window.EL.* — load(), status(), stats(), fps(), cam(), fly().
+-->
+<style>
+  :root {
+    --bg: #05070f; --panel: rgba(10,16,28,0.94); --line: rgba(255,170,0,0.28);
+    --ink: #cfe7ff; --dim: #7f93ad; --hot: #ffaa00; --bad: #ff5566; --good: #66dd88;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+    font-family: 'Rajdhani', 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+  canvas { display: block; }
+  #ui {
+    position: fixed; top: 12px; left: 12px; width: 310px; z-index: 10;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 12px 14px; backdrop-filter: blur(6px);
+    max-height: calc(100vh - 24px); overflow-y: auto;
+  }
+  #ui h1 { font-size: 13px; letter-spacing: 0.14em; color: var(--hot);
+    margin: 0 0 2px 0; font-weight: 700; }
+  #ui .sub { font-size: 10px; color: var(--dim); letter-spacing: 0.08em;
+    margin: 0 0 12px 0; text-transform: uppercase; }
+  label { display: block; font-size: 10px; letter-spacing: 0.1em; color: var(--dim);
+    text-transform: uppercase; margin: 10px 0 3px; }
+  input[type=text], select {
+    width: 100%; padding: 6px 8px; background: #0c1220; color: var(--ink);
+    border: 1px solid #27354c; border-radius: 3px; font-family: inherit; font-size: 13px;
+  }
+  input[type=text]:focus, select:focus { outline: none; border-color: var(--hot); }
+  input[type=range] { width: 100%; accent-color: var(--hot); margin: 2px 0 0; }
+  .row { display: flex; gap: 6px; }
+  .row > * { flex: 1; }
+  button {
+    padding: 7px 10px; background: #1b2b45; color: var(--ink); border: 1px solid #34506f;
+    border-radius: 3px; cursor: pointer; font-family: inherit; font-size: 12px;
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  button:hover { background: #24395c; border-color: var(--hot); }
+  button.go { background: #4a3410; border-color: var(--hot); color: var(--hot); font-weight: 700; }
+  .val { float: right; color: var(--ink); font-variant-numeric: tabular-nums; }
+  .chk { display: flex; align-items: center; gap: 6px; margin-top: 9px;
+    font-size: 11px; letter-spacing: 0.06em; color: var(--dim); text-transform: uppercase; }
+  .chk input { accent-color: var(--hot); }
+  #status { margin-top: 12px; font-size: 11px; line-height: 1.5; color: var(--dim);
+    border-top: 1px solid #1b2536; padding-top: 9px; min-height: 30px; }
+  #status .ok { color: var(--good); } #status .err { color: var(--bad); }
+  #stats { position: fixed; top: 12px; right: 12px; z-index: 10; text-align: right;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 9px 12px; font-size: 11px; line-height: 1.6; color: var(--dim);
+    font-variant-numeric: tabular-nums; }
+  #stats b { color: var(--ink); font-weight: 600; }
+  #stats #fps { color: var(--hot); font-size: 16px; font-weight: 700; }
+  #help { position: fixed; bottom: 10px; left: 12px; z-index: 10; font-size: 10px;
+    color: #4d5f76; letter-spacing: 0.08em; }
+  #attrib { position: fixed; bottom: 10px; right: 12px; z-index: 10; font-size: 9px;
+    color: #4d5f76; text-align: right; line-height: 1.5; }
+  #attrib a { color: #5d7a99; }
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <h1>LSS EARTH LAB</h1>
+  <p class="sub">free · keyless · drop-in for gmaps · <span id="build"></span></p>
+
+  <label>Location</label>
+  <input type="text" id="loc" value="Midtown Manhattan, New York" placeholder="type any place">
+  <div class="row" style="margin-top:6px;">
+    <button class="go" id="go">Drop</button>
+    <button id="clear">Clear</button>
+  </div>
+
+  <label>Extent <span class="val" id="extentV">4.0 km</span></label>
+  <input type="range" id="extent" min="1000" max="16000" step="500" value="4000">
+
+  <label>Terrain mesh <span class="val" id="segsV">256</span></label>
+  <input type="range" id="segs" min="64" max="512" step="64" value="256">
+
+  <label>World scale <span class="val" id="scaleV">1.0&times;</span></label>
+  <input type="range" id="scale" min="1" max="20" step="1" value="1">
+
+  <label>Terrain exaggeration <span class="val" id="hexV">1.0&times;</span></label>
+  <input type="range" id="hex" min="1" max="10" step="0.5" value="1">
+
+  <label>Imagery</label>
+  <select id="imgsrc">
+    <option value="esri">Esri World Imagery (sharp, z19)</option>
+    <option value="eox">EOX Sentinel-2 cloudless (CC BY)</option>
+    <option value="none">None (flat shaded)</option>
+  </select>
+
+  <label>Imagery detail</label>
+  <select id="imgq">
+    <option value="1536">Fast — fewest tiles</option>
+    <option value="3072" selected>Balanced</option>
+    <option value="6144">Sharp — many tiles, slow</option>
+  </select>
+
+  <div class="chk"><input type="checkbox" id="bld" checked><span>OSM buildings</span></div>
+  <div class="chk"><input type="checkbox" id="wire"><span>Wireframe</span></div>
+
+  <div id="status">idle</div>
+</div>
+
+<div id="stats">
+  <div id="fps">—</div>
+  <div>tris <b id="tris">0</b></div>
+  <div>draws <b id="draws">0</b></div>
+  <div>buildings <b id="nbld">0</b></div>
+  <div>terrain relief <b id="relief">—</b></div>
+  <div>tallest bldg <b id="tallest">—</b></div>
+  <div>alt <b id="alt">0</b> m</div>
+</div>
+
+<div id="help">W A S D · Q/E up-down · SHIFT boost · drag to look · scroll = speed</div>
+<div id="attrib">
+  DEM &copy; Mapterhorn / Re:Earth (CC BY 4.0)<br>
+  Buildings &copy; OpenStreetMap contributors (ODbL)<br>
+  <span id="imgattrib">Imagery &copy; Esri, Maxar, Earthstar Geographics</span>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+window.THREE = THREE;
+
+// Shown in the HUD. If this does not match what you just edited, the browser is
+// serving you a cached copy and nothing you change will appear.
+const EL_BUILD = 'b7';
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PART 1 — LSSEarthTiles
+   THIS IS THE DELIVERABLE. Everything below PART 1 is lab scaffolding.
+   Paste this class into index-working.html and change one line at the
+   `new GTR(key)` call site in _lssGmapsBuildLevel.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const EARTH_R = 6378137;
+const DEG = Math.PI / 180;
+
+/* ---- Web Mercator ------------------------------------------------------- */
+// Standard slippy-tile math. Everything in the class works in TILE space and
+// converts to world metres through _proj() exactly once, so terrain and
+// buildings can never disagree about where a lat/lng is.
+function lngToTileX(lng, z) { return (lng + 180) / 360 * (1 << z); }
+function latToTileY(lat, z) {
+  const s = Math.min(0.9999, Math.max(-0.9999, Math.sin(lat * DEG)));
+  return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * (1 << z);
+}
+function tileXToLng(x, z) { return x / (1 << z) * 360 - 180; }
+function tileYToLat(y, z) {
+  return Math.atan(Math.sinh(Math.PI * (1 - 2 * y / (1 << z)))) / DEG;
+}
+// Ground metres covered by one tile at this zoom and latitude.
+function tileMetres(z, lat) {
+  return 2 * Math.PI * EARTH_R * Math.cos(lat * DEG) / (1 << z);
+}
+
+/* ---- tiny concurrency-limited image loader ------------------------------ */
+// Browsers cap ~6 connections per host anyway; a pool keeps the queue ours
+// (so abort() actually stops work) and keeps the progress counter honest.
+function _loadImages(urls, limit, onProgress, signal) {
+  let next = 0, done = 0;
+  const out = new Array(urls.length);
+  return new Promise((resolve) => {
+    const pump = () => {
+      if (signal && signal.aborted) return resolve(out);
+      if (next >= urls.length) { if (done >= urls.length) resolve(out); return; }
+      const i = next++;
+      const img = new Image();
+      img.crossOrigin = 'anonymous';   // REQUIRED: we read these pixels back
+      const finish = (v) => {
+        out[i] = v; done++;
+        if (onProgress) onProgress(done, urls.length);
+        if (done >= urls.length) resolve(out); else pump();
+      };
+      img.onload = () => finish(img);
+      img.onerror = () => finish(null);  // a missing tile is a hole, not a failure
+      img.src = urls[i];
+    };
+    const n = Math.min(limit, urls.length);
+    if (n === 0) resolve(out);
+    for (let k = 0; k < n; k++) pump();
+  });
+}
+
+/* ---- Overpass response cache (IndexedDB) -------------------------------- */
+// NOT a convenience. The public Overpass endpoint 429s after ~3 queries from
+// one IP in 30 s and 504s under load — measured, repeatedly, building this lab.
+// A player-facing build MUST NOT query it per map load: it needs a cache in
+// front (this, plus a shared Worker+R2 cache server-side). A ~20 MB response
+// for a dense district is far past sessionStorage, hence IDB.
+const _OSM_DB = 'lss-earth-osm', _OSM_STORE = 'bbox';
+function _idb() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open(_OSM_DB, 1);
+    r.onupgradeneeded = () => {
+      if (!r.result.objectStoreNames.contains(_OSM_STORE)) r.result.createObjectStore(_OSM_STORE);
+    };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function _osmCacheGet(key) {
+  try {
+    const db = await _idb();
+    return await new Promise((res) => {
+      const r = db.transaction(_OSM_STORE).objectStore(_OSM_STORE).get(key);
+      r.onsuccess = () => res(r.result || null);
+      r.onerror = () => res(null);
+    });
+  } catch (_) { return null; }
+}
+async function _osmCachePut(key, val) {
+  try {
+    const db = await _idb();
+    db.transaction(_OSM_STORE, 'readwrite').objectStore(_OSM_STORE).put(val, key);
+  } catch (_) {}
+}
+
+/* ---- ray vs axis-aligned building prism (slab test) --------------------- */
+// Buildings collide as upright boxes, not as their exact footprint polygon.
+// At ship speed through a city canyon the difference is invisible, and it is
+// the difference between an O(1) test and a mesh raycast.
+function _slabHit(o, d, b) {
+  let tmin = 0, tmax = Infinity;
+  const lo = [b.x0, b.base, b.z0], hi = [b.x1, b.top, b.z1];
+  const oo = [o.x, o.y, o.z], dd = [d.x, d.y, d.z];
+  for (let a = 0; a < 3; a++) {
+    if (Math.abs(dd[a]) < 1e-9) {
+      if (oo[a] < lo[a] || oo[a] > hi[a]) return -1;
+      continue;
+    }
+    const inv = 1 / dd[a];
+    let t1 = (lo[a] - oo[a]) * inv, t2 = (hi[a] - oo[a]) * inv;
+    if (t1 > t2) { const s = t1; t1 = t2; t2 = s; }
+    if (t1 > tmin) tmin = t1;
+    if (t2 < tmax) tmax = t2;
+    if (tmin > tmax) return -1;
+  }
+  return tmin;
+}
+
+/* ---- geometry merge (so the class needs no addons) ---------------------- */
+// Merges non-indexed BufferGeometries that share the same attribute set.
+// BufferGeometryUtils would do this, but keeping the class import-free is
+// what makes it a true one-line drop into the game.
+function _mergeGeos(geos) {
+  if (geos.length === 0) return null;
+  if (geos.length === 1) return geos[0];
+  const names = Object.keys(geos[0].attributes);
+  let total = 0;
+  for (const g of geos) total += g.attributes.position.count;
+  const merged = new THREE.BufferGeometry();
+  for (const name of names) {
+    const itemSize = geos[0].attributes[name].itemSize;
+    const arr = new Float32Array(total * itemSize);
+    let o = 0;
+    for (const g of geos) {
+      const a = g.attributes[name];
+      if (!a) { o += g.attributes.position.count * itemSize; continue; }
+      arr.set(a.array, o);
+      o += a.array.length;
+    }
+    merged.setAttribute(name, new THREE.BufferAttribute(arr, itemSize));
+  }
+  for (const g of geos) g.dispose();
+  return merged;
+}
+
+/**
+ * LSSEarthTiles — API-compatible stand-in for 3d-tiles-renderer's
+ * GoogleTilesRenderer, built from free open data.
+ *
+ * new LSSEarthTiles({ extentMetres, terrainSegments, imagery, buildings, ... })
+ *
+ * The LSS call site becomes:
+ *      const tiles = new LSSEarthTiles({ extentMetres: 4000 });
+ *      tiles.setLatLonToYUp(lat * DEG, lng * DEG);     // unchanged
+ *      tiles.group.scale.setScalar(scale);             // unchanged
+ *      scene.add(tiles.group);                         // unchanged
+ *      ... everything else unchanged ...
+ */
+class LSSEarthTiles {
+  constructor(opts = {}) {
+    // --- the eight members LSS touches -----------------------------------
+    this.group = new THREE.Group();
+    this.group.name = 'LSSEarthTiles';
+    this.errorTarget = 8;       // accepted and ignored: this is not an LOD tree
+    this.errorThreshold = 8;
+
+    // --- our own config ---------------------------------------------------
+    this.extentMetres    = opts.extentMetres    ?? 4000;
+    this.terrainSegments = opts.terrainSegments ?? 256;
+    this.imagery         = opts.imagery         ?? 'esri';
+    this.buildings       = opts.buildings       ?? true;
+    this.maxDemZoom      = opts.maxDemZoom      ?? 15;    // Re:Earth tops out at 15
+    // Spatial chunking. NOT a micro-optimisation — see _chunkOf. One merged
+    // mesh per layer measured 32 ms PER RAYCAST, and LSS casts twice per entity
+    // per frame. It also defeats frustum culling entirely: three cannot cull
+    // half of an object, so a 3-object city draws every triangle every frame.
+    this.chunkDivisions  = opts.chunkDivisions  ?? 8;
+    this.heightScale     = opts.heightScale     ?? 1;    // see heightAt()
+    this.imageryCanvasPx = opts.imageryCanvasPx ?? 3072;
+    this.overpassUrl     = opts.overpassUrl     ?? 'https://overpass-api.de/api/interpreter';
+    this.overpassMirrors = opts.overpassMirrors ?? [
+      'https://overpass.kumi.systems/api/interpreter',
+      'https://overpass.private.coffee/api/interpreter'
+    ];
+    this.demUrl          = opts.demUrl ??
+      'https://terrain.reearth.land/terrarium/elevation/{z}/{x}/{y}.png';
+    this.onProgress      = opts.onProgress      ?? null;
+
+    // --- internals --------------------------------------------------------
+    this._listeners = {};
+    this._abort = new AbortController();
+    this._disposed = false;
+    this._grid = null;        // { heights, w, h, x0, y0, z } — DEM in tile space
+    this._proj = null;        // { mx0, my0, k } — mercator → local metres
+    this._bounds = null;      // { X0, X1, Z0, Z1 } world-metre bbox of the patch
+    this._imgCanvas = null;
+    this._imgData = null;
+    this._bldList = [];       // {x0,z0,x1,z1,base,top} per building
+    this._cgrid = null;       // uniform grid over _bldList (see collide())
+    this.ready = null;        // Promise, resolves when the patch is built
+    this.stats = { buildings: 0, demTiles: 0, imgTiles: 0, ms: 0 };
+  }
+
+  /* ---- the eight members ------------------------------------------------ */
+
+  addEventListener(type, cb) { (this._listeners[type] ||= []).push(cb); }
+  removeEventListener(type, cb) {
+    const a = this._listeners[type]; if (!a) return;
+    const i = a.indexOf(cb); if (i >= 0) a.splice(i, 1);
+  }
+  _emit(type, ev) {
+    for (const cb of (this._listeners[type] || [])) { try { cb(ev); } catch (_) {} }
+  }
+
+  // No-ops: there is no LOD tree to drive. Kept because _lssGmapsTick calls
+  // them every frame (guarded by typeof, but answering honestly is cheaper
+  // than making the guard do work).
+  setCamera() {}
+  setResolutionFromRenderer() {}
+  update() {}
+
+  /** Same signature as GoogleTilesRenderer: RADIANS. Starts the build. */
+  setLatLonToYUp(latRad, lonRad) {
+    this.lat = latRad / DEG;
+    this.lng = lonRad / DEG;
+    this.ready = this._build().catch((e) => {
+      console.error('[lss-earth] build failed:', e);
+      this._emit('load-error', { error: e, message: String(e && e.message || e) });
+    });
+    return this.ready;
+  }
+
+  dispose() {
+    this._disposed = true;
+    try { this._abort.abort(); } catch (_) {}
+    this.group.traverse((o) => {
+      if (o.geometry) o.geometry.dispose();
+      const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
+      for (const m of mats) { if (m.map) m.map.dispose(); m.dispose(); }
+    });
+    this.group.clear();
+    this._grid = null; this._imgData = null; this._imgCanvas = null;
+    this._bldList = []; this._cgrid = null;
+  }
+
+  /* ---- world-space queries (bonus: LSS can skip raycasts with these) ----- */
+
+  /**
+   * Terrain height in LOCAL world metres at world (x, z). Bilinear. O(1).
+   * heightScale is applied HERE and nowhere else, so the terrain mesh, every
+   * building's base and collide() cannot disagree about where the ground is.
+   * (1 = true scale, which is what the game wants; the slider exists because
+   * real cities like Toronto have ~44 m of relief over 4 km and you need a way
+   * to tell "flat because the DEM failed" from "flat because it is flat".)
+   */
+  heightAt(x, z) {
+    const g = this._grid; if (!g) return 0;
+    // _worldToPixel inlined ON PURPOSE: it returns an object, and this runs
+    // ~220k times during extrusion (once per footprint vertex) plus once per
+    // entity per frame in collide(). The allocation alone cost 3.6 s of build
+    // time on Hong Kong.
+    const p = this._proj;
+    const n = 1 << g.z;
+    const mx = p.mx0 + x / p.k;
+    const my = p.my0 - z / p.k;
+    const tx = (mx / EARTH_R / DEG + 180) / 360 * n;
+    const ty = (0.5 - my / (2 * Math.PI * EARTH_R)) * n;
+    return (this._sampleGrid((tx - g.x0) * 256, (ty - g.y0) * 256) - this._baseH) * this.heightScale;
+  }
+
+  /**
+   * O(1) terrain + building collision. This is the point of generating the
+   * geometry ourselves instead of streaming an opaque photogrammetry mesh:
+   * we know which triangles are GROUND and which are a BUILDING, so neither
+   * needs a raycast.
+   *
+   * Measured on Midtown Manhattan (21k buildings, 662k tris):
+   *    raycast, 3 merged meshes      32.2  ms per cast
+   *    raycast, 8x8 chunked           1.33 ms per cast
+   *    this                           see EL.benchCollide()
+   *
+   * LSS casts twice per entity per frame, so only the last one fits a frame
+   * budget. Returns true if it moved the entity.
+   */
+  collide(pos, vel, pad = 120) {
+    let moved = false;
+    const h = this.heightAt(pos.x, pos.z);
+    if (pos.y - h < pad) {
+      pos.y = h + pad;
+      if (vel && vel.y < 0) vel.y = 0;
+      moved = true;
+    }
+    const g = this._cgrid;
+    if (!g) return moved;
+    const ci = ((pos.x - g.X0) / g.cell) | 0, cj = ((pos.z - g.Z0) / g.cell) | 0;
+    if (ci < 0 || cj < 0 || ci >= g.gx || cj >= g.gz) return moved;
+    const list = g.cells[cj * g.gx + ci];
+    if (!list) return moved;
+    for (let k = 0; k < list.length; k++) {
+      const b = list[k];
+      if (pos.y > b.top + pad || pos.y < b.base - pad) continue;
+      if (pos.x < b.x0 - pad || pos.x > b.x1 + pad) continue;
+      if (pos.z < b.z0 - pad || pos.z > b.z1 + pad) continue;
+      // Inside the padded prism: eject along the SHALLOWEST axis, which is
+      // what keeps a ship skimming a facade instead of teleporting through it.
+      const dxl = pos.x - (b.x0 - pad), dxr = (b.x1 + pad) - pos.x;
+      const dzl = pos.z - (b.z0 - pad), dzr = (b.z1 + pad) - pos.z;
+      const dup = (b.top + pad) - pos.y;
+      const m = Math.min(dxl, dxr, dzl, dzr, dup);
+      if (m === dup)      { pos.y = b.top + pad; if (vel && vel.y < 0) vel.y = 0; }
+      else if (m === dxl) { pos.x = b.x0 - pad;  if (vel && vel.x > 0) vel.x = 0; }
+      else if (m === dxr) { pos.x = b.x1 + pad;  if (vel && vel.x < 0) vel.x = 0; }
+      else if (m === dzl) { pos.z = b.z0 - pad;  if (vel && vel.z > 0) vel.z = 0; }
+      else                { pos.z = b.z1 + pad;  if (vel && vel.z < 0) vel.z = 0; }
+      moved = true;
+    }
+    return moved;
+  }
+
+  /**
+   * Distance along a ray to the first ground or building hit, or Infinity.
+   * Drop-in for the sdfRaycast override at index-working.html:52217, which
+   * currently raycasts the tile leaf meshes for projectiles, hitscan and AI
+   * line-of-sight. DDA over the building grid plus a marched terrain test.
+   */
+  raycast(origin, dir, maxDist) {
+    const g = this._cgrid;
+    let best = Infinity;
+    if (g) {
+      // Walk the grid cells the ray passes through, nearest first.
+      const step = g.cell * 0.5;
+      const n = Math.min(4096, Math.ceil(maxDist / step));
+      let lastCell = -1;
+      for (let s = 0; s <= n; s++) {
+        const d = s * step;
+        const x = origin.x + dir.x * d, y = origin.y + dir.y * d, z = origin.z + dir.z * d;
+        const ci = ((x - g.X0) / g.cell) | 0, cj = ((z - g.Z0) / g.cell) | 0;
+        if (ci < 0 || cj < 0 || ci >= g.gx || cj >= g.gz) continue;
+        const cell = cj * g.gx + ci;
+        if (cell === lastCell) continue;
+        lastCell = cell;
+        const list = g.cells[cell];
+        if (!list) continue;
+        for (let k = 0; k < list.length; k++) {
+          const b = list[k];
+          const t = _slabHit(origin, dir, b);
+          if (t >= 0 && t < best) best = t;
+        }
+        if (best < d + step) break;      // nothing further can beat it
+      }
+    }
+    // Terrain: march until we go under the surface, then bisect.
+    const tstep = Math.max(8, maxDist / 256);
+    let prev = origin.y - this.heightAt(origin.x, origin.z);
+    for (let d = tstep; d <= Math.min(maxDist, best); d += tstep) {
+      const x = origin.x + dir.x * d, y = origin.y + dir.y * d, z = origin.z + dir.z * d;
+      const cur = y - this.heightAt(x, z);
+      if (cur <= 0 && prev > 0) {
+        // Zero crossing inside this step: prev is the height above ground at
+        // d-tstep, cur at d, so the surface is prev/(prev-cur) of the way in.
+        const t = (d - tstep) + tstep * (prev / (prev - cur));
+        if (t < best) best = t;
+        break;
+      }
+      prev = cur;
+    }
+    return best > maxDist ? Infinity : best;
+  }
+
+  /** Uniform grid of building prisms. Built once, right after extrusion. */
+  _buildCollisionIndex() {
+    const b = this._bounds, list = this._bldList;
+    if (!list || list.length === 0) { this._cgrid = null; return; }
+    const cell = 48;
+    const gx = Math.max(1, Math.ceil((b.X1 - b.X0) / cell));
+    const gz = Math.max(1, Math.ceil((b.Z1 - b.Z0) / cell));
+    const cells = new Array(gx * gz);
+    for (const bl of list) {
+      const i0 = Math.max(0, ((bl.x0 - b.X0) / cell) | 0);
+      const i1 = Math.min(gx - 1, ((bl.x1 - b.X0) / cell) | 0);
+      const j0 = Math.max(0, ((bl.z0 - b.Z0) / cell) | 0);
+      const j1 = Math.min(gz - 1, ((bl.z1 - b.Z0) / cell) | 0);
+      for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+        const c = j * gx + i;
+        (cells[c] || (cells[c] = [])).push(bl);
+      }
+    }
+    this._cgrid = { cell, gx, gz, cells, X0: b.X0, Z0: b.Z0 };
+  }
+
+  /* ---- projection ------------------------------------------------------- */
+  // Local mercator: true-to-scale at the origin latitude, linear in mercator
+  // metres, so terrain vertices and building footprints land on the same math.
+  _setupProjection() {
+    const myOf = (lat) => EARTH_R * Math.log(Math.tan(Math.PI / 4 + lat * DEG / 2));
+    this._proj = {
+      mx0: EARTH_R * this.lng * DEG,
+      my0: myOf(this.lat),
+      k: Math.cos(this.lat * DEG),        // mercator metres → ground metres
+      myOf
+    };
+  }
+  /** lat/lng → local world XZ (Y-up, +X east, +Z south). */
+  project(lat, lng) {
+    const p = this._proj;
+    return {
+      x: (EARTH_R * lng * DEG - p.mx0) * p.k,
+      z: -(p.myOf(lat) - p.my0) * p.k
+    };
+  }
+  /** world XZ → DEM grid pixel. Both mappings are linear, so this is exact. */
+  _worldToPixel(x, z) {
+    const p = this._proj, g = this._grid;
+    const mx = p.mx0 + x / p.k;
+    const my = p.my0 - z / p.k;
+    const n = 1 << g.z;
+    const tx = (mx / EARTH_R / DEG + 180) / 360 * n;
+    const ty = (0.5 - my / (2 * Math.PI * EARTH_R)) * n;
+    return { px: (tx - g.x0) * 256, py: (ty - g.y0) * 256 };
+  }
+  /** Bilinear sample of the stitched DEM, clamped at the edges. */
+  _sampleGrid(px, py) {
+    const g = this._grid;
+    const x = Math.min(g.w - 1.001, Math.max(0, px));
+    const y = Math.min(g.h - 1.001, Math.max(0, py));
+    const x0 = x | 0, y0 = y | 0, fx = x - x0, fy = y - y0;
+    const i = y0 * g.w + x0;
+    const a = g.heights[i],         b = g.heights[i + 1];
+    const c = g.heights[i + g.w],   d = g.heights[i + g.w + 1];
+    return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+  }
+
+  _progress(msg, frac) {
+    if (this.onProgress) { try { this.onProgress(msg, frac); } catch (_) {} }
+  }
+
+  /* ---- build ------------------------------------------------------------ */
+
+  async _build() {
+    const t0 = performance.now();
+    this._setupProjection();
+
+    await this._loadDEM();
+    if (this._disposed) return;
+
+    await this._loadImagery();
+    if (this._disposed) return;
+
+    this._buildTerrainMesh();
+    if (this._disposed) return;
+
+    if (this.buildings) {
+      try { await this._loadBuildings(); }
+      catch (e) {
+        // Buildings are a bonus layer: a dead Overpass must not cost you the
+        // terrain you already have. But it MUST be loud — see _overpassFetch.
+        console.warn('[lss-earth] buildings unavailable:', e);
+        this.stats.buildingError = e.message || String(e);
+        this._emit('buildings-failed', { error: e, message: this.stats.buildingError });
+      }
+    }
+
+    this.stats.ms = Math.round(performance.now() - t0);
+    this._progress('ready', 1);
+    this._emit('load-complete', {});
+  }
+
+  /** Fetch + stitch terrarium DEM tiles into one height grid. */
+  async _loadDEM() {
+    // Pick the zoom whose tile is closest to a third of the requested extent,
+    // so a patch is ~3 tiles across: enough to stitch, few enough to be fast.
+    let z = this.maxDemZoom;
+    for (let t = 8; t <= this.maxDemZoom; t++) {
+      if (tileMetres(t, this.lat) <= this.extentMetres / 2) { z = t; break; }
+      z = t;
+    }
+    const tm = tileMetres(z, this.lat);
+    // round, not ceil: ceil spends a whole extra ring of tiles (a 5x5 instead
+    // of a 3x3 = 2.8x the fetches) to cover a few hundred metres nobody flies to.
+    const half = Math.max(1, Math.round(this.extentMetres / 2 / tm));
+    const cx = Math.floor(lngToTileX(this.lng, z));
+    const cy = Math.floor(latToTileY(this.lat, z));
+    const x0 = cx - half, y0 = cy - half;
+    const nx = half * 2 + 1, ny = half * 2 + 1;
+
+    const urls = [];
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      urls.push(this.demUrl.replace('{z}', z).replace('{x}', x0 + i).replace('{y}', y0 + j));
+    }
+    this._progress('terrain: ' + urls.length + ' DEM tiles @ z' + z, 0);
+    const imgs = await _loadImages(urls, 8, (d, n) =>
+      this._progress('terrain ' + d + '/' + n, d / n), this._abort.signal);
+    if (this._disposed) return;
+
+    const w = nx * 256, h = ny * 256;
+    const heights = new Float32Array(w * h);
+    const cv = document.createElement('canvas');
+    cv.width = 256; cv.height = 256;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    let got = 0;
+    for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+      const img = imgs[j * nx + i];
+      if (!img) continue;               // hole: stays at 0 m
+      got++;
+      ctx.clearRect(0, 0, 256, 256);
+      ctx.drawImage(img, 0, 0, 256, 256);
+      const px = ctx.getImageData(0, 0, 256, 256).data;
+      for (let y = 0; y < 256; y++) {
+        let src = y * 256 * 4;
+        let dst = (j * 256 + y) * w + i * 256;
+        for (let x = 0; x < 256; x++, src += 4, dst++) {
+          // terrarium: metres = R*256 + G + B/256 - 32768
+          heights[dst] = px[src] * 256 + px[src + 1] + px[src + 2] / 256 - 32768;
+        }
+      }
+    }
+    if (got === 0) throw new Error('no DEM tiles loaded (CORS or network)');
+    this.stats.demTiles = got;
+    this._grid = { heights, w, h, x0, y0, z };
+
+    // World bbox of the stitched patch, and the origin's own elevation
+    // (subtracted so ground sits at y = 0, which is what LSS expects).
+    const nLat = tileYToLat(y0, z),      sLat = tileYToLat(y0 + ny, z);
+    const wLng = tileXToLng(x0, z),      eLng = tileXToLng(x0 + nx, z);
+    const nw = this.project(nLat, wLng), se = this.project(sLat, eLng);
+    this._bounds = { X0: nw.x, X1: se.x, Z0: nw.z, Z1: se.z };
+    this._baseH = 0;
+    const o = this._worldToPixel(0, 0);
+    this._baseH = this._sampleGrid(o.px, o.py);
+  }
+
+  /** Fetch + composite satellite imagery covering exactly the DEM bbox. */
+  async _loadImagery() {
+    if (this.imagery === 'none') return;
+    const g = this._grid;
+    const nx = Math.round(g.w / 256);
+    // Step up in zoom (4x the tiles each step) until the composite would
+    // exceed the canvas cap. More zoom = sharper ground, more requests.
+    let k = 0;
+    while (nx * (1 << (k + 1)) * 256 <= this.imageryCanvasPx) k++;
+    const zi = g.z + k, side = nx * (1 << k);
+    const ix0 = g.x0 * (1 << k), iy0 = g.y0 * (1 << k);
+
+    const tmpl = this.imagery === 'eox'
+      ? 'https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-2020_3857/default/g/{z}/{y}/{x}.jpg'
+      : 'https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}';
+    const urls = [];
+    for (let j = 0; j < side; j++) for (let i = 0; i < side; i++) {
+      urls.push(tmpl.replace('{z}', zi).replace('{x}', ix0 + i).replace('{y}', iy0 + j));
+    }
+    this._progress('imagery: ' + urls.length + ' tiles @ z' + zi, 0);
+    const imgs = await _loadImages(urls, 10, (d, n) =>
+      this._progress('imagery ' + d + '/' + n, d / n), this._abort.signal);
+    if (this._disposed) return;
+
+    const px = side * 256;
+    const cv = document.createElement('canvas');
+    cv.width = px; cv.height = px;
+    const ctx = cv.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#2a3240'; ctx.fillRect(0, 0, px, px);
+    let got = 0;
+    for (let j = 0; j < side; j++) for (let i = 0; i < side; i++) {
+      const img = imgs[j * side + i];
+      if (!img) continue;
+      got++;
+      ctx.drawImage(img, i * 256, j * 256, 256, 256);
+    }
+    this.stats.imgTiles = got;
+    this._imgCanvas = cv;
+    // Kept for per-building roof-colour sampling. Only possible because every
+    // imagery source here is CORS-clean, so the canvas is not tainted.
+    try { this._imgData = ctx.getImageData(0, 0, px, px); } catch (_) { this._imgData = null; }
+  }
+
+  /** UV of a world XZ inside the patch (shared by terrain and buildings). */
+  _uv(x, z) {
+    const b = this._bounds;
+    return {
+      u: (x - b.X0) / (b.X1 - b.X0),
+      v: 1 - (z - b.Z0) / (b.Z1 - b.Z0)
+    };
+  }
+
+  /** Chunk index for a world XZ, or -1 outside the patch. */
+  _chunkOf(x, z) {
+    const b = this._bounds, D = this.chunkDivisions;
+    const i = Math.floor((x - b.X0) / (b.X1 - b.X0) * D);
+    const j = Math.floor((z - b.Z0) / (b.Z1 - b.Z0) * D);
+    if (i < 0 || j < 0 || i >= D || j >= D) return -1;
+    return j * D + i;
+  }
+
+  _buildTerrainMesh() {
+    const b = this._bounds, D = this.chunkDivisions;
+    // Same total vertex budget as one big grid, cut into D x D pieces. The
+    // chunks share ONE material instance, so this costs extra draw calls but
+    // not an extra shader program.
+    const N = Math.max(4, Math.round(this.terrainSegments / D));
+    const mat = new THREE.MeshStandardMaterial({
+      map: this._imgCanvas ? this._makeTexture(this._imgCanvas) : null,
+      color: this._imgCanvas ? 0xffffff : 0x5e6b52,
+      roughness: 0.96, metalness: 0.0
+    });
+    const idx = new Uint32Array(N * N * 6);
+    {
+      let t = 0;
+      for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+        const a = j * (N + 1) + i, c = a + 1, d = a + (N + 1), e = d + 1;
+        idx[t++] = a; idx[t++] = d; idx[t++] = c;
+        idx[t++] = c; idx[t++] = d; idx[t++] = e;
+      }
+    }
+    for (let cj = 0; cj < D; cj++) for (let ci = 0; ci < D; ci++) {
+      // Chunks span [ci/D, (ci+1)/D] and SHARE their edge vertices with the
+      // neighbour, which is what keeps the seams watertight.
+      const x0 = b.X0 + (b.X1 - b.X0) * (ci / D), x1 = b.X0 + (b.X1 - b.X0) * ((ci + 1) / D);
+      const z0 = b.Z0 + (b.Z1 - b.Z0) * (cj / D), z1 = b.Z0 + (b.Z1 - b.Z0) * ((cj + 1) / D);
+      const vcount = (N + 1) * (N + 1);
+      const pos = new Float32Array(vcount * 3);
+      const uv = new Float32Array(vcount * 2);
+      let p = 0, q = 0;
+      for (let j = 0; j <= N; j++) {
+        const z = z0 + (z1 - z0) * (j / N);
+        for (let i = 0; i <= N; i++) {
+          const x = x0 + (x1 - x0) * (i / N);
+          pos[p++] = x; pos[p++] = this.heightAt(x, z); pos[p++] = z;
+          const c = this._uv(x, z);
+          uv[q++] = c.u; uv[q++] = c.v;
+        }
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      geo.setIndex(new THREE.BufferAttribute(idx.slice(), 1));
+      geo.computeVertexNormals();
+      geo.computeBoundingSphere();
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.name = 'earth-terrain-' + (cj * D + ci);
+      mesh.receiveShadow = true;
+      this.group.add(mesh);
+    }
+  }
+
+  _makeTexture(canvas) {
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
+    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
+    return tex;
+  }
+
+  /** Fetch OSM building footprints and extrude them onto the terrain. */
+  async _loadBuildings() {
+    const g = this._grid;
+    const nx = Math.round(g.w / 256);
+    const s = tileYToLat(g.y0 + nx, g.z), n = tileYToLat(g.y0, g.z);
+    const w = tileXToLng(g.x0, g.z), e = tileXToLng(g.x0 + nx, g.z);
+    const q = `[out:json][timeout:30];way["building"](${s},${w},${n},${e});out geom;`;
+    const key = `${s.toFixed(5)},${w.toFixed(5)},${n.toFixed(5)},${e.toFixed(5)}`;
+
+    let data = await _osmCacheGet(key);
+    if (data) {
+      this.stats.osmCached = true;
+      this._progress('buildings: from cache', 0.8);
+    } else {
+      data = await this._overpassFetch(q);
+      this.stats.osmCached = false;
+      _osmCachePut(key, data);
+    }
+    if (this._disposed) return;
+
+    const ways = (data.elements || []).filter((el) => el.type === 'way' && el.geometry);
+    this._progress('buildings: extruding ' + ways.length + '…', 0.8);
+
+    // Roofs and walls are built as SEPARATE meshes on purpose. Sharing one
+    // material meant a wall was satellite-texel x dark-tint — dark times dark,
+    // which is why the first pass rendered Manhattan as a field of black slabs.
+    // Roofs want the imagery; walls want a lit tint and no map at all.
+    // Bucketed by chunk, merged per chunk: one draw call per populated chunk
+    // per layer, and a raycast rejects every chunk it does not pass through.
+    const nChunks = this.chunkDivisions * this.chunkDivisions;
+    const roofs = Array.from({ length: nChunks }, () => []);
+    const walls = Array.from({ length: nChunks }, () => []);
+    let placed = 0;
+    const tExtrude = performance.now();
+    for (const way of ways) {
+      if (this._extrudeBuilding(way, roofs, walls)) placed++;
+    }
+    this.stats.buildings = placed;
+    this.stats.extrudeMs = Math.round(performance.now() - tExtrude);
+    if (placed === 0) return;
+    this._buildCollisionIndex();
+
+    const roofMat = new THREE.MeshStandardMaterial({
+      map: this._imgCanvas ? this._makeTexture(this._imgCanvas) : null,
+      color: this._imgCanvas ? 0xffffff : 0x8d9099,
+      roughness: 0.9, metalness: 0.0
+    });
+    const wallMat = new THREE.MeshStandardMaterial({
+      vertexColors: true, roughness: 0.74, metalness: 0.06
+    });
+    for (let c = 0; c < nChunks; c++) {
+      for (const [bucket, mat, tag] of [[roofs[c], roofMat, 'roofs'], [walls[c], wallMat, 'walls']]) {
+        if (bucket.length === 0) continue;
+        const geo = _mergeGeos(bucket);
+        if (!geo) continue;
+        geo.computeVertexNormals();
+        geo.computeBoundingSphere();
+        const m = new THREE.Mesh(geo, mat);
+        m.name = 'earth-' + tag + '-' + c;
+        m.castShadow = true; m.receiveShadow = true;
+        this.group.add(m);
+      }
+    }
+  }
+
+  /**
+   * Overpass with retry + mirror fallback.
+   *
+   * WHY THIS IS NOT OPTIONAL: the first version just let a failure through and
+   * logged a warning. Loading Toronto then produced 9 DEM tiles, 144 imagery
+   * tiles and ZERO buildings — which does not look like an error, it looks like
+   * a perfectly good aerial photo of a city with nothing built on it. The
+   * report back was "I went to Toronto and it was before the CN Tower was
+   * built." A silent degrade to flat ground is the worst failure mode this
+   * thing has, because the result is plausible.
+   *
+   * overpass-api.de recovers within ~30 s of a 429/504 (measured many times),
+   * so backoff is usually enough. The mirrors are tried only after the primary
+   * gives up; they were unreachable from this machine, so they are a courtesy
+   * for other networks, not a guarantee.
+   */
+  async _overpassFetch(query) {
+    const endpoints = [this.overpassUrl, ...this.overpassMirrors];
+    const backoff = [0, 3000, 8000];
+    let lastErr = null;
+    for (let attempt = 0; attempt < backoff.length; attempt++) {
+      if (backoff[attempt] > 0) {
+        this._progress(`buildings: Overpass busy, retrying in ${backoff[attempt] / 1000}s…`, 0.55);
+        await new Promise((r) => setTimeout(r, backoff[attempt]));
+        if (this._disposed) throw new Error('aborted');
+      }
+      this._progress(`buildings: querying Overpass (try ${attempt + 1}/${backoff.length})…`, 0.6);
+      try {
+        const resp = await fetch(this.overpassUrl, {
+          method: 'POST', body: query, signal: this._abort.signal
+        });
+        if (resp.ok) return await resp.json();
+        lastErr = new Error('Overpass HTTP ' + resp.status +
+          (resp.status === 429 || resp.status === 504 ? ' (rate-limited)' : ''));
+        if (resp.status !== 429 && resp.status !== 504) break;   // not worth retrying
+      } catch (e) {
+        if (this._disposed) throw e;
+        lastErr = e;
+      }
+    }
+    // Keep the PRIMARY's error for the message. A mirror's generic "unreachable"
+    // is the least informative thing that happened and must not overwrite
+    // "rate-limited", which is the one a human can act on.
+    const primaryErr = lastErr;
+    let mirrorNote = '';
+    for (let i = 1; i < endpoints.length; i++) {
+      this._progress('buildings: trying mirror ' + endpoints[i].split('/')[2] + '…', 0.65);
+      try {
+        const c = new AbortController();
+        const to = setTimeout(() => c.abort(), 8000);
+        const resp = await fetch(endpoints[i], { method: 'POST', body: query, signal: c.signal });
+        clearTimeout(to);
+        if (resp.ok) return await resp.json();
+        mirrorNote = ', mirrors also failed';
+      } catch (e) { mirrorNote = ', mirrors unreachable'; }
+    }
+    throw new Error(((primaryErr && primaryErr.message) || 'Overpass unavailable') + mirrorNote);
+  }
+
+  /** Parse an OSM height tag: "50", "50 m", "164'" → metres. */
+  static parseHeight(tags) {
+    const h = tags.height || tags['building:height'];
+    if (h) {
+      const m = String(h).match(/([\d.]+)\s*(m|ft|')?/);
+      if (m) {
+        const v = parseFloat(m[1]);
+        if (isFinite(v) && v > 0) return (m[2] === 'ft' || m[2] === "'") ? v * 0.3048 : v;
+      }
+    }
+    const lv = parseFloat(tags['building:levels']);
+    if (isFinite(lv) && lv > 0) return lv * 3.2 + 1.5;   // +1.5 for roof furniture
+    return null;
+  }
+
+  _extrudeBuilding(way, roofsOut, wallsOut) {
+    const ring = way.geometry;
+    if (!ring || ring.length < 4) return false;
+    const tags = way.tags || {};
+
+    // Footprint in local metres.
+    const pts = [];
+    for (let i = 0; i < ring.length - 1; i++) {      // last point repeats the first
+      const g = ring[i];
+      if (!g) return false;
+      const p = this.project(g.lat, g.lon);
+      pts.push(new THREE.Vector2(p.x, -p.z));        // Shape XY; -z so +Y = north
+    }
+    if (pts.length < 3) return false;
+
+    // Footprint area drives the height fallback: a big footprint with no tags
+    // is a warehouse, not a tower.
+    let area2 = 0, cx = 0, cz = 0;
+    for (let i = 0, n = pts.length; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % n];
+      const cr = a.x * b.y - b.x * a.y;
+      area2 += cr; cx += (a.x + b.x) * cr; cz += (a.y + b.y) * cr;
+    }
+    const area = Math.abs(area2) / 2;
+    if (area < 12) return false;                     // skip sheds and map noise
+    cx /= (3 * area2); cz /= (3 * area2);
+    const wx = cx, wz = -cz;
+
+    let height = LSSEarthTiles.parseHeight(tags);
+    if (height === null) {
+      // Deterministic fallback so the same city always looks the same:
+      // hash the way id into a small jitter around an area-based guess.
+      const guess = area > 4000 ? 12 : area > 1200 ? 9 : 6.5;
+      const hash = ((way.id * 2654435761) >>> 0) / 4294967296;
+      height = guess * (0.8 + hash * 0.55);
+    }
+    height = Math.min(height, 620);                  // Burj-proof
+
+    // A flat-bottomed prism on a slope will float at its uphill corner unless
+    // the base is sunk to the LOWEST ground under the footprint. Hong Kong (and
+    // any hill city) shows metres of daylight under buildings otherwise. The
+    // top still comes off the centroid height, so the tagged height stays
+    // honest and only the buried part grows.
+    let lowY = Infinity;
+    for (const p of pts) {
+      const gy = this.heightAt(p.x, -p.y);
+      if (gy < lowY) lowY = gy;
+    }
+    const groundY = this.heightAt(wx, wz);
+    const baseY = Math.min(lowY, groundY);
+    height += (groundY - baseY);
+
+    // Wall tint sampled from this building's OWN roof pixel in the satellite
+    // composite, lifted well off black. Tinting from the roof is the cheapest
+    // thing that stops a city looking like uniform grey LEGO; the lift is what
+    // stops it looking like uniform black LEGO.
+    let cr = 0.36, cg = 0.38, cb = 0.42;
+    if (this._imgData) {
+      const uvc = this._uv(wx, wz);
+      const px = Math.max(0, Math.min(this._imgData.width - 1,
+        Math.round(uvc.u * this._imgData.width)));
+      const py = Math.max(0, Math.min(this._imgData.height - 1,
+        Math.round((1 - uvc.v) * this._imgData.height)));
+      const o = (py * this._imgData.width + px) * 4;
+      const d = this._imgData.data;
+      cr = 0.17 + (d[o]     / 255) * 0.58;
+      cg = 0.18 + (d[o + 1] / 255) * 0.58;
+      cb = 0.22 + (d[o + 2] / 255) * 0.58;
+    }
+
+    let shape;
+    try { shape = new THREE.Shape(pts); } catch (_) { return false; }
+    let geo;
+    try {
+      geo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false, curveSegments: 1 });
+    } catch (_) { return false; }
+    geo.rotateX(-Math.PI / 2);        // Shape XY plane → world XZ, extrude → +Y
+    geo.translate(0, baseY, 0);
+    if (geo.index) geo = geo.toNonIndexed();
+
+    // Split the extrusion by triangle: roof caps go to the textured mesh,
+    // sides to the tinted one, and the FLOOR cap is thrown away — it is buried
+    // under the terrain and was a quarter of every building's triangles.
+    const pos = geo.attributes.position.array;
+    const tris = pos.length / 9;
+    const topY = baseY + height - 0.02, botY = baseY + 0.02;
+    const rp = [], wp = [], wc = [];
+    for (let t = 0; t < tris; t++) {
+      const o = t * 9;
+      const y0 = pos[o + 1], y1 = pos[o + 4], y2 = pos[o + 7];
+      if (y0 > topY && y1 > topY && y2 > topY) {
+        for (let k = 0; k < 9; k++) rp.push(pos[o + k]);
+      } else if (y0 < botY && y1 < botY && y2 < botY) {
+        continue;                                    // buried floor cap
+      } else {
+        for (let k = 0; k < 9; k++) wp.push(pos[o + k]);
+        for (let v = 0; v < 3; v++) {
+          // Darken toward the base: streets read as streets from above, and a
+          // tower gets vertical falloff instead of one flat slab of colour.
+          const f = 0.58 + 0.42 * Math.min(1, (pos[o + v * 3 + 1] - baseY) / Math.max(1, height));
+          wc.push(cr * f, cg * f, cb * f);
+        }
+      }
+    }
+    geo.dispose();
+
+    const chunk = this._chunkOf(wx, wz);
+    if (chunk < 0) return false;                     // centroid outside the patch
+
+    // Collision prism. Recorded here because this is the only place that knows
+    // a set of triangles is one BUILDING rather than just geometry.
+    let bx0 = Infinity, bx1 = -Infinity, bz0 = Infinity, bz1 = -Infinity;
+    for (const p of pts) {
+      if (p.x < bx0) bx0 = p.x; if (p.x > bx1) bx1 = p.x;
+      const wz2 = -p.y;
+      if (wz2 < bz0) bz0 = wz2; if (wz2 > bz1) bz1 = wz2;
+    }
+    this._bldList.push({ x0: bx0, x1: bx1, z0: bz0, z1: bz1, base: baseY, top: baseY + height });
+
+    if (rp.length) {
+      const g = new THREE.BufferGeometry();
+      const p = new Float32Array(rp);
+      g.setAttribute('position', new THREE.BufferAttribute(p, 3));
+      const n = p.length / 3, uv = new Float32Array(n * 2);
+      for (let i = 0; i < n; i++) {
+        const c = this._uv(p[i * 3], p[i * 3 + 2]);
+        uv[i * 2] = c.u; uv[i * 2 + 1] = c.v;
+      }
+      g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+      roofsOut[chunk].push(g);
+    }
+    if (wp.length) {
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(wp), 3));
+      g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(wc), 3));
+      wallsOut[chunk].push(g);
+    }
+    return true;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PART 2 — lab scaffolding (scene, fly camera, HUD). Not part of the port.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.0;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8fb6dd);
+scene.fog = new THREE.FogExp2(0x9fc0e0, 0.000035);
+
+const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 1, 120000);
+camera.position.set(0, 900, 1800);
+
+const sun = new THREE.DirectionalLight(0xfff3e0, 2.1);
+sun.position.set(-4000, 6000, 2500);
+scene.add(sun);
+// Fill, but not too much: with one directional sun an unlit wall in a dense
+// downtown goes pure black; crank the fill and the whole city blows out to
+// white. Both failure modes happened building this lab.
+scene.add(new THREE.HemisphereLight(0xcfe2ff, 0x6a6255, 0.95));
+scene.add(new THREE.AmbientLight(0xffffff, 0.12));
+
+let tiles = null;
+
+/* ---- fly camera --------------------------------------------------------- */
+const keys = {};
+let yaw = 0, pitch = -0.32, speed = 320, dragging = false;
+addEventListener('keydown', (e) => { keys[e.code] = true; });
+addEventListener('keyup', (e) => { keys[e.code] = false; });
+renderer.domElement.addEventListener('mousedown', () => { dragging = true; });
+addEventListener('mouseup', () => { dragging = false; });
+addEventListener('mousemove', (e) => {
+  if (!dragging) return;
+  yaw -= e.movementX * 0.0026;
+  pitch = Math.max(-1.5, Math.min(1.5, pitch - e.movementY * 0.0026));
+});
+addEventListener('wheel', (e) => {
+  speed = Math.max(20, Math.min(12000, speed * (e.deltaY > 0 ? 0.85 : 1.18)));
+}, { passive: true });
+
+function flyTick(dt) {
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+  camera.quaternion.copy(q);
+  const f = new THREE.Vector3(0, 0, -1).applyQuaternion(q);
+  const r = new THREE.Vector3(1, 0, 0).applyQuaternion(q);
+  const v = new THREE.Vector3();
+  if (keys.KeyW) v.add(f); if (keys.KeyS) v.sub(f);
+  if (keys.KeyD) v.add(r); if (keys.KeyA) v.sub(r);
+  if (keys.KeyE) v.y += 1;  if (keys.KeyQ) v.y -= 1;
+  if (v.lengthSq() > 0) {
+    v.normalize().multiplyScalar(speed * dt * (keys.ShiftLeft || keys.ShiftRight ? 4 : 1));
+    camera.position.add(v);
+  }
+}
+
+/* ---- HUD ---------------------------------------------------------------- */
+const $ = (id) => document.getElementById(id);
+const statusEl = $('status');
+function setStatus(msg, cls) {
+  statusEl.innerHTML = cls ? `<span class="${cls}">${msg}</span>` : msg;
+}
+$('extent').oninput = (e) => { $('extentV').textContent = (e.target.value / 1000).toFixed(1) + ' km'; };
+$('segs').oninput   = (e) => { $('segsV').textContent = e.target.value; };
+$('hex').oninput    = (e) => { $('hexV').textContent = (+e.target.value).toFixed(1) + '×'; };
+$('scale').oninput  = (e) => {
+  $('scaleV').textContent = (+e.target.value).toFixed(1) + '×';
+  if (tiles) tiles.group.scale.setScalar(+e.target.value);
+};
+$('wire').onchange = (e) => {
+  if (!tiles) return;
+  tiles.group.traverse((o) => { if (o.isMesh) o.material.wireframe = e.target.checked; });
+};
+$('imgsrc').onchange = (e) => {
+  $('imgattrib').textContent = e.target.value === 'eox'
+    ? 'Imagery © EOX Sentinel-2 cloudless (CC BY 4.0)'
+    : e.target.value === 'esri' ? 'Imagery © Esri, Maxar, Earthstar Geographics' : '';
+};
+
+/** Free geocoding — the same Nominatim endpoint index-working.html already uses. */
+async function geocode(q) {
+  const u = 'https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' +
+            encodeURIComponent(q);
+  const r = await fetch(u, { headers: { 'Accept': 'application/json' } });
+  if (!r.ok) throw new Error('geocoder HTTP ' + r.status);
+  const j = await r.json();
+  if (!j.length) throw new Error('no match for "' + q + '"');
+  return { lat: +j[0].lat, lng: +j[0].lon, name: j[0].display_name };
+}
+
+async function drop(lat, lng, label) {
+  clearTiles();
+  setStatus('loading…');
+  tiles = new LSSEarthTiles({
+    extentMetres: +$('extent').value,
+    terrainSegments: +$('segs').value,
+    imagery: $('imgsrc').value,
+    imageryCanvasPx: +$('imgq').value,
+    heightScale: +$('hex').value,
+    buildings: $('bld').checked,
+    onProgress: (m, f) => setStatus(m + (f < 1 ? ' — ' + Math.round(f * 100) + '%' : ''))
+  });
+  tiles.addEventListener('load-error', (ev) => setStatus('ERROR: ' + ev.message, 'err'));
+  // --- exactly the LSS call sequence, in the same order --------------------
+  tiles.setLatLonToYUp(lat * DEG, lng * DEG);
+  tiles.group.scale.setScalar(+$('scale').value);
+  scene.add(tiles.group);
+  tiles.errorTarget = 8; tiles.errorThreshold = 8;
+  tiles.setResolutionFromRenderer(camera, renderer);
+  tiles.setCamera(camera);
+  // -------------------------------------------------------------------------
+  await tiles.ready;
+  if (!tiles) return;
+  const s = tiles.stats;
+  const line = `${s.demTiles} DEM · ${s.imgTiles} imagery · ${s.buildings} buildings` +
+    `<br>${s.ms} ms total (${s.extrudeMs || 0} ms extruding)`;
+  if (s.buildingError) {
+    // Loud on purpose. Terrain with no buildings is a PLAUSIBLE-LOOKING scene,
+    // so nothing about the render itself tells you the city is missing.
+    setStatus(`<span class="err"><b>NO BUILDINGS LOADED</b><br>${s.buildingError}<br>` +
+      `You are looking at bare terrain + satellite photo only.</span>` +
+      `<br><button id="retryB" style="margin-top:8px;width:100%;">Retry buildings</button><br>${line}`);
+    const rb = $('retryB');
+    if (rb) rb.onclick = () => drop(lat, lng, label);
+  } else {
+    setStatus(`<span class="ok">${label || 'ready'}</span><br>${line}`);
+  }
+
+  // "No height" is ambiguous — it can mean flat TERRAIN or missing BUILDINGS,
+  // and those have completely different causes. Report both, separately.
+  let vmin = Infinity, vmax = -Infinity;
+  tiles.group.traverse((o) => {
+    if (!o.isMesh || !o.name.startsWith('earth-terrain')) return;
+    const p = o.geometry.attributes.position.array;
+    for (let i = 1; i < p.length; i += 3) { if (p[i] < vmin) vmin = p[i]; if (p[i] > vmax) vmax = p[i]; }
+  });
+  const relief = isFinite(vmax - vmin) ? Math.round(vmax - vmin) : 0;
+  $('relief').textContent = relief + ' m';
+  $('relief').style.color = relief < 25 ? 'var(--hot)' : 'var(--ink)';
+  let tall = 0;
+  for (const b of tiles._bldList) tall = Math.max(tall, b.top - b.base);
+  $('tallest').textContent = tiles._bldList.length ? Math.round(tall) + ' m' : 'none';
+  $('tallest').style.color = tiles._bldList.length ? 'var(--ink)' : 'var(--bad)';
+  $('nbld').textContent = s.buildings;
+  // Park the camera looking down the patch from the south-east.
+  camera.position.set(1200, 700, 1600);
+  yaw = 0.64; pitch = -0.30;
+  if ($('wire').checked) tiles.group.traverse((o) => { if (o.isMesh) o.material.wireframe = true; });
+}
+
+function clearTiles() {
+  if (!tiles) return;
+  scene.remove(tiles.group);
+  tiles.dispose();
+  tiles = null;
+  $('nbld').textContent = '0';
+}
+
+$('go').onclick = async () => {
+  const q = $('loc').value.trim();
+  if (!q) return;
+  setStatus('geocoding…');
+  try {
+    const g = await geocode(q);
+    await drop(g.lat, g.lng, g.name.split(',').slice(0, 2).join(','));
+  } catch (e) { setStatus('ERROR: ' + e.message, 'err'); }
+};
+$('clear').onclick = () => { clearTiles(); setStatus('idle'); };
+$('loc').onkeydown = (e) => { if (e.key === 'Enter') $('go').onclick(); };
+
+/* ---- loop --------------------------------------------------------------- */
+let last = performance.now(), fpsAcc = 0, fpsN = 0, fpsShown = 0;
+function loop() {
+  requestAnimationFrame(loop);
+  const now = performance.now();
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+  flyTick(dt);
+  if (tiles) tiles.update();
+  renderer.render(scene, camera);
+
+  fpsAcc += dt; fpsN++;
+  if (fpsAcc >= 0.5) {
+    fpsShown = Math.round(fpsN / fpsAcc);
+    $('fps').textContent = fpsShown;
+    $('tris').textContent = renderer.info.render.triangles.toLocaleString();
+    $('draws').textContent = renderer.info.render.calls;
+    $('alt').textContent = Math.round(camera.position.y);
+    fpsAcc = 0; fpsN = 0;
+  }
+}
+loop();
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ---- test hooks (driven from the Browser pane) -------------------------- */
+window.EL = {
+  LSSEarthTiles,
+  get tiles() { return tiles; },
+  load: (lat, lng) => drop(lat, lng, `${lat}, ${lng}`),
+  place: async (q) => { $('loc').value = q; return $('go').onclick(); },
+  clear: clearTiles,
+  status: () => statusEl.textContent,
+  stats: () => tiles ? { ...tiles.stats, fps: fpsShown,
+    tris: renderer.info.render.triangles, draws: renderer.info.render.calls } : null,
+  fps: () => fpsShown,
+  cam: (x, y, z, yw, p) => {
+    if (x !== undefined) camera.position.set(x, y, z);
+    if (yw !== undefined) { yaw = yw; pitch = p; }
+    return { pos: camera.position.toArray().map(Math.round), yaw, pitch };
+  },
+  // Height query straight out of the class — this is what lets LSS skip
+  // raycasts for terrain-follow if we want it later.
+  h: (x, z) => tiles ? tiles.heightAt(x, z) : null,
+  // Synchronous render, so a HIDDEN Browser pane (where rAF is paused) can
+  // still be posed and screenshotted. See the lss-headless-capture notes.
+  render: () => {
+    camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+    renderer.render(scene, camera);
+    return { tris: renderer.info.render.triangles, draws: renderer.info.render.calls };
+  },
+  // Exact-size capture that works while the pane is HIDDEN (where the
+  // page canvas has a zero-size framebuffer and every draw is a GL error).
+  // setSize gives the framebuffer real dimensions; toDataURL must run in the
+  // same turn as the render because preserveDrawingBuffer is false.
+  shot: (w = 1280, h = 720) => {
+    const old = new THREE.Vector2(); renderer.getSize(old);
+    const oldAspect = camera.aspect;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h; camera.updateProjectionMatrix();
+    camera.quaternion.setFromEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+    renderer.render(scene, camera);
+    const url = renderer.domElement.toDataURL('image/jpeg', 0.86);
+    renderer.setSize(old.x, old.y, false);
+    camera.aspect = oldAspect; camera.updateProjectionMatrix();
+    return url;
+  },
+  set: (k, v) => { $(k).value = v; $(k).oninput && $(k).oninput({ target: $(k) }); },
+  /**
+   * Head-to-head: what LSS does today (raycast the tile meshes) vs collide().
+   * `n` is the number of entities; LSS casts TWICE per entity per frame.
+   */
+  benchCollide: (n = 12) => {
+    if (!tiles) return null;
+    tiles.group.updateMatrixWorld(true);
+    const meshes = [];
+    tiles.group.traverse((c) => { if (c.isMesh) meshes.push(c); });
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      pts.push(new THREE.Vector3((i * 271) % 2000 - 1000, 260, (i * 437) % 2000 - 1000));
+    }
+    const rc = new THREE.Raycaster(); rc.far = 8000;
+    const dn = new THREE.Vector3(0, -1, 0);
+    let t0 = performance.now();
+    for (let r = 0; r < 4; r++) for (const p of pts) { rc.set(p, dn); rc.intersectObjects(meshes, false); }
+    const rayMs = (performance.now() - t0) / 4;
+    const vel = new THREE.Vector3();
+    t0 = performance.now();
+    for (let r = 0; r < 400; r++) for (const p of pts) tiles.collide(p.clone(), vel, 120);
+    const colMs = (performance.now() - t0) / 400;
+    return {
+      entities: n, meshes: meshes.length,
+      raycastMsPerFrame: +(rayMs * 2).toFixed(2),
+      collideMsPerFrame: +(colMs * 2).toFixed(3),
+      speedup: Math.round(rayMs / colMs) + '×'
+    };
+  }
+};
+$('build').textContent = EL_BUILD;
+setStatus('ready — type a place and hit DROP');
+</script>
+</body>
+</html>
