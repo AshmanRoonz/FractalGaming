@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '46.00';
+const LSS_BUILD = '46.01';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -116881,6 +116881,22 @@ function gameLoop(timestamp) {
   // renderer streams tiles in / disposes far ones based on camera
   // position; calling update() each frame keeps the LOD pyramid current.
   // No-op when not in a gmaps level.
+  // ⭐⭐ (v46.01) AND MARK IT, BECAUSE NOTHING DID.
+  // _lssGmapsTick runs HERE, ahead of the first named __pmark in the tick, so
+  // every millisecond of earth streaming, earth life, day/night, the sky rig and
+  // the earth collision pass was folded into `prelude+input` - one bucket, no
+  // way to tell them apart. That is why the v45.94 hitch hunt could attribute
+  // only `renderFrame` and had to reach for renderer.info deltas to work out
+  // what the rest of a 195 ms frame was: the profiler could not see this mode at
+  // all. Every other system in the loop has had a name since v39.49.
+  // `prelude+input` keeps its meaning - everything in the preamble that is NOT
+  // the earth - and simply accumulates in two calls per frame instead of one, so
+  // its total stays comparable with every mark ever taken. Off the earth,
+  // _lssGmapsTick returns on its first line and none of the earth:* names are
+  // ever created, so the hub's profile is byte-for-byte what it was.
+  // (`s.calls` and `s.max` for prelude+input now count two segments per frame;
+  // the F8 blame reads `total` deltas only, so nothing downstream cares.)
+  __pmark('prelude+input');
   if (typeof _lssGmapsTick === 'function') _lssGmapsTick(game.deltaTime);
 
   // Update level shader time for vein animations
@@ -133019,6 +133035,7 @@ function _lssGmapsTick(dt) {
     if (typeof t.update === 'function') t.update();
     if (typeof t.updateNight === 'function') t.updateNight(scene);
     if (typeof t.waterTick === 'function') t.waterTick(dt);
+    __pmark('earth:tiles');      // LOD/camera/night/water on the patch set
     // ⭐ DAY OVER WILDERNESS, DUSK OVER CITY. Blended from local building density
     // so flying out of a city walks the sky up instead of flipping it, and a
     // mountain range is not pitch black. Ramp is in buildings/km2: below 6 is
@@ -133081,13 +133098,16 @@ function _lssGmapsTick(dt) {
         }
       }
     } catch (_) {}
+    __pmark('earth:sky');        // the day/night blend, window glow and the dome sizing
     // The endless world loads what is ahead of the SHIP, not the camera — a
     // chase camera trails, and streaming off it means the ground arrives late
     // in exactly the direction you are travelling.
     if (typeof t.streamUpdate === 'function') {
       const _f = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
       t.streamUpdate(_f);
+      __pmark('earth:stream');   // patch streaming + the v45.95 publish drain
       try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
+      __pmark('earth:life');     // traffic, carriers, monsters
     }
     // ⭐ THE SKY CANNOT BE ALLOWED TO STAY GONE. The cause above is fixed, but
     // _swBuildHubWater disposes the weather on ANY water-level change and only
@@ -133110,6 +133130,7 @@ function _lssGmapsTick(dt) {
     // like a shell", and the parked sun is "there's a bright orb in the city...
     // that's the sun in the middle of the map, in the floor". One missing call.
     try { if (typeof _wxFrame === 'function') _wxFrame(dt); } catch (_) {}
+    __pmark('earth:wx');         // the sky dome + weather, which only this mode drives
   } catch (_) {  }
   if (t.group && t.group.children && t.group.children.length > 0) {
     t.group.traverse((c) => {
@@ -133126,6 +133147,7 @@ function _lssGmapsTick(dt) {
       }
     });
   }
+  __pmark('earth:matfix');       // ⚠ a FULL traverse of the patch set, every frame
   // Terrain + building collision for player and AI ships.
   try {
     if (typeof player !== 'undefined' && player && player.position && player.velocity) {
@@ -133139,6 +133161,7 @@ function _lssGmapsTick(dt) {
   } catch (e) {
     if (window.lssGmaps && window.lssGmaps.debug) console.warn('[lss-gmaps] collision error:', e);
   }
+  __pmark('earth:collide');      // player + every entity against terrain and buildings
   // Optional: per-second debug summary so the user can tell whether the
   // raycasts are finding anything. Toggle on with window.lssGmaps.debug = true.
   if (window.lssGmaps && window.lssGmaps.debug) {

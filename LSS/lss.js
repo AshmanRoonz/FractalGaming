@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '46.00';
+const LSS_BUILD = '46.01';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -76399,6 +76399,7 @@ function gameLoop(timestamp) {
   if (typeof updateBCSWakes === 'function') updateBCSWakes(game.deltaTime || 0.016);
   if (typeof updateAmbientCloudWakes === 'function') updateAmbientCloudWakes(game.deltaTime || 0.016);
 
+  __pmark('prelude+input');
   if (typeof _lssGmapsTick === 'function') _lssGmapsTick(game.deltaTime);
 
   if (game.levelMaterial && game.levelMaterial.uniforms) {
@@ -89750,6 +89751,7 @@ function _lssGmapsTick(dt) {
     if (typeof t.update === 'function') t.update();
     if (typeof t.updateNight === 'function') t.updateNight(scene);
     if (typeof t.waterTick === 'function') t.waterTick(dt);
+    __pmark('earth:tiles');      // LOD/camera/night/water on the patch set
     try {
       if (typeof t.buildingDensity === 'function') {
         const _pp = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
@@ -89777,10 +89779,13 @@ function _lssGmapsTick(dt) {
         }
       }
     } catch (_) {}
+    __pmark('earth:sky');        // the day/night blend, window glow and the dome sizing
     if (typeof t.streamUpdate === 'function') {
       const _f = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
       t.streamUpdate(_f);
+      __pmark('earth:stream');   // patch streaming + the v45.95 publish drain
       try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
+      __pmark('earth:life');     // traffic, carriers, monsters
     }
     try {
       if (typeof _WX !== 'undefined' && _WX && !_WX.on && typeof _wxInit === 'function') {
@@ -89789,6 +89794,7 @@ function _lssGmapsTick(dt) {
       }
     } catch (_) {}
     try { if (typeof _wxFrame === 'function') _wxFrame(dt); } catch (_) {}
+    __pmark('earth:wx');         // the sky dome + weather, which only this mode drives
   } catch (_) {  }
   if (t.group && t.group.children && t.group.children.length > 0) {
     t.group.traverse((c) => {
@@ -89805,6 +89811,7 @@ function _lssGmapsTick(dt) {
       }
     });
   }
+  __pmark('earth:matfix');       // ⚠ a FULL traverse of the patch set, every frame
   try {
     if (typeof player !== 'undefined' && player && player.position && player.velocity) {
       _lssGmapsCollideEntity(player.position, player.velocity);
@@ -89817,6 +89824,7 @@ function _lssGmapsTick(dt) {
   } catch (e) {
     if (window.lssGmaps && window.lssGmaps.debug) console.warn('[lss-gmaps] collision error:', e);
   }
+  __pmark('earth:collide');      // player + every entity against terrain and buildings
   if (window.lssGmaps && window.lssGmaps.debug) {
     const now = performance.now();
     if (now - _lssGmapsDebug.lastReport > 1000) {
