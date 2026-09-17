@@ -603,6 +603,59 @@ body.lss-ghost #stasis-vignette,
 body.lss-ghost #enemy-lockon-warning,
 body.lss-ghost #hit-marker,
 body.lss-ghost #hit-marker-kill { display: none !important; }
+/* ⭐ (v45.44) SELFIE / ORBIT VIEW HIDES THE HUD. Owner: "in the selfie view mode activated by
+   the o key, it should also hide the HUD and score, so it's just the ship and the world".
+   Same mechanism as the two rules above — a body class + display:none — but set and cleared by
+   _orbitCamApply in lockstep with whether the orbit camera is ACTUALLY driving the frame, not by
+   the O key handler (see the note there for why that distinction is the whole safety story).
+   The list is the cinematic hide (_lssEnsureCinematicStyles) plus the layers a cinematic never has
+   to think about, because it runs before anyone is shooting: the first-person shield and block
+   flashes, the damage edges and vignettes, the hit markers, the fps readout. Every one of those is
+   painted for a camera INSIDE the cockpit, and this camera is outside the hull looking back at it.
+   #hud alone carries the score — #round-info (FLEET A / FLEET B), the timer, the champion bar, the
+   kill feed, the radar and the speed readout are all its children, and a display:none parent takes
+   the whole subtree with it whatever the per-frame updateHUD writes on them inline.
+   #ov-banner and #lss-version-badge go too. The banner was carrying this toggle's own 'ORBIT VIEW'
+   heads-up, which is exactly what the owner then asked for less of ("we don't need the heads up"),
+   and the version stamp is a fixed body-level watermark in the bottom-right corner of every frame.
+   ⚠ DELIBERATELY KEPT, each for a reason, each one line away from being hidden if you disagree:
+     #ship-select-countdown  the 3-2-1 / FIGHT beat; leaving orbit on across a round start should
+                          not cost you the start of the round
+     #ov-respawn          you still need to know you were killed, and how to get back
+     #touch-controls      display:none takes the sticks' hit-testing with it, and the ship is still
+                          being flown underneath this view
+     #scoreboard          a HOLD (TAB / Start): it is on screen only while asked for
+     #clip-save-btn       hiding a button you are meant to click is just a broken button */
+body.lss-orbit #hud,
+body.lss-orbit #crosshair,
+body.lss-orbit #circumpunct-hud,
+body.lss-orbit #hud-world,
+body.lss-orbit #cockpit-frame,
+body.lss-orbit #gun-layer,
+body.lss-orbit #core-overlay-frame,
+body.lss-orbit #ability-overlay-frame,
+body.lss-orbit #enemy-healthbars,
+body.lss-orbit #stasis-warning,
+body.lss-orbit #stasis-vignette,
+body.lss-orbit #execution-prompt,
+body.lss-orbit #endless-hud,
+body.lss-orbit #fps-counter,
+body.lss-orbit #hit-marker,
+body.lss-orbit #hit-marker-kill,
+body.lss-orbit .damage-indicator,
+body.lss-orbit .dmg-edge,
+body.lss-orbit #ov-damage-vignette,
+body.lss-orbit #ov-warp,
+body.lss-orbit #ov-underwater,
+body.lss-orbit #ov-killstreak,
+body.lss-orbit #ov-medals,
+body.lss-orbit #ov-ability,
+body.lss-orbit #ov-sword-block,
+body.lss-orbit #ov-vortex-shield,
+body.lss-orbit #ov-gun-shield,
+body.lss-orbit #ov-thermal-shield,
+body.lss-orbit #ov-banner,
+body.lss-orbit #lss-version-badge { display: none !important; }
 /* (v37.23) The hangar image + scrim render from #ship-select-bg (a canvas
    baked once at boot — see the markup note), NOT from a CSS background: the
    v37.22 CSS url() version re-decoded the PNG on the between-rounds picker
@@ -6766,7 +6819,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.43';
+const LSS_BUILD = '45.45';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -29287,13 +29340,31 @@ function _lssCameraDepthForFov(force) {
 // positions the camera in gameLoop - so this wins without having to fight it. It only moves the
 // camera: nothing else in the frame knows or cares, and `on:false` costs one property read.
 // ⚠ Not for VR - the headset owns its pose, and overriding it is how you make someone ill.
-const _ORB = { v: new THREE.Vector3(), t: new THREE.Vector3(), last: 0 };
+const _ORB = { v: new THREE.Vector3(), t: new THREE.Vector3(), last: 0, hud: false };
 function _orbitCamApply() {
   let O;
   try { O = window.__orbitCam; } catch (_) { return; }
-  if (!O || !O.on) return;
-  if (typeof player === 'undefined' || !player || !player.position) return;
-  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return; } catch (_) {}
+  // ⭐ (v45.44) THE HUD FOLLOWS THE CAMERA, NOT THE KEY. Owner: "in the selfie view mode activated
+  // by the o key, it should also hide the HUD and score, so it's just the ship and the world".
+  // `live` is the three early returns this function already had, folded into one boolean, and the
+  // body class is synced to it - so the chrome is hidden if and only if this function is actually
+  // moving the camera. Hanging the class off the O key handler instead would look identical and be
+  // wrong in three ways: it would strand a hidden HUD on every frame the orbit DECLINES to run (no
+  // player yet at the menu, a headset owning the pose, the object missing), it would never fire for
+  // the console entry points __orbit() / __orbitOff(), and nothing would take the class off at a
+  // teardown. Here, every one of those cases is already a `live === false` on the next frame.
+  // Costs one classList write per TRANSITION, and when the view is off, one property read and a
+  // comparison - the XR and player checks stay behind the `live &&` short-circuit they were in.
+  let live = !!(O && O.on);
+  if (live) {
+    try { if (renderer && renderer.xr && renderer.xr.isPresenting) live = false; } catch (_) {}
+    if (typeof player === 'undefined' || !player || !player.position) live = false;
+  }
+  if (live !== _ORB.hud) {
+    _ORB.hud = live;
+    try { document.body.classList.toggle('lss-orbit', live); } catch (_) {}   // see `body.lss-orbit` in the stylesheet for exactly what goes, and what deliberately stays
+  }
+  if (!live) return;
   const now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
   const dt = (_ORB.last ? Math.min(0.1, (now - _ORB.last) / 1000) : 0);
   _ORB.last = now;
@@ -92132,6 +92203,8 @@ document.addEventListener('keydown', (e) => {
   // Toggling it on starts a slow circle so one press shows every side without another input; it
   // deliberately does NOT capture the mouse, because the ship is still being flown underneath it.
   // window.__orbitCam.spin = 0 stops the circle, and az / el / dist stay live from the console.
+  // (v45.44) It also strips the HUD - see `body.lss-orbit` in the stylesheet. The class is NOT set
+  // here: _orbitCamApply owns it, so the console entries move it too and no path can leave it on.
   if (e.code === 'KeyO' && !e.ctrlKey && !e.altKey && !e.metaKey) {
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
@@ -92140,7 +92213,10 @@ document.addEventListener('keydown', (e) => {
       if (O) {
         O.on = !O.on;
         if (O.on) { if (!O.dist) O.dist = 260; if (O.el == null) O.el = 14; O.spin = O.spin || 16; }
-        if (window.Overlays && Overlays.banner) Overlays.banner(O.on ? 'ORBIT VIEW' : 'ORBIT OFF', '(O) to toggle');
+        // (v45.45) NO BANNER. It used to announce 'ORBIT VIEW' / 'ORBIT OFF' here - owner: "we
+        // don't need the heads up". The view announces itself: the camera swings out to the beam
+        // and every readout on the screen goes with it. #ov-banner is on the hide list now too,
+        // so this was also the last thing that could paint over a shot the mode exists to take.
       }
     } catch (_) {}
   }

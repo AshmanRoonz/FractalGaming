@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.43';
+const LSS_BUILD = '45.45';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -15603,13 +15603,20 @@ function _lssCameraDepthForFov(force) {
 
 
 
-const _ORB = { v: new THREE.Vector3(), t: new THREE.Vector3(), last: 0 };
+const _ORB = { v: new THREE.Vector3(), t: new THREE.Vector3(), last: 0, hud: false };
 function _orbitCamApply() {
   let O;
   try { O = window.__orbitCam; } catch (_) { return; }
-  if (!O || !O.on) return;
-  if (typeof player === 'undefined' || !player || !player.position) return;
-  try { if (renderer && renderer.xr && renderer.xr.isPresenting) return; } catch (_) {}
+  let live = !!(O && O.on);
+  if (live) {
+    try { if (renderer && renderer.xr && renderer.xr.isPresenting) live = false; } catch (_) {}
+    if (typeof player === 'undefined' || !player || !player.position) live = false;
+  }
+  if (live !== _ORB.hud) {
+    _ORB.hud = live;
+    try { document.body.classList.toggle('lss-orbit', live); } catch (_) {}   // see `body.lss-orbit` in the stylesheet for exactly what goes, and what deliberately stays
+  }
+  if (!live) return;
   const now = (typeof performance !== 'undefined') ? performance.now() : Date.now();
   const dt = (_ORB.last ? Math.min(0.1, (now - _ORB.last) / 1000) : 0);
   _ORB.last = now;
@@ -58708,7 +58715,6 @@ document.addEventListener('keydown', (e) => {
       if (O) {
         O.on = !O.on;
         if (O.on) { if (!O.dist) O.dist = 260; if (O.el == null) O.el = 14; O.spin = O.spin || 16; }
-        if (window.Overlays && Overlays.banner) Overlays.banner(O.on ? 'ORBIT VIEW' : 'ORBIT OFF', '(O) to toggle');
       }
     } catch (_) {}
   }
