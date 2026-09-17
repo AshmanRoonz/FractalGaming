@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.74';
+const LSS_BUILD = '45.76';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -29839,6 +29839,47 @@ let _starfieldPoints = null;
   _starfieldPoints.visible = false;
   scene.add(_starfieldPoints);
 })();
+
+// ⭐ HOW BIG THE WORLD IS ALLOWED TO BE.
+//
+// Owner: "i travelled about 100km and i hit a wall, and it felt like i hit a
+// wall of rubber, it just sent me back a bit" (later "maybe it was more like
+// 50km"). Both readings are the same wall. Free flight already gets
+// ARENA_SIZE * 10, and updatePlayerMovement takes 0.9 of that as a HARD clamp
+// and 0.8 as a SOFT edge that subtracts velocity:
+//     if (pos.x > softEdge) vel.x -= (pos.x - softEdge) * 0.5 * dt;
+// - which is exactly "rubber". Measured: the player pins at 225,000 units with
+// a -973 u/s push-back, and at 7 units/metre that is 32 km.
+//
+// 32 km is right for a combat arena over streaming hub terrain. It is wrong for
+// a mode whose whole premise is the real Earth, so a STREAMED gmaps level gets
+// a far larger box.
+//
+// ⚠ IT IS STILL A BOX, AND IT HAS TO BE. The bound is not arbitrary - the
+// original comment is about float32. At 3.5e6 units the float32 step is ~0.42
+// units (6 cm at this scale), which is invisible; an order of magnitude further
+// out it is not. The local mercator is also only true-to-scale at the origin
+// latitude, so 500 km north of Toronto the ground is already ~9% stretched.
+// Genuinely circling the planet needs the WARP half of the travel model (still
+// unbuilt) and a floating origin with re-projection, not a bigger number here.
+//
+// Used by the player clamp, the bot clamp and the projectile bound, because
+// fencing bots or bolts at 225k while the player is 300 km away would pin them
+// to the box face - which is the bug the bot comment below already describes.
+function _lssFlightArena() {
+  // The constant is inlined rather than held in a module const: a top-level
+  // const read before its line has run throws even behind typeof (see the TDZ
+  // note in the v39.02 boot failure), and this is called from three places.
+  try {
+    if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active &&
+        _lssGmaps.tiles && typeof _lssGmaps.tiles.streamUpdate === 'function') {
+      return 3500000;   // ~500 km at 7 units/metre
+    }
+  } catch (_) {}
+  return (typeof LSS !== 'undefined' &&
+          (LSS.MODE === 'freeflight' || LSS.MODE === 'endless'))
+    ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+}
 
 // ---- ARENA BOUNDARY GRID ----
 
@@ -56638,8 +56679,7 @@ class Bot {
     // and pinned there (velocity pushes outward toward the player at the ring,
     // clamp resets position every frame): a motionless line of 4 ships ~10k
     // from the ring that never "came out". Match the bot bound to the player's.
-    const _bndArena = (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless'))
-      ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+    const _bndArena = _lssFlightArena();
     const s = _bndArena * 0.9;
     this.position.clamp(this._tempVec3a.set(-s,-s,-s), this._tempVec3b.set(s,s,s));
 
@@ -59861,7 +59901,7 @@ class Projectile {
     // ARENA_SIZE*10 (see _mvClamp ~L41070) — so missiles hit an invisible wall at the map edge while
     // you keep flying. Match the projectile bound to the player's bound so missiles reach as far as
     // you can fly (still bounded, just at the real flyable edge, not 1/10th of it).
-    const s = (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+    const s = _lssFlightArena();
     if (Math.abs(this.position.x) > s || Math.abs(this.position.y) > s || Math.abs(this.position.z) > s) {
       // (v42.81) ...and silent here too. The note above already named this symptom - "missiles hit an
       // invisible wall at the map edge" - and raised the bound, but left the explosion AT the bound.
@@ -83258,7 +83298,7 @@ function updatePlayerMovement(dt) {
   // would otherwise fence you in at ~22.5k even though the terrain keeps streaming past.
   // 10x (~225k hard / 200k soft) stays well inside float32 precision so positions/terrain
   // don't jitter. All other modes keep the normal arena bound.
-  const _arena = (LSS.MODE === 'freeflight' || LSS.MODE === 'endless') ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+  const _arena = _lssFlightArena();
   const s = _arena * 0.9;
   const softEdge = _arena * 0.8;
   if (player.position.x > softEdge)       player.velocity.x -= (player.position.x - softEdge) * 0.5 * dt;
@@ -130920,7 +130960,14 @@ class LSSEarthWorld {
     this.nearRadius    = opts.nearRadius    ?? 1;     // patches each way -> 3x3
     this.farMetres     = opts.farMetres     ?? 9000;  // the horizon patch
     this.scale         = opts.scale         ?? 7;
-    this.maxConcurrent = opts.maxConcurrent ?? 1;     // patch builds in flight
+    // Patch builds in flight. Was 1, to keep a first flight from being rate
+    // limited on Overpass - but since v45.69 the terrain no longer waits on
+    // Overpass at all (it races a 6 s deadline and the city backfills), so what
+    // is actually in flight here is DEM + imagery, which are CDN requests that
+    // parallelise happily. At 1 the near ring cannot keep up with a fast run:
+    // measured walking 7 km every 3.2 s, patches sat at 0 for most of the trip
+    // even though the horizon kept following. 2 halves the catch-up time.
+    this.maxConcurrent = opts.maxConcurrent ?? 2;
     this.patchOpts     = opts.patchOpts     ?? {};
     this.onProgress    = opts.onProgress    ?? null;
 

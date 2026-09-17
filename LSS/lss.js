@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.74';
+const LSS_BUILD = '45.76';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -15919,6 +15919,18 @@ let _starfieldPoints = null;
   _starfieldPoints.visible = false;
   scene.add(_starfieldPoints);
 })();
+
+function _lssFlightArena() {
+  try {
+    if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active &&
+        _lssGmaps.tiles && typeof _lssGmaps.tiles.streamUpdate === 'function') {
+      return 3500000;   // ~500 km at 7 units/metre
+    }
+  } catch (_) {}
+  return (typeof LSS !== 'undefined' &&
+          (LSS.MODE === 'freeflight' || LSS.MODE === 'endless'))
+    ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+}
 
 
 const _arenaGridMeshes = [];
@@ -34088,8 +34100,7 @@ class Bot {
       resolveCollision(this.position, this.velocity, botCollR, this);
     }
 
-    const _bndArena = (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless'))
-      ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+    const _bndArena = _lssFlightArena();
     const s = _bndArena * 0.9;
     this.position.clamp(this._tempVec3a.set(-s,-s,-s), this._tempVec3b.set(s,s,s));
 
@@ -36324,7 +36335,7 @@ class Projectile {
       }
     }
 
-    const s = (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+    const s = _lssFlightArena();
     if (Math.abs(this.position.x) > s || Math.abs(this.position.y) > s || Math.abs(this.position.z) > s) {
       this.destroy(true);
     }
@@ -52577,7 +52588,7 @@ function updatePlayerMovement(dt) {
       }
     } catch (_) {}
   }
-  const _arena = (LSS.MODE === 'freeflight' || LSS.MODE === 'endless') ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+  const _arena = _lssFlightArena();
   const s = _arena * 0.9;
   const softEdge = _arena * 0.8;
   if (player.position.x > softEdge)       player.velocity.x -= (player.position.x - softEdge) * 0.5 * dt;
@@ -88347,7 +88358,7 @@ class LSSEarthWorld {
     this.nearRadius    = opts.nearRadius    ?? 1;     // patches each way -> 3x3
     this.farMetres     = opts.farMetres     ?? 9000;  // the horizon patch
     this.scale         = opts.scale         ?? 7;
-    this.maxConcurrent = opts.maxConcurrent ?? 1;     // patch builds in flight
+    this.maxConcurrent = opts.maxConcurrent ?? 2;
     this.patchOpts     = opts.patchOpts     ?? {};
     this.onProgress    = opts.onProgress    ?? null;
 
