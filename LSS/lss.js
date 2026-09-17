@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.46';
+const LSS_BUILD = '45.62';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -3908,7 +3908,8 @@ function _applyStartView() {
   if (!_tp && typeof player !== 'undefined' && player && player.mesh) player.mesh.visible = false;
 }
 function startFreeFlight(_tag) {
-  LSS.MODE = _lssRoomModeChoose(_tag === 'cyberpunk' ? 'cyberpunk' : 'freeflight');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose((_tag === 'cyberpunk' || _tag === 'earth') ? _tag : 'freeflight');   // (v43.19) a room has one mode
+  try { _lssSyncEarthToTag(_lssRoomTag()); } catch (_) {}   // (v45.47)
   try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}   // (v38.78) every free flight starts with six hostile cities
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}   
   
@@ -3919,7 +3920,10 @@ function startFreeFlight(_tag) {
   game.testMode = false;      
   game.raceNoTimer = true;    
   game.currentRound = 1;
-  if (LSS.MODE === 'freeflight') game.selectedMap = 'hub_overworld';
+  if (LSS.MODE === 'freeflight') {
+    const _isEarth = !!(game._earth && game._earth.armed);
+    game.selectedMap = _isEarth ? 'gmaps_earth' : 'hub_overworld';
+  }
   try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}   
   
   
@@ -4858,6 +4862,7 @@ function _applyModeClientSetup(mode) {
   const _tag = _lssRoomModeOr(mode || 'classic');
   LSS.MODE = _lssTagMode(_tag);                   // (v43.19) a room has one mode
   _lssSyncCyberToTag(_tag);                       // (v44.11) ...and the flag is its projection
+  try { _lssSyncEarthToTag(_tag); } catch (_) {}   // (v45.47) same, for EARTH
   mode = LSS.MODE;                                // the rest of this function switches on the MODE
   if (mode === 'race') {
     try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
@@ -5024,6 +5029,7 @@ function _updateShipSelectRoom() {
 function _ssModeName() {
   try {
     if (game && game._cyber && game._cyber.armed) return 'CYBERPUNK CITY';
+    if (game && game._earth && game._earth.armed) return 'FREE FLIGHT: EARTH';
     const M = (typeof LSS !== 'undefined') ? LSS.MODE : '';
     if (M === 'race') return 'RACE MODE';
     if (M === 'assault') return 'ASSAULT';
@@ -5251,6 +5257,9 @@ function _visibleMapKeys() {
     return out;
   }
   if (LSS.MODE === 'freeflight') {
+    if (typeof game !== 'undefined' && game && game._earth && game._earth.armed) {
+      return all.filter(k => k === 'gmaps_earth');
+    }
     return all.filter(k => k.indexOf('hub_') === 0);
   }
   if (LSS.MODE === 'endless') {
@@ -25818,6 +25827,15 @@ function _cyberPrePlace() {
     }
   } catch (e) { console.warn('[cyber] preplace:', e); }
 }
+function startEarthFlight() {
+  try {
+    game._earth = { armed: true, origin: null, warps: 0 };
+    if (game._cyber) game._cyber = null;   // one tag at a time
+  } catch (_) {}
+  startFreeFlight('earth');
+}
+try { if (typeof window !== 'undefined') window.startEarthFlight = startEarthFlight; } catch (_) {}
+
 function startCyberpunkCity() {
   _cyberPrefetch();
   game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false,
@@ -28554,49 +28572,76 @@ function _wxMakeClouds() {
     uniforms: {
       uT: _swU.uTime, uCam: { value: new THREE.Vector3() },
       uTile: { value: 26000.0 }, uWind: { value: new THREE.Vector2(14.0, 7.5) },
+      uSpread: { value: 1.0 }, uLift: { value: 1.0 },
+
       uFogC: { value: new THREE.Color(0x9fc8e8) }, uFogD: { value: 0.00011 },
       uSunC: { value: new THREE.Color(1.0, 0.94, 0.82) },
     },
     vertexShader: `
       attribute vec2 aPrm;
-      uniform float uT, uTile;
+      uniform float uT, uTile, uSpread, uLift;
       uniform vec3 uCam;
       uniform vec2 uWind;
-      varying vec2 vUv; varying float vRnd; varying float vDist;
+      varying vec2 vUv; varying float vRnd; varying float vDist; varying float vEdge;
+      varying vec3 vRight; varying vec3 vUp;
       void main() {
         vUv = uv; vRnd = aPrm.x;
         vec3 c = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         float scl = instanceMatrix[0][0];
+        c.xz *= uSpread;
+        scl  *= max(uSpread, uLift);
+        c.y  *= uLift;
+        float tile = uTile * uSpread;
         float wmul = 0.7 + 0.6 * fract(aPrm.x * 7.31);
         c.x += uWind.x * uT * wmul;
         c.z += uWind.y * uT * wmul;
-        float h = uTile * 0.5;
-        c.x = uCam.x + (mod(c.x - uCam.x + h, uTile) - h);
-        c.z = uCam.z + (mod(c.z - uCam.z + h, uTile) - h);
-        vec4 mv = viewMatrix * vec4(c, 1.0);
-        mv.xy += (uv - 0.5) * scl * vec2(2.0, 1.15);
+        float h = tile * 0.5;
+        vec2 d = vec2(c.x - uCam.x, c.z - uCam.z);
+        d = mod(d + h, tile) - h;          // wrap into the box around the camera
+        c.x = uCam.x + d.x;
+        c.z = uCam.z + d.y;
+        vEdge = max(abs(d.x), abs(d.y)) / h;
+        vec3 vw = normalize(uCam - c);
+        vec3 upP = vec3(0.0, 1.0, 0.0) - vw * vw.y;
+        if (dot(upP, upP) < 0.000001) upP = vec3(0.0, 0.0, 1.0) - vw * vw.z;
+        upP = normalize(upP);
+        vec3 rightP = normalize(cross(upP, vw));
+        vRight = rightP; vUp = upP;
+        vec3 off3 = rightP * ((uv.x - 0.5) * 2.00 * scl)
+                  + upP    * ((uv.y - 0.5) * 1.15 * scl);
+        vec4 mv = viewMatrix * vec4(c + off3, 1.0);
         vDist = length(mv.xyz);
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: `
       uniform vec3 uFogC, uSunC;
       uniform float uFogD;
-      varying vec2 vUv; varying float vRnd; varying float vDist;
-      float h21(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
-      float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
-        return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
+      varying vec2 vUv; varying float vRnd; varying float vDist; varying float vEdge;
+      varying vec3 vRight; varying vec3 vUp;
+      float h31(vec3 p){ p = fract(p * vec3(123.34, 456.21, 789.13));
+        p += dot(p, p + 45.32); return fract(p.x * p.y * p.z); }
+      float vn3(vec3 p){ vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+        float a = mix(mix(h31(i), h31(i + vec3(1.0, 0.0, 0.0)), f.x),
+                      mix(h31(i + vec3(0.0, 1.0, 0.0)), h31(i + vec3(1.0, 1.0, 0.0)), f.x), f.y);
+        float b = mix(mix(h31(i + vec3(0.0, 0.0, 1.0)), h31(i + vec3(1.0, 0.0, 1.0)), f.x),
+                      mix(h31(i + vec3(0.0, 1.0, 1.0)), h31(i + vec3(1.0, 1.0, 1.0)), f.x), f.y);
+        return mix(a, b, f.z); }
       void main() {
         vec2 p = vUv * 2.0 - 1.0;
         float r = length(p * vec2(1.0, 1.55));
-        vec2 q = vUv * 3.0 + vRnd * 17.0;
-        float n = 0.6 * vn(q) + 0.3 * vn(q * 2.3) + 0.15 * vn(q * 5.1);
+        float rr = min(1.0, length(p));
+        vec3 vwF = cross(vRight, vUp);
+        vec3 dir = normalize(vRight * p.x + vUp * p.y
+                             + vwF * sqrt(max(0.0, 1.0 - rr * rr)));
+        vec3 q = dir * 2.6 + vRnd * 17.0;
+        float n = 0.70 * vn3(q) + 0.35 * vn3(q * 2.6);
         float a = smoothstep(1.05, 0.25, r + (0.55 - n) * 0.95);
         a *= smoothstep(1.0, 0.66, abs(p.x)) * smoothstep(1.0, 0.66, abs(p.y));
         float fogK = 1.0 - exp(-vDist * uFogD);
         vec3 col = mix(vec3(0.98), uSunC, 0.20 + 0.35 * n);
         col = mix(col, uFogC, fogK);
         a *= 0.52 * (1.0 - fogK * 0.85);
-        a *= 1.0 - smoothstep(19000.0, 23500.0, vDist);
+        a *= 1.0 - smoothstep(0.74, 0.96, vEdge);
         if (a < 0.01) discard;
         gl_FragColor = vec4(col, a);
       }`,
@@ -28933,6 +28978,8 @@ function _wxFrame(dt) {
   }
   const cu = _WX.clouds.material.uniforms;
   cu.uCam.value.copy(camP);
+  if (cu.uSpread) cu.uSpread.value = 1;
+  if (cu.uLift)   cu.uLift.value   = Math.max(1, Math.min(2.3, 1 + (_wxK - 1) * 0.18));
   if (scene.fog && scene.fog.color) {
     cu.uFogC.value.copy(scene.fog.color);
     _WX.dome.material.uniforms.uHaze.value.copy(scene.fog.color);
@@ -50425,7 +50472,8 @@ function commitLoadout(key) {
       _v12mLobbyError('Pick a map (tunnel or Custom Location).');
       throw new Error('lobby: no map');
     }
-    if (isGmapsMap && !hasOverlay) {
+    const _selfSited = !!(map && map.stream && typeof map.lat === 'number' && typeof map.lng === 'number');
+    if (isGmapsMap && !hasOverlay && !_selfSited) {
       _v12mLobbyError('Custom Location selected but no place typed. Type into DROP and click GO, or pick a tunnel map.');
       throw new Error('lobby: gmaps map without overlay');
     }
@@ -63495,6 +63543,7 @@ function _lssCurtainFailsafe() {
   } catch (_) {}
 }
 
+let _lssEarthCurtainTries = 0;
 function hideLoadingOverlay() {
   try {
     if (game && game._cyber && game._cyber.armed && !game._cyber.started &&
@@ -63503,6 +63552,18 @@ function hideLoadingOverlay() {
       setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
       return;
     }
+    if (game && game._earth && game._earth.armed && game.state !== 'playing' &&
+        _lssEarthCurtainTries < 1800) {
+      const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
+      const _building = !!(_w && _w._patches && typeof _w.bootTarget === 'number' &&
+                           _w._patches.size < _w.bootTarget);
+      if (_building) {
+        _lssEarthCurtainTries++;
+        setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
+        return;
+      }
+    }
+    _lssEarthCurtainTries = 0;
   } catch (_) {}
   _lssCurtainTries = 0;
   const ov = document.getElementById('lss-loading-overlay');
@@ -64082,21 +64143,29 @@ function _lssSpeedLerp(base, target, mix) {
 function _lssRoomTag() {
   try {
     const armed = !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed);
+    const earth = !!(typeof game !== 'undefined' && game && game._earth && game._earth.armed);
     const m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
-    return (armed && m === 'freeflight') ? 'cyberpunk' : m;
+    if (m !== 'freeflight') return m;
+    return earth ? 'earth' : (armed ? 'cyberpunk' : m);
   } catch (_) { return 'classic'; }
 }
-function _lssTagMode(tag) { return (tag === 'cyberpunk') ? 'freeflight' : tag; }
+function _lssTagMode(tag) { return (tag === 'cyberpunk' || tag === 'earth') ? 'freeflight' : tag; }
 function _lssTagOf(evt) {
   try {
     if (!evt) return null;
     if (typeof evt.tag === 'string' && evt.tag) return evt.tag;
+    if (evt.earth && evt.mode === 'freeflight') return 'earth';
     if (evt.cyber && evt.mode === 'freeflight') return 'cyberpunk';
     return evt.mode || null;
   } catch (_) { return null; }
 }
 function _lssTagPut(msg, tag) {
-  try { msg.mode = _lssTagMode(tag); msg.cyber = (tag === 'cyberpunk'); msg.tag = tag; } catch (_) {}
+  try {
+    msg.mode = _lssTagMode(tag);
+    msg.cyber = (tag === 'cyberpunk');
+    msg.earth = (tag === 'earth');
+    msg.tag = tag;
+  } catch (_) {}
   return msg;
 }
 function _lssSyncCyberToTag(tag) {
@@ -64118,13 +64187,23 @@ function _lssSyncCyberToTag(tag) {
     }
   } catch (_) {}
 }
-const _LSS_PICKABLE_MODES = ['classic', 'freeflight', 'cyberpunk', 'endless', 'race', 'assault'];
+function _lssSyncEarthToTag(tag) {
+  try {
+    const want = (tag === 'earth');
+    const have = !!(typeof game !== 'undefined' && game && game._earth && game._earth.armed);
+    if (want === have) return;
+    if (typeof game === 'undefined' || !game) return;
+    game._earth = want ? { armed: true, origin: null, warps: 0 } : null;
+  } catch (_) {}
+}
+const _LSS_PICKABLE_MODES = ['classic', 'freeflight', 'cyberpunk', 'earth', 'endless', 'race', 'assault'];
 function _lssModeDisplayName(m) {
   if (m === 'race') return 'RACE MODE';
   if (m === 'assault') return 'ASSAULT';
   if (m === 'endless') return 'ENDLESS';
   if (m === 'freeflight') return 'EXHIBITION';
   if (m === 'cyberpunk') return 'CYBERPUNK CITY';   // (v44.11)
+  if (m === 'earth') return 'FREE FLIGHT: EARTH';   // (v45.47)
   if (m === 'campaign') return 'CAMPAIGN';
   return 'ELIMINATION';
 }
@@ -64134,6 +64213,7 @@ function _lssModeBlurb(m) {
   if (m === 'endless') return 'A cavern without end.';
   if (m === 'freeflight') return 'Patrol the open overworld.';
   if (m === 'cyberpunk') return 'Storm the carrier, or hold the city.';   // (v44.11)
+  if (m === 'earth') return 'The real Earth. Fly anywhere.';   // (v45.47)
   return 'Team elimination.';
 }
 function _lssJoinedMatchInProgress() {
@@ -64834,6 +64914,7 @@ function _lssRoomModeChoose(want) {
   const _t = _lssRoomModeOr(want);
   const m = _lssTagMode(_t);
   try { _lssSyncCyberToTag(_t); } catch (_) {}
+  try { _lssSyncEarthToTag(_t); } catch (_) {}
   try { _lssModeChosen(); } catch (_) {}
   try { LSS.MODE = m; } catch (_) {}
   try { if (typeof net !== 'undefined' && net && net.active) _lssModeDecide(); } catch (_) {}
@@ -72604,6 +72685,20 @@ const MAP_DATA = {
     tunnels: [],
   },
 
+  gmaps_earth: {
+    type: 'gmaps',
+    stream: true,
+    name: 'Earth',
+    thumb: 'map_thumbs/toronto.jpg',
+    description: 'The real Earth, streamed. Fly anywhere; warp to any city.',
+    lat: 43.6426,
+    lng: -79.3860,
+    scale: 7,
+    extentMetres: 2600,
+    palette: [0x1a2848, 0x2a3858, 0x202848, 0x18283a, 0x202848, 0x1a2840, 0x18203a, 0x1c2848],
+    rooms: [],
+    tunnels: [],
+  },
   gmaps_user: {
     type: 'gmaps',
     name: 'Custom Location',
@@ -86446,60 +86541,118 @@ function _lssEarthWallMat() {
 }
 
 let _lssEarthLightSave = null;
-function _lssEarthNightLights(on) {
+let _lssEarthNightK = -1;
+/**
+ * ⭐ DAY OVER WILDERNESS, DUSK OVER CITY — a CONTINUOUS blend, not a switch.
+ *
+ * The dusk rig was applied to every real-world level unconditionally, which is
+ * right for Hong Kong and wrong for everywhere that is not a city. Owner:
+ * "areas where there's no buildings or not many buildings should be daylight...
+ * rocky mountains for example, banff". A night wilderness is just black; the
+ * whole reason to fly to Banff is to see it.
+ *
+ * `k` is 0 (full daylight, the weather dome's own sky) to 1 (the hub's CITY
+ * DUSK). Every value is LERPED from the daylight baseline toward the dusk
+ * target, so flying out of a city into open country walks the sky up rather
+ * than flipping it. The baseline is captured ONCE, before anything is touched,
+ * and every later call re-derives from it — applying a blend on top of a
+ * blended state would compound and never come back.
+ */
+function _lssEarthApplyDayNight(k) {
   if (typeof scene === 'undefined' || !scene) return;
   const D = (typeof _HUB_ZONES !== 'undefined' && _HUB_ZONES && _HUB_ZONES.DUSK) || null;
-  if (on) {
-    if (_lssEarthLightSave) return;
+  if (!D) return;
+  k = Math.max(0, Math.min(1, k));
+  if (!_lssEarthLightSave) {
     _lssEarthLightSave = {
       amb: ambientLight.intensity, ambC: ambientLight.color.getHex(),
       key: dirLight.intensity, fill: dirLight2.intensity, rim: dirLight3.intensity,
       hemi: hemiLight.intensity, hSky: hemiLight.color.getHex(), hGnd: hemiLight.groundColor.getHex(),
-      fogC: (scene.fog && scene.fog.color) ? scene.fog.color.getHex() : null, fx: null
+      fogC: (scene.fog && scene.fog.color) ? scene.fog.color.getHex() : null,
+      dome: null, fx: null
     };
-    if (!D) return;
-    ambientLight.intensity *= D.amb;            // 4.4x
-    if (D.ambColor != null) ambientLight.color.setHex(D.ambColor);
-    dirLight.intensity  *= D.key;               // 0.14x — this is what makes it night
-    dirLight2.intensity *= D.fill;
-    dirLight3.intensity *= D.rim;
-    hemiLight.intensity *= D.hemi;
-    if (D.hemiSky != null) hemiLight.color.setHex(D.hemiSky);
-    if (D.hemiGnd != null) hemiLight.groundColor.setHex(D.hemiGnd);
-    if (scene.fog && scene.fog.color && D.fog != null) scene.fog.color.setHex(D.fog);
     try {
-      if (typeof _WX !== 'undefined' && _WX && _WX.dome && _WX.dome.material &&
-          _WX.dome.material.uniforms) {
+      if (typeof _WX !== 'undefined' && _WX && _WX.dome && _WX.dome.material && _WX.dome.material.uniforms) {
         const u = _WX.dome.material.uniforms;
-        if (u.uZenith)  u.uZenith.value.setHex(D.zen);
-        if (u.uHorizon) u.uHorizon.value.setHex(D.hor);
-        if (u.uHaze)    u.uHaze.value.setHex(D.fog);
-        if (u.uBelow)   u.uBelow.value.setHex(D.fog);
+        _lssEarthLightSave.dome = {
+          zen: u.uZenith ? u.uZenith.value.getHex() : null,
+          hor: u.uHorizon ? u.uHorizon.value.getHex() : null,
+          haze: u.uHaze ? u.uHaze.value.getHex() : null,
+          below: u.uBelow ? u.uBelow.value.getHex() : null
+        };
       }
     } catch (_) {}
     try {
       if (typeof postFX !== 'undefined' && postFX.brightMat && postFX.compositeMat) {
         _lssEarthLightSave.fx = { th: postFX.brightMat.uniforms.threshold.value,
                                   st: postFX.compositeMat.uniforms.bloomStrength.value };
-        if (D.bloomThreshold != null) postFX.brightMat.uniforms.threshold.value = D.bloomThreshold;
-        if (D.bloomStrength != null) postFX.compositeMat.uniforms.bloomStrength.value = D.bloomStrength;
       }
     } catch (_) {}
-  } else if (_lssEarthLightSave) {
-    const v = _lssEarthLightSave;
-    ambientLight.intensity = v.amb; ambientLight.color.setHex(v.ambC);
-    dirLight.intensity = v.key; dirLight2.intensity = v.fill; dirLight3.intensity = v.rim;
-    hemiLight.intensity = v.hemi;
-    hemiLight.color.setHex(v.hSky); hemiLight.groundColor.setHex(v.hGnd);
-    if (v.fogC != null && scene.fog && scene.fog.color) scene.fog.color.setHex(v.fogC);
-    try {
-      if (v.fx && typeof postFX !== 'undefined' && postFX.brightMat && postFX.compositeMat) {
-        postFX.brightMat.uniforms.threshold.value = v.fx.th;
-        postFX.compositeMat.uniforms.bloomStrength.value = v.fx.st;
-      }
-    } catch (_) {}
-    _lssEarthLightSave = null;
   }
+  if (Math.abs(k - _lssEarthNightK) < 0.004) return;   // nothing worth re-writing
+  _lssEarthNightK = k;
+  const v = _lssEarthLightSave;
+  const lerp = (a, b) => a + (b - a) * k;
+  const mixHex = (a, b) => {
+    const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+    const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+    return ((Math.round(lerp(ar, br)) << 16) | (Math.round(lerp(ag, bg)) << 8) | Math.round(lerp(ab, bb)));
+  };
+  ambientLight.intensity = lerp(v.amb, v.amb * D.amb);
+  if (D.ambColor != null) ambientLight.color.setHex(mixHex(v.ambC, D.ambColor));
+  dirLight.intensity  = lerp(v.key,  v.key  * D.key);
+  dirLight2.intensity = lerp(v.fill, v.fill * D.fill);
+  dirLight3.intensity = lerp(v.rim,  v.rim  * D.rim);
+  hemiLight.intensity = lerp(v.hemi, v.hemi * D.hemi);
+  if (D.hemiSky != null) hemiLight.color.setHex(mixHex(v.hSky, D.hemiSky));
+  if (D.hemiGnd != null) hemiLight.groundColor.setHex(mixHex(v.hGnd, D.hemiGnd));
+  if (scene.fog && scene.fog.color && v.fogC != null && D.fog != null) {
+    scene.fog.color.setHex(mixHex(v.fogC, D.fog));
+  }
+  try {
+    if (v.dome && typeof _WX !== 'undefined' && _WX && _WX.dome && _WX.dome.material &&
+        _WX.dome.material.uniforms) {
+      const u = _WX.dome.material.uniforms;
+      if (u.uZenith && v.dome.zen != null)  u.uZenith.value.setHex(mixHex(v.dome.zen, D.zen));
+      if (u.uHorizon && v.dome.hor != null) u.uHorizon.value.setHex(mixHex(v.dome.hor, D.hor));
+      if (u.uHaze && v.dome.haze != null)   u.uHaze.value.setHex(mixHex(v.dome.haze, D.fog));
+      if (u.uBelow && v.dome.below != null) u.uBelow.value.setHex(mixHex(v.dome.below, D.fog));
+    }
+  } catch (_) {}
+  try {
+    if (v.fx && typeof postFX !== 'undefined' && postFX.brightMat && postFX.compositeMat) {
+      if (D.bloomThreshold != null) postFX.brightMat.uniforms.threshold.value = lerp(v.fx.th, D.bloomThreshold);
+      if (D.bloomStrength != null) postFX.compositeMat.uniforms.bloomStrength.value = lerp(v.fx.st, D.bloomStrength);
+    }
+  } catch (_) {}
+}
+function _lssEarthNightLights(on) {
+  if (on) { _lssEarthApplyDayNight(1); return; }
+  if (!_lssEarthLightSave) return;
+  const v = _lssEarthLightSave;
+  ambientLight.intensity = v.amb; ambientLight.color.setHex(v.ambC);
+  dirLight.intensity = v.key; dirLight2.intensity = v.fill; dirLight3.intensity = v.rim;
+  hemiLight.intensity = v.hemi;
+  hemiLight.color.setHex(v.hSky); hemiLight.groundColor.setHex(v.hGnd);
+  if (v.fogC != null && scene.fog && scene.fog.color) scene.fog.color.setHex(v.fogC);
+  try {
+    if (v.dome && typeof _WX !== 'undefined' && _WX && _WX.dome && _WX.dome.material &&
+        _WX.dome.material.uniforms) {
+      const u = _WX.dome.material.uniforms;
+      if (u.uZenith && v.dome.zen != null)  u.uZenith.value.setHex(v.dome.zen);
+      if (u.uHorizon && v.dome.hor != null) u.uHorizon.value.setHex(v.dome.hor);
+      if (u.uHaze && v.dome.haze != null)   u.uHaze.value.setHex(v.dome.haze);
+      if (u.uBelow && v.dome.below != null) u.uBelow.value.setHex(v.dome.below);
+    }
+  } catch (_) {}
+  try {
+    if (v.fx && typeof postFX !== 'undefined' && postFX.brightMat && postFX.compositeMat) {
+      postFX.brightMat.uniforms.threshold.value = v.fx.th;
+      postFX.compositeMat.uniforms.bloomStrength.value = v.fx.st;
+    }
+  } catch (_) {}
+  _lssEarthLightSave = null;
+  _lssEarthNightK = -1;
 }
 
 /**
@@ -86529,6 +86682,11 @@ class LSSEarthTiles {
     this.buildingExtentMul  = opts.buildingExtentMul  ?? 2.2;   // see _loadBuildings
     this.farBuildingMinH    = opts.farBuildingMinH    ?? 26;    // metres, beyond the core ring
     this.podWidenMul        = opts.podWidenMul        ?? 1.9;   // see the pod note in _extrudeBuilding
+    this.projOrigin         = opts.projOrigin         ?? null;
+    this.prefetchedWays     = opts.prefetchedWays     ?? null;
+    this.ownsFog            = opts.ownsFog            ?? true;
+    this.forceWaterLevel    = opts.forceWaterLevel    ?? null;
+    this.forceBaseH         = opts.forceBaseH         ?? null;
     this.overpassUrl     = opts.overpassUrl     ?? 'https://overpass-api.de/api/interpreter';
     this.overpassMirrors = opts.overpassMirrors ?? [
       'https://overpass.kumi.systems/api/interpreter',
@@ -86636,8 +86794,10 @@ class LSSEarthTiles {
    */
   _xf() {
     const g = this.group;
-    const s = (g.scale && g.scale.x) || 1;
-    return { s, ox: g.position.x, oy: g.position.y, oz: g.position.z };
+    g.updateWorldMatrix(true, false);
+    const e = g.matrixWorld.elements;
+    const s = Math.hypot(e[0], e[1], e[2]) || 1;
+    return { s, ox: e[12], oy: e[13], oz: e[14] };
   }
 
   collide(pos, vel, pad) {
@@ -86753,10 +86913,36 @@ class LSSEarthTiles {
     return best > md ? Infinity : best * X.s;
   }
 
+  /**
+   * ⚠ THE PROJECTION ORIGIN IS NOT THE PATCH CENTRE.
+   * A patch used to define both: its own lat/lng was the map origin AND the
+   * middle of its tiles. That is fine for one static patch and useless for a
+   * streamed world, where several patches covering different ground have to
+   * agree on where world (0,0) is or they will not line up. `projOrigin` pins
+   * the frame for every patch in a session; `lat`/`lng` only say which ground
+   * THIS patch covers.
+   *
+   * Keeping ONE fixed origin (rather than a floating one that re-centres on the
+   * player) is deliberate: it means flight never has to shift the player,
+   * entities, network players or the champion field mid-air. At 7 units/m,
+   * float32 holds sub-centimetre precision out past 100 km, which is far beyond
+   * any continuous flight — and warp, which does move the origin, is allowed a
+   * loading screen.
+   */
   _setupProjection() {
     const myOf = (lat) => _leR * Math.log(Math.tan(Math.PI / 4 + lat * _leDEG / 2));
-    this._proj = { mx0: _leR * this.lng * _leDEG, my0: myOf(this.lat),
-                   k: Math.cos(this.lat * _leDEG), myOf };
+    const o = this.projOrigin || { lat: this.lat, lng: this.lng };
+    this._proj = { mx0: _leR * o.lng * _leDEG, my0: myOf(o.lat),
+                   k: Math.cos(o.lat * _leDEG), myOf };
+  }
+  /** Inverse of project(): local world XZ -> lat/lng. Needed to ask what ground
+   *  a point in the world corresponds to when streaming ahead of the player. */
+  unproject(x, z) {
+    const p = this._proj;
+    const mx = p.mx0 + x / p.k;
+    const my = p.my0 - z / p.k;
+    return { lat: (2 * Math.atan(Math.exp(my / _leR)) - Math.PI / 2) / _leDEG,
+             lng: (mx / _leR) / _leDEG };
   }
   /** lat/lng -> local world XZ (Y up, +X east, +Z south). */
   project(lat, lng) {
@@ -86843,7 +87029,8 @@ class LSSEarthTiles {
         this._grid = g;
         this._bounds = { X0: g.X0, X1: g.X1, Z0: g.Z0, Z1: g.Z1 };
         this._baseH = 0;
-        this._baseH = this._sampleRing(g, 0, 0);
+        this._baseH = (typeof this.forceBaseH === 'number')
+          ? this.forceBaseH : this._sampleRing(g, 0, 0);
       }
     }
     this.stats.rings = this._grids.length;
@@ -86887,15 +87074,32 @@ class LSSEarthTiles {
     let domV = 0, domC = 0;
     for (const [v, c] of hist) if (c > domC) { domC = c; domV = v; }
     let level = (k === 0) ? null : this._waterLevelRaw;
-    if (k === 0 && domC >= heights.length * 0.01) level = domV;
+    if (k === 0) {
+      if (typeof this.forceWaterLevel === 'number') level = this.forceWaterLevel;
+      else if (domC >= heights.length * 0.01) level = domV;
+    }
     if (level !== null && level !== undefined) {
-      const levels = new Set();
+      const levels = new Set([level]);
       for (const [v, c] of hist) {
-        if (Math.abs(v - level) <= 2.0 && c >= heights.length * 0.0002) levels.add(v);
+        if (v !== level && Math.abs(v - level) <= 0.5 && c >= heights.length * 0.0025) levels.add(v);
       }
       const wet = new Uint8Array(w * h);
+      for (let i = 0; i < heights.length; i++) if (levels.has(heights[i])) wet[i] = 1;
       let nWet = 0;
-      for (let i = 0; i < heights.length; i++) { if (levels.has(heights[i])) { wet[i] = 1; nWet++; } }
+      {
+        const keep = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          if (!wet[i]) continue;
+          let n = 0;
+          if (x > 0 && wet[i - 1]) n++;
+          if (x < w - 1 && wet[i + 1]) n++;
+          if (y > 0 && wet[i - w]) n++;
+          if (y < h - 1 && wet[i + w]) n++;
+          if (n >= 2) { keep[i] = 1; nWet++; }
+        }
+        wet.set(keep);
+      }
       if (nWet > heights.length * 0.004) {
         let amt = new Float32Array(w * h);
         for (let i = 0; i < wet.length; i++) amt[i] = wet[i];
@@ -86920,11 +87124,13 @@ class LSSEarthTiles {
           }
         }
         const D = this.seaDepth;
-        for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = level - D * Math.min(1, amt[i] * 1.25);
+        const surface = (typeof this.forceWaterLevel === 'number') ? this.forceWaterLevel : level;
+        for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = surface - D * Math.min(1, amt[i] * 1.25);
         this._hasSea = true;
-        if (k === 0) this._waterLevelRaw = level;
+        if (k === 0) this._waterLevelRaw = surface;
         if (k === 0) this.stats.seaPct = Math.round(1000 * nWet / heights.length) / 10;
-        if (k === 0) this.stats.waterLevelM = Math.round(level * 10) / 10;
+        if (k === 0) this.stats.waterLevelM = Math.round(surface * 100) / 100;
+        if (k === 0) this.stats.detectedLevelM = Math.round(level * 100) / 100;
       }
     }
 
@@ -87038,7 +87244,7 @@ class LSSEarthTiles {
 
   _buildTerrainMesh() {
     for (let k = 0; k < this._grids.length; k++) this._buildRingMesh(k);
-    this._applyFog();
+    if (this.ownsFog) this._applyFog();
   }
 
   _buildRingMesh(k) {
@@ -87062,6 +87268,8 @@ class LSSEarthTiles {
       const z0 = g.Z0 + (g.Z1 - g.Z0) * (cj / D), z1 = g.Z0 + (g.Z1 - g.Z0) * ((cj + 1) / D);
       if (inner && x0 >= inner.X0 - 0.5 && x1 <= inner.X1 + 0.5 &&
                    z0 >= inner.Z0 - 0.5 && z1 <= inner.Z1 + 0.5) continue;
+      const H = this.holeHalfMetres;
+      if (H > 0 && x0 >= -H && x1 <= H && z0 >= -H && z1 <= H) continue;
       const vcount = (N + 1) * (N + 1);
       const pos = new Float32Array(vcount * 3), uv = new Float32Array(vcount * 2);
       let p = 0, q = 0;
@@ -87102,16 +87310,135 @@ class LSSEarthTiles {
    * measured from the origin's own elevation, and the group carries the scale
    * and the pivot offset _lssGmapsRefinePivot writes.
    */
+  /**
+   * Drive the facade windows from the actual sun.
+   *
+   * The hub city is permanently at dusk, so _hcTowerMat can light every window
+   * unconditionally. A real-world level inherits whatever sky the map preset
+   * picked, and the first build ran at local noon — thousands of buildings
+   * glowing ice/sodium/rose under a midday sun, which read as confetti. Windows
+   * are a function of sun elevation AND intensity: elevation alone fails,
+   * because the dusk rig dims the sun where it stands rather than moving it
+   * below the horizon. A residual 6% by day (real glass does carry interior
+   * light) ramping to full below the horizon.
+   *
+   * ⚠ Keep this method BELOW collide/raycast, not above _setupProjection. It
+   * used to sit between them and an index splice from `collide` to
+   * `_setupProjection` deleted it silently — it was missing for several builds
+   * and nobody saw it, because the night rig makes it night regardless.
+   */
+  /**
+   * ⭐ ONE BLEND DRIVES BOTH THE SKY AND THE WINDOWS.
+   *
+   * This used to derive the window glow from the SUN — elevation and intensity —
+   * while `_lssEarthApplyDayNight` derived the sky from BUILDING DENSITY. The
+   * two then disagreed: measured over Banff, density 24 put the sky at k=0.455
+   * (partly dusk, ambient lifted, sun dimmed to 1.4) while the sun-based rule
+   * read that same dimmed sun as full daylight and pinned the glow to its 0.06
+   * floor — an effective 0.013 on a sunlit face, i.e. invisible. Owner: "i went
+   * to banff and the cyberpunk overlay wasn't there".
+   *
+   * Worse, the sun IS the thing the dusk blend dims, so the two were circular.
+   * Density is the honest input: it is what decides whether this is a city at
+   * all. `setWindowGlow` takes that one number; `updateNight` now only keeps the
+   * sun DIRECTION current, for the per-face dimming inside the shader.
+   */
+  setWindowGlow(v) {
+    const m = this._wallMat;
+    if (!m || !m.userData || !m.userData.uLeNight) return;
+    m.userData.uLeNight.value = Math.max(0, Math.min(1, v));
+  }
+  updateNight(scene) {
+    const m = this._wallMat;
+    if (!m || !m.userData || !m.userData.uSunV) return;
+    let best = null, bi = -1;
+    scene.traverse((o) => { if (o.isDirectionalLight && o.intensity > bi) { bi = o.intensity; best = o; } });
+    if (best) m.userData.uSunV.value.copy(best.position).normalize();
+  }
+
   /** Terrain height in WORLD units at a WORLD xz — what the shore-mask bake wants. */
   groundYWorld(x, z) {
     const X = this._xf();
     return this.heightAt((x - X.ox) / X.s, (z - X.oz) / X.s) * X.s + X.oy;
   }
 
+  /**
+   * ⭐ SPAWN POINTS CLEAR OF THE CITY.
+   *
+   * A gmaps level has no rooms and no corridors, so getValidSpawnPoint hits its
+   * `return new THREE.Vector3(0,0,0)` fallback — the map origin, at ground
+   * level, which over a real city is the inside of whatever building stands at
+   * the lat/lng you picked. Owner: "we keep spawning inside a building".
+   *
+   * Rather than hunt for a gap at street level, spawn ABOVE THE ROOFS: for each
+   * candidate the ceiling is the tallest building within `clear` metres, so the
+   * point is airborne and unobstructed by construction. This is a flight game;
+   * starting in the air is what it wants anyway.
+   *
+   * Returns WORLD positions, ready for game.corridorPoints.
+   */
+  spawnPoints(n, clearM) {
+    const out = [];
+    if (!this._bounds) return out;
+    const X = this._xf();
+    const sc = X.s;
+    const clear = clearM || 140;
+    const b = this._bounds;
+    const rx = (b.X1 - b.X0) * 0.34, rz = (b.Z1 - b.Z0) * 0.34;
+    const N = Math.max(4, n || 24);
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      const rr = 0.45 + 0.5 * ((i % 3) / 2);
+      const x = Math.cos(a) * rx * rr, z = Math.sin(a) * rz * rr;
+      let top = this.heightAt(x, z);
+      const g = this._cgrid;
+      if (g) {
+        const i0 = Math.max(0, ((x - clear - g.X0) / g.cell) | 0);
+        const i1 = Math.min(g.gx - 1, ((x + clear - g.X0) / g.cell) | 0);
+        const j0 = Math.max(0, ((z - clear - g.Z0) / g.cell) | 0);
+        const j1 = Math.min(g.gz - 1, ((z + clear - g.Z0) / g.cell) | 0);
+        for (let j = j0; j <= j1; j++) for (let ii = i0; ii <= i1; ii++) {
+          const list = g.cells[j * g.gx + ii];
+          if (!list) continue;
+          for (let k = 0; k < list.length; k++) if (list[k].top > top) top = list[k].top;
+        }
+      }
+      out.push({
+        x: x * sc + X.ox,
+        y: (top * sc + X.oy) + 260,   // clearance above the tallest roof
+        z: z * sc + X.oz,
+        team: (x < 0) ? 'A' : 'B'
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Buildings per square kilometre in this patch — what decides whether the sky
+   * over you is a city dusk or open daylight (see _lssEarthApplyDayNight).
+   * Counted over the whole patch rather than a radius around the ship, because
+   * it only has to answer "is this a city". Toronto's core measures ~100/km2;
+   * Banff would be ~0.
+   */
+  buildingDensity() {
+    const b = this._bldBounds || this._bounds;
+    if (!b || !this._bldList) return 0;
+    const km2 = Math.max(0.01, ((b.X1 - b.X0) / 1000) * ((b.Z1 - b.Z0) / 1000));
+    return this._bldList.length / km2;
+  }
+
+  /** How far this patch's terrain reaches, in WORLD units. */
+  farUnits() {
+    const sc = this._xf().s;
+    if (this.stats && this.stats.farUnits) return this.stats.farUnits;
+    const g = this._grids && this._grids[this._grids.length - 1];
+    return g ? ((g.X1 - g.X0) / 2) * sc : 20000;
+  }
+
   seaLevelWorld() {
-    const s = (this.group.scale && this.group.scale.x) || 1;
+    const X = this._xf();
     const L = (typeof this._waterLevelRaw === 'number') ? this._waterLevelRaw : 0;
-    return ((L - this._baseH) * this.heightScale) * s + this.group.position.y;
+    return ((L - this._baseH) * this.heightScale) * X.s + X.oy;
   }
 
   /**
@@ -87131,8 +87458,17 @@ class LSSEarthTiles {
     const WL = this.seaLevelWorld();
     try {
       _swBuildHubWater({ WL, YFLOOR: WL - this.seaDepth * this.heightScale *
-                         ((this.group.scale && this.group.scale.x) || 1) });
+                         this._xf().s });
       this.stats.waterWL = Math.round(WL);
+      try {
+        const w = game._hubWater;
+        if (w && w.scale) {
+          const k = Math.max(1, Math.min(8, this.farUnits() * 2.2 / 48000));
+          w.scale.set(k, k, k);
+          w.updateMatrix();
+          this.stats.waterScale = +k.toFixed(2);
+        }
+      } catch (_) {}
       return true;
     } catch (e) { console.warn('[lss-earth] water build failed:', e); return false; }
   }
@@ -87155,10 +87491,10 @@ class LSSEarthTiles {
   _applyFog() {
     if (typeof scene === 'undefined' || !scene || !this._grids.length) return;
     const g = this._grids[this._grids.length - 1];
-    const s = (this.group.scale && this.group.scale.x) || 1;
+    const s = this._xf().s;
     const far = Math.max(1, ((g.X1 - g.X0) / 2) * s);
     this.stats.farUnits = Math.round(far);
-    const d = Math.sqrt(Math.log(10)) / far;
+    const d = Math.sqrt(Math.log(10)) / (far * 0.78);
     if (scene.fog && typeof scene.fog.density === 'number') {
       this._savedFog = { d: scene.fog.density, c: scene.fog.color.getHex() };
       scene.fog.density = d;
@@ -87255,12 +87591,18 @@ class LSSEarthTiles {
       + ');out geom;';
     const key = 'v2:' + s.toFixed(5) + ',' + w.toFixed(5) + ',' + n.toFixed(5) + ',' + e.toFixed(5);
 
-    let data = await _leCacheGet(key);
-    if (data) { this.stats.osmCached = true; this._progress('buildings: from cache', 0.8); }
-    else {
-      data = await this._overpassFetch(q);
-      this.stats.osmCached = false;
-      _leCachePut(key, data);
+    let data;
+    if (this.prefetchedWays) {
+      data = { elements: this.prefetchedWays };
+      this.stats.osmCached = 'shared';
+    } else {
+      data = await _leCacheGet(key);
+      if (data) { this.stats.osmCached = true; this._progress('buildings: from cache', 0.8); }
+      else {
+        data = await this._overpassFetch(q);
+        this.stats.osmCached = false;
+        _leCachePut(key, data);
+      }
     }
     if (this._disposed) return;
 
@@ -87406,6 +87748,10 @@ class LSSEarthTiles {
     const groundY = this.heightAt(wx, wz);
     let baseY = Math.min(lowY, groundY);
     height += (groundY - baseY);
+    if (this._hasSea && typeof this._waterLevelRaw === 'number') {
+      const _wlLocal = (this._waterLevelRaw - this._baseH) * this.heightScale;
+      if (baseY < _wlLocal) baseY = _wlLocal;
+    }
     const _minH = (() => {
       const mh = parseFloat(tags.min_height);
       if (isFinite(mh) && mh > 0) return mh;
@@ -87627,6 +87973,479 @@ class LSSEarthTiles {
     inst.castShadow = false; inst.receiveShadow = false;
     this.group.add(inst);
     this.stats.ads = placed;
+  }
+}
+
+class LSSEarthWorld {
+  constructor(opts = {}) {
+    this.group = new THREE.Group();
+    this.group.name = 'LSSEarthWorld';
+    this.errorTarget = 8;
+    this.errorThreshold = 8;
+
+    this.patchMetres   = opts.patchMetres   ?? 2600;  // one near patch's extent
+    this.nearRadius    = opts.nearRadius    ?? 1;     // patches each way -> 3x3
+    this.farMetres     = opts.farMetres     ?? 9000;  // the horizon patch
+    this.scale         = opts.scale         ?? 7;
+    this.maxConcurrent = opts.maxConcurrent ?? 1;     // patch builds in flight
+    this.patchOpts     = opts.patchOpts     ?? {};
+    this.onProgress    = opts.onProgress    ?? null;
+
+    this._patches = new Map();   // "cx,cy" -> LSSEarthTiles
+    this._bldWays = null; this._bldRegionKey = null; this._bldRegionPending = null;
+    this._bldCentre = null; this._probe = null;
+    this._bldFail = 0; this._bldFailAt = 0; this._bldCooldown = 0;
+    this._bldRetryTimer = null;
+    this._glow = null;
+    this.bootTarget = (this.nearRadius >= 1) ? 5 : 1;
+    this._baseH = null;       // the shared y=0 datum; see _ensureFar
+    this._farReady = false;   // see streamUpdate
+    this._pending = new Set();
+    this._far = null;
+    this._farCell = null;
+    this._listeners = {};
+    this._disposed = false;
+    this.ready = null;
+    this.stats = { patches: 0, buildings: 0, loads: 0, ms: 0 };
+  }
+
+  addEventListener(t, cb) { (this._listeners[t] || (this._listeners[t] = [])).push(cb); }
+  removeEventListener(t, cb) {
+    const a = this._listeners[t]; if (!a) return;
+    const i = a.indexOf(cb); if (i >= 0) a.splice(i, 1);
+  }
+  _emit(t, e) { for (const cb of (this._listeners[t] || [])) { try { cb(e); } catch (_) {} } }
+  setCamera() {} setResolutionFromRenderer() {}
+  update() {}
+  _progress(m, f) { if (this.onProgress) { try { this.onProgress(m, f); } catch (_) {} } }
+
+  /** RADIANS, like GoogleTilesRenderer. Pins the origin and builds the first patches. */
+  setLatLonToYUp(latRad, lonRad) {
+    this.lat = latRad / _leDEG;
+    this.lng = lonRad / _leDEG;
+    this.origin = { lat: this.lat, lng: this.lng };
+    this._cell = this.patchMetres;
+    this.ready = this._boot().catch((e) => {
+      console.error('[lss-earth-world] boot failed:', e);
+      this._emit('load-error', { error: e, message: String((e && e.message) || e) });
+    });
+    return this.ready;
+  }
+
+  async _boot() {
+    const t0 = performance.now();
+    this._bldCentre = { cx: 0, cy: 0 };
+    await this._ensureFar(0, 0, '0:0');
+    const R = this.nearRadius;
+    const cells = [];
+    for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) cells.push({ dx, dy, d: dx * dx + dy * dy });
+    cells.sort((a, b) => a.d - b.d);
+    this.bootTarget = cells.filter((c) => c.d <= 1).length;   // same number, now exact
+    const core = cells.filter((c) => c.d <= 1);
+    this._progress('city: ' + core.length + ' districts', 0.5);
+    await Promise.all(core.map((c) => this._ensurePatch(c.dx, c.dy)));
+    if (this._disposed) return;
+    this.stats.ms = Math.round(performance.now() - t0);
+    this._emit('load-complete', {});
+    for (const c of cells) {
+      if (this._disposed) return;
+      if (c.d <= 1) continue;
+      await this._ensurePatch(c.dx, c.dy);
+    }
+    this.stats.msAll = Math.round(performance.now() - t0);
+  }
+
+  _key(cx, cy) { return cx + ',' + cy; }
+
+  /**
+   * World units per LOCAL metre, measured off the scene graph rather than
+   * trusted from this.scale. The patches carry this.scale and hang under
+   * this.group, so the true figure is the product -- and if anything scales
+   * the world group (the shared gmaps level setup used to, which is what made
+   * it 49), every query below follows the geometry instead of drifting from
+   * it. See the _xf() note in LSSEarthTiles.
+   */
+  _unitsPerMetre() {
+    this.group.updateWorldMatrix(true, false);
+    const e = this.group.matrixWorld.elements;
+    return (Math.hypot(e[0], e[1], e[2]) || 1) * this.scale;
+  }
+
+  /**
+   * Set the world scale WITHOUT scaling the group. The patches are what carry
+   * it (see _mkPatch); scaling the group too multiplies the two.
+   */
+  applyScale(n) {
+    if (typeof n !== 'number' || !(n > 0)) return;
+    this.scale = n;
+    this.group.scale.setScalar(1);
+    for (const p of this._patches.values()) p.group.scale.setScalar(n);
+    if (this._far) this._far.group.scale.setScalar(n);
+  }
+
+  /** Which near-patch cell a LOCAL-metre xz falls in. */
+  _cellOf(x, z) {
+    return { cx: Math.floor(x / this._cell + 0.5), cy: Math.floor(z / this._cell + 0.5) };
+  }
+  /** Centre of a cell in LOCAL metres, then as lat/lng via the shared frame. */
+  _cellLatLng(cx, cy) {
+    const probe = this._any();
+    const x = cx * this._cell, z = cy * this._cell;
+    if (probe) return probe.unproject(x, z);
+    const myOf = (lat) => _leR * Math.log(Math.tan(Math.PI / 4 + lat * _leDEG / 2));
+    const k = Math.cos(this.origin.lat * _leDEG);
+    const mx = _leR * this.origin.lng * _leDEG + x / k;
+    const my = myOf(this.origin.lat) - z / k;
+    return { lat: (2 * Math.atan(Math.exp(my / _leR)) - Math.PI / 2) / _leDEG,
+             lng: (mx / _leR) / _leDEG };
+  }
+  _any() { for (const p of this._patches.values()) return p; return this._far; }
+
+  _mkPatch(lat, lng, extra) {
+    const o = Object.assign({}, this.patchOpts, extra || {}, {
+      projOrigin: this.origin,
+      extentMetres: extra && extra.extentMetres,
+      onProgress: (m, f) => this._progress(m, f)
+    });
+    const t = new LSSEarthTiles(o);
+    t.group.scale.setScalar(this.scale);
+    t.setLatLonToYUp(lat * _leDEG, lng * _leDEG);
+    return t;
+  }
+
+  /**
+   * ⭐ ONE BUILDING QUERY FOR THE WHOLE NEAR RING.
+   *
+   * Nine patches must not be nine Overpass queries — that is a guaranteed 429
+   * on the first flight, and it is also why the world used to go playable with
+   * only the centre patch built and the rest popping in afterwards. Fetching
+   * the region up front is what makes it possible to WAIT for the full ring in
+   * the loading screen, which is what the owner actually asked for: "the map
+   * loaded after we got in... so it had a pop in effect".
+   *
+   * Shape matches a patch's own query: full detail over the middle, and outside
+   * it only buildings tall enough to read at range, filtered SERVER-SIDE.
+   */
+  async _ensureBldRegion(cx, cy, force) {
+    const r = this.nearRadius + 1;
+    const key = cx + ':' + cy;
+    if (this._bldRegionKey === key && this._bldWays) return this._bldWays;
+    if (this._bldRegionPending === key) return this._bldWaysPromise;
+    if (!force && this._bldFailAt && (Date.now() - this._bldFailAt) < this._bldCooldown) return [];
+    this._bldRegionPending = key;
+    this._bldWaysPromise = (async () => {
+      const probe = this._any() || this._mkProbe();
+      const ll = (x, z) => this._cellLatLng(x / this._cell, z / this._cell);
+      const half = (r + 0.5) * this._cell;
+      const nw = ll(cx * this._cell - half, cy * this._cell - half);
+      const se = ll(cx * this._cell + half, cy * this._cell + half);
+      const ch = this._cell * 0.5;
+      const cnw = ll(cx * this._cell - ch, cy * this._cell - ch);
+      const cse = ll(cx * this._cell + ch, cy * this._cell + ch);
+      const S = Math.min(nw.lat, se.lat), N = Math.max(nw.lat, se.lat);
+      const W = Math.min(nw.lng, se.lng), E = Math.max(nw.lng, se.lng);
+      const cS = Math.min(cnw.lat, cse.lat), cN = Math.max(cnw.lat, cse.lat);
+      const cW = Math.min(cnw.lng, cse.lng), cE = Math.max(cnw.lng, cse.lng);
+      const core = '(' + cS + ',' + cW + ',' + cN + ',' + cE + ')';
+      const wide = '(' + S + ',' + W + ',' + N + ',' + E + ')';
+      const minH = (this.patchOpts && this.patchOpts.farBuildingMinH) || 26;
+      const q = '[out:json][timeout:60];('
+        + 'way["building"]' + core + ';'
+        + 'way["building:part"]' + core + ';'
+        + 'way["building"](if:number(t["height"])>=' + minH + ')' + wide + ';'
+        + ');out geom;';
+      const ckey = 'w2:' + S.toFixed(4) + ',' + W.toFixed(4) + ',' + N.toFixed(4) + ',' + E.toFixed(4);
+      let data = await _leCacheGet(ckey);
+      if (!data) {
+        this._progress('city: one query for the whole neighbourhood...', 0.4);
+        try {
+          data = await probe._overpassFetch(q);
+          _leCachePut(ckey, data);
+        } catch (e) {
+          console.warn('[lss-earth-world] region buildings failed:', e);
+          this._bldRegionPending = null;
+          this._bldFail++;
+          this._bldFailAt = Date.now();
+          this._bldCooldown = Math.min(60000, 15000 * Math.pow(2, this._bldFail - 1));
+          this.stats.buildingError = (e && e.message) || String(e);
+          this._emit('buildings-failed', { error: e, message: this.stats.buildingError,
+                                           retryInMs: this._bldCooldown, attempt: this._bldFail });
+          this._scheduleBldRetry(cx, cy);
+          return [];
+        }
+      }
+      const seen = new Set();
+      const ways = (data.elements || []).filter((el) => {
+        if (el.type !== 'way' || !el.geometry) return false;
+        if (seen.has(el.id)) return false;
+        seen.add(el.id); return true;
+      });
+      this._bldWays = ways;
+      this._bldRegionKey = key;
+      this._bldRegionPending = null;
+      this._bldFail = 0; this._bldFailAt = 0; this._bldCooldown = 0;
+      this.stats.regionWays = ways.length;
+      return ways;
+    })();
+    return this._bldWaysPromise;
+  }
+
+  /**
+   * Come back for the city later. One timer for the whole world, not one per
+   * patch, and it outlives the patches that provoked it -- the ones already on
+   * screen with nothing on them are exactly what _backfillBuildings fixes.
+   */
+  _scheduleBldRetry(cx, cy) {
+    if (this._bldRetryTimer || this._disposed) return;
+    const wait = this._bldCooldown || 15000;
+    this._bldRetryTimer = setTimeout(async () => {
+      this._bldRetryTimer = null;
+      if (this._disposed) return;
+      let ways = null;
+      try { ways = await this._ensureBldRegion(cx, cy, true); } catch (_) { ways = null; }
+      if (!ways || !ways.length || this._disposed) return;
+      await this._backfillBuildings(ways);
+    }, wait);
+  }
+
+  /**
+   * Put a city on the patches that were built during the outage. They are
+   * already on screen with their terrain and imagery, so this only has to add
+   * the buildings -- _loadBuildings is self-contained and takes the ways
+   * through prefetchedWays, the same way a fresh patch gets them.
+   */
+  async _backfillBuildings(ways) {
+    let n = 0;
+    for (const p of this._patches.values()) {
+      if (this._disposed) return;
+      if (p._bldList && p._bldList.length) continue;   // this one already has its city
+      try {
+        p.prefetchedWays = ways;
+        await p._loadBuildings();
+        if (typeof this._glow === 'number' && typeof p.setWindowGlow === 'function') {
+          p.setWindowGlow(this._glow);
+        }
+        n++;
+      } catch (e) { console.warn('[lss-earth-world] backfill failed:', e); }
+      await new Promise((r) => setTimeout(r, 0));      // never one long block
+    }
+    this.stats.buildings = 0;
+    for (const p of this._patches.values()) this.stats.buildings += (p._bldList || []).length;
+    console.log('[lss-earth-world] buildings backfilled into', n, 'patches;',
+                this.stats.buildings, 'total');
+    this._emit('buildings-backfilled', { patches: n, buildings: this.stats.buildings });
+  }
+
+  /** A throwaway patch instance, only for borrowing _overpassFetch before any exists. */
+  _mkProbe() {
+    if (this._probe) return this._probe;
+    this._probe = new LSSEarthTiles({ projOrigin: this.origin });
+    return this._probe;
+  }
+
+  async _ensurePatch(cx, cy) {
+    const k = this._key(cx, cy);
+    if (this._patches.has(k) || this._pending.has(k) || this._disposed) return;
+    this._pending.add(k);
+    try {
+      const ll = this._cellLatLng(cx, cy);
+      const ways = await this._ensureBldRegion(this._bldCentre ? this._bldCentre.cx : 0,
+                                               this._bldCentre ? this._bldCentre.cy : 0);
+      const t = this._mkPatch(ll.lat, ll.lng, {
+        extentMetres: this.patchMetres, ringCount: 1, water: false, ads: true,
+        prefetchedWays: ways, ownsFog: false,
+        forceWaterLevel: (typeof this._waterLevel === 'number') ? this._waterLevel : null,
+        forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null
+      });
+      await t.ready;
+      if (this._disposed) { try { t.dispose(); } catch (_) {} return; }
+      this.group.add(t.group);
+      this._patches.set(k, t);
+      this.stats.loads++;
+      this.stats.patches = this._patches.size;
+      this.stats.buildings = 0;
+      for (const p of this._patches.values()) this.stats.buildings += (p.stats.buildings || 0);
+    } catch (e) {
+      console.warn('[lss-earth-world] patch', k, 'failed:', e);
+    } finally { this._pending.delete(k); }
+  }
+
+  async _ensureFar(cellX, cellY, key) {
+    const k = key || this._key(cellX, cellY);
+    if (this._farCell === k || this._disposed) return;
+    const ll = this._cellLatLng(cellX, cellY);
+    const nearHalf = ((this.nearRadius * 2 + 1) * this._cell) / 2 - this._cell * 0.25;
+    const t = this._mkPatch(ll.lat, ll.lng, {
+      extentMetres: this.farMetres, ringCount: 3, buildings: false, ads: false, water: true,
+      holeHalfMetres: Math.max(0, nearHalf),
+      forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null
+    });
+    this._farCell = k;
+    await t.ready;
+    if (this._disposed) { try { t.dispose(); } catch (_) {} return; }
+    const old = this._far;
+    this.group.add(t.group);
+    this._far = t;
+    if (typeof t._waterLevelRaw === 'number') this._waterLevel = t._waterLevelRaw;
+    if (typeof this._baseH !== 'number' && typeof t._baseH === 'number') this._baseH = t._baseH;
+    this._farReady = true;
+    this._holeSig = null;   // force the hole onto the replacement next frame
+    if (old) { try { this.group.remove(old.group); old.dispose(); } catch (_) {} }
+  }
+
+  /**
+   * Per frame. `focus` is a WORLD position (the player). Loads what is missing
+   * around them and drops what they have left behind.
+   * ⚠ ONE build at a time (maxConcurrent). Each patch is a DEM + imagery fetch
+   * and an Overpass query; firing a 3x3 at once is how you get rate-limited on
+   * the first flight.
+   */
+  streamUpdate(focus) {
+    if (this._disposed || !focus || !this.origin) return;
+    if (!this._farReady) return;
+    const s = this._unitsPerMetre();
+    const lx = (focus.x - this.group.position.x) / s;
+    const lz = (focus.z - this.group.position.z) / s;
+    const c = this._cellOf(lx, lz);
+
+    if (!this._bldCentre || Math.abs(c.cx - this._bldCentre.cx) > this.nearRadius ||
+        Math.abs(c.cy - this._bldCentre.cy) > this.nearRadius) {
+      this._bldCentre = { cx: c.cx, cy: c.cy };
+      this._ensureBldRegion(c.cx, c.cy);
+    }
+    if (this._pending.size < this.maxConcurrent) {
+      let best = null, bestD = Infinity;
+      for (let dy = -this.nearRadius; dy <= this.nearRadius; dy++) {
+        for (let dx = -this.nearRadius; dx <= this.nearRadius; dx++) {
+          const cx = c.cx + dx, cy = c.cy + dy, k = this._key(cx, cy);
+          if (this._patches.has(k) || this._pending.has(k)) continue;
+          const d = dx * dx + dy * dy;
+          if (d < bestD) { bestD = d; best = { cx, cy }; }
+        }
+      }
+      if (best) this._ensurePatch(best.cx, best.cy);
+    }
+
+    const keep = this.nearRadius + 1;
+    for (const [k, p] of [...this._patches]) {
+      const parts = k.split(','), px = +parts[0], py = +parts[1];
+      if (Math.abs(px - c.cx) > keep || Math.abs(py - c.cy) > keep) {
+        this._patches.delete(k);
+        try { this.group.remove(p.group); p.dispose(); } catch (_) {}
+      }
+    }
+    this.stats.patches = this._patches.size;
+
+    if (this._far && typeof this._far.setHole === 'function') {
+      const half = this._cell * 0.5, trim = this._cell * 0.25;
+      let X0 = Infinity, X1 = -Infinity, Z0 = Infinity, Z1 = -Infinity;
+      for (const key of this._patches.keys()) {
+        const pr = key.split(','), px = +pr[0] * this._cell, pz = +pr[1] * this._cell;
+        if (px - half < X0) X0 = px - half;
+        if (px + half > X1) X1 = px + half;
+        if (pz - half < Z0) Z0 = pz - half;
+        if (pz + half > Z1) Z1 = pz + half;
+      }
+      if (isFinite(X0)) {
+        const r = { X0: X0 + trim, X1: X1 - trim, Z0: Z0 + trim, Z1: Z1 - trim };
+        const sig = (r.X0 | 0) + ':' + (r.X1 | 0) + ':' + (r.Z0 | 0) + ':' + (r.Z1 | 0);
+        if (sig !== this._holeSig) { this._holeSig = sig; this._far.setHole(r); }
+      }
+    }
+
+    const step = this.farMetres * 0.5;
+    const fcx = Math.round(lx / step), fcy = Math.round(lz / step);
+    const fk = fcx + ':' + fcy;
+    if (fk !== this._farCell && this._pending.size === 0) {
+      this._ensureFar(fcx * step / this._cell, fcy * step / this._cell, fk);
+    }
+  }
+
+  _patchAt(x, z) {
+    const s = this._unitsPerMetre();
+    const lx = (x - this.group.position.x) / s, lz = (z - this.group.position.z) / s;
+    const c = this._cellOf(lx, lz);
+    return this._patches.get(this._key(c.cx, c.cy)) || null;
+  }
+  /**
+   * How far this world reaches, in WORLD units — what the sky rig sizes itself
+   * against. A streamed world GROWS as patches arrive, so this is a live query;
+   * a build-time stat is stale the moment it is taken, and that is what left the
+   * sun disc parked inside the terrain.
+   */
+  farUnits() {
+    const f = this._far ? this._far.farUnits() : 0;
+    const near = (this.nearRadius + 0.5) * 2 * this._cell * this._unitsPerMetre();
+    return Math.max(f, near, 20000);
+  }
+
+  /** Spawn points from the patch at the world origin — see LSSEarthTiles.spawnPoints. */
+  spawnPoints(n, clearM) {
+    const p = this._patches.get(this._key(0, 0)) || this._any();
+    return (p && typeof p.spawnPoints === 'function') ? p.spawnPoints(n, clearM) : [];
+  }
+
+  /**
+   * Density of the patch the ship is actually over — see _lssEarthApplyDayNight.
+   * ⚠ Returns null, NOT 0, when that patch has not arrived yet. Falling back to
+   * "any patch" would report the city you just left while flying over unloaded
+   * country, and falling back to 0 would strobe the sky to daylight every time
+   * you crossed into a cell that is still streaming. null means "don't know",
+   * and the caller holds the last value.
+   */
+  buildingDensity(worldPos) {
+    const p = worldPos ? this._patchAt(worldPos.x, worldPos.z) : this._any();
+    if (!p || typeof p.buildingDensity !== 'function') return null;
+    return p.buildingDensity();
+  }
+
+  /** LOCAL metres in, like a patch's heightAt. */
+  heightAt(x, z) {
+    const c = this._cellOf(x, z);
+    const p = this._patches.get(this._key(c.cx, c.cy)) || this._far;
+    return p ? p.heightAt(x, z) : 0;
+  }
+  groundYWorld(x, z) {
+    const p = this._patchAt(x, z) || this._far;
+    return p ? p.groundYWorld(x, z) : 0;
+  }
+  seaLevelWorld() { return this._far ? this._far.seaLevelWorld() : 0; }
+  collide(pos, vel, pad) {
+    let moved = false;
+    const p = this._patchAt(pos.x, pos.z);
+    if (p) moved = p.collide(pos, vel, pad) || moved;
+    else if (this._far) moved = this._far.collide(pos, vel, pad) || moved;
+    return moved;
+  }
+  raycast(origin, dir, maxDist) {
+    let best = Infinity;
+    const p = this._patchAt(origin.x, origin.z);
+    for (const t of [p, this._far]) {
+      if (!t) continue;
+      const d = t.raycast(origin, dir, maxDist);
+      if (isFinite(d) && d < best) best = d;
+    }
+    return best;
+  }
+  updateNight(scene) {
+    for (const p of this._patches.values()) p.updateNight(scene);
+    if (this._far) this._far.updateNight(scene);
+  }
+  setWindowGlow(v) {
+    this._glow = v;          // see _backfillBuildings
+    for (const p of this._patches.values()) p.setWindowGlow(v);
+    if (this._far) this._far.setWindowGlow(v);
+  }
+  waterTick(dt) { if (this._far) this._far.waterTick(dt); }
+  buildWater() { return this._far ? this._far.buildWater() : false; }
+
+  dispose() {
+    this._disposed = true;
+    if (this._bldRetryTimer) { clearTimeout(this._bldRetryTimer); this._bldRetryTimer = null; }
+    for (const p of this._patches.values()) { try { this.group.remove(p.group); p.dispose(); } catch (_) {} }
+    this._patches.clear();
+    if (this._far) { try { this.group.remove(this._far.group); this._far.dispose(); } catch (_) {} this._far = null; }
+    this.group.clear();
   }
 }
 
@@ -87852,7 +88671,19 @@ async function _lssGmapsBuildLevel(level) {
   }
 
   try {
-    const tiles = new LSSEarthTiles({
+    const _wantStream = (typeof window !== 'undefined' && window.__earthStream !== undefined)
+      ? !!window.__earthStream : !!level.stream;
+    const tiles = _wantStream
+      ? new LSSEarthWorld({
+          patchMetres: (typeof level.extentMetres === 'number' && level.extentMetres > 0)
+            ? level.extentMetres : 2600,
+          scale: (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7,
+          patchOpts: { cyberpunk: level.cyberpunk !== false },
+          onProgress: (msg, frac) => {
+            try { if (typeof _lssGmapsSetLoadMsg === 'function') _lssGmapsSetLoadMsg(msg, frac); } catch (_) {}
+          }
+        })
+      : new LSSEarthTiles({
       extentMetres: (typeof level.extentMetres === 'number' && level.extentMetres > 0)
         ? level.extentMetres : 2600,
       cyberpunk: level.cyberpunk !== false,
@@ -87865,7 +88696,23 @@ async function _lssGmapsBuildLevel(level) {
       tiles.setLatLonToYUp(level.lat * Math.PI / 180, level.lng * Math.PI / 180);
     }
     const _gmapsScale = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7;
-    tiles.group.scale.setScalar(_gmapsScale);
+    if (typeof tiles.applyScale === 'function') tiles.applyScale(_gmapsScale);
+    else tiles.group.scale.setScalar(_gmapsScale);
+    try {
+      if (typeof tiles.addEventListener === 'function') {
+        tiles.addEventListener('buildings-failed', (e) => {
+          const secs = Math.round((((e && e.retryInMs) || 15000)) / 1000);
+          const m = 'buildings unavailable (' + ((e && e.message) || 'Overpass') +
+                    ') - retrying in ' + secs + 's';
+          console.warn('[lss-gmaps]', m);
+          try { if (typeof _lssGmapsSetLoadMsg === 'function') _lssGmapsSetLoadMsg(m, 0.9); } catch (_) {}
+        });
+        tiles.addEventListener('buildings-backfilled', (e) => {
+          console.log('[lss-gmaps] buildings arrived late:', (e && e.buildings) || 0,
+                      'across', (e && e.patches) || 0, 'patches');
+        });
+      }
+    } catch (_) {}
     _lssGmaps.scale = _gmapsScale;
     scene.add(tiles.group);
     const _errBudget = Math.max(8, 8 * (_lssGmaps.scale || 1));
@@ -87897,6 +88744,7 @@ async function _lssGmapsBuildLevel(level) {
     _lssGmaps.lng = level.lng;
     try { if (typeof setSky === 'function') setSky(level.sky || 'cyberpunk'); } catch (_) {}
     try { if (typeof _wxInit === 'function') _wxInit(null); } catch (e) { console.warn('[lss-earth] weather init failed:', e); }
+    try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(false); } catch (_) {}
     try {
       const _far = (tiles.stats && tiles.stats.farUnits) || 20000;
       const _cap = (typeof camera !== 'undefined' && camera && camera.far) ? camera.far * 0.92 : 1e9;
@@ -87907,6 +88755,8 @@ async function _lssGmapsBuildLevel(level) {
       try { scene.remove(tiles.group); } catch(_) {}
       try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
       try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}
+      try { if (typeof LSS !== 'undefined' && LSS) LSS._camReach = 0; } catch (_) {}
+      try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(true); } catch (_) {}
       try { _WX.distMul = 1; } catch (_) {}
       try { if (typeof _wxDispose === 'function') _wxDispose(); } catch (_) {}
       try { _lssEarthNightLights(false); } catch (_) {}
@@ -87931,6 +88781,23 @@ async function _lssGmapsBuildLevel(level) {
         new Promise((r) => setTimeout(r, (typeof level.loadTimeoutMs === 'number') ? level.loadTimeoutMs : 25000))
       ]);
     } catch (_) {}
+    try {
+      if (typeof tiles.spawnPoints === 'function') {
+        const _sp = tiles.spawnPoints(24);
+        if (_sp && _sp.length) {
+          game.corridorPoints = _sp;
+          try {
+            if (typeof player !== 'undefined' && player && player.position) {
+              const _s0 = _sp[0];
+              player.position.set(_s0.x, _s0.y, _s0.z);
+              if (player.velocity) player.velocity.set(0, 0, 0);
+              console.log('[lss-earth] player placed at spawn',
+                          Math.round(_s0.x), Math.round(_s0.y), Math.round(_s0.z));
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (e) { console.warn('[lss-earth] spawn points failed:', e); }
   } catch (e) {
     console.error('[lss-gmaps] failed to initialize tiles:', e);
     alert('Failed to initialize Google Maps tiles: ' + e.message + "\nCheck your API key and that the Map Tiles API is enabled on your Google Cloud project.");
@@ -88043,6 +88910,32 @@ function _lssGmapsTick(dt) {
     if (typeof t.update === 'function') t.update();
     if (typeof t.updateNight === 'function') t.updateNight(scene);
     if (typeof t.waterTick === 'function') t.waterTick(dt);
+    try {
+      if (typeof t.buildingDensity === 'function') {
+        const _pp = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
+        const _d = t.buildingDensity(_pp);
+        if (_d !== null && _d !== undefined) {
+          const _u = Math.max(0, Math.min(1, (_d - 6) / (45 - 6)));
+          const _k = _u * _u * (3 - 2 * _u);
+          _lssEarthApplyDayNight(_k);
+          if (typeof t.setWindowGlow === 'function') t.setWindowGlow(0.10 + 0.90 * _k);
+        }
+      }
+    } catch (_) {}
+    try {
+      if (typeof t.farUnits === 'function') {
+        const _fu = t.farUnits();
+        try { if (typeof LSS !== 'undefined' && LSS) LSS._camReach = Math.min(300000, _fu * 1.15); } catch (_) {}
+        if (typeof _WX !== 'undefined' && _WX && _WX.on) {
+          const _cap = (typeof camera !== 'undefined' && camera && camera.far) ? camera.far * 0.92 : 1e9;
+          _WX.distMul = Math.max(1, Math.min(8, Math.min(_fu * 1.35, _cap) / 20500));
+        }
+      }
+    } catch (_) {}
+    if (typeof t.streamUpdate === 'function') {
+      const _f = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
+      t.streamUpdate(_f);
+    }
     try { if (typeof _wxFrame === 'function') _wxFrame(dt); } catch (_) {}
   } catch (_) {  }
   if (t.group && t.group.children && t.group.children.length > 0) {
@@ -88384,7 +89277,8 @@ function _lssGmapsDetachCity() {
 function _lssGmapsSetScaleLive(n) {
   if (typeof n !== 'number' || n <= 0) return;
   _lssGmaps.scale = n;
-  if (_lssGmaps.tiles && _lssGmaps.tiles.group) _lssGmaps.tiles.group.scale.setScalar(n);
+  if (_lssGmaps.tiles && typeof _lssGmaps.tiles.applyScale === 'function') _lssGmaps.tiles.applyScale(n);
+  else if (_lssGmaps.tiles && _lssGmaps.tiles.group) _lssGmaps.tiles.group.scale.setScalar(n);
   if (_lssGmaps.tiles) {
     const e = Math.max(8, 8 * n);
     if (_lssGmaps.tiles.errorTarget !== undefined) _lssGmaps.tiles.errorTarget = e;

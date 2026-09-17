@@ -4000,6 +4000,9 @@ body.vr-active #camp-video { display: none !important; }
           <button id="btn-cyberpunk" onclick="startCyberpunkCity()" type="button" title="Cyberpunk City — attack from a carrier or defend the city. Sides swap every round.">
             CYBERPUNK CITY
           </button>
+          <button id="btn-earth" onclick="startEarthFlight()" type="button" title="Free Flight: Earth — the real planet, streamed. Fly anywhere; cities at dusk, wilderness by day.">
+            FREE FLIGHT: EARTH
+          </button>
           <div style="display:flex;align-items:baseline;gap:16px;flex-wrap:wrap;">
             <button id="btn-freeflight" onclick="startFreeFlight()" type="button" title="Exhibition — patrol the open mossy overworld (the campaign hub)" style="
                     flex:1 1 0;min-height:54px;
@@ -5047,7 +5050,7 @@ body.vr-active #camp-video { display: none !important; }
 
 /* (v35.20) #lobby-room-join-btn joins this group so CREATE / JOIN reads as one
    of the menu entries rather than a boxed form button. */
-#btn-solo, #btn-campaign, #btn-endless, #btn-cyberpunk, #btn-freeflight, #btn-howto, #btn-join, #btn-race, #btn-assault, #lobby-room-join-btn {
+#btn-solo, #btn-campaign, #btn-endless, #btn-cyberpunk, #btn-earth, #btn-freeflight, #btn-howto, #btn-join, #btn-race, #btn-assault, #lobby-room-join-btn {
   background: transparent !important; border: none !important;
   border-radius: 0 !important; box-shadow: none !important;
   min-height: 0 !important; padding: 7px 0 !important; margin: 0 !important;
@@ -5105,6 +5108,14 @@ body.vr-active #camp-video { display: none !important; }
 #btn-cyberpunk:hover {
   color: #ffa8ff !important; transform: translateX(12px);
   text-shadow: 0 0 24px rgba(240,108,255,0.7);
+  background: transparent !important; border: none !important;
+}
+/* (v45.47) FREE FLIGHT: EARTH takes the atmosphere's own blue, against
+   CYBERPUNK CITY's rose — the two share a city but not a planet. */
+#btn-earth { color: #5cc8ff !important; }
+#btn-earth:hover {
+  color: #a8e4ff !important; transform: translateX(12px);
+  text-shadow: 0 0 24px rgba(92,200,255,0.7);
   background: transparent !important; border: none !important;
 }
 /* (v45.36) TITLE: GAME MODE, in the callout tags' chromatic style.
@@ -6819,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.46';
+const LSS_BUILD = '45.62';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -12636,7 +12647,8 @@ function _applyStartView() {
 //     CYBERPUNK CITY into somebody's classic room yields 'classic' and the flag comes straight back
 //     down - v43.19's rule, unchanged.
 function startFreeFlight(_tag) {
-  LSS.MODE = _lssRoomModeChoose(_tag === 'cyberpunk' ? 'cyberpunk' : 'freeflight');   // (v43.19) a room has one mode
+  LSS.MODE = _lssRoomModeChoose((_tag === 'cyberpunk' || _tag === 'earth') ? _tag : 'freeflight');   // (v43.19) a room has one mode
+  try { _lssSyncEarthToTag(_lssRoomTag()); } catch (_) {}   // (v45.47)
   try { if (typeof _owReset === 'function') _owReset(); } catch (_) {}   // (v38.78) every free flight starts with six hostile cities
   try { document.body.classList.add('lss-freeflight'); } catch (_) {}   
   
@@ -12660,7 +12672,13 @@ function startFreeFlight(_tag) {
   // ⚠ ONLY the map is guarded here. What a refused EXHIBITION press should do about the rest of the
   // free-flight state (the lss-freeflight body class, thirdPerson, raceNoTimer) is a behaviour
   // question for the owner, not something to decide silently - flagged, deliberately not changed.
-  if (LSS.MODE === 'freeflight') game.selectedMap = 'hub_overworld';
+  // (v45.47) EARTH takes the real world instead of the procedural overworld.
+  // gmaps_earth is a streamed gmaps level (level.stream), so buildRoomGraphLevel
+  // routes it to _lssGmapsBuildLevel exactly like Custom Location does.
+  if (LSS.MODE === 'freeflight') {
+    const _isEarth = !!(game._earth && game._earth.armed);
+    game.selectedMap = _isEarth ? 'gmaps_earth' : 'hub_overworld';
+  }
   try { if (typeof _preloadCyanRing === 'function') _preloadCyanRing(); } catch (_) {}   
   
   
@@ -13873,6 +13891,7 @@ function _applyModeClientSetup(mode) {
   const _tag = _lssRoomModeOr(mode || 'classic');
   LSS.MODE = _lssTagMode(_tag);                   // (v43.19) a room has one mode
   _lssSyncCyberToTag(_tag);                       // (v44.11) ...and the flag is its projection
+  try { _lssSyncEarthToTag(_tag); } catch (_) {}   // (v45.47) same, for EARTH
   mode = LSS.MODE;                                // the rest of this function switches on the MODE
   if (mode === 'race') {
     try { if (typeof setWallPattern === 'function') setWallPattern(22); } catch (_) {}
@@ -14117,6 +14136,10 @@ function _updateShipSelectRoom() {
 function _ssModeName() {
   try {
     if (game && game._cyber && game._cyber.armed) return 'CYBERPUNK CITY';
+    // (v45.47) ⚠ THIS is the caption renderer the lobby actually uses.
+    // _lssModeDisplayName only feeds the blurb and the step list, so a mode
+    // added there alone shows up in the rotation under the WRONG name.
+    if (game && game._earth && game._earth.armed) return 'FREE FLIGHT: EARTH';
     const M = (typeof LSS !== 'undefined') ? LSS.MODE : '';
     if (M === 'race') return 'RACE MODE';
     if (M === 'assault') return 'ASSAULT';
@@ -14520,6 +14543,16 @@ function _visibleMapKeys() {
   }
   // (v33.00) Free-flight / hub : the carousel shows ONLY the hub_ overworld map(s).
   if (LSS.MODE === 'freeflight') {
+    // (v45.47) FREE FLIGHT: EARTH is the freeflight MODE with the earth TAG
+    // armed, so the two share LSS.MODE and must not share a map list. EARTH
+    // offers only the streamed world; the overworld hub_ maps are the other
+    // arm's. Doing it here rather than in startFreeFlight matters: the ship
+    // select LAUNCH button goes through game.selectedMap, which the carousel
+    // sets from THIS list — startFreeFlight is a different entry point and
+    // setting the map only there left EARTH launching hub_overworld.
+    if (typeof game !== 'undefined' && game && game._earth && game._earth.armed) {
+      return all.filter(k => k === 'gmaps_earth');
+    }
     return all.filter(k => k.indexOf('hub_') === 0);
   }
   if (LSS.MODE === 'endless') {
@@ -44834,6 +44867,19 @@ function _cyberPrePlace() {
     }
   } catch (e) { console.warn('[cyber] preplace:', e); }
 }
+// (v45.47) FREE FLIGHT: EARTH from the main menu. Mirrors startCyberpunkCity:
+// arm the tag, then hand off to startFreeFlight, which is the one entry point
+// that knows how to set the mode up. The map is NOT set here — _visibleMapKeys
+// branches on the armed tag and the carousel picks gmaps_earth from it.
+function startEarthFlight() {
+  try {
+    game._earth = { armed: true, origin: null, warps: 0 };
+    if (game._cyber) game._cyber = null;   // one tag at a time
+  } catch (_) {}
+  startFreeFlight('earth');
+}
+try { if (typeof window !== 'undefined') window.startEarthFlight = startEarthFlight; } catch (_) {}
+
 function startCyberpunkCity() {
   _cyberPrefetch();
   game._cyber = { armed: true, started: false, lost: false, bots: [], hold: 0, over: false,
@@ -48304,55 +48350,148 @@ function _wxMakeClouds() {
       });
     }
   }
+  // ⚠ THE GLSL BELOW MUST STAY PURE ASCII, COMMENTS INCLUDED. GLSL ES rejects
+  // a non-ASCII byte anywhere in the source, so a single ⚠ in a comment fails
+  // the link and the mesh silently draws NOTHING -- onBeforeRender still fires
+  // 144x/s, the instance matrices still look right, and even alpha 1.0 with
+  // depthTest off shows nothing. That is what "you wiped out the white clouds"
+  // was in v45.54. Keep the prose out here, where it is free.
+  //
+  // What the shader does, and why:
+  //  - uSpread scales cloud xz AND puff size together, so angular size and
+  //    apparent density are unchanged and the field simply reaches further,
+  //    making a wrap come round less often. KEEP IT SMALL: it also moves clouds
+  //    further away, and the fragment fogs by distance, so a big spread turns
+  //    them sky-coloured -- "cant even see any white clouds here" at 3x.
+  //  - uLift raises the deck. The field was authored when a gmaps world
+  //    rendered at 49 units/metre (the double-scale bug fixed in v45.48), where
+  //    Banff's peaks stood 29,400 units tall and clouds at 2,700-4,400 floated
+  //    well clear. At the correct 7 u/m those peaks are 4,200 units -- level
+  //    with the deck -- so the puffs sat at 13 degrees elevation, BEHIND the
+  //    mountains. Size tracks max(uSpread, uLift) or lifting alone shrinks them
+  //    to wisps.
+  //  - PARALLAX, NOT A PIVOTING CUTOUT. Locking the up vector stopped the
+  //    sprites ROLLING, but that was not what the owner was seeing: "no...
+  //    there's got to be a transformation we can do in parallax or something, so
+  //    they don't look like they are spinning". A camera-facing quad presents
+  //    the SAME face from everywhere, so flying past one reads as the cloud
+  //    turning to follow you -- there is no parallax inside it. So the fragment
+  //    treats its pixel as a point on a DOME around the puff centre
+  //    (z = sqrt(1 - r^2)) and takes that point's WORLD direction off the same
+  //    basis the vertex expanded with. The noise is sampled in 3D on that
+  //    direction, so the detail is anchored in world space: move, and you see a
+  //    different side of the same blob instead of a rotating decal.
+  //    ⚠ THE BASIS IS PER PUFF, not one camera basis shared by the field. A
+  //    single camera-forward axis is only right for a cloud dead centre on
+  //    screen; for one off to the side the true eye direction differs, so it
+  //    re-orients as it sweeps toward the middle and STILL reads as spinning
+  //    ("it looks better... but still spinning a bit"). Each puff therefore
+  //    builds its own vw = normalize(uCam - c) in the vertex shader and hands
+  //    the fragment vRight/vUp; vw is recovered as cross(vRight, vUp) rather
+  //    than sent, saving a varying. This also makes the quads true
+  //    point-facing billboards instead of screen-aligned ones. The
+  //    SILHOUETTE is untouched, so the shape and soft edges read as before.
+  //    Two octaves, weights 0.70 + 0.35, because the sum has to stay 1.05 --
+  //    the alpha below is smoothstep(1.05, 0.25, r + (0.55 - n) * 0.95) and it
+  //    is that range, not the octave count, that sets the silhouette.
+  //  - THE SPRITES DO NOT ROLL. A billboard built on the camera's own up vector
+  //    (view-space y, or cameraUp from the viewMatrix columns) turns with the
+  //    camera, so banking the ship spins every cloud with it. Owner: "as i turn,
+  //    they turn, which looks odd". These puffs are 2.00 x 1.15 and carry noise
+  //    detail, so the roll reads plainly; the BillboardCloudSystem basin clouds
+  //    get away with the same basis only because they are square with a circular
+  //    falloff and so rotationally symmetric. Fix: project WORLD up into the
+  //    view plane and use that as the sprite's up, with right perpendicular to
+  //    it. The sprite still faces the camera; it just never rolls. Near the
+  //    zenith and nadir world up projects to nothing, so it blends back to
+  //    screen up over ul 0.02..0.20 -- and both lengths are guarded, because
+  //    mix() of two opposed unit vectors is the zero vector and normalize(0) is
+  //    NaN, which would blank the field.
+  //  - vEdge is the WRAP-BOX coordinate, 0 at the camera and 1 at the edge. The
+  //    alpha fade is keyed to it and never to vDist: the box wraps per AXIS at
+  //    h, while the old radial fade started at 19000 against h = 13000, so every
+  //    cloud teleported at full opacity -- "i dont like seeing the cloud pop in".
   const geo = new THREE.PlaneGeometry(1, 1);
   const mat = new THREE.ShaderMaterial({
     transparent: true, depthWrite: false, fog: false,
     uniforms: {
       uT: _swU.uTime, uCam: { value: new THREE.Vector3() },
       uTile: { value: 26000.0 }, uWind: { value: new THREE.Vector2(14.0, 7.5) },
+      // Spread the field with the world, like _WX.distMul already does for the
+      // dome and the sun -- but SEPARATELY from altitude, because the two cost
+      // different things: uSpread pushes clouds further away (and straight into
+      // the distance fog below), while uLift only raises the deck. Both 1 in
+      // the hub, so the hub is unchanged.
+      uSpread: { value: 1.0 }, uLift: { value: 1.0 },
+
       uFogC: { value: new THREE.Color(0x9fc8e8) }, uFogD: { value: 0.00011 },
       uSunC: { value: new THREE.Color(1.0, 0.94, 0.82) },
     },
     vertexShader: `
       attribute vec2 aPrm;
-      uniform float uT, uTile;
+      uniform float uT, uTile, uSpread, uLift;
       uniform vec3 uCam;
       uniform vec2 uWind;
-      varying vec2 vUv; varying float vRnd; varying float vDist;
+      varying vec2 vUv; varying float vRnd; varying float vDist; varying float vEdge;
+      varying vec3 vRight; varying vec3 vUp;
       void main() {
         vUv = uv; vRnd = aPrm.x;
         vec3 c = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
         float scl = instanceMatrix[0][0];
+        c.xz *= uSpread;
+        scl  *= max(uSpread, uLift);
+        c.y  *= uLift;
+        float tile = uTile * uSpread;
         float wmul = 0.7 + 0.6 * fract(aPrm.x * 7.31);
         c.x += uWind.x * uT * wmul;
         c.z += uWind.y * uT * wmul;
-        float h = uTile * 0.5;
-        c.x = uCam.x + (mod(c.x - uCam.x + h, uTile) - h);
-        c.z = uCam.z + (mod(c.z - uCam.z + h, uTile) - h);
-        vec4 mv = viewMatrix * vec4(c, 1.0);
-        mv.xy += (uv - 0.5) * scl * vec2(2.0, 1.15);
+        float h = tile * 0.5;
+        vec2 d = vec2(c.x - uCam.x, c.z - uCam.z);
+        d = mod(d + h, tile) - h;          // wrap into the box around the camera
+        c.x = uCam.x + d.x;
+        c.z = uCam.z + d.y;
+        vEdge = max(abs(d.x), abs(d.y)) / h;
+        vec3 vw = normalize(uCam - c);
+        vec3 upP = vec3(0.0, 1.0, 0.0) - vw * vw.y;
+        if (dot(upP, upP) < 0.000001) upP = vec3(0.0, 0.0, 1.0) - vw * vw.z;
+        upP = normalize(upP);
+        vec3 rightP = normalize(cross(upP, vw));
+        vRight = rightP; vUp = upP;
+        vec3 off3 = rightP * ((uv.x - 0.5) * 2.00 * scl)
+                  + upP    * ((uv.y - 0.5) * 1.15 * scl);
+        vec4 mv = viewMatrix * vec4(c + off3, 1.0);
         vDist = length(mv.xyz);
         gl_Position = projectionMatrix * mv;
       }`,
     fragmentShader: `
       uniform vec3 uFogC, uSunC;
       uniform float uFogD;
-      varying vec2 vUv; varying float vRnd; varying float vDist;
-      float h21(vec2 p){ p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
-      float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
-        return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y); }
+      varying vec2 vUv; varying float vRnd; varying float vDist; varying float vEdge;
+      varying vec3 vRight; varying vec3 vUp;
+      float h31(vec3 p){ p = fract(p * vec3(123.34, 456.21, 789.13));
+        p += dot(p, p + 45.32); return fract(p.x * p.y * p.z); }
+      float vn3(vec3 p){ vec3 i = floor(p), f = fract(p); f = f * f * (3.0 - 2.0 * f);
+        float a = mix(mix(h31(i), h31(i + vec3(1.0, 0.0, 0.0)), f.x),
+                      mix(h31(i + vec3(0.0, 1.0, 0.0)), h31(i + vec3(1.0, 1.0, 0.0)), f.x), f.y);
+        float b = mix(mix(h31(i + vec3(0.0, 0.0, 1.0)), h31(i + vec3(1.0, 0.0, 1.0)), f.x),
+                      mix(h31(i + vec3(0.0, 1.0, 1.0)), h31(i + vec3(1.0, 1.0, 1.0)), f.x), f.y);
+        return mix(a, b, f.z); }
       void main() {
         vec2 p = vUv * 2.0 - 1.0;
         float r = length(p * vec2(1.0, 1.55));
-        vec2 q = vUv * 3.0 + vRnd * 17.0;
-        float n = 0.6 * vn(q) + 0.3 * vn(q * 2.3) + 0.15 * vn(q * 5.1);
+        float rr = min(1.0, length(p));
+        vec3 vwF = cross(vRight, vUp);
+        vec3 dir = normalize(vRight * p.x + vUp * p.y
+                             + vwF * sqrt(max(0.0, 1.0 - rr * rr)));
+        vec3 q = dir * 2.6 + vRnd * 17.0;
+        float n = 0.70 * vn3(q) + 0.35 * vn3(q * 2.6);
         float a = smoothstep(1.05, 0.25, r + (0.55 - n) * 0.95);
         a *= smoothstep(1.0, 0.66, abs(p.x)) * smoothstep(1.0, 0.66, abs(p.y));
         float fogK = 1.0 - exp(-vDist * uFogD);
         vec3 col = mix(vec3(0.98), uSunC, 0.20 + 0.35 * n);
         col = mix(col, uFogC, fogK);
         a *= 0.52 * (1.0 - fogK * 0.85);
-        a *= 1.0 - smoothstep(19000.0, 23500.0, vDist);
+        a *= 1.0 - smoothstep(0.74, 0.96, vEdge);
         if (a < 0.01) discard;
         gl_FragColor = vec4(col, a);
       }`,
@@ -48825,6 +48964,19 @@ function _wxFrame(dt) {
   // clouds wrap around the camera; haze tracks the live fog (city tint bleeds in)
   const cu = _WX.clouds.material.uniforms;
   cu.uCam.value.copy(camP);
+  // ⚠ SPREAD AND LIFT ARE NOT THE SAME LEVER. Spreading moves clouds further
+  // away and the fragment fogs by distance (fogK = 1 - exp(-vDist * uFogD)):
+  // at 3x, the far clouds sat at ~39,000 instead of ~13,000, fogK went 0.31 ->
+  // 0.67, and they turned sky-coloured -- "cant even see any white clouds
+  // here... i see the blue ones", the blue being the dome behind where they
+  // had been. So spread stays gentle and LIFT does the real work of getting
+  // the deck above a real-world world's terrain.
+  // SPREAD STAYS 1. There are only 320 puffs in the field, so widening the box
+  // thins it by the SQUARE of the factor -- 1.56x spread is 2.4x fewer clouds
+  // per unit of sky, and the deck reads as empty. Widening needs more clusters
+  // in _wxMakeClouds first, not a bigger uSpread.
+  if (cu.uSpread) cu.uSpread.value = 1;
+  if (cu.uLift)   cu.uLift.value   = Math.max(1, Math.min(2.3, 1 + (_wxK - 1) * 0.18));
   if (scene.fog && scene.fog.color) {
     cu.uFogC.value.copy(scene.fog.color);
     _WX.dome.material.uniforms.uHaze.value.copy(scene.fog.color);
@@ -79519,7 +79671,13 @@ function commitLoadout(key) {
       _v12mLobbyError('Pick a map (tunnel or Custom Location).');
       throw new Error('lobby: no map');
     }
-    if (isGmapsMap && !hasOverlay) {
+    // (v45.47) A gmaps map that carries its OWN lat/lng does not need a typed
+    // location. That guard exists for Custom Location, whose coordinates only
+    // arrive from the DROP panel; FREE FLIGHT: EARTH ships with a start point
+    // and streams from there, so requiring an overlay would make the mode
+    // unlaunchable.
+    const _selfSited = !!(map && map.stream && typeof map.lat === 'number' && typeof map.lng === 'number');
+    if (isGmapsMap && !hasOverlay && !_selfSited) {
       _v12mLobbyError('Custom Location selected but no place typed. Type into DROP and click GO, or pick a tunnel map.');
       throw new Error('lobby: gmaps map without overlay');
     }
@@ -99251,6 +99409,7 @@ function _lssCurtainFailsafe() {
   } catch (_) {}
 }
 
+let _lssEarthCurtainTries = 0;
 function hideLoadingOverlay() {
   // (v38.03) CYBERPUNK CITY: hold the curtain until the mode has built itself. It used to lift a
   // beat before the lineup started, and that beat is the free-flight camera sitting at the launch
@@ -99263,6 +99422,29 @@ function hideLoadingOverlay() {
       setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
       return;
     }
+    // (v45.47) FREE FLIGHT: EARTH holds the curtain the same way, and for the
+    // same reason. The curtain is lowered when the SHADERS are warm, which has
+    // nothing to do with whether the world exists — measured: overlay down at
+    // 2.1 s with 1 of 9 patches built, the rest arriving until 8.5 s. Owner:
+    // "the map loaded after we got in... so it had a pop in effect". The build
+    // is awaited inside _lssGmapsBuildLevel, but that runs alongside the launch
+    // sequence rather than gating it, so the hold has to be here.
+    // ⚠ The 240-try ceiling (~4 s of retries) is NOT enough for a cold world —
+    // a first visit fetches DEM, imagery and an Overpass region. Earth gets its
+    // own, longer ceiling, and it is a CEILING on purpose: a curtain that never
+    // lifts is worse than any pop-in.
+    if (game && game._earth && game._earth.armed && game.state !== 'playing' &&
+        _lssEarthCurtainTries < 1800) {
+      const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
+      const _building = !!(_w && _w._patches && typeof _w.bootTarget === 'number' &&
+                           _w._patches.size < _w.bootTarget);
+      if (_building) {
+        _lssEarthCurtainTries++;
+        setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
+        return;
+      }
+    }
+    _lssEarthCurtainTries = 0;
   } catch (_) {}
   _lssCurtainTries = 0;
   const ov = document.getElementById('lss-loading-overlay');
@@ -100339,13 +100521,19 @@ function _lssSpeedLerp(base, target, mix) {
 function _lssRoomTag() {
   try {
     const armed = !!(typeof game !== 'undefined' && game && game._cyber && game._cyber.armed);
+    // (v45.47) EARTH rides freeflight the same way CYBERPUNK CITY does. It is a
+    // TAG, not a new LSS.MODE string, and that is deliberate: a real mode name
+    // must be taught to GAME_MODES in backend/src/worker.js before a room can
+    // agree on it, while a tag on an existing mode needs no backend change.
+    const earth = !!(typeof game !== 'undefined' && game && game._earth && game._earth.armed);
     const m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
-    return (armed && m === 'freeflight') ? 'cyberpunk' : m;
+    if (m !== 'freeflight') return m;
+    return earth ? 'earth' : (armed ? 'cyberpunk' : m);
   } catch (_) { return 'classic'; }
 }
 // tag -> the LSS.MODE string it runs as. The ONLY unmapper; every write of LSS.MODE from a tag goes
 // through it, or a raw 'cyberpunk' poisons 51 `MODE === 'freeflight'` tests at once.
-function _lssTagMode(tag) { return (tag === 'cyberpunk') ? 'freeflight' : tag; }
+function _lssTagMode(tag) { return (tag === 'cyberpunk' || tag === 'earth') ? 'freeflight' : tag; }
 // What an arriving packet MEANS, in one expression. Reads the new `tag` field and the legacy
 // mode+cyber pair the v37.80 senders have shipped since long before this commit, so open_solo_start
 // and dropin_state need no edit to keep working.
@@ -100353,6 +100541,7 @@ function _lssTagOf(evt) {
   try {
     if (!evt) return null;
     if (typeof evt.tag === 'string' && evt.tag) return evt.tag;
+    if (evt.earth && evt.mode === 'freeflight') return 'earth';
     if (evt.cyber && evt.mode === 'freeflight') return 'cyberpunk';
     return evt.mode || null;
   } catch (_) { return null; }
@@ -100361,7 +100550,12 @@ function _lssTagOf(evt) {
 // authored by one sender inside one packet cannot half-arrive; two fields on two different events
 // can, and that is what the room has today (cyber rides open_solo_start, the mode rides the decree).
 function _lssTagPut(msg, tag) {
-  try { msg.mode = _lssTagMode(tag); msg.cyber = (tag === 'cyberpunk'); msg.tag = tag; } catch (_) {}
+  try {
+    msg.mode = _lssTagMode(tag);
+    msg.cyber = (tag === 'cyberpunk');
+    msg.earth = (tag === 'earth');
+    msg.tag = tag;
+  } catch (_) {}
   return msg;
 }
 // THE PROJECTION. Idempotent: when the flag already matches it returns without touching the object,
@@ -100386,13 +100580,25 @@ function _lssSyncCyberToTag(tag) {
     }
   } catch (_) {}
 }
-const _LSS_PICKABLE_MODES = ['classic', 'freeflight', 'cyberpunk', 'endless', 'race', 'assault'];
+// The EARTH projection, idempotent like _lssSyncCyberToTag: a re-applied decree
+// must not re-roll a live world.
+function _lssSyncEarthToTag(tag) {
+  try {
+    const want = (tag === 'earth');
+    const have = !!(typeof game !== 'undefined' && game && game._earth && game._earth.armed);
+    if (want === have) return;
+    if (typeof game === 'undefined' || !game) return;
+    game._earth = want ? { armed: true, origin: null, warps: 0 } : null;
+  } catch (_) {}
+}
+const _LSS_PICKABLE_MODES = ['classic', 'freeflight', 'cyberpunk', 'earth', 'endless', 'race', 'assault'];
 function _lssModeDisplayName(m) {
   if (m === 'race') return 'RACE MODE';
   if (m === 'assault') return 'ASSAULT';
   if (m === 'endless') return 'ENDLESS';
   if (m === 'freeflight') return 'EXHIBITION';
   if (m === 'cyberpunk') return 'CYBERPUNK CITY';   // (v44.11)
+  if (m === 'earth') return 'FREE FLIGHT: EARTH';   // (v45.47)
   if (m === 'campaign') return 'CAMPAIGN';
   return 'ELIMINATION';
 }
@@ -100402,6 +100608,7 @@ function _lssModeBlurb(m) {
   if (m === 'endless') return 'A cavern without end.';
   if (m === 'freeflight') return 'Patrol the open overworld.';
   if (m === 'cyberpunk') return 'Storm the carrier, or hold the city.';   // (v44.11)
+  if (m === 'earth') return 'The real Earth. Fly anywhere.';   // (v45.47)
   return 'Team elimination.';
 }
 // Same lock rule as MATCH SPEED and race mode, for the same reason: changing it under a live round
@@ -101673,6 +101880,7 @@ function _lssRoomModeChoose(want) {
   const _t = _lssRoomModeOr(want);
   const m = _lssTagMode(_t);
   try { _lssSyncCyberToTag(_t); } catch (_) {}
+  try { _lssSyncEarthToTag(_t); } catch (_) {}
   try { _lssModeChosen(); } catch (_) {}
   // ⭐⭐⭐ (v45.30) APPLY BEFORE ANNOUNCING, OR THE PRESS DECREES THE MODE IT IS LEAVING.
   // Owner: pressing CYBERPUNK CITY in a settled two-peer room put BOTH clients in ELIMINATION,
@@ -111289,6 +111497,23 @@ const MAP_DATA = {
 
   // ============================================================
   // ============================================================
+  // (v45.47) FREE FLIGHT: EARTH — the streamed world. `stream: true` is what
+  // makes _lssGmapsBuildLevel hand this to LSSEarthWorld (patches kept around
+  // the player on one origin) rather than LSSEarthTiles (a single fixed patch).
+  gmaps_earth: {
+    type: 'gmaps',
+    stream: true,
+    name: 'Earth',
+    thumb: 'map_thumbs/toronto.jpg',
+    description: 'The real Earth, streamed. Fly anywhere; warp to any city.',
+    lat: 43.6426,
+    lng: -79.3860,
+    scale: 7,
+    extentMetres: 2600,
+    palette: [0x1a2848, 0x2a3858, 0x202848, 0x18283a, 0x202848, 0x1a2840, 0x18203a, 0x1c2848],
+    rooms: [],
+    tunnels: [],
+  },
   gmaps_user: {
     type: 'gmaps',
     name: 'Custom Location',
@@ -128442,72 +128667,122 @@ function _lssEarthWallMat() {
 // leaving them dimmed would follow the player back out to every other map.
 // ---------------------------------------------------------------------------
 let _lssEarthLightSave = null;
-function _lssEarthNightLights(on) {
+let _lssEarthNightK = -1;
+/**
+ * ⭐ DAY OVER WILDERNESS, DUSK OVER CITY — a CONTINUOUS blend, not a switch.
+ *
+ * The dusk rig was applied to every real-world level unconditionally, which is
+ * right for Hong Kong and wrong for everywhere that is not a city. Owner:
+ * "areas where there's no buildings or not many buildings should be daylight...
+ * rocky mountains for example, banff". A night wilderness is just black; the
+ * whole reason to fly to Banff is to see it.
+ *
+ * `k` is 0 (full daylight, the weather dome's own sky) to 1 (the hub's CITY
+ * DUSK). Every value is LERPED from the daylight baseline toward the dusk
+ * target, so flying out of a city into open country walks the sky up rather
+ * than flipping it. The baseline is captured ONCE, before anything is touched,
+ * and every later call re-derives from it — applying a blend on top of a
+ * blended state would compound and never come back.
+ */
+function _lssEarthApplyDayNight(k) {
   if (typeof scene === 'undefined' || !scene) return;
   const D = (typeof _HUB_ZONES !== 'undefined' && _HUB_ZONES && _HUB_ZONES.DUSK) || null;
-  if (on) {
-    if (_lssEarthLightSave) return;
+  if (!D) return;
+  k = Math.max(0, Math.min(1, k));
+  if (!_lssEarthLightSave) {
     _lssEarthLightSave = {
       amb: ambientLight.intensity, ambC: ambientLight.color.getHex(),
       key: dirLight.intensity, fill: dirLight2.intensity, rim: dirLight3.intensity,
       hemi: hemiLight.intensity, hSky: hemiLight.color.getHex(), hGnd: hemiLight.groundColor.getHex(),
-      fogC: (scene.fog && scene.fog.color) ? scene.fog.color.getHex() : null, fx: null
+      fogC: (scene.fog && scene.fog.color) ? scene.fog.color.getHex() : null,
+      dome: null, fx: null
     };
-    if (!D) return;
-    // ⚠ AMBIENT GOES **UP**, NOT DOWN. The first cut dimmed everything by a
-    // flat factor and the terrain rendered pure black; _HUB_ZONES.DUSK already
-    // records why, in its own comment: "a night city needs roughly 0.5 [ambient]
-    // or every unlit surface renders as pure black no matter its albedo.
-    // Dimming the key light is what makes it night; ambient is what keeps it
-    // readable." So these multipliers come STRAIGHT off the hub city's dusk
-    // block rather than being invented here — same numbers, same look, and any
-    // future tuning of the hub's night lands on the real-world city too.
-    ambientLight.intensity *= D.amb;            // 4.4x
-    if (D.ambColor != null) ambientLight.color.setHex(D.ambColor);
-    dirLight.intensity  *= D.key;               // 0.14x — this is what makes it night
-    dirLight2.intensity *= D.fill;
-    dirLight3.intensity *= D.rim;
-    hemiLight.intensity *= D.hemi;
-    if (D.hemiSky != null) hemiLight.color.setHex(D.hemiSky);
-    if (D.hemiGnd != null) hemiLight.groundColor.setHex(D.hemiGnd);
-    if (scene.fog && scene.fog.color && D.fog != null) scene.fog.color.setHex(D.fog);
-    // The weather dome built by _wxInit is a DAY sky — a bright blue gradient
-    // over a night city, which is what the first pass looked like. Repaint it
-    // with the same dusk palette.
     try {
-      if (typeof _WX !== 'undefined' && _WX && _WX.dome && _WX.dome.material &&
-          _WX.dome.material.uniforms) {
+      if (typeof _WX !== 'undefined' && _WX && _WX.dome && _WX.dome.material && _WX.dome.material.uniforms) {
         const u = _WX.dome.material.uniforms;
-        if (u.uZenith)  u.uZenith.value.setHex(D.zen);
-        if (u.uHorizon) u.uHorizon.value.setHex(D.hor);
-        if (u.uHaze)    u.uHaze.value.setHex(D.fog);
-        if (u.uBelow)   u.uBelow.value.setHex(D.fog);
+        _lssEarthLightSave.dome = {
+          zen: u.uZenith ? u.uZenith.value.getHex() : null,
+          hor: u.uHorizon ? u.uHorizon.value.getHex() : null,
+          haze: u.uHaze ? u.uHaze.value.getHex() : null,
+          below: u.uBelow ? u.uBelow.value.getHex() : null
+        };
       }
     } catch (_) {}
-    // Bloom: without it the window banks never bleed and the skyline reads flat.
     try {
       if (typeof postFX !== 'undefined' && postFX.brightMat && postFX.compositeMat) {
         _lssEarthLightSave.fx = { th: postFX.brightMat.uniforms.threshold.value,
                                   st: postFX.compositeMat.uniforms.bloomStrength.value };
-        if (D.bloomThreshold != null) postFX.brightMat.uniforms.threshold.value = D.bloomThreshold;
-        if (D.bloomStrength != null) postFX.compositeMat.uniforms.bloomStrength.value = D.bloomStrength;
       }
     } catch (_) {}
-  } else if (_lssEarthLightSave) {
-    const v = _lssEarthLightSave;
-    ambientLight.intensity = v.amb; ambientLight.color.setHex(v.ambC);
-    dirLight.intensity = v.key; dirLight2.intensity = v.fill; dirLight3.intensity = v.rim;
-    hemiLight.intensity = v.hemi;
-    hemiLight.color.setHex(v.hSky); hemiLight.groundColor.setHex(v.hGnd);
-    if (v.fogC != null && scene.fog && scene.fog.color) scene.fog.color.setHex(v.fogC);
-    try {
-      if (v.fx && typeof postFX !== 'undefined' && postFX.brightMat && postFX.compositeMat) {
-        postFX.brightMat.uniforms.threshold.value = v.fx.th;
-        postFX.compositeMat.uniforms.bloomStrength.value = v.fx.st;
-      }
-    } catch (_) {}
-    _lssEarthLightSave = null;
   }
+  if (Math.abs(k - _lssEarthNightK) < 0.004) return;   // nothing worth re-writing
+  _lssEarthNightK = k;
+  const v = _lssEarthLightSave;
+  const lerp = (a, b) => a + (b - a) * k;
+  const mixHex = (a, b) => {
+    const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+    const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+    return ((Math.round(lerp(ar, br)) << 16) | (Math.round(lerp(ag, bg)) << 8) | Math.round(lerp(ab, bb)));
+  };
+  // ⚠ AMBIENT GOES UP, NOT DOWN — _HUB_ZONES.DUSK says why in its own comment:
+  // "a night city needs roughly 0.5 [ambient] or every unlit surface renders as
+  // pure black no matter its albedo. Dimming the key light is what makes it
+  // night; ambient is what keeps it readable."
+  ambientLight.intensity = lerp(v.amb, v.amb * D.amb);
+  if (D.ambColor != null) ambientLight.color.setHex(mixHex(v.ambC, D.ambColor));
+  dirLight.intensity  = lerp(v.key,  v.key  * D.key);
+  dirLight2.intensity = lerp(v.fill, v.fill * D.fill);
+  dirLight3.intensity = lerp(v.rim,  v.rim  * D.rim);
+  hemiLight.intensity = lerp(v.hemi, v.hemi * D.hemi);
+  if (D.hemiSky != null) hemiLight.color.setHex(mixHex(v.hSky, D.hemiSky));
+  if (D.hemiGnd != null) hemiLight.groundColor.setHex(mixHex(v.hGnd, D.hemiGnd));
+  if (scene.fog && scene.fog.color && v.fogC != null && D.fog != null) {
+    scene.fog.color.setHex(mixHex(v.fogC, D.fog));
+  }
+  try {
+    if (v.dome && typeof _WX !== 'undefined' && _WX && _WX.dome && _WX.dome.material &&
+        _WX.dome.material.uniforms) {
+      const u = _WX.dome.material.uniforms;
+      if (u.uZenith && v.dome.zen != null)  u.uZenith.value.setHex(mixHex(v.dome.zen, D.zen));
+      if (u.uHorizon && v.dome.hor != null) u.uHorizon.value.setHex(mixHex(v.dome.hor, D.hor));
+      if (u.uHaze && v.dome.haze != null)   u.uHaze.value.setHex(mixHex(v.dome.haze, D.fog));
+      if (u.uBelow && v.dome.below != null) u.uBelow.value.setHex(mixHex(v.dome.below, D.fog));
+    }
+  } catch (_) {}
+  try {
+    if (v.fx && typeof postFX !== 'undefined' && postFX.brightMat && postFX.compositeMat) {
+      if (D.bloomThreshold != null) postFX.brightMat.uniforms.threshold.value = lerp(v.fx.th, D.bloomThreshold);
+      if (D.bloomStrength != null) postFX.compositeMat.uniforms.bloomStrength.value = lerp(v.fx.st, D.bloomStrength);
+    }
+  } catch (_) {}
+}
+function _lssEarthNightLights(on) {
+  if (on) { _lssEarthApplyDayNight(1); return; }
+  if (!_lssEarthLightSave) return;
+  const v = _lssEarthLightSave;
+  ambientLight.intensity = v.amb; ambientLight.color.setHex(v.ambC);
+  dirLight.intensity = v.key; dirLight2.intensity = v.fill; dirLight3.intensity = v.rim;
+  hemiLight.intensity = v.hemi;
+  hemiLight.color.setHex(v.hSky); hemiLight.groundColor.setHex(v.hGnd);
+  if (v.fogC != null && scene.fog && scene.fog.color) scene.fog.color.setHex(v.fogC);
+  try {
+    if (v.dome && typeof _WX !== 'undefined' && _WX && _WX.dome && _WX.dome.material &&
+        _WX.dome.material.uniforms) {
+      const u = _WX.dome.material.uniforms;
+      if (u.uZenith && v.dome.zen != null)  u.uZenith.value.setHex(v.dome.zen);
+      if (u.uHorizon && v.dome.hor != null) u.uHorizon.value.setHex(v.dome.hor);
+      if (u.uHaze && v.dome.haze != null)   u.uHaze.value.setHex(v.dome.haze);
+      if (u.uBelow && v.dome.below != null) u.uBelow.value.setHex(v.dome.below);
+    }
+  } catch (_) {}
+  try {
+    if (v.fx && typeof postFX !== 'undefined' && postFX.brightMat && postFX.compositeMat) {
+      postFX.brightMat.uniforms.threshold.value = v.fx.th;
+      postFX.compositeMat.uniforms.bloomStrength.value = v.fx.st;
+    }
+  } catch (_) {}
+  _lssEarthLightSave = null;
+  _lssEarthNightK = -1;
 }
 
 /**
@@ -128549,6 +128824,25 @@ class LSSEarthTiles {
     this.buildingExtentMul  = opts.buildingExtentMul  ?? 2.2;   // see _loadBuildings
     this.farBuildingMinH    = opts.farBuildingMinH    ?? 26;    // metres, beyond the core ring
     this.podWidenMul        = opts.podWidenMul        ?? 1.9;   // see the pod note in _extrudeBuilding
+    // {lat,lng} shared by every patch in a streamed world. See _setupProjection.
+    this.projOrigin         = opts.projOrigin         ?? null;
+    // Ways handed down by LSSEarthWorld instead of a per-patch Overpass query.
+    this.prefetchedWays     = opts.prefetchedWays     ?? null;
+    // Local metres: terrain chunks entirely inside +-this are not built, because
+    // another patch owns that ground. See _buildRingMesh.
+    this.ownsFog            = opts.ownsFog            ?? true;
+    // Raw DEM metres, set by LSSEarthWorld so every patch and the water plane
+    // agree on one surface. See _fetchDemRing.
+    this.forceWaterLevel    = opts.forceWaterLevel    ?? null;
+    // Raw DEM metres, same idea for the y=0 datum. _baseH defaults to the
+    // elevation at the SHARED origin -- but _sampleRing CLAMPS to the patch's
+    // own DEM window, so a patch whose window does not contain the origin
+    // samples its nearest edge instead and zeroes itself against the wrong
+    // ground. Measured over Banff: nine patches spread over 63.65 m of base,
+    // i.e. 445 world units of step between neighbours at scale 7. That is a
+    // vertical SEAM in the terrain, and collision reads the cell owner while
+    // the eye sees whichever patch drew on top. See _loadDEM.
+    this.forceBaseH         = opts.forceBaseH         ?? null;
     this.overpassUrl     = opts.overpassUrl     ?? 'https://overpass-api.de/api/interpreter';
     this.overpassMirrors = opts.overpassMirrors ?? [
       'https://overpass.kumi.systems/api/interpreter',
@@ -128656,9 +128950,19 @@ class LSSEarthTiles {
    * METRES and park every ship 840 units off the deck.
    */
   _xf() {
+    // WORLD MATRIX, not position/scale. A patch is a direct child of the scene
+    // on a single-location level, but LSSEarthWorld parents every patch to its
+    // OWN group -- so position/scale here are the patch's offset INSIDE that
+    // group, not where the geometry actually is. Reading them cost a silent
+    // 7x: the world group carried level.scale and _mkPatch gave the patch the
+    // same scale again, so terrain rendered at 49 units/metre while collide()
+    // divided by 7. Flat ground hid it (7 * 0 == 49 * 0); Banff did not --
+    // owner: "the collision doesn't line up with the mountains visually".
     const g = this.group;
-    const s = (g.scale && g.scale.x) || 1;
-    return { s, ox: g.position.x, oy: g.position.y, oz: g.position.z };
+    g.updateWorldMatrix(true, false);
+    const e = g.matrixWorld.elements;
+    const s = Math.hypot(e[0], e[1], e[2]) || 1;
+    return { s, ox: e[12], oy: e[13], oz: e[14] };
   }
 
   collide(pos, vel, pad) {
@@ -128791,10 +129095,36 @@ class LSSEarthTiles {
     return best > md ? Infinity : best * X.s;
   }
 
+  /**
+   * ⚠ THE PROJECTION ORIGIN IS NOT THE PATCH CENTRE.
+   * A patch used to define both: its own lat/lng was the map origin AND the
+   * middle of its tiles. That is fine for one static patch and useless for a
+   * streamed world, where several patches covering different ground have to
+   * agree on where world (0,0) is or they will not line up. `projOrigin` pins
+   * the frame for every patch in a session; `lat`/`lng` only say which ground
+   * THIS patch covers.
+   *
+   * Keeping ONE fixed origin (rather than a floating one that re-centres on the
+   * player) is deliberate: it means flight never has to shift the player,
+   * entities, network players or the champion field mid-air. At 7 units/m,
+   * float32 holds sub-centimetre precision out past 100 km, which is far beyond
+   * any continuous flight — and warp, which does move the origin, is allowed a
+   * loading screen.
+   */
   _setupProjection() {
     const myOf = (lat) => _leR * Math.log(Math.tan(Math.PI / 4 + lat * _leDEG / 2));
-    this._proj = { mx0: _leR * this.lng * _leDEG, my0: myOf(this.lat),
-                   k: Math.cos(this.lat * _leDEG), myOf };
+    const o = this.projOrigin || { lat: this.lat, lng: this.lng };
+    this._proj = { mx0: _leR * o.lng * _leDEG, my0: myOf(o.lat),
+                   k: Math.cos(o.lat * _leDEG), myOf };
+  }
+  /** Inverse of project(): local world XZ -> lat/lng. Needed to ask what ground
+   *  a point in the world corresponds to when streaming ahead of the player. */
+  unproject(x, z) {
+    const p = this._proj;
+    const mx = p.mx0 + x / p.k;
+    const my = p.my0 - z / p.k;
+    return { lat: (2 * Math.atan(Math.exp(my / _leR)) - Math.PI / 2) / _leDEG,
+             lng: (mx / _leR) / _leDEG };
   }
   /** lat/lng -> local world XZ (Y up, +X east, +Z south). */
   project(lat, lng) {
@@ -128892,7 +129222,8 @@ class LSSEarthTiles {
         this._grid = g;
         this._bounds = { X0: g.X0, X1: g.X1, Z0: g.Z0, Z1: g.Z1 };
         this._baseH = 0;
-        this._baseH = this._sampleRing(g, 0, 0);
+        this._baseH = (typeof this.forceBaseH === 'number')
+          ? this.forceBaseH : this._sampleRing(g, 0, 0);
       }
     }
     this.stats.rings = this._grids.length;
@@ -128953,20 +129284,61 @@ class LSSEarthTiles {
     for (const [v, c] of hist) if (c > domC) { domC = c; domV = v; }
     // Ring 0 decides the level; the outer rings must reuse it or the shoreline
     // would step between rings.
+    // ⚠ ONE WATER LEVEL FOR THE WHOLE WORLD. Each patch detects its own dominant
+    // value, and patches at DIFFERENT ZOOMS disagree slightly — the near ring
+    // measured Lake Ontario at 75.0 and the horizon patch, one zoom coarser, at
+    // 74.8. The water PLANE takes one of them, so the other's shoreline sits
+    // above or below it. forceWaterLevel hands every patch the level the plane
+    // will actually use.
     let level = (k === 0) ? null : this._waterLevelRaw;
-    if (k === 0 && domC >= heights.length * 0.01) level = domV;
+    if (k === 0) {
+      if (typeof this.forceWaterLevel === 'number') level = this.forceWaterLevel;
+      else if (domC >= heights.length * 0.01) level = domV;
+    }
     if (level !== null && level !== undefined) {
-      // A body can be flattened to a few neighbouring values (different source
-      // tiles, different rounding). Take every exact level within 2 m of the
-      // dominant one that covers a meaningful patch — that is what picks up a
-      // river mouth or a pond sitting at the same height as the main body.
-      const levels = new Set();
+      // ⚠ THE BAND WAS TOO GENEROUS AND IT ATE THE CITY. This used to admit every
+      // exact level within 2 m of the dominant one that covered 0.02% of the
+      // grid. Terrarium heights are quantised to 1/256 m, so on a 590k-texel
+      // grid 0.02% is ~118 texels — a threshold flat LAND near the water's
+      // elevation clears by coincidence. Carparks, rail yards and reclaimed
+      // ground were being carved out and covered by the water plane: "the map
+      // details are messed up in some parts and it thinks its water... and then
+      // our water cuts in over top".
+      //
+      // A water body is ONE flattened value and it is CONTIGUOUS. Both tests are
+      // needed:
+      //   · a TIGHT band, because one body can still land on two adjacent
+      //     quantised values where source tiles rounded differently. Owner:
+      //     "2m is a lot for water... it should be like .5m" — and half a metre
+      //     is the right order: a real body is dead flat, so anything further
+      //     than that is terrain, not the same lake.
+      //   · a count a coincidence cannot reach. 0.02% of a 590k grid is ~118
+      //     texels; 0.25% is ~1,475, which is a sub-body rather than noise.
+      //   · then erode — a wet texel needs two wet neighbours to survive. Real
+      //     water is solid and loses only its rim; scattered land matches vanish.
+      // (Cost: a river or pond at a DIFFERENT elevation is not detected. It could
+      // not be rendered anyway — the LSS water plane is one global level.)
+      const levels = new Set([level]);
       for (const [v, c] of hist) {
-        if (Math.abs(v - level) <= 2.0 && c >= heights.length * 0.0002) levels.add(v);
+        if (v !== level && Math.abs(v - level) <= 0.5 && c >= heights.length * 0.0025) levels.add(v);
       }
       const wet = new Uint8Array(w * h);
+      for (let i = 0; i < heights.length; i++) if (levels.has(heights[i])) wet[i] = 1;
       let nWet = 0;
-      for (let i = 0; i < heights.length; i++) { if (levels.has(heights[i])) { wet[i] = 1; nWet++; } }
+      {
+        const keep = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          const i = y * w + x;
+          if (!wet[i]) continue;
+          let n = 0;
+          if (x > 0 && wet[i - 1]) n++;
+          if (x < w - 1 && wet[i + 1]) n++;
+          if (y > 0 && wet[i - w]) n++;
+          if (y < h - 1 && wet[i + w]) n++;
+          if (n >= 2) { keep[i] = 1; nWet++; }
+        }
+        wet.set(keep);
+      }
       if (nWet > heights.length * 0.004) {
         // Blur the mask to get distance-from-shore for free: the blurred value
         // is ~0 at the waterline and ~1 in open water, which is exactly the ramp
@@ -128996,11 +129368,17 @@ class LSSEarthTiles {
         // Dig the basin BELOW THE BODY'S OWN LEVEL. Only wet texels move, so the
         // shoreline is untouched and the bed rises to meet it.
         const D = this.seaDepth;
-        for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = level - D * Math.min(1, amt[i] * 1.25);
+        // ⚠ The surface every patch SHARES, which is not necessarily the one this
+        // patch detected — see the note above. Carving to the local value would
+        // leave each ring's shoreline at a slightly different height than the one
+        // water plane that covers them all.
+        const surface = (typeof this.forceWaterLevel === 'number') ? this.forceWaterLevel : level;
+        for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = surface - D * Math.min(1, amt[i] * 1.25);
         this._hasSea = true;
-        if (k === 0) this._waterLevelRaw = level;
+        if (k === 0) this._waterLevelRaw = surface;
         if (k === 0) this.stats.seaPct = Math.round(1000 * nWet / heights.length) / 10;
-        if (k === 0) this.stats.waterLevelM = Math.round(level * 10) / 10;
+        if (k === 0) this.stats.waterLevelM = Math.round(surface * 100) / 100;
+        if (k === 0) this.stats.detectedLevelM = Math.round(level * 100) / 100;
       }
     }
 
@@ -129119,7 +129497,12 @@ class LSSEarthTiles {
 
   _buildTerrainMesh() {
     for (let k = 0; k < this._grids.length; k++) this._buildRingMesh(k);
-    this._applyFog();
+    // ⚠ ONLY THE PATCH THAT DEFINES THE HORIZON SETS THE FOG. Every patch used
+    // to call this, so in the streamed world the LAST near patch built won and
+    // sized the fog to its own 2.6 km extent — measured 8.74e-5, i.e. 50%
+    // visibility at 1.4 km, with the whole world beyond it in soup. Fog is a
+    // property of how far you can SEE, which only the outermost patch knows.
+    if (this.ownsFog) this._applyFog();
   }
 
   _buildRingMesh(k) {
@@ -129147,6 +129530,16 @@ class LSSEarthTiles {
       // keeps a chunk that merely touches the inner edge, so there is no gap.
       if (inner && x0 >= inner.X0 - 0.5 && x1 <= inner.X1 + 0.5 &&
                    z0 >= inner.Z0 - 0.5 && z1 <= inner.Z1 + 0.5) continue;
+      // ⚠ AND SKIP WHAT A DIFFERENT PATCH ALREADY OWNS. In the streamed world
+      // the horizon patch is centred on the same ground as the near ring, so its
+      // innermost ring drew the SAME terrain at a coarser zoom — two surfaces
+      // metres apart, interleaving into a band of broken slabs along the
+      // skyline. Owner: "the horizon looks messed up". Same rule as the annulus
+      // above: only a chunk ENTIRELY inside the hole is dropped, so a chunk
+      // straddling the boundary still draws and the seam overlaps rather than
+      // gaps.
+      const H = this.holeHalfMetres;
+      if (H > 0 && x0 >= -H && x1 <= H && z0 >= -H && z1 <= H) continue;
       const vcount = (N + 1) * (N + 1);
       const pos = new Float32Array(vcount * 3), uv = new Float32Array(vcount * 2);
       let p = 0, q = 0;
@@ -129190,16 +129583,140 @@ class LSSEarthTiles {
    * measured from the origin's own elevation, and the group carries the scale
    * and the pivot offset _lssGmapsRefinePivot writes.
    */
+  /**
+   * Drive the facade windows from the actual sun.
+   *
+   * The hub city is permanently at dusk, so _hcTowerMat can light every window
+   * unconditionally. A real-world level inherits whatever sky the map preset
+   * picked, and the first build ran at local noon — thousands of buildings
+   * glowing ice/sodium/rose under a midday sun, which read as confetti. Windows
+   * are a function of sun elevation AND intensity: elevation alone fails,
+   * because the dusk rig dims the sun where it stands rather than moving it
+   * below the horizon. A residual 6% by day (real glass does carry interior
+   * light) ramping to full below the horizon.
+   *
+   * ⚠ Keep this method BELOW collide/raycast, not above _setupProjection. It
+   * used to sit between them and an index splice from `collide` to
+   * `_setupProjection` deleted it silently — it was missing for several builds
+   * and nobody saw it, because the night rig makes it night regardless.
+   */
+  /**
+   * ⭐ ONE BLEND DRIVES BOTH THE SKY AND THE WINDOWS.
+   *
+   * This used to derive the window glow from the SUN — elevation and intensity —
+   * while `_lssEarthApplyDayNight` derived the sky from BUILDING DENSITY. The
+   * two then disagreed: measured over Banff, density 24 put the sky at k=0.455
+   * (partly dusk, ambient lifted, sun dimmed to 1.4) while the sun-based rule
+   * read that same dimmed sun as full daylight and pinned the glow to its 0.06
+   * floor — an effective 0.013 on a sunlit face, i.e. invisible. Owner: "i went
+   * to banff and the cyberpunk overlay wasn't there".
+   *
+   * Worse, the sun IS the thing the dusk blend dims, so the two were circular.
+   * Density is the honest input: it is what decides whether this is a city at
+   * all. `setWindowGlow` takes that one number; `updateNight` now only keeps the
+   * sun DIRECTION current, for the per-face dimming inside the shader.
+   */
+  setWindowGlow(v) {
+    const m = this._wallMat;
+    if (!m || !m.userData || !m.userData.uLeNight) return;
+    m.userData.uLeNight.value = Math.max(0, Math.min(1, v));
+  }
+  updateNight(scene) {
+    const m = this._wallMat;
+    if (!m || !m.userData || !m.userData.uSunV) return;
+    let best = null, bi = -1;
+    scene.traverse((o) => { if (o.isDirectionalLight && o.intensity > bi) { bi = o.intensity; best = o; } });
+    if (best) m.userData.uSunV.value.copy(best.position).normalize();
+  }
+
   /** Terrain height in WORLD units at a WORLD xz — what the shore-mask bake wants. */
   groundYWorld(x, z) {
     const X = this._xf();
     return this.heightAt((x - X.ox) / X.s, (z - X.oz) / X.s) * X.s + X.oy;
   }
 
+  /**
+   * ⭐ SPAWN POINTS CLEAR OF THE CITY.
+   *
+   * A gmaps level has no rooms and no corridors, so getValidSpawnPoint hits its
+   * `return new THREE.Vector3(0,0,0)` fallback — the map origin, at ground
+   * level, which over a real city is the inside of whatever building stands at
+   * the lat/lng you picked. Owner: "we keep spawning inside a building".
+   *
+   * Rather than hunt for a gap at street level, spawn ABOVE THE ROOFS: for each
+   * candidate the ceiling is the tallest building within `clear` metres, so the
+   * point is airborne and unobstructed by construction. This is a flight game;
+   * starting in the air is what it wants anyway.
+   *
+   * Returns WORLD positions, ready for game.corridorPoints.
+   */
+  spawnPoints(n, clearM) {
+    const out = [];
+    if (!this._bounds) return out;
+    const X = this._xf();
+    const sc = X.s;
+    const clear = clearM || 140;
+    const b = this._bounds;
+    const rx = (b.X1 - b.X0) * 0.34, rz = (b.Z1 - b.Z0) * 0.34;
+    const N = Math.max(4, n || 24);
+    for (let i = 0; i < N; i++) {
+      // A ring, not a grid: it spreads the two teams to opposite sides for free
+      // and keeps everyone off the exact centre.
+      const a = (i / N) * Math.PI * 2;
+      const rr = 0.45 + 0.5 * ((i % 3) / 2);
+      const x = Math.cos(a) * rx * rr, z = Math.sin(a) * rz * rr;
+      let top = this.heightAt(x, z);
+      const g = this._cgrid;
+      if (g) {
+        const i0 = Math.max(0, ((x - clear - g.X0) / g.cell) | 0);
+        const i1 = Math.min(g.gx - 1, ((x + clear - g.X0) / g.cell) | 0);
+        const j0 = Math.max(0, ((z - clear - g.Z0) / g.cell) | 0);
+        const j1 = Math.min(g.gz - 1, ((z + clear - g.Z0) / g.cell) | 0);
+        for (let j = j0; j <= j1; j++) for (let ii = i0; ii <= i1; ii++) {
+          const list = g.cells[j * g.gx + ii];
+          if (!list) continue;
+          for (let k = 0; k < list.length; k++) if (list[k].top > top) top = list[k].top;
+        }
+      }
+      out.push({
+        x: x * sc + X.ox,
+        y: (top * sc + X.oy) + 260,   // clearance above the tallest roof
+        z: z * sc + X.oz,
+        team: (x < 0) ? 'A' : 'B'
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Buildings per square kilometre in this patch — what decides whether the sky
+   * over you is a city dusk or open daylight (see _lssEarthApplyDayNight).
+   * Counted over the whole patch rather than a radius around the ship, because
+   * it only has to answer "is this a city". Toronto's core measures ~100/km2;
+   * Banff would be ~0.
+   */
+  buildingDensity() {
+    const b = this._bldBounds || this._bounds;
+    if (!b || !this._bldList) return 0;
+    const km2 = Math.max(0.01, ((b.X1 - b.X0) / 1000) * ((b.Z1 - b.Z0) / 1000));
+    return this._bldList.length / km2;
+  }
+
+  /** How far this patch's terrain reaches, in WORLD units. */
+  farUnits() {
+    const sc = this._xf().s;
+    if (this.stats && this.stats.farUnits) return this.stats.farUnits;
+    const g = this._grids && this._grids[this._grids.length - 1];
+    return g ? ((g.X1 - g.X0) / 2) * sc : 20000;
+  }
+
   seaLevelWorld() {
-    const s = (this.group.scale && this.group.scale.x) || 1;
+    // _xf(), not position/scale: under LSSEarthWorld the patch's own position
+    // is its offset INSIDE that group, so a pivot written to the world group
+    // would be missed here and the water plane would sit at the wrong height.
+    const X = this._xf();
     const L = (typeof this._waterLevelRaw === 'number') ? this._waterLevelRaw : 0;
-    return ((L - this._baseH) * this.heightScale) * s + this.group.position.y;
+    return ((L - this._baseH) * this.heightScale) * X.s + X.oy;
   }
 
   /**
@@ -129219,8 +129736,25 @@ class LSSEarthTiles {
     const WL = this.seaLevelWorld();
     try {
       _swBuildHubWater({ WL, YFLOOR: WL - this.seaDepth * this.heightScale *
-                         ((this.group.scale && this.group.scale.x) || 1) });
+                         this._xf().s });
       this.stats.waterWL = Math.round(WL);
+      // ⚠ THE FLAT WATER IS A 48,000-UNIT PLANE — ±24,000 around the camera it
+      // follows. That is 3.4 km of real sea at scale 7, against a world that
+      // reaches 148,000 units, so the ocean visibly ENDED and the edge swept
+      // along with you: "the water could load a little further away, it's doing
+      // the pop in thing too". Scaling a FLAT mirror is safe — the plane's
+      // normal and height are unchanged, so the reflection matrix is untouched;
+      // only its extent grows. The displacement sheet is a separate, smaller
+      // mesh that keeps its own density near the ship.
+      try {
+        const w = game._hubWater;
+        if (w && w.scale) {
+          const k = Math.max(1, Math.min(8, this.farUnits() * 2.2 / 48000));
+          w.scale.set(k, k, k);
+          w.updateMatrix();
+          this.stats.waterScale = +k.toFixed(2);
+        }
+      } catch (_) {}
       return true;
     } catch (e) { console.warn('[lss-earth] water build failed:', e); return false; }
   }
@@ -129243,10 +129777,13 @@ class LSSEarthTiles {
   _applyFog() {
     if (typeof scene === 'undefined' || !scene || !this._grids.length) return;
     const g = this._grids[this._grids.length - 1];
-    const s = (this.group.scale && this.group.scale.x) || 1;
+    const s = this._xf().s;
     const far = Math.max(1, ((g.X1 - g.X0) / 2) * s);
     this.stats.farUnits = Math.round(far);
-    const d = Math.sqrt(Math.log(10)) / far;
+    // 0.78, not 1.0: sqrt(ln 10) / far leaves ~10% visibility AT the edge, which
+    // is a faint but real line where the world stops. Pulling the fog in makes
+    // the last of the terrain fade out before you can see it end.
+    const d = Math.sqrt(Math.log(10)) / (far * 0.78);
     if (scene.fog && typeof scene.fog.density === 'number') {
       this._savedFog = { d: scene.fog.density, c: scene.fog.color.getHex() };
       scene.fog.density = d;
@@ -129366,12 +129903,22 @@ class LSSEarthTiles {
       + ');out geom;';
     const key = 'v2:' + s.toFixed(5) + ',' + w.toFixed(5) + ',' + n.toFixed(5) + ',' + e.toFixed(5);
 
-    let data = await _leCacheGet(key);
-    if (data) { this.stats.osmCached = true; this._progress('buildings: from cache', 0.8); }
-    else {
-      data = await this._overpassFetch(q);
-      this.stats.osmCached = false;
-      _leCachePut(key, data);
+    let data;
+    if (this.prefetchedWays) {
+      // (v45.47) The streamed world fetches ONE region for the whole near ring
+      // and hands every patch the same ways — nine patches must not be nine
+      // Overpass queries. The patch still rejects everything outside its own
+      // chunk grid, so sharing costs a cheap centroid test per way.
+      data = { elements: this.prefetchedWays };
+      this.stats.osmCached = 'shared';
+    } else {
+      data = await _leCacheGet(key);
+      if (data) { this.stats.osmCached = true; this._progress('buildings: from cache', 0.8); }
+      else {
+        data = await this._overpassFetch(q);
+        this.stats.osmCached = false;
+        _leCachePut(key, data);
+      }
     }
     if (this._disposed) return;
 
@@ -129536,6 +130083,16 @@ class LSSEarthTiles {
     const groundY = this.heightAt(wx, wz);
     let baseY = Math.min(lowY, groundY);
     height += (groundY - baseY);
+    // ⚠ DO NOT LET A BUILDING STAND ON THE SEA BED. The water carve lowers every
+    // wet texel by seaDepth, and a building whose footprint touches one takes
+    // its base from the CARVED ground — so shoreline blocks, piers and anything
+    // on reclaimed land sank under the water plane. Owner: "some of the
+    // buildings are under water". The waterline is the floor for a building
+    // base; below it there is no land to stand on.
+    if (this._hasSea && typeof this._waterLevelRaw === 'number') {
+      const _wlLocal = (this._waterLevelRaw - this._baseH) * this.heightScale;
+      if (baseY < _wlLocal) baseY = _wlLocal;
+    }
     // A building:part can START in mid-air (min_height) — that is how a pod or
     // a setback section is modelled. Such a part is NOT sunk to the ground.
     const _minH = (() => {
@@ -129806,6 +130363,594 @@ class LSSEarthTiles {
     inst.castShadow = false; inst.receiveShadow = false;
     this.group.add(inst);
     this.stats.ads = placed;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (v45.47) LSSEarthWorld — UNBOUNDED FLIGHT OVER THE REAL EARTH
+//
+// LSSEarthTiles builds ONE patch around one lat/lng. That is a level. This owns
+// a set of patches sharing a single projection origin and keeps them around the
+// player, so you can fly in any direction and the ground keeps arriving.
+//
+// ── WHY A FIXED ORIGIN, NOT A FLOATING ONE ────────────────────────────────
+// The textbook answer to an endless world is a floating origin: re-centre on
+// the player and translate everything back. LSS would have to shift the player,
+// every entity, every network player and the champion field mid-flight — the
+// same list _lssGmapsShiftLevelY walks for Y — and do it without the net peers
+// disagreeing. It is not worth it here: at 7 units/m, float32 keeps
+// sub-centimetre precision past 100 km, which is further than any continuous
+// flight. So the origin is pinned for the session and only WARP moves it, where
+// a loading screen is acceptable anyway.
+//
+// ── WHY TERRAIN STREAMS AND BUILDINGS BLOCK ───────────────────────────────
+// ⚠ Re:Earth and Esri are CDNs and do not care how many tiles you pull.
+// OVERPASS DOES: measured 429 after ~3 queries in 30 s from one IP. So terrain
+// and imagery stream at patch granularity while buildings come in LARGE blocks
+// — one query per block, sized so that crossing one takes a minute-plus of
+// flight. Anything finer rate-limits itself to death on the first flight.
+// ═══════════════════════════════════════════════════════════════════════════
+class LSSEarthWorld {
+  constructor(opts = {}) {
+    this.group = new THREE.Group();
+    this.group.name = 'LSSEarthWorld';
+    // The eight members the gmaps path pokes, same contract as LSSEarthTiles.
+    this.errorTarget = 8;
+    this.errorThreshold = 8;
+
+    this.patchMetres   = opts.patchMetres   ?? 2600;  // one near patch's extent
+    this.nearRadius    = opts.nearRadius    ?? 1;     // patches each way -> 3x3
+    this.farMetres     = opts.farMetres     ?? 9000;  // the horizon patch
+    this.scale         = opts.scale         ?? 7;
+    this.maxConcurrent = opts.maxConcurrent ?? 1;     // patch builds in flight
+    this.patchOpts     = opts.patchOpts     ?? {};
+    this.onProgress    = opts.onProgress    ?? null;
+
+    this._patches = new Map();   // "cx,cy" -> LSSEarthTiles
+    this._bldWays = null; this._bldRegionKey = null; this._bldRegionPending = null;
+    this._bldCentre = null; this._probe = null;
+    // A rate-limited Overpass must not read as "this city has no buildings".
+    // See _ensureBldRegion: the failure is never cached, it backs off, and a
+    // timer retries and backfills the patches that were built without a city.
+    this._bldFail = 0; this._bldFailAt = 0; this._bldCooldown = 0;
+    this._bldRetryTimer = null;
+    // Last setWindowGlow, re-applied to anything backfilled later -- a patch
+    // that gets its buildings after the day/night blend has run would
+    // otherwise sit at the material default. See _backfillBuildings.
+    this._glow = null;
+    // ⚠ Computable UP FRONT, and it has to be. The curtain polls this every 16 ms
+    // from the first frame; leaving it at 1 until _boot got around to setting it
+    // meant the very first poll saw 1-of-1 and lifted with one patch built.
+    // Cells with d<=1 is the centre plus its four neighbours.
+    this.bootTarget = (this.nearRadius >= 1) ? 5 : 1;
+    this._baseH = null;       // the shared y=0 datum; see _ensureFar
+    this._farReady = false;   // see streamUpdate
+    this._pending = new Set();
+    this._far = null;
+    this._farCell = null;
+    this._listeners = {};
+    this._disposed = false;
+    this.ready = null;
+    this.stats = { patches: 0, buildings: 0, loads: 0, ms: 0 };
+  }
+
+  addEventListener(t, cb) { (this._listeners[t] || (this._listeners[t] = [])).push(cb); }
+  removeEventListener(t, cb) {
+    const a = this._listeners[t]; if (!a) return;
+    const i = a.indexOf(cb); if (i >= 0) a.splice(i, 1);
+  }
+  _emit(t, e) { for (const cb of (this._listeners[t] || [])) { try { cb(e); } catch (_) {} } }
+  setCamera() {} setResolutionFromRenderer() {}
+  // ⚠ update() is the no-arg per-frame call _lssGmapsTick already makes on any
+  // tiles object. The streaming pass is streamUpdate(focus) and must NOT share
+  // that name, or the tick would run it every frame with focus === undefined.
+  update() {}
+  _progress(m, f) { if (this.onProgress) { try { this.onProgress(m, f); } catch (_) {} } }
+
+  /** RADIANS, like GoogleTilesRenderer. Pins the origin and builds the first patches. */
+  setLatLonToYUp(latRad, lonRad) {
+    this.lat = latRad / _leDEG;
+    this.lng = lonRad / _leDEG;
+    this.origin = { lat: this.lat, lng: this.lng };
+    // Metres of world per patch cell, in LOCAL metres (before group scale).
+    this._cell = this.patchMetres;
+    this.ready = this._boot().catch((e) => {
+      console.error('[lss-earth-world] boot failed:', e);
+      this._emit('load-error', { error: e, message: String((e && e.message) || e) });
+    });
+    return this.ready;
+  }
+
+  async _boot() {
+    const t0 = performance.now();
+    // The horizon patch first: it is what stops the world ending at the edge of
+    // the near patches while they are still arriving.
+    this._bldCentre = { cx: 0, cy: 0 };
+    await this._ensureFar(0, 0, '0:0');
+    // ⭐ WAIT FOR THE WHOLE NEAR RING, not just the centre. Going playable with
+    // one patch built is what produced "the map loaded after we got in... so it
+    // had a pop in effect". It is affordable now only because the buildings for
+    // all nine came from ONE query (_ensureBldRegion) — the DEM and imagery are
+    // CDN fetches that parallelise freely.
+    // ⚠ NEAREST FIRST, AND ONLY WHAT IS VISIBLE. Raster order loads a corner
+    // before the cell next to you, and waiting for the full 3x3 does not fit
+    // inside the launch countdown — which releases the curtain whether the world
+    // is ready or not (measured: state goes 'playing' at ~5 s regardless). So
+    // the boot target is the PLUS: the centre and its four neighbours, the
+    // patches actually under and beside the spawn. The four corners stream in
+    // behind the horizon patch, which is already up and covers them.
+    const R = this.nearRadius;
+    const cells = [];
+    for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) cells.push({ dx, dy, d: dx * dx + dy * dy });
+    cells.sort((a, b) => a.d - b.d);
+    this.bootTarget = cells.filter((c) => c.d <= 1).length;   // same number, now exact
+    // ⚠ THE CORE LOADS IN PARALLEL, THE REST ONE AT A TIME. maxConcurrent is 1
+    // because an Overpass query per patch would rate-limit — but the region
+    // query has already happened by here, so these five only pull DEM and
+    // imagery from CDNs, which parallelise happily. Sequential, they took ~1 s
+    // each and the launch countdown lifted the curtain at ~5 s with four of five
+    // built. Together they beat it.
+    const core = cells.filter((c) => c.d <= 1);
+    this._progress('city: ' + core.length + ' districts', 0.5);
+    await Promise.all(core.map((c) => this._ensurePatch(c.dx, c.dy)));
+    if (this._disposed) return;
+    this.stats.ms = Math.round(performance.now() - t0);
+    this._emit('load-complete', {});
+    // The corners follow one at a time, behind the horizon patch that already
+    // covers them, so they cost nothing anyone can see.
+    for (const c of cells) {
+      if (this._disposed) return;
+      if (c.d <= 1) continue;
+      await this._ensurePatch(c.dx, c.dy);
+    }
+    this.stats.msAll = Math.round(performance.now() - t0);
+  }
+
+  _key(cx, cy) { return cx + ',' + cy; }
+
+  /**
+   * World units per LOCAL metre, measured off the scene graph rather than
+   * trusted from this.scale. The patches carry this.scale and hang under
+   * this.group, so the true figure is the product -- and if anything scales
+   * the world group (the shared gmaps level setup used to, which is what made
+   * it 49), every query below follows the geometry instead of drifting from
+   * it. See the _xf() note in LSSEarthTiles.
+   */
+  _unitsPerMetre() {
+    this.group.updateWorldMatrix(true, false);
+    const e = this.group.matrixWorld.elements;
+    return (Math.hypot(e[0], e[1], e[2]) || 1) * this.scale;
+  }
+
+  /**
+   * Set the world scale WITHOUT scaling the group. The patches are what carry
+   * it (see _mkPatch); scaling the group too multiplies the two.
+   */
+  applyScale(n) {
+    if (typeof n !== 'number' || !(n > 0)) return;
+    this.scale = n;
+    this.group.scale.setScalar(1);
+    for (const p of this._patches.values()) p.group.scale.setScalar(n);
+    if (this._far) this._far.group.scale.setScalar(n);
+  }
+
+  /** Which near-patch cell a LOCAL-metre xz falls in. */
+  _cellOf(x, z) {
+    return { cx: Math.floor(x / this._cell + 0.5), cy: Math.floor(z / this._cell + 0.5) };
+  }
+  /** Centre of a cell in LOCAL metres, then as lat/lng via the shared frame. */
+  _cellLatLng(cx, cy) {
+    const probe = this._any();
+    const x = cx * this._cell, z = cy * this._cell;
+    if (probe) return probe.unproject(x, z);
+    // Before any patch exists, do the inverse by hand off the origin.
+    const myOf = (lat) => _leR * Math.log(Math.tan(Math.PI / 4 + lat * _leDEG / 2));
+    const k = Math.cos(this.origin.lat * _leDEG);
+    const mx = _leR * this.origin.lng * _leDEG + x / k;
+    const my = myOf(this.origin.lat) - z / k;
+    return { lat: (2 * Math.atan(Math.exp(my / _leR)) - Math.PI / 2) / _leDEG,
+             lng: (mx / _leR) / _leDEG };
+  }
+  _any() { for (const p of this._patches.values()) return p; return this._far; }
+
+  _mkPatch(lat, lng, extra) {
+    const o = Object.assign({}, this.patchOpts, extra || {}, {
+      projOrigin: this.origin,
+      extentMetres: extra && extra.extentMetres,
+      onProgress: (m, f) => this._progress(m, f)
+    });
+    const t = new LSSEarthTiles(o);
+    t.group.scale.setScalar(this.scale);
+    t.setLatLonToYUp(lat * _leDEG, lng * _leDEG);
+    return t;
+  }
+
+  /**
+   * ⭐ ONE BUILDING QUERY FOR THE WHOLE NEAR RING.
+   *
+   * Nine patches must not be nine Overpass queries — that is a guaranteed 429
+   * on the first flight, and it is also why the world used to go playable with
+   * only the centre patch built and the rest popping in afterwards. Fetching
+   * the region up front is what makes it possible to WAIT for the full ring in
+   * the loading screen, which is what the owner actually asked for: "the map
+   * loaded after we got in... so it had a pop in effect".
+   *
+   * Shape matches a patch's own query: full detail over the middle, and outside
+   * it only buildings tall enough to read at range, filtered SERVER-SIDE.
+   */
+  async _ensureBldRegion(cx, cy, force) {
+    const r = this.nearRadius + 1;
+    const key = cx + ':' + cy;
+    if (this._bldRegionKey === key && this._bldWays) return this._bldWays;
+    if (this._bldRegionPending === key) return this._bldWaysPromise;
+    // A failure is NOT an answer, so it is never cached -- but the five core
+    // patches must not each re-hammer a server that just rate-limited us.
+    // Hold off until the scheduled retry, which passes force.
+    if (!force && this._bldFailAt && (Date.now() - this._bldFailAt) < this._bldCooldown) return [];
+    this._bldRegionPending = key;
+    this._bldWaysPromise = (async () => {
+      const probe = this._any() || this._mkProbe();
+      const ll = (x, z) => this._cellLatLng(x / this._cell, z / this._cell);
+      const half = (r + 0.5) * this._cell;
+      const nw = ll(cx * this._cell - half, cy * this._cell - half);
+      const se = ll(cx * this._cell + half, cy * this._cell + half);
+      const ch = this._cell * 0.5;
+      const cnw = ll(cx * this._cell - ch, cy * this._cell - ch);
+      const cse = ll(cx * this._cell + ch, cy * this._cell + ch);
+      const S = Math.min(nw.lat, se.lat), N = Math.max(nw.lat, se.lat);
+      const W = Math.min(nw.lng, se.lng), E = Math.max(nw.lng, se.lng);
+      const cS = Math.min(cnw.lat, cse.lat), cN = Math.max(cnw.lat, cse.lat);
+      const cW = Math.min(cnw.lng, cse.lng), cE = Math.max(cnw.lng, cse.lng);
+      const core = '(' + cS + ',' + cW + ',' + cN + ',' + cE + ')';
+      const wide = '(' + S + ',' + W + ',' + N + ',' + E + ')';
+      const minH = (this.patchOpts && this.patchOpts.farBuildingMinH) || 26;
+      const q = '[out:json][timeout:60];('
+        + 'way["building"]' + core + ';'
+        + 'way["building:part"]' + core + ';'
+        + 'way["building"](if:number(t["height"])>=' + minH + ')' + wide + ';'
+        + ');out geom;';
+      const ckey = 'w2:' + S.toFixed(4) + ',' + W.toFixed(4) + ',' + N.toFixed(4) + ',' + E.toFixed(4);
+      let data = await _leCacheGet(ckey);
+      if (!data) {
+        this._progress('city: one query for the whole neighbourhood...', 0.4);
+        try {
+          data = await probe._overpassFetch(q);
+          _leCachePut(ckey, data);
+        } catch (e) {
+          // DO NOT COMMIT AN EMPTY ANSWER. This used to fall through to
+          // `data = { elements: [] }` and then cache it as the region's result
+          // (_bldWays = [], _bldRegionKey = key), so ONE transient 429 -- and
+          // Overpass 429s after ~3 queries in 30 s, which relaunching hits --
+          // meant every patch for the rest of the session got zero ways.
+          // Owner, over Toronto: "none of the buildings rose up, just have the
+          // 2D pictures", then "loaded that time" on the next attempt.
+          // _overpassFetch has ALREADY spent 3 tries and both mirrors here, so
+          // this is a real outage: back off, tell anyone listening, and let the
+          // retry below put the city in when the server comes back.
+          console.warn('[lss-earth-world] region buildings failed:', e);
+          this._bldRegionPending = null;
+          this._bldFail++;
+          this._bldFailAt = Date.now();
+          this._bldCooldown = Math.min(60000, 15000 * Math.pow(2, this._bldFail - 1));
+          this.stats.buildingError = (e && e.message) || String(e);
+          this._emit('buildings-failed', { error: e, message: this.stats.buildingError,
+                                           retryInMs: this._bldCooldown, attempt: this._bldFail });
+          this._scheduleBldRetry(cx, cy);
+          return [];
+        }
+      }
+      const seen = new Set();
+      const ways = (data.elements || []).filter((el) => {
+        if (el.type !== 'way' || !el.geometry) return false;
+        if (seen.has(el.id)) return false;
+        seen.add(el.id); return true;
+      });
+      this._bldWays = ways;
+      this._bldRegionKey = key;
+      this._bldRegionPending = null;
+      this._bldFail = 0; this._bldFailAt = 0; this._bldCooldown = 0;
+      this.stats.regionWays = ways.length;
+      return ways;
+    })();
+    return this._bldWaysPromise;
+  }
+
+  /**
+   * Come back for the city later. One timer for the whole world, not one per
+   * patch, and it outlives the patches that provoked it -- the ones already on
+   * screen with nothing on them are exactly what _backfillBuildings fixes.
+   */
+  _scheduleBldRetry(cx, cy) {
+    if (this._bldRetryTimer || this._disposed) return;
+    const wait = this._bldCooldown || 15000;
+    this._bldRetryTimer = setTimeout(async () => {
+      this._bldRetryTimer = null;
+      if (this._disposed) return;
+      let ways = null;
+      try { ways = await this._ensureBldRegion(cx, cy, true); } catch (_) { ways = null; }
+      // A second failure reschedules itself from the catch, with a longer wait.
+      if (!ways || !ways.length || this._disposed) return;
+      await this._backfillBuildings(ways);
+    }, wait);
+  }
+
+  /**
+   * Put a city on the patches that were built during the outage. They are
+   * already on screen with their terrain and imagery, so this only has to add
+   * the buildings -- _loadBuildings is self-contained and takes the ways
+   * through prefetchedWays, the same way a fresh patch gets them.
+   */
+  async _backfillBuildings(ways) {
+    let n = 0;
+    for (const p of this._patches.values()) {
+      if (this._disposed) return;
+      if (p._bldList && p._bldList.length) continue;   // this one already has its city
+      try {
+        p.prefetchedWays = ways;
+        await p._loadBuildings();
+        // The day/night blend has long since run; a patch built now would sit
+        // at the material default without this. See _lssEarthApplyDayNight.
+        if (typeof this._glow === 'number' && typeof p.setWindowGlow === 'function') {
+          p.setWindowGlow(this._glow);
+        }
+        n++;
+      } catch (e) { console.warn('[lss-earth-world] backfill failed:', e); }
+      await new Promise((r) => setTimeout(r, 0));      // never one long block
+    }
+    this.stats.buildings = 0;
+    for (const p of this._patches.values()) this.stats.buildings += (p._bldList || []).length;
+    console.log('[lss-earth-world] buildings backfilled into', n, 'patches;',
+                this.stats.buildings, 'total');
+    this._emit('buildings-backfilled', { patches: n, buildings: this.stats.buildings });
+  }
+
+  /** A throwaway patch instance, only for borrowing _overpassFetch before any exists. */
+  _mkProbe() {
+    if (this._probe) return this._probe;
+    this._probe = new LSSEarthTiles({ projOrigin: this.origin });
+    return this._probe;
+  }
+
+  async _ensurePatch(cx, cy) {
+    const k = this._key(cx, cy);
+    // Note: no maxConcurrent check here — that budget is enforced by the CALLER
+    // (streamUpdate picks one per frame), so the boot can run its core in
+    // parallel without the two fighting.
+    if (this._patches.has(k) || this._pending.has(k) || this._disposed) return;
+    this._pending.add(k);
+    try {
+      const ll = this._cellLatLng(cx, cy);
+      // ⚠ Near patches carry NO water plane and NO far rings. The water plane is
+      // global (one level, one mesh) and belongs to the horizon patch; a ring
+      // per near patch would draw the same distant ground nine times.
+      const ways = await this._ensureBldRegion(this._bldCentre ? this._bldCentre.cx : 0,
+                                               this._bldCentre ? this._bldCentre.cy : 0);
+      const t = this._mkPatch(ll.lat, ll.lng, {
+        extentMetres: this.patchMetres, ringCount: 1, water: false, ads: true,
+        prefetchedWays: ways, ownsFog: false,
+        forceWaterLevel: (typeof this._waterLevel === 'number') ? this._waterLevel : null,
+        forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null
+      });
+      await t.ready;
+      if (this._disposed) { try { t.dispose(); } catch (_) {} return; }
+      this.group.add(t.group);
+      this._patches.set(k, t);
+      this.stats.loads++;
+      this.stats.patches = this._patches.size;
+      this.stats.buildings = 0;
+      for (const p of this._patches.values()) this.stats.buildings += (p.stats.buildings || 0);
+    } catch (e) {
+      console.warn('[lss-earth-world] patch', k, 'failed:', e);
+    } finally { this._pending.delete(k); }
+  }
+
+  async _ensureFar(cellX, cellY, key) {
+    const k = key || this._key(cellX, cellY);
+    if (this._farCell === k || this._disposed) return;
+    const ll = this._cellLatLng(cellX, cellY);
+    // The near ring spans (2r+1) patches; the horizon must not redraw any of it.
+    // Trimmed by a quarter patch so the two overlap slightly at the seam rather
+    // than risking a gap.
+    const nearHalf = ((this.nearRadius * 2 + 1) * this._cell) / 2 - this._cell * 0.25;
+    const t = this._mkPatch(ll.lat, ll.lng, {
+      extentMetres: this.farMetres, ringCount: 3, buildings: false, ads: false, water: true,
+      holeHalfMetres: Math.max(0, nearHalf),
+      forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null
+    });
+    this._farCell = k;
+    await t.ready;
+    if (this._disposed) { try { t.dispose(); } catch (_) {} return; }
+    const old = this._far;
+    this.group.add(t.group);
+    this._far = t;
+    // The horizon patch owns the water plane, so its level is THE level.
+    if (typeof t._waterLevelRaw === 'number') this._waterLevel = t._waterLevelRaw;
+    // ...and its base is THE datum, latched ONCE. Re-latching on a re-centred
+    // horizon would move y=0 under a world full of already-built patches.
+    if (typeof this._baseH !== 'number' && typeof t._baseH === 'number') this._baseH = t._baseH;
+    this._farReady = true;
+    this._holeSig = null;   // force the hole onto the replacement next frame
+    // Swap AFTER the replacement is on screen, never before — dropping the old
+    // horizon first is a visible hole in the world for the whole build.
+    if (old) { try { this.group.remove(old.group); old.dispose(); } catch (_) {} }
+  }
+
+  /**
+   * Per frame. `focus` is a WORLD position (the player). Loads what is missing
+   * around them and drops what they have left behind.
+   * ⚠ ONE build at a time (maxConcurrent). Each patch is a DEM + imagery fetch
+   * and an Overpass query; firing a 3x3 at once is how you get rate-limited on
+   * the first flight.
+   */
+  streamUpdate(focus) {
+    if (this._disposed || !focus || !this.origin) return;
+    // ⚠ THE TICK RACES THE BOOT. _lssGmaps.tiles is assigned the moment the
+    // world is CONSTRUCTED, so _lssGmapsTick starts calling this while _boot is
+    // still awaiting the horizon patch — and a patch created in that window is
+    // built before the horizon has published the shared water level, so it
+    // carves its own and its shoreline does not meet the plane. It also steals
+    // bandwidth from the boot it is supposed to follow. Nothing streams until
+    // the horizon exists.
+    if (!this._farReady) return;
+    const s = this._unitsPerMetre();
+    const lx = (focus.x - this.group.position.x) / s;
+    const lz = (focus.z - this.group.position.z) / s;
+    const c = this._cellOf(lx, lz);
+
+    // Re-fetch the building region when the ship leaves the one we have.
+    if (!this._bldCentre || Math.abs(c.cx - this._bldCentre.cx) > this.nearRadius ||
+        Math.abs(c.cy - this._bldCentre.cy) > this.nearRadius) {
+      this._bldCentre = { cx: c.cx, cy: c.cy };
+      this._ensureBldRegion(c.cx, c.cy);
+    }
+    if (this._pending.size < this.maxConcurrent) {
+      // Nearest missing cell first, so the ground you are about to fly over
+      // beats the one behind you.
+      let best = null, bestD = Infinity;
+      for (let dy = -this.nearRadius; dy <= this.nearRadius; dy++) {
+        for (let dx = -this.nearRadius; dx <= this.nearRadius; dx++) {
+          const cx = c.cx + dx, cy = c.cy + dy, k = this._key(cx, cy);
+          if (this._patches.has(k) || this._pending.has(k)) continue;
+          const d = dx * dx + dy * dy;
+          if (d < bestD) { bestD = d; best = { cx, cy }; }
+        }
+      }
+      if (best) this._ensurePatch(best.cx, best.cy);
+    }
+
+    // Retire anything more than one ring outside the keep radius (hysteresis,
+    // so flying along a boundary does not thrash a patch in and out).
+    const keep = this.nearRadius + 1;
+    for (const [k, p] of [...this._patches]) {
+      const parts = k.split(','), px = +parts[0], py = +parts[1];
+      if (Math.abs(px - c.cx) > keep || Math.abs(py - c.cy) > keep) {
+        this._patches.delete(k);
+        try { this.group.remove(p.group); p.dispose(); } catch (_) {}
+      }
+    }
+    this.stats.patches = this._patches.size;
+
+    // The horizon follows at its own, much coarser cadence.
+    // ⭐ KEEP THE HORIZON OUT OF THE NEAR RING'S GROUND. The rect is what the
+    // loaded near patches actually cover, trimmed a quarter-patch so the two
+    // overlap at the seam instead of risking a gap. Recomputed as patches come
+    // and go, because the near ring travels with the player while the horizon
+    // patch is built once and sits still.
+    if (this._far && typeof this._far.setHole === 'function') {
+      const half = this._cell * 0.5, trim = this._cell * 0.25;
+      let X0 = Infinity, X1 = -Infinity, Z0 = Infinity, Z1 = -Infinity;
+      for (const key of this._patches.keys()) {
+        const pr = key.split(','), px = +pr[0] * this._cell, pz = +pr[1] * this._cell;
+        if (px - half < X0) X0 = px - half;
+        if (px + half > X1) X1 = px + half;
+        if (pz - half < Z0) Z0 = pz - half;
+        if (pz + half > Z1) Z1 = pz + half;
+      }
+      if (isFinite(X0)) {
+        const r = { X0: X0 + trim, X1: X1 - trim, Z0: Z0 + trim, Z1: Z1 - trim };
+        const sig = (r.X0 | 0) + ':' + (r.X1 | 0) + ':' + (r.Z0 | 0) + ':' + (r.Z1 | 0);
+        if (sig !== this._holeSig) { this._holeSig = sig; this._far.setHole(r); }
+      }
+    }
+
+    // Re-centre once the player is half a far-patch from its middle, and only
+    // while nothing else is building — the horizon is the most expensive fetch
+    // in the world and must never compete with the ground under the ship.
+    const step = this.farMetres * 0.5;
+    const fcx = Math.round(lx / step), fcy = Math.round(lz / step);
+    const fk = fcx + ':' + fcy;
+    if (fk !== this._farCell && this._pending.size === 0) {
+      this._ensureFar(fcx * step / this._cell, fcy * step / this._cell, fk);
+    }
+  }
+
+  // ---- the queries the rest of the gmaps path asks of a tiles object -------
+  _patchAt(x, z) {
+    const s = this._unitsPerMetre();
+    const lx = (x - this.group.position.x) / s, lz = (z - this.group.position.z) / s;
+    const c = this._cellOf(lx, lz);
+    return this._patches.get(this._key(c.cx, c.cy)) || null;
+  }
+  /**
+   * How far this world reaches, in WORLD units — what the sky rig sizes itself
+   * against. A streamed world GROWS as patches arrive, so this is a live query;
+   * a build-time stat is stale the moment it is taken, and that is what left the
+   * sun disc parked inside the terrain.
+   */
+  farUnits() {
+    const f = this._far ? this._far.farUnits() : 0;
+    // Near patches can out-reach the horizon while it is re-centring.
+    const near = (this.nearRadius + 0.5) * 2 * this._cell * this._unitsPerMetre();
+    return Math.max(f, near, 20000);
+  }
+
+  /** Spawn points from the patch at the world origin — see LSSEarthTiles.spawnPoints. */
+  spawnPoints(n, clearM) {
+    const p = this._patches.get(this._key(0, 0)) || this._any();
+    return (p && typeof p.spawnPoints === 'function') ? p.spawnPoints(n, clearM) : [];
+  }
+
+  /**
+   * Density of the patch the ship is actually over — see _lssEarthApplyDayNight.
+   * ⚠ Returns null, NOT 0, when that patch has not arrived yet. Falling back to
+   * "any patch" would report the city you just left while flying over unloaded
+   * country, and falling back to 0 would strobe the sky to daylight every time
+   * you crossed into a cell that is still streaming. null means "don't know",
+   * and the caller holds the last value.
+   */
+  buildingDensity(worldPos) {
+    const p = worldPos ? this._patchAt(worldPos.x, worldPos.z) : this._any();
+    if (!p || typeof p.buildingDensity !== 'function') return null;
+    return p.buildingDensity();
+  }
+
+  /** LOCAL metres in, like a patch's heightAt. */
+  heightAt(x, z) {
+    const c = this._cellOf(x, z);
+    const p = this._patches.get(this._key(c.cx, c.cy)) || this._far;
+    return p ? p.heightAt(x, z) : 0;
+  }
+  groundYWorld(x, z) {
+    const p = this._patchAt(x, z) || this._far;
+    return p ? p.groundYWorld(x, z) : 0;
+  }
+  seaLevelWorld() { return this._far ? this._far.seaLevelWorld() : 0; }
+  collide(pos, vel, pad) {
+    let moved = false;
+    const p = this._patchAt(pos.x, pos.z);
+    if (p) moved = p.collide(pos, vel, pad) || moved;
+    else if (this._far) moved = this._far.collide(pos, vel, pad) || moved;
+    return moved;
+  }
+  raycast(origin, dir, maxDist) {
+    let best = Infinity;
+    const p = this._patchAt(origin.x, origin.z);
+    for (const t of [p, this._far]) {
+      if (!t) continue;
+      const d = t.raycast(origin, dir, maxDist);
+      if (isFinite(d) && d < best) best = d;
+    }
+    return best;
+  }
+  updateNight(scene) {
+    for (const p of this._patches.values()) p.updateNight(scene);
+    if (this._far) this._far.updateNight(scene);
+  }
+  setWindowGlow(v) {
+    this._glow = v;          // see _backfillBuildings
+    for (const p of this._patches.values()) p.setWindowGlow(v);
+    if (this._far) this._far.setWindowGlow(v);
+  }
+  waterTick(dt) { if (this._far) this._far.waterTick(dt); }
+  buildWater() { return this._far ? this._far.buildWater() : false; }
+
+  dispose() {
+    this._disposed = true;
+    if (this._bldRetryTimer) { clearTimeout(this._bldRetryTimer); this._bldRetryTimer = null; }
+    for (const p of this._patches.values()) { try { this.group.remove(p.group); p.dispose(); } catch (_) {} }
+    this._patches.clear();
+    if (this._far) { try { this.group.remove(this._far.group); this._far.dispose(); } catch (_) {} this._far = null; }
+    this.group.clear();
   }
 }
 
@@ -130087,7 +131232,29 @@ async function _lssGmapsBuildLevel(level) {
   // level from free keyless open data and exposes the same eight members the
   // Google renderer did, so everything below this point is unchanged.
   try {
-    const tiles = new LSSEarthTiles({
+    // (v45.47) `level.stream` picks the endless world — a set of patches kept
+    // around the player on ONE shared projection origin — over a single fixed
+    // patch. Everything downstream is unchanged: LSSEarthWorld answers the same
+    // eight members, plus heightAt/collide/raycast/updateNight/waterTick.
+    // window.__earthStream = 1 forces it on any gmaps level, which is how it gets
+    // exercised before a mode of its own exists; 0 forces the single patch.
+    const _wantStream = (typeof window !== 'undefined' && window.__earthStream !== undefined)
+      ? !!window.__earthStream : !!level.stream;
+    const tiles = _wantStream
+      ? new LSSEarthWorld({
+          patchMetres: (typeof level.extentMetres === 'number' && level.extentMetres > 0)
+            ? level.extentMetres : 2600,
+          scale: (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7,
+          patchOpts: { cyberpunk: level.cyberpunk !== false },
+          // Only the single-patch branch below had this, so a STREAMED world
+          // loaded in total silence -- including _overpassFetch's own
+          // "Overpass busy, retrying in 3s...", which is the one message that
+          // explains a city that never rose.
+          onProgress: (msg, frac) => {
+            try { if (typeof _lssGmapsSetLoadMsg === 'function') _lssGmapsSetLoadMsg(msg, frac); } catch (_) {}
+          }
+        })
+      : new LSSEarthTiles({
       // Sized against the hub city, which is radius 7500 = 15,000 units across.
       // At 7 units/m a 2.6 km patch is ~18,000 units — the same order of arena,
       // and far fewer OSM buildings and tiles to fetch than the 4.5 km default
@@ -130108,7 +131275,28 @@ async function _lssGmapsBuildLevel(level) {
     // capital-ship scale relative to real city. Scale 12 = ships at
     // ~8% of skyscraper height ; small-plane / large-car through canyon.
     const _gmapsScale = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7;
-    tiles.group.scale.setScalar(_gmapsScale);
+    // A streamed world scales its PATCHES, not its group -- doing both squared
+    // the scale. applyScale() is how it takes the level's figure.
+    if (typeof tiles.applyScale === 'function') tiles.applyScale(_gmapsScale);
+    else tiles.group.scale.setScalar(_gmapsScale);
+    // Buildings are a bonus layer that fails quietly, and a city with none does
+    // not look broken -- it looks like an aerial photo of empty ground. Both
+    // classes emit this; nothing had ever listened.
+    try {
+      if (typeof tiles.addEventListener === 'function') {
+        tiles.addEventListener('buildings-failed', (e) => {
+          const secs = Math.round((((e && e.retryInMs) || 15000)) / 1000);
+          const m = 'buildings unavailable (' + ((e && e.message) || 'Overpass') +
+                    ') - retrying in ' + secs + 's';
+          console.warn('[lss-gmaps]', m);
+          try { if (typeof _lssGmapsSetLoadMsg === 'function') _lssGmapsSetLoadMsg(m, 0.9); } catch (_) {}
+        });
+        tiles.addEventListener('buildings-backfilled', (e) => {
+          console.log('[lss-gmaps] buildings arrived late:', (e && e.buildings) || 0,
+                      'across', (e && e.patches) || 0, 'patches');
+        });
+      }
+    } catch (_) {}
     _lssGmaps.scale = _gmapsScale;
     scene.add(tiles.group);
     // Coarser tile target when the world is scaled up ; otherwise the
@@ -130160,6 +131348,12 @@ async function _lssGmapsBuildLevel(level) {
     // _skyDomeRefresh expects something behind the dome.
     try { if (typeof setSky === 'function') setSky(level.sky || 'cyberpunk'); } catch (_) {}
     try { if (typeof _wxInit === 'function') _wxInit(null); } catch (e) { console.warn('[lss-earth] weather init failed:', e); }
+    // ⚠ HIDE THE ARENA GRID. _swApplyAtmosphere turns it ON for any level
+    // without sandwich terrain, and a real-world level is exactly that — so the
+    // arena bounds box was being drawn around a city. Owner: "a visible
+    // wireframe cube is in the sky". It marks the edge of an arena; a streamed
+    // Earth has no edge to mark.
+    try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(false); } catch (_) {}
     // Push the dome/sun out past this world's terrain, but never past the far
     // plane — a dome beyond `camera.far` is not a bigger sky, it is no sky.
     try {
@@ -130174,6 +131368,8 @@ async function _lssGmapsBuildLevel(level) {
       // Put the shared scene back the way it was: these lights and this sky
       // belong to every other map too.
       try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}
+      try { if (typeof LSS !== 'undefined' && LSS) LSS._camReach = 0; } catch (_) {}
+      try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(true); } catch (_) {}
       try { _WX.distMul = 1; } catch (_) {}
       try { if (typeof _wxDispose === 'function') _wxDispose(); } catch (_) {}
       try { _lssEarthNightLights(false); } catch (_) {}
@@ -130209,6 +131405,36 @@ async function _lssGmapsBuildLevel(level) {
         new Promise((r) => setTimeout(r, (typeof level.loadTimeoutMs === 'number') ? level.loadTimeoutMs : 25000))
       ]);
     } catch (_) {}
+    // ⭐ Give the level somewhere to spawn. Without this getValidSpawnPoint
+    // falls through to (0,0,0) — the map origin at ground level, i.e. inside a
+    // downtown building. corridorPoints is the shared pool every spawn and
+    // respawn draws from, so filling it fixes bots and rejoins too, not just
+    // the first drop.
+    try {
+      if (typeof tiles.spawnPoints === 'function') {
+        const _sp = tiles.spawnPoints(24);
+        if (_sp && _sp.length) {
+          game.corridorPoints = _sp;
+          // ⚠ FILLING corridorPoints IS NOT ENOUGH IN FREE FLIGHT. That pool is
+          // what getValidSpawnPoint draws from, which fixes bots and respawns —
+          // but free flight never calls it: its arms place the player directly
+          // (the carrier portal, HUB_CITY, an overworld tower top), and an EARTH
+          // level matches none of them, so the player simply kept whatever
+          // position they already had. Measured: 2,027 units from the nearest
+          // spawn point. That is "we still keep spawning inside that building"
+          // AFTER the pool was fixed. Place them explicitly.
+          try {
+            if (typeof player !== 'undefined' && player && player.position) {
+              const _s0 = _sp[0];
+              player.position.set(_s0.x, _s0.y, _s0.z);
+              if (player.velocity) player.velocity.set(0, 0, 0);
+              console.log('[lss-earth] player placed at spawn',
+                          Math.round(_s0.x), Math.round(_s0.y), Math.round(_s0.z));
+            }
+          } catch (_) {}
+        }
+      }
+    } catch (e) { console.warn('[lss-earth] spawn points failed:', e); }
   } catch (e) {
     console.error('[lss-gmaps] failed to initialize tiles:', e);
     alert('Failed to initialize Google Maps tiles: ' + e.message + "\nCheck your API key and that the Map Tiles API is enabled on your Google Cloud project.");
@@ -130354,6 +131580,59 @@ function _lssGmapsTick(dt) {
     if (typeof t.update === 'function') t.update();
     if (typeof t.updateNight === 'function') t.updateNight(scene);
     if (typeof t.waterTick === 'function') t.waterTick(dt);
+    // ⭐ DAY OVER WILDERNESS, DUSK OVER CITY. Blended from local building density
+    // so flying out of a city walks the sky up instead of flipping it, and a
+    // mountain range is not pitch black. Ramp is in buildings/km2: below 6 is
+    // open country, above 45 is downtown (Toronto's core measures ~110).
+    // Smoothstepped so the middle does not sit at a flat half-dusk.
+    try {
+      if (typeof t.buildingDensity === 'function') {
+        const _pp = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
+        const _d = t.buildingDensity(_pp);
+        if (_d !== null && _d !== undefined) {
+          const _u = Math.max(0, Math.min(1, (_d - 6) / (45 - 6)));
+          const _k = _u * _u * (3 - 2 * _u);
+          _lssEarthApplyDayNight(_k);
+          // The SAME k lights the windows, so the sky and the city can never
+          // disagree about whether this is a city. The 0.10 floor keeps a hint
+          // of interior light in open country without lighting it up.
+          if (typeof t.setWindowGlow === 'function') t.setWindowGlow(0.10 + 0.90 * _k);
+        }
+      }
+    } catch (_) {}
+    // ⚠ SIZE THE SKY EVERY FRAME, NOT ONCE AT BUILD. The first cut set
+    // _WX.distMul from `tiles.stats.farUnits` at level build — a stat only the
+    // single-patch class reports, so the STREAMED world fell back to 20,000 and
+    // put the sun disc at 23,100 units, back inside its own terrain: "sometimes
+    // the sun is still in the earth". A streamed world also grows as patches
+    // arrive, so a build-time number is stale the moment it is taken. Clamped to
+    // camera.far, because a dome past the far plane is not a bigger sky, it is
+    // no sky.
+    try {
+      if (typeof t.farUnits === 'function') {
+        const _fu = t.farUnits();
+        // ⭐ THE CAMERA HAS TO REACH AS FAR AS THE GROUND DOES. Owner: "from
+        // above up high it looks fine... it's mountains cutting out". The
+        // terrain rings reach ~148,000 units while the far plane sat at ~74,000
+        // — so distant mountains were clipped at the plane. It only shows from
+        // LOW altitude, because from high up you are looking DOWN at nearer
+        // ground and nothing reaches the limit. _lssCamReach honours this
+        // override; _lssCameraDepthForFov derives near from it, so depth
+        // precision scales with it rather than collapsing.
+        try { if (typeof LSS !== 'undefined' && LSS) LSS._camReach = Math.min(300000, _fu * 1.15); } catch (_) {}
+        if (typeof _WX !== 'undefined' && _WX && _WX.on) {
+          const _cap = (typeof camera !== 'undefined' && camera && camera.far) ? camera.far * 0.92 : 1e9;
+          _WX.distMul = Math.max(1, Math.min(8, Math.min(_fu * 1.35, _cap) / 20500));
+        }
+      }
+    } catch (_) {}
+    // The endless world loads what is ahead of the SHIP, not the camera — a
+    // chase camera trails, and streaming off it means the ground arrives late
+    // in exactly the direction you are travelling.
+    if (typeof t.streamUpdate === 'function') {
+      const _f = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
+      t.streamUpdate(_f);
+    }
     // ⭐ (v45.46) THE SKY HAS TO BE DRIVEN TOO. _wxFrame is called only from the
     // hub branch of gameLoop (`game.sandwichTerrain.ON`), exactly like the water
     // ticks — so on a real-world level the dome never followed the camera and
@@ -130782,7 +132061,8 @@ function _lssGmapsDetachCity() {
 function _lssGmapsSetScaleLive(n) {
   if (typeof n !== 'number' || n <= 0) return;
   _lssGmaps.scale = n;
-  if (_lssGmaps.tiles && _lssGmaps.tiles.group) _lssGmaps.tiles.group.scale.setScalar(n);
+  if (_lssGmaps.tiles && typeof _lssGmaps.tiles.applyScale === 'function') _lssGmaps.tiles.applyScale(n);
+  else if (_lssGmaps.tiles && _lssGmaps.tiles.group) _lssGmaps.tiles.group.scale.setScalar(n);
   // Update errorTarget so tile detail re-balances at the new scale.
   if (_lssGmaps.tiles) {
     const e = Math.max(8, 8 * n);
