@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '46.01';
+const LSS_BUILD = '46.08';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -128780,6 +128780,25 @@ function _leTileMetres(z, lat) { return 2 * Math.PI * _leR * Math.cos(lat * _leD
 
 // Concurrency-limited image loader. crossOrigin is REQUIRED: the DEM pixels
 // are read back through a canvas, which a tainted image forbids.
+// ⭐⭐ (v46.02) ...AND TRY AGAIN BEFORE ACCEPTING ONE.
+// `tries` re-requests only the entries that came back null, once per extra try,
+// with a short pause. For imagery a hole is a grey square; for a DEM it is a
+// block of ZEROS that the water detector reads as a sea (see _loadDEM), so the
+// cheap retry is worth far more than it costs. Default 1 = the old behaviour.
+async function _leLoadImagesRetry(urls, limit, onProgress, signal, tries) {
+  let out = await _leLoadImages(urls, limit, onProgress, signal);
+  for (let t = 1; t < (tries || 1); t++) {
+    if (signal && signal.aborted) return out;
+    const miss = [];
+    for (let i = 0; i < out.length; i++) if (!out[i]) miss.push(i);
+    if (!miss.length) return out;
+    await new Promise((r) => setTimeout(r, 400 * t));
+    if (signal && signal.aborted) return out;
+    const again = await _leLoadImages(miss.map((i) => urls[i]), limit, null, signal);
+    for (let j = 0; j < miss.length; j++) if (again[j]) out[miss[j]] = again[j];
+  }
+  return out;
+}
 function _leLoadImages(urls, limit, onProgress, signal) {
   let next = 0, done = 0;
   const out = new Array(urls.length);
@@ -129740,10 +129759,33 @@ class LSSEarthTiles {
     this.buildingExtentMul  = opts.buildingExtentMul  ?? 2.2;   // see _loadBuildings
     this.farBuildingMinH    = opts.farBuildingMinH    ?? 26;    // metres, beyond the core ring
     this.podWidenMul        = opts.podWidenMul        ?? 1.9;   // see the pod note in _extrudeBuilding
+    // ⭐ (v46.06) SLENDER THINGS TAPER. See the taper block in _extrudeBuilding.
+    // Ratio = height / footprint span. Measured over Toronto's centre patch
+    // (5,527 buildings): median 0.43, p90 2.38, p99 9.97 - so 6 is the top ~2.5%
+    // and is genuinely only masts, spires, chimneys and legs.
+    this.taperMinRatio      = opts.taperMinRatio      ?? 6;
+    this.taperFullRatio     = opts.taperFullRatio     ?? 20;   // where the taper reaches taperMax
+    this.taperMax           = opts.taperMax           ?? 0.38; // top width at full slenderness
+    this.taperPow           = opts.taperPow           ?? 1.35; // >1 = narrows faster near the top
+    this.taperWingMax       = opts.taperWingMax       ?? 0.72; // a part hanging off a shared edge
     // {lat,lng} shared by every patch in a streamed world. See _setupProjection.
     this.projOrigin         = opts.projOrigin         ?? null;
     // Ways handed down by LSSEarthWorld instead of a per-patch Overpass query.
     this.prefetchedWays     = opts.prefetchedWays     ?? null;
+    // ⭐⭐⭐ (v46.05) THE BUILDING BOX, GIVEN RATHER THAN DERIVED.
+    // `_bounds` is the DEM TILE box: it snaps to Web Mercator tile edges, so it
+    // is neither the same size nor the same centre as the patch's ownership
+    // cell. Measured on Toronto's centre patch: the cell is [-1300, 1300] on
+    // both axes, `_bounds` is X [-1148, 1506] and Z [-1602, 1053] - offset by up
+    // to 250 m. v46.03 set buildingExtentMul to 1, which made `_bldBounds`
+    // exactly that offset box, and `_chunkOf` then rejected everything in the
+    // band between the two shapes. The CN Tower sits at local z = 1212: inside
+    // its cell, 159 m OUTSIDE `_bounds.Z1`, so all 30 of its `building:part`
+    // polygons were dropped and the owner got a hole where the tower had been.
+    // Ownership is already decided by cell upstream, so the chunk grid has to be
+    // that same square or it is a second filter of a different shape.
+    // Null keeps the derived box, which is what the single-patch class wants.
+    this.bldBounds          = opts.bldBounds          ?? null;
     // Local metres: terrain chunks entirely inside +-this are not built, because
     // another patch owns that ground. See _buildRingMesh.
     this.ownsFog            = opts.ownsFog            ?? true;
@@ -130207,12 +130249,31 @@ class LSSEarthTiles {
       urls.push(this.demUrl.replace('{z}', z).replace('{x}', x0 + i).replace('{y}', y0 + j));
     }
     this._progress('terrain ring ' + k + ': ' + urls.length + ' DEM tiles @ z' + z, 0);
-    const imgs = await _leLoadImages(urls, 8, (d, t) =>
-      this._progress('terrain ring ' + k + ' ' + d + '/' + t, d / t), this._abort.signal);
+    const imgs = await _leLoadImagesRetry(urls, 8, (d, t) =>
+      this._progress('terrain ring ' + k + ' ' + d + '/' + t, d / t), this._abort.signal, 3);
     if (this._disposed) return null;
 
     const w = n * 256, h = n * 256;
     const heights = new Float32Array(w * h);
+    // ⭐⭐⭐ (v46.02) A MISSING DEM TILE IS NOT SEA LEVEL.
+    // `heights` is a zero-filled Float32Array and the assembly below skips a
+    // tile that failed to load, so a transient CDN error left a block of EXACT
+    // ZEROS sitting in the terrain. Nothing downstream could tell that apart
+    // from real ground at 0 m, and two things then went badly wrong:
+    //   1. the water detector is "is this exact value shared by an implausible
+    //      number of texels", and a missing tile is the most implausible value
+    //      share there is - so the hole was promoted to a SEA at elevation 0 and
+    //      carved seaDepth (34 m) below itself;
+    //   2. it won the histogram, so the REAL water lost.
+    // Measured live at Banff: 20 of 25 DEM tiles loaded, and the grid held
+    // 327,680 texels at exactly -34 - which is 1280 x 256, one whole missing
+    // tile ROW, carved to `0 - seaDepth`. Ground there is 1,386 m, so that is a
+    // 1.4 km cliff into a sea that does not exist, in terrain the collision
+    // system reads. And the Bow River, correctly flattened at 1379.5 m across
+    // 2.3% of the patch, never stood a chance against a 20% block of zeros.
+    // Owner: "banff river here is missing water".
+    // Validity is TILE-granular, so it costs one Uint8Array and a fill per row.
+    const valid = new Uint8Array(w * h);
     const cv = document.createElement('canvas');
     cv.width = 256; cv.height = 256;
     const ctx = cv.getContext('2d', { willReadFrequently: true });
@@ -130230,10 +130291,55 @@ class LSSEarthTiles {
           // terrarium: metres = R*256 + G + B/256 - 32768
           heights[dst] = px[src] * 256 + px[src + 1] + px[src + 2] / 256 - 32768;
         }
+        const row = (j * 256 + y) * w + i * 256;
+        valid.fill(1, row, row + 256);
       }
     }
     if (got === 0) return null;
     this.stats.demTiles = (this.stats.demTiles || 0) + got;
+    this.stats.demMissing = (this.stats.demMissing || 0) + (n * n - got);
+    // REPAIR THE HOLES so nothing downstream ever sees a cliff. Four linear
+    // sweeps carrying the last valid height along each row and each column, then
+    // the mean of whichever directions found one: O(texels), a few ms, once, at
+    // load. It extrudes the surrounding ground inward rather than inventing
+    // terrain - which is the right shape for a hole this size and, above all, is
+    // continuous with its edges. The water detector below still uses the
+    // ORIGINAL `valid` mask, so a repaired texel can never vote for a level.
+    if (got < n * n) {
+      const fill = new Float32Array(w * h), cnt = new Uint8Array(w * h);
+      // rows left->right and right->left
+      for (let y = 0; y < h; y++) {
+        let last = NaN;
+        for (let x = 0, i = y * w; x < w; x++, i++) {
+          if (valid[i]) last = heights[i]; else if (last === last) { fill[i] += last; cnt[i]++; }
+        }
+        last = NaN;
+        for (let x = w - 1, i = y * w + w - 1; x >= 0; x--, i--) {
+          if (valid[i]) last = heights[i]; else if (last === last) { fill[i] += last; cnt[i]++; }
+        }
+      }
+      // columns top->bottom and bottom->top
+      for (let x = 0; x < w; x++) {
+        let last = NaN;
+        for (let y = 0, i = x; y < h; y++, i += w) {
+          if (valid[i]) last = heights[i]; else if (last === last) { fill[i] += last; cnt[i]++; }
+        }
+        last = NaN;
+        for (let y = h - 1, i = x + (h - 1) * w; y >= 0; y--, i -= w) {
+          if (valid[i]) last = heights[i]; else if (last === last) { fill[i] += last; cnt[i]++; }
+        }
+      }
+      const _bh = (typeof this.forceBaseH === 'number') ? this.forceBaseH : null;
+      let repaired = 0, orphan = 0;
+      for (let i = 0; i < heights.length; i++) {
+        if (valid[i]) continue;
+        if (cnt[i]) { heights[i] = fill[i] / cnt[i]; repaired++; }
+        else { heights[i] = (_bh !== null) ? _bh : 0; orphan++; }   // no valid texel in any direction
+      }
+      console.warn('[lss-earth] ring ' + k + ': ' + (n * n - got) + ' of ' + (n * n)
+        + ' DEM tiles missing - ' + repaired + ' texels repaired from neighbours'
+        + (orphan ? (', ' + orphan + ' with no neighbour at all') : ''));
+    }
 
     // ═══ WATER DETECTION AND CARVING ═══
     // Mapterhorn applies an OSM-derived water mask to the DEM and FLATTENS each
@@ -130250,8 +130356,17 @@ class LSSEarthTiles {
     // shared by an implausible number of texels". Measured: Toronto 34.3% at
     // exactly 75, next value 1.2%. Sea, lake, river and pond all flatten the
     // same way, so all of them qualify.
+    // ⚠ (v46.02) ONLY TEXELS THAT CAME FROM A REAL TILE GET A VOTE, and the
+    // share is measured against those too - otherwise a patch that is half
+    // missing halves the effective threshold for everything else as well.
     const hist = new Map();
-    for (let i = 0; i < heights.length; i++) hist.set(heights[i], (hist.get(heights[i]) || 0) + 1);
+    let nReal = 0;
+    for (let i = 0; i < heights.length; i++) {
+      if (!valid[i]) continue;
+      nReal++;
+      hist.set(heights[i], (hist.get(heights[i]) || 0) + 1);
+    }
+    if (nReal === 0) nReal = heights.length;
     let domV = 0, domC = 0;
     for (const [v, c] of hist) if (c > domC) { domC = c; domV = v; }
     // Ring 0 decides the level; the outer rings must reuse it or the shoreline
@@ -130296,7 +130411,7 @@ class LSSEarthTiles {
       // that only promotes a sea or a great lake, which is what the single
       // global plane can actually draw.
       // window.__earthRivers = 1 re-enables the experiment; see _buildLocalWater.
-      else if (domC >= heights.length * ((this.water || !(typeof window !== 'undefined' && window.__earthRivers)) ? 0.01 : 0.0012)) level = domV;
+      else if (domC >= nReal * ((this.water || !(typeof window !== 'undefined' && window.__earthRivers)) ? 0.01 : 0.0012)) level = domV;
     }
     if (level !== null && level !== undefined) {
       // ⚠ THE BAND WAS TOO GENEROUS AND IT ATE THE CITY. This used to admit every
@@ -131122,7 +131237,9 @@ class LSSEarthTiles {
     const w = _leTileXToLng(g.x0 - _pad, g.z), e = _leTileXToLng(g.x0 + nx + _pad, g.z);
     const cs = _leTileYToLat(g.y0 + nx, g.z), cn2 = _leTileYToLat(g.y0, g.z);
     const cw = _leTileXToLng(g.x0, g.z), ce = _leTileXToLng(g.x0 + nx, g.z);
-    {
+    if (this.bldBounds) {
+      this._bldBounds = this.bldBounds;          // (v46.05) the ownership cell
+    } else {
       const b0 = this._bounds;
       const cx = (b0.X0 + b0.X1) / 2, cz = (b0.Z0 + b0.Z1) / 2;
       const hw = (b0.X1 - b0.X0) * _bm / 2, hz = (b0.Z1 - b0.Z0) * _bm / 2;
@@ -131228,6 +131345,94 @@ class LSSEarthTiles {
       }
     }
     const ways = outlines.filter((el) => !suppressed.has(el)).concat(parts);
+    // ⭐⭐⭐ (v46.07) WHERE A SLENDER PART SHOULD LEAN TOWARD.
+    // Owner: "the 3 pillars are more like right angle triangles with the right
+    // angle touching the other pillars". v46.06 tapered every part toward its
+    // OWN centroid, so the CN Tower's three wings shrank in place and pulled
+    // away from the core instead of leaning into it - "no that didn't work".
+    // The real structure, straight out of the OSM footprints (measured on
+    // Toronto, radii from the tower axis): a 440 m hexagonal CORE at r 10.1-10.7,
+    // and three 330 m WINGS whose outer vertices reach r 29 but whose two INNER
+    // vertices sit at r 10.2 and 10.7 - the same coordinates as two of the
+    // core's. The wings share an edge with the core.
+    // So the anchor is not the axis and not the centroid: it is the SHARED EDGE.
+    // Taper toward it and the inner face stays put while the outer face sweeps
+    // in, which is a right triangle in elevation with the vertical side against
+    // its neighbours - exactly what was asked for. Anchoring on the axis instead
+    // would drag the inner vertices INTO the core.
+    // A vertex shared by two or more ways is an inner vertex, quantised to 0.5 m
+    // because two ways that share a node share it exactly. The core's six are all
+    // shared, so its anchor comes out as its own centre and it tapers evenly -
+    // which is right, it IS the central shaft. Ordinary terraced buildings share
+    // walls too, but nothing here touches a building that is not slender.
+    // ⚠ "SHARED" IS NOT "INNER" - that was the v46.07 mistake. Measured on one
+    // CN Tower wing, EVERY vertex is shared: the two inner ones at r 10.2/10.7
+    // by two ways, and the outer pair at r 29 by two as well, with the r 22.8
+    // pair by three. Sharing does not discriminate and neither does its degree,
+    // so the anchor landed at r 16 - halfway out - and the wing drifted away
+    // from the core instead of folding into it.
+    // What DOES discriminate is distance from the local axis, and the axis is
+    // recoverable without knowing anything about towers: take the way's one-hop
+    // neighbours (every way it shares a vertex with), and average all of their
+    // vertices. For the CN Tower that is core + wings + pod, whose centroid is
+    // the axis by symmetry. Then the anchor is this part's vertices NEAREST that
+    // axis - its inner edge - and tapering toward it holds that edge while the
+    // outer edge sweeps in, which is the right triangle with the vertical side
+    // against its neighbours.
+    // ⚠ A CONCENTRIC part (the hexagonal core: every vertex 10.1-10.7 from the
+    // axis) has no inner edge, and picking "the nearest 40%" of a circle would
+    // give it a lopsided anchor and bend it sideways. Low spread => it IS the
+    // axis, so it tapers about its own centre.
+    // Only slender parts are anchored, so this walks 244 of 47,294 buildings.
+    try {
+      const _vk = (x, z) => (Math.round(x * 2) + ':' + Math.round(z * 2));
+      const _vmap = new Map(), _ring = new Array(ways.length);
+      for (let wi = 0; wi < ways.length; wi++) {
+        const g = ways[wi].geometry; if (!g) { _ring[wi] = null; continue; }
+        const r = [];
+        for (let i = 0; i < g.length - 1; i++) {
+          const q = g[i]; if (!q) continue;
+          const pr = this.project(q.lat, q.lon);
+          r.push(pr.x, pr.z);
+          const k = _vk(pr.x, pr.z);
+          let a = _vmap.get(k); if (!a) _vmap.set(k, a = []); a.push(wi);
+        }
+        _ring[wi] = r;
+      }
+      for (let wi = 0; wi < ways.length; wi++) {
+        const r = _ring[wi]; if (!r || r.length < 6) continue;
+        const hh = LSSEarthTiles.parseHeight(ways[wi].tags || {});
+        if (hh === null) continue;
+        let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        for (let i = 0; i < r.length; i += 2) {
+          if (r[i] < x0) x0 = r[i]; if (r[i] > x1) x1 = r[i];
+          if (r[i + 1] < z0) z0 = r[i + 1]; if (r[i + 1] > z1) z1 = r[i + 1];
+        }
+        const span = Math.max(x1 - x0, z1 - z0);
+        if (hh / Math.max(1, span) < this.taperMinRatio) continue;    // not slender: no anchor
+        const nb = new Set([wi]);
+        for (let i = 0; i < r.length; i += 2) {
+          const a = _vmap.get(_vk(r[i], r[i + 1]));
+          if (a) for (const j of a) nb.add(j);
+        }
+        let ax = 0, az = 0, an = 0;
+        for (const j of nb) {
+          const q = _ring[j]; if (!q) continue;
+          for (let i = 0; i < q.length; i += 2) { ax += q[i]; az += q[i + 1]; an++; }
+        }
+        if (an < 3) continue;
+        ax /= an; az /= an;
+        const d = [];
+        for (let i = 0; i < r.length; i += 2) d.push([Math.hypot(r[i] - ax, r[i + 1] - az), r[i], r[i + 1]]);
+        d.sort((p, q) => p[0] - q[0]);
+        const dmin = d[0][0], dmax = d[d.length - 1][0];
+        if (dmax <= 0.0001 || (dmax - dmin) / dmax < 0.35) continue;  // concentric: own centre
+        const keep = Math.max(2, Math.round(d.length * 0.4));
+        let bx = 0, bz = 0;
+        for (let i = 0; i < keep; i++) { bx += d[i][1]; bz += d[i][2]; }
+        ways[wi].__anchor = { x: bx / keep, z: bz / keep };
+      }
+    } catch (e) { console.warn('[lss-earth] taper anchors skipped:', e); }
     this.stats.parts = parts.length;
     this.stats.suppressedOutlines = suppressed.size;
     this._progress('buildings: extruding ' + ways.length + '...', 0.85);
@@ -131312,7 +131517,12 @@ class LSSEarthTiles {
 
     // Outside the core ring, keep only what reads at that range: a distant
     // skyline is towers, and the houses under it are invisible triangles.
-    const b0 = this._bounds;
+    // (v46.05) against the GIVEN box when there is one. With ownership by cell
+    // everything this patch is handed is in its core, so `isFar` is false and
+    // nothing owned is thinned by farBuildingMinH or loses its roof cap. Without
+    // one (the single-patch class) this is the tile box exactly as before, and
+    // its far-skyline thinning is untouched.
+    const b0 = this.bldBounds || this._bounds;
     const isFar = (wx < b0.X0 || wx > b0.X1 || wz < b0.Z0 || wz > b0.Z1);
     if (isFar && height < this.farBuildingMinH) return false;
     const chunk = this._chunkOf(wx, wz);
@@ -131393,6 +131603,58 @@ class LSSEarthTiles {
     geo.rotateX(-Math.PI / 2);     // Shape XY -> world XZ, extrude -> +Y
     geo.translate(0, baseY, 0);
     if (geo.index) geo = geo.toNonIndexed();
+
+    // ⭐⭐ (v46.06) A SLENDER PART NARROWS AS IT RISES.
+    // Owner, on the CN Tower: "the three pillars that hold up the donut, the
+    // three pillars get more narrow as it gets higher and closer to the donut...
+    // so the three pillars look more like a spear than a column (but not so
+    // sharp of a point, just slightly angled inward)".
+    // ExtrudeGeometry only makes PRISMS, so every OSM part came out as a
+    // straight column. The owner's three pillars are real and measurable: three
+    // `building:part` polygons of 330 m over a 20-21 m span (ratio 15.7-16.9)
+    // rising to the SkyPod at 321 m, with the 440 m core (ratio 21.5) up the
+    // middle.
+    // The rule is by SHAPE, not by name, so it cannot single out one landmark
+    // and cannot be fooled by one: height/span >= taperMinRatio. And the STRENGTH
+    // scales with slenderness, which is what keeps it honest - a 6:1 tower barely
+    // moves, the CN Tower's legs come in ~28%, the core ~38%. Over Toronto's
+    // centre patch that is 139 of 5,527 buildings (2.5%), all of them masts.
+    // `taperPow` > 1 puts the narrowing high up rather than spreading it evenly,
+    // which is the "closer to the donut" part - and a top scale well above zero
+    // is the "not so sharp of a point" part.
+    // ⚠ The COLLISION polygon (`poly`, pushed above) stays the untouched
+    // footprint, so the hull is very slightly generous against a tapered mast.
+    // That is the safe direction - you stop short of a spire rather than passing
+    // through one - and matching it would mean a per-height collision profile.
+    {
+      const _tSpan = Math.max(bx1 - bx0, bz1 - bz0);
+      const _tRatio = height / Math.max(1, _tSpan);
+      if (_tRatio >= this.taperMinRatio && this.taperMax > 0) {
+        // (v46.07) the shared inner edge if this part has one, else its middle
+        const _an = way.__anchor;
+        const _tax = _an ? _an.x : wx, _taz = _an ? _an.z : wz;
+        // How far off its own centre that anchor is, as a fraction of the span:
+        // ~0 for the central core (all its vertices are shared, so the anchor IS
+        // its centre) and ~0.5 for a wing hanging off one edge. A wing has to
+        // come in much further than a mast does - it is meant to disappear into
+        // the shaft by the time it reaches the pod - so the strength rides that
+        // offset rather than needing a second rule to recognise a wing.
+        const _off = Math.min(1, Math.hypot(wx - _tax, wz - _taz) / Math.max(1, _tSpan * 0.5));
+        const _tMax = this.taperMax + (this.taperWingMax - this.taperMax) * _off;
+        const _tK = Math.max(0, Math.min(1,
+          (_tRatio - this.taperMinRatio) / Math.max(0.001, this.taperFullRatio - this.taperMinRatio)));
+        const _tTop = 1 - _tMax * _tK;
+        const _tp = geo.attributes.position.array;
+        const _tH = Math.max(1, height);
+        for (let i = 0; i < _tp.length; i += 3) {
+          const t = Math.max(0, Math.min(1, (_tp[i + 1] - baseY) / _tH));
+          const sc = 1 - (1 - _tTop) * Math.pow(t, this.taperPow);
+          _tp[i]     = _tax + (_tp[i]     - _tax) * sc;
+          _tp[i + 2] = _taz + (_tp[i + 2] - _taz) * sc;
+        }
+        geo.attributes.position.needsUpdate = true;
+      }
+    }
 
     // Per-vertex facade coordinate for the window shader: distance along the
     // footprint perimeter, so the window grid runs continuously around corners
@@ -131848,7 +132110,25 @@ class LSSEarthWorld {
       const half = (r + 0.5) * this._cell;
       const nw = ll(cx * this._cell - half, cy * this._cell - half);
       const se = ll(cx * this._cell + half, cy * this._cell + half);
-      const ch = this._cell * 0.5;
+      // ⭐⭐⭐ (v46.03) FULL DETAIL OVER THE WHOLE NEAR RING.
+      // This was `_cell * 0.5` - half a cell each way, i.e. the CENTRE CELL
+      // ONLY - while the near ring is (2*nearRadius+1)^2 = nine cells. Every
+      // other patch therefore received only what the wide box returns, and the
+      // wide box is filtered SERVER-SIDE to buildings at least farBuildingMinH
+      // (26 m) tall. So eight of nine patches only ever got towers, which is
+      // most of "i see the 2D buildings, and then only some of the 3D
+      // buildings": measured over Toronto, 103 / 15 / 394 buildings on the
+      // off-centre patches against thousands in the imagery under them.
+      // ⚠ THE 38 s ABORT IS THE REASON TO BE CAREFUL HERE, NOT A REASON NOT TO
+      // DO IT. That abort was the full 2.2x box - five cells by five, ~13 km of
+      // Toronto. The ring is three by three, 7.8 km, about a third of the area,
+      // and the outer band still goes through the tall-only filter. The curtain
+      // already waits for the city and the owner has said that is the right
+      // trade ("we just need more time in the loading screen").
+      // window.__earthCoreCells overrides it; 0.5 restores the v46.02 box.
+      const _coreCells = (typeof window !== 'undefined' && typeof window.__earthCoreCells === 'number')
+        ? window.__earthCoreCells : (this.nearRadius + 0.5);
+      const ch = this._cell * _coreCells;
       const cnw = ll(cx * this._cell - ch, cy * this._cell - ch);
       const cse = ll(cx * this._cell + ch, cy * this._cell + ch);
       const S = Math.min(nw.lat, se.lat), N = Math.max(nw.lat, se.lat);
@@ -131867,8 +132147,13 @@ class LSSEarthWorld {
       let data = await _leCacheGet(ckey);
       if (!data) {
         this._progress('city: one query for the whole neighbourhood...', 0.4);
+        const _tq = (typeof performance !== 'undefined') ? performance.now() : 0;
         try {
           data = await probe._overpassFetch(q);
+          this.stats.regionMs = Math.round(((typeof performance !== 'undefined') ? performance.now() : 0) - _tq);
+          console.log('[lss-earth-world] region ' + key + ': core ' + _coreCells.toFixed(1)
+            + ' cells, ' + this.stats.regionMs + ' ms, '
+            + Math.round(JSON.stringify(data).length / 1048576 * 10) / 10 + ' MB');
           _leCachePut(ckey, data);
         } catch (e) {
           // DO NOT COMMIT AN EMPTY ANSWER. This used to fall through to
@@ -131924,7 +132209,11 @@ class LSSEarthWorld {
       try {
         const _pr = this._any() || this._mkProbe();
         if (_pr && typeof _pr.project === 'function') {
-          const R = this.nearRadius;
+          // (v46.04) how many ways each cell owns, so the per-frame repair sweep
+          // in streamUpdate costs a Map lookup per patch instead of a 50,000-way
+          // filter per patch per frame.
+          const _oc = new Map();
+          this._bldCellCount = _oc;
           for (const el of ways) {
             const g = el.geometry;
             let mx = 0, mz = 0, n = 0;
@@ -131935,8 +132224,23 @@ class LSSEarthWorld {
             }
             if (!n) { el.__oc = null; continue; }
             const c = this._cellOf(mx / n, mz / n);
-            el.__oc = this._key(Math.max(cx - R, Math.min(cx + R, c.cx)),
-                                Math.max(cy - R, Math.min(cy + R, c.cy)));
+            // ⛔⛔ (v46.03) NO CLAMP. v45.96 clamped the owning cell into the
+            // ring around the REGION centre, meaning to hand the band beyond the
+            // ring to the nearest edge patch. It dropped buildings wholesale
+            // instead, because patches do not live in that window:
+            // `_bldCentre` only re-centres once the ship is more than nearRadius
+            // cells away, patches are created within nearRadius of the ship's
+            // CURRENT cell, and patches already loaded are kept well past that.
+            // Measured live over Toronto: `_bldCentre` at (2,1), every owner tag
+            // still in [-1..1], and NINE OF TWELVE patches handed zero ways -
+            // owner: "i see the 2D buildings, and then only some of the 3D
+            // buildings".
+            // The true cell is the right answer and needs no window: a cell with
+            // no patch has no TERRAIN either, so nothing visible is lost by not
+            // assigning its buildings to a neighbour, and `_backfillBuildings`
+            // puts the city in as soon as a region covering that cell lands.
+            el.__oc = this._key(c.cx, c.cy);
+            _oc.set(el.__oc, (_oc.get(el.__oc) || 0) + 1);
           }
         }
       } catch (e) { console.warn('[lss-earth-world] ownership tag failed:', e); }
@@ -132067,12 +132371,20 @@ class LSSEarthWorld {
       const t = this._mkPatch(ll.lat, ll.lng, {
         extentMetres: this.patchMetres, ringCount: 1, water: false, ads: true,
         prefetchedWays: this._waysFor(ways, k), ownsFog: false,
-        // (v45.96) With ownership exclusive, a WIDER building box no longer
-        // duplicates anything - it only lets an edge patch reach the band the
-        // clamp assigned to it, out to (nearRadius + 1.5) cells from the region
-        // centre. At 2.2 that band was clipped by _chunkOf and the far skyline
-        // would have thinned as soon as the duplicates stopped covering for it.
-        buildingExtentMul: 3.4,
+        // the exact square `_cellOf` used to decide ownership: cell (cx, cy)
+        // spans [cx*cell - cell/2, cx*cell + cell/2).
+        bldBounds: { X0: cx * this._cell - this._cell / 2, X1: cx * this._cell + this._cell / 2,
+                     Z0: cy * this._cell - this._cell / 2, Z1: cy * this._cell + this._cell / 2 },
+        // (v46.03) EXACTLY ITS OWN CELL. v45.96 widened this to 3.4 to let an
+        // edge patch reach the clamped band; with ownership by true cell there
+        // is no band to reach, and 1.0 makes `_bldBounds` identical to
+        // `_bounds`. That matters for more than tidiness: the 8x8 chunk grid is
+        // laid over _bldBounds, so at 3.4 a patch's buildings all fell into the
+        // middle ~2x2 chunks - four big meshes instead of sixty-four small ones,
+        // and far worse frustum culling. It also makes `isFar` unreachable, so
+        // every building this patch owns gets its real roof and nothing is
+        // dropped by farBuildingMinH.
+        buildingExtentMul: 1,
         forceWaterLevel: (typeof this._waterLevel === 'number') ? this._waterLevel : null,
         forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null
       });
@@ -132171,6 +132483,41 @@ class LSSEarthWorld {
       }
     }
     if (this._disposed) return;
+    // ⭐⭐⭐ (v46.04) AND REPAIR ANY PATCH THAT MISSED ITS CITY.
+    // `_backfillBuildings` fires ONCE, from the region's resolve. A patch built
+    // while that query was still in flight took the 6 s race in `_ensurePatch`
+    // and got `[]`, and if it was not in `_patches` at the moment the single
+    // backfill pass swept - or the pass was still awaiting an earlier patch when
+    // it appeared - nothing ever came back for it.
+    // That is not hypothetical: measured over Toronto on a 16.6 s region query,
+    // cells -1,-1 and 1,-1 sat at zero buildings with 11,099 and 8,449 ways
+    // tagged and waiting for them; calling `_backfillBuildings` by hand filled
+    // both in 812 ms and took the city from 24,723 buildings to 41,109.
+    // So the sweep runs from the streaming pass instead: one patch per call, at
+    // most one attempt per patch per region (`__bfKey`), gated on a cell that
+    // actually has ways. Costs a Map lookup per patch per frame when there is
+    // nothing to do.
+    if (this._bldWays && this._bldWays.length && this._bldRegionKey && !this._bfBusy) {
+      for (const [pk, p] of this._patches.entries()) {
+        if (p.__bfKey === this._bldRegionKey) continue;
+        if (p._bldList && p._bldList.length) { p.__bfKey = this._bldRegionKey; continue; }
+        const n = this._bldCellCount ? (this._bldCellCount.get(pk) || 0) : 1;
+        if (!n) { p.__bfKey = this._bldRegionKey; continue; }
+        p.__bfKey = this._bldRegionKey;
+        this._bfBusy = true;
+        (async () => {
+          try {
+            p.prefetchedWays = this._waysFor(this._bldWays, pk);
+            await p._loadBuildings();
+            if (this._glow !== null && typeof p.setWindowGlow === 'function') p.setWindowGlow(this._glow);
+            this.stats.buildings = 0;
+            for (const q of this._patches.values()) this.stats.buildings += (q.stats.buildings || 0);
+          } catch (e) { console.warn('[lss-earth-world] late backfill', pk, 'failed:', e); }
+          finally { this._bfBusy = false; }
+        })();
+        break;
+      }
+    }
     // ⚠ THE TICK RACES THE BOOT. _lssGmaps.tiles is assigned the moment the
     // world is CONSTRUCTED, so _lssGmapsTick starts calling this while _boot is
     // still awaiting the horizon patch — and a patch created in that window is
