@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.73';
+const LSS_BUILD = '45.74';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -41360,6 +41360,7 @@ function _hwxCalibrate() {
   W._thr = S[k];
 }
 const _hwxV = new THREE.Vector3();
+const _HWX_FADE_S = 1.8;
 function _hwxPlace(p, ref, fwd, t, anywhere) {
   const W = HUB_WX, R = W.R;
   let bx = 0, bz = 0, bv = -9;
@@ -41386,6 +41387,8 @@ function _hwxPlace(p, ref, fwd, t, anywhere) {
   gc._writeFlip = false;
   gc.setPosition(bx, y, bz);
   gc._writeFlip = Math.random() < 0.5;
+  p._wxFade = 0;
+  try { gc.setOpacity(0); } catch (_) {}
 }
 function _hwxFrame(dt) {
   const W = HUB_WX;
@@ -41405,6 +41408,11 @@ function _hwxFrame(dt) {
   for (let i = 0; i < gp.length; i++) {
     const p = gp[i];
     if (!p || !p._wx || !p.gasCloud) continue;
+    if (p._wxFade != null) {
+      p._wxFade += dt / _HWX_FADE_S;
+      if (p._wxFade >= 1) { p._wxFade = null; try { p.gasCloud.setOpacity(1); } catch (_) {} }
+      else { const f = p._wxFade; try { p.gasCloud.setOpacity(f * f * (3 - 2 * f)); } catch (_) {} }
+    }
     const c = p.gasCloud.position;
     const dx = c.x - ref.x, dz = c.z - ref.z, d2 = dx * dx + dz * dz;
     if (d2 <= R2 && W._primed) continue;
@@ -86803,11 +86811,28 @@ function _lssEarthLifeTick(dt) {
   for (const e of _LSS_EL.ents.slice()) {
     if (!e.alive) { _elDetach(e); continue; }
     if (!e._bodyOk) {
-      let _vis = 0;
-      e.mesh.traverse((o) => { if (o.isMesh && o.visible) _vis++; });
-      if (_vis > 0) e._bodyOk = true;
+      let _vis = 0, _noMat = 0;
+      e.mesh.traverse((o) => {
+        if (!o.isMesh || !o.visible) return;
+        _vis++;
+        if (!o.material) _noMat++;
+      });
+      let _span = 0;
+      if (_vis > 0) {
+        try {
+          const _b = new THREE.Box3().setFromObject(e.mesh);
+          if (!_b.isEmpty()) {
+            const _sz = _b.getSize(new THREE.Vector3());
+            _span = Math.max(_sz.x, _sz.y, _sz.z);
+            if (!isFinite(_span)) _span = 0;
+          }
+        } catch (_) { _span = 0; }
+      }
+      if (_vis > 0 && _noMat === 0 && _span > 2) e._bodyOk = true;
       else if ((e._bodyT = (e._bodyT || 0) + dt) > 2) {
-        console.warn('[earth-life] retiring bodyless', e.earthKind, e.id);
+        console.warn('[earth-life] retiring bodyless ' + e.earthKind + ' ' + e.id +
+                     ' (visibleMeshes ' + _vis + ', noMaterial ' + _noMat +
+                     ', span ' + Math.round(_span) + ')');
         _elDetach(e); continue;
       }
     }

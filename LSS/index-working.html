@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.73';
+const LSS_BUILD = '45.74';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -66503,6 +66503,8 @@ function _hwxCalibrate() {
 // Place one deck cloud at a cloudy spot. `ahead` biases into the pilot's heading so a recycled cloud
 // arrives in front of them (and out at the ring, where the far fade has it at alpha 0 anyway).
 const _hwxV = new THREE.Vector3();
+// Seconds for a recycled deck cloud to reach full opacity. See _hwxPlace.
+const _HWX_FADE_S = 1.8;
 function _hwxPlace(p, ref, fwd, t, anywhere) {
   const W = HUB_WX, R = W.R;
   let bx = 0, bz = 0, bv = -9;
@@ -66533,6 +66535,17 @@ function _hwxPlace(p, ref, fwd, t, anywhere) {
   gc._writeFlip = false;
   gc.setPosition(bx, y, bz);
   gc._writeFlip = Math.random() < 0.5;
+  // ⭐ FADE IT IN. Owner: "the basin clouds keep popping in, too, they need to
+  // fade in". A cloud recycled into the downwind ANNULUS arrives where the
+  // aerial fade (uAerial / uFarIn / uFarOut) already has it at alpha 0, so that
+  // path was fine - but the `anywhere` branch fills the whole disc, right down
+  // to r = 0, and those land in clear air at full alpha. That branch is not
+  // rare in free flight: it fires for every cloud left more than 1.5R behind,
+  // which is what a fast run or a warp does to the entire deck at once.
+  // Ramping from zero costs one setOpacity per frame per FADING cloud and
+  // nothing once it has arrived.
+  p._wxFade = 0;
+  try { gc.setOpacity(0); } catch (_) {}
 }
 // Called from updateDetachedGasPockets, once, for the whole deck.
 function _hwxFrame(dt) {
@@ -66553,6 +66566,14 @@ function _hwxFrame(dt) {
   for (let i = 0; i < gp.length; i++) {
     const p = gp[i];
     if (!p || !p._wx || !p.gasCloud) continue;
+    // Run the fade BEFORE the range test, or a cloud that is comfortably inside
+    // the ring (the common case, and the one that `continue`s below) would
+    // never advance its ramp and would sit at alpha 0 for good.
+    if (p._wxFade != null) {
+      p._wxFade += dt / _HWX_FADE_S;
+      if (p._wxFade >= 1) { p._wxFade = null; try { p.gasCloud.setOpacity(1); } catch (_) {} }
+      else { const f = p._wxFade; try { p.gasCloud.setOpacity(f * f * (3 - 2 * f)); } catch (_) {} }
+    }
     const c = p.gasCloud.position;
     const dx = c.x - ref.x, dz = c.z - ref.z, d2 = dx * dx + dz * dz;
     if (d2 <= R2 && W._primed) continue;
@@ -129018,11 +129039,40 @@ function _lssEarthLifeTick(dt) {
     // has no visible mesh after a couple of seconds. Costs one traverse per
     // entity only until its body is confirmed, then nothing.
     if (!e._bodyOk) {
-      let _vis = 0;
-      e.mesh.traverse((o) => { if (o.isMesh && o.visible) _vis++; });
-      if (_vis > 0) e._bodyOk = true;
+      // ⚠ "visible" IS NOT "drawing". The first cut of this guard only counted
+      // meshes with o.visible true, and that misses the case the owner actually
+      // hit: "tag is there, can shoot the ship and see the smoke, but the glb is
+      // not there". The entity was whole - collision, damage, hit FX all fine -
+      // so the hull was present and simply rendering nothing. A mesh with no
+      // material, or one collapsed to no size, passes every visibility test and
+      // draws nothing at all. Check for those too, and SAY WHICH, so the cause
+      // is named the next time rather than guessed at.
+      let _vis = 0, _noMat = 0;
+      e.mesh.traverse((o) => {
+        if (!o.isMesh || !o.visible) return;
+        _vis++;
+        if (!o.material) _noMat++;
+      });
+      let _span = 0;
+      if (_vis > 0) {
+        try {
+          const _b = new THREE.Box3().setFromObject(e.mesh);
+          if (!_b.isEmpty()) {
+            const _sz = _b.getSize(new THREE.Vector3());
+            _span = Math.max(_sz.x, _sz.y, _sz.z);
+            if (!isFinite(_span)) _span = 0;
+          }
+        } catch (_) { _span = 0; }
+      }
+      // The span bar is deliberately LOW (2 units against hulls of 150-3000).
+      // It is here to catch a collapse to nothing, not to judge size - a
+      // skinned clone measured in bind space can read oddly without being
+      // broken, and retiring a ship that was going to draw is the worse error.
+      if (_vis > 0 && _noMat === 0 && _span > 2) e._bodyOk = true;
       else if ((e._bodyT = (e._bodyT || 0) + dt) > 2) {
-        console.warn('[earth-life] retiring bodyless', e.earthKind, e.id);
+        console.warn('[earth-life] retiring bodyless ' + e.earthKind + ' ' + e.id +
+                     ' (visibleMeshes ' + _vis + ', noMaterial ' + _noMat +
+                     ', span ' + Math.round(_span) + ')');
         _elDetach(e); continue;
       }
     }
