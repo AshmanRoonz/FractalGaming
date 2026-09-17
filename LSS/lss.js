@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.76';
+const LSS_BUILD = '45.92';
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -19342,7 +19342,14 @@ function _swRippleMaskJobTick(cine) {
   const T = game._hubWaterT;
   if (!T || typeof _stGroundYCarved !== 'function') { R._maskJob = null; R._farJob = null; return; }
   const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : (T.WL || 0);
-  const budget = (window.__water && window.__water.bakeMs) || ((cine || (J && J.fast) || (F && F.fast)) ? 4.0 : 1.0);
+  const _lsLoading = (() => {
+    try {
+      const ov = document.getElementById('lss-loading-overlay');
+      return !!(ov && ov.classList.contains('active'));
+    } catch (_) { return false; }
+  })();
+  const budget = (window.__water && window.__water.bakeMs)
+    || (_lsLoading ? 10.0 : ((cine || (J && J.fast) || (F && F.fast)) ? 4.0 : 1.0));
   const t0 = performance.now();
   if (J) {
     if (!R.maskData) { R._maskJob = null; return; }
@@ -19362,6 +19369,7 @@ function _swRippleMaskJobTick(cine) {
       R.acc = R.step;
       if (R.maskTex) R.maskTex.needsUpdate = true;
       R._maskJob = null;
+      R._maskEverBaked = true;
     }
     return;
   }
@@ -19375,6 +19383,7 @@ function _swRippleMaskJobTick(cine) {
     if ((F.row & 3) === 0 && performance.now() - t0 > budget) break;
   }
   if (F.row >= RES) {
+    R._maskEverBaked = true;   // either lane satisfies the curtain; see hideLoadingOverlay
     R.farData.set(stage);
     R.farCenter.set(F.cx, F.cz);
     if (R.farTex) R.farTex.needsUpdate = true;
@@ -63587,6 +63596,13 @@ function _lssCurtainFailsafe() {
 }
 
 let _lssEarthCurtainTries = 0;
+let _lssEarthCurtainT0 = 0;
+let _lssWaterWaitT0 = 0;   // see _waterPending in hideLoadingOverlay
+const _lssSettle = { x: 0, y: 0, z: 0, still: 0, spent: 0, seen: false };
+const _LSS_SETTLE_MS = 260;       // quiet time required before lifting
+const _LSS_SETTLE_MAX = 4000;     // never hold longer than this for settling alone
+const _LSS_SETTLE_JUMP = 40;      // world units; below this is drift, not a teleport
+const _LSS_EARTH_CURTAIN_MAX_MS = 45000;
 function hideLoadingOverlay() {
   try {
     if (game && game._cyber && game._cyber.armed && !game._cyber.started &&
@@ -63595,18 +63611,47 @@ function hideLoadingOverlay() {
       setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
       return;
     }
-    if (game && game._earth && game._earth.armed && game.state !== 'playing' &&
-        _lssEarthCurtainTries < 1800) {
+    if (game && game._earth && game._earth.armed &&
+        (_lssEarthCurtainT0 === 0 ||
+         (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) {
       const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
+      const _noWorld = !_w;
+      const _noSpawn = !!(typeof _lssGmaps !== 'undefined' && _lssGmaps &&
+                          _lssGmaps._spawnPlaced === false);
       const _building = !!(_w && _w._patches && typeof _w.bootTarget === 'number' &&
                            _w._patches.size < _w.bootTarget);
-      if (_building) {
+      const _regionUnknown = !!(_w && _w._bldRegionKey == null && ((_w._bldFail | 0) === 0));
+      const _cityPending = !!(_w && _w._bldRegionKey != null && _w.stats &&
+                              ((_w.stats.regionWays | 0) > 0) &&
+                              ((_w.stats.buildings | 0) === 0));
+      if (_noWorld || _noSpawn || _building || _regionUnknown || _cityPending) {
+        if (_lssEarthCurtainT0 === 0) _lssEarthCurtainT0 = Date.now();
         _lssEarthCurtainTries++;
         setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
         return;
       }
     }
     _lssEarthCurtainTries = 0;
+    _lssEarthCurtainT0 = 0;
+    _lssWaterWaitT0 = 0;
+
+    if (typeof player !== 'undefined' && player && player.position &&
+        _lssSettle.spent < _LSS_SETTLE_MAX) {
+      const _pp = player.position;
+      const _d = _lssSettle.seen
+        ? (Math.abs(_pp.x - _lssSettle.x) + Math.abs(_pp.y - _lssSettle.y) + Math.abs(_pp.z - _lssSettle.z))
+        : 0;
+      _lssSettle.x = _pp.x; _lssSettle.y = _pp.y; _lssSettle.z = _pp.z;
+      _lssSettle.seen = true;
+      if (_d > _LSS_SETTLE_JUMP) _lssSettle.still = 0;   // that was a teleport - start over
+      else _lssSettle.still += 16;
+      if (_lssSettle.still < _LSS_SETTLE_MS) {
+        _lssSettle.spent += 16;
+        setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
+        return;
+      }
+    }
+    _lssSettle.still = 0; _lssSettle.spent = 0; _lssSettle.seen = false;
   } catch (_) {}
   _lssCurtainTries = 0;
   const ov = document.getElementById('lss-loading-overlay');
@@ -86611,12 +86656,62 @@ const _EL_KIND = {
              altLo: 4200, altHi: 7400, spdLo: 65, spdHi: 105,
              hp: 40000, rad: 900, per: 0, clear: 1200 },
   monster: { max:  5, ringIn: 3800, ringOut: 8200, killR: 16000,
-             altLo:  240, altHi: 1500, spdLo: 90, spdHi: 200,
-             hp: 2600, rad: 280, per: 0, clear: 200 },
+             altLo:   10, altHi:   70, spdLo: 45, spdHi: 120,
+             hp: 2600, rad: 280, per: 0, clear: 0 },
 };
 
 const _LSS_EL = { on: false, group: null, ents: [], n: 0,
                   hoard: [], carrier: null, mon: {}, dens: 0, densT: 0, budget: 0 };
+
+/**
+ * ⚠ CLONE A SKINNED GLB PROPERLY. THIS IS THE GHOST SHIP.
+ *
+ * Owner: "tag is there, can shoot the ship and see the smoke, but the glb is
+ * not there", and later "ghost ship here in our window" - caught live.
+ *
+ * `Object3D.clone(true)` does NOT rebind a SkinnedMesh's skeleton. The clone
+ * gets its own bones in the hierarchy, but `skeleton` still points at the
+ * ORIGINAL's bones. Measured on the live monsters: boneBelongsToThisClone false
+ * on every one, and three of four literally sharing the proto's Skeleton
+ * object. So every clone deforms to wherever the PROTO's bones are - at the
+ * origin, nowhere near the entity - and its geometry bounding sphere is still
+ * the 1-2 unit BIND-SPACE sphere, so `frustumCulled` throws it away as well.
+ * The entity itself is untouched by any of that: position, collision, damage
+ * and hit FX all work, which is exactly why you can shoot a ship that is not
+ * there.
+ *
+ * THREE.SkeletonUtils is not loaded in this build (checked), so this is the
+ * minimal equivalent: clone, then rebind each SkinnedMesh to the bones that
+ * live INSIDE the clone, matched by name, keeping the original boneInverses
+ * and bindMatrix.
+ *
+ * frustumCulled is turned off for the skinned meshes too. Even correctly bound,
+ * a skinned mesh's bounding sphere describes its bind pose, not where the bones
+ * put it, and there are only a handful of these on screen.
+ *
+ * Safe on non-skinned models: nothing matches and it is a plain deep clone.
+ */
+function _elCloneRigged(src) {
+  const out = src.clone(true);
+  try {
+    const srcSkinned = [];
+    src.traverse((o) => { if (o.isSkinnedMesh) srcSkinned.push(o); });
+    if (!srcSkinned.length) return out;
+    const boneByName = new Map();
+    out.traverse((o) => { if (o.isBone) boneByName.set(o.name, o); });
+    let i = 0;
+    out.traverse((o) => {
+      if (!o.isSkinnedMesh) return;
+      const from = srcSkinned[i++] || o;
+      const sk = from.skeleton || o.skeleton;
+      if (!sk || !sk.bones) return;
+      const bones = sk.bones.map((b) => boneByName.get(b.name) || b);
+      o.bind(new THREE.Skeleton(bones, sk.boneInverses), from.bindMatrix);
+      o.frustumCulled = false;
+    });
+  } catch (e) { console.warn('[earth-life] rigged clone failed:', e); }
+  return out;
+}
 
 /** Scale an arbitrary GLB clone so its longest axis is `target` world units. */
 function _elFit(obj, target) {
@@ -86666,7 +86761,7 @@ function _lssEarthLifeInit() {
         new THREE.GLTFLoader().load(MONSTER_BASE_URL + def.key + '.glb' + bust,
           (gltf) => {
             try { _lssCapModelTextures(gltf.scene, 'earthlife ' + def.key); } catch (_) {}
-            _LSS_EL.mon[def.key] = gltf.scene;
+            _LSS_EL.mon[def.key] = { scene: gltf.scene, clips: gltf.animations || [] };
           }, undefined, () => {});
       }
     }
@@ -86714,7 +86809,7 @@ function _elMesh(kind) {
   if (kind === 'traffic') {
     const pool = _LSS_EL.hoard;
     if (!pool || !pool.length) return null;
-    const cl = pool[(Math.random() * pool.length) | 0].clone(true);
+    const cl = _elCloneRigged(pool[(Math.random() * pool.length) | 0]);
     cl.traverse((o) => {
       if (!o.isMesh) return;
       o.castShadow = false;
@@ -86734,7 +86829,11 @@ function _elMesh(kind) {
     return holder;
   }
   if (kind === 'carrier') {
-    if (_LSS_EL.carrier) holder.add(_elFit(_LSS_EL.carrier.clone(true), 2600));
+    if (_LSS_EL.carrier) {
+      const _c = _elFit(_elCloneRigged(_LSS_EL.carrier), 2600);
+      _c.rotation.y = Math.PI / 2;
+      holder.add(_c);
+    }
     else {
       const m = new THREE.Mesh(new THREE.BoxGeometry(900, 200, 2400),
         new THREE.MeshStandardMaterial({ color: 0x2a3140, metalness: 0.4, roughness: 0.7 }));
@@ -86745,8 +86844,20 @@ function _elMesh(kind) {
   }
   const keys = Object.keys(_LSS_EL.mon);
   if (!keys.length) return null;
-  const src = _LSS_EL.mon[keys[(Math.random() * keys.length) | 0]];
-  holder.add(_elFit(src.clone(true), (typeof MONSTER_SIZE === 'number' ? MONSTER_SIZE : 520)));
+  const rec = _LSS_EL.mon[keys[(Math.random() * keys.length) | 0]];
+  const body = _elFit(_elCloneRigged(rec.scene), (typeof MONSTER_SIZE === 'number' ? MONSTER_SIZE : 520));
+  holder.add(body);
+  try {
+    if (rec.clips && rec.clips.length && THREE.AnimationMixer) {
+      const mx = new THREE.AnimationMixer(body);
+      const clip = (typeof _monStripRootMotion === 'function')
+        ? _monStripRootMotion(rec.clips[0]) : rec.clips[0];
+      const act = mx.clipAction(clip);
+      act.play();
+      act.time = Math.random() * (clip.duration || 1);   // never in lockstep
+      holder.userData.elMixer = mx;
+    }
+  } catch (e) { console.warn('[earth-life] monster anim failed:', e); }
   return holder;
 }
 
@@ -86779,7 +86890,8 @@ function _elSpawn(kind) {
     id: 'earthlife_' + kind + '_' + (++_LSS_EL.n),
     position: new THREE.Vector3(x, y, z),
     velocity: new THREE.Vector3(Math.sin(head) * spd, 0, Math.cos(head) * spd),
-    team: 9300, name: kind.toUpperCase(), loadout: { name: kind.toUpperCase() },
+    team: 9300, name: kind.toUpperCase(),
+    loadout: (kind === 'monster') ? null : { name: kind.toUpperCase() },
     chassis: { hullWidth: K.rad * 2, hullHeight: K.rad, hullLength: K.rad * 2.4,
                flightSpeed: spd },
     collisionRadius: K.rad, shipState: 'flying', doomed: false,
@@ -86821,7 +86933,9 @@ function _lssEarthLifeTick(dt) {
 
   for (const e of _LSS_EL.ents.slice()) {
     if (!e.alive) { _elDetach(e); continue; }
-    if (!e._bodyOk) {
+    e._bodyT = (e._bodyT || 0) - dt;
+    if (e._bodyT <= 0) {
+      e._bodyT = 2.0 + Math.random();   // staggered, so they never all check together
       let _vis = 0, _noMat = 0;
       e.mesh.traverse((o) => {
         if (!o.isMesh || !o.visible) return;
@@ -86839,8 +86953,9 @@ function _lssEarthLifeTick(dt) {
           }
         } catch (_) { _span = 0; }
       }
-      if (_vis > 0 && _noMat === 0 && _span > 2) e._bodyOk = true;
-      else if ((e._bodyT = (e._bodyT || 0) + dt) > 2) {
+      if (_vis > 0 && _noMat === 0 && _span > 2) { e._bodyBad = 0; }
+      else if ((e._bodyBad = (e._bodyBad || 0) + 1) >= 2) {
+        _LSS_EL.retired = (_LSS_EL.retired || 0) + 1;
         console.warn('[earth-life] retiring bodyless ' + e.earthKind + ' ' + e.id +
                      ' (visibleMeshes ' + _vis + ', noMaterial ' + _noMat +
                      ', span ' + Math.round(_span) + ')');
@@ -86851,6 +86966,8 @@ function _lssEarthLifeTick(dt) {
     if (e.earthKind === 'monster') {
       e._head += (Math.random() - 0.5) * dt * 0.9;
       e.velocity.set(Math.sin(e._head) * e._spd, e.velocity.y, Math.cos(e._head) * e._spd);
+      const _mx = e.mesh.userData.elMixer;
+      if (_mx) { try { _mx.update(dt); } catch (_) {} }
     }
     e._bob += dt * (e.earthKind === 'carrier' ? 0.25 : 0.7);
     e.position.x += e.velocity.x * dt;
@@ -86858,8 +86975,9 @@ function _lssEarthLifeTick(dt) {
 
     let gy = 0;
     try { const v = t.groundYWorld(e.position.x, e.position.z); if (isFinite(v)) gy = v; } catch (_) {}
-    const wantY = gy + e._alt + Math.sin(e._bob) * (e.earthKind === 'carrier' ? 40 : 18);
-    e.position.y += (wantY - e.position.y) * Math.min(1, dt * 1.6);
+    const _walks = (e.earthKind === 'monster');
+    const wantY = gy + e._alt + (_walks ? 0 : Math.sin(e._bob) * (e.earthKind === 'carrier' ? 40 : 18));
+    e.position.y += (wantY - e.position.y) * Math.min(1, dt * (_walks ? 6.0 : 1.6));
     if (e.position.y < gy + K.clear) e.position.y = gy + K.clear;
 
     e.mesh.position.copy(e.position);
@@ -86878,7 +86996,9 @@ function _lssEarthLifeTick(dt) {
           if (ch.geometry) ch.geometry.dispose();
           if (ch.material && ch.material.dispose) ch.material.dispose();
         }
-        e.mesh.add(_elFit(_LSS_EL.carrier.clone(true), 2600));
+        const _ch = _elFit(_elCloneRigged(_LSS_EL.carrier), 2600);
+        _ch.rotation.y = Math.PI / 2;   // see _elMesh: the hull is X-long
+        e.mesh.add(_ch);
         e.mesh.userData.elPlaceholder = false;
       } catch (_) {}
       break;
@@ -87398,6 +87518,12 @@ class LSSEarthTiles {
         this._baseH = 0;
         this._baseH = (typeof this.forceBaseH === 'number')
           ? this.forceBaseH : this._sampleRing(g, 0, 0);
+        const _plw = this._pendingLocalWater;
+        this._pendingLocalWater = null;
+        if (_plw) {
+          try { this._buildLocalWater(g, _plw.wet, _plw.surface, _plw.w, _plw.h); }
+          catch (e) { console.warn('[lss-earth] local water failed:', e); }
+        }
       }
     }
     this.stats.rings = this._grids.length;
@@ -87443,7 +87569,7 @@ class LSSEarthTiles {
     let level = (k === 0) ? null : this._waterLevelRaw;
     if (k === 0) {
       if (typeof this.forceWaterLevel === 'number') level = this.forceWaterLevel;
-      else if (domC >= heights.length * 0.01) level = domV;
+      else if (domC >= heights.length * ((this.water || !(typeof window !== 'undefined' && window.__earthRivers)) ? 0.01 : 0.0012)) level = domV;
     }
     if (level !== null && level !== undefined) {
       const levels = new Set([level]);
@@ -87498,6 +87624,10 @@ class LSSEarthTiles {
         const surface = (typeof this.forceWaterLevel === 'number') ? this.forceWaterLevel : level;
         for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = surface - D * Math.min(1, amt[i] * 1.25);
         this._hasSea = true;
+        if (k === 0 && !this.water && typeof this.forceWaterLevel !== 'number' &&
+            (typeof window !== 'undefined' && window.__earthRivers)) {
+          this._pendingLocalWater = { wet, surface, w, h };
+        }
         if (k === 0) this._waterLevelRaw = surface;
         if (k === 0) this.stats.seaPct = Math.round(1000 * nWet / heights.length) / 10;
         if (k === 0) this.stats.waterLevelM = Math.round(surface * 100) / 100;
@@ -87510,6 +87640,81 @@ class LSSEarthTiles {
     const nw = this.project(nLat, wLng), se = this.project(sLat, eLng);
     return { heights, w, h, x0, y0, z, n, X0: nw.x, X1: se.x, Z0: nw.z, Z1: se.z,
              img: null, tex: null };
+  }
+
+  /** Ramp a freshly built river/lake surface up to full. See _buildLocalWater. */
+  localWaterTick(dt) {
+    const m = this._localWater;
+    if (!m || !m.material) return;
+    const f = m.userData.elFade;
+    if (typeof f !== 'number' || f >= 1) return;
+    const nf = Math.min(1, f + (dt || 0.016) / 1.2);
+    m.userData.elFade = nf;
+    m.material.opacity = 0.82 * (nf * nf * (3 - 2 * nf));
+  }
+
+  /**
+   * A flat surface over this patch's OWN water body, at its OWN elevation.
+   *
+   * The LSS water plane is global and single-level - one mesh, one height - and
+   * that is right for a sea. It cannot draw a mountain river, which sits 1,380 m
+   * above sea level and descends as it goes. So a near patch that detected a
+   * body the horizon patch knows nothing about draws it here instead: a plain
+   * translucent sheet over the wet mask, at the body's own flattened height.
+   *
+   * ⚠ CLIPPED TO THIS PATCH'S OWN CELL. Ring 0 spans ~3,835 m against a 2,600 m
+   * cell, so neighbouring patches overlap - and two translucent sheets at
+   * slightly different river heights would z-fight along every seam. Emitting
+   * only within the patch's own half-extent tiles them edge to edge instead.
+   *
+   * Decimated by STEP texels: a river is a fraction of a percent of the grid, so
+   * this is a few hundred quads, not a few hundred thousand.
+   */
+  _buildLocalWater(g, wet, surface, w, h) {
+    if (typeof THREE === 'undefined') return;
+    const y = (surface - this._baseH) * this.heightScale;
+    const STEP = 4;
+    const half = (this.extentMetres || 2600) * 0.5;
+    const c = this.project(this.lat, this.lng);
+    const pos = [], idx = [];
+    let n = 0;
+    const sx = (g.X1 - g.X0) / w, sz = (g.Z1 - g.Z0) / h;
+    for (let py = 0; py + STEP < h; py += STEP) {
+      for (let px = 0; px + STEP < w; px += STEP) {
+        if (!wet[py * w + px]) continue;
+        const x0 = g.X0 + px * sx, x1 = x0 + STEP * sx;
+        const z0 = g.Z0 + py * sz, z1 = z0 + STEP * sz;
+        if (x1 < c.x - half || x0 > c.x + half) continue;
+        if (z1 < c.z - half || z0 > c.z + half) continue;
+        pos.push(x0, y, z0, x1, y, z0, x1, y, z1, x0, y, z1);
+        idx.push(n, n + 2, n + 1, n, n + 3, n + 2);
+        n += 4;
+      }
+    }
+    if (!idx.length) {
+      console.warn('[lss-earth] local water: no quads.',
+                   'wetTexels', (() => { let n = 0; for (let i = 0; i < wet.length; i++) if (wet[i]) n++; return n; })(),
+                   'grid', w + 'x' + h, 'clipHalf', Math.round(half),
+                   'centre', Math.round(c.x) + ',' + Math.round(c.z),
+                   'bounds', Math.round(g.X0) + '..' + Math.round(g.X1));
+      return;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x2e5a7a, transparent: true, opacity: 0,
+      roughness: 0.12, metalness: 0.32,
+      side: THREE.DoubleSide, depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.name = 'earth-localwater';
+    mesh.renderOrder = 1;
+    this.group.add(mesh);
+    mesh.userData.elFade = 0;
+    this._localWater = mesh;
+    this.stats.localWaterQuads = n / 4;
   }
 
   /** Bilinear sample of ONE ring's grid, in that ring's own tile space. */
@@ -88855,7 +89060,12 @@ class LSSEarthWorld {
     for (const p of this._patches.values()) p.setWindowGlow(v);
     if (this._far) this._far.setWindowGlow(v);
   }
-  waterTick(dt) { if (this._far) this._far.waterTick(dt); }
+  waterTick(dt) {
+    if (this._far) this._far.waterTick(dt);
+    for (const p of this._patches.values()) {
+      if (typeof p.localWaterTick === 'function') p.localWaterTick(dt);
+    }
+  }
   buildWater() { return this._far ? this._far.buildWater() : false; }
 
   dispose() {
@@ -89197,6 +89407,7 @@ async function _lssGmapsBuildLevel(level) {
       }
     }, 1000);
     try { _lssGmapsRefinePivot(); } catch(_) {}
+    _lssGmaps._spawnPlaced = false;   // the curtain waits on this; see hideLoadingOverlay
     try {
       await Promise.race([
         tiles.ready,
@@ -89220,6 +89431,7 @@ async function _lssGmapsBuildLevel(level) {
         }
       }
     } catch (e) { console.warn('[lss-earth] spawn points failed:', e); }
+    _lssGmaps._spawnPlaced = true;
   } catch (e) {
     console.error('[lss-gmaps] failed to initialize tiles:', e);
     alert('Failed to initialize Google Maps tiles: ' + e.message + "\nCheck your API key and that the Map Tiles API is enabled on your Google Cloud project.");

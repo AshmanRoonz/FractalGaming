@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = '45.76';
+const LSS_BUILD = '45.92';
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -35142,7 +35142,22 @@ function _swRippleMaskJobTick(cine) {
   const T = game._hubWaterT;
   if (!T || typeof _stGroundYCarved !== 'function') { R._maskJob = null; R._farJob = null; return; }
   const WL = (typeof game._hubWaterWL === 'number') ? game._hubWaterWL : (T.WL || 0);
-  const budget = (window.__water && window.__water.bakeMs) || ((cine || (J && J.fast) || (F && F.fast)) ? 4.0 : 1.0);
+  // ⭐ BAKE HARD WHILE THE CURTAIN IS UP. 1 ms a frame is the right budget in
+  // open play - the whole point of amortising is not to hitch - but behind a
+  // loading screen there is no frame to protect and every millisecond spent
+  // here is a millisecond the player never sees. Owner, arriving over Lake
+  // Ontario: "i saw it pop in"... "i can see the water is not loaded from this
+  // shot". The PLANE was up at 3.41 s against a curtain that lifted at 11.58 s;
+  // what was missing was this mask, and the water draws with an empty one -
+  // which is the same alpha-0 invisible water as the v45.4x shore-mask bug.
+  const _lsLoading = (() => {
+    try {
+      const ov = document.getElementById('lss-loading-overlay');
+      return !!(ov && ov.classList.contains('active'));
+    } catch (_) { return false; }
+  })();
+  const budget = (window.__water && window.__water.bakeMs)
+    || (_lsLoading ? 10.0 : ((cine || (J && J.fast) || (F && F.fast)) ? 4.0 : 1.0));
   const t0 = performance.now();
   if (J) {
     if (!R.maskData) { R._maskJob = null; return; }
@@ -35162,6 +35177,13 @@ function _swRippleMaskJobTick(cine) {
       R.acc = R.step;
       if (R.maskTex) R.maskTex.needsUpdate = true;
       R._maskJob = null;
+      // One-shot: the loading curtain waits for the FIRST full bake and no
+      // more. The mask re-arms every time the water centre moves, and the
+      // player is being positioned during load, so waiting on `_maskJob`
+      // itself meant waiting out a chain of re-bakes - measured as a Toronto
+      // lift at 24.1 s against 11.6 s before. One is all it takes for the
+      // lake to be drawn rather than empty.
+      R._maskEverBaked = true;
     }
     return;
   }
@@ -35175,6 +35197,7 @@ function _swRippleMaskJobTick(cine) {
     if ((F.row & 3) === 0 && performance.now() - t0 > budget) break;
   }
   if (F.row >= RES) {
+    R._maskEverBaked = true;   // either lane satisfies the curtain; see hideLoadingOverlay
     R.farData.set(stage);
     R.farCenter.set(F.cx, F.cz);
     if (R.farTex) R.farTex.needsUpdate = true;
@@ -99519,6 +99542,32 @@ function _lssCurtainFailsafe() {
 }
 
 let _lssEarthCurtainTries = 0;
+// ⚠ A TIME CAP, NOT A TRY COUNT. hideLoadingOverlay is called from more than
+// one path and each call starts its OWN 16 ms retry chain, all of them
+// incrementing the same counter - so a 2600-try ceiling burned through in ~18 s
+// rather than the 42 s it reads as. Measured on a cold Hamburg behind a slow
+// Overpass: the curtain gave up at 22.4 s with 0 patches and 0 buildings, and
+// the city did not land until 36.8 s. Wall-clock cannot be consumed twice.
+let _lssEarthCurtainT0 = 0;
+let _lssWaterWaitT0 = 0;   // see _waterPending in hideLoadingOverlay
+// ⭐ NOBODY SHOULD EVER SEE THEMSELVES BE MOVED.
+// Owner: "i start in one place, and then a second later i get teleported up
+// higher" ... "that's dumb... it shouldn't be like that anywhere in the game...
+// and it is in other places too".
+// The specific case is the earth level - `_lssGmapsBuildLevel` places the
+// player only AFTER `await tiles.ready`, so the generic launch position is what
+// you land on and the real spawn arrives a beat later. But the shape is general:
+// any mode whose spawn is chosen after the launch sequence has already put the
+// player somewhere will show the jump. Rather than chase each one, the curtain
+// simply refuses to lift while the player is still MOVING.
+// Position-based, so it needs no cooperation from any mode: hold until the
+// player has not jumped for _LSS_SETTLE_MS, and cap the whole thing so a mode
+// that legitimately moves the player during load cannot hang behind it.
+const _lssSettle = { x: 0, y: 0, z: 0, still: 0, spent: 0, seen: false };
+const _LSS_SETTLE_MS = 260;       // quiet time required before lifting
+const _LSS_SETTLE_MAX = 4000;     // never hold longer than this for settling alone
+const _LSS_SETTLE_JUMP = 40;      // world units; below this is drift, not a teleport
+const _LSS_EARTH_CURTAIN_MAX_MS = 45000;
 function hideLoadingOverlay() {
   // (v38.03) CYBERPUNK CITY: hold the curtain until the mode has built itself. It used to lift a
   // beat before the lineup started, and that beat is the free-flight camera sitting at the launch
@@ -99542,18 +99591,97 @@ function hideLoadingOverlay() {
     // a first visit fetches DEM, imagery and an Overpass region. Earth gets its
     // own, longer ceiling, and it is a CEILING on purpose: a curtain that never
     // lifts is worse than any pop-in.
-    if (game && game._earth && game._earth.armed && game.state !== 'playing' &&
-        _lssEarthCurtainTries < 1800) {
+    // ⚠ NO `game.state !== 'playing'` ON THIS BRANCH, and no early-out when the
+    // world object does not exist yet. Both were why the first cut of the wait
+    // below did nothing: measured on a cold Munich with a slow Overpass, the
+    // launch sequence flips state to 'playing' at ~6.5 s, and at that moment
+    // `_lssGmaps.tiles` was still null - so every world condition read false and
+    // the curtain lifted at 6.4 s onto zero patches and zero buildings. The
+    // state flag describes the LAUNCH SEQUENCE, not whether the world exists,
+    // and this hold is about the world. The try ceiling is what bounds it.
+    if (game && game._earth && game._earth.armed &&
+        (_lssEarthCurtainT0 === 0 ||
+         (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) {
       const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
+      // The level build is async; until it has constructed the world there is
+      // nothing to ask, and "nothing to ask" is not "ready".
+      const _noWorld = !_w;
+      // A water plane with a half-baked shore mask renders as nothing. If this
+      // world has water at all, wait for the bake - see _swRippleMaskJobTick,
+      // which now spends a 10 ms budget per frame while this curtain is up.
+      // ⚠ BOUNDED, AND IT HAS TO BE. Gating on the NEAR lane alone hung the
+      // curtain to its 45 s cap in Toronto - that lane does not always run, so
+      // the flag never arrived and the screen simply never lifted. Either lane
+      // sets it now, and the wait gets its own short deadline on top: the water
+      // is worth a couple of seconds, it is not worth a screen that never ends.
+      // NO EXPLICIT WATER WAIT HERE ANY MORE. v45.88-45.90 held the curtain on
+      // the shore-mask bake, and it hung: measured in Toronto with everything
+      // else ready - 9 patches, 7,640 buildings, the plane up - and the screen
+      // still up at 26 s, released only by disarming this branch by hand. The
+      // gain was never worth that risk, because the actual fix is one line in
+      // _swRippleMaskJobTick: a 10 ms per-frame bake budget while the curtain
+      // is up, instead of the 1 ms that protects live frames. The mask then
+      // finishes inside a curtain that is ALREADY being held for the patches
+      // and the city, and nothing here has to know about it.
+      // The explicit spawn placement runs after `await tiles.ready` further
+      // down this file, and it is the jump the owner was seeing. Wait for it.
+      const _noSpawn = !!(typeof _lssGmaps !== 'undefined' && _lssGmaps &&
+                          _lssGmaps._spawnPlaced === false);
       const _building = !!(_w && _w._patches && typeof _w.bootTarget === 'number' &&
                            _w._patches.size < _w.bootTarget);
-      if (_building) {
+      // ⭐ ...AND WAIT FOR THE CITY, NOT JUST THE GROUND.
+      // Owner, arriving at Banff: "missing buildings, 2d visible, but 3d
+      // missing... and the cyberpunk overlay is missing" - the overlay is ON
+      // the buildings, so one cause, not two. Then, correctly: "i think its
+      // just slow... we just need more time in the loading screen before it
+      // all loads in".
+      // The terrain no longer waits on Overpass (v45.69 races it at 6 s so a
+      // slow server cannot stall the streamer), which is right for the STREAM
+      // and wrong for the ARRIVAL: the patches come up bare and the city
+      // backfills whenever it lands. Measured against a deliberately slow
+      // Overpass: playable at 14 s with ZERO buildings, and the 15,087 of them
+      // did not appear until 25 s.
+      // So the curtain waits for it too:
+      //   _regionUnknown - we have not heard back from Overpass at all yet.
+      //   _cityPending   - we have, there IS a city, and it is not extruded yet.
+      // Both are false over genuine wilderness (the region resolves with 0
+      // ways), so open country still lifts the moment the ground is ready, and
+      // both are false once _bldFail > 0, so a DEAD Overpass lifts immediately
+      // and leaves it to the retry + backfill. The try ceiling caps all of it:
+      // a curtain that never lifts is worse than any pop-in.
+      const _regionUnknown = !!(_w && _w._bldRegionKey == null && ((_w._bldFail | 0) === 0));
+      const _cityPending = !!(_w && _w._bldRegionKey != null && _w.stats &&
+                              ((_w.stats.regionWays | 0) > 0) &&
+                              ((_w.stats.buildings | 0) === 0));
+      if (_noWorld || _noSpawn || _building || _regionUnknown || _cityPending) {
+        if (_lssEarthCurtainT0 === 0) _lssEarthCurtainT0 = Date.now();
         _lssEarthCurtainTries++;
         setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
         return;
       }
     }
     _lssEarthCurtainTries = 0;
+    _lssEarthCurtainT0 = 0;
+    _lssWaterWaitT0 = 0;
+
+    // ...and whatever the mode, do not lift mid-teleport. See _lssSettle.
+    if (typeof player !== 'undefined' && player && player.position &&
+        _lssSettle.spent < _LSS_SETTLE_MAX) {
+      const _pp = player.position;
+      const _d = _lssSettle.seen
+        ? (Math.abs(_pp.x - _lssSettle.x) + Math.abs(_pp.y - _lssSettle.y) + Math.abs(_pp.z - _lssSettle.z))
+        : 0;
+      _lssSettle.x = _pp.x; _lssSettle.y = _pp.y; _lssSettle.z = _pp.z;
+      _lssSettle.seen = true;
+      if (_d > _LSS_SETTLE_JUMP) _lssSettle.still = 0;   // that was a teleport - start over
+      else _lssSettle.still += 16;
+      if (_lssSettle.still < _LSS_SETTLE_MS) {
+        _lssSettle.spent += 16;
+        setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
+        return;
+      }
+    }
+    _lssSettle.still = 0; _lssSettle.spent = 0; _lssSettle.seen = false;
   } catch (_) {}
   _lssCurtainTries = 0;
   const ov = document.getElementById('lss-loading-overlay');
@@ -128833,13 +128961,67 @@ const _EL_KIND = {
   carrier: { max:  2, ringIn: 11000, ringOut: 17000, killR: 38000,
              altLo: 4200, altHi: 7400, spdLo: 65, spdHi: 105,
              hp: 40000, rad: 900, per: 0, clear: 1200 },
+  // ⚠ MONSTERS WALK. They were sharing the traffic profile - hundreds of
+  // metres up, ship speeds, holding an altitude - which reads as a creature
+  // flying like a ship. They belong ON the ground, slower, with their own
+  // animation running (see _elMesh).
   monster: { max:  5, ringIn: 3800, ringOut: 8200, killR: 16000,
-             altLo:  240, altHi: 1500, spdLo: 90, spdHi: 200,
-             hp: 2600, rad: 280, per: 0, clear: 200 },
+             altLo:   10, altHi:   70, spdLo: 45, spdHi: 120,
+             hp: 2600, rad: 280, per: 0, clear: 0 },
 };
 
 const _LSS_EL = { on: false, group: null, ents: [], n: 0,
                   hoard: [], carrier: null, mon: {}, dens: 0, densT: 0, budget: 0 };
+
+/**
+ * ⚠ CLONE A SKINNED GLB PROPERLY. THIS IS THE GHOST SHIP.
+ *
+ * Owner: "tag is there, can shoot the ship and see the smoke, but the glb is
+ * not there", and later "ghost ship here in our window" - caught live.
+ *
+ * `Object3D.clone(true)` does NOT rebind a SkinnedMesh's skeleton. The clone
+ * gets its own bones in the hierarchy, but `skeleton` still points at the
+ * ORIGINAL's bones. Measured on the live monsters: boneBelongsToThisClone false
+ * on every one, and three of four literally sharing the proto's Skeleton
+ * object. So every clone deforms to wherever the PROTO's bones are - at the
+ * origin, nowhere near the entity - and its geometry bounding sphere is still
+ * the 1-2 unit BIND-SPACE sphere, so `frustumCulled` throws it away as well.
+ * The entity itself is untouched by any of that: position, collision, damage
+ * and hit FX all work, which is exactly why you can shoot a ship that is not
+ * there.
+ *
+ * THREE.SkeletonUtils is not loaded in this build (checked), so this is the
+ * minimal equivalent: clone, then rebind each SkinnedMesh to the bones that
+ * live INSIDE the clone, matched by name, keeping the original boneInverses
+ * and bindMatrix.
+ *
+ * frustumCulled is turned off for the skinned meshes too. Even correctly bound,
+ * a skinned mesh's bounding sphere describes its bind pose, not where the bones
+ * put it, and there are only a handful of these on screen.
+ *
+ * Safe on non-skinned models: nothing matches and it is a plain deep clone.
+ */
+function _elCloneRigged(src) {
+  const out = src.clone(true);
+  try {
+    const srcSkinned = [];
+    src.traverse((o) => { if (o.isSkinnedMesh) srcSkinned.push(o); });
+    if (!srcSkinned.length) return out;
+    const boneByName = new Map();
+    out.traverse((o) => { if (o.isBone) boneByName.set(o.name, o); });
+    let i = 0;
+    out.traverse((o) => {
+      if (!o.isSkinnedMesh) return;
+      const from = srcSkinned[i++] || o;
+      const sk = from.skeleton || o.skeleton;
+      if (!sk || !sk.bones) return;
+      const bones = sk.bones.map((b) => boneByName.get(b.name) || b);
+      o.bind(new THREE.Skeleton(bones, sk.boneInverses), from.bindMatrix);
+      o.frustumCulled = false;
+    });
+  } catch (e) { console.warn('[earth-life] rigged clone failed:', e); }
+  return out;
+}
 
 /** Scale an arbitrary GLB clone so its longest axis is `target` world units. */
 function _elFit(obj, target) {
@@ -128896,7 +129078,10 @@ function _lssEarthLifeInit() {
         new THREE.GLTFLoader().load(MONSTER_BASE_URL + def.key + '.glb' + bust,
           (gltf) => {
             try { _lssCapModelTextures(gltf.scene, 'earthlife ' + def.key); } catch (_) {}
-            _LSS_EL.mon[def.key] = gltf.scene;
+            // Keep the CLIPS too. Without them the creature is a static model
+            // being slid through the air - owner: "monsters shouldn't be flying
+            // like ships... we have code for how they move, already".
+            _LSS_EL.mon[def.key] = { scene: gltf.scene, clips: gltf.animations || [] };
           }, undefined, () => {});
       }
     }
@@ -128947,7 +129132,7 @@ function _elMesh(kind) {
   if (kind === 'traffic') {
     const pool = _LSS_EL.hoard;
     if (!pool || !pool.length) return null;
-    const cl = pool[(Math.random() * pool.length) | 0].clone(true);
+    const cl = _elCloneRigged(pool[(Math.random() * pool.length) | 0]);
     // Same treatment the hub gives these GLBs: their dark metal reads near-black
     // without a lift, and the materials must be CLONED, never mutated in place -
     // they belong to the shared cache.
@@ -128970,7 +129155,20 @@ function _elMesh(kind) {
     return holder;
   }
   if (kind === 'carrier') {
-    if (_LSS_EL.carrier) holder.add(_elFit(_LSS_EL.carrier.clone(true), 2600));
+    if (_LSS_EL.carrier) {
+      const _c = _elFit(_elCloneRigged(_LSS_EL.carrier), 2600);
+      // ⚠ THE HULL'S LONG AXIS IS X, NOT Z. Owner: "the carriers travel
+      // sideways (i guess the glb is oriented wrong) we have it corrected in
+      // cyberpunk city mode, and exhibition". The campaign knows it too -
+      // _carrierGroundClear measures the footprint as half.x = LENGTH and
+      // half.z = WIDTH. Every entity here is yawed with atan2(vel.x, vel.z),
+      // which points local +Z along travel, so the hull needs the same quarter
+      // turn loadHoardModel already bakes into every ship proto ("face travel",
+      // proto.rotation.y = Math.PI / 2). The placeholder box never showed it
+      // because BoxGeometry(900, 200, 2400) is already Z-long.
+      _c.rotation.y = Math.PI / 2;
+      holder.add(_c);
+    }
     else {
       // The route is worth flying before the hull lands, same as the campaign's
       // placeholder: a box of the right footprint reads correctly at altitude.
@@ -128986,8 +129184,22 @@ function _elMesh(kind) {
   }
   const keys = Object.keys(_LSS_EL.mon);
   if (!keys.length) return null;
-  const src = _LSS_EL.mon[keys[(Math.random() * keys.length) | 0]];
-  holder.add(_elFit(src.clone(true), (typeof MONSTER_SIZE === 'number' ? MONSTER_SIZE : 520)));
+  const rec = _LSS_EL.mon[keys[(Math.random() * keys.length) | 0]];
+  const body = _elFit(_elCloneRigged(rec.scene), (typeof MONSTER_SIZE === 'number' ? MONSTER_SIZE : 520));
+  holder.add(body);
+  // Walk cycle, driven per entity. _monStripRootMotion is what keeps the clip
+  // from also TRANSLATING the creature - the tick owns where it goes.
+  try {
+    if (rec.clips && rec.clips.length && THREE.AnimationMixer) {
+      const mx = new THREE.AnimationMixer(body);
+      const clip = (typeof _monStripRootMotion === 'function')
+        ? _monStripRootMotion(rec.clips[0]) : rec.clips[0];
+      const act = mx.clipAction(clip);
+      act.play();
+      act.time = Math.random() * (clip.duration || 1);   // never in lockstep
+      holder.userData.elMixer = mx;
+    }
+  } catch (e) { console.warn('[earth-life] monster anim failed:', e); }
   return holder;
 }
 
@@ -129020,7 +129232,13 @@ function _elSpawn(kind) {
     id: 'earthlife_' + kind + '_' + (++_LSS_EL.n),
     position: new THREE.Vector3(x, y, z),
     velocity: new THREE.Vector3(Math.sin(head) * spd, 0, Math.cos(head) * spd),
-    team: 9300, name: kind.toUpperCase(), loadout: { name: kind.toUpperCase() },
+    team: 9300, name: kind.toUpperCase(),
+    // NO loadout ON A MONSTER. The flat HUD callout opens with
+    //   if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
+    // so carrying one is exactly what earns a ship its name tag - and not
+    // carrying one is why OutskirtsMonster has never had a callout. Owner:
+    // "monsters don't get callout tags". Ships and carriers still do.
+    loadout: (kind === 'monster') ? null : { name: kind.toUpperCase() },
     chassis: { hullWidth: K.rad * 2, hullHeight: K.rad, hullLength: K.rad * 2.4,
                flightSpeed: spd },
     collisionRadius: K.rad, shipState: 'flying', doomed: false,
@@ -129078,15 +129296,21 @@ function _lssEarthLifeTick(dt) {
     // its child. Rather than chase each of those, refuse to keep an entity that
     // has no visible mesh after a couple of seconds. Costs one traverse per
     // entity only until its body is confirmed, then nothing.
-    if (!e._bodyOk) {
-      // ⚠ "visible" IS NOT "drawing". The first cut of this guard only counted
-      // meshes with o.visible true, and that misses the case the owner actually
-      // hit: "tag is there, can shoot the ship and see the smoke, but the glb is
-      // not there". The entity was whole - collision, damage, hit FX all fine -
-      // so the hull was present and simply rendering nothing. A mesh with no
-      // material, or one collapsed to no size, passes every visibility test and
-      // draws nothing at all. Check for those too, and SAY WHICH, so the cause
-      // is named the next time rather than guessed at.
+    // ⚠ CHECKED ON A CADENCE, NOT ONCE. The v45.72/74 guard latched `_bodyOk`
+    // after the first good frame and never looked again - so it could only ever
+    // catch a hull that was broken AT BIRTH. The owner kept seeing them anyway
+    // ("just saw a ship without a body"), which says a hull can also go missing
+    // LATER: these are clones of SHARED hoard protos, and geometry is shared
+    // with the proto, so anything that disposes one out from under us empties
+    // every clone at once while the entity carries on working.
+    // "visible" is still not "drawing": a mesh with no material, or one
+    // collapsed to no size, passes every visibility test and renders nothing -
+    // "tag is there, can shoot the ship and see the smoke, but the glb is not
+    // there". Two consecutive bad checks retire it, so one odd frame mid-clone
+    // cannot kill a ship that was about to draw.
+    e._bodyT = (e._bodyT || 0) - dt;
+    if (e._bodyT <= 0) {
+      e._bodyT = 2.0 + Math.random();   // staggered, so they never all check together
       let _vis = 0, _noMat = 0;
       e.mesh.traverse((o) => {
         if (!o.isMesh || !o.visible) return;
@@ -129104,12 +129328,12 @@ function _lssEarthLifeTick(dt) {
           }
         } catch (_) { _span = 0; }
       }
-      // The span bar is deliberately LOW (2 units against hulls of 150-3000).
-      // It is here to catch a collapse to nothing, not to judge size - a
-      // skinned clone measured in bind space can read oddly without being
-      // broken, and retiring a ship that was going to draw is the worse error.
-      if (_vis > 0 && _noMat === 0 && _span > 2) e._bodyOk = true;
-      else if ((e._bodyT = (e._bodyT || 0) + dt) > 2) {
+      // The span bar is deliberately LOW (hulls run 150-3000 units). It is here
+      // to catch a collapse to nothing, not to judge size - retiring a ship that
+      // was going to draw is the worse error.
+      if (_vis > 0 && _noMat === 0 && _span > 2) { e._bodyBad = 0; }
+      else if ((e._bodyBad = (e._bodyBad || 0) + 1) >= 2) {
+        _LSS_EL.retired = (_LSS_EL.retired || 0) + 1;
         console.warn('[earth-life] retiring bodyless ' + e.earthKind + ' ' + e.id +
                      ' (visibleMeshes ' + _vis + ', noMaterial ' + _noMat +
                      ', span ' + Math.round(_span) + ')');
@@ -129121,6 +129345,9 @@ function _lssEarthLifeTick(dt) {
       // A slow heading wander, so they read as roaming rather than commuting.
       e._head += (Math.random() - 0.5) * dt * 0.9;
       e.velocity.set(Math.sin(e._head) * e._spd, e.velocity.y, Math.cos(e._head) * e._spd);
+      // ...and the walk cycle.
+      const _mx = e.mesh.userData.elMixer;
+      if (_mx) { try { _mx.update(dt); } catch (_) {} }
     }
     e._bob += dt * (e.earthKind === 'carrier' ? 0.25 : 0.7);
     e.position.x += e.velocity.x * dt;
@@ -129131,8 +129358,10 @@ function _lssEarthLifeTick(dt) {
     // Banff is immediately.
     let gy = 0;
     try { const v = t.groundYWorld(e.position.x, e.position.z); if (isFinite(v)) gy = v; } catch (_) {}
-    const wantY = gy + e._alt + Math.sin(e._bob) * (e.earthKind === 'carrier' ? 40 : 18);
-    e.position.y += (wantY - e.position.y) * Math.min(1, dt * 1.6);
+    // A walker sticks to the ground it is over; only the fliers bob and ease.
+    const _walks = (e.earthKind === 'monster');
+    const wantY = gy + e._alt + (_walks ? 0 : Math.sin(e._bob) * (e.earthKind === 'carrier' ? 40 : 18));
+    e.position.y += (wantY - e.position.y) * Math.min(1, dt * (_walks ? 6.0 : 1.6));
     if (e.position.y < gy + K.clear) e.position.y = gy + K.clear;
 
     e.mesh.position.copy(e.position);
@@ -129155,7 +129384,9 @@ function _lssEarthLifeTick(dt) {
           if (ch.geometry) ch.geometry.dispose();
           if (ch.material && ch.material.dispose) ch.material.dispose();
         }
-        e.mesh.add(_elFit(_LSS_EL.carrier.clone(true), 2600));
+        const _ch = _elFit(_elCloneRigged(_LSS_EL.carrier), 2600);
+        _ch.rotation.y = Math.PI / 2;   // see _elMesh: the hull is X-long
+        e.mesh.add(_ch);
         e.mesh.userData.elPlaceholder = false;
       } catch (_) {}
       break;
@@ -129753,6 +129984,14 @@ class LSSEarthTiles {
         this._baseH = 0;
         this._baseH = (typeof this.forceBaseH === 'number')
           ? this.forceBaseH : this._sampleRing(g, 0, 0);
+        // Now that the grid has its world bounds AND the datum is set, the
+        // river/lake surface stashed during the carve can actually be built.
+        const _plw = this._pendingLocalWater;
+        this._pendingLocalWater = null;
+        if (_plw) {
+          try { this._buildLocalWater(g, _plw.wet, _plw.surface, _plw.w, _plw.h); }
+          catch (e) { console.warn('[lss-earth] local water failed:', e); }
+        }
       }
     }
     this.stats.rings = this._grids.length;
@@ -129822,7 +130061,38 @@ class LSSEarthTiles {
     let level = (k === 0) ? null : this._waterLevelRaw;
     if (k === 0) {
       if (typeof this.forceWaterLevel === 'number') level = this.forceWaterLevel;
-      else if (domC >= heights.length * 0.01) level = domV;
+      // ⚠ THE DOMINANCE BAR DEPENDS ON WHAT THIS PATCH OWNS.
+      // Owner, in Banff: "do the maps not come with river/water data? banff
+      // river here is missing water". They do - measured in this very patch,
+      // the Bow and the Vermilion Lakes sit at bit-exact 1378.5 / 1379.0 /
+      // 1379.5 m across 8,381 + 7,300 + 7,615 texels. What rejected them was
+      // this line: 1% of the grid is 16,384 texels and the biggest cluster is
+      // 0.512%, so no level was ever chosen and `_hasSea` stayed false.
+      // 1% is the right bar for the HORIZON patch, because that one owns the
+      // single global water plane and must only ever trigger on a sea or a
+      // great lake - promoting a river there would put a 46 km plane at the
+      // river's height and drown the valley downstream of it.
+      // A near patch owns nothing but its own 2.6 km of ground and now draws
+      // its own local surface (see _buildLocalWater), so it can afford to be an
+      // order of magnitude more sensitive.
+      // ⚠ BACK TO 1% FOR BOTH (v45.92). v45.83 dropped the NEAR-patch bar to
+      // 0.12% so Banff's river would be detected - and it was, correctly: the
+      // Bow and the Vermilion Lakes are in the DEM as bit-exact 1378.5 / 1379.0
+      // / 1379.5 m surfaces. Detection was never the problem. What the sensitive
+      // bar bought was a CARVED river bed that `_buildLocalWater` then had to
+      // fill, and that sheet is not good enough: owner, "the rivers at banff
+      // didn't work to get water... and the lake is partially covered, looks
+      // like boxy covering". A 4-texel-decimated grid of axis-aligned quads,
+      // clipped to the patch's own cell, reads as boxes and holes - and a
+      // detected-but-unfilled body is WORSE than an undetected one, because the
+      // bed is dug out and left dry.
+      // Doing this properly needs a per-BODY surface (connected components, one
+      // level each, a real shoreline and the water shader rather than a flat
+      // translucent sheet), not a lower threshold. Until then, back to the bar
+      // that only promotes a sea or a great lake, which is what the single
+      // global plane can actually draw.
+      // window.__earthRivers = 1 re-enables the experiment; see _buildLocalWater.
+      else if (domC >= heights.length * ((this.water || !(typeof window !== 'undefined' && window.__earthRivers)) ? 0.01 : 0.0012)) level = domV;
     }
     if (level !== null && level !== undefined) {
       // ⚠ THE BAND WAS TOO GENEROUS AND IT ATE THE CITY. This used to admit every
@@ -129933,6 +130203,20 @@ class LSSEarthTiles {
         const surface = (typeof this.forceWaterLevel === 'number') ? this.forceWaterLevel : level;
         for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = surface - D * Math.min(1, amt[i] * 1.25);
         this._hasSea = true;
+        // A body the horizon patch does not know about gets a LOCAL surface:
+        // the one global plane is at sea level and a mountain river is 1,380 m
+        // up, so nothing else is going to draw it.
+        // ⚠ STASHED, NOT BUILT, HERE. Two things this needs do not exist yet at
+        // this point in _fetchDemRing: the ring's grid OBJECT (with its X0/X1/
+        // Z0/Z1 world bounds) is assembled by the `return` at the bottom of this
+        // function, and `_baseH` - which converts the body's raw DEM metres into
+        // a local Y - is not assigned until the ring-0 block in _loadDEM. The
+        // first cut called the builder straight from here and got exactly what
+        // that deserves: "local water failed: ReferenceError: g is not defined".
+        if (k === 0 && !this.water && typeof this.forceWaterLevel !== 'number' &&
+            (typeof window !== 'undefined' && window.__earthRivers)) {
+          this._pendingLocalWater = { wet, surface, w, h };
+        }
         if (k === 0) this._waterLevelRaw = surface;
         if (k === 0) this.stats.seaPct = Math.round(1000 * nWet / heights.length) / 10;
         if (k === 0) this.stats.waterLevelM = Math.round(surface * 100) / 100;
@@ -129945,6 +130229,86 @@ class LSSEarthTiles {
     const nw = this.project(nLat, wLng), se = this.project(sLat, eLng);
     return { heights, w, h, x0, y0, z, n, X0: nw.x, X1: se.x, Z0: nw.z, Z1: se.z,
              img: null, tex: null };
+  }
+
+  /** Ramp a freshly built river/lake surface up to full. See _buildLocalWater. */
+  localWaterTick(dt) {
+    const m = this._localWater;
+    if (!m || !m.material) return;
+    const f = m.userData.elFade;
+    if (typeof f !== 'number' || f >= 1) return;
+    const nf = Math.min(1, f + (dt || 0.016) / 1.2);
+    m.userData.elFade = nf;
+    m.material.opacity = 0.82 * (nf * nf * (3 - 2 * nf));
+  }
+
+  /**
+   * A flat surface over this patch's OWN water body, at its OWN elevation.
+   *
+   * The LSS water plane is global and single-level - one mesh, one height - and
+   * that is right for a sea. It cannot draw a mountain river, which sits 1,380 m
+   * above sea level and descends as it goes. So a near patch that detected a
+   * body the horizon patch knows nothing about draws it here instead: a plain
+   * translucent sheet over the wet mask, at the body's own flattened height.
+   *
+   * ⚠ CLIPPED TO THIS PATCH'S OWN CELL. Ring 0 spans ~3,835 m against a 2,600 m
+   * cell, so neighbouring patches overlap - and two translucent sheets at
+   * slightly different river heights would z-fight along every seam. Emitting
+   * only within the patch's own half-extent tiles them edge to edge instead.
+   *
+   * Decimated by STEP texels: a river is a fraction of a percent of the grid, so
+   * this is a few hundred quads, not a few hundred thousand.
+   */
+  _buildLocalWater(g, wet, surface, w, h) {
+    if (typeof THREE === 'undefined') return;
+    const y = (surface - this._baseH) * this.heightScale;
+    const STEP = 4;
+    const half = (this.extentMetres || 2600) * 0.5;
+    const c = this.project(this.lat, this.lng);
+    const pos = [], idx = [];
+    let n = 0;
+    const sx = (g.X1 - g.X0) / w, sz = (g.Z1 - g.Z0) / h;
+    for (let py = 0; py + STEP < h; py += STEP) {
+      for (let px = 0; px + STEP < w; px += STEP) {
+        if (!wet[py * w + px]) continue;
+        const x0 = g.X0 + px * sx, x1 = x0 + STEP * sx;
+        const z0 = g.Z0 + py * sz, z1 = z0 + STEP * sz;
+        if (x1 < c.x - half || x0 > c.x + half) continue;
+        if (z1 < c.z - half || z0 > c.z + half) continue;
+        pos.push(x0, y, z0, x1, y, z0, x1, y, z1, x0, y, z1);
+        idx.push(n, n + 2, n + 1, n, n + 3, n + 2);
+        n += 4;
+      }
+    }
+    if (!idx.length) {
+      console.warn('[lss-earth] local water: no quads.',
+                   'wetTexels', (() => { let n = 0; for (let i = 0; i < wet.length; i++) if (wet[i]) n++; return n; })(),
+                   'grid', w + 'x' + h, 'clipHalf', Math.round(half),
+                   'centre', Math.round(c.x) + ',' + Math.round(c.z),
+                   'bounds', Math.round(g.X0) + '..' + Math.round(g.X1));
+      return;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x2e5a7a, transparent: true, opacity: 0,
+      roughness: 0.12, metalness: 0.32,
+      side: THREE.DoubleSide, depthWrite: false,
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.name = 'earth-localwater';
+    mesh.renderOrder = 1;
+    this.group.add(mesh);
+    // ⭐ FADE IT IN. On ARRIVAL this is invisible anyway - the curtain holds
+    // until the core patches are built, measured at Banff as water up at 12.0 s
+    // against a lift at 17.9 s. But a patch that completes while you are FLYING
+    // adds its river in one frame, at full opacity, in open view - owner: "i saw
+    // it pop in". Born at 0 and ramped by localWaterTick.
+    mesh.userData.elFade = 0;
+    this._localWater = mesh;
+    this.stats.localWaterQuads = n / 4;
   }
 
   /** Bilinear sample of ONE ring's grid, in that ring's own tile space. */
@@ -131615,7 +131979,13 @@ class LSSEarthWorld {
     for (const p of this._patches.values()) p.setWindowGlow(v);
     if (this._far) this._far.setWindowGlow(v);
   }
-  waterTick(dt) { if (this._far) this._far.waterTick(dt); }
+  waterTick(dt) {
+    if (this._far) this._far.waterTick(dt);
+    // The near patches carry the rivers and lakes the global plane cannot reach.
+    for (const p of this._patches.values()) {
+      if (typeof p.localWaterTick === 'function') p.localWaterTick(dt);
+    }
+  }
   buildWater() { return this._far ? this._far.buildWater() : false; }
 
   dispose() {
@@ -132079,6 +132449,7 @@ async function _lssGmapsBuildLevel(level) {
     // mirrors; unbounded, that is ~30 s of frozen loading screen for a layer
     // that is allowed to fail. Race it against a timeout and let the rest
     // stream in if it loses — the terrain and water are already up by then.
+    _lssGmaps._spawnPlaced = false;   // the curtain waits on this; see hideLoadingOverlay
     try {
       await Promise.race([
         tiles.ready,
@@ -132115,6 +132486,9 @@ async function _lssGmapsBuildLevel(level) {
         }
       }
     } catch (e) { console.warn('[lss-earth] spawn points failed:', e); }
+    // Set even when the placement could not happen: the curtain must never hang
+    // on a step that is allowed to fail.
+    _lssGmaps._spawnPlaced = true;
   } catch (e) {
     console.error('[lss-gmaps] failed to initialize tiles:', e);
     alert('Failed to initialize Google Maps tiles: ' + e.message + "\nCheck your API key and that the Map Tiles API is enabled on your Google Cloud project.");
