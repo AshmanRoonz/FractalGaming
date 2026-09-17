@@ -5384,6 +5384,7 @@ function selectMap(mapKey, opts) {
     const _isG = (mapData.type === 'gmaps');
     if (_gpanel) {
       _gpanel.style.display = _isG ? 'flex' : 'none';
+      if (_isG) { try { _lssGmapsSyncRacePanel(); } catch (_) {} }
       const _win = document.getElementById('map-window');
       const _host = document.getElementById('map-select');
       if (_isG && _win && _gpanel.parentNode !== _win) _win.appendChild(_gpanel);
@@ -28904,16 +28905,20 @@ function _wxDispose() {
 function _wxFrame(dt) {
   if (!_WX.on) return;
   const camP = camera.position;
+  const _wxK = (typeof _WX.distMul === 'number' && _WX.distMul > 0) ? _WX.distMul : 1;
+  if (_WX.dome.scale.x !== _wxK) _WX.dome.scale.setScalar(_wxK);
   _WX.dome.position.copy(camP);
   const sd = _WX.sunDir;
   try { if (_swU && _swU.uSunDir) _swU.uSunDir.value.copy(sd); } catch (_) {}   // (v44.45) the terrain relief lights from the real sun
-  _WX.sunDisc.position.set(camP.x + sd.x * 17500, camP.y + sd.y * 17500, camP.z + sd.z * 17500);
+  const _sunD = 17500 * _wxK;
+  if (_WX.sunDisc.scale.x !== _wxK) { _WX.sunDisc.scale.setScalar(_wxK); _WX.sunHalo.scale.setScalar(_wxK); }
+  _WX.sunDisc.position.set(camP.x + sd.x * _sunD, camP.y + sd.y * _sunD, camP.z + sd.z * _sunD);
   _WX.sunHalo.position.copy(_WX.sunDisc.position);
   if (_WX.bow) {
     const bd = _wxBowDir.set(-sd.x, 0, -sd.z).normalize();
     bd.y = -0.14; bd.normalize();
     const D = 9000;
-    _WX.bow.position.set(camP.x + bd.x * D, camP.y + bd.y * D, camP.z + bd.z * D);
+    _WX.bow.position.set(camP.x + bd.x * D * _wxK, camP.y + bd.y * D * _wxK, camP.z + bd.z * D * _wxK);
     _WX.bow.lookAt(camP.x, camP.y, camP.z);
     _WX.bow.scale.setScalar(D * 0.9);
     try {
@@ -64186,6 +64191,7 @@ function _lssRenderLobbyMode() {
 function _lssStepRoomMode(dir) {
   try {
     if (_lssRoomModeLocked()) return;
+    setTimeout(() => { try { _lssGmapsSyncRacePanel(); } catch (_) {} }, 0);
     const list = _LSS_PICKABLE_MODES;
     let i = list.indexOf(_lssRoomTag());
     if (i < 0) i = 0;
@@ -86520,6 +86526,9 @@ class LSSEarthTiles {
     this.lateralPadFactor = opts.lateralPadFactor ?? 0.30;
     this.seaDepth        = opts.seaDepth        ?? 34;
     this.water           = opts.water           ?? true;
+    this.buildingExtentMul  = opts.buildingExtentMul  ?? 2.2;   // see _loadBuildings
+    this.farBuildingMinH    = opts.farBuildingMinH    ?? 26;    // metres, beyond the core ring
+    this.podWidenMul        = opts.podWidenMul        ?? 1.9;   // see the pod note in _extrudeBuilding
     this.overpassUrl     = opts.overpassUrl     ?? 'https://overpass-api.de/api/interpreter';
     this.overpassMirrors = opts.overpassMirrors ?? [
       'https://overpass.kumi.systems/api/interpreter',
@@ -86543,6 +86552,7 @@ class LSSEarthTiles {
     this._bldList = [];
     this._cgrid = null;
     this._hasSea = false;
+    this._waterLevelRaw = null;   // the body's own elevation, NOT assumed to be 0
     this._adPanels = [];
     this.ready = null;
     this.stats = { buildings: 0, demTiles: 0, imgTiles: 0, ads: 0, ms: 0 };
@@ -86763,17 +86773,6 @@ class LSSEarthTiles {
     const c = g.heights[i + g.w], d = g.heights[i + g.w + 1];
     return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
   }
-  _chunkOf(x, z) {
-    const b = this._bounds, D = this.chunkDivisions;
-    const i = Math.floor((x - b.X0) / (b.X1 - b.X0) * D);
-    const j = Math.floor((z - b.Z0) / (b.Z1 - b.Z0) * D);
-    if (i < 0 || j < 0 || i >= D || j >= D) return -1;
-    return j * D + i;
-  }
-  _uv(x, z) {
-    const b = this._bounds;
-    return { u: (x - b.X0) / (b.X1 - b.X0), v: 1 - (z - b.Z0) / (b.Z1 - b.Z0) };
-  }
   _progress(msg, frac) {
     if (this.onProgress) { try { this.onProgress(msg, frac); } catch (_) {} }
   }
@@ -86883,37 +86882,52 @@ class LSSEarthTiles {
     if (got === 0) return null;
     this.stats.demTiles = (this.stats.demTiles || 0) + got;
 
-    const wet = new Uint8Array(w * h);
-    let nWet = 0;
-    for (let i = 0; i < heights.length; i++) { if (heights[i] === 0) { wet[i] = 1; nWet++; } }
-    if (nWet > heights.length * 0.004) {
-      let amt = new Float32Array(w * h);
-      for (let i = 0; i < wet.length; i++) amt[i] = wet[i];
-      const tmp = new Float32Array(w * h);
-      const R = 3;
-      for (let pass = 0; pass < 2; pass++) {
-        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-          let sum = 0, n2 = 0;
-          for (let k = -R; k <= R; k++) {
-            const xx = x + k; if (xx < 0 || xx >= w) continue;
-            sum += amt[y * w + xx]; n2++;
-          }
-          tmp[y * w + x] = sum / n2;
-        }
-        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-          let sum = 0, n2 = 0;
-          for (let k = -R; k <= R; k++) {
-            const yy = y + k; if (yy < 0 || yy >= h) continue;
-            sum += tmp[yy * w + x]; n2++;
-          }
-          amt[y * w + x] = sum / n2;
-        }
+    const hist = new Map();
+    for (let i = 0; i < heights.length; i++) hist.set(heights[i], (hist.get(heights[i]) || 0) + 1);
+    let domV = 0, domC = 0;
+    for (const [v, c] of hist) if (c > domC) { domC = c; domV = v; }
+    let level = (k === 0) ? null : this._waterLevelRaw;
+    if (k === 0 && domC >= heights.length * 0.01) level = domV;
+    if (level !== null && level !== undefined) {
+      const levels = new Set();
+      for (const [v, c] of hist) {
+        if (Math.abs(v - level) <= 2.0 && c >= heights.length * 0.0002) levels.add(v);
       }
-      const D = this.seaDepth;
-      for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = -D * Math.min(1, amt[i] * 1.25);
-      this._hasSea = true;
-      this.stats.seaPct = Math.round(1000 * nWet / heights.length) / 10;
+      const wet = new Uint8Array(w * h);
+      let nWet = 0;
+      for (let i = 0; i < heights.length; i++) { if (levels.has(heights[i])) { wet[i] = 1; nWet++; } }
+      if (nWet > heights.length * 0.004) {
+        let amt = new Float32Array(w * h);
+        for (let i = 0; i < wet.length; i++) amt[i] = wet[i];
+        const tmp = new Float32Array(w * h);
+        const R = 3;
+        for (let pass = 0; pass < 2; pass++) {
+          for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+            let sum = 0, n2 = 0;
+            for (let q = -R; q <= R; q++) {
+              const xx = x + q; if (xx < 0 || xx >= w) continue;
+              sum += amt[y * w + xx]; n2++;
+            }
+            tmp[y * w + x] = sum / n2;
+          }
+          for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+            let sum = 0, n2 = 0;
+            for (let q = -R; q <= R; q++) {
+              const yy = y + q; if (yy < 0 || yy >= h) continue;
+              sum += tmp[yy * w + x]; n2++;
+            }
+            amt[y * w + x] = sum / n2;
+          }
+        }
+        const D = this.seaDepth;
+        for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = level - D * Math.min(1, amt[i] * 1.25);
+        this._hasSea = true;
+        if (k === 0) this._waterLevelRaw = level;
+        if (k === 0) this.stats.seaPct = Math.round(1000 * nWet / heights.length) / 10;
+        if (k === 0) this.stats.waterLevelM = Math.round(level * 10) / 10;
+      }
     }
+
     const nLat = _leTileYToLat(y0, z), sLat = _leTileYToLat(y0 + n, z);
     const wLng = _leTileXToLng(x0, z), eLng = _leTileXToLng(x0 + n, z);
     const nw = this.project(nLat, wLng), se = this.project(sLat, eLng);
@@ -87015,7 +87029,7 @@ class LSSEarthTiles {
   _uv(x, z) { return this._uvIn(this._grids[0], x, z); }
 
   _chunkOf(x, z) {
-    const b = this._bounds, D = this.chunkDivisions;
+    const b = this._bldBounds || this._bounds, D = this.chunkDivisions;
     const i = Math.floor((x - b.X0) / (b.X1 - b.X0) * D);
     const j = Math.floor((z - b.Z0) / (b.Z1 - b.Z0) * D);
     if (i < 0 || j < 0 || i >= D || j >= D) return -1;
@@ -87096,7 +87110,8 @@ class LSSEarthTiles {
 
   seaLevelWorld() {
     const s = (this.group.scale && this.group.scale.x) || 1;
-    return ((0 - this._baseH) * this.heightScale) * s + this.group.position.y;
+    const L = (typeof this._waterLevelRaw === 'number') ? this._waterLevelRaw : 0;
+    return ((L - this._baseH) * this.heightScale) * s + this.group.position.y;
   }
 
   /**
@@ -87165,7 +87180,17 @@ class LSSEarthTiles {
       }
       this._progress('buildings: querying Overpass (try ' + (attempt + 1) + '/' + backoff.length + ')...', 0.6);
       try {
-        const resp = await fetch(this.overpassUrl, { method: 'POST', body: query, signal: this._abort.signal });
+        const _c = new AbortController();
+        const _to = setTimeout(() => _c.abort(), 30000);
+        const _onAbort = () => _c.abort();
+        this._abort.signal.addEventListener('abort', _onAbort);
+        let resp;
+        try {
+          resp = await fetch(this.overpassUrl, { method: 'POST', body: query, signal: _c.signal });
+        } finally {
+          clearTimeout(_to);
+          this._abort.signal.removeEventListener('abort', _onAbort);
+        }
         if (resp.ok) return await resp.json();
         lastErr = new Error('Overpass HTTP ' + resp.status +
           ((resp.status === 429 || resp.status === 504) ? ' (rate-limited)' : ''));
@@ -87209,10 +87234,26 @@ class LSSEarthTiles {
   async _loadBuildings() {
     const g = this._grid;
     const nx = Math.round(g.w / 256);
-    const s = _leTileYToLat(g.y0 + nx, g.z), n = _leTileYToLat(g.y0, g.z);
-    const w = _leTileXToLng(g.x0, g.z), e = _leTileXToLng(g.x0 + nx, g.z);
-    const q = '[out:json][timeout:30];way["building"](' + s + ',' + w + ',' + n + ',' + e + ');out geom;';
-    const key = s.toFixed(5) + ',' + w.toFixed(5) + ',' + n.toFixed(5) + ',' + e.toFixed(5);
+    const _bm = Math.max(1, this.buildingExtentMul);
+    const _pad = (nx * (_bm - 1)) / 2;
+    const s = _leTileYToLat(g.y0 + nx + _pad, g.z), n = _leTileYToLat(g.y0 - _pad, g.z);
+    const w = _leTileXToLng(g.x0 - _pad, g.z), e = _leTileXToLng(g.x0 + nx + _pad, g.z);
+    const cs = _leTileYToLat(g.y0 + nx, g.z), cn2 = _leTileYToLat(g.y0, g.z);
+    const cw = _leTileXToLng(g.x0, g.z), ce = _leTileXToLng(g.x0 + nx, g.z);
+    {
+      const b0 = this._bounds;
+      const cx = (b0.X0 + b0.X1) / 2, cz = (b0.Z0 + b0.Z1) / 2;
+      const hw = (b0.X1 - b0.X0) * _bm / 2, hz = (b0.Z1 - b0.Z0) * _bm / 2;
+      this._bldBounds = { X0: cx - hw, X1: cx + hw, Z0: cz - hz, Z1: cz + hz };
+    }
+    const core = '(' + cs + ',' + cw + ',' + cn2 + ',' + ce + ')';
+    const wide = '(' + s + ',' + w + ',' + n + ',' + e + ')';
+    const q = '[out:json][timeout:60];('
+      + 'way["building"]' + core + ';'
+      + 'way["building:part"]' + core + ';'
+      + 'way["building"](if:number(t["height"])>=' + this.farBuildingMinH + ')' + wide + ';'
+      + ');out geom;';
+    const key = 'v2:' + s.toFixed(5) + ',' + w.toFixed(5) + ',' + n.toFixed(5) + ',' + e.toFixed(5);
 
     let data = await _leCacheGet(key);
     if (data) { this.stats.osmCached = true; this._progress('buildings: from cache', 0.8); }
@@ -87223,7 +87264,60 @@ class LSSEarthTiles {
     }
     if (this._disposed) return;
 
-    const ways = (data.elements || []).filter((el) => el.type === 'way' && el.geometry);
+    const _seen = new Set();
+    const all = (data.elements || []).filter((el) => {
+      if (el.type !== 'way' || !el.geometry) return false;
+      if (_seen.has(el.id)) return false;
+      _seen.add(el.id); return true;
+    });
+    const parts = [], outlines = [];
+    for (const el of all) {
+      const t = el.tags || {};
+      if (t['building:part'] && t['building:part'] !== 'no') parts.push(el); else outlines.push(el);
+    }
+    const suppressed = new Set();
+    if (parts.length) {
+      const CELL = 200;
+      const idx = new Map();
+      const keyOf = (x, z) => ((x / CELL) | 0) + ':' + ((z / CELL) | 0);
+      const ringOf = (el) => {
+        const r = [];
+        for (let i = 0; i < el.geometry.length - 1; i++) {
+          const gg = el.geometry[i]; if (!gg) continue;
+          const pr = this.project(gg.lat, gg.lon); r.push(pr.x, -pr.z);
+        }
+        return r;
+      };
+      for (const el of outlines) {
+        const r = ringOf(el); if (r.length < 6) continue;
+        el.__ring = r;
+        let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        for (let i = 0; i < r.length; i += 2) {
+          if (r[i] < x0) x0 = r[i]; if (r[i] > x1) x1 = r[i];
+          if (-r[i + 1] < z0) z0 = -r[i + 1]; if (-r[i + 1] > z1) z1 = -r[i + 1];
+        }
+        for (let cx = (x0 / CELL) | 0; cx <= ((x1 / CELL) | 0); cx++) {
+          for (let cz = (z0 / CELL) | 0; cz <= ((z1 / CELL) | 0); cz++) {
+            const k2 = cx + ':' + cz;
+            if (!idx.has(k2)) idx.set(k2, []);
+            idx.get(k2).push(el);
+          }
+        }
+      }
+      for (const pt of parts) {
+        const r = ringOf(pt); if (r.length < 6) continue;
+        let sx = 0, sz = 0;
+        for (let i = 0; i < r.length; i += 2) { sx += r[i]; sz += r[i + 1]; }
+        sx /= (r.length / 2); sz /= (r.length / 2);
+        const cands = idx.get(keyOf(sx, -sz)) || [];
+        for (const el of cands) {
+          if (_lePointInPoly(el.__ring, sx, sz)) { suppressed.add(el); break; }
+        }
+      }
+    }
+    const ways = outlines.filter((el) => !suppressed.has(el)).concat(parts);
+    this.stats.parts = parts.length;
+    this.stats.suppressedOutlines = suppressed.size;
     this._progress('buildings: extruding ' + ways.length + '...', 0.85);
 
     const nChunks = this.chunkDivisions * this.chunkDivisions;
@@ -87298,6 +87392,9 @@ class LSSEarthTiles {
     }
     height = Math.min(height, 620);                 // Burj-proof
 
+    const b0 = this._bounds;
+    const isFar = (wx < b0.X0 || wx > b0.X1 || wz < b0.Z0 || wz > b0.Z1);
+    if (isFar && height < this.farBuildingMinH) return false;
     const chunk = this._chunkOf(wx, wz);
     if (chunk < 0) return false;
 
@@ -87307,8 +87404,28 @@ class LSSEarthTiles {
       if (gy < lowY) lowY = gy;
     }
     const groundY = this.heightAt(wx, wz);
-    const baseY = Math.min(lowY, groundY);
+    let baseY = Math.min(lowY, groundY);
     height += (groundY - baseY);
+    const _minH = (() => {
+      const mh = parseFloat(tags.min_height);
+      if (isFinite(mh) && mh > 0) return mh;
+      const ml = parseFloat(tags['building:min_level']);
+      return (isFinite(ml) && ml > 0) ? ml * 3.2 : 0;
+    })();
+    if (_minH > 0) {
+      baseY = groundY + _minH;
+      height = Math.max(1, (groundY + height) - baseY);
+      let _w0 = Infinity, _w1 = -Infinity, _h0 = Infinity, _h1 = -Infinity;
+      for (const q of pts) {
+        if (q.x < _w0) _w0 = q.x; if (q.x > _w1) _w1 = q.x;
+        if (q.y < _h0) _h0 = q.y; if (q.y > _h1) _h1 = q.y;
+      }
+      const _span = Math.max(_w1 - _w0, _h1 - _h0);
+      if (_span > 0 && height < _span && this.podWidenMul > 1) {
+        const k = this.podWidenMul;
+        for (const q of pts) { q.x = cx + (q.x - cx) * k; q.y = cz + (q.y - cz) * k; }
+      }
+    }
 
     let bx0 = Infinity, bx1 = -Infinity, bz0 = Infinity, bz1 = -Infinity;
     for (const p of pts) {
@@ -87372,10 +87489,16 @@ class LSSEarthTiles {
     for (let t = 0; t < tris; t++) {
       const o = t * 9;
       const y0 = pos[o + 1], y1 = pos[o + 4], y2 = pos[o + 7];
-      if (y0 > topY && y1 > topY && y2 > topY) {
+      if (y0 > topY && y1 > topY && y2 > topY && !isFar) {
         for (let k = 0; k < 9; k++) rp.push(pos[o + k]);
       } else if (y0 < botY && y1 < botY && y2 < botY) {
-        continue;
+        if (_minH <= 0) continue;
+        for (let k = 0; k < 9; k++) wp.push(pos[o + k]);
+        for (let v = 0; v < 3; v++) {
+          const vx = pos[o + v * 3], vy = pos[o + v * 3 + 1], vz = pos[o + v * 3 + 2];
+          wf.push(uAt(vx, vz), vy - baseY, rnd, height);
+          wc.push(cr * 0.5, cg * 0.5, cb * 0.5);
+        }
       } else {
         for (let k = 0; k < 9; k++) wp.push(pos[o + k]);
         for (let v = 0; v < 3; v++) {
@@ -87656,7 +87779,9 @@ async function _lssGmapsBuildLevel(level) {
 
   if (game.pendingRaceRoute && LSS.MODE === 'race') {
     const rr = game.pendingRaceRoute;
-    const fin = _raceLatLngToWorldXZ(rr.start.lat, rr.start.lng, rr.finish.lat, rr.finish.lng);
+    const _raceScale = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7;
+    const _finM = _raceLatLngToWorldXZ(rr.start.lat, rr.start.lng, rr.finish.lat, rr.finish.lng);
+    const fin = { x: _finM.x * _raceScale, z: _finM.z * _raceScale };
     const dist = Math.sqrt(fin.x * fin.x + fin.z * fin.z);
     const len = Math.max(1, dist);
     const ux = fin.x / len, uz = fin.z / len;
@@ -87772,11 +87897,17 @@ async function _lssGmapsBuildLevel(level) {
     _lssGmaps.lng = level.lng;
     try { if (typeof setSky === 'function') setSky(level.sky || 'cyberpunk'); } catch (_) {}
     try { if (typeof _wxInit === 'function') _wxInit(null); } catch (e) { console.warn('[lss-earth] weather init failed:', e); }
+    try {
+      const _far = (tiles.stats && tiles.stats.farUnits) || 20000;
+      const _cap = (typeof camera !== 'undefined' && camera && camera.far) ? camera.far * 0.92 : 1e9;
+      _WX.distMul = Math.max(1, Math.min(8, Math.min(_far * 1.35, _cap) / 20500));
+    } catch (_) {}
     try { _lssEarthNightLights(true); } catch (_) {}
     _lssGmaps.cleanup = () => {
       try { scene.remove(tiles.group); } catch(_) {}
       try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
       try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}
+      try { _WX.distMul = 1; } catch (_) {}
       try { if (typeof _wxDispose === 'function') _wxDispose(); } catch (_) {}
       try { _lssEarthNightLights(false); } catch (_) {}
       try { if (typeof clearSky === 'function') clearSky(); } catch (_) {}
@@ -87794,6 +87925,12 @@ async function _lssGmapsBuildLevel(level) {
       }
     }, 1000);
     try { _lssGmapsRefinePivot(); } catch(_) {}
+    try {
+      await Promise.race([
+        tiles.ready,
+        new Promise((r) => setTimeout(r, (typeof level.loadTimeoutMs === 'number') ? level.loadTimeoutMs : 25000))
+      ]);
+    } catch (_) {}
   } catch (e) {
     console.error('[lss-gmaps] failed to initialize tiles:', e);
     alert('Failed to initialize Google Maps tiles: ' + e.message + "\nCheck your API key and that the Map Tiles API is enabled on your Google Cloud project.");
@@ -87906,6 +88043,7 @@ function _lssGmapsTick(dt) {
     if (typeof t.update === 'function') t.update();
     if (typeof t.updateNight === 'function') t.updateNight(scene);
     if (typeof t.waterTick === 'function') t.waterTick(dt);
+    try { if (typeof _wxFrame === 'function') _wxFrame(dt); } catch (_) {}
   } catch (_) {  }
   if (t.group && t.group.children && t.group.children.length > 0) {
     t.group.traverse((c) => {
@@ -88255,17 +88393,38 @@ function _lssGmapsSetScaleLive(n) {
   console.log('[lss-gmaps] world scale ->', n);
 }
 function _buildRaceCustomMap(startGeo, finishGeo) {
+  const _d2r = Math.PI / 180, _R = 6371000;
+  let _routeM = 0;
+  try {
+    const dLat = (finishGeo.lat - startGeo.lat) * _d2r, dLng = (finishGeo.lng - startGeo.lng) * _d2r;
+    const hav = Math.sin(dLat / 2) ** 2 +
+                Math.cos(startGeo.lat * _d2r) * Math.cos(finishGeo.lat * _d2r) * Math.sin(dLng / 2) ** 2;
+    _routeM = 2 * _R * Math.asin(Math.sqrt(hav));
+  } catch (_) { _routeM = 0; }
   return {
     type: 'gmaps',
     name: 'Race ; ' + (startGeo.name || 'Start') + ' to ' + (finishGeo.name || 'Finish'),
     description: 'Free-flight race between two real-world locations. No walls ; just sky and city.',
     lat: startGeo.lat,
     lng: startGeo.lng,
-    scale: 1,
+    extentMetres: Math.max(2600, Math.min(8000, _routeM * 2.4)),
+    scale: 7,
     palette: [0x102030, 0x122838, 0x143040, 0x163848, 0x184050, 0x1a4858, 0x1c5060, 0x1e5868],
     rooms: [],
     tunnels: [],
   };
+}
+
+function _lssGmapsSyncRacePanel() {
+  try {
+    const on = (typeof LSS !== 'undefined') && LSS && LSS.MODE === 'race';
+    const lbl = document.getElementById('gmaps-overlay-label');
+    const fin = document.getElementById('gmaps-loc-finish-input');
+    const startInp = document.getElementById('gmaps-loc-input');
+    if (lbl) lbl.textContent = on ? 'RACE: START -> FINISH' : 'DROP ON LOCATION';
+    if (fin) fin.style.display = on ? '' : 'none';
+    if (startInp) startInp.placeholder = on ? 'Start location (e.g. Stanley Park)' : 'ENTER LOCATION NAME';
+  } catch (_) {}
 }
 
 function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {

@@ -14768,6 +14768,15 @@ function selectMap(mapKey, opts) {
     const _isG = (mapData.type === 'gmaps');
     if (_gpanel) {
       _gpanel.style.display = _isG ? 'flex' : 'none';
+      // (v45.46) ⚠ THE FINISH FIELD USED TO BE REVEALED BY A BUTTON THAT NO
+      // LONGER EXISTS. `#race-mode-toggle` was replaced by the ss-mode room
+      // carousel, but the only code that ever showed #gmaps-loc-finish-input
+      // and relabelled the panel to "RACE: START -> FINISH" still lives in that
+      // dead button's click handler, bound behind `if (raceBtn)` — which is
+      // now always false. So race mode over a custom location offered a START
+      // box and nothing else. Sync it from the mode itself, here, where the
+      // panel is shown.
+      if (_isG) { try { _lssGmapsSyncRacePanel(); } catch (_) {} }
       // (v43.33) ...AND IT LIVES INSIDE THE ORANGE BOX. Owner: "put the buttons and input box from
       // the custom location map box inside the orange box to replace 'Type a location in the DROP
       // panel and click GO, then LAUNCH.'"
@@ -48770,11 +48779,24 @@ function _wxDispose() {
 function _wxFrame(dt) {
   if (!_WX.on) return;
   const camP = camera.position;
+  // (v45.46) ⚠ THE SKY IS A 20,500-UNIT SPHERE AND THE SUN IS A BILLBOARD
+  // 17,500 UNITS AWAY. Both are sized for the hub, whose terrain reaches
+  // _swHubView()*_SW_CHUNK = 10,800 — comfortably inside them. A real-world
+  // level reaches 37k on a plain drop and ~95k on a long race, which puts the
+  // camera OUTSIDE the dome and the sun disc down among the buildings. Owner:
+  // "i also hit a blue wall that was the sky i guess, it was like a shell" and
+  // "in the spawn there seems to be a bright orb in the city". _WX.distMul
+  // pushes both out to match the world; it is 1 everywhere else, so the hub is
+  // byte-identical.
+  const _wxK = (typeof _WX.distMul === 'number' && _WX.distMul > 0) ? _WX.distMul : 1;
+  if (_WX.dome.scale.x !== _wxK) _WX.dome.scale.setScalar(_wxK);
   _WX.dome.position.copy(camP);
   // sun quads pinned at "infinity" along the light direction
   const sd = _WX.sunDir;
   try { if (_swU && _swU.uSunDir) _swU.uSunDir.value.copy(sd); } catch (_) {}   // (v44.45) the terrain relief lights from the real sun
-  _WX.sunDisc.position.set(camP.x + sd.x * 17500, camP.y + sd.y * 17500, camP.z + sd.z * 17500);
+  const _sunD = 17500 * _wxK;
+  if (_WX.sunDisc.scale.x !== _wxK) { _WX.sunDisc.scale.setScalar(_wxK); _WX.sunHalo.scale.setScalar(_wxK); }
+  _WX.sunDisc.position.set(camP.x + sd.x * _sunD, camP.y + sd.y * _sunD, camP.z + sd.z * _sunD);
   _WX.sunHalo.position.copy(_WX.sunDisc.position);
   // real-rainbow behavior: the bow is an OPTICAL effect centered on the
   // observer's anti-solar point (fixed 42° angular radius) — it travels with
@@ -48783,7 +48805,7 @@ function _wxFrame(dt) {
     const bd = _wxBowDir.set(-sd.x, 0, -sd.z).normalize();
     bd.y = -0.14; bd.normalize();
     const D = 9000;
-    _WX.bow.position.set(camP.x + bd.x * D, camP.y + bd.y * D, camP.z + bd.z * D);
+    _WX.bow.position.set(camP.x + bd.x * D * _wxK, camP.y + bd.y * D * _wxK, camP.z + bd.z * D * _wxK);
     _WX.bow.lookAt(camP.x, camP.y, camP.z);
     _WX.bow.scale.setScalar(D * 0.9);
     // (v35.21) Fade the bow out inside the city dusk. A full-spectrum arc over
@@ -100494,6 +100516,8 @@ function _lssRenderLobbyMode() {
 function _lssStepRoomMode(dir) {
   try {
     if (_lssRoomModeLocked()) return;
+    // The DROP panel may already be on screen when the mode changes.
+    setTimeout(() => { try { _lssGmapsSyncRacePanel(); } catch (_) {} }, 0);
     const list = _LSS_PICKABLE_MODES;
     // ⚠ (v44.11) INDEX ON THE TAG. On LSS.MODE, EXHIBITION and CYBERPUNK CITY both answer
     // 'freeflight' and therefore the same index - so `next` from exhibition would land on
@@ -128522,6 +128546,9 @@ class LSSEarthTiles {
     // ship and gives the water something to sit in.
     this.seaDepth        = opts.seaDepth        ?? 34;
     this.water           = opts.water           ?? true;
+    this.buildingExtentMul  = opts.buildingExtentMul  ?? 2.2;   // see _loadBuildings
+    this.farBuildingMinH    = opts.farBuildingMinH    ?? 26;    // metres, beyond the core ring
+    this.podWidenMul        = opts.podWidenMul        ?? 1.9;   // see the pod note in _extrudeBuilding
     this.overpassUrl     = opts.overpassUrl     ?? 'https://overpass-api.de/api/interpreter';
     this.overpassMirrors = opts.overpassMirrors ?? [
       'https://overpass.kumi.systems/api/interpreter',
@@ -128545,6 +128572,7 @@ class LSSEarthTiles {
     this._bldList = [];
     this._cgrid = null;
     this._hasSea = false;
+    this._waterLevelRaw = null;   // the body's own elevation, NOT assumed to be 0
     this._adPanels = [];
     this.ready = null;
     this.stats = { buildings: 0, demTiles: 0, imgTiles: 0, ads: 0, ms: 0 };
@@ -128783,17 +128811,6 @@ class LSSEarthTiles {
     const c = g.heights[i + g.w], d = g.heights[i + g.w + 1];
     return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
   }
-  _chunkOf(x, z) {
-    const b = this._bounds, D = this.chunkDivisions;
-    const i = Math.floor((x - b.X0) / (b.X1 - b.X0) * D);
-    const j = Math.floor((z - b.Z0) / (b.Z1 - b.Z0) * D);
-    if (i < 0 || j < 0 || i >= D || j >= D) return -1;
-    return j * D + i;
-  }
-  _uv(x, z) {
-    const b = this._bounds;
-    return { u: (x - b.X0) / (b.X1 - b.X0), v: 1 - (z - b.Z0) / (b.Z1 - b.Z0) };
-  }
   _progress(msg, frac) {
     if (this.onProgress) { try { this.onProgress(msg, frac); } catch (_) {} }
   }
@@ -128915,53 +128932,78 @@ class LSSEarthTiles {
     if (got === 0) return null;
     this.stats.demTiles = (this.stats.demTiles || 0) + got;
 
-    // ═══ SEA DETECTION AND CARVING ═══
-    // Mapterhorn applies an OSM-derived water mask to the DEM, and it flattens
-    // water to BIT-EXACT ZERO. Measured on Hong Kong: 34.7% of the grid is
-    // exactly 0 while the next most common value is 0.1%, so `=== 0` is a
-    // decisive sea test that costs nothing and needs no extra request. (The
-    // quantized-mesh tiles carry a real watermask extension, but decoding
-    // those would mean a whole new format; this is the same information.)
-    // ⚠ Inland water is NOT caught: lakes flatten to their own level, not 0,
-    // and in Hong Kong those clusters are 0.16% of the grid in 20-80 texel
-    // patches. The LSS water plane is one global level anyway, so sea is the
-    // only thing it could render correctly.
-    const wet = new Uint8Array(w * h);
-    let nWet = 0;
-    for (let i = 0; i < heights.length; i++) { if (heights[i] === 0) { wet[i] = 1; nWet++; } }
-    if (nWet > heights.length * 0.004) {
-      // Blur the mask to get distance-from-shore for free: the blurred value is
-      // ~0 at the waterline and ~1 in open water, which is exactly the ramp a
-      // sea bed wants. Two box passes over a 3-texel radius.
-      let amt = new Float32Array(w * h);
-      for (let i = 0; i < wet.length; i++) amt[i] = wet[i];
-      const tmp = new Float32Array(w * h);
-      const R = 3;
-      for (let pass = 0; pass < 2; pass++) {
-        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-          let sum = 0, n2 = 0;
-          for (let k = -R; k <= R; k++) {
-            const xx = x + k; if (xx < 0 || xx >= w) continue;
-            sum += amt[y * w + xx]; n2++;
-          }
-          tmp[y * w + x] = sum / n2;
-        }
-        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-          let sum = 0, n2 = 0;
-          for (let k = -R; k <= R; k++) {
-            const yy = y + k; if (yy < 0 || yy >= h) continue;
-            sum += tmp[yy * w + x]; n2++;
-          }
-          amt[y * w + x] = sum / n2;
-        }
+    // ═══ WATER DETECTION AND CARVING ═══
+    // Mapterhorn applies an OSM-derived water mask to the DEM and FLATTENS each
+    // water body to a single bit-exact value. That is the mask, for free, with
+    // no extra request and no new format. (The quantized-mesh tiles carry a real
+    // watermask extension, but decoding those would mean a whole new format for
+    // the same information.)
+    //
+    // ⚠ IT IS NOT ALWAYS ZERO. The first cut tested `height === 0`, which is the
+    // SEA — and Hong Kong duly came out at 34.7% water. Toronto came out at
+    // ZERO, because Lake Ontario is flattened to bit-exact **75**, its real
+    // elevation: "i did a race from toronto to bowmanville... but the water was
+    // missing". So the test is not "is it zero", it is "is this exact value
+    // shared by an implausible number of texels". Measured: Toronto 34.3% at
+    // exactly 75, next value 1.2%. Sea, lake, river and pond all flatten the
+    // same way, so all of them qualify.
+    const hist = new Map();
+    for (let i = 0; i < heights.length; i++) hist.set(heights[i], (hist.get(heights[i]) || 0) + 1);
+    let domV = 0, domC = 0;
+    for (const [v, c] of hist) if (c > domC) { domC = c; domV = v; }
+    // Ring 0 decides the level; the outer rings must reuse it or the shoreline
+    // would step between rings.
+    let level = (k === 0) ? null : this._waterLevelRaw;
+    if (k === 0 && domC >= heights.length * 0.01) level = domV;
+    if (level !== null && level !== undefined) {
+      // A body can be flattened to a few neighbouring values (different source
+      // tiles, different rounding). Take every exact level within 2 m of the
+      // dominant one that covers a meaningful patch — that is what picks up a
+      // river mouth or a pond sitting at the same height as the main body.
+      const levels = new Set();
+      for (const [v, c] of hist) {
+        if (Math.abs(v - level) <= 2.0 && c >= heights.length * 0.0002) levels.add(v);
       }
-      // Dig the basin. Only WET texels move, so the shoreline itself is
-      // untouched and the bed rises to meet it.
-      const D = this.seaDepth;
-      for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = -D * Math.min(1, amt[i] * 1.25);
-      this._hasSea = true;
-      this.stats.seaPct = Math.round(1000 * nWet / heights.length) / 10;
+      const wet = new Uint8Array(w * h);
+      let nWet = 0;
+      for (let i = 0; i < heights.length; i++) { if (levels.has(heights[i])) { wet[i] = 1; nWet++; } }
+      if (nWet > heights.length * 0.004) {
+        // Blur the mask to get distance-from-shore for free: the blurred value
+        // is ~0 at the waterline and ~1 in open water, which is exactly the ramp
+        // a bed wants. Two box passes over a 3-texel radius.
+        let amt = new Float32Array(w * h);
+        for (let i = 0; i < wet.length; i++) amt[i] = wet[i];
+        const tmp = new Float32Array(w * h);
+        const R = 3;
+        for (let pass = 0; pass < 2; pass++) {
+          for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+            let sum = 0, n2 = 0;
+            for (let q = -R; q <= R; q++) {
+              const xx = x + q; if (xx < 0 || xx >= w) continue;
+              sum += amt[y * w + xx]; n2++;
+            }
+            tmp[y * w + x] = sum / n2;
+          }
+          for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+            let sum = 0, n2 = 0;
+            for (let q = -R; q <= R; q++) {
+              const yy = y + q; if (yy < 0 || yy >= h) continue;
+              sum += tmp[yy * w + x]; n2++;
+            }
+            amt[y * w + x] = sum / n2;
+          }
+        }
+        // Dig the basin BELOW THE BODY'S OWN LEVEL. Only wet texels move, so the
+        // shoreline is untouched and the bed rises to meet it.
+        const D = this.seaDepth;
+        for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = level - D * Math.min(1, amt[i] * 1.25);
+        this._hasSea = true;
+        if (k === 0) this._waterLevelRaw = level;
+        if (k === 0) this.stats.seaPct = Math.round(1000 * nWet / heights.length) / 10;
+        if (k === 0) this.stats.waterLevelM = Math.round(level * 10) / 10;
+      }
     }
+
     const nLat = _leTileYToLat(y0, z), sLat = _leTileYToLat(y0 + n, z);
     const wLng = _leTileXToLng(x0, z), eLng = _leTileXToLng(x0 + n, z);
     const nw = this.project(nLat, wLng), se = this.project(sLat, eLng);
@@ -129064,8 +129106,11 @@ class LSSEarthTiles {
   /** Ring 0 UV — what the buildings and their roof-colour lookup use. */
   _uv(x, z) { return this._uvIn(this._grids[0], x, z); }
 
+  // Spans _bldBounds (the widened BUILDING area) when there is one, so a
+  // building fetched outside the core ring still gets a chunk instead of being
+  // rejected. Terrain chunking does not use this.
   _chunkOf(x, z) {
-    const b = this._bounds, D = this.chunkDivisions;
+    const b = this._bldBounds || this._bounds, D = this.chunkDivisions;
     const i = Math.floor((x - b.X0) / (b.X1 - b.X0) * D);
     const j = Math.floor((z - b.Z0) / (b.Z1 - b.Z0) * D);
     if (i < 0 || j < 0 || i >= D || j >= D) return -1;
@@ -129153,7 +129198,8 @@ class LSSEarthTiles {
 
   seaLevelWorld() {
     const s = (this.group.scale && this.group.scale.x) || 1;
-    return ((0 - this._baseH) * this.heightScale) * s + this.group.position.y;
+    const L = (typeof this._waterLevelRaw === 'number') ? this._waterLevelRaw : 0;
+    return ((L - this._baseH) * this.heightScale) * s + this.group.position.y;
   }
 
   /**
@@ -129222,7 +129268,19 @@ class LSSEarthTiles {
       }
       this._progress('buildings: querying Overpass (try ' + (attempt + 1) + '/' + backoff.length + ')...', 0.6);
       try {
-        const resp = await fetch(this.overpassUrl, { method: 'POST', body: query, signal: this._abort.signal });
+        // Bounded: an unbounded primary can sit for 38 s and then lose to a
+        // teardown, which reads as "no buildings" with no error worth seeing.
+        const _c = new AbortController();
+        const _to = setTimeout(() => _c.abort(), 30000);
+        const _onAbort = () => _c.abort();
+        this._abort.signal.addEventListener('abort', _onAbort);
+        let resp;
+        try {
+          resp = await fetch(this.overpassUrl, { method: 'POST', body: query, signal: _c.signal });
+        } finally {
+          clearTimeout(_to);
+          this._abort.signal.removeEventListener('abort', _onAbort);
+        }
         if (resp.ok) return await resp.json();
         lastErr = new Error('Overpass HTTP ' + resp.status +
           ((resp.status === 429 || resp.status === 504) ? ' (rate-limited)' : ''));
@@ -129269,10 +129327,44 @@ class LSSEarthTiles {
   async _loadBuildings() {
     const g = this._grid;
     const nx = Math.round(g.w / 256);
-    const s = _leTileYToLat(g.y0 + nx, g.z), n = _leTileYToLat(g.y0, g.z);
-    const w = _leTileXToLng(g.x0, g.z), e = _leTileXToLng(g.x0 + nx, g.z);
-    const q = '[out:json][timeout:30];way["building"](' + s + ',' + w + ',' + n + ',' + e + ');out geom;';
-    const key = s.toFixed(5) + ',' + w.toFixed(5) + ',' + n.toFixed(5) + ',' + e.toFixed(5);
+    // (v45.46) FETCH BUILDINGS WIDER THAN THE CORE RING — "load the buildings
+    // during the loading screen... like really far distance". The bbox grows by
+    // buildingExtentMul, and beyond the core only buildings tall enough to read
+    // at that range survive (farBuildingMinH, applied in _extrudeBuilding).
+    // That buys a far skyline without paying for every house under it.
+    const _bm = Math.max(1, this.buildingExtentMul);
+    const _pad = (nx * (_bm - 1)) / 2;
+    const s = _leTileYToLat(g.y0 + nx + _pad, g.z), n = _leTileYToLat(g.y0 - _pad, g.z);
+    const w = _leTileXToLng(g.x0 - _pad, g.z), e = _leTileXToLng(g.x0 + nx + _pad, g.z);
+    const cs = _leTileYToLat(g.y0 + nx, g.z), cn2 = _leTileYToLat(g.y0, g.z);
+    const cw = _leTileXToLng(g.x0, g.z), ce = _leTileXToLng(g.x0 + nx, g.z);
+    {
+      const b0 = this._bounds;
+      const cx = (b0.X0 + b0.X1) / 2, cz = (b0.Z0 + b0.Z1) / 2;
+      const hw = (b0.X1 - b0.X0) * _bm / 2, hz = (b0.Z1 - b0.Z0) * _bm / 2;
+      this._bldBounds = { X0: cx - hw, X1: cx + hw, Z0: cz - hz, Z1: cz + hz };
+    }
+    // (v45.46) ALSO FETCH building:part. Owner, on the skyline: "omg they
+    // circumsized the cn tower". A `building=yes` outline extruded to its
+    // `height` tag is a blunt prism — right height, right footprint, no taper,
+    // no pod, no spire. OSM models landmarks with stacked `building:part`
+    // polygons carrying `min_height`, and the CN Tower has 38 of them. Pulling
+    // those in is what gives it (and every other properly-mapped tower) a
+    // silhouette instead of a column.
+    // ⚠ DO NOT ASK FOR EVERY BUILDING IN THE WIDE BOX. The first cut fetched all
+    // buildings over the 2.2x bbox — a 12 km square of Toronto — and the request
+    // ran 38 s before being aborted, leaving the city empty. Ask Overpass to do
+    // the filtering: everything inside the CORE ring, and outside it only what
+    // is tall enough to read at that range, via a server-side (if:) test.
+    // Measured on Toronto: 3.84 MB in 3.9 s for the union, against a 38 s abort.
+    const core = '(' + cs + ',' + cw + ',' + cn2 + ',' + ce + ')';
+    const wide = '(' + s + ',' + w + ',' + n + ',' + e + ')';
+    const q = '[out:json][timeout:60];('
+      + 'way["building"]' + core + ';'
+      + 'way["building:part"]' + core + ';'
+      + 'way["building"](if:number(t["height"])>=' + this.farBuildingMinH + ')' + wide + ';'
+      + ');out geom;';
+    const key = 'v2:' + s.toFixed(5) + ',' + w.toFixed(5) + ',' + n.toFixed(5) + ',' + e.toFixed(5);
 
     let data = await _leCacheGet(key);
     if (data) { this.stats.osmCached = true; this._progress('buildings: from cache', 0.8); }
@@ -129283,7 +129375,67 @@ class LSSEarthTiles {
     }
     if (this._disposed) return;
 
-    const ways = (data.elements || []).filter((el) => el.type === 'way' && el.geometry);
+    // The wide tall-building query overlaps the core one, so the union repeats
+    // every tall building in the middle. Dedupe by id before anything counts them.
+    const _seen = new Set();
+    const all = (data.elements || []).filter((el) => {
+      if (el.type !== 'way' || !el.geometry) return false;
+      if (_seen.has(el.id)) return false;
+      _seen.add(el.id); return true;
+    });
+    const parts = [], outlines = [];
+    for (const el of all) {
+      const t = el.tags || {};
+      if (t['building:part'] && t['building:part'] !== 'no') parts.push(el); else outlines.push(el);
+    }
+    // ⚠ A BUILDING WITH PARTS MUST NOT ALSO DRAW ITS OWN BOX, or the blunt prism
+    // sits inside the detailed one and you see the worse of the two. The OSM 3D
+    // convention is that the outline is a footprint, not geometry, once parts
+    // exist. Match each part to its containing outline by centroid, through a
+    // coarse grid so this stays linear rather than parts x outlines.
+    const suppressed = new Set();
+    if (parts.length) {
+      const CELL = 200;
+      const idx = new Map();
+      const keyOf = (x, z) => ((x / CELL) | 0) + ':' + ((z / CELL) | 0);
+      const ringOf = (el) => {
+        const r = [];
+        for (let i = 0; i < el.geometry.length - 1; i++) {
+          const gg = el.geometry[i]; if (!gg) continue;
+          const pr = this.project(gg.lat, gg.lon); r.push(pr.x, -pr.z);
+        }
+        return r;
+      };
+      for (const el of outlines) {
+        const r = ringOf(el); if (r.length < 6) continue;
+        el.__ring = r;
+        let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        for (let i = 0; i < r.length; i += 2) {
+          if (r[i] < x0) x0 = r[i]; if (r[i] > x1) x1 = r[i];
+          if (-r[i + 1] < z0) z0 = -r[i + 1]; if (-r[i + 1] > z1) z1 = -r[i + 1];
+        }
+        for (let cx = (x0 / CELL) | 0; cx <= ((x1 / CELL) | 0); cx++) {
+          for (let cz = (z0 / CELL) | 0; cz <= ((z1 / CELL) | 0); cz++) {
+            const k2 = cx + ':' + cz;
+            if (!idx.has(k2)) idx.set(k2, []);
+            idx.get(k2).push(el);
+          }
+        }
+      }
+      for (const pt of parts) {
+        const r = ringOf(pt); if (r.length < 6) continue;
+        let sx = 0, sz = 0;
+        for (let i = 0; i < r.length; i += 2) { sx += r[i]; sz += r[i + 1]; }
+        sx /= (r.length / 2); sz /= (r.length / 2);
+        const cands = idx.get(keyOf(sx, -sz)) || [];
+        for (const el of cands) {
+          if (_lePointInPoly(el.__ring, sx, sz)) { suppressed.add(el); break; }
+        }
+      }
+    }
+    const ways = outlines.filter((el) => !suppressed.has(el)).concat(parts);
+    this.stats.parts = parts.length;
+    this.stats.suppressedOutlines = suppressed.size;
     this._progress('buildings: extruding ' + ways.length + '...', 0.85);
 
     // Roofs and walls are SEPARATE meshes on purpose. Sharing one material
@@ -129364,6 +129516,11 @@ class LSSEarthTiles {
     }
     height = Math.min(height, 620);                 // Burj-proof
 
+    // Outside the core ring, keep only what reads at that range: a distant
+    // skyline is towers, and the houses under it are invisible triangles.
+    const b0 = this._bounds;
+    const isFar = (wx < b0.X0 || wx > b0.X1 || wz < b0.Z0 || wz > b0.Z1);
+    if (isFar && height < this.farBuildingMinH) return false;
     const chunk = this._chunkOf(wx, wz);
     if (chunk < 0) return false;
 
@@ -129377,8 +129534,38 @@ class LSSEarthTiles {
       if (gy < lowY) lowY = gy;
     }
     const groundY = this.heightAt(wx, wz);
-    const baseY = Math.min(lowY, groundY);
+    let baseY = Math.min(lowY, groundY);
     height += (groundY - baseY);
+    // A building:part can START in mid-air (min_height) — that is how a pod or
+    // a setback section is modelled. Such a part is NOT sunk to the ground.
+    const _minH = (() => {
+      const mh = parseFloat(tags.min_height);
+      if (isFinite(mh) && mh > 0) return mh;
+      const ml = parseFloat(tags['building:min_level']);
+      return (isFinite(ml) && ml > 0) ? ml * 3.2 : 0;
+    })();
+    if (_minH > 0) {
+      baseY = groundY + _minH;
+      height = Math.max(1, (groundY + height) - baseY);
+      // ⭐ POD WIDENING. An elevated part that is WIDER THAN IT IS TALL is an
+      // observation deck — the CN Tower's donut, the ring on a comms mast —
+      // rather than a setback on a tower, which is tall and narrow. OSM's
+      // footprint for one is accurate but reads as a thin collar at flight
+      // distance; the owner wanted it "almost double its current radius". The
+      // squat test is what keeps this off ordinary setbacks, which would
+      // otherwise bulge. Applied to `pts` BEFORE the bbox and the collision
+      // polygon are taken, so what you hit is what you see.
+      let _w0 = Infinity, _w1 = -Infinity, _h0 = Infinity, _h1 = -Infinity;
+      for (const q of pts) {
+        if (q.x < _w0) _w0 = q.x; if (q.x > _w1) _w1 = q.x;
+        if (q.y < _h0) _h0 = q.y; if (q.y > _h1) _h1 = q.y;
+      }
+      const _span = Math.max(_w1 - _w0, _h1 - _h0);
+      if (_span > 0 && height < _span && this.podWidenMul > 1) {
+        const k = this.podWidenMul;
+        for (const q of pts) { q.x = cx + (q.x - cx) * k; q.y = cz + (q.y - cz) * k; }
+      }
+    }
 
     let bx0 = Infinity, bx1 = -Infinity, bz0 = Infinity, bz1 = -Infinity;
     for (const p of pts) {
@@ -129455,10 +129642,27 @@ class LSSEarthTiles {
     for (let t = 0; t < tris; t++) {
       const o = t * 9;
       const y0 = pos[o + 1], y1 = pos[o + 4], y2 = pos[o + 7];
-      if (y0 > topY && y1 > topY && y2 > topY) {
+      if (y0 > topY && y1 > topY && y2 > topY && !isFar) {
         for (let k = 0; k < 9; k++) rp.push(pos[o + k]);
       } else if (y0 < botY && y1 < botY && y2 < botY) {
-        continue;
+        // ⭐ KEEP THE FLOOR CAP WHEN THE PART IS IN MID-AIR. Discarding it is
+        // right for a ground-level building — that face is buried under the
+        // terrain and was a quarter of every building's triangles — but a
+        // building:part with min_height starts hundreds of metres up, and
+        // throwing its floor away leaves the underside open. Looking up at the
+        // CN Tower's SkyPod you saw straight into it: "close the bottom of the
+        // donut with a disc". It goes to the FACADE bucket, not the roof one:
+        // the roof material is the satellite drape, and the underside of a pod
+        // is not ground. The facade's height tint puts it at the dark end
+        // (y == baseY), which is what an underside should be, and the shader
+        // skips windows on any near-horizontal normal so it stays plain.
+        if (_minH <= 0) continue;
+        for (let k = 0; k < 9; k++) wp.push(pos[o + k]);
+        for (let v = 0; v < 3; v++) {
+          const vx = pos[o + v * 3], vy = pos[o + v * 3 + 1], vz = pos[o + v * 3 + 2];
+          wf.push(uAt(vx, vz), vy - baseY, rnd, height);
+          wc.push(cr * 0.5, cg * 0.5, cb * 0.5);
+        }
       } else {
         for (let k = 0; k < 9; k++) wp.push(pos[o + k]);
         for (let v = 0; v < 3; v++) {
@@ -129787,7 +129991,17 @@ async function _lssGmapsBuildLevel(level) {
   // race graph ; champion field auto-spawns at the finish marker.
   if (game.pendingRaceRoute && LSS.MODE === 'race') {
     const rr = game.pendingRaceRoute;
-    const fin = _raceLatLngToWorldXZ(rr.start.lat, rr.start.lng, rr.finish.lat, rr.finish.lng);
+    // ⚠ _raceLatLngToWorldXZ RETURNS METRES. The tiles group carries level.scale
+    // (7 by default since v45.46), so a geographic point sitting `d` metres from
+    // the origin is drawn at `d * scale` world units — and an unscaled finish
+    // lands at a SEVENTH of the true distance, i.e. effectively on top of the
+    // spawn. That is the "it put the finish at the spawn" report. Back when
+    // scale was 1 the two happened to agree, which is why this was never wrong
+    // before. SPAWN_OFFSET / STARTLINE_BACK below are deliberately NOT scaled:
+    // those are ship-sized offsets and ships did not get bigger.
+    const _raceScale = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7;
+    const _finM = _raceLatLngToWorldXZ(rr.start.lat, rr.start.lng, rr.finish.lat, rr.finish.lng);
+    const fin = { x: _finM.x * _raceScale, z: _finM.z * _raceScale };
     const dist = Math.sqrt(fin.x * fin.x + fin.z * fin.z);
     const len = Math.max(1, dist);
     const ux = fin.x / len, uz = fin.z / len;
@@ -129946,6 +130160,13 @@ async function _lssGmapsBuildLevel(level) {
     // _skyDomeRefresh expects something behind the dome.
     try { if (typeof setSky === 'function') setSky(level.sky || 'cyberpunk'); } catch (_) {}
     try { if (typeof _wxInit === 'function') _wxInit(null); } catch (e) { console.warn('[lss-earth] weather init failed:', e); }
+    // Push the dome/sun out past this world's terrain, but never past the far
+    // plane — a dome beyond `camera.far` is not a bigger sky, it is no sky.
+    try {
+      const _far = (tiles.stats && tiles.stats.farUnits) || 20000;
+      const _cap = (typeof camera !== 'undefined' && camera && camera.far) ? camera.far * 0.92 : 1e9;
+      _WX.distMul = Math.max(1, Math.min(8, Math.min(_far * 1.35, _cap) / 20500));
+    } catch (_) {}
     try { _lssEarthNightLights(true); } catch (_) {}
     _lssGmaps.cleanup = () => {
       try { scene.remove(tiles.group); } catch(_) {}
@@ -129953,6 +130174,7 @@ async function _lssGmapsBuildLevel(level) {
       // Put the shared scene back the way it was: these lights and this sky
       // belong to every other map too.
       try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}
+      try { _WX.distMul = 1; } catch (_) {}
       try { if (typeof _wxDispose === 'function') _wxDispose(); } catch (_) {}
       try { _lssEarthNightLights(false); } catch (_) {}
       try { if (typeof clearSky === 'function') clearSky(); } catch (_) {}
@@ -129970,6 +130192,23 @@ async function _lssGmapsBuildLevel(level) {
       }
     }, 1000);
     try { _lssGmapsRefinePivot(); } catch(_) {}
+    // (v45.46) ⭐ HOLD THE LOADING SCREEN UNTIL THE CITY IS ACTUALLY THERE.
+    // Owner: "i wish we could load the buildings during the loading screen".
+    // _build() is kicked off by setLatLonToYUp and was never awaited, so the
+    // level went playable as soon as the tiles OBJECT existed — terrain first,
+    // then the city popping in over the next several seconds. Awaiting
+    // tiles.ready puts the whole fetch inside the loading screen where it
+    // belongs.
+    // ⚠ BOUNDED. A rate-limited Overpass retries with backoff and then tries
+    // mirrors; unbounded, that is ~30 s of frozen loading screen for a layer
+    // that is allowed to fail. Race it against a timeout and let the rest
+    // stream in if it loses — the terrain and water are already up by then.
+    try {
+      await Promise.race([
+        tiles.ready,
+        new Promise((r) => setTimeout(r, (typeof level.loadTimeoutMs === 'number') ? level.loadTimeoutMs : 25000))
+      ]);
+    } catch (_) {}
   } catch (e) {
     console.error('[lss-gmaps] failed to initialize tiles:', e);
     alert('Failed to initialize Google Maps tiles: ' + e.message + "\nCheck your API key and that the Map Tiles API is enabled on your Google Cloud project.");
@@ -130115,6 +130354,15 @@ function _lssGmapsTick(dt) {
     if (typeof t.update === 'function') t.update();
     if (typeof t.updateNight === 'function') t.updateNight(scene);
     if (typeof t.waterTick === 'function') t.waterTick(dt);
+    // ⭐ (v45.46) THE SKY HAS TO BE DRIVEN TOO. _wxFrame is called only from the
+    // hub branch of gameLoop (`game.sandwichTerrain.ON`), exactly like the water
+    // ticks — so on a real-world level the dome never followed the camera and
+    // the sun disc never moved from where _wxInit dropped it. A camera-locked
+    // skydome that is not tracking is just a 20,500-unit sphere sitting at the
+    // origin, which is precisely "i hit a blue wall that was the sky, it was
+    // like a shell", and the parked sun is "there's a bright orb in the city...
+    // that's the sun in the middle of the map, in the floor". One missing call.
+    try { if (typeof _wxFrame === 'function') _wxFrame(dt); } catch (_) {}
   } catch (_) {  }
   if (t.group && t.group.children && t.group.children.length > 0) {
     t.group.traverse((c) => {
@@ -130544,13 +130792,37 @@ function _lssGmapsSetScaleLive(n) {
   console.log('[lss-gmaps] world scale ->', n);
 }
 function _buildRaceCustomMap(startGeo, finishGeo) {
+  // (v45.46) Scale 7 like every other real-world level — this used to be
+  // hardcoded 1, which left race maps with the old proportions (a 100-unit hull
+  // against 300-unit towers) while the drop-on-location map had been fixed.
+  // The finish marker is scaled to match at the _raceLatLngToWorldXZ call site.
+  // The patch also has to be big enough to CONTAIN the route: the default 2.6 km
+  // core would leave a long race finishing out past the loaded terrain.
+  const _d2r = Math.PI / 180, _R = 6371000;
+  let _routeM = 0;
+  try {
+    const dLat = (finishGeo.lat - startGeo.lat) * _d2r, dLng = (finishGeo.lng - startGeo.lng) * _d2r;
+    const hav = Math.sin(dLat / 2) ** 2 +
+                Math.cos(startGeo.lat * _d2r) * Math.cos(finishGeo.lat * _d2r) * Math.sin(dLng / 2) ** 2;
+    _routeM = 2 * _R * Math.asin(Math.sqrt(hav));
+  } catch (_) { _routeM = 0; }
   return {
     type: 'gmaps',
     name: 'Race ; ' + (startGeo.name || 'Start') + ' to ' + (finishGeo.name || 'Finish'),
     description: 'Free-flight race between two real-world locations. No walls ; just sky and city.',
+    // ⚠ ORIGIN STAYS ON THE START. The race placement below
+    // (_lssGmapsBuildLevel's pendingRaceRoute block) puts the spawns at the
+    // world origin and the finish at the start->finish offset, so the origin IS
+    // the starting line. Centring the patch on the midpoint would look tidier
+    // and would silently move the start.
     lat: startGeo.lat,
     lng: startGeo.lng,
-    scale: 1,
+    // extentMetres is a full WIDTH and the patch is centred on the start, so it
+    // needs 2x the route to reach the finish, plus margin. Capped at 8 km: past
+    // that the DEM/imagery fetch count climbs fast, and a finish beyond the core
+    // still lands on the outer LOD rings rather than on nothing.
+    extentMetres: Math.max(2600, Math.min(8000, _routeM * 2.4)),
+    scale: 7,
     palette: [0x102030, 0x122838, 0x143040, 0x163848, 0x184050, 0x1a4858, 0x1c5060, 0x1e5868],
     rooms: [],
     tunnels: [],
@@ -130560,6 +130832,22 @@ function _buildRaceCustomMap(startGeo, finishGeo) {
 // Convert a finish lat/lng (relative to a start lat/lng) into world XZ.
 // Flat-earth approximation, accurate to <1% at city scale. Output matches
 // the post-setLatLonToYUp convention : X = east, Z = south (north = -Z).
+// (v45.46) Put the DROP panel into race or plain-drop shape. Called from
+// selectMap (whenever the panel is shown) and from _lssStepRoomMode (when the
+// room mode changes while it is already up), because the button that used to
+// own this is gone. See the note at the selectMap call site.
+function _lssGmapsSyncRacePanel() {
+  try {
+    const on = (typeof LSS !== 'undefined') && LSS && LSS.MODE === 'race';
+    const lbl = document.getElementById('gmaps-overlay-label');
+    const fin = document.getElementById('gmaps-loc-finish-input');
+    const startInp = document.getElementById('gmaps-loc-input');
+    if (lbl) lbl.textContent = on ? 'RACE: START -> FINISH' : 'DROP ON LOCATION';
+    if (fin) fin.style.display = on ? '' : 'none';
+    if (startInp) startInp.placeholder = on ? 'Start location (e.g. Stanley Park)' : 'ENTER LOCATION NAME';
+  } catch (_) {}
+}
+
 function _raceLatLngToWorldXZ(startLat, startLng, finishLat, finishLng) {
   const M_PER_DEG_LAT = 111320;
   const sLat = startLat * Math.PI / 180;
