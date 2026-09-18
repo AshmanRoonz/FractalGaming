@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.26";
+const LSS_BUILD = "46.34";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -27160,7 +27160,9 @@ const SKY_I = {
   range: 30000,        // build radius around the player
   res: 26,             // surface-net grid per island
   budget: 1,           // islands meshed per frame
+  skin: 70,
   vines: 1, bld: 1,
+  padR: 130,
   flora: 1,            // trees / mushrooms on the top surfaces
   fungal: 0.30,        // fraction of islands that grow glowing caps instead of trees
   deckBias: 0.45,
@@ -27547,6 +27549,7 @@ function _skBuild(I) {
     for (let k = 0; k < nT; k++) {
       const a = rnd() * 6.283, rr = Math.sqrt(rnd()) * I.R * 0.52;
       const bx = I.x + Math.cos(a) * rr, bz = I.z + Math.sin(a) * rr;
+      if (Math.hypot(bx - I.x, bz - I.z) < SKY_I.padR + 90) continue;
       const ty = _skTop(I, bx, bz, nb);
       if (ty === null) continue;
       const e = 26;
@@ -27565,7 +27568,7 @@ function _skBuild(I) {
       }
     }
     const cy = _skTop(I, I.x, I.z, nb);
-    if (cy !== null) { boxes.push(I.x, cy - 2, I.z, 0, 0, 0, 0); keepOut.push(I.x, I.z, 82); }   // marker, replaced below
+    if (cy !== null) { boxes.push(I.x, cy - 2, I.z, 0, 0, 0, 0); keepOut.push(I.x, I.z, SKY_I.padR + 40); }   // marker, replaced below
     if (boxes.length) {
       const n = boxes.length / 7;
       let real = 0; for (let i = 0; i < n; i++) if (boxes[i * 7 + 3] > 0) real++;
@@ -27590,12 +27593,12 @@ function _skBuild(I) {
       grp.add(im);
     }
     if (cy !== null) {
-      I.padY = cy; I.padR = 46;
+      I.padY = cy; I.padR = SKY_I.padR;
       const padM = new THREE.Mesh(_SK_PAD, _skPadMat);
-      padM.scale.set(46, 3, 46); padM.position.set(I.x, cy - 1, I.z);
+      padM.scale.set(SKY_I.padR, 3, SKY_I.padR); padM.position.set(I.x, cy - 1, I.z);
       grp.add(padM);
       const ring = new THREE.Mesh(_SK_RING, _skRingMat);
-      ring.scale.set(52, 52, 52); ring.position.set(I.x, cy + 5, I.z);
+      ring.scale.set(SKY_I.padR, SKY_I.padR, SKY_I.padR); ring.position.set(I.x, cy + 5, I.z);
       grp.add(ring);
     }
     if (glows.length) {
@@ -27722,7 +27725,7 @@ const PAD_LOCK = {
   on: true,
   vMax: 420,        // touchdown speed ceiling - you land on it, you do not crash into it
   hMax: 460,        // claim reach: how far up a pad still counts as YOURS, so city
-  rMin: 120,        // smallest trigger dome any pad gets, however small its ring is
+  rMin: 250,        // smallest trigger dome any pad gets, however small its ring is
   claimR: 2.4,      // pad radii within which city traffic yields the spot
   charge: 3.0,      // seconds to a full shield bank (the stasis field's own duration)
   hull: 0.06,       // hull repaired per second as a fraction of max. Set 0 for shields only.
@@ -27731,6 +27734,7 @@ const PAD_LOCK = {
   chargeFade: 0.24,                 // fraction of a step spent fading in / out
   settle: 0.55,     // seconds to glide from touchdown to the centre of the ring
   gpDead: 0.35,     // stick deflection that counts as "the pilot wants to fly"
+  releaseHold: 0.12,
   skyLift: 80,
   maxHold: 0,       // 0 = stay as long as you like. Any positive value re-arms a ceiling.
   _pad: null, _claimed: null, _spent: null, _hold: null, _from: null, _t: 0, _why: null, _whyT: 0,
@@ -27776,7 +27780,7 @@ function _padRelease(why) {
   if (PL._pad) { PL._why = why || 'unknown'; PL._whyT = (typeof game !== 'undefined' && game.time) || 0; }
   _HC_RING_U.uClaim.value.w = 0;
   if (PL._pad) {
-    PL._pad = null; PL._hold = null; PL._from = null; PL._t = 0;
+    PL._pad = null; PL._hold = null; PL._from = null; PL._t = 0; PL._inp = 0;
     game.playerInPadStasis = false;
     game.playerInStasis = false;
     try { const v = document.getElementById('stasis-vignette'); if (v) v.style.display = 'none'; } catch (_) {}
@@ -27807,15 +27811,40 @@ function _padFrame(dt) {
   }
   if (PL._claimed && PL._claimed !== near) { PL._claimed._claim = false; PL._claimed = null; }
   if (near) { near._claim = true; PL._claimed = near; }
-  if (PL._spent && (PL._spent !== near || (py - PL._spent.y) > PL.hMax * 1.6)) PL._spent = null;
-  if (PL._pad) {
-    RU.uClaim.value.set(PL._pad.x, PL._pad.y, PL._pad.z, 1);
+  if (PL._spent) {
+    const sr = Math.max(PL._spent.r || 60, PL.rMin) * 1.15;
+    const sdy = py - PL._spent.y;
+    const sd = Math.hypot(Math.hypot(px - PL._spent.x, pz - PL._spent.z), Math.max(0, sdy));
+    if (PL._spent !== near || sd > sr) PL._spent = null;
+  }
+  const _domeY = near ? (py - near.y) : 0;
+  const _domeR = near ? Math.max(nr, PL.rMin) : 0;
+  const inDome = !!near && _domeY >= -20 &&
+                 Math.hypot(nd, Math.max(0, _domeY)) <= _domeR;
+  PL._inDome = inDome;
+  PL._domeT = inDome ? (PL._domeT || 0) + dt : 0;
+
+  if (inDome) {
+    RU.uClaim.value.set(near.x, near.y, near.z, 1);
     const STEP = PAD_LOCK.chargeSteps, per = PAD_LOCK.chargeStep;
-    const u = (PL._t % (per * STEP.length)) / per;
+    const u = (PL._domeT % (per * STEP.length)) / per;
     const idx = Math.floor(u) % STEP.length, fr = u - Math.floor(u);
     const ease = PAD_LOCK.chargeFade;
     RU.uChargeS.value = STEP[idx];
     RU.uChargeA.value = Math.min(1, fr / ease) * Math.min(1, (1 - fr) / ease);
+    if (player.maxShield > 0) {
+      const c = (player.maxShield / Math.max(0.1, PL.charge)) * dt;
+      const room = player.maxShield - player.shield;
+      if (c <= room) { player.shield += c; }
+      else {
+        player.shield = player.maxShield;
+        const cap = player.maxShield * 0.5;
+        player.overShield = Math.min(cap, (player.overShield || 0) + (c - room));
+      }
+    }
+    if (PL.hull > 0 && typeof player.health === 'number' && player.maxHealth > 0) {
+      player.health = Math.min(player.maxHealth, player.health + player.maxHealth * PL.hull * dt);
+    }
   } else {
     RU.uClaim.value.w = 0;
     RU.uChargeS.value = 1; RU.uChargeA.value = 1;
@@ -27831,7 +27860,7 @@ function _padFrame(dt) {
     if (dy < -20 || spd > PL.vMax) { PL._dbg.stop = (dy < -20) ? 'below' : 'fast'; return; }
     if (Math.hypot(nd, Math.max(0, dy)) > domeR) { PL._dbg.stop = 'outside-dome'; return; }
     PL._dbg.stop = null;
-    PL._pad = near; PL._t = 0;
+    PL._pad = near; PL._t = 0; PL._inp = 0;
     let rest = 60;
     try {
       if (player.mesh) {
@@ -27843,11 +27872,13 @@ function _padFrame(dt) {
     PL._hold = { x: near.x, y: near.y + rest + (near.sky ? PL.skyLift : 0), z: near.z };
     game.playerInStasis = true; game.playerInPadStasis = true;
     player.velocity.set(0, 0, 0);
+    try { if (typeof playSound === 'function') playSound('stasis'); } catch (_) {}
     try { const v = document.getElementById('stasis-vignette'); if (v) v.style.display = 'block'; } catch (_) {}
     return;
   }
 
-  if (_padPilotInput()) { PL._spent = PL._pad; _padRelease('pilot'); return; }
+  PL._inp = _padPilotInput() ? (PL._inp || 0) + dt : 0;
+  if (PL._inp > PL.releaseHold) { PL._spent = PL._pad; _padRelease('pilot'); return; }
 
   PL._t += dt;
   if (PL._from && PL._t < PL.settle) {
@@ -27862,51 +27893,54 @@ function _padFrame(dt) {
   }
   player.velocity.set(0, 0, 0);
 
-  if (player.maxShield > 0) {
-    const c = (player.maxShield / Math.max(0.1, PL.charge)) * dt;
-    const room = player.maxShield - player.shield;
-    if (c <= room) { player.shield += c; }
-    else {
-      player.shield = player.maxShield;
-      const cap = player.maxShield * 0.5;
-      player.overShield = Math.min(cap, (player.overShield || 0) + (c - room));
-    }
-  }
-  if (PL.hull > 0 && typeof player.health === 'number' && player.maxHealth > 0) {
-    player.health = Math.min(player.maxHealth, player.health + player.maxHealth * PL.hull * dt);
-  }
   if (PL.maxHold > 0 && PL._t >= PL.maxHold) { PL._spent = PL._pad; _padRelease('timeout'); }
 }
 
+function _skInSkin(pos, nb, f, skin) {
+  const e = 9;
+  const gx = _skField(pos.x + e, pos.y, pos.z, nb) - _skField(pos.x - e, pos.y, pos.z, nb);
+  const gy = _skField(pos.x, pos.y + e, pos.z, nb) - _skField(pos.x, pos.y - e, pos.z, nb);
+  const gz = _skField(pos.x, pos.y, pos.z + e, nb) - _skField(pos.x, pos.y, pos.z - e, nb);
+  const gl = Math.hypot(gx, gy, gz);
+  if (gl < 1e-9) return false;
+  return (f / (gl / (2 * e))) + skin > 0.5;
+}
 function _skCollide(pos, velocity, radius) {
   if (!SKY_I.on || !_skLive.size) return;
   if (game.playerInPadStasis) return;
   const R = radius || 40;
+  const skin = SKY_I.skin + R;
   for (const rec of _skLive.values()) {
     const I = rec.isl;
     if (!I) continue;
     const dx = pos.x - I.x, dz = pos.z - I.z, dy = pos.y - I.y;
-    const reach = I.R * 1.6 + R;
+    const reach = I.R * 1.6 + R + skin;
     if (dx * dx + dz * dz > reach * reach) continue;
-    if (dy > I.R * (I.up + 0.6) + R || dy < -I.R * (I.dn + 0.4) - R) continue;
+    if (dy > I.R * (I.up + 0.6) + R + skin || dy < -I.R * (I.dn + 0.4) - R - skin) continue;
     const nb = _skNb(I);
     let f = _skField(pos.x, pos.y, pos.z, nb);
-    if (f <= 0) continue;
-    for (let it = 0; it < 5 && f > 0; it++) {
+    if (f <= 0 && !_skInSkin(pos, nb, f, skin)) continue;
+    let nx = 0, ny = 0, nz = 0;
+    for (let it = 0; it < 6; it++) {
       const e = 9;
       const gx = _skField(pos.x + e, pos.y, pos.z, nb) - _skField(pos.x - e, pos.y, pos.z, nb);
       const gy = _skField(pos.x, pos.y + e, pos.z, nb) - _skField(pos.x, pos.y - e, pos.z, nb);
       const gz = _skField(pos.x, pos.y, pos.z + e, nb) - _skField(pos.x, pos.y, pos.z - e, nb);
-      const gl = Math.hypot(gx, gy, gz) || 1e-6;
-      const nx = gx / gl, ny = gy / gl, nz = gz / gl;
-      const stepOut = Math.min(160, (f / (gl / (2 * e))) + R * 0.35);
-      pos.x += nx * stepOut; pos.y += ny * stepOut; pos.z += nz * stepOut;
-      if (velocity) {
-        const vd = velocity.x * nx + velocity.y * ny + velocity.z * nz;
-        if (vd < 0) { velocity.x -= nx * vd * 1.25; velocity.y -= ny * vd * 1.25; velocity.z -= nz * vd * 1.25; }
-      }
+      const gl = Math.hypot(gx, gy, gz);
+      if (gl < 1e-9) break;
+      nx = -gx / gl; ny = -gy / gl; nz = -gz / gl;
+      const gs = gl / (2 * e);                 // field units per world unit
+      const depth = f / gs + skin;             // world units inside the INFLATED surface
+      if (depth <= 0.5) break;                 // already clear: nothing to do, no lurch
+      const step = Math.min(depth, 90);
+      pos.x += nx * step; pos.y += ny * step; pos.z += nz * step;
       f = _skField(pos.x, pos.y, pos.z, nb);
     }
+    if (velocity) {
+      const vd = velocity.x * nx + velocity.y * ny + velocity.z * nz;
+      if (vd < 0) { velocity.x -= nx * vd; velocity.y -= ny * vd; velocity.z -= nz * vd; }
+    }
+    break;
   }
 }
 try { window.__skyDbg = () => ({ live: _skLive.size, ms: +SKY_I._ms.toFixed(1),

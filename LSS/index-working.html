@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.26";
+const LSS_BUILD = "46.34";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -47003,7 +47003,14 @@ const SKY_I = {
   range: 30000,        // build radius around the player
   res: 26,             // surface-net grid per island
   budget: 1,           // islands meshed per frame
+  // How far OUTSIDE the analytic surface the collider stops. The visible mesh is a
+  // surface net and can sit up to a cell (size/res) outside the field it was built
+  // from, so colliding exactly on f=0 lets you fly into visible rock.
+  skin: 70,
   vines: 1, bld: 1,
+  // A city landing pad is 80-200 across. 46 was a token ring you could not aim at,
+  // and it forced the landing dome to be almost entirely `rMin` rather than the pad.
+  padR: 130,
   flora: 1,            // trees / mushrooms on the top surfaces
   fungal: 0.30,        // fraction of islands that grow glowing caps instead of trees
   // ⭐ CLOUDS COME FROM THE WEATHER DECK, NOT FROM THE ISLANDS. The hub already runs
@@ -47479,6 +47486,11 @@ function _skBuild(I) {
     for (let k = 0; k < nT; k++) {
       const a = rnd() * 6.283, rr = Math.sqrt(rnd()) * I.R * 0.52;
       const bx = I.x + Math.cos(a) * rr, bz = I.z + Math.sin(a) * rr;
+      // ⚠ THE PAD IS ALWAYS AT THE ISLAND CENTRE, and the towers are placed BEFORE it
+      // exists - so without this they land on top of it. Owner: "no buildings on the
+      // landing pads". The keepOut list below cannot help: it is filled by this very
+      // loop and consumed by the foliage, long after the towers are committed.
+      if (Math.hypot(bx - I.x, bz - I.z) < SKY_I.padR + 90) continue;
       const ty = _skTop(I, bx, bz, nb);
       if (ty === null) continue;
       // reject anything perched on a slope - a tower half in the air reads as a bug
@@ -47499,7 +47511,7 @@ function _skBuild(I) {
     }
     // a landing platform on the flattest spot near the middle
     const cy = _skTop(I, I.x, I.z, nb);
-    if (cy !== null) { boxes.push(I.x, cy - 2, I.z, 0, 0, 0, 0); keepOut.push(I.x, I.z, 82); }   // marker, replaced below
+    if (cy !== null) { boxes.push(I.x, cy - 2, I.z, 0, 0, 0, 0); keepOut.push(I.x, I.z, SKY_I.padR + 40); }   // marker, replaced below
     if (boxes.length) {
       const n = boxes.length / 7;
       let real = 0; for (let i = 0; i < n; i++) if (boxes[i * 7 + 3] > 0) real++;
@@ -47526,12 +47538,12 @@ function _skBuild(I) {
     if (cy !== null) {
       // Publish the pad on the island record so the landing system can find it
       // without re-walking the field. _SK_PAD is a unit cylinder scaled by 46.
-      I.padY = cy; I.padR = 46;
+      I.padY = cy; I.padR = SKY_I.padR;
       const padM = new THREE.Mesh(_SK_PAD, _skPadMat);
-      padM.scale.set(46, 3, 46); padM.position.set(I.x, cy - 1, I.z);
+      padM.scale.set(SKY_I.padR, 3, SKY_I.padR); padM.position.set(I.x, cy - 1, I.z);
       grp.add(padM);
       const ring = new THREE.Mesh(_SK_RING, _skRingMat);
-      ring.scale.set(52, 52, 52); ring.position.set(I.x, cy + 5, I.z);
+      ring.scale.set(SKY_I.padR, SKY_I.padR, SKY_I.padR); ring.position.set(I.x, cy + 5, I.z);
       grp.add(ring);
     }
     if (glows.length) {
@@ -47710,7 +47722,14 @@ const PAD_LOCK = {
   hMax: 460,        // claim reach: how far up a pad still counts as YOURS, so city
                     // traffic yields it while you are on approach. The LANDING trigger
                     // is the dome below; this is the wider reservation around it.
-  rMin: 120,        // smallest trigger dome any pad gets, however small its ring is
+  // ⭐ THE DOME MUST CONTAIN THE RESTING HEIGHT, OR THE PAD CAN NEVER FIRE.
+  // v46.29 fixed the sky collider, which had been pushing ships INTO the rock; with
+  // it correct, a hull now comes to rest on its skin standoff — MEASURED at 156 above
+  // an island pad, against a 120 dome. The pad engaged exactly once, at dome 119 of
+  // 120, and only because a test shoved it down through the band. This floor is sized
+  // off that measurement with room to spare, and it is why the two numbers are
+  // coupled: raise SKY_I.skin or the hull size and this has to follow.
+  rMin: 250,        // smallest trigger dome any pad gets, however small its ring is
   claimR: 2.4,      // pad radii within which city traffic yields the spot
   charge: 3.0,      // seconds to a full shield bank (the stasis field's own duration)
   hull: 0.06,       // hull repaired per second as a fraction of max. Set 0 for shields only.
@@ -47719,6 +47738,13 @@ const PAD_LOCK = {
   chargeFade: 0.24,                 // fraction of a step spent fading in / out
   settle: 0.55,     // seconds to glide from touchdown to the centre of the ring
   gpDead: 0.35,     // stick deflection that counts as "the pilot wants to fly"
+  // ⚠ RELEASE ON SUSTAINED INPUT, NOT ON A SINGLE FRAME. Input here is noisy: a
+  // controller polled every frame writes into input.keys, so a resting pad can spike
+  // `up` (bound to space) and `forward` for one frame at a time - measured 32 phantom
+  // space frames and 16 phantom w frames in 2.5 s from an untouched pad. One blip was
+  // enough to throw the pilot off a pad they had just landed on. A real press clears
+  // this easily; noise does not.
+  releaseHold: 0.12,
   // ⚠ SKY PADS NEED EXTRA CLEARANCE. An island's visible surface is a surface NET,
   // but I.padY comes from walking the analytic metaball FIELD - and the mesh can sit
   // up to a full cell away from the field it was built from (cell = size/res, which
@@ -47783,7 +47809,7 @@ function _padRelease(why) {
   if (PL._pad) { PL._why = why || 'unknown'; PL._whyT = (typeof game !== 'undefined' && game.time) || 0; }
   _HC_RING_U.uClaim.value.w = 0;
   if (PL._pad) {
-    PL._pad = null; PL._hold = null; PL._from = null; PL._t = 0;
+    PL._pad = null; PL._hold = null; PL._from = null; PL._t = 0; PL._inp = 0;
     game.playerInPadStasis = false;
     game.playerInStasis = false;
     try { const v = document.getElementById('stasis-vignette'); if (v) v.style.display = 'none'; } catch (_) {}
@@ -47820,21 +47846,57 @@ function _padFrame(dt) {
   // Exactly one pad is claimed at a time, and leaving re-arms it.
   if (PL._claimed && PL._claimed !== near) { PL._claimed._claim = false; PL._claimed = null; }
   if (near) { near._claim = true; PL._claimed = near; }
-  // Leaving re-arms the pad. Sideways is covered by `near` changing, but climbing
-  // straight off one keeps it as the nearest pad forever - so height counts as leaving
-  // too, otherwise you get exactly one landing per pad per visit.
-  if (PL._spent && (PL._spent !== near || (py - PL._spent.y) > PL.hMax * 1.6)) PL._spent = null;
-  if (PL._pad) {
-    RU.uClaim.value.set(PL._pad.x, PL._pad.y, PL._pad.z, 1);
+  // ⭐ RE-ARM ON LEAVING THE TRIGGER DOME. `_spent` exists so releasing the hold does
+  // not instantly re-lock you while you are still sitting on the pad - but keying it
+  // to the far wider CLAIM reach meant one spurious release locked you out of that pad
+  // until you climbed 736 units or flew to another one. The dome is the landing
+  // trigger, so leaving the dome is what "you are no longer landing here" means.
+  // 1.15 is hysteresis, so hovering exactly on the boundary cannot chatter.
+  if (PL._spent) {
+    const sr = Math.max(PL._spent.r || 60, PL.rMin) * 1.15;
+    const sdy = py - PL._spent.y;
+    const sd = Math.hypot(Math.hypot(px - PL._spent.x, pz - PL._spent.z), Math.max(0, sdy));
+    if (PL._spent !== near || sd > sr) PL._spent = null;
+  }
+  // ⭐⭐ THE DOME ACTIVATES THE PAD. Owner: "it should keep animated as long as you are
+  // in the dome". These used to be gated on PL._pad - the position LOCK - which made
+  // the visible effect hostage to every condition the lock has (touchdown speed, the
+  // `_spent` re-arm, a stray frame of pilot input). Being inside the dome is the thing
+  // the player can see themselves doing, so it is what drives the ring and the charge;
+  // the lock is now only responsible for holding the ship still.
+  const _domeY = near ? (py - near.y) : 0;
+  const _domeR = near ? Math.max(nr, PL.rMin) : 0;
+  const inDome = !!near && _domeY >= -20 &&
+                 Math.hypot(nd, Math.max(0, _domeY)) <= _domeR;
+  PL._inDome = inDome;
+  PL._domeT = inDome ? (PL._domeT || 0) + dt : 0;
+
+  if (inDome) {
+    RU.uClaim.value.set(near.x, near.y, near.z, 1);
     // normal -> medium -> small -> normal, each held then faded out, the radius
-    // swapping while it is invisible. PL._t is the time held, so the cycle starts
-    // clean on touchdown instead of wherever a free-running clock happened to be.
+    // swapping while it is invisible. _domeT is the time spent in the dome, so the
+    // cycle starts clean on arrival rather than wherever a free-running clock was.
     const STEP = PAD_LOCK.chargeSteps, per = PAD_LOCK.chargeStep;
-    const u = (PL._t % (per * STEP.length)) / per;
+    const u = (PL._domeT % (per * STEP.length)) / per;
     const idx = Math.floor(u) % STEP.length, fr = u - Math.floor(u);
     const ease = PAD_LOCK.chargeFade;
     RU.uChargeS.value = STEP[idx];
     RU.uChargeA.value = Math.min(1, fr / ease) * Math.min(1, (1 - fr) / ease);
+    // Charging is part of "the pad is working on you", so it runs on the dome too -
+    // hover in it and you charge; you do not have to achieve a clean touchdown first.
+    if (player.maxShield > 0) {
+      const c = (player.maxShield / Math.max(0.1, PL.charge)) * dt;
+      const room = player.maxShield - player.shield;
+      if (c <= room) { player.shield += c; }
+      else {
+        player.shield = player.maxShield;
+        const cap = player.maxShield * 0.5;
+        player.overShield = Math.min(cap, (player.overShield || 0) + (c - room));
+      }
+    }
+    if (PL.hull > 0 && typeof player.health === 'number' && player.maxHealth > 0) {
+      player.health = Math.min(player.maxHealth, player.health + player.maxHealth * PL.hull * dt);
+    }
   } else {
     RU.uClaim.value.w = 0;
     RU.uChargeS.value = 1; RU.uChargeA.value = 1;
@@ -47861,7 +47923,7 @@ function _padFrame(dt) {
     if (dy < -20 || spd > PL.vMax) { PL._dbg.stop = (dy < -20) ? 'below' : 'fast'; return; }
     if (Math.hypot(nd, Math.max(0, dy)) > domeR) { PL._dbg.stop = 'outside-dome'; return; }
     PL._dbg.stop = null;
-    PL._pad = near; PL._t = 0;
+    PL._pad = near; PL._t = 0; PL._inp = 0;
     // ⭐ SETTLE ONTO THE MIDDLE OF THE RING. Owner: "the charge spot should be right
     // down on the surface center of the ring". Holding wherever the hull happened to
     // stop left ships parked half off the pad and floating, and the charge ring then
@@ -47880,13 +47942,18 @@ function _padFrame(dt) {
     PL._hold = { x: near.x, y: near.y + rest + (near.sky ? PL.skyLift : 0), z: near.z };
     game.playerInStasis = true; game.playerInPadStasis = true;
     player.velocity.set(0, 0, 0);
+    // The same cue a stasis field plays on entry. enterStasis is wrapped near the
+    // bottom of the file to fire playSound('stasis'); a pad is the same event to the
+    // player, so it gets the same sound rather than a second one invented for it.
+    try { if (typeof playSound === 'function') playSound('stasis'); } catch (_) {}
     try { const v = document.getElementById('stasis-vignette'); if (v) v.style.display = 'block'; } catch (_) {}
     return;
   }
 
   // The pilot always wins. Checked BEFORE the pin, so the frame the input arrives is
   // the frame we let go of the controls.
-  if (_padPilotInput()) { PL._spent = PL._pad; _padRelease('pilot'); return; }
+  PL._inp = _padPilotInput() ? (PL._inp || 0) + dt : 0;
+  if (PL._inp > PL.releaseHold) { PL._spent = PL._pad; _padRelease('pilot'); return; }
 
   PL._t += dt;
   // Glide from wherever the hull touched down to the middle of the ring, then hold
@@ -47905,21 +47972,8 @@ function _padFrame(dt) {
   }
   player.velocity.set(0, 0, 0);
 
-  // Identical charge curve to a stasis field: shield first, then the overshield
-  // bank at the same rate, capped at half max.
-  if (player.maxShield > 0) {
-    const c = (player.maxShield / Math.max(0.1, PL.charge)) * dt;
-    const room = player.maxShield - player.shield;
-    if (c <= room) { player.shield += c; }
-    else {
-      player.shield = player.maxShield;
-      const cap = player.maxShield * 0.5;
-      player.overShield = Math.min(cap, (player.overShield || 0) + (c - room));
-    }
-  }
-  if (PL.hull > 0 && typeof player.health === 'number' && player.maxHealth > 0) {
-    player.health = Math.min(player.maxHealth, player.health + player.maxHealth * PL.hull * dt);
-  }
+  // (charging is handled by the dome block above - a locked ship is always in the
+  // dome that locked it, so doing it here as well would simply double the rate)
   // Charged is not a reason to leave. The banks simply stop filling and the ring keeps
   // cycling, so a pad doubles as somewhere to sit and look at the city. maxHold is 0
   // by default now; set it positive to re-arm a ceiling.
@@ -47930,36 +47984,91 @@ function _padFrame(dt) {
 // The metaball field IS the collider: evaluate it, and if we are inside, walk out
 // along its gradient. No mesh raycast, no BVH, and it is exactly the surface that
 // was meshed, so what you see is what you hit.
+// True when pos is outside the rock but still inside the collision SKIN, i.e. the
+// band where we want a gentle push rather than nothing. Costs one extra gradient
+// only for points that are already near a blob, because the caller has broadphased.
+function _skInSkin(pos, nb, f, skin) {
+  const e = 9;
+  const gx = _skField(pos.x + e, pos.y, pos.z, nb) - _skField(pos.x - e, pos.y, pos.z, nb);
+  const gy = _skField(pos.x, pos.y + e, pos.z, nb) - _skField(pos.x, pos.y - e, pos.z, nb);
+  const gz = _skField(pos.x, pos.y, pos.z + e, nb) - _skField(pos.x, pos.y, pos.z - e, nb);
+  const gl = Math.hypot(gx, gy, gz);
+  if (gl < 1e-9) return false;
+  return (f / (gl / (2 * e))) + skin > 0.5;
+}
 function _skCollide(pos, velocity, radius) {
   if (!SKY_I.on || !_skLive.size) return;
   // (v46.25) The landing lock pins the ship; do not also push it out of the field.
   if (game.playerInPadStasis) return;
   const R = radius || 40;
+  const skin = SKY_I.skin + R;
   for (const rec of _skLive.values()) {
     const I = rec.isl;
     if (!I) continue;
     const dx = pos.x - I.x, dz = pos.z - I.z, dy = pos.y - I.y;
-    const reach = I.R * 1.6 + R;
+    const reach = I.R * 1.6 + R + skin;
     if (dx * dx + dz * dz > reach * reach) continue;
-    if (dy > I.R * (I.up + 0.6) + R || dy < -I.R * (I.dn + 0.4) - R) continue;
+    if (dy > I.R * (I.up + 0.6) + R + skin || dy < -I.R * (I.dn + 0.4) - R - skin) continue;
     const nb = _skNb(I);
     let f = _skField(pos.x, pos.y, pos.z, nb);
-    if (f <= 0) continue;
-    for (let it = 0; it < 5 && f > 0; it++) {
+    // ⭐⭐⭐ TEST AGAINST THE SAME SURFACE WE PUSH TO, OR THE SKIN BECOMES A TRAP.
+    // Owner: "when i crash into it i get thrown around, jittery" / "sometimes get
+    // stuck in it for a second and thrown out".
+    // The test used to be `f <= 0` - the TRUE surface - while the push-out solved to
+    // the INFLATED surface a skin further out. That leaves a dead band one skin thick
+    // with no resistance in it at all: you fly through it untouched, touch the rock,
+    // and are then teleported the whole skin back out in one step. And because
+    // resolveCollision runs once per movement SUBSTEP (MAX_STEP = collRadius*0.5, so
+    // about every 20 units of travel), that lurch fires several times a frame.
+    // Testing and resolving against the same inflated surface makes the response
+    // PROPORTIONAL: entering the skin costs a few units, the correction shrinks to
+    // zero exactly at rest, and there is no cliff to fall off.
+    if (f <= 0 && !_skInSkin(pos, nb, f, skin)) continue;
+    // ⭐⭐ ONE RESOLVE FOR THE WHOLE CLUSTER, AND IT ENDS THE LOOP.
+    // _skNb(I) is I plus every island whose blob MERGES with it, and _skField sums
+    // that list - so the field just probed is already the merged surface of the whole
+    // cluster. The old code nonetheless kept iterating the outer loop, so inside a
+    // column 3-5 islands EACH ran a full resolve against the same surface, each
+    // writing pos and each reflecting velocity, five times over. Owner: "it's jerking
+    // my screen around". Resolve once against the merged field, then stop.
+    let nx = 0, ny = 0, nz = 0;
+    for (let it = 0; it < 6; it++) {
       const e = 9;
       const gx = _skField(pos.x + e, pos.y, pos.z, nb) - _skField(pos.x - e, pos.y, pos.z, nb);
       const gy = _skField(pos.x, pos.y + e, pos.z, nb) - _skField(pos.x, pos.y - e, pos.z, nb);
       const gz = _skField(pos.x, pos.y, pos.z + e, nb) - _skField(pos.x, pos.y, pos.z - e, nb);
-      const gl = Math.hypot(gx, gy, gz) || 1e-6;
-      const nx = gx / gl, ny = gy / gl, nz = gz / gl;
-      const stepOut = Math.min(160, (f / (gl / (2 * e))) + R * 0.35);
-      pos.x += nx * stepOut; pos.y += ny * stepOut; pos.z += nz * stepOut;
-      if (velocity) {
-        const vd = velocity.x * nx + velocity.y * ny + velocity.z * nz;
-        if (vd < 0) { velocity.x -= nx * vd * 1.25; velocity.y -= ny * vd * 1.25; velocity.z -= nz * vd * 1.25; }
-      }
+      const gl = Math.hypot(gx, gy, gz);
+      if (gl < 1e-9) break;
+      // ⭐⭐⭐ THE OUTWARD NORMAL IS THE NEGATED GRADIENT. _skField starts at -0.42 and
+      // ADDS a t^3 term per blob that grows toward each centre - it is POSITIVE INSIDE,
+      // so grad(f) points INWARD. Using +grad as "out" pushed ships DEEPER into the
+      // rock every frame, and made the velocity test `vd < 0` never fire, so nothing
+      // ever slowed down either. That is the whole of "i drove inside" and "stuck in it
+      // for a second and thrown out" - the collider was sucking you in. Wrong since the
+      // islands shipped in v46.10.
+      nx = -gx / gl; ny = -gy / gl; nz = -gz / gl;
+      const gs = gl / (2 * e);                 // field units per world unit
+      // ⚠ STOP CLEAR OF THE MESH, NOT OF THE FIELD. What you SEE is a surface net;
+      // what this tests is the analytic field it was built from, and the two can
+      // disagree by up to a full cell (size/res, ~83 units on a big island), so
+      // resolving to f=0 puts the hull visibly inside the rock.
+      const depth = f / gs + skin;             // world units inside the INFLATED surface
+      if (depth <= 0.5) break;                 // already clear: nothing to do, no lurch
+      // Clamp the per-iteration correction. A deep hit then walks out over a few
+      // iterations instead of one teleport, and a graze moves only the few units it
+      // actually needs - which is the difference between a cushion and a catapult.
+      const step = Math.min(depth, 90);
+      pos.x += nx * step; pos.y += ny * step; pos.z += nz * step;
       f = _skField(pos.x, pos.y, pos.z, nb);
     }
+    // ⚠ Reflect ONCE, after the walk, and only CANCEL the inward component. The old
+    // code did this inside the iteration loop at 1.25x - an amplifying bounce applied
+    // up to five times per island per frame, which is most of what threw the camera.
+    if (velocity) {
+      const vd = velocity.x * nx + velocity.y * ny + velocity.z * nz;
+      if (vd < 0) { velocity.x -= nx * vd; velocity.y -= ny * vd; velocity.z -= nz * vd; }
+    }
+    break;
   }
 }
 try { window.__skyDbg = () => ({ live: _skLive.size, ms: +SKY_I._ms.toFixed(1),
