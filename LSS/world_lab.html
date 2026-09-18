@@ -1,0 +1,3369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- No-store: this file is iterated on constantly and python's http.server sends no
+     Cache-Control, so browsers happily serve a stale copy from the disk cache and you
+     end up debugging code that is not running. -->
+<meta http-equiv="Cache-Control" content="no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<title>LSS World Lab</title>
+<!--
+  LSS WORLD LAB — a procedural Earth. No tiles, no DEM, no imagery, no Overpass.
+
+  WHY THIS EXISTS
+  ---------------
+  FREE FLIGHT: EARTH currently STREAMS its world. earth_lab.html already killed the
+  Google 3D-Tiles bill by swapping in free open data, but the shape of the problem did
+  not change: every patch is still three network round trips (terrarium DEM PNG, Esri
+  imagery JPEGs, an Overpass buildings query), which means load stalls, rate limits, a
+  hard dependency on three third-party services staying up and CORS-open, and a world
+  that cannot exist offline or in a Quest standalone build.
+
+  This lab answers the other way: THE WORLD IS A FUNCTION, NOT A DOWNLOAD.
+
+      height   = f(x, z)              pure, seeded, deterministic, infinite
+      colour   = g(worldPos, normal)  evaluated in the fragment shader, zero texels
+      cities   = PRNG(cellHash)       same city every time, from 12 bytes of seed
+
+  Nothing is fetched. Nothing is cached. Nothing can 429 you. The entire planet is
+  ~60 KB of code, and "streaming" becomes "call the function for the patch you need".
+
+  WHAT IT IS BUILT FROM
+  ---------------------
+  Rules derived by reading real satellite imagery and street maps at matched zoom
+  ladders (z8 -> z18) across ~50 sites. The two findings that shape everything here:
+
+    1. TERRAIN IS SELF-SIMILAR. The Grand Canyon's branching looks the same at 126 km,
+       32 km, 8 km and 2 km. Same for Alpine ridges and the Norwegian skerry coast.
+       One recursive rule, applied at every scale, all the way down to a cutoff of
+       ~100 m — below which the geometry goes smooth and the detail becomes TEXTURE
+       (scree, crevasse stripes, vegetation stipple), not shape.
+       => terrain = weighted ridged multifractal (flat valleys, sharp divides) and a
+          fragment shader for everything finer than a vertex.
+
+    2. CITIES ARE NOT. Tokyo shows nothing new between z10 and z14, then everything at
+       once. Cities are a LADDER of discrete scales — freeway 8 km, arterial 1.6 km,
+       collector 400 m, block 100 m, parcel 15 m — spaced by a near-constant ratio of
+       ~4, with a DIFFERENT geometry on every rung. Self-scaling, not self-similar.
+       => city = fixed-depth recursive subdivision, different grammar per rung.
+       => never build a city out of fbm, and never build terrain out of a hierarchy.
+
+  The full derivation lives in WORLD_RULES.md next to this file.
+
+  RELATIONSHIP TO THE GAME
+  ------------------------
+  PART 1 and PART 2 are the deliverable and are engine-agnostic (PART 1 has no THREE
+  dependency at all). LSSProcWorld in PART 3 implements the same eight-member contract
+  LSSEarthTiles / LSSEarthWorld already satisfy, so _lssGmapsBuildLevel can construct
+  it instead, and _lssGmapsCollideEntity / _lssGmapsTick / worldSDF / the race routes
+  keep working untouched — they only ever traverse `.group` for isMesh and raycast it.
+
+  SCALE: the world function works in TRUE METRES. The game applies 7 world units per
+  metre at the group (level.scale), exactly as gmaps_earth does today.
+
+  THREE: pinned to 0.165.0, the version index-working.html's importmap loads.
+  TEST HOOKS: window.WL.* — gen(), at(), stats(), fps(), cam(), tp(), knobs().
+-->
+<style>
+  :root {
+    --bg:#05070f; --panel:rgba(10,16,28,.94); --line:rgba(255,170,0,.28);
+    --ink:#cfe7ff; --dim:#7f93ad; --hot:#ffaa00; --bad:#ff5566; --good:#66dd88;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);overflow:hidden;
+    font-family:'Rajdhani','Segoe UI',system-ui,sans-serif}
+  canvas{display:block}
+  #ui{position:fixed;top:10px;left:10px;width:286px;z-index:10;background:var(--panel);
+    border:1px solid var(--line);border-radius:6px;padding:10px 12px;backdrop-filter:blur(6px);
+    max-height:calc(100vh - 20px);overflow-y:auto}
+  #ui h1{font-size:13px;letter-spacing:.14em;color:var(--hot);margin:0;font-weight:700}
+  #ui .sub{font-size:10px;color:var(--dim);letter-spacing:.07em;margin:2px 0 10px;text-transform:uppercase}
+  label{display:block;font-size:10px;letter-spacing:.1em;color:var(--dim);
+    text-transform:uppercase;margin:9px 0 2px}
+  select,input[type=text]{width:100%;padding:5px 7px;background:#0c1220;color:var(--ink);
+    border:1px solid #27354c;border-radius:3px;font-family:inherit;font-size:12px}
+  input[type=range]{width:100%;accent-color:var(--hot);margin:1px 0 0}
+  .row{display:flex;gap:5px}.row>*{flex:1}
+  button{padding:6px 8px;background:#1b2b45;color:var(--ink);border:1px solid #34506f;
+    border-radius:3px;cursor:pointer;font-family:inherit;font-size:11px;letter-spacing:.07em;
+    text-transform:uppercase}
+  button:hover{background:#24395c;border-color:var(--hot)}
+  button.go{background:#4a3410;border-color:var(--hot);color:var(--hot);font-weight:700}
+  .val{float:right;color:var(--ink);font-variant-numeric:tabular-nums}
+  .chk{display:flex;align-items:center;gap:5px;margin-top:7px;font-size:10px;
+    letter-spacing:.06em;color:var(--dim);text-transform:uppercase}
+  .chk input{accent-color:var(--hot)}
+  hr{border:0;border-top:1px solid #1b2536;margin:11px 0 2px}
+  #stats{position:fixed;top:10px;right:10px;z-index:10;text-align:right;background:var(--panel);
+    border:1px solid var(--line);border-radius:6px;padding:8px 11px;font-size:11px;
+    line-height:1.55;color:var(--dim);font-variant-numeric:tabular-nums;min-width:156px}
+  #stats b{color:var(--ink);font-weight:600}
+  #stats #fps{color:var(--hot);font-size:17px;font-weight:700;line-height:1.1}
+  #stats .hdr{color:var(--hot);font-size:9px;letter-spacing:.12em;margin-top:6px;
+    border-top:1px solid #1b2536;padding-top:4px;text-transform:uppercase}
+  #help{position:fixed;bottom:8px;left:10px;z-index:10;font-size:10px;color:#4d5f76;
+    letter-spacing:.07em}
+  #note{position:fixed;bottom:8px;right:10px;z-index:10;font-size:10px;color:#5d7a99;
+    text-align:right;line-height:1.5}
+  #boot{position:fixed;inset:0;z-index:50;background:#05070f;display:flex;
+    align-items:center;justify-content:center;color:var(--hot);letter-spacing:.2em;font-size:13px}
+</style>
+</head>
+<body>
+
+<div id="ui">
+  <h1>LSS WORLD LAB</h1>
+  <p class="sub">procedural earth &middot; zero bytes streamed &middot; <span id="build"></span></p>
+
+  <label>World <span class="val" id="modeV">earth</span></label>
+  <div class="row">
+    <button id="mEarth" class="go">Earth</button>
+    <button id="mSky">Skylands</button>
+  </div>
+
+  <label>Island density <span class="val" id="idV">1.00&times;</span></label>
+  <input type="range" id="idens" min="0.2" max="2.5" step="0.05" value="2.5">
+
+  <label>Island size <span class="val" id="isV">1.00&times;</span></label>
+  <input type="range" id="isize" min="0.4" max="2.2" step="0.05" value="1.3">
+
+  <label>World seed <span class="val" id="seedV">1337</span></label>
+  <div class="row">
+    <input type="text" id="seed" value="1337">
+    <button class="go" id="regen">Regen</button>
+  </div>
+
+  <label>Jump to</label>
+  <div class="row">
+    <select id="jump">
+      <option value="city">Nearest city</option>
+      <option value="bigcity">Biggest city near</option>
+      <option value="coast">Coastline</option>
+      <option value="mtn">Mountains</option>
+      <option value="river">River valley</option>
+      <option value="desert">Desert</option>
+      <option value="farm">Farmland</option>
+    </select>
+    <button id="go">Go</button>
+  </div>
+
+  <hr>
+  <label>Sea level <span class="val" id="seaV">0 m</span></label>
+  <input type="range" id="sea" min="-400" max="600" step="10" value="600">
+
+  <label>Relief <span class="val" id="reliefV">1.00&times;</span></label>
+  <input type="range" id="relief" min="0.2" max="2.5" step="0.05" value="1.35">
+
+  <label>Erosion (valley flatness) <span class="val" id="eroV">1.00</span></label>
+  <input type="range" id="ero" min="0" max="2" step="0.05" value="2">
+
+  <label>Structural grain <span class="val" id="grainV">1.00</span></label>
+  <input type="range" id="grain" min="0" max="2.5" step="0.05" value="2.1">
+
+  <label>City density <span class="val" id="cdV">1.00&times;</span></label>
+  <input type="range" id="cd" min="0" max="2.5" step="0.05" value="1.8">
+
+  <label>Sun elevation <span class="val" id="sunV">26&deg;</span></label>
+  <input type="range" id="sun" min="2" max="80" step="1" value="5">
+
+  <hr>
+  <label>View <span class="val" id="viewV">ground</span></label>
+  <div class="row">
+    <button id="vGround">Ground</button>
+    <button id="vMap">Map</button>
+  </div>
+
+  <hr>
+  <label>Cloud cover <span class="val" id="covV">0.50</span></label>
+  <input type="range" id="cov" min="0" max="1" step="0.02" value="0.68">
+
+  <label>Cloud base <span class="val" id="cbV">1200 m</span></label>
+  <input type="range" id="cb" min="300" max="4000" step="50" value="2050">
+
+  <label>Cloud depth <span class="val" id="cdepV">1800 m</span></label>
+  <input type="range" id="cdep" min="200" max="4000" step="50" value="3400">
+
+  <label>Wind <span class="val" id="windV">18 m/s</span></label>
+  <input type="range" id="wind" min="0" max="60" step="1" value="22">
+
+  <label>March quality <span class="val" id="mqV">56</span></label>
+  <input type="range" id="mq" min="16" max="128" step="8" value="32">
+
+  <hr>
+  <div class="chk"><input type="checkbox" id="clouds" checked><span>Volumetric clouds</span></div>
+  <div class="chk"><input type="checkbox" id="cshad" checked><span>Cloud shadows on ground</span></div>
+  <div class="chk"><input type="checkbox" id="cities" checked><span>Cities</span></div>
+  <div class="chk"><input type="checkbox" id="roads" checked><span>Road meshes</span></div>
+  <div class="chk"><input type="checkbox" id="water" checked><span>Water</span></div>
+  <div class="chk"><input type="checkbox" id="wire"><span>Wireframe</span></div>
+  <div class="chk"><input type="checkbox" id="lodc"><span>Colour by LOD</span></div>
+</div>
+
+<div id="stats">
+  <div id="fps">&mdash;</div>
+  <div>tris <b id="tris">0</b></div>
+  <div>draws <b id="draws">0</b></div>
+  <div>patches <b id="patches">0</b></div>
+  <div>gen ms <b id="genms">0</b></div>
+  <div class="hdr">position</div>
+  <div>alt <b id="alt">0</b> m</div>
+  <div>ground <b id="gnd">0</b> m</div>
+  <div>biome <b id="biome">&mdash;</b></div>
+  <div class="hdr">city</div>
+  <div><b id="cityname">&mdash;</b></div>
+  <div>bldgs <b id="nbld">0</b></div>
+  <div class="hdr">skylands</div>
+  <div>islands <b id="nisl">0</b></div>
+  <div>mesh ms <b id="islms">0</b></div>
+  <div class="hdr">volume</div>
+  <div>iso <b id="viso">&mdash;</b></div>
+  <div>steps <b id="vsteps">0</b></div>
+  <div class="hdr">streamed</div>
+  <div><b id="bytes" style="color:#66dd88">0 bytes</b></div>
+</div>
+
+<div id="help">W A S D &middot; Q/E up-down &middot; SHIFT boost &middot; drag to look &middot; scroll = speed &middot; M = map</div>
+<div id="note">everything on screen is <b>f(x,z,seed)</b><br>no tiles &middot; no DEM &middot; no imagery &middot; no OSM</div>
+<div id="boot">GENERATING WORLD&hellip;</div>
+
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.165.0/build/three.module.min.js" } }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+window.THREE = THREE;
+
+// Shown in the HUD. If this does not match what you just edited, the browser is
+// serving a cached copy and nothing you change will appear.
+const WL_BUILD = 'w1';
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   PART 1 — THE WORLD FUNCTION
+   Engine-agnostic. No THREE. Pure, seeded, deterministic, infinite in x and z.
+   This is the half that replaces the DEM stream.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* ---- integer hash ------------------------------------------------------------
+   Math.imul keeps every product in int32, so this is exactly reproducible across
+   machines. A float sin-hash is NOT — it drifts with the platform's sin(), and a
+   world whose coastline moves between two players' machines is not a world.      */
+function ihash(x, y, s) {
+  let n = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(s | 0, 1442695051);
+  n = Math.imul(n ^ (n >>> 13), 1274126177);
+  return ((n ^ (n >>> 16)) >>> 0) / 4294967296;
+}
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const clamp = (v, a, b) => v < a ? a : (v > b ? b : v);
+const sstep = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+const mix = (a, b, t) => a + (b - a) * t;
+
+/* ---- value noise -------------------------------------------------------------
+   Deliberately value noise and not simplex. Value noise's grid artefacts read as
+   faceting only when you use few octaves at low amplitude; here every use is 4+
+   octaves, and value noise is ~3x cheaper per sample. Terrain generation is the
+   single hottest CPU loop in the streamer, so that ratio decides the frame budget. */
+function vn(x, y, s) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  const a = ihash(xi, yi, s), b = ihash(xi + 1, yi, s);
+  const c = ihash(xi, yi + 1, s), d = ihash(xi + 1, yi + 1, s);
+  return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+}
+function fbm(x, y, oct, s) {
+  let v = 0, a = 0.5, f = 1, n = 0;
+  for (let i = 0; i < oct; i++) { v += a * vn(x * f, y * f, s + i * 17); n += a; f *= 2; a *= 0.5; }
+  return v / n;
+}
+
+/* ---- weighted ridged multifractal (Musgrave) ---------------------------------
+   ⭐ THE SINGLE MOST IMPORTANT FUNCTION IN THE FILE.
+
+   Plain fbm makes rolling lumps. Real terrain — the Grand Canyon ladder, the Alps
+   ladder — is the opposite shape: BROAD FLAT INTERFLUVES cut by NARROW SHARP
+   INCISIONS, with the branching repeating identically at every scale.
+
+   The weight term `w` is what produces that. Each octave is multiplied by how high
+   the PREVIOUS octave was, so fine detail only appears on ground that is already
+   raised — i.e. on the ridges. Valley floors, where w has collapsed to ~0, stay
+   flat. That one line is the difference between "noise" and "erosion", and it
+   costs nothing: no simulation, no iteration, no neighbourhood, so it stays a pure
+   f(x,z) and an endless world can evaluate it per-vertex on demand.              */
+function rmf(x, y, oct, s, lac, gain, sharp) {
+  let sum = 0, amp = 0.5, f = 1, w = 1, norm = 0;
+  for (let i = 0; i < oct; i++) {
+    let n = 1 - Math.abs(2 * vn(x * f, y * f, s + i * 31) - 1);
+    n *= n;                       // sharpen the crease into a ridge
+    n *= w;
+    w = clamp(n * (1.6 + sharp), 0, 1);   // ← the erosion term
+    sum += n * amp; norm += amp;
+    f *= lac; amp *= gain;
+  }
+  return sum / norm;
+}
+
+/* ─────────────────────────── world knobs ─────────────────────────── */
+// ⭐ OWNER-PICKED DEFAULTS (2026-09-18). Read straight off the sliders in a live
+// skylands session the owner had tuned and called good: a dense 2.5x archipelago of
+// large islands under heavy weather at a 5-degree sun. The sliders below are the
+// source of truth at boot (bindRange applies them over these literals).
+const W = {
+  seed: 1337,
+  sea: 600,            // metres — a slider, because sea level IS the coastline generator
+  relief: 1.35,
+  erosion: 2.0,
+  grain: 2.1,        // structural anisotropy (Zagros folds vs isotropic hills)
+  cityDensity: 1.8,
+};
+
+/* ---- structural grain --------------------------------------------------------
+   Zagros = parallel folds. Appalachians = zigzag folds. Namib = wind-aligned dunes.
+   Norway = fracture-aligned fjords. Every one of those reads as "a place" instead
+   of "some noise" purely because its features share ONE DIRECTION. Isotropic noise
+   can never produce it, no matter how many octaves you spend.
+
+   So before sampling anything, rotate into a regional frame and squash one axis.
+   The squash factor stretches features along the grain; the region's angle itself
+   varies slowly (~400 km), so grain provinces meet at believable seams.           */
+const _g = { a: 0, s: 0 };
+function grainAt(x, z, out) {
+  const a = (fbm(x / 430000, z / 430000, 3, 91) - 0.5) * 6.2832;
+  const s = fbm(x / 370000 + 5.3, z / 370000 + 5.3, 3, 92);
+  out.a = a; out.s = s * W.grain;
+  return out;
+}
+
+/* ---- the elevation stack ----------------------------------------------------- */
+// Continental mask. One low-frequency field; the coastline is wherever it crosses
+// the land threshold, so the coast inherits the fractal detail of the field for
+// free — which is exactly how a real coast is made (Bergen ladder: the same shape
+// at 156 km, 39 km and 9.7 km).
+function continentAt(x, z) { return fbm(x / 305000, z / 305000, 6, 11); }
+
+// Mountains come in LINEAR BELTS (Alps, Andes, Zagros), never in blobs. A ridge
+// function at continental scale gives belts; cubing it keeps them narrow.
+function orogenyAt(x, z) {
+  const belt = 1 - Math.abs(2 * vn(x / 168000, z / 168000, 23) - 1);
+  return belt * belt * (0.25 + 0.75 * belt);
+}
+
+/* ── VOLCANOES ──────────────────────────────────────────────────────────────
+   A stratovolcano is the one landform that is POINT-symmetric. Every other
+   mountain here comes out of a ridge field, and a ridge field can never make
+   Fuji — a single cone, a crater at the top, and radial gullies running all the
+   way down. They are rare, they are landmarks, and they are 30 lines.            */
+function volcanoAt(x, z) {
+  const C = 145000;
+  let add = 0;
+  const i0 = Math.floor(x / C), j0 = Math.floor(z / C);
+  for (let i = i0 - 1; i <= i0 + 1; i++) for (let j = j0 - 1; j <= j0 + 1; j++) {
+    if (ihash(i, j, W.seed + 901) > 0.30) continue;
+    const vx = (i + 0.2 + ihash(i, j, W.seed + 902) * 0.6) * C;
+    const vz = (j + 0.2 + ihash(i, j, W.seed + 903) * 0.6) * C;
+    const dx = x - vx, dz = z - vz;
+    const rad = 4600 + ihash(i, j, W.seed + 904) * 8200;
+    const d = Math.hypot(dx, dz) / rad;
+    if (d > 1.7) continue;
+    const hgt = 700 + ihash(i, j, W.seed + 905) * 2500;
+    // radial gullies — the ribbing that says "this was built by what ran off it"
+    const ang = Math.atan2(dz, dx);
+    const nGul = 16 + Math.floor(ihash(i, j, W.seed + 906) * 18);
+    const r = d * (1 + 0.052 * Math.sin(ang * nGul + ihash(i, j, 7) * 6.283)
+                     + 0.030 * Math.sin(ang * (nGul * 2 + 3)));
+    const cone = Math.exp(-Math.pow(r, 1.65) * 2.4);
+    const crater = Math.exp(-(r / 0.115) * (r / 0.115)) * 0.52;
+    add += hgt * (cone - crater);
+  }
+  return add;
+}
+
+/* ── GLACIAL BASINS ─────────────────────────────────────────────────────────
+   The Finland plate has thousands of lakes and NO drainage tree. Ice does not
+   erode a dendritic network, it scours basins and leaves them — "deranged"
+   drainage. A dendritic generator can never produce it, so it needs its own
+   province: blobs carved from a jittered lattice, each holding its own water at
+   its own level (a global level would drown the whole province).                */
+function lakeBasin(x, z) {
+  const C = 1150;
+  const i0 = Math.floor(x / C), j0 = Math.floor(z / C);
+  let best = 0;
+  for (let i = i0 - 1; i <= i0 + 1; i++) for (let j = j0 - 1; j <= j0 + 1; j++) {
+    if (ihash(i, j, W.seed + 911) > 0.16) continue;
+    const bx = (i + 0.15 + ihash(i, j, W.seed + 912) * 0.7) * C;
+    const bz = (j + 0.15 + ihash(i, j, W.seed + 913) * 0.7) * C;
+    const rr = C * (0.22 + ihash(i, j, W.seed + 914) * 0.42);
+    // elongate along the ice-flow direction — Finnish lakes are all parallel
+    const ia = ihash(i0 * 7, j0 * 7, W.seed + 915) * 3.1416;
+    const ca = Math.cos(ia), sa = Math.sin(ia);
+    const dx = x - bx, dz = z - bz;
+    const ex = (dx * ca + dz * sa) / 2.3, ez = (-dx * sa + dz * ca);
+    const t = 1 - sstep(rr * 0.35, rr, Math.hypot(ex, ez));
+    if (t > best) best = t;
+  }
+  return best;
+}
+
+// soft stair: flat treads, steep risers. The Deccan plate — flood basalt stacks
+// weather into discrete benches, so elevation there is QUANTISED, not continuous.
+function softStair(v, step) {
+  const q = v / step, f = q - Math.floor(q);
+  return (Math.floor(q) + sstep(0.28, 0.72, f)) * step;
+}
+
+const _s = { h: 0, land: 0, wet: 0, base: 0, water: 0, slope: 0 };
+
+/**
+ * The world function. Returns metres above sea datum plus the fields the shader
+ * and the city placer need. `out` is reused — this is called per vertex.
+ */
+function sample(x, z, out) {
+  out = out || {};
+  grainAt(x, z, _g);
+  const ca = Math.cos(_g.a), sa = Math.sin(_g.a);
+  // ⚠ 3.4x squash does not make Zagros, it makes CORRUGATED IRON — long perfectly
+  // parallel razor ridges with a sawtooth running down them, because squashing an
+  // axis-aligned value-noise lattice this hard exposes the lattice. 1.6x reads as
+  // structural grain; anything more reads as a machine.
+  const sq = 1 + 1.6 * _g.s * _g.s;
+  // DOMAIN WARP. The other half of the same fix, and the cheapest realism in the
+  // file: offsetting the sample point by a low-frequency noise vector destroys the
+  // lattice regularity and bends ridge lines the way real strike lines bend.
+  const wa = 2600 + 5200 * _g.s;
+  const wx = (fbm(x / 41000 + 11, z / 41000 + 11, 3, 81) - 0.5) * wa;
+  const wz = (fbm(x / 41000 + 23, z / 41000 + 23, 3, 82) - 0.5) * wa;
+  const gx = (x * ca + z * sa) + wx;
+  const gz = (-x * sa + z * ca) * sq + wz;
+
+  const cont = continentAt(x, z);
+  const land = sstep(0.455, 0.545, cont);           // 0 ocean … 1 inland
+  const oro = orogenyAt(x, z) * sstep(0.48, 0.72, cont);
+
+  // ⭐ ERODIBILITY SETS DRAINAGE DENSITY. The Badlands and Loess plates are cut by
+  // a gully every 40 m; the granite next door has one valley per 4 km. Same
+  // process, same rainfall — different rock. One regional field scales every
+  // drainage frequency, and it is the cheapest "this is somewhere else" lever in
+  // the generator: soft provinces come out shredded, hard ones come out massive.
+  const erod = 0.55 + fbm(x / 198000 + 77, z / 198000 + 77, 3, 66) * 1.15;
+  // stepped-plateau (flood basalt) province
+  const trap = sstep(0.60, 0.80, fbm(x / 232000 + 61, z / 232000 + 61, 3, 63));
+  // glaciated province — deranged drainage, lake-studded. ⚠ Gated on a COLD field
+  // as well as a glaciation field: the first build put a Finnish lake district in
+  // the middle of a sand sea, because "deranged drainage" was a shape parameter
+  // with no climate behind it. Ice provinces belong where ice was.
+  const cold = sstep(0.42, 0.68, fbm(x / 305000 + 88, z / 305000 + 88, 3, 65));
+  const glac = sstep(0.60, 0.82, fbm(x / 187000 + 44, z / 187000 + 44, 3, 64)) * cold;
+
+  // rolling lowland — gentle, fbm is right here because lowlands really ARE lumpy.
+  // Two terms, because a single wavelength is the tell: a 24 km swell for the
+  // regional form and a 6 km hill octave gated by a slowly-varying "hilliness", so
+  // some provinces are Kansas and their neighbours are Tuscany.
+  const hilly = sstep(0.38, 0.72, fbm(x / 240000 + 17, z / 240000 + 17, 3, 34));
+  const low = (fbm(x / 24000, z / 24000, 5, 31) - 0.44) * 520
+            + (fbm(gx / 6100, gz / 6100, 4, 32) - 0.5) * 300 * hilly;
+
+  // the eroded highland
+  const mt = rmf(gx / 33000, gz / 33000, 8, 47, 2.03, 0.52, W.erosion);
+
+  // plateau clamp — the Grand Canyon rule: a preserved flat upper surface that the
+  // drainage cuts INTO, rather than a set of peaks. Regions vary between the two.
+  const plat = sstep(0.55, 0.78, fbm(x / 210000 + 9, z / 210000 + 9, 3, 55));
+  const mtShaped = mix(mt, 0.62 + (mt - 0.62) * 0.22, plat);
+
+  // dissected upland. Earth is not "plain, then suddenly Alps" — most land between
+  // the two is hill country cut by its own small drainage (the Appalachian, Tuscan
+  // and bocage plates). Without this term the lowlands read as a putting green.
+  const upl = sstep(0.34, 0.74, fbm(x / 176000 + 21, z / 176000 + 21, 3, 35));
+  const dis = rmf(gx / (12500 / erod), gz / (12500 / erod), 6, 44, 2.02, 0.55, W.erosion);
+
+  let h = low + upl * dis * 760 * W.relief + oro * mtShaped * 4300 * W.relief;
+  h += volcanoAt(x, z) * land;
+  if (trap > 0.02) h = mix(h, softStair(h, 165), trap * 0.82);
+
+  // regional base level: the same stack with the fine octaves removed. This is
+  // what rivers and lakes sit ON, and it is why water levels vary smoothly
+  // downstream instead of every valley holding a flat global-sea puddle.
+  let base = low + upl * 0.42 * 760 * W.relief
+           + oro * (0.30 + 0.34 * fbm(gx / 96000, gz / 96000, 3, 48)) * 4300 * W.relief;
+
+  // drainage incision. A second, coarser weighted-ridged field inverted: high where
+  // the valley network runs. Tributaries inherit the parent's branching because the
+  // weight term already gated them — no flow accumulation pass needed.
+  const vp = rmf(gx / (47000 / erod), gz / (47000 / erod), 6, 77, 2.0, 0.5, W.erosion);
+  // ⚠ MEASURE THE FIELD BEFORE YOU THRESHOLD IT. vp's median over land is ~0.42,
+  // so sstep(0.62, 0.06, vp) — which looks like "a narrow channel" — is actually
+  // true over most of the map, and the first build flooded 45% of all LAND with
+  // river. A channel has to sit in vp's bottom few per cent, not its middle.
+  const valley = sstep(0.30, 0.06, vp);             // broad valley floor, ~20% of land
+  const chan   = sstep(0.075, 0.015, vp);           // the watercourse itself, ~5%
+  h -= valley * 150 * W.erosion * clamp(h / 900, 0, 1);
+  h -= chan * 46 * W.erosion;
+
+  // the ocean floor, and the shelf ramp into it
+  const deep = -2500 + (fbm(x / 88000, z / 88000, 4, 61) - 0.5) * 1100;
+  h = deep + (h - deep) * sstep(0, 1, land);
+  base = deep + (base - deep) * sstep(0, 1, land);
+
+  // water surface: the sea, plus rivers and lakes riding the local base level.
+  // One expression yields sea, lake, river and estuary — flood a drainage network
+  // and you get every coast type for free (ria, fjord, skerry, archipelago).
+  // ⚠ THE SIGN THAT MATTERS. A water level that RISES as you leave the channel
+  // floods every dry valley to above its own base level — the whole continent comes
+  // out as lake. Outside a channel the level must fall away to nothing, so the
+  // (1-chan) term is subtracted and squared: water exists only where a channel is.
+  // 4th power, not 2nd: at chan=0.5 a squared falloff still allows water 460 m
+  // below base level, which any dissected valley reaches — that was 19% of land
+  // under river. ^4 collapses it to 156 m and lands rivers+lakes at ~3% of land,
+  // which is Earth's number.
+  const q = (1 - chan) * (1 - chan);
+  let wl = Math.max(W.sea, base - 18 - q * q * 2600);
+
+  // glacial lakes: each basin carries its OWN surface, derived from the ground it
+  // was cut into, so a province full of them does not become one flooded plain
+  if (glac > 0.18) {
+    const lb = lakeBasin(x, z) * glac;
+    if (lb > 0.001) {
+      const cut = lb * 30;
+      const pre = h;
+      h -= cut;
+      wl = Math.max(wl, pre - cut * 0.20);
+    }
+  }
+
+  out.h = h;
+  out.vp = vp; out.valley = valley; out.chan = chan; out.oro = oro;
+  out.erod = erod; out.trap = trap; out.glac = glac;
+  out.land = land;
+  out.base = base;
+  out.wl = wl;                                      // the plane, always
+  out.water = (h < wl) ? wl : -1e9;                 // …and whether it is above ground here
+  // MOISTURE drives every biome downstream, so it needs the FULL range or the
+  // whole planet comes out one colour. A regional climate field (the "latitude"
+  // band, ~200 km) does the heavy lifting; valleys add a local bonus (rivers are
+  // green in a desert — the Nile plate); altitude takes it away.
+  const clim = sstep(0.31, 0.71, fbm(x / 196000, z / 196000, 4, 71));
+  out.wet = clamp(0.02 + clim * 1.06 + valley * 0.26
+                  - (1 - land) * 0.12 - sstep(900, 2700, h) * 0.40, 0, 1);
+  return out;
+}
+function heightAt(x, z) { return sample(x, z, _s).h; }
+
+/* ⭐ THE SURFACE INDIRECTION. The city generator is ~400 lines of subdivision,
+   district logic and six block grammars, and none of it cares what kind of ground
+   it is standing on — it asks three questions: how high is it here, is it water,
+   how steep is it. Route those three through SURF and the identical generator
+   builds on a floating island. That is the entire skylands integration; no part of
+   the grammar work is duplicated or forked. */
+let SURF = null;                                   // null = the Earth heightfield
+const surfH     = (x, z)    => SURF ? SURF.h(x, z) : heightAt(x, z);
+const surfWet   = (x, z)    => SURF ? SURF.off(x, z) : (sample(x, z, {}).water > -1e8);
+const surfSlope = (x, z, e) => SURF ? SURF.slope(x, z, e) : slopeAt(x, z, e);
+function slopeAt(x, z, e) {
+  e = e || 60;
+  const a = heightAt(x - e, z), b = heightAt(x + e, z);
+  const c = heightAt(x, z - e), d = heightAt(x, z + e);
+  return Math.hypot(b - a, d - c) / (2 * e);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   PART 2 — THE CITY FUNCTION
+   This is the half that replaces the Overpass buildings query AND the imagery
+   stream, because a city you generate is a city you can also colour.
+
+   THE FINDING THAT SHAPES IT: cities are NOT fractal. The Tokyo zoom ladder shows
+   nothing new between z10 and z14 and then everything at once; the LA ladder shows
+   four flat, separate rungs — freeway 6-8 km, arterial 1600 m, collector 400 m,
+   local block ~100 x 280 m, parcel ~15 x 40 m. Ratio ~4 between rungs, and a
+   COMPLETELY DIFFERENT geometry on each. So the generator is a fixed-depth
+   recursive subdivision with per-depth street widths, not a noise field.
+
+   The second finding: blocks are the FACES of the street graph. The hub city in
+   index-working.html builds blocks first on a rotated lattice and separates them
+   with park bands — its own comment says "this city has no streets" — which is why
+   it reads as a diagram from the air rather than a place. Here the streets are the
+   gaps left by the subdivision, so the topology is correct by construction and the
+   hierarchy falls out of the same recursion.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+const CITY_CELL = 30000;           // m — one candidate site per 30 km cell
+
+// Street width per subdivision depth, metres. Straight off the LA / Paris / Tokyo
+// z16-z18 plates: arterials run 40-60 m kerb to kerb with a planted median,
+// collectors 20-25, locals 12-16, alleys 6-9.
+const ST_W = [58, 34, 20, 13, 8];
+
+// Plan archetypes, each one traced to the plates that produced it.
+const PLANS = {
+  grid:       { w: 0.26, split: 'rhythm', jit: 0.03, rot: 0.00, depth: 4, blk: 95,  polar: 0 },
+  radial:     { w: 0.14, split: 'even',   jit: 0.10, rot: 0.00, depth: 4, blk: 105, polar: 1 },
+  organic:    { w: 0.22, split: 'jitter', jit: 0.34, rot: 0.11, depth: 5, blk: 62,  polar: 0 },
+  superblock: { w: 0.16, split: 'even',   jit: 0.07, rot: 0.00, depth: 3, blk: 290, polar: 0 },
+  linear:     { w: 0.12, split: 'rhythm', jit: 0.12, rot: 0.00, depth: 4, blk: 120, polar: 0 },
+  medieval:   { w: 0.10, split: 'jitter', jit: 0.46, rot: 0.19, depth: 5, blk: 44,  polar: 0 },
+};
+
+// Regional roof palettes. Roof colour on Earth is a REGIONAL CONSTANT with low
+// variance — Paris zinc, Barcelona/Naples terracotta, Tokyo/LA pale grey, Marrakesh
+// ochre, Dubai sand-and-white. Randomising roof colour per building is the single
+// fastest way to make a procedural city look fake, so the jitter here is tiny and
+// the palette is chosen once per city.
+// ⭐ REAL AERIAL IMAGERY IS NEARLY MONOCHROME. Read the Manhattan, Paris and Tokyo
+// z18 plates channel by channel: the only saturated pixels in the whole frame are
+// CARS — and, at a port, containers. Everything else is grey, grey-brown, grey-green.
+// A city built from "nice" saturated palettes reads as a toy instantly and no amount
+// of geometry fixes it. So these are pulled most of the way to neutral, and
+// saturation is spent only where the plates spend it.
+const _desat = (c, k) => { const g = 0.30 * c[0] + 0.59 * c[1] + 0.11 * c[2];
+  return [c[0] + (g - c[0]) * k, c[1] + (g - c[1]) * k, c[2] + (g - c[2]) * k]; };
+const ROOFS = (() => {
+  const raw = {
+    zinc:       [[0.38, 0.40, 0.43], [0.33, 0.35, 0.39], [0.44, 0.46, 0.48]],
+    terracotta: [[0.55, 0.30, 0.21], [0.48, 0.26, 0.18], [0.61, 0.36, 0.25]],
+    pale:       [[0.60, 0.60, 0.58], [0.52, 0.53, 0.53], [0.68, 0.67, 0.63]],
+    ochre:      [[0.60, 0.45, 0.29], [0.53, 0.39, 0.25], [0.67, 0.52, 0.34]],
+    sand:       [[0.72, 0.68, 0.60], [0.64, 0.60, 0.53], [0.80, 0.77, 0.70]],
+    slate:      [[0.26, 0.27, 0.29], [0.21, 0.22, 0.25], [0.32, 0.33, 0.34]],
+  };
+  const k = { zinc: 0.35, terracotta: 0.42, pale: 0.25, ochre: 0.45, sand: 0.40, slate: 0.25 };
+  const out = {};
+  for (const n in raw) out[n] = raw[n].map(c => _desat(c, k[n]));
+  return out;
+})();
+const ROOF_KEYS = Object.keys(ROOFS);
+const PLAN_LIST = Object.keys(PLANS);
+
+/**
+ * Is there a city in this 30 km cell, and what is it?
+ * Pure function of (ci, cj, seed) — every peer derives the identical city.
+ *
+ * SITE BEFORE PLAN. Real cities are placed by terrain before they are planned by
+ * people: a sheltered harbour, a river confluence, a pass, a coastal plain. So the
+ * site is SCORED against the world function (coast proximity, river proximity,
+ * flatness) and rejected if the ground says no — which is why cities here end up
+ * on estuaries and in valley mouths instead of scattered like Poisson dots.
+ */
+const _cityCache = new Map();
+function cityAt(ci, cj) {
+  const key = ci + ':' + cj;
+  let c = _cityCache.get(key);
+  if (c !== undefined) return c;
+  c = _buildCitySite(ci, cj);
+  _cityCache.set(key, c);
+  return c;
+}
+function _buildCitySite(ci, cj) {
+  const S = W.seed;
+  const r1 = ihash(ci, cj, S + 501), r2 = ihash(ci, cj, S + 502), r3 = ihash(ci, cj, S + 503);
+  const x = (ci + 0.16 + r1 * 0.68) * CITY_CELL;
+  const z = (cj + 0.16 + r2 * 0.68) * CITY_CELL;
+
+  const s0 = sample(x, z, {});
+  if (s0.h < W.sea + 3 || s0.h > W.sea + 2300) return null;
+  if (s0.water > -1e8) return null;
+
+  const slope = slopeAt(x, z, 220);
+  if (slope > 0.17) return null;            // the LA rule: the grid stops at the slope break
+
+  // how close is open water / a river? probed on a ring — cheap and good enough
+  let coast = 0, river = 0;
+  for (let k = 0; k < 8; k++) {
+    const a = k / 8 * 6.2832;
+    const sp = sample(x + Math.cos(a) * 2600, z + Math.sin(a) * 2600, {});
+    if (sp.water > -1e8) { if (sp.land < 0.62) coast = 1; else river = 1; }
+  }
+  let score = 0.18 + 0.46 * coast + 0.30 * river + 0.34 * (1 - clamp(slope * 6, 0, 1)) + 0.30 * r3;
+  score *= W.cityDensity;
+  if (score < 0.70) return null;
+
+  // RANK-SIZE. Real city sizes follow a power law: a handful of metropolises, many
+  // towns, a swarm of villages. r^2.6 gives that distribution from one uniform.
+  const rank = Math.pow(r3, 2.6);
+  const R = 620 + rank * 9800 + coast * 900;
+
+  // plan archetype, weighted — but terrain has the final say: a city on a narrow
+  // coastal shelf becomes linear whatever the dice wanted (Hong Kong, Dubai, every
+  // Norwegian town on the Bergen plate).
+  const rp = ihash(ci, cj, S + 504);
+  let acc = 0, plan = 'grid', tot = 0;
+  for (const k in PLANS) tot += PLANS[k].w;
+  for (const k in PLANS) { acc += PLANS[k].w / tot; if (rp <= acc) { plan = k; break; } }
+  if (coast && slope > 0.10) plan = 'linear';
+
+  const roof = ROOF_KEYS[Math.floor(ihash(ci, cj, S + 505) * ROOF_KEYS.length)];
+  return {
+    id: ci + ':' + cj, x, z, R, plan, roof, rank, y: s0.h, coast, river,
+    yaw: ihash(ci, cj, S + 506) * 6.2832,
+    seed: (Math.imul(ci, 73856093) ^ Math.imul(cj, 19349663) ^ S) | 0,
+    name: _cityName(ci, cj, S),
+    built: null, coarse: null,
+  };
+}
+
+// Throwaway name generator so the HUD has something to say. Syllables only — no
+// real place names, so nothing here can accidentally claim to be somewhere real.
+const _SY1 = ['kor', 'vel', 'mar', 'ash', 'tor', 'del', 'bran', 'sel', 'nor', 'kal', 'ver', 'thal'];
+const _SY2 = ['an', 'ith', 'or', 'ez', 'ara', 'un', 'iel', 'os', 'ay', 'ek'];
+const _SY3 = ['', '', '', ' Reach', ' Bay', ' Gate', ' Cross', ' Hollow', ' Point', ' Landing'];
+function _cityName(ci, cj, S) {
+  const a = _SY1[Math.floor(ihash(ci, cj, S + 601) * _SY1.length)];
+  const b = _SY2[Math.floor(ihash(ci, cj, S + 602) * _SY2.length)];
+  const c = _SY3[Math.floor(ihash(ci, cj, S + 603) * _SY3.length)];
+  return (a + b).replace(/^./, m => m.toUpperCase()) + c;
+}
+
+/** Every city whose footprint could touch a query disc. */
+function citiesNear(x, z, radius) {
+  const out = [];
+  const pad = radius + 12000;
+  const i0 = Math.floor((x - pad) / CITY_CELL), i1 = Math.floor((x + pad) / CITY_CELL);
+  const j0 = Math.floor((z - pad) / CITY_CELL), j1 = Math.floor((z + pad) / CITY_CELL);
+  for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) {
+    const c = cityAt(i, j);
+    if (c && Math.hypot(c.x - x, c.z - z) < radius + c.R * 1.3) out.push(c);
+  }
+  return out;
+}
+
+/* ───────────────────────── the subdivision ─────────────────────────
+   A block is an oriented rectangle {cx, cz, w, d, yaw}. Splitting one leaves a
+   street of width ST_W[depth] in the gap, so the street hierarchy and the block
+   sizes are the same recursion seen from two sides.
+
+   'rhythm' splits on a multiple of the plan's block module -> Manhattan, Phoenix.
+   'even'   splits near the middle -> superblocks, planned new towns.
+   'jitter' splits anywhere and rotates the halves -> medina, Naples, old Tokyo. */
+function subdivide(rect, depth, P, rng, blocks, streets, maxDepth) {
+  const long = Math.max(rect.w, rect.d);
+  const short = Math.min(rect.w, rect.d);
+  if (depth >= maxDepth || short < P.blk * 1.75 || long < P.blk * 1.75) {
+    if (short > 16) { rect.depth = depth; blocks.push(rect); }
+    return;
+  }
+  const sw = ST_W[Math.min(depth, ST_W.length - 1)];
+  const alongW = rect.w >= rect.d;                 // always split across the long axis
+  const L = alongW ? rect.w : rect.d;
+  let t;
+  if (P.split === 'rhythm') {
+    const n = Math.max(2, Math.round(L / (P.blk + sw)));
+    t = (1 + Math.floor(rng() * (n - 1))) / n;
+  } else if (P.split === 'even') {
+    t = 0.5 + (rng() - 0.5) * P.jit;
+  } else {
+    t = 0.5 + (rng() - 0.5) * P.jit * 2;
+  }
+  t = clamp(t, 0.2, 0.8);
+
+  const ca = Math.cos(rect.yaw), sa = Math.sin(rect.yaw);
+  const aW = L * t - sw * 0.5, bW = L * (1 - t) - sw * 0.5;
+  if (aW < 14 || bW < 14) { rect.depth = depth; blocks.push(rect); return; }
+  const dr = P.rot ? (rng() - 0.5) * P.rot : 0;
+  const mk = (off, ww, rot) => {
+    const lx = alongW ? off : 0, lz = alongW ? 0 : off;
+    return {
+      cx: rect.cx + ca * lx - sa * lz,
+      cz: rect.cz + sa * lx + ca * lz,
+      w: alongW ? ww : rect.w,
+      d: alongW ? rect.d : ww,
+      yaw: rect.yaw + rot,
+    };
+  };
+  // the street itself, kept so it can be drawn and so buildings know which way to face
+  const soff = L * t - L * 0.5;
+  const slx = alongW ? soff : 0, slz = alongW ? 0 : soff;
+  streets.push({
+    cx: rect.cx + ca * slx - sa * slz,
+    cz: rect.cz + sa * slx + ca * slz,
+    w: alongW ? sw : rect.w, d: alongW ? rect.d : sw,
+    yaw: rect.yaw, rank: depth,
+  });
+  subdivide(mk(-L * 0.5 + aW * 0.5, aW, dr),  depth + 1, P, rng, blocks, streets, maxDepth);
+  subdivide(mk( L * 0.5 - bW * 0.5, bW, -dr), depth + 1, P, rng, blocks, streets, maxDepth);
+}
+
+/* ───────────────────────── block grammars ─────────────────────────
+   FOUR, and only four, cover almost every plate I looked at. Which one a block
+   gets is decided by district type, and district type by distance to the core —
+   because that is how the real ones sort: Paris z18 is perimeter blocks all the
+   way out, Dubai z18 is tower-in-park all the way in, LA z18 turns from downtown
+   to detached houses inside 3 km.
+
+     perimeter  buildings hug the street edge, courtyard void in the middle, and a
+                UNIFORM CORNICE HEIGHT. Paris, Barcelona, Milan, Naples.
+     tower      isolated towers standing in a landscaped podium, big setbacks, a
+                parking deck. Dubai, Shenzhen, Brasilia, Singapore.
+     fine       buildings fill their parcel edge to edge, no courtyard, huge
+                footprint variance, low height variance. Tokyo, medina, Naples.
+     detached   house + front setback + back yard + driveway, very regular rhythm.
+                LA, Phoenix, every suburb on Earth.
+*/
+const DISTRICTS = ['core', 'commercial', 'dense', 'residential', 'industrial', 'park'];
+
+function districtFor(c, bx, bz, rng) {
+  const d = Math.hypot(bx - c.x, bz - c.z) / c.R;      // 0 core … 1 edge
+  const r = rng();
+  // G17 green is STRUCTURAL. Earth's dense cities run 10-20% open space and it is
+  // what you actually navigate by from the air; 5% reads as none at all.
+  if (r < 0.10 + 0.13 * d) return 'park';
+  if (d < 0.13 && c.rank > 0.25) return 'core';
+  if (d < 0.36) return r < 0.62 ? 'commercial' : 'dense';
+  if (d < 0.62) return r < 0.30 ? 'commercial' : (r < 0.72 ? 'dense' : 'residential');
+  return r < 0.16 ? 'industrial' : 'residential';
+}
+const GRAMMAR = {
+  core: 'tower', commercial: 'perimeter', dense: 'fine',
+  residential: 'detached', industrial: 'shed', park: 'park',
+};
+
+/**
+ * Build one city: subdivision -> districts -> grammars -> instance arrays.
+ * Output is deliberately the same shape the hub city emits — flat Float arrays of
+ * 12 floats per instance (x,y,z, sx,sy,sz, yaw, r,g,b, kind, rnd) — so the game's
+ * existing instanced-mesh builders can consume it unchanged.
+ */
+function buildCity(c) {
+  if (c.built) return c.built;
+  const t0 = performance.now();
+  const rng = mulberry32(c.seed);
+  const P = PLANS[c.plan];
+  const pal = ROOFS[c.roof];
+  const B = [];                  // buildings: flat 12-float records
+  const solids = [];             // OBB colliders
+  const trees = [];
+  const roads = [];
+
+  // ── the footprint. NOT a circle. Real footprints are cut by water and slope,
+  // which is what gives Manhattan, Venice and Hong Kong their silhouettes. So the
+  // seed rect is generous and every block is tested against the world function. ──
+  const root = { cx: c.x, cz: c.z, w: c.R * 2, d: c.R * 2 * (0.62 + rng() * 0.6), yaw: c.yaw };
+  const blocks = [], streets = [];
+  // Recursion depth from AREA, not from a constant: a 12 km metropolis and a 1 km
+  // town both have ~100 m blocks, so they cannot share a depth. P.depth is a bias
+  // (a medina subdivides further than a superblock scheme), and the cap is what
+  // keeps the leaf count finite.
+  const area = root.w * root.d;
+  const dNat = Math.ceil(Math.log2(Math.max(4, area / (P.blk * P.blk * 1.6))));
+  const maxD = clamp(dNat + (P.depth - 4), 4, 12);
+  subdivide(root, 0, P, rng, blocks, streets, maxD);
+
+  const keep = [];
+  const _diag = { n: blocks.length, edge: 0, wet: 0, slope: 0 };
+  for (const b of blocks) {
+    const dx = b.cx - c.x, dz = b.cz - c.z;
+    const ang = Math.atan2(dz, dx), rr = Math.hypot(dx, dz);
+    if (rr > cityEdgeR(c, ang)) { _diag.edge++; continue; }
+    if (surfWet(b.cx, b.cz)) { _diag.wet++; continue; }            // water (or thin air) eats the block
+    const bslope = surfSlope(b.cx, b.cz, 90);
+    if (bslope > 0.30) { _diag.slope++; continue; }                // so does a cliff
+    b.y = surfH(b.cx, b.cz); b.slope = bslope; b.dist = rr / c.R;
+    keep.push(b);
+  }
+  // ⭐ CORE FIRST, THEN A BUDGET. A 6 km city at full parcel detail is ~250k
+  // instances, which no frame budget survives — and it is also wrong: real density
+  // falls off hard from the core. Sorting by distance and spending a fixed budget
+  // gives a city that is dense where you look at it and thins out at the edge,
+  // which is both cheaper AND more accurate than uniform detail.
+  keep.sort((a, b2) => a.dist - b2.dist);
+  const BUDGET = 52000;                                            // instances
+  for (const s of streets) {
+    if (surfWet(s.cx, s.cz)) continue;
+    s.y = surfH(s.cx, s.cz);
+    roads.push(s);
+  }
+
+  const push = (x, y, z, sx, sy, sz, yaw, col, kind, rnd) =>
+    B.push(x, y, z, sx, sy, sz, yaw, col[0], col[1], col[2], kind, rnd);
+
+  /* ⭐ GROUND PER BUILDING, NOT PER BLOCK.
+     Every grammar used to sit its buildings on `b.y` — the surface height at the
+     BLOCK CENTRE. On Earth that is nearly free, because a 100 m block spans almost
+     no terrain curvature. On a floating island it is wrong twice over:
+       · the top is strongly curved, so buildings toward a block's corners hang in
+         the air (or bury themselves);
+       · at the RIM the block centre is still over rock while the buildings past it
+         have nothing underneath at all.
+     So: sample the ground under each building, cull it if there is none, and SINK
+     it by the most the surface can fall across its own footprint (slope x half
+     diagonal). Sinking is the right bias — a building buried 20 cm reads as
+     founded, a building floating 20 cm reads as broken. */
+  const bldY = (px, pz, hw, hd, slope) => {
+    const y = surfH(px, pz);
+    if (y < -1e8) return null;
+    if (SURF) {
+      // rim test: a footprint corner over thin air means no building here
+      const r = Math.hypot(hw, hd) * 0.72;
+      if (surfH(px + r, pz) < -1e8 || surfH(px - r, pz) < -1e8 ||
+          surfH(px, pz + r) < -1e8 || surfH(px, pz - r) < -1e8) return null;
+    }
+    return y - 0.35 - (slope || 0) * Math.hypot(hw, hd) * 0.5;
+  };
+  const jit = (col, a) => {
+    const m = 1 + (rng() * 2 - 1) * a;
+    return [clamp(col[0] * m, 0, 1), clamp(col[1] * m, 0, 1), clamp(col[2] * m, 0, 1)];
+  };
+  const pick = (arr) => arr[Math.floor(rng() * arr.length)];
+  const solid = (x, y, z, sx, sy, sz, yaw, col, kind, rnd) => {
+    push(x, y, z, sx, sy, sz, yaw, col, kind, rnd);
+    solids.push({ cx: x, cz: z, yaw, hw: sx * 0.5, hd: sz * 0.5, y0: y, y1: y + sy });
+  };
+  // J8 ROOF CLUTTER. The Manhattan and Tokyo z18 plates are more mechanical plant
+  // than roof: HVAC boxes, stair penthouses, lift overruns, water tanks, vent stubs.
+  // A clean flat lid is the fastest way to say "generated", and this costs ~5
+  // instances per roof in a buffer that already exists.
+  const roofKit = (x, roofY, z, w, d, yaw, rich) => {
+    if (Math.min(w, d) < 11) return;
+    const ca = Math.cos(yaw), sa = Math.sin(yaw);
+    const lp = (lx, lz) => [x + ca * lx - sa * lz, z + sa * lx + ca * lz];
+    const n = 1 + Math.floor(rng() * (rich ? 4 : 2));
+    for (let k = 0; k < n; k++) {
+      const [px, pz] = lp((rng() - 0.5) * w * 0.6, (rng() - 0.5) * d * 0.6);
+      push(px, roofY, pz, 2.2 + rng() * 4.5, 1.1 + rng() * 2.4, 2.0 + rng() * 3.8,
+           yaw + (rng() - 0.5) * 0.3, jit([0.40, 0.41, 0.42], 0.16), 6, rng());
+    }
+    if (rich || rng() < 0.45) {                 // stair / lift penthouse
+      const [px, pz] = lp((rng() - 0.5) * w * 0.35, (rng() - 0.5) * d * 0.35);
+      push(px, roofY, pz, 4 + rng() * 4, 2.6 + rng() * 2.2, 3.5 + rng() * 3.5, yaw,
+           jit([0.46, 0.46, 0.45], 0.10), 6, rng());
+    }
+    if (rng() < (rich ? 0.55 : 0.22)) {         // water tank
+      const [px, pz] = lp((rng() - 0.5) * w * 0.5, (rng() - 0.5) * d * 0.5);
+      const r = 1.2 + rng() * 1.6;
+      push(px, roofY + 1.8, pz, r * 2, 2.2 + rng() * 2.0, r * 2, 0, [0.34, 0.31, 0.28], 3, rng());
+    }
+    // a parapet lip is what makes a flat roof read as flat rather than as a lid
+    if (rng() < 0.75) push(x, roofY, z, w, 0.9 + rng() * 0.7, d, yaw, jit([0.44, 0.44, 0.44], 0.08), 7, rng());
+  };
+
+  // HEIGHT. Rank-size again, plus a strong distance-to-core term. The LA z13 plate
+  // is the proof: one shadow cluster in an 8 km frame and nothing else above four
+  // storeys. Randomising height per block gives the "spiky mess" look instead.
+  const coreH = 20 + c.rank * 95;
+  // ⭐ RANK-SIZE NEEDS A PARETO TAIL, NOT A SPREAD. `0.55 + r*r*0.45` varies height
+  // by 2x, which produces a sea of identical mid-rise slabs — exactly what the
+  // first build looked like from street level. Real height distributions are
+  // heavy-tailed: most blocks are low, a few are several times the median, and one
+  // or two are landmarks. Pareto with alpha~1.6, clipped, gives that from one
+  // uniform, and it is the difference between a skyline and a wall.
+  const pareto = (lo, hi) => clamp(Math.pow(Math.max(rng(), 1e-4), -0.62), lo, hi);
+  // ⚠ A HEAVY TAIL MULTIPLIED BY A CORE FALLOFF MULTIPLIED BY A BASE COMPOUNDS.
+  // The first version reached 1687 m — four Burj Khalifas — because three separate
+  // "bigger near the middle" terms all hit their maximum on the same block. A tail
+  // needs a CEILING, and the ceiling itself is what should fall off from the core:
+  // that is the actual shape of every real skyline (one tall cluster, a hard drop).
+  const hAt = (dist, base, spread) => {
+    const fall = Math.exp(-(dist * dist) / 0.13);
+    const med  = base * (0.32 + 1.05 * fall);                  // median at this radius
+    const h    = med * mix(0.55, pareto(0.55, 4.2), clamp(spread, 0, 1));
+    return clamp(h, 6, 55 + 430 * fall);                       // nothing exceeds this
+  };
+
+  // ⭐ EVERY GRAMMAR HAS A NATURAL BLOCK SIZE, AND A SUPERBLOCK IS BIGGER THAN ALL
+  // OF THEM. Handed a 600 m superblock, the perimeter rule draws a 600 m hollow
+  // ring, tower-in-park lays a 440 m podium slab and the industrial rule extrudes a
+  // 300 m shed — none of which exist anywhere on Earth. The missing rung is the one
+  // the LA ladder shows between arterial and local: internal LANES. Split the block
+  // down to the grammar's own size first, and the lanes become real streets.
+  const GRAM_SIZE = { perimeter: 115, tower: 155, shed: 200, park: 1e9, fine: 1e9, detached: 1e9 };
+
+  let nB = 0;
+  for (const b0 of keep) {
+    if (B.length >= BUDGET * 12) break;
+    const type = districtFor(c, b0.cx, b0.cz, rng);
+    const gram = GRAMMAR[type];
+    let units = [b0];
+    const tgt = GRAM_SIZE[gram];
+    if (Math.min(b0.w, b0.d) > tgt * 1.7) {
+      const subs = [], lanes = [];
+      subdivide({ cx: b0.cx, cz: b0.cz, w: b0.w, d: b0.d, yaw: b0.yaw }, 2,
+                { split: 'rhythm', jit: 0.10, rot: 0, blk: tgt }, rng, subs, lanes, 8);
+      if (subs.length) {
+        for (const u of subs) { u.y = b0.y; u.dist = b0.dist; }
+        for (const ln of lanes) { ln.y = b0.y; roads.push(ln); }
+        units = subs;
+      }
+    }
+  for (const b of units) {
+    if (B.length >= BUDGET * 12) break;
+    const ca = Math.cos(b.yaw), sa = Math.sin(b.yaw);
+    const loc = (lx, lz) => [b.cx + ca * lx - sa * lz, b.cz + sa * lx + ca * lz];
+
+    if (gram === 'park') {
+      const n = Math.max(3, Math.floor(b.w * b.d / 2600));
+      for (let k = 0; k < n; k++) {
+        const [tx, tz] = loc((rng() - 0.5) * b.w * 0.92, (rng() - 0.5) * b.d * 0.92);
+        const ty = surfH(tx, tz); if (ty < -1e8) continue;
+        trees.push(tx, ty, tz, 5 + rng() * 7);
+      }
+      continue;
+    }
+
+    if (gram === 'tower') {
+      // TOWER IN PARK. One to three isolated towers, a podium, and a lot of ground
+      // left over — that ground is the whole point and is why Dubai reads as Dubai.
+      const n = clamp(Math.round(b.w * b.d / 26000), 1, 5);
+      const pw = Math.min(b.w * 0.72, 120), pd = Math.min(b.d * 0.72, 120);
+      const py0 = bldY(b.cx, b.cz, pw * 0.5, pd * 0.5, b.slope);
+      if (py0 === null) continue;
+      solid(b.cx, py0, b.cz, pw, 7 + rng() * 9, pd, b.yaw, jit([0.34, 0.35, 0.37], 0.12), 0, rng());
+      // the landscaped ground the towers stand in — the half of the archetype that
+      // is not a building, and the half that makes Dubai read as Dubai
+      for (let k = 0; k < 4 + Math.floor(rng() * 5); k++) {
+        const [tx, tz] = loc((rng() - 0.5) * b.w * 0.92, (rng() - 0.5) * b.d * 0.92);
+        const ty = surfH(tx, tz); if (ty < -1e8) continue;
+        trees.push(tx, ty, tz, 4 + rng() * 5);
+      }
+      for (let k = 0; k < n; k++) {
+        const [px, pz] = loc((rng() - 0.5) * b.w * 0.42, (rng() - 0.5) * b.d * 0.42);
+        const fw = Math.min(b.w, b.d) * (0.22 + rng() * 0.20);
+        const fd = fw * (0.72 + rng() * 0.56);
+        const h = hAt(b.dist, coreH, 1.6);
+        const ty2 = bldY(px, pz, fw * 0.5, fd * 0.5, b.slope);
+        if (ty2 === null) continue;
+        _silhouette(push, solid, jit, pick, rng, px, ty2 + 10, pz, fw, fd, h, b.yaw, pal);
+        nB++;
+      }
+      continue;
+    }
+
+    if (gram === 'perimeter') {
+      // PERIMETER BLOCK. The Paris-Opera plate: buildings on all four street faces,
+      // a courtyard void behind them, and one cornice height for the whole block.
+      // The uniform height is not a simplification — it IS the look.
+      const dep = clamp(Math.min(b.w, b.d) * 0.30, 11, 26);
+      const H = hAt(b.dist, 17 + c.rank * 16, 0.45) * 0.55 + 12;
+      const col = jit(pick(pal), 0.06);
+      const faces = [
+        [0, (b.d - dep) * 0.5, b.w, dep], [0, -(b.d - dep) * 0.5, b.w, dep],
+        [(b.w - dep) * 0.5, 0, dep, b.d - dep * 2], [-(b.w - dep) * 0.5, 0, dep, b.d - dep * 2],
+      ];
+      for (const [lx, lz, fw, fd] of faces) {
+        if (fw < 8 || fd < 8) continue;
+        // split the face into party-wall units so the roofline has a rhythm
+        const along = fw > fd;
+        const L = along ? fw : fd;
+        const nU = Math.max(1, Math.round(L / (13 + rng() * 9)));
+        for (let u = 0; u < nU; u++) {
+          const uL = L / nU;
+          const o = -L * 0.5 + uL * (u + 0.5);
+          const [px, pz] = loc(lx + (along ? o : 0), lz + (along ? 0 : o));
+          const hh = H * (0.90 + rng() * 0.20);
+          const uw = (along ? uL : fw) * 0.99, ud = (along ? fd : uL) * 0.99;
+          const py1 = bldY(px, pz, uw * 0.5, ud * 0.5, b.slope);
+          if (py1 === null) continue;
+          solid(px, py1, pz, uw, hh, ud, b.yaw, col, 1, rng());
+          if (rng() < 0.55) roofKit(px, py1 + hh, pz, uw * 0.88, ud * 0.88, b.yaw, false);
+          nB++;
+        }
+      }
+      if (rng() < 0.7) {
+        const [tx, tz] = loc(0, 0);
+        const n = 1 + Math.floor(rng() * 4);
+        for (let k = 0; k < n; k++)
+        {
+          const qx = tx + (rng() - 0.5) * (b.w - dep * 2) * 0.7;
+          const qz = tz + (rng() - 0.5) * (b.d - dep * 2) * 0.7;
+          const qy = surfH(qx, qz);
+          if (qy > -1e8) trees.push(qx, qy, qz, 4 + rng() * 4);
+        }
+      }
+      continue;
+    }
+
+    if (gram === 'fine') {
+      // FINE GRAIN. Tokyo Ginza: parcels filled edge to edge, wildly varying
+      // footprint, barely varying height. Sub-split the block into parcels and
+      // build each one out to its own boundary with a 0.5 m gap.
+      const parcels = [], dummy = [];
+      subdivide({ cx: b.cx, cz: b.cz, w: b.w, d: b.d, yaw: b.yaw }, 0,
+                { split: 'jitter', jit: 0.55, rot: 0.02, blk: 11 }, rng, parcels, dummy, 4);
+      const H = hAt(b.dist, 13 + c.rank * 14, 0.9) * 0.5 + 8;
+      for (const p of parcels) {
+        if (rng() < 0.06) continue;                       // the occasional empty lot
+        const hh = H * (0.6 + rng() * rng() * 1.5);
+        const py2 = bldY(p.cx, p.cz, (p.w - 1) * 0.5, (p.d - 1) * 0.5, b.slope);
+        if (py2 === null) continue;
+        solid(p.cx, py2, p.cz, p.w - 1.0, hh, p.d - 1.0, p.yaw, jit(pick(pal), 0.10), 1, rng());
+        roofKit(p.cx, py2 + hh, p.cz, p.w - 2.2, p.d - 2.2, p.yaw, hh > 22);
+        nB++;
+      }
+      continue;
+    }
+
+    if (gram === 'shed' || gram === 'retail') {
+      // I23: the apron first, and it is LIGHTER than the roadway (LA z18 plate)
+      if (rng() < 0.75) {
+        const pw = b.w * 0.86, pd = b.d * (gram === 'retail' ? 0.62 : 0.34);
+        const [px, pz] = loc(0, b.d * 0.5 - pd * 0.5 - 4);
+        const ay = bldY(px, pz, pw * 0.5, pd * 0.5, b.slope);
+        if (ay !== null && surfSlope(px, pz, 40) < 0.10)
+          push(px, ay - 0.4, pz, pw, 0.9, pd, b.yaw, [0.49, 0.49, 0.48], 8, rng());
+      }
+    }
+    if (gram === 'shed') {
+      // INDUSTRIAL. Big flat sheds with a long axis, a yard, and silos. From the
+      // air these are the largest single roofs in any city and read instantly.
+      const n = 1 + Math.floor(rng() * 2);
+      for (let k = 0; k < n; k++) {
+        const fw = Math.min(b.w * (0.5 + rng() * 0.36) / n, 190);
+        const fd = Math.min(b.d * (0.45 + rng() * 0.36), 150);
+        const [px, pz] = loc((k - (n - 1) * 0.5) * b.w / n, (rng() - 0.5) * b.d * 0.16);
+        const sh = 9 + rng() * 13;
+        const py3 = bldY(px, pz, fw * 0.5, fd * 0.5, b.slope);
+        if (py3 === null) continue;
+        solid(px, py3, pz, fw, sh, fd, b.yaw, jit([0.55, 0.56, 0.56], 0.10), 2, rng());
+        roofKit(px, py3 + sh, pz, fw * 0.8, fd * 0.8, b.yaw, false);
+        nB++;
+      }
+      if (rng() < 0.45) {
+        const [sx, sz] = loc((rng() - 0.5) * b.w * 0.6, (rng() - 0.5) * b.d * 0.6);
+        const r = 4 + rng() * 4;
+        const sy = bldY(sx, sz, r, r, b.slope);
+        if (sy !== null) push(sx, sy, sz, r * 2, 14 + rng() * 14, r * 2, 0, jit([0.72, 0.72, 0.70], 0.06), 3, rng());
+      }
+      continue;
+    }
+
+    // DETACHED. The LA z18 plate: a regular parcel rhythm, a front setback to the
+    // street, a back yard, a street tree. The RHYTHM is the signal — not the houses.
+    {
+      // lots grow toward the edge — the real gradient, and it is also the cheap one
+      const lg = 1 + b.dist * 1.7;
+      const lotW = (14 + rng() * 8) * lg, lotD = (30 + rng() * 14) * lg;
+      const nx = Math.max(1, Math.floor(b.w / lotW));
+      const nz = Math.max(1, Math.floor(b.d / lotD));
+      for (let i = 0; i < nx; i++) for (let j = 0; j < nz; j++) {
+        if (rng() < 0.07) continue;
+        const lx = -b.w * 0.5 + (i + 0.5) * (b.w / nx);
+        const lz = -b.d * 0.5 + (j + 0.5) * (b.d / nz);
+        const front = (j < nz / 2 ? 1 : -1) * (b.d / nz) * 0.16;   // setback toward the street
+        const [px, pz] = loc(lx, lz + front);
+        // ⚠ A HOUSE IS ~12 m WIDE WHETHER THE LOT IS 14 m OR 80 m. Scaling the
+        // footprint with the lot turned every outer suburb into 25x36 m plates 5 m
+        // high — flat white tiles lying on the ground. The LA z18 plate is explicit:
+        // the building covers maybe a third of its parcel and the rest is yard, and
+        // it is the RHYTHM of that repeat, not the size, that reads from the air.
+        const hw = Math.min((b.w / nx) * 0.62, 9 + rng() * 6);
+        const hd = Math.min((b.d / nz) * 0.42, 7 + rng() * 7);
+        const py4 = bldY(px, pz, hw * 0.5, hd * 0.5, b.slope);
+        if (py4 === null) continue;
+        push(px, py4, pz, hw, 4.4 + rng() * 4.2, hd, b.yaw, jit(pick(pal), 0.09), 1, rng());
+        nB++;
+        if (rng() < 0.42) {
+          const [tx, tz] = loc(lx, lz - front * 1.9);
+          const ty4 = surfH(tx, tz);
+          if (ty4 > -1e8) trees.push(tx, ty4, tz, 3 + rng() * 4);
+        }
+      }
+    }
+  }
+  }
+
+  // ── H15 / N14 STREET TREES ────────────────────────────────────────────────
+  // The Paris Opera plate reads as Paris from 3 km up because of two dark-green
+  // ribbons flanking a pale one, and the Bracknell photo shows suburban canopy
+  // that is TALLER than the houses and hides most of the fabric. Trees are not
+  // decoration on a street — at this altitude they are most of what you see.
+  for (const r of roads) {
+    if (r.rank > 3) continue;                       // alleys get none
+    const perKm = r.rank <= 1 ? 92 : 62;            // ~11 m and ~16 m spacing
+    const along = r.d >= r.w;
+    const L = along ? r.d : r.w, HW = (along ? r.w : r.d) * 0.5 + 2.5;
+    const n = Math.floor(L / 1000 * perKm);
+    if (n < 1) continue;
+    const ca = Math.cos(r.yaw), sa = Math.sin(r.yaw);
+    for (let k = 0; k < n; k++) {
+      if (rng() < 0.18) continue;                   // gaps: driveways, junctions
+      const t = -L * 0.5 + L * ((k + 0.5) / n);
+      for (const side of [-HW, HW]) {
+        if (rng() < 0.22) continue;
+        const lx = along ? side : t, lz = along ? t : side;
+        const tx = r.cx + ca * lx - sa * lz, tz = r.cz + sa * lx + ca * lz;
+        const ty = surfH(tx, tz);
+        if (ty < -1e8) continue;
+        trees.push(tx, ty, tz, 4.5 + rng() * 5.5);
+      }
+    }
+  }
+
+  c.built = {
+    inst: new Float32Array(B), solids, trees: new Float32Array(trees), roads,
+    count: B.length / 12, buildings: nB, blocks: keep.length, diag: _diag,
+    ms: performance.now() - t0,
+  };
+  return c.built;
+}
+
+/* Tower silhouette archetypes. The reason a skyline reads as a skyline is that its
+   tops DIFFER — the index-working.html city learned this the hard way at v35.21
+   ("a single rounded clump with no roofline rhythm"). Every stage is still an
+   instance in the same buffer, so variety costs instances, never draw calls. */
+function _silhouette(push, solid, jit, pick, rng, px, py, pz, fw, fd, h, yaw, pal) {
+  const a = rng();
+  const col = pick(pal);
+  const mast = (my, r, mh) => push(px, my, pz, r, mh, r, 0, [0.20, 0.21, 0.23], 3, rng());
+  if (a < 0.24) {                                   // SLAB
+    solid(px, py, pz, fw, h, fd, yaw, jit(col, 0.08), 4, rng());
+    if (rng() < 0.5) mast(py + h, 0.8 + rng() * 0.8, 6 + rng() * 18);
+  } else if (a < 0.54) {                            // SETBACK ziggurat
+    let y = py, w = fw, d = fd, left = h;
+    for (let s = 0; s < 3 && left > 8; s++) {
+      const sh = (s === 2) ? left : left * (0.40 + rng() * 0.18);
+      solid(px, y, pz, w, sh, d, yaw, jit(col, 0.07 + s * 0.02), 4, rng());
+      y += sh; left -= sh; w *= 0.64 + rng() * 0.14; d *= 0.64 + rng() * 0.14;
+    }
+    if (rng() < 0.55) mast(y, 0.7 + rng() * 0.7, 9 + rng() * 24);
+  } else if (a < 0.72) {                            // SPIRE
+    const sw = fw * (0.44 + rng() * 0.16), sd = fd * (0.44 + rng() * 0.16);
+    const shaft = h * (0.68 + rng() * 0.12);
+    solid(px, py, pz, sw, shaft, sd, yaw, jit(col, 0.07), 4, rng());
+    let y = py + shaft, w = sw, d = sd, left = h - shaft;
+    for (let s = 0; s < 3 && left > 5; s++) {
+      const sh = left * 0.42; w *= 0.66; d *= 0.66;
+      solid(px, y, pz, w, sh, d, yaw, jit(col, 0.06), 4, rng());
+      y += sh; left -= sh;
+    }
+    mast(y, 0.6 + rng() * 0.5, 18 + rng() * 38);
+  } else if (a < 0.88) {                            // TWIST
+    const n = 3 + Math.floor(rng() * 2);
+    let y = py, w = fw, d = fd;
+    const tw = (rng() < 0.5 ? -1 : 1) * (0.09 + rng() * 0.10);
+    for (let s = 0; s < n; s++) {
+      solid(px, y, pz, w, h / n, d, yaw + tw * s, jit(col, 0.07), 4, rng());
+      y += h / n; w *= 0.94; d *= 0.94;
+    }
+  } else {                                          // ROUND
+    const r = Math.min(fw, fd) * 0.5;
+    push(px, py, pz, r * 2, h, r * 2, 0, jit(col, 0.07), 5, rng());
+    push(px, py + h, pz, r * 2.5, h * 0.05, r * 2.5, 0, jit(col, 0.11), 5, rng());
+    mast(py + h + h * 0.05, 0.7, 12 + rng() * 26);
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   PART 3 — THE GROUND SHADER
+   This is what replaces the IMAGERY stream. There is no texture here at all: no
+   canvas, no atlas, no fetch, no upload, no VRAM. Colour is computed from the same
+   world function the geometry came from, per fragment, so it is sharp at any
+   altitude and identical on every machine.
+
+   The rules it encodes, all read off the plates:
+     · biome boundaries that a PROCESS makes sharp are SHARP. Snow line and tree
+       line are contours. The Nile's green/tan edge is a distance-to-water
+       threshold with no gradient at all. Crossfading them is the giveaway.
+     · below the geometry cutoff the detail stops being SHAPE and becomes TEXTURE:
+       scree fans, dune ripples, crevasse stripes, vegetation stipple, wave foam.
+     · the strongest large-scale texture on Earth is FIELD PATTERN, and it is a
+       tiling rule plus a per-cell crop colour — Kansas pivots, Dutch polder
+       lattice, bocage cells, Tuscan contour strips.
+     · at a low sun the dominant signal from the air is SHADOW, not albedo.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+const GROUND_VS = `
+attribute float aWet;
+attribute float aUrban;
+varying vec3 vW;
+varying vec3 vN;
+varying float vWet;
+varying float vUrb;
+void main() {
+  vec4 wp = modelMatrix * vec4(position, 1.0);
+  vW = wp.xyz;
+  vN = normalize(mat3(modelMatrix) * normal);
+  vWet = aWet;
+  vUrb = aUrban;
+  gl_Position = projectionMatrix * viewMatrix * wp;
+}`;
+
+const GROUND_FS = `
+precision highp float;
+varying vec3 vW;
+varying vec3 vN;
+varying float vWet;
+varying float vUrb;
+uniform vec3  uSunDir;
+uniform vec3  uSunCol;
+uniform vec3  uSkyCol;
+uniform vec3  uFogCol;
+uniform float uFogDen;
+uniform float uSea;
+uniform float uLodTint;
+uniform vec3  uTint;
+uniform vec3  uCam;
+uniform float uTime;
+uniform float uCloudBase;
+uniform float uWind;
+uniform float uCloudOn;
+
+// A sin-based hash costs a transcendental per corner, i.e. FOUR per noise sample
+// and ~80 per fragment here. This one is pure multiply-add and measured the same
+// visually. (Colour only — the CPU side keeps the exact integer hash, because
+// geometry has to be bit-reproducible across machines and this is not.)
+
+float _cvh(vec2 p){
+  vec3 q = fract(vec3(p.xyx) * vec3(0.1031,0.1030,0.0973));
+  q += dot(q, q.yzx + 33.33); return fract((q.x+q.y)*q.z);
+}
+float _cvn(vec2 p){
+  vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
+  return mix(mix(_cvh(i),_cvh(i+vec2(1,0)),u.x), mix(_cvh(i+vec2(0,1)),_cvh(i+vec2(1,1)),u.x), u.y);
+}
+float coverageAt(vec2 xz, float t, float wind){
+  vec2 w = xz + vec2(t*wind, t*wind*0.34);
+  float c=0.0, a=0.5, f=1.0/21000.0, n=0.0;
+  for(int i=0;i<4;i++){ c += a*_cvn(w*f); n += a; f*=2.15; a*=0.5; }
+  return c/n;
+}
+
+float h21(vec2 p){
+  vec3 q = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+  q += dot(q, q.yzx + 33.33);
+  return fract((q.x + q.y) * q.z);
+}
+float vnz(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f*f*(3.0-2.0*f);
+  return mix(mix(h21(i), h21(i+vec2(1,0)), u.x),
+             mix(h21(i+vec2(0,1)), h21(i+vec2(1,1)), u.x), u.y);
+}
+float fbm2(vec2 p, int oct){
+  float v=0.0, a=0.5;
+  for(int i=0;i<6;i++){ if(i>=oct) break; v += a*vnz(p); p*=2.02; a*=0.5; }
+  return v;
+}
+vec2 rot2(vec2 p, float a){ float c=cos(a), s=sin(a); return vec2(c*p.x-s*p.y, s*p.x+c*p.y); }
+
+// The patchwork quilt. What makes farmland read from the air is not "green" — it
+// is that ADJACENT CELLS ARE DIFFERENT CROPS AT DIFFERENT STAGES, so the contrast
+// is between neighbours, not within a field. Six states, hard-selected.
+vec3 cropCol(float t){
+  if (t < 0.20) return vec3(0.27, 0.40, 0.15);   // pasture
+  if (t < 0.38) return vec3(0.72, 0.65, 0.29);   // ripe cereal
+  if (t < 0.53) return vec3(0.42, 0.31, 0.19);   // ploughed earth
+  if (t < 0.69) return vec3(0.45, 0.57, 0.22);   // young crop
+  if (t < 0.85) return vec3(0.63, 0.58, 0.40);   // stubble
+  return                vec3(0.20, 0.31, 0.12);  // dark fodder
+}
+
+void main() {
+  vec3  P     = vW;
+  float h     = P.y - uSea;
+  float slope = clamp(1.0 - vN.y, 0.0, 1.0);
+  vec2  xz    = P.xz;
+  float dist  = length(P - uCam);
+
+  // ⭐ TEXTURE HAS AN LOD TOO. An 11 m dune ripple is below one pixel by 2 km out,
+  // and a sub-pixel periodic signal does not average away — it moirés into
+  // corduroy across the whole frame. Fine detail has to be faded out with distance
+  // exactly the way geometry is, or procedural texture looks worse than a photo at
+  // range while looking better up close.
+  float fine = 1.0 - smoothstep(260.0, 3400.0, dist);
+  float mid  = 1.0 - smoothstep(2000.0, 26000.0, dist);
+
+  // ── micro-relief. Everything below the vertex spacing lives here, as texture.
+  float n1 = fbm2(xz * 0.0140, 4);
+  float n2 = mix(0.5, fbm2(xz * 0.1100, 3), mid);
+  float n3 = mix(0.5, vnz(xz * 0.9000), fine);
+
+  // ── the palette ────────────────────────────────────────────────────────────
+  vec3 rock   = mix(vec3(0.33,0.31,0.29), vec3(0.47,0.44,0.40), n1);
+  // strata banding: sedimentary colour follows ELEVATION, which is why the Grand
+  // Canyon plate is horizontally striped and a noise-coloured cliff never is.
+  float band  = smoothstep(0.35,0.65, fract(h*0.011 + n1*0.35));
+  rock        = mix(rock, rock*vec3(1.14,0.95,0.80), band*0.55);
+  vec3 scree  = mix(rock, vec3(0.46,0.43,0.40), 0.5) * (0.85 + 0.3*n2);
+
+  vec3 grass  = mix(vec3(0.24,0.33,0.15), vec3(0.34,0.42,0.19), n1);
+  vec3 forest = mix(vec3(0.10,0.19,0.09), vec3(0.15,0.26,0.11), n2);
+  vec3 dry    = mix(vec3(0.55,0.48,0.31), vec3(0.67,0.60,0.41), n1);
+  vec3 sandC  = mix(vec3(0.76,0.68,0.50), vec3(0.86,0.79,0.62), n1);
+  vec3 snow   = vec3(0.92,0.94,0.97) * (0.92 + 0.10*n2);
+
+  // ── assemble. Order matters: each later rule OVERRIDES, it does not average,
+  // because on Earth the later process physically covers the earlier one.
+  float arid  = 1.0 - smoothstep(0.24, 0.58, vWet);
+
+  // DESERT PROVINCES. A desert is not one surface: erg (dune sea), reg (gravel
+  // plain) and hamada (rock pavement) are separate places with hard borders, and
+  // the Namib plate shows all three inside 30 km. Painting the whole arid zone as
+  // dunes is the same mistake as giving every building its own roof colour.
+  if (arid > 0.35) {
+    float erg  = smoothstep(0.44, 0.62, vnz(xz * 0.000021 + 41.0));
+    float dAng = (vnz(xz*0.000012 + 19.0) - 0.5) * 3.1416;
+    vec2  dp   = rot2(xz, dAng);
+    // phase jitter from noise — without it the crests are a perfect comb
+    float dune = sin(dp.y * 0.017 + fbm2(xz*0.00085,3)*11.0)*0.5 + 0.5;
+    float ripp = sin(dp.y * 0.55  + fbm2(xz*0.02,2)*7.0)*0.5 + 0.5;
+    vec3  reg  = mix(vec3(0.52,0.46,0.37), vec3(0.62,0.55,0.44), n1) * (0.94 + 0.12*n2);
+    sandC     *= 0.88 + 0.18*dune + 0.05*ripp*fine;
+    sandC      = mix(reg, sandC, erg);
+  }
+
+  vec3 col    = mix(grass, dry, arid);
+  col         = mix(col, sandC, smoothstep(0.62, 0.90, arid));
+
+  // ⭐ CLEARED vs WOODED IS ONE DECISION, NOT TWO BLENDS. Multiplying farmland by
+  // (1 - forest) and forest by (1 - farmland) leaves a mush of both everywhere, and
+  // the plates say the opposite: a wood ENDS, and a field starts. One field decides
+  // which process owns the ground, and both read at full strength on their side.
+  float cleared = smoothstep(0.40, 0.57, fbm2(xz * 0.000085 + 55.0, 3));
+
+  float treeL = 1900.0 - 760.0*arid;
+  float wood  = smoothstep(0.42,0.60,vWet) * (1.0 - smoothstep(treeL-260.0, treeL, h))
+              * (1.0 - smoothstep(0.42, 0.66, slope))
+              * (1.0 - cleared * 0.94);
+  col         = mix(col, forest, wood);
+
+  // ── FIELD PATTERN — the human texture, and the single biggest visual win over a
+  // noise-coloured world. A tiling rule plus a per-cell crop colour.
+  // ⚠ DO NOT GATE THIS ON THE CITY FOOTPRINT. The first build multiplied it by the
+  // urban paint, so fields only existed inside the city they feed — which is
+  // backwards, and meant the pattern never appeared anywhere. Agriculture is its
+  // own province: flat, watered, low, and far larger than any city.
+  float settled = smoothstep(0.34, 0.63, fbm2(xz * 0.000055 + 13.0, 3));
+  float farm  = (1.0-smoothstep(0.050,0.130,slope)) * smoothstep(0.22,0.44,vWet)
+              * (1.0-smoothstep(1000.0,1700.0,h)) * cleared
+              * max(settled, smoothstep(0.02, 0.30, vUrb));
+  if (farm > 0.004) {
+    float fAng  = (vnz(xz * 0.000018) - 0.5) * 3.1416;
+    float fSize = mix(70.0, 430.0, vnz(xz * 0.000031 + 7.0));
+    vec2  fp    = rot2(xz, fAng) / fSize;
+    vec2  fid   = floor(fp);
+    vec2  ff    = fract(fp);
+    float cid   = h21(fid);
+    float cid2  = h21(fid + 31.7);
+    float cid3  = h21(fid + 77.1);
+
+    // STRIP FIELDS. Some parcels split the long way into 2-6 ribbons, each its own
+    // crop — the Tuscan and bocage plates are mostly this, and it is what breaks
+    // the "graph paper" look a single cell grid always has.
+    vec2 gg = ff;
+    if (cid3 > 0.74) {
+      float ns = floor(2.0 + cid2 * 2.6);
+      float si = floor(ff.y * ns);
+      gg.y = fract(ff.y * ns);
+      cid  = h21(fid + si * 13.7 + 5.1);
+    }
+    vec3 crop = cropCol(cid);
+
+    // centre-pivot circles where it is dry — the Kansas plate
+    float pivot = 1.0 - smoothstep(0.44, 0.48, length(ff - 0.5));
+    crop = mix(crop * 0.66, crop,
+               mix(1.0, pivot, step(0.66, cid2) * (1.0 - smoothstep(0.26, 0.50, vWet))));
+    // within-field grain: drill lines, faded out with distance like any fine detail
+    crop *= 0.95 + 0.09 * sin((rot2(xz, fAng).y) * 0.9) * fine;
+    // hedgerow / farm track on every boundary. The DARK LINE is the signal.
+    vec2  e    = min(gg, 1.0 - gg);
+    float bord = 1.0 - smoothstep(0.0, 0.030, min(e.x, e.y));
+    crop = mix(crop, vec3(0.15, 0.20, 0.10), bord * 0.80 * mid);
+    col  = mix(col, crop, clamp(farm, 0.0, 1.0) * 0.94);
+  }
+
+  // rock wins on any real slope, and scree fans out below it
+  col         = mix(col, scree, smoothstep(0.30, 0.44, slope));
+  col         = mix(col, rock,  smoothstep(0.44, 0.60, slope));
+
+  // SNOW LINE: a contour, hard-edged, and it does not hold on a cliff
+  float snowL = 2450.0 - 900.0*(1.0-arid) + fbm2(xz*0.00035,3)*420.0;
+  float sn    = smoothstep(snowL, snowL+130.0, h) * (1.0 - smoothstep(0.52,0.78,slope));
+  col         = mix(col, snow, sn);
+
+  // beach: a narrow band at the waterline, on flat ground only
+  float beach = (1.0 - smoothstep(1.0, 9.0, h)) * (1.0-smoothstep(0.06,0.16,slope)) * step(0.0,h);
+  col         = mix(col, vec3(0.80,0.74,0.58), beach*0.9);
+
+  // ── the city, painted on the ground so a distant city still reads as a city
+  // long before a single building mesh has been built for it
+  vec3 pave   = mix(vec3(0.30,0.30,0.31), vec3(0.40,0.40,0.39), n2);
+  pave        = mix(pave, col * 0.82 + 0.06, 0.34);   // a city is the colour of its ground
+  col         = mix(col, pave, smoothstep(0.10, 0.80, vUrb) * 0.78);
+
+  col        *= 0.90 + 0.20*n3;                       // break up the flat fill
+
+  // ── lighting. At a low sun the shadow IS the image, so keep the terminator hard
+  // and let the sky do the fill rather than a flat ambient.
+  float ndl   = max(dot(vN, uSunDir), 0.0);
+  float sky   = 0.5 + 0.5*vN.y;
+
+  // RULE L7 - CLOUD SHADOWS. The strongest single cue that a world is alive, and it
+  // costs one projection and one noise lookup: walk from this point along the sun to
+  // the cloud base and ask the SAME coverage field the march asks. No shadow map, no
+  // second pass, and it works all the way to the horizon.
+  float shad = 1.0;
+  if (uCloudOn > 0.5) {
+    float tt = (uCloudBase - P.y) / max(uSunDir.y, 0.08);
+    float cv = coverageAt(P.xz + uSunDir.xz * tt, uTime, uWind);
+    shad = 1.0 - smoothstep(0.42, 0.68, cv) * 0.72;
+  }
+  vec3  lit   = col * (uSunCol * ndl * shad + uSkyCol * sky * 0.42);
+
+  lit         = mix(lit, uTint, uLodTint);
+
+  float fogA  = 1.0 - exp(-dist*dist * uFogDen*uFogDen);
+  // aerial perspective: distance goes toward the sky, brighter toward the sun
+  vec3  fog   = mix(uFogCol, uSunCol*0.8 + uFogCol*0.5,
+                    pow(max(dot(normalize(P-uCam), uSunDir), 0.0), 4.0)*0.6);
+  gl_FragColor = vec4(mix(lit, fog, clamp(fogA,0.0,1.0)), 1.0);
+}`;
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   PART 4 — THE LAB
+   Scene, the patch streamer, city meshing, flight. Everything below this line is
+   scaffolding: it exists so the two functions above can be looked at, flown
+   through and tuned. The streamer is deliberately shaped like LSSEarthWorld's
+   (concentric rings around one origin, a build budget per frame) so that what is
+   proved here transfers without a redesign.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+// City footprint edge. Called from BOTH the block culler and the ground-paint
+// attribute, so the painted extent and the built extent are the same shape.
+// Derived from ihash, never from the build rng — the paint must not depend on
+// whether the city has been built yet.
+function cityEdgeR(c, ang) {
+  const a1 = 0.10 + ihash(c.seed, 1, 7) * 0.09;
+  const a2 = 0.07 + ihash(c.seed, 2, 7) * 0.06;
+  const a3 = 0.05 * ihash(c.seed, 3, 7);
+  const p1 = ihash(c.seed, 4, 7) * 6.283, p2 = ihash(c.seed, 5, 7) * 6.283,
+        p3 = ihash(c.seed, 6, 7) * 6.283;
+  return c.R * (0.92 + a1 * Math.sin(2 * ang + p1) + a2 * Math.sin(3 * ang + p2)
+                     + a3 * Math.sin(5 * ang + p3));
+}
+function urbanAt(x, z, list) {
+  let u = 0;
+  for (let i = 0; i < list.length; i++) {
+    const c = list[i];
+    const dx = x - c.x, dz = z - c.z;
+    const r = Math.hypot(dx, dz);
+    const e = cityEdgeR(c, Math.atan2(dz, dx));
+    const t = 1 - sstep(e * 0.72, e * 1.06, r);
+    if (t > u) u = t;
+  }
+  return u;
+}
+
+/* ─────────────────────────── scene ─────────────────────────── */
+const BASE_CELL = 1100;      // m, finest patch
+const LEVELS    = 6;         // 1.1 km … 35 km cells → ~140 km of world on screen
+const SEG       = 48;        // verts per patch edge
+const FAR       = 180000;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 2, FAR);
+camera.position.set(0, 900, 0);
+
+const SUN = { el: 5, az: 2.2 };
+const sunDir = new THREE.Vector3();
+const sunCol = new THREE.Color();
+const skyCol = new THREE.Color();
+const fogCol = new THREE.Color();
+function updateSun() {
+  const e = SUN.el * Math.PI / 180;
+  sunDir.set(Math.cos(e) * Math.cos(SUN.az), Math.sin(e), Math.cos(e) * Math.sin(SUN.az)).normalize();
+  // low sun → warm and dim; high sun → white and bright. This one curve is most of
+  // the difference between "a render" and "a photograph of somewhere".
+  const t = clamp(SUN.el / 55, 0, 1);
+  sunCol.setRGB(mix(1.00, 1.00, t), mix(0.62, 0.97, t), mix(0.34, 0.92, t))
+        .multiplyScalar(mix(0.75, 1.30, t));
+  skyCol.setRGB(mix(0.32, 0.45, t), mix(0.42, 0.58, t), mix(0.62, 0.82, t));
+  fogCol.setRGB(mix(0.62, 0.66, t), mix(0.66, 0.74, t), mix(0.74, 0.88, t));
+  scene.fog = new THREE.FogExp2(fogCol.getHex(), 1 / 62000);
+  scene.background = new THREE.Color(fogCol.getHex());
+  for (const m of groundMats) {
+    m.uniforms.uSunDir.value.copy(sunDir);
+    m.uniforms.uSunCol.value.copy(sunCol);
+    m.uniforms.uSkyCol.value.copy(skyCol);
+    m.uniforms.uFogCol.value.copy(fogCol);
+  }
+  if (sky) { sky.material.uniforms.uSunDir.value.copy(sunDir); sky.material.uniforms.uSunCol.value.copy(sunCol);
+             sky.material.uniforms.uFogCol.value.copy(fogCol); }
+  if (typeof cloudMat !== 'undefined' && cloudMat) {
+    cloudMat.uniforms.uSunDir.value.copy(sunDir); cloudMat.uniforms.uSunCol.value.copy(sunCol);
+    cloudMat.uniforms.uSkyCol.value.copy(skyCol); cloudMat.uniforms.uFogCol.value.copy(fogCol);
+  }
+  if (typeof waterMat !== 'undefined' && waterMat) {
+    waterMat.uniforms.uSunDir.value.copy(sunDir); waterMat.uniforms.uSunCol.value.copy(sunCol);
+    waterMat.uniforms.uSkyCol.value.copy(skyCol); waterMat.uniforms.uFogCol.value.copy(fogCol);
+  }
+  dirLight.position.copy(sunDir).multiplyScalar(10000);
+  dirLight.color.copy(sunCol);
+  _bldU.uNight.value = 1 - clamp(SUN.el / 18, 0, 1);   // N16 lit windows appear at dusk
+  _bldU.uSunCol.value.copy(sunCol);
+  hemi.color.copy(skyCol); hemi.groundColor.setRGB(0.22, 0.20, 0.17);
+}
+const dirLight = new THREE.DirectionalLight(0xffffff, 2.1);
+const hemi = new THREE.HemisphereLight(0x88aaff, 0x352f28, 0.85);
+scene.add(dirLight, hemi);
+
+/* ---- sky dome: a gradient plus a sun, no cubemap, no HDRI, nothing fetched ---- */
+const sky = new THREE.Mesh(
+  new THREE.SphereGeometry(FAR * 0.48, 32, 20),
+  new THREE.ShaderMaterial({
+    side: THREE.BackSide, depthWrite: false, fog: false,
+    uniforms: { uSunDir: { value: new THREE.Vector3() }, uSunCol: { value: new THREE.Color() },
+                uFogCol: { value: new THREE.Color() } },
+    vertexShader: 'varying vec3 vD; void main(){ vD = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+    fragmentShader: `
+      varying vec3 vD; uniform vec3 uSunDir, uSunCol, uFogCol;
+      void main(){
+        float up = clamp(vD.y, 0.0, 1.0);
+        vec3 zen = vec3(0.16,0.32,0.62);
+        vec3 col = mix(uFogCol, zen, pow(up, 0.55));
+        float s = max(dot(normalize(vD), uSunDir), 0.0);
+        col += uSunCol * pow(s, 320.0) * 3.0;               // the disc
+        col += uSunCol * pow(s, 5.0) * 0.30 * (1.0-up*0.6); // the glow around it
+        gl_FragColor = vec4(col, 1.0);
+      }`,
+  })
+);
+sky.frustumCulled = false;
+scene.add(sky);
+
+/* ---- ground materials, one per LOD level so the debug tint can differ -------- */
+const LOD_TINTS = [0x3388ff, 0x33ff88, 0xffcc33, 0xff6633, 0xcc33ff, 0xffffff];
+const groundMats = [];
+for (let l = 0; l < LEVELS; l++) {
+  groundMats.push(new THREE.ShaderMaterial({
+    vertexShader: GROUND_VS, fragmentShader: GROUND_FS,
+    uniforms: {
+      uSunDir: { value: new THREE.Vector3() }, uSunCol: { value: new THREE.Color() },
+      uSkyCol: { value: new THREE.Color() },   uFogCol: { value: new THREE.Color() },
+      uFogDen: { value: 1 / 62000 },           uSea: { value: 0 },
+      uLodTint: { value: 0 },                  uTint: { value: new THREE.Color(LOD_TINTS[l]) },
+      uCam: { value: new THREE.Vector3() },     uTime: { value: 0 },
+      uCloudBase: { value: 1200 },              uWind: { value: 18 },
+      uCloudOn: { value: 1 },
+    },
+  }));
+}
+
+/* ==============================================================================
+   THE VOLUMETRIC LAYER
+   Lifted from labs/world_volumetric_webgpu.html, which raymarches a genome-baked
+   3D density field. Three ideas transfer wholesale and are the reason this is a
+   port rather than a rewrite:
+
+     1. BAKE ONCE PER VOXEL, MARCH THE CHEAP BUFFER. The expensive field evaluation
+        runs once at bake time, never per march step. A 56-step march with a 4-tap
+        light march is 224 field lookups per pixel — at 1.4 Mpx that is 313 M
+        lookups a frame, which no analytic noise survives and a texture fetch does
+        without noticing.
+
+     2. THE ISO IS A PERCENTILE, NOT A THRESHOLD. The volumetric lab sorts a
+        subsample of the baked field and takes the value at the (1 - fill)
+        percentile, so EVERY world is guaranteed both open space to fly through and
+        structure to fly among — never an empty void, never a solid block. Applied
+        to weather, "coverage 0.5" stops being a magic number that means something
+        different for every noise seed and starts meaning "half the sky".
+
+     3. HG PHASE + SHORT LIGHT MARCH + POWDER. Already tuned there; carried over
+        with the same constants.
+
+   What changes in the port: the WebGPU version bakes a FIXED 3200-unit box. A sky
+   has to be endless, so this bakes a TILEABLE volume (periodic hashing, so the
+   texture wraps seamlessly) and samples it in world space. The box becomes a slab
+   between two altitudes, extending forever sideways.
+   ============================================================================== */
+
+const VOL_N = 64;                       // 64^3 R8 = 262 KB. Tiny, and it wraps.
+
+// Periodic value noise: hashing the lattice MODULO the period is what makes the
+// baked texture tileable. Without it the volume seams every VOL_N metres and the
+// sky is a visible grid from altitude.
+function pvn(x, y, z, per, seed) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = x - xi, yf = y - yi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf);
+  const H = (a, b, c) => {
+    const am = ((a % per) + per) % per, bm = ((b % per) + per) % per, cm = ((c % per) + per) % per;
+    return ihash(am + bm * 131, cm, seed);
+  };
+  const c000 = H(xi, yi, zi),     c100 = H(xi + 1, yi, zi);
+  const c010 = H(xi, yi + 1, zi), c110 = H(xi + 1, yi + 1, zi);
+  const c001 = H(xi, yi, zi + 1),     c101 = H(xi + 1, yi, zi + 1);
+  const c011 = H(xi, yi + 1, zi + 1), c111 = H(xi + 1, yi + 1, zi + 1);
+  const x00 = c000 + (c100 - c000) * u, x10 = c010 + (c110 - c010) * u;
+  const x01 = c001 + (c101 - c001) * u, x11 = c011 + (c111 - c011) * u;
+  const y0 = x00 + (x10 - x00) * v, y1 = x01 + (x11 - x01) * v;
+  return y0 + (y1 - y0) * w;
+}
+// Periodic Worley, inverted. Cumulus are BILLOWS — packed spheres — and plain fbm
+// cannot make a billow, which is why fbm-only clouds always read as smoke.
+function pworley(x, y, z, per, seed) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  let best = 9;
+  for (let k = -1; k <= 1; k++) for (let j = -1; j <= 1; j++) for (let i = -1; i <= 1; i++) {
+    const cx = xi + i, cy = yi + j, cz = zi + k;
+    const mx = ((cx % per) + per) % per, my = ((cy % per) + per) % per, mz = ((cz % per) + per) % per;
+    const fx = ihash(mx + my * 131, mz, seed);
+    const fy = ihash(mx + my * 131, mz, seed + 1);
+    const fz = ihash(mx + my * 131, mz, seed + 2);
+    const dx = cx + fx - x, dy = cy + fy - y, dz = cz + fz - z;
+    const d = dx * dx + dy * dy + dz * dz;
+    if (d < best) best = d;
+  }
+  return Math.sqrt(best);
+}
+
+let volTex = null, VOL_ISO = 0.5, _volSamples = null;
+
+function bakeVolume() {
+  const t0 = performance.now();
+  const N = VOL_N, data = new Uint8Array(N * N * N);
+  const raw = new Float32Array(N * N * N);
+  let i = 0;
+  for (let z = 0; z < N; z++) for (let y = 0; y < N; y++) for (let x = 0; x < N; x++, i++) {
+    // Perlin-Worley: fbm for the wispy structure, inverted Worley for the billows
+    const fx = x / N * 4, fy = y / N * 4, fz = z / N * 4;
+    let f = 0, amp = 0.5, fr = 1, nm = 0;
+    for (let o = 0; o < 4; o++) {
+      f += amp * pvn(fx * fr, fy * fr, fz * fr, 4 * fr, 900 + o * 37);
+      nm += amp; fr *= 2; amp *= 0.5;
+    }
+    f /= nm;
+    let wo = 0, wamp = 0.6, wfr = 1, wnm = 0;
+    for (let o = 0; o < 3; o++) {
+      wo += wamp * (1 - Math.min(1, pworley(fx * 1.6 * wfr, fy * 1.6 * wfr, fz * 1.6 * wfr, Math.round(6.4 * wfr), 700 + o * 53)));
+      wnm += wamp; wfr *= 2; wamp *= 0.5;
+    }
+    wo /= wnm;
+    const v = clamp(f * 0.42 + wo * 0.58, 0, 1);
+    raw[i] = v;
+    data[i] = Math.round(v * 255);
+  }
+  // ⭐ THE PERCENTILE TUNE, straight from the volumetric lab. Sort a subsample once;
+  // the coverage slider then indexes it, so "0.5" means half the sky at ANY seed.
+  const samp = [];
+  for (let k = 0; k < raw.length; k += 17) samp.push(raw[k]);
+  samp.sort((a, b) => a - b);
+  _volSamples = samp;
+
+  if (volTex) volTex.dispose();
+  volTex = new THREE.Data3DTexture(data, N, N, N);
+  volTex.format = THREE.RedFormat;
+  volTex.type = THREE.UnsignedByteType;
+  volTex.minFilter = volTex.magFilter = THREE.LinearFilter;
+  volTex.wrapS = volTex.wrapT = volTex.wrapR = THREE.RepeatWrapping;
+  volTex.unpackAlignment = 1;
+  volTex.needsUpdate = true;
+  tuneIso();
+  return performance.now() - t0;
+}
+function tuneIso() {
+  if (!_volSamples) return;
+  // ⚠ VOLUME FILL IS NOT SKY COVERAGE. The volumetric lab flies INSIDE its box, so
+  // "fill 0.15" there means 15% of the space is solid and the rest is flyable. A sky
+  // is looked THROUGH: a 1900 m column at 50% volume fill is opaque from above,
+  // because the ray meets cloud somewhere almost every time. Mapping the slider
+  // straight onto the percentile gave a flat overcast sheet at every setting.
+  //
+  // Sky coverage ~ 1 - (1 - fillVol)^n for n independent samples down the column, so
+  // half a sky needs single-digit volume fill. The square law below puts cover 0.5 at
+  // ~12% fill, which reads as scattered cumulus, and cover 1.0 at 42%, which reads as
+  // a broken overcast you can still find holes in.
+  const cover = clamp(CLOUD.cover, 0, 1);
+  const fillVol = 0.015 + cover * cover * 0.40;
+  const idx = clamp(Math.floor(_volSamples.length * (1 - fillVol)), 0, _volSamples.length - 1);
+  VOL_ISO = _volSamples[idx];
+  if (cloudMat) cloudMat.uniforms.uIso.value = VOL_ISO;
+}
+
+const CLOUD = { cover: 0.68, base: 2050, depth: 3400, wind: 22, steps: 32, on: true, shadows: true };
+
+/* ---- water ───────────────────────────────────────────────────────────────────
+   RULES D21-D23, D32. A flat blue sheet is the single biggest "this is procedural"
+   tell on any coast. What a real coast reads as from the air is DEPTH: turquoise
+   over sand, black-blue over the shelf edge, a white surf band where it shoals,
+   and milky green where a river is feeding it. All of that is one attribute —
+   depth — which the height field already knows for free.                          */
+const waterMat = new THREE.ShaderMaterial({
+  transparent: true, side: THREE.DoubleSide,
+  uniforms: {
+    uSunDir: { value: new THREE.Vector3() }, uSunCol: { value: new THREE.Color() },
+    uSkyCol: { value: new THREE.Color() },   uFogCol: { value: new THREE.Color() },
+    uFogDen: { value: 1 / 62000 }, uCam: { value: new THREE.Vector3() },
+    uTime: { value: 0 },
+  },
+  vertexShader: `
+    attribute float aDepth;
+    attribute float aInland;
+    varying float vDep; varying float vInl; varying vec3 vWp;
+    void main(){
+      vec4 wp = modelMatrix * vec4(position, 1.0);
+      vWp = wp.xyz; vDep = aDepth; vInl = aInland;
+      gl_Position = projectionMatrix * viewMatrix * wp;
+    }`,
+  fragmentShader: `
+    precision highp float;
+    varying float vDep; varying float vInl; varying vec3 vWp;
+    uniform vec3 uSunDir, uSunCol, uSkyCol, uFogCol, uCam;
+    uniform float uFogDen, uTime;
+    float wh(vec2 p){
+      vec3 q = fract(vec3(p.xyx) * vec3(0.1031,0.1030,0.0973));
+      q += dot(q, q.yzx + 33.33); return fract((q.x+q.y)*q.z);
+    }
+    float wn(vec2 p){
+      vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
+      return mix(mix(wh(i),wh(i+vec2(1,0)),u.x), mix(wh(i+vec2(0,1)),wh(i+vec2(1,1)),u.x), u.y);
+    }
+    void main(){
+      float d    = max(vDep, 0.0);
+      float dist = length(vWp - uCam);
+      float fine = 1.0 - smoothstep(400.0, 9000.0, dist);
+
+      // D21: depth IS the colour. Beer-Lambert, not a lerp — the falloff is what
+      // gives a real lagoon its glow right at the shore.
+      // ⚠ TURQUOISE IS CARBONATE SAND, NOT SHALLOWNESS. Keying the bright colour on
+      // depth alone made every 5 m inland puddle look like a reef flat. An inland
+      // lake over mud and peat is dark green-brown at ANY depth; only a marine
+      // shore over pale sediment goes luminous.
+      float inl  = smoothstep(0.74, 0.95, vInl);
+      vec3 shoal = mix(vec3(0.32, 0.72, 0.68), vec3(0.17, 0.26, 0.19), inl);
+      vec3 shelf = mix(vec3(0.06, 0.32, 0.42), vec3(0.06, 0.15, 0.15), inl);
+      vec3 abyss = mix(vec3(0.012, 0.055, 0.135), vec3(0.02, 0.05, 0.06), inl);
+      vec3 col = mix(shoal, shelf, 1.0 - exp(-d * 0.085));
+      col      = mix(col,   abyss, 1.0 - exp(-d * 0.0055));
+
+      // D23: surf. A white band where it shoals, widest on the gentlest slope.
+      float surf = (1.0 - smoothstep(0.0, 2.6, d));
+      float band = wn(vWp.xz * 0.05 + vec2(uTime * 0.12, 0.0));
+      col = mix(col, vec3(0.92,0.96,0.97),
+                clamp(surf * (0.35 + 0.65*band), 0.0, 1.0) * 0.85 * (1.0 - inl));
+
+      // ripple normal — two crossed wave trains plus noise, faded with distance
+      float t = uTime;
+      vec2 q = vWp.xz * 0.11;
+      float h1 = sin(q.x*1.7 + t*1.1) * 0.5 + sin(q.y*1.3 - t*0.9) * 0.5;
+      float h2 = wn(vWp.xz * 0.035 + vec2(t*0.05, -t*0.04)) - 0.5;
+      vec3 N = normalize(vec3((h1*0.045 + h2*0.35) * fine, 1.0, (h1*0.038 - h2*0.31) * fine));
+
+      float ndl = max(dot(N, uSunDir), 0.0);
+      vec3  V   = normalize(uCam - vWp);
+      vec3  H   = normalize(uSunDir + V);
+      float spec= pow(max(dot(N, H), 0.0), 220.0);
+      float fres= pow(1.0 - max(dot(N, V), 0.0), 4.0);
+
+      vec3 lit = col * (uSunCol * ndl * 0.45 + uSkyCol * 0.55)
+               + uSkyCol * fres * 0.9
+               + uSunCol * spec * 2.2;
+
+      float fogA = 1.0 - exp(-dist*dist * uFogDen*uFogDen);
+      gl_FragColor = vec4(mix(lit, uFogCol, clamp(fogA,0.0,1.0)),
+                          mix(0.80, 0.99, clamp(d*0.25,0.0,1.0)));
+    }`,
+});
+
+/* ==============================================================================
+   SKYLANDS — floating rock, and the city that lives on it.
+
+   This is the other half of the volumetric mix. The cloud march above treats the
+   3D field as something to look THROUGH; here the same kind of field is something
+   to stand ON. Two things make that work:
+
+     · METABALLS, NOT A HEIGHTFIELD. A heightfield cannot make an overhang, and an
+       overhang is the entire point of a floating island — the flat top you build on
+       and the tapering root hanging under it are the same surface. Summing smooth
+       blobs gives that for free, and blobs that are near each other MERGE, which is
+       how an archipelago gets its bridges and arches without any extra rule.
+
+     · SURFACE NETS, NOT MARCHING CUBES. Marching cubes needs a 256-case table;
+       surface nets needs none — one vertex per sign-changing cell, placed at the
+       average of its edge crossings, then quads across every sign-changing edge.
+       ~70 lines, and it produces exactly the soft lumpy "meatball" surface this
+       wants, where marching cubes would give a faceted one.
+
+   The islands are flat-ish on TOP because the field is squashed above the centre
+   and stretched below it — one asymmetry, and the silhouette reads as land rather
+   than as a potato.
+   ============================================================================== */
+
+const SKY = {
+  on: false,
+  cell: 3400,          // m, horizontal island lattice
+  cellY: 1500,         // m, vertical lattice
+  levels: 2,           // ck in [-levels, levels]
+  dens: 2.5,           // how many cells hold an island
+  size: 1.3,
+  res: 34,             // surface-net grid per island
+  range: 14000,        // build radius
+};
+let islMs = 0, cityMs = 0, grpMs = 0;
+
+const _islCache = new Map();
+function islandAt(ci, cj, ck) {
+  const key = ci + ',' + cj + ',' + ck;
+  let v = _islCache.get(key);
+  if (v !== undefined) return v;
+  const H = (o) => ihash(ci * 7 + ck * 131, cj * 13 + ck * 29, W.seed + o);
+  v = null;
+  if (H(771) < 0.34 * SKY.dens) {
+    const R = (240 + H(772) * 700) * SKY.size;
+    v = {
+      id: key,
+      x: (ci + 0.15 + H(773) * 0.7) * SKY.cell,
+      y: (ck + 0.15 + H(774) * 0.7) * SKY.cellY + 900,
+      z: (cj + 0.15 + H(775) * 0.7) * SKY.cell,
+      R,
+      // squash above / stretch below: flat top, deep root
+      up: 0.30 + H(776) * 0.22,
+      dn: 0.95 + H(777) * 0.85,
+      warp: 0.30 + H(778) * 0.45,
+      seed: (Math.imul(ci, 83492791) ^ Math.imul(cj, 19349663) ^ Math.imul(ck, 73856093) ^ W.seed) | 0,
+      mesh: null, city: null,
+    };
+  }
+  _islCache.set(key, v);
+  return v;
+}
+
+/* The set of islands whose blobs can actually reach island I's meshing box. This is
+   the inner loop of EVERY field sample, so its length is the single biggest cost in
+   the skylands build.
+
+   ⚠ islandsNear() takes a `y` and has never used it — it filters horizontally only.
+   With five vertical levels that means all five stacked islands in a cell are in the
+   loop even when they are 1.5 km apart vertically and cannot possibly contribute.
+   Filtering in 3D against the sum of the two radii typically cuts ~15 neighbours to
+   ~4, and the mesh time with it.
+
+   ⚠ buildIsland and islandCity MUST use the same list, or the rendered rock and the
+   surface the city is built on are two different surfaces. */
+function fieldNeighbours(I) {
+  if (I._nb) return I._nb;
+  const out = [];
+  for (const J of islandsNear(I.x, I.y, I.z, I.R * 2.2)) {
+    const reach = I.R * 1.65 + J.R * 1.35;
+    const dx = J.x - I.x, dz = J.z - I.z;
+    const dy = (J.y - I.y) / Math.max(0.35, Math.min(J.up, J.dn));
+    if (dx * dx + dz * dz + dy * dy < reach * reach) out.push(J);
+  }
+  if (!out.length) out.push(I);
+  I._nb = out;
+  return out;
+}
+
+function islandsNear(x, y, z, rad) {
+  const out = [];
+  const i0 = Math.floor((x - rad) / SKY.cell), i1 = Math.floor((x + rad) / SKY.cell);
+  const j0 = Math.floor((z - rad) / SKY.cell), j1 = Math.floor((z + rad) / SKY.cell);
+  for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++)
+    for (let k = -SKY.levels; k <= SKY.levels; k++) {
+      const I = islandAt(i, j, k);
+      if (I && Math.hypot(I.x - x, I.z - z) < rad + I.R * 2) out.push(I);
+    }
+  return out;
+}
+
+/* ⚠ 2D NOISE ON A 3D FIELD MAKES A POTATO. Displacing a metaball by fbm(x, z) is
+   constant down any vertical line, so every island comes out as a smooth blob with
+   a featureless underside — which is exactly what the first build looked like. Rock
+   needs noise that varies with HEIGHT too: that is what puts crevices in the flanks
+   and torn facets on the root, and it is where the overhangs come from. */
+function vn3(x, y, z, s) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = x - xi, yf = y - yi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf), w = zf * zf * (3 - 2 * zf);
+  const H = (a, b, c) => ihash(a + b * 379, c, s);
+  const c000 = H(xi, yi, zi),         c100 = H(xi + 1, yi, zi);
+  const c010 = H(xi, yi + 1, zi),     c110 = H(xi + 1, yi + 1, zi);
+  const c001 = H(xi, yi, zi + 1),     c101 = H(xi + 1, yi, zi + 1);
+  const c011 = H(xi, yi + 1, zi + 1), c111 = H(xi + 1, yi + 1, zi + 1);
+  const a0 = c000 + (c100 - c000) * u, a1 = c010 + (c110 - c010) * u;
+  const b0 = c001 + (c101 - c001) * u, b1 = c011 + (c111 - c011) * u;
+  const y0 = a0 + (a1 - a0) * v, y1 = b0 + (b1 - b0) * v;
+  return y0 + (y1 - y0) * w;
+}
+function fbm3(x, y, z, oct, s) {
+  let v = 0, a = 0.5, f = 1, n = 0;
+  for (let i = 0; i < oct; i++) { v += a * vn3(x * f, y * f, z * f, s + i * 19); n += a; f *= 2.03; a *= 0.5; }
+  return v / n;
+}
+
+// The field. Positive inside rock. A blob plus a lumpy displacement, and the
+// displacement is what turns a ball into a rock.
+function skyField(x, y, z, list, owner) {
+  let d = -0.42;
+  for (let n = 0; n < list.length; n++) {
+    const I = list[n];
+    const dx = (x - I.x) / I.R, dz = (z - I.z) / I.R;
+    const ry = y - I.y;
+    const yy = ry > 0 ? ry / (I.R * I.up) : ry / (I.R * I.dn);
+    const r2 = dx * dx + yy * yy + dz * dz;
+    if (r2 > 2.4) continue;
+    // Wyvill-style smooth falloff - cheap, C1, and sums cleanly between neighbours
+    const t = Math.max(0, 1 - r2 * 0.62);
+    d += t * t * t;
+  }
+  // ⭐⭐ THE NOISE MUST BE GATED BY THE BLOB.
+  // Adding noise everywhere means empty air has |noise| up to 0.44 against a base
+  // of -0.42, so the field can read as SOLID in open space. Two bad consequences,
+  // and the second is subtle enough that it cost an hour:
+  //   1. detached specks of rock floating near nothing;
+  //   2. islandTop() walks DOWN looking for an outside->inside crossing, so if the
+  //      very first sample is already inside there is no crossing to find and it
+  //      returns null. Every city block then reads as thin air and gets culled —
+  //      which is exactly what happened: 24 of 29 blocks culled as "wet".
+  // Scaling the noise by the blob's own falloff means noise can only ever carve or
+  // bulge material that already belongs to an island, never create it in midair.
+  const core = d + 0.42;
+  if (core <= 0.0015) return d;
+  const gate = core < 0.35 ? (core / 0.35) * (core / 0.35) * (3 - 2 * (core / 0.35)) : 1;
+  // Lumps. Three octaves of genuine 3D noise, plus a RIDGED term that is stronger
+  // downward: tops read as weathered and rounded, roots as torn and faceted, which
+  // is the difference between a floating rock and a floating pebble.
+  const ref = owner ? owner.y : (list.length ? list[0].y : 0);
+  const below = clamp((ref - y) / 360, 0, 1);
+  const n1 = fbm3(x / 430, y / 340, z / 430, 3, 301) - 0.5;
+  const n2 = fbm3(x / 155 + 11, y / 120 + 11, z / 155 + 11, 2, 302) - 0.5;
+  const rg = 1 - Math.abs(2 * vn3(x / 250, y / 190, z / 250, 303) - 1);
+  d += (n1 * 0.62 + n2 * 0.26) * gate;
+  d -= rg * rg * 0.38 * below * gate;          // crevices, cutting upward from the root
+  return d;
+}
+
+/* ---- naive surface nets ------------------------------------------------------
+   One vertex per sign-changing cell at the average of its edge crossings; a quad
+   for every sign-changing grid edge, joining the four cells around it. No tables. */
+const _SN_EDGES = [
+  [0, 1], [1, 3], [2, 3], [0, 2], [4, 5], [5, 7], [6, 7], [4, 6],
+  [0, 4], [1, 5], [2, 6], [3, 7],
+];
+const _SN_CORN = [
+  [0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0],
+  [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1],
+];
+
+function surfaceNet(f, ox, oy, oz, size, N) {
+  const S = N + 1, step = size / N;
+  const g = new Float32Array(S * S * S);
+  for (let k = 0; k < S; k++) for (let j = 0; j < S; j++) for (let i = 0; i < S; i++)
+    g[(k * S + j) * S + i] = f(ox + i * step, oy + j * step, oz + k * step);
+
+  const at = (i, j, k) => g[(k * S + j) * S + i];
+  const idx = new Int32Array(N * N * N).fill(-1);
+  const pos = [], nrm = [], col = [], tri = [];
+  const c = new Array(8);
+
+  for (let k = 0; k < N; k++) for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    let neg = 0;
+    for (let n = 0; n < 8; n++) {
+      const o = _SN_CORN[n];
+      c[n] = at(i + o[0], j + o[1], k + o[2]);
+      if (c[n] < 0) neg++;
+    }
+    if (neg === 0 || neg === 8) continue;
+    let sx = 0, sy = 0, sz = 0, cnt = 0;
+    for (let e = 0; e < 12; e++) {
+      const a = _SN_EDGES[e][0], b = _SN_EDGES[e][1];
+      const va = c[a], vb = c[b];
+      if ((va < 0) === (vb < 0)) continue;
+      const t = va / (va - vb);
+      const pa = _SN_CORN[a], pb = _SN_CORN[b];
+      sx += pa[0] + (pb[0] - pa[0]) * t;
+      sy += pa[1] + (pb[1] - pa[1]) * t;
+      sz += pa[2] + (pb[2] - pa[2]) * t;
+      cnt++;
+    }
+    if (!cnt) continue;
+    const vx = ox + (i + sx / cnt) * step;
+    const vy = oy + (j + sy / cnt) * step;
+    const vz = oz + (k + sz / cnt) * step;
+    idx[(k * N + j) * N + i] = pos.length / 3;
+    pos.push(vx, vy, vz);
+    // gradient normal, sampled on the real field so it is smooth across cells
+    const h = step * 0.6;
+    const nx = f(vx + h, vy, vz) - f(vx - h, vy, vz);
+    const ny = f(vx, vy + h, vz) - f(vx, vy - h, vz);
+    const nz = f(vx, vy, vz + h) - f(vx, vy, vz - h);
+    const il = -1 / (Math.hypot(nx, ny, nz) || 1);
+    const Nx = nx * il, Ny = ny * il, Nz = nz * il;
+    nrm.push(Nx, Ny, Nz);
+    // vertex colour: grass on what faces the sky, rock on the flanks, dark root
+    const up = clamp(Ny, 0, 1);
+    const deep = clamp(-Ny, 0, 1);
+    const band = 0.5 + 0.5 * Math.sin(vy * 0.035 + vx * 0.002);
+    let r = 0.34 + band * 0.10, gg = 0.30 + band * 0.08, bb = 0.27 + band * 0.06;
+    r = mix(r, 0.20, deep * 0.7); gg = mix(gg, 0.18, deep * 0.7); bb = mix(bb, 0.17, deep * 0.7);
+    const gr = up * up;
+    r = mix(r, 0.22, gr); gg = mix(gg, 0.36, gr); bb = mix(bb, 0.16, gr);
+    col.push(r, gg, bb);
+  }
+
+  // quads across sign-changing grid edges
+  for (let k = 1; k < N; k++) for (let j = 1; j < N; j++) for (let i = 1; i < N; i++) {
+    const v000 = at(i, j, k) < 0;
+    // +x edge -> quad in the (y,z) cells around it
+    if (v000 !== (at(i + 1, j, k) < 0)) {
+      const a = idx[(k * N + j) * N + i], b = idx[((k - 1) * N + j) * N + i];
+      const cq = idx[((k - 1) * N + (j - 1)) * N + i], d = idx[(k * N + (j - 1)) * N + i];
+      if (a >= 0 && b >= 0 && cq >= 0 && d >= 0) {
+        if (v000) tri.push(a, b, cq, a, cq, d); else tri.push(a, cq, b, a, d, cq);
+      }
+    }
+    if (v000 !== (at(i, j + 1, k) < 0)) {
+      const a = idx[(k * N + j) * N + i], b = idx[(k * N + j) * N + (i - 1)];
+      const cq = idx[((k - 1) * N + j) * N + (i - 1)], d = idx[((k - 1) * N + j) * N + i];
+      if (a >= 0 && b >= 0 && cq >= 0 && d >= 0) {
+        if (v000) tri.push(a, b, cq, a, cq, d); else tri.push(a, cq, b, a, d, cq);
+      }
+    }
+    if (v000 !== (at(i, j, k + 1) < 0)) {
+      const a = idx[(k * N + j) * N + i], b = idx[(k * N + (j - 1)) * N + i];
+      const cq = idx[(k * N + (j - 1)) * N + (i - 1)], d = idx[(k * N + j) * N + (i - 1)];
+      if (a >= 0 && b >= 0 && cq >= 0 && d >= 0) {
+        if (v000) tri.push(a, b, cq, a, cq, d); else tri.push(a, cq, b, a, d, cq);
+      }
+    }
+  }
+  return { pos, nrm, col, tri };
+}
+
+const rockMat = new THREE.MeshLambertMaterial({ vertexColors: true });
+
+function buildIsland(I) {
+  if (I.mesh) return I.mesh;
+  const t0 = performance.now();
+  const near = fieldNeighbours(I);
+
+  /* ⭐⭐ THE BOX MUST CLOSE THE SURFACE, OR YOU GET HOLES.
+     skyField sums EVERY island in range, so a neighbour's blob reaches into this
+     island's meshing box and the field is still solid when it hits the wall. Surface
+     nets only emit a quad when all four cells around an edge contain the surface, and
+     the outermost ring of cells has no outside neighbour — so wherever material
+     touches the box, the mesh simply stops: flat cut faces on the flanks and open
+     holes in the undersides, which is exactly what they looked like from below.
+
+     Two parts to the fix. Size the box from the island's ACTUAL extent (the old cube
+     was centred wrong for deep roots and cropped them), and then force the field
+     hard negative within a couple of cells of every wall so the isosurface is
+     guaranteed to close inside the volume. The neighbour's own mesh closes its own
+     side, and the two solids simply interpenetrate — which is invisible, because
+     both are rock. */
+  const pad  = I.R * 1.55;
+  const yTop = I.y + I.R * (I.up + 0.30);
+  const yBot = I.y - I.R * (I.dn * 1.18);
+  const size = Math.max(pad * 2, yTop - yBot);
+  const ox = I.x - pad, oz = I.z - pad;
+  const oy = (yTop + yBot) * 0.5 - size * 0.5;
+  const step = size / SKY.res;
+  const wall = step * 2.0;
+  const f = (x, y, z) => {
+    const d = skyField(x, y, z, near, I);
+    const ex = Math.min(x - ox, ox + size - x, y - oy, oy + size - y, z - oz, oz + size - z);
+    if (ex >= wall) return d;
+    return d - (1 - Math.max(ex, 0) / wall) * 8;
+  };
+  const sn = surfaceNet(f, ox, oy, oz, size, SKY.res);
+  islMs = islMs * 0.8 + (performance.now() - t0) * 0.2;
+  if (!sn.tri.length) { I.mesh = new THREE.Group(); return I.mesh; }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(sn.pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(sn.nrm, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(sn.col, 3));
+  g.setIndex(sn.tri);
+  g.computeBoundingSphere();
+  const m = new THREE.Mesh(g, rockMat);
+  m.name = 'island:' + I.id;
+  I.mesh = m;
+  return m;
+}
+
+// Top surface of an island at (x,z): walk down from above until the field turns
+// positive. This is what lets the CITY generator treat an island like ground.
+/* ⭐⭐ THE FLOATING-BUILDING BUG, and it was here rather than in the placement code.
+   The first version swept the WHOLE island in 26 steps: on a 1220 m island that is
+   a 2.3 km span, i.e. 88 m per step, and then it LINEARLY INTERPOLATED across that
+   bracket — on a metaball-plus-3D-noise field, which is nowhere near linear over
+   88 m. So the "surface height" it handed back could be tens of metres out, and
+   every building inherited the error. Snapping buildings to the ground per-building
+   fixed WHICH ground they used; it could not fix a ground query that was wrong.
+
+   Two changes:
+     · SEARCH ONLY THE BUILDABLE BAND. The top surface of a flat-topped island is
+       never below its own mid-height, so there is no reason to sweep down into the
+       root. That alone cuts the bracket by ~2.5x.
+     · BISECT AFTER THE BRACKET. Seven halvings take a 34 m bracket to 0.26 m, for
+       seven extra field evaluations — far cheaper than doubling the coarse sweep,
+       and it is the accuracy that actually matters. */
+function islandTop(I, x, z, near) {
+  const y0 = I.y + I.R * I.up * 1.15;
+  const y1 = I.y - I.R * 0.35;
+  const n = 30;
+  const dy = (y1 - y0) / n;
+  let top = y0, prev = skyField(x, top, z, near, I);
+  // if we start INSIDE, climb until we are out, or there is no top to find here
+  for (let g = 0; g < 8 && prev >= 0; g++) {
+    top += I.R * 0.25;
+    prev = skyField(x, top, z, near, I);
+  }
+  if (prev >= 0) return null;
+  let py = top;
+  for (let i = 1; i <= n; i++) {
+    const y = py + dy;
+    const v = skyField(x, y, z, near, I);
+    if (prev < 0 && v >= 0) {
+      // bisect the bracket [py, y] for the real crossing
+      let a = py, b = y, fa = prev;
+      for (let k = 0; k < 7; k++) {
+        const m = (a + b) * 0.5;
+        const fm = skyField(x, m, z, near, I);
+        if ((fa < 0) === (fm < 0)) { a = m; fa = fm; } else { b = m; }
+      }
+      return (a + b) * 0.5;
+    }
+    prev = v; py = y;
+  }
+  return null;
+}
+
+// A city on a rock. Same generator, different ground.
+function islandCity(I) {
+  if (I.city !== null) return I.city;
+  const near = fieldNeighbours(I);
+  const topC = islandTop(I, I.x, I.z, near);
+  if (topC === null || I.R < 300) { I.city = false; return false; }
+
+  const H = (o) => ihash(I.seed, o, 7);
+  const plan = PLAN_LIST[Math.floor(H(11) * PLAN_LIST.length)];
+  const roof = ROOF_KEYS[Math.floor(H(12) * ROOF_KEYS.length)];
+  const c = {
+    id: 'isl:' + I.id, x: I.x, z: I.z, R: I.R * 0.62, plan, roof,
+    rank: clamp((I.R - 300) / 700, 0, 1), y: topC, coast: 0, river: 0,
+    yaw: H(13) * 6.2832, seed: I.seed, name: _cityName(I.seed & 1023, (I.seed >> 10) & 1023, W.seed),
+    built: null,
+  };
+  // The provider: "ground" is the island's top surface, "water" is thin air, and
+  // slope comes from the same surface by finite difference.
+  // bldY asks for the ground up to five times per building, and islandTop is a
+  // walk down the metaball field. Quantise to 2.5 m and memoise: footprint corners
+  // and neighbouring houses share cells, which collapses most of the work.
+  const memo = new Map();
+  // ⚠⚠ ONE CONSTANT, USED TWICE. This quantised by 1.5 and de-quantised by 2.5 for
+  // a while, because a later tweak changed the divisor and missed the multiplier.
+  // Every ground query was therefore remapped to a point ~30 km away in open sky,
+  // came back as "no surface", and every city block was culled as thin air — so the
+  // skylands had roads and trees but NO BUILDINGS, with no error anywhere.
+  const Q = 1.5;
+  const topQ = (x, z) => {
+    const qx = Math.round(x / Q), qz = Math.round(z / Q);
+    const k = qx * 131071 + qz;
+    let v = memo.get(k);
+    if (v === undefined) {
+      const t = islandTop(I, qx * Q, qz * Q, near);
+      v = (t === null) ? -1e9 : t;
+      memo.set(k, v);
+    }
+    return v;
+  };
+  const prov = {
+    h: (x, z) => topQ(x, z),
+    off: (x, z) => topQ(x, z) < -1e8,
+    slope: (x, z, e) => {
+      e = e || 60;
+      const a = topQ(x - e, z), b = topQ(x + e, z);
+      const d = topQ(x, z - e), f = topQ(x, z + e);
+      if (a < -1e8 || b < -1e8 || d < -1e8 || f < -1e8) return 9;
+      return Math.hypot(b - a, f - d) / (2 * e);
+    },
+  };
+  c._surf = prov;
+  const prev = SURF;
+  SURF = prov;
+  const _t = performance.now();
+  try { buildCity(c); } finally { SURF = prev; }
+  cityMs = cityMs * 0.7 + (performance.now() - _t) * 0.3;
+  c._topCalls = memo.size;
+  I.city = c;
+  return c;
+}
+
+const liveIslands = new Map();
+function streamIslands(cx, cy, cz, budget) {
+  if (!SKY.on) {
+    for (const [k, rec] of liveIslands) {
+      scene.remove(rec.group);
+      rec.group.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+    }
+    liveIslands.clear();
+    return 0;
+  }
+  const near = islandsNear(cx, cy, cz, SKY.range);
+  const want = new Set(near.map(I => I.id));
+  for (const [k, rec] of [...liveIslands]) {
+    if (!want.has(k)) {
+      scene.remove(rec.group);
+      rec.group.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+      liveIslands.delete(k);
+    }
+  }
+  near.sort((a, b) => (Math.hypot(a.x - cx, a.y - cy, a.z - cz)) - (Math.hypot(b.x - cx, b.y - cy, b.z - cz)));
+  let n = 0;
+  for (const I of near) {
+    if (liveIslands.has(I.id)) continue;
+    if (n >= budget) break;
+    const grp = new THREE.Group();
+    grp.add(buildIsland(I));
+    if (SHOW.cities) {
+      const c = islandCity(I);
+      if (c && c.built && c.built.count) {
+        // ⚠ The road ribbon is built HERE, not in buildCity, and it samples the
+        // surface per segment. Handing it SURF=null makes a sky city's streets
+        // follow the Earth heightfield and hang in the air. The provider has to
+        // stay mounted for the mesh pass as well as the generation pass.
+        const prev = SURF;
+        SURF = c._surf || null;
+        const _g = performance.now();
+        try { grp.add(cityGroupFor(c)); } finally { SURF = prev; }
+        grpMs = grpMs * 0.7 + (performance.now() - _g) * 0.3;
+      }
+    }
+    scene.add(grp);
+    liveIslands.set(I.id, { group: grp, isl: I });
+    n++;
+  }
+  return near.length - liveIslands.size;
+}
+
+/* ═════════════════ the cloud march ═════════════════
+   A fullscreen pass AFTER the scene, reading the scene depth so the march stops at
+   the terrain instead of painting over it. The volumetric lab marches a fixed
+   3200-unit box; a sky has to be endless, so the box becomes a SLAB between two
+   altitudes that extends forever sideways, and the baked volume tiles into it.    */
+let sceneRT = null;
+function makeRT(w, h) {
+  const dt = new THREE.DepthTexture(w, h);
+  dt.format = THREE.DepthFormat;
+  dt.type = THREE.UnsignedIntType;
+  return new THREE.WebGLRenderTarget(w, h, {
+    minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+    format: THREE.RGBAFormat, type: THREE.HalfFloatType, depthTexture: dt,
+  });
+}
+
+const CLOUD_FS = `
+  precision highp float;
+  precision highp sampler3D;
+  in vec2 vUv;
+  uniform sampler2D uColor;
+  uniform sampler2D uDepth;
+  uniform sampler3D uVol;
+  uniform mat4 uInvVP;
+  uniform vec3 uCamPos, uSunDir, uSunCol, uSkyCol, uFogCol;
+  uniform float uIso, uBase, uTop, uTime, uWind, uSteps, uOn;
+  out vec4 fragColor;
+
+float _cvh(vec2 p){
+  vec3 q = fract(vec3(p.xyx) * vec3(0.1031,0.1030,0.0973));
+  q += dot(q, q.yzx + 33.33); return fract((q.x+q.y)*q.z);
+}
+float _cvn(vec2 p){
+  vec2 i=floor(p), f=fract(p); vec2 u=f*f*(3.0-2.0*f);
+  return mix(mix(_cvh(i),_cvh(i+vec2(1,0)),u.x), mix(_cvh(i+vec2(0,1)),_cvh(i+vec2(1,1)),u.x), u.y);
+}
+float coverageAt(vec2 xz, float t, float wind){
+  vec2 w = xz + vec2(t*wind, t*wind*0.34);
+  float c=0.0, a=0.5, f=1.0/21000.0, n=0.0;
+  for(int i=0;i<4;i++){ c += a*_cvn(w*f); n += a; f*=2.15; a*=0.5; }
+  return c/n;
+}
+
+  // Density at a point. The volume is sampled TWICE - once wide for the body, once
+  // tight for the edge erosion. That second tap is what turns a blob into a
+  // cauliflower, and it is why one 64^3 texture is enough for the whole sky.
+  float cloudAt(vec3 p, float cov){
+    // ⭐ THE FEEL. The first pass gave a thin scattered layer; what makes the
+    // volumetric lab read as "an asteroid belt made of cotton candy" is three
+    // things, none of which is more noise:
+    //   · the masses are BIG and FEW, so there is somewhere to fly between them;
+    //   · each one TOWERS by a different amount, so the field has depth rather
+    //     than a flat ceiling — a cloudscape is a skyline;
+    //   · the edge is HARD, so it reads as a solid you could touch and not as fog.
+    // The percentile iso is what makes the gaps reliable: the threshold is set from
+    // the field's own distribution, so "cover 0.5" leaves half the sky open at ANY
+    // seed instead of sometimes overcast and sometimes clear.
+    // Big CLEAR regions matter as much as big clouds - an evenly-scattered sky has
+    // no shape. Below the floor there is simply no weather here at all.
+    float covS = smoothstep(0.30, 0.64, cov);
+    if (covS < 0.015) return 0.0;
+
+    // per-cloud vertical development. Where the weather map is strong the cloud
+    // towers to the top of the slab; where it is weak it stays a flat pancake.
+    float topN = mix(0.30, 1.0, covS);
+    float hN = (p.y - uBase) / max(uTop - uBase, 1.0);
+    if (hN < 0.0 || hN > topN) return 0.0;
+    float u = hN / topN;
+    // flat base, billowing middle, rounded top
+    float prof = smoothstep(0.0, 0.07, u) * (1.0 - smoothstep(0.52, 1.0, u));
+
+    vec3 q = p;
+    q.xz += vec2(uTime * uWind, uTime * uWind * 0.34);
+    float body = texture(uVol, q / 17000.0).r;           // BIG masses, few of them
+    float mid  = texture(uVol, q / 3800.0).r;            // billows on the mass
+    float det  = texture(uVol, q / 780.0).r;             // erosion at the edge
+    float d = body + (mid - 0.5) * 0.30;
+    float thr = mix(uIso + 0.30, uIso - 0.16, covS);
+    float e = clamp((d - thr) * 6.5, 0.0, 1.0);          // HARD edge, not a ramp
+    e -= (1.0 - det) * 0.22 * (1.0 - e) * 2.0;           // wispy only where thin
+    return clamp(e, 0.0, 1.0) * prof;
+  }
+
+  // TONE MAPPING MOVES HERE. three applies it only when a material draws to the
+  // CANVAS, so once the scene renders into a render target the frame comes back
+  // LINEAR and this pass owns the grade. That is better anyway: the cloud is
+  // composited in linear light BEFORE the curve, which is the only way a bright
+  // cloud edge against a dark hillside does not clip to white.
+  vec3 grade(vec3 c){
+    vec3 m = (c * (2.51 * c + 0.03)) / (c * (2.43 * c + 0.59) + 0.14);
+    return pow(clamp(m, vec3(0.0), vec3(1.0)), vec3(1.0 / 2.2));
+  }
+
+  void main(){
+    vec3 scol = texture(uColor, vUv).rgb;
+    if (uOn < 0.5) { fragColor = vec4(grade(scol), 1.0); return; }
+
+    vec2 ndc  = vUv * 2.0 - 1.0;
+    vec4 farP = uInvVP * vec4(ndc, 1.0, 1.0);
+    vec3 rd   = normalize(farP.xyz / farP.w - uCamPos);
+
+    // stop the march at the terrain
+    float dz = texture(uDepth, vUv).x;
+    float sceneDist = 1e9;
+    if (dz < 0.999999) {
+      vec4 wp = uInvVP * vec4(ndc, dz * 2.0 - 1.0, 1.0);
+      sceneDist = length(wp.xyz / wp.w - uCamPos);
+    }
+
+    float t0, t1;
+    if (abs(rd.y) < 1e-4) {
+      if (uCamPos.y < uBase || uCamPos.y > uTop) { fragColor = vec4(grade(scol), 1.0); return; }
+      t0 = 0.0; t1 = 42000.0;
+    } else {
+      float ta = (uBase - uCamPos.y) / rd.y;
+      float tb = (uTop  - uCamPos.y) / rd.y;
+      t0 = min(ta, tb); t1 = max(ta, tb);
+    }
+    t0 = max(t0, 0.0);
+    t1 = min(min(t1, sceneDist), 46000.0);
+    if (t1 <= t0) { fragColor = vec4(grade(scol), 1.0); return; }
+
+    float cosT  = dot(rd, uSunDir);
+    float g     = 0.55;
+    float phase = (1.0 - g*g) / (12.5663706 * pow(1.0 + g*g - 2.0*g*cosT, 1.5));
+
+    int   N     = int(uSteps);
+    float span  = t1 - t0;
+    float step0 = span / float(N);
+    // jitter the entry point, or the slab bands hard at low step counts
+    float t     = t0 + step0 * _cvh(gl_FragCoord.xy + uTime * 61.0);
+
+    float T = 1.0;
+    vec3  acc = vec3(0.0);
+    for (int i = 0; i < 128; i++) {
+      if (i >= N || T < 0.02 || t > t1) break;
+      vec3 p = uCamPos + rd * t;
+      float cov = coverageAt(p.xz, uTime, uWind);
+      float d = cloudAt(p, cov);
+      float dt = max(step0, t * 0.012);
+      if (d > 0.008) {
+        // 3-tap light march toward the sun, straight from the volumetric lab
+        float ls = 0.0;
+        float lstep = max(step0 * 1.4, 60.0);
+        for (int j = 1; j <= 3; j++) {
+          vec3 sp = p + uSunDir * lstep * float(j);
+          ls += cloudAt(sp, coverageAt(sp.xz, uTime, uWind));
+        }
+        float lightT = exp(-ls * lstep * 0.0075);
+        float powder = 1.0 - exp(-d * 2.6);
+        vec3  amb    = mix(uFogCol, uSkyCol, 0.55) * 0.92;
+        vec3  lit    = vec3(0.96, 0.97, 1.0) *
+                       (amb * 0.55 + uSunCol * lightT * (0.45 + phase * 1.35) * powder);
+        float a = 1.0 - exp(-d * dt * 0.0085);
+        acc += T * a * lit;
+        T   *= 1.0 - a;
+        t   += dt;
+      } else {
+        t += dt * 2.4;                         // empty-space skip
+      }
+    }
+    fragColor = vec4(grade(acc + scol * T), 1.0);
+  }
+`;
+
+const cloudMat = new THREE.ShaderMaterial({
+  glslVersion: THREE.GLSL3,
+  depthTest: false, depthWrite: false,
+  uniforms: {
+    uColor: { value: null }, uDepth: { value: null }, uVol: { value: null },
+    uInvVP: { value: new THREE.Matrix4() }, uCamPos: { value: new THREE.Vector3() },
+    uSunDir: { value: new THREE.Vector3() }, uSunCol: { value: new THREE.Color() },
+    uSkyCol: { value: new THREE.Color() }, uFogCol: { value: new THREE.Color() },
+    uIso: { value: 0.5 }, uBase: { value: 1200 }, uTop: { value: 2300 },
+    uTime: { value: 0 }, uWind: { value: 18 }, uSteps: { value: 56 }, uOn: { value: 1 },
+  },
+  vertexShader: `
+    out vec2 vUv;
+    void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+  fragmentShader: CLOUD_FS,
+});
+const cloudScene = new THREE.Scene();
+const cloudCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+{
+  const q = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), cloudMat);
+  q.frustumCulled = false;
+  cloudScene.add(q);
+}
+const _invVP = new THREE.Matrix4();
+
+/* ═════════════════ the patch streamer ═════════════════
+   Concentric rings: level l is a 4x4 grid of cells of size BASE<<l, minus whatever
+   level l-1 already covers. Perfectly tiling, no quadtree bookkeeping, and the cell
+   origin is snapped to its own size so rings never jitter as the camera moves.
+   Cracks at the level seams are hidden by a downward skirt on every cell edge —
+   cheaper and more robust than stitching index buffers.                           */
+const cells = new Map();          // key → { mesh, water, lvl }
+const buildQ = [];
+let genMs = 0, nPatches = 0;
+
+function cellKey(l, ix, iz) { return l + ':' + ix + ':' + iz; }
+
+function wantedCells(camX, camZ) {
+  const want = new Map();
+  let inner = null;
+  for (let l = 0; l < LEVELS; l++) {
+    const S = BASE_CELL * (1 << l);
+    const cx = Math.floor(camX / S), cz = Math.floor(camZ / S);
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let dz = -2; dz <= 1; dz++) for (let dx = -2; dx <= 1; dx++) {
+      const ix = cx + dx, iz = cz + dz;
+      const x0 = ix * S, z0 = iz * S;
+      minX = Math.min(minX, x0); maxX = Math.max(maxX, x0 + S);
+      minZ = Math.min(minZ, z0); maxZ = Math.max(maxZ, z0 + S);
+      // skip anything the finer ring already covers
+      if (inner && x0 >= inner.minX - 1 && x0 + S <= inner.maxX + 1 &&
+                   z0 >= inner.minZ - 1 && z0 + S <= inner.maxZ + 1) continue;
+      want.set(cellKey(l, ix, iz), { l, ix, iz, S,
+        d: Math.hypot(x0 + S * 0.5 - camX, z0 + S * 0.5 - camZ) });
+    }
+    inner = { minX, maxX, minZ, maxZ };
+  }
+  return want;
+}
+
+function buildCell(l, ix, iz) {
+  const t0 = performance.now();
+  const S = BASE_CELL * (1 << l);
+  const N = SEG, step = S / N;
+  const x0 = ix * S, z0 = iz * S;
+
+  // one extra ring of samples on every side, used only for normals — so the normal
+  // at a cell edge is the true surface normal and neighbours agree
+  const G = N + 3;
+  const hh = new Float32Array(G * G);
+  const wlv = new Float32Array(G * G);
+  const sub = new Uint8Array(G * G);
+  const wt = new Float32Array(G * G);
+  const lnd = new Float32Array(G * G);
+  const cityList = citiesNear(x0 + S * 0.5, z0 + S * 0.5, S * 0.9);
+  const tmp = {};
+  let minH = 1e9, maxH = -1e9, anyWater = false;
+  for (let j = 0; j < G; j++) for (let i = 0; i < G; i++) {
+    const x = x0 + (i - 1) * step, z = z0 + (j - 1) * step;
+    sample(x, z, tmp);
+    const k = j * G + i;
+    hh[k] = tmp.h; wlv[k] = tmp.wl; wt[k] = tmp.wet; lnd[k] = tmp.land;
+    sub[k] = (tmp.water > -1e8) ? 1 : 0;
+    if (sub[k]) anyWater = true;
+    if (tmp.h < minH) minH = tmp.h; if (tmp.h > maxH) maxH = tmp.h;
+  }
+
+  const V = (N + 1) * (N + 1);
+  const pos = new Float32Array(V * 3), nrm = new Float32Array(V * 3);
+  const aWet = new Float32Array(V), aUrb = new Float32Array(V);
+  for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) {
+    const v = j * (N + 1) + i, k = (j + 1) * G + (i + 1);
+    const x = x0 + i * step, z = z0 + j * step;
+    pos[v * 3] = x; pos[v * 3 + 1] = hh[k]; pos[v * 3 + 2] = z;
+    const hL = hh[k - 1], hR = hh[k + 1], hD = hh[k - G], hU = hh[k + G];
+    let nx = hL - hR, ny = 2 * step, nz = hD - hU;
+    const il = 1 / Math.hypot(nx, ny, nz);
+    nrm[v * 3] = nx * il; nrm[v * 3 + 1] = ny * il; nrm[v * 3 + 2] = nz * il;
+    aWet[v] = wt[k];
+    aUrb[v] = cityList.length ? urbanAt(x, z, cityList) : 0;
+  }
+  // indices + a skirt ring hanging below every edge
+  const idx = [];
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const a = j * (N + 1) + i, b = a + 1, c = a + N + 1, d = c + 1;
+    idx.push(a, c, b, b, c, d);
+  }
+  // A skirt only has to cover the height gap between two LOD levels, which is at
+  // most the local relief across one coarse cell. 2.2x the step made the outer
+  // rings drop 1.6 km, and a coarse patch beside a cliff then showed its skirt as a
+  // giant flat-topped box hanging in the distance.
+  const skirtDrop = Math.max(18, step * 0.75);
+  const sBase = V;
+  const border = [];
+  for (let i = 0; i <= N; i++) border.push(i);                              // j=0
+  for (let j = 1; j <= N; j++) border.push(j * (N + 1) + N);                // i=N
+  for (let i = N - 1; i >= 0; i--) border.push(N * (N + 1) + i);            // j=N
+  for (let j = N - 1; j >= 1; j--) border.push(j * (N + 1));                // i=0
+  const pos2 = new Float32Array((V + border.length) * 3);
+  const nrm2 = new Float32Array((V + border.length) * 3);
+  const wet2 = new Float32Array(V + border.length);
+  const urb2 = new Float32Array(V + border.length);
+  pos2.set(pos); nrm2.set(nrm); wet2.set(aWet); urb2.set(aUrb);
+  for (let b = 0; b < border.length; b++) {
+    const src = border[b], dst = sBase + b;
+    pos2[dst * 3] = pos[src * 3];
+    pos2[dst * 3 + 1] = pos[src * 3 + 1] - skirtDrop;
+    pos2[dst * 3 + 2] = pos[src * 3 + 2];
+    nrm2[dst * 3] = nrm[src * 3]; nrm2[dst * 3 + 1] = nrm[src * 3 + 1]; nrm2[dst * 3 + 2] = nrm[src * 3 + 2];
+    wet2[dst] = aWet[src]; urb2[dst] = aUrb[src];
+  }
+  for (let b = 0; b < border.length; b++) {
+    const b2 = (b + 1) % border.length;
+    idx.push(border[b], sBase + b, border[b2], border[b2], sBase + b, sBase + b2);
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos2, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(nrm2, 3));
+  geo.setAttribute('aWet', new THREE.BufferAttribute(wet2, 1));
+  geo.setAttribute('aUrban', new THREE.BufferAttribute(urb2, 1));
+  geo.setIndex(idx);
+  geo.computeBoundingSphere();
+  const mesh = new THREE.Mesh(geo, groundMats[l]);
+  mesh.frustumCulled = true;
+  mesh.userData.lvl = l;
+
+  // water surface for this cell, from the same grid
+  let water = null;
+  if (anyWater && l < 5) {
+    // ⭐ ANY CORNER, NOT ALL FOUR. Requiring all four submerged stops the sheet a
+    // whole quad short of the shore, so the waterline becomes a stair-step at the
+    // vertex pitch — a sawtooth coast, visible from kilometres up. Emitting on ANY
+    // submerged corner runs the sheet UNDER the beach instead; the terrain then
+    // occludes it and the visible waterline is the true surface intersection,
+    // smooth at any LOD and free.
+    const wp = [], wi = [], wd = [], wq = [];
+    const map = new Int32Array(V).fill(-1);
+    for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) {
+      const v = j * (N + 1) + i, k = (j + 1) * G + (i + 1);
+      map[v] = wp.length / 3;
+      wp.push(x0 + i * step, wlv[k], z0 + j * step);
+      wd.push(wlv[k] - hh[k]);                       // depth, for the water shader
+      wq.push(lnd[k]);                               // 0 open sea … 1 deep inland
+    }
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      const a = j * (N + 1) + i, b = a + 1, c = a + N + 1, d = c + 1;
+      const ka = (j + 1) * G + (i + 1), kb = ka + 1, kc = ka + G, kd = kc + 1;
+      if (!(sub[ka] || sub[kb] || sub[kc] || sub[kd])) continue;
+      wi.push(map[a], map[c], map[b], map[b], map[c], map[d]);
+    }
+    if (wi.length) {
+      const wg = new THREE.BufferGeometry();
+      wg.setAttribute('position', new THREE.Float32BufferAttribute(wp, 3));
+      wg.setAttribute('aDepth', new THREE.Float32BufferAttribute(wd, 1));
+      wg.setAttribute('aInland', new THREE.Float32BufferAttribute(wq, 1));
+      wg.setIndex(wi); wg.computeBoundingSphere();
+      water = new THREE.Mesh(wg, waterMat);
+      water.renderOrder = 1;
+    }
+  }
+  genMs = genMs * 0.85 + (performance.now() - t0) * 0.15;
+  return { mesh, water, lvl: l };
+}
+
+function disposeCell(c) {
+  if (c.mesh) { scene.remove(c.mesh); c.mesh.geometry.dispose(); }
+  if (c.water) { scene.remove(c.water); c.water.geometry.dispose(); }
+}
+
+function streamTerrain(camX, camZ, budget) {
+  const want = wantedCells(camX, camZ);
+  for (const [k, c] of cells) if (!want.has(k)) { disposeCell(c); cells.delete(k); }
+  buildQ.length = 0;
+  for (const [k, w] of want) if (!cells.has(k)) buildQ.push([k, w]);
+  buildQ.sort((a, b) => a[1].d - b[1].d);
+  let n = 0;
+  for (const [k, w] of buildQ) {
+    if (n >= budget) break;
+    const c = buildCell(w.l, w.ix, w.iz);
+    cells.set(k, c);
+    scene.add(c.mesh); if (c.water) scene.add(c.water);
+    n++;
+  }
+  nPatches = cells.size;
+  return buildQ.length - n;
+}
+
+/* ═════════════════ city meshing ═════════════════
+   Two InstancedMeshes per city (boxes, cylinders) plus trees and a merged road
+   ribbon. Instancing is the whole reason a full city is affordable: the v35.21
+   silhouette work in the hub city proved that a varied skyline costs INSTANCES,
+   never DRAW CALLS, as long as every variant lands in the same buffer.          */
+const BOX_G = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
+const CYL_G = new THREE.CylinderGeometry(0.5, 0.5, 1, 12).translate(0, 0.5, 0);
+const TREE_G = new THREE.ConeGeometry(0.5, 1, 6).translate(0, 0.5, 0);
+
+const _bldU = { uNight: { value: 0 }, uSunCol: { value: new THREE.Color(1, 1, 1) } };
+
+/* -- THE FACADE ---------------------------------------------------------------
+   Rules N1-N10, read off GROUND-LEVEL PHOTOGRAPHS rather than maps, because what a
+   pilot at 200 m actually sees is a WALL, and a wall is not a flat colour with a
+   window grid on it.
+
+   What every one of those photographs has in common - a Sydney terrace, a Porto
+   apartment block, the Daily News Building - is a THREE-PART VERTICAL COMPOSITION:
+
+     BASE   one tall storey (1.3-1.8x the others), different material, mostly
+            glazed, usually shaded by a canopy. It reads as a DARK BAND and it is
+            the single strongest cue that a box is a building.
+     SHAFT  the repeated bay. ~5-6 m for houses, 3.5-4.5 m for apartments, and it
+            narrows toward 2.5 m as buildings get taller.
+     CAP    a cornice or parapet, lighter, with the roofline breakers above it.
+
+   Plus: windows read NEAR-BLACK in daylight (contrast 4:1 or more), floor lines
+   show as thin shadow bands, weathering runs DOWNWARD from every sill, and the
+   building is ONE colour - variance lives between buildings, never within one.   */
+function makeBuildingMat() {
+  const m = new THREE.MeshLambertMaterial();
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uNight = _bldU.uNight;
+    sh.uniforms.uSunCol = _bldU.uSunCol;
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>',
+        '#include <common>\nattribute vec2 aFx;\nvarying vec2 vFx;\nvarying vec3 vWP;\nvarying vec3 vWN;\nvarying vec3 vSZ;\nvarying float vUp;')
+      .replace('#include <begin_vertex>', [
+        '#include <begin_vertex>',
+        'vWP = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;',
+        'vWN = normalize(mat3(modelMatrix) * mat3(instanceMatrix) * normal);',
+        'vFx = aFx;',
+        'vSZ = vec3(length(instanceMatrix[0].xyz), length(instanceMatrix[1].xyz), length(instanceMatrix[2].xyz));',
+        'vUp = position.y;'
+      ].join('\n'));
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', [
+        '#include <common>',
+        'varying vec2 vFx; varying vec3 vWP; varying vec3 vWN; varying vec3 vSZ; varying float vUp;',
+        'uniform float uNight; uniform vec3 uSunCol;',
+        'float bh21(vec2 p){',
+        '  vec3 q = fract(vec3(p.xyx) * vec3(0.1031,0.1030,0.0973));',
+        '  q += dot(q, q.yzx + 33.33); return fract((q.x+q.y)*q.z);',
+        '}'
+      ].join('\n'))
+      .replace('#include <dithering_fragment>', [
+        '#include <dithering_fragment>',
+        '{',
+        '  vec3  nn   = normalize(vWN);',
+        // vNormal is VIEW space: using it to ask "wall or roof" gives an answer that
+        // changes as you turn the camera, i.e. windows crawling over the roofs.
+        '  float wall = 1.0 - abs(nn.y);',
+        '  float kind = vFx.x, rnd = vFx.y;',
+        '  float H    = vSZ.y;',
+        '  float yM   = vUp * H;',
+        '  vec3  base = gl_FragColor.rgb;',
+        '  if (wall > 0.45 && kind < 5.5 && H > 4.5) {',
+        '    float fh = 2.95 + 0.55 * fract(rnd * 7.31);',              // N2 storey height
+        '    float gh = fh * (1.30 + 0.50 * fract(rnd * 11.17));',      // N2 taller ground floor
+        '    float bw = mix(5.6, 2.6, clamp((H - 11.0) / 80.0, 0.0, 1.0)) * (0.90 + 0.28 * fract(rnd * 3.77));',
+        '    vec2  uv = abs(nn.x) > abs(nn.z) ? vWP.zy : vWP.xy;',
+        '    float u  = uv.x;',
+        '    float bx = fract(u / bw);',
+        '    float lit = step(0.66 - uNight * 0.34, bh21(vec2(floor(u / bw), floor(yM / fh))));',
+        '    if (yM < gh) {',
+        // N3/N4 BASE: glazed, recessed, shaded by a canopy - a dark band
+        '      float g = smoothstep(0.10, 0.20, bx) * (1.0 - smoothstep(0.80, 0.90, bx))',
+        '              * smoothstep(0.10, 0.22, yM / gh) * (1.0 - smoothstep(0.80, 0.93, yM / gh));',
+        '      vec3 shopC = mix(base * 0.30, vec3(0.62, 0.66, 0.70), 0.35);',
+        '      gl_FragColor.rgb = mix(base * 0.72, shopC, g * wall);',
+        '      gl_FragColor.rgb *= 1.0 - (1.0 - smoothstep(0.0, 0.16, yM / gh)) * 0.35 * wall;',
+        '    } else {',
+        '      float fy = fract((yM - gh) / fh);',
+        // N5 windows are near-black holes; N6 window fraction rises with height
+        '      float wW = mix(0.30, 0.42, clamp((H - 11.0) / 80.0, 0.0, 1.0));',
+        '      float win = smoothstep(0.5 - wW, 0.5 - wW + 0.06, bx)',
+        '                * (1.0 - smoothstep(0.5 + wW - 0.06, 0.5 + wW, bx))',
+        '                * smoothstep(0.22, 0.30, fy) * (1.0 - smoothstep(0.70, 0.78, fy));',
+        '      vec3 glass = mix(vec3(0.045, 0.055, 0.075), uSunCol * vec3(1.0, 0.88, 0.62), lit * (0.25 + 0.6 * uNight));',
+        '      gl_FragColor.rgb = mix(base, glass, win * wall);',
+        // J13 floor line - the thin shadow that turns a box into storeys
+        '      gl_FragColor.rgb *= 1.0 - (1.0 - smoothstep(0.0, 0.085, fy)) * 0.30 * wall;',
+        // N9 balconies on a SUB-rhythm: every other bay, alternating floors
+        '      float balc = step(0.5, fract(floor(u / bw) * 0.5 + floor((yM - gh) / fh) * 0.5 + rnd));',
+        '      float bandY = (1.0 - smoothstep(0.0, 0.16, fy));',
+        '      gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * 0.62,',
+        '                             balc * bandY * step(0.55, fract(rnd * 5.1)) * wall * 0.8);',
+        '    }',
+        // N3 CAP - cornice, lighter, with a shadow tucked under it
+        '    float capT = smoothstep(H - 1.9, H - 1.1, yM);',
+        '    gl_FragColor.rgb = mix(gl_FragColor.rgb, gl_FragColor.rgb * 1.22 + 0.02, capT * wall);',
+        '    gl_FragColor.rgb *= 1.0 - smoothstep(H - 3.2, H - 2.2, yM) * (1.0 - capT) * 0.22 * wall;',
+        // N18 weathering: vertical streaks running DOWN from sills and parapets
+        '    float streak = bh21(vec2(floor(u * 0.45), 0.0));',
+        '    gl_FragColor.rgb *= 1.0 - streak * 0.10 * wall * (1.0 - smoothstep(0.0, 0.55, yM / max(H, 1.0)));',
+        '  }',
+        '  gl_FragColor.rgb *= 0.94 + 0.06 * wall;',
+        '}'
+      ].join('\n'));
+  };
+  return m;
+}
+const bldMat = makeBuildingMat();
+const treeMat = new THREE.MeshLambertMaterial({ color: 0x2c4420 });
+// ⚠ DoubleSide is not optional here. A street rect's winding flips with its yaw,
+// so a single-sided road mesh renders roughly every other street and the network
+// comes out as dashes.
+const roadMat = new THREE.MeshLambertMaterial({ color: 0x24262b, side: THREE.DoubleSide });
+
+const cityMeshes = new Map();
+let nBldTotal = 0;
+
+function ensureCity(c) {
+  if (cityMeshes.has(c.id)) return cityMeshes.get(c.id);
+  const g = cityGroupFor(c);
+  scene.add(g);
+  const rec = { group: g, city: c, buildings: c.built.buildings };
+  cityMeshes.set(c.id, rec);
+  return rec;
+}
+
+// Instance meshes for a city that has already been generated. Split out of
+// ensureCity so an island can add the same group to its own transform group.
+function cityGroupFor(c) {
+  const b = buildCity(c);
+  const g = new THREE.Group(); g.name = 'city:' + c.id;
+  const A = b.inst, n = b.count;
+  let nBox = 0, nCyl = 0;
+  for (let i = 0; i < n; i++) { const k = A[i * 12 + 10]; if (k === 3 || k === 5) nCyl++; else nBox++; }
+
+  // The instanced (kind, rnd) attribute cannot live on the SHARED geometry - it
+  // would be overwritten by whichever city built last. Clone per city; a unit box
+  // is 24 vertices, so this costs nothing, and dropCity disposes the clone.
+  const fxBox = new Float32Array(nBox * 2), fxCyl = new Float32Array(nCyl * 2);
+  const mk = (geo, count, fx) => {
+    if (!count) return null;
+    const g2 = geo.clone();
+    g2.setAttribute('aFx', new THREE.InstancedBufferAttribute(fx, 2));
+    return new THREE.InstancedMesh(g2, bldMat, count);
+  };
+  const boxes = mk(BOX_G, nBox, fxBox), cyls = mk(CYL_G, nCyl, fxCyl);
+  const M = new THREE.Matrix4(), Q = new THREE.Quaternion(), E = new THREE.Euler();
+  const Pv = new THREE.Vector3(), Sv = new THREE.Vector3(), Cl = new THREE.Color();
+  let bi = 0, ci = 0;
+  for (let i = 0; i < n; i++) {
+    const o = i * 12;
+    const kind = A[o + 10];
+    E.set(0, A[o + 6], 0); Q.setFromEuler(E);
+    Pv.set(A[o], A[o + 1], A[o + 2]);
+    Sv.set(A[o + 3], A[o + 4], A[o + 5]);
+    M.compose(Pv, Q, Sv);
+    Cl.setRGB(A[o + 7], A[o + 8], A[o + 9]);
+    if (kind === 3 || kind === 5) {
+      if (cyls) { cyls.setMatrixAt(ci, M); cyls.setColorAt(ci, Cl);
+                  fxCyl[ci * 2] = kind; fxCyl[ci * 2 + 1] = A[o + 11]; ci++; }
+    } else if (boxes) {
+      boxes.setMatrixAt(bi, M); boxes.setColorAt(bi, Cl);
+      fxBox[bi * 2] = kind; fxBox[bi * 2 + 1] = A[o + 11]; bi++;
+    }
+  }
+  if (boxes) { boxes.instanceMatrix.needsUpdate = true; boxes.instanceColor.needsUpdate = true; g.add(boxes); }
+  if (cyls)  { cyls.instanceMatrix.needsUpdate = true;  cyls.instanceColor.needsUpdate = true;  g.add(cyls); }
+
+  // trees
+  const T = b.trees, nt = T.length / 4;
+  if (nt) {
+    const tm = new THREE.InstancedMesh(TREE_G, treeMat, nt);
+    for (let i = 0; i < nt; i++) {
+      const r = T[i * 4 + 3];
+      Pv.set(T[i * 4], T[i * 4 + 1], T[i * 4 + 2]);
+      Sv.set(r * 1.5, r * 2.2, r * 1.5);
+      M.compose(Pv, new THREE.Quaternion(), Sv);
+      tm.setMatrixAt(i, M);
+    }
+    tm.instanceMatrix.needsUpdate = true;
+    g.add(tm);
+  }
+
+  // road ribbon: one merged flat mesh. Roads are the thing the hub city has none
+  // of, and from 500 m up they are most of what you actually see of a city.
+  if (b.roads.length && SHOW.roads) {
+    const rp = [], ri = [];
+    let vi = 0;
+    for (const s of b.roads) {
+      const ca = Math.cos(s.yaw), sa = Math.sin(s.yaw);
+      const hw = s.w * 0.5, hd = s.d * 0.5;
+      // ⚠ A STREET IS A RIBBON, NOT A QUAD. An arterial can be 2 km long; four
+      // corner samples let it cut straight through every hill it crosses, which
+      // reads as a black wire strung over the city. Segment it and sample along.
+      const along = s.d >= s.w;
+      const L = along ? s.d : s.w, HW = along ? hw : hd;
+      const n = Math.max(1, Math.round(L / 60));
+      const seg = L / n;
+      // ⭐ A ROAD IS CROSS-LEVEL. Sampling the terrain independently at each KERB
+      // tilts the ribbon sideways by the full cross-slope, so on any real hillside
+      // the carriageway rolls over and one edge stabs out of the ground — from the
+      // air, long black blades scattered across the terrain. Take ONE height on the
+      // centreline and hold it right across the width, which is also what a grader
+      // does. (Rule H22: streets are cut into terrain, not draped over it.)
+      const ys = [];
+      for (let k = 0; k <= n; k++) {
+        const t = -L * 0.5 + L * (k / n);
+        const lx = along ? 0 : t, lz = along ? t : 0;
+        const X = s.cx + ca * lx - sa * lz, Z = s.cz + sa * lx + ca * lz;
+        ys.push(surfH(X, Z));
+      }
+      // H17: smooth the profile — a road eases its grade rather than following
+      // every bump, and an unsmoothed profile reads as a rollercoaster
+      // off-surface samples come back as -1e9; a ribbon containing one would be a
+      // kilometre-long spike. On an island this is the cliff edge, and a street
+      // simply stops there.
+      let offEdge = false;
+      for (let k = 0; k <= n; k++) if (ys[k] < -1e8) { offEdge = true; break; }
+      if (offEdge) continue;
+      const ysm = ys.slice();
+      for (let k = 1; k < n; k++) ysm[k] = (ys[k - 1] + 2 * ys[k] + ys[k + 1]) * 0.25;
+      for (let k = 0; k <= n; k++) {
+        const t = -L * 0.5 + L * (k / n);
+        for (const side of [-HW, HW]) {
+          const lx = along ? side : t, lz = along ? t : side;
+          const X = s.cx + ca * lx - sa * lz, Z = s.cz + sa * lx + ca * lz;
+          rp.push(X, ysm[k] + 1.6, Z);
+        }
+      }
+      for (let k = 0; k < n; k++) {
+        // H17: no road climbs a 25% grade. Drop the segment instead of drawing a ramp.
+        if (Math.abs(ysm[k + 1] - ysm[k]) > seg * 0.25) continue;
+        const a0 = vi + k * 2;
+        ri.push(a0, a0 + 1, a0 + 2, a0 + 1, a0 + 3, a0 + 2);
+      }
+      vi += (n + 1) * 2;
+    }
+    const rg = new THREE.BufferGeometry();
+    rg.setAttribute('position', new THREE.Float32BufferAttribute(rp, 3));
+    rg.setIndex(ri); rg.computeVertexNormals();
+    g.add(new THREE.Mesh(rg, roadMat));
+  }
+
+  return g;
+}
+function dropCity(id) {
+  const rec = cityMeshes.get(id); if (!rec) return;
+  scene.remove(rec.group);
+  rec.group.traverse(o => { if (o.geometry && o.geometry !== BOX_G && o.geometry !== CYL_G && o.geometry !== TREE_G) o.geometry.dispose(); });
+  cityMeshes.delete(id);
+  const c = rec.city; if (c) c.built = null;
+}
+
+const CITY_MESH_RANGE = 26000;
+function streamCities(camX, camZ) {
+  if (!SHOW.cities) {
+    for (const id of [...cityMeshes.keys()]) dropCity(id);
+    nBldTotal = 0; return;
+  }
+  const near = citiesNear(camX, camZ, CITY_MESH_RANGE);
+  const live = new Set();
+  let built = 0;
+  for (const c of near) {
+    live.add(c.id);
+    if (!cityMeshes.has(c.id) && built < 1) { ensureCity(c); built++; }
+  }
+  for (const id of [...cityMeshes.keys()]) if (!live.has(id)) dropCity(id);
+  let tot = 0; for (const r of cityMeshes.values()) tot += r.buildings;
+  nBldTotal = tot;
+}
+
+/* ═════════════════ flight ═════════════════ */
+const keys = {};
+let yaw = 0, pitch = -0.22, speed = 260, dragging = false, lx = 0, ly = 0;
+addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'KeyM') toggleMap();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+renderer.domElement.addEventListener('mousedown', e => { dragging = true; lx = e.clientX; ly = e.clientY; });
+addEventListener('mouseup', () => { dragging = false; });
+addEventListener('mousemove', e => {
+  if (!dragging) return;
+  yaw -= (e.clientX - lx) * 0.0032; pitch -= (e.clientY - ly) * 0.0032;
+  pitch = clamp(pitch, -1.5, 1.5);
+  lx = e.clientX; ly = e.clientY;
+});
+addEventListener('wheel', e => {
+  speed = clamp(speed * (e.deltaY > 0 ? 0.86 : 1.16), 8, 24000);
+  e.preventDefault();
+}, { passive: false });
+
+let mapMode = false;
+function toggleMap() {
+  mapMode = !mapMode;
+  if (mapMode) { camera.position.y = Math.max(camera.position.y, 26000); pitch = -1.5; }
+  else { pitch = -0.25; }
+  document.getElementById('viewV').textContent = mapMode ? 'map' : 'ground';
+}
+
+const fwd = new THREE.Vector3(), right = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
+function fly(dt) {
+  fwd.set(Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), Math.cos(yaw) * Math.cos(pitch)).normalize();
+  right.crossVectors(fwd, up).normalize();
+  const s = speed * dt * (keys.ShiftLeft || keys.ShiftRight ? 6 : 1);
+  if (keys.KeyW) camera.position.addScaledVector(fwd, s);
+  if (keys.KeyS) camera.position.addScaledVector(fwd, -s);
+  if (keys.KeyA) camera.position.addScaledVector(right, -s);
+  if (keys.KeyD) camera.position.addScaledVector(right, s);
+  if (keys.KeyQ) camera.position.y -= s;
+  if (keys.KeyE) camera.position.y += s;
+  if (!SKY.on) {
+    const g = heightAt(camera.position.x, camera.position.z);
+    if (camera.position.y < g + 12) camera.position.y = g + 12;
+  }
+  camera.lookAt(camera.position.x + fwd.x, camera.position.y + fwd.y, camera.position.z + fwd.z);
+}
+
+/* ═════════════════ jump-to ═════════════════
+   Search outward from the camera for ground that satisfies a predicate. Being able
+   to ask the world "where is a desert?" and get an answer in ~2 ms is only possible
+   because the world is a pure function — you cannot probe a tile stream like this. */
+function findSpot(kind) {
+  const ox = camera.position.x, oz = camera.position.z;
+  let best = null, bestScore = -1e9;
+  const tmp = {};
+  for (let ring = 1; ring < 46; ring++) {
+    const r = ring * 5200;
+    for (let k = 0; k < 24; k++) {
+      const a = (k / 24 + ring * 0.13) * 6.2832;
+      const x = ox + Math.cos(a) * r, z = oz + Math.sin(a) * r;
+      sample(x, z, tmp);
+      const sl = slopeAt(x, z, 160);
+      let sc = -1e9;
+      if (kind === 'coast')  sc = (tmp.water > -1e8 || tmp.land > 0.75) ? -1e9 : 1 - Math.abs(tmp.land - 0.58) * 9;
+      if (kind === 'mtn')    sc = tmp.h * 0.001 + sl * 3;
+      if (kind === 'river')  sc = (tmp.water > -1e8 && tmp.land > 0.72) ? (2 - tmp.h * 0.0004) : -1e9;
+      if (kind === 'desert') sc = (tmp.water > -1e8) ? -1e9 : (1 - tmp.wet) * 3 - sl * 4;
+      if (kind === 'farm')   sc = (tmp.water > -1e8) ? -1e9 : tmp.wet * 2 - sl * 12 + urbanAt(x, z, citiesNear(x, z, 9000)) * 2;
+      sc -= r * 0.00004;
+      if (sc > bestScore) { bestScore = sc; best = [x, z]; }
+    }
+    if (bestScore > 2.2 && ring > 3) break;
+  }
+  return best;
+}
+function jumpTo(kind) {
+  let x, z, alt = 900;
+  if (kind === 'city' || kind === 'bigcity') {
+    const near = citiesNear(camera.position.x, camera.position.z, 260000);
+    if (!near.length) { setStatus('no city within 260 km — try another seed'); return; }
+    near.sort(kind === 'bigcity'
+      ? (a, b) => b.R - a.R
+      : (a, b) => Math.hypot(a.x - camera.position.x, a.z - camera.position.z)
+                - Math.hypot(b.x - camera.position.x, b.z - camera.position.z));
+    const c = near[0];
+    x = c.x; z = c.z; alt = c.y + Math.max(500, c.R * 0.42);
+  } else {
+    const p = findSpot(kind);
+    if (!p) return;
+    x = p[0]; z = p[1];
+    alt = Math.max(heightAt(x, z) + (kind === 'mtn' ? 1800 : 520), 220);
+  }
+  camera.position.set(x, alt, z);
+  pitch = -0.30;
+  resetWorld(false);
+}
+function setStatus(s) { const e = document.getElementById('cityname'); if (e) e.textContent = s; }
+
+/* ═════════════════ UI wiring ═════════════════ */
+const SHOW = { cities: true, roads: true, water: true, wire: false, lod: false };
+const $ = id => document.getElementById(id);
+
+function resetWorld(clearCities) {
+  for (const [k, c] of cells) disposeCell(c);
+  cells.clear();
+  if (clearCities !== false) {
+    for (const id of [...cityMeshes.keys()]) dropCity(id);
+    _cityCache.clear();
+  }
+}
+
+function bindRange(id, vid, fmt, set) {
+  const el = $(id);
+  const apply = () => { const v = parseFloat(el.value); $(vid).textContent = fmt(v); set(v); };
+  el.addEventListener('input', apply); apply();
+}
+bindRange('sea', 'seaV', v => v + ' m', v => { W.sea = v; for (const m of groundMats) m.uniforms.uSea.value = v; resetWorld(true); });
+bindRange('relief', 'reliefV', v => v.toFixed(2) + '×', v => { W.relief = v; resetWorld(true); });
+bindRange('ero', 'eroV', v => v.toFixed(2), v => { W.erosion = v; resetWorld(true); });
+bindRange('grain', 'grainV', v => v.toFixed(2), v => { W.grain = v; resetWorld(true); });
+bindRange('cd', 'cdV', v => v.toFixed(2) + '×', v => { W.cityDensity = v; resetWorld(true); });
+bindRange('sun', 'sunV', v => v + '°', v => { SUN.el = v; updateSun(); });
+bindRange('cov',  'covV',  v => v.toFixed(2),      v => { CLOUD.cover = v; tuneIso(); });
+bindRange('cb',   'cbV',   v => v + ' m',          v => { CLOUD.base = v; });
+bindRange('cdep', 'cdepV', v => v + ' m',          v => { CLOUD.depth = v; });
+bindRange('wind', 'windV', v => v + ' m/s',        v => { CLOUD.wind = v; });
+bindRange('mq',   'mqV',   v => String(v),         v => { CLOUD.steps = v; });
+$('clouds').addEventListener('change', e => { CLOUD.on = e.target.checked; });
+$('cshad').addEventListener('change', e => {
+  CLOUD.shadows = e.target.checked;
+  for (const m of groundMats) m.uniforms.uCloudOn.value = CLOUD.shadows ? 1 : 0;
+});
+
+$('regen').onclick = () => {
+  W.seed = (parseInt($('seed').value, 10) || 0) | 0;
+  $('seedV').textContent = W.seed;
+  resetWorld(true);
+};
+$('go').onclick = () => jumpTo($('jump').value);
+
+function setMode(sky) {
+  SKY.on = sky;
+  $('modeV').textContent = sky ? 'skylands' : 'earth';
+  $('mEarth').className = sky ? '' : 'go';
+  $('mSky').className = sky ? 'go' : '';
+  for (const c of cells.values()) if (c.water) c.water.visible = !sky && SHOW.water;
+  if (sky) {
+    // drop into the archipelago rather than wherever the Earth camera was
+    const I = islandsNear(camera.position.x, camera.position.y, camera.position.z, 26000)
+      .sort((a, b) => b.R - a.R)[0];
+    if (I) { camera.position.set(I.x - I.R * 2.4, I.y + I.R * 0.9, I.z - I.R * 2.4); }
+    else { camera.position.set(0, 1400, 0); }
+    yaw = Math.PI * 0.25; pitch = -0.12;
+    // ⚠ do NOT override the cloud sliders here. This used to force base=200 to put
+    // weather under the islands, which silently threw away whatever the owner had
+    // tuned the moment they switched modes.
+  }
+}
+$('mEarth').onclick = () => setMode(false);
+$('mSky').onclick = () => setMode(true);
+bindRange('idens', 'idV', v => v.toFixed(2) + '\u00d7', v => {
+  SKY.dens = v; _islCache.clear(); if (SKY.on) streamIslands(0, 0, 0, 0);
+});
+bindRange('isize', 'isV', v => v.toFixed(2) + '\u00d7', v => {
+  SKY.size = v; _islCache.clear(); if (SKY.on) streamIslands(0, 0, 0, 0);
+});
+$('vGround').onclick = () => { if (mapMode) toggleMap(); };
+$('vMap').onclick = () => { if (!mapMode) toggleMap(); };
+for (const [id, k] of [['cities', 'cities'], ['roads', 'roads'], ['water', 'water'], ['wire', 'wire'], ['lodc', 'lod']]) {
+  $(id).addEventListener('change', e => {
+    SHOW[k] = e.target.checked;
+    if (k === 'wire') for (const m of groundMats) m.wireframe = SHOW.wire;
+    if (k === 'lod') for (let l = 0; l < LEVELS; l++) groundMats[l].uniforms.uLodTint.value = SHOW.lod ? 0.55 : 0;
+    if (k === 'cities' || k === 'roads') { for (const id2 of [...cityMeshes.keys()]) dropCity(id2); }
+    if (k === 'water') for (const c of cells.values()) if (c.water) c.water.visible = SHOW.water;
+  });
+}
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  if (sceneRT) { sceneRT.dispose(); sceneRT.depthTexture.dispose(); sceneRT = null; }
+});
+
+/* ═════════════════ loop ═════════════════ */
+let last = performance.now(), fpsAcc = 0, fpsN = 0, hudT = 0;
+let _sceneTris = 0, _sceneDraws = 0;
+function biomeName(s, sl) {
+  if (s.water > -1e8) return s.land < 0.62 ? 'ocean' : 'river / lake';
+  const h = s.h - W.sea;
+  if (h > 2450 - 900 * s.wet) return 'snow';
+  if (sl > 0.44) return 'rock';
+  if (s.wet < 0.24) return 'desert';
+  if (s.wet < 0.42) return 'steppe';
+  if (h > 1300) return 'alpine';
+  return s.wet > 0.6 ? 'forest' : 'grassland';
+}
+const tmpS = {};
+function loop() {
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  fpsAcc += 1 / Math.max(dt, 1e-4); fpsN++;
+
+  fly(dt);
+  sky.position.copy(camera.position);
+  for (const m of groundMats) {
+    m.uniforms.uCam.value.copy(camera.position);
+    m.uniforms.uTime.value = now * 0.001;
+    m.uniforms.uCloudBase.value = CLOUD.base;
+    m.uniforms.uWind.value = CLOUD.wind;
+  }
+  waterMat.uniforms.uCam.value.copy(camera.position);
+  waterMat.uniforms.uTime.value = now * 0.001;
+  dirLight.position.copy(camera.position).addScaledVector(sunDir, 12000);
+  dirLight.target.position.copy(camera.position);
+  dirLight.target.updateMatrixWorld();
+
+  let pending = 0;
+  if (SKY.on) {
+    // Skylands is VOLUMETRIC SPACE: there is no ground, only rock and weather. The
+    // terrain streamer is torn down rather than pushed out of sight, because an
+    // 87-patch heightfield nobody can see is still 3 ms a frame of generation.
+    if (cells.size) { for (const [k, cc] of cells) disposeCell(cc); cells.clear(); }
+    if (cityMeshes.size) { for (const id of [...cityMeshes.keys()]) dropCity(id); }
+    pending = streamIslands(camera.position.x, camera.position.y, camera.position.z, 1);
+    let tot = 0;
+    for (const rec of liveIslands.values()) {
+      const c = rec.isl.city;
+      if (c && c.built) tot += c.built.buildings;
+    }
+    nBldTotal = tot;
+  } else {
+    if (liveIslands.size) streamIslands(0, 0, 0, 0);
+    pending = streamTerrain(camera.position.x, camera.position.z, 3);
+    streamCities(camera.position.x, camera.position.z);
+  }
+
+  // ⚠ STATS BEFORE THE SECOND PASS. renderer.info resets at the start of every
+  // render() call, so reading it after the cloud pass reports one draw and two
+  // triangles. Snapshot the scene pass here.
+  const dpr = renderer.getPixelRatio();
+  const rw = Math.max(1, Math.floor(innerWidth * dpr)), rh = Math.max(1, Math.floor(innerHeight * dpr));
+  if (!sceneRT || sceneRT.width !== rw || sceneRT.height !== rh) {
+    if (sceneRT) { sceneRT.dispose(); sceneRT.depthTexture.dispose(); }
+    sceneRT = makeRT(rw, rh);
+  }
+  renderer.setRenderTarget(sceneRT);
+  renderer.render(scene, camera);
+  renderer.setRenderTarget(null);
+  _sceneTris = renderer.info.render.triangles;
+  _sceneDraws = renderer.info.render.calls;
+
+  _invVP.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse).invert();
+  const cu = cloudMat.uniforms;
+  cu.uColor.value = sceneRT.texture;
+  cu.uDepth.value = sceneRT.depthTexture;
+  cu.uVol.value = volTex;
+  cu.uInvVP.value.copy(_invVP);
+  cu.uCamPos.value.copy(camera.position);
+  cu.uIso.value = VOL_ISO;
+  cu.uBase.value = CLOUD.base;
+  cu.uTop.value = CLOUD.base + CLOUD.depth;
+  cu.uTime.value = now * 0.001;
+  cu.uWind.value = CLOUD.wind;
+  cu.uSteps.value = CLOUD.steps;
+  cu.uOn.value = (CLOUD.on && volTex) ? 1 : 0;
+  renderer.render(cloudScene, cloudCam);
+
+  hudT += dt;
+  if (hudT > 0.25) {
+    hudT = 0;
+    $('fps').textContent = Math.round(fpsAcc / Math.max(fpsN, 1)); fpsAcc = 0; fpsN = 0;
+    $('tris').textContent = _sceneTris.toLocaleString();
+    $('draws').textContent = _sceneDraws;
+    $('viso').textContent = VOL_ISO.toFixed(3);
+    $('nisl').textContent = liveIslands.size + (pending ? ' +' + pending : '');
+    $('islms').textContent = islMs.toFixed(0) + ' / ' + cityMs.toFixed(0) + ' / ' + grpMs.toFixed(0);
+    $('vsteps').textContent = (CLOUD.on && volTex) ? CLOUD.steps : 0;
+    $('patches').textContent = cells.size + (pending ? ' +' + pending : '');
+    $('genms').textContent = genMs.toFixed(1);
+    sample(camera.position.x, camera.position.z, tmpS);
+    const sl = slopeAt(camera.position.x, camera.position.z, 120);
+    $('alt').textContent = Math.round(camera.position.y - tmpS.h);
+    $('gnd').textContent = Math.round(tmpS.h);
+    $('biome').textContent = biomeName(tmpS, sl);
+    $('nbld').textContent = nBldTotal.toLocaleString();
+    const near = citiesNear(camera.position.x, camera.position.z, 4000);
+    $('cityname').textContent = near.length
+      ? near[0].name + '  (' + near[0].plan + ', ' + (near[0].R / 1000).toFixed(1) + ' km)'
+      : '—';
+  }
+  requestAnimationFrame(loop);
+}
+
+/* ═════════════════ boot ═════════════════ */
+$('build').textContent = WL_BUILD;
+const _bakeMs = bakeVolume();
+console.log('[world lab] volume baked in ' + _bakeMs.toFixed(0) + ' ms');
+updateSun();
+// start somewhere interesting rather than at the origin, which could be ocean
+(function pickStart() {
+  const tmp = {};
+  for (let i = 0; i < 400; i++) {
+    const x = (ihash(i, 7, W.seed) - 0.5) * 900000;
+    const z = (ihash(i, 9, W.seed) - 0.5) * 900000;
+    sample(x, z, tmp);
+    if (tmp.water > -1e8 || tmp.h < 30) continue;
+    const near = citiesNear(x, z, 40000);
+    if (!near.length) continue;
+    const c = near[0];
+    camera.position.set(c.x, c.y + Math.max(650, c.R * 0.5), c.z + c.R * 1.3);
+    yaw = Math.PI; pitch = -0.28;
+    return;
+  }
+  camera.position.set(0, 2500, 0);
+})();
+streamTerrain(camera.position.x, camera.position.z, 200);
+$('boot').style.display = 'none';
+loop();
+
+/* ---- test hooks --------------------------------------------------------- */
+window.WL = {
+  W, SUN, SHOW,
+  at: (x, z) => sample(x ?? camera.position.x, z ?? camera.position.z, {}),
+  cities: (r) => citiesNear(camera.position.x, camera.position.z, r || 60000),
+  city: (i) => { const c = citiesNear(camera.position.x, camera.position.z, 200000)[i || 0]; return c && { ...c, built: !!c.built }; },
+  // ⚠ the live renderer.info now describes the CLOUD pass (1 draw, 2 triangles),
+  // because info resets per render() call and the march runs second. Report the
+  // snapshot the loop takes right after the scene pass.
+  stats: () => ({ patches: cells.size, tris: _sceneTris, draws: _sceneDraws,
+                  bld: nBldTotal, genMs, iso: VOL_ISO, steps: CLOUD.on ? CLOUD.steps : 0 }),
+  tp: (x, y, z) => { camera.position.set(x, y, z); resetWorld(false); },
+  jump: jumpTo,
+  SKY, sky: (on) => setMode(on !== false),
+  // debug: the island top surface under a point, and the city sitting on it
+  top: (x, z) => {
+    const near = islandsNear(x, 0, z, 4000);
+    let best = null;
+    for (const I of near) { const t = islandTop(I, x, z, near); if (t !== null && (best === null || t > best)) best = t; }
+    return best;
+  },
+  probe: (dx, dz) => {
+    for (const rec of liveIslands.values()) {
+      const I = rec.isl, c = I.city;
+      if (!c || !c._surf) continue;
+      const near = fieldNeighbours(I);
+      const x = c.x + (dx || 0), z = c.z + (dz || 0);
+      const raw = islandTop(I, x, z, near);
+      const y0 = I.y + I.R * I.up * 1.15, y1 = I.y - I.R * 0.35;
+      const col = [];
+      for (let i = 0; i <= 12; i++) {
+        const y = y0 + (y1 - y0) * (i / 12);
+        col.push(+skyField(x, y, z, near, I).toFixed(3));
+      }
+      return { isl: I.id, R: Math.round(I.R), up: +I.up.toFixed(2), dn: +I.dn.toFixed(2),
+               Iy: Math.round(I.y), y0: Math.round(y0), y1: Math.round(y1),
+               nearCount: near.length, raw, prov: c._surf.h(x, z), off: c._surf.off(x, z), col };
+    }
+    return null;
+  },
+  cityOn: () => {
+    const out = [];
+    for (const rec of liveIslands.values()) {
+      const c = rec.isl.city;
+      if (c && c.built) out.push({ name: c.name, R: Math.round(c.R), blocks: c.built.blocks, n: c.built.buildings, plan: c.plan, diag: c.built.diag });
+    }
+    out.sort((a, b) => b.n - a.n);
+    return out;
+  },
+  islands: () => islandsNear(camera.position.x, camera.position.y, camera.position.z, 26000)
+    .map(I => ({ id: I.id, x: Math.round(I.x), y: Math.round(I.y), z: Math.round(I.z), R: Math.round(I.R), city: !!I.city })),
+  look: (y, pi) => { yaw = y; pitch = clamp(pi, -1.5, 1.5); },
+  bytes: () => 0,
+  CLOUD, bake: bakeVolume, iso: () => VOL_ISO,
+  err: () => window.__loopErr || null,
+};
+window.addEventListener('error', e => { window.__loopErr = (e.error && e.error.stack) || e.message; });
+</script>
+</body>
+</html>
