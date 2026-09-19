@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.54";
+const LSS_BUILD = "46.55";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -39627,12 +39627,8 @@ function _makeExplosionMesh(type) {
       matOpts = { color: 0x111111, transparent: true, opacity: 0.3 };
       break;
     case 'potatoSphere':
-      geo = _EXPL_SPHERE_LG;
-      matOpts = {
-        color: 0xff6600, transparent: true, opacity: 0.85,
-        depthWrite: false,
-      };
-      break;
+      return Object.assign(new THREE.Mesh(_EXPL_SPHERE_MED, _makeExplosionOrbMaterial(0xff6600, 0.85)),
+        { userData: { _poolType: 'potatoSphere' } });
   }
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial(matOpts));
   mesh.userData._poolType = type;
@@ -40016,8 +40012,12 @@ function spawnExplosion(pos, size, fireRamp, vel, opts) {   // (v44.22) vel: the
   const _mini = !!(opts && opts.mini);
   if (game._hubWater && pos && !_mini) { try { _swBlast(pos.x, pos.y, pos.z, size, vel); } catch (_) {} }
   const _explFrameKey = (typeof game !== 'undefined' && game) ? game.time : 0;
-  if (_explFrameKey !== spawnExplosion._frameKey) { spawnExplosion._frameKey = _explFrameKey; spawnExplosion._count = 0; }
-  const _explOverBudget = (!_mini) && ((++spawnExplosion._count) > 4);
+  if (_explFrameKey !== spawnExplosion._frameKey) { spawnExplosion._frameKey = _explFrameKey; spawnExplosion._count = 0; spawnExplosion._bigCount = 0; }
+  const _EB = (typeof window !== 'undefined') ? (window.__expl || (window.__expl = {})) : {};
+  const _explBig = size >= ((_EB.bigSize != null) ? +_EB.bigSize : 70);
+  const _explOverBudget = (!_mini) && (_explBig
+    ? ((spawnExplosion._bigCount = (spawnExplosion._bigCount | 0) + 1) > ((_EB.bigBudget != null) ? +_EB.bigBudget : 6))
+    : ((spawnExplosion._count = (spawnExplosion._count | 0) + 1) > ((_EB.budget != null) ? +_EB.budget : 4)));
   if ((typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) || _explOverBudget) {
     if (_mini) return;
     if (typeof playSpatialSound === 'function') {

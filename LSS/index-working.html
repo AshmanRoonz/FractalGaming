@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.54";
+const LSS_BUILD = "46.55";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -64800,12 +64800,19 @@ function _makeExplosionMesh(type) {
       matOpts = { color: 0x111111, transparent: true, opacity: 0.3 };
       break;
     case 'potatoSphere':
-      geo = _EXPL_SPHERE_LG;
-      matOpts = {
-        color: 0xff6600, transparent: true, opacity: 0.85,
-        depthWrite: false,
-      };
-      break;
+      // ⭐⭐ (v46.55) THE LAST FLAT SHAPE IN THE POOL. Owner: "sometimes i see death explosions just
+      // look like a simple colored circle" - and that is this, described exactly. Every other orb
+      // type above carries the file's own NO FLAT SHAPES rule (see `flash`: "3D fresnel orb - soft
+      // center-bright falloff, volumetric from every angle"); the cheap fallback was left behind on
+      // a plain MeshBasicMaterial, which shades a sphere at ONE flat colour, so its silhouette is
+      // all you see: a hard-edged 8x6 ball that reads as an orange disc.
+      // It is a drop-in: _makeExplosionOrbMaterial bridges `.opacity` and `.color` onto its uniforms
+      // precisely so the pool and updateEffects keep working unchanged, which is why the other four
+      // switched without touching a call site. Additive like them too, and the rim `discard` makes
+      // it CHEAPER on fill than the flat material it replaces - which matters, because the machines
+      // that see this path most are the ones that cannot afford the real explosion.
+      return Object.assign(new THREE.Mesh(_EXPL_SPHERE_MED, _makeExplosionOrbMaterial(0xff6600, 0.85)),
+        { userData: { _poolType: 'potatoSphere' } });
   }
   const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial(matOpts));
   mesh.userData._poolType = type;
@@ -65275,12 +65282,31 @@ function spawnExplosion(pos, size, fireRamp, vel, opts) {   // (v44.22) vel: the
   // big simultaneous cluster kill trims its overflow. (Audio side is capped by
   // the 'explosion' min-gap in _SOUND_MIN_GAP.)
   const _explFrameKey = (typeof game !== 'undefined' && game) ? game.time : 0;
-  if (_explFrameKey !== spawnExplosion._frameKey) { spawnExplosion._frameKey = _explFrameKey; spawnExplosion._count = 0; }
+  if (_explFrameKey !== spawnExplosion._frameKey) { spawnExplosion._frameKey = _explFrameKey; spawnExplosion._count = 0; spawnExplosion._bigCount = 0; }
+  // ⭐⭐ (v46.55) A DEATH MUST NOT LOSE ITS PLACE TO A ROCK CHIP. The budget below is right about the
+  // GPU - the note under it measured a ~244 ms spike from a missile into a rock cluster - but it
+  // spent that budget FIRST COME, FIRST SERVED within the frame, and the things that arrive first
+  // are whatever happened to be hit. A ship dying in the same frame as four pellet pops, a chip off
+  // a rock and a thermite was the FIFTH caller and fell to the cheap sphere: the biggest event on
+  // screen, demoted by a spark.
+  // The traffic-ship death already shows this was known and worked around by hand - its comment
+  // reads "the spawnExplosion per-frame budget is 4 full bursts, so three total stays inside it and
+  // never downgrades" - but hand-fitting one call site cannot help when a SECOND ship dies beside it.
+  // So big blasts and small ones draw on SEPARATE allowances. A hull death is 80-150 (the three
+  // chassis are 80/100/140, hub traffic 150, an execution x1.5 on top); the loudest thing that is
+  // NOT a death is a cluster burst at 60. 70 splits them with room either side. Small explosions can
+  // no longer starve a death, and the GPU ceiling is unchanged for the case that set it - a swarm of
+  // small ones still stops at `budget`.
+  const _EB = (typeof window !== 'undefined') ? (window.__expl || (window.__expl = {})) : {};
+  const _explBig = size >= ((_EB.bigSize != null) ? +_EB.bigSize : 70);
   // (v46.49) a mini neither SPENDS the budget nor is judged by it - its caller caps it per trigger
   // pull instead. On a potato it draws nothing at all rather than a potato sphere per pellet: that
   // sphere stands in for ONE big blast, and eight of them reads worse than the pellet sparks alone
   // (the same call _spawnClassFireBurst makes for the green fire on that tier).
-  const _explOverBudget = (!_mini) && ((++spawnExplosion._count) > 4);
+  // (v46.49) a mini spends NEITHER counter - see the note above.
+  const _explOverBudget = (!_mini) && (_explBig
+    ? ((spawnExplosion._bigCount = (spawnExplosion._bigCount | 0) + 1) > ((_EB.bigBudget != null) ? +_EB.bigBudget : 6))
+    : ((spawnExplosion._count = (spawnExplosion._count | 0) + 1) > ((_EB.budget != null) ? +_EB.budget : 4)));
   if ((typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) || _explOverBudget) {
     if (_mini) return;
     // Spatial audio kept ; cheap relative to the visual chain we just skipped.
