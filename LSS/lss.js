@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.55";
+const LSS_BUILD = "46.71";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -17029,10 +17029,11 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       sh.uniforms.uClipHasParent = m._clipHasParentU || (m._clipHasParentU = { value: 0 });
       const _cn = _CLIP_N.toFixed(1), _cr = (_CLIP_N + 1).toFixed(1);
       const _chn = (_CLIP_N * 0.5).toFixed(1);            // window half-width (64)
+      const _cnl = (_CLIP_N - 0.5).toFixed(1);            // last row/col test (127.5 at N=128)
       const _cms = (_CLIP_N * 0.25 + 1);                  // morph band start, from the EYE (33)
       const _cme = (_CLIP_N * 0.5 - 4 - 2);               // morph complete, from the EYE (58)
       const _cmsS = _cms.toFixed(1), _cmw = (_cme - _cms).toFixed(1);   // width 25
-      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform sampler2D uClipAtlasP;\nuniform vec2 uClipOriginP;\nuniform float uClipHasParent;\nuniform vec2 uClipEye;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*128.0,_fj=uv.y*128.0;\n if((_fj<0.5||_fj>127.5)&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x);}else if((_fi<0.5||_fi>127.5)&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x);}\n vec2 _eo=(vec2(modelMatrix[3][0],modelMatrix[3][2])-uClipEye)/uClipSpacing;float _rd=max(abs(_fi-'+_chn+'+_eo.x),abs(_fj-'+_chn+'+_eo.y));float _gm=clamp((_rd-'+_cmsS+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00,_h10,_h01;if(uClipHasParent>0.5){vec2 _pb=vec2(_ie*0.5,_je*0.5)+uClipOriginP+0.5;_h00=texture2D(uClipAtlasP,fract(_pb/129.0)).x;_h10=texture2D(uClipAtlasP,fract((_pb+vec2(1.0,0.0))/129.0)).x;_h01=texture2D(uClipAtlasP,fract((_pb+vec2(0.0,1.0))/129.0)).x;}else{_h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/129.0)).x;_h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/129.0)).x;_h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/129.0)).x;}_ch=mix(_ch,_h00+(_h10-_h00)*_wx+(_h01-_h00)*_wz,_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/128.0,1.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/128.0,0.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/128.0,1.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/128.0,0.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _spanX=(min(uv.x+1.0/128.0,1.0)-max(uv.x-1.0/128.0,0.0))*128.0*uClipSpacing; float _spanZ=(min(uv.y+1.0/128.0,1.0)-max(uv.y-1.0/128.0,0.0))*128.0*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));\n if(uClipHasParent>0.5 && _gm>0.0){ float _pie=floor(_fi*0.5)*2.0,_pje=floor(_fj*0.5)*2.0; float _pwx=(_fi-_pie)*0.5,_pwz=(_fj-_pje)*0.5; vec2 _pq=vec2(_pie*0.5,_pje*0.5)+uClipOriginP+0.5; float _ps=uClipSpacing*2.0;\n float _q00=texture2D(uClipAtlasP,fract(_pq/129.0)).x; float _q10=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,0.0))/129.0)).x; float _q01=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,1.0))/129.0)).x;\n float _qn0=texture2D(uClipAtlasP,fract((_pq+vec2(-1.0,0.0))/129.0)).x; float _q0n=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,-1.0))/129.0)).x; float _q20=texture2D(uClipAtlasP,fract((_pq+vec2(2.0,0.0))/129.0)).x;\n float _q11=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,1.0))/129.0)).x; float _q1n=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,-1.0))/129.0)).x; float _qn1=texture2D(uClipAtlasP,fract((_pq+vec2(-1.0,1.0))/129.0)).x; float _q02=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,2.0))/129.0)).x;\n vec2 _gA=vec2(_q10-_qn0,_q01-_q0n); vec2 _gB=vec2(_q20-_q00,_q11-_q1n); vec2 _gC=vec2(_q11-_qn1,_q02-_q00);\n vec2 _gp=_gA+(_gB-_gA)*_pwx+(_gC-_gA)*_pwz;\n vec3 _pn=normalize(vec3(-_gp.x/(2.0*_ps),1.0,-_gp.y/(2.0*_ps)));\n vSN = normalize(mix(vSN,_pn,_gm)); }');
+      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform sampler2D uClipAtlasP;\nuniform vec2 uClipOriginP;\nuniform float uClipHasParent;\nuniform vec2 uClipEye;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*'+_cn+',_fj=uv.y*'+_cn+';\n if((_fj<0.5||_fj>'+_cnl+')&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/'+_cn+',uv.y)*'+_cn+'+uClipOrigin+0.5)/'+_cr+')).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/'+_cn+',uv.y)*'+_cn+'+uClipOrigin+0.5)/'+_cr+')).x);}else if((_fi<0.5||_fi>'+_cnl+')&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/'+_cn+')*'+_cn+'+uClipOrigin+0.5)/'+_cr+')).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/'+_cn+')*'+_cn+'+uClipOrigin+0.5)/'+_cr+')).x);}\n vec2 _eo=(vec2(modelMatrix[3][0],modelMatrix[3][2])-uClipEye)/uClipSpacing;float _rd=max(abs(_fi-'+_chn+'+_eo.x),abs(_fj-'+_chn+'+_eo.y));float _gm=clamp((_rd-'+_cmsS+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00,_h10,_h01;if(uClipHasParent>0.5){vec2 _pb=vec2(_ie*0.5,_je*0.5)+uClipOriginP+0.5;_h00=texture2D(uClipAtlasP,fract(_pb/'+_cr+')).x;_h10=texture2D(uClipAtlasP,fract((_pb+vec2(1.0,0.0))/'+_cr+')).x;_h01=texture2D(uClipAtlasP,fract((_pb+vec2(0.0,1.0))/'+_cr+')).x;}else{_h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/'+_cr+')).x;_h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/'+_cr+')).x;_h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/'+_cr+')).x;}_ch=mix(_ch,_h00+(_h10-_h00)*_wx+(_h01-_h00)*_wz,_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/'+_cn+',1.0),uv.y)*'+_cn+' + uClipOrigin + 0.5)/'+_cr+')).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/'+_cn+',0.0),uv.y)*'+_cn+' + uClipOrigin + 0.5)/'+_cr+')).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/'+_cn+',1.0))*'+_cn+' + uClipOrigin + 0.5)/'+_cr+')).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/'+_cn+',0.0))*'+_cn+' + uClipOrigin + 0.5)/'+_cr+')).x;\n float _spanX=(min(uv.x+1.0/'+_cn+',1.0)-max(uv.x-1.0/'+_cn+',0.0))*'+_cn+'*uClipSpacing; float _spanZ=(min(uv.y+1.0/'+_cn+',1.0)-max(uv.y-1.0/'+_cn+',0.0))*'+_cn+'*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));\n if(uClipHasParent>0.5 && _gm>0.0){ float _pie=floor(_fi*0.5)*2.0,_pje=floor(_fj*0.5)*2.0; float _pwx=(_fi-_pie)*0.5,_pwz=(_fj-_pje)*0.5; vec2 _pq=vec2(_pie*0.5,_pje*0.5)+uClipOriginP+0.5; float _ps=uClipSpacing*2.0;\n float _q00=texture2D(uClipAtlasP,fract(_pq/'+_cr+')).x; float _q10=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,0.0))/'+_cr+')).x; float _q01=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,1.0))/'+_cr+')).x;\n float _qn0=texture2D(uClipAtlasP,fract((_pq+vec2(-1.0,0.0))/'+_cr+')).x; float _q0n=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,-1.0))/'+_cr+')).x; float _q20=texture2D(uClipAtlasP,fract((_pq+vec2(2.0,0.0))/'+_cr+')).x;\n float _q11=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,1.0))/'+_cr+')).x; float _q1n=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,-1.0))/'+_cr+')).x; float _qn1=texture2D(uClipAtlasP,fract((_pq+vec2(-1.0,1.0))/'+_cr+')).x; float _q02=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,2.0))/'+_cr+')).x;\n vec2 _gA=vec2(_q10-_qn0,_q01-_q0n); vec2 _gB=vec2(_q20-_q00,_q11-_q1n); vec2 _gC=vec2(_q11-_qn1,_q02-_q00);\n vec2 _gp=_gA+(_gB-_gA)*_pwx+(_gC-_gA)*_pwz;\n vec3 _pn=normalize(vec3(-_gp.x/(2.0*_ps),1.0,-_gp.y/(2.0*_ps)));\n vSN = normalize(mix(vSN,_pn,_gm)); }');
     } else {
       sh.vertexShader='attribute float aFlatY;\nuniform float uBendFlat;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vWY=mix(position.y, aFlatY, uBendFlat); vWPos=position;\n vSN=vec3(0.0,1.0,0.0);');
     }
@@ -17502,7 +17503,169 @@ function _swBuildTrees(x0,z0,T){
   for(let v=0;v<sets.shroom.length;v++)emit(sets.shroom[v],_swShroomMatGet(), buckets.shroom[v],-1.5, 1.6,2.0, 12, true);
   return meshes.length?meshes:null;
 }
-function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ if(im && im.parent)scene.remove(im); if(im && im.dispose)im.dispose(); }catch(_){} } } }
+function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ if(im && im.parent)scene.remove(im); if(im && im.dispose)im.dispose(); if(im && im.userData && im.userData.ownGeo && im.geometry)im.geometry.dispose(); }catch(_){} } } }   // (v46.71) drapes own their merged geometry
+
+const _SW_DRAPE_SEG = 4;
+const _swDrapeC0I = new THREE.Color(0xf4fcff), _swDrapeC1I = new THREE.Color(0x9fc9e2);
+const _swDrapeC0V = new THREE.Color(0x7d9e52), _swDrapeC1V = new THREE.Color(0x2b4520), _swDrapeCT = new THREE.Color();
+const _swDrapeSt = [];   // scratch stations: x, y, z, r, ex, ey, s
+function _swDrapeStrand(acc, lx, lz, hLip, fx, fz, len, rad, snowy, T) {
+  const S = _swDrapeSt; S.length = 0;
+  const tipR = snowy ? 0.05 : 0.45, FX = snowy ? 1.25 : 1.0, FY = snowy ? 0.70 : 0.85;
+  const EX = Math.max(1.15, 1.6 - 0.05 * Math.max(0, rad - 6)), EY = 0.32;   // the tongue: a slab, narrower for the fat ones
+  const reach = Math.min(40, Math.max(8, 0.30 * len));
+  for (let t = 0; t < 3; t++) {
+    const f = (t === 0) ? 1.0 : (t === 1) ? 0.55 : 0.0, w = (t === 0) ? 0.06 : (t === 1) ? 0.85 : 1.0, sPar = (t === 0) ? -0.30 : (t === 1) ? -0.16 : 0.0;
+    const x = lx - fx * reach * f, z = lz - fz * reach * f, h = _swDrapeY(x, z, T);
+    S.push(x, h + EY * rad * w * 0.7 - (t === 0 ? 0.6 : 0), z, rad * w, EX, EY, sPar);
+  }
+  const D = 3, stationLen = Math.max(5, len / 6);
+  let arc = 0, ph = hLip, next = 0, nSt = 0, ended = false;
+  for (let i = 1; i <= 90 && !ended; i++) {
+    const x = lx + fx * D * i, z = lz + fz * D * i, h = _swDrapeY(x, z, T), dh = ph - h, slope = dh / D;
+    arc += Math.hypot(D, dh);
+    if (i > 2 && dh < -0.5) ended = true;                        // the rock comes back up: end here
+    else if (arc >= 0.35 * len && slope < 0.45) ended = true;    // flattened onto a terrace
+    if (arc >= len) ended = true;
+    if (arc >= next || ended) {
+      const sPar = Math.min(1, arc / len), r = rad * (1 - (1 - tipR) * Math.pow(sPar, 1.3));
+      const nn = 1 / Math.sqrt(1 + slope * slope), off = r * FY * 0.7;   // outward normal (slope, 1)/|.|
+      S.push(x + fx * slope * nn * off, h + nn * off, z + fz * slope * nn * off, r, FX, FY, sPar);
+      next = arc + stationLen; nSt++;
+    }
+    ph = h;
+  }
+  if (nSt < 1) return;
+  { const o = S.length - 7; S.push(S[o] + fx * 0.8, S[o + 1] - 0.8, S[o + 2] + fz * 0.8, rad * 0.02, 1, 1, 1); }   // a closed tip
+  const n = S.length / 7, SEG = _SW_DRAPE_SEG, lxA = -fz, lzA = fx;
+  const C0 = snowy ? _swDrapeC0I : _swDrapeC0V, C1 = snowy ? _swDrapeC1I : _swDrapeC1V, CT = _swDrapeCT;
+  const base = acc.v;
+  for (let k = 0; k < n; k++) {
+    const o = k * 7, oA = Math.max(0, k - 1) * 7, oB = Math.min(n - 1, k + 1) * 7;
+    let tx = S[oB] - S[oA], ty = S[oB + 1] - S[oA + 1], tz = S[oB + 2] - S[oA + 2];
+    const tl = Math.hypot(tx, ty, tz) || 1; tx /= tl; ty /= tl; tz /= tl;
+    let bx = ty * lzA, by = tz * lxA - tx * lzA, bz = -ty * lxA;
+    const bl = Math.hypot(bx, by, bz) || 1; bx /= bl; by /= bl; bz /= bl;
+    const r = S[o + 3], ex = S[o + 4], ey = S[o + 5], sPar = S[o + 6];
+    CT.copy(C0).lerp(C1, Math.min(1, Math.max(0, sPar * 1.6)));
+    for (let q = 0; q < SEG; q++) {
+      const th = (q / SEG) * 6.283185 + 0.7854, ca = Math.cos(th) * r * ex, sa = Math.sin(th) * r * ey;
+      acc.pos.push(S[o] + lxA * ca + bx * sa, S[o + 1] + by * sa, S[o + 2] + lzA * ca + bz * sa);
+      acc.col.push(CT.r, CT.g, CT.b);
+    }
+  }
+  for (let k = 0; k < n - 1; k++) for (let q = 0; q < SEG; q++) {
+    const q2 = (q + 1) % SEG, r0 = base + k * SEG, r1 = base + (k + 1) * SEG;
+    acc.idx.push(r0 + q, r1 + q, r1 + q2, r0 + q, r1 + q2, r0 + q2);
+  }
+  acc.v += n * SEG; acc.n++;
+}
+let _swIceMat = null, _swVineMat = null;
+function _swIceMatGet(){ if(!_swIceMat) _swIceMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x8fb4cc, vertexColors: true, side: THREE.DoubleSide }); return _swIceMat; }
+function _swDrapeVineMatGet(){ if(!_swVineMat) _swVineMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x141f0d, vertexColors: true, side: THREE.DoubleSide }); return _swVineMat; }
+function _swDrapeY(x, z, T) {
+  if (_HB.ready && _HB.on && _HB.mean && _HB.sp === 32 && _CLIP_M0 === 32 && _HB.minLevel <= 0) {
+    const sp = _HB.sp, dim = _HB.dim[0], D = _HB.mean[0];
+    const fx = (x - _HB.x0) / sp, fz = (z - _HB.z0) / sp, i0 = Math.floor(fx), j0 = Math.floor(fz);
+    if (i0 >= 0 && j0 >= 0 && i0 + 1 < dim && j0 + 1 < dim) {
+      const u = fx - i0, v = fz - j0, o = j0 * dim + i0;
+      const a = D[o], b = D[o + 1], c = D[o + dim], e = D[o + dim + 1];
+      return 0.125 * ((u + v <= 1) ? a + (b - a) * u + (c - a) * v : e + (c - e) * (1 - u) + (b - e) * (1 - v));
+    }
+  }
+  return _stGroundYCarved(x, z, T);
+}
+let _swDrapeErr = 0;   // (v46.56d) one-shot guard for the build-threw warning at the stream site
+function _swBuildDrapes(x0, z0, T) {
+  if (!T) return null;
+  const K = (typeof window !== 'undefined' && window.__drapes) ? window.__drapes : {};
+  if (K.on === false) return null;
+  const step0 = (K.step != null) ? +K.step : 52;
+  const N = Math.max(3, Math.round(_SW_CHUNK / step0)), step = _SW_CHUNK / N;
+  const L = (K.probe != null) ? +K.probe : 34;
+  const dropMin = (K.drop != null) ? +K.drop : 78;
+  const perMax = Math.max(1, (K.per != null) ? (K.per | 0) : 2);   // (v46.57) a folded strand reads for two spikes
+  const lenK = (K.lenK != null) ? +K.lenK : 0.55;
+  const maxLen = (K.maxLen != null) ? +K.maxLen : 190;
+  const thick = (K.thick != null) ? +K.thick : 1;
+  const lipK = (K.lipK != null) ? +K.lipK : 1.3;   // (v46.69) fall per unit that counts as the edge (~52 degrees)
+  let _a = (Math.imul(Math.round(x0 / 16) + 12345, 2654435761) ^ Math.imul(Math.round(z0 / 16) + 6789, 40503)) | 0;
+  const rnd = () => { _a = (_a + 0x6D2B79F5) | 0; let t = Math.imul(_a ^ (_a >>> 15), 1 | _a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const accIce = { pos: [], col: [], idx: [], v: 0, n: 0 }, accVine = { pos: [], col: [], idx: [], v: 0, n: 0 };   // (v46.71) merged per chunk
+  const snowLine = (T.snowLine != null) ? T.snowLine : 0.7;
+  const _hot = (K.hot != null) ? !!K.hot : (T.biome === 'volcanic' || T.biome === 'goldmine');
+  const _snowK = (K.snow != null) ? +K.snow : 0;   // shifts the ice/vine split up or down the band
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const ax = x0 + (i + rnd()) * step, az = z0 + (j + rnd()) * step;
+    if (T.HUB && typeof _owExcludes === 'function' && _owExcludes(ax, az)) continue;
+    if (T.HUB && _hubCityExcludes(ax, az) && (typeof _hubCityGroundBlocked !== 'function' || _hubCityGroundBlocked(ax, az))) continue;
+    const ay = _swDrapeY(ax, az, T);   // (v46.69) the rendered surface, here and in every sample below
+    if (T.WL != null && ay < T.WL + 6) continue;
+    const _d0 = ay - _swDrapeY(ax + L, az, T);
+    const _d1 = ay - _swDrapeY(ax - L, az, T);
+    const _d2 = ay - _swDrapeY(ax, az + L, T);
+    const _d3 = ay - _swDrapeY(ax, az - L, T);
+    let bd = _d0, bi = 0;
+    if (_d1 > bd) { bd = _d1; bi = 1; }
+    if (_d2 > bd) { bd = _d2; bi = 2; }
+    if (_d3 > bd) { bd = _d3; bi = 3; }
+    if (bd < dropMin) continue;
+    const bx = (bi === 0) ? 1 : (bi === 1) ? -1 : 0, bz = (bi === 2) ? 1 : (bi === 3) ? -1 : 0;
+    const back = -((bi === 0) ? _d1 : (bi === 1) ? _d0 : (bi === 2) ? _d3 : _d2);
+    if (back > bd * ((K.lipFlat != null) ? +K.lipFlat : 0.45)) continue;
+    const _pA = (bi < 2) ? _d2 : _d0, _pB = (bi < 2) ? _d3 : _d1;
+    const along = Math.max(Math.abs(_pA), Math.abs(_pB));
+    if (along > bd * ((K.ridgeK != null) ? +K.ridgeK : 0.55)) continue;
+    const t = (ay - (T.YMID - T.AMP * 0.5)) / (T.AMP * 1.15);
+    const snowy = !_hot && t > (snowLine + _snowK);
+    if (!snowy) {
+      if (T.HUB && typeof _hzZoneForFoliage === 'function' && _hzZoneForFoliage(ax, az)) continue;
+      if (_stPatch(ax, az) < 0.30) continue;
+    }
+    const acc = snowy ? accIce : accVine;
+    const lim = snowy ? ((K.ice != null) ? +K.ice : 1) : ((K.vine != null) ? +K.vine : 1);
+    if (lim <= 0) continue;
+    let fdx = _d0 - _d1, fdz = _d2 - _d3; const fdl = Math.hypot(fdx, fdz) || 1; fdx /= fdl; fdz /= fdl;
+    const px = -fdz, pz = fdx;                    // along the lip
+    const n = 1 + ((rnd() * perMax) | 0);
+    for (let k = 0; k < n; k++) {
+      const alo = (rnd() - 0.5) * step * 0.9;      // spread along the edge
+      const wx = ax + px * alo, wz = az + pz * alo;
+      let hPrev = _swDrapeY(wx, wz, T), lipS = -1, hLip = hPrev;
+      for (let sd = 3; sd <= L + 9; sd += 3) {
+        const h = _swDrapeY(wx + fdx * sd, wz + fdz * sd, T);
+        if (hPrev - h > 3 * lipK) { lipS = sd - 3; break; }
+        hPrev = h; hLip = h;
+      }
+      if (lipS < 0) continue;                       // no break on this line after all
+      const len = Math.min(maxLen, bd * lenK * (0.55 + rnd() * 0.75) * lim);
+      if (len < 10) continue;
+      const rad = len * (snowy ? 0.075 : 0.065) * thick;
+      _swDrapeStrand(acc, wx + fdx * lipS, wz + fdz * lipS, hLip, fdx, fdz, len, rad, snowy, T);
+    }
+  }
+  const out = [];
+  const minPer = (K.minPer != null) ? (K.minPer | 0) : 18;
+  const emit = (acc, mat, kind) => {
+    if (!acc.n || acc.n < minPer) return;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(acc.pos), 3));
+    g.setAttribute('color', new THREE.BufferAttribute(Float32Array.from(acc.col), 3));
+    g.setIndex(acc.idx);
+    g.computeVertexNormals(); g.computeBoundingSphere();
+    const m = new THREE.Mesh(g, mat);
+    m.frustumCulled = true;
+    m.castShadow = false;        // a strand's shadow is not worth a shadow-pass draw on a cliff
+    m.receiveShadow = true;
+    m.userData = { isSandwichTerrain: true, drape: kind, ownGeo: true, strands: acc.n };   // ownGeo: _swRemoveTrees disposes it
+    scene.add(m);
+    out.push(m);
+  };
+  emit(accIce,  _swIceMatGet(),       'ice');
+  emit(accVine, _swDrapeVineMatGet(), 'vine');
+  return out.length ? out : null;
+}
 
 function _swShellJobNew(x0, z0, isCeil, T) {
   const n = _SW_CELLS, nVert = (n + 1) * (n + 1);
@@ -30586,9 +30749,13 @@ function _swChunkAllowed(cx, cz, T) {
 
 
 
-const _CLIP_N = 128;          
+const _CLIP_N = (function () {
+  try { const q = +new URLSearchParams(location.search).get('clipN'); if (q === 128 || q === 256 || q === 512) return q; } catch (_) {}
+  try { if ((typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) || (typeof isStandaloneQuest === 'function' && isStandaloneQuest())) return 128; } catch (_) {}
+  return 512;
+})();
 const _CLIP_LEVELS = 6;       
-let _CLIP_M0 = 16;   
+let _CLIP_M0 = 32;   
 const _clipmap = { levels: null, solidGeo: null, ringGeo: null, on: false, raf: 0 };
 
 
@@ -30743,26 +30910,272 @@ window.__clipSeam = function () {
   return rows;
 };
 
-const _CLIP_PEAK = { on: 0, k: 3, mix: 0.25, foot: 1.0, minLevel: 1 };
+
+const _HB = { on: 1, sp: 32, N: 3328, w: 0.7, minLevel: 0, bandFloor: 0, shareMip: 1, ready: false, ms: 0, prog: 0,
+              mean: null, max: null, dim: null, x0: 0, z0: 0,
+              far: null, failed: false, building: false, cached: false, hash: '', workers: 0, evals: 0,
+              promise: null, onProg: null, spWanted: 32 };
+try { window.__hbake = _HB; } catch (_) {}
+const _HB_BOX = 53248;        // base half-extent: 45,056 (cities) + 8,192 (L0 half window at N=512, M0=32)
+const _HB_EYE = 45056;        // far tables assume the eye anywhere inside the content box
+const _HB_FAR_MAX = 327680;   // cap on a far table's half-extent (L5 at N=512 wants 307,200)
+function _hbHalf() { return _HB.N * _HB.sp * 0.5; }
+function _hbSample(wx, wz, lvl) {
+  if (!_HB.ready || !_HB.on || !_HB.mean) return null;
+  const d = (_HB.shareMip !== 0) ? 0 : Math.min(_HB.mean.length - 1, Math.max(0, lvl - _HB.minLevel));
+  const dim = _HB.dim[d], sp = _HB.sp << d;
+  const i = Math.round((wx - _HB.x0) / sp), j = Math.round((wz - _HB.z0) / sp);
+  if (i < 0 || j < 0 || i >= dim || j >= dim) return null;   // outside the base box: try the far tables
+  const o = j * dim + i;
+  const mn = _HB.mean[d][o] * 0.125, mx = _HB.max[d][o] * 0.125;
+  return mn + (mx - mn) * _HB.w;
+}
+function _hfSample(wx, wz, sp) {
+  const F = _HB.far; if (!_HB.ready || !_HB.on || !F) return null;
+  for (let t = 0; t < F.length; t++) {
+    const f = F[t]; if (f.sp !== sp || !f.data) continue;
+    const i = Math.round((wx - f.x0) / sp), j = Math.round((wz - f.z0) / sp);
+    if (i < 0 || j < 0 || i >= f.N || j >= f.N) return null;
+    return f.data[j * f.N + i] * 0.125;
+  }
+  return null;
+}
+function _hbFarSpec() {
+  const out = [], M0 = (typeof _CLIP_M0 === 'number') ? _CLIP_M0 : 32, NC = _CLIP_N, LV = _CLIP_LEVELS;
+  for (let k = 0; k < LV; k++) {
+    const sp = M0 * Math.pow(2, k); if (sp < 64) continue;
+    const ext = Math.min(_HB_FAR_MAX, (NC / 2) * sp + _HB_EYE);
+    const n1 = Math.ceil(ext / sp), N = 2 * n1 + 1;
+    out.push({ sp: sp, N: N, x0: -n1 * sp, z0: -n1 * sp, data: null });
+  }
+  return out;
+}
+function _hbFamily() {
+  return [sdSphere, sdCylinder, sdfSmin, _stHash2, _stNoise2, _stFbm, _stRidged, _stGroundY, _stCeilY, _stSmooth,
+          _stRouteAt, _stCarveOpenness, _stGroundYCarvedBase, _stCeilYCarvedBase, _stPillarAt, _stGroundYCarved, _stCeilYCarved];
+}
+function _hbGameBits() {
+  let ht = null, oa = 0, of = 0, S = [], C = [];
+  try { ht = game._hubTerra || null; oa = game._clipExtraOctaveAmp || 0; of = game._clipExtraOctaveFreq || 0; S = game.levelSpheres || []; C = game.levelCylinders || []; } catch (_) {}
+  return { ht: ht, oa: oa, of: of, S: S, C: C };
+}
+function _hbFnv(h, str) { for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h; }
+function _hbHash(T, farSpec, sp, N) {
+  const src = _hbFamily().map(f => f.toString()).join('\n');
+  const cfg = 'hb2|' + sp + '|' + N + '|' + _HB_BOX + '|' + JSON.stringify(farSpec.map(f => [f.sp, f.N, f.x0])) + '|' + JSON.stringify(T) + '|' + JSON.stringify(_hbGameBits());
+  const h1 = _hbFnv(_hbFnv(2166136261 >>> 0, src), cfg), h2 = _hbFnv(_hbFnv(0x9747b28c >>> 0, cfg), src);
+  return ('00000000' + h1.toString(16)).slice(-8) + ('00000000' + h2.toString(16)).slice(-8);
+}
+function _hbWorkerSrc(g) {
+  const fam = _hbFamily().map(f => f.toString()).join('\n');
+  const pre = 'const _ST_EMPTY = [];\n' +
+    'const _stRouteScratch = { o: 0, ty: 0 };\n' +
+    'var game = ' + JSON.stringify({ _hubTerra: g.ht, _clipExtraOctaveAmp: g.oa, _clipExtraOctaveFreq: g.of, levelSpheres: g.S, levelCylinders: g.C }) + ';\n';
+  const body = '\nself.onmessage = function (e) {\n' +
+    '  const m = e.data, T = m.T;\n' +
+    '  if (m.check) { const n = m.check.length >> 1, out = new Float64Array(n); for (let i = 0; i < n; i++) out[i] = _stGroundYCarved(m.check[2 * i], m.check[2 * i + 1], T); self.postMessage({ check: out }, [out.buffer]); return; }\n' +
+    '  const N = m.N, sp = m.sp, rows = m.j1 - m.j0, data = new Int16Array(rows * N), Q = 8, LIM = 32767, sk = m.skip || 0;\n' +
+    '  for (let jj = 0; jj < rows; jj++) {\n' +
+    '    const wz = m.z0 + (m.j0 + jj) * sp, row = jj * N, inZ = sk > 0 && wz > -sk && wz < sk;\n' +
+    '    for (let i = 0; i < N; i++) {\n' +
+    '      const wx = m.x0 + i * sp;\n' +
+    '      if (inZ && wx > -sk && wx < sk) continue;\n' +
+    '      const h = Math.round(_stGroundYCarved(wx, wz, T) * Q);\n' +
+    '      data[row + i] = h > LIM ? LIM : (h < -LIM ? -LIM : h);\n' +
+    '    }\n' +
+    '  }\n' +
+    '  self.postMessage({ id: m.id, t: m.t, j0: m.j0, j1: m.j1, data: data }, [data.buffer]);\n' +
+    '};\n';
+  return pre + fam + body;
+}
+function _hbDbOpen() {
+  return new Promise((res, rej) => {
+    if (typeof indexedDB === 'undefined') { rej(new Error('no indexedDB')); return; }
+    let r; try { r = indexedDB.open('lss_hbake', 1); } catch (e) { rej(e); return; }
+    r.onupgradeneeded = () => { try { r.result.createObjectStore('t'); } catch (_) {} };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error || new Error('open failed'));
+    r.onblocked = () => rej(new Error('blocked'));
+  });
+}
+async function _hbCacheGet(key) {
+  const db = await _hbDbOpen();
+  try {
+    return await new Promise((res, rej) => {
+      const tx = db.transaction('t', 'readonly'), rq = tx.objectStore('t').get(key);
+      rq.onsuccess = () => res(rq.result || null); rq.onerror = () => rej(rq.error);
+    });
+  } finally { try { db.close(); } catch (_) {} }
+}
+async function _hbCachePut(key, val) {
+  try {
+    const db = await _hbDbOpen();
+    try {
+      await new Promise((res, rej) => {
+        const tx = db.transaction('t', 'readwrite'), st = tx.objectStore('t');
+        st.clear(); st.put(val, key);
+        tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+      });
+    } finally { try { db.close(); } catch (_) {} }
+  } catch (e) { try { console.warn('[hbake] cache write failed:', e); } catch (_) {} }
+}
+async function _hbBakeWorkers(T, farSpec, g) {
+  if (typeof Worker === 'undefined' || typeof Blob === 'undefined' || typeof URL === 'undefined' || !URL.createObjectURL) return false;
+  const nW = Math.max(1, Math.min(8, ((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4) - 1));
+  let url = null; const ws = [];
+  const kill = () => { for (const w of ws) { try { w.terminate(); } catch (_) {} } ws.length = 0; if (url) { try { URL.revokeObjectURL(url); } catch (_) {} url = null; } };
+  try {
+    url = URL.createObjectURL(new Blob([_hbWorkerSrc(g)], { type: 'text/javascript' }));
+    for (let i = 0; i < nW; i++) ws.push(new Worker(url));
+    const pts = new Float64Array(96); let sd = 12345;
+    const rnd = () => { sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0; return sd / 4294967296; };
+    for (let i = 0; i < 48; i++) { const R = (i < 32) ? _HB_BOX : _HB_FAR_MAX; pts[2 * i] = (rnd() * 2 - 1) * R; pts[2 * i + 1] = (rnd() * 2 - 1) * R; }
+    const got = await new Promise((res, rej) => {
+      const w = ws[0]; const to = setTimeout(() => rej(new Error('self-check timeout')), 20000);
+      w.onmessage = (e) => { clearTimeout(to); res(e.data && e.data.check); };
+      w.onerror = (e) => { clearTimeout(to); rej((e && e.error) || new Error((e && e.message) || 'worker error')); };
+      w.postMessage({ check: pts, T: T });
+    });
+    if (!got || got.length !== 48) throw new Error('self-check returned nothing');
+    for (let i = 0; i < 48; i++) {
+      const a = _stGroundYCarved(pts[2 * i], pts[2 * i + 1], T), b = got[i];
+      if (!(Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(a)))) {
+        console.warn('[hbake] worker disagrees with the main thread at', pts[2 * i], pts[2 * i + 1], a, b, '-> main-thread bake');
+        kill(); return false;
+      }
+    }
+    const N = _HB.N, sp = _HB.sp, base = new Int16Array(N * N);
+    const targets = [{ N: N, sp: sp, x0: _HB.x0, z0: _HB.z0, data: base, skip: 0 }];
+    for (const f of farSpec) { f.data = new Int16Array(f.N * f.N); targets.push({ N: f.N, sp: f.sp, x0: f.x0, z0: f.z0, data: f.data, skip: _HB_BOX }); }
+    const jobs = []; let total = 0;
+    for (let t = 0; t < targets.length; t++) {
+      const tg = targets[t], band = 16;
+      for (let j0 = 0; j0 < tg.N; j0 += band) { const j1 = Math.min(tg.N, j0 + band); jobs.push({ id: jobs.length, t: t, j0: j0, j1: j1, N: tg.N, sp: tg.sp, x0: tg.x0, z0: tg.z0, skip: tg.skip }); total += (j1 - j0) * tg.N; }
+    }
+    let done = 0, next = 0, active = 0, failed = null;
+    await new Promise((resolve) => {
+      const pump = (w) => {
+        if (failed || next >= jobs.length) { if (active === 0) resolve(); return; }
+        const job = jobs[next++]; active++;
+        w.onmessage = (e) => {
+          const r = e.data, tg = targets[r.t];
+          tg.data.set(r.data, r.j0 * tg.N);
+          done += (r.j1 - r.j0) * tg.N; _HB.prog = done / total;
+          if (_HB.onProg) { try { _HB.onProg(_HB.prog); } catch (_) {} }
+          active--; pump(w);
+        };
+        w.onerror = (e) => { failed = (e && e.error) || new Error((e && e.message) || 'worker error'); active--; pump(w); };
+        w.postMessage(Object.assign({ T: T }, job));
+      };
+      for (const w of ws) pump(w);
+    });
+    kill();
+    if (failed) { console.warn('[hbake] worker bake failed:', failed); return false; }
+    _HB.mean = [base]; _HB.max = [base]; _HB.dim = [N]; _HB.far = farSpec; _HB.workers = nW; _HB.evals = total;
+    return true;
+  } catch (e) { try { console.warn('[hbake] worker pool failed:', e); } catch (_) {} kill(); return false; }
+}
+async function _hbBakeMain(T) {
+  _HB.sp = 64; _HB.N = Math.round(2 * _HB_BOX / _HB.sp);
+  const half = _hbHalf(); _HB.x0 = -half; _HB.z0 = -half;
+  const N = _HB.N, sp = _HB.sp, base = new Int16Array(N * N), Q = 8, LIM = 32767;
+  let yieldAt = performance.now();
+  for (let j = 0; j < N; j++) {
+    const wz = _HB.z0 + j * sp, row = j * N;
+    for (let i = 0; i < N; i++) { const h = Math.round(_stGroundYCarved(_HB.x0 + i * sp, wz, T) * Q); base[row + i] = h > LIM ? LIM : (h < -LIM ? -LIM : h); }
+    const now = performance.now();
+    if (now - yieldAt > 12) { yieldAt = now; _HB.prog = j / N; if (_HB.onProg) { try { _HB.onProg(_HB.prog); } catch (_) {} } await new Promise(r => setTimeout(r, 0)); }
+  }
+  _HB.mean = [base]; _HB.max = [base]; _HB.dim = [N]; _HB.far = null; _HB.workers = 0; _HB.evals = N * N;
+}
+function _hbPending() {
+  try { return !!(_HB.on && !_HB.ready && !_HB.failed && game && game._clipWantHub && game.sandwichTerrain && game.sandwichTerrain.HUB); } catch (_) { return false; }
+}
+function _hbKick() {
+  try {
+    const T = game.sandwichTerrain;
+    if (!_HB.on || !T || !T.HUB || !game._clipWantHub || _HB.building) return;
+    const farSpec = _hbFarSpec(), sp = _HB.spWanted, N = Math.round(2 * _HB_BOX / sp);
+    const key = _hbHash(T, farSpec, sp, N);
+    if (_HB.ready && _HB.hash === key) return;
+    _HB.ready = false; _HB.failed = false; _HB.hash = key; _HB.sp = sp; _HB.N = N;
+    _HB.promise = _hbBuild(null, key, farSpec).catch((e) => { try { console.warn('[hbake] build threw:', e); } catch (_) {} _HB.failed = true; });
+  } catch (e) { try { console.warn('[hbake] kick failed:', e); } catch (_) {} _HB.failed = true; }
+}
+async function _hbAwait(onProg) {
+  if (onProg) _HB.onProg = onProg;
+  if (!_HB.promise && _hbPending()) _hbKick();
+  if (_HB.promise) { try { await _HB.promise; } catch (_) {} }
+  _HB.onProg = null;
+}
+async function _hbBuild(onProg, key, farSpec) {
+  if (onProg) _HB.onProg = onProg;
+  const T = game.sandwichTerrain;
+  if (!_HB.on || !T || !T.HUB) return;
+  if (!farSpec) farSpec = _hbFarSpec();
+  if (!key) { _HB.sp = _HB.spWanted; _HB.N = Math.round(2 * _HB_BOX / _HB.sp); key = _hbHash(T, farSpec, _HB.sp, _HB.N); _HB.hash = key; _HB.ready = false; }
+  _HB.building = true; _HB.cached = false; _HB.failed = false; _HB.prog = 0;
+  const t0 = performance.now();
+  try {
+    const half = _hbHalf(); _HB.x0 = -half; _HB.z0 = -half;
+    let hit = null; try { hit = await _hbCacheGet(key); } catch (e) { try { console.warn('[hbake] cache read failed:', e); } catch (_) {} }
+    const fits = !!(hit && hit.base && hit.base.length === _HB.N * _HB.N && Array.isArray(hit.far) && hit.far.length === farSpec.length && hit.far.every((a, i) => a && a.length === farSpec[i].N * farSpec[i].N));
+    if (fits) {
+      _HB.mean = [hit.base]; _HB.max = [hit.base]; _HB.dim = [_HB.N];
+      for (let i = 0; i < farSpec.length; i++) farSpec[i].data = hit.far[i];
+      _HB.far = farSpec; _HB.cached = true; _HB.evals = 0; _HB.workers = 0;
+    } else {
+      const g = _hbGameBits(), Tp = JSON.parse(JSON.stringify(T));
+      let ok = false;
+      try { ok = await _hbBakeWorkers(Tp, farSpec, g); } catch (e) { try { console.warn('[hbake] worker path threw:', e); } catch (_) {} }
+      if (!ok) await _hbBakeMain(T);
+      else _hbCachePut(key, { v: 1, base: _HB.mean[0], far: farSpec.map(f => f.data) });   // fire and forget
+    }
+    _HB.ms = Math.round(performance.now() - t0); _HB.prog = 1; _HB.ready = true;
+    let bytes = _HB.mean[0].byteLength; if (_HB.far) for (const f of _HB.far) bytes += f.data.byteLength;
+    try {
+      console.log('[hbake] ' + (_HB.cached ? 'cache hit' : ('baked on ' + _HB.workers + ' workers, ' + _HB.evals + ' evals')) + ': base ' + _HB.N + '^2 @' + _HB.sp + 'u' +
+        (_HB.far ? ' + far ' + _HB.far.map(f => f.N + '^2@' + f.sp).join(', ') : '') + ' in ' + _HB.ms + ' ms, ' + (bytes / 1048576).toFixed(1) + ' MB, key ' + key);
+    } catch (_) {}
+    try {
+      if (typeof _clipmap !== 'undefined' && _clipmap.on && _clipmap.levels) {
+        for (const L of _clipmap.levels) { _clipBakeLevel(L); await new Promise(r => setTimeout(r, 0)); }
+      }
+    } catch (_) {}
+  } catch (e) {
+    try { console.warn('[hbake] build failed:', e); } catch (_) {}
+    _HB.failed = true;
+  } finally { _HB.building = false; _HB.onProg = null; }
+}
+try { window.__hbakeBuild = _hbBuild; } catch (_) {}
+
+const _CLIP_PEAK = { on: 1, k: 2, w: 0.7, foot: 1.0, minLevel: 3 };
 try { window.__clipPeak = _CLIP_PEAK; } catch (_) {}
 
 function _clipCellH(wx, wz, sp, T, lvl) {
+  if (_HB.ready && _HB.on && lvl >= _HB.minLevel) {
+    const _hb = _hbSample(wx, wz, lvl);
+    if (_hb != null) return _hb;
+    const _hf = _hfSample(wx, wz, sp);      // (v46.68) outside the base box: this level's far table
+    if (_hf != null) return _hf;
+  }
+  const _bf = (_HB.on && _HB.ready) ? (+_HB.bandFloor || 0) : 0;
+  if (_bf > sp) return _stGroundYCarved(wx, wz, T, _bf);
   const P = _CLIP_PEAK;
-  const k = (P.on && lvl >= P.minLevel) ? Math.max(1, P.k | 0) : 1;
-  if (k <= 1) return _stGroundYCarved(wx, wz, T, sp);
-  const ext = sp * P.foot;
-  let mx = -Infinity, sum = 0;
+  const base = _stGroundYCarved(wx, wz, T, sp);
+  const w = (P.on && lvl >= P.minLevel) ? +P.w : 0;
+  if (!(w > 0)) return base;
+  const k = Math.max(2, P.k | 0), ext = sp * P.foot;
+  let mx = -Infinity;
   for (let j = 0; j < k; j++) {
     const oz = ((j + 0.5) / k - 0.5) * ext;
     for (let i = 0; i < k; i++) {
       const ox = ((i + 0.5) / k - 0.5) * ext;
-      const h = _stGroundYCarved(wx + ox, wz + oz, T, sp);
+      const h = _stGroundYCarved(wx + ox, wz + oz, T);   // NO sp - raw, or the peak is gone already
       if (h > mx) mx = h;
-      sum += h;
     }
   }
-  const mean = sum / (k * k);
-  return mean + (mx - mean) * P.mix;
+  return (mx > base) ? base + (mx - base) * w : base;
 }
 
 function _clipBakeLevel(L) {
@@ -30900,7 +31313,7 @@ function _clipUpdate(px, pz) {
       const ogx = L.gIx, ogz = L.gIz, first = (ogx === undefined);
       L.cx = ncx; L.cz = ncz;
       L.gIx = Math.round(ncx / L.spacing) - N / 2; L.gIz = Math.round(ncz / L.spacing) - N / 2;
-      if (first || Math.abs(L.gIx - ogx) > N || Math.abs(L.gIz - ogz) > N) _clipBakeLevel(L);   
+      if (first || Math.abs(L.gIx - ogx) > N * 0.5 || Math.abs(L.gIz - ogz) > N * 0.5) _clipBakeLevel(L);   
       else _clipBakeEdge(L, ogx, ogz);                                                          
       L.mesh.position.set(ncx, 0, ncz);
     }
@@ -31110,10 +31523,13 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   const _R2 = _VIEW * _VIEW;
   const wantGrass = (game.sandwichGrass !== false) && (((T.biome || 'grassy') === 'grassy') || T.biome === 'mossy');
   const wantTrees = (game.sandwichTrees !== false) && (T.biome === 'mossy');
+  const wantDrapes = (game.sandwichDrapes !== false) &&
+                     !(typeof window !== 'undefined' && window.__drapes && window.__drapes.on === false);
+  const wantFoliage = wantTrees || wantDrapes;
   const _SC = _swStreamIdle;
   const _clipOn = !!(typeof _clipmap !== 'undefined' && _clipmap && _clipmap.on);
   if (_SC.idle && _SC.T === T && _SC.scx === scx && _SC.scz === scz && _SC.view === _VIEW &&
-      _SC.size === chunks.size && _SC.grass === wantGrass && _SC.trees === wantTrees && _SC.clip === _clipOn) return 0;
+      _SC.size === chunks.size && _SC.grass === wantGrass && _SC.trees === wantFoliage && _SC.clip === _clipOn) return 0;
   let _swDisposed = 0, _swRemoved = 0;
   const todo = [];
   for (let cx = scx - _VIEW; cx <= scx + _VIEW; cx++) {
@@ -31199,17 +31615,21 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false; _swRemoved++;   // (v39.94) capped, see the dispose note
     }
     const nearT = _cheb <= _treeView;
-    if (nearT && wantTrees && !c.treesBuilt && tBuilt < (tLim || 1)) {
+    if (nearT && wantFoliage && !c.treesBuilt && tBuilt < (tLim || 1)) {
       const _fpT = game._foliageProf ? performance.now() : 0;
-      c.trees = _swBuildTrees(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.treesBuilt = true; tBuilt++;
+      const _tm = wantTrees ? _swBuildTrees(cx * _SW_CHUNK, cz * _SW_CHUNK, T) : null;
+      let _dm = null;
+      if (wantDrapes) { try { _dm = _swBuildDrapes(cx * _SW_CHUNK, cz * _SW_CHUNK, T); }
+        catch (e) { if (!_swDrapeErr) { _swDrapeErr = 1; try { console.warn('[drapes] build threw:', e); } catch (_) {} } } }
+      c.trees = (_tm || _dm) ? (_tm || []).concat(_dm || []) : null; c.treesBuilt = true; tBuilt++;
       if (game._foliageProf) _foliageProfRec('trees', performance.now() - _fpT);
-    } else if ((!nearT || !wantTrees) && c.treesBuilt && _swRemoved < _remMax) {
+    } else if ((!nearT || !wantFoliage) && c.treesBuilt && _swRemoved < _remMax) {
       _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;   // (v39.94) capped
     }
   }
   _SC.idle = (built === 0 && stepped === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0);   // (v39.49) a stepped job is not idle
   _SC.T = T; _SC.scx = scx; _SC.scz = scz; _SC.view = _VIEW; _SC.size = chunks.size;
-  _SC.grass = wantGrass; _SC.trees = wantTrees; _SC.clip = _clipOn;
+  _SC.grass = wantGrass; _SC.trees = wantFoliage; _SC.clip = _clipOn;
   return built + stepped + gBuilt + tBuilt;   // (v39.49) stepped keeps the warmup drain looping while a job is in flight
 }
 if (typeof window !== 'undefined') window.__swStream = updateSandwichStream;
@@ -31256,6 +31676,7 @@ function initSandwichTerrain() {
     game._clipWantHub = !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && typeof _clipBuild === 'function';
     if (!game._clipWantHub) { game._swPreloading = true; game._swPreloadZero = 0; game._swPreloadFrames = 0; game._swPreloadStart = (game.time || 0); game._preLaunchWaiting = false; game._swPreloadHoldT = 0; }   // (v44.03) a fresh preload gets a fresh hold clock
     try { if (typeof _clipmap !== 'undefined') _clipmap.on = false; } catch (_) {}
+    try { if (typeof _hbKick === 'function') _hbKick(); } catch (_) {}
   } else if (T && T.biome !== 'mossy') {
     try {
       game._clipWantHub = false;
@@ -47464,6 +47885,7 @@ async function _prebakeWorldForLaunch() {
   };
   try {
     const _tA = _pbNow();
+    try { if (typeof _hbAwait === 'function') await _hbAwait((p) => { try { _pbSub('baking the overworld  ' + Math.round(p * 100) + '%'); } catch (_) {} }); } catch (_) {}
     await _warmupYield();
     rep.ms.clip = Math.round(_pbNow() - _tA);
 
@@ -48304,6 +48726,7 @@ async function _rrStagedSwap(pending, ph) {
     await _warmupYield();
 
     t = _pbNow();
+    try { if (typeof _hbAwait === 'function') await _hbAwait((p) => { try { showLoadingOverlay(null, 'baking the overworld  ' + Math.round(p * 100) + '%'); } catch (_) {} }); } catch (_) {}
     if (game._clipWantHub && !_clipmap.on && player && player.position) {
       try { rep.clipLevels = await _clipEnableSliced(player.position.x, player.position.z); }
       catch (e) { console.warn('[swap] clipmap enable failed:', e); }
@@ -52459,6 +52882,11 @@ function commitLoadout(key) {
       () => _prebakeWorldForLaunch(),
       (e) => { console.warn('[commitLoadout] shader warmup failed, prebaking anyway:', e); return _prebakeWorldForLaunch(); }
     );
+    _warmupPromise = _warmupPromise.then(() => {
+      try { return _hbAwait((p) => { try { const _ls = document.getElementById('lss-loading-sub');
+        if (_ls) _ls.textContent = 'baking the overworld  ' + Math.round(p * 100) + '%'; } catch (_) {} }); }
+      catch (e) { try { console.warn('[hbake] build threw:', e); } catch (_) {} }
+    });
   }
   _warmupPromise.then(() => {
     try { game._warmupDone = true; } catch (_) {}   // (v42.25)
@@ -78091,7 +78519,8 @@ function gameLoop(timestamp) {
       }
       if (game._clipWantHub && !_clipmap.enabling) {   // (v36.27) enabling: _clipEnableSliced owns it
         if (!_clipmap.on) {
-          if (game.state === 'playing' && typeof _clipEnableSliced === 'function') {
+          if (typeof _hbPending === 'function' && _hbPending()) {
+          } else if (game.state === 'playing' && typeof _clipEnableSliced === 'function') {
             try { const _pr = _clipEnableSliced(_fX, _fZ); if (_pr && _pr.catch) _pr.catch(() => { _clipmap.enabling = false; }); } catch (_) { _clipmap.enabling = false; }
           } else {
             try { _clipEnableNow(_fX, _fZ); } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }

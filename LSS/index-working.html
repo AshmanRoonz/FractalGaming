@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.55";
+const LSS_BUILD = "46.71";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -31506,10 +31506,19 @@ function _swPatchTerrainMat(m, isCeil, clipAtlas) {
       // moves with it; if _CLIP_N changes, both move.
       const _cn = _CLIP_N.toFixed(1), _cr = (_CLIP_N + 1).toFixed(1);
       const _chn = (_CLIP_N * 0.5).toFixed(1);            // window half-width (64)
+      // (v46.67) THE LAST TWO N-LITERALS. v46.66 parameterised the 24 `128.0` / 24 `129.0` but the
+      // outer-edge stitch tests (`_fj>127.5`, `_fi>127.5` = last row / last column) were left as
+      // literals. At N=256 `_fj>127.5` is TRUE FOR THE WHOLE +z HALF of every level (and `_fi>127.5`
+      // for the +x half), so every odd vertex there was averaged from its neighbours = drawn at the
+      // PARENT's resolution, with the boundary on the level's centre line, which follows the pilot.
+      // That is the owner's "the landscape morphs slightly, things grow and shrink while we drive":
+      // terrain crossed from half-res to full-res as it passed the ship. `__clipSeam` never saw it
+      // because its JS mirror already used `N - 0.5`. Byte-identical at N=128 (127.5).
+      const _cnl = (_CLIP_N - 0.5).toFixed(1);            // last row/col test (127.5 at N=128)
       const _cms = (_CLIP_N * 0.25 + 1);                  // morph band start, from the EYE (33)
       const _cme = (_CLIP_N * 0.5 - 4 - 2);               // morph complete, from the EYE (58)
       const _cmsS = _cms.toFixed(1), _cmw = (_cme - _cms).toFixed(1);   // width 25
-      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform sampler2D uClipAtlasP;\nuniform vec2 uClipOriginP;\nuniform float uClipHasParent;\nuniform vec2 uClipEye;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*128.0,_fj=uv.y*128.0;\n if((_fj<0.5||_fj>127.5)&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/128.0,uv.y)*128.0+uClipOrigin+0.5)/129.0)).x);}else if((_fi<0.5||_fi>127.5)&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/128.0)*128.0+uClipOrigin+0.5)/129.0)).x);}\n vec2 _eo=(vec2(modelMatrix[3][0],modelMatrix[3][2])-uClipEye)/uClipSpacing;float _rd=max(abs(_fi-'+_chn+'+_eo.x),abs(_fj-'+_chn+'+_eo.y));float _gm=clamp((_rd-'+_cmsS+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00,_h10,_h01;if(uClipHasParent>0.5){vec2 _pb=vec2(_ie*0.5,_je*0.5)+uClipOriginP+0.5;_h00=texture2D(uClipAtlasP,fract(_pb/129.0)).x;_h10=texture2D(uClipAtlasP,fract((_pb+vec2(1.0,0.0))/129.0)).x;_h01=texture2D(uClipAtlasP,fract((_pb+vec2(0.0,1.0))/129.0)).x;}else{_h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/129.0)).x;_h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/129.0)).x;_h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/129.0)).x;}_ch=mix(_ch,_h00+(_h10-_h00)*_wx+(_h01-_h00)*_wz,_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/128.0,1.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/128.0,0.0),uv.y)*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/128.0,1.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/128.0,0.0))*128.0 + uClipOrigin + 0.5)/129.0)).x;\n float _spanX=(min(uv.x+1.0/128.0,1.0)-max(uv.x-1.0/128.0,0.0))*128.0*uClipSpacing; float _spanZ=(min(uv.y+1.0/128.0,1.0)-max(uv.y-1.0/128.0,0.0))*128.0*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));\n if(uClipHasParent>0.5 && _gm>0.0){ float _pie=floor(_fi*0.5)*2.0,_pje=floor(_fj*0.5)*2.0; float _pwx=(_fi-_pie)*0.5,_pwz=(_fj-_pje)*0.5; vec2 _pq=vec2(_pie*0.5,_pje*0.5)+uClipOriginP+0.5; float _ps=uClipSpacing*2.0;\n float _q00=texture2D(uClipAtlasP,fract(_pq/129.0)).x; float _q10=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,0.0))/129.0)).x; float _q01=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,1.0))/129.0)).x;\n float _qn0=texture2D(uClipAtlasP,fract((_pq+vec2(-1.0,0.0))/129.0)).x; float _q0n=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,-1.0))/129.0)).x; float _q20=texture2D(uClipAtlasP,fract((_pq+vec2(2.0,0.0))/129.0)).x;\n float _q11=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,1.0))/129.0)).x; float _q1n=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,-1.0))/129.0)).x; float _qn1=texture2D(uClipAtlasP,fract((_pq+vec2(-1.0,1.0))/129.0)).x; float _q02=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,2.0))/129.0)).x;\n vec2 _gA=vec2(_q10-_qn0,_q01-_q0n); vec2 _gB=vec2(_q20-_q00,_q11-_q1n); vec2 _gC=vec2(_q11-_qn1,_q02-_q00);\n vec2 _gp=_gA+(_gB-_gA)*_pwx+(_gC-_gA)*_pwz;\n vec3 _pn=normalize(vec3(-_gp.x/(2.0*_ps),1.0,-_gp.y/(2.0*_ps)));\n vSN = normalize(mix(vSN,_pn,_gm)); }');
+      sh.vertexShader='uniform sampler2D uClipAtlas;\nuniform vec2 uClipOrigin;\nuniform sampler2D uClipAtlasP;\nuniform vec2 uClipOriginP;\nuniform float uClipHasParent;\nuniform vec2 uClipEye;\nuniform float uClipSkirt;\nuniform float uClipMorph;\nuniform float uClipSpacing;\nattribute float aSkirt;\nvarying float vWY; varying vec3 vWPos; varying vec3 vSN;\n'+sh.vertexShader.replace('#include <begin_vertex>','#include <begin_vertex>\n vec2 _ct = fract((uv*'+_cn+' + uClipOrigin + 0.5)/'+_cr+');\n float _ch = texture2D(uClipAtlas, _ct).x;\n float _fi=uv.x*'+_cn+',_fj=uv.y*'+_cn+';\n if((_fj<0.5||_fj>'+_cnl+')&&mod(_fi,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x-1.0/'+_cn+',uv.y)*'+_cn+'+uClipOrigin+0.5)/'+_cr+')).x+texture2D(uClipAtlas,fract((vec2(uv.x+1.0/'+_cn+',uv.y)*'+_cn+'+uClipOrigin+0.5)/'+_cr+')).x);}else if((_fi<0.5||_fi>'+_cnl+')&&mod(_fj,2.0)>0.5){_ch=0.5*(texture2D(uClipAtlas,fract((vec2(uv.x,uv.y-1.0/'+_cn+')*'+_cn+'+uClipOrigin+0.5)/'+_cr+')).x+texture2D(uClipAtlas,fract((vec2(uv.x,uv.y+1.0/'+_cn+')*'+_cn+'+uClipOrigin+0.5)/'+_cr+')).x);}\n vec2 _eo=(vec2(modelMatrix[3][0],modelMatrix[3][2])-uClipEye)/uClipSpacing;float _rd=max(abs(_fi-'+_chn+'+_eo.x),abs(_fj-'+_chn+'+_eo.y));float _gm=clamp((_rd-'+_cmsS+')/'+_cmw+',0.0,1.0)*uClipMorph;if(_gm>0.0){float _ie=floor(_fi*0.5)*2.0,_je=floor(_fj*0.5)*2.0;float _wx=(_fi-_ie)*0.5,_wz=(_fj-_je)*0.5;float _h00,_h10,_h01;if(uClipHasParent>0.5){vec2 _pb=vec2(_ie*0.5,_je*0.5)+uClipOriginP+0.5;_h00=texture2D(uClipAtlasP,fract(_pb/'+_cr+')).x;_h10=texture2D(uClipAtlasP,fract((_pb+vec2(1.0,0.0))/'+_cr+')).x;_h01=texture2D(uClipAtlasP,fract((_pb+vec2(0.0,1.0))/'+_cr+')).x;}else{_h00=texture2D(uClipAtlas,fract((vec2(_ie,_je)+uClipOrigin+0.5)/'+_cr+')).x;_h10=texture2D(uClipAtlas,fract((vec2(_ie+2.0,_je)+uClipOrigin+0.5)/'+_cr+')).x;_h01=texture2D(uClipAtlas,fract((vec2(_ie,_je+2.0)+uClipOrigin+0.5)/'+_cr+')).x;}_ch=mix(_ch,_h00+(_h10-_h00)*_wx+(_h01-_h00)*_wz,_gm);}\n transformed.y = _ch - aSkirt * uClipSkirt;\n vWY = _ch;\n vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n float _hR=texture2D(uClipAtlas, fract((vec2(min(uv.x+1.0/'+_cn+',1.0),uv.y)*'+_cn+' + uClipOrigin + 0.5)/'+_cr+')).x;\n float _hL=texture2D(uClipAtlas, fract((vec2(max(uv.x-1.0/'+_cn+',0.0),uv.y)*'+_cn+' + uClipOrigin + 0.5)/'+_cr+')).x;\n float _hU=texture2D(uClipAtlas, fract((vec2(uv.x,min(uv.y+1.0/'+_cn+',1.0))*'+_cn+' + uClipOrigin + 0.5)/'+_cr+')).x;\n float _hD=texture2D(uClipAtlas, fract((vec2(uv.x,max(uv.y-1.0/'+_cn+',0.0))*'+_cn+' + uClipOrigin + 0.5)/'+_cr+')).x;\n float _spanX=(min(uv.x+1.0/'+_cn+',1.0)-max(uv.x-1.0/'+_cn+',0.0))*'+_cn+'*uClipSpacing; float _spanZ=(min(uv.y+1.0/'+_cn+',1.0)-max(uv.y-1.0/'+_cn+',0.0))*'+_cn+'*uClipSpacing; vSN = normalize(vec3(-(_hR-_hL)/_spanX, 1.0, -(_hU-_hD)/_spanZ));\n if(uClipHasParent>0.5 && _gm>0.0){ float _pie=floor(_fi*0.5)*2.0,_pje=floor(_fj*0.5)*2.0; float _pwx=(_fi-_pie)*0.5,_pwz=(_fj-_pje)*0.5; vec2 _pq=vec2(_pie*0.5,_pje*0.5)+uClipOriginP+0.5; float _ps=uClipSpacing*2.0;\n float _q00=texture2D(uClipAtlasP,fract(_pq/'+_cr+')).x; float _q10=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,0.0))/'+_cr+')).x; float _q01=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,1.0))/'+_cr+')).x;\n float _qn0=texture2D(uClipAtlasP,fract((_pq+vec2(-1.0,0.0))/'+_cr+')).x; float _q0n=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,-1.0))/'+_cr+')).x; float _q20=texture2D(uClipAtlasP,fract((_pq+vec2(2.0,0.0))/'+_cr+')).x;\n float _q11=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,1.0))/'+_cr+')).x; float _q1n=texture2D(uClipAtlasP,fract((_pq+vec2(1.0,-1.0))/'+_cr+')).x; float _qn1=texture2D(uClipAtlasP,fract((_pq+vec2(-1.0,1.0))/'+_cr+')).x; float _q02=texture2D(uClipAtlasP,fract((_pq+vec2(0.0,2.0))/'+_cr+')).x;\n vec2 _gA=vec2(_q10-_qn0,_q01-_q0n); vec2 _gB=vec2(_q20-_q00,_q11-_q1n); vec2 _gC=vec2(_q11-_qn1,_q02-_q00);\n vec2 _gp=_gA+(_gB-_gA)*_pwx+(_gC-_gA)*_pwz;\n vec3 _pn=normalize(vec3(-_gp.x/(2.0*_ps),1.0,-_gp.y/(2.0*_ps)));\n vSN = normalize(mix(vSN,_pn,_gm)); }');
     } else {
       // (v36.99) BENT SANDWICH: every height-band effect (snowline, strata,
       // biome bands) keys off vWY. Bent chunks carry their pre-bend height
@@ -32235,7 +32244,337 @@ function _swBuildTrees(x0,z0,T){
   for(let v=0;v<sets.shroom.length;v++)emit(sets.shroom[v],_swShroomMatGet(), buckets.shroom[v],-1.5, 1.6,2.0, 12, true);
   return meshes.length?meshes:null;
 }
-function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ if(im && im.parent)scene.remove(im); if(im && im.dispose)im.dispose(); }catch(_){} } } }
+function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ if(im && im.parent)scene.remove(im); if(im && im.dispose)im.dispose(); if(im && im.userData && im.userData.ownGeo && im.geometry)im.geometry.dispose(); }catch(_){} } } }   // (v46.71) drapes own their merged geometry
+
+// ═══ (v46.56) RIDGE DRAPES - ICICLES AND VINES OVER A CLIFF LIP ══════════════════════════════════
+// Owner, over a screenshot of a banded cliff with blue arcs on the snow shoulders and green ones on
+// the mossy band below: "i am thinking maybe some icicles flowing over top down from ridges, and
+// vines for the the grassy areas".
+// They are ONE mechanism. An icicle and a vine are both a tapered strand hanging off an edge; what
+// differs is the shape, the colour and which BAND of the cliff it belongs to - so this finds lips
+// once and lets the altitude decide what hangs there. Ice above the snow line, vines below it
+// wherever the ground cover says there is something alive to trail from.
+//
+// FINDING A LIP. Not "is this steep" - a whole cliff FACE is steep and a strand pinned to the middle
+// of one reads as a spike stuck in a wall. A lip is where ground you could stand on runs out: sample
+// the height four ways at `probe`, and if the biggest of those four falls further than `drop`, this
+// is an edge and that direction is over it. The same four samples give the direction for free, so
+// the strand can be nudged OUT over the drop instead of sitting behind it.
+// ⚠ COST IS THE REASON FOR THE COARSE GRID. Each sample is one _stGroundYGrid plus four
+//   _stGroundYCarved - the same SDF calls grass pays, and this streams on the same per-frame budget.
+//   At `step` 52 a chunk costs about what its grass does; halving it quadruples that.
+// ⚠ SHARED GEOMETRY AND MATERIALS ARE NEVER DISPOSED HERE. These ride `c.trees`, whose teardown is
+//   _swRemoveTrees, and that calls InstancedMesh.dispose - which drops the INSTANCE buffers only.
+//   A chunk unloading must never reach the singletons below (the disposal bug class this file has
+//   shipped half-fixed twice). The two hook geometries are built once, lazily, and shared by every
+//   chunk that ever hangs a strand.
+// ⚠ OPAQUE ON PURPOSE. Ice wants to be translucent and every transparent thing in this project ends
+//   up in a sort-order bug (the landing-pad ring flicker is the most recent); a pale near-white blue
+//   reads as ice at the range you see a cliff from and cannot flicker against anything.
+// ⚠ THE RNG IS SEEDED PER CHUNK. Chunks are re-baked mid-run (the endless append-tear guard), and
+//   Math.random would re-roll every strand on a rebake - a cliff that reshuffles its own icicles as
+//   you fly past it. Same reason the sky islands seed theirs.
+// window.__drapes = { on, step, probe, drop, per, ice, vine, lenK, maxLen, snow } tunes it live.
+// ⭐⭐⭐ (v46.57) A STRAND HAS TO FOLD OVER THE LIP, NOT STAND ON IT. Owner: "it really needs to
+// fold over from the top of the ridge... a lot of the icicles look like they start from the rock...
+// and the vines too".
+// A straight vertical cylinder CANNOT read any other way. However carefully it is placed, its top
+// end is a flat disc sitting somewhere on a rock face, so it always looks driven INTO the cliff
+// rather than draped over it. v46.56 spent three passes moving that top end around - out over the
+// drop, back to the lip, up to ridge height - and every one of them was rearranging the wrong
+// thing. The fix is the SHAPE.
+// This is a swept tube (the file's own idiom - see the cockpit canopy frame) along a path that
+// starts HORIZONTAL lying back on the ridge top, folds over the edge through a quadratic bezier,
+// then hangs straight down. The strand is anchored by a length of ITSELF lying on the ground behind
+// the lip, and what crosses the edge is a bend - which is what "folds over from the top" means for
+// an icicle and a vine alike.
+// ⭐⭐ ...AND IT CHANGES COLOUR ALONG ITS LENGTH. Owner: "the vines should turn from the surface
+// colour, over the ledge, down the side of the rock". The ramp is baked into the geometry as vertex
+// colours against the SAME path parameter the taper uses, so the root wears the ground it grows out
+// of and the hanging tail is vine. Free - no second material, no shader, and it costs three floats
+// a vertex on a geometry that exists once. Ice gets the same treatment for the same reason: snow at
+// the lip, colder blue where it hangs clear.
+// ⚠ IT IS ALSO FORGIVING ABOUT WHERE THE EDGE IS, which matters more than it sounds: the probe grid
+//   only knows the break is somewhere between the sample and `L` away. With a straight spike that
+//   uncertainty IS the bug. With a fold, an origin slightly inboard lays the root on the rock and
+//   drops the tail off the edge, and slightly outboard lays the root across the lip - both read.
+// ⚠ THE AXES ARE SCALED BY DIFFERENT NUMBERS (rad, len, rad), so the bend is deliberately not
+//   circular in unit space: its REACH back over the ridge is in Z (scaled by rad) and its DROP is in
+//   Y (scaled by len). At typical values - rad 3-12, len 25-190 - `zRoot` 3.0 against `yBend` 0.10
+//   lands at roughly 15 units of fold-over to 6 of drop, which is the proportion that reads. A
+//   circular bend in unit space would come out stretched 8-16x vertically and the fold would vanish.
+// ⚠ TRIANGLE BUDGET: 8 stations x 4 sides = 56 tris a strand against the old cone's 10, so `per`
+//   drops with it. A folded strand reads harder than a spike, so fewer are wanted anyway.
+// ⚠⚠⚠ (v46.58) NON-UNIFORM INSTANCE SCALE DESTROYS A BENT TUBE, AND THAT IS WHY THEY STOOD UP.
+// Owner on v46.57: "they dont fold, they spike right up above the surface".
+// v46.57 scaled each instance by (rad, len, rad) - which is right for a straight hanging cylinder,
+// whose cross-section lies in X and Z. But this path BENDS: the horizontal ROOT lying back on the
+// ridge runs along Z, so ITS cross-section lies in X and **Y** - and Y is the axis being multiplied
+// by `len`. The root's tube therefore came out `2 * r * len` tall: a 120-unit vertical fin standing
+// on the ridge for a 60-unit strand. The fold was in the geometry the whole time; the matrix stood
+// it on end.
+// A bent tube can only take a UNIFORM scale. So the radius becomes ABSOLUTE in unit space (a
+// fraction of the hang, `rBase`) and the instance scales by `len` alone - every axis by the same
+// number, so the root, the bend and the tail all keep their proportions. The cost is that thickness
+// is now tied to length, which is what the old `rad` formula (2.6 + len*0.055) was approximating by
+// hand anyway; ice and vine keep separate ratios because they have separate geometries.
+// ⚠ `zRoot` and `yBend` are now fractions of the HANG, not of the radius: at len 60, zRoot 0.22
+//   reaches 13 units back over the ridge and yBend 0.10 drops 6 through the bend.
+// ⭐⭐⭐ (v46.71) REDESIGNED: A RIBBON THAT LIES ON THE RENDERED ROCK. Owner, after v46.69/70 (fold
+// pinned to the edge, plumb hang, a tilt): "they don't fit properly, some are floating, some are
+// shoved in", "the tops look too cylindrical", "you have them on an angle... the angle was fine",
+// "can barely see any of them", "they are pushed into the land too much", "you can redesign them
+// completely if you know a better way".
+// Every previous cut was ONE rigid shape, instanced, placed by a guess: a straight tube (v46.56),
+// a folded tube (v46.57), a folded tube with a flat tongue (v46.69). A rigid shape can fit a face
+// at one point only. The rendered faces are 55-70 degrees and the ridge tops are not flat, so a
+// plumb hang from the edge is inside the rock a few units down, a hang out from the edge floats,
+// and a tongue that reaches back over a crest floats or buries itself. Each fix moved the error.
+// Now each strand is built from the surface it hangs on. Three stations back on the ridge make a
+// flat, feathered tongue, each on the rock at its own height; then the strand WALKS the rendered
+// surface (see _swDrapeY: L0's own lattice and triangle split) along the fall line, over the edge
+// and down the face, emitting a station every few units, each offset from the rock by the strand's
+// own half-thickness along the local normal, tapering to a closed tip. Vertical where the face is
+// vertical, following the rock where it is not, on the rock everywhere - so nothing floats and
+// nothing is pushed in - and the top is a sheet lying on the ridge with no end face to show.
+// The cross-section is an ellipse per station: wide and thin on the tongue (EX x EY in radii), a
+// rounded rib down the face for ice and nearly round for vine, four sides at 45 degrees so the
+// tongue is a slab with flat faces, not a diamond. Colour turns at the ledge exactly as before.
+// ⚠ ONE MERGED GEOMETRY PER CHUNK PER KIND, not InstancedMesh: a surface-fitted strand is unique,
+//   so instancing has nothing to share. Draw calls are unchanged (one per chunk per kind, `minPer`
+//   still gates the sparse ones); triangles ~80 a strand (was 56). The mesh OWNS its geometry, so
+//   _swRemoveTrees disposes it (`userData.ownGeo`) - the shared-singleton rule still holds for
+//   the materials, which are never disposed here.
+// ⚠ A strand ends early where the rock comes back up (a bowl, a ledge) or where it has flattened
+//   onto a terrace after a third of its length - an icicle stops at the ledge it reaches.
+const _SW_DRAPE_SEG = 4;
+const _swDrapeC0I = new THREE.Color(0xf4fcff), _swDrapeC1I = new THREE.Color(0x9fc9e2);
+const _swDrapeC0V = new THREE.Color(0x7d9e52), _swDrapeC1V = new THREE.Color(0x2b4520), _swDrapeCT = new THREE.Color();
+const _swDrapeSt = [];   // scratch stations: x, y, z, r, ex, ey, s
+function _swDrapeStrand(acc, lx, lz, hLip, fx, fz, len, rad, snowy, T) {
+  const S = _swDrapeSt; S.length = 0;
+  const tipR = snowy ? 0.05 : 0.45, FX = snowy ? 1.25 : 1.0, FY = snowy ? 0.70 : 0.85;
+  const EX = Math.max(1.15, 1.6 - 0.05 * Math.max(0, rad - 6)), EY = 0.32;   // the tongue: a slab, narrower for the fat ones
+  const reach = Math.min(40, Math.max(8, 0.30 * len));
+  // the tongue: three stations back on the ridge, each on the rock, the far end a point dipped in
+  for (let t = 0; t < 3; t++) {
+    const f = (t === 0) ? 1.0 : (t === 1) ? 0.55 : 0.0, w = (t === 0) ? 0.06 : (t === 1) ? 0.85 : 1.0, sPar = (t === 0) ? -0.30 : (t === 1) ? -0.16 : 0.0;
+    const x = lx - fx * reach * f, z = lz - fz * reach * f, h = _swDrapeY(x, z, T);
+    S.push(x, h + EY * rad * w * 0.7 - (t === 0 ? 0.6 : 0), z, rad * w, EX, EY, sPar);
+  }
+  // over the edge and down: walk the rendered surface along the fall line
+  const D = 3, stationLen = Math.max(5, len / 6);
+  let arc = 0, ph = hLip, next = 0, nSt = 0, ended = false;
+  for (let i = 1; i <= 90 && !ended; i++) {
+    const x = lx + fx * D * i, z = lz + fz * D * i, h = _swDrapeY(x, z, T), dh = ph - h, slope = dh / D;
+    arc += Math.hypot(D, dh);
+    if (i > 2 && dh < -0.5) ended = true;                        // the rock comes back up: end here
+    else if (arc >= 0.35 * len && slope < 0.45) ended = true;    // flattened onto a terrace
+    if (arc >= len) ended = true;
+    if (arc >= next || ended) {
+      const sPar = Math.min(1, arc / len), r = rad * (1 - (1 - tipR) * Math.pow(sPar, 1.3));
+      const nn = 1 / Math.sqrt(1 + slope * slope), off = r * FY * 0.7;   // outward normal (slope, 1)/|.|
+      S.push(x + fx * slope * nn * off, h + nn * off, z + fz * slope * nn * off, r, FX, FY, sPar);
+      next = arc + stationLen; nSt++;
+    }
+    ph = h;
+  }
+  if (nSt < 1) return;
+  { const o = S.length - 7; S.push(S[o] + fx * 0.8, S[o + 1] - 0.8, S[o + 2] + fz * 0.8, rad * 0.02, 1, 1, 1); }   // a closed tip
+  // rings: lateral axis X = along the lip (constant), B = T x X keeps the canopy-frame handedness
+  const n = S.length / 7, SEG = _SW_DRAPE_SEG, lxA = -fz, lzA = fx;
+  const C0 = snowy ? _swDrapeC0I : _swDrapeC0V, C1 = snowy ? _swDrapeC1I : _swDrapeC1V, CT = _swDrapeCT;
+  const base = acc.v;
+  for (let k = 0; k < n; k++) {
+    const o = k * 7, oA = Math.max(0, k - 1) * 7, oB = Math.min(n - 1, k + 1) * 7;
+    let tx = S[oB] - S[oA], ty = S[oB + 1] - S[oA + 1], tz = S[oB + 2] - S[oA + 2];
+    const tl = Math.hypot(tx, ty, tz) || 1; tx /= tl; ty /= tl; tz /= tl;
+    let bx = ty * lzA, by = tz * lxA - tx * lzA, bz = -ty * lxA;
+    const bl = Math.hypot(bx, by, bz) || 1; bx /= bl; by /= bl; bz /= bl;
+    const r = S[o + 3], ex = S[o + 4], ey = S[o + 5], sPar = S[o + 6];
+    CT.copy(C0).lerp(C1, Math.min(1, Math.max(0, sPar * 1.6)));
+    for (let q = 0; q < SEG; q++) {
+      const th = (q / SEG) * 6.283185 + 0.7854, ca = Math.cos(th) * r * ex, sa = Math.sin(th) * r * ey;
+      acc.pos.push(S[o] + lxA * ca + bx * sa, S[o + 1] + by * sa, S[o + 2] + lzA * ca + bz * sa);
+      acc.col.push(CT.r, CT.g, CT.b);
+    }
+  }
+  for (let k = 0; k < n - 1; k++) for (let q = 0; q < SEG; q++) {
+    const q2 = (q + 1) % SEG, r0 = base + k * SEG, r1 = base + (k + 1) * SEG;
+    acc.idx.push(r0 + q, r1 + q, r1 + q2, r0 + q, r1 + q2, r0 + q2);
+  }
+  acc.v += n * SEG; acc.n++;
+}
+let _swIceMat = null, _swVineMat = null;
+// (v46.56c) The first cut read as dark ticks against the snow: a Lambert on a cliff face that is
+// turned away from a fixed noon sun gets almost no diffuse, and ice is mostly TRANSMITTED light
+// anyway - it does not go dark just because it is in shade. The emissive carries that floor.
+// (v46.57) white base + vertexColors: the hue lives in the geometry's ramp now, so the material
+// only carries the lighting floor. `vertexColors` is a program define - both drape materials set it,
+// and neither shares a program with anything else.
+function _swIceMatGet(){ if(!_swIceMat) _swIceMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x8fb4cc, vertexColors: true, side: THREE.DoubleSide }); return _swIceMat; }
+function _swDrapeVineMatGet(){ if(!_swVineMat) _swVineMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x141f0d, vertexColors: true, side: THREE.DoubleSide }); return _swVineMat; }
+// ⭐⭐⭐ (v46.69) THE SURFACE THE STRAND HAS TO FIT IS THE ONE L0 DRAWS, NOT THE FUNCTION.
+// Owner: "they don't fit properly, some are floating, some are shoved in". Every height the placer
+// used came from the analytic field (`_stGroundYGrid`, `_stGroundYCarved`), and the hub's ground is
+// the clipmap: since v46.68 L0 is the 32 u base table, linearly interpolated across triangles split
+// on the anti-diagonal (see _clipGeo). Between lattice points the two surfaces differ by whatever
+// the field does inside a cell - metres, on the striated faces where these hang - and a strand that
+// is exactly on the function is exactly that far off the rock. This reproduces the rendered surface
+// on the CPU (same lattice, same split), so a fit computed here is a fit on screen. Falls back to
+// the function when the table is not up (a chunk built before the bake) or L0 is not on it.
+function _swDrapeY(x, z, T) {
+  if (_HB.ready && _HB.on && _HB.mean && _HB.sp === 32 && _CLIP_M0 === 32 && _HB.minLevel <= 0) {
+    const sp = _HB.sp, dim = _HB.dim[0], D = _HB.mean[0];
+    const fx = (x - _HB.x0) / sp, fz = (z - _HB.z0) / sp, i0 = Math.floor(fx), j0 = Math.floor(fz);
+    if (i0 >= 0 && j0 >= 0 && i0 + 1 < dim && j0 + 1 < dim) {
+      const u = fx - i0, v = fz - j0, o = j0 * dim + i0;
+      const a = D[o], b = D[o + 1], c = D[o + dim], e = D[o + dim + 1];
+      return 0.125 * ((u + v <= 1) ? a + (b - a) * u + (c - a) * v : e + (c - e) * (1 - u) + (b - e) * (1 - v));
+    }
+  }
+  return _stGroundYCarved(x, z, T);
+}
+let _swDrapeErr = 0;   // (v46.56d) one-shot guard for the build-threw warning at the stream site
+function _swBuildDrapes(x0, z0, T) {
+  if (!T) return null;
+  const K = (typeof window !== 'undefined' && window.__drapes) ? window.__drapes : {};
+  if (K.on === false) return null;
+  const step0 = (K.step != null) ? +K.step : 52;
+  const N = Math.max(3, Math.round(_SW_CHUNK / step0)), step = _SW_CHUNK / N;
+  const L = (K.probe != null) ? +K.probe : 34;
+  // (v46.56b) 44 -> 78. Owner: "make them thicker and fit properly". A 44-unit fall over a 34-unit
+  // probe is a 52 degree slope - a hillside, not a cliff - and hanging strands off those put them
+  // everywhere (measured on the exhibition spawn: 369 InstancedMeshes, ~49k instances, which is
+  // roughly DOUBLE the hub's whole draw-call budget). 78 is ~66 degrees: the sheer striated faces
+  // the owner drew on, and nothing else.
+  const dropMin = (K.drop != null) ? +K.drop : 78;
+  const perMax = Math.max(1, (K.per != null) ? (K.per | 0) : 2);   // (v46.57) a folded strand reads for two spikes
+  const lenK = (K.lenK != null) ? +K.lenK : 0.55;
+  const maxLen = (K.maxLen != null) ? +K.maxLen : 190;
+  const thick = (K.thick != null) ? +K.thick : 1;
+  const lipK = (K.lipK != null) ? +K.lipK : 1.3;   // (v46.69) fall per unit that counts as the edge (~52 degrees)
+  // deterministic per chunk - see the note above
+  let _a = (Math.imul(Math.round(x0 / 16) + 12345, 2654435761) ^ Math.imul(Math.round(z0 / 16) + 6789, 40503)) | 0;
+  const rnd = () => { _a = (_a + 0x6D2B79F5) | 0; let t = Math.imul(_a ^ (_a >>> 15), 1 | _a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  const accIce = { pos: [], col: [], idx: [], v: 0, n: 0 }, accVine = { pos: [], col: [], idx: [], v: 0, n: 0 };   // (v46.71) merged per chunk
+  const snowLine = (T.snowLine != null) ? T.snowLine : 0.7;
+  const _hot = (K.hot != null) ? !!K.hot : (T.biome === 'volcanic' || T.biome === 'goldmine');
+  const _snowK = (K.snow != null) ? +K.snow : 0;   // shifts the ice/vine split up or down the band
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const ax = x0 + (i + rnd()) * step, az = z0 + (j + rnd()) * step;
+    // the same exclusions the grass pass uses, in the same order
+    if (T.HUB && typeof _owExcludes === 'function' && _owExcludes(ax, az)) continue;
+    if (T.HUB && _hubCityExcludes(ax, az) && (typeof _hubCityGroundBlocked !== 'function' || _hubCityGroundBlocked(ax, az))) continue;
+    const ay = _swDrapeY(ax, az, T);   // (v46.69) the rendered surface, here and in every sample below
+    if (T.WL != null && ay < T.WL + 6) continue;
+    // FOUR PROBES, and all four are kept - the shape of the set is what says lip / face / peak /
+    // ridge. Index 0..3 = +x, -x, +z, -z, so the opposite of an axis probe is its pair and the
+    // PERPENDICULAR pair is the other axis.
+    const _d0 = ay - _swDrapeY(ax + L, az, T);
+    const _d1 = ay - _swDrapeY(ax - L, az, T);
+    const _d2 = ay - _swDrapeY(ax, az + L, T);
+    const _d3 = ay - _swDrapeY(ax, az - L, T);
+    let bd = _d0, bi = 0;
+    if (_d1 > bd) { bd = _d1; bi = 1; }
+    if (_d2 > bd) { bd = _d2; bi = 2; }
+    if (_d3 > bd) { bd = _d3; bi = 3; }
+    if (bd < dropMin) continue;
+    const bx = (bi === 0) ? 1 : (bi === 1) ? -1 : 0, bz = (bi === 2) ? 1 : (bi === 3) ? -1 : 0;
+    // ⭐⭐ (v46.56c) A DROP IS NOT A LIP. This is what put strands over the entire cliff instead of
+    // along its edges: the exhibition spawn's faces are SHEER and striated, so every sample on one
+    // had a big fall within a probe and every one qualified - 18k icicles blanketing a wall like
+    // dirt, when the owner had drawn about eight fringes along the ridge lines. A point halfway down
+    // a face falls as hard as it RISES: the wall continues up behind your shoulder. A lip does not.
+    const back = -((bi === 0) ? _d1 : (bi === 1) ? _d0 : (bi === 2) ? _d3 : _d2);
+    if (back > bd * ((K.lipFlat != null) ? +K.lipFlat : 0.45)) continue;
+    // ⭐⭐⭐ (v46.56d) ...AND A LIP IS NOT A RIDGE. Owner: "shouldn't be coming off peaks, only
+    // ridges". A PEAK passes everything above - it falls away on every side and nothing rises behind
+    // it - so summits grew a crown of icicles, which is exactly backwards: a fringe needs a LINE to
+    // hang from. The difference is in the perpendicular pair. A ridge runs level ALONG itself and
+    // falls across itself, so the two probes at 90 degrees to the fall are near zero. A peak falls
+    // in all four. Same four samples, no extra cost: reject when the ground gives way sideways too.
+    const _pA = (bi < 2) ? _d2 : _d0, _pB = (bi < 2) ? _d3 : _d1;
+    const along = Math.max(Math.abs(_pA), Math.abs(_pB));
+    if (along > bd * ((K.ridgeK != null) ? +K.ridgeK : 0.55)) continue;
+    // ⚠⚠ (v46.56d) A DEAD `if (up > ...)` SAT HERE AND COST AN HOUR. v46.56c introduced `up` in the probe loop
+    // and tested it here; v46.56d rewrote the probe loop to keep all four samples and replaced `up` with
+    // `back`, but its edit anchor ended at the `bd < dropMin` line - so the TEST below it survived,
+    // referencing an identifier that no longer existed. Every call threw a ReferenceError into the
+    // stream site's catch and the feature built NOTHING, while trees beside it kept building normally.
+    // Third time this file has paid for the same shape (`_beta`, the `_slHitsOut` latch, this): when an
+    // edit replaces a block, grep the identifiers it RETIRED before trusting it. A silent catch cannot
+    // tell you, and `node --check` resolves no scopes.
+    const t = (ay - (T.YMID - T.AMP * 0.5)) / (T.AMP * 1.15);
+    // ⚠ NOT ON A LAVA PEAK. Height alone says "this band is the cap", not "this cap is cold" -
+    // volcanic and goldmine shade their summits hot, and ice hanging off those is a wrongness you
+    // cannot un-see. Everything else caps white or grey and takes it.
+    const snowy = !_hot && t > (snowLine + _snowK);
+    if (!snowy) {
+      // a vine needs something to have grown there. _stPatch is the same ground-cover field the
+      // grass pass gates on, and the zone test keeps vines out of the deep biomes that grow their
+      // own cover (snow, crystal, volcanic) exactly as grass is kept out of them.
+      if (T.HUB && typeof _hzZoneForFoliage === 'function' && _hzZoneForFoliage(ax, az)) continue;
+      if (_stPatch(ax, az) < 0.30) continue;
+    }
+    const acc = snowy ? accIce : accVine;
+    const lim = snowy ? ((K.ice != null) ? +K.ice : 1) : ((K.vine != null) ? +K.vine : 1);
+    if (lim <= 0) continue;
+    // A CURTAIN, NOT A SPIKE. Several strands spread ALONG the lip (perpendicular to the fall) so a
+    // ridge grows a fringe; one per edge sample reads as litter.
+    // (v46.71) the fall line is the GRADIENT of the four probes, not the axis that fell furthest, so
+    // the strand walks straight down the face it hangs on
+    let fdx = _d0 - _d1, fdz = _d2 - _d3; const fdl = Math.hypot(fdx, fdz) || 1; fdx /= fdl; fdz /= fdl;
+    const px = -fdz, pz = fdx;                    // along the lip
+    // A CURTAIN, NOT A SPIKE. Several strands spread ALONG the lip (perpendicular to the fall) so a
+    // ridge grows a fringe; one per edge sample reads as litter.
+    const n = 1 + ((rnd() * perMax) | 0);
+    for (let k = 0; k < n; k++) {
+      const alo = (rnd() - 0.5) * step * 0.9;      // spread along the edge
+      // ⭐⭐⭐ (v46.69) FIND THE EDGE FOR THIS STRAND, ON THE SURFACE IT HANGS FROM. The probe only says
+      // "the ground gives way somewhere within L of here". Each strand walks its own line from the
+      // ridge toward the drop in 3 u steps until the rendered surface falls at more than `lipK` per
+      // unit (~52 degrees) and starts at the last walkable step. The surface is piecewise-linear
+      // over 32 u cells, so the break is a triangle edge and the walk finds it to within a step.
+      const wx = ax + px * alo, wz = az + pz * alo;
+      let hPrev = _swDrapeY(wx, wz, T), lipS = -1, hLip = hPrev;
+      for (let sd = 3; sd <= L + 9; sd += 3) {
+        const h = _swDrapeY(wx + fdx * sd, wz + fdz * sd, T);
+        if (hPrev - h > 3 * lipK) { lipS = sd - 3; break; }
+        hPrev = h; hLip = h;
+      }
+      if (lipS < 0) continue;                       // no break on this line after all
+      const len = Math.min(maxLen, bd * lenK * (0.55 + rnd() * 0.75) * lim);
+      if (len < 10) continue;
+      // a long strand is a fat one (v46.56b); `thick` scales it
+      const rad = len * (snowy ? 0.075 : 0.065) * thick;
+      _swDrapeStrand(acc, wx + fdx * lipS, wz + fdz * lipS, hLip, fdx, fdz, len, rad, snowy, T);
+    }
+  }
+  const out = [];
+  // ⚠ (v46.56d) A DRAW CALL PER CHUNK IS THE REAL COST, NOT THE STRANDS. A chunk that can only muster
+  // a handful is not worth its own draw: drop it and let the chunks with a ridge carry the look.
+  const minPer = (K.minPer != null) ? (K.minPer | 0) : 18;
+  const emit = (acc, mat, kind) => {
+    if (!acc.n || acc.n < minPer) return;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(acc.pos), 3));
+    g.setAttribute('color', new THREE.BufferAttribute(Float32Array.from(acc.col), 3));
+    g.setIndex(acc.idx);
+    g.computeVertexNormals(); g.computeBoundingSphere();
+    const m = new THREE.Mesh(g, mat);
+    m.frustumCulled = true;
+    m.castShadow = false;        // a strand's shadow is not worth a shadow-pass draw on a cliff
+    m.receiveShadow = true;
+    m.userData = { isSandwichTerrain: true, drape: kind, ownGeo: true, strands: acc.n };   // ownGeo: _swRemoveTrees disposes it
+    scene.add(m);
+    out.push(m);
+  };
+  emit(accIce,  _swIceMatGet(),       'ice');
+  emit(accVine, _swDrapeVineMatGet(), 'vine');
+  return out.length ? out : null;
+}
 
 // (v39.49) SHELL ROW JOBS. A chunk shell is 41x41 vertices of _stGroundYCarved / _stCeilYCarved
 // (+ rim pinch + colour): ~10-15 ms of main-thread SDF sampling on a rocky/snow map, two shells a
@@ -51368,9 +51707,39 @@ function _swChunkAllowed(cx, cz, T) {
 
 
 
-const _CLIP_N = 128;          
+// ⭐⭐ (v46.66) `_CLIP_N` IS NOW A REAL CONSTANT. It was hardcoded as 24 `128.0` and 24 `129.0`
+// literals inside the vertex-shader string above, beside `_cn`/`_cr` which already held exactly
+// those values and were each used once. Parameterising them is provably a no-op at N=128: EXPAND the
+// placeholders in both the old and new forms and the strings are byte-identical (the patch asserts
+// it). ⚠ Expand, do not substitute back - the original already contained one `'+_cn+'` and one
+// `'+_cr+'`, so a naive reverse substitution reports a false mismatch. That is what it did first.
+// WHY IT MATTERS: v46.65's pixel measurement showed the NEAREST handoff is the entire bug - 44.5 px
+// at M0 16 against under 3 px for every other - and it sits at `64 * M0` from the pilot. `M0` pushes
+// it out by COARSENING the mesh; `_CLIP_N` pushes it out at the SAME resolution, which is what is
+// actually wanted. Affordable only because v46.60's pyramid made `_clipCellH` an array lookup.
+// ⚠ Terrain VERTEX count scales with N^2 (~4.75*N^2 cells over the six levels), so N 256 is 4x the
+// terrain geometry. Measure the frame before trusting it.
+const _CLIP_N = (function () {
+  // (v46.67) N is a BOOT-TIME choice, not a literal. `?clipN=128|256|512` overrides it for A/B runs
+  // (the shader string and the ring geometry are generated from it once, so it cannot be a live
+  // knob), and mobile / standalone Quest keep the pre-v46.66 128: v46.66 quadrupled the terrain's
+  // vertex count on every platform and never gated it. Same flags the terrain material's AO
+  // default keys on (`_LSS_IS_MOBILE` is declared ~28k lines above this, so it is live here).
+  try { const q = +new URLSearchParams(location.search).get('clipN'); if (q === 128 || q === 256 || q === 512) return q; } catch (_) {}
+  try { if ((typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) || (typeof isStandaloneQuest === 'function' && isStandaloneQuest())) return 128; } catch (_) {}
+  // (v46.68) 512 on desktop. Measured at the same eye: every handoff halves (nearest high-ground p95
+  // 11.9 -> 6.1 px, worst 51 -> 23) for <1 ms of GPU. The rebake hitch that made 512 unshippable in
+  // v46.67 (5-8 s) is gone with the baked world - every texel is a table lookup now.
+  return 512;
+})();
 const _CLIP_LEVELS = 6;       
-let _CLIP_M0 = 16;   
+// ⭐⭐ (v46.64) 16 -> 64, to match the baked field's spacing. MEASURED in px subtended at the
+// distance each handoff happens (which is the only unit that matters here): at M0 16 the NEAREST
+// handoff was 44.5 px of terrain movement 160 m in front of the pilot, while every other handoff was
+// already under 3 px. That one boundary was the whole complaint, and four earlier fixes all went
+// after the four handoffs that were already invisible. M0 64 puts L0 out to 320 m and matches the
+// field, so no mesh is finer than the data it draws. `__clipDetail(16)` restores the old ring live.
+let _CLIP_M0 = 32;   
 const _clipmap = { levels: null, solidGeo: null, ringGeo: null, on: false, raf: 0 };
 
 
@@ -51652,26 +52021,447 @@ window.__clipSeam = function () {
 // already a worker copy of the sandwich terrain math that must stay identical),
 // or slice _clipBakeLevel by row bands across frames instead of by whole level.
 // Either makes the cost invisible; neither is a tuning change.
-const _CLIP_PEAK = { on: 0, k: 3, mix: 0.25, foot: 1.0, minLevel: 1 };
+
+// ═══ (v46.60) THE BAKED HEIGHT PYRAMID — ONE SOURCE, SO THE LEVELS CANNOT DISAGREE ══════════════
+// Owner: "how big is our overworld with all 7 cities and everything in between? can't we just bake
+// that in, so we dont' need not LOD?" ... "a 15mb asset is a tiny bake, and can be cached... we
+// have a loading screen for this purpose".
+//
+// IT DOES NOT REMOVE LOD, and it does not need to. You still cannot draw 31 M vertices, so the
+// clipmap stays. What it removes is the CAUSE of the peaks changing: today every level RE-EVALUATES
+// the procedural function at its own spacing, so the levels disagree by construction - measured at
+// 15.6 m of total height change between L5 and L0 even after v46.59's envelope. With ONE baked
+// source and a MAX-mip chain, every level reads the same data and a summit's height is the same at
+// every level, because a max-mip preserves maxima exactly.
+// It is also CHEAPER than what it replaces: an array lookup instead of a procedural evaluation
+// (five of them, with v46.59's envelope). That is what pays back the rebake hitch.
+//
+// THE EXTENT, measured off OW: cities sit at radii 27,500-36,500 with RADIUS 3,400, so all seven
+// plus everything between fit inside ~40,000 u. The grid below covers +-45,056 u - 90,112 across,
+// 7.0 km in game metres - and anything outside falls back to the analytic path, which is where
+// nothing is.
+//
+// ⚠⚠ THE NUMBER THAT SIZED THIS: `_stGroundY` evaluates at ~0.30 M samples/s (measured in node over
+// 90k and 490k runs, agreeing). So the base grid is the whole budget:
+//     base 32 u -> 2816^2 = 7.9 M evals = ~26 s, 15.9 MB a chain
+//     base 64 u -> 1408^2 = 2.0 M evals = ~6.6 s,  4.0 MB a chain   <- shipped
+// 64 u is L2, so L0 (16) and L1 (32) stay analytic - and they are exactly the two that had nothing
+// to gain, measuring 0.0 m and 0.2 m of summit drop. L2-L5 carry 3.7 / 20.5 / 51.0 / 50.4 m and are
+// the ones this covers. Raising `sp` to 32 is a one-line change if the L1/L2 step ever matters; it
+// costs the 26 s and the 16 MB above.
+//
+// ⚠ TWO CHAINS, MEAN AND MAX, NOT ONE. A pure max-mip keeps every peak but inflates valleys into a
+// blocky upper envelope by L5; a pure mean is what shrinks the peaks in the first place. Keeping
+// both and blending at LOOKUP (`w`) is what makes the blend a live knob rather than a bake
+// parameter - and it is why the build propagates mean and max separately instead of re-filtering
+// its own output, which would compound toward the max a level at a time.
+// ⚠ Int16 at 8x: heights run about -1,000..3,200 u, so x8 fits inside +-32,767 with 0.125 u of
+// precision - finer than anything the clipmap can express.
+// ⚠ THE BUILD MUST YIELD. 2 M evaluations is ~6.6 s; run straight through and the tab is
+// unresponsive and can lose the GL context (this project has history). It runs in row bands with an
+// await between, behind the loading screen, chained off the same promise as the prebake.
+// window.__hbake = { on, sp, N, w, minLevel, ready, ms } - `on: 0` restores the analytic path.
+// ⭐⭐⭐ (v46.61) `bandFloor` - THE LAST TWO HANDOFFS, AND THE REAL MECHANISM OF THE WHOLE BUG.
+// Owner after v46.60: "i still see growing spikes" ... then "it's less but still there".
+// Print what each level CARRIES and it is immediate. `_bl`'s window is [2sp, 4sp] and the octaves
+// (670/335/168/84/42) are spaced exactly one octave apart, so EVERY level switches one whole octave
+// on from 0.23 to 1.00 in a SINGLE step:
+//     L0(16): 1 1 1 1.00 0.23   L1(32): 1 1 1 0.23 0   L2(64): 1 1 0.23 0 0   L3(128): 1 0.23 0 0 0
+// Six levels, five octaves, one octave per handoff. That IS the growth - structural, not a sampling
+// artifact, which is why every sampling-side fix (the v46.59 envelope, the v46.60 pyramid) only ever
+// took a bite out of it.
+// ⚠ The pyramid could not reach the last two: its base is 64 u, Nyquist 128, so the 84 and 42
+// octaves are not in the bake at ANY mip. They live only in the analytic L0/L1 - exactly where you
+// are looking when you fly up to something.
+// ⚠ DEAD END, MEASURED, DO NOT RETRY: widening `_bl` so an octave fades in over several levels cuts
+// shimmer well (swim 17.2 -> 6.3) but makes the GROWTH worse - summit drop 20.5 -> 34.5 -> 37.1 ->
+// 37.5 m as the window widens, because every level then fades its octaves out earlier. Narrowing was
+// already a dead end. The `_bl` window is not the lever in either direction.
+// SO: hold L0 and L1 to the SAME BAND the pyramid's base carries. `bandFloor` is that band in world
+// units; a level finer than it band-limits to it instead of to its own spacing, and then no handoff
+// anywhere adds an octave the previous one lacked.
+// ⚠ THIS IS NOT `minLevel: 0`. That was tried live and reads BLOCKY, because it drops L0/L1 to the
+// 64 u GRID. This keeps the mesh at 16 u and 32 u and only limits the FIELD - smooth, not stepped.
+// ⚠ COLLISION IS UNTOUCHED: it calls _stGroundYCarved with no `sp` at all, so it keeps every octave.
+// Only what is DRAWN is band-limited.
+// ⚠ THE COST IS REAL AND IT IS DETAIL: the finest terrain feature you can see becomes `bandFloor`
+// wide (64 u = 5 m at 12.8 u/m). If that is too smooth the answer is a FINER BAKE BASE, not a
+// smaller floor - 32 u costs ~53 s of bake and ~21 MB, 16 u needs an offline asset.
+// ⚠⚠⚠ (v46.62) MEASURED END-TO-END AND IT DOES NOTHING - SHIPPED OFF. The v46.61 reasoning above is
+// sound and the first measurement agreed with it (L1->L0 fell to 0.02 m), but that probe sampled a
+// ring around a player parked over FLAT LOW GROUND. Re-run on HIGH ground - which is the only place
+// anyone looks at a skyline - and the whole effect vanishes: total level-to-level change 13.5 m with
+// bandFloor off against 13.8 m with it on, and the per-handoff means are within noise of each other
+// (1.22/2.18/4.49/7.75/9.21 vs 0.90/2.34/4.80/7.21/9.39). It is a real detail cost for nothing.
+// ⭐ THE LESSON IS THE SAMPLE SET, NOT THE IDEA: a terrain metric measured where the player happens
+// to be standing is worthless. Sample high ground, low ground and summits separately - this file has
+// now paid for that twice (see the 3100-clamp note under v46.59).
+// `bandFloor` is left in as a knob because the mechanism is real; it just is not the bottleneck.
+// (v46.64) minLevel 0: with the base band-limited there is no finer field left for L0/L1 to carry,
+// so letting them read it too is what finally makes EVERY level render the same surface. `_CLIP_M0`
+// is set to match `sp` below - a mesh finer than the field would only interpolate it.
+// ⭐⭐⭐ (v46.68) THE BAKED WORLD - no clipmap texel evaluates the noise function any more.
+// v46.67's measurement: the whole clipmap costs <1 ms of GPU at N=512, but a full rebake (hub entry,
+// a long teleport) froze the frame for 5-8 s at 512 and 1.4-2.2 s at the shipped 256, because
+// (a) L0/L1 were still analytic - 2 x 513^2 `_stGroundYCarved` calls at ~6.5 us each - and
+// (b) the coarse levels' windows lie mostly OUTSIDE the pyramid box, where `_clipCellH` fell back to
+//     the analytic path with `_CLIP_PEAK`'s 4 extra samples per texel.
+// So the tables now cover every texel a level can ask for while the eye is inside the content box:
+//   BASE   32 u over +-53,248 u (the 7-city extent + L0's half window) - 3328^2, L0 reads it directly
+//   FAR    one table per level spacing >= 64 u, at that spacing, over +-((N/2)*sp + 45,056): the
+//          window plus the content box, capped at +-327,680. Texels inside the base box are skipped
+//          (they are never read: the base answers first).
+// All of it is the RAW field point-sampled on lattices that are multiples of 32 u anchored at 0, so
+// every level's vertices are bit-identical to the finer level's where they coincide (the v46.63
+// shared-vertex property) - across the box edge too.
+// ⚠ THE BAKE RUNS IN WORKERS. ~14 M evaluations is ~90 s single-threaded; a pool of
+// hardwareConcurrency-1 workers does it in ~10 s. The worker's source is the LIVE main-thread
+// functions' `toString()` (see _hbFamily), so it cannot drift from collision - and it is proven on
+// every run: 48 points are evaluated on both sides and must agree to 1e-6 before a single job is
+// sent. Any disagreement, any worker error, no Worker at all -> the old main-thread bake at 64 u.
+// ⚠ IT IS CACHED IN INDEXEDDB, keyed on a hash of the functions' SOURCE + the terrain params +
+// the hub knobs + the level spheres/cylinders + the table geometry. A terrain edit or a knob
+// change invalidates it by construction; an unchanged world loads in ~0.3 s. One entry is kept.
+// ⚠ THE CLIPMAP WAITS FOR IT. gameLoop's enable and the staged swap both hold while `_hbPending()`;
+// before this the launch enabled the rings BEFORE the pyramid existed, so every level was baked
+// analytically (8 s in one frame at N=256), never refreshed, and edge bakes then mixed pyramid
+// texels into analytic atlases as you flew. `_hbKick` starts the bake the moment the hub's T
+// exists (end of initSandwichTerrain) so it overlaps the shader compile.
+// window.__hbake = { on, sp, N, w, minLevel, ready, cached, workers, evals, ms, far, hash }.
+// `on: 0` restores the analytic path. `__hbakeBuild()` forces a rebake (after a live knob change).
+const _HB = { on: 1, sp: 32, N: 3328, w: 0.7, minLevel: 0, bandFloor: 0, shareMip: 1, ready: false, ms: 0, prog: 0,
+              mean: null, max: null, dim: null, x0: 0, z0: 0,
+              far: null, failed: false, building: false, cached: false, hash: '', workers: 0, evals: 0,
+              promise: null, onProg: null, spWanted: 32 };
+try { window.__hbake = _HB; } catch (_) {}
+const _HB_BOX = 53248;        // base half-extent: 45,056 (cities) + 8,192 (L0 half window at N=512, M0=32)
+const _HB_EYE = 45056;        // far tables assume the eye anywhere inside the content box
+const _HB_FAR_MAX = 327680;   // cap on a far table's half-extent (L5 at N=512 wants 307,200)
+function _hbHalf() { return _HB.N * _HB.sp * 0.5; }
+// One field, sampled sparsely: every level reads mip 0 at its own stride (v46.63, shared vertices).
+// `shareMip = 0` used to select a per-level mean/max mip; the chains are no longer built, so `d`
+// clamps to 0 and the knob is inert. `w` is likewise a no-op at d = 0 and kept for the API.
+function _hbSample(wx, wz, lvl) {
+  if (!_HB.ready || !_HB.on || !_HB.mean) return null;
+  const d = (_HB.shareMip !== 0) ? 0 : Math.min(_HB.mean.length - 1, Math.max(0, lvl - _HB.minLevel));
+  const dim = _HB.dim[d], sp = _HB.sp << d;
+  const i = Math.round((wx - _HB.x0) / sp), j = Math.round((wz - _HB.z0) / sp);
+  if (i < 0 || j < 0 || i >= dim || j >= dim) return null;   // outside the base box: try the far tables
+  const o = j * dim + i;
+  const mn = _HB.mean[d][o] * 0.125, mx = _HB.max[d][o] * 0.125;
+  return mn + (mx - mn) * _HB.w;
+}
+// The far table whose spacing IS this level's spacing (exact lattice hits, no interpolation).
+function _hfSample(wx, wz, sp) {
+  const F = _HB.far; if (!_HB.ready || !_HB.on || !F) return null;
+  for (let t = 0; t < F.length; t++) {
+    const f = F[t]; if (f.sp !== sp || !f.data) continue;
+    const i = Math.round((wx - f.x0) / sp), j = Math.round((wz - f.z0) / sp);
+    if (i < 0 || j < 0 || i >= f.N || j >= f.N) return null;
+    return f.data[j * f.N + i] * 0.125;
+  }
+  return null;
+}
+function _hbFarSpec() {
+  const out = [], M0 = (typeof _CLIP_M0 === 'number') ? _CLIP_M0 : 32, NC = _CLIP_N, LV = _CLIP_LEVELS;
+  for (let k = 0; k < LV; k++) {
+    const sp = M0 * Math.pow(2, k); if (sp < 64) continue;
+    const ext = Math.min(_HB_FAR_MAX, (NC / 2) * sp + _HB_EYE);
+    const n1 = Math.ceil(ext / sp), N = 2 * n1 + 1;
+    out.push({ sp: sp, N: N, x0: -n1 * sp, z0: -n1 * sp, data: null });
+  }
+  return out;
+}
+// The functions whose source defines the field - what the worker is built from and what the
+// cache key hashes. Order matters only for readability; they are all hoisted declarations.
+function _hbFamily() {
+  return [sdSphere, sdCylinder, sdfSmin, _stHash2, _stNoise2, _stFbm, _stRidged, _stGroundY, _stCeilY, _stSmooth,
+          _stRouteAt, _stCarveOpenness, _stGroundYCarvedBase, _stCeilYCarvedBase, _stPillarAt, _stGroundYCarved, _stCeilYCarved];
+}
+function _hbGameBits() {
+  let ht = null, oa = 0, of = 0, S = [], C = [];
+  try { ht = game._hubTerra || null; oa = game._clipExtraOctaveAmp || 0; of = game._clipExtraOctaveFreq || 0; S = game.levelSpheres || []; C = game.levelCylinders || []; } catch (_) {}
+  return { ht: ht, oa: oa, of: of, S: S, C: C };
+}
+function _hbFnv(h, str) { for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h; }
+function _hbHash(T, farSpec, sp, N) {
+  const src = _hbFamily().map(f => f.toString()).join('\n');
+  const cfg = 'hb2|' + sp + '|' + N + '|' + _HB_BOX + '|' + JSON.stringify(farSpec.map(f => [f.sp, f.N, f.x0])) + '|' + JSON.stringify(T) + '|' + JSON.stringify(_hbGameBits());
+  const h1 = _hbFnv(_hbFnv(2166136261 >>> 0, src), cfg), h2 = _hbFnv(_hbFnv(0x9747b28c >>> 0, cfg), src);
+  return ('00000000' + h1.toString(16)).slice(-8) + ('00000000' + h2.toString(16)).slice(-8);
+}
+function _hbWorkerSrc(g) {
+  const fam = _hbFamily().map(f => f.toString()).join('\n');
+  const pre = 'const _ST_EMPTY = [];\n' +
+    'const _stRouteScratch = { o: 0, ty: 0 };\n' +
+    'var game = ' + JSON.stringify({ _hubTerra: g.ht, _clipExtraOctaveAmp: g.oa, _clipExtraOctaveFreq: g.of, levelSpheres: g.S, levelCylinders: g.C }) + ';\n';
+  const body = '\nself.onmessage = function (e) {\n' +
+    '  const m = e.data, T = m.T;\n' +
+    '  if (m.check) { const n = m.check.length >> 1, out = new Float64Array(n); for (let i = 0; i < n; i++) out[i] = _stGroundYCarved(m.check[2 * i], m.check[2 * i + 1], T); self.postMessage({ check: out }, [out.buffer]); return; }\n' +
+    '  const N = m.N, sp = m.sp, rows = m.j1 - m.j0, data = new Int16Array(rows * N), Q = 8, LIM = 32767, sk = m.skip || 0;\n' +
+    '  for (let jj = 0; jj < rows; jj++) {\n' +
+    '    const wz = m.z0 + (m.j0 + jj) * sp, row = jj * N, inZ = sk > 0 && wz > -sk && wz < sk;\n' +
+    '    for (let i = 0; i < N; i++) {\n' +
+    '      const wx = m.x0 + i * sp;\n' +
+    '      if (inZ && wx > -sk && wx < sk) continue;\n' +
+    '      const h = Math.round(_stGroundYCarved(wx, wz, T) * Q);\n' +
+    '      data[row + i] = h > LIM ? LIM : (h < -LIM ? -LIM : h);\n' +
+    '    }\n' +
+    '  }\n' +
+    '  self.postMessage({ id: m.id, t: m.t, j0: m.j0, j1: m.j1, data: data }, [data.buffer]);\n' +
+    '};\n';
+  return pre + fam + body;
+}
+function _hbDbOpen() {
+  return new Promise((res, rej) => {
+    if (typeof indexedDB === 'undefined') { rej(new Error('no indexedDB')); return; }
+    let r; try { r = indexedDB.open('lss_hbake', 1); } catch (e) { rej(e); return; }
+    r.onupgradeneeded = () => { try { r.result.createObjectStore('t'); } catch (_) {} };
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error || new Error('open failed'));
+    r.onblocked = () => rej(new Error('blocked'));
+  });
+}
+async function _hbCacheGet(key) {
+  const db = await _hbDbOpen();
+  try {
+    return await new Promise((res, rej) => {
+      const tx = db.transaction('t', 'readonly'), rq = tx.objectStore('t').get(key);
+      rq.onsuccess = () => res(rq.result || null); rq.onerror = () => rej(rq.error);
+    });
+  } finally { try { db.close(); } catch (_) {} }
+}
+async function _hbCachePut(key, val) {
+  try {
+    const db = await _hbDbOpen();
+    try {
+      await new Promise((res, rej) => {
+        const tx = db.transaction('t', 'readwrite'), st = tx.objectStore('t');
+        st.clear(); st.put(val, key);
+        tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); tx.onabort = () => rej(tx.error);
+      });
+    } finally { try { db.close(); } catch (_) {} }
+  } catch (e) { try { console.warn('[hbake] cache write failed:', e); } catch (_) {} }
+}
+// The worker-pool bake. Returns false (and touches nothing) on any failure, so the caller can fall
+// back to the main-thread path.
+async function _hbBakeWorkers(T, farSpec, g) {
+  if (typeof Worker === 'undefined' || typeof Blob === 'undefined' || typeof URL === 'undefined' || !URL.createObjectURL) return false;
+  const nW = Math.max(1, Math.min(8, ((typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4) - 1));
+  let url = null; const ws = [];
+  const kill = () => { for (const w of ws) { try { w.terminate(); } catch (_) {} } ws.length = 0; if (url) { try { URL.revokeObjectURL(url); } catch (_) {} url = null; } };
+  try {
+    url = URL.createObjectURL(new Blob([_hbWorkerSrc(g)], { type: 'text/javascript' }));
+    for (let i = 0; i < nW; i++) ws.push(new Worker(url));
+    // (1) SELF-CHECK: the worker must reproduce the main thread exactly, inside the box and far out.
+    const pts = new Float64Array(96); let sd = 12345;
+    const rnd = () => { sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0; return sd / 4294967296; };
+    for (let i = 0; i < 48; i++) { const R = (i < 32) ? _HB_BOX : _HB_FAR_MAX; pts[2 * i] = (rnd() * 2 - 1) * R; pts[2 * i + 1] = (rnd() * 2 - 1) * R; }
+    const got = await new Promise((res, rej) => {
+      const w = ws[0]; const to = setTimeout(() => rej(new Error('self-check timeout')), 20000);
+      w.onmessage = (e) => { clearTimeout(to); res(e.data && e.data.check); };
+      w.onerror = (e) => { clearTimeout(to); rej((e && e.error) || new Error((e && e.message) || 'worker error')); };
+      w.postMessage({ check: pts, T: T });
+    });
+    if (!got || got.length !== 48) throw new Error('self-check returned nothing');
+    for (let i = 0; i < 48; i++) {
+      const a = _stGroundYCarved(pts[2 * i], pts[2 * i + 1], T), b = got[i];
+      if (!(Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(a)))) {
+        console.warn('[hbake] worker disagrees with the main thread at', pts[2 * i], pts[2 * i + 1], a, b, '-> main-thread bake');
+        kill(); return false;
+      }
+    }
+    // (2) JOBS: row bands of every table, pulled by whichever worker is free.
+    const N = _HB.N, sp = _HB.sp, base = new Int16Array(N * N);
+    const targets = [{ N: N, sp: sp, x0: _HB.x0, z0: _HB.z0, data: base, skip: 0 }];
+    for (const f of farSpec) { f.data = new Int16Array(f.N * f.N); targets.push({ N: f.N, sp: f.sp, x0: f.x0, z0: f.z0, data: f.data, skip: _HB_BOX }); }
+    const jobs = []; let total = 0;
+    for (let t = 0; t < targets.length; t++) {
+      const tg = targets[t], band = 16;
+      for (let j0 = 0; j0 < tg.N; j0 += band) { const j1 = Math.min(tg.N, j0 + band); jobs.push({ id: jobs.length, t: t, j0: j0, j1: j1, N: tg.N, sp: tg.sp, x0: tg.x0, z0: tg.z0, skip: tg.skip }); total += (j1 - j0) * tg.N; }
+    }
+    let done = 0, next = 0, active = 0, failed = null;
+    await new Promise((resolve) => {
+      const pump = (w) => {
+        if (failed || next >= jobs.length) { if (active === 0) resolve(); return; }
+        const job = jobs[next++]; active++;
+        w.onmessage = (e) => {
+          const r = e.data, tg = targets[r.t];
+          tg.data.set(r.data, r.j0 * tg.N);
+          done += (r.j1 - r.j0) * tg.N; _HB.prog = done / total;
+          if (_HB.onProg) { try { _HB.onProg(_HB.prog); } catch (_) {} }
+          active--; pump(w);
+        };
+        w.onerror = (e) => { failed = (e && e.error) || new Error((e && e.message) || 'worker error'); active--; pump(w); };
+        w.postMessage(Object.assign({ T: T }, job));
+      };
+      for (const w of ws) pump(w);
+    });
+    kill();
+    if (failed) { console.warn('[hbake] worker bake failed:', failed); return false; }
+    _HB.mean = [base]; _HB.max = [base]; _HB.dim = [N]; _HB.far = farSpec; _HB.workers = nW; _HB.evals = total;
+    return true;
+  } catch (e) { try { console.warn('[hbake] worker pool failed:', e); } catch (_) {} kill(); return false; }
+}
+// The pre-v46.68 path, kept as the fallback: main thread, row bands with a yield, and at 64 u so it
+// stays inside ~20 s. No far tables - the coarse levels fall back to the analytic path outside the box.
+async function _hbBakeMain(T) {
+  _HB.sp = 64; _HB.N = Math.round(2 * _HB_BOX / _HB.sp);
+  const half = _hbHalf(); _HB.x0 = -half; _HB.z0 = -half;
+  const N = _HB.N, sp = _HB.sp, base = new Int16Array(N * N), Q = 8, LIM = 32767;
+  let yieldAt = performance.now();
+  for (let j = 0; j < N; j++) {
+    const wz = _HB.z0 + j * sp, row = j * N;
+    for (let i = 0; i < N; i++) { const h = Math.round(_stGroundYCarved(_HB.x0 + i * sp, wz, T) * Q); base[row + i] = h > LIM ? LIM : (h < -LIM ? -LIM : h); }
+    const now = performance.now();
+    if (now - yieldAt > 12) { yieldAt = now; _HB.prog = j / N; if (_HB.onProg) { try { _HB.onProg(_HB.prog); } catch (_) {} } await new Promise(r => setTimeout(r, 0)); }
+  }
+  _HB.mean = [base]; _HB.max = [base]; _HB.dim = [N]; _HB.far = null; _HB.workers = 0; _HB.evals = N * N;
+}
+// True while the hub's tables are still being built - gameLoop and the staged swap hold the clipmap
+// enable on it, because enabling now would bake every level analytically and never refresh.
+function _hbPending() {
+  try { return !!(_HB.on && !_HB.ready && !_HB.failed && game && game._clipWantHub && game.sandwichTerrain && game.sandwichTerrain.HUB); } catch (_) { return false; }
+}
+// Called at the end of initSandwichTerrain: decides whether the standing tables still describe this
+// world (same key -> keep them, the cavern -> hub return costs nothing) and otherwise starts the bake
+// immediately so it overlaps the shader compile.
+function _hbKick() {
+  try {
+    const T = game.sandwichTerrain;
+    if (!_HB.on || !T || !T.HUB || !game._clipWantHub || _HB.building) return;
+    const farSpec = _hbFarSpec(), sp = _HB.spWanted, N = Math.round(2 * _HB_BOX / sp);
+    const key = _hbHash(T, farSpec, sp, N);
+    if (_HB.ready && _HB.hash === key) return;
+    _HB.ready = false; _HB.failed = false; _HB.hash = key; _HB.sp = sp; _HB.N = N;
+    _HB.promise = _hbBuild(null, key, farSpec).catch((e) => { try { console.warn('[hbake] build threw:', e); } catch (_) {} _HB.failed = true; });
+  } catch (e) { try { console.warn('[hbake] kick failed:', e); } catch (_) {} _HB.failed = true; }
+}
+// Await the standing bake (starting one if the kick was missed), routing its progress to `onProg`.
+async function _hbAwait(onProg) {
+  if (onProg) _HB.onProg = onProg;
+  if (!_HB.promise && _hbPending()) _hbKick();
+  if (_HB.promise) { try { await _HB.promise; } catch (_) {} }
+  _HB.onProg = null;
+}
+async function _hbBuild(onProg, key, farSpec) {
+  if (onProg) _HB.onProg = onProg;
+  const T = game.sandwichTerrain;
+  if (!_HB.on || !T || !T.HUB) return;
+  if (!farSpec) farSpec = _hbFarSpec();
+  if (!key) { _HB.sp = _HB.spWanted; _HB.N = Math.round(2 * _HB_BOX / _HB.sp); key = _hbHash(T, farSpec, _HB.sp, _HB.N); _HB.hash = key; _HB.ready = false; }
+  _HB.building = true; _HB.cached = false; _HB.failed = false; _HB.prog = 0;
+  const t0 = performance.now();
+  try {
+    const half = _hbHalf(); _HB.x0 = -half; _HB.z0 = -half;
+    let hit = null; try { hit = await _hbCacheGet(key); } catch (e) { try { console.warn('[hbake] cache read failed:', e); } catch (_) {} }
+    const fits = !!(hit && hit.base && hit.base.length === _HB.N * _HB.N && Array.isArray(hit.far) && hit.far.length === farSpec.length && hit.far.every((a, i) => a && a.length === farSpec[i].N * farSpec[i].N));
+    if (fits) {
+      _HB.mean = [hit.base]; _HB.max = [hit.base]; _HB.dim = [_HB.N];
+      for (let i = 0; i < farSpec.length; i++) farSpec[i].data = hit.far[i];
+      _HB.far = farSpec; _HB.cached = true; _HB.evals = 0; _HB.workers = 0;
+    } else {
+      const g = _hbGameBits(), Tp = JSON.parse(JSON.stringify(T));
+      let ok = false;
+      try { ok = await _hbBakeWorkers(Tp, farSpec, g); } catch (e) { try { console.warn('[hbake] worker path threw:', e); } catch (_) {} }
+      if (!ok) await _hbBakeMain(T);
+      else _hbCachePut(key, { v: 1, base: _HB.mean[0], far: farSpec.map(f => f.data) });   // fire and forget
+    }
+    _HB.ms = Math.round(performance.now() - t0); _HB.prog = 1; _HB.ready = true;
+    let bytes = _HB.mean[0].byteLength; if (_HB.far) for (const f of _HB.far) bytes += f.data.byteLength;
+    try {
+      console.log('[hbake] ' + (_HB.cached ? 'cache hit' : ('baked on ' + _HB.workers + ' workers, ' + _HB.evals + ' evals')) + ': base ' + _HB.N + '^2 @' + _HB.sp + 'u' +
+        (_HB.far ? ' + far ' + _HB.far.map(f => f.N + '^2@' + f.sp).join(', ') : '') + ' in ' + _HB.ms + ' ms, ' + (bytes / 1048576).toFixed(1) + ' MB, key ' + key);
+    } catch (_) {}
+    // The rings may already be up on the analytic path (`on` toggled live, a race): refresh them.
+    try {
+      if (typeof _clipmap !== 'undefined' && _clipmap.on && _clipmap.levels) {
+        for (const L of _clipmap.levels) { _clipBakeLevel(L); await new Promise(r => setTimeout(r, 0)); }
+      }
+    } catch (_) {}
+  } catch (e) {
+    try { console.warn('[hbake] build failed:', e); } catch (_) {}
+    _HB.failed = true;
+  } finally { _HB.building = false; _HB.onProg = null; }
+}
+try { window.__hbakeBuild = _hbBuild; } catch (_) {}
+
+// ⭐⭐⭐ (v46.59) THE PEAK ENVELOPE HAS TO BE TAKEN OVER THE FULL-DETAIL FIELD.
+// Owner: "we really need to fix the growing peaks... some peaks grow by like 10m or more as you
+// drive up". MEASURED (tools harness + scratch peakgrow.mjs, 40 real summits, bilinear over each
+// level's own grid exactly as the renderer resolves it): a summit renders **20.5 m** below its true
+// height at L3 and **51.0 m** at L4, and per-summit L3->L0 growth runs 8-34 m. The report was exact.
+//
+// ⚠ THE SUPERSAMPLE ABOVE COULD NOT HAVE FIXED IT, which is why it reads as a near no-op: it took
+// its max over `_stGroundYCarved(.., sp)` - the BAND-LIMITED field - so the peak content was already
+// gone before the max ever saw it. Measured: even at mix 1.0 (pure max) it moved L3 only 26.5 -> 17.3
+// m and left L4 at 48.6. The envelope must come from the RAW field, so the inner samples drop `sp`.
+//
+// ⚠ AND THIS IS A REAL TRADEOFF, NOT A FREE WIN. A max is not a linear filter: it jumps as the grid
+// slides, which is the shimmer v46.09 was spent removing. Measured against `w` (summit drop / swim,
+// swim on ordinary slopes rather than the 3100-clamped summits, which flatter a max-filter):
+//     w      dropL3   dropL4   swimL3  swimL4   valley bias
+//     0.0    20.5 m   51.0 m    17.2    23.1     -3.56 m     (shipped)
+//     0.4    12.7 m   31.6 m    16.9    24.2     -0.39 m     free, but only a 38% cut
+//     0.7     7.2 m   18.7 m    20.6    32.6     +1.46 m     <- shipped default, a 3x cut
+//     1.0     1.5 m    4.9 m    24.6    42.7     +3.61 m     growth gone, shimmer back
+// Note `w` also corrects a bias nobody had measured: the shipped path sits low ground **3.56 m
+// BELOW** true, and the envelope pulls that to roughly zero on the way past.
+// ⚠ Things that were tried and do NOT help, so they are not worth re-testing: an OVERLAPPING
+// footprint (`foot` 1.5-2.0) - swim tracks `w` almost alone, `k` and `foot` barely move it; and
+// widening or narrowing the `_bl` window - at (1.2..2.0)*sp start and (0.5..2.0)*sp rolloff the drop
+// only went 20.5 -> 17.8 m while swim went 17.2 -> 26.9. The band-limit is not the lever.
+// ⚠ k 2 vs 3: 8.1 m against 7.2 m at w 0.7 - nearly the same for HALF the samples, so k is 2.
+// ⚠⚠ COST, MEASURED IN THE GAME, and the old note below this is still the truth. Steady flight is
+// FREE - a 17 km teleport probe read p50 14.0 / p95 22.5 ms with the envelope on against p50 14.7 /
+// p95 21.0 off, i.e. identical - because normal travel only ever runs `_clipBakeEdge`, whose cost is
+// the leading edge and not the atlas. The whole cost lands on a FULL rebake, and there it is real:
+//     peak off            max frame  480 ms
+//     on, minLevel 2      max frame 1429 ms
+//     on, minLevel 3      max frame 1167 ms   <- shipped
+//     on, minLevel 4      max frame  795 ms
+// `minLevel` 3 is the deliberate trade: L3/L4/L5 carry 20.5 / 51.0 / 50.4 m of the drop and get the
+// envelope; L2 measured only 3.7 m and is left alone, which buys back a quarter of the hitch. L0/L1
+// measured 0.0 and 0.2 m and could never have gained anything.
+// ⚠ THE HITCH IS NOT FIXED, IT IS BOUNDED. The old note's remedy still stands and is still the right
+// one: slice `_clipBakeLevel` by ROW BANDS across frames (or move the bake to the terrain worker).
+// Neither is a tuning change, so neither is in this pass. Until then a full rebake - a teleport, a
+// zone-rift traverse, a level enable - costs ~2.4x what it did. Flying does not.
+// `window.__clipPeak = { on, k, w, foot, minLevel }`; **`on: 0` is exactly v46.58**.
+const _CLIP_PEAK = { on: 1, k: 2, w: 0.7, foot: 1.0, minLevel: 3 };
 try { window.__clipPeak = _CLIP_PEAK; } catch (_) {}
 
 function _clipCellH(wx, wz, sp, T, lvl) {
+  // (v46.60) the pyramid, when it is up and this point is inside it. One lookup, and it is the SAME
+  // number every level that asks - which is the whole point. The v46.59 envelope below stays as the
+  // fallback for L0/L1, for anything outside the box, and for `__hbake.on = 0`.
+  if (_HB.ready && _HB.on && lvl >= _HB.minLevel) {
+    const _hb = _hbSample(wx, wz, lvl);
+    if (_hb != null) return _hb;
+    const _hf = _hfSample(wx, wz, sp);      // (v46.68) outside the base box: this level's far table
+    if (_hf != null) return _hf;
+  }
+  // (v46.61) a level finer than the pyramid's band renders that band, not its own - see bandFloor.
+  const _bf = (_HB.on && _HB.ready) ? (+_HB.bandFloor || 0) : 0;
+  if (_bf > sp) return _stGroundYCarved(wx, wz, T, _bf);
   const P = _CLIP_PEAK;
-  const k = (P.on && lvl >= P.minLevel) ? Math.max(1, P.k | 0) : 1;
-  if (k <= 1) return _stGroundYCarved(wx, wz, T, sp);
-  const ext = sp * P.foot;
-  let mx = -Infinity, sum = 0;
+  const base = _stGroundYCarved(wx, wz, T, sp);
+  const w = (P.on && lvl >= P.minLevel) ? +P.w : 0;
+  if (!(w > 0)) return base;
+  // the envelope: the highest thing the FULL-detail field puts inside this cell. `base` already
+  // carries the band-limited shape, so this only ever lifts it toward a summit it is hiding - it
+  // never lowers anything, and on ground with no peak in the cell it is a no-op.
+  const k = Math.max(2, P.k | 0), ext = sp * P.foot;
+  let mx = -Infinity;
   for (let j = 0; j < k; j++) {
     const oz = ((j + 0.5) / k - 0.5) * ext;
     for (let i = 0; i < k; i++) {
       const ox = ((i + 0.5) / k - 0.5) * ext;
-      const h = _stGroundYCarved(wx + ox, wz + oz, T, sp);
+      const h = _stGroundYCarved(wx + ox, wz + oz, T);   // NO sp - raw, or the peak is gone already
       if (h > mx) mx = h;
-      sum += h;
     }
   }
-  const mean = sum / (k * k);
-  return mean + (mx - mean) * P.mix;
+  return (mx > base) ? base + (mx - base) * w : base;
 }
 
 function _clipBakeLevel(L) {
@@ -51886,7 +52676,9 @@ function _clipUpdate(px, pz) {
       const ogx = L.gIx, ogz = L.gIz, first = (ogx === undefined);
       L.cx = ncx; L.cz = ncz;
       L.gIx = Math.round(ncx / L.spacing) - N / 2; L.gIz = Math.round(ncz / L.spacing) - N / 2;
-      if (first || Math.abs(L.gIx - ogx) > N || Math.abs(L.gIz - ogz) > N) _clipBakeLevel(L);   
+      // (v46.68) > N/2, not > N: an edge bake re-samples 2*d*R texels (the d x d corner twice), so past
+      // half a window it costs MORE than the R^2 full bake it was avoiding.
+      if (first || Math.abs(L.gIx - ogx) > N * 0.5 || Math.abs(L.gIz - ogz) > N * 0.5) _clipBakeLevel(L);   
       else _clipBakeEdge(L, ogx, ogz);                                                          
       L.mesh.position.set(ncx, 0, ncz);
     }
@@ -52200,6 +52992,14 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   const _R2 = _VIEW * _VIEW;
   const wantGrass = (game.sandwichGrass !== false) && (((T.biome || 'grassy') === 'grassy') || T.biome === 'mossy');
   const wantTrees = (game.sandwichTrees !== false) && (T.biome === 'mossy');
+  // (v46.56) ⚠ TREES ARE MOSSY-ONLY, AND RIDGE DRAPES MUST NOT BE. `wantTrees` gates on the HUB's
+  // one biome, so hanging the drapes off it built them nowhere - measured on an endless crystalcave
+  // run: 361 chunks, 0 tree meshes, 0 drapes. They share the tree SLOT (one lifecycle, one teardown)
+  // but they need their own WANT, so the slot now opens for either and each builder decides for
+  // itself whether it has anything to plant.
+  const wantDrapes = (game.sandwichDrapes !== false) &&
+                     !(typeof window !== 'undefined' && window.__drapes && window.__drapes.on === false);
+  const wantFoliage = wantTrees || wantDrapes;
   // (v38.61) IDLE EARLY-OUT. In steady state (same chunk cell, nothing left
   // to build, dispose or plant) this rescanned the whole view square — 625
   // cells on the desktop hub, each a fresh 'cx,cz' string + a Map lookup —
@@ -52211,7 +53011,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   const _SC = _swStreamIdle;
   const _clipOn = !!(typeof _clipmap !== 'undefined' && _clipmap && _clipmap.on);
   if (_SC.idle && _SC.T === T && _SC.scx === scx && _SC.scz === scz && _SC.view === _VIEW &&
-      _SC.size === chunks.size && _SC.grass === wantGrass && _SC.trees === wantTrees && _SC.clip === _clipOn) return 0;
+      _SC.size === chunks.size && _SC.grass === wantGrass && _SC.trees === wantFoliage && _SC.clip === _clipOn) return 0;
   let _swDisposed = 0, _swRemoved = 0;
   const todo = [];
   for (let cx = scx - _VIEW; cx <= scx + _VIEW; cx++) {
@@ -52323,18 +53123,29 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       _swRemoveGrass(c.grass); c.grass = null; c.grassBuilt = false; _swRemoved++;   // (v39.94) capped, see the dispose note
     }
     const nearT = _cheb <= _treeView;
-    if (nearT && wantTrees && !c.treesBuilt && tBuilt < (tLim || 1)) {
+    if (nearT && wantFoliage && !c.treesBuilt && tBuilt < (tLim || 1)) {
       const _fpT = game._foliageProf ? performance.now() : 0;
-      c.trees = _swBuildTrees(cx * _SW_CHUNK, cz * _SW_CHUNK, T); c.treesBuilt = true; tBuilt++;
+      // (v46.56) drapes ride the TREE lifecycle rather than growing a third one: same build cap,
+      // same remove cap, same _swDisposeChunk and the same two reset sweeps, with no new call site
+      // to forget. _swRemoveTrees walks whatever array it is handed.
+      const _tm = wantTrees ? _swBuildTrees(cx * _SW_CHUNK, cz * _SW_CHUNK, T) : null;
+      let _dm = null;
+      // ⚠ (v46.56d) THE CATCH REPORTS ONCE. A silent catch around a builder is how this file lost
+      // `_beta` for four builds - the throw unwound, the feature produced nothing, and every
+      // measurement downstream stayed plausible. It still must not take the tree build down with it,
+      // so the catch stays; it just stops being silent.
+      if (wantDrapes) { try { _dm = _swBuildDrapes(cx * _SW_CHUNK, cz * _SW_CHUNK, T); }
+        catch (e) { if (!_swDrapeErr) { _swDrapeErr = 1; try { console.warn('[drapes] build threw:', e); } catch (_) {} } } }
+      c.trees = (_tm || _dm) ? (_tm || []).concat(_dm || []) : null; c.treesBuilt = true; tBuilt++;
       if (game._foliageProf) _foliageProfRec('trees', performance.now() - _fpT);
-    } else if ((!nearT || !wantTrees) && c.treesBuilt && _swRemoved < _remMax) {
+    } else if ((!nearT || !wantFoliage) && c.treesBuilt && _swRemoved < _remMax) {
       _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;   // (v39.94) capped
     }
   }
   // (v38.61) record what this pass concluded (see the idle early-out above)
   _SC.idle = (built === 0 && stepped === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0);   // (v39.49) a stepped job is not idle
   _SC.T = T; _SC.scx = scx; _SC.scz = scz; _SC.view = _VIEW; _SC.size = chunks.size;
-  _SC.grass = wantGrass; _SC.trees = wantTrees; _SC.clip = _clipOn;
+  _SC.grass = wantGrass; _SC.trees = wantFoliage; _SC.clip = _clipOn;
   return built + stepped + gBuilt + tBuilt;   // (v39.49) stepped keeps the warmup drain looping while a job is in flight
 }
 // Debug hook (the __* convention): drive the streamer manually with a chosen
@@ -52442,6 +53253,8 @@ function initSandwichTerrain() {
     // build's baked height rings — stale ghost mountains with no collision
     // that pop in/out as edges incrementally re-bake.
     try { if (typeof _clipmap !== 'undefined') _clipmap.on = false; } catch (_) {}
+    // (v46.68) start (or re-validate) the height tables the moment the hub's T exists - see _hbKick.
+    try { if (typeof _hbKick === 'function') _hbKick(); } catch (_) {}
   } else if (T && T.biome !== 'mossy') {
     // (v34.96) Arena/cavern build: the hub clipmap must be fully OFF — its
     // rings would keep rendering stale hub heights over the arena terrain
@@ -75470,6 +76283,11 @@ async function _prebakeWorldForLaunch() {
   try {
     // ---- A. let gameLoop take one turn (hub clipmap enable) ----
     const _tA = _pbNow();
+    // (v46.68) hold for the height tables, then give gameLoop a frame to enable the rings from them,
+    // BEFORE the streamer runs: chunks built ahead of `_clipmap.on` bake ground shells that
+    // _clipDropChunkGrounds throws away. A cache hit makes this ~0.3 s; a first bake overlaps the
+    // shader compile that ran before this and finishes here.
+    try { if (typeof _hbAwait === 'function') await _hbAwait((p) => { try { _pbSub('baking the overworld  ' + Math.round(p * 100) + '%'); } catch (_) {} }); } catch (_) {}
     await _warmupYield();
     rep.ms.clip = Math.round(_pbNow() - _tA);
 
@@ -76895,6 +77713,8 @@ async function _rrStagedSwap(pending, ph) {
     // ahead of `_clipmap.on` have their ground shell thrown away — the launch
     // prebake's phase A is the same ordering rule).
     t = _pbNow();
+    // (v46.68) the tables first - a cache hit is ~0.3 s, and the rings must not bake analytically.
+    try { if (typeof _hbAwait === 'function') await _hbAwait((p) => { try { showLoadingOverlay(null, 'baking the overworld  ' + Math.round(p * 100) + '%'); } catch (_) {} }); } catch (_) {}
     if (game._clipWantHub && !_clipmap.on && player && player.position) {
       try { rep.clipLevels = await _clipEnableSliced(player.position.x, player.position.z); }
       catch (e) { console.warn('[swap] clipmap enable failed:', e); }
@@ -82906,6 +83726,15 @@ function commitLoadout(key) {
       () => _prebakeWorldForLaunch(),
       (e) => { console.warn('[commitLoadout] shader warmup failed, prebaking anyway:', e); return _prebakeWorldForLaunch(); }
     );
+    // (v46.60) ...and the height pyramid, on the same promise for the same reason the prebake is
+    // here: everything downstream that gates on "ready" already hangs off this one chain, so solo
+    // and multiplayer both inherit it with no new ordering. It never rejects, and it no-ops on any
+    // map that is not the overworld hub.
+    _warmupPromise = _warmupPromise.then(() => {
+      try { return _hbAwait((p) => { try { const _ls = document.getElementById('lss-loading-sub');
+        if (_ls) _ls.textContent = 'baking the overworld  ' + Math.round(p * 100) + '%'; } catch (_) {} }); }
+      catch (e) { try { console.warn('[hbake] build threw:', e); } catch (_) {} }
+    });
   }
   // (v36.22) THE BULK ASSET PRELOAD IS NO LONGER PART OF THE LAUNCH.
   // v36.16 called preloadAllAssets() here and hung it off this same promise via
@@ -119520,7 +120349,10 @@ function gameLoop(timestamp) {
           // owner's overworld flight: `hub:clip` 214 ms in a 292 ms frame, LoAF script 286 ms) the
           // whole bake lands in one frame. The sliced enable the staged swap already uses yields
           // between levels; the synchronous path stays for the loading states that expect it.
-          if (game.state === 'playing' && typeof _clipEnableSliced === 'function') {
+          if (typeof _hbPending === 'function' && _hbPending()) {
+            // (v46.68) the height tables are still baking: enabling now would bake every level
+            // analytically (seconds, in this frame) and never refresh. Next frame, again.
+          } else if (game.state === 'playing' && typeof _clipEnableSliced === 'function') {
             try { const _pr = _clipEnableSliced(_fX, _fZ); if (_pr && _pr.catch) _pr.catch(() => { _clipmap.enabling = false; }); } catch (_) { _clipmap.enabling = false; }
           } else {
             try { _clipEnableNow(_fX, _fZ); } catch (e) { console.warn('[clip] S6 enable failed -> streamer fallback', e); game._clipWantHub = false; }
