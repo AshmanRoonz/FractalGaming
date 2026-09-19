@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.48";
+const LSS_BUILD = "46.51";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -5045,18 +5045,13 @@ function _ssModeLabel() {
     if (!el) return;
     const name = _ssModeName();
     if (!name) { el.classList.remove('on'); el.innerHTML = ''; el._ssmBuilt = false; return; }
-    let sub = '';
-    if (game && game._cyber && game._cyber.armed) {
-      sub = (player && game._cyber.teamA != null && player.team === game._cyber.teamB)
-        ? 'HOLD THE FIELD' : 'TAKE THE FIELD';
-    }
     if (!el._ssmBuilt) {
       el.innerHTML =
         '<div class="lss-tag"><div class="lt-text">' +
           '<span class="ssm-title">LAST SHIP SAILING</span>' +
           '<span class="ssm-sep">:</span>' +
           '<span class="ssm-mode"></span>' +
-        '</div><div class="lt-sub ssm-sub" style="display:none;"></div></div>';
+        '</div></div>';   // (v46.51) no .ssm-sub - see the note above
       el._ssmBuilt = true;
     }
     const _mEl = el.querySelector('.ssm-mode');
@@ -5064,8 +5059,6 @@ function _ssModeLabel() {
       if (typeof _lssDigitizeIn === 'function') _lssDigitizeIn(_mEl, name);
       else _mEl.textContent = name;
     }
-    const _sEl = el.querySelector('.ssm-sub');
-    if (_sEl) { _sEl.textContent = sub; _sEl.style.display = sub ? '' : 'none'; }
     el.classList.add('on');
     try {
       requestAnimationFrame(() => { try { _ssSpreadRails(); } catch (_) {} });
@@ -7236,6 +7229,16 @@ function handleNetEvent(evt, fromPeerId) {
             _bfD.normalize();
             spawnPelletBurst(_bfA, _bfD, Math.min(_bfA.distanceTo(_bfB) + 200, (_w && _w.range) || 900));
           }
+          if (typeof _slayerFireBurst === 'function') {
+            _bfD.subVectors(_bfA, _bfB);
+            _bfD.multiplyScalar(40 / (_bfD.length() || 1));
+            for (let hi = 0; hi < 2; hi++) {
+              _slayerFireBurst(new THREE.Vector3(
+                _bfB.x + _bfD.x + (Math.random() - 0.5) * 70,
+                _bfB.y + _bfD.y + (Math.random() - 0.5) * 70,
+                _bfB.z + _bfD.z + (Math.random() - 0.5) * 70), _col, hi);
+            }
+          }
         } else {
           spawnTracer(_bfA, _bfB, _col, 0.8);
         }
@@ -7714,6 +7717,18 @@ function handleNetEvent(evt, fromPeerId) {
         typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
         player.position && player.position.distanceToSquared(origin) < 1800 * 1800) {
       try { playSpatialSound('fire_spread', origin, { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 }); } catch (_) {}
+    }
+    return;
+  }
+  if (evt.type === 'pellet_hits' && evt.p && evt.p.length >= 3 && typeof _slayerFireBurst === 'function') {
+    const _phCol = (typeof evt.c === 'number') ? evt.c
+      : ((typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66);
+    const _phN = Math.min(16, Math.floor(evt.p.length / 3));
+    for (let k = 0; k < _phN; k++) {
+      try {
+        _slayerFireBurst(new THREE.Vector3(+evt.p[k * 3] || 0, +evt.p[k * 3 + 1] || 0, +evt.p[k * 3 + 2] || 0),
+                         _phCol, k);
+      } catch (_) {}
     }
     return;
   }
@@ -27126,6 +27141,7 @@ function _hubCityFrame(dt) {
   if (hc.lights) {
     const hs = hc.lights.children;
     for (let i = 0; i < hs.length; i++) hs[i].rotation.y = t * (0.14 + i * 0.07) + i * 2.09;
+    try { _cityBeamPhase(hc.lights); } catch (_) {}   // (v46.50) the sweep dims when it is not pointed your way
   }
   if (hc.twrMat && hc.twrMat.userData.uHcSunV && typeof camera !== 'undefined') {
     _hcSunVTmp.set(0.267, 0.802, 0.401).transformDirection(camera.matrixWorldInverse);
@@ -29621,7 +29637,9 @@ function _owFrame(dt) {
     for (let i = 0; i < C.length; i++) {
       const b = C[i].built; if (!b) continue;
       if (b.twrMat && b.twrMat.userData.uHcSunV) b.twrMat.userData.uHcSunV.value.copy(OW._sunV);
-      if (b.lights) { const hs = b.lights.children; for (let k = 0; k < hs.length; k++) hs[k].rotation.y = t * (0.14 + k * 0.07) + k * 2.09; }
+      if (b.lights) { const hs = b.lights.children; for (let k = 0; k < hs.length; k++) hs[k].rotation.y = t * (0.14 + k * 0.07) + k * 2.09;
+        try { _cityBeamPhase(b.lights); } catch (_) {}   // (v46.50) same sweep, sector cities
+      }
     }
   }
   if (nearest >= 0) {
@@ -36691,6 +36709,19 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
         const _travel = Math.min(dist + 200, weapon.range);
         spawnPelletBurst(fireOrigin, spreadDir, _travel);
       }
+      if (typeof _slayerFireBurst === 'function' && target && target.position &&
+          typeof camera !== 'undefined' && camera &&
+          target.position.distanceToSquared(camera.position) < _mfR * _mfR) {
+        const _thR = (target.chassis && target.chassis.hullLength) ? target.chassis.hullLength * 0.5 : 40;
+        const _thF = _botSpreadDir.subVectors(fireOrigin, target.position);
+        _thF.multiplyScalar(_thR / (_thF.length() || 1));
+        for (let hi = 0; hi < 2; hi++) {
+          _slayerFireBurst(new THREE.Vector3(
+            target.position.x + _thF.x + (Math.random() - 0.5) * _thR,
+            target.position.y + _thF.y + (Math.random() - 0.5) * _thR,
+            target.position.z + _thF.z + (Math.random() - 0.5) * _thR), flashColor, hi);
+        }
+      }
     }
 
     if ((typeof window === 'undefined' || window.__enemyFireSfx !== false) &&
@@ -38250,6 +38281,40 @@ const dynamicLights = {
   }
 })();
 
+const _BEAM_PHASE = { on: true, side: 0.28, back: 0.50, fN: 2.2, bN: 2.5, citySide: 0.55 };
+if (typeof window !== 'undefined') window.__beamPhase = _BEAM_PHASE;
+const _bpTmp = new THREE.Vector3();
+const _bpAx  = new THREE.Vector3();
+const _bpAt  = new THREE.Vector3();
+function _beamPhase(axis, at, along, sideK) {
+  const K = (typeof window !== 'undefined' && window.__beamPhase) ? window.__beamPhase : _BEAM_PHASE;
+  if (K.on === false || typeof camera === 'undefined' || !camera) return 1;
+  const side = (sideK != null) ? sideK : ((K.side != null) ? K.side : 0.28);
+  _bpTmp.subVectors(camera.position, at);
+  if (along) _bpTmp.addScaledVector(axis, -along);
+  const len = _bpTmp.length();
+  if (len < 1e-4) return side;
+  const c = (_bpTmp.x * axis.x + _bpTmp.y * axis.y + _bpTmp.z * axis.z) / len;
+  if (c >= 0) return side + (1 - side) * Math.pow(c, (K.fN != null) ? K.fN : 2.2);
+  const back = Math.max(side, (K.back != null) ? K.back : 0.50);
+  return side + (back - side) * Math.pow(-c, (K.bN != null) ? K.bN : 2.5);
+}
+function _cityBeamPhase(lightsGroup) {
+  if (!lightsGroup || typeof _beamPhase !== 'function') return;
+  const K = (typeof window !== 'undefined' && window.__beamPhase) ? window.__beamPhase : _BEAM_PHASE;
+  const sk = (K.citySide != null) ? K.citySide : 0.55;
+  const hs = lightsGroup.children;
+  for (let i = 0; i < hs.length; i++) {
+    const c = hs[i] && hs[i].children && hs[i].children[0];
+    if (!c || !c.material) continue;
+    if (c.userData._opBase == null) c.userData._opBase = c.material.opacity;
+    const e = c.matrixWorld.elements;
+    _bpAx.set(e[4], e[5], e[6]).normalize();
+    _bpAt.set(e[12], e[13], e[14]);
+    c.material.opacity = c.userData._opBase * _beamPhase(_bpAx, _bpAt, 1800, sk);
+  }
+}
+
 const _SHIPL = {
   engine: null, head: null, traffic: [],
   TRAF_N: ((typeof isStandaloneQuest === 'function' && isStandaloneQuest()) ||
@@ -38648,6 +38713,7 @@ function _shipLightsFrame() {
       if (!(e.isCarrier && typeof _carrier !== 'undefined' && _carrier.dir) && !(e.isOwCarrier && e.dir)) e.mesh.getWorldDirection(S._d);   // (v38.81)
       m.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
       m.scale.set(cR, cR, cLen);
+      m.material.opacity = o * _beamPhase(S._d, m.position, cLen * 0.25);
     }
   }
   const mP = S.coneP;
@@ -38669,6 +38735,7 @@ function _shipLightsFrame() {
       if (_fpBeam) mP.position.copy(camera.position).addScaledVector(S._d, (_HB && _HB.fpPush != null) ? _HB.fpPush : 260);
       mP.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
       mP.scale.set(cR, cR, cLen);
+      mP.material.opacity *= _beamPhase(S._d, mP.position, cLen * 0.25);
     }
   }
 }
@@ -39928,13 +39995,15 @@ function applyExplosionPush(pos, force, radius) {
 }
 if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPush;
 
-function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing that exploded, for the water
+function spawnExplosion(pos, size, fireRamp, vel, opts) {   // (v44.22) vel: the thing that exploded, for the water
   size = size || 20;
-  if (game._hubWater && pos) { try { _swBlast(pos.x, pos.y, pos.z, size, vel); } catch (_) {} }
+  const _mini = !!(opts && opts.mini);
+  if (game._hubWater && pos && !_mini) { try { _swBlast(pos.x, pos.y, pos.z, size, vel); } catch (_) {} }
   const _explFrameKey = (typeof game !== 'undefined' && game) ? game.time : 0;
   if (_explFrameKey !== spawnExplosion._frameKey) { spawnExplosion._frameKey = _explFrameKey; spawnExplosion._count = 0; }
-  const _explOverBudget = (++spawnExplosion._count) > 4;
+  const _explOverBudget = (!_mini) && ((++spawnExplosion._count) > 4);
   if ((typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) || _explOverBudget) {
+    if (_mini) return;
     if (typeof playSpatialSound === 'function') {
       const _far = Math.max(300, size * 18);
       try { playSpatialSound('explosion', pos.clone(), { refDistance: Math.max(180, size * 10), maxDistance: _far, rolloffFactor: 0.85 }); } catch (_) {}
@@ -39961,10 +40030,10 @@ function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing
     });
     return;
   }
-  if (typeof applyExplosionPush === 'function') {
+  if (!_mini && typeof applyExplosionPush === 'function') {
     applyExplosionPush(pos, 40 + size * 2.5, 200 + size * 12);
   }
-  if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(pos, size, fireRamp);
+  if (typeof _spawnExplosionFireCloud === 'function' && !(opts && opts.cloud === false)) _spawnExplosionFireCloud(pos, size, fireRamp);
   if (typeof _spawnExplosionLight === 'function') _spawnExplosionLight(pos, size);
 
   if (typeof spawnFXBurst === 'function' && size >= 8 && getVRPerfTier() < 2) {
@@ -40014,7 +40083,7 @@ function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing
     v8SpawnSparks(pos, sparkCount, Math.max(0.8, size * 0.07), Math.max(140, size * 14), 0xff8822, 0xfff8a0);
   }
 
-  if (typeof playSpatialSound === 'function') {
+  if (!_mini && typeof playSpatialSound === 'function') {
     const _far = Math.max(300, size * 18);
     try { playSpatialSound('explosion', pos.clone(), { refDistance: Math.max(180, size * 10), maxDistance: _far, rolloffFactor: 0.85 }); } catch (_) {}
   }
@@ -40024,7 +40093,7 @@ function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing
   }
 
   let _shockFalloff = 0;
-  if (player && player.position) {
+  if (!_mini && player && player.position) {
     const dx = pos.x - player.position.x, dy = pos.y - player.position.y, dz = pos.z - player.position.z;
     const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
     const reach = Math.max(400, size * 25);
@@ -40036,7 +40105,7 @@ function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing
     }
   }
 
-  if (typeof postFX !== 'undefined' && postFX.compositeMat) {
+  if (!_mini && typeof postFX !== 'undefined' && postFX.compositeMat) {
     const intensity = Math.min(0.9, (size * 0.012 + 0.25) * (0.4 + 0.6 * _shockFalloff));
     if (intensity > 0.05) {
       if (!postFX.shockwave) postFX.shockwave = {};
@@ -55628,12 +55697,39 @@ function fireProjectile(origin, dir, w) {
   }
 }
 
+let _slHitsOut = null;
+const _SL_BLAST = { on: true, count: 8, cloud: 3, per: 2, size: 3.4, jitter: 14 };
+const _SL_MINI    = { mini: true };
+const _SL_MINI_NC = { mini: true, cloud: false };
+if (typeof window !== 'undefined') window.__slayerBlast = _SL_BLAST;
+function _slayerPelletBlast(pt, i) {
+  const K = (typeof window !== 'undefined' && window.__slayerBlast) ? window.__slayerBlast : _SL_BLAST;
+  if (!pt || K.on === false || typeof spawnExplosion !== 'function') return;
+  const n  = (K.count != null) ? K.count : 8;
+  const sz = (K.size  != null) ? K.size  : 3.4;
+  if (i >= n || sz <= 0) return;
+  const per = Math.max(1, (K.per != null) ? K.per : 2);
+  const jit = (K.jitter != null) ? K.jitter : 14;
+  const cloudN = (K.cloud != null) ? K.cloud : 3;
+  for (let b = 0; b < per; b++) {
+    const j = (b === 0) ? 0 : jit;
+    const at = new THREE.Vector3(
+      pt.x + (Math.random() - 0.5) * j,
+      pt.y + (Math.random() - 0.5) * j,
+      pt.z + (Math.random() - 0.5) * j);
+    try {
+      spawnExplosion(at, sz * (0.7 + Math.random() * 0.7), null, null,
+                     (b === 0 && i < cloudN) ? _SL_MINI : _SL_MINI_NC);
+    } catch (_) {}
+  }
+}
 function _slayerFireBurst(pt, col, i) {
+  if (_slHitsOut && pt) _slHitsOut.push(Math.round(pt.x), Math.round(pt.y), Math.round(pt.z));
   const K = (typeof window !== 'undefined' && window.__slayerFire) ? window.__slayerFire : null;
   const n = (K && K.count != null) ? K.count : 3;
   const sz = (K && K.size != null) ? K.size : 13;
-  if (sz <= 0 || i >= n) return;
-  try { _spawnClassFireBurst(pt, col, sz); } catch (_) {}
+  if (sz > 0 && i < n) { try { _spawnClassFireBurst(pt, col, sz); } catch (_) {} }
+  _slayerPelletBlast(pt, i);
 }
 function fireSpread(origin, dir, w) {
   const _adsZ = Math.max(0, Math.min(1, (typeof game !== 'undefined' && game._adsZoom) || 0));
@@ -55644,6 +55740,9 @@ function fireSpread(origin, dir, w) {
   const _coneMul  = 1 - _adsZ * (1 - (_adsD ? _SK.cone2 : _SK.cone1));
   const _rangeMul = 1 + _adsZ * ((_adsD ? _SK.range2 : _SK.range1) - 1);
   const _slRange  = w.range * _rangeMul;
+  const _slSend = !!(net.active && net.sendEvent);
+  _slHitsOut = _slSend ? [] : null;
+  try {
   for (let i = 0; i < w.pellets; i++) {
     
     
@@ -55760,6 +55859,19 @@ function fireSpread(origin, dir, w) {
         spawnImpactSparks(hitPt, 2);
         _slayerFireBurst(hitPt, _slCol, i);      // (v38.55) leviathans and destructibles too
       }
+    }
+  }
+  } finally {
+    const _hits = _slHitsOut;
+    _slHitsOut = null;
+    if (_slSend && _hits && _hits.length) {
+      try {
+        net.sendEvent({
+          type: 'pellet_hits',
+          c: (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0x44ff66,
+          p: _hits,
+        });
+      } catch (_) {}
     }
   }
 }

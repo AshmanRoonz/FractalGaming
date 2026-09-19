@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.48";
+const LSS_BUILD = "46.51";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -14159,11 +14159,13 @@ function _ssModeLabel() {
     if (!el) return;
     const name = _ssModeName();
     if (!name) { el.classList.remove('on'); el.innerHTML = ''; el._ssmBuilt = false; return; }
-    let sub = '';
-    if (game && game._cyber && game._cyber.armed) {
-      sub = (player && game._cyber.teamA != null && player.team === game._cyber.teamB)
-        ? 'HOLD THE FIELD' : 'TAKE THE FIELD';
-    }
+    // (v46.51) THE SUB-LINE IS GONE. Owner: "'take the field' text overlay from the lobby/ship
+    // selection screen, it needs to go (be deleted)". It was the masthead's second line, written
+    // only in CYBERPUNK CITY and only ever carrying one of two strings - TAKE THE FIELD for the
+    // attacking side, HOLD THE FIELD for the defending one. Both are removed, because they are two
+    // faces of the SAME element: deleting the attacker's alone would have left defenders with a
+    // subtitle and attackers without one on the same screen. The role is still announced where it
+    // belongs, on the match-start banner (_cyberBegin's Overlays.banner), which is untouched.
     // (v45.36) "LAST SHIP SAILING: ELIMINATION" - the picker's masthead, wearing the v44.38 callout
     // tag. BUILT ONCE and then only the parts that change are written: re-setting innerHTML every
     // call would restart .lss-tag's jitter/glitch animations on every repaint (this function runs
@@ -14174,7 +14176,7 @@ function _ssModeLabel() {
           '<span class="ssm-title">LAST SHIP SAILING</span>' +
           '<span class="ssm-sep">:</span>' +
           '<span class="ssm-mode"></span>' +
-        '</div><div class="lt-sub ssm-sub" style="display:none;"></div></div>';
+        '</div></div>';   // (v46.51) no .ssm-sub - see the note above
       el._ssmBuilt = true;
     }
     // Only the MODE digitises - the title half is constant, so typing it in again on every mode
@@ -14185,8 +14187,6 @@ function _ssModeLabel() {
       if (typeof _lssDigitizeIn === 'function') _lssDigitizeIn(_mEl, name);
       else _mEl.textContent = name;
     }
-    const _sEl = el.querySelector('.ssm-sub');
-    if (_sEl) { _sEl.textContent = sub; _sEl.style.display = sub ? '' : 'none'; }
     el.classList.add('on');
     // (v45.36) CYBERPUNK CITY is half again as wide as ELIMINATION, so the fit has to be re-run when
     // the mode changes - _ssSpreadRails is otherwise only reached on resize and from the dock's
@@ -17559,6 +17559,20 @@ function handleNetEvent(evt, fromPeerId) {
             _bfD.normalize();
             spawnPelletBurst(_bfA, _bfD, Math.min(_bfA.distanceTo(_bfB) + 200, (_w && _w.range) || 900));
           }
+          // (v46.49) and the impact scatter at the far end, mirroring what the bot authority draws
+          // in fireAtShip's spread branch. `_bfB` is the target the authority sent ; the pops sit on
+          // the face of it turned toward the muzzle. No hull size crosses the wire, so the spread is
+          // a flat 40 u - a typical half hull, and an impact scatter does not need to be exact.
+          if (typeof _slayerFireBurst === 'function') {
+            _bfD.subVectors(_bfA, _bfB);
+            _bfD.multiplyScalar(40 / (_bfD.length() || 1));
+            for (let hi = 0; hi < 2; hi++) {
+              _slayerFireBurst(new THREE.Vector3(
+                _bfB.x + _bfD.x + (Math.random() - 0.5) * 70,
+                _bfB.y + _bfD.y + (Math.random() - 0.5) * 70,
+                _bfB.z + _bfD.z + (Math.random() - 0.5) * 70), _col, hi);
+            }
+          }
         } else {
           spawnTracer(_bfA, _bfB, _col, 0.8);
         }
@@ -18252,6 +18266,24 @@ function handleNetEvent(evt, fromPeerId) {
         typeof playSpatialSound === 'function' && typeof player !== 'undefined' && player &&
         player.position && player.position.distanceToSquared(origin) < 1800 * 1800) {
       try { playSpatialSound('fire_spread', origin, { refDistance: 130, maxDistance: 2400, rolloffFactor: 1.15 }); } catch (_) {}
+    }
+    return;
+  }
+  // (v46.49) WHERE A PEER'S PELLETS LANDED. One event per trigger pull carrying a flat [x,y,z,...]
+  // of the impact points fireSpread resolved on the shooter's machine, so this side draws the same
+  // green surface fire and the same scatter of tiny thermite pops it does - the impact half of the
+  // shotgun that peers never saw at all before, since 'pellet_burst' above only carries the shot.
+  // The index is the pellet's, which is what gives the first few impacts the volumetric fire and
+  // leaves the rest as cheap pops - the identical budget the shooter spent.
+  if (evt.type === 'pellet_hits' && evt.p && evt.p.length >= 3 && typeof _slayerFireBurst === 'function') {
+    const _phCol = (typeof evt.c === 'number') ? evt.c
+      : ((typeof LSS !== 'undefined' && LSS.CLASS_COLORS) ? LSS.CLASS_COLORS.SLAYER : 0x44ff66);
+    const _phN = Math.min(16, Math.floor(evt.p.length / 3));
+    for (let k = 0; k < _phN; k++) {
+      try {
+        _slayerFireBurst(new THREE.Vector3(+evt.p[k * 3] || 0, +evt.p[k * 3 + 1] || 0, +evt.p[k * 3 + 2] || 0),
+                         _phCol, k);
+      } catch (_) {}
     }
     return;
   }
@@ -46930,6 +46962,7 @@ function _hubCityFrame(dt) {
   if (hc.lights) {
     const hs = hc.lights.children;
     for (let i = 0; i < hs.length; i++) hs[i].rotation.y = t * (0.14 + i * 0.07) + i * 2.09;
+    try { _cityBeamPhase(hc.lights); } catch (_) {}   // (v46.50) the sweep dims when it is not pointed your way
   }
   if (hc.twrMat && hc.twrMat.userData.uHcSunV && typeof camera !== 'undefined') {
     _hcSunVTmp.set(0.267, 0.802, 0.401).transformDirection(camera.matrixWorldInverse);
@@ -50028,7 +50061,9 @@ function _owFrame(dt) {
     for (let i = 0; i < C.length; i++) {
       const b = C[i].built; if (!b) continue;
       if (b.twrMat && b.twrMat.userData.uHcSunV) b.twrMat.userData.uHcSunV.value.copy(OW._sunV);
-      if (b.lights) { const hs = b.lights.children; for (let k = 0; k < hs.length; k++) hs[k].rotation.y = t * (0.14 + k * 0.07) + k * 2.09; }
+      if (b.lights) { const hs = b.lights.children; for (let k = 0; k < hs.length; k++) hs[k].rotation.y = t * (0.14 + k * 0.07) + k * 2.09;
+        try { _cityBeamPhase(b.lights); } catch (_) {}   // (v46.50) same sweep, sector cities
+      }
     }
   }
   if (nearest >= 0) {
@@ -60414,6 +60449,25 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
         const _travel = Math.min(dist + 200, weapon.range);
         spawnPelletBurst(fireOrigin, spreadDir, _travel);
       }
+      // ⭐ (v46.49) ...AND THE IMPACT SCATTER, so a SLAYER bot's shotgun lands the same way the
+      // human's does (v45.42's rule: "all usage of weapons should behave the same as the humans").
+      // A bot's spread has no per-pellet raycast - the accuracy roll above already decided this
+      // volley connects - so the pops go on the target's HULL FACE toward this muzzle, which is
+      // where those pellets would have stopped. Gated on `_mfR`, the same camera-distance test the
+      // muzzle flash above already uses: a hull you cannot make out does not need impact fire.
+      if (typeof _slayerFireBurst === 'function' && target && target.position &&
+          typeof camera !== 'undefined' && camera &&
+          target.position.distanceToSquared(camera.position) < _mfR * _mfR) {
+        const _thR = (target.chassis && target.chassis.hullLength) ? target.chassis.hullLength * 0.5 : 40;
+        const _thF = _botSpreadDir.subVectors(fireOrigin, target.position);
+        _thF.multiplyScalar(_thR / (_thF.length() || 1));
+        for (let hi = 0; hi < 2; hi++) {
+          _slayerFireBurst(new THREE.Vector3(
+            target.position.x + _thF.x + (Math.random() - 0.5) * _thR,
+            target.position.y + _thF.y + (Math.random() - 0.5) * _thR,
+            target.position.z + _thF.z + (Math.random() - 0.5) * _thR), flashColor, hi);
+        }
+      }
     }
 
     // (v36.71) Incoming-fire audio: enemy shots were completely SILENT — the
@@ -62619,6 +62673,87 @@ const dynamicLights = {
   }
 })();
 
+// (v46.50) A LIGHT SHAFT IS DIMMER SEEN FROM THE SIDE. Owner: "when you look sideways through
+// a ship headlight or city light, it brightens the background through the light even though the
+// light isn't shining on that part you're looking at through the beam... i don't think light works
+// that way."
+// They are right, and the missing term is the PHASE FUNCTION.
+// What you see when you look at a beam is IN-SCATTERING: the air inside the cone bounces a little
+// of the lamp's light toward your eye. How much depends on the angle between the direction the
+// light is TRAVELLING and the direction from that air to your eye - and for air and haze the
+// scattering is strongly FORWARD-peaked (Mie ; Henyey-Greenstein g ~ 0.6-0.9). Head-on into an
+// oncoming lamp you catch the whole lobe. Across the beam at 90 degrees you catch a small fraction
+// of it. From BEHIND the lamp you catch the weaker back-scatter lobe - weak but real, and it is
+// exactly why your own headlights haze back at you in fog while an oncoming car's read as solid
+// shafts.
+// Every fake-volumetric shaft in this file is an unshaded additive shell with NO angle term at all,
+// so a beam crossing your view laid down precisely as much light as one aimed at your face - and
+// over a bright background (a night city) a constant additive veil reads as the background itself
+// lighting up. That is the artifact, and this is the term that was missing.
+// ! ANCHORED AT HEAD-ON = 1.0, NOT AT SIDE-ON. Every opacity in this file was calibrated by eye
+// against the SIDE-ON case (the headlight cone's 0.16/0.12 pair was tuned live in a volcanic
+// reach), so anchoring the other way would have multiplied the whole feature UP instead of
+// correcting it. Head-on keeps its shipped value ; side-on falls to `side` ; behind the lamp lands
+// at `back`.
+// ! IT IS A VIEW TERM, SO IT MULTIPLIES material.opacity AFTER the per-slot smoothing and is never
+// folded into the smoothed state - swinging the camera has to change it THIS frame, not over the
+// 250 ms the intensity fade takes.
+// ! NOT the real Henyey-Greenstein. At g 0.55 the true HG puts side-on at 6% and back-scatter at
+// 2.4% of head-on, which does not just correct these shafts, it deletes them - and HG is a poor fit
+// at 180 degrees anyway (real fog back-scatters far more than it predicts). Two power lobes rising
+// out of a floor give the same shape with both ends dialable, which is what a hand-tuned effect
+// needs. window.__beamPhase = { on, side, back, fN, bN, citySide } tunes it live ; `on:false` is
+// exactly v46.49.
+const _BEAM_PHASE = { on: true, side: 0.28, back: 0.50, fN: 2.2, bN: 2.5, citySide: 0.55 };
+if (typeof window !== 'undefined') window.__beamPhase = _BEAM_PHASE;
+const _bpTmp = new THREE.Vector3();
+const _bpAx  = new THREE.Vector3();
+const _bpAt  = new THREE.Vector3();
+// axis: unit direction the light TRAVELS. at: a point on the shaft (the apex is what callers have).
+// along: how far down the shaft to take the sample - a cone 1150 units long subtends a big range of
+// angles, and the sample belongs where the shaft is actually BRIGHT, which the beam gradient puts
+// near the apex. sideK: floor override for a shaft whose whole job is to be seen side-on.
+function _beamPhase(axis, at, along, sideK) {
+  const K = (typeof window !== 'undefined' && window.__beamPhase) ? window.__beamPhase : _BEAM_PHASE;
+  if (K.on === false || typeof camera === 'undefined' || !camera) return 1;
+  const side = (sideK != null) ? sideK : ((K.side != null) ? K.side : 0.28);
+  _bpTmp.subVectors(camera.position, at);
+  if (along) _bpTmp.addScaledVector(axis, -along);
+  const len = _bpTmp.length();
+  if (len < 1e-4) return side;
+  const c = (_bpTmp.x * axis.x + _bpTmp.y * axis.y + _bpTmp.z * axis.z) / len;
+  if (c >= 0) return side + (1 - side) * Math.pow(c, (K.fN != null) ? K.fN : 2.2);
+  // `side` is a FLOOR, so the back lobe may only ever rise out of it. Without the max, a caller
+  // whose sideK override sits above `back` (the city sweep's 0.55 vs 0.50) turns the back lobe into
+  // a DIP - measured 0.539 on a searchlight pointing away, under its own floor.
+  const back = Math.max(side, (K.back != null) ? K.back : 0.50);
+  return side + (back - side) * Math.pow(-c, (K.bN != null) ? K.bN : 2.5);
+}
+// (v46.50) The city's sweeping searchlights - same construction, same missing term. They carry
+// their OWN floor (`citySide`, 0.55) because unlike a headlight their entire job is to be read
+// side-on from a distance as a landmark: at the headlight's 0.28 a 0.055 cone lands at 0.015 and
+// stops existing. The vertical beacon COLUMN on the hero tower is left alone for the same reason
+// taken to its limit - its axis is straight up, so every view of it from the city is 90 degrees and
+// a phase term could only ever subtract from it.
+// The world axis is the cone's local +Y (ConeGeometry baked apex-at-origin, opening +Y) read
+// straight out of matrixWorld, and the apex is its world position. Using last frame's matrix is
+// deliberate: the sweep turns at ~0.2 rad/s, so one frame of lag is not expressible.
+function _cityBeamPhase(lightsGroup) {
+  if (!lightsGroup || typeof _beamPhase !== 'function') return;
+  const K = (typeof window !== 'undefined' && window.__beamPhase) ? window.__beamPhase : _BEAM_PHASE;
+  const sk = (K.citySide != null) ? K.citySide : 0.55;
+  const hs = lightsGroup.children;
+  for (let i = 0; i < hs.length; i++) {
+    const c = hs[i] && hs[i].children && hs[i].children[0];
+    if (!c || !c.material) continue;
+    if (c.userData._opBase == null) c.userData._opBase = c.material.opacity;
+    const e = c.matrixWorld.elements;
+    _bpAx.set(e[4], e[5], e[6]).normalize();
+    _bpAt.set(e[12], e[13], e[14]);
+    c.material.opacity = c.userData._opBase * _beamPhase(_bpAx, _bpAt, 1800, sk);
+  }
+}
+
 // ---- SHIP LIGHTS: engine glow + under-hull headlight (v36.03) ----
 // Owner report: "engines on the ships do light up, but they don't light up
 // anything around them". Correct — the engine orbs/plumes are additive MESHES;
@@ -63280,6 +63415,11 @@ function _shipLightsFrame() {
       if (!(e.isCarrier && typeof _carrier !== 'undefined' && _carrier.dir) && !(e.isOwCarrier && e.dir)) e.mesh.getWorldDirection(S._d);   // (v38.81)
       m.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
       m.scale.set(cR, cR, cLen);
+      // (v46.50) THE VIEW TERM. It goes here, after the pose, because this is the first point that
+      // has both the beam axis and the apex - and after the smoothing above on purpose, so turning
+      // your head changes it in one frame. Live branch only: a cone in its 250 ms release tail has
+      // already dropped its entity ref and keeps its last pose, so it keeps its last phase too.
+      m.material.opacity = o * _beamPhase(S._d, m.position, cLen * 0.25);
     }
   }
   // The player's own cone — THIRD PERSON ONLY (first person would fill the
@@ -63325,6 +63465,12 @@ function _shipLightsFrame() {
       if (_fpBeam) mP.position.copy(camera.position).addScaledVector(S._d, (_HB && _HB.fpPush != null) ? _HB.fpPush : 260);
       mP.quaternion.setFromUnitVectors(_SHIPL_FWD, S._d);
       mP.scale.set(cR, cR, cLen);
+      // (v46.50) YOUR OWN BEAM IS THE BACK-SCATTER CASE, and now reads like one. The lamp is on
+      // your own hull pointing away from you, so the light reaching your eye took the weak lobe -
+      // the real reason your own headlights in fog are a haze while an oncoming car's are a shaft.
+      // Chase camera behind the tail is `back` (0.50) ; swing it round the nose and it climbs to
+      // full. Multiplies whatever the underwater first-person branch set one line above.
+      mP.material.opacity *= _beamPhase(S._d, mP.position, cLen * 0.25);
     }
   }
 }
@@ -65033,11 +65179,24 @@ if (typeof window !== 'undefined') window.applyExplosionPush = applyExplosionPus
 // alpha 0.85, i.e. BRIGHTER than the pyro flame's 0.55, for 0.5 s, at the same position. Thermite
 // impact therefore painted an orange-to-white cloud on top of the red flame on both sides, so the
 // first half-second of every hit looked unchanged no matter what the flame ramp said.
-function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing that exploded, for the water
+function spawnExplosion(pos, size, fireRamp, vel, opts) {   // (v44.22) vel: the thing that exploded, for the water
   size = size || 20;
-  // (v41.19) every explosion in the game funnels through here, so ONE hook covers projectiles,
-  // cluster kills, gas ignition, ship deaths and monster attacks alike. See _swBlast for the shape.
-  if (game._hubWater && pos) { try { _swBlast(pos.x, pos.y, pos.z, size, vel); } catch (_) {} }
+  // (v46.49) `opts.mini` - THE SAME EXPLOSION, MINUS EVERYTHING THAT IS NOT A PICTURE. Slayer's
+  // shotgun wanted "the explosion pyro's thermite launcher makes, tiny in comparison, but lots of
+  // tiny ones", and the VISUAL half of this function already does exactly that at a small `size`:
+  // the cluster burst (>=8), the explosion light (>=8), the shader smoke (>12) and the chunk debris
+  // (>25) all gate themselves off on the way down, leaving the flash/flare/fire/core billboards,
+  // the fire cloud, the embers, the sparks and the debris - which IS the thermite blast, small.
+  // What could never survive eight of them in one frame is the half that is not a picture, because
+  // every piece of it is a per-EVENT cost that one trigger pull must spend once or not at all:
+  //   the per-frame full-explosion budget (4, so pellets 5-8 would have dropped to the potato
+  //   sphere), the concussion push (it would shove the ship you just shot), the screen shake, the
+  //   screen-space shockwave, the 'explosion' one-shot and the water blast.
+  // So `mini` keeps the picture and drops those six. Nothing about a normal explosion changes.
+  // `opts.cloud === false` additionally skips the volumetric fire cloud - the one expensive piece
+  // (a fresh ShaderMaterial per call) - so a caller can spend a few of those across many pops.
+  const _mini = !!(opts && opts.mini);
+  if (game._hubWater && pos && !_mini) { try { _swBlast(pos.x, pos.y, pos.z, size, vel); } catch (_) {} }
   // Burst guard: a missile into a rock cluster destroys many rocks in one
   // frame, and each full explosion spawns fireball + smoke + debris + a light.
   // N of them at once spiked the GPU (~244ms) and blocked the main thread on
@@ -65048,8 +65207,13 @@ function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing
   // the 'explosion' min-gap in _SOUND_MIN_GAP.)
   const _explFrameKey = (typeof game !== 'undefined' && game) ? game.time : 0;
   if (_explFrameKey !== spawnExplosion._frameKey) { spawnExplosion._frameKey = _explFrameKey; spawnExplosion._count = 0; }
-  const _explOverBudget = (++spawnExplosion._count) > 4;
+  // (v46.49) a mini neither SPENDS the budget nor is judged by it - its caller caps it per trigger
+  // pull instead. On a potato it draws nothing at all rather than a potato sphere per pellet: that
+  // sphere stands in for ONE big blast, and eight of them reads worse than the pellet sparks alone
+  // (the same call _spawnClassFireBurst makes for the green fire on that tier).
+  const _explOverBudget = (!_mini) && ((++spawnExplosion._count) > 4);
   if ((typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) || _explOverBudget) {
+    if (_mini) return;
     // Spatial audio kept ; cheap relative to the visual chain we just skipped.
     if (typeof playSpatialSound === 'function') {
       const _far = Math.max(300, size * 18);
@@ -65079,10 +65243,10 @@ function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing
     });
     return;
   }
-  if (typeof applyExplosionPush === 'function') {
+  if (!_mini && typeof applyExplosionPush === 'function') {
     applyExplosionPush(pos, 40 + size * 2.5, 200 + size * 12);
   }
-  if (typeof _spawnExplosionFireCloud === 'function') _spawnExplosionFireCloud(pos, size, fireRamp);
+  if (typeof _spawnExplosionFireCloud === 'function' && !(opts && opts.cloud === false)) _spawnExplosionFireCloud(pos, size, fireRamp);
   // Dynamic point light at every explosion ≥ 8 units. Lights up
   // walls / ships / other FX so the blast actually illuminates the scene
   // instead of being a self-glowing decal.
@@ -65154,7 +65318,7 @@ function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing
   // + occlusion lowpass + multi-convolver reverb (wide/tight/long) so the
   // boom pans correctly, gets eaten by walls between you and it, and tails
   // off into the room tone. Larger blasts carry farther via refDistance.
-  if (typeof playSpatialSound === 'function') {
+  if (!_mini && typeof playSpatialSound === 'function') {
     const _far = Math.max(300, size * 18);
     try { playSpatialSound('explosion', pos.clone(), { refDistance: Math.max(180, size * 10), maxDistance: _far, rolloffFactor: 0.85 }); } catch (_) {}
   }
@@ -65167,7 +65331,7 @@ function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing
 
   // --- Distance-based camera shake (cinematic concussive feel) ---
   let _shockFalloff = 0;
-  if (player && player.position) {
+  if (!_mini && player && player.position) {
     const dx = pos.x - player.position.x, dy = pos.y - player.position.y, dz = pos.z - player.position.z;
     const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
     const reach = Math.max(400, size * 25);
@@ -65181,7 +65345,7 @@ function spawnExplosion(pos, size, fireRamp, vel) {   // (v44.22) vel: the thing
 
   // --- Screen-space shockwave refraction warp (~300 ms per plan V1b) ---
   // Only spawn one at a time; replace if a new explosion is closer/bigger.
-  if (typeof postFX !== 'undefined' && postFX.compositeMat) {
+  if (!_mini && typeof postFX !== 'undefined' && postFX.compositeMat) {
     const intensity = Math.min(0.9, (size * 0.012 + 0.25) * (0.4 + 0.6 * _shockFalloff));
     if (intensity > 0.05) {
       if (!postFX.shockwave) postFX.shockwave = {};
@@ -88007,12 +88171,65 @@ function fireProjectile(origin, dir, w) {
 // hull, leviathan. `i` is the PELLET INDEX, so the cap is per trigger pull rather than per second:
 // a shotgun's whole point is that its pellets land together, and a time throttle would keep one of
 // them and throw the spray away. Three volumetric clouds read as a scatter ; eight is just budget.
+// (v46.49) Sent on the wire by fireSpread while its pellet loop runs, null the rest of the time.
+// A LATCH rather than a return value on purpose: this function is THE single place that knows a
+// pellet landed, and it has four callers inside that loop (world, leviathan, hull, destructible).
+// v38.55 shipped a Slayer impact effect hung off ONE of those four and the owner reported it
+// missing on ships and leviathans - collecting here makes that bug unreachable by construction.
+let _slHitsOut = null;
+// ⭐⭐ (v46.49) THE PELLET POPS. Owner: "i want whatever slayer shoots, a bunch of little tiny
+// explosions to appear at the green shotgun pellets impact site ... we can use the baked in
+// explosion that pyro's thermite launcher makes ... but make the explosions for slayer's weapon
+// tiny in comparison, but lots of tiny ones".
+// So this IS spawnExplosion - literally the thermite warhead's own call, at roughly a fifth of its
+// size (thermite lands at 22 on the world, 9 on a hull ; a pop is 3.4 x 0.7..1.4) and carrying the
+// `mini` flag that drops the six per-EVENT layers a shotgun cannot pay eight times in one frame.
+// See spawnExplosion's header for what mini keeps and what it drops.
+// ⚠ THE BUDGET IS PER TRIGGER PULL, NOT PER SECOND - the same rule the green fire beside it uses.
+// `i` is the PELLET INDEX: a time throttle would keep one pop of a blast and throw the scatter
+// away, and the scatter IS the effect.
+// ⚠ ONLY `cloud` OF THEM CARRY THE VOLUMETRIC FIRE CLOUD. That cloud is a fresh ShaderMaterial per
+// call and is the only expensive piece of a pop ; the rest is pooled billboards plus instanced
+// sparks/debris. The existing green-fire cap says "Three volumetric clouds read as a scatter ;
+// eight is just budget" about this very weapon, so the clouds stay at three and the cheap pops go
+// wide. window.__slayerBlast tunes all of it live.
+const _SL_BLAST = { on: true, count: 8, cloud: 3, per: 2, size: 3.4, jitter: 14 };
+const _SL_MINI    = { mini: true };
+const _SL_MINI_NC = { mini: true, cloud: false };
+if (typeof window !== 'undefined') window.__slayerBlast = _SL_BLAST;
+function _slayerPelletBlast(pt, i) {
+  const K = (typeof window !== 'undefined' && window.__slayerBlast) ? window.__slayerBlast : _SL_BLAST;
+  if (!pt || K.on === false || typeof spawnExplosion !== 'function') return;
+  const n  = (K.count != null) ? K.count : 8;
+  const sz = (K.size  != null) ? K.size  : 3.4;
+  if (i >= n || sz <= 0) return;
+  const per = Math.max(1, (K.per != null) ? K.per : 2);
+  const jit = (K.jitter != null) ? K.jitter : 14;
+  const cloudN = (K.cloud != null) ? K.cloud : 3;
+  for (let b = 0; b < per; b++) {
+    // b === 0 sits exactly where the pellet stopped ; the rest scatter, so several pellets into one
+    // flat wall still read as separate pops instead of one stacked blob.
+    const j = (b === 0) ? 0 : jit;
+    const at = new THREE.Vector3(
+      pt.x + (Math.random() - 0.5) * j,
+      pt.y + (Math.random() - 0.5) * j,
+      pt.z + (Math.random() - 0.5) * j);
+    try {
+      spawnExplosion(at, sz * (0.7 + Math.random() * 0.7), null, null,
+                     (b === 0 && i < cloudN) ? _SL_MINI : _SL_MINI_NC);
+    } catch (_) {}
+  }
+}
 function _slayerFireBurst(pt, col, i) {
+  if (_slHitsOut && pt) _slHitsOut.push(Math.round(pt.x), Math.round(pt.y), Math.round(pt.z));
   const K = (typeof window !== 'undefined' && window.__slayerFire) ? window.__slayerFire : null;
   const n = (K && K.count != null) ? K.count : 3;
   const sz = (K && K.size != null) ? K.size : 13;
-  if (sz <= 0 || i >= n) return;
-  try { _spawnClassFireBurst(pt, col, sz); } catch (_) {}
+  // (v46.49) the green fire keeps its own cap ; the pops have theirs. Nothing may sit between them
+  // and _slayerPelletBlast - this function IS the shared "a pellet landed here" hook, and an early
+  // return for the fire's budget would silently take the explosions with it.
+  if (sz > 0 && i < n) { try { _spawnClassFireBurst(pt, col, sz); } catch (_) {} }
+  _slayerPelletBlast(pt, i);
 }
 function fireSpread(origin, dir, w) {
   // ⭐⭐ (v44.16) AIMING TIGHTENS THE PATTERN AND MAKES IT REACH. Owner: "when slayer aims/zooms
@@ -88040,6 +88257,16 @@ function fireSpread(origin, dir, w) {
   const _coneMul  = 1 - _adsZ * (1 - (_adsD ? _SK.cone2 : _SK.cone1));
   const _rangeMul = 1 + _adsZ * ((_adsD ? _SK.range2 : _SK.range1) - 1);
   const _slRange  = w.range * _rangeMul;
+  // (v46.49) MULTIPLAYER SEES THE IMPACTS. The existing per-pellet `pellet_burst` event carries the
+  // shot's ORIGIN, DIRECTION and the WORLD raycast distance - which is exactly the wrong number for
+  // an impact: a pellet that stopped on a hull travelled far less than the wall behind it, and one
+  // that hit nothing has no impact at all. Rather than widen eight events, the whole trigger pull
+  // sends ONE extra event carrying the points where pellets actually landed, filled by the impact
+  // hook itself (see _slHitsOut). Damage is unaffected - it is resolved here and crosses the wire
+  // as a finished number in a hit claim, so this is purely what the other machine draws.
+  const _slSend = !!(net.active && net.sendEvent);
+  _slHitsOut = _slSend ? [] : null;
+  try {
   for (let i = 0; i < w.pellets; i++) {
     
     
@@ -88175,6 +88402,21 @@ function fireSpread(origin, dir, w) {
         spawnImpactSparks(hitPt, 2);
         _slayerFireBurst(hitPt, _slCol, i);      // (v38.55) leviathans and destructibles too
       }
+    }
+  }
+  } finally {
+    // finally, not a plain clear: a throw anywhere in the loop would otherwise leave the latch
+    // armed and every later bot/peer impact would pile into an array nobody ever drains.
+    const _hits = _slHitsOut;
+    _slHitsOut = null;
+    if (_slSend && _hits && _hits.length) {
+      try {
+        net.sendEvent({
+          type: 'pellet_hits',
+          c: (typeof chassisFlashColor === 'function') ? chassisFlashColor(player.loadoutKey) : 0x44ff66,
+          p: _hits,
+        });
+      } catch (_) {}
     }
   }
 }
