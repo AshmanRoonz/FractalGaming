@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.34";
+const LSS_BUILD = "46.48";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -29707,6 +29707,58 @@ function _wxFull() {
            (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()));
 }
 
+const _SKY_A = { node: null, buf: null, tried: false, bass: 0, mid: 0, lvl: 0, flow: 0 };
+function _skyAudioFrame(dt) {
+  const U = (typeof _WX !== 'undefined' && _WX && _WX.dome && _WX.dome.material)
+    ? _WX.dome.material.uniforms : null;
+  if (!U || !U.uFlow) return;
+  if (!_SKY_A.tried && audio && audio.ctx && audio.musicGain) {
+    _SKY_A.tried = true;
+    try {
+      const an = audio.ctx.createAnalyser();
+      an.fftSize = 256;
+      an.smoothingTimeConstant = 0.82;
+      audio.musicGain.connect(an);          // a tap: an analyser has no output path,
+      _SKY_A.node = an;                     // so this cannot alter what you hear
+      _SKY_A.buf = new Uint8Array(an.frequencyBinCount);
+    } catch (_) { _SKY_A.node = null; }
+  }
+  let bass = 0, mid = 0, lvl = 0;
+  if (_SKY_A.node) {
+    try {
+      _SKY_A.node.getByteFrequencyData(_SKY_A.buf);
+      const b = _SKY_A.buf, n = b.length;
+      let sb = 0, sm = 0, sa = 0;
+      for (let i = 1; i < 7; i++) sb += b[i];
+      for (let i = 7; i < 30; i++) sm += b[i];
+      for (let i = 1; i < n; i++) sa += b[i];
+      bass = sb / (6 * 255); mid = sm / (23 * 255); lvl = sa / ((n - 1) * 255);
+    } catch (_) {}
+  }
+  const up = 1 - Math.exp(-dt * 6.0), dn = 1 - Math.exp(-dt * 1.1);
+  _SKY_A.bass += (bass - _SKY_A.bass) * (bass > _SKY_A.bass ? up : dn);
+  _SKY_A.mid  += (mid  - _SKY_A.mid ) * (mid  > _SKY_A.mid  ? up : dn);
+  _SKY_A.lvl  += (lvl  - _SKY_A.lvl ) * (lvl  > _SKY_A.lvl  ? up : dn);
+  _SKY_A.flow += dt * (0.016 + 0.085 * _SKY_A.lvl);
+  U.uFlow.value = _SKY_A.flow;
+  U.uAudio.value.set(_SKY_A.bass, _SKY_A.mid, _SKY_A.lvl);
+
+  const z = U.uZenith.value;
+  const lum = 0.299 * z.r + 0.587 * z.g + 0.114 * z.b;
+  let t = (lum - 0.035) / 0.165;
+  t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  const night = 1 - (t * t * (3 - 2 * t));
+  const mixc = (a, b) => a + (b - a) * night;
+  const sd = _WX.sunDisc, sh = _WX.sunHalo;
+  if (sd && sd.material && sd.material.uniforms && sd.material.uniforms.uCol) {
+    sd.material.uniforms.uCol.value.setRGB(mixc(1.0, 0.16), mixc(0.95, 0.045), mixc(0.82, 0.30));
+  }
+  if (sh && sh.material && sh.material.uniforms && sh.material.uniforms.uCol) {
+    sh.material.uniforms.uCol.value.setRGB(mixc(1.0, 0.20), mixc(0.95, 0.06), mixc(0.82, 0.36));
+  }
+}
+if (typeof window !== 'undefined') window.__skyAudio = _SKY_A;
+
 function _wxMakeDome() {
   const geo = new THREE.SphereGeometry(20500, 32, 15);
   const mat = new THREE.ShaderMaterial({
@@ -29718,6 +29770,16 @@ function _wxMakeDome() {
       uHaze: { value: new THREE.Color(0x9fc8e8) },
       uBelow: { value: new THREE.Color(0x9fc8e8) },
       uBelowBlend: { value: 0.10 },
+      uGalPole: { value: new THREE.Vector3(0.22, 0.62, -0.75).normalize() },
+      uGalCore: { value: new THREE.Vector3(-0.78, -0.10, 0.62).normalize() },
+      uSpace:   { value: 1.0 },     // master. window.__sky.uSpace.value = 0 disables.
+      uVivid:   { value: 1.0 },
+      uDay:     { value: 12.0 },
+      uStars:   { value: 1.4 },
+      uMilky:   { value: 0.40 },
+      uDust:    { value: 2.6 },
+      uFlow:  { value: 0 },
+      uAudio: { value: new THREE.Vector3(0, 0, 0) },   // bass, mid, level (smoothed)
     },
     vertexShader: `
       varying vec3 vDir;
@@ -29729,19 +29791,176 @@ function _wxMakeDome() {
     fragmentShader: `
       uniform vec3 uSunDir, uZenith, uHorizon, uHaze, uBelow;
       uniform float uBelowBlend;
+      uniform vec3 uGalPole, uGalCore, uAudio;
+      uniform float uSpace, uStars, uMilky, uDust, uFlow, uVivid, uDay;
       varying vec3 vDir;
+
+      float gh1(vec3 p){ p = fract(p * 0.1031); p += dot(p, p.yzx + 33.33); return fract((p.x + p.y) * p.z); }
+      vec3 gh3(vec3 p){ p = fract(p * vec3(0.1031, 0.1030, 0.0973)); p += dot(p, p.yxz + 33.33);
+                        return fract((p.xxy + p.yxx) * p.zyx); }
+      float gn3(vec3 x){ vec3 i = floor(x), f = fract(x); f = f * f * (3.0 - 2.0 * f);
+        return mix(mix(mix(gh1(i), gh1(i + vec3(1,0,0)), f.x), mix(gh1(i + vec3(0,1,0)), gh1(i + vec3(1,1,0)), f.x), f.y),
+                   mix(mix(gh1(i + vec3(0,0,1)), gh1(i + vec3(1,0,1)), f.x), mix(gh1(i + vec3(0,1,1)), gh1(i + vec3(1,1,1)), f.x), f.y), f.z); }
+      float gfbm(vec3 p){ float v = 0.0, a = 0.5;
+        for (int k = 0; k < 4; k++) { v += a * gn3(p); p *= 2.04; a *= 0.5; } return v; }
+      // RIDGED, because dust is filamentary. Plain fbm gives cotton wool; 1-|n|
+      // accumulated gives the stringy branching rift the real thing has. Same trick
+      // the terrain uses for erosion ridges.
+      vec3 ghsv(vec3 c){ vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+        vec3 q = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+        return c.z * mix(K.xxx, clamp(q - K.xxx, 0.0, 1.0), c.y); }
+      float gridged(vec3 p){ float v = 0.0, a = 0.5, prev = 1.0;
+        for (int k = 0; k < 4; k++) { float r = 1.0 - abs(gn3(p) * 2.0 - 1.0); r *= r * prev;
+          v += a * r; prev = r; p *= 2.11; a *= 0.5; } return v; }
+
       void main() {
+        vec3 d = normalize(vDir);
         float up = clamp(vDir.y, -0.12, 1.0);
         vec3 col = mix(uHorizon, uZenith, pow(max(up, 0.0), 0.55));
+
+        // The night gate is derived from the ZENITH COLOUR the zone system already
+        // drives, so the galaxy fades in exactly as the sky darkens - the city dusk
+        // ramp and every sector tint steer it for free, with no new plumbing.
+        float lum = dot(uZenith, vec3(0.299, 0.587, 0.114));
+        float nightRamp = 1.0 - smoothstep(0.035, 0.20, lum);
+        float lit = mix(uDay, 1.0, nightRamp) * uSpace;   // >=1 by day: a GAIN, never a mix weight
+
+        // ⭐⭐ THE GALAXY IS APPLIED AFTER THE HAZE, and this is why. Owner: "too much
+        // white is bad". uHaze is a pale blue and the haze mix runs at up to 0.9 -
+        // written into col first, the galaxy was then 90% replaced by pale blue near
+        // the horizon, which is exactly the white wash. Accumulating here and applying
+        // below keeps the hue intact; the haze still removes the galaxy (correctly -
+        // you cannot see the Milky Way through thick air) it just no longer PAINTS it.
+        vec3 galC = vec3(0.0), starC = vec3(0.0);
+        float galA = 0.0, galAdd = 0.0;
+
+        if (lit > 0.002) {
+          // galactic frame: latitude off the band plane, longitude along it
+          vec3 gp = normalize(uGalPole);
+          vec3 gx = normalize(uGalCore - gp * dot(uGalCore, gp));
+          vec3 gy = cross(gp, gx);
+          float sLat = clamp(dot(d, gp), -1.0, 1.0);
+          float lat = asin(sLat);
+          float lon = atan(dot(d, gy), dot(d, gx));
+
+          // THE BAND. Not a straight stripe: the centreline warps, and the disc is
+          // far wider and brighter toward the core than out along the arms.
+          float warp = (gfbm(d * 1.6 + 11.0) - 0.5) * 0.085;
+          float lat2 = lat + warp;
+          float toCore = abs(lon) / 3.14159;                       // 0 at core, 1 opposite
+          // half-width in RADIANS: ~7 degrees at the core, ~3 in the arms
+          float width = mix(0.125, 0.048, smoothstep(0.0, 0.85, toCore));
+          float band = exp(-pow(abs(lat2) / width, 2.1));
+          float bulge = exp(-pow(abs(lon) / 0.72, 2.0)) * exp(-pow(abs(lat2) / 0.135, 2.0));
+
+          // UNRESOLVED STARLIGHT. Two scales, stretched ALONG the band - the real
+          // thing is smeared lengthwise, not isotropic.
+          vec3 sp = vec3(lon * 1.35, lat2 * 4.2, 0.0) + d * 0.6;
+          // each octave drifts at its own rate, so the structure SHEARS as it moves
+          // rather than sliding rigidly past - that shear is what reads as alive
+          vec3 fl = vec3(uFlow * 0.33, uFlow * 0.09, uFlow * 0.21);
+          float milk = gfbm(sp * 7.0 + fl) * 0.52
+                     + gfbm(sp * 18.0 + 17.0 + fl * 2.3) * 0.32
+                     + gfbm(sp * 44.0 + 5.0 + fl * 4.1) * 0.10;
+          milk = pow(clamp(milk, 0.0, 1.0), 1.5);
+          float glow = band * (0.20 + 1.05 * milk) + bulge * 0.85;
+
+          // COLOUR. Documentary version first: warm cream core, cool blue-white arms.
+          vec3 warm = vec3(1.00, 0.86, 0.62);
+          vec3 cool = vec3(0.70, 0.78, 1.00);
+          vec3 gal = mix(cool, warm, clamp(bulge * 1.5 + (1.0 - toCore) * 0.45, 0.0, 1.0));
+          // ...then the aurora. Hue walks ALONG the band (lon) so you get migrating
+          // curtains of colour rather than one flat wash, drifts with uFlow, and the
+          // milk value pushes it too - so the bright knots read a different hue from
+          // the thin parts, which is most of what makes MilkDrop look organic.
+          // The core desaturates toward white: a vivid sky still needs somewhere for
+          // the eye to rest, and blowing the bulge out to white is what keeps the band
+          // readable as a shape instead of a rainbow smear.
+          float hue = fract(0.46 + lon * 0.082 + uFlow * 0.021 + milk * 0.26 + uAudio.y * 0.13);
+          // Was desaturating toward white at the core "so the eye has somewhere to
+          // rest". The owner does not want that rest - keep it saturated everywhere
+          // and let the DUST lanes provide the contrast instead.
+          float sat = clamp(0.95 - 0.10 * bulge, 0.0, 1.0);
+          vec3 vivid = ghsv(vec3(hue, sat, 1.0));
+          gal = mix(gal, vivid, uVivid);
+
+          // HII REGIONS: the little pink puffs strung along the band.
+          float hii = smoothstep(0.66, 0.88, gfbm(sp * 26.0 + 31.0)) * band;
+          gal = mix(gal, mix(vec3(1.25, 0.42, 0.72), ghsv(vec3(fract(hue + 0.42), 0.95, 1.3)), uVivid),
+                    clamp(hii * 0.65, 0.0, 1.0));
+
+          // DUST IS ABSORPTION, NOT DARK PAINT. This is the whole difference between
+          // a glowing stripe and a galaxy: model TRANSMISSION and multiply the light
+          // by it, so the lanes only bite where there is light behind them - and the
+          // rift reads as something IN FRONT of the core rather than a black smear
+          // on top of it. Domain-warped so the filaments run lengthwise.
+          vec3 dp = vec3(lon * 1.8, lat2 * 7.0, 0.0) + d * 0.9;
+          dp += (gfbm(dp * 4.5 + 5.0 + fl * 1.6) - 0.5) * (0.85 + uAudio.y * 0.35);
+          float dust = gridged(dp * 11.0);
+          dust = pow(clamp(dust * 1.5, 0.0, 1.0), 1.25);
+          float trans = exp(-dust * 4.2 * uDust * smoothstep(0.01, 0.22, band));
+          glow *= trans;
+
+          // bass lifts the whole band, mid pushes it warmer - gentle, so it breathes
+          // with the track instead of flashing at it
+          gal = mix(gal, vec3(1.05, 0.72, 0.95), clamp(uAudio.y * 0.30, 0.0, 0.5));
+          // ⭐⭐ VIBRANCY IS A BLEND, NOT A BRIGHTNESS. Pushing an additive term up just
+          // drives every channel past 1.0 and the hue is lost - the band went white,
+          // not colourful. Same clipping trap as the additive FX note. So MIX toward
+          // the colour (which preserves the hue exactly, however strong it gets) and
+          // keep only a small additive term on top for the bright knots to bloom.
+          galC = gal;
+          galA = clamp(glow * uMilky * 0.62 * lit, 0.0, 1.0) * (0.35 + 0.65 * uVivid);
+          // the additive term is what actually whitens, so it stays small
+          galAdd = glow * 0.045 * lit * uMilky * (1.0 + uAudio.x * 0.70);
+
+          // STARS. Density follows the band, so the sky thickens toward it exactly
+          // as it does in the photo. Two cell scales = a range of apparent sizes.
+          for (int L = 0; L < 2; L++) {
+            float S = (L == 0) ? 130.0 : 62.0;
+            vec3 cp = d * S;
+            vec3 ci = floor(cp), cf = fract(cp);
+            vec3 r3 = gh3(ci + float(L) * 19.0);
+            float keep = gh1(ci + 3.7 + float(L) * 8.0);
+            float dens = 0.055 + 0.30 * band;
+            if (keep < dens) {
+              float dd = length(cf - r3);
+              float mag = gh1(ci + 7.7 + float(L) * 5.0);
+              float sz = (L == 0 ? 0.055 : 0.085) * (0.35 + 0.65 * mag);
+              float pt = smoothstep(sz, 0.0, dd);
+              // most stars faint, a few bright - a power curve, not a uniform roll
+              float bright = pow(mag, 3.4) * (L == 0 ? 1.0 : 1.9);
+              vec3 sc = mix(vec3(0.72, 0.82, 1.0), vec3(1.0, 0.80, 0.58), gh1(ci + 13.1));
+              sc = mix(sc, gal, 0.50 * uVivid);
+              float lost = mix(1.0, 0.30, clamp(band * 1.15, 0.0, 1.0));
+              starC += sc * pt * bright * lit * uStars * (0.55 + 0.75 * trans) * lost;
+            }
+          }
+        }
+
+        // (v46.43) A WARM SUN IN A NIGHT SKY IS THE ONE THING THAT STILL READS WRONG.
+        // Owner: "make the sun go like dark purple in the dark skies". Same night
+        // the galaxy uses, so it tracks the zone tinting and the city dusk ramp with
+        // no extra plumbing - and it dims as well as shifts, because a dark sun that
+        // is still bright is just a purple headlight.
         float sunAmt = pow(max(dot(vDir, uSunDir), 0.0), 6.0);
-        col += vec3(1.0, 0.82, 0.55) * sunAmt * 0.35;
+        vec3 sunGlow = mix(vec3(1.0, 0.82, 0.55), vec3(0.34, 0.11, 0.58), nightRamp);
+        col += sunGlow * sunAmt * mix(0.35, 0.20, nightRamp);
         float hazeAmt = 1.0 - smoothstep(0.0, 0.22, up);
         col = mix(col, uHaze, hazeAmt * 0.9);
+        // clear air only: the galaxy fades out into haze near the horizon instead of
+        // being tinted by it
+        float clear = clamp(1.0 - hazeAmt * 0.95, 0.0, 1.0);
+        col = mix(col, galC, galA * clear);
+        col += galC * galAdd * clear;
+        col += starC * clear;
+
         float _below = smoothstep(uBelowBlend, -uBelowBlend, vDir.y);
         col = mix(col, uBelow, _below * 0.95);
         gl_FragColor = vec4(col, 1.0);
       }`,
   });
+  if (typeof window !== 'undefined') window.__sky = mat.uniforms;
   const dome = new THREE.Mesh(geo, mat);
   dome.renderOrder = 3;
   dome.frustumCulled = false;
@@ -30152,8 +30371,10 @@ function _wxInit(T) {
   const sun = _wxMakeSun(); _WX.sunDisc = sun.disc; _WX.sunHalo = sun.halo;
   group.add(sun.disc); group.add(sun.halo);
   _WX.clouds = _wxMakeClouds(); group.add(_WX.clouds);
-  _WX.bow = _wxMakeBow();
-  group.add(_WX.bow);
+  if (typeof window !== 'undefined' && window.__hubBow != null && +window.__hubBow) {
+    _WX.bow = _wxMakeBow();
+    group.add(_WX.bow);
+  }
   scene.add(group);
   _WX.group = group;
   try {
@@ -77731,6 +77952,7 @@ function gameLoop(timestamp) {
       try { _volcSync(_fX, _fZ); } catch (_) {}
       try { _skFrame(_fX, _cineActive ? camera.position.y : player.position.y, _fZ); } catch (_) {}
       try { _padFrame(dt); } catch (e) { if (typeof window !== 'undefined' && !window.__padErr) window.__padErr = String((e && e.stack) || e); }
+      try { _skyAudioFrame(dt); } catch (_) {}
       if (game.bendWorld && game._bendSegs && game._bendSegs.length) {
         const _bq = _bendUnmap(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
         _fX = _bq.x; _fZ = _bq.z;
