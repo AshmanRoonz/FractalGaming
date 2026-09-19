@@ -13601,7 +13601,8 @@ function _skyDomeRefresh() {
   const tex = _equirectSky.texture;
   dome.material.map = tex || null;
   dome.material.needsUpdate = true;
-  dome.visible = !!tex && (!atmosphereOn || brokenSim) && !(typeof game !== 'undefined' && game.hubWeather);
+  const _wxUp = !!(typeof _WX !== 'undefined' && _WX && _WX.on && _WX.dome);
+  dome.visible = !!tex && (!atmosphereOn || brokenSim) && !(typeof game !== 'undefined' && game.hubWeather) && !_wxUp;
   
   
   
@@ -89854,6 +89855,52 @@ class LSSEarthTiles {
         }
       }
       if (nWet > heights.length * 0.004) {
+        {
+          const q = new Int32Array(w * h);
+          let qh = 0, qt = 0;
+          for (let i = 0; i < wet.length; i++) if (wet[i]) q[qt++] = i;
+          const seedN = qt, lim = level + 0.5;
+          let popped = 0;
+          while (qh < qt) {
+            if ((++popped & 0x3FFF) === 0 && sl.due()) { await sl.yield(); if (this._disposed) return null; }
+            const i = q[qh++];
+            const x = i % w;
+            if (x > 0 && !wet[i - 1] && heights[i - 1] <= lim) { wet[i - 1] = 1; nWet++; q[qt++] = i - 1; }
+            if (x < w - 1 && !wet[i + 1] && heights[i + 1] <= lim) { wet[i + 1] = 1; nWet++; q[qt++] = i + 1; }
+            if (i >= w && !wet[i - w] && heights[i - w] <= lim) { wet[i - w] = 1; nWet++; q[qt++] = i - w; }
+            if (i + w < wet.length && !wet[i + w] && heights[i + w] <= lim) { wet[i + w] = 1; nWet++; q[qt++] = i + w; }
+          }
+          this.stats.wetFlooded = (this.stats.wetFlooded || 0) + (qt - seedN);
+        }
+        {
+          const R = (typeof window !== 'undefined' && window.__earthWaterClose != null) ? (+window.__earthWaterClose | 0) : 8;
+          if (R > 0) {
+            const t8 = new Uint8Array(w * h), dil = new Uint8Array(w * h), inv = new Uint8Array(w * h), ero = new Uint8Array(w * h);
+            const boxAny = async (src, dst) => {
+              for (let y = 0; y < h; y++) {
+                if (sl.due()) { await sl.yield(); if (this._disposed) return false; }
+                let d = 1e9;
+                for (let x = 0, i = y * w; x < w; x++, i++) { d = src[i] ? 0 : d + 1; t8[i] = (d <= R) ? 1 : 0; }
+                d = 1e9;
+                for (let x = w - 1, i = y * w + w - 1; x >= 0; x--, i--) { d = src[i] ? 0 : d + 1; if (d <= R) t8[i] = 1; }
+              }
+              for (let x = 0; x < w; x++) {
+                if (sl.due()) { await sl.yield(); if (this._disposed) return false; }
+                let d = 1e9;
+                for (let y = 0, i = x; y < h; y++, i += w) { d = t8[i] ? 0 : d + 1; dst[i] = (d <= R) ? 1 : 0; }
+                d = 1e9;
+                for (let y = h - 1, i = x + (h - 1) * w; y >= 0; y--, i -= w) { d = t8[i] ? 0 : d + 1; if (d <= R) dst[i] = 1; }
+              }
+              return true;
+            };
+            if (!(await boxAny(wet, dil))) return null;
+            for (let i = 0; i < inv.length; i++) inv[i] = dil[i] ? 0 : 1;
+            if (!(await boxAny(inv, ero))) return null;      // ero = 1 where the dilation has a 0 within R
+            let closed = 0;
+            for (let i = 0; i < wet.length; i++) if (!wet[i] && !ero[i]) { wet[i] = 1; nWet++; closed++; }
+            this.stats.wetClosed = (this.stats.wetClosed || 0) + closed;
+          }
+        }
         let amt = new Float32Array(w * h);
         for (let i = 0; i < wet.length; i++) amt[i] = wet[i];
         const tmp = new Float32Array(w * h);
@@ -90857,6 +90904,25 @@ class LSSEarthTiles {
     return true;
   }
 
+  _clearBuildings() {
+    const isBld = (m) => /^earth-(roofs|walls)-\d+$/.test(m.name || '') || m.name === 'earth-ads';
+    const gone = this.group.children.filter(isBld);
+    for (const m of gone) {
+      this.group.remove(m);
+      if (m.geometry) m.geometry.dispose();
+      if (m.material && typeof m.material.dispose === 'function') m.material.dispose();
+    }
+    this._pubQ = this._pubQ.filter((m) => {
+      if (!isBld(m)) return true;
+      if (m.geometry) m.geometry.dispose();
+      if (m.material && typeof m.material.dispose === 'function') m.material.dispose();
+      return false;
+    });
+    this._bldList = []; this._cgrid = null;
+    this.stats.buildings = 0; this.stats.ads = 0; this.stats.adsPlace = null;
+    this.stats.rebuilt = (this.stats.rebuilt || 0) + 1;
+  }
+
   _buildCollisionIndex() {
     const b = this._bounds, list = this._bldList;
     if (!list || list.length === 0) { this._cgrid = null; return; }
@@ -90928,6 +90994,14 @@ class LSSEarthTiles {
       if (mat.uniforms[k] === undefined || mat.uniforms[k] === null) {
         mat.uniforms[k] = { value: (k === 'uHcLodOn') ? 1 : 0 };
       }
+    }
+    {
+      const _A = (typeof window !== 'undefined' && window.__ads) || {};
+      const gOut = (_A.earthGfadeOut != null) ? +_A.earthGfadeOut : 0.01;
+      const gIn = (_A.earthGfadeIn != null) ? +_A.earthGfadeIn : 0.03;
+      const u = mat.uniforms;
+      if (u.uAdsGFade && u.uAdsGFade.value && typeof u.uAdsGFade.value.set === 'function') u.uAdsGFade.value.set(gOut, gIn);
+      if (_A.earthGround != null && u.uAdsGround) u.uAdsGround.value = +_A.earthGround;
     }
     const inst = new THREE.InstancedMesh(geo, mat, max);
     inst.name = 'earth-ads';
@@ -91281,6 +91355,11 @@ class LSSEarthWorld {
           }
         }
       } catch (e) { console.warn('[lss-earth-world] ownership tag failed:', e); }
+      this._bldCoreKeys = new Set();
+      {
+        const r0 = Math.max(0, Math.floor(_coreCells - 0.5 + 1e-6));
+        for (let dy = -r0; dy <= r0; dy++) for (let dx = -r0; dx <= r0; dx++) this._bldCoreKeys.add(this._key(cx + dx, cy + dy));
+      }
       this._bldWays = ways;
       this._bldRegionKey = key;
       this._bldRegionPending = null;
@@ -91299,6 +91378,9 @@ class LSSEarthWorld {
    * probe was missing, or the tag threw) returns everything, which is exactly
    * the pre-45.96 behaviour rather than an empty city.
    */
+  /** (v46.76) Does the CURRENT region cover the whole of cell `k`? */
+  _bldCompleteFor(k) { return !!(this._bldCoreKeys && this._bldCoreKeys.has(k)); }
+
   _waysFor(ways, k) {
     if (!ways || !ways.length) return ways || [];
     if (ways[0].__oc === undefined) return ways;
@@ -91333,8 +91415,12 @@ class LSSEarthWorld {
     let n = 0;
     for (const [pk, p] of this._patches.entries()) {
       if (this._disposed) return;
-      if ((p._bldList && p._bldList.length) || p._bldBusy) continue;   // this one already has (or is getting) its city
+      if (p._bldBusy) continue;                                  // getting its city right now
+      const has = !!(p._bldList && p._bldList.length);
+      if (has && (p.__bldComplete || !this._bldCompleteFor(pk))) continue;
       try {
+        if (has) p._clearBuildings();
+        p.__bldComplete = this._bldCompleteFor(pk);
         p.prefetchedWays = this._waysFor(ways, pk);
         await p._loadBuildings();
         if (typeof this._glow === 'number' && typeof p.setWindowGlow === 'function') {
@@ -91378,6 +91464,7 @@ class LSSEarthWorld {
         forceWaterLevel: (typeof this._waterLevel === 'number') ? this._waterLevel : null,
         forceBaseH: (typeof this._baseH === 'number') ? this._baseH : null
       });
+      t.__bldComplete = (ways.length > 0) && this._bldCompleteFor(k);   // (v46.76) tall-only or timed out -> the backfill owes it a city
       await t.ready;
       if (this._disposed) { try { t.dispose(); } catch (_) {} return; }
       this.group.add(t.group);
@@ -91442,13 +91529,15 @@ class LSSEarthWorld {
       for (const [pk, p] of this._patches.entries()) {
         if (p.__bfKey === this._bldRegionKey) continue;
         if (p._bldBusy) continue;   // (v46.76) mid-build; it will have its city
-        if (p._bldList && p._bldList.length) { p.__bfKey = this._bldRegionKey; continue; }
+        if (p._bldList && p._bldList.length && (p.__bldComplete || !this._bldCompleteFor(pk))) { p.__bfKey = this._bldRegionKey; continue; }
         const n = this._bldCellCount ? (this._bldCellCount.get(pk) || 0) : 1;
         if (!n) { p.__bfKey = this._bldRegionKey; continue; }
         p.__bfKey = this._bldRegionKey;
         this._bfBusy = true;
         (async () => {
           try {
+            if (p._bldList && p._bldList.length) p._clearBuildings();   // (v46.76) a tall-only set, being completed
+            p.__bldComplete = this._bldCompleteFor(pk);
             p.prefetchedWays = this._waysFor(this._bldWays, pk);
             await p._loadBuildings();
             if (this._glow !== null && typeof p.setWindowGlow === 'function') p.setWindowGlow(this._glow);
@@ -91466,8 +91555,7 @@ class LSSEarthWorld {
     const lz = (focus.z - this.group.position.z) / s;
     const c = this._cellOf(lx, lz);
 
-    if (!this._bldCentre || Math.abs(c.cx - this._bldCentre.cx) > this.nearRadius ||
-        Math.abs(c.cy - this._bldCentre.cy) > this.nearRadius) {
+    if (!this._bldCentre || ((c.cx !== this._bldCentre.cx || c.cy !== this._bldCentre.cy) && !this._bldRegionPending)) {
       this._bldCentre = { cx: c.cx, cy: c.cy };
       this._ensureBldRegion(c.cx, c.cy);
     }
@@ -92159,6 +92247,7 @@ function _lssGmapsTick(dt) {
         console.warn('[lss-gmaps] weather vanished - re-initialising');
         _wxInit(null);
       }
+      if (_WX && _WX.on && _WX.dome && typeof _skyDome !== 'undefined' && _skyDome && _skyDome.visible) _skyDome.visible = false;
     } catch (_) {}
     try { if (typeof _wxFrame === 'function') _wxFrame(dt); } catch (_) {}
     __pmark('earth:wx');         // the sky dome + weather, which only this mode drives
