@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.75";
+const LSS_BUILD = "46.76";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -89275,6 +89275,21 @@ function _leDeferPublish() {
   } catch (_) { return false; }
 }
 const _LE_PUBLISH_PER_FRAME = 4;
+const _LE_SLICE_MS = 6;
+function _leSliceMs() {
+  try { if (typeof window !== 'undefined' && typeof window.__earthSliceMs === 'number') return window.__earthSliceMs; } catch (_) {}
+  return _leDeferPublish() ? _LE_SLICE_MS : 40;
+}
+function _leSlicer() {
+  const S = { budget: _leSliceMs(), t0: performance.now(), yields: 0 };
+  S.due = () => S.budget > 0 && (performance.now() - S.t0) >= S.budget;
+  S.yield = async () => {
+    await new Promise((r) => setTimeout(r, 0));
+    S.yields++; S.budget = _leSliceMs(); S.t0 = performance.now();
+  };
+  return S;
+}
+function _leBreath() { return _leDeferPublish() ? new Promise((r) => setTimeout(r, 0)) : Promise.resolve(); }
 
 class LSSEarthTiles {
   constructor(opts = {}) {
@@ -89620,10 +89635,13 @@ class LSSEarthTiles {
     this._setupProjection();
     await this._loadDEM();
     if (this._disposed) return;
+    await _leBreath();   // (v46.76) each stage below runs its own slice clock; never chain two in one task
     await this._loadImagery();
     if (this._disposed) return;
-    this._buildTerrainMesh();
+    await _leBreath();
+    await this._buildTerrainMesh();   // (v46.76) sliced
     if (this._disposed) return;
+    await _leBreath();
     if (this.water) { try { this.buildWater(); } catch (e) { console.warn('[lss-earth] water:', e); } }
     if (this.buildings) {
       try { await this._loadBuildings(); }
@@ -89704,6 +89722,7 @@ class LSSEarthTiles {
       this._progress('terrain ring ' + k + ' ' + d + '/' + t, d / t), this._abort.signal, 3);
     if (this._disposed) return null;
 
+    const sl = _leSlicer();
     const w = n * 256, h = n * 256;
     const heights = new Float32Array(w * h);
     const valid = new Uint8Array(w * h);
@@ -89712,6 +89731,7 @@ class LSSEarthTiles {
     const ctx = cv.getContext('2d', { willReadFrequently: true });
     let got = 0;
     for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+      if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
       const img = imgs[j * n + i];
       if (!img) continue;
       got++;
@@ -89734,6 +89754,7 @@ class LSSEarthTiles {
       const fill = new Float32Array(w * h), cnt = new Uint8Array(w * h);
       for (let y = 0; y < h; y++) {
         let last = NaN;
+        if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
         for (let x = 0, i = y * w; x < w; x++, i++) {
           if (valid[i]) last = heights[i]; else if (last === last) { fill[i] += last; cnt[i]++; }
         }
@@ -89744,6 +89765,7 @@ class LSSEarthTiles {
       }
       for (let x = 0; x < w; x++) {
         let last = NaN;
+        if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
         for (let y = 0, i = x; y < h; y++, i += w) {
           if (valid[i]) last = heights[i]; else if (last === last) { fill[i] += last; cnt[i]++; }
         }
@@ -89755,6 +89777,7 @@ class LSSEarthTiles {
       const _bh = (typeof this.forceBaseH === 'number') ? this.forceBaseH : null;
       let repaired = 0, orphan = 0;
       for (let i = 0; i < heights.length; i++) {
+        if ((i & 0x3FFF) === 0 && sl.due()) { await sl.yield(); if (this._disposed) return null; }
         if (valid[i]) continue;
         if (cnt[i]) { heights[i] = fill[i] / cnt[i]; repaired++; }
         else { heights[i] = (_bh !== null) ? _bh : 0; orphan++; }   // no valid texel in any direction
@@ -89767,6 +89790,7 @@ class LSSEarthTiles {
     const hist = new Map();
     let nReal = 0;
     for (let i = 0; i < heights.length; i++) {
+      if ((i & 0x3FFF) === 0 && sl.due()) { await sl.yield(); if (this._disposed) return null; }
       if (!valid[i]) continue;
       nReal++;
       hist.set(heights[i], (hist.get(heights[i]) || 0) + 1);
@@ -89789,11 +89813,15 @@ class LSSEarthTiles {
         levels.add(v);
       }
       const wet = new Uint8Array(w * h);
-      for (let i = 0; i < heights.length; i++) if (levels.has(heights[i])) wet[i] = 1;
+      for (let i = 0; i < heights.length; i++) {
+        if ((i & 0x3FFF) === 0 && sl.due()) { await sl.yield(); if (this._disposed) return null; }
+        if (levels.has(heights[i])) wet[i] = 1;
+      }
       let nWet = 0;
       {
         const keep = new Uint8Array(w * h);
-        for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        for (let y = 0; y < h; y++) { if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
+        for (let x = 0; x < w; x++) {
           const i = y * w + x;
           if (!wet[i]) continue;
           let n = 0;
@@ -89802,7 +89830,7 @@ class LSSEarthTiles {
           if (y > 0 && wet[i - w]) n++;
           if (y < h - 1 && wet[i + w]) n++;
           if (n >= 2) { keep[i] = 1; nWet++; }
-        }
+        } }
         wet.set(keep);
       }
       {
@@ -89810,6 +89838,7 @@ class LSSEarthTiles {
           const fill = new Uint8Array(w * h);
           fill.set(wet);
           for (let y = 1; y < h - 1; y++) {
+            if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
             for (let x = 1; x < w - 1; x++) {
               const i = y * w + x;
               if (wet[i]) continue;
@@ -89830,30 +89859,36 @@ class LSSEarthTiles {
         const tmp = new Float32Array(w * h);
         const R = 3;
         for (let pass = 0; pass < 2; pass++) {
-          for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          for (let y = 0; y < h; y++) { if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
+          for (let x = 0; x < w; x++) {
             let sum = 0, n2 = 0;
             for (let q = -R; q <= R; q++) {
               const xx = x + q; if (xx < 0 || xx >= w) continue;
               sum += amt[y * w + xx]; n2++;
             }
             tmp[y * w + x] = sum / n2;
-          }
-          for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+          } }
+          for (let y = 0; y < h; y++) { if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
+          for (let x = 0; x < w; x++) {
             let sum = 0, n2 = 0;
             for (let q = -R; q <= R; q++) {
               const yy = y + q; if (yy < 0 || yy >= h) continue;
               sum += tmp[yy * w + x]; n2++;
             }
             amt[y * w + x] = sum / n2;
-          }
+          } }
         }
         const D = this.seaDepth;
         const surface = (typeof this.forceWaterLevel === 'number') ? this.forceWaterLevel : level;
-        for (let i = 0; i < wet.length; i++) if (wet[i]) heights[i] = surface - D * Math.min(1, amt[i] * 1.25);
+        for (let i = 0; i < wet.length; i++) {
+          if ((i & 0x3FFF) === 0 && sl.due()) { await sl.yield(); if (this._disposed) return null; }
+          if (wet[i]) heights[i] = surface - D * Math.min(1, amt[i] * 1.25);
+        }
         {
           const _bed = surface - D;
           for (let pass = 0; pass < 2; pass++) {
             for (let y = 1; y < h - 1; y++) {
+              if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
               for (let x = 1; x < w - 1; x++) {
                 const i = y * w + x;
                 if (heights[i] > surface) continue;       // dry land, or an island
@@ -90020,28 +90055,28 @@ class LSSEarthTiles {
       if (this._disposed) return;
 
       const px = side * 256;
+      const far = (k > 0 && px > cap);
+      const tpx = far ? Math.max(1, Math.floor(cap / side)) : 256;
+      const cpx = side * tpx;
       const cv = document.createElement('canvas');
-      cv.width = px; cv.height = px;
+      cv.width = cpx; cv.height = cpx;
       const ctx = cv.getContext('2d', { willReadFrequently: true });
-      ctx.fillStyle = '#2a3240'; ctx.fillRect(0, 0, px, px);
+      if (far) { ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high'; }
+      ctx.fillStyle = '#2a3240'; ctx.fillRect(0, 0, cpx, cpx);
       let got = 0;
+      const sl = _leSlicer();
       for (let j = 0; j < side; j++) for (let i = 0; i < side; i++) {
+        if (sl.due()) { await sl.yield(); if (this._disposed) return; }
         const img = imgs[j * side + i];
         if (!img) continue;
         got++;
-        ctx.drawImage(img, i * 256, j * 256, 256, 256);
+        ctx.drawImage(img, i * tpx, j * tpx, tpx, tpx);
+        if ((got & 15) === 0) ctx.getImageData(0, 0, 1, 1);
       }
       this.stats.imgTiles = (this.stats.imgTiles || 0) + got;
-      if (k > 0 && px > cap) {
-        const sm = document.createElement('canvas');
-        sm.width = sm.height = cap;
-        const sctx = sm.getContext('2d');
-        sctx.imageSmoothingEnabled = true; sctx.imageSmoothingQuality = 'high';
-        sctx.drawImage(cv, 0, 0, px, px, 0, 0, cap, cap);
-        g.img = sm;
-        continue;
-      }
+      if (far) { g.img = cv; continue; }
       g.img = cv;
+      if (sl.due()) { await sl.yield(); if (this._disposed) return; }   // (v46.76) the 512² sample below is one more 36 MB read
       if (k === 0) {
         this._imgCanvas = cv;
         try {
@@ -90057,6 +90092,7 @@ class LSSEarthTiles {
           }
         } catch (_) { this._imgData = null; }
       }
+      if (sl.due()) { await sl.yield(); if (this._disposed) return; }   // (v46.76) do not carry this task into the next ring or stage
     }
   }
 
@@ -90064,6 +90100,7 @@ class LSSEarthTiles {
     let tex = _leTexCache.get(canvas);
     if (tex) return tex;
     tex = new THREE.CanvasTexture(canvas);
+    tex.flipY = false;
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.anisotropy = 8;
     tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
@@ -90073,7 +90110,7 @@ class LSSEarthTiles {
 
   /** UV of a world XZ inside a ring (shared by that ring's terrain). */
   _uvIn(g, x, z) {
-    return { u: (x - g.X0) / (g.X1 - g.X0), v: 1 - (z - g.Z0) / (g.Z1 - g.Z0) };
+    return { u: (x - g.X0) / (g.X1 - g.X0), v: (z - g.Z0) / (g.Z1 - g.Z0) };
   }
   /** Ring 0 UV — what the buildings and their roof-colour lookup use. */
   _uv(x, z) { return this._uvIn(this._grids[0], x, z); }
@@ -90086,12 +90123,16 @@ class LSSEarthTiles {
     return j * D + i;
   }
 
-  _buildTerrainMesh() {
-    for (let k = 0; k < this._grids.length; k++) this._buildRingMesh(k);
+  async _buildTerrainMesh() {
+    const sl = _leSlicer();   // (v46.76) one clock across the rings
+    for (let k = 0; k < this._grids.length; k++) {
+      await this._buildRingMesh(k, sl);
+      if (this._disposed) return;
+    }
     if (this.ownsFog) this._applyFog();
   }
 
-  _buildRingMesh(k) {
+  async _buildRingMesh(k, sl) {
     const g = this._grids[k];
     const inner = (k > 0) ? this._grids[k - 1] : null;
     const D = this.chunkDivisions;
@@ -90108,6 +90149,7 @@ class LSSEarthTiles {
       idx[t++] = c; idx[t++] = d; idx[t++] = e;
     }
     for (let cj = 0; cj < D; cj++) for (let ci = 0; ci < D; ci++) {
+      if (sl && sl.due()) { await sl.yield(); if (this._disposed) return; }   // (v46.76)
       const x0 = g.X0 + (g.X1 - g.X0) * (ci / D), x1 = g.X0 + (g.X1 - g.X0) * ((ci + 1) / D);
       const z0 = g.Z0 + (g.Z1 - g.Z0) * (cj / D), z1 = g.Z0 + (g.Z1 - g.Z0) * ((cj + 1) / D);
       if (inner && x0 >= inner.X0 - 0.5 && x1 <= inner.X1 + 0.5 &&
@@ -90412,6 +90454,12 @@ class LSSEarthTiles {
   }
 
   async _loadBuildings() {
+    if (this._bldBusy) return;
+    this._bldBusy = true;
+    try { await this._loadBuildingsBody(); }
+    finally { this._bldBusy = false; }
+  }
+  async _loadBuildingsBody() {
     const g = this._grid;
     const nx = Math.round(g.w / 256);
     const _bm = Math.max(1, this.buildingExtentMul);
@@ -90452,6 +90500,8 @@ class LSSEarthTiles {
     }
     if (this._disposed) return;
 
+    const sl = _leSlicer();   // (v46.76) the slice clock for everything below
+    const tBody = performance.now();
     const _seen = new Set();
     const all = (data.elements || []).filter((el) => {
       if (el.type !== 'way' || !el.geometry) return false;
@@ -90477,6 +90527,7 @@ class LSSEarthTiles {
         return r;
       };
       for (const el of outlines) {
+        if (sl.due()) { await sl.yield(); if (this._disposed) return; }   // (v46.76)
         const r = ringOf(el); if (r.length < 6) continue;
         el.__ring = r;
         let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
@@ -90493,6 +90544,7 @@ class LSSEarthTiles {
         }
       }
       for (const pt of parts) {
+        if (sl.due()) { await sl.yield(); if (this._disposed) return; }   // (v46.76)
         const r = ringOf(pt); if (r.length < 6) continue;
         let sx = 0, sz = 0;
         for (let i = 0; i < r.length; i += 2) { sx += r[i]; sz += r[i + 1]; }
@@ -90508,6 +90560,7 @@ class LSSEarthTiles {
       const _vk = (x, z) => (Math.round(x * 2) + ':' + Math.round(z * 2));
       const _vmap = new Map(), _ring = new Array(ways.length);
       for (let wi = 0; wi < ways.length; wi++) {
+        if (sl.due()) { await sl.yield(); if (this._disposed) return; }   // (v46.76)
         const g = ways[wi].geometry; if (!g) { _ring[wi] = null; continue; }
         const r = [];
         for (let i = 0; i < g.length - 1; i++) {
@@ -90520,6 +90573,7 @@ class LSSEarthTiles {
         _ring[wi] = r;
       }
       for (let wi = 0; wi < ways.length; wi++) {
+        if (sl.due()) { await sl.yield(); if (this._disposed) return; }   // (v46.76)
         const r = _ring[wi]; if (!r || r.length < 6) continue;
         const hh = LSSEarthTiles.parseHeight(ways[wi].tags || {});
         if (hh === null) continue;
@@ -90562,7 +90616,10 @@ class LSSEarthTiles {
     for (let i = 0; i < nChunks; i++) { roofs.push([]); walls.push([]); }
     let placed = 0;
     const tEx = performance.now();
-    for (const way of ways) { if (this._extrudeBuilding(way, roofs, walls)) placed++; }
+    for (const way of ways) {
+      if (sl.due()) { await sl.yield(); if (this._disposed) return; }   // (v46.76)
+      if (this._extrudeBuilding(way, roofs, walls)) placed++;
+    }
     this.stats.buildings = placed;
     this.stats.extrudeMs = Math.round(performance.now() - tEx);
     if (placed === 0) return;
@@ -90576,6 +90633,7 @@ class LSSEarthTiles {
                                    : new THREE.MeshLambertMaterial({ vertexColors: true });
     this._wallMat = wallMat;
     for (let c = 0; c < nChunks; c++) {
+      if (sl.due()) { await sl.yield(); if (this._disposed) return; }   // (v46.76)
       if (roofs[c].length) {
         const geo = _leMergeGeos(roofs[c]);
         geo.computeVertexNormals(); geo.computeBoundingSphere();
@@ -90594,6 +90652,8 @@ class LSSEarthTiles {
       }
     }
     if (this.ads) { try { this._buildAdPanels(); } catch (e) { console.warn('[lss-earth] ads skipped:', e); } }
+    this.stats.buildMs = Math.round(performance.now() - tBody);
+    this.stats.buildYields = sl.yields;
   }
 
   _extrudeBuilding(way, roofsOut, wallsOut) {
@@ -90743,7 +90803,7 @@ class LSSEarthTiles {
     if (this._imgData) {
       const uvc = this._uv(wx, wz);
       const ipx = Math.max(0, Math.min(this._imgData.width - 1, Math.round(uvc.u * this._imgData.width)));
-      const ipy = Math.max(0, Math.min(this._imgData.height - 1, Math.round((1 - uvc.v) * this._imgData.height)));
+      const ipy = Math.max(0, Math.min(this._imgData.height - 1, Math.round(uvc.v * this._imgData.height)));   // (v46.76) v is top-down now
       const o = (ipy * this._imgData.width + ipx) * 4, d = this._imgData.data;
       cr = 0.17 + (d[o] / 255) * 0.58;
       cg = 0.18 + (d[o + 1] / 255) * 0.58;
@@ -90828,6 +90888,32 @@ class LSSEarthTiles {
    *
    * Placement: the tallest buildings get a panel on their longest facade,
    * hung in the upper third, inset slightly so it does not z-fight the wall.
+   *
+   * ⭐⭐ (v46.76) EVERY PANEL STOOD AT 90° TO ITS WALL. Owner: "some of the ad
+   * signs go into buildings". All of them did: `yaw = atan2(ex, ez) + π/2`
+   * had already turned the edge direction by a quarter, and `(cos yaw,
+   * -sin yaw)` turned it by another, so the "normal" the panel was aimed
+   * along was the edge itself, anti-parallel. Measured on the 12 nearest
+   * panels over Toronto: panel normal · wall normal = 0.00 for every one,
+   * panel centre 0.00-0.07 m off the wall plane where the inset says 1.2 m.
+   * A 15-35 m sign standing edge-on across a facade is half inside the tower
+   * and half in the street, and the street half is what the owner saw
+   * entering the next building. The outward normal now comes from the ring's
+   * WINDING (exact for concave footprints, where the old centroid test can
+   * point inward) and is confirmed by a point-in-polygon probe.
+   *
+   * A facade can also be genuinely BLOCKED: OSM terraces share party walls
+   * and a `building:part` can stand against its neighbour. Every placement
+   * is probed against the collision grid at the panel's own height, its own
+   * footprint included (the notch of an L is a building too). A blocked
+   * facade first SLIDES the panel along the wall toward the clear end, then
+   * narrows it, then ROTATES to the next longest edge, and only then gives
+   * the building up. A facade that already carries a panel is skipped: an
+   * outline the part-suppression missed (centroid outside its own concave
+   * ring) stood inside its parts with the same longest edge, which is what
+   * stacked pairs two metres apart. The budget (`max`) is filled from the
+   * ranked list instead of sliced off its top, so a rejected building costs
+   * a panel nothing. `stats.adsPlace` says how each candidate went.
    */
   _buildAdPanels() {
     if (typeof _hcHoloMat !== 'function') return;
@@ -90835,7 +90921,6 @@ class LSSEarthTiles {
     if (cands.length === 0) return;
     cands.sort((a, b) => b.h - a.h);
     const max = Math.min(48, Math.max(6, Math.round(cands.length * 0.06)));
-    const chosen = cands.slice(0, max);
 
     const geo = new THREE.PlaneGeometry(1, 1);
     const mat = _hcHoloMat();
@@ -90844,34 +90929,27 @@ class LSSEarthTiles {
         mat.uniforms[k] = { value: (k === 'uHcLodOn') ? 1 : 0 };
       }
     }
-    const inst = new THREE.InstancedMesh(geo, mat, chosen.length);
+    const inst = new THREE.InstancedMesh(geo, mat, max);
     inst.name = 'earth-ads';
     inst.frustumCulled = true;
-    const prm = new Float32Array(chosen.length * 2);
+    const prm = new Float32Array(max * 2);
     const col = new THREE.Color();
     const m4 = new THREE.Matrix4(), q = new THREE.Quaternion();
     const pos = new THREE.Vector3(), scl = new THREE.Vector3();
+    const done = [];   // every placed panel, for the same-facade test
+    const tally = { tried: 0, placed: 0, blocked: 0, dup: 0, slid: 0, turned: 0 };
     let placed = 0;
-    for (const b of chosen) {
-      let bi = -1, bl = 0;
-      for (let i = 0; i < b.pts.length; i++) {
-        const a = b.pts[i], c = b.pts[(i + 1) % b.pts.length];
-        const L = Math.hypot(c.x - a.x, c.y - a.y);
-        if (L > bl) { bl = L; bi = i; }
-      }
-      if (bi < 0 || bl < 12) continue;
-      const a = b.pts[bi], c = b.pts[(bi + 1) % b.pts.length];
-      const mx = (a.x + c.x) / 2, my = (a.y + c.y) / 2;
-      const ex = c.x - a.x, ez = -(c.y - a.y);
-      const yaw = Math.atan2(ex, ez) + Math.PI / 2;
-      let nx = Math.cos(yaw), nz = -Math.sin(yaw);
-      if ((mx - b.cx) * nx + ((-my) - b.cz) * nz < 0) { nx = -nx; nz = -nz; }
-      const w = Math.min(bl * 0.8, 120);
-      const hgt = Math.min(w * 0.55, b.h * 0.3);
-      if (hgt < 6) continue;
-      pos.set(mx + nx * 1.2, b.base + b.h * 0.72, (-my) + nz * 1.2);
-      q.setFromEuler(new THREE.Euler(0, Math.atan2(nx, nz), 0));
-      scl.set(w, hgt, 1);
+    for (const b of cands) {
+      if (placed >= max) break;
+      tally.tried++;
+      const P = this._adPanelPlace(b, done);
+      if (!P) { tally.blocked++; continue; }
+      if (P.dup) { tally.dup++; continue; }
+      if (P.slid) tally.slid++;
+      if (P.edge > 0) tally.turned++;
+      pos.set(P.x, P.y, P.z);
+      q.setFromEuler(new THREE.Euler(0, Math.atan2(P.nx, P.nz), 0));
+      scl.set(P.w, P.hgt, 1);
       m4.compose(pos, q, scl);
       inst.setMatrixAt(placed, m4);
       const hue = (b.rnd * 5.7) % 1;
@@ -90881,8 +90959,11 @@ class LSSEarthTiles {
       inst.setColorAt(placed, col);
       prm[placed * 2] = 0;
       prm[placed * 2 + 1] = b.rnd;   // the ad atlas cell + glyph seed
+      done.push({ x: P.x, z: P.z, nx: P.nx, nz: P.nz, w: P.w });
       placed++;
     }
+    tally.placed = placed;
+    this.stats.adsPlace = tally;
     if (placed === 0) { geo.dispose(); mat.dispose(); return; }
     inst.count = placed;
     inst.geometry.setAttribute('aPrm', new THREE.InstancedBufferAttribute(prm, 2));
@@ -90891,6 +90972,79 @@ class LSSEarthTiles {
     inst.castShadow = false; inst.receiveShadow = false;
     this.group.add(inst);
     this.stats.ads = placed;
+  }
+
+  _adPanelPlace(b, done) {
+    const pts = b.pts, n = pts.length;
+    let area2 = 0;
+    for (let i = 0; i < n; i++) { const a = pts[i], c = pts[(i + 1) % n]; area2 += a.x * c.y - c.x * a.y; }
+    const wind = (area2 >= 0) ? 1 : -1;
+    const edges = [];
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], c = pts[(i + 1) % n];
+      const L = Math.hypot(c.x - a.x, c.y - a.y);
+      if (L >= 12) edges.push({ i, L });
+    }
+    if (!edges.length) return null;
+    edges.sort((u, v) => v.L - u.L);
+    const y = b.base + b.h * 0.72;
+    const OUT = 1.2;   // the panel plane, off the wall so it never z-fights it
+    const AIR = 4.0;   // and this much open air in front of it
+    for (let e = 0; e < edges.length && e < 6; e++) {
+      const { i, L } = edges[e];
+      const a = pts[i], c = pts[(i + 1) % n];
+      const ux = (c.x - a.x) / L, uy = (c.y - a.y) / L;      // along the wall
+      let px = uy * wind, py = -ux * wind;                    // outward, pts space
+      const mx = (a.x + c.x) / 2, my = (a.y + c.y) / 2;
+      if (_lePointInPoly(b.poly, mx + px * 1.5, my + py * 1.5)) { px = -px; py = -py; }
+      const nx = px, nz = -py;                                // world (x, z)
+      for (let pass = 0; pass < 2; pass++) {
+        const w = Math.min(L * (pass ? 0.5 : 0.8), 120);
+        const hgt = Math.min(w * 0.55, b.h * 0.3);
+        if (hgt < 6) break;
+        if (pass === 0) {
+          for (let d = 0; d < done.length; d++) {
+            const D = done[d];
+            if (D.nx * nx + D.nz * nz < 0.98) continue;
+            const dx = mx - D.x, dz = (-my) - D.z;
+            if (Math.abs(dx * nx + dz * nz) < 3 && Math.abs(dx * nz - dz * nx) < (w + D.w) * 0.5) return { dup: true };
+          }
+        }
+        const slideMax = Math.max(0, (L - w) / 2 - 0.5);
+        const offs = (slideMax > 1) ? [0, slideMax, -slideMax, slideMax * 0.5, -slideMax * 0.5] : [0];
+        for (let k = 0; k < offs.length; k++) {
+          const cx = mx + ux * offs[k], cy = my + uy * offs[k];
+          if (this._adFacadeClear(cx, cy, ux, uy, px, py, w, y, hgt, OUT, AIR)) {
+            return { x: cx + px * OUT, y, z: -(cy + py * OUT), nx, nz, w, hgt, edge: e, slid: (k > 0 || pass > 0) };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  _adFacadeClear(cx, cy, ux, uy, px, py, w, y, hgt, OUT, AIR) {
+    const g = this._cgrid;
+    if (!g) return true;
+    const yLo = y - hgt * 0.45, yHi = y + hgt * 0.45;
+    for (let s = -0.45; s <= 0.451; s += 0.225) {
+      for (let o = 0; o < 2; o++) {
+        const out = o ? (OUT + AIR) : OUT;
+        const sx = cx + ux * (s * w) + px * out, sy = cy + uy * (s * w) + py * out;
+        const wx = sx, wz = -sy;
+        const ci = ((wx - g.X0) / g.cell) | 0, cj = ((wz - g.Z0) / g.cell) | 0;
+        if (ci < 0 || cj < 0 || ci >= g.gx || cj >= g.gz) continue;
+        const list = g.cells[cj * g.gx + ci];
+        if (!list) continue;
+        for (let k = 0; k < list.length; k++) {
+          const bl = list[k];
+          if (bl.top < yLo || bl.base > yHi) continue;
+          if (wx < bl.x0 || wx > bl.x1 || wz < bl.z0 || wz > bl.z1) continue;
+          if (_lePointInPoly(bl.poly, sx, sy)) return false;
+        }
+      }
+    }
+    return true;
   }
 }
 
@@ -91084,7 +91238,7 @@ class LSSEarthWorld {
           this.stats.regionMs = Math.round(((typeof performance !== 'undefined') ? performance.now() : 0) - _tq);
           console.log('[lss-earth-world] region ' + key + ': core ' + _coreCells.toFixed(1)
             + ' cells, ' + this.stats.regionMs + ' ms, '
-            + Math.round(JSON.stringify(data).length / 1048576 * 10) / 10 + ' MB');
+            + ((data && data.elements) ? data.elements.length : 0) + ' elements');   // (v46.76) was a JSON.stringify of the whole 10 MB reply, for a log line
           _leCachePut(ckey, data);
         } catch (e) {
           console.warn('[lss-earth-world] region buildings failed:', e);
@@ -91110,7 +91264,9 @@ class LSSEarthWorld {
         if (_pr && typeof _pr.project === 'function') {
           const _oc = new Map();
           this._bldCellCount = _oc;
+          const _sl = _leSlicer();   // (v46.76) ~38k ways, a projection per vertex
           for (const el of ways) {
+            if (_sl.due()) { await _sl.yield(); if (this._disposed) return []; }
             const g = el.geometry;
             let mx = 0, mz = 0, n = 0;
             for (let i = 0; i < g.length; i++) {
@@ -91177,7 +91333,7 @@ class LSSEarthWorld {
     let n = 0;
     for (const [pk, p] of this._patches.entries()) {
       if (this._disposed) return;
-      if (p._bldList && p._bldList.length) continue;   // this one already has its city
+      if ((p._bldList && p._bldList.length) || p._bldBusy) continue;   // this one already has (or is getting) its city
       try {
         p.prefetchedWays = this._waysFor(ways, pk);
         await p._loadBuildings();
@@ -91285,6 +91441,7 @@ class LSSEarthWorld {
     if (this._bldWays && this._bldWays.length && this._bldRegionKey && !this._bfBusy) {
       for (const [pk, p] of this._patches.entries()) {
         if (p.__bfKey === this._bldRegionKey) continue;
+        if (p._bldBusy) continue;   // (v46.76) mid-build; it will have its city
         if (p._bldList && p._bldList.length) { p.__bfKey = this._bldRegionKey; continue; }
         const n = this._bldCellCount ? (this._bldCellCount.get(pk) || 0) : 1;
         if (!n) { p.__bfKey = this._bldRegionKey; continue; }
@@ -91784,6 +91941,7 @@ async function _lssGmapsBuildLevel(level) {
       });
     }
     _lssGmaps.tiles = tiles;
+    try { if (typeof window !== 'undefined') window.__earthTiles = tiles; } catch (_) {}   // (v46.76) pane probes: stats, _patches, _bldList
     _lssGmaps.active = true;
     _lssGmaps.lat = level.lat;
     _lssGmaps.lng = level.lng;
@@ -92264,6 +92422,7 @@ async function _lssGmapsAttachAtLatLng(lat, lng, label, opts) {
     try { if (typeof tiles.setCamera === 'function') tiles.setCamera(camera); } catch(_) {}
     try { if (typeof tiles.update === 'function') tiles.update(); } catch(_) {}
     _lssGmaps.tiles = tiles;
+    try { if (typeof window !== 'undefined') window.__earthTiles = tiles; } catch (_) {}   // (v46.76) pane probes: stats, _patches, _bldList
     _lssGmaps.scale = sc;
     _lssGmaps.overlayOnly = true;
     _lssGmaps.active = true;

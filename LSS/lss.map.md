@@ -6341,3 +6341,16 @@ against it (h = 1.41 measured against a +/-0.55 seed clamp), so the shallows abs
 water's alpha read only the near mask, so it was opaque past the ripple window's square edge - the
 horizontal straight line; **41.74** the reflection UV clamp smeared an edge texel past the mirror -
 the vertical straight line. ⚠ Live: `,`/`.` shore absorption, `;`/`'` viscosity, `[`/`]` maxSlope.
+
+---
+
+## FREE FLIGHT: EARTH — v46.76 notes (ad panels + streamed-patch hitches)
+
+**Jump:** `_buildAdPanels()` · `_adPanelPlace(` · `_adFacadeClear(` · `function _leSlicer` · `function _leBreath` · `window.__earthTiles`
+
+- **Ad panels stood 90° to their facades** (owner: "some of the ad signs go into buildings"). `_buildAdPanels` turned the edge direction by a quarter twice (`atan2 + π/2`, then `(cos, -sin)`), so every panel's normal ran ALONG its wall: a 15-35 m sign edge-on across the facade, half inside the tower. Measured on the 12 nearest panels over Toronto: panel·wall normal 0.00, centre on the wall plane. Now: outward normal from the ring's winding (+ a point-in-poly probe), `_adFacadeClear` probes the panel face against the collision grid at the panel's height (own footprint included), a blocked facade slides along the wall → narrows → rotates to the next longest edge → is skipped; a facade that already carries a panel is skipped (outline+part pairs used to stack two panels 2 m apart). `stats.adsPlace` tallies it. Verified: 39/40 panels dot 1.00 at the 1.2 m inset.
+- **Streamed-patch hitches (?pbhud):** 467/542 ms frames blamed `earth:stream` = `_loadBuildings` with `prefetchedWays` never awaits, so its whole tail (suppression, taper anchors, 142-408 ms of extrusion, merges, ads) ran inside the streaming tick's late backfill; the 50-90 ms long tasks with no blame were the DEM ring's post-load passes and the 144 imagery tile draws running as the LAST tile's `onload` continuation (named by a `long-animation-frame` PerformanceObserver's `scripts[].invoker`). Every such loop now runs on `_leSlicer()` (6 ms slices while playing, 40 behind the curtain, `window.__earthSliceMs`), `_leBreath()` sits between `_build` stages, `_bldBusy` serialises the two backfill callers. Same harness: worst frame 133 → 58 ms, gaps ≥100 ms 7 → 0.
+- **Texture upload:** `flipY` on the 3072² CanvasTexture was a CPU flip of 36 MB inside texImage2D (28-37 ms vs 15.7 ms measured live); `_makeTexture` sets `flipY = false` and `_uvIn` runs v top-down (roof-colour lookup follows). Far rings draw their tiles straight into the capped canvas instead of compositing at 3072² and downscaling.
+- ⚠ **The 2D canvas defers its draws**: after slicing the tile loop the imagery frames were still 40-52 ms because the 144 queued `drawImage`s rasterised (and decoded their JPEGs) at the first READ, in one burst the slice clock never saw. `ctx.getImageData(0, 0, 1, 1)` every 16 tiles flushes the work into the loop. Shipped result over a downtown teleport rebuild (7 dense patches): worst frame 50 ms, no gap ≥ 100 ms.
+- Left as is: the region cache read (`IDBRequest.onsuccess`, 50-96 ms once per ~8 km, a 10 MB structured clone), ~15 ms per patch for the texture's first draw.
+- **`strip.py` stamped `lss.js?v=0` on every build** (single-quote regex vs double-quoted source) while `_headers` caches `/lss.js` immutable for a year — fixed; the tag is `lss.js?v=<LSS_BUILD>` now.

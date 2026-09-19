@@ -149,8 +149,13 @@ def split_game_script(lines):
         sys.stderr.write("split: game script tags are not on their own lines; shipping inline.\n")
         return lines, None, None
     js = lines[op + 1:cl]
-    m = next((re.search(r"const LSS_BUILD = '([^']+)'", l) for l in js
-              if "const LSS_BUILD = '" in l), None)
+    # (v46.76) Either quote style. The source has used double quotes since
+    # long before this split existed, and the single-quote pattern matched
+    # nothing, so every build shipped as lss.js?v=0 -- one URL for every
+    # version, which _headers caches immutable for a year. Returning players
+    # could keep a stale 3 MB script for as long as that.
+    m = next((re.search(r"const LSS_BUILD = ['\"]([^'\"]+)['\"]", l) for l in js
+              if "const LSS_BUILD = " in l), None)
     build = m.group(1) if m else "0"
     tag = ('<script src="lss.js?v=%s"></script>' % build)
     html = lines[:op] + [tag] + lines[cl + 1:]
