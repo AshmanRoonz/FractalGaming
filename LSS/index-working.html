@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.71";
+const LSS_BUILD = "46.75";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -31227,6 +31227,29 @@ function _volcExcl(x, z) {
   c = c * c * (3 - 2 * c); sp = sp * sp * (3 - 2 * sp);
   return Math.min(c, sp);
 }
+// (v46.72) HOW MUCH OF A VOLCANO IS UNDER (x, z), on the SHADER's own footprint: the terrain FS
+// paints basalt and glow with `1 - smoothstep(0.62, 1.20, d/R)` from the same four nearest cones,
+// so anything gated on this agrees with what the ground looks like. Owner: "we shouldn't have
+// icicles or vines on a volcano" - the drape pass keyed ice on height alone (a snow-line summit is a
+// summit) and vines on the zone, and a stratovolcano is neither cold nor a zone. `edge` is the outer
+// radius in R (1.2 = the shader's); suppressed cones (city / spawn exclusion) do not count, exactly
+// as in _volcSync.
+function _volcHotAt(x, z, edge) {
+  const E = (edge != null) ? edge : 1.2;
+  const ci = Math.floor(x / _VOLC_CELL), cj = Math.floor(z / _VOLC_CELL);
+  let best = 0;
+  for (let i = ci - 1; i <= ci + 1; i++) for (let j = cj - 1; j <= cj + 1; j++) {
+    const V = _volcAt(i, j);
+    if (!V) continue;
+    const d = Math.hypot(x - V.x, z - V.z) / Math.max(1, V.R);
+    if (d >= E) continue;
+    if (_volcExcl(V.x, V.z) < 0.25) continue;
+    let t = (d - 0.62) / (E - 0.62); t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    const m = 1 - t * t * (3 - 2 * t);
+    if (m > best) best = m;
+  }
+  return best;
+}
 let _volcKey = '';
 function _volcSync(cx, cz) {
   const T = game.sandwichTerrain;
@@ -32424,7 +32447,9 @@ function _swDrapeVineMatGet(){ if(!_swVineMat) _swVineMat = new THREE.MeshLamber
 // on the CPU (same lattice, same split), so a fit computed here is a fit on screen. Falls back to
 // the function when the table is not up (a chunk built before the bake) or L0 is not on it.
 function _swDrapeY(x, z, T) {
-  if (_HB.ready && _HB.on && _HB.mean && _HB.sp === 32 && _CLIP_M0 === 32 && _HB.minLevel <= 0) {
+  // (v46.73) OVERWORLD ONLY: the hub's tables stay resident inside a rift cavern, and without this
+  // gate a cavern point read the overworld's height under it.
+  if (T && T.HUB && _HB.ready && _HB.on && _HB.mean && _HB.sp === 32 && _CLIP_M0 === 32 && _HB.minLevel <= 0) {
     const sp = _HB.sp, dim = _HB.dim[0], D = _HB.mean[0];
     const fx = (x - _HB.x0) / sp, fz = (z - _HB.z0) / sp, i0 = Math.floor(fx), j0 = Math.floor(fz);
     if (i0 >= 0 && j0 >= 0 && i0 + 1 < dim && j0 + 1 < dim) {
@@ -32469,6 +32494,8 @@ function _swBuildDrapes(x0, z0, T) {
     if (T.HUB && _hubCityExcludes(ax, az) && (typeof _hubCityGroundBlocked !== 'function' || _hubCityGroundBlocked(ax, az))) continue;
     const ay = _swDrapeY(ax, az, T);   // (v46.69) the rendered surface, here and in every sample below
     if (T.WL != null && ay < T.WL + 6) continue;
+    // (v46.72) nothing hangs on a volcano - ice or vine - anywhere the shader paints it hot
+    if (T.HUB && typeof _volcHotAt === 'function' && _volcHotAt(ax, az, (K.volc != null) ? +K.volc : 1.2) > 0.004) continue;
     // FOUR PROBES, and all four are kept - the shape of the set is what says lip / face / peak /
     // ridge. Index 0..3 = +x, -x, +z, -z, so the opposite of an axis probe is its pair and the
     // PERPENDICULAR pair is the other axis.
@@ -43968,6 +43995,8 @@ function _hcPadSched(pad, i, t, lift, cache) {
   }
   const ph = ((t / C.period) + C.h2) % 1;
   const o = C.out, P = C.pos;
+  // (v46.74) last frame's position, for CONTINUITY across a claim: a hold is flown to, not cut to
+  const pvx = P.x, pvy = P.y, pvz = P.z, pvOk = C._seen === true; C._seen = true;
   o.pos = P; o.from = null; o.to = null; o.fx = null; o.yaw = undefined;
   // segments: 0 in-cruise, 1 descend, 2 parked, 3 rise, 4 out-cruise, 5 absent
   // (v35.65) Rebalanced toward AIRBORNE. Old split was 42% flying / 36% parked
@@ -43979,21 +44008,52 @@ function _hcPadSched(pad, i, t, lift, cache) {
   // free, instead of descending through the parked player. Only the descend/park/rise
   // window is replaced - the ship still cruises in and out on schedule, so the fleet
   // keeps its rhythm and one waiting freighter reads as traffic holding, not as a bug.
+  // ⭐⭐ (v46.74) ...AND IT IS FLOWN TO, NOT CUT TO. Owner: "when you go near a landing pad in the
+  // city, the city ships disappear if they are near that pad". The hold sits at the approach
+  // altitude, 2100-3300 above the pad, and v46.15 put the ship THERE on the frame the claim began -
+  // so a freighter parked on the pad, or halfway down to it, jumped 200 m straight up and, seen from
+  // the pad, vanished. Now it climbs out of wherever it was to the hold over `_HC_HOLD_IN` seconds
+  // and, when the claim lifts (or its window ends), eases back onto its schedule over
+  // `_HC_HOLD_OUT`. Both blends start from the last position this function produced, so nothing
+  // teleports, and the heading follows the motion (the consumer orients on from/to).
   if (pad._claim && ph >= 0.18 && ph < 0.58) {
     o.seg = 0;
     const a2 = t * 0.22 + C.h2 * 6.283, hr = 210;
-    P.x = C.AH.x + Math.cos(a2) * hr; P.y = C.AH.y; P.z = C.AH.z + Math.sin(a2) * hr;
-    o.fx = C.AH; o.yaw = -a2;
+    const hx = C.AH.x + Math.cos(a2) * hr, hy = C.AH.y, hz = C.AH.z + Math.sin(a2) * hr;
+    if (!C.hold) C.hold = pvOk ? { t0: t, x: pvx, y: pvy, z: pvz } : { t0: t - 1e4, x: hx, y: hy, z: hz };
+    C.rel = null;
+    let k = (t - C.hold.t0) / _HC_HOLD_IN; k = k < 0 ? 0 : (k > 1 ? 1 : k); k = k * k * (3 - 2 * k);
+    P.x = C.hold.x + (hx - C.hold.x) * k; P.y = C.hold.y + (hy - C.hold.y) * k; P.z = C.hold.z + (hz - C.hold.z) * k;
+    const hf = C.hf || (C.hf = { x: 0, y: 0, z: 0 }), ht = C.ht || (C.ht = { x: 0, y: 0, z: 0 });
+    if (k < 1 && pvOk) { hf.x = pvx; hf.y = pvy; hf.z = pvz; ht.x = P.x; ht.y = P.y; ht.z = P.z; }
+    else { hf.x = P.x; hf.y = P.y; hf.z = P.z; ht.x = P.x - Math.sin(a2); ht.y = P.y; ht.z = P.z + Math.cos(a2); }
+    if ((ht.x - hf.x) * (ht.x - hf.x) + (ht.z - hf.z) * (ht.z - hf.z) > 1e-6) { o.from = hf; o.to = ht; }
+    o.fx = C.AH;
     return o;
   }
-  if (ph < 0.20) { o.seg = 0; _hcLerpInto(P, C.FI, C.AH, ph / 0.20);          o.from = C.FI; o.to = C.AH; o.fx = C.FI; return o; }
-  if (ph < 0.26) { o.seg = 1; _hcLerpInto(P, C.AH, C.A, (ph - 0.20) / 0.06);  o.from = C.AH; o.to = C.A;  return o; }
-  if (ph < 0.30) { o.seg = 1; _hcLerpInto(P, C.A, C.PK, (ph - 0.26) / 0.04);  o.from = C.A;  o.to = C.PK; return o; }
-  if (ph < 0.48) { o.seg = 2; P.x = C.PK.x; P.y = C.PK.y; P.z = C.PK.z;        o.yaw = pad.yaw; return o; }
-  if (ph < 0.52) { o.seg = 3; _hcLerpInto(P, C.PK, C.A, (ph - 0.48) / 0.04);  o.from = C.PK; o.to = C.A;  return o; }
-  if (ph < 0.58) { o.seg = 3; _hcLerpInto(P, C.A, C.AH, (ph - 0.52) / 0.06);  o.from = C.A;  o.to = C.AH; return o; }
-  if (ph < 0.92) { o.seg = 4; _hcLerpInto(P, C.AH, C.FO, (ph - 0.58) / 0.34); o.from = C.AH; o.to = C.FO; o.fx = C.FO; return o; }
-  o.seg = 5; o.pos = null; return o;
+  if (C.hold) { C.rel = { t0: t, x: pvx, y: pvy, z: pvz }; C.hold = null; }
+  _hcSchedSeg(C, pad, ph, o, P);
+  if (C.rel) {
+    if (o.pos && o.seg !== 5) {
+      let k = (t - C.rel.t0) / _HC_HOLD_OUT;
+      if (k >= 1) C.rel = null;
+      else { k = k < 0 ? 0 : k; k = k * k * (3 - 2 * k); P.x = C.rel.x + (P.x - C.rel.x) * k; P.y = C.rel.y + (P.y - C.rel.y) * k; P.z = C.rel.z + (P.z - C.rel.z) * k; }
+    } else C.rel = null;
+  }
+  return o;
+}
+const _HC_HOLD_IN = 6.0, _HC_HOLD_OUT = 6.0;   // (v46.74) seconds: climb out to the hold / settle back (node sim: peaks ~630 u/s, never a cut)
+// The schedule proper: position and segment for a phase, into o/P. Split out of _hcPadSched so the
+// hold's return blend can wrap it.
+function _hcSchedSeg(C, pad, ph, o, P) {
+  if (ph < 0.20) { o.seg = 0; _hcLerpInto(P, C.FI, C.AH, ph / 0.20);          o.from = C.FI; o.to = C.AH; o.fx = C.FI; return; }
+  if (ph < 0.26) { o.seg = 1; _hcLerpInto(P, C.AH, C.A, (ph - 0.20) / 0.06);  o.from = C.AH; o.to = C.A;  return; }
+  if (ph < 0.30) { o.seg = 1; _hcLerpInto(P, C.A, C.PK, (ph - 0.26) / 0.04);  o.from = C.A;  o.to = C.PK; return; }
+  if (ph < 0.48) { o.seg = 2; P.x = C.PK.x; P.y = C.PK.y; P.z = C.PK.z;        o.yaw = pad.yaw; return; }
+  if (ph < 0.52) { o.seg = 3; _hcLerpInto(P, C.PK, C.A, (ph - 0.48) / 0.04);  o.from = C.PK; o.to = C.A;  return; }
+  if (ph < 0.58) { o.seg = 3; _hcLerpInto(P, C.A, C.AH, (ph - 0.52) / 0.06);  o.from = C.A;  o.to = C.AH; return; }
+  if (ph < 0.92) { o.seg = 4; _hcLerpInto(P, C.AH, C.FO, (ph - 0.58) / 0.34); o.from = C.AH; o.to = C.FO; o.fx = C.FO; return; }
+  o.seg = 5; o.pos = null;
 }
 
 // (v44.36) A towed ad banner: a vertical holo sheet behind the freighter on a cable, side-on to the
@@ -48209,6 +48269,19 @@ function _padList(out) {
   try {
     const hc = game.hubCity;
     if (hc && hc.city && hc.city.pads) { const ps = hc.city.pads; for (let i = 0; i < ps.length; i++) out.push(ps[i]); }
+  } catch (_) {}
+  // (v46.74) ...and every BUILT sector city's pads. Owner: "the landing pads in other cities are
+  // inactive" - they come out of the same _hubCityBuild pipeline (world-space, `city.pads`), the
+  // ring material shares _HC_RING_U so the flare and charge already work there; they were simply
+  // never candidates. Built cities only: a dropped city's pads have no ring under them.
+  try {
+    if (typeof OW !== 'undefined' && OW && OW.cities) {
+      for (let i = 0; i < OW.cities.length; i++) {
+        const b = OW.cities[i].built, ps = b && b.city && b.city.pads;
+        if (!ps) continue;
+        for (let j = 0; j < ps.length; j++) out.push(ps[j]);
+      }
+    }
   } catch (_) {}
   try {
     for (const rec of _skLive.values()) {
@@ -52997,7 +53070,10 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   // run: 361 chunks, 0 tree meshes, 0 drapes. They share the tree SLOT (one lifecycle, one teardown)
   // but they need their own WANT, so the slot now opens for either and each builder decides for
   // itself whether it has anything to plant.
-  const wantDrapes = (game.sandwichDrapes !== false) &&
+  // (v46.73) ...and OVERWORLD ONLY. Owner: "no vines or icicles in the caverns, only overworld... i
+  // guess that means the rift". `T.HUB` is true for the mossy overworld alone (initSandwichTerrain's
+  // `_isHubMap`); the zone-rift caverns, endless and every arena carry their own T with HUB false.
+  const wantDrapes = (game.sandwichDrapes !== false) && !!(T && T.HUB) &&
                      !(typeof window !== 'undefined' && window.__drapes && window.__drapes.on === false);
   const wantFoliage = wantTrees || wantDrapes;
   // (v38.61) IDLE EARLY-OUT. In steady state (same chunk cell, nothing left
@@ -116053,6 +116129,18 @@ function getNextMap() {
     return MAP_DATA.camp_approach || CAMPAIGN_LEG_MAP;
   }
   let selectedMapKey = game.selectedMap || 'hourglass';
+  // ⭐⭐ (v46.75) THE ZONE RIFT IS A WORLD SWAP THE GAME ASKED FOR, NOT A PICK. v43.73's legality
+  // gate below rebuilt any map the mode's picker would not offer - and a rift enters with
+  // `shifting_deep` while LSS.MODE is still 'freeflight', whose legal list is `hub_*`. So since
+  // 09-13 every rift warned "not available in mode freeflight -> building hub_overworld" and built
+  // the OVERWORLD (its seven `hub_*` rooms, its footprint) with the cavern's biome and an arena
+  // ceiling clamped on: owner, "they were arenas before, like the elimination style... now they
+  // are more like endless caverns". The cavern flag is the transition's own marker (_hzEnterCavern
+  // sets it before the round ends), so it is the exemption. The gate keeps guarding real picks.
+  // ⚠ Keyed on the flag ALONE: measured, something rewrites `selectedMap` to hub_overworld within
+  // a second of _hzEnterCavern (the picker sync), so a key test would miss any rebuild that
+  // happens while the cavern is live. The flag is cleared by _hzReturnToHub before the trip home.
+  if (typeof game !== 'undefined' && game && game._cavern && MAP_DATA.shifting_deep) { game.selectedMap = 'shifting_deep'; return MAP_DATA.shifting_deep; }
   // (v43.73) ⭐ THE LEGALITY GATE LIVES HERE, because this is the ONE place every world build reads
   // the map key - both `const level = getNextMap()` call sites, for the first launch and for every
   // round after it. Owner: "i tried to start it on the wrong map, and it diD".

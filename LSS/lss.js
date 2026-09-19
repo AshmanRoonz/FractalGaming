@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.71";
+const LSS_BUILD = "46.75";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -16872,6 +16872,22 @@ function _volcExcl(x, z) {
   c = c * c * (3 - 2 * c); sp = sp * sp * (3 - 2 * sp);
   return Math.min(c, sp);
 }
+function _volcHotAt(x, z, edge) {
+  const E = (edge != null) ? edge : 1.2;
+  const ci = Math.floor(x / _VOLC_CELL), cj = Math.floor(z / _VOLC_CELL);
+  let best = 0;
+  for (let i = ci - 1; i <= ci + 1; i++) for (let j = cj - 1; j <= cj + 1; j++) {
+    const V = _volcAt(i, j);
+    if (!V) continue;
+    const d = Math.hypot(x - V.x, z - V.z) / Math.max(1, V.R);
+    if (d >= E) continue;
+    if (_volcExcl(V.x, V.z) < 0.25) continue;
+    let t = (d - 0.62) / (E - 0.62); t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    const m = 1 - t * t * (3 - 2 * t);
+    if (m > best) best = m;
+  }
+  return best;
+}
 let _volcKey = '';
 function _volcSync(cx, cz) {
   const T = game.sandwichTerrain;
@@ -17564,7 +17580,7 @@ let _swIceMat = null, _swVineMat = null;
 function _swIceMatGet(){ if(!_swIceMat) _swIceMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x8fb4cc, vertexColors: true, side: THREE.DoubleSide }); return _swIceMat; }
 function _swDrapeVineMatGet(){ if(!_swVineMat) _swVineMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x141f0d, vertexColors: true, side: THREE.DoubleSide }); return _swVineMat; }
 function _swDrapeY(x, z, T) {
-  if (_HB.ready && _HB.on && _HB.mean && _HB.sp === 32 && _CLIP_M0 === 32 && _HB.minLevel <= 0) {
+  if (T && T.HUB && _HB.ready && _HB.on && _HB.mean && _HB.sp === 32 && _CLIP_M0 === 32 && _HB.minLevel <= 0) {
     const sp = _HB.sp, dim = _HB.dim[0], D = _HB.mean[0];
     const fx = (x - _HB.x0) / sp, fz = (z - _HB.z0) / sp, i0 = Math.floor(fx), j0 = Math.floor(fz);
     if (i0 >= 0 && j0 >= 0 && i0 + 1 < dim && j0 + 1 < dim) {
@@ -17602,6 +17618,7 @@ function _swBuildDrapes(x0, z0, T) {
     if (T.HUB && _hubCityExcludes(ax, az) && (typeof _hubCityGroundBlocked !== 'function' || _hubCityGroundBlocked(ax, az))) continue;
     const ay = _swDrapeY(ax, az, T);   // (v46.69) the rendered surface, here and in every sample below
     if (T.WL != null && ay < T.WL + 6) continue;
+    if (T.HUB && typeof _volcHotAt === 'function' && _volcHotAt(ax, az, (K.volc != null) ? +K.volc : 1.2) > 0.004) continue;
     const _d0 = ay - _swDrapeY(ax + L, az, T);
     const _d1 = ay - _swDrapeY(ax - L, az, T);
     const _d2 = ay - _swDrapeY(ax, az + L, T);
@@ -24977,22 +24994,44 @@ function _hcPadSched(pad, i, t, lift, cache) {
   }
   const ph = ((t / C.period) + C.h2) % 1;
   const o = C.out, P = C.pos;
+  const pvx = P.x, pvy = P.y, pvz = P.z, pvOk = C._seen === true; C._seen = true;
   o.pos = P; o.from = null; o.to = null; o.fx = null; o.yaw = undefined;
   if (pad._claim && ph >= 0.18 && ph < 0.58) {
     o.seg = 0;
     const a2 = t * 0.22 + C.h2 * 6.283, hr = 210;
-    P.x = C.AH.x + Math.cos(a2) * hr; P.y = C.AH.y; P.z = C.AH.z + Math.sin(a2) * hr;
-    o.fx = C.AH; o.yaw = -a2;
+    const hx = C.AH.x + Math.cos(a2) * hr, hy = C.AH.y, hz = C.AH.z + Math.sin(a2) * hr;
+    if (!C.hold) C.hold = pvOk ? { t0: t, x: pvx, y: pvy, z: pvz } : { t0: t - 1e4, x: hx, y: hy, z: hz };
+    C.rel = null;
+    let k = (t - C.hold.t0) / _HC_HOLD_IN; k = k < 0 ? 0 : (k > 1 ? 1 : k); k = k * k * (3 - 2 * k);
+    P.x = C.hold.x + (hx - C.hold.x) * k; P.y = C.hold.y + (hy - C.hold.y) * k; P.z = C.hold.z + (hz - C.hold.z) * k;
+    const hf = C.hf || (C.hf = { x: 0, y: 0, z: 0 }), ht = C.ht || (C.ht = { x: 0, y: 0, z: 0 });
+    if (k < 1 && pvOk) { hf.x = pvx; hf.y = pvy; hf.z = pvz; ht.x = P.x; ht.y = P.y; ht.z = P.z; }
+    else { hf.x = P.x; hf.y = P.y; hf.z = P.z; ht.x = P.x - Math.sin(a2); ht.y = P.y; ht.z = P.z + Math.cos(a2); }
+    if ((ht.x - hf.x) * (ht.x - hf.x) + (ht.z - hf.z) * (ht.z - hf.z) > 1e-6) { o.from = hf; o.to = ht; }
+    o.fx = C.AH;
     return o;
   }
-  if (ph < 0.20) { o.seg = 0; _hcLerpInto(P, C.FI, C.AH, ph / 0.20);          o.from = C.FI; o.to = C.AH; o.fx = C.FI; return o; }
-  if (ph < 0.26) { o.seg = 1; _hcLerpInto(P, C.AH, C.A, (ph - 0.20) / 0.06);  o.from = C.AH; o.to = C.A;  return o; }
-  if (ph < 0.30) { o.seg = 1; _hcLerpInto(P, C.A, C.PK, (ph - 0.26) / 0.04);  o.from = C.A;  o.to = C.PK; return o; }
-  if (ph < 0.48) { o.seg = 2; P.x = C.PK.x; P.y = C.PK.y; P.z = C.PK.z;        o.yaw = pad.yaw; return o; }
-  if (ph < 0.52) { o.seg = 3; _hcLerpInto(P, C.PK, C.A, (ph - 0.48) / 0.04);  o.from = C.PK; o.to = C.A;  return o; }
-  if (ph < 0.58) { o.seg = 3; _hcLerpInto(P, C.A, C.AH, (ph - 0.52) / 0.06);  o.from = C.A;  o.to = C.AH; return o; }
-  if (ph < 0.92) { o.seg = 4; _hcLerpInto(P, C.AH, C.FO, (ph - 0.58) / 0.34); o.from = C.AH; o.to = C.FO; o.fx = C.FO; return o; }
-  o.seg = 5; o.pos = null; return o;
+  if (C.hold) { C.rel = { t0: t, x: pvx, y: pvy, z: pvz }; C.hold = null; }
+  _hcSchedSeg(C, pad, ph, o, P);
+  if (C.rel) {
+    if (o.pos && o.seg !== 5) {
+      let k = (t - C.rel.t0) / _HC_HOLD_OUT;
+      if (k >= 1) C.rel = null;
+      else { k = k < 0 ? 0 : k; k = k * k * (3 - 2 * k); P.x = C.rel.x + (P.x - C.rel.x) * k; P.y = C.rel.y + (P.y - C.rel.y) * k; P.z = C.rel.z + (P.z - C.rel.z) * k; }
+    } else C.rel = null;
+  }
+  return o;
+}
+const _HC_HOLD_IN = 6.0, _HC_HOLD_OUT = 6.0;   // (v46.74) seconds: climb out to the hold / settle back (node sim: peaks ~630 u/s, never a cut)
+function _hcSchedSeg(C, pad, ph, o, P) {
+  if (ph < 0.20) { o.seg = 0; _hcLerpInto(P, C.FI, C.AH, ph / 0.20);          o.from = C.FI; o.to = C.AH; o.fx = C.FI; return; }
+  if (ph < 0.26) { o.seg = 1; _hcLerpInto(P, C.AH, C.A, (ph - 0.20) / 0.06);  o.from = C.AH; o.to = C.A;  return; }
+  if (ph < 0.30) { o.seg = 1; _hcLerpInto(P, C.A, C.PK, (ph - 0.26) / 0.04);  o.from = C.A;  o.to = C.PK; return; }
+  if (ph < 0.48) { o.seg = 2; P.x = C.PK.x; P.y = C.PK.y; P.z = C.PK.z;        o.yaw = pad.yaw; return; }
+  if (ph < 0.52) { o.seg = 3; _hcLerpInto(P, C.PK, C.A, (ph - 0.48) / 0.04);  o.from = C.PK; o.to = C.A;  return; }
+  if (ph < 0.58) { o.seg = 3; _hcLerpInto(P, C.A, C.AH, (ph - 0.52) / 0.06);  o.from = C.A;  o.to = C.AH; return; }
+  if (ph < 0.92) { o.seg = 4; _hcLerpInto(P, C.AH, C.FO, (ph - 0.58) / 0.34); o.from = C.AH; o.to = C.FO; o.fx = C.FO; return; }
+  o.seg = 5; o.pos = null;
 }
 
 function _hcAttachBanner(holder, i, sc) {
@@ -27941,6 +27980,15 @@ function _padList(out) {
   try {
     const hc = game.hubCity;
     if (hc && hc.city && hc.city.pads) { const ps = hc.city.pads; for (let i = 0; i < ps.length; i++) out.push(ps[i]); }
+  } catch (_) {}
+  try {
+    if (typeof OW !== 'undefined' && OW && OW.cities) {
+      for (let i = 0; i < OW.cities.length; i++) {
+        const b = OW.cities[i].built, ps = b && b.city && b.city.pads;
+        if (!ps) continue;
+        for (let j = 0; j < ps.length; j++) out.push(ps[j]);
+      }
+    }
   } catch (_) {}
   try {
     for (const rec of _skLive.values()) {
@@ -31523,7 +31571,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   const _R2 = _VIEW * _VIEW;
   const wantGrass = (game.sandwichGrass !== false) && (((T.biome || 'grassy') === 'grassy') || T.biome === 'mossy');
   const wantTrees = (game.sandwichTrees !== false) && (T.biome === 'mossy');
-  const wantDrapes = (game.sandwichDrapes !== false) &&
+  const wantDrapes = (game.sandwichDrapes !== false) && !!(T && T.HUB) &&
                      !(typeof window !== 'undefined' && window.__drapes && window.__drapes.on === false);
   const wantFoliage = wantTrees || wantDrapes;
   const _SC = _swStreamIdle;
@@ -75490,6 +75538,7 @@ function getNextMap() {
     return MAP_DATA.camp_approach || CAMPAIGN_LEG_MAP;
   }
   let selectedMapKey = game.selectedMap || 'hourglass';
+  if (typeof game !== 'undefined' && game && game._cavern && MAP_DATA.shifting_deep) { game.selectedMap = 'shifting_deep'; return MAP_DATA.shifting_deep; }
   try {
     if (typeof _visibleMapKeys === 'function') {
       const legal = _visibleMapKeys();
