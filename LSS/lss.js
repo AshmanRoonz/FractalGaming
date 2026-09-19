@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.51";
+const LSS_BUILD = "46.54";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -19024,9 +19024,20 @@ function _swSpawnSplash(x, wl, z, n, power) {
   }
 }
 const _swSplV = new THREE.Vector3();
-function _swSpawnSplashV(x, wl, z, V, D, countScl, beta) {
+function _swSurfDip(depth, fp) {
+  const W = window.__water || {};
+  const k = (W.dip != null) ? +W.dip : 2.2;
+  if (!(k > 0) || !(depth > 0)) return 0;
+  const cap = Math.max(8, (fp && fp.DRAFT) ? fp.DRAFT : 14) * ((W.dipMax != null) ? +W.dipMax : 5);
+  return -Math.min(cap, depth * k);
+}
+function _swSpawnSplashV(x, wl, z, V, D, countScl, beta, dipY) {
   if (!game.particles || game._swSubmerged) return 0;
   const W3 = window.__water || {};
+  const _dip = dipY || 0;
+  const _dipFall = (W3.dipFall != null) ? +W3.dipFall : 2.0;
+  const _dipR = (_dipFall > 0) ? Math.max(1, D * _dipFall) : 0;
+  const _wlY = wl + _dip;
   const vx = V ? V.x : 0, vyy = V ? V.y : 0, vz = V ? V.z : 0;
   const Vn = Math.max(0, -vyy);                                 
   const Tx = vx, Tz = vz, Vt = Math.hypot(Tx, Tz);             
@@ -19087,9 +19098,10 @@ function _swSpawnSplashV(x, wl, z, V, D, countScl, beta) {
       const _rx = x + thx * D * 0.42 + ox * D * 0.42 * _as;
       const _rz = z + thz * D * 0.42 + oz * D * 0.42 * _as;
       const _out = D * _reach;
+      const _dk = _dipR ? (function () { const t = Math.min(1, _out / _dipR); return (1 - t) * (1 - t); })() : 1;
       game.particles.push({
         position: new THREE.Vector3(_rx + wx * _out + (Math.random() - 0.5) * 10,
-                                    wl + 3 + Math.max(0, se) * _out * 0.22,
+                                    wl + _dip * _dk + 3 + Math.max(0, se) * _out * 0.22,
                                     _rz + wz * _out + (Math.random() - 0.5) * 10),
         velocity: _swSplV.clone(),
         life: (0.30 + Math.random() * 0.55) * (1 - 0.13 * _lv), maxLife: 0.92,
@@ -19114,7 +19126,7 @@ function _swSpawnSplashV(x, wl, z, V, D, countScl, beta) {
     speed *= 1 + 0.4 * lean * fwd;                            
     _swSplV.set(dx * speed + Tx * cAdv, dy * speed, dz * speed + Tz * cAdv);   
     game.particles.push({
-      position: new THREE.Vector3(x + (Math.random() - 0.5) * 22, wl + 4, z + (Math.random() - 0.5) * 22),
+      position: new THREE.Vector3(x + (Math.random() - 0.5) * 22, _wlY + 4, z + (Math.random() - 0.5) * 22),
       velocity: _swSplV.clone(),
       life: 0.30 + Math.random() * 0.78, maxLife: 1.08,
       color: (Math.random() < 0.5) ? 0x7ba6c4 : 0xa6c8de,
@@ -19319,7 +19331,7 @@ function _swWpnCross(x0, y0, z0, x1, y1, z1, Y, speed, src, minDt) {
   if (uy > 0) { try { _swExitPlume(hx2, wl2, hz2, ux, uy, uz, shotSp, R, 0.25 + 0.75 * Math.min(1, Ax * 6)); } catch (_) {} }
   return 1;
 }
-function _swRooster(px, wl, pz, vel, fp, wet01) {
+function _swRooster(px, wl, pz, vel, fp, wet01, dipY) {   // (v46.52) dipY - see _swSurfDip
   if (!game.particles || game._swSubmerged || !fp) return 0;
   const W3 = window.__water || {};
   const k = (W3.rooster != null) ? +W3.rooster : 1;
@@ -19343,7 +19355,7 @@ function _swRooster(px, wl, pz, vel, fp, wet01) {
                  (-bz * ce + lz * side) * spd + vz * 0.30);
     game.particles.push({
       position: new THREE.Vector3(px + lx * (Math.random() - 0.5) * fp.BEAM * 0.7,
-                                  wl + 4 + Math.random() * fp.DRAFT,
+                                  wl + (dipY || 0) + 4 + Math.random() * fp.DRAFT,
                                   pz + lz * (Math.random() - 0.5) * fp.BEAM * 0.7),
       velocity: _swDropV.clone(),
       life: 0.55 + Math.random() * 0.95, maxLife: 1.5,
@@ -20038,7 +20050,8 @@ function _swEntityWaterTick(dt, WL) {
           try {
             _swSpawnSplashV(e.position.x + _ux * fp.half * 0.55, WL, e.position.z + _uz * fp.half * 0.55,
                             { x: _swEntVel.x, y: -Math.max(14, sp * 0.10 * _wet), z: _swEntVel.z },
-                            fp.BEAM, 0.55 + 0.55 * _wet, _swDeadrise(fp));
+                            fp.BEAM, 0.55 + 0.55 * _wet, _swDeadrise(fp),
+                            _swSurfDip(-keelA, fp));   // (v46.52) bots, monsters and peers dip too
             _capSheet--;
           } catch (_) {}
         }
@@ -20062,7 +20075,8 @@ function _swEntityWaterTick(dt, WL) {
             const _wk = Math.min(1, Math.max(0.30, _deep / Math.max(6, fp.DRAFT)));
             _swSpawnSplashV(_tx, WL, _tz,
                             { x: _swEntVel.x, y: -Math.max(12, sp * 0.09 * _wk), z: _swEntVel.z },
-                            fp.BEAM * 0.34, 0.35 + 0.65 * _wk, _swDeadrise(fp));
+                            fp.BEAM * 0.34, 0.35 + 0.65 * _wk, _swDeadrise(fp),
+                            _swSurfDip(_deep, fp));   // (v46.52) `_deep` is already WL minus the tip
             if (typeof _swFxN === 'function') _swFxN('entWing');   // (v44.98) its own counter - the spray it throws is shared with the sheet's
             _capWing--;
           }
@@ -20285,7 +20299,8 @@ function _swRippleTick(dt) {
             _swFxN('plane');
             _swSpawnSplashV(px + hx * fp.half * 0.55, WL, pz + hz * fp.half * 0.55,
                             { x: player.velocity.x, y: -Math.max(14, sp * 0.10 * _wet01), z: player.velocity.z },
-                            fp.BEAM, 0.55 + 0.55 * _wet01, _swDeadrise(fp));
+                            fp.BEAM, 0.55 + 0.55 * _wet01, _swDeadrise(fp),
+                            _swSurfDip(-keelA, fp));
           }
         }
       } else if (R.planT) R.planT = 0;
@@ -20294,7 +20309,7 @@ function _swRippleTick(dt) {
         const _rr = (7 + 15 * _wet01 * Math.min(1, sp / 320)) * _pl;
         if (R.roosT > 1 / Math.max(0.5, _rr)) {
           R.roosT = 0;
-          if (_swFxRoom() > 10) _swRooster(px - hx * fp.half * 1.15, WL, pz - hz * fp.half * 1.15, player.velocity, fp, _wet01);
+          if (_swFxRoom() > 10) _swRooster(px - hx * fp.half * 1.15, WL, pz - hz * fp.half * 1.15, player.velocity, fp, _wet01, _swSurfDip(-keelA, fp));   // (v46.52) the transom sits in the same hollow the bow does
         }
       } else if (R.roosT) R.roosT = 0;
     }
@@ -20341,7 +20356,8 @@ function _swRippleTick(dt) {
               if (_wSpray && _swFxRoom() > 10) {
                 _swSpawnSplashV(_tx, WL, _tz,
                                 { x: player.velocity.x, y: -Math.max(12, sp * 0.09 * _wk), z: player.velocity.z },
-                                fp.BEAM * 0.34, 0.35 + 0.65 * _wk, _swDeadrise(_fp0));
+                                fp.BEAM * 0.34, 0.35 + 0.65 * _wk, _swDeadrise(_fp0),
+                                _swSurfDip(_d - _kW, _fp0));
               }
               if (_wSpray && window.__waterDisp && !W3.crestBreak) {
                 _swCrestSpray(_tx, WL, _tz, _wa, player.velocity.x, player.velocity.z);
@@ -61326,11 +61342,15 @@ function pollGamepad() {
     if (settingsOpen) {
       closeSettings();
     } else if (_shipSelectActive && !_commitPending && (game.state === 'select' || _betweenRoundsPick())) {
-      if (_previewedKey && LOADOUTS[_previewedKey]) {
-        commitLoadout(_previewedKey);
-      } else {
+      if (!(_previewedKey && LOADOUTS[_previewedKey])) {
         const first = document.querySelector('.ship-chip');
         if (first && first.dataset && first.dataset.key) previewLoadout(first.dataset.key);
+      } else if (game.state !== 'select') {
+        commitLoadout(_previewedKey);                                  // between rounds: one press swaps
+      } else if (typeof _lssConfirmed === 'function' && !_lssConfirmed()) {
+        if (typeof _lssToggleConfirm === 'function') _lssToggleConfirm();   // press 1 - CONFIRM
+      } else if (typeof _lssLaunchReady !== 'function' || _lssLaunchReady()) {
+        commitLoadout(_previewedKey);                                       // press 2 - LAUNCH
       }
     }
   }
