@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.76";
+const LSS_BUILD = "46.77";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -18815,6 +18815,7 @@ const _SW_RIPPLE_FRAG = [
   'uniform float uSeedImpulse;',   // (v41.02) 0 = the v41.01 displacement pluck, 1 = a pure velocity impulse
   'uniform float uFoamDecay; uniform float uSeedFoamK;',   // (v41.53) the foam field - see the note below
   'uniform float uShoreDamp; uniform float uShoreDampD;',   // (v41.72) shallow-water absorption
+  'uniform float uSpongeW; uniform float uSpongeK;',        // (v46.77) the absorbing rim - see below
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -18841,11 +18842,12 @@ const _SW_RIPPLE_FRAG = [
   '  }',
   '  vec2 ed = min(uv, 1.0 - uv);',
   '  float edg = smoothstep(0.0, 0.06, min(ed.x, ed.y));',
-  '  nh *= edg;',
+  '  float spg = 1.0 - smoothstep(0.0, max(uSpongeW, 0.001), min(ed.x, ed.y));',
+  '  float dmp = 1.0 - uSpongeK * spg * spg;',
   '  float sA = sAcc * edg;',
   '  nh += (1.0 - uSeedImpulse) * sA;',
-  '  h.y = h.x - uSeedImpulse * sA;',  
-  '  h.x = nh;',                      
+  '  h.y = (h.x - uSeedImpulse * sA) * dmp;',   // (v46.77) sponge on the previous height
+  '  h.x = nh * dmp;',                           // (v46.77) ...and on the new one
   '  h.z = min(1.6, (h.z * uFoamDecay + fAcc * uSeedFoamK) * edg);',
   '  gl_FragColor = h;',
   '}'
@@ -18868,6 +18870,8 @@ function _swRippleInit() {
     v.material.uniforms.uSeedImpulse = { value: 0.25 };
     v.material.uniforms.uShoreDamp = { value: 0.96 };
     v.material.uniforms.uShoreDampD = { value: 0.28 };
+    v.material.uniforms.uSpongeW = { value: 0.18 };   // (v46.77) absorbing rim width, fraction of the window
+    v.material.uniforms.uSpongeK = { value: 0.12 };   // (v46.77) per-step damping at the very edge
     v.material.uniforms.uFoamDecay = { value: 0.9930 };   // (v41.56) ~1.6 s half-life, was ~3 s
     v.material.uniforms.uSeedFoamK = { value: 0.10 };
     v.material.uniforms.uSeeds = { value: seeds };
@@ -19673,6 +19677,13 @@ window.__waterProbe = function () {
     if (a > 2e-4) live++;
     if (a * kk > 2.0) sat++;   // tanh(2) = 0.964 : flat-topped for anything you can see
   }
+  let _eS = 0, _eN = 0, _iS = 0, _iN = 0;
+  for (let j = 0; j < RES; j++) for (let i = 0; i < RES; i++) {
+    const d = Math.min(i, RES - 1 - i, j, RES - 1 - j) / RES;
+    const h = buf[(j * RES + i) * 4];
+    if (d < 0.12) { _eS += h * h; _eN++; } else if (d > 0.30) { _iS += h * h; _iN++; }
+  }
+  const bandEdge = +Math.sqrt(_eS / Math.max(1, _eN)).toExponential(2), bandInner = +Math.sqrt(_iS / Math.max(1, _iN)).toExponential(2);
   const dsp = function (h) { return +_swDispWorld(h).toFixed(2); };
   let lo = 0, hi = 0, lr = -1;
   try {
@@ -19705,6 +19716,7 @@ window.__waterProbe = function () {
     skips: (window.__lssSkips | 0),
   };
   try { console.log('[waterProbe]', JSON.stringify(out)); } catch (_) {}
+  out.bandEdge = bandEdge; out.bandInner = bandInner;   // (v46.77)
   return out;
 };
 window.__crestStat = function (radius) {
@@ -20283,6 +20295,8 @@ function _swRippleTick(dt) {
       if (_W3.seedFoam != null && _u.uSeedFoamK) _u.uSeedFoamK.value = _W3.seedFoam;             // (v41.53)
       if (_W3.shoreDamp != null && _u.uShoreDamp) _u.uShoreDamp.value = _W3.shoreDamp;           // (v41.72)
       if (_W3.shoreDampD != null && _u.uShoreDampD) _u.uShoreDampD.value = _W3.shoreDampD;       // (v41.72)
+      if (_W3.spongeW != null && _u.uSpongeW) _u.uSpongeW.value = _W3.spongeW;                   // (v46.77)
+      if (_W3.spongeK != null && _u.uSpongeK) _u.uSpongeK.value = _W3.spongeK;                   // (v46.77)
     }
   } catch (_) {}   
   
@@ -25077,6 +25091,7 @@ function _hcAttachBanner(holder, i, sc) {
   const cg = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, -tail), new THREE.Vector3(0, -8 * sc, -(tail + cable))]);
   const line = new THREE.Line(cg, new THREE.LineBasicMaterial({ color: 0x9fc4d8, transparent: true, opacity: 0.55, fog: false }));
   line.frustumCulled = false;
+  line.userData._adBanner = true;   // (v46.77) so a holder that is torn down alone can find its cable
   holder.add(line);
 }
 function _hcTrafficInit(city, group) {
@@ -88902,6 +88917,13 @@ function _elDetach(e) {
   e.alive = false;
   try { if (e.mesh && e.mesh.parent) e.mesh.parent.remove(e.mesh); } catch (_) {}
   try {
+    if (e.mesh) e.mesh.traverse((o) => {
+      if (!(o.userData && o.userData._adBanner)) return;
+      try { if (o.geometry) o.geometry.dispose(); } catch (_) {}
+      try { if (o.material && o.material.dispose) o.material.dispose(); } catch (_) {}
+    });
+  } catch (_) {}
+  try {
     if (typeof game !== 'undefined' && game && game.entities) {
       const i = game.entities.indexOf(e);
       if (i >= 0) game.entities.splice(i, 1);
@@ -88943,8 +88965,10 @@ function _elMesh(kind) {
       }
       o.material = one ? out[0] : out;
     });
-    cl.scale.multiplyScalar(0.9 + Math.random() * 0.8);
+    const _k = 0.9 + Math.random() * 0.8;
+    cl.scale.multiplyScalar(_k);
     holder.add(cl);
+    holder.userData.elScale = _k;   // (v46.77) the banner scales with the hull, like the hub's class scale
     return holder;
   }
   if (kind === 'carrier') {
@@ -89029,6 +89053,15 @@ function _elSpawn(kind) {
   };
   _LSS_EL.ents.push(ent);
   try { if (typeof game !== 'undefined' && game && game.entities) game.entities.push(ent); } catch (_) {}
+  if (kind === 'traffic') {
+    try {
+      const _A = (typeof window !== 'undefined' && window.__ads) || {};
+      if (!(_A.banners === 0 || _A.on === 0) && (_LSS_EL.n % 3 === 1) && typeof _hcAttachBanner === 'function') {
+        _hcAttachBanner(mesh, _LSS_EL.n, mesh.userData.elScale || 1);
+        ent.hasBanner = true;
+      }
+    } catch (e) { console.warn('[earth-life] banner skipped:', e); }
+  }
   return ent;
 }
 

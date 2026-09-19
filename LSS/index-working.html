@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.76";
+const LSS_BUILD = "46.77";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -34202,6 +34202,7 @@ const _SW_RIPPLE_FRAG = [
   'uniform float uSeedImpulse;',   // (v41.02) 0 = the v41.01 displacement pluck, 1 = a pure velocity impulse
   'uniform float uFoamDecay; uniform float uSeedFoamK;',   // (v41.53) the foam field - see the note below
   'uniform float uShoreDamp; uniform float uShoreDampD;',   // (v41.72) shallow-water absorption
+  'uniform float uSpongeW; uniform float uSpongeK;',        // (v46.77) the absorbing rim - see below
   'void main(){',
   '  vec2 cellSize = 1.0 / resolution.xy;',
   '  vec2 uv = gl_FragCoord.xy * cellSize;',
@@ -34295,15 +34296,31 @@ const _SW_RIPPLE_FRAG = [
   // outer band so waves leaving the window are swallowed, not mirrored. (Shorelines still reflect.)
   '  vec2 ed = min(uv, 1.0 - uv);',
   '  float edg = smoothstep(0.0, 0.06, min(ed.x, ed.y));',
-  '  nh *= edg;',
+  // ⭐⭐ (v46.77) A SPONGE, NOT A WALL. Owner: "the ripples ... bounce back on an
+  // invisible square... they should traverse the whole geometry of the basin".
+  // The square is this window (BOUNDS around the ship). The old rim was
+  // `nh *= edg`: the NEW height zeroed across the outer 6% while the previous
+  // height (h.y) kept going, i.e. an abrupt change of medium 15 cells wide -
+  // to a wave that is a wall, and it reflected. An absorbing rim damps BOTH
+  // fields, gently, over a wide band: `dmp` ramps from 1 in the interior to
+  // 1 - uSpongeK at the very edge along a quadratic, over uSpongeW of the
+  // window (0.18 = 46 cells at RES 256). At c = sqrt(uWaveC2) ~ 0.5 cells a
+  // step a wave spends ~90 steps in the band and comes out at ~4% - and what
+  // little reaches the clamped edge is damped again on the way back. The rim
+  // is smooth relative to a wake's wavelength (4-16 cells), so the sponge
+  // itself reflects next to nothing. Seeds and foam still stop at `edg`.
+  // Applied where h.x / h.y are stored, below. window.__water.spongeW /
+  // spongeK tune it; K = 0 restores the wall behaviour minus the hard zero.
+  '  float spg = 1.0 - smoothstep(0.0, max(uSpongeW, 0.001), min(ed.x, ed.y));',
+  '  float dmp = 1.0 - uSpongeK * spg * spg;',
   // (v41.02) the seed gets the same edge damping the wave does, then splits: the displacement half
   // lands on the new height, the impulse half is taken OFF the previous one, which leaves the
   // surface where it was and moving. At uSeedImpulse = 0 this is `nh += sAcc*edg; h.y = h.x`, i.e.
   // identical to every build before this one.
   '  float sA = sAcc * edg;',
   '  nh += (1.0 - uSeedImpulse) * sA;',
-  '  h.y = h.x - uSeedImpulse * sA;',  
-  '  h.x = nh;',                      
+  '  h.y = (h.x - uSeedImpulse * sA) * dmp;',   // (v46.77) sponge on the previous height
+  '  h.x = nh * dmp;',                           // (v46.77) ...and on the new one
   // (v41.53) the foam field: no Laplacian, no neighbours, no propagation - it only decays and
   // accumulates. uFoamDecay is per 60 Hz step, so 0.9962 is a ~3 second half-life. Clamped so a hull
   // parked in one spot cannot bank up an unbounded white patch.
@@ -34366,6 +34383,8 @@ function _swRippleInit() {
     // shoreDamp 1 is the pre-41.72 lossless shore.
     v.material.uniforms.uShoreDamp = { value: 0.96 };
     v.material.uniforms.uShoreDampD = { value: 0.28 };
+    v.material.uniforms.uSpongeW = { value: 0.18 };   // (v46.77) absorbing rim width, fraction of the window
+    v.material.uniforms.uSpongeK = { value: 0.12 };   // (v46.77) per-step damping at the very edge
     v.material.uniforms.uFoamDecay = { value: 0.9930 };   // (v41.56) ~1.6 s half-life, was ~3 s
     // ⚠ (v41.56) 0.36 -> 0.10. Measured on a Dreadnought at 340 u/s, 0.36 drove the field into its
     // own 1.6 clamp (foam p99 = 1.54 near the hull, saturated over a wide band) and the v41.55 albedo
@@ -35784,6 +35803,15 @@ window.__waterProbe = function () {
   // (v41.16) through _swDispWorld, the ONE mirror. This probe was a fourth private copy of the
   // transform and it desynced the instant v41.15 changed the shape: it reported a 45-unit crest
   // where the shader was drawing 130. Any code that needs a world height calls the helper.
+  // (v46.77) where the energy sits: RMS height in the outer 12% rim vs the
+  // inner 40% square. A wall rim piles energy at the edge; a sponge does not.
+  let _eS = 0, _eN = 0, _iS = 0, _iN = 0;
+  for (let j = 0; j < RES; j++) for (let i = 0; i < RES; i++) {
+    const d = Math.min(i, RES - 1 - i, j, RES - 1 - j) / RES;
+    const h = buf[(j * RES + i) * 4];
+    if (d < 0.12) { _eS += h * h; _eN++; } else if (d > 0.30) { _iS += h * h; _iN++; }
+  }
+  const bandEdge = +Math.sqrt(_eS / Math.max(1, _eN)).toExponential(2), bandInner = +Math.sqrt(_iS / Math.max(1, _iN)).toExponential(2);
   const dsp = function (h) { return +_swDispWorld(h).toFixed(2); };
   // ⚠ hMax over the WHOLE 128x128 window is not what you are looking at - a stale spike left at
   // the far edge by an earlier impact wins it every time. The number that matters is the surface
@@ -35819,6 +35847,7 @@ window.__waterProbe = function () {
     skips: (window.__lssSkips | 0),
   };
   try { console.log('[waterProbe]', JSON.stringify(out)); } catch (_) {}
+  out.bandEdge = bandEdge; out.bandInner = bandInner;   // (v46.77)
   return out;
 };
 // ⚠⚠ (v41.48) DEV PROBE - THE TWO NUMBERS THE FOAM THRESHOLDS ARE SET AGAINST, MEASURED.
@@ -36769,6 +36798,8 @@ function _swRippleTick(dt) {
       if (_W3.seedFoam != null && _u.uSeedFoamK) _u.uSeedFoamK.value = _W3.seedFoam;             // (v41.53)
       if (_W3.shoreDamp != null && _u.uShoreDamp) _u.uShoreDamp.value = _W3.shoreDamp;           // (v41.72)
       if (_W3.shoreDampD != null && _u.uShoreDampD) _u.uShoreDampD.value = _W3.shoreDampD;       // (v41.72)
+      if (_W3.spongeW != null && _u.uSpongeW) _u.uSpongeW.value = _W3.spongeW;                   // (v46.77)
+      if (_W3.spongeK != null && _u.uSpongeK) _u.uSpongeK.value = _W3.spongeK;                   // (v46.77)
     }
   } catch (_) {}   
   
@@ -44125,6 +44156,7 @@ function _hcAttachBanner(holder, i, sc) {
   const cg = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, -tail), new THREE.Vector3(0, -8 * sc, -(tail + cable))]);
   const line = new THREE.Line(cg, new THREE.LineBasicMaterial({ color: 0x9fc4d8, transparent: true, opacity: 0.55, fog: false }));
   line.frustumCulled = false;
+  line.userData._adBanner = true;   // (v46.77) so a holder that is torn down alone can find its cable
   holder.add(line);
 }
 function _hcTrafficInit(city, group) {
@@ -132610,6 +132642,15 @@ function _elDetach(e) {
   if (!e) return;
   e.alive = false;
   try { if (e.mesh && e.mesh.parent) e.mesh.parent.remove(e.mesh); } catch (_) {}
+  // (v46.77) a towed banner owns its geometry, material and cable; the hull is a
+  // clone of a shared proto and stays as it was.
+  try {
+    if (e.mesh) e.mesh.traverse((o) => {
+      if (!(o.userData && o.userData._adBanner)) return;
+      try { if (o.geometry) o.geometry.dispose(); } catch (_) {}
+      try { if (o.material && o.material.dispose) o.material.dispose(); } catch (_) {}
+    });
+  } catch (_) {}
   try {
     if (typeof game !== 'undefined' && game && game.entities) {
       const i = game.entities.indexOf(e);
@@ -132655,8 +132696,10 @@ function _elMesh(kind) {
       }
       o.material = one ? out[0] : out;
     });
-    cl.scale.multiplyScalar(0.9 + Math.random() * 0.8);
+    const _k = 0.9 + Math.random() * 0.8;
+    cl.scale.multiplyScalar(_k);
     holder.add(cl);
+    holder.userData.elScale = _k;   // (v46.77) the banner scales with the hull, like the hub's class scale
     return holder;
   }
   if (kind === 'carrier') {
@@ -132762,6 +132805,21 @@ function _elSpawn(kind) {
   };
   _LSS_EL.ents.push(ent);
   try { if (typeof game !== 'undefined' && game && game.entities) game.entities.push(ent); } catch (_) {}
+  // ⭐ (v46.77) TOWED AD BANNERS ON THE REAL SKY TOO. Owner: "some of the
+  // traffic ships should have ad banners, like in exhibition". Same function
+  // as the hub's traffic (every third hull, same atlas, same flutter): the
+  // Earth holder shares its convention - local +z is the flight direction
+  // (`mesh.rotation.y = atan2(vx, vz)` in the tick) - so the banner trails
+  // behind, and the hull's random scale plays the hub's class scale.
+  if (kind === 'traffic') {
+    try {
+      const _A = (typeof window !== 'undefined' && window.__ads) || {};
+      if (!(_A.banners === 0 || _A.on === 0) && (_LSS_EL.n % 3 === 1) && typeof _hcAttachBanner === 'function') {
+        _hcAttachBanner(mesh, _LSS_EL.n, mesh.userData.elScale || 1);
+        ent.hasBanner = true;
+      }
+    } catch (e) { console.warn('[earth-life] banner skipped:', e); }
+  }
   return ent;
 }
 
