@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.81";
+const LSS_BUILD = "46.82";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -6825,6 +6825,7 @@ function handleHitVote(vote, fromPeerId) {
 }
 
 function handleNetEvent(evt, fromPeerId) {
+  try { if (typeof _raceCircuitNetEvent === 'function' && _raceCircuitNetEvent(evt, fromPeerId)) return; } catch (_) {}
   if (evt.type === 'kill') {
     addKillFeed(evt.killerName || 'Peer', evt.victimName || 'Peer');
     if (evt.killerBotId != null && evt.killerBotOwner === net.myPeerId && typeof _botAuthority === 'function' && _botAuthority()) {
@@ -15953,8 +15954,7 @@ function _lssFlightArena() {
       return 3500000;   // ~500 km at 7 units/metre
     }
   } catch (_) {}
-  return (typeof LSS !== 'undefined' &&
-          (LSS.MODE === 'freeflight' || LSS.MODE === 'endless'))
+  return (_lssHubWorld() || (typeof LSS !== 'undefined' && LSS.MODE === 'endless'))   // (v46.82) the OVERWORLD CIRCUIT's cities sit ~48k out
     ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
 }
 
@@ -17885,7 +17885,7 @@ function _hubZoneTick(px, pz, dt) {
   const Z = _HUB_ZONES;
   const T = game.sandwichTerrain;
   if (!Z.ON || !T || !T.ON || T.biome !== 'mossy') return;
-  if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
+  if (!_lssHubWorld()) return;   // (v46.82) the OVERWORLD CIRCUIT morphs too
   const C = _hzLooks();
   if (!Z._mossyFog && scene.fog && scene.fog.color) Z._mossyFog = scene.fog.color.clone();
   const keys = ['mossy'].concat(Z.sectors);
@@ -32281,7 +32281,7 @@ function initSandwichTerrain() {
   } catch (e) { console.warn('[sandwich] init terrain failed:', e); }
   }
   if (!game._swapStaging) { try { _hubCityInit(); } catch (e) { console.warn('[hubcity] init failed:', e); } }
-  if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && T && T.biome === 'mossy') {
+  if (_lssHubWorld() && T && T.biome === 'mossy') {   // (v46.82) the OVERWORLD CIRCUIT streams the hub clipmap too
     game._clipWantHub = !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && typeof _clipBuild === 'function';
     if (!game._clipWantHub) { game._swPreloading = true; game._swPreloadZero = 0; game._swPreloadFrames = 0; game._swPreloadStart = (game.time || 0); game._preLaunchWaiting = false; game._swPreloadHoldT = 0; }   // (v44.03) a fresh preload gets a fresh hold clock
     try { if (typeof _clipmap !== 'undefined') _clipmap.on = false; } catch (_) {}
@@ -36386,8 +36386,19 @@ class Bot {
       this.aiRole = 'engage';
       _raceWaypoint = this.aiTarget;
     }
-    if (LSS.MODE === 'race' && game.state === 'playing' && game.raceGraph && game.raceGraph.finishId) {
-      if (game.selectedMap === 'race_straightaway' && game.sandwichTerrain &&
+    const _rcOn = (typeof _isCircuitRace === 'function' && _isCircuitRace());
+    if (LSS.MODE === 'race' && game.state === 'playing' && (_rcOn || (game.raceGraph && game.raceGraph.finishId))) {
+      if (_rcOn) {
+        const _wp = _raceCircuitBotWaypoint(this, dt);
+        if (_wp) {
+          if (!this.aiTarget) this.aiTarget = new THREE.Vector3();
+          this.aiTarget.copy(_wp);
+          this.aiRetreating = false;
+          this.aiRole = 'engage';
+          _raceWaypoint = this.aiTarget;
+        }
+      }
+      else if (game.selectedMap === 'race_straightaway' && game.sandwichTerrain &&
           typeof _stGroundYCarved === 'function' && typeof _stCeilYCarved === 'function') {
         const _sT = game.sandwichTerrain;
         const _aheadZ = Math.min(9000, this.position.z + 2600);
@@ -36413,18 +36424,18 @@ class Bot {
 
       if (_raceWaypoint && this.aiTarget) {
         const _now = (game && typeof game.time === 'number') ? game.time : 0;
-        if (!this._stuckPos) {
-          this._stuckPos = new THREE.Vector3().copy(this.position);
-          this._stuckT = _now;
+        if (!this._rsWpPos) {
+          this._rsWpPos = new THREE.Vector3().copy(this.position);
+          this._rsWpT = _now;
         } else {
-          const dx = this.position.x - this._stuckPos.x;
-          const dy = this.position.y - this._stuckPos.y;
-          const dz = this.position.z - this._stuckPos.z;
+          const dx = this.position.x - this._rsWpPos.x;
+          const dy = this.position.y - this._rsWpPos.y;
+          const dz = this.position.z - this._rsWpPos.z;
           if (dx*dx + dy*dy + dz*dz > 60 * 60) {
-            this._stuckPos.copy(this.position);
-            this._stuckT = _now;
+            this._rsWpPos.copy(this.position);
+            this._rsWpT = _now;
             this._stuckNudgeUntil = 0;
-          } else if ((_now - this._stuckT) > 1.5) {
+          } else if ((_now - this._rsWpT) > 1.5) {
             if (!this._stuckNudgeUntil || _now > this._stuckNudgeUntil) {
               this._stuckNudgeUntil = _now + 0.8;
               const ang = Math.random() * Math.PI * 2;
@@ -43534,7 +43545,7 @@ function spawnDynamicObjects(rooms) {
     }
     return true;
   };
-  const nonSpawnRooms = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') ? [] : rooms.filter(r => !r.team);   
+  const nonSpawnRooms = _lssHubWorld() ? [] : rooms.filter(r => !r.team);   // (v46.82) no obstacle clusters in the open overworld, race or free flight   
   for (const rm of nonSpawnRooms) {
     const count = 2 + Math.floor(Math.random() * 2); 
     for (let i = 0; i < count; i++) {
@@ -43589,14 +43600,14 @@ function spawnDynamicObjects(rooms) {
   
   
   
-  if (typeof _spawnBasinClouds === 'function' && !(typeof LSS !== 'undefined' && LSS.MODE === 'freeflight')) _spawnBasinClouds();   
+  if (typeof _spawnBasinClouds === 'function' && !_lssHubWorld()) _spawnBasinClouds();   // (v46.82)   
   
   
   
   
   const _hbOn = (typeof window === 'undefined' || window.__hubClouds == null) ? true : !!+window.__hubClouds;
   if (_hbOn
-      && typeof LSS !== 'undefined' && LSS.MODE === 'freeflight' && typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem && typeof GasCloud === 'function'
+      && _lssHubWorld() && typeof billboardCloudSystem !== 'undefined' && billboardCloudSystem && typeof GasCloud === 'function'   // (v46.82)
       && !(typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) && (typeof QUALITY === 'undefined' || typeof QUALITY.basinClouds !== 'function' || QUALITY.basinClouds())) {
     try {
       if (!game.detachedGasPockets) game.detachedGasPockets = [];
@@ -44722,6 +44733,18 @@ function _faceRaceFirstRing() {
   try {
     if (typeof LSS === 'undefined' || LSS.MODE !== 'race') return;
     if (typeof player === 'undefined' || !player || !player.euler || !player.position) return;
+    if (typeof _isCircuitRace === 'function' && _isCircuitRace()) {
+      const C = game.raceCircuit; if (!C || !C.ready) return;
+      const r = C.rings[Math.min(player._raceIdx | 0, C.rings.length - 1)];
+      const dx = player.position.x - r.x, dz = player.position.z - r.z;
+      if (dx * dx + dz * dz > 1) {
+        player.euler.y = Math.atan2(dx, dz);
+        player.euler.x = 0;
+        game._parPrevYaw = player.euler.y;
+        game._parPrevPitch = player.euler.x;
+      }
+      return;
+    }
     const map = _raceRingMap();   // (v39.57) the generated track too
     if (!map || !Array.isArray(map.rooms)) return;
     const _teamCode = (player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
@@ -46393,6 +46416,20 @@ class RaceRing {
     if (!this.alive) return;
     if (!this._usedProto && _cyanRingProto) this._buildMesh();   
     if (this._inner) this._inner.rotation.z += 0.5 * dt;
+    if (this._cidx != null) {
+      const _want = (typeof player !== 'undefined' && player) ? (player._raceIdx | 0) : -1;
+      const _live = (this._cidx === _want);
+      if (this.group && this.group.visible !== _live) this.group.visible = _live;
+      if (_live && player.position && player.shipState !== 'dead' && game.state === 'playing') {
+        const cr = this.diameter * RACE_CIRCUIT.captureK;
+        if (player.position.distanceToSquared(this.position) < cr * cr) {
+          this.captured = true;
+          if (this.group) this.group.visible = false;
+          try { _raceCircuitOnLocalCapture(this._cidx); } catch (_) {}
+        }
+      }
+      return;
+    }
     if (!this.captured && typeof player !== 'undefined' && player && player.position && player.shipState !== 'dead') {
       const cr = this.diameter * 0.45;
       if (player.position.distanceToSquared(this.position) < cr * cr) {
@@ -46432,6 +46469,7 @@ function _raceRingMap() {
 function _spawnPoleRings() {
   try {
     if (typeof LSS === 'undefined' || LSS.MODE !== 'race') return;
+    if (typeof _isCircuitRace === 'function' && _isCircuitRace()) { _raceCircuitSpawnRings(); return; }   // (v46.82) RACE CIRCUITS lay their own gates
     const map = _raceRingMap();
     if (!map || !Array.isArray(map.rooms)) return;
     _preloadCyanRing();
@@ -46468,12 +46506,837 @@ function _raceOnRingCaptured(ring) {
   } catch (_) {}
 }
 function _raceFinishUnlocked() {
+  if (typeof _isCircuitRace === 'function' && _isCircuitRace()) return _raceCircuitAnyCleared();   // (v46.82) a circuit opens its finish when ANY racer clears the lap
   if (!game || !_raceRingMap()) return true;   // (v39.57) any ringed track locks its finish
   const rings = game.poleRings;
   if (!Array.isArray(rings) || rings.length === 0) return false;
   for (let i = 0; i < rings.length; i++) { if (!rings[i] || !rings[i].captured) return false; }
   return true;
 }
+
+const RACE_CIRCUIT = {
+  earth: { rings: 12, radiusM: [800, 1060], lowM: [36, 62], highEvery: 4, highAboveRoofM: [110, 190],
+           lowD: 400, highD: 600, clearM: 8, searchM: 150, startBackM: 420 },
+  ow:    { cityRings: 3, lowU: [260, 420], highAboveRoofU: [700, 1200], lowD: 540, highD: 760,
+           clearU: 90, searchU: 1100, cityInnerR: 0.62, startBackU: 2600 },
+  captureK: 0.45,        // player: pass within this fraction of the diameter of the centre
+  botCaptureK: 0.62,     // bots thread worse than pilots; the gate is more forgiving for them
+  respawnDelay: 4,       // seconds dead before a racer comes back at their last ring
+  decreeEvery: 1.5, reqEvery: 2.0,
+  mmRangeEarth: 5200, mmRangeOw: 14000,
+};
+const _rcScan = { clear: Infinity, roof: -Infinity, n: 0 };
+const _rcSeen = new Set();
+const _rcV = new THREE.Vector3(), _rcV2 = new THREE.Vector3(), _rcV3 = new THREE.Vector3();
+const _rcNet = { t: 0, reqT: 0, acked: null };
+const _rc = { pendingSince: 0, playingAt: null, hudEl: null, hudTxt: '', hudTop: 0, hudVp: 0, ringsFirstT: 0 };
+
+function _raceCircuitKind() {
+  try {
+    if (typeof LSS === 'undefined' || LSS.MODE !== 'race' || typeof game === 'undefined' || !game) return null;
+    const m = (typeof MAP_DATA !== 'undefined' && game.selectedMap) ? MAP_DATA[game.selectedMap] : null;
+    return (m && m.circuit) ? m.circuit : null;
+  } catch (_) { return null; }
+}
+function _isCircuitRace() { return !!_raceCircuitKind(); }
+function _isEarthCircuit() { return _raceCircuitKind() === 'earth'; }
+function _lssHubWorld() {
+  try {
+    if (typeof LSS === 'undefined') return false;
+    if (LSS.MODE === 'freeflight') return true;
+    return LSS.MODE === 'race' && _raceCircuitKind() === 'overworld';
+  } catch (_) { return false; }
+}
+function _raceCircuitReady() { const C = (typeof game !== 'undefined' && game) ? game.raceCircuit : null; return !!(C && C.ready && C.rings && C.rings.length); }
+function _raceCircuitAuthority() { try { return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : true; } catch (_) { return true; } }
+
+function _rcEarthWorld() {
+  try { return (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active) ? _lssGmaps.tiles : null; } catch (_) { return null; }
+}
+function _rcEarthPatch(W, x, z) {
+  try { return (W && typeof W._patchAt === 'function') ? W._patchAt(x, z) : W; } catch (_) { return null; }
+}
+function _rcEarthGroundY(W, x, z) {
+  try { return (W && typeof W.groundYWorld === 'function') ? W.groundYWorld(x, z) : 0; } catch (_) { return 0; }
+}
+function _rcEarthScan(W, x, y, z, R, below, out) {
+  out.clear = Infinity; out.roof = -Infinity; out.n = 0;
+  const p = _rcEarthPatch(W, x, z);
+  if (!p || !p._cgrid || typeof p._xf !== 'function') return out;
+  const X = p._xf();
+  const s = X.s || 1;
+  const lx = (x - X.ox) / s, ly = (y - X.oy) / s, lz = (z - X.oz) / s;
+  const Rm = R / s, belowM = below / s;
+  const g = p._cgrid;
+  const i0 = Math.max(0, ((lx - Rm - g.X0) / g.cell) | 0), i1 = Math.min(g.gx - 1, ((lx + Rm - g.X0) / g.cell) | 0);
+  const j0 = Math.max(0, ((lz - Rm - g.Z0) / g.cell) | 0), j1 = Math.min(g.gz - 1, ((lz + Rm - g.Z0) / g.cell) | 0);
+  const px = lx, py = -lz;   // polygon space is (x, -z)
+  let clear = Infinity, roof = -Infinity, n = 0;
+  const seen = _rcSeen; seen.clear();
+  for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+    const list = g.cells[j * g.gx + i]; if (!list) continue;
+    for (let k = 0; k < list.length; k++) {
+      const b = list[k];
+      if (seen.has(b)) continue; seen.add(b);
+      const ddx = Math.max(b.x0 - lx, 0, lx - b.x1), ddz = Math.max(b.z0 - lz, 0, lz - b.z1);
+      if (ddx * ddx + ddz * ddz > Rm * Rm) continue;
+      n++;
+      const topW = b.top * s + X.oy;
+      if (topW > roof) roof = topW;
+      if (b.top < ly - belowM) continue;   // stays under the ring's bottom
+      let d = 0;
+      if (!_lePointInPoly(b.poly, px, py)) { const ne = _leNearestEdge(b.poly, px, py); d = ne.d; }
+      if (d < clear) clear = d;
+    }
+  }
+  out.clear = (clear === Infinity) ? Infinity : clear * s;
+  out.roof = roof; out.n = n;
+  return out;
+}
+function _rcOwCities() {
+  const out = [];
+  try {
+    if (typeof game !== 'undefined' && game.hubCity && game.hubCity.city && typeof HUB_CITY !== 'undefined') {
+      out.push({ name: 'THE HUB', x: HUB_CITY.x, z: HUB_CITY.z, padY: HUB_CITY.padY, R: HUB_CITY.genome.radius,
+                 towerH: HUB_CITY.genome.towerH, city: game.hubCity.city, hub: true });
+    }
+    if (typeof OW !== 'undefined' && OW.cities) for (const c of OW.cities) {
+      out.push({ name: c.name, x: c.x, z: c.z, padY: c.padY, R: c.R, towerH: c.site.genome.towerH,
+                 city: (c.built && c.built.city) || null, hub: false, idx: c.idx });
+    }
+  } catch (_) {}
+  return out;
+}
+function _rcOwGroundY(x, z) {
+  const T = (typeof game !== 'undefined' && game) ? game.sandwichTerrain : null;
+  if (!T || !T.ON) return 0;
+  let h = NaN;
+  try { h = _stGroundYCarved(x, z, T); } catch (_) { h = NaN; }
+  if (!isFinite(h) || Math.abs(h) > 1e8) { try { h = _stGroundY(x, z, T); } catch (_) { h = NaN; } }
+  if (!isFinite(h) || Math.abs(h) > 1e8) h = 0;
+  return h;
+}
+function _rcOwScan(city, x, y, z, R, below, out) {
+  out.clear = Infinity; out.roof = -Infinity; out.n = 0;
+  if (!city || !city.hash) return out;
+  const CELL = city.cellSize || 256;
+  const gx0 = Math.floor((x - R) / CELL), gx1 = Math.floor((x + R) / CELL);
+  const gz0 = Math.floor((z - R) / CELL), gz1 = Math.floor((z + R) / CELL);
+  const seen = _rcSeen; seen.clear();
+  let clear = Infinity, roof = -Infinity, n = 0;
+  for (let gx = gx0; gx <= gx1; gx++) for (let gz = gz0; gz <= gz1; gz++) {
+    const arr = city.hash.get(gx + ',' + gz); if (!arr) continue;
+    for (let i = 0; i < arr.length; i++) {
+      const o = arr[i];
+      if (seen.has(o)) continue; seen.add(o);
+      const c = Math.cos(o.yaw), s = Math.sin(o.yaw);
+      const rx = x - o.cx, rz = z - o.cz;
+      const lx = c * rx + s * rz, lz = -s * rx + c * rz;
+      const ex = Math.max(Math.abs(lx) - o.hw, 0), ez = Math.max(Math.abs(lz) - o.hd, 0);
+      const d = Math.sqrt(ex * ex + ez * ez);
+      if (d > R) continue;
+      n++;
+      if (o.y1 > roof) roof = o.y1;
+      if (o.y1 < y - below) continue;
+      if (d < clear) clear = d;
+    }
+  }
+  out.clear = clear; out.roof = roof; out.n = n;
+  return out;
+}
+
+function _rcPlaceRing(Q, vx, vz, tx, tz, high, rng, P) {
+  const D = high ? P.highD : P.lowD;
+  const r = D * 0.5;
+  const need = r + P.clear;
+  const S = P.search;
+  const out = _rcScan;
+  let best = null, bestScore = -Infinity;
+  const N = 28;
+  for (let i = 0; i < N; i++) {
+    const rad = i ? S * Math.sqrt(i / N) : 0, ang = i * 2.399963 + rng() * 0.4;
+    const x = vx + Math.cos(ang) * rad, z = vz + Math.sin(ang) * rad;
+    const gy = Q.ground(x, z);
+    let y;
+    if (high) {
+      Q.scan(x, gy, z, P.roofR, 1e9, out);
+      const roof = isFinite(out.roof) ? out.roof : gy;
+      y = Math.max(gy + P.highMin, roof) + P.highAbove[0] + rng() * (P.highAbove[1] - P.highAbove[0]);
+    } else {
+      y = gy + P.low[0] + rng() * (P.low[1] - P.low[0]);
+      y = Math.max(y, gy + r + P.groundPad);
+    }
+    let ok = false, tries = 0, score = 0;
+    while (tries < (high ? 1 : 6)) {
+      Q.scan(x, y, z, need + S * 0.5, r, out);
+      const cl = out.clear;
+      if (cl >= need) {
+        ok = true;
+        score = -rad / S - tries * 0.35 + (out.n > 0 ? 0.25 : 0) + ((isFinite(cl) && cl < need * 2.2) ? 0.15 : 0);
+        break;
+      }
+      tries++;
+      y += P.climb;
+    }
+    if (!ok) continue;
+    if (score > bestScore) { bestScore = score; best = { x, y, z }; }
+    if (rad === 0 && tries === 0 && !high) break;   // the vertex itself is a street-level gate
+  }
+  if (!best) {
+    const gy = Q.ground(vx, vz);
+    Q.scan(vx, gy, vz, P.roofR, 1e9, out);
+    const roof = isFinite(out.roof) ? out.roof : gy;
+    best = { x: vx, y: Math.max(gy + r + P.groundPad, roof + r + P.clear * 2), z: vz };
+  }
+  return { x: best.x, y: best.y, z: best.z, d: D, tx, tz, high: !!high };
+}
+function _rcStartLine(Q, P, sx, sz, tx, tz, refY) {
+  const out = _rcScan;
+  const gy = Q.ground(sx, sz);
+  Q.scan(sx, gy, sz, P.startR, 1e9, out);
+  const roof = isFinite(out.roof) ? out.roof : gy;
+  return { x: sx, y: Math.max(refY, roof + P.startAbove, gy + P.startAbove), z: sz, tx, tz };
+}
+function _rcFinish(Q, P, start) {
+  const out = _rcScan;
+  const gy = Q.ground(start.x, start.z);
+  Q.scan(start.x, gy, start.z, P.startR, 1e9, out);
+  const roof = isFinite(out.roof) ? out.roof : gy;
+  return { x: start.x, y: Math.max(start.y + P.finUp, roof + P.finAbove), z: start.z, r: 480 };
+}
+
+function _rcGenEarth(seed) {
+  const W = _rcEarthWorld();
+  if (!W) return null;
+  let s = 7;
+  try { s = (typeof W._unitsPerMetre === 'function') ? W._unitsPerMetre() : ((_lssGmaps && _lssGmaps.scale) || 7); } catch (_) {}
+  const K = RACE_CIRCUIT.earth;
+  const rng = _hcMulberry32(seed >>> 0);
+  const Q = {
+    ground: (x, z) => _rcEarthGroundY(W, x, z),
+    scan: (x, y, z, R, below, out) => _rcEarthScan(W, x, y, z, R, below, out),
+  };
+  const P = {
+    low: [K.lowM[0] * s, K.lowM[1] * s], highAbove: [K.highAboveRoofM[0] * s, K.highAboveRoofM[1] * s],
+    highMin: 150 * s, lowD: K.lowD, highD: K.highD, clear: K.clearM * s, search: K.searchM * s,
+    roofR: 160 * s, climb: 14 * s, groundPad: 6 * s,
+    startR: 120 * s, startAbove: 70 * s, finUp: 90 * s, finAbove: 120 * s,
+  };
+  const N = K.rings;
+  const Rm = (K.radiusM[0] + rng() * (K.radiusM[1] - K.radiusM[0])) * s;
+  const a1 = rng() * 6.283, a2 = rng() * 6.283, k1 = 0.10 + rng() * 0.12, k2 = 0.05 + rng() * 0.08;
+  const rot = rng() * 6.283, dir = rng() < 0.5 ? 1 : -1;
+  const verts = [];
+  for (let i = 0; i < N; i++) {
+    const a = rot + dir * (i / N) * 6.283 + (rng() - 0.5) * (0.35 * 6.283 / N);
+    const rr = Rm * (1 + k1 * Math.sin(2 * a + a1) + k2 * Math.sin(3 * a + a2));
+    verts.push({ x: Math.cos(a) * rr, z: Math.sin(a) * rr });
+  }
+  const rings = [];
+  const highPhase = Math.floor(rng() * K.highEvery);
+  for (let i = 0; i < N; i++) {
+    const v = verts[i], pv = verts[(i + N - 1) % N], nv = verts[(i + 1) % N];
+    let tx = nv.x - pv.x, tz = nv.z - pv.z; const L = Math.hypot(tx, tz) || 1; tx /= L; tz /= L;
+    const high = ((i + highPhase) % K.highEvery) === (K.highEvery - 1);
+    rings.push(_rcPlaceRing(Q, v.x, v.z, tx, tz, high, rng, P));
+  }
+  const r0 = rings[0];
+  const start = _rcStartLine(Q, P, r0.x - r0.tx * K.startBackM * s, r0.z - r0.tz * K.startBackM * s, r0.tx, r0.tz, r0.y);
+  return { kind: 'earth', seed: seed >>> 0, rings, start, fin: _rcFinish(Q, P, start), upm: s };
+}
+function _rcGenOverworld(seed) {
+  const cities = _rcOwCities();
+  if (!cities.length) return null;
+  const K = RACE_CIRCUIT.ow;
+  const rng = _hcMulberry32(seed >>> 0);
+  const hub = cities.find(c => c.hub) || cities[0];
+  const others = cities.filter(c => c !== hub);
+  others.sort((a, b) => Math.atan2(a.z - hub.z, a.x - hub.x) - Math.atan2(b.z - hub.z, b.x - hub.x));
+  if (rng() < 0.5) others.reverse();
+  const startK = others.length ? Math.floor(rng() * others.length) : 0;
+  const order = [hub];
+  for (let i = 0; i < others.length; i++) order.push(others[(startK + i) % others.length]);
+  const P = {
+    low: [K.lowU[0], K.lowU[1]], highAbove: [K.highAboveRoofU[0], K.highAboveRoofU[1]], highMin: 400,
+    lowD: K.lowD, highD: K.highD, clear: K.clearU, search: K.searchU, roofR: 1400, climb: 120, groundPad: 60,
+    startR: 900, startAbove: 500, finUp: 600, finAbove: 800,
+  };
+  const Qfor = (c) => ({
+    ground: (x, z) => {
+      const dx = x - c.x, dz = z - c.z;
+      if (dx * dx + dz * dz < (c.R + 300) * (c.R + 300)) return c.padY;
+      return _rcOwGroundY(x, z);
+    },
+    scan: (x, y, z, R, below, out) => _rcOwScan(c.city, x, y, z, R, below, out),
+  });
+  const Qopen = {
+    ground: (x, z) => _rcOwGroundY(x, z),
+    scan: (x, y, z, R, below, out) => { out.clear = Infinity; out.roof = -Infinity; out.n = 0; return out; },
+  };
+  const verts = [];
+  const nC = order.length;
+  for (let ci = 0; ci < nC; ci++) {
+    const c = order[ci], nx = order[(ci + 1) % nC], pvC = order[(ci + nC - 1) % nC];
+    const ain = Math.atan2(pvC.z - c.z, pvC.x - c.x), aout = Math.atan2(nx.z - c.z, nx.x - c.x);
+    let da = aout - ain; while (da > Math.PI) da -= 6.283185; while (da < -Math.PI) da += 6.283185;
+    if (nC === 1) da = 6.283185 * 0.8;
+    const n = K.cityRings;
+    const highAt = Math.floor(rng() * n);
+    for (let k = 0; k < n; k++) {
+      const t = (k + 0.5) / n;
+      const a = ain + da * t + (rng() - 0.5) * 0.45;
+      const rr = c.R * K.cityInnerR * (0.32 + 0.68 * Math.abs(2 * t - 1)) + (rng() - 0.5) * c.R * 0.16;
+      verts.push({ x: c.x + Math.cos(a) * rr, z: c.z + Math.sin(a) * rr, high: (k === highAt), Q: Qfor(c) });
+    }
+    if (nC > 1) {
+      const mx = (c.x + nx.x) * 0.5, mz = (c.z + nx.z) * 0.5;
+      const ux = nx.x - c.x, uz = nx.z - c.z; const L = Math.hypot(ux, uz) || 1;
+      const side = (rng() - 0.5) * 6000;
+      verts.push({ x: mx + (-uz / L) * side, z: mz + (ux / L) * side, high: true, Q: Qopen });
+    }
+  }
+  const N = verts.length;
+  const rings = [];
+  for (let i = 0; i < N; i++) {
+    const v = verts[i], pv = verts[(i + N - 1) % N], nv = verts[(i + 1) % N];
+    let tx = nv.x - pv.x, tz = nv.z - pv.z; const L = Math.hypot(tx, tz) || 1; tx /= L; tz /= L;
+    rings.push(_rcPlaceRing(v.Q, v.x, v.z, tx, tz, v.high, rng, P));
+  }
+  const r0 = rings[0];
+  const Q0 = verts[0].Q;
+  const start = _rcStartLine(Q0, P, r0.x - r0.tx * K.startBackU, r0.z - r0.tz * K.startBackU, r0.tx, r0.tz, r0.y);
+  return { kind: 'overworld', seed: seed >>> 0, rings, start, fin: _rcFinish(Q0, P, start), upm: 7 };
+}
+
+function _raceCircuitSeed() {
+  let s = 0;
+  try { if (typeof net !== 'undefined' && net && net.active && typeof net.worldSeed === 'number') s = net.worldSeed >>> 0; } catch (_) {}
+  if (!s) { s = (game._raceSeed = game._raceSeed || ((Math.random() * 0xffffffff) >>> 0)); }
+  try {
+    if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active) {
+      s = (s ^ (Math.round((_lssGmaps.lat || 0) * 1e4) * 2654435761) ^ (Math.round((_lssGmaps.lng || 0) * 1e4) * 40503)) >>> 0;
+    }
+  } catch (_) {}
+  return s >>> 0;
+}
+function _raceCircuitInstall() {
+  const C = game.raceCircuit; if (!C || !C.ready) return;
+  const px = -C.start.tz, pz = C.start.tx;   // across the line
+  const gap = (C.kind === 'earth') ? 160 : 260;
+  const back = (C.kind === 'earth') ? 220 : 360;
+  const pts = [];
+  for (let row = 0; row < 3; row++) for (let i = 0; i < 6; i++) {
+    const off = (i - 2.5) * gap;
+    pts.push({ x: C.start.x + px * off - C.start.tx * back * row, y: C.start.y + 40 * row,
+               z: C.start.z + pz * off - C.start.tz * back * row,
+               team: (i < 3) ? 'A' : 'B', roomType: 'room', roomId: 'race_start' });
+  }
+  game.corridorPoints = pts;
+  const rooms = Array.isArray(game.sdfRoomData) ? game.sdfRoomData.filter(r => r && !r.champion && r.id !== 'race_finish') : [];
+  rooms.push({ id: 'race_finish', team: null, champion: true, x: C.fin.x, y: C.fin.y, z: C.fin.z, r: C.fin.r || 480, _race: true });
+  game.sdfRoomData = rooms;
+  game.raceNoTimer = true;
+}
+function _raceCircuitResetProgress() {
+  try { player._raceIdx = 0; player._raceCleared = false; } catch (_) {}
+  try {
+    if (Array.isArray(game.entities)) for (const e of game.entities) { if (e) { e._raceIdx = 0; e._raceCleared = false; e._raceClearSaid = false; } }
+    if (typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) for (const n of net.networkPlayers) { if (n) { n._raceIdx = 0; n._raceCleared = false; n._raceClearSaid = false; } }
+  } catch (_) {}
+  _rc.ringsFirstT = 0;
+}
+function _raceCircuitPlaceAll() {
+  const C = game.raceCircuit; if (!C || !C.ready) return;
+  try {
+    const sp = getValidSpawnPoint((player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A');
+    player.position.copy(sp); _spawnPickSet(sp);
+    if (player.velocity) player.velocity.set(0, 0, 0);
+    if (typeof _faceRaceFirstRing === 'function') _faceRaceFirstRing();
+  } catch (_) {}
+  try {
+    if (typeof _botAuthority === 'function' && _botAuthority() && Array.isArray(game.entities)) {
+      for (const e of game.entities) {
+        if (!(e instanceof Bot) || e.isProxy || !e.alive) continue;
+        const sp = getValidSpawnPoint(e.team === LSS.TEAM_FLEET_B ? 'B' : 'A');
+        e.position.copy(sp); if (e.velocity) e.velocity.set(0, 0, 0);
+        if (e.mesh) e.mesh.position.copy(e.position);
+      }
+    }
+  } catch (_) {}
+}
+function _raceCircuitSpawnRings() {
+  const C = game.raceCircuit; if (!C || !C.ready) return;
+  try { _preloadCyanRing(); } catch (_) {}
+  if (Array.isArray(game.poleRings)) for (const r of game.poleRings) { try { r.destroy(); } catch (_) {} }
+  game.poleRings = [];
+  for (let i = 0; i < C.rings.length; i++) {
+    const r = C.rings[i];
+    const ring = new RaceRing(new THREE.Vector3(r.x, r.y, r.z), r.d);
+    ring._cidx = i;
+    ring.orientAxis(new THREE.Vector3(r.tx, 0, r.tz));
+    game.poleRings.push(ring);
+  }
+  _raceCircuitResetProgress();
+  _raceCircuitRefreshVis();
+}
+function _raceCircuitRefreshVis() {
+  const R = game.poleRings; if (!Array.isArray(R)) return;
+  const idx = player._raceIdx | 0;
+  for (let i = 0; i < R.length; i++) {
+    const ring = R[i]; if (!ring || ring._cidx == null) continue;
+    ring.captured = (ring._cidx < idx);
+    if (ring.group) ring.group.visible = (ring._cidx === idx);
+  }
+}
+function _raceCircuitOnLocalCapture(idx) {
+  const C = game.raceCircuit; if (!C || !C.ready) return;
+  if ((player._raceIdx | 0) !== idx) return;
+  player._raceIdx = idx + 1;
+  const N = C.rings.length;
+  try { if (typeof playSound === 'function') playSound('firework_pop'); } catch (_) {}
+  try {
+    if (player._raceIdx >= N) {
+      player._raceCleared = true;
+      if (window.Overlays) Overlays.banner('CIRCUIT CLEAR', 'Capture the finish field to win');
+      if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue();
+    } else if (window.Overlays) {
+      const nr = C.rings[player._raceIdx];
+      Overlays.banner('RING ' + (idx + 1) + ' / ' + N, nr.high ? 'Next gate is UP HIGH' : 'Next gate is low, between the buildings');
+    }
+  } catch (_) {}
+  _raceCircuitRefreshVis();
+  _raceCircuitSendProg();
+}
+function _raceCircuitAnyCleared() {
+  const C = game.raceCircuit; if (!C || !C.ready) return false;
+  const N = C.rings.length;
+  if ((player._raceIdx | 0) >= N) return true;
+  if (Array.isArray(game.entities)) for (const e of game.entities) {
+    if (!e || !e.alive) continue;
+    if (e.peerId) { if (e._raceCleared) return true; continue; }
+    if (!e.isProxy && (e._raceIdx | 0) >= N) return true;
+  }
+  return false;
+}
+function _raceCanClaim(ship) {
+  if (!_isCircuitRace()) return true;
+  const C = game.raceCircuit; if (!C || !C.ready || !ship) return false;
+  const N = C.rings.length;
+  if (ship === player) {
+    const ok = (player._raceIdx | 0) >= N;
+    if (!ok) {
+      try {
+        const f = game.championField;
+        if (f && f.alive && f.position && player.position && player.position.distanceTo(f.position) < (f.holdRadius || f.radius) + 160 &&
+            (game.time || 0) - _rc.ringsFirstT > 6 && window.Overlays) {
+          _rc.ringsFirstT = game.time || 0;
+          Overlays.banner('RINGS FIRST', (N - (player._raceIdx | 0)) + ' gate' + ((N - (player._raceIdx | 0)) === 1 ? '' : 's') + ' still to take');
+        }
+      } catch (_) {}
+    }
+    return ok;
+  }
+  if (ship.isProxy) return false;
+  if (ship.peerId) return !!ship._raceCleared;
+  return (ship._raceIdx | 0) >= N;
+}
+
+function _raceCircuitPacket() {
+  const C = game.raceCircuit; if (!C || !C.ready) return null;
+  return { type: 'race_circuit', id: C.id, kind: C.kind, seed: C.seed, upm: C.upm,
+           rings: C.rings.map(r => [Math.round(r.x), Math.round(r.y), Math.round(r.z), r.d, +r.tx.toFixed(4), +r.tz.toFixed(4), r.high ? 1 : 0]),
+           start: [Math.round(C.start.x), Math.round(C.start.y), Math.round(C.start.z), +C.start.tx.toFixed(4), +C.start.tz.toFixed(4)],
+           fin: [Math.round(C.fin.x), Math.round(C.fin.y), Math.round(C.fin.z), C.fin.r || 480] };
+}
+function _raceCircuitFromPacket(p) {
+  try {
+    if (!p || !Array.isArray(p.rings) || !p.rings.length || !Array.isArray(p.start) || !Array.isArray(p.fin)) return null;
+    return { kind: p.kind, seed: p.seed >>> 0, id: String(p.id || ''), upm: +p.upm || 7, ready: true, fromDecree: true,
+      rings: p.rings.map(a => ({ x: +a[0], y: +a[1], z: +a[2], d: +a[3] || 440, tx: +a[4], tz: +a[5], high: !!a[6] })),
+      start: { x: +p.start[0], y: +p.start[1], z: +p.start[2], tx: +p.start[3], tz: +p.start[4] },
+      fin: { x: +p.fin[0], y: +p.fin[1], z: +p.fin[2], r: +p.fin[3] || 480 } };
+  } catch (_) { return null; }
+}
+function _raceCircuitSendProg() {
+  try {
+    if (!(typeof net !== 'undefined' && net && net.active && net.sendEvent)) return;
+    net.sendEvent({ type: 'race_prog', idx: player._raceIdx | 0, cleared: !!player._raceCleared });
+  } catch (_) {}
+}
+function _raceCircuitOnArrive() {
+  try { if (Array.isArray(game.poleRings)) { for (const r of game.poleRings) { try { r.destroy(); } catch (_) {} } game.poleRings = []; } } catch (_) {}
+  _raceCircuitResetProgress();
+  const early = (game.state !== 'playing') || (_rc.playingAt == null) || ((game.time || 0) - _rc.playingAt < 4);
+  if (early) _raceCircuitPlaceAll();
+}
+function _raceCircuitAdopt(C) {
+  C.ready = true;
+  if (!C.id) { let me = 'solo'; try { if (typeof net !== 'undefined' && net && net.myPeerId) me = String(net.myPeerId); } catch (_) {} C.id = me + ':' + C.seed + ':' + Date.now(); }
+  game.raceCircuit = C;
+  _rc.pendingSince = 0;
+  _rcNet.acked = new Set(); _rcNet.t = 0;
+  _raceCircuitInstall();
+  _raceCircuitOnArrive();
+}
+function _raceCircuitNetTick(dt) {
+  if (game.state === 'playing') { if (_rc.playingAt == null) _rc.playingAt = game.time || 0; }
+  else _rc.playingAt = null;
+  if (!(typeof net !== 'undefined' && net && net.active && net.sendEvent)) return;
+  if (game.state !== 'warmup' && game.state !== 'playing') return;
+  const C = game.raceCircuit;
+  if (C && C.ready) {
+    if (!_raceCircuitAuthority()) return;
+    let peers = []; try { peers = (typeof nonJudgePeerIds === 'function') ? nonJudgePeerIds() : []; } catch (_) {}
+    if (!_rcNet.acked) _rcNet.acked = new Set();
+    let missing = false;
+    for (const id of peers) { if (!_rcNet.acked.has(String(id))) { missing = true; break; } }
+    if (!missing) return;
+    _rcNet.t -= dt;
+    if (_rcNet.t > 0) return;
+    _rcNet.t = RACE_CIRCUIT.decreeEvery;
+    const pkt = _raceCircuitPacket(); if (pkt) { try { net.sendEvent(pkt); } catch (_) {} }
+  } else {
+    if (_raceCircuitAuthority()) return;   // the authority generates; it never asks
+    _rcNet.reqT -= dt;
+    if (_rcNet.reqT > 0) return;
+    _rcNet.reqT = RACE_CIRCUIT.reqEvery;
+    try { net.sendEvent({ type: 'race_circuit_req' }); } catch (_) {}
+  }
+}
+function _raceCircuitNetEvent(evt, fromPeerId) {
+  if (!evt) return false;
+  if (evt.type === 'race_circuit') {
+    try {
+      const C = _raceCircuitFromPacket(evt);
+      const have = game.raceCircuit;
+      const mine = _raceCircuitAuthority() && have && have.ready && !have.fromDecree;
+      if (C && !mine && (!have || have.id !== C.id)) _raceCircuitAdopt(C);
+      if (net.sendEvent) net.sendEvent({ type: 'race_circuit_ack', id: evt.id }, fromPeerId);
+    } catch (_) {}
+    return true;
+  }
+  if (evt.type === 'race_circuit_ack') {
+    if (!_rcNet.acked) _rcNet.acked = new Set();
+    _rcNet.acked.add(String(fromPeerId));
+    return true;
+  }
+  if (evt.type === 'race_circuit_req') {
+    try { if (_raceCircuitAuthority()) { const pkt = _raceCircuitPacket(); if (pkt && net.sendEvent) net.sendEvent(pkt, fromPeerId); } } catch (_) {}
+    return true;
+  }
+  if (evt.type === 'race_prog') {
+    try {
+      const np = (net.networkPlayers || []).find(n => n && n.peerId === fromPeerId);
+      if (np) {
+        np._raceIdx = evt.idx | 0; np._raceCleared = !!evt.cleared;
+        if (np._raceCleared && !np._raceClearSaid) {
+          np._raceClearSaid = true;
+          const nm = (np.loadout && np.loadout.name) ? np.loadout.name : 'A RIVAL';
+          if (window.Overlays && !(player._raceCleared)) Overlays.banner(nm + ' CLEARED THE CIRCUIT', 'Take the finish before they do');
+        }
+      }
+    } catch (_) {}
+    return true;
+  }
+  return false;
+}
+
+function _raceCircuitEarthKick() {
+  if (!_isEarthCircuit()) return;
+  const have = game.raceCircuit;
+  if (have && have.ready && have.kind === 'earth') { _raceCircuitInstall(); _raceCircuitPlaceAll(); return; }   // round 2+: the same lap
+  _rc.pendingSince = performance.now();
+  _raceCircuitEarthPoll();
+}
+function _raceCircuitEarthPoll() {
+  if (!_isEarthCircuit()) { _rc.pendingSince = 0; return; }
+  if (game.raceCircuit && game.raceCircuit.ready) { _rc.pendingSince = 0; return; }
+  if (!_raceCircuitAuthority()) { _rc.pendingSince = 0; return; }   // the decree brings it
+  const W = _rcEarthWorld();
+  let p0 = null; try { p0 = (W && typeof W._patchAt === 'function') ? W._patchAt(0, 0) : W; } catch (_) {}
+  const haveCity = !!(p0 && p0._bldList && p0._bldList.length && p0._cgrid);
+  const waited = performance.now() - _rc.pendingSince;
+  const giveUp = waited > 14000 || (W && ((W._bldFail | 0) > 0) && waited > 4000);
+  if (!W || (!haveCity && !giveUp)) { setTimeout(_raceCircuitEarthPoll, 400); return; }
+  const seed = _raceCircuitSeed();
+  let C = null;
+  try { C = _rcGenEarth(seed); } catch (e) { console.warn('[race] earth circuit failed:', e); }
+  if (!C) { if (waited < 20000) setTimeout(_raceCircuitEarthPoll, 600); else _rc.pendingSince = 0; return; }
+  _raceCircuitAdopt(C);
+  console.log('[race] earth circuit:', C.rings.length, 'gates, seed', seed, haveCity ? '(city in)' : '(no city - open gates)',
+              'high:', C.rings.filter(r => r.high).length);
+}
+function _raceCircuitOverworldBuild() {
+  if (_raceCircuitKind() !== 'overworld') return;
+  const T = game.sandwichTerrain; if (!T || !T.ON) return;
+  game.raceNoTimer = true;
+  try {
+    if (typeof _owEnsureSites === 'function' && _owEnsureSites(T) && typeof OW !== 'undefined' && OW.cities) {
+      for (const c of OW.cities) {
+        if (c.built) continue;
+        try { _owBuild(c); } catch (e) { console.warn('[race] city build failed:', c.name, e); c.built = { city: null, group: null, failed: true }; }
+      }
+    }
+  } catch (e) { console.warn('[race] sites failed:', e); }
+  const have = game.raceCircuit;
+  if (have && have.ready && have.kind === 'overworld') { _raceCircuitInstall(); return; }   // round 2+: the same lap
+  if (!_raceCircuitAuthority()) return;   // the decree brings it
+  const seed = _raceCircuitSeed();
+  let C = null;
+  try { C = _rcGenOverworld(seed); } catch (e) { console.warn('[race] overworld circuit failed:', e); }
+  if (!C) { console.warn('[race] overworld circuit: no cities to lay a lap through'); return; }
+  C.ready = true;
+  { let me = 'solo'; try { if (typeof net !== 'undefined' && net && net.myPeerId) me = String(net.myPeerId); } catch (_) {} C.id = me + ':' + C.seed + ':' + Date.now(); }
+  game.raceCircuit = C;
+  _rcNet.acked = new Set(); _rcNet.t = 0;
+  _raceCircuitInstall();
+  console.log('[race] overworld circuit:', C.rings.length, 'gates over', _rcOwCities().length, 'cities, seed', seed);
+}
+function _owRaceFrame(dt) {
+  if (_raceCircuitKind() !== 'overworld') return;
+  if (typeof OW === 'undefined' || !OW.cities) return;
+  const C = OW.cities;
+  let builtThisFrame = false;
+  for (let i = 0; i < C.length; i++) {
+    const c = C[i];
+    if (!c.built && !builtThisFrame) { builtThisFrame = true; try { _owBuild(c); } catch (e) { c.built = { city: null, group: null, failed: true }; } }
+  }
+  if (typeof camera === 'undefined' || !camera) return;
+  if (!OW._sunV) OW._sunV = new THREE.Vector3();
+  OW._sunV.set(0.267, 0.802, 0.401).transformDirection(camera.matrixWorldInverse);
+  const t = (typeof _swU !== 'undefined' && _swU.uTime) ? _swU.uTime.value : 0;
+  for (let i = 0; i < C.length; i++) {
+    const b = C[i].built; if (!b) continue;
+    if (b.twrMat && b.twrMat.userData.uHcSunV) b.twrMat.userData.uHcSunV.value.copy(OW._sunV);
+    if (b.lights) {
+      const hs = b.lights.children;
+      for (let k = 0; k < hs.length; k++) hs[k].rotation.y = t * (0.14 + k * 0.07) + k * 2.09;
+      try { if (typeof _cityBeamPhase === 'function') _cityBeamPhase(b.lights); } catch (_) {}
+    }
+  }
+}
+function _raceCircuitTeardown() {
+  try { if (game.raceCircuit && game.raceCircuit.kind === 'overworld' && typeof _owDispose === 'function') _owDispose(); } catch (_) {}
+  if (game.raceCircuit) { try { game.raceNoTimer = false; } catch (_) {} }
+  game.raceCircuit = null; game._raceSeed = null;
+  _rcNet.acked = null; _rcNet.t = 0; _rcNet.reqT = 0; _rc.pendingSince = 0; _rc.playingAt = null;
+  try { player._raceIdx = 0; player._raceCleared = false; } catch (_) {}
+  try { const el = document.getElementById('race-hud'); if (el) el.style.display = 'none'; } catch (_) {}
+}
+function _raceCircuitMatchReset() {
+  try { if (game.raceCircuit && game.raceCircuit.kind === 'overworld' && typeof _owDispose === 'function' && _raceCircuitKind() !== 'overworld') _owDispose(); } catch (_) {}
+  game.raceCircuit = null; game._raceSeed = null;
+  _rcNet.acked = null; _rcNet.t = 0; _rcNet.reqT = 0; _rc.pendingSince = 0; _rc.playingAt = null;
+  try { player._raceIdx = 0; player._raceCleared = false; } catch (_) {}
+}
+
+function _raceObstacleRay(o, d, maxDist) {
+  let best = maxDist;
+  try {
+    const W = _rcEarthWorld();
+    if (W && typeof W.raycast === 'function') { const h = W.raycast(o, d, maxDist); if (isFinite(h) && h < best) best = h; }
+    if (typeof _hubCityRayHit === 'function' && game.hubCity) { const h = _hubCityRayHit(o, d, best); if (h < best) best = h; }
+    if (typeof _owRayHit === 'function' && typeof OW !== 'undefined' && OW.cities) { const h = _owRayHit(o, d, best, true); if (h < best) best = h; }
+  } catch (_) {}
+  return best;
+}
+function _raceCircuitBotWaypoint(bot, dt) {
+  const C = game.raceCircuit; if (!C || !C.ready) return null;
+  const N = C.rings.length;
+  let idx = bot._raceIdx | 0;
+  let gx, gy, gz, tx, tz;
+  for (let guard = 0; guard < 3; guard++) {
+    if (idx >= N) {
+      bot._raceCleared = true;
+      const sh = game.championShell, f = game.championField;
+      if (sh && sh.alive && sh.position) {
+        const off = _rcV.subVectors(bot.position, sh.position); if (off.lengthSq() < 1) off.set(1, 0.2, 0); off.normalize();
+        return _rcV2.copy(sh.position).addScaledVector(off, (sh.collisionRadius || 170) + 260);
+      }
+      if (f && f.alive && f.position) {
+        const _h = f.claimedBy;
+        if (_h && _h !== bot && _h.team === bot.team && (_h.alive !== false) && (_h !== player || player.shipState !== 'dead')) {
+          const _n = Math.max(1, (game.entities || []).length);
+          const _ang = ((bot.id | 0) % _n) * (Math.PI * 2 / _n) + (bot.id | 0) * 0.7;
+          const _ring = (f.radius || 50) + 520;
+          return _rcV2.set(f.position.x + Math.cos(_ang) * _ring, f.position.y + 90 + (((bot.id | 0) % 3) - 1) * 140, f.position.z + Math.sin(_ang) * _ring);
+        }
+        return _rcV2.copy(f.position);
+      }
+      return _rcV2.set(C.fin.x, C.fin.y, C.fin.z);
+    }
+    const r = C.rings[idx];
+    gx = r.x; gy = r.y; gz = r.z; tx = r.tx; tz = r.tz;
+    const cap = r.d * RACE_CIRCUIT.botCaptureK;
+    const dx = bot.position.x - gx, dy = bot.position.y - gy, dz = bot.position.z - gz;
+    if (dx * dx + dy * dy + dz * dz < cap * cap) { bot._raceIdx = ++idx; continue; }
+    break;
+  }
+  const dist = Math.hypot(gx - bot.position.x, gy - bot.position.y, gz - bot.position.z);
+  const ahead = Math.min(dist * 0.55, 900);
+  const climb = Math.max(0, Math.min(900, (dist - 320) * 0.6));
+  if (dist > 320) _rcV2.set(gx - tx * ahead, gy + climb, gz - tz * ahead); else _rcV2.set(gx, gy, gz);
+  const now = (game && typeof game.time === 'number') ? game.time : 0;
+  const gyB = _raceBotGroundY(bot.position.x, bot.position.z);
+  if (isFinite(gyB) && _rcV2.y < gyB + 170) _rcV2.y = gyB + 170;
+  if (bot._raceDodgeUntil > now && bot._raceDodge) return _rcV2.copy(bot._raceDodge);
+  const spd = bot.velocity ? bot.velocity.length() : 0;
+  if (spd < 70 && dist > 300) {
+    bot._raceStuckT = (bot._raceStuckT || 0) + (dt || 0.016);
+    if (bot._raceStuckT > 1.2) {
+      bot._raceStuckT = 0;
+      const a = Math.random() * 6.283;
+      if (!bot._raceDodge) bot._raceDodge = new THREE.Vector3();
+      bot._raceDodge.set(bot.position.x + Math.cos(a) * 320, bot.position.y + 520, bot.position.z + Math.sin(a) * 320);
+      bot._raceDodgeUntil = now + 0.9;
+      if (bot.velocity) { bot.velocity.y += 260; bot.velocity.x += Math.cos(a) * 120; bot.velocity.z += Math.sin(a) * 120; }
+      return _rcV2.copy(bot._raceDodge);
+    }
+  } else bot._raceStuckT = 0;
+  const dir = _rcV.subVectors(_rcV2, bot.position); const L = dir.length(); if (L > 1) dir.multiplyScalar(1 / L);
+  const look = Math.min(L, 760);
+  if (look > 60) {
+    const hit = _raceObstacleRay(bot.position, dir, look);
+    if (hit < look) {
+      let pick = null;
+      const up = _rcV3.set(dir.x, dir.y + 0.9, dir.z).normalize();
+      if (_raceObstacleRay(bot.position, up, look) >= look) pick = up;
+      else {
+        const px = -dir.z, pz = dir.x;
+        const lf = _rcV3.set(dir.x + px * 0.9, dir.y + 0.25, dir.z + pz * 0.9).normalize();
+        if (_raceObstacleRay(bot.position, lf, look) >= look) pick = lf;
+        else pick = _rcV3.set(dir.x - px * 0.9, dir.y + 0.25, dir.z - pz * 0.9).normalize();
+      }
+      if (!bot._raceDodge) bot._raceDodge = new THREE.Vector3();
+      bot._raceDodge.copy(bot.position).addScaledVector(pick, look);
+      bot._raceDodgeUntil = now + 0.5;
+      return _rcV2.copy(bot._raceDodge);
+    }
+  }
+  return _rcV2;
+}
+function _raceBotGroundY(x, z) {
+  try {
+    const W = _rcEarthWorld();
+    if (W && typeof W.groundYWorld === 'function') return W.groundYWorld(x, z);
+    if (_raceCircuitKind() === 'overworld') return _rcOwGroundY(x, z);
+  } catch (_) {}
+  return -Infinity;
+}
+function _raceCircuitRespawnPoint(idx, team) {
+  const C = game.raceCircuit;
+  if (!C || !C.ready || (idx | 0) <= 0) return getValidSpawnPoint(team === LSS.TEAM_FLEET_B ? 'B' : 'A');
+  const r = C.rings[Math.min(idx | 0, C.rings.length) - 1];   // the last gate taken
+  return new THREE.Vector3(r.x + r.tx * 260, r.y + 120, r.z + r.tz * 260);
+}
+function _raceCircuitRespawnTick(dt) {
+  if (!_isCircuitRace() || game.state !== 'playing') return;
+  const C = game.raceCircuit; if (!C || !C.ready) return;
+  if (player.shipState === 'dead') {
+    game._raceRespawnT = (game._raceRespawnT || 0) + dt;
+    if (game._raceRespawnT >= RACE_CIRCUIT.respawnDelay) { game._raceRespawnT = 0; try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {} }
+  } else game._raceRespawnT = 0;
+  if (!(typeof _botAuthority === 'function' && _botAuthority())) return;
+  if (!Array.isArray(game.entities)) return;
+  let changed = false;
+  for (let i = game.entities.length - 1; i >= 0; i--) {
+    const b = game.entities[i];
+    if (!(b instanceof Bot) || b.isProxy || b.alive) continue;
+    b._raceDeadT = (b._raceDeadT || 0) + dt;
+    if (b._raceDeadT < RACE_CIRCUIT.respawnDelay) continue;
+    try {
+      const nb = new Bot(b.loadoutKey, b.team, b.id);
+      nb._raceIdx = b._raceIdx | 0; nb._raceCleared = !!b._raceCleared;
+      nb.kills = b.kills | 0; nb.damageDealt = b.damageDealt || 0;
+      const sp = _raceCircuitRespawnPoint(nb._raceIdx, nb.team);
+      nb.position.copy(sp); if (nb.mesh) nb.mesh.position.copy(nb.position);
+      try { b.destroy(); } catch (_) {}
+      game.entities.splice(i, 1, nb);
+      changed = true;
+    } catch (e) { console.warn('[race] bot respawn failed:', e); }
+  }
+  if (changed && typeof net !== 'undefined' && net && net.active && typeof _botSendRoster === 'function') { try { _botSendRoster(); } catch (_) {} }
+}
+
+function _raceCircuitHud() {
+  const on = _isCircuitRace() && (game.state === 'playing' || game.state === 'warmup') && _raceCircuitReady() &&
+             typeof player !== 'undefined' && player && player.position;
+  let el = _rc.hudEl || document.getElementById('race-hud');
+  if (!on) { if (el && el.style.display !== 'none') el.style.display = 'none'; _rc.hudTxt = ''; return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'race-hud';
+    el.style.cssText = 'position:fixed;top:112px;left:50%;transform:translateX(-50%);z-index:60;' +
+      'font-family:Orbitron,Rajdhani,sans-serif;font-size:13px;font-weight:700;letter-spacing:3px;color:#6fe6ff;' +
+      'text-shadow:0 0 12px rgba(60,224,255,0.55),0 1px 4px rgba(0,0,0,0.9);pointer-events:none;white-space:nowrap;';
+    document.body.appendChild(el);
+    _rc.hudEl = el;
+  }
+  const vp = innerWidth * 100000 + innerHeight;
+  if (el.style.display !== 'block' || _rc.hudVp !== vp) {
+    _rc.hudVp = vp;
+    let top = 112;
+    try { const ri = document.getElementById('round-info'); if (ri) { const rr = ri.getBoundingClientRect(); if (rr.height > 0) top = Math.round(rr.bottom + 8); } } catch (_) {}
+    el.style.top = top + 'px';
+    el.style.display = 'block';
+  }
+  const C = game.raceCircuit, N = C.rings.length, idx = player._raceIdx | 0;
+  let txt;
+  if (idx >= N) txt = 'CIRCUIT CLEAR · TAKE THE FINISH';
+  else {
+    const r = C.rings[idx];
+    const d = Math.hypot(r.x - player.position.x, r.y - player.position.y, r.z - player.position.z);
+    const m = d / (C.upm || 7);
+    const dist = (m >= 1000) ? (m / 1000).toFixed(1) + ' KM' : Math.round(m / 10) * 10 + ' M';
+    txt = 'GATE ' + (idx + 1) + ' / ' + N + ' · ' + dist + (r.high ? ' · ▲ HIGH' : '');
+  }
+  if (txt !== _rc.hudTxt) { _rc.hudTxt = txt; el.textContent = txt; }
+}
+function _raceCircuitMinimap(ctx, _plot, _mmArrow) {
+  const C = game.raceCircuit; if (!C || !C.ready) return;
+  const R = C.rings, N = R.length, idx = player._raceIdx | 0;
+  ctx.strokeStyle = 'rgba(60,224,255,0.16)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  let pen = false;
+  for (let i = 0; i <= N; i++) {
+    const r = R[i % N]; const p = _plot(r.x, r.z);
+    if (p.off) { pen = false; continue; }
+    if (!pen) { ctx.moveTo(p.x, p.y); pen = true; } else ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+  for (let i = 0; i < N; i++) {
+    const r = R[i]; const p = _plot(r.x, r.z);
+    if (i === idx) {
+      const _rp = 0.55 + Math.sin((game.time || 0) * 4) * 0.35;
+      const col = 'rgba(60,224,255,' + _rp + ')';
+      if (p.off) { _mmArrow(p, col); continue; }
+      ctx.strokeStyle = col; ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(p.x, p.y, r.high ? 5 : 4, 0, Math.PI * 2); ctx.stroke();
+      if (r.high) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, 1.3, 0, Math.PI * 2); ctx.fill(); }
+    } else if (p.off) continue;
+    else if (i < idx) { ctx.fillStyle = 'rgba(90,150,170,0.45)'; ctx.beginPath(); ctx.arc(p.x, p.y, 1.6, 0, Math.PI * 2); ctx.fill(); }
+    else { ctx.strokeStyle = 'rgba(60,224,255,0.45)'; ctx.lineWidth = 1; ctx.beginPath(); ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2); ctx.stroke(); }
+  }
+  if (idx >= N) {
+    const p = _plot(C.fin.x, C.fin.z); const col = 'rgba(255,210,77,0.9)';
+    if (p.off) _mmArrow(p, col); else { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, Math.PI * 2); ctx.fill(); }
+  }
+}
+if (typeof window !== 'undefined') window.__race = {
+  info: function () {
+    const C = game.raceCircuit;
+    return { kind: _raceCircuitKind(), ready: !!(C && C.ready), id: C && C.id, rings: C ? C.rings.length : 0,
+             high: C ? C.rings.filter(r => r.high).length : 0, idx: player._raceIdx | 0, cleared: !!player._raceCleared,
+             poleRings: (game.poleRings || []).length, visible: (game.poleRings || []).filter(r => r.group && r.group.visible).length,
+             start: C && C.start, fin: C && C.fin, state: game.state, noTimer: !!game.raceNoTimer,
+             bots: (game.entities || []).filter(e => e instanceof Bot).map(b => ({ id: b.id, alive: b.alive, idx: b._raceIdx | 0, proxy: !!b.isProxy })),
+             auth: _raceCircuitAuthority(), pending: _rc.pendingSince > 0 };
+  },
+  rings: function () { const C = game.raceCircuit; return C ? C.rings.map((r, i) => ({ i, x: Math.round(r.x), y: Math.round(r.y), z: Math.round(r.z), d: r.d, high: r.high })) : []; },
+  skip: function () { const C = game.raceCircuit; if (!C) return 'no circuit'; _raceCircuitOnLocalCapture(player._raceIdx | 0); return player._raceIdx; },
+  tp: function (i) { const C = game.raceCircuit; if (!C) return 'no circuit'; const r = C.rings[i | 0]; if (!r) return 'no ring'; player.position.set(r.x - r.tx * 600, r.y, r.z - r.tz * 600); if (player.velocity) player.velocity.set(0, 0, 0); return [Math.round(player.position.x), Math.round(player.position.y), Math.round(player.position.z)]; },
+  regen: function () { game.raceCircuit = null; game._raceSeed = null; if (_isEarthCircuit()) _raceCircuitEarthKick(); else _raceCircuitOverworldBuild(); return _raceCircuitReady(); },
+};
 
 function _monsterRoundReset() {
   if (typeof game === 'undefined' || !game || !game.monsters) return;
@@ -46678,7 +47541,7 @@ function updateDynamicObjects(dt) {
   
   
   
-  const _ffHubGas = (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight');   
+  const _ffHubGas = _lssHubWorld();   // (v46.82)   
   if (!_ffHubGas && typeof _applyCloudAttraction === 'function') _applyCloudAttraction(dt);
   updateDetachedGasPockets(dt);
   if (!_ffHubGas && typeof updateGasChemistry === 'function') updateGasChemistry(dt);
@@ -53327,6 +54190,7 @@ function commitLoadout(key) {
 
   const _finishCommit = () => {
   if (!midMatch) {
+    try { if (typeof _raceCircuitMatchReset === 'function') _raceCircuitMatchReset(); } catch (_) {}   // (v46.82) a fresh match lays a fresh lap
     try { activeMode().onStart(); } catch (_) {}
     const buildWorld = () => {
       shuffleMapRotation();
@@ -54032,6 +54896,9 @@ function respawnPlayer() {
            getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(player.team) : (player.team === LSS.TEAM_FLEET_B ? 'B' : 'A'));
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
     sp = new THREE.Vector3(0, 0, -CAMPAIGN_LEG_HALF_Z);
+  }
+  if (typeof _isCircuitRace === 'function' && _isCircuitRace() && (player._raceIdx | 0) > 0) {
+    try { sp = _raceCircuitRespawnPoint(player._raceIdx, player.team); } catch (_) {}
   }
   if (game._cyber && game._cyber.armed) {
     try {
@@ -61011,7 +61878,8 @@ function updateRoundSystem(dt) {
     const isResolutionAuthority = !net.active || amStasisOwner();
     const championPending = (game.championResult === 'A' || game.championResult === 'B');
     const _aslt = _isAssault();
-    if (!game.testMode && !(typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) && (endByChampion || (!championPending && ((!_aslt && (aliveB === 0 || aliveA === 0)) || endByTimer))) && isResolutionAuthority) {
+    const _rcirc = (typeof _isCircuitRace === 'function' && _isCircuitRace());
+    if (!game.testMode && !(typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) && (endByChampion || (!championPending && ((!_aslt && !_rcirc && (aliveB === 0 || aliveA === 0)) || endByTimer))) && isResolutionAuthority) {
       let winnerLabel = '';
       let winnerTeam = LSS.TEAM_FLEET_A;
       if (endByChampion) {
@@ -61536,6 +62404,7 @@ document.addEventListener('keydown', (e) => {
 function returnToRootMenu(opts) {
   const _keepRoom = !!(opts && opts.keepRoom);
   try { activeMode().onTeardown(); } catch (_) {}
+  try { if (typeof _raceCircuitTeardown === 'function') _raceCircuitTeardown(); } catch (_) {}   // (v46.82) the lap, its cities, its HUD line
   try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}   // (v44.43) no world's sea outlives its match: classic's teardown is empty, only free flight's disposed the water (idempotent after it)
   try { if (typeof LSS !== 'undefined') LSS.MODE = 'classic'; } catch (_) {}
   try { if (typeof net !== 'undefined' && net) net.roomMode = null; } catch (_) {}
@@ -64754,6 +65623,7 @@ function updateHUD() {
       _hudDisplay(_ccEl, 'champ-cap:d', 'none');
     }
   }
+  try { _raceCircuitHud(); } catch (_) {}   // (v46.82) GATE n / N under the round block
 
   updateAbilityHUD();
 }
@@ -64827,6 +65697,8 @@ function updateMinimap() {
   const _mode = (typeof LSS !== 'undefined') ? LSS.MODE : null;
   let _mmR = 3400;
   if (_mode === 'endless') _mmR = 2600;
+  else if (_mode === 'race' && typeof _raceCircuitKind === 'function' && _raceCircuitKind() === 'earth') _mmR = RACE_CIRCUIT.mmRangeEarth;   // (v46.82) a lap is wider than an arena
+  else if (_mode === 'race' && typeof _raceCircuitKind === 'function' && _raceCircuitKind() === 'overworld') _mmR = RACE_CIRCUIT.mmRangeOw;
   else if (_mode === 'campaign' && game.campaign) _mmR = CAMP_RADAR_HALF_SPAN * (68 / 75);
   if (typeof window !== 'undefined' && typeof window.__mmRange === 'number' && window.__mmRange > 0) _mmR = window.__mmRange;
   const viewExtent = _mmR * (75 / 68);
@@ -65047,7 +65919,9 @@ function updateMinimap() {
   }
 
 
-  if (typeof game !== 'undefined' && Array.isArray(game.poleRings) && game.poleRings.length) {
+  if (typeof _isCircuitRace === 'function' && _isCircuitRace() && game.raceCircuit && game.raceCircuit.ready) {
+    try { _raceCircuitMinimap(ctx, _plot, _mmArrow); } catch (_) {}
+  } else if (typeof game !== 'undefined' && Array.isArray(game.poleRings) && game.poleRings.length) {
     for (const ring of game.poleRings) {
       if (!ring || !ring.position) continue;
       const p = _plot(ring.position.x, ring.position.z);
@@ -66296,7 +67170,7 @@ function hideLoadingOverlay() {
       setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
       return;
     }
-    if (game && game._earth && game._earth.armed &&
+    if (game && ((game._earth && game._earth.armed) || (typeof _isEarthCircuit === 'function' && _isEarthCircuit())) &&   // (v46.82) the EARTH CIRCUIT holds the same curtain
         (_lssEarthCurtainT0 === 0 ||
          (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) {
       const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
@@ -66309,7 +67183,10 @@ function hideLoadingOverlay() {
       const _cityPending = !!(_w && _w._bldRegionKey != null && _w.stats &&
                               ((_w.stats.regionWays | 0) > 0) &&
                               ((_w.stats.buildings | 0) === 0));
-      if (_noWorld || _noSpawn || _building || _regionUnknown || _cityPending) {
+      const _heldMs = _lssEarthCurtainT0 ? (Date.now() - _lssEarthCurtainT0) : 0;
+      const _noCircuit = !!(typeof _isEarthCircuit === 'function' && _isEarthCircuit() && !(game.raceCircuit && game.raceCircuit.ready) &&
+                            ((typeof _raceCircuitAuthority === 'function' && _raceCircuitAuthority()) || _heldMs < 20000));
+      if (_noWorld || _noSpawn || _building || _regionUnknown || _cityPending || _noCircuit) {
         if (_lssEarthCurtainT0 === 0) _lssEarthCurtainT0 = Date.now();
         _lssEarthCurtainTries++;
         setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
@@ -66986,7 +67863,7 @@ function _lssModeDisplayName(m) {
   return 'ELIMINATION';
 }
 function _lssModeBlurb(m) {
-  if (m === 'race') return 'Sprint the track.';
+  if (m === 'race') return 'Sprint the track, or lap a real city.';
   if (m === 'assault') return 'Storm or hold the field.';
   if (m === 'endless') return 'A cavern without end.';
   if (m === 'freeflight') return 'Patrol the open overworld.';
@@ -74077,6 +74954,7 @@ class StasisField {
     this.championMode = !!championMode;
     this.radius = this.championMode ? 50 : 120;
     this.holdRadius = this.radius;
+    try { if (this.championMode && typeof _isCircuitRace === 'function' && _isCircuitRace()) this.holdRadius = 240; } catch (_) {}
     if (this.championMode && !(opts && opts.noShell)) {
       try { if (typeof _spawnChampionShell === 'function') _spawnChampionShell(this); }
       catch (e) { console.warn('[champ-shell] spawn failed:', e); }
@@ -74733,6 +75611,7 @@ function updateStasisFields(dt) {
         }
         if (player.shipState !== 'dead' && player.position && field.recentlyReleasedShip !== player &&
             (!_isAssault() || player.team === _assaultAttackerFleet()) &&
+            (typeof _raceCanClaim !== 'function' || _raceCanClaim(player)) &&   // (v46.82) a circuit racer claims only past the last gate
             (!_isCyber() || _cyberPlayerAttacks(game._cyber))) {
           const d = player.position.distanceTo(field.position);
           if (d < (field.holdRadius || field.radius)) {
@@ -74757,6 +75636,7 @@ function updateStasisFields(dt) {
             if (!bot.alive) continue;
             if (field.recentlyReleasedShip === bot) continue;
             if (_isAssault() && bot.team !== _assaultAttackerFleet()) continue;
+            if (typeof _raceCanClaim === 'function' && !_raceCanClaim(bot)) continue;   // (v46.82) same rule for bots and peers
             if (_isCyber() && !bot._cyberAttacker) continue;
             if (bot.position.distanceTo(field.position) < (field.holdRadius || field.radius)) {
               field.claimedBy = bot;
@@ -75492,6 +76372,27 @@ const MAP_DATA = {
   }
 };
 
+MAP_DATA.race_earth = {
+  type: 'gmaps',
+  stream: true,
+  circuit: 'earth',
+  name: 'Earth Circuit',
+  thumb: 'map_thumbs/toronto.jpg',
+  description: 'Drop on any place on Earth and race a ring circuit low through its streets. Type a location, or lap downtown Toronto.',
+  lat: 43.6426,
+  lng: -79.3860,
+  scale: 7,
+  extentMetres: 2600,
+  palette: [0x1a2848, 0x2a3858, 0x202848, 0x18283a, 0x202848, 0x1a2840, 0x18203a, 0x1c2848],
+  rooms: [],
+  tunnels: [],
+};
+MAP_DATA.race_overworld = Object.assign({}, MAP_DATA.hub_overworld, {
+  circuit: 'overworld',
+  name: 'The Overworld Circuit',
+  description: 'One massive lap through all seven cities of the overworld: thread the towers, climb for the high gates, dive for the finish over the hub.',
+});
+
 const CAMPAIGN_LEG_HALF_Z = 18000;
 const CAMPAIGN_LEG_MAP = {
   name: 'The Approach',
@@ -76193,6 +77094,7 @@ function buildRoomGraphLevel(level) {
       _lssGmaps._refineInterval = null;
     }
   } catch (_) {}
+  try { if (typeof _isCircuitRace === 'function' && _isCircuitRace()) game.raceNoTimer = true; } catch (_) {}
   if (level && level.type === 'gmaps') {
     if (game.pendingGmapsOverlay) {
       level.lat = game.pendingGmapsOverlay.lat;
@@ -76498,6 +77400,7 @@ function buildRoomGraphLevel(level) {
     try { initSandwichTerrain(); } catch (e) { console.warn('[sandwich] init error:', e); }
   try { game._rrBuildParts.init = Math.round(performance.now() - _bpT0); } catch (_) {}   // (v39.49c)
   }
+  try { if (typeof _raceCircuitOverworldBuild === 'function') _raceCircuitOverworldBuild(); } catch (e) { console.warn('[race] overworld circuit failed:', e); }
 
   const mapGenHud = document.getElementById('map-gen-hud');
   if (mapGenHud) {
@@ -79240,7 +80143,7 @@ function gameLoop(timestamp) {
             }
           }
         } catch (_) { _sX = _fX; _sZ = _fZ; }
-        updateSandwichStream(_sX, _sZ, (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || (LSS.MODE === 'endless' && _lssEndlessMobile()))) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
+        updateSandwichStream(_sX, _sZ, (_lssHubWorld() || (typeof LSS !== 'undefined' && LSS.MODE === 'endless' && _lssEndlessMobile())) ? 1 : undefined);   // (v35.89) endless MOBILE bake budget 1/frame (freeflight precedent): an endless chunk bakes ground+ceiling, measured 11-14ms per budget-2 pickup on a fast desktop CPU — 35-70ms on a phone = visible hitches at speed. Desktop endless keeps 2/frame.
       }
       __pmark('hub:stream');   // (v39.49) chunk streamer / warmup drain alone
       try { _swUpdateHubWater(); } catch (_) {}   
@@ -79272,6 +80175,7 @@ function gameLoop(timestamp) {
       try { _hubCityFrame(dt); } catch (_) {}
       try { _carrierFrame(dt); } catch (_) {}   // (v37.72) no-op until a carrier is spawned
       try { _owFrame(dt); } catch (e) { if (!window._owErr) { window._owErr = String((e && e.stack) || e); console.warn('[cities] frame threw:', e); } }   // (v38.78) overworld cities
+      try { _owRaceFrame(dt); } catch (e) { if (!window._owRaceErr) { window._owRaceErr = String((e && e.stack) || e); console.warn('[race] city frame threw:', e); } }   // (v46.82) the OVERWORLD CIRCUIT's cities
       try { _wildFrame(dt); } catch (e) { if (!window._wildErr) { window._wildErr = String((e && e.stack) || e); console.warn('[wild] frame threw:', e); } }   // (v42.74) wild leviathan families
       try { _cyberFrame(dt); } catch (_) {}     // (v37.76) no-op unless CYBERPUNK CITY is running
       __pmark('hub:city');
@@ -79439,8 +80343,11 @@ function gameLoop(timestamp) {
   __pmark('particles'); 
   updateEffects(dt);
   try {
-    const _wantPoleRings = (typeof LSS !== 'undefined' && LSS.MODE === 'race' && game.state === 'playing' &&
-      typeof _raceRingMap === 'function' && !!_raceRingMap());
+    const _rcRace = (typeof _isCircuitRace === 'function' && _isCircuitRace());
+    if (_rcRace) { try { _raceCircuitNetTick(dt); } catch (_) {} try { _raceCircuitRespawnTick(dt); } catch (_) {} }
+    const _wantPoleRings = (typeof LSS !== 'undefined' && LSS.MODE === 'race' &&
+      ((game.state === 'playing' && typeof _raceRingMap === 'function' && !!_raceRingMap()) ||
+       (_rcRace && (game.state === 'playing' || game.state === 'warmup'))));
     if (_wantPoleRings) {
       if (!game.poleRings || !game.poleRings.length) { if (typeof _spawnPoleRings === 'function') _spawnPoleRings(); }
       if (game.poleRings) for (let _pri = 0; _pri < game.poleRings.length; _pri++) { try { game.poleRings[_pri].update(dt); } catch (_) {} }
@@ -92705,6 +93612,7 @@ async function _lssGmapsBuildLevel(level) {
       }
     } catch (e) { console.warn('[lss-earth] spawn points failed:', e); }
     _lssGmaps._spawnPlaced = true;
+    try { if (typeof _raceCircuitEarthKick === 'function') _raceCircuitEarthKick(); } catch (e) { console.warn('[race] earth kick failed:', e); }
   } catch (e) {
     console.error('[lss-gmaps] failed to initialize tiles:', e);
     alert('Failed to initialize Google Maps tiles: ' + e.message + "\nCheck your API key and that the Map Tiles API is enabled on your Google Cloud project.");
@@ -92944,6 +93852,7 @@ function _lssGmapsShiftLevelY(dy) {
 
 function _lssGmapsApplyTerrainFollow() {
   if (LSS.MODE !== 'race') return;
+  if (typeof _isCircuitRace === 'function' && _isCircuitRace()) return;
   if (!_lssGmaps.tiles || !_lssGmaps.tiles.group) return;
   if (!Array.isArray(game.sdfRoomData) || game.sdfRoomData.length === 0) return;
   _lssGmaps.tiles.group.updateMatrixWorld(true);
@@ -93240,12 +94149,13 @@ function _buildRaceCustomMap(startGeo, finishGeo) {
 function _lssGmapsSyncRacePanel() {
   try {
     const on = (typeof LSS !== 'undefined') && LSS && LSS.MODE === 'race';
+    const circ = on && (typeof _raceCircuitKind === 'function') && _raceCircuitKind() === 'earth';
     const lbl = document.getElementById('gmaps-overlay-label');
     const fin = document.getElementById('gmaps-loc-finish-input');
     const startInp = document.getElementById('gmaps-loc-input');
-    if (lbl) lbl.textContent = on ? 'RACE: START -> FINISH' : 'DROP ON LOCATION';
-    if (fin) fin.style.display = on ? '' : 'none';
-    if (startInp) startInp.placeholder = on ? 'Start location (e.g. Stanley Park)' : 'ENTER LOCATION NAME';
+    if (lbl) lbl.textContent = circ ? 'RACE CIRCUIT: DROP ON LOCATION' : (on ? 'RACE: START -> FINISH' : 'DROP ON LOCATION');
+    if (fin) fin.style.display = (on && !circ) ? '' : 'none';
+    if (startInp) startInp.placeholder = circ ? 'Anywhere on Earth (e.g. Tokyo, Manhattan)' : (on ? 'Start location (e.g. Stanley Park)' : 'ENTER LOCATION NAME');
   } catch (_) {}
 }
 
