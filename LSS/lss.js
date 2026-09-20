@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.79";
+const LSS_BUILD = "46.81";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -7639,13 +7639,18 @@ function handleNetEvent(evt, fromPeerId) {
         shipMuzzleWorld(_pfMesh, peerForWidth._muzzleShot, from);
       }
     }
-    if (game._hubWater && typeof _swWpnCross === 'function') { try {
-      _swWpnCross(from.x, from.y, from.z, to.x, to.y, to.z,
-                  (typeof _swWpnYield === 'function') ? _swWpnYield(0, 0, 1) : 120,
-                  0, 'peerTracer', 0.06); } catch (_) {} }
     const _shooterLoadout = (typeof evt.lo === 'string' && evt.lo)
       ? evt.lo
       : (peerForWidth && peerForWidth.loadoutKey);
+    if (game._hubWater && typeof _swWpnCross === 'function') { try {
+      const _plW = (typeof LOADOUTS !== 'undefined' && _shooterLoadout && LOADOUTS[_shooterLoadout])
+        ? LOADOUTS[_shooterLoadout].weapon : null;
+      const _plY = (_plW && typeof _swWpnYield === 'function')
+        ? _swWpnYield(_plW.damage, _plW.splash, 1) *
+            ((window.__water && window.__water.mainK != null) ? +window.__water.mainK : 0.55)
+        : ((typeof _swWpnYield === 'function') ? _swWpnYield(0, 0, 1) : 120);
+      _swWpnCross(from.x, from.y, from.z, to.x, to.y, to.z,
+                  _plY, 0, 'peerTracer' + (fromPeerId || ''), 0.06); } catch (_) {} }
     if (_shooterLoadout === 'PUNCTURE') {
       _spawnRailgunSpiral(from, to, evt.color || 0xeeff66);
     } else if (evt.b === 1) {
@@ -7793,6 +7798,11 @@ function handleNetEvent(evt, fromPeerId) {
         _vlbMesh.renderOrder = 2;
         scene.add(_vlbMesh);
         game.effects.push({ mesh: _vlbMesh, type: 'vortexLaserBeam', age: 0, lifetime: _vlbLife });
+        if (game._hubWater && typeof _swWpnCross === 'function') { try {
+          _swWpnCross(_vlbOrigin.x, _vlbOrigin.y, _vlbOrigin.z,
+                      _vlbOrigin.x + _vlbDir.x * _vlbRange, _vlbOrigin.y + _vlbDir.y * _vlbRange, _vlbOrigin.z + _vlbDir.z * _vlbRange,
+                      (window.__water && window.__water.laserAbilityYield != null) ? +window.__water.laserAbilityYield : 2400,
+                      0, 'vLaserPeer' + (fromPeerId || ''), 0.05); } catch (_) {} }
       } catch (e) { console.warn('[v27 net] vortex_laser_beam spawn failed:', e); }
     }
     return;
@@ -18826,30 +18836,35 @@ const _SW_RIPPLE_FRAG = [
   'uniform vec4 uHullT;',                         // (rear end s, dirSign, section length, tailK)
   'uniform float uHullFoam; uniform float uHullKick;',
   'uniform float uHClamp;',   // (v46.78) the safety net, see below
-  'float _hImm(vec2 lp, vec3 up, float wl){',
-  '  vec2 huv = vec2((lp.x - uHullR.x) / (uHullR.y - uHullR.x), (lp.y - uHullR.z) / (uHullR.w - uHullR.z));',
+  'uniform sampler2D uEntTex0; uniform sampler2D uEntTex1;',
+  'uniform vec4 uEntA[2]; uniform vec4 uEntAP[2];',
+  'uniform vec4 uEntB[2]; uniform vec4 uEntR[2];',
+  'uniform vec4 uEntY[2]; uniform vec4 uEntU[2]; uniform vec4 uEntUP[2];',
+  'uniform vec4 uEntT[2];',
+  'float _hImm(sampler2D tex, vec4 rc, vec4 Y, vec2 lp, vec3 up, float wl){',
+  '  vec2 huv = vec2((lp.x - rc.x) / (rc.y - rc.x), (lp.y - rc.z) / (rc.w - rc.z));',
   '  if (huv.x <= 0.0 || huv.x >= 1.0 || huv.y <= 0.0 || huv.y >= 1.0) return 0.0;',
-  '  float d = texture2D(uHullTex, huv).r;',
+  '  float d = texture2D(tex, huv).r;',
   '  if (d < 0.002) return 0.0;',
-  '  float yU = uHullY.x + (1.0 - d) * uHullY.y;',
+  '  float yU = Y.x + (1.0 - d) * Y.y;',
   '  float yW = (wl - up.x * lp.x - up.z * lp.y) / max(up.y, 0.5);',
-  '  return clamp(yW - yU, 0.0, uHullY.y);',
+  '  return clamp(yW - yU, 0.0, Y.y);',
   '}',
-  'float _hullP(vec2 w, vec4 A, vec3 up, float wl, float tl){',
+  'float _hullP(sampler2D tex, vec4 rc, vec4 Y, vec4 B, vec4 T, vec2 w, vec4 A, vec3 up, float wl, float tl){',
   '  vec2 d = w - A.xy;',
   '  vec2 lp = vec2(d.x * A.w - d.y * A.z, dot(d, A.zw));',
-  '  float r = uHullB.w;',
-  '  if (lp.y < uHullR.z - tl - r || lp.y > uHullR.w + tl + r || lp.x < uHullR.x - r || lp.x > uHullR.y + r) return 0.0;',
-  '  float im = _hImm(lp, up, wl);',
-  '  float ar = max(max(_hImm(lp + vec2(r, 0.0), up, wl), _hImm(lp - vec2(r, 0.0), up, wl)), max(_hImm(lp + vec2(0.0, r), up, wl), _hImm(lp - vec2(0.0, r), up, wl)));',
-  '  float P = (-im + max(0.0, ar - im) * uHullB.z) * uHullB.x;',
-  '  float u = (uHullT.x - lp.y) * uHullT.y;',
+  '  float r = B.w;',
+  '  if (lp.y < rc.z - tl - r || lp.y > rc.w + tl + r || lp.x < rc.x - r || lp.x > rc.y + r) return 0.0;',
+  '  float im = _hImm(tex, rc, Y, lp, up, wl);',
+  '  float ar = max(max(_hImm(tex, rc, Y, lp + vec2(r, 0.0), up, wl), _hImm(tex, rc, Y, lp - vec2(r, 0.0), up, wl)), max(_hImm(tex, rc, Y, lp + vec2(0.0, r), up, wl), _hImm(tex, rc, Y, lp - vec2(0.0, r), up, wl)));',
+  '  float P = (-im + max(0.0, ar - im) * B.z) * B.x;',
+  '  float u = (T.x - lp.y) * T.y;',
   '  if (tl > 0.0 && u > 0.0 && u < tl) {',
   '    float f = 1.0 - u / tl;',
   '    vec2 sp = vec2(lp.x / max(f, 0.05), 0.0);',
   '    float tm = 0.0;',
-  '    for (int i = 0; i < 4; i++) { sp.y = uHullT.x + uHullT.y * (0.03 + 0.06 * float(i)) * uHullT.z; tm = max(tm, _hImm(sp, up, wl)); }',
-  '    P -= tm * f * f * uHullB.x * uHullT.w;',
+  '    for (int i = 0; i < 4; i++) { sp.y = T.x + T.y * (0.03 + 0.06 * float(i)) * T.z; tm = max(tm, _hImm(tex, rc, Y, sp, up, wl)); }',
+  '    P -= tm * f * f * B.x * T.w;',
   '  }',
   '  return P;',
   '}',
@@ -18882,7 +18897,9 @@ const _SW_RIPPLE_FRAG = [
   '  float edg = smoothstep(0.0, 0.06, min(ed.x, ed.y));',
   '  float spg = 1.0 - smoothstep(0.0, max(uSpongeW, 0.001), min(ed.x, ed.y));',
   '  float dmp = 1.0 - uSpongeK * spg * spg;',
-  '  float _hpk = (uHullB.y > 0.5) ? (_hullP(wpos, uHullA, uHullU.xyz, uHullY.z, uHullU.w) - _hullP(wpos, uHullAP, uHullUP.xyz, uHullY.w, uHullUP.w)) : 0.0;',   // (v46.78) the hull patch, see the header
+  '  float _hpk = (uHullB.y > 0.5) ? (_hullP(uHullTex, uHullR, uHullY, uHullB, uHullT, wpos, uHullA, uHullU.xyz, uHullY.z, uHullU.w) - _hullP(uHullTex, uHullR, uHullY, uHullB, uHullT, wpos, uHullAP, uHullUP.xyz, uHullY.w, uHullUP.w)) : 0.0;',   // (v46.78) the hull patch, see the header
+  '  if (uEntB[0].y > 0.5) _hpk += _hullP(uEntTex0, uEntR[0], uEntY[0], uEntB[0], uEntT[0], wpos, uEntA[0], uEntU[0].xyz, uEntY[0].z, uEntU[0].w) - _hullP(uEntTex0, uEntR[0], uEntY[0], uEntB[0], uEntT[0], wpos, uEntAP[0], uEntUP[0].xyz, uEntY[0].w, uEntUP[0].w);',
+  '  if (uEntB[1].y > 0.5) _hpk += _hullP(uEntTex1, uEntR[1], uEntY[1], uEntB[1], uEntT[1], wpos, uEntA[1], uEntU[1].xyz, uEntY[1].z, uEntU[1].w) - _hullP(uEntTex1, uEntR[1], uEntY[1], uEntB[1], uEntT[1], wpos, uEntAP[1], uEntUP[1].xyz, uEntY[1].w, uEntUP[1].w);',
   '  fAcc += abs(_hpk) * uHullFoam;',
   '  float sA = sAcc * edg;',
   '  nh += (1.0 - uSeedImpulse) * sA + _hpk;',
@@ -18911,7 +18928,7 @@ function _swRippleInit() {
     v.material.defines = v.material.defines || {};
     v.material.defines.BOUNDS = _SW_RIPPLE_BOUNDS.toFixed(1);
     const seeds = []; for (let i = 0; i < 8; i++) seeds.push(new THREE.Vector4(0, 0, 1, 0));
-    v.material.uniforms.viscosity = { value: 0.9970 };
+    v.material.uniforms.viscosity = { value: 0.9940 };
     v.material.uniforms.uWaveC2 = { value: 0.26 };
     v.material.uniforms.uSeedImpulse = { value: 0.25 };
     v.material.uniforms.uShoreDamp = { value: 0.96 };
@@ -18928,6 +18945,14 @@ function _swRippleInit() {
     v.material.uniforms.uHullY = { value: new THREE.Vector4(0, 1, 0, 0) };
     v.material.uniforms.uHullU = { value: new THREE.Vector4(0, 1, 0, 0) };
     v.material.uniforms.uHullUP = { value: new THREE.Vector4(0, 1, 0, 0) };
+    v.material.uniforms.uEntTex0 = { value: null };
+    v.material.uniforms.uEntTex1 = { value: null };
+    for (const _k of ['uEntA', 'uEntAP', 'uEntB', 'uEntR', 'uEntY', 'uEntT']) {
+      v.material.uniforms[_k] = { value: [new THREE.Vector4(), new THREE.Vector4()] };
+    }
+    for (const _k of ['uEntU', 'uEntUP']) {
+      v.material.uniforms[_k] = { value: [new THREE.Vector4(0, 1, 0, 0), new THREE.Vector4(0, 1, 0, 0)] };
+    }
     v.material.uniforms.uHullT = { value: new THREE.Vector4(0, 1, 1, 0) };
     v.material.uniforms.uHullFoam = { value: 1.5 };
     v.material.uniforms.uHullKick = { value: 0.15 };
@@ -18977,20 +19002,21 @@ function _swSpdCurve(sp, knee, tail) {
 }
 const _swHPv = new THREE.Vector3(), _swHPq = new THREE.Quaternion(), _swHPs = new THREE.Vector3();
 const _swHPf = new THREE.Vector3(), _swHPu = new THREE.Vector3(), _swHPqi = new THREE.Quaternion();
-function _swHullSilhouette(mesh) {
+function _swHullSilhouette(mesh, slot) {
   const R = _swRipple;
   if (!mesh) return null;
+  const _sn = (slot === 1) ? 'hullSil1' : (slot === 2) ? 'hullSil2' : 'hullSil';
   let hull = null;
   for (let i = 0; i < mesh.children.length; i++) {
     const c = mesh.children[i];
     if (c && c.userData && c.userData.bboxSize) { hull = c; break; }
   }
-  if (!hull) return null;
+  if (!hull) hull = mesh;
   const W = (typeof window !== 'undefined' && window.__water) ? window.__water : {};
   const res = Math.max(16, Math.min(256, (W.hullRes) ? (+W.hullRes | 0) : 64));
   const key = hull.uuid + ':' + res;
-  if (R.hullSil && R.hullSil.key === key && !W.hullRedo) return R.hullSil;
-  W.hullRedo = 0;
+  if (R[_sn] && R[_sn].key === key && !W.hullRedo) return R[_sn];
+  if (!slot) W.hullRedo = 0;
   if (typeof renderer === 'undefined' || !renderer) return null;
   try {
     mesh.updateWorldMatrix(true, true);
@@ -19004,13 +19030,28 @@ function _swHullSilhouette(mesh) {
       if (!o.isMesh || !o.geometry) return;
       const ud = o.userData || {};
       if (ud.isPlume || ud._outlineHug || ud._adBanner || o.name === 'shield') return;
-      tmp.multiplyMatrices(inv, o.matrixWorld);
-      const m = new THREE.Mesh(o.geometry);
-      m.matrixAutoUpdate = false; m.matrix.copy(tmp); m.matrixWorld.copy(tmp);
+      tmp.multiplyMatrices(inv, o.matrixWorld);   // frame space - for the BOX only, see below
+      let m;
+      if (o.isSkinnedMesh && o.skeleton) {
+        m = new THREE.SkinnedMesh(o.geometry);
+        m.skeleton = o.skeleton;
+        m.bindMatrix.copy(o.bindMatrix);
+        m.matrix.identity(); m.matrixWorld.identity();
+      } else {
+        m = new THREE.Mesh(o.geometry);
+        m.matrix.copy(o.matrixWorld); m.matrixWorld.copy(o.matrixWorld);
+      }
+      m.matrixAutoUpdate = false;
       m.frustumCulled = false;
       sc.add(m); cnt++;
-      if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
-      box.copy(o.geometry.boundingBox).applyMatrix4(tmp);
+      let _bb = null;
+      if (o.isSkinnedMesh && typeof o.computeBoundingBox === 'function') {
+        if (!o.boundingBox) { try { o.computeBoundingBox(); } catch (_) {} }
+        _bb = o.boundingBox;
+      }
+      if (!_bb) { if (!o.geometry.boundingBox) o.geometry.computeBoundingBox(); _bb = o.geometry.boundingBox; }
+      if (!_bb) return;
+      box.copy(_bb).applyMatrix4(tmp);
       all.union(box);
     });
     if (!cnt || all.isEmpty()) return null;
@@ -19020,7 +19061,12 @@ function _swHullSilhouette(mesh) {
     const x0 = all.min.x - mg, x1 = all.max.x + mg, z0 = all.min.z - mg, z1 = all.max.z + mg;
     const y0 = all.min.y - 1, range = (all.max.y - all.min.y) + 2;
     const cam = new THREE.OrthographicCamera(x0, x1, z1, z0, 0, range);
-    cam.position.set(0, y0, 0); cam.up.set(0, 0, 1); cam.lookAt(0, y0 + 1, 0); cam.updateMatrixWorld(true);
+    cam.position.set(0, y0, 0); cam.up.set(0, 0, 1); cam.lookAt(0, y0 + 1, 0);
+    cam.updateMatrix();
+    cam.matrixAutoUpdate = false;
+    cam.matrixWorld.multiplyMatrices(frame, cam.matrix);
+    cam.matrixWorldNeedsUpdate = false;
+    cam.matrixWorldInverse.copy(cam.matrixWorld).invert();
     sc.overrideMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.BasicDepthPacking, side: THREE.DoubleSide });
     const rt = new THREE.WebGLRenderTarget(res, res, { minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
       format: THREE.RGBAFormat, type: THREE.UnsignedByteType, depthBuffer: true, stencilBuffer: false, generateMipmaps: false });
@@ -19032,11 +19078,26 @@ function _swHullSilhouette(mesh) {
     renderer.render(sc, cam);
     renderer.setRenderTarget(prevRT); renderer.setClearColor(prevClear, prevAlpha); renderer.autoClear = prevAuto;
     sc.overrideMaterial.dispose();
-    const old = R.hullSil;
-    R.hullSil = { key, rt, tex: rt.texture, x0, x1, z0, z1, zMin: all.min.z, zMax: all.max.z, y0, range, beam, len, rimR, res, cnt };
+    let _fill = 1;
+    try {
+      const _pb = new Uint8Array(res * res * 4);
+      renderer.readRenderTargetPixels(rt, 0, 0, res, res, _pb);
+      let _on = 0;
+      for (let i = 0; i < res * res; i++) if (_pb[i * 4] > 1) _on++;
+      _fill = _on / (res * res);
+      R.silFill = +_fill.toFixed(4);
+    } catch (_) {}
+    const _minFill = (W.silMinFill != null) ? +W.silMinFill : 0.004;   // ~16 texels of 64x64
+    if (_fill < _minFill) {
+      try { rt.dispose(); } catch (_) {}
+      if (!R._silWarned) { R._silWarned = 1; console.warn('[water] silhouette came back empty (fill ' + _fill + ') - body keeps its round seed'); }
+      return null;
+    }
+    const old = R[_sn];
+    R[_sn] = { key, rt, tex: rt.texture, x0, x1, z0, z1, zMin: all.min.z, zMax: all.max.z, y0, range, beam, len, rimR, res, cnt, fill: +_fill.toFixed(4) };
     try { if (old && old.rt) old.rt.dispose(); } catch (_) {}
-    try { window.__hullSil = R.hullSil; } catch (_) {}
-    return R.hullSil;
+    try { if (!slot) window.__hullSil = R.hullSil; } catch (_) {}
+    return R[_sn];
   } catch (e) { console.warn('[water] hull silhouette failed:', e); return null; }
 }
 function _swCrashSpray(x, wl, z, hx, hz, halfW, tailLen, f, vx, vz) {
@@ -19660,7 +19721,8 @@ function _swWpnCross(x0, y0, z0, x1, y1, z1, Y, speed, src, minDt) {
   _swFxN('wpnCross');
   _swImpact(hx2, hz2, (uy > 0) ? -1 : 1, fp2, 1,
             { x: ux * shotSp, y: uy * shotSp, z: uz * shotSp }, wl2, null,
-            0.55 * wk * (Ax / Math.max(1e-4, A)) * ((uy > 0) ? 1.61 : 1));
+            0.55 * wk * (Ax / Math.max(1e-4, A)) * ((uy > 0) ? 1.61 : 1),
+            1);
   const vth = (W3.vent != null) ? +W3.vent : 0.009;
   if (uy <= 0 && Ax * ((W3.impactPeak != null) ? +W3.impactPeak : 0.135) > vth &&
       typeof _SW_BLASTS !== 'undefined' && _SW_BLASTS.length < 6) {
@@ -19674,7 +19736,7 @@ function _swWpnCross(x0, y0, z0, x1, y1, z1, Y, speed, src, minDt) {
 }
 function _swTailUp(sp, g) {
   const W3 = window.__water || {};
-  const H = Math.max(0, sp) * ((W3.tailH != null) ? +W3.tailH : 0.12);
+  const H = Math.max(0, sp) * ((W3.tailH != null) ? +W3.tailH : 0.17);
   return Math.sqrt(2 * Math.max(1, g) * H) * (0.75 + Math.random() * 0.5);
 }
 function _swRooster(px, wl, pz, vel, fp, wet01, dipY) {   // (v46.52) dipY - see _swSurfDip
@@ -19811,8 +19873,9 @@ window.__waterFX = function (reset) {
   return out;
 };
 window.__seedLog = function () { const l = _swRipple._sl || []; _swRipple._sl = []; return { seeds: l, fx: Object.assign({}, _SW_FXN) }; };
-window.__hullSilDump = function (cols) {
-  const S = _swRipple.hullSil; if (!S || !S.rt) return 'no silhouette';
+window.__hullSilDump = function (cols, slot) {
+  const S = _swRipple[(slot === 1) ? 'hullSil1' : (slot === 2) ? 'hullSil2' : 'hullSil'];   // (v46.80) 1/2 = the entity slots
+  if (!S || !S.rt) return 'no silhouette';
   const res = S.res, px = new Uint8Array(res * res * 4);
   renderer.readRenderTargetPixels(S.rt, 0, 0, res, res, px);
   const C = Math.max(8, Math.min(res, cols | 0 || 32)), step = res / C;
@@ -20220,13 +20283,14 @@ function _swPeerFootprint(np) {
   np._swFP = { _k: c, LEN: LEN, BEAM: BEAM, DRAFT: DRAFT, half: LEN * 0.5, heft: heft };
   return np._swFP;
 }
-function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
+function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK, wakeK) {
   const vy = vel ? Math.abs(vel.y) : 0;
   const vh = vel ? Math.hypot(vel.x, vel.z) : 0;
   const p = Math.min(2.6, vy / 90);
   const k = (sign > 0) ? 1.0 : 0.62;                                  
   const baseR = (sign > 0 ? 1.0 : 0.85) * fp.BEAM * 1.6;             
-  const baseA = (0.10 + 0.10 * p) * (fp.DRAFT / 13.5) * fp.heft * mass * k * (((window.__water && window.__water.wake) != null) ? +window.__water.wake : 1)   /* (v44.83) `|| 1` made wake:0 mean FULL wake */ * ((ampK != null) ? ampK : 1);
+  const _wakeK = (wakeK != null) ? +wakeK : (((window.__water && window.__water.wake) != null) ? +window.__water.wake : 1);   /* (v44.83) `|| 1` made wake:0 mean FULL wake */
+  const baseA = (0.10 + 0.10 * p) * (fp.DRAFT / 13.5) * fp.heft * mass * k * _wakeK * ((ampK != null) ? ampK : 1);
   const _cw = window.__water || {};
   const W3 = _cw;   // (v44.80) the knob bag, named as the rest of the water code names it
   const _peakI = (_cw.impactPeak != null) ? +_cw.impactPeak : 0.135;
@@ -20256,6 +20320,12 @@ function _swImpact(px, pz, sign, fp, mass, vel, WL, actor, ampK) {
                                 Math.min(26, Math.round((8 + 16 * fp.heft) * _shed)), 0.92, 1.0, 1.15, 1.15);
   }
 }
+function _swSkimCeil(fp, DR) {
+  const W = window.__water || {};
+  const k = (W.skimH != null) ? +W.skimH : 1;
+  return Math.max(DR * 2.5, (fp && fp.BEAM > 0 ? fp.BEAM : 40) * 5 + 120) * k;
+}
+const _skHOf = _swSkimCeil;
 const _swWingR = new THREE.Vector3();   // (v41.58) scratch for the wing-contact test
 const _swHMInv = new THREE.Matrix4(), _swHMMat = new THREE.Matrix4();
 const _swHMBox = new THREE.Box3(), _swHMBB = new THREE.Box3();
@@ -20327,6 +20397,48 @@ function _swEntState(e) {
 }
 const _swEntVel = { x: 0, y: 0, z: 0, length: 0 };
 const _swEntRight = new THREE.Vector3();   // (v44.98) scratch for the wing-tip roll axis
+const _swEPv = new THREE.Vector3(), _swEPq = new THREE.Quaternion(), _swEPs = new THREE.Vector3();
+const _swEPf = new THREE.Vector3(), _swEPu = new THREE.Vector3(), _swEPqi = new THREE.Quaternion();
+function _swEntPatch(e, slot, WL, dt, pressK) {
+  try {
+    const K = window.__water || {};
+    const sil = _swHullSilhouette(e.mesh, slot);
+    if (!sil) return null;
+    e.mesh.updateWorldMatrix(true, false);
+    e.mesh.matrixWorld.decompose(_swEPv, _swEPq, _swEPs);
+    _swEPf.set(0, 0, 1).applyQuaternion(_swEPq);
+    const fl = Math.hypot(_swEPf.x, _swEPf.z);
+    if (!(fl > 0.2)) return null;                       // nose straight up or down: no heading to use
+    const fx = _swEPf.x / fl, fz = _swEPf.z / fl;
+    _swEPqi.copy(_swEPq).invert();
+    _swEPu.set(0, 1, 0).applyQuaternion(_swEPqi);
+    const keelA = (_swEPv.y + sil.y0) - WL;
+    if (keelA >= 0) return null;                        // dry: every texel would read zero immersion
+    const H = Math.max(8, sil.range);
+    const deepFall = H * 0.6 * ((K.entDeep != null) ? +K.entDeep : 1);
+    const _deep = 1 - Math.max(0, Math.min(1, (-keelA - deepFall) / Math.max(1, deepFall)));
+    if (!(_deep > 0.02)) return null;
+    const imm = Math.max(0, Math.min(H, -keelA));
+    const st = _swEntState(e);
+    const idt = dt > 1e-4 ? (1 / dt) : 0;
+    const evx = (e.position.x - st.px) * idt, evz = (e.position.z - st.pz) * idt;
+    const sp = Math.hypot(evx, evz);
+    const mv = sp > 8;
+    let ds = (e._swPatchDS) || 1;
+    if (mv) ds = (fx * (evx / sp) + fz * (evz / sp)) >= 0 ? 1 : -1;
+    e._swPatchDS = ds;
+    const tail = mv ? ((K.entTail != null) ? +K.entTail : 1.0) * (sil.beam * 0.45 + Math.min(sp * 0.10, sil.len)) : 0;
+    return {
+      id: e.id || e.uuid || ('e' + slot),
+      x: _swEPv.x, z: _swEPv.z, fx, fz, ux: _swEPu.x, uy: _swEPu.y, uz: _swEPu.z,
+      wl: WL - _swEPv.y + Math.max(0, keelA),
+      k: Math.min(pressK * _deep / 170, ((K.entHollow != null) ? +K.entHollow : 0.22) / Math.max(1, imm)),
+      rimK: (K.entRim != null) ? +K.entRim : 0.5, rimR: sil.rimR,
+      tailLen: tail, tailK: (K.entTailK != null) ? +K.entTailK : 0.8, dirSign: ds,
+      sRear: ds > 0 ? sil.zMin : sil.zMax, LEN: sil.zMax - sil.zMin, sil, t: performance.now(),
+    };
+  } catch (_) { return null; }
+}
 function _swEntityWaterTick(dt, WL) {
   const R = _swRipple; if (!R || !R.gpu) return;
   const K = (window.__water = window.__water || {});
@@ -20361,6 +20473,39 @@ function _swEntityWaterTick(dt, WL) {
   if (budget <= 0) return;
   const _spN = (K.entSprayMax != null) ? +K.entSprayMax : 2;
   let _capRoos = _spN, _capSheet = _spN, _capCrest = _spN, _capWing = Math.max(1, _spN >> 1);
+
+  const _epK = (K.entPress != null) ? +K.entPress : 1.0;
+  R.entP = R.entP || [null, null];
+  R._entPrev = R._entPrev || [null, null];
+  if (_epK > 0 && cam && typeof _swHullSilhouette === 'function') {
+    let _b0 = null, _b1 = null, _s0 = 0, _s1 = 0;
+    for (let i = 0; i < L.length; i++) {
+      const e = L[i];
+      if (!e.mesh || e.mesh.visible === false) continue;
+      const _fpS = _swEntFootprint(e);
+      const _ko = (typeof e.footOff === 'number' && e.footOff > 0) ? e.footOff : _fpS.DRAFT;
+      const _bodyH = Math.max(8, _ko * 2);
+      const _kA = (e.position.y - _ko) - WL;
+      if (!(_kA < _bodyH * 0.5 && _kA > -_bodyH * 1.5)) continue;
+      const dx = e.position.x - cam.x, dy = e.position.y - cam.y, dz = e.position.z - cam.z;
+      const d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > far2) continue;
+      const sc = _fpS.BEAM / Math.max(200, Math.sqrt(d2));
+      if (sc > _s0) { _b1 = _b0; _s1 = _s0; _b0 = e; _s0 = sc; }
+      else if (sc > _s1) { _b1 = e; _s1 = sc; }
+    }
+    const _pick = [_b0, _b1];
+    for (let sl = 0; sl < 2; sl++) {
+      const e = _pick[sl];
+      const rec = e ? _swEntPatch(e, sl + 1, WL, dt, _epK) : null;
+      if (e) e._swPatchSlot = rec ? (sl + 1) : 0;
+      if (rec && R._entPrev[sl] && R._entPrev[sl].id !== rec.id) R._entPrev[sl] = null;
+      R.entP[sl] = rec;
+    }
+    try { window.__entP = R.entP; } catch (_) {}
+  } else {
+    R.entP[0] = R.entP[1] = null;
+  }
 
   const n = L.length;
   for (let k = 0; k < n; k++) {
@@ -20405,11 +20550,16 @@ function _swEntityWaterTick(dt, WL) {
         const amp = Math.min((K.entAmpCap != null) ? +K.entAmpCap : 0.08, Math.min(0.9, (sp / 900) * 0.55) * fp.heft * K.entWake) * _dK * _dK;
         if (amp > 0.004) {
           const ux = sp > 1 ? (_swEntVel.x / sp) : 0, uz = sp > 1 ? (_swEntVel.z / sp) : 0;
-          _swRippleSeed(e.position.x + ux * fp.half * 0.6,
-                        e.position.z + uz * fp.half * 0.6,
-                        fp.BEAM * 1.25, -amp);
-          if (typeof _swFxN === 'function') _swFxN('entWake');
-          budget--;
+          const _psl = e._swPatchSlot | 0;
+          const _prec = (_psl > 0 && R.entP) ? R.entP[_psl - 1] : null;
+          const _patched = !!(_prec && _prec.id === (e.id || e.uuid));
+          if (!_patched) {
+            _swRippleSeed(e.position.x + ux * fp.half * 0.6,
+                          e.position.z + uz * fp.half * 0.6,
+                          fp.BEAM * 1.25, -amp);
+            if (typeof _swFxN === 'function') _swFxN('entWake');
+            budget--;
+          }
           if (_capCrest > 0 && _swFxRoom() > 40) {
             const _spd = Math.min(1, sp / 420);
             const _cA = amp * (0.45 + 0.95 * _spd);
@@ -20677,9 +20827,9 @@ function _swRippleTick(dt) {
       if (_laying) { R._wakeSp = sp; R._wakeSpT = performance.now(); }   // the reader ignores it once 250 ms stale (this block does not run every tick)
     }
     {
-      const _hp = (W3.hullPress != null) ? +W3.hullPress : 1.0;
+      const _hp = (W3.hullPress != null) ? +W3.hullPress : 1.25;
       let _ok = false;
-      if (_hp > 0 && _hm && player.mesh && keelA < 60 && keelA > -DR * 6) {
+      if (_hp > 0 && _hm && player.mesh && keelA < _skHOf(fp, DR) && keelA > -DR * 6) {
         const sil = _swHullSilhouette(player.mesh);
         if (sil) {
           player.mesh.matrixWorld.decompose(_swHPv, _swHPq, _swHPs);
@@ -20694,9 +20844,11 @@ function _swRippleTick(dt) {
             if (_mv) _ds = (fx * hx + fz * hz) >= 0 ? 1 : -1;
             const _tail = _mv ? ((W3.hullTail != null) ? +W3.hullTail : 1.0) * (fp.BEAM * 0.45 + Math.min(sp * 0.10, fp.LEN)) : 0;
             const _deep = 1 - Math.max(0, Math.min(1, (-keelA - DR * 3) / (DR * 3)));
-            const _skD = DR * 0.25 * ((W3.skimDepth != null) ? +W3.skimDepth : 1);
-            const _skH = DR * 2.5 * ((W3.skimH != null) ? +W3.skimH : 1);
-            const _skim = Math.max(0, keelA) + _skD * (1 - Math.max(0, Math.min(1, keelA / Math.max(1, _skH))));
+            const _skD = DR * 0.55 * ((W3.skimDepth != null) ? +W3.skimDepth : 1);
+            const _skH = _skHOf(fp, DR);
+            const _skT = Math.max(0, Math.min(1, keelA / Math.max(1, _skH)));
+            const _skFall = 1 - _skT;
+            const _skim = Math.max(0, keelA) + _skD * _skFall * Math.sqrt(_skFall);
             R.hullP = {
               x: _swHPv.x, z: _swHPv.z, fx, fz, ux: _swHPu.x, uy: _swHPu.y, uz: _swHPu.z,
               wl: WL - _swHPv.y + _skim, k: _hp * W3.mass * _deep / 170,
@@ -20925,6 +21077,43 @@ function _swRippleTick(dt) {
         R._hullPrev = null;
       } else { u.uHullB.value.y = 0; R._hullPrev = null; }
     }
+    if (u.uEntB) {
+      const EP = R.entP || [null, null];
+      const PV = (R._entPrev = R._entPrev || [null, null]);
+      for (let sl = 0; sl < 2; sl++) {
+        const E = EP[sl];
+        const A = u.uEntA.value[sl], AP = u.uEntAP.value[sl], B = u.uEntB.value[sl];
+        const RC = u.uEntR.value[sl], Y = u.uEntY.value[sl];
+        const U = u.uEntU.value[sl], UP = u.uEntUP.value[sl], T = u.uEntT.value[sl];
+        if (E && E.sil && E.sil.tex && (performance.now() - E.t) < 300) {
+          const P0 = (PV[sl] && PV[sl].id === E.id) ? PV[sl] : E;
+          if (sl === 0) u.uEntTex0.value = E.sil.tex; else u.uEntTex1.value = E.sil.tex;
+          A.set(E.x - _cx, E.z - _cz, E.fx, E.fz);
+          AP.set(P0.x - _cx, P0.z - _cz, P0.fx, P0.fz);
+          B.set(E.k, 1, E.rimK, E.rimR);
+          RC.set(E.sil.x0, E.sil.x1, E.sil.z0, E.sil.z1);
+          Y.set(E.sil.y0, E.sil.range, E.wl, P0.wl);
+          U.set(E.ux, E.uy, E.uz, E.tailLen);
+          UP.set(P0.ux, P0.uy, P0.uz, P0.tailLen);
+          T.set(E.sRear, E.dirSign, E.LEN, E.tailK);
+          PV[sl] = E;
+        } else if (PV[sl] && PV[sl].sil && PV[sl].sil.tex) {
+          const P0 = PV[sl];
+          if (sl === 0) u.uEntTex0.value = P0.sil.tex; else u.uEntTex1.value = P0.sil.tex;
+          A.set(P0.x - _cx, P0.z - _cz, P0.fx, P0.fz);
+          AP.set(P0.x - _cx, P0.z - _cz, P0.fx, P0.fz);
+          B.set(P0.k, 1, P0.rimK, P0.rimR);
+          RC.set(P0.sil.x0, P0.sil.x1, P0.sil.z0, P0.sil.z1);
+          Y.set(P0.sil.y0, P0.sil.range, -1e6, P0.wl);
+          U.set(P0.ux, P0.uy, P0.uz, 0);
+          UP.set(P0.ux, P0.uy, P0.uz, P0.tailLen);
+          T.set(P0.sRear, P0.dirSign, P0.LEN, P0.tailK);
+          PV[sl] = null;
+        } else { B.y = 0; PV[sl] = null; }
+      }
+      if (!u.uEntTex0.value) u.uEntTex0.value = u.uHullTex.value;
+      if (!u.uEntTex1.value) u.uEntTex1.value = u.uEntTex0.value;
+    }
     const _xrPrevRT = (renderer && renderer.getRenderTarget) ? renderer.getRenderTarget() : null;
     R.gpu.compute();
     try { _swRippleUpsample(); }
@@ -21011,6 +21200,47 @@ function _swRippleTick(dt) {
           const _spz = (player && player.position) ? player.position.z : cz;
           const svx = player.velocity ? player.velocity.x : 0, svz = player.velocity ? player.velocity.z : 0;
           const sc = function (hh, wf) { const x = hh * g2d; return (x / (1 + Math.abs(x))) * wf; };  
+          const _HP = R.hullP, _uKeel = R.prevKeel;
+          if (_HP && _HP.sil && (_Wc.underSlap == null || +_Wc.underSlap > 0) && !game._swSubmerged &&
+              _uKeel != null) {
+            const _pr = Math.max(20, Math.max(_HP.sil.beam, _HP.sil.len) * 0.5);
+            const _toI = function (w0, c0) { return ((w0 - c0) / B + 0.5) * RES - CO - 0.5; };
+            const _i0 = Math.max(1, Math.floor(_toI(_spx - _pr, cx))), _i1 = Math.min(CRS - 2, Math.ceil(_toI(_spx + _pr, cx)));
+            const _j0 = Math.max(1, Math.floor(_toI(_spz - _pr, cz))), _j1 = Math.min(CRS - 2, Math.ceil(_toI(_spz + _pr, cz)));
+            let _best = -1e9, _bx = 0, _bz = 0;
+            for (let _j = _j0; _j <= _j1; _j++) {
+              const _wz = cz + ((CO + _j + 0.5) * invR - 0.5) * B, _dz = _wz - _spz;
+              if (_dz * _dz > _pr * _pr) continue;
+              for (let _i = _i0; _i <= _i1; _i++) {
+                const _wx = cx + ((CO + _i + 0.5) * invR - 0.5) * B, _dx = _wx - _spx;
+                if (_dx * _dx + _dz * _dz > _pr * _pr) continue;
+                const _hh = buf[(_j * CRS + _i) * 4];
+                if (_hh <= 0) continue;
+                const _over = _swDispWorld(_hh) - _uKeel;     // how far past the keel the SURFACE is
+                if (_over > _best) { _best = _over; _bx = _wx; _bz = _wz; }
+              }
+            }
+            const _nowU = performance.now();
+            const _dtU = (R._usT2 != null) ? Math.max(0.004, Math.min(0.5, (_nowU - R._usT2) / 1000)) : 0;
+            const _rise = (_dtU > 0 && R._usOver != null) ? (_best - R._usOver) / _dtU : 0;
+            R._usOver = +_best.toFixed(2); R._usT2 = _nowU; R._usRise = Math.round(_rise);
+            const _rate = 1000 / Math.max(1, (_Wc.slapRate != null) ? +_Wc.slapRate : 14);
+            const _riseMin = (_Wc.slapRise != null) ? +_Wc.slapRise : 30;
+            if (_best > -1.0 && _rise > _riseMin && (_nowU - (R._usT || 0)) > _rate) {
+              R._usT = _nowU;
+              const _dl = Math.hypot(_bx - _spx, _bz - _spz) || 1;
+              const _ox = (_bx - _spx) / _dl, _oz = (_bz - _spz) / _dl;
+              const _sq = Math.min(1, _rise / 260);
+              const _sv = ((_Wc.slapSpeed != null) ? +_Wc.slapSpeed : 1) * (220 + 1100 * _sq);
+              const _sAmp = ((_Wc.slapAmp != null) ? +_Wc.slapAmp : 1) * (0.16 + 0.14 * _sq);
+              _swFxN('underSlap');
+              _swCrestSpray(_bx, WLc, _bz, _sAmp,
+                            _ox * _sv + svx * 0.3, _oz * _sv + svz * 0.3, _uKeel);
+              _swCrestSpray(_bx - _ox * _pr * 0.5, WLc, _bz - _oz * _pr * 0.5, _sAmp * 0.8,
+                            -_ox * _sv * 0.8 + svx * 0.3, -_oz * _sv * 0.8 + svz * 0.3, _uKeel);
+              try { _swCrestDots(_bx, WLc, _bz, _sAmp * 3.0, _ox * _sv * 0.2, _oz * _sv * 0.2, _uKeel); } catch (_) {}
+            }
+          }
           let emitted = 0, nBreak = 0, maxV = 0;
           R._crScan = (((R._crScan || 0) + 7) % (CRS - 2));                    
           const _scanT0 = performance.now();
@@ -21281,7 +21511,10 @@ function _swRippleDispose() {
   try { if (R.upRT && R.upRT.dispose) R.upRT.dispose(); } catch (_) {}   // (v44.21)
   R.upRT = null; R.upTex = null;
   try { if (R.hullSil && R.hullSil.rt) R.hullSil.rt.dispose(); } catch (_) {}   // (v46.78)
+  try { if (R.hullSil1 && R.hullSil1.rt) R.hullSil1.rt.dispose(); } catch (_) {}   // (v46.80)
+  try { if (R.hullSil2 && R.hullSil2.rt) R.hullSil2.rt.dispose(); } catch (_) {}
   R.hullSil = null; R.hullP = null; R._hullPrev = null;
+  R.hullSil1 = null; R.hullSil2 = null; R.entP = null; R._entPrev = null;
   try { if (R.gpu && R.gpu.dispose) R.gpu.dispose(); } catch (_) {}
   try { if (R.maskTex && R.maskTex.dispose) R.maskTex.dispose(); } catch (_) {}   
   try { if (R.farTex && R.farTex.dispose) R.farTex.dispose(); } catch (_) {}      
@@ -26838,6 +27071,7 @@ function startEarthFlight() {
     game._earth = { armed: true, origin: null, warps: 0 };
     if (game._cyber) game._cyber = null;   // one tag at a time
   } catch (_) {}
+  try { if (typeof _lssSetSpeedMix === 'function') _lssSetSpeedMix(1); } catch (_) {}
   startFreeFlight('earth');
 }
 try { if (typeof window !== 'undefined') window.startEarthFlight = startEarthFlight; } catch (_) {}
