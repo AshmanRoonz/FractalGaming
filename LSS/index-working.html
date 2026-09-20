@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.92";
+const LSS_BUILD = "46.93";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -49885,6 +49885,18 @@ const OW = {
   AWAY: 4500,            // carrier this far outside the city radius = taken away
   AGGRO: 30, HUNT: 15000, STANDOFF: 1300,   // (v38.85) a hit wakes a hostile city for 30 s: fighters break formation onto the attacker, the carrier hunts them out to 15,000u and parks 1,300u off
   FIELD_BUILD: 120, FIELD_CHARGE: 10, RESPAWN: 45, LEASH: 9000,
+  // ⭐⭐⭐ (v46.93) THE FLEET'S LEASH NEEDED THE SAME COOLDOWN THE CARRIER'S JUMP GOT. Owner, in
+  // exhibition: "i went to one of the cities with a carrier and fleet, the fleet was coming at me,
+  // but they were teleporting all over the place, it didn't make any sense" - and the v38.88 note
+  // one line below is the SAME complaint about carriers ("put a cool down on carriers that can
+  // teleport... sometimes they teleport around me"), fixed there with `jumpCd`. The fleet's leash
+  // was left with a distance and no clock, so it could fire EVERY FRAME: a ship over LEASH from the
+  // anchor is snapped to the formation ring, flies back at its target, exceeds it again, and is
+  // snapped again - and the ring angle carries a `t * 0.12` term, so each snap lands somewhere new.
+  // That is "teleporting all over the place", exactly.
+  // LEASH_CD is seconds between snaps per ship; LEASH_FIGHT is how far a ship may stray from the
+  // anchor while it is actually FIGHTING something, measured from the target instead.
+  LEASH_CD: 12, LEASH_FIGHT: 13500,
   FOLLOW: { back: 2200, up: 300, side: 700, wander: 350, band: 900, vz: 80, spd: 330, accel: 90, jump: 9000, jumpCd: 45, catchup: 1.35, spread: 2600, sep: 2200 },
   // (v38.88) owner: "put a cool down on carriers that can teleport... sometimes they teleport around me": one jump per 45 s per
   // carrier; between jumps a carrier more than 5,000u behind cruises 35% faster instead
@@ -50263,8 +50275,19 @@ function _owFleetTick(c, dt) {
       engaged = dT < 3400 + big && dA < 7000 + big;
     }
     const dAnchor = Math.hypot(b.position.x - ax, b.position.z - az);
-    if (dAnchor > OW.LEASH) {
+    // ⭐⭐ (v46.93) A SHIP THAT IS FIGHTING IS NOT A STRAGGLER - see the note on OW.LEASH_CD.
+    // v38.85 made the fleet's aggro reach "however far" (the whole fleet turns onto whoever shot the
+    // city); the leash was never told, so the two pulled against each other every frame. While
+    // engaged the leash is measured from the TARGET, which is what the ship is supposed to be near -
+    // only a ship far from BOTH its anchor and its quarry is genuinely lost.
+    const _dTgt = (engaged && ctAlive && ct && ct.position) ? b.position.distanceTo(ct.position) : Infinity;
+    const _fighting = engaged && _dTgt < (OW.LEASH_FIGHT || 13500);
+    b._leashCd = Math.max(0, (b._leashCd || 0) - dt);
+    if (dAnchor > OW.LEASH && !_fighting && b._leashCd <= 0) {
       // fell too far behind (a fast pilot, a long chase): jump back to the anchor
+      // ⚠ ONE SNAP PER LEASH_CD. Without this the test re-passes on the very next frame and the
+      //   ship strobes between the ring and wherever it was going.
+      b._leashCd = (typeof OW.LEASH_CD === 'number') ? OW.LEASH_CD : 12;
       const ang = (i / F.length) * Math.PI * 2 + t * 0.12;
       b.position.set(ax + Math.cos(ang) * ring, ay + 150, az + Math.sin(ang) * ring);
       if (b.mesh) b.mesh.position.copy(b.position);

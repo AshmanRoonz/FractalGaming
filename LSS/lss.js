@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.92";
+const LSS_BUILD = "46.93";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -28797,6 +28797,7 @@ const OW = {
   AWAY: 4500,            // carrier this far outside the city radius = taken away
   AGGRO: 30, HUNT: 15000, STANDOFF: 1300,   // (v38.85) a hit wakes a hostile city for 30 s: fighters break formation onto the attacker, the carrier hunts them out to 15,000u and parks 1,300u off
   FIELD_BUILD: 120, FIELD_CHARGE: 10, RESPAWN: 45, LEASH: 9000,
+  LEASH_CD: 12, LEASH_FIGHT: 13500,
   FOLLOW: { back: 2200, up: 300, side: 700, wander: 350, band: 900, vz: 80, spd: 330, accel: 90, jump: 9000, jumpCd: 45, catchup: 1.35, spread: 2600, sep: 2200 },
   BOSS: { key: 'GraveTitan', hpX: 80, size: 15000, rise: 14, zapEvery: 1.2, zapN: 4, zapDmg: 900, zapRange: 4200,
           lanceEvery: 9, lanceRange: 10500, lanceDmg: 1600, touchDmg: 600, spd: 40, anim: 0.20, turn: 0.45,
@@ -29109,7 +29110,11 @@ function _owFleetTick(c, dt) {
       engaged = dT < 3400 + big && dA < 7000 + big;
     }
     const dAnchor = Math.hypot(b.position.x - ax, b.position.z - az);
-    if (dAnchor > OW.LEASH) {
+    const _dTgt = (engaged && ctAlive && ct && ct.position) ? b.position.distanceTo(ct.position) : Infinity;
+    const _fighting = engaged && _dTgt < (OW.LEASH_FIGHT || 13500);
+    b._leashCd = Math.max(0, (b._leashCd || 0) - dt);
+    if (dAnchor > OW.LEASH && !_fighting && b._leashCd <= 0) {
+      b._leashCd = (typeof OW.LEASH_CD === 'number') ? OW.LEASH_CD : 12;
       const ang = (i / F.length) * Math.PI * 2 + t * 0.12;
       b.position.set(ax + Math.cos(ang) * ring, ay + 150, az + Math.sin(ang) * ring);
       if (b.mesh) b.mesh.position.copy(b.position);

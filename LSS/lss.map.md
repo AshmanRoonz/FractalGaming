@@ -290,6 +290,14 @@ Owner, with `?pbhud`: *"i found a hitch when the rift guardians came out to figh
 - **⚠ The banner and stinger ride the FIRST hull**, not the last, so the warning is never late.
 - **Verified:** with `TRIGGER` raised so every ring fires, entities arrived **+5, +5, +5, +5** across four 0.14 s steps (five rings each adding one hull per step) instead of 20 in one tick; 24 guards spawned, 22 alive, 9 chasing the player, all meshed, zero console errors.
 
+#### ⭐⭐⭐ (v46.93) THE CITY FLEET TELEPORTED WHILE CHASING — a leash with no cooldown
+**Jump:** `OW.LEASH_CD` / `OW.LEASH_FIGHT` (beside `LEASH`) · the `_fighting` / `_leashCd` block in `_owFleetTick`.
+Owner, in exhibition: *"i went to one of the cities with a carrier and fleet, the fleet was coming at me, but they were teleporting all over the place, it didn't make any sense"* — then, decisively: *"oh yeah i was trying to pull them away"*.
+- **`_owFleetTick` snaps any fleet ship over `OW.LEASH` (9,000) from the anchor onto the formation ring — and it had no clock.** So a ship that is CHASING you past the leash is snapped home, flies back at you, exceeds it again on the very next frame, and is snapped again. The ring angle carries a `t * 0.12` term, so every snap lands somewhere new: "teleporting all over the place", exactly. Pulling the fleet away from its city is the precise input that holds the condition true.
+- **⭐ THE PRECEDENT IS ONE LINE BELOW THE CONSTANT.** `OW.FOLLOW` carries `jump: 9000, jumpCd: 45` with the comment *"(v38.88) owner: 'put a cool down on carriers that can teleport... sometimes they teleport around me'"* — the same complaint, about carriers, already fixed with a cooldown. The fleet's leash was left with a distance and no clock.
+- **Two halves, both needed.** `LEASH_CD: 12` — one snap per ship per 12 s, so it can never strobe whatever else is true. `LEASH_FIGHT: 13500` — while ENGAGED the leash is measured from the **target** instead of the anchor, because a ship near what it is fighting is doing its job. v38.85 made the fleet's aggro reach *"however far"* (the whole fleet turns onto whoever shot the city) and the leash was never told, so the two pulled against each other every frame. Only a ship far from **both** its anchor and its quarry is genuinely lost.
+- **⚠ Verified only partly, and worth re-checking in play.** Measured: 3 fleet ships, all aggroed onto the player, dragged to 36,222 u from the carrier over 12.6 s — **zero position jumps > 1,500 u**, `_leashCd` live and counting. But the fleet never exceeded 6,127 u from the carrier in that run (they could not keep up with the drag), so the leash branch itself was barely exercised; the old code's failure was not reproduced side by side. The owner can reproduce it by flying — that is the check that matters.
+
 #### Map selector UI — `~L7015`
 **Jump:** `function buildMapSelector` · `function selectMap` (~L7150)
 - **Symbols:** `buildMapSelector`, `selectMap`, `_renderMapPreview`, `cycleMap`
