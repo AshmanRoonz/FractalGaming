@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.98";
+const LSS_BUILD = "46.99";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -16354,6 +16354,11 @@ class NetworkPlayer {
         this._cgWasOn = false;
         try { if (this._bcgOn && typeof _blasterChargeGlowOff === 'function') _blasterChargeGlowOff(this); } catch (_) {}
       }
+      // (v46.99) A PEER'S CORE, from the `co` bit. This is the whole point of the feature - the two
+      // sites above only ever told you a peer was CHARGING. Nothing needs an off-switch here: the
+      // glow runs on a TTL, so a packet that stops saying `co` puts it out within 0.25 s, and so
+      // does a peer who disconnects mid-ult.
+      if (s && s.co && _gunCoreLights(this.loadoutKey)) { try { _gunCoreGlow(this, dt); } catch (_) {} }
     } else if (this._cgWasOn) {
       this._cgWasOn = false;
       try { if (this._bcgOn && typeof _blasterChargeGlowOff === 'function') _blasterChargeGlowOff(this); } catch (_) {}
@@ -16730,6 +16735,10 @@ const _broadcastState = {
   // needs a DURATION, and a state field self-heals when a tick is dropped where an event would not.
   pa: 0,
   cg: 0,
+  // (v46.99) co = a CORE is running. One more bit beside pa/cg, and sent for EVERY ship rather than
+  // gated on BLASTER, for the reason the v44.17 note beside them gives: which cores have a visual is
+  // the renderer's business, not the broadcaster's, and gating here would silently drop the next one.
+  co: 0,
 };
 function broadcastPlayerState(dt) {
   if (!net.active || !net.sendState) return;
@@ -16789,6 +16798,7 @@ function broadcastPlayerState(dt) {
   s.cg = Math.max(0, Math.min(9, Math.round(Math.min(1, _cgRaw) * 9)));
   s.va = (player.loadoutKey === 'VORTEX' && typeof _vortexChargeFrac === 'function')
     ? Math.round(_vortexChargeFrac() * 9) : 0;
+  s.co = (player.coreActive && player.shipState !== 'dead') ? 1 : 0;   // (v46.99)
 
   const msg = JSON.stringify(s);
   net.bytesSent += msg.length;
@@ -21525,6 +21535,231 @@ function _blasterChargeGlowOff(owner) {
   if (!owner._bcgTubes) return;
   for (const m of owner._bcgTubes) { m.visible = false; m.material.opacity = 0; }
 }
+
+// : (v46.99) BLASTER CORE - CYAN LIGHTNING CRAWLING OVER THE HULL ::::::::::::::::::::::::::::::::
+// Owner: "we need some visual indication to all players that Blaster's core is active... the body
+// shield ability makes his whole ship glow" -> "i don't like the glowing balls" -> "i want something
+// more like the body shield visually" -> "make the guns look illusionally bigger" -> "no sir, i
+// don't like it... how about just cyan lightning flowing around the hull" (and: no orbital).
+//
+// WHY LIGHTNING IS THE ONE THAT WORKS, after four that did not. Measured in the pane: with this
+// effect hidden entirely, a Body Shield'd Blaster is ALREADY a full-hull blowout in cyan. Anything
+// that competes on BRIGHTNESS at the same hue loses - orbs, a masked plasma skin and a swollen gun
+// ghost all washed out under it. Lightning does not compete on brightness at all. It is thin, it is
+// linear, and above all it MOVES: a hard-edged arc crawling across a flat glowing wash still reads,
+// because the eye tracks the motion, not the luminance. It is also the one visual language the ship
+// already speaks - `_primeArcTick` crackles the same bolts around the guns when an ability is
+// primed, so this is the same idea turned up and spread over the whole hull.
+//
+// THE ARCS RIDE THE REAL SKIN, NOT A BOUNDING SHAPE. Anchors are actual HULL VERTICES, so every bolt
+// starts and ends on the ship's own surface and hugs whatever shape is there - no orbiting ring, no
+// capsule stand-in. They are stored in the hull mesh's LOCAL space, so they ride every transform
+// (ship, model fit scale, third person, the seat) for free, and are sampled into a
+// station x angle grid around the hull's long axis: `_GCG_RINGS` bands nose-to-tail, `_GCG_SPOKES`
+// points around each. Consecutive anchors in a ring are neighbours on the skin, so walking the
+// cursor makes one arc chase the next AROUND the hull, which is the "flowing" the owner asked for.
+// Every few ticks an arc jumps between rings instead, so it also travels ALONG the ship.
+//
+// (!) SAMPLE THROUGH THE ACCESSOR, NEVER `position.array`. These hulls ship with
+//     KHR_mesh_quantization: the attribute is a NORMALIZED Int16Array and a raw read returns ~12000
+//     where `getX()` returns 0.9. An earlier cut of this feature read the array directly, put every
+//     vertex thousands of units from where it really was, and silently produced nothing while every
+//     debug field it printed looked healthy.
+//
+// (!) IT MUST NOT READ AS DAMAGE, and the first tuning did. Owner: "it has to be different than
+//     hull damage lightning". `emitDamageState` already crackles a damaged hull with
+//     `spawnLightningBolt(a, b, 0x66e0ff, 0.28, 1, 3)` - pale cyan, 0.28 s, one branch, thickness 3 -
+//     and a first pass at 0x44eeff / 0.26 / 3-4 was indistinguishable from it. Four things separate
+//     them now, and they are all STRUCTURAL rather than a colour nudge, because colour alone is what
+//     failed:
+//       SHAPE   damage arcs LEAVE the hull (`_emitArcB` reaches out to 1.8 hull radii into open air).
+//               These never do - both ends are hull vertices, so an arc lies ON the plating.
+//       CHAIN   damage arcs are independent random sparks. These are a walk: each one starts where
+//               the last ended, so the discharge travels instead of popping.
+//       CORE    every arc is TWO bolts on the same path - a wide saturated cyan halo and a thin
+//               near-white core at ~0.4 the width and half the life. That is the "hot conduit" recipe
+//               the Syphon drain and the champion tether use (73424/50673), and nothing in the damage
+//               path stacks bolts, so it is a silhouette difference at any distance.
+//       DENSITY damage is a few arcs a second on a hurt ship. This is a continuous web - several live
+//               at once, always, for the core's whole duration.
+//
+// Knobs: window.__gunCore = { on, tint, core, every, arcs, thick, life, branches, jump, light,
+//                             inflate }.
+const _GCG = { live: [] };
+const _GCG_RINGS = 5, _GCG_SPOKES = 14;
+const _gcgA = new THREE.Vector3(), _gcgB = new THREE.Vector3(), _gcgTmp = new THREE.Vector3();
+// Build the anchor grid once per hull geometry. Cached on the HULL MESH, not the owner: a pooled bot
+// hull (`_botShipPool`) hands the same mesh to the next Blaster, and this is a pure function of that
+// geometry.
+function _gcgAnchors(owner) {
+  let hullMesh = null, most = 0;
+  owner.mesh.traverse(o => {
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+    const c = o.geometry.attributes.position.count;
+    if (c > most) { most = c; hullMesh = o; }
+  });
+  if (!hullMesh) return null;
+  const ud = hullMesh.userData || (hullMesh.userData = {});
+  // (!) ANCHORS SIT OFF THE SKIN, NOT ON IT. Two neighbouring surface vertices are joined by a
+  //     straight-ish path, and on a convex hull that path runs INSIDE the plating - so the first cut
+  //     of this had 7-14 live bolts a frame (counted in `game.effects`) and you could barely see one
+  //     of them. Pushing each anchor out along its radial from the ship's long axis floats the arcs
+  //     just clear of the surface, which is what makes them read as a corona crawling over the hull
+  //     instead of as almost nothing.
+  const _inf = 1 + ((window.__gunCore && window.__gunCore.inflate != null) ? window.__gunCore.inflate : 0.085);
+  const _akey = hullMesh.geometry.uuid + '|' + _inf.toFixed(3);
+  if (ud._gcgAnchorKey === _akey && ud._gcgAnchors) return { hullMesh, rings: ud._gcgAnchors };
+  const t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
+  const pos = hullMesh.geometry.attributes.position;
+  if (!hullMesh.geometry.boundingBox) hullMesh.geometry.computeBoundingBox();
+  const bb = hullMesh.geometry.boundingBox;
+  const size = bb.getSize(new THREE.Vector3());
+  // The long axis is the ship's spine; the other two are the plane we measure the angle in.
+  const ax = (size.x >= size.y && size.x >= size.z) ? 0 : ((size.y >= size.z) ? 1 : 2);
+  const u = (ax + 1) % 3, v = (ax + 2) % 3;
+  const lo = bb.min.getComponent(ax), span = Math.max(1e-6, size.getComponent(ax));
+  const cu = (bb.min.getComponent(u) + bb.max.getComponent(u)) * 0.5;
+  const cv = (bb.min.getComponent(v) + bb.max.getComponent(v)) * 0.5;
+  // One cell per (station, spoke), keeping the OUTERMOST vertex found - the skin, not the interior.
+  const cell = new Array(_GCG_RINGS * _GCG_SPOKES).fill(null);
+  const rad = new Float32Array(_GCG_RINGS * _GCG_SPOKES);
+  const stride = Math.max(1, Math.floor(pos.count / 6000));   // ~6k samples is plenty for 70 anchors
+  const p = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i += stride) {
+    p.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+    let st = Math.floor((p.getComponent(ax) - lo) / span * _GCG_RINGS);
+    if (st < 0) st = 0; else if (st >= _GCG_RINGS) st = _GCG_RINGS - 1;
+    const du = p.getComponent(u) - cu, dv = p.getComponent(v) - cv;
+    const r2 = du * du + dv * dv;
+    let sp = Math.floor((Math.atan2(dv, du) + Math.PI) / (Math.PI * 2) * _GCG_SPOKES);
+    if (sp < 0) sp = 0; else if (sp >= _GCG_SPOKES) sp = _GCG_SPOKES - 1;
+    const k = st * _GCG_SPOKES + sp;
+    if (r2 > rad[k]) {
+      rad[k] = r2;
+      const q = p.clone();
+      q.setComponent(u, cu + du * _inf);
+      q.setComponent(v, cv + dv * _inf);
+      cell[k] = q;
+    }
+  }
+  // Rings with holes (a station the hull is simply not round at) fall back to their neighbour, so a
+  // walk never jumps to the far side of the ship.
+  const rings = [];
+  for (let st = 0; st < _GCG_RINGS; st++) {
+    const ring = [];
+    for (let sp = 0; sp < _GCG_SPOKES; sp++) {
+      let c = cell[st * _GCG_SPOKES + sp];
+      if (!c) for (let d = 1; d < _GCG_SPOKES && !c; d++) {
+        c = cell[st * _GCG_SPOKES + ((sp + d) % _GCG_SPOKES)] || cell[st * _GCG_SPOKES + ((sp - d + _GCG_SPOKES) % _GCG_SPOKES)];
+      }
+      if (c) ring.push(c);
+    }
+    if (ring.length > 2) rings.push(ring);
+  }
+  ud._gcgAnchorKey = _akey; ud._gcgAnchors = rings;
+  try { window.__gunCoreAnchorMs = Math.round((performance.now() - t0) * 10) / 10; } catch (_) {}
+  return rings.length ? { hullMesh, rings } : null;
+}
+// Drive one frame. Called every frame the core is up, for the local pilot, a bot and a peer alike -
+// the owner is a parameter for the same reason `_blasterChargeGlow` grew one in v44.17.
+function _gunCoreGlow(owner, dt) {
+  owner = owner || player;
+  if (!owner || !owner.mesh) return;
+  const K = window.__gunCore || (window.__gunCore = {});
+  if (K.on === false) return;
+  if ((owner.shipState === 'dead') || (owner.alive === false)) return;
+  const A = _gcgAnchors(owner);
+  if (!A) return;
+  if (!owner._gcgOn) { owner._gcgOn = true; owner._gcgWalk = 0; owner._gcgRing = 0; if (_GCG.live.indexOf(owner) < 0) _GCG.live.push(owner); }
+  owner._gcgTTL = 0.25;   // fed every frame by the drive; _gunCoreGlowTick puts it out
+  const _small = (typeof _fxSmallDevice === 'function') && _fxSmallDevice();
+  owner._gcgT = (owner._gcgT || 0) - (dt || 0.016);
+  if (owner._gcgT > 0) return;
+  // 20 tube-geometry builds a second is a desktop's idea of cheap, not a phone's - the same split
+  // `_primeArcTick` makes, and this runs for the core's full ten seconds rather than a held beat.
+  owner._gcgT = (K.every != null) ? K.every : (_small ? 0.15 : 0.06);
+  const rings = A.rings, hullMesh = A.hullMesh;
+  hullMesh.updateWorldMatrix(true, false);
+  const mw = hullMesh.matrixWorld;
+  const col = (K.tint != null) ? K.tint : 0x00e0ff;          // saturated, NOT the damage path's pale 0x66e0ff
+  const core = (K.core != null) ? K.core : 0xeaffff;
+  const life = (K.life != null) ? K.life : 0.30;
+  // (!) THICKNESS IS IN WORLD UNITS AND THIS HULL IS 420 OF THEM LONG. `emitDamageState` uses 3 and
+  //     `_primeArcTick` 0.9, but both of those are read at arm's length from the gun; an arc meant to
+  //     be legible across an arena on a ship that fills ~300 px needs an order more. 5 was measured
+  //     INVISIBLE here (14 live bolts a frame, none readable) and 22 was "too much" - a continuous
+  //     cocoon rather than discrete travelling arcs. 13 is the level where each arc reads as its own
+  //     stroke and the hull is still the thing you are looking at.
+  const thick = (K.thick != null) ? K.thick : 13.0;
+  const br = (K.branches != null) ? K.branches : 2;
+  const jump = (K.jump != null) ? K.jump : 0.30;
+  const arcs = Math.max(1, (K.arcs != null) ? K.arcs : (_small ? 1 : 2));
+  for (let s = 0; s < arcs; s++) {
+    // The walk: one step around the current ring per arc, so each one starts where the last ended
+    // and the discharge visibly TRAVELS instead of popping at random the way damage does.
+    owner._gcgWalk = (owner._gcgWalk | 0) + 1;
+    const ring = rings[owner._gcgRing % rings.length];
+    const n = ring.length;
+    const i0 = owner._gcgWalk % n;
+    let a = ring[i0], b;
+    if (rings.length > 1 && Math.random() < jump) {
+      // ...and every few arcs it steps to the next ring instead, so it also runs nose-to-tail.
+      const nr = (owner._gcgRing + 1 + ((Math.random() * (rings.length - 1)) | 0)) % rings.length;
+      const other = rings[nr];
+      b = other[i0 % other.length];
+      owner._gcgRing = nr;
+    } else {
+      b = ring[(i0 + 1) % n];
+    }
+    _gcgA.copy(a).applyMatrix4(mw);
+    _gcgB.copy(b).applyMatrix4(mw);
+    if (_gcgA.distanceTo(_gcgB) < 6) continue;   // spawnLightningBolt ignores anything shorter
+    const fa = _gcgA.clone(), fb = _gcgB.clone();
+    try {
+      spawnLightningBolt(fa, fb, col, life, br, thick, false);              // the wide saturated halo
+      spawnLightningBolt(fa, fb, core, life * 0.55, 1, thick * 0.38, false); // ...and the white-hot core
+    } catch (_) {}
+  }
+  // A light every few arcs so the ship's REAL plating picks the cyan up rather than the bolts
+  // floating over an unlit hull. Not on a phone, where every dynamic light is a forward-pass cost.
+  if (!_small && Math.random() < ((K.light != null) ? K.light : 0.4) && typeof spawnDynamicLight === 'function') {
+    const camP = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+    if (!camP || camP.distanceToSquared(owner.position || _gcgA) < 2600 * 2600) {
+      try { spawnDynamicLight(_gcgA, col, 2.2, ((owner.chassis && owner.chassis.hullLength) || 60) * 2.2, 0.14); } catch (_) {}
+    }
+  }
+}
+function _gunCoreGlowOff(owner) {
+  owner = owner || player;
+  if (!owner) return;
+  owner._gcgOn = false;
+  const i = _GCG.live.indexOf(owner);
+  if (i >= 0) _GCG.live.splice(i, 1);
+  // Nothing to hide: the bolts are pooled, short-lived and expire on their own. That is the whole
+  // reason this shape has no teardown bugs - there is no persistent object to leak or forget.
+}
+// A TTL SWEEP, NOT A TEARDOWN CALL PER EXIT. A core ends through death, round end, a soft return to
+// the menu, a peer disconnecting mid-ult, or simply a packet that stops arriving - and the glow is
+// driven for three different owner kinds. One "nobody fed me this frame" rule covers every one of
+// those, including the ones nobody has thought of yet. Same shape as `_bcgTTL` (v39.47).
+function _gunCoreGlowTick(dt) {
+  for (let i = _GCG.live.length - 1; i >= 0; i--) {
+    const o = _GCG.live[i];
+    if (!o) { _GCG.live.splice(i, 1); continue; }
+    o._gcgTTL = (o._gcgTTL || 0) - dt;
+    if (o._gcgTTL <= 0) _gunCoreGlowOff(o);
+  }
+}
+// Is this ship's core the one that lights its hull? Kept in one place so the three drive sites
+// (local / bot / peer) cannot drift apart, and so another core can join by name later.
+function _gunCoreLights(loadoutKey) { return loadoutKey === 'BLASTER'; }
+if (typeof window !== 'undefined') window.__gunCoreInfo = function () {
+  return _GCG.live.map(o => ({
+    who: (o === player) ? 'you' : (o.peerId ? ('peer ' + o.peerId) : ('bot ' + (o.id != null ? o.id : '?'))),
+    ship: o.loadoutKey, ring: o._gcgRing, walk: o._gcgWalk,
+    anchorMs: window.__gunCoreAnchorMs, ttl: +(o._gcgTTL || 0).toFixed(2),
+  }));
+};
 function emitChassisMuzzleFlash(loadoutKey, pos, dir, mine) {
   if (!pos || !dir) return;
   // (v39.77) `mine` = the local player's own shot (fireWeapon passes it; peers and bots do not).
@@ -62296,6 +62531,10 @@ class Bot {
   _coreTick(dt) {
     if (this._coreT <= 0 || !this._coreName) return;
     this._coreT -= dt;
+    // (v46.99) A bot's core is a core: it lights its guns like anyone else's. Ahead of the
+    // per-core-name branches below on purpose - AI Assist has no branch there (it is an aim/ammo
+    // buff, not a spawner), so a Blaster bot's ult had NO tell at all before this line.
+    if (_gunCoreLights(this.loadoutKey) && this.alive) { try { _gunCoreGlow(this, dt); } catch (_) {} }
     const done = this._coreT <= 0;
     let tgt = this._coreTarget;
     const tgtAlive = tgt && (tgt === player ? (player.shipState !== 'dead') : !!tgt.alive);
@@ -95773,6 +96012,7 @@ function updateWorldEffects(dt) {
   // up would strand them again. This function was already moved ahead of the deathCam branch for
   // the same class of bug (a bot's fire freezing on screen), so it is the one tick guaranteed to
   // keep running — which makes it the right place for the backstop.
+  try { _gunCoreGlowTick(dt); } catch (_) {}   // (v46.99) every gun-core glow, every owner kind
   if (player._bcgOn) {
     player._bcgTTL = (player._bcgTTL || 0) - dt;
     if (player._bcgTTL <= 0) { try { _blasterChargeGlowOff(); } catch (_) {} }
@@ -97781,6 +98021,11 @@ function updateAbilities(dt) {
   // Freeze core meter while core is active. (v38.72) A maxed Syphon keeps charging: its core
   // became a full restore, so the old "cap at 0 for maxed Syphon" line is gone.
   if (player.coreActive) player.coreMeter = 0;
+  // (v46.99) ...and the guns are alight while it runs. Your own tell as well as everyone else's:
+  // in third person you see your own pods, and in the seat the pod lights wash the cockpit.
+  if (player.coreActive && player.shipState !== 'dead' && _gunCoreLights(player.loadoutKey)) {
+    try { _gunCoreGlow(player, dt); } catch (_) {}
+  }
   // Edge-detect on core readiness so the ship-AI announcer fires
   // exactly once when the meter hits 100, not every frame thereafter.
   // _wasCoreReady tracks last-frame state so the next true-edge triggers.

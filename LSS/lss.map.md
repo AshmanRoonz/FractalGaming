@@ -6669,3 +6669,64 @@ branch in `_swUpdateUnderwater`
     6240 u, against water half as thick. Net is a large win with no new light.
   - Live: `window.__underwater = { cavern:false, cavDensity, cavCol, span }`.
   - **144 fps both ways** at the same vantage (fog density is a uniform write).
+
+### v46.99 — Blaster's core is visible to everyone: cyan lightning crawling over the hull
+
+Owner: *"we need some visual indication to all players that Blaster's core is active... the body
+shield ability makes his whole ship glow, but what if we could just make the area around his guns
+glow, similarly, but much brighter (in case body shield is activated, it won't hide the core
+visual)"*. AI Assist had **no tell at all** — not on your own ship, not on a bot, not on a peer.
+
+**Jump:** `function _gunCoreGlow` · `function _gcgAnchors` · `function _gunCoreGlowTick` ·
+`function _gunCoreLights` · the `co` field in `_broadcastState`
+
+- **⭐⭐⭐ IT TOOK FOUR REJECTED VISUALS, AND THE MEASUREMENT THAT EXPLAINS ALL FOUR.** Orbs at the
+  markers ("i don't like the glowing balls"), a `plasma_cyan` hull skin masked to the guns, and a
+  swollen ghost of the gun pods were each tried and each washed out. The reason is one number: with
+  the effect **hidden entirely**, a Body Shield'd Blaster is *already* a full-hull blowout in the
+  same cyan. `_setShipShieldEmissive(mesh, 0x33ccff, 1.1)` plus its hull-hug clone own colour and
+  luminance over the whole silhouette, so **anything competing on brightness at that hue loses by
+  construction**. Lightning wins because it does not compete there: it is thin, hard-edged and it
+  MOVES, and the eye tracks motion across a flat wash. Verified with the shield up.
+- **The arcs ride real hull vertices.** `_gcgAnchors` samples the hull geometry into a
+  `_GCG_RINGS`(5) x `_GCG_SPOKES`(14) grid around the hull's long axis, keeping the OUTERMOST vertex
+  per cell, stored in the hull mesh's LOCAL space so they ride ship / fit-scale / third-person / seat
+  transforms for free. Cached on the hull mesh (not the owner) because `_botShipPool` hands the same
+  mesh to the next Blaster. **1.3 ms, once per hull.**
+- **It is a WALK, not a sparkle.** Each arc starts where the last ended — one step around the ring,
+  or a `jump` (30%) to the next ring — so the discharge visibly travels around and along the hull.
+- **⚠ ANCHORS ARE PUSHED OFF THE SKIN (`inflate` 0.085).** Two neighbouring surface vertices are
+  joined by a near-straight path, and on a convex hull that path runs INSIDE the plating. Measured:
+  **7–14 live bolts a frame in `game.effects` and not one of them readable.** Pushing each anchor out
+  along its radial from the long axis floats the arcs clear.
+- **⚠ THICKNESS IS IN WORLD UNITS AND THIS HULL IS ~420 OF THEM LONG.** `emitDamageState` uses 3 and
+  `_primeArcTick` 0.9, but both are read at arm's length. **5 measured invisible; 22 was "too much"
+  (a cocoon, not arcs); 13 is where each arc reads as its own stroke.**
+- **⚠ IT MUST NOT READ AS DAMAGE, and the first tuning did.** Owner: *"it has to be different than
+  hull damage lightning"*. `emitDamageState` already crackles a hurt hull with
+  `spawnLightningBolt(a, b, 0x66e0ff, 0.28, 1, 3)`. Four **structural** separations (colour alone
+  failed): arcs never leave the hull (damage arcs reach 1.8 hull radii into open air); they chain
+  instead of popping independently; every arc is **two bolts** — a wide saturated `0x00e0ff` halo
+  plus a near-white `0xeaffff` core at 0.38 width / 0.55 life, the "hot conduit" recipe the Syphon
+  drain uses and which nothing in the damage path does; and the density is continuous rather than
+  occasional.
+- **ALL THREE OWNER KINDS, which is the whole point of the feature.** `_gunCoreGlow(owner, dt)` is
+  owner-parameterised for the same reason `_blasterChargeGlow` grew an owner in v44.17. Local pilot
+  in `updateAbilities`; **bots** at the head of `Bot._coreTick` (AI Assist has no branch there — it
+  is an aim/ammo buff — so a Blaster bot's ult previously had *no* tell whatsoever); **peers** from a
+  new `co` bit in `_broadcastState`, sent for every ship rather than gated on BLASTER, per the v44.17
+  note beside `pa`/`cg` that says which cores have a visual is the renderer's business.
+- **No teardown path to get wrong.** The bolts are pooled, short-lived and expire themselves, so
+  there is nothing persistent to leak; a TTL sweep (`_gunCoreGlowTick`, the `_bcgTTL` shape from
+  v39.47) covers death, round end, soft return, a peer disconnecting mid-ult and a packet that simply
+  stops arriving, with one "nobody fed me this frame" rule.
+- **MEASURED, RTX 5050 @ 144 Hz, free flight:** 144 fps idle → **112–120 fps while a core runs**
+  (~80 bolts/s of tube rebuilds), recovering the moment it ends. Anchor build 1.3 ms once per hull.
+  Bot path verified live with `__dbg.spawnBot('BLASTER')` — `__gunCoreInfo()` reports
+  `who: "bot 7777"` and the arcs render on a ship that is not the local player's.
+- **⚠ VERIFICATION LIMIT, stated plainly:** the peer path is verified *statically* — all six wiring
+  points are present in the shipped `lss.js`, and the drive is the identical
+  `_gunCoreGlow(owner, dt)` call the bot path exercises with a non-player owner. The `co` bit itself
+  has **not** been driven end-to-end through a second client; that needs the two-tab room test.
+- Knobs: `window.__gunCore = { on, tint, core, every, arcs, thick, life, branches, jump, light,
+  inflate }`; census at `window.__gunCoreInfo()`.

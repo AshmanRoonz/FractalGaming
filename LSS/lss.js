@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.98";
+const LSS_BUILD = "46.99";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -6337,6 +6337,7 @@ class NetworkPlayer {
         this._cgWasOn = false;
         try { if (this._bcgOn && typeof _blasterChargeGlowOff === 'function') _blasterChargeGlowOff(this); } catch (_) {}
       }
+      if (s && s.co && _gunCoreLights(this.loadoutKey)) { try { _gunCoreGlow(this, dt); } catch (_) {} }
     } else if (this._cgWasOn) {
       this._cgWasOn = false;
       try { if (this._bcgOn && typeof _blasterChargeGlowOff === 'function') _blasterChargeGlowOff(this); } catch (_) {}
@@ -6612,6 +6613,7 @@ const _broadcastState = {
   va: 0,
   pa: 0,
   cg: 0,
+  co: 0,
 };
 function broadcastPlayerState(dt) {
   if (!net.active || !net.sendState) return;
@@ -6657,6 +6659,7 @@ function broadcastPlayerState(dt) {
   s.cg = Math.max(0, Math.min(9, Math.round(Math.min(1, _cgRaw) * 9)));
   s.va = (player.loadoutKey === 'VORTEX' && typeof _vortexChargeFrac === 'function')
     ? Math.round(_vortexChargeFrac() * 9) : 0;
+  s.co = (player.coreActive && player.shipState !== 'dead') ? 1 : 0;   // (v46.99)
 
   const msg = JSON.stringify(s);
   net.bytesSent += msg.length;
@@ -10077,6 +10080,146 @@ function _blasterChargeGlowOff(owner) {
   if (!owner._bcgTubes) return;
   for (const m of owner._bcgTubes) { m.visible = false; m.material.opacity = 0; }
 }
+
+const _GCG = { live: [] };
+const _GCG_RINGS = 5, _GCG_SPOKES = 14;
+const _gcgA = new THREE.Vector3(), _gcgB = new THREE.Vector3(), _gcgTmp = new THREE.Vector3();
+function _gcgAnchors(owner) {
+  let hullMesh = null, most = 0;
+  owner.mesh.traverse(o => {
+    if (!o.isMesh || !o.geometry || !o.geometry.attributes.position) return;
+    const c = o.geometry.attributes.position.count;
+    if (c > most) { most = c; hullMesh = o; }
+  });
+  if (!hullMesh) return null;
+  const ud = hullMesh.userData || (hullMesh.userData = {});
+  const _inf = 1 + ((window.__gunCore && window.__gunCore.inflate != null) ? window.__gunCore.inflate : 0.085);
+  const _akey = hullMesh.geometry.uuid + '|' + _inf.toFixed(3);
+  if (ud._gcgAnchorKey === _akey && ud._gcgAnchors) return { hullMesh, rings: ud._gcgAnchors };
+  const t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
+  const pos = hullMesh.geometry.attributes.position;
+  if (!hullMesh.geometry.boundingBox) hullMesh.geometry.computeBoundingBox();
+  const bb = hullMesh.geometry.boundingBox;
+  const size = bb.getSize(new THREE.Vector3());
+  const ax = (size.x >= size.y && size.x >= size.z) ? 0 : ((size.y >= size.z) ? 1 : 2);
+  const u = (ax + 1) % 3, v = (ax + 2) % 3;
+  const lo = bb.min.getComponent(ax), span = Math.max(1e-6, size.getComponent(ax));
+  const cu = (bb.min.getComponent(u) + bb.max.getComponent(u)) * 0.5;
+  const cv = (bb.min.getComponent(v) + bb.max.getComponent(v)) * 0.5;
+  const cell = new Array(_GCG_RINGS * _GCG_SPOKES).fill(null);
+  const rad = new Float32Array(_GCG_RINGS * _GCG_SPOKES);
+  const stride = Math.max(1, Math.floor(pos.count / 6000));   // ~6k samples is plenty for 70 anchors
+  const p = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i += stride) {
+    p.set(pos.getX(i), pos.getY(i), pos.getZ(i));
+    let st = Math.floor((p.getComponent(ax) - lo) / span * _GCG_RINGS);
+    if (st < 0) st = 0; else if (st >= _GCG_RINGS) st = _GCG_RINGS - 1;
+    const du = p.getComponent(u) - cu, dv = p.getComponent(v) - cv;
+    const r2 = du * du + dv * dv;
+    let sp = Math.floor((Math.atan2(dv, du) + Math.PI) / (Math.PI * 2) * _GCG_SPOKES);
+    if (sp < 0) sp = 0; else if (sp >= _GCG_SPOKES) sp = _GCG_SPOKES - 1;
+    const k = st * _GCG_SPOKES + sp;
+    if (r2 > rad[k]) {
+      rad[k] = r2;
+      const q = p.clone();
+      q.setComponent(u, cu + du * _inf);
+      q.setComponent(v, cv + dv * _inf);
+      cell[k] = q;
+    }
+  }
+  const rings = [];
+  for (let st = 0; st < _GCG_RINGS; st++) {
+    const ring = [];
+    for (let sp = 0; sp < _GCG_SPOKES; sp++) {
+      let c = cell[st * _GCG_SPOKES + sp];
+      if (!c) for (let d = 1; d < _GCG_SPOKES && !c; d++) {
+        c = cell[st * _GCG_SPOKES + ((sp + d) % _GCG_SPOKES)] || cell[st * _GCG_SPOKES + ((sp - d + _GCG_SPOKES) % _GCG_SPOKES)];
+      }
+      if (c) ring.push(c);
+    }
+    if (ring.length > 2) rings.push(ring);
+  }
+  ud._gcgAnchorKey = _akey; ud._gcgAnchors = rings;
+  try { window.__gunCoreAnchorMs = Math.round((performance.now() - t0) * 10) / 10; } catch (_) {}
+  return rings.length ? { hullMesh, rings } : null;
+}
+function _gunCoreGlow(owner, dt) {
+  owner = owner || player;
+  if (!owner || !owner.mesh) return;
+  const K = window.__gunCore || (window.__gunCore = {});
+  if (K.on === false) return;
+  if ((owner.shipState === 'dead') || (owner.alive === false)) return;
+  const A = _gcgAnchors(owner);
+  if (!A) return;
+  if (!owner._gcgOn) { owner._gcgOn = true; owner._gcgWalk = 0; owner._gcgRing = 0; if (_GCG.live.indexOf(owner) < 0) _GCG.live.push(owner); }
+  owner._gcgTTL = 0.25;   // fed every frame by the drive; _gunCoreGlowTick puts it out
+  const _small = (typeof _fxSmallDevice === 'function') && _fxSmallDevice();
+  owner._gcgT = (owner._gcgT || 0) - (dt || 0.016);
+  if (owner._gcgT > 0) return;
+  owner._gcgT = (K.every != null) ? K.every : (_small ? 0.15 : 0.06);
+  const rings = A.rings, hullMesh = A.hullMesh;
+  hullMesh.updateWorldMatrix(true, false);
+  const mw = hullMesh.matrixWorld;
+  const col = (K.tint != null) ? K.tint : 0x00e0ff;          // saturated, NOT the damage path's pale 0x66e0ff
+  const core = (K.core != null) ? K.core : 0xeaffff;
+  const life = (K.life != null) ? K.life : 0.30;
+  const thick = (K.thick != null) ? K.thick : 13.0;
+  const br = (K.branches != null) ? K.branches : 2;
+  const jump = (K.jump != null) ? K.jump : 0.30;
+  const arcs = Math.max(1, (K.arcs != null) ? K.arcs : (_small ? 1 : 2));
+  for (let s = 0; s < arcs; s++) {
+    owner._gcgWalk = (owner._gcgWalk | 0) + 1;
+    const ring = rings[owner._gcgRing % rings.length];
+    const n = ring.length;
+    const i0 = owner._gcgWalk % n;
+    let a = ring[i0], b;
+    if (rings.length > 1 && Math.random() < jump) {
+      const nr = (owner._gcgRing + 1 + ((Math.random() * (rings.length - 1)) | 0)) % rings.length;
+      const other = rings[nr];
+      b = other[i0 % other.length];
+      owner._gcgRing = nr;
+    } else {
+      b = ring[(i0 + 1) % n];
+    }
+    _gcgA.copy(a).applyMatrix4(mw);
+    _gcgB.copy(b).applyMatrix4(mw);
+    if (_gcgA.distanceTo(_gcgB) < 6) continue;   // spawnLightningBolt ignores anything shorter
+    const fa = _gcgA.clone(), fb = _gcgB.clone();
+    try {
+      spawnLightningBolt(fa, fb, col, life, br, thick, false);              // the wide saturated halo
+      spawnLightningBolt(fa, fb, core, life * 0.55, 1, thick * 0.38, false); // ...and the white-hot core
+    } catch (_) {}
+  }
+  if (!_small && Math.random() < ((K.light != null) ? K.light : 0.4) && typeof spawnDynamicLight === 'function') {
+    const camP = (typeof camera !== 'undefined' && camera) ? camera.position : null;
+    if (!camP || camP.distanceToSquared(owner.position || _gcgA) < 2600 * 2600) {
+      try { spawnDynamicLight(_gcgA, col, 2.2, ((owner.chassis && owner.chassis.hullLength) || 60) * 2.2, 0.14); } catch (_) {}
+    }
+  }
+}
+function _gunCoreGlowOff(owner) {
+  owner = owner || player;
+  if (!owner) return;
+  owner._gcgOn = false;
+  const i = _GCG.live.indexOf(owner);
+  if (i >= 0) _GCG.live.splice(i, 1);
+}
+function _gunCoreGlowTick(dt) {
+  for (let i = _GCG.live.length - 1; i >= 0; i--) {
+    const o = _GCG.live[i];
+    if (!o) { _GCG.live.splice(i, 1); continue; }
+    o._gcgTTL = (o._gcgTTL || 0) - dt;
+    if (o._gcgTTL <= 0) _gunCoreGlowOff(o);
+  }
+}
+function _gunCoreLights(loadoutKey) { return loadoutKey === 'BLASTER'; }
+if (typeof window !== 'undefined') window.__gunCoreInfo = function () {
+  return _GCG.live.map(o => ({
+    who: (o === player) ? 'you' : (o.peerId ? ('peer ' + o.peerId) : ('bot ' + (o.id != null ? o.id : '?'))),
+    ship: o.loadoutKey, ring: o._gcgRing, walk: o._gcgWalk,
+    anchorMs: window.__gunCoreAnchorMs, ttl: +(o._gcgTTL || 0).toFixed(2),
+  }));
+};
 function emitChassisMuzzleFlash(loadoutKey, pos, dir, mine) {
   if (!pos || !dir) return;
   if (mine) pos = _adsAnchor(pos.clone());
@@ -37445,6 +37588,7 @@ class Bot {
   _coreTick(dt) {
     if (this._coreT <= 0 || !this._coreName) return;
     this._coreT -= dt;
+    if (_gunCoreLights(this.loadoutKey) && this.alive) { try { _gunCoreGlow(this, dt); } catch (_) {} }
     const done = this._coreT <= 0;
     let tgt = this._coreTarget;
     const tgtAlive = tgt && (tgt === player ? (player.shipState !== 'dead') : !!tgt.alive);
@@ -60643,6 +60787,7 @@ function updateWorldEffects(dt) {
       if (!_pyroShieldUp) _hideThermalShieldFlameSpheres(player);
     }
   } catch (_) {}
+  try { _gunCoreGlowTick(dt); } catch (_) {}   // (v46.99) every gun-core glow, every owner kind
   if (player._bcgOn) {
     player._bcgTTL = (player._bcgTTL || 0) - dt;
     if (player._bcgTTL <= 0) { try { _blasterChargeGlowOff(); } catch (_) {} }
@@ -62118,6 +62263,9 @@ function updateAbilities(dt) {
 
   game._dtLast = dt;   // (v37.68) last frame's dt, for effects that tick outside this function
   if (player.coreActive) player.coreMeter = 0;
+  if (player.coreActive && player.shipState !== 'dead' && _gunCoreLights(player.loadoutKey)) {
+    try { _gunCoreGlow(player, dt); } catch (_) {}
+  }
   const _nowCoreReady = player.coreMeter >= 100;
   if (_nowCoreReady && !player._wasCoreReady) {
     try { if (typeof ANN !== 'undefined' && ANN.coreReady) ANN.coreReady(); } catch (_) {}
