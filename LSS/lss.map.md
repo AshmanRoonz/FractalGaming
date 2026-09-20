@@ -6595,3 +6595,77 @@ Owner: *"races in custom locations... a circuit through whatever place you choos
 - **The Shifting Run is a lot longer** (owner): `_lssGenRaceTrack` lays 110-140 SU (16.5-21k units, was 36-48 SU) with 12-16 gates (was 4-6), side wander ±9 SU, height ±4 SU. Measured start→finish 18,282 units. Still one new track per round (the seed folds the round); the arena bound (`LSS.ARENA_SIZE` 25000) still contains ±10.5k.
 - **The race route chevron** (owner, the Straightaway: "there is one, its a blue arrow... make it double yellow chevron arrows like in endless"): the v36.71 gold double chevron gets a `race` branch - the next gate of a circuit, else the finish (the field once up, the champion room before that) - hidden inside 600 u. The champion field's own cyan rim arrow steps aside in race mode, and so does the circuit's cyan rim marker (the dashed guide line still ends where the chevron sits). Measured: 56 gold px / 0 blue px at the Straightaway's off-disc finish, 18-24 gold px on the next gate of the track maps.
 - Left as is: the old any-order pole-ring code (`_spawnPoleRings` / `_raceOnRingCaptured` / the radar's pole-ring branch) is now unreachable on every shipped race map except as a fallback; the Straightaway and the point-to-point Custom Location race have no gates and keep the classic race rules (timer, respawn-free, any-time finish).
+
+### v46.98 — the loading you could see in endless, and the dark water you could not
+
+Three owner reports from one long endless run on The Long Dark (`endless_bend`), all measured in the
+pane at 144 fps before and after.
+
+**Jump:** `function _swInvalidateChunksInRect` · `function _swSwapRebake` / `_swDropRebake` · the
+rebake lane in `updateSandwichStream` · the dive block in `_lssEndlessNextSeg` · the `_flooded`
+branch in `_swUpdateUnderwater`
+
+- **⭐⭐⭐ "In the space between the caverns we can see loading happening every few seconds, the space
+  we can see through lights up white or black as it draws new."** That is `_swInvalidateChunksInRect`,
+  and its own comment had gone stale: *"those chunks are >=6 km out, so the rebake hides in fog"*. Two
+  things put its rect on top of the ship. (a) **Bend runs widen it by `_BEND_R` (4200) on every side**
+  — a new segment's bend records re-curve every chunk in their compact support — and the append fires
+  when the route end is within 7000 u, so the rect's NEAR edge lands ~1.5–3 km from the pilot. (b)
+  **Past 42 km from origin the wander steers home** (`_lssEndlessNextSeg`) and the route folds back
+  over its own neighbourhood, so appended geometry is spatially beside the player. A disposed chunk is
+  gone from the scene and the in-play streamer rebuilds one shell at a time inside a 2.5 ms slice
+  (v39.49), so each one is an open hole for *seconds*, and what shows through it is the sky dome or the
+  water void — white, or black.
+  - **Fix: build the replacement behind the old shells and swap.** `_swInvalidateChunksInRect` now
+    marks `c._stale` and leaves the chunk drawn (a chunk with no shells yet is still dropped outright —
+    nothing to lose). The streamer grew a **rebake lane** sharing the one-job-at-a-time slot with new
+    chunks, ordered by **distance, not kind**: a new chunk's hole is at the frontier where fog hides
+    it, a stale chunk beside the ship is a seam you are looking straight at. The replacement shells are
+    finished `visible = false`, then `_swSwapRebake` reveals them and frees the old ones in one frame.
+    Visibility is **inherited from the mesh being replaced**, because the merged-block path (v44.91)
+    hides chunk shells while its block stands in for them. `_swMerge` needs no change — its signature
+    is geometry ids, so a swap drops the block by itself.
+  - **MEASURED, parked in an endless dive, 64 chunks invalidated around the ship in one call:** visible
+    terrain meshes **722 → 722, min = max, over 900 frames**, all 64 cleared in 138 frames (~2.3 s).
+    The counterfactual, run in the same session by disposing + deleting the same rect the way v46.97
+    did: **-98 meshes instantly (49 chunks × 2 shells) and 695 frames — ~11.6 s — to fill back in.**
+  - Loading paths (prebake, staging, swaps) keep the old shape: not `_budgeted`, so every stale chunk
+    is rebuilt outright in the same frame behind the overlay.
+  - Debug: `window.__swStale()` (stale / rebuilding / chunks / rebaked), `window.__swInvalidate(minX,
+    maxX, minZ, maxZ)` to fire the path by hand.
+
+- **"Where the caverns go down on an angle under water, open them up a little, make them wider apart."**
+  The dive block at the end of `_lssEndlessNextSeg` scales the lane by how far the segment's world-y
+  midpoint sits under the water plane and by its pitch: `r` up to **×1.75** and the carve weight `w`
+  from 0.15 up to **0.33** (still under the 0.42 the v35.73 note calls a partial carve, so a dive stays
+  a cavern and never reads as subway); halls take 60% of the same factor. Both derive from state the
+  generator already holds — **no extra `rand()` draws**, so the route stays byte-identical on every
+  co-op peer (the v35.85 rule). Above water the factor is exactly 1, so classic endless (flat y, ±260)
+  is untouched by construction.
+  - **MEASURED** by raycasting the real terrain 24 ways around the spine, same segment (gid 13, 2.9 km
+    under the plane, pitch −34°), A/B/A in one session: **median wall clearance 320 → 412 u (+29%),
+    mean 441 → 548, min 113 → 167 (+48%)** — and the return trip landed back on 412/167 exactly, so the
+    rebake is deterministic as well as seamless.
+  - Live: `window.__endlessDive = { on:false, wide, steep, span, wl }`; `run.segs[].dive` is the 0..1
+    depth the widener used.
+
+- **⭐⭐⭐ "Either it's too dark and we brighten it, or we make the headlight do more work." It was
+  neither — a flooded cavern is not a deep lake, and the depth ramp could not tell them apart.**
+  `_swUpdateUnderwater` ramped `depth01 = below / 1200`, written for the hub's sea, where "deeper =
+  darker" spans a few hundred units of lake you dip into. The bent endless tube is under the world-flat
+  water plane **by construction** (v39.64) and the route reaches ~23,000 u down, so `depth01` pinned to
+  1 after 1200 u and **the whole dive ran at the maximum darkness the system can produce** — fog
+  `041f28` at density 0.0026, measured in the pane. At 0.0026 an exp2 fog is ~81% closed at 500 u and
+  ~96% at 700 u, while the same run's lane measures **412 u median / 1071 u max** wall clearance: the
+  walls were inside the murk, always. That is also why v44.48's big lamp (×6 intensity, ×2.6 reach) did
+  not settle it — the reach was never the problem; nothing within reach could be seen through.
+  - **Fix:** `T.ENDLESS` gets a **constant murk** instead of a depth ramp — a flooded cave reads the
+    same at 1 km down as at 20 km, because there is no surface above you either way. `0x0c4350` at
+    **0.0013** (~34% closed at 500 u, ~75% at 900 u): the far wall of a wide lane reads, the distance
+    still goes. The hub's lake keeps its ramp exactly as it was. The CSS wash holds at a constant 0.5
+    so it stops pulsing as the tube rises and falls.
+  - **The lamp needed nothing.** `_swSubDark()` keys on fog luminance, so brightening the water dims
+    the boost — measured, that cost **9%** (headlight 21756 → 19742 cd) with the throw unchanged at
+    6240 u, against water half as thick. Net is a large win with no new light.
+  - Live: `window.__underwater = { cavern:false, cavDensity, cavCol, span }`.
+  - **144 fps both ways** at the same vantage (fog density is a uniform write).

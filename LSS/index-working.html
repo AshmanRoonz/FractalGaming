@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.97";
+const LSS_BUILD = "46.98";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -32778,12 +32778,41 @@ function _swShellJobFlush(c, T, wantCeil) {
 }
 function _swDisposeChunk(c) {
   c._job = null;   // (v39.49) an in-flight shell job holds no GPU resources
-  for (const m of [c.ground, c.ceiling]) {
+  c._reJob = null;   // (v46.98) ...and neither does a stale-rebake job
+  for (const m of [c.ground, c.ceiling, c._reG, c._reC]) {
     if (!m) continue;   
     try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material && !m.material._swShared) m.material.dispose(); } catch (_) {}   
   }
+  c._reG = c._reC = null; c._stale = false;   // (v46.98)
   _swRemoveGrass(c.grass);
   _swRemoveTrees(c.trees);
+}
+// (v46.98) Free one chunk's HALF-BUILT replacement without touching the live shells.
+function _swDropRebake(c) {
+  c._reJob = null;
+  for (const m of [c._reG, c._reC]) {
+    if (!m) continue;
+    try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material && !m.material._swShared) m.material.dispose(); } catch (_) {}
+  }
+  c._reG = c._reC = null;
+}
+// (v46.98) The swap: the replacement shells are finished and hidden, the old ones are still what
+// the pilot sees. Show the new, drop the old, in ONE frame - the chunk is never absent from the
+// scene. Visibility is INHERITED from the mesh being replaced (the merged-block path, v44.91, hides
+// chunk shells while its block stands in for them; a blind `visible = true` would un-hide them).
+function _swSwapRebake(c) {
+  const oldG = c.ground, oldC = c.ceiling;
+  if (c._reG) c._reG.visible = oldG ? oldG.visible : true;
+  if (c._reC) c._reC.visible = oldC ? oldC.visible : true;
+  for (const m of [oldG, oldC]) {
+    if (!m) continue;
+    try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material && !m.material._swShared) m.material.dispose(); } catch (_) {}
+  }
+  c.ground = c._reG || null; c.ceiling = c._reC || null;
+  c._reG = c._reC = null; c._reJob = null; c._stale = false;
+  // Foliage was planted against the OLD heightfield - drop it and let the planting lane replant.
+  if (c.grassBuilt) { try { _swRemoveGrass(c.grass); } catch (_) {} c.grass = null; c.grassBuilt = false; }
+  if (c.treesBuilt) { try { _swRemoveTrees(c.trees); } catch (_) {} c.trees = null; c.treesBuilt = false; }
 }
 
 // (v35.84) ENDLESS append-tear guard. A chunk baked BEFORE a route append that
@@ -32796,6 +32825,25 @@ function _swDisposeChunk(c) {
 // Dispose every baked chunk inside the new geometry's influence rect; the
 // budgeted streamer rebakes them (distance-sorted, _SW_BUILD_PER_FRAME) with
 // the carvers present. Those chunks are >=6km out, so the rebake hides in fog.
+//
+// ⚠ (v46.98) "THOSE CHUNKS ARE >=6 km OUT" STOPPED BEING TRUE, AND THE PILOT COULD SEE IT.
+// Owner, on a ~50 km endless run: "in the space between the caverns we can see loading happening
+// every few seconds, the space we can see through lights up white or black as it draws new". That
+// is this function. Two things put the rect on top of the ship:
+//   * BEND runs widen it by _BEND_R (4200) on every side, because a new segment's bend records
+//     re-curve every chunk within their compact support. The route end that triggers an append is
+//     within 7000 u, so the NEAR edge of the rect lands ~1.5-3 km from the pilot - inside the view,
+//     not in the fog.
+//   * Past ~42 km from origin the wander steers home (_lssEndlessNextSeg) and the route folds back
+//     over its own neighbourhood, so appended geometry is spatially beside the player even when it
+//     is a long way ahead along the spine.
+// A disposed chunk is GONE from the scene, and the in-play streamer rebuilds one shell at a time
+// inside a 2.5 ms slice (v39.49) - so each invalidated chunk is an open hole for many frames, and
+// what shows through it is the sky dome or the water void: white, or black.
+// So do not dispose what the pilot can see. Mark it STALE and leave it drawn; the streamer's
+// rebake lane builds the replacement shells HIDDEN and swaps them in when they are finished
+// (_swSwapRebake), which is the same fix shape the round-transition work landed on. A chunk with
+// nothing on screen yet (mid-build, no shells) has nothing to lose and is still dropped outright.
 function _swInvalidateChunksInRect(minX, maxX, minZ, maxZ) {
   const chunks = game.sandwichChunks;
   if (!chunks || !chunks.size) return 0;
@@ -32804,10 +32852,24 @@ function _swInvalidateChunksInRect(minX, maxX, minZ, maxZ) {
   let n = 0;
   for (const [key, c] of chunks) {
     if (c.cx < c0x || c.cx > c1x || c.cz < c0z || c.cz > c1z) continue;
-    _swDisposeChunk(c); chunks.delete(key); n++;
+    if (!c.ground && !c.ceiling) { _swDisposeChunk(c); chunks.delete(key); n++; continue; }
+    // Already queued for a rebake: throw away the partial replacement (its shapes are stale too)
+    // and re-queue, keeping the live shells on screen throughout.
+    if (c._reJob || c._reG || c._reC) _swDropRebake(c);
+    c._job = null;   // an in-flight ceiling job is baked against the old carve set
+    c._stale = true; n++;
   }
+  // Marking changes nothing the idle cache watches (the chunk count is the same now), so say so.
+  if (n) _swStreamIdle.idle = false;
   return n;
 }
+if (typeof window !== 'undefined') window.__swInvalidate = function (minX, maxX, minZ, maxZ) { return _swInvalidateChunksInRect(minX, maxX, minZ, maxZ); };
+if (typeof window !== 'undefined') window.__swStale = function () {
+  const ch = game.sandwichChunks; if (!ch) return { stale: 0, rebuilding: 0, chunks: 0 };
+  let st = 0, rb = 0;
+  for (const c of ch.values()) { if (c._stale) st++; if (c._reJob || c._reG || c._reC) rb++; }
+  return { stale: st, rebuilding: rb, chunks: ch.size, rebaked: window.__endlessRebaked || 0 };
+};
 
 // Atmosphere: a hazy biome sky + matched fog so distant peaks fade into the
 // horizon (the Ace look). Saves/restores the original fog + background so the
@@ -42850,11 +42912,41 @@ function _swUpdateUnderwater() {
     _swExitUnderwater();
   }
   if (game._swSubmerged) {                           
-    const depth01 = Math.max(0, Math.min(1, below / 1200));
+    // ⭐⭐ (v46.98) A FLOODED CAVERN IS NOT A DEEP LAKE, AND THE DEPTH RAMP COULD NOT TELL THEM APART.
+    // Owner: "in endless, where the caverns go down on an angle under water ... it's really hard to
+    // see and navigate in that dark water" -> "either it's too dark and we brighten it, or we make
+    // the headlight do more work". Measured in the pane on a bent endless dive: fog 041f28 at
+    // density 0.0026 - which is this line's MAXIMUM, in both terms, and it had been at the maximum
+    // for the whole dive. The ramp below is `below / 1200`, written for the hub's sea, where "deeper
+    // = darker" spans a few hundred units of lake you dip into. The bent endless tube is under the
+    // world-flat water plane BY CONSTRUCTION (v39.64 - the plane stays flat and the cavern dives
+    // beneath it) and the route reaches ~23,000 u down, so `depth01` pins to 1 after 1200 u and the
+    // rest of the run is the darkest fog the system can make.
+    // At 0.0026 an exp2 fog is ~81% closed at 500 u and ~96% at 700 u, while the same run's lane
+    // measures 412 u median / 1071 u max wall clearance: the walls were inside the murk, always.
+    // That is also why v44.48's big lamp (x6 intensity, x2.6 reach) did not settle it - the problem
+    // was never the lamp's reach, it was that nothing within reach could be seen through.
+    // So the endless caverns get their own constant murk instead of a depth ramp: a flooded cave
+    // reads the same at 1 km down as at 20 km, because there is no surface above you either way.
+    // 0.0013 leaves the far wall of a wide lane readable (~34% closed at 500 u, ~75% at 900 u) and
+    // still swallows the distance. The hub's lake keeps its ramp exactly as it was.
+    // Live: window.__underwater = { cavern:false, cavDensity, cavCol, span, deepMix }.
+    const _UK = (typeof window !== 'undefined') ? (window.__underwater = window.__underwater || {}) : null;
+    const _swT = game.sandwichTerrain;
+    const _flooded = !!(_swT && _swT.ENDLESS) && !(_UK && _UK.cavern === false);
+    if (_flooded) {
+      _swSubmergedFogGet().density = (_UK && _UK.cavDensity != null) ? _UK.cavDensity : 0.0013;
+      try { _swSubmergedFogGet().color.setHex((_UK && _UK.cavCol != null) ? _UK.cavCol : 0x0c4350); } catch (_) {}
+    } else {
+    const depth01 = Math.max(0, Math.min(1, below / ((_UK && _UK.span) || 1200)));
     _swSubmergedFogGet().density = 0.0016 + 0.0010 * depth01;
     try { _swSubmergedFogGet().color.setHex(0x0a3a44).lerp(_swDeepCol, depth01 * 0.8); } catch (_) {}   // (v39.64) darker with depth
+    }
+    // (v46.98) the CSS wash keeps a depth feel even where the fog no longer ramps - in a flooded
+    // cavern it settles at a constant, so the overlay does not pulse as the tube rises and falls.
+    const _ov01 = _flooded ? 0.5 : Math.max(0, Math.min(1, below / ((_UK && _UK.span) || 1200)));
     try { _swBubblesTick(Math.min(0.05, (typeof _lastFrameDt === 'number') ? _lastFrameDt : 0.016), w.userData.WL); } catch (_) {}
-    try { if (window.Overlays && Overlays.underwater) Overlays.underwater(true, depth01); } catch (_) {}
+    try { if (window.Overlays && Overlays.underwater) Overlays.underwater(true, _ov01); } catch (_) {}
   }
 }
 function _swDisposeHubWater() {
@@ -54412,6 +54504,8 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   const _clipOn = !!(typeof _clipmap !== 'undefined' && _clipmap && _clipmap.on);
   if (_SC.idle && _SC.T === T && _SC.scx === scx && _SC.scz === scz && _SC.view === _VIEW &&
       _SC.size === chunks.size && _SC.grass === wantGrass && _SC.trees === wantFoliage && _SC.clip === _clipOn) return 0;
+  // (v46.98) how many chunks are drawn but carry a stale heightfield (see _swInvalidateChunksInRect)
+  let _staleN = 0; for (const c of chunks.values()) if (c._stale) _staleN++;
   let _swDisposed = 0, _swRemoved = 0;
   const todo = [];
   for (let cx = scx - _VIEW; cx <= scx + _VIEW; cx++) {
@@ -54448,13 +54542,32 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   if (_budgeted) {
     let _cur = null;
     for (const c of chunks.values()) { if (c._job) { _cur = c; break; } }
-    if (!_cur && lim > 0) {
-      const t = todo[0];
-      _cur = { cx: t.cx, cz: t.cz, ground: null, ceiling: null, _job: null };
-      _cur._job = _wantGround ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, false, T)
-                : (_wantCeil ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, true, T) : null);
-      chunks.set(t.key, _cur);
-      if (!_cur._job) built++;
+    // (v46.98) THE REBAKE LANE shares the one-job-at-a-time slot with new chunks, and the two are
+    // ordered by DISTANCE, not by kind: a new chunk's hole is at the streaming frontier where the
+    // fog hides it, while a stale chunk beside the ship is a seam the pilot is looking straight at.
+    // Nearest-first serves both without a second budget to keep in step.
+    let _re = null;
+    if (!_cur) for (const c of chunks.values()) { if (c._reJob) { _re = c; break; } }
+    if (!_cur && !_re) {
+      let _sc = null, _sd = Infinity;
+      if (_staleN) for (const c of chunks.values()) {
+        if (!c._stale) continue;
+        const d = (c.cx - scx) * (c.cx - scx) + (c.cz - scz) * (c.cz - scz);
+        if (d < _sd) { _sd = d; _sc = c; }
+      }
+      if (_sc && (lim === 0 || _sd <= todo[0].d)) {
+        const ox = _sc.cx * _SW_CHUNK, oz = _sc.cz * _SW_CHUNK;
+        _sc._reJob = _wantGround ? _swShellJobNew(ox, oz, false, T) : (_wantCeil ? _swShellJobNew(ox, oz, true, T) : null);
+        if (_sc._reJob) _re = _sc;
+        else { _sc._stale = false; _staleN--; }   // nothing wanted from this chunk (clipmap + mossy) - the mark is moot
+      } else if (lim > 0) {
+        const t = todo[0];
+        _cur = { cx: t.cx, cz: t.cz, ground: null, ceiling: null, _job: null };
+        _cur._job = _wantGround ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, false, T)
+                  : (_wantCeil ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, true, T) : null);
+        chunks.set(t.key, _cur);
+        if (!_cur._job) built++;
+      }
     }
     if (_cur && _cur._job) {
       const J = _cur._job;
@@ -54466,9 +54579,30 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
         _cur._job = (!J.isCeil && _wantCeil) ? _swShellJobNew(_cur.cx * _SW_CHUNK, _cur.cz * _SW_CHUNK, true, T) : null;
         built++;
       }
+    } else if (_re && _re._reJob) {
+      const J = _re._reJob;
+      stepped++;
+      const _left = _bMs - (performance.now() - _bt0);
+      if (_swShellJobRows(J, Math.max(0.2, _left))) {
+        const mesh = _swShellJobFinish(J);
+        mesh.visible = false;   // built behind the shell it replaces; _swSwapRebake reveals it
+        if (J.isCeil) _re._reC = mesh; else _re._reG = mesh;
+        _re._reJob = (!J.isCeil && _wantCeil) ? _swShellJobNew(_re.cx * _SW_CHUNK, _re.cz * _SW_CHUNK, true, T) : null;
+        if (!_re._reJob) { _swSwapRebake(_re); _staleN--; built++; }
+      }
     }
   } else {
     for (const c of chunks.values()) { if (c._job) { _swShellJobFlush(c, T, _wantCeil); built++; } }
+    // (v46.98) Loading paths (prebake, staging, swaps) are behind the overlay: finish every stale
+    // rebake outright, the way this used to behave everywhere.
+    if (_staleN) for (const c of chunks.values()) {
+      if (!c._stale) continue;
+      _swDropRebake(c);
+      const ox = c.cx * _SW_CHUNK, oz = c.cz * _SW_CHUNK;
+      c._reG = _wantGround ? _swBuildShell(ox, oz, false, T) : null;
+      c._reC = _wantCeil ? _swBuildShell(ox, oz, true, T) : null;
+      _swSwapRebake(c); _staleN--; built++;
+    }
     for (let i = 0; i < lim; i++) {
       const t = todo[i], ox = t.cx * _SW_CHUNK, oz = t.cz * _SW_CHUNK;
       chunks.set(t.key, { cx: t.cx, cz: t.cz, ground: _wantGround ? _swBuildShell(ox, oz, false, T) : null, ceiling: _wantCeil ? _swBuildShell(ox, oz, true, T) : null, _job: null });
@@ -54543,7 +54677,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
     }
   }
   // (v38.61) record what this pass concluded (see the idle early-out above)
-  _SC.idle = (built === 0 && stepped === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0);   // (v39.49) a stepped job is not idle
+  _SC.idle = (built === 0 && stepped === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0 && _staleN === 0);   // (v39.49) a stepped job is not idle ; (v46.98) nor is a pending rebake
   _SC.T = T; _SC.scx = scx; _SC.scz = scz; _SC.view = _VIEW; _SC.size = chunks.size;
   _SC.grass = wantGrass; _SC.trees = wantFoliage; _SC.clip = _clipOn;
   return built + stepped + gBuilt + tBuilt;   // (v39.49) stepped keeps the warmup drain looping while a job is in flight
@@ -118560,6 +118694,7 @@ function _lssEndlessNextSeg(run) {
     // nodes — the spine is a smooth curve, not a kinked polyline.
     const shh = Math.sin(g.heading), chh = Math.cos(g.heading);
     const nSub = Math.max(1, Math.round(len / 800));
+    const _wy0 = g._wy;   // (v46.98) this segment's START altitude — the dive widener reads its midpoint
     let fx = a.x, fz = a.z;
     for (let si = 0; si < nSub; si++) {
       const thI = g._thPrev + (thNew - g._thPrev) * ((si + 0.5) / nSub);
@@ -118576,6 +118711,33 @@ function _lssEndlessNextSeg(run) {
     }
     g._thPrev = thNew;
     g._bu += len;
+    // ── (v46.98) THE DIVES OPEN UP ───────────────────────────────────────────
+    // Owner: "where the caverns go down on an angle under water, we should open the caverns up a
+    // little, make them wider apart — it's really hard to see and navigate in that dark water".
+    // The water plane is WORLD-flat at T.WL and the bent tube dives under it (v39.64), so a lane
+    // that reads fine in open air becomes a black pipe the moment the spine crosses the surface:
+    // the underwater fog (_swDeepCol) eats the walls, and on a steep pitch you are nose-down into
+    // it with no horizon to read the lane against. Give those stretches more room — both levers:
+    //   r  = the lane's FOOTPRINT (how far apart the walls stand)
+    //   w  = the carve WEIGHT, which is what pulls floor and roof toward the tube's own
+    //        ±ARENA_DROP/ARENA_RISE (headroom). 0.15 -> at most ~0.33, still under the 0.42 the
+    //        v35.73 note calls a partial carve, so a dive stays a cavern and never reads as subway.
+    // Both are derived from state the generator ALREADY holds (the segment's world altitude and its
+    // pitch) — NO extra rand() draws, so the route stays byte-identical on every co-op peer (the
+    // v35.85 rule). Above water `wide` is exactly 1 and `w` exactly 0.15: classic endless, whose
+    // flat y never leaves ±260, is untouched by construction. Live knobs: window.__endlessDive.
+    const _DV = (typeof window !== 'undefined') ? (window.__endlessDive = window.__endlessDive || {}) : null;
+    const _dvOff = !!(_DV && _DV.on === false);   // A/B switch: false = the pre-v46.98 lane, for measuring against
+    const _wlRef = (_DV && typeof _DV.wl === 'number') ? _DV.wl
+                 : ((game.sandwichTerrain && game.sandwichTerrain.WL != null) ? game.sandwichTerrain.WL : -420);
+    const _span = (_DV && _DV.span) || 1400;   // how far under the surface counts as "fully deep"
+    const _wyMid = (_wy0 + g._wy) * 0.5;
+    const _depth = _dvOff ? 0 : Math.max(0, Math.min(1, (_wlRef - _wyMid) / _span));
+    const _steep = Math.min(1, Math.abs(thNew) / 0.9);
+    const _wideK = (_DV && _DV.wide != null) ? _DV.wide : 0.40;
+    const _steepK = (_DV && _DV.steep != null) ? _DV.steep : 0.35;
+    const wide = 1 + _depth * (_wideK + _steepK * _steep);
+    const wCarve = 0.15 + _depth * (0.10 + 0.08 * _steep);
     // _bendMapPoint returns a SCRATCH — copy each result before the next call.
     const rA = _bendMapPoint(a.x, a.y, a.z);
     const wA = { x: rA.x, y: rA.y, z: rA.z };
@@ -118583,7 +118745,9 @@ function _lssEndlessNextSeg(run) {
     const wB = { x: rB.x, y: rB.y, z: rB.z };
     let wHp = null;
     if (hp) { const rH = _bendMapPoint(hp.x, hp.y, hp.z); wHp = { x: rH.x, y: rH.y, z: rH.z }; }
-    return { a: wA, b: wB, fa: a, fb: b, r, hall, hallR, hp: wHp, fhp: hp, gid: g.nextGid++ };
+    // Halls take a softer share of the same factor — they are already 800-1600 u across.
+    return { a: wA, b: wB, fa: a, fb: b, r: r * wide, hall, hallR: hallR * (1 + (wide - 1) * 0.6),
+             w: wCarve, dive: _depth, hp: wHp, fhp: hp, gid: g.nextGid++ };
   }
   return { a, b, r, hall, hallR, hp, gid: g.nextGid++ };
 }
@@ -118610,7 +118774,7 @@ function _lssEndlessApplySeg(run, s) {
   }
   // w 0.42: partial carve — the lane GUARANTEES passage but keeps the ridged
   // relief, so the corridor reads as cavern, not subway (v35.73).
-  const cyl = { ax: ca.x, ay: ca.y, az: ca.z, bx: cb.x, by: cb.y, bz: cb.z, r: s.r, w: 0.15 };
+  const cyl = { ax: ca.x, ay: ca.y, az: ca.z, bx: cb.x, by: cb.y, bz: cb.z, r: s.r, w: (s.w != null ? s.w : 0.15) };   // (v46.98) s.w: underwater dives carve a little harder
   game.levelCylinders.push(cyl);
   let sph = null, spur = null;
   if (s.hall) {
@@ -118624,6 +118788,7 @@ function _lssEndlessApplySeg(run, s) {
   run.segs.push({
     gid: s.gid, a: s.a, b: s.b, hall: s.hall,
     len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
+    dive: s.dive || 0,   // (v46.98) 0..1 how far under the water plane this segment sits
     cyl, sph, spur,
   });
   // (v35.84) Rebake any already-baked chunk this new geometry carves (the

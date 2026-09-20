@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.97";
+const LSS_BUILD = "46.98";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -17781,12 +17781,35 @@ function _swShellJobFlush(c, T, wantCeil) {
 }
 function _swDisposeChunk(c) {
   c._job = null;   // (v39.49) an in-flight shell job holds no GPU resources
-  for (const m of [c.ground, c.ceiling]) {
+  c._reJob = null;   // (v46.98) ...and neither does a stale-rebake job
+  for (const m of [c.ground, c.ceiling, c._reG, c._reC]) {
     if (!m) continue;   
     try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material && !m.material._swShared) m.material.dispose(); } catch (_) {}   
   }
+  c._reG = c._reC = null; c._stale = false;   // (v46.98)
   _swRemoveGrass(c.grass);
   _swRemoveTrees(c.trees);
+}
+function _swDropRebake(c) {
+  c._reJob = null;
+  for (const m of [c._reG, c._reC]) {
+    if (!m) continue;
+    try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material && !m.material._swShared) m.material.dispose(); } catch (_) {}
+  }
+  c._reG = c._reC = null;
+}
+function _swSwapRebake(c) {
+  const oldG = c.ground, oldC = c.ceiling;
+  if (c._reG) c._reG.visible = oldG ? oldG.visible : true;
+  if (c._reC) c._reC.visible = oldC ? oldC.visible : true;
+  for (const m of [oldG, oldC]) {
+    if (!m) continue;
+    try { if (m.parent) scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material && !m.material._swShared) m.material.dispose(); } catch (_) {}
+  }
+  c.ground = c._reG || null; c.ceiling = c._reC || null;
+  c._reG = c._reC = null; c._reJob = null; c._stale = false;
+  if (c.grassBuilt) { try { _swRemoveGrass(c.grass); } catch (_) {} c.grass = null; c.grassBuilt = false; }
+  if (c.treesBuilt) { try { _swRemoveTrees(c.trees); } catch (_) {} c.trees = null; c.treesBuilt = false; }
 }
 
 function _swInvalidateChunksInRect(minX, maxX, minZ, maxZ) {
@@ -17797,10 +17820,21 @@ function _swInvalidateChunksInRect(minX, maxX, minZ, maxZ) {
   let n = 0;
   for (const [key, c] of chunks) {
     if (c.cx < c0x || c.cx > c1x || c.cz < c0z || c.cz > c1z) continue;
-    _swDisposeChunk(c); chunks.delete(key); n++;
+    if (!c.ground && !c.ceiling) { _swDisposeChunk(c); chunks.delete(key); n++; continue; }
+    if (c._reJob || c._reG || c._reC) _swDropRebake(c);
+    c._job = null;   // an in-flight ceiling job is baked against the old carve set
+    c._stale = true; n++;
   }
+  if (n) _swStreamIdle.idle = false;
   return n;
 }
+if (typeof window !== 'undefined') window.__swInvalidate = function (minX, maxX, minZ, maxZ) { return _swInvalidateChunksInRect(minX, maxX, minZ, maxZ); };
+if (typeof window !== 'undefined') window.__swStale = function () {
+  const ch = game.sandwichChunks; if (!ch) return { stale: 0, rebuilding: 0, chunks: 0 };
+  let st = 0, rb = 0;
+  for (const c of ch.values()) { if (c._stale) st++; if (c._reJob || c._reG || c._reC) rb++; }
+  return { stale: st, rebuilding: rb, chunks: ch.size, rebaked: window.__endlessRebaked || 0 };
+};
 
 const _HUB_ZONES = {
   ON: true,
@@ -23817,11 +23851,20 @@ function _swUpdateUnderwater() {
     _swExitUnderwater();
   }
   if (game._swSubmerged) {                           
-    const depth01 = Math.max(0, Math.min(1, below / 1200));
+    const _UK = (typeof window !== 'undefined') ? (window.__underwater = window.__underwater || {}) : null;
+    const _swT = game.sandwichTerrain;
+    const _flooded = !!(_swT && _swT.ENDLESS) && !(_UK && _UK.cavern === false);
+    if (_flooded) {
+      _swSubmergedFogGet().density = (_UK && _UK.cavDensity != null) ? _UK.cavDensity : 0.0013;
+      try { _swSubmergedFogGet().color.setHex((_UK && _UK.cavCol != null) ? _UK.cavCol : 0x0c4350); } catch (_) {}
+    } else {
+    const depth01 = Math.max(0, Math.min(1, below / ((_UK && _UK.span) || 1200)));
     _swSubmergedFogGet().density = 0.0016 + 0.0010 * depth01;
     try { _swSubmergedFogGet().color.setHex(0x0a3a44).lerp(_swDeepCol, depth01 * 0.8); } catch (_) {}   // (v39.64) darker with depth
+    }
+    const _ov01 = _flooded ? 0.5 : Math.max(0, Math.min(1, below / ((_UK && _UK.span) || 1200)));
     try { _swBubblesTick(Math.min(0.05, (typeof _lastFrameDt === 'number') ? _lastFrameDt : 0.016), w.userData.WL); } catch (_) {}
-    try { if (window.Overlays && Overlays.underwater) Overlays.underwater(true, depth01); } catch (_) {}
+    try { if (window.Overlays && Overlays.underwater) Overlays.underwater(true, _ov01); } catch (_) {}
   }
 }
 function _swDisposeHubWater() {
@@ -32206,6 +32249,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   const _clipOn = !!(typeof _clipmap !== 'undefined' && _clipmap && _clipmap.on);
   if (_SC.idle && _SC.T === T && _SC.scx === scx && _SC.scz === scz && _SC.view === _VIEW &&
       _SC.size === chunks.size && _SC.grass === wantGrass && _SC.trees === wantFoliage && _SC.clip === _clipOn) return 0;
+  let _staleN = 0; for (const c of chunks.values()) if (c._stale) _staleN++;
   let _swDisposed = 0, _swRemoved = 0;
   const todo = [];
   for (let cx = scx - _VIEW; cx <= scx + _VIEW; cx++) {
@@ -32229,13 +32273,28 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
   if (_budgeted) {
     let _cur = null;
     for (const c of chunks.values()) { if (c._job) { _cur = c; break; } }
-    if (!_cur && lim > 0) {
-      const t = todo[0];
-      _cur = { cx: t.cx, cz: t.cz, ground: null, ceiling: null, _job: null };
-      _cur._job = _wantGround ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, false, T)
-                : (_wantCeil ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, true, T) : null);
-      chunks.set(t.key, _cur);
-      if (!_cur._job) built++;
+    let _re = null;
+    if (!_cur) for (const c of chunks.values()) { if (c._reJob) { _re = c; break; } }
+    if (!_cur && !_re) {
+      let _sc = null, _sd = Infinity;
+      if (_staleN) for (const c of chunks.values()) {
+        if (!c._stale) continue;
+        const d = (c.cx - scx) * (c.cx - scx) + (c.cz - scz) * (c.cz - scz);
+        if (d < _sd) { _sd = d; _sc = c; }
+      }
+      if (_sc && (lim === 0 || _sd <= todo[0].d)) {
+        const ox = _sc.cx * _SW_CHUNK, oz = _sc.cz * _SW_CHUNK;
+        _sc._reJob = _wantGround ? _swShellJobNew(ox, oz, false, T) : (_wantCeil ? _swShellJobNew(ox, oz, true, T) : null);
+        if (_sc._reJob) _re = _sc;
+        else { _sc._stale = false; _staleN--; }   // nothing wanted from this chunk (clipmap + mossy) - the mark is moot
+      } else if (lim > 0) {
+        const t = todo[0];
+        _cur = { cx: t.cx, cz: t.cz, ground: null, ceiling: null, _job: null };
+        _cur._job = _wantGround ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, false, T)
+                  : (_wantCeil ? _swShellJobNew(t.cx * _SW_CHUNK, t.cz * _SW_CHUNK, true, T) : null);
+        chunks.set(t.key, _cur);
+        if (!_cur._job) built++;
+      }
     }
     if (_cur && _cur._job) {
       const J = _cur._job;
@@ -32247,9 +32306,28 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
         _cur._job = (!J.isCeil && _wantCeil) ? _swShellJobNew(_cur.cx * _SW_CHUNK, _cur.cz * _SW_CHUNK, true, T) : null;
         built++;
       }
+    } else if (_re && _re._reJob) {
+      const J = _re._reJob;
+      stepped++;
+      const _left = _bMs - (performance.now() - _bt0);
+      if (_swShellJobRows(J, Math.max(0.2, _left))) {
+        const mesh = _swShellJobFinish(J);
+        mesh.visible = false;   // built behind the shell it replaces; _swSwapRebake reveals it
+        if (J.isCeil) _re._reC = mesh; else _re._reG = mesh;
+        _re._reJob = (!J.isCeil && _wantCeil) ? _swShellJobNew(_re.cx * _SW_CHUNK, _re.cz * _SW_CHUNK, true, T) : null;
+        if (!_re._reJob) { _swSwapRebake(_re); _staleN--; built++; }
+      }
     }
   } else {
     for (const c of chunks.values()) { if (c._job) { _swShellJobFlush(c, T, _wantCeil); built++; } }
+    if (_staleN) for (const c of chunks.values()) {
+      if (!c._stale) continue;
+      _swDropRebake(c);
+      const ox = c.cx * _SW_CHUNK, oz = c.cz * _SW_CHUNK;
+      c._reG = _wantGround ? _swBuildShell(ox, oz, false, T) : null;
+      c._reC = _wantCeil ? _swBuildShell(ox, oz, true, T) : null;
+      _swSwapRebake(c); _staleN--; built++;
+    }
     for (let i = 0; i < lim; i++) {
       const t = todo[i], ox = t.cx * _SW_CHUNK, oz = t.cz * _SW_CHUNK;
       chunks.set(t.key, { cx: t.cx, cz: t.cz, ground: _wantGround ? _swBuildShell(ox, oz, false, T) : null, ceiling: _wantCeil ? _swBuildShell(ox, oz, true, T) : null, _job: null });
@@ -32303,7 +32381,7 @@ function updateSandwichStream(px, pz, budget, gLim, tLim) {
       _swRemoveTrees(c.trees); c.trees = null; c.treesBuilt = false; _swRemoved++;   // (v39.94) capped
     }
   }
-  _SC.idle = (built === 0 && stepped === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0);   // (v39.49) a stepped job is not idle
+  _SC.idle = (built === 0 && stepped === 0 && gBuilt === 0 && tBuilt === 0 && _swDisposed === 0 && _swRemoved === 0 && _staleN === 0);   // (v39.49) a stepped job is not idle ; (v46.98) nor is a pending rebake
   _SC.T = T; _SC.scx = scx; _SC.scz = scz; _SC.view = _VIEW; _SC.size = chunks.size;
   _SC.grass = wantGrass; _SC.trees = wantFoliage; _SC.clip = _clipOn;
   return built + stepped + gBuilt + tBuilt;   // (v39.49) stepped keeps the warmup drain looping while a job is in flight
@@ -76971,6 +77049,7 @@ function _lssEndlessNextSeg(run) {
     const thNew = Math.max(-1.5, Math.min(1.5, g._th));
     const shh = Math.sin(g.heading), chh = Math.cos(g.heading);
     const nSub = Math.max(1, Math.round(len / 800));
+    const _wy0 = g._wy;   // (v46.98) this segment's START altitude — the dive widener reads its midpoint
     let fx = a.x, fz = a.z;
     for (let si = 0; si < nSub; si++) {
       const thI = g._thPrev + (thNew - g._thPrev) * ((si + 0.5) / nSub);
@@ -76987,13 +77066,26 @@ function _lssEndlessNextSeg(run) {
     }
     g._thPrev = thNew;
     g._bu += len;
+    const _DV = (typeof window !== 'undefined') ? (window.__endlessDive = window.__endlessDive || {}) : null;
+    const _dvOff = !!(_DV && _DV.on === false);   // A/B switch: false = the pre-v46.98 lane, for measuring against
+    const _wlRef = (_DV && typeof _DV.wl === 'number') ? _DV.wl
+                 : ((game.sandwichTerrain && game.sandwichTerrain.WL != null) ? game.sandwichTerrain.WL : -420);
+    const _span = (_DV && _DV.span) || 1400;   // how far under the surface counts as "fully deep"
+    const _wyMid = (_wy0 + g._wy) * 0.5;
+    const _depth = _dvOff ? 0 : Math.max(0, Math.min(1, (_wlRef - _wyMid) / _span));
+    const _steep = Math.min(1, Math.abs(thNew) / 0.9);
+    const _wideK = (_DV && _DV.wide != null) ? _DV.wide : 0.40;
+    const _steepK = (_DV && _DV.steep != null) ? _DV.steep : 0.35;
+    const wide = 1 + _depth * (_wideK + _steepK * _steep);
+    const wCarve = 0.15 + _depth * (0.10 + 0.08 * _steep);
     const rA = _bendMapPoint(a.x, a.y, a.z);
     const wA = { x: rA.x, y: rA.y, z: rA.z };
     const rB = _bendMapPoint(b.x, b.y, b.z);
     const wB = { x: rB.x, y: rB.y, z: rB.z };
     let wHp = null;
     if (hp) { const rH = _bendMapPoint(hp.x, hp.y, hp.z); wHp = { x: rH.x, y: rH.y, z: rH.z }; }
-    return { a: wA, b: wB, fa: a, fb: b, r, hall, hallR, hp: wHp, fhp: hp, gid: g.nextGid++ };
+    return { a: wA, b: wB, fa: a, fb: b, r: r * wide, hall, hallR: hallR * (1 + (wide - 1) * 0.6),
+             w: wCarve, dive: _depth, hp: wHp, fhp: hp, gid: g.nextGid++ };
   }
   return { a, b, r, hall, hallR, hp, gid: g.nextGid++ };
 }
@@ -77009,7 +77101,7 @@ function _lssEndlessApplySeg(run, s) {
            Math.hypot(B[cut].wmx - ppx, B[cut].wmy - ppy, B[cut].wmz - ppz) > 18000) cut++;
     if (cut > 0) B.splice(0, cut);
   }
-  const cyl = { ax: ca.x, ay: ca.y, az: ca.z, bx: cb.x, by: cb.y, bz: cb.z, r: s.r, w: 0.15 };
+  const cyl = { ax: ca.x, ay: ca.y, az: ca.z, bx: cb.x, by: cb.y, bz: cb.z, r: s.r, w: (s.w != null ? s.w : 0.15) };   // (v46.98) s.w: underwater dives carve a little harder
   game.levelCylinders.push(cyl);
   let sph = null, spur = null;
   if (s.hall) {
@@ -77023,6 +77115,7 @@ function _lssEndlessApplySeg(run, s) {
   run.segs.push({
     gid: s.gid, a: s.a, b: s.b, hall: s.hall,
     len: Math.hypot(s.b.x - s.a.x, s.b.y - s.a.y, s.b.z - s.a.z),
+    dive: s.dive || 0,   // (v46.98) 0..1 how far under the water plane this segment sits
     cyl, sph, spur,
   });
   try {
