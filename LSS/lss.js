@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.91";
+const LSS_BUILD = "46.92";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -18226,10 +18226,11 @@ function _hzCavernFrame(dt) {
     try { cv.ring = new BossPortal(rp); } catch (_) {}
   }
 }
-const _HZ_GUARDS = { N: 4, TRIGGER: 3200, REARM_DIST: 6500, COOLDOWN: 30 };
+const _HZ_GUARDS = { N: 4, TRIGGER: 3200, REARM_DIST: 6500, COOLDOWN: 30, GAP: 0.14 };
 if (typeof window !== 'undefined') window.__riftGuards = _HZ_GUARDS;
 function _hzGuardsFrame(p, d, dt) {
   if (p._guardCool > 0) p._guardCool -= dt;
+  if (p._guardBuild) { try { _hzGuardsBuildStep(p, dt); } catch (_) { p._guardBuild = null; p._guardsPending = false; } return; }
   if (p._guardsUp) {
     let alive = 0;
     for (const b of p._guardsUp) { if (b && b.alive) alive++; }
@@ -18247,33 +18248,57 @@ function _hzGuardsFrame(p, d, dt) {
     if (!_HZ_CAVERN.portals || _HZ_CAVERN.portals.indexOf(p) < 0) return;
     if (game._cavern || (net && net.active) || game.state !== 'playing') return;
     if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
-    const flight = [];
-    for (let i = 0; i < picks.length; i++) {
-      if (!protos[i]) continue;
-      let bot = null;
-      try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9500 + i), picks[i]); } catch (_) { continue; }
-      try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, picks[i]); } catch (_) {}
-      bot._riftGuard = true;
-      const pos = p.pos.clone();
-      pos.x += (Math.random() - 0.5) * 420; pos.y += (Math.random() - 0.5) * 260; pos.z += (Math.random() - 0.5) * 420;
-      bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
-      if (player && player.position) {
-        const spd = ((bot.chassis && bot.chassis.flightSpeed) || 300) * 0.9;
-        bot.velocity.copy(player.position).sub(pos).normalize().multiplyScalar(spd);
-        bot.combatTarget = player;
-        bot.aiTarget = player.position.clone();
-        bot.aiLastKnownPlayer = player.position.clone();
-        bot.aiLastKnownTime = (game && game.time) || 0;
-      }
-      game.entities.push(bot);
-      flight.push(bot);
-    }
-    if (!flight.length) return;
-    p._guardsUp = flight;
-    p._guardCool = _HZ_GUARDS.COOLDOWN;
-    try { if (window.Overlays) Overlays.banner('RIFT GUARDS', flight.length + ' hostiles are coming through the ring'); } catch (_) {}
-    try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+    p._guardBuild = { picks, protos, i: 0, flight: [], t: 0 };
+    p._guardsPending = false;
   }).catch(() => { p._guardsPending = false; });
+}
+function _hzGuardsBuildStep(p, dt) {
+  const B = p._guardBuild;
+  if (!B) return;
+  const _stand = (!_HZ_CAVERN.portals || _HZ_CAVERN.portals.indexOf(p) < 0) ||
+                 game._cavern || (net && net.active) || game.state !== 'playing' ||
+                 (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight');
+  if (_stand) {
+    p._guardBuild = null;
+    if (B.flight.length) { p._guardsUp = B.flight; p._guardCool = _HZ_GUARDS.COOLDOWN; }
+    return;
+  }
+  B.t -= dt;
+  if (B.t > 0) return;
+  B.t = (typeof _HZ_GUARDS.GAP === 'number' && _HZ_GUARDS.GAP > 0) ? _HZ_GUARDS.GAP : 0;
+  const i = B.i++;
+  if (i < B.picks.length) {
+    if (B.protos[i]) {
+      let bot = null;
+      try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9500 + i), B.picks[i]); } catch (_) { bot = null; }
+      if (bot) {
+        try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, B.picks[i]); } catch (_) {}
+        bot._riftGuard = true;
+        const pos = p.pos.clone();
+        pos.x += (Math.random() - 0.5) * 420; pos.y += (Math.random() - 0.5) * 260; pos.z += (Math.random() - 0.5) * 420;
+        bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
+        if (player && player.position) {
+          const spd = ((bot.chassis && bot.chassis.flightSpeed) || 300) * 0.9;
+          bot.velocity.copy(player.position).sub(pos).normalize().multiplyScalar(spd);
+          bot.combatTarget = player;
+          bot.aiTarget = player.position.clone();
+          bot.aiLastKnownPlayer = player.position.clone();
+          bot.aiLastKnownTime = (game && game.time) || 0;
+        }
+        game.entities.push(bot);
+        B.flight.push(bot);
+        if (B.flight.length === 1) {
+          try { if (window.Overlays) Overlays.banner('RIFT GUARDS', _HZ_GUARDS.N + ' hostiles are coming through the ring'); } catch (_) {}
+          try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+        }
+      }
+    }
+    return;
+  }
+  p._guardBuild = null;
+  if (!B.flight.length) return;
+  p._guardsUp = B.flight;
+  p._guardCool = _HZ_GUARDS.COOLDOWN;
 }
 function _hzPortalsFrame(dt) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;

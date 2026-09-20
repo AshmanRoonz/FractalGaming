@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.91";
+const LSS_BUILD = "46.92";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -33430,10 +33430,29 @@ function _hzCavernFrame(dt) {
 // stalling. One flight per approach: the flight re-arms only after every ship
 // is dead AND the player has backed off (plus a floor cooldown so hovering at
 // the trigger radius can't flap it). Knobs on window.__riftGuards.
-const _HZ_GUARDS = { N: 4, TRIGGER: 3200, REARM_DIST: 6500, COOLDOWN: 30 };
+// ⭐⭐⭐ (v46.92) `GAP` — SECONDS BETWEEN HULLS. Owner, with ?pbhud: "i found a hitch when the rift
+// guardians came out to fight in exhibition". The mark says it exactly: a **1,124.9 ms** frame whose
+// `made` line reads **175 programs, 136 geometries and 29 textures created in that ONE frame**, and
+// whose `cold` line reads **175 cold links**, with `getProgramParameter` (the blocking LINK_STATUS
+// query) caught at 21 / 34 / 40 ms. The named sections account for only ~200 ms of it (`hub:ripple`
+// 100, `hub:weather` 50, `hub:stream` 29, `hub:clip` 22) because the rest is not IN a section - it
+// is the linking, which happens at draw time inside renderFrame.
+// 175 is not a mystery number: the flight is N=4 hulls, `buildModelShipMesh` gives each one 14
+// meshes and 14 materials (v38.92), and each material forks a program per render target / light
+// count / depth pass - 4 x 14 x ~3. `_hzGuardsFrame` built ALL FOUR inside one `.then`, so every one
+// of those programs was created in one tick and first-drawn in the next.
+// The cure is the one this file already uses everywhere it hands the GPU a lot at once (the earth
+// publish budget, `_leSlicer`, the hub streamer): give it one at a time. `_lssPrimeTick` already
+// runs 2 ms a frame from gameLoop and drains links that have finished in parallel, so spacing the
+// hulls lets each one's programs be linked and primed before the next arrives.
+// GAP is in seconds; 0 restores the v35.15 all-at-once build.
+const _HZ_GUARDS = { N: 4, TRIGGER: 3200, REARM_DIST: 6500, COOLDOWN: 30, GAP: 0.14 };
 if (typeof window !== 'undefined') window.__riftGuards = _HZ_GUARDS;
 function _hzGuardsFrame(p, d, dt) {
   if (p._guardCool > 0) p._guardCool -= dt;
+  // (v46.92) A flight under construction: one hull per GAP seconds, built from this same per-frame
+  // call so it needs no timer of its own and dies with the portal like everything else here.
+  if (p._guardBuild) { try { _hzGuardsBuildStep(p, dt); } catch (_) { p._guardBuild = null; p._guardsPending = false; } return; }
   if (p._guardsUp) {
     let alive = 0;
     for (const b of p._guardsUp) { if (b && b.alive) alive++; }
@@ -33456,38 +33475,72 @@ function _hzGuardsFrame(p, d, dt) {
     if (!_HZ_CAVERN.portals || _HZ_CAVERN.portals.indexOf(p) < 0) return;
     if (game._cavern || (net && net.active) || game.state !== 'playing') return;
     if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
-    const flight = [];
-    for (let i = 0; i < picks.length; i++) {
-      if (!protos[i]) continue;
-      let bot = null;
-      try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9500 + i), picks[i]); } catch (_) { continue; }
-      try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, picks[i]); } catch (_) {}
-      bot._riftGuard = true;
-      // Materialize across the gate mouth (ring is ~760u across) and burst
-      // OUT of it toward the player — reads as flying through the portal.
-      const pos = p.pos.clone();
-      pos.x += (Math.random() - 0.5) * 420; pos.y += (Math.random() - 0.5) * 260; pos.z += (Math.random() - 0.5) * 420;
-      bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
-      if (player && player.position) {
-        const spd = ((bot.chassis && bot.chassis.flightSpeed) || 300) * 0.9;
-        bot.velocity.copy(player.position).sub(pos).normalize().multiplyScalar(spd);
-        // Prime the brain so the first frames already pursue: combatTarget is
-        // the ENTITY to fight, aiTarget is the Vector3 move waypoint (see
-        // findTarget — passing an entity here would just be overwritten).
-        bot.combatTarget = player;
-        bot.aiTarget = player.position.clone();
-        bot.aiLastKnownPlayer = player.position.clone();
-        bot.aiLastKnownTime = (game && game.time) || 0;
-      }
-      game.entities.push(bot);
-      flight.push(bot);
-    }
-    if (!flight.length) return;
-    p._guardsUp = flight;
-    p._guardCool = _HZ_GUARDS.COOLDOWN;
-    try { if (window.Overlays) Overlays.banner('RIFT GUARDS', flight.length + ' hostiles are coming through the ring'); } catch (_) {}
-    try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+    // (v46.92) Hand the job to the per-frame builder instead of making all four here. The banner and
+    // the stinger stay on the FIRST hull so the warning is never late.
+    p._guardBuild = { picks, protos, i: 0, flight: [], t: 0 };
+    p._guardsPending = false;
   }).catch(() => { p._guardsPending = false; });
+}
+// (v46.92) ONE HULL PER `GAP` SECONDS — see the note on _HZ_GUARDS.
+// ⚠ Re-checks the same stand-down conditions the `.then` does, EVERY step: a flight now spans
+//   several hundred milliseconds, so the world can move on (cavern entered, room went networked,
+//   round ended, portals rebuilt) part-way through building it. Half a flight is fine; half a flight
+//   in a world that no longer wants it is not.
+function _hzGuardsBuildStep(p, dt) {
+  const B = p._guardBuild;
+  if (!B) return;
+  const _stand = (!_HZ_CAVERN.portals || _HZ_CAVERN.portals.indexOf(p) < 0) ||
+                 game._cavern || (net && net.active) || game.state !== 'playing' ||
+                 (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight');
+  if (_stand) {
+    // Whatever is already flying stays — it is in game.entities and owns itself now.
+    p._guardBuild = null;
+    if (B.flight.length) { p._guardsUp = B.flight; p._guardCool = _HZ_GUARDS.COOLDOWN; }
+    return;
+  }
+  B.t -= dt;
+  if (B.t > 0) return;
+  B.t = (typeof _HZ_GUARDS.GAP === 'number' && _HZ_GUARDS.GAP > 0) ? _HZ_GUARDS.GAP : 0;
+  const i = B.i++;
+  if (i < B.picks.length) {
+    if (B.protos[i]) {
+      let bot = null;
+      try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9500 + i), B.picks[i]); } catch (_) { bot = null; }
+      if (bot) {
+        try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, B.picks[i]); } catch (_) {}
+        bot._riftGuard = true;
+        // Materialize across the gate mouth (ring is ~760u across) and burst
+        // OUT of it toward the player — reads as flying through the portal.
+        const pos = p.pos.clone();
+        pos.x += (Math.random() - 0.5) * 420; pos.y += (Math.random() - 0.5) * 260; pos.z += (Math.random() - 0.5) * 420;
+        bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
+        if (player && player.position) {
+          const spd = ((bot.chassis && bot.chassis.flightSpeed) || 300) * 0.9;
+          bot.velocity.copy(player.position).sub(pos).normalize().multiplyScalar(spd);
+          // Prime the brain so the first frames already pursue: combatTarget is
+          // the ENTITY to fight, aiTarget is the Vector3 move waypoint (see
+          // findTarget — passing an entity here would just be overwritten).
+          bot.combatTarget = player;
+          bot.aiTarget = player.position.clone();
+          bot.aiLastKnownPlayer = player.position.clone();
+          bot.aiLastKnownTime = (game && game.time) || 0;
+        }
+        game.entities.push(bot);
+        B.flight.push(bot);
+        // The warning rides the FIRST hull through the ring, not the last.
+        if (B.flight.length === 1) {
+          try { if (window.Overlays) Overlays.banner('RIFT GUARDS', _HZ_GUARDS.N + ' hostiles are coming through the ring'); } catch (_) {}
+          try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+        }
+      }
+    }
+    return;
+  }
+  // Done.
+  p._guardBuild = null;
+  if (!B.flight.length) return;
+  p._guardsUp = B.flight;
+  p._guardCool = _HZ_GUARDS.COOLDOWN;
 }
 function _hzPortalsFrame(dt) {
   if (typeof LSS === 'undefined' || LSS.MODE !== 'freeflight') return;
