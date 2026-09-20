@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.84";
+const LSS_BUILD = "46.85";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -2654,26 +2654,7 @@ async function startElimination() {
 }
 if (typeof window !== 'undefined') window.startElimination = startElimination;
 
-function _renderEliminationBotsBtn() {
-  const btn = document.getElementById('btn-ss-bots');
-  if (!btn) return;
-  const dock = document.getElementById('ss-bots-dock');
-  const _m = (typeof LSS !== 'undefined' && LSS.MODE) ? LSS.MODE : 'classic';
-  const show = (_m !== 'campaign' && _m !== 'freeflight' && _m !== 'endless');
-  btn.style.display = show ? '' : 'none';
-  if (dock) dock.style.display = show ? '' : 'none';
-  try {
-    const strip = document.getElementById('teammates-strip');
-    if (strip) strip.classList.toggle('ss-no-bots-btn', !show);
-  } catch (_) {}
-  if (!show) return;
-  const on = (game.eliminationBots !== false);
-  btn.textContent = (on ? '☑ ' : '☐ ') + 'ADD BOTS';
-  btn.classList.toggle('ss-bots-on', on);
-  btn.title = on
-    ? 'Bots fill the empty seats; a player who joins takes a bot\'s place. Click to turn them off.'
-    : 'No bots — only the pilots in your room. Click to add bots.';
-}
+function _renderEliminationBotsBtn() { /* no-op: the fleet cards own the opponents now */ }
 function _toggleEliminationBots() {
   _setEliminationBots(game.eliminationBots === false, true);
 }
@@ -5101,9 +5082,31 @@ function _lssSyncVrLaunchBtn() {
             :                  'Take the room in, in VR';
   } catch (_) {}
 }
+function _lssPickLocked() {
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    return !!game._ssConfirmed && game.state === 'select';
+  } catch (_) { return false; }
+}
+function _lssSyncPickLockUI() {
+  try {
+    const on = _lssPickLocked();
+    const sel = document.getElementById('ship-select');
+    if (sel) sel.classList.toggle('ss-pick-locked', on);
+    const p = document.getElementById('ship-car-prev');
+    const n = document.getElementById('ship-car-next');
+    if (p) p.disabled = on;
+    if (n) n.disabled = on;
+    const car = document.getElementById('ship-carousel');
+    if (car) car.title = on ? 'Locked in — un-tick CONFIRM to change your ship' : '';
+    const perks = document.getElementById('ship-preview-perks');
+    if (perks) perks.title = on ? 'Locked in — un-tick CONFIRM to change your pilot perk' : '';
+  } catch (_) {}
+}
 function _lssRefreshLaunchRow() {
   try {
     _lssSyncVrLaunchBtn();
+    _lssSyncPickLockUI();
     const c = document.getElementById('ship-preview-confirm');
     const l = document.getElementById('ship-preview-launch');
     const on = _lssConfirmed();
@@ -5149,7 +5152,7 @@ function _lssToggleConfirm() {
                                               ship: (net.myReady && game._ssKey) ? game._ssKey : null }); } catch (_) {}
       try { if (typeof updateLobbyPeers === 'function') updateLobbyPeers(); } catch (_) {}
     }
-    _lssRefreshLaunchRow();
+    _lssRefreshLaunchRow();   // (v46.85) which calls _lssSyncPickLockUI - ship + perk follow the tick
     try { if (typeof _syncMapButtonsDisabled === 'function') _syncMapButtonsDisabled(); } catch (_) {}
     try { if (typeof _lssRenderLobbyMode === 'function') _lssRenderLobbyMode(); } catch (_) {}
     try { if (typeof _lssRefreshInsaneSpeedBtn === 'function') _lssRefreshInsaneSpeedBtn(); } catch (_) {}
@@ -66612,6 +66615,7 @@ function buildShipSelect() {
   }
   const _carKeys = () => Array.from(track.children).map(c => c.dataset.key);
   const _carCycle = (dir) => {
+    if (_lssPickLocked()) return;
     const keys = _carKeys();
     if (!keys.length) return;
     let i = keys.indexOf(_previewedKey);
@@ -66623,13 +66627,18 @@ function buildShipSelect() {
   if (carPrev) carPrev.onclick = () => _carCycle(-1);
   if (carNext) carNext.onclick = () => _carCycle(1);
   startShipPreviewLoop();
-  const initialKey = (player && player.loadoutKey && LOADOUTS[player.loadoutKey])
-    ? player.loadoutKey : (_carKeys()[0] || null);
+  const initialKey = (_lssPickLocked() && _previewedKey && LOADOUTS[_previewedKey])
+    ? _previewedKey
+    : ((player && player.loadoutKey && LOADOUTS[player.loadoutKey])
+        ? player.loadoutKey : (_carKeys()[0] || null));
   if (initialKey) previewLoadout(initialKey);
 }
 
 function previewLoadout(key) {
   try { if (net && net._waitingForPeers) return; } catch (_) {}
+  try {
+    if (_previewedKey && key !== _previewedKey && _lssPickLocked()) { _lssSyncPickLockUI(); return; }
+  } catch (_) {}
   const loadout = LOADOUTS[key];
   if (!loadout) return;
   const ch = CHASSIS[loadout.chassis];
@@ -66785,6 +66794,7 @@ function _getStoredPerkId() {
 }
 function _setStoredPerkId(id) {
   if (!PILOT_PERKS[id]) return;
+  try { if (typeof _lssPickLocked === 'function' && _lssPickLocked()) return; } catch (_) {}
   try { localStorage.setItem('lss_perk_id', id); } catch (_) {}
   if (typeof player !== 'undefined') player.perkId = id;
   try { if (typeof _clearAllOutlineOptics === 'function') _clearAllOutlineOptics(); } catch (_) {}
@@ -66830,6 +66840,7 @@ function _renderPerkPicker() {
   }
   const cur = PILOT_PERKS[currentId];
   if (cur) desc.textContent = cur.desc;
+  try { if (typeof _lssSyncPickLockUI === 'function') _lssSyncPickLockUI(); } catch (_) {}
 }
 
 function _campSwarmCapFor(d) {
