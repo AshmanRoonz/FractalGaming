@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.85";
+const LSS_BUILD = "46.86";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -36540,9 +36540,16 @@ class Bot {
       moveDir.normalize();
     }
 
+    let _coreFace = null;
+    if (this._coreName === 'Mega Laser' && this._coreT > 0 &&
+        this._coreTarget && this._coreTarget.position) {
+      const _cf = this._coreFaceDir || (this._coreFaceDir = new THREE.Vector3());
+      _cf.subVectors(this._coreTarget.position, this.position);
+      if (_cf.lengthSq() > 1) { _cf.normalize(); _coreFace = _cf; }
+    }
     if (!_raceWaypoint && !_arenaVia) {
-      const _turnK = (this._underFireT > 0 && this._evadeT > 0) ? 5 : 2;
-      this.targetDir.lerp(moveDir, dt * _turnK);
+      const _turnK = (_coreFace || (this._underFireT > 0 && this._evadeT > 0)) ? 5 : 2;
+      this.targetDir.lerp(_coreFace || moveDir, dt * _turnK);
       this.targetDir.normalize();
     }
 
@@ -36744,11 +36751,21 @@ class Bot {
     const _tgtHullR = (tgt === player ? player.chassis.hullLength : tgt.chassis.hullLength) * 1.0;
     let used = true;
     if (ability.name === 'Laser') {
+      if (aim.dot(this.targetDir) <= 0.7) return;
       const range = 2500;
       const reach = Math.min(range, losDist);
-      const beamEnd = this._tempVec3c.copy(this.position).addScaledVector(aim, reach);
-      spawnTracer(this.position, beamEnd, 0xff2200, 1.6);
-      spawnTracer(this.position, beamEnd, 0xffaa44, 1.4);
+      const beamEnd = new THREE.Vector3().copy(this.position).addScaledVector(aim, reach);
+      const _lmn = this.mesh && this.mesh.userData && this.mesh.userData.muzzleNodes;
+      if (_lmn && _lmn.length) {
+        for (let _g = 0; _g < _lmn.length; _g++) {
+          const _lo = _lmn[_g].getWorldPosition(this._tempVec3d);
+          spawnTracer(_lo, beamEnd, 0xff2200, 1.6, _lmn[_g]);
+          spawnTracer(_lo, beamEnd, 0xffaa44, 1.4, _lmn[_g]);
+        }
+      } else {
+        spawnTracer(this.position, beamEnd, 0xff2200, 1.6);
+        spawnTracer(this.position, beamEnd, 0xffaa44, 1.4);
+      }
       if (dist > 0 && dist < range) {
         const closest = this._tempVec3d.copy(this.position).addScaledVector(aim, dist);
         if (closest.distanceTo(tgt.position) < _tgtHullR) {
@@ -37308,10 +37325,13 @@ class Bot {
           this._coreFxT -= dt;
           if (this._coreFxT <= 0) {
             this._coreFxT = 0.05;
-            const end = this._tempVec3c.copy(this.position).addScaledVector(aim, Math.min(los, 3000));
+            const _mn = this.mesh && this.mesh.userData && this.mesh.userData.muzzleNodes;
+            const _gn = (_mn && _mn.length) ? _mn[(this._coreFxSide = ((this._coreFxSide | 0) + 1)) % _mn.length] : null;
+            const end = new THREE.Vector3().copy(this.position).addScaledVector(aim, Math.min(los, 3000));
+            const from = _gn ? _gn.getWorldPosition(this._tempVec3d) : this.position;
             try {
-              spawnTracer(this.position, end, LSS.CLASS_COLORS.VORTEX, 2.2);
-              spawnTracer(this.position, end, 0xffffff, 1.0);
+              spawnTracer(from, end, LSS.CLASS_COLORS.VORTEX, 2.2, _gn, true);
+              spawnTracer(from, end, 0xffffff, 1.0, _gn, true);
             } catch (_) {}
           }
         }
@@ -48220,7 +48240,7 @@ function _vxTracerRetract(e, t) {
   if (t <= DELAY && !e._anchor) return;
   const tt = (t <= DELAY) ? 0 : (t - DELAY) / (1 - DELAY);
   const r = tt > 1 ? 1 : tt;
-  const retract = r * r * 0.94;
+  const retract = e._beamPin ? 0 : (r * r * 0.94);
   _VX_TRC_FROM.copy(e._retractFrom).lerp(e._retractTo, retract);
   const newLen = _VX_TRC_FROM.distanceTo(e._retractTo);
   _VX_TRC_MID.copy(_VX_TRC_FROM).add(e._retractTo).multiplyScalar(0.5);
@@ -50669,7 +50689,7 @@ const _PLAYER_LAUNCHER_FRACS = {
   ],
 };
 
-function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul, anchor) {
+function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul, anchor, beamPin) {
   widthScale = widthScale || 1.0;
   anchor = (anchor && anchor.isObject3D) ? anchor : null;
   const _fromRef = anchor ? fromVec.clone() : fromVec;
@@ -50694,6 +50714,7 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul, anchor) 
       _retractFrom: _fromRef,
       _retractTo:   toVec,
       _anchor: anchor,
+      _beamPin: !!beamPin,   // (v46.86)
     });
   }
 
@@ -50820,7 +50841,7 @@ function _spawnRailgunSpiral(from, to, color) {
 }
 
 const _cpTracerTmp = new THREE.Vector3();
-function spawnTracer(from, to, color, widthScale) {
+function spawnTracer(from, to, color, widthScale, anchor, beamPin) {
   color = color || 0xffff00;
   const wScale = (typeof widthScale === 'number' && widthScale > 0) ? widthScale : 1.0;
   if (typeof game !== 'undefined' && game && game._cockpit3dLive && !game.thirdPerson &&
@@ -50893,7 +50914,7 @@ function spawnTracer(from, to, color, widthScale) {
       }
     }
   }
-  _spawnSingleTracer(from, to, color, 1.0 * wScale, 0.4, _tpAnchor);
+  _spawnSingleTracer(from, to, color, 1.0 * wScale, 0.4, anchor || _tpAnchor, beamPin);
 }
 
 const _LIGHTNING_CYL_GEO = new THREE.CylinderGeometry(1, 1, 1, 8, 1, true);
@@ -52354,6 +52375,7 @@ function updateEffects(dt) {
     }
     else if (e.type === 'tracerTail') {
       if (e.initialOpacity == null) e.initialOpacity = e.mesh.material.opacity;
+      if (e._beamPin && e._anchor) { try { e._anchor.getWorldPosition(e._retractFrom); } catch (_) { e._anchor = null; } }
       _vxTracerRetract(e, t);
       const fade = 1 - t * t * t;
       const _tpf = (e._retractFrom && e._retractTo)

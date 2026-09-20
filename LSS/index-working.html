@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.85";
+const LSS_BUILD = "46.86";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -60767,12 +60767,37 @@ class Bot {
       moveDir.normalize();
     }
 
+    // ⭐⭐ (v46.86) CHANNELLING A BEAM MEANS POINTING AT WHAT YOU ARE BURNING. Owner: "it looked
+    // like the vortex ship wasn't pointed at the enemy when using mega laser... like it was coming
+    // out the side of his weapon."
+    // The main guns have ALWAYS been nose-locked - the fire gate a few hundred lines down is
+    // `dot > 0.7`, i.e. the target has to sit inside ~45 deg of the heading - but `_coreTick` fires
+    // the Mega Laser straight down `(target - position)` with no facing rule at all, and nothing in
+    // the steering knew a core was even running. So a Vortex in the middle of a dogfight break
+    // burned a four-second beam out of its own flank. A human cannot do that: the beam leaves the
+    // guns, so you fly at what you are killing. Now the bot does too - for the core's duration the
+    // HEADING IS THE AIM, at the dodge block's hard turn rate so it swings round instead of
+    // wallowing through the whole channel.
+    // (This was invisible until v46.86 moved the beam onto the gun markers. Out of the hull centre
+    //  it read as a beam through the middle of the ship; out of a barrel it reads as sideways.)
+    // ⚠ Under the SAME `!_raceWaypoint && !_arenaVia` guard as the normal steer, and folded into
+    //   the same single `targetDir` write: a race line and the arena router are navigation, and
+    //   they still own the heading. Two writers of one heading is how it starts fighting itself.
+    // ⚠ Its own scratch. `moveDir` is already one of _tempVec3a/b/c depending on which branch set
+    //   it, so borrowing any of the three here would quietly overwrite the thing being lerped TO.
+    let _coreFace = null;
+    if (this._coreName === 'Mega Laser' && this._coreT > 0 &&
+        this._coreTarget && this._coreTarget.position) {
+      const _cf = this._coreFaceDir || (this._coreFaceDir = new THREE.Vector3());
+      _cf.subVectors(this._coreTarget.position, this.position);
+      if (_cf.lengthSq() > 1) { _cf.normalize(); _coreFace = _cf; }
+    }
     if (!_raceWaypoint && !_arenaVia) {
       // (v45.42) Turn harder while dodging. The dt*2 lerp is a ~0.5 s heading change, which is
       // slower than the 0.45-0.7 s the juke is even held for - so without this the bot would only
       // ever get halfway into each break before the next one replaced it, and visibly wallow.
-      const _turnK = (this._underFireT > 0 && this._evadeT > 0) ? 5 : 2;
-      this.targetDir.lerp(moveDir, dt * _turnK);
+      const _turnK = (_coreFace || (this._underFireT > 0 && this._evadeT > 0)) ? 5 : 2;
+      this.targetDir.lerp(_coreFace || moveDir, dt * _turnK);
       this.targetDir.normalize();
     }
 
@@ -61157,14 +61182,39 @@ class Bot {
     const _tgtHullR = (tgt === player ? player.chassis.hullLength : tgt.chassis.hullLength) * 1.0;
     let used = true;
     if (ability.name === 'Laser') {
+      // ⭐ (v46.86) NOSE-LOCKED, like the main guns and like the human's. Same defect as the Mega
+      // Laser core one branch of the AI over: this is a forward hitscan BEAM out of gun1/gun2, and
+      // nothing checked where the hull was pointing, so it could flash out of the ship's side.
+      // `dot > 0.7` is the main weapon's own fire gate (~45 deg), reused verbatim rather than
+      // invented. A plain `return` is the right refusal here - _tryUseOffensive's range and LOS
+      // gates above return the same way, leaving the cooldown at zero, so the bot simply fires the
+      // moment it has come round rather than being sent away for half a second.
+      if (aim.dot(this.targetDir) <= 0.7) return;
       // Hitscan beam. Same color stack as the player's Laser and
       // damage scaled to the ability's listed dmg, with bot accuracy
       // multiplier so shots aren't pinpoint at long range.
       const range = 2500;
       const reach = Math.min(range, losDist);
-      const beamEnd = this._tempVec3c.copy(this.position).addScaledVector(aim, reach);
-      spawnTracer(this.position, beamEnd, 0xff2200, 1.6);
-      spawnTracer(this.position, beamEnd, 0xffaa44, 1.4);
+      // ⭐ (v46.86) OUT OF THE GUNS, same as the Mega Laser core - this is the identical defect on
+      // the same ship (both beams left the hull's bbox centre, 85 u from either marker). The
+      // player's Laser draws an arm from EACH gun converging on the aim point (`_vortexGunPair`),
+      // so this fires one pair per gun rather than alternating: it is a single shot, not a 20 Hz
+      // sustained beam, so four streaks once costs nothing and the V reads the way the human's does.
+      // No `beamPin` here - a one-shot bolt SHOULD retract, exactly like every other bot shot.
+      // ⚠ `beamEnd` is a real Vector3, not `_tempVec3c`: _spawnSingleTracer holds `toVec` by
+      //   reference for the streak's whole life (see the core's note).
+      const beamEnd = new THREE.Vector3().copy(this.position).addScaledVector(aim, reach);
+      const _lmn = this.mesh && this.mesh.userData && this.mesh.userData.muzzleNodes;
+      if (_lmn && _lmn.length) {
+        for (let _g = 0; _g < _lmn.length; _g++) {
+          const _lo = _lmn[_g].getWorldPosition(this._tempVec3d);
+          spawnTracer(_lo, beamEnd, 0xff2200, 1.6, _lmn[_g]);
+          spawnTracer(_lo, beamEnd, 0xffaa44, 1.4, _lmn[_g]);
+        }
+      } else {
+        spawnTracer(this.position, beamEnd, 0xff2200, 1.6);
+        spawnTracer(this.position, beamEnd, 0xffaa44, 1.4);
+      }
       // Hit if target is roughly along the beam axis. dist is the
       // pre-normalized length we saved above so this still works.
       if (dist > 0 && dist < range) {
@@ -61973,10 +62023,27 @@ class Bot {
           this._coreFxT -= dt;
           if (this._coreFxT <= 0) {
             this._coreFxT = 0.05;
-            const end = this._tempVec3c.copy(this.position).addScaledVector(aim, Math.min(los, 3000));
+            // ⭐⭐ (v46.86) OUT OF THE GUNS. Owner: "the bot vortex using the mega laser core... it
+            // looks like it disconnects from the ship, but it should be connected the same way the
+            // other guns are through the glb muzzle G1, and G2." Both tracers left `this.position`,
+            // the hull's bbox CENTRE - MEASURED on the Vortex hull: 85 u from either gun marker on a
+            // 100 u hull, i.e. most of the ship. The bot aims at its TARGET, not along its own nose,
+            // so a strafing Vortex fired the beam out of its own flank.
+            // ⚠ COSMETIC ONLY, deliberately: the LOS raycast and `_dealAbilityDamage` above still
+            //   run off `this.position`, which is the v32.21 rule for every muzzle move in the file.
+            // The gun ALTERNATES per tick rather than both firing: the streak layers live 0.10-0.42 s
+            // against a 0.05 s respawn, so both barrels always have a live beam, and the tracer count
+            // stays exactly where the 20 Hz budget below was set (four a tick would double it).
+            const _mn = this.mesh && this.mesh.userData && this.mesh.userData.muzzleNodes;
+            const _gn = (_mn && _mn.length) ? _mn[(this._coreFxSide = ((this._coreFxSide | 0) + 1)) % _mn.length] : null;
+            // ⚠ A REAL VECTOR FOR THE FAR END, not `_tempVec3c`. _spawnSingleTracer keeps `toVec` BY
+            //   REFERENCE as `_retractTo` and reads it every frame, so handing it a scratch this class
+            //   overwrites next tick drags every live streak's far end with it.
+            const end = new THREE.Vector3().copy(this.position).addScaledVector(aim, Math.min(los, 3000));
+            const from = _gn ? _gn.getWorldPosition(this._tempVec3d) : this.position;
             try {
-              spawnTracer(this.position, end, LSS.CLASS_COLORS.VORTEX, 2.2);
-              spawnTracer(this.position, end, 0xffffff, 1.0);
+              spawnTracer(from, end, LSS.CLASS_COLORS.VORTEX, 2.2, _gn, true);
+              spawnTracer(from, end, 0xffffff, 1.0, _gn, true);
             } catch (_) {}
           }
         }
@@ -76443,7 +76510,12 @@ function _vxTracerRetract(e, t) {
   if (t <= DELAY && !e._anchor) return;
   const tt = (t <= DELAY) ? 0 : (t - DELAY) / (1 - DELAY);
   const r = tt > 1 ? 1 : tt;
-  const retract = r * r * 0.94;
+  // (v46.86) …unless it is a pinned BEAM, which stays rooted at its gun and fades in place. The
+  // peel is right for a bolt leaving a barrel and wrong for a beam still coming out of one: at the
+  // Mega Laser core's 20 Hz respawn the shortest layer (the 0.10 s hot core) starts peeling 30 ms
+  // in, so for 20 ms of every 50 ms EVERY live layer was mid-retract and the whole beam lifted off
+  // the hull. MEASURED before the fix: worst drawn near-end 727 u from the nearest gun.
+  const retract = e._beamPin ? 0 : (r * r * 0.94);
   _VX_TRC_FROM.copy(e._retractFrom).lerp(e._retractTo, retract);
   const newLen = _VX_TRC_FROM.distanceTo(e._retractTo);
   _VX_TRC_MID.copy(_VX_TRC_FROM).add(e._retractTo).multiplyScalar(0.5);
@@ -80602,8 +80674,11 @@ const _PLAYER_LAUNCHER_FRACS = {
 // Internal helper: spawn one tracer streak along (fromVec -> toVec).
 // spawnTracer() routes player-side shots through two calls to this (one
 // from each arm) so the visible beams converge on the target as a triangle.
-function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul, anchor) {
+function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul, anchor, beamPin) {
   widthScale = widthScale || 1.0;
+  // ⭐ (v46.86) `beamPin`: this streak is a SUSTAINED BEAM, not a bolt - keep its near end on the
+  // anchor for its whole life instead of peeling it forward (see _vxTracerRetract). A beam that
+  // retracts is a beam that visibly leaves its own gun; the retract exists for shots in flight.
   // (v38.68) `anchor`: an Object3D (gun marker, engine orb) the near end stays glued to for the
   // streak's whole life; updateEffects re-reads its world position every frame into this one
   // shared vector (cloned here so the caller's scratch is never mutated). Owner: "the dash
@@ -80646,6 +80721,7 @@ function _spawnSingleTracer(fromVec, toVec, color, widthScale, tailMul, anchor) 
       _retractFrom: _fromRef,
       _retractTo:   toVec,
       _anchor: anchor,
+      _beamPin: !!beamPin,   // (v46.86)
     });
   }
 
@@ -80821,7 +80897,11 @@ function _spawnRailgunSpiral(from, to, color) {
 }
 
 const _cpTracerTmp = new THREE.Vector3();
-function spawnTracer(from, to, color, widthScale) {
+// (v46.86) `anchor` / `beamPin` are for callers that already know which GLB marker a shot leaves -
+// today that is the bot Vortex's Laser ability and its Mega Laser core. They reach only the
+// bot / far-field arm at the bottom: the two player arms above resolve their own origins and
+// return before this, so nothing a player fires is affected by passing them.
+function spawnTracer(from, to, color, widthScale, anchor, beamPin) {
   color = color || 0xffff00;
   // Per-call width multiplier so rapid-fire weapons (chaingun, Predator
   // Cannon) can pass a smaller value (~0.55) and stop their long-lived haze
@@ -80954,7 +81034,9 @@ function spawnTracer(from, to, color, widthScale) {
       }
     }
   }
-  _spawnSingleTracer(from, to, color, 1.0 * wScale, 0.4, _tpAnchor);
+  // (v46.86) a caller-named anchor wins over the sniffed one - `_tpAnchor` only ever finds one of
+  // OUR markers, so the two can never both be set, but the precedence should still be stated.
+  _spawnSingleTracer(from, to, color, 1.0 * wScale, 0.4, anchor || _tpAnchor, beamPin);
 }
 
 // Lightning bolt: jagged line from A to B using a single merged BufferGeometry (1 draw call)
@@ -83111,6 +83193,16 @@ function updateEffects(dt) {
     // curve is clean single-shot (vs compounding per-frame multiply).
     else if (e.type === 'tracerTail') {
       if (e.initialOpacity == null) e.initialOpacity = e.mesh.material.opacity;
+      // (v46.86) …and a PINNED BEAM's haze follows its anchor too. v38.68 taught the `tracer` arm
+      // above to re-read the live marker but not this one, so the two HAZE tubes - the widest
+      // layers of the five, radius 7 and 9 - stayed at the spawn point while the core and beam
+      // rode the gun; on a beam from a ship doing 320 u/s that is up to 130 u of glow left hanging
+      // off the hull over the outer tube's 0.42 s.
+      // ⚠ GATED ON `_beamPin`, NOT ON `_anchor`. An anchored BOLT's tail is supposed to be left
+      //   behind - that is the trail - and the anchor list includes the dash speed lines off the
+      //   engine orbs, where trailing IS the effect. Only a sustained beam wants its haze to stay
+      //   rooted, so only a sustained beam gets this.
+      if (e._beamPin && e._anchor) { try { e._anchor.getWorldPosition(e._retractFrom); } catch (_) { e._anchor = null; } }
       // Retract back end first so the haze stops painting
       // a noodle behind a strafing player ; opacity fade and swell layer
       // on top of the geometrically-shrinking cylinder.
