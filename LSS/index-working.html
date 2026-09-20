@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.95";
+const LSS_BUILD = "46.97";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -33616,15 +33616,30 @@ function _hzPortalsFrame(dt) {
   // owner's rule is that the rings themselves are disabled for the duration, so nobody flies off
   // into a cavern mid-match.
   if (game._cyber && game._cyber.armed) { _hzPortalsDispose(); return; }
-  if (game.state !== 'playing') return;
-  // Hub re-entry after a cavern: put the ship back where it left.
+  // ⭐⭐⭐ (v46.96) PUT THE SHIP BACK BEFORE ANYONE CAN SEE IT SOMEWHERE ELSE. Owner: "when i warp
+  // back from finishing the rift, it first puts me at the original spawn for a second, then it puts
+  // me at the portal i came out of."
+  // This block used to sit BELOW the `game.state !== 'playing'` gate one line down, so the sequence
+  // was: the return rebuilds the hub -> `respawnPlayer` drops you at the generic hub spawn -> the
+  // round runs roundEnd -> warmup -> playing -> and only THEN did this fire and move you to the
+  // ring. The cover is long gone by 'playing', so the whole detour is on screen. It is the v45.x
+  // "nobody should ever see themselves be moved" rule, missed on this one path.
+  // Moved ABOVE the gate: the terrain checks just above are the real precondition (the hub has to
+  // exist before a hub coordinate means anything), and they are satisfied during the swap, while the
+  // cover is still up.
+  // ⚠ AND IT LATCHES. `respawnPlayer` consumes `_spawnPick` AHEAD of drawing a fresh point (v45.04),
+  //   so without this the round-start respawn would draw a hub spawn and move you a SECOND time,
+  //   right after this put you back. v46.91 clears that latch on every level build, which is why it
+  //   is set here - after the rebuild - and not in `_hzReturnToHub` before it.
   if (_HZ_CAVERN._returnPos && player && player.position) {
     player.position.copy(_HZ_CAVERN._returnPos);
     player.velocity.set(0, 0, 0);
     if (player.mesh) player.mesh.position.copy(_HZ_CAVERN._returnPos);
+    try { if (typeof _spawnPickSet === 'function') _spawnPickSet(player.position); } catch (_) {}
     _HZ_CAVERN._returnPos = null;
     try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}
   }
+  if (game.state !== 'playing') return;
   if (!_HZ_CAVERN.portals) {
     _HZ_CAVERN.portals = [];
     const Z = _HUB_ZONES, n = Z.sectors.length, SEC = (Math.PI * 2) / n;
@@ -88619,9 +88634,48 @@ function _lssStartSpectatorCinematic() {
   // doesn't overflow on small spawns.
   const NS = myShips.length;
   const SPACING = Math.min(220, Math.max(80, (roomR * 1.4) / Math.max(1, NS)));
-  const lineCenterX = cx + fwdX * roomR * 0.10;  
-  const lineCenterZ = cz + fwdZ * roomR * 0.10;
-  const lineY = cy + 30;
+  let lineCenterX = cx + fwdX * roomR * 0.10;  
+  let lineCenterZ = cz + fwdZ * roomR * 0.10;
+  let lineY = cy + 30;
+  // ⭐⭐⭐ (v46.97) THE LINEUP IS CENTRED ON THE PLAYER'S ACTUAL SPAWN, NOT THE ROOM'S CENTRE.
+  // Owner: "when you are in the cinematic, and then when you start, it's two locations, and your
+  // ship actually slides from point a to point b" - and they were right that it is the same family
+  // as the rift-return bug, though the mechanism is the opposite way round.
+  // NOTHING WAS BROKEN IN THE BLEND. The arrival blend flies our own ship from its lineup slot to
+  // `player.position` over the last 1.4 s ON PURPOSE (v36.76: "our own ship's lineup mesh flies home
+  // to its restored pose on the same ease, so the dive visibly lands ON our ship"), and it is a true
+  // parametric lerp - the meshes are re-pinned to their slots at the top of every cinematic frame,
+  // so both camera and ship really do share the ease. It was doing exactly what it was written to do.
+  // THE TWO LOCATIONS WERE THE BUG. The slot came from the spawn ROOM'S CENTRE while the ship's real
+  // spawn is `getValidSpawnPoint` -> a scattered `corridorPoints` entry somewhere in that room, so
+  // the blend always had a room-radius of travel to cover and the ship visibly flew it. Make the two
+  // the same point and the blend has nothing to move: the ship sits still, and the camera dive that
+  // was always the point of the shot is all that is left.
+  // The player is slot 0 (`sideIdx = 0` -> `off = 0`), so the slot IS the line centre - which is also
+  // why this is the whole fix: the camera framing below (orbitCX/CZ, camPos, camTarget, camHeight)
+  // is all derived from these three, so it follows the lineup instead of having to be re-aimed.
+  // ⚠ ONLY WHEN THE PLAYER IS ACTUALLY IN THE LINEUP. `_moveFront` puts them at index 0 if they
+  //   are in it at all; a spectator / bot-only flight has no ship to centre on and keeps the room.
+  // ⚠ The teammates now spread about the player's spawn rather than the room's middle, so a wide
+  //   line off to one side of a small room can clip a far teammate into a wall for the length of the
+  //   flight. That is cosmetic and it is the better trade: the lineup exists to be looked at, every
+  //   ship is restored to its real spawn at the cut, and NOTHING collides during warmup - whereas the
+  //   player's own ship sliding is the thing the owner actually reported.
+  try {
+    if (myShips[0] && myShips[0].isPlayer && player && player.position) {
+      // The distance this USED to be is the distance the ship used to slide - logged because it is
+      // the one number that says whether this is working, and it cannot be seen any other way once
+      // it is zero. Expect `slide 0`; anything else means the spawn moved after the lineup was sited.
+      try {
+        console.log('[cinematic] lineup on spawn | slide was',
+          Math.round(Math.hypot(lineCenterX - player.position.x, lineY - player.position.y,
+                                lineCenterZ - player.position.z)), 'u');
+      } catch (_) {}
+      lineCenterX = player.position.x;
+      lineY       = player.position.y;
+      lineCenterZ = player.position.z;
+    }
+  } catch (_) {}
 
   _cinematic.ships = [];
   // Quaternion : rotate the model so its "nose forward" (mesh -Z, after

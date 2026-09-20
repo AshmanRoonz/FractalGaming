@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.95";
+const LSS_BUILD = "46.97";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -18339,14 +18339,15 @@ function _hzPortalsFrame(dt) {
   if (!T || !T.ON || T.biome !== 'mossy') return;
   if (net && net.active) { _hzPortalsDispose(); return; }   // solo-only, like the rift
   if (game._cyber && game._cyber.armed) { _hzPortalsDispose(); return; }
-  if (game.state !== 'playing') return;
   if (_HZ_CAVERN._returnPos && player && player.position) {
     player.position.copy(_HZ_CAVERN._returnPos);
     player.velocity.set(0, 0, 0);
     if (player.mesh) player.mesh.position.copy(_HZ_CAVERN._returnPos);
+    try { if (typeof _spawnPickSet === 'function') _spawnPickSet(player.position); } catch (_) {}
     _HZ_CAVERN._returnPos = null;
     try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {}
   }
+  if (game.state !== 'playing') return;
   if (!_HZ_CAVERN.portals) {
     _HZ_CAVERN.portals = [];
     const Z = _HUB_ZONES, n = Z.sectors.length, SEC = (Math.PI * 2) / n;
@@ -55917,9 +55918,21 @@ function _lssStartSpectatorCinematic() {
 
   const NS = myShips.length;
   const SPACING = Math.min(220, Math.max(80, (roomR * 1.4) / Math.max(1, NS)));
-  const lineCenterX = cx + fwdX * roomR * 0.10;  
-  const lineCenterZ = cz + fwdZ * roomR * 0.10;
-  const lineY = cy + 30;
+  let lineCenterX = cx + fwdX * roomR * 0.10;  
+  let lineCenterZ = cz + fwdZ * roomR * 0.10;
+  let lineY = cy + 30;
+  try {
+    if (myShips[0] && myShips[0].isPlayer && player && player.position) {
+      try {
+        console.log('[cinematic] lineup on spawn | slide was',
+          Math.round(Math.hypot(lineCenterX - player.position.x, lineY - player.position.y,
+                                lineCenterZ - player.position.z)), 'u');
+      } catch (_) {}
+      lineCenterX = player.position.x;
+      lineY       = player.position.y;
+      lineCenterZ = player.position.z;
+    }
+  } catch (_) {}
 
   _cinematic.ships = [];
   const _qFaceForward = new THREE.Quaternion().setFromUnitVectors(
