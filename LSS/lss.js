@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.78";
+const LSS_BUILD = "46.79";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -52391,6 +52391,7 @@ function _canPrimeAbility(slot, ability) {
 
 function abilityInputPress(slot) {
   if (!player || !player.abilities || !player.abilities[slot]) return;
+  if (_abilitiesBlockedByUi() || _abilitySwapLocked()) return;   // (v46.79)
   const ability = player.abilities[slot];
   if (player.loadoutKey === 'PUNCTURE' && ability.name === 'Cluster Missile' && player.shipState !== 'dead') {
     try { if (_punctureDetonateClusters() > 0) return; } catch (_) {}
@@ -52408,6 +52409,12 @@ function abilityInputPress(slot) {
 
 function abilityInputRelease(slot) {
   if (!player) return;
+  if (_abilitiesBlockedByUi() || _abilitySwapLocked()) {   // (v46.79) drop the prime instead of firing it
+    if (player._abilityPrimes) delete player._abilityPrimes[slot];
+    if (player._abilityPrime && player._abilityPrime.slot === slot) player._abilityPrime = null;
+    try { cancelAbilityOverlayPrime(); } catch (_) {}
+    return;
+  }
   const _pm = player._abilityPrimes && player._abilityPrimes[slot];
   if (!_pm) return;                                   // (v43.11) this slot was never primed
   delete player._abilityPrimes[slot];
@@ -52981,6 +52988,13 @@ function commitLoadout(key) {
   player.abilities = loadout.abilities;
   player.abilityCooldowns = [0, 0, 0];
   player.abilityActive = [false, false, false];
+  player._abilityLockT = (typeof game !== 'undefined' && game && typeof game.time === 'number') ? game.time : 0;
+  player._abilityPrime = null; player._abilityPrimes = {};
+  try {
+    const _kb = (typeof input !== 'undefined' && input) ? input.kbBindings : null;
+    if (_kb && input.keys) { for (const _a of ['ability0', 'ability1', 'ability2']) if (_kb[_a]) input.keys[_kb[_a]] = false; }
+    if (typeof input !== 'undefined' && input) { input.gpAbility0Prev = input.gpAbility0; input.gpAbility1Prev = input.gpAbility1; input.gpAbility2Prev = input.gpAbility2; }
+  } catch (_) {}
   player.abilityTimers = [0, 0, 0];
   player.coreReady = false;
   player.coreActive = false;
@@ -56754,8 +56768,27 @@ function getPlayerForwardOrigin(forward, distance, out) {
   return target.copy(player.position).addScaledVector(forward, distance || 0);
 }
 
+function _abilitiesBlockedByUi() {
+  try {
+    if (typeof settingsOpen !== 'undefined' && settingsOpen) return true;
+    if (typeof game !== 'undefined' && game && (game.state === 'select' || game.state === 'matchEnd')) return true;
+    const sel = document.getElementById('ship-select');
+    if (sel && sel.classList.contains('active')) return true;
+    const lob = document.getElementById('lobby');
+    if (lob && lob.style.display !== 'none' && lob.offsetParent !== null) return true;
+  } catch (_) {}
+  return false;
+}
+function _abilitySwapLocked() {
+  try {
+    if (!player || player._abilityLockT == null) return false;
+    if (typeof game === 'undefined' || !game || typeof game.time !== 'number') return false;
+    return (game.time - player._abilityLockT) < 0.6;
+  } catch (_) { return false; }
+}
 function activateAbility(slot) {
   if (player.shipState === 'dead' || !player.abilities[slot]) return;
+  if (_abilitiesBlockedByUi() || _abilitySwapLocked()) return;   // (v46.79)
   if (game.state === 'warmup') return;
 
   const ability = player.abilities[slot];

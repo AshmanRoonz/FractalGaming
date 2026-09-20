@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.78";
+const LSS_BUILD = "46.79";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -82989,6 +82989,7 @@ function _canPrimeAbility(slot, ability) {
 // or to the existing activateAbility tap-fire path for everything else.
 function abilityInputPress(slot) {
   if (!player || !player.abilities || !player.abilities[slot]) return;
+  if (_abilitiesBlockedByUi() || _abilitySwapLocked()) return;   // (v46.79)
   const ability = player.abilities[slot];
   // ⭐ (v44.47) THE SECOND TAP IS ON THE ABILITY KEY. Owner: "the puncture cluster missile detonate
   // is the wrong button, it needs to be the same button that launches it". v44.17 put the airburst
@@ -83036,6 +83037,12 @@ function abilityInputPress(slot) {
 // while activateAbility runs the gameplay effect.
 function abilityInputRelease(slot) {
   if (!player) return;
+  if (_abilitiesBlockedByUi() || _abilitySwapLocked()) {   // (v46.79) drop the prime instead of firing it
+    if (player._abilityPrimes) delete player._abilityPrimes[slot];
+    if (player._abilityPrime && player._abilityPrime.slot === slot) player._abilityPrime = null;
+    try { cancelAbilityOverlayPrime(); } catch (_) {}
+    return;
+  }
   const _pm = player._abilityPrimes && player._abilityPrimes[slot];
   if (!_pm) return;                                   // (v43.11) this slot was never primed
   delete player._abilityPrimes[slot];
@@ -83811,6 +83818,14 @@ function commitLoadout(key) {
   player.abilities = loadout.abilities;
   player.abilityCooldowns = [0, 0, 0];
   player.abilityActive = [false, false, false];
+  // (v46.79) see activateAbility: a ship change owns the ability inputs for a moment
+  player._abilityLockT = (typeof game !== 'undefined' && game && typeof game.time === 'number') ? game.time : 0;
+  player._abilityPrime = null; player._abilityPrimes = {};
+  try {
+    const _kb = (typeof input !== 'undefined' && input) ? input.kbBindings : null;
+    if (_kb && input.keys) { for (const _a of ['ability0', 'ability1', 'ability2']) if (_kb[_a]) input.keys[_kb[_a]] = false; }
+    if (typeof input !== 'undefined' && input) { input.gpAbility0Prev = input.gpAbility0; input.gpAbility1Prev = input.gpAbility1; input.gpAbility2Prev = input.gpAbility2; }
+  } catch (_) {}
   player.abilityTimers = [0, 0, 0];
   player.coreReady = false;
   player.coreActive = false;
@@ -90044,8 +90059,39 @@ function getPlayerForwardOrigin(forward, distance, out) {
   return target.copy(player.position).addScaledVector(forward, distance || 0);
 }
 
+// (v46.79) Owner: "sometimes i get a weird notification like 'cluster missile
+// active' when i change ships... they shouldn't be there, ever". That banner is
+// Overlays.abilityFlash, and the only road to it is activateAbility, which was
+// gated on dead / warmup / cooldown and nothing else: not on the ship picker,
+// the lobby or settings being up (the keyboard dispatcher has no menu test; the
+// gamepad one does), and not on a ship change in progress. Traced live with the
+// banner wrapped to log its stack: every stray flash was an ability press or a
+// hold-prime release arriving around the swap. So: no activation while a menu
+// owns the input, and none for 0.6 s of game time after a loadout commit
+// (commitLoadout also drops hold primes, releases the bound keys and re-syncs
+// the gamepad edge state so a button held across the swap cannot fire the new
+// ship's slot on release).
+function _abilitiesBlockedByUi() {
+  try {
+    if (typeof settingsOpen !== 'undefined' && settingsOpen) return true;
+    if (typeof game !== 'undefined' && game && (game.state === 'select' || game.state === 'matchEnd')) return true;
+    const sel = document.getElementById('ship-select');
+    if (sel && sel.classList.contains('active')) return true;
+    const lob = document.getElementById('lobby');
+    if (lob && lob.style.display !== 'none' && lob.offsetParent !== null) return true;
+  } catch (_) {}
+  return false;
+}
+function _abilitySwapLocked() {
+  try {
+    if (!player || player._abilityLockT == null) return false;
+    if (typeof game === 'undefined' || !game || typeof game.time !== 'number') return false;
+    return (game.time - player._abilityLockT) < 0.6;
+  } catch (_) { return false; }
+}
 function activateAbility(slot) {
   if (player.shipState === 'dead' || !player.abilities[slot]) return;
+  if (_abilitiesBlockedByUi() || _abilitySwapLocked()) return;   // (v46.79)
   // No abilities during the pre-round warmup countdown
   if (game.state === 'warmup') return;
 
