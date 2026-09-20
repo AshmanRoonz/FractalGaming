@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.89";
+const LSS_BUILD = "46.91";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -7706,7 +7706,9 @@ function handleNetEvent(evt, fromPeerId) {
     const _isPeer = net.peers.get(fromPeerId);
     const _isNp = _isPeer && _isPeer.networkPlayer;
     if (_isNp && _isNp.mesh && typeof _innerSparkRipple === 'function') {
-      try { _innerSparkRipple(_isNp); } catch (_) {}
+      try {
+        _innerSparkRipple(_isNp, evt.core ? _isrCoreOpts() : null);
+      } catch (_) {}
     }
     return;
   }
@@ -58938,6 +58940,15 @@ function executeAbility(slot, ability) {
 
   else if (ability.type === 'utility') {
     if (ability.name === 'Teleport') {
+      let _tpRooted = false;
+      try {
+        _tpRooted = (game.playerRootTimer > 0);
+        if (!_tpRooted && game.worldEffects) {
+          for (const _te of game.worldEffects) {
+            if (_te && _te.type === 'tether' && _te.rootTarget === player) { _tpRooted = true; break; }
+          }
+        }
+      } catch (_) {}
       try {
         game.playerRootTimer = 0;
         if (game.worldEffects) {
@@ -58953,8 +58964,9 @@ function executeAbility(slot, ability) {
       player.phaseInvuln = true;
       try { playSound('phase_dash'); } catch (_) {}
       const speed = player.velocity ? player.velocity.length() : 0;
-      if (speed > 5) {
-        let moveDir = player.velocity.clone().normalize();
+      if (speed > 5 || _tpRooted) {
+        let moveDir = (speed > 5) ? player.velocity.clone().normalize()
+                                  : forward.clone().normalize();
         player.phaseInvulnTimer = 0.3;
         const dashStart = player.position.clone();
         const _tpReach = (typeof _aegisUpFor === 'function' && _aegisUpFor(17)) ? 640 : 400;
@@ -59499,6 +59511,8 @@ function activateCore() {
   }
   else if (coreName === 'AI Nanobots') {
     try { playSound('upgrade_core'); } catch (_) {}
+    try { _innerSparkRipple(player, _isrCoreOpts()); } catch (_) {}
+    try { if (net.active && net.sendEvent) net.sendEvent({ type: 'inner_spark', core: 1 }); } catch (_) {}
     if (player.syphonTier >= 3) {
       player.shield = player.maxShield;
       player.shieldRegenDelay = 0;
@@ -60380,7 +60394,17 @@ function _releaseVortexShieldBurst(playBurstSound) {
 
 const _ISR_LIVE = [];
 const _ISR_DUR = 1.0;
-function _innerSparkRipple(owner) {
+const _ISR_CORE = { dur: 1.7, gain: 1.25 };
+function _isrCoreOpts() {
+  try {
+    const K = (typeof window !== 'undefined') ? window.__syphonCoreFx : null;
+    return {
+      dur:  (K && typeof K.dur === 'number' && K.dur > 0) ? K.dur : _ISR_CORE.dur,
+      gain: (K && typeof K.gain === 'number' && K.gain > 0) ? K.gain : _ISR_CORE.gain,
+    };
+  } catch (_) { return { dur: _ISR_CORE.dur, gain: _ISR_CORE.gain }; }
+}
+function _innerSparkRipple(owner, opts) {
   try {
     if (!owner || !owner.mesh || typeof _makeHullHugShield !== 'function') return;
     for (let i = _ISR_LIVE.length - 1; i >= 0; i--) {
@@ -60390,7 +60414,12 @@ function _innerSparkRipple(owner) {
     if (!shell) return;
     shell.scale.set(1.035, 1.035, 1.035);   // tighter than the shield: this is the hull glowing, not a bubble
     owner.mesh.add(shell);
-    _ISR_LIVE.push({ owner, shell, mat: shell.userData && shell.userData._shieldMat, t: 0 });
+    const _o = opts || {};
+    _ISR_LIVE.push({
+      owner, shell, mat: shell.userData && shell.userData._shieldMat, t: 0,
+      dur:  (typeof _o.dur === 'number' && _o.dur > 0) ? _o.dur : _ISR_DUR,
+      gain: (typeof _o.gain === 'number' && _o.gain > 0) ? _o.gain : 1,
+    });
   } catch (_) {}
 }
 function _innerSparkEnd(e) {
@@ -60404,14 +60433,16 @@ function _innerSparkTick(dt) {
   for (let i = _ISR_LIVE.length - 1; i >= 0; i--) {
     const e = _ISR_LIVE[i];
     e.t += dt;
-    const k = e.t / _ISR_DUR;
+    const k = e.t / (e.dur || _ISR_DUR);
     if (k >= 1 || !e.owner || !e.owner.mesh || !e.shell.parent) {
       _innerSparkEnd(e); _ISR_LIVE.splice(i, 1); continue;
     }
     const u = e.mat && e.mat.uniforms;
     if (u) {
       if (u.uTime) u.uTime.value = (typeof game !== 'undefined' && game.time) ? game.time : e.t;
-      if (e.mat.opacity !== undefined) e.mat.opacity = Math.sin(Math.min(1, k) * Math.PI) * 0.9;
+      if (e.mat.opacity !== undefined) {
+        e.mat.opacity = Math.min(1, Math.sin(Math.min(1, k) * Math.PI) * 0.9 * (e.gain || 1));
+      }
       const hull = (e.owner.chassis && e.owner.chassis.hullLength) || 90;
       if (!e._fwd) { e._fwd = new THREE.Vector3(); e._at = new THREE.Vector3(); }
       const q = e.owner.targetQuat || (e.owner.mesh && e.owner.mesh.quaternion);
@@ -60419,8 +60450,8 @@ function _innerSparkTick(dt) {
       e._at.copy(e.owner.position || e.owner.mesh.position)
            .addScaledVector(e._fwd, hull * (0.5 - k));
       if (typeof flashFXMaterialHit === 'function' && (e._hitT = (e._hitT || 0) - dt) <= 0) {
-        e._hitT = 0.12;
-        try { flashFXMaterialHit(e.mat, e._at, 0x66f0ff, hull * 0.55); } catch (_) {}
+        e._hitT = 0.12 * ((e.dur || _ISR_DUR) / _ISR_DUR);
+        try { flashFXMaterialHit(e.mat, e._at, 0x66f0ff, hull * 0.55 * (e.gain || 1)); } catch (_) {}
       }
     }
   }
@@ -77432,6 +77463,7 @@ function buildRoomGraphLevel(level) {
   try { if (typeof _bendReset === 'function') _bendReset(); } catch (_) {}
   game._swPalXf = null;
   game._buildSeq = (game._buildSeq | 0) + 1;
+  try { if (typeof _spawnPickSet === 'function') _spawnPickSet(null); } catch (_) {}
   try {
     if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps._refineInterval) {
       clearInterval(_lssGmaps._refineInterval);
@@ -93714,6 +93746,10 @@ async function _lssGmapsLoadModule() {
 }
 
 async function _lssGmapsBuildLevel(level) {
+  const _gmSeq = (typeof game !== 'undefined' && game) ? (game._buildSeq | 0) : 0;
+  const _gmStale = () => {
+    try { return (game._buildSeq | 0) !== _gmSeq; } catch (_) { return false; }
+  };
   for (const m of game.mapMeshes) { if (m.parent) scene.remove(m); }
   game.mapMeshes = [];
   game.levelBoxes = [];
@@ -93940,6 +93976,11 @@ async function _lssGmapsBuildLevel(level) {
         new Promise((r) => setTimeout(r, (typeof level.loadTimeoutMs === 'number') ? level.loadTimeoutMs : 25000))
       ]);
     } catch (_) {}
+    if (_gmStale()) {
+      console.warn('[lss-gmaps] build is stale (seq ' + _gmSeq + ' -> ' + (game._buildSeq | 0) +
+                   ') - abandoning spawn placement for ' + (level && level.name));
+      return;
+    }
     const _asltGmaps = (typeof LSS !== 'undefined' && LSS.MODE === 'assault');
     try {
       if (typeof tiles.spawnPoints === 'function') {

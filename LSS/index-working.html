@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.89";
+const LSS_BUILD = "46.91";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -18299,7 +18299,11 @@ function handleNetEvent(evt, fromPeerId) {
     const _isPeer = net.peers.get(fromPeerId);
     const _isNp = _isPeer && _isPeer.networkPlayer;
     if (_isNp && _isNp.mesh && typeof _innerSparkRipple === 'function') {
-      try { _innerSparkRipple(_isNp); } catch (_) {}
+      // (v46.90) `core: 1` = the Syphon core's bigger wash; absent = the ability's. One flag rather
+      // than the numbers themselves, so the two stay tuned in ONE place (see the core's call site).
+      try {
+        _innerSparkRipple(_isNp, evt.core ? _isrCoreOpts() : null);
+      } catch (_) {}
     }
     return;
   }
@@ -93287,6 +93291,26 @@ function executeAbility(slot, ability) {
       // The trap is RE-ARMED rather than consumed (its catch is gated on
       // !eff.triggered): the 400-unit hop normally carries you clear, but fly
       // back in and it can take you again, so a Puncture's trap isn't wasted.
+      // ⭐⭐⭐ (v46.90) ...AND IT HAS TO CARRY YOU CLEAR, WHICH IT DID NOT. Owner: "slayer should be
+      // able to teleport out of a tether."
+      // v35.63 (below) clears the root, so the ability always LOOKED like it worked. But the hop
+      // itself is gated on `speed > 5`, and a tether zeroes your velocity every frame - both at the
+      // trap (`eff.rootTarget.velocity.set(0,0,0)`) and in updatePlayerMovement, which refuses to
+      // move you at all while `playerRootTimer > 0`. So a tethered Slayer always measured speed 0,
+      // fell into the STATIONARY arm, and "phased in place": root cleared, ship not moved. And the
+      // trap is deliberately RE-ARMED rather than consumed, so it caught them again on the spot.
+      // The escape ability could not escape the one thing it exists to escape.
+      // `_tpRooted` is captured HERE, before the clear below erases the evidence, and the hop reads
+      // the ship's FACING instead of its (zeroed) velocity.
+      let _tpRooted = false;
+      try {
+        _tpRooted = (game.playerRootTimer > 0);
+        if (!_tpRooted && game.worldEffects) {
+          for (const _te of game.worldEffects) {
+            if (_te && _te.type === 'tether' && _te.rootTarget === player) { _tpRooted = true; break; }
+          }
+        }
+      } catch (_) {}
       try {
         game.playerRootTimer = 0;
         if (game.worldEffects) {
@@ -93303,9 +93327,14 @@ function executeAbility(slot, ability) {
       // Phasing whoosh + sub doppler for the reality-warp.
       try { playSound('phase_dash'); } catch (_) {}
       const speed = player.velocity ? player.velocity.length() : 0;
-      if (speed > 5) {
-        // Dash in movement direction
-        let moveDir = player.velocity.clone().normalize();
+      // (v46.90) `|| _tpRooted`: a rooted ship has no velocity to take a heading from, so the blink
+      // would otherwise be refused exactly when it is needed. Everything past this point - the
+      // ground clamp, the three retries, the zero-distance refund, the stun sweep - is unchanged
+      // and now applies to the escape too.
+      if (speed > 5 || _tpRooted) {
+        // Dash in movement direction - or, breaking a tether, along the nose.
+        let moveDir = (speed > 5) ? player.velocity.clone().normalize()
+                                  : forward.clone().normalize();
         player.phaseInvulnTimer = 0.3;
         const dashStart = player.position.clone();
         // (v35.70) STOP SHORT OF THE GROUND. This was an unconditional 400-unit
@@ -94062,6 +94091,15 @@ function activateCore() {
   else if (coreName === 'AI Nanobots') {
     // Three rising chimes + downbeat = "tier acquired."
     try { playSound('upgrade_core'); } catch (_) {}
+    // ⭐ (v46.90) THE CORE LOOKS LIKE INNER SPARK, LOUDER. Owner: "syphon's core should do similar
+    // animation as inner spark, just brighter and a bit longer". Same effect, same ship, bigger
+    // numbers - which is right twice over: the core IS the ability's big brother (Inner Spark resets
+    // cooldowns, the maxed core resets cooldowns AND shield AND dashes), and one effect with a knob
+    // cannot drift away from itself the way a copied one does.
+    // ⚠ BEFORE the tier switch below, not inside it: a tier-1/2 pickup and a tier-3 full restore
+    //   are both the core going off, and both should read the same.
+    try { _innerSparkRipple(player, _isrCoreOpts()); } catch (_) {}
+    try { if (net.active && net.sendEvent) net.sendEvent({ type: 'inner_spark', core: 1 }); } catch (_) {}
     if (player.syphonTier >= 3) {
       // (v38.72) FULLY UPGRADED: the core keeps charging and every further activation is a full
       // restore. Owner: "after fully upgraded, the next core will just give full shield and reset
@@ -95239,7 +95277,30 @@ function _releaseVortexShieldBurst(playBurstSound) {
 //   material is ours to release. See the shared-geometry disposal notes.
 const _ISR_LIVE = [];
 const _ISR_DUR = 1.0;
-function _innerSparkRipple(owner) {
+// ⭐ (v46.90) THE SYPHON CORE'S VERSION OF THE SAME WASH. Owner: "syphon's core should do similar
+// animation as inner spark, just brighter and a bit longer". One place for the pair, and a live
+// knob (`window.__syphonCoreFx = { dur, gain }`) so it can be judged by eye without a rebuild.
+// ⚠ GAIN IS BOUNDED BY THE CLIP, not by taste. Opacity is `min(1, 0.9 * gain * sin(pi*k))`, so
+//   every gain above ~1.11 SATURATES across a band in the middle and the wash goes flat-topped -
+//   the same clipping trap the fire shader has (a brightness multiply into a clamped target is not
+//   brighter, it is flatter). Measured: gain 1.6 clips for 51% of the run, 1.3 for 30%, 1.25 for
+//   ~26%. 1.25 keeps the sine's shape with a short hot top, and the part of `gain` that does NOT
+//   clip - the travelling hit-flash radius, `hull * 0.55 * gain` - carries the rest of the read.
+const _ISR_CORE = { dur: 1.7, gain: 1.25 };
+function _isrCoreOpts() {
+  try {
+    const K = (typeof window !== 'undefined') ? window.__syphonCoreFx : null;
+    return {
+      dur:  (K && typeof K.dur === 'number' && K.dur > 0) ? K.dur : _ISR_CORE.dur,
+      gain: (K && typeof K.gain === 'number' && K.gain > 0) ? K.gain : _ISR_CORE.gain,
+    };
+  } catch (_) { return { dur: _ISR_CORE.dur, gain: _ISR_CORE.gain }; }
+}
+// (v46.90) `opts` = { dur, gain }. Owner: "syphon's core should do similar animation as inner
+// spark, just brighter and a bit longer" - so the ability keeps its own numbers and the CORE passes
+// bigger ones, rather than either forking the effect or the core inventing a second one.
+// Defaults reproduce the v44.17 ability exactly, so every existing caller is untouched.
+function _innerSparkRipple(owner, opts) {
   try {
     if (!owner || !owner.mesh || typeof _makeHullHugShield !== 'function') return;
     // One at a time per ship; re-triggering restarts the wash rather than stacking shells.
@@ -95250,7 +95311,12 @@ function _innerSparkRipple(owner) {
     if (!shell) return;
     shell.scale.set(1.035, 1.035, 1.035);   // tighter than the shield: this is the hull glowing, not a bubble
     owner.mesh.add(shell);
-    _ISR_LIVE.push({ owner, shell, mat: shell.userData && shell.userData._shieldMat, t: 0 });
+    const _o = opts || {};
+    _ISR_LIVE.push({
+      owner, shell, mat: shell.userData && shell.userData._shieldMat, t: 0,
+      dur:  (typeof _o.dur === 'number' && _o.dur > 0) ? _o.dur : _ISR_DUR,
+      gain: (typeof _o.gain === 'number' && _o.gain > 0) ? _o.gain : 1,
+    });
   } catch (_) {}
 }
 function _innerSparkEnd(e) {
@@ -95265,7 +95331,7 @@ function _innerSparkTick(dt) {
   for (let i = _ISR_LIVE.length - 1; i >= 0; i--) {
     const e = _ISR_LIVE[i];
     e.t += dt;
-    const k = e.t / _ISR_DUR;
+    const k = e.t / (e.dur || _ISR_DUR);
     if (k >= 1 || !e.owner || !e.owner.mesh || !e.shell.parent) {
       _innerSparkEnd(e); _ISR_LIVE.splice(i, 1); continue;
     }
@@ -95273,7 +95339,12 @@ function _innerSparkTick(dt) {
     if (u) {
       if (u.uTime) u.uTime.value = (typeof game !== 'undefined' && game.time) ? game.time : e.t;
       // Up fast, down slow - a discharge, not a fade-in.
-      if (e.mat.opacity !== undefined) e.mat.opacity = Math.sin(Math.min(1, k) * Math.PI) * 0.9;
+      // ⚠ CLAMPED AT 1. `gain` brightens the wash, and an opacity above 1 is not brighter - three
+      //   clamps it on upload, so the only thing an unclamped value buys is a silent difference
+      //   between what the number says and what the pixel does.
+      if (e.mat.opacity !== undefined) {
+        e.mat.opacity = Math.min(1, Math.sin(Math.min(1, k) * Math.PI) * 0.9 * (e.gain || 1));
+      }
       // Walk the ripple nose -> tail so it reads as travelling ACROSS the body.
       const hull = (e.owner.chassis && e.owner.chassis.hullLength) || 90;
       if (!e._fwd) { e._fwd = new THREE.Vector3(); e._at = new THREE.Vector3(); }
@@ -95282,8 +95353,10 @@ function _innerSparkTick(dt) {
       e._at.copy(e.owner.position || e.owner.mesh.position)
            .addScaledVector(e._fwd, hull * (0.5 - k));
       if (typeof flashFXMaterialHit === 'function' && (e._hitT = (e._hitT || 0) - dt) <= 0) {
-        e._hitT = 0.12;
-        try { flashFXMaterialHit(e.mat, e._at, 0x66f0ff, hull * 0.55); } catch (_) {}
+        // (v46.90) the flashes stay on the same cadence RELATIVE to the run, so a longer wash is a
+        // longer discharge rather than the same handful of pulses stretched thin.
+        e._hitT = 0.12 * ((e.dur || _ISR_DUR) / _ISR_DUR);
+        try { flashFXMaterialHit(e.mat, e._at, 0x66f0ff, hull * 0.55 * (e.gain || 1)); } catch (_) {}
       }
     }
   }
@@ -119077,7 +119150,18 @@ function buildRoomGraphLevel(level) {
   // Bump the build sequence so any in-flight overlay
   // IIFE from a prior call knows its captured state is stale and
   // can bail out instead of re-adding old wall meshes to the scene.
+  // (v46.91) ...and the gmaps build reads it too, for the same reason - see _lssGmapsBuildLevel.
   game._buildSeq = (game._buildSeq | 0) + 1;
+  // ⭐⭐ (v46.91) A SPAWN PICK BELONGS TO THE LEVEL IT WAS DRAWN FROM. `_spawnPick` is a latch that
+  // the next `respawnPlayer` consumes AHEAD of drawing a fresh point (v45.04), and nothing in the
+  // file ever cleared it - it was only ever set or taken. So a pick recorded on one map and not
+  // spent there (you simply did not die) stayed loaded, and the first respawn on the NEXT map put
+  // you at a coordinate from the old one. Harmless between two arenas of similar size; not harmless
+  // coming off a Custom Location, whose points are kilometres out.
+  // Clearing it HERE - once per level build, before anything fills the new pool - means the latch
+  // can only ever hold a point from the level currently being built. Every legitimate writer
+  // (_finishCommit's fresh and between-rounds arms, the gmaps tail) runs after this line.
+  try { if (typeof _spawnPickSet === 'function') _spawnPickSet(null); } catch (_) {}
   try {
     if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps._refineInterval) {
       clearInterval(_lssGmaps._refineInterval);
@@ -139503,6 +139587,23 @@ async function _lssGmapsLoadModule() {
 // corridor points used by getValidSpawnPoint and AI nav) but routes geometry
 // through the photoreal tile renderer instead of marching cubes.
 async function _lssGmapsBuildLevel(level) {
+  // ⭐⭐⭐ (v46.91) WHOSE LEVEL IS THIS STILL? Owner: "i went from elimination custom location, then
+  // after a match switched to shifting deep in the same elimination lobby... but i didn't spawn with
+  // my team, i spawned kinda middle of the arena."
+  // This function is ASYNC and awaits up to 25 s on `tiles.ready`, and its tail then writes
+  // `game.corridorPoints`, `game.sdfRoomData`, `player.position` and the `_spawnPick` latch. Nothing
+  // stopped an in-flight EARTH build from landing all of that on whatever level was built next: the
+  // new map's own spawn pool is replaced by Earth points, which in elimination carry no `team` tag
+  // at all, so `getValidSpawnPoint('A')` finds nothing, falls through to its `p.x < 0` half-split,
+  // and hands back a coordinate kilometres away that the arena bound then clamps to somewhere near
+  // the middle. That is the report, exactly.
+  // `game._buildSeq` is bumped by buildRoomGraphLevel for EVERY level, and the overlay IIFE in that
+  // same function has guarded on it since v37.00 for precisely this reason - this path simply never
+  // did. Captured AFTER the bump (buildRoomGraphLevel calls us) so it is this build's own number.
+  const _gmSeq = (typeof game !== 'undefined' && game) ? (game._buildSeq | 0) : 0;
+  const _gmStale = () => {
+    try { return (game._buildSeq | 0) !== _gmSeq; } catch (_) { return false; }
+  };
   // Clear previous map state. Ships / projectiles persist (they'll respawn
   // on the new round per existing match flow).
   for (const m of game.mapMeshes) { if (m.parent) scene.remove(m); }
@@ -139827,6 +139928,15 @@ async function _lssGmapsBuildLevel(level) {
         new Promise((r) => setTimeout(r, (typeof level.loadTimeoutMs === 'number') ? level.loadTimeoutMs : 25000))
       ]);
     } catch (_) {}
+    // ⚠ (v46.91) A NEWER LEVEL WON THE RACE WHILE WE AWAITED - everything below writes the world's
+    //   spawn state, so landing it on someone else's map is worse than not finishing at all. The
+    //   tiles themselves are already built and parented; `_lssGmaps.cleanup` (set above) is what the
+    //   next build calls to take them down, so bailing here leaks nothing.
+    if (_gmStale()) {
+      console.warn('[lss-gmaps] build is stale (seq ' + _gmSeq + ' -> ' + (game._buildSeq | 0) +
+                   ') - abandoning spawn placement for ' + (level && level.name));
+      return;
+    }
     // ⭐ Give the level somewhere to spawn. Without this getValidSpawnPoint
     // falls through to (0,0,0) — the map origin at ground level, i.e. inside a
     // downtown building. corridorPoints is the shared pool every spawn and
