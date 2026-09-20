@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.93";
+const LSS_BUILD = "46.95";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -18120,27 +18120,50 @@ function _hzSpawnCavernBots() {
   }
   Promise.all(picks.map(k => loadHoardModel(k))).then((protos) => {
     if (game._cavern !== cv) return;
-    let spawnedN = 0;
-    for (let i = 0; i < picks.length; i++) {
-      if (!protos[i]) continue;
-      let bot = null;
-      try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9000 + i), picks[i]); } catch (_) { continue; }
-      try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, picks[i]); } catch (_) {}
-      bot._cavernBot = true;
-      bot.maxHealth = Math.max(200, Math.round(bot.maxHealth * g.doctrine.hp)); bot.health = bot.maxHealth;
-      try { if (typeof _campBoostSpeed === 'function' && g.doctrine.spd !== 1.33) _campBoostSpeed(bot, g.doctrine.spd / 1.33); } catch (_) {}
-      let sp = null; try { sp = getValidSpawnPoint('B'); } catch (_) {}
-      const pos = sp ? sp.clone() : new THREE.Vector3(0, 0, 0);
-      pos.x += (g.rnd() - 0.5) * 1100; pos.y += (g.rnd() - 0.5) * 400; pos.z += (g.rnd() - 0.5) * 1100;
-      bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
-      if (g.doctrine.lockAll) bot.aiTarget = player;
-      game.entities.push(bot);
-      spawnedN++;
-    }
-    cv.target = spawnedN || cv.target;
-    try { if (window.Overlays) Overlays.banner('HOSTILES: ' + g.doctrine.name, 'Destroy all ' + cv.target + ' ships, then take the rift home'); } catch (_) {}
-    try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+    cv._spawnJob = { picks, protos, g, i: 0, n: 0, t: 0 };
   }).catch(() => { cv._noSpawn = true; });
+}
+function _hzCavernStep(dt) {
+  const cv = game._cavern; if (!cv) return;
+  const J = cv._spawnJob; if (!J) return;
+  J.t -= dt;
+  if (J.t > 0) return;
+  const _gap = (typeof _HZ_GUARDS !== 'undefined' && typeof _HZ_GUARDS.GAP === 'number' && _HZ_GUARDS.GAP > 0) ? _HZ_GUARDS.GAP : 0;
+  J.t = _gap;
+  const _many = (_gap <= 0) ? (J.picks.length - J.i) : 1;
+  for (let _k = 0; _k < _many; _k++) {
+    const i = J.i++;
+    if (i < J.picks.length) {
+      const g = J.g;
+      if (J.protos[i]) {
+        let bot = null;
+        try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9000 + i), J.picks[i]); } catch (_) { bot = null; }
+        if (bot) {
+          try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, J.picks[i]); } catch (_) {}
+          bot._cavernBot = true;
+          bot.maxHealth = Math.max(200, Math.round(bot.maxHealth * g.doctrine.hp)); bot.health = bot.maxHealth;
+          try { if (typeof _campBoostSpeed === 'function' && g.doctrine.spd !== 1.33) _campBoostSpeed(bot, g.doctrine.spd / 1.33); } catch (_) {}
+          let sp = null; try { sp = getValidSpawnPoint('B'); } catch (_) {}
+          const pos = sp ? sp.clone() : new THREE.Vector3(0, 0, 0);
+          pos.x += (g.rnd() - 0.5) * 1100; pos.y += (g.rnd() - 0.5) * 400; pos.z += (g.rnd() - 0.5) * 1100;
+          bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
+          if (g.doctrine.lockAll) bot.aiTarget = player;
+          game.entities.push(bot);
+          J.n++;
+          if (J.n === 1) {
+            try { if (window.Overlays) Overlays.banner('HOSTILES: ' + g.doctrine.name, 'Destroy all ' + cv.target + ' ships, then take the rift home'); } catch (_) {}
+            try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+          }
+        }
+      }
+      continue;
+  }
+  break;
+  }
+  if (J.i < J.picks.length) return;
+  cv._spawnJob = null;
+  cv.target = J.n || cv.target;
+  if (!J.n) cv._noSpawn = true;   // nothing built at all - let the failsafe open the way home
 }
 function _hzEnterCavern(p) {
   if (game._cavern || (net && net.active)) return;
@@ -18189,6 +18212,7 @@ function _hzCavernFrame(dt) {
   if (!cv || game.state !== 'playing') return;
   if (!cv._arrived) { cv._arrived = true; try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {} }
   if (!cv.spawned) { _hzSpawnCavernBots(); return; }
+  if (cv._spawnJob) { try { _hzCavernStep(dt); } catch (_) { cv._spawnJob = null; } return; }
   if (cv.done) {
     if (cv.ring) {
       try { cv.ring.update(dt); } catch (_) {}
@@ -18226,7 +18250,7 @@ function _hzCavernFrame(dt) {
     try { cv.ring = new BossPortal(rp); } catch (_) {}
   }
 }
-const _HZ_GUARDS = { N: 4, TRIGGER: 3200, REARM_DIST: 6500, COOLDOWN: 30, GAP: 0.14 };
+const _HZ_GUARDS = { N: 4, TRIGGER: 3200, REARM_DIST: 6500, COOLDOWN: 30, GAP: 0 };
 if (typeof window !== 'undefined') window.__riftGuards = _HZ_GUARDS;
 function _hzGuardsFrame(p, d, dt) {
   if (p._guardCool > 0) p._guardCool -= dt;
@@ -18265,36 +18289,42 @@ function _hzGuardsBuildStep(p, dt) {
   }
   B.t -= dt;
   if (B.t > 0) return;
-  B.t = (typeof _HZ_GUARDS.GAP === 'number' && _HZ_GUARDS.GAP > 0) ? _HZ_GUARDS.GAP : 0;
-  const i = B.i++;
-  if (i < B.picks.length) {
-    if (B.protos[i]) {
-      let bot = null;
-      try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9500 + i), B.picks[i]); } catch (_) { bot = null; }
-      if (bot) {
-        try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, B.picks[i]); } catch (_) {}
-        bot._riftGuard = true;
-        const pos = p.pos.clone();
-        pos.x += (Math.random() - 0.5) * 420; pos.y += (Math.random() - 0.5) * 260; pos.z += (Math.random() - 0.5) * 420;
-        bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
-        if (player && player.position) {
-          const spd = ((bot.chassis && bot.chassis.flightSpeed) || 300) * 0.9;
-          bot.velocity.copy(player.position).sub(pos).normalize().multiplyScalar(spd);
-          bot.combatTarget = player;
-          bot.aiTarget = player.position.clone();
-          bot.aiLastKnownPlayer = player.position.clone();
-          bot.aiLastKnownTime = (game && game.time) || 0;
-        }
-        game.entities.push(bot);
-        B.flight.push(bot);
-        if (B.flight.length === 1) {
-          try { if (window.Overlays) Overlays.banner('RIFT GUARDS', _HZ_GUARDS.N + ' hostiles are coming through the ring'); } catch (_) {}
-          try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+  const _gap = (typeof _HZ_GUARDS.GAP === 'number' && _HZ_GUARDS.GAP > 0) ? _HZ_GUARDS.GAP : 0;
+  B.t = _gap;
+  const _many = (_gap <= 0) ? (B.picks.length - B.i) : 1;
+  for (let _k = 0; _k < _many; _k++) {
+    const i = B.i++;
+    if (i < B.picks.length) {
+      if (B.protos[i]) {
+        let bot = null;
+        try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9500 + i), B.picks[i]); } catch (_) { bot = null; }
+        if (bot) {
+          try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, B.picks[i]); } catch (_) {}
+          bot._riftGuard = true;
+          const pos = p.pos.clone();
+          pos.x += (Math.random() - 0.5) * 420; pos.y += (Math.random() - 0.5) * 260; pos.z += (Math.random() - 0.5) * 420;
+          bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
+          if (player && player.position) {
+            const spd = ((bot.chassis && bot.chassis.flightSpeed) || 300) * 0.9;
+            bot.velocity.copy(player.position).sub(pos).normalize().multiplyScalar(spd);
+            bot.combatTarget = player;
+            bot.aiTarget = player.position.clone();
+            bot.aiLastKnownPlayer = player.position.clone();
+            bot.aiLastKnownTime = (game && game.time) || 0;
+          }
+          game.entities.push(bot);
+          B.flight.push(bot);
+          if (B.flight.length === 1) {
+            try { if (window.Overlays) Overlays.banner('RIFT GUARDS', _HZ_GUARDS.N + ' hostiles are coming through the ring'); } catch (_) {}
+            try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+          }
         }
       }
-    }
-    return;
+      continue;
   }
+  break;
+  }
+  if (B.i < B.picks.length) return;
   p._guardBuild = null;
   if (!B.flight.length) return;
   p._guardsUp = B.flight;
@@ -50363,8 +50393,17 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
           _ENT_PRIME.keys.add(k);
         }
         if (built.length) {
-          if (rt) renderer.setRenderTarget(rt);
-          renderer.render(scene, camera);
+          const _np0 = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+          try {
+            if (typeof renderFrame === 'function') renderFrame();
+            else { if (rt) renderer.setRenderTarget(rt); renderer.render(scene, camera); }
+          } catch (_) {}
+          const _np1 = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+          if (_np1 > _np0 && typeof _drainProgramLinks === 'function') {
+            rep.forks = (rep.forks | 0) + (_np1 - _np0);
+            try { await _drainProgramLinks(3000, null, 'entPrime'); } catch (_) {}
+            try { if (typeof renderFrame === 'function') renderFrame(); } catch (_) {}
+          }
           rep.drawn += built.length;
         }
       } catch (e) {
@@ -50587,6 +50626,23 @@ async function _rrStagedSwap(pending, ph) {
       try { showLoadingOverlay(null, 'cloaking the fleet'); } catch (_) {}
       await _prebakeCloakWarmRoots(_ckRoots, t0 + _SWAP_MAX_MS, rep, false);   // (v40.25) shadowless: depth variants came from the launch overlay
     } catch (_) {}
+    t = _pbNow();
+    if (_pbNow() - t0 < _SWAP_MAX_MS) {
+      try { showLoadingOverlay(null, 'drawing the first frame'); } catch (_) {}
+      const _npA = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+      try { if (typeof renderFrame === 'function') renderFrame(); } catch (_) {}
+      await _warmupYield();
+      const _npB = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+      rep.frame0Forks = _npB - _npA;
+      if (_npB > _npA && typeof _drainProgramLinks === 'function') {
+        const _left = _SWAP_MAX_MS - (_pbNow() - t0);
+        try { await _drainProgramLinks(Math.max(800, Math.min(6000, _left)), rep, 'drainFrame0'); } catch (_) {}
+      }
+      try { if (typeof renderFrame === 'function') renderFrame(); } catch (_) {}
+      await _warmupYield();
+    } else if (!rep.capped) rep.capped = 'frame0-skipped';
+    rep.ms.frame0 = Math.round(_pbNow() - t);
+
     if (_pbNow() - t0 < _SWAP_MAX_MS) {
       try { showLoadingOverlay(null, 'waiting for the GPU'); } catch (_) {}
       await _prebakeGpuFence(Math.max(500, Math.min(4000, _SWAP_MAX_MS - (_pbNow() - t0))), rep, 'fence');

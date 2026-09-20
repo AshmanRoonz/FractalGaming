@@ -298,6 +298,37 @@ Owner, in exhibition: *"i went to one of the cities with a carrier and fleet, th
 - **Two halves, both needed.** `LEASH_CD: 12` — one snap per ship per 12 s, so it can never strobe whatever else is true. `LEASH_FIGHT: 13500` — while ENGAGED the leash is measured from the **target** instead of the anchor, because a ship near what it is fighting is doing its job. v38.85 made the fleet's aggro reach *"however far"* (the whole fleet turns onto whoever shot the city) and the leash was never told, so the two pulled against each other every frame. Only a ship far from **both** its anchor and its quarry is genuinely lost.
 - **⚠ Verified only partly, and worth re-checking in play.** Measured: 3 fleet ships, all aggroed onto the player, dragged to 36,222 u from the carrier over 12.6 s — **zero position jumps > 1,500 u**, `_leashCd` live and counting. But the fleet never exceeded 6,127 u from the carrier in that run (they could not keep up with the drag), so the leash branch itself was barely exercised; the old code's failure was not reproduced side by side. The owner can reproduce it by flying — that is the check that matters.
 
+#### ⭐⭐⭐ (v46.94-46.95) THE RIFT-ENTRY HITCH — the world swap never drew its first frame. FIXED.
+**Jump:** the `renderFrame` + `_drainProgramLinks` block in `_primeEntityModels` · `_HZ_GUARDS.GAP` (now 0) · `_hzCavernStep` / `_hzGuardsBuildStep`.
+Owner: *"there was some hitches at the start of a rift match, a lot of ships popped in at once and not baked probably"*, then the design call: *"they can all spawn at once, just has to be warmed up"*.
+- **v46.92's answer was the wrong shape and is reverted to a knob.** Spacing the hulls out (`GAP`) hid the cost rather than removing it. `GAP` now defaults to **0** — the flight and the garrison arrive together again, as they should — and remains as an escape hatch (`window.__riftGuards.GAP = 0.14`).
+- **⭐⭐ TWO REAL DEFECTS IN `_primeEntityModels`, both the same ones v46.88 found in `_lssEarthWarmOnce`:**
+  - it drew with **`renderer.render(scene, camera)`**, which does not set `toneMapping`, `outputColorSpace` or `shadowMap.type` — all three are renderer GLOBALS *and* three.js program-cache-key fields, so it linked one variant and the live frame wanted another. `renderFrame` sets that state itself, which is why the prebake's stage E2 uses it;
+  - it **never drained**. `render` only STARTS a link; the first real draw joins it. Every warm in the prebake is paired with `_drainProgramLinks`; this one was not.
+- **⚠⚠ AND IT IS STILL NOT ENOUGH — measured after the fix, entering a rift.** The garrison arrives together (RUSH DOCTRINE, 7/7, job finished), but the recorder still shows **cold links in batches of 40 / 39 / 37 across 49.2–52.2 s**, and one `getProgramParameter` (the blocking LINK_STATUS query) **blocked 638 ms on p337**. The prime reported `asked 29, drawn 29, passes 8, ms 358` but **`forks: 2`** — i.e. it created almost no programs, so the ones the cavern then needed were never its to warm.
+- **⭐ THE LIKELY REASON, and the next thing to try:** the prime runs inside the staged world-swap, i.e. against the **OLD world's lighting**, and **per-type light counts are part of three's program cache key** (PART 13 rule 5c — `numDirLights`/`numPointLights`/`numSpotLights`/`numHemiLights`, in the key *even for unlit materials*). A cavern has its own lights, so every hull warmed before they are up is warmed into a variant the cavern will never ask for. The fix to try is to run (or repeat) the hoard prime **after the cavern's lighting is established but still behind the cover**, not before it.
+- **⭐⭐⭐ (v46.95) THE ACTUAL FIX: give the SWAP the prebake's stage E2.** Measuring the fork REASONS
+  instead of guessing settled it. Entering a rift on 46.94: **125 cold links**, and the ships were the
+  small half — `basic` 42 · `(unnamed)` 29 · `physical` 9 · player cockpit (`Vortex_*`/`hull.004`) 21 ·
+  terrain 6 · water/bubbles/points/layeredFX 3 each — plus **`freed x24`**: the swap DISPOSES the hub,
+  which releases those programs (the v38.97 rule), and the cavern relinks equivalents. And the
+  reasons: **`outputColorSpace` 32 + `toneMapping` 32 = 51%**, i.e. warmed against a different render
+  target than the frame really uses. `numDirLightShadows`/`numDirLights` were only ~19%, so the
+  lighting theory I had proposed was a small part, **not** the cause.
+  - Every stage the swap already had warms a PIECE (`_warmRealCombatFX`, `_prebakeGpuPrime`, the
+    cloak warm). **None of them draws the finished world the way the game draws it** — and
+    `renderFrame` is the only thing that sets `toneMapping`, `outputColorSpace` and `shadowMap.type`
+    to their live values, which is exactly why the LAUNCH prebake's stage E2 uses it. The swap simply
+    never got that stage.
+  - Added before the fence, inside `_SWAP_MAX_MS` and paid out of the countdown like every other
+    stage: **`renderFrame()` → count the forks → `_drainProgramLinks` → `renderFrame()` again** (twice,
+    because the post chain's ping-pong targets alternate). The links are still made — they are just
+    made behind the cover, where a drain absorbs them, instead of joining on the first visible draw.
+  - **MEASURED, same rift, same probe:** worst frame **1,181 ms → 199.6 ms**, frames over 100 ms
+    **6 → 2** (top five 1181/984/692/680/361 → 200/112/44/43/42). A second entry with the programs warm:
+    **32.5 ms worst, zero frames over 100.**
+- **Separately, not cold links at all:** the last auto-mark is a **975.1 ms** frame whose blame is `renderFrame: 972.2` with only **1** program created — that is GPU/fill on the cavern's first full-resolution frame, a different problem from this one.
+
 #### Map selector UI — `~L7015`
 **Jump:** `function buildMapSelector` · `function selectMap` (~L7150)
 - **Symbols:** `buildMapSelector`, `selectMap`, `_renderMapPreview`, `cycleMap`

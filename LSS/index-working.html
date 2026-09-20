@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.93";
+const LSS_BUILD = "46.95";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -33283,30 +33283,73 @@ function _hzSpawnCavernBots() {
     if (!keys.length) { cv._noSpawn = true; return; }
     picks = []; for (let i = 0; i < g.count; i++) picks.push(keys[i % keys.length]);
   }
+  // ⭐⭐⭐ (v46.94) ONE HULL AT A TIME - the same fix v46.92 gave the rift guards, and this site is
+  // the worse of the two. Owner: "there was some hitches at the start of a rift match, a lot of
+  // ships popped in at once and not baked probably." Right on the mechanism: the doctrines run to
+  // `swarm` at **9-12 ships**, `buildModelShipMesh` gives each hull 14 meshes + 14 materials
+  // (v38.92), and each material forks a program per render target / light count / depth pass - so
+  // building the garrison in one `.then` created on the order of 500 programs in a single tick and
+  // first-drew every one of them on the next. (The guards' version of this measured 175 programs
+  // and a 1,124.9 ms frame; this one is up to three times the hulls.)
+  // ⚠ v36.28 ALREADY FIXED THE OTHER HALF and is not what is failing: it moved the GLB PARSE and
+  //   GPU prime into the staged world-swap (`_entPrimeHoardKeys`), so the models are warm. What is
+  //   still paid here is per-HULL - the material clones and their program forks - and that happens
+  //   at `new Bot`, not at parse.
+  // The build now rides `_hzCavernStep` off the existing per-frame call, one hull per
+  // `_HZ_GUARDS.GAP` seconds (the shared "seconds between hoard hulls entering play" knob).
   Promise.all(picks.map(k => loadHoardModel(k))).then((protos) => {
     if (game._cavern !== cv) return;
-    let spawnedN = 0;
-    for (let i = 0; i < picks.length; i++) {
-      if (!protos[i]) continue;
-      let bot = null;
-      try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9000 + i), picks[i]); } catch (_) { continue; }
-      try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, picks[i]); } catch (_) {}
-      bot._cavernBot = true;
-      bot.maxHealth = Math.max(200, Math.round(bot.maxHealth * g.doctrine.hp)); bot.health = bot.maxHealth;
-      // _campTuneHoardBot already boosted 1.33x — scale the remainder.
-      try { if (typeof _campBoostSpeed === 'function' && g.doctrine.spd !== 1.33) _campBoostSpeed(bot, g.doctrine.spd / 1.33); } catch (_) {}
-      let sp = null; try { sp = getValidSpawnPoint('B'); } catch (_) {}
-      const pos = sp ? sp.clone() : new THREE.Vector3(0, 0, 0);
-      pos.x += (g.rnd() - 0.5) * 1100; pos.y += (g.rnd() - 0.5) * 400; pos.z += (g.rnd() - 0.5) * 1100;
-      bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
-      if (g.doctrine.lockAll) bot.aiTarget = player;
-      game.entities.push(bot);
-      spawnedN++;
-    }
-    cv.target = spawnedN || cv.target;
-    try { if (window.Overlays) Overlays.banner('HOSTILES: ' + g.doctrine.name, 'Destroy all ' + cv.target + ' ships, then take the rift home'); } catch (_) {}
-    try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+    cv._spawnJob = { picks, protos, g, i: 0, n: 0, t: 0 };
   }).catch(() => { cv._noSpawn = true; });
+}
+// (v46.94) One cavern hull per GAP. Driven from _hzCavernFrame, which RETURNS while a job is live -
+// see the note there about the clear-check.
+function _hzCavernStep(dt) {
+  const cv = game._cavern; if (!cv) return;
+  const J = cv._spawnJob; if (!J) return;
+  J.t -= dt;
+  if (J.t > 0) return;
+  const _gap = (typeof _HZ_GUARDS !== 'undefined' && typeof _HZ_GUARDS.GAP === 'number' && _HZ_GUARDS.GAP > 0) ? _HZ_GUARDS.GAP : 0;
+  J.t = _gap;
+  // (v46.94) GAP 0 = the whole garrison in this one step. It arrives together, as the owner wants,
+  // and the cost it used to carry is paid behind the loading cover by _primeEntityModels instead.
+  const _many = (_gap <= 0) ? (J.picks.length - J.i) : 1;
+  for (let _k = 0; _k < _many; _k++) {
+    const i = J.i++;
+    if (i < J.picks.length) {
+      const g = J.g;
+      if (J.protos[i]) {
+        let bot = null;
+        try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9000 + i), J.picks[i]); } catch (_) { bot = null; }
+        if (bot) {
+          try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, J.picks[i]); } catch (_) {}
+          bot._cavernBot = true;
+          bot.maxHealth = Math.max(200, Math.round(bot.maxHealth * g.doctrine.hp)); bot.health = bot.maxHealth;
+          // _campTuneHoardBot already boosted 1.33x — scale the remainder.
+          try { if (typeof _campBoostSpeed === 'function' && g.doctrine.spd !== 1.33) _campBoostSpeed(bot, g.doctrine.spd / 1.33); } catch (_) {}
+          let sp = null; try { sp = getValidSpawnPoint('B'); } catch (_) {}
+          const pos = sp ? sp.clone() : new THREE.Vector3(0, 0, 0);
+          pos.x += (g.rnd() - 0.5) * 1100; pos.y += (g.rnd() - 0.5) * 400; pos.z += (g.rnd() - 0.5) * 1100;
+          bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
+          if (g.doctrine.lockAll) bot.aiTarget = player;
+          game.entities.push(bot);
+          J.n++;
+          // The garrison is announced on the FIRST hull, with the doctrine's INTENDED count - the
+          // player should not be told "destroy all 1 ships" while eleven more are still arriving.
+          if (J.n === 1) {
+            try { if (window.Overlays) Overlays.banner('HOSTILES: ' + g.doctrine.name, 'Destroy all ' + cv.target + ' ships, then take the rift home'); } catch (_) {}
+            try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+          }
+        }
+      }
+      continue;
+  }
+  break;
+  }
+  if (J.i < J.picks.length) return;
+  cv._spawnJob = null;
+  cv.target = J.n || cv.target;
+  if (!J.n) cv._noSpawn = true;   // nothing built at all - let the failsafe open the way home
 }
 function _hzEnterCavern(p) {
   if (game._cavern || (net && net.active)) return;
@@ -33378,6 +33421,13 @@ function _hzCavernFrame(dt) {
   if (!cv || game.state !== 'playing') return;
   if (!cv._arrived) { cv._arrived = true; try { if (window.Overlays && Overlays.warp) Overlays.warp(false); } catch (_) {} }
   if (!cv.spawned) { _hzSpawnCavernBots(); return; }
+  // ⚠⚠ (v46.94) A GARRISON UNDER CONSTRUCTION MUST NOT BE JUDGED CLEARED. The check below reads
+  //   `seen && !alive` - and a staggered spawn passes through exactly that state the moment the
+  //   player kills the first hull before the second has arrived. Returning here keeps the whole
+  //   clear-check (and `_noSpawnT`, which must not accumulate while the build is healthy) parked
+  //   until the last hull is in. If the promise never resolved there is no job, so the 20 s failsafe
+  //   still runs untouched.
+  if (cv._spawnJob) { try { _hzCavernStep(dt); } catch (_) { cv._spawnJob = null; } return; }
   if (cv.done) {
     if (cv.ring) {
       try { cv.ring.update(dt); } catch (_) {}
@@ -33445,8 +33495,12 @@ function _hzCavernFrame(dt) {
 // publish budget, `_leSlicer`, the hub streamer): give it one at a time. `_lssPrimeTick` already
 // runs 2 ms a frame from gameLoop and drains links that have finished in parallel, so spacing the
 // hulls lets each one's programs be linked and primed before the next arrives.
-// GAP is in seconds; 0 restores the v35.15 all-at-once build.
-const _HZ_GUARDS = { N: 4, TRIGGER: 3200, REARM_DIST: 6500, COOLDOWN: 30, GAP: 0.14 };
+// ⭐ (v46.94) GAP IS 0 BY DEFAULT - THE FLIGHT ARRIVES TOGETHER. Owner: "they can all spawn at
+// once, just has to be warmed up". So the real fix moved to the WARM (see _primeEntityModels, which
+// had been linking the wrong program variant and never draining), and the spacing below is kept
+// only as an escape hatch: `window.__riftGuards.GAP = 0.14` spreads the hulls again if a slow
+// device ever needs it. At 0 the whole flight is built in one step, as it was before v46.92.
+const _HZ_GUARDS = { N: 4, TRIGGER: 3200, REARM_DIST: 6500, COOLDOWN: 30, GAP: 0 };
 if (typeof window !== 'undefined') window.__riftGuards = _HZ_GUARDS;
 function _hzGuardsFrame(p, d, dt) {
   if (p._guardCool > 0) p._guardCool -= dt;
@@ -33500,42 +33554,49 @@ function _hzGuardsBuildStep(p, dt) {
   }
   B.t -= dt;
   if (B.t > 0) return;
-  B.t = (typeof _HZ_GUARDS.GAP === 'number' && _HZ_GUARDS.GAP > 0) ? _HZ_GUARDS.GAP : 0;
-  const i = B.i++;
-  if (i < B.picks.length) {
-    if (B.protos[i]) {
-      let bot = null;
-      try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9500 + i), B.picks[i]); } catch (_) { bot = null; }
-      if (bot) {
-        try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, B.picks[i]); } catch (_) {}
-        bot._riftGuard = true;
-        // Materialize across the gate mouth (ring is ~760u across) and burst
-        // OUT of it toward the player — reads as flying through the portal.
-        const pos = p.pos.clone();
-        pos.x += (Math.random() - 0.5) * 420; pos.y += (Math.random() - 0.5) * 260; pos.z += (Math.random() - 0.5) * 420;
-        bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
-        if (player && player.position) {
-          const spd = ((bot.chassis && bot.chassis.flightSpeed) || 300) * 0.9;
-          bot.velocity.copy(player.position).sub(pos).normalize().multiplyScalar(spd);
-          // Prime the brain so the first frames already pursue: combatTarget is
-          // the ENTITY to fight, aiTarget is the Vector3 move waypoint (see
-          // findTarget — passing an entity here would just be overwritten).
-          bot.combatTarget = player;
-          bot.aiTarget = player.position.clone();
-          bot.aiLastKnownPlayer = player.position.clone();
-          bot.aiLastKnownTime = (game && game.time) || 0;
-        }
-        game.entities.push(bot);
-        B.flight.push(bot);
-        // The warning rides the FIRST hull through the ring, not the last.
-        if (B.flight.length === 1) {
-          try { if (window.Overlays) Overlays.banner('RIFT GUARDS', _HZ_GUARDS.N + ' hostiles are coming through the ring'); } catch (_) {}
-          try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+  const _gap = (typeof _HZ_GUARDS.GAP === 'number' && _HZ_GUARDS.GAP > 0) ? _HZ_GUARDS.GAP : 0;
+  B.t = _gap;
+  // (v46.94) GAP 0 = the whole flight in this one step (the pre-v46.92 behaviour).
+  const _many = (_gap <= 0) ? (B.picks.length - B.i) : 1;
+  for (let _k = 0; _k < _many; _k++) {
+    const i = B.i++;
+    if (i < B.picks.length) {
+      if (B.protos[i]) {
+        let bot = null;
+        try { bot = new Bot('VORTEX', LSS.TEAM_FLEET_B, (typeof _campNextBotId === 'function') ? _campNextBotId() : (9500 + i), B.picks[i]); } catch (_) { bot = null; }
+        if (bot) {
+          try { if (typeof _campTuneHoardBot === 'function') _campTuneHoardBot(bot, B.picks[i]); } catch (_) {}
+          bot._riftGuard = true;
+          // Materialize across the gate mouth (ring is ~760u across) and burst
+          // OUT of it toward the player — reads as flying through the portal.
+          const pos = p.pos.clone();
+          pos.x += (Math.random() - 0.5) * 420; pos.y += (Math.random() - 0.5) * 260; pos.z += (Math.random() - 0.5) * 420;
+          bot.position.copy(pos); if (bot.mesh) bot.mesh.position.copy(pos);
+          if (player && player.position) {
+            const spd = ((bot.chassis && bot.chassis.flightSpeed) || 300) * 0.9;
+            bot.velocity.copy(player.position).sub(pos).normalize().multiplyScalar(spd);
+            // Prime the brain so the first frames already pursue: combatTarget is
+            // the ENTITY to fight, aiTarget is the Vector3 move waypoint (see
+            // findTarget — passing an entity here would just be overwritten).
+            bot.combatTarget = player;
+            bot.aiTarget = player.position.clone();
+            bot.aiLastKnownPlayer = player.position.clone();
+            bot.aiLastKnownTime = (game && game.time) || 0;
+          }
+          game.entities.push(bot);
+          B.flight.push(bot);
+          // The warning rides the FIRST hull through the ring, not the last.
+          if (B.flight.length === 1) {
+            try { if (window.Overlays) Overlays.banner('RIFT GUARDS', _HZ_GUARDS.N + ' hostiles are coming through the ring'); } catch (_) {}
+            try { if (typeof playSound === 'function') playSound('round_start'); } catch (_) {}
+          }
         }
       }
-    }
-    return;
+      continue;
   }
+  break;
+  }
+  if (B.i < B.picks.length) return;
   // Done.
   p._guardBuild = null;
   if (!B.flight.length) return;
@@ -80160,8 +80221,34 @@ async function _primeEntityModels(keys, tStart, budgetMs) {
           _ENT_PRIME.keys.add(k);
         }
         if (built.length) {
-          if (rt) renderer.setRenderTarget(rt);
-          renderer.render(scene, camera);
+          // ⭐⭐⭐ (v46.94) THIS PRIME EXISTED AND DID NOT TAKE. Owner, on the rift garrison: "a lot of
+          // ships popped in at once and not baked probably" - right on the mechanism, and the cause
+          // is two lines that have been wrong since v36.28:
+          //   (a) it drew with `renderer.render(scene, camera)`, which does NOT set `toneMapping`,
+          //       `outputColorSpace` or `shadowMap.type` - all three are renderer GLOBALS *and*
+          //       three.js program-cache-key fields. Whatever the last pass left them at is what
+          //       this linked, so the live frame then wanted a DIFFERENT program for the same
+          //       material and linked it cold anyway. Measured on the identical mistake in
+          //       `_lssEarthWarmOnce` (v46.88): 14 programs warmed, 14 `[cold]` links moments later,
+          //       every one naming `[FORK: outputColorSpace toneMapping]`. `renderFrame` sets that
+          //       state itself, which is exactly why the prebake's stage E2 uses it.
+          //   (b) it never DRAINED. `render` only STARTS a link; the first real draw is what joins
+          //       it. The prebake pairs every warm with `_drainProgramLinks` for this reason.
+          // With both fixed the garrison can arrive all at once, which is the owner's call:
+          // "they can all spawn at once, just has to be warmed up".
+          const _np0 = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+          try {
+            if (typeof renderFrame === 'function') renderFrame();
+            else { if (rt) renderer.setRenderTarget(rt); renderer.render(scene, camera); }
+          } catch (_) {}
+          const _np1 = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+          if (_np1 > _np0 && typeof _drainProgramLinks === 'function') {
+            rep.forks = (rep.forks | 0) + (_np1 - _np0);
+            try { await _drainProgramLinks(3000, null, 'entPrime'); } catch (_) {}
+            // Drawn again so the now-LINKED programs are the ones the driver builds a pipeline for
+            // (ANGLE builds its vertex executable at the draw call, not at link).
+            try { if (typeof renderFrame === 'function') renderFrame(); } catch (_) {}
+          }
           rep.drawn += built.length;
         }
       } catch (e) {
@@ -80554,6 +80641,46 @@ async function _rrStagedSwap(pending, ph) {
       try { showLoadingOverlay(null, 'cloaking the fleet'); } catch (_) {}
       await _prebakeCloakWarmRoots(_ckRoots, t0 + _SWAP_MAX_MS, rep, false);   // (v40.25) shadowless: depth variants came from the launch overlay
     } catch (_) {}
+    // ---- ⭐⭐⭐ (v46.95) THE FIRST FRAME, BEHIND THE COVER - the stage this path never had ----
+    // Owner: "there was some hitches at the start of a rift match, a lot of ships popped in at once
+    // and not baked probably", and then the design call: "they can all spawn at once, just has to be
+    // warmed up".
+    // MEASURED entering a rift on 46.94 (?pbhud, `__coldSeen` fork names): **125 cold program links**,
+    // and the ships were the small half of it -
+    //   basic 42 · (unnamed) 29 · physical 9 · player cockpit (Vortex_*/hull.004) 21 · terrain 6 ·
+    //   water 3 · bubbles 3 · points 3 · layeredFX 3, plus **`freed x24`** - the swap DISPOSES the
+    //   hub, which releases those programs (the v38.97 rule: a disposed material with no other
+    //   holder frees its program), and the cavern then relinks equivalents.
+    // And the fork reasons say why the existing warms did not cover it: **outputColorSpace 32 and
+    // toneMapping 32 - 51% of the total** - i.e. warmed against a different render target than the
+    // one the frame really uses. (numDirLightShadows/numDirLights account for only ~19%, so the
+    // lighting theory was a small part, not the cause.)
+    // Every stage above warms a PIECE (fx, gpu prime, cloak). None of them draws the finished world
+    // the way the game draws it. `renderFrame` is the only thing that sets `toneMapping`,
+    // `outputColorSpace` and `shadowMap.type` to their live values - which is exactly why the LAUNCH
+    // prebake's stage E2 uses it - and this path simply never got that stage. So: draw the real
+    // frame, DRAIN what it forked (a compile only starts a link; the first draw joins it), then draw
+    // again so the driver builds its pipelines against programs that are already linked.
+    // ⚠ Inside the stage budget like every other stage, and it shortens the countdown rather than
+    //   adding to it (see `dur` below).
+    t = _pbNow();
+    if (_pbNow() - t0 < _SWAP_MAX_MS) {
+      try { showLoadingOverlay(null, 'drawing the first frame'); } catch (_) {}
+      const _npA = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+      try { if (typeof renderFrame === 'function') renderFrame(); } catch (_) {}
+      await _warmupYield();
+      const _npB = (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+      rep.frame0Forks = _npB - _npA;
+      if (_npB > _npA && typeof _drainProgramLinks === 'function') {
+        const _left = _SWAP_MAX_MS - (_pbNow() - t0);
+        try { await _drainProgramLinks(Math.max(800, Math.min(6000, _left)), rep, 'drainFrame0'); } catch (_) {}
+      }
+      // Twice, because the post chain's ping-pong targets alternate - the prebake's own note.
+      try { if (typeof renderFrame === 'function') renderFrame(); } catch (_) {}
+      await _warmupYield();
+    } else if (!rep.capped) rep.capped = 'frame0-skipped';
+    rep.ms.frame0 = Math.round(_pbNow() - t);
+
     // (v40.25) the fence stays INSIDE the stage budget (this path shortens its countdown by the
     // stage's length, floor 4 s - see `dur` below), capped at 4 s so a slow drain costs seconds of
     // countdown, never the countdown.
