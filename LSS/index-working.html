@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.82";
+const LSS_BUILD = "46.83";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -74214,9 +74214,12 @@ function _clearBossPortal() {
 // inner spin. Held on its own game.poleRings array — NEVER pushed to
 // game.monsters — so the rings have no collision/weapon-target behaviour.
 class RaceRing {
-  constructor(pos, diameter) {
+  constructor(pos, diameter, opts) {
     this.position = pos.clone();
     this.diameter = diameter || PORTAL_GATE_DIAMETER;
+    // (v46.83) a RACE CIRCUIT gate wears the endless Aegis bolt, not the cyan ring - see _buildGateMesh
+    this._gate = !!(opts && opts.gate);
+    this._gateT = 0; this._gatePh = Math.random() * 6.283; this._gateParts = null;
     this.alive = true;
     this.captured = false;  
     this.group = null;      
@@ -74226,6 +74229,7 @@ class RaceRing {
     this._buildMesh();
   }
   _buildMesh() {
+    if (this._gate) { this._buildGateMesh(); return; }
     if (this.group) { try { scene.remove(this.group); _disposeMeshTreeDeep(this.group, !this._usedProto); } catch (_) {} this.group = null; this._inner = null; }
     const group = new THREE.Group();
     let inner;
@@ -74252,7 +74256,53 @@ class RaceRing {
     scene.add(group);
     if (this._faceDir) this._applyOrient();
   }
+  // (v46.83) The gate build: the endless Aegis bolt from _raceGateLib, scaled to the gate. It ACTS as
+  // a ring - capture is the sphere test in update() - but the look is a beacon you can take from any
+  // side, which is the whole point ("omni directional unlike a ring").
+  _buildGateMesh() {
+    if (this.group) { try { scene.remove(this.group); } catch (_) {} this.group = null; this._inner = null; this._gateParts = null; }
+    const lib = (typeof _raceGateLib === 'function') ? _raceGateLib() : null;
+    if (!lib) return;
+    const grp = new THREE.Group();
+    const core = new THREE.Mesh(lib.geo, lib.coreMat); core.renderOrder = 1; grp.add(core);
+    const sh1 = new THREE.Mesh(lib.shGeo1, lib.shMat1); sh1.renderOrder = 2; grp.add(sh1);
+    let sh2 = null, spr = null, rig = null;
+    if (!lib.lite) {
+      sh2 = new THREE.Mesh(lib.shGeo2, lib.shMat2); sh2.renderOrder = 2; grp.add(sh2);
+      spr = new THREE.Sprite(lib.sprMat); spr.scale.set(170, 170, 1); grp.add(spr);
+      rig = new THREE.Group();
+      for (let r = 0; r < 3; r++) {
+        const hold = new THREE.Group();
+        hold.rotation.y = r * 2.0944;
+        hold.rotation.z = 0.55;
+        const m = new THREE.Mesh(lib.rayGeo, lib.rayMat);
+        m.position.y = 190;
+        m.renderOrder = 2;
+        hold.add(m);
+        rig.add(hold);
+      }
+      grp.add(rig);
+    }
+    grp.scale.setScalar(this.diameter / 300);
+    grp.position.copy(this.position);
+    scene.add(grp);
+    this.group = grp; this._inner = core; this._gateParts = { core, sh1, sh2, spr, rig };
+    this._usedProto = true;
+  }
+  // the bolt's own idle: an erratic core flicker, counter-rotating shells, a precessing ray rig, a slow bob
+  _animateGate(dt) {
+    const P = this._gateParts; if (!P) return;
+    this._gateT += dt;
+    const tt = this._gateT, ph = this._gatePh;
+    const wob = 1 + 0.16 * Math.cos(tt * 7.3 + ph) + 0.11 * Math.cos(tt * 12.7 + ph * 2.3) + 0.06 * Math.cos(tt * 23.1 + ph * 4.1);
+    if (P.core) P.core.scale.setScalar(wob);
+    if (P.sh1) { P.sh1.rotation.y += dt * 1.9; P.sh1.rotation.x = 0.6 * Math.cos(tt * 0.9 + ph); }
+    if (P.sh2) { P.sh2.rotation.y -= dt * 2.6; P.sh2.rotation.z = 0.8 * Math.cos(tt * 1.3 + ph); }
+    if (P.rig) { P.rig.rotation.y += dt * 0.45; P.rig.rotation.x = 0.10 * Math.cos(tt * 0.7 + ph); }
+    if (this.group) this.group.position.y = this.position.y + Math.sin(tt * 1.8 + ph) * 12;
+  }
   orientAxis(dir) {
+    if (this._gate) return;   // (v46.83) a bolt has no axis
     if (!dir || dir.lengthSq() < 1) return;
     this._faceDir = dir.clone().normalize();
     this._applyOrient();
@@ -74263,8 +74313,8 @@ class RaceRing {
   }
   update(dt) {
     if (!this.alive) return;
-    if (!this._usedProto && _cyanRingProto) this._buildMesh();   
-    if (this._inner) this._inner.rotation.z += 0.5 * dt;
+    if (!this._gate && !this._usedProto && _cyanRingProto) this._buildMesh();   
+    if (this._gate) this._animateGate(dt); else if (this._inner) this._inner.rotation.z += 0.5 * dt;
     // (v46.82) RACE CIRCUITS: a circuit gate is live for the local pilot only while it is THEIR next
     // one (each racer carries its own cursor), so only that one is drawn and only it can be taken.
     // _buildMesh may have just rebuilt the group (the GLB arriving late) with visible = true, which
@@ -74297,6 +74347,8 @@ class RaceRing {
   }
   destroy() {
     this.alive = false;
+    // (v46.83) a gate's parts are the SHARED bolt library: remove the group, dispose nothing
+    if (this._gate) { if (this.group) { try { scene.remove(this.group); } catch (_) {} } this.group = null; this._inner = null; this._gateParts = null; return; }
     if (this.group) { try { scene.remove(this.group); _disposeMeshTreeDeep(this.group, !this._usedProto); } catch (_) {} this.group = null; this._inner = null; }
   }
 }
@@ -74422,7 +74474,7 @@ const RACE_CIRCUIT = {
            clearU: 90, searchU: 1100, cityInnerR: 0.62, startBackU: 2600 },
   captureK: 0.45,        // player: pass within this fraction of the diameter of the centre
   botCaptureK: 0.62,     // bots thread worse than pilots; the gate is more forgiving for them
-  respawnDelay: 4,       // seconds dead before a racer comes back at their last ring
+  respawnDelay: 1.5,     // (v46.83) seconds dead before a racer comes back WHERE they died (owner: "after 1.5s")
   decreeEvery: 1.5, reqEvery: 2.0,
   mmRangeEarth: 5200, mmRangeOw: 14000,
 };
@@ -74430,7 +74482,7 @@ const _rcScan = { clear: Infinity, roof: -Infinity, n: 0 };
 const _rcSeen = new Set();
 const _rcV = new THREE.Vector3(), _rcV2 = new THREE.Vector3(), _rcV3 = new THREE.Vector3();
 const _rcNet = { t: 0, reqT: 0, acked: null };
-const _rc = { pendingSince: 0, playingAt: null, hudEl: null, hudTxt: '', hudTop: 0, hudVp: 0, ringsFirstT: 0 };
+const _rc = { pendingSince: 0, playingAt: null, hudEl: null, hudTxt: '', hudTop: 0, hudVp: 0, ringsFirstT: 0, auth: null };
 
 function _raceCircuitKind() {
   try {
@@ -74452,7 +74504,104 @@ function _lssHubWorld() {
   } catch (_) { return false; }
 }
 function _raceCircuitReady() { const C = (typeof game !== 'undefined' && game) ? game.raceCircuit : null; return !!(C && C.ready && C.rings && C.rings.length); }
-function _raceCircuitAuthority() { try { return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : true; } catch (_) { return true; } }
+// ⭐⭐⭐ (v46.83) WHO LAYS THE LAP: the peer longest in the room, NOT the stasis owner. `amStasisOwner`
+// sorts RANDOM trystero ids, so about half the time a drop-in joiner outranked the host, generated
+// its own lap and decreed it - and the host, no longer "authority", adopted it MID-RACE: gates
+// cleared, cursor back to 1 (owner: "i saw someone capture my point, and it disappeared"). This is
+// v44.61's election (the cities had the identical fault) with its load-bearing `unknown` guard:
+// missing a peer's age means keep whatever you hold, never take.
+function _raceCircuitAuthority() {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active) return true;
+    let peers = []; try { peers = (typeof nonJudgePeerIds === 'function') ? nonJudgePeerIds() : []; } catch (_) {}
+    if (!peers.length) { _rc.auth = true; return true; }
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    const mine = net.roomJoinedAt ? Math.max(0, now - net.roomJoinedAt) : 0;
+    const cands = [{ id: String(net.myPeerId), inRoom: mine }];
+    let unknown = false;
+    for (const id of peers) {
+      let v = null;
+      try { const m = net._peerModes && net._peerModes.get(id); if (m && typeof m.inRoom === 'number' && m.inRoom >= 0) v = m.inRoom + Math.max(0, now - (m.at || now)); } catch (_) {}
+      if (v == null) { try { const pr = net.peers && net.peers.get(id); if (pr && typeof pr.inRoom === 'number' && pr.inRoom >= 0) v = pr.inRoom + Math.max(0, now - (pr.inRoomAt || now)); } catch (_) {} }
+      if (v == null) { unknown = true; continue; }
+      cands.push({ id: String(id), inRoom: v });
+    }
+    if (unknown) return (_rc.auth === true);
+    cands.sort((a, b) => (Math.abs(b.inRoom - a.inRoom) > 1500) ? (b.inRoom - a.inRoom) : (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0)));
+    _rc.auth = (cands[0].id === String(net.myPeerId));
+    return _rc.auth;
+  } catch (_) { return (_rc.auth === true); }
+}
+
+// (v46.83) The finish is EXPOSED once the field is up and its shell is down - the codebase's own
+// word for it ("Destroy the shell to expose the field"). From then on a death is final: no respawn
+// for the pilot or a bot, and a fleet wipe ends the round like classic. Owner: "if you die when the
+// champion field is exposed, then you don't get to respawn".
+function _raceFinishExposed() {
+  const f = (typeof game !== 'undefined' && game) ? game.championField : null;
+  if (!f || !f.alive) return false;
+  const sh = game.championShell;
+  return !(sh && sh.alive);
+}
+// (v46.83) The respawn's "puff of smoke": a dozen pale cloud puffs, a light, the phase sound.
+function _raceRespawnPuff(pos) {
+  try {
+    if (typeof spawnFXBurst !== 'function' || !pos) return;
+    const col = new THREE.Color(0xbfe6ff);
+    for (let i = 0; i < 12; i++) {
+      const a = Math.random() * 6.283, r = Math.random() * 70;
+      const puff = spawnFXBurst('cloud', { x: pos.x + Math.cos(a) * r, y: pos.y + (Math.random() - 0.5) * 60, z: pos.z + Math.sin(a) * r },
+        34 + Math.random() * 16, 0.9 + Math.random() * 0.5, { startScale: 0.25, endScale: 1.6, segs: 14 });
+      if (puff && puff.material && puff.material.uniforms && puff.material.uniforms.uBaseColor) puff.material.uniforms.uBaseColor.value.copy(col);
+    }
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(pos, 0x88ccff, 2.5, 600, 0.35);
+    const p = (pos.clone) ? pos.clone() : new THREE.Vector3(pos.x, pos.y, pos.z);
+    if (typeof playSpatialSound === 'function') playSpatialSound('phase_dash', p, { refDistance: 420, maxDistance: 6000 });
+  } catch (_) {}
+}
+// (v46.83) THE GATE IS THE ENDLESS AEGIS BOLT. Owner: "change the rings to the aegis powerup (from
+// endless mode) instead (but will act as a ring, not a powerup), i just like the look of the powerup
+// over the ring, and looks omni directional unlike a ring". One shared library, the exact recipe of
+// _lssEndlessBoltSlot (octahedron core, two additive FX shells, the glow sprite, three god-ray
+// shafts); RaceRing._buildGateMesh instances it per gate, scaled to the gate's diameter. Shared
+// geometries and materials: a gate's destroy() only removes its group - see the v42.xx
+// shared-geometry disposal rule.
+let _rcGateLib = null;
+function _raceGateLib() {
+  if (_rcGateLib) return _rcGateLib;
+  try {
+    const potato = (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+    const lite = !!((typeof _lssEndlessMobile === 'function' && _lssEndlessMobile()) || (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE));
+    const mkFlat = (col, op) => new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false });
+    let sh1, sh2;
+    if (!potato && typeof _makeFXMaterial === 'function') {
+      sh1 = _makeFXMaterial('fireball_cyan');
+      if (sh1.uniforms && sh1.uniforms.uPosScale) sh1.uniforms.uPosScale.value = 1 / 46;
+      sh1.blending = THREE.AdditiveBlending;
+      if (sh1.userData) sh1.userData._timeOffset = Math.random() * 10;
+      sh2 = _makeFXMaterial('plasma_cyan');
+      if (sh2.uniforms && sh2.uniforms.uPosScale) sh2.uniforms.uPosScale.value = 1 / 64;
+      if (sh2.uniforms && sh2.uniforms.uBrightness) sh2.uniforms.uBrightness.value *= 0.7;
+      sh2.blending = THREE.AdditiveBlending;
+      if (sh2.userData) sh2.userData._timeOffset = Math.random() * 10;
+    } else { sh1 = mkFlat(0x33ccff, 0.5); sh2 = mkFlat(0x2288ff, 0.3); }
+    const rayTex = (typeof _lssEndlessBoltRayTexture === 'function') ? _lssEndlessBoltRayTexture() : null;
+    _rcGateLib = {
+      lite,
+      geo: new THREE.OctahedronGeometry(22),
+      shGeo1: new THREE.IcosahedronGeometry(46, 1),
+      shGeo2: new THREE.IcosahedronGeometry(64, 1),
+      rayGeo: new THREE.PlaneGeometry(30, 440),
+      coreMat: new THREE.MeshBasicMaterial({ color: 0xbff2ff, toneMapped: false }),
+      shMat1: sh1, shMat2: sh2,
+      sprMat: new THREE.SpriteMaterial({ map: (typeof _emberFalloffTexture !== 'undefined' ? _emberFalloffTexture : null),
+        color: 0x55bbff, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }),
+      rayMat: new THREE.MeshBasicMaterial({ map: rayTex, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending,
+        depthWrite: false, side: THREE.DoubleSide, fog: false, color: 0x9fdcff }),
+    };
+  } catch (e) { console.warn('[race] gate library failed:', e); _rcGateLib = null; }
+  return _rcGateLib;
+}
 
 // ---- the world queries the placer asks -------------------------------------------------------
 function _rcEarthWorld() {
@@ -74780,6 +74929,7 @@ function _raceCircuitResetProgress() {
     if (typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) for (const n of net.networkPlayers) { if (n) { n._raceIdx = 0; n._raceCleared = false; n._raceClearSaid = false; } }
   } catch (_) {}
   _rc.ringsFirstT = 0;
+  game._raceDeathPos = null; game._raceRespawnT = 0; game._raceNoRespawnSaid = false; game._raceRespawnInPlace = false;
 }
 function _raceCircuitPlaceAll() {
   const C = game.raceCircuit; if (!C || !C.ready) return;
@@ -74809,9 +74959,8 @@ function _raceCircuitSpawnRings() {
   game.poleRings = [];
   for (let i = 0; i < C.rings.length; i++) {
     const r = C.rings[i];
-    const ring = new RaceRing(new THREE.Vector3(r.x, r.y, r.z), r.d);
+    const ring = new RaceRing(new THREE.Vector3(r.x, r.y, r.z), r.d, { gate: true });   // (v46.83) the Aegis bolt look
     ring._cidx = i;
-    ring.orientAxis(new THREE.Vector3(r.tx, 0, r.tz));
     game.poleRings.push(ring);
   }
   _raceCircuitResetProgress();
@@ -74831,7 +74980,16 @@ function _raceCircuitOnLocalCapture(idx) {
   if ((player._raceIdx | 0) !== idx) return;
   player._raceIdx = idx + 1;
   const N = C.rings.length;
-  try { if (typeof playSound === 'function') playSound('firework_pop'); } catch (_) {}
+  try { if (typeof playSound === 'function') playSound('rearm_reset'); } catch (_) {}   // (v46.83) the endless bolt's own collection cue (owner)
+  try {
+    // (v46.83) the bolt's own collection flash, at the gate
+    const r = C.rings[idx];
+    if (r && typeof spawnFXBurst === 'function') {
+      const p = new THREE.Vector3(r.x, r.y, r.z);
+      spawnFXBurst('fireball_cyan', p, Math.max(110, r.d * 0.3), 0.55, { startScale: 0.9, endScale: 2.2 });
+      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(p, 0x55ccff, 3.0, 900, 0.5);
+    }
+  } catch (_) {}
   try {
     if (player._raceIdx >= N) {
       player._raceCleared = true;
@@ -74917,6 +75075,16 @@ function _raceCircuitOnArrive() {
 function _raceCircuitAdopt(C) {
   C.ready = true;
   if (!C.id) { let me = 'solo'; try { if (typeof net !== 'undefined' && net && net.myPeerId) me = String(net.myPeerId); } catch (_) {} C.id = me + ':' + C.seed + ':' + Date.now(); }
+  // (v46.83) the same lap under a new id (the election settled on the other launcher, whose
+  // deterministic overworld lap is ours to the unit): re-tag it and touch nothing else - no
+  // cleared gates, no cursor reset, nobody moved off their line
+  const have = game.raceCircuit;
+  if (have && have.ready && have.kind === C.kind && (have.seed >>> 0) === (C.seed >>> 0) && have.rings.length === C.rings.length) {
+    have.id = C.id; have.fromDecree = !!C.fromDecree;
+    _rc.pendingSince = 0;
+    _rcNet.acked = new Set(); _rcNet.t = 0;
+    return;
+  }
   game.raceCircuit = C;
   _rc.pendingSince = 0;
   _rcNet.acked = new Set(); _rcNet.t = 0;
@@ -74955,7 +75123,8 @@ function _raceCircuitNetEvent(evt, fromPeerId) {
     try {
       const C = _raceCircuitFromPacket(evt);
       const have = game.raceCircuit;
-      const mine = _raceCircuitAuthority() && have && have.ready && !have.fromDecree;
+      // (v46.83) the authority keeps its own lap whatever arrives; everyone else takes the decree
+      const mine = _raceCircuitAuthority() && have && have.ready;
       if (C && !mine && (!have || have.id !== C.id)) _raceCircuitAdopt(C);
       if (net.sendEvent) net.sendEvent({ type: 'race_circuit_ack', id: evt.id }, fromPeerId);
     } catch (_) {}
@@ -75207,32 +75376,50 @@ function _raceCircuitRespawnPoint(idx, team) {
   const r = C.rings[Math.min(idx | 0, C.rings.length) - 1];   // the last gate taken
   return new THREE.Vector3(r.x + r.tx * 260, r.y + 120, r.z + r.tz * 260);
 }
-// A crashed racer comes back after a short hold at the last gate they took, lap progress intact:
-// the pilot through respawnPlayer, our bots as fresh hulls in the same seat (the assault pattern -
-// Bot.die leaves a dead object, so the seat is re-dealt rather than revived).
+// (v46.83) A destroyed racer comes back WHERE IT DIED after 1.5 s, in a puff of smoke, lap progress
+// intact - the pilot through respawnPlayer (the `_raceRespawnInPlace` latch hands it the death
+// point), our bots as fresh hulls in the same seat (the assault pattern - Bot.die leaves a dead
+// object, so the seat is re-dealt rather than revived). Once the finish is EXPOSED nobody comes back.
 function _raceCircuitRespawnTick(dt) {
   if (!_isCircuitRace() || game.state !== 'playing') return;
   const C = game.raceCircuit; if (!C || !C.ready) return;
+  const exposed = _raceFinishExposed();
   if (player.shipState === 'dead') {
+    if (!(game._raceRespawnT > 0) && player.position) game._raceDeathPos = player.position.clone();   // where the hull came apart
     game._raceRespawnT = (game._raceRespawnT || 0) + dt;
-    if (game._raceRespawnT >= RACE_CIRCUIT.respawnDelay) { game._raceRespawnT = 0; try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {} }
-  } else game._raceRespawnT = 0;
+    if (exposed) {
+      if (!game._raceNoRespawnSaid) {
+        game._raceNoRespawnSaid = true;
+        try { if (window.Overlays) Overlays.banner('NO RESPAWN', 'The finish is exposed - that one counted'); } catch (_) {}
+      }
+    } else if (game._raceRespawnT >= RACE_CIRCUIT.respawnDelay) {
+      game._raceRespawnT = 0;
+      game._raceRespawnInPlace = true;
+      try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {}
+      game._raceRespawnInPlace = false;
+      try { _raceRespawnPuff(player.position); } catch (_) {}
+    }
+  } else { game._raceRespawnT = 0; game._raceNoRespawnSaid = false; }
   if (!(typeof _botAuthority === 'function' && _botAuthority())) return;
   if (!Array.isArray(game.entities)) return;
   let changed = false;
   for (let i = game.entities.length - 1; i >= 0; i--) {
     const b = game.entities[i];
     if (!(b instanceof Bot) || b.isProxy || b.alive) continue;
+    if (!b._raceDeathPos && b.position) b._raceDeathPos = b.position.clone();
     b._raceDeadT = (b._raceDeadT || 0) + dt;
+    if (exposed) continue;                                  // final
     if (b._raceDeadT < RACE_CIRCUIT.respawnDelay) continue;
     try {
       const nb = new Bot(b.loadoutKey, b.team, b.id);
       nb._raceIdx = b._raceIdx | 0; nb._raceCleared = !!b._raceCleared;
       nb.kills = b.kills | 0; nb.damageDealt = b.damageDealt || 0;
-      const sp = _raceCircuitRespawnPoint(nb._raceIdx, nb.team);
+      const sp = b._raceDeathPos ? b._raceDeathPos.clone() : _raceCircuitRespawnPoint(nb._raceIdx, nb.team);
+      sp.y += 40;
       nb.position.copy(sp); if (nb.mesh) nb.mesh.position.copy(nb.position);
       try { b.destroy(); } catch (_) {}
       game.entities.splice(i, 1, nb);
+      try { _raceRespawnPuff(nb.position); } catch (_) {}
       changed = true;
     } catch (e) { console.warn('[race] bot respawn failed:', e); }
   }
@@ -75271,7 +75458,21 @@ function _raceCircuitHud() {
     const d = Math.hypot(r.x - player.position.x, r.y - player.position.y, r.z - player.position.z);
     const m = d / (C.upm || 7);
     const dist = (m >= 1000) ? (m / 1000).toFixed(1) + ' KM' : Math.round(m / 10) * 10 + ' M';
-    txt = 'GATE ' + (idx + 1) + ' / ' + N + ' · ' + dist + (r.high ? ' · ▲ HIGH' : '');
+    // (v46.83) which way: the signed bearing off the nose (yaw convention of _faceRaceFirstRing:
+    // forward at yaw y is (-sin y, 0, -cos y)) and a climb/dive cue past 20 degrees of pitch
+    let way = '';
+    try {
+      const yaw = (player.euler && typeof player.euler.y === 'number') ? player.euler.y : 0;
+      const dx = r.x - player.position.x, dz = r.z - player.position.z;
+      const hd = Math.hypot(dx, dz) || 1;
+      let rel = Math.atan2(dx, -dz) - Math.atan2(-Math.sin(yaw), Math.cos(yaw));
+      while (rel > Math.PI) rel -= Math.PI * 2; while (rel < -Math.PI) rel += Math.PI * 2;
+      const deg = Math.round(Math.abs(rel) * 180 / Math.PI / 5) * 5;
+      way = (deg < 8) ? ' · ▲' : (rel < 0 ? (' · ◀ ' + deg + '°') : (' · ' + deg + '° ▶'));
+      const pitch = Math.atan2(r.y - player.position.y, hd) * 180 / Math.PI;
+      if (pitch > 20) way += ' UP'; else if (pitch < -20) way += ' DOWN';
+    } catch (_) {}
+    txt = 'GATE ' + (idx + 1) + ' / ' + N + ' · ' + dist + way + (r.high ? ' · HIGH' : '');
   }
   if (txt !== _rc.hudTxt) { _rc.hudTxt = txt; el.textContent = txt; }
 }
@@ -75290,12 +75491,24 @@ function _raceCircuitMinimap(ctx, _plot, _mmArrow) {
     if (!pen) { ctx.moveTo(p.x, p.y); pen = true; } else ctx.lineTo(p.x, p.y);
   }
   ctx.stroke();
+  // (v46.83) THE LINE TO THE NEXT GATE, always: from the ship (the disc centre) to the gate, clamped
+  // at the rim when it is off the disc. Owner, mid-lap in the second overworld city: "i couldn't
+  // find the next ring, the line to the next one didn't appear on the map" - the lap polyline only
+  // ever joined ON-disc gates, and a transit gate 15 km out left nothing but a small rim arrow.
+  if (idx < N) {
+    const pn = _plot(R[idx].x, R[idx].z);
+    const _gp = 0.45 + Math.sin((game.time || 0) * 4) * 0.25;
+    ctx.strokeStyle = 'rgba(60,224,255,' + _gp + ')'; ctx.lineWidth = 1.2;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(75, 75); ctx.lineTo(pn.x, pn.y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
   for (let i = 0; i < N; i++) {
     const r = R[i]; const p = _plot(r.x, r.z);
     if (i === idx) {
       const _rp = 0.55 + Math.sin((game.time || 0) * 4) * 0.35;
       const col = 'rgba(60,224,255,' + _rp + ')';
-      if (p.off) { _mmArrow(p, col); continue; }
+      if (p.off) { _mmArrow(p, col); ctx.strokeStyle = col; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(p.x, p.y, 5.5, 0, Math.PI * 2); ctx.stroke(); continue; }
       ctx.strokeStyle = col; ctx.lineWidth = 1.6;
       ctx.beginPath(); ctx.arc(p.x, p.y, r.high ? 5 : 4, 0, Math.PI * 2); ctx.stroke();
       if (r.high) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, 1.3, 0, Math.PI * 2); ctx.fill(); }
@@ -75323,6 +75536,10 @@ if (typeof window !== 'undefined') window.__race = {
   skip: function () { const C = game.raceCircuit; if (!C) return 'no circuit'; _raceCircuitOnLocalCapture(player._raceIdx | 0); return player._raceIdx; },
   tp: function (i) { const C = game.raceCircuit; if (!C) return 'no circuit'; const r = C.rings[i | 0]; if (!r) return 'no ring'; player.position.set(r.x - r.tx * 600, r.y, r.z - r.tz * 600); if (player.velocity) player.velocity.set(0, 0, 0); return [Math.round(player.position.x), Math.round(player.position.y), Math.round(player.position.z)]; },
   regen: function () { game.raceCircuit = null; game._raceSeed = null; if (_isEarthCircuit()) _raceCircuitEarthKick(); else _raceCircuitOverworldBuild(); return _raceCircuitReady(); },
+  // (v46.83) test hooks for the respawn rules: kill the pilot / a bot seat, expose the finish
+  kill: function () { try { if (typeof playerDie === 'function') playerDie(null); return player.shipState; } catch (e) { return String(e); } },
+  killBot: function (id) { try { const b = (game.entities || []).find(e => e instanceof Bot && e.id === (id | 0)); if (!b) return 'no bot'; b.takeDamage(1e9, 'player'); return b.alive; } catch (e) { return String(e); } },
+  expose: function () { try { const sh = game.championShell; if (sh) sh.alive = false; return _raceFinishExposed(); } catch (e) { return String(e); } },
 };
 // ===================== end RACE CIRCUITS =====================
 
@@ -86841,9 +87058,12 @@ function respawnPlayer() {
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
     sp = new THREE.Vector3(0, 0, -CAMPAIGN_LEG_HALF_Z);
   }
-  // (v46.82) RACE CIRCUITS: back at the last gate taken, lap progress intact
-  if (typeof _isCircuitRace === 'function' && _isCircuitRace() && (player._raceIdx | 0) > 0) {
-    try { sp = _raceCircuitRespawnPoint(player._raceIdx, player.team); } catch (_) {}
+  // (v46.83) RACE CIRCUITS: back WHERE YOU DIED (the respawn tick's latch), lap progress intact; a
+  // respawn that is not that (a round reset) keeps the spawn pick / start line it was handed.
+  if (typeof _isCircuitRace === 'function' && _isCircuitRace()) {
+    try {
+      if (game._raceRespawnInPlace && game._raceDeathPos) { sp = game._raceDeathPos.clone(); sp.y += 40; game._raceDeathPos = null; }
+    } catch (_) {}
   }
   // (v37.76) CYBERPUNK CITY: the attacker's respawn point is the carrier's DECK, read live off the
   // markers so it is where the deck is now, not where it was at round start. _carrierDeckPoint
@@ -97346,8 +97566,9 @@ function updateRoundSystem(dt) {
     // (v34.68) Assault: unlimited respawns — a wiped fleet does NOT end the
     // round (they respawn and keep playing); only capture or timer ends it.
     const _aslt = _isAssault();
-    // (v46.82) a circuit race ends at the finish field only: crashed racers come back at their last gate
-    const _rcirc = (typeof _isCircuitRace === 'function' && _isCircuitRace());
+    // (v46.82) a circuit race ends at the finish field only while racers still respawn; (v46.83) once
+    // the finish is EXPOSED deaths are final, so a fleet wipe ends it like classic
+    const _rcirc = (typeof _isCircuitRace === 'function' && _isCircuitRace() && !(typeof _raceFinishExposed === 'function' && _raceFinishExposed()));
     if (!game.testMode && !(typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) && (endByChampion || (!championPending && ((!_aslt && !_rcirc && (aliveB === 0 || aliveA === 0)) || endByTimer))) && isResolutionAuthority) {
       let winnerLabel = '';
       // Track which fleet won so the round-end banner can read

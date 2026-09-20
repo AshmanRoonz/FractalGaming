@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.82";
+const LSS_BUILD = "46.83";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -46366,9 +46366,11 @@ function _clearBossPortal() {
 }
 
 class RaceRing {
-  constructor(pos, diameter) {
+  constructor(pos, diameter, opts) {
     this.position = pos.clone();
     this.diameter = diameter || PORTAL_GATE_DIAMETER;
+    this._gate = !!(opts && opts.gate);
+    this._gateT = 0; this._gatePh = Math.random() * 6.283; this._gateParts = null;
     this.alive = true;
     this.captured = false;  
     this.group = null;      
@@ -46378,6 +46380,7 @@ class RaceRing {
     this._buildMesh();
   }
   _buildMesh() {
+    if (this._gate) { this._buildGateMesh(); return; }
     if (this.group) { try { scene.remove(this.group); _disposeMeshTreeDeep(this.group, !this._usedProto); } catch (_) {} this.group = null; this._inner = null; }
     const group = new THREE.Group();
     let inner;
@@ -46403,7 +46406,49 @@ class RaceRing {
     scene.add(group);
     if (this._faceDir) this._applyOrient();
   }
+  _buildGateMesh() {
+    if (this.group) { try { scene.remove(this.group); } catch (_) {} this.group = null; this._inner = null; this._gateParts = null; }
+    const lib = (typeof _raceGateLib === 'function') ? _raceGateLib() : null;
+    if (!lib) return;
+    const grp = new THREE.Group();
+    const core = new THREE.Mesh(lib.geo, lib.coreMat); core.renderOrder = 1; grp.add(core);
+    const sh1 = new THREE.Mesh(lib.shGeo1, lib.shMat1); sh1.renderOrder = 2; grp.add(sh1);
+    let sh2 = null, spr = null, rig = null;
+    if (!lib.lite) {
+      sh2 = new THREE.Mesh(lib.shGeo2, lib.shMat2); sh2.renderOrder = 2; grp.add(sh2);
+      spr = new THREE.Sprite(lib.sprMat); spr.scale.set(170, 170, 1); grp.add(spr);
+      rig = new THREE.Group();
+      for (let r = 0; r < 3; r++) {
+        const hold = new THREE.Group();
+        hold.rotation.y = r * 2.0944;
+        hold.rotation.z = 0.55;
+        const m = new THREE.Mesh(lib.rayGeo, lib.rayMat);
+        m.position.y = 190;
+        m.renderOrder = 2;
+        hold.add(m);
+        rig.add(hold);
+      }
+      grp.add(rig);
+    }
+    grp.scale.setScalar(this.diameter / 300);
+    grp.position.copy(this.position);
+    scene.add(grp);
+    this.group = grp; this._inner = core; this._gateParts = { core, sh1, sh2, spr, rig };
+    this._usedProto = true;
+  }
+  _animateGate(dt) {
+    const P = this._gateParts; if (!P) return;
+    this._gateT += dt;
+    const tt = this._gateT, ph = this._gatePh;
+    const wob = 1 + 0.16 * Math.cos(tt * 7.3 + ph) + 0.11 * Math.cos(tt * 12.7 + ph * 2.3) + 0.06 * Math.cos(tt * 23.1 + ph * 4.1);
+    if (P.core) P.core.scale.setScalar(wob);
+    if (P.sh1) { P.sh1.rotation.y += dt * 1.9; P.sh1.rotation.x = 0.6 * Math.cos(tt * 0.9 + ph); }
+    if (P.sh2) { P.sh2.rotation.y -= dt * 2.6; P.sh2.rotation.z = 0.8 * Math.cos(tt * 1.3 + ph); }
+    if (P.rig) { P.rig.rotation.y += dt * 0.45; P.rig.rotation.x = 0.10 * Math.cos(tt * 0.7 + ph); }
+    if (this.group) this.group.position.y = this.position.y + Math.sin(tt * 1.8 + ph) * 12;
+  }
   orientAxis(dir) {
+    if (this._gate) return;   // (v46.83) a bolt has no axis
     if (!dir || dir.lengthSq() < 1) return;
     this._faceDir = dir.clone().normalize();
     this._applyOrient();
@@ -46414,8 +46459,8 @@ class RaceRing {
   }
   update(dt) {
     if (!this.alive) return;
-    if (!this._usedProto && _cyanRingProto) this._buildMesh();   
-    if (this._inner) this._inner.rotation.z += 0.5 * dt;
+    if (!this._gate && !this._usedProto && _cyanRingProto) this._buildMesh();   
+    if (this._gate) this._animateGate(dt); else if (this._inner) this._inner.rotation.z += 0.5 * dt;
     if (this._cidx != null) {
       const _want = (typeof player !== 'undefined' && player) ? (player._raceIdx | 0) : -1;
       const _live = (this._cidx === _want);
@@ -46441,6 +46486,7 @@ class RaceRing {
   }
   destroy() {
     this.alive = false;
+    if (this._gate) { if (this.group) { try { scene.remove(this.group); } catch (_) {} } this.group = null; this._inner = null; this._gateParts = null; return; }
     if (this.group) { try { scene.remove(this.group); _disposeMeshTreeDeep(this.group, !this._usedProto); } catch (_) {} this.group = null; this._inner = null; }
   }
 }
@@ -46521,7 +46567,7 @@ const RACE_CIRCUIT = {
            clearU: 90, searchU: 1100, cityInnerR: 0.62, startBackU: 2600 },
   captureK: 0.45,        // player: pass within this fraction of the diameter of the centre
   botCaptureK: 0.62,     // bots thread worse than pilots; the gate is more forgiving for them
-  respawnDelay: 4,       // seconds dead before a racer comes back at their last ring
+  respawnDelay: 1.5,     // (v46.83) seconds dead before a racer comes back WHERE they died (owner: "after 1.5s")
   decreeEvery: 1.5, reqEvery: 2.0,
   mmRangeEarth: 5200, mmRangeOw: 14000,
 };
@@ -46529,7 +46575,7 @@ const _rcScan = { clear: Infinity, roof: -Infinity, n: 0 };
 const _rcSeen = new Set();
 const _rcV = new THREE.Vector3(), _rcV2 = new THREE.Vector3(), _rcV3 = new THREE.Vector3();
 const _rcNet = { t: 0, reqT: 0, acked: null };
-const _rc = { pendingSince: 0, playingAt: null, hudEl: null, hudTxt: '', hudTop: 0, hudVp: 0, ringsFirstT: 0 };
+const _rc = { pendingSince: 0, playingAt: null, hudEl: null, hudTxt: '', hudTop: 0, hudVp: 0, ringsFirstT: 0, auth: null };
 
 function _raceCircuitKind() {
   try {
@@ -46548,7 +46594,86 @@ function _lssHubWorld() {
   } catch (_) { return false; }
 }
 function _raceCircuitReady() { const C = (typeof game !== 'undefined' && game) ? game.raceCircuit : null; return !!(C && C.ready && C.rings && C.rings.length); }
-function _raceCircuitAuthority() { try { return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : true; } catch (_) { return true; } }
+function _raceCircuitAuthority() {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active) return true;
+    let peers = []; try { peers = (typeof nonJudgePeerIds === 'function') ? nonJudgePeerIds() : []; } catch (_) {}
+    if (!peers.length) { _rc.auth = true; return true; }
+    const now = (typeof performance !== 'undefined') ? performance.now() : 0;
+    const mine = net.roomJoinedAt ? Math.max(0, now - net.roomJoinedAt) : 0;
+    const cands = [{ id: String(net.myPeerId), inRoom: mine }];
+    let unknown = false;
+    for (const id of peers) {
+      let v = null;
+      try { const m = net._peerModes && net._peerModes.get(id); if (m && typeof m.inRoom === 'number' && m.inRoom >= 0) v = m.inRoom + Math.max(0, now - (m.at || now)); } catch (_) {}
+      if (v == null) { try { const pr = net.peers && net.peers.get(id); if (pr && typeof pr.inRoom === 'number' && pr.inRoom >= 0) v = pr.inRoom + Math.max(0, now - (pr.inRoomAt || now)); } catch (_) {} }
+      if (v == null) { unknown = true; continue; }
+      cands.push({ id: String(id), inRoom: v });
+    }
+    if (unknown) return (_rc.auth === true);
+    cands.sort((a, b) => (Math.abs(b.inRoom - a.inRoom) > 1500) ? (b.inRoom - a.inRoom) : (a.id < b.id ? -1 : (a.id > b.id ? 1 : 0)));
+    _rc.auth = (cands[0].id === String(net.myPeerId));
+    return _rc.auth;
+  } catch (_) { return (_rc.auth === true); }
+}
+
+function _raceFinishExposed() {
+  const f = (typeof game !== 'undefined' && game) ? game.championField : null;
+  if (!f || !f.alive) return false;
+  const sh = game.championShell;
+  return !(sh && sh.alive);
+}
+function _raceRespawnPuff(pos) {
+  try {
+    if (typeof spawnFXBurst !== 'function' || !pos) return;
+    const col = new THREE.Color(0xbfe6ff);
+    for (let i = 0; i < 12; i++) {
+      const a = Math.random() * 6.283, r = Math.random() * 70;
+      const puff = spawnFXBurst('cloud', { x: pos.x + Math.cos(a) * r, y: pos.y + (Math.random() - 0.5) * 60, z: pos.z + Math.sin(a) * r },
+        34 + Math.random() * 16, 0.9 + Math.random() * 0.5, { startScale: 0.25, endScale: 1.6, segs: 14 });
+      if (puff && puff.material && puff.material.uniforms && puff.material.uniforms.uBaseColor) puff.material.uniforms.uBaseColor.value.copy(col);
+    }
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(pos, 0x88ccff, 2.5, 600, 0.35);
+    const p = (pos.clone) ? pos.clone() : new THREE.Vector3(pos.x, pos.y, pos.z);
+    if (typeof playSpatialSound === 'function') playSpatialSound('phase_dash', p, { refDistance: 420, maxDistance: 6000 });
+  } catch (_) {}
+}
+let _rcGateLib = null;
+function _raceGateLib() {
+  if (_rcGateLib) return _rcGateLib;
+  try {
+    const potato = (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
+    const lite = !!((typeof _lssEndlessMobile === 'function' && _lssEndlessMobile()) || (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE));
+    const mkFlat = (col, op) => new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false });
+    let sh1, sh2;
+    if (!potato && typeof _makeFXMaterial === 'function') {
+      sh1 = _makeFXMaterial('fireball_cyan');
+      if (sh1.uniforms && sh1.uniforms.uPosScale) sh1.uniforms.uPosScale.value = 1 / 46;
+      sh1.blending = THREE.AdditiveBlending;
+      if (sh1.userData) sh1.userData._timeOffset = Math.random() * 10;
+      sh2 = _makeFXMaterial('plasma_cyan');
+      if (sh2.uniforms && sh2.uniforms.uPosScale) sh2.uniforms.uPosScale.value = 1 / 64;
+      if (sh2.uniforms && sh2.uniforms.uBrightness) sh2.uniforms.uBrightness.value *= 0.7;
+      sh2.blending = THREE.AdditiveBlending;
+      if (sh2.userData) sh2.userData._timeOffset = Math.random() * 10;
+    } else { sh1 = mkFlat(0x33ccff, 0.5); sh2 = mkFlat(0x2288ff, 0.3); }
+    const rayTex = (typeof _lssEndlessBoltRayTexture === 'function') ? _lssEndlessBoltRayTexture() : null;
+    _rcGateLib = {
+      lite,
+      geo: new THREE.OctahedronGeometry(22),
+      shGeo1: new THREE.IcosahedronGeometry(46, 1),
+      shGeo2: new THREE.IcosahedronGeometry(64, 1),
+      rayGeo: new THREE.PlaneGeometry(30, 440),
+      coreMat: new THREE.MeshBasicMaterial({ color: 0xbff2ff, toneMapped: false }),
+      shMat1: sh1, shMat2: sh2,
+      sprMat: new THREE.SpriteMaterial({ map: (typeof _emberFalloffTexture !== 'undefined' ? _emberFalloffTexture : null),
+        color: 0x55bbff, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }),
+      rayMat: new THREE.MeshBasicMaterial({ map: rayTex, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending,
+        depthWrite: false, side: THREE.DoubleSide, fog: false, color: 0x9fdcff }),
+    };
+  } catch (e) { console.warn('[race] gate library failed:', e); _rcGateLib = null; }
+  return _rcGateLib;
+}
 
 function _rcEarthWorld() {
   try { return (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active) ? _lssGmaps.tiles : null; } catch (_) { return null; }
@@ -46844,6 +46969,7 @@ function _raceCircuitResetProgress() {
     if (typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) for (const n of net.networkPlayers) { if (n) { n._raceIdx = 0; n._raceCleared = false; n._raceClearSaid = false; } }
   } catch (_) {}
   _rc.ringsFirstT = 0;
+  game._raceDeathPos = null; game._raceRespawnT = 0; game._raceNoRespawnSaid = false; game._raceRespawnInPlace = false;
 }
 function _raceCircuitPlaceAll() {
   const C = game.raceCircuit; if (!C || !C.ready) return;
@@ -46871,9 +46997,8 @@ function _raceCircuitSpawnRings() {
   game.poleRings = [];
   for (let i = 0; i < C.rings.length; i++) {
     const r = C.rings[i];
-    const ring = new RaceRing(new THREE.Vector3(r.x, r.y, r.z), r.d);
+    const ring = new RaceRing(new THREE.Vector3(r.x, r.y, r.z), r.d, { gate: true });   // (v46.83) the Aegis bolt look
     ring._cidx = i;
-    ring.orientAxis(new THREE.Vector3(r.tx, 0, r.tz));
     game.poleRings.push(ring);
   }
   _raceCircuitResetProgress();
@@ -46893,7 +47018,15 @@ function _raceCircuitOnLocalCapture(idx) {
   if ((player._raceIdx | 0) !== idx) return;
   player._raceIdx = idx + 1;
   const N = C.rings.length;
-  try { if (typeof playSound === 'function') playSound('firework_pop'); } catch (_) {}
+  try { if (typeof playSound === 'function') playSound('rearm_reset'); } catch (_) {}   // (v46.83) the endless bolt's own collection cue (owner)
+  try {
+    const r = C.rings[idx];
+    if (r && typeof spawnFXBurst === 'function') {
+      const p = new THREE.Vector3(r.x, r.y, r.z);
+      spawnFXBurst('fireball_cyan', p, Math.max(110, r.d * 0.3), 0.55, { startScale: 0.9, endScale: 2.2 });
+      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(p, 0x55ccff, 3.0, 900, 0.5);
+    }
+  } catch (_) {}
   try {
     if (player._raceIdx >= N) {
       player._raceCleared = true;
@@ -46972,6 +47105,13 @@ function _raceCircuitOnArrive() {
 function _raceCircuitAdopt(C) {
   C.ready = true;
   if (!C.id) { let me = 'solo'; try { if (typeof net !== 'undefined' && net && net.myPeerId) me = String(net.myPeerId); } catch (_) {} C.id = me + ':' + C.seed + ':' + Date.now(); }
+  const have = game.raceCircuit;
+  if (have && have.ready && have.kind === C.kind && (have.seed >>> 0) === (C.seed >>> 0) && have.rings.length === C.rings.length) {
+    have.id = C.id; have.fromDecree = !!C.fromDecree;
+    _rc.pendingSince = 0;
+    _rcNet.acked = new Set(); _rcNet.t = 0;
+    return;
+  }
   game.raceCircuit = C;
   _rc.pendingSince = 0;
   _rcNet.acked = new Set(); _rcNet.t = 0;
@@ -47009,7 +47149,7 @@ function _raceCircuitNetEvent(evt, fromPeerId) {
     try {
       const C = _raceCircuitFromPacket(evt);
       const have = game.raceCircuit;
-      const mine = _raceCircuitAuthority() && have && have.ready && !have.fromDecree;
+      const mine = _raceCircuitAuthority() && have && have.ready;
       if (C && !mine && (!have || have.id !== C.id)) _raceCircuitAdopt(C);
       if (net.sendEvent) net.sendEvent({ type: 'race_circuit_ack', id: evt.id }, fromPeerId);
     } catch (_) {}
@@ -47232,26 +47372,43 @@ function _raceCircuitRespawnPoint(idx, team) {
 function _raceCircuitRespawnTick(dt) {
   if (!_isCircuitRace() || game.state !== 'playing') return;
   const C = game.raceCircuit; if (!C || !C.ready) return;
+  const exposed = _raceFinishExposed();
   if (player.shipState === 'dead') {
+    if (!(game._raceRespawnT > 0) && player.position) game._raceDeathPos = player.position.clone();   // where the hull came apart
     game._raceRespawnT = (game._raceRespawnT || 0) + dt;
-    if (game._raceRespawnT >= RACE_CIRCUIT.respawnDelay) { game._raceRespawnT = 0; try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {} }
-  } else game._raceRespawnT = 0;
+    if (exposed) {
+      if (!game._raceNoRespawnSaid) {
+        game._raceNoRespawnSaid = true;
+        try { if (window.Overlays) Overlays.banner('NO RESPAWN', 'The finish is exposed - that one counted'); } catch (_) {}
+      }
+    } else if (game._raceRespawnT >= RACE_CIRCUIT.respawnDelay) {
+      game._raceRespawnT = 0;
+      game._raceRespawnInPlace = true;
+      try { if (typeof respawnPlayer === 'function') respawnPlayer(); } catch (_) {}
+      game._raceRespawnInPlace = false;
+      try { _raceRespawnPuff(player.position); } catch (_) {}
+    }
+  } else { game._raceRespawnT = 0; game._raceNoRespawnSaid = false; }
   if (!(typeof _botAuthority === 'function' && _botAuthority())) return;
   if (!Array.isArray(game.entities)) return;
   let changed = false;
   for (let i = game.entities.length - 1; i >= 0; i--) {
     const b = game.entities[i];
     if (!(b instanceof Bot) || b.isProxy || b.alive) continue;
+    if (!b._raceDeathPos && b.position) b._raceDeathPos = b.position.clone();
     b._raceDeadT = (b._raceDeadT || 0) + dt;
+    if (exposed) continue;                                  // final
     if (b._raceDeadT < RACE_CIRCUIT.respawnDelay) continue;
     try {
       const nb = new Bot(b.loadoutKey, b.team, b.id);
       nb._raceIdx = b._raceIdx | 0; nb._raceCleared = !!b._raceCleared;
       nb.kills = b.kills | 0; nb.damageDealt = b.damageDealt || 0;
-      const sp = _raceCircuitRespawnPoint(nb._raceIdx, nb.team);
+      const sp = b._raceDeathPos ? b._raceDeathPos.clone() : _raceCircuitRespawnPoint(nb._raceIdx, nb.team);
+      sp.y += 40;
       nb.position.copy(sp); if (nb.mesh) nb.mesh.position.copy(nb.position);
       try { b.destroy(); } catch (_) {}
       game.entities.splice(i, 1, nb);
+      try { _raceRespawnPuff(nb.position); } catch (_) {}
       changed = true;
     } catch (e) { console.warn('[race] bot respawn failed:', e); }
   }
@@ -47288,7 +47445,19 @@ function _raceCircuitHud() {
     const d = Math.hypot(r.x - player.position.x, r.y - player.position.y, r.z - player.position.z);
     const m = d / (C.upm || 7);
     const dist = (m >= 1000) ? (m / 1000).toFixed(1) + ' KM' : Math.round(m / 10) * 10 + ' M';
-    txt = 'GATE ' + (idx + 1) + ' / ' + N + ' · ' + dist + (r.high ? ' · ▲ HIGH' : '');
+    let way = '';
+    try {
+      const yaw = (player.euler && typeof player.euler.y === 'number') ? player.euler.y : 0;
+      const dx = r.x - player.position.x, dz = r.z - player.position.z;
+      const hd = Math.hypot(dx, dz) || 1;
+      let rel = Math.atan2(dx, -dz) - Math.atan2(-Math.sin(yaw), Math.cos(yaw));
+      while (rel > Math.PI) rel -= Math.PI * 2; while (rel < -Math.PI) rel += Math.PI * 2;
+      const deg = Math.round(Math.abs(rel) * 180 / Math.PI / 5) * 5;
+      way = (deg < 8) ? ' · ▲' : (rel < 0 ? (' · ◀ ' + deg + '°') : (' · ' + deg + '° ▶'));
+      const pitch = Math.atan2(r.y - player.position.y, hd) * 180 / Math.PI;
+      if (pitch > 20) way += ' UP'; else if (pitch < -20) way += ' DOWN';
+    } catch (_) {}
+    txt = 'GATE ' + (idx + 1) + ' / ' + N + ' · ' + dist + way + (r.high ? ' · HIGH' : '');
   }
   if (txt !== _rc.hudTxt) { _rc.hudTxt = txt; el.textContent = txt; }
 }
@@ -47304,12 +47473,20 @@ function _raceCircuitMinimap(ctx, _plot, _mmArrow) {
     if (!pen) { ctx.moveTo(p.x, p.y); pen = true; } else ctx.lineTo(p.x, p.y);
   }
   ctx.stroke();
+  if (idx < N) {
+    const pn = _plot(R[idx].x, R[idx].z);
+    const _gp = 0.45 + Math.sin((game.time || 0) * 4) * 0.25;
+    ctx.strokeStyle = 'rgba(60,224,255,' + _gp + ')'; ctx.lineWidth = 1.2;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath(); ctx.moveTo(75, 75); ctx.lineTo(pn.x, pn.y); ctx.stroke();
+    ctx.setLineDash([]);
+  }
   for (let i = 0; i < N; i++) {
     const r = R[i]; const p = _plot(r.x, r.z);
     if (i === idx) {
       const _rp = 0.55 + Math.sin((game.time || 0) * 4) * 0.35;
       const col = 'rgba(60,224,255,' + _rp + ')';
-      if (p.off) { _mmArrow(p, col); continue; }
+      if (p.off) { _mmArrow(p, col); ctx.strokeStyle = col; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(p.x, p.y, 5.5, 0, Math.PI * 2); ctx.stroke(); continue; }
       ctx.strokeStyle = col; ctx.lineWidth = 1.6;
       ctx.beginPath(); ctx.arc(p.x, p.y, r.high ? 5 : 4, 0, Math.PI * 2); ctx.stroke();
       if (r.high) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, 1.3, 0, Math.PI * 2); ctx.fill(); }
@@ -47336,6 +47513,9 @@ if (typeof window !== 'undefined') window.__race = {
   skip: function () { const C = game.raceCircuit; if (!C) return 'no circuit'; _raceCircuitOnLocalCapture(player._raceIdx | 0); return player._raceIdx; },
   tp: function (i) { const C = game.raceCircuit; if (!C) return 'no circuit'; const r = C.rings[i | 0]; if (!r) return 'no ring'; player.position.set(r.x - r.tx * 600, r.y, r.z - r.tz * 600); if (player.velocity) player.velocity.set(0, 0, 0); return [Math.round(player.position.x), Math.round(player.position.y), Math.round(player.position.z)]; },
   regen: function () { game.raceCircuit = null; game._raceSeed = null; if (_isEarthCircuit()) _raceCircuitEarthKick(); else _raceCircuitOverworldBuild(); return _raceCircuitReady(); },
+  kill: function () { try { if (typeof playerDie === 'function') playerDie(null); return player.shipState; } catch (e) { return String(e); } },
+  killBot: function (id) { try { const b = (game.entities || []).find(e => e instanceof Bot && e.id === (id | 0)); if (!b) return 'no bot'; b.takeDamage(1e9, 'player'); return b.alive; } catch (e) { return String(e); } },
+  expose: function () { try { const sh = game.championShell; if (sh) sh.alive = false; return _raceFinishExposed(); } catch (e) { return String(e); } },
 };
 
 function _monsterRoundReset() {
@@ -54897,8 +55077,10 @@ function respawnPlayer() {
   if (typeof LSS !== 'undefined' && LSS.MODE === 'campaign' && typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
     sp = new THREE.Vector3(0, 0, -CAMPAIGN_LEG_HALF_Z);
   }
-  if (typeof _isCircuitRace === 'function' && _isCircuitRace() && (player._raceIdx | 0) > 0) {
-    try { sp = _raceCircuitRespawnPoint(player._raceIdx, player.team); } catch (_) {}
+  if (typeof _isCircuitRace === 'function' && _isCircuitRace()) {
+    try {
+      if (game._raceRespawnInPlace && game._raceDeathPos) { sp = game._raceDeathPos.clone(); sp.y += 40; game._raceDeathPos = null; }
+    } catch (_) {}
   }
   if (game._cyber && game._cyber.armed) {
     try {
@@ -61878,7 +62060,7 @@ function updateRoundSystem(dt) {
     const isResolutionAuthority = !net.active || amStasisOwner();
     const championPending = (game.championResult === 'A' || game.championResult === 'B');
     const _aslt = _isAssault();
-    const _rcirc = (typeof _isCircuitRace === 'function' && _isCircuitRace());
+    const _rcirc = (typeof _isCircuitRace === 'function' && _isCircuitRace() && !(typeof _raceFinishExposed === 'function' && _raceFinishExposed()));
     if (!game.testMode && !(typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'endless')) && (endByChampion || (!championPending && ((!_aslt && !_rcirc && (aliveB === 0 || aliveA === 0)) || endByTimer))) && isResolutionAuthority) {
       let winnerLabel = '';
       let winnerTeam = LSS.TEAM_FLEET_A;
