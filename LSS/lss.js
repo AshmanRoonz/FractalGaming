@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.87";
+const LSS_BUILD = "46.89";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -5272,7 +5272,7 @@ function _visibleMapKeys() {
     const isRaceMap = k.startsWith('race_');
     const isAssaultMap = k.startsWith('assault_');
     const isGmapsSlot = k === 'gmaps_user';
-    if (LSS.MODE === 'assault') return isAssaultMap;
+    if (LSS.MODE === 'assault') return isAssaultMap || isGmapsSlot;
     if (isGmapsSlot) return true;
     if (isAssaultMap) return false;
     return isRace ? isRaceMap : !isRaceMap;
@@ -43915,15 +43915,39 @@ function _enforceDetachedGasBudget() {
 }
 
 function _lssEarthWarmOnce(w) {
-  if (!w || w.__warmed) return;
-  w.__warmed = true;
-  try {
-    if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' ||
-        !scene || typeof camera === 'undefined' || !camera) return;
+  if (!w || w.__warmed || w.__warming) return;
+  w.__warming = true;
+  const _done = () => { try { w.__warmed = true; w.__warming = false; } catch (_) {} };
+  if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' ||
+      !scene || typeof camera === 'undefined' || !camera) { _done(); return; }
+  (async () => {
     const t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
-    const p0 = renderer.info.programs ? renderer.info.programs.length : 0;
-    try { renderer.compile(scene, camera); } catch (_) {}
-    try { renderer.render(scene, camera); } catch (_) {}
+    const _np = () => (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+    const p0 = _np();
+    let forks = 0, drained = 0;
+    const _legacy = () => { try { return !!(typeof window !== 'undefined' && window.__earthWarmLegacy); } catch (_) { return false; } };
+    const _pass = async (capMs) => {
+      const _a = _np();
+      if (_legacy()) {
+        try { renderer.compile(scene, camera); } catch (_) {}
+        try { renderer.render(scene, camera); } catch (_) {}
+        try { if (typeof _warmupYield === 'function') await _warmupYield(); } catch (_) {}
+        forks += Math.max(0, _np() - _a);
+        return;
+      }
+      try { if (typeof renderFrame === 'function') renderFrame(); } catch (_) {}
+      try { if (typeof _warmupYield === 'function') await _warmupYield(); } catch (_) {}
+      const _b = _np();
+      if (_b > _a) {
+        forks += (_b - _a);
+        try { if (typeof _drainProgramLinks === 'function') await _drainProgramLinks(capMs, null, 'earthWarm'); } catch (_) {}
+        drained++;
+      }
+      try { if (typeof renderFrame === 'function') renderFrame(); } catch (_) {}
+      try { if (typeof _warmupYield === 'function') await _warmupYield(); } catch (_) {}
+    };
+    try { await _pass(4000); } catch (_) {}
+    let held = [];
     try {
       const src = [];
       if (typeof _LSS_EL !== 'undefined' && _LSS_EL) {
@@ -43937,25 +43961,26 @@ function _lssEarthWarmOnce(w) {
       if (src.length) {
         const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
         const at = camera.position.clone().addScaledVector(fwd, 600);
-        const held = [];
         for (const o of src) {
           if (!o || o.parent) continue;            // already somewhere; leave it
           held.push([o, o.position.clone(), o.visible]);
           o.position.copy(at); o.visible = true;
           scene.add(o);
         }
-        if (held.length) {
-          try { renderer.compile(scene, camera); } catch (_) {}
-          try { renderer.render(scene, camera); } catch (_) {}
-          for (const [o, p, v] of held) { scene.remove(o); o.position.copy(p); o.visible = v; }
-        }
+        if (held.length) await _pass(3000);
         try { window.__earthWarmLife = held.length; } catch (_) {}
       }
     } catch (e) { console.warn('[earth-warm] life warm skipped:', e); }
-    const p1 = renderer.info.programs ? renderer.info.programs.length : 0;
-    console.log('[earth-warm] ' + Math.round(((typeof performance !== 'undefined') ? performance.now() : 0) - t0)
-      + ' ms behind the curtain, programs ' + p0 + ' -> ' + p1);
-  } catch (e) { console.warn('[earth-warm] failed:', e); }
+    try { for (const [o, q, v] of held) { scene.remove(o); o.position.copy(q); o.visible = v; } } catch (_) {}
+    const p1 = _np();
+    try {
+      console.log('[earth-warm] ' + Math.round(((typeof performance !== 'undefined') ? performance.now() : 0) - t0)
+        + ' ms behind the curtain, programs ' + p0 + ' -> ' + p1
+        + ', forks ' + forks + ' drained in ' + drained + ' pass(es)'
+        + (window.__linkDrain ? (' [last drain ' + window.__linkDrain.ms + ' ms, primed ' + window.__linkDrain.primed + ']') : ''));
+    } catch (_) {}
+    _done();
+  })().catch((e) => { try { console.warn('[earth-warm] failed:', e); } catch (_) {} _done(); });
 }
 
 function _lssWorldUnitsPerMetre() {
@@ -61976,6 +62001,7 @@ function updateRoundSystem(dt) {
       try { _warmRealCombatFX(); } catch (_) {}
     }
     if (game.warmupTimer <= 0 && !selectActive && !game._swapStaging && !game._rrStaging &&
+        !(typeof _lssEarthCurtainUp === 'function' && _lssEarthCurtainUp()) &&
         !(game.arenaField && _arenaMesh.building && (performance.now() - _arenaMesh.t0) < 60000)) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
@@ -67453,6 +67479,15 @@ const _LSS_SETTLE_MS = 260;       // quiet time required before lifting
 const _LSS_SETTLE_MAX = 4000;     // never hold longer than this for settling alone
 const _LSS_SETTLE_JUMP = 40;      // world units; below this is drift, not a teleport
 const _LSS_EARTH_CURTAIN_MAX_MS = 45000;
+function _lssEarthCurtainUp() {
+  try {
+    if (typeof document === 'undefined') return false;
+    const _cov = document.getElementById('lss-loading-overlay');
+    if (!_cov || !_cov.classList.contains('active')) return false;
+    if (typeof _lssEarthCurtainArmed !== 'function' || !_lssEarthCurtainArmed()) return false;
+    return (!_lssEarthCurtainT0 || (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS);
+  } catch (_) { return false; }
+}
 function _lssEarthCurtainArmed() {
   try {
     if (typeof game === 'undefined' || !game) return false;
@@ -87827,7 +87862,8 @@ function _flybyTick(dt) {
   const t = ctx.currentTime;
   const _on = (typeof window === 'undefined' || window.__flyby !== false) &&
     !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
-  const _live = _on && typeof game !== 'undefined' && game &&
+  const _held = (typeof _loadingAudioHold !== 'undefined' && _loadingAudioHold);
+  const _live = _on && !_held && typeof game !== 'undefined' && game &&
     (game.state === 'playing' || game.state === 'warmup') &&
     typeof camera !== 'undefined' && camera;
   const maxV = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 2 : 3;
@@ -93904,16 +93940,65 @@ async function _lssGmapsBuildLevel(level) {
         new Promise((r) => setTimeout(r, (typeof level.loadTimeoutMs === 'number') ? level.loadTimeoutMs : 25000))
       ]);
     } catch (_) {}
+    const _asltGmaps = (typeof LSS !== 'undefined' && LSS.MODE === 'assault');
     try {
       if (typeof tiles.spawnPoints === 'function') {
-        const _sp = tiles.spawnPoints(24);
+        const _sp = tiles.spawnPoints(_asltGmaps ? 64 : 24);
         if (_sp && _sp.length) {
           game.corridorPoints = _sp;
+          if (_asltGmaps && _sp.length >= 4) {
+            const _r2 = (q) => q.x * q.x + q.z * q.z;
+            const _byR = _sp.slice().sort((a, b) => _r2(a) - _r2(b));
+            const _anchor = _byR[Math.floor(_byR.length * 0.5)];
+            const _fx = _anchor.x, _fz = _anchor.z, _fieldY = _anchor.y;
+            const _fLen = Math.max(1, Math.hypot(_fx, _fz));
+            const _ux = _fx / _fLen, _uz = _fz / _fLen;           // origin -> field, the contest axis
+            const _proj = (q) => q.x * _ux + q.z * _uz;
+            const _byP = _sp.slice().sort((a, b) => _proj(b) - _proj(a));
+            const _n = Math.max(2, Math.floor(_byP.length * 0.3));
+            const _def = _byP.slice(0, _n);                       // deepest into the field's half
+            const _atk = _byP.slice(_byP.length - _n);            // furthest the other way
+            for (const q of _sp) q.team = null;                   // the middle is neutral ground
+            for (const q of _def) q.team = 'A';
+            for (const q of _atk) q.team = 'B';
+            const _ctr = (arr) => {
+              let x = 0, y = 0, z = 0;
+              for (const q of arr) { x += q.x; y += q.y; z += q.z; }
+              return { x: x / arr.length, y: y / arr.length, z: z / arr.length };
+            };
+            const _ca = _ctr(_def), _cb = _ctr(_atk);
+            game.sdfRoomData = [
+              { id: 'spawn_a', team: 'A', side: 'A', x: _ca.x, y: _ca.y, z: _ca.z, r: 420 },
+              { id: 'spawn_b', team: 'B', side: 'B', x: _cb.x, y: _cb.y, z: _cb.z, r: 420 },
+              { id: 'field', team: null, side: 'A', champion: true, x: _fx, y: _fieldY, z: _fz, r: 520 },
+            ];
+            try {
+              console.log('[assault-gmaps] field', Math.round(_fx), Math.round(_fieldY), Math.round(_fz),
+                          '| defenders', _def.length, 'attackers', _atk.length,
+                          '| ends', Math.round(Math.hypot(_ca.x - _cb.x, _ca.z - _cb.z)), 'apart');
+            } catch (_) {}
+          }
           try {
-            if (typeof player !== 'undefined' && player && player.position) {
+            if (_asltGmaps && typeof player !== 'undefined' && player && player.position &&
+                typeof getValidSpawnPoint === 'function') {
+              const _tc = (typeof _assaultSpawnSide === 'function' && typeof player.team !== 'undefined')
+                ? _assaultSpawnSide(player.team) : 'A';
+              const _ap = getValidSpawnPoint(_tc);
+              if (_ap) {
+                player.position.copy(_ap);
+                if (player.velocity) player.velocity.set(0, 0, 0);
+                try { if (typeof _spawnPickSet === 'function') _spawnPickSet(_ap); } catch (_) {}
+                console.log('[assault-gmaps] player dropped on side ' + _tc,
+                            Math.round(_ap.x), Math.round(_ap.y), Math.round(_ap.z));
+              }
+            }
+          } catch (e) { console.warn('[assault-gmaps] spawn re-pick failed:', e); }
+          try {
+            if (!_asltGmaps && typeof player !== 'undefined' && player && player.position) {
               const _s0 = _sp[0];
               player.position.set(_s0.x, _s0.y, _s0.z);
               if (player.velocity) player.velocity.set(0, 0, 0);
+              try { if (typeof _spawnPickSet === 'function') _spawnPickSet(player.position); } catch (_) {}
               console.log('[lss-earth] player placed at spawn',
                           Math.round(_s0.x), Math.round(_s0.y), Math.round(_s0.z));
             }
@@ -94068,7 +94153,9 @@ function _lssGmapsTick(dt) {
       const _f = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
       t.streamUpdate(_f);
       __pmark('earth:stream');   // patch streaming + the v45.95 publish drain
-      try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
+      if (!(typeof _lssEarthCurtainUp === 'function' && _lssEarthCurtainUp())) {
+        try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
+      }
       __pmark('earth:life');     // traffic, carriers, monsters
     } else if (typeof t.publishTick === 'function') {
       try {

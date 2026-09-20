@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.87";
+const LSS_BUILD = "46.89";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -14617,7 +14617,11 @@ function _visibleMapKeys() {
     const isGmapsSlot = k === 'gmaps_user';
     // (v34.68) Assault carousels list ONLY assault_ maps (their side-'A'
     // defender end + champion room are load-bearing); other modes hide them.
-    if (LSS.MODE === 'assault') return isAssaultMap;
+    // (v46.89) ...plus Custom Location. Owner: "we should put custom location into assault mode".
+    // The parenthetical above is exactly why this needed more than a carousel entry: a gmaps level
+    // ships `rooms: []`, so the defender end and the champion room have to be SYNTHESISED at build
+    // time. `_lssGmapsBuildLevel` does that now - see its assault branch.
+    if (LSS.MODE === 'assault') return isAssaultMap || isGmapsSlot;
     if (isGmapsSlot) return true;
     if (isAssaultMap) return false;
     return isRace ? isRaceMap : !isRaceMap;
@@ -71006,26 +71010,88 @@ function _enforceDetachedGasBudget() {
 // no draw is only half a warm.
 // One shot per world, flagged on the world object itself so a new level (or a
 // warp) gets its own without any reset bookkeeping.
+// ⭐⭐⭐ (v46.88) WARM THROUGH `renderFrame`, THEN DRAIN THE LINKS.
+// Owner: "index.html?pbhud and elimination on a custom location... let's see if we can find some
+// hitches". One frame at the end of the load, and nothing else: 14 programs + 870 geometries +
+// 13 textures + 3.7 MB created in a single frame, **525 ms** (583 on a rerun), with `slowgl`
+// naming the blocking calls as `getProgramParameter` - the synchronous LINK_STATUS query - at
+// 21, 21, 73 and 24 ms. `first` named what pulled them in: `earth-terrain-0-36`, `earth-roofs-2`,
+// `earth-walls-2`, `earth-ads` and the life GLBs `Material_0.001/0.002`, `mesh_0`.
+//
+// THE WARM WAS ALREADY RUNNING AND WARMING THE WRONG VARIANT. Console timeline:
+//   33.03  [earth-warm] 385 ms behind the curtain, programs 196 -> 210
+//   33.13  fourteen [cold] links - the SAME materials
+//   33.18  curtain lifts
+// and the probe prints each fork: `lambert [FORK: outputColorSpace toneMapping]`, `water [FORK:
+// outputColorSpace toneMapping]`, `Material_0.001 [FORK: mapUv flags]`, `basic [FORK: flags]`,
+// `bubbles [FORK: idx-52 shadowMapType]`.
+//
+// ⚠ BINDING THE RENDER TARGET IS NOT THE FIX - measured, then reverted, do not retry. PART 13's
+//   rule 5 makes the bound target the obvious suspect and this was the one warm path that never
+//   bound one. Saving, binding `null` AND `postFX.rtScene`, warming both and restoring changed
+//   NOTHING (same 14 cold links, same fork names, 525 -> 583 ms) and cost the warm 385 -> 575 ms.
+//   `toneMapping`, `outputColorSpace` and `shadowMap.type` are renderer GLOBALS as well as cache-key
+//   fields, and `renderer.render(scene, camera)` does not set any of them. `renderFrame` does.
+//
+// SO: DRAW THE WAY THE GAME DRAWS, WHICH IS WHAT THE PREBAKE ALREADY DOES. Its stage E2 is this
+// exact recipe - `renderFrame()`, count the forks, `_drainProgramLinks`, `renderFrame()` again -
+// and the reason it exists there is the same one it is needed here: a compile only starts a link,
+// and the first DRAW of a program joins it. The drain polls `COMPLETION_STATUS_KHR` instead of
+// blocking, then primes `getUniforms`/`getAttributes` so three's own first-use query is paid here
+// too. The earth city is built long after the prebake ran, so it never had any of this.
+//
+// ⚠ ASYNC NOW, AND `__warmed` IS SET AT THE END. The curtain's caller already re-polls every
+//   16 ms while `!_w.__warmed`, so making this a promise that flips the flag when it is finished
+//   makes the curtain wait for the drain for free. `__warming` keeps the re-entry idempotent.
+// ⚠ The caller is inside `hideLoadingOverlay`'s 45 s ceiling, so every stage is capped: a curtain
+//   that never lifts is worse than any hitch.
 function _lssEarthWarmOnce(w) {
-  if (!w || w.__warmed) return;
-  w.__warmed = true;
-  try {
-    if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' ||
-        !scene || typeof camera === 'undefined' || !camera) return;
+  if (!w || w.__warmed || w.__warming) return;
+  w.__warming = true;
+  const _done = () => { try { w.__warmed = true; w.__warming = false; } catch (_) {} };
+  if (typeof renderer === 'undefined' || !renderer || typeof scene === 'undefined' ||
+      !scene || typeof camera === 'undefined' || !camera) { _done(); return; }
+  (async () => {
     const t0 = (typeof performance !== 'undefined') ? performance.now() : 0;
-    const p0 = renderer.info.programs ? renderer.info.programs.length : 0;
-    try { renderer.compile(scene, camera); } catch (_) {}
-    try { renderer.render(scene, camera); } catch (_) {}
+    const _np = () => (renderer.info && renderer.info.programs) ? renderer.info.programs.length : 0;
+    const p0 = _np();
+    let forks = 0, drained = 0;
+    // One pass of the REAL render path, then drain whatever it forked. Twice, because the post
+    // chain's ping-pong targets alternate - the prebake's own note, and the same reason here.
+    // `window.__earthWarmLegacy = 1` restores the v46.87 pair (renderer.compile + renderer.render,
+    // no drain) so the two can be A/B'd in one session without a rebuild. It is the knob that
+    // produced the before column in the v46.88 note above; leave it, the next person will want it.
+    const _legacy = () => { try { return !!(typeof window !== 'undefined' && window.__earthWarmLegacy); } catch (_) { return false; } };
+    const _pass = async (capMs) => {
+      const _a = _np();
+      if (_legacy()) {
+        try { renderer.compile(scene, camera); } catch (_) {}
+        try { renderer.render(scene, camera); } catch (_) {}
+        try { if (typeof _warmupYield === 'function') await _warmupYield(); } catch (_) {}
+        forks += Math.max(0, _np() - _a);
+        return;
+      }
+      try { if (typeof renderFrame === 'function') renderFrame(); } catch (_) {}
+      try { if (typeof _warmupYield === 'function') await _warmupYield(); } catch (_) {}
+      const _b = _np();
+      if (_b > _a) {
+        forks += (_b - _a);
+        try { if (typeof _drainProgramLinks === 'function') await _drainProgramLinks(capMs, null, 'earthWarm'); } catch (_) {}
+        drained++;
+      }
+      try { if (typeof renderFrame === 'function') renderFrame(); } catch (_) {}
+      try { if (typeof _warmupYield === 'function') await _warmupYield(); } catch (_) {}
+    };
+    try { await _pass(4000); } catch (_) {}
     // ⭐ ...AND THE POPULATION, WHICH IS NOT IN THE SCENE YET.
-    // The traffic, carriers and monsters spawn from _lssEarthLifeTick once play
-    // begins, so the pass above cannot see them: measured, the walls and the ads
-    // went quiet and `Material_0.001` / `Material_0.002` still linked in play for
-    // 282 ms. Those are the GLB materials.
-    // Object3D.clone() SHARES materials by reference - _elCloneRigged is a
-    // clone(true) - so warming the SOURCE scene warms every creature cut from
-    // it. Park each source in front of the camera for one render (ANGLE builds
-    // its vertex executable at the draw call, not at link) and take it out
-    // again; nothing is on screen but the curtain.
+    // The traffic, carriers and monsters spawn from _lssEarthLifeTick once play begins, so the pass
+    // above cannot see them: measured before this existed, the walls and the ads went quiet and
+    // `Material_0.001` / `Material_0.002` still linked in play for 282 ms. Those are the GLB
+    // materials. Object3D.clone() SHARES materials by reference - _elCloneRigged is a clone(true) -
+    // so warming the SOURCE scene warms every creature cut from it. Park each source in front of
+    // the camera for one render (ANGLE builds its vertex executable at the draw call, not at link)
+    // and take it out again; nothing is on screen but the curtain.
+    let held = [];
     try {
       const src = [];
       if (typeof _LSS_EL !== 'undefined' && _LSS_EL) {
@@ -71039,25 +71105,28 @@ function _lssEarthWarmOnce(w) {
       if (src.length) {
         const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
         const at = camera.position.clone().addScaledVector(fwd, 600);
-        const held = [];
         for (const o of src) {
           if (!o || o.parent) continue;            // already somewhere; leave it
           held.push([o, o.position.clone(), o.visible]);
           o.position.copy(at); o.visible = true;
           scene.add(o);
         }
-        if (held.length) {
-          try { renderer.compile(scene, camera); } catch (_) {}
-          try { renderer.render(scene, camera); } catch (_) {}
-          for (const [o, p, v] of held) { scene.remove(o); o.position.copy(p); o.visible = v; }
-        }
+        if (held.length) await _pass(3000);
         try { window.__earthWarmLife = held.length; } catch (_) {}
       }
     } catch (e) { console.warn('[earth-warm] life warm skipped:', e); }
-    const p1 = renderer.info.programs ? renderer.info.programs.length : 0;
-    console.log('[earth-warm] ' + Math.round(((typeof performance !== 'undefined') ? performance.now() : 0) - t0)
-      + ' ms behind the curtain, programs ' + p0 + ' -> ' + p1);
-  } catch (e) { console.warn('[earth-warm] failed:', e); }
+    // ⚠ FINALLY, not on the happy path only: a throw above must never leave a monster source
+    //   parked 600 units in front of the camera for the rest of the match.
+    try { for (const [o, q, v] of held) { scene.remove(o); o.position.copy(q); o.visible = v; } } catch (_) {}
+    const p1 = _np();
+    try {
+      console.log('[earth-warm] ' + Math.round(((typeof performance !== 'undefined') ? performance.now() : 0) - t0)
+        + ' ms behind the curtain, programs ' + p0 + ' -> ' + p1
+        + ', forks ' + forks + ' drained in ' + drained + ' pass(es)'
+        + (window.__linkDrain ? (' [last drain ' + window.__linkDrain.ms + ' ms, primed ' + window.__linkDrain.primed + ']') : ''));
+    } catch (_) {}
+    _done();
+  })().catch((e) => { try { console.warn('[earth-warm] failed:', e); } catch (_) {} _done(); });
 }
 
 function _lssWorldUnitsPerMetre() {
@@ -97444,7 +97513,14 @@ function updateRoundSystem(dt) {
     // if anything ever leaves the flag stuck the match must still start.
     // ⚠ Co-op caveat: each client gates on its OWN build, so a slow machine
     // enters 'playing' late against the shared round clock — accepted v1.
+    // ⭐⭐ (v46.88) ...AND NOT WHILE THE EARTH CURTAIN IS UP - see _lssEarthCurtainUp. Exactly the
+    // loading-contract case the Spire paragraph above describes, and it takes the same shape: hold
+    // warmup until the world the player is about to fight in is actually on screen. Without it the
+    // v46.87 curtain meant round 1 opened, and often half-ran, against a loading screen.
+    // ⚠ Co-op caveat, inherited from the Spire gate: each client holds on ITS OWN curtain, so a
+    //   slow machine enters 'playing' late against the shared round clock.
     if (game.warmupTimer <= 0 && !selectActive && !game._swapStaging && !game._rrStaging &&
+        !(typeof _lssEarthCurtainUp === 'function' && _lssEarthCurtainUp()) &&
         !(game.arenaField && _arenaMesh.building && (performance.now() - _arenaMesh.t0) < 60000)) {
       if (typeof _warmRealCombatFX === 'function') { try { _warmRealCombatFX(); } catch (_) {} }
       game.state = 'playing';
@@ -105651,6 +105727,25 @@ const _LSS_SETTLE_MS = 260;       // quiet time required before lifting
 const _LSS_SETTLE_MAX = 4000;     // never hold longer than this for settling alone
 const _LSS_SETTLE_JUMP = 40;      // world units; below this is drift, not a teleport
 const _LSS_EARTH_CURTAIN_MAX_MS = 45000;
+// ⭐⭐⭐ (v46.88) "THE MATCH STARTED BEFORE I GOT IN IT." Owner, on the v46.87 curtain, plus
+// "i heard ships moving around during loading screen". Both are the same regression and it is mine:
+// v46.87 made the loading screen wait for a gmaps world to finish building - 28-50 s on a cold city,
+// measured - and told NOTHING ELSE. The launch sequence still flipped `game.state` to 'playing' on
+// its own schedule, so the match ran its entire opening behind an opaque overlay: the round clock
+// started, the bots engaged, the flyby voices picked up ships you could not see, and the player
+// arrived to a fight already in progress.
+// A curtain that waits for the world has to stop the WORLD too, not just the picture. This is the
+// one predicate the three holds below share.
+// ⚠ CAPPED on the same ceiling as the curtain itself. A wedged curtain must never wedge the match.
+function _lssEarthCurtainUp() {
+  try {
+    if (typeof document === 'undefined') return false;
+    const _cov = document.getElementById('lss-loading-overlay');
+    if (!_cov || !_cov.classList.contains('active')) return false;
+    if (typeof _lssEarthCurtainArmed !== 'function' || !_lssEarthCurtainArmed()) return false;
+    return (!_lssEarthCurtainT0 || (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS);
+  } catch (_) { return false; }
+}
 // ⭐⭐ (v46.87) WHOSE LOADING SCREEN WAITS FOR THE CITY. Owner: "in other modes like elimination,
 // that have custom location or earth custom location, the warmup/bake/prebake/loading screen doesn't
 // wait for the buildings to be drawn like in free flight: earth".
@@ -131674,7 +131769,16 @@ function _flybyTick(dt) {
   const t = ctx.currentTime;
   const _on = (typeof window === 'undefined' || window.__flyby !== false) &&
     !(typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato());
-  const _live = _on && typeof game !== 'undefined' && game &&
+  // ⭐⭐ (v46.88) "i heard ships moving around during loading screen". The v36.24 LOADING-SCREEN
+  // AUDIO HOLD lives inside `playSound`, and THESE VOICES ARE NOT PLAYSOUND CALLERS - a flyby is a
+  // BufferSource wired straight to `audio.sfxBus` in _flybyAssign, so the hold never saw it. It did
+  // not matter while a curtain lasted a couple of seconds; v46.87's earth curtain is up for 28-50 s
+  // with the world live behind it, and the pool happily locked onto ships the player could not see.
+  // `_loadingAudioHold` is the same flag playSound reads, so the two now agree.
+  // Voices already running are released by the existing no-candidate sweep below (candN stays 0),
+  // and the dead-man fade lands - nothing has to be torn down here.
+  const _held = (typeof _loadingAudioHold !== 'undefined' && _loadingAudioHold);
+  const _live = _on && !_held && typeof game !== 'undefined' && game &&
     (game.state === 'playing' || game.state === 'warmup') &&
     typeof camera !== 'undefined' && camera;
   const maxV = (typeof _LSS_IS_MOBILE !== 'undefined' && _LSS_IS_MOBILE) ? 2 : 3;
@@ -139728,11 +139832,80 @@ async function _lssGmapsBuildLevel(level) {
     // downtown building. corridorPoints is the shared pool every spawn and
     // respawn draws from, so filling it fixes bots and rejoins too, not just
     // the first drop.
+    // ⭐⭐⭐ (v46.89) ASSAULT OVER A REAL CITY. Owner: "we should put custom location into assault
+    // mode". Assault needs three things no gmaps level has, because `rooms: []`:
+    //   · a CHAMPION room - `spawnChampionField` finds the objective with
+    //     `game.sdfRoomData.find(r => r.champion === true)` and otherwise falls back to the average
+    //     of `game.levelSpheres`, which on a gmaps level is EMPTY, i.e. the field lands at (0,0,0):
+    //     the map origin at ground level, inside a downtown building;
+    //   · a DEFENDER end and an ATTACKER end - `_assaultSpawnSide(team)` returns the fixed side tag
+    //     'A' or 'B' and `getValidSpawnPoint` filters `corridorPoints` on `p.team`. Untagged points
+    //     fall through to its x<0 / x>0 split, which on a streamed world puts the two fleets
+    //     kilometres apart on an axis that means nothing;
+    //   · both ends CLEAR of the city, which is the one thing the level can already answer.
+    // The race branch at the top of this function already synthesises the same shape for its own
+    // start/finish pair, so this is that pattern, not a new one.
+    // ⚠ 'A' IS ALWAYS THE DEFENDER END, as geography. Roles swap every round
+    //   (`_assaultAttackerFleet()` is a pure function of `currentRound`) and `_assaultSpawnSide`
+    //   maps the fleet to the side - so the tags must stay put or both fleets move every round.
+    // ⚠ `tiles.spawnPoints()` IS the clearance test. Those points are already validated against
+    //   the buildings, so partitioning them costs nothing and cannot put a fleet in a tower - much
+    //   better than inventing coordinates and hoping, which is the trap the map warns about for
+    //   arena rooms.
+    const _asltGmaps = (typeof LSS !== 'undefined' && LSS.MODE === 'assault');
     try {
       if (typeof tiles.spawnPoints === 'function') {
-        const _sp = tiles.spawnPoints(24);
+        // Assault wants two clusters out of one pool, so ask for more of them.
+        const _sp = tiles.spawnPoints(_asltGmaps ? 64 : 24);
         if (_sp && _sp.length) {
           game.corridorPoints = _sp;
+          if (_asltGmaps && _sp.length >= 4) {
+            // ⚠⚠ SPLIT BY BEARING, NOT BY RADIUS, and NEVER INVENT THE FIELD'S COORDINATE.
+            //   `tiles.spawnPoints()` lays its points out as CONCENTRIC RINGS around the drop
+            //   origin - measured on Toronto: 64 points spanning 11,889 x 11,946 units on radii of
+            //   ~2843 / 4422 / 6002. The first cut put the field at their CENTROID and took the
+            //   nearest and furthest thirds, which is the inner ring and the outer ring: two shells
+            //   sharing one centre, so the two ends came out **33 units apart**. Splitting on which
+            //   SIDE of the field they fall gives a real battlefield instead.
+            //   And the field itself is one of the level's OWN points, not a coordinate of mine:
+            //   those are already validated clear of the buildings, which is the whole reason to
+            //   use them (the map's standing rule for arena rooms - retag a verified centre, do not
+            //   invent one).
+            // The anchor is the point at the MEDIAN radius, so the objective sits in the city rather
+            // than on top of the drop pin or out at the rim.
+            const _r2 = (q) => q.x * q.x + q.z * q.z;
+            const _byR = _sp.slice().sort((a, b) => _r2(a) - _r2(b));
+            const _anchor = _byR[Math.floor(_byR.length * 0.5)];
+            const _fx = _anchor.x, _fz = _anchor.z, _fieldY = _anchor.y;
+            const _fLen = Math.max(1, Math.hypot(_fx, _fz));
+            const _ux = _fx / _fLen, _uz = _fz / _fLen;           // origin -> field, the contest axis
+            // Project every point onto that axis: positive is the defender half (the field's side),
+            // negative is the attacker half, and the two ends are the extremes of each.
+            const _proj = (q) => q.x * _ux + q.z * _uz;
+            const _byP = _sp.slice().sort((a, b) => _proj(b) - _proj(a));
+            const _n = Math.max(2, Math.floor(_byP.length * 0.3));
+            const _def = _byP.slice(0, _n);                       // deepest into the field's half
+            const _atk = _byP.slice(_byP.length - _n);            // furthest the other way
+            for (const q of _sp) q.team = null;                   // the middle is neutral ground
+            for (const q of _def) q.team = 'A';
+            for (const q of _atk) q.team = 'B';
+            const _ctr = (arr) => {
+              let x = 0, y = 0, z = 0;
+              for (const q of arr) { x += q.x; y += q.y; z += q.z; }
+              return { x: x / arr.length, y: y / arr.length, z: z / arr.length };
+            };
+            const _ca = _ctr(_def), _cb = _ctr(_atk);
+            game.sdfRoomData = [
+              { id: 'spawn_a', team: 'A', side: 'A', x: _ca.x, y: _ca.y, z: _ca.z, r: 420 },
+              { id: 'spawn_b', team: 'B', side: 'B', x: _cb.x, y: _cb.y, z: _cb.z, r: 420 },
+              { id: 'field', team: null, side: 'A', champion: true, x: _fx, y: _fieldY, z: _fz, r: 520 },
+            ];
+            try {
+              console.log('[assault-gmaps] field', Math.round(_fx), Math.round(_fieldY), Math.round(_fz),
+                          '| defenders', _def.length, 'attackers', _atk.length,
+                          '| ends', Math.round(Math.hypot(_ca.x - _cb.x, _ca.z - _cb.z)), 'apart');
+            } catch (_) {}
+          }
           // ⚠ FILLING corridorPoints IS NOT ENOUGH IN FREE FLIGHT. That pool is
           // what getValidSpawnPoint draws from, which fixes bots and respawns —
           // but free flight never calls it: its arms place the player directly
@@ -139741,11 +139914,46 @@ async function _lssGmapsBuildLevel(level) {
           // position they already had. Measured: 2,027 units from the nearest
           // spawn point. That is "we still keep spawning inside that building"
           // AFTER the pool was fixed. Place them explicitly.
+          // ⭐⭐⭐ (v46.89) RE-PICK THE SPAWN, BECAUSE THE FIRST PICK HAPPENED BEFORE THIS WORLD EXISTED.
+          // `_finishCommit`'s fresh-match path runs
+          //     buildRoomGraphLevel(level);  ...  player.position.copy(_spawnPickSet(getValidSpawnPoint(teamCode)))
+          // and for a gmaps level `buildRoomGraphLevel` RETURNS A PROMISE that nobody awaits - so
+          // that pick is drawn against the PREVIOUS map's `corridorPoints` (or an empty pool, i.e.
+          // the 0,0,0 fallback) and then LATCHED into `_spawnPick`, which the first respawn of the
+          // round consumes ahead of any fresh draw (the v45.04 mechanism). Measured in assault over
+          // Toronto: the player sat at (-40, 311, -393) - near the map origin, 3,939 u from the
+          // defender end and 3,852 from the attacker end, i.e. neither - and a death put them back
+          // in exactly the same spot.
+          // So re-pick here, where the pool is finally real, and re-latch it so the first respawn
+          // agrees with the drop. Behind the curtain (v46.88 holds warmup until it lifts), so this
+          // is never a teleport anyone sees.
           try {
-            if (typeof player !== 'undefined' && player && player.position) {
+            if (_asltGmaps && typeof player !== 'undefined' && player && player.position &&
+                typeof getValidSpawnPoint === 'function') {
+              const _tc = (typeof _assaultSpawnSide === 'function' && typeof player.team !== 'undefined')
+                ? _assaultSpawnSide(player.team) : 'A';
+              const _ap = getValidSpawnPoint(_tc);
+              if (_ap) {
+                player.position.copy(_ap);
+                if (player.velocity) player.velocity.set(0, 0, 0);
+                try { if (typeof _spawnPickSet === 'function') _spawnPickSet(_ap); } catch (_) {}
+                console.log('[assault-gmaps] player dropped on side ' + _tc,
+                            Math.round(_ap.x), Math.round(_ap.y), Math.round(_ap.z));
+              }
+            }
+          } catch (e) { console.warn('[assault-gmaps] spawn re-pick failed:', e); }
+          // ⚠ NOT IN ASSAULT. The explicit placement below exists because FREE FLIGHT never calls
+          //   `getValidSpawnPoint` - assault does, on its own side tag, and has just used it above.
+          try {
+            if (!_asltGmaps && typeof player !== 'undefined' && player && player.position) {
               const _s0 = _sp[0];
               player.position.set(_s0.x, _s0.y, _s0.z);
               if (player.velocity) player.velocity.set(0, 0, 0);
+              // (v46.89) ...and LATCH it, for the same reason the assault branch above re-picks:
+              // the pick `_finishCommit` latched was drawn before this world existed, and the first
+              // respawn of the round consumes that latch rather than drawing a fresh one. Without
+              // this line, dying once on a Custom Location put you back at the pre-build origin.
+              try { if (typeof _spawnPickSet === 'function') _spawnPickSet(player.position); } catch (_) {}
               console.log('[lss-earth] player placed at spawn',
                           Math.round(_s0.x), Math.round(_s0.y), Math.round(_s0.z));
             }
@@ -139974,7 +140182,15 @@ function _lssGmapsTick(dt) {
       const _f = (typeof player !== 'undefined' && player && player.position) ? player.position : camera.position;
       t.streamUpdate(_f);
       __pmark('earth:stream');   // patch streaming + the v45.95 publish drain
-      try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
+      // ⭐ (v46.88) NO POPULATION BEHIND THE CURTAIN. Traffic, carriers and monsters spawn here,
+      // and the carrier brings its OWN audio graph (`_carrierEngineStart`, a BufferSource into a
+      // world panner - another non-playSound voice the v36.24 hold cannot see). Spawning a city's
+      // worth of life during a 30-50 s loading screen also meant the player arrived to traffic that
+      // had already flown half its route. The patches still stream: the WORLD is what the curtain
+      // is waiting for, the population is not.
+      if (!(typeof _lssEarthCurtainUp === 'function' && _lssEarthCurtainUp())) {
+        try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
+      }
       __pmark('earth:life');     // traffic, carriers, monsters
     } else if (typeof t.publishTick === 'function') {
       // ⚠⚠ (v46.87) A SINGLE-PATCH LEVEL HAD NOTHING DRAINING ITS PUBLISH QUEUE. `_publish`
