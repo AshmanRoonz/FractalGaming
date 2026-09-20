@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.86";
+const LSS_BUILD = "46.87";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -14606,6 +14606,12 @@ function _visibleMapKeys() {
     if (k.indexOf('camp_') === 0) return false;
     if (k.indexOf('endless_') === 0) return false;   
     if (k.indexOf('hub_') === 0) return false;    
+    // (v46.87) gmaps_earth is the FREE-FLIGHT arm's entry and the branch above is the only place
+    // it belongs. Custom Location now builds the identical streamed world (see MAP_DATA.gmaps_user),
+    // so leaving both in the classic / race carousel listed the same map twice under two names -
+    // which is exactly the confusion the owner named ("earth and custom location should be the same
+    // thing"). The DROP panel is what makes this slot worth having, and it hangs off gmaps_user.
+    if (k === 'gmaps_earth') return false;
     const isRaceMap = k.startsWith('race_');
     const isAssaultMap = k.startsWith('assault_');
     const isGmapsSlot = k === 'gmaps_user';
@@ -105645,6 +105651,31 @@ const _LSS_SETTLE_MS = 260;       // quiet time required before lifting
 const _LSS_SETTLE_MAX = 4000;     // never hold longer than this for settling alone
 const _LSS_SETTLE_JUMP = 40;      // world units; below this is drift, not a teleport
 const _LSS_EARTH_CURTAIN_MAX_MS = 45000;
+// ⭐⭐ (v46.87) WHOSE LOADING SCREEN WAITS FOR THE CITY. Owner: "in other modes like elimination,
+// that have custom location or earth custom location, the warmup/bake/prebake/loading screen doesn't
+// wait for the buildings to be drawn like in free flight: earth".
+// The hold below was armed on `game._earth.armed` (the FREE FLIGHT: EARTH tag) and later
+// `_isEarthCircuit()` - two MODE flags. But the thing being waited for is a WORLD: patches, a DEM,
+// an Overpass region and an extruded city, none of which care which menu button started the match.
+// Elimination, skirmish and a non-circuit race can all pick a gmaps map, and in every one of them
+// the curtain lifted on shader warmth alone and the city rose afterwards in plain view.
+// So ask the level instead. Liberal on purpose - EITHER the level being built or the one selected -
+// because the two disagree for exactly the window this has to cover: `currentLevel` is written at
+// the top of `_lssGmapsBuildLevel`, and before that runs `selectedMap` is the only thing that knows
+// a gmaps world is coming. The 45 s ceiling below is what bounds a wrong answer.
+function _lssEarthCurtainArmed() {
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    if (game._earth && game._earth.armed) return true;
+    if (typeof _isEarthCircuit === 'function' && _isEarthCircuit()) return true;
+    if (game.currentLevel && game.currentLevel.type === 'gmaps') return true;
+    if (typeof MAP_DATA !== 'undefined' && MAP_DATA) {
+      const _m = MAP_DATA[game.selectedMap];
+      if (_m && _m.type === 'gmaps') return true;
+    }
+  } catch (_) {}
+  return false;
+}
 function hideLoadingOverlay() {
   // (v38.03) CYBERPUNK CITY: hold the curtain until the mode has built itself. It used to lift a
   // beat before the lineup started, and that beat is the free-flight camera sitting at the launch
@@ -105676,7 +105707,7 @@ function hideLoadingOverlay() {
     // the curtain lifted at 6.4 s onto zero patches and zero buildings. The
     // state flag describes the LAUNCH SEQUENCE, not whether the world exists,
     // and this hold is about the world. The try ceiling is what bounds it.
-    if (game && ((game._earth && game._earth.armed) || (typeof _isEarthCircuit === 'function' && _isEarthCircuit())) &&   // (v46.82) the EARTH CIRCUIT holds the same curtain
+    if (game && _lssEarthCurtainArmed() &&   // (v46.82) the EARTH CIRCUIT, (v46.87) and any gmaps level in any mode
         (_lssEarthCurtainT0 === 0 ||
          (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) {
       const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
@@ -105726,8 +105757,17 @@ function hideLoadingOverlay() {
       // both are false once _bldFail > 0, so a DEAD Overpass lifts immediately
       // and leaves it to the retry + backfill. The try ceiling caps all of it:
       // a curtain that never lifts is worse than any pop-in.
-      const _regionUnknown = !!(_w && _w._bldRegionKey == null && ((_w._bldFail | 0) === 0));
-      const _cityPending = !!(_w && _w._bldRegionKey != null && _w.stats &&
+      // ⚠ (v46.87) `_bldRegionKey` / `_bldFail` / `stats.regionWays` ARE LSSEarthWorld MEMBERS.
+      //   On the single-patch LSSEarthTiles they are simply absent, which reads as
+      //   "region unknown, and Overpass has not failed" - i.e. TRUE FOREVER, and the curtain would
+      //   sit to its 45 s ceiling on a world that was finished. Ask whether this is the streaming
+      //   kind first; the single patch is covered by `_noSpawn`, which follows its `await
+      //   tiles.ready` inside _lssGmapsBuildLevel. (Reachable today only via
+      //   `window.__earthStream = 0`, since Custom Location streams as of v46.87 - but the shape of
+      //   the bug is why the arming change needed this in the same breath.)
+      const _streamed = !!(_w && typeof _w.streamUpdate === 'function');
+      const _regionUnknown = !!(_streamed && _w._bldRegionKey == null && ((_w._bldFail | 0) === 0));
+      const _cityPending = !!(_streamed && _w._bldRegionKey != null && _w.stats &&
                               ((_w.stats.regionWays | 0) > 0) &&
                               ((_w.stats.buildings | 0) === 0));
       // (v46.82) ...and for the lap itself: the authority lays it once the city is in (bounded in
@@ -117856,6 +117896,23 @@ const MAP_DATA = {
   },
   gmaps_user: {
     type: 'gmaps',
+    // ⭐⭐⭐ (v46.87) STREAMED, i.e. THE SAME WORLD FREE FLIGHT: EARTH BUILDS. Owner: "earth and
+    // custom location should be the same thing" / "all the work we did on earth mode, that's the
+    // custom location we'll use".
+    // Until now this slot was the ONLY level still built by the single-patch `LSSEarthTiles`: one
+    // fixed 2.6 km square, no streaming, no backfill, no life, and - the reason the owner noticed -
+    // none of the loading-curtain machinery, which is all written against `LSSEarthWorld`. Three
+    // years of Earth work (patch streaming, the Overpass region + backfill, the publish budget, the
+    // night lights, traffic and monsters) went into the streamed world and none of it reached here.
+    // One word fixes that: `_lssGmapsBuildLevel` reads `level.stream` and hands the level to
+    // LSSEarthWorld instead, and every field below is already what gmaps_earth uses (scale 7,
+    // patchMetres defaulting to 2600).
+    // (!) IT ALSO RETIRES THE LAUNCH REFUSAL. commitLoadout's `_v12mValidate` let a gmaps map
+    //     launch with no typed DROP location only when it was `_selfSited` - `stream` AND its own
+    //     lat/lng - which is now true here, so picking Custom Location and pressing LAUNCH drops you
+    //     on the stored coordinates instead of erroring. Typing into DROP still wins: the override
+    //     in buildRoomGraphLevel writes level.lat/lng before the build.
+    stream: true,
     name: 'Custom Location',
     thumb: 'map_thumbs/toronto.jpg',
     description: 'Type a location in the DROP panel and click GO, then LAUNCH.',
@@ -135781,8 +135838,18 @@ function _leDeferPublish() {
   try {
     if (typeof window !== 'undefined' && window.__earthPublish === 0) return false;
     if (typeof game === 'undefined' || !game || game.state !== 'playing') return false;
-    const ov = document.getElementById('loading-overlay');
-    if (ov && getComputedStyle(ov).display !== 'none' && +getComputedStyle(ov).opacity > 0.01) return false;
+    // ⚠⚠ (v46.87) `lss-loading-overlay`, NOT `loading-overlay`. There is no element by the shorter
+    //   id - the markup and all eleven other lookups in this file use the prefixed one - so this
+    //   test found null and fell through to "defer" every time. The comment above says meshes go in
+    //   IMMEDIATELY while the curtain is up, and they never did: from the moment the launch
+    //   sequence flips state to 'playing' (measured at ~6.5 s on a cold world, with the curtain
+    //   still up for several seconds more) the city was being drip-fed at 4 meshes a frame BEHIND
+    //   the loading screen, which is both a longer wait and a worse pop-in.
+    // ⚠ The overlay is shown/hidden by the `active` CLASS, not by display/opacity, so read the
+    //   class - a computed-style test on an element whose base rule is display:none would call a
+    //   raised curtain lowered.
+    const ov = document.getElementById('lss-loading-overlay');
+    if (ov && ov.classList.contains('active')) return false;
     return true;
   } catch (_) { return false; }
 }
@@ -139909,6 +139976,21 @@ function _lssGmapsTick(dt) {
       __pmark('earth:stream');   // patch streaming + the v45.95 publish drain
       try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
       __pmark('earth:life');     // traffic, carriers, monsters
+    } else if (typeof t.publishTick === 'function') {
+      // ⚠⚠ (v46.87) A SINGLE-PATCH LEVEL HAD NOTHING DRAINING ITS PUBLISH QUEUE. `_publish`
+      //   queues a mesh whenever `_leDeferPublish()` says so, and the ONLY drain in the file lives
+      //   inside `LSSEarthWorld.streamUpdate` - which the single-patch class does not have. So any
+      //   chunk built after the state flipped to 'playing' went into `_pubQ` and was never added to
+      //   the group at all: not late, never. That is the other half of "the buildings aren't drawn",
+      //   and it is why Custom Location could finish loading with holes in it.
+      //   Custom Location streams as of v46.87 so this branch is reachable only through
+      //   `window.__earthStream = 0`, but a queue with no consumer is a landmine either way.
+      try {
+        const _b = (typeof window !== 'undefined' && typeof window.__earthPublish === 'number')
+          ? window.__earthPublish : _LE_PUBLISH_PER_FRAME;
+        if (_b > 0) t.publishTick(_b);
+      } catch (_) {}
+      __pmark('earth:stream');
     }
     // ⭐ THE SKY CANNOT BE ALLOWED TO STAY GONE. The cause above is fixed, but
     // _swBuildHubWater disposes the weather on ANY water-level change and only

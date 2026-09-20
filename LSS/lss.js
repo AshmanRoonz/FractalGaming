@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.86";
+const LSS_BUILD = "46.87";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -5268,6 +5268,7 @@ function _visibleMapKeys() {
     if (k.indexOf('camp_') === 0) return false;
     if (k.indexOf('endless_') === 0) return false;   
     if (k.indexOf('hub_') === 0) return false;    
+    if (k === 'gmaps_earth') return false;
     const isRaceMap = k.startsWith('race_');
     const isAssaultMap = k.startsWith('assault_');
     const isGmapsSlot = k === 'gmaps_user';
@@ -67452,6 +67453,19 @@ const _LSS_SETTLE_MS = 260;       // quiet time required before lifting
 const _LSS_SETTLE_MAX = 4000;     // never hold longer than this for settling alone
 const _LSS_SETTLE_JUMP = 40;      // world units; below this is drift, not a teleport
 const _LSS_EARTH_CURTAIN_MAX_MS = 45000;
+function _lssEarthCurtainArmed() {
+  try {
+    if (typeof game === 'undefined' || !game) return false;
+    if (game._earth && game._earth.armed) return true;
+    if (typeof _isEarthCircuit === 'function' && _isEarthCircuit()) return true;
+    if (game.currentLevel && game.currentLevel.type === 'gmaps') return true;
+    if (typeof MAP_DATA !== 'undefined' && MAP_DATA) {
+      const _m = MAP_DATA[game.selectedMap];
+      if (_m && _m.type === 'gmaps') return true;
+    }
+  } catch (_) {}
+  return false;
+}
 function hideLoadingOverlay() {
   try {
     if (game && game._cyber && game._cyber.armed && !game._cyber.started &&
@@ -67460,7 +67474,7 @@ function hideLoadingOverlay() {
       setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
       return;
     }
-    if (game && ((game._earth && game._earth.armed) || (typeof _isEarthCircuit === 'function' && _isEarthCircuit())) &&   // (v46.82) the EARTH CIRCUIT holds the same curtain
+    if (game && _lssEarthCurtainArmed() &&   // (v46.82) the EARTH CIRCUIT, (v46.87) and any gmaps level in any mode
         (_lssEarthCurtainT0 === 0 ||
          (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) {
       const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
@@ -67469,8 +67483,9 @@ function hideLoadingOverlay() {
                           _lssGmaps._spawnPlaced === false);
       const _building = !!(_w && _w._patches && typeof _w.bootTarget === 'number' &&
                            _w._patches.size < _w.bootTarget);
-      const _regionUnknown = !!(_w && _w._bldRegionKey == null && ((_w._bldFail | 0) === 0));
-      const _cityPending = !!(_w && _w._bldRegionKey != null && _w.stats &&
+      const _streamed = !!(_w && typeof _w.streamUpdate === 'function');
+      const _regionUnknown = !!(_streamed && _w._bldRegionKey == null && ((_w._bldFail | 0) === 0));
+      const _cityPending = !!(_streamed && _w._bldRegionKey != null && _w.stats &&
                               ((_w.stats.regionWays | 0) > 0) &&
                               ((_w.stats.buildings | 0) === 0));
       const _heldMs = _lssEarthCurtainT0 ? (Date.now() - _lssEarthCurtainT0) : 0;
@@ -76652,6 +76667,7 @@ const MAP_DATA = {
   },
   gmaps_user: {
     type: 'gmaps',
+    stream: true,
     name: 'Custom Location',
     thumb: 'map_thumbs/toronto.jpg',
     description: 'Type a location in the DROP panel and click GO, then LAUNCH.',
@@ -91082,8 +91098,8 @@ function _leDeferPublish() {
   try {
     if (typeof window !== 'undefined' && window.__earthPublish === 0) return false;
     if (typeof game === 'undefined' || !game || game.state !== 'playing') return false;
-    const ov = document.getElementById('loading-overlay');
-    if (ov && getComputedStyle(ov).display !== 'none' && +getComputedStyle(ov).opacity > 0.01) return false;
+    const ov = document.getElementById('lss-loading-overlay');
+    if (ov && ov.classList.contains('active')) return false;
     return true;
   } catch (_) { return false; }
 }
@@ -94054,6 +94070,13 @@ function _lssGmapsTick(dt) {
       __pmark('earth:stream');   // patch streaming + the v45.95 publish drain
       try { _lssEarthLifeTick(dt); } catch (e) { console.warn('[earth-life]', e); }
       __pmark('earth:life');     // traffic, carriers, monsters
+    } else if (typeof t.publishTick === 'function') {
+      try {
+        const _b = (typeof window !== 'undefined' && typeof window.__earthPublish === 'number')
+          ? window.__earthPublish : _LE_PUBLISH_PER_FRAME;
+        if (_b > 0) t.publishTick(_b);
+      } catch (_) {}
+      __pmark('earth:stream');
     }
     try {
       if (typeof _WX !== 'undefined' && _WX && !_WX.on && typeof _wxInit === 'function') {
