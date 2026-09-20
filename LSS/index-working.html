@@ -6830,7 +6830,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.83";
+const LSS_BUILD = "46.84";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -60230,11 +60230,14 @@ class Bot {
     }
   }
 
-  chooseRaceWaypoint() {
+  // (v46.84) RACE CIRCUITS: the same BFS aimed at ANY room - a track circuit sends the bot to the room of
+  // its NEXT gate, then to the finish. chooseRaceWaypoint() is the old finish-bound call.
+  chooseRaceWaypoint() { const g = game.raceGraph; return this.chooseRaceWaypointTo(g && g.finishId); }
+  chooseRaceWaypointTo(tid) {
     const graph = game.raceGraph;
-    if (!graph || !graph.finishId) return null;
+    if (!graph || !tid || !graph.nodes || !graph.nodes[tid]) return null;
     const nodes = graph.nodes;
-    const finish = nodes[graph.finishId];
+    const finish = nodes[tid];
     if (!finish) return null;
 
     // Containing-room test (which sphere are we INSIDE right now).
@@ -60256,7 +60259,7 @@ class Bot {
     if (!this._raceCurRoomId) this._raceCurRoomId = nearestId;
     let curId = this._raceCurRoomId;
     if (!curId) return null;
-    if (curId === graph.finishId) return finish;
+    if (curId === tid) return finish;
 
     // BFS from current room to finish ; record predecessor to reconstruct
     // the next-step neighbor. Edges carry the tunnel midpoint as the
@@ -60267,7 +60270,7 @@ class Bot {
     let found = false;
     while (queue.length) {
       const id = queue.shift();
-      if (id === graph.finishId) { found = true; break; }
+      if (id === tid) { found = true; break; }
       const n = nodes[id];
       for (const nb of n.neighbors) {
         if (visited[nb.id]) continue;
@@ -60279,7 +60282,7 @@ class Bot {
     if (!found) return finish;
 
     // Walk back from finish to the immediate-next room after curId.
-    let stepId = graph.finishId;
+    let stepId = tid;
     let stepEdge = prev[stepId];
     while (stepEdge && stepEdge.fromId !== curId) {
       stepId = stepEdge.fromId;
@@ -74888,6 +74891,64 @@ function _rcGenOverworld(seed) {
   return { kind: 'overworld', seed: seed >>> 0, rings, start, fin: _rcFinish(Q0, P, start), upm: 7 };
 }
 
+// (v46.84) TRACK CIRCUITS - Pole Position and the Shifting Run (owner: "should also be setup the
+// same way, with the aegis captures instead of rings, and the other rules we just made"). The gates
+// are the track's own rooms in TRACK ORDER: the path from a start room to the champion room through
+// the tunnel graph (the Shifting Run's `gate: n` numbering is that same order), a bolt at each room's
+// centre, the champion room the finish. Nothing is placed and nothing is decreed: both maps are the
+// same on every peer (authored, or generated from the shared seed), so every client lays the lap
+// itself in buildRoomGraphLevel and the decree machinery stands down (`local`). Bots keep the BFS
+// tunnel navigation - straight lines ram cavern walls - aimed at the next gate's room.
+function _rcGenTrack(level, rooms) {
+  const g = (typeof game !== 'undefined' && game) ? game.raceGraph : null;
+  if (!g || !g.finishId || !g.nodes || !Array.isArray(rooms)) return null;
+  const byId = {}; for (const r of rooms) if (r && r.id) byId[r.id] = r;
+  const starts = rooms.filter(r => r && r.team);
+  const s0 = starts[0] || rooms[0]; if (!s0 || !g.nodes[s0.id]) return null;
+  const prev = {}; const q = [s0.id]; const seen = {}; seen[s0.id] = true; let found = false;
+  while (q.length) {
+    const id = q.shift(); if (id === g.finishId) { found = true; break; }
+    const n = g.nodes[id]; if (!n) continue;
+    for (const nb of n.neighbors) { if (seen[nb.id]) continue; seen[nb.id] = true; prev[nb.id] = id; q.push(nb.id); }
+  }
+  const order = [];
+  if (found) { let id = g.finishId; while (id && id !== s0.id) { order.push(id); id = prev[id]; } order.reverse(); }
+  let gateRooms = order.map(id => byId[id]).filter(r => r && !r.team && !r.champion);
+  const numbered = rooms.filter(r => r && r.gate);
+  if (numbered.length) gateRooms = numbered.slice().sort((a, b) => a.gate - b.gate);
+  if (!gateRooms.length) return null;
+  const rings = gateRooms.map((r, i) => {
+    const nx = gateRooms[Math.min(i + 1, gateRooms.length - 1)], pv = gateRooms[Math.max(i - 1, 0)];
+    let tx = nx.x - pv.x, tz = nx.z - pv.z; const L = Math.hypot(tx, tz) || 1; tx /= L; tz /= L;
+    return { x: r.x, y: r.y, z: r.z, d: Math.min((r.r || 300) * 1.5, 520), tx, tz, high: false, roomId: r.id };
+  });
+  const fin = rooms.find(r => r && r.champion);
+  const r0 = rings[0];
+  let seed = 0; try { if (typeof net !== 'undefined' && net && net.active && typeof net.worldSeed === 'number') seed = net.worldSeed >>> 0; } catch (_) {}
+  return { kind: 'track', seed, rings, upm: 12.8, local: true, ready: true,
+           start: { x: r0.x - r0.tx * 600, y: r0.y, z: r0.z - r0.tz * 600, tx: r0.tx, tz: r0.tz },
+           fin: fin ? { x: fin.x, y: fin.y, z: fin.z, r: fin.r || 480 } : { x: r0.x, y: r0.y, z: r0.z, r: 480 },
+           id: 'track:' + game.selectedMap + ':' + seed + ':' + ((game.currentRound | 0) || 1) };
+}
+function _raceCircuitTrackBuild(level, rooms) {
+  if (_raceCircuitKind() !== 'track') return;
+  const C = _rcGenTrack(level, rooms);
+  if (!C) { console.warn('[race] track circuit: no gate rooms on', game.selectedMap); return; }
+  game.raceCircuit = C;
+  _rc.pendingSince = 0; _rcNet.acked = new Set(); _rcNet.t = 0;
+  _raceCircuitInstall();
+  console.log('[race] track circuit:', C.rings.length, 'gates on', game.selectedMap);
+}
+// tunnel navigation for a track circuit: the BFS waypoint toward a room, or null when not applicable
+function _rcTrackNav(bot, roomId) {
+  try {
+    const g = game.raceGraph;
+    if (!g || !roomId || !g.nodes || !g.nodes[roomId] || typeof bot.chooseRaceWaypointTo !== 'function') return null;
+    const wp = bot.chooseRaceWaypointTo(roomId);
+    return wp ? _rcV2.set(wp.x, wp.y, wp.z) : null;
+  } catch (_) { return null; }
+}
+
 // ---- install / progress / rings ----------------------------------------------------------------
 function _raceCircuitSeed() {
   let s = 0;
@@ -74905,6 +74966,8 @@ function _raceCircuitSeed() {
 // build (round 2+ rebuilds the level), the ring objects on every warmup.
 function _raceCircuitInstall() {
   const C = game.raceCircuit; if (!C || !C.ready) return;
+  // (v46.84) a track circuit keeps its map's own spawn rooms and champion room; only the clock goes
+  if (C.kind === 'track') { game.raceNoTimer = true; return; }
   const px = -C.start.tz, pz = C.start.tx;   // across the line
   const gap = (C.kind === 'earth') ? 160 : 260;
   const back = (C.kind === 'earth') ? 220 : 360;
@@ -75097,6 +75160,7 @@ function _raceCircuitNetTick(dt) {
   if (!(typeof net !== 'undefined' && net && net.active && net.sendEvent)) return;
   if (game.state !== 'warmup' && game.state !== 'playing') return;
   const C = game.raceCircuit;
+  if (_raceCircuitKind() === 'track') return;   // (v46.84) every peer lays a track lap itself
   if (C && C.ready) {
     if (!_raceCircuitAuthority()) return;
     let peers = []; try { peers = (typeof nonJudgePeerIds === 'function') ? nonJudgePeerIds() : []; } catch (_) {}
@@ -75121,6 +75185,7 @@ function _raceCircuitNetEvent(evt, fromPeerId) {
   if (!evt) return false;
   if (evt.type === 'race_circuit') {
     try {
+      if (_raceCircuitKind() === 'track') { if (net.sendEvent) net.sendEvent({ type: 'race_circuit_ack', id: evt.id }, fromPeerId); return true; }   // (v46.84) local lap
       const C = _raceCircuitFromPacket(evt);
       const have = game.raceCircuit;
       // (v46.83) the authority keeps its own lap whatever arrives; everyone else takes the decree
@@ -75136,7 +75201,7 @@ function _raceCircuitNetEvent(evt, fromPeerId) {
     return true;
   }
   if (evt.type === 'race_circuit_req') {
-    try { if (_raceCircuitAuthority()) { const pkt = _raceCircuitPacket(); if (pkt && net.sendEvent) net.sendEvent(pkt, fromPeerId); } } catch (_) {}
+    try { if (_raceCircuitKind() !== 'track' && _raceCircuitAuthority()) { const pkt = _raceCircuitPacket(); if (pkt && net.sendEvent) net.sendEvent(pkt, fromPeerId); } } catch (_) {}
     return true;
   }
   if (evt.type === 'race_prog') {
@@ -75277,6 +75342,13 @@ function _raceCircuitBotWaypoint(bot, dt) {
   for (let guard = 0; guard < 3; guard++) {
     if (idx >= N) {
       bot._raceCleared = true;
+      // (v46.84) a track circuit: through the tunnels to the finish room first; inside it the field
+      // rules below take over
+      if (C.kind === 'track') {
+        const g = game.raceGraph, fn = (g && g.nodes) ? g.nodes[g.finishId] : null;
+        const inFin = !!(fn && Math.hypot(bot.position.x - fn.x, bot.position.y - fn.y, bot.position.z - fn.z) < (fn.r || 300));
+        if (!inFin) { const wp = _rcTrackNav(bot, g && g.finishId); if (wp) return wp; }
+      }
       const sh = game.championShell, f = game.championField;
       if (sh && sh.alive && sh.position) {
         const off = _rcV.subVectors(bot.position, sh.position); if (off.lengthSq() < 1) off.set(1, 0.2, 0); off.normalize();
@@ -75305,6 +75377,9 @@ function _raceCircuitBotWaypoint(bot, dt) {
     if (dx * dx + dy * dy + dz * dz < cap * cap) { bot._raceIdx = ++idx; continue; }
     break;
   }
+  // (v46.84) a track circuit: the tunnel graph to the gate's room (the gate sits at its centre, so the
+  // BFS's own "inside the room -> its centre" step is the capture run)
+  if (C.kind === 'track') { const wp = _rcTrackNav(bot, C.rings[idx].roomId); if (wp) return wp; }
   const dist = Math.hypot(gx - bot.position.x, gy - bot.position.y, gz - bot.position.z);
   const ahead = Math.min(dist * 0.55, 900);
   // ⚠ COME IN FROM ABOVE. A low gate sits 40-60 m up a street with towers on every side, so an
@@ -75508,7 +75583,7 @@ function _raceCircuitMinimap(ctx, _plot, _mmArrow) {
     if (i === idx) {
       const _rp = 0.55 + Math.sin((game.time || 0) * 4) * 0.35;
       const col = 'rgba(60,224,255,' + _rp + ')';
-      if (p.off) { _mmArrow(p, col); ctx.strokeStyle = col; ctx.lineWidth = 1.4; ctx.beginPath(); ctx.arc(p.x, p.y, 5.5, 0, Math.PI * 2); ctx.stroke(); continue; }
+      if (p.off) continue;   // (v46.84) off the disc the gold route chevron marks it, at the end of the guide line
       ctx.strokeStyle = col; ctx.lineWidth = 1.6;
       ctx.beginPath(); ctx.arc(p.x, p.y, r.high ? 5 : 4, 0, Math.PI * 2); ctx.stroke();
       if (r.high) { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(p.x, p.y, 1.3, 0, Math.PI * 2); ctx.fill(); }
@@ -103586,6 +103661,10 @@ function updateMinimap() {
     const p = _plot(field.position.x, field.position.z);
     const pulse = 0.5 + Math.sin(game.time * 4) * 0.3;
     const fcol = `rgba(0,200,255,${pulse})`;
+    // (v46.84) in a race the finish off the disc is the gold route chevron's job (owner, the
+    // Straightaway: "there is one, its a blue arrow... make it double yellow chevron arrows like in
+    // endless"); on the disc the diamond still marks the field itself
+    if (p.off && field.championMode && typeof LSS !== 'undefined' && LSS.MODE === 'race') continue;
     if (p.off) { _mmArrow(p, fcol); continue; }
     ctx.fillStyle = fcol;
     ctx.beginPath();
@@ -103660,6 +103739,23 @@ function updateMinimap() {
                typeof CAMPAIGN_LEG_HALF_Z !== 'undefined') {
       const _cdx = 0 - ccx, _cdz = CAMPAIGN_LEG_HALF_Z - ccz;
       if (_cdx * _cdx + _cdz * _cdz > 2200 * 2200) { _etx = 0; _etz = CAMPAIGN_LEG_HALF_Z; }
+    } else if (_navMode === 'race') {
+      // (v46.84) RACE: the next gate of a circuit, else the finish - the field once it is up, the
+      // champion room before that (the Straightaway's finish is a room from the first frame)
+      let _tx = null, _tz = null;
+      const _C = game.raceCircuit;
+      if (typeof _isCircuitRace === 'function' && _isCircuitRace() && _C && _C.ready) {
+        const _ix = (typeof player !== 'undefined' && player) ? (player._raceIdx | 0) : 0;
+        if (_ix < _C.rings.length) { _tx = _C.rings[_ix].x; _tz = _C.rings[_ix].z; }
+        else if (game.championField && game.championField.alive && game.championField.position) { _tx = game.championField.position.x; _tz = game.championField.position.z; }
+        else { _tx = _C.fin.x; _tz = _C.fin.z; }
+      } else if (game.championField && game.championField.alive && game.championField.position) {
+        _tx = game.championField.position.x; _tz = game.championField.position.z;
+      } else if (Array.isArray(game.sdfRoomData)) {
+        const _fr = game.sdfRoomData.find(r => r && r.champion);
+        if (_fr) { _tx = _fr.x; _tz = _fr.z; }
+      }
+      if (_tx !== null) { const _ddx = _tx - ccx, _ddz = _tz - ccz; if (_ddx * _ddx + _ddz * _ddz > 600 * 600) { _etx = _tx; _etz = _tz; } }
     }
     if (_etx !== null) {
       const p = _plot(_etx, _etz);
@@ -117391,10 +117487,11 @@ const MAP_DATA = {
   // ring; the finish stays locked until every ring is taken, like Pole Position) and a champion finish,
   // carved as tunnels through a fresh biome every round. The rooms below are the preview / fallback.
   race_shifting: {
+    circuit: 'track',   // (v46.84) RACE CIRCUITS: Aegis gates in track order, one at a time - see _raceCircuitTrackBuild
     name: 'The Shifting Run',
     thumb: 'map_thumbs/shifting_run.png',   // (v43.78) owner's concept art, resized to the 468x220 the other thumbs use   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
     procedural: 'race_shifting',
-    description: 'A new track every round: line up across the start, thread the rings through a cavern that has never existed before, dive for the finish.',
+    description: 'A new, long track every round: line up across the start, take the Aegis gates in order through a cavern that has never existed before, dive for the finish.',
     defaultTheme: 'Snow',
     terrain: { wallPinch: 0.24 },
     palette: [
@@ -117472,10 +117569,11 @@ const MAP_DATA = {
   // Coordinates are absolute (not SU-multiplied) since map_lab exports
   // in world units already.
   race_pole_position: {
+    circuit: 'track',   // (v46.84) RACE CIRCUITS: Aegis gates in track order, one at a time - see _raceCircuitTrackBuild
     name: 'Pole Position',
     thumb: 'map_thumbs/pole_position.png',   // (v43.78) owner's concept art, resized to the 468x220 the other thumbs use   // (v43.76) mode prefix dropped from the label - the picker already says which mode you are in
     defaultTheme: 'Grassy',
-    description: 'Hand-built sweep ; spawns at the eastern start, climb to the cathedral roof, descend through the western spine, dive into the central finish.',
+    description: 'Hand-built sweep ; take the Aegis gates in order - climb to the cathedral roof, descend through the western spine, dive into the central finish.',
     palette: [
       0x4487ff, 0xff4488, 0x44ddff, 0xff8844, 0xaaaaff, 0x44ddff, 0xff4488, 0xffffaa
     ],
@@ -118514,7 +118612,8 @@ function _lssGenRaceTrack(base) {
   const R = (a, b) => a + (b - a) * rnd();
   const ang = R(0, Math.PI * 2);
   const fx = Math.cos(ang), fz = Math.sin(ang), px = -fz, pz = fx;
-  const L = SU * R(36, 48);
+  // (v46.84) A LOT LONGER (owner): 110-140 SU (16.5-21 km) with 12-16 gates, from 36-48 SU and 4-6.
+  const L = SU * R(110, 140);
   const at = (t, side, y) => ({ x: fx * t + px * side, y: y, z: fz * t + pz * side });
   const rooms = [], tunnels = [];
   const s0 = -L / 2;
@@ -118523,13 +118622,13 @@ function _lssGenRaceTrack(base) {
     const q = at(s0, lanes[i] * SU, 0);
     rooms.push({ id: 'start_' + ((i % 2) ? 'b' : 'a') + (Math.floor(i / 2) + 1), team: (i % 2) ? 'B' : 'A', x: q.x, y: q.y, z: q.z, r: SU * 1.6 });
   }
-  const N = 4 + Math.floor(rnd() * 3);
+  const N = 12 + Math.floor(rnd() * 5);
   let side = 0, yy = 0;
   const gates = [];
   for (let i = 0; i < N; i++) {
     const t = s0 + L * (i + 1) / (N + 1);
-    side = Math.max(-SU * 7, Math.min(SU * 7, side + SU * R(-4, 4)));
-    yy = Math.max(-SU * 3, Math.min(SU * 3, yy + SU * R(-1.6, 1.6)));
+    side = Math.max(-SU * 9, Math.min(SU * 9, side + SU * R(-4.5, 4.5)));
+    yy = Math.max(-SU * 4, Math.min(SU * 4, yy + SU * R(-1.8, 1.8)));
     const q = at(t, side, yy);
     const g = { id: 'gate_' + (i + 1), team: null, gate: i + 1, x: q.x, y: q.y, z: q.z, r: SU * R(1.8, 2.3) };
     rooms.push(g); gates.push(g);
@@ -118546,6 +118645,7 @@ function _lssGenRaceTrack(base) {
   console.log('[race-shifting] seed=' + seed + ' gates=' + N + ' len=' + Math.round(L) + ' biome=' + biome);
   return {
     procedural: 'race_shifting',
+    circuit: base.circuit,   // (v46.84)
     name: base.name, thumb: base.thumb, description: base.description,
     defaultTheme: base.defaultTheme, palette: base.palette, terrain: base.terrain,
     _biomeOverride: biome,
@@ -118919,6 +119019,8 @@ function buildRoomGraphLevel(level) {
     for (const id in nodes) { if (nodes[id].champion) { finishId = id; break; } }
     game.raceGraph = { nodes, finishId };
   })();
+  // (v46.84) RACE CIRCUITS: Pole Position / the Shifting Run lay their gates along this graph
+  try { if (typeof _raceCircuitTrackBuild === 'function') _raceCircuitTrackBuild(level, rooms); } catch (e) { console.warn('[race] track circuit failed:', e); }
 
   // --- GENERATE CORRIDOR POINTS (for spawning, bot navigation, dynamic object placement) ---
   // Sample points inside rooms (tagged with team)
