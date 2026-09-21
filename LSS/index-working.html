@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.33";
+const LSS_BUILD = "47.35";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -10394,6 +10394,54 @@ async function joinRoom() {
       // a warmup_ready from us that already fired.
       if (typeof _localWarmupReady !== 'undefined' && _localWarmupReady && net.sendEvent) {
         try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
+      }
+
+      // ⭐⭐⭐ (v47.35) ...AND THE MAP, WITH ITS CUSTOM LOCATION.
+      // Owner: "i had put the location in before the other player joined... and we ended up in two
+      // cities". `map_change` only ever fires on a CHANGE - which is the exact hole the `ship` field
+      // a few lines above was added to close ("ship_pick only fires on a carousel change, so without
+      // this a joiner would see blank cards until everyone already here touched theirs").
+      // A peer who joins AFTER the location was typed never hears it. It keeps its own map state,
+      // and at launch each client builds its own world from its own `pendingGmapsOverlay`: two
+      // cities, one room. Nothing downstream can recover from that - the launch handshake syncs
+      // WHEN everyone starts, never WHAT they built.
+      // ⚠ To the JOINER ONLY, like broadcastWorldObjects below; everyone already here has it.
+      // ⚠ Safe if several peers answer at once: the receiver applies it with
+      //   `selectMap(..., { silent: true })` - "re-announcing it is the amplifier" - so it never
+      //   echoes back, and duplicates carry identical state.
+      // ⚠⚠ SENT MORE THAN ONCE, AND IT HAS TO BE. The receiver refuses a map that is not legal
+      //   for ITS mode (`_visibleMapKeys`, the v43.91 guard), and a peer that has only just joined
+      //   has not been decreed a mode yet - MEASURED: the joiner reported `mode: "?"` and stayed on
+      //   `hourglass` while correctly taking the Tokyo overlay, because the overlay is applied
+      //   BEFORE that guard and the mapKey after it. One immediate send therefore lands half the
+      //   state. These retries are silent, identical and idempotent, so the one that arrives after
+      //   the mode decree completes the job and the rest cost nothing.
+      // ⚠⚠ ONLY WHEN WE HAVE A LOCATION TO SHARE, AND NEVER A NULL ONE. BOTH sides run this
+      //   handler when a connection forms - the joiner sees the host appear just as the host sees
+      //   the joiner - so a symmetric "here is my map state" is CROSS-FIRE. MEASURED: the joiner
+      //   correctly took Kyoto at 1.5 s and was back to null by 3 s, because its own empty state
+      //   went the other way and the receiver reads `gmapsOverlay === null` as "peer detached -
+      //   clear locally", which wiped the HOST, whose next retry then broadcast the wipe back.
+      //   Gating on actually HAVING an overlay makes the exchange one-directional by construction:
+      //   a fresh joiner has none, so it stays silent and cannot erase anyone.
+      // ⚠ The `gmapsOverlay` key is OMITTED rather than sent as null - omission is "no opinion" to
+      //   the receiver, null is a command to clear.
+      if (net.sendEvent && typeof game !== 'undefined' && game && game.selectedMap &&
+          game.pendingGmapsOverlay) {
+        const _sendMapTo = () => {
+          try {
+            const _jov = game.pendingGmapsOverlay;
+            if (!net.active || !net.sendEvent || !game.selectedMap || !_jov) return;
+            net.sendEvent({
+              type: 'map_change',
+              mapKey: game.selectedMap,
+              gmapsOverlay: { lat: _jov.lat, lng: _jov.lng, name: _jov.name }
+            }, peerId);
+          } catch (_) {}
+        };
+        _sendMapTo();
+        setTimeout(_sendMapTo, 800);
+        setTimeout(_sendMapTo, 2500);
       }
 
       // If I'm the world owner and we have a built world, ship the
@@ -15870,7 +15918,8 @@ function checkAllLoadoutsReady() {
     // queued the launch_at message ; relative duration then scheduled
     // a fresh 1500 ms wait from receipt instead of firing immediately
     // to catch up).
-    if (net.sendEvent) net.sendEvent({ type: 'launch_at', launchAt });
+    // ⭐⭐⭐ (v47.34) `sentAt` MAKES THIS CLOCK-INDEPENDENT. See the receiver for why.
+    if (net.sendEvent) net.sendEvent({ type: 'launch_at', launchAt, sentAt: Date.now() });
     scheduleLaunch(launchAt);
   }
   // Non-proposers wait for the launch_at event in handleNetEvent.
@@ -15922,13 +15971,15 @@ function _lssArmSyncedCountdown(atMs) {
     try { launchCountdown(LSS.SHORT_COUNTDOWN); } catch (_) {}
   }, Math.max(0, atMs - _now()));
 }
-function scheduleLaunch(launchAt) {
+// `delayMs`, when given, is a DURATION measured on the sender's clock and is used instead of
+// differencing two clocks. See the v47.34 note in the `launch_at` receiver.
+function scheduleLaunch(launchAt, delayMs) {
   if (net.launchTimer) clearTimeout(net.launchTimer);
   if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
   net.launchScheduledAt = launchAt;
   // Everyone has confirmed ; disable the map arrows.
   _syncMapButtonsDisabled();
-  const delay = Math.max(0, launchAt - Date.now());
+  const delay = (typeof delayMs === 'number') ? Math.max(0, delayMs) : Math.max(0, launchAt - Date.now());
 
   // Self-healing launch_at handshake. The proposer used to
   // send launch_at exactly once and trust the network to deliver it ;
@@ -15945,9 +15996,12 @@ function scheduleLaunch(launchAt) {
     const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
     if (allIds[0] === net.myPeerId) {
       net.launchRebroadcast = setInterval(() => {
-        // (launch-sync 2026-05) Plain launchAt re-broadcast ; receiver
-        // dedupes by launchAt and computes delay against its own clock.
-        try { net.sendEvent({ type: 'launch_at', launchAt }); } catch (_) {}
+        // (v47.34) A FRESH `sentAt` EVERY TIME, and that is the whole trick: the remaining
+        // duration the receiver reads (`launchAt - sentAt`) SHRINKS with each re-broadcast, so a
+        // peer that was blocked and processes a backlog acts on the LAST one and fires almost
+        // immediately. That is precisely the late-receipt case the 2026-05 note says killed the
+        // earlier relative attempt - and this re-broadcast did not exist then.
+        try { net.sendEvent({ type: 'launch_at', launchAt, sentAt: Date.now() }); } catch (_) {}
       }, 150);
     }
   }
@@ -17332,6 +17386,30 @@ function handleNetEvent(evt, fromPeerId) {
     const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
     const expectedProposer = allIds[0];
     if (fromPeerId === expectedProposer && player.loadoutKey) {
+      // ⭐⭐⭐ (v47.34) TWO DEVICES DO NOT SHARE A CLOCK. Owner: "they are out of sync... they need
+      // to wait for sync before the load screen goes away (that's the curtain)".
+      // v45.16 calls this "a genuine clock handshake" that "works", and on two tabs it does - they
+      // share one `Date.now()`, which is exactly why a same-machine test measures ~170 ms and a
+      // PC + PHONE room measures about a second. **There is no clock-offset estimation anywhere in
+      // this file** (the only `_timeOffset`s are shader phases), so `launchAt - Date.now()` differs
+      // between peers by their full system-clock skew - unbounded, and seconds is ordinary.
+      // Everything downstream inherits it: the curtain, the cinematic and the 3-2-1 all hang off
+      // this one timer.
+      // So read a DURATION instead: `launchAt - sentAt` is computed entirely on the SENDER's clock,
+      // so it carries no skew at all. The cost is one-way transit (tens of ms on a data channel)
+      // where the old form paid the whole clock difference.
+      // ⚠ THE 2026-05 NOTE ABOVE SAYS RELATIVE WAS TRIED AND BROKE LATE RECEIPT - and it did, but
+      //   that was before the 150 ms RE-BROADCAST. Each re-broadcast now carries a fresh `sentAt`,
+      //   so the remaining duration shrinks; a peer that was blocked for 2 s drains its backlog,
+      //   acts on the LAST message and fires straight away instead of starting a fresh 1500 ms wait.
+      //   That is why the dedupe below no longer swallows repeats when `sentAt` is present: each one
+      //   REFINES the schedule, and `scheduleLaunch` is idempotent (it clears the prior timer).
+      // ⚠ Falls back to the absolute form for any peer still sending the old message shape.
+      if (typeof evt.sentAt === 'number') {
+        net.lastLaunchId = evt.launchAt;
+        scheduleLaunch(evt.launchAt, evt.launchAt - evt.sentAt);
+        return;
+      }
       if (net.lastLaunchId === evt.launchAt) return; 
       net.lastLaunchId = evt.launchAt;
       scheduleLaunch(evt.launchAt);

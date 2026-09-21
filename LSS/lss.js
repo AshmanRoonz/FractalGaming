@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.33";
+const LSS_BUILD = "47.35";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -2434,6 +2434,24 @@ async function joinRoom() {
 
       if (typeof _localWarmupReady !== 'undefined' && _localWarmupReady && net.sendEvent) {
         try { net.sendEvent({ type: 'warmup_ready' }); } catch (_) {}
+      }
+
+      if (net.sendEvent && typeof game !== 'undefined' && game && game.selectedMap &&
+          game.pendingGmapsOverlay) {
+        const _sendMapTo = () => {
+          try {
+            const _jov = game.pendingGmapsOverlay;
+            if (!net.active || !net.sendEvent || !game.selectedMap || !_jov) return;
+            net.sendEvent({
+              type: 'map_change',
+              mapKey: game.selectedMap,
+              gmapsOverlay: { lat: _jov.lat, lng: _jov.lng, name: _jov.name }
+            }, peerId);
+          } catch (_) {}
+        };
+        _sendMapTo();
+        setTimeout(_sendMapTo, 800);
+        setTimeout(_sendMapTo, 2500);
       }
 
       if (game.clusters && game.clusters.length > 0) {
@@ -6028,7 +6046,7 @@ function checkAllLoadoutsReady() {
   const proposer = allIds[0];
   if (proposer === net.myPeerId) {
     const launchAt = Date.now() + 1500;
-    if (net.sendEvent) net.sendEvent({ type: 'launch_at', launchAt });
+    if (net.sendEvent) net.sendEvent({ type: 'launch_at', launchAt, sentAt: Date.now() });
     scheduleLaunch(launchAt);
   }
 }
@@ -6052,18 +6070,18 @@ function _lssArmSyncedCountdown(atMs) {
     try { launchCountdown(LSS.SHORT_COUNTDOWN); } catch (_) {}
   }, Math.max(0, atMs - _now()));
 }
-function scheduleLaunch(launchAt) {
+function scheduleLaunch(launchAt, delayMs) {
   if (net.launchTimer) clearTimeout(net.launchTimer);
   if (net.launchRebroadcast) { clearInterval(net.launchRebroadcast); net.launchRebroadcast = null; }
   net.launchScheduledAt = launchAt;
   _syncMapButtonsDisabled();
-  const delay = Math.max(0, launchAt - Date.now());
+  const delay = (typeof delayMs === 'number') ? Math.max(0, delayMs) : Math.max(0, launchAt - Date.now());
 
   if (net.active && net.sendEvent) {
     const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
     if (allIds[0] === net.myPeerId) {
       net.launchRebroadcast = setInterval(() => {
-        try { net.sendEvent({ type: 'launch_at', launchAt }); } catch (_) {}
+        try { net.sendEvent({ type: 'launch_at', launchAt, sentAt: Date.now() }); } catch (_) {}
       }, 150);
     }
   }
@@ -6989,6 +7007,11 @@ function handleNetEvent(evt, fromPeerId) {
     const allIds = [net.myPeerId, ...nonJudgePeerIds()].sort();
     const expectedProposer = allIds[0];
     if (fromPeerId === expectedProposer && player.loadoutKey) {
+      if (typeof evt.sentAt === 'number') {
+        net.lastLaunchId = evt.launchAt;
+        scheduleLaunch(evt.launchAt, evt.launchAt - evt.sentAt);
+        return;
+      }
       if (net.lastLaunchId === evt.launchAt) return; 
       net.lastLaunchId = evt.launchAt;
       scheduleLaunch(evt.launchAt);
