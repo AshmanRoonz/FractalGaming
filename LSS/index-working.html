@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.13";
+const LSS_BUILD = "47.14";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -137510,6 +137510,43 @@ try {
   }
 } catch (_) {}
 
+// (v47.14) THE GROUND LIFT. See the long note at the terrain material in _buildRingMesh for why this
+// exists and how 0.30 was chosen. Short version: the earth night rig dims every light so the towers'
+// window texels bloom and the city reads as cyberpunk, but bare ground has no bright texels and just
+// goes black. This gives the terrain - and ONLY the terrain, the facades have no emissiveMap - a
+// self-lit floor driven by its own satellite imagery, so it keeps its colour and detail instead of
+// crushing to zero. A floor, not a fill light: shading and shadows still read on top of it.
+const _LE_GROUND_LIFT = 0.30;
+function _leGroundLift() {
+  try {
+    const v = window.__earthGroundLift;
+    if (typeof v === 'number' && isFinite(v) && v >= 0) return v;
+  } catch (_) {}
+  return _LE_GROUND_LIFT;
+}
+function _leApplyGroundLift(mat) {
+  if (!mat || !mat.map || !mat.emissive) return;
+  const v = _leGroundLift();
+  mat.emissiveMap = (v > 0) ? mat.map : null;   // 0 restores the pre-v47.14 look exactly
+  mat.emissive.setScalar(v);
+  mat.emissiveIntensity = 1;
+  mat.needsUpdate = true;
+}
+// Live tuner for the pane: __earthGroundLiftApply(0.4) re-applies to every terrain mesh already built.
+// Rings stream in over time and each gets the lift at creation, so this is only needed while dialling.
+try {
+  window.__earthGroundLiftApply = function (v) {
+    if (typeof v === 'number') window.__earthGroundLift = v;
+    let n = 0;
+    try {
+      scene.traverse((o) => {
+        if (/^earth-terrain/.test(o.name || '') && o.material) { _leApplyGroundLift(o.material); n++; }
+      });
+    } catch (_) {}
+    return { lift: _leGroundLift(), meshes: n };
+  };
+} catch (_) {}
+
 function _lssEarthApplyDayNight(k) {
   if (typeof scene === 'undefined' || !scene) return;
   const D = (typeof _HUB_ZONES !== 'undefined' && _HUB_ZONES && _HUB_ZONES.DUSK) || null;
@@ -139077,10 +139114,32 @@ class LSSEarthTiles {
     // Outer rings are coarser on purpose: they cover 4x the area per step and
     // are only ever seen at distance through the haze.
     const N = Math.max(4, Math.round(this.terrainSegments / D / (k + 1)));
+    // (v47.14) THE GROUND GETS A SELF-LIT FLOOR, THE SKY DIMMING DOES NOT TOUCH IT.
+    // Owner: "i find the ground in the cities to be very dark, on Earth... i went to hong kong and the
+    // hill is just all black ... we dim the skies in cities to make the cyberpunk buildings look cooler
+    // and more visible, but maybe there could be a way it doesn't affect the ground so much".
+    // MEASURED in Hong Kong: the earth night rig (_lssEarthApplyDayNight -> _HUB_ZONES.DUSK) leaves the
+    // terrain lit by AmbientLight 3.73 @ #2b3b90 - a dim BLUE - with the key light at 0.327, fill 0.151,
+    // rim 0.112, hemi 0.4, under ACES at exposure 0.78. The TOWERS survive that because their window
+    // texels clear the dusk bloom threshold (0.14, strength 1.70) and bloom; bare hillside has no bright
+    // texels at all, so it renders as near-black. The buildings are MeshLambert with emissive #000000
+    // and no emissiveMap, so lifting the ground here cannot touch them - this is the one channel the
+    // terrain has and the facades do not.
+    // emissiveMap = the satellite imagery itself, so the ground keeps its own colour and detail and
+    // simply stops falling to zero; it is a floor, not a fill light, so shading and shadows still read.
+    // 0.30 chosen by eye against 0 / 0.16 / 0.30 / 0.55 at a straight-down vantage over the Hong Kong
+    // hill flank: 0.16 was still too dark to read the streets, 0.55 reads like daylight imagery and
+    // fights the night. Stays under the 0.14 bloom threshold for any plausible ground albedo, so the
+    // terrain lifts without glowing.
+    // ⚠ emissiveMap is a program-cache-key term (emissiveMapUv), so this forks ONE extra terrain
+    //   program. It is created during the world build, behind the curtain.
+    // window.__earthGroundLift tunes it live (see _leApplyGroundLift); 0 restores the old look.
+    const _mapTex = g.img ? this._makeTexture(g.img) : null;
     const mat = new THREE.MeshLambertMaterial({
-      map: g.img ? this._makeTexture(g.img) : null,
+      map: _mapTex,
       color: g.img ? 0xffffff : 0x5e6b52
     });
+    try { _leApplyGroundLift(mat); } catch (_) {}
     const idx = new Uint32Array(N * N * 6);
     let t = 0;
     for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {

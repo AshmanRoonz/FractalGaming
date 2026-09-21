@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.13";
+const LSS_BUILD = "47.14";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -91918,6 +91918,35 @@ try {
   }
 } catch (_) {}
 
+const _LE_GROUND_LIFT = 0.30;
+function _leGroundLift() {
+  try {
+    const v = window.__earthGroundLift;
+    if (typeof v === 'number' && isFinite(v) && v >= 0) return v;
+  } catch (_) {}
+  return _LE_GROUND_LIFT;
+}
+function _leApplyGroundLift(mat) {
+  if (!mat || !mat.map || !mat.emissive) return;
+  const v = _leGroundLift();
+  mat.emissiveMap = (v > 0) ? mat.map : null;   // 0 restores the pre-v47.14 look exactly
+  mat.emissive.setScalar(v);
+  mat.emissiveIntensity = 1;
+  mat.needsUpdate = true;
+}
+try {
+  window.__earthGroundLiftApply = function (v) {
+    if (typeof v === 'number') window.__earthGroundLift = v;
+    let n = 0;
+    try {
+      scene.traverse((o) => {
+        if (/^earth-terrain/.test(o.name || '') && o.material) { _leApplyGroundLift(o.material); n++; }
+      });
+    } catch (_) {}
+    return { lift: _leGroundLift(), meshes: n };
+  };
+} catch (_) {}
+
 function _lssEarthApplyDayNight(k) {
   if (typeof scene === 'undefined' || !scene) return;
   const D = (typeof _HUB_ZONES !== 'undefined' && _HUB_ZONES && _HUB_ZONES.DUSK) || null;
@@ -93007,10 +93036,12 @@ class LSSEarthTiles {
     const inner = (k > 0) ? this._grids[k - 1] : null;
     const D = this.chunkDivisions;
     const N = Math.max(4, Math.round(this.terrainSegments / D / (k + 1)));
+    const _mapTex = g.img ? this._makeTexture(g.img) : null;
     const mat = new THREE.MeshLambertMaterial({
-      map: g.img ? this._makeTexture(g.img) : null,
+      map: _mapTex,
       color: g.img ? 0xffffff : 0x5e6b52
     });
+    try { _leApplyGroundLift(mat); } catch (_) {}
     const idx = new Uint32Array(N * N * 6);
     let t = 0;
     for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
