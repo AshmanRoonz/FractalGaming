@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.16";
+const LSS_BUILD = "47.21";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -7785,6 +7785,20 @@ const player = {
   mesh: null,
 };
 
+// (v47.21) THE FLAT-SCREEN HUD SHIPS AT THE TOP OF ITS RANGE. Owner: "let's max
+// out the HUD size by default in the settings (1.75x)". 1.75 is the slider's
+// maximum, not an arbitrary number - see the `hudScale` note below for why the
+// range ends there (past ~1.8 the gauge cluster reaches the pinned compass rose).
+// ⚠ SIX PLACES USED TO SPELL THIS `1`: the `input` default, `_hlScale`'s fallback,
+// the settings page's build-time and reopen values, `saveSettings`, and
+// `SHIPPED_DEFAULTS`. They only ever agreed by hand, so they are one constant now.
+// ⚠ A SAVED SETTING STILL WINS - `loadSettings` writes `data.hudScale` over this
+// whenever the key is present, which is every save written since v36.19. This
+// changes what a FIRST BOOT and a RESET TO DEFAULTS get, and what a pre-v36.19
+// save (no key at all) falls back to. Anyone who has already touched the slider
+// keeps their number, by design: a default is not a migration.
+const HUD_SCALE_DEFAULT = 1.75;
+
 // ---- INPUT ----
 
 const input = {
@@ -7964,7 +7978,8 @@ const input = {
   // The radar + compass are EXCLUDED (the owner asked for it, and the rose is
   // dimensioned off the disc); so are the DOM HUD bits and the cockpit frame art,
   // which is designed around the layout at 1x.
-  hudScale: 1,
+  // (v47.21) Default is now the slider's MAXIMUM - see HUD_SCALE_DEFAULT above.
+  hudScale: HUD_SCALE_DEFAULT,
   // (v42.56) HOW OPAQUE THE HUD IS, and how opaque its TEXT is, as two independent settings.
   // Owner: "can we put a slider for HUD opacity, in the settings, make text opacity independent".
   // The graphics side already existed as `window.__hudAlpha` (v41.40, default 0.72) - every
@@ -101692,7 +101707,7 @@ function _nrgLowCol(pct, t) {
 // would see hudScale × vrHudScale — 2.25× at both defaults.
 function _hlScale() {
   if (typeof isXRPresenting === 'function' && isXRPresenting()) return 1;
-  const s = (typeof input !== 'undefined' && input && typeof input.hudScale === 'number') ? input.hudScale : 1;
+  const s = (typeof input !== 'undefined' && input && typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT;
   if (!(s > 0)) return 1;
   return Math.max(0.75, Math.min(1.75, Math.round(s * 20) / 20));
 }
@@ -102560,6 +102575,65 @@ function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel) {
               'rgba(236,247,255,0.95)', Math.max(7, vm * sizeV), wDeg * 0.88);
 }
 
+// (v47.17) A label on a plate that is TURNED, not CURVED. `_hlfLabelPlate` rides
+// its text along the bar, which is right on the 136-degree top rows but means
+// NRG and AMMO read almost VERTICALLY on the 44-degree flank bars - the tangent
+// there is ~115 degrees. The dash pip row sitting in the same band is a straight
+// strip at `_HLF_DASH.rot`, so these two now match it and the flank stops being
+// the one place you tilt your head. Owner: "put NRG text and AMMO text in the
+// same orientation at the dash dots (rotated from what it's at)".
+//
+// ⚠ The PLATE turns with the text. Rotating only the glyphs inside an arc-shaped
+// cutout puts a ~1.4vm word across a 1.5vm-tall cell at 85 degrees to the cell's
+// own axis - it fits by arithmetic and reads as a mistake.
+//
+// `endDeg` + `dir` anchor it the way the arc plates were anchored: the plate's
+// near corner lands on the end of the bar the fill GROWS FROM, so it still reads
+// as part of the bar rather than floating in the middle of it. The width has to
+// be measured before the angle can be chosen, which is why the caller passes an
+// end and a direction instead of a mid angle.
+// (v47.18) `_HLF_LBL.slide` is HOW FAR PAST the bar's end the plate hangs, as a
+// fraction of its own width: 0 sits it fully inside the bar with its near edge
+// on the end, 0.5 centres it ON the end, 1 clears the bar entirely. Owner:
+// "NRG can actually lower to the bottom of its bar" / "same with ammo".
+// `radial` is the same idea across the band: 0.5 is the bar's mid radius, 0 its
+// inner edge, 1 its outer. Both are live on `window.__hudLbl` because this is
+// eye-tuned against a 12-pixel word and a rebuild per nudge is the slow way to
+// find a number nobody can derive.
+const _HLF_LBL = { slide: 0.5, radial: 0.5 };
+function _hlfLblK(name) {
+  try { const o = window.__hudLbl; if (o && typeof o[name] === 'number') return o[name]; } catch (_) {}
+  return _HLF_LBL[name];
+}
+function _hlfFlatPlate(I, rIn, rOut, endDeg, dir, rotDeg, text, sizeV) {
+  const ctx = I.ctx, vm = I.vmin;
+  const f = Math.max(7, vm * sizeV);
+  const r = rIn + (rOut - rIn) * _hlfLblK('radial');
+  ctx.save();
+  ctx.font = '700 ' + f.toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif';
+  const w = ctx.measureText(text).width + f * 1.10, h = f * 1.75;
+  const mid = endDeg + dir * ((w / vm) / (r * _HL_D2R)) * (0.5 - _hlfLblK('slide'));
+  const a = mid * _HL_D2R;
+  ctx.translate(I.cx + Math.cos(a) * r * vm, I.cy + Math.sin(a) * r * vm);
+  ctx.rotate(rotDeg * _HL_D2R);
+  ctx.globalAlpha = I.ga;
+  ctx.beginPath();
+  ctx.roundRect(-w / 2, -h / 2, w, h, Math.min(h * 0.30, vm * 0.45));
+  ctx.fillStyle = '#05080b';
+  ctx.fill();
+  // Same two-pass etch the arc labels use: near-black stroke under a light fill,
+  // so the word holds over the lit bar and the bare track alike.
+  ctx.globalAlpha = _hlTA();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(1.6, f * 0.34);
+  ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+  ctx.strokeText(text, 0, 0);
+  ctx.fillStyle = 'rgba(236,247,255,0.95)';
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
+}
+
 // Cell widths that are NOT equal: wider at the ends, narrower in the middle.
 // Derived from the count, so a 3-plate hull and a 5-plate hull both get the
 // pattern rather than a hardcoded table.
@@ -102751,18 +102825,32 @@ function _hlfIcon(I, kind, s, col, ready) {
 // AMMO keeps on the right. The icons stop being a cluster floating inside the
 // ring and become part of the instrument.
 //
-// ⚠ 1.85vm is what the 2vm outer half allows. Smaller than the 2.6 they had
-// free-standing, but far larger than the ~1.3 the FULL-width band forced when
-// they sat at r 13.2 with NRG 7.8 degrees away — that measurement is what
-// pushed them off the flank in the first place, and halving the strip is what
-// makes the band usable.
-// ⚠ Reads `_HL` at module scope — keep below the `_HL` literal (v39.02 TDZ).
+// (v47.20) 2.10vm, up from the 1.85 the 2vm outer half allowed. Owner: "make the
+// 3 icons slightly bigger, but don't make them overlap the NRG bar, they can
+// expand outward". So the row is no longer centred in the outer half: it is
+// pinned by its INNER EDGE at NRG's outer edge + `GAP`, and every extra vmin of
+// size travels outward. At rest it now reaches 15.40, past the 15.2 band edge -
+// which is free, because the frame (`_HLF.FR`) only spans `TOP` 200..340 and
+// this row sits at 152..196, and the old `labR` 16.3 captions are long gone.
+//
+// Still far larger than the ~1.3 the FULL-width band forced when they sat at
+// r 13.2 with NRG 7.8 degrees away - that measurement is what pushed them off
+// the flank in the first place, and halving the strip is what made it usable.
+// ⚠ Reads `_HL` at module scope - keep below the `_HL` literal (v39.02 TDZ).
 const _HLF_ICON_ROW = (function () {
+  const nrgOut = _HL.speed.r + _HL.speed.tick * 0.5;   // 13.2 - NRG's outer edge
+  // GAP covers the STROKE, not just the path: `_hlfIcon` strokes at vm*0.17
+  // centred on the outline, so the drawn edge reaches 0.085vm inside `rIn`.
+  // 0.20 leaves ~0.115vm of real daylight against NRG's 13.2.
+  // (The ready glow is a shadowBlur halo, not an edge - it washes over the bar
+  // by design and did before this change too.)
+  const GAP = 0.20, size = 2.10;
   return {
-    r: _HL.speed.r + _HL.speed.tick * 0.75,      // mid of the outer half
+    rIn: nrgOut + GAP,                           // the edge nothing may cross
+    r: nrgOut + GAP + size / 2,                  // resting centre
     mid: (_HL.speed.a0 + _HL.speed.a1) / 2 + (_HL.speed.rot || 0),
     step: 3.3,
-    size: 1.85,
+    size: size,
   };
 })();
 
@@ -102882,22 +102970,32 @@ function _hlfDraw(ctx, W, H, v) {
   // the icon row below is the ability readout now. CORE takes the caption.
   _hlfLabelPlate(I, (AB.rIn + AB.rOut) / 2, 270, 'CORE', coreCol, 0.66, 11,
                  Math.max(AB.rOut - AB.rIn, 0.95));
-  // (v47.01) NRG and AMMO are cutouts punched through their OWN bars now,
-  // instead of curved captions riding beside them. RECTANGLES, not the
-  // trapezoids the top three rows use: those sit on a 136-degree sweep where
-  // the bevel is a slight taper, but on a 44-degree bar the same proportion
-  // skews the plate badly enough to read as a mistake.
-  // `_HL.speed.labR` / `_HL.ammo.labR` (16.3, outside the band) are no longer
-  // used on this path — NRG's would have ended up captioning the role icons
-  // rather than its own bar, which is what forced the question.
-  //
-  // The plate is sized to the STRING, because these two carry a value and the
-  // others do not: a fixed width that fits 'AMMO  40/40' leaves 'NRG  7%'
-  // rattling around inside an oversized hole.
+  // (v47.01) NRG and AMMO are plates on their OWN bars, instead of curved
+  // captions riding beside them. `_HL.speed.labR` / `_HL.ammo.labR` (16.3,
+  // outside the band) are no longer used on this path — NRG's would have ended
+  // up captioning the role icons rather than its own bar, which is what forced
+  // the question.
+  // (v47.17) They are no longer arc CUTOUTS either: both are flat plates turned
+  // to the dash row's angle (see `_hlfFlatPlate`), and both are sized by the
+  // measured word rather than a character count, since neither carries a value
+  // any more. That retired `plateDeg`, whose whole job was fitting a plate
+  // around a string whose length changed with the reading.
   // ⚠ Keep these TIGHT. The top rows are short plates on a 136-degree sweep;
   // these sit on 44- and 42-degree bars, so the same generosity turns the bar
   // into mostly label and you can no longer read the fill behind it.
-  const plateDeg = (str, r) => (str.length * 0.50 + 0.8) / (r * _HL_D2R);
+  // (v47.17) ⚠ NOW CENTRED ON THEIR BAR, which REVERSES the v47.01 rule below.
+  // That rule put both plates flush with their bar's OUTER EDGE, and it was
+  // right for an arc-shaped cutout: sharing the bar's own edge is what made the
+  // cutout look punched through it. A plate that is TURNED off the bar's axis
+  // shares no edge with it, so the same offset stops reading as flush and just
+  // reads as misplaced - and it showed up on AMMO and not NRG because the two
+  // bands are different depths. NRG is the band's INNER HALF (11.2..13.2) so its
+  // outer-edge offset happened to land near the middle anyway; AMMO spans the
+  // WHOLE band (11.2..15.2), where the same offset is a full 1.25vm off centre.
+  // Owner: "NRG fits, AMMO is a off center in its bar". Each now takes its own
+  // bar's MID radius - which also puts AMMO at 13.2, the dash row's own radius.
+  //
+  // The superseded v47.01 note, kept because it still explains the top rows:
   // ⚠ These two are FLUSH WITH THE OUTER EDGE of their bar, not centred on it.
   // Centred, the plate floats in the middle of the blades with a sliver of bar
   // above and below and reads as a sticker laid on top; sharing the bar's own
@@ -102913,21 +103011,27 @@ function _hlfDraw(ctx, W, H, v) {
   // from `a1` (28 deg, its lower end). `_hlfLabelPlate` takes a mid angle, so
   // the offset is half the plate's own width, in the direction that keeps it
   // inside the bar.
-  const PLATE_H = 1.5;
+  // (v47.17) NAMES ONLY - the numbers are gone. 'NRG 7%' and 'AMMO 40/40' put a
+  // live readout inside the plate, which forced the plate to be sized to the
+  // STRING and made it grow and shrink as the value changed; the bar behind it
+  // is already the quantity, and on a 44-degree sweep the digits were eating the
+  // fill they were describing. Owner: "remove the number readout for each".
+  // ⚠ This leaves NO numeric ammo readout on the framed HUD - deliberate, and
+  // the same call the v35.42 note records for hull.
+  //
+  // Both take their tilt from `_HLF_DASH.rot`, the dash row's own rotation, so
+  // they cannot drift out of step with the thing they were asked to match.
+  // MIRRORED across the instrument: NRG is the left flank, AMMO the right, and
+  // the HUD already mirrors its flanks (`_HL.ab1.rot` -50 against `ab2` +50).
+  const LBL_TILT = _HLF_DASH.rot || 30;
+  // Each plate is given its bar's OWN radial extent, so `radial` means the same
+  // thing on both: NRG is the band's inner half, AMMO the whole band.
   if (v.energyPct != null) {
-    const r = (_HL.speed.r + _HL.speed.tick * 0.5) - PLATE_H / 2;   // NRG's half, outer edge
-    const str = 'NRG  ' + Math.round(v.energyPct * 100) + '%';
-    const w = plateDeg(str, r);
-    _hlfLabelPlate(I, r, _HL.speed.a0 + (_HL.speed.rot || 0) + w / 2,
-                   str, null, 0.62, w, PLATE_H, 0);
+    _hlfFlatPlate(I, _HL.speed.r, _HL.speed.r + _HL.speed.tick * 0.5,
+                  _HL.speed.a0 + (_HL.speed.rot || 0), +1, -LBL_TILT, 'NRG', 0.62);
   }
-  {
-    const r = (_HL.ammo.r + 4) - PLATE_H / 2;                       // full band, outer edge
-    const str = 'AMMO  ' + v.ammoFull;
-    const w = plateDeg(str, r);
-    _hlfLabelPlate(I, r, _HL.ammo.a1 + (_HL.ammo.rot || 0) - w / 2, str,
-                   null, 0.62, w, PLATE_H, 0);
-  }
+  _hlfFlatPlate(I, _HL.ammo.r, _HL.ammo.r + 4,
+                _HL.ammo.a1 + (_HL.ammo.rot || 0), -1, +LBL_TILT, 'AMMO', 0.62);
 
   // ── ABILITY ICONS ── (v47.01) in the slot the CORE bar just vacated, still
   // mirroring the dash row across the instrument. Three role glyphs: sword
@@ -102942,14 +103046,19 @@ function _hlfDraw(ctx, W, H, v) {
   // being read at a glance is the entire job here.
   {
     const order = _HL_AB.slice().sort((a, b) => _HL[a.cd].a0 - _HL[b.cd].a0);
-    const IR = _HLF_ICON_ROW, size = IR.size * vm;
+    const IR = _HLF_ICON_ROW;
+    // Live knob, same reason as `window.__hudLbl`: this is eye-tuned against the
+    // NRG bar it must not touch, and a rebuild per nudge is the slow way there.
+    let szV = IR.size;
+    try { if (window.__hudIcon && typeof window.__hudIcon.size === 'number') szV = window.__hudIcon.size; } catch (_) {}
+    const size = szV * vm;
     // Stepped in POLAR so the row follows the ring, but each glyph is drawn
     // upright (below): a tilted sword and a tilted bolt are markedly harder to
     // tell apart at a glance, and being read at a glance is the whole job.
     // The row is a vertical-ish column on the left flank now, so the old
     // left-to-right pill order becomes TOP-to-bottom. Angle grows upward
     // here, so the first of the sorted abilities takes the LARGEST offset.
-    const dPerStep = IR.step / IR.r * 180 / Math.PI;
+    const dPerStep = IR.step / (IR.rIn + szV / 2) * 180 / Math.PI;
     ctx.save();
     ctx.globalAlpha = I.ga;
     for (let i = 0; i < order.length; i++) {
@@ -102970,8 +103079,14 @@ function _hlfDraw(ctx, W, H, v) {
       const age = (v.t != null && _hudRF && _hudRF.t0) ? v.t - _hudRF.t0[m.slot] : -1;
       if (age >= 0 && age < 0.45) pop = 1 + 0.32 * (1 - age / 0.45);
       const a = (IR.mid + ((order.length - 1) / 2 - i) * dPerStep) * _HL_D2R;
+      // ⚠ (v47.20) THE READY-POP GROWS OUTWARD, not about the centre. Scaled in
+      // place, a 1.32x pop put the inner edge 0.34vm INSIDE the NRG bar for the
+      // 0.45 s it ran - an overlap that existed before this row was resized and
+      // would only have got worse with it. Holding the inner edge and letting
+      // the far side travel keeps the one hard constraint the owner set.
+      const rDraw = IR.rIn + szV * pop / 2;
       ctx.save();
-      ctx.translate(I.cx + Math.cos(a) * IR.r * vm, I.cy + Math.sin(a) * IR.r * vm);
+      ctx.translate(I.cx + Math.cos(a) * rDraw * vm, I.cy + Math.sin(a) * rDraw * vm);
       _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready);
       ctx.restore();
     }
@@ -112123,7 +112238,7 @@ function _refreshSettingsValues() {
     // (v36.19) buildSettingsPage writes overlay.innerHTML once and is gated by
     // _settingsBuilt, so without this the slider shows its build-time value
     // every time the overlay is reopened.
-    const _fs = (typeof input.hudScale === 'number') ? input.hudScale : 1;
+    const _fs = (typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT;
     setRange('set-hud-scale', null, _fs);
     const _fv = $('#val-hud-scale');
     if (_fv) _fv.textContent = _fs.toFixed(2) + 'x';
@@ -112488,8 +112603,8 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row">
         <label>HUD Size</label>
-        <input type="range" id="set-hud-scale" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScale === 'number') ? input.hudScale : 1}">
-        <div class="value-display" id="val-hud-scale">${((typeof input.hudScale === 'number') ? input.hudScale : 1).toFixed(2)}x</div>
+        <input type="range" id="set-hud-scale" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT}">
+        <div class="value-display" id="val-hud-scale">${((typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT).toFixed(2)}x</div>
       </div>
       <div class="setting-row">
         <!-- step 0.01, not the 0.05 its neighbours use: the shipped default is 0.72, which is not
@@ -114769,7 +114884,7 @@ function saveSettings() {
       cockpitVR: input.cockpitVR === true,
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
-      hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
+      hudScale: (typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT,
       hudOpacity: (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72,
       hudTextOpacity: (typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1,
       crosshairOpacity: (typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72,
@@ -115052,7 +115167,7 @@ const SHIPPED_DEFAULTS = {
   "vrRenderScale": 1,
   "vrPerfMode": "standard",
   "vrStripFx": true,
-  "hudScale": 1,
+  "hudScale": HUD_SCALE_DEFAULT,   // (v47.21) first boot and RESET TO DEFAULTS both land here
   "hudOpacity": 0.72,
   "hudTextOpacity": 1,
   "crosshairOpacity": 0.72,
@@ -116686,9 +116801,11 @@ function loadSettings() {
     // Absent key keeps the `true` default — settings saved before v35.55 have
     // no entry for this, and those players should still see the captions.
     if (typeof data.hudGaugeLabels === 'boolean') input.hudGaugeLabels = data.hudGaugeLabels;
-    // (v36.19) Absent key keeps the 1 default, so every pre-v36.19 save loads at
-    // the designed layout. Clamped on read as well as in _hlScale so a
-    // hand-edited localStorage cannot wedge the HUD off-screen.
+    // (v36.19) Absent key keeps the built-in default, so every pre-v36.19 save
+    // falls back to it - which since v47.21 is 1.75, not the 1 this note used to
+    // promise. A save that HAS the key still wins, which is every save written
+    // since v36.19. Clamped on read as well as in _hlScale so a hand-edited
+    // localStorage cannot wedge the HUD off-screen.
     if (typeof data.cockpitSolidity === 'number' && isFinite(data.cockpitSolidity)) {
       input.cockpitSolidity = Math.max(0, Math.min(1, data.cockpitSolidity));
     }

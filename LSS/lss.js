@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.16";
+const LSS_BUILD = "47.21";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -552,6 +552,8 @@ const player = {
   mesh: null,
 };
 
+const HUD_SCALE_DEFAULT = 1.75;
+
 
 const input = {
   keys: {},
@@ -667,7 +669,7 @@ const input = {
   vrHudScale: 3,
   vrWater: false,
   vrWaterRefl: false,
-  hudScale: 1,
+  hudScale: HUD_SCALE_DEFAULT,
   hudOpacity: 0.72,
   hudTextOpacity: 1,
   crosshairOpacity: 0.72,
@@ -64477,7 +64479,7 @@ function _nrgLowCol(pct, t) {
 
 function _hlScale() {
   if (typeof isXRPresenting === 'function' && isXRPresenting()) return 1;
-  const s = (typeof input !== 'undefined' && input && typeof input.hudScale === 'number') ? input.hudScale : 1;
+  const s = (typeof input !== 'undefined' && input && typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT;
   if (!(s > 0)) return 1;
   return Math.max(0.75, Math.min(1.75, Math.round(s * 20) / 20));
 }
@@ -65044,6 +65046,38 @@ function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel) {
               'rgba(236,247,255,0.95)', Math.max(7, vm * sizeV), wDeg * 0.88);
 }
 
+const _HLF_LBL = { slide: 0.5, radial: 0.5 };
+function _hlfLblK(name) {
+  try { const o = window.__hudLbl; if (o && typeof o[name] === 'number') return o[name]; } catch (_) {}
+  return _HLF_LBL[name];
+}
+function _hlfFlatPlate(I, rIn, rOut, endDeg, dir, rotDeg, text, sizeV) {
+  const ctx = I.ctx, vm = I.vmin;
+  const f = Math.max(7, vm * sizeV);
+  const r = rIn + (rOut - rIn) * _hlfLblK('radial');
+  ctx.save();
+  ctx.font = '700 ' + f.toFixed(1) + 'px Orbitron, "Segoe UI", sans-serif';
+  const w = ctx.measureText(text).width + f * 1.10, h = f * 1.75;
+  const mid = endDeg + dir * ((w / vm) / (r * _HL_D2R)) * (0.5 - _hlfLblK('slide'));
+  const a = mid * _HL_D2R;
+  ctx.translate(I.cx + Math.cos(a) * r * vm, I.cy + Math.sin(a) * r * vm);
+  ctx.rotate(rotDeg * _HL_D2R);
+  ctx.globalAlpha = I.ga;
+  ctx.beginPath();
+  ctx.roundRect(-w / 2, -h / 2, w, h, Math.min(h * 0.30, vm * 0.45));
+  ctx.fillStyle = '#05080b';
+  ctx.fill();
+  ctx.globalAlpha = _hlTA();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = Math.max(1.6, f * 0.34);
+  ctx.strokeStyle = 'rgba(0,0,0,0.82)';
+  ctx.strokeText(text, 0, 0);
+  ctx.fillStyle = 'rgba(236,247,255,0.95)';
+  ctx.fillText(text, 0, 0);
+  ctx.restore();
+}
+
 function _hlfUneven(n) {
   const w = [];
   for (let i = 0; i < n; i++) w.push(0.72 + 0.58 * Math.abs(2 * (i + 0.5) / n - 1));
@@ -65179,11 +65213,14 @@ function _hlfIcon(I, kind, s, col, ready) {
 }
 
 const _HLF_ICON_ROW = (function () {
+  const nrgOut = _HL.speed.r + _HL.speed.tick * 0.5;   // 13.2 - NRG's outer edge
+  const GAP = 0.20, size = 2.10;
   return {
-    r: _HL.speed.r + _HL.speed.tick * 0.75,      // mid of the outer half
+    rIn: nrgOut + GAP,                           // the edge nothing may cross
+    r: nrgOut + GAP + size / 2,                  // resting centre
     mid: (_HL.speed.a0 + _HL.speed.a1) / 2 + (_HL.speed.rot || 0),
     step: 3.3,
-    size: 1.85,
+    size: size,
   };
 })();
 
@@ -65264,27 +65301,21 @@ function _hlfDraw(ctx, W, H, v) {
   _hlfLabelPlate(I, (HP.rIn + HP.rOut) / 2, 270, 'HP', hpCol, 0.78, 9, HP.rOut - HP.rIn);
   _hlfLabelPlate(I, (AB.rIn + AB.rOut) / 2, 270, 'CORE', coreCol, 0.66, 11,
                  Math.max(AB.rOut - AB.rIn, 0.95));
-  const plateDeg = (str, r) => (str.length * 0.50 + 0.8) / (r * _HL_D2R);
-  const PLATE_H = 1.5;
+  const LBL_TILT = _HLF_DASH.rot || 30;
   if (v.energyPct != null) {
-    const r = (_HL.speed.r + _HL.speed.tick * 0.5) - PLATE_H / 2;   // NRG's half, outer edge
-    const str = 'NRG  ' + Math.round(v.energyPct * 100) + '%';
-    const w = plateDeg(str, r);
-    _hlfLabelPlate(I, r, _HL.speed.a0 + (_HL.speed.rot || 0) + w / 2,
-                   str, null, 0.62, w, PLATE_H, 0);
+    _hlfFlatPlate(I, _HL.speed.r, _HL.speed.r + _HL.speed.tick * 0.5,
+                  _HL.speed.a0 + (_HL.speed.rot || 0), +1, -LBL_TILT, 'NRG', 0.62);
   }
-  {
-    const r = (_HL.ammo.r + 4) - PLATE_H / 2;                       // full band, outer edge
-    const str = 'AMMO  ' + v.ammoFull;
-    const w = plateDeg(str, r);
-    _hlfLabelPlate(I, r, _HL.ammo.a1 + (_HL.ammo.rot || 0) - w / 2, str,
-                   null, 0.62, w, PLATE_H, 0);
-  }
+  _hlfFlatPlate(I, _HL.ammo.r, _HL.ammo.r + 4,
+                _HL.ammo.a1 + (_HL.ammo.rot || 0), -1, +LBL_TILT, 'AMMO', 0.62);
 
   {
     const order = _HL_AB.slice().sort((a, b) => _HL[a.cd].a0 - _HL[b.cd].a0);
-    const IR = _HLF_ICON_ROW, size = IR.size * vm;
-    const dPerStep = IR.step / IR.r * 180 / Math.PI;
+    const IR = _HLF_ICON_ROW;
+    let szV = IR.size;
+    try { if (window.__hudIcon && typeof window.__hudIcon.size === 'number') szV = window.__hudIcon.size; } catch (_) {}
+    const size = szV * vm;
+    const dPerStep = IR.step / (IR.rIn + szV / 2) * 180 / Math.PI;
     ctx.save();
     ctx.globalAlpha = I.ga;
     for (let i = 0; i < order.length; i++) {
@@ -65299,8 +65330,9 @@ function _hlfDraw(ctx, W, H, v) {
       const age = (v.t != null && _hudRF && _hudRF.t0) ? v.t - _hudRF.t0[m.slot] : -1;
       if (age >= 0 && age < 0.45) pop = 1 + 0.32 * (1 - age / 0.45);
       const a = (IR.mid + ((order.length - 1) / 2 - i) * dPerStep) * _HL_D2R;
+      const rDraw = IR.rIn + szV * pop / 2;
       ctx.save();
-      ctx.translate(I.cx + Math.cos(a) * IR.r * vm, I.cy + Math.sin(a) * IR.r * vm);
+      ctx.translate(I.cx + Math.cos(a) * rDraw * vm, I.cy + Math.sin(a) * rDraw * vm);
       _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready);
       ctx.restore();
     }
@@ -71146,7 +71178,7 @@ function _refreshSettingsValues() {
   }
   setChk('set-hud-gauge-labels', input.hudGaugeLabels !== false);
   {
-    const _fs = (typeof input.hudScale === 'number') ? input.hudScale : 1;
+    const _fs = (typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT;
     setRange('set-hud-scale', null, _fs);
     const _fv = $('#val-hud-scale');
     if (_fv) _fv.textContent = _fs.toFixed(2) + 'x';
@@ -71490,8 +71522,8 @@ function buildSettingsPage() {
       </div>
       <div class="setting-row">
         <label>HUD Size</label>
-        <input type="range" id="set-hud-scale" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScale === 'number') ? input.hudScale : 1}">
-        <div class="value-display" id="val-hud-scale">${((typeof input.hudScale === 'number') ? input.hudScale : 1).toFixed(2)}x</div>
+        <input type="range" id="set-hud-scale" min="0.75" max="1.75" step="0.05" value="${(typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT}">
+        <div class="value-display" id="val-hud-scale">${((typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT).toFixed(2)}x</div>
       </div>
       <div class="setting-row">
         <!-- step 0.01, not the 0.05 its neighbours use: the shipped default is 0.72, which is not
@@ -73530,7 +73562,7 @@ function saveSettings() {
       cockpitVR: input.cockpitVR === true,
       cockpitVRv2: true,   // (v37.67) this save has seen the VR cockpit default flip
       hudGaugeLabels: input.hudGaugeLabels !== false,
-      hudScale: (typeof input.hudScale === 'number') ? input.hudScale : 1,
+      hudScale: (typeof input.hudScale === 'number') ? input.hudScale : HUD_SCALE_DEFAULT,
       hudOpacity: (typeof input.hudOpacity === 'number') ? input.hudOpacity : 0.72,
       hudTextOpacity: (typeof input.hudTextOpacity === 'number') ? input.hudTextOpacity : 1,
       crosshairOpacity: (typeof input.crosshairOpacity === 'number') ? input.crosshairOpacity : 0.72,
@@ -73784,7 +73816,7 @@ const SHIPPED_DEFAULTS = {
   "vrRenderScale": 1,
   "vrPerfMode": "standard",
   "vrStripFx": true,
-  "hudScale": 1,
+  "hudScale": HUD_SCALE_DEFAULT,   // (v47.21) first boot and RESET TO DEFAULTS both land here
   "hudOpacity": 0.72,
   "hudTextOpacity": 1,
   "crosshairOpacity": 0.72,
