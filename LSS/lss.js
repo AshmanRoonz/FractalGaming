@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.21";
+const LSS_BUILD = "47.26";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -37195,7 +37195,10 @@ class Bot {
       }
     } else if (ability.name === 'Cluster Missile') {
       const vel = this._tempVec3b.copy(aim).multiplyScalar(900);
-      const proj = new Projectile(this.position, vel, 800, 250, 'bot', LSS.CLASS_COLORS.PUNCTURE);
+      const _cmFrom = (this.mesh && typeof shipMuzzleWorld === 'function')
+        ? shipMuzzleWorld(this.mesh, 0, this._tempVec3c)
+        : this.position;
+      const proj = new Projectile(_cmFrom, vel, 800, 250, 'bot', LSS.CLASS_COLORS.PUNCTURE);
       proj.isCluster = true;
       proj.clusterDmg = 500;
       proj.clusterDuration = 5;
@@ -37555,7 +37558,11 @@ class Bot {
       try {
         if (typeof spawnDynamicLight === 'function') {
           const k = 1 - Math.max(0, this._csT);
-          spawnDynamicLight(this.position, LSS.CLASS_COLORS.BLASTER, 1.0 + k * 2.5, 260 + k * 240, 0.12);
+          const _csMn = this.mesh && this.mesh.userData && this.mesh.userData.muzzleNodes;
+          const _csAt = (_csMn && _csMn.length)
+            ? _csMn[(this._csGlowSide = ((this._csGlowSide | 0) + 1)) % _csMn.length].getWorldPosition(this._tempVec3d)
+            : this.position;
+          spawnDynamicLight(_csAt, LSS.CLASS_COLORS.BLASTER, 1.0 + k * 2.5, 260 + k * 240, 0.12);
         }
       } catch (_) {}
     }
@@ -59051,13 +59058,17 @@ function executeAbility(slot, ability) {
       try { playSound('cluster_missile_fire'); } catch (_) {}
       let _cmOrigin = player.position.clone();
       let _cmDir = forward.clone();
-      const _cmFrac = { x: 0.644, y: 0.638 }; 
-      if (_cmFrac && typeof _computeScreenMuzzleWorld === 'function') {
-        const _cmGp = _computeScreenMuzzleWorld(_cmFrac.x, _cmFrac.y);
-        if (_cmGp) {
-          _cmDir = player.position.clone().addScaledVector(forward, 1200).sub(_cmGp).normalize();
-          _cmOrigin = _cmGp.addScaledVector(_cmDir, 40);
-        }
+      let _cmGp = null;
+      try {
+        const _cmNodes = player.mesh && player.mesh.userData && player.mesh.userData.muzzleNodes;
+        if (_cmNodes && _cmNodes.length) _cmGp = shipMuzzleWorld(player.mesh, 0, new THREE.Vector3());
+      } catch (_) {}
+      if (!_cmGp && typeof _computeScreenMuzzleWorld === 'function') {
+        _cmGp = _computeScreenMuzzleWorld(0.644, 0.638);   // legacy painted-frame fallback
+      }
+      if (_cmGp) {
+        _cmDir = player.position.clone().addScaledVector(forward, 1200).sub(_cmGp).normalize();
+        _cmOrigin = _cmGp.addScaledVector(_cmDir, 40);
       }
       const vel = _cmDir.multiplyScalar(1000);
       const proj = new Projectile(_cmOrigin, vel, 800, 250, 'player', LSS.CLASS_COLORS.PUNCTURE);
@@ -59656,6 +59667,19 @@ function executeAbility(slot, ability) {
 
 }
 
+const _psMuzzle = new THREE.Vector3();
+function _powerShotMuzzleNodes() {
+  const n = (player.mesh && player.mesh.userData) ? player.mesh.userData.muzzleNodes : null;
+  return (n && n.length) ? n : null;
+}
+function _powerShotMuzzle(i, out) {
+  out = out || _psMuzzle;
+  const nodes = _powerShotMuzzleNodes();
+  if (!nodes) return out.copy(player.position);
+  const n = nodes.length;
+  nodes[((i | 0) % n + n) % n].getWorldPosition(out);
+  return _adsAnchor(out);
+}
 function firePowerShot() {
   const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
   if (game._hubWater && typeof _swWpnCross === 'function') { try {
@@ -59677,7 +59701,8 @@ function firePowerShot() {
       pelletDir.normalize();
       const _pelletWallDist = (typeof raycastLevel === 'function') ? raycastLevel(player.position, pelletDir, range) : range;
       const pelletEnd = player.position.clone().add(pelletDir.clone().multiplyScalar(_pelletWallDist));
-      spawnTracer(player.position, pelletEnd, LSS.CLASS_COLORS.BLASTER);
+      const _pOrig = _powerShotMuzzle(p, new THREE.Vector3());
+      spawnTracer(_pOrig, pelletEnd, LSS.CLASS_COLORS.BLASTER);
       if (_pelletWallDist < range) {
         if (typeof spawnWallRipple === 'function') spawnWallRipple(pelletEnd, LSS.CLASS_COLORS.BLASTER);
         if (typeof spawnHitFire === 'function') spawnHitFire(pelletEnd, LSS.CLASS_COLORS.BLASTER, null, 0.6);
@@ -59685,7 +59710,7 @@ function firePowerShot() {
       if (net.active && net.sendEvent) {
         net.sendEvent({
           type: 'fire_tracer',
-          ox: player.position.x, oy: player.position.y, oz: player.position.z,
+          ox: _pOrig.x, oy: _pOrig.y, oz: _pOrig.z,     // (v47.24) the barrel, so peers see it leave the gun too
           ex: pelletEnd.x, ey: pelletEnd.y, ez: pelletEnd.z,
           color: LSS.CLASS_COLORS.BLASTER,
         });
@@ -59747,25 +59772,22 @@ function firePowerShot() {
     const range = 10000;
     const _csWallDist = (typeof raycastLevel === 'function') ? raycastLevel(player.position, forward, range) : range;
     const end = player.position.clone().add(forward.clone().multiplyScalar(_csWallDist));
-    spawnTracer(player.position, end, LSS.CLASS_COLORS.BLASTER);
-    spawnTracer(player.position.clone().add(new THREE.Vector3(0,2,0)), end.clone().add(new THREE.Vector3(0,2,0)), 0xaaeeff);
+    const _psNodes = _powerShotMuzzleNodes();
+    const _psGuns = _psNodes ? _psNodes.length : 1;   // (v47.26) all of them, together
+    for (let _gi = 0; _gi < _psGuns; _gi++) {
+      const _o = _powerShotMuzzle(_gi, new THREE.Vector3());
+      spawnTracer(_o, end.clone(), LSS.CLASS_COLORS.BLASTER);
+      if (_gi === 0) spawnTracer(_o.clone().add(new THREE.Vector3(0,2,0)), end.clone().add(new THREE.Vector3(0,2,0)), 0xaaeeff);
+      if (net.active && net.sendEvent) {
+        net.sendEvent({ type: 'fire_tracer', ox: _o.x, oy: _o.y, oz: _o.z,
+                        ex: end.x, ey: end.y, ez: end.z, color: LSS.CLASS_COLORS.BLASTER });
+        if (_gi === 0) net.sendEvent({ type: 'fire_tracer', ox: _o.x, oy: _o.y + 2, oz: _o.z,
+                        ex: end.x, ey: end.y + 2, ez: end.z, color: 0xaaeeff });
+      }
+    }
     if (_csWallDist < range) {
       if (typeof spawnWallRipple === 'function') spawnWallRipple(end, LSS.CLASS_COLORS.BLASTER);
       if (typeof spawnHitFire === 'function') spawnHitFire(end, LSS.CLASS_COLORS.BLASTER, null, 1.3);
-    }
-    if (net.active && net.sendEvent) {
-      net.sendEvent({
-        type: 'fire_tracer',
-        ox: player.position.x, oy: player.position.y, oz: player.position.z,
-        ex: end.x, ey: end.y, ez: end.z,
-        color: LSS.CLASS_COLORS.BLASTER,
-      });
-      net.sendEvent({
-        type: 'fire_tracer',
-        ox: player.position.x, oy: player.position.y + 2, oz: player.position.z,
-        ex: end.x, ey: end.y + 2, ez: end.z,
-        color: 0xaaeeff,
-      });
     }
     const _csHits = [];
     for (const bot of game.entities) {
@@ -64966,10 +64988,15 @@ function _hlfShades(key) {
   if (n == null) return (_hlfShadeCache[key] = {});
   const hs = _hlfHexToHsl('#' + (n >>> 0).toString(16).padStart(6, '0'));
   const out = {};
+  let lMax = 0;
   for (const k in _HLF_THEME) {
     const m = _HLF_THEME[k];
+    if (m[2] > lMax) lMax = m[2];
     out[k] = _hlfHslToHex(hs[0] + m[0] * _HLF.SPREAD, hs[1] * m[1], m[2]);
   }
+  out.coreHot = _hlfHslToHex(hs[0] + _HLF_THEME.core[0] * _HLF.SPREAD,
+                             hs[1] * _HLF_THEME.core[1],
+                             Math.min(0.92, lMax + 0.10));
   return (_hlfShadeCache[key] = out);
 }
 
@@ -65212,6 +65239,58 @@ function _hlfIcon(I, kind, s, col, ready) {
   ctx.shadowBlur = 0;
 }
 
+const _HLF_CORE = { pitch: 1.55, thick: 0.62, depth: 0.55 };
+function _hlfCoreK(n) {
+  try { const o = window.__hudCore; if (o && typeof o[n] === 'number') return o[n]; } catch (_) {}
+  return _HLF_CORE[n];
+}
+
+function _hlfChevronPath(ctx, cx, cy, rIn, rOut, s, wDeg, tkDeg) {
+  const rM = (rIn + rOut) / 2, D = _HL_D2R;
+  const X = (r, a) => cx + Math.cos(a * D) * r, Y = (r, a) => cy + Math.sin(a * D) * r;
+  ctx.beginPath();
+  ctx.moveTo(X(rOut, s), Y(rOut, s));
+  ctx.lineTo(X(rM, s + wDeg), Y(rM, s + wDeg));
+  ctx.lineTo(X(rIn, s), Y(rIn, s));
+  ctx.lineTo(X(rIn, s + tkDeg), Y(rIn, s + tkDeg));
+  ctx.lineTo(X(rM, s + wDeg + tkDeg), Y(rM, s + wDeg + tkDeg));
+  ctx.lineTo(X(rOut, s + tkDeg), Y(rOut, s + tkDeg));
+  ctx.closePath();
+}
+
+function _hlfChevronRow(I, rInV, rOutV, a0, a1, frac, col, glow) {
+  const ctx = I.ctx, vm = I.vmin, cx = I.cx, cy = I.cy, D = _HL_D2R;
+  const rIn = rInV * vm, rOut = rOutV * vm, rM = (rIn + rOut) / 2;
+  const perDeg = rM * D;                       // px of arc per degree at mid radius
+  const pitch = _hlfCoreK('pitch') * vm / perDeg;
+  const tk    = _hlfCoreK('thick') * vm / perDeg;
+  const w     = _hlfCoreK('depth') * vm / perDeg;
+  const span = a1 - a0;
+  const n = Math.max(3, Math.floor((span - w) / pitch));
+  const start = a0 + (span - ((n - 1) * pitch + tk + w)) / 2;
+
+  ctx.globalAlpha = I.ga;
+  ctx.strokeStyle = _hlA(col, 0.34);
+  ctx.lineWidth = Math.max(1, vm * 0.10);
+  ctx.lineJoin = 'round';
+  for (let i = 0; i < n; i++) { _hlfChevronPath(ctx, cx, cy, rIn, rOut, start + i * pitch, w, tk); ctx.stroke(); }
+
+  const f = Math.max(0, Math.min(1, frac));
+  if (f > 0.002) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, rOut + vm * 2, a0 * D, (a0 + span * f) * D);
+    ctx.closePath();
+    ctx.clip();
+    ctx.fillStyle = col;
+    if (glow) { ctx.shadowColor = col; ctx.shadowBlur = vm * glow * 1.6; }
+    for (let i = 0; i < n; i++) { _hlfChevronPath(ctx, cx, cy, rIn, rOut, start + i * pitch, w, tk); ctx.fill(); }
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+}
+
 const _HLF_ICON_ROW = (function () {
   const nrgOut = _HL.speed.r + _HL.speed.tick * 0.5;   // 13.2 - NRG's outer edge
   const GAP = 0.20, size = 2.10;
@@ -65274,11 +65353,14 @@ function _hlfDraw(ctx, W, H, v) {
   _hlOverShieldOverlay(ctx, _hlPlace({ a: 'mc', x: 0, y: 0, r: (SH.rIn + SH.rOut) / 2 }, W, H),
                        _synth(SH.rIn, SH.rOut, 1, 0));
 
-  const coreCol = v.coreState ? (v.coreCol || _HL.core.col) : (sh.core || _HL.core.col);
+  const _coreBase = sh.core || _HL.core.col;
+  const coreCol = v.coreFiring ? (v.coreCol || _HL.core.col)
+                : (v.corePulse != null ? _hlA(sh.coreHot || _coreBase, v.corePulse)
+                : _coreBase);
   const coreReady = v.corePct >= 1 || !!v.coreState;
   const _abR = _hlPlace({ a: 'mc', x: 0, y: 0, r: (AB.rIn + AB.rOut) / 2 }, W, H);
-  _hlfBarRow(I, AB.rIn, AB.rOut, TOP.a0, TOP.a1, 1, 0, v.corePct, coreCol,
-             null, { solid: true, glow: coreReady ? 1.2 : 0 });
+  _hlfChevronRow(I, AB.rIn, AB.rOut, TOP.a0, TOP.a1, v.corePct, coreCol,
+                 coreReady ? 1.2 : 0);
   ctx.globalAlpha = I.ga;
   _hlReadyFlash(ctx, _abR,
                 { a0: TOP.a0, a1: TOP.a1, seg: 1, rot: 0, thick: (AB.rOut - AB.rIn) * 0.9 },
@@ -65747,16 +65829,15 @@ function drawCircumpunctHUD() {
 
   if (typeof window === 'undefined' || !window.__hudLegacy) {
     const _coreFiring = !!player.coreActive;
-    let _corePctDraw, _coreCol;
+    let _corePctDraw, _coreCol, _corePulse = null;
     if (_coreFiring) {
       const _dur = (player.loadout && player.loadout.core && player.loadout.core.duration) || 0.001;
       _corePctDraw = Math.max(0, Math.min(1, (player.coreTimer || 0) / _dur));
       _coreCol = '#ffbe3c';
     } else {
       _corePctDraw = corePct;
-      _coreCol = corePct >= 1
-        ? _hlA('#f0ff1f', Math.round((0.75 + 0.25 * Math.sin(t * 4.5)) * 20) / 20)
-        : _HL.core.col;
+      _coreCol = _HL.core.col;
+      if (corePct >= 1) _corePulse = Math.round((0.75 + 0.25 * Math.sin(t * 4.5)) * 20) / 20;
     }
 
     let _nrg = null, _nrgCol = null, _nrgWarn = false;
@@ -65812,6 +65893,7 @@ function drawCircumpunctHUD() {
       ammoFull: _infAmmo ? 'INF' : (player.clipAmmo + '/' + player.maxClip),
       ammoCol: player.reloading ? '#ffb020' : null,
       corePct: _corePctDraw, coreCol: _coreCol,
+      coreFiring: _coreFiring, corePulse: _corePulse,
       t: t,   // (v44.39) for the ready double-flash
       dashN: player.dashCharges, dashMax: player.maxDashes,
       aegisStr: _aegisStr, objectiveStr: _objStr,
