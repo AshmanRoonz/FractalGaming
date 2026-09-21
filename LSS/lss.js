@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.15";
+const LSS_BUILD = "47.16";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -65795,7 +65795,8 @@ function drawCircumpunctHUD() {
       ctx.strokeStyle = 'rgba(200,215,255,0.22)';
       ctx.lineWidth = 4;
       ctx.beginPath(); ctx.arc(cx, cy, _ccR, 0, Math.PI * 2); ctx.stroke();
-      const _col = _cc.isA ? 'rgba(255,90,90,' : 'rgba(110,230,110,';
+      const _ccNoTeam = !(player && (player.team === LSS.TEAM_FLEET_A || player.team === LSS.TEAM_FLEET_B));
+      const _col = (_ccNoTeam ? !_cc.isA : _cc.mine) ? 'rgba(110,230,110,' : 'rgba(255,90,90,';
       ctx.strokeStyle = _col + '0.28)';
       ctx.lineWidth = 10;
       ctx.beginPath(); ctx.arc(cx, cy, _ccR, _a0, _a1); ctx.stroke();
