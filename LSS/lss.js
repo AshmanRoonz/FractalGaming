@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.04";
+const LSS_BUILD = "47.08";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -17714,6 +17714,47 @@ function _swBuildTrees(x0,z0,T){
 }
 function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ if(im && im.parent)scene.remove(im); if(im && im.dispose)im.dispose(); if(im && im.userData && im.userData.ownGeo && im.geometry)im.geometry.dispose(); }catch(_){} } } }   // (v46.71) drapes own their merged geometry
 
+function _swTreeVisTick(cx, cz) {
+  const chunks = game.sandwichChunks;
+  if (!chunks || !chunks.size) return;
+  if (typeof window !== 'undefined' && window.__treeVisCull === 0) {
+    if (window.__treeVisCull !== window.__treeVisCullShown) {
+      for (const c of chunks.values()) {
+        const arr = c.trees; if (!arr) continue;
+        for (let i = 0; i < arr.length; i++) { const im = arr[i]; if (im && im.isInstancedMesh) im.visible = true; }
+      }
+      window.__treeVisCullShown = 0;
+      try { window.__treeVis = { hidden: 0, shown: -1, fadeB: Math.round(_swU.uTreeFadeB.value) }; } catch (_) {}
+    }
+    return;
+  }
+  try { window.__treeVisCullShown = undefined; } catch (_) {}
+  if (game.bendWorld) return;                       // the chunk grid is FLAT, uCam is BENT - they cannot agree
+  if (game._worldPrebaking || game._swPreloading || game._swapStaging || game._rrStaging) return;
+  try { if (window.__lssWarmDraw) return; } catch (_) {}
+  if (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on) return;
+  if (!_swU || !_swU.uTreeFadeB) return;
+  const B = _swU.uTreeFadeB.value;
+  if (!(B > 0)) return;
+  const B2 = B * B;
+  let _hid = 0, _shown = 0;
+  for (const c of chunks.values()) {
+    const arr = c.trees;
+    if (!arr || !arr.length) continue;
+    const x0 = c.cx * _SW_CHUNK, z0 = c.cz * _SW_CHUNK;
+    const dx = Math.max(0, x0 - cx, cx - (x0 + _SW_CHUNK));
+    const dz = Math.max(0, z0 - cz, cz - (z0 + _SW_CHUNK));
+    const vis = (dx * dx + dz * dz) < B2;            // nearest corner inside the fade end
+    for (let i = 0; i < arr.length; i++) {
+      const im = arr[i];
+      if (!im || !im.isInstancedMesh) continue;      // the drapes are merged Meshes - no fade, leave them
+      if (im.visible !== vis) im.visible = vis;
+      if (vis) _shown++; else _hid++;
+    }
+  }
+  try { window.__treeVis = { hidden: _hid, shown: _shown, fadeB: Math.round(B) }; } catch (_) {}
+}
+
 const _SW_DRAPE_SEG = 4;
 const _swDrapeC0I = new THREE.Color(0xf4fcff), _swDrapeC1I = new THREE.Color(0x9fc9e2);
 const _swDrapeC0V = new THREE.Color(0x7d9e52), _swDrapeC1V = new THREE.Color(0x2b4520), _swDrapeCT = new THREE.Color();
@@ -32047,16 +32088,32 @@ try { window.__hbakeBuild = _hbBuild; } catch (_) {}
 const _CLIP_PEAK = { on: 1, k: 2, w: 0.7, foot: 1.0, minLevel: 3 };
 try { window.__clipPeak = _CLIP_PEAK; } catch (_) {}
 
+const _CLIP_STAT = { hit: 0, missBase: 0, missPeak: 0, lvl: [], calls: [] };
+try {
+  window.__clipReport = function () {
+    const o = { hit: _CLIP_STAT.hit, missBase: _CLIP_STAT.missBase, missPeak: _CLIP_STAT.missPeak, perLevel: [] };
+    o.total = o.hit + o.missBase + o.missPeak;
+    o.hitPct = o.total ? Math.round(1000 * o.hit / o.total) / 10 : null;
+    for (let k = 0; k < _CLIP_STAT.lvl.length; k++) {
+      if (!_CLIP_STAT.lvl[k] && !_CLIP_STAT.calls[k]) continue;
+      o.perLevel.push({ k: k, bakes: _CLIP_STAT.calls[k] || 0, ms: Math.round(_CLIP_STAT.lvl[k] || 0),
+                        avgMs: _CLIP_STAT.calls[k] ? Math.round(10 * (_CLIP_STAT.lvl[k] / _CLIP_STAT.calls[k])) / 10 : 0 });
+    }
+    return o;
+  };
+  window.__clipReportReset = function () { _CLIP_STAT.hit = _CLIP_STAT.missBase = _CLIP_STAT.missPeak = 0; _CLIP_STAT.lvl = []; _CLIP_STAT.calls = []; return 'reset'; };
+} catch (_) {}
 function _clipCellH(wx, wz, sp, T, lvl) {
   if (_HB.ready && _HB.on && lvl >= _HB.minLevel) {
     const _hb = _hbSample(wx, wz, lvl);
-    if (_hb != null) return _hb;
+    if (_hb != null) { _CLIP_STAT.hit++; return _hb; }
     const _hf = _hfSample(wx, wz, sp);      // (v46.68) outside the base box: this level's far table
-    if (_hf != null) return _hf;
+    if (_hf != null) { _CLIP_STAT.hit++; return _hf; }
   }
   const _bf = (_HB.on && _HB.ready) ? (+_HB.bandFloor || 0) : 0;
   if (_bf > sp) return _stGroundYCarved(wx, wz, T, _bf);
   const P = _CLIP_PEAK;
+  if ((P.on && lvl >= P.minLevel) ? +P.w > 0 : false) _CLIP_STAT.missPeak++; else _CLIP_STAT.missBase++;
   const base = _stGroundYCarved(wx, wz, T, sp);
   const w = (P.on && lvl >= P.minLevel) ? +P.w : 0;
   if (!(w > 0)) return base;
@@ -32075,6 +32132,7 @@ function _clipCellH(wx, wz, sp, T, lvl) {
 
 function _clipBakeLevel(L) {
   const T = game.sandwichTerrain; if (!T) return;
+  const _cbT = performance.now();
   const N = _CLIP_N, R = N + 1, sp = L.spacing;
   L.gIx = Math.round(L.cx / sp) - N / 2; L.gIz = Math.round(L.cz / sp) - N / 2;
   const d = L.data;
@@ -32090,6 +32148,7 @@ function _clipBakeLevel(L) {
   _clipOriginP(L);
   _clipWireParents();
   L.tex.needsUpdate = true;
+  try { _CLIP_STAT.lvl[L.k] = (_CLIP_STAT.lvl[L.k] || 0) + (performance.now() - _cbT); _CLIP_STAT.calls[L.k] = (_CLIP_STAT.calls[L.k] || 0) + 1; } catch (_) {}
 }
 
 function _clipOriginP(L) {
@@ -32109,6 +32168,7 @@ function _clipWireParents() {
 
 function _clipBakeEdge(L, ogx, ogz) {
   const T = game.sandwichTerrain; if (!T) return;
+  const _cbT = performance.now();
   const N = _CLIP_N, R = N + 1, sp = L.spacing, d = L.data, ngx = L.gIx, ngz = L.gIz;
   for (let gx = ngx; gx <= ngx + N; gx++) { if (gx >= ogx && gx <= ogx + N) continue;
     const tcol = ((gx % R) + R) % R, wx = gx * sp;
@@ -32119,6 +32179,7 @@ function _clipBakeEdge(L, ogx, ogz) {
   L.mat._clipOrigin.value.set(((ngx % R) + R) % R, ((ngz % R) + R) % R);
   _clipOriginP(L);
   L.tex.needsUpdate = true;
+  try { _CLIP_STAT.lvl[L.k] = (_CLIP_STAT.lvl[L.k] || 0) + (performance.now() - _cbT); _CLIP_STAT.calls[L.k] = (_CLIP_STAT.calls[L.k] || 0) + 1; } catch (_) {}
 }
 
 function _clipBuild() {
@@ -32197,10 +32258,40 @@ async function _clipEnableSliced(fx, fz) {
   return n;
 }
 
+function _clipSkyOccluder() {
+  try {
+    if (typeof window !== 'undefined' && window.__clipCull === 0) return null;   // A/B off-switch
+    if (typeof game !== 'undefined' && game && game.bendWorld) return null;
+    let dome = null, r = 0;
+    if (typeof _WX !== 'undefined' && _WX && _WX.on && _WX.dome && _WX.dome.visible &&
+        (!_WX.group || _WX.group.visible !== false)) {
+      dome = _WX.dome;
+      const _k = (typeof _WX.distMul === 'number' && _WX.distMul > 0) ? _WX.distMul : 1;   // race/earth raise it
+      r = (((dome.geometry && dome.geometry.parameters && dome.geometry.parameters.radius) || 20500)) * _k;
+    } else if (typeof _skyDome !== 'undefined' && _skyDome && _skyDome.visible &&
+               _skyDome.material && _skyDome.material.map) {
+      dome = _skyDome;
+      r = ((dome.geometry && dome.geometry.parameters && dome.geometry.parameters.radius) || 20000);
+    }
+    if (!dome || !(r > 0)) return null;
+    const _g = dome.geometry;
+    const _ws = (_g && _g.parameters && _g.parameters.widthSegments) || 32;
+    const _hs = (_g && _g.parameters && _g.parameters.heightSegments) || 15;
+    const _rho = r * Math.cos(Math.PI / _ws) * Math.cos(Math.PI / (2 * _hs));
+    if (typeof game !== 'undefined' && game && typeof game._hubWaterWL === 'number' &&
+        typeof camera !== 'undefined' && camera &&
+        2 * Math.abs(camera.position.y - game._hubWaterWL) >= _rho) return null;
+    let _m = (typeof window !== 'undefined' && window.__clipCullMul != null) ? +window.__clipCullMul : 1.0;
+    if (!(isFinite(_m) && _m > 0)) _m = 1.0;
+    return { x: dome.position.x, z: dome.position.z, r: r * _m };
+  } catch (_) { return null; }
+}
+
 function _clipUpdate(px, pz) {
   if (!_clipmap.on || !_clipmap.levels) return;
   _clipEyeSet(px, pz);   // (v36.43) every frame, not just on a snap — the morph ramp is continuous in this
   const N = _CLIP_N;
+  const _occ = _clipSkyOccluder();   // (v47.07) once per frame, not once per level
   for (const L of _clipmap.levels) {
     const stp = 2 * L.spacing;
     const ncx = Math.round(px / stp) * stp, ncz = Math.round(pz / stp) * stp;
@@ -32212,6 +32303,13 @@ function _clipUpdate(px, pz) {
       else _clipBakeEdge(L, ogx, ogz);                                                          
       L.mesh.position.set(ncx, 0, ncz);
     }
+    let _vis = true;
+    if (L.k > 0 && _occ) {
+      const _H = ((N / 2 - 4) * 0.5) * L.spacing;   // ring hole half-extent; tracks _clipGeo(_CLIP_N/2-4)
+      const _near = _H - Math.max(Math.abs(_occ.x - L.cx), Math.abs(_occ.z - L.cz)) - L.spacing;
+      if (_near > _occ.r) _vis = false;
+    }
+    if (L.mesh.visible !== _vis) L.mesh.visible = _vis;
   }
 }
 
@@ -81159,6 +81257,7 @@ function gameLoop(timestamp) {
       let _fX = _cineActive ? camera.position.x : player.position.x;
       let _fZ = _cineActive ? camera.position.z : player.position.z;
       _swU.uCam.value.set(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
+      try { _swTreeVisTick(_fX, _fZ); } catch (_) {}   // (v47.05) must stay ABOVE the bend unmap below - _fX/_fZ are still in the space uCam just got
       try { _volcSync(_fX, _fZ); } catch (_) {}
       try { _skFrame(_fX, _cineActive ? camera.position.y : player.position.y, _fZ); } catch (_) {}
       try { _padFrame(dt); } catch (e) { if (typeof window !== 'undefined' && !window.__padErr) window.__padErr = String((e && e.stack) || e); }

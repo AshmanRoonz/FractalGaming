@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.04";
+const LSS_BUILD = "47.08";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -32648,6 +32648,67 @@ function _swBuildTrees(x0,z0,T){
 }
 function _swRemoveTrees(arr){ if(arr){ for(const im of arr){ try{ if(im && im.parent)scene.remove(im); if(im && im.dispose)im.dispose(); if(im && im.userData && im.userData.ownGeo && im.geometry)im.geometry.dispose(); }catch(_){} } } }   // (v46.71) drapes own their merged geometry
 
+// (v47.05) FAR-FOLIAGE SUBMIT GATE. `_swFoliageMat`'s vertex shader ends with
+//   tfade = 1.0 - smoothstep(uTreeFadeA, uTreeFadeB, distance(ip.xz, uCam.xz)); transformed *= tfade;
+// so an instance past uTreeFadeB collapses onto its own origin: every triangle degenerate, zero pixels,
+// FULL vertex cost. uTreeFadeB is `_swTV * _SW_CHUNK * 0.76` = 8208 on desktop while chunks (and their
+// trees) stream to a disc of radius _swHubView() = 12 chunks = 10800 - so the outer ~34% of the tree
+// disc by area is submitted every frame to produce nothing. It is paid in the main pass, again in the
+// mirror pass (which does not hide foliage and fires ~every 2nd frame), and again in the shadow pass,
+// where stock MeshDepthMaterial carries no tfade at all, so the faded band is submitted at FULL size.
+// This hides the InstancedMeshes whose NEAREST corner is already past the fade end.
+//   - INSTANCED MESHES ONLY. `c.trees` is `(_tm || []).concat(_dm || [])` and the _dm half is the
+//     v46.71 merged ice/vine DRAPES - plain Meshes on MeshLambertMaterial with NO fade at all. Hiding
+//     those pops cliff strands at distance. Never touch them; `isInstancedMesh` is the discriminator.
+//   - NO per-chunk cache flag: `_swSwapRebake` and the capped remove null `c.trees` without clearing
+//     any flag, and the rebuilt meshes arrive visible. `im.visible` IS the cache.
+//   - NOT while the curtain is down. The far submits are what link `_swShroomMatGet`'s program
+//     (mushrooms only exist in zone sectors past the fade end), and a link deferred into play is a
+//     hitch - the exact failure rule 5 and v39.83/39.84 are about.
+//   - window.__treeVisCull = 0 turns it off live, for an A/B in one session at one camera pose.
+function _swTreeVisTick(cx, cz) {
+  const chunks = game.sandwichChunks;
+  if (!chunks || !chunks.size) return;
+  // The off-switch must RESTORE, not just stop hiding - otherwise everything this gate already hid
+  // stays hidden and an A/B measures the same thing twice. (It did, once.) One pass, then it is inert.
+  if (typeof window !== 'undefined' && window.__treeVisCull === 0) {
+    if (window.__treeVisCull !== window.__treeVisCullShown) {
+      for (const c of chunks.values()) {
+        const arr = c.trees; if (!arr) continue;
+        for (let i = 0; i < arr.length; i++) { const im = arr[i]; if (im && im.isInstancedMesh) im.visible = true; }
+      }
+      window.__treeVisCullShown = 0;
+      try { window.__treeVis = { hidden: 0, shown: -1, fadeB: Math.round(_swU.uTreeFadeB.value) }; } catch (_) {}
+    }
+    return;
+  }
+  try { window.__treeVisCullShown = undefined; } catch (_) {}
+  if (game.bendWorld) return;                       // the chunk grid is FLAT, uCam is BENT - they cannot agree
+  if (game._worldPrebaking || game._swPreloading || game._swapStaging || game._rrStaging) return;
+  try { if (window.__lssWarmDraw) return; } catch (_) {}
+  if (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on) return;
+  if (!_swU || !_swU.uTreeFadeB) return;
+  const B = _swU.uTreeFadeB.value;
+  if (!(B > 0)) return;
+  const B2 = B * B;
+  let _hid = 0, _shown = 0;
+  for (const c of chunks.values()) {
+    const arr = c.trees;
+    if (!arr || !arr.length) continue;
+    const x0 = c.cx * _SW_CHUNK, z0 = c.cz * _SW_CHUNK;
+    const dx = Math.max(0, x0 - cx, cx - (x0 + _SW_CHUNK));
+    const dz = Math.max(0, z0 - cz, cz - (z0 + _SW_CHUNK));
+    const vis = (dx * dx + dz * dz) < B2;            // nearest corner inside the fade end
+    for (let i = 0; i < arr.length; i++) {
+      const im = arr[i];
+      if (!im || !im.isInstancedMesh) continue;      // the drapes are merged Meshes - no fade, leave them
+      if (im.visible !== vis) im.visible = vis;
+      if (vis) _shown++; else _hid++;
+    }
+  }
+  try { window.__treeVis = { hidden: _hid, shown: _shown, fadeB: Math.round(B) }; } catch (_) {}
+}
+
 // ═══ (v46.56) RIDGE DRAPES - ICICLES AND VINES OVER A CLIFF LIP ══════════════════════════════════
 // Owner, over a screenshot of a banded cliff with blue arcs on the snow shoulders and green ones on
 // the mossy band below: "i am thinking maybe some icicles flowing over top down from ridges, and
@@ -54212,20 +54273,42 @@ try { window.__hbakeBuild = _hbBuild; } catch (_) {}
 const _CLIP_PEAK = { on: 1, k: 2, w: 0.7, foot: 1.0, minLevel: 3 };
 try { window.__clipPeak = _CLIP_PEAK; } catch (_) {}
 
+// (v47.08) CLIPMAP BAKE PROBE. A minute of 1400 u/s hub flight at 1080p produced 118 clipmap snaps
+// totalling 2,054 ms, the worst 28-40 ms each - landing as 49 ms frames and making `hub:clip` the single
+// biggest contributor to in-play frame spikes (p99.9 = 49 ms, worst 87 ms). The cost is per TEXEL and
+// depends entirely on whether _clipCellH hits the baked height table: a hit is an array read, a MISS is a
+// full _stGroundYCarved (and, on levels >= _CLIP_PEAK.minLevel, FIVE of them for the peak-max loop).
+// These counters say which. window.__clipReport() prints hit/miss and per-level bake ms.
+const _CLIP_STAT = { hit: 0, missBase: 0, missPeak: 0, lvl: [], calls: [] };
+try {
+  window.__clipReport = function () {
+    const o = { hit: _CLIP_STAT.hit, missBase: _CLIP_STAT.missBase, missPeak: _CLIP_STAT.missPeak, perLevel: [] };
+    o.total = o.hit + o.missBase + o.missPeak;
+    o.hitPct = o.total ? Math.round(1000 * o.hit / o.total) / 10 : null;
+    for (let k = 0; k < _CLIP_STAT.lvl.length; k++) {
+      if (!_CLIP_STAT.lvl[k] && !_CLIP_STAT.calls[k]) continue;
+      o.perLevel.push({ k: k, bakes: _CLIP_STAT.calls[k] || 0, ms: Math.round(_CLIP_STAT.lvl[k] || 0),
+                        avgMs: _CLIP_STAT.calls[k] ? Math.round(10 * (_CLIP_STAT.lvl[k] / _CLIP_STAT.calls[k])) / 10 : 0 });
+    }
+    return o;
+  };
+  window.__clipReportReset = function () { _CLIP_STAT.hit = _CLIP_STAT.missBase = _CLIP_STAT.missPeak = 0; _CLIP_STAT.lvl = []; _CLIP_STAT.calls = []; return 'reset'; };
+} catch (_) {}
 function _clipCellH(wx, wz, sp, T, lvl) {
   // (v46.60) the pyramid, when it is up and this point is inside it. One lookup, and it is the SAME
   // number every level that asks - which is the whole point. The v46.59 envelope below stays as the
   // fallback for L0/L1, for anything outside the box, and for `__hbake.on = 0`.
   if (_HB.ready && _HB.on && lvl >= _HB.minLevel) {
     const _hb = _hbSample(wx, wz, lvl);
-    if (_hb != null) return _hb;
+    if (_hb != null) { _CLIP_STAT.hit++; return _hb; }
     const _hf = _hfSample(wx, wz, sp);      // (v46.68) outside the base box: this level's far table
-    if (_hf != null) return _hf;
+    if (_hf != null) { _CLIP_STAT.hit++; return _hf; }
   }
   // (v46.61) a level finer than the pyramid's band renders that band, not its own - see bandFloor.
   const _bf = (_HB.on && _HB.ready) ? (+_HB.bandFloor || 0) : 0;
   if (_bf > sp) return _stGroundYCarved(wx, wz, T, _bf);
   const P = _CLIP_PEAK;
+  if ((P.on && lvl >= P.minLevel) ? +P.w > 0 : false) _CLIP_STAT.missPeak++; else _CLIP_STAT.missBase++;
   const base = _stGroundYCarved(wx, wz, T, sp);
   const w = (P.on && lvl >= P.minLevel) ? +P.w : 0;
   if (!(w > 0)) return base;
@@ -54247,6 +54330,7 @@ function _clipCellH(wx, wz, sp, T, lvl) {
 
 function _clipBakeLevel(L) {
   const T = game.sandwichTerrain; if (!T) return;
+  const _cbT = performance.now();
   const N = _CLIP_N, R = N + 1, sp = L.spacing;
   L.gIx = Math.round(L.cx / sp) - N / 2; L.gIz = Math.round(L.cz / sp) - N / 2;
   const d = L.data;
@@ -54262,6 +54346,7 @@ function _clipBakeLevel(L) {
   _clipOriginP(L);
   _clipWireParents();
   L.tex.needsUpdate = true;
+  try { _CLIP_STAT.lvl[L.k] = (_CLIP_STAT.lvl[L.k] || 0) + (performance.now() - _cbT); _CLIP_STAT.calls[L.k] = (_CLIP_STAT.calls[L.k] || 0) + 1; } catch (_) {}
 }
 
 // (v36.45) The parent-lattice origin for THIS level: fine even index _ie maps to
@@ -54295,6 +54380,7 @@ function _clipWireParents() {
 // of R*R per snap = the snap-hitch + "terrain redraws on the horizon" fix.
 function _clipBakeEdge(L, ogx, ogz) {
   const T = game.sandwichTerrain; if (!T) return;
+  const _cbT = performance.now();
   const N = _CLIP_N, R = N + 1, sp = L.spacing, d = L.data, ngx = L.gIx, ngz = L.gIz;
   // ⚠ (v36.45) MUST use the same _clipCellH as _clipBakeLevel. These texels sit
   // in the same toroidal atlas as ones baked by the full path, so a mismatch
@@ -54314,6 +54400,7 @@ function _clipBakeEdge(L, ogx, ogz) {
   L.mat._clipOrigin.value.set(((ngx % R) + R) % R, ((ngz % R) + R) % R);
   _clipOriginP(L);
   L.tex.needsUpdate = true;
+  try { _CLIP_STAT.lvl[L.k] = (_CLIP_STAT.lvl[L.k] || 0) + (performance.now() - _cbT); _CLIP_STAT.calls[L.k] = (_CLIP_STAT.calls[L.k] || 0) + 1; } catch (_) {}
 }
 
 function _clipBuild() {
@@ -54444,12 +54531,65 @@ async function _clipEnableSliced(fx, fz) {
   return n;
 }
 
+// (v47.07) THE SKY IS AN OPAQUE OCCLUDER, AND SOME CLIPMAP RINGS LIVE ENTIRELY BEHIND IT.
+// `_wxMakeDome` is a camera-centred BackSide sphere (radius 20500, 32x15) whose fragment shader writes
+// alpha 1.0 with `transparent` unset - so it sits in the OPAQUE list - and `depthWrite:false`,
+// `renderOrder = 3`. The clipmap levels are `renderOrder = -2`, so they draw FIRST, write depth, and the
+// dome then paints over every one of their fragments that lies outside it. Any ray from a point INSIDE a
+// convex opaque shell to a point OUTSIDE it crosses the shell exactly once, so the shell's fragment is
+// strictly nearer. That is the whole proof and it needs both halves: the geometry outside, the viewpoint
+// inside. Measured cost of the rings this can drop: 409,504 triangles and 266,225 vertices EACH.
+// Returns { x, z, r } - the dome's centre in XZ and its radius - or null for "cull nothing".
+function _clipSkyOccluder() {
+  try {
+    if (typeof window !== 'undefined' && window.__clipCull === 0) return null;   // A/B off-switch
+    // `_clipUpdate`'s px,pz are BEND-UNMAPPED in gameLoop, so L.cx lives in FLAT image space there while
+    // camera.position is in BENT space. Not reachable today (bend is endless-only) - cheap insurance.
+    if (typeof game !== 'undefined' && game && game.bendWorld) return null;
+    let dome = null, r = 0;
+    if (typeof _WX !== 'undefined' && _WX && _WX.on && _WX.dome && _WX.dome.visible &&
+        (!_WX.group || _WX.group.visible !== false)) {
+      dome = _WX.dome;
+      const _k = (typeof _WX.distMul === 'number' && _WX.distMul > 0) ? _WX.distMul : 1;   // race/earth raise it
+      r = (((dome.geometry && dome.geometry.parameters && dome.geometry.parameters.radius) || 20500)) * _k;
+    } else if (typeof _skyDome !== 'undefined' && _skyDome && _skyDome.visible &&
+               _skyDome.material && _skyDome.material.map) {
+      dome = _skyDome;
+      r = ((dome.geometry && dome.geometry.parameters && dome.geometry.parameters.radius) || 20000);
+    }
+    // ⚠ NO camera.far FALLBACK. camera.far is a PLANE: the in-frustum radial distance at z = far is
+    // far * sqrt(1 + tan^2(vHalf) + tan^2(hHalf)) ~ 3.3x far at fov 120, and the reflector's oblique
+    // projection destroys the far plane outright. No visible dome -> cull nothing.
+    if (!dome || !(r > 0)) return null;
+    // The tessellated sphere is INSCRIBED in r; its face centres sit at
+    // r*cos(pi/widthSeg)*cos(pi/(2*heightSeg)) (0.9897*r at 32x15). Geometry must be outside r, and a
+    // viewpoint must be inside that smaller radius. Conservative in both directions.
+    const _g = dome.geometry;
+    const _ws = (_g && _g.parameters && _g.parameters.widthSegments) || 32;
+    const _hs = (_g && _g.parameters && _g.parameters.heightSegments) || 15;
+    const _rho = r * Math.cos(Math.PI / _ws) * Math.cos(Math.PI / (2 * _hs));
+    // ⚠ THE REFLECTOR. Its virtual camera is mirrored about the water plane but the dome is NOT
+    // re-centred for that pass (lss.map.md: "the sky is pinned to the MAIN camera every frame ... inside
+    // the reflection pass it is off-centre by 2 * (camY - WL)"). The proof only holds while that virtual
+    // camera is still inside the dome.
+    if (typeof game !== 'undefined' && game && typeof game._hubWaterWL === 'number' &&
+        typeof camera !== 'undefined' && camera &&
+        2 * Math.abs(camera.position.y - game._hubWaterWL) >= _rho) return null;
+    let _m = (typeof window !== 'undefined' && window.__clipCullMul != null) ? +window.__clipCullMul : 1.0;
+    if (!(isFinite(_m) && _m > 0)) _m = 1.0;
+    // The DOME's own position, not camera.position: it is the exact centre of the shell being reasoned
+    // about (and equals camera.position as of this frame's _wxFrame / last onBeforeRender).
+    return { x: dome.position.x, z: dome.position.z, r: r * _m };
+  } catch (_) { return null; }
+}
+
 // Per-frame follow : snap each level to a multiple of 2x its spacing (coarse verts land on fine
 // vertex lines), re-bake + reposition when the snapped centre changes (usually only L0 moves).
 function _clipUpdate(px, pz) {
   if (!_clipmap.on || !_clipmap.levels) return;
   _clipEyeSet(px, pz);   // (v36.43) every frame, not just on a snap — the morph ramp is continuous in this
   const N = _CLIP_N;
+  const _occ = _clipSkyOccluder();   // (v47.07) once per frame, not once per level
   for (const L of _clipmap.levels) {
     const stp = 2 * L.spacing;
     const ncx = Math.round(px / stp) * stp, ncz = Math.round(pz / stp) * stp;
@@ -54463,6 +54603,19 @@ function _clipUpdate(px, pz) {
       else _clipBakeEdge(L, ogx, ogz);                                                          
       L.mesh.position.set(ncx, 0, ncz);
     }
+    // (v47.07) THE DRAW ONLY, and OUTSIDE the snap block so it re-evaluates every frame (_WX.distMul
+    // moves on the race/earth circuits, __domeHide moves, altitude moves).
+    // WARNING the ATLAS above is ALWAYS baked: _clipWireParents points each level's _clipAtlasP at the
+    // NEXT level's texture, so a hidden level's atlas is still sampled by the level below it. NEVER skip
+    // _clipBakeLevel/_clipBakeEdge for a hidden level. (L4/L5's atlases are genuinely dead while both are
+    // hidden, but making that conditional risks a v36.46-class 55 ms full bake on the frame they return.)
+    let _vis = true;
+    if (L.k > 0 && _occ) {
+      const _H = ((N / 2 - 4) * 0.5) * L.spacing;   // ring hole half-extent; tracks _clipGeo(_CLIP_N/2-4)
+      const _near = _H - Math.max(Math.abs(_occ.x - L.cx), Math.abs(_occ.z - L.cz)) - L.spacing;
+      if (_near > _occ.r) _vis = false;
+    }
+    if (L.mesh.visible !== _vis) L.mesh.visible = _vis;
   }
 }
 
@@ -124715,6 +124868,7 @@ function gameLoop(timestamp) {
       let _fX = _cineActive ? camera.position.x : player.position.x;
       let _fZ = _cineActive ? camera.position.z : player.position.z;
       _swU.uCam.value.set(_fX, _cineActive ? camera.position.y : player.position.y, _fZ);
+      try { _swTreeVisTick(_fX, _fZ); } catch (_) {}   // (v47.05) must stay ABOVE the bend unmap below - _fX/_fZ are still in the space uCam just got
       try { _volcSync(_fX, _fZ); } catch (_) {}
       try { _skFrame(_fX, _cineActive ? camera.position.y : player.position.y, _fZ); } catch (_) {}
       try { _padFrame(dt); } catch (e) { if (typeof window !== 'undefined' && !window.__padErr) window.__padErr = String((e && e.stack) || e); }

@@ -298,6 +298,54 @@ These cost real measurement time and are worth not re-investigating.
 - **82% of the first pass's findings were wrong.** 67 candidate findings, 12 survived. Most died on "the
   guard you did not read closes this path", "the map records this as tried and reverted", or "your cost
   figure is a misread of the probe".
+- **The in-play `hub:clip` hitches are an out-of-bounds artifact.** See below — this one cost a full round
+  of chasing and the answer was that the code is already right.
+
+### The `hub:clip` hitch hunt, and why it was a non-finding (v47.08)
+
+Section 3's table shows `hub:clip` peaking at **306 ms**, which looked like the biggest remaining in-play
+problem. Flying the hub at 1,400 u/s for a minute at 1080p seemed to confirm it: **118 clipmap snaps
+totalling 2,054 ms, the worst 28–40 ms each**, landing as 49 ms frames, and `hub:clip` was the single
+largest contributor to frame spikes (2,016 of ~3,200 ms across all big frames).
+
+v47.08 adds `window.__clipReport()` — hit/miss counters in `_clipCellH` and per-level bake timers. A bake
+texel is an array read when it hits the baked height table and a full `_stGroundYCarved` when it misses
+(and **five** of them on levels ≥ `_CLIP_PEAK.minLevel`, for the peak-max loop). Sampling the counters
+against distance during the flight:
+
+| player \|x\| | hits | missBase | missPeak |
+|---|---|---|---|
+| 44,501 | 2,822,526 | **0** | **0** |
+| 49,404 | 2,856,382 | 245,216 | 28,728 |
+| 54,362 | 2,864,390 | 534,628 | 67,836 |
+| 59,317 | 2,867,852 | 824,602 | 102,720 |
+
+Hits stop growing; misses climb to 927k. And the reason is sitting in a comment three lines from the
+constant: `const _HB_BOX = 53248;   // base half-extent: 45,056 (cities) + 8,192 (L0 half window at N=512,
+M0=32)`. **The table covers the designed play area — the overworld city ring at ±45,056 — plus exactly
+L0's half-window, and nothing beyond.** My straight-line flight ran to \|x\| = 59,317, **31% past the world
+it is sized for.**
+
+Re-flown as a 40,000-radius orbit, i.e. inside the city extent:
+
+| | out-of-bounds flight | **in-bounds orbit (r = 40,000)** |
+|---|---|---|
+| table hit rate | 75.5% | **100%** (4,430,781 samples, **0 misses**) |
+| total clip bake | 3,481 ms | **177 ms** |
+| L0 / L3 / L5 avg bake | 1.1 / 6.7 / 9.1 ms | **0.0 / 0.1 / 0.1 ms** |
+| bakes performed | 1,855 | 3,184 (**more bakes, 20× less time**) |
+| `hub:clip` share of spikes | 2,016 ms | **225 ms** |
+| p99 / p99.9 | 22.1 / 45.8 ms | **14.5 / 36.7 ms** |
+
+**Inside the designed world the clipmap is essentially free**, and the remaining spikes are `renderFrame`
+(399 ms) rather than `hub:clip` (225 ms). `_HB_BOX`'s sizing is now *measured* to be exactly right rather
+than merely commented. No change made.
+
+⚠ The one real question this leaves: **if a player can actually fly past ±45,056, they get the degraded
+path** — `hub:clip` goes from 0.1 ms to 6.7–9.1 ms per bake on L3–L5. Worth checking whether anything
+leashes the ship at the city extent. If nothing does, the cheap fix is a far table at `sp = 32` (L0 has
+none — every other clipmap spacing 64…1024 has a matching one), not a bigger base box: the base box is
+already 34 MB and doubling its half-extent quadruples the cold bake.
 
 ---
 
@@ -367,6 +415,77 @@ Mode entry points, all reachable from the DOM: `#btn-join` (classic), `#btn-free
 | v47.02 | the three ORDER-1 fixes, applied and measured one at a time | hub **19.5–34.8 s → 4.8 s warm / 11.6 s cold**; cyberpunk **17.5 s → 6.6 s**; −120 programs |
 | v47.03 | `_fetchDemRing` stage timers + `window.__demReport()` | measurement only — and it overturned the earth assumption (see above) |
 | v47.04 | branch-free blur interior + integer-window DEM histogram | blur **1,734 → 826 ms**, hist **683 → 301 ms**, DEM CPU **3,859 → 3,088 ms** |
+| v47.05/06 | far-foliage submit gate (`_swTreeVisTick`) | hub at 1080p **+5.5 fps**, p99 **−1.35 ms**, **−1.14 M tris** and **−44 draws** per frame |
+| v47.07 | clipmap sky-occlusion cull (`_clipSkyOccluder`) | hub at 1080p **+3.5 to +8.4 fps**, **−1.64 M tris** and −3 draws per frame |
+| v47.08 | `window.__clipReport()` — clipmap hit/miss + per-level bake timers | measurement only — proved the `hub:clip` hitches are an out-of-bounds artifact, no change needed |
+
+### v47.05 / v47.06 — the far-foliage submit gate (the first *in-play* win)
+
+`_swFoliageMat`'s vertex shader ends with `tfade = 1.0 - smoothstep(uTreeFadeA, uTreeFadeB, distance(ip.xz,
+uCam.xz)); transformed *= tfade;` — so an instance past `uTreeFadeB` collapses onto its own origin: every
+triangle degenerate, **zero pixels, full vertex cost**. `uTreeFadeB` is 8,208 while chunks stream to a disc
+of radius `_swHubView()` × `_SW_CHUNK` = 10,800, so the outer ~34% of the tree disc by area is submitted
+every frame to produce nothing — in the main pass, again in the mirror pass (which does not hide foliage),
+and again in the shadow pass, where stock `MeshDepthMaterial` carries no `tfade` at all and the band is
+submitted at **full** size. `_swTreeVisTick` hides the `InstancedMesh`es whose nearest chunk corner is past
+the fade end. Drapes (`isInstancedMesh` false — merged `Mesh`es with no fade) are never touched.
+
+**A/B in one session, one camera pose, toggling `window.__treeVisCull`, two runs per arm:**
+
+| | 1031×688 pane | **1920×1080** |
+|---|---|---|
+| fps, cull off → on | 136.4 → 136.8 (**no change**) | 120.8 → **126.3 (+5.5, +4.6%)** |
+| p99 frame | 12.7 → 12.05 ms | 14.4 → **13.05 ms (−1.35)** |
+| triangles/frame | 11.56 M → 10.42 M (**−1.14 M**) | 11.72 M → 10.58 M (**−1.14 M**) |
+| draw calls/frame | 466 → 425 (**−41**) | 475 → **431 (−44)** |
+
+Both arms were tight across repeats (126.1/126.4 vs 120.7/120.9), so the 1080p gain is real and
+reproducible. **This is the clearest demonstration of the pane-size trap in this whole review: the exact
+same patch measures ZERO at pane size and +4.6% at the owner's resolution.** Screenshots at cull on / off /
+on are pixel-identical, which is the point — those instances were already rendering nothing.
+
+⚠ One methodology bug worth remembering: the first A/B showed no difference at *either* size because
+`window.__treeVisCull = 0` only stopped the gate from hiding — it did not re-show what was already hidden,
+so both arms measured the same scene. v47.06 makes the off-switch restore on the next tick. **A debug
+toggle that is not symmetric will quietly measure nothing twice.**
+
+### v47.07 — the clipmap sky-occlusion cull
+
+The sky dome (`_wxMakeDome`: a camera-centred `BackSide` sphere, radius 20500, 32×15) writes alpha 1.0 with
+`transparent` unset — so it is in the **opaque** list — at `renderOrder = 3`. The clipmap levels are
+`renderOrder = -2`: they draw first, write depth, and the dome then paints over every one of their
+fragments that lies outside it. Any ray from a point *inside* a convex opaque shell to a point *outside* it
+crosses the shell exactly once, so the shell's fragment is strictly nearer. `_clipSkyOccluder()` returns the
+dome's XZ centre and radius; `_clipUpdate` then hides any level whose ring hole already exceeds it.
+
+**A/B at 1920×1080, interleaved, `window.__clipCull`:**
+
+| | cull OFF | cull ON | delta |
+|---|---|---|---|
+| **triangles/frame** | 10,586,982 | 8,947,340 | **−1,638,539 (−15.5%)** |
+| draw calls/frame | 423.5 | 421 | −3 |
+| **fps** | 123.6 / 123.7 / 123.9 | 132.0 / 132.2 | **+8.4 (+6.8%)** |
+| p99 frame | 13.1 ms | 12.2 ms | −0.9 ms |
+
+The triangle figure is rock solid across two separate sessions (8.95 M vs 10.59 M, spread < 0.1%). The fps
+figure needs a caveat: an earlier, less-settled session measured only **+3.5 fps** with a 5 fps spread
+inside its OFF arm. The numbers above are from the run where both arms were tight (OFF σ ≈ 0.15 fps). Take
+**+3.5 to +8.4 fps** as the honest range — the world keeps streaming for minutes after spawn, so a
+sequential before/after here is worthless and only an interleaved A/B on a settled world means anything.
+
+⚠ **The atlas is always baked.** `_clipWireParents` points each level's `_clipAtlasP` at the *next* level's
+texture, so a hidden level's atlas is still sampled by the level below it. This patch hides `L.mesh` only —
+it never skips `_clipBakeLevel` / `_clipBakeEdge`. The test also sits *outside* the snap block so it
+re-evaluates every frame (`_WX.distMul` moves on the race and earth circuits, altitude moves), and it bails
+entirely when the reflector's mirrored virtual camera could be outside the dome
+(`2 * |camY - _hubWaterWL| >= rho`) or when `game.bendWorld` puts the chunk grid and `uCam` in different
+spaces. There is deliberately **no `camera.far` fallback** — `far` is a plane, the in-frustum radial
+distance at `z = far` is ~3.3× `far` at fov 120, and the reflector's oblique projection destroys it.
+
+**Visual verification:** cull on / off / on at 600 u and at 9,000 u altitude — all six screenshots
+identical, no horizon gap, no missing ring. Classic (no clipmap, no trees) unchanged: 0 cold links, 0
+post-lift stalls, `treeVis {hidden: 0, shown: 0}` — both gates correctly inert off the hub. Mobile preset
+boots.
 
 ### v47.02 — measured before/after
 
