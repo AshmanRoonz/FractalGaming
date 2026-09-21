@@ -3159,6 +3159,277 @@ state and then stops until the state changes.
 composer frame it reports only the LAST internal pass (1 quad), not the frame's total. The resource
 deltas are the trustworthy part.
 
+## v47.01 — CORE becomes an arc, the abilities become role ICONS
+
+Owner: *"it's too hard to see when core is ready, and when the abilities are ready"*. Both
+readouts were thin bars whose only ready-signal was a colour change, which is the weakest signal
+a HUD has. They swapped places and both got a stronger one.
+
+**CORE now fills the whole ability row** (`_HLF.AB`, 10.10–10.95, spanning `TOP.a0..a1`) as one
+solid arc. At full charge it keeps the fill and gains a GLOW, and **the v44.39 ready
+double-flash works again** — `_hlReadyFlash` draws along `a0..a1`, so on the straight bar CORE
+used to be it had nowhere to land and had been dropped. It is solid, never hatched: the row is
+too thin for a hatch to be anything but noise, which the ability pills already found out.
+
+**The three abilities are role ICONS** on the flank CORE vacated: sword offensive, shield
+defensive, bolt utility. **The SLOT picks the glyph**, because slot→role is already this
+codebase's convention (`_HLF_THEME` uses the same mapping to pick each ability's hue): 0
+offensive, 1 defensive, 2 utility. A hull that breaks that convention gets the wrong glyph.
+
+- **⚠ The row could not stay where the CORE bar was.** At r 13.2 it is inside the tick strips'
+  band with NRG only 7.8° away, which caps three icons at ~1.3 vmin — far too small for the one
+  thing they exist to make obvious. Measured, not guessed. `_HLF_ICON_ROW` pulls them in to
+  **r 9.0**, where nothing else reaches that angle (every row spans 202..338, every strip starts
+  at 11.2).
+- **Stepped in POLAR, drawn UPRIGHT.** The row follows the ring, but a tilted sword and a tilted
+  bolt are markedly harder to tell apart at a glance. Ordered by each ability's old arc position
+  (`_HL[m.cd].a0`), so left-to-right matches where the pills used to sit.
+- **The shield glyph needs a FLAT top.** A peaked top reads as a plain hexagon at icon size.
+- **Partial fill, not just on/off.** The owner asked for silhouette vs full colour; the colour
+  rises through the silhouette from the bottom as it charges, so the row still reports how long
+  is left. Same visual language, strictly more information.
+- **A short POP on becoming ready**, off the same `_hudRF.t0` timestamp `_hlReadyFlash` uses, over
+  in under half a second. Motion in peripheral vision is a cost the owner has called out before,
+  so it is spent only on a thing the ship actually just did.
+- **The curved ability NAMES are gone** with the pills they sat in. CORE takes the caption plate.
+
+## v47.01b — the left band splits, and the side captions come onto their bars
+
+**NRG takes only the INNER half of its band** (11.2..13.2) and **the role icons take the outer
+half** (13.2..15.2), running along the circumference beside it. Owner: *"could the NRG bar be
+halved in width, and then the 3 icons go on the circumference alongside the NRG bar which will
+go on the inside"*. AMMO still spans the whole 4 vmin, so both flanks read the same width. This
+also fixed the icons' real problem: free-standing at r 9 they were fine, but they had been
+pushed there because the FULL-width band left them only ~1.3 vmin. Halving the strip makes the
+band usable, at 1.85 vmin.
+
+**NRG and AMMO are cutouts punched through their own bars**, not curved captions beside them:
+- `_HL.speed.labR` / `_HL.ammo.labR` (16.3, outside the band) are dead on this path. NRG's would
+  have ended up captioning the role icons rather than its own bar.
+- **Rectangles, not trapezoids.** `_hlfLabelPlate` takes a `bevel` now; 0 gives square radial
+  ends. The top three rows sit on a 136° sweep where the default bevel is a slight taper; on a
+  44° bar the same proportion skews the plate badly enough to read as a mistake.
+- **No outline** — a null `col` skips the stroke, so it is white text on a black block. These
+  two sit ON a striped bar, and an outline there adds a third edge beside the bar's own.
+- **Flush with the bar's OUTER edge and started at its BOTTOM corner**, not centred. Centred, the
+  plate floats with a sliver of bar above and below and reads as a sticker laid on top. The
+  bottom corner is the end each bar fills from — NRG lights from `a0` (152°), AMMO is `fromEnd`
+  so it lights from `a1` (28°).
+- **The plate is sized to the STRING** (`plateDeg`), because these two carry a value: a width that
+  fits `AMMO  40/40` leaves `NRG  7%` rattling around in an oversized hole. Keep it tight — too
+  generous and the bar becomes mostly label and you cannot read the fill behind it.
+
+## v47.00 — the FRAMED ASSEMBLY ships, and the HUD gets per-ship themes
+
+**`_HLF` + `_hlf*` + `_hlfDraw`, in `index-working.html` just above `_hlDrawHUD`.** Nine gauges
+became one instrument. `_hlDrawHUD` no longer calls `_hlArcBar` / `_hlTicks` / `_hlSegArc` /
+`_hlGaugeLabel` for health, shield, energy, speed, ammo, core, dash or the three ability arcs —
+it calls `_hlfDraw(ctx, W, H, v)` and that owns all of them. The `_HL` entries still hold the
+angles, radii and fallback colours (so hud_studio still describes the LAYOUT), but the SHAPES
+now come from `_HLF`.
+
+Designed in `LSS/hud_concepts.html` over many rounds with the owner — read the lab section for
+the rejected passes, because they cost the most time:
+- **No bloom.** *"naw, it looks bad… it's just design, we don't need bloom or anything fancy"*.
+  An entire pass built on multi-pass `shadowBlur` was thrown out. The ONE exception is SHIELD,
+  which is a solid fill with a glow — that is what makes it read as a different kind of thing
+  from the hull. Everything else is flat strokes.
+- **Battery pills were tried and reverted** (*"revert, looked better before"*). The hull row is
+  a thick 45° hatch; the ability row and shield are solid.
+- **HP plates are UNEVEN but honest.** `_hlfUneven(n)` varies each plate's drawn WIDTH; every
+  plate still carries 1/n of hull exactly as `_hlArcBar` did. A wide plate is not worth more.
+- **Square radial ends on the hull row** (`opt.bevel: 0`). `cellPath`'s bevel shortens the inner
+  edge, so a gap between two bevelled cells opens into a V instead of a straight seam.
+
+**PER-SHIP THEMES at hue spread 0.69** (`_HLF_THEME` + `_hlfShades`, memoized per loadout key).
+Each readout takes its own hue offset / saturation / lightness off `LSS.CLASS_COLORS`, so the
+cluster reads as one hull while the gauges stay tellable apart by shade. Nothing is hand-typed
+per ship.
+
+**⚠ A state colour must beat the theme, and only a state colour.** Three flags were added to the
+`v` object for exactly this, because the old code conflated "this is the default colour" with
+"this colour is carrying information":
+- `hHealthy` — the hull warning ramp (amber / doomed red) wins; the healthy colour gets themed.
+  Without the flag the only way to tell them apart was comparing colour strings.
+- `nrgWarn` — only `_nrgLowCol`'s VORTEX/PYRO low strobe wins. The `#ff5014` / `#ff7828` pair is
+  the meter's default palette, not a signal, so the theme replaces it.
+- `coreState` — firing amber and the ready pulse win; the idle colour gets themed.
+
+**⚠ The overlays were re-pointed, not dropped.** `_hlNanoOverlay`, `_hlOverShieldOverlay` and the
+ability `_hlReadyFlash` would have died with the `_hlArcBar` calls. They are called with
+SYNTHETIC parts built from the `_HLF` rows instead, so the same `_hlNanoSpan` walker lands on
+the new geometry with the same colours (`#5dff8d`, `#b8f6ff`, `#c4ffd4`). The core's ready-flash
+is the one that was dropped — CORE is a straight bar now and an arc flash would land nowhere.
+
+**⚠ `let r` in `_hlDrawHUD`.** The deleted health block used to declare `r`; the reticle line
+below only assigned it. With the declaration gone the assignment silently created a GLOBAL
+instead of erroring, because the game script is sloppy mode — the crosshair still drew and
+nothing looked wrong. `node --check` cannot catch this class of bug.
+
+## The HUD lab — `LSS/hud_concepts.html`
+
+A standalone page for iterating on the cockpit HUD. Served from the same root:
+**http://localhost:8099/hud_concepts.html**. Changes nothing at runtime — the game does not load it.
+
+### ⭐ THE BASELINE IS THE GAME'S OWN RENDERER, NOT A COPY OF IT
+
+Owner: *"start over with this lab... make the original HUD first, exactly how it is in the game,
+then we will make iterations of the original."* So ORIGINAL is not a reconstruction. On load the
+lab fetches `lss.js`, **slices out the source text from `const _HL = {` through the closing brace
+of `function _hlDrawHUD` (~595 lines — the layout table plus every `_hl*` renderer) and evaluates
+it**. `extractHudBlock()` does the brace walk, string- and comment-aware.
+
+That means ORIGINAL cannot drift: change the HUD in the game and reload the lab, and it has
+changed here too — labels, colours, ready-flash, radar disc, compass rose, the AEGIS line, the
+value strings on the gauge labels, all of it. **Everything an earlier hand-built version of this
+lab got wrong, it got wrong because it was a reimplementation.** If extraction fails the badge
+goes red and the lab renders NOTHING, rather than quietly showing something that is not the game.
+
+**The shim surface is nine names**, and it is deliberately short because each one is a place the
+lab could diverge: `player`, `input`, `hudCtx`, `_mm` (a stand-in minimap canvas so `_hlRadar` has
+a source), `_hudRF` (`{t0:[...]}`, the ready-flash clock), `camera.getWorldDirection`,
+`THREE.Vector3`, `hudFont`, `_hudFontCache`. `isXRPresenting` and `_perkEffectiveBag` are
+`typeof`-guarded in the game and so are simply absent. **⚠ `player`, `input` and `hudCtx` are read
+by bare name inside the block**, so they are declared as bindings in the generated function's own
+scope, not passed as arguments — and `hudFont` writes to `hudCtx`, so the lab points `hudCtx` at
+the same context it passes to `_hlDrawHUD` (in the game those are the same object).
+
+The lab supplies a fake `player` and the `v` bag, both mirroring the game's real call site (search
+`_hlDrawHUD(ctx, W, H, cx, cy, {` in `lss.js` for the contract: `healthPct/hCol/shieldPct/
+energyPct/speedPct/ammoPct/ammoStr/speedStr/ammoFull/ammoCol/corePct/coreCol/t/dashN/dashMax/
+aegisStr/objectiveStr/blasterClose`). `input.hudScale` and `input.hudOpacity` are wired to
+sliders, so the extracted `_hlScale()` / `_hlGA()` behave exactly as in game.
+
+### A VARIANT IS A DELTA, NOT A DRAWING
+
+`{ id, name, sub, note, hl:{...}, post(ctx, I) }`. The `hl` block is merged into the live `_HL`
+before the frame and **restored afterwards**, so an iteration is always a readable diff against
+the original rather than a parallel implementation — `HL.diff()` prints it, and the sidebar shows
+it. `post()` is for marks the game has no part for (a bracket, a tie), drawn after `_hlDrawHUD`.
+
+Tabs: **ORIGINAL** · **VARIANTS** · **COMPARE** (original and the variant side by side, same
+telemetry, which is the view that actually settles an argument).
+
+Shipped variants:
+
+- `top-stack` — **open bottom; the whole stack moves to the top.** Outside to inside:
+  **SHIELD → HP → the three ability arcs**, all on one sweep (`TOP` = 202–338°, the ability
+  arcs' own span, which already clears the side strips) and all inside `BAND` = 11.2–15.2 — the
+  radial band the strips occupy, so the top group is exactly as wide as them.
+
+  | | inner | outer |
+  |---|---|---|
+  | side strips (NRG left, AMMO right) | 11.2 | 15.2 |
+  | ability arcs | 11.2 | 12.0 |
+  | HP | 12.47 | 13.7 |
+  | SHIELD | 14.17 | 15.2 |
+
+  - **SPEED is gone and its strip reads NRG**, keeping speed's red (`#941e1e`) and its exact
+    geometry. The layout half is an `_HL` delta (`speed: { lab:'NRG' }`); the readout half is a
+    **`vals` hook** that sets `v.speedPct = S.nrg` and `v.energyPct = null` — `_hlDrawHUD` skips
+    energy entirely when that is null, which is the game's own guard, not a workaround.
+  - **CORE and DASH frame the open bottom, one under each side strip.** The game tucks DASH
+    under the LEFT strip at `(-9.7, 7) rot -30` — r 12.0 / 144°, just below that strip's lower
+    end at 152°. Mirroring about vertical gives the RIGHT strip the same radius and the same
+    clearance (180−144 = 36°), so **DASH mirrors to the right** and **CORE takes the slot it
+    vacated**: one unsegmented bar, opposite tilt, drawn by `post()`.
+    **⚠ Both are RADIAL, which is what "the same width as the strips" means for them.**
+    `_hlPips` lays its pips along the box's WIDTH, and at rot ±30 that width points almost
+    straight out from centre (5.8° off) — so the row is a radial run, not a tangential one. They
+    are therefore re-centred on `BAND` and given its thickness: `w = BAND.rOut - BAND.rIn`,
+    centre `r = (rIn+rOut)/2`, so both span **11.2–15.2 exactly like the tick strips**. The pips
+    resize themselves — `_hlPips` does `rad = min(h/2, w/(total*2.6))`, and `total` is the hull's
+    `dashMax`, so 1/2/3-dash hulls all fill the same run. The CORE bar is defined as the literal
+    mirror of the dash box (`-HL.dash.x`, `HL.dash.w`, `-HL.dash.rot`), so the pair cannot drift.
+    CORE is hidden from the ring with `core: { r:-1, lab:'' }` — the game's own escape hatch:
+    `_hlSegArc` and `_hlReadyFlash` both start with `if (!(rad > 0)) return` (the v38.66 note),
+    and an empty `lab` short-circuits `_hlGaugeLabel`.
+  - **Three ability colours, and the mapping means something.** `_HL_AB` pins each arc to a
+    slot, and every hull in `LOADOUTS` orders its abilities the same way, so arc position
+    already encodes a role: `ab3cd` centre = slot 0 **offensive** `#ff5ec8`, `ab2cd` right =
+    slot 1 **defensive** `#8f7bff`, `ab1cd` left = slot 2 **utility** `#2ee056`.
+    **⚠ Amber is deliberately avoided** — `_hlDrawHUD` paints an ACTIVE ability `#ffb020`, and
+    that has to stay unique.
+  - **Every label rides its own bar**, ability names included — but the ability names need a
+    detour. **The game paints an ability's name in that ability's arc colour**
+    (`_hlArcLabel(..., _hlA(col, ...))`), so three arc colours would have meant three text
+    colours. The variant's **`player()` hook blanks the names on the fake ship** — which makes
+    `_hlArcLabel` return early on `if (!str) return` — and `post()` redraws them in the HUD's
+    standard `rgba(226,244,255,0.72)`. Their size is capped at `thick * 0.82` like every other
+    bar-riding label, because the game's 1.0 vmin ability type overhangs a 0.8 vmin arc.
+  - ⚠ **Long ability names shrink hard at r 11.6.** `_hlArcLabel`'s 44° cap is an angular one, so
+    moving the names from 16.2 to 11.6 cuts the arc length available to them by ~28% and the font
+    scales down to match. `CLUSTER MISSILE` only just fits. If that reads too small, the levers
+    are shorter labels or putting the names back outside (`abLabelR`).
+
+### ✅ SHIPPED in v47.00 — the FRAMED ASSEMBLY is now the game's HUD
+
+The variant designed on this page (`nested-cells`, shown as FRAMED ASSEMBLY) **is the shipped
+HUD**. It lives in `index-working.html` as `_HLF` + `_hlf*`, immediately above `_hlDrawHUD`.
+**The lab's own copy of it was deleted** — `_hlDrawHUD` draws it now, so the variant would have
+drawn the whole instrument a second time on top of the game's, and its `_HL` deltas (`r:-1`,
+`tick:0`, the moved dash) no longer reach anything because nothing reads those fields on the
+draw path. **ORIGINAL on this page IS the framed assembly.**
+
+**The iteration loop inverted, and it is the better one**: edit `_HLF` (or `_hlfBarRow` /
+`_hlfBorderPath` / …) in `index-working.html`, run `python strip.py`, reload the lab. ORIGINAL
+picks the change up because the page re-fetches `lss.js` every load — there is no copy here to
+keep in sync, which is the whole reason the lab was built by extraction. The SHIP THEMES panel
+still composes over it, so the per-hull palettes stay tunable from the page.
+
+**⚠ Pin `HL.S.cd` before a comparison capture.** The ability cooldowns are re-seeded on every
+page load, so two `HL.shot()` frames taken across a reload show the ability arcs at different
+charge levels and it reads as a regression you just caused. `HL.S.cd = [0,0,0]` makes them all
+ready. `HL.set()` rebuilds the stage, so set the cooldowns *after* the last `set`/`ship` call.
+
+**The extracted source is used VERBATIM** — not one character is rewritten. An earlier pass
+promoted `const _HL_AB_LABEL_R` to `let` so a variant could move the ability names; that was
+reverted once `post()` took over drawing them, because a hook that already exists beats an edit
+to the thing whose fidelity is the entire point.
+
+**⚠ How to HIDE a part without an `off` flag** — the game has no such concept, so use its own
+guards: `r:-1` makes `_hlSegArc` and `_hlReadyFlash` return on `if (!(rad > 0))` (the v38.66
+note), `lab:''` short-circuits `_hlGaugeLabel`, and `v.energyPct = null` makes `_hlDrawHUD` skip
+the energy arc outright.
+
+### SHIP THEMES — a colour-only layer, composed on top of any variant
+
+Owner: *"for each ship, we will override the default colors with various shades from each ship's
+theme."* Applied AFTER the variant's `hl`, so a hull's shades win on colour while the variant keeps
+owning the geometry; both are undone at the end of the frame.
+
+**A theme is a FAMILY, not one accent.** The flat-accent version was tried and rejected — if every
+gauge is the same colour a pilot can no longer read value by colour. Each readout instead gets its
+own hue offset, saturation multiplier and lightness (`THEME_MAP`), all measured off
+`LSS.CLASS_COLORS[ship]` by `shipShades()`. **Nothing is hand-typed per hull**: change a class
+colour in the game and all ten shades follow.
+
+`UI.spread` scales every hue offset. **Default 0.6, and that number matters** — at 1.0 the extremes
+span 74°, which takes a yellow hull's AMMO to green and a cyan hull's NRG to green, i.e. out of
+the family. 0.6 keeps the cluster recognisably one hue; the slider still opens it up.
+
+**⚠ Three colours are deliberately left untinted**, and they must stay that way:
+- low-hull amber and doomed red (`buildV`'s `hCol`) — a warning has to mean the same thing on
+  every hull;
+- the ACTIVE-ability amber `#ffb020`, hard-coded in `_hlDrawHUD`;
+- the ready-flash whites, hard-coded in `_hlReadyFlash`.
+
+Sidebar shows the live swatch row; `HL.shades('PYRO')` returns the map.
+
+**Console hooks (`window.HL`):** `HL.original()`, `HL.variant('hp-shield-bottom')`,
+`HL.compare(id)`, `HL.diff(id)`, `HL.ship('PYRO')`, `HL.scenario('doomed')`,
+`HL.set({backdrop:'day', aspect:2.3333})`, `HL.pause()`, `HL.hl()` (the live `_HL`),
+`HL.theme(true|false)`, `HL.spread(0.6)`, `HL.shades('PYRO')`, and
+**`HL.shot({ship, variant, w, h, scenario, jpeg:0.85})`** for an exact-size headless capture that
+does not depend on the pane.
+
+**⚠ The python dev server 304s hard** — after editing, reload with `?v=N` or the pane silently
+re-runs the previous build.
+
+*The previous version of this lab (7 hand-drawn per-ship rings, style themes, a non-circular
+concept set and an `HC.audit()` overlap checker) is at `backups/hud_concepts_v1_preRewrite.html`.
+It was a reimplementation of the HUD, which is exactly why it was replaced.*
+
 ## The skin lab — `LSS/skin_lab.html`
 
 A standalone page for designing `SHIP_SKINS` entries against the real shader. Served from the same

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "46.99";
+const LSS_BUILD = "47.01";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -64777,64 +64777,434 @@ function _hlCompass(ctx, r, col) {
   ctx.restore();
 }
 
+const _HLF = {
+  TOP:  { a0: 202, a1: 338 },        // the sweep HP+SHIELD share — the ability arcs' own span
+  BAND: { rIn: 11.2, rOut: 15.2 },   // the tick strips' radial band, where the dash row now lives
+  SH:   { rIn: 13.88, rOut: 14.52 }, // shield: a thin band centred on 14.20, the slot it used to fill
+  HP:   { rIn: 11.95, rOut: 13.30 },
+  AB:   { rIn: 10.10, rOut: 10.95 }, // pulled in far enough to clear FR.rIn, so it reads as its own row
+  FR:   { rIn: 11.55, rOut: 15.25 }, // the frame around both rows
+  SPREAD: 0.69,                      // owner's hue spread for the per-ship themes
+};
+
+const _HLF_THEME = {
+  core:   [   0, 1.00, 0.70 ],
+  shield: [  20, 0.92, 0.64 ],
+  health: [   0, 1.00, 0.46 ],
+  ab3cd:  [ -16, 1.00, 0.60 ],   // slot 0 — offensive
+  ab2cd:  [  34, 0.95, 0.58 ],   // slot 1 — defensive
+  ab1cd:  [  12, 0.85, 0.50 ],   // slot 2 — utility
+  energy: [ -28, 0.85, 0.44 ],
+  speed:  [ -34, 0.80, 0.42 ],   // the NRG blade uses THIS — it is the speed part, repurposed
+  ammo:   [  40, 1.00, 0.55 ],
+  dash:   [  14, 0.70, 0.72 ],
+};
+
+function _hlfHexToHsl(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+  let h = 0, sat = 0; const l = (mx + mn) / 2;
+  if (d) {
+    sat = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+    h = mx === r ? ((g - b) / d + (g < b ? 6 : 0)) : mx === g ? ((b - r) / d + 2) : ((r - g) / d + 4);
+    h *= 60;
+  }
+  return [h, sat, l];
+}
+function _hlfHslToHex(h, sat, l) {
+  h = ((h % 360) + 360) % 360;
+  sat = Math.max(0, Math.min(1, sat)); l = Math.max(0, Math.min(1, l));
+  const c = (1 - Math.abs(2 * l - 1)) * sat, x = c * (1 - Math.abs((h / 60) % 2 - 1)), m = l - c / 2;
+  let r, g, b;
+  if (h < 60)       { r = c; g = x; b = 0; }
+  else if (h < 120) { r = x; g = c; b = 0; }
+  else if (h < 180) { r = 0; g = c; b = x; }
+  else if (h < 240) { r = 0; g = x; b = c; }
+  else if (h < 300) { r = x; g = 0; b = c; }
+  else              { r = c; g = 0; b = x; }
+  const t = v => Math.round((v + m) * 255).toString(16).padStart(2, '0');
+  return '#' + t(r) + t(g) + t(b);
+}
+
+const _hlfShadeCache = Object.create(null);
+function _hlfShades(key) {
+  const hit = _hlfShadeCache[key];
+  if (hit) return hit;
+  const n = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[key] != null)
+    ? LSS.CLASS_COLORS[key] : null;
+  if (n == null) return (_hlfShadeCache[key] = {});
+  const hs = _hlfHexToHsl('#' + (n >>> 0).toString(16).padStart(6, '0'));
+  const out = {};
+  for (const k in _HLF_THEME) {
+    const m = _HLF_THEME[k];
+    out[k] = _hlfHslToHex(hs[0] + m[0] * _HLF.SPREAD, hs[1] * m[1], m[2]);
+  }
+  return (_hlfShadeCache[key] = out);
+}
+
+function _hlfCellPath(ctx, cx, cy, rIn, rOut, a0, a1, bevel) {
+  const D = _HL_D2R;
+  const b = (a1 - a0 > bevel * 2.4) ? bevel : 0;
+  ctx.beginPath();
+  ctx.arc(cx, cy, rOut, a0 * D, a1 * D);
+  ctx.arc(cx, cy, rIn, (a1 - b) * D, (a0 + b) * D, true);
+  ctx.closePath();
+}
+
+function _hlfHatch(ctx, cx, cy, reach, col, alpha, vm) {
+  ctx.save();
+  ctx.clip();
+  ctx.globalAlpha = alpha;
+  ctx.strokeStyle = col;
+  ctx.lineWidth = Math.max(1.4, vm * 0.42);
+  const step = vm * 0.95;
+  for (let d = -reach * 2; d <= reach * 2; d += step) {
+    ctx.beginPath();
+    ctx.moveTo(cx + d, cy - reach);
+    ctx.lineTo(cx + d + reach * 2, cy + reach);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function _hlfBorderPath(ctx, cx, cy, rIn, rOut, a0, a1, nodes, nh, nw, sw) {
+  const D = _HL_D2R;
+  const pt = (r, a) => ({ x: cx + Math.cos(a * D) * r, y: cy + Math.sin(a * D) * r });
+  const L  = (r, a) => { const q = pt(r, a); ctx.lineTo(q.x, q.y); };
+  const AR = (r, s, e) => ctx.arc(cx, cy, r, s * D, e * D, e < s);
+  const r1 = rIn + (rOut - rIn) * 0.40, r2 = rIn + (rOut - rIn) * 0.72;
+
+  ctx.beginPath();
+  const q0 = pt(rIn, a0 + 2 * sw); ctx.moveTo(q0.x, q0.y);
+  L(r1, a0 + 2 * sw); L(r1, a0 + sw);        // staircase out, left end
+  L(r2, a0 + sw);     L(r2, a0);
+  L(rOut, a0);
+
+  const step = (a1 - a0) / nodes;             // nodules along the outer edge
+  let cur = a0;
+  for (let i = 0; i < nodes; i++) {
+    const c = a0 + step * (i + 0.5);
+    const na = c - nw / 2, nb = c + nw / 2;
+    AR(rOut, cur, na);
+    L(rOut + nh, na);
+    AR(rOut + nh, na, nb);
+    L(rOut, nb);
+    cur = nb;
+  }
+  AR(rOut, cur, a1);
+
+  L(r2, a1);      L(r2, a1 - sw);             // staircase in, right end
+  L(r1, a1 - sw); L(r1, a1 - 2 * sw);
+  L(rIn, a1 - 2 * sw);
+  AR(rIn, a1 - 2 * sw, a0 + 2 * sw);
+  ctx.closePath();
+}
+
+function _hlfLabelPlate(I, r, mid, text, col, sizeV, wDeg, hV, bevel) {
+  const ctx = I.ctx, vm = I.vmin;
+  _hlfCellPath(ctx, I.cx, I.cy, (r - hV / 2) * vm, (r + hV / 2) * vm,
+               mid - wDeg / 2, mid + wDeg / 2, bevel != null ? bevel : wDeg * 0.20);
+  ctx.fillStyle = '#05080b';
+  ctx.fill();
+  if (col) {
+    ctx.strokeStyle = col;
+    ctx.lineWidth = Math.max(1, vm * 0.12);
+    ctx.stroke();
+  }
+  _hlArcLabel(ctx, I.cx, I.cy, r * vm, mid, text,
+              'rgba(236,247,255,0.95)', Math.max(7, vm * sizeV), wDeg * 0.88);
+}
+
+function _hlfUneven(n) {
+  const w = [];
+  for (let i = 0; i < n; i++) w.push(0.72 + 0.58 * Math.abs(2 * (i + 0.5) / n - 1));
+  return w;
+}
+
+function _hlfBarRow(I, rInV, rOutV, a0, a1, segs, gapDeg, frac, col, weights, opt) {
+  const ctx = I.ctx, vm = I.vmin, cx = I.cx, cy = I.cy;
+  const rIn = rInV * vm, rOut = rOutV * vm, reach = rOut * 1.3;
+  const w = weights || new Array(segs).fill(1);
+  const tot = w.reduce((a, b) => a + b, 0);
+  const avail = (a1 - a0) - gapDeg * (segs - 1);
+  let cur = a0;
+  for (let i = 0; i < segs; i++) {
+    const span = avail * w[i] / tot;
+    const st = cur, en = st + span;
+    const bev = (opt && opt.bevel != null) ? opt.bevel : Math.min(2.0, span * 0.12);
+    cur = en + gapDeg;
+    ctx.globalAlpha = I.ga;
+    _hlfCellPath(ctx, cx, cy, rIn, rOut, st, en, bev);
+    ctx.strokeStyle = _hlA(col, 0.34);
+    ctx.lineWidth = Math.max(1, vm * 0.12);
+    ctx.stroke();
+    const lit = Math.max(0, Math.min(1, frac * segs - i));
+    if (lit > 0.004) {
+      const le = st + (en - st) * lit;
+      if (opt && opt.solid) {
+        const glow = (opt.glow == null ? 1 : opt.glow);
+        ctx.save();
+        ctx.fillStyle = col;
+        ctx.shadowColor = col;
+        for (let k = 0; k < 3; k++) {
+          ctx.globalAlpha = I.ga * (k === 0 ? 0.26 : k === 1 ? 0.42 : 1);
+          ctx.shadowBlur = vm * glow * (k === 0 ? 5.4 : k === 1 ? 2.3 : 0.7);
+          _hlfCellPath(ctx, cx, cy, rIn, rOut, st, le, bev);
+          ctx.fill();
+        }
+        ctx.restore();
+      } else {
+        _hlfCellPath(ctx, cx, cy, rIn, rOut, st, le, bev);
+        _hlfHatch(ctx, cx, cy, reach, col, 0.9 * I.ga, vm);
+      }
+      ctx.globalAlpha = I.ga;
+      _hlfCellPath(ctx, cx, cy, rIn, rOut, st, le, bev);
+      ctx.strokeStyle = col;
+      ctx.lineWidth = Math.max(1, vm * 0.15);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = I.ga;
+    ctx.strokeStyle = _hlA(col, 0.85);
+    ctx.lineWidth = Math.max(1, vm * 0.17);
+    for (let e = 0; e < 2; e++) {
+      const a = (e === 0 ? st : en) * _HL_D2R;
+      ctx.beginPath();
+      ctx.moveTo(cx + Math.cos(a) * rIn, cy + Math.sin(a) * rIn);
+      ctx.lineTo(cx + Math.cos(a) * rOut, cy + Math.sin(a) * rOut);
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = I.ga;
+}
+
+function _hlfWedge(I, rIn, rOut, a0, a1, n, frac, col, fromEnd) {
+  const ctx = I.ctx, vm = I.vmin, cx = I.cx, cy = I.cy;
+  const per = (a1 - a0) / n, gap = Math.min(per * 0.34, 1.6);
+  const rI = rIn * vm, rO = rOut * vm;
+  for (let i = 0; i < n; i++) {
+    const st = a0 + i * per, en = st + per - gap;
+    const idx = fromEnd ? (n - 1 - i) : i;
+    const on = frac > 0 && (idx / Math.max(1, n - 1)) <= frac + 1e-6;
+    _hlfCellPath(ctx, cx, cy, rI, rO, st, en, (en - st) * 0.22);
+    ctx.globalAlpha = I.ga * (on ? 1 : 0.26);
+    ctx.fillStyle = col;
+    ctx.fill();
+  }
+  ctx.globalAlpha = I.ga;
+}
+
+const _HLF_ICON = ['sword', 'shield', 'bolt'];
+
+function _hlfIconPath(ctx, kind, s) {
+  ctx.beginPath();
+  if (kind === 'shield') {
+    ctx.moveTo(-0.38 * s, -0.46 * s);
+    ctx.lineTo(0.38 * s, -0.46 * s);
+    ctx.lineTo(0.38 * s, 0.02 * s);
+    ctx.quadraticCurveTo(0.38 * s, 0.34 * s, 0, 0.50 * s);
+    ctx.quadraticCurveTo(-0.38 * s, 0.34 * s, -0.38 * s, 0.02 * s);
+    ctx.closePath();
+  } else if (kind === 'sword') {
+    ctx.moveTo(0, -0.50 * s);                 // blade, point up
+    ctx.lineTo(0.12 * s, -0.26 * s);
+    ctx.lineTo(0.12 * s, 0.04 * s);
+    ctx.lineTo(0.34 * s, 0.04 * s);           // crossguard
+    ctx.lineTo(0.34 * s, 0.16 * s);
+    ctx.lineTo(0.10 * s, 0.16 * s);
+    ctx.lineTo(0.10 * s, 0.38 * s);           // grip
+    ctx.lineTo(0.20 * s, 0.38 * s);           // pommel
+    ctx.lineTo(0.20 * s, 0.50 * s);
+    ctx.lineTo(-0.20 * s, 0.50 * s);
+    ctx.lineTo(-0.20 * s, 0.38 * s);
+    ctx.lineTo(-0.10 * s, 0.38 * s);
+    ctx.lineTo(-0.10 * s, 0.16 * s);
+    ctx.lineTo(-0.34 * s, 0.16 * s);
+    ctx.lineTo(-0.34 * s, 0.04 * s);
+    ctx.lineTo(-0.12 * s, 0.04 * s);
+    ctx.lineTo(-0.12 * s, -0.26 * s);
+    ctx.closePath();
+  } else {                                     // bolt
+    ctx.moveTo(0.20 * s, -0.50 * s);
+    ctx.lineTo(-0.34 * s, 0.08 * s);
+    ctx.lineTo(-0.02 * s, 0.08 * s);
+    ctx.lineTo(-0.18 * s, 0.50 * s);
+    ctx.lineTo(0.34 * s, -0.08 * s);
+    ctx.lineTo(0.02 * s, -0.08 * s);
+    ctx.closePath();
+  }
+}
+
+function _hlfIcon(I, kind, s, col, frac, ready) {
+  const ctx = I.ctx, vm = I.vmin;
+  _hlfIconPath(ctx, kind, s);
+  ctx.globalAlpha = I.ga;
+  ctx.fillStyle = 'rgba(5,9,13,0.88)';
+  ctx.fill();
+  if (frac > 0.004) {
+    ctx.save();
+    _hlfIconPath(ctx, kind, s);
+    ctx.clip();
+    ctx.globalAlpha = I.ga * (ready ? 1 : 0.8);
+    ctx.fillStyle = col;
+    ctx.fillRect(-s, s * 0.5 - s * frac, s * 2, s * frac);
+    ctx.restore();
+  }
+  _hlfIconPath(ctx, kind, s);
+  ctx.globalAlpha = I.ga;
+  ctx.strokeStyle = ready ? col : _hlA(col, 0.42);
+  ctx.lineWidth = Math.max(1, vm * (ready ? 0.17 : 0.11));
+  ctx.lineJoin = 'round';
+  if (ready) { ctx.shadowColor = col; ctx.shadowBlur = vm * 1.5; }
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+const _HLF_ICON_ROW = (function () {
+  return {
+    r: _HL.speed.r + _HL.speed.tick * 0.75,      // mid of the outer half
+    mid: (_HL.speed.a0 + _HL.speed.a1) / 2 + (_HL.speed.rot || 0),
+    step: 3.3,
+    size: 1.85,
+  };
+})();
+
+const _HLF_DASH = (function () {
+  const ang = Math.atan2(_HL.dash.y, -_HL.dash.x);
+  const rc  = (_HLF.BAND.rIn + _HLF.BAND.rOut) / 2;
+  return Object.assign({}, _HL.dash, {
+    x: Math.cos(ang) * rc,
+    y: Math.sin(ang) * rc,
+    w: _HLF.BAND.rOut - _HLF.BAND.rIn,
+    rot: -(_HL.dash.rot || 0),
+  });
+})();
+
+function _hlfDraw(ctx, W, H, v) {
+  const TOP = _HLF.TOP, SH = _HLF.SH, HP = _HLF.HP, AB = _HLF.AB, FR = _HLF.FR;
+  const base = _hlPlace(_HL.shield, W, H);            // any centred part gives cx/cy/vmin
+  const vm = base.vmin;
+  const I = { ctx: ctx, cx: base.cx, cy: base.cy, vmin: vm, ga: _hlGA(), v: v };
+  const sh = _hlfShades(player && player.loadoutKey);
+
+  const shCol = sh.shield || _HL.shield.col;
+  const hpCol = v.hHealthy ? (sh.health || _HL.health.col) : v.hCol;
+  const segs  = _HL.health.seg || 5;
+
+  ctx.save();
+  ctx.globalAlpha = I.ga;
+
+  const g = ctx.createRadialGradient(I.cx, I.cy, FR.rIn * vm, I.cx, I.cy, (FR.rOut + 0.6) * vm);
+  g.addColorStop(0, hpCol);
+  g.addColorStop(0.42, hpCol);
+  g.addColorStop(0.58, shCol);
+  g.addColorStop(1, shCol);
+  _hlfBorderPath(ctx, I.cx, I.cy, FR.rIn * vm, FR.rOut * vm, TOP.a0 - 2, TOP.a1 + 2,
+                 4, 0.62 * vm, 3.6, 2.0);
+  ctx.strokeStyle = g;
+  ctx.lineWidth = Math.max(1.2, vm * 0.20);
+  ctx.stroke();
+
+  _hlfBarRow(I, SH.rIn, SH.rOut, TOP.a0, TOP.a1, 1, 0, v.shieldPct, shCol,
+             null, { solid: true, glow: 1 });
+  _hlfBarRow(I, HP.rIn, HP.rOut, TOP.a0, TOP.a1, segs, 1.6, v.healthPct, hpCol,
+             _hlfUneven(segs), { bevel: 0 });
+
+  const _synth = (rowIn, rowOut, seg, gapDeg) => ({
+    a0: TOP.a0, a1: TOP.a1, seg: seg, gapDeg: gapDeg, rot: 0,
+    thick: (rowOut - rowIn) * 0.9,
+  });
+  _hlNanoOverlay(ctx, _hlPlace({ a: 'mc', x: 0, y: 0, r: (HP.rIn + HP.rOut) / 2 }, W, H),
+                 _synth(HP.rIn, HP.rOut, segs, 1.6));
+  _hlOverShieldOverlay(ctx, _hlPlace({ a: 'mc', x: 0, y: 0, r: (SH.rIn + SH.rOut) / 2 }, W, H),
+                       _synth(SH.rIn, SH.rOut, 1, 0));
+
+  const coreCol = v.coreState ? (v.coreCol || _HL.core.col) : (sh.core || _HL.core.col);
+  const coreReady = v.corePct >= 1 || !!v.coreState;
+  const _abR = _hlPlace({ a: 'mc', x: 0, y: 0, r: (AB.rIn + AB.rOut) / 2 }, W, H);
+  _hlfBarRow(I, AB.rIn, AB.rOut, TOP.a0, TOP.a1, 1, 0, v.corePct, coreCol,
+             null, { solid: true, glow: coreReady ? 1.2 : 0 });
+  ctx.globalAlpha = I.ga;
+  _hlReadyFlash(ctx, _abR,
+                { a0: TOP.a0, a1: TOP.a1, seg: 1, rot: 0, thick: (AB.rOut - AB.rIn) * 0.9 },
+                3, v.t, '#fffdb4');   // (v44.39) idx 3 is CORE's ready slot
+
+  const nrgCol = v.nrgWarn ? v.energyCol : (sh.speed || _HL.speed.col);
+  if (v.energyPct != null) {
+    _hlfWedge(I, _HL.speed.r, _HL.speed.r + _HL.speed.tick * 0.5,
+              _HL.speed.a0 + (_HL.speed.rot || 0),
+              _HL.speed.a1 + (_HL.speed.rot || 0), _HL.speed.seg || 9,
+              v.energyPct, nrgCol, false);
+  }
+  const SB = { rIn: _HL.ammo.r, rOut: _HL.ammo.r + 4 };
+  _hlfWedge(I, SB.rIn, SB.rOut, _HL.ammo.a0 + (_HL.ammo.rot || 0),
+            _HL.ammo.a1 + (_HL.ammo.rot || 0), _hlAmmoSegs() || _HL.ammo.seg,
+            v.ammoPct, v.ammoCol || sh.ammo || _HL.ammo.col, !!_HL.ammo.fromEnd);
+
+  _hlfLabelPlate(I, (SH.rIn + SH.rOut) / 2, 270, 'SHIELD', shCol, 0.78, 15,
+                 Math.max(SH.rOut - SH.rIn, 1.00));
+  _hlfLabelPlate(I, (HP.rIn + HP.rOut) / 2, 270, 'HP', hpCol, 0.78, 9, HP.rOut - HP.rIn);
+  _hlfLabelPlate(I, (AB.rIn + AB.rOut) / 2, 270, 'CORE', coreCol, 0.66, 11,
+                 Math.max(AB.rOut - AB.rIn, 0.95));
+  const plateDeg = (str, r) => (str.length * 0.50 + 0.8) / (r * _HL_D2R);
+  const PLATE_H = 1.5;
+  if (v.energyPct != null) {
+    const r = (_HL.speed.r + _HL.speed.tick * 0.5) - PLATE_H / 2;   // NRG's half, outer edge
+    const str = 'NRG  ' + Math.round(v.energyPct * 100) + '%';
+    const w = plateDeg(str, r);
+    _hlfLabelPlate(I, r, _HL.speed.a0 + (_HL.speed.rot || 0) + w / 2,
+                   str, null, 0.62, w, PLATE_H, 0);
+  }
+  {
+    const r = (_HL.ammo.r + 4) - PLATE_H / 2;                       // full band, outer edge
+    const str = 'AMMO  ' + v.ammoFull;
+    const w = plateDeg(str, r);
+    _hlfLabelPlate(I, r, _HL.ammo.a1 + (_HL.ammo.rot || 0) - w / 2, str,
+                   null, 0.62, w, PLATE_H, 0);
+  }
+
+  {
+    const order = _HL_AB.slice().sort((a, b) => _HL[a.cd].a0 - _HL[b.cd].a0);
+    const IR = _HLF_ICON_ROW, size = IR.size * vm;
+    const dPerStep = IR.step / IR.r * 180 / Math.PI;
+    ctx.save();
+    ctx.globalAlpha = I.ga;
+    for (let i = 0; i < order.length; i++) {
+      const m = order[i];
+      const ab = player.abilities && player.abilities[m.slot];
+      if (!ab) continue;
+      const cd = (player.abilityCooldowns && player.abilityCooldowns[m.slot]) || 0;
+      const active = !!(player.abilityActive && player.abilityActive[m.slot]);
+      const ready = cd <= 0 || active;
+      const f = ready ? 1 : Math.max(0, Math.min(1, 1 - cd / (ab.cooldown || 1)));
+      const col = active ? '#ffb020' : (sh[m.cd] || _HL[m.cd].col);
+      let pop = 1;
+      const age = (v.t != null && _hudRF && _hudRF.t0) ? v.t - _hudRF.t0[m.slot] : -1;
+      if (age >= 0 && age < 0.45) pop = 1 + 0.32 * (1 - age / 0.45);
+      const a = (IR.mid + ((order.length - 1) / 2 - i) * dPerStep) * _HL_D2R;
+      ctx.save();
+      ctx.translate(I.cx + Math.cos(a) * IR.r * vm, I.cy + Math.sin(a) * IR.r * vm);
+      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, f, ready);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  ctx.restore();
+
+  ctx.globalAlpha = _hlGA();
+  _hlPips(ctx, _hlPlace(_HLF_DASH, W, H), _HLF_DASH, v.dashN,
+          sh.dash || _HLF_DASH.col, v.dashMax);
+}
+
 function _hlDrawHUD(ctx, W, H, cx, cy, v) {
   ctx.save();
   ctx.translate(cx - W / 2, cy - H / 2);
   ctx.globalAlpha = _hlGA();
 
-  let r = _hlPlace(_HL.health, W, H);
-  _hlArcBar(ctx, r, _HL.health, v.healthPct, v.hCol);
-  _hlNanoOverlay(ctx, r, _HL.health);
-  _hlGaugeLabel(ctx, r, _HL.health);
+  _hlfDraw(ctx, W, H, v);
 
-  r = _hlPlace(_HL.shield, W, H);
-  _hlArcBar(ctx, r, _HL.shield, v.shieldPct, _HL.shield.col);
-  _hlOverShieldOverlay(ctx, r, _HL.shield);
-  _hlGaugeLabel(ctx, r, _HL.shield);
-
-  if (v.energyPct != null) {
-    r = _hlPlace(_HL.energy, W, H);
-    _hlArcBar(ctx, r, _HL.energy, v.energyPct, v.energyCol || _HL.energy.col);
-    _hlGaugeLabel(ctx, r, _HL.energy);
-  }
-
-  r = _hlPlace(_HL.speed, W, H);
-  _hlTicks(ctx, r, _HL.speed, v.speedPct, _HL.speed.col);
-  _hlGaugeLabel(ctx, r, _HL.speed, v.speedStr);   // (v38.75) 'SPEED  ###km/h'
-
-  r = _hlPlace(_HL.ammo, W, H);
-  _hlTicks(ctx, r, _HL.ammo, v.ammoPct, v.ammoCol || _HL.ammo.col, _hlAmmoSegs());
-  _hlGaugeLabel(ctx, r, _HL.ammo, v.ammoFull);    // (v38.75) 'AMMO  ##/##'
-
-  r = _hlPlace(_HL.core, W, H);
-  _hlSegArc(ctx, r, _HL.core, v.corePct, v.coreCol || _HL.core.col);
-  _hlReadyFlash(ctx, r, _HL.core, 3, v.t, '#fffdb4');   // (v44.39)
-  _hlGaugeLabel(ctx, r, _HL.core);
-
-  r = _hlPlace(_HL.dash, W, H);
-  _hlPips(ctx, r, _HL.dash, v.dashN, _HL.dash.col, v.dashMax);
-
-  for (let i = 0; i < _HL_AB.length; i++) {
-    const m = _HL_AB[i];
-    const ab = player.abilities && player.abilities[m.slot];
-    if (!ab) continue;
-    const cd = (player.abilityCooldowns && player.abilityCooldowns[m.slot]) || 0;
-    const active = !!(player.abilityActive && player.abilityActive[m.slot]);
-    const dur = ab.cooldown || 1;
-    const ready = cd <= 0;
-    const pct = (active || ready) ? 1 : Math.max(0, Math.min(1, 1 - cd / dur));
-    const col = active ? '#ffb020' : _HL[m.cd].col;
-    const cdp = _HL[m.cd];
-    r = _hlPlace(cdp, W, H);
-    _hlArcBar(ctx, r, cdp, pct, _hlA(col, ready || active ? 1 : 0.45));
-    _hlReadyFlash(ctx, r, cdp, m.slot, v.t, '#c4ffd4');   // (v44.39)
-    _hlArcLabel(ctx, r.cx, r.cy, _HL_AB_LABEL_R * r.vmin,
-      (cdp.a0 + cdp.a1) / 2, String(ab.name || '').toUpperCase(),
-      _hlA(col, ready || active ? 0.95 : 0.45),
-      Math.max(7, r.vmin * 1.0), _HL_AB_LABEL_MAXDEG);
-  }
-
-  r = _hlPlace(_HL.reticle, W, H);
+  let r = _hlPlace(_HL.reticle, W, H);
   ctx.globalAlpha = _hlCA();   // (v42.59) the crosshair has its own slider
   if (v.blasterClose) {
     ctx.save();
@@ -65240,16 +65610,19 @@ function drawCircumpunctHUD() {
         : _HL.core.col;
     }
 
-    let _nrg = null, _nrgCol = null;
+    let _nrg = null, _nrgCol = null, _nrgWarn = false;
     if (player.loadoutKey === 'VORTEX' && player.vortexMaxEnergy) {
       _nrg = player.vortexEnergy / player.vortexMaxEnergy;
       _nrgCol = _nrgLowCol(_nrg, t);
+      _nrgWarn = !!_nrgCol;
     } else if (player.loadoutKey === 'PUNCTURE') {
       _nrg = player.railgunCharge;
       _nrgCol = _nrg >= 1 ? '#ff5014' : '#ff7828';
     } else if (player.loadoutKey === 'PYRO' && player.thermalShieldMaxHP) {
       _nrg = player.thermalShieldHP / player.thermalShieldMaxHP;
-      _nrgCol = _nrgLowCol(_nrg, t) || '#ff6a20';   // (v42.58) was a flat '#ff3c1e' below 0.2
+      const _nrgLow = _nrgLowCol(_nrg, t);          // (v42.58) was a flat '#ff3c1e' below 0.2
+      _nrgWarn = !!_nrgLow;
+      _nrgCol = _nrgLow || '#ff6a20';
     } else if (player.loadoutKey === 'BLASTER' && player.powerShotCharging) {
       _nrg = player.powerShotCharge;
       _nrgCol = _nrg >= 1 ? '#ff5014' : '#ff7828';
@@ -65278,8 +65651,11 @@ function drawCircumpunctHUD() {
     _hlDrawHUD(ctx, W, H, cx, cy, {
       healthPct: healthPct,
       hCol: (healthPct >= 0.6 && !isDoomed) ? _HL.health.col : hCol,
+      hHealthy: (healthPct >= 0.6 && !isDoomed),
       shieldPct: shieldPct,
       energyPct: _nrg, energyCol: _nrgCol,
+      nrgWarn: _nrgWarn,
+      coreState: _coreFiring || corePct >= 1,
       speedPct: speedPct,
       ammoPct: _infAmmo ? 1 : player.clipAmmo / player.maxClip,
       ammoStr: _infAmmo ? 'INF' : String(player.clipAmmo),

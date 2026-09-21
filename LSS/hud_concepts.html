@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LSS — HUD Lab</title>
+<!--
+  ============================================================================
+  LSS HUD LAB                                                  (standalone)
+  ============================================================================
+  Owner: *"start over with this lab... make the original HUD first, exactly how
+  it is in the game, then we will make iterations of the original."*
+
+  So the baseline here is not a reconstruction of the game's HUD. It IS the
+  game's HUD: on load this fetches `lss.js`, slices out the block from
+  `const _HL = {` through the end of `function _hlDrawHUD` — the whole layout
+  table plus every renderer, verbatim — and runs it. Nothing is re-measured,
+  re-typed or approximated, so ORIGINAL cannot drift from the shipped build;
+  when the game's HUD changes, reload this page and it has changed here too.
+
+  The block reaches outside itself for exactly nine things, and every one is
+  shimmed below: player, input, _mm, _hudRF, camera, THREE.Vector3, hudFont,
+  _hudFontCache, hudCtx. (`isXRPresenting` and `_perkEffectiveBag` are
+  typeof-guarded in the game, so they are simply absent here.)
+
+  The extracted source is used VERBATIM — not one character is rewritten.
+
+  A VARIANT is a declarative delta on that same table — `hl: {...}` merged into
+  `_HL` for one frame and restored afterwards — plus optional `vals()` to
+  repoint a readout, `player()` to shape the fake ship, and `post()` for marks
+  the game has no part for. That keeps every iteration honestly diffable
+  against the original instead of being a separate drawing.
+
+  Console: window.HL  ( .original() .variant() .compare() .diff() .ship() .shot() )
+  ============================================================================
+-->
+<style>
+  :root{
+    --bg:#070a0e; --panel:#111823; --panel2:#0c1119; --line:#233040;
+    --ink:#cfe3f5; --dim:#7d93a7; --dim2:#4e6070;
+    --acc:#ffb020; --acc2:#4fd1ff; --ok:#2ee056; --bad:#ff5470;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font:13px/1.45 "Segoe UI",system-ui,sans-serif;overflow:hidden}
+  #app{display:flex;flex-direction:column;height:100%}
+
+  header{flex:none;display:flex;align-items:center;gap:14px;padding:0 14px;
+    height:44px;background:var(--panel2);border-bottom:1px solid var(--line)}
+  header .brand{font-weight:700;letter-spacing:.18em;font-size:12px;color:var(--acc);
+    text-transform:uppercase;white-space:nowrap}
+  header .brand small{display:block;font-weight:400;letter-spacing:.1em;
+    font-size:9px;color:var(--dim2)}
+  .tabs{display:flex;gap:2px;margin-left:8px}
+  .tabs button{font:inherit;font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+    background:transparent;color:var(--dim);border:1px solid transparent;
+    border-bottom:2px solid transparent;padding:6px 14px;cursor:pointer;border-radius:4px 4px 0 0}
+  .tabs button:hover{color:var(--ink);background:#151f2b}
+  .tabs button.on{color:var(--acc2);border-bottom-color:var(--acc2);background:#141d28}
+  header .sp{flex:1}
+  #src{font:10px/1.3 ui-monospace,Consolas,monospace;color:var(--dim2);text-align:right;
+    border:1px solid var(--line);border-radius:4px;padding:3px 8px;white-space:nowrap}
+  #src.live{color:var(--ok);border-color:#1d4a2c}
+  #src.bad{color:var(--bad);border-color:#5a2230}
+
+  #body{flex:1;display:flex;min-height:0}
+  aside{width:284px;flex:none;background:var(--panel);border-right:1px solid var(--line);
+    display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden}
+  aside::-webkit-scrollbar{width:9px}
+  aside::-webkit-scrollbar-thumb{background:#1d2836;border-radius:9px}
+  .sec{padding:9px 12px 11px;border-bottom:1px solid var(--line)}
+  .sec h3{margin:0 0 7px;font-size:10px;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--dim);font-weight:600}
+  label{display:block;color:var(--dim);font-size:10.5px;letter-spacing:.04em;margin:8px 0 3px}
+  label b{color:var(--ink);font-weight:600;float:right;font:10px ui-monospace,Consolas,monospace}
+  select,input[type=text],button{font:inherit;background:var(--panel2);color:var(--ink);
+    border:1px solid var(--line);border-radius:4px;padding:5px 8px;width:100%}
+  button{cursor:pointer;background:#18222e}
+  button:hover{background:#22303f}
+  input[type=range]{width:100%;accent-color:var(--acc2);height:18px}
+  .row{display:flex;gap:6px}.row>*{flex:1}
+  .chips{display:flex;flex-wrap:wrap;gap:4px}
+  .chip{padding:4px 9px;border:1px solid var(--line);border-radius:99px;cursor:pointer;
+    font-size:10.5px;letter-spacing:.06em;background:var(--panel2);width:auto;flex:none;
+    color:var(--dim);white-space:nowrap}
+  .chip:hover{color:var(--ink)}
+  .chip .dot{display:inline-block;width:7px;height:7px;border-radius:9px;margin-right:5px;
+    vertical-align:1px}
+  .chip.on{color:#05080b;font-weight:700;border-color:transparent}
+  .list{display:flex;flex-direction:column;gap:3px}
+  .list button{text-align:left;font-size:11.5px;padding:6px 9px;line-height:1.25;
+    border-color:transparent;background:#131c26;color:var(--dim)}
+  .list button:hover{background:#1b2735;color:var(--ink)}
+  .list button.on{background:#1d2b3a;color:var(--ink);box-shadow:inset 3px 0 0 var(--acc2)}
+  .list button i{display:block;font-style:normal;font-size:9.5px;color:var(--dim2);
+    letter-spacing:.05em;margin-top:1px}
+  .list button.on i{color:var(--dim)}
+  .mini{font-size:10px;color:var(--dim2);line-height:1.45;margin-top:6px}
+  .mini code{color:var(--dim)}
+
+  main{flex:1;min-width:0;display:flex;flex-direction:column;background:#04070a}
+  #stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;
+    gap:14px;padding:16px;overflow:hidden}
+  #stage canvas{box-shadow:0 0 0 1px #1d2835,0 18px 50px #000;background:#000;display:block}
+  .pane{display:flex;flex-direction:column;gap:6px;align-items:center;min-width:0;min-height:0}
+  .pane .cap{font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--dim2)}
+  footer{flex:none;border-top:1px solid var(--line);background:var(--panel2);
+    padding:9px 14px;min-height:58px;display:flex;gap:18px;align-items:flex-start}
+  footer .t{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--acc);
+    font-weight:700;padding-top:1px;min-width:158px;max-width:230px;flex:none;line-height:1.35}
+  footer .t small{display:block;color:var(--dim2);font-weight:400;letter-spacing:.08em;
+    font-size:9.5px;text-transform:none}
+  footer .d{font-size:11.5px;color:var(--dim);line-height:1.5}
+  footer .d em{color:var(--ink);font-style:normal}
+  footer .d code{color:var(--acc2);font-size:11px}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="brand">HUD Lab<small>Last Ship Sailing</small></div>
+    <div class="tabs">
+      <button data-tab="original" class="on">Original</button>
+      <button data-tab="variant">Variants</button>
+      <button data-tab="compare">Compare</button>
+    </div>
+    <div class="sp"></div>
+    <div id="src">reading lss.js…</div>
+  </header>
+
+  <div id="body">
+    <aside>
+      <div class="sec">
+        <h3>Hull</h3>
+        <div class="chips" id="shipChips"></div>
+        <div class="mini" id="shipInfo"></div>
+      </div>
+
+      <div class="sec" id="secVariant" style="display:none">
+        <h3>Variant</h3>
+        <div class="list" id="variantList"></div>
+        <div class="mini">Each variant is a <code>_HL</code> delta applied to the
+          game's own renderer for one frame, then undone.<br>
+          <span id="vDelta" style="color:var(--acc2)"></span></div>
+      </div>
+
+      <div class="sec">
+        <h3>Ship theme</h3>
+        <label style="margin-top:0">
+          <input type="checkbox" id="useTheme" checked style="width:auto;vertical-align:-2px">
+          Override colours with this hull's shades
+        </label>
+        <label>Hue spread <b id="vSpread">0.60</b></label>
+        <input type="range" id="sSpread" min="0" max="200" value="60">
+        <div class="chips" id="swatches" style="margin-top:7px"></div>
+        <div class="mini">Every shade is measured off
+          <code>LSS.CLASS_COLORS</code>, so nothing is hand-typed per hull. Low-hull
+          amber, doomed red and the active-ability amber stay untinted — a warning
+          has to mean the same thing on every ship.</div>
+      </div>
+
+      <div class="sec">
+        <h3>View</h3>
+        <label>Aspect</label>
+        <select id="aspect">
+          <option value="1.7778">16 : 9</option>
+          <option value="2.3333">21 : 9 ultrawide</option>
+          <option value="1.6">16 : 10</option>
+          <option value="1.3333">4 : 3</option>
+          <option value="0.4615">9 : 19.5 phone</option>
+        </select>
+        <label>Backdrop</label>
+        <select id="backdrop">
+          <option value="night">Night space + city</option>
+          <option value="day">Bright sky over water</option>
+          <option value="none">Black</option>
+        </select>
+        <label>HUD scale <b id="vScale">1.00</b></label>
+        <input type="range" id="sScale" min="75" max="175" value="100">
+        <label>HUD opacity <b id="vOp">0.72</b></label>
+        <input type="range" id="sOp" min="0" max="100" value="72">
+        <div class="mini">These are the game's real settings
+          (<code>input.hudScale</code>, <code>input.hudOpacity</code>), read by the
+          extracted <code>_hlScale()</code> and <code>_hlGA()</code>.</div>
+      </div>
+
+      <div class="sec">
+        <h3>Telemetry</h3>
+        <div class="row" style="margin-bottom:6px">
+          <button id="btnLive">Live</button>
+          <button id="btnPause">Pause</button>
+        </div>
+        <div class="chips" style="margin-bottom:4px">
+          <button class="chip" data-scn="full">Full</button>
+          <button class="chip" data-scn="fight">Mid-fight</button>
+          <button class="chip" data-scn="doomed">Doomed</button>
+          <button class="chip" data-scn="core">Core ready</button>
+        </div>
+        <label>Hull <b id="vHp">100%</b></label>    <input type="range" id="sHp"   min="0" max="100" value="100">
+        <label>Shield <b id="vSh">100%</b></label>  <input type="range" id="sSh"   min="0" max="100" value="100">
+        <label>Overshield <b id="vOv">0%</b></label><input type="range" id="sOv"   min="0" max="100" value="0">
+        <label>Energy <b id="vNrg">100%</b></label> <input type="range" id="sNrg"  min="0" max="100" value="100">
+        <label>Ammo <b id="vAmmo">full</b></label>  <input type="range" id="sAmmo" min="0" max="100" value="100">
+        <label>Speed <b id="vSpd">40%</b></label>   <input type="range" id="sSpd"  min="0" max="100" value="40">
+        <label>Core <b id="vCore">0%</b></label>    <input type="range" id="sCore" min="0" max="100" value="0">
+        <label>Dash <b id="vDash">max</b></label>   <input type="range" id="sDash" min="0" max="5"   value="5">
+      </div>
+
+      <div class="sec">
+        <h3>Export</h3>
+        <div class="row">
+          <button id="btnPng">PNG</button>
+          <button id="btnPng2">PNG @2×</button>
+        </div>
+      </div>
+    </aside>
+
+    <main>
+      <div id="stage"></div>
+      <footer>
+        <div class="t" id="noteTitle">—<small id="noteSub"></small></div>
+        <div class="d" id="noteBody"></div>
+      </footer>
+    </main>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+/* ==========================================================================
+   1.  EXTRACT THE GAME'S HUD RENDERER
+   --------------------------------------------------------------------------
+   Not a port. The literal source text of `_HL` and every `_hl*` function is
+   lifted out of the shipped `lss.js` and evaluated here, so ORIGINAL is the
+   game by construction. If this fails the badge goes red and nothing renders,
+   rather than quietly showing something that is not the game.
+   ========================================================================== */
+const SRC = { ok:false, lines:0 };
+
+function extractHudBlock(js){
+  const a = js.indexOf('const _HL = {');
+  if (a < 0) throw new Error('no `const _HL = {` in lss.js');
+  const fn = js.indexOf('function _hlDrawHUD', a);
+  if (fn < 0) throw new Error('no `function _hlDrawHUD`');
+  /* walk to the closing brace of _hlDrawHUD, string- and comment-aware */
+  let i = js.indexOf('{', fn), d = 0, s = null, esc = false, line = false, blk = false;
+  for (; i < js.length; i++){
+    const c = js[i], n = js[i+1];
+    if (line){ if (c === '\n') line = false; continue; }
+    if (blk){ if (c === '*' && n === '/'){ blk = false; i++; } continue; }
+    if (s){ if (esc) esc = false; else if (c === '\\') esc = true; else if (c === s) s = null; continue; }
+    if (c === '/' && n === '/'){ line = true; i++; continue; }
+    if (c === '/' && n === '*'){ blk = true; i++; continue; }
+    if (c === '"' || c === "'" || c === '`'){ s = c; continue; }
+    if (c === '{') d++;
+    else if (c === '}'){ if (--d === 0){ i++; break; } }
+  }
+  if (d !== 0) throw new Error('unbalanced braces walking _hlDrawHUD');
+  return js.slice(a, i);
+}
+
+/* ---- the shim surface ----------------------------------------------------
+   The extracted block reaches outside itself for exactly these. Everything
+   else it needs, it defines. Keep this list short: each entry is a place the
+   lab could diverge from the game, so each one is either the game's real
+   value or an obvious stand-in. `player`, `input` and `hudCtx` must be plain
+   bindings in the block's own scope (it reads them by bare name), which is
+   why they are declared inside the generated function rather than passed. */
+function makeHud(blockSrc){
+  const shim = {
+    mm:{ canvas:null },
+    rf:{ t0:[0,0,0,0] },
+    heading:0,
+  };
+  const THREE = { Vector3: function(){ this.x = 0; this.y = 0; this.z = 0; } };
+  const camera = { getWorldDirection(v){
+    v.x = Math.sin(shim.heading); v.z = -Math.cos(shim.heading); v.y = 0; return v; } };
+
+  const factory = new Function(
+    'THREE', '_mm', '_hudRF', 'camera',
+    '"use strict";\n' +
+    'let player = null, input = null, hudCtx = null, _hudFontCache = "";\n' +
+    'function hudFont(s){ if (s === _hudFontCache) return; _hudFontCache = s;\n' +
+    '                     if (hudCtx) hudCtx.font = s; }\n' +
+    blockSrc + '\n' +
+    'return {\n' +
+    '  _HL:_HL, _HL_AB:_HL_AB, _HL_AB_LABEL_R:_HL_AB_LABEL_R,\n' +
+    '  _HL_AB_LABEL_MAXDEG:_HL_AB_LABEL_MAXDEG,\n' +
+    '  _hlDrawHUD:_hlDrawHUD, _hlPlace:_hlPlace, _hlA:_hlA,\n' +
+    '  _hlArcBar:_hlArcBar, _hlSegArc:_hlSegArc, _hlTicks:_hlTicks, _hlPips:_hlPips,\n' +
+    '  _hlReticle:_hlReticle, _hlArcLabel:_hlArcLabel, _hlGaugeLabel:_hlGaugeLabel,\n' +
+    '  _hlText:_hlText, _hlScale:_hlScale, _hlGA:_hlGA, _hlCA:_hlCA, _hlTA:_hlTA,\n' +
+    '  bind:function(p, inp, cx){ player = p; input = inp; hudCtx = cx; _hudFontCache = ""; },\n' +
+    '};\n'
+  );
+  const api = factory(THREE, shim.mm, shim.rf, camera);
+  api._shim = shim;
+  return api;
+}
+
+/* ==========================================================================
+   2.  THE FAKE SHIP — the only thing the lab invents
+   ========================================================================== */
+const DATA = { LOADOUTS:null, CHASSIS:null, CLASS_COLORS:null };
+const SHIP_ORDER = ['BLASTER','PYRO','PUNCTURE','SLAYER','TRACKER','SYPHON','VORTEX'];
+
+/* string-aware brace match — `LOADOUTS` contains `can\'t shoot`, which a naive
+   depth count walks straight past */
+function sliceObj(src, anchor){
+  const i = src.indexOf(anchor);            if (i < 0) return null;
+  const b = src.indexOf('{', i);            if (b < 0) return null;
+  let d = 0, inS = null, esc = false;
+  for (let j = b; j < src.length; j++){
+    const c = src[j];
+    if (esc) { esc = false; continue; }
+    if (inS) { if (c === '\\') esc = true; else if (c === inS) inS = null; continue; }
+    if (c === '"' || c === "'" || c === '`') { inS = c; continue; }
+    if (c === '{') d++;
+    else if (c === '}') { if (--d === 0) return src.slice(b, j + 1); }
+  }
+  return null;
+}
+
+function shipRec(key){
+  const L = DATA.LOADOUTS[key] || DATA.LOADOUTS.BLASTER;
+  const C = DATA.CHASSIS[L.chassis];
+  const n = DATA.CLASS_COLORS[key];
+  return {
+    key, name:L.name, className:L.className, chassis:L.chassis,
+    weapon:L.weapon, abilities:L.abilities, core:L.core,
+    maxHealth:C.maxHealth, maxShield:C.maxShield, flightSpeed:C.flightSpeed,
+    maxDashes:C.maxDashes, segs:C.healthSegments,
+    col:'#' + (n >>> 0).toString(16).padStart(6,'0'),
+  };
+}
+
+const S = {
+  hp:1, sh:1, over:0, nrg:1, core:0, spd:.4, ammo:1, dash:5,
+  cd:[0,0,0], active:[0,0,0], reloading:false, t:0, paused:false, live:true,
+  manual:{},
+};
+function tick(dt, rec){
+  S.t += dt;
+  if (S.paused || !S.live) return;
+  const m = S.manual, R = (a,b) => a + Math.random()*(b-a);
+  const clip = rec.weapon.clipSize || 20;
+  if (!m.ammo){
+    if (S.reloading){ if (Math.random() < dt*0.9){ S.reloading = false; S.ammo = 1; } }
+    else if (Math.random() < dt*3.0){
+      S.ammo = Math.max(0, S.ammo - 1/clip);
+      if (S.ammo <= 0) S.reloading = true;
+    }
+  }
+  if (Math.random() < dt*0.5){
+    let d = R(.02,.10);
+    if (!m.over && S.over > 0){ const x = Math.min(S.over, d); S.over -= x; d -= x; }
+    if (!m.sh)  { const x = Math.min(S.sh, d); S.sh -= x; d -= x; }
+    if (!m.hp && d > 0) S.hp = Math.max(.02, S.hp - d);
+  }
+  if (!m.sh) S.sh = Math.min(1, S.sh + dt*0.13);
+  if (!m.hp && S.hp < .2 && Math.random() < dt*.25) S.hp = Math.min(1, S.hp + .35);
+  if (!m.nrg) S.nrg = Math.min(1, Math.max(0, S.nrg + (Math.sin(S.t*.9) > 0 ? -dt*.12 : dt*.10)));
+  if (!m.core) S.core = Math.min(1, S.core + dt*.04);
+  if (S.core >= 1 && !m.core && Math.random() < dt*.3) S.core = 0;
+  if (!m.spd) S.spd = .35 + .4*(0.5+0.5*Math.sin(S.t*.45));
+  for (let i=0;i<3;i++){
+    const A = rec.abilities[i]; if (!A) continue;
+    S.cd[i] = Math.max(0, S.cd[i] - dt);
+    if (S.cd[i] <= 0 && Math.random() < dt*(2.4/Math.max(A.cooldown||1,1))) S.cd[i] = A.cooldown || 0;
+  }
+  if (!m.dash){
+    if (S.dash < rec.maxDashes && Math.random() < dt*.35) S.dash++;
+    else if (S.dash > 0 && Math.random() < dt*.25) S.dash--;
+  }
+}
+function scenario(which, rec){
+  const M = S.manual;
+  if (which === 'full')   Object.assign(S, {hp:1,   sh:1,   over:0,   nrg:1,   core:.1, ammo:1,  dash:rec.maxDashes});
+  if (which === 'fight')  Object.assign(S, {hp:.54, sh:.28, over:0,   nrg:.62, core:.45,ammo:.35,dash:1});
+  if (which === 'doomed') Object.assign(S, {hp:.11, sh:0,   over:0,   nrg:.30, core:.72,ammo:.10,dash:0});
+  if (which === 'core')   Object.assign(S, {hp:.78, sh:.60, over:.35, nrg:.90, core:1,  ammo:1,  dash:rec.maxDashes});
+  S.reloading = false;
+  M.hp = M.sh = M.over = M.nrg = M.core = M.ammo = M.dash = M.spd = true;
+  S.live = false;
+}
+
+/* the `player` the extracted block reads, and the `v` bag `_hlDrawHUD` takes
+   — both mirroring how the game itself builds them at the call site */
+function buildPlayer(rec){
+  const clip = rec.weapon.clipSize || 20;
+  return {
+    loadoutKey: rec.key,
+    maxHealth: rec.maxHealth, maxShield: rec.maxShield,
+    health: S.hp * rec.maxHealth,
+    overShield: S.over * rec.maxShield,
+    maxClip: clip, clipAmmo: Math.round(S.ammo * clip),
+    weapon: { clipSize: clip },
+    reloading: S.reloading,
+    maxDashes: rec.maxDashes, dashCharges: Math.min(S.dash, rec.maxDashes),
+    velocity: { length: () => S.spd * rec.flightSpeed },
+    abilities: rec.abilities,
+    abilityCooldowns: S.cd,
+    abilityActive: S.active,
+    shipState: {},
+    blasterMode: 'long',
+  };
+}
+function buildV(rec, HUD){
+  const HL = HUD._HL;
+  const hp = S.hp, doomed = hp <= .15;
+  const hCol = doomed ? '#ff3a4a' : (hp < .35 ? '#c8a11e' : HL.health.col);
+  const clip = rec.weapon.clipSize || 20, clipAmmo = Math.round(S.ammo * clip);
+  return {
+    healthPct: hp,
+    hCol: (hp >= 0.6 && !doomed) ? HL.health.col : hCol,
+    shieldPct: S.sh,
+    energyPct: S.nrg, energyCol: null,
+    speedPct: S.spd,
+    ammoPct: S.ammo,
+    ammoStr: String(clipAmmo),
+    speedStr: Math.round(S.spd * rec.flightSpeed * 0.36) + 'km/h',
+    ammoFull: clipAmmo + '/' + clip,
+    ammoCol: S.reloading ? '#ffb020' : null,
+    corePct: S.core, coreCol: null,
+    t: S.t,
+    dashN: Math.min(S.dash, rec.maxDashes), dashMax: rec.maxDashes,
+    aegisStr: 'AEGIS 3  120/200', objectiveStr: '',
+    blasterClose: false,
+  };
+}
+
+/* ==========================================================================
+   3.  VARIANTS — declarative deltas on the game's own `_HL`
+   --------------------------------------------------------------------------
+   `hl` is merged into `_HL` before the frame and restored after, so a variant
+   is always a readable diff against the original rather than a separate
+   drawing. `post(ctx, I)` adds marks the game has no part for.
+   ========================================================================== */
+const VARIANTS = [];
+const V = (o) => { VARIANTS.push(o); return o; };
+
+/* HP and SHIELD share ONE bottom sweep, so the pair can never drift out of
+   register: change this and both bars move together. 32 -> 146 deg clears the
+   ammo ticks (346-28) at one end and the speed ticks (152-196) at the other. */
+const BOT = { a0:32, a1:146 };
+
+/* ...and ONE radial band, the same one the tick strips occupy. `_hlTicks`
+   draws from `p.r` outward to `p.r + p.tick`, and both `_HL.speed` and
+   `_HL.ammo` are r 11.2 / tick 4, so SPD and AMMO each span 11.2 -> 15.2.
+   Putting HP's inner edge and SHIELD's outer edge on those same two radii
+   makes all four readouts one continuous 4-vmin annulus, and pulls HP out
+   toward SHIELD so there is less air between the two bars. */
+const BAND = { rIn:11.2, rOut:15.2 };
+
+/* the top sweep: the ability arcs' own span, which already clears the NRG
+   strip (152-196) at one end and the AMMO strip (346-28) at the other */
+const TOP = { a0:202, a1:338 };
+
+V({
+  id:'original', name:'ORIGINAL', sub:'the shipped HUD, untouched',
+  note:'The game\'s own <code>_HL</code> table and <code>_hlDrawHUD</code>, lifted out of '
+     + '<code>lss.js</code> and run here verbatim — layout, renderers, colours, label rules, '
+     + 'ready-flash, radar and compass. Nothing on this tab is re-measured or re-typed, so it '
+     + 'is the baseline every variant is diffed against.',
+  hl:{},
+});
+
+/* ⚠ (v47.00) THE TWO ITERATION VARIANTS THAT USED TO LIVE HERE ARE GONE,
+   because the design they carried SHIPPED. `_hlDrawHUD` no longer draws the
+   gauges from `_HL` at all - it hands off to `_hlfDraw`, which owns the framed
+   assembly and its own `_HLF` geometry. So ORIGINAL on this page IS the framed
+   assembly now, and keeping `top-stack` / `nested-cells` would have been worse
+   than dead code: their `post()` drew the whole instrument a SECOND time over
+   the game's copy, and their `_HL` deltas (`r:-1`, `tick:0`, the moved dash)
+   no longer reach anything, because nothing reads those fields on the draw
+   path any more.
+
+   HOW TO ITERATE FROM HERE. The loop inverts, and it is the better one:
+   change `_HLF` (or `_hlfBarRow` / `_hlfBorderPath` / ... ) in
+   index-working.html, run `python strip.py`, reload this page. ORIGINAL picks
+   the change up because it re-fetches lss.js every load - there is no copy
+   here to keep in sync, which was the whole point of building the lab this way
+   (see lss.map.md, "The HUD lab"). The SHIP THEMES panel below still composes
+   over it, so the per-hull palettes stay tunable from this page.
+
+   A new variant is still perfectly possible - it just deltas `_HLF` instead of
+   `_HL` now, and must hide the shipped assembly rather than draw beside it.
+   ========================================================================== */
+
+/* ==========================================================================
+   3b. SHIP THEMES — a colour-only layer that composes with any variant
+   --------------------------------------------------------------------------
+   Owner: *"for each ship, we will override the default colors with various
+   shades from each ship's theme."*
+
+   A theme is NOT one flat accent — that was tried and rejected, because if
+   every gauge is the same colour a pilot can no longer read value by colour.
+   It is a FAMILY: each readout gets its own hue offset, saturation and
+   lightness, all measured off `LSS.CLASS_COLORS[ship]`. So the cluster
+   obviously belongs to one hull, while the gauges stay tellable apart by
+   shade. Nothing is hand-typed per ship — change a class colour in the game
+   and every shade follows.
+
+   ⚠ Three colours are deliberately NOT themed:
+     • low-hull amber and doomed red (`buildV`'s `hCol`) — a warning has to
+       mean the same thing on every hull;
+     • the ACTIVE-ability amber `#ffb020`, hard-coded in `_hlDrawHUD`;
+     • the ready-flash whites, hard-coded in `_hlReadyFlash`.
+   ========================================================================== */
+function hexToHsl(hex){
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n>>16&255)/255, g = (n>>8&255)/255, b = (n&255)/255;
+  const mx = Math.max(r,g,b), mn = Math.min(r,g,b), d = mx - mn;
+  let h = 0, sat = 0; const l = (mx+mn)/2;
+  if (d){
+    sat = l > 0.5 ? d/(2-mx-mn) : d/(mx+mn);
+    h = mx === r ? ((g-b)/d + (g < b ? 6 : 0)) : mx === g ? ((b-r)/d + 2) : ((r-g)/d + 4);
+    h *= 60;
+  }
+  return [h, sat, l];
+}
+function hslToHex(h, sat, l){
+  h = ((h % 360) + 360) % 360;
+  sat = Math.max(0, Math.min(1, sat)); l = Math.max(0, Math.min(1, l));
+  const c = (1 - Math.abs(2*l - 1)) * sat, x = c * (1 - Math.abs((h/60) % 2 - 1)), m = l - c/2;
+  let r, g, b;
+  if (h < 60)       { r=c; g=x; b=0; }
+  else if (h < 120) { r=x; g=c; b=0; }
+  else if (h < 180) { r=0; g=c; b=x; }
+  else if (h < 240) { r=0; g=x; b=c; }
+  else if (h < 300) { r=x; g=0; b=c; }
+  else              { r=c; g=0; b=x; }
+  const t = v => Math.round((v+m)*255).toString(16).padStart(2,'0');
+  return '#' + t(r) + t(g) + t(b);
+}
+
+/* [hue offset (x spread), saturation multiplier, lightness] per readout.
+   The offsets are what keep neighbouring gauges apart: CORE brightest at the
+   hull's own hue, SHIELD warm of it, NRG/SPD cool of it, AMMO warmest. */
+const THEME_MAP = {
+  core:   [   0, 1.00, 0.70 ],
+  shield: [  20, 0.92, 0.64 ],
+  health: [   0, 1.00, 0.46 ],
+  ab3cd:  [ -16, 1.00, 0.60 ],   // slot 0 - offensive
+  ab2cd:  [  34, 0.95, 0.58 ],   // slot 1 - defensive
+  ab1cd:  [  12, 0.85, 0.50 ],   // slot 2 - utility
+  energy: [ -28, 0.85, 0.44 ],
+  speed:  [ -34, 0.80, 0.42 ],
+  ammo:   [  40, 1.00, 0.55 ],
+  dash:   [  14, 0.70, 0.72 ],
+};
+function shipShades(rec, spread){
+  const [h, sat] = hexToHsl(rec.col);
+  const out = {};
+  for (const k in THEME_MAP){
+    const m = THEME_MAP[k];
+    out[k] = hslToHex(h + m[0]*(spread == null ? 1 : spread), sat*m[1], m[2]);
+  }
+  return out;
+}
+/* shaped like an `hl` delta, so it goes through the same apply/restore path */
+function themeDelta(rec, spread){
+  const sh = shipShades(rec, spread), d = {};
+  for (const k in sh) d[k] = { col: sh[k] };
+  return d;
+}
+
+/* ==========================================================================
+   4.  BACKDROP — contrast has to be judged against something
+   ========================================================================== */
+const stars = Array.from({length:230}, () => ({ x:Math.random(), y:Math.random(), r:Math.random()*.9+.2, p:Math.random()*6.28 }));
+function drawBackdrop(ctx, W, H, mode, t){
+  ctx.clearRect(0,0,W,H);
+  if (mode === 'none'){ ctx.fillStyle = '#000'; ctx.fillRect(0,0,W,H); }
+  else if (mode === 'night'){
+    const vm = Math.min(W,H)/100;
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#04060d'); g.addColorStop(.55,'#070d18'); g.addColorStop(.72,'#0d1626');
+    g.addColorStop(.74,'#1a2740'); g.addColorStop(1,'#050810');
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    ctx.save();
+    for (const s of stars){
+      ctx.globalAlpha = .25 + .55*(0.5+0.5*Math.sin(t*1.7 + s.p));
+      ctx.fillStyle = '#cfe3f5';
+      ctx.fillRect(s.x*W, s.y*H*.74, s.r*vm*.3+.7, s.r*vm*.3+.7);
+    }
+    ctx.restore();
+    const hz = H*.74;
+    const cg = ctx.createLinearGradient(0,hz-H*.09,0,hz);
+    cg.addColorStop(0,'rgba(255,140,60,0)'); cg.addColorStop(1,'rgba(255,150,70,.30)');
+    ctx.fillStyle = cg; ctx.fillRect(0,hz-H*.09,W,H*.09);
+    ctx.fillStyle = 'rgba(4,6,12,.95)'; ctx.fillRect(0,hz,W,H-hz);
+    for (let i=0;i<44;i++){
+      const x = ((i*97.13)%100)/100*W, w = (3+((i*31)%9))*vm*.35, h = (4+((i*53)%22))*vm*.6;
+      ctx.fillStyle = 'rgba(10,16,28,.98)'; ctx.fillRect(x, hz-h, w, h);
+      for (let k=0;k<4;k++){
+        if (((i*7+k*13)%5) > 2) continue;
+        ctx.fillStyle = 'rgba(255,190,110,.5)';
+        ctx.fillRect(x+w*.25, hz-h+k*h*.22+h*.08, w*.5, h*.06);
+      }
+    }
+  } else {
+    const vm = Math.min(W,H)/100;
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#5d9fd8'); g.addColorStop(.5,'#a8cbe6'); g.addColorStop(.66,'#dceaf3');
+    g.addColorStop(.67,'#2e6e91'); g.addColorStop(1,'#123c55');
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    ctx.save(); ctx.globalAlpha = .5; ctx.fillStyle = '#fff';
+    for (let i=0;i<7;i++){
+      const x = ((i*173)%100)/100*W, y = H*(.08+((i*37)%30)/100*.5), r = (8+((i*19)%14))*vm;
+      ctx.beginPath(); ctx.ellipse(x,y,r*1.9,r*.6,0,0,6.2832); ctx.fill();
+    }
+    ctx.restore();
+  }
+  if (mode === 'none') return;
+  const vm = Math.min(W,H)/100;
+  ctx.save();
+  for (let i=0;i<3;i++){
+    const a = t*.25 + i*2.2, x = W/2 + Math.cos(a)*W*.22, y = H*.46 + Math.sin(a*1.3)*H*.14;
+    ctx.fillStyle = mode === 'day' ? 'rgba(20,28,38,.85)' : 'rgba(150,170,195,.5)';
+    ctx.beginPath(); ctx.moveTo(x+vm*1.4,y); ctx.lineTo(x-vm*.9,y+vm*.8);
+    ctx.lineTo(x-vm*.4,y); ctx.lineTo(x-vm*.9,y-vm*.8); ctx.closePath(); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* a stand-in minimap texture, so the extracted `_hlRadar` has the source it
+   expects and the radar disc renders rather than being skipped */
+function makeMinimap(){
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d');
+  g.fillStyle = '#0a1018'; g.fillRect(0,0,128,128);
+  g.strokeStyle = 'rgba(79,209,255,.22)'; g.lineWidth = 1;
+  for (let i=16;i<128;i+=16){
+    g.beginPath(); g.moveTo(i,0); g.lineTo(i,128); g.stroke();
+    g.beginPath(); g.moveTo(0,i); g.lineTo(128,i); g.stroke();
+  }
+  g.fillStyle = '#2ee056'; g.fillRect(62,62,5,5);
+  g.fillStyle = '#ff5470';
+  g.fillRect(40,34,4,4); g.fillRect(92,80,4,4); g.fillRect(70,100,4,4);
+  return c;
+}
+
+/* ==========================================================================
+   5.  APP
+   ========================================================================== */
+const UI = { tab:'original', ship:'PUNCTURE', variant:'nested-cells',
+             aspect:1.7778, backdrop:'night', scale:1.0, opacity:0.72,
+             theme:true, spread:0.6 };
+const $ = s => document.querySelector(s);
+let HUD = null, REC = null, last = performance.now();
+const INPUT = { hudScale:1, hudOpacity:0.72, hudTextOpacity:1, crosshairOpacity:1, hudGaugeLabels:true };
+
+function variantById(id){ return VARIANTS.find(v => v.id === id) || VARIANTS[0]; }
+
+/* A delta may be a plain object or a function of the live `_HL`. The function
+   form lets a variant be expressed in terms of the game's own numbers — "sit
+   in the same radial band as the tick strips", "start where the hull bar ends"
+   — so it stays correct if those numbers ever change, instead of freezing a
+   copy of them here. */
+function resolveHL(v){
+  const d = v.hl;
+  return (typeof d === 'function') ? d(HUD._HL) : (d || {});
+}
+function applyHL(delta){
+  const undo = [];
+  for (const part in delta){
+    const target = HUD._HL[part]; if (!target) continue;
+    const patch = delta[part], keep = {};
+    for (const k in patch){ keep[k] = target[k]; target[k] = patch[k]; }
+    undo.push([target, keep]);
+  }
+  return () => undo.forEach(([t,k]) => { for (const key in k){
+    if (k[key] === undefined) delete t[key]; else t[key] = k[key]; } });
+}
+function deltaSummary(delta){
+  const out = [];
+  for (const part in delta){
+    const ks = Object.keys(delta[part]);
+    if (ks.length) out.push(part + ' → ' + ks.join(', '));
+  }
+  return out.length ? out.join('  ·  ') : 'no change — this is the original';
+}
+
+function drawHud(cv, variant){
+  const ctx = cv.getContext('2d');
+  const W = cv.width, H = cv.height;
+  ctx.setTransform(1,0,0,1,0,0);
+  drawBackdrop(ctx, W, H, UI.backdrop, S.t);
+
+  INPUT.hudScale = UI.scale; INPUT.hudOpacity = UI.opacity;
+  const plr = buildPlayer(REC);
+  if (variant.player) try { variant.player(plr, REC); } catch (e){}
+  HUD.bind(plr, INPUT, ctx);
+  HUD._shim.heading = S.t * 0.15;
+
+  const undo = applyHL(resolveHL(variant));
+  /* theme after the variant, so a hull's shades win over a variant's colours
+     while the variant keeps owning the geometry */
+  const undoTheme = UI.theme ? applyHL(themeDelta(REC, UI.spread)) : null;
+  /* a variant may repoint a READOUT as well as move it — e.g. feeding NRG to
+     the strip the game wires to speed */
+  const v = buildV(REC, HUD);
+  if (variant.vals) try { variant.vals(v, S, REC); } catch (e){}
+  try { HUD._hlDrawHUD(ctx, W, H, W/2, H/2, v); }
+  catch (e){ console.error('[hud lab] _hlDrawHUD threw', e); }
+  if (variant.post){
+    const vmin = Math.min(W,H)/100 * HUD._hlScale();
+    try { variant.post(ctx, { HUD, vmin, cx:W/2, cy:H/2, W, H, rec:REC, v, S, over:S.over }); }
+    catch (e){ console.error('[hud lab] post threw', e); }
+  }
+  if (undoTheme) undoTheme();
+  undo();
+}
+
+function buildStage(){
+  const st = $('#stage'); st.innerHTML = '';
+  const panes = UI.tab === 'compare'
+    ? [['ORIGINAL', variantById('original')], [variantById(UI.variant).name, variantById(UI.variant)]]
+    : [[null, UI.tab === 'original' ? variantById('original') : variantById(UI.variant)]];
+  st._panes = panes.map(([cap, variant]) => {
+    const d = document.createElement('div'); d.className = 'pane';
+    const cv = document.createElement('canvas');
+    d.appendChild(cv);
+    if (cap){ const c = document.createElement('div'); c.className = 'cap'; c.textContent = cap; d.appendChild(c); }
+    st.appendChild(d);
+    return { cv, variant };
+  });
+}
+function fit(cv, aspect, boxW, boxH){
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let w = boxW, h = w / aspect;
+  if (h > boxH){ h = boxH; w = h * aspect; }
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  cv.width = Math.max(2, Math.round(w*dpr)); cv.height = Math.max(2, Math.round(h*dpr));
+}
+function frame(now){
+  const dt = Math.min(.05, (now - last)/1000); last = now;
+  if (HUD && REC){
+    tick(dt, REC);
+    if (S.live) syncSliders();
+    const st = $('#stage'), panes = st._panes || [], n = Math.max(1, panes.length);
+    const boxW = (st.clientWidth - 32 - (n-1)*14) / n;
+    const boxH = st.clientHeight - 32 - (n > 1 ? 22 : 0);
+    for (const p of panes){ fit(p.cv, UI.aspect, boxW, boxH); drawHud(p.cv, p.variant); }
+  }
+  requestAnimationFrame(frame);
+}
+
+function buildShipChips(){
+  const box = $('#shipChips'); box.innerHTML = '';
+  SHIP_ORDER.forEach(k => {
+    const r = shipRec(k);
+    const b = document.createElement('button');
+    b.className = 'chip' + (k === UI.ship ? ' on' : '');
+    b.innerHTML = '<span class="dot" style="background:'+r.col+'"></span>' + k;
+    if (k === UI.ship) b.style.background = r.col;
+    b.onclick = () => { UI.ship = k; REC = shipRec(k); S.dash = REC.maxDashes;
+                        buildShipChips(); syncSliders(); };
+    box.appendChild(b);
+  });
+  buildSwatches();
+  const r = shipRec(UI.ship);
+  $('#shipInfo').innerHTML =
+    r.className + ' · ' + r.chassis.toLowerCase() + '<br>' +
+    r.maxHealth.toLocaleString() + ' hull / ' + r.maxShield.toLocaleString() + ' shield · ' +
+    r.maxDashes + ' dash<br>' + r.weapon.name + ' · ' + r.weapon.clipSize + ' rnd<br>' +
+    r.abilities.map((a,i)=>(i+1)+') '+a.name).join(' · ');
+}
+function buildSwatches(){
+  const box = $('#swatches'); if (!box) return;
+  box.innerHTML = '';
+  const sh = shipShades(shipRec(UI.ship), UI.spread);
+  const order = ['core','shield','health','ab3cd','ab2cd','ab1cd','energy','speed','ammo','dash'];
+  const name = { ab3cd:'AB1', ab2cd:'AB2', ab1cd:'AB3', health:'HP', energy:'NRG', speed:'SPD' };
+  order.forEach(k => {
+    const el = document.createElement('span');
+    el.className = 'chip';
+    el.style.cssText = 'cursor:default;padding:2px 7px;font-size:9px;letter-spacing:.08em;' +
+                       'border-color:' + sh[k] + ';color:' + sh[k];
+    el.innerHTML = '<span class="dot" style="background:' + sh[k] + '"></span>' +
+                   (name[k] || k.toUpperCase());
+    el.title = k + '  ' + sh[k];
+    box.appendChild(el);
+  });
+}
+
+function buildVariants(){
+  const l = $('#variantList'); l.innerHTML = '';
+  VARIANTS.filter(v => v.id !== 'original').forEach(v => {
+    const b = document.createElement('button');
+    b.className = (v.id === UI.variant ? 'on' : '');
+    b.innerHTML = v.name + '<i>' + v.sub + '</i>';
+    b.onclick = () => { UI.variant = v.id; buildVariants(); buildStage(); updateNote(); };
+    l.appendChild(b);
+  });
+  $('#vDelta').textContent = deltaSummary(resolveHL(variantById(UI.variant)));
+}
+function updateNote(){
+  const v = UI.tab === 'original' ? variantById('original') : variantById(UI.variant);
+  $('#noteTitle').innerHTML = (UI.tab === 'compare' ? 'ORIGINAL &nbsp;vs&nbsp; ' + v.name : v.name)
+                            + '<small>' + v.sub + '</small>';
+  $('#noteBody').innerHTML = v.note;
+}
+function setTab(t){
+  UI.tab = t;
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  $('#secVariant').style.display = (t === 'original') ? 'none' : '';
+  buildStage(); updateNote();
+}
+function syncSliders(){
+  const pc = x => Math.round(x*100) + '%';
+  const clip = REC.weapon.clipSize || 20;
+  $('#sHp').value  = S.hp*100;   $('#vHp').textContent  = pc(S.hp);
+  $('#sSh').value  = S.sh*100;   $('#vSh').textContent  = pc(S.sh);
+  $('#sOv').value  = S.over*100; $('#vOv').textContent  = pc(S.over);
+  $('#sNrg').value = S.nrg*100;  $('#vNrg').textContent = pc(S.nrg);
+  $('#sAmmo').value= S.ammo*100; $('#vAmmo').textContent= S.reloading ? 'reloading'
+                                   : Math.round(S.ammo*clip) + '/' + clip;
+  $('#sSpd').value = S.spd*100;  $('#vSpd').textContent = Math.round(S.spd*REC.flightSpeed) + ' u/s';
+  $('#sCore').value= S.core*100; $('#vCore').textContent= pc(S.core);
+  $('#sDash').max  = REC.maxDashes;
+  $('#sDash').value= Math.min(S.dash, REC.maxDashes);
+  $('#vDash').textContent = Math.min(S.dash,REC.maxDashes) + '/' + REC.maxDashes;
+  $('#btnLive').className = S.live ? 'on' : '';
+}
+function wire(){
+  document.querySelectorAll('.tabs button').forEach(b => b.onclick = () => setTab(b.dataset.tab));
+  $('#useTheme').onchange = e => { UI.theme = e.target.checked; };
+  $('#sSpread').oninput   = e => { UI.spread = +e.target.value/100;
+                                   $('#vSpread').textContent = UI.spread.toFixed(2);
+                                   buildSwatches(); };
+  $('#aspect').onchange   = e => UI.aspect = parseFloat(e.target.value);
+  $('#backdrop').onchange = e => UI.backdrop = e.target.value;
+  $('#sScale').oninput = e => { UI.scale = +e.target.value/100; $('#vScale').textContent = UI.scale.toFixed(2); };
+  $('#sOp').oninput    = e => { UI.opacity = +e.target.value/100; $('#vOp').textContent = UI.opacity.toFixed(2); };
+  $('#btnLive').onclick  = () => { S.live = true; S.manual = {}; S.paused = false; $('#btnPause').textContent = 'Pause'; };
+  $('#btnPause').onclick = () => { S.paused = !S.paused; $('#btnPause').textContent = S.paused ? 'Resume' : 'Pause'; };
+  document.querySelectorAll('[data-scn]').forEach(b => b.onclick = () => { scenario(b.dataset.scn, REC); syncSliders(); });
+  const bind = (sel, chan, fn) => $(sel).oninput = e => { S.live = false; S.manual[chan] = true; fn(+e.target.value); syncSliders(); };
+  bind('#sHp','hp',    v => S.hp = v/100);
+  bind('#sSh','sh',    v => S.sh = v/100);
+  bind('#sOv','over',  v => S.over = v/100);
+  bind('#sNrg','nrg',  v => S.nrg = v/100);
+  bind('#sAmmo','ammo',v => { S.ammo = v/100; S.reloading = false; });
+  bind('#sSpd','spd',  v => S.spd = v/100);
+  bind('#sCore','core',v => S.core = v/100);
+  bind('#sDash','dash',v => S.dash = v);
+  $('#btnPng').onclick  = () => savePng(1);
+  $('#btnPng2').onclick = () => savePng(2);
+}
+function savePng(k){
+  const panes = $('#stage')._panes || []; if (!panes.length) return;
+  const W = 1600*k, H = Math.round(W/UI.aspect);
+  const out = document.createElement('canvas');
+  out.width = W*panes.length; out.height = H;
+  const o = out.getContext('2d');
+  panes.forEach((p,i) => {
+    const tmp = document.createElement('canvas'); tmp.width = W; tmp.height = H;
+    drawHud(tmp, p.variant);
+    o.drawImage(tmp, i*W, 0);
+  });
+  const a = document.createElement('a');
+  a.download = 'lss_hud_' + UI.ship.toLowerCase() + '_' + UI.tab + '.png';
+  a.href = out.toDataURL('image/png'); a.click();
+}
+
+(async function boot(){
+  const badge = $('#src');
+  try {
+    const res = await fetch('lss.js', { cache:'no-cache' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const js = await res.text();
+    const block = extractHudBlock(js);
+    HUD = makeHud(block);
+    HUD._shim.mm.canvas = makeMinimap();
+    const grab = (anchor) => {
+      const t = sliceObj(js, anchor);
+      if (!t) throw new Error('no ' + anchor);
+      return (0, eval)('(' + t + ')');
+    };
+    DATA.CLASS_COLORS = grab('LSS.CLASS_COLORS =');
+    DATA.CHASSIS      = grab('const CHASSIS =');
+    DATA.LOADOUTS     = grab('const LOADOUTS =');
+    SRC.ok = true; SRC.lines = block.split('\n').length;
+    badge.textContent = 'live · _HL + _hlDrawHUD from lss.js (' + SRC.lines + ' lines)';
+    badge.className = 'live';
+  } catch (e){
+    badge.textContent = 'EXTRACTION FAILED — ' + e.message;
+    badge.className = 'bad';
+    $('#noteTitle').textContent = 'NOT THE GAME';
+    $('#noteBody').innerHTML = 'The lab could not lift the HUD renderer out of <code>lss.js</code>, '
+      + 'so it is showing nothing rather than showing something that is not the game. <b>'
+      + e.message + '</b>';
+    return;
+  }
+
+  REC = shipRec(UI.ship); S.dash = REC.maxDashes;
+  buildShipChips(); buildVariants(); wire(); setTab('original'); syncSliders();
+  requestAnimationFrame(frame);
+
+  window.HL = {
+    ui:UI, S, HUD, DATA, variants:VARIANTS,
+    hl:() => HUD._HL,
+    original:() => { setTab('original'); return 'original'; },
+    variant:(id) => { if (id){ UI.variant = id; buildVariants(); } setTab('variant'); return UI.variant; },
+    compare:(id) => { if (id){ UI.variant = id; buildVariants(); } setTab('compare'); return UI.variant; },
+    ship:(k) => { if (k){ UI.ship = k.toUpperCase(); REC = shipRec(UI.ship); S.dash = REC.maxDashes;
+                          buildShipChips(); syncSliders(); } return UI.ship; },
+    scenario:(s) => { scenario(s, REC); syncSliders(); return s; },
+    set:(o) => { Object.assign(UI, o); buildStage(); return UI; },
+    pause:(v) => { S.paused = (v !== false); return S.paused; },
+    theme:(on) => { if (on != null){ UI.theme = !!on; $('#useTheme').checked = UI.theme; } return UI.theme; },
+    spread:(k) => { if (k != null){ UI.spread = k; $('#sSpread').value = k*100;
+                                    $('#vSpread').textContent = k.toFixed(2); buildSwatches(); }
+                    return UI.spread; },
+    shades:(k) => shipShades(shipRec((k || UI.ship).toUpperCase()), UI.spread),
+    diff:(id) => deltaSummary(resolveHL(variantById(id || UI.variant))),
+    /* exact-size headless capture, independent of the pane */
+    shot:(o) => {
+      o = o || {};
+      if (o.ship){ UI.ship = o.ship.toUpperCase(); REC = shipRec(UI.ship); S.dash = REC.maxDashes; }
+      if (o.scenario) scenario(o.scenario, REC);
+      const cv = document.createElement('canvas');
+      cv.width = o.w || 1280; cv.height = o.h || Math.round((o.w||1280)/UI.aspect);
+      drawHud(cv, variantById(o.variant || 'original'));
+      return cv.toDataURL(o.jpeg ? 'image/jpeg' : 'image/png', o.jpeg || undefined);
+    },
+  };
+  console.log('[hud lab] ORIGINAL is lss.js\'s own _hlDrawHUD (' + SRC.lines + ' lines extracted).',
+              '\n  HL.original() / HL.variant("nested-cells") / HL.compare() / HL.diff()');
+})();
+</script>
+</body>
+</html>
