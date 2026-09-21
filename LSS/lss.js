@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.56";
+const LSS_BUILD = "47.60";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -5419,6 +5419,16 @@ function selectMap(mapKey, opts) {
     }
   } catch (_) {}
 
+  if (mapData.type !== 'gmaps' && typeof game !== 'undefined' && game && game.pendingGmapsOverlay) {
+    game.pendingGmapsOverlay = null;
+    try { if (typeof _lssGmapsDetachCity === 'function') _lssGmapsDetachCity(); } catch (_) {}
+    try {
+      const stat = document.getElementById('gmaps-loc-status');
+      if (stat) { stat.textContent = ''; stat.classList.remove('err', 'ok'); }
+    } catch (_) {}
+    try { if (typeof _updateSkyUI === 'function') _updateSkyUI(); } catch (_) {}
+    console.log('[lss-gmaps] left Custom Location for', mapKey, '- location cleared, city detached.');
+  }
   if (net.active && net.sendEvent && !(opts && opts.silent)) {
     const ov = game.pendingGmapsOverlay;
     net.sendEvent({
@@ -37638,16 +37648,50 @@ class Bot {
     if (this._csT > 0) return;
     this._csT = 0;
     if (!this.alive) return;
-    const vel = this._tempVec3b.copy(this._csAim).multiplyScalar(1200);
-    const origin = (this.mesh && typeof shipMuzzleWorld === 'function')
-      ? shipMuzzleWorld(this.mesh, this._muzzleShot = (this._muzzleShot | 0) + 1, this._tempVec3c)
-      : this._tempVec3c.copy(this.position);
-    const proj = new Projectile(origin, vel, 3200 * 0.6, 100, 'bot', LSS.CLASS_COLORS.BLASTER);
-    proj.sizeMult = 1.8;
-    proj.ownerTeam = this.team; proj.ownerRef = this;
-    game.projectiles.push(proj);
+    const _csDir = new THREE.Vector3().copy(this._csAim).normalize();
+    const _csRange = 10000;
+    let _csWall = _csRange;
+    try { if (typeof raycastLevel === 'function') _csWall = raycastLevel(this.position, _csDir, _csRange); } catch (_) {}
+    if (!(_csWall > 0)) _csWall = _csRange;
+    const _csEnd = new THREE.Vector3().copy(this.position).addScaledVector(_csDir, _csWall);
+    const _csNodes = this.mesh && this.mesh.userData && this.mesh.userData.muzzleNodes;
+    const _csGuns = (_csNodes && _csNodes.length) ? _csNodes.length : 1;
+    for (let _gi = 0; _gi < _csGuns; _gi++) {
+      const _o = (_csNodes && _csNodes.length)
+        ? _csNodes[_gi].getWorldPosition(new THREE.Vector3())
+        : new THREE.Vector3().copy(this.position);
+      try { spawnTracer(_o, _csEnd.clone(), LSS.CLASS_COLORS.BLASTER); } catch (_) {}
+      if (_gi === 0) {
+        try { spawnTracer(_o.clone().add(new THREE.Vector3(0, 2, 0)),
+                          _csEnd.clone().add(new THREE.Vector3(0, 2, 0)), 0xaaeeff); } catch (_) {}
+        try { if (typeof spawnDynamicLight === 'function') spawnDynamicLight(_o, LSS.CLASS_COLORS.BLASTER, 4.0, 600, 0.18); } catch (_) {}
+      }
+    }
+    if (_csWall < _csRange) {
+      try { if (typeof spawnWallRipple === 'function') spawnWallRipple(_csEnd, LSS.CLASS_COLORS.BLASTER); } catch (_) {}
+      try { if (typeof spawnHitFire === 'function') spawnHitFire(_csEnd, LSS.CLASS_COLORS.BLASTER, null, 1.3); } catch (_) {}
+    }
+    const _csDmg = 3200 * 0.6;
+    const _csPerp = (p) => {
+      const dx = p.x - this.position.x, dy = p.y - this.position.y, dz = p.z - this.position.z;
+      const t = dx * _csDir.x + dy * _csDir.y + dz * _csDir.z;
+      if (t < 0 || t > _csWall) return -1;
+      const ox = dx - _csDir.x * t, oy = dy - _csDir.y * t, oz = dz - _csDir.z * t;
+      return Math.sqrt(ox * ox + oy * oy + oz * oz);
+    };
+    for (const _b of game.entities) {
+      if (!_b || !_b.alive || _b === this || _b.team === this.team || !_b.position || !_b.chassis) continue;
+      const _d = _csPerp(_b.position);
+      if (_d < 0 || _d > _b.chassis.hullLength) continue;
+      this._dealAbilityDamage(_b, _csDmg);
+    }
     try {
-      if (typeof spawnDynamicLight === 'function') spawnDynamicLight(origin, LSS.CLASS_COLORS.BLASTER, 4.0, 600, 0.18);
+      if (typeof player !== 'undefined' && player && player.position &&
+          player.shipState !== 'dead' && player.team !== this.team) {
+        const _d = _csPerp(player.position);
+        const _pr = (player.chassis && player.chassis.hullLength) ? player.chassis.hullLength : 120;
+        if (_d >= 0 && _d <= _pr) this._dealAbilityDamage(player, _csDmg);
+      }
     } catch (_) {}
   }
 
@@ -60960,7 +61004,7 @@ function _tickFireDOTs(dt) {
     const dps = bot.onFireDps || 200;
     if (typeof bot.takeDamage === 'function') {
       try {
-        const dealt = bot.takeDamage(dps * dt, bot.onFireSource || 'player');
+        const dealt = _dotHit(bot, dps * dt, bot.onFireSource || 'fire');   // (v47.59) sustained
         if (dealt > 0 && bot.onFireSource === 'player' && typeof player !== 'undefined' && player) {
           player.damageDealt = (player.damageDealt || 0) + dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
         }
@@ -61006,7 +61050,7 @@ function _tickFireDOTs(dt) {
       if (!mon || !mon.alive || !mon.position || !mon.onFireTimer || mon.onFireTimer <= 0) continue;
       const dps = mon.onFireDps || 200;
       try {
-        const dealt = mon.takeDamage(dps * dt, mon.onFireSource || 'player', mon.position);
+        const dealt = _dotHit(mon, dps * dt, mon.onFireSource || 'fire', mon.position);   // (v47.58/59)
         if (dealt > 0 && mon.onFireSource === 'player' && typeof player !== 'undefined' && player) {
           player.damageDealt = (player.damageDealt || 0) + dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
         }
@@ -61225,7 +61269,7 @@ function updateWorldEffects(dt) {
           const _py = _ty - eff.direction.y * along;
           const _pz = _tz - eff.direction.z * along;
           if (_px * _px + _py * _py + _pz * _pz < 150 * 150) {
-            const dealt = bot.takeDamage(eff.dmgPerSec * dt, eff.owner);
+            const dealt = _dotHit(bot, eff.dmgPerSec * dt, eff.owner);   // (v47.59) sustained
             if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
           }
         }
@@ -61243,7 +61287,7 @@ function updateWorldEffects(dt) {
           const _mpz = _mtz - eff.direction.z * _mAlong;
           const _mReach = 150 + (mon.collisionRadius || 0);
           if (_mpx * _mpx + _mpy * _mpy + _mpz * _mpz >= _mReach * _mReach) continue;
-          const _md = mon.takeDamage(eff.dmgPerSec * dt, eff.owner || 'player', mon.position);
+          const _md = _dotHit(mon, eff.dmgPerSec * dt, eff.owner || 'fire', mon.position);   // (v47.58/59)
           if (_md > 0 && eff.owner === 'player' && typeof player !== 'undefined' && player) { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); }
           mon.onFireTimer = Math.max(mon.onFireTimer || 0, 3.0);
           mon.onFireDps = Math.max(mon.onFireDps || 0, 320);
@@ -61549,7 +61593,7 @@ function updateWorldEffects(dt) {
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
           if (_bodyDist(eff.position, bot) < eff.radius) {
-            const dealt = bot.takeDamage(eff.igniteDmgPerSec * dt, eff.owner);
+            const dealt = _dotHit(bot, eff.igniteDmgPerSec * dt, eff.owner);   // (v47.59) sustained
             if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
             if (bot.velocity) bot.velocity.multiplyScalar(1 - eff.slowFactor * dt);
           }
@@ -61558,11 +61602,11 @@ function updateWorldEffects(dt) {
             for (const mon of game.monsters) {
               if (!mon.alive || !mon.position) continue;
               if (mon.position.distanceTo(eff.position) < eff.radius + (mon.collisionRadius || 0)) {
-                const dealt = mon.takeDamage(eff.igniteDmgPerSec * dt, eff.owner, mon.position);
+                const dealt = _dotHit(mon, eff.igniteDmgPerSec * dt, eff.owner, mon.position);   // (v47.59)
                 if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
                 mon.onFireTimer = Math.max(mon.onFireTimer || 0, 2.0);
                 mon.onFireDps   = Math.max(mon.onFireDps   || 0, eff.igniteDmgPerSec || 200);
-                mon.onFireSource = (eff.owner === 'player') ? 'player' : (eff.owner || 'player');
+                mon.onFireSource = (eff.owner === 'player') ? 'player' : (eff.owner || null);   // (v47.58)
                 if (mon.velocity && typeof mon.velocity.multiplyScalar === 'function') mon.velocity.multiplyScalar(1 - eff.slowFactor * dt);
               }
             }
@@ -61805,7 +61849,7 @@ function updateWorldEffects(dt) {
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === eff.team) continue;
         if (_bodyDist(eff.position, bot) < eff.radius) {
-          const dealt = bot.takeDamage(eff.dmgPerSec * dt, eff.owner);
+          const dealt = _dotHit(bot, eff.dmgPerSec * dt, eff.owner);   // (v47.59) sustained
           if (dealt > 0 && eff.owner === 'player') { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 100); }
         }
       }
@@ -61822,7 +61866,7 @@ function updateWorldEffects(dt) {
         for (const mon of game.monsters) {
           if (!mon.alive || !mon.position) continue;
           if (mon.position.distanceTo(eff.position) < eff.radius + (mon.collisionRadius || 0)) {
-            const _md = mon.takeDamage(eff.dmgPerSec * dt, eff.owner || 'player', mon.position);
+            const _md = _dotHit(mon, eff.dmgPerSec * dt, eff.owner || 'fire', mon.position);   // (v47.58/59)
             if (_md > 0 && eff.owner === 'player') { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); }
           }
         }
@@ -91001,9 +91045,35 @@ function showHitMarker() {
   if (!el) return;
   _markerFlash(el, _HIT_FLASH_KEYS, 250);
 }
+let _hmSustainDepth = 0;
+let _hmSustainAt = 0;
+function _dotHit(target, amount, attacker, hitPoint) {
+  _hmSustainDepth++;
+  try {
+    return (hitPoint !== undefined) ? target.takeDamage(amount, attacker, hitPoint)
+                                    : target.takeDamage(amount, attacker);
+  } finally { _hmSustainDepth--; }
+}
 function _hitMarkFor(attacker, dealt) {
   if (!(dealt > 0) || attacker !== 'player') return;
   try { if (typeof player !== 'undefined' && player && player.shipState === 'dead') return; } catch (_) { return; }
+  if (_hmSustainDepth > 0) {
+    const _ms = (typeof window !== 'undefined' && typeof window.__hmSustainedMs === 'number')
+      ? window.__hmSustainedMs : 400;
+    const _now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    if (!(_now - _hmSustainAt >= _ms)) return;
+    _hmSustainAt = _now;
+  }
+  try {
+    if (typeof window !== 'undefined' && window.__hmTrace) {
+      if (!window.__hitMarks) window.__hitMarks = [];
+      const _st = (new Error()).stack || '';
+      window.__hitMarks.push({ t: Math.round((typeof game !== 'undefined' && game.time) ? game.time * 100 : 0) / 100,
+                               dealt: Math.round(dealt * 100) / 100,
+                               from: _st.split(String.fromCharCode(10)).slice(2, 6).join(' | ') });
+      if (window.__hitMarks.length > 40) window.__hitMarks.shift();
+    }
+  } catch (_) {}
   try { showHitMarker(); } catch (_) {}
 }
 
@@ -95547,6 +95617,7 @@ async function _lssGmapsBuildLevel(level) {
       _lssGmaps._dayK = null;   // seed the day/night ease on this level's first frame
       _lssGmaps.cleanup = () => {
         try { _lssGmaps.active = false; } catch (_) {}
+        try { if (_lssGmaps._refineInterval) { clearInterval(_lssGmaps._refineInterval); _lssGmaps._refineInterval = null; } } catch (_) {}
         try { scene.remove(tiles.group); } catch(_) {}
         try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
         try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}
@@ -96189,6 +96260,7 @@ async function _lssGmapsAttachAtLatLng(lat, lng, label, opts) {
     }, 500);
     _lssGmaps.cleanup = () => {
       try { clearInterval(_streamPulse); } catch (_) {}
+      try { if (_lssGmaps._refineInterval) { clearInterval(_lssGmaps._refineInterval); _lssGmaps._refineInterval = null; } } catch (_) {}   // (v47.57)
       try { scene.remove(tiles.group); } catch (_) {}
       try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch (_) {}
       _lssGmaps.tiles = null;

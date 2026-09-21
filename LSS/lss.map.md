@@ -7331,3 +7331,139 @@ shouldn't rotate at all in the cinematic or after"*, then *"it happened in exhib
   yaw, B deg with the new` - B must be 0. B = 0 also proves the derived quaternion equals the row's
   shared lineup quaternion, i.e. the player is still in formation with the wingmen rather than merely
   not rotating.
+
+
+### v47.57 - the city that followed you to The Nexus
+
+Owner: *"i was in an elimination custom location, after the match i switched maps to nexus and i
+could see the city layout on the floor... it also jumped around a couple times"*, and *"the spawns
+were incorrect, too"*.
+
+**Jump:** `left Custom Location for` (the log) · `pendingGmapsOverlay` · `function selectMap` ·
+`_lssGmaps._refineInterval`
+
+- **NOT A LEAK - THE OVERLAY PATH FIRING UNASKED.** `buildRoomGraphLevel` has two arms: a `gmaps`
+  level builds the streamed world, and **any other level with `pendingGmapsOverlay` still set gets
+  the city attached over it as scenery** (*"overlay attached via build path ; tunnel SDF preserved"*).
+  That arm predates v46.89, when Custom Location became the full streamed world. Since then the DROP
+  panel is shown for the gmaps slot ALONE, so the only way to reach it is to set a location and then
+  pick a different map - exactly what the owner did and exactly what they did not want. The arm also
+  restores the arena's walls / rooms / corridorPoints from a snapshot taken around an `await`, which
+  is where the wrong spawns come from.
+- **⭐⭐⭐ CHANGING THE MAP NOW CLEARS THE LOCATION**, in `selectMap`, for the same reason
+  `cyclePreset` has always cleared it: *"selecting a preset means the player wants the preset scene,
+  not the city tiles"*. Choosing The Nexus means the player wants The Nexus.
+  **⚠ It has to sit BEFORE selectMap's `map_change` broadcast**, so the event carries
+  `gmapsOverlay: null` and the room converges on the clear instead of a peer handing the location
+  straight back.
+- **⚠ AND THE REFINE TIMER WAS NEVER CLEARED BY ANY TEARDOWN.** `_lssGmaps._refineInterval` re-sites
+  the tile pivot once a second for 20 s after every attach, and it survived the map change - **130
+  `[lss-gmaps] auto-positioned tiles` lines in one session, at an hourglass room
+  (`binding probe @ (-1050,600)`)**. That repetition IS the "jumped around a couple times". Both
+  `cleanup` closures clear it now.
+- **MEASURED, the owner's exact path** - Custom Location elimination, play the match out, back in the
+  lobby, one click to The Nexus: `LSSEarthTiles` **1,877 meshes -> 0**, `pendingGmapsOverlay` Tokyo ->
+  `null`, and **zero** refine lines in the following 6 s. Before the fix the same path left **244
+  meshes parented to an arena** with the timer still running.
+- ⚠ A solo elimination does NOT raise the picker between rounds - it runs straight into the next
+  round. The reproduction is *after the match*, in the lobby, which is what the owner said.
+
+
+### v47.58 - `|| 'player'` is not a default, it is a false confession
+
+Owner: *"i hit someone while they were in my team's pyro fire, and i got hitmarkers as if they were
+in my own fire, but i was not a pyro"*, then *"cluster missile might have the same issue"*.
+
+**Jump:** `function _hitMarkFor` · `function _tickFireDOTs` · `onFireSource` · `window.__hmTrace`
+
+- **⭐⭐⭐ `'player'` IS A SENTINEL, NOT A NAME.** Since v45.38 `Bot.takeDamage` ends with
+  `_hitMarkFor(attacker, amount)` - the damage CONTRACT, deliberately moved off 29 call sites onto
+  the one function - and `_hitMarkFor` fires on `attacker === 'player'` and nothing else. So **any**
+  damage source that passes that string flashes the local pilot's marker, whoever owns the damage.
+  That makes `x || 'player'` an actively dangerous idiom: it reads as a harmless default and it means
+  *"if I do not know who did this, say it was me."*
+- **The offenders, all fixed to `'fire'` / `null`:** `_tickFireDOTs`' `bot.onFireSource || 'player'`
+  and its monster twin, and the gas / cluster monster ticks' `eff.owner || 'player'`. Note the CREDIT
+  lines beside each already tested `=== 'player'` correctly - only the attacker argument lied, which
+  is why damage-dealt and core stayed right while the marker flashed. Damage still lands; credit and
+  marker do not. **MEASURED: a null-source burn at 300 dps for 1.0 s now deals exactly 300 and
+  records ZERO markers, while a real `takeDamage(40, 'player')` still records one.**
+- **⚠ CLUSTER IS CLEAN** - the zone carries `owner: this.owner` and the tick passes `eff.owner`, so
+  a bot's or peer's cluster cannot flash your marker. Only its MONSTER arm had the fallback.
+- **⚠ THE OWNER'S EXACT CASE IS NOT REPRODUCED, AND HERE IS WHY IT RESISTS.** For a SHIP the only
+  thing that seeds `onFireTimer` is `splashDamage`'s `isPyroThermite` branch - and `isPyroThermite` is
+  set *only on the local player's PYRO shots and on network replay of a remote human* (see the note
+  at `_deathCamTickFire`). **A bot Pyro's thermite therefore applies no burn at all**, which a live
+  probe confirmed: an enemy PYRO bot fighting for 30 s produced ZERO entities with `onFireTimer > 0`.
+  That is worth a look on its own - a bot's thermite is supposed to stick.
+- **⚠ SO THE NEXT REPORT SHOULD NAME ITS OWN CALLER.** `window.__hmTrace = true` records the last 40
+  markers with `{t, dealt, from}` where `from` is four frames of stack. Reasoning about this one from
+  the outside cost most of a session and did not land it; one traced repro would have.
+
+
+### v47.59 - one shot, sixty hit markers a second
+
+Owner: *"i hit someone while they were in my team's pyro fire, and i got hitmarkers as if they were
+in my own fire, but i was not a pyro"*, then *"it was me and the bots... i just shot someone with one
+hit, and then received a bunch of hitmarkers as if they were in fire"*, then - the clincher -
+*"i thought i heard a similar glitch in endless"*.
+
+**Jump:** `function _dotHit` · `function _hitMarkFor` · `window.__hmTrace`
+
+- **⭐⭐⭐ A HIT MARKER IS A DISCRETE EVENT; SUSTAINED DAMAGE IS NOT.** v45.38 moved the marker off 29
+  call sites onto `Bot.takeDamage` - the damage CONTRACT - so that every WEAPON would mark. Correct,
+  and it also swept in every CONTINUOUS source, which ticks `dmgPerSec * dt` **once per entity per
+  frame**. One cluster missile then strobed a marker ~60 times a second for the life of its zone -
+  and `showHitMarker` plays the `hit` SOUND, which is why the owner *heard* it in endless before they
+  could name it. Endless is the worst case: monsters plus zones, constantly.
+- **MEASURED**, one injected player-owned zone: **40 markers in 0.65 s** (the trace ring's cap), 10
+  from `Bot.takeDamage` and 30 from `OutskirtsMonster.takeDamage`, both under `updateWorldEffects`.
+  After: **5 markers in 2.05 s**, i.e. the 400 ms pulse, with a discrete shot still marking once.
+- **`_dotHit(target, amount, attacker, hitPoint)`** flags the stack as sustained for the duration of
+  one `takeDamage`; `_hitMarkFor` then pulses on its own slow clock. **⚠ The attacker string is
+  deliberately NOT changed** - `'player'` is what carries kill credit and what a dozen other
+  `=== 'player'` tests read. Changing it would have been the obvious fix and would have silently
+  broken zone kill attribution.
+- **⚠ HELD BEAMS ARE LEFT ALONE** - the thermal lance and MEGA LASER (`3000 * dt` in
+  `updateAbilities`) are weapons the pilot is actively firing, where a steady stream is the feedback
+  they are supposed to give. The laser is also a measurement hazard: it flooded the 40-entry trace
+  ring during a verification run and made the fix look like it had not worked.
+- **⚠ `_hitMarkFor` RETURNS EARLY WHILE THE PLAYER IS DEAD**, which invalidated two measurements
+  before it was noticed. Check `player.shipState` before trusting a zero.
+- Knobs: `window.__hmTrace = true` records the last 40 markers as `{t, dealt, from}` with four frames
+  of stack - it is what finally named `updateWorldEffects` after a long stretch of reading code from
+  the outside. `window.__hmSustainedMs` (default 400) tunes the pulse.
+
+
+### v47.60 - "blaster doesn't have rockets in his loadout"
+
+Owner: *"i saw blaster as a bot shoot a rocket... blaster doesn't have rockets in his loadout"* /
+*"let's make sure the bots are using proper loadouts"*.
+
+**Jump:** `_chargeShotTick` · `_tryUseOffensive` · `_powerShotMuzzleNodes`
+
+- **THE AUDIT CAME BACK CLEAN, WHICH IS WORTH RECORDING SO NOBODY REDOES IT.** All seven ships were
+  checked slot by slot against the bot dispatchers: every OFFENSIVE ability (Laser, Flame Chain,
+  Cluster Missile, Stun Bolt, Tracker Rockets, Charge Shot, Rocket Salvo), every DEFENSIVE one
+  (Vortex Shield / Absorption / Fire Shield / Body Shield share a branch, plus Afterburner, Energy
+  Syphon, Plasma Shield), every UTILITY one, and all seven cores have a matching branch, and **not
+  one branch fires another ship's weapon.** `const weapon = this.loadout.weapon` is the only main-gun
+  source. The loadouts were never crossed.
+- **⭐⭐⭐ IT WAS THE PRESENTATION.** The bot's Charge Shot release pushed a travelling `Projectile`
+  at speed 1200 with `sizeMult 1.8` - a fat glowing round crossing the arena, which is a ROCKET to
+  anyone watching. BLASTER owns no projectile weapon at all: the Gatling is hitscan and the human's
+  Charge Shot is an instant piercing BEAM. So "using the wrong loadout" was the right read of the
+  wrong layer.
+- The release now mirrors the human beat for beat: raycast to the wall, one tracer per REAL gun
+  marker all converging on that point, the pale companion on barrel 0 only, wall ripple + impact
+  fire, and piercing damage to everything the line crosses via `_dealAbilityDamage` (so shields,
+  spawn protection and the bot's own core charging are unchanged). Damage keeps its 0.6 bot scale.
+- **⚠ Same defect CLASS as v45.42's "a railgun looks like a railgun" and "the human's Tracker
+  Rockets, not an approximation of them".** When a bot ability is written as a cheap stand-in, the
+  give-away is the owner naming a weapon the ship does not have. Check the PRESENTATION before
+  re-auditing the loadout tables.
+- **⚠ `end` is cloned per tracer** - `_spawnSingleTracer` keeps the far vector by reference as
+  `_retractTo` (the v46.86 trap), so one shared instance ties every barrel's far end together.
+- **MEASURED**, forced release on a spawned BLASTER bot: projectiles owned by it **0 before, 0
+  after**; target pool **-1966** (the 1,920 beam plus incidental fire) at 919 u; **8 muzzle nodes ->
+  12 new effects** (eight barrel tracers, the companion, ripple / fire / light).
