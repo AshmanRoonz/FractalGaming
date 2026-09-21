@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.49";
+const LSS_BUILD = "47.55";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -7512,6 +7512,28 @@ function handleNetEvent(evt, fromPeerId) {
       if (typeof _wildAuthority === 'function' && _wildAuthority() && _WILD && _WILD._list) {
         const m = _WILD._list.find(x => x && x.wildId === (evt.i | 0) && x.alive);
         if (m) m.takeDamage(Math.max(0, +evt.d || 0), 'peer:' + fromPeerId, m.position);
+      }
+    } catch (_) {}
+    return;
+  }
+  if (evt.type === 'el_state') {
+    try { if (typeof _elApplyState === 'function') _elApplyState(evt.s); } catch (_) {}
+    return;
+  }
+  if (evt.type === 'el_gone' && typeof evt.i === 'number') {
+    try {
+      if (typeof _elAuthority === 'function' && !_elAuthority() && _LSS_EL && _LSS_EL.ents) {
+        const _e = _LSS_EL.ents.find(x => x && x.elId === (evt.i | 0) && x.alive);
+        if (_e) _elKill(_e);
+      }
+    } catch (_) {}
+    return;
+  }
+  if (evt.type === 'el_dmg' && typeof evt.i === 'number') {
+    try {
+      if (typeof _elAuthority === 'function' && _elAuthority() && _LSS_EL && _LSS_EL.ents) {
+        const _e = _LSS_EL.ents.find(x => x && x.elId === (evt.i | 0) && x.alive);
+        if (_e) _e.takeDamage(Math.max(0, +evt.d || 0), 'peer:' + fromPeerId);
       }
     } catch (_) {}
     return;
@@ -36706,7 +36728,21 @@ class Bot {
       else if (d > 0.5) this.position.lerp(_botProxyTarget, Math.min(1, dt * 8));
       if (d > 3) this.targetDir.copy(_botProxyTarget).sub(this.position).normalize();
     }
-    if (this.mesh) {
+    let _faced = false;
+    if (typeof game !== 'undefined' && game && game.state === 'warmup' && this.mesh && this.position) {
+      try {
+        let _tgt = (typeof _enemyFleetCentroid === 'function') ? _enemyFleetCentroid(this.team) : null;
+        if (!_tgt && typeof _monsterArenaInfo === 'function') _tgt = _monsterArenaInfo().center;
+        if (_tgt) {
+          this.mesh.position.copy(this.position);
+          this.mesh.lookAt(_tgt.x, this.position.y, _tgt.z);
+          this.targetDir.set(_tgt.x - this.position.x, 0, _tgt.z - this.position.z);
+          if (this.targetDir.lengthSq() > 1e-6) this.targetDir.normalize();
+          _faced = true;
+        }
+      } catch (_) {}
+    }
+    if (this.mesh && !_faced) {
       this.mesh.position.copy(this.position);
       if (this.targetDir.lengthSq() > 0.01) {
         _botProxyTarget.copy(this.position).add(this.targetDir);
@@ -55227,6 +55263,7 @@ function _botSendRoster(toPeerId) {
     if (!(b instanceof Bot) || b.isProxy) continue;
     bots.push({ i: b.id, k: b.loadoutKey, t: (b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A', h: b.hoardModelKey || null, n: b.isNemesis ? 1 : 0,
       a: b.alive ? 1 : 0,   // (v47.45) so a late joiner builds a dead bot as a dead shell, not a ghost
+      rs: b._rosterShip ? 1 : 0,   // (v47.50) a match pilot (wears the radar diamond), not city/wave filler
 
       tm: b.team, c: (b._owCity != null) ? b._owCity : -1 });   // (v38.79) numeric team + overworld city
   }
@@ -55269,6 +55306,7 @@ function _botApplyRoster(rows) {
       const b = new Bot(r.k, team, r.i, r.h || null);
       b.isProxy = true;
       if (r.c != null && r.c >= 0) b._owCity = r.c;   // (v38.79) an overworld city fleet proxy
+      if (r.rs) b._rosterShip = true;   // (v47.50) so a peer's radar draws it as a match pilot too
       if (r.n) { try { b.isNemesis = true; } catch (_) {} }
       if (r.a === 0) {
         try { b.alive = false; b.doomed = false; b.shipState = 'dead'; if (b.mesh) b.mesh.visible = false; } catch (_) {}
@@ -55361,6 +55399,7 @@ function spawnBots() {
     if (_seatOff('enemy', i)) { try { console.log('[spawnBots] enemy seat', i, 'SKIPPED (off)'); } catch (_) {} continue; }
     if (!enemyLoadouts[i]) { try { console.warn('[spawnBots] enemy seat', i, 'has NO HULL in the deal - nothing built'); } catch (_) {} continue; }
     const bot = new Bot(enemyLoadouts[i], LSS.TEAM_FLEET_B, i + 1);
+    bot._rosterShip = true;   // (v47.50) one of the match's own pilots - see the radar glyph
     const sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(LSS.TEAM_FLEET_B) : 'B');
     bot.position.copy(sp);
     applyPrev(bot);
@@ -55371,6 +55410,7 @@ function spawnBots() {
   for (let i = 0; i < _friendN; i++) {
     if (_seatOff('friendly', i)) continue;
     const bot = new Bot(friendlyLoadouts[i], LSS.TEAM_FLEET_A, i + 10);
+    bot._rosterShip = true;   // (v47.50)
     const sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(LSS.TEAM_FLEET_A) : 'A');
     bot.position.copy(sp);
     applyPrev(bot);
@@ -67196,6 +67236,30 @@ function updateMinimap() {
     ctx.beginPath(); ctx.moveTo(4, 0); ctx.lineTo(-2, 3); ctx.lineTo(-2, -3); ctx.closePath(); ctx.fill();
     ctx.restore();
   };
+  const _mmPilot = (p, col, off) => {
+    let x = p.x, y = p.y, ang = 0;
+    if (off) {
+      ang = Math.atan2(p.y - cy, p.x - cx);
+      x = cx + Math.cos(ang) * 69.5;
+      y = cy + Math.sin(ang) * 69.5;
+    }
+    const r = off ? 3.6 : 4.5;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(x, y - r); ctx.lineTo(x + r, y);
+    ctx.lineTo(x, y + r); ctx.lineTo(x - r, y);
+    ctx.closePath(); ctx.stroke();
+    ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(x, y, off ? 1.3 : 1.5, 0, Math.PI * 2); ctx.fill();
+    if (off) {
+      ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+      ctx.beginPath();
+      ctx.moveTo(r + 1.2, 0); ctx.lineTo(r - 0.6, 1.8); ctx.lineTo(r - 0.6, -1.8);
+      ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+  };
 
   if (typeof LSS !== 'undefined' && LSS.MODE === 'endless' && game.endlessRun && game.endlessRun._boltPool) {
     const bp = game.endlessRun._boltPool;
@@ -67314,6 +67378,14 @@ function updateMinimap() {
       ctx.fillRect(p.x - 1.1, p.y - 2, 2.2, 5);
       continue;
     }
+    if (bot._rosterShip) {
+      _mmPilot(p, isEnemy ? ENEMY_COL : FRIEND_COL, p.off);
+      if (!p.off && bot.doomed) {
+        ctx.strokeStyle = ENEMY_COL; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(p.x, p.y, 7, 0, Math.PI * 2); ctx.stroke();
+      }
+      continue;
+    }
     if (p.off) { _mmArrow(p, isEnemy ? ENEMY_COL : FRIEND_COL); continue; }
     ctx.fillStyle = isEnemy ? ENEMY_COL : FRIEND_COL;
     ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
@@ -67330,19 +67402,7 @@ function updateMinimap() {
       if (!np || !np.alive || !np.position) continue;
       const isEnemy = (_localTeam == null) || (np.team !== _localTeam);
       const p = _plot(np.position.x, np.position.z);
-      if (p.off) { _mmArrow(p, isEnemy ? ENEMY_COL : FRIEND_COL); continue; }
-      const _col = isEnemy ? ENEMY_COL : FRIEND_COL;
-      ctx.strokeStyle = _col;
-      ctx.lineWidth = 1.2;
-      ctx.beginPath();
-      ctx.moveTo(p.x, p.y - 4.5); ctx.lineTo(p.x + 4.5, p.y);
-      ctx.lineTo(p.x, p.y + 4.5); ctx.lineTo(p.x - 4.5, p.y);
-      ctx.closePath();
-      ctx.stroke();
-      ctx.fillStyle = _col;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, 1.5, 0, Math.PI * 2);
-      ctx.fill();
+      _mmPilot(p, isEnemy ? ENEMY_COL : FRIEND_COL, p.off);
     }
   }
 
@@ -92073,16 +92133,24 @@ function _elKill(e) {
     }
     if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', e.position);
   } catch (_) {}
+  try {
+    if (_elAuthority() && typeof net !== 'undefined' && net && net.active && net.sendEvent && e.elId) {
+      net.sendEvent({ type: 'el_gone', i: e.elId | 0 });
+    }
+  } catch (_) {}
   _elDetach(e);
 }
 
-/** The visible hull for one spawn, or null when its proto has not landed yet. */
-function _elMesh(kind) {
+/** The visible hull for one spawn, or null when its proto has not landed yet.
+ *  (v47.54) `pick` (0..1) and `scl` are passed IN rather than rolled here, because the same hull has
+ *  to come out on every peer - see `_elNetSend`, which transmits both. */
+function _elMesh(kind, pick, scl) {
+  if (typeof pick !== 'number' || !isFinite(pick)) pick = Math.random();
   const holder = new THREE.Group();
   if (kind === 'traffic') {
     const pool = _LSS_EL.hoard;
     if (!pool || !pool.length) return null;
-    const cl = _elCloneRigged(pool[(Math.random() * pool.length) | 0]);
+    const cl = _elCloneRigged(pool[Math.min(pool.length - 1, (pick * pool.length) | 0)]);
     cl.traverse((o) => {
       if (!o.isMesh) return;
       o.castShadow = false;
@@ -92097,7 +92165,7 @@ function _elMesh(kind) {
       }
       o.material = one ? out[0] : out;
     });
-    const _k = 0.9 + Math.random() * 0.8;
+    const _k = (typeof scl === 'number' && scl > 0) ? scl : (0.9 + Math.random() * 0.8);
     cl.scale.multiplyScalar(_k);
     holder.add(cl);
     holder.userData.elScale = _k;   // (v46.77) the banner scales with the hull, like the hub's class scale
@@ -92119,7 +92187,7 @@ function _elMesh(kind) {
   }
   const keys = Object.keys(_LSS_EL.mon);
   if (!keys.length) return null;
-  const rec = _LSS_EL.mon[keys[(Math.random() * keys.length) | 0]];
+  const rec = _LSS_EL.mon[keys[Math.min(keys.length - 1, (pick * keys.length) | 0)]];
   const body = _elFit(_elCloneRigged(rec.scene), (typeof MONSTER_SIZE === 'number' ? MONSTER_SIZE : 520));
   holder.add(body);
   try {
@@ -92136,33 +92204,39 @@ function _elMesh(kind) {
   return holder;
 }
 
-function _elSpawn(kind) {
+function _elSpawn(kind, d) {
   const K = _EL_KIND[kind];
   const t = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
   if (!K || !_LSS_EL.group || !t) return null;
   const p = (typeof player !== 'undefined' && player && player.position) ? player.position
           : ((typeof camera !== 'undefined' && camera) ? camera.position : null);
   if (!p) return null;
-  const mesh = _elMesh(kind);
-  if (!mesh) return null;
+  const pick = d ? d.pick : Math.random();
+  const scl = d ? d.scl : (0.9 + Math.random() * 0.8);
+  const mesh = _elMesh(kind, pick, scl);
+  if (!mesh) return null;   // proto not landed yet; on a peer the next packet retries
 
   const a = Math.random() * Math.PI * 2;
   const r = K.ringIn + Math.random() * (K.ringOut - K.ringIn);
-  const x = p.x + Math.cos(a) * r, z = p.z + Math.sin(a) * r;
+  let x = p.x + Math.cos(a) * r, z = p.z + Math.sin(a) * r;
+  if (d) { x = d.x; z = d.z; }
   let gy = 0;
   try { const v = t.groundYWorld(x, z); if (isFinite(v)) gy = v; } catch (_) {}
-  const y = gy + K.altLo + Math.random() * (K.altHi - K.altLo);
+  let y = gy + K.altLo + Math.random() * (K.altHi - K.altLo);
+  if (d) y = d.y;
 
-  const head = Math.random() * Math.PI * 2;
-  const spd = K.spdLo + Math.random() * (K.spdHi - K.spdLo);
-  const hp = Math.round(K.hp * (0.8 + Math.random() * 0.4));
+  const head = d ? d.head : (Math.random() * Math.PI * 2);
+  const spd = d ? d.spd : (K.spdLo + Math.random() * (K.spdHi - K.spdLo));
+  const hp = d ? d.hp : Math.round(K.hp * (0.8 + Math.random() * 0.4));
+  const elId = d ? (d.id | 0) : (++_LSS_EL.n);
 
   mesh.position.set(x, y, z);
   _LSS_EL.group.add(mesh);
 
   const ent = {
     isEarthLife: true, earthKind: kind, alive: true,
-    id: 'earthlife_' + kind + '_' + (++_LSS_EL.n),
+    elId: elId, isProxy: !!d, elPick: pick, elScl: scl,   // (v47.54) the wire key + what it was built from
+    id: 'earthlife_' + kind + '_' + elId,
     position: new THREE.Vector3(x, y, z),
     velocity: new THREE.Vector3(Math.sin(head) * spd, 0, Math.cos(head) * spd),
     team: 9300, name: kind.toUpperCase(),
@@ -92177,6 +92251,14 @@ function _elSpawn(kind) {
     takeDamage(amount, attacker) {
       if (!this.alive || attacker === this) return 0;
       if (!(amount > 0)) return 0;
+      if (this.isProxy && attacker !== 'net') {
+        try {
+          if (typeof net !== 'undefined' && net && net.active && net.sendEvent) {
+            net.sendEvent({ type: 'el_dmg', i: this.elId | 0, d: Math.max(0, amount || 0) });
+          }
+        } catch (_) {}
+        return amount;   // report the hit so local impact FX read right
+      }
       const before = this.health;
       this.health = Math.max(0, this.health - amount);
       if (this.health <= 0) _elKill(this);
@@ -92188,13 +92270,74 @@ function _elSpawn(kind) {
   if (kind === 'traffic') {
     try {
       const _A = (typeof window !== 'undefined' && window.__ads) || {};
-      if (!(_A.banners === 0 || _A.on === 0) && (_LSS_EL.n % 3 === 1) && typeof _hcAttachBanner === 'function') {
-        _hcAttachBanner(mesh, _LSS_EL.n, mesh.userData.elScale || 1);
+      if (!(_A.banners === 0 || _A.on === 0) && (elId % 3 === 1) && typeof _hcAttachBanner === 'function') {
+        _hcAttachBanner(mesh, elId, mesh.userData.elScale || 1);
         ent.hasBanner = true;
       }
     } catch (e) { console.warn('[earth-life] banner skipped:', e); }
   }
   return ent;
+}
+
+function _elAuthority() {
+  try {
+    if (typeof net === 'undefined' || !net || !net.active) return true;
+    return (typeof amStasisOwner === 'function') ? !!amStasisOwner() : true;
+  } catch (_) { return true; }
+}
+const _EL_KINDS = ['traffic', 'carrier', 'monster'];
+function _elNetSend(dt) {
+  try {
+    if (!net || !net.active || !net.sendEvent) return;
+    if (!_elAuthority()) return;
+    if (!_LSS_EL.ents.length) return;
+    _LSS_EL._sendT = (_LSS_EL._sendT || 0) - (dt || 0.016);
+    if (_LSS_EL._sendT > 0) return;
+    _LSS_EL._sendT = 1 / (_LSS_EL.netHz || 4);
+    const rows = [];
+    for (const e of _LSS_EL.ents) {
+      if (!e || !e.position) continue;
+      const ki = _EL_KINDS.indexOf(e.earthKind);
+      if (ki < 0) continue;
+      rows.push([e.elId | 0, ki, Math.round((e.elPick || 0) * 1000), Math.round((e.elScl || 1) * 1000),
+                 Math.round(e.position.x), Math.round(e.position.y), Math.round(e.position.z),
+                 Math.round(((e.mesh && e.mesh.rotation.y) || 0) * 100),
+                 Math.round(e.health), e.alive ? 1 : 0]);
+    }
+    if (rows.length) net.sendEvent({ type: 'el_state', s: rows });
+  } catch (_) {}
+}
+function _elApplyState(rows) {
+  try {
+    if (!Array.isArray(rows) || _elAuthority()) return;
+    if (!_LSS_EL.on || !_LSS_EL.group) return;
+    const seen = new Set();
+    for (const r of rows) {
+      const id = r[0] | 0;
+      seen.add(id);
+      let e = null;
+      for (const q of _LSS_EL.ents) { if (q && q.elId === id) { e = q; break; } }
+      if (!e) {
+        if (!r[9]) continue;                       // a death for a ship we never met
+        const kind = _EL_KINDS[r[1] | 0];
+        if (!kind) continue;
+        e = _elSpawn(kind, { id: id, pick: (r[2] || 0) / 1000, scl: (r[3] || 1000) / 1000,
+                             x: r[4], y: r[5], z: r[6], head: (r[7] || 0) / 100,
+                             spd: 0, hp: r[8] });
+        if (!e) continue;                          // proto not landed yet - next packet retries
+      }
+      e._netPos = e._netPos || new THREE.Vector3();
+      e._netPos.set(r[4], r[5], r[6]);
+      e._netYaw = (r[7] || 0) / 100;
+      e.health = r[8];
+      if (!r[9] && e.alive) { try { _elKill(e); } catch (_) {} }
+    }
+    for (let q = _LSS_EL.ents.length - 1; q >= 0; q--) {
+      const e = _LSS_EL.ents[q];
+      if (!e || seen.has(e.elId)) continue;
+      _elDetach(e);                                // quietly: the authority retired it by distance
+    }
+  } catch (_) {}
 }
 
 function _lssEarthLifeTick(dt) {
@@ -92205,6 +92348,8 @@ function _lssEarthLifeTick(dt) {
           : ((typeof camera !== 'undefined' && camera) ? camera.position : null);
   if (!p) return;
   dt = Math.min(0.1, Math.max(0, dt || 0));
+  const _elAuth = _elAuthority();
+  try { _elNetSend(dt); } catch (_) {}   // (v47.54) self-gates on _elAuthority
 
   _LSS_EL.densT -= dt;
   if (_LSS_EL.densT <= 0) {
@@ -92245,6 +92390,22 @@ function _lssEarthLifeTick(dt) {
                      ', span ' + Math.round(_span) + ')');
         _elDetach(e); continue;
       }
+    }
+    if (e.isProxy && _elAuth) { e.isProxy = false; e._netPos = null; }
+    if (e.isProxy) {
+      if (e._netPos) {
+        const _d = e.position.distanceTo(e._netPos);
+        if (_d > 4000) e.position.copy(e._netPos);
+        else if (_d > 0.5) e.position.lerp(e._netPos, Math.min(1, dt * 8));
+      }
+      e._bob += dt * (e.earthKind === 'carrier' ? 0.25 : 0.7);
+      if (e.earthKind === 'monster') {
+        const _mx = e.mesh.userData.elMixer;
+        if (_mx) { try { _mx.update(dt); } catch (_) {} }   // the walk cycle is cosmetic, keep it local
+      }
+      e.mesh.position.copy(e.position);
+      if (typeof e._netYaw === 'number') e.mesh.rotation.y = e._netYaw;
+      continue;
     }
     const K = _EL_KIND[e.earthKind];
     if (e.earthKind === 'monster') {
@@ -92289,6 +92450,7 @@ function _lssEarthLifeTick(dt) {
     }
   }
 
+  if (!_elAuth) return;
   _LSS_EL.budget -= dt;
   if (_LSS_EL.budget > 0) return;
   const have = { traffic: 0, carrier: 0, monster: 0 };
@@ -92325,6 +92487,14 @@ try {
                 for (const e of _LSS_EL.ents) c[e.earthKind]++;
                 return { counts: c, density: Math.round(_LSS_EL.dens), total: _LSS_EL.ents.length }; },
       clear() { for (const e of _LSS_EL.ents.slice()) _elDetach(e); },
+      net() {
+        const rows = _LSS_EL.ents.map(e => ({ id: e.elId, k: e.earthKind, proxy: !!e.isProxy,
+                                              hp: Math.round(e.health),
+                                              x: Math.round(e.position.x), z: Math.round(e.position.z) }))
+                                 .sort((a, b) => a.id - b.id);
+        return { authority: (typeof _elAuthority === 'function') ? _elAuthority() : null,
+                 total: rows.length, proxies: rows.filter(r => r.proxy).length, ids: rows };
+      },
     };
   }
 } catch (_) {}
@@ -95446,22 +95616,48 @@ async function _lssGmapsBuildLevel(level) {
             const _n2 = Math.max(2, Math.floor(_byP2.length * 0.35));
             for (const q of _sp) q.team = null;                  // the middle stays neutral
             const _d3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
-            const _clump = (anchor) => _sp.slice().sort((a, b) => _d3(a, anchor) - _d3(b, anchor)).slice(0, _n2);
-            const _ea = _clump(_byP2[0]), _eb = _clump(_byP2[_byP2.length - 1]);
+            const _SEP = (typeof window !== 'undefined' && typeof window.__earthTeamSep === 'number'
+                          && window.__earthTeamSep > 0) ? window.__earthTeamSep : 3000;
+            const _CLR = (typeof window !== 'undefined' && typeof window.__earthTeamClump === 'number'
+                          && window.__earthTeamClump > 0) ? window.__earthTeamClump : 900;
+            let _anA = _byP2[0];   // an extreme, so both ends sit in open air rather than mid-cloud
+            let _anB = null, _bErr = Infinity;
+            for (const q of _sp) {
+              if (q === _anA) continue;
+              const _e = Math.abs(_d3(q, _anA) - _SEP);
+              if (_e < _bErr) { _bErr = _e; _anB = q; }
+            }
+            if (!_anB) _anB = _byP2[_byP2.length - 1];
+            const _clump = (anchor, taken) => {
+              const srt = _sp.slice().sort((a, b) => _d3(a, anchor) - _d3(b, anchor));
+              const out = [];
+              for (const q of srt) {
+                if (taken && taken.indexOf(q) >= 0) continue;          // the ends must stay disjoint
+                if (out.length >= _n2) break;
+                if (out.length >= 1 && _d3(q, anchor) > _CLR) break;
+                out.push(q);
+              }
+              return out;
+            };
+            const _ea = _clump(_anA, null), _eb = _clump(_anB, _ea);
             for (const q of _ea) q.team = 'A';
             for (const q of _eb) q.team = 'B';
             const _ctr2 = (arr) => { let x=0,y=0,z=0; for (const q of arr) { x+=q.x; y+=q.y; z+=q.z; }
                                      return { x:x/arr.length, y:y/arr.length, z:z/arr.length }; };
             const _c1 = _ctr2(_ea), _c2 = _ctr2(_eb);
+            const _cm = { x: (_c1.x + _c2.x) / 2, y: (_c1.y + _c2.y) / 2, z: (_c1.z + _c2.z) / 2 };
             game.sdfRoomData = [
               { id: 'spawn_a', team: 'A', side: 'A', x: _c1.x, y: _c1.y, z: _c1.z, r: 420 },
               { id: 'spawn_b', team: 'B', side: 'B', x: _c2.x, y: _c2.y, z: _c2.z, r: 420 },
+              { id: 'champion', champion: true, x: _cm.x, y: _cm.y, z: _cm.z, r: 420 },
             ];
             try {
               const _span = (arr) => { let m = 0; for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) { const d = _d3(arr[i], arr[j]); if (d > m) m = d; } return Math.round(m); };
               console.log('[lss-earth] team ends', _ea.length + '/' + _eb.length,
                           'apart', Math.round(Math.hypot(_c1.x - _c2.x, _c1.z - _c2.z)),
-                          '| spans', _span(_ea) + '/' + _span(_eb));
+                          '| spans', _span(_ea) + '/' + _span(_eb),
+                          '| champion at', Math.round(_cm.x), Math.round(_cm.y), Math.round(_cm.z),
+                          '=', Math.round(Math.hypot(_c1.x - _cm.x, _c1.z - _cm.z)), 'from each end');
             } catch (_) {}
           }
           try {

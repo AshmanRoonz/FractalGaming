@@ -7186,3 +7186,115 @@ mistake**: a list of ships filtered on a property that NetworkPlayers also have.
   client's own ship. Callable at the cinematic beat from either client; built because answering
   "where is my fleet" off a scoreboard (names, not metres) or a roster (lags, contains humans) had
   already produced four wrong diagnoses.
+
+
+### v47.50-47.53 - the seven pilots on the radar, the ends that were a diameter apart, and the objective at (0,0,0)
+
+Owner, after the v47.49 fleet fix: *"the ships were rotated in weird directions... oh well, they were
+all there"* / *"in the custom location, in elimination, we started far from each other"* /
+*"way too far apart, my bots don't know how to get to the battle"* / *"i think the 7 ships should get
+a special indication on the radar, enemy and friendly different color of the same shape... the diamond
+with the dot in it... but if they are off the map, it should go outside the circle so you know the
+direction"* / *"it has to be central to where the champion field will spawn"*.
+
+**Jump:** `_updateProxyBot` · `const _mmPilot` · `_rosterShip` · `[lss-earth] team ends` ·
+`function spawnChampionField`
+
+- **⭐⭐⭐ A PROXY NEVER REACHED THE WARMUP FACING RULE.** `update()` squares every bot up at the
+  enemy fleet during the 3-2-1 (v31.20) - but that branch lives *after*
+  `if (this.isProxy) { this._updateProxyBot(dt); return; }`, so **no proxy has ever run it**. A
+  proxy's heading comes only from `targetDir`, derived from the gap between where it was and where
+  the authority says it is; park it and that gap is whatever the last correction happened to be. On
+  the JOINER the entire fleet is proxies, so a perfectly formed line pointed in scattered directions.
+  `_updateProxyBot` now applies the same `_enemyFleetCentroid` rule - no byte on the wire.
+- **⭐⭐ ONE GLYPH FOR THE SEVEN SHIPS ON THE CARDS.** The diamond-with-a-dot is not new - v37.84 gave
+  it to connected HUMANS and left every bot a plain 3x3 square. Fine in an arena; useless on a Custom
+  Location, where the city's traffic and fleets are squares too and your wingman is indistinguishable
+  from a freighter. `_rosterShip` is set in `spawnBots` and carried on the roster wire (`rs`) so a
+  peer's proxies wear it too, and `_mmPilot` draws both humans and roster bots.
+  **⚠ Off-disc keeps the glyph** at radius 69.5 - outside the 68 clamp ring ordinary contacts share -
+  with a small outward chevron. A human leaving the radar used to degrade to the generic hostile
+  arrow, the opposite of what the marker is for. **MEASURED**: 124 px per friendly bot (a 3x3 square
+  is 36), and with the range forced down, mean radius **69.8**, span 65.4-74.4 inside the 74.5 rim.
+- **⭐⭐⭐ "AS FAR APART AS THIS LEVEL ALLOWS" IS NOT A SPAWN.** v47.30 split the ends along the
+  cloud's own diameter, which fixed *"they spawned right beside each other"* and overshot to
+  **8,241 u** - against 2,400 in an arena. Bots could not find the fight. Two failed attempts worth
+  keeping:
+  - **Aiming at a point in the middle does not work, because there is no middle.**
+    `tiles.spawnPoints()` validates against the buildings, so the open air is a RING around the drop,
+    not over its centre. Targets at centre +/- SEP/2 both snapped back to the rim, roughly opposite:
+    **still 8,091 u apart**. Pick end B as *the validated point whose distance from A is closest to
+    SEP* - only points that exist, and it hits the separation directly.
+  - **"Never fewer than 2" defeated the radius cap.** Taking the two nearest unconditionally before
+    applying the 900 u cap still logged `spans 2077/2059`. **One point is a perfectly good end**:
+    `getValidSpawnPoint(team, spread)` jitters every draw by 80 around it, which is tighter than any
+    pair of these points. **MEASURED after**: `team ends 1/1 apart 3480 | spans 0/0`, and all five
+    bots within **780-1,370 u** in play (before: 10,348 / 11,914 / 10,816).
+- **⭐⭐ THE CHAMPION FIELD WAS SPAWNING AT THE WORLD ORIGIN.** `spawnChampionField` takes the
+  `champion: true` room out of `sdfRoomData`, and failing that averages `game.levelSpheres` - which a
+  real-world level does not have. The gmaps split published only `spawn_a` / `spawn_b`, so neither
+  source existed and `cx,cy,cz` stayed **0,0,0**: the objective sat at the drop origin while both
+  fleets were out on the ring. Publishing the midpoint of the two ends makes it central by
+  construction - `champion at 229 733 5653 = 1740 from each end`.
+  **⚠ `y` is the mean of the two ends' altitudes**, which came from `tiles.spawnPoints()` and are
+  already above the roofline. Not the terrain height, and not a constant.
+- Knobs: `window.__earthTeamSep` (metres between the ends, default 3000) and
+  `window.__earthTeamClump` (max radius of one end, default 900).
+
+
+### v47.54-47.55 - Custom Location traffic joins the room
+
+Owner: *"are the traffic ships in custom location in sync in multiplayer?"* - they were not, in any
+sense, and the answer took one grep: **`isEarthLife` was written once at creation and never read
+again.** No authority, no wire, no proxy path. Compare `isHubTraffic`, which has ~14 call sites.
+
+**Jump:** `function _elAuthority` · `function _elNetSend` · `function _elApplyState` ·
+`function _elSpawn` · `window.__earthLife`
+
+- **What "not synced" actually meant.** Every attribute came from bare `Math.random()` - ring angle,
+  radius, altitude, heading, speed, HP, hull model, scale, whether it towed a banner. The spawn ring
+  is centred on **`player.position`**, so each peer seeded its own set around ITSELF and the two could
+  not coincide even with a shared seed. The population target came from locally-measured city density
+  and the drain retired the farthest from the LOCAL player. `takeDamage` decremented a local number
+  and `_elKill` detached locally. Two peers over one Tokyo flew through two different cities.
+- **⚠ AND BOTS HUNT THEM.** `Bot`'s target loop excludes `isHubTraffic` but NOT `isEarthLife`, and
+  these carry `team: 9300` (hostile to everyone) with a valid position. Owner had already reported the
+  symptom without either of us connecting it: *"a bot was just going around shooting city ships and
+  monsters"*. Before this fix that meant each client's bots chased phantoms the other could not see
+  and replayed `bot_fire` into empty air.
+- **⭐⭐⭐ MODELLED ON `_WILD`, NOT ON `_HC_TRAF` - and the difference is the whole design choice.**
+  The hub's freighters cost **zero bytes** because they fly a deterministic pad schedule: position is
+  a pure function of `(pad, slot, sharedClock)` via `_hcPadSched`, a receiver derives it, and only
+  ships that LEAVE that schedule are transmitted. That is only available because `city.pads` is a
+  fixed structure both sides build identically. Earth-life has no such structure - it is rolled at run
+  time with variable position, hull, scale and speed, which is exactly the case the `wild_state` note
+  says a `mon_*`-style fixed index cannot serve. So the row carries **construction arguments**
+  (`[elId, kindIdx, pick*1000, scale*1000, x, y, z, yaw*100, health, alive]`) and a peer can build a
+  ship it has never heard of - which is also why there is no late-joiner path: the next packet
+  reconciles everything.
+- **The pieces:** `_elAuthority()` = `amStasisOwner()` (the peer the champion field and the wildlife
+  already trust); `_elNetSend` at 4 Hz; `_elApplyState` builds what it has not seen, follows what it
+  has, reaps what stopped arriving; `_elSpawn(kind, d)` takes an optional descriptor off the wire and
+  every roll becomes the authority's value; `_elMesh(kind, pick, scl)` takes the hull choice and scale
+  as arguments so the same ship comes out everywhere; the banner is keyed on `elId`, not the local
+  counter.
+- **⚠ A PROXY DOES NOT OWN ITS HEALTH.** `takeDamage` on a proxy forwards `el_dmg` and returns the
+  amount (so local impact FX still read right) WITHOUT applying it. `'net'` is exempt - that is the
+  authority's own answer arriving. This is also what makes the split authorities safe: bots run on
+  `_botAuthority()` (the open-solo host) while traffic runs on `amStasisOwner()`, and **those are
+  routinely different peers** - measured here, the JOINER owned the traffic. A bot shooting a proxy
+  routes through the wire by construction.
+- **⚠ A KILL IS AN EVENT, A RETIRE IS NOT.** The authority detaches on death immediately, so the dead
+  row never reaches the feed and a peer would only see it stop arriving - reaped in silence, no
+  explosion. `_elKill` announces `el_gone`. `_elDetach` alone stays quiet, which is correct: that is
+  the distance retire, and nobody should hear a bang for a ship that flew out of range.
+- **⚠ AUTHORITY MIGRATION.** `amStasisOwner()` moves when the owner leaves, and the new owner's whole
+  set is still flagged `isProxy` - which the follow branch would keep chasing against a `_netPos`
+  nobody is sending. The city's traffic would simply stop. The tick adopts them (`isProxy = false`).
+- **VERIFIED, two clients, one Tokyo room.** Authority `proxies: 0` / peer `proxies: 25`; **identical
+  ids including the gaps** (2, 3, 7, 8, 9, 10 - 4/5/6 already retired), identical kinds, identical HP
+  (897/1001/1079/1009/944/863), positions 100-200 u apart at 230-540 u/s on a 4 Hz feed. A peer-side
+  hit: local health unchanged at 897, then **647 on BOTH** sides. A peer-side killshot: id 2 gone on
+  both, rosters still identical afterwards (`[8,10,16,17,20]`, 25 each).
+- `window.__earthLife.net()` - `{authority, total, proxies, ids[]}`. **Compare `ids`, not counts**:
+  the counts agreed perfectly back when the two sets were completely disjoint.
