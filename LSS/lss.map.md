@@ -1,9 +1,16 @@
-# `lss.map.md` — architecture & navigation map for `index.html`
+# `lss.map.md` — architecture & navigation map for `index-working.html`
 
-> Companion map to the single-file WebGL game `index.html` (build **v36.56**).
-> The whole game is **one classic `<script>`** defining `function _bootLSS()` spanning **lines 3036–70463** — one giant shared lexical scope, no modules.
+> Companion map to the WebGL game in `LSS/`. Current as of build **v47.26**.
+>
+> ⚠ **This maps `index-working.html`, the commented SOURCE you edit** — NOT `index.html`, which since the dual-file split is a ~6.7k-line shell that loads the generated `lss.js`. Run `python strip.py` from the repo root to regenerate; see [`CLAUDE.md`](CLAUDE.md).
+>
+> The game is **one classic `<script>`** defining `function _bootLSS()` — one giant shared lexical scope, no modules. It spans essentially the whole file (from ~L6.8k to the end of ~143k source lines; 4 → ~96k in the generated `lss.js`), which is why almost nothing is reachable from the console: use the `window.__*` probes instead.
+>
+> ⚠ **These figures drift, and this header was stale for a long time** — it claimed build v36.56 and "lines 3036–70463" well after both were wrong, and still described the pre-split single file. **Re-derive rather than trust it:** `grep -n 'function _bootLSS' index-working.html`, `wc -l`, and `grep LSS_BUILD`. The same applies to every `~L#####` hint below — jump by the `Jump:` anchor, which never drifts.
 
 ## How to use this file
+
+- **New here? Read [`CLAUDE.md`](CLAUDE.md) first.** It is the short version: how Ashman and you actually work together, the two-file build (`index-working.html` -> `strip.py`), the rules that bite on the FIRST action (UTF-8, TDZ, `LSS_BUILD`, backups), and how to run and measure. **This file is the long version** - the architecture map and the trap log. CLAUDE.md loads automatically; this one you open.
 
 - **Jump by anchor, not by line number.** Each entry has a **`Jump:`** string — a unique declaration you can Ctrl-F / grep for (`function fireWeapon`, `class Bot`, `const audio`). The `~L#####` line hints are approximate and **drift** as the file grows; the anchor never does.
 - **To find a subsystem:** scan the Section Map below (it's in file order, grouped into PARTs), grab the `Jump:` anchor, search for it in `index.html`.
