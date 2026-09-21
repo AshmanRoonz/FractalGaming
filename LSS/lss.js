@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.01";
+const LSS_BUILD = "47.04";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -15479,7 +15479,7 @@ function _waterRefractBind(rnd, scn, cam) {
       try { window.__waterCopyAllocs = (window.__waterCopyAllocs || 0) + 1; } catch (_) {}
     }
     if (window.__f8seg) window.__f8seg('refcopy');   // (v40.59) the blit on its own - see the v40.16 note above
-    rnd.copyFramebufferToTexture(_wrZero, postFX.rtRefractCopy);
+    rnd.copyFramebufferToTexture(postFX.rtRefractCopy);
     if (window.__f8seg) window.__f8seg('scene');   // (v40.59)
     u.uSceneTex.value = postFX.rtRefractCopy;
     const _cw = postFX.rtRefractCopy.image.width, _ch = postFX.rtRefractCopy.image.height;
@@ -16183,10 +16183,33 @@ function sdfSmin(a,b,k) {
 // open straight through any mountain pinch. Pure function of (x,z) + the shared
 // terrain params, so every client renders the same draw (no Math.random).
 function _stHash2(x,z){const h=Math.sin(x*127.1+z*311.7)*43758.5453;return h-Math.floor(h);}
+// (v47.02) _stNoise2 asks for the SAME 2x2 integer lattice corners over and over: a row scan shares
+// two of four corners with the previous sample, and _stFbm/_stRidged re-enter at every octave. Only
+// _stNoise2 calls this - every other _stHash2 caller (the shell jitter, the volcano/karst cell loops,
+// _stPillarAt, the city, the sky) passes NON-integer args and keeps calling _stHash2 unchanged.
+// WHY IT MATTERS: measured 5,705 ms of self time in ONE hub load - 43% of all main-thread JS - and a
+// free-lookup control run takes the terrain-evaluation loop 673 ms -> 204 ms, i.e. the sin IS ~70% of
+// _stGroundYCarved. ~200 _stHash2 calls per _stGroundYCarved, 180 of them from here.
+// VALUE-PRESERVING BY CONSTRUCTION: on a miss it computes the identical expression. Same doubles, same
+// terrain, same collision, same seeded worlds. _hbHash still changes (the family list grows), so the
+// first hub launch after this re-bakes once and then hits the IndexedDB cache.
+// The state lives on the function OBJECT, not a module const, so there is no temporal dead zone
+// (lss-tdz-const-trap / v39.02) and f.toString() carries everything the worker copies need.
+// 8192 entries = 128 KB/thread; 4096 measured ~4% slower, 2048 ~8% slower.
+function _stHash2i(xi,zi){
+  var S=_stHash2i._s;
+  if(!S){S=_stHash2i._s={kx:new Int32Array(8192).fill(0x7fffffff),kz:new Int32Array(8192).fill(0x7fffffff),v:new Float64Array(8192)};}
+  const k=((Math.imul(xi,374761393)^Math.imul(zi,668265263))>>>15)&8191;
+  const kx=S.kx;
+  if(kx[k]===xi&&S.kz[k]===zi) return S.v[k];
+  const h=Math.sin(xi*127.1+zi*311.7)*43758.5453,v=h-Math.floor(h);
+  kx[k]=xi;S.kz[k]=zi;S.v[k]=v;
+  return v;
+}
 function _stNoise2(x,z){
   const xi=Math.floor(x),zi=Math.floor(z),xf=x-xi,zf=z-zi;
   const u=xf*xf*(3-2*xf),v=zf*zf*(3-2*zf);
-  const a=_stHash2(xi,zi),b=_stHash2(xi+1,zi),c=_stHash2(xi,zi+1),d=_stHash2(xi+1,zi+1);
+  const a=_stHash2i(xi,zi),b=_stHash2i(xi+1,zi),c=_stHash2i(xi,zi+1),d=_stHash2i(xi+1,zi+1);
   const ab=a+(b-a)*u,cd=c+(d-c)*u;return (ab+(cd-ab)*v)*2-1;
 }
 // (v33.04) fractal-sum value noise (octaves of _stNoise2), -1..1 ; the hub height
@@ -16602,10 +16625,20 @@ function sdfSmin(a,b,k) {
 }
 
 function _stHash2(x,z){const h=Math.sin(x*127.1+z*311.7)*43758.5453;return h-Math.floor(h);}
+function _stHash2i(xi,zi){
+  var S=_stHash2i._s;
+  if(!S){S=_stHash2i._s={kx:new Int32Array(8192).fill(0x7fffffff),kz:new Int32Array(8192).fill(0x7fffffff),v:new Float64Array(8192)};}
+  const k=((Math.imul(xi,374761393)^Math.imul(zi,668265263))>>>15)&8191;
+  const kx=S.kx;
+  if(kx[k]===xi&&S.kz[k]===zi) return S.v[k];
+  const h=Math.sin(xi*127.1+zi*311.7)*43758.5453,v=h-Math.floor(h);
+  kx[k]=xi;S.kz[k]=zi;S.v[k]=v;
+  return v;
+}
 function _stNoise2(x,z){
   const xi=Math.floor(x),zi=Math.floor(z),xf=x-xi,zf=z-zi;
   const u=xf*xf*(3-2*xf),v=zf*zf*(3-2*zf);
-  const a=_stHash2(xi,zi),b=_stHash2(xi+1,zi),c=_stHash2(xi,zi+1),d=_stHash2(xi+1,zi+1);
+  const a=_stHash2i(xi,zi),b=_stHash2i(xi+1,zi),c=_stHash2i(xi,zi+1),d=_stHash2i(xi+1,zi+1);
   const ab=a+(b-a)*u,cd=c+(d-c)*u;return (ab+(cd-ab)*v)*2-1;
 }
 function _stFbm(x,z,oct,freq,seed){let s=0,a=0.5,f=freq,n=0;for(let o=0;o<oct;o++){s+=a*_stNoise2(x*f+seed*19.3,z*f+seed*7.1);n+=a;f*=2.0;a*=0.5;}return s/n;}
@@ -31813,7 +31846,7 @@ function _hbFarSpec() {
   return out;
 }
 function _hbFamily() {
-  return [sdSphere, sdCylinder, sdfSmin, _stHash2, _stNoise2, _stFbm, _stRidged, _stGroundY, _stCeilY, _stSmooth,
+  return [sdSphere, sdCylinder, sdfSmin, _stHash2, _stHash2i, _stNoise2, _stFbm, _stRidged, _stGroundY, _stCeilY, _stSmooth,
           _stRouteAt, _stCarveOpenness, _stGroundYCarvedBase, _stCeilYCarvedBase, _stPillarAt, _stGroundYCarved, _stCeilYCarved];
 }
 function _hbGameBits() {
@@ -49394,17 +49427,16 @@ function _warmRealCombatFXInner(_fxDefer) {
     try { scene.traverse(o => { if (o.isMesh && !_meshBefore.has(o)) o.frustumCulled = false; }); } catch (_) {}
     W(() => {
       if (renderer.xr && renderer.xr.isPresenting) { renderer.compile(scene, camera); return; }
-      const _prevTM = renderer.toneMapping;
-      const _NO = (typeof THREE !== 'undefined' && THREE.NoToneMapping !== undefined) ? THREE.NoToneMapping : 0;
-      const _drawPasses = () => {
-        try { renderer.toneMapping = _NO; renderer.render(scene, camera); } catch (_) {}
-        try { renderer.toneMapping = _prevTM; } catch (_) {}
-        try { renderer.render(scene, camera); } catch (_) {}
-      };
-      try { renderer.toneMapping = _NO; renderer.compile(scene, camera); } catch (_) {}
-      try { renderer.toneMapping = _prevTM; } catch (_) {}
-      try { renderer.compile(scene, camera); } catch (_) {}
-      if (_fxDefer) { _fxFinish = _drawPasses; } else { _drawPasses(); }
+      try {
+        if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
+          renderer.setRenderTarget(postFX.rtScene);
+          renderer.compile(scene, camera);
+          renderer.render(scene, camera);
+          renderer.setRenderTarget(null);
+        } else {
+          renderer.compile(scene, camera);   // belt only: postFX.rtScene is module-scope and always set
+        }
+      } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
       try {   // (v40.38) name the programs this warm created, by a material that uses each
         const _newIds = new Set();
         for (const pw of (renderer.info.programs || [])) if (pw.id >= _fxNp0) _newIds.add(pw.id);
@@ -49428,18 +49460,10 @@ function _warmRealCombatFXInner(_fxDefer) {
         window.__fxWarmProgs = Array.from(_named.entries()).map((e) => 'p' + e[0] + ' ' + e[1]).slice(0, 24);
         if (_newIds.size > _named.size) window.__fxWarmProgs.push('+' + (_newIds.size - _named.size) + ' unnamed');
       } catch (_) {}
-      try {
-        if (typeof postFX !== 'undefined' && postFX && postFX.rtScene) {
-          renderer.setRenderTarget(postFX.rtScene);
-          renderer.compile(scene, camera);
-          renderer.render(scene, camera);
-          renderer.setRenderTarget(null);
-        }
-      } catch (_) { try { renderer.setRenderTarget(null); } catch (__) {} }
     });
     W(() => { if (_mwg && _mwg.parent) scene.remove(_mwg); });
     if (_fxDefer && _fxFinish) return _fxFinish;   // (v40.69) the caller draws, after it has drained
-    W(() => { if (_lzg && _lzg.parent) { scene.remove(_lzg); _lzg.traverse((o) => { try { if (o.isMesh && o.material && o.material.dispose) o.material.dispose(); } catch (_) {} }); } });   // (v40.45) the laser stand-ins go with the pins
+    W(() => { if (_lzg && _lzg.parent) { scene.remove(_lzg); _lzg.traverse((o) => { try { if (o.isMesh && o.material) { if (typeof _lssRetainMat === 'function') _lssRetainMat(o.material); else if (o.material.dispose) o.material.dispose(); } } catch (_) {} }); } });
   } catch (_) {}
 }
 
@@ -49968,10 +49992,8 @@ async function _prebakeWorldForLaunch() {
     _pbSub('compiling effects');
     let _fxFin = null;
     try { if (typeof _warmRealCombatFX === 'function') _fxFin = _warmRealCombatFX(true); } catch (_) {}
-    if (typeof _fxFin === 'function') {
-      try { await _drainProgramLinks(6000, rep, 'drainFx0'); } catch (_) {}
-      try { _fxFin(); } catch (_) {}
-    }
+    try { await _drainProgramLinks(6000, rep, 'drainFx0'); } catch (_) {}
+    if (typeof _fxFin === 'function') { try { _fxFin(); } catch (_) {} }
     rep.ms.fx = Math.round(_pbNow() - _tC);
     await _warmupYield();
 
@@ -91039,6 +91061,24 @@ try {
       ? function (x, z) { try { return _stGroundYCarved(x, z, game.sandwichTerrain); } catch (_) { return NaN; } } : null,
   };
 } catch (_) {}
+window.__demReport = function __demReport() {
+  const out = { instances: 0, tiles: 0, missing: 0, ms: { net: 0, decode: 0, fill: 0, hist: 0, wet: 0, close: 0, blur: 0 }, per: [] };
+  try {
+    for (const t of (window.__leTiles || [])) {
+      if (!t || !t.stats) continue;
+      out.instances++;
+      out.tiles += (t.stats.demTiles || 0);
+      out.missing += (t.stats.demMissing || 0);
+      const m = t.stats.demMs || {};
+      for (const k in out.ms) out.ms[k] += (m[k] || 0);
+      if (t.stats.demMs) out.per.push({ tiles: t.stats.demTiles || 0, ms: Object.assign({}, m) });
+    }
+    out.cpuMs = out.ms.decode + out.ms.fill + out.ms.hist + out.ms.wet;
+    out.wetSplit = { close: out.ms.close, blur: out.ms.blur, rest: out.ms.wet - out.ms.close - out.ms.blur };
+    out.totalMs = out.cpuMs + out.ms.net;
+  } catch (e) { out.error = String(e); }
+  return out;
+};
 window.lssPerfSnapshot = function lssPerfSnapshot() {
   const bcs = (typeof billboardCloudSystem !== 'undefined') ? billboardCloudSystem : null;
   let bcsActive = 0;
@@ -91955,6 +91995,7 @@ class LSSEarthTiles {
     this._adPanels = [];
     this.ready = null;
     this.stats = { buildings: 0, demTiles: 0, imgTiles: 0, ads: 0, ms: 0 };
+    try { (window.__leTiles || (window.__leTiles = [])).push(this); if (window.__leTiles.length > 24) window.__leTiles.shift(); } catch (_) {}
   }
 
   addEventListener(type, cb) { (this._listeners[type] || (this._listeners[type] = [])).push(cb); }
@@ -92320,11 +92361,16 @@ class LSSEarthTiles {
       urls.push(this.demUrl.replace('{z}', z).replace('{x}', x0 + i).replace('{y}', y0 + j));
     }
     this._progress('terrain ring ' + k + ': ' + urls.length + ' DEM tiles @ z' + z, 0);
+    const _T0 = () => ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now());
+    const _TM = (key, t0) => { try { const s = this.stats; const m = (s.demMs || (s.demMs = {})); m[key] = Math.round((m[key] || 0) + (_T0() - t0)); } catch (_) {} };
+    const _tNet = _T0();
     const imgs = await _leLoadImagesRetry(urls, 8, (d, t) =>
       this._progress('terrain ring ' + k + ' ' + d + '/' + t, d / t), this._abort.signal, 3);
+    _TM('net', _tNet);
     if (this._disposed) return null;
 
     const sl = _leSlicer();
+    const _tDec = _T0();
     const w = n * 256, h = n * 256;
     const heights = new Float32Array(w * h);
     const valid = new Uint8Array(w * h);
@@ -92349,9 +92395,11 @@ class LSSEarthTiles {
         valid.fill(1, row, row + 256);
       }
     }
+    _TM('decode', _tDec);
     if (got === 0) return null;
     this.stats.demTiles = (this.stats.demTiles || 0) + got;
     this.stats.demMissing = (this.stats.demMissing || 0) + (n * n - got);
+    const _tFill = _T0();
     if (got < n * n) {
       const fill = new Float32Array(w * h), cnt = new Uint8Array(w * h);
       for (let y = 0; y < h; y++) {
@@ -92389,13 +92437,34 @@ class LSSEarthTiles {
         + (orphan ? (', ' + orphan + ' with no neighbour at all') : ''));
     }
 
+    _TM('fill', _tFill);
+    const _tHist = _T0();
     const hist = new Map();
     let nReal = 0;
+    let _kMin = Infinity, _kMax = -Infinity;
     for (let i = 0; i < heights.length; i++) {
       if ((i & 0x3FFF) === 0 && sl.due()) { await sl.yield(); if (this._disposed) return null; }
       if (!valid[i]) continue;
       nReal++;
-      hist.set(heights[i], (hist.get(heights[i]) || 0) + 1);
+      const k = Math.round((heights[i] + 32768) * 256);
+      if (k < _kMin) _kMin = k;
+      if (k > _kMax) _kMax = k;
+    }
+    const _kSpan = (nReal > 0 && _kMax >= _kMin) ? (_kMax - _kMin + 1) : 0;
+    if (_kSpan > 0 && _kSpan <= 4194304) {
+      const _kCnt = new Int32Array(_kSpan);
+      for (let i = 0; i < heights.length; i++) {
+        if ((i & 0x3FFF) === 0 && sl.due()) { await sl.yield(); if (this._disposed) return null; }
+        if (!valid[i]) continue;
+        _kCnt[Math.round((heights[i] + 32768) * 256) - _kMin]++;
+      }
+      for (let j = 0; j < _kSpan; j++) if (_kCnt[j]) hist.set((j + _kMin) / 256 - 32768, _kCnt[j]);
+    } else {
+      for (let i = 0; i < heights.length; i++) {
+        if ((i & 0x3FFF) === 0 && sl.due()) { await sl.yield(); if (this._disposed) return null; }
+        if (!valid[i]) continue;
+        hist.set(heights[i], (hist.get(heights[i]) || 0) + 1);
+      }
     }
     if (nReal === 0) nReal = heights.length;
     let domV = 0, domC = 0;
@@ -92405,6 +92474,8 @@ class LSSEarthTiles {
       if (typeof this.forceWaterLevel === 'number') level = this.forceWaterLevel;
       else if (domC >= nReal * ((this.water || !(typeof window !== 'undefined' && window.__earthRivers)) ? 0.01 : 0.0012)) level = domV;
     }
+    _TM('hist', _tHist);
+    const _tWet = _T0();
     if (level !== null && level !== undefined) {
       const levels = new Set([level]);
       for (const [v, c] of hist) {
@@ -92473,6 +92544,7 @@ class LSSEarthTiles {
           }
           this.stats.wetFlooded = (this.stats.wetFlooded || 0) + (qt - seedN);
         }
+        const _tClose = _T0();
         {
           const R = (typeof window !== 'undefined' && window.__earthWaterClose != null) ? (+window.__earthWaterClose | 0) : 8;
           if (R > 0) {
@@ -92502,30 +92574,58 @@ class LSSEarthTiles {
             this.stats.wetClosed = (this.stats.wetClosed || 0) + closed;
           }
         }
+        _TM('close', _tClose);
+        const _tBlur = _T0();
         let amt = new Float32Array(w * h);
         for (let i = 0; i < wet.length; i++) amt[i] = wet[i];
         const tmp = new Float32Array(w * h);
         const R = 3;
+        const _n2c = 2 * R + 1;
         for (let pass = 0; pass < 2; pass++) {
           for (let y = 0; y < h; y++) { if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
-          for (let x = 0; x < w; x++) {
+          const _row = y * w, _xLo = Math.min(R, w), _xHi = Math.max(R, w - R);
+          for (let x = 0; x < _xLo; x++) {
             let sum = 0, n2 = 0;
             for (let q = -R; q <= R; q++) {
               const xx = x + q; if (xx < 0 || xx >= w) continue;
-              sum += amt[y * w + xx]; n2++;
+              sum += amt[_row + xx]; n2++;
             }
-            tmp[y * w + x] = sum / n2;
-          } }
-          for (let y = 0; y < h; y++) { if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
-          for (let x = 0; x < w; x++) {
+            tmp[_row + x] = sum / n2;
+          }
+          for (let x = _xLo; x < _xHi; x++) {
+            const b = _row + x; let sum = 0;
+            for (let q = -R; q <= R; q++) sum += amt[b + q];
+            tmp[b] = sum / _n2c;
+          }
+          for (let x = _xHi; x < w; x++) {
             let sum = 0, n2 = 0;
             for (let q = -R; q <= R; q++) {
-              const yy = y + q; if (yy < 0 || yy >= h) continue;
-              sum += tmp[yy * w + x]; n2++;
+              const xx = x + q; if (xx < 0 || xx >= w) continue;
+              sum += amt[_row + xx]; n2++;
             }
-            amt[y * w + x] = sum / n2;
+            tmp[_row + x] = sum / n2;
+          } }
+          const _yLo = Math.min(R, h), _yHi = Math.max(R, h - R);
+          for (let y = 0; y < h; y++) { if (sl.due()) { await sl.yield(); if (this._disposed) return null; }
+          const _row = y * w, _interior = (y >= _yLo && y < _yHi);
+          if (_interior) {
+            for (let x = 0; x < w; x++) {
+              const b = _row + x; let sum = 0;
+              for (let q = -R; q <= R; q++) sum += tmp[b + q * w];
+              amt[b] = sum / _n2c;
+            }
+          } else {
+            for (let x = 0; x < w; x++) {
+              let sum = 0, n2 = 0;
+              for (let q = -R; q <= R; q++) {
+                const yy = y + q; if (yy < 0 || yy >= h) continue;
+                sum += tmp[yy * w + x]; n2++;
+              }
+              amt[_row + x] = sum / n2;
+            }
           } }
         }
+        _TM('blur', _tBlur);
         const D = this.seaDepth;
         const surface = (typeof this.forceWaterLevel === 'number') ? this.forceWaterLevel : level;
         for (let i = 0; i < wet.length; i++) {
@@ -92566,6 +92666,7 @@ class LSSEarthTiles {
     const nLat = _leTileYToLat(y0, z), sLat = _leTileYToLat(y0 + n, z);
     const wLng = _leTileXToLng(x0, z), eLng = _leTileXToLng(x0 + n, z);
     const nw = this.project(nLat, wLng), se = this.project(sLat, eLng);
+    _TM('wet', _tWet);
     return { heights, w, h, x0, y0, z, n, X0: nw.x, X1: se.x, Z0: nw.z, Z1: se.z,
              img: null, tex: null };
   }
