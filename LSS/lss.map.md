@@ -7298,3 +7298,36 @@ again.** No authority, no wire, no proxy path. Compare `isHubTraffic`, which has
   both, rosters still identical afterwards (`[8,10,16,17,20]`, 25 each).
 - `window.__earthLife.net()` - `{authority, total, proxies, ids[]}`. **Compare `ids`, not counts**:
   the counts agreed perfectly back when the two sets were completely disjoint.
+
+
+### v47.56 - our own ship turning while the camera pans (the bearing/euler mirror)
+
+Owner: *"in elimination, my ship rotates 90 degrees as the camera is panning around... my ship
+shouldn't rotate at all in the cinematic or after"*, then *"it happened in exhibition, as well"*.
+
+**Jump:** `own ship: fwd` (the log) · `_cineMQ` · `function _lssUpdateSpectatorCinematic`
+
+- **THE PAN IS NOT DOING IT - THE ARRIVAL BLEND IS.** Over the final 1.4 s the update slerps our own
+  mesh from its lineup quaternion to `_cineMQ`, the pose built from `player.euler` (v36.76: *"our own
+  ship's lineup mesh flies home to its restored pose on the same ease"*). That is deliberate, and it
+  is a no-op only while the two describe the same heading. The commit's
+  `s.ent.euler.y = Math.atan2(fwdX, -fwdZ)` guaranteed they did not.
+- **⭐⭐⭐ `atan2(f.x, -f.z)` IS A COMPASS BEARING, AND `euler.y` IS ITS NEGATIVE.** That expression is
+  what `_hlCompass` and the radar use to turn a forward vector into a bearing (0 = north = -Z,
+  90 = east = +X). But a yaw of `y` points the camera at `(-sin y, 0, -cos y)`, whose bearing is
+  `-y`. So the ship was handed a MIRRORED heading. **This is a general trap in this file** - the two
+  conventions look identical and differ by a sign.
+- **⚠ WHY IT LOOKED MAP-SPECIFIC.** The mirror is invisible when the lineup runs straight down
+  +/-Z (`fwdX = 0`), which is every arena whose two spawn rooms sit north-south - so it hid in the
+  maps that get tested most and showed up in exhibition and Custom Location, where the rooms sit at
+  arbitrary bearings. The error is a pure function of the lineup direction, which is also why the
+  owner read it as "90 degrees": **MEASURED at fwd (-0.87, -0.49) it is 121.0 deg.**
+- **⭐⭐ THE SIGN IS NOT THE FIX, IT IS ONLY WHY THE DELTA WAS THAT SIZE.** The fix is to stop stating
+  the same pose twice: derive the player's lineup quaternion FROM the gameplay euler using the rig's
+  own convention (camera quat, then a local Y-flip - the exact expression `_cineMQ` is built with).
+  The blend then has nothing to close BY CONSTRUCTION, whatever the heading formula later becomes,
+  and the two can no longer drift apart.
+- **The log is the test.** `[cinematic] own ship: fwd X Z | blend would rotate it A deg with the old
+  yaw, B deg with the new` - B must be 0. B = 0 also proves the derived quaternion equals the row's
+  shared lineup quaternion, i.e. the player is still in formation with the wingmen rather than merely
+  not rotating.

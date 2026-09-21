@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.55";
+const LSS_BUILD = "47.56";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -89703,7 +89703,44 @@ function _lssStartSpectatorCinematic() {
     // Face the way the line faces. The player steers by `euler`; a bot's mesh keeps whatever
     // quaternion it holds until it moves (`mesh.lookAt` only runs at speed > 1), so the slot
     // orientation survives on its own.
-    if (s.isPlayer && s.ent.euler) s.ent.euler.y = Math.atan2(fwdX, -fwdZ);
+    // ⭐⭐⭐ (v47.56) OUR OWN SHIP MUST NOT TURN. Owner: "in elimination, my ship rotates 90 degrees
+    // as the camera is panning around... my ship shouldn't rotate at all in the cinematic or after".
+    // THE PAN IS NOT DOING IT - the arrival blend is. Over the final 1.4 s `_lssUpdateSpectatorCinematic`
+    // slerps our own mesh from its lineup quaternion to `_cineMQ`, the pose derived from
+    // `player.euler` (see the v36.76 note: "our own ship's lineup mesh flies home to its restored
+    // pose on the same ease"). That is deliberate, and it is a NO-OP only while the two describe the
+    // same heading. This line made sure they did not.
+    // `atan2(f.x, -f.z)` is the COMPASS BEARING formula - it is what `_hlCompass` and the radar use
+    // to turn a forward vector into a bearing (0 = north = -Z, 90 = east = +X). But `euler.y` is the
+    // NEGATIVE of that bearing: a yaw of y points the camera at (-sin y, 0, -cos y), whose bearing is
+    // -y. So the ship was handed a mirrored heading. Facing straight down +/-Z the mirror is
+    // invisible (fwdX = 0, which is every arena the lineup happens to run north-south) and on a
+    // diagonal it is exactly the 90 degrees the owner saw.
+    // ⚠ AND THE SIGN IS NOT THE REAL FIX - it is the reason the delta was 90 rather than something
+    //   else. The real fix is to stop stating the same pose twice: derive the lineup quaternion FROM
+    //   the gameplay euler, using the rig's own convention (camera quat, then a local Y-flip - the
+    //   exact expression `_cineMQ` is built with). Then the blend has nothing to close BY
+    //   CONSTRUCTION, whatever the heading formula says, and a future change to one cannot desync
+    //   the other. The logged delta is what the ship would have rotated; expect 0.
+    if (s.isPlayer && s.ent.euler) {
+      const _yOld = Math.atan2(fwdX, -fwdZ);       // what this line used to write
+      s.ent.euler.y = -_yOld;                       // = atan2(-fwdX, -fwdZ)
+      _cineQ.setFromEuler(s.ent.euler);
+      const _lineQ = s.quat;                        // the row's pose, shared with every teammate
+      const _ownQ = new THREE.Quaternion().copy(_cineQ).multiply(_cineFlipY);
+      try {
+        const _delta = (a, b) => {
+          const d = a.clone().invert().multiply(b);
+          return 2 * Math.acos(Math.min(1, Math.abs(d.w))) * 180 / Math.PI;
+        };
+        const _q2 = new THREE.Quaternion().setFromEuler(
+          new THREE.Euler(s.ent.euler.x, _yOld, s.ent.euler.z, s.ent.euler.order)).multiply(_cineFlipY);
+        console.log('[cinematic] own ship: fwd', fwdX.toFixed(2), fwdZ.toFixed(2),
+                    '| blend would rotate it', _delta(_lineQ, _q2).toFixed(1),
+                    'deg with the old yaw,', _delta(_lineQ, _ownQ).toFixed(1), 'deg with the new');
+      } catch (_) {}
+      s.quat = _ownQ;
+    }
     // The restore now has nothing to undo.
     s.origPos.set(s.pos.x, s.pos.y, s.pos.z);
     s.origQuat.copy(s.quat);

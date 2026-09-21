@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.55";
+const LSS_BUILD = "47.56";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -56441,7 +56441,25 @@ function _lssStartSpectatorCinematic() {
     if (!_clear) { s.pos.x = s.origPos.x; s.pos.y = s.origPos.y; s.pos.z = s.origPos.z; s.quat = s.origQuat.clone(); _cmtSkip++; continue; }
     s.ent.position.set(s.pos.x, s.pos.y, s.pos.z);
     if (s.ent.velocity) s.ent.velocity.set(0, 0, 0);
-    if (s.isPlayer && s.ent.euler) s.ent.euler.y = Math.atan2(fwdX, -fwdZ);
+    if (s.isPlayer && s.ent.euler) {
+      const _yOld = Math.atan2(fwdX, -fwdZ);       // what this line used to write
+      s.ent.euler.y = -_yOld;                       // = atan2(-fwdX, -fwdZ)
+      _cineQ.setFromEuler(s.ent.euler);
+      const _lineQ = s.quat;                        // the row's pose, shared with every teammate
+      const _ownQ = new THREE.Quaternion().copy(_cineQ).multiply(_cineFlipY);
+      try {
+        const _delta = (a, b) => {
+          const d = a.clone().invert().multiply(b);
+          return 2 * Math.acos(Math.min(1, Math.abs(d.w))) * 180 / Math.PI;
+        };
+        const _q2 = new THREE.Quaternion().setFromEuler(
+          new THREE.Euler(s.ent.euler.x, _yOld, s.ent.euler.z, s.ent.euler.order)).multiply(_cineFlipY);
+        console.log('[cinematic] own ship: fwd', fwdX.toFixed(2), fwdZ.toFixed(2),
+                    '| blend would rotate it', _delta(_lineQ, _q2).toFixed(1),
+                    'deg with the old yaw,', _delta(_lineQ, _ownQ).toFixed(1), 'deg with the new');
+      } catch (_) {}
+      s.quat = _ownQ;
+    }
     s.origPos.set(s.pos.x, s.pos.y, s.pos.z);
     s.origQuat.copy(s.quat);
     _cmtOk++;
