@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.26";
+const LSS_BUILD = "47.28";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -6078,7 +6078,7 @@ function scheduleLaunch(launchAt) {
     game._launchCommitted = true;   // (v45.05) the room is going: committed
     const _cdAt = ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now())
                   + _lssCineWindowMs();
-    _lssRunCinematicThen(() => {});          // plays inside the window; it no longer owns the 3-2-1
+    _lssRunCinematicThen(() => {}, false);   // plays inside the window; it no longer owns the 3-2-1
     let _cineOn = false;
     try { _cineOn = !!(typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active); } catch (_) {}
     if (_cineOn) { try { hideLoadingOverlay(); } catch (_) {} }
@@ -56199,7 +56199,10 @@ function _lssStartSpectatorCinematic() {
     try { return !!_cyberCinematic(game._cyber); } catch (e) { console.warn('[cyber] cinematic:', e); return false; }
   }
   if (typeof game === 'undefined' || !game) return false;
-  if (!Array.isArray(game.sdfRoomData) || game.sdfRoomData.length === 0) return false;
+  const _rooms = Array.isArray(game.sdfRoomData) ? game.sdfRoomData : [];
+  let _cinEarth = false;
+  try { _cinEarth = !!(_lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly); } catch (_) {}
+  if (!_rooms.length && !_cinEarth) return false;
   try { _setArenaGridVisible(false); } catch (_) {}   
 
   const TA = (typeof LSS !== 'undefined' && typeof LSS.TEAM_FLEET_A !== 'undefined') ? LSS.TEAM_FLEET_A : 2;
@@ -56238,25 +56241,31 @@ function _lssStartSpectatorCinematic() {
   _moveFront(myShips);
 
   let spawnRoom = null;
-  for (const r of game.sdfRoomData) {
+  for (const r of _rooms) {
     if (r.team === myTeamCode) { spawnRoom = r; break; }
   }
   let cx, cy, cz, roomR;
   if (spawnRoom) {
     cx = spawnRoom.x; cy = spawnRoom.y; cz = spawnRoom.z;
     roomR = spawnRoom.r || 300;
-  } else {
+  } else if (_rooms.length) {
     let xs = 0, ys = 0, zs = 0;
-    for (const r of game.sdfRoomData) { xs += r.x; ys += r.y; zs += r.z; }
-    cx = xs / game.sdfRoomData.length;
-    cy = ys / game.sdfRoomData.length;
-    cz = zs / game.sdfRoomData.length;
+    for (const r of _rooms) { xs += r.x; ys += r.y; zs += r.z; }
+    cx = xs / _rooms.length;
+    cy = ys / _rooms.length;
+    cz = zs / _rooms.length;
+    roomR = 400;
+  } else {
+    let xs = 0, ys = 0, zs = 0, n = 0;
+    for (const s2 of myShips) { const p = s2.ent && s2.ent.position; if (!p) continue; xs += p.x; ys += p.y; zs += p.z; n++; }
+    if (!n) return false;
+    cx = xs / n; cy = ys / n; cz = zs / n;
     roomR = 400;
   }
 
   let fwdX = 1, fwdZ = 0;
   let enemyRoom = null;
-  for (const r of game.sdfRoomData) {
+  for (const r of _rooms) {
     if (r.team === enemyTeamCode) { enemyRoom = r; break; }
   }
   if (enemyRoom) {
@@ -56265,6 +56274,16 @@ function _lssStartSpectatorCinematic() {
     const fl = Math.sqrt(fwdX * fwdX + fwdZ * fwdZ);
     if (fl > 1) { fwdX /= fl; fwdZ /= fl; }
     else { fwdX = 1; fwdZ = 0; }
+  } else if (!_rooms.length) {
+    let xs = 0, zs = 0, n = 0;
+    if (Array.isArray(game.entities)) {
+      for (const e of game.entities) { if (e && e.alive && e.team !== myTeam && e.position) { xs += e.position.x; zs += e.position.z; n++; } }
+    }
+    let dx = 0, dz = 0;
+    if (n) { dx = xs / n - cx; dz = zs / n - cz; }
+    else if (player && player.euler) { dx = -Math.sin(player.euler.y); dz = -Math.cos(player.euler.y); }
+    const fl = Math.sqrt(dx * dx + dz * dz);
+    if (fl > 1e-3) { fwdX = dx / fl; fwdZ = dz / fl; }
   }
   const sideX = -fwdZ;
   const sideZ = fwdX;
@@ -56550,13 +56569,28 @@ function _cineWhenSettled(fn, capMs) {
   };
   tick();
 }
-function _lssRunCinematicThen(andThen) {
+let _cineCurtainT0 = 0;
+const _CINE_CURTAIN_MAX_MS = 50000;
+function _lssRunCinematicThen(andThen, waitCurtain) {
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) {
     _cinematic.after = () => {
       try { andThen(); } catch (e) { console.warn('[cinematic] post-tick failed:', e && e.message); }
     };
     return;
   }
+  try {
+    const _ov = (waitCurtain === false) ? null : document.getElementById('lss-loading-overlay');
+    if (_ov && getComputedStyle(_ov).display !== 'none') {
+      if (!_cineCurtainT0) _cineCurtainT0 = Date.now();
+      if (Date.now() - _cineCurtainT0 < _CINE_CURTAIN_MAX_MS) {
+        setTimeout(() => { try { _lssRunCinematicThen(andThen, waitCurtain); } catch (_) {} }, 50);
+        return;
+      }
+      console.warn('[cinematic] curtain still up after ' +
+                   Math.round((Date.now() - _cineCurtainT0) / 1000) + ' s - playing anyway');
+    }
+    _cineCurtainT0 = 0;
+  } catch (_) {}
   let started = false;
   try {
     if (typeof _lssStartSpectatorCinematic === 'function') {
