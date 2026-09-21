@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.10";
+const LSS_BUILD = "47.13";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -92156,19 +92156,27 @@ class LSSEarthTiles {
   dispose() {
     this._disposed = true;
     try { this._abort.abort(); } catch (_) {}
+    const _emAll = [];
     try {
       for (const m of this._pubQ) {
         if (m.geometry) m.geometry.dispose();
         const mm = Array.isArray(m.material) ? m.material : (m.material ? [m.material] : []);
-        for (const x of mm) { if (x.map) x.map.dispose(); x.dispose(); }
+        for (const x of mm) _emAll.push(x);
       }
     } catch (_) {}
     this._pubQ = [];
     this.group.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
-      for (const m of mats) { if (m.map) m.map.dispose(); m.dispose(); }
+      for (const m of mats) _emAll.push(m);
     });
+    try {
+      const _canRetain = (typeof _lssRetainMat === 'function');
+      for (const m of _emAll) { if (_canRetain) _lssRetainMat(m); else if (m.dispose) m.dispose(); }
+      const _kept = new Set();
+      try { const K = window._fxRetainKeys; if (K) for (const v of K.values()) _kept.add(v); } catch (_) {}
+      for (const m of _emAll) { if (!_kept.has(m) && m.map && m.map.dispose) m.map.dispose(); }
+    } catch (_) {}
     this.group.clear();
     this._grid = null; this._imgData = null; this._imgCanvas = null;
     this._bldList = []; this._cgrid = null; this._adPanels = []; this._grids = [];
@@ -93721,16 +93729,20 @@ class LSSEarthTiles {
 
   _clearBuildings() {
     const isBld = (m) => /^earth-(roofs|walls)-\d+$/.test(m.name || '') || m.name === 'earth-ads';
+    const _free = (m) => {
+      if (m.geometry) m.geometry.dispose();
+      if (!m.material) return;
+      if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material);
+      else if (typeof m.material.dispose === 'function') m.material.dispose();
+    };
     const gone = this.group.children.filter(isBld);
     for (const m of gone) {
       this.group.remove(m);
-      if (m.geometry) m.geometry.dispose();
-      if (m.material && typeof m.material.dispose === 'function') m.material.dispose();
+      _free(m);
     }
     this._pubQ = this._pubQ.filter((m) => {
       if (!isBld(m)) return true;
-      if (m.geometry) m.geometry.dispose();
-      if (m.material && typeof m.material.dispose === 'function') m.material.dispose();
+      _free(m);
       return false;
     });
     this._bldList = []; this._cgrid = null;
@@ -94561,7 +94573,22 @@ const _lssGmaps = {
   loadingPromise: null,
   cleanup: null,
   lat: 0, lng: 0,
+  sig: null,   // (v47.13) the signature of the level the live world was built for; see _lssGmapsLevelSig
 };
+
+function _lssGmapsLevelSig(level) {
+  try {
+    if (!level || level.type !== 'gmaps') return null;
+    if (!(typeof level.lat === 'number' && typeof level.lng === 'number')) return null;
+    const stream = (typeof window !== 'undefined' && window.__earthStream !== undefined)
+      ? !!window.__earthStream : !!level.stream;
+    const ext = (typeof level.extentMetres === 'number' && level.extentMetres > 0) ? level.extentMetres : 2600;
+    const sc  = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7;
+    return (stream ? 'W' : 'T') + '|' + level.lat.toFixed(6) + '|' + level.lng.toFixed(6) +
+           '|' + ext + '|' + sc + '|' + ((level.cyberpunk !== false) ? 1 : 0) +
+           '|' + ((level.ads !== false) ? 1 : 0);
+  } catch (_) { return null; }
+}
 
 function _lssGmapsGetKey() {
   try { return localStorage.getItem('lss_gmaps_api_key') || null; }
@@ -94680,9 +94707,25 @@ async function _lssGmapsBuildLevel(level) {
   if (typeof invalidateMinimapExtent === 'function') invalidateMinimapExtent();
   game.sdfRoomData = [];
 
-  if (_lssGmaps.cleanup) { try { _lssGmaps.cleanup(); } catch(_) {} _lssGmaps.cleanup = null; }
-  _lssGmaps.active = false;
-  _lssGmaps.tiles = null;
+  const _keepTiles = (function () {
+    try {
+      if (typeof window !== 'undefined' && window.__earthKeep === false) return null;
+      if (!_lssGmaps.active || !_lssGmaps.tiles || !_lssGmaps.cleanup) return null;
+      const T = _lssGmaps.tiles;
+      if (!T.group || !T.group.parent) return null;       // it must still be in the scene
+      const sig = _lssGmapsLevelSig(level);
+      if (!sig || sig !== _lssGmaps.sig) return null;
+      return T;
+    } catch (_) { return null; }
+  })();
+  if (_keepTiles) {
+    console.log('[lss-gmaps] KEPT the world over', level.name, '- no rebuild (sig', _lssGmaps.sig + ')');
+  } else {
+    if (_lssGmaps.cleanup) { try { _lssGmaps.cleanup(); } catch(_) {} _lssGmaps.cleanup = null; }
+    _lssGmaps.active = false;
+    _lssGmaps.tiles = null;
+    _lssGmaps.sig = null;
+  }
 
   
   
@@ -94782,7 +94825,7 @@ async function _lssGmapsBuildLevel(level) {
   try {
     const _wantStream = (typeof window !== 'undefined' && window.__earthStream !== undefined)
       ? !!window.__earthStream : !!level.stream;
-    const tiles = _wantStream
+    const tiles = _keepTiles || (_wantStream
       ? new LSSEarthWorld({
           patchMetres: (typeof level.extentMetres === 'number' && level.extentMetres > 0)
             ? level.extentMetres : 2600,
@@ -94800,94 +94843,97 @@ async function _lssGmapsBuildLevel(level) {
       onProgress: (msg, frac) => {
         try { if (typeof _lssGmapsSetLoadMsg === 'function') _lssGmapsSetLoadMsg(msg, frac); } catch (_) {}
       }
-    });
-    if (typeof tiles.setLatLonToYUp === 'function') {
-      tiles.setLatLonToYUp(level.lat * Math.PI / 180, level.lng * Math.PI / 180);
-    }
-    const _gmapsScale = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7;
-    if (typeof tiles.applyScale === 'function') tiles.applyScale(_gmapsScale);
-    else tiles.group.scale.setScalar(_gmapsScale);
-    try {
-      if (typeof tiles.addEventListener === 'function') {
-        tiles.addEventListener('buildings-failed', (e) => {
-          const secs = Math.round((((e && e.retryInMs) || 15000)) / 1000);
-          const m = 'buildings unavailable (' + ((e && e.message) || 'Overpass') +
-                    ') - retrying in ' + secs + 's';
-          console.warn('[lss-gmaps]', m);
-          try { if (typeof _lssGmapsSetLoadMsg === 'function') _lssGmapsSetLoadMsg(m, 0.9); } catch (_) {}
-        });
-        tiles.addEventListener('buildings-backfilled', (e) => {
-          console.log('[lss-gmaps] buildings arrived late:', (e && e.buildings) || 0,
-                      'across', (e && e.patches) || 0, 'patches');
-        });
+    }));
+    if (!_keepTiles) {
+      if (typeof tiles.setLatLonToYUp === 'function') {
+        tiles.setLatLonToYUp(level.lat * Math.PI / 180, level.lng * Math.PI / 180);
       }
-    } catch (_) {}
-    _lssGmaps.scale = _gmapsScale;
-    scene.add(tiles.group);
-    const _errBudget = Math.max(8, 8 * (_lssGmaps.scale || 1));
-    if (tiles.errorTarget !== undefined) tiles.errorTarget = _errBudget;
-    if (tiles.errorThreshold !== undefined) tiles.errorThreshold = _errBudget;
-    try { if (typeof tiles.setResolutionFromRenderer === 'function') tiles.setResolutionFromRenderer(camera, renderer); } catch(_) {}
-    try { if (typeof tiles.setCamera === 'function') tiles.setCamera(camera); } catch(_) {}
-    if (typeof tiles.addEventListener === 'function') {
-      let _alerted = false;
-      tiles.addEventListener('load-error', (ev) => {
-        const err = ev && (ev.error || ev.message || '');
-        const isAuth = String(err).match(/40[13]/);
-        console.warn('[lss-gmaps] tile load error:', err);
-        if (isAuth && !_alerted) {
-          _alerted = true;
-          alert('Google Maps tile server returned ' + (String(err).match(/40[13]/) || ['403']) + ' for your API key.\n\nFix on Google Cloud Console:\n' +
-                '1) Enable the Map Tiles API on your project\n' +
-                '   (https://console.cloud.google.com/apis/library/tile.googleapis.com)\n' +
-                '2) Make sure billing is active on that project\n' +
-                '3) If your key has HTTP-referrer restrictions, add this page\'s origin\n' +
-                '   (or set restriction to None temporarily for testing)\n\n' +
-                'You can clear the saved key with window.lssGmaps.clearKey() in DevTools.');
+      const _gmapsScale = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7;
+      if (typeof tiles.applyScale === 'function') tiles.applyScale(_gmapsScale);
+      else tiles.group.scale.setScalar(_gmapsScale);
+      try {
+        if (typeof tiles.addEventListener === 'function') {
+          tiles.addEventListener('buildings-failed', (e) => {
+            const secs = Math.round((((e && e.retryInMs) || 15000)) / 1000);
+            const m = 'buildings unavailable (' + ((e && e.message) || 'Overpass') +
+                      ') - retrying in ' + secs + 's';
+            console.warn('[lss-gmaps]', m);
+            try { if (typeof _lssGmapsSetLoadMsg === 'function') _lssGmapsSetLoadMsg(m, 0.9); } catch (_) {}
+          });
+          tiles.addEventListener('buildings-backfilled', (e) => {
+            console.log('[lss-gmaps] buildings arrived late:', (e && e.buildings) || 0,
+                        'across', (e && e.patches) || 0, 'patches');
+          });
         }
-      });
-    }
-    _lssGmaps.tiles = tiles;
-    try { if (typeof window !== 'undefined') window.__earthTiles = tiles; } catch (_) {}   // (v46.76) pane probes: stats, _patches, _bldList
-    _lssGmaps.active = true;
-    _lssGmaps.lat = level.lat;
-    _lssGmaps.lng = level.lng;
-    try { if (typeof setSky === 'function') setSky(level.sky || 'cyberpunk'); } catch (_) {}
-    try { if (typeof _wxInit === 'function') _wxInit(null); } catch (e) { console.warn('[lss-earth] weather init failed:', e); }
-    try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(false); } catch (_) {}
-    try {
-      const _far = (tiles.stats && tiles.stats.farUnits) || 20000;
-      const _cap = (typeof camera !== 'undefined' && camera && camera.far) ? camera.far * 0.92 : 1e9;
-      _WX.distMul = Math.max(1, Math.min(8, Math.min(_far * 1.35, _cap) / 20500));
-    } catch (_) {}
-    try { _lssEarthNightLights(true); } catch (_) {}
-    try { if (typeof tiles.streamUpdate === 'function') _lssEarthLifeInit(); } catch (_) {}
-    _lssGmaps._dayK = null;   // seed the day/night ease on this level's first frame
-    _lssGmaps.cleanup = () => {
-      try { scene.remove(tiles.group); } catch(_) {}
-      try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
-      try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}
-      try { if (typeof LSS !== 'undefined' && LSS) LSS._camReach = 0; } catch (_) {}
-      try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(true); } catch (_) {}
-      try { _WX.distMul = 1; } catch (_) {}
-      try { if (typeof _lssEarthLifeDispose === 'function') _lssEarthLifeDispose(); } catch (_) {}
-      try { if (typeof _wxDispose === 'function') _wxDispose(); } catch (_) {}
-      try { _lssEarthNightLights(false); } catch (_) {}
-      try { if (typeof clearSky === 'function') clearSky(); } catch (_) {}
-      _lssGmaps.tiles = null;
-    };
-    console.log('[lss-gmaps] active over', level.name, '@', level.lat, level.lng);
-    try { if (_lssGmaps._refineInterval) clearInterval(_lssGmaps._refineInterval); } catch(_) {}
-    let _bldRefineCount = 0;
-    _lssGmaps._refineInterval = setInterval(() => {
-      try { _lssGmapsRefinePivot(); } catch(_) {}
-      _bldRefineCount++;
-      if (_bldRefineCount >= 20) {
-        try { clearInterval(_lssGmaps._refineInterval); } catch(_) {}
-        _lssGmaps._refineInterval = null;
+      } catch (_) {}
+      _lssGmaps.scale = _gmapsScale;
+      scene.add(tiles.group);
+      const _errBudget = Math.max(8, 8 * (_lssGmaps.scale || 1));
+      if (tiles.errorTarget !== undefined) tiles.errorTarget = _errBudget;
+      if (tiles.errorThreshold !== undefined) tiles.errorThreshold = _errBudget;
+      try { if (typeof tiles.setResolutionFromRenderer === 'function') tiles.setResolutionFromRenderer(camera, renderer); } catch(_) {}
+      try { if (typeof tiles.setCamera === 'function') tiles.setCamera(camera); } catch(_) {}
+      if (typeof tiles.addEventListener === 'function') {
+        let _alerted = false;
+        tiles.addEventListener('load-error', (ev) => {
+          const err = ev && (ev.error || ev.message || '');
+          const isAuth = String(err).match(/40[13]/);
+          console.warn('[lss-gmaps] tile load error:', err);
+          if (isAuth && !_alerted) {
+            _alerted = true;
+            alert('Google Maps tile server returned ' + (String(err).match(/40[13]/) || ['403']) + ' for your API key.\n\nFix on Google Cloud Console:\n' +
+                  '1) Enable the Map Tiles API on your project\n' +
+                  '   (https://console.cloud.google.com/apis/library/tile.googleapis.com)\n' +
+                  '2) Make sure billing is active on that project\n' +
+                  '3) If your key has HTTP-referrer restrictions, add this page\'s origin\n' +
+                  '   (or set restriction to None temporarily for testing)\n\n' +
+                  'You can clear the saved key with window.lssGmaps.clearKey() in DevTools.');
+          }
+        });
       }
-    }, 1000);
-    try { _lssGmapsRefinePivot(); } catch(_) {}
+      _lssGmaps.tiles = tiles;
+      try { if (typeof window !== 'undefined') window.__earthTiles = tiles; } catch (_) {}   // (v46.76) pane probes: stats, _patches, _bldList
+      _lssGmaps.active = true;
+      _lssGmaps.sig = _lssGmapsLevelSig(level);   // (v47.13) what the kept-world test compares against
+      _lssGmaps.lat = level.lat;
+      _lssGmaps.lng = level.lng;
+      try { if (typeof setSky === 'function') setSky(level.sky || 'cyberpunk'); } catch (_) {}
+      try { if (typeof _wxInit === 'function') _wxInit(null); } catch (e) { console.warn('[lss-earth] weather init failed:', e); }
+      try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(false); } catch (_) {}
+      try {
+        const _far = (tiles.stats && tiles.stats.farUnits) || 20000;
+        const _cap = (typeof camera !== 'undefined' && camera && camera.far) ? camera.far * 0.92 : 1e9;
+        _WX.distMul = Math.max(1, Math.min(8, Math.min(_far * 1.35, _cap) / 20500));
+      } catch (_) {}
+      try { _lssEarthNightLights(true); } catch (_) {}
+      try { if (typeof tiles.streamUpdate === 'function') _lssEarthLifeInit(); } catch (_) {}
+      _lssGmaps._dayK = null;   // seed the day/night ease on this level's first frame
+      _lssGmaps.cleanup = () => {
+        try { scene.remove(tiles.group); } catch(_) {}
+        try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
+        try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}
+        try { if (typeof LSS !== 'undefined' && LSS) LSS._camReach = 0; } catch (_) {}
+        try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(true); } catch (_) {}
+        try { _WX.distMul = 1; } catch (_) {}
+        try { if (typeof _lssEarthLifeDispose === 'function') _lssEarthLifeDispose(); } catch (_) {}
+        try { if (typeof _wxDispose === 'function') _wxDispose(); } catch (_) {}
+        try { _lssEarthNightLights(false); } catch (_) {}
+        try { if (typeof clearSky === 'function') clearSky(); } catch (_) {}
+        _lssGmaps.tiles = null;
+      };
+      console.log('[lss-gmaps] active over', level.name, '@', level.lat, level.lng);
+      try { if (_lssGmaps._refineInterval) clearInterval(_lssGmaps._refineInterval); } catch(_) {}
+      let _bldRefineCount = 0;
+      _lssGmaps._refineInterval = setInterval(() => {
+        try { _lssGmapsRefinePivot(); } catch(_) {}
+        _bldRefineCount++;
+        if (_bldRefineCount >= 20) {
+          try { clearInterval(_lssGmaps._refineInterval); } catch(_) {}
+          _lssGmaps._refineInterval = null;
+        }
+      }, 1000);
+      try { _lssGmapsRefinePivot(); } catch(_) {}
+    }
     _lssGmaps._spawnPlaced = false;   // the curtain waits on this; see hideLoadingOverlay
     try {
       await Promise.race([

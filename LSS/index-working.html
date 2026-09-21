@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.10";
+const LSS_BUILD = "47.13";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -137861,19 +137861,43 @@ class LSSEarthTiles {
     try { this._abort.abort(); } catch (_) {}
     // Anything still queued never reached the group, so the traverse below
     // cannot see it and it would leak its buffers.
+    // (v47.11) RETAIN THE PROGRAMS. This used to dispose EVERY material here, and a disposed material
+    // with no other holder FREES ITS PROGRAM - so the next round relinks it COLD. That is the v38.97
+    // failure mode, and the earth teardown was the rebuild it never got applied to.
+    // MEASURED on race/race_earth at the round transition, with Material.prototype.dispose hooked:
+    // 1,692 disposes from this one traverse, `freed x19` in the cold watcher, the program count
+    // dropping 187 -> 176 and climbing back, then `lambert [RELINK] x2` / `basic [FORK: flags]
+    // [RELINK]` / six unnamed cold links, two getProgramParameter calls blocking 33-36 ms, and 33
+    // frames over 60 ms in the transition window (90-150 ms sustained, worst 401 ms) as the rebuilt
+    // buildings first entered the SHADOW pass. `renderFrame` was only ~7 ms of that 401 ms frame,
+    // which is the tell that the cost is linking, not drawing.
+    // _lssRetainMat keeps ONE material per real three.js program key and disposes every other, so the
+    // retained set is bounded by the program count (~19), not by the building count.
+    // ⚠ THE MAP GOES WITH THE MATERIAL. A retained material must keep its texture - it is held only to
+    //   own its program and is never drawn again, but disposing its map would leave three.js holding a
+    //   dead texture on a live material. So collect first, retain, then drop the maps of exactly the
+    //   ones that were NOT retained. Everything else frees as before.
+    const _emAll = [];
     try {
       for (const m of this._pubQ) {
         if (m.geometry) m.geometry.dispose();
         const mm = Array.isArray(m.material) ? m.material : (m.material ? [m.material] : []);
-        for (const x of mm) { if (x.map) x.map.dispose(); x.dispose(); }
+        for (const x of mm) _emAll.push(x);
       }
     } catch (_) {}
     this._pubQ = [];
     this.group.traverse((o) => {
       if (o.geometry) o.geometry.dispose();
       const mats = Array.isArray(o.material) ? o.material : (o.material ? [o.material] : []);
-      for (const m of mats) { if (m.map) m.map.dispose(); m.dispose(); }
+      for (const m of mats) _emAll.push(m);
     });
+    try {
+      const _canRetain = (typeof _lssRetainMat === 'function');
+      for (const m of _emAll) { if (_canRetain) _lssRetainMat(m); else if (m.dispose) m.dispose(); }
+      const _kept = new Set();
+      try { const K = window._fxRetainKeys; if (K) for (const v of K.values()) _kept.add(v); } catch (_) {}
+      for (const m of _emAll) { if (!_kept.has(m) && m.map && m.map.dispose) m.map.dispose(); }
+    } catch (_) {}
     this.group.clear();
     this._grid = null; this._imgData = null; this._imgCanvas = null;
     this._bldList = []; this._cgrid = null; this._adPanels = []; this._grids = [];
@@ -139974,18 +139998,34 @@ class LSSEarthTiles {
   // terrain, water and imagery stay. Materials go with their meshes (they are
   // per patch - dispose() already treats them so); the roof texture and the ad
   // atlas are shared and material.dispose() does not touch textures.
+  // (v47.11) RETAIN THE PROGRAMS, DISPOSE THE GEOMETRY. These facade materials are derived from
+  // _hcTowerMat / _hcHoloMat, and a plain .dispose() on the LAST holder of a material FREES ITS
+  // PROGRAM - so the next rebuild relinks it COLD. That is the v38.97 failure mode, and the earth
+  // path was the one rebuild it never got applied to. Measured on race/race_earth at the round-2
+  // transition: `freed x19` at the teardown, then `lambert [RELINK] x2`, `basic [FORK: flags]
+  // [RELINK]` and six unnamed cold links, two getProgramParameter calls blocking 33-36 ms, and a
+  // burst of ~32 frames over 60 ms (90-150 ms sustained, one at 313 ms) as the rebuilt buildings
+  // first entered the shadow pass - MeshDepthMaterial p228/p229/p230 first-drawing 89,864 / 31,543 /
+  // 63,161 triangles. `renderFrame` was only ~7 ms of that 313 ms frame, which is the tell that the
+  // cost is linking, not drawing. _lssRetainMat keeps ONE material per real three.js program key
+  // (renderer.properties.get(mat).programs) and disposes every other, so the program count is
+  // bounded and nothing has to relink.
   _clearBuildings() {
     const isBld = (m) => /^earth-(roofs|walls)-\d+$/.test(m.name || '') || m.name === 'earth-ads';
+    const _free = (m) => {
+      if (m.geometry) m.geometry.dispose();
+      if (!m.material) return;
+      if (typeof _lssRetainMat === 'function') _lssRetainMat(m.material);
+      else if (typeof m.material.dispose === 'function') m.material.dispose();
+    };
     const gone = this.group.children.filter(isBld);
     for (const m of gone) {
       this.group.remove(m);
-      if (m.geometry) m.geometry.dispose();
-      if (m.material && typeof m.material.dispose === 'function') m.material.dispose();
+      _free(m);
     }
     this._pubQ = this._pubQ.filter((m) => {
       if (!isBld(m)) return true;
-      if (m.geometry) m.geometry.dispose();
-      if (m.material && typeof m.material.dispose === 'function') m.material.dispose();
+      _free(m);
       return false;
     });
     this._bldList = []; this._cgrid = null;
@@ -141152,7 +141192,26 @@ const _lssGmaps = {
   loadingPromise: null,
   cleanup: null,
   lat: 0, lng: 0,
+  sig: null,   // (v47.13) the signature of the level the live world was built for; see _lssGmapsLevelSig
 };
+
+// (v47.13) Everything the earth world's construction reads off a level, in one string. If this is
+// unchanged the built world is identical, so a round rebuild can reuse it instead of tearing the city
+// down and re-fetching the DEM (see the _keepTiles path in _lssGmapsBuildLevel). Keep this in step with
+// the constructor arguments there - a field the constructor reads and this does not is a stale world.
+function _lssGmapsLevelSig(level) {
+  try {
+    if (!level || level.type !== 'gmaps') return null;
+    if (!(typeof level.lat === 'number' && typeof level.lng === 'number')) return null;
+    const stream = (typeof window !== 'undefined' && window.__earthStream !== undefined)
+      ? !!window.__earthStream : !!level.stream;
+    const ext = (typeof level.extentMetres === 'number' && level.extentMetres > 0) ? level.extentMetres : 2600;
+    const sc  = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7;
+    return (stream ? 'W' : 'T') + '|' + level.lat.toFixed(6) + '|' + level.lng.toFixed(6) +
+           '|' + ext + '|' + sc + '|' + ((level.cyberpunk !== false) ? 1 : 0) +
+           '|' + ((level.ads !== false) ? 1 : 0);
+  } catch (_) { return null; }
+}
 
 function _lssGmapsGetKey() {
   try { return localStorage.getItem('lss_gmaps_api_key') || null; }
@@ -141313,9 +141372,38 @@ async function _lssGmapsBuildLevel(level) {
   // Tear down any prior tile renderer (e.g. switching gmaps level to gmaps
   // level). Without this we'd accumulate tile groups and double the draw
   // cost on every map swap.
-  if (_lssGmaps.cleanup) { try { _lssGmaps.cleanup(); } catch(_) {} _lssGmaps.cleanup = null; }
-  _lssGmaps.active = false;
-  _lssGmaps.tiles = null;
+  // (v47.13) KEEP THE EARTH WORLD ACROSS A ROUND. This function runs on EVERY level build, and a race
+  // circuit re-rolls its gates every round - so round 2 used to tear the whole city down and rebuild it
+  // from the DEM even though the LOCATION had not moved. Measured on race/race_earth at the transition,
+  // JS self-profile over the 20 s window: boxAny (the R=8 water-mask closing) 1,740 ms of SELF time,
+  // scene traverse 1,405, getImageData 602, _fetchDemRing 519 self / 2,442 total, plus _loadBuildingsBody
+  // 1,539 and updateNight 1,505 - about 5 s of main-thread JS landing as ~32 frames over 60 ms, sustained
+  // 90-150 ms with spikes to 401 ms. Owner: "couple hitches in race/earth circuit".
+  // Same shape as v38.99's _keepTerrain for the sandwich terrain: if nothing that defines the world has
+  // changed, do not rebuild it. The gates, the spawn points and everything else below still re-roll.
+  // ⚠ The signature must cover everything the constructor reads - the streamed-vs-single class, lat/lng,
+  //   extent, scale, cyberpunk and ads - because those are the only inputs to what gets built. A typed
+  //   DROP to a new location changes lat/lng, so it correctly rebuilds.
+  // window.__earthKeep = false disables it for an A/B.
+  const _keepTiles = (function () {
+    try {
+      if (typeof window !== 'undefined' && window.__earthKeep === false) return null;
+      if (!_lssGmaps.active || !_lssGmaps.tiles || !_lssGmaps.cleanup) return null;
+      const T = _lssGmaps.tiles;
+      if (!T.group || !T.group.parent) return null;       // it must still be in the scene
+      const sig = _lssGmapsLevelSig(level);
+      if (!sig || sig !== _lssGmaps.sig) return null;
+      return T;
+    } catch (_) { return null; }
+  })();
+  if (_keepTiles) {
+    console.log('[lss-gmaps] KEPT the world over', level.name, '- no rebuild (sig', _lssGmaps.sig + ')');
+  } else {
+    if (_lssGmaps.cleanup) { try { _lssGmaps.cleanup(); } catch(_) {} _lssGmaps.cleanup = null; }
+    _lssGmaps.active = false;
+    _lssGmaps.tiles = null;
+    _lssGmaps.sig = null;
+  }
 
   
   
@@ -141448,7 +141536,7 @@ async function _lssGmapsBuildLevel(level) {
     // exercised before a mode of its own exists; 0 forces the single patch.
     const _wantStream = (typeof window !== 'undefined' && window.__earthStream !== undefined)
       ? !!window.__earthStream : !!level.stream;
-    const tiles = _wantStream
+    const tiles = _keepTiles || (_wantStream
       ? new LSSEarthWorld({
           patchMetres: (typeof level.extentMetres === 'number' && level.extentMetres > 0)
             ? level.extentMetres : 2600,
@@ -141474,146 +141562,149 @@ async function _lssGmapsBuildLevel(level) {
       onProgress: (msg, frac) => {
         try { if (typeof _lssGmapsSetLoadMsg === 'function') _lssGmapsSetLoadMsg(msg, frac); } catch (_) {}
       }
-    });
+    }));
     // Pivot so the requested lat/lng sits at the local origin (Y up).
-    if (typeof tiles.setLatLonToYUp === 'function') {
-      tiles.setLatLonToYUp(level.lat * Math.PI / 180, level.lng * Math.PI / 180);
-    }
-    // Apply per-level world scale. Default 1 = ships at
-    // capital-ship scale relative to real city. Scale 12 = ships at
-    // ~8% of skyscraper height ; small-plane / large-car through canyon.
-    const _gmapsScale = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7;
-    // A streamed world scales its PATCHES, not its group -- doing both squared
-    // the scale. applyScale() is how it takes the level's figure.
-    if (typeof tiles.applyScale === 'function') tiles.applyScale(_gmapsScale);
-    else tiles.group.scale.setScalar(_gmapsScale);
-    // Buildings are a bonus layer that fails quietly, and a city with none does
-    // not look broken -- it looks like an aerial photo of empty ground. Both
-    // classes emit this; nothing had ever listened.
-    try {
-      if (typeof tiles.addEventListener === 'function') {
-        tiles.addEventListener('buildings-failed', (e) => {
-          const secs = Math.round((((e && e.retryInMs) || 15000)) / 1000);
-          const m = 'buildings unavailable (' + ((e && e.message) || 'Overpass') +
-                    ') - retrying in ' + secs + 's';
-          console.warn('[lss-gmaps]', m);
-          try { if (typeof _lssGmapsSetLoadMsg === 'function') _lssGmapsSetLoadMsg(m, 0.9); } catch (_) {}
-        });
-        tiles.addEventListener('buildings-backfilled', (e) => {
-          console.log('[lss-gmaps] buildings arrived late:', (e && e.buildings) || 0,
-                      'across', (e && e.patches) || 0, 'patches');
-        });
+    if (!_keepTiles) {
+      if (typeof tiles.setLatLonToYUp === 'function') {
+        tiles.setLatLonToYUp(level.lat * Math.PI / 180, level.lng * Math.PI / 180);
       }
-    } catch (_) {}
-    _lssGmaps.scale = _gmapsScale;
-    scene.add(tiles.group);
-    // Coarser tile target when the world is scaled up ; otherwise the
-    // loader tries to keep <8px error against now-much-larger geometry
-    // and burns bandwidth on hi-detail tiles you can't see anyway.
-    const _errBudget = Math.max(8, 8 * (_lssGmaps.scale || 1));
-    if (tiles.errorTarget !== undefined) tiles.errorTarget = _errBudget;
-    if (tiles.errorThreshold !== undefined) tiles.errorThreshold = _errBudget;
-    // Pre-set resolution so the first update() pass has the camera-error
-    // baseline ready ; otherwise the renderer logs a one-time warning.
-    try { if (typeof tiles.setResolutionFromRenderer === 'function') tiles.setResolutionFromRenderer(camera, renderer); } catch(_) {}
-    try { if (typeof tiles.setCamera === 'function') tiles.setCamera(camera); } catch(_) {}
-    // Surface tile-load errors clearly. 403 from tile.googleapis.com is
-    // the most common first-run failure ; the alert text walks the user
-    // through enabling Map Tiles API + billing + key referrer settings.
-    if (typeof tiles.addEventListener === 'function') {
-      let _alerted = false;
-      tiles.addEventListener('load-error', (ev) => {
-        const err = ev && (ev.error || ev.message || '');
-        const isAuth = String(err).match(/40[13]/);
-        console.warn('[lss-gmaps] tile load error:', err);
-        if (isAuth && !_alerted) {
-          _alerted = true;
-          alert('Google Maps tile server returned ' + (String(err).match(/40[13]/) || ['403']) + ' for your API key.\n\nFix on Google Cloud Console:\n' +
-                '1) Enable the Map Tiles API on your project\n' +
-                '   (https://console.cloud.google.com/apis/library/tile.googleapis.com)\n' +
-                '2) Make sure billing is active on that project\n' +
-                '3) If your key has HTTP-referrer restrictions, add this page\'s origin\n' +
-                '   (or set restriction to None temporarily for testing)\n\n' +
-                'You can clear the saved key with window.lssGmaps.clearKey() in DevTools.');
+      // Apply per-level world scale. Default 1 = ships at
+      // capital-ship scale relative to real city. Scale 12 = ships at
+      // ~8% of skyscraper height ; small-plane / large-car through canyon.
+      const _gmapsScale = (typeof level.scale === 'number' && level.scale > 0) ? level.scale : 7;
+      // A streamed world scales its PATCHES, not its group -- doing both squared
+      // the scale. applyScale() is how it takes the level's figure.
+      if (typeof tiles.applyScale === 'function') tiles.applyScale(_gmapsScale);
+      else tiles.group.scale.setScalar(_gmapsScale);
+      // Buildings are a bonus layer that fails quietly, and a city with none does
+      // not look broken -- it looks like an aerial photo of empty ground. Both
+      // classes emit this; nothing had ever listened.
+      try {
+        if (typeof tiles.addEventListener === 'function') {
+          tiles.addEventListener('buildings-failed', (e) => {
+            const secs = Math.round((((e && e.retryInMs) || 15000)) / 1000);
+            const m = 'buildings unavailable (' + ((e && e.message) || 'Overpass') +
+                      ') - retrying in ' + secs + 's';
+            console.warn('[lss-gmaps]', m);
+            try { if (typeof _lssGmapsSetLoadMsg === 'function') _lssGmapsSetLoadMsg(m, 0.9); } catch (_) {}
+          });
+          tiles.addEventListener('buildings-backfilled', (e) => {
+            console.log('[lss-gmaps] buildings arrived late:', (e && e.buildings) || 0,
+                        'across', (e && e.patches) || 0, 'patches');
+          });
         }
-      });
-    }
-    _lssGmaps.tiles = tiles;
-    try { if (typeof window !== 'undefined') window.__earthTiles = tiles; } catch (_) {}   // (v46.76) pane probes: stats, _patches, _bldList
-    _lssGmaps.active = true;
-    _lssGmaps.lat = level.lat;
-    _lssGmaps.lng = level.lng;
-    // (v45.46) Neon facades and holo ads only read at night, and the default
-    // procedural dome puts this level under a blue noon sky. Swap in the
-    // cyberpunk equirect and drop the lights to moonlight; `level.sky` lets a
-    // map override it ('cyberpunk2', 'purple', any _skyboxPresets key or path).
-    // (v45.46) THE OVERWORLD'S SKY, not a flat equirect.
-    // _wxInit builds the hub's whole atmosphere group — the gradient dome, the
-    // sun disc + halo, the HUB_WX cloud deck and the rainbow — and it turns out
-    // to ignore its `T` argument entirely, so it can be driven from a level
-    // that has no sandwich terrain. That gives the real-world city the same
-    // clouds and horizon the overworld has, instead of a painted backdrop with
-    // a hard edge. setSky still runs first because _wxInit's own
-    // _skyDomeRefresh expects something behind the dome.
-    try { if (typeof setSky === 'function') setSky(level.sky || 'cyberpunk'); } catch (_) {}
-    try { if (typeof _wxInit === 'function') _wxInit(null); } catch (e) { console.warn('[lss-earth] weather init failed:', e); }
-    // ⚠ HIDE THE ARENA GRID. _swApplyAtmosphere turns it ON for any level
-    // without sandwich terrain, and a real-world level is exactly that — so the
-    // arena bounds box was being drawn around a city. Owner: "a visible
-    // wireframe cube is in the sky". It marks the edge of an arena; a streamed
-    // Earth has no edge to mark.
-    try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(false); } catch (_) {}
-    // Push the dome/sun out past this world's terrain, but never past the far
-    // plane — a dome beyond `camera.far` is not a bigger sky, it is no sky.
-    try {
-      const _far = (tiles.stats && tiles.stats.farUnits) || 20000;
-      const _cap = (typeof camera !== 'undefined' && camera && camera.far) ? camera.far * 0.92 : 1e9;
-      _WX.distMul = Math.max(1, Math.min(8, Math.min(_far * 1.35, _cap) / 20500));
-    } catch (_) {}
-    try { _lssEarthNightLights(true); } catch (_) {}
-    // Traffic, carriers and monsters, but only where the world streams: a
-    // single-location gmaps level has a fixed extent and no reason to recycle a
-    // population around the player.
-    try { if (typeof tiles.streamUpdate === 'function') _lssEarthLifeInit(); } catch (_) {}
-    _lssGmaps._dayK = null;   // seed the day/night ease on this level's first frame
-    _lssGmaps.cleanup = () => {
-      try { scene.remove(tiles.group); } catch(_) {}
-      try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
-      // Put the shared scene back the way it was: these lights and this sky
-      // belong to every other map too.
-      try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}
-      try { if (typeof LSS !== 'undefined' && LSS) LSS._camReach = 0; } catch (_) {}
-      try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(true); } catch (_) {}
-      try { _WX.distMul = 1; } catch (_) {}
-      try { if (typeof _lssEarthLifeDispose === 'function') _lssEarthLifeDispose(); } catch (_) {}
-      try { if (typeof _wxDispose === 'function') _wxDispose(); } catch (_) {}
-      try { _lssEarthNightLights(false); } catch (_) {}
-      try { if (typeof clearSky === 'function') clearSky(); } catch (_) {}
-      _lssGmaps.tiles = null;
-    };
-    console.log('[lss-gmaps] active over', level.name, '@', level.lat, level.lng);
-    try { if (_lssGmaps._refineInterval) clearInterval(_lssGmaps._refineInterval); } catch(_) {}
-    let _bldRefineCount = 0;
-    _lssGmaps._refineInterval = setInterval(() => {
-      try { _lssGmapsRefinePivot(); } catch(_) {}
-      _bldRefineCount++;
-      if (_bldRefineCount >= 20) {
-        try { clearInterval(_lssGmaps._refineInterval); } catch(_) {}
-        _lssGmaps._refineInterval = null;
+      } catch (_) {}
+      _lssGmaps.scale = _gmapsScale;
+      scene.add(tiles.group);
+      // Coarser tile target when the world is scaled up ; otherwise the
+      // loader tries to keep <8px error against now-much-larger geometry
+      // and burns bandwidth on hi-detail tiles you can't see anyway.
+      const _errBudget = Math.max(8, 8 * (_lssGmaps.scale || 1));
+      if (tiles.errorTarget !== undefined) tiles.errorTarget = _errBudget;
+      if (tiles.errorThreshold !== undefined) tiles.errorThreshold = _errBudget;
+      // Pre-set resolution so the first update() pass has the camera-error
+      // baseline ready ; otherwise the renderer logs a one-time warning.
+      try { if (typeof tiles.setResolutionFromRenderer === 'function') tiles.setResolutionFromRenderer(camera, renderer); } catch(_) {}
+      try { if (typeof tiles.setCamera === 'function') tiles.setCamera(camera); } catch(_) {}
+      // Surface tile-load errors clearly. 403 from tile.googleapis.com is
+      // the most common first-run failure ; the alert text walks the user
+      // through enabling Map Tiles API + billing + key referrer settings.
+      if (typeof tiles.addEventListener === 'function') {
+        let _alerted = false;
+        tiles.addEventListener('load-error', (ev) => {
+          const err = ev && (ev.error || ev.message || '');
+          const isAuth = String(err).match(/40[13]/);
+          console.warn('[lss-gmaps] tile load error:', err);
+          if (isAuth && !_alerted) {
+            _alerted = true;
+            alert('Google Maps tile server returned ' + (String(err).match(/40[13]/) || ['403']) + ' for your API key.\n\nFix on Google Cloud Console:\n' +
+                  '1) Enable the Map Tiles API on your project\n' +
+                  '   (https://console.cloud.google.com/apis/library/tile.googleapis.com)\n' +
+                  '2) Make sure billing is active on that project\n' +
+                  '3) If your key has HTTP-referrer restrictions, add this page\'s origin\n' +
+                  '   (or set restriction to None temporarily for testing)\n\n' +
+                  'You can clear the saved key with window.lssGmaps.clearKey() in DevTools.');
+          }
+        });
       }
-    }, 1000);
-    try { _lssGmapsRefinePivot(); } catch(_) {}
-    // (v45.46) ⭐ HOLD THE LOADING SCREEN UNTIL THE CITY IS ACTUALLY THERE.
-    // Owner: "i wish we could load the buildings during the loading screen".
-    // _build() is kicked off by setLatLonToYUp and was never awaited, so the
-    // level went playable as soon as the tiles OBJECT existed — terrain first,
-    // then the city popping in over the next several seconds. Awaiting
-    // tiles.ready puts the whole fetch inside the loading screen where it
-    // belongs.
-    // ⚠ BOUNDED. A rate-limited Overpass retries with backoff and then tries
-    // mirrors; unbounded, that is ~30 s of frozen loading screen for a layer
-    // that is allowed to fail. Race it against a timeout and let the rest
-    // stream in if it loses — the terrain and water are already up by then.
+      _lssGmaps.tiles = tiles;
+      try { if (typeof window !== 'undefined') window.__earthTiles = tiles; } catch (_) {}   // (v46.76) pane probes: stats, _patches, _bldList
+      _lssGmaps.active = true;
+      _lssGmaps.sig = _lssGmapsLevelSig(level);   // (v47.13) what the kept-world test compares against
+      _lssGmaps.lat = level.lat;
+      _lssGmaps.lng = level.lng;
+      // (v45.46) Neon facades and holo ads only read at night, and the default
+      // procedural dome puts this level under a blue noon sky. Swap in the
+      // cyberpunk equirect and drop the lights to moonlight; `level.sky` lets a
+      // map override it ('cyberpunk2', 'purple', any _skyboxPresets key or path).
+      // (v45.46) THE OVERWORLD'S SKY, not a flat equirect.
+      // _wxInit builds the hub's whole atmosphere group — the gradient dome, the
+      // sun disc + halo, the HUB_WX cloud deck and the rainbow — and it turns out
+      // to ignore its `T` argument entirely, so it can be driven from a level
+      // that has no sandwich terrain. That gives the real-world city the same
+      // clouds and horizon the overworld has, instead of a painted backdrop with
+      // a hard edge. setSky still runs first because _wxInit's own
+      // _skyDomeRefresh expects something behind the dome.
+      try { if (typeof setSky === 'function') setSky(level.sky || 'cyberpunk'); } catch (_) {}
+      try { if (typeof _wxInit === 'function') _wxInit(null); } catch (e) { console.warn('[lss-earth] weather init failed:', e); }
+      // ⚠ HIDE THE ARENA GRID. _swApplyAtmosphere turns it ON for any level
+      // without sandwich terrain, and a real-world level is exactly that — so the
+      // arena bounds box was being drawn around a city. Owner: "a visible
+      // wireframe cube is in the sky". It marks the edge of an arena; a streamed
+      // Earth has no edge to mark.
+      try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(false); } catch (_) {}
+      // Push the dome/sun out past this world's terrain, but never past the far
+      // plane — a dome beyond `camera.far` is not a bigger sky, it is no sky.
+      try {
+        const _far = (tiles.stats && tiles.stats.farUnits) || 20000;
+        const _cap = (typeof camera !== 'undefined' && camera && camera.far) ? camera.far * 0.92 : 1e9;
+        _WX.distMul = Math.max(1, Math.min(8, Math.min(_far * 1.35, _cap) / 20500));
+      } catch (_) {}
+      try { _lssEarthNightLights(true); } catch (_) {}
+      // Traffic, carriers and monsters, but only where the world streams: a
+      // single-location gmaps level has a fixed extent and no reason to recycle a
+      // population around the player.
+      try { if (typeof tiles.streamUpdate === 'function') _lssEarthLifeInit(); } catch (_) {}
+      _lssGmaps._dayK = null;   // seed the day/night ease on this level's first frame
+      _lssGmaps.cleanup = () => {
+        try { scene.remove(tiles.group); } catch(_) {}
+        try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
+        // Put the shared scene back the way it was: these lights and this sky
+        // belong to every other map too.
+        try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}
+        try { if (typeof LSS !== 'undefined' && LSS) LSS._camReach = 0; } catch (_) {}
+        try { if (typeof _setArenaGridVisible === 'function') _setArenaGridVisible(true); } catch (_) {}
+        try { _WX.distMul = 1; } catch (_) {}
+        try { if (typeof _lssEarthLifeDispose === 'function') _lssEarthLifeDispose(); } catch (_) {}
+        try { if (typeof _wxDispose === 'function') _wxDispose(); } catch (_) {}
+        try { _lssEarthNightLights(false); } catch (_) {}
+        try { if (typeof clearSky === 'function') clearSky(); } catch (_) {}
+        _lssGmaps.tiles = null;
+      };
+      console.log('[lss-gmaps] active over', level.name, '@', level.lat, level.lng);
+      try { if (_lssGmaps._refineInterval) clearInterval(_lssGmaps._refineInterval); } catch(_) {}
+      let _bldRefineCount = 0;
+      _lssGmaps._refineInterval = setInterval(() => {
+        try { _lssGmapsRefinePivot(); } catch(_) {}
+        _bldRefineCount++;
+        if (_bldRefineCount >= 20) {
+          try { clearInterval(_lssGmaps._refineInterval); } catch(_) {}
+          _lssGmaps._refineInterval = null;
+        }
+      }, 1000);
+      try { _lssGmapsRefinePivot(); } catch(_) {}
+      // (v45.46) ⭐ HOLD THE LOADING SCREEN UNTIL THE CITY IS ACTUALLY THERE.
+      // Owner: "i wish we could load the buildings during the loading screen".
+      // _build() is kicked off by setLatLonToYUp and was never awaited, so the
+      // level went playable as soon as the tiles OBJECT existed — terrain first,
+      // then the city popping in over the next several seconds. Awaiting
+      // tiles.ready puts the whole fetch inside the loading screen where it
+      // belongs.
+      // ⚠ BOUNDED. A rate-limited Overpass retries with backoff and then tries
+      // mirrors; unbounded, that is ~30 s of frozen loading screen for a layer
+      // that is allowed to fail. Race it against a timeout and let the rest
+      // stream in if it loses — the terrain and water are already up by then.
+    }
     _lssGmaps._spawnPlaced = false;   // the curtain waits on this; see hideLoadingOverlay
     try {
       await Promise.race([
