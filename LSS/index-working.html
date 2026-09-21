@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.35";
+const LSS_BUILD = "47.49";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -51333,6 +51333,17 @@ class OwCarrier {
     try { _owCarrierDied(this); } catch (e) { console.warn('[cities] carrier death handler threw:', e); }
   }
   destroy() {
+    // (v47.42) `window.__botDestroyLog = true` names WHO removed a bot. A bot that spawnBots builds
+    // and that is gone moments later cannot be diagnosed from the roster - the roster only shows the
+    // hole. This prints the id and the calling frames.
+    try {
+      if (typeof window !== 'undefined' && window.__botDestroyLog) {
+        const _st = ((new Error()).stack || '').split(String.fromCharCode(10)).slice(1, 5);
+        console.warn('[bot destroy] id', this.id, this.loadoutKey, 't' + this.team,
+                     '| state', (typeof game !== 'undefined' && game) ? game.state : '?',
+                     '| alive', this.alive, _st);
+      }
+    } catch (_) {}
     this._chargeEnd();
     try { if (this.mesh) scene.remove(this.mesh); } catch (_) {}
     const i = game.entities.indexOf(this); if (i >= 0) game.entities.splice(i, 1);
@@ -87609,10 +87620,26 @@ function _botSendRoster(toPeerId) {
   if (!_botAuthority()) return;   // (v38.63) one gate — see _botAuthority
   const bots = [];
   for (const b of game.entities) {
-    if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
+    // ⭐⭐⭐ (v47.45) DEAD BOTS STAY ON THE ROSTER. This read `|| !b.alive`, and that one clause
+    // put this function in direct contradiction with `bot_state` 20 lines up, which ships
+    // `b.alive ? 1 : 0` for EVERY bot and whose receiver has an explicit alive->dead arm AND a
+    // dead->alive REVIVE arm. The revive arm could never fire: it needs `_botProxyById(id)` to
+    // return the dead shell, and this roster deleted that shell within 2 s of the death - the
+    // v38.63 comment on the revive even says "the roster kept our dead shell", which stopped being
+    // true here. So a bot that died on the authority did not die on the peers, it was ERASED:
+    // no wreck, no DEAD row, and the two clients' fleets stopped agreeing.
+    // **MEASURED**, one room, same second - authority: `PUNCTURE DEAD 6411` holding its Fleet A
+    // row; joiner: no PUNCTURE anywhere. Owner: "1 bot is just missing completely" / "the bot count
+    // is wrong on the scoreboard" / "the teams on the scorecard is wrong" - all three, this line.
+    // `a` carries the flag so a peer joining mid-round builds the shell already dead instead of a
+    // ghost flying around. A genuine removal (drop-in replacement, a fresh deal, round reset) still
+    // drops the row entirely, which is what `_botApplyRoster`'s removal arm is actually for.
+    if (!(b instanceof Bot) || b.isProxy) continue;
     // (v32.76) h = hoardModelKey (so a campaign proxy renders the right hoard ship + is
     // seen by the e.hoardModelKey filters) ; n = Nemesis role (excluded from clear-check).
     bots.push({ i: b.id, k: b.loadoutKey, t: (b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A', h: b.hoardModelKey || null, n: b.isNemesis ? 1 : 0,
+      a: b.alive ? 1 : 0,   // (v47.45) so a late joiner builds a dead bot as a dead shell, not a ghost
+
       tm: b.team, c: (b._owCity != null) ? b._owCity : -1 });   // (v38.79) numeric team + overworld city
   }
   // (v39.64) the authority's run clock rides along so peers draw the endless critters at the same moment
@@ -87666,6 +87693,12 @@ function _botApplyRoster(rows) {
       b.isProxy = true;
       if (r.c != null && r.c >= 0) b._owCity = r.c;   // (v38.79) an overworld city fleet proxy
       if (r.n) { try { b.isNemesis = true; } catch (_) {} }
+      // (v47.45) a row that is on the roster but flagged dead: stand the shell up already dead,
+      // quietly. Not `b.die()` - that would pop an explosion for a kill that happened before we
+      // arrived. `bot_state`'s revive arm puts it back in the air next round.
+      if (r.a === 0) {
+        try { b.alive = false; b.doomed = false; b.shipState = 'dead'; if (b.mesh) b.mesh.visible = false; } catch (_) {}
+      }
       game.entities.push(b);
     } catch (e) { console.warn('[dropin] proxy spawn failed:', e); }
   }
@@ -87683,6 +87716,30 @@ function _botApplyRoster(rows) {
 // to that specific peer, and they spawn into it.
 function _dropinReplaceBot(team, toPeerId) {
   if (!net || !net.openSolo) return;
+  // ⭐⭐⭐ (v47.43) ONLY FOR A HUMAN THE BOT DEAL DID NOT ALREADY KNOW ABOUT.
+  // Owner: "1 bot is just missing completely" - and the trap named this function.
+  // The call site gates on `game.state !== 'select'`, which is true all through WARMUP - so a peer
+  // who sat in the lobby, confirmed, and rode the same 3-2-1 as everybody else still arrived here
+  // and ate a bot. But `spawnBots` had already dealt `3 - humans` WITH that peer counted, so the
+  // fleet lost a second seat for one pilot. **MEASURED**: `[spawnBots] built: 1:SYPHON 2:VORTEX
+  // 10:SLAYER 11:BLASTER`, then id 1 spliced here ~3 s later in state `warmup`, with `Bot.destroy`
+  // never called by any other path - which is why it read as "never spawned" for so long.
+  // The discriminator is not the game state, it is whether this pilot was in the tally the deal used:
+  // more humans on that fleet NOW than when the bots were dealt = a genuine late joiner.
+  // ⚠ No stash (spawnBots has not run) means there are no dealt bots to protect, so fall through.
+  try {
+    const _dealt = game._botSeatHumans;
+    if (_dealt) {
+      const _now = _lssHumanCounts();
+      const _k = (team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
+      if ((_now[_k] | 0) <= (_dealt[_k] | 0)) {
+        console.log('[dropin] no seat taken: fleet', _k, 'has', _now[_k],
+                    'human(s) and the deal already allowed for', _dealt[_k]);
+        return;
+      }
+      _dealt[_k] = (_now[_k] | 0);   // this one is accounted for now; the next is judged against it
+    }
+  } catch (_) {}
   let _seat = null;
   for (let i = 0; i < game.entities.length; i++) {
     const b = game.entities[i];
@@ -87777,15 +87834,21 @@ function spawnBots() {
   // numbers exactly (3 enemy / 2 friendly), so nothing changes for the common case.
   // (!) The human tally is no longer gated on `net.openSolo`: the local player exists offline too,
   //     and that gate is what kept this arithmetic from ever noticing them.
-  let _hB = 0, _hA = 0;
-  try {
-    if (player && player.team === LSS.TEAM_FLEET_B) _hB++;
-    else if (player && player.team === LSS.TEAM_FLEET_A) _hA++;
-  } catch (_) { _hA++; }
-  if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-    _hB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
-    _hA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
-  }
+  // ⭐⭐⭐ (v47.38) THE THIRD COPY OF THIS COUNT - and leaving it behind is what broke v47.37.
+  // Owner: "there was a bot in our game named SL+ ... and the bots on mobile device team were not
+  // in the 3, 2, 1 or in the game at all".
+  // v47.37 taught the CARDS (`_lssBotSeats`) and the REINFORCEMENT loop to count lobby peers, and
+  // missed this one - the INITIAL spawn. So the strip promised `3 - humans` while this still ran the
+  // old `openSolo`-gated tally and dealt a full three. **MEASURED, two tabs: host's own team 2 bots
+  // (right), the joiner's team 3 (one too many)** - a bot nobody's card accounted for, which is the
+  // stray that turns up hunting city ships. In the other direction, on whichever client the counts
+  // disagreed the other way, a fleet spawns none at all.
+  // ⚠ THREE PLACES HAVE TO AGREE - the cards, the initial spawn and the reinforcement top-up.
+  //   `_lssBotSeats`' own note is the warning I did not finish reading: "keeping the two in step is
+  //   the whole point of this function; when they drifted, the cards faithfully drew the 4v2 the
+  //   spawn was about to produce". There were never two. There were three.
+  const _shc = _lssHumanCounts();
+  const _hB = _shc.B, _hA = _shc.A;
   const _enemyN = Math.max(0, 3 - _hB);
   const _friendN = Math.max(0, 3 - _hA);
   // ⭐⭐ (v45.43) A SEAT THE OWNER SWITCHED OFF IN THE PICKER DOES NOT SPAWN. Owner: "click x on a
@@ -87800,8 +87863,14 @@ function spawnBots() {
     try { return (typeof _lssBotSeatIsOff === 'function') && _lssBotSeatIsOff(side, i); } catch (_) { return false; }
   };
   const enemyLoadouts = game._botShipDeal.enemy;
+  // (v47.42) Owner: "one backwards, one missing" - the missing one is an ENEMY seat that produces no
+  // bot in a ROOM but always does solo. Say out loud what each seat decided, so the next run names it
+  // instead of being inferred from a roster that lags and contains humans.
+  try { console.log('[spawnBots] enemyN', _enemyN, 'friendN', _friendN, '| humans A', _hA, 'B', _hB,
+                    '| deal', JSON.stringify(enemyLoadouts), '| off', JSON.stringify(_lssBotSeatOff('enemy'))); } catch (_) {}
   for (let i = 0; i < _enemyN; i++) {
-    if (_seatOff('enemy', i)) continue;
+    if (_seatOff('enemy', i)) { try { console.log('[spawnBots] enemy seat', i, 'SKIPPED (off)'); } catch (_) {} continue; }
+    if (!enemyLoadouts[i]) { try { console.warn('[spawnBots] enemy seat', i, 'has NO HULL in the deal - nothing built'); } catch (_) {} continue; }
     const bot = new Bot(enemyLoadouts[i], LSS.TEAM_FLEET_B, i + 1);
     const sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(LSS.TEAM_FLEET_B) : 'B');
     bot.position.copy(sp);
@@ -87818,6 +87887,19 @@ function spawnBots() {
     applyPrev(bot);
     game.entities.push(bot);
   }
+  // (v47.42) What this call actually LEFT BEHIND. The per-seat lines above say what was BUILT; this
+  // says what survived to the end of the function - which is how you tell "never created" from
+  // "created and then removed by something else".
+  // ⭐⭐⭐ (v47.43) REMEMBER THE TALLY THESE BOTS WERE DEALT AGAINST. `_dropinReplaceBot` removes a
+  // bot so a LATE human can take its seat - but `_enemyN/_friendN` above have ALREADY subtracted
+  // every human it knew about, so replacing again for one of those humans subtracts them twice.
+  // That is the missing ship. See the guard in `_dropinReplaceBot`.
+  try { game._botSeatHumans = { A: _hA, B: _hB }; } catch (_) {}
+  try {
+    console.log('[spawnBots] built:', (game.entities || [])
+      .filter(e => e && e.loadoutKey && !e.isProxy && !String(e.id).startsWith('net_'))
+      .map(e => e.id + ':' + e.loadoutKey + '/t' + e.team).join(' '));
+  } catch (_) {}
   if (net.active && typeof _botSendRoster === 'function') {
     try { _botSendRoster(); } catch (_) {}   // (v38.63) self-gates on _botAuthority
   }
@@ -89356,18 +89438,24 @@ function _lssStartSpectatorCinematic() {
   if (player && player.mesh && player.team === myTeam) {
     myShips.push({ ent: player, mesh: player.mesh, isPlayer: true });
   }
+  // ⭐⭐⭐ (v47.39) NEVER POSE A SHIP THIS CLIENT CANNOT HOLD. Owner: "one team didn't stay in their
+  // position after the cinematic".
+  // v47.32 made the lineup the starting spot by committing the slot to `ent.position` - which works
+  // only for ships this client SIMULATES. A **proxy bot** is driven by the authority's `bot_state`
+  // every frame and a **NetworkPlayer** by that peer's own broadcast, so posing either one is a
+  // loan: the next packet takes it straight back, and that is the snap. On the HOST it never showed,
+  // because the host owns its own bots; on the joiner its whole fleet is proxies.
+  // So the lineup now contains only what this client owns, and the AUTHORITY lays the rest out for
+  // real (see `_lssAuthorityFleetLine` below) so a peer's fleet is still in formation - it just
+  // arrives there authoritatively instead of being posed locally and yanked back.
+  // ⚠ The visible trade: on a peer, the flight no longer sweeps past a posed human teammate. It
+  //   sweeps past where that teammate ACTUALLY IS, which is the whole point of not moving after.
   if (Array.isArray(game.entities)) {
     for (let i = 0; i < game.entities.length; i++) {
       const e = game.entities[i];
       if (!e || !e.alive || !e.mesh) continue;
+      if (e.isProxy) continue;                 // the authority owns this one
       if (e.team === myTeam) myShips.push({ ent: e, mesh: e.mesh, isPlayer: false });
-    }
-  }
-  if (typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) {
-    for (let i = 0; i < net.networkPlayers.length; i++) {
-      const np = net.networkPlayers[i];
-      if (!np || !np.alive || !np.mesh) continue;
-      if (np.team === myTeam) myShips.push({ ent: np, mesh: np.mesh, isPlayer: false });
     }
   }
   if (myShips.length === 0) {
@@ -89573,6 +89661,120 @@ function _lssStartSpectatorCinematic() {
   try { if (_cmtSkip) console.warn('[cinematic] ' + _cmtSkip + ' slot(s) blocked - those ships kept their validated spawn'); } catch (_) {}
   try { console.log('[cinematic] lineup committed as spawn:', _cmtOk, 'ship(s)'); } catch (_) {}
 
+  // ⭐⭐ (v47.39) ...AND THE AUTHORITY LINES UP THE FLEET IT OWNS FOR SOMEBODY ELSE.
+  // The block above handles the ships THIS client simulates. In a room the bot authority also
+  // simulates the OTHER fleet's bots - which are exactly the proxies a peer was just told not to
+  // pose. Nobody else can place them, so if the authority does not, that peer's fleet spends the
+  // whole cinematic scattered across its spawn cluster.
+  // Same geometry as the lineup above (a row on the side axis, spacing and clearance test included),
+  // anchored on that fleet's OWN centroid and facing back toward this one, so the two fleets look
+  // like they are squaring off rather than both pointing the same way.
+  // ⚠ Authority only. On a peer this is a no-op - it owns none of them - and running it anyway
+  //   would be two clients writing the same positions from different anchors.
+  try {
+    const _amAuth = (typeof _botAuthority !== 'function') || _botAuthority();
+    if (_amAuth) {
+      // ⚠⚠ (v47.44) A NetworkPlayer MATCHES EVERY ONE OF THESE TESTS - alive, has a `loadoutKey`,
+      //   is not a proxy, is on the other team, has a position. So this list used to contain the
+      //   PEER'S OWN SHIP and the authority tried to place it like a bot: it cannot (that peer owns
+      //   its position and overwrites it next packet), it pushed the real bots out by a slot, and
+      //   the log said "lined up 3 ship(s)" for a two-bot fleet.
+      //   That pilot is not a row member - it is the ANCHOR the whole row hangs off.
+      // ⚠⚠ AND IT IS FOUND HERE, NOT IN `net.networkPlayers`. v47.41 looked there and came up empty
+      //   every single time (the log read `on their room` on every run, never `on their pilot`), so
+      //   the anchor fell back to the team room - which on a gmaps level is the CENTROID OF A SPAWN
+      //   CLUSTER THOUSANDS OF UNITS ACROSS, while the peer re-anchors its own row on where it
+      //   actually spawned. MEASURED over Tokyo: the joiner's own fleet 4,559 and 8,310 u away and
+      //   several hundred BELOW it. On an arena the room and the spawn nearly coincide, which is
+      //   exactly why this passed there and failed here.
+      const _foeAll = (game.entities || []).filter(e => e && e.alive && e.loadoutKey &&
+                                                       e.team !== myTeam && e.position);
+      const _isBotCls = (e) => (typeof Bot === 'undefined') || (e instanceof Bot);
+      const _foe = _foeAll.filter(e => _isBotCls(e) && !e.isProxy);
+      if (_foe.length) {
+        // ⭐⭐ (v47.40) ANCHOR ON THE SAME POINT THAT FLEET'S OWN CLIENT WILL USE, AND LEAVE THE
+        // CENTRE SEAT FOR ITS HUMAN. Owner: "the mobile player, joiner, didn't have bots in the
+        // cinematic, and i think they were in the game but somewhere else".
+        // v47.39 anchored this row on the far BOTS' centroid, which is nobody's reference point: the
+        // peer meanwhile commits ITS ship to a slot computed from its own team's SPAWN ROOM, so the
+        // two lineups were built around different origins and the peer's fleet formed up neatly a
+        // long way from the peer. Both sides now use that fleet's `sdfRoomData` room - the same
+        // source `spawnRoom` above uses for THIS fleet - falling back to the bots' centroid only
+        // when the level has no rooms.
+        // ⚠ `enemyRoom` is already resolved above for the forward vector; reuse it rather than
+        //   looking it up a second time and risking the two disagreeing.
+        // ⚠ SLOT 0 IS THE HUMAN'S. The peer's own lineup puts itself at index 0 (`_moveFront`), so
+        //   the bots start at the first free seat or the authority parks a bot on top of the pilot.
+        // ⭐⭐⭐ (v47.41) ANCHOR ON THAT FLEET'S PILOT, BECAUSE THAT IS WHAT THEIR CLIENT ANCHORS ON.
+        // Owner: "i think they were in the game but somewhere else" and then "they were floating too
+        // high i think" - the altitude was the tell.
+        // The block further up does NOT line up on `sdfRoomData` at all: once the player is in the
+        // lineup it re-anchors the whole row onto `player.position` - "lineup on spawn | slide 0".
+        // So a peer centres its row on WHERE IT ACTUALLY SPAWNED, while v47.39/40 centred that
+        // fleet's bots on the bots' centroid and then the room. Three different origins for one
+        // formation, which is the ~1,400 u gap - and the room's `y` against a spawn's `y` is exactly
+        // the "floating too high".
+        // The authority already knows their spawn: it is the NetworkPlayer it is simulating against.
+        // Anchor there and the two sides agree BY CONSTRUCTION rather than by both guessing right.
+        // ⚠ Room / centroid remain as fallbacks for a fleet with no human in it (all-bot side), where
+        //   nothing else is going to re-anchor and the row is the only thing being placed.
+        let fx, fy, fz, _anchoredOn = 'centroid';
+        let _foePilot = null;
+        try { _foePilot = _foeAll.find(e => !_isBotCls(e)) || null; } catch (_) {}
+        if (_foePilot) { fx = _foePilot.position.x; fy = _foePilot.position.y; fz = _foePilot.position.z; _anchoredOn = 'pilot'; }
+        else if (enemyRoom) { fx = enemyRoom.x; fy = enemyRoom.y; fz = enemyRoom.z; _anchoredOn = 'room'; }
+        else {
+          fx = 0; fy = 0; fz = 0;
+          for (const b of _foe) { fx += b.position.x; fy += b.position.y; fz += b.position.z; }
+          fx /= _foe.length; fy /= _foe.length; fz /= _foe.length;
+        }
+        // Face this fleet: the axis from them to us, and a side axis perpendicular to it.
+        let bx = cx - fx, bz = cz - fz;
+        const bl = Math.hypot(bx, bz);
+        if (bl > 1) { bx /= bl; bz /= bl; } else { bx = 1; bz = 0; }
+        const fsX = -bz, fsZ = bx;
+        // How many seats that fleet's humans hold. One pilot = seat 0; the bots begin after them.
+        let _fh = 0;
+        try {
+          const _hc2 = _lssHumanCounts();
+          _fh = (otherTeam === LSS.TEAM_FLEET_A) ? _hc2.A : _hc2.B;
+        } catch (_) {}
+        let _placedN = 0;
+        for (let i = 0; i < _foe.length; i++) {
+          const _si = i + _fh;                       // skip the seats the humans are standing in
+          const side = (_si === 0) ? 0 : ((_si % 2 === 1) ? Math.ceil(_si / 2) : -Math.ceil(_si / 2));
+          const off = side * SPACING;
+          const px = fx + fsX * off, py = fy, pz = fz + fsZ * off;
+          let ok = true;
+          try { if (typeof _spawnClearanceScore === 'function') ok = _spawnClearanceScore(px, py, pz).score >= 0; } catch (_) {}
+          if (!ok) continue;                       // blocked slot: leave that one where it spawned
+          _foe[i].position.set(px, py, pz);
+          if (_foe[i].velocity) _foe[i].velocity.set(0, 0, 0);
+          if (_foe[i].mesh) _foe[i].mesh.position.set(px, py, pz);
+          // ⭐⭐ (v47.42) ...AND POINT IT. Owner, with a screenshot: "one backwards, one missing".
+          // The block that lines up THIS client's own ships sets `quat` on every slot; this one only
+          // ever set POSITION, so an authority-placed ship kept whatever heading it happened to
+          // spawn with - which is why a fleet drawn up in a neat row had a hull facing the wrong way
+          // down the line.
+          // ⚠ `mesh.lookAt`, not a quaternion copy: a Bot's own per-frame sync is
+          //   `mesh.lookAt(position + targetDir)` (see Bot.update), so matching that convention is
+          //   what makes the heading SURVIVE - and `targetDir` is set with it so the first frame of
+          //   movement does not immediately swing the nose back.
+          try {
+            if (_foe[i].targetDir && _foe[i].targetDir.set) _foe[i].targetDir.set(bx, 0, bz);
+            if (_foe[i].mesh) _foe[i].mesh.lookAt(px + bx * 100, py, pz + bz * 100);
+          } catch (_) {}
+          _placedN++;
+        }
+        // (v47.48) `_placedN`, not `_foe.length`: a blocked slot `continue`s above, so the old line
+        // reported ships it had not moved - which is exactly the kind of log that sends the next
+        // session looking somewhere else.
+        try { console.log('[cinematic] authority lined up', _placedN, 'of', _foe.length,
+                          'ship(s) of the other fleet on their', _anchoredOn); } catch (_) {}
+      }
+    }
+  } catch (e) { try { console.warn('[cinematic] far-fleet lineup failed:', e && e.message); } catch (_) {} }
+
   // Apply initial pose immediately so no one-frame pop from first-person.
   for (let i = 0; i < _cinematic.ships.length; i++) {
     const s = _cinematic.ships[i];
@@ -89589,7 +89791,26 @@ function _lssStartSpectatorCinematic() {
   // seven ships the sweep passes the middle of the line close up rather than backing off until
   // everything fits, which is what made the ships look small. Knobs: window.__cine.
   const _CN = window.__cine || (window.__cine = {});
-  const _lineHalf = (NS > 1) ? (SPACING * (NS - 1) * 0.5) : 0;
+  // ⭐⭐ (v47.40) FRAME THE WHOLE FLEET, EVEN THOUGH WE ONLY POSE WHAT WE OWN. Owner: "right tab
+  // bots were not in the cinematic".
+  // v47.39 correctly stopped a client posing proxies it cannot hold, which shrank `myShips` on a
+  // JOINER to one ship - itself - and this radius follows `NS`. So the camera framed a single hull
+  // and the fleet, which the authority had by then parked right beside it, sat outside the shot.
+  // The ships are THERE; only the composition was wrong. Count every hull on this fleet for the
+  // framing - owned, proxy and peer alike - and keep posing just the owned ones.
+  let _fleetN = NS;
+  try {
+    let _extra = 0;
+    for (const e of (game.entities || [])) {
+      if (!e || !e.alive || !e.loadoutKey || e.team !== myTeam) continue;
+      if (e.isProxy) _extra++;                       // authority-driven, framed but never posed
+    }
+    if (typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) {
+      for (const np of net.networkPlayers) if (np && np.alive && np.team === myTeam) _extra++;
+    }
+    _fleetN = NS + _extra;
+  } catch (_) {}
+  const _lineHalf = (_fleetN > 1) ? (SPACING * (_fleetN - 1) * 0.5) : 0;
   const camAhead = Math.max((_CN.min != null) ? _CN.min : 150,
                    Math.min((_CN.max != null) ? _CN.max : 420,
                             _lineHalf * ((_CN.spread != null) ? _CN.spread : 0.70) + ((_CN.pad != null) ? _CN.pad : 130)));
@@ -89649,6 +89870,83 @@ function _lssShipEngineFX(mesh) {
   if (Array.isArray(ud.engineGlows))  for (const g of ud.engineGlows)  if (g) out.push(g);
   try { mesh.traverse(c => { if (c && c.userData && c.userData.isPlume && out.indexOf(c) < 0) out.push(c); }); } catch (_) {}
   return out;
+}
+
+// ⭐⭐⭐ (v47.48) KEEP THE FAR FLEET GLUED TO ITS PILOT FOR THE WHOLE OF WARMUP.
+// Owner: "they weren't in the cinematic, and then during the countdown they were in random
+// position" - on Custom Location, still true after v47.47 put the spawn placement back in front of
+// the cinematic. v47.47 fixed the ORDER on each client; this fixes the order BETWEEN them.
+// The authority lines up the other fleet's bots on that fleet's NetworkPlayer (v47.41), reading the
+// position that peer last broadcast. But a peer relocates itself when ITS OWN city build finishes
+// ("[lss-earth] player placed at spawn"), and its clients build at their own pace - measured in one
+// Tokyo room, prebake 2,820 ms on the host against 7,012 ms on the joiner. So the authority drew a
+// perfectly good line around where that peer USED to be, and the peer then walked away from it.
+// **MEASURED**: joiner's own two wingmen frozen 939 u and 1,318 u away through the whole countdown,
+// while the authority's log cheerfully read "lined up 2 ship(s) ... on their pilot".
+// Chasing the timing is the fragile fix - there is always one more thing that can move a peer after
+// the handshake. So stop placing ONCE and start HOLDING: re-check at ~4 Hz while warmup runs, and
+// re-form only when the formation is actually broken. Once glued it costs one distance test.
+// ⚠ Authority only, pilot only, warmup only. With no human on that fleet nothing can drift, so the
+//   cinematic's own placement (which has the room / centroid fallbacks this does not) stands.
+// ⚠ The trigger is the FORMATION being wrong, not the anchor having moved - that way it also heals
+//   a fleet scattered by something else entirely, which is exactly how this bug kept coming back
+//   wearing a different hat.
+function _lssAuthorityFleetLine() {
+  try {
+    if (typeof _botAuthority === 'function' && !_botAuthority()) return 0;
+    if (typeof player === 'undefined' || !player || !player.position || player.team == null) return 0;
+    const myTeam = player.team;
+    const otherTeam = (myTeam === LSS.TEAM_FLEET_B) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B;
+    const _all = (game.entities || []).filter(e => e && e.alive && e.loadoutKey &&
+                                                  e.team === otherTeam && e.position);
+    const _isBotCls = (e) => (typeof Bot === 'undefined') || (e instanceof Bot);
+    const _foe = _all.filter(e => _isBotCls(e) && !e.isProxy);
+    const _pilot = _all.find(e => !_isBotCls(e)) || null;
+    if (!_foe.length || !_pilot) return 0;
+    const fx = _pilot.position.x, fy = _pilot.position.y, fz = _pilot.position.z;
+    const SPACING = 220;   // the cinematic's own cap; a lineup never spreads wider than this
+    // ⭐⭐ (v47.48b) TRACK, DO NOT CATCH UP. Owner, on the 4 Hz version: "it started in the cinematic
+    // okay... then they changed positions like 3 times" / "mostly rotating on spot".
+    // The first cut re-formed only when the formation was already badly broken (worst > 3x spacing),
+    // checked 4 times a second - so every time the pilot's position landed on this client (its own
+    // spawn placement, then each `player_state` packet after it) the fleet TELEPORTED to catch up,
+    // and the owner watched three of those corrections inside one shot. On a peer those jumps are
+    // worse than they sound: a proxy re-aims itself off its position delta, so each teleport also
+    // spun the hull - "rotating on spot".
+    // Recomputed EVERY warmup frame against the live pilot instead, the fleet simply IS beside that
+    // pilot: when the anchor does not move there is nothing to see, and when it jumps the whole
+    // formation jumps with it in the same frame rather than a quarter-second later.
+    // ⚠ Writing every frame is also what keeps the fleet STILL, which is the actual requirement -
+    //   "they shouldn't move after the cinematic... that's its starting spot". Four bots, a handful
+    //   of vector ops, and the write is skipped outright when every ship is already on its slot.
+    let bx = player.position.x - fx, bz = player.position.z - fz;
+    const bl = Math.hypot(bx, bz);
+    if (bl > 1) { bx /= bl; bz /= bl; } else { bx = 1; bz = 0; }
+    const fsX = -bz, fsZ = bx;
+    let _fh = 0;   // seats that fleet's own humans stand in; the bots begin after them
+    try { const h = _lssHumanCounts(); _fh = (otherTeam === LSS.TEAM_FLEET_A) ? (h.A | 0) : (h.B | 0); } catch (_) {}
+    let _placed = 0, _moved = 0;
+    for (let i = 0; i < _foe.length; i++) {
+      const _si = i + _fh;
+      const side = (_si === 0) ? 0 : ((_si % 2 === 1) ? Math.ceil(_si / 2) : -Math.ceil(_si / 2));
+      const off = side * SPACING;
+      const px = fx + fsX * off, py = fy, pz = fz + fsZ * off;
+      const _d = Math.hypot(_foe[i].position.x - px, _foe[i].position.y - py, _foe[i].position.z - pz);
+      if (_d < 1) continue;                  // already on its slot: no write, nothing to re-aim
+      if (_d > 50) _moved++;                 // only a real correction is worth a log line
+      _foe[i].position.set(px, py, pz);
+      if (_foe[i].velocity) _foe[i].velocity.set(0, 0, 0);
+      if (_foe[i].mesh) _foe[i].mesh.position.set(px, py, pz);
+      // (v47.42) point it down the line too - `mesh.lookAt` to match Bot.update's own convention,
+      // and `targetDir` with it so the first frame of movement does not swing the nose back.
+      try {
+        if (_foe[i].targetDir && _foe[i].targetDir.set) _foe[i].targetDir.set(bx, 0, bz);
+        if (_foe[i].mesh) _foe[i].mesh.lookAt(px + bx * 100, py, pz + bz * 100);
+      } catch (_) {}
+      _placed++;
+    }
+    return _moved;
+  } catch (_) { return 0; }
 }
 
 function _lssEndSpectatorCinematic() {
@@ -98750,6 +99048,13 @@ function updateRoundSystem(dt) {
     game.warmupTimer = ((typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') && game._swPreloading) ? 0.1 : 0;   
   }
   if (game.state === 'warmup') {
+    // (v47.48) Hold the other fleet on its pilot while warmup runs - see _lssAuthorityFleetLine.
+    // Every frame, and a no-op the moment every ship is already on its slot, so the steady state
+    // costs one distance test per bot per frame and writes nothing.
+    try {
+      const _rg = _lssAuthorityFleetLine();
+      if (_rg) console.log('[cinematic] re-formed', _rg, 'far-fleet ship(s) on their pilot');
+    } catch (_) {}
     const prev = game.warmupTimer;
     // Wall-clock-anchored ; alt-tab safe.
     _tickTimer('warmupTimer');
@@ -99032,14 +99337,13 @@ function updateRoundSystem(dt) {
         // they are on, so the top-up cannot assume Fleet A is theirs. Without this the reinforcement
         // loop would keep restoring the 4v2 every few seconds even after spawnBots got it right.
         let _rhB = 0, _rhA = 0;
+        // (v47.37) THE SAME COUNT THE CARDS USE. Keeping these two in step is the stated point of
+        // _lssBotSeats - "when they drifted, the cards faithfully drew the 4v2 the spawn was about
+        // to produce" - so they now share `_lssHumanCounts` rather than repeating the arithmetic.
         try {
-          if (player && player.team === LSS.TEAM_FLEET_B) _rhB++;
-          else if (player && player.team === LSS.TEAM_FLEET_A) _rhA++;
+          const _rhc = _lssHumanCounts();
+          _rhB = _rhc.B; _rhA = _rhc.A;
         } catch (_) { _rhA++; }
-        if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-          _rhB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
-          _rhA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
-        }
         let _needB = Math.max(0, 3 - _rhB), _needA = Math.max(0, 3 - _rhA);
         // ⭐ (v45.43) ...and the seats the owner REMOVED in the picker stay removed. Without this the
         // reinforcement loop would put a deleted bot straight back every few seconds - the same
@@ -107225,6 +107529,104 @@ function _lssBotToggleSeat(side, idx) {
 // (v45.43) Each entry is now `{ key, idx, off }` rather than a bare hull string: the card has to
 // draw a REMOVED seat too (that card is the only way to put it back), and it needs the seat's real
 // index to address the flag. `idx` is the deal index, so it survives any number of seats being off.
+// ⭐⭐⭐ (v47.37) HOW MANY HUMANS ARE ON EACH FLEET - the one answer both the CARDS and the SPAWN
+// need, so they cannot drift. Owner: "when the other player joined the room, they didn't take a
+// bot's player card space... there just was a new card active... so it showed 7 cards instead of 6.
+// humans joining will replace bot cards."
+// ⚠ The replacement arithmetic was ALREADY RIGHT (`Math.max(0, 3 - humans)`, v45.41). What was
+//   wrong was the COUNT feeding it, in two ways, both of which made a lobby joiner invisible:
+//     1. it was gated on `net.openSolo`, so in an ordinary room peers were never counted at all;
+//     2. it read `net.networkPlayers` - the IN-WORLD peer entities - which is empty in the picker,
+//        where the humans exist only as `net.peers`.
+//   So the strip drew YOU + every peer + a full bot hand: seven cards for a two-human room.
+// ⚠ Counts `net.peers` FIRST and only falls back to `networkPlayers`, rather than summing both -
+//   in a live match a peer is present in both lists and would otherwise be counted twice, which
+//   would silently delete a bot seat per peer.
+// Overflow is the owner's rule and comes for free: past three per side `Math.max(0, 3 - n)` is 0
+// bots and the extra humans simply get their own cards.
+function _lssHumanCounts() {
+  const out = { A: 0, B: 0 };
+  try {
+    const TA = LSS.TEAM_FLEET_A, TB = LSS.TEAM_FLEET_B;
+    if (typeof player !== 'undefined' && player) {
+      if (player.team === TB) out.B++; else if (player.team === TA) out.A++;
+    }
+    if (typeof net === 'undefined' || !net || !net.active) return out;
+    let counted = 0;
+    if (net.peers && typeof net.peers.forEach === 'function') {
+      net.peers.forEach((peer, peerId) => {
+        try {
+          if (typeof _peerIsJudge === 'function' && _peerIsJudge(peer)) return;
+          let t = (peer && peer.team !== undefined && peer.team !== null) ? peer.team : null;
+          if (t === null && typeof _teamForPeerId === 'function') t = _teamForPeerId(peerId);
+          if (t === null || t === undefined) return;
+          if (t === TB) { out.B++; counted++; } else if (t === TA) { out.A++; counted++; }
+        } catch (_) {}
+      });
+    }
+    if (!counted && Array.isArray(net.networkPlayers)) {
+      for (const np of net.networkPlayers) {
+        if (!np || np.team === undefined || np.team === null) continue;
+        if (np.team === TB) out.B++; else if (np.team === TA) out.A++;
+      }
+    }
+  } catch (_) {}
+  return out;
+}
+// (v47.40) `window.__seats()` - what the seat arithmetic actually believes, from a device console.
+// `net` is closure-scoped, so a room's human tally cannot otherwise be inspected where it matters.
+try {
+  if (typeof window !== 'undefined') window.__seats = function () {
+    const o = { humans: null, seats: null, peers: [], err: null };
+    try { o.humans = _lssHumanCounts(); } catch (e) { o.err = String(e && e.message); }
+    try { o.seats = _lssBotSeats(); } catch (_) {}
+    try { o.myTeam = (typeof player !== 'undefined' && player) ? player.team : null; } catch (_) {}
+    try {
+      if (typeof net !== 'undefined' && net && net.peers && net.peers.forEach) {
+        net.peers.forEach((p, id) => {
+          let t = (p && p.team !== undefined && p.team !== null) ? p.team : null;
+          let dt = null;
+          try { if (t === null && typeof _teamForPeerId === 'function') dt = _teamForPeerId(id); } catch (_) {}
+          o.peers.push({ id: String(id).slice(0, 8), team: t, derived: dt,
+                         judge: (typeof _peerIsJudge === 'function') ? !!_peerIsJudge(p) : null });
+        });
+      }
+    } catch (_) {}
+    return o;
+  };
+} catch (_) {}
+// (v47.46) `window.__ents()` - EVERY ship in the world, with where it actually is relative to me.
+// The fleet-placement bugs are all "the joiner's own fleet is somewhere else", and answering that
+// from a scoreboard (which shows names, not metres) or from a roster (which lags and contains
+// humans) has cost several wrong diagnoses. This is the flat truth, callable at the cinematic beat
+// from either client: id, team, whether it is a proxy or a real bot or a NETWORK PILOT, and its
+// distance + height offset from this client's own ship.
+try {
+  if (typeof window !== 'undefined') window.__ents = function () {
+    const out = { me: null, state: null, mine: [], foe: [], other: [] };
+    try { out.state = game.state; } catch (_) {}
+    let px = 0, py = 0, pz = 0, myTeam = null;
+    try {
+      px = player.position.x; py = player.position.y; pz = player.position.z; myTeam = player.team;
+      out.me = { team: myTeam, x: Math.round(px), y: Math.round(py), z: Math.round(pz) };
+    } catch (_) {}
+    try {
+      for (const e of (game.entities || [])) {
+        if (!e || !e.position || !e.loadoutKey) continue;
+        const dx = e.position.x - px, dy = e.position.y - py, dz = e.position.z - pz;
+        const row = { id: String(e.id), key: e.loadoutKey, team: e.team, alive: !!e.alive,
+                      kind: (typeof Bot !== 'undefined' && (e instanceof Bot))
+                              ? (e.isProxy ? 'proxy' : 'bot') : 'pilot',
+                      dist: Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz)), dY: Math.round(dy) };
+        if (e.team === myTeam) out.mine.push(row);
+        else if (e.team != null) out.foe.push(row);
+        else out.other.push(row);
+      }
+    } catch (_) {}
+    try { out.camFromMe = Math.round(camera.position.distanceTo(player.position)); } catch (_) {}
+    return out;
+  };
+} catch (_) {}
 function _lssBotSeats() {
   const out = { friendly: [], enemy: [] };
   try {
@@ -107239,13 +107641,8 @@ function _lssBotSeats() {
     // (v45.41) the same arithmetic spawnBots runs, local player included - see the seat note there.
     // Keeping the two in step is the whole point of this function; when they drifted, the cards
     // faithfully drew the 4v2 the spawn was about to produce.
-    let _hB = 0, _hA = 0;
-    if (player && player.team === LSS.TEAM_FLEET_B) _hB++;
-    else if (player && player.team === LSS.TEAM_FLEET_A) _hA++;
-    if (net && net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-      _hB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
-      _hA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
-    }
+    const _hc = _lssHumanCounts();          // (v47.37) lobby peers included - see the note there
+    const _hB = _hc.B, _hA = _hc.A;
     const eN = Math.max(0, 3 - _hB), fN = Math.max(0, 3 - _hA);
     // (v45.43) `off` rides along instead of filtering: a removed seat still gets a card, because
     // that card carries the + that brings it back. See _lssBotSeatOff for why the index is the key.
@@ -107937,10 +108334,33 @@ function _lssEarthWorldPending() {
     if (typeof game === 'undefined' || !game) return false;
     // (v47.33) The room already agreed this world was built, 1.5 s before the shared launch
     // instant - see the note in scheduleLaunch. Re-litigating it per peer only de-syncs the lift.
-    if (game._launchCurtainFree) return false;
     if (typeof _lssEarthCurtainArmed !== 'function' || !_lssEarthCurtainArmed()) return false;
     if (!(_lssEarthCurtainT0 === 0 ||
           (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) return false;
+    // ⭐⭐⭐ (v47.47) THIS WORLD'S OWN SPAWN PLACEMENT OUTRANKS THE ROOM'S CURTAIN AGREEMENT.
+    // Owner: "they weren't in the cinematic, and then during the countdown they were in random
+    // position" - on Custom Location only, and this ordering is the whole reason.
+    // `_launchCurtainFree` (v47.33) used to sit ABOVE these lines and short-circuit the entire
+    // function, on the argument that the room had already agreed the world was built. It had agreed
+    // about the TILES. It had not agreed about the spawn placement, which runs after
+    // `await tiles.ready` much further down `_lssGmapsBuildLevel` and RE-DRAWS THE PLAYER AND EVERY
+    // BOT on `getValidSpawnPoint`. So the sequence was:
+    //     launch instant -> curtain free -> nothing pending -> CINEMATIC LINES EVERYONE UP AND
+    //     COMMITS THE SLOTS  ->  tiles.ready resolves  ->  "[lss-earth] re-placed 5 bots on their
+    //     team ends"  ->  countdown opens on a fleet scattered across a 9,600 u team end.
+    // **MEASURED** over Tokyo, host and joiner alike: `lineup committed as spawn: 3 ship(s)` with
+    // zero blocked slots, yet at countdown the two wingmen sat 1,007 u and 1,247 u from their own
+    // pilot - 240 u apart, i.e. a perfectly intact formation that the player was no longer standing
+    // in, because the re-place had drawn everyone fresh numbers afterwards. An arena never showed it:
+    // it has no post-build re-place at all, and its spawn points are a few hundred units apart.
+    // A room-wide flag cannot answer a question about THIS client's own build, so it no longer
+    // gets to. Bounded by the two lines above, which is why this sits under them and not over them:
+    // the curtain's own deadline still wins, and a build that dies before setting the flag cannot
+    // hang the launch (`_spawnPlaced = true` is also set on the failure path, by design).
+    try {
+      if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps._spawnPlaced === false) return true;
+    } catch (_) {}
+    if (game._launchCurtainFree) return false;
       const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
       // The level build is async; until it has constructed the world there is
       // nothing to ask, and "nothing to ask" is not "ready".
@@ -136479,6 +136899,16 @@ function updateScoreboard() {
     const mkList = (team) => {
       const list = [];
       for (const b of game.entities) {
+        // ⭐⭐ (v47.45) BOTS ONLY. `game.entities` holds NetworkPlayers beside the bots, and every
+        // one of them matched the `.team` test - so each connected human was drawn TWICE: once as a
+        // bare row wearing its hull name (indistinguishable from a bot) and once more as its real
+        // `[NET]` row below. **MEASURED**: a 2-human 4-bot room showed FLEET B as
+        // `BLASTER / VORTEX / VORTEX / [NET] VORTEX`. Owner: "the bot count is wrong on the
+        // scoreboard" / "the teams on the scorecard is wrong".
+        // `_lssIsBot` is the predicate written for exactly this - the fleet chips were fixed with it
+        // and this list was missed. The `.loadout` guard is the cyber branch's warning applied here:
+        // carrier / traffic pseudo-entities live in this array too and have no loadout to name.
+        if (!_lssIsBot(b) || !b.loadout) continue;
         if (b.team !== team) continue;
         if (_asltSB && !b.alive) continue;
         list.push({ n: b.loadout.name, s: statusOf(b), k: b.kills || 0, d: b.damageDealt || 0, me: false });
@@ -138313,7 +138743,28 @@ class LSSEarthTiles {
     this.cyberpunk       = opts.cyberpunk       ?? true;
     this.ads             = opts.ads             ?? true;
     this.maxDemZoom      = opts.maxDemZoom      ?? 15;    // Re:Earth tops out at 15
-    this.imageryCanvasPx = opts.imageryCanvasPx ?? 3072;
+    // ⭐⭐⭐ (v47.36) A PHONE CANNOT HOLD 3072² PER PATCH. Owner: "i got a gpu context lost on my
+    // phone, just after the match started, but everything else seemed good before that".
+    // MEASURED in the mobile preset over a Custom Location: **1,245 MB of live GL objects** -
+    // textures 892 MB across just 130 objects against buffers 357 MB across 9,222 - with **ten
+    // textures at 48.2 MB each**. That is this line: `LSSEarthWorld` streams PATCHES and each one
+    // builds its own ring 0 at the full budget (3072² RGBA = 37.7 MB, ~48 with mipmaps), so the
+    // cost is per patch, not per level. 482 MB of imagery from ten objects.
+    // ⚠ v45.97 already fought this ("940 MB of imagery in total... the driver pages") and capped
+    //   the OUTER rings at 1024. Ring 0 was deliberately left at full detail - "that is the ground
+    //   you fly over" - which is right on a desktop and is what kills a phone, because the ring-0
+    //   exemption is exactly the one that repeats per streamed patch.
+    // A phone renders this at 375 CSS px wide; it cannot resolve 3072² of ground under any
+    // circumstances. Matching the outer-ring cap takes each patch from ~48 MB to ~5.6 MB.
+    // ⚠ NOT a quality preset: this is a hard memory ceiling, so it keys off the DEVICE rather than
+    //   the graphics tier. `window.__earthImgPx` overrides it for testing either way.
+    this.imageryCanvasPx = opts.imageryCanvasPx ?? (function () {
+      try {
+        if (typeof window !== 'undefined' && typeof window.__earthImgPx === 'number') return window.__earthImgPx;
+        if (typeof lssIsMobileDevice === 'function' && lssIsMobileDevice()) return 1024;
+      } catch (_) {}
+      return 3072;
+    })();
     this.heightScale     = opts.heightScale     ?? 1;
     // Spatial chunking. NOT a micro-optimisation: one merged mesh per layer
     // measured 32 ms PER RAYCAST (the gmaps tick casts twice per entity per
@@ -142573,6 +143024,14 @@ async function _lssGmapsBuildLevel(level) {
               let _moved = 0;
               for (const _b of game.entities) {
                 if (!_b || !_b.loadoutKey || !_b.position) continue;   // skip city traffic (earthKind)
+                // ⭐⭐ (v47.47) BOTS THIS CLIENT OWNS. NOTHING ELSE.
+                // The log read "re-placed 5 bots" in a room holding FOUR - the fifth was the remote
+                // human, who matches `loadoutKey` like everything else here. Teleporting a
+                // NetworkPlayer is a loan the next packet calls in, so it buys nothing and shows as
+                // a yank; and a PROXY belongs to the bot authority, which is re-placing it on its
+                // own side and sending it over. Same filter family as the scoreboard and the
+                // cinematic row - see `_lssIsBot`.
+                if (!_lssIsBot(_b) || _b.isProxy) continue;
                 const _bt = (typeof LSS !== 'undefined' && _b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
                 const _bp = getValidSpawnPoint(_bt);
                 if (!_bp) continue;

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.35";
+const LSS_BUILD = "47.49";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -29794,6 +29794,14 @@ class OwCarrier {
     try { _owCarrierDied(this); } catch (e) { console.warn('[cities] carrier death handler threw:', e); }
   }
   destroy() {
+    try {
+      if (typeof window !== 'undefined' && window.__botDestroyLog) {
+        const _st = ((new Error()).stack || '').split(String.fromCharCode(10)).slice(1, 5);
+        console.warn('[bot destroy] id', this.id, this.loadoutKey, 't' + this.team,
+                     '| state', (typeof game !== 'undefined' && game) ? game.state : '?',
+                     '| alive', this.alive, _st);
+      }
+    } catch (_) {}
     this._chargeEnd();
     try { if (this.mesh) scene.remove(this.mesh); } catch (_) {}
     const i = game.entities.indexOf(this); if (i >= 0) game.entities.splice(i, 1);
@@ -55216,8 +55224,10 @@ function _botSendRoster(toPeerId) {
   if (!_botAuthority()) return;   // (v38.63) one gate — see _botAuthority
   const bots = [];
   for (const b of game.entities) {
-    if (!(b instanceof Bot) || b.isProxy || !b.alive) continue;
+    if (!(b instanceof Bot) || b.isProxy) continue;
     bots.push({ i: b.id, k: b.loadoutKey, t: (b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A', h: b.hoardModelKey || null, n: b.isNemesis ? 1 : 0,
+      a: b.alive ? 1 : 0,   // (v47.45) so a late joiner builds a dead bot as a dead shell, not a ghost
+
       tm: b.team, c: (b._owCity != null) ? b._owCity : -1 });   // (v38.79) numeric team + overworld city
   }
   const rt = (game.endlessRun && game.endlessRun.startedAt) ? (Date.now() - game.endlessRun.startedAt) / 1000 : undefined;
@@ -55260,6 +55270,9 @@ function _botApplyRoster(rows) {
       b.isProxy = true;
       if (r.c != null && r.c >= 0) b._owCity = r.c;   // (v38.79) an overworld city fleet proxy
       if (r.n) { try { b.isNemesis = true; } catch (_) {} }
+      if (r.a === 0) {
+        try { b.alive = false; b.doomed = false; b.shipState = 'dead'; if (b.mesh) b.mesh.visible = false; } catch (_) {}
+      }
       game.entities.push(b);
     } catch (e) { console.warn('[dropin] proxy spawn failed:', e); }
   }
@@ -55267,6 +55280,19 @@ function _botApplyRoster(rows) {
 
 function _dropinReplaceBot(team, toPeerId) {
   if (!net || !net.openSolo) return;
+  try {
+    const _dealt = game._botSeatHumans;
+    if (_dealt) {
+      const _now = _lssHumanCounts();
+      const _k = (team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
+      if ((_now[_k] | 0) <= (_dealt[_k] | 0)) {
+        console.log('[dropin] no seat taken: fleet', _k, 'has', _now[_k],
+                    'human(s) and the deal already allowed for', _dealt[_k]);
+        return;
+      }
+      _dealt[_k] = (_now[_k] | 0);   // this one is accounted for now; the next is judged against it
+    }
+  } catch (_) {}
   let _seat = null;
   for (let i = 0; i < game.entities.length; i++) {
     const b = game.entities[i];
@@ -55321,23 +55347,19 @@ function spawnBots() {
     _lssDealBotShips();
   }
   game._botShipDeal.fromPicker = false;
-  let _hB = 0, _hA = 0;
-  try {
-    if (player && player.team === LSS.TEAM_FLEET_B) _hB++;
-    else if (player && player.team === LSS.TEAM_FLEET_A) _hA++;
-  } catch (_) { _hA++; }
-  if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-    _hB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
-    _hA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
-  }
+  const _shc = _lssHumanCounts();
+  const _hB = _shc.B, _hA = _shc.A;
   const _enemyN = Math.max(0, 3 - _hB);
   const _friendN = Math.max(0, 3 - _hA);
   const _seatOff = (side, i) => {
     try { return (typeof _lssBotSeatIsOff === 'function') && _lssBotSeatIsOff(side, i); } catch (_) { return false; }
   };
   const enemyLoadouts = game._botShipDeal.enemy;
+  try { console.log('[spawnBots] enemyN', _enemyN, 'friendN', _friendN, '| humans A', _hA, 'B', _hB,
+                    '| deal', JSON.stringify(enemyLoadouts), '| off', JSON.stringify(_lssBotSeatOff('enemy'))); } catch (_) {}
   for (let i = 0; i < _enemyN; i++) {
-    if (_seatOff('enemy', i)) continue;
+    if (_seatOff('enemy', i)) { try { console.log('[spawnBots] enemy seat', i, 'SKIPPED (off)'); } catch (_) {} continue; }
+    if (!enemyLoadouts[i]) { try { console.warn('[spawnBots] enemy seat', i, 'has NO HULL in the deal - nothing built'); } catch (_) {} continue; }
     const bot = new Bot(enemyLoadouts[i], LSS.TEAM_FLEET_B, i + 1);
     const sp = getValidSpawnPoint(_isAssault() ? _assaultSpawnSide(LSS.TEAM_FLEET_B) : 'B');
     bot.position.copy(sp);
@@ -55354,6 +55376,12 @@ function spawnBots() {
     applyPrev(bot);
     game.entities.push(bot);
   }
+  try { game._botSeatHumans = { A: _hA, B: _hB }; } catch (_) {}
+  try {
+    console.log('[spawnBots] built:', (game.entities || [])
+      .filter(e => e && e.loadoutKey && !e.isProxy && !String(e.id).startsWith('net_'))
+      .map(e => e.id + ':' + e.loadoutKey + '/t' + e.team).join(' '));
+  } catch (_) {}
   if (net.active && typeof _botSendRoster === 'function') {
     try { _botSendRoster(); } catch (_) {}   // (v38.63) self-gates on _botAuthority
   }
@@ -56245,14 +56273,8 @@ function _lssStartSpectatorCinematic() {
     for (let i = 0; i < game.entities.length; i++) {
       const e = game.entities[i];
       if (!e || !e.alive || !e.mesh) continue;
+      if (e.isProxy) continue;                 // the authority owns this one
       if (e.team === myTeam) myShips.push({ ent: e, mesh: e.mesh, isPlayer: false });
-    }
-  }
-  if (typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) {
-    for (let i = 0; i < net.networkPlayers.length; i++) {
-      const np = net.networkPlayers[i];
-      if (!np || !np.alive || !np.mesh) continue;
-      if (np.team === myTeam) myShips.push({ ent: np, mesh: np.mesh, isPlayer: false });
     }
   }
   if (myShips.length === 0) {
@@ -56387,6 +56409,57 @@ function _lssStartSpectatorCinematic() {
   try { if (_cmtSkip) console.warn('[cinematic] ' + _cmtSkip + ' slot(s) blocked - those ships kept their validated spawn'); } catch (_) {}
   try { console.log('[cinematic] lineup committed as spawn:', _cmtOk, 'ship(s)'); } catch (_) {}
 
+  try {
+    const _amAuth = (typeof _botAuthority !== 'function') || _botAuthority();
+    if (_amAuth) {
+      const _foeAll = (game.entities || []).filter(e => e && e.alive && e.loadoutKey &&
+                                                       e.team !== myTeam && e.position);
+      const _isBotCls = (e) => (typeof Bot === 'undefined') || (e instanceof Bot);
+      const _foe = _foeAll.filter(e => _isBotCls(e) && !e.isProxy);
+      if (_foe.length) {
+        let fx, fy, fz, _anchoredOn = 'centroid';
+        let _foePilot = null;
+        try { _foePilot = _foeAll.find(e => !_isBotCls(e)) || null; } catch (_) {}
+        if (_foePilot) { fx = _foePilot.position.x; fy = _foePilot.position.y; fz = _foePilot.position.z; _anchoredOn = 'pilot'; }
+        else if (enemyRoom) { fx = enemyRoom.x; fy = enemyRoom.y; fz = enemyRoom.z; _anchoredOn = 'room'; }
+        else {
+          fx = 0; fy = 0; fz = 0;
+          for (const b of _foe) { fx += b.position.x; fy += b.position.y; fz += b.position.z; }
+          fx /= _foe.length; fy /= _foe.length; fz /= _foe.length;
+        }
+        let bx = cx - fx, bz = cz - fz;
+        const bl = Math.hypot(bx, bz);
+        if (bl > 1) { bx /= bl; bz /= bl; } else { bx = 1; bz = 0; }
+        const fsX = -bz, fsZ = bx;
+        let _fh = 0;
+        try {
+          const _hc2 = _lssHumanCounts();
+          _fh = (otherTeam === LSS.TEAM_FLEET_A) ? _hc2.A : _hc2.B;
+        } catch (_) {}
+        let _placedN = 0;
+        for (let i = 0; i < _foe.length; i++) {
+          const _si = i + _fh;                       // skip the seats the humans are standing in
+          const side = (_si === 0) ? 0 : ((_si % 2 === 1) ? Math.ceil(_si / 2) : -Math.ceil(_si / 2));
+          const off = side * SPACING;
+          const px = fx + fsX * off, py = fy, pz = fz + fsZ * off;
+          let ok = true;
+          try { if (typeof _spawnClearanceScore === 'function') ok = _spawnClearanceScore(px, py, pz).score >= 0; } catch (_) {}
+          if (!ok) continue;                       // blocked slot: leave that one where it spawned
+          _foe[i].position.set(px, py, pz);
+          if (_foe[i].velocity) _foe[i].velocity.set(0, 0, 0);
+          if (_foe[i].mesh) _foe[i].mesh.position.set(px, py, pz);
+          try {
+            if (_foe[i].targetDir && _foe[i].targetDir.set) _foe[i].targetDir.set(bx, 0, bz);
+            if (_foe[i].mesh) _foe[i].mesh.lookAt(px + bx * 100, py, pz + bz * 100);
+          } catch (_) {}
+          _placedN++;
+        }
+        try { console.log('[cinematic] authority lined up', _placedN, 'of', _foe.length,
+                          'ship(s) of the other fleet on their', _anchoredOn); } catch (_) {}
+      }
+    }
+  } catch (e) { try { console.warn('[cinematic] far-fleet lineup failed:', e && e.message); } catch (_) {} }
+
   for (let i = 0; i < _cinematic.ships.length; i++) {
     const s = _cinematic.ships[i];
     s.mesh.visible = true;
@@ -56397,7 +56470,19 @@ function _lssStartSpectatorCinematic() {
   }
 
   const _CN = window.__cine || (window.__cine = {});
-  const _lineHalf = (NS > 1) ? (SPACING * (NS - 1) * 0.5) : 0;
+  let _fleetN = NS;
+  try {
+    let _extra = 0;
+    for (const e of (game.entities || [])) {
+      if (!e || !e.alive || !e.loadoutKey || e.team !== myTeam) continue;
+      if (e.isProxy) _extra++;                       // authority-driven, framed but never posed
+    }
+    if (typeof net !== 'undefined' && net && Array.isArray(net.networkPlayers)) {
+      for (const np of net.networkPlayers) if (np && np.alive && np.team === myTeam) _extra++;
+    }
+    _fleetN = NS + _extra;
+  } catch (_) {}
+  const _lineHalf = (_fleetN > 1) ? (SPACING * (_fleetN - 1) * 0.5) : 0;
   const camAhead = Math.max((_CN.min != null) ? _CN.min : 150,
                    Math.min((_CN.max != null) ? _CN.max : 420,
                             _lineHalf * ((_CN.spread != null) ? _CN.spread : 0.70) + ((_CN.pad != null) ? _CN.pad : 130)));
@@ -56448,6 +56533,48 @@ function _lssShipEngineFX(mesh) {
   if (Array.isArray(ud.engineGlows))  for (const g of ud.engineGlows)  if (g) out.push(g);
   try { mesh.traverse(c => { if (c && c.userData && c.userData.isPlume && out.indexOf(c) < 0) out.push(c); }); } catch (_) {}
   return out;
+}
+
+function _lssAuthorityFleetLine() {
+  try {
+    if (typeof _botAuthority === 'function' && !_botAuthority()) return 0;
+    if (typeof player === 'undefined' || !player || !player.position || player.team == null) return 0;
+    const myTeam = player.team;
+    const otherTeam = (myTeam === LSS.TEAM_FLEET_B) ? LSS.TEAM_FLEET_A : LSS.TEAM_FLEET_B;
+    const _all = (game.entities || []).filter(e => e && e.alive && e.loadoutKey &&
+                                                  e.team === otherTeam && e.position);
+    const _isBotCls = (e) => (typeof Bot === 'undefined') || (e instanceof Bot);
+    const _foe = _all.filter(e => _isBotCls(e) && !e.isProxy);
+    const _pilot = _all.find(e => !_isBotCls(e)) || null;
+    if (!_foe.length || !_pilot) return 0;
+    const fx = _pilot.position.x, fy = _pilot.position.y, fz = _pilot.position.z;
+    const SPACING = 220;   // the cinematic's own cap; a lineup never spreads wider than this
+    let bx = player.position.x - fx, bz = player.position.z - fz;
+    const bl = Math.hypot(bx, bz);
+    if (bl > 1) { bx /= bl; bz /= bl; } else { bx = 1; bz = 0; }
+    const fsX = -bz, fsZ = bx;
+    let _fh = 0;   // seats that fleet's own humans stand in; the bots begin after them
+    try { const h = _lssHumanCounts(); _fh = (otherTeam === LSS.TEAM_FLEET_A) ? (h.A | 0) : (h.B | 0); } catch (_) {}
+    let _placed = 0, _moved = 0;
+    for (let i = 0; i < _foe.length; i++) {
+      const _si = i + _fh;
+      const side = (_si === 0) ? 0 : ((_si % 2 === 1) ? Math.ceil(_si / 2) : -Math.ceil(_si / 2));
+      const off = side * SPACING;
+      const px = fx + fsX * off, py = fy, pz = fz + fsZ * off;
+      const _d = Math.hypot(_foe[i].position.x - px, _foe[i].position.y - py, _foe[i].position.z - pz);
+      if (_d < 1) continue;                  // already on its slot: no write, nothing to re-aim
+      if (_d > 50) _moved++;                 // only a real correction is worth a log line
+      _foe[i].position.set(px, py, pz);
+      if (_foe[i].velocity) _foe[i].velocity.set(0, 0, 0);
+      if (_foe[i].mesh) _foe[i].mesh.position.set(px, py, pz);
+      try {
+        if (_foe[i].targetDir && _foe[i].targetDir.set) _foe[i].targetDir.set(bx, 0, bz);
+        if (_foe[i].mesh) _foe[i].mesh.lookAt(px + bx * 100, py, pz + bz * 100);
+      } catch (_) {}
+      _placed++;
+    }
+    return _moved;
+  } catch (_) { return 0; }
 }
 
 function _lssEndSpectatorCinematic() {
@@ -62575,6 +62702,10 @@ function updateRoundSystem(dt) {
     game.warmupTimer = ((typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') && game._swPreloading) ? 0.1 : 0;   
   }
   if (game.state === 'warmup') {
+    try {
+      const _rg = _lssAuthorityFleetLine();
+      if (_rg) console.log('[cinematic] re-formed', _rg, 'far-fleet ship(s) on their pilot');
+    } catch (_) {}
     const prev = game.warmupTimer;
     _tickTimer('warmupTimer');
     const _selEl = _hudEl('ship-select');   // (v38.61) cached (was two lookups per warmup frame)
@@ -62697,13 +62828,9 @@ function updateRoundSystem(dt) {
       if (_rAtkDue || _rDefDue) {
         let _rhB = 0, _rhA = 0;
         try {
-          if (player && player.team === LSS.TEAM_FLEET_B) _rhB++;
-          else if (player && player.team === LSS.TEAM_FLEET_A) _rhA++;
+          const _rhc = _lssHumanCounts();
+          _rhB = _rhc.B; _rhA = _rhc.A;
         } catch (_) { _rhA++; }
-        if (net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-          _rhB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
-          _rhA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
-        }
         let _needB = Math.max(0, 3 - _rhB), _needA = Math.max(0, 3 - _rhA);
         try {
           _needB = Math.max(0, _needB - _lssBotSeatsOffIn('enemy', _needB));
@@ -68109,6 +68236,81 @@ function _lssBotToggleSeat(side, idx) {
     try { updateTeammatesStrip(); } catch (_) {}
   } catch (_) {}
 }
+function _lssHumanCounts() {
+  const out = { A: 0, B: 0 };
+  try {
+    const TA = LSS.TEAM_FLEET_A, TB = LSS.TEAM_FLEET_B;
+    if (typeof player !== 'undefined' && player) {
+      if (player.team === TB) out.B++; else if (player.team === TA) out.A++;
+    }
+    if (typeof net === 'undefined' || !net || !net.active) return out;
+    let counted = 0;
+    if (net.peers && typeof net.peers.forEach === 'function') {
+      net.peers.forEach((peer, peerId) => {
+        try {
+          if (typeof _peerIsJudge === 'function' && _peerIsJudge(peer)) return;
+          let t = (peer && peer.team !== undefined && peer.team !== null) ? peer.team : null;
+          if (t === null && typeof _teamForPeerId === 'function') t = _teamForPeerId(peerId);
+          if (t === null || t === undefined) return;
+          if (t === TB) { out.B++; counted++; } else if (t === TA) { out.A++; counted++; }
+        } catch (_) {}
+      });
+    }
+    if (!counted && Array.isArray(net.networkPlayers)) {
+      for (const np of net.networkPlayers) {
+        if (!np || np.team === undefined || np.team === null) continue;
+        if (np.team === TB) out.B++; else if (np.team === TA) out.A++;
+      }
+    }
+  } catch (_) {}
+  return out;
+}
+try {
+  if (typeof window !== 'undefined') window.__seats = function () {
+    const o = { humans: null, seats: null, peers: [], err: null };
+    try { o.humans = _lssHumanCounts(); } catch (e) { o.err = String(e && e.message); }
+    try { o.seats = _lssBotSeats(); } catch (_) {}
+    try { o.myTeam = (typeof player !== 'undefined' && player) ? player.team : null; } catch (_) {}
+    try {
+      if (typeof net !== 'undefined' && net && net.peers && net.peers.forEach) {
+        net.peers.forEach((p, id) => {
+          let t = (p && p.team !== undefined && p.team !== null) ? p.team : null;
+          let dt = null;
+          try { if (t === null && typeof _teamForPeerId === 'function') dt = _teamForPeerId(id); } catch (_) {}
+          o.peers.push({ id: String(id).slice(0, 8), team: t, derived: dt,
+                         judge: (typeof _peerIsJudge === 'function') ? !!_peerIsJudge(p) : null });
+        });
+      }
+    } catch (_) {}
+    return o;
+  };
+} catch (_) {}
+try {
+  if (typeof window !== 'undefined') window.__ents = function () {
+    const out = { me: null, state: null, mine: [], foe: [], other: [] };
+    try { out.state = game.state; } catch (_) {}
+    let px = 0, py = 0, pz = 0, myTeam = null;
+    try {
+      px = player.position.x; py = player.position.y; pz = player.position.z; myTeam = player.team;
+      out.me = { team: myTeam, x: Math.round(px), y: Math.round(py), z: Math.round(pz) };
+    } catch (_) {}
+    try {
+      for (const e of (game.entities || [])) {
+        if (!e || !e.position || !e.loadoutKey) continue;
+        const dx = e.position.x - px, dy = e.position.y - py, dz = e.position.z - pz;
+        const row = { id: String(e.id), key: e.loadoutKey, team: e.team, alive: !!e.alive,
+                      kind: (typeof Bot !== 'undefined' && (e instanceof Bot))
+                              ? (e.isProxy ? 'proxy' : 'bot') : 'pilot',
+                      dist: Math.round(Math.sqrt(dx * dx + dy * dy + dz * dz)), dY: Math.round(dy) };
+        if (e.team === myTeam) out.mine.push(row);
+        else if (e.team != null) out.foe.push(row);
+        else out.other.push(row);
+      }
+    } catch (_) {}
+    try { out.camFromMe = Math.round(camera.position.distanceTo(player.position)); } catch (_) {}
+    return out;
+  };
+} catch (_) {}
 function _lssBotSeats() {
   const out = { friendly: [], enemy: [] };
   try {
@@ -68118,13 +68320,8 @@ function _lssBotSeats() {
     if (_m === 'campaign' || _m === 'freeflight' || _m === 'endless') return out;
     const deal = game._botShipDeal;
     if (!deal || !deal.enemy || !deal.friendly) return out;
-    let _hB = 0, _hA = 0;
-    if (player && player.team === LSS.TEAM_FLEET_B) _hB++;
-    else if (player && player.team === LSS.TEAM_FLEET_A) _hA++;
-    if (net && net.active && net.openSolo && net.networkPlayers && net.networkPlayers.length) {
-      _hB += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_B).length;
-      _hA += net.networkPlayers.filter(p => p && p.team === LSS.TEAM_FLEET_A).length;
-    }
+    const _hc = _lssHumanCounts();          // (v47.37) lobby peers included - see the note there
+    const _hB = _hc.B, _hA = _hc.A;
     const eN = Math.max(0, 3 - _hB), fN = Math.max(0, 3 - _hA);
     for (let i = 0; i < eN && i < deal.enemy.length; i++) if (deal.enemy[i]) out.enemy.push({ key: deal.enemy[i], idx: i, off: _lssBotSeatIsOff('enemy', i) });
     for (let i = 0; i < fN && i < deal.friendly.length; i++) if (deal.friendly[i]) out.friendly.push({ key: deal.friendly[i], idx: i, off: _lssBotSeatIsOff('friendly', i) });
@@ -68550,10 +68747,13 @@ function _lssEarthCurtainArmed() {
 function _lssEarthWorldPending() {
   try {
     if (typeof game === 'undefined' || !game) return false;
-    if (game._launchCurtainFree) return false;
     if (typeof _lssEarthCurtainArmed !== 'function' || !_lssEarthCurtainArmed()) return false;
     if (!(_lssEarthCurtainT0 === 0 ||
           (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) return false;
+    try {
+      if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps._spawnPlaced === false) return true;
+    } catch (_) {}
+    if (game._launchCurtainFree) return false;
       const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
       const _noWorld = !_w;
       const _noSpawn = !!(typeof _lssGmaps !== 'undefined' && _lssGmaps &&
@@ -90916,6 +91116,7 @@ function updateScoreboard() {
     const mkList = (team) => {
       const list = [];
       for (const b of game.entities) {
+        if (!_lssIsBot(b) || !b.loadout) continue;
         if (b.team !== team) continue;
         if (_asltSB && !b.alive) continue;
         list.push({ n: b.loadout.name, s: statusOf(b), k: b.kills || 0, d: b.damageDealt || 0, me: false });
@@ -92298,7 +92499,13 @@ class LSSEarthTiles {
     this.cyberpunk       = opts.cyberpunk       ?? true;
     this.ads             = opts.ads             ?? true;
     this.maxDemZoom      = opts.maxDemZoom      ?? 15;    // Re:Earth tops out at 15
-    this.imageryCanvasPx = opts.imageryCanvasPx ?? 3072;
+    this.imageryCanvasPx = opts.imageryCanvasPx ?? (function () {
+      try {
+        if (typeof window !== 'undefined' && typeof window.__earthImgPx === 'number') return window.__earthImgPx;
+        if (typeof lssIsMobileDevice === 'function' && lssIsMobileDevice()) return 1024;
+      } catch (_) {}
+      return 3072;
+    })();
     this.heightScale     = opts.heightScale     ?? 1;
     this.chunkDivisions  = opts.chunkDivisions  ?? 8;
     this.ringCount       = opts.ringCount       ?? 3;
@@ -95290,6 +95497,7 @@ async function _lssGmapsBuildLevel(level) {
               let _moved = 0;
               for (const _b of game.entities) {
                 if (!_b || !_b.loadoutKey || !_b.position) continue;   // skip city traffic (earthKind)
+                if (!_lssIsBot(_b) || _b.isProxy) continue;
                 const _bt = (typeof LSS !== 'undefined' && _b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
                 const _bp = getValidSpawnPoint(_bt);
                 if (!_bp) continue;
