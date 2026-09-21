@@ -65035,23 +65035,13 @@ function _hlfIconPath(ctx, kind, s) {
   }
 }
 
-function _hlfIcon(I, kind, s, col, frac, ready) {
+function _hlfIcon(I, kind, s, col, ready) {
   const ctx = I.ctx, vm = I.vmin;
   _hlfIconPath(ctx, kind, s);
   ctx.globalAlpha = I.ga;
-  ctx.fillStyle = 'rgba(5,9,13,0.88)';
+  ctx.fillStyle = ready ? col : 'rgba(5,9,13,0.88)';
   ctx.fill();
-  if (frac > 0.004) {
-    ctx.save();
-    _hlfIconPath(ctx, kind, s);
-    ctx.clip();
-    ctx.globalAlpha = I.ga * (ready ? 1 : 0.8);
-    ctx.fillStyle = col;
-    ctx.fillRect(-s, s * 0.5 - s * frac, s * 2, s * frac);
-    ctx.restore();
-  }
   _hlfIconPath(ctx, kind, s);
-  ctx.globalAlpha = I.ga;
   ctx.strokeStyle = ready ? col : _hlA(col, 0.42);
   ctx.lineWidth = Math.max(1, vm * (ready ? 0.17 : 0.11));
   ctx.lineJoin = 'round';
@@ -65175,16 +65165,15 @@ function _hlfDraw(ctx, W, H, v) {
       if (!ab) continue;
       const cd = (player.abilityCooldowns && player.abilityCooldowns[m.slot]) || 0;
       const active = !!(player.abilityActive && player.abilityActive[m.slot]);
-      const ready = cd <= 0 || active;
-      const f = ready ? 1 : Math.max(0, Math.min(1, 1 - cd / (ab.cooldown || 1)));
-      const col = active ? '#ffb020' : (sh[m.cd] || _HL[m.cd].col);
+      const ready = cd <= 0 && !active;
+      const col = sh[m.cd] || _HL[m.cd].col;
       let pop = 1;
       const age = (v.t != null && _hudRF && _hudRF.t0) ? v.t - _hudRF.t0[m.slot] : -1;
       if (age >= 0 && age < 0.45) pop = 1 + 0.32 * (1 - age / 0.45);
       const a = (IR.mid + ((order.length - 1) / 2 - i) * dPerStep) * _HL_D2R;
       ctx.save();
       ctx.translate(I.cx + Math.cos(a) * IR.r * vm, I.cy + Math.sin(a) * IR.r * vm);
-      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, f, ready);
+      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready);
       ctx.restore();
     }
     ctx.restore();

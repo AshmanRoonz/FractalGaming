@@ -3185,9 +3185,17 @@ offensive, 1 defensive, 2 utility. A hull that breaks that convention gets the w
   bolt are markedly harder to tell apart at a glance. Ordered by each ability's old arc position
   (`_HL[m.cd].a0`), so left-to-right matches where the pills used to sit.
 - **The shield glyph needs a FLAT top.** A peaked top reads as a plain hexagon at icon size.
-- **Partial fill, not just on/off.** The owner asked for silhouette vs full colour; the colour
-  rises through the silhouette from the bottom as it charges, so the row still reports how long
-  is left. Same visual language, strictly more information.
+- **⚠ STRICTLY BINARY — dark or bright, nothing in between.** Two readouts were tried here and
+  then removed on the owner's call, so do not reintroduce them:
+    • a charge level rising through the silhouette from the bottom. It reported how long was
+      left, but *"we don't really need to show it charging, just ready or not visually, so dark
+      or bright"* — a half-lit gauge is one you have to read, and this row exists to be glanced
+      at.
+    • the active-ability amber `#ffb020` the old arcs used. An ability that is RUNNING is one
+      you cannot press, so it draws dark like any other unavailable ability: *"i think the yellow
+      is that it is in use... but just make it dark instead"*. Running and cooling down now look
+      identical, and that is the intended trade.
+  `ready = cd <= 0 && !active`.
 - **A short POP on becoming ready**, off the same `_hudRF.t0` timestamp `_hlReadyFlash` uses, over
   in under half a second. Motion in peripheral vision is a cost the owner has called out before,
   so it is spent only on a thing the ship actually just did.
