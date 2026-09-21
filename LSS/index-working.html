@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.14";
+const LSS_BUILD = "47.15";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -30281,7 +30281,22 @@ const _arenaGridMeshes = [];
     }
   }
 })();
+// (v47.15) ⚠ SHOWING THE GRID IS A REQUEST, NOT A COMMAND.
+// _swApplyAtmosphere turns the grid ON for any level without sandwich terrain, and a
+// real-world gmaps level is exactly that - so every round rebuilt over Earth re-raises
+// the 50 km wireframe box around the city. _lssGmapsBuildLevel lowered it again right
+// after, which is why round 1 always looked right; v47.13 then moved that call inside
+// the "the world was built fresh" branch, so from round 2 on nobody lowered it.
+// Owner: "in your preview window, i can see a weird wall, in earth/race".
+// Vetoing here rather than chasing call sites makes it ordering-proof: a streamed Earth
+// has no arena edge to mark, whoever asks. An OVERLAY level keeps its grid - it still
+// has a real arena underneath.
+// (The read is wrapped because `_lssGmaps` is a top-level const declared ~110k lines
+// below this one, and `typeof` does NOT shield a TDZ read - see the v39.02 boot failure.)
 function _setArenaGridVisible(v) {
+  if (v) {
+    try { if (_lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) v = false; } catch (_) {}
+  }
   for (let i = 0; i < _arenaGridMeshes.length; i++) { try { _arenaGridMeshes[i].visible = !!v; } catch (_) {} }
 }
 
@@ -141455,6 +141470,7 @@ async function _lssGmapsBuildLevel(level) {
       return T;
     } catch (_) { return null; }
   })();
+  _lssGmaps._seaRetryAt = 0;   // (v47.15) a new level never inherits the last one's sea back-off
   if (_keepTiles) {
     console.log('[lss-gmaps] KEPT the world over', level.name, '- no rebuild (sig', _lssGmaps.sig + ')');
   } else {
@@ -141726,6 +141742,11 @@ async function _lssGmapsBuildLevel(level) {
       try { if (typeof tiles.streamUpdate === 'function') _lssEarthLifeInit(); } catch (_) {}
       _lssGmaps._dayK = null;   // seed the day/night ease on this level's first frame
       _lssGmaps.cleanup = () => {
+        // (v47.15) Drop the flag FIRST. Every caller sets `active = false` immediately
+        // after this returns, but _setArenaGridVisible now refuses to raise the grid
+        // while it is still set - so restoring the arena bounds has to happen after it
+        // is clear, or leaving an Earth level would hide the grid for good.
+        try { _lssGmaps.active = false; } catch (_) {}
         try { scene.remove(tiles.group); } catch(_) {}
         try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
         // Put the shared scene back the way it was: these lights and this sky
@@ -142175,6 +142196,29 @@ function _lssGmapsTick(dt) {
       // (v46.76) ...and the equirect behind the dome must never show while the
       // dome is up (see _skyDomeRefresh). One boolean a frame, self-healing.
       if (_WX && _WX.on && _WX.dome && typeof _skyDome !== 'undefined' && _skyDome && _skyDome.visible) _skyDome.visible = false;
+    } catch (_) {}
+    // ⭐ (v47.15) AND NEITHER CAN THE SEA. Exactly the sky's shape, and now its cause too:
+    // _swApplyAtmosphere calls _swDisposeHubWater for any level with no sandwich terrain - which
+    // a real-world level always is - and the ONLY thing that puts the water back is the tile
+    // build's buildWater(). That was fine while every round rebuilt the world. v47.13 let a
+    // round REUSE it to kill the round-transition hitches, so from round 2 on the build never
+    // ran and the ocean never came back. Owner: "the water didn't load that time".
+    // Healing here rather than in the keep branch keeps it independent of who disposes the
+    // water and in what order, which is the same argument the sky block above makes.
+    // ⚠ RATE-LIMITED. buildWater() stands up a ripple sim, a reflector and two flocks, and on
+    // a level with no sea it returns false every time - so a failed attempt backs off hard
+    // instead of asking once a frame forever.
+    try {
+      if (typeof t.buildWater === 'function' &&
+          !(typeof game !== 'undefined' && game && game._hubWater)) {
+        const _now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (!(_lssGmaps._seaRetryAt > _now)) {
+          let _built = false;
+          try { _built = !!t.buildWater(); } catch (e) { console.warn('[lss-gmaps] sea rebuild failed:', e); }
+          _lssGmaps._seaRetryAt = _now + (_built ? 2000 : 30000);
+          if (_built) console.warn('[lss-gmaps] sea vanished - rebuilt');
+        }
+      }
     } catch (_) {}
     // ⭐ (v45.46) THE SKY HAS TO BE DRIVEN TOO. _wxFrame is called only from the
     // hub branch of gameLoop (`game.sandwichTerrain.ON`), exactly like the water

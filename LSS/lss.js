@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.14";
+const LSS_BUILD = "47.15";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -16136,6 +16136,9 @@ const _arenaGridMeshes = [];
   }
 })();
 function _setArenaGridVisible(v) {
+  if (v) {
+    try { if (_lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) v = false; } catch (_) {}
+  }
   for (let i = 0; i < _arenaGridMeshes.length; i++) { try { _arenaGridMeshes[i].visible = !!v; } catch (_) {} }
 }
 
@@ -94749,6 +94752,7 @@ async function _lssGmapsBuildLevel(level) {
       return T;
     } catch (_) { return null; }
   })();
+  _lssGmaps._seaRetryAt = 0;   // (v47.15) a new level never inherits the last one's sea back-off
   if (_keepTiles) {
     console.log('[lss-gmaps] KEPT the world over', level.name, '- no rebuild (sig', _lssGmaps.sig + ')');
   } else {
@@ -94940,6 +94944,7 @@ async function _lssGmapsBuildLevel(level) {
       try { if (typeof tiles.streamUpdate === 'function') _lssEarthLifeInit(); } catch (_) {}
       _lssGmaps._dayK = null;   // seed the day/night ease on this level's first frame
       _lssGmaps.cleanup = () => {
+        try { _lssGmaps.active = false; } catch (_) {}
         try { scene.remove(tiles.group); } catch(_) {}
         try { if (typeof tiles.dispose === 'function') tiles.dispose(); } catch(_) {}
         try { if (typeof _swDisposeHubWater === 'function') _swDisposeHubWater(); } catch (_) {}
@@ -95208,6 +95213,18 @@ function _lssGmapsTick(dt) {
         _wxInit(null);
       }
       if (_WX && _WX.on && _WX.dome && typeof _skyDome !== 'undefined' && _skyDome && _skyDome.visible) _skyDome.visible = false;
+    } catch (_) {}
+    try {
+      if (typeof t.buildWater === 'function' &&
+          !(typeof game !== 'undefined' && game && game._hubWater)) {
+        const _now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        if (!(_lssGmaps._seaRetryAt > _now)) {
+          let _built = false;
+          try { _built = !!t.buildWater(); } catch (e) { console.warn('[lss-gmaps] sea rebuild failed:', e); }
+          _lssGmaps._seaRetryAt = _now + (_built ? 2000 : 30000);
+          if (_built) console.warn('[lss-gmaps] sea vanished - rebuilt');
+        }
+      }
     } catch (_) {}
     try { if (typeof _wxFrame === 'function') _wxFrame(dt); } catch (_) {}
     __pmark('earth:wx');         // the sky dome + weather, which only this mode drives

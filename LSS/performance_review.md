@@ -622,3 +622,46 @@ found, consistently, exactly as before. Screenshot confirms skyline, lake and ni
 loops is sliced behind `_leSlicer`, so it only costs wall-clock when it is the critical path. `loadMs` was
 9,256 ms before and 9,272 ms after — unchanged. It matters on a slower machine, on a cold network where
 the retries stack, and for main-thread contention with everything else the launch is doing.
+
+
+### v47.15 — two regressions the v47.13 keep path caused, and what they teach
+
+Both were reported by the owner, not found by measurement, and **both are mine**: v47.13's `_keepTiles` win
+(round-transition hitches 33 spikes → 1) skipped shared scene state along with the tile rebuild.
+
+| | before (round 2+, kept world) | after |
+|---|---|---|
+| arena boundary grid | **6 of 6 visible** — a 50,000-unit wireframe box through the city | **0 of 6** |
+| hub water | `game._hubWater = null` — no ocean | present, `WL = -53.3` |
+
+**Root cause, one sentence.** `_swApplyAtmosphere` runs on every round rebuild; its
+no-sandwich-terrain branch — which a real-world level always takes — *resets* shared scene state, and the
+only code that re-applied it lived inside `_lssGmapsBuildLevel`'s `if (!_keepTiles)` branch. Round 1 was
+therefore always correct and round 2 onward always wrong, which is exactly why it read as two unrelated
+bugs rather than one.
+
+**The fixes are deliberately not symmetrical with the break.** Neither re-applies state in the keep
+branch, because that would only be correct for the current call order:
+
+- the grid is **vetoed inside `_setArenaGridVisible`** — showing it is a request, and a streamed Earth has
+  no arena edge to mark, whoever asks;
+- the sea **self-heals in `_lssGmapsTick`**, beside the sky repair that v46.76 had already written for
+  precisely this failure mode (`weather vanished - re-initialising`). Rate-limited 2 s after a success and
+  30 s after a failure, since `buildWater()` returns `false` forever on a level with no sea.
+
+**Verified end-to-end** on the broken path, not by inspection: `[lss-gmaps] KEPT the world` in the console
+three times, grid `0/6` and water present across `playing → roundEnd → warmup → playing`, with
+`[lss-gmaps] sea vanished - rebuilt` firing exactly once per kept round. `window.__earthKeep = false` was
+used to force the `cleanup()` branch, which is the only in-session way to exercise it without leaving the
+map; the restore-on-exit ordering was then confirmed in the generated `lss.js` (`active = false` at 94947,
+`_setArenaGridVisible(true)` at 94952).
+
+**The transferable lesson, and the reason this is in the perf doc.** *Reusing a world to kill a hitch is a
+performance win that buys a correctness liability.* The cost was not in the keep decision, which is sound;
+it was in assuming a build function's body was all "build". Before adding anything else to a keep path,
+**census what the per-round teardown resets** — here `_swApplyAtmosphere`'s no-terrain branch resets fog,
+background, `_clearBrokenSimForcefield`, `_swDisposeHubWater` (*which also disposes the weather*),
+`_setArenaGridVisible(true)`, `_skyDomeRefresh`, `_lssApplyHubLighting(false)`, `_lssRestoreArenaMood()`.
+That census is also what bounds the blast radius: of those, only the water and the grid were owned by the
+gmaps build, the sky already self-healed, and lighting/mood/fog are never set by it — so the set of broken
+state is complete at two, and I checked rather than assumed.
