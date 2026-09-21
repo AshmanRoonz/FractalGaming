@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.28";
+const LSS_BUILD = "47.29";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -89704,6 +89704,13 @@ function _cineHeavyWorkPending() {
     // runs, which is precisely the sustained judder the owner reported in VR rather than one stall.
     try { if (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on) return true; } catch (_) {}
     if (game._swapStaging || game._rrStaging) return true;
+    // ⭐ (v47.29) ...AND THE REAL-WORLD LEVEL'S OWN BUILD. See `_lssEarthWorldPending`: every other
+    // term here is arena/hub work, so a gmaps peer used to satisfy all of them while its patches, its
+    // spawn placement and its city were still arriving. This is what makes `warmup_ready` mean "my
+    // world exists" on an Earth map, which is what the room is really waiting for.
+    // ⚠ Self-limiting (the curtain's own 45 s ceiling is inside it) and it sits under
+    //   `_markLocalWarmupReady`'s 120 s cap as well, so it can DELAY a launch, never cancel one.
+    try { if (typeof _lssEarthWorldPending === 'function' && _lssEarthWorldPending()) return true; } catch (_) {}
     return false;
   } catch (_) { return false; }
 }
@@ -107760,40 +107767,27 @@ function _lssEarthCurtainArmed() {
   } catch (_) {}
   return false;
 }
-function hideLoadingOverlay() {
-  // (v38.03) CYBERPUNK CITY: hold the curtain until the mode has built itself. It used to lift a
-  // beat before the lineup started, and that beat is the free-flight camera sitting at the launch
-  // ring with nothing else made yet - your ship, alone, in what looks like the wrong place. The
-  // retry is bounded so nothing can ever be trapped behind it.
+// ⭐⭐ (v47.29) THE CURTAIN'S OWN VERDICT, AS A PREDICATE - so the MULTIPLAYER handshake can ask it.
+// This block used to live inline in hideLoadingOverlay and was the only thing that knew whether a
+// real-world level had finished building. `_cineHeavyWorkPending` - which is what `warmup_ready`
+// announces through since v45.12 ("READY HAS TO MEAN LOADED") - covers shader warmup, the hub
+// preload, the world prebake and swap/round staging, but NOT this. So on a gmaps level a peer could
+// pass every check it knew about and announce ready while its city was still streaming, which is
+// exactly the failure v45.12 set out to remove, one layer further down.
+// Owner: "the cinematic should really be sync'd so it starts when all the players are loaded...
+// then the match starts at the same time for everyone".
+// ⚠ EXTRACTED VERBATIM, not re-derived: same six terms, same order, same short-circuit. Two copies
+//   of this condition would drift, and the notes inside it are the record of what each term cost.
+// ⚠ THE DEADLINE LIVES IN HERE TOO. Past `_LSS_EARTH_CURTAIN_MAX_MS` the curtain gives up and flies
+//   anyway, so 'still pending' has to become false at the same moment - otherwise a peer whose world
+//   never completes would hold the room until the 120 s ready cap instead of the 45 s the curtain
+//   actually waits.
+function _lssEarthWorldPending() {
   try {
-    if (game && game._cyber && game._cyber.armed && !game._cyber.started &&
-        game.state !== 'playing' && _lssCurtainTries < 240) {
-      _lssCurtainTries++;
-      setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
-      return;
-    }
-    // (v45.47) FREE FLIGHT: EARTH holds the curtain the same way, and for the
-    // same reason. The curtain is lowered when the SHADERS are warm, which has
-    // nothing to do with whether the world exists — measured: overlay down at
-    // 2.1 s with 1 of 9 patches built, the rest arriving until 8.5 s. Owner:
-    // "the map loaded after we got in... so it had a pop in effect". The build
-    // is awaited inside _lssGmapsBuildLevel, but that runs alongside the launch
-    // sequence rather than gating it, so the hold has to be here.
-    // ⚠ The 240-try ceiling (~4 s of retries) is NOT enough for a cold world —
-    // a first visit fetches DEM, imagery and an Overpass region. Earth gets its
-    // own, longer ceiling, and it is a CEILING on purpose: a curtain that never
-    // lifts is worse than any pop-in.
-    // ⚠ NO `game.state !== 'playing'` ON THIS BRANCH, and no early-out when the
-    // world object does not exist yet. Both were why the first cut of the wait
-    // below did nothing: measured on a cold Munich with a slow Overpass, the
-    // launch sequence flips state to 'playing' at ~6.5 s, and at that moment
-    // `_lssGmaps.tiles` was still null - so every world condition read false and
-    // the curtain lifted at 6.4 s onto zero patches and zero buildings. The
-    // state flag describes the LAUNCH SEQUENCE, not whether the world exists,
-    // and this hold is about the world. The try ceiling is what bounds it.
-    if (game && _lssEarthCurtainArmed() &&   // (v46.82) the EARTH CIRCUIT, (v46.87) and any gmaps level in any mode
-        (_lssEarthCurtainT0 === 0 ||
-         (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) {
+    if (typeof game === 'undefined' || !game) return false;
+    if (typeof _lssEarthCurtainArmed !== 'function' || !_lssEarthCurtainArmed()) return false;
+    if (!(_lssEarthCurtainT0 === 0 ||
+          (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) return false;
       const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
       // The level build is async; until it has constructed the world there is
       // nothing to ask, and "nothing to ask" is not "ready".
@@ -107859,7 +107853,44 @@ function hideLoadingOverlay() {
       const _heldMs = _lssEarthCurtainT0 ? (Date.now() - _lssEarthCurtainT0) : 0;
       const _noCircuit = !!(typeof _isEarthCircuit === 'function' && _isEarthCircuit() && !(game.raceCircuit && game.raceCircuit.ready) &&
                             ((typeof _raceCircuitAuthority === 'function' && _raceCircuitAuthority()) || _heldMs < 20000));
-      if (_noWorld || _noSpawn || _building || _regionUnknown || _cityPending || _noCircuit) {
+    return !!(_noWorld || _noSpawn || _building || _regionUnknown || _cityPending || _noCircuit);
+  } catch (_) { return false; }
+}
+function hideLoadingOverlay() {
+  // (v38.03) CYBERPUNK CITY: hold the curtain until the mode has built itself. It used to lift a
+  // beat before the lineup started, and that beat is the free-flight camera sitting at the launch
+  // ring with nothing else made yet - your ship, alone, in what looks like the wrong place. The
+  // retry is bounded so nothing can ever be trapped behind it.
+  try {
+    if (game && game._cyber && game._cyber.armed && !game._cyber.started &&
+        game.state !== 'playing' && _lssCurtainTries < 240) {
+      _lssCurtainTries++;
+      setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
+      return;
+    }
+    // (v45.47) FREE FLIGHT: EARTH holds the curtain the same way, and for the
+    // same reason. The curtain is lowered when the SHADERS are warm, which has
+    // nothing to do with whether the world exists — measured: overlay down at
+    // 2.1 s with 1 of 9 patches built, the rest arriving until 8.5 s. Owner:
+    // "the map loaded after we got in... so it had a pop in effect". The build
+    // is awaited inside _lssGmapsBuildLevel, but that runs alongside the launch
+    // sequence rather than gating it, so the hold has to be here.
+    // ⚠ The 240-try ceiling (~4 s of retries) is NOT enough for a cold world —
+    // a first visit fetches DEM, imagery and an Overpass region. Earth gets its
+    // own, longer ceiling, and it is a CEILING on purpose: a curtain that never
+    // lifts is worse than any pop-in.
+    // ⚠ NO `game.state !== 'playing'` ON THIS BRANCH, and no early-out when the
+    // world object does not exist yet. Both were why the first cut of the wait
+    // below did nothing: measured on a cold Munich with a slow Overpass, the
+    // launch sequence flips state to 'playing' at ~6.5 s, and at that moment
+    // `_lssGmaps.tiles` was still null - so every world condition read false and
+    // the curtain lifted at 6.4 s onto zero patches and zero buildings. The
+    // state flag describes the LAUNCH SEQUENCE, not whether the world exists,
+    // and this hold is about the world. The try ceiling is what bounds it.
+    if (game && _lssEarthCurtainArmed() &&   // (v46.82) the EARTH CIRCUIT, (v46.87) and any gmaps level in any mode
+        (_lssEarthCurtainT0 === 0 ||
+         (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) {
+      if (_lssEarthWorldPending()) {
         if (_lssEarthCurtainT0 === 0) _lssEarthCurtainT0 = Date.now();
         _lssEarthCurtainTries++;
         setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);

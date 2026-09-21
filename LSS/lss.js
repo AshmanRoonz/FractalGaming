@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.28";
+const LSS_BUILD = "47.29";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -56523,6 +56523,7 @@ function _cineHeavyWorkPending() {
     if (game._worldPrebaking) return true;            // world prebake / GPU pose sweep
     try { if (typeof _PREBAKE !== 'undefined' && _PREBAKE && _PREBAKE.on) return true; } catch (_) {}
     if (game._swapStaging || game._rrStaging) return true;
+    try { if (typeof _lssEarthWorldPending === 'function' && _lssEarthWorldPending()) return true; } catch (_) {}
     return false;
   } catch (_) { return false; }
 }
@@ -68499,17 +68500,12 @@ function _lssEarthCurtainArmed() {
   } catch (_) {}
   return false;
 }
-function hideLoadingOverlay() {
+function _lssEarthWorldPending() {
   try {
-    if (game && game._cyber && game._cyber.armed && !game._cyber.started &&
-        game.state !== 'playing' && _lssCurtainTries < 240) {
-      _lssCurtainTries++;
-      setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
-      return;
-    }
-    if (game && _lssEarthCurtainArmed() &&   // (v46.82) the EARTH CIRCUIT, (v46.87) and any gmaps level in any mode
-        (_lssEarthCurtainT0 === 0 ||
-         (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) {
+    if (typeof game === 'undefined' || !game) return false;
+    if (typeof _lssEarthCurtainArmed !== 'function' || !_lssEarthCurtainArmed()) return false;
+    if (!(_lssEarthCurtainT0 === 0 ||
+          (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) return false;
       const _w = (typeof _lssGmaps !== 'undefined' && _lssGmaps) ? _lssGmaps.tiles : null;
       const _noWorld = !_w;
       const _noSpawn = !!(typeof _lssGmaps !== 'undefined' && _lssGmaps &&
@@ -68524,7 +68520,21 @@ function hideLoadingOverlay() {
       const _heldMs = _lssEarthCurtainT0 ? (Date.now() - _lssEarthCurtainT0) : 0;
       const _noCircuit = !!(typeof _isEarthCircuit === 'function' && _isEarthCircuit() && !(game.raceCircuit && game.raceCircuit.ready) &&
                             ((typeof _raceCircuitAuthority === 'function' && _raceCircuitAuthority()) || _heldMs < 20000));
-      if (_noWorld || _noSpawn || _building || _regionUnknown || _cityPending || _noCircuit) {
+    return !!(_noWorld || _noSpawn || _building || _regionUnknown || _cityPending || _noCircuit);
+  } catch (_) { return false; }
+}
+function hideLoadingOverlay() {
+  try {
+    if (game && game._cyber && game._cyber.armed && !game._cyber.started &&
+        game.state !== 'playing' && _lssCurtainTries < 240) {
+      _lssCurtainTries++;
+      setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
+      return;
+    }
+    if (game && _lssEarthCurtainArmed() &&   // (v46.82) the EARTH CIRCUIT, (v46.87) and any gmaps level in any mode
+        (_lssEarthCurtainT0 === 0 ||
+         (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) {
+      if (_lssEarthWorldPending()) {
         if (_lssEarthCurtainT0 === 0) _lssEarthCurtainT0 = Date.now();
         _lssEarthCurtainTries++;
         setTimeout(() => { try { hideLoadingOverlay(); } catch (_) {} }, 16);
