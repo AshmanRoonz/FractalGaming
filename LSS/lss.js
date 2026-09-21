@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.09";
+const LSS_BUILD = "47.10";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -47435,6 +47435,7 @@ function _raceCircuitTrackBuild(level, rooms) {
   game.raceCircuit = C;
   _rc.pendingSince = 0; _rcNet.acked = new Set(); _rcNet.t = 0;
   _raceCircuitInstall();
+  try { _raceCircuitOnArrive(); } catch (e) { console.warn('[race] track circuit arrive failed:', e); }
   console.log('[race] track circuit:', C.rings.length, 'gates on', game.selectedMap);
 }
 function _rcTrackNav(bot, roomId) {
@@ -81556,7 +81557,16 @@ function gameLoop(timestamp) {
       ((game.state === 'playing' && typeof _raceRingMap === 'function' && !!_raceRingMap()) ||
        (_rcRace && (game.state === 'playing' || game.state === 'warmup'))));
     if (_wantPoleRings) {
-      if (!game.poleRings || !game.poleRings.length) { if (typeof _spawnPoleRings === 'function') _spawnPoleRings(); }
+      let _prWant = -1;
+      try { if (_rcRace && game.raceCircuit && game.raceCircuit.ready && game.raceCircuit.rings) _prWant = game.raceCircuit.rings.length; } catch (_) {}
+      if (!game.poleRings || !game.poleRings.length ||
+          (_prWant >= 0 && game.poleRings.length !== _prWant)) {
+        if (_prWant >= 0 && game.poleRings && game.poleRings.length && game.poleRings.length !== _prWant) {
+          try { console.warn('[race] gate desync: ' + game.poleRings.length + ' meshes vs ' + _prWant + ' rings - respawning'); } catch (_) {}
+          try { if (typeof _clearPoleRings === 'function') _clearPoleRings(); } catch (_) {}
+        }
+        if (typeof _spawnPoleRings === 'function') _spawnPoleRings();
+      }
       if (game.poleRings) for (let _pri = 0; _pri < game.poleRings.length; _pri++) { try { game.poleRings[_pri].update(dt); } catch (_) {} }
     } else if (game.poleRings && game.poleRings.length) {
       if (typeof _clearPoleRings === 'function') _clearPoleRings();

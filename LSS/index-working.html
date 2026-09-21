@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.09";
+const LSS_BUILD = "47.10";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -75859,6 +75859,18 @@ function _raceCircuitTrackBuild(level, rooms) {
   game.raceCircuit = C;
   _rc.pendingSince = 0; _rcNet.acked = new Set(); _rcNet.t = 0;
   _raceCircuitInstall();
+  // (v47.10) ⚠ AND HAND OVER THE OLD GATE MESHES, exactly as _raceCircuitAdopt does for the net path.
+  // This runs from buildRoomGraphLevel, i.e. on EVERY round rebuild, and it REPLACES game.raceCircuit -
+  // usually with a different ring count (measured on race_shifting: round 1 laid 12 gates, round 2 laid
+  // 14). game.poleRings was left holding the PREVIOUS round's RaceRing objects, and gameLoop only
+  // respawns them `if (!game.poleRings.length)`, so nothing ever re-synced them. The result is the
+  // owner's bug: the HUD, the minimap and the BOTS all read C.rings (the new list) while the only thing
+  // actually drawn is a RaceRing sitting at the OLD gate's position. "i couldn't see the first check
+  // point, i saw it on the mini map, and the bots got it and moved on" - the marker pointed at a new
+  // gate that had no mesh, and the bots, which capture against C.rings, sailed through it.
+  // _raceCircuitOnArrive destroys the stale rings (gameLoop then rebuilds them from the new C), resets
+  // progress - correct here, this IS a fresh lap - and re-places them if we are not already mid-race.
+  try { _raceCircuitOnArrive(); } catch (e) { console.warn('[race] track circuit arrive failed:', e); }
   console.log('[race] track circuit:', C.rings.length, 'gates on', game.selectedMap);
 }
 // tunnel navigation for a track circuit: the BFS waypoint toward a room, or null when not applicable
@@ -125450,7 +125462,22 @@ function gameLoop(timestamp) {
       ((game.state === 'playing' && typeof _raceRingMap === 'function' && !!_raceRingMap()) ||
        (_rcRace && (game.state === 'playing' || game.state === 'warmup'))));
     if (_wantPoleRings) {
-      if (!game.poleRings || !game.poleRings.length) { if (typeof _spawnPoleRings === 'function') _spawnPoleRings(); }
+      // (v47.10) BELT: respawn on a COUNT MISMATCH too, not only when the list is empty. Any path that
+      // swaps game.raceCircuit for one with a different ring count while poleRings is already populated
+      // leaves the drawn gates desynced from the list the HUD, minimap and bots all read - invisible
+      // checkpoints that still capture. _raceCircuitTrackBuild was one such path (fixed at its source
+      // above); this guard covers the next one. Circuit races only: a non-circuit ringed track has no
+      // raceCircuit and must keep the plain `is it empty` test.
+      let _prWant = -1;
+      try { if (_rcRace && game.raceCircuit && game.raceCircuit.ready && game.raceCircuit.rings) _prWant = game.raceCircuit.rings.length; } catch (_) {}
+      if (!game.poleRings || !game.poleRings.length ||
+          (_prWant >= 0 && game.poleRings.length !== _prWant)) {
+        if (_prWant >= 0 && game.poleRings && game.poleRings.length && game.poleRings.length !== _prWant) {
+          try { console.warn('[race] gate desync: ' + game.poleRings.length + ' meshes vs ' + _prWant + ' rings - respawning'); } catch (_) {}
+          try { if (typeof _clearPoleRings === 'function') _clearPoleRings(); } catch (_) {}
+        }
+        if (typeof _spawnPoleRings === 'function') _spawnPoleRings();
+      }
       if (game.poleRings) for (let _pri = 0; _pri < game.poleRings.length; _pri++) { try { game.poleRings[_pri].update(dt); } catch (_) {} }
     } else if (game.poleRings && game.poleRings.length) {
       if (typeof _clearPoleRings === 'function') _clearPoleRings();
