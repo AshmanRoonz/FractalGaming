@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.29";
+const LSS_BUILD = "47.33";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -15975,6 +15975,20 @@ function scheduleLaunch(launchAt) {
     // launchCountdown hides it at the deadline, so this cannot strand anyone behind it.
     let _cineOn = false;
     try { _cineOn = !!(typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active); } catch (_) {}
+    // ⭐⭐ (v47.33) THE CURTAIN GOES UP ON THE SHARED INSTANT, NOT ON EACH PEER'S OWN RE-CHECK.
+    // Owner: "the sync was close, like about a second apart on the cinematic" - while the COUNTDOWN
+    // measured 2 ms apart, because it rides an absolute deadline and the cinematic did not.
+    // Both peers reach this line at the same wall-clock moment (`launchAt`), but the line below used
+    // to call into `hideLoadingOverlay`, whose gmaps branch re-asks `_lssEarthWorldPending()` on its
+    // own 16 ms retry against its own frame pacing - so each peer lifted a little later than the
+    // last, and the cinematic is only VISIBLE once your own curtain is gone.
+    // That re-check is now redundant here: since v47.29 the `launch_at` proposal is gated on every
+    // peer's world already being built, and `launchAt` is a further 1.5 s after that. So the world
+    // question has been answered before this instant, by the whole room, and asking it again per
+    // peer only adds jitter.
+    // ⚠ CLEARED ON EVERY gmaps BUILD (see `_lssGmapsBuildLevel`), so it frees THIS launch only - a
+    //   later level still holds its curtain for its own world.
+    try { if (typeof game !== 'undefined' && game) game._launchCurtainFree = true; } catch (_) {}
     if (_cineOn) { try { hideLoadingOverlay(); } catch (_) {} }
     else { try { const _ls = document.getElementById('lss-loading-sub');
                  if (_ls) _ls.textContent = 'syncing match start'; } catch (_) {} }
@@ -16313,7 +16327,20 @@ class NetworkPlayer {
     // damage path (matching bot behavior).
     if (this.mesh.userData.shieldMesh) {
       let opacity = 0;
-      if (s.spawnProt > 0) {
+      // ⭐⭐ (v47.33) NOT BEFORE THE MATCH STARTS. Owner: "we could see an activated shield around
+      // the other player during the start, but then it hid as it should (until it gets hit)".
+      // This is v36.73's complaint one seat over. That pass removed the spawn-protection bubble from
+      // the LOCAL ship - "starting a match in third person shows the shield for a second, it
+      // shouldn't show it at all" - and DELIBERATELY kept it on peers and bots, because "protected,
+      // don't waste shots" is a real tell in multiplayer. That reasoning still holds, and it is
+      // exactly what says when the bubble is worth drawing: **it is a tell about shooting**, so it
+      // has no job during the cinematic and the 3-2-1, when nobody can shoot anyway. All it does
+      // there is put a lit dome on the one ship you are being shown.
+      // ⚠ Gate the SOURCE, not the mesh: the cinematic hides `shieldMesh` for the ships in its own
+      //   lineup, but an enemy peer is never in your lineup, so nothing was covering this one.
+      // Spawn protection itself is untouched - only whether it is drawn before the flight is live.
+      const _live = (typeof game !== 'undefined' && game && game.state === 'playing');
+      if (_live && s.spawnProt > 0) {
         const frac = Math.min(1, s.spawnProt / 3);
         opacity = Math.max(opacity, 1.0 * frac);
       }
@@ -89398,6 +89425,7 @@ function _lssStartSpectatorCinematic() {
     const _fx = _lssShipEngineFX(rec.mesh);
     _cinematic.ships.push({
       mesh: rec.mesh,
+      ent: rec.ent,          // (v47.32) the LOGICAL ship - a mesh pose alone does not stick
       isPlayer: rec.isPlayer,
       origPos: rec.mesh.position.clone(),
       origQuat: rec.mesh.quaternion.clone(),
@@ -89423,6 +89451,50 @@ function _lssStartSpectatorCinematic() {
       _qFaceForward
     );
   }
+  // ⭐⭐⭐ (v47.32) THE LINEUP IS THE STARTING SPOT. Owner: "they shouldn't move after the
+  // cinematic... no ship should... that's its starting spot", and before that "the bots
+  // disappeared" and "my ship turned 90 degrees after the cinematic". ALL THREE ARE ONE BUG.
+  // The cinematic is MESH-ONLY: it poses `mesh`, never `ent.position`, and re-applies that pose
+  // every tick. `_lssCompleteSpectatorCinematic` then snaps every mesh back to `origPos/origQuat`.
+  // v39.95 already fixed this FOR THE PLAYER ALONE - the last 1.4 s blends their ship to the
+  // gameplay pose and overwrites its orig* - and the note beside it concedes the rest: "the teammate
+  // snap at the cut happens off-axis behind the camera". It is not off-axis when the lineup is your
+  // own fleet: they snap back to spawn, kilometres away, which reads as vanishing. The 90-degree
+  // turn is the same snap on your own ship whenever that blend does NOT complete (in multiplayer
+  // the flight runs inside a fixed window and can be cut short, skipping the overwrite entirely).
+  // So commit the slot to the ENTITY, and make orig* the slot too - then the blend target, the
+  // gameplay pose and the restore all agree and there is nothing left to snap.
+  // ⚠ CLEARANCE IS WHY THIS IS NOT A ONE-LINER. Lineup slots are laid out geometrically around the
+  //   spawn anchor; they are NOT validated against the world, and on a real-world level that can put
+  //   a ship inside a tower - the exact hazard `tiles.spawnPoints()` exists to avoid ("those points
+  //   are already validated against the buildings"). So each slot is scored first, and a slot that
+  //   does not clear leaves THAT ship on its own validated spawn instead. One ship out of formation
+  //   beats one ship inside a building.
+  let _cmtOk = 0, _cmtSkip = 0;
+  for (let i = 0; i < _cinematic.ships.length; i++) {
+    const s = _cinematic.ships[i];
+    if (!s.ent || !s.ent.position) continue;
+    let _clear = true;
+    try {
+      if (typeof _spawnClearanceScore === 'function') {
+        _clear = _spawnClearanceScore(s.pos.x, s.pos.y, s.pos.z).score >= 0;
+      }
+    } catch (_) {}
+    if (!_clear) { s.pos.x = s.origPos.x; s.pos.y = s.origPos.y; s.pos.z = s.origPos.z; s.quat = s.origQuat.clone(); _cmtSkip++; continue; }
+    s.ent.position.set(s.pos.x, s.pos.y, s.pos.z);
+    if (s.ent.velocity) s.ent.velocity.set(0, 0, 0);
+    // Face the way the line faces. The player steers by `euler`; a bot's mesh keeps whatever
+    // quaternion it holds until it moves (`mesh.lookAt` only runs at speed > 1), so the slot
+    // orientation survives on its own.
+    if (s.isPlayer && s.ent.euler) s.ent.euler.y = Math.atan2(fwdX, -fwdZ);
+    // The restore now has nothing to undo.
+    s.origPos.set(s.pos.x, s.pos.y, s.pos.z);
+    s.origQuat.copy(s.quat);
+    _cmtOk++;
+  }
+  try { if (_cmtSkip) console.warn('[cinematic] ' + _cmtSkip + ' slot(s) blocked - those ships kept their validated spawn'); } catch (_) {}
+  try { console.log('[cinematic] lineup committed as spawn:', _cmtOk, 'ship(s)'); } catch (_) {}
+
   // Apply initial pose immediately so no one-frame pop from first-person.
   for (let i = 0; i < _cinematic.ships.length; i++) {
     const s = _cinematic.ships[i];
@@ -107785,6 +107857,9 @@ function _lssEarthCurtainArmed() {
 function _lssEarthWorldPending() {
   try {
     if (typeof game === 'undefined' || !game) return false;
+    // (v47.33) The room already agreed this world was built, 1.5 s before the shared launch
+    // instant - see the note in scheduleLaunch. Re-litigating it per peer only de-syncs the lift.
+    if (game._launchCurtainFree) return false;
     if (typeof _lssEarthCurtainArmed !== 'function' || !_lssEarthCurtainArmed()) return false;
     if (!(_lssEarthCurtainT0 === 0 ||
           (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) return false;
@@ -142194,6 +142269,7 @@ async function _lssGmapsBuildLevel(level) {
       // stream in if it loses — the terrain and water are already up by then.
     }
     _lssGmaps._spawnPlaced = false;   // the curtain waits on this; see hideLoadingOverlay
+    try { game._launchCurtainFree = false; } catch (_) {}   // (v47.33) this world holds its own curtain again
     try {
       await Promise.race([
         tiles.ready,
@@ -142288,6 +142364,60 @@ async function _lssGmapsBuildLevel(level) {
                           '| ends', Math.round(Math.hypot(_ca.x - _cb.x, _ca.z - _cb.z)), 'apart');
             } catch (_) {}
           }
+          // ⭐⭐ (v47.30) TEAM MODES GET TWO ENDS TOO - not just assault. Owner, two peers over Tokyo:
+          // "they spawned right beside each other even tho opposite teams".
+          // Only the assault branch above ever tagged `q.team`, so in elimination/classic the pool
+          // reached `getValidSpawnPoint` untagged and every fleet drew from all 24 points. Its
+          // untagged fallback splits on the SIGN OF WORLD X, which is not a battlefield - the drop
+          // origin is the centre of these rings, so the two halves touch along x = 0 and a point
+          // from each can be metres apart.
+          // ⚠ SPLIT BY BEARING, and the axis is one of the LEVEL'S OWN POINTS, for exactly the two
+          //   reasons the assault note above gives: a radius split puts two concentric shells on one
+          //   centre (measured there: 33 units apart), and inventing a coordinate can drop a fleet
+          //   inside a tower. `tiles.spawnPoints()` has already validated these against the
+          //   buildings, so partitioning them costs nothing and cannot.
+          // The axis is origin -> FURTHEST point, i.e. a real diameter of the cloud, so the two ends
+          // are as far apart as this level allows.
+          if (!_asltGmaps && _sp.length >= 4) {
+            const _r2b = (q) => q.x * q.x + q.z * q.z;
+            let _far = _sp[0];
+            for (const q of _sp) if (_r2b(q) > _r2b(_far)) _far = q;
+            const _fl = Math.max(1, Math.hypot(_far.x, _far.z));
+            const _ax = _far.x / _fl, _az = _far.z / _fl;
+            const _pj = (q) => q.x * _ax + q.z * _az;
+            const _byP2 = _sp.slice().sort((a, b) => _pj(b) - _pj(a));
+            const _n2 = Math.max(2, Math.floor(_byP2.length * 0.35));
+            for (const q of _sp) q.team = null;                  // the middle stays neutral
+            // ⚠⚠ (v47.31) A FLEET IS A CLUSTER, NOT A HALF. Taking the top N BY PROJECTION separates
+            //   the two sides correctly but says nothing about how spread each side is: these points
+            //   are concentric RINGS, so one end's slice mixes an inner-ring point with an outer-ring
+            //   one. MEASURED over Tokyo with the plain projection slice: ends 8,479 u apart - right -
+            //   but each end SPANNING 9,557 / 9,616 u internally, so the owner's own wingmen spawned
+            //   3,664 and 8,109 u away and read as "the bots disappeared".
+            //   So take the extreme point as the anchor and keep the N points NEAREST IT. Same
+            //   separation between the ends, a fleet-sized cluster inside each.
+            const _d3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+            const _clump = (anchor) => _sp.slice().sort((a, b) => _d3(a, anchor) - _d3(b, anchor)).slice(0, _n2);
+            const _ea = _clump(_byP2[0]), _eb = _clump(_byP2[_byP2.length - 1]);
+            for (const q of _ea) q.team = 'A';
+            for (const q of _eb) q.team = 'B';
+            // ...and publish them as ROOMS. `sdfRoomData` is what the lineup cinematic reads for its
+            // anchor and its "which way is the enemy" direction (see _lssStartSpectatorCinematic);
+            // with real ends it no longer has to fall back to the team centroid (v47.27).
+            const _ctr2 = (arr) => { let x=0,y=0,z=0; for (const q of arr) { x+=q.x; y+=q.y; z+=q.z; }
+                                     return { x:x/arr.length, y:y/arr.length, z:z/arr.length }; };
+            const _c1 = _ctr2(_ea), _c2 = _ctr2(_eb);
+            game.sdfRoomData = [
+              { id: 'spawn_a', team: 'A', side: 'A', x: _c1.x, y: _c1.y, z: _c1.z, r: 420 },
+              { id: 'spawn_b', team: 'B', side: 'B', x: _c2.x, y: _c2.y, z: _c2.z, r: 420 },
+            ];
+            try {
+              const _span = (arr) => { let m = 0; for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) { const d = _d3(arr[i], arr[j]); if (d > m) m = d; } return Math.round(m); };
+              console.log('[lss-earth] team ends', _ea.length + '/' + _eb.length,
+                          'apart', Math.round(Math.hypot(_c1.x - _c2.x, _c1.z - _c2.z)),
+                          '| spans', _span(_ea) + '/' + _span(_eb));
+            } catch (_) {}
+          }
           // ⚠ FILLING corridorPoints IS NOT ENOUGH IN FREE FLIGHT. That pool is
           // what getValidSpawnPoint draws from, which fixes bots and respawns —
           // but free flight never calls it: its arms place the player directly
@@ -142328,7 +142458,15 @@ async function _lssGmapsBuildLevel(level) {
           //   `getValidSpawnPoint` - assault does, on its own side tag, and has just used it above.
           try {
             if (!_asltGmaps && typeof player !== 'undefined' && player && player.position) {
-              const _s0 = _sp[0];
+              // (v47.30) ⚠ WAS `_sp[0]` - THE SAME POINT FOR EVERYONE. That is the whole bug: both
+              // peers run this locally, both take element 0, so two opposite fleets land on top of
+              // each other. Draw from this player's OWN end instead, through the scorer that the
+              // rest of the game respawns with (40 clearance-tested attempts, vs one untested
+              // point). Falls back to `_sp[0]` only if the draw somehow fails.
+              const _tc2 = (typeof LSS !== 'undefined' && player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
+              let _s0 = null;
+              try { if (typeof getValidSpawnPoint === 'function') _s0 = getValidSpawnPoint(_tc2); } catch (_) {}
+              if (!_s0) _s0 = _sp[0];
               player.position.set(_s0.x, _s0.y, _s0.z);
               if (player.velocity) player.velocity.set(0, 0, 0);
               // (v46.89) ...and LATCH it, for the same reason the assault branch above re-picks:
@@ -142340,6 +142478,34 @@ async function _lssGmapsBuildLevel(level) {
                           Math.round(_s0.x), Math.round(_s0.y), Math.round(_s0.z));
             }
           } catch (_) {}
+          // ⭐⭐ (v47.31) AND THE BOTS, FOR EXACTLY THE REASON THE PLAYER IS RE-PICKED ABOVE.
+          // Owner: "during countdown, bots shouldn't disappear" - and they were never hidden.
+          // MEASURED over Tokyo: all 5 bots within 3,000 u on the first warmup sample, ZERO within
+          // 3,000 u on the next, `mesh.visible` true throughout. They did not vanish, they were
+          // LEFT BEHIND: the v46.89 note explains that `_finishCommit` draws its spawn before this
+          // world exists, and that is just as true for every bot as it is for the player - but only
+          // the player was re-drawn once the pool became real. So the player teleported onto their
+          // team end and the fleet stayed back at the pre-build origin, kilometres away.
+          // ⚠ This is what makes the v47.30 team split safe: separating the two ENDS by ~8,500 u is
+          //   only correct if each fleet actually MOVES to its own end. Split without this and the
+          //   fix makes the symptom worse, which is how it surfaced.
+          // ⚠ Behind the curtain, like the player's re-pick, so nothing teleports in view.
+          try {
+            if (!_asltGmaps && typeof getValidSpawnPoint === 'function' && Array.isArray(game.entities)) {
+              let _moved = 0;
+              for (const _b of game.entities) {
+                if (!_b || !_b.loadoutKey || !_b.position) continue;   // skip city traffic (earthKind)
+                const _bt = (typeof LSS !== 'undefined' && _b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
+                const _bp = getValidSpawnPoint(_bt);
+                if (!_bp) continue;
+                _b.position.copy(_bp);
+                if (_b.velocity) _b.velocity.set(0, 0, 0);
+                if (_b.mesh) _b.mesh.position.copy(_bp);
+                _moved++;
+              }
+              if (_moved) console.log('[lss-earth] re-placed', _moved, 'bots on their team ends');
+            }
+          } catch (e) { console.warn('[lss-earth] bot re-place failed:', e); }
         }
       }
     } catch (e) { console.warn('[lss-earth] spawn points failed:', e); }

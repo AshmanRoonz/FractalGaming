@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.29";
+const LSS_BUILD = "47.33";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -6081,6 +6081,7 @@ function scheduleLaunch(launchAt) {
     _lssRunCinematicThen(() => {}, false);   // plays inside the window; it no longer owns the 3-2-1
     let _cineOn = false;
     try { _cineOn = !!(typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active); } catch (_) {}
+    try { if (typeof game !== 'undefined' && game) game._launchCurtainFree = true; } catch (_) {}
     if (_cineOn) { try { hideLoadingOverlay(); } catch (_) {} }
     else { try { const _ls = document.getElementById('lss-loading-sub');
                  if (_ls) _ls.textContent = 'syncing match start'; } catch (_) {} }
@@ -6303,7 +6304,8 @@ class NetworkPlayer {
 
     if (this.mesh.userData.shieldMesh) {
       let opacity = 0;
-      if (s.spawnProt > 0) {
+      const _live = (typeof game !== 'undefined' && game && game.state === 'playing');
+      if (_live && s.spawnProt > 0) {
         const frac = Math.min(1, s.spawnProt / 3);
         opacity = Math.max(opacity, 1.0 * frac);
       }
@@ -56316,6 +56318,7 @@ function _lssStartSpectatorCinematic() {
     const _fx = _lssShipEngineFX(rec.mesh);
     _cinematic.ships.push({
       mesh: rec.mesh,
+      ent: rec.ent,          // (v47.32) the LOGICAL ship - a mesh pose alone does not stick
       isPlayer: rec.isPlayer,
       origPos: rec.mesh.position.clone(),
       origQuat: rec.mesh.quaternion.clone(),
@@ -56340,6 +56343,27 @@ function _lssStartSpectatorCinematic() {
       _qFaceForward
     );
   }
+  let _cmtOk = 0, _cmtSkip = 0;
+  for (let i = 0; i < _cinematic.ships.length; i++) {
+    const s = _cinematic.ships[i];
+    if (!s.ent || !s.ent.position) continue;
+    let _clear = true;
+    try {
+      if (typeof _spawnClearanceScore === 'function') {
+        _clear = _spawnClearanceScore(s.pos.x, s.pos.y, s.pos.z).score >= 0;
+      }
+    } catch (_) {}
+    if (!_clear) { s.pos.x = s.origPos.x; s.pos.y = s.origPos.y; s.pos.z = s.origPos.z; s.quat = s.origQuat.clone(); _cmtSkip++; continue; }
+    s.ent.position.set(s.pos.x, s.pos.y, s.pos.z);
+    if (s.ent.velocity) s.ent.velocity.set(0, 0, 0);
+    if (s.isPlayer && s.ent.euler) s.ent.euler.y = Math.atan2(fwdX, -fwdZ);
+    s.origPos.set(s.pos.x, s.pos.y, s.pos.z);
+    s.origQuat.copy(s.quat);
+    _cmtOk++;
+  }
+  try { if (_cmtSkip) console.warn('[cinematic] ' + _cmtSkip + ' slot(s) blocked - those ships kept their validated spawn'); } catch (_) {}
+  try { console.log('[cinematic] lineup committed as spawn:', _cmtOk, 'ship(s)'); } catch (_) {}
+
   for (let i = 0; i < _cinematic.ships.length; i++) {
     const s = _cinematic.ships[i];
     s.mesh.visible = true;
@@ -68503,6 +68527,7 @@ function _lssEarthCurtainArmed() {
 function _lssEarthWorldPending() {
   try {
     if (typeof game === 'undefined' || !game) return false;
+    if (game._launchCurtainFree) return false;
     if (typeof _lssEarthCurtainArmed !== 'function' || !_lssEarthCurtainArmed()) return false;
     if (!(_lssEarthCurtainT0 === 0 ||
           (Date.now() - _lssEarthCurtainT0) < _LSS_EARTH_CURTAIN_MAX_MS)) return false;
@@ -95130,6 +95155,7 @@ async function _lssGmapsBuildLevel(level) {
       try { _lssGmapsRefinePivot(); } catch(_) {}
     }
     _lssGmaps._spawnPlaced = false;   // the curtain waits on this; see hideLoadingOverlay
+    try { game._launchCurtainFree = false; } catch (_) {}   // (v47.33) this world holds its own curtain again
     try {
       await Promise.race([
         tiles.ready,
@@ -95179,6 +95205,35 @@ async function _lssGmapsBuildLevel(level) {
                           '| ends', Math.round(Math.hypot(_ca.x - _cb.x, _ca.z - _cb.z)), 'apart');
             } catch (_) {}
           }
+          if (!_asltGmaps && _sp.length >= 4) {
+            const _r2b = (q) => q.x * q.x + q.z * q.z;
+            let _far = _sp[0];
+            for (const q of _sp) if (_r2b(q) > _r2b(_far)) _far = q;
+            const _fl = Math.max(1, Math.hypot(_far.x, _far.z));
+            const _ax = _far.x / _fl, _az = _far.z / _fl;
+            const _pj = (q) => q.x * _ax + q.z * _az;
+            const _byP2 = _sp.slice().sort((a, b) => _pj(b) - _pj(a));
+            const _n2 = Math.max(2, Math.floor(_byP2.length * 0.35));
+            for (const q of _sp) q.team = null;                  // the middle stays neutral
+            const _d3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
+            const _clump = (anchor) => _sp.slice().sort((a, b) => _d3(a, anchor) - _d3(b, anchor)).slice(0, _n2);
+            const _ea = _clump(_byP2[0]), _eb = _clump(_byP2[_byP2.length - 1]);
+            for (const q of _ea) q.team = 'A';
+            for (const q of _eb) q.team = 'B';
+            const _ctr2 = (arr) => { let x=0,y=0,z=0; for (const q of arr) { x+=q.x; y+=q.y; z+=q.z; }
+                                     return { x:x/arr.length, y:y/arr.length, z:z/arr.length }; };
+            const _c1 = _ctr2(_ea), _c2 = _ctr2(_eb);
+            game.sdfRoomData = [
+              { id: 'spawn_a', team: 'A', side: 'A', x: _c1.x, y: _c1.y, z: _c1.z, r: 420 },
+              { id: 'spawn_b', team: 'B', side: 'B', x: _c2.x, y: _c2.y, z: _c2.z, r: 420 },
+            ];
+            try {
+              const _span = (arr) => { let m = 0; for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) { const d = _d3(arr[i], arr[j]); if (d > m) m = d; } return Math.round(m); };
+              console.log('[lss-earth] team ends', _ea.length + '/' + _eb.length,
+                          'apart', Math.round(Math.hypot(_c1.x - _c2.x, _c1.z - _c2.z)),
+                          '| spans', _span(_ea) + '/' + _span(_eb));
+            } catch (_) {}
+          }
           try {
             if (_asltGmaps && typeof player !== 'undefined' && player && player.position &&
                 typeof getValidSpawnPoint === 'function') {
@@ -95196,7 +95251,10 @@ async function _lssGmapsBuildLevel(level) {
           } catch (e) { console.warn('[assault-gmaps] spawn re-pick failed:', e); }
           try {
             if (!_asltGmaps && typeof player !== 'undefined' && player && player.position) {
-              const _s0 = _sp[0];
+              const _tc2 = (typeof LSS !== 'undefined' && player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
+              let _s0 = null;
+              try { if (typeof getValidSpawnPoint === 'function') _s0 = getValidSpawnPoint(_tc2); } catch (_) {}
+              if (!_s0) _s0 = _sp[0];
               player.position.set(_s0.x, _s0.y, _s0.z);
               if (player.velocity) player.velocity.set(0, 0, 0);
               try { if (typeof _spawnPickSet === 'function') _spawnPickSet(player.position); } catch (_) {}
@@ -95204,6 +95262,22 @@ async function _lssGmapsBuildLevel(level) {
                           Math.round(_s0.x), Math.round(_s0.y), Math.round(_s0.z));
             }
           } catch (_) {}
+          try {
+            if (!_asltGmaps && typeof getValidSpawnPoint === 'function' && Array.isArray(game.entities)) {
+              let _moved = 0;
+              for (const _b of game.entities) {
+                if (!_b || !_b.loadoutKey || !_b.position) continue;   // skip city traffic (earthKind)
+                const _bt = (typeof LSS !== 'undefined' && _b.team === LSS.TEAM_FLEET_B) ? 'B' : 'A';
+                const _bp = getValidSpawnPoint(_bt);
+                if (!_bp) continue;
+                _b.position.copy(_bp);
+                if (_b.velocity) _b.velocity.set(0, 0, 0);
+                if (_b.mesh) _b.mesh.position.copy(_bp);
+                _moved++;
+              }
+              if (_moved) console.log('[lss-earth] re-placed', _moved, 'bots on their team ends');
+            }
+          } catch (e) { console.warn('[lss-earth] bot re-place failed:', e); }
         }
       }
     } catch (e) { console.warn('[lss-earth] spawn points failed:', e); }
