@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.08";
+const LSS_BUILD = "47.09";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -37191,7 +37191,7 @@ class Bot {
     } else if (ability.name === 'Cluster Missile') {
       const vel = this._tempVec3b.copy(aim).multiplyScalar(900);
       const proj = new Projectile(this.position, vel, 800, 250, 'bot', LSS.CLASS_COLORS.PUNCTURE);
-      proj.cluster = true;
+      proj.isCluster = true;
       proj.clusterDmg = 500;
       proj.clusterDuration = 5;
       proj.sizeMult = 3.0;
@@ -39336,9 +39336,7 @@ class Projectile {
     } catch (_) {}
     const dmgPerSec = this.clusterDmg || 80;
     const duration = this.clusterDuration || 3;
-    const _clTeam = (this.owner === 'network' && this.ownerTeam != null)
-      ? this.ownerTeam
-      : (player ? player.team : 0);
+    const _clTeam = (this.ownerTeam != null) ? this.ownerTeam : (player ? player.team : 0);
     game.worldEffects.push({
       type: 'cluster', position: this.position.clone(),
       timer: duration, dmgPerSec: dmgPerSec, radius: 250,
@@ -59985,6 +59983,8 @@ function activateCore() {
         break;
     }
     }   // (v38.72) end of the tier ladder
+    player.shield = player.maxShield;
+    player.shieldRegenDelay = 0;
   }
 }
 
@@ -61503,6 +61503,10 @@ function updateWorldEffects(dt) {
     }
 
     else if (eff.type === 'cluster') {
+      if (eff.team !== player.team && player.shipState !== 'dead' && eff.owner !== 'player' &&
+          _bodyDist(eff.position, player) < eff.radius) {
+        playerTakeDamage(eff.dmgPerSec * dt, eff.owner, null);
+      }
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === eff.team) continue;
         if (_bodyDist(eff.position, bot) < eff.radius) {

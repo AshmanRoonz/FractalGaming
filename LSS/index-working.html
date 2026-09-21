@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.08";
+const LSS_BUILD = "47.09";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -61977,7 +61977,13 @@ class Bot {
       // Projectile constructor clones origin + velocity ; passing scratches
       // is safe because they're not retained.
       const proj = new Projectile(this.position, vel, 800, 250, 'bot', LSS.CLASS_COLORS.PUNCTURE);
-      proj.cluster = true;
+      // (v47.09) WAS `proj.cluster = true`, which NOTHING reads. Every consumer tests `isCluster`:
+      // Projectile.update's `shouldExplode`, all nine `if (this.isCluster) this.spawnClusterChildren()`
+      // sites, `_punctureDetonateClusters`, and `broadcastAbilityProjectile`. The only `.cluster`
+      // reads in the file are on ClusterObstacle, an unrelated class - so a PUNCTURE bot's cluster
+      // missile flew, hit and did its 800 impact + 250 splash but NEVER split. Owner: "puncture bots
+      // cluster missile isn't cluster exploding".
+      proj.isCluster = true;
       proj.clusterDmg = 500;
       proj.clusterDuration = 5;
       proj.sizeMult = 3.0;
@@ -65037,9 +65043,11 @@ class Projectile {
     // `ownerTeam` (it has to, for the same reason); this just uses it.
     // Pre-existing - a mirrored missile has always exploded locally on impact - but manual
     // detonation (v44.17) makes it happen on demand, so it gets fixed here rather than noted.
-    const _clTeam = (this.owner === 'network' && this.ownerTeam != null)
-      ? this.ownerTeam
-      : (player ? player.team : 0);
+    // (v47.09) ANY owner with a team gets it, not just 'network'. The cluster field skips everything on
+    // `eff.team`, so a BOT's cluster used to fall through to `player.team` and burn the bot's OWN allies
+    // while sparing its enemies. Latent until v47.09 made bot clusters actually split. A player-owned
+    // projectile has no ownerTeam, so it still falls through to player.team exactly as before.
+    const _clTeam = (this.ownerTeam != null) ? this.ownerTeam : (player ? player.team : 0);
     game.worldEffects.push({
       type: 'cluster', position: this.position.clone(),
       timer: duration, dmgPerSec: dmgPerSec, radius: 250,
@@ -95003,6 +95011,18 @@ function activateCore() {
         break;
     }
     }   // (v38.72) end of the tier ladder
+    // (v47.09) THE CORE ALWAYS GIVES A FULL SHIELD, at every tier. Owner: "syphon's core should always
+    // also grant full shield (not overshield if that ability is enabled)". Before this, only tier 3+
+    // refilled: a tier-1 or tier-3 pickup gave NO shield at all and tier 2 gave a partial +500. The bot
+    // path (_useCore, 'AI Nanobots') has always done `this.shield = this.maxShield` unconditionally, so
+    // this also puts the player and the bots on the same rule.
+    // ⚠ AFTER the switch, not before: tier 2 raises player.maxShield to chassis.maxShield + 500, and
+    //   filling first would leave the bar short by exactly that 500 the moment the cap moves.
+    // ⚠ SHIELD ONLY - player.overShield is a SEPARATE layer with its own cap
+    //   (maxShield * perk.overShieldFrac, see the Emergency Recharge perk). It is deliberately NOT
+    //   touched here, so the core tops the shield up without handing out a free overshield on top.
+    player.shield = player.maxShield;
+    player.shieldRegenDelay = 0;
   }
 }
 
@@ -97044,6 +97064,15 @@ function updateWorldEffects(dt) {
 
     // Cluster Missile sustained explosion zone
     else if (eff.type === 'cluster') {
+      // (v47.09) THE FIELD COULD NEVER TOUCH THE LOCAL PLAYER. This block looped entities, dynamic
+      // objects and monsters and simply had no player branch - so the whole 500 DPS x 5 s payload of an
+      // enemy Cluster Missile was unreachable, whether it came from a bot or a network peer. The
+      // 'firewall' effect right above does exactly this, and this is its idiom, copied verbatim.
+      // Latent while bot clusters never split at all (see the isCluster fix in _tryUseOffensive).
+      if (eff.team !== player.team && player.shipState !== 'dead' && eff.owner !== 'player' &&
+          _bodyDist(eff.position, player) < eff.radius) {
+        playerTakeDamage(eff.dmgPerSec * dt, eff.owner, null);
+      }
       // Damage enemies in the blast zone
       for (const bot of game.entities) {
         if (!bot.alive || bot.team === eff.team) continue;
