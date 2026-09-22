@@ -7525,3 +7525,41 @@ Owner: *"the rockets/projectiles should also increase in speed, with the match s
   spawning one and waiting produced ZERO projectiles in 3 s - most hulls are hitscan and a bot with
   no target never fires.
 - Knob: `window.__projSpeedMul` overrides the factor outright.
+
+
+### v47.63/47.64 - race checkpoints at 4x, cycling hue
+
+Owner: *"in race mode, let's made the check points like 4x the size, and cycling hue shifting, to be
+easier to see"*.
+
+**Jump:** `function _raceGateScale` · `_buildGateMesh` · `_animateGate` · `function _raceGateLib`
+
+- **⭐⭐⭐ VISUAL ONLY. SCALING THE CAPTURE SPHERE BREAKS THE TRACK.** The first cut multiplied
+  `RaceRing`'s `diameter`, which sizes the mesh AND the capture test
+  (`this.diameter * RACE_CIRCUIT.captureK`, 0.45). Keeping them matched sounds obviously right - a
+  gate that looks bigger but captures at the old radius is a lie from the cockpit - and it is wrong:
+  at 4x the overworld capture radius goes **243 -> 972** and earth's **180 -> 720**, while **earth
+  gates sit ~450-550 m apart along the lap**. You would take the next gate without flying to it.
+  **CAUGHT IN THE ACT**: `__race.tp(i)` drops you 600 u short of a gate and the teleport CAPTURED it
+  on arrival, because 600 < 972. After the fix the same teleport leaves the cursor on gate 0.
+  The group is scaled at draw time instead (`grp.scale = diameter/300 * k`) and `diameter` keeps its
+  gameplay meaning.
+- **⚠ THE GLOW GROWS AS sqrt(k), NOT k.** The sprite and ray rig are ADDITIVE; at a straight 4x the
+  sprite is ~1,224 u across and each ray ~3,168 u long. **MEASURED on the overworld circuit: the
+  whole frame went flat magenta from 540 m away.** Compensating them by `1/sqrt(k)` keeps the solid
+  core at 4x while the halo only doubles - verified after: sprite 170 -> 85, rig 1 -> 0.5, group 7.2.
+- **The hue cycle rides the SHARED singleton.** `_rcGateLib` is cached and has exactly ONE consumer
+  (`_buildGateMesh`), and a circuit shows only ONE gate at a time (the `_cidx === player._raceIdx`
+  test), so tinting the shared materials once per frame is both correct and free - cloning per gate
+  would buy nothing and cost a material set per checkpoint. Guarded on `game.time` so N rings do not
+  write it N times. Only materials that own a `.color` are touched: `shMat1/shMat2` are FX shaders
+  carrying their palette in uniforms. **MEASURED**: core hue 231 -> 292 -> 351 -> 39 -> 94 -> 159 ->
+  222 over 3 s, a full wrap, with core/sprite/rays moving together.
+- **⚠ ONLY CIRCUIT RACES HAVE GATES.** `race_earth`, `race_overworld` and `gmaps_user` lay Aegis-bolt
+  BEACONS (`_raceCircuitSpawnRings`). `race_shifting` and `race_pole_position` use the older
+  fly-THROUGH cyan rings (`_spawnPoleRings`), sized to their room by
+  `Math.min((r.r||300) * 1.7, 560)` and oriented to the track flow - those are deliberately NOT
+  scaled here, because a ring 4x wider than the room it sits in is buried in the rock, and the v36.71
+  note already records a spawn sitting inside its own ring's capture sphere at 1x.
+- Knobs: `window.__raceGateScale` (default 4; 1 restores the old gates exactly) and
+  `window.__raceGateHueSec` (default 3 s per full hue wrap).

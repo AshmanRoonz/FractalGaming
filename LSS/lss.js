@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.62";
+const LSS_BUILD = "47.64";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -47025,7 +47025,13 @@ class RaceRing {
       }
       grp.add(rig);
     }
-    grp.scale.setScalar(this.diameter / 300);
+    const _gk = (typeof _raceGateScale === 'function') ? _raceGateScale() : 1;
+    if (_gk > 1) {
+      const _c = 1 / Math.sqrt(_gk);
+      if (spr) spr.scale.multiplyScalar(_c);
+      if (rig) rig.scale.setScalar(_c);
+    }
+    grp.scale.setScalar(this.diameter / 300 * _gk);
     grp.position.copy(this.position);
     scene.add(grp);
     this.group = grp; this._inner = core; this._gateParts = { core, sh1, sh2, spr, rig };
@@ -47034,6 +47040,27 @@ class RaceRing {
   _animateGate(dt) {
     const P = this._gateParts; if (!P) return;
     this._gateT += dt;
+    try {
+      const lib = (typeof _raceGateLib === 'function') ? _raceGateLib() : null;
+      if (lib) {
+        const now = (typeof game !== 'undefined' && game && game.time) ? game.time : this._gateT;
+        if (lib._hueAt !== now) {
+          lib._hueAt = now;
+          let per = 3;
+          try {
+            const k = (typeof window !== 'undefined') ? window.__raceGateHueSec : undefined;
+            if (typeof k === 'number' && isFinite(k) && k > 0) per = k;
+          } catch (_) {}
+          const h = (now / per) % 1;
+          const tint = (m, sat, lig) => {
+            try { if (m && m.color && m.color.setHSL) m.color.setHSL(h, sat, lig); } catch (_) {}
+          };
+          tint(lib.coreMat, 0.60, 0.90);
+          tint(lib.sprMat,  0.90, 0.66);
+          tint(lib.rayMat,  0.85, 0.80);
+        }
+      }
+    } catch (_) {}
     const tt = this._gateT, ph = this._gatePh;
     const wob = 1 + 0.16 * Math.cos(tt * 7.3 + ph) + 0.11 * Math.cos(tt * 12.7 + ph * 2.3) + 0.06 * Math.cos(tt * 23.1 + ph * 4.1);
     if (P.core) P.core.scale.setScalar(wob);
@@ -47234,6 +47261,13 @@ function _raceRespawnPuff(pos) {
   } catch (_) {}
 }
 let _rcGateLib = null;
+function _raceGateScale() {
+  try {
+    const v = (typeof window !== 'undefined') ? window.__raceGateScale : undefined;
+    if (typeof v === 'number' && isFinite(v) && v > 0) return v;
+  } catch (_) {}
+  return 4;
+}
 function _raceGateLib() {
   if (_rcGateLib) return _rcGateLib;
   try {

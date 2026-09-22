@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.62";
+const LSS_BUILD = "47.64";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -75511,7 +75511,19 @@ class RaceRing {
       }
       grp.add(rig);
     }
-    grp.scale.setScalar(this.diameter / 300);
+    // (v47.63) The 4x lives HERE, on the drawn group, so `this.diameter` stays the capture size.
+    const _gk = (typeof _raceGateScale === 'function') ? _raceGateScale() : 1;
+    // ⚠ THE GLOW GROWS AS sqrt(k), NOT k. The sprite and the ray rig are ADDITIVE, and at a straight
+    //   4x the sprite is ~1,224 units across and each ray ~3,168 long - flying near one washed the
+    //   whole frame out (verified on the overworld circuit: the screen went flat magenta from 540 m
+    //   away). Growing the solid core at 4x while the halo only doubles keeps the beacon findable
+    //   without turning the approach into a colour-out.
+    if (_gk > 1) {
+      const _c = 1 / Math.sqrt(_gk);
+      if (spr) spr.scale.multiplyScalar(_c);
+      if (rig) rig.scale.setScalar(_c);
+    }
+    grp.scale.setScalar(this.diameter / 300 * _gk);
     grp.position.copy(this.position);
     scene.add(grp);
     this.group = grp; this._inner = core; this._gateParts = { core, sh1, sh2, spr, rig };
@@ -75521,6 +75533,40 @@ class RaceRing {
   _animateGate(dt) {
     const P = this._gateParts; if (!P) return;
     this._gateT += dt;
+    // ⭐⭐ (v47.63) THE HUE CYCLE. Owner wants the checkpoint findable, and a beacon that CHANGES
+    // colour is picked out of a busy city skyline far faster than one that is merely bright - the
+    // v46.99 lesson about Body Shield in reverse: there, motion beat luminance; here, a moving HUE
+    // beats a fixed one against a background that already has every brightness in it.
+    // ⚠ THE MATERIALS ARE A SHARED SINGLETON (`_rcGateLib`), so this recolours every gate at once -
+    //   which is exactly right and also free, because a circuit shows only ONE gate at a time (see
+    //   the `_cidx === player._raceIdx` test in update). Cloning per gate would buy nothing and cost
+    //   a material set per checkpoint. Guarded on the clock so N rings do not write it N times.
+    // ⚠ Only materials that actually own a `.color` are tinted. `shMat1`/`shMat2` are FX shaders on
+    //   the non-potato path and carry their palette in uniforms, so they are left to their own look
+    //   rather than half-tinted by a property they may not have.
+    try {
+      const lib = (typeof _raceGateLib === 'function') ? _raceGateLib() : null;
+      if (lib) {
+        const now = (typeof game !== 'undefined' && game && game.time) ? game.time : this._gateT;
+        if (lib._hueAt !== now) {
+          lib._hueAt = now;
+          let per = 3;
+          try {
+            const k = (typeof window !== 'undefined') ? window.__raceGateHueSec : undefined;
+            if (typeof k === 'number' && isFinite(k) && k > 0) per = k;
+          } catch (_) {}
+          const h = (now / per) % 1;
+          const tint = (m, sat, lig) => {
+            try { if (m && m.color && m.color.setHSL) m.color.setHSL(h, sat, lig); } catch (_) {}
+          };
+          // Saturation / lightness keep each part's original weight: the core stays near-white hot,
+          // the sprite and rays stay the softer glow around it.
+          tint(lib.coreMat, 0.60, 0.90);
+          tint(lib.sprMat,  0.90, 0.66);
+          tint(lib.rayMat,  0.85, 0.80);
+        }
+      }
+    } catch (_) {}
     const tt = this._gateT, ph = this._gatePh;
     const wob = 1 + 0.16 * Math.cos(tt * 7.3 + ph) + 0.11 * Math.cos(tt * 12.7 + ph * 2.3) + 0.06 * Math.cos(tt * 23.1 + ph * 4.1);
     if (P.core) P.core.scale.setScalar(wob);
@@ -75795,6 +75841,27 @@ function _raceRespawnPuff(pos) {
 // geometries and materials: a gate's destroy() only removes its group - see the v42.xx
 // shared-geometry disposal rule.
 let _rcGateLib = null;
+// ⭐⭐⭐ (v47.63) CHECKPOINTS AT 4x. Owner: "in race mode, let's made the check points like 4x the
+// size, and cycling hue shifting, to be easier to see".
+// ⚠⚠ VISUAL ONLY - THE CAPTURE SPHERE IS DELIBERATELY NOT SCALED, AND THAT WAS A CORRECTION.
+//   The first cut multiplied `RaceRing`'s `diameter`, which sizes the mesh AND the capture test
+//   (`this.diameter * RACE_CIRCUIT.captureK`, 0.45). Matching them sounds right and it breaks the
+//   track: at 4x the overworld capture radius goes 243 -> 972 and earth's 180 -> 720, while EARTH
+//   GATES SIT ~450-550 m APART along the lap. You would take the next gate without ever flying to
+//   it. Caught in the act - `__race.tp(i)` drops you 600 u short of a gate and the teleport CAPTURED
+//   it on arrival, because 600 < 972.
+//   So the group is scaled at draw time instead and `diameter` keeps its gameplay meaning. The
+//   mismatch that remains (a glow wider than the sphere you must touch) is the far cheaper error:
+//   the solid core is still what you aim at, and over-shooting a checkpoint is recoverable in a way
+//   that auto-capturing three of them is not.
+// Knob: `window.__raceGateScale` (default 4; 1 restores the old gates exactly).
+function _raceGateScale() {
+  try {
+    const v = (typeof window !== 'undefined') ? window.__raceGateScale : undefined;
+    if (typeof v === 'number' && isFinite(v) && v > 0) return v;
+  } catch (_) {}
+  return 4;
+}
 function _raceGateLib() {
   if (_rcGateLib) return _rcGateLib;
   try {
