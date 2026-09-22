@@ -7563,3 +7563,186 @@ easier to see"*.
   note already records a spawn sitting inside its own ring's capture sphere at 1x.
 - Knobs: `window.__raceGateScale` (default 4; 1 restores the old gates exactly) and
   `window.__raceGateHueSec` (default 3 s per full hue wrap).
+
+
+### v47.65 - the hue cycle that measured perfectly and was invisible
+
+Owner, after v47.64 shipped: *"this is good, i see the bigger check points in the races... let's make
+them cycle through the hues"* - i.e. the SIZE landed and the hue did not, despite the entry above
+recording a verified 231 -> 292 -> 351 -> 39 -> 94 -> 159 sweep.
+
+**Jump:** `_animateGate` (the `tint` helper)
+
+- **⭐⭐⭐ A MEASUREMENT CAN BE RIGHT AND ANSWER THE WRONG QUESTION.** The colours really did cycle.
+  What was never checked is whether the parts being tinted are the parts you SEE. Two faults, both
+  invisible to the probe that "passed":
+  1. **THE TWO BIG SHELLS WERE SKIPPED.** `shMat1`/`shMat2` are LayeredFX shader materials with no
+     `.color`, so the tinter's `if (m.color)` test quietly passed over them - and they are the
+     largest things in the gate (icosahedrons of 46 and 64 at x7.2 scale). The beacon's colour IS
+     those shells; they stayed preset cyan while the core, sprite and rays cycled underneath.
+     The lever is `uniforms.uBaseColor`: `fireball_purple` is byte-identical to `fireball_cyan`
+     apart from `baseColor`, and the layers carry hue OFFSETS from it, not absolute colours.
+  2. **THE CORE WAS TINTED AT L 0.90** - white with a rumour of hue. The samples logged as proof
+     (`#eceefa`, `#f9ecfa`, `#faecee`) are, read honestly, three shades of white.
+- **The tinter now handles both kinds** (`uniforms.uBaseColor` first, `.color` second, which also
+  covers the potato-path flat fallback shells) and the saturation/lightness carry the hue rather
+  than a wash of it. **MEASURED after**: shells `#6efd69` -> `#69e9fd` -> `#b469fd` -> `#fd69ba` ->
+  `#fdec69` over 3 s, and two screenshots of one gate a second apart are cyan then magenta.
+- ⚠ **The lesson for the next colour change in this file: sample the DOMINANT element, not the one
+  that is easiest to read.** A hex value proves a property moved; only the picture proves the thing
+  changed colour. Same family as the v46.99 Body Shield finding - what wins the frame is what the
+  eye is actually given.
+
+
+### v47.66 - the overworld lap climbs a sky-island column
+
+Owner: *"in the overworld race, we should make sure the check points go up a group of floating
+islands and back down"*.
+
+**Jump:** `function _rcSkyColumnNear` · `function _rcSkyLeg` · `_rcGenOverworld`
+
+- **The world already had the landmark.** v46.10's SKY ISLANDS are built as COLUMNS - *"a stack of
+  islands winding up a vertical axis on a golden-angle spiral"*, 4-11 of them between y 1,400 and
+  11,500, with empty sky between columns so one reads as a destination. The leg is the lap agreeing
+  to use that, not new geometry.
+- **⭐⭐ `_skClusterAt` IS A PURE FUNCTION OF THE CELL**, which is what makes this safe at GENERATION
+  time: no island mesh has to exist yet, and every peer derives the identical column from the
+  identical cell - the same property the circuit relies on to stay in sync. The finder sweeps a 5x5
+  cell block around the transit midpoint and takes the nearest column of >= 3 islands (a two-island
+  stub is not a climb).
+- **⚠ GATES GO ABOVE EACH ISLAND'S TOP, NOT BESIDE IT.** An island is a metaball with an OVERHANG -
+  that is the entire point of the shape (see the SKY ISLANDS header) - so a gate at centre height
+  offset sideways can land inside the tapering ROOT hanging beneath the island above it.
+  `padY` when the island has a landing pad, else `y + R`, then +260.
+- **⚠ CAP THE COUNT AT 5 UP + 2 DOWN.** An 11-island column would add eleven checkpoints to a lap
+  that runs three per city; the climb would read as a chore rather than a landmark. Evenly sampled
+  across the stack, so the full height is still used.
+- **⚠ ONE LEG PER LAP** (`_skyUsed`). Every transit swapped for a climb would be a staircase.
+- **⚠ A SKY VERT CARRIES ITS OWN `y` AND SKIPS `_rcPlaceRing`.** That function derives altitude from
+  the ground and roof under the point, which is exactly wrong over open sky 10 km up - it would drag
+  the gate back down to the terrain below the column.
+- **MEASURED**, one generated lap (34 gates): the altitude ladder runs
+  `2771 -> 4894 -> 8228 -> 9867 -> 12352 (summit) -> 9158 -> 5965`, then gate 10 at -55 back in the
+  next city. All seven sky gates capture when flown to, advancing the cursor 3 -> 10 in order, so
+  none is buried in rock.
+
+
+### v47.67/47.68 - crevices, and the mid-air drift
+
+Owner: *"it'd be cooler in the overworld race if the checkpoints were down low, some make you get fly
+in crevices"*, then *"not all, just more of them"*, then *"there's too much mid range height... it's
+good to stay low, unless we are going to go up buildings or into floating islands"*.
+
+**Jump:** `function _rcCreviceNear` · `RACE_CIRCUIT.ow` · `_rcGenOverworld`
+
+- **⭐⭐ A CREVICE IS DEFINED BY ITS WALLS, NOT BY BEING LOW.** Scoring "ground is below average here"
+  finds the middle of every valley and open plain. What makes a gap worth threading is terrain ABOVE
+  YOU ON BOTH SIDES, so the test is OPPOSITE PAIRS on a ring: at least one pair `(k, k+4)` where BOTH
+  samples stand 240 above the floor. That single rule is the whole difference between a canyon and a
+  field.
+- **⚠ SEEDED `rng`, NEVER `Math.random()`** - the lap must be identical on every peer or the room's
+  checkpoints desync. Same constraint the rest of the circuit lives under.
+- **⚠ A MISSED CREVICE STAYS LOW.** The first cut fell back to the old high sky gate, which is where
+  the drift came from: over open terrain between two cities there is no building to climb and no
+  island to reach, so `high` there only ever meant mid-air. `highAboveRoofU` also came down from
+  **700-1200 to 220-520**, so a HIGH gate now skims the rooftops instead of sailing over them.
+- **⚠⚠ MEASURE HEIGHT ABOVE GROUND, NOT ABSOLUTE Y - AND KNOW WHAT THE GROUND IS.** The first
+  verification used absolute `y` and reported the change had made things WORSE (32% -> 41% "mid
+  range"), which was an artifact: a gate 200 above a mountain at 2,600 is low, and absolute y cannot
+  tell you that. `window.__groundY(x, z)` gives AGL. **After, by AGL: 15 gates at or under 600, four
+  around 1,000-1,300 (rooftop height), eight in the island climb.**
+  **⚠ AND AGL STILL LIES OVER A CITY**: cities sit on carved PADS above the terrain, so a gate at
+  rooftop height reads 2,600-3,900 AGL against raw ground while the pilot is skimming the towers.
+  Do not "fix" those.
+
+
+### v47.69 - a proxy wears the right hull and the wrong name
+
+Owner: *"the city ships in the hub race had 'puncture' on their callout tag"*.
+
+**Jump:** `function _botApplyRoster` · `function _campSetShipName` · `_owSpawnFleet`
+
+- **The callout is `(ent.loadout.name || '?').toUpperCase()`** - so whatever is in `loadout.name` is
+  what the player reads off a hull.
+- A city-fleet ship is built on the AUTHORITY as `new Bot(<player class>, team, id, <hoard key>)` -
+  the LOADOUTS entry supplies its STATS and the hoard GLB supplies its HULL - and then
+  `_campSetShipName(b, keys[i])` renames it to the hoard model's own file name. That rename is the
+  only thing standing between a city freighter and a callout that reads PUNCTURE, and its own
+  comment says so: *"HUD callout name = the ship's file name (display only; stats stay VORTEX)"*.
+  The hoard keys are real ship names - `mantaray`, `interceptor`, `tron`, `midknight` - so the
+  authority's callouts read correctly.
+- **⭐⭐ `_botApplyRoster` NEVER RE-APPLIED IT.** A peer rebuilds the ship from the roster row as
+  `new Bot(r.k, team, r.i, r.h || null)` - right hull (`r.h` is the hoardModelKey and the ctor takes
+  it), stats right, and the name straight off the LOADOUTS entry. So every non-authority peer
+  labelled the whole city fleet with player-class names, on ships no player is flying. One line;
+  it applies to the campaign hoard too, which is named the same way on its authority.
+- **⚠ NOT REPRODUCED, AND THERE IS A SECOND CANDIDATE.** Solo is unaffected: `_owAuthority()`
+  returns true with no net, so a solo pilot names its own fleet correctly - verified `netActive:
+  false` on a solo overworld race. Which leaves two readings of the report: a NETWORKED hub race
+  (the proxy bug above, now fixed), or a SOLO one in which the PUNCTURE tag belonged to a BOT RACER
+  flying the circuit past the city - which is a correct label on a real player-class ship. Telling
+  them apart from the cockpit: a city ship now wears a hoard name, a racer wears a class name.
+
+
+### v47.70 - THE actual cause: the race respawner adopted the city fleet
+
+Owner: *"the city ships in the hub race had 'puncture' on their callout tag"*, then the detail that
+made it findable: *"it was not puncture, and it was labelled puncture, a few of them were labelled
+that... i was solo, on overworld race"*.
+
+**Jump:** `_raceCircuitBotRespawn` (the `instanceof Bot` loop) · `_owSpawnFleet`
+
+- **⭐⭐⭐ A CITY-FLEET SHIP IS A BOT, AND THE RACE RESPAWNER TOOK EVERY DEAD ONE.** The loop filtered
+  on `instanceof Bot && !isProxy && !alive` and nothing else. The overworld circuit races THROUGH
+  the hub's cities, their fleets fight while you lap, and each one that died was rebuilt as
+  `new Bot(b.loadoutKey, b.team, b.id)` - **dropping the fourth argument**. That argument is the
+  hoard model key, i.e. the hull, and with it went `_campSetShipName` (the freighter's real name),
+  `_owCity` (its membership of the fleet), `_riftGuard` and its speed boost. The ship returned as a
+  bare player class wearing the player class's NAME. With several cities fighting, several at once -
+  *"a few of them were labelled that"*.
+- **⚠ `_raceIdx` IS NOT A RACER TEST.** `_raceCircuitResetProgress` stamps `_raceIdx = 0` on EVERY
+  entity in `game.entities`, hub traffic included - verified live, `hubtraf_0` reports `_raceIdx`
+  non-null. The honest markers are `_owCity` and `hoardModelKey`: a racer has neither.
+- The city fleet has its own life cycle (`_owSpawnFleet` / `_owKillFleet`); the race has no business
+  resurrecting it. The rebuild ALSO now carries `hoardModelKey` and the display name across, as
+  belt and braces for any hoard bot that ever reaches that path.
+- **MEASURED**: a bot given `_owCity` + `hoardModelKey: 'mantaray'` and a real racer both killed -
+  after 4 s the city ship is **still dead with its name and hull intact**, the racer is **alive
+  again**. Before, the first would have returned as a live PUNCTURE.
+- ⚠ **The v47.69 entry above is a DIFFERENT, real bug** (proxies never got `_campSetShipName`), not
+  this one - it only bites networked peers, and the owner was solo. Both are fixed; do not assume
+  one explains the other. The false lead cost a round: solo authority names its own fleet correctly,
+  which is exactly why "I was solo" was the sentence that cracked it.
+
+
+### v47.71 - monsters can be held and slowed
+
+Owner: *"monsters should be affected by tether traps, stun bolt, and energy syphon"*.
+
+**Jump:** `function _monCtl` · `function _monSlow` · `eff.type === 'tether'` · `isArcWave`
+
+- **All three already DAMAGED monsters** - Energy Syphon even carries an explicit "(monster
+  coverage)" branch. What none of them could do is CONTROL one, because control in this game is a
+  per-SHIP field that only ships read: `arcSlowTimer` is scaled into a Bot's accel and speed cap,
+  `stunTimer` gates its update, `game.playerRootTimer` freezes the pilot. A monster's update reads
+  none of them, so a tether caught nothing and a stun bolt was just damage.
+- **⭐⭐ ONE HOOK THAT SCALES `dt`, NOT THREE FIELDS THREADED THROUGH EVERY MOVEMENT LINE.** A monster
+  update is long - chase speed, teleport cooldowns, bob, swipe timers - and slowing it by editing
+  each term is a list the next behaviour silently falls off. `_monCtl(this, dt)` at the top of
+  `OutskirtsMonster.update` and `WildLeviathan.update` slows all of it at once, one line per class.
+- **⚠ ROOT IS NOT `dt = 0`.** That would freeze the animation mixers and FX timers too, and a
+  frozen-solid creature reads as broken rather than held. 0.05 keeps it alive and straining while
+  the velocity is zeroed outright.
+- **⚠ ZEROING `velocity` ALONE DOES NOT HOLD A MONSTER** - its update re-derives velocity every
+  frame from the chase vector, so the tether refreshes `_rootT` for as long as it lasts.
+- **⚠ `game.monsters` IS A SEPARATE ARRAY FROM `game.entities`** - the tether's two trigger scans
+  (player, then entities) could never see a creature. Reach is padded by the creature's own radius:
+  a 520-unit body whose CENTRE is outside a 250-unit trap is still standing on it.
+- **⚠⚠ MEASURING A MONSTER'S SPEED IS A TRAP: ITS TARGET SPEED SCALES WITH DISTANCE TO THE PREY**
+  (`_chaseBase + (dist - _surgeAt) * k`). Two attempts reported the SLOW making it FASTER - once
+  because the baseline window caught it accelerating from rest, once because it had closed the gap
+  between windows. The honest rig pins the creature at the SAME distance before each window and
+  measures DISPLACEMENT: **39 units in 2 s normal, 11 slowed, 39 again** (ratio 0.28), and tethered
+  **0**, then **41** once the tether expired.
+- ⚠ Verified directly: the control hook, and the TETHER call site end to end. The Stun Bolt and
+  Energy Syphon call sites are wired to the same `_monSlow` but were not fired in a live match.

@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.64";
+const LSS_BUILD = "47.71";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -65171,6 +65171,7 @@ class Projectile {
               return;
             }
             const dealt = mon.takeDamage(this.damage, 'player', this.position);
+            if (this.isArcWave) _monSlow(mon, 2.0);   // (v47.71) the bot path has done this since v36
             if (dealt > 0) {
               player.damageDealt += dealt;
               player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
@@ -65440,6 +65441,7 @@ class Projectile {
           const _mdist = Math.sqrt(_mdSq);
           const _mfall = Math.max(0.1, 1 - _mdist / _mReach);
           const _mdealt = mon.takeDamage(this.damage * 0.75 * _mfall, 'player', this.position);
+          if (this.isArcWave) _monSlow(mon, 2.0);   // (v47.71) arc-wave splash slows monsters as well
           if (_mdealt > 0) {
             player.damageDealt += _mdealt;
             player.coreMeter = Math.min(100, player.coreMeter + _mdealt / 100);
@@ -73326,6 +73328,44 @@ function _faceRaceFirstRing() {
   } catch (_) {}
 }
 
+// ⭐⭐⭐ (v47.71) MONSTERS CAN BE ROOTED AND SLOWED. Owner: "monsters should be affected by tether
+// traps, stun bolt, and energy syphon".
+// All three already DAMAGED monsters (the syphon even has an explicit "(monster coverage)" branch);
+// what none of them could do is CONTROL one, because control in this game is a per-ship field that
+// only ships read: `arcSlowTimer` is scaled into a Bot's accel and speed cap, `stunTimer` gates its
+// update, and `game.playerRootTimer` freezes the pilot. A monster's update reads none of them, so a
+// tether caught nothing and a stun bolt was just damage.
+// ⚠ ONE HOOK, SCALING dt, RATHER THAN THREE FIELDS THREADED THROUGH EVERY MOVEMENT LINE. A monster
+//   update is a long function - chase speed, teleport cooldowns, bob, swipe timers - and slowing it
+//   by editing each term would be a list that the next behaviour silently falls off. Scaling the dt
+//   it is handed slows all of it at once, which is what "slowed" means, and it costs one line per
+//   class.
+// ⚠ ROOT IS NOT dt = 0. A zero dt would freeze the animation mixers and the FX timers too, and a
+//   frozen-solid creature reads as a broken one rather than a held one. 0.05 keeps it alive and
+//   visibly straining while the velocity is zeroed outright.
+function _monCtl(m, dt) {
+  try {
+    if (!m) return dt;
+    if (m._rootT > 0) {
+      m._rootT -= dt;
+      try { if (m.velocity) m.velocity.set(0, 0, 0); } catch (_) {}
+      return dt * 0.05;
+    }
+    if (m._slowT > 0) {
+      m._slowT -= dt;
+      return dt * 0.35;          // matches the 0.3-0.4 a Bot gets from arcSlowTimer
+    }
+  } catch (_) {}
+  return dt;
+}
+// Apply the Stun Bolt / Energy Syphon slow to a monster, the way `arcSlowTimer` is applied to a Bot.
+function _monSlow(m, secs) {
+  try {
+    if (!m || !m.alive) return;
+    m._slowT = Math.max(m._slowT || 0, secs || 2.0);
+    if (m.velocity) m.velocity.multiplyScalar(0.3);
+  } catch (_) {}
+}
 class OutskirtsMonster {
   constructor(def, homeDir) {
     this.def = def;
@@ -73693,6 +73733,7 @@ class OutskirtsMonster {
 
   update(dt) {
     if (!this.alive || !this.mesh) return;
+    dt = _monCtl(this, dt);   // (v47.71) tether root / stun slow
     if (this.dormant) { if (this.mesh.visible) this.mesh.visible = false; return; }
     this._hitFxTimer -= dt;
     this._touchCd -= dt;
@@ -74874,6 +74915,7 @@ class WildLeviathan {
 
   update(dt) {
     if (!this.alive) return;
+    dt = _monCtl(this, dt);   // (v47.71) tether root / stun slow
     if (this._hitFxTimer > 0) this._hitFxTimer -= dt;
     if (this._touchCd > 0) this._touchCd -= dt;
 
@@ -75541,9 +75583,19 @@ class RaceRing {
     //   which is exactly right and also free, because a circuit shows only ONE gate at a time (see
     //   the `_cidx === player._raceIdx` test in update). Cloning per gate would buy nothing and cost
     //   a material set per checkpoint. Guarded on the clock so N rings do not write it N times.
-    // ⚠ Only materials that actually own a `.color` are tinted. `shMat1`/`shMat2` are FX shaders on
-    //   the non-potato path and carry their palette in uniforms, so they are left to their own look
-    //   rather than half-tinted by a property they may not have.
+    // ⚠⚠ (v47.65) THE FIRST CUT CYCLED AND WAS INVISIBLE, FOR TWO REASONS - and the colours really
+    //   did move, sampled hue 231 -> 292 -> 351 -> 39 -> 94 -> 159 over 3 s, while the beacon still
+    //   read cyan. A measurement can be right and answer the wrong question.
+    //   1. THE TWO BIG SHELLS WERE SKIPPED. `shMat1`/`shMat2` are LayeredFX shader materials with no
+    //      `.color`, so the old tinter passed over them - and they are the largest things in the
+    //      gate (icosahedrons of 46 and 64, at x7.2). The beacon's colour IS those shells, and they
+    //      stayed locked to their preset cyan while the small parts cycled underneath.
+    //      They tint through `uniforms.uBaseColor`: `fireball_purple` is byte-identical to
+    //      `fireball_cyan` apart from `baseColor`, so that uniform is the colour lever BY DESIGN,
+    //      and the layers carry hue OFFSETS from it rather than absolute colours.
+    //   2. THE CORE WAS TINTED AT L 0.90, which is white with a rumour of hue - the samples came
+    //      back `#eceefa`, `#f9ecfa`, `#faecee`. Saturation up and lightness down so the hue is the
+    //      thing you see, which is the whole point of the request.
     try {
       const lib = (typeof _raceGateLib === 'function') ? _raceGateLib() : null;
       if (lib) {
@@ -75556,14 +75608,23 @@ class RaceRing {
             if (typeof k === 'number' && isFinite(k) && k > 0) per = k;
           } catch (_) {}
           const h = (now / per) % 1;
+          // Handles both kinds: a LayeredFX shell answers on `uniforms.uBaseColor`, a plain
+          // Basic/Sprite material (and the potato-path fallback shells) on `.color`.
           const tint = (m, sat, lig) => {
-            try { if (m && m.color && m.color.setHSL) m.color.setHSL(h, sat, lig); } catch (_) {}
+            try {
+              if (!m) return;
+              const u = m.uniforms && m.uniforms.uBaseColor;
+              if (u && u.value && u.value.setHSL) { u.value.setHSL(h, sat, lig); return; }
+              if (m.color && m.color.setHSL) m.color.setHSL(h, sat, lig);
+            } catch (_) {}
           };
-          // Saturation / lightness keep each part's original weight: the core stays near-white hot,
-          // the sprite and rays stay the softer glow around it.
-          tint(lib.coreMat, 0.60, 0.90);
-          tint(lib.sprMat,  0.90, 0.66);
-          tint(lib.rayMat,  0.85, 0.80);
+          // Saturation / lightness keep each part's relative WEIGHT - core hottest, shells and halo
+          // deeper - while every one of them now carries the hue instead of a wash of it.
+          tint(lib.coreMat, 0.85, 0.68);
+          tint(lib.sprMat,  0.95, 0.60);
+          tint(lib.rayMat,  0.90, 0.66);
+          tint(lib.shMat1,  0.95, 0.56);   // the big shells: this is the pair you actually see
+          tint(lib.shMat2,  0.95, 0.52);
         }
       }
     } catch (_) {}
@@ -75744,7 +75805,13 @@ function _raceFinishUnlocked() {
 const RACE_CIRCUIT = {
   earth: { rings: 12, radiusM: [800, 1060], lowM: [36, 62], highEvery: 4, highAboveRoofM: [110, 190],
            lowD: 400, highD: 600, clearM: 8, searchM: 150, startBackM: 420 },
-  ow:    { cityRings: 3, lowU: [260, 420], highAboveRoofU: [700, 1200], lowD: 540, highD: 760,
+  // ⭐⭐⭐ (v47.68) LOW IS THE DEFAULT; HIGH HAS TO EARN IT. Owner: "there's too much mid range
+  //   height... it's good to stay low, unless we are going to go up buildings or into floating
+  //   islands". `highAboveRoofU` was 700-1200 ABOVE the tallest roof, which over open mountains put
+  //   a gate 1,100-1,600 above the terrain - not up a building, not among the islands, just mid-air.
+  //   **MEASURED before: 11 of 34 gates (32%) sat between 1,200 and 7,000.** Now a HIGH gate clears
+  //   the rooftops by 220-520, which reads as flying the skyline, and everything else stays down.
+  ow:    { cityRings: 3, lowU: [170, 320], highAboveRoofU: [220, 520], lowD: 540, highD: 760,
            clearU: 90, searchU: 1100, cityInnerR: 0.62, startBackU: 2600 },
   captureK: 0.45,        // player: pass within this fraction of the diameter of the centre
   botCaptureK: 0.62,     // bots thread worse than pilots; the gate is more forgiving for them
@@ -76112,6 +76179,105 @@ function _rcGenEarth(seed) {
   const start = _rcStartLine(Q, P, r0.x - r0.tx * K.startBackM * s, r0.z - r0.tz * K.startBackM * s, r0.tx, r0.tz, r0.y);
   return { kind: 'earth', seed: seed >>> 0, rings, start, fin: _rcFinish(Q, P, start), upm: s };
 }
+// ⭐⭐⭐ (v47.66) THE OVERWORLD LAP CLIMBS A SKY-ISLAND COLUMN AND COMES BACK DOWN.
+// Owner: "in the overworld race, we should make sure the check points go up a group of floating
+// islands and back down".
+// The archipelago is already built as exactly the thing that asks for: v46.10's columns are "a stack
+// of islands winding up a vertical axis on a golden-angle spiral", 4-11 of them from y 1,400 to
+// 11,500, with empty sky between columns so one reads as a destination. So the leg is not invented
+// geometry - it is the lap agreeing to use a landmark the world already has.
+// ⚠ `_skClusterAt` IS A PURE FUNCTION OF THE CELL, which is what makes this safe to do at
+//   generation time: no mesh has to exist yet, and every peer derives the identical column from the
+//   identical cell - the same property the circuit itself relies on to stay in sync.
+function _rcSkyColumnNear(nx, nz) {
+  try {
+    if (typeof SKY_I === 'undefined' || !SKY_I.on || typeof _skClusterAt !== 'function') return null;
+    const ci = Math.floor(nx / SKY_I.cell), cj = Math.floor(nz / SKY_I.cell);
+    let best = null, bestD = Infinity;
+    for (let i = ci - 2; i <= ci + 2; i++) {
+      for (let j = cj - 2; j <= cj + 2; j++) {
+        const cl = _skClusterAt(i, j);
+        if (!cl || cl.length < 3) continue;          // a two-island stub is not a climb
+        let mx = 0, mz = 0;
+        for (const I of cl) { mx += I.x; mz += I.z; }
+        mx /= cl.length; mz /= cl.length;
+        const d = Math.hypot(mx - nx, mz - nz);
+        if (d < bestD) { bestD = d; best = cl; }
+      }
+    }
+    return best;
+  } catch (_) { return null; }
+}
+// Gates ABOVE each island's top, bottom to summit, then a short stepped descent toward the next
+// city. ⚠ Above the top, not beside it: an island is a metaball with an OVERHANG (that is the whole
+// point of the shape - see the SKY ISLANDS header), so a gate placed at its centre height and
+// offset sideways can end up inside the root hanging beneath the next one up.
+function _rcSkyLeg(col, nextX, nextZ) {
+  const up = col.slice().sort((a, b) => a.y - b.y);
+  // ⚠ CAP THE COUNT. An 11-island column would otherwise add eleven checkpoints to a lap that has
+  //   three per city, and the climb would read as a chore rather than a landmark.
+  const MAXUP = 5;
+  const pick = [];
+  if (up.length <= MAXUP) pick.push.apply(pick, up);
+  else { const st = (up.length - 1) / (MAXUP - 1); for (let i = 0; i < MAXUP; i++) pick.push(up[Math.round(i * st)]); }
+  const topY = (I) => ((I.padY != null) ? I.padY : (I.y + I.R)) + 260;
+  const out = [];
+  for (const I of pick) out.push({ x: I.x, z: I.z, y: topY(I), sky: true });
+  // ...AND BACK DOWN. Two gates stepping off the summit toward the next city, landing back near the
+  // height the column started at, so the lap rejoins the world instead of ending in the sky.
+  const sum = pick[pick.length - 1], low = pick[0];
+  const sy = topY(sum), by = topY(low);
+  let dx = nextX - sum.x, dz = nextZ - sum.z;
+  const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+  for (let k = 1; k <= 2; k++) {
+    const t = k / 3;
+    out.push({ x: sum.x + dx * (L * 0.45 * t), z: sum.z + dz * (L * 0.45 * t),
+               y: sy + (by - sy) * t, sky: true });
+  }
+  return out;
+}
+// ⭐⭐⭐ (v47.67) CREVICE GATES. Owner: "it'd be cooler in the overworld race if the checkpoints were
+// down low, some make you get fly in crevices" - then, when asked: "not all, just more of them".
+// So this is a MIX, not a policy: a transit leg rolls for a crevice, and the ones that miss keep the
+// high sky gate they have always had. A lap that was all canyon would trade one monotony for
+// another, and the sky-island climb (v47.66) only reads as a climb if the rest of the lap is not.
+// ⚠ A CREVICE IS DEFINED BY ITS WALLS, NOT BY BEING LOW. Sampling "ground is below average here"
+//   finds the middle of every valley and open plain. What makes a gap worth threading is terrain
+//   ABOVE YOU ON BOTH SIDES, so the test is OPPOSITE PAIRS on a ring: at least one pair (k, k+4)
+//   where BOTH samples stand `wall` above the floor. That one rule is the difference between a
+//   canyon and a field.
+// ⚠ Uses the SEEDED `rng` so the lap stays identical on every peer - the whole circuit depends on
+//   that (see the decree machinery), and a Math.random() here would desync the room's checkpoints.
+function _rcCreviceNear(groundY, mx, mz, rng) {
+  try {
+    if (typeof groundY !== 'function') return null;
+    const RING = 520;      // how far out to look for walls: about two ship-lengths
+    const WALL = 240;      // a side must stand this far above the floor to count as a wall
+    let best = null, bestScore = 0;
+    for (let t = 0; t < 26; t++) {
+      const a = rng() * 6.283185, rad = 1200 + rng() * 7000;
+      const x = mx + Math.cos(a) * rad, z = mz + Math.sin(a) * rad;
+      const c = groundY(x, z);
+      if (!isFinite(c)) continue;
+      const h = [];
+      for (let k = 0; k < 8; k++) {
+        const aa = k * 0.785398;
+        h.push(groundY(x + Math.cos(aa) * RING, z + Math.sin(aa) * RING) - c);
+      }
+      let pairs = 0, depth = 0;
+      for (let k = 0; k < 4; k++) {
+        const d = Math.min(h[k], h[k + 4]);       // BOTH sides, or it is a slope and not a gap
+        if (d > WALL) { pairs++; if (d > depth) depth = d; }
+      }
+      if (!pairs) continue;
+      // Deeper is better, and a gap walled on two axes beats one walled on a single axis - but not
+      // so much that a shallow crossroads outranks a real ravine.
+      const score = depth + pairs * 140;
+      if (score > bestScore) { bestScore = score; best = { x: x, z: z, floor: c, depth: depth, pairs: pairs }; }
+    }
+    return best;
+  } catch (_) { return null; }
+}
 function _rcGenOverworld(seed) {
   const cities = _rcOwCities();
   if (!cities.length) return null;
@@ -76146,6 +76312,7 @@ function _rcGenOverworld(seed) {
   };
   // the vertex list of the whole lap first, tangents from the neighbours, then the rings
   const verts = [];
+  let _skyUsed = false;   // (v47.66) at most one sky-island climb per lap
   const nC = order.length;
   for (let ci = 0; ci < nC; ci++) {
     const c = order[ci], nx = order[(ci + 1) % nC], pvC = order[(ci + nC - 1) % nC];
@@ -76167,7 +76334,36 @@ function _rcGenOverworld(seed) {
       const mx = (c.x + nx.x) * 0.5, mz = (c.z + nx.z) * 0.5;
       const ux = nx.x - c.x, uz = nx.z - c.z; const L = Math.hypot(ux, uz) || 1;
       const side = (rng() - 0.5) * 6000;
-      verts.push({ x: mx + (-uz / L) * side, z: mz + (ux / L) * side, high: true, Q: Qopen });
+      // (v47.66) ...unless a SKY-ISLAND COLUMN is near this leg, in which case the transit becomes
+      // the climb: up the stack and back down, rejoining on the way to the next city. One leg only -
+      // `_skyUsed` - because a lap that climbed every column would be a staircase, not a race.
+      let _leg = null;
+      if (!_skyUsed) {
+        const _col = _rcSkyColumnNear(mx, mz);
+        if (_col) { _leg = _rcSkyLeg(_col, nx.x, nx.z); }
+      }
+      if (_leg && _leg.length) {
+        _skyUsed = true;
+        for (const g of _leg) verts.push({ x: g.x, z: g.z, y: g.y, high: true, Q: Qopen });
+      } else {
+        // (v47.67) most transits now dive instead of soaring - see _rcCreviceNear. The roll keeps
+        // the mix the owner asked for ("not all, just more of them"); a miss keeps the old sky gate.
+        let _cv = null;
+        if (rng() < 0.62) _cv = _rcCreviceNear(_rcOwGroundY, mx, mz, rng);
+        if (_cv) {
+          // Down IN it: clear of the floor by a ship's height, and still well under the rim so the
+          // gate is something you descend into rather than skim over.
+          const _fy = _cv.floor + 150;
+          verts.push({ x: _cv.x, z: _cv.z, y: Math.min(_fy, _cv.floor + _cv.depth * 0.55), high: false, Q: Qopen, crev: true });
+        } else {
+          // (v47.68) ⚠ A MISSED CREVICE STAYS LOW - it does not fall back to a sky gate. This is
+          // the transit between two cities over open terrain: there is no building to climb and no
+          // island to reach, so `high` here only ever produced the mid-air drift the owner called
+          // out. `_rcPlaceRing` with high:false hugs the ground at `lowU` and climbs only if the
+          // clearance test makes it.
+          verts.push({ x: mx + (-uz / L) * side, z: mz + (ux / L) * side, high: false, Q: Qopen });
+        }
+      }
     }
   }
   const N = verts.length;
@@ -76175,7 +76371,17 @@ function _rcGenOverworld(seed) {
   for (let i = 0; i < N; i++) {
     const v = verts[i], pv = verts[(i + N - 1) % N], nv = verts[(i + 1) % N];
     let tx = nv.x - pv.x, tz = nv.z - pv.z; const L = Math.hypot(tx, tz) || 1; tx /= L; tz /= L;
-    rings.push(_rcPlaceRing(v.Q, v.x, v.z, tx, tz, v.high, rng, P));
+    // (v47.66) A SKY GATE CARRIES ITS OWN `y`. `_rcPlaceRing` derives altitude from the ground and
+    // the roof under the point, which is exactly wrong over open sky 10 km up - it would drag the
+    // gate back down to the terrain below the column.
+    if (typeof v.y === 'number' && isFinite(v.y)) {
+      // (v47.67) a crevice gate is a LOW gate - smaller, and flagged low so nothing downstream
+      // treats it as a sky marker.
+      rings.push({ x: v.x, y: v.y, z: v.z, d: v.crev ? P.lowD : P.highD,
+                   tx: tx, tz: tz, high: !v.crev });
+    } else {
+      rings.push(_rcPlaceRing(v.Q, v.x, v.z, tx, tz, v.high, rng, P));
+    }
   }
   const r0 = rings[0];
   const Q0 = verts[0].Q;
@@ -76785,12 +76991,35 @@ function _raceCircuitRespawnTick(dt) {
   for (let i = game.entities.length - 1; i >= 0; i--) {
     const b = game.entities[i];
     if (!(b instanceof Bot) || b.isProxy || b.alive) continue;
+    // ⭐⭐⭐ (v47.70) RACERS ONLY. Owner: "the city ships in the hub race had 'puncture' on their
+    // callout tag... it was not puncture, and it was labelled puncture, a few of them were labelled
+    // that... i was solo, on overworld race".
+    // This loop's filter was `instanceof Bot && !isProxy && !alive`, and A CITY-FLEET SHIP IS A BOT.
+    // The overworld circuit races through the hub's cities, their fleets fight while you lap, and
+    // every one that died was picked up by this respawner and rebuilt as
+    // `new Bot(b.loadoutKey, ...)` - which drops the FOURTH argument. That argument is the hoard
+    // model key, i.e. the hull, and with it goes `_campSetShipName` (the freighter's real name),
+    // `_owCity` (its membership of the city fleet), `_riftGuard` and its speed boost. The ship came
+    // back as a bare player class wearing the player class's NAME - PUNCTURE on a city freighter -
+    // and with several cities fighting, several at once, which is exactly the report.
+    // ⚠ `_raceIdx` CANNOT BE THE TEST: `_raceCircuitResetProgress` stamps it on EVERY entity in
+    //   `game.entities`, hub traffic included, so it is 0 on things that have never raced.
+    //   `_owCity` and `hoardModelKey` are the honest markers - a racer has neither.
+    // ⚠ The city fleet has its own life cycle (`_owSpawnFleet` / `_owKillFleet`); the race has no
+    //   business resurrecting it at all.
+    if (b._owCity != null || b.hoardModelKey) continue;
     if (!b._raceDeathPos && b.position) b._raceDeathPos = b.position.clone();
     b._raceDeadT = (b._raceDeadT || 0) + dt;
     if (exposed) continue;                                  // final
     if (b._raceDeadT < RACE_CIRCUIT.respawnDelay) continue;
     try {
-      const nb = new Bot(b.loadoutKey, b.team, b.id);
+      // (v47.70) Belt and braces: carry the hull and the display name across the rebuild, so that if
+      // any hoard-hulled bot ever does reach this path it comes back as itself rather than as its
+      // stat template. The guard above should mean this never fires - keep both.
+      const nb = new Bot(b.loadoutKey, b.team, b.id, b.hoardModelKey || null);
+      try {
+        if (b.loadout && b.loadout.name && typeof _campSetShipName === 'function') _campSetShipName(nb, b.loadout.name);
+      } catch (_) {}
       nb._raceIdx = b._raceIdx | 0; nb._raceCleared = !!b._raceCleared;
       nb.kills = b.kills | 0; nb.damageDealt = b.damageDealt || 0;
       const sp = b._raceDeathPos ? b._raceDeathPos.clone() : _raceCircuitRespawnPoint(nb._raceIdx, nb.team);
@@ -87900,6 +88129,20 @@ function _botApplyRoster(rows) {
       // is counted by the e.hoardModelKey filters. r.n = Nemesis role (clear-check excludes).
       const b = new Bot(r.k, team, r.i, r.h || null);
       b.isProxy = true;
+      // ⭐⭐⭐ (v47.69) A PROXY WEARS THE RIGHT HULL AND THE WRONG NAME. Owner: "the city ships in
+      // the hub race had 'puncture' on their callout tag".
+      // The HUD callout is `(ent.loadout.name || '?').toUpperCase()`, and a city-fleet ship gets its
+      // display name on the AUTHORITY from `_campSetShipName(b, keys[i])` - the hoard model's own
+      // file name, deliberately separate from the LOADOUTS entry that supplies its stats ("HUD
+      // callout name = the ship's file name; display only, stats stay VORTEX"). That rename lives in
+      // `_owSpawnFleet` and NOTHING re-applies it here, so every peer that receives the roster built
+      // the ship from `r.k` alone and labelled a city freighter PUNCTURE / VORTEX / SLAYER - the
+      // player-class key, on a ship no player is flying.
+      // ⚠ The hull was always right: `r.h` is the hoardModelKey and the ctor already takes it. Only
+      //   the NAME was missing, which is why it read as a labelling bug rather than a wrong ship.
+      // ⚠ Applies to every hoard-model proxy, not just the city fleets - the campaign hoard is
+      //   named the same way on its authority and had the same hole.
+      if (r.h && typeof _campSetShipName === 'function') { try { _campSetShipName(b, r.h); } catch (_) {} }
       if (r.c != null && r.c >= 0) b._owCity = r.c;   // (v38.79) an overworld city fleet proxy
       if (r.rs) b._rosterShip = true;   // (v47.50) so a peer's radar draws it as a match pilot too
       if (r.n) { try { b.isNemesis = true; } catch (_) {} }
@@ -94769,6 +95012,9 @@ function executeAbility(slot, ability) {
       }
       if (bestMon) {
         const _md = bestMon.takeDamage(800, 'player', bestMon.position);
+        // (v47.71) "Energy Syphon slows enemies" - the bot branch a few lines down has always set
+        // `arcSlowTimer`; the monster branch drained and healed but left the creature at full speed.
+        _monSlow(bestMon, 2.0);
         if (_md > 0) { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); showHitMarker(); }
         player.shield = Math.min(player.maxShield, player.shield + 800);
         try {
@@ -97748,6 +97994,28 @@ function updateWorldEffects(dt) {
           }
         }
       }
+      // (v47.71) ...and a MONSTER can spring it. `game.monsters` is a separate array from
+      // `game.entities`, so the two scans above could never see one - a trap laid in front of a
+      // leviathan simply sat there. Reach is padded by the creature's own radius: a 520-unit body
+      // whose CENTRE is outside a 300-unit trap is still standing on it.
+      if (!eff.triggered && game.monsters) {
+        for (const m of game.monsters) {
+          if (!m || !m.alive || !m.position || m.dormant) continue;
+          if (m.team != null && m.team === eff.team) continue;
+          if (m.position.distanceTo(eff.position) < eff.radius + (m.collisionRadius || 0) * 0.6) {
+            eff.triggered = true;
+            eff.rootTarget = m;
+            eff.rootTimer = eff.rootDuration;
+            eff._rootIsMon = true;
+            m._rootT = Math.max(m._rootT || 0, eff.rootDuration);
+            try {
+              if (typeof playSpatialSound === 'function') playSpatialSound('tether_caught', eff.position.clone());
+              else playSound('tether_caught');
+            } catch (_) {}
+            break;
+          }
+        }
+      }
       const _rootIsLocal = (eff.rootTarget === player);
       const _rootAlive = eff.rootTarget && (_rootIsLocal ? player.shipState !== 'dead' : eff.rootTarget.alive);
       if (eff.triggered && _rootAlive) {
@@ -97756,6 +98024,9 @@ function updateWorldEffects(dt) {
         // immobilization is enforced by game.playerRootTimer in
         // updatePlayerMovement ; zeroing velocity here is belt-and-braces.
         if (eff.rootTarget.velocity) eff.rootTarget.velocity.set(0, 0, 0);
+        // (v47.71) a monster is held by its own field, refreshed while the tether lasts - zeroing
+        // velocity alone would not stop one, because its update re-derives velocity every frame.
+        if (eff._rootIsMon) eff.rootTarget._rootT = Math.max(eff.rootTarget._rootT || 0, eff.rootTimer);
       }
       // ⚠ (v36.68) THE TRAP BREAKS WHEN THE ROOT ENDS FOR *ANY* REASON.
       // PUNCTURE 2 "Stasis Traps explode when they break" used to live INSIDE

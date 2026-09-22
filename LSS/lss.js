@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.64";
+const LSS_BUILD = "47.71";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -39352,6 +39352,7 @@ class Projectile {
               return;
             }
             const dealt = mon.takeDamage(this.damage, 'player', this.position);
+            if (this.isArcWave) _monSlow(mon, 2.0);   // (v47.71) the bot path has done this since v36
             if (dealt > 0) {
               player.damageDealt += dealt;
               player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
@@ -39542,6 +39543,7 @@ class Projectile {
           const _mdist = Math.sqrt(_mdSq);
           const _mfall = Math.max(0.1, 1 - _mdist / _mReach);
           const _mdealt = mon.takeDamage(this.damage * 0.75 * _mfall, 'player', this.position);
+          if (this.isArcWave) _monSlow(mon, 2.0);   // (v47.71) arc-wave splash slows monsters as well
           if (_mdealt > 0) {
             player.damageDealt += _mdealt;
             player.coreMeter = Math.min(100, player.coreMeter + _mdealt / 100);
@@ -45378,6 +45380,28 @@ function _faceRaceFirstRing() {
   } catch (_) {}
 }
 
+function _monCtl(m, dt) {
+  try {
+    if (!m) return dt;
+    if (m._rootT > 0) {
+      m._rootT -= dt;
+      try { if (m.velocity) m.velocity.set(0, 0, 0); } catch (_) {}
+      return dt * 0.05;
+    }
+    if (m._slowT > 0) {
+      m._slowT -= dt;
+      return dt * 0.35;          // matches the 0.3-0.4 a Bot gets from arcSlowTimer
+    }
+  } catch (_) {}
+  return dt;
+}
+function _monSlow(m, secs) {
+  try {
+    if (!m || !m.alive) return;
+    m._slowT = Math.max(m._slowT || 0, secs || 2.0);
+    if (m.velocity) m.velocity.multiplyScalar(0.3);
+  } catch (_) {}
+}
 class OutskirtsMonster {
   constructor(def, homeDir) {
     this.def = def;
@@ -45630,6 +45654,7 @@ class OutskirtsMonster {
 
   update(dt) {
     if (!this.alive || !this.mesh) return;
+    dt = _monCtl(this, dt);   // (v47.71) tether root / stun slow
     if (this.dormant) { if (this.mesh.visible) this.mesh.visible = false; return; }
     this._hitFxTimer -= dt;
     this._touchCd -= dt;
@@ -46522,6 +46547,7 @@ class WildLeviathan {
 
   update(dt) {
     if (!this.alive) return;
+    dt = _monCtl(this, dt);   // (v47.71) tether root / stun slow
     if (this._hitFxTimer > 0) this._hitFxTimer -= dt;
     if (this._touchCd > 0) this._touchCd -= dt;
 
@@ -47053,11 +47079,18 @@ class RaceRing {
           } catch (_) {}
           const h = (now / per) % 1;
           const tint = (m, sat, lig) => {
-            try { if (m && m.color && m.color.setHSL) m.color.setHSL(h, sat, lig); } catch (_) {}
+            try {
+              if (!m) return;
+              const u = m.uniforms && m.uniforms.uBaseColor;
+              if (u && u.value && u.value.setHSL) { u.value.setHSL(h, sat, lig); return; }
+              if (m.color && m.color.setHSL) m.color.setHSL(h, sat, lig);
+            } catch (_) {}
           };
-          tint(lib.coreMat, 0.60, 0.90);
-          tint(lib.sprMat,  0.90, 0.66);
-          tint(lib.rayMat,  0.85, 0.80);
+          tint(lib.coreMat, 0.85, 0.68);
+          tint(lib.sprMat,  0.95, 0.60);
+          tint(lib.rayMat,  0.90, 0.66);
+          tint(lib.shMat1,  0.95, 0.56);   // the big shells: this is the pair you actually see
+          tint(lib.shMat2,  0.95, 0.52);
         }
       }
     } catch (_) {}
@@ -47185,7 +47218,7 @@ function _raceFinishUnlocked() {
 const RACE_CIRCUIT = {
   earth: { rings: 12, radiusM: [800, 1060], lowM: [36, 62], highEvery: 4, highAboveRoofM: [110, 190],
            lowD: 400, highD: 600, clearM: 8, searchM: 150, startBackM: 420 },
-  ow:    { cityRings: 3, lowU: [260, 420], highAboveRoofU: [700, 1200], lowD: 540, highD: 760,
+  ow:    { cityRings: 3, lowU: [170, 320], highAboveRoofU: [220, 520], lowD: 540, highD: 760,
            clearU: 90, searchU: 1100, cityInnerR: 0.62, startBackU: 2600 },
   captureK: 0.45,        // player: pass within this fraction of the diameter of the centre
   botCaptureK: 0.62,     // bots thread worse than pilots; the gate is more forgiving for them
@@ -47498,6 +47531,73 @@ function _rcGenEarth(seed) {
   const start = _rcStartLine(Q, P, r0.x - r0.tx * K.startBackM * s, r0.z - r0.tz * K.startBackM * s, r0.tx, r0.tz, r0.y);
   return { kind: 'earth', seed: seed >>> 0, rings, start, fin: _rcFinish(Q, P, start), upm: s };
 }
+function _rcSkyColumnNear(nx, nz) {
+  try {
+    if (typeof SKY_I === 'undefined' || !SKY_I.on || typeof _skClusterAt !== 'function') return null;
+    const ci = Math.floor(nx / SKY_I.cell), cj = Math.floor(nz / SKY_I.cell);
+    let best = null, bestD = Infinity;
+    for (let i = ci - 2; i <= ci + 2; i++) {
+      for (let j = cj - 2; j <= cj + 2; j++) {
+        const cl = _skClusterAt(i, j);
+        if (!cl || cl.length < 3) continue;          // a two-island stub is not a climb
+        let mx = 0, mz = 0;
+        for (const I of cl) { mx += I.x; mz += I.z; }
+        mx /= cl.length; mz /= cl.length;
+        const d = Math.hypot(mx - nx, mz - nz);
+        if (d < bestD) { bestD = d; best = cl; }
+      }
+    }
+    return best;
+  } catch (_) { return null; }
+}
+function _rcSkyLeg(col, nextX, nextZ) {
+  const up = col.slice().sort((a, b) => a.y - b.y);
+  const MAXUP = 5;
+  const pick = [];
+  if (up.length <= MAXUP) pick.push.apply(pick, up);
+  else { const st = (up.length - 1) / (MAXUP - 1); for (let i = 0; i < MAXUP; i++) pick.push(up[Math.round(i * st)]); }
+  const topY = (I) => ((I.padY != null) ? I.padY : (I.y + I.R)) + 260;
+  const out = [];
+  for (const I of pick) out.push({ x: I.x, z: I.z, y: topY(I), sky: true });
+  const sum = pick[pick.length - 1], low = pick[0];
+  const sy = topY(sum), by = topY(low);
+  let dx = nextX - sum.x, dz = nextZ - sum.z;
+  const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+  for (let k = 1; k <= 2; k++) {
+    const t = k / 3;
+    out.push({ x: sum.x + dx * (L * 0.45 * t), z: sum.z + dz * (L * 0.45 * t),
+               y: sy + (by - sy) * t, sky: true });
+  }
+  return out;
+}
+function _rcCreviceNear(groundY, mx, mz, rng) {
+  try {
+    if (typeof groundY !== 'function') return null;
+    const RING = 520;      // how far out to look for walls: about two ship-lengths
+    const WALL = 240;      // a side must stand this far above the floor to count as a wall
+    let best = null, bestScore = 0;
+    for (let t = 0; t < 26; t++) {
+      const a = rng() * 6.283185, rad = 1200 + rng() * 7000;
+      const x = mx + Math.cos(a) * rad, z = mz + Math.sin(a) * rad;
+      const c = groundY(x, z);
+      if (!isFinite(c)) continue;
+      const h = [];
+      for (let k = 0; k < 8; k++) {
+        const aa = k * 0.785398;
+        h.push(groundY(x + Math.cos(aa) * RING, z + Math.sin(aa) * RING) - c);
+      }
+      let pairs = 0, depth = 0;
+      for (let k = 0; k < 4; k++) {
+        const d = Math.min(h[k], h[k + 4]);       // BOTH sides, or it is a slope and not a gap
+        if (d > WALL) { pairs++; if (d > depth) depth = d; }
+      }
+      if (!pairs) continue;
+      const score = depth + pairs * 140;
+      if (score > bestScore) { bestScore = score; best = { x: x, z: z, floor: c, depth: depth, pairs: pairs }; }
+    }
+    return best;
+  } catch (_) { return null; }
+}
 function _rcGenOverworld(seed) {
   const cities = _rcOwCities();
   if (!cities.length) return null;
@@ -47528,6 +47628,7 @@ function _rcGenOverworld(seed) {
     scan: (x, y, z, R, below, out) => { out.clear = Infinity; out.roof = -Infinity; out.n = 0; return out; },
   };
   const verts = [];
+  let _skyUsed = false;   // (v47.66) at most one sky-island climb per lap
   const nC = order.length;
   for (let ci = 0; ci < nC; ci++) {
     const c = order[ci], nx = order[(ci + 1) % nC], pvC = order[(ci + nC - 1) % nC];
@@ -47546,7 +47647,24 @@ function _rcGenOverworld(seed) {
       const mx = (c.x + nx.x) * 0.5, mz = (c.z + nx.z) * 0.5;
       const ux = nx.x - c.x, uz = nx.z - c.z; const L = Math.hypot(ux, uz) || 1;
       const side = (rng() - 0.5) * 6000;
-      verts.push({ x: mx + (-uz / L) * side, z: mz + (ux / L) * side, high: true, Q: Qopen });
+      let _leg = null;
+      if (!_skyUsed) {
+        const _col = _rcSkyColumnNear(mx, mz);
+        if (_col) { _leg = _rcSkyLeg(_col, nx.x, nx.z); }
+      }
+      if (_leg && _leg.length) {
+        _skyUsed = true;
+        for (const g of _leg) verts.push({ x: g.x, z: g.z, y: g.y, high: true, Q: Qopen });
+      } else {
+        let _cv = null;
+        if (rng() < 0.62) _cv = _rcCreviceNear(_rcOwGroundY, mx, mz, rng);
+        if (_cv) {
+          const _fy = _cv.floor + 150;
+          verts.push({ x: _cv.x, z: _cv.z, y: Math.min(_fy, _cv.floor + _cv.depth * 0.55), high: false, Q: Qopen, crev: true });
+        } else {
+          verts.push({ x: mx + (-uz / L) * side, z: mz + (ux / L) * side, high: false, Q: Qopen });
+        }
+      }
     }
   }
   const N = verts.length;
@@ -47554,7 +47672,12 @@ function _rcGenOverworld(seed) {
   for (let i = 0; i < N; i++) {
     const v = verts[i], pv = verts[(i + N - 1) % N], nv = verts[(i + 1) % N];
     let tx = nv.x - pv.x, tz = nv.z - pv.z; const L = Math.hypot(tx, tz) || 1; tx /= L; tz /= L;
-    rings.push(_rcPlaceRing(v.Q, v.x, v.z, tx, tz, v.high, rng, P));
+    if (typeof v.y === 'number' && isFinite(v.y)) {
+      rings.push({ x: v.x, y: v.y, z: v.z, d: v.crev ? P.lowD : P.highD,
+                   tx: tx, tz: tz, high: !v.crev });
+    } else {
+      rings.push(_rcPlaceRing(v.Q, v.x, v.z, tx, tz, v.high, rng, P));
+    }
   }
   const r0 = rings[0];
   const Q0 = verts[0].Q;
@@ -48083,12 +48206,16 @@ function _raceCircuitRespawnTick(dt) {
   for (let i = game.entities.length - 1; i >= 0; i--) {
     const b = game.entities[i];
     if (!(b instanceof Bot) || b.isProxy || b.alive) continue;
+    if (b._owCity != null || b.hoardModelKey) continue;
     if (!b._raceDeathPos && b.position) b._raceDeathPos = b.position.clone();
     b._raceDeadT = (b._raceDeadT || 0) + dt;
     if (exposed) continue;                                  // final
     if (b._raceDeadT < RACE_CIRCUIT.respawnDelay) continue;
     try {
-      const nb = new Bot(b.loadoutKey, b.team, b.id);
+      const nb = new Bot(b.loadoutKey, b.team, b.id, b.hoardModelKey || null);
+      try {
+        if (b.loadout && b.loadout.name && typeof _campSetShipName === 'function') _campSetShipName(nb, b.loadout.name);
+      } catch (_) {}
       nb._raceIdx = b._raceIdx | 0; nb._raceCleared = !!b._raceCleared;
       nb.kills = b.kills | 0; nb.damageDealt = b.damageDealt || 0;
       const sp = b._raceDeathPos ? b._raceDeathPos.clone() : _raceCircuitRespawnPoint(nb._raceIdx, nb.team);
@@ -55389,6 +55516,7 @@ function _botApplyRoster(rows) {
       const team = (r.tm != null) ? r.tm : ((r.t === 'B') ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A);   // (v38.79) numeric team when the roster carries one
       const b = new Bot(r.k, team, r.i, r.h || null);
       b.isProxy = true;
+      if (r.h && typeof _campSetShipName === 'function') { try { _campSetShipName(b, r.h); } catch (_) {} }
       if (r.c != null && r.c >= 0) b._owCity = r.c;   // (v38.79) an overworld city fleet proxy
       if (r.rs) b._rosterShip = true;   // (v47.50) so a peer's radar draws it as a match pilot too
       if (r.n) { try { b.isNemesis = true; } catch (_) {} }
@@ -59575,6 +59703,7 @@ function executeAbility(slot, ability) {
       }
       if (bestMon) {
         const _md = bestMon.takeDamage(800, 'player', bestMon.position);
+        _monSlow(bestMon, 2.0);
         if (_md > 0) { player.damageDealt += _md; player.coreMeter = Math.min(100, player.coreMeter + _md / 100); showHitMarker(); }
         player.shield = Math.min(player.maxShield, player.shield + 800);
         try {
@@ -61738,11 +61867,30 @@ function updateWorldEffects(dt) {
           }
         }
       }
+      if (!eff.triggered && game.monsters) {
+        for (const m of game.monsters) {
+          if (!m || !m.alive || !m.position || m.dormant) continue;
+          if (m.team != null && m.team === eff.team) continue;
+          if (m.position.distanceTo(eff.position) < eff.radius + (m.collisionRadius || 0) * 0.6) {
+            eff.triggered = true;
+            eff.rootTarget = m;
+            eff.rootTimer = eff.rootDuration;
+            eff._rootIsMon = true;
+            m._rootT = Math.max(m._rootT || 0, eff.rootDuration);
+            try {
+              if (typeof playSpatialSound === 'function') playSpatialSound('tether_caught', eff.position.clone());
+              else playSound('tether_caught');
+            } catch (_) {}
+            break;
+          }
+        }
+      }
       const _rootIsLocal = (eff.rootTarget === player);
       const _rootAlive = eff.rootTarget && (_rootIsLocal ? player.shipState !== 'dead' : eff.rootTarget.alive);
       if (eff.triggered && _rootAlive) {
         eff.rootTimer -= dt;
         if (eff.rootTarget.velocity) eff.rootTarget.velocity.set(0, 0, 0);
+        if (eff._rootIsMon) eff.rootTarget._rootT = Math.max(eff.rootTarget._rootT || 0, eff.rootTimer);
       }
       if (eff.triggered && !eff._broke && (eff.rootTimer <= 0 || !_rootAlive)) {
         eff._broke = true;
