@@ -7467,3 +7467,61 @@ Owner: *"i saw blaster as a bot shoot a rocket... blaster doesn't have rockets i
 - **MEASURED**, forced release on a spawned BLASTER bot: projectiles owned by it **0 before, 0
   after**; target pool **-1966** (the 1,920 beam plus incidental fire) at 919 u; **8 muzzle nodes ->
   12 new effects** (eight barrel tracers, the companion, ripple / fire / light).
+
+
+### v47.61 - the bolt icon fills by charge
+
+Owner: *"pyro has 2 charges, so maybe his lightning bolt icon can half fill/color"*.
+
+**Jump:** `function _hlfIcon` · `function _hlfAbCharges` · `_HLF_ICON`
+
+- The icon row answered ONE bit - can I press this - because that is all a cooldown has to say. A
+  CHARGE ability has a second thing to say. Worse, slot 2's `abilityCooldowns` entry is the REGEN
+  timer for the NEXT charge, so a Pyro holding one of two gas charges was drawn DIMMED - told it
+  could not press a thing it could.
+- `_hlfIcon` gained a `frac`: the silhouette is filled bottom-up inside a clip of its own path, the
+  same trick the CORE chevrons use, so a half-full bolt is still unmistakably a bolt. Default is
+  `ready ? 1 : 0`, so every non-charge icon is byte-for-byte unchanged.
+- **⚠ `_hlfAbCharges` MIRRORS THE DOM SLOT'S PREDICATE** (search `PYRO Explosive Gas: charge-based`).
+  The two must name the same set - PYRO Explosive Gas, SLAYER Teleport w/ Aegis 8, PUNCTURE Stasis
+  Trap w/ Aegis 11 - or the canvas row and the ability slot disagree about what the player holds.
+- **MEASURED**, lit pixels in the icon column with `window.__hudIcon = {size:9}` to make the fill
+  legible: **0 -> 16865, 1 -> 18049, 2 -> 19128**, and returning to each value reproduced it
+  EXACTLY. Steps of +1184 and +1079 - equal slabs, which is what a linear charge fill must give.
+- **⚠ MEASURE THIS ONE WITH THE SIZE KNOB UP.** At the shipped 2.10 vmin the icon is ~18 px, the
+  whole fill is ~40 px, and a frame diff of the HUD is swamped by its own animation (a 2-vs-1 diff
+  came back as 65,965 changed pixels across a 495x663 box - the entire HUD, all of it motion).
+
+
+### v47.62 - match speed moves the bullets too
+
+Owner: *"the rockets/projectiles should also increase in speed, with the match speed"*.
+
+**Jump:** `function _lssProjSpeedMul` · `class Projectile` (constructor)
+
+- The v44.18 dial blends every SHIP toward `RACE_SPEED` (900) and left every PROJECTILE where it was.
+  The shipped projectile speeds are **350, 600 and 900**, so at INSANE the Shotgun's pellets travel
+  at 350 against ships doing 900 - they cannot reach anything that is running away, and the Thermite
+  at 600 is no better. **The mode's own speed floor was breaking its weapons.**
+- **⚠ ONE GLOBAL FACTOR, NOT A PER-SHIP ONE.** Scaling each shot by how much ITS FIRER sped up is
+  the tempting version and it is wrong: a projectile has to catch whoever it is AIMED at, and at mix
+  1 every ship is doing 900 regardless of who fired. Per-firer would make a Dreadnought's rockets
+  (250 -> 900, 3.6x) far faster than a Corvette's (450 -> 900, 2x) for no reason a player could see,
+  and would stop a weapon's speed being a property of the weapon.
+- The reference is DERIVED, not invented: the mean of the three chassis flightSpeeds (450/350/250) is
+  **350**, so mix 1 gives `900/350 = 2.57x` and the world and its bullets speed up together. The
+  blend goes through `_lssSpeedLerp` like every other speed in the file, so mix 0 returns EXACTLY 1.
+- **⚠ APPLIED IN THE CONSTRUCTOR, NOT AT THE CALL SITES.** There are **18** `new Projectile(...)`
+  sites - main guns, Cluster Missile, Rocket Salvo, Tracker Rockets, Stun Bolt, and the bot twin of
+  each - and scaling at each one is a list a future weapon silently falls off. Homing re-derives its
+  speed from `this.velocity.length()`, so the factor survives the steering.
+- **⚠ `owner === 'network'` IS EXEMPT.** A peer's projectile arrives with a velocity the SENDER has
+  already scaled (SPEED_MIX is a room setting, so every client agrees on the factor); multiplying
+  again would SQUARE it on the receiving end.
+- **MEASURED**, one PYRO bot forced to fire at the player: NORMAL **800 / 900**, INSANE **2314**,
+  back to NORMAL **800**. 2314/900 = **2.571**, exactly `RACE_SPEED / 350`.
+- ⚠ To get a projectile on demand for a test: `__dbg.spawnBot('PYRO')`, then each frame set
+  `b.position` near the player, `b.combatTarget = player` and `b.spawnProtection = 0`. Simply
+  spawning one and waiting produced ZERO projectiles in 3 s - most hulls are hitscan and a bot with
+  no target never fires.
+- Knob: `window.__projSpeedMul` overrides the factor outright.

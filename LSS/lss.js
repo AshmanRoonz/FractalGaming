@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.60";
+const LSS_BUILD = "47.62";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -38643,6 +38643,12 @@ class Projectile {
   constructor(origin, velocity, damage, splash, owner, color) {
     this.position = origin.clone();
     this.velocity = velocity.clone();
+    if (owner !== 'network') {
+      try {
+        const _sm = (typeof _lssProjSpeedMul === 'function') ? _lssProjSpeedMul() : 1;
+        if (_sm !== 1) this.velocity.multiplyScalar(_sm);
+      } catch (_) {}
+    }
     this.damage = damage;
     this.splash = splash;
     this.owner = owner;
@@ -65496,6 +65502,21 @@ function _hlfWedge(I, rIn, rOut, a0, a1, n, frac, col, fromEnd) {
 
 const _HLF_ICON = ['sword', 'shield', 'bolt'];
 
+function _hlfAbCharges(ability) {
+  try {
+    if (!ability || typeof player === 'undefined' || !player) return null;
+    const nm = ability.name;
+    const _aeg = (n) => (typeof _aegisUpFor === 'function') && _aegisUpFor(n);
+    const ok = (player.loadoutKey === 'PYRO' && nm === 'Explosive Gas') ||
+               (player.loadoutKey === 'SLAYER' && nm === 'Teleport' && _aeg(8)) ||
+               (player.loadoutKey === 'PUNCTURE' && nm === 'Stasis Trap' && _aeg(11));
+    if (!ok) return null;
+    const max = player.maxTrapCharges || 2;
+    const n = Math.max(0, Math.min(max, player.trapCharges || 0));
+    return { n: n, max: max };
+  } catch (_) { return null; }
+}
+
 function _hlfIconPath(ctx, kind, s) {
   ctx.beginPath();
   if (kind === 'shield') {
@@ -65535,12 +65556,22 @@ function _hlfIconPath(ctx, kind, s) {
   }
 }
 
-function _hlfIcon(I, kind, s, col, ready) {
+function _hlfIcon(I, kind, s, col, ready, frac) {
   const ctx = I.ctx, vm = I.vmin;
+  const _f = (typeof frac === 'number' && isFinite(frac))
+    ? Math.max(0, Math.min(1, frac)) : (ready ? 1 : 0);
   _hlfIconPath(ctx, kind, s);
   ctx.globalAlpha = I.ga;
-  ctx.fillStyle = ready ? col : 'rgba(5,9,13,0.88)';
+  ctx.fillStyle = 'rgba(5,9,13,0.88)';
   ctx.fill();
+  if (_f > 0) {
+    ctx.save();
+    _hlfIconPath(ctx, kind, s);
+    ctx.clip();
+    ctx.fillStyle = col;
+    ctx.fillRect(-s * 0.6, s * 0.5 - s * _f, s * 1.2, s * _f);
+    ctx.restore();
+  }
   _hlfIconPath(ctx, kind, s);
   ctx.strokeStyle = ready ? col : _hlA(col, 0.42);
   ctx.lineWidth = Math.max(1, vm * (ready ? 0.17 : 0.11));
@@ -65717,7 +65748,9 @@ function _hlfDraw(ctx, W, H, v) {
       if (!ab) continue;
       const cd = (player.abilityCooldowns && player.abilityCooldowns[m.slot]) || 0;
       const active = !!(player.abilityActive && player.abilityActive[m.slot]);
-      const ready = cd <= 0 && !active;
+      const _chg = _hlfAbCharges(ab);
+      const ready = _chg ? (_chg.n > 0 && !active) : (cd <= 0 && !active);
+      const _frac = _chg ? (_chg.n / _chg.max) : (ready ? 1 : 0);
       const col = sh[m.cd] || _HL[m.cd].col;
       let pop = 1;
       const age = (v.t != null && _hudRF && _hudRF.t0) ? v.t - _hudRF.t0[m.slot] : -1;
@@ -65726,7 +65759,7 @@ function _hlfDraw(ctx, W, H, v) {
       const rDraw = IR.rIn + szV * pop / 2;
       ctx.save();
       ctx.translate(I.cx + Math.cos(a) * rDraw * vm, I.cy + Math.sin(a) * rDraw * vm);
-      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready);
+      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready, _frac);
       ctx.restore();
     }
     ctx.restore();
@@ -69508,6 +69541,16 @@ function _lssSpeedMix() {
 }
 function _lssInsaneSpeed() {
   try { return _lssSpeedMix() > 0 && LSS.MODE !== 'race'; } catch (_) { return false; }
+}
+function _lssProjSpeedMul() {
+  try {
+    const _o = (typeof window !== 'undefined') ? window.__projSpeedMul : undefined;
+    if (typeof _o === 'number' && isFinite(_o) && _o > 0) return _o;
+    const mix = _lssSpeedMix();
+    if (!(mix > 0)) return 1;
+    const REF = 350;   // mean of the three chassis flightSpeeds (450, 350, 250)
+    return _lssSpeedLerp(1, (LSS.RACE_SPEED || 900) / REF, mix);
+  } catch (_) { return 1; }
 }
 function _lssSpeedLerp(base, target, mix) {
   const b = Number(base) || 0, t = Number(target) || 0;

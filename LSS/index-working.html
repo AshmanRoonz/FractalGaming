@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.60";
+const LSS_BUILD = "47.62";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -64177,6 +64177,20 @@ class Projectile {
   constructor(origin, velocity, damage, splash, owner, color) {
     this.position = origin.clone();
     this.velocity = velocity.clone();
+    // ⭐⭐ (v47.62) The match-speed factor is applied HERE and nowhere else. There are 18 `new
+    // Projectile(...)` sites - the main guns, Cluster Missile, Rocket Salvo, Tracker Rockets, the
+    // Stun Bolt, the bot twins of all of them - and scaling at each one is a list that a future
+    // weapon silently falls off. Homing re-derives its speed from `this.velocity.length()`
+    // (see the tracker block in update), so the factor survives the steering.
+    // ⚠ NOT FOR 'network'. A peer's projectile arrives with a velocity the SENDER already scaled -
+    //   SPEED_MIX is a room setting, so every client agrees on the factor - and multiplying again
+    //   would square it on the receiving end.
+    if (owner !== 'network') {
+      try {
+        const _sm = (typeof _lssProjSpeedMul === 'function') ? _lssProjSpeedMul() : 1;
+        if (_sm !== 1) this.velocity.multiplyScalar(_sm);
+      } catch (_) {}
+    }
     this.damage = damage;
     this.splash = splash;
     this.owner = owner;
@@ -103533,6 +103547,25 @@ function _hlfWedge(I, rIn, rOut, a0, a1, n, frac, col, fromEnd) {
 // glyph, so check here before adding one that does.
 const _HLF_ICON = ['sword', 'shield', 'bolt'];
 
+// (v47.61) Charge-based abilities, for the icon row. ⚠ The predicate is a MIRROR of the one the DOM
+// ability slot uses (search `PYRO Explosive Gas: charge-based`) - the two must name the same set or
+// the canvas row and the slot disagree about what the player is holding. Returns null for everything
+// that is a plain cooldown, which is most of the file.
+function _hlfAbCharges(ability) {
+  try {
+    if (!ability || typeof player === 'undefined' || !player) return null;
+    const nm = ability.name;
+    const _aeg = (n) => (typeof _aegisUpFor === 'function') && _aegisUpFor(n);
+    const ok = (player.loadoutKey === 'PYRO' && nm === 'Explosive Gas') ||
+               (player.loadoutKey === 'SLAYER' && nm === 'Teleport' && _aeg(8)) ||
+               (player.loadoutKey === 'PUNCTURE' && nm === 'Stasis Trap' && _aeg(11));
+    if (!ok) return null;
+    const max = player.maxTrapCharges || 2;
+    const n = Math.max(0, Math.min(max, player.trapCharges || 0));
+    return { n: n, max: max };
+  } catch (_) { return null; }
+}
+
 // Each glyph is drawn in a unit box (-0.5..0.5) and scaled by `s`, so one
 // number controls icon size. Sub-paths share one beginPath: nonzero winding
 // fills them as a single silhouette.
@@ -103592,12 +103625,38 @@ function _hlfIconPath(ctx, kind, s) {
 //     but just make it dark instead". That is a real loss of information
 //     (running and cooling down look identical) and it is the intended trade.
 // The glow is warranted for the same reason SHIELD's is: it is the whole point.
-function _hlfIcon(I, kind, s, col, ready) {
+// ⭐⭐ (v47.61) `frac` FILLS THE GLYPH LIKE A TANK. Owner: "pyro has 2 charges, so maybe his
+// lightning bolt icon can half fill/color".
+// The icon used to answer one bit - can I press this - because that is all a cooldown has to say.
+// A CHARGE ability has a second thing to say: how many are in stock. The DOM ability slots have
+// carried that since Explosive Gas was written (`trapCharges + '/' + maxTrapCharges`); the canvas
+// row never did, so a Pyro sitting on one of two gas charges saw the same glyph as one sitting on
+// two - or, worse, a dimmed one, because slot 2's cooldown is the REGEN timer for the next charge
+// and reads as "not ready" while a usable charge is in hand.
+// ⚠ The fill is CLIPPED TO THE GLYPH and painted bottom-up, the same trick the CORE chevrons use:
+//   the silhouette stays exactly the silhouette, so a half-full bolt is still unmistakably a bolt.
+//   Lighting some other way - a second colour, a pip, a ring - would cost a cue the row cannot
+//   spare at this size.
+// ⚠ Default `frac` is the old behaviour exactly (`ready ? 1 : 0`), so every non-charge icon in the
+//   row is byte-for-byte what it was.
+function _hlfIcon(I, kind, s, col, ready, frac) {
   const ctx = I.ctx, vm = I.vmin;
+  const _f = (typeof frac === 'number' && isFinite(frac))
+    ? Math.max(0, Math.min(1, frac)) : (ready ? 1 : 0);
   _hlfIconPath(ctx, kind, s);
   ctx.globalAlpha = I.ga;
-  ctx.fillStyle = ready ? col : 'rgba(5,9,13,0.88)';
+  ctx.fillStyle = 'rgba(5,9,13,0.88)';
   ctx.fill();
+  if (_f > 0) {
+    // The glyph is authored in a unit box (-0.5..0.5) scaled by `s`, so the box runs -s/2..+s/2 and
+    // canvas +y is DOWN - the filled band therefore grows upward from the bottom edge.
+    ctx.save();
+    _hlfIconPath(ctx, kind, s);
+    ctx.clip();
+    ctx.fillStyle = col;
+    ctx.fillRect(-s * 0.6, s * 0.5 - s * _f, s * 1.2, s * _f);
+    ctx.restore();
+  }
   _hlfIconPath(ctx, kind, s);
   ctx.strokeStyle = ready ? col : _hlA(col, 0.42);
   ctx.lineWidth = Math.max(1, vm * (ready ? 0.17 : 0.11));
@@ -103943,7 +104002,11 @@ function _hlfDraw(ctx, W, H, v) {
       const active = !!(player.abilityActive && player.abilityActive[m.slot]);
       // IN USE counts as NOT READY. The icon answers one question — can I
       // press this — and while an ability is running the answer is no.
-      const ready = cd <= 0 && !active;
+      // (v47.61) A charge ability answers "can I press this" with STOCK, not with the cooldown -
+      // slot 2's timer is the regen of the NEXT charge and ticks while a usable one is in hand.
+      const _chg = _hlfAbCharges(ab);
+      const ready = _chg ? (_chg.n > 0 && !active) : (cd <= 0 && !active);
+      const _frac = _chg ? (_chg.n / _chg.max) : (ready ? 1 : 0);
       const col = sh[m.cd] || _HL[m.cd].col;
       // A short POP the moment it comes off cooldown, off the same `_hudRF`
       // timestamp `_hlReadyFlash` uses. Motion in the corner of the eye is a
@@ -103961,7 +104024,7 @@ function _hlfDraw(ctx, W, H, v) {
       const rDraw = IR.rIn + szV * pop / 2;
       ctx.save();
       ctx.translate(I.cx + Math.cos(a) * rDraw * vm, I.cy + Math.sin(a) * rDraw * vm);
-      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready);
+      _hlfIcon(I, _HLF_ICON[m.slot] || 'bolt', size * pop, col, ready, _frac);
       ctx.restore();
     }
     ctx.restore();
@@ -109745,6 +109808,32 @@ function _lssSpeedMix() {
 // Kept for the callers that only want to know "is the match speed modified at all".
 function _lssInsaneSpeed() {
   try { return _lssSpeedMix() > 0 && LSS.MODE !== 'race'; } catch (_) { return false; }
+}
+// ⭐⭐⭐ (v47.62) MATCH SPEED MOVES THE BULLETS TOO. Owner: "the rockets/projectiles should also
+// increase in speed, with the match speed".
+// The dial blends every SHIP toward `RACE_SPEED` (900) and left every PROJECTILE where it was, and
+// the shipped projectile speeds are 350, 600 and 900. So at INSANE the Shotgun's pellets travel at
+// 350 against ships doing 900 - they cannot reach anything that is running away, and the Thermite at
+// 600 is no better. The mode's own speed floor is what breaks its weapons.
+// ⚠ ONE GLOBAL FACTOR, NOT A PER-SHIP ONE. Scaling each shot by how much ITS FIRER sped up is the
+//   tempting version and it is wrong: a projectile has to catch whoever it is aimed at, and at mix 1
+//   EVERY ship is doing 900 regardless of who fired. A per-firer rule would make a Dreadnought's
+//   rockets (250 -> 900, 3.6x) far faster than a Corvette's (450 -> 900, 2x) for no reason the
+//   player could ever see, and it would stop a weapon's speed being a property of the weapon.
+// The reference is the MEAN chassis flight speed, derived rather than invented: 450 / 350 / 250
+//   average to 350, so mix 1 gives 900/350 = 2.57x and the world and its bullets speed up together.
+// ⚠ The blend goes through `_lssSpeedLerp` like everything else here, so mix 0 returns EXACTLY 1
+//   and normal matches are untouched by construction rather than by arithmetic.
+// Knob: `window.__projSpeedMul` overrides the factor outright for tuning.
+function _lssProjSpeedMul() {
+  try {
+    const _o = (typeof window !== 'undefined') ? window.__projSpeedMul : undefined;
+    if (typeof _o === 'number' && isFinite(_o) && _o > 0) return _o;
+    const mix = _lssSpeedMix();
+    if (!(mix > 0)) return 1;
+    const REF = 350;   // mean of the three chassis flightSpeeds (450, 350, 250)
+    return _lssSpeedLerp(1, (LSS.RACE_SPEED || 900) / REF, mix);
+  } catch (_) { return 1; }
 }
 // One blend, used by the player, the bots and the dash so they can never drift apart.
 function _lssSpeedLerp(base, target, mix) {
