@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.09";
+const LSS_BUILD = "48.16";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -7878,17 +7878,7 @@ function handleNetEvent(evt, fromPeerId) {
         const _vlbRange  = (typeof evt.range  === 'number') ? evt.range  : 2500;
         const _vlbRadius = (typeof evt.radius === 'number') ? evt.radius :   80;
         const _vlbLife   = (typeof evt.life   === 'number') ? evt.life   : 0.45;
-        const _vlbMid    = _vlbOrigin.clone().addScaledVector(_vlbDir, _vlbRange * 0.5);
-        const _vlbMat    = _makeFXMaterial('core_beam');
-        if (_vlbMat.uniforms.uPosScale) _vlbMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _vlbRadius);
-        const _vlbMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _vlbMat);
-        _vlbMesh.position.copy(_vlbMid);
-        _vlbMesh.quaternion.setFromUnitVectors(_mvUp, _vlbDir);
-        _vlbMesh.scale.set(_vlbRadius, _vlbRange, _vlbRadius);
-        _vlbMesh.frustumCulled = false;
-        _vlbMesh.renderOrder = 2;
-        scene.add(_vlbMesh);
-        game.effects.push({ mesh: _vlbMesh, type: 'vortexLaserBeam', age: 0, lifetime: _vlbLife });
+        _spawnVortexLaserPeerBeam(_vlbOrigin, _vlbDir, _vlbRange, _vlbRadius, _vlbLife);
         if (game._hubWater && typeof _swWpnCross === 'function') { try {
           _swWpnCross(_vlbOrigin.x, _vlbOrigin.y, _vlbOrigin.z,
                       _vlbOrigin.x + _vlbDir.x * _vlbRange, _vlbOrigin.y + _vlbDir.y * _vlbRange, _vlbOrigin.z + _vlbDir.z * _vlbRange,
@@ -8639,6 +8629,93 @@ function _vortexSpan(mesh, from, to, radius) {
   mesh.quaternion.setFromUnitVectors(_mvUp, _vyDir);
   mesh.scale.set(radius, len, radius);
   return len;
+}
+function _vortexCoreBeamOff() {
+  try {
+    if (player._vortexCoreBeam) player._vortexCoreBeam.visible = false;
+    if (player._vortexCoreArms) for (const _a of player._vortexCoreArms) _a.visible = false;
+    if (player._vortexCoreGlows) for (const _g of player._vortexCoreGlows) _g.visible = false;
+  } catch (_) {}
+}
+function _spawnVortexLaserShot(origin, dir, range, gunA, gunB, life) {
+  if (!origin || !dir || typeof scene === 'undefined' || !scene) return;
+  const BEAM_RADIUS = 4;
+  const beamLife = (typeof life === 'number' && life > 0) ? life : 0.22;
+  const o = origin.clone(), d = dir.clone().normalize();
+  const pair = !!(gunA && gunB);
+  const beamMid = o.clone().addScaledVector(d, range * 0.5);
+  const beamMat = _makeFXMaterial('core_beam');
+  if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / Math.max(1, BEAM_RADIUS);
+  const beamMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), beamMat);
+  beamMesh.position.copy(beamMid);
+  beamMesh.quaternion.setFromUnitVectors(_mvUp, d.clone().negate());
+  beamMesh.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
+  beamMesh.frustumCulled = false;
+  beamMesh.renderOrder = 2;
+  const _beamBackMat = new THREE.MeshBasicMaterial({
+    color: 0x8a3cf0, transparent: true, opacity: 0.85,
+    blending: THREE.NormalBlending, depthWrite: false, vertexColors: true,
+  });
+  const _beamBack = new THREE.Mesh(_getVortexCoreBeamGeometry(), _beamBackMat);
+  _beamBack.scale.set(0.8, 1, 0.8);
+  _beamBack.position.y = 0;
+  _beamBack.renderOrder = 1;
+  _beamBack.frustumCulled = false;
+  beamMesh.add(_beamBack);
+  scene.add(beamMesh);
+  if (pair) {
+    const _armR = BEAM_RADIUS * _vortexYKnobs().armAbility;
+    for (const _gun of [gunA, gunB]) {
+      const _armMat = _makeFXMaterial('core_beam');
+      if (_armMat.uniforms.uPosScale) _armMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _armR);
+      if (_armMat.uniforms.uAxialFalloff) _armMat.uniforms.uAxialFalloff.value = 0.95;   // (v39.68) fades into the muzzle glow (+Y = the gun)
+      const _armMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _armMat);
+      _vortexSpan(_armMesh, o, _gun, _armR);   // opaque +Y end at the joint
+      _armMesh.frustumCulled = false;
+      _armMesh.renderOrder = 2;
+      scene.add(_armMesh);
+      game.effects.push({ mesh: _armMesh, type: 'vortexLaserBeam', age: 0, lifetime: beamLife });
+    }
+  }
+  try {
+    const _gmat = _vortexGlowMaterial(), _ggeo = _vortexGlowGeometry();
+    const _vfA = window.__vortexFire || {};
+    const _gMuzA = (_vfA.glowMuzzleAbility != null) ? _vfA.glowMuzzleAbility : 16;
+    const _gJointA = (_vfA.glowJointAbility != null) ? _vfA.glowJointAbility : 22;
+    const _spots = pair ? [[gunA, _gMuzA], [gunB, _gMuzA], [o, _gJointA]] : [[o, _gJointA]];
+    for (const _sp of _spots) {
+      const q = new THREE.Mesh(_ggeo, _gmat);
+      q.position.copy(_sp[0]); q.quaternion.copy(camera.quaternion); q.scale.set(_sp[1], _sp[1], 1);
+      q.frustumCulled = false; q.renderOrder = 3;
+      scene.add(q);
+      game.effects.push({ mesh: q, type: 'vortexLaserBeam', age: 0, lifetime: beamLife, glow: _sp[1] });
+    }
+  } catch (_) {}
+  game.effects.push({
+    mesh: beamMesh,
+    type: 'vortexLaserBeam',
+    age: 0,
+    lifetime: beamLife,
+    o: o, d: d, len: range,
+  });
+}
+function _spawnVortexLaserPeerBeam(origin, dir, range, radius, life) {
+  if (!origin || !dir || typeof scene === 'undefined' || !scene) return;
+  const _vlbDir = dir.clone().normalize();
+  const _vlbRange = (typeof range === 'number') ? range : 2500;
+  const _vlbRadius = (typeof radius === 'number') ? radius : 80;
+  const _vlbLife = (typeof life === 'number') ? life : 0.45;
+  const _vlbMid = origin.clone().addScaledVector(_vlbDir, _vlbRange * 0.5);
+  const _vlbMat = _makeFXMaterial('core_beam');
+  if (_vlbMat.uniforms.uPosScale) _vlbMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _vlbRadius);
+  const _vlbMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _vlbMat);
+  _vlbMesh.position.copy(_vlbMid);
+  _vlbMesh.quaternion.setFromUnitVectors(_mvUp, _vlbDir);
+  _vlbMesh.scale.set(_vlbRadius, _vlbRange, _vlbRadius);
+  _vlbMesh.frustumCulled = false;
+  _vlbMesh.renderOrder = 2;
+  scene.add(_vlbMesh);
+  game.effects.push({ mesh: _vlbMesh, type: 'vortexLaserBeam', age: 0, lifetime: _vlbLife });
 }
 function _getVortexCoreBeamGeometry() {
   if (_VORTEX_CORE_BEAM_GEO) return _VORTEX_CORE_BEAM_GEO;
@@ -16310,7 +16387,10 @@ function _rplSample(kc) {
   if (kc) {
     const A = R.actors.me, b = A && A.buf, n = b ? b.length : 0;
     if (n >= 9 && b[n - 1] > 0.5) b.push(t, b[n - 8], b[n - 7], b[n - 6], b[n - 5], b[n - 4], b[n - 3], b[n - 2], b[n - 1]);
-  } else if (player && player.mesh) put(_rplActor(R, 'me', player), player.mesh, player.shipState !== 'dead', player);
+  } else if (player && player.mesh) {
+    put(_rplActor(R, 'me', player), player.mesh, player.shipState !== 'dead', player);
+    _rplBeamSample(R, t);   // (v48.14) the Mega Laser, in the frame of the pose just taken
+  }
   const E = game.entities || [];
   for (let i = 0; i < E.length; i++) {
     const e = E[i];
@@ -16377,6 +16457,9 @@ function _rplFire(e) {
       case 'hb': spawnHullBurst(_rplV3(a[0]), a[1], a[2]); break;
       case 'mf': emitChassisMuzzleFlash(a[0], _rplV3(a[1]), _rplV3(a[2])); break;
       case 'sh': spawnShieldHit(_rplV3(a[0]), a[1], a[2], null); break;
+      case 'cf': _spawnClassFireBurst(_rplV3(a[0]), a[1], a[2], a[3]); break;   // (v48.14)
+      case 'vl': _spawnVortexLaserShot(_rplV3(a[0]), _rplV3(a[1]), a[2], _rplV3(a[3]), _rplV3(a[4]), a[5]); break;   // (v48.16)
+      case 'vp': _spawnVortexLaserPeerBeam(_rplV3(a[0]), _rplV3(a[1]), a[2], a[3], a[4]); break;                     // (v48.16)
       case 'ex': {
         const _o = (a[4] && typeof a[4] === 'object') ? a[4] : {};
         spawnExplosion(_rplV3(a[0]), a[1], (a[2] != null && typeof a[2] !== 'boolean') ? a[2] : null, _rplV3(a[3]),
@@ -16407,7 +16490,13 @@ function _rplFireLifted(st, e) {
   const W = game.worldEffects;
   const n0 = W ? W.length : 0;
   _rplFire(e);
-  if (W && W.length > n0) { const got = W.splice(n0, W.length - n0); for (const x of got) st.wfx.push(x); }
+  if (W && W.length > n0) {
+    const got = W.splice(n0, W.length - n0);
+    for (const x of got) {
+      if (e.k === 'cf' && x._grow == null) x._grow = 1.2;
+      st.wfx.push(x);
+    }
+  }
 }
 function _rplWfxDispose(eff) {
   const retain = (m) => { try { if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else m.dispose(); } catch (_) {} };
@@ -16434,6 +16523,11 @@ function _rplWfxDispose(eff) {
     if (Array.isArray(eff.puffMeshes)) for (const m of eff.puffMeshes) kill(m, false, false);
     if (eff.type === 'particle_wall') {
       kill(eff.mesh, true, true); kill(eff.plasmaMesh, true, false); kill(eff.edgeMesh, true, true);
+    } else if (eff.type === 'vortex_core_beam' || eff.type === 'vortex_core_beam_remote') {
+      kill(eff.mesh, true, true); kill(eff.stem, true, true);
+      for (const a of (eff.arms || [])) kill(a, true, true);
+      for (const g of (eff.glows || [])) { try { if (g && g.parent) g.parent.remove(g); } catch (_) {} }
+      eff.stem = null; eff.arms = eff.glows = null;
     } else {
       kill(eff.mesh, false, false);
       kill(eff.coreMesh, false, false);
@@ -16444,7 +16538,9 @@ function _rplWfxDispose(eff) {
   } catch (_) {}
 }
 const _RPL_WFX = { tether: 1, tripwire: 1, particle_wall: 1, incendiary_gas: 1, firewall: 1, pyro_flame: 1,
-                   sonar_pulse: 1, vortex_core_beam_remote: 1 };
+                   sonar_pulse: 1, vortex_core_beam_remote: 1,
+                   vortex_core_beam: 1 };   // (v48.14) the pilot's own Mega Laser - recorded by _rplBeamSample, not from the live list
+const _RPL_KC_WFX = { vortex_core_beam: 1, vortex_core_beam_remote: 1 };
 function _rplWfxFlags(e) {
   switch (e.type) {
     case 'tether': return (e.triggered ? 1 : 0) | (e._shotDown ? 2 : 0);
@@ -16482,6 +16578,47 @@ function _rplWfxFlagAt(W, t) {
   while (lo < hi) { const mid = (lo + hi) >> 1; if (s[mid * 2] <= t) lo = mid + 1; else hi = mid; }
   return (lo > 0) ? (s[(lo - 1) * 2 + 1] | 0) : 0;
 }
+const _rplBmQ = new THREE.Quaternion(), _rplBmD = new THREE.Vector3(), _rplBmS = new THREE.Vector3();
+function _rplBeamSample(R, t) {
+  const bm = player && player._vortexCoreBeam, m = player && player.mesh;
+  const on = !!(bm && bm.visible && m && player.coreActive && player.shipState !== 'dead');
+  let W = R._mlW ? R.wf[R._mlW] : null;
+  if (!on) { if (W) R._mlW = 0; return; }   // it went out: the next firing is an entry of its own
+  if (!W) {
+    R._mlW = ++R.wid;
+    W = R.wf[R._mlW] = { k: 'vortex_core_beam', t0: t, t1: t, p: null, d: null, len: 0, r: 0, team: player.team,
+                         own: 'me', grp: null, dur: 0, sx: [], bt: [] };
+  }
+  W.t1 = t;
+  _rplBmQ.copy(m.quaternion).invert();
+  const len = bm.scale.y;
+  _rplBmD.set(0, 1, 0).applyQuaternion(bm.quaternion);   // the stem's +Y is the firing direction
+  _rplBmS.copy(bm.position).addScaledVector(_rplBmD, -0.5 * len).sub(m.position).applyQuaternion(_rplBmQ);
+  _rplBmD.applyQuaternion(_rplBmQ);
+  const A = player._vortexCoreArms, arms = !!(A && A[0] && A[0].visible);
+  W.bt.push(t, _rplBmS.x, _rplBmS.y, _rplBmS.z, _rplBmD.x, _rplBmD.y, _rplBmD.z, len, arms ? 1 : 0);
+}
+const _rplBmOut = { sx: 0, sy: 0, sz: 0, dx: 0, dy: 0, dz: -1, len: 0, arms: 0 };
+function _rplBeamAt(W, t) {
+  const b = W.bt, n = b ? (b.length / 9) | 0 : 0;
+  if (!n) return null;
+  let lo = 0, hi = 0;
+  if (t >= b[(n - 1) * 9]) { lo = hi = n - 1; }
+  else if (t > b[0]) {
+    lo = 0; hi = n - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (b[mid * 9] <= t) lo = mid; else hi = mid; }
+  }
+  const i = lo * 9, j = hi * 9, span = b[j] - b[i];
+  const u = (span > 1e-6) ? Math.max(0, Math.min(1, (t - b[i]) / span)) : 0;
+  const o = _rplBmOut, L = (k) => b[i + k] + (b[j + k] - b[i + k]) * u;
+  o.sx = L(1); o.sy = L(2); o.sz = L(3); o.dx = L(4); o.dy = L(5); o.dz = L(6); o.len = L(7); o.arms = b[i + 8];
+  return o;
+}
+function _rplActorMesh(st, key) {
+  if (st && st.pup) { const P = st.pup[key]; return (P && P.owner && P.owner.mesh) || null; }
+  const A = st && st.R && st.R.actors[key];
+  return A ? _rplMeshOf(A) : null;
+}
 function _rplLiftSpawn(fn) {
   const L = game.worldEffects;
   const n0 = L.length;
@@ -16490,6 +16627,7 @@ function _rplLiftSpawn(fn) {
   return null;
 }
 const _rplWV = new THREE.Vector3(), _rplWD = new THREE.Vector3(), _rplWQ = new THREE.Quaternion(), _rplWY = new THREE.Vector3(0, 1, 0);
+const _rplBmJ = new THREE.Vector3(), _rplBmA = new THREE.Vector3(), _rplBmB = new THREE.Vector3();   // (v48.14) the Mega Laser's joint and guns
 function _rplWfxBuild(W) {
   const pos = W.p ? new THREE.Vector3(W.p[0], W.p[1], W.p[2]) : new THREE.Vector3();
   const dir = W.d ? new THREE.Vector3(W.d[0], W.d[1], W.d[2]) : new THREE.Vector3(0, 0, -1);
@@ -16526,6 +16664,31 @@ function _rplWfxBuild(W) {
         scene.add(m);
       } catch (_) {}
       return { type: 'vortex_core_beam_remote', mesh: m };
+    }
+    case 'vortex_core_beam': {
+      const V = { type: 'vortex_core_beam', stem: null, arms: [], glows: [] };
+      try {
+        const sm = _makeFXMaterial('core_beam');
+        if (sm.uniforms && sm.uniforms.uPosScale) sm.uniforms.uPosScale.value = 1 / 95;
+        V.stem = new THREE.Mesh(_getVortexCoreBeamConeGeometry(), sm);
+        V.stem.frustumCulled = false; V.stem.renderOrder = 2; V.stem.visible = false;
+        scene.add(V.stem);
+        for (let i = 0; i < 2; i++) {
+          const am = _makeFXMaterial('core_beam');
+          if (am.uniforms && am.uniforms.uPosScale) am.uniforms.uPosScale.value = 1 / Math.max(1, 95 * 0.15);
+          if (am.uniforms && am.uniforms.uAxialFalloff) am.uniforms.uAxialFalloff.value = 0.95;
+          const a = new THREE.Mesh(_getVortexCoreArmConeGeometry(), am);
+          a.frustumCulled = false; a.renderOrder = 2; a.visible = false;
+          scene.add(a); V.arms.push(a);
+        }
+        const gm = _vortexGlowMaterial(), gg = _vortexGlowGeometry();
+        for (let i = 0; i < 3; i++) {
+          const q = new THREE.Mesh(gg, gm);
+          q.frustumCulled = false; q.renderOrder = 3; q.visible = false;
+          scene.add(q); V.glows.push(q);
+        }
+      } catch (e) { console.warn('[replay] mega laser rebuild failed:', e); }
+      return V;
     }
   }
   return null;
@@ -16637,13 +16800,50 @@ function _rplWfxDress(st, W, V, rt, dtRep) {
       }
       break;
     }
+    case 'vortex_core_beam': {
+      const key = W.own || 'me';
+      const A = st.R.actors[key], m = _rplActorMesh(st, key);
+      const alive = A ? _rplPoseAt(A, rt, _rplWV, _rplWQ) : false;
+      const b = alive ? _rplBeamAt(W, rt) : null;
+      const show = !!(b && V.stem && b.len > 1);
+      if (V.stem) V.stem.visible = show;
+      for (const a of V.arms) a.visible = false;
+      for (const g of V.glows) g.visible = false;
+      if (!show) break;
+      const J = _rplBmJ.set(b.sx, b.sy, b.sz).applyQuaternion(_rplWQ).add(_rplWV);
+      const D = _rplWD.set(b.dx, b.dy, b.dz).applyQuaternion(_rplWQ).normalize();
+      V.stem.position.copy(J).addScaledVector(D, b.len * 0.5);
+      V.stem.quaternion.setFromUnitVectors(_rplWY, D);
+      V.stem.scale.set(95, b.len, 95);
+      const breath = 0.92 + 0.10 * Math.sin(7 * T);
+      const us = V.stem.material && V.stem.material.uniforms;
+      if (us && us.uIntensity) us.uIntensity.value = breath;
+      const nodes = (b.arms > 0.5 && m && m.userData) ? m.userData.muzzleNodes : null;
+      if (nodes && nodes.length >= 2 && V.arms.length === 2 && V.glows.length === 3) {
+        try { m.updateMatrixWorld(true); } catch (_) {}
+        nodes[0].getWorldPosition(_rplBmA); nodes[1].getWorldPosition(_rplBmB);
+        const armR = 95 * _vortexYKnobs().armCore;
+        _vortexSpan(V.arms[0], J, _rplBmA, armR);
+        _vortexSpan(V.arms[1], J, _rplBmB, armR);
+        for (const a of V.arms) { a.visible = true; const ua = a.material && a.material.uniforms; if (ua && ua.uIntensity) ua.uIntensity.value = breath; }
+        const vf = window.__vortexFire || {};
+        const gMuz = (vf.glowMuzzle != null) ? vf.glowMuzzle : 30, gJoint = (vf.glowJoint != null) ? vf.glowJoint : 4.5 * armR;
+        const pulse = 0.9 + 0.14 * Math.sin(T * 23.0);
+        const G = V.glows;
+        G[0].position.copy(_rplBmA); G[1].position.copy(_rplBmB); G[2].position.copy(J);
+        G[0].scale.set(gMuz * pulse, gMuz * pulse, 1); G[1].scale.set(gMuz * (2 - pulse), gMuz * (2 - pulse), 1); G[2].scale.set(gJoint, gJoint, 1);
+        for (const g of G) { g.quaternion.copy(camera.quaternion); g.visible = true; }
+      }
+      break;
+    }
   }
 }
-function _rplWfxReplay(st, rt, dtRep) {
+function _rplWfxReplay(st, rt, dtRep, only) {
   const R = st.R, wf = R.wf; if (!wf) return;
   const V = st.wv || (st.wv = {});
   for (const id in wf) {
     const W = wf[id];
+    if (only && !only[W.k]) continue;
     const live = (rt >= W.t0 && rt <= W.t1 + 0.05) && !(W.k === 'tether' && (_rplWfxFlagAt(W, rt) & 2));
     let v = V[id];
     if (v && W.k === 'incendiary_gas' && v._lit && !(_rplWfxFlagAt(W, rt) & 1)) { _rplWfxDispose(v); delete V[id]; v = null; }
@@ -16985,6 +17185,11 @@ function _rplKcStart(R, K) {
   try { window.addEventListener('keydown', onIn, true); window.addEventListener('mousedown', onIn, true); } catch (_) {}
   try { if (typeof _ghostHullRestore === 'function' && player && player.mesh) _ghostHullRestore(player.mesh); } catch (_) {}
   _adsReset();   // (v48.05) a round won while zoomed would otherwise be replayed through the scope
+  try {
+    player.coreActive = false; player.coreTimer = 0; player._laserCoreArcTimer = 0;
+    _vortexCoreBeamOff();
+    for (const e of (game.worldEffects || [])) if (e && (e._beamFlame || e._muzzleFlame) && e.timer > 0.02) e.timer = 0.02;
+  } catch (_) {}
   try { window.__killcamN = (window.__killcamN | 0) + 1; } catch (_) {}
   return true;
 }
@@ -17004,6 +17209,7 @@ function _rplKcEnd() {
   _rplPjFree(kc);
   for (const e of (kc.wfx || [])) _rplWfxDispose(e);   // (v48.07) its own fire clouds
   kc.wfx = [];
+  _rplWfxFreeAll(kc);   // (v48.14) its Mega Lasers
   try { document.body.classList.remove('lss-killcam'); } catch (_) {}
 }
 function _rplPadRaw() {
@@ -17051,6 +17257,7 @@ function _rplKcFrame(now) {
     m.position.copy(_rplP); m.quaternion.copy(_rplQ);
   }
   _rplKcCamera(kc, dtR);
+  try { _rplWfxReplay(kc, kc.rt, dtR * kc.rate, _RPL_KC_WFX); } catch (_) {}
   _rplPjDraw(kc, kc.rt);   // (v48.01) after the camera: the shot ribbons face this frame's eye
   try { if (typeof _audioUpdateListener === 'function') _audioUpdateListener(); } catch (_) {}   // spatial sound hears the replay camera
   if (kc.rt >= kc.t1) {
@@ -17193,9 +17400,11 @@ function _rplSerialize(R) {
            projectiles: Object.keys(R.pj).map(id => ({ c: R.pj[id].c, s: R.pj[id].s, buf: R.pj[id].buf.map((v, i) => (i % 4 === 0) ? r4(v - t0) : r1(v)) })),
            worldFx: Object.keys(R.wf || {}).map(id => {
              const W = R.wf[id];
-             return { k: W.k, t0: r4(W.t0 - t0), t1: r4(W.t1 - t0), p: W.p ? W.p.map(r1) : null, d: W.d ? W.d.map(r4) : null,
-                      len: W.len, r: W.r, team: W.team, own: W.own, grp: W.grp, dur: W.dur,
-                      sx: W.sx.map((v, i) => (i % 2 === 0) ? r4(v - t0) : v) };
+             const o = { k: W.k, t0: r4(W.t0 - t0), t1: r4(W.t1 - t0), p: W.p ? W.p.map(r1) : null, d: W.d ? W.d.map(r4) : null,
+                         len: W.len, r: W.r, team: W.team, own: W.own, grp: W.grp, dur: W.dur,
+                         sx: W.sx.map((v, i) => (i % 2 === 0) ? r4(v - t0) : v) };
+             if (W.bt) o.bt = W.bt.map((v, i) => { const f = i % 9; return (f === 0) ? r4(v - t0) : ((f >= 4 && f <= 6) ? r4(v) : (f === 8 ? v : r1(v))); });
+             return o;
            }) };
 }
 function _rplDeserialize(o) {
@@ -17222,6 +17431,7 @@ function _rplDeserialize(o) {
     R.wf[i + 1] = { k: W.k, t0: W.t0, t1: +W.t1 || W.t0, p: W.p || null, d: W.d || null, len: W.len || 0, r: W.r || 0,
                     team: (W.team != null) ? W.team : null, own: W.own || null, grp: (W.grp != null) ? W.grp : null,
                     dur: W.dur || 0, sx: Array.isArray(W.sx) ? W.sx : [] };
+    if (Array.isArray(W.bt)) R.wf[i + 1].bt = W.bt;   // (v48.14) a Mega Laser's drawn track
   });
   R.wid = (o.worldFx || []).length;
   return R;
@@ -17416,6 +17626,11 @@ function _rplStudioOpen(R, opts) {
   _rplClearFx();
   const hide = (m) => { if (m && m.isObject3D) { st.hidden.push({ m: m, vis: m.visible }); m.visible = false; } };
   try { if (player && player.mesh) hide(player.mesh); } catch (_) {}
+  try {
+    hide(player._vortexCoreBeam);
+    for (const a of (player._vortexCoreArms || [])) hide(a);
+    for (const g of (player._vortexCoreGlows || [])) hide(g);
+  } catch (_) {}
   for (const e of (game.entities || [])) {
     try { if (e && e.mesh && (e.loadoutKey || e.peerId) && !e.isEarthLife && !e.isHubTraffic && e._owCity == null) hide(e.mesh); } catch (_) {}
   }
@@ -21269,7 +21484,7 @@ function _cavernWaterCheap(T) {
 }
 function _swCavernWaterWanted(T) {
   if (!T || !T.ON || T.YFLOOR == null) return false;
-  if (T.biome === 'mossy' || T.biome === 'brokensim') return false;
+  if (T.biome === 'mossy') return false;
   const K = (typeof window !== 'undefined') ? (window.__cavernWater = window.__cavernWater || {}) : null;
   if (K && K.on === false) return false;
   return true;
@@ -21307,7 +21522,12 @@ function _swApplyAtmosphere() {
   if (T.biome === 'brokensim') {
     scene.fog = new THREE.FogExp2(sky.getHex(), (game.sandwichFog || 0.3) * 0.4e-4);
     try { setSky('purple'); } catch (_) {}
-    try { _swDisposeHubWater(); } catch (_) {}
+    if (_swCavernWaterWanted(T)) {
+      try { T.WL = _swCavernWaterLevel(T); } catch (_) {}
+      try { _swBuildHubWater(T); } catch (e) { console.warn('[cavern water] build failed:', e); }
+    } else {
+      try { _swDisposeHubWater(); } catch (_) {}
+    }
     try { _lssApplyHubLighting(false); } catch (_) {}
     try { _lssRestoreArenaMood(); } catch (_) {}
   } else if (T.biome === 'mossy') {
@@ -54418,6 +54638,21 @@ async function _prebakeGpuPrime() {
       try { window.__reflWarm = _n; } catch (_) {}
     }
   } catch (_) {}
+  try {
+    const _dmOn = !!(typeof window !== 'undefined' && window.__waterDisp) && !!game._hubWater &&
+                  !((typeof _cavernWaterCheap === 'function') && _cavernWaterCheap(game.sandwichTerrain));
+    const _wHub = game._hubWater;
+    const _dm = (_dmOn && typeof _swBuildHubWaterDispGet === 'function')
+      ? _swBuildHubWaterDispGet((_wHub && _wHub.userData && _wHub.userData.WL != null) ? _wHub.userData.WL : (game._hubWaterWL || 0)) : null;
+    const _dmm = _dm && _dm.material;
+    if (rt && _dmm) {
+      const _s0 = _dmm.side;
+      _dmm.side = (_s0 === THREE.DoubleSide) ? THREE.FrontSide : THREE.DoubleSide;
+      _dmm.needsUpdate = true;
+      try { if (_warmDrawRoot(_dm, rt, false)) passes++; }
+      finally { _dmm.side = _s0; _dmm.needsUpdate = true; }
+    }
+  } catch (_) {}
   try { if (typeof _warmChargeGlowOnce === 'function') _warmChargeGlowOnce(); } catch (_) {}   // (v39.53) charge-glow program pair
   try { await _warmRuntimeFxOnce(); } catch (_) {}
   try { await _drainProgramLinks(4000, null, 'drainPrime'); } catch (_) {}
@@ -59357,8 +59592,7 @@ function playerDie(attacker) {
   player.coreActive = false;
   player.coreTimer = 0;
   player._laserCoreArcTimer = 0;
-  if (player._vortexCoreBeam) player._vortexCoreBeam.visible = false;
-  if (player._vortexCoreArms) for (const _a of player._vortexCoreArms) _a.visible = false;
+  _vortexCoreBeamOff();   // (v48.14) the stem, the arms - and the three glow cards, which this used to leave lit
   for (let we = game.worldEffects.length - 1; we >= 0; we--) {
     const eff = game.worldEffects[we];
     if (!eff || eff.type !== 'firewall') continue;
@@ -59537,11 +59771,6 @@ function _tickPerkEffects(dt) {
         player.perkCloakActive = true;
         player.perkCloakActiveTimer = p.cloakDuration;
         _setPlayerShipOpacity(p.cloakOpacity);
-        try {
-          if (window.Overlays && typeof Overlays.abilityFlash === 'function') {
-            Overlays.abilityFlash('Auto Cloak', '#aa66ff');
-          }
-        } catch (_) {}
         try {
           if (typeof announcerSay === 'function') {
             announcerSay('Auto cloak active.', { key: 'auto_cloak', cooldown: 4 });
@@ -62837,56 +63066,11 @@ function executeAbility(slot, ability) {
         _swWpnCross(_vlOrigin.x, _vlOrigin.y, _vlOrigin.z, beamEnd.x, beamEnd.y, beamEnd.z,
                     (window.__water && window.__water.laserAbilityYield != null) ? +window.__water.laserAbilityYield : 2400,
                     0, 'vLaser', 0.05); } catch (_) {} }
-      const BEAM_RADIUS = 4; 
-      const beamLife = 0.22; 
-      const beamMid = _vlOrigin.clone().addScaledVector(_vlDir, range * 0.5);
-      const beamMat = _makeFXMaterial('core_beam');
-      if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / Math.max(1, BEAM_RADIUS);
-      const beamMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), beamMat);
-      const _vbLen = range;
-      beamMesh.position.copy(beamMid);
-      beamMesh.quaternion.setFromUnitVectors(_mvUp, _vlDir.clone().negate());
-      beamMesh.scale.set(BEAM_RADIUS, _vbLen, BEAM_RADIUS);
-      beamMesh.frustumCulled = false;
-      beamMesh.renderOrder = 2;
-      const _beamBackMat = new THREE.MeshBasicMaterial({
-        color: 0x8a3cf0, transparent: true, opacity: 0.85,
-        blending: THREE.NormalBlending, depthWrite: false, vertexColors: true,
-      });
-      const _beamBack = new THREE.Mesh(_getVortexCoreBeamGeometry(), _beamBackMat);
-      _beamBack.scale.set(0.8, 1, 0.8);
-      _beamBack.position.y = 0;
-      _beamBack.renderOrder = 1;
-      _beamBack.frustumCulled = false;
-      beamMesh.add(_beamBack);
-      scene.add(beamMesh);
-      if (_vyPair) {
-        for (const _gun of [_vyGunA, _vyGunB]) {
-          const _armMat = _makeFXMaterial('core_beam');
-          const _armR = BEAM_RADIUS * _vyK.armAbility;
-          if (_armMat.uniforms.uPosScale) _armMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _armR);
-          if (_armMat.uniforms.uAxialFalloff) _armMat.uniforms.uAxialFalloff.value = 0.95;   // (v39.68) fades into the muzzle glow (+Y = the gun)
-          const _armMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _armMat);
-          _vortexSpan(_armMesh, _vlOrigin, _gun, _armR);   // opaque +Y end at the joint
-          _armMesh.frustumCulled = false;
-          _armMesh.renderOrder = 2;
-          scene.add(_armMesh);
-          game.effects.push({ mesh: _armMesh, type: 'vortexLaserBeam', age: 0, lifetime: beamLife });
-        }
-      }
+      const BEAM_RADIUS = 4;   // (the net event below still sends these two)
+      const beamLife = 0.22;
+      _spawnVortexLaserShot(_vlOrigin, _vlDir, range, _vyPair ? _vyGunA : null, _vyPair ? _vyGunB : null, beamLife);
       try {
-        const _gmat = _vortexGlowMaterial(), _ggeo = _vortexGlowGeometry();
         const _vfA = window.__vortexFire || {};
-        const _gMuzA = (_vfA.glowMuzzleAbility != null) ? _vfA.glowMuzzleAbility : 16;
-        const _gJointA = (_vfA.glowJointAbility != null) ? _vfA.glowJointAbility : 22;
-        const _spots = _vyPair ? [[_vyGunA, _gMuzA], [_vyGunB, _gMuzA], [_vlOrigin, _gJointA]] : [[_vlOrigin, _gJointA]];
-        for (const _sp of _spots) {
-          const q = new THREE.Mesh(_ggeo, _gmat);
-          q.position.copy(_sp[0]); q.quaternion.copy(camera.quaternion); q.scale.set(_sp[1], _sp[1], 1);
-          q.frustumCulled = false; q.renderOrder = 3;
-          scene.add(q);
-          game.effects.push({ mesh: q, type: 'vortexLaserBeam', age: 0, lifetime: beamLife, glow: _sp[1] });
-        }
         if (_vyPair && typeof _spawnClassFireBurst === 'function') {
           for (const _gun of [_vyGunA, _vyGunB]) {
             for (let _k = 0; _k < 2; _k++) {
@@ -62897,13 +63081,6 @@ function executeAbility(slot, ability) {
           }
         }
       } catch (_) {}
-      game.effects.push({
-        mesh: beamMesh,
-        type: 'vortexLaserBeam',
-        age: 0,
-        lifetime: beamLife,
-        o: _vlOrigin.clone(), d: _vlDir.clone(), len: range,   
-      });
       const _vlMuzzle = _vlOrigin;
       if (typeof _spawnSingleTracer === 'function') {
         _spawnSingleTracer(_vlMuzzle, beamEnd, LSS.CLASS_COLORS.VORTEX, 1.6);
@@ -64971,6 +65148,10 @@ function updateWorldEffects(dt) {
     player._bcgTTL = (player._bcgTTL || 0) - dt;
     if (player._bcgTTL <= 0) { try { _blasterChargeGlowOff(); } catch (_) {} }
   }
+  if (player._vortexCoreBeam && player._vortexCoreBeam.visible) {
+    player._vcbTTL = (player._vcbTTL || 0) - dt;
+    if (player._vcbTTL <= 0) _vortexCoreBeamOff();
+  }
   for (let e = game.worldEffects.length - 1; e >= 0; e--) {
     const eff = game.worldEffects[e];
     eff.timer -= dt;
@@ -65661,7 +65842,7 @@ function updateWorldEffects(dt) {
         const peer = net.peers.get(eff.ownerPeerId);
         np = peer && peer.networkPlayer;
       }
-      if (!np || !np.mesh || !np.alive) {
+      if (!np || !np.mesh || !np.alive || _RPL.kc) {
         eff.mesh.visible = false;
       } else {
         if (!eff._fwd) eff._fwd = new THREE.Vector3();
@@ -65824,16 +66005,12 @@ function updateAbilities(dt) {
         
         
         
-        const VORTEX_SHIELD_DRAIN = 250; 
-        
-        
-        
-        
-        
-        const VORTEX_AMP_MAX      = 2.0;  
-        const VORTEX_AMP_MIN_HIT  = 1.1;  
-        const VORTEX_AMP_WINDOW   = 0.45; 
-        const VORTEX_AMP_DMG_FULL = 150;  
+        const _vsK = (typeof window !== 'undefined' && window.__vortexShield) || {};
+        const VORTEX_SHIELD_DRAIN = (typeof _vsK.drain === 'number') ? _vsK.drain : 250;
+        const VORTEX_AMP_MAX      = (typeof _vsK.ampMax === 'number') ? _vsK.ampMax : 1.5;      // was 2.0
+        const VORTEX_AMP_MIN_HIT  = (typeof _vsK.ampMinHit === 'number') ? _vsK.ampMinHit : 1.05; // was 1.1
+        const VORTEX_AMP_WINDOW   = (typeof _vsK.ampWindow === 'number') ? _vsK.ampWindow : 0.45;
+        const VORTEX_AMP_DMG_FULL = (typeof _vsK.ampFull === 'number') ? _vsK.ampFull : 250;     // was 150
         player.vortexRecentAbsorb = (player.vortexRecentAbsorb || 0) * Math.exp(-dt / VORTEX_AMP_WINDOW);
         let _vortexAmp = 1.0;
         if (player.vortexRecentAbsorb > 0) {
@@ -66027,6 +66204,7 @@ function updateAbilities(dt) {
       beam.quaternion.setFromUnitVectors(_mvUp, forward);
       beam.scale.set(BEAM_RADIUS, _stemLen, BEAM_RADIUS);
       beam.visible = true;
+      player._vcbTTL = 0.2;   // (v48.14) fed every frame it is drawn; updateWorldEffects puts it out if nothing is feeding it
       try {
         const _vfK = window.__vortexFire || (window.__vortexFire = { hz: 10, life: 1.6, size: 26, max: 22, color: 0xc46cff, out: 1.0, grow: 1.0, shotMuzzle: 12, shotHit: 20, shotDeep: 0, shotTint: 0xc46cff });   // (v39.56) purple as seen, not as stored
         player._mlFlameT = (player._mlFlameT || 0) - dt;
@@ -83236,7 +83414,13 @@ const Overlays = (() => {
     { label: 'UNSTOPPABLE',  color: '#cc00ff', scale: 1.60 },
     { label: 'GODLIKE',      color: '#ff00ff', scale: 1.70, glow: true },
   ];
+  const _CALLOUT_DEFAULTS = { ability: false, streak: true, medals: true };
+  function _callout(k) {
+    try { const c = window.__callouts; if (c && typeof c[k] === 'boolean') return c[k]; } catch (_) {}
+    return !!_CALLOUT_DEFAULTS[k];
+  }
   function killStreak(count) {
+    if (!_callout('streak')) return;
     const el = $('ov-killstreak');
     if (!el || count < 2) return;
     const d = STREAK_DATA[Math.min(count, STREAK_DATA.length - 1)] || STREAK_DATA[STREAK_DATA.length - 1];
@@ -83267,6 +83451,7 @@ const Overlays = (() => {
     execution:  { icon: '●', label: 'EXECUTION',   color: '#ff2200' },
   };
   function medal(type) {
+    if (!_callout('medals')) return;   // (v48.10) see killStreak
     const root = $('ov-medals');
     const m = MEDAL_ICONS[type];
     if (!root || !m) return;
@@ -83290,7 +83475,12 @@ const Overlays = (() => {
     const c = color || ABILITY_COLORS[(name || '').toLowerCase()] || '#ffffff';
     el.style.setProperty('--ab-color', c);
     el.style.setProperty('--ab-color-soft', c + '80');
-    el.querySelector('.ab-label').textContent = (name || 'ABILITY').toUpperCase() + ' ACTIVE';
+    const lbl = el.querySelector('.ab-label');
+    if (lbl) {
+      const on = _callout('ability');
+      lbl.style.display = on ? '' : 'none';
+      if (on) lbl.textContent = (name || 'ABILITY').toUpperCase() + ' ACTIVE';
+    }
     replay(el, 'show');
   }
 
@@ -95455,6 +95645,9 @@ respawnPlayer = function() {
     spawnHullBurst = _rplTap(spawnHullBurst, 'hb', [0, 1, 2]);
     emitChassisMuzzleFlash = _rplTap(emitChassisMuzzleFlash, 'mf', [0, 1, 2]);      // `mine` dropped: a replay is never the local cockpit's shot
     spawnShieldHit = _rplTap(spawnShieldHit, 'sh', [0, 1, 2]);
+    _spawnClassFireBurst = _rplTap(_spawnClassFireBurst, 'cf', [0, 1, 2, 3]);       // (pos, colour, size, life)
+    _spawnVortexLaserShot = _rplTap(_spawnVortexLaserShot, 'vl', [0, 1, 2, 3, 4, 5]);        // (origin, dir, range, gunA, gunB, life)
+    _spawnVortexLaserPeerBeam = _rplTap(_spawnVortexLaserPeerBeam, 'vp', [0, 1, 2, 3, 4]);   // (origin, dir, range, radius, life)
     const _ps3 = playSpatialSound;
     playSpatialSound = function (type, worldPos, opts) {
       if (_RPL.rec && !_RPL.replay && !_RPL.sndNest) _rplEv('s3', type, worldPos, opts);

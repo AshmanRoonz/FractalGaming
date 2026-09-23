@@ -6860,7 +6860,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.09";
+const LSS_BUILD = "48.16";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -18661,17 +18661,8 @@ function handleNetEvent(evt, fromPeerId) {
         const _vlbRange  = (typeof evt.range  === 'number') ? evt.range  : 2500;
         const _vlbRadius = (typeof evt.radius === 'number') ? evt.radius :   80;
         const _vlbLife   = (typeof evt.life   === 'number') ? evt.life   : 0.45;
-        const _vlbMid    = _vlbOrigin.clone().addScaledVector(_vlbDir, _vlbRange * 0.5);
-        const _vlbMat    = _makeFXMaterial('core_beam');
-        if (_vlbMat.uniforms.uPosScale) _vlbMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _vlbRadius);
-        const _vlbMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _vlbMat);
-        _vlbMesh.position.copy(_vlbMid);
-        _vlbMesh.quaternion.setFromUnitVectors(_mvUp, _vlbDir);
-        _vlbMesh.scale.set(_vlbRadius, _vlbRange, _vlbRadius);
-        _vlbMesh.frustumCulled = false;
-        _vlbMesh.renderOrder = 2;
-        scene.add(_vlbMesh);
-        game.effects.push({ mesh: _vlbMesh, type: 'vortexLaserBeam', age: 0, lifetime: _vlbLife });
+        // (v48.16) the cylinder is _spawnVortexLaserPeerBeam's now (tapped, 'vp'): a room's replay draws it too
+        _spawnVortexLaserPeerBeam(_vlbOrigin, _vlbDir, _vlbRange, _vlbRadius, _vlbLife);
         // ⭐⭐ (v46.80) THE PEER'S LASER ABILITY NEVER TOUCHED THE WATER. The local one has had its
         // own hook since v41.78 at yield 2400 (`'vLaser'`) - the ability does 2400 damage in one
         // 0.5 s burst - and this, the branch that draws the same beam for everyone else, has none.
@@ -19762,6 +19753,133 @@ function _vortexSpan(mesh, from, to, radius) {
   mesh.quaternion.setFromUnitVectors(_mvUp, _vyDir);
   mesh.scale.set(radius, len, radius);
   return len;
+}
+// ⭐⭐ (v48.14) THE MEGA LASER'S OWN MESHES, OFF. The pilot's core beam is not an effect entry: the stem
+// (player._vortexCoreBeam), its two arms and its three glow cards are persistent scene meshes that ONLY
+// updateAbilities poses - and only updateAbilities hides them, from its "not firing" branch. So anything
+// that stops calling it while the core runs leaves the beam standing wherever the last frame put it.
+// Owner: "final kill with mega laser, and the mega laser drawing stayed on after the match, and then
+// didn't re-animate for the replay, the ship just lined up with the old mega laser that was stuck static
+// drawn from just before the round ended" - the final kill cam (v47.97) is such a caller (gameLoop runs
+// nothing of the pilot's while `_RPL.kc` is up), so a beam live at the whistle froze for the whole kill
+// cam, and the replayed hull flew back into it. Death was the other one, and it cleared the stem and
+// arms but not the glow cards, which hung in the air through the ghost cam. Every hand-over uses this.
+function _vortexCoreBeamOff() {
+  try {
+    if (player._vortexCoreBeam) player._vortexCoreBeam.visible = false;
+    if (player._vortexCoreArms) for (const _a of player._vortexCoreArms) _a.visible = false;
+    if (player._vortexCoreGlows) for (const _g of player._vortexCoreGlows) _g.visible = false;
+  } catch (_) {}
+}
+// ⭐⭐ (v48.16) THE LASER ABILITY'S SHOT, AS A PURE VISUAL SPAWNER. Owner: "make the laser ability show in
+// replays too". Its tracer, lightning, hit fire and barrel flames always came back in a replay (tapped
+// spawners), but the shot itself - the thin 'core_beam' cylinder with its violet backing core, the two
+// arms back to the guns and the glow cards over their ends - was built inline in executeAbility, so no
+// replay had ever drawn it. Lifted here as it was: everything it needs is in its arguments (the stem's
+// start, the aim, the reach after the wall clamp, the two gun points or null, the life), it touches
+// nothing but the scene and game.effects, and the shot is fixed in the world from the moment it spawns
+// (updateEffects' 'vortexLaserBeam' branch only fades it and retracts it muzzle-first) - so the recorder
+// taps it ('vl') and a replay re-calls it with the recorded arguments, the fade included. The damage,
+// the water hook, the net events and the tracer / lightning / flames stay in executeAbility.
+function _spawnVortexLaserShot(origin, dir, range, gunA, gunB, life) {
+  if (!origin || !dir || typeof scene === 'undefined' || !scene) return;
+  const BEAM_RADIUS = 4;
+  const beamLife = (typeof life === 'number' && life > 0) ? life : 0.22;
+  const o = origin.clone(), d = dir.clone().normalize();
+  const pair = !!(gunA && gunB);
+  const beamMid = o.clone().addScaledVector(d, range * 0.5);
+  const beamMat = _makeFXMaterial('core_beam');
+  if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / Math.max(1, BEAM_RADIUS);
+  const beamMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), beamMat);
+  // (v32.49) Slim cylinder whose bright "circle" sits AT the muzzle (matching
+  // the thin purple tracer), fading toward the target. The geometry's alpha
+  // ramp fades in from its -Y end, so aim the OPAQUE +Y end back at the muzzle
+  // (negate the dir). This only reads right because BEAM_RADIUS is now tiny —
+  // a fat version blooms the near rim across the whole screen.
+  beamMesh.position.copy(beamMid);
+  beamMesh.quaternion.setFromUnitVectors(_mvUp, d.clone().negate());
+  beamMesh.scale.set(BEAM_RADIUS, range, BEAM_RADIUS);
+  beamMesh.frustumCulled = false;
+  beamMesh.renderOrder = 2;
+  // Vivid normal-blend backing core: the translucent shader beam washes
+  // out over bright skies. A saturated violet inner cylinder at 65%
+  // radius keeps the beam reading as ENERGY on white backgrounds (a
+  // dark one read as a shadow-beam) ; against dark space it adds body
+  // inside the glow. Child of the beam so transform + lifetime ride
+  // along for free (shared global geometry — never disposed).
+  const _beamBackMat = new THREE.MeshBasicMaterial({
+    color: 0x8a3cf0, transparent: true, opacity: 0.85,
+    blending: THREE.NormalBlending, depthWrite: false, vertexColors: true,
+  });
+  const _beamBack = new THREE.Mesh(_getVortexCoreBeamGeometry(), _beamBackMat);
+  // Backing spans the same full muzzle-anchored beam as the parent tube.
+  _beamBack.scale.set(0.8, 1, 0.8);
+  _beamBack.position.y = 0;
+  _beamBack.renderOrder = 1;
+  _beamBack.frustumCulled = false;
+  beamMesh.add(_beamBack);
+  scene.add(beamMesh);
+  // the two arms: same shader, same lifetime, their own effect entries so the shared
+  // 'vortexLaserBeam' fade + dispose path carries them for free
+  if (pair) {
+    const _armR = BEAM_RADIUS * _vortexYKnobs().armAbility;
+    for (const _gun of [gunA, gunB]) {
+      const _armMat = _makeFXMaterial('core_beam');
+      if (_armMat.uniforms.uPosScale) _armMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _armR);
+      if (_armMat.uniforms.uAxialFalloff) _armMat.uniforms.uAxialFalloff.value = 0.95;   // (v39.68) fades into the muzzle glow (+Y = the gun)
+      const _armMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _armMat);
+      _vortexSpan(_armMesh, o, _gun, _armR);   // opaque +Y end at the joint
+      _armMesh.frustumCulled = false;
+      _armMesh.renderOrder = 2;
+      scene.add(_armMesh);
+      game.effects.push({ mesh: _armMesh, type: 'vortexLaserBeam', age: 0, lifetime: beamLife });
+    }
+  }
+  // (v39.68) THE SAME END TREATMENT AS THE CORE (v39.67), owner: "make the same changes to laser's
+  // appearance". Glow cards over the open cone ends at the guns and the joint (their own
+  // 'vortexLaserBeam' entries: the shared fade path shrinks them via e.glow and disposes them).
+  try {
+    const _gmat = _vortexGlowMaterial(), _ggeo = _vortexGlowGeometry();
+    const _vfA = window.__vortexFire || {};
+    const _gMuzA = (_vfA.glowMuzzleAbility != null) ? _vfA.glowMuzzleAbility : 16;
+    const _gJointA = (_vfA.glowJointAbility != null) ? _vfA.glowJointAbility : 22;
+    const _spots = pair ? [[gunA, _gMuzA], [gunB, _gMuzA], [o, _gJointA]] : [[o, _gJointA]];
+    for (const _sp of _spots) {
+      const q = new THREE.Mesh(_ggeo, _gmat);
+      q.position.copy(_sp[0]); q.quaternion.copy(camera.quaternion); q.scale.set(_sp[1], _sp[1], 1);
+      q.frustumCulled = false; q.renderOrder = 3;
+      scene.add(q);
+      game.effects.push({ mesh: q, type: 'vortexLaserBeam', age: 0, lifetime: beamLife, glow: _sp[1] });
+    }
+  } catch (_) {}
+  game.effects.push({
+    mesh: beamMesh,
+    type: 'vortexLaserBeam',
+    age: 0,
+    lifetime: beamLife,
+    o: o, d: d, len: range,
+  });
+}
+// (v48.16) ...and the one a PEER's Laser draws here, lifted out of the effect_spawn handler for the same
+// reason (a room's replay never had it either): one 'core_beam' cylinder from what the event carries.
+// Its water hook stays in the handler - the lake is live, a replay never touches it.
+function _spawnVortexLaserPeerBeam(origin, dir, range, radius, life) {
+  if (!origin || !dir || typeof scene === 'undefined' || !scene) return;
+  const _vlbDir = dir.clone().normalize();
+  const _vlbRange = (typeof range === 'number') ? range : 2500;
+  const _vlbRadius = (typeof radius === 'number') ? radius : 80;
+  const _vlbLife = (typeof life === 'number') ? life : 0.45;
+  const _vlbMid = origin.clone().addScaledVector(_vlbDir, _vlbRange * 0.5);
+  const _vlbMat = _makeFXMaterial('core_beam');
+  if (_vlbMat.uniforms.uPosScale) _vlbMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _vlbRadius);
+  const _vlbMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _vlbMat);
+  _vlbMesh.position.copy(_vlbMid);
+  _vlbMesh.quaternion.setFromUnitVectors(_mvUp, _vlbDir);
+  _vlbMesh.scale.set(_vlbRadius, _vlbRange, _vlbRadius);
+  _vlbMesh.frustumCulled = false;
+  _vlbMesh.renderOrder = 2;
+  scene.add(_vlbMesh);
+  game.effects.push({ mesh: _vlbMesh, type: 'vortexLaserBeam', age: 0, lifetime: _vlbLife });
 }
 function _getVortexCoreBeamGeometry() {
   if (_VORTEX_CORE_BEAM_GEO) return _VORTEX_CORE_BEAM_GEO;
@@ -30604,7 +30722,10 @@ function _rplSample(kc) {
   if (kc) {
     const A = R.actors.me, b = A && A.buf, n = b ? b.length : 0;
     if (n >= 9 && b[n - 1] > 0.5) b.push(t, b[n - 8], b[n - 7], b[n - 6], b[n - 5], b[n - 4], b[n - 3], b[n - 2], b[n - 1]);
-  } else if (player && player.mesh) put(_rplActor(R, 'me', player), player.mesh, player.shipState !== 'dead', player);
+  } else if (player && player.mesh) {
+    put(_rplActor(R, 'me', player), player.mesh, player.shipState !== 'dead', player);
+    _rplBeamSample(R, t);   // (v48.14) the Mega Laser, in the frame of the pose just taken
+  }
   const E = game.entities || [];
   for (let i = 0; i < E.length; i++) {
     const e = E[i];
@@ -30675,6 +30796,9 @@ function _rplFire(e) {
       case 'hb': spawnHullBurst(_rplV3(a[0]), a[1], a[2]); break;
       case 'mf': emitChassisMuzzleFlash(a[0], _rplV3(a[1]), _rplV3(a[2])); break;
       case 'sh': spawnShieldHit(_rplV3(a[0]), a[1], a[2], null); break;
+      case 'cf': _spawnClassFireBurst(_rplV3(a[0]), a[1], a[2], a[3]); break;   // (v48.14)
+      case 'vl': _spawnVortexLaserShot(_rplV3(a[0]), _rplV3(a[1]), a[2], _rplV3(a[3]), _rplV3(a[4]), a[5]); break;   // (v48.16)
+      case 'vp': _spawnVortexLaserPeerBeam(_rplV3(a[0]), _rplV3(a[1]), a[2], a[3], a[4]); break;                     // (v48.16)
       case 'ex': {
         const _o = (a[4] && typeof a[4] === 'object') ? a[4] : {};
         spawnExplosion(_rplV3(a[0]), a[1], (a[2] != null && typeof a[2] !== 'boolean') ? a[2] : null, _rplV3(a[3]),
@@ -30716,7 +30840,16 @@ function _rplFireLifted(st, e) {
   const W = game.worldEffects;
   const n0 = W ? W.length : 0;
   _rplFire(e);
-  if (W && W.length > n0) { const got = W.splice(n0, W.length - n0); for (const x of got) st.wfx.push(x); }
+  if (W && W.length > n0) {
+    const got = W.splice(n0, W.length - n0);
+    for (const x of got) {
+      // (v48.14) a class-fire burst: every live caller sets its growth AFTER the spawn returns (1.0-1.3 -
+      // the beam's 1.0, the barrels' 1.3, the charge fire's 1.2-1.25), which a tap cannot see; without
+      // it the explosion default (2.2) would end the replayed flames half again as big (0.7 + grow: 2.9 v 1.9)
+      if (e.k === 'cf' && x._grow == null) x._grow = 1.2;
+      st.wfx.push(x);
+    }
+  }
 }
 // (v48.06) tear a replay's world-effect visual down the way the live sweep does, field by field: shared
 // geometry (the wall lens and rim, the fire-cloud and FX-burst spheres, the beam cone) is never freed;
@@ -30749,6 +30882,16 @@ function _rplWfxDispose(eff) {
     if (Array.isArray(eff.puffMeshes)) for (const m of eff.puffMeshes) kill(m, false, false);
     if (eff.type === 'particle_wall') {
       kill(eff.mesh, true, true); kill(eff.plasmaMesh, true, false); kill(eff.edgeMesh, true, true);
+    } else if (eff.type === 'vortex_core_beam' || eff.type === 'vortex_core_beam_remote') {
+      // (v48.14) the beam cones: their geometry is a module singleton (the stem's cone is on the shared
+      // list, the arms' is NOT - so keepGeo outright), and their 'core_beam' programs are RETAINED: a
+      // theater match may never have drawn a live beam, and then these were its only holders - the next
+      // beam would re-link cold. The glow cards share the one card geometry and the one retained card
+      // material with the live beam and the Laser ability, so they only leave the scene.
+      kill(eff.mesh, true, true); kill(eff.stem, true, true);
+      for (const a of (eff.arms || [])) kill(a, true, true);
+      for (const g of (eff.glows || [])) { try { if (g && g.parent) g.parent.remove(g); } catch (_) {} }
+      eff.stem = null; eff.arms = eff.glows = null;
     } else {
       kill(eff.mesh, false, false);
       kill(eff.coreMesh, false, false);
@@ -30775,7 +30918,12 @@ function _rplWfxDispose(eff) {
 // cloud (lifted, _rplFireLifted). Not rebuilt: the live mine sparkles and gas drift particles (loose
 // game.particles, pure garnish).
 const _RPL_WFX = { tether: 1, tripwire: 1, particle_wall: 1, incendiary_gas: 1, firewall: 1, pyro_flame: 1,
-                   sonar_pulse: 1, vortex_core_beam_remote: 1 };
+                   sonar_pulse: 1, vortex_core_beam_remote: 1,
+                   vortex_core_beam: 1 };   // (v48.14) the pilot's own Mega Laser - recorded by _rplBeamSample, not from the live list
+// (v48.14) what the KILL CAM rebuilds. It borrows the live world, so the live traps, walls and gas stand
+// in it as they are (as they always have); but a Mega Laser is a beam that rides its caster, and the
+// caster is being replayed - so the beams are drawn from the recording and the live ones are put out.
+const _RPL_KC_WFX = { vortex_core_beam: 1, vortex_core_beam_remote: 1 };
 function _rplWfxFlags(e) {
   switch (e.type) {
     case 'tether': return (e.triggered ? 1 : 0) | (e._shotDown ? 2 : 0);
@@ -30818,6 +30966,60 @@ function _rplWfxFlagAt(W, t) {
   while (lo < hi) { const mid = (lo + hi) >> 1; if (s[mid * 2] <= t) lo = mid + 1; else hi = mid; }
   return (lo > 0) ? (s[(lo - 1) * 2 + 1] | 0) : 0;
 }
+// ⭐⭐ (v48.14) THE PILOT'S OWN MEGA LASER. The peer's beam is a world effect (vortex_core_beam_remote,
+// recorded above) and a bot's is a stream of tracers (tapped), but the pilot's is neither: persistent
+// meshes that updateAbilities poses (player._vortexCoreBeam + arms + glow cards), so no replay had ever
+// seen it. Owner: "didn't re-animate for the replay". Recorded here, one entry per firing, as a 20 Hz
+// track `bt` of what was DRAWN, in the HULL'S OWN FRAME (sampled with the hull pose in the same
+// _rplSample call): the stem's start (the joint 300 u ahead, or the hull itself when the arms are off),
+// its direction (the aim, which is not the nose), its length (walls clamp it) and whether the arms were
+// drawn. Hull-local is what keeps it ON the ship in a replay: both interpolate between the same samples,
+// so the beam can never drift off the hull that fires it. The arms are not recorded at all - they run to
+// the gun markers, which the replayed hull carries itself.
+// stride 9: t, sx, sy, sz, dx, dy, dz, len, arms
+const _rplBmQ = new THREE.Quaternion(), _rplBmD = new THREE.Vector3(), _rplBmS = new THREE.Vector3();
+function _rplBeamSample(R, t) {
+  const bm = player && player._vortexCoreBeam, m = player && player.mesh;
+  const on = !!(bm && bm.visible && m && player.coreActive && player.shipState !== 'dead');
+  let W = R._mlW ? R.wf[R._mlW] : null;
+  if (!on) { if (W) R._mlW = 0; return; }   // it went out: the next firing is an entry of its own
+  if (!W) {
+    R._mlW = ++R.wid;
+    W = R.wf[R._mlW] = { k: 'vortex_core_beam', t0: t, t1: t, p: null, d: null, len: 0, r: 0, team: player.team,
+                         own: 'me', grp: null, dur: 0, sx: [], bt: [] };
+  }
+  W.t1 = t;
+  _rplBmQ.copy(m.quaternion).invert();
+  const len = bm.scale.y;
+  _rplBmD.set(0, 1, 0).applyQuaternion(bm.quaternion);   // the stem's +Y is the firing direction
+  _rplBmS.copy(bm.position).addScaledVector(_rplBmD, -0.5 * len).sub(m.position).applyQuaternion(_rplBmQ);
+  _rplBmD.applyQuaternion(_rplBmQ);
+  const A = player._vortexCoreArms, arms = !!(A && A[0] && A[0].visible);
+  W.bt.push(t, _rplBmS.x, _rplBmS.y, _rplBmS.z, _rplBmD.x, _rplBmD.y, _rplBmD.z, len, arms ? 1 : 0);
+}
+// the recorded beam at time t, lerped between its samples (hull-local; null if it has none)
+const _rplBmOut = { sx: 0, sy: 0, sz: 0, dx: 0, dy: 0, dz: -1, len: 0, arms: 0 };
+function _rplBeamAt(W, t) {
+  const b = W.bt, n = b ? (b.length / 9) | 0 : 0;
+  if (!n) return null;
+  let lo = 0, hi = 0;
+  if (t >= b[(n - 1) * 9]) { lo = hi = n - 1; }
+  else if (t > b[0]) {
+    lo = 0; hi = n - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (b[mid * 9] <= t) lo = mid; else hi = mid; }
+  }
+  const i = lo * 9, j = hi * 9, span = b[j] - b[i];
+  const u = (span > 1e-6) ? Math.max(0, Math.min(1, (t - b[i]) / span)) : 0;
+  const o = _rplBmOut, L = (k) => b[i + k] + (b[j + k] - b[i + k]) * u;
+  o.sx = L(1); o.sy = L(2); o.sz = L(3); o.dx = L(4); o.dy = L(5); o.dz = L(6); o.len = L(7); o.arms = b[i + 8];
+  return o;
+}
+// the hull a replay is drawing for actor `key`: the studio's puppet, or (the kill cam) the borrowed live one
+function _rplActorMesh(st, key) {
+  if (st && st.pup) { const P = st.pup[key]; return (P && P.owner && P.owner.mesh) || null; }
+  const A = st && st.R && st.R.actors[key];
+  return A ? _rplMeshOf(A) : null;
+}
 // run one of the game's own spawn helpers and take its new entry straight back out of the live list
 function _rplLiftSpawn(fn) {
   const L = game.worldEffects;
@@ -30827,6 +31029,7 @@ function _rplLiftSpawn(fn) {
   return null;
 }
 const _rplWV = new THREE.Vector3(), _rplWD = new THREE.Vector3(), _rplWQ = new THREE.Quaternion(), _rplWY = new THREE.Vector3(0, 1, 0);
+const _rplBmJ = new THREE.Vector3(), _rplBmA = new THREE.Vector3(), _rplBmB = new THREE.Vector3();   // (v48.14) the Mega Laser's joint and guns
 function _rplWfxBuild(W) {
   const pos = W.p ? new THREE.Vector3(W.p[0], W.p[1], W.p[2]) : new THREE.Vector3();
   const dir = W.d ? new THREE.Vector3(W.d[0], W.d[1], W.d[2]) : new THREE.Vector3(0, 0, -1);
@@ -30866,6 +31069,34 @@ function _rplWfxBuild(W) {
         scene.add(m);
       } catch (_) {}
       return { type: 'vortex_core_beam_remote', mesh: m };
+    }
+    case 'vortex_core_beam': {
+      // (v48.14) the pilot's own: the stem, the two arm cones and the three glow cards, built exactly as
+      // updateAbilities builds them (same geometry singletons, same 'core_beam' preset and uniforms, the
+      // shared glow card material) - so it is the live beam by construction
+      const V = { type: 'vortex_core_beam', stem: null, arms: [], glows: [] };
+      try {
+        const sm = _makeFXMaterial('core_beam');
+        if (sm.uniforms && sm.uniforms.uPosScale) sm.uniforms.uPosScale.value = 1 / 95;
+        V.stem = new THREE.Mesh(_getVortexCoreBeamConeGeometry(), sm);
+        V.stem.frustumCulled = false; V.stem.renderOrder = 2; V.stem.visible = false;
+        scene.add(V.stem);
+        for (let i = 0; i < 2; i++) {
+          const am = _makeFXMaterial('core_beam');
+          if (am.uniforms && am.uniforms.uPosScale) am.uniforms.uPosScale.value = 1 / Math.max(1, 95 * 0.15);
+          if (am.uniforms && am.uniforms.uAxialFalloff) am.uniforms.uAxialFalloff.value = 0.95;
+          const a = new THREE.Mesh(_getVortexCoreArmConeGeometry(), am);
+          a.frustumCulled = false; a.renderOrder = 2; a.visible = false;
+          scene.add(a); V.arms.push(a);
+        }
+        const gm = _vortexGlowMaterial(), gg = _vortexGlowGeometry();
+        for (let i = 0; i < 3; i++) {
+          const q = new THREE.Mesh(gg, gm);
+          q.frustumCulled = false; q.renderOrder = 3; q.visible = false;
+          scene.add(q); V.glows.push(q);
+        }
+      } catch (e) { console.warn('[replay] mega laser rebuild failed:', e); }
+      return V;
     }
   }
   return null;
@@ -30981,14 +31212,55 @@ function _rplWfxDress(st, W, V, rt, dtRep) {
       }
       break;
     }
+    case 'vortex_core_beam': {
+      // (v48.14) the pilot's own, on the replayed hull: the hull-local stem put back through the pose that
+      // hull was given this frame, the arms run to ITS gun markers, the glow cards on their ends - the
+      // live formulas (updateAbilities' Mega Laser block), driven by the recording
+      const key = W.own || 'me';
+      const A = st.R.actors[key], m = _rplActorMesh(st, key);
+      const alive = A ? _rplPoseAt(A, rt, _rplWV, _rplWQ) : false;
+      const b = alive ? _rplBeamAt(W, rt) : null;
+      const show = !!(b && V.stem && b.len > 1);
+      if (V.stem) V.stem.visible = show;
+      for (const a of V.arms) a.visible = false;
+      for (const g of V.glows) g.visible = false;
+      if (!show) break;
+      const J = _rplBmJ.set(b.sx, b.sy, b.sz).applyQuaternion(_rplWQ).add(_rplWV);
+      const D = _rplWD.set(b.dx, b.dy, b.dz).applyQuaternion(_rplWQ).normalize();
+      V.stem.position.copy(J).addScaledVector(D, b.len * 0.5);
+      V.stem.quaternion.setFromUnitVectors(_rplWY, D);
+      V.stem.scale.set(95, b.len, 95);
+      const breath = 0.92 + 0.10 * Math.sin(7 * T);
+      const us = V.stem.material && V.stem.material.uniforms;
+      if (us && us.uIntensity) us.uIntensity.value = breath;
+      const nodes = (b.arms > 0.5 && m && m.userData) ? m.userData.muzzleNodes : null;
+      if (nodes && nodes.length >= 2 && V.arms.length === 2 && V.glows.length === 3) {
+        try { m.updateMatrixWorld(true); } catch (_) {}
+        nodes[0].getWorldPosition(_rplBmA); nodes[1].getWorldPosition(_rplBmB);
+        const armR = 95 * _vortexYKnobs().armCore;
+        _vortexSpan(V.arms[0], J, _rplBmA, armR);
+        _vortexSpan(V.arms[1], J, _rplBmB, armR);
+        for (const a of V.arms) { a.visible = true; const ua = a.material && a.material.uniforms; if (ua && ua.uIntensity) ua.uIntensity.value = breath; }
+        const vf = window.__vortexFire || {};
+        const gMuz = (vf.glowMuzzle != null) ? vf.glowMuzzle : 30, gJoint = (vf.glowJoint != null) ? vf.glowJoint : 4.5 * armR;
+        const pulse = 0.9 + 0.14 * Math.sin(T * 23.0);
+        const G = V.glows;
+        G[0].position.copy(_rplBmA); G[1].position.copy(_rplBmB); G[2].position.copy(J);
+        G[0].scale.set(gMuz * pulse, gMuz * pulse, 1); G[1].scale.set(gMuz * (2 - pulse), gMuz * (2 - pulse), 1); G[2].scale.set(gJoint, gJoint, 1);
+        for (const g of G) { g.quaternion.copy(camera.quaternion); g.visible = true; }
+      }
+      break;
+    }
   }
 }
 // the studio's pass: every recorded effect whose life contains the playhead is standing, dressed for it
-function _rplWfxReplay(st, rt, dtRep) {
+// (v48.14) `only`: the kinds to draw (the kill cam's _RPL_KC_WFX); every kind when absent (the studio)
+function _rplWfxReplay(st, rt, dtRep, only) {
   const R = st.R, wf = R.wf; if (!wf) return;
   const V = st.wv || (st.wv = {});
   for (const id in wf) {
     const W = wf[id];
+    if (only && !only[W.k]) continue;
     const live = (rt >= W.t0 && rt <= W.t1 + 0.05) && !(W.k === 'tether' && (_rplWfxFlagAt(W, rt) & 2));
     let v = V[id];
     // a seek back past a cloud's ignition: the lit look cannot be taken back off, so build it fresh
@@ -31367,6 +31639,17 @@ function _rplKcStart(R, K) {
   try { window.addEventListener('keydown', onIn, true); window.addEventListener('mousedown', onIn, true); } catch (_) {}
   try { if (typeof _ghostHullRestore === 'function' && player && player.mesh) _ghostHullRestore(player.mesh); } catch (_) {}
   _adsReset();   // (v48.05) a round won while zoomed would otherwise be replayed through the scope
+  // ⭐⭐ (v48.14) ...AND THE PILOT'S CORE GOES OUT WITH THE ROUND. Nothing of the pilot's runs under the
+  // kill cam, so a Mega Laser still firing at the whistle stood frozen through all of it (see
+  // _vortexCoreBeamOff) - and ending only its meshes is not enough: updateAbilities comes back the
+  // moment the kill cam ends or is skipped, and would draw the rest of a 4 s core into the round end.
+  // The round is over, so the core is over - exactly what death does to it. The purple fire the beam
+  // shed (live, aging at full speed) goes with it; the replay draws its own (the 'cf' tap).
+  try {
+    player.coreActive = false; player.coreTimer = 0; player._laserCoreArcTimer = 0;
+    _vortexCoreBeamOff();
+    for (const e of (game.worldEffects || [])) if (e && (e._beamFlame || e._muzzleFlame) && e.timer > 0.02) e.timer = 0.02;
+  } catch (_) {}
   try { window.__killcamN = (window.__killcamN | 0) + 1; } catch (_) {}
   return true;
 }
@@ -31389,6 +31672,7 @@ function _rplKcEnd() {
   _rplPjFree(kc);
   for (const e of (kc.wfx || [])) _rplWfxDispose(e);   // (v48.07) its own fire clouds
   kc.wfx = [];
+  _rplWfxFreeAll(kc);   // (v48.14) its Mega Lasers
   try { document.body.classList.remove('lss-killcam'); } catch (_) {}
 }
 // the first connected pad, read raw (the kill cam's own buttons: A / B skip, Y opens the studio)
@@ -31446,6 +31730,8 @@ function _rplKcFrame(now) {
     m.position.copy(_rplP); m.quaternion.copy(_rplQ);
   }
   _rplKcCamera(kc, dtR);
+  // (v48.14) the Mega Lasers, ridden by the hulls just posed (after the camera: the glow cards face it)
+  try { _rplWfxReplay(kc, kc.rt, dtR * kc.rate, _RPL_KC_WFX); } catch (_) {}
   _rplPjDraw(kc, kc.rt);   // (v48.01) after the camera: the shot ribbons face this frame's eye
   try { if (typeof _audioUpdateListener === 'function') _audioUpdateListener(); } catch (_) {}   // spatial sound hears the replay camera
   if (kc.rt >= kc.t1) {
@@ -31608,9 +31894,12 @@ function _rplSerialize(R) {
            // (v48.06) the world effects: where, facing, size, side, caster, and the state track
            worldFx: Object.keys(R.wf || {}).map(id => {
              const W = R.wf[id];
-             return { k: W.k, t0: r4(W.t0 - t0), t1: r4(W.t1 - t0), p: W.p ? W.p.map(r1) : null, d: W.d ? W.d.map(r4) : null,
-                      len: W.len, r: W.r, team: W.team, own: W.own, grp: W.grp, dur: W.dur,
-                      sx: W.sx.map((v, i) => (i % 2 === 0) ? r4(v - t0) : v) };
+             const o = { k: W.k, t0: r4(W.t0 - t0), t1: r4(W.t1 - t0), p: W.p ? W.p.map(r1) : null, d: W.d ? W.d.map(r4) : null,
+                         len: W.len, r: W.r, team: W.team, own: W.own, grp: W.grp, dur: W.dur,
+                         sx: W.sx.map((v, i) => (i % 2 === 0) ? r4(v - t0) : v) };
+             // (v48.14) the Mega Laser's drawn track: t, the hull-local stem start (0.1 u), direction, length, arms
+             if (W.bt) o.bt = W.bt.map((v, i) => { const f = i % 9; return (f === 0) ? r4(v - t0) : ((f >= 4 && f <= 6) ? r4(v) : (f === 8 ? v : r1(v))); });
+             return o;
            }) };
 }
 function _rplDeserialize(o) {
@@ -31638,6 +31927,7 @@ function _rplDeserialize(o) {
     R.wf[i + 1] = { k: W.k, t0: W.t0, t1: +W.t1 || W.t0, p: W.p || null, d: W.d || null, len: W.len || 0, r: W.r || 0,
                     team: (W.team != null) ? W.team : null, own: W.own || null, grp: (W.grp != null) ? W.grp : null,
                     dur: W.dur || 0, sx: Array.isArray(W.sx) ? W.sx : [] };
+    if (Array.isArray(W.bt)) R.wf[i + 1].bt = W.bt;   // (v48.14) a Mega Laser's drawn track
   });
   R.wid = (o.worldFx || []).length;
   return R;
@@ -31853,6 +32143,13 @@ function _rplStudioOpen(R, opts) {
   // the paused match's hulls and shots step out of the picture (restored exactly on close)
   const hide = (m) => { if (m && m.isObject3D) { st.hidden.push({ m: m, vis: m.visible }); m.visible = false; } };
   try { if (player && player.mesh) hide(player.mesh); } catch (_) {}
+  // (v48.14) and the pilot's Mega Laser if one is running (the console's dev studio over a live match):
+  // persistent meshes only updateAbilities poses, which the paused match does not run
+  try {
+    hide(player._vortexCoreBeam);
+    for (const a of (player._vortexCoreArms || [])) hide(a);
+    for (const g of (player._vortexCoreGlows || [])) hide(g);
+  } catch (_) {}
   for (const e of (game.entities || [])) {
     try { if (e && e.mesh && (e.loadoutKey || e.peerId) && !e.isEarthLife && !e.isHubTraffic && e._owCity == null) hide(e.mesh); } catch (_) {}
   }
@@ -37329,7 +37626,9 @@ function _cavernWaterCheap(T) {
 }
 function _swCavernWaterWanted(T) {
   if (!T || !T.ON || T.YFLOOR == null) return false;
-  if (T.biome === 'mossy' || T.biome === 'brokensim') return false;
+  // (v48.13) Broken Simulation is no longer dry - see the brokensim branch of _swApplyAtmosphere.
+  // The hub (mossy) still has its own sea, built by its own branch.
+  if (T.biome === 'mossy') return false;
   const K = (typeof window !== 'undefined') ? (window.__cavernWater = window.__cavernWater || {}) : null;
   if (K && K.on === false) return false;
   return true;
@@ -37373,7 +37672,22 @@ function _swApplyAtmosphere() {
     // gated on uGlitch+uCeil). No separate forcefield mesh. Thinner fog so the sky reads.
     scene.fog = new THREE.FogExp2(sky.getHex(), (game.sandwichFog || 0.3) * 0.4e-4);
     try { setSky('purple'); } catch (_) {}
-    try { _swDisposeHubWater(); } catch (_) {}
+    // ⭐ (v48.13) AND WATER, LIKE EVERY OTHER CAVERN. Owner: "water is broken in ... the diamond (and all
+    // diamond themed maps)... something that looks like water surface, just a flat horizontal plane, but
+    // it doesn't do anything/react like water". It was never water: v38.16 flooded every cavern's
+    // basins to floor + 16 % of its relief but left this biome dry on theme grounds ("a failing
+    // simulation with an open sky gets none"), so its valleys bottom out in the terrain's bare flat
+    // floor (YFLOOR, the relief clamped flat), which reads exactly as a sheet of dead water. Now it gets
+    // the same live water as the others - ripples, wakes, reflection (of the purple sky through the
+    // glitch holes, too), the underwater view; `window.__cavernWater = { on: false }` still dries every
+    // cavern at once. (The Spire is an arena with no sandwich terrain, and the owner: "spire doesn't
+    // need water" - its pit is the lava floor.)
+    if (_swCavernWaterWanted(T)) {
+      try { T.WL = _swCavernWaterLevel(T); } catch (_) {}
+      try { _swBuildHubWater(T); } catch (e) { console.warn('[cavern water] build failed:', e); }
+    } else {
+      try { _swDisposeHubWater(); } catch (_) {}
+    }
     try { _lssApplyHubLighting(false); } catch (_) {}
     try { _lssRestoreArenaMood(); } catch (_) {}
   } else if (T.biome === 'mossy') {
@@ -85624,6 +85938,34 @@ async function _prebakeGpuPrime() {
       try { window.__reflWarm = _n; } catch (_) {}
     }
   } catch (_) {}
+  // ⭐⭐ (v48.15) THE WATER SHEET'S OTHER SIDE. The displaced sheet (_hubWaterDisp, the mesh every crest
+  // and reflection is drawn into) is FrontSide while the eye is above every crest the field can raise and
+  // DoubleSide below that - within uDispScale + 6 (~106 u) of the surface (the v44.21 self-occlude block,
+  // `const _side = (_so && _camClear > _ceil + 6.0)`), and `side` is a program key term (the doubleSided
+  // flag). The prime renders below come from the spawn, far above the water, so they only ever built the
+  // FrontSide program - and the first low pass over any flooded cavern linked the other one IN PLAY.
+  // Measured before this, a solo on The Nexus (rocky) with the eye 50 u over the water: `[cold] water
+  // [FORK: flags]`, the doubleSided bit and nothing else (key flags 1027 against the warm 3) - general
+  // cavern water, not something The Diamond's new flooding (v48.13) brought. One draw of the sheet on
+  // its OTHER side here, then its side put back (the per-frame block owns it and rewrites it when it
+  // changes). Same gate as the per-frame block: the phone / headset cheap water never draws this sheet.
+  // The sheet is built lazily by the first frame's water update, so get it the way that update does
+  // (_swBuildHubWaterDispGet returns the one that exists, or builds it at the same level).
+  try {
+    const _dmOn = !!(typeof window !== 'undefined' && window.__waterDisp) && !!game._hubWater &&
+                  !((typeof _cavernWaterCheap === 'function') && _cavernWaterCheap(game.sandwichTerrain));
+    const _wHub = game._hubWater;
+    const _dm = (_dmOn && typeof _swBuildHubWaterDispGet === 'function')
+      ? _swBuildHubWaterDispGet((_wHub && _wHub.userData && _wHub.userData.WL != null) ? _wHub.userData.WL : (game._hubWaterWL || 0)) : null;
+    const _dmm = _dm && _dm.material;
+    if (rt && _dmm) {
+      const _s0 = _dmm.side;
+      _dmm.side = (_s0 === THREE.DoubleSide) ? THREE.FrontSide : THREE.DoubleSide;
+      _dmm.needsUpdate = true;
+      try { if (_warmDrawRoot(_dm, rt, false)) passes++; }
+      finally { _dmm.side = _s0; _dmm.needsUpdate = true; }
+    }
+  } catch (_) {}
   try { if (typeof _warmChargeGlowOnce === 'function') _warmChargeGlowOnce(); } catch (_) {}   // (v39.53) charge-glow program pair
   // (v40.11) ...and everything the game SPAWNS. Before the twelve prime renders, so anything these
   // prototypes touch is warm by the time the wide passes run. See the note on _warmRuntimeFxOnce.
@@ -93112,8 +93454,7 @@ function playerDie(attacker) {
   player.coreActive = false;
   player.coreTimer = 0;
   player._laserCoreArcTimer = 0;
-  if (player._vortexCoreBeam) player._vortexCoreBeam.visible = false;
-  if (player._vortexCoreArms) for (const _a of player._vortexCoreArms) _a.visible = false;
+  _vortexCoreBeamOff();   // (v48.14) the stem, the arms - and the three glow cards, which this used to leave lit
   for (let we = game.worldEffects.length - 1; we >= 0; we--) {
     const eff = game.worldEffects[we];
     if (!eff || eff.type !== 'firewall') continue;
@@ -93427,11 +93768,8 @@ function _tickPerkEffects(dt) {
         player.perkCloakActive = true;
         player.perkCloakActiveTimer = p.cloakDuration;
         _setPlayerShipOpacity(p.cloakOpacity);
-        try {
-          if (window.Overlays && typeof Overlays.abilityFlash === 'function') {
-            Overlays.abilityFlash('Auto Cloak', '#aa66ff');
-          }
-        } catch (_) {}
+        // (v48.10) no screen flash for it any more - owner: "i don't need an auto cloak text at all".
+        // The hull going see-through is the tell; the announcer line below stays (it is not text).
         try {
           if (typeof announcerSay === 'function') {
             announcerSay('Auto cloak active.', { key: 'auto_cloak', cooldown: 4 });
@@ -98891,74 +99229,14 @@ function executeAbility(slot, ability) {
         _swWpnCross(_vlOrigin.x, _vlOrigin.y, _vlOrigin.z, beamEnd.x, beamEnd.y, beamEnd.z,
                     (window.__water && window.__water.laserAbilityYield != null) ? +window.__water.laserAbilityYield : 2400,
                     0, 'vLaser', 0.05); } catch (_) {} }
-      const BEAM_RADIUS = 4; 
-      const beamLife = 0.22; 
-      const beamMid = _vlOrigin.clone().addScaledVector(_vlDir, range * 0.5);
-      const beamMat = _makeFXMaterial('core_beam');
-      if (beamMat.uniforms.uPosScale) beamMat.uniforms.uPosScale.value = 1.0 / Math.max(1, BEAM_RADIUS);
-      const beamMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), beamMat);
-      // (v32.49) Slim cylinder whose bright "circle" sits AT the muzzle (matching
-      // the thin purple tracer), fading toward the target. The geometry's alpha
-      // ramp fades in from its -Y end, so aim the OPAQUE +Y end back at the muzzle
-      // (negate the dir). This only reads right because BEAM_RADIUS is now tiny —
-      // a fat version blooms the near rim across the whole screen.
-      const _vbLen = range;
-      beamMesh.position.copy(beamMid);
-      beamMesh.quaternion.setFromUnitVectors(_mvUp, _vlDir.clone().negate());
-      beamMesh.scale.set(BEAM_RADIUS, _vbLen, BEAM_RADIUS);
-      beamMesh.frustumCulled = false;
-      beamMesh.renderOrder = 2;
-      // Vivid normal-blend backing core: the translucent shader beam washes
-      // out over bright skies. A saturated violet inner cylinder at 65%
-      // radius keeps the beam reading as ENERGY on white backgrounds (a
-      // dark one read as a shadow-beam) ; against dark space it adds body
-      // inside the glow. Child of the beam so transform + lifetime ride
-      // along for free (shared global geometry — never disposed).
-      const _beamBackMat = new THREE.MeshBasicMaterial({
-        color: 0x8a3cf0, transparent: true, opacity: 0.85,
-        blending: THREE.NormalBlending, depthWrite: false, vertexColors: true,
-      });
-      const _beamBack = new THREE.Mesh(_getVortexCoreBeamGeometry(), _beamBackMat);
-      // Backing spans the same full muzzle-anchored beam as the parent tube.
-      _beamBack.scale.set(0.8, 1, 0.8);
-      _beamBack.position.y = 0;
-      _beamBack.renderOrder = 1;
-      _beamBack.frustumCulled = false;
-      beamMesh.add(_beamBack);
-      scene.add(beamMesh);
-      // the two arms: same shader, same lifetime, their own effect entries so the shared
-      // 'vortexLaserBeam' fade + dispose path carries them for free
-      if (_vyPair) {
-        for (const _gun of [_vyGunA, _vyGunB]) {
-          const _armMat = _makeFXMaterial('core_beam');
-          const _armR = BEAM_RADIUS * _vyK.armAbility;
-          if (_armMat.uniforms.uPosScale) _armMat.uniforms.uPosScale.value = 1.0 / Math.max(1, _armR);
-          if (_armMat.uniforms.uAxialFalloff) _armMat.uniforms.uAxialFalloff.value = 0.95;   // (v39.68) fades into the muzzle glow (+Y = the gun)
-          const _armMesh = new THREE.Mesh(_getVortexCoreBeamGeometry(), _armMat);
-          _vortexSpan(_armMesh, _vlOrigin, _gun, _armR);   // opaque +Y end at the joint
-          _armMesh.frustumCulled = false;
-          _armMesh.renderOrder = 2;
-          scene.add(_armMesh);
-          game.effects.push({ mesh: _armMesh, type: 'vortexLaserBeam', age: 0, lifetime: beamLife });
-        }
-      }
-      // (v39.68) THE SAME END TREATMENT AS THE CORE (v39.67), owner: "make the same changes to laser's
-      // appearance". Glow cards over the open cone ends at the guns and the joint (their own
-      // 'vortexLaserBeam' entries: the shared fade path shrinks them via e.glow and disposes them),
-      // and a spit of class fire from each barrel so the arms are born out of flame.
+      const BEAM_RADIUS = 4;   // (the net event below still sends these two)
+      const beamLife = 0.22;
+      // (v48.16) the shot itself - the beam and its backing core, the two arms, the glow cards - is
+      // _spawnVortexLaserShot's now, word for word, so the recorder can tap it and a replay can draw it
+      _spawnVortexLaserShot(_vlOrigin, _vlDir, range, _vyPair ? _vyGunA : null, _vyPair ? _vyGunB : null, beamLife);
+      // and a spit of class fire from each barrel so the arms are born out of flame (tapped on its own, 'cf')
       try {
-        const _gmat = _vortexGlowMaterial(), _ggeo = _vortexGlowGeometry();
         const _vfA = window.__vortexFire || {};
-        const _gMuzA = (_vfA.glowMuzzleAbility != null) ? _vfA.glowMuzzleAbility : 16;
-        const _gJointA = (_vfA.glowJointAbility != null) ? _vfA.glowJointAbility : 22;
-        const _spots = _vyPair ? [[_vyGunA, _gMuzA], [_vyGunB, _gMuzA], [_vlOrigin, _gJointA]] : [[_vlOrigin, _gJointA]];
-        for (const _sp of _spots) {
-          const q = new THREE.Mesh(_ggeo, _gmat);
-          q.position.copy(_sp[0]); q.quaternion.copy(camera.quaternion); q.scale.set(_sp[1], _sp[1], 1);
-          q.frustumCulled = false; q.renderOrder = 3;
-          scene.add(q);
-          game.effects.push({ mesh: q, type: 'vortexLaserBeam', age: 0, lifetime: beamLife, glow: _sp[1] });
-        }
         if (_vyPair && typeof _spawnClassFireBurst === 'function') {
           for (const _gun of [_vyGunA, _vyGunB]) {
             for (let _k = 0; _k < 2; _k++) {
@@ -98969,13 +99247,6 @@ function executeAbility(slot, ability) {
           }
         }
       } catch (_) {}
-      game.effects.push({
-        mesh: beamMesh,
-        type: 'vortexLaserBeam',
-        age: 0,
-        lifetime: beamLife,
-        o: _vlOrigin.clone(), d: _vlDir.clone(), len: range,   
-      });
       // ONE laser beam from the painted single-cannon muzzle in
       // laser_VORTEX.png (the cannon sits upper-right with its barrel tip
       // projecting at roughly (60%, 40%) of the screen). Width scaled up
@@ -101860,6 +102131,14 @@ function updateWorldEffects(dt) {
     player._bcgTTL = (player._bcgTTL || 0) - dt;
     if (player._bcgTTL <= 0) { try { _blasterChargeGlowOff(); } catch (_) {} }
   }
+  // (v48.14) THE MEGA LASER, SAME BACKSTOP. Its stem, arms and glow cards are scene-owned meshes posed
+  // and hidden only by updateAbilities - the final kill cam froze one for its whole length (see
+  // _vortexCoreBeamOff). Death and the kill cam now put it out themselves; this catches the next branch
+  // that stops that tick with the core running. Fed 0.2 s by every frame that draws it.
+  if (player._vortexCoreBeam && player._vortexCoreBeam.visible) {
+    player._vcbTTL = (player._vcbTTL || 0) - dt;
+    if (player._vcbTTL <= 0) _vortexCoreBeamOff();
+  }
   // ---- WORLD EFFECTS UPDATE (firewalls, trip wires, traps, tethers) ----
   for (let e = game.worldEffects.length - 1; e >= 0; e--) {
     const eff = game.worldEffects[e];
@@ -102821,7 +103100,10 @@ function updateWorldEffects(dt) {
         const peer = net.peers.get(eff.ownerPeerId);
         np = peer && peer.networkPlayer;
       }
-      if (!np || !np.mesh || !np.alive) {
+      // (v48.14) not while the final kill cam runs: it re-poses np.mesh to the REPLAY while np.position
+      // stays live, so this beam would draw from where the pilot is now along where they were facing
+      // then. The kill cam draws the recorded beam on the replayed hull instead (_RPL_KC_WFX).
+      if (!np || !np.mesh || !np.alive || _RPL.kc) {
         eff.mesh.visible = false;
       } else {
         if (!eff._fwd) eff._fwd = new THREE.Vector3();
@@ -103041,16 +103323,20 @@ function updateAbilities(dt) {
         
         
         
-        const VORTEX_SHIELD_DRAIN = 250; 
-        
-        
-        
-        
-        
-        const VORTEX_AMP_MAX      = 2.0;  
-        const VORTEX_AMP_MIN_HIT  = 1.1;  
-        const VORTEX_AMP_WINDOW   = 0.45; 
-        const VORTEX_AMP_DMG_FULL = 150;  
+        // ⭐ (v48.12) THE SHIELD DRAINS SLOWER UNDER FIRE. Owner: "vortex needs a vortex shield buff... it
+        // seems to get depleted really fast when absorbing damage, so let's slow down that depletion a
+        // little so it can absorb a bit more damage before draining so fast". The idle drain (250/s, 4 s
+        // of hold from a full 1000) is untouched; what emptied it in a fight was the under-fire amplifier,
+        // which reached its 2x ceiling after 150 damage inside the 0.45 s memory - 500/s, a full pool
+        // gone in 2.0 s of taking hits. Now the ceiling is 1.5x and it takes 250 damage to reach it:
+        // heavy fire drains 375/s (2.67 s, a third longer), a stray hit barely registers (1.05x).
+        // Live knob: window.__vortexShield = { drain, ampMax, ampMinHit, ampFull, ampWindow }.
+        const _vsK = (typeof window !== 'undefined' && window.__vortexShield) || {};
+        const VORTEX_SHIELD_DRAIN = (typeof _vsK.drain === 'number') ? _vsK.drain : 250;
+        const VORTEX_AMP_MAX      = (typeof _vsK.ampMax === 'number') ? _vsK.ampMax : 1.5;      // was 2.0
+        const VORTEX_AMP_MIN_HIT  = (typeof _vsK.ampMinHit === 'number') ? _vsK.ampMinHit : 1.05; // was 1.1
+        const VORTEX_AMP_WINDOW   = (typeof _vsK.ampWindow === 'number') ? _vsK.ampWindow : 0.45;
+        const VORTEX_AMP_DMG_FULL = (typeof _vsK.ampFull === 'number') ? _vsK.ampFull : 250;     // was 150
         player.vortexRecentAbsorb = (player.vortexRecentAbsorb || 0) * Math.exp(-dt / VORTEX_AMP_WINDOW);
         let _vortexAmp = 1.0;
         if (player.vortexRecentAbsorb > 0) {
@@ -103337,6 +103623,7 @@ function updateAbilities(dt) {
       beam.quaternion.setFromUnitVectors(_mvUp, forward);
       beam.scale.set(BEAM_RADIUS, _stemLen, BEAM_RADIUS);
       beam.visible = true;
+      player._vcbTTL = 0.2;   // (v48.14) fed every frame it is drawn; updateWorldEffects puts it out if nothing is feeding it
       // (v39.54) PURPLE FIRE OFF THE BEAM. Owner: "purple flames coming off the laser beam, and the
       // flames stay for a second longer". window.__vortexFire.hz times a second a fire cloud (the
       // volumetric FBM fire the class bursts use, _spawnClassFireBurst) is seeded ON the beam's
@@ -127684,7 +127971,20 @@ const Overlays = (() => {
     { label: 'UNSTOPPABLE',  color: '#cc00ff', scale: 1.60 },
     { label: 'GODLIKE',      color: '#ff00ff', scale: 1.70, glow: true },
   ];
+  // ⭐ (v48.10) THE ABILITY "ACTIVE" TEXT IS OFF. Owner: "i don't want any message like that across the
+  // screen during the match or replay (whatever other messages in that font and style in that space, can
+  // be removed)", after the AUTO CLOAK ACTIVE flash - then, v48.11, "kill streak callouts and medals are
+  // good to keep". So OFF by default: only the ability flash's "<NAME> ACTIVE" text (its coloured edge
+  // pulse stays - it is not a message; the Auto Cloak perk no longer flashes at all). ON as before: the
+  // kill-streak callout (DOUBLE KILL...) and the medals (FIRST BLOOD, LONGSHOT, REVENGE, SHUTDOWN), the
+  // round / objective banners and DESTROYED / GHOST MODE. Knob: window.__callouts = { ability, streak, medals }.
+  const _CALLOUT_DEFAULTS = { ability: false, streak: true, medals: true };
+  function _callout(k) {
+    try { const c = window.__callouts; if (c && typeof c[k] === 'boolean') return c[k]; } catch (_) {}
+    return !!_CALLOUT_DEFAULTS[k];
+  }
   function killStreak(count) {
+    if (!_callout('streak')) return;
     const el = $('ov-killstreak');
     if (!el || count < 2) return;
     const d = STREAK_DATA[Math.min(count, STREAK_DATA.length - 1)] || STREAK_DATA[STREAK_DATA.length - 1];
@@ -127728,6 +128028,7 @@ const Overlays = (() => {
     execution:  { icon: '●', label: 'EXECUTION',   color: '#ff2200' },
   };
   function medal(type) {
+    if (!_callout('medals')) return;   // (v48.10) see killStreak
     const root = $('ov-medals');
     const m = MEDAL_ICONS[type];
     if (!root || !m) return;
@@ -127752,7 +128053,13 @@ const Overlays = (() => {
     const c = color || ABILITY_COLORS[(name || '').toLowerCase()] || '#ffffff';
     el.style.setProperty('--ab-color', c);
     el.style.setProperty('--ab-color-soft', c + '80');
-    el.querySelector('.ab-label').textContent = (name || 'ABILITY').toUpperCase() + ' ACTIVE';
+    // (v48.10) the edge pulse only - the "<NAME> ACTIVE" text is off (see killStreak)
+    const lbl = el.querySelector('.ab-label');
+    if (lbl) {
+      const on = _callout('ability');
+      lbl.style.display = on ? '' : 'none';
+      if (on) lbl.textContent = (name || 'ABILITY').toUpperCase() + ' ACTIVE';
+    }
     replay(el, 'show');
   }
 
@@ -142590,6 +142897,14 @@ respawnPlayer = function() {
     spawnHullBurst = _rplTap(spawnHullBurst, 'hb', [0, 1, 2]);
     emitChassisMuzzleFlash = _rplTap(emitChassisMuzzleFlash, 'mf', [0, 1, 2]);      // `mine` dropped: a replay is never the local cockpit's shot
     spawnShieldHit = _rplTap(spawnShieldHit, 'sh', [0, 1, 2]);
+    // (v48.14) the class fire: the Mega Laser's purple flames along its beam and out of its barrels, the
+    // charge fire, the Vortex shot fire. Only the OUTERMOST calls are recorded (the nest guard), so the
+    // muzzle fire emitChassisMuzzleFlash lights is not doubled - it already comes back through 'mf'.
+    _spawnClassFireBurst = _rplTap(_spawnClassFireBurst, 'cf', [0, 1, 2, 3]);       // (pos, colour, size, life)
+    // (v48.16) the Vortex Laser ability's shot: the pilot's (beam + backing core, the arms, the glow cards)
+    // and the cylinder a peer's draws here - both were built inline, so no replay had them
+    _spawnVortexLaserShot = _rplTap(_spawnVortexLaserShot, 'vl', [0, 1, 2, 3, 4, 5]);        // (origin, dir, range, gunA, gunB, life)
+    _spawnVortexLaserPeerBeam = _rplTap(_spawnVortexLaserPeerBeam, 'vp', [0, 1, 2, 3, 4]);   // (origin, dir, range, radius, life)
     const _ps3 = playSpatialSound;
     playSpatialSound = function (type, worldPos, opts) {
       if (_RPL.rec && !_RPL.replay && !_RPL.sndNest) _rplEv('s3', type, worldPos, opts);
