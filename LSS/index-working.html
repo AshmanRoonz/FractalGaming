@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.84";
+const LSS_BUILD = "47.93";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -21332,6 +21332,14 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
   tetherEff.glow = haloMesh;
   tetherEff.pulsePhase = Math.random() * Math.PI * 2;
   tetherEff.arcTimer = 0;
+  // (v47.92) the layer alphas as built, so _tetherAlphaApply can scale them from a fixed base
+  try {
+    tetherEff._aBase = {
+      core: (tetherMat.uniforms.uLayerAlpha && tetherMat.uniforms.uLayerAlpha.value) ? tetherMat.uniforms.uLayerAlpha.value.slice() : null,
+      halo: (haloMat.uniforms.uLayerAlpha && haloMat.uniforms.uLayerAlpha.value) ? haloMat.uniforms.uLayerAlpha.value.slice() : null,
+    };
+    _tetherAlphaApply(tetherEff);
+  } catch (_) {}
   if (broadcast && net.active && net.sendEvent) {
     net.sendEvent({
       type: 'effect_spawn', kind: 'tether',
@@ -21340,6 +21348,136 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
     });
   }
 }
+// ⭐⭐ (v47.92) FAINTER. Owner: "let's also make them less visible, with more transparency".
+// A LayeredFX material has no single opacity - its alpha IS the per-layer `uLayerAlpha[i]` times the
+// pattern (see _LAYERED_FX_FRAG), blended normally - so the trap is faded by scaling those three
+// numbers on its OWN two materials (each trap builds fresh ones through _makeFXMaterial, and the
+// sweep disposes them rather than pooling, so nothing else can inherit the scale).
+// Two levels: a set trap is faint (it is a trap), one that has CAUGHT someone comes up to where you
+// can find it again - it is now the thing you are trying to shoot (see _tetherShotProbe), and the
+// lightning tether to the victim already gives it away. The idle crackle is slower and thinner too.
+// Knob: `window.__tetherAlpha = { idle, caught }` (1 = the pre-47.92 look), read every frame.
+const TETHER_ALPHA = { idle: 0.35, caught: 0.7 };
+function _tetherAlphaK(eff) {
+  let k = eff && eff.triggered ? TETHER_ALPHA.caught : TETHER_ALPHA.idle;
+  try {
+    const o = window.__tetherAlpha;
+    if (o && typeof o === 'object') { const v = eff && eff.triggered ? o.caught : o.idle; if (typeof v === 'number' && isFinite(v) && v >= 0) k = v; }
+  } catch (_) {}
+  return k;
+}
+function _tetherAlphaApply(eff) {
+  if (!eff || !eff._aBase) return;
+  const k = _tetherAlphaK(eff);
+  if (eff._aK === k) return;
+  eff._aK = k;
+  const set = (m, base) => {
+    try { if (m && base && m.uniforms && m.uniforms.uLayerAlpha) m.uniforms.uLayerAlpha.value = base.map(a => a * k); } catch (_) {}
+  };
+  set(eff.mesh && eff.mesh.material, eff._aBase.core);
+  set(eff.glow && eff.glow.material, eff._aBase.halo);
+}
+// ⭐⭐⭐ (v47.92) SHOOT YOUR WAY OUT OF A TETHER - IF IT HAS CAUGHT YOU. Owner: "we should be able to
+// shoot/destroy puncture tether traps (only if we are caught in them)".
+// The trap is a worldEffect, not an entity, so no gun could hit it. Enrolling it in `game.monsters`
+// would put it in front of ~40 loops (every AoE, the bots, the monster sync, the tether's own monster
+// scan), so instead it joins the one place each of the pilot's guns already decides "the nearest solid
+// thing on this line": the OBSTACLE SLOT in fireHitscan and fireSpread, as a proxy answering the same
+// takeDamage(dmg) -> dealt contract the dynamic objects and the leviathans do (the slot then stops the
+// shot there, credits it and shows the hit marker). A pilot PROJECTILE that reaches it is taken in the
+// trap's own per-frame branch. Only a trap whose `rootTarget` is the LOCAL pilot is ever a candidate:
+// you cannot shoot a trap you are not in, and one holding a bot - or nobody - is untouchable as before.
+// Broken = released on the spot (the root clears unless another tether still holds you), the trap is
+// swept like any expiry, and an `effect_destroy` for its netId takes it off every peer's screen.
+// Knobs: `window.__tetherShot = { hp, hitR }` - 1,200 HP is ~0.5-1.6 s of a main gun on target
+// (SYPHON ~2,700 dps .. PYRO ~750), against a 4 s root; the 70 u hit sphere is the halo and then some.
+const TETHER_SHOT = { hp: 1200, hitR: 70 };
+function _tetherShotK() {
+  try {
+    const k = window.__tetherShot;
+    if (k && typeof k === 'object') return { hp: (+k.hp > 0) ? +k.hp : TETHER_SHOT.hp, hitR: (+k.hitR > 0) ? +k.hitR : TETHER_SHOT.hitR };
+  } catch (_) {}
+  return TETHER_SHOT;
+}
+function _tetherHoldsMe(eff) {
+  return !!(eff && eff.type === 'tether' && eff.triggered && !eff._shotDown && eff.timer > 0 &&
+            typeof player !== 'undefined' && player && eff.rootTarget === player && player.shipState !== 'dead');
+}
+// The tether holding the pilot on this ray, as an obstacle-slot candidate - { obj, proj } or null.
+function _tetherShotProbe(origin, dir, maxDist) {
+  const W = (typeof game !== 'undefined' && game) ? game.worldEffects : null;
+  if (!W || !W.length || !origin || !dir) return null;
+  const K = _tetherShotK(), R2 = K.hitR * K.hitR;
+  let best = null, bestP = Infinity;
+  for (let i = 0; i < W.length; i++) {
+    const eff = W[i]; if (!_tetherHoldsMe(eff)) continue;
+    const ex = eff.position.x - origin.x, ey = eff.position.y - origin.y, ez = eff.position.z - origin.z;
+    const proj = ex * dir.x + ey * dir.y + ez * dir.z;
+    if (proj < 0 || proj > maxDist || proj >= bestP) continue;
+    const cx = ex - dir.x * proj, cy = ey - dir.y * proj, cz = ez - dir.z * proj;
+    if (cx * cx + cy * cy + cz * cz > R2) continue;
+    best = eff; bestP = proj;
+  }
+  if (!best) return null;
+  if (!best._shotProxy) {
+    const eff = best;
+    best._shotProxy = { alive: true, name: 'TetherTrap', position: eff.position, collisionRadius: K.hitR,
+                        takeDamage: (dmg) => _tetherTakeShot(eff, dmg) };
+  }
+  return { obj: best._shotProxy, proj: bestP };
+}
+function _tetherTakeShot(eff, dmg) {
+  if (!_tetherHoldsMe(eff)) return 0;
+  const d = Math.max(0, +dmg || 0);
+  if (eff.shotHP == null) eff.shotHP = _tetherShotK().hp;
+  eff.shotHP -= d;
+  eff._hitFlash = 0.12;
+  if (eff.shotHP <= 0) _tetherShatter(eff);
+  return d;
+}
+function _tetherShatter(eff) {
+  if (!eff || eff._shotDown) return;
+  eff._shotDown = true;
+  if (eff._shotProxy) eff._shotProxy.alive = false;
+  eff.triggered = false; eff.rootTarget = null; eff.rootTimer = 0;
+  eff.timer = 0;   // swept, meshes disposed, exactly like an expiry
+  // free - unless another tether still has you
+  let hold = 0;
+  try { for (const o of game.worldEffects) if (o !== eff && _tetherHoldsMe(o)) hold = Math.max(hold, o.rootTimer || 0); } catch (_) {}
+  game.playerRootTimer = hold;
+  try {
+    const p = eff.position.clone();
+    const col = (typeof _fxFriendly === 'function' && _fxFriendly(eff.team)) ? LSS.CLASS_COLORS.PUNCTURE : _FXFF.tetherEnemy;
+    if (typeof spawnExplosion === 'function') spawnExplosion(p, 14);
+    if (typeof spawnImpactSparks === 'function') spawnImpactSparks(p, 12);
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(p, col, 2.6, 520, 0.3);
+    if (typeof playSpatialSound === 'function') playSpatialSound('firework_pop', p);
+  } catch (_) {}
+  try {
+    if (typeof net !== 'undefined' && net && net.active && net.sendEvent && eff.netId !== undefined) {
+      net.sendEvent({ type: 'effect_destroy', netId: eff.netId });
+    }
+  } catch (_) {}
+  try { window.__tetherShotDown = (window.__tetherShotDown | 0) + 1; } catch (_) {}
+}
+// pane probe: `__tetherProbe.drop(150)` lays an ENEMY tether 150 u off your nose (it catches you at
+// once - trigger radius 250); `__tetherProbe.list()` reads every tether's state.
+if (typeof window !== 'undefined') window.__tetherProbe = {
+  drop: function (dist) {
+    try {
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      const p = player.position.clone().addScaledVector(fwd, dist || 150);
+      const enemy = (player.team === LSS.TEAM_FLEET_A) ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A;
+      spawnTetherTrap(p, 'bot', enemy, null, ++net.effectIdCounter, false);
+      return [Math.round(p.x), Math.round(p.y), Math.round(p.z)];
+    } catch (e) { return String(e); }
+  },
+  list: function () {
+    return (game.worldEffects || []).filter(e => e && e.type === 'tether').map(e => ({
+      hp: (e.shotHP == null) ? null : Math.round(e.shotHP), caught: !!e.triggered, me: e.rootTarget === player,
+      shot: !!e._shotDown, timer: +e.timer.toFixed(1), alphaK: e._aK, dist: Math.round(e.position.distanceTo(player.position)) }));
+  },
+};
 
 function _buildFlameChainFlameLicks(effData, pos, dir, length) {
   if (typeof _makeFXMaterial !== 'function') return;
@@ -30414,8 +30552,16 @@ function _lssFlightArena() {
       return 3500000;   // ~500 km at 7 units/metre
     }
   } catch (_) {}
-  return (_lssHubWorld() || (typeof LSS !== 'undefined' && LSS.MODE === 'endless'))   // (v46.82) the OVERWORLD CIRCUIT's cities sit ~48k out
+  const _base = (_lssHubWorld() || (typeof LSS !== 'undefined' && LSS.MODE === 'endless'))   // (v46.82) the OVERWORLD CIRCUIT's cities sit ~48k out
     ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+  // (v47.90) ...and never smaller than the LEVEL. The 4x Shifting Run lays its course along an axis
+  // through the origin, 66-84 k units long - up to ~42 k out, against a classic box whose soft edge
+  // (x0.8, the player's push-back) sits at 20 k and whose bot clamp (x0.9) at 22.5 k. The span is
+  // stamped by buildRoomGraphLevel from the rooms and tunnels it just laid, so every classic arena
+  // (all well inside 20 k) is unchanged.
+  let _span = 0;
+  try { _span = (typeof game !== 'undefined' && game && game._levelSpan) || 0; } catch (_) {}
+  return (_span > 0) ? Math.max(_base, (_span + 3000) / 0.8) : _base;
 }
 
 // ---- ARENA BOUNDARY GRID ----
@@ -31331,10 +31477,20 @@ const _ST_EMPTY=[];
 const _stRouteScratch={o:0,ty:0};
 function _stRouteAt(x,z,T){
   const soft=T.CLEAR_SOFT||300; let o=0, ty=T.YMID;
+  // (v47.90) EXACT EARLY-OUTS. An element only ever counts through `if (e > o)` with o starting at 0,
+  // and e is exactly 0 once the point is r + soft away - so anything whose box (grown by r + soft)
+  // misses the point can be skipped without changing one result. This loop runs per collision query,
+  // per sdfNormal tap and per raycast step over EVERY room and tunnel of the level, and the 4x
+  // Shifting Run has ~70 of each (was ~20): the box test turns nearly all of them into four compares.
   const S=game.levelSpheres||_ST_EMPTY;
-  for(let i=0;i<S.length;i++){const s=S[i];const dsx=x-s.cx,dsz=z-s.cz;const d=Math.sqrt(dsx*dsx+dsz*dsz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o){o=e;ty=s.cy;}}
+  for(let i=0;i<S.length;i++){const s=S[i];const dsx=x-s.cx,dsz=z-s.cz;const rq=s.r+soft;
+    if(dsx>=rq||dsx<=-rq||dsz>=rq||dsz<=-rq)continue;
+    const d=Math.sqrt(dsx*dsx+dsz*dsz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o){o=e;ty=s.cy;}}
   const C=game.levelCylinders||_ST_EMPTY;
   for(let i=0;i<C.length;i++){const c=C[i];
+    if(c._mnx===undefined){c._mnx=Math.min(c.ax,c.bx);c._mxx=Math.max(c.ax,c.bx);c._mnz=Math.min(c.az,c.bz);c._mxz=Math.max(c.az,c.bz);}
+    const rq=c.r+soft;
+    if(x<c._mnx-rq||x>c._mxx+rq||z<c._mnz-rq||z>c._mxz+rq)continue;
     const dx=c.bx-c.ax,dz=c.bz-c.az,l2=dx*dx+dz*dz;
     let t=l2>0?((x-c.ax)*dx+(z-c.az)*dz)/l2:0; t=t<0?0:(t>1?1:t);
     const cx=c.ax+dx*t,cz=c.az+dz*t,dqx=x-cx,dqz=z-cz,d=Math.sqrt(dqx*dqx+dqz*dqz);
@@ -62532,8 +62688,10 @@ class Bot {
     // (v43.18c) ⚠ `this.arcSlowTimer <= 0` blocked EVERY dash: the field is undefined on a Bot, and
     // `undefined <= 0` is false. Written the safe way round, so an absent field reads as "not slowed"
     // rather than as "never allowed" - the same trap the clamp below already avoids with `> 0`.
+    // (v47.86) `_rcCapAt` - a racer braking into a gate does not dash into it (the dash SETS velocity to
+    // dashSpeed along the heading, which is the overshoot the brake exists to prevent).
     if (!this.dashActive && this._botDashCd <= 0 && this.alive && !(this.arcSlowTimer > 0) &&
-        !this._stuckEscapeT && this.targetDir) {
+        !this._stuckEscapeT && this.targetDir && this._rcCapAt !== game.time) {
       const _ct = this.combatTarget;
       const _gap = (_ct && _ct.position) ? _ct.position.distanceTo(this.position) : 0;
       // (v43.18b) MEASURED: this fired almost never. Bots dogfight CLOSE - live gaps were 162-359
@@ -62598,6 +62756,13 @@ class Bot {
     if (_latOwned && this._latCap != null) {
       const _ls = this.velocity.length();
       if (_ls > this._latCap) this.velocity.multiplyScalar(Math.max(this._latCap / _ls, 1 - 3 * dt));
+    }
+    // (v47.86) ...and the race line's, into and out of a sharp gate (see _rcLineWaypoint). Stamped with
+    // the frame it was asked for, so a bot that leaves the line - cleared, respawned, knob off - is never
+    // held by a stale one.
+    if (this._rcCapAt === game.time && this._rcCap > 0) {
+      const _rs = this.velocity.length();
+      if (_rs > this._rcCap) this.velocity.multiplyScalar(Math.max(this._rcCap / _rs, 1 - 3 * dt));
     }
 
     // (M2) Hoard ships navigate the open gap through the sandwich-terrain legs
@@ -62706,8 +62871,32 @@ class Bot {
         // keep the old rule and only touch the shell when nothing else is worth shooting.
         // Role is derived from the bot id, NOT stored: stable for the bot's life, identical on every
         // peer, and costs nothing to recompute after a host migration.
-        const _isBreaker = (((this.id | 0) % 2) === 0);
-        if (_shD < _objRange && (_isBreaker || !_fireTgt || _ctD > _OBJ_BREAK)) _fireTgt = _sh;
+        let _isBreaker = (((this.id | 0) % 2) === 0);
+        // ⭐⭐⭐ (v47.85) ...BUT A RACE HAS NO ESCORTS. Owner: "they are all hanging out at the champion
+        // field and none of them are breaking the barrier around it" - and, one round later, "one of
+        // them broke it this time". The split above is ASSAULT's (one attacking side, half commit,
+        // half screen), and the race inherited it through this shared block. In a race every racer
+        // who has cleared the lap is after the same field for themselves, and the id parity decides
+        // who "breaks": ids run 1,2,3 (fleet B) and 10,11 (fleet A), so whenever the first bots
+        // across the line were odd - #1, #3, #11 - the whole finish was escorts, and an escort only
+        // takes the shell with no rival inside `_OBJ_BREAK`. At a finish there always is one. They
+        // circled the standoff ring shooting each other, and the shell fell only when their
+        // crossfire happened to cross it (the v34.71 note above calls that "incidental bot crossfire").
+        // MEASURED (47.84, three odd-id bots cleared and placed in the finish room, the pilot 20 km
+        // away): ONE deliberate shell shot in 15 s; the shell died to spill - SLAYER pellets 726 and
+        // PYRO thermite 540 aimed at each other, 1,633 from bot-owned projectiles.
+        // So: a racer that may CLAIM the finish (`_raceCanClaim` - past the last gate on a circuit,
+        // anyone on a point-to-point race) is always a breaker - rings first, then the barrier, and
+        // only then the rival (the owner's order for race bots: "first priority should be the rings,
+        // sub task is to kill the enemy"). A racer still lapping never aims at the shell: it cannot
+        // claim what is inside, and every shot at it is a shot spent opening the finish for a rival.
+        let _mayShell = true;
+        if (LSS.MODE === 'race') {
+          let _rcl = true;
+          try { if (typeof _raceCanClaim === 'function') _rcl = !!_raceCanClaim(this); } catch (_) {}
+          _isBreaker = _rcl; _mayShell = _rcl;
+        }
+        if (_mayShell && _shD < _objRange && (_isBreaker || !_fireTgt || _ctD > _OBJ_BREAK)) _fireTgt = _sh;
       }
     }
     if (this.fireTimer <= 0 && game.state === 'playing' && this._mayFight() && _fireTgt) {
@@ -72804,12 +72993,15 @@ function spawnDynamicObjects(rooms) {
   };
   const nonSpawnRooms = _lssHubWorld() ? [] : rooms.filter(r => !r.team);   // (v46.82) no obstacle clusters in the open overworld, race or free flight   
   for (const rm of nonSpawnRooms) {
-    const count = 2 + Math.floor(Math.random() * 2); 
+    // (v47.90) a Shifting Run BEND room (three between each pair of gates since the 4x course) takes one
+    // cluster, out toward its wall: 2-3 in every one of ~55 extra rooms would have roughly tripled the
+    // course's rocks and gas clouds, and parked them on the racing line through the room's middle.
+    const count = rm.bend ? 1 : 2 + Math.floor(Math.random() * 2);
     for (let i = 0; i < count; i++) {
       let placed = false;
       for (let attempt = 0; attempt < 8 && !placed; attempt++) {
         const angle = Math.random() * Math.PI * 2;
-        const dist = rm.r * (0.15 + Math.random() * 0.45);
+        const dist = rm.r * (rm.bend ? (0.5 + Math.random() * 0.15) : (0.15 + Math.random() * 0.45));
         const yOff = (Math.random() - 0.5) * rm.r * 0.6;
         const px = rm.x + Math.cos(angle) * dist;
         const py = rm.y + yOff;
@@ -76764,6 +76956,7 @@ class RaceRing {
     // (v46.83) a RACE CIRCUIT gate wears the endless Aegis bolt, not the cyan ring - see _buildGateMesh
     this._gate = !!(opts && opts.gate);
     this._gateT = 0; this._gatePh = Math.random() * 6.283; this._gateParts = null;
+    this._gateAxis = (opts && opts.axis) ? opts.axis.clone() : null;   // (v47.87) the hoop faces along the track
     this.alive = true;
     this.captured = false;  
     this.group = null;      
@@ -76808,11 +77001,17 @@ class RaceRing {
     const lib = (typeof _raceGateLib === 'function') ? _raceGateLib() : null;
     if (!lib) return;
     const grp = new THREE.Group();
-    const core = new THREE.Mesh(lib.geo, lib.coreMat); core.renderOrder = 1; grp.add(core);
-    const sh1 = new THREE.Mesh(lib.shGeo1, lib.shMat1); sh1.renderOrder = 2; grp.add(sh1);
+    // (v47.87) THE HOOP (see _raceGateLib): the three layers become tori in their own group, which is
+    // turned to face along the track and keeps the gate's TRUE size (the 4x below is undone on it), so
+    // its hole stays the capture sphere. `window.__raceGateHoop = false` builds the v46.83 orb.
+    const _hoop = !(typeof window !== 'undefined' && window.__raceGateHoop === false) && !!lib.hoopGeo;
+    const _body = _hoop ? new THREE.Group() : grp;
+    if (_hoop) grp.add(_body);
+    const core = new THREE.Mesh(_hoop ? lib.hoopGeo : lib.geo, lib.coreMat); core.renderOrder = 1; _body.add(core);
+    const sh1 = new THREE.Mesh(_hoop ? lib.hoopGeo1 : lib.shGeo1, lib.shMat1); sh1.renderOrder = 2; _body.add(sh1);
     let sh2 = null, spr = null, rig = null;
     if (!lib.lite) {
-      sh2 = new THREE.Mesh(lib.shGeo2, lib.shMat2); sh2.renderOrder = 2; grp.add(sh2);
+      sh2 = new THREE.Mesh(_hoop ? lib.hoopGeo2 : lib.shGeo2, lib.shMat2); sh2.renderOrder = 2; _body.add(sh2);
       spr = new THREE.Sprite(lib.sprMat); spr.scale.set(170, 170, 1); grp.add(spr);
       rig = new THREE.Group();
       for (let r = 0; r < 3; r++) {
@@ -76840,9 +77039,18 @@ class RaceRing {
       if (rig) rig.scale.setScalar(_c);
     }
     grp.scale.setScalar(this.diameter / 300 * _gk);
+    if (_hoop) {
+      _body.scale.setScalar(1 / _gk);   // the hoop is the checkpoint: true size, never the findability scale
+      // Face along the track. TorusGeometry lies in XY, so its hole looks down +Z; the circuit carries
+      // each gate's horizontal travel direction (tx, tz), and the hoop stands upright across it.
+      const ax = this._gateAxis;
+      if (ax && ax.lengthSq() > 1e-6) {
+        try { _body.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), ax.clone().normalize()); } catch (_) {}
+      }
+    }
     grp.position.copy(this.position);
     scene.add(grp);
-    this.group = grp; this._inner = core; this._gateParts = { core, sh1, sh2, spr, rig };
+    this.group = grp; this._inner = core; this._gateParts = { core, sh1, sh2, spr, rig, hoop: _hoop };
     this._usedProto = true;
   }
   // the bolt's own idle: an erratic core flicker, counter-rotating shells, a precessing ray rig, a slow bob
@@ -76904,10 +77112,28 @@ class RaceRing {
     } catch (_) {}
     const tt = this._gateT, ph = this._gatePh;
     const wob = 1 + 0.16 * Math.cos(tt * 7.3 + ph) + 0.11 * Math.cos(tt * 12.7 + ph * 2.3) + 0.06 * Math.cos(tt * 23.1 + ph * 4.1);
-    if (P.core) P.core.scale.setScalar(wob);
-    if (P.sh1) { P.sh1.rotation.y += dt * 1.9; P.sh1.rotation.x = 0.6 * Math.cos(tt * 0.9 + ph); }
-    if (P.sh2) { P.sh2.rotation.y -= dt * 2.6; P.sh2.rotation.z = 0.8 * Math.cos(tt * 1.3 + ph); }
+    if (P.hoop) {
+      // (v47.87) a hoop keeps its plane: the shells SPIN in it (counter-rotating, same rates as the orb)
+      // instead of tumbling, and the core's flicker is a quarter of the orb's - a full one would breathe
+      // the hole in and out by a third, and the hole is the checkpoint
+      if (P.core) P.core.scale.setScalar(1 + (wob - 1) * 0.25);
+      if (P.sh1) P.sh1.rotation.z += dt * 1.9;
+      if (P.sh2) P.sh2.rotation.z -= dt * 2.6;
+    } else {
+      if (P.core) P.core.scale.setScalar(wob);
+      if (P.sh1) { P.sh1.rotation.y += dt * 1.9; P.sh1.rotation.x = 0.6 * Math.cos(tt * 0.9 + ph); }
+      if (P.sh2) { P.sh2.rotation.y -= dt * 2.6; P.sh2.rotation.z = 0.8 * Math.cos(tt * 1.3 + ph); }
+    }
     if (P.rig) { P.rig.rotation.y += dt * 0.45; P.rig.rotation.x = 0.10 * Math.cos(tt * 0.7 + ph); }
+    // (v47.87) live knob for the glow in the hoop's hole: `window.__raceHoopGlow` (1 = as built, which the
+    // owner signed off on - "nice"; below 1 opens the hole up). Read per frame so it tunes in the pane.
+    if (P.hoop && P.spr) {
+      let gk = 1;
+      try { const k = window.__raceHoopGlow; if (typeof k === 'number' && isFinite(k) && k > 0) gk = k; } catch (_) {}
+      if (P._sprBase == null) P._sprBase = P.spr.scale.x;
+      const want = P._sprBase * gk;
+      if (P.spr.scale.x !== want) P.spr.scale.set(want, want, 1);
+    }
     if (this.group) this.group.position.y = this.position.y + Math.sin(tt * 1.8 + ph) * 12;
   }
   orientAxis(dir) {
@@ -77222,11 +77448,27 @@ function _raceGateLib() {
       if (sh2.userData) sh2.userData._timeOffset = Math.random() * 10;
     } else { sh1 = mkFlat(0x33ccff, 0.5); sh2 = mkFlat(0x2288ff, 0.3); }
     const rayTex = (typeof _lssEndlessBoltRayTexture === 'function') ? _lssEndlessBoltRayTexture() : null;
+    // ⭐⭐ (v47.87) THE HOOP. Owner: "can we make the race check points into tauruses, instead of
+    // spheres, but the same texture/shaders - don't let this affect the aegis orbs in endless".
+    // Same three layers on the same materials - the white-hot core and the fireball / plasma FX
+    // shells - wrapped round a ring instead of a point, so a checkpoint reads as something you fly
+    // THROUGH. Units are the gate's own: the hoop group is drawn at diameter/300 WITHOUT the 4x
+    // findability scale (see _buildGateMesh), so 135 = RACE_CIRCUIT.captureK (0.45) x 300 puts the
+    // core tube's INNER edge exactly on the pilot's capture sphere - through the hole is taken, and
+    // the hole is the checkpoint. The FX shells are softer and fatter, so their glow spills a little
+    // inside it.
+    // ⚠ Endless is untouched by construction: its bolts are built by _lssEndlessBoltSlot from its own
+    //   `run._boltLib`, and `_makeFXMaterial` returns a fresh material on every call - nothing here is
+    //   shared with it. The orb geometries stay in this library for `window.__raceGateHoop = false`.
+    const _hR = RACE_CIRCUIT.captureK * 300 + 12;
     _rcGateLib = {
       lite,
       geo: new THREE.OctahedronGeometry(22),
       shGeo1: new THREE.IcosahedronGeometry(46, 1),
       shGeo2: new THREE.IcosahedronGeometry(64, 1),
+      hoopGeo: new THREE.TorusGeometry(_hR, 12, 14, 96),
+      hoopGeo1: new THREE.TorusGeometry(_hR, 22, 14, 96),
+      hoopGeo2: new THREE.TorusGeometry(_hR, 32, 16, 96),
       rayGeo: new THREE.PlaneGeometry(30, 440),
       coreMat: new THREE.MeshBasicMaterial({ color: 0xbff2ff, toneMapped: false }),
       shMat1: sh1, shMat2: sh2,
@@ -77756,6 +77998,199 @@ function _rcTrackNav(bot, roomId) {
     return wp ? _rcV2.set(wp.x, wp.y, wp.z) : null;
   } catch (_) { return null; }
 }
+// ⭐⭐⭐ (v47.86) THE RACE LINE - a track bot flies the TUNNEL, not a beeline at the next room.
+// Owner: "they are not very good from getting to point a to point b, because they are very distracted
+// by fighting each other". The fighting half was the finish (v47.85). This is the other half, and it
+// was never the fighting: a no-fire A/B on the same seed (47.84, the Shifting Run) kept every gap.
+// MEASURED (47.85, a 10 Hz trace of all five bots through one lap): 17 gaps of 4-10 s between gates,
+// against a steady ~1.8 s a gate for the one hull that laps clean (PUNCTURE, acceleration 1200).
+//   (1) NEAR MISSES. In most gaps the bot flew THROUGH the gate room and passed 5-60 u outside the
+//       capture sphere - BLASTER 258 vs a 253 cap, PYRO 313 vs 293, PUNCTURE 264 vs 255 - and had to
+//       come round again. A 39-degree gate at 900 u/s is a ~1,600 u turning circle for a hull with
+//       500 acceleration (v*v/a) on legs ~1,200 u long: the heavy hulls PHYSICALLY could not make the
+//       corner, swung wide and grazed the gate. Bots have no throttle - the Spire lattice's lesson
+//       (`_latCap`, v47.81): the fix for a hull that overshoots is BRAKING, not a tighter aim.
+//   (2) OUTSIDE THE TUBE. `chooseRaceWaypointTo` steers at the next room's CENTRE from wherever the
+//       bot is, a line that is only clear from ON the tunnel axis. Median off-axis distance was
+//       300-650 u against a 260 u tube; the worst stall was SYPHON wedged in rock at 1 u/s for 6.4 s,
+//       still trying to fly straight through it.
+// So: pure pursuit on the tunnel centreline (each gate room's own tunnel to the next, room centre to
+// room centre) with a speed-scaled lookahead, plus a speed CAP into a sharp gate and back out of it,
+// derived from the hull's own acceleration. Leg 0 (start room -> gate 1) keeps the BFS: four start
+// lanes, each with its own tunnel, and nothing sharp on it.
+// Knobs: `window.__raceLine = false` is 47.85 exactly (the BFS room-to-room waypoint);
+// `window.__raceLineK` is this table, live. Counters: `window.__raceLineN` (frames steered),
+// `window.__raceCapN` (frames braked).
+const RACE_LINE = {
+  lookK: 0.7, lookMin: 360, lookMax: 820,   // lookahead along the tunnel = speed x lookK, clamped
+  brakeD: 700,        // start braking this far (along the tunnel) before a sharp gate
+  exitD: 480,         // ...and keep the cap this far into the next leg while the nose is still coming round
+  sharpDeg: 18,       // a gate turning less than this is taken flat out
+  turnD: 1.6,         // the turn has to fit in (gate room radius x turnD) of travel: R = that / angle
+  aEff: 0.7,          // share of the hull's acceleration that actually turns it (the heading lags the goal)
+  vMin: 380,          // never brake below this
+};
+if (typeof window !== 'undefined') window.__raceLineK = RACE_LINE;
+function _rcLineBuild(C) {
+  if (!C) return null;
+  if (C._line !== undefined) return C._line;   // per circuit, and a track circuit is re-made every round
+  C._line = null;
+  try {
+    const L = game.currentLevel, g = game.raceGraph;
+    if (!L || !Array.isArray(L.rooms) || !Array.isArray(L.tunnels)) return null;
+    const byId = {}; for (const r of L.rooms) if (r && r.id) byId[r.id] = r;
+    // the same "which room holds this tunnel end" rule _buildRaceGraph uses for its edges
+    const roomAt = (p) => {
+      let best = null, bd = Infinity;
+      for (const r of L.rooms) {
+        const dx = p.x - r.x, dy = p.y - r.y, dz = p.z - r.z, d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 <= r.r * r.r && d2 < bd) { bd = d2; best = r; }
+      }
+      return best;
+    };
+    const tun = {};
+    for (const t of L.tunnels) {
+      const P = t && t.path; if (!P || P.length < 2) continue;
+      const a = roomAt(P[0]), b = roomAt(P[P.length - 1]);
+      if (!a || !b || a === b) continue;
+      const tr = t.r || 260;
+      tun[a.id + '|' + b.id] = { P, r: tr }; tun[b.id + '|' + a.id] = { P: P.slice().reverse(), r: tr };
+    }
+    // (v47.90) A LEG IS THE ROOM PATH BETWEEN TWO GATES, not one tunnel: the 4x Shifting Run lays three
+    // bend rooms between each pair. Room path by BFS over the race graph (a chain on the generated
+    // track, direct neighbours on Pole Position), then every hop's room centre and tunnel path.
+    const bfs = (a, b) => {
+      if (!g || !g.nodes || !g.nodes[a] || !g.nodes[b]) return null;
+      const prev = {}, seen = {}; const q = [a]; seen[a] = true;
+      while (q.length) {
+        const id = q.shift(); if (id === b) break;
+        for (const nb of g.nodes[id].neighbors) { if (seen[nb.id]) continue; seen[nb.id] = true; prev[nb.id] = id; q.push(nb.id); }
+      }
+      if (!seen[b]) return null;
+      const out = []; for (let id = b; id != null; id = (id === a) ? null : prev[id]) out.push(id);
+      return out.reverse();
+    };
+    const legOf = (path, endR) => {
+      if (!path || path.length < 2) return null;
+      const p = [], cum = [], rAt = [];
+      const push = (x, y, z, r) => {
+        const o = p[p.length - 1];
+        if (o) {
+          const s = Math.hypot(x - o[0], y - o[1], z - o[2]);
+          if (s < 1) { rAt[rAt.length - 1] = Math.max(rAt[rAt.length - 1], r); return; }   // the generated tunnels start and end ON the room centres
+          cum.push(cum[cum.length - 1] + s);
+        } else cum.push(0);
+        p.push([x, y, z]); rAt.push(r);
+      };
+      for (let h = 0; h < path.length; h++) {
+        const Rm = byId[path[h]]; if (!Rm) return null;
+        push(Rm.x, Rm.y, Rm.z, Rm.r || 300);
+        if (h + 1 < path.length) {
+          const T = tun[path[h] + '|' + path[h + 1]]; if (!T) return null;
+          for (const q of T.P) push(q.x, q.y, q.z, T.r);
+        }
+      }
+      if (p.length < 2) return null;
+      // the turn at every INTERIOR vertex - the bends are where a heavy hull swings wide, not only the gate
+      const turnAt = new Array(p.length).fill(0);
+      for (let j = 1; j < p.length - 1; j++) {
+        const ux = p[j][0] - p[j - 1][0], uy = p[j][1] - p[j - 1][1], uz = p[j][2] - p[j - 1][2];
+        const vx = p[j + 1][0] - p[j][0], vy = p[j + 1][1] - p[j][1], vz = p[j + 1][2] - p[j][2];
+        const nu = Math.hypot(ux, uy, uz) || 1, nv = Math.hypot(vx, vy, vz) || 1;
+        turnAt[j] = Math.acos(Math.max(-1, Math.min(1, (ux * vx + uy * vy + uz * vz) / (nu * nv))));
+      }
+      return { p, cum, len: cum[cum.length - 1], roomR: endR || 300, turn: 0, turnAt, rAt, rooms: path.length };
+    };
+    const ids = C.rings.map(r => r.roomId);
+    if (g && g.finishId) ids.push(g.finishId);   // leg N: the last gate -> the finish room
+    // leg 0: from where the start lanes MEET to gate 1 - the room after the start room on its path.
+    // Four lanes, four start rooms: none of them is the line, their shared next room is. (Pole Position's
+    // start room is gate 1's neighbour, so its leg 0 is a single room and stays on the BFS.)
+    let leg0 = null;
+    try {
+      const st = L.rooms.find(r => r && r.team);
+      const sp = st ? bfs(st.id, ids[0]) : null;
+      if (sp && sp.length >= 3) leg0 = legOf(sp.slice(1), byId[ids[0]] && byId[ids[0]].r);
+    } catch (_) { leg0 = null; }
+    const legs = [leg0];
+    for (let i = 1; i < ids.length; i++) {
+      const B = byId[ids[i]];
+      legs.push(B ? legOf(bfs(ids[i - 1], ids[i]), B.r) : null);
+    }
+    const dirOf = (lg, first) => {
+      const a = first ? lg.p[0] : lg.p[lg.p.length - 2], b = first ? lg.p[1] : lg.p[lg.p.length - 1];
+      const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], n = Math.hypot(dx, dy, dz) || 1;
+      return [dx / n, dy / n, dz / n];
+    };
+    for (let i = 0; i < legs.length - 1; i++) {
+      const A = legs[i], B = legs[i + 1]; if (!A || !B) continue;
+      const u = dirOf(A, false), v = dirOf(B, true);
+      A.turn = Math.acos(Math.max(-1, Math.min(1, u[0] * v[0] + u[1] * v[1] + u[2] * v[2])));   // the gate at the END of leg i
+    }
+    C._line = { legs, n: legs.filter(Boolean).length };
+    console.log('[race] race line:', C._line.n, 'of', legs.length, 'legs (', legs.map(l => l ? l.rooms : '-').join(' '), 'rooms each)');
+  } catch (e) { console.warn('[race] race line build failed:', e); C._line = null; }
+  return C._line;
+}
+function _rcLinePointAt(leg, s, out) {
+  const P = leg.p, cum = leg.cum;
+  let j = 0; while (j < P.length - 2 && cum[j + 1] < s) j++;
+  const seg = (cum[j + 1] - cum[j]) || 1, t = Math.max(0, Math.min(1, (s - cum[j]) / seg));
+  const a = P[j], b = P[j + 1];
+  return out.set(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t);
+}
+// The bot's goal on leg `idx` (gate idx-1 -> gate idx), or null to fall back to the BFS. Stamps
+// `_rcCap` / `_rcCapAt` when it wants the bot braked this frame (applied after the speed clamp in
+// Bot.update, beside the lattice cap).
+function _rcLineWaypoint(bot, idx, C) {
+  if (typeof window !== 'undefined' && window.__raceLine === false) return null;
+  const line = _rcLineBuild(C); if (!line) return null;
+  const leg = line.legs[idx]; if (!leg) return null;
+  const px = bot.position.x, py = bot.position.y, pz = bot.position.z, P = leg.p;
+  let bD2 = Infinity, bS = 0, bJ = 0;
+  for (let j = 0; j < P.length - 1; j++) {
+    const a = P[j], b = P[j + 1];
+    const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
+    const L2 = abx * abx + aby * aby + abz * abz; if (L2 < 1) continue;
+    let t = ((px - a[0]) * abx + (py - a[1]) * aby + (pz - a[2]) * abz) / L2;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    const qx = a[0] + abx * t - px, qy = a[1] + aby * t - py, qz = a[2] + abz * t - pz;
+    const d2 = qx * qx + qy * qy + qz * qz;
+    if (d2 < bD2) { bD2 = d2; bS = leg.cum[j] + t * Math.sqrt(L2); bJ = j; }
+  }
+  const K = RACE_LINE, v = bot.velocity, spd = v ? v.length() : 0;
+  // the lookahead never runs past the gate: the last stretch aims at its centre, so the pass goes
+  // through the middle of the capture sphere instead of grazing it
+  const look = Math.max(K.lookMin, Math.min(K.lookMax, spd * K.lookK));
+  _rcLinePointAt(leg, Math.min(bS + look, leg.len), _rcV2);
+  try { window.__raceLineN = (window.__raceLineN | 0) + 1; } catch (_) {}
+  // BRAKING. v = sqrt(a x R): the speed at which this hull's thrust can bend its path to radius R,
+  // and R is whatever lets the turn fit inside the room it happens in.
+  // (v47.90) Into whichever vertex this segment runs into - a bend room inside the leg, or the gate at
+  // its end - and back out of the one it came from while the nose is still swinging onto the segment.
+  const acc = ((bot.chassis && bot.chassis.acceleration) || 600) * K.aEff;
+  const sharp = K.sharpDeg * Math.PI / 180;
+  const n = P.length;
+  let cap = Infinity;
+  const jn = bJ + 1;
+  const turnN = (jn >= n - 1) ? leg.turn : leg.turnAt[jn];
+  const rN = (jn >= n - 1) ? leg.roomR : leg.rAt[jn];
+  if (turnN > sharp && leg.cum[jn] - bS < K.brakeD) {
+    cap = Math.min(cap, Math.sqrt(acc * (rN * K.turnD) / turnN));
+  }
+  if (bS - leg.cum[bJ] < K.exitD && spd > 1) {
+    const a = P[bJ], b = P[bJ + 1];
+    const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], dn = Math.hypot(dx, dy, dz) || 1;
+    const c = (v.x * dx + v.y * dy + v.z * dz) / (dn * spd);
+    const ang = Math.acos(Math.max(-1, Math.min(1, c)));
+    if (ang > sharp) cap = Math.min(cap, Math.sqrt(acc * (leg.rAt[bJ] * K.turnD) / Math.min(ang, Math.PI / 2)));
+  }
+  if (cap < Infinity) {
+    bot._rcCap = Math.max(K.vMin, cap); bot._rcCapAt = game.time;
+    try { window.__raceCapN = (window.__raceCapN | 0) + 1; } catch (_) {}
+  }
+  return _rcV2;
+}
 
 // ---- install / progress / rings ----------------------------------------------------------------
 function _raceCircuitSeed() {
@@ -77839,12 +78274,39 @@ function _raceCircuitSpawnRings() {
   game.poleRings = [];
   for (let i = 0; i < C.rings.length; i++) {
     const r = C.rings[i];
-    const ring = new RaceRing(new THREE.Vector3(r.x, r.y, r.z), r.d, { gate: true });   // (v46.83) the Aegis bolt look
+    const ring = new RaceRing(new THREE.Vector3(r.x, r.y, r.z), r.d,
+                              { gate: true, axis: _raceGateAxis(C, i) });   // (v46.83) the Aegis look; (v47.87) as a hoop across the track
     ring._cidx = i;
     game.poleRings.push(ring);
   }
   _raceCircuitResetProgress();
   _raceCircuitRefreshVis();
+}
+// (v47.87) Which way a hoop faces: the bisector of the way in and the way out, flat (the hoop stands
+// upright). A ring's stored (tx, tz) is the prev->next CHORD, and on the FIRST gate prev is the gate
+// itself, so gate 1 faced down its outgoing leg and the grid saw it edge-on at 40-odd degrees
+// (measured in the pane from the Shifting Run's start). Gate 1's way in is the start grid: the team
+// rooms' centre on a track, the circuit's start line elsewhere; the last gate's way out is the finish.
+function _raceGateAxis(C, i) {
+  const R = C.rings, r = R[i];
+  let px = null, pz = null;
+  if (i > 0) { px = R[i - 1].x; pz = R[i - 1].z; }
+  else if (C.kind === 'track' && Array.isArray(game.sdfRoomData)) {
+    let n = 0, sx = 0, sz = 0;
+    for (const q of game.sdfRoomData) if (q && q.team) { sx += q.x; sz += q.z; n++; }
+    if (n) { px = sx / n; pz = sz / n; }
+  }
+  if (px == null && C.start) { px = C.start.x; pz = C.start.z; }
+  const nx = (i + 1 < R.length) ? R[i + 1].x : (C.fin ? C.fin.x : r.x + (r.tx || 0));
+  const nz = (i + 1 < R.length) ? R[i + 1].z : (C.fin ? C.fin.z : r.z + (r.tz || 1));
+  let ax = 0, az = 0, haveIn = false;
+  if (px != null) { const x = r.x - px, z = r.z - pz, L = Math.hypot(x, z); if (L > 1) { ax += x / L; az += z / L; haveIn = true; } }
+  // Gate 1 faces the GRID outright: the bisector still left it 38 deg off from the pilot's lane
+  // (MEASURED, the Shifting Run - the grid-to-gate-1 line and the gate-1-to-gate-2 leg differ by ~76 deg),
+  // and it is the one hoop everyone lines up on from a standstill. Every later gate splits the turn.
+  if (!(i === 0 && haveIn)) { const x = nx - r.x, z = nz - r.z, L = Math.hypot(x, z); if (L > 1) { ax += x / L; az += z / L; } }
+  const L = Math.hypot(ax, az);
+  return (L > 1e-3) ? new THREE.Vector3(ax / L, 0, az / L) : new THREE.Vector3(r.tx || 0, 0, r.tz || 1);
 }
 function _raceCircuitRefreshVis() {
   const R = game.poleRings; if (!Array.isArray(R)) return;
@@ -77877,7 +78339,9 @@ function _raceCircuitOnLocalCapture(idx) {
       if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue();
     } else if (window.Overlays) {
       const nr = C.rings[player._raceIdx];
-      Overlays.banner('RING ' + (idx + 1) + ' / ' + N, nr.high ? 'Next gate is UP HIGH' : 'Next gate is low, between the buildings');
+      // (v47.87) the "between the buildings" line is the Earth circuit's; a cavern track has no buildings
+      Overlays.banner('RING ' + (idx + 1) + ' / ' + N, nr.high ? 'Next gate is UP HIGH'
+                      : ((C.kind === 'track') ? 'Next gate - through the hoop' : 'Next gate is low, between the buildings'));
     }
   } catch (_) {}
   _raceCircuitRefreshVis();
@@ -78171,7 +78635,7 @@ function _raceCircuitBotWaypoint(bot, dt) {
       if (C.kind === 'track') {
         const g = game.raceGraph, fn = (g && g.nodes) ? g.nodes[g.finishId] : null;
         const inFin = !!(fn && Math.hypot(bot.position.x - fn.x, bot.position.y - fn.y, bot.position.z - fn.z) < (fn.r || 300));
-        if (!inFin) { const wp = _rcTrackNav(bot, g && g.finishId); if (wp) return wp; }
+        if (!inFin) { const wp = _rcLineWaypoint(bot, N, C) || _rcTrackNav(bot, g && g.finishId); if (wp) return wp; }   // (v47.86) the race line's last leg
       }
       const sh = game.championShell, f = game.championField;
       if (sh && sh.alive && sh.position) {
@@ -78203,7 +78667,8 @@ function _raceCircuitBotWaypoint(bot, dt) {
   }
   // (v46.84) a track circuit: the tunnel graph to the gate's room (the gate sits at its centre, so the
   // BFS's own "inside the room -> its centre" step is the capture run)
-  if (C.kind === 'track') { const wp = _rcTrackNav(bot, C.rings[idx].roomId); if (wp) return wp; }
+  // (v47.86) ...along the race line when the leg has one (every leg but the start lanes) - see _rcLineWaypoint
+  if (C.kind === 'track') { const wp = _rcLineWaypoint(bot, idx, C) || _rcTrackNav(bot, C.rings[idx].roomId); if (wp) return wp; }
   const dist = Math.hypot(gx - bot.position.x, gy - bot.position.y, gz - bot.position.z);
   const ahead = Math.min(dist * 0.55, 900);
   // ⚠ COME IN FROM ABOVE. A low gate sits 40-60 m up a street with towers on every side, so an
@@ -94699,6 +95164,11 @@ function fireHitscan(origin, dir, w) {
       }
     }
   }
+  // (v47.92) ...and so does the PUNCTURE tether that is holding YOU - only that one (_tetherShotProbe)
+  {
+    const _tq = _tetherShotProbe(origin, aimDir, Math.min(w.range, levelDist));
+    if (_tq && _tq.proj < bestObstDist) { bestObstacle = _tq.obj; bestObstDist = _tq.proj; }
+  }
 
   // PUNCTURE Sodium Railgun pierces : damage every ship along the
   // line, not just the closest. The beam still stops at obstacles / level
@@ -95227,6 +95697,11 @@ function fireSpread(origin, dir, w) {
           bestObstDist = proj;
         }
       }
+    }
+    // (v47.92) the tether holding YOU takes pellets too (see _tetherShotProbe)
+    {
+      const _tq = _tetherShotProbe(origin, spreadDir, Math.min(_slRange, levelDist));
+      if (_tq && _tq.proj < bestObstDist) { bestObst = _tq.obj; bestObstDist = _tq.proj; }
     }
 
     let hitBot = false;
@@ -99270,7 +99745,12 @@ function updateWorldEffects(dt) {
     }
 
     else if (eff.type === 'tether') {
-      if (!eff.triggered) {
+      // ⚠⚠ (v47.92) A SHOT-DOWN TRAP MUST NOT CATCH AGAIN. _tetherShatter clears `triggered` and zeroes the
+      //   timer, but the sweep that removes the trap runs at the bottom of THIS loop, after these scans.
+      //   With `triggered` false and the victim still well inside the 250 u radius, the first scan below
+      //   re-caught them in the same frame and re-set playerRootTimer to 4 s - MEASURED: the trap died at
+      //   0.8 s and the pilot was rooted again, at 3.9 s, by nothing. `_shotDown` closes all three scans.
+      if (!eff.triggered && !eff._shotDown) {
         // Local player first. In multiplayer the local player is NOT in
         // game.entities (it's `player`), and remote enemies are network
         // mirrors whose velocity we can't authoritatively zero. The trap
@@ -99292,7 +99772,7 @@ function updateWorldEffects(dt) {
           } catch (_) {}
         }
       }
-      if (!eff.triggered) {
+      if (!eff.triggered && !eff._shotDown) {
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
           if (_bodyDist(eff.position, bot) < eff.radius) {
@@ -99312,7 +99792,7 @@ function updateWorldEffects(dt) {
       // `game.entities`, so the two scans above could never see one - a trap laid in front of a
       // leviathan simply sat there. Reach is padded by the creature's own radius: a 520-unit body
       // whose CENTRE is outside a 300-unit trap is still standing on it.
-      if (!eff.triggered && game.monsters) {
+      if (!eff.triggered && !eff._shotDown && game.monsters) {
         for (const m of game.monsters) {
           if (!m || !m.alive || !m.position || m.dormant) continue;
           if (m.team != null && m.team === eff.team) continue;
@@ -99380,17 +99860,44 @@ function updateWorldEffects(dt) {
           try { if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', _bp); } catch (_) {}
         }
       }
+      // ⭐⭐⭐ (v47.92) A PILOT PROJECTILE THAT REACHES THE TETHER HOLDING THEM breaks against it - the
+      // projectile half of "shoot your way out" (hitscan and pellets go through the obstacle slot; see
+      // _tetherShotProbe). Only the trap that holds the LOCAL pilot takes shots, only the pilot's own
+      // rounds count, and the round is spent on it. Silent despawn: the main projectile loop sweeps it.
+      if (_tetherHoldsMe(eff) && game.projectiles && game.projectiles.length) {
+        const _R = _tetherShotK().hitR, _R2 = _R * _R;
+        for (let _pi = 0; _pi < game.projectiles.length; _pi++) {
+          const _p = game.projectiles[_pi];
+          if (!_p || !_p.alive || _p.owner !== 'player' || !(_p.damage > 0) || !_p.position) continue;
+          if (_p.position.distanceToSquared(eff.position) > _R2) continue;
+          _tetherTakeShot(eff, _p.damage);
+          try {
+            if (typeof spawnExplosion === 'function') spawnExplosion(_p.position, 8);
+            if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_p.position, 4);
+            if (typeof showHitMarker === 'function') showHitMarker();
+          } catch (_) {}
+          try { _despawnProjectileSilent(_p); } catch (_) { _p.alive = false; }
+          if (eff._shotDown) break;
+        }
+      }
+      // ⚠ NOT `continue`: this branch sits in the sweep loop, and the removal of an expired effect is at
+      //   the BOTTOM of the loop body - skipping it would leave a shot-down trap in the list for good.
+      //   A trap shot down this frame only skips its dressing; timer 0 lets the sweep below take it.
+      const _tethGone = !!eff._shotDown;
+      if (!_tethGone) _tetherAlphaApply(eff);   // (v47.92) faint when set, readable once it has caught someone
       // ---- Visible effects so the trap reads as an active ensnare ----
       // The bare octahedron looks like a static debug widget ; layer in:
       //   * spinning rotation per frame so the geometry visibly tumbles,
       //   * a pulsing additive glow halo around it,
       //   * tendril lightning arcs reaching outward (and toward the rooted
       //     target if one exists, "tether" reading).
-      if (eff.mesh) {
+      if (eff.mesh && !_tethGone) {
         eff.mesh.rotation.x += dt * 1.4;
         eff.mesh.rotation.y += dt * 2.1;
         if (eff.mesh.material && eff.mesh.material.uniforms && eff.mesh.material.uniforms.uIntensity) {
-          eff.mesh.material.uniforms.uIntensity.value = eff.triggered ? 1.7 : 1.0;
+          // (v47.92) a shot landing on the tether that holds you flares it for 0.12 s - the hit you just made
+          if (eff._hitFlash > 0) eff._hitFlash -= dt;
+          eff.mesh.material.uniforms.uIntensity.value = (eff._hitFlash > 0) ? 3.0 : (eff.triggered ? 1.7 : 1.0);
         }
         const ph = (eff.pulsePhase || 0) + game.time * 5.0;
         if (eff.glow) {
@@ -99408,7 +99915,7 @@ function updateWorldEffects(dt) {
       // directions ; if a target is rooted, also arc toward them so the
       // tether is visually obvious.
       eff.arcTimer = (eff.arcTimer || 0) - dt;
-      if (eff.arcTimer <= 0 && typeof spawnLightningBolt === 'function') {
+      if (eff.arcTimer <= 0 && !_tethGone && typeof spawnLightningBolt === 'function') {
         // Random outward tendril
         const dir = new THREE.Vector3(
           (Math.random() - 0.5),
@@ -99419,12 +99926,16 @@ function updateWorldEffects(dt) {
         dir.normalize();
         const reach = 80 + Math.random() * 100;
         const arcEnd = eff.position.clone().add(dir.multiplyScalar(reach));
-        spawnLightningBolt(eff.position, arcEnd, LSS.CLASS_COLORS.PUNCTURE, 0.08, 1, 1.0);
+        // (v47.92) a SET trap crackles thinner (0.6 vs 1.0) - see the idle cadence below
+        spawnLightningBolt(eff.position, arcEnd, LSS.CLASS_COLORS.PUNCTURE, 0.08, 1, eff.triggered ? 1.0 : 0.6);
         // Tether arc to the rooted target, if any (longer, brighter, branched)
         if (eff.triggered && eff.rootTarget && eff.rootTarget.alive) {
           spawnLightningBolt(eff.position, eff.rootTarget.position, LSS.CLASS_COLORS.PUNCTURE, 0.10, 2, 1.4);
         }
-        eff.arcTimer = 0.05 + Math.random() * 0.05;
+        // (v47.92) ...and about a quarter as often while it waits: a bolt every 50-100 ms was the
+        // brightest thing a hidden trap did. Once it has caught someone it crackles at the old rate
+        // (and the tether arc to the victim rides the same clock, so it keeps its cadence).
+        eff.arcTimer = eff.triggered ? (0.05 + Math.random() * 0.05) : (0.22 + Math.random() * 0.2);
       }
     }
 
@@ -123499,7 +124010,23 @@ function _lssGenRaceTrack(base) {
   const ang = R(0, Math.PI * 2);
   const fx = Math.cos(ang), fz = Math.sin(ang), px = -fz, pz = fx;
   // (v46.84) A LOT LONGER (owner): 110-140 SU (16.5-21 km) with 12-16 gates, from 36-48 SU and 4-6.
-  const L = SU * R(110, 140);
+  // ⭐⭐ (v47.90) ...AND FOUR TIMES THAT, WITH A GATE WHERE EVERY FOURTH ONE WAS. Owner: "make the rings
+  // in the shifting run about the distance of every 4 rings how they currently are... so 1/4 less rings
+  // in this distance, but let's make the distance 4x longer". So the course is laid exactly as before -
+  // one room every ~1,300 u, the same side/height random walk per room, the same clamps - over 4x the
+  // length (440-560 SU, 66-84 k units), and only every 4th room is a GATE; the three between are BEND
+  // rooms: carved caverns with no ring. Same 12-16 gates a lap, same local twist, a gate every ~5 km.
+  // The bends stay ROOMS (not extra points on a longer tunnel) on purpose: every tunnel stays a straight
+  // room-to-room link, which is the one shape `chooseRaceWaypointTo`'s "the line to a room centre is
+  // clear from the corridor axis" rule is true for, and the race line (`_rcLineBuild`) chains through
+  // them room by room. Their only costs are more elements in the route carve (see the v47.90 box test
+  // in `_stRouteAt`) and a bigger arena bound (`_lssFlightArena` now contains the level).
+  // Dev A/B knob: `window.__shiftRunPer` = rooms per gate (default 4). 1 is the v46.84 course EXACTLY -
+  // same length draw, same per-room draws in the same order, every room a gate. Build-time only, and a
+  // LOCAL knob: in a room every peer must hold the same value or their tracks differ.
+  let PER = 4;
+  try { const k = (typeof window !== 'undefined') ? window.__shiftRunPer : undefined; if (typeof k === 'number' && k >= 1 && k <= 8) PER = k | 0; } catch (_) {}
+  const L = SU * R(110, 140) * PER;
   const at = (t, side, y) => ({ x: fx * t + px * side, y: y, z: fz * t + pz * side });
   const rooms = [], tunnels = [];
   const s0 = -L / 2;
@@ -123509,23 +124036,33 @@ function _lssGenRaceTrack(base) {
     rooms.push({ id: 'start_' + ((i % 2) ? 'b' : 'a') + (Math.floor(i / 2) + 1), team: (i % 2) ? 'B' : 'A', x: q.x, y: q.y, z: q.z, r: SU * 1.6 });
   }
   const N = 12 + Math.floor(rnd() * 5);
+  const M = PER * (N + 1) - 1;   // rooms between the start line and the finish (PER 4: three bends, then the gate)
   let side = 0, yy = 0;
-  const gates = [];
-  for (let i = 0; i < N; i++) {
-    const t = s0 + L * (i + 1) / (N + 1);
+  const gates = [], line = [];
+  for (let i = 0; i < M; i++) {
+    const t = s0 + L * (i + 1) / (M + 1);
     side = Math.max(-SU * 9, Math.min(SU * 9, side + SU * R(-4.5, 4.5)));
     yy = Math.max(-SU * 4, Math.min(SU * 4, yy + SU * R(-1.8, 1.8)));
     const q = at(t, side, yy);
-    const g = { id: 'gate_' + (i + 1), team: null, gate: i + 1, x: q.x, y: q.y, z: q.z, r: SU * R(1.8, 2.3) };
-    rooms.push(g); gates.push(g);
+    const k = i + 1;
+    let rm;
+    if (k % PER === 0) {
+      const gi = k / PER;
+      rm = { id: 'gate_' + gi, team: null, gate: gi, x: q.x, y: q.y, z: q.z, r: SU * R(1.8, 2.3) };
+      gates.push(rm);
+    } else {
+      // `bend` - spawnDynamicObjects gives these ONE rock cluster, out at the edge (see there)
+      rm = { id: 'bend_' + k, team: null, bend: true, x: q.x, y: q.y, z: q.z, r: SU * R(1.8, 2.3) };
+    }
+    rooms.push(rm); line.push(rm);
   }
   const fq = at(L / 2, 0, 0);
   const finish = { id: 'finish', team: null, champion: true, x: fq.x, y: fq.y, z: fq.z, r: SU * 3.0 };
   rooms.push(finish);
   const link = (a, b, r) => tunnels.push({ path: [{ x: a.x, y: a.y, z: a.z }, { x: b.x, y: b.y, z: b.z }], r: r });
-  for (let i = 0; i < lanes.length; i++) link(rooms[i], gates[0], 240);
-  for (let i = 0; i < gates.length - 1; i++) link(gates[i], gates[i + 1], 260);
-  link(gates[gates.length - 1], finish, 260);
+  for (let i = 0; i < lanes.length; i++) link(rooms[i], line[0], 240);
+  for (let i = 0; i < line.length - 1; i++) link(line[i], line[i + 1], 260);
+  link(line[line.length - 1], finish, 260);
   const BIOMES = ['rocky', 'crystalcave', 'volcanic', 'snow', 'goldmine', 'grassy', 'brokensim'];
   const biome = BIOMES[Math.floor(rnd() * BIOMES.length) % BIOMES.length];
   console.log('[race-shifting] seed=' + seed + ' gates=' + N + ' len=' + Math.round(L) + ' biome=' + biome);
@@ -123970,6 +124507,8 @@ function buildRoomGraphLevel(level) {
     bMinY=Math.min(bMinY,seg.a.y-sr,seg.b.y-sr);bMaxY=Math.max(bMaxY,seg.a.y+sr,seg.b.y+sr);
     bMinZ=Math.min(bMinZ,seg.a.z-sr,seg.b.z-sr);bMaxZ=Math.max(bMaxZ,seg.a.z+sr,seg.b.z+sr);
   }
+  // (v47.90) how far out this level reaches - _lssFlightArena grows the flyable box to contain it
+  game._levelSpan = isFinite(bMinX) ? Math.max(Math.abs(bMinX), Math.abs(bMaxX), Math.abs(bMinZ), Math.abs(bMaxZ)) : 0;
 
   // --- SANDWICH TERRAIN: params + bounds expansion ---
   // Deterministic mountain "sandwich" (jagged peaks below + mirrored peaks

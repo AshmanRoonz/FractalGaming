@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.84";
+const LSS_BUILD = "47.93";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -9874,6 +9874,13 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
   tetherEff.glow = haloMesh;
   tetherEff.pulsePhase = Math.random() * Math.PI * 2;
   tetherEff.arcTimer = 0;
+  try {
+    tetherEff._aBase = {
+      core: (tetherMat.uniforms.uLayerAlpha && tetherMat.uniforms.uLayerAlpha.value) ? tetherMat.uniforms.uLayerAlpha.value.slice() : null,
+      halo: (haloMat.uniforms.uLayerAlpha && haloMat.uniforms.uLayerAlpha.value) ? haloMat.uniforms.uLayerAlpha.value.slice() : null,
+    };
+    _tetherAlphaApply(tetherEff);
+  } catch (_) {}
   if (broadcast && net.active && net.sendEvent) {
     net.sendEvent({
       type: 'effect_spawn', kind: 'tether',
@@ -9882,6 +9889,109 @@ function spawnTetherTrap(pos, owner, team, ownerPeerId, netId, broadcast) {
     });
   }
 }
+const TETHER_ALPHA = { idle: 0.35, caught: 0.7 };
+function _tetherAlphaK(eff) {
+  let k = eff && eff.triggered ? TETHER_ALPHA.caught : TETHER_ALPHA.idle;
+  try {
+    const o = window.__tetherAlpha;
+    if (o && typeof o === 'object') { const v = eff && eff.triggered ? o.caught : o.idle; if (typeof v === 'number' && isFinite(v) && v >= 0) k = v; }
+  } catch (_) {}
+  return k;
+}
+function _tetherAlphaApply(eff) {
+  if (!eff || !eff._aBase) return;
+  const k = _tetherAlphaK(eff);
+  if (eff._aK === k) return;
+  eff._aK = k;
+  const set = (m, base) => {
+    try { if (m && base && m.uniforms && m.uniforms.uLayerAlpha) m.uniforms.uLayerAlpha.value = base.map(a => a * k); } catch (_) {}
+  };
+  set(eff.mesh && eff.mesh.material, eff._aBase.core);
+  set(eff.glow && eff.glow.material, eff._aBase.halo);
+}
+const TETHER_SHOT = { hp: 1200, hitR: 70 };
+function _tetherShotK() {
+  try {
+    const k = window.__tetherShot;
+    if (k && typeof k === 'object') return { hp: (+k.hp > 0) ? +k.hp : TETHER_SHOT.hp, hitR: (+k.hitR > 0) ? +k.hitR : TETHER_SHOT.hitR };
+  } catch (_) {}
+  return TETHER_SHOT;
+}
+function _tetherHoldsMe(eff) {
+  return !!(eff && eff.type === 'tether' && eff.triggered && !eff._shotDown && eff.timer > 0 &&
+            typeof player !== 'undefined' && player && eff.rootTarget === player && player.shipState !== 'dead');
+}
+function _tetherShotProbe(origin, dir, maxDist) {
+  const W = (typeof game !== 'undefined' && game) ? game.worldEffects : null;
+  if (!W || !W.length || !origin || !dir) return null;
+  const K = _tetherShotK(), R2 = K.hitR * K.hitR;
+  let best = null, bestP = Infinity;
+  for (let i = 0; i < W.length; i++) {
+    const eff = W[i]; if (!_tetherHoldsMe(eff)) continue;
+    const ex = eff.position.x - origin.x, ey = eff.position.y - origin.y, ez = eff.position.z - origin.z;
+    const proj = ex * dir.x + ey * dir.y + ez * dir.z;
+    if (proj < 0 || proj > maxDist || proj >= bestP) continue;
+    const cx = ex - dir.x * proj, cy = ey - dir.y * proj, cz = ez - dir.z * proj;
+    if (cx * cx + cy * cy + cz * cz > R2) continue;
+    best = eff; bestP = proj;
+  }
+  if (!best) return null;
+  if (!best._shotProxy) {
+    const eff = best;
+    best._shotProxy = { alive: true, name: 'TetherTrap', position: eff.position, collisionRadius: K.hitR,
+                        takeDamage: (dmg) => _tetherTakeShot(eff, dmg) };
+  }
+  return { obj: best._shotProxy, proj: bestP };
+}
+function _tetherTakeShot(eff, dmg) {
+  if (!_tetherHoldsMe(eff)) return 0;
+  const d = Math.max(0, +dmg || 0);
+  if (eff.shotHP == null) eff.shotHP = _tetherShotK().hp;
+  eff.shotHP -= d;
+  eff._hitFlash = 0.12;
+  if (eff.shotHP <= 0) _tetherShatter(eff);
+  return d;
+}
+function _tetherShatter(eff) {
+  if (!eff || eff._shotDown) return;
+  eff._shotDown = true;
+  if (eff._shotProxy) eff._shotProxy.alive = false;
+  eff.triggered = false; eff.rootTarget = null; eff.rootTimer = 0;
+  eff.timer = 0;   // swept, meshes disposed, exactly like an expiry
+  let hold = 0;
+  try { for (const o of game.worldEffects) if (o !== eff && _tetherHoldsMe(o)) hold = Math.max(hold, o.rootTimer || 0); } catch (_) {}
+  game.playerRootTimer = hold;
+  try {
+    const p = eff.position.clone();
+    const col = (typeof _fxFriendly === 'function' && _fxFriendly(eff.team)) ? LSS.CLASS_COLORS.PUNCTURE : _FXFF.tetherEnemy;
+    if (typeof spawnExplosion === 'function') spawnExplosion(p, 14);
+    if (typeof spawnImpactSparks === 'function') spawnImpactSparks(p, 12);
+    if (typeof spawnDynamicLight === 'function') spawnDynamicLight(p, col, 2.6, 520, 0.3);
+    if (typeof playSpatialSound === 'function') playSpatialSound('firework_pop', p);
+  } catch (_) {}
+  try {
+    if (typeof net !== 'undefined' && net && net.active && net.sendEvent && eff.netId !== undefined) {
+      net.sendEvent({ type: 'effect_destroy', netId: eff.netId });
+    }
+  } catch (_) {}
+  try { window.__tetherShotDown = (window.__tetherShotDown | 0) + 1; } catch (_) {}
+}
+if (typeof window !== 'undefined') window.__tetherProbe = {
+  drop: function (dist) {
+    try {
+      const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+      const p = player.position.clone().addScaledVector(fwd, dist || 150);
+      const enemy = (player.team === LSS.TEAM_FLEET_A) ? LSS.TEAM_FLEET_B : LSS.TEAM_FLEET_A;
+      spawnTetherTrap(p, 'bot', enemy, null, ++net.effectIdCounter, false);
+      return [Math.round(p.x), Math.round(p.y), Math.round(p.z)];
+    } catch (e) { return String(e); }
+  },
+  list: function () {
+    return (game.worldEffects || []).filter(e => e && e.type === 'tether').map(e => ({
+      hp: (e.shotHP == null) ? null : Math.round(e.shotHP), caught: !!e.triggered, me: e.rootTarget === player,
+      shot: !!e._shotDown, timer: +e.timer.toFixed(1), alphaK: e._aK, dist: Math.round(e.position.distanceTo(player.position)) }));
+  },
+};
 
 function _buildFlameChainFlameLicks(effData, pos, dir, length) {
   if (typeof _makeFXMaterial !== 'function') return;
@@ -16162,8 +16272,11 @@ function _lssFlightArena() {
       return 3500000;   // ~500 km at 7 units/metre
     }
   } catch (_) {}
-  return (_lssHubWorld() || (typeof LSS !== 'undefined' && LSS.MODE === 'endless'))   // (v46.82) the OVERWORLD CIRCUIT's cities sit ~48k out
+  const _base = (_lssHubWorld() || (typeof LSS !== 'undefined' && LSS.MODE === 'endless'))   // (v46.82) the OVERWORLD CIRCUIT's cities sit ~48k out
     ? LSS.ARENA_SIZE * 10 : LSS.ARENA_SIZE;
+  let _span = 0;
+  try { _span = (typeof game !== 'undefined' && game && game._levelSpan) || 0; } catch (_) {}
+  return (_span > 0) ? Math.max(_base, (_span + 3000) / 0.8) : _base;
 }
 
 
@@ -16849,9 +16962,14 @@ const _stRouteScratch={o:0,ty:0};
 function _stRouteAt(x,z,T){
   const soft=T.CLEAR_SOFT||300; let o=0, ty=T.YMID;
   const S=game.levelSpheres||_ST_EMPTY;
-  for(let i=0;i<S.length;i++){const s=S[i];const dsx=x-s.cx,dsz=z-s.cz;const d=Math.sqrt(dsx*dsx+dsz*dsz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o){o=e;ty=s.cy;}}
+  for(let i=0;i<S.length;i++){const s=S[i];const dsx=x-s.cx,dsz=z-s.cz;const rq=s.r+soft;
+    if(dsx>=rq||dsx<=-rq||dsz>=rq||dsz<=-rq)continue;
+    const d=Math.sqrt(dsx*dsx+dsz*dsz);const e=1-_stSmooth(s.r,s.r+soft,d);if(e>o){o=e;ty=s.cy;}}
   const C=game.levelCylinders||_ST_EMPTY;
   for(let i=0;i<C.length;i++){const c=C[i];
+    if(c._mnx===undefined){c._mnx=Math.min(c.ax,c.bx);c._mxx=Math.max(c.ax,c.bx);c._mnz=Math.min(c.az,c.bz);c._mxz=Math.max(c.az,c.bz);}
+    const rq=c.r+soft;
+    if(x<c._mnx-rq||x>c._mxx+rq||z<c._mnz-rq||z>c._mxz+rq)continue;
     const dx=c.bx-c.ax,dz=c.bz-c.az,l2=dx*dx+dz*dz;
     let t=l2>0?((x-c.ax)*dx+(z-c.az)*dz)/l2:0; t=t<0?0:(t>1?1:t);
     const cx=c.ax+dx*t,cz=c.az+dz*t,dqx=x-cx,dqz=z-cz,d=Math.sqrt(dqx*dqx+dqz*dqz);
@@ -37593,7 +37711,7 @@ class Bot {
     if (this.dashActive && this._botDashActiveT <= 0) this.dashActive = false;
     this._botDashCd = (this._botDashCd || 0) - dt;
     if (!this.dashActive && this._botDashCd <= 0 && this.alive && !(this.arcSlowTimer > 0) &&
-        !this._stuckEscapeT && this.targetDir) {
+        !this._stuckEscapeT && this.targetDir && this._rcCapAt !== game.time) {
       const _ct = this.combatTarget;
       const _gap = (_ct && _ct.position) ? _ct.position.distanceTo(this.position) : 0;
       const _closing = !!(_ct && _ct.position);
@@ -37635,6 +37753,10 @@ class Bot {
       const _ls = this.velocity.length();
       if (_ls > this._latCap) this.velocity.multiplyScalar(Math.max(this._latCap / _ls, 1 - 3 * dt));
     }
+    if (this._rcCapAt === game.time && this._rcCap > 0) {
+      const _rs = this.velocity.length();
+      if (_rs > this._rcCap) this.velocity.multiplyScalar(Math.max(this._rcCap / _rs, 1 - 3 * dt));
+    }
 
     if ((this.hoardModelKey && LSS.MODE === 'campaign') ||
         (this.hoardModelKey && (this._cavernBot || this._riftGuard)) ||
@@ -37674,8 +37796,14 @@ class Bot {
         const _objRange = this.loadout.weapon.range * ((this._rangeModeT > 0) ? 1.6 : 1.0);
         const _OBJ_BREAK = (typeof window !== 'undefined' && window.__botAI && window.__botAI.objBreak != null)
           ? window.__botAI.objBreak : 1500;
-        const _isBreaker = (((this.id | 0) % 2) === 0);
-        if (_shD < _objRange && (_isBreaker || !_fireTgt || _ctD > _OBJ_BREAK)) _fireTgt = _sh;
+        let _isBreaker = (((this.id | 0) % 2) === 0);
+        let _mayShell = true;
+        if (LSS.MODE === 'race') {
+          let _rcl = true;
+          try { if (typeof _raceCanClaim === 'function') _rcl = !!_raceCanClaim(this); } catch (_) {}
+          _isBreaker = _rcl; _mayShell = _rcl;
+        }
+        if (_mayShell && _shD < _objRange && (_isBreaker || !_fireTgt || _ctD > _OBJ_BREAK)) _fireTgt = _sh;
       }
     }
     if (this.fireTimer <= 0 && game.state === 'playing' && this._mayFight() && _fireTgt) {
@@ -45049,12 +45177,12 @@ function spawnDynamicObjects(rooms) {
   };
   const nonSpawnRooms = _lssHubWorld() ? [] : rooms.filter(r => !r.team);   // (v46.82) no obstacle clusters in the open overworld, race or free flight   
   for (const rm of nonSpawnRooms) {
-    const count = 2 + Math.floor(Math.random() * 2); 
+    const count = rm.bend ? 1 : 2 + Math.floor(Math.random() * 2);
     for (let i = 0; i < count; i++) {
       let placed = false;
       for (let attempt = 0; attempt < 8 && !placed; attempt++) {
         const angle = Math.random() * Math.PI * 2;
-        const dist = rm.r * (0.15 + Math.random() * 0.45);
+        const dist = rm.r * (rm.bend ? (0.5 + Math.random() * 0.15) : (0.15 + Math.random() * 0.45));
         const yOff = (Math.random() - 0.5) * rm.r * 0.6;
         const px = rm.x + Math.cos(angle) * dist;
         const py = rm.y + yOff;
@@ -47922,6 +48050,7 @@ class RaceRing {
     this.diameter = diameter || PORTAL_GATE_DIAMETER;
     this._gate = !!(opts && opts.gate);
     this._gateT = 0; this._gatePh = Math.random() * 6.283; this._gateParts = null;
+    this._gateAxis = (opts && opts.axis) ? opts.axis.clone() : null;   // (v47.87) the hoop faces along the track
     this.alive = true;
     this.captured = false;  
     this.group = null;      
@@ -47962,11 +48091,14 @@ class RaceRing {
     const lib = (typeof _raceGateLib === 'function') ? _raceGateLib() : null;
     if (!lib) return;
     const grp = new THREE.Group();
-    const core = new THREE.Mesh(lib.geo, lib.coreMat); core.renderOrder = 1; grp.add(core);
-    const sh1 = new THREE.Mesh(lib.shGeo1, lib.shMat1); sh1.renderOrder = 2; grp.add(sh1);
+    const _hoop = !(typeof window !== 'undefined' && window.__raceGateHoop === false) && !!lib.hoopGeo;
+    const _body = _hoop ? new THREE.Group() : grp;
+    if (_hoop) grp.add(_body);
+    const core = new THREE.Mesh(_hoop ? lib.hoopGeo : lib.geo, lib.coreMat); core.renderOrder = 1; _body.add(core);
+    const sh1 = new THREE.Mesh(_hoop ? lib.hoopGeo1 : lib.shGeo1, lib.shMat1); sh1.renderOrder = 2; _body.add(sh1);
     let sh2 = null, spr = null, rig = null;
     if (!lib.lite) {
-      sh2 = new THREE.Mesh(lib.shGeo2, lib.shMat2); sh2.renderOrder = 2; grp.add(sh2);
+      sh2 = new THREE.Mesh(_hoop ? lib.hoopGeo2 : lib.shGeo2, lib.shMat2); sh2.renderOrder = 2; _body.add(sh2);
       spr = new THREE.Sprite(lib.sprMat); spr.scale.set(170, 170, 1); grp.add(spr);
       rig = new THREE.Group();
       for (let r = 0; r < 3; r++) {
@@ -47988,9 +48120,16 @@ class RaceRing {
       if (rig) rig.scale.setScalar(_c);
     }
     grp.scale.setScalar(this.diameter / 300 * _gk);
+    if (_hoop) {
+      _body.scale.setScalar(1 / _gk);   // the hoop is the checkpoint: true size, never the findability scale
+      const ax = this._gateAxis;
+      if (ax && ax.lengthSq() > 1e-6) {
+        try { _body.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), ax.clone().normalize()); } catch (_) {}
+      }
+    }
     grp.position.copy(this.position);
     scene.add(grp);
-    this.group = grp; this._inner = core; this._gateParts = { core, sh1, sh2, spr, rig };
+    this.group = grp; this._inner = core; this._gateParts = { core, sh1, sh2, spr, rig, hoop: _hoop };
     this._usedProto = true;
   }
   _animateGate(dt) {
@@ -48026,10 +48165,23 @@ class RaceRing {
     } catch (_) {}
     const tt = this._gateT, ph = this._gatePh;
     const wob = 1 + 0.16 * Math.cos(tt * 7.3 + ph) + 0.11 * Math.cos(tt * 12.7 + ph * 2.3) + 0.06 * Math.cos(tt * 23.1 + ph * 4.1);
-    if (P.core) P.core.scale.setScalar(wob);
-    if (P.sh1) { P.sh1.rotation.y += dt * 1.9; P.sh1.rotation.x = 0.6 * Math.cos(tt * 0.9 + ph); }
-    if (P.sh2) { P.sh2.rotation.y -= dt * 2.6; P.sh2.rotation.z = 0.8 * Math.cos(tt * 1.3 + ph); }
+    if (P.hoop) {
+      if (P.core) P.core.scale.setScalar(1 + (wob - 1) * 0.25);
+      if (P.sh1) P.sh1.rotation.z += dt * 1.9;
+      if (P.sh2) P.sh2.rotation.z -= dt * 2.6;
+    } else {
+      if (P.core) P.core.scale.setScalar(wob);
+      if (P.sh1) { P.sh1.rotation.y += dt * 1.9; P.sh1.rotation.x = 0.6 * Math.cos(tt * 0.9 + ph); }
+      if (P.sh2) { P.sh2.rotation.y -= dt * 2.6; P.sh2.rotation.z = 0.8 * Math.cos(tt * 1.3 + ph); }
+    }
     if (P.rig) { P.rig.rotation.y += dt * 0.45; P.rig.rotation.x = 0.10 * Math.cos(tt * 0.7 + ph); }
+    if (P.hoop && P.spr) {
+      let gk = 1;
+      try { const k = window.__raceHoopGlow; if (typeof k === 'number' && isFinite(k) && k > 0) gk = k; } catch (_) {}
+      if (P._sprBase == null) P._sprBase = P.spr.scale.x;
+      const want = P._sprBase * gk;
+      if (P.spr.scale.x !== want) P.spr.scale.set(want, want, 1);
+    }
     if (this.group) this.group.position.y = this.position.y + Math.sin(tt * 1.8 + ph) * 12;
   }
   orientAxis(dir) {
@@ -48250,11 +48402,15 @@ function _raceGateLib() {
       if (sh2.userData) sh2.userData._timeOffset = Math.random() * 10;
     } else { sh1 = mkFlat(0x33ccff, 0.5); sh2 = mkFlat(0x2288ff, 0.3); }
     const rayTex = (typeof _lssEndlessBoltRayTexture === 'function') ? _lssEndlessBoltRayTexture() : null;
+    const _hR = RACE_CIRCUIT.captureK * 300 + 12;
     _rcGateLib = {
       lite,
       geo: new THREE.OctahedronGeometry(22),
       shGeo1: new THREE.IcosahedronGeometry(46, 1),
       shGeo2: new THREE.IcosahedronGeometry(64, 1),
+      hoopGeo: new THREE.TorusGeometry(_hR, 12, 14, 96),
+      hoopGeo1: new THREE.TorusGeometry(_hR, 22, 14, 96),
+      hoopGeo2: new THREE.TorusGeometry(_hR, 32, 16, 96),
       rayGeo: new THREE.PlaneGeometry(30, 440),
       coreMat: new THREE.MeshBasicMaterial({ color: 0xbff2ff, toneMapped: false }),
       shMat1: sh1, shMat2: sh2,
@@ -48664,6 +48820,159 @@ function _rcTrackNav(bot, roomId) {
     return wp ? _rcV2.set(wp.x, wp.y, wp.z) : null;
   } catch (_) { return null; }
 }
+const RACE_LINE = {
+  lookK: 0.7, lookMin: 360, lookMax: 820,   // lookahead along the tunnel = speed x lookK, clamped
+  brakeD: 700,        // start braking this far (along the tunnel) before a sharp gate
+  exitD: 480,         // ...and keep the cap this far into the next leg while the nose is still coming round
+  sharpDeg: 18,       // a gate turning less than this is taken flat out
+  turnD: 1.6,         // the turn has to fit in (gate room radius x turnD) of travel: R = that / angle
+  aEff: 0.7,          // share of the hull's acceleration that actually turns it (the heading lags the goal)
+  vMin: 380,          // never brake below this
+};
+if (typeof window !== 'undefined') window.__raceLineK = RACE_LINE;
+function _rcLineBuild(C) {
+  if (!C) return null;
+  if (C._line !== undefined) return C._line;   // per circuit, and a track circuit is re-made every round
+  C._line = null;
+  try {
+    const L = game.currentLevel, g = game.raceGraph;
+    if (!L || !Array.isArray(L.rooms) || !Array.isArray(L.tunnels)) return null;
+    const byId = {}; for (const r of L.rooms) if (r && r.id) byId[r.id] = r;
+    const roomAt = (p) => {
+      let best = null, bd = Infinity;
+      for (const r of L.rooms) {
+        const dx = p.x - r.x, dy = p.y - r.y, dz = p.z - r.z, d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 <= r.r * r.r && d2 < bd) { bd = d2; best = r; }
+      }
+      return best;
+    };
+    const tun = {};
+    for (const t of L.tunnels) {
+      const P = t && t.path; if (!P || P.length < 2) continue;
+      const a = roomAt(P[0]), b = roomAt(P[P.length - 1]);
+      if (!a || !b || a === b) continue;
+      const tr = t.r || 260;
+      tun[a.id + '|' + b.id] = { P, r: tr }; tun[b.id + '|' + a.id] = { P: P.slice().reverse(), r: tr };
+    }
+    const bfs = (a, b) => {
+      if (!g || !g.nodes || !g.nodes[a] || !g.nodes[b]) return null;
+      const prev = {}, seen = {}; const q = [a]; seen[a] = true;
+      while (q.length) {
+        const id = q.shift(); if (id === b) break;
+        for (const nb of g.nodes[id].neighbors) { if (seen[nb.id]) continue; seen[nb.id] = true; prev[nb.id] = id; q.push(nb.id); }
+      }
+      if (!seen[b]) return null;
+      const out = []; for (let id = b; id != null; id = (id === a) ? null : prev[id]) out.push(id);
+      return out.reverse();
+    };
+    const legOf = (path, endR) => {
+      if (!path || path.length < 2) return null;
+      const p = [], cum = [], rAt = [];
+      const push = (x, y, z, r) => {
+        const o = p[p.length - 1];
+        if (o) {
+          const s = Math.hypot(x - o[0], y - o[1], z - o[2]);
+          if (s < 1) { rAt[rAt.length - 1] = Math.max(rAt[rAt.length - 1], r); return; }   // the generated tunnels start and end ON the room centres
+          cum.push(cum[cum.length - 1] + s);
+        } else cum.push(0);
+        p.push([x, y, z]); rAt.push(r);
+      };
+      for (let h = 0; h < path.length; h++) {
+        const Rm = byId[path[h]]; if (!Rm) return null;
+        push(Rm.x, Rm.y, Rm.z, Rm.r || 300);
+        if (h + 1 < path.length) {
+          const T = tun[path[h] + '|' + path[h + 1]]; if (!T) return null;
+          for (const q of T.P) push(q.x, q.y, q.z, T.r);
+        }
+      }
+      if (p.length < 2) return null;
+      const turnAt = new Array(p.length).fill(0);
+      for (let j = 1; j < p.length - 1; j++) {
+        const ux = p[j][0] - p[j - 1][0], uy = p[j][1] - p[j - 1][1], uz = p[j][2] - p[j - 1][2];
+        const vx = p[j + 1][0] - p[j][0], vy = p[j + 1][1] - p[j][1], vz = p[j + 1][2] - p[j][2];
+        const nu = Math.hypot(ux, uy, uz) || 1, nv = Math.hypot(vx, vy, vz) || 1;
+        turnAt[j] = Math.acos(Math.max(-1, Math.min(1, (ux * vx + uy * vy + uz * vz) / (nu * nv))));
+      }
+      return { p, cum, len: cum[cum.length - 1], roomR: endR || 300, turn: 0, turnAt, rAt, rooms: path.length };
+    };
+    const ids = C.rings.map(r => r.roomId);
+    if (g && g.finishId) ids.push(g.finishId);   // leg N: the last gate -> the finish room
+    let leg0 = null;
+    try {
+      const st = L.rooms.find(r => r && r.team);
+      const sp = st ? bfs(st.id, ids[0]) : null;
+      if (sp && sp.length >= 3) leg0 = legOf(sp.slice(1), byId[ids[0]] && byId[ids[0]].r);
+    } catch (_) { leg0 = null; }
+    const legs = [leg0];
+    for (let i = 1; i < ids.length; i++) {
+      const B = byId[ids[i]];
+      legs.push(B ? legOf(bfs(ids[i - 1], ids[i]), B.r) : null);
+    }
+    const dirOf = (lg, first) => {
+      const a = first ? lg.p[0] : lg.p[lg.p.length - 2], b = first ? lg.p[1] : lg.p[lg.p.length - 1];
+      const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], n = Math.hypot(dx, dy, dz) || 1;
+      return [dx / n, dy / n, dz / n];
+    };
+    for (let i = 0; i < legs.length - 1; i++) {
+      const A = legs[i], B = legs[i + 1]; if (!A || !B) continue;
+      const u = dirOf(A, false), v = dirOf(B, true);
+      A.turn = Math.acos(Math.max(-1, Math.min(1, u[0] * v[0] + u[1] * v[1] + u[2] * v[2])));   // the gate at the END of leg i
+    }
+    C._line = { legs, n: legs.filter(Boolean).length };
+    console.log('[race] race line:', C._line.n, 'of', legs.length, 'legs (', legs.map(l => l ? l.rooms : '-').join(' '), 'rooms each)');
+  } catch (e) { console.warn('[race] race line build failed:', e); C._line = null; }
+  return C._line;
+}
+function _rcLinePointAt(leg, s, out) {
+  const P = leg.p, cum = leg.cum;
+  let j = 0; while (j < P.length - 2 && cum[j + 1] < s) j++;
+  const seg = (cum[j + 1] - cum[j]) || 1, t = Math.max(0, Math.min(1, (s - cum[j]) / seg));
+  const a = P[j], b = P[j + 1];
+  return out.set(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t);
+}
+function _rcLineWaypoint(bot, idx, C) {
+  if (typeof window !== 'undefined' && window.__raceLine === false) return null;
+  const line = _rcLineBuild(C); if (!line) return null;
+  const leg = line.legs[idx]; if (!leg) return null;
+  const px = bot.position.x, py = bot.position.y, pz = bot.position.z, P = leg.p;
+  let bD2 = Infinity, bS = 0, bJ = 0;
+  for (let j = 0; j < P.length - 1; j++) {
+    const a = P[j], b = P[j + 1];
+    const abx = b[0] - a[0], aby = b[1] - a[1], abz = b[2] - a[2];
+    const L2 = abx * abx + aby * aby + abz * abz; if (L2 < 1) continue;
+    let t = ((px - a[0]) * abx + (py - a[1]) * aby + (pz - a[2]) * abz) / L2;
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    const qx = a[0] + abx * t - px, qy = a[1] + aby * t - py, qz = a[2] + abz * t - pz;
+    const d2 = qx * qx + qy * qy + qz * qz;
+    if (d2 < bD2) { bD2 = d2; bS = leg.cum[j] + t * Math.sqrt(L2); bJ = j; }
+  }
+  const K = RACE_LINE, v = bot.velocity, spd = v ? v.length() : 0;
+  const look = Math.max(K.lookMin, Math.min(K.lookMax, spd * K.lookK));
+  _rcLinePointAt(leg, Math.min(bS + look, leg.len), _rcV2);
+  try { window.__raceLineN = (window.__raceLineN | 0) + 1; } catch (_) {}
+  const acc = ((bot.chassis && bot.chassis.acceleration) || 600) * K.aEff;
+  const sharp = K.sharpDeg * Math.PI / 180;
+  const n = P.length;
+  let cap = Infinity;
+  const jn = bJ + 1;
+  const turnN = (jn >= n - 1) ? leg.turn : leg.turnAt[jn];
+  const rN = (jn >= n - 1) ? leg.roomR : leg.rAt[jn];
+  if (turnN > sharp && leg.cum[jn] - bS < K.brakeD) {
+    cap = Math.min(cap, Math.sqrt(acc * (rN * K.turnD) / turnN));
+  }
+  if (bS - leg.cum[bJ] < K.exitD && spd > 1) {
+    const a = P[bJ], b = P[bJ + 1];
+    const dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], dn = Math.hypot(dx, dy, dz) || 1;
+    const c = (v.x * dx + v.y * dy + v.z * dz) / (dn * spd);
+    const ang = Math.acos(Math.max(-1, Math.min(1, c)));
+    if (ang > sharp) cap = Math.min(cap, Math.sqrt(acc * (leg.rAt[bJ] * K.turnD) / Math.min(ang, Math.PI / 2)));
+  }
+  if (cap < Infinity) {
+    bot._rcCap = Math.max(K.vMin, cap); bot._rcCapAt = game.time;
+    try { window.__raceCapN = (window.__raceCapN | 0) + 1; } catch (_) {}
+  }
+  return _rcV2;
+}
 
 function _raceCircuitSeed() {
   let s = 0;
@@ -48734,12 +49043,31 @@ function _raceCircuitSpawnRings() {
   game.poleRings = [];
   for (let i = 0; i < C.rings.length; i++) {
     const r = C.rings[i];
-    const ring = new RaceRing(new THREE.Vector3(r.x, r.y, r.z), r.d, { gate: true });   // (v46.83) the Aegis bolt look
+    const ring = new RaceRing(new THREE.Vector3(r.x, r.y, r.z), r.d,
+                              { gate: true, axis: _raceGateAxis(C, i) });   // (v46.83) the Aegis look; (v47.87) as a hoop across the track
     ring._cidx = i;
     game.poleRings.push(ring);
   }
   _raceCircuitResetProgress();
   _raceCircuitRefreshVis();
+}
+function _raceGateAxis(C, i) {
+  const R = C.rings, r = R[i];
+  let px = null, pz = null;
+  if (i > 0) { px = R[i - 1].x; pz = R[i - 1].z; }
+  else if (C.kind === 'track' && Array.isArray(game.sdfRoomData)) {
+    let n = 0, sx = 0, sz = 0;
+    for (const q of game.sdfRoomData) if (q && q.team) { sx += q.x; sz += q.z; n++; }
+    if (n) { px = sx / n; pz = sz / n; }
+  }
+  if (px == null && C.start) { px = C.start.x; pz = C.start.z; }
+  const nx = (i + 1 < R.length) ? R[i + 1].x : (C.fin ? C.fin.x : r.x + (r.tx || 0));
+  const nz = (i + 1 < R.length) ? R[i + 1].z : (C.fin ? C.fin.z : r.z + (r.tz || 1));
+  let ax = 0, az = 0, haveIn = false;
+  if (px != null) { const x = r.x - px, z = r.z - pz, L = Math.hypot(x, z); if (L > 1) { ax += x / L; az += z / L; haveIn = true; } }
+  if (!(i === 0 && haveIn)) { const x = nx - r.x, z = nz - r.z, L = Math.hypot(x, z); if (L > 1) { ax += x / L; az += z / L; } }
+  const L = Math.hypot(ax, az);
+  return (L > 1e-3) ? new THREE.Vector3(ax / L, 0, az / L) : new THREE.Vector3(r.tx || 0, 0, r.tz || 1);
 }
 function _raceCircuitRefreshVis() {
   const R = game.poleRings; if (!Array.isArray(R)) return;
@@ -48771,7 +49099,8 @@ function _raceCircuitOnLocalCapture(idx) {
       if (typeof musicPlayChampionCue === 'function') musicPlayChampionCue();
     } else if (window.Overlays) {
       const nr = C.rings[player._raceIdx];
-      Overlays.banner('RING ' + (idx + 1) + ' / ' + N, nr.high ? 'Next gate is UP HIGH' : 'Next gate is low, between the buildings');
+      Overlays.banner('RING ' + (idx + 1) + ' / ' + N, nr.high ? 'Next gate is UP HIGH'
+                      : ((C.kind === 'track') ? 'Next gate - through the hoop' : 'Next gate is low, between the buildings'));
     }
   } catch (_) {}
   _raceCircuitRefreshVis();
@@ -49033,7 +49362,7 @@ function _raceCircuitBotWaypoint(bot, dt) {
       if (C.kind === 'track') {
         const g = game.raceGraph, fn = (g && g.nodes) ? g.nodes[g.finishId] : null;
         const inFin = !!(fn && Math.hypot(bot.position.x - fn.x, bot.position.y - fn.y, bot.position.z - fn.z) < (fn.r || 300));
-        if (!inFin) { const wp = _rcTrackNav(bot, g && g.finishId); if (wp) return wp; }
+        if (!inFin) { const wp = _rcLineWaypoint(bot, N, C) || _rcTrackNav(bot, g && g.finishId); if (wp) return wp; }   // (v47.86) the race line's last leg
       }
       const sh = game.championShell, f = game.championField;
       if (sh && sh.alive && sh.position) {
@@ -49059,7 +49388,7 @@ function _raceCircuitBotWaypoint(bot, dt) {
     if (dx * dx + dy * dy + dz * dz < cap * cap) { bot._raceIdx = ++idx; continue; }
     break;
   }
-  if (C.kind === 'track') { const wp = _rcTrackNav(bot, C.rings[idx].roomId); if (wp) return wp; }
+  if (C.kind === 'track') { const wp = _rcLineWaypoint(bot, idx, C) || _rcTrackNav(bot, C.rings[idx].roomId); if (wp) return wp; }
   const dist = Math.hypot(gx - bot.position.x, gy - bot.position.y, gz - bot.position.z);
   const ahead = Math.min(dist * 0.55, 900);
   const climb = Math.max(0, Math.min(900, (dist - 320) * 0.6));
@@ -59530,6 +59859,10 @@ function fireHitscan(origin, dir, w) {
       }
     }
   }
+  {
+    const _tq = _tetherShotProbe(origin, aimDir, Math.min(w.range, levelDist));
+    if (_tq && _tq.proj < bestObstDist) { bestObstacle = _tq.obj; bestObstDist = _tq.proj; }
+  }
 
   const isPiercing = (player.loadoutKey === 'PUNCTURE') ||
     (player.loadoutKey === 'BLASTER' && typeof _aegisUpFor === 'function' && _aegisUpFor(2));
@@ -59894,6 +60227,10 @@ function fireSpread(origin, dir, w) {
           bestObstDist = proj;
         }
       }
+    }
+    {
+      const _tq = _tetherShotProbe(origin, spreadDir, Math.min(_slRange, levelDist));
+      if (_tq && _tq.proj < bestObstDist) { bestObst = _tq.obj; bestObstDist = _tq.proj; }
     }
 
     let hitBot = false;
@@ -62775,7 +63112,7 @@ function updateWorldEffects(dt) {
     }
 
     else if (eff.type === 'tether') {
-      if (!eff.triggered) {
+      if (!eff.triggered && !eff._shotDown) {
         if (player && player.shipState !== 'dead' && player.alive !== false
             && eff.team !== player.team
             && player.position.distanceTo(eff.position) < eff.radius) {
@@ -62789,7 +63126,7 @@ function updateWorldEffects(dt) {
           } catch (_) {}
         }
       }
-      if (!eff.triggered) {
+      if (!eff.triggered && !eff._shotDown) {
         for (const bot of game.entities) {
           if (!bot.alive || bot.team === eff.team) continue;
           if (_bodyDist(eff.position, bot) < eff.radius) {
@@ -62804,7 +63141,7 @@ function updateWorldEffects(dt) {
           }
         }
       }
-      if (!eff.triggered && game.monsters) {
+      if (!eff.triggered && !eff._shotDown && game.monsters) {
         for (const m of game.monsters) {
           if (!m || !m.alive || !m.position || m.dormant) continue;
           if (m.team != null && m.team === eff.team) continue;
@@ -62856,11 +63193,30 @@ function updateWorldEffects(dt) {
           try { if (typeof playSpatialSound === 'function') playSpatialSound('explosion_large', _bp); } catch (_) {}
         }
       }
-      if (eff.mesh) {
+      if (_tetherHoldsMe(eff) && game.projectiles && game.projectiles.length) {
+        const _R = _tetherShotK().hitR, _R2 = _R * _R;
+        for (let _pi = 0; _pi < game.projectiles.length; _pi++) {
+          const _p = game.projectiles[_pi];
+          if (!_p || !_p.alive || _p.owner !== 'player' || !(_p.damage > 0) || !_p.position) continue;
+          if (_p.position.distanceToSquared(eff.position) > _R2) continue;
+          _tetherTakeShot(eff, _p.damage);
+          try {
+            if (typeof spawnExplosion === 'function') spawnExplosion(_p.position, 8);
+            if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_p.position, 4);
+            if (typeof showHitMarker === 'function') showHitMarker();
+          } catch (_) {}
+          try { _despawnProjectileSilent(_p); } catch (_) { _p.alive = false; }
+          if (eff._shotDown) break;
+        }
+      }
+      const _tethGone = !!eff._shotDown;
+      if (!_tethGone) _tetherAlphaApply(eff);   // (v47.92) faint when set, readable once it has caught someone
+      if (eff.mesh && !_tethGone) {
         eff.mesh.rotation.x += dt * 1.4;
         eff.mesh.rotation.y += dt * 2.1;
         if (eff.mesh.material && eff.mesh.material.uniforms && eff.mesh.material.uniforms.uIntensity) {
-          eff.mesh.material.uniforms.uIntensity.value = eff.triggered ? 1.7 : 1.0;
+          if (eff._hitFlash > 0) eff._hitFlash -= dt;
+          eff.mesh.material.uniforms.uIntensity.value = (eff._hitFlash > 0) ? 3.0 : (eff.triggered ? 1.7 : 1.0);
         }
         const ph = (eff.pulsePhase || 0) + game.time * 5.0;
         if (eff.glow) {
@@ -62872,7 +63228,7 @@ function updateWorldEffects(dt) {
         }
       }
       eff.arcTimer = (eff.arcTimer || 0) - dt;
-      if (eff.arcTimer <= 0 && typeof spawnLightningBolt === 'function') {
+      if (eff.arcTimer <= 0 && !_tethGone && typeof spawnLightningBolt === 'function') {
         const dir = new THREE.Vector3(
           (Math.random() - 0.5),
           (Math.random() - 0.5),
@@ -62882,11 +63238,11 @@ function updateWorldEffects(dt) {
         dir.normalize();
         const reach = 80 + Math.random() * 100;
         const arcEnd = eff.position.clone().add(dir.multiplyScalar(reach));
-        spawnLightningBolt(eff.position, arcEnd, LSS.CLASS_COLORS.PUNCTURE, 0.08, 1, 1.0);
+        spawnLightningBolt(eff.position, arcEnd, LSS.CLASS_COLORS.PUNCTURE, 0.08, 1, eff.triggered ? 1.0 : 0.6);
         if (eff.triggered && eff.rootTarget && eff.rootTarget.alive) {
           spawnLightningBolt(eff.position, eff.rootTarget.position, LSS.CLASS_COLORS.PUNCTURE, 0.10, 2, 1.4);
         }
-        eff.arcTimer = 0.05 + Math.random() * 0.05;
+        eff.arcTimer = eff.triggered ? (0.05 + Math.random() * 0.05) : (0.22 + Math.random() * 0.2);
       }
     }
 
@@ -79885,7 +80241,9 @@ function _lssGenRaceTrack(base) {
   const R = (a, b) => a + (b - a) * rnd();
   const ang = R(0, Math.PI * 2);
   const fx = Math.cos(ang), fz = Math.sin(ang), px = -fz, pz = fx;
-  const L = SU * R(110, 140);
+  let PER = 4;
+  try { const k = (typeof window !== 'undefined') ? window.__shiftRunPer : undefined; if (typeof k === 'number' && k >= 1 && k <= 8) PER = k | 0; } catch (_) {}
+  const L = SU * R(110, 140) * PER;
   const at = (t, side, y) => ({ x: fx * t + px * side, y: y, z: fz * t + pz * side });
   const rooms = [], tunnels = [];
   const s0 = -L / 2;
@@ -79895,23 +80253,32 @@ function _lssGenRaceTrack(base) {
     rooms.push({ id: 'start_' + ((i % 2) ? 'b' : 'a') + (Math.floor(i / 2) + 1), team: (i % 2) ? 'B' : 'A', x: q.x, y: q.y, z: q.z, r: SU * 1.6 });
   }
   const N = 12 + Math.floor(rnd() * 5);
+  const M = PER * (N + 1) - 1;   // rooms between the start line and the finish (PER 4: three bends, then the gate)
   let side = 0, yy = 0;
-  const gates = [];
-  for (let i = 0; i < N; i++) {
-    const t = s0 + L * (i + 1) / (N + 1);
+  const gates = [], line = [];
+  for (let i = 0; i < M; i++) {
+    const t = s0 + L * (i + 1) / (M + 1);
     side = Math.max(-SU * 9, Math.min(SU * 9, side + SU * R(-4.5, 4.5)));
     yy = Math.max(-SU * 4, Math.min(SU * 4, yy + SU * R(-1.8, 1.8)));
     const q = at(t, side, yy);
-    const g = { id: 'gate_' + (i + 1), team: null, gate: i + 1, x: q.x, y: q.y, z: q.z, r: SU * R(1.8, 2.3) };
-    rooms.push(g); gates.push(g);
+    const k = i + 1;
+    let rm;
+    if (k % PER === 0) {
+      const gi = k / PER;
+      rm = { id: 'gate_' + gi, team: null, gate: gi, x: q.x, y: q.y, z: q.z, r: SU * R(1.8, 2.3) };
+      gates.push(rm);
+    } else {
+      rm = { id: 'bend_' + k, team: null, bend: true, x: q.x, y: q.y, z: q.z, r: SU * R(1.8, 2.3) };
+    }
+    rooms.push(rm); line.push(rm);
   }
   const fq = at(L / 2, 0, 0);
   const finish = { id: 'finish', team: null, champion: true, x: fq.x, y: fq.y, z: fq.z, r: SU * 3.0 };
   rooms.push(finish);
   const link = (a, b, r) => tunnels.push({ path: [{ x: a.x, y: a.y, z: a.z }, { x: b.x, y: b.y, z: b.z }], r: r });
-  for (let i = 0; i < lanes.length; i++) link(rooms[i], gates[0], 240);
-  for (let i = 0; i < gates.length - 1; i++) link(gates[i], gates[i + 1], 260);
-  link(gates[gates.length - 1], finish, 260);
+  for (let i = 0; i < lanes.length; i++) link(rooms[i], line[0], 240);
+  for (let i = 0; i < line.length - 1; i++) link(line[i], line[i + 1], 260);
+  link(line[line.length - 1], finish, 260);
   const BIOMES = ['rocky', 'crystalcave', 'volcanic', 'snow', 'goldmine', 'grassy', 'brokensim'];
   const biome = BIOMES[Math.floor(rnd() * BIOMES.length) % BIOMES.length];
   console.log('[race-shifting] seed=' + seed + ' gates=' + N + ' len=' + Math.round(L) + ' biome=' + biome);
@@ -80226,6 +80593,7 @@ function buildRoomGraphLevel(level) {
     bMinY=Math.min(bMinY,seg.a.y-sr,seg.b.y-sr);bMaxY=Math.max(bMaxY,seg.a.y+sr,seg.b.y+sr);
     bMinZ=Math.min(bMinZ,seg.a.z-sr,seg.b.z-sr);bMaxZ=Math.max(bMaxZ,seg.a.z+sr,seg.b.z+sr);
   }
+  game._levelSpan = isFinite(bMinX) ? Math.max(Math.abs(bMinX), Math.abs(bMaxX), Math.abs(bMinZ), Math.abs(bMaxZ)) : 0;
 
   if (game.sandwichTerrainEnabled === undefined) game.sandwichTerrainEnabled = true;
   if (_keepTerrain) {
