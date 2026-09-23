@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.16";
+const LSS_BUILD = "48.17";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -10680,30 +10680,37 @@ const _emitArcB = new THREE.Vector3();
 const _botFireOrigin = new THREE.Vector3();
 const _botFireDir = new THREE.Vector3();
 const _botSpreadDir = new THREE.Vector3();
+function _dmgTierOf(entity) {
+  const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
+  const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
+  if (hpFrac >= 1.0) return 0;
+  const _dk = (typeof window !== 'undefined' && window.__dmgFX) || null;
+  if ((entity.shield || 0) > 0.5) {
+    const _burnThrough = !!(_dk && _dk.burnThroughShield) &&
+                         hpFrac < ((_dk && _dk.heavyAt != null) ? _dk.heavyAt : 0.5);
+    if (!_burnThrough) return 0;
+  }
+  if (hpFrac < 0.25) return 4;
+  if (hpFrac < 0.50) return 3;
+  if (hpFrac < 0.75) return 2;
+  return 1;
+}
 function emitDamageState(entity, dt) {
   if (_RPL.kc || _RPL.studio) return;   // (v47.97) the kill cam poses the hulls at their REPLAYED spots; live smoke would puff where they really are
   if (!entity || !entity.position) return;
   if (entity.alive === false || entity.shipState === 'dead') return;
   if (entity._cloaked) return;
   if (entity.mesh && entity.mesh.visible === false) return;
-  const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
-  const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
-  if (hpFrac >= 1.0) return;
-  const _dk = (typeof window !== 'undefined' && window.__dmgFX) || null;
-  if ((entity.shield || 0) > 0.5) {
-    const _burnThrough = !!(_dk && _dk.burnThroughShield) &&
-                         hpFrac < ((_dk && _dk.heavyAt != null) ? _dk.heavyAt : 0.5);
-    if (!_burnThrough) return;
-  }
-  
-  let tier = 0;
-  if (hpFrac < 0.75) tier = 1;
-  if (hpFrac < 0.50) tier = 2;
-  if (hpFrac < 0.25) tier = 3;
+  const tier = _dmgTierOf(entity) - 1;   // 0 sparking .. 3 fire; -1 = none
+  if (tier < 0) return;
   if (entity._dmgEmitTimer == null) entity._dmgEmitTimer = 0;
   entity._dmgEmitTimer -= dt;
   if (entity._dmgEmitTimer > 0) return;
   entity._dmgEmitTimer = 0.11 - tier * 0.022;
+  _RPL.nest++;
+  try { _dmgStateEmit(entity, tier); } finally { _RPL.nest--; }
+}
+function _dmgStateEmit(entity, tier) {
   const hullR = (entity.chassis && entity.chassis.hullLength) ? entity.chassis.hullLength * 0.45 : 45;
   _emitPos.set(
     entity.position.x + (Math.random() - 0.5) * hullR * 2,
@@ -16327,8 +16334,28 @@ function _rplStateAt(A, t) {
   let lo = 0, hi = (s.length / 3) | 0;
   while (lo < hi) { const mid = (lo + hi) >> 1; if (s[mid * 3] <= t) lo = mid + 1; else hi = mid; }
   const i = lo - 1;
-  if (i >= 0) { out.sh = s[i * 3 + 1] || null; out.dm = (s[i * 3 + 2] | 0); }   // dm = flags (1 doomed, 2 cloaked)
+  if (i >= 0) { out.sh = s[i * 3 + 1] || null; out.dm = (s[i * 3 + 2] | 0); }   // dm = flags (1 doomed, 2 cloaked; v48.17: bits 2-4 damage stage, 32 burning)
   return out;
+}
+const _rplDmgEnt = { position: new THREE.Vector3(), velocity: new THREE.Vector3(), team: 0, chassis: { hullLength: 100 } };
+function _rplDmgTick(holder, A, pos, prevPos, flags, dt) {
+  if (!holder || !(dt > 0)) return;
+  if (flags & 2) return;   // cloaked: the live emitter skips a cloaked hull as well
+  const stage = (flags >> 2) & 7, burn = !!(flags & 32);
+  if (!stage && !burn) { holder._dmgT = 0; return; }
+  const E = _rplDmgEnt;
+  E.position.copy(pos);
+  E.velocity.copy(pos).sub(prevPos).multiplyScalar(20);   // prevPos is 50 ms back along the recorded path
+  E.team = A.team; E.chassis.hullLength = A.hull || 100;
+  _RPL.nest++;
+  try {
+    if (stage) {
+      const tier = stage - 1;
+      holder._dmgT = (holder._dmgT || 0) - dt;
+      if (holder._dmgT <= 0) { holder._dmgT = 0.11 - tier * 0.022; _dmgStateEmit(E, tier); }
+    }
+    if (burn) _burnSprayEmit(pos, A.hull || 100, dt);
+  } catch (_) {} finally { _RPL.nest--; }
 }
 const _RPL_SH_COL = { plasma_purple: 0xaa55ff, plasma_cyan: 0x33ccff, plasma_red: 0xff3322, plasma_green: 0x44ff99 };
 const _RPL_CLOAK_OP = 0.18;   // (v48.03) how a cloaked ship replays: a ghost you can still follow (live: 0.01)
@@ -16380,7 +16407,9 @@ function _rplSample(kc) {
     if (alive) {
       const sh = _rplShieldOf(m);
       const op = m.userData ? m.userData._rplOp : undefined;
-      const dm = ((ent && ent.doomed) ? 1 : 0) | ((typeof op === 'number' && op < 0.99) ? 2 : 0);
+      let stg = 0, burn = 0;
+      try { if (ent) { stg = _dmgTierOf(ent); burn = (ent.onFireTimer > 0) ? 1 : 0; } } catch (_) {}
+      const dm = ((ent && ent.doomed) ? 1 : 0) | ((typeof op === 'number' && op < 0.99) ? 2 : 0) | (stg << 2) | (burn << 5);
       if (sh !== A._sh || dm !== A._dm) { A._sh = sh; A._dm = dm; (A.sx || (A.sx = [])).push(t, sh, dm); }
     }
   };
@@ -17255,6 +17284,13 @@ function _rplKcFrame(now) {
     if (!m.parent) scene.add(m);
     m.visible = alive;
     m.position.copy(_rplP); m.quaternion.copy(_rplQ);
+    if (alive) {
+      try {
+        _rplPoseAt(A, kc.rt - 0.05, _rplP2, null);
+        const H = kc.dmgH || (kc.dmgH = {});
+        _rplDmgTick(H[key] || (H[key] = {}), A, _rplP, _rplP2, _rplStateAt(A, kc.rt).dm, dtR * kc.rate);
+      } catch (_) {}
+    }
   }
   _rplKcCamera(kc, dtR);
   try { _rplWfxReplay(kc, kc.rt, dtR * kc.rate, _RPL_KC_WFX); } catch (_) {}
@@ -17810,6 +17846,7 @@ function _rplStudioFrame(now) {
       const clk = !!(S.dm & 2);
       if (P.cloak !== clk) { P.cloak = clk; try { _setShipMeshOpacity(m, clk ? _RPL_CLOAK_OP : 1.0); } catch (_) {} }
       animateShipMesh(m, spd, ch.flightSpeed || ch.maxSpeed || 400, false, Math.max(dtRep, 1e-4), !!(S.dm & 1));
+      _rplDmgTick(P, P.A, _rplP, _rplP2, S.dm, dtRep);   // (v48.17) sparking, arcs, smoke, fire, the Pyro burn
     } catch (_) {}
   }
   _rplWfxReplay(st, st.rt, dtRep);   // (v48.06) the traps, walls, gas, flame chains standing at the playhead
@@ -18487,6 +18524,7 @@ if (typeof window !== 'undefined') window.__replay = {
              follow: s.follow, puppets: Object.keys(s.pup).length, shotsDrawn: (s.pmPool || []).filter(sl => sl.vis).length,
              shields: Object.keys(s.pup).filter(k => s.pup[k].sh).map(k => k + ':' + s.pup[k].sh),
              cloaked: Object.keys(s.pup).filter(k => s.pup[k].cloak),
+             damage: Object.keys(s.pup).map(k => { const f = _rplStateAt(s.pup[k].A, s.rt).dm; const g = (f >> 2) & 7; return (g || (f & 32)) ? (k + ':' + g + ((f & 32) ? '+burn' : '')) : null; }).filter(Boolean),
              worldFx: Object.keys(s.wv || {}).map(id => s.R.wf[id] ? s.R.wf[id].k : '?'),
              evI: s.evI, ev: s.R.ev.length, lib: s.libOpen, hidden: s.hidden.length,
              cam3: [Math.round(camera.position.x), Math.round(camera.position.y), Math.round(camera.position.z)] };
@@ -64891,9 +64929,37 @@ function _drainStaggeredRocketSalvo(dt) {
 const _FIRE_DOT_PARTICLE_PALETTE = [
   0xffffaa, 0xffdd66, 0xffaa33, 0xff7722, 0xff4411, 0xcc2200,
 ];
+function _burnSprayEmit(center, hLen, dt) {
+  const particlesPerSec = 10;
+  const expected = particlesPerSec * dt;
+  let toSpawn = Math.floor(expected);
+  if (Math.random() < (expected - toSpawn)) toSpawn += 1;
+  if (game.particles && toSpawn > 0) {
+    const hullR = hLen * 0.45;
+    for (let pi = 0; pi < toSpawn; pi++) {
+      const phi = Math.random() * Math.PI * 2;
+      const cosTheta = 2 * Math.random() - 1;
+      const sinTheta = Math.sqrt(Math.max(0, 1 - cosTheta * cosTheta));
+      const ox = hullR * sinTheta * Math.cos(phi);
+      const oy = hullR * sinTheta * Math.sin(phi);
+      const oz = hullR * cosTheta;
+      const vScale = 60 + Math.random() * 60;
+      const vx = (ox / hullR) * vScale + (Math.random() - 0.5) * 30;
+      const vy = (oy / hullR) * vScale + Math.random() * 40;
+      const vz = (oz / hullR) * vScale + (Math.random() - 0.5) * 30;
+      game.particles.push({
+        position: new THREE.Vector3(center.x + ox, center.y + oy, center.z + oz),
+        velocity: new THREE.Vector3(vx, vy, vz),
+        life: 0.30 + Math.random() * 0.40,
+        maxLife: 0.70,
+        color: _FIRE_DOT_PARTICLE_PALETTE[Math.floor(Math.random() * _FIRE_DOT_PARTICLE_PALETTE.length)],
+        size: 8 + Math.random() * 10,
+      });
+    }
+  }
+}
 function _tickFireDOTs(dt) {
   if (!game || !game.entities) return;
-  const particlesPerSec = 10;  
   for (let bi = 0; bi < game.entities.length; bi++) {
     const bot = game.entities[bi];
     if (!bot || !bot.alive || !bot.position) continue;
@@ -64913,33 +64979,7 @@ function _tickFireDOTs(dt) {
       bot.onFireDps = 0;
       bot.onFireSource = null;
     }
-    const expected = particlesPerSec * dt;
-    let toSpawn = Math.floor(expected);
-    if (Math.random() < (expected - toSpawn)) toSpawn += 1;
-    if (game.particles && toSpawn > 0) {
-      const hLen = (bot.chassis && bot.chassis.hullLength) ? bot.chassis.hullLength : 80;
-      const hullR = hLen * 0.45;
-      for (let pi = 0; pi < toSpawn; pi++) {
-        const phi = Math.random() * Math.PI * 2;
-        const cosTheta = 2 * Math.random() - 1;
-        const sinTheta = Math.sqrt(Math.max(0, 1 - cosTheta * cosTheta));
-        const ox = hullR * sinTheta * Math.cos(phi);
-        const oy = hullR * sinTheta * Math.sin(phi);
-        const oz = hullR * cosTheta;
-        const vScale = 60 + Math.random() * 60;
-        const vx = (ox / hullR) * vScale + (Math.random() - 0.5) * 30;
-        const vy = (oy / hullR) * vScale + Math.random() * 40;
-        const vz = (oz / hullR) * vScale + (Math.random() - 0.5) * 30;
-        game.particles.push({
-          position: new THREE.Vector3(bot.position.x + ox, bot.position.y + oy, bot.position.z + oz),
-          velocity: new THREE.Vector3(vx, vy, vz),
-          life: 0.30 + Math.random() * 0.40,
-          maxLife: 0.70,
-          color: _FIRE_DOT_PARTICLE_PALETTE[Math.floor(Math.random() * _FIRE_DOT_PARTICLE_PALETTE.length)],
-          size: 8 + Math.random() * 10,
-        });
-      }
-    }
+    if (!_RPL.kc) _burnSprayEmit(bot.position, (bot.chassis && bot.chassis.hullLength) ? bot.chassis.hullLength : 80, dt);
   }
   if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
     for (let mi = 0; mi < game.monsters.length; mi++) {

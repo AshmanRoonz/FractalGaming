@@ -6860,7 +6860,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.16";
+const LSS_BUILD = "48.17";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -22565,6 +22565,37 @@ const _emitArcB = new THREE.Vector3();
 const _botFireOrigin = new THREE.Vector3();
 const _botFireDir = new THREE.Vector3();
 const _botSpreadDir = new THREE.Vector3();
+// (v48.17) THE DAMAGE STAGE A HULL IS SHOWING: 0 none, 1 sparking (< 100 %), 2 electric (< 75 %), 3 smoke
+// (< 50 %), 4 fire (< 25 %). One rule for the live emitter AND the replay recorder (the stage rides the
+// state track `sx`), so a replay can never show a different stage from the one that was on screen.
+function _dmgTierOf(entity) {
+  const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
+  const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
+  if (hpFrac >= 1.0) return 0;
+  // Shield up = hide all hull damage. Threshold > 0.5 (not == 0) so flickering low-shield ticks
+  // don't strobe the effects on/off.
+  // ⚠ (v42.06) THIS IS DELIBERATE, NOT A BUG — it has been questioned once and upheld. Owner:
+  // "my ship stopped smoking and flaming, when i stayed still", then, on working out why:
+  // "oh the shield puts out the flames... it's probably my shield recharge ability i had on...
+  // that's acceptible then". So a ship that re-shields reads as repaired, and that is the intended
+  // language: the shield IS the ship's condition as far as the FX are concerned.
+  // The alternative was built and measured (smoke/fire track HULL integrity and burn through a
+  // shield, so a wreck that disengages still looks like a wreck) and is kept here as OPT-IN only,
+  // because it also changes every bot and peer — a shielded but badly hurt enemy would smoke, which
+  // is a real combat-readability change nobody asked for.
+  //   window.__dmgFX = { burnThroughShield: true }   // heavy tiers ignore the shield
+  //   window.__dmgFX = { burnThroughShield: true, heavyAt: 0.25 }   // fire only, not smoke
+  const _dk = (typeof window !== 'undefined' && window.__dmgFX) || null;
+  if ((entity.shield || 0) > 0.5) {
+    const _burnThrough = !!(_dk && _dk.burnThroughShield) &&
+                         hpFrac < ((_dk && _dk.heavyAt != null) ? _dk.heavyAt : 0.5);
+    if (!_burnThrough) return 0;
+  }
+  if (hpFrac < 0.25) return 4;
+  if (hpFrac < 0.50) return 3;
+  if (hpFrac < 0.75) return 2;
+  return 1;
+}
 function emitDamageState(entity, dt) {
   if (_RPL.kc || _RPL.studio) return;   // (v47.97) the kill cam poses the hulls at their REPLAYED spots; live smoke would puff where they really are
   // ⚠⚠ (v42.02) THE LOCAL PLAYER HAS NO `alive` FIELD - THAT IS WHY YOUR OWN HULL NEVER SPARKED.
@@ -22587,38 +22618,25 @@ function emitDamageState(entity, dt) {
   // SURVIVES never heals and would otherwise smoke for the rest of the session, pad included.
   if (entity._cloaked) return;
   if (entity.mesh && entity.mesh.visible === false) return;
-  const maxHp = entity.maxHealth || (entity.chassis && entity.chassis.maxHealth) || 1;
-  const hpFrac = Math.max(0, (entity.health || 0) / maxHp);
-  if (hpFrac >= 1.0) return;
-  // Shield up = hide all hull damage. Threshold > 0.5 (not == 0) so flickering low-shield ticks
-  // don't strobe the effects on/off.
-  // ⚠ (v42.06) THIS IS DELIBERATE, NOT A BUG — it has been questioned once and upheld. Owner:
-  // "my ship stopped smoking and flaming, when i stayed still", then, on working out why:
-  // "oh the shield puts out the flames... it's probably my shield recharge ability i had on...
-  // that's acceptible then". So a ship that re-shields reads as repaired, and that is the intended
-  // language: the shield IS the ship's condition as far as the FX are concerned.
-  // The alternative was built and measured (smoke/fire track HULL integrity and burn through a
-  // shield, so a wreck that disengages still looks like a wreck) and is kept here as OPT-IN only,
-  // because it also changes every bot and peer — a shielded but badly hurt enemy would smoke, which
-  // is a real combat-readability change nobody asked for.
-  //   window.__dmgFX = { burnThroughShield: true }   // heavy tiers ignore the shield
-  //   window.__dmgFX = { burnThroughShield: true, heavyAt: 0.25 }   // fire only, not smoke
-  const _dk = (typeof window !== 'undefined' && window.__dmgFX) || null;
-  if ((entity.shield || 0) > 0.5) {
-    const _burnThrough = !!(_dk && _dk.burnThroughShield) &&
-                         hpFrac < ((_dk && _dk.heavyAt != null) ? _dk.heavyAt : 0.5);
-    if (!_burnThrough) return;
-  }
-  
-  let tier = 0;
-  if (hpFrac < 0.75) tier = 1;
-  if (hpFrac < 0.50) tier = 2;
-  if (hpFrac < 0.25) tier = 3;
+  // (v48.17) the stage is _dmgTierOf's - the one rule the recorder reads too (see the shield note there)
+  const tier = _dmgTierOf(entity) - 1;   // 0 sparking .. 3 fire; -1 = none
+  if (tier < 0) return;
   // Emit cadence: faster as damage worsens. tier 0 = 110ms, tier 3 = 45ms.
   if (entity._dmgEmitTimer == null) entity._dmgEmitTimer = 0;
   entity._dmgEmitTimer -= dt;
   if (entity._dmgEmitTimer > 0) return;
   entity._dmgEmitTimer = 0.11 - tier * 0.022;
+  // ⭐ (v48.17) NOT RECORDED. A replay re-emits all of this from the recorded STAGE, on the replayed hull
+  // (_rplDmgTick). Recorded as it was, only the tapped half came back - the lightning and the flame puffs,
+  // as loose one-offs frozen where they spawned (the fire never streamed off the hull) - and the sparks
+  // and the smoke not at all, neither being a tapped spawner.
+  _RPL.nest++;
+  try { _dmgStateEmit(entity, tier); } finally { _RPL.nest--; }
+}
+// (v48.17) the damage-state effects themselves, split out of emitDamageState so a replay can run them on a
+// replayed hull. `entity` needs only position, velocity, team and chassis.hullLength - the replay hands it a
+// stand-in built from the recorded pose. `tier` 0 sparking / 1 electric / 2 smoke / 3 fire.
+function _dmgStateEmit(entity, tier) {
   // Pick a random point on the hull as the emit anchor (scratch ; no alloc).
   const hullR = (entity.chassis && entity.chassis.hullLength) ? entity.chassis.hullLength * 0.45 : 45;
   _emitPos.set(
@@ -30651,8 +30669,38 @@ function _rplStateAt(A, t) {
   let lo = 0, hi = (s.length / 3) | 0;
   while (lo < hi) { const mid = (lo + hi) >> 1; if (s[mid * 3] <= t) lo = mid + 1; else hi = mid; }
   const i = lo - 1;
-  if (i >= 0) { out.sh = s[i * 3 + 1] || null; out.dm = (s[i * 3 + 2] | 0); }   // dm = flags (1 doomed, 2 cloaked)
+  if (i >= 0) { out.sh = s[i * 3 + 1] || null; out.dm = (s[i * 3 + 2] | 0); }   // dm = flags (1 doomed, 2 cloaked; v48.17: bits 2-4 damage stage, 32 burning)
   return out;
+}
+// ⭐⭐ (v48.17) THE DAMAGE STATES, REPLAYED. Owner: "does the replay show damage states? like the sparking
+// and on fire?" - it did not, not properly: emitDamageState and the burn spray stand down under a replay
+// (the live entities are not where their hulls are being drawn), so all a replay had was what the
+// recorder happened to catch of the tapped half - the lightning and the flame puffs, as loose one-offs
+// frozen where they spawned - and nothing of the sparks, the smoke or the Pyro burn. Now the recorded
+// STAGE and BURN flag drive the very same emitters (_dmgStateEmit / _burnSprayEmit) on the replayed hull:
+// same cadence, same particles, the fire streaming aft off a moving hull, friendly flames red. `holder`
+// keeps the emit timer (a studio puppet, or the kill cam's per-actor slot); `dt` is REPLAY time, so a
+// paused studio emits nothing and the kill cam's slow motion slows the cadence with everything else.
+// The spawns are NEVER recorded (the kill cam runs while the round is still being recorded).
+const _rplDmgEnt = { position: new THREE.Vector3(), velocity: new THREE.Vector3(), team: 0, chassis: { hullLength: 100 } };
+function _rplDmgTick(holder, A, pos, prevPos, flags, dt) {
+  if (!holder || !(dt > 0)) return;
+  if (flags & 2) return;   // cloaked: the live emitter skips a cloaked hull as well
+  const stage = (flags >> 2) & 7, burn = !!(flags & 32);
+  if (!stage && !burn) { holder._dmgT = 0; return; }
+  const E = _rplDmgEnt;
+  E.position.copy(pos);
+  E.velocity.copy(pos).sub(prevPos).multiplyScalar(20);   // prevPos is 50 ms back along the recorded path
+  E.team = A.team; E.chassis.hullLength = A.hull || 100;
+  _RPL.nest++;
+  try {
+    if (stage) {
+      const tier = stage - 1;
+      holder._dmgT = (holder._dmgT || 0) - dt;
+      if (holder._dmgT <= 0) { holder._dmgT = 0.11 - tier * 0.022; _dmgStateEmit(E, tier); }
+    }
+    if (burn) _burnSprayEmit(pos, A.hull || 100, dt);
+  } catch (_) {} finally { _RPL.nest--; }
 }
 // the hull's own glow while a shield is up (the colours updateShieldVisuals gives the player's)
 const _RPL_SH_COL = { plasma_purple: 0xaa55ff, plasma_cyan: 0x33ccff, plasma_red: 0xff3322, plasma_green: 0x44ff99 };
@@ -30712,10 +30760,15 @@ function _rplSample(kc) {
     // doomed heartbeat
     // (v48.03) the third field is FLAGS: 1 = doomed, 2 = cloaked (the hull's last _setShipMeshOpacity,
     // stamped by the wrapper in _rplInstallTaps). 48.01-48.02 files carry 0/1 there, which reads the same.
+    // (v48.17) ...and the DAMAGE STAGE the hull is showing (bits 2-4, _dmgTierOf: 0 none, 1 sparking,
+    // 2 electric, 3 smoke, 4 fire - the live emitter's own rule, shield-up-hides-it included) and whether it
+    // is BURNING (bit 5, Pyro's fire damage over time). _rplDmgTick replays both on the replayed hull.
     if (alive) {
       const sh = _rplShieldOf(m);
       const op = m.userData ? m.userData._rplOp : undefined;
-      const dm = ((ent && ent.doomed) ? 1 : 0) | ((typeof op === 'number' && op < 0.99) ? 2 : 0);
+      let stg = 0, burn = 0;
+      try { if (ent) { stg = _dmgTierOf(ent); burn = (ent.onFireTimer > 0) ? 1 : 0; } } catch (_) {}
+      const dm = ((ent && ent.doomed) ? 1 : 0) | ((typeof op === 'number' && op < 0.99) ? 2 : 0) | (stg << 2) | (burn << 5);
       if (sh !== A._sh || dm !== A._dm) { A._sh = sh; A._dm = dm; (A.sx || (A.sx = [])).push(t, sh, dm); }
     }
   };
@@ -31728,6 +31781,14 @@ function _rplKcFrame(now) {
     if (!m.parent) scene.add(m);
     m.visible = alive;
     m.position.copy(_rplP); m.quaternion.copy(_rplQ);
+    // (v48.17) and its damage state, from the recording - the live emitter stands down under the kill cam
+    if (alive) {
+      try {
+        _rplPoseAt(A, kc.rt - 0.05, _rplP2, null);
+        const H = kc.dmgH || (kc.dmgH = {});
+        _rplDmgTick(H[key] || (H[key] = {}), A, _rplP, _rplP2, _rplStateAt(A, kc.rt).dm, dtR * kc.rate);
+      } catch (_) {}
+    }
   }
   _rplKcCamera(kc, dtR);
   // (v48.14) the Mega Lasers, ridden by the hulls just posed (after the camera: the glow cards face it)
@@ -32356,6 +32417,7 @@ function _rplStudioFrame(now) {
       const clk = !!(S.dm & 2);
       if (P.cloak !== clk) { P.cloak = clk; try { _setShipMeshOpacity(m, clk ? _RPL_CLOAK_OP : 1.0); } catch (_) {} }
       animateShipMesh(m, spd, ch.flightSpeed || ch.maxSpeed || 400, false, Math.max(dtRep, 1e-4), !!(S.dm & 1));
+      _rplDmgTick(P, P.A, _rplP, _rplP2, S.dm, dtRep);   // (v48.17) sparking, arcs, smoke, fire, the Pyro burn
     } catch (_) {}
   }
   _rplWfxReplay(st, st.rt, dtRep);   // (v48.06) the traps, walls, gas, flame chains standing at the playhead
@@ -33079,6 +33141,8 @@ if (typeof window !== 'undefined') window.__replay = {
              follow: s.follow, puppets: Object.keys(s.pup).length, shotsDrawn: (s.pmPool || []).filter(sl => sl.vis).length,
              shields: Object.keys(s.pup).filter(k => s.pup[k].sh).map(k => k + ':' + s.pup[k].sh),
              cloaked: Object.keys(s.pup).filter(k => s.pup[k].cloak),
+             // (v48.17) each hull's recorded damage stage at the playhead (1 sparking .. 4 fire, +burn: Pyro fire)
+             damage: Object.keys(s.pup).map(k => { const f = _rplStateAt(s.pup[k].A, s.rt).dm; const g = (f >> 2) & 7; return (g || (f & 32)) ? (k + ':' + g + ((f & 32) ? '+burn' : '')) : null; }).filter(Boolean),
              worldFx: Object.keys(s.wv || {}).map(id => s.R.wf[id] ? s.R.wf[id].k : '?'),
              evI: s.evI, ev: s.R.ev.length, lib: s.libOpen, hidden: s.hidden.length,
              cam3: [Math.round(camera.position.x), Math.round(camera.position.y), Math.round(camera.position.z)] };
@@ -101754,9 +101818,44 @@ function _drainStaggeredRocketSalvo(dt) {
 const _FIRE_DOT_PARTICLE_PALETTE = [
   0xffffaa, 0xffdd66, 0xffaa33, 0xff7722, 0xff4411, 0xcc2200,
 ];
+// (v48.17) the flames a burning ship sheds (Pyro's fire damage over time), split out of _tickFireDOTs so a
+// replay can run them on a replayed hull too: `center` + the hull length are all it reads.
+function _burnSprayEmit(center, hLen, dt) {
+  const particlesPerSec = 10;
+  // Particle spray around the bot's hull. ~25/sec ; fractional spawn
+  // so the rate doesn't quantize visibly.
+  const expected = particlesPerSec * dt;
+  let toSpawn = Math.floor(expected);
+  if (Math.random() < (expected - toSpawn)) toSpawn += 1;
+  if (game.particles && toSpawn > 0) {
+    const hullR = hLen * 0.45;
+    for (let pi = 0; pi < toSpawn; pi++) {
+      // Random point on a sphere of radius hullR around the bot center.
+      const phi = Math.random() * Math.PI * 2;
+      const cosTheta = 2 * Math.random() - 1;
+      const sinTheta = Math.sqrt(Math.max(0, 1 - cosTheta * cosTheta));
+      const ox = hullR * sinTheta * Math.cos(phi);
+      const oy = hullR * sinTheta * Math.sin(phi);
+      const oz = hullR * cosTheta;
+      // Velocity : slow outward drift + slight upward bias so flames
+      // peel off the hull like a real fire plume in motion.
+      const vScale = 60 + Math.random() * 60;
+      const vx = (ox / hullR) * vScale + (Math.random() - 0.5) * 30;
+      const vy = (oy / hullR) * vScale + Math.random() * 40;
+      const vz = (oz / hullR) * vScale + (Math.random() - 0.5) * 30;
+      game.particles.push({
+        position: new THREE.Vector3(center.x + ox, center.y + oy, center.z + oz),
+        velocity: new THREE.Vector3(vx, vy, vz),
+        life: 0.30 + Math.random() * 0.40,
+        maxLife: 0.70,
+        color: _FIRE_DOT_PARTICLE_PALETTE[Math.floor(Math.random() * _FIRE_DOT_PARTICLE_PALETTE.length)],
+        size: 8 + Math.random() * 10,
+      });
+    }
+  }
+}
 function _tickFireDOTs(dt) {
   if (!game || !game.entities) return;
-  const particlesPerSec = 10;  
   for (let bi = 0; bi < game.entities.length; bi++) {
     const bot = game.entities[bi];
     if (!bot || !bot.alive || !bot.position) continue;
@@ -101781,38 +101880,10 @@ function _tickFireDOTs(dt) {
       bot.onFireDps = 0;
       bot.onFireSource = null;
     }
-    // Particle spray around the bot's hull. ~25/sec ; fractional spawn
-    // so the rate doesn't quantize visibly.
-    const expected = particlesPerSec * dt;
-    let toSpawn = Math.floor(expected);
-    if (Math.random() < (expected - toSpawn)) toSpawn += 1;
-    if (game.particles && toSpawn > 0) {
-      const hLen = (bot.chassis && bot.chassis.hullLength) ? bot.chassis.hullLength : 80;
-      const hullR = hLen * 0.45;
-      for (let pi = 0; pi < toSpawn; pi++) {
-        // Random point on a sphere of radius hullR around the bot center.
-        const phi = Math.random() * Math.PI * 2;
-        const cosTheta = 2 * Math.random() - 1;
-        const sinTheta = Math.sqrt(Math.max(0, 1 - cosTheta * cosTheta));
-        const ox = hullR * sinTheta * Math.cos(phi);
-        const oy = hullR * sinTheta * Math.sin(phi);
-        const oz = hullR * cosTheta;
-        // Velocity : slow outward drift + slight upward bias so flames
-        // peel off the hull like a real fire plume in motion.
-        const vScale = 60 + Math.random() * 60;
-        const vx = (ox / hullR) * vScale + (Math.random() - 0.5) * 30;
-        const vy = (oy / hullR) * vScale + Math.random() * 40;
-        const vz = (oz / hullR) * vScale + (Math.random() - 0.5) * 30;
-        game.particles.push({
-          position: new THREE.Vector3(bot.position.x + ox, bot.position.y + oy, bot.position.z + oz),
-          velocity: new THREE.Vector3(vx, vy, vz),
-          life: 0.30 + Math.random() * 0.40,
-          maxLife: 0.70,
-          color: _FIRE_DOT_PARTICLE_PALETTE[Math.floor(Math.random() * _FIRE_DOT_PARTICLE_PALETTE.length)],
-          size: 8 + Math.random() * 10,
-        });
-      }
-    }
+    // (v48.17) the spray is _burnSprayEmit's now, which the replay runs on a replayed hull too - and not
+    // while the kill cam poses the hulls at their REPLAYED spots: it would puff where the ship really is
+    // (emitDamageState stands down for the same reason; the damage itself above still runs).
+    if (!_RPL.kc) _burnSprayEmit(bot.position, (bot.chassis && bot.chassis.hullLength) ? bot.chassis.hullLength : 80, dt);
   }
   if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
     for (let mi = 0; mi < game.monsters.length; mi++) {
