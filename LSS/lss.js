@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.94";
+const LSS_BUILD = "47.96";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -9964,10 +9964,10 @@ function _tetherShatter(eff) {
   try {
     const p = eff.position.clone();
     const col = (typeof _fxFriendly === 'function' && _fxFriendly(eff.team)) ? LSS.CLASS_COLORS.PUNCTURE : _FXFF.tetherEnemy;
-    if (typeof spawnExplosion === 'function') spawnExplosion(p, 14);
+    if (typeof spawnExplosion === 'function') spawnExplosion(p, 14, null, null, { mini: true });
     if (typeof spawnImpactSparks === 'function') spawnImpactSparks(p, 12);
     if (typeof spawnDynamicLight === 'function') spawnDynamicLight(p, col, 2.6, 520, 0.3);
-    if (typeof playSpatialSound === 'function') playSpatialSound('firework_pop', p);
+    if (typeof playSpatialSound === 'function') playSpatialSound('tether_snap', p);
   } catch (_) {}
   try {
     if (typeof net !== 'undefined' && net && net.active && net.sendEvent && eff.netId !== undefined) {
@@ -60001,7 +60001,7 @@ function fireHitscan(origin, dir, w) {
         player.coreMeter = Math.min(100, player.coreMeter + dealt / 100);
       }
       const hitPt = origin.clone().add(aimDir.clone().multiplyScalar(bestObstDist));
-      spawnExplosion(hitPt, 8);
+      spawnExplosion(hitPt, 8, null, null, (bestObstacle && bestObstacle.name === 'TetherTrap') ? { mini: true } : undefined);   // (v47.95) the tether holding you: the flash, not the boom
       spawnImpactSparks(hitPt, 4);
     }
     return;
@@ -60017,7 +60017,7 @@ function fireHitscan(origin, dir, w) {
       showHitMarker();
     }
     const hitPt = origin.clone().add(aimDir.clone().multiplyScalar(bestObstDist));
-    spawnExplosion(hitPt, 8);
+    spawnExplosion(hitPt, 8, null, null, (bestObstacle && bestObstacle.name === 'TetherTrap') ? { mini: true } : undefined);   // (v47.95) the tether holding you: the flash, not the boom
     spawnImpactSparks(hitPt, 4);
     return; 
   }
@@ -63262,7 +63262,7 @@ function updateWorldEffects(dt) {
           if (_p.position.distanceToSquared(eff.position) > _R2) continue;
           _tetherTakeShot(eff, _p.damage);
           try {
-            if (typeof spawnExplosion === 'function') spawnExplosion(_p.position, 8);
+            if (typeof spawnExplosion === 'function') spawnExplosion(_p.position, 8, null, null, { mini: true });   // (v47.95) no boom - see _tetherShatter
             if (typeof spawnImpactSparks === 'function') spawnImpactSparks(_p.position, 4);
             if (typeof showHitMarker === 'function') showHitMarker();
           } catch (_) {}
@@ -72178,7 +72178,27 @@ function _howtoRender(ov) {
          "<div style='font-size:12px;color:#cdd;line-height:1.55;margin-top:4px;'>" + txt + '</div></div>';
   }
   h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:14px 0 8px;'>COMBAT MECHANICS</div>";
+  const _hrList = [];
+  try {
+    for (const k in LOADOUTS) {
+      const L = LOADOUTS[k]; if (!L || !L.abilities) continue;
+      for (const a of L.abilities) {
+        if (a && typeof _isHoldPrimeAbility === 'function' && _isHoldPrimeAbility(k, a.name)) {
+          _hrList.push(esc(String(a.name).toUpperCase()) + " <span style='color:#9ab;'>(" + esc(L.name) + ')</span>');
+        }
+      }
+    }
+  } catch (_) {}
   const _mechs = [
+    ['HOLD &amp; RELEASE', '#ffc46b',
+     'Some controls fire when you LET GO, not when you press. PUNCTURE&#8217;s SODIUM RAILGUN charges while you hold the trigger &#8212; ' +
+     'its barrels glow brighter as it builds &#8212; and fires the moment you release: a tap is a base-damage shot, a full hold of about ' +
+     '2.5 seconds hits up to 4&#215; as hard, and the charge is spent by the shot, hit or miss. ' +
+     (_hrList.length ? 'These abilities work the same way &#8212; press to ready, keep aiming while you hold, release to fire: ' + _hrList.join(', ') + '. ' : '') +
+     'TRACKER ROCKETS only ready on a full 3/3 lock, and if the lock breaks while you hold, nothing fires. ' +
+     'VORTEX SHIELD is held too: it absorbs incoming fire while you hold it, and letting go fires everything it soaked up at whatever you are aiming at. ' +
+     'ABSORPTION and FIRE SHIELD simply stay up while held. ' +
+     'BLASTER&#8217;s CHARGE SHOT only looks like one: press once and it spools for a second, then fires by itself &#8212; keep your aim on the target through the spool.'],
     ['ZOOM &amp; DOUBLE ZOOM', '#9fe8ff',
      'Hold the zoom control for 2.4&#215; optics. TAP it once, then press and HOLD again straight away, for a 4.8&#215; second stage. ' +
      'Aim sensitivity scales down with magnification so the same hand movement stays precise at both levels.'],
@@ -72216,11 +72236,21 @@ function _howtoRender(ov) {
     h += "<div style='display:flex;justify-content:space-between;flex-wrap:wrap;gap:4px;align-items:baseline;'>" +
          "<span class='lss-title' style='font-size:16px;letter-spacing:3px;color:#ffaa00;'>" + esc(L.name) + '</span>' +
          "<span style='font-size:11px;color:#9ab;letter-spacing:2px;text-transform:uppercase;'>" + esc(L.className || '') + '</span></div>';
+    const _hrBadge = (txt) => txt ? " <span style='color:#ffc46b;font-size:10px;letter-spacing:1.5px;margin-left:4px;" +
+      "border:1px solid rgba(255,196,107,0.45);border-radius:4px;padding:0 5px;white-space:nowrap;'>" + txt + '</span>' : '';
     h += "<div style='font-size:12px;color:#66bbff;margin-top:6px;letter-spacing:0.6px;'>WEAPON — " + esc(L.weapon.name) +
-         ' : ' + esc(L.weapon.damage) + ' dmg, ' + esc(L.weapon.mode) + '</div>';
+         ' : ' + esc(L.weapon.damage) + ' dmg, ' + esc(L.weapon.mode) +
+         _hrBadge(key === 'PUNCTURE' ? 'HOLD TO CHARGE &#183; RELEASE TO FIRE &#183; UP TO 4&#215;' : '') + '</div>';
     (L.abilities || []).forEach((a, i) => {
+      let _hb = '';
+      try {
+        if (typeof _isHoldPrimeAbility === 'function' && _isHoldPrimeAbility(key, a.name)) _hb = 'HOLD &#183; RELEASE TO FIRE';
+        else if (a.name === 'Vortex Shield') _hb = 'HOLD TO ABSORB &#183; RELEASE TO FIRE BACK';
+        else if (_holdAbilityNames.indexOf(a.name) >= 0) _hb = 'HOLD';
+        else if (a.name === 'Charge Shot') _hb = 'FIRES ITSELF AFTER 1 S';
+      } catch (_) {}
       h += "<div style='margin-top:6px;'><span style='color:#8f8;font-size:11px;letter-spacing:1.5px;'>" + (slotTag[i] || 'ABILITY ' + (i + 1)) +
-           " — " + esc(a.name).toUpperCase() + '</span>' +
+           " — " + esc(a.name).toUpperCase() + '</span>' + _hrBadge(_hb) +
            "<div style='font-size:12px;color:#cdd;line-height:1.45;'>" + esc(a.desc) + '</div></div>';
     });
     if (L.core) {
@@ -87321,6 +87351,125 @@ const DEFAULT_SOUND_LIBRARY = {
           "chance": 1,
           "count": 3,
           "spacing": 0.095,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        }
+      ],
+      "recipeGain": 1
+    },
+    {
+      "name": "tether_snap",
+      "description": "electric snap + rising ping + falling twang/zap, no thump : a Stasis Trap shot apart by the pilot it held (v47.95)",
+      "category": "PUNCTURE",
+      "layers": [
+        {
+          "kind": "noise",
+          "duration": 0.04,
+          "volume": 0.22,
+          "startOffset": 0,
+          "filterFreq": 2600,
+          "filterQ": 0.8,
+          "filterType": "highpass",
+          "varDur": 0.2,
+          "varVol": 0.2,
+          "varFreq": 0.2,
+          "reverseEnvelope": false,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "peakGain": 0
+        },
+        {
+          "kind": "tri",
+          "wave": "sine",
+          "freqs": [
+            1320
+          ],
+          "rampFreqs": [
+            1980
+          ],
+          "vol": 0.1,
+          "dur": 0.06,
+          "rampTime": 0.05,
+          "startOffset": 0,
+          "envelope": {
+            "attack": 0.001,
+            "hold": 0.005,
+            "decay": 0.05
+          },
+          "pitchVar": 0.08,
+          "durVar": 0.1,
+          "volVar": 0.1,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "triangle",
+          "freqs": [
+            440,
+            660
+          ],
+          "rampFreqs": [
+            110,
+            165
+          ],
+          "vol": 0.18,
+          "dur": 0.18,
+          "rampTime": 0.14,
+          "startOffset": 0.02,
+          "envelope": {
+            "attack": 0.002,
+            "hold": 0.006,
+            "decay": 0.16
+          },
+          "pitchVar": 0.1,
+          "durVar": 0.15,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
+          "spacingVar": 0,
+          "countDecay": 0,
+          "wavePool": [],
+          "pitchPool": [],
+          "pitchPick": "perVoice"
+        },
+        {
+          "kind": "tri",
+          "wave": "sawtooth",
+          "freqs": [
+            330
+          ],
+          "rampFreqs": [
+            55
+          ],
+          "vol": 0.06,
+          "dur": 0.28,
+          "rampTime": 0.26,
+          "startOffset": 0.03,
+          "envelope": {
+            "attack": 0.005,
+            "hold": 0,
+            "decay": 0.26
+          },
+          "pitchVar": 0.06,
+          "durVar": 0.1,
+          "volVar": 0.15,
+          "chance": 1,
+          "count": 1,
+          "spacing": 0,
           "spacingVar": 0,
           "countDecay": 0,
           "wavePool": [],
