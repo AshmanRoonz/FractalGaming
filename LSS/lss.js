@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.83";
+const LSS_BUILD = "47.84";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -48653,7 +48653,7 @@ function _raceCircuitTrackBuild(level, rooms) {
   game.raceCircuit = C;
   _rc.pendingSince = 0; _rcNet.acked = new Set(); _rcNet.t = 0;
   _raceCircuitInstall();
-  try { _raceCircuitOnArrive(); } catch (e) { console.warn('[race] track circuit arrive failed:', e); }
+  try { _raceCircuitHandOver(); } catch (e) { console.warn('[race] track circuit hand-over failed:', e); }
   console.log('[race] track circuit:', C.rings.length, 'gates on', game.selectedMap);
 }
 function _rcTrackNav(bot, roomId) {
@@ -48706,6 +48706,10 @@ function _raceCircuitResetProgress() {
 }
 function _raceCircuitPlaceAll() {
   const C = game.raceCircuit; if (!C || !C.ready) return;
+  if (!Array.isArray(game.corridorPoints) || !game.corridorPoints.length) {
+    console.warn('[race] place-all skipped: no spawn pool yet (', C.kind, ')');
+    return;
+  }
   try {
     const sp = getValidSpawnPoint((player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A');
     player.position.copy(sp); _spawnPickSet(sp);
@@ -48830,10 +48834,13 @@ function _raceCircuitSendProg() {
   } catch (_) {}
 }
 function _raceCircuitOnArrive() {
-  try { if (Array.isArray(game.poleRings)) { for (const r of game.poleRings) { try { r.destroy(); } catch (_) {} } game.poleRings = []; } } catch (_) {}
-  _raceCircuitResetProgress();
+  _raceCircuitHandOver();
   const early = (game.state !== 'playing') || (_rc.playingAt == null) || ((game.time || 0) - _rc.playingAt < 4);
   if (early) _raceCircuitPlaceAll();
+}
+function _raceCircuitHandOver() {
+  try { if (Array.isArray(game.poleRings)) { for (const r of game.poleRings) { try { r.destroy(); } catch (_) {} } game.poleRings = []; } } catch (_) {}
+  _raceCircuitResetProgress();
 }
 function _raceCircuitAdopt(C) {
   C.ready = true;

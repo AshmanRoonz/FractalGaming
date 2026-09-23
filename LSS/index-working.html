@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.83";
+const LSS_BUILD = "47.84";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -77720,7 +77720,31 @@ function _raceCircuitTrackBuild(level, rooms) {
   // gate that had no mesh, and the bots, which capture against C.rings, sailed through it.
   // _raceCircuitOnArrive destroys the stale rings (gameLoop then rebuilds them from the new C), resets
   // progress - correct here, this IS a fresh lap - and re-places them if we are not already mid-race.
-  try { _raceCircuitOnArrive(); } catch (e) { console.warn('[race] track circuit arrive failed:', e); }
+  // ⭐⭐⭐ (v47.84) ...BUT NOT THE RE-PLACE. THIS LINE IS WHAT PUT THE PILOT AT THE WORLD ORIGIN IN ROUND 2.
+  // Owner: "In race mode, round 2, i spawned in a different location than the start."
+  // This function runs from INSIDE buildRoomGraphLevel, after `game.corridorPoints = []` and BEFORE the
+  // new level's corridor points are sampled (they are pushed a few lines after the call site). So the
+  // v47.10 hand-over's `_raceCircuitPlaceAll()` drew its spawn from an EMPTY pool, and
+  // `getValidSpawnPoint` answers an empty pool with (0,0,0). It then LATCHED that through
+  // `_spawnPickSet`, and the v45.04 latch is exactly what the round's next `respawnPlayer()` consumes
+  // ahead of a fresh draw. Round 1 hid it (`buildWorld` re-picks and re-latches after the build); round
+  // 2+ has no re-pick - `_rrReset` -> `respawnPlayer()` took the origin. The only thing that ever
+  // rescued it was swapping ships in the between-rounds picker (`commitLoadout`'s midMatch fork
+  // re-picks), which is why it read as intermittent.
+  // MEASURED (47.83, solo, the Shifting Run): round 1 spawned 74 u from start_a1; round 2 went live
+  // with the pilot at (0, 0, -15), 10,174 u from the nearest start room - the Shifting Run re-rolls
+  // its axis every round, so the origin is mid-course - while all five bots sat on the new grid.
+  // ⚠ DO NOT "FIX" THIS BY MOVING THE PLACE-ALL BELOW THE CORRIDOR SAMPLING. In a room this whole
+  //   build runs inside `withSeededRandom` (it swaps Math.random), and `getValidSpawnPoint` draws a
+  //   different number of randoms per client (own team; bots only on the bot authority) - every draw
+  //   here would shift the shared stream that `spawnDynamicObjects` / `spawnOrganics` read next, and
+  //   the peers' worlds would diverge. From an empty pool it drew none, which is the only reason this
+  //   never desynced a room as well.
+  // Nothing is lost by not placing here: every caller of buildRoomGraphLevel lines the racers up
+  // itself once the pool exists - `buildWorld` (round 1) re-picks the pilot, `_rrReset` (round 2+)
+  // respawns the pilot (latch cleared at the top of buildRoomGraphLevel, so it draws fresh from the new
+  // start rooms) and re-deals the bots through spawnBots().
+  try { _raceCircuitHandOver(); } catch (e) { console.warn('[race] track circuit hand-over failed:', e); }
   console.log('[race] track circuit:', C.rings.length, 'gates on', game.selectedMap);
 }
 // tunnel navigation for a track circuit: the BFS waypoint toward a room, or null when not applicable
@@ -77780,6 +77804,15 @@ function _raceCircuitResetProgress() {
 }
 function _raceCircuitPlaceAll() {
   const C = game.raceCircuit; if (!C || !C.ready) return;
+  // (v47.84) ⚠ NEVER FROM AN EMPTY POOL. `getValidSpawnPoint` answers an empty corridorPoints with
+  // (0,0,0), and the `_spawnPickSet` below LATCHES whatever it got for the next respawnPlayer() - that
+  // pair is how a track lap put the pilot at the world origin in round 2 (see _raceCircuitTrackBuild).
+  // The track path no longer calls this; the guard is for whatever path does next. Skipping is safe:
+  // a caller with no pool yet is mid-build, and every build path places the racers once it has one.
+  if (!Array.isArray(game.corridorPoints) || !game.corridorPoints.length) {
+    console.warn('[race] place-all skipped: no spawn pool yet (', C.kind, ')');
+    return;
+  }
   try {
     const sp = getValidSpawnPoint((player.team === LSS.TEAM_FLEET_B) ? 'B' : 'A');
     player.position.copy(sp); _spawnPickSet(sp);
@@ -77914,10 +77947,17 @@ function _raceCircuitSendProg() {
 // on the start line - before the round is live, or within its first seconds. A decree that lands
 // mid-lap must not teleport a pilot.
 function _raceCircuitOnArrive() {
-  try { if (Array.isArray(game.poleRings)) { for (const r of game.poleRings) { try { r.destroy(); } catch (_) {} } game.poleRings = []; } } catch (_) {}
-  _raceCircuitResetProgress();
+  _raceCircuitHandOver();
   const early = (game.state !== 'playing') || (_rc.playingAt == null) || ((game.time || 0) - _rc.playingAt < 4);
   if (early) _raceCircuitPlaceAll();
+}
+// (v47.84) The half of _raceCircuitOnArrive that does not move anybody: drop the previous lap's gate
+// meshes (gameLoop respawns them against the new C.rings) and zero every racer's cursor. A TRACK lap
+// takes only this - it is laid mid-build, before there is a spawn pool to line anyone up from (see
+// the v47.84 note in _raceCircuitTrackBuild).
+function _raceCircuitHandOver() {
+  try { if (Array.isArray(game.poleRings)) { for (const r of game.poleRings) { try { r.destroy(); } catch (_) {} } game.poleRings = []; } } catch (_) {}
+  _raceCircuitResetProgress();
 }
 function _raceCircuitAdopt(C) {
   C.ready = true;
