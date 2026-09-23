@@ -8307,3 +8307,60 @@ Owner: *"tracker's sword icon, representing his tracking missiles, the icon is a
 - **MEASURED (the shipped function in node):** no lock / 2-of-3 / full lock on a DEAD target / full lock during the core -> dim; full lock on a live ship, full lock on a leviathan -> lit; another ship's ability -> lit. The HUD lab still extracts and draws (1094 lines, no errors).
 - No ready-POP on the lock edge, deliberately: the v44.39 latch already leaves sub-second cooldowns out (Tracker Rockets would strobe), and a lock that flickers in and out would strobe the same way.
 - **Open:** the same "would a press work" question applies elsewhere - the Vortex Laser needs 350 energy and its icon is lit below that. Not changed; offered.
+
+### v48.23 - the scoreboard in the ship picker's style
+
+Owner: *"make the scoreboard look cooler, same fonts and style as in the ship selection screen"*.
+
+**Jump:** `scoreboardCSS.textContent` (the CSS, with the note above it) · `function updateScoreboard` (`rowH` / `fleetH` / `meRow` / `peerRow`)
+
+- **Every value is the picker's own**, not invented: Orbitron / Rajdhani; the orange `#ffaa00` masthead with the red/cyan chromatic split (the STATIC `.lss-chroma` treatment - the board is a hold, not a transient callout, so no jitter/glitch); the card plate `rgba(20,20,40,0.55)` on `rgba(80,80,120,0.4)`, 9px radius (`.ship-chip` / `.fleet-chip`); YOUR row wears `.ship-chip.selected`'s cyan edge and glow; fleet headers are `.fleet-half-header` (Orbitron 10px caps, YOUR FLEET `#7fd4ff`, ENEMY FLEET `#ff5544`, FLEET A/B dimmed). Each row takes its hull's `LSS.CLASS_COLORS` as a left accent and as the colour of its WHO tag (YOU / PILOT - a connected human, the old `[NET] ` prefix - / BOT); status is a chip (ALIVE green, DOOMED amber, DEAD grey with the row dimmed); numbers are tabular Rajdhani with thousands separators. The subtitle is `_ssModeName()` (the picker's own mode names) plus the round in a fleet mode; the round score sits on each fleet header as a bold count + ROUNDS (CAPTURES in cyberpunk).
+- **The logic that decides WHICH rows exist is copied branch for branch** - PvE pilots-only (+ LEVIATHANS, + AEGIS in endless), the v47.45 `_lssIsBot` filter, the assault corpse filter and ATTACKING/DEFENDING, the v42.28 cyberpunk branch off C.bots with its capture score, YOU in fleet A unless you are in B. Only the markup changed; the v38.61 same-HTML skip is kept. The columns share one CSS grid (`--sb-n`, set only when the column count changes).
+- The CSS note lives as `//` lines ABOVE the template string: strip.py removes comment lines, and a `/* */` block inside a JS template literal would have had its first line stripped out of the CSS.
+- **MEASURED:** a solo Elimination match, held open with Tab - title, ELIMINATION · ROUND 1, both fleet headers with scores, six rows with the class accents, YOU highlighted, fonts computed as Orbitron; at a 390 px phone width the board is 367 px, no horizontal overflow, no clipped names, the DEAD state visible.
+
+### v48.24 - orbit the kill cam (everyone, every device)
+
+Owner: *"for the round replay, we should allow the orbital control, for everyone, so i can rotate around manually during the replay, default starting at the rear like we have it"*.
+
+**Jump:** `function _rplKcOrbitInput` (the note above it) · `function _rplKcSwing` · `function _rplKcCamera` · `_rplKcStart` (`onIn` / `onMove` / `onUp` / `onWheel`) · `_RPL_K` (`orbitMouse` / `orbitTouch` / `orbitPad`)
+
+- **No new input plumbing.** Every device's look already lands somewhere the kill cam has to itself: the pointer-locked mouse AND the touch look pad bank into `input.mouseDX/DY`, and the right stick is `input.gpLookX/Y` (deadzone, curve, stick swap and invert already applied). gameLoop skips updatePlayerMovement under `_RPL.kc`, so nothing else reads them. Zoom is the wheel, or the other stick's forward/back (`gpMoveY`). The orbit is this client's camera only - no traffic (the replay design rule) - so every player in a room drives their own.
+- **The swing turns the WHOLE director rig round the killer: the boom and the look point together.** Zero swing is exactly the old shot. The studio's chase swings the boom alone, and once it is round past the side it looks AWAY from the ship, because the look point stays out ahead. Rotating both keeps the killer in the same place in the frame from any side. The swing is heading-relative, like the chase it starts from.
+  - Azimuth goes round world-up. The climb goes about `boom x up`, and a positive angle turns the boom TOWARDS up.
+  - The climb is clamped per frame against the boom's own current pitch: 16 degrees at rest, more when the killer climbs or dives. The total stays within -70..76 degrees, short of the pole where `lookAt`'s up vector flips the picture.
+  - **The director's turn onto the victim gives way as the viewer swings off its shot:** full inside 7 degrees, none past 40 (`ws * (1 - sw)`). A nudge keeps the victim framed; a big swing is the viewer's shot.
+  - With no killer (a doom timer, a collision), the idle circle round the victim stops where the viewer takes hold of it (`spinA`), the way the selfie orbit's spin does.
+- **Senses match the pilot's look.** Right swings the camera round to show more of the right, so the camera moves LEFT round the ship. Down lifts it to look down. Mouse and look-pad rates come from the pilot's own `input.sensitivity` (x2 mouse, x1 touch; touch already carries `touchLookScale` 6). The pad turns 2.2 rad/s, and the climb gets 0.7 of that. All are live knobs through `window.__killcam`, and `{orbit:false}` turns the control off.
+- **Skips:** moving never skips. The rules stand: any key, a click, a fresh fire / A / B. Two additions:
+  - A FREE pointer (not locked, not touch) has to press to drag, so there a click skips on the RELEASE, and only if it did not drag.
+  - Touch FIRE skips, the same rule as the pad's fire. The look pad orbits now, and most of the bare canvas a tap could hit sits under the touch controls.
+- **Nothing counts for the first 0.45 s (`skipArmAt`), and a stick held through the whistle has to come back to centre first (`lookHeld` / `zoomHeld`).** Both would otherwise start the replay swung by the flying.
+- ⚠ **Fixed on the way:** the `mouseDX/DY` bank is emptied every kill cam frame. Before this, it banked up for the whole kill cam (nothing consumed it), and the first updatePlayerMovement after it dumped all of it into the pilot's aim.
+- The corner hint names the device in hand (`_rplKcHint`): RIGHT STICK TO ORBIT · A TO SKIP / DRAG TO ORBIT · FIRE TO SKIP / MOUSE TO ORBIT · ANY KEY TO SKIP.
+- Probes: `__replay.kcs()` (az / el in degrees, zoom, user, hint, camera) and `__replay.kcOrbit(azDeg, elDeg, zoom)`.
+- **MEASURED:**
+  - The shipped functions, pulled from `lss.js` and run on the page's THREE. Unswung = the old want/look exactly. Stick-right 90: the camera at the ship's side, looking through it. 180: in front, looking back. The climb clamps at 76.2 degrees. At the kill, unswung looks at the victim, a 6-degree nudge still does, and a 90-degree swing does not. Zoom scales the boom. The no-killer circle matches the old one within 1 u. 100 px of mouse = 0.3 rad and the bank reads 0 after. A held stick is ignored until it centres, then gives 0.22 rad in 0.1 s. The wheel zooms 1.15 per notch.
+  - Live, two real solo round ends (staged final kills): the kill cam starts itself on the old rear shot with the hull centred (projected x 0.00, y -0.09). 520 units of mouse swung it 89.4 degrees round, and a lift of -200 took it -34 degrees. Mouse travel inside the first 0.45 s was dropped. Both kill cams ran out on their own.
+- **Open:** the right stick on real hardware (the owner's pad); the touch look pad on a phone.
+
+### v48.25-48.26 - the between-rounds countdown gets its sounds back (and the FIGHT tone race)
+
+Owner: *"at the start of the round, there is a beeping during each countdown number 3, 2, 1 .... but in between rounds, it's silent... it should have the same sounds"*.
+
+**Jump:** `function _cdRound` (the pings) · `function finishLaunch` (`_toneSpent`, the `_rrToneDone` latch) · `game._rrToneFlipAt` in updateRoundSystem's warmup->playing flip · `window.__sndLog`
+
+- **Why it was silent.** The 3-2-1 pings (`sonar_ping_1/2/3`) and the `round_start` sting only ever lived in launchCountdown's ticker. v45.14 runs that ticker SILENT between rounds, with no digits and no pings, so that the arena's ROUND N 3-2-1 (`_cdRound`, off `game.warmupTimer`) is the only countdown. The digits moved to `_cdRound`, but their sound did not. The sting went too: the silent `finishLaunch` still set `game._rrToneDone = true`, and the flip's `!game._rrToneDone` guard read that as "already played".
+- **48.25:**
+  - `_cdRound` plays the same pings on the digits it paints (3 -> ping_1, 2 -> ping_2, 1 -> ping_3). It is gated on `_cdPaint` returning true, and the map is inlined, so there is no top-level const to hit the TDZ.
+  - It cannot double: the only other thing that pings is a non-silent ticker, and the round side stands down for the whole of one.
+  - `finishLaunch` sets the latch only when its tone actually played.
+- **48.26 - a PRE-EXISTING double on the fresh launch, found by measuring 48.25.** The LAUNCH beat and the FIGHT flip race on one clock (the `_cdPaint` header).
+  - When the flip won, it played `round_start` (22.264), then finishLaunch played it again (22.282), and finishLaunch also left the latch true with nothing left to consume it. Round 2's FIGHT then played NO tone, measured.
+  - Now the flip stamps `game._rrToneFlipAt`, and finishLaunch treats a flip tone in the last 1.5 s as its own: no tone and no latch.
+  - Why the latch stays instead of becoming a pure time window: a Spire build or the Earth curtain can hold the flip many seconds past LAUNCH, and the latch is what keeps that late flip quiet.
+- **`window.__sndLog(true)` / `()` / `(false)`: which sounds actually played** (`[type, own, seconds]`, past the gap reservation). Off, it costs playSound one property read. Its state lives on `audio._sndLog`, not in a new top-level binding, because playSound is hoisted (TDZ).
+- **MEASURED (48.26, solo, The Nexus):**
+  - Round 1 launch: pings at 17.28 / 18.27 / 19.27, then ONE `round_start` at 20.266. The flip won the race again and finishLaunch stood down; the latch was left false.
+  - Round 2 (the owner's own round, flying with the pad): ROUND 2 3-2-1 painted at 67.1 / 68.1 / 69.1 with pings at 67.065 / 68.066 / 69.066, and FIGHT at 70.1 with one `round_start` at 70.066. Same cadence as round 1.
+  - The owner confirmed by ear.

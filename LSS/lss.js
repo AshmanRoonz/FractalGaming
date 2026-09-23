@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.22";
+const LSS_BUILD = "48.26";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -16179,7 +16179,8 @@ if (typeof window !== 'undefined') {
   };
   window.__orbitOff = function () { window.__orbitCam.on = false; return 'orbit cam off'; };
 }
-const _RPL_K = { lead: 4.0, slowLead: 1.2, fastRate: 1.0, tailReal: 2.0, rate: 1 / 3, delay: 0.25, hold: 0.3, maxExtend: 6, maxSec: 900 };
+const _RPL_K = { lead: 4.0, slowLead: 1.2, fastRate: 1.0, tailReal: 2.0, rate: 1 / 3, delay: 0.25, hold: 0.3, maxExtend: 6, maxSec: 900,
+                 orbitMouse: 2, orbitTouch: 1, orbitPad: 2.2 };
 function _rplKcTail(cfg, rate) {
   if (typeof cfg.tail === 'number' && cfg.tail >= 0) return cfg.tail;
   return Math.max(0, (cfg.tailReal != null ? +cfg.tailReal : 2.0)) * rate;
@@ -16190,6 +16191,8 @@ const _rplQa = new THREE.Quaternion(), _rplQb = new THREE.Quaternion(), _rplFwd 
 const _rplCamTgt = new THREE.Vector3(), _rplTmp = new THREE.Vector3(), _rplM4 = new THREE.Matrix4(), _rplUp = new THREE.Vector3(0, 1, 0);
 const _rplTmp2 = new THREE.Vector3(), _rplTmp3 = new THREE.Vector3(), _rplRight = new THREE.Vector3(), _rplEuler = new THREE.Euler(0, 0, 0, 'YXZ');
 const _rplFlipY = new THREE.Quaternion(0, 1, 0, 0);
+const _rplOrbB = new THREE.Vector3(), _rplOrbL = new THREE.Vector3(), _rplOrbR = new THREE.Vector3();
+const _rplOrbQa = new THREE.Quaternion(), _rplOrbQb = new THREE.Quaternion();
 const _RPL_HIDE = ['#hud', '#crosshair', '#circumpunct-hud', '#hud-world', '#cockpit-frame', '#gun-layer', '#core-overlay-frame',
   '#ability-overlay-frame', '#ability-overlay-frame *', '#hud *', '#enemy-healthbars', '#stasis-warning', '#stasis-vignette',
   '#execution-prompt', '#endless-hud', '#hit-marker', '#hit-marker-kill', '.damage-indicator', '.dmg-edge', '#ov-damage-vignette',
@@ -17192,7 +17195,15 @@ function _rplKcStart(R, K) {
   const kc = _RPL.kc = { R, K, vk, kk, t0, t1, rt: t0, rate: fast, rateFast: fast, rateSlow: rate, slowFrom: K.t - slowLead,
                          cfg, lead, hold, evI: 0, pj: [], pmPool: [], wfx: [], saved: [], skip: false,
                          skipArmAt: now + 450, last: now, camInit: false, camPos: new THREE.Vector3(),
-                         gpWas: !!(typeof input !== 'undefined' && input.gpFire), padWas: [], endAt: 0 };
+                         gpWas: !!(typeof input !== 'undefined' && input.gpFire), padWas: [], endAt: 0,
+                         oAz: 0, oEl: 0, oZoom: 1, user: false, act: 0, spinA: 0, mdx: 0, mdy: 0, wheel: 0, drag: null,
+                         tfWas: false, lookHeld: false, zoomHeld: false };
+  try {
+    kc.tfWas = !!input.touchFire;
+    kc.lookHeld = !!input.gpConnected && (Math.abs(input.gpLookX || 0) + Math.abs(input.gpLookY || 0) >= 0.08);
+    kc.zoomHeld = !!input.gpConnected && Math.abs(input.gpMoveY || 0) >= 0.08;
+    input.mouseDX = 0; input.mouseDY = 0;   // the round's own mouse travel is not the viewer's
+  } catch (_) {}
   while (kc.evI < R.ev.length && R.ev[kc.evI].t < t0) kc.evI++;
   try { for (const p of (game.projectiles || [])) { try { _despawnProjectileSilent(p); } catch (_) {} } game.projectiles = []; } catch (_) {}
   _rplClearFx();
@@ -17213,16 +17224,33 @@ function _rplKcStart(R, K) {
     ks.textContent = KA ? KA.name : ''; ks.style.color = KA ? _rplClassCol(KA.lo) : '';
     ar.style.display = KA ? '' : 'none';
     vs.textContent = VA ? VA.name : ''; vs.style.color = VA ? _rplClassCol(VA.lo) : '';
+    const sk = el.querySelector('.rpl-skip'); if (sk) sk.textContent = _rplKcHint();   // (v48.24)
     document.body.classList.add('lss-killcam');
   } catch (_) {}
   const onIn = (ev) => {
-    if (!_RPL.kc) return;
-    if (performance.now() < _RPL.kc.skipArmAt) return;
+    const kc = _RPL.kc; if (!kc) return;
     if (ev && ev.code === 'F9') return;   // F9 is the clip recorder's save - not a skip
-    _RPL.kc.skip = true;
+    if (ev && ev.type === 'mousedown' && !input.locked && !input.touchActive) { kc.drag = { x: ev.clientX, y: ev.clientY, moved: 0 }; return; }
+    if (performance.now() < kc.skipArmAt) return;
+    kc.skip = true;
   };
-  kc.onIn = onIn;
-  try { window.addEventListener('keydown', onIn, true); window.addEventListener('mousedown', onIn, true); } catch (_) {}
+  const onMove = (ev) => {
+    const kc = _RPL.kc; if (!kc || !kc.drag || input.locked) return;   // locked: the game banks movementX/Y into input.mouseDX
+    kc.mdx += ev.clientX - kc.drag.x; kc.mdy += ev.clientY - kc.drag.y;
+    kc.drag.x = ev.clientX; kc.drag.y = ev.clientY;
+  };
+  const onUp = () => {
+    const kc = _RPL.kc; if (!kc || !kc.drag) return;
+    const d = kc.drag; kc.drag = null;
+    if (d.moved + Math.abs(kc.mdx) + Math.abs(kc.mdy) < 6 && performance.now() >= kc.skipArmAt) kc.skip = true;
+  };
+  const onWheel = (ev) => { const kc = _RPL.kc; if (kc) kc.wheel += (ev.deltaY > 0) ? 1 : (ev.deltaY < 0 ? -1 : 0); };
+  kc.onIn = onIn; kc.onMove = onMove; kc.onUp = onUp; kc.onWheel = onWheel;
+  try {
+    window.addEventListener('keydown', onIn, true); window.addEventListener('mousedown', onIn, true);
+    window.addEventListener('mousemove', onMove, true); window.addEventListener('mouseup', onUp, true);
+    window.addEventListener('wheel', onWheel, { capture: true, passive: true });
+  } catch (_) {}
   try { if (typeof _ghostHullRestore === 'function' && player && player.mesh) _ghostHullRestore(player.mesh); } catch (_) {}
   _adsReset();   // (v48.05) a round won while zoomed would otherwise be replayed through the scope
   try {
@@ -17236,7 +17264,12 @@ function _rplKcStart(R, K) {
 function _rplKcEnd() {
   const kc = _RPL.kc; if (!kc) return;
   _RPL.kc = null;
-  try { window.removeEventListener('keydown', kc.onIn, true); window.removeEventListener('mousedown', kc.onIn, true); } catch (_) {}
+  try {
+    window.removeEventListener('keydown', kc.onIn, true); window.removeEventListener('mousedown', kc.onIn, true);
+    window.removeEventListener('mousemove', kc.onMove, true); window.removeEventListener('mouseup', kc.onUp, true);
+    window.removeEventListener('wheel', kc.onWheel, true);
+  } catch (_) {}
+  try { input.mouseDX = 0; input.mouseDY = 0; } catch (_) {}   // (v48.24) nothing the viewer did reaches the pilot's aim
   for (const s of kc.saved) {
     try {
       const m = s.m;
@@ -17266,6 +17299,9 @@ function _rplKcFrame(now) {
     const gp = !!(typeof input !== 'undefined' && input.gpFire);
     if (gp && !kc.gpWas && now >= kc.skipArmAt) kc.skip = true;
     kc.gpWas = gp;
+    const tf = !!input.touchFire;
+    if (tf && !kc.tfWas && now >= kc.skipArmAt) kc.skip = true;
+    kc.tfWas = tf;
     const pad = _rplPadRaw();
     if (pad) {
       const b = pad.buttons || [], dn = (i) => !!(b[i] && b[i].pressed);
@@ -17303,6 +17339,7 @@ function _rplKcFrame(now) {
       } catch (_) {}
     }
   }
+  try { _rplKcOrbitInput(kc, now, dtR); } catch (_) {}   // (v48.24) the viewer's hands on the camera
   _rplKcCamera(kc, dtR);
   try { _rplWfxReplay(kc, kc.rt, dtR * kc.rate, _RPL_KC_WFX); } catch (_) {}
   _rplPjDraw(kc, kc.rt);   // (v48.01) after the camera: the shot ribbons face this frame's eye
@@ -17327,6 +17364,56 @@ function _rplBoom(from, want, hull) {
     want.copy(from).addScaledVector(_rplTmp2, s);
   } catch (_) {}
 }
+function _rplKcOrbitInput(kc, now, dt) {
+  let mdx = 0, mdy = 0;
+  try { mdx = (+input.mouseDX || 0) + kc.mdx; mdy = (+input.mouseDY || 0) + kc.mdy; input.mouseDX = 0; input.mouseDY = 0; } catch (_) {}
+  kc.mdx = 0; kc.mdy = 0;
+  const wheel = kc.wheel; kc.wheel = 0;
+  if (kc.drag) kc.drag.moved += Math.abs(mdx) + Math.abs(mdy);
+  kc.act = Math.max(0, kc.act - dt * 3);
+  const cfg = kc.cfg;
+  if (cfg.orbit === false || now < kc.skipArmAt) return;
+  let dAz = 0, dEl = 0, zm = 1;
+  if (mdx || mdy) {
+    const k = Math.max(0.0003, +input.sensitivity || 0.0015) * (input.touchActive ? (+cfg.orbitTouch || 1) : (+cfg.orbitMouse || 2));
+    dAz -= mdx * k; dEl += mdy * k;
+  }
+  if (input.gpConnected) {
+    const lx = +input.gpLookX || 0, ly = +input.gpLookY || 0;
+    if (kc.lookHeld) { if (Math.abs(lx) + Math.abs(ly) < 0.08) kc.lookHeld = false; }
+    else if (lx || ly) { const r = +cfg.orbitPad || 2.2; dAz -= lx * r * dt; dEl += ly * r * 0.7 * dt; }
+    const my = +input.gpMoveY || 0;
+    if (kc.zoomHeld) { if (Math.abs(my) < 0.08) kc.zoomHeld = false; }
+    else if (my) zm *= Math.pow(2, my * dt);
+  }
+  if (wheel) zm *= Math.pow(1.15, wheel);
+  if (!dAz && !dEl && zm === 1) return;
+  kc.user = true; kc.act = 1;
+  kc.oAz = Math.atan2(Math.sin(kc.oAz + dAz), Math.cos(kc.oAz + dAz));   // kept in +/-PI
+  kc.oEl += dEl;   // clamped in _rplKcSwing, which knows how steep the boom already is
+  kc.oZoom = Math.max(0.5, Math.min(4, kc.oZoom * zm));
+}
+function _rplKcSwing(kc, boom, look) {
+  const L = boom.length();
+  const e0 = (L > 1e-6) ? Math.asin(Math.max(-1, Math.min(1, boom.y / L))) : 0;
+  kc.oEl = Math.max(-1.22 - e0, Math.min(1.33 - e0, kc.oEl));
+  if (kc.oZoom !== 1) boom.multiplyScalar(kc.oZoom);
+  if (kc.oAz) { _rplOrbQa.setFromAxisAngle(_rplUp, kc.oAz); boom.applyQuaternion(_rplOrbQa); look.applyQuaternion(_rplOrbQa); }
+  if (kc.oEl) {
+    _rplOrbR.crossVectors(boom, _rplUp);   // rotating about boom x up turns the boom TOWARDS up: +oEl climbs
+    if (_rplOrbR.lengthSq() > 1e-6) { _rplOrbR.normalize(); _rplOrbQb.setFromAxisAngle(_rplOrbR, kc.oEl); boom.applyQuaternion(_rplOrbQb); look.applyQuaternion(_rplOrbQb); }
+  }
+  const s = Math.sqrt(kc.oAz * kc.oAz + kc.oEl * kc.oEl);
+  const u = Math.max(0, Math.min(1, (s - 0.12) / 0.58));   // none inside 7 degrees, all of it past 40
+  return u * u * (3 - 2 * u);
+}
+function _rplKcHint() {
+  try {
+    if (input.gpConnected) return 'RIGHT STICK TO ORBIT · A TO SKIP';
+    if (input.touchActive) return 'DRAG TO ORBIT · FIRE TO SKIP';
+  } catch (_) {}
+  return 'MOUSE TO ORBIT · ANY KEY TO SKIP';
+}
 function _rplKcCamera(kc, dt) {
   const R = kc.R, K = kc.K, cfg = kc.cfg;
   const VA = R.actors[kc.vk], KA = kc.kk ? R.actors[kc.kk] : null;
@@ -17336,21 +17423,26 @@ function _rplKcCamera(kc, dt) {
     _rplPoseAt(KA, kc.rt, _rplP, _rplQ);
     _rplFwd.set(0, 0, 1).applyQuaternion(_rplQ);   // hull nose is local +Z
     const hull = Math.max(60, KA.hull || 100);
-    want.copy(_rplP).addScaledVector(_rplFwd, -hull * 2.6).addScaledVector(_rplUp, hull * 0.75);
+    _rplOrbB.copy(_rplFwd).multiplyScalar(-hull * 2.6).addScaledVector(_rplUp, hull * 0.75);
+    _rplOrbL.copy(_rplFwd).multiplyScalar(hull * 8);
+    const sw = _rplKcSwing(kc, _rplOrbB, _rplOrbL);
+    want.copy(_rplP).add(_rplOrbB);
     const L = kc.lead || cfg.lead;
     const w = Math.max(0, Math.min(1, (kc.rt - (K.t - L * 0.75)) / Math.max(0.2, L * 0.75 - 0.15)));
-    const ws = w * w * (3 - 2 * w);
-    _rplLook.copy(_rplP).addScaledVector(_rplFwd, hull * 8).lerp(_rplP2, ws);
+    const ws = w * w * (3 - 2 * w) * (1 - sw);   // the director's turn onto the victim, while it is still its shot
+    _rplLook.copy(_rplP).add(_rplOrbL).lerp(_rplP2, ws);
     _rplBoom(_rplP, want, hull);
   } else {
-    const a = (kc.rt - kc.t0) * 0.35;
-    want.set(_rplP2.x + Math.cos(a) * 520, _rplP2.y + 180, _rplP2.z + Math.sin(a) * 520);
+    if (!kc.user) kc.spinA = (kc.rt - kc.t0) * 0.35;   // the idle circle stops where the viewer takes hold
+    kc.oEl = Math.max(-1.55, Math.min(1.0, kc.oEl));   // 19 degrees up plus that: -70..76
+    const a = kc.spinA - kc.oAz, el = 0.3335 + kc.oEl, r = 550 * kc.oZoom, ce = Math.cos(el) * r;
+    want.set(_rplP2.x + Math.cos(a) * ce, _rplP2.y + Math.sin(el) * r, _rplP2.z + Math.sin(a) * ce);   // unswung: 520 out, 180 up
     _rplLook.copy(_rplP2);
   }
   if (!kc.camInit) { kc.camInit = true; kc.camPos.copy(want); kc.look = _rplLook.clone(); }
-  const k = 1 - Math.exp(-dt * 7);
+  const k = 1 - Math.exp(-dt * (7 + 9 * kc.act));
   kc.camPos.lerp(want, k);
-  kc.look.lerp(_rplLook, 1 - Math.exp(-dt * 9));
+  kc.look.lerp(_rplLook, 1 - Math.exp(-dt * (9 + 7 * kc.act)));
   camera.position.copy(kc.camPos);
   camera.up.set(0, 1, 0);
   camera.lookAt(kc.look);
@@ -18507,6 +18599,19 @@ if (typeof window !== 'undefined') window.__replay = {
     return _rplKcStart(R, R.kills[R.kills.length - 1]);
   },
   stop: function () { _rplKcEnd(); _rplStudioClose(); return true; },
+  kcs: function () {
+    const k = _RPL.kc; if (!k) return 'no kill cam';
+    const d = (r) => +(r * 180 / Math.PI).toFixed(1);
+    return { rt: +(k.rt - k.t0).toFixed(2), len: +(k.t1 - k.t0).toFixed(2), killer: k.kk || null, victim: k.vk,
+             az: d(k.oAz), el: d(k.oEl), zoom: +k.oZoom.toFixed(2), user: k.user, act: +k.act.toFixed(2), lookHeld: k.lookHeld,
+             drag: !!k.drag, hint: (document.querySelector('#rpl-kc .rpl-skip') || {}).textContent,
+             cam3: [Math.round(camera.position.x), Math.round(camera.position.y), Math.round(camera.position.z)] };
+  },
+  kcOrbit: function (az, el, zoom) {
+    const k = _RPL.kc; if (!k) return 'no kill cam';
+    k.oAz = (+az || 0) * Math.PI / 180; k.oEl = (+el || 0) * Math.PI / 180; if (zoom) k.oZoom = +zoom; k.user = true;
+    return window.__replay.kcs();
+  },
   studio: function (which, opts) {
     const R = (typeof which === 'string' && which !== 'last' && which !== 'cur') ? _RPL.lib.find(x => x.id === which)
             : (which === 'last' ? _RPL.last : (_RPL.cur || _RPL.last));
@@ -66906,7 +67011,7 @@ function updateRoundSystem(dt) {
       if (typeof musicSetPattern === 'function' && !_ffHub) {
         try { musicSetPattern('combat', { bpmTarget: 100, intensity: 1 }); } catch (_) {}
       }
-      if (!selectActive && !_ffHub && !game._rrToneDone) playSound('round_start');
+      if (!selectActive && !_ffHub && !game._rrToneDone) { playSound('round_start'); try { game._rrToneFlipAt = performance.now(); } catch (_) {} }
       game._rrToneDone = false;
       if (window.Overlays) {
         if (!_ffHub) Overlays.countdown('FIGHT', '');
@@ -73449,7 +73554,10 @@ function _cdRound(n, label) {
   try { if (typeof LSS !== 'undefined' && LSS.MODE === 'freeflight') return; } catch (_) {}
   if (n === 0 || n === 'FIGHT') { _cdPaint('round', 'FIGHT', '', { fight: true, prio: 2, hold: _CDHOLD_FIGHT_MS }); return; }
   try { if (game && game._launchCdOwnsDigits && _launchCountdownRuntime && !_launchCountdownRuntime.launched) return; } catch (_) {}
-  _cdPaint('round', String(n), label || '', { hold: _CDHOLD_DIGIT_MS });
+  if (_cdPaint('round', String(n), label || '', { hold: _CDHOLD_DIGIT_MS })) {
+    const _pn = +n, _ping = (_pn === 3) ? 'sonar_ping_1' : (_pn === 2) ? 'sonar_ping_2' : (_pn === 1) ? 'sonar_ping_3' : null;
+    if (_ping) { try { playSound(_ping); } catch (_) {} }
+  }
 }
 function launchCountdown(duration, opts) {
   const _silent = !!(opts && opts.silent);
@@ -73522,9 +73630,11 @@ function launchCountdown(duration, opts) {
     countdownRuntime.launched = true;
     try { _applyStagedRoundShip(); } catch (_) {}
     try { game._launchCdOwnsDigits = false; } catch (_) {}
+    let _toneSpent = false;
+    try { const _fa = game._rrToneFlipAt || 0; _toneSpent = _fa > 0 && (performance.now() - _fa) < 1500; } catch (_) {}
     if (_silent) { _rrPickClock(''); }
-    else { tick('LAUNCH', 'WARP-IN'); try { playSound('round_start'); } catch (e) {} }
-    try { game._rrToneDone = true; } catch (_) {}
+    else { tick('LAUNCH', 'WARP-IN'); if (!_toneSpent) { try { playSound('round_start'); } catch (e) {} } }
+    if (!_silent && !_toneSpent) { try { game._rrToneDone = true; } catch (_) {} }
     const sel = document.getElementById('ship-select');
     if (sel) {
       sel.classList.remove('active');
@@ -93262,8 +93372,14 @@ function playSound(type) {
   resumeAudio();
   const own = (_audioSpatialDepth === 0);
   if (!_audioReserveSound(type, own)) return;
+  if (audio._sndLog) { try { audio._sndLog.push([type, own ? 1 : 0, Math.round(performance.now()) / 1000]); if (audio._sndLog.length > 120) audio._sndLog.shift(); } catch (_) {} }   // (v48.25) __sndLog
   _playSoundFromLabRecipe(type);
 }
+if (typeof window !== 'undefined') window.__sndLog = function (on) {
+  if (on === true) audio._sndLog = [];
+  else if (on === false) { const L = audio._sndLog; audio._sndLog = null; return L ? L.slice() : null; }
+  return audio._sndLog ? audio._sndLog.slice() : null;
+};
 
 const _spatialRelPos = new THREE.Vector3();
 const _spatialInvQuat = new THREE.Quaternion();
@@ -95374,21 +95490,99 @@ const scoreboardCSS = document.createElement('style');
 scoreboardCSS.textContent = `
 #scoreboard {
   position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-  width: 600px; background: rgba(5,8,18,0.92); border: 1px solid rgba(100,180,255,0.2);
+  width: min(680px, 94vw); max-height: 88vh; overflow: hidden;
   z-index: 50; pointer-events: none; display: none; color: #fff;
-  font-family: 'Courier New', monospace; padding: 20px;
+  font-family: 'Rajdhani', 'Inter', sans-serif;
+  padding: 18px 20px 14px;
+  background: linear-gradient(180deg, rgba(12,16,34,0.94), rgba(5,8,18,0.94));
+  border: 1px solid rgba(80,80,120,0.45); border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.05), 0 0 30px rgba(80,180,255,0.07);
 }
 #scoreboard.visible { display: block; }
-#scoreboard h2 { text-align: center; color: #ffaa00; font-size: 16px; letter-spacing: 3px; margin-bottom: 12px; }
-.sb-team-header { font-size: 12px; letter-spacing: 2px; padding: 4px 8px; margin-top: 10px; }
-.sb-team-a { color: #ff6666; border-bottom: 1px solid rgba(255,100,100,0.3); }
-.sb-team-b { color: #66bb66; border-bottom: 1px solid rgba(100,200,100,0.3); }
-.sb-row { display: flex; justify-content: space-between; padding: 3px 12px; font-size: 11px; }
-.sb-row.player-row { color: #ffcc00; }
-.sb-row .sb-name { flex: 2; }
-.sb-row .sb-stat { flex: 1; text-align: center; color: #aaa; }
-.sb-row .sb-stat-header { flex: 1; text-align: center; color: #666; font-size: 9px; text-transform: uppercase; }
-.sb-header-row { display: flex; justify-content: space-between; padding: 2px 12px; margin-bottom: 4px; }
+#scoreboard::before {
+  content: ''; position: absolute; left: 22%; right: 22%; top: -1px; height: 2px; border-radius: 2px;
+  background: linear-gradient(90deg, rgba(255,170,0,0), rgba(255,170,0,0.85), rgba(255,170,0,0));
+  box-shadow: 0 0 12px rgba(255,170,0,0.45);
+}
+#scoreboard .sb-title { text-align: center; margin: 0 0 14px; }
+#scoreboard .sb-title-text {
+  display: inline-block; font-family: 'Orbitron', sans-serif; font-weight: 700;
+  font-size: 22px; letter-spacing: 6px; padding-left: 6px; color: #ffaa00;
+  text-shadow: -1px 0 0 rgba(255,64,96,0.6), 1px 0 0 rgba(64,220,255,0.6), 0 0 6px currentColor, 0 0 18px rgba(255,170,0,0.45);
+}
+#scoreboard .sb-sub {
+  display: block; margin-top: 5px;
+  font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 11px;
+  letter-spacing: 3px; color: #8a93a6; text-transform: uppercase;
+}
+#scoreboard .sb-sub b { color: #ffd27a; font-weight: 700; }
+.sb-grid {
+  display: grid; align-items: center; column-gap: 8px;
+  grid-template-columns: minmax(0, 2.3fr) minmax(0, 0.95fr) repeat(var(--sb-n, 2), minmax(0, 0.8fr));
+}
+.sb-head {
+  padding: 0 12px 6px 16px;
+  font-family: 'Orbitron', sans-serif; font-size: 8.5px; font-weight: 600;
+  letter-spacing: 2px; color: rgba(150,175,205,0.55); text-transform: uppercase;
+}
+.sb-head > div:not(:first-child) { text-align: center; }
+.sb-fleet {
+  display: flex; align-items: center; gap: 10px; margin: 12px 2px 6px; padding-bottom: 5px;
+  font-family: 'Orbitron', sans-serif; font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+  border-bottom: 1px solid rgba(80,80,120,0.35);
+}
+.sb-fleet .sb-ftag { font-weight: 700; }
+.sb-fleet.mine .sb-ftag, .sb-fleet.pilots .sb-ftag { color: #7fd4ff; text-shadow: 0 0 10px rgba(127,212,255,0.35); }
+.sb-fleet.foe .sb-ftag { color: #ff5544; text-shadow: 0 0 10px rgba(255,85,68,0.35); }
+.sb-fleet .sb-fside { opacity: 0.55; font-size: 9px; letter-spacing: 1.6px; }
+.sb-fleet .sb-fnote { font-size: 8.5px; letter-spacing: 1.6px; color: #ffd27a; opacity: 0.85; }
+.sb-fleet .sb-fscore { margin-left: auto; font-size: 9px; letter-spacing: 1.6px; color: #8a93a6; }
+.sb-fleet .sb-fscore b { font-size: 15px; letter-spacing: 1px; color: #fff; margin-right: 5px; }
+.sb-rows { display: flex; flex-direction: column; gap: 4px; }
+.sb-row {
+  position: relative; padding: 6px 12px 6px 16px; overflow: hidden;
+  background: rgba(20,20,40,0.55); border: 1px solid rgba(80,80,120,0.4); border-radius: 9px;
+}
+.sb-row::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+  background: var(--cc, #8899aa); box-shadow: 0 0 10px var(--cc, #8899aa);
+}
+.sb-row.you {
+  border-color: #7fd4ff; background: rgba(25,50,75,0.85);
+  box-shadow: 0 0 14px rgba(80,180,255,0.28), inset 0 0 12px rgba(80,180,255,0.12);
+}
+.sb-row.dead { opacity: 0.5; }
+.sb-ship { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.sb-name {
+  font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: 11.5px; letter-spacing: 1.6px;
+  color: #cfd6e4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sb-row.you .sb-name { color: #9fe8ff; text-shadow: 0 0 10px rgba(120,220,255,0.6); }
+.sb-who {
+  font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 9px; letter-spacing: 1.4px;
+  color: var(--cc, #8899aa); text-transform: uppercase; white-space: nowrap;
+}
+.sb-status {
+  justify-self: center; font-family: 'Orbitron', sans-serif; font-size: 8px; font-weight: 700; letter-spacing: 1.4px;
+  padding: 2px 7px; border-radius: 3px; border: 1px solid currentColor; background: rgba(0,0,0,0.35);
+}
+.sb-status.alive { color: #6fe08f; }
+.sb-status.doomed { color: #ffb020; box-shadow: 0 0 8px rgba(255,176,32,0.35); }
+.sb-status.dead { color: #7a7f8e; }
+.sb-num {
+  text-align: center; font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 15px;
+  color: #e8eef7; font-variant-numeric: tabular-nums;
+}
+.sb-row.you .sb-num { color: #fff; }
+.sb-foot {
+  display: flex; justify-content: center; gap: 22px; margin-top: 14px; padding-top: 10px;
+  border-top: 1px solid rgba(80,80,120,0.35);
+  font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 14px; color: #fff; font-variant-numeric: tabular-nums;
+}
+.sb-foot em {
+  font-style: normal; font-family: 'Orbitron', sans-serif; font-size: 8.5px; font-weight: 600;
+  letter-spacing: 2px; color: rgba(150,175,205,0.6); margin-right: 6px;
+}
 `;
 document.head.appendChild(scoreboardCSS);
 
@@ -95416,47 +95610,63 @@ function updateScoreboard() {
 
   const _sbMode = (typeof LSS !== 'undefined' && LSS.MODE) || 'classic';
   const statusOf = (e) => !e.alive ? 'DEAD' : e.doomed ? 'DOOMED' : 'ALIVE';
-  const row = (name, status, kills, dmg, isPlayer) => (
-    '<div class="sb-row' + (isPlayer ? ' player-row' : '') + '">' +
-    '<div class="sb-name">' + name + '</div>' +
-    '<div class="sb-stat">' + status + '</div>' +
-    '<div class="sb-stat">' + (kills || 0) + '</div>' +
-    '<div class="sb-stat">' + Math.floor(dmg || 0) + '</div>' +
-    '</div>'
-  );
   const pStatus = player.shipState === 'dead' ? 'DEAD' : player.doomed ? 'DOOMED' : 'ALIVE';
-  const _youName = 'YOU (' + (player.loadout ? player.loadout.name : '?') + ')';
-
-  let html = '<h2>SCOREBOARD</h2>';
   const _sbCyber = (typeof _isCyber === 'function') && _isCyber();
   const _sbPvE = !_sbCyber && (_sbMode === 'campaign' || _sbMode === 'freeflight' || _sbMode === 'endless');
   const _sbEndless = (_sbMode === 'endless');
-  html += '<div class="sb-header-row"><div class="sb-name sb-stat-header">SHIP</div><div class="sb-stat-header">STATUS</div><div class="sb-stat-header">KILLS</div>'
-    + (_sbPvE ? '<div class="sb-stat-header">LEVIATHANS</div>' : '')
-    + (_sbEndless ? '<div class="sb-stat-header">AEGIS</div>' : '')
-    + '<div class="sb-stat-header">DAMAGE</div></div>';
+
+  const _esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const _cc = (key) => {
+    const c = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && key && LSS.CLASS_COLORS[key] != null) ? LSS.CLASS_COLORS[key] : 0x8899aa;
+    return '#' + (c >>> 0).toString(16).padStart(6, '0');
+  };
+  const _nf = (v) => Math.floor(v || 0).toLocaleString('en-US');
+  const _nCols = 2 + (_sbPvE ? 1 : 0) + (_sbEndless ? 1 : 0);
+  if (sb._lssCols !== _nCols) { sb._lssCols = _nCols; sb.style.setProperty('--sb-n', String(_nCols)); }
+  const rowH = (r) => {
+    const st = String(r.s || 'ALIVE').toLowerCase();
+    let h = '<div class="sb-row sb-grid' + (r.me ? ' you' : '') + (st === 'dead' ? ' dead' : '') + '" style="--cc:' + _cc(r.key) + '">' +
+      '<div class="sb-ship"><span class="sb-name">' + _esc(r.n) + '</span><span class="sb-who">' + _esc(r.who) + '</span></div>' +
+      '<div class="sb-status ' + st + '">' + _esc(r.s) + '</div>' +
+      '<div class="sb-num">' + _nf(r.k) + '</div>';
+    if (_sbPvE) h += '<div class="sb-num">' + _nf(r.m) + '</div>';
+    if (_sbEndless) h += '<div class="sb-num">' + (r.a != null ? 'L' + r.a : '-') + '</div>';
+    return h + '<div class="sb-num">' + _nf(r.d) + '</div></div>';
+  };
+  const fleetH = (cls, tag, side, note, score) =>
+    '<div class="sb-fleet ' + cls + '"><span class="sb-ftag">' + tag + '</span>' +
+    (side ? '<span class="sb-fside">' + side + '</span>' : '') +
+    (note ? '<span class="sb-fnote">' + note + '</span>' : '') +
+    (score ? '<span class="sb-fscore">' + score + '</span>' : '') + '</div>';
+  const scoreH = (n, word) => '<b>' + (n | 0) + '</b>' + word;
+  const meRow = (extra) => Object.assign({ n: player.loadout ? player.loadout.name : '?', key: player.loadoutKey, who: 'YOU',
+    s: pStatus, k: player.kills || 0, d: player.damageDealt || 0, me: true }, extra || {});
+  const peerRow = (np, extra) => Object.assign({ n: np.loadout ? np.loadout.name : '?', key: np.loadoutKey, who: 'PILOT',
+    s: statusOf(np), k: np.kills || 0, d: np.damageDealt || 0, me: false }, extra || {});
+
+  let _sub = _esc((typeof _ssModeName === 'function' && _ssModeName()) || '');
+  if (!_sbPvE) {
+    const _rn = (_sbCyber && game._cyber && game._cyber.round) ? game._cyber.round : (game.currentRound || 0);
+    if (_rn) _sub += (_sub ? ' &middot; ' : '') + 'ROUND <b>' + _rn + '</b>';
+  }
+  let html = '<div class="sb-title"><span class="sb-title-text">SCOREBOARD</span>' + (_sub ? '<span class="sb-sub">' + _sub + '</span>' : '') + '</div>';
+  html += '<div class="sb-head sb-grid"><div>SHIP</div><div>STATUS</div><div>KILLS</div>'
+    + (_sbPvE ? '<div>LEVIATHANS</div>' : '')
+    + (_sbEndless ? '<div>AEGIS</div>' : '')
+    + '<div>DAMAGE</div></div>';
 
   if (_sbPvE) {
     let _sbHdrX = '';
-    if (_sbMode === 'campaign') _sbHdrX = ' — WAVE ' + (game.currentRound || 1);
-    else if (_sbMode === 'endless' && game.endlessRun) _sbHdrX = ' — ' + (game.endlessRun.dist / 1000).toFixed(2) + ' KM';
-    html += '<div class="sb-team-header sb-team-a">PILOTS' + _sbHdrX + '</div>';
+    if (_sbMode === 'campaign') _sbHdrX = 'WAVE ' + (game.currentRound || 1);
+    else if (_sbMode === 'endless' && game.endlessRun) _sbHdrX = (game.endlessRun.dist / 1000).toFixed(2) + ' KM';
+    html += fleetH('pilots', 'PILOTS', '', _sbHdrX, '');
     const _myAegis = (game.endlessRun && game.endlessRun.aegis) ? (game.endlessRun.aegis.lvl | 0) : null;
-    const prows = [{ n: _youName, s: pStatus, k: player.kills || 0, m: player.monKills || 0, a: _myAegis, d: player.damageDealt || 0, me: true }];
+    const prows = [meRow({ m: player.monKills || 0, a: _myAegis })];
     for (const np of net.networkPlayers) {
-      prows.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, m: np.monKills || 0, a: (np.aegisLvl != null) ? np.aegisLvl : null, d: np.damageDealt || 0, me: false });
+      prows.push(peerRow(np, { m: np.monKills || 0, a: (np.aegisLvl != null) ? np.aegisLvl : null }));
     }
     prows.sort((a, b) => (b.k + b.m) - (a.k + a.m));
-    for (const p of prows) {
-      html += '<div class="sb-row' + (p.me ? ' player-row' : '') + '">' +
-        '<div class="sb-name">' + p.n + '</div>' +
-        '<div class="sb-stat">' + p.s + '</div>' +
-        '<div class="sb-stat">' + (p.k || 0) + '</div>' +
-        '<div class="sb-stat">' + (p.m || 0) + '</div>' +
-        (_sbEndless ? ('<div class="sb-stat">' + (p.a != null ? 'L' + p.a : '-') + '</div>') : '') +
-        '<div class="sb-stat">' + Math.floor(p.d || 0) + '</div>' +
-        '</div>';
-    }
+    html += '<div class="sb-rows">' + prows.map(rowH).join('') + '</div>';
   } else {
     const _asltSB = (_sbMode === 'assault');
     const mkList = (team) => {
@@ -95465,20 +95675,21 @@ function updateScoreboard() {
         if (!_lssIsBot(b) || !b.loadout) continue;
         if (b.team !== team) continue;
         if (_asltSB && !b.alive) continue;
-        list.push({ n: b.loadout.name, s: statusOf(b), k: b.kills || 0, d: b.damageDealt || 0, me: false });
+        list.push({ n: b.loadout.name, key: b.loadoutKey, who: 'BOT', s: statusOf(b), k: b.kills || 0, d: b.damageDealt || 0, me: false });
       }
       for (const np of net.networkPlayers) {
         if (np.team !== team) continue;
-        list.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, d: np.damageDealt || 0, me: false });
+        list.push(peerRow(np));
       }
       list.sort((a, b) => b.k - a.k);
       return list;
     };
+    const _side = (team) => (team === player.team) ? ['mine', 'YOUR FLEET'] : ['foe', 'ENEMY FLEET'];
     if (_sbCyber) {
       const _cC = game._cyber;
       const _cL = (_cC && _cC.ledger) || { capsA: 0, capsB: 0 };
       const _cAtk = (typeof _cyberAtkFleet === 'function') ? _cyberAtkFleet(_cC) : null;
-      const _cTag = (team) => (_cAtk == null) ? '' : (team === _cAtk ? ' — ATTACKING' : ' — DEFENDING');
+      const _cTag = (team) => (_cAtk == null) ? '' : (team === _cAtk ? 'ATTACKING' : 'DEFENDING');
       const _cCaps = (team) => (team === _cC.teamA) ? (_cL.capsA || 0) : (_cL.capsB || 0);
       const _cList = (team) => {
         const list = [];
@@ -95486,39 +95697,44 @@ function updateScoreboard() {
           for (const b of (_cC.bots || [])) {
             if (!b || b.team !== team || !b.loadout) continue;
             if (!b.alive) continue;
-            list.push({ n: b.loadout.name, s: statusOf(b), k: b.kills || 0, d: b.damageDealt || 0 });
+            list.push({ n: b.loadout.name, key: b.loadoutKey, who: 'BOT', s: statusOf(b), k: b.kills || 0, d: b.damageDealt || 0, me: false });
           }
         } catch (_) {}
         try {
           for (const np of net.networkPlayers) {
             if (np.team !== team) continue;
-            list.push({ n: '[NET] ' + (np.loadout ? np.loadout.name : '?'), s: statusOf(np), k: np.kills || 0, d: np.damageDealt || 0 });
+            list.push(peerRow(np));
           }
         } catch (_) {}
         list.sort((a, b) => b.k - a.k);
         return list;
       };
-      const _cRound = ' — ROUND ' + ((_cC && _cC.round) || 1);
       const _cA = _cC ? _cC.teamA : LSS.TEAM_FLEET_A, _cB = _cC ? _cC.teamB : LSS.TEAM_FLEET_B;
-      html += '<div class="sb-team-header sb-team-a">FLEET A' + _cTag(_cA) + ' (' + _cCaps(_cA) + ' captures)' + _cRound + '</div>';
-      if (player.team === _cA) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
-      for (const p of _cList(_cA)) html += row(p.n, p.s, p.k, p.d, false);
-      html += '<div class="sb-team-header sb-team-b">FLEET B' + _cTag(_cB) + ' (' + _cCaps(_cB) + ' captures)</div>';
-      if (player.team === _cB) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
-      for (const p of _cList(_cB)) html += row(p.n, p.s, p.k, p.d, false);
+      for (const [team, letter] of [[_cA, 'A'], [_cB, 'B']]) {
+        const s = _side(team);
+        html += fleetH(s[0], s[1], 'FLEET ' + letter, _cTag(team), scoreH(_cCaps(team), 'CAPTURES'));
+        const rows = [];
+        if (player.team === team) rows.push(meRow());
+        for (const p of _cList(team)) rows.push(p);
+        html += '<div class="sb-rows">' + rows.map(rowH).join('') + '</div>';
+      }
     } else {
-    const _atkF = (_asltSB && typeof _assaultAttackerFleet === 'function') ? _assaultAttackerFleet() : null;
-    const tag = (team) => (!_asltSB || !_atkF) ? '' : (team === _atkF ? ' — ATTACKING' : ' — DEFENDING');
-    html += '<div class="sb-team-header sb-team-a">FLEET A' + tag(LSS.TEAM_FLEET_A) + ' (' + game.scoreA + ' rounds)</div>';
-    if (player.team !== LSS.TEAM_FLEET_B) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
-    for (const p of mkList(LSS.TEAM_FLEET_A)) html += row(p.n, p.s, p.k, p.d, false);
-    html += '<div class="sb-team-header sb-team-b">FLEET B' + tag(LSS.TEAM_FLEET_B) + ' (' + game.scoreB + ' rounds)</div>';
-    if (player.team === LSS.TEAM_FLEET_B) html += row(_youName, pStatus, player.kills, player.damageDealt, true);
-    for (const p of mkList(LSS.TEAM_FLEET_B)) html += row(p.n, p.s, p.k, p.d, false);
+      const _atkF = (_asltSB && typeof _assaultAttackerFleet === 'function') ? _assaultAttackerFleet() : null;
+      const tag = (team) => (!_asltSB || !_atkF) ? '' : (team === _atkF ? 'ATTACKING' : 'DEFENDING');
+      const _youIn = (team) => (team === LSS.TEAM_FLEET_B) ? (player.team === LSS.TEAM_FLEET_B) : (player.team !== LSS.TEAM_FLEET_B);
+      for (const [team, letter, score] of [[LSS.TEAM_FLEET_A, 'A', game.scoreA], [LSS.TEAM_FLEET_B, 'B', game.scoreB]]) {
+        const s = _youIn(team) ? ['mine', 'YOUR FLEET'] : ['foe', 'ENEMY FLEET'];
+        html += fleetH(s[0], s[1], 'FLEET ' + letter, tag(team), scoreH(score, 'ROUNDS'));
+        const rows = [];
+        if (_youIn(team)) rows.push(meRow());
+        for (const p of mkList(team)) rows.push(p);
+        html += '<div class="sb-rows">' + rows.map(rowH).join('') + '</div>';
+      }
     }
   }
 
-  html += '<div style="text-align:center;color:#888;font-size:10px;margin-top:12px;letter-spacing:2px;">KILLS ' + (player.kills || 0) + '  &middot;  DEATHS ' + (player.deaths || 0) + '  &middot;  DAMAGE ' + Math.floor(player.damageDealt || 0) + '</div>';
+  html += '<div class="sb-foot"><span><em>KILLS</em>' + _nf(player.kills) + '</span><span><em>DEATHS</em>' + _nf(player.deaths) +
+          '</span><span><em>DAMAGE</em>' + _nf(player.damageDealt) + '</span></div>';
   if (sb._lssHtml === html) return;
   sb._lssHtml = html;
   sb.innerHTML = html;
