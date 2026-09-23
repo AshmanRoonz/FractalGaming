@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.18";
+const LSS_BUILD = "48.19";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -22742,6 +22742,18 @@ function _swTailUp(sp, g) {
   const H = Math.max(0, sp) * ((W3.tailH != null) ? +W3.tailH : 0.17);
   return Math.sqrt(2 * Math.max(1, g) * H) * (0.75 + Math.random() * 0.5);
 }
+function _swDropUpFor(H, g) {
+  const W3 = window.__water || {};
+  const keep = Math.max(0.001, Math.min(0.999, (W3.dropDrag != null) ? +W3.dropDrag : 0.25));
+  const tau = 1 / Math.log(1 / keep), gt = Math.max(1, g) * tau;
+  if (!(H > 0)) return 0;
+  let v = Math.sqrt(2 * Math.max(1, g) * H) * 1.2 + 1;
+  for (let i = 0; i < 6; i++) {
+    const f = tau * v - gt * tau * Math.log(1 + v / gt) - H;
+    v = Math.max(1, v - f / Math.max(1e-6, tau * v / (gt + v)));
+  }
+  return v;
+}
 function _swRooster(px, wl, pz, vel, fp, wet01, dipY) {   // (v46.52) dipY - see _swSurfDip
   if (!game.particles || game._swSubmerged || !fp) return 0;
   const W3 = window.__water || {};
@@ -22749,8 +22761,13 @@ function _swRooster(px, wl, pz, vel, fp, wet01, dipY) {   // (v46.52) dipY - see
   if (!(k > 0)) return 0;
   const vx = vel ? vel.x : 0, vz = vel ? vel.z : 0, sp = Math.hypot(vx, vz);
   if (sp < 60) return 0;
-  const n = Math.max(2, Math.min(22, Math.round((3 + 9 * wet01) * (fp.BEAM / 72))));
+  const _spK = Math.max(0.35, Math.min(1.3, sp / 350));
+  const _nK = (W3.roosterN != null) ? +W3.roosterN : 0.6;
+  const n = Math.max(2, Math.min(22, Math.round((3 + 9 * wet01) * (fp.BEAM / 72) * _spK * _nK)));
   if (_swFxRoom() < n) return 0;
+  const _hPer = sp * ((W3.roosterH != null) ? +W3.roosterH : 0.23) * k;   // apex height, before the per-drop spread
+  const _gK = (W3.dropGrav != null) ? +W3.dropGrav : 1.0;
+  const _tau = 1 / Math.log(1 / Math.max(0.001, Math.min(0.999, (W3.dropDrag != null) ? +W3.dropDrag : 0.25)));
   const bx = sp > 1e-3 ? vx / sp : 0, bz = sp > 1e-3 ? vz / sp : 1;   
   const lx = -bz, lz = bx;                                            
   for (let i = 0; i < n; i++) {
@@ -22760,17 +22777,20 @@ function _swRooster(px, wl, pz, vel, fp, wet01, dipY) {   // (v46.52) dipY - see
     const _spdBase = sp * (0.34 + 0.42 * Math.random()) * (0.55 + 0.65 * wet01);
     const spd = _spdBase;                 // horizontal - the fan, unscaled
     const _g = 300 + Math.random() * 200;
-    const _spdUp = _swTailUp(sp, _g) * k;   // (v46.78) height linear in speed - see _swTailUp; k = the higher dial
-    const ce = Math.cos(el), se = Math.sin(el);
+    const _gE = Math.max(1, _g * _gK);
+    const _vUp = _swDropUpFor(_hPer * (0.7 + Math.random() * 0.6), _gE);
+    const _tUp = _tau * Math.log(1 + _vUp / (_gE * _tau));
+    const _life = Math.min(3.0, Math.max(0.55, _tUp * (1.3 + Math.random() * 0.6)));
+    const ce = Math.cos(el);
     _swDropV.set((-bx * ce + lx * side) * spd + vx * 0.30,
-                 se * _spdUp,
+                 _vUp,
                  (-bz * ce + lz * side) * spd + vz * 0.30);
     game.particles.push({
       position: new THREE.Vector3(px + lx * (Math.random() - 0.5) * fp.BEAM * 0.7,
                                   wl + (dipY || 0) + 4 + Math.random() * fp.DRAFT,
                                   pz + lz * (Math.random() - 0.5) * fp.BEAM * 0.7),
       velocity: _swDropV.clone(),
-      life: 0.55 + Math.random() * 0.95, maxLife: 1.5,
+      life: _life, maxLife: Math.max(1.5, _life),   // (v48.19) short-lived drops keep the old fade-in-from-dim; long ones start bright
       color: (Math.random() < 0.5) ? 0xa6c8de : 0xcfe4f0,
       size: (1.4 + Math.random() * 2.8) * (window.__splashSz || 1),
       grav: _g,
@@ -23770,7 +23790,9 @@ function _swRippleTick(dt) {
     if (W3.sheetBend === undefined) W3.sheetBend = 1.0;   // curvature of the film across the spray root
     if (W3.sheetWarp === undefined) W3.sheetWarp = 1.0;   // the flapping instability
     if (W3.sheetFrac === undefined) W3.sheetFrac = 1.0;   // ligament -> droplet breakup cascade
-    if (W3.rooster === undefined) W3.rooster = 8.0;       // transom rooster-tail HEIGHT (the 'higher' dial)
+    if (W3.rooster === undefined) W3.rooster = 8.0;       // transom rooster-tail HEIGHT (the 'higher' dial) - (v48.19) a true height multiplier now
+    if (W3.roosterH === undefined) W3.roosterH = 0.23;    // (v48.19) apex per u/s of speed, per dial unit: 8 x 0.23 = 1.84 u of tail per u/s
+    if (W3.roosterN === undefined) W3.roosterN = 0.6;     // (v48.19) drops per burst (the drops now outlive their apex)
     if (W3.dots === undefined) W3.dots = 1.4;             // bright specks off wave/wake peaks (coarse layer)
     if (W3.dotsFine === undefined) W3.dotsFine = 1.7;     // (v41.31) the finer, brighter second layer, as a multiple of the coarse count
     if (W3.flow === undefined) W3.flow = 1.0;             // dipole (potential flow past the body)
