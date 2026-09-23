@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.93";
+const LSS_BUILD = "47.94";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -9975,6 +9975,41 @@ function _tetherShatter(eff) {
     }
   } catch (_) {}
   try { window.__tetherShotDown = (window.__tetherShotDown | 0) + 1; } catch (_) {}
+}
+function _tetherHeld() {
+  const W = (typeof game !== 'undefined' && game) ? game.worldEffects : null;
+  if (!W) return null;
+  for (let i = 0; i < W.length; i++) if (_tetherHoldsMe(W[i])) return W[i];
+  return null;
+}
+function _tetherHitSeg(o, dir, len, reach, dmg) {
+  const eff = _tetherHeld(); if (!eff || !o || !dir) return 0;
+  const R = (reach != null && reach > 0) ? reach : _tetherShotK().hitR;
+  const ex = eff.position.x - o.x, ey = eff.position.y - o.y, ez = eff.position.z - o.z;
+  const along = ex * dir.x + ey * dir.y + ez * dir.z;
+  if (along < -R || along > len + R) return 0;
+  const a = Math.max(0, Math.min(len, along));
+  const cx = ex - dir.x * a, cy = ey - dir.y * a, cz = ez - dir.z * a;
+  if (cx * cx + cy * cy + cz * cz > R * R) return 0;
+  return _tetherTakeShot(eff, dmg);
+}
+function _tetherHitSphere(c, r, dmg) {
+  const eff = _tetherHeld(); if (!eff || !c) return 0;
+  const R = (r || 0) + _tetherShotK().hitR;
+  if (eff.position.distanceToSquared(c) > R * R) return 0;
+  return _tetherTakeShot(eff, dmg);
+}
+function _tetherHitCone(apex, dir, reach, r0, r1, maxDps, dt) {
+  const eff = _tetherHeld(); if (!eff || !apex || !dir) return 0;
+  const dx = eff.position.x - apex.x, dy = eff.position.y - apex.y, dz = eff.position.z - apex.z;
+  const along = dx * dir.x + dy * dir.y + dz * dir.z;
+  if (along < 0 || along > reach) return 0;
+  const px = dx - dir.x * along, py = dy - dir.y * along, pz = dz - dir.z * along;
+  const perp = Math.sqrt(px * px + py * py + pz * pz);
+  const a01 = along / reach;
+  const coneR = r0 + (r1 - r0) * a01 + _tetherShotK().hitR;
+  if (perp > coneR) return 0;
+  return _tetherTakeShot(eff, maxDps * (1 - a01) * (0.5 + 0.5 * (1 - perp / coneR)) * dt);
 }
 if (typeof window !== 'undefined') window.__tetherProbe = {
   drop: function (dist) {
@@ -60775,6 +60810,7 @@ function executeAbility(slot, ability) {
           }
         }
       }
+      try { if (_tetherHitSeg(player.position, forward, range, null, _vlDmg) > 0) showHitMarker(); } catch (_) {}
       try { playSound('laser_shot'); } catch (_) {}
     }
     else if (ability.name === 'Flame Chain') {
@@ -60975,6 +61011,15 @@ function executeAbility(slot, ability) {
           }
         }
       }
+      try {
+        const _tq = _tetherShotProbe(player.position, forward, Math.min(1500, bestDist));
+        if (_tq) {
+          if (_tq.obj.takeDamage(800) > 0) showHitMarker();
+          try { const _so = (typeof getPlayerForwardOrigin === 'function') ? getPlayerForwardOrigin(forward, 90, new THREE.Vector3()) : player.position.clone();
+                spawnSiphonHelix(_so, _tq.obj.position, LSS.CLASS_COLORS.SYPHON, 1.0); } catch (_) {}
+          bestMon = null; bestBot = null;
+        }
+      } catch (_) {}
       if (bestMon) {
         const _md = bestMon.takeDamage(800, 'player', bestMon.position);
         _monSlow(bestMon, 2.0);
@@ -61167,6 +61212,7 @@ function executeAbility(slot, ability) {
               _te.triggered = false;
               _te.rootTarget = null;
               _te.rootTimer = 0;
+              _te._escaped = true;   // (v47.94) and it lets you go - see the catch scan in updateWorldEffects
             }
           }
         }
@@ -61520,6 +61566,7 @@ function firePowerShot() {
           }
         }
       }
+      try { if (_tetherHitSeg(player.position, pelletDir, _pelletWallDist, null, 270 * _execDmg) > 0) showHitMarker(); } catch (_) {}
     }
     triggerScreenShake(5);
   } else {
@@ -61602,6 +61649,7 @@ function firePowerShot() {
         }
       }
     }
+    try { if (_tetherHitSeg(player.position, forward, _csWallDist, null, 3200) > 0) showHitMarker(); } catch (_) {}
     triggerScreenShake(3);
   }
   try { playSound('power_shot_release'); } catch (_) {}
@@ -62717,6 +62765,7 @@ function updateWorldEffects(dt) {
           }
         }
       }
+      if (isMyEff && eff.owner === 'player') { try { _tetherHitSeg(eff.position, eff.direction, eff.length, 150, eff.dmgPerSec * dt); } catch (_) {} }
       if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
         for (const mon of game.monsters) {
           if (!mon.alive || !mon.position) continue;
@@ -62860,6 +62909,16 @@ function updateWorldEffects(dt) {
             }
           }
         }
+      }
+      if (eff.armed && eff.timer > 0 && eff.owner === 'player') {
+        try {
+          if (_tetherHitSphere(eff.position, eff.radius, eff.dmg) > 0) {
+            spawnExplosion(eff.position, 20);
+            if (typeof playSpatialSound === 'function') playSpatialSound('tripwire_detonate', eff.position.clone());
+            if (player.shipState !== 'dead') showHitMarker();
+            eff.timer = 0;
+          }
+        } catch (_) {}
       }
       if (eff.armed && eff.groupId !== undefined) {
         eff.arcTimer -= dt;
@@ -63041,6 +63100,7 @@ function updateWorldEffects(dt) {
             if (bot.velocity) bot.velocity.multiplyScalar(1 - eff.slowFactor * dt);
           }
         }
+        if (eff.owner === 'player') { try { _tetherHitSphere(eff.position, eff.radius, eff.igniteDmgPerSec * dt); } catch (_) {} }
           if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
             for (const mon of game.monsters) {
               if (!mon.alive || !mon.position) continue;
@@ -63112,9 +63172,10 @@ function updateWorldEffects(dt) {
     }
 
     else if (eff.type === 'tether') {
+      if (eff._escaped && player && player.position && player.position.distanceTo(eff.position) > eff.radius + 40) eff._escaped = false;
       if (!eff.triggered && !eff._shotDown) {
         if (player && player.shipState !== 'dead' && player.alive !== false
-            && eff.team !== player.team
+            && eff.team !== player.team && !eff._escaped   // (v47.94) not the pilot who just teleported out
             && player.position.distanceTo(eff.position) < eff.radius) {
           eff.triggered = true;
           eff.rootTarget = player;        
@@ -63651,6 +63712,7 @@ function updateAbilities(dt) {
           if (dealt > 0) { player.damageDealt += dealt; player.coreMeter = Math.min(100, player.coreMeter + dealt / 200); }
         }
       }
+      try { _tetherHitCone(player.position, forward, reach, baseRadius, tipRadius, maxDPS, dt); } catch (_) {}
       const probeMid = _abProbeMid.copy(player.position).addScaledVector(forward, reach * 0.5);
       const probeRadius = Math.max(reach * 0.5, (baseRadius + tipRadius) * 0.5);
       igniteNearbyGas(probeMid, probeRadius, 'player', player.team);

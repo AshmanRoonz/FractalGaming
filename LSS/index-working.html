@@ -6843,7 +6843,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.93";
+const LSS_BUILD = "47.94";
 // (v45.35) `?safetop=N` - how many pixels of the viewport's top edge the ship-select header keeps
 // its MAIN MENU / SETTINGS buttons clear of. See the --ss-top-safe note in the stylesheet: the
 // default is a measured guess at the Meta Quest browser's window chrome, and this is how it gets
@@ -21459,6 +21459,50 @@ function _tetherShatter(eff) {
     }
   } catch (_) {}
   try { window.__tetherShotDown = (window.__tetherShotDown | 0) + 1; } catch (_) {}
+}
+// ⭐⭐⭐ (v47.94) ...AND THE ABILITIES. Owner, cycling every ship against a stream of traps: "laser shot
+// no", "fire shield no", "none of the fire stuff" - and "thermite launcher yes worked". 47.92 covered
+// the guns and anything that flies a `Projectile` (rockets, Cluster Missile, Stun Bolt, the rocket
+// cores); every other damaging ability resolves its OWN loop over bots and monsters, so each of those
+// asks one of these three shapes about the tether holding the pilot - a segment (Laser / Mega Laser,
+// Flame Chain walls, Charge Shot pellets), a sphere (ignited Explosive Gas, Plasma Mines) and a cone
+// (Fire Shield) - with the damage it just dealt everything else. Same candidate rule as the guns
+// (_tetherHoldsMe): only the trap holding YOU, only your own abilities. Each returns what it dealt.
+function _tetherHeld() {
+  const W = (typeof game !== 'undefined' && game) ? game.worldEffects : null;
+  if (!W) return null;
+  for (let i = 0; i < W.length; i++) if (_tetherHoldsMe(W[i])) return W[i];
+  return null;
+}
+function _tetherHitSeg(o, dir, len, reach, dmg) {
+  const eff = _tetherHeld(); if (!eff || !o || !dir) return 0;
+  const R = (reach != null && reach > 0) ? reach : _tetherShotK().hitR;
+  const ex = eff.position.x - o.x, ey = eff.position.y - o.y, ez = eff.position.z - o.z;
+  const along = ex * dir.x + ey * dir.y + ez * dir.z;
+  if (along < -R || along > len + R) return 0;
+  const a = Math.max(0, Math.min(len, along));
+  const cx = ex - dir.x * a, cy = ey - dir.y * a, cz = ez - dir.z * a;
+  if (cx * cx + cy * cy + cz * cz > R * R) return 0;
+  return _tetherTakeShot(eff, dmg);
+}
+function _tetherHitSphere(c, r, dmg) {
+  const eff = _tetherHeld(); if (!eff || !c) return 0;
+  const R = (r || 0) + _tetherShotK().hitR;
+  if (eff.position.distanceToSquared(c) > R * R) return 0;
+  return _tetherTakeShot(eff, dmg);
+}
+// the Fire Shield's own cone test and falloff (see its ship loop in updateAbilities), for the trap
+function _tetherHitCone(apex, dir, reach, r0, r1, maxDps, dt) {
+  const eff = _tetherHeld(); if (!eff || !apex || !dir) return 0;
+  const dx = eff.position.x - apex.x, dy = eff.position.y - apex.y, dz = eff.position.z - apex.z;
+  const along = dx * dir.x + dy * dir.y + dz * dir.z;
+  if (along < 0 || along > reach) return 0;
+  const px = dx - dir.x * along, py = dy - dir.y * along, pz = dz - dir.z * along;
+  const perp = Math.sqrt(px * px + py * py + pz * pz);
+  const a01 = along / reach;
+  const coneR = r0 + (r1 - r0) * a01 + _tetherShotK().hitR;
+  if (perp > coneR) return 0;
+  return _tetherTakeShot(eff, maxDps * (1 - a01) * (0.5 + 0.5 * (1 - perp / coneR)) * dt);
 }
 // pane probe: `__tetherProbe.drop(150)` lays an ENEMY tether 150 u off your nose (it catches you at
 // once - trigger radius 250); `__tetherProbe.list()` reads every tether's state.
@@ -96503,6 +96547,8 @@ function executeAbility(slot, ability) {
           }
         }
       }
+      // (v47.94) the tether holding you, on the same damage ray (see _tetherHitSeg)
+      try { if (_tetherHitSeg(player.position, forward, range, null, _vlDmg) > 0) showHitMarker(); } catch (_) {}
       // Sharp piercing zap so the laser beam reads sonically.
       try { playSound('laser_shot'); } catch (_) {}
     }
@@ -96799,6 +96845,17 @@ function executeAbility(slot, ability) {
           }
         }
       }
+      // (v47.94) ...and the tether holding you, when it is the NEAREST thing on the beam (_tetherShotProbe):
+      // it takes the 800 a monster would (no shield to drain, and no lifesteal off a trap)
+      try {
+        const _tq = _tetherShotProbe(player.position, forward, Math.min(1500, bestDist));
+        if (_tq) {
+          if (_tq.obj.takeDamage(800) > 0) showHitMarker();
+          try { const _so = (typeof getPlayerForwardOrigin === 'function') ? getPlayerForwardOrigin(forward, 90, new THREE.Vector3()) : player.position.clone();
+                spawnSiphonHelix(_so, _tq.obj.position, LSS.CLASS_COLORS.SYPHON, 1.0); } catch (_) {}
+          bestMon = null; bestBot = null;
+        }
+      } catch (_) {}
       if (bestMon) {
         const _md = bestMon.takeDamage(800, 'player', bestMon.position);
         // (v47.71) "Energy Syphon slows enemies" - the bot branch a few lines down has always set
@@ -97075,6 +97132,7 @@ function executeAbility(slot, ability) {
               _te.triggered = false;
               _te.rootTarget = null;
               _te.rootTimer = 0;
+              _te._escaped = true;   // (v47.94) and it lets you go - see the catch scan in updateWorldEffects
             }
           }
         }
@@ -97579,6 +97637,8 @@ function firePowerShot() {
           }
         }
       }
+      // (v47.94) each pellet can land on the tether holding you (see _tetherHitSeg)
+      try { if (_tetherHitSeg(player.position, pelletDir, _pelletWallDist, null, 270 * _execDmg) > 0) showHitMarker(); } catch (_) {}
     }
     triggerScreenShake(5);
   } else {
@@ -97692,6 +97752,8 @@ function firePowerShot() {
         }
       }
     }
+    // (v47.94) the piercing slug goes through the tether holding you too (see _tetherHitSeg)
+    try { if (_tetherHitSeg(player.position, forward, _csWallDist, null, 3200) > 0) showHitMarker(); } catch (_) {}
     triggerScreenShake(3);
   }
   // Heavy cannon-style boom on release ; pairs with the existing
@@ -99233,6 +99295,8 @@ function updateWorldEffects(dt) {
           }
         }
       }
+      // (v47.94) YOUR fire curtain burns the tether holding you (see _tetherHitSeg) - same 150 u reach
+      if (isMyEff && eff.owner === 'player') { try { _tetherHitSeg(eff.position, eff.direction, eff.length, 150, eff.dmgPerSec * dt); } catch (_) {} }
       // (monster coverage) The fire curtain burns leviathans / the boss too.
       // Gate on _monAuthority() ALONE (not isMyEff) so the stasis owner always
       // applies the pack burn regardless of who placed the wall ; takeDamage
@@ -99405,6 +99469,17 @@ function updateWorldEffects(dt) {
             }
           }
         }
+      }
+      // (v47.94) YOUR armed mine trips on the tether holding you, and detonates into it (see _tetherHitSphere)
+      if (eff.armed && eff.timer > 0 && eff.owner === 'player') {
+        try {
+          if (_tetherHitSphere(eff.position, eff.radius, eff.dmg) > 0) {
+            spawnExplosion(eff.position, 20);
+            if (typeof playSpatialSound === 'function') playSpatialSound('tripwire_detonate', eff.position.clone());
+            if (player.shipState !== 'dead') showHitMarker();
+            eff.timer = 0;
+          }
+        } catch (_) {}
       }
       // ---- Electric arcs to sibling Plasma Mines orbs ----
       // Once per random interval, this orb fires a lightning bolt to ONE of
@@ -99656,6 +99731,8 @@ function updateWorldEffects(dt) {
             if (bot.velocity) bot.velocity.multiplyScalar(1 - eff.slowFactor * dt);
           }
         }
+        // (v47.94) YOUR burning gas cooks the tether holding you (see _tetherHitSphere)
+        if (eff.owner === 'player') { try { _tetherHitSphere(eff.position, eff.radius, eff.igniteDmgPerSec * dt); } catch (_) {} }
           // (v32.4) Burning gas / firewall zone also damages outskirts monsters.
           if (game.monsters && (typeof _monAuthority !== 'function' || _monAuthority())) {
             for (const mon of game.monsters) {
@@ -99750,6 +99827,14 @@ function updateWorldEffects(dt) {
       //   With `triggered` false and the victim still well inside the 250 u radius, the first scan below
       //   re-caught them in the same frame and re-set playerRootTimer to 4 s - MEASURED: the trap died at
       //   0.8 s and the pilot was rooted again, at 3.9 s, by nothing. `_shotDown` closes all three scans.
+      // ⭐⭐ (v47.94) A TELEPORT ESCAPE IS AN ESCAPE. Owner: "teleport is supposed to escape it... but it
+      // escapes only to be recaptured lol". v35.63 re-arms the trap on purpose (it stays a trap for
+      // everyone else), and v46.90 made the hop real - but the hop goes along the NOSE, and you were
+      // caught flying INTO the trap, so the nose points straight through it: a 400 u hop from ~200 u
+      // short lands ~200 u past it, inside the 250 u trigger radius, and the re-armed trap took you
+      // on the next frame. `_escaped` (set by the teleport) makes this trap ignore YOU until you are
+      // clear of its radius (+40 u); it still catches anyone else, and you again if you fly back in.
+      if (eff._escaped && player && player.position && player.position.distanceTo(eff.position) > eff.radius + 40) eff._escaped = false;
       if (!eff.triggered && !eff._shotDown) {
         // Local player first. In multiplayer the local player is NOT in
         // game.entities (it's `player`), and remote enemies are network
@@ -99760,7 +99845,7 @@ function updateWorldEffects(dt) {
         // trapped on every other client too. This is what makes the trap catch
         // enemy PLAYERS, not just bots.
         if (player && player.shipState !== 'dead' && player.alive !== false
-            && eff.team !== player.team
+            && eff.team !== player.team && !eff._escaped   // (v47.94) not the pilot who just teleported out
             && player.position.distanceTo(eff.position) < eff.radius) {
           eff.triggered = true;
           eff.rootTarget = player;        
@@ -100499,6 +100584,8 @@ function updateAbilities(dt) {
           // (v35.63) No lingering burn on monsters either — see the ship branch.
         }
       }
+      // (v47.94) ...and the tether holding you, if it sits in the cone (see _tetherHitCone)
+      try { _tetherHitCone(player.position, forward, reach, baseRadius, tipRadius, maxDPS, dt); } catch (_) {}
       // Fire Shield is a fire source: ignite Explosive Gas anywhere
       // inside the burn cone (probe at mid-cone with a generous radius so a
       // single call covers most of the cone volume), plus a small probe at
