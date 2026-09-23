@@ -6860,7 +6860,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.19";
+const LSS_BUILD = "48.22";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -22196,6 +22196,10 @@ function _gcgAnchors(owner) {
 function _gunCoreGlow(owner, dt) {
   owner = owner || player;
   if (!owner || !owner.mesh) return;
+  // (v48.20) not while a replay owns the hulls: the kill cam re-poses them, so a live drive would crawl
+  // over the replayed hull on live timing, beside the recorded arcs the replay is already redrawing -
+  // the same reason emitDamageState stands down (v47.97). The TTL sweep puts it out meanwhile.
+  if (_RPL.kc || _RPL.studio) return;
   const K = window.__gunCore || (window.__gunCore = {});
   if (K.on === false) return;
   if ((owner.shipState === 'dead') || (owner.alive === false)) return;
@@ -22212,8 +22216,10 @@ function _gunCoreGlow(owner, dt) {
   const rings = A.rings, hullMesh = A.hullMesh;
   hullMesh.updateWorldMatrix(true, false);
   const mw = hullMesh.matrixWorld;
-  const col = (K.tint != null) ? K.tint : 0x00e0ff;          // saturated, NOT the damage path's pale 0x66e0ff
-  const core = (K.core != null) ? K.core : 0xeaffff;
+  // (v48.20) the ship's own pair (_gcgPalette); __gunCore.tint / .core still override every ship at once
+  const _pal = _gcgPalette(owner.loadoutKey);
+  const col = (K.tint != null) ? K.tint : _pal[0];          // saturated, NOT the damage path's pale 0x66e0ff
+  const core = (K.core != null) ? K.core : _pal[1];
   const life = (K.life != null) ? K.life : 0.30;
   // (!) THICKNESS IS IN WORLD UNITS AND THIS HULL IS 420 OF THEM LONG. `emitDamageState` uses 3 and
   //     `_primeArcTick` 0.9, but both of those are read at arm's length from the gun; an arc meant to
@@ -22283,7 +22289,27 @@ function _gunCoreGlowTick(dt) {
 }
 // Is this ship's core the one that lights its hull? Kept in one place so the three drive sites
 // (local / bot / peer) cannot drift apart, and so another core can join by name later.
-function _gunCoreLights(loadoutKey) { return loadoutKey === 'BLASTER'; }
+// ⭐ (v48.20) ...and three did. Owner: "we put lightning around blaster's ship while he uses his core...
+// let's put that on vortex, tracker, and puncture, during their cores, in their own theme colors".
+// Mega Laser, Mega Tracker Rockets and Mega Barrage get the same crawling discharge, each in its own
+// colours (_gcgPalette). Nothing else needed: the peer `co` bit was already sent for every ship (v46.99
+// kept that gate in the renderer on purpose), and a bot's drive sits at the head of its _coreTick.
+const _GCG_SHIPS = { BLASTER: 1, VORTEX: 1, TRACKER: 1, PUNCTURE: 1 };
+function _gunCoreLights(loadoutKey) { return !!_GCG_SHIPS[loadoutKey]; }
+// (v48.20) THE DISCHARGE IN THE SHIP'S OWN COLOURS: [halo, white-hot core]. The halo is the class colour
+// itself (LSS.CLASS_COLORS - the one every effect of that ship already wears), the core that colour 85 %
+// of the way to white - the same saturated-halo-plus-near-white-conduit recipe the Blaster was tuned to.
+// The BLASTER keeps its v46.99 tuning exactly (0x00e0ff, a deeper cyan than its class 0x44eeff, picked so
+// it could never be read as the damage path's pale 0x66e0ff). None of the others can be: hull-damage
+// lightning is cyan on every ship.
+const _GCG_PAL = { BLASTER: [0x00e0ff, 0xeaffff] };
+function _gcgPalette(key) {
+  const hit = _GCG_PAL[key];
+  if (hit) return hit;
+  const c = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[key] != null) ? LSS.CLASS_COLORS[key] : 0x00e0ff;
+  const w = (x) => Math.round(x + (255 - x) * 0.85);
+  return (_GCG_PAL[key] = [c, (w((c >> 16) & 255) << 16) | (w((c >> 8) & 255) << 8) | w(c & 255)]);
+}
 if (typeof window !== 'undefined') window.__gunCoreInfo = function () {
   return _GCG.live.map(o => ({
     who: (o === player) ? 'you' : (o.peerId ? ('peer ' + o.peerId) : ('bot ' + (o.id != null ? o.id : '?'))),
@@ -96899,7 +96925,8 @@ function _lssApplyShipRig(dt) {
         const _W = window.__cockpit || {};
         // (v37.35) kick 1.0 -> 0.35 and the dip 0.25 -> 0.12 : owner asked for
         // less shake on firing ("less screen/ship shake for the recoil").
-        const _kick = (typeof _W.kick === 'number') ? _W.kick : 0.35;
+        // (v48.21) x _recoilK('kick'), 0 by default - no recoil on the ships; an explicit __cockpit.kick still wins
+        const _kick = (typeof _W.kick === 'number') ? _W.kick : 0.35 * _recoilK('kick');
         const _rc = Math.max(player.gunRecoilL || 0, player.gunRecoilR || 0);
         if (_rc > 0 && _kick > 0) {
           _cpFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -97676,6 +97703,24 @@ function startReload() {
   document.getElementById('reload-indicator').style.display = 'block';
 }
 
+// ⭐⭐ (v48.21) NO RECOIL ON THE SHIPS. Owner: "let's take the recoil off of the weapons on all the ships,
+// currently it rotates the ships nose downward... these are anti gravity machines, they aren't affected by
+// recoil". Three things moved the SHIP (or the eye in it) when its own guns fired, and all three go:
+//   - 'pitch': fireWeapon subtracted a per-shot kick from player.euler.x - 0.005 rad a shot on a fast gun,
+//     0.015 on a spread, 0.025 on a slow one (x0.4 in the 3D cockpit). Its comment said "small pitch kick
+//     upward, recovers naturally", but euler.x going DOWN is the nose going down, and nothing ever
+//     recovered it: sustained fire walked the aim into the floor and the pilot had to keep pulling up.
+//   - 'shake': the per-shot screen shake beside it, and the Blaster Charge Shot's firing jolt (5 close, 3
+//     long) - the owner's own word for these in v37.35 was "ship shake for the recoil of firing weapons".
+//   - 'kick': the 3D cockpit's eye kicking back and dipping on every shot (v37.29).
+// The GUNS still animate - barrels sliding, the painted gun kick, flashes - that is the weapon cycling, not
+// the ship being moved; impact / explosion / hit shakes are untouched. window.__recoil = { pitch, shake,
+// kick } are multipliers (0 = off, the default; 1 = the pre-48.21 feel) to bring any of it back live.
+function _recoilK(kind) {
+  const R = (typeof window !== 'undefined') ? window.__recoil : null;
+  const v = R ? R[kind] : undefined;
+  return (typeof v === 'number' && isFinite(v)) ? Math.max(0, v) : 0;
+}
 function fireWeapon() {
   // No primary fire during the pre-round warmup countdown
   if (game.state === 'warmup') return;
@@ -97778,11 +97823,13 @@ function fireWeapon() {
   // the painted frames keep their feel.
   const _rMul = (typeof game !== 'undefined' && game && game._cockpit3dLive)
     ? (((window.__cockpit || {}).recoilMul != null) ? window.__cockpit.recoilMul : 0.4) : 1.0;
-  const recoilAmount = (w.mode === 'spread' ? 0.015 : (w.fireRate > 0.5 ? 0.025 : 0.005)) * _rMul;
-  player.euler.x -= recoilAmount;
+  // (v48.21) off by default - see _recoilK: the ships are not moved by their own guns
+  const recoilAmount = (w.mode === 'spread' ? 0.015 : (w.fireRate > 0.5 ? 0.025 : 0.005)) * _rMul * _recoilK('pitch');
+  if (recoilAmount > 0) player.euler.x -= recoilAmount;
 
-  // Screen shake (tiny per-shot)
-  triggerScreenShake((w.mode === 'spread' ? 1.5 : (w.fireRate > 0.5 ? 1.0 : 0.3)) * _rMul);
+  // Screen shake (tiny per-shot) - (v48.21) off by default too
+  const _rShake = (w.mode === 'spread' ? 1.5 : (w.fireRate > 0.5 ? 1.0 : 0.3)) * _rMul * _recoilK('shake');
+  if (_rShake > 0) triggerScreenShake(_rShake);
 
   // Muzzle particles (small bright dots ejected forward)
   for (let i = 0; i < 3; i++) {
@@ -100625,7 +100672,7 @@ function firePowerShot() {
       // (v47.94) each pellet can land on the tether holding you (see _tetherHitSeg)
       try { if (_tetherHitSeg(player.position, pelletDir, _pelletWallDist, null, 270 * _execDmg) > 0) showHitMarker(); } catch (_) {}
     }
-    triggerScreenShake(5);
+    if (_recoilK('shake') > 0) triggerScreenShake(5 * _recoilK('shake'));   // (v48.21) the firing jolt is recoil: off by default
   } else {
     // Long-range Charge Shot: precision piercing shot (travels through all enemies)
     // (v38.40) ONE OF THE TWO SNIPERS. Owner: the railgun and this "should be the longest range
@@ -100739,7 +100786,7 @@ function firePowerShot() {
     }
     // (v47.94) the piercing slug goes through the tether holding you too (see _tetherHitSeg)
     try { if (_tetherHitSeg(player.position, forward, _csWallDist, null, 3200) > 0) showHitMarker(); } catch (_) {}
-    triggerScreenShake(3);
+    if (_recoilK('shake') > 0) triggerScreenShake(3 * _recoilK('shake'));   // (v48.21) the firing jolt is recoil: off by default
   }
   // Heavy cannon-style boom on release ; pairs with the existing
   // powershot_charge hum so the player feels the build-up + release.
@@ -108845,6 +108892,37 @@ function _hlfAbCharges(ability) {
   } catch (_) { return null; }
 }
 
+// ⭐ (v48.22) WOULD THE PRESS DO ANYTHING? Owner: "tracker's sword icon, representing his tracking
+// missiles, the icon is always lit... it should be dim when there is no lock, and lit when there is a
+// lock (because it only works when there's a lock)". The icon answers "can I press this" (v47.01), but it
+// only asked the COOLDOWN - and Tracker Rockets' is 0.25 s, so it was lit nearly always, including every
+// moment the key would do nothing. A volley fires only at a target with a FULL lock (3/3) that is still
+// alive - executeAbility resolves each locked id against game.entities and game.monsters and returns,
+// silently, if none resolves - and never while Mega Tracker Rockets holds the same launchers. This is that
+// test, read the same way. (_canPrimeAbility has the >= 3 half of it for the press path.)
+function _hlfAbArmed(ability) {
+  try {
+    if (!ability || typeof player === 'undefined' || !player) return true;
+    if (ability.name === 'Tracker Rockets' && player.loadoutKey === 'TRACKER') {
+      if (player.coreActive && player.loadout && player.loadout.core &&
+          player.loadout.core.name === 'Mega Tracker Rockets') return false;
+      const L = player.trackerLocks;
+      if (!L) return false;
+      const G = (typeof game !== 'undefined') ? game : null;
+      for (const id in L) {
+        if (!(L[id] >= 3)) continue;
+        if (!G) return true;
+        const E = G.entities || [];
+        for (let i = 0; i < E.length; i++) { const b = E[i]; if (b && b.alive && b.id == id) return true; }
+        const M = G.monsters || [];
+        for (let i = 0; i < M.length; i++) { const mn = M[i]; if (mn && mn.alive && mn.id != null && mn.id == id) return true; }
+      }
+      return false;
+    }
+    return true;
+  } catch (_) { return true; }
+}
+
 // Each glyph is drawn in a unit box (-0.5..0.5) and scaled by `s`, so one
 // number controls icon size. Sub-paths share one beginPath: nonzero winding
 // fills them as a single silhouette.
@@ -109284,7 +109362,8 @@ function _hlfDraw(ctx, W, H, v) {
       // (v47.61) A charge ability answers "can I press this" with STOCK, not with the cooldown -
       // slot 2's timer is the regen of the NEXT charge and ticks while a usable one is in hand.
       const _chg = _hlfAbCharges(ab);
-      const ready = _chg ? (_chg.n > 0 && !active) : (cd <= 0 && !active);
+      // (v48.22) ...and only lit when the press would DO something (Tracker Rockets: a full lock) - _hlfAbArmed
+      const ready = (_chg ? (_chg.n > 0 && !active) : (cd <= 0 && !active)) && _hlfAbArmed(ab);
       const _frac = _chg ? (_chg.n / _chg.max) : (ready ? 1 : 0);
       const col = sh[m.cd] || _HL[m.cd].col;
       // A short POP the moment it comes off cooldown, off the same `_hudRF`
@@ -112383,6 +112462,9 @@ function updateAbilityHUD() {
       cls = charges > 0 ? 'ability-slot ready' : 'ability-slot on-cooldown';
       cdTextVal = charges + '/' + maxCharges;
     }
+    // (v48.22) the icon row's "would a press do anything" gate, so the two can never disagree (a Tracker
+    // Rockets slot with no full lock is not ready - see _hlfAbArmed)
+    if (cls === 'ability-slot ready' && typeof _hlfAbArmed === 'function' && !_hlfAbArmed(ability)) cls = 'ability-slot on-cooldown';
 
     _hudClass(e.slot, 'ab:' + i + ':c', cls);
     _hudWidth(e.bar, 'ab:' + i + ':w', barW);

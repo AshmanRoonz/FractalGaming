@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.19";
+const LSS_BUILD = "48.22";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -10449,6 +10449,7 @@ function _gcgAnchors(owner) {
 function _gunCoreGlow(owner, dt) {
   owner = owner || player;
   if (!owner || !owner.mesh) return;
+  if (_RPL.kc || _RPL.studio) return;
   const K = window.__gunCore || (window.__gunCore = {});
   if (K.on === false) return;
   if ((owner.shipState === 'dead') || (owner.alive === false)) return;
@@ -10463,8 +10464,9 @@ function _gunCoreGlow(owner, dt) {
   const rings = A.rings, hullMesh = A.hullMesh;
   hullMesh.updateWorldMatrix(true, false);
   const mw = hullMesh.matrixWorld;
-  const col = (K.tint != null) ? K.tint : 0x00e0ff;          // saturated, NOT the damage path's pale 0x66e0ff
-  const core = (K.core != null) ? K.core : 0xeaffff;
+  const _pal = _gcgPalette(owner.loadoutKey);
+  const col = (K.tint != null) ? K.tint : _pal[0];          // saturated, NOT the damage path's pale 0x66e0ff
+  const core = (K.core != null) ? K.core : _pal[1];
   const life = (K.life != null) ? K.life : 0.30;
   const thick = (K.thick != null) ? K.thick : 13.0;
   const br = (K.branches != null) ? K.branches : 2;
@@ -10515,7 +10517,16 @@ function _gunCoreGlowTick(dt) {
     if (o._gcgTTL <= 0) _gunCoreGlowOff(o);
   }
 }
-function _gunCoreLights(loadoutKey) { return loadoutKey === 'BLASTER'; }
+const _GCG_SHIPS = { BLASTER: 1, VORTEX: 1, TRACKER: 1, PUNCTURE: 1 };
+function _gunCoreLights(loadoutKey) { return !!_GCG_SHIPS[loadoutKey]; }
+const _GCG_PAL = { BLASTER: [0x00e0ff, 0xeaffff] };
+function _gcgPalette(key) {
+  const hit = _GCG_PAL[key];
+  if (hit) return hit;
+  const c = (typeof LSS !== 'undefined' && LSS.CLASS_COLORS && LSS.CLASS_COLORS[key] != null) ? LSS.CLASS_COLORS[key] : 0x00e0ff;
+  const w = (x) => Math.round(x + (255 - x) * 0.85);
+  return (_GCG_PAL[key] = [c, (w((c >> 16) & 255) << 16) | (w((c >> 8) & 255) << 8) | w(c & 255)]);
+}
 if (typeof window !== 'undefined') window.__gunCoreInfo = function () {
   return _GCG.live.map(o => ({
     who: (o === player) ? 'you' : (o.peerId ? ('peer ' + o.peerId) : ('bot ' + (o.id != null ? o.id : '?'))),
@@ -61559,7 +61570,7 @@ function _lssApplyShipRig(dt) {
           try { document.body.classList.add('lss-cockpit3d'); } catch (_) {}
         }
         const _W = window.__cockpit || {};
-        const _kick = (typeof _W.kick === 'number') ? _W.kick : 0.35;
+        const _kick = (typeof _W.kick === 'number') ? _W.kick : 0.35 * _recoilK('kick');
         const _rc = Math.max(player.gunRecoilL || 0, player.gunRecoilR || 0);
         if (_rc > 0 && _kick > 0) {
           _cpFwd.set(0, 0, -1).applyQuaternion(camera.quaternion);
@@ -62031,6 +62042,11 @@ function startReload() {
   document.getElementById('reload-indicator').style.display = 'block';
 }
 
+function _recoilK(kind) {
+  const R = (typeof window !== 'undefined') ? window.__recoil : null;
+  const v = R ? R[kind] : undefined;
+  return (typeof v === 'number' && isFinite(v)) ? Math.max(0, v) : 0;
+}
 function fireWeapon() {
   if (game.state === 'warmup') return;
   const w = player.weapon;
@@ -62085,10 +62101,11 @@ function fireWeapon() {
 
   const _rMul = (typeof game !== 'undefined' && game && game._cockpit3dLive)
     ? (((window.__cockpit || {}).recoilMul != null) ? window.__cockpit.recoilMul : 0.4) : 1.0;
-  const recoilAmount = (w.mode === 'spread' ? 0.015 : (w.fireRate > 0.5 ? 0.025 : 0.005)) * _rMul;
-  player.euler.x -= recoilAmount;
+  const recoilAmount = (w.mode === 'spread' ? 0.015 : (w.fireRate > 0.5 ? 0.025 : 0.005)) * _rMul * _recoilK('pitch');
+  if (recoilAmount > 0) player.euler.x -= recoilAmount;
 
-  triggerScreenShake((w.mode === 'spread' ? 1.5 : (w.fireRate > 0.5 ? 1.0 : 0.3)) * _rMul);
+  const _rShake = (w.mode === 'spread' ? 1.5 : (w.fireRate > 0.5 ? 1.0 : 0.3)) * _rMul * _recoilK('shake');
+  if (_rShake > 0) triggerScreenShake(_rShake);
 
   for (let i = 0; i < 3; i++) {
     const pVel = _fwDir.clone().multiplyScalar(300 + Math.random() * 200);
@@ -64034,7 +64051,7 @@ function firePowerShot() {
       }
       try { if (_tetherHitSeg(player.position, pelletDir, _pelletWallDist, null, 270 * _execDmg) > 0) showHitMarker(); } catch (_) {}
     }
-    triggerScreenShake(5);
+    if (_recoilK('shake') > 0) triggerScreenShake(5 * _recoilK('shake'));   // (v48.21) the firing jolt is recoil: off by default
   } else {
     const range = 10000;
     const _csWallDist = (typeof raycastLevel === 'function') ? raycastLevel(player.position, forward, range) : range;
@@ -64116,7 +64133,7 @@ function firePowerShot() {
       }
     }
     try { if (_tetherHitSeg(player.position, forward, _csWallDist, null, 3200) > 0) showHitMarker(); } catch (_) {}
-    triggerScreenShake(3);
+    if (_recoilK('shake') > 0) triggerScreenShake(3 * _recoilK('shake'));   // (v48.21) the firing jolt is recoil: off by default
   }
   try { playSound('power_shot_release'); } catch (_) {}
   player.powerShotCharging = false;
@@ -69538,6 +69555,29 @@ function _hlfAbCharges(ability) {
   } catch (_) { return null; }
 }
 
+function _hlfAbArmed(ability) {
+  try {
+    if (!ability || typeof player === 'undefined' || !player) return true;
+    if (ability.name === 'Tracker Rockets' && player.loadoutKey === 'TRACKER') {
+      if (player.coreActive && player.loadout && player.loadout.core &&
+          player.loadout.core.name === 'Mega Tracker Rockets') return false;
+      const L = player.trackerLocks;
+      if (!L) return false;
+      const G = (typeof game !== 'undefined') ? game : null;
+      for (const id in L) {
+        if (!(L[id] >= 3)) continue;
+        if (!G) return true;
+        const E = G.entities || [];
+        for (let i = 0; i < E.length; i++) { const b = E[i]; if (b && b.alive && b.id == id) return true; }
+        const M = G.monsters || [];
+        for (let i = 0; i < M.length; i++) { const mn = M[i]; if (mn && mn.alive && mn.id != null && mn.id == id) return true; }
+      }
+      return false;
+    }
+    return true;
+  } catch (_) { return true; }
+}
+
 function _hlfIconPath(ctx, kind, s) {
   ctx.beginPath();
   if (kind === 'shield') {
@@ -69770,7 +69810,7 @@ function _hlfDraw(ctx, W, H, v) {
       const cd = (player.abilityCooldowns && player.abilityCooldowns[m.slot]) || 0;
       const active = !!(player.abilityActive && player.abilityActive[m.slot]);
       const _chg = _hlfAbCharges(ab);
-      const ready = _chg ? (_chg.n > 0 && !active) : (cd <= 0 && !active);
+      const ready = (_chg ? (_chg.n > 0 && !active) : (cd <= 0 && !active)) && _hlfAbArmed(ab);
       const _frac = _chg ? (_chg.n / _chg.max) : (ready ? 1 : 0);
       const col = sh[m.cd] || _HL[m.cd].col;
       let pop = 1;
@@ -71956,6 +71996,7 @@ function updateAbilityHUD() {
       cls = charges > 0 ? 'ability-slot ready' : 'ability-slot on-cooldown';
       cdTextVal = charges + '/' + maxCharges;
     }
+    if (cls === 'ability-slot ready' && typeof _hlfAbArmed === 'function' && !_hlfAbArmed(ability)) cls = 'ability-slot on-cooldown';
 
     _hudClass(e.slot, 'ab:' + i + ':c', cls);
     _hudWidth(e.bar, 'ab:' + i + ':w', barW);
