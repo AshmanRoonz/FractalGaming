@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.74";
+const LSS_BUILD = "47.83";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -33708,13 +33708,19 @@ function _arenaNavMinClr(bot) {
 function _arenaNavHole(x, z, j, G) {
   return _ARENA_FIELD.floorHole(x, z, j, G);
 }
-function _arenaNavBlocked(x0, y0, z0, x1, y1, z1, G) {
+function _arenaNavBlocked(x0, y0, z0, x1, y1, z1, G, minClr) {
   const s0 = _arenaNavStorey(y0, G), s1 = _arenaNavStorey(y1, G);
   if (s0 === s1) return -1;
   const lo = Math.min(s0, s1), hi = Math.max(s0, s1);
   const dy = y1 - y0;
   if (Math.abs(dy) < 1e-3) return -1;
   const up = (s1 > s0);
+  if (minClr != null) {
+    const j = up ? s0 : s0 - 1;
+    const t = (G.floorY[j] - y0) / dy;
+    const cx = x0 + (x1 - x0) * t, cz = z0 + (z1 - z0) * t;
+    return (_arenaNavHole(cx, cz, j, G) > -minClr) ? j : -1;
+  }
   for (let n = 0; n < hi - lo; n++) {
     const j = up ? (lo + n) : (hi - 1 - n);
     const fy = G.floorY[j];
@@ -33733,6 +33739,16 @@ function _arenaNavThroatClr(x, z, fy, G) {
   }
   return worst;
 }
+function _arenaNavBanned(bot, j, mx, mz) {
+  const B = bot._arenaBans;
+  if (!B || !B.length) return false;
+  const now = (typeof game !== 'undefined' && game) ? game.time : 0;
+  for (let i = 0; i < B.length; i++) {
+    const b = B[i];
+    if (b.until > now && b.slab === j && Math.abs(b.x - mx) < 1 && Math.abs(b.z - mz) < 1) return true;
+  }
+  return false;
+}
 function _arenaNavPickThroat(bot, j, gx, gy, gz, G, minClr, out) {
   const fy = G.floorY[j];
   const px = bot.position.x, py = bot.position.y, pz = bot.position.z;
@@ -33741,6 +33757,7 @@ function _arenaNavPickThroat(bot, j, gx, gy, gz, G, minClr, out) {
   for (let h = 0; h < nsh; h++) {
     const a = (h / nsh) * 6.2831853 + j * 0.9 + G.satPhase;
     const mx = Math.cos(a) * G.shaftR, mz = Math.sin(a) * G.shaftR;
+    if (_arenaNavBanned(bot, j, mx, mz)) continue;
     if (_arenaNavThroatClr(mx, mz, fy, G) < minClr) continue;
     const c = Math.hypot(mx - px, fy - py, mz - pz) + Math.hypot(gx - mx, gy - fy, gz - mz);
     if (c < bestCost) { bestCost = c; bestX = mx; bestZ = mz; bestR = G.shaftRad; found = true; }
@@ -33749,6 +33766,7 @@ function _arenaNavPickThroat(bot, j, gx, gy, gz, G, minClr, out) {
     for (let s = 0; s < _AR_SECTORS; s++) {
       const a = (s / _AR_SECTORS) * 6.2831853;
       const mx = Math.cos(a) * G.ringR, mz = Math.sin(a) * G.ringR;
+      if (_arenaNavBanned(bot, j, mx, mz)) continue;
       if (_arenaNavThroatClr(mx, mz, fy, G) < minClr) continue;
       const c = Math.hypot(mx - px, fy - py, mz - pz) + Math.hypot(gx - mx, gy - fy, gz - mz);
       if (c < bestCost) { bestCost = c; bestX = mx; bestZ = mz; bestR = G.ringW; found = true; }
@@ -33762,12 +33780,13 @@ function _arenaNavUpdate(bot, gx, gy, gz, dt, G) {
   const p = bot.position;
   if (!bot._arenaWay) bot._arenaWay = new THREE.Vector3();
   bot._arenaT = (bot._arenaT || 0) - dt;
-  const slab = _arenaNavBlocked(p.x, p.y, p.z, gx, gy, gz, G);
+  const minClr = _arenaNavMinClr(bot);
+  const _apOn = _arenaPathOn();   // (v47.78)
+  const slab = _arenaNavBlocked(p.x, p.y, p.z, gx, gy, gz, G, _apOn ? minClr : undefined);
   if (slab < 0) {
     if (bot._arenaOn) { bot._arenaOn = false; bot._arenaSlab = -1; }
     return false;
   }
-  const minClr = _arenaNavMinClr(bot);
   if (!bot._arenaOn || bot._arenaSlab !== slab || bot._arenaT <= 0) {
     if (!_arenaNavPickThroat(bot, slab, gx, gy, gz, G, minClr, _arNavTmp)) {
       bot._arenaOn = false; bot._arenaSlab = -1;
@@ -33775,19 +33794,318 @@ function _arenaNavUpdate(bot, gx, gy, gz, dt, G) {
     }
     bot._arenaOn = true;
     bot._arenaSlab = slab;
+    if (_arNavTmp.x !== bot._arenaMx || _arNavTmp.z !== bot._arenaMz) { bot._arenaStallN = 0; bot._arenaStallT0 = game.time; }
     bot._arenaMx = _arNavTmp.x; bot._arenaMz = _arNavTmp.z; bot._arenaMy = _arNavTmp.y;
     bot._arenaTol = Math.max(_AR_TOL_MIN, Math.min(_AR_TOL_MAX, (_arNavTmp.r || 150) * 0.6));
     bot._arenaThru = false;
     bot._arenaT = _AR_REVALIDATE;
+    bot._arenaAlignY = _apOn ? _arenaNavAlignY(G, bot._arenaMx, bot._arenaMz, p.y, gy > p.y) : null;
   }
   const dxz = Math.hypot(bot._arenaMx - p.x, bot._arenaMz - p.z);
   if (dxz <= bot._arenaTol) bot._arenaThru = true;
   const goingUp = (gy > p.y);
   const lip = G.slabT * 2.2;
-  const wy = bot._arenaMy + (bot._arenaThru ? (goingUp ? lip : -lip)
-                                            : (goingUp ? -lip : lip));
+  let wy = bot._arenaMy + (bot._arenaThru ? (goingUp ? lip : -lip)
+                                          : (goingUp ? -lip : lip));
+  if (!bot._arenaThru && bot._arenaAlignY != null && _apOn) wy = bot._arenaAlignY;   // (v47.78)
   bot._arenaWay.set(bot._arenaMx, wy, bot._arenaMz);
   return true;
+}
+
+if (typeof window !== 'undefined' && !window.__arenaPath) {
+  window.__arenaPath = {
+    on: true,
+    look: 320,      // u ahead of the hull a committed detour is steered at
+    evalT: 0.3,     // s between planner decisions (jittered per bot)
+    commit: 0.55,   // s a detour heading is held before it is re-judged
+    runL: 560,      // u of the straight line to the goal that must be flyable to go direct
+    pad: 12,        // u added to the hull's c* for every flyability test
+  };
+}
+function _arenaPathK() {
+  try { return (typeof window !== 'undefined' && window.__arenaPath) || {}; } catch (_) { return {}; }
+}
+function _arenaPathOn() { return _arenaPathK().on !== false; }
+if (typeof window !== 'undefined') {
+  window.__arenaPathReport = () => {
+    try {
+      const G = game.arenaField && game.arenaField.G;
+      return (game.entities || []).filter(b => b instanceof Bot && b.alive && !b.isProxy).map(b => ({
+        id: b.id, k: b.loadoutKey, storey: G ? _arenaNavStorey(b.position.y, G) : null,
+        router: b._arenaOn ? ('slab ' + b._arenaSlab + (b._arenaThru ? ' THROUGH' : ' ALIGN') +
+                              (b._arenaAlignY != null ? ' @y' + Math.round(b._arenaAlignY) : '')) : null,
+        detour: (b._alDetour && b._alT > 0) ? [+b._alDir.x.toFixed(2), +b._alDir.y.toFixed(2), +b._alDir.z.toFixed(2)] : null,
+        clr: G ? Math.round(-_ARENA_FIELD.eval(b.position.x, b.position.y, b.position.z, G)) : null,
+        need: Math.round(_arenaNavMinClr(b)),
+      }));
+    } catch (e) { return { error: String(e) }; }
+  };
+}
+function _arenaNavAlignY(G, mx, mz, y, goingUp) {
+  const s = _arenaNavStorey(y, G), nf = G.floorY.length;
+  const lo = (s > 0) ? G.floorY[s - 1] + G.slabT : -G.H;
+  const hi = (s < nf) ? G.floorY[s] - G.slabT : G.H;
+  let bestY = (lo + hi) * 0.5, best = -Infinity;
+  for (let i = 0; i <= 8; i++) {
+    const yy = lo + 70 + (hi - lo - 140) * (i / 8);
+    const c = -_ARENA_FIELD.eval(mx, yy, mz, G);
+    const sc = c + 0.08 * (goingUp ? (yy - lo) : (hi - yy));
+    if (sc > best) { best = sc; bestY = yy; }
+  }
+  return bestY;
+}
+function _arenaClearRun(G, x, y, z, ux, uy, uz, L, need, c0) {
+  let t = 0;
+  for (let i = 0; i < 48 && t < L; i++) {
+    const c = -_ARENA_FIELD.eval(x + ux * t, y + uy * t, z + uz * t, G);
+    const req = Math.min(need, c0 - 5 + t * 0.9);
+    if (c < req) return t;
+    t += Math.max(22, (c - req) * 0.8);
+  }
+  return Math.min(t, L);
+}
+const _AL_CANDS = (() => {
+  const out = [];
+  for (const yw of [20, 40, 60, 85, 110, 140, 180]) for (const pt of [0, 24, -24]) out.push([yw, pt]);
+  return out;
+})();
+const _alRayDir = new THREE.Vector3();   // the planner's LOS ray (raycastLevel does not retain it)
+const _alGoalV = new THREE.Vector3();    // the lattice's goal attach point
+
+const _AL_DIRS = [[1,0,0],[0,1,0],[0,0,1],[1,1,0],[1,-1,0],[1,0,1],[1,0,-1],[0,1,1],[0,1,-1],[1,1,1],[1,1,-1],[1,-1,1],[1,-1,-1]];
+const _AL_MIN = 60;   // the lattice keeps nothing tighter than this (below every hull's c*)
+const _arenaLat = { key: null, ready: false, building: false, worker: null, url: null, t0: 0, ms: 0,
+                    s: 0, nx: 0, ny: 0, nz: 0, ox: 0, oy: 0, oz: 0, n: 0,
+                    pos: null, clr: null, ecl: null, live: 0, edges: 0,
+                    g: null, came: null, closed: null, hId: null, hF: null };
+function _arenaLatOn() { return _arenaPathOn() && _arenaPathK().lat !== false; }
+function _arenaLatWorkerSrc() {
+  return 'const FIELD = ' + _ARENA_FIELD_SRC + ';\n' + `
+const DIRS = [[1,0,0],[0,1,0],[0,0,1],[1,1,0],[1,-1,0],[1,0,1],[1,0,-1],[0,1,1],[0,1,-1],[1,1,1],[1,1,-1],[1,-1,1],[1,-1,-1]];
+const OFF = [[0,0,0],[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+const FR = [0.5, 0.25, 0.75];
+self.onmessage = (e) => {
+  const m = e.data;
+  if (!m || m.cmd !== 'build') return;
+  const G = m.g, s = m.s, nx = m.nx, ny = m.ny, nz = m.nz, ox = m.ox, oy = m.oy, oz = m.oz;
+  const R2 = m.R2, MIN = m.minNeed, n = nx * ny * nz, q = s / 3;
+  const pos = new Float32Array(n * 3), clr = new Float32Array(n), ecl = new Float32Array(n * 13);
+  for (let j = 0; j < ny; j++) for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) {
+    const id = (j * nz + k) * nx + i;
+    const cx = ox + i * s, cy = oy + j * s, cz = oz + k * s;
+    pos[id * 3] = cx; pos[id * 3 + 1] = cy; pos[id * 3 + 2] = cz;
+    if (cx * cx + cz * cz > R2) { clr[id] = -1; continue; }
+    let best = -1e9;
+    for (let o = 0; o < 7; o++) {
+      const x = cx + OFF[o][0] * q, y = cy + OFF[o][1] * q, z = cz + OFF[o][2] * q;
+      const c = -FIELD.eval(x, y, z, G);
+      if (c > best) { best = c; pos[id * 3] = x; pos[id * 3 + 1] = y; pos[id * 3 + 2] = z; }
+    }
+    clr[id] = best;
+  }
+  for (let j = 0; j < ny; j++) for (let k = 0; k < nz; k++) for (let i = 0; i < nx; i++) {
+    const id = (j * nz + k) * nx + i;
+    const ca = clr[id];
+    for (let d = 0; d < 13; d++) {
+      const e2 = id * 13 + d;
+      ecl[e2] = -1;
+      if (ca < MIN) continue;
+      const i2 = i + DIRS[d][0], j2 = j + DIRS[d][1], k2 = k + DIRS[d][2];
+      if (i2 < 0 || i2 >= nx || j2 < 0 || j2 >= ny || k2 < 0 || k2 >= nz) continue;
+      const id2 = (j2 * nz + k2) * nx + i2;
+      const cb = clr[id2];
+      if (cb < MIN) continue;
+      const ax = pos[id * 3], ay = pos[id * 3 + 1], az = pos[id * 3 + 2];
+      const bx = pos[id2 * 3], by = pos[id2 * 3 + 1], bz = pos[id2 * 3 + 2];
+      let mn = Math.min(ca, cb);
+      for (let f = 0; f < 3 && mn >= MIN; f++) {
+        const t = FR[f];
+        const c = -FIELD.eval(ax + (bx - ax) * t, ay + (by - ay) * t, az + (bz - az) * t, G);
+        if (c < mn) mn = c;
+      }
+      // An edge through a slab hole is only as wide as the hole's RIM, which sits at the slab's two
+      // faces and its midplane - never at a quarter point by luck. Sample exactly there.
+      if (mn >= MIN && ay !== by) {
+        for (let f = 0; f < G.floorY.length && mn >= MIN; f++) {
+          for (let q2 = -1; q2 <= 1 && mn >= MIN; q2++) {
+            const yy = G.floorY[f] + q2 * G.slabT;
+            if ((ay - yy) * (by - yy) >= 0) continue;
+            const t = (yy - ay) / (by - ay);
+            const c = -FIELD.eval(ax + (bx - ax) * t, yy, az + (bz - az) * t, G);
+            if (c < mn) mn = c;
+          }
+        }
+      }
+      if (mn >= MIN) ecl[e2] = mn;
+    }
+  }
+  self.postMessage({ key: m.key, pos: pos, clr: clr, ecl: ecl }, [pos.buffer, clr.buffer, ecl.buffer]);
+};`;
+}
+function _arenaLatDispose() {
+  if (_arenaLat.worker) { try { _arenaLat.worker.terminate(); } catch (_) {} }
+  if (_arenaLat.url) { try { URL.revokeObjectURL(_arenaLat.url); } catch (_) {} }
+  Object.assign(_arenaLat, { key: null, ready: false, building: false, worker: null, url: null,
+                             pos: null, clr: null, ecl: null, live: 0, edges: 0,
+                             g: null, came: null, closed: null, hId: null, hF: null });
+}
+function _arenaEnsureLattice(level) {
+  if (!_arenaLatOn()) return;
+  const key = JSON.stringify(level.arena) + '|lat2';   // bump when the worker's output changes
+  if (_arenaLat.key === key && (_arenaLat.ready || _arenaLat.building)) return;
+  _arenaLatDispose();
+  const G = _arenaBuildParams(level.arena, level.rooms);
+  const s = 160, ext = G.R + 40, ylo = -G.H - 40, yhi = G.H + 40;
+  const nx = Math.ceil(2 * ext / s) + 1, ny = Math.ceil((yhi - ylo) / s) + 1;
+  Object.assign(_arenaLat, { key, building: true, t0: performance.now(), s, nx, ny, nz: nx,
+                             ox: -ext, oy: ylo, oz: -ext, n: nx * ny * nx });
+  let url = null, w = null;
+  try {
+    url = URL.createObjectURL(new Blob([_arenaLatWorkerSrc()], { type: 'text/javascript' }));
+    _arenaLat.url = url;
+    w = new Worker(url);
+  } catch (e) {
+    console.warn('[spire] nav lattice worker unavailable - router + local planner only:', e);
+    _arenaLatDispose(); return;
+  }
+  _arenaLat.worker = w;
+  w.onerror = (e) => {
+    console.warn('[spire] nav lattice worker failed - router + local planner only:', e && (e.message || e));
+    if (_arenaLat.key === key) _arenaLatDispose();
+  };
+  w.onmessage = (ev) => {
+    const r = ev.data;
+    if (!r || r.key !== _arenaLat.key) return;
+    const L = _arenaLat;
+    L.pos = r.pos; L.clr = r.clr; L.ecl = r.ecl;
+    let live = 0, edges = 0;
+    for (let i = 0; i < L.n; i++) if (L.clr[i] >= _AL_MIN) live++;
+    for (let i = 0; i < L.ecl.length; i++) if (L.ecl[i] > 0) edges++;
+    L.live = live; L.edges = edges;
+    L.g = new Float32Array(L.n); L.came = new Int32Array(L.n); L.closed = new Uint8Array(L.n);
+    L.hId = new Int32Array(L.n * 8); L.hF = new Float32Array(L.n * 8);   // lazy deletion re-pushes
+    L.ms = Math.round(performance.now() - L.t0);
+    L.ready = true; L.building = false;
+    try { w.terminate(); } catch (_) {}
+    L.worker = null;
+    if (L.url) { try { URL.revokeObjectURL(L.url); } catch (_) {} L.url = null; }
+    console.log('[spire] nav lattice: ' + live + ' live nodes, ' + edges + ' edges, ' + L.ms + ' ms');
+  };
+  w.postMessage({ cmd: 'build', key, g: G, s, nx, ny, nz: nx, ox: -ext, oy: ylo, oz: -ext,
+                  R2: ext * ext, minNeed: _AL_MIN });
+}
+function _arenaLatAttach(p, need, G, clearFrom, c0) {
+  const L = _arenaLat, s = L.s;
+  const ci = Math.round((p.x - L.ox) / s), cj = Math.round((p.y - L.oy) / s), ck = Math.round((p.z - L.oz) / s);
+  const cand = [];
+  for (let dj = -1; dj <= 1; dj++) for (let dk = -1; dk <= 1; dk++) for (let di = -1; di <= 1; di++) {
+    const i = ci + di, j = cj + dj, k = ck + dk;
+    if (i < 0 || i >= L.nx || j < 0 || j >= L.ny || k < 0 || k >= L.nz) continue;
+    const id = (j * L.nz + k) * L.nx + i;
+    if (L.clr[id] < need) continue;
+    const dx = L.pos[id * 3] - p.x, dy = L.pos[id * 3 + 1] - p.y, dz = L.pos[id * 3 + 2] - p.z;
+    cand.push([dx * dx + dy * dy + dz * dz, id]);
+  }
+  if (!cand.length) return -1;
+  cand.sort((a, b) => a[0] - b[0]);
+  if (!clearFrom) return cand[0][1];
+  for (let n = 0; n < cand.length && n < 6; n++) {
+    const id = cand[n][1], d = Math.sqrt(cand[n][0]);
+    if (d < 1) return id;
+    const ux = (L.pos[id * 3] - p.x) / d, uy = (L.pos[id * 3 + 1] - p.y) / d, uz = (L.pos[id * 3 + 2] - p.z) / d;
+    if (_arenaClearRun(G, p.x, p.y, p.z, ux, uy, uz, d, need, c0) >= d - 1) return id;
+  }
+  return cand[0][1];   // nothing provably clear: the nearest, and the stuck escape is the backstop
+}
+const _AL_W = 1.6;   // weighted A*: a slightly longer path for far fewer expansions
+function _alHeapPush(S, id, f) {
+  const hId = _arenaLat.hId, hF = _arenaLat.hF;
+  if (S.hn >= hId.length) return;
+  let i = S.hn++;
+  while (i > 0) { const pi = (i - 1) >> 1; if (hF[pi] <= f) break; hId[i] = hId[pi]; hF[i] = hF[pi]; i = pi; }
+  hId[i] = id; hF[i] = f;
+}
+function _alHeapPop(S) {
+  const hId = _arenaLat.hId, hF = _arenaLat.hF;
+  const top = hId[0], lastId = hId[--S.hn], lastF = hF[S.hn];
+  let i = 0;
+  for (;;) {
+    let c = 2 * i + 1;
+    if (c >= S.hn) break;
+    if (c + 1 < S.hn && hF[c + 1] < hF[c]) c++;
+    if (hF[c] >= lastF) break;
+    hId[i] = hId[c]; hF[i] = hF[c]; i = c;
+  }
+  if (S.hn > 0) { hId[i] = lastId; hF[i] = lastF; }
+  return top;
+}
+function _arenaLatSearchStart(owner, sId, gId, need, ban, now, gx, gy, gz) {
+  const L = _arenaLat, P = L.pos;
+  L.g.fill(Infinity); L.closed.fill(0);
+  const S = L.srch = { owner, sId, gId, need, ban, now, touch: now, hn: 0, exp: 0, ms: 0, stepMax: 0,
+                       tx: P[gId * 3], ty: P[gId * 3 + 1], tz: P[gId * 3 + 2], gx, gy, gz };
+  L.g[sId] = 0; L.came[sId] = -1;
+  _alHeapPush(S, sId, _AL_W * Math.hypot(P[sId * 3] - S.tx, P[sId * 3 + 1] - S.ty, P[sId * 3 + 2] - S.tz));
+  return S;
+}
+function _arenaLatSearchStep(ms, maxExp) {
+  const L = _arenaLat, S = L.srch;
+  if (!S) return null;
+  const nx = L.nx, nz = L.nz, nxz = nx * nz, P = L.pos, E = L.ecl, g = L.g, came = L.came, closed = L.closed;
+  const need = S.need, ban = S.ban, now = S.now, gId = S.gId, tx = S.tx, ty = S.ty, tz = S.tz;
+  const pad = 70, tEnd = performance.now() + ms;
+  let n = 0;
+  while (S.hn > 0) {
+    if (S.exp >= maxExp) return null;
+    if ((++n & 63) === 0 && performance.now() > tEnd) return undefined;
+    const id = _alHeapPop(S);
+    if (closed[id]) continue;
+    if (id === gId) {
+      const out = [];
+      for (let c = id; c !== -1; c = came[c]) out.push(c);
+      out.reverse();
+      return out;
+    }
+    closed[id] = 1; S.exp++;
+    const i = id % nx, k = ((id / nx) | 0) % nz, j = (id / nxz) | 0;
+    const px = P[id * 3], py = P[id * 3 + 1], pz = P[id * 3 + 2];
+    for (let d = 0; d < 13; d++) {
+      const D = _AL_DIRS[d];
+      for (let sg = 1; sg >= -1; sg -= 2) {
+        const i2 = i + D[0] * sg, j2 = j + D[1] * sg, k2 = k + D[2] * sg;
+        if (i2 < 0 || i2 >= nx || j2 < 0 || j2 >= L.ny || k2 < 0 || k2 >= nz) continue;
+        const id2 = (j2 * nz + k2) * nx + i2;
+        if (closed[id2]) continue;
+        if (ban && id2 !== gId && ban[id2] > now) continue;
+        const ec = (sg > 0) ? E[id * 13 + d] : E[id2 * 13 + d];   // the edge lives on its lower end
+        if (ec < need) continue;
+        const len = Math.hypot(P[id2 * 3] - px, P[id2 * 3 + 1] - py, P[id2 * 3 + 2] - pz);
+        const ng = g[id] + len * (1 + 0.8 * Math.max(0, (need + pad - ec) / pad));   // prefer wide passages
+        if (ng < g[id2]) {
+          g[id2] = ng; came[id2] = id;
+          _alHeapPush(S, id2, ng + _AL_W * Math.hypot(P[id2 * 3] - tx, P[id2 * 3 + 1] - ty, P[id2 * 3 + 2] - tz));
+        }
+      }
+    }
+  }
+  return null;
+}
+if (typeof window !== 'undefined') {
+  window.__arenaLatReport = () => {
+    const L = _arenaLat;
+    const out = { ready: L.ready, building: L.building, ms: L.ms, s: L.s, dims: [L.nx, L.ny, L.nz],
+                  live: L.live, edges: L.edges, bots: [] };
+    try {
+      for (const b of (game.entities || [])) {
+        if (!(b instanceof Bot) || !b.alive || b.isProxy) continue;
+        const T = b._lat;
+        out.bots.push({ id: b.id, k: b.loadoutKey,
+                        path: (T && T.ids) ? (T.i + '/' + T.ids.length) : (T && T.failT ? 'no path' : null),
+                        plans: T ? T.plans : 0, ms: T ? +T.ms.toFixed(1) : null });
+      }
+    } catch (_) {}
+    return out;
+  };
 }
 if (typeof window !== 'undefined') {
   window.__spireNav = () => {
@@ -36543,6 +36861,191 @@ function animateShipMesh(mesh, speed, maxSpeed, isFiring, dt, doomed) {
 }
 
 
+if (typeof window !== 'undefined' && !window.__squadNav) {
+  window.__squadNav = {
+    on: true,          // false = legacy navigateToEnemyTerritory everywhere (A/B)
+    lambda: 0.5,       // search prior weight: 0 = nearest unsearched room, 1 = lean hard toward the prior
+    combatWin: 4,      // s a wingmate stays "in combat" after its last sighting / shot / hit
+    checkTtl: 25,      // s a searched room stays clear before it is worth searching again
+    regroupMax: 10,    // s the squad waits for stragglers before fanning out anyway
+    look: 260,         // u of pure-pursuit lookahead along a tunnel axis
+    scanT: 0.6,        // s between LOS looks while navigating (findTarget normally runs every 1-3 s)
+  };
+}
+function _snK() {
+  let K = null;
+  try { K = (typeof window !== 'undefined') ? window.__squadNav : null; } catch (_) {}
+  return K || {};
+}
+function _snNum(v, d) { return (typeof v === 'number' && isFinite(v)) ? v : d; }
+function _snArena() {
+  try {
+    if (typeof LSS === 'undefined' || typeof game === 'undefined' || !game) return false;
+    const m = LSS.MODE;
+    if (m === 'race' || m === 'freeflight' || m === 'endless' || m === 'campaign') return false;
+    if (typeof _lssGmaps !== 'undefined' && _lssGmaps && _lssGmaps.active && !_lssGmaps.overlayOnly) return false;
+    const lv = game.currentLevel;
+    if (!lv || lv.procedural === 'endless') return false;
+    if (game.sandwichTerrain && game.sandwichTerrain.HUB) return false;
+    return !!(game.raceGraph && game.raceGraph.nodes && Array.isArray(game.sdfRoomData));
+  } catch (_) { return false; }
+}
+let _snG = null;
+function _snGraph() {
+  if (!_snArena()) return null;
+  const src = game.raceGraph, rooms = game.sdfRoomData, cyl = game.levelCylinders || [];
+  if (_snG && _snG.src === src && _snG.rs === rooms && _snG.cn === cyl.length) return _snG;
+  _snG = null;
+  const R = [];
+  for (const r of rooms) if (r && isFinite(r.x) && isFinite(r.y) && isFinite(r.z) && r.r > 0) R.push(r);
+  const n = R.length;
+  if (n < 2) return null;
+  const inRoom = (x, y, z) => {
+    let best = -1, bd = Infinity;
+    for (let i = 0; i < n; i++) {
+      const r = R[i], dx = x - r.x, dy = y - r.y, dz = z - r.z, d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 <= r.r * r.r && d2 < bd) { bd = d2; best = i; }
+    }
+    return best;
+  };
+  const cost = new Float64Array(n * n).fill(Infinity);
+  const nxt = new Int16Array(n * n).fill(-1);
+  const E = new Array(n * n).fill(null);   // E[i*n+j] = the tunnel i->j, oriented (x0 in i, x1 in j)
+  for (let i = 0; i < n; i++) { cost[i * n + i] = 0; nxt[i * n + i] = i; }
+  let edges = 0;
+  for (const c of cyl) {
+    if (!c) continue;
+    const a = inRoom(c.ax, c.ay, c.az), b = inRoom(c.bx, c.by, c.bz);
+    if (a < 0 || b < 0 || a === b) continue;
+    const w = Math.hypot(c.bx - c.ax, c.by - c.ay, c.bz - c.az) +
+              Math.hypot(c.ax - R[a].x, c.ay - R[a].y, c.az - R[a].z) +
+              Math.hypot(c.bx - R[b].x, c.by - R[b].y, c.bz - R[b].z);
+    const tr = c.r || SU * 1.2;
+    if (w < cost[a * n + b]) {
+      cost[a * n + b] = w; nxt[a * n + b] = b;
+      E[a * n + b] = { x0: c.ax, y0: c.ay, z0: c.az, x1: c.bx, y1: c.by, z1: c.bz, r: tr };
+    }
+    if (w < cost[b * n + a]) {
+      cost[b * n + a] = w; nxt[b * n + a] = a;
+      E[b * n + a] = { x0: c.bx, y0: c.by, z0: c.bz, x1: c.ax, y1: c.ay, z1: c.az, r: tr };
+    }
+    edges++;
+  }
+  for (let k = 0; k < n; k++) for (let i = 0; i < n; i++) {
+    const ik = cost[i * n + k];
+    if (ik === Infinity) continue;
+    for (let j = 0; j < n; j++) {
+      const v = ik + cost[k * n + j];
+      if (v < cost[i * n + j]) { cost[i * n + j] = v; nxt[i * n + j] = nxt[i * n + k]; }
+    }
+  }
+  for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+    if (cost[i * n + j] === Infinity) cost[i * n + j] = Math.hypot(R[i].x - R[j].x, R[i].y - R[j].y, R[i].z - R[j].z);
+  }
+  _snG = { src, rs: rooms, cn: cyl.length, R, n, cost, nxt, E, edges };
+  return _snG;
+}
+function _snRoomNear(G, p) {
+  let inside = -1, bi = Infinity, near = -1, bn = Infinity;
+  for (let i = 0; i < G.n; i++) {
+    const r = G.R[i], d = Math.hypot(p.x - r.x, p.y - r.y, p.z - r.z);
+    if (d <= r.r && d / r.r < bi) { bi = d / r.r; inside = i; }
+    if (d - r.r < bn) { bn = d - r.r; near = i; }
+  }
+  return (inside >= 0) ? inside : near;
+}
+function _snRoomOf(bot, G) {
+  const p = bot.position;
+  let inside = -1, bi = Infinity;
+  for (let i = 0; i < G.n; i++) {
+    const r = G.R[i], dx = p.x - r.x, dy = p.y - r.y, dz = p.z - r.z, q = (dx * dx + dy * dy + dz * dz) / (r.r * r.r);
+    if (q <= 1 && q < bi) { bi = q; inside = i; }
+  }
+  if (inside >= 0) { bot._navRoom = inside; bot._navRoomG = G; return inside; }
+  const cur = (bot._navRoomG === G) ? bot._navRoom : -1;
+  if (cur == null || cur < 0) { bot._navRoom = _snRoomNear(G, p); bot._navRoomG = G; return bot._navRoom; }
+  const r = G.R[cur];
+  if (Math.hypot(p.x - r.x, p.y - r.y, p.z - r.z) > r.r + 1200) bot._navRoom = _snRoomNear(G, p);
+  return bot._navRoom;
+}
+function _snSquad(team, G) {
+  if (!game._squadNav) game._squadNav = {};
+  let s = game._squadNav[team];
+  if (!s || s.g !== G) {
+    s = game._squadNav[team] = { g: G, phase: 'regroup', since: game.time, rally: -1,
+                                 checked: new Float64Array(G.n).fill(-1e9),
+                                 contactT: -1e9, seen: null, seenT: -1e9 };
+  }
+  return s;
+}
+function _snInCombat(b, now, win) {
+  return (b._underFireT > 0) || (b._combatT != null && (now - b._combatT) < win);
+}
+function _snWaypoint(bot, G, cur, goal, gx, gy, gz) {
+  const out = bot._navWp || (bot._navWp = new THREE.Vector3());
+  if (cur < 0 || goal < 0 || cur === goal) return out.set(gx, gy, gz);
+  const n = G.n, h = G.nxt[cur * n + goal];
+  const e = (h >= 0) ? G.E[cur * n + h] : null;
+  if (!e) return out.set(gx, gy, gz);   // unrouted (the Spire): straight; the vertical router takes it
+  const p = bot.position;
+  let ux = e.x1 - e.x0, uy = e.y1 - e.y0, uz = e.z1 - e.z0;
+  const L = Math.hypot(ux, uy, uz) || 1;
+  ux /= L; uy /= L; uz /= L;
+  const rx = p.x - e.x0, ry = p.y - e.y0, rz = p.z - e.z0;
+  const ax = rx * ux + ry * uy + rz * uz;                       // progress along the tunnel
+  const lat = Math.hypot(rx - ux * ax, ry - uy * ax, rz - uz * ax);   // distance off its axis
+  const R0 = G.R[cur];
+  const inCur = Math.hypot(p.x - R0.x, p.y - R0.y, p.z - R0.z) <= R0.r;
+  const tol = Math.max(45, Math.min(90, e.r * 0.4));
+  let s;
+  if (inCur && lat > tol) {
+    const axC = (R0.x - e.x0) * ux + (R0.y - e.y0) * uy + (R0.z - e.z0) * uz;
+    s = Math.min(Math.max(ax, axC) + 120, axC + R0.r * 0.5);
+  } else {
+    s = ax + _snNum(_snK().look, 260);
+  }
+  if (s >= L) { const R1 = G.R[h]; return out.set(R1.x, R1.y, R1.z); }
+  return out.set(e.x0 + ux * s, e.y0 + uy * s, e.z0 + uz * s);
+}
+if (typeof window !== 'undefined') {
+  window.__squadNavReport = () => {
+    try {
+      const G = _snGraph(), K = _snK(), now = game.time;
+      const out = { arena: _snArena(), on: K.on !== false, rooms: G ? G.R.map(r => r.id) : null,
+                    edges: G ? G.edges : 0, squads: {}, bots: [] };
+      if (G && game._squadNav) for (const t in game._squadNav) {
+        const s = game._squadNav[t];
+        if (s.g !== G) continue;
+        out.squads[t] = { phase: s.phase, for: +(now - s.since).toFixed(1), rally: s.rally >= 0 ? G.R[s.rally].id : null,
+                          checked: G.R.filter((r, i) => now - s.checked[i] < _snNum(K.checkTtl, 25)).map(r => r.id),
+                          contactAgo: +(now - s.contactT).toFixed(1),
+                          seen: s.seen ? [Math.round(s.seen.x), Math.round(s.seen.y), Math.round(s.seen.z)] : null };
+      }
+      for (const b of (game.entities || [])) {
+        if (!(b instanceof Bot) || !b.alive || b.isProxy) continue;
+        const N = b._nav;
+        out.bots.push({ id: b.id, k: b.loadoutKey, team: b.team,
+                        room: (G && b._navRoomG === G && b._navRoom >= 0) ? G.R[b._navRoom].id : null,
+                        mode: N ? N.mode : null,
+                        goal: N ? (N.mode === 'support' ? ('ship ' + (N.ship ? N.ship.id : '?'))
+                                                        : (G && G.R[N.room] ? G.R[N.room].id : null)) : null,
+                        combatAgo: (b._combatT != null) ? +(now - b._combatT).toFixed(1) : null });
+      }
+      return out;
+    } catch (e) { return { error: String(e) }; }
+  };
+  window.__losProbe = (ax, ay, az, bx, by, bz) => {
+    try {
+      const o = new THREE.Vector3(ax, ay, az), d = new THREE.Vector3(bx - ax, by - ay, bz - az);
+      const dist = d.length();
+      if (dist < 1e-3) return { dist: 0, hit: 0, clear: true };
+      d.multiplyScalar(1 / dist);
+      const hit = raycastLevel(o, d, dist + 10);
+      return { dist: Math.round(dist), hit: Math.round(hit), clear: hit >= dist - 5 };
+    } catch (e) { return { error: String(e) }; }
+  };
+}
+
 class Bot {
   constructor(loadoutKey, team, id, hoardModelKey) {
     const loadout = LOADOUTS[loadoutKey];
@@ -36831,6 +37334,7 @@ class Bot {
 
     let _raceWaypoint = null;
     let _arenaVia = null;
+    let _latOwned = false;   // (v47.81) the Spire lattice owns the heading this frame (speed cap, fast nose)
     if (game._cyber && game._cyber.armed && this._cyberAttacker != null && game.state === 'playing') {
       const _wp = _cyberBotWaypoint(this);
       if (_wp) {
@@ -36959,6 +37463,11 @@ class Bot {
       _raceWaypoint = this.aiTarget;
     }
 
+    if (!_raceWaypoint && this._nav && game.state === 'playing' && !this.aiRetreating) {
+      const _snW = this._squadNavTick(dt);
+      if (_snW) { this.aiTarget = _snW; _raceWaypoint = this.aiTarget; }
+    }
+
     const _afN = game.arenaField;
     if (_afN && _afN.ON && _afN.G && _afN.G.floorY && _afN.G.floorY.length &&
         game.state === 'playing' && !this.aiRetreating &&
@@ -36967,8 +37476,25 @@ class Bot {
       const _dst = _raceWaypoint ? this.aiTarget
                  : ((this.combatTarget && this.combatTarget.position)
                      ? this.combatTarget.position : this.aiTarget);
-      if (_dst && _arenaNavUpdate(this, _dst.x, _dst.y, _dst.z, dt, _afN.G)) {
-        _arenaVia = this._arenaWay;
+      let _latW = null;
+      if (_arenaLatOn() && _arenaLat.ready) {
+        const _lg0 = this.aiTarget || _dst;
+        if (_lg0) _latW = this._arenaLatTick(_lg0.x, _lg0.y, _lg0.z, dt, _afN.G, !_raceWaypoint);
+      }
+      if (_latW) {
+        _arenaVia = _latW;
+        _latOwned = true;
+        if (this._arenaOn) { this._arenaOn = false; this._arenaSlab = -1; }   // not the router's transit
+      } else {
+        const _routed = !!(_dst && _arenaNavUpdate(this, _dst.x, _dst.y, _dst.z, dt, _afN.G));
+        if (_routed) _arenaVia = this._arenaWay;
+        if (_arenaPathOn()) {
+          const _lg = _routed ? this._arenaWay : (this.aiTarget || _dst);
+          if (_lg) {
+            const _lw = this._arenaLocalUpdate(_lg.x, _lg.y, _lg.z, dt, _afN.G, !_routed && !_raceWaypoint);
+            if (_lw) _arenaVia = _lw;
+          }
+        }
       }
     } else if (this._arenaOn) {
       this._arenaOn = false; this._arenaSlab = -1;
@@ -36990,7 +37516,7 @@ class Bot {
       moveDir = this._tempVec3a.subVectors(_goal, this.position);
       const _rd = moveDir.length();
       if (_rd > 0.001) moveDir.multiplyScalar(1 / _rd);
-      this.targetDir.lerp(moveDir, dt * 2);
+      this.targetDir.lerp(moveDir, dt * (_latOwned ? 4 : 2));   // (v47.81) lattice turns: see _latCap
       this.targetDir.normalize();
     } else if (this.aiTarget) {
       const toTarget = this._tempVec3a.subVectors(this.aiTarget, this.position);
@@ -37105,6 +37631,10 @@ class Bot {
       this.velocity.multiplyScalar(maxSpd / speed);
     }
     this.velocity.multiplyScalar(1 - this.chassis.deceleration * dt / Math.max(speed, 1));
+    if (_latOwned && this._latCap != null) {
+      const _ls = this.velocity.length();
+      if (_ls > this._latCap) this.velocity.multiplyScalar(Math.max(this._latCap / _ls, 1 - 3 * dt));
+    }
 
     if ((this.hoardModelKey && LSS.MODE === 'campaign') ||
         (this.hoardModelKey && (this._cavernBot || this._riftGuard)) ||
@@ -38046,6 +38576,34 @@ class Bot {
     if (this._unstickFails >= 4) this._unstickT = burstT * 1.8;
     try { if (window.__stuck && window.__stuck.debug) console.log('[stuck]', this.loadoutKey, this.id, 'escaping'); } catch (_) {}
     try { window.__stuckN = (window.__stuckN | 0) + 1; } catch (_) {}
+    if (this._lat && this._lat.ids && _arenaLat.ready && window.__arenaBan !== false) {
+      const _T = this._lat, _now = game.time, _L = _arenaLat, _p = this.position;
+      if (!_T.ban || _T.ban.length !== _L.n) _T.ban = new Float32Array(_L.n);
+      _T.ban[_T.ids[_T.i]] = _now + 15;
+      const _ci = Math.round((_p.x - _L.ox) / _L.s), _cj = Math.round((_p.y - _L.oy) / _L.s), _ck = Math.round((_p.z - _L.oz) / _L.s);
+      for (let dj = -2; dj <= 2; dj++) for (let dk = -2; dk <= 2; dk++) for (let di = -2; di <= 2; di++) {
+        const i = _ci + di, j = _cj + dj, k = _ck + dk;
+        if (i < 0 || i >= _L.nx || j < 0 || j >= _L.ny || k < 0 || k >= _L.nz) continue;
+        const id = (j * _L.nz + k) * _L.nx + i;
+        const dx = _L.pos[id * 3] - _p.x, dy = _L.pos[id * 3 + 1] - _p.y, dz = _L.pos[id * 3 + 2] - _p.z;
+        if (dx * dx + dy * dy + dz * dz < 220 * 220) _T.ban[id] = _now + 15;
+      }
+      _T.t = -1e9;   // replan next frame
+      if (_L.srch && _L.srch.owner === this) _L.srch = null;
+      try { window.__latBanN = (window.__latBanN | 0) + 1; } catch (_) {}
+    }
+    if (this._arenaOn && this._arenaSlab >= 0 && window.__arenaBan !== false) {
+      const _now = game.time;
+      if (_now - (this._arenaStallT0 || 0) > 10) { this._arenaStallN = 0; this._arenaStallT0 = _now; }
+      this._arenaStallN = (this._arenaStallN || 0) + 1;
+      if (this._arenaStallN >= 2) {
+        this._arenaBans = (this._arenaBans || []).filter(b => b.until > _now);
+        this._arenaBans.push({ slab: this._arenaSlab, x: this._arenaMx, z: this._arenaMz, until: _now + 12 });
+        this._arenaStallN = 0;
+        this._arenaT = 0;
+        try { window.__arenaBanN = (window.__arenaBanN | 0) + 1; } catch (_) {}
+      }
+    }
   }
 
   _doomK() { try { return (typeof window !== 'undefined' && window.__doom) || null; } catch (_) { return null; } }
@@ -38102,6 +38660,7 @@ class Bot {
   }
 
   findTarget() {
+    this._nav = null;
     const ct = this._acquireCombatTarget();
     this.combatTarget = ct;
     if (ct && ct !== player) {
@@ -38116,6 +38675,7 @@ class Bot {
       if (losDist >= dist - 5) {
         this.aiLastKnownPlayer = player.position.clone();
         this.aiLastKnownTime = game.time;
+        this._snContact(player.position);   // (v47.75) a sighting is contact - see _squadNavDecide
         this.aiTarget = player.position.clone();
         this.aiSharedTargetAge = 0;
 
@@ -38184,7 +38744,357 @@ class Bot {
     } catch (_) { return false; }
   }
 
+  _snContact(pos) {
+    this._combatT = game.time;
+    if (pos) (this._combatAt || (this._combatAt = new THREE.Vector3())).copy(pos);
+  }
+
+  _squadNavDecide() {
+    const K = _snK();
+    if (K.on === false) return false;
+    const G = _snGraph();
+    if (!G) return false;
+    const now = game.time;
+    const sq = _snSquad(this.team, G);
+    const win = _snNum(K.combatWin, 4);
+    const myRoom = _snRoomOf(this, G);
+    let fight = null, fightD = Infinity;
+    const squad = [this];
+    const _mem = (b) => {
+      if (b._combatT == null) return;
+      if (b._combatT > sq.contactT) sq.contactT = b._combatT;
+      if (b._combatAt && b._combatT > sq.seenT) {
+        sq.seen = (sq.seen || new THREE.Vector3()).copy(b._combatAt); sq.seenT = b._combatT;
+      }
+    };
+    _mem(this);
+    for (const b of game.entities) {
+      if (!(b instanceof Bot) || b === this || b.isProxy || b.team !== this.team || b._owCity != null) continue;
+      _mem(b);
+      if (!b.alive) continue;
+      if (_snInCombat(b, now, win)) {
+        const d = b.position.distanceToSquared(this.position);
+        if (d < fightD) { fightD = d; fight = b; }
+      }
+      squad.push(b);
+    }
+    if (fight) {
+      this._nav = { mode: 'support', room: -1, ship: fight, t: now };
+      this._snScan(K);
+      return true;
+    }
+    if (sq.contactT > sq.since) { sq.phase = 'regroup'; sq.since = now; sq.rally = -1; }
+    if (sq.phase === 'regroup') {
+      for (const b of squad) _snRoomOf(b, G);
+      if (sq.rally < 0) {
+        let best = -1, bc = Infinity;
+        for (let k = 0; k < G.n; k++) {
+          let c = 0;
+          for (const b of squad) c += G.cost[b._navRoom * G.n + k];
+          if (c < bc) { bc = c; best = k; }
+        }
+        sq.rally = best;
+      }
+      const rr = G.R[sq.rally];
+      const inRally = (b) => rr && Math.hypot(b.position.x - rr.x, b.position.y - rr.y, b.position.z - rr.z) <= rr.r;
+      if (!rr || squad.length <= 1 || squad.every(inRally) || now - sq.since > _snNum(K.regroupMax, 10)) {
+        sq.phase = 'search'; sq.since = now;
+        sq.checked.fill(-1e9);
+        if (rr) sq.checked[sq.rally] = now;   // the whole squad is standing in it and just looked
+        this._snPlan(G, sq, squad, now, K);   // "...then fan out": one decision for the whole squad
+      } else {
+        this._nav = { mode: 'regroup', room: sq.rally, ship: null, t: now };
+        this._snScan(K);
+        return true;
+      }
+    }
+    const ttl = _snNum(K.checkTtl, 25);
+    const R0 = G.R[myRoom];
+    if (R0 && Math.hypot(this.position.x - R0.x, this.position.y - R0.y, this.position.z - R0.z) <= R0.r * 0.75) {
+      sq.checked[myRoom] = now;
+    }
+    const prev = this._navClaim;
+    let goal = (prev != null && prev >= 0 && prev < G.n && prev !== myRoom && now - sq.checked[prev] >= ttl &&
+                this._navClaimG === G && this._navClaimE === sq.epoch && now - (this._navClaimT || 0) < ttl) ? prev : -1;
+    if (goal < 0 && sq.plan && sq.plan[this.id] != null && now - sq.planT < 15) {
+      const pr = sq.plan[this.id];
+      delete sq.plan[this.id];
+      if (pr !== myRoom && now - sq.checked[pr] >= ttl) { goal = pr; this._navClaimT = now; }
+    }
+    if (goal < 0) {
+      goal = this._snPickSearch(G, sq, myRoom, squad, now, K);
+      this._navClaimT = now;
+    }
+    this._navClaim = goal; this._navClaimG = G; this._navClaimE = sq.epoch;
+    this._nav = { mode: 'search', room: goal, ship: null, t: now };
+    this._snScan(K);
+    return true;
+  }
+
+  _snScan(K) {
+    const t = _snNum(K.scanT, 0.6);
+    if (this.aiTimer > t) this.aiTimer = t * (0.8 + Math.random() * 0.4);
+  }
+
+  _snPrior(G, sq, now) {
+    if (sq.seen && now - sq.seenT < 60) return sq.seen;
+    const ef = (this.team === LSS.TEAM_FLEET_A) ? LSS.TEAM_FLEET_B : (this.team === LSS.TEAM_FLEET_B) ? LSS.TEAM_FLEET_A : null;
+    const side = (ef == null) ? null : (_isAssault() ? _assaultSpawnSide(ef) : (ef === LSS.TEAM_FLEET_A ? 'A' : 'B'));
+    let sx = 0, sy = 0, sz = 0, c = 0;
+    if (side) for (const r of G.R) if (r.team === side) { sx += r.x; sy += r.y; sz += r.z; c++; }
+    return c ? { x: sx / c, y: sy / c, z: sz / c } : null;
+  }
+
+  _snPlan(G, sq, squad, now, K) {
+    const n = G.n, lam = _snNum(K.lambda, 0.5), ttl = _snNum(K.checkTtl, 25);
+    sq.epoch = (sq.epoch | 0) + 1;
+    const P = this._snPrior(G, sq, now);
+    const free = [];
+    for (let k = 0; k < n; k++) if (now - sq.checked[k] >= ttl) free.push(k);
+    const members = squad.filter(b => b._navRoomG === G && b._navRoom >= 0);
+    const spd = (b) => Math.max(100, (b.chassis && b.chassis.flightSpeed) || 350);
+    const plan = {};
+    const take = (k) => { const i = free.indexOf(k); if (i >= 0) free.splice(i, 1); };
+    if (P && free.length) {
+      let kStar = -1, bd = Infinity;
+      for (const k of free) { const r = G.R[k], d = Math.hypot(r.x - P.x, r.y - P.y, r.z - P.z); if (d < bd) { bd = d; kStar = k; } }
+      let who = null, bt = Infinity;
+      for (const b of members) { const t = G.cost[b._navRoom * n + kStar] / spd(b); if (t < bt) { bt = t; who = b; } }
+      if (who) { plan[who.id] = kStar; take(kStar); }
+    }
+    const rest = members.filter(b => plan[b.id] == null).sort((a, b) => spd(b) - spd(a));
+    for (const b of rest) {
+      let best = -1, bs = Infinity;
+      for (const k of free) {
+        if (k === b._navRoom) continue;
+        let s = G.cost[b._navRoom * n + k];
+        if (P) { const r = G.R[k]; s += lam * Math.hypot(r.x - P.x, r.y - P.y, r.z - P.z); }
+        if (s < bs) { bs = s; best = k; }
+      }
+      if (best >= 0) { plan[b.id] = best; take(best); }
+    }
+    sq.plan = plan; sq.planT = now;
+  }
+
+  _snPickSearch(G, sq, myRoom, squad, now, K) {
+    const n = G.n, ttl = _snNum(K.checkTtl, 25), lam = _snNum(K.lambda, 0.5);
+    const claimed = new Set();
+    for (const b of squad) {
+      if (b !== this && b._nav && b._nav.mode === 'search' && b._nav.room >= 0 && now - b._nav.t < 4.5) claimed.add(b._nav.room);
+    }
+    if (sq.plan && now - sq.planT < 15) for (const id in sq.plan) if (id !== String(this.id)) claimed.add(sq.plan[id]);
+    const P = this._snPrior(G, sq, now);
+    const pick = (useChecked, useClaims) => {
+      let best = -1, bs = Infinity;
+      for (let k = 0; k < n; k++) {
+        if (k === myRoom) continue;
+        if (useClaims && claimed.has(k)) continue;
+        if (useChecked && now - sq.checked[k] < ttl) continue;
+        let s = G.cost[myRoom * n + k];
+        if (P) { const r = G.R[k]; s += lam * Math.hypot(r.x - P.x, r.y - P.y, r.z - P.z); }
+        if (s < bs) { bs = s; best = k; }
+      }
+      return best;
+    };
+    let g = pick(true, true);
+    if (g < 0) {
+      sq.checked.fill(-1e9);
+      for (const b of squad) if (b._navRoomG === G && b._navRoom >= 0) sq.checked[b._navRoom] = now;
+      g = pick(true, true);
+    }
+    if (g < 0) g = pick(false, false);   // two rooms and a claimed one: go anyway
+    return (g >= 0) ? g : myRoom;
+  }
+
+  _squadNavTick(dt) {
+    const N = this._nav;
+    if (!N) return null;
+    const now = game.time;
+    const G = _snGraph();
+    if (!G || now - N.t > 6) { this._nav = null; return null; }   // findTarget stopped refreshing it
+    const cur = _snRoomOf(this, G);
+    let goal = N.room, gx, gy, gz;
+    if (N.mode === 'support') {
+      const m = N.ship;
+      if (!m || !m.alive) { this._nav = null; this.aiTimer = Math.min(this.aiTimer, 0.05); return null; }
+      goal = _snRoomNear(G, m.position);
+      gx = m.position.x; gy = m.position.y; gz = m.position.z;
+    } else {
+      const r = G.R[goal];
+      if (!r) { this._nav = null; return null; }
+      gx = r.x; gy = r.y; gz = r.z;
+      if (N.mode === 'regroup') {
+        const a = (this.id | 0) * 2.39996;
+        gx += Math.cos(a) * r.r * 0.3; gz += Math.sin(a) * r.r * 0.3;
+        gy += (((this.id | 0) % 3) - 1) * r.r * 0.15;
+      } else if (cur === goal &&
+                 Math.hypot(this.position.x - r.x, this.position.y - r.y, this.position.z - r.z) <= r.r * 0.45) {
+        _snSquad(this.team, G).checked[goal] = now;
+        if (this.aiTimer > 0.05) this.aiTimer = 0.05;
+      }
+    }
+    return _snWaypoint(this, G, cur, goal, gx, gy, gz);
+  }
+
+  _arenaLocalUpdate(gx, gy, gz, dt, G, los) {
+    const K = _arenaPathK();
+    const p = this.position;
+    if (!this._alWp) { this._alWp = new THREE.Vector3(); this._alDir = new THREE.Vector3(); }
+    this._alT = (this._alT || 0) - dt;
+    const look = _snNum(K.look, 320);
+    if (this._alT > 0) {
+      if (!this._alDetour) return null;
+      return this._alWp.set(p.x + this._alDir.x * look, p.y + this._alDir.y * look, p.z + this._alDir.z * look);
+    }
+    this._alT = _snNum(K.evalT, 0.3) * (0.8 + Math.random() * 0.4);
+    this._alDetour = false;
+    const dx = gx - p.x, dy = gy - p.y, dz = gz - p.z;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist < 80) return null;
+    const ux = dx / dist, uy = dy / dist, uz = dz / dist;
+    if (los) {
+      if (this.combatTarget === player) {
+        if (game.time - (this.aiLastKnownTime || -1e9) < 1.2) return null;
+      } else {
+        _alRayDir.set(ux, uy, uz);
+        if (raycastLevel(p, _alRayDir, dist + 10, true) >= dist - 5) return null;
+      }
+    }
+    const need = _arenaNavMinClr(this) + _snNum(K.pad, 12);
+    const c0 = -_ARENA_FIELD.eval(p.x, p.y, p.z, G);
+    const L = Math.min(dist, _snNum(K.runL, 560));
+    if (_arenaClearRun(G, p.x, p.y, p.z, ux, uy, uz, L, need, c0) >= L - 1) return null;   // flyable: direct
+    const yaw0 = Math.atan2(uz, ux), pit0 = Math.asin(Math.max(-1, Math.min(1, uy)));
+    const Lc = Math.min(360, Math.max(160, dist));
+    const side = this._alSide || ((((this.id | 0) % 2) === 0) ? 1 : -1);
+    for (let i = 0; i < _AL_CANDS.length; i++) {
+      const yw = _AL_CANDS[i][0], pt = _AL_CANDS[i][1];
+      for (let s = 0; s < 2; s++) {
+        if (yw === 180 && s === 1) break;   // straight back has no second side
+        const sg = (s === 0) ? side : -side;
+        const yaw = yaw0 + sg * yw * Math.PI / 180;
+        const pit = Math.max(-1.05, Math.min(1.05, pit0 + pt * Math.PI / 180));
+        const cp = Math.cos(pit);
+        const vx = Math.cos(yaw) * cp, vy = Math.sin(pit), vz = Math.sin(yaw) * cp;
+        if (_arenaClearRun(G, p.x, p.y, p.z, vx, vy, vz, Lc, need, c0) >= Lc - 1) {
+          this._alDir.set(vx, vy, vz);
+          this._alSide = sg;
+          this._alDetour = true;
+          this._alT = _snNum(K.commit, 0.55);
+          try { window.__arenaDetourN = (window.__arenaDetourN | 0) + 1; } catch (_) {}
+          return this._alWp.set(p.x + vx * look, p.y + vy * look, p.z + vz * look);
+        }
+      }
+    }
+    return null;
+  }
+
+  _arenaLatTick(gx, gy, gz, dt, G, los) {
+    const L = _arenaLat;
+    if (!L.ready) return null;
+    const K = _arenaPathK();
+    const p = this.position;
+    const T = this._lat || (this._lat = { ids: null, i: 0, gx: 0, gy: 0, gz: 0, t: -1e9, failT: -1e9,
+                                          lookT: 0, plans: 0, ms: 0, losT: 0, los: false,
+                                          wp: new THREE.Vector3(), key: null });
+    if (T.key !== L.key) { T.ids = null; T.key = L.key; }
+    const now = game.time;
+    const dist = Math.hypot(gx - p.x, gy - p.y, gz - p.z);
+    if (dist < 160) { T.ids = null; return null; }
+    if (los) {
+      let seen;
+      if (this.combatTarget === player) seen = (now - (this.aiLastKnownTime || -1e9)) < 1.2;
+      else {
+        if (now - T.losT > 0.3) {
+          T.losT = now;
+          _alRayDir.set((gx - p.x) / dist, (gy - p.y) / dist, (gz - p.z) / dist);
+          T.los = raycastLevel(p, _alRayDir, dist + 10, true) >= dist - 5;
+        }
+        seen = T.los;
+      }
+      if (seen) { T.ids = null; return null; }
+    }
+    const need = _arenaNavMinClr(this) + _snNum(K.pad, 12);
+    const moved = T.ids ? Math.hypot(gx - T.gx, gy - T.gy, gz - T.gz) : Infinity;
+    const stuckFresh = (this._unstickT || 0) > 1.0 && now - T.t > 1.0;
+    const needPlan = !T.ids || moved > 300 || now - T.t > 4 || stuckFresh;
+    let S = L.srch;
+    if (S && (S.owner !== this) && (!S.owner || !S.owner.alive || now - S.touch > 0.4)) { L.srch = null; S = null; }
+    let res;   // undefined = nothing finished this frame
+    if (S && S.owner === this) {
+      S.touch = now;
+      const t0 = performance.now();
+      res = _arenaLatSearchStep(1.0, 8000);
+      const dtS = performance.now() - t0; S.ms += dtS; if (dtS > S.stepMax) S.stepMax = dtS;
+    } else if (needPlan && !S && !(!T.ids && now - T.failT < 1.5)) {
+      const t0 = performance.now();
+      const c0 = -_ARENA_FIELD.eval(p.x, p.y, p.z, G);
+      _alGoalV.set(gx, gy, gz);
+      const sId = _arenaLatAttach(p, need, G, true, c0);
+      const gId = _arenaLatAttach(_alGoalV, need, G, false, 0);
+      if (sId < 0 || gId < 0) res = null;
+      else {
+        S = _arenaLatSearchStart(this, sId, gId, need, T.ban, now, gx, gy, gz);
+        res = _arenaLatSearchStep(1.0, 8000);
+        const dtS = performance.now() - t0; S.ms += dtS; if (dtS > S.stepMax) S.stepMax = dtS;
+      }
+    }
+    if (res !== undefined) {
+      const S2 = L.srch;
+      if (S2 && S2.owner === this) L.srch = null;
+      T.plans++; T.t = now;
+      if (S2 && S2.owner === this) { T.gx = S2.gx; T.gy = S2.gy; T.gz = S2.gz; T.ms = S2.ms; } else { T.gx = gx; T.gy = gy; T.gz = gz; T.ms = 0; }
+      try {
+        window.__arenaPlanN = (window.__arenaPlanN | 0) + 1;
+        if (S2 && S2.owner === this) {
+          window.__arenaPlanMs = Math.max(window.__arenaPlanMs || 0, S2.ms);            // whole search
+          window.__arenaStepMs = Math.max(window.__arenaStepMs || 0, S2.stepMax);        // worst single frame
+        }
+      } catch (_) {}
+      if (res) { T.ids = res; T.i = 0; T.lookT = 0; }
+      else { T.ids = null; T.failT = now; }
+    }
+    if (!T.ids) return null;
+    const P = L.pos, ids = T.ids;
+    T.lookT -= dt;
+    if (T.lookT <= 0) {
+      T.lookT = 0.25;
+      const c0 = -_ARENA_FIELD.eval(p.x, p.y, p.z, G);
+      for (let j = Math.min(ids.length - 1, T.i + 6); j > T.i; j--) {
+        const id = ids[j];
+        const dx = P[id * 3] - p.x, dy = P[id * 3 + 1] - p.y, dz = P[id * 3 + 2] - p.z;
+        const d = Math.hypot(dx, dy, dz);
+        if (d < 1 || _arenaClearRun(G, p.x, p.y, p.z, dx / d, dy / d, dz / d, d, need, c0) >= d - 1) { T.i = j; break; }
+      }
+    }
+    let id = ids[T.i];
+    if (T.i < ids.length - 1) {
+      const n2 = ids[T.i + 1];
+      const dI0 = Math.hypot(P[id * 3] - p.x, P[id * 3 + 1] - p.y, P[id * 3 + 2] - p.z);
+      const ax0 = P[id * 3] - p.x, ay0 = P[id * 3 + 1] - p.y, az0 = P[id * 3 + 2] - p.z;
+      const bx0 = P[n2 * 3] - P[id * 3], by0 = P[n2 * 3 + 1] - P[id * 3 + 1], bz0 = P[n2 * 3 + 2] - P[id * 3 + 2];
+      const cosT = (ax0 * bx0 + ay0 * by0 + az0 * bz0) / ((Math.hypot(ax0, ay0, az0) || 1) * (Math.hypot(bx0, by0, bz0) || 1));
+      if (dI0 < ((cosT > 0.82) ? 110 : 55)) { T.i++; id = ids[T.i]; }   // cos 35 deg = 0.82
+    }
+    if (T.i >= ids.length - 1) { this._latCap = null; return null; }   // last node: direct approach finishes
+    this._latCap = null;
+    const dI = Math.hypot(P[id * 3] - p.x, P[id * 3 + 1] - p.y, P[id * 3 + 2] - p.z);
+    if (dI < 420 && T.i + 1 < ids.length) {
+      const n2 = ids[T.i + 1];
+      let ox = P[n2 * 3] - P[id * 3], oy = P[n2 * 3 + 1] - P[id * 3 + 1], oz = P[n2 * 3 + 2] - P[id * 3 + 2];
+      const ol = Math.hypot(ox, oy, oz) || 1;
+      const ix = (P[id * 3] - p.x) / (dI || 1), iy = (P[id * 3 + 1] - p.y) / (dI || 1), iz = (P[id * 3 + 2] - p.z) / (dI || 1);
+      const turn = Math.acos(Math.max(-1, Math.min(1, (ix * ox + iy * oy + iz * oz) / ol))) * 180 / Math.PI;
+      if (turn > 35) {
+        const top = this.chassis.flightSpeed || 350;
+        this._latCap = top * Math.max(0.3, Math.min(1, 1 - (turn - 35) / 90));
+      }
+    }
+    return T.wp.set(P[id * 3], P[id * 3 + 1], P[id * 3 + 2]);
+  }
+
   navigateToEnemyTerritory() {
+    if (this._squadNavDecide()) return;
     if (!game.corridorPoints || game.corridorPoints.length === 0) {
       this.aiTarget = this._tempVec3a.set(
         (Math.random() - 0.5) * 3000,
@@ -38221,7 +39131,8 @@ class Bot {
     if (_tgtIsPlayer ? (player.shipState === 'dead') : !(target && target.alive)) return;
     _botFireDir.copy(dir).normalize();
     const wallDist = raycastLevel(this.position, _botFireDir, dist + 10, true);
-    if (wallDist < dist - 5) return; 
+    if (wallDist < dist - 5) return;
+    if (_tgtIsPlayer || (target && target.team != null && target.team !== this.team)) this._snContact(target.position);
     
     
     
@@ -38404,6 +39315,11 @@ const isChaingunBot = (weapon.fireRate <= 0.10);
         if (this._fireFromDir.lengthSq() > 1e-4) this._fireFromDir.normalize();
         else this._fireFromDir.set(0, 0, 1);
       }
+      const _hostile = (attacker === 'player')
+        ? (typeof player !== 'undefined' && player && player.team !== this.team)
+        : (attacker && typeof attacker === 'object') ? (attacker.team != null && attacker.team !== this.team)
+        : (typeof attacker === 'string' && attacker.indexOf('peer:') === 0);
+      if (_hostile) this._snContact(_srcPos || this.position);
     } catch (_) {}
 
     if (typeof _wallAbsorbSegment === 'function') {
@@ -79061,6 +79977,7 @@ function buildRoomGraphLevel(level) {
   if (!_keepTerrain) game.sandwichTerrain = null;
   game.arenaField = null;
   if (!(level && level.arena)) { try { _arenaDisposeMesh(); } catch (_) {} }
+  if (!(level && level.arena)) { try { _arenaLatDispose(); } catch (_) {} }
   try { if (typeof _bendReset === 'function') _bendReset(); } catch (_) {}
   game._swPalXf = null;
   game._buildSeq = (game._buildSeq | 0) + 1;
@@ -79400,6 +80317,8 @@ function buildRoomGraphLevel(level) {
   if (game.arenaField) {
     try { _arenaEnsureMesh(level); }
     catch (e) { console.warn('[spire] mesh build failed (collision-only world):', e); }
+    try { _arenaEnsureLattice(level); }
+    catch (e) { console.warn('[spire] nav lattice failed (router + local planner only):', e); }
     if (mapGenHud && !_arenaMesh.building) mapGenHud.style.display = 'none';
   }
   else if (game.sandwichTerrain && game.sandwichTerrain.ON) {

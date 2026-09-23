@@ -7779,7 +7779,9 @@ spawned too far apart that the bots on either team didn't see each other or me"*
   (120..900 u), re-rolled per `findTarget`. Firing stays LOS-gated. **MEASURED with the owner AFK on
   purpose: the enemy fleet crossed 2,400 u and killed the parked ship with no LOS at spawn.**
   **⚠ OPEN: the inverted bonus still applies on every ARENA. Left alone deliberately - it changes
-  arena bot behaviour nobody has reported.**
+  arena bot behaviour nobody has reported.** -> **CLOSED in v47.75**: the owner chose the arena
+  behaviour (regroup, fan out, support) and it replaced the bonus there - see *v47.75-47.77*. Leaving
+  it was right at the time: on the Nexus and the Shifting Deep it barely mattered (measured there).
 - **⭐⭐⭐ ON A COLD LOCATION, THE WHOLE ROUND WAS PLACED FROM THE HORIZON PATCH.** Placement awaited
   `tiles.ready` raced against 25 s - but `ready` is the WHOLE 3x3, corners included. **MEASURED cold
   Toronto: Overpass region 21.0 s, core 38.1 s, all nine 65.9 s.** The race lost, no near patch
@@ -7830,3 +7832,234 @@ spawned too far apart that the bots on either team didn't see each other or me"*
   traffic survives and shares the fleets' airspace. A passive probe (camera->bot segment vs every
   earth-life sphere, 10 Hz, `window.__tagAuditLog`) was installed in the pane to confirm before
   changing the callout.
+
+
+### v47.75-47.77 - arena bots that lose you: regroup, fan out, support (and the Spire shaft a DREADNOUGHT could not reach)
+
+Owner, asked what an arena bot with no line of sight, no squad sighting and no memory should do:
+*"check its wing mates, support their position if they are in combat, or regroup with wingmates"*,
+then *"regroup, then fan out to search... support if one finds"*. Later, watching the Spire:
+*"that last bot is kinda stuck or something, it's not coming up"*, *"just slayer had found me, and
+his friends didn't join in the battle"*, *"they were able to find me before, idk what's the problem"*,
+*"the third bot never found me"*.
+
+**Jump:** `SQUAD NAVIGATION` (the header above `class Bot`) · `_squadNavDecide` · `_snPlan` ·
+`_snPickSearch` · `_squadNavTick` · `function _snWaypoint` · `function _snGraph` ·
+`function _arenaNavBanned` · `window.__squadNav` · `window.__squadNavReport` · `window.__losProbe`
+
+- **⭐⭐⭐ THE OLD PATH PARKED THE BOT AT HOME.** `navigateToEnemyTerritory` (first commit) scored the
+  NEAREST corridor point and gave `-500` to `nav.team !== goal`, where `goal` is the ENEMY side letter,
+  so the bonus went to the bot's OWN end. Even with the sign fixed it could not have made progress:
+  "nearest point" is the room you are standing in. It now runs only off-arena (`_snArena`: not race /
+  free flight / endless / campaign, not a gmaps WORLD, not the hub) or with `__squadNav.on = false`,
+  and it is kept VERBATIM there so the A/B compares against the real old behaviour.
+- **THE NEW PATH, in priority order, decided on every `findTarget` - and ONLY in the no-info branch:
+  any sighting, shared sighting or memory still wins, exactly as before.**
+  - **SUPPORT** - a living wingmate is in combat (`_combatT` within 4 s - it saw its target, fired
+    with LOS, or was hit, which `_snContact` stamps; or `_underFireT`) -> fly to it.
+  - **REGROUP** - after ANY squad contact since the last fan-out: gather at the graph MEDIAN of the
+    living wingmates' rooms. Done when all are inside it, or after `regroupMax` (10 s). At round
+    start the squad already shares its spawn room, so this completes on the first call.
+    ⚠ The squad is EVERY living wingmate, not only the ones already navigating - the first cut
+    counted navigators only, so the first bot to lose contact saw a squad of one and fanned out alone.
+  - **FAN OUT** - `_snPlan`, ONE decision for the whole squad (v47.77, below); after its planned room
+    each bot claims the next unsearched, unclaimed room itself (`_snPickSearch`: tunnel cost +
+    `lambda` x distance to the prior). Arriving within 0.45 r of a room's centre CHECKS it
+    (squad-shared, `checkTtl` 25 s) and forces an immediate LOS look. Searching bots look every
+    ~0.6 s (`scanT`) instead of 1-3 s. A claim expires after `checkTtl` so a wedged bot gives it back.
+  - **The prior is honest**: the squad's LAST CONTACT (`_combatAt` - what a bot actually saw) or, at
+    round start, the enemy fleet's SPAWN (`_assaultSpawnSide` in assault). Nothing reads the target's
+    live position.
+- **⭐⭐ THE OLD PATH LEAKED THE TRUE POSITION ANYWAY - TWICE.** With the player as `combatTarget`, a
+  FLANK-role bot blends 60% of its heading toward `player.position` whenever within 3,000 u (the
+  whole Nexus), and the Spire's v36.61 router routes toward `combatTarget.position` whenever a slab
+  is in the way. **MEASURED, blind-bot soak on the Nexus: both flank-role legacy bots flew straight
+  to the room the player was parked in.** Nav mode rides the `_raceWaypoint` steer, which runs
+  neither - a bot that has lost you really has lost you. (Both still apply while a bot HAS info.)
+- **ROUTING.** Graph = rooms (`game.sdfRoomData`) + the carved tunnel CYLINDERS (`game.levelCylinders`)
+  with a Floyd-Warshall next-hop table (n <= 16). A hop is flown ALONG ITS TUNNEL'S AXIS: line up on
+  the axis inside the room first (never further out than half the room), then pure-pursuit `look`
+  (260 u) ahead, then the next room's centre. Nexus: the three bots were in `center`, `se` and `sw`
+  by t = 4 s.
+  - **⚠ NOT `chooseRaceWaypointTo`.** Its edges carry `mid = path[floor(len/2)]`, and every arena
+    tunnel is a 2-point path, so `mid` is the FAR endpoint - right one way, the bot's OWN room centre
+    the other (it would hold a bot at its own centre forever). Race tracks never noticed: their
+    tunnels are authored in the forward direction. Left alone; race uses it.
+  - **⚠ `levelCylinders`, NOT `level.tunnels`**: `_lssGmapsShiftLevelY` shifts the cylinders and the
+    rooms but not the raw tunnel list.
+  - **⚠ The Spire has no tunnels**, so no edges: a hop goes straight at the goal room and the v36.61
+    router takes it through a throat - toward THIS waypoint, because nav mode sets `_raceWaypoint`.
+- **⭐⭐⭐ MEASURED: THE NEXUS AND THE SHIFTING DEEP ARE OPEN CAVERNS - "no information" barely exists
+  there.** `window.__losProbe` runs the exact test `findTarget` does. From the enemy spawn room:
+  **Nexus - 2 of 71 room sample points hidden (both in `ne`); `nw` and `spawn_a` fully visible.
+  Shifting Deep (a round-2 layout) - every point in 6 of 7 rooms visible from EVERY one of 40 spawn
+  positions; one pocket in `deep_2a`.** The owner's *"the bots seem to come really aggressively"* is
+  this: they can see you from home. Parked in the ONE hidden pocket, time to first sighting:
+
+  | map | legacy (s) | squad nav (s) |
+  |---|---|---|
+  | Nexus, `ne` pocket | 2.1 2.2 2.7 3.0 2.5 (median 2.5) | 1.9 3.4 1.2 1.8 1.7 (median 1.8) |
+  | Shifting Deep, `deep_2a` pocket | 1.3 7.9 2.2 1.3 2.2 (median 2.2) | 1.2 2.4 2.1 1.1 0.0 (median 1.2) |
+
+  A bot a few hundred units out of its spawn sees the pocket, so the inverted bonus hardly mattered
+  on these two maps. **The Spire is where it does: the pit sees NONE of the other rooms (0 of 8 spawn
+  points to every room centre).**
+- **⭐⭐ v47.77 - THE FAN-OUT IS ONE DECISION, NOT THREE.** On the Spire v47.75/76 took **14.7 / 16.0 /
+  17.2 s** to first contact against the legacy's **8.1 / 9.6 / 10.5** - which it got by cheating (the
+  router aims at the real position). Two causes. (1) Unrouted room pairs were charged 2x "for being
+  unrouted" - and on the Spire EVERY pair is unrouted, so all it did was halve `lambda` and the search
+  crept up one storey at a time. (2) Each bot picked alone, in update order, so the likeliest room -
+  the enemy spawn, the FARTHEST from the pit - was every bot's last pick and could fall to a
+  DREADNOUGHT. `_snPlan` now gives the likeliest room to whichever bot REACHES it first (cost / its
+  own `flightSpeed`: the SLAYER) and spreads the rest fastest-first. First contact after: table below.
+- **⭐⭐ v47.76-77 - A THROAT THE HULL CANNOT GET TO (`_arenaNavBanned`).** The *"not coming up"* bot
+  was a DREADNOUGHT BLASTER pinned at (-1925, 640, 662) at 2-5 u/s, the v41.95 escape firing 7 times
+  in 6 s, each kick undone because the router re-picked the SAME cheapest throat. The line to its
+  ALIGN point was clear to a thin ray (1,085 u), but a satellite column (~145 deg) stood between the
+  bot (~161 deg) and the throat (~128 deg) - and c* is checked on the THROAT, never on the approach.
+  Two escapes inside 10 s on one throat now ban it for that bot for 12 s and the router re-picks.
+  `window.__arenaBan = false` for A/B, `window.__arenaBanN` counts.
+  - **⚠ v47.76 COUNTED "TWO IN A ROW" AND NEVER FIRED** for a wedged PYRO: the count reset on any
+    sample that made ground - and the escape's own velocity kick IS ground made (0, 1, 0, 1...).
+    v47.77 counts escapes inside a window and resets only on a new throat.
+- **SPIRE, player parked in `spawn_a` (the crown); enemy hand BLASTER + PYRO (both DREADNOUGHT) +
+  SLAYER; bots healed every tick so the owner's fire could not thin them; time at which EACH bot first
+  sees the player itself (75 s cap):**
+
+  | trial | arm | SLAYER | PYRO | BLASTER | arrived | stuck escapes | throat bans |
+  |---|---|---|---|---|---|---|---|
+  | 1 | legacy (v47.74) | 10.5 | 33.9 | 52.4 | 3/3 | 8 | - |
+  | 1 | v47.77 | 6.7 | 64.1 | - | 2/3 | 17 | 2 |
+  | 2 | legacy | 7.4 | - | - | 1/3 | 29 | - |
+  | 2 | v47.77 | 8.7 | - | - | 1/3 | 24 | 4 |
+  | 3 | legacy | 11.4 | - | - | 1/3 | 25 | - |
+  | 3 | v47.77 | 8.1 | - | 67.9 | 2/3 | 21 | 6 |
+
+  **First contact: mean 9.8 s legacy -> 7.8 s v47.77** (and v47.75/76, before the plan: 14.7 / 16.0 s;
+  20.7 with no ban; the legacy in the first-sighting-only runs: 8.1 / 9.6, 7.9 / 8.6 with the ban).
+  **DREADNOUGHT arrivals: 2 of 6 in BOTH arms; stuck escapes: mean 20.7 in BOTH.** The throat ban gets
+  heavy hulls UP the slabs (PYRO pit -> top storey in ~48 s in v47.77 trial 1, where the legacy left
+  both DREADNOUGHTs at `mid_low` for the whole 75 s in an earlier run) - what stops them arriving is the
+  open item below, and it is the same in both arms.
+
+- **⚠ OPEN - SAME-STOREY PURSUIT, and it is why the DREADNOUGHTs rarely arrive.** Once one bot sees
+  you, Fleet B's shared sighting (7 s, refreshed while it keeps seeing you) sends the others STRAIGHT
+  at your position, and on the Spire nothing routes around a column or spike on the SAME storey: the
+  v36.61 router only handles slab crossings, and `_squadNavTick` only runs with no information.
+  Measured: BLASTER at the edge of `spawn_a` (y 1230) from 40 s to 75 s without LOS; the legacy arm
+  logged 29 stuck escapes in one trial. Both arms have it; it is older than this change. The obvious
+  next step is a same-storey visibility graph between the Spire's nav rooms (or routing the shared
+  sighting through `_snWaypoint`) - not done here.
+  -> **CLOSED in v47.78-47.83** (entry below) - and the diagnosis above was mostly WRONG: logging every
+  stuck escape showed 28 of 33 were the v36.61 slab router (the wrong slab, and an ALIGN height inside
+  the stalactite forest), only 5 were same-storey chases. The fix that worked was a clearance lattice
+  over the whole arena; the DREADNOUGHTs now arrive 8 of 8, in 33.7-38.1 s.
+- **Measurement traps that cost time:**
+  - **⚠ THE OWNER WAS FLYING THE TEST TAB.** Kills on a pinned PYRO (`player.kills` 4 with a probe that
+    never fires) were Ashman; *"only slayer should teleport"* was the harness putting bots back in
+    their spawn between 2 s trials (only SLAYER's loadout has `Teleport`, verified); *"they didn't
+    really come for me that round"* was a round in which `findTarget` was deliberately blinded. Say
+    what is being driven BEFORE driving it, and say when a round is instrumented.
+  - **⚠ A PLAYER CANNOT BE BURIED IN ROCK.** Pinned at y -1500 it sat at y -584..-614 (a vertical
+    clamp near `YFLOOR`) - under the centre room, in view.
+  - **⚠ A BLIND `findTarget` IS NOT A BLIND BOT.** The fire block runs its OWN raycast, so a bot that
+    happens to face you still fires, stamps contact, and support/regroup takes over the soak.
+  - **⚠ A trial that ends at the FIRST sighting cannot show support.** The friends-join numbers above
+    come from trials that run until every bot has seen the player.
+  - **⚠ `startElimination` + a parked player: rounds end in seconds** when the bots can see you. The
+    harness held the clock (`roundTimerAnchorMs`) and topped hull/shield up every 100 ms.
+    `game.testMode` would also stop rounds ending, but it switches bot abilities off AND pops the
+    settings theme panel (`lss-test-dev`).
+  - **⚠ `window.selectMap` does not exist** - step the carousel with `#map-next` and read
+    `game.selectedMap`. The `lss` launch config serves the MAIN checkout's `LSS/`; from a worktree use
+    `fgroot` (:8095, game at `/LSS/index.html`).
+
+
+### v47.78-47.83 - the Spire's heavy hulls get to the fight: the right slab, the clear column, a lattice, and a brake
+
+Owner, watching elimination on The Spire: *"just slayer had found me, and his friends didn't join in
+the battle"*, *"the third bot never found me"*, *"he came for me in the end"*.
+
+**Jump:** `THE SPIRE, PART 2` (above `_arenaNavAlignY`) · `THE SPIRE, PART 3` (above `_AL_DIRS`) ·
+`function _arenaNavBlocked` · `function _arenaNavAlignY` · `_arenaLocalUpdate` · `_arenaLatTick` ·
+`function _arenaEnsureLattice` · `function _arenaLatSearchStep` · `this._latCap` ·
+`window.__arenaPath` · `window.__arenaPathReport` · `window.__arenaLatReport`
+
+- **⭐⭐⭐ THE FRIENDS ARE THE HEAVY HULLS, AND THE SPIRE IS A MAZE FOR THEM.** BLASTER and PYRO are
+  DREADNOUGHTs: hullLength 140, acceleration 500, top speed 250, drag 400 - c* (the clearance a hull
+  needs to make ANY headway, v36.61's containment-stall note) is **139 u, against 68 for SLAYER**.
+  `__spireArena.at` sampled on a polar grid, three heights per storey: **only 33-59% of each storey
+  has 139 u of clearance** (the crown worst, 33-42%), against 69-84% at 68 u. Stalagmites reach
+  ~690 u into the 634 u pit, stalactites hang 450 u under every slab and ~520 more from the cap.
+- **⭐⭐⭐ MEASURE WHERE THEY WEDGE BEFORE CHOOSING THE TOOL.** The brief blamed same-storey pursuit.
+  Every stuck escape logged with position, clearance and goal (two 60 s trials) said: **28 of 33 were
+  the v36.61 SLAB ROUTER**, 27 in its ALIGN phase at clearance 139-163 (pressed at the hull's very
+  limit); 5 were same-storey chases. Three causes, fixed in **v47.78**:
+  - **⚠ THE WRONG SLAB (`_arenaNavBlocked`).** It returned the FIRST SOLID crossing between bot and
+    goal - so when the goal line threaded a hole in the NEAREST slab somewhere far off, that slab was
+    skipped and the bot was handed a throat one or two storeys up. **A PYRO in the PIT was routed at
+    slab 1 and 2 throats for 36 s, pressing into slab 0's underside.** And the 148 u ring counted as a
+    hole for a hull needing 139 u on every side. Now: the slab adjacent to the bot's storey, blocked
+    unless the crossing sits `minClr` deep inside a hole.
+  - **⚠ THE ALIGN ALTITUDE (`_arenaNavAlignY`).** ALIGN held the bot `lip` (150 u) under the slab -
+    exactly where the stalactites hang. They only root where the slab is SOLID, so the column under a
+    hole is clear: line up at the clearest height in it (9 samples), then THROUGH climbs.
+  - **⚠ NOTHING STEERED AROUND ANYTHING (`_arenaLocalUpdate`).** A local planner: sphere-trace the
+    field with c* + pad; when the line to the goal (or the router's ALIGN point) is not flyable, take
+    the open heading nearest the goal for 0.55 s. Out of line-of-sight combat only.
+- **⭐⭐ v47.78 ENDED THE WEDGING AND BROUGHT NOBODY.** Stuck escapes per 75 s trial fell from 21-25
+  to 0-5 - and no DREADNOUGHT arrived: BLASTER circled the pit for 60 s at the right slab-0 throat,
+  and SLAYER got SLOWER (13.7 / 19.5 s vs 6.5-8.2). **A local planner avoids what is in front of it;
+  the pit is a maze, and a maze needs a path.** "Fewer stuck escapes" was never the goal - arrivals are.
+- **⭐⭐⭐ v47.79 - THE LATTICE.** A clearance lattice over the whole arena, built ONCE per arena in a
+  worker from the SAME `_ARENA_FIELD_SRC` string the collision and the mesh use, cached by the arena
+  params like the mesh (round 2+ instant - verified: ready during round 2's countdown, same build; a
+  non-arena build disposes it). Nodes every 160 u, each nudged to the clearest of 7 samples in its
+  cell; edges to the 26 neighbours carrying the MIN clearance sampled along them. Slab holes, the
+  helix and the spike forest are all just clearance, so ONE graph covers storeys and slab crossings.
+  **8,928 live nodes, 75,035 edges, 5.3 s in the worker, ready before the countdown ended.** Main
+  thread: hull-aware weighted A*, wide passages preferred, followed with a visibility look-ahead (skip
+  to the furthest of the next 6 nodes the hull can fly to from where it IS). Until it lands, and
+  whenever it has no path, the v47.78 router + planner steer. **First series: 12 of 12 bots arrived,
+  DREADNOUGHTs 8 of 8, median ~35 s.**
+- **⭐⭐ v47.80-47.82 - THE SHAFT TRAP, A WRONG TURN, AND THE BRAKE.** One spot kept eating DREADNOUGHTs:
+  under slab 2's 128-degree shaft, three trials running. v47.80 blamed the path follower's 110 u
+  "arrived" radius and halved it, and single-node bans on a stall - and arrivals went from ~35 s to
+  ~60 s (A* just took the next node up the same shaft). v47.81 sampled every edge exactly where it
+  crosses a slab face/midplane and made a stall ban a 220 u REGION. Still stuck there - so the column
+  itself got measured: **bottleneck 192 u at y 1100, 235 u through the approach - wide open.** The
+  wedge was HANDLING: bots have no throttle (full thrust on the nose, a speed clamp, drag), so a
+  DREADNOUGHT turning up into a vertical column at 250 u/s carries ~80 u on drag plus ~100 u of heading
+  lag, and the part of the column with 139 u of clearance is ~96 u across. **v47.82 brakes into sharp
+  turns** (`_latCap`: 0.3 of top speed at a 125-degree turn, the nose swinging twice as fast while the
+  lattice owns it), restores 110 u on gentle turns (55 u only before a sharp one), and moves the bans
+  from a Map to a typed array (Map lookups inside A* had pushed the worst plan from 2.2 to 5.9 ms).
+- **⭐⭐ v47.83 - A CAP, NOT AN AVERAGE.** Plans ran to completion inside one frame: worst 1.9-3.0 ms,
+  about one a second across a squad - a dropped frame on a 144 Hz display whenever one lands on a busy
+  frame. The search is now RESUMABLE: one in flight across all bots, at most 1 ms a frame, its bot
+  flying its old path meanwhile.
+- **RESULT - Spire, player parked in `spawn_a` (the crown), enemy hand BLASTER + PYRO (DREADNOUGHT)
+  + SLAYER, bots healed each tick, time each bot first SEES the player itself, 75 s cap:**
+
+  | build | trials | bots that arrived | DREADNOUGHT arrivals | SLAYER first sighting | stuck escapes / trial | worst planning frame |
+  |---|---|---|---|---|---|---|
+  | v47.77 (legacy, `__arenaPath.on = false`) | 4 | 6 / 12 | 2 / 8 (66.2, 69.1 s) | 5.8 - 24.5 s | 20 - 25 | - |
+  | v47.78 (router fixes + local planner) | 2 | 2 / 6 | 0 / 4 | 13.7, 19.5 s | 0 - 5 | - |
+  | v47.79 (+ lattice) | 4 | 12 / 12 | 8 / 8, 32.3 - 56.6 s | 5.7 - 7.6 s | 0 - 7 | 2.2 ms |
+  | **v47.83 (final)** | 4 | **12 / 12** | **8 / 8, 33.7 - 38.1 s** | **5.4 - 5.7 s** | **0 - 1** | **1.3 ms** |
+
+  v47.83 had all three bots on the player by **35.7 - 38.2 s in every trial**; the legacy arm never had
+  all three there within 75 s (the v47.78 A/B's own legacy trials agreed: SLAYER alone, 3 of 3).
+
+- **Knobs:** `window.__arenaPath.on = false` is v47.77 exactly (legacy slab walk, lip ALIGN, no
+  planner, no lattice); `.lat = false` keeps the router fixes + planner without the lattice;
+  `window.__arenaBan = false` drops every ban. Counters to difference across a trial:
+  `__arenaPlanN`, `__arenaPlanMs` (worst whole search), `__arenaStepMs` (worst single frame),
+  `__arenaDetourN`, `__arenaBanN`, `__latBanN`, `__stuckN`.
+- **Gated to `game.arenaField.ON`** - the room/tunnel arenas (the Nexus, the Shifting Deep) never
+  reach any of it.
+- **⚠ `strip.py` CAN FAIL TO WRITE `lss.js` MID-SESSION** with `OSError: [Errno 22] Invalid argument`
+  - transient on Windows (the pane was fetching the 4 MB file); the old file is left intact and a
+  retry a second later writes it.
+- **⚠ A TRIAL HARNESS THAT ENDS ON THE FIRST SIGHTING CANNOT SEE THIS BUG.** "The friends didn't
+  join" only shows when every bot's own first sighting is timed; every number above is that.
