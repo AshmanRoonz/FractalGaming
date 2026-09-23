@@ -8364,3 +8364,32 @@ Owner: *"at the start of the round, there is a beeping during each countdown num
   - Round 1 launch: pings at 17.28 / 18.27 / 19.27, then ONE `round_start` at 20.266. The flip won the race again and finishLaunch stood down; the latch was left false.
   - Round 2 (the owner's own round, flying with the pad): ROUND 2 3-2-1 painted at 67.1 / 68.1 / 69.1 with pings at 67.065 / 68.066 / 69.066, and FIGHT at 70.1 with one `round_start` at 70.066. Same cadence as round 1.
   - The owner confirmed by ear.
+
+### v48.27-48.28 - the leviathans are in the replay
+
+Owner: *"are monsters in replays?"* - no. Then, on the cost I quoted for the replay theater: *"isn't the animation local? all we need is its position"* - right.
+
+**Jump:** `function _rplIsMon` (the note above it) · the `game.monsters` loop in `_rplSample` · `function _rplMonPuppet` / `_rplMonPuppetFrame` / `_rplMonAdopt` · `_rplActorCol` · the `!_RPL.kc` on the mixer tick in `OutskirtsMonster.update` · the return of `_rplPoseAt`
+
+- **Why they were missing.** The recorder only ever read `game.entities`. The six OutskirtsMonsters live in `game.monsters`, and `_rplKey` had no key for them. So a replay drew their zaps (`spawnLightningBolt` is tapped) arcing out of empty space, and a leviathan's kill was recorded with no killer (the kill cam fell back to its slow circle round the victim).
+- **The walk is local.** It is ONE looping clip that the creature's own AnimationMixer plays in place (`attachModel`, root motion stripped). That is how every peer in a room already animates the positions `mon_*` sends it. So a leviathan records like a hull, the pose at 20 Hz, keyed `'m' + monId`. Actor fields: `mon` = def key, `mid` = seat, `hull` = MONSTER_SIZE for the cameras, name `FLESH MAW` etc.
+  - It is sampled only while OUT (alive, not dormant, in the scene), plus the one sample that says it left. Six of them idling in the outskirts for a whole round would be most of the file for nothing.
+  - Its position is the creature's own `position`, which `update()` copies onto the mesh. Its facing lives only on the mesh.
+- **The replay borrows the live creature**, as the kill cam borrows hulls.
+  - **Kill cam:** it poses the match's own meshes, and ticks their mixers at `dtR * kc.rate`. The live tick stands down while `_RPL.kc` is set; otherwise the legs would run at full speed on top of the slow motion.
+  - **Studio:** it casts the paused match's own six (matched by seat and def key). The theater's launch primes them (`_primeMonsterModels`), so there is nothing to clone and no 20-45 MB model to load twice. A puppet whose model has not attached yet adopts it when it does. On close it is put back exactly as it was, never pooled or disposed.
+  - The studio also hides the paused match's leviathans the way it hides the live hulls.
+- **Credit:** a leviathan's kill now names it. The kill cam chases the creature at its own size ("FLESH MAW ▶ VORTEX"), and the name wears its ghost tint (`_rplActorCol`, also on the studio labels, cast swatches and kill toasts). The studio cast lists them last, tagged LEVIATHAN.
+- **Trap: under the kill cam, a leviathan's mesh wears the REPLAY's pose.** Its live drift adds onto that pose (`rotation += rotVel*dt`). So the aftermath the recorder takes down under the kill cam uses the facing stashed at `_rplKcStart` (`mo._rplQ0`), not the mesh's. Its position is safe, because the AI never reads the mesh.
+- The champion shell is in `game.monsters` too. `_rplIsMon` (team `'monster'` + a numeric `monId` + a def key) is what tells a leviathan apart.
+- ⚠ **48.28 - NOT ALIVE BEFORE ITS FIRST SAMPLE (`_rplPoseAt`).** The lookup holds the first sample for any earlier t. So an actor that entered the round late (a summoned leviathan, a drop-in pilot) stood at its first recorded spot from the start of the replay.
+  - Measured on 48.27: FLESH MAW and GRAVE TITAN were both drawn at 10 s, ten seconds before their summon.
+  - The pose is still the first sample, so a camera following the actor has somewhere to be. The flag allows 0.1 s of grace, because every ship's first sample lands a frame after t0.
+- Their own death blast replays (the `spawnExplosion` inside `spawnMonsterGuts` is tapped). The ectoplasm gibs do not: they are `game.effects` meshes, not a tapped spawner.
+- **MEASURED (solo, 48.27):**
+  - Two leviathans were summoned by hand beside the pilot and recorded as `m0` / `m1`. Three kills were dealt by FleshMaw and credited `m0 > b1/b2/b3`.
+  - The kill cam started `m0 > b3`, titled FLESH MAW in `#ff7a9a`, with the creature centred (projected 0.00, -0.12).
+  - Its mixer advanced 1.001 s over 1.001 s of the full-speed approach: one tick, not two.
+  - The studio cast 8 actors, with FLESH MAW / GRAVE TITAN last and their ghost swatches. It chased FleshMaw centred (0.00, -0.10), and the mixer followed the replay clock, not the wall.
+  - On close, both creatures went back hidden, dormant and where they were.
+  - 48.28's `_rplPoseAt`, run from the shipped `lss.js`: a monster first sampled at 20.6 s is hidden at 0 / 10 / 20.45 s, shown at 20.55 / 22 s and hidden after it left. A ship sampled from 0.016 s is alive at 0.

@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.26";
+const LSS_BUILD = "48.28";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -16262,8 +16262,24 @@ function _rplKey(x) {
   if (typeof x === 'string') return (x.indexOf('peer:') === 0) ? 'n' + x.slice(5) : null;
   if (x.peerId) return 'n' + x.peerId;
   if (x.botId != null) return 'b' + x.botId;                 // a bot's hit claim (fakeAttacker)
+  if (_rplIsMon(x)) return 'm' + x.monId;                    // (v48.27) a leviathan - so its kill names it
   if (x.loadoutKey && x.id != null && !x.isEarthLife && !x.hoardModelKey) return 'b' + x.id;
   return null;
+}
+function _rplIsMon(x) {
+  return !!(x && x.team === 'monster' && typeof x.monId === 'number' && x.monId >= 0 && x.def && x.def.key);
+}
+function _rplMonName(key) { return String(key || 'LEVIATHAN').replace(/([a-z])([A-Z])/g, '$1 $2').toUpperCase(); }
+function _rplActorCol(A) {
+  try {
+    if (A && A.mon) {
+      for (let i = 0; i < MONSTER_DEFS.length; i++) {
+        const d = MONSTER_DEFS[i];
+        if (d.key === A.mon && d.ghost != null) return '#' + (d.ghost >>> 0).toString(16).padStart(6, '0');
+      }
+    }
+  } catch (_) {}
+  return _rplClassCol(A ? A.lo : null);
 }
 function _rplName(ent, key) {
   if (key === 'me') {
@@ -16322,9 +16338,11 @@ function _rplKillNote(fromPeerId, evt) {
 function _rplActor(R, key, ent) {
   let A = R.actors[key];
   if (!A) {
-    A = R.actors[key] = { key: key, lo: ent.loadoutKey || null, team: ent.team, name: _rplName(ent, key),
-                          hull: (ent.chassis && ent.chassis.hullLength) || 100,
+    const mon = _rplIsMon(ent);   // (v48.27) a leviathan: its def key, its seat, its own size for the cameras
+    A = R.actors[key] = { key: key, lo: ent.loadoutKey || null, team: ent.team, name: mon ? _rplMonName(ent.def.key) : _rplName(ent, key),
+                          hull: (ent.chassis && ent.chassis.hullLength) || (mon ? MONSTER_SIZE : 100),
                           skin: (key === 'me' && ent.skinId && ent.skinId !== 'factory') ? ent.skinId : null, buf: [] };
+    if (mon) { A.mon = ent.def.key; A.mid = ent.monId; }
   }
   A.ent = ent;
   return A;
@@ -16445,6 +16463,20 @@ function _rplSample(kc) {
     if (!alive && A.buf.length && A.buf[A.buf.length - 1] < 0.5) continue;
     put(A, e.mesh, alive, e);
   }
+  const M = game.monsters;
+  if (M && M.length) {
+    for (let i = 0; i < M.length; i++) {
+      const mo = M[i];
+      if (!_rplIsMon(mo) || !mo.mesh || !mo.position) continue;
+      const key = 'm' + mo.monId;
+      const out = !!(mo.alive && !mo.dormant && mo.mesh.parent);
+      const A0 = R.actors[key];
+      if (!out && (!A0 || !A0.buf.length || A0.buf[A0.buf.length - 1] < 0.5)) continue;   // never out, or already said it left
+      const A = _rplActor(R, key, mo);
+      const p = mo.position, q = (kc && mo._rplQ0) ? mo._rplQ0 : mo.mesh.quaternion;
+      A.buf.push(t, p.x, p.y, p.z, q.x, q.y, q.z, q.w, out ? 1 : 0);
+    }
+  }
   const P = game.projectiles || [];
   for (let i = 0; i < P.length; i++) {
     const pr = P[i];
@@ -16477,7 +16509,7 @@ function _rplPoseAt(A, t, outP, outQ) {
     _rplQb.set(b[j + 4], b[j + 5], b[j + 6], b[j + 7]);
     outQ.copy(_rplQa).slerp(_rplQb, u);
   }
-  return b[i + 8] > 0.5;
+  return b[i + 8] > 0.5 && t >= b[0] - 0.1;
 }
 function _rplV3(a) { return (a && a.length === 3) ? new THREE.Vector3(a[0], a[1], a[2]) : null; }
 function _rplOpts(o) {
@@ -17211,6 +17243,11 @@ function _rplKcStart(R, K) {
     const m = _rplMeshOf(R.actors[key]);
     if (m) kc.saved.push({ m, parent: m.parent, vis: m.visible, p: m.position.clone(), q: m.quaternion.clone(), bot: m.userData ? m.userData.bot : undefined });
   }
+  try {
+    for (const mo of (game.monsters || [])) {
+      if (_rplIsMon(mo) && mo.mesh) (mo._rplQ0 || (mo._rplQ0 = new THREE.Quaternion())).copy(mo.mesh.quaternion);
+    }
+  } catch (_) {}
   for (const id in R.pj) {
     const P = R.pj[id], b = P.buf, n = (b.length / 4) | 0;
     if (n && b[(n - 1) * 4] >= t0 && b[0] <= t1) kc.pj.push(P);
@@ -17221,9 +17258,9 @@ function _rplKcStart(R, K) {
     const el = document.getElementById('rpl-kc');
     const KA = kk ? R.actors[kk] : null, VA = R.actors[vk];
     const ks = el.querySelector('.rpl-k'), vs = el.querySelector('.rpl-v'), ar = el.querySelector('.rpl-arrow');
-    ks.textContent = KA ? KA.name : ''; ks.style.color = KA ? _rplClassCol(KA.lo) : '';
+    ks.textContent = KA ? KA.name : ''; ks.style.color = KA ? _rplActorCol(KA) : '';
     ar.style.display = KA ? '' : 'none';
-    vs.textContent = VA ? VA.name : ''; vs.style.color = VA ? _rplClassCol(VA.lo) : '';
+    vs.textContent = VA ? VA.name : ''; vs.style.color = VA ? _rplActorCol(VA) : '';
     const sk = el.querySelector('.rpl-skip'); if (sk) sk.textContent = _rplKcHint();   // (v48.24)
     document.body.classList.add('lss-killcam');
   } catch (_) {}
@@ -17331,7 +17368,9 @@ function _rplKcFrame(now) {
     if (!m.parent) scene.add(m);
     m.visible = alive;
     m.position.copy(_rplP); m.quaternion.copy(_rplQ);
-    if (alive) {
+    if (alive && A.mon) {
+      try { const mx = A.ent && A.ent._mixer; if (mx) mx.update(dtR * kc.rate); } catch (_) {}
+    } else if (alive) {
       try {
         _rplPoseAt(A, kc.rt - 0.05, _rplP2, null);
         const H = kc.dmgH || (kc.dmgH = {});
@@ -17532,6 +17571,7 @@ function _rplSerialize(R) {
     for (let i = 0; i < b.length; i++) { const f = i % 9; o[i] = (f === 0) ? r4(b[i] - t0) : (f <= 3 ? r1(b[i]) : (f <= 7 ? r4(b[i]) : b[i])); }
     actors[k] = { lo: A.lo, team: A.team, name: A.name, hull: A.hull, skin: A.skin || null, stride: 't,x,y,z,qx,qy,qz,qw,alive', buf: o,
                   sx: (A.sx || []).map((v, i) => (i % 3 === 0) ? r4(v - t0) : v) };   // (v48.01) t, shield, doomed
+    if (A.mon) { actors[k].mon = A.mon; actors[k].mid = A.mid; }   // (v48.27) a leviathan: which one, and its seat
   }
   return { lssReplay: 1, id: R.id, when: R.when || 0, build: R.build, mode: R.mode, map: R.map, mapName: R.mapName || R.map,
            sig: R.sig, seed: R.seed, round: R.round, secs: r4(_rplEnd(R) - t0), actors: actors,
@@ -17555,6 +17595,7 @@ function _rplDeserialize(o) {
     const A = o.actors[k] || {};
     R.actors[k] = { key: k, lo: A.lo || null, team: A.team, name: A.name || k, hull: A.hull || 100, skin: A.skin || null,
                     buf: Array.isArray(A.buf) ? A.buf : [], sx: Array.isArray(A.sx) ? A.sx : [] };
+    if (A.mon && typeof A.mid === 'number') { R.actors[k].mon = String(A.mon); R.actors[k].mid = A.mid; }   // (v48.27)
   }
   for (const e of o.events) {
     if (!e || typeof e.t !== 'number') continue;
@@ -17698,6 +17739,8 @@ function _rplOrder(R) {
   const seat = (k) => { const n = parseInt(k.slice(1), 10); return isFinite(n) ? n : 0; };
   ks.sort((a, b) => {
     if (a === 'me') return -1; if (b === 'me') return 1;
+    const ma = R.actors[a].mon ? 1 : 0, mb = R.actors[b].mon ? 1 : 0;   // (v48.27) the leviathans after every pilot
+    if (ma !== mb) return ma - mb;
     const ta = (R.actors[a].team === meTeam) ? 0 : 1, tb = (R.actors[b].team === meTeam) ? 0 : 1;
     if (ta !== tb) return ta - tb;
     if (a[0] !== b[0]) return a < b ? -1 : 1;
@@ -17707,6 +17750,7 @@ function _rplOrder(R) {
 }
 function _rplPuppet(st, key) {
   const A = st.R.actors[key];
+  if (A && A.mon) { _rplMonPuppet(st, key, A); return; }   // (v48.27)
   try {
     const lo = A.lo;
     if (!lo || typeof LOADOUTS === 'undefined' || !LOADOUTS[lo]) return;
@@ -17722,8 +17766,45 @@ function _rplPuppet(st, key) {
     st.pup[key] = { owner: owner, A: A, alive: false, label: null };
   } catch (e) { console.warn('[replay] puppet ' + key + ' failed:', e); }
 }
+function _rplMonPuppet(st, key, A) {
+  let mo = null;
+  try { for (const x of (game.monsters || [])) if (_rplIsMon(x) && x.monId === A.mid && x.def.key === A.mon) { mo = x; break; } } catch (_) {}
+  if (!mo) { _rplLog('studio: no ' + A.mon + ' on this page to cast (' + key + ')'); return; }
+  const owner = { mesh: null, alive: true, _rplPuppet: true, _rplMon: mo, saved: null };
+  st.pup[key] = { owner: owner, A: A, alive: false, label: null };
+  _rplMonAdopt(owner);
+}
+function _rplMonAdopt(o) {
+  const m = o._rplMon && o._rplMon.mesh;
+  if (!m || o.mesh) return;
+  o.mesh = m;
+  o.saved = { parent: m.parent, vis: m.visible, p: m.position.clone(), q: m.quaternion.clone() };
+}
+function _rplMonPuppetFrame(st, key, P, dtRep) {
+  const o = P.owner;
+  if (!o.mesh) _rplMonAdopt(o);
+  const m = o.mesh; if (!m) { P.alive = false; return; }
+  const alive = _rplPoseAt(P.A, st.rt, _rplP, _rplQ);
+  P.alive = alive;
+  if (!m.parent) scene.add(m);
+  m.visible = alive && !(st.cam === 'pov' && key === st.follow);
+  m.position.copy(_rplP); m.quaternion.copy(_rplQ);
+  if (alive && dtRep > 0) { try { const mx = o._rplMon._mixer; if (mx) mx.update(dtRep); } catch (_) {} }   // its walk, at the studio's rate
+}
 function _rplPuppetFree(P) {
   const o = P.owner; o.alive = false;   // a GLB swap still in flight bails on this (swapToModelMeshWhenReady's isDead)
+  if (o._rplMon) {
+    const m = o.mesh, s = o.saved;
+    if (m && s) {
+      try {
+        if (!s.parent) { if (m.parent) m.parent.remove(m); }
+        else if (m.parent !== s.parent) s.parent.add(m);
+        m.visible = s.vis; m.position.copy(s.p); m.quaternion.copy(s.q);
+      } catch (_) {}
+    }
+    try { if (P.label && P.label.parentNode) P.label.parentNode.removeChild(P.label); } catch (_) {}
+    return;
+  }
   const m = o.mesh; if (!m) return;
   try { P.shMesh = null; _stripHullHugClones(m); if (P.sh) _clearShipShieldEmissive(m); P.sh = null; } catch (_) {}
   try { if (P.cloak) { P.cloak = false; _setShipMeshOpacity(m, 1.0); } } catch (_) {}
@@ -17772,6 +17853,9 @@ function _rplStudioOpen(R, opts) {
   } catch (_) {}
   for (const e of (game.entities || [])) {
     try { if (e && e.mesh && (e.loadoutKey || e.peerId) && !e.isEarthLife && !e.isHubTraffic && e._owCity == null) hide(e.mesh); } catch (_) {}
+  }
+  for (const mo of (game.monsters || [])) {
+    try { if (_rplIsMon(mo) && mo.mesh) hide(mo.mesh); } catch (_) {}
   }
   for (const p of (game.projectiles || [])) {
     try { for (const k in p) { const v = p[k]; if (v && v.isObject3D && v.parent) hide(v); } } catch (_) {}
@@ -17904,9 +17988,9 @@ function _rplStudioToast(st, e) {
   const R = st.R, KA = e.a[1] ? R.actors[e.a[1]] : null, VA = R.actors[e.a[0]];
   el.textContent = '';
   const add = (txt, col, cls) => { const s = document.createElement('span'); s.textContent = txt; if (col) s.style.color = col; if (cls) s.className = cls; el.appendChild(s); };
-  if (KA) { add(KA.name, _rplClassCol(KA.lo)); add('▶', null, 'ar'); }
+  if (KA) { add(KA.name, _rplActorCol(KA)); add('▶', null, 'ar'); }
   else add('✕ ', '#ff5a5a');
-  add(VA ? VA.name : '?', VA ? _rplClassCol(VA.lo) : null);
+  add(VA ? VA.name : '?', VA ? _rplActorCol(VA) : null);
   el.classList.add('on');
   st.toastT = performance.now() + 2600;
 }
@@ -17932,7 +18016,9 @@ function _rplStudioFrame(now) {
   }
   const dtRep = (st.playing && !st.scrubbing && !st.padScrub) ? dtR * st.rate : 0;
   for (const key in st.pup) {
-    const P = st.pup[key], m = P.owner.mesh;
+    const P = st.pup[key];
+    if (P.owner._rplMon) { _rplMonPuppetFrame(st, key, P, dtRep); continue; }   // (v48.27) a leviathan: pose + walk
+    const m = P.owner.mesh;
     if (!m) continue;
     const alive = _rplPoseAt(P.A, st.rt, _rplP, _rplQ);
     P.alive = alive;
@@ -18052,7 +18138,7 @@ function _rplStudioLabels(st) {
       el = P.label = document.createElement('div');
       el.className = 'rst-lbl';
       el.textContent = P.A.name;
-      el.style.color = _rplClassCol(P.A.lo);
+      el.style.color = _rplActorCol(P.A);
       box.appendChild(el);
     }
     const m = P.owner.mesh;
@@ -18150,10 +18236,10 @@ function _rplStudioUIFill(st, root) {
     const A = R.actors[key];
     const b = document.createElement('button');
     b.type = 'button'; b.dataset.a = 'follow'; b.dataset.v = key;
-    const sw = document.createElement('span'); sw.className = 'sw'; sw.style.background = _rplClassCol(A.lo);
+    const sw = document.createElement('span'); sw.className = 'sw'; sw.style.background = _rplActorCol(A);
     const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = A.name;
     const tm = document.createElement('span'); tm.className = 'tm';
-    tm.textContent = (key === 'me') ? 'YOU' : ((R.actors.me && A.team === R.actors.me.team) ? 'ALLY' : 'ENEMY');
+    tm.textContent = (key === 'me') ? 'YOU' : A.mon ? 'LEVIATHAN' : ((R.actors.me && A.team === R.actors.me.team) ? 'ALLY' : 'ENEMY');   // (v48.27)
     b.appendChild(sw); b.appendChild(nm); b.appendChild(tm);
     st.ui.actors.appendChild(b);
   }
@@ -49369,7 +49455,7 @@ class OutskirtsMonster {
       const vis = _camD2 < 13000 * 13000;
       if (this.mesh.visible !== vis) this.mesh.visible = vis;
     }
-    if (this._mixer && this.mesh.visible) this._mixer.update(dt);
+    if (this._mixer && this.mesh.visible && !_RPL.kc) this._mixer.update(dt);
     if (!_monAuthority()) { this._updateProxy(dt); return; }
     if (game.state !== 'playing') {
       this.aggro = false;
