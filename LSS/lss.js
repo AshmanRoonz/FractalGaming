@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.17";
+const LSS_BUILD = "48.18";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -74440,138 +74440,44 @@ function _howtoBindLabel(scheme, action) {
   const k = (kb[action] != null && kb[action] !== '') ? kb[action] : KB_DEFAULTS[action];
   return (k == null || k === '') ? '' : _formatKey(k);
 }
+const _HOWTO_HUD_PTS = {
+  shield: [0.3562, 0.1284], hp: [0.3272, 0.2002], core: [0.3404, 0.2556], nrg: [0.2719, 0.3552],
+  icons: [0.2269, 0.4153], reticle: [0.5683, 0.3827], ammo: [0.7795, 0.4175], dash: [0.7313, 0.5496],
+  radar: [0.4363, 0.8415], compass: [0.6642, 0.7654], aegis: [0.6206, 0.9593],
+};
 function _howtoHudSvg() {
-  const SC = 3.32;                                  // svg units per vmin (frame is 100 vmin tall)
-  const FX = 165, FY = 30, FW = 590, FH = 332;      // the 16:9 "screen" frame
-  const cx = FX + FW / 2, cy = FY + FH / 2;         // the 'mc' anchor
-  const bcY = FY + FH;                              // the 'bc' anchor edge
-  const RD = Math.PI / 180;
-  const px = (r, d) => +(cx + r * SC * Math.cos(d * RD)).toFixed(1);
-  const py = (r, d) => +(cy + r * SC * Math.sin(d * RD)).toFixed(1);
-  function arcPath(r, d0, d1) {
-    return 'M' + px(r, d0) + ' ' + py(r, d0) +
-      ' A' + (r * SC).toFixed(1) + ' ' + (r * SC).toFixed(1) + ' 0 ' +
-      ((d1 - d0) > 180 ? 1 : 0) + ' 1 ' + px(r, d1) + ' ' + py(r, d1);
-  }
-  function segArc(e, op) {
-    const rot = e.rot || 0;
-    const gap = (e.gapDeg != null) ? e.gapDeg : (e.kind === 'segarc' ? 4 : 0);
-    const a0 = e.a0 + rot, a1 = e.a1 + rot, n = e.seg || 1;
-    const sw = (a1 - a0 - gap * (n - 1)) / n;
-    let s = '';
-    for (let i = 0; i < n; i++) {
-      const b = a0 + i * (sw + gap);
-      s += '<path d="' + arcPath(e.r, b, b + sw) + '" fill="none" stroke="' + e.col +
-           '" stroke-width="' + (e.thick * SC).toFixed(1) + '" stroke-linecap="round" opacity="' + (op || 0.95) + '"/>';
-    }
-    return s;
-  }
-  function tickStrip(e) {
-    const rot = e.rot || 0, a0 = e.a0 + rot, a1 = e.a1 + rot;
-    let s = '';
-    for (let i = 0; i < e.seg; i++) {
-      const d = a0 + (a1 - a0) * (e.seg === 1 ? 0.5 : i / (e.seg - 1));
-      s += '<line x1="' + px(e.r, d) + '" y1="' + py(e.r, d) + '" x2="' + px(e.r + e.tick, d) +
-           '" y2="' + py(e.r + e.tick, d) + '" stroke="' + e.col + '" stroke-width="' +
-           Math.max(1, e.thick * SC).toFixed(1) + '" opacity="0.9"/>';
-    }
-    return s;
-  }
-  function callout(x, y, tx, ty, col, lines, anchor) {
-    let s = '';
-    if (tx != null) {
-      s += '<line x1="' + tx + '" y1="' + ty + '" x2="' + x + '" y2="' + (y - 4) +
-           '" stroke="rgba(150,180,215,0.28)" stroke-width="1"/>';
-    }
+  const IW = 404, IH = Math.round(IW * 838 / 900);   // the picture, at howto_hud.jpg's own aspect
+  const IX = (920 - IW) / 2, IY = 12, VH = IY + IH + 12;
+  const LX = IX - 16, RX = IX + IW + 16;              // the two callout columns
+  const P = (k) => { const q = _HOWTO_HUD_PTS[k]; return [+(IX + q[0] * IW).toFixed(1), +(IY + q[1] * IH).toFixed(1)]; };
+  function callout(x, y, k, col, lines, anchor) {
+    const t = P(k), lx = (anchor === 'end') ? x + 4 : x - 4;
+    let s = '<line x1="' + t[0] + '" y1="' + t[1] + '" x2="' + lx + '" y2="' + (y - 4) +
+            '" stroke="rgba(205,228,255,0.55)" stroke-width="1"/>' +
+            '<circle cx="' + t[0] + '" cy="' + t[1] + '" r="2.4" fill="#fff" stroke="rgba(0,0,0,0.6)" stroke-width="1"/>';
     for (let i = 0; i < lines.length; i++) {
-      s += '<text x="' + x + '" y="' + (y + i * 11.5) + '" text-anchor="' + (anchor || 'start') +
+      s += '<text x="' + x + '" y="' + (y + i * 11.5) + '" text-anchor="' + anchor +
            '" font-family="Rajdhani,sans-serif" font-size="' + (i ? 9.5 : 11) + '" letter-spacing="1"' +
            ' font-weight="' + (i ? 500 : 700) + '" fill="' + (i ? '#8fa3b8' : col) + '">' + lines[i] + '</text>';
     }
     return s;
   }
-  const H = _HL;
-  let g = '<svg viewBox="0 0 920 434" xmlns="http://www.w3.org/2000/svg" role="img" ' +
+  let g = '<svg viewBox="0 0 920 ' + VH + '" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="The in-flight HUD" ' +
           'style="width:100%;min-width:640px;height:auto;display:block;">';
-  g += '<rect x="' + FX + '" y="' + FY + '" width="' + FW + '" height="' + FH +
-       '" rx="8" fill="rgba(8,12,24,0.55)" stroke="rgba(120,200,255,0.22)" stroke-width="1.2"/>';
-  g += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (H.health.r * SC).toFixed(1) +
-       '" fill="none" stroke="rgba(255,50,30,0.20)" stroke-width="' + (2.8 * SC).toFixed(1) + '"/>';
-  g += segArc(H.health) + segArc(H.shield) + segArc(H.energy) + segArc(H.core);
-  g += tickStrip(H.speed) + tickStrip(H.ammo);
-  g += segArc(H.ab1cd) + segArc(H.ab3cd) + segArc(H.ab2cd);
-  let defs = '<defs>';
-  const _abArcs = [['htp-a1', H.ab1cd], ['htp-a3', H.ab3cd], ['htp-a2', H.ab2cd]];
-  for (const [id, e] of _abArcs) {
-    const mid = (e.a0 + e.a1) / 2;
-    defs += '<path id="' + id + '" d="' + arcPath(16.2, mid - 21, mid + 21) + '" fill="none"/>';
-  }
-  g += defs + '</defs>';
-  for (const [id] of _abArcs) {
-    g += '<text font-family="Rajdhani,sans-serif" font-size="7.5" letter-spacing="1.2" fill="#2ee056" opacity="0.8">' +
-         '<textPath href="#' + id + '" startOffset="50%" text-anchor="middle">ABILITY</textPath></text>';
-  }
-  {
-    const d = H.dash, bx = cx + d.x * SC, by = cy + d.y * SC;
-    g += '<g transform="translate(' + bx.toFixed(1) + ' ' + by.toFixed(1) + ') rotate(' + (d.rot || 0) + ')">';
-    const n = 5, span = d.w * SC;
-    for (let i = 0; i < n; i++) {
-      const lit = i < 3;
-      g += '<circle cx="' + (-span / 2 + i * (span / (n - 1))).toFixed(1) + '" cy="0" r="' + (0.55 * SC).toFixed(1) +
-           '" fill="' + (lit ? d.col : 'none') + '" stroke="' + d.col + '" stroke-width="1" opacity="' + (lit ? 0.95 : 0.45) + '"/>';
-    }
-    g += '</g>';
-  }
-  g += '<circle cx="' + cx + '" cy="' + cy + '" r="' + (H.reticle.r * SC).toFixed(1) +
-       '" fill="none" stroke="#dff2ff" stroke-width="1.3" opacity="0.9"/>' +
-       '<circle cx="' + cx + '" cy="' + cy + '" r="1.6" fill="#dff2ff"/>';
-  g += '<text x="' + cx + '" y="' + (FY + 13) + '" text-anchor="middle" font-family="Rajdhani,sans-serif"' +
-       ' font-size="8.5" letter-spacing="1.5" fill="#dde" opacity="0.75">ROUND 2 &#183; 3:41</text>';
-  g += '<text x="' + cx + '" y="' + (FY + 8 * SC + 3).toFixed(1) + '" text-anchor="middle" font-family="Rajdhani,sans-serif"' +
-       ' font-size="9" letter-spacing="1.5" fill="#ffd24d" opacity="0.85">12 480 u &#183; LIVES 2 &#183; AEGIS L3</text>';
-  g += '<text x="' + (FX + FW - 4 * SC).toFixed(1) + '" y="' + (FY + 8 * SC).toFixed(1) + '" text-anchor="end"' +
-       ' font-family="Rajdhani,sans-serif" font-size="8" letter-spacing="0.5" fill="#cdd" opacity="0.7">SLAYER &#10148; VORTEX</text>';
-  {
-    const mm = H.minimap, mx = cx + mm.x * SC, my = bcY + mm.y * SC, mr = (mm.w / 2) * SC;
-    g += '<circle cx="' + mx.toFixed(1) + '" cy="' + my.toFixed(1) + '" r="' + mr.toFixed(1) +
-         '" fill="rgba(8,16,30,0.85)" stroke="#4fd1ff" stroke-width="1.2" opacity="0.95"/>';
-    for (let d = 0; d < 360; d += 15) {
-      const r1 = 11.5 * SC, r2 = 12.4 * SC, ca = Math.cos(d * RD), sa = Math.sin(d * RD);
-      g += '<line x1="' + (mx + r1 * ca).toFixed(1) + '" y1="' + (my + r1 * sa).toFixed(1) +
-           '" x2="' + (mx + r2 * ca).toFixed(1) + '" y2="' + (my + r2 * sa).toFixed(1) +
-           '" stroke="#7d93a7" stroke-width="1" opacity="0.6"/>';
-    }
-    const _cards = [['N', 270], ['E', 0], ['S', 90], ['W', 180]];
-    for (const [ltr, d] of _cards) {
-      g += '<text x="' + (mx + 14.3 * SC * Math.cos(d * RD)).toFixed(1) + '" y="' +
-           (my + 14.3 * SC * Math.sin(d * RD) + 3).toFixed(1) + '" text-anchor="middle"' +
-           ' font-family="Rajdhani,sans-serif" font-size="9" font-weight="700" fill="#7d93a7">' + ltr + '</text>';
-    }
-    g += '<path d="M' + mx.toFixed(1) + ' ' + (my - mr + 1).toFixed(1) + ' l-4 -7 l8 0 Z" fill="#4fd1ff"/>';
-    g += '<path d="M' + mx.toFixed(1) + ' ' + (my - 7).toFixed(1) + ' l-4.5 12 l9 0 Z" fill="#fff"/>';
-    g += '<circle cx="' + (mx + 14).toFixed(1) + '" cy="' + (my - 10).toFixed(1) + '" r="2.2" fill="#ff5544"/>' +
-         '<circle cx="' + (mx - 11).toFixed(1) + '" cy="' + (my + 8).toFixed(1) + '" r="2.2" fill="#6f6"/>';
-    const ed = -35, ex = mx + mr * 0.906 * Math.cos(ed * RD), ey = my + mr * 0.906 * Math.sin(ed * RD);
-    g += '<g transform="translate(' + ex.toFixed(1) + ' ' + ey.toFixed(1) + ') rotate(' + (ed + 90) + ')">' +
-         '<path d="M0 -4.5 L3.8 3.2 L-3.8 3.2 Z" fill="#ff5544"/></g>';
-    g += callout(340, 400, mx - mr * 0.7, my + mr * 0.7, '#4fd1ff',
-                 ['RADAR &#8212; SHIP-UP', 'you are the fixed triangle; the world rotates'], 'end');
-    g += callout(580, 400, mx + 12.4 * SC, my + 4, '#7d93a7',
-                 ['SPINNING COMPASS + EDGE ARROWS', 'letter at the top = your heading &#183; rim arrows = off-radar contacts'], 'start');
-  }
-  g += callout(155, 78,  px(H.core.r, 250), py(H.core.r, 250), '#f0ff1f', ['CORE &#8212; 4 BLOCKS (TOP)', 'fills to 100% &#183; fires your super'], 'end');
-  g += callout(155, 122, px(H.energy.r, 210), py(H.energy.r, 210), '#4d52ff', ['ENERGY (NRG)', 'ability + afterburner fuel'], 'end');
-  g += callout(155, 162, px(H.health.r, 195), py(H.health.r, 195), '#2f9e47', ['HEALTH ARC', 'hull, in 5 segments'], 'end');
-  g += callout(155, 202, px(12.5, 174), py(12.5, 174), '#c04040', ['SPEED TICKS'], 'end');
-  g += callout(155, 246, cx + H.dash.x * SC - 10, cy + H.dash.y * SC + 4, '#4fd1ff', ['DASH PIPS', 'one pip = one charge'], 'end');
-  g += callout(155, 292, px(H.health.r, 150), py(H.health.r, 150), '#ff5544', ['DOOMED PULSE', 'red band at &#8804;15% hull'], 'end');
-  g += callout(765, 82,  px(H.ab2cd.r, 317), py(H.ab2cd.r, 317), '#2ee056', ['ABILITY COOLDOWN ARCS', 'names curve over each bar'], 'start');
-  g += callout(765, 128, px(H.shield.r, 332), py(H.shield.r, 332), '#4fd1ff', ['SHIELD ARC'], 'start');
-  g += callout(765, 168, px(12.5, 7), py(12.5, 7), '#cfa302', ['AMMO TICKS', 'clip &#8212; reload when empty'], 'start');
-  g += callout(765, 212, cx + H.reticle.r * SC + 2, cy, '#dff2ff', ['RETICLE'], 'start');
-  g += callout(765, 52,  FX + FW - 4 * SC - 4, FY + 8 * SC - 4, '#cdd', ['KILL FEED'], 'start');
-  g += callout(cx, 14, cx, FY + 8 * SC - 10, '#ffd24d',
-               ['TOP-CENTRE BAND &#8212; round &#183; timer / stasis lock / endless distance &#183; lives'], 'middle');
+  g += '<image href="howto_hud.jpg" x="' + IX + '" y="' + IY + '" width="' + IW + '" height="' + IH + '" preserveAspectRatio="none"/>';
+  g += '<rect x="' + IX + '" y="' + IY + '" width="' + IW + '" height="' + IH +
+       '" rx="6" fill="none" stroke="rgba(120,200,255,0.30)" stroke-width="1.2"/>';
+  g += callout(LX, 44,  'shield', '#c77dff', ['SHIELD', 'the outer band &#8212; soaks damage before your hull'], 'end');
+  g += callout(LX, 92,  'hp',     '#a979ff', ['HULL (HP)', 'five plates &#183; amber under 60%, red under 30%', 'flashing red = DOOMED'], 'end');
+  g += callout(LX, 152, 'core',   '#d9a6ff', ['CORE', 'fills as you deal damage &#183; glows when ready', 'then fire your ship&#8217;s super'], 'end');
+  g += callout(LX, 212, 'nrg',    '#7a86ff', ['NRG', 'your ship&#8217;s energy or charge meter', '(on the ships that have one)'], 'end');
+  g += callout(LX, 268, 'icons',  '#b36bff', ['ABILITIES', 'sword offense &#183; shield defense &#183; bolt utility', 'bright = ready &#183; dark = not yet'], 'end');
+  g += callout(LX, 334, 'radar',  '#4fd1ff', ['RADAR &#8212; SHIP-UP', 'you are the centre &#183; red = enemies'], 'end');
+  g += callout(RX, 120, 'reticle', '#dff2ff', ['RETICLE'], 'start');
+  g += callout(RX, 170, 'ammo',    '#ff5bd6', ['AMMO', 'your clip &#8212; reload when it runs dry'], 'start');
+  g += callout(RX, 226, 'dash',    '#d9a2ff', ['DASH PIPS', 'one pip = one dash'], 'start');
+  g += callout(RX, 292, 'compass', '#9fb4c8', ['COMPASS', 'spins as you turn &#183; the letter under the', 'cyan marker is your heading'], 'start');
+  g += callout(RX, 352, 'aegis',   '#ffb020', ['AEGIS RANK', 'free flight: this ship&#8217;s rank and XP'], 'start');
   g += '</svg>';
   return g;
 }
@@ -74804,7 +74710,7 @@ function _howtoRender(ov) {
   if (ctlNote) h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;margin-top:6px;">' + ctlNote + '</div>';
   h += "<div class='lss-title' style='font-size:15px;letter-spacing:4px;color:#7cf;margin:18px 0 8px;'>THE HUD</div>";
   h += '<div style="font-size:12px;color:#9ab;letter-spacing:1px;line-height:1.6;margin-bottom:8px;">' +
-       'Everything lives on one circumpunct cluster around your reticle, with the radar disc at the bottom of the screen. Drawn from the live HUD layout:</div>';
+       'Everything lives in one cluster around your reticle, with the radar disc at the bottom of the screen. Each ship paints it in its own colours &#8212; this is the VORTEX:</div>';
   h += '<div style="border:1px solid rgba(120,200,255,0.2);border-radius:8px;background:rgba(10,14,28,0.55);padding:8px;overflow-x:auto;">' +
        _howtoHudSvg() + '</div>';
   h += '</div>';

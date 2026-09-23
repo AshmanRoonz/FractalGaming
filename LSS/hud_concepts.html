@@ -18,10 +18,12 @@
   re-typed or approximated, so ORIGINAL cannot drift from the shipped build;
   when the game's HUD changes, reload this page and it has changed here too.
 
-  The block reaches outside itself for exactly nine things, and every one is
+  The block reaches outside itself for exactly ten things, and every one is
   shimmed below: player, input, _mm, _hudRF, camera, THREE.Vector3, hudFont,
-  _hudFontCache, hudCtx. (`isXRPresenting` and `_perkEffectiveBag` are
-  typeof-guarded in the game, so they are simply absent here.)
+  _hudFontCache, hudCtx - and (v48.18) LSS.CLASS_COLORS, the game's real table,
+  without which the framed HUD's own per-ship theme (_hlfShades) drew nothing
+  here. (`isXRPresenting` and `_perkEffectiveBag` are typeof-guarded in the
+  game, so they are simply absent here.)
 
   The extracted source is used VERBATIM — not one character is rewritten.
 
@@ -148,7 +150,7 @@
       <div class="sec">
         <h3>Ship theme</h3>
         <label style="margin-top:0">
-          <input type="checkbox" id="useTheme" checked style="width:auto;vertical-align:-2px">
+          <input type="checkbox" id="useTheme" style="width:auto;vertical-align:-2px">
           Override colours with this hull's shades
         </label>
         <label>Hue spread <b id="vSpread">0.60</b></label>
@@ -157,7 +159,10 @@
         <div class="mini">Every shade is measured off
           <code>LSS.CLASS_COLORS</code>, so nothing is hand-typed per hull. Low-hull
           amber, doomed red and the active-ability amber stay untinted — a warning
-          has to mean the same thing on every ship.</div>
+          has to mean the same thing on every ship.<br>
+          <b>Off by default (v48.18):</b> the game themes every hull ITSELF now
+          (<code>_hlfShades</code>, spread 0.69), and ORIGINAL draws that. Tick this only to
+          try another spread on top.</div>
       </div>
 
       <div class="sec">
@@ -175,6 +180,7 @@
           <option value="night">Night space + city</option>
           <option value="day">Bright sky over water</option>
           <option value="none">Black</option>
+          <option value="clear">Transparent (captures)</option>
         </select>
         <label>HUD scale <b id="vScale">1.00</b></label>
         <input type="range" id="sScale" min="75" max="175" value="100">
@@ -278,8 +284,12 @@ function makeHud(blockSrc){
   const camera = { getWorldDirection(v){
     v.x = Math.sin(shim.heading); v.z = -Math.cos(shim.heading); v.y = 0; return v; } };
 
+  /* (v48.18) + LSS.CLASS_COLORS - the game's real table, read out of lss.js at boot (DATA is filled
+     after this runs, hence the getter). Without it the game's own per-ship theme (_hlfShades, v47.00)
+     returned {} here and ORIGINAL drew with the lab's theme approximation instead of the game's. */
+  const LSS = { get CLASS_COLORS(){ return DATA.CLASS_COLORS; } };
   const factory = new Function(
-    'THREE', '_mm', '_hudRF', 'camera',
+    'THREE', '_mm', '_hudRF', 'camera', 'LSS',
     '"use strict";\n' +
     'let player = null, input = null, hudCtx = null, _hudFontCache = "";\n' +
     'function hudFont(s){ if (s === _hudFontCache) return; _hudFontCache = s;\n' +
@@ -293,9 +303,13 @@ function makeHud(blockSrc){
     '  _hlReticle:_hlReticle, _hlArcLabel:_hlArcLabel, _hlGaugeLabel:_hlGaugeLabel,\n' +
     '  _hlText:_hlText, _hlScale:_hlScale, _hlGA:_hlGA, _hlCA:_hlCA, _hlTA:_hlTA,\n' +
     '  bind:function(p, inp, cx){ player = p; input = inp; hudCtx = cx; _hudFontCache = ""; },\n' +
+    /* (v48.18) the framed HUD's own layout tables - so a capture can say WHERE each part landed */
+    '  _HLF:(typeof _HLF !== "undefined") ? _HLF : null,\n' +
+    '  _HLF_ICON_ROW:(typeof _HLF_ICON_ROW !== "undefined") ? _HLF_ICON_ROW : null,\n' +
+    '  _HLF_DASH:(typeof _HLF_DASH !== "undefined") ? _HLF_DASH : null,\n' +
     '};\n'
   );
-  const api = factory(THREE, shim.mm, shim.rf, camera);
+  const api = factory(THREE, shim.mm, shim.rf, camera, LSS);
   api._shim = shim;
   return api;
 }
@@ -410,11 +424,21 @@ function buildPlayer(rec){
 function buildV(rec, HUD){
   const HL = HUD._HL;
   const hp = S.hp, doomed = hp <= .15;
-  const hCol = doomed ? '#ff3a4a' : (hp < .35 ? '#c8a11e' : HL.health.col);
+  /* (v48.18) the game's own ramp (its _HUD_C.r_09 / a_08) - red under 30 %, amber under 60 % */
+  const hCol = doomed ? '#ff3a4a' : (hp < .3 ? 'rgba(255,50,30,0.9)' : (hp < .6 ? 'rgba(255,170,0,0.8)' : HL.health.col));
   const clip = rec.weapon.clipSize || 20, clipAmmo = Math.round(S.ammo * clip);
+  const coreReady = S.core >= 1;
   return {
     healthPct: hp,
     hCol: (hp >= 0.6 && !doomed) ? HL.health.col : hCol,
+    /* (v48.18) the three state flags the game's call site passes since v47.00 (+ v47.23's core pair).
+       Without hHealthy the framed HUD read every healthy hull as a WARNING and drew the untinted
+       green instead of the ship's theme; without coreState / corePulse a full core never glowed. */
+    hHealthy: (hp >= 0.6 && !doomed),
+    nrgWarn: false,
+    coreState: coreReady,
+    coreFiring: false,
+    corePulse: coreReady ? Math.round((0.75 + 0.25 * Math.sin(S.t * 4.5)) * 20) / 20 : null,
     shieldPct: S.sh,
     energyPct: S.nrg, energyCol: null,
     speedPct: S.spd,
@@ -573,6 +597,7 @@ function themeDelta(rec, spread){
 const stars = Array.from({length:230}, () => ({ x:Math.random(), y:Math.random(), r:Math.random()*.9+.2, p:Math.random()*6.28 }));
 function drawBackdrop(ctx, W, H, mode, t){
   ctx.clearRect(0,0,W,H);
+  if (mode === 'clear') return;   // (v48.18) transparent - the HUD alone, for the HOW TO PLAY picture
   if (mode === 'none'){ ctx.fillStyle = '#000'; ctx.fillRect(0,0,W,H); }
   else if (mode === 'night'){
     const vm = Math.min(W,H)/100;
@@ -648,7 +673,7 @@ function makeMinimap(){
    ========================================================================== */
 const UI = { tab:'original', ship:'PUNCTURE', variant:'nested-cells',
              aspect:1.7778, backdrop:'night', scale:1.0, opacity:0.72,
-             theme:true, spread:0.6 };
+             theme:false, spread:0.6 };   /* (v48.18) off: the game's own _hlfShades themes the hull now */
 const $ = s => document.querySelector(s);
 let HUD = null, REC = null, last = performance.now();
 const INPUT = { hudScale:1, hudOpacity:0.72, hudTextOpacity:1, crosshairOpacity:1, hudGaugeLabels:true };
