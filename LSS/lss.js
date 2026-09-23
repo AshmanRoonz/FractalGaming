@@ -9,7 +9,9 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.96";
+const LSS_BUILD = "48.09";
+const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
+               theater: null, libSolo: null };
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -6712,6 +6714,26 @@ function _tickTimer(name) {
   const elapsed = (Date.now() - anchor) / 1000;
   game[name] = Math.max(0, total - elapsed);
 }
+const _CLK = { at: 0, own: {} };
+function _clockPause(who, on) {
+  try {
+    if (typeof net !== 'undefined' && net && net.active) { _CLK.own = {}; _CLK.at = 0; return 0; }
+    const any = () => { for (const k in _CLK.own) if (_CLK.own[k]) return true; return false; };
+    const was = any();
+    if (on) _CLK.own[who] = true; else delete _CLK.own[who];
+    const is = any();
+    if (!was && is) { _CLK.at = Date.now(); return 0; }
+    if (was && !is && _CLK.at) {
+      const dW = Math.max(0, Date.now() - _CLK.at);
+      _CLK.at = 0;
+      for (const n of ['roundTimer', 'warmupTimer', 'roundEndTimer', 'matchEndTimer']) {
+        if (typeof game[n + 'AnchorMs'] === 'number') game[n + 'AnchorMs'] += dW;
+      }
+      return dW;
+    }
+  } catch (_) {}
+  return 0;
+}
 
 function broadcastGameSync(dt) {
   if (!net.active || !net.sendEvent) return;
@@ -10582,6 +10604,7 @@ const _botFireOrigin = new THREE.Vector3();
 const _botFireDir = new THREE.Vector3();
 const _botSpreadDir = new THREE.Vector3();
 function emitDamageState(entity, dt) {
+  if (_RPL.kc || _RPL.studio) return;   // (v47.97) the kill cam poses the hulls at their REPLAYED spots; live smoke would puff where they really are
   if (!entity || !entity.position) return;
   if (entity.alive === false || entity.shipState === 'dead') return;
   if (entity._cloaked) return;
@@ -16061,6 +16084,2199 @@ if (typeof window !== 'undefined') {
   };
   window.__orbitOff = function () { window.__orbitCam.on = false; return 'orbit cam off'; };
 }
+const _RPL_K = { lead: 4.0, slowLead: 1.2, fastRate: 1.0, tailReal: 2.0, rate: 1 / 3, delay: 0.25, hold: 0.3, maxExtend: 6, maxSec: 900 };
+function _rplKcTail(cfg, rate) {
+  if (typeof cfg.tail === 'number' && cfg.tail >= 0) return cfg.tail;
+  return Math.max(0, (cfg.tailReal != null ? +cfg.tailReal : 2.0)) * rate;
+}
+const _RPL_SND2 = /^(fire_|laser|explosion|power_?shot|railgun|rocket|salvo|cluster|stun|dash|death|thermal|siphon|tether|tripwire|vortex|phase_dash|missile|charge)/;
+const _rplP = new THREE.Vector3(), _rplP2 = new THREE.Vector3(), _rplQ = new THREE.Quaternion(), _rplQ2 = new THREE.Quaternion();
+const _rplQa = new THREE.Quaternion(), _rplQb = new THREE.Quaternion(), _rplFwd = new THREE.Vector3(), _rplLook = new THREE.Vector3();
+const _rplCamTgt = new THREE.Vector3(), _rplTmp = new THREE.Vector3(), _rplM4 = new THREE.Matrix4(), _rplUp = new THREE.Vector3(0, 1, 0);
+const _rplTmp2 = new THREE.Vector3(), _rplTmp3 = new THREE.Vector3(), _rplRight = new THREE.Vector3(), _rplEuler = new THREE.Euler(0, 0, 0, 'YXZ');
+const _rplFlipY = new THREE.Quaternion(0, 1, 0, 0);
+const _RPL_HIDE = ['#hud', '#crosshair', '#circumpunct-hud', '#hud-world', '#cockpit-frame', '#gun-layer', '#core-overlay-frame',
+  '#ability-overlay-frame', '#ability-overlay-frame *', '#hud *', '#enemy-healthbars', '#stasis-warning', '#stasis-vignette',
+  '#execution-prompt', '#endless-hud', '#hit-marker', '#hit-marker-kill', '.damage-indicator', '.dmg-edge', '#ov-damage-vignette',
+  '#ov-warp', '#ov-underwater', '#ov-killstreak', '#ov-medals', '#ov-ability', '#ov-sword-block', '#ov-vortex-shield',
+  '#ov-gun-shield', '#ov-thermal-shield', '#ov-banner', '#ov-respawn', '#reload-indicator', '#round-info', '#champ-capture',
+  '#kill-feed', '#minimap', '#doomed-warning', '.ship-name-label', '#hbar-pool', '#clip-save-btn', '#race-hud',
+  '#enemy-lockon-warning'];
+function _rplCfg() {
+  let o = null;
+  try { o = (typeof window !== 'undefined') ? window.__killcam : null; } catch (_) {}
+  return (o && typeof o === 'object') ? Object.assign({}, _RPL_K, o) : _RPL_K;
+}
+function _rplEnabled() {
+  try {
+    if (typeof window !== 'undefined' && window.__killcam && window.__killcam.on === false) return false;
+    if (typeof LSS === 'undefined' || LSS.MODE !== 'classic') return false;
+    if (typeof isXRPresenting === 'function' && isXRPresenting()) return false;   // every camera override stands down in XR
+    return true;
+  } catch (_) { return false; }
+}
+function _rplNow() {
+  const R = _RPL.cur, st = _RPL.studio;
+  return (st ? st.gt0 : game.time) - ((R && R.pa) || 0);
+}
+function _rplLog(msg) {
+  try { const L = _RPL.log || (_RPL.log = []); L.push((performance.now() / 1000).toFixed(2) + '  ' + msg); if (L.length > 60) L.shift(); } catch (_) {}
+}
+function _rplArg(a) {
+  if (a == null) return null;
+  const ty = typeof a;
+  if (ty === 'number' || ty === 'string' || ty === 'boolean') return a;
+  if (a.isVector3) return [a.x, a.y, a.z];
+  if (a.isColor) return a.getHex();
+  if (Array.isArray(a)) return a.map(x => (x && typeof x === 'object') ? _rplArg(x) : x);
+  if (ty === 'object' && (a.constructor === Object || !a.constructor)) {
+    const o = {};
+    for (const k in a) {
+      const v = a[k], tv = typeof v;
+      if (v == null || tv === 'number' || tv === 'string' || tv === 'boolean') o[k] = v;
+      else if (v.isVector3) o[k] = [v.x, v.y, v.z];
+    }
+    return o;
+  }
+  return null;
+}
+function _rplEv(k) {
+  if (_RPL.replay) return;
+  const R = _RPL.cur; if (!R) return;
+  const a = [];
+  for (let i = 1; i < arguments.length; i++) a.push(_rplArg(arguments[i]));
+  R.ev.push({ t: _rplNow(), k: k, a: a });
+}
+function _rplTap(o, k, argIdx) {
+  return function () {
+    if (_RPL.rec && !_RPL.replay && !_RPL.nest) {
+      const a = [k];
+      for (let i = 0; i < argIdx.length; i++) a.push(arguments[argIdx[i]]);
+      _rplEv.apply(null, a);
+    }
+    _RPL.nest++;
+    try { return o.apply(this, arguments); } finally { _RPL.nest--; }
+  };
+}
+function _rplKey(x) {
+  if (!x) return null;
+  if (typeof player !== 'undefined' && (x === player || x === 'player')) return 'me';
+  if (typeof x === 'string') return (x.indexOf('peer:') === 0) ? 'n' + x.slice(5) : null;
+  if (x.peerId) return 'n' + x.peerId;
+  if (x.botId != null) return 'b' + x.botId;                 // a bot's hit claim (fakeAttacker)
+  if (x.loadoutKey && x.id != null && !x.isEarthLife && !x.hoardModelKey) return 'b' + x.id;
+  return null;
+}
+function _rplName(ent, key) {
+  if (key === 'me') {
+    try { const du = (typeof discordCurrentUser === 'function') ? discordCurrentUser() : null; if (du && (du.global_name || du.username)) return String(du.global_name || du.username); } catch (_) {}
+    return 'YOU';
+  }
+  try { if (ent && ent.loadout && ent.loadout.name) return String(ent.loadout.name); } catch (_) {}
+  return (ent && ent.loadoutKey) ? String(ent.loadoutKey) : '?';
+}
+function _rplNewId() { return 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+function _rplMapName() {
+  try { if (game.currentLevel && game.currentLevel.name) return String(game.currentLevel.name); } catch (_) {}
+  return String(game.selectedMap || '?');
+}
+function _rplLevelSig() {
+  let s = String(game.selectedMap || '?');
+  try {
+    const L = game.currentLevel;
+    if (L && (L.procedural || (L.terrain && L.terrain.pillars))) {
+      s += '#r' + (game.currentRound | 0) + '#s' + (((typeof net !== 'undefined' && net && net.worldSeed) | 0));
+    }
+  } catch (_) {}
+  return s;
+}
+function _rplNewRec() {
+  let seed = null; try { seed = (typeof net !== 'undefined' && net && typeof net.worldSeed === 'number') ? net.worldSeed : null; } catch (_) {}
+  return { id: _rplNewId(), when: Date.now(), t0: game.time, endT: 0, pa: 0, round: game.currentRound | 0, map: game.selectedMap,
+           mapName: _rplMapName(), sig: _rplLevelSig(), mode: LSS.MODE, seed: seed, build: LSS_BUILD,
+           actors: {}, ev: [], kills: [], pj: {}, pid: 0, wf: {}, wid: 0, _lastT: -1, _trimAt: 0, saved: false, savedSecs: 0 };
+}
+function _rplDeath(victim, attacker) {
+  const R = _RPL.cur; if (!R || _RPL.replay) return;
+  const vk = _rplKey(victim); if (!vk) return;
+  const p = victim.position || (victim.mesh && victim.mesh.position) || null;
+  const e = { t: _rplNow(), k: 'kill', a: [vk, _rplKey(attacker), p ? [p.x, p.y, p.z] : null] };
+  R.ev.push(e); R.kills.push(e);
+}
+function _rplKillNote(fromPeerId, evt) {
+  const R = _RPL.cur; if (!R || !fromPeerId || !evt) return;
+  const vk = 'n' + fromPeerId;
+  let kk = null;
+  try {
+    if (evt.killerBotId != null) kk = 'b' + evt.killerBotId;
+    else if (evt.killerPeerId && typeof net !== 'undefined' && evt.killerPeerId === net.myPeerId) kk = 'me';
+    else if (evt.killerPeerId) kk = 'n' + evt.killerPeerId;
+  } catch (_) {}
+  const now = _rplNow();
+  for (let i = R.kills.length - 1; i >= 0; i--) {
+    const e = R.kills[i];
+    if (now - e.t > 3) break;
+    if (e.a[0] === vk) { if (!e.a[1]) e.a[1] = kk; return; }
+  }
+  const e = { t: now, k: 'kill', a: [vk, kk, null] };
+  R.ev.push(e); R.kills.push(e);
+}
+function _rplActor(R, key, ent) {
+  let A = R.actors[key];
+  if (!A) {
+    A = R.actors[key] = { key: key, lo: ent.loadoutKey || null, team: ent.team, name: _rplName(ent, key),
+                          hull: (ent.chassis && ent.chassis.hullLength) || 100,
+                          skin: (key === 'me' && ent.skinId && ent.skinId !== 'factory') ? ent.skinId : null, buf: [] };
+  }
+  A.ent = ent;
+  return A;
+}
+function _rplShieldOf(m) {
+  const ch = m && m.children;
+  if (!ch) return null;
+  for (let i = 0; i < ch.length; i++) {
+    const u = ch[i].userData;
+    if (!u || !u.shieldClone || u._outlineHug || !u._shieldMat || !u._shieldMat.userData) continue;
+    const p = u._shieldMat.userData.presetName;
+    if (typeof p === 'string' && p.indexOf('plasma_') === 0) return p;
+  }
+  return null;
+}
+const _rplStateOut = { sh: null, dm: 0 };
+function _rplStateAt(A, t) {
+  const s = A.sx, out = _rplStateOut;
+  out.sh = null; out.dm = 0;
+  if (!s || !s.length) return out;
+  let lo = 0, hi = (s.length / 3) | 0;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (s[mid * 3] <= t) lo = mid + 1; else hi = mid; }
+  const i = lo - 1;
+  if (i >= 0) { out.sh = s[i * 3 + 1] || null; out.dm = (s[i * 3 + 2] | 0); }   // dm = flags (1 doomed, 2 cloaked)
+  return out;
+}
+const _RPL_SH_COL = { plasma_purple: 0xaa55ff, plasma_cyan: 0x33ccff, plasma_red: 0xff3322, plasma_green: 0x44ff99 };
+const _RPL_CLOAK_OP = 0.18;   // (v48.03) how a cloaked ship replays: a ghost you can still follow (live: 0.01)
+function _rplPuppetShield(P, preset) {
+  preset = preset || null;
+  if ((P.sh || null) === preset) return;
+  const m = P.owner.mesh;
+  try { if (P.shMesh) { _disposeShieldClone(P.shMesh); P.shMesh = null; } } catch (_) {}
+  try { if (P.sh && !preset && m) _clearShipShieldEmissive(m); } catch (_) {}
+  P.sh = preset;
+  if (!preset || !m) return;
+  try {
+    const c = _makeHullHugShield(P.owner, preset);
+    if (c) {
+      m.add(c);
+      P.shMesh = c;
+      const u = c.userData && c.userData._shieldMat && c.userData._shieldMat.uniforms;
+      if (u && u.uIntensity) u.uIntensity.value = 1.8;
+    }
+    _setShipShieldEmissive(m, _RPL_SH_COL[preset] || 0x88ccff, 2.0);
+  } catch (_) {}
+}
+function _rplTrim(R, now) {
+  const cut = now - _RPL_K.maxSec + 60;
+  if (cut <= R.t0) return;
+  let i = 0; while (i < R.ev.length && R.ev[i].t < cut) i++;
+  if (i) R.ev.splice(0, i);
+  R.kills = R.kills.filter(e => e.t >= cut);
+  for (const k in R.actors) {
+    const b = R.actors[k].buf; let n = 0;
+    while (n + 9 < b.length && b[n + 9] < cut) n += 9;   // keep the last sample before the cut
+    if (n) b.splice(0, n);
+    const s = R.actors[k].sx;   // (v48.01) and the state that was in force at the cut
+    if (s) { let m = 0; while (m + 3 < s.length && s[m + 3] < cut) m += 3; if (m) s.splice(0, m); }
+  }
+  for (const id in R.pj) { const b = R.pj[id].buf; if (!b.length || b[b.length - 4] < cut) delete R.pj[id]; }
+  if (R.wf) for (const id in R.wf) if (R.wf[id].t1 < cut) delete R.wf[id];   // (v48.06)
+  R.t0 = cut;
+}
+function _rplSample(kc) {
+  const R = _RPL.cur; if (!R) return;
+  const t = _rplNow();
+  if (t - R._lastT < 0.05) return;
+  R._lastT = t;
+  if (t - R.t0 > _RPL_K.maxSec && t >= R._trimAt) { R._trimAt = t + 30; _rplTrim(R, t); }
+  const put = (A, m, alive, ent) => {
+    const p = m.position, q = m.quaternion;
+    A.buf.push(t, p.x, p.y, p.z, q.x, q.y, q.z, q.w, alive ? 1 : 0);
+    if (alive) {
+      const sh = _rplShieldOf(m);
+      const op = m.userData ? m.userData._rplOp : undefined;
+      const dm = ((ent && ent.doomed) ? 1 : 0) | ((typeof op === 'number' && op < 0.99) ? 2 : 0);
+      if (sh !== A._sh || dm !== A._dm) { A._sh = sh; A._dm = dm; (A.sx || (A.sx = [])).push(t, sh, dm); }
+    }
+  };
+  if (kc) {
+    const A = R.actors.me, b = A && A.buf, n = b ? b.length : 0;
+    if (n >= 9 && b[n - 1] > 0.5) b.push(t, b[n - 8], b[n - 7], b[n - 6], b[n - 5], b[n - 4], b[n - 3], b[n - 2], b[n - 1]);
+  } else if (player && player.mesh) put(_rplActor(R, 'me', player), player.mesh, player.shipState !== 'dead', player);
+  const E = game.entities || [];
+  for (let i = 0; i < E.length; i++) {
+    const e = E[i];
+    if (!e || !e.mesh || e.isEarthLife || e.isHubTraffic || e.hoardModelKey || e._owCity != null) continue;
+    const key = e.peerId ? ('n' + e.peerId) : ((e.loadoutKey && e.id != null) ? ('b' + e.id) : null);
+    if (!key) continue;
+    const A = _rplActor(R, key, e);
+    const alive = e.alive !== false;
+    if (!alive && A.buf.length && A.buf[A.buf.length - 1] < 0.5) continue;
+    put(A, e.mesh, alive, e);
+  }
+  const P = game.projectiles || [];
+  for (let i = 0; i < P.length; i++) {
+    const pr = P[i];
+    if (!pr || !pr.alive || !pr.position) continue;
+    if (!pr._rplId) {
+      pr._rplId = ++R.pid;
+      const c = (pr.color && pr.color.isColor) ? pr.color.getHex() : pr.color;
+      R.pj[pr._rplId] = { c: c, s: pr.sizeMult || 1, buf: [] };
+    }
+    const PJ = R.pj[pr._rplId]; if (!PJ) continue;
+    PJ.buf.push(t, pr.position.x, pr.position.y, pr.position.z);
+  }
+  _rplWfxSample(R, t);   // (v48.06) the traps, walls, gas, flame chains...
+}
+function _rplPoseAt(A, t, outP, outQ) {
+  const b = A.buf, n = (b.length / 9) | 0;
+  if (!n) return false;
+  let lo = 0, hi = 0;
+  if (t >= b[(n - 1) * 9]) { lo = hi = n - 1; }
+  else if (t > b[0]) {
+    lo = 0; hi = n - 1;
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (b[m * 9] <= t) lo = m; else hi = m; }
+  }
+  const i = lo * 9, j = hi * 9;
+  const span = b[j] - b[i];
+  const u = (span > 1e-6) ? Math.max(0, Math.min(1, (t - b[i]) / span)) : 0;
+  outP.set(b[i + 1] + (b[j + 1] - b[i + 1]) * u, b[i + 2] + (b[j + 2] - b[i + 2]) * u, b[i + 3] + (b[j + 3] - b[i + 3]) * u);
+  if (outQ) {
+    _rplQa.set(b[i + 4], b[i + 5], b[i + 6], b[i + 7]);
+    _rplQb.set(b[j + 4], b[j + 5], b[j + 6], b[j + 7]);
+    outQ.copy(_rplQa).slerp(_rplQb, u);
+  }
+  return b[i + 8] > 0.5;
+}
+function _rplV3(a) { return (a && a.length === 3) ? new THREE.Vector3(a[0], a[1], a[2]) : null; }
+function _rplOpts(o) {
+  if (!o || typeof o !== 'object') return undefined;
+  const r = {};
+  for (const k in o) { const v = o[k]; r[k] = (Array.isArray(v) && v.length === 3) ? new THREE.Vector3(v[0], v[1], v[2]) : v; }
+  return r;
+}
+function _rplFire(e) {
+  const a = e.a;
+  try {
+    switch (e.k) {
+      case 'st': _spawnSingleTracer(_rplV3(a[0]), _rplV3(a[1]), a[2], a[3], a[4], null, !!a[5]); break;
+      case 'rs': _spawnRailgunSpiral(_rplV3(a[0]), _rplV3(a[1]), a[2]); break;
+      case 'pb': spawnPelletBurst(_rplV3(a[0]), _rplV3(a[1]), a[2]); break;
+      case 'fx': spawnFXBurst(a[0], _rplV3(a[1]), a[2], a[3], _rplOpts(a[4])); break;
+      case 'lb': spawnLightningBolt(_rplV3(a[0]), _rplV3(a[1]), a[2], a[3], a[4], a[5], !!a[6]); break;
+      case 'is': spawnImpactSparks(_rplV3(a[0]), a[1]); break;
+      case 'hf': spawnHitFire(_rplV3(a[0]), a[1], null, a[2]); break;
+      case 'hb': spawnHullBurst(_rplV3(a[0]), a[1], a[2]); break;
+      case 'mf': emitChassisMuzzleFlash(a[0], _rplV3(a[1]), _rplV3(a[2])); break;
+      case 'sh': spawnShieldHit(_rplV3(a[0]), a[1], a[2], null); break;
+      case 'ex': {
+        const _o = (a[4] && typeof a[4] === 'object') ? a[4] : {};
+        spawnExplosion(_rplV3(a[0]), a[1], (a[2] != null && typeof a[2] !== 'boolean') ? a[2] : null, _rplV3(a[3]),
+                       { mini: true, cloud: _o.cloud !== false });
+        break;
+      }
+      case 's3': playSpatialSound(a[0], _rplV3(a[1]), _rplOpts(a[2])); break;
+      case 's2': playSound(a[0]); break;
+    }
+  } catch (_) {}
+}
+function _rplTimeK() {
+  const st = _RPL.studio;
+  if (st) return (st.playing && !st.scrubbing) ? st.rate : 1e-4;
+  return (_RPL.kc && _RPL.kc.rate != null) ? _RPL.kc.rate : 1;
+}
+function _rplClearFx(st) {
+  try {
+    const E = (game.effects || []).slice();
+    if (game.effects) game.effects.length = 0;
+    for (const e of E) { try { _disposeOrReleaseEffect(e); } catch (_) {} }
+  } catch (_) {}
+  try { if (game.particles) game.particles.length = 0; } catch (_) {}
+  const S = st || _RPL.studio;
+  if (S && S.wfx) { for (const e of S.wfx) _rplWfxDispose(e); S.wfx.length = 0; }
+}
+function _rplFireLifted(st, e) {
+  const W = game.worldEffects;
+  const n0 = W ? W.length : 0;
+  _rplFire(e);
+  if (W && W.length > n0) { const got = W.splice(n0, W.length - n0); for (const x of got) st.wfx.push(x); }
+}
+function _rplWfxDispose(eff) {
+  const retain = (m) => { try { if (typeof _lssRetainMat === 'function') _lssRetainMat(m); else m.dispose(); } catch (_) {} };
+  const sharedGeo = (g) => {
+    try {
+      return !!(g && ((typeof _isSharedEffectGeometry === 'function' && _isSharedEffectGeometry(g)) ||
+                      (typeof window !== 'undefined' && g === window._fireCloudGeo)));
+    } catch (_) { return true; }
+  };
+  const kill = (m, keepGeo, keepMat) => {
+    if (!m || !m.isObject3D) return;
+    try { if (m.parent) m.parent.remove(m); } catch (_) {}
+    try {
+      if (m.geometry && !keepGeo && !sharedGeo(m.geometry) && !(m.userData && m.userData._fxSharedGeo)) m.geometry.dispose();
+    } catch (_) {}
+    try {
+      const mat = m.material;
+      if (mat) { if (keepMat || (m.userData && m.userData._fireCloud)) retain(mat); else mat.dispose(); }
+    } catch (_) {}
+  };
+  try {
+    if (Array.isArray(eff.fireMeshes)) for (const m of eff.fireMeshes) kill(m, true, true);
+    if (Array.isArray(eff.meshes)) for (const m of eff.meshes) kill(m, true, true);
+    if (Array.isArray(eff.puffMeshes)) for (const m of eff.puffMeshes) kill(m, false, false);
+    if (eff.type === 'particle_wall') {
+      kill(eff.mesh, true, true); kill(eff.plasmaMesh, true, false); kill(eff.edgeMesh, true, true);
+    } else {
+      kill(eff.mesh, false, false);
+      kill(eff.coreMesh, false, false);
+      kill(eff.glow, false, false);
+    }
+    eff.fireMeshes = eff.meshes = eff.puffMeshes = null;
+    eff.mesh = eff.coreMesh = eff.glow = eff.plasmaMesh = eff.edgeMesh = null;
+  } catch (_) {}
+}
+const _RPL_WFX = { tether: 1, tripwire: 1, particle_wall: 1, incendiary_gas: 1, firewall: 1, pyro_flame: 1,
+                   sonar_pulse: 1, vortex_core_beam_remote: 1 };
+function _rplWfxFlags(e) {
+  switch (e.type) {
+    case 'tether': return (e.triggered ? 1 : 0) | (e._shotDown ? 2 : 0);
+    case 'incendiary_gas': return e.ignited ? 1 + 2 * ((e.team | 0) & 255) : 0;   // lit, and by whose side
+    case 'particle_wall': return Math.round(Math.max(0, Math.min(1, (e.hp || 0) / (e.maxHp || 1))) * 20);   // HP in 5 % steps
+    case 'tripwire': return e.armed ? 1 : 0;
+  }
+  return 0;
+}
+function _rplWfxSample(R, t) {
+  const WE = game.worldEffects || [];
+  for (let i = 0; i < WE.length; i++) {
+    const e = WE[i];
+    if (!e || !_RPL_WFX[e.type]) continue;
+    if (e.type === 'firewall' && !(Array.isArray(e.meshes) && e.meshes.length)) continue;
+    if (e.type === 'tripwire' && !e.mesh) continue;
+    let W = e._rplWid ? R.wf[e._rplWid] : null;
+    if (!W) {
+      if (e._rplWid && e._rplWR === R) continue;   // trimmed away: do not start it again
+      e._rplWid = ++R.wid; e._rplWR = R;
+      const p = e.position, d = e.direction;
+      W = R.wf[e._rplWid] = { k: e.type, t0: t, t1: t, p: p ? [p.x, p.y, p.z] : null, d: d ? [d.x, d.y, d.z] : null,
+                              len: e.length || 0, r: e.radius || 0, team: (e.team != null) ? e.team : null,
+                              own: e.ownerPeerId || null, grp: (e.groupId != null) ? e.groupId : null,
+                              dur: e.duration || e.totalDur || 0, sx: [] };
+    }
+    W.t1 = t;
+    const f = _rplWfxFlags(e);
+    if (f !== W._f) { W._f = f; W.sx.push(t, f); }
+  }
+}
+function _rplWfxFlagAt(W, t) {
+  const s = W.sx; if (!s || !s.length) return 0;
+  let lo = 0, hi = (s.length / 2) | 0;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (s[mid * 2] <= t) lo = mid + 1; else hi = mid; }
+  return (lo > 0) ? (s[(lo - 1) * 2 + 1] | 0) : 0;
+}
+function _rplLiftSpawn(fn) {
+  const L = game.worldEffects;
+  const n0 = L.length;
+  try { fn(); } catch (e) { console.warn('[replay] world effect rebuild failed:', e); }
+  if (L.length > n0) { const got = L.splice(n0, L.length - n0); return got[got.length - 1]; }
+  return null;
+}
+const _rplWV = new THREE.Vector3(), _rplWD = new THREE.Vector3(), _rplWQ = new THREE.Quaternion(), _rplWY = new THREE.Vector3(0, 1, 0);
+function _rplWfxBuild(W) {
+  const pos = W.p ? new THREE.Vector3(W.p[0], W.p[1], W.p[2]) : new THREE.Vector3();
+  const dir = W.d ? new THREE.Vector3(W.d[0], W.d[1], W.d[2]) : new THREE.Vector3(0, 0, -1);
+  switch (W.k) {
+    case 'tether': return _rplLiftSpawn(() => spawnTetherTrap(pos, 'rpl', W.team, null, null, false));
+    case 'tripwire': return _rplLiftSpawn(() => spawnTripWireOrb(pos, 'rpl', W.team, null, null, false, W.grp));
+    case 'particle_wall': return _rplLiftSpawn(() => spawnParticleWall(pos, dir, 'rpl', W.team, null, null, false));
+    case 'incendiary_gas': return _rplLiftSpawn(() => spawnIncendiaryGas(pos, 'rpl', W.team, null, null, false));
+    case 'firewall': {
+      const V = { type: 'firewall', team: W.team, meshes: [] };
+      try { _buildFlameChainFlameLicks(V, pos, dir, W.len || 800); } catch (_) {}
+      return V;
+    }
+    case 'pyro_flame': {
+      let fm = null;
+      try { fm = _spawnFireCloudCluster(pos, Object.assign({ count: 3, radius: 48, alpha: 0.55 }, _fireRamp(W.team))); } catch (_) {}
+      return { type: 'pyro_flame', duration: W.dur || 2.0, timer: W.dur || 2.0, fireMeshes: fm || [] };
+    }
+    case 'sonar_pulse': {
+      const m = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), new THREE.MeshBasicMaterial({
+        color: LSS.CLASS_COLORS.TRACKER, wireframe: true, transparent: true, opacity: 0.45,
+        blending: THREE.AdditiveBlending, depthWrite: false }));
+      m.position.copy(pos); m.scale.setScalar(0.01); m.renderOrder = 2;
+      scene.add(m);
+      return { type: 'sonar_pulse', mesh: m };
+    }
+    case 'vortex_core_beam_remote': {
+      let m = null;
+      try {
+        const mat = _makeFXMaterial('core_beam');
+        if (mat && mat.uniforms && mat.uniforms.uPosScale) mat.uniforms.uPosScale.value = 1 / 95;
+        m = new THREE.Mesh(_getVortexCoreBeamConeGeometry(), mat);
+        m.frustumCulled = false; m.renderOrder = 2;
+        scene.add(m);
+      } catch (_) {}
+      return { type: 'vortex_core_beam_remote', mesh: m };
+    }
+  }
+  return null;
+}
+function _rplWfxDress(st, W, V, rt, dtRep) {
+  const el = Math.max(0, rt - W.t0), T = game.time, f = _rplWfxFlagAt(W, rt);
+  switch (W.k) {
+    case 'tether': {
+      V.triggered = !!(f & 1);
+      try { _tetherAlphaApply(V); } catch (_) {}
+      if (V.mesh) {
+        V.mesh.rotation.x += 1.4 * dtRep; V.mesh.rotation.y += 2.1 * dtRep;
+        const u = V.mesh.material && V.mesh.material.uniforms;
+        if (u && u.uIntensity) u.uIntensity.value = V.triggered ? 1.7 : 1.0;
+      }
+      if (V.glow) {
+        V.glow.scale.setScalar(1 + 0.25 * Math.sin(0.7 * ((V.pulsePhase || 0) + 5 * el)));
+        const u = V.glow.material && V.glow.material.uniforms;
+        if (u && u.uIntensity) u.uIntensity.value = V.triggered ? 1.6 : 1.0;
+      }
+      break;
+    }
+    case 'tripwire':
+      if (V.mesh) V.mesh.scale.setScalar(1 + 0.18 * Math.sin((V.pulsePhase || 0) + 4 * el));
+      break;
+    case 'particle_wall': {
+      const hp = f / 20, osc = 0.5 + 0.5 * Math.sin(0.6 * el);
+      const fr = (typeof _fxFriendly === 'function') ? _fxFriendly(W.team) : false;
+      const u = V.mesh && V.mesh.material && V.mesh.material.uniforms;
+      if (u) {
+        if (u.time) u.time.value = T;
+        if (u.uHp) u.uHp.value = hp;
+        if (u.uColor && u.uColor.value && u.uColor.value.setHSL) u.uColor.value.setHSL(fr ? 0.070 + 0.020 * osc : 0.04 + 0.04 * osc, fr ? 1 : 0.85, fr ? 0.60 : 0.55);
+      }
+      if (V.edgeMesh && V.edgeMesh.material) {
+        try { V.edgeMesh.material.color.setHSL(fr ? 0.085 : 0.10, fr ? 0.95 : 0.7, 0.7); V.edgeMesh.material.opacity = 0.3 + 0.4 * hp; } catch (_) {}
+      }
+      break;
+    }
+    case 'incendiary_gas': {
+      const lit = !!(f & 1);
+      if (lit && !V._lit) {
+        V._lit = true;
+        const team = (f - 1) >> 1;
+        try {
+          const gu = V.mesh.material.uniforms, gr = _fireRamp(team);
+          gu.uC0.value.setHex(gr.c0); gu.uC1.value.setHex(gr.c1); gu.uC2.value.setHex(gr.c2); gu.uC3.value.setHex(gr.c3);
+          if (gu.uBaseAlpha) gu.uBaseAlpha.value = 0.8;
+          if (gu.uRise) gu.uRise.value = 1.3;
+          V.mesh.material.blending = THREE.AdditiveBlending; V.mesh.material.needsUpdate = true;
+        } catch (_) {}
+        try { const cu = V.coreMesh.material.uniforms; if (cu && cu.uBaseColor) cu.uBaseColor.value.setHex(0xff7722); } catch (_) {}
+      }
+      try {
+        const gu = V.mesh.material.uniforms;
+        if (gu.time) gu.time.value = T;
+        if (!V._lit) {
+          V.mesh.scale.setScalar(350 + 20 * Math.sin(1.5 * T));
+          if (gu.uBaseAlpha) gu.uBaseAlpha.value = 0.55 + 0.10 * Math.sin(0.8 * T);
+          if (V.coreMesh) V.coreMesh.scale.setScalar(160 + 12 * Math.sin(2 * T + 1));
+        } else {
+          V.mesh.scale.setScalar(350 + 30 * Math.sin(3 * T));
+          if (gu.uBaseAlpha) gu.uBaseAlpha.value = Math.max(0, Math.min(0.95, 0.75 + 0.08 * Math.sin(8 * T)));
+        }
+      } catch (_) {}
+      break;
+    }
+    case 'firewall': {
+      const fade = Math.max(0, Math.min(1, (W.t1 - rt) / 1));
+      for (const m of (V.meshes || [])) {
+        const fx = m.userData && m.userData._fwFX;
+        if (!fx) continue;
+        m.scale.setScalar(fx.baseRadius * (1 + 0.08 * Math.sin(T * fx.freq + fx.phase)) * fade);
+        m.position.y = fx.baseY + 6 * Math.sin(T * fx.freq * 0.5 + fx.phase);
+        const u = m.material && m.material.uniforms;
+        if (u) { if (u.time) u.time.value = T; if (u.uBaseAlpha) u.uBaseAlpha.value = 0.6 * fade; }
+      }
+      break;
+    }
+    case 'pyro_flame': {
+      const dur = V.duration || 2.0, timer = Math.max(0, dur - el), fadeT = timer / dur;
+      for (const m of (V.fireMeshes || [])) {
+        const u = m.material.uniforms;
+        u.time.value = T;
+        u.uBaseAlpha.value = 0.55 * fadeT;
+        m.position.y = m.userData._fcBaseY + (dur - timer) * 40;
+        m.scale.setScalar(m.userData._fcR * (1 + (1 - fadeT) * 0.5));
+      }
+      break;
+    }
+    case 'sonar_pulse': {
+      const k = Math.min(1, el / 1.2);
+      if (V.mesh) { V.mesh.scale.setScalar(Math.max(0.01, 3000 * k)); V.mesh.material.opacity = 0.45 * (1 - k * k); }
+      break;
+    }
+    case 'vortex_core_beam_remote': {
+      const A = W.own ? st.R.actors['n' + W.own] : null;
+      const alive = A ? _rplPoseAt(A, rt, _rplWV, _rplWQ) : false;
+      if (V.mesh) {
+        V.mesh.visible = !!alive;
+        if (alive) {
+          _rplWD.set(0, 0, -1).applyQuaternion(_rplWQ);
+          V.mesh.position.copy(_rplWV).addScaledVector(_rplWD, 1500);
+          V.mesh.quaternion.setFromUnitVectors(_rplWY, _rplWD);
+          V.mesh.scale.set(95, 3000, 95);
+          const u = V.mesh.material && V.mesh.material.uniforms;
+          if (u && u.uIntensity) u.uIntensity.value = 0.92 + 0.10 * Math.sin(7 * T);
+        }
+      }
+      break;
+    }
+  }
+}
+function _rplWfxReplay(st, rt, dtRep) {
+  const R = st.R, wf = R.wf; if (!wf) return;
+  const V = st.wv || (st.wv = {});
+  for (const id in wf) {
+    const W = wf[id];
+    const live = (rt >= W.t0 && rt <= W.t1 + 0.05) && !(W.k === 'tether' && (_rplWfxFlagAt(W, rt) & 2));
+    let v = V[id];
+    if (v && W.k === 'incendiary_gas' && v._lit && !(_rplWfxFlagAt(W, rt) & 1)) { _rplWfxDispose(v); delete V[id]; v = null; }
+    if (!live) { if (v) { _rplWfxDispose(v); delete V[id]; } continue; }
+    if (!v) { v = _rplWfxBuild(W); if (!v) continue; V[id] = v; }
+    try { _rplWfxDress(st, W, v, rt, dtRep); } catch (_) {}
+  }
+}
+function _rplWfxFreeAll(st) {
+  const V = st && st.wv; if (!V) return;
+  for (const id in V) _rplWfxDispose(V[id]);
+  st.wv = {};
+}
+function _rplWfxTick(st, dt) {
+  const L = st.wfx; if (!L || !L.length) return;
+  const t2 = game.time;
+  for (let i = L.length - 1; i >= 0; i--) {
+    const eff = L[i];
+    eff.timer = (eff.timer || 0) - dt;
+    if (eff.timer <= 0) { _rplWfxDispose(eff); L.splice(i, 1); continue; }
+    try {
+      if (eff.type === 'explFireCloud' && eff.fireMeshes) {
+        const tt = 1 - Math.max(0, eff.timer / (eff.duration || 0.5));
+        for (let j = 0; j < eff.fireMeshes.length; j++) {
+          const m = eff.fireMeshes[j], u = m.material.uniforms;
+          u.time.value = t2;
+          u.uBaseAlpha.value = 0.85 * (1 - tt) * (1 - tt);
+          m.scale.setScalar((eff._explSize || 20) * (0.7 + j * 0.3 + tt * (eff._grow != null ? eff._grow : 2.2)));
+        }
+      } else if (eff.type === 'pyro_flame' && eff.fireMeshes) {
+        const fadeT = Math.max(0, eff.timer / (eff.duration || 2.0));
+        for (const m of eff.fireMeshes) {
+          const u = m.material.uniforms;
+          u.time.value = t2;
+          u.uBaseAlpha.value = 0.55 * fadeT;
+          m.position.y = m.userData._fcBaseY + ((eff.duration || 2.0) - eff.timer) * 40;
+          m.scale.setScalar(m.userData._fcR * (1 + (1 - fadeT) * 0.5));
+        }
+      }
+    } catch (_) {}
+  }
+}
+function _rplClassCol(lo) {
+  try { const c = LSS.CLASS_COLORS[lo]; return (c != null) ? '#' + (c >>> 0).toString(16).padStart(6, '0') : '#e8f0ff'; } catch (_) { return '#e8f0ff'; }
+}
+function _rplFmt(s) {
+  s = Math.max(0, s || 0);
+  const m = Math.floor(s / 60), r = s - m * 60;
+  return m + ':' + (r < 10 ? '0' : '') + r.toFixed(1);
+}
+function _rplFlash(msg) {
+  try {
+    let el = document.getElementById('rpl-flash');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'rpl-flash';
+      el.style.cssText = 'position:fixed;left:50%;bottom:22%;transform:translateX(-50%);z-index:10060;padding:10px 18px;' +
+        'background:rgba(8,12,22,.92);border:1px solid rgba(255,204,102,.6);border-radius:5px;color:#ffcc66;' +
+        'font-family:"Rajdhani",sans-serif;font-size:16px;letter-spacing:.14em;pointer-events:none;opacity:0;transition:opacity .25s;';
+      document.body.appendChild(el);
+    }
+    el.textContent = msg;
+    el.style.opacity = '1';
+    clearTimeout(el._t);
+    el._t = setTimeout(() => { el.style.opacity = '0'; }, 2600);
+  } catch (_) {}
+}
+function _rplEnsureUI() {
+  if (document.getElementById('rpl-kc')) return;
+  const st = document.createElement('style');
+  st.id = 'rpl-kc-styles';
+  st.textContent = _RPL_HIDE.map(s => 'body.lss-killcam ' + s + ',body.lss-replay ' + s).join(',') + '{display:none !important;}' +
+    'body.lss-replay #touch-controls{visibility:hidden !important;pointer-events:none !important;}' +
+    '#rpl-kc{position:fixed;inset:0;z-index:214;pointer-events:none;display:none;font-family:"Rajdhani",sans-serif;}' +
+    'body.lss-killcam #rpl-kc{display:block;}' +
+    '#rpl-kc .rpl-bar{position:absolute;left:0;right:0;height:8.5vh;background:#000;}' +
+    '#rpl-kc .rpl-bar.top{top:0;}#rpl-kc .rpl-bar.bot{bottom:0;}' +
+    '#rpl-kc .rpl-title{position:absolute;top:calc(8.5vh + 16px);left:50%;transform:translateX(-50%);font-size:clamp(20px,3.2vmin,34px);' +
+    'letter-spacing:.45em;color:#ffcc66;text-shadow:0 0 14px rgba(255,160,40,.55);white-space:nowrap;}' +
+    '#rpl-kc .rpl-rec{display:inline-block;width:.55em;height:.55em;border-radius:50%;background:#ff3b3b;margin-right:.6em;vertical-align:.08em;' +
+    'box-shadow:0 0 10px #ff3b3b;animation:rplRec 1s steps(2,start) infinite;}@keyframes rplRec{to{visibility:hidden;}}' +
+    '#rpl-kc .rpl-names{position:absolute;bottom:calc(8.5vh + 18px);left:50%;transform:translateX(-50%);font-size:clamp(15px,2.3vmin,24px);' +
+    'letter-spacing:.18em;color:#e8f0ff;white-space:nowrap;text-shadow:0 0 8px rgba(0,0,0,.8);}' +
+    '#rpl-kc .rpl-names .rpl-arrow{color:#ff5a5a;margin:0 .7em;}' +
+    '#rpl-kc .rpl-skip{position:absolute;bottom:2.6vh;right:3vw;font-size:clamp(10px,1.5vmin,14px);letter-spacing:.2em;color:rgba(220,230,255,.55);}' +
+    '#rpl-st{position:fixed;inset:0;z-index:215;pointer-events:none;display:none;font-family:"Rajdhani",sans-serif;color:#e8f0ff;' +
+    'user-select:none;-webkit-user-select:none;}' +
+    'body.lss-replay #rpl-st{display:block;}' +
+    '#rpl-st button{pointer-events:auto;font:inherit;font-weight:600;font-size:clamp(11px,1.55vmin,15px);letter-spacing:.14em;color:#e8f0ff;' +
+    'background:rgba(8,12,22,.74);border:1px solid rgba(160,200,255,.28);border-radius:4px;padding:5px 10px;min-height:32px;cursor:pointer;}' +
+    '#rpl-st button:hover{border-color:rgba(255,204,102,.85);color:#fff;}' +
+    '#rpl-st button.on{background:rgba(255,204,102,.2);border-color:#ffcc66;color:#ffcc66;}' +
+    '#rpl-st button:disabled{opacity:.38;cursor:default;}' +
+    '#rpl-st .rst-top{position:absolute;top:12px;left:16px;right:16px;display:flex;justify-content:space-between;align-items:flex-start;gap:10px;flex-wrap:wrap;}' +
+    '#rpl-st .rst-title{font-size:clamp(16px,2.4vmin,24px);letter-spacing:.32em;color:#ffcc66;text-shadow:0 0 12px rgba(255,160,40,.45),0 0 4px #000;}' +
+    '#rpl-st .rst-sub{display:block;font-size:.6em;letter-spacing:.22em;color:rgba(220,230,255,.78);margin-top:3px;text-shadow:0 0 5px #000;}' +
+    '#rpl-st .rst-btns{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;}' +
+    '#rpl-st .rst-actors{position:absolute;right:16px;top:78px;display:flex;flex-direction:column;gap:4px;max-height:calc(100vh - 240px);overflow-y:auto;pointer-events:auto;}' +
+    '#rpl-st .rst-actors button{text-align:left;min-width:150px;display:flex;align-items:center;gap:8px;}' +
+    '#rpl-st .rst-actors .sw{width:4px;height:16px;border-radius:2px;flex:none;}' +
+    '#rpl-st .rst-actors .tm{margin-left:auto;font-size:.8em;opacity:.6;}' +
+    '#rpl-st .rst-actors button.dead .nm{opacity:.45;text-decoration:line-through;}' +
+    '#rpl-st .rst-bottom{position:absolute;left:16px;right:16px;bottom:12px;display:flex;flex-direction:column;gap:7px;}' +
+    '#rpl-st .rst-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}' +
+    '#rpl-st .rst-time{font-variant-numeric:tabular-nums;font-size:clamp(13px,1.9vmin,18px);letter-spacing:.08em;min-width:128px;text-shadow:0 0 6px #000,0 0 2px #000;}' +
+    '#rpl-st .rst-track{position:relative;flex:1 1 260px;height:28px;pointer-events:auto;cursor:pointer;touch-action:none;}' +
+    '#rpl-st .rst-track .bar{position:absolute;left:0;right:0;top:12px;height:4px;background:rgba(160,200,255,.25);border-radius:2px;}' +
+    '#rpl-st .rst-track .fill{position:absolute;left:0;top:12px;height:4px;background:#ffcc66;border-radius:2px;width:0;}' +
+    '#rpl-st .rst-track .mk{position:absolute;top:6px;width:3px;height:16px;margin-left:-1px;background:#ff4d4d;border-radius:1px;box-shadow:0 0 6px rgba(255,60,60,.8);}' +
+    '#rpl-st .rst-track .head{position:absolute;top:4px;width:4px;height:20px;margin-left:-2px;background:#fff;border-radius:2px;box-shadow:0 0 8px rgba(255,255,255,.8);left:0;}' +
+    '#rpl-st .rst-seg{display:flex;gap:3px;}' +
+    '#rpl-st .rst-hint{font-size:clamp(10px,1.3vmin,13px);letter-spacing:.12em;color:rgba(220,230,255,.62);text-shadow:0 0 6px #000;}' +
+    '#rpl-st .rst-toast{position:absolute;top:17%;left:50%;transform:translateX(-50%);font-size:clamp(16px,2.6vmin,28px);letter-spacing:.2em;' +
+    'white-space:nowrap;opacity:0;transition:opacity .25s;text-shadow:0 0 10px rgba(0,0,0,.95),0 0 3px #000;}' +
+    '#rpl-st .rst-toast.on{opacity:1;}#rpl-st .rst-toast .ar{color:#ff5a5a;margin:0 .6em;}' +
+    '#rpl-st .rst-lbls{position:absolute;inset:0;overflow:hidden;}' +
+    '#rpl-st .rst-lbl{position:absolute;left:0;top:0;font-size:clamp(11px,1.5vmin,14px);letter-spacing:.14em;font-weight:600;white-space:nowrap;' +
+    'text-shadow:0 0 5px #000,0 0 2px #000;opacity:.8;will-change:transform;}' +
+    '#rpl-st .rst-lbl.f{opacity:1;font-size:clamp(13px,1.8vmin,17px);}' +
+    '#rpl-st.ui-off .rst-top,#rpl-st.ui-off .rst-actors,#rpl-st.ui-off .rst-bottom,#rpl-st.ui-off .rst-lbls{display:none;}' +
+    '#rpl-st .rst-lib{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(780px,calc(100vw - 32px));max-height:calc(100vh - 80px);' +
+    'display:none;flex-direction:column;background:rgba(8,12,22,.95);border:1px solid rgba(255,204,102,.45);border-radius:6px;pointer-events:auto;' +
+    'box-shadow:0 10px 40px rgba(0,0,0,.6);}' +
+    '#rpl-st.lib .rst-lib{display:flex;}' +
+    'body.lss-replay-lib #rpl-st{display:block;z-index:10050;background:rgba(0,0,0,.45);}' +
+    'body.lss-replay-lib #rpl-st > :not(.rst-lib){display:none !important;}' +
+    '#rpl-st .rst-lib-h{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid rgba(160,200,255,.18);}' +
+    '#rpl-st .rst-lib-h .t{flex:1;color:#ffcc66;letter-spacing:.3em;font-size:18px;}' +
+    '#rpl-st .rst-lib-l{overflow-y:auto;padding:4px 14px 10px;}' +
+    '#rpl-st .rst-lib-sec{margin:12px 0 2px;font-size:12px;letter-spacing:.25em;color:rgba(220,230,255,.55);}' +
+    '#rpl-st .rst-it{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid rgba(160,200,255,.1);flex-wrap:wrap;}' +
+    '#rpl-st .rst-it .d{flex:1 1 230px;}#rpl-st .rst-it .n{font-size:16px;letter-spacing:.12em;}' +
+    '#rpl-st .rst-it .m{font-size:12px;letter-spacing:.08em;color:rgba(220,230,255,.62);}' +
+    '#rpl-st .rst-it .b{display:flex;gap:4px;flex-wrap:wrap;}' +
+    '#rpl-st .rst-lib-f{padding:10px 14px;font-size:12px;color:rgba(220,230,255,.58);letter-spacing:.05em;border-top:1px solid rgba(160,200,255,.12);}' +
+    '@media (max-width:720px){#rpl-st .rst-actors{top:auto;bottom:150px;right:8px;max-height:28vh;}#rpl-st .rst-actors button{min-width:108px;}' +
+    '#rpl-st .rst-hint{display:none;}#rpl-st .rst-bottom{left:8px;right:8px;}#rpl-st .rst-top{left:8px;right:8px;}}';
+  document.head.appendChild(st);
+  const d = document.createElement('div');
+  d.id = 'rpl-kc';
+  d.innerHTML = '<div class="rpl-bar top"></div><div class="rpl-bar bot"></div>' +
+    "<div class='rpl-title lss-title'><span class='rpl-rec'></span>FINAL KILL</div>" +
+    "<div class='rpl-names'><span class='rpl-k'></span><span class='rpl-arrow'>&#9654;</span><span class='rpl-v'></span></div>" +
+    "<div class='rpl-skip'>ANY KEY TO SKIP</div>";
+  document.body.appendChild(d);
+}
+function _rplMeshOf(A) {
+  if (A.key === 'me') return (player && player.mesh) || null;
+  return (A.ent && A.ent.mesh) || null;
+}
+function _rplFinalKill(R) {
+  if (R.endBy === 'timer') return null;
+  const end = R.endT || _rplNow();
+  for (let i = R.kills.length - 1; i >= 0; i--) {
+    const e = R.kills[i];
+    if (e.t > end + 0.8) continue;
+    if (end - e.t > 3.0) return null;
+    return e;
+  }
+  return null;
+}
+const _RPL_TRAIL_N = 10, _RPL_TRAIL_T = 0.25;
+const _rplTrailPts = [];
+for (let i = 0; i < _RPL_TRAIL_N; i++) _rplTrailPts.push(new THREE.Vector3());
+const _rplTrailD = new THREE.Vector3(), _rplTrailV = new THREE.Vector3(), _rplTmpC = new THREE.Color();
+function _rplPjPath(b, n, t, out) {
+  if (t <= b[0]) { out.set(b[1], b[2], b[3]); return; }
+  const kl = (n - 1) * 4;
+  if (t >= b[kl]) { out.set(b[kl + 1], b[kl + 2], b[kl + 3]); return; }
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (b[mid * 4] <= t) lo = mid; else hi = mid; }
+  const i0 = lo * 4, i1 = hi * 4, sp = b[i1] - b[i0];
+  const u = (sp > 1e-6) ? Math.max(0, Math.min(1, (t - b[i0]) / sp)) : 0;
+  out.set(b[i0 + 1] + (b[i1 + 1] - b[i0 + 1]) * u, b[i0 + 2] + (b[i1 + 2] - b[i0 + 2]) * u, b[i0 + 3] + (b[i1 + 3] - b[i0 + 3]) * u);
+}
+function _rplPjSlot() {
+  const add = (m) => { m.renderOrder = 1; scene.add(m); return m; };
+  const core = add(new THREE.Mesh(_SHARED_PROJ_CORE_GEO, new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 1.0, blending: THREE.AdditiveBlending, depthWrite: false })));
+  let glow = null;
+  try {
+    const gm = _makeFXMaterial('proj_glow');
+    if (gm && gm.uniforms && gm.uniforms.uPosScale) gm.uniforms.uPosScale.value = 1.0 / 7.0;
+    if (gm) glow = add(new THREE.Mesh(_SHARED_PROJ_GLOW_GEO, gm));
+  } catch (_) { glow = null; }
+  const haze = add(new THREE.Mesh(_SHARED_PROJ_HAZE_GEO, new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false })));
+  const N = _RPL_TRAIL_N;
+  const pos = new Float32Array(N * 2 * 3), col = new Float32Array(N * 2 * 3), idx = new Uint16Array((N - 1) * 6);
+  for (let i = 0; i < N - 1; i++) { const a = i * 2; idx[i * 6] = a; idx[i * 6 + 1] = a + 1; idx[i * 6 + 2] = a + 2; idx[i * 6 + 3] = a + 1; idx[i * 6 + 4] = a + 3; idx[i * 6 + 5] = a + 2; }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.setIndex(new THREE.BufferAttribute(idx, 1));
+  const rib = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide }));
+  rib.frustumCulled = false;
+  add(rib);
+  return { core: core, glow: glow, haze: haze, rib: rib, pos: pos, col: col, c: undefined, s: undefined, vis: true };
+}
+function _rplPjSlotShow(sl, on) {
+  if (sl.vis === on) return;
+  sl.vis = on;
+  sl.core.visible = on; sl.haze.visible = on; sl.rib.visible = on;
+  if (sl.glow) sl.glow.visible = on;
+}
+function _rplPjDraw(S, rt) {
+  const pool = S.pmPool || (S.pmPool = []);
+  const N = _RPL_TRAIL_N, dT = _RPL_TRAIL_T / (N - 1);
+  let used = 0;
+  for (let i = 0; i < S.pj.length; i++) {
+    const P = S.pj[i], b = P.buf, n = (b.length / 4) | 0;
+    if (!n || rt < b[0] || rt > b[(n - 1) * 4] + 0.02) continue;
+    let sl = pool[used];
+    if (!sl) { try { sl = pool[used] = _rplPjSlot(); } catch (_) { break; } }
+    used++;
+    _rplPjSlotShow(sl, true);
+    if (sl.c !== P.c) {
+      sl.c = P.c;
+      const c = (P.c != null) ? P.c : 0xffaa00;
+      try {
+        sl.core.material.color.set(c); sl.haze.material.color.set(c);
+        const gu = sl.glow && sl.glow.material.uniforms;
+        if (gu && gu.uBaseColor) gu.uBaseColor.value.set(c);
+        _rplTmpC.set(c);
+        for (let k = 0; k < N; k++) {
+          const f = (1 - k / (N - 1)) * (1 - k / (N - 1));
+          for (let e = 0; e < 2; e++) { const j = (k * 2 + e) * 3; sl.col[j] = _rplTmpC.r * f; sl.col[j + 1] = _rplTmpC.g * f; sl.col[j + 2] = _rplTmpC.b * f; }
+        }
+        sl.rib.geometry.attributes.color.needsUpdate = true;
+      } catch (_) {}
+    }
+    const s = Math.max(0.5, P.s || 1);
+    if (sl.s !== s) { sl.s = s; sl.core.scale.setScalar(s); sl.haze.scale.setScalar(s); if (sl.glow) sl.glow.scale.setScalar(s); }
+    for (let k = 0; k < N; k++) _rplPjPath(b, n, Math.max(b[0], rt - k * dT), _rplTrailPts[k]);
+    const head = _rplTrailPts[0];
+    sl.core.position.copy(head); sl.haze.position.copy(head); if (sl.glow) sl.glow.position.copy(head);
+    const w0 = 5.5 * s * 0.5;
+    for (let k = 0; k < N; k++) {
+      const p = _rplTrailPts[k];
+      const a = _rplTrailPts[Math.max(0, k - 1)], z = _rplTrailPts[Math.min(N - 1, k + 1)];
+      _rplTrailD.subVectors(a, z);
+      _rplTrailV.subVectors(camera.position, p);
+      _rplTrailD.cross(_rplTrailV);
+      const L = _rplTrailD.length();
+      const w = w0 * (1 - 0.7 * k / (N - 1));
+      if (L > 1e-6) _rplTrailD.multiplyScalar(w / L); else _rplTrailD.set(0, 0, 0);
+      const j = k * 6;
+      sl.pos[j] = p.x + _rplTrailD.x; sl.pos[j + 1] = p.y + _rplTrailD.y; sl.pos[j + 2] = p.z + _rplTrailD.z;
+      sl.pos[j + 3] = p.x - _rplTrailD.x; sl.pos[j + 4] = p.y - _rplTrailD.y; sl.pos[j + 5] = p.z - _rplTrailD.z;
+    }
+    sl.rib.geometry.attributes.position.needsUpdate = true;
+  }
+  for (let i = used; i < pool.length; i++) _rplPjSlotShow(pool[i], false);
+}
+function _rplPjFree(S) {
+  for (const sl of (S.pmPool || [])) {
+    for (const m of [sl.core, sl.glow, sl.haze, sl.rib]) {
+      if (!m) continue;
+      try { if (m.parent) m.parent.remove(m); if (m.material) m.material.dispose(); } catch (_) {}
+    }
+    try { sl.rib.geometry.dispose(); } catch (_) {}   // its own; the other three share the live shots' geometry
+  }
+  S.pmPool = [];
+}
+function _rplKcStart(R, K) {
+  if (!R || !K || _RPL.kc || _RPL.studio) { _rplLog('kc refused: ' + (!R ? 'no rec' : !K ? 'no kill' : _RPL.kc ? 'one running' : 'studio open')); return false; }
+  const cfg = _rplCfg();
+  const vk = K.a[0], kk = K.a[1];
+  if (!R.actors[vk]) { _rplLog('kc refused: victim ' + vk + ' was never sampled'); return false; }
+  let lead = Math.max(0.2, +cfg.lead || 4);
+  const rate = Math.max(0.05, Math.min(1, +cfg.rate || (1 / 3)));
+  const fast = Math.max(rate, Math.min(4, +cfg.fastRate || 1));
+  let slowLead = Math.min(lead, (cfg.slowLead != null) ? Math.max(0, +cfg.slowLead) : 1.2);
+  const hold = (cfg.hold != null) ? +cfg.hold : 0.3;
+  let tail = _rplKcTail(cfg, rate);
+  const realNeed = () => (lead - slowLead) / fast + (slowLead + tail) / rate + hold + 0.15;
+  try {
+    if (game.state === 'roundEnd' && typeof game.roundEndTimer === 'number') {
+      const need = realNeed();
+      let left = game.roundEndTimer;
+      if (need > left) {
+        const solo = !(typeof net !== 'undefined' && net && net.active);
+        if (solo && typeof game.roundEndTimerTotal === 'number') {
+          const ext = Math.min(cfg.maxExtend || 6, need - left);
+          game.roundEndTimerTotal += ext;
+          game.roundEndTimer += ext;
+          left += ext;
+          _rplLog('kc: solo round end held ' + ext.toFixed(2) + ' s longer for the replay');
+        }
+        if (realNeed() > left) {
+          const budget = Math.max(0.6, left - hold - 0.15);
+          const slowReal = (slowLead + tail) / rate;
+          if (slowReal < budget) {
+            lead = slowLead + (budget - slowReal) * fast;
+          } else {
+            tail = Math.min(tail, Math.max(0.2, budget * rate * 0.4));
+            slowLead = Math.max(0.3, budget * rate - tail);
+            lead = slowLead;
+          }
+        }
+      }
+    }
+  } catch (_) {}
+  _rplLog('kc start: ' + (kk || '?') + ' > ' + vk + ' at ' + (K.t - R.t0).toFixed(1) + ' s, lead ' + lead.toFixed(2) + ' s (last ' +
+          slowLead.toFixed(2) + ' slow) + tail ' + tail.toFixed(2) + ' s, ' + fast.toFixed(2) + 'x -> ' + rate.toFixed(2) + 'x');
+  const t0 = Math.max(R.t0, K.t - lead), t1 = K.t + tail;
+  const now = performance.now();
+  const kc = _RPL.kc = { R, K, vk, kk, t0, t1, rt: t0, rate: fast, rateFast: fast, rateSlow: rate, slowFrom: K.t - slowLead,
+                         cfg, lead, hold, evI: 0, pj: [], pmPool: [], wfx: [], saved: [], skip: false,
+                         skipArmAt: now + 450, last: now, camInit: false, camPos: new THREE.Vector3(),
+                         gpWas: !!(typeof input !== 'undefined' && input.gpFire), padWas: [], endAt: 0 };
+  while (kc.evI < R.ev.length && R.ev[kc.evI].t < t0) kc.evI++;
+  try { for (const p of (game.projectiles || [])) { try { _despawnProjectileSilent(p); } catch (_) {} } game.projectiles = []; } catch (_) {}
+  _rplClearFx();
+  for (const key in R.actors) {
+    const m = _rplMeshOf(R.actors[key]);
+    if (m) kc.saved.push({ m, parent: m.parent, vis: m.visible, p: m.position.clone(), q: m.quaternion.clone(), bot: m.userData ? m.userData.bot : undefined });
+  }
+  for (const id in R.pj) {
+    const P = R.pj[id], b = P.buf, n = (b.length / 4) | 0;
+    if (n && b[(n - 1) * 4] >= t0 && b[0] <= t1) kc.pj.push(P);
+  }
+  kc.pjSeen = R.pid;
+  try {
+    _rplEnsureUI();
+    const el = document.getElementById('rpl-kc');
+    const KA = kk ? R.actors[kk] : null, VA = R.actors[vk];
+    const ks = el.querySelector('.rpl-k'), vs = el.querySelector('.rpl-v'), ar = el.querySelector('.rpl-arrow');
+    ks.textContent = KA ? KA.name : ''; ks.style.color = KA ? _rplClassCol(KA.lo) : '';
+    ar.style.display = KA ? '' : 'none';
+    vs.textContent = VA ? VA.name : ''; vs.style.color = VA ? _rplClassCol(VA.lo) : '';
+    document.body.classList.add('lss-killcam');
+  } catch (_) {}
+  const onIn = (ev) => {
+    if (!_RPL.kc) return;
+    if (performance.now() < _RPL.kc.skipArmAt) return;
+    if (ev && ev.code === 'F9') return;   // F9 is the clip recorder's save - not a skip
+    _RPL.kc.skip = true;
+  };
+  kc.onIn = onIn;
+  try { window.addEventListener('keydown', onIn, true); window.addEventListener('mousedown', onIn, true); } catch (_) {}
+  try { if (typeof _ghostHullRestore === 'function' && player && player.mesh) _ghostHullRestore(player.mesh); } catch (_) {}
+  _adsReset();   // (v48.05) a round won while zoomed would otherwise be replayed through the scope
+  try { window.__killcamN = (window.__killcamN | 0) + 1; } catch (_) {}
+  return true;
+}
+function _rplKcEnd() {
+  const kc = _RPL.kc; if (!kc) return;
+  _RPL.kc = null;
+  try { window.removeEventListener('keydown', kc.onIn, true); window.removeEventListener('mousedown', kc.onIn, true); } catch (_) {}
+  for (const s of kc.saved) {
+    try {
+      const m = s.m;
+      if (m.userData && m.userData.bot !== s.bot) continue;
+      if (!s.parent) { if (m.parent) m.parent.remove(m); }
+      else if (m.parent !== s.parent) s.parent.add(m);
+      m.visible = s.vis; m.position.copy(s.p); m.quaternion.copy(s.q);
+    } catch (_) {}
+  }
+  _rplPjFree(kc);
+  for (const e of (kc.wfx || [])) _rplWfxDispose(e);   // (v48.07) its own fire clouds
+  kc.wfx = [];
+  try { document.body.classList.remove('lss-killcam'); } catch (_) {}
+}
+function _rplPadRaw() {
+  try {
+    const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (let i = 0; i < pads.length; i++) { const g = pads[i]; if (g && g.connected !== false && !(g.id && g.id.indexOf('XR Virtual Gamepad') === 0)) return g; }
+  } catch (_) {}
+  return null;
+}
+function _rplKcFrame(now) {
+  const kc = _RPL.kc, R = kc.R, K = kc.K, cfg = kc.cfg;
+  const dtR = Math.min(0.1, Math.max(0, (now - kc.last) / 1000)); kc.last = now;
+  try {
+    const gp = !!(typeof input !== 'undefined' && input.gpFire);
+    if (gp && !kc.gpWas && now >= kc.skipArmAt) kc.skip = true;
+    kc.gpWas = gp;
+    const pad = _rplPadRaw();
+    if (pad) {
+      const b = pad.buttons || [], dn = (i) => !!(b[i] && b[i].pressed);
+      if (now >= kc.skipArmAt && ((dn(0) && !kc.padWas[0]) || (dn(1) && !kc.padWas[1]))) kc.skip = true;
+      kc.padWas = [dn(0), dn(1)];
+    }
+  } catch (_) {}
+  if (kc.skip) { _rplKcEnd(); return; }
+  {
+    const s0 = kc.slowFrom, E = 0.3;
+    let k = kc.rateSlow;
+    if (kc.rt <= s0 - E) k = kc.rateFast;
+    else if (kc.rt < s0) { const u = (kc.rt - (s0 - E)) / E; k = kc.rateFast + (kc.rateSlow - kc.rateFast) * u * u * (3 - 2 * u); }
+    kc.rate = k;
+  }
+  kc.rt = Math.min(kc.t1, kc.rt + dtR * kc.rate);
+  while ((kc.pjSeen | 0) < R.pid) { const P = R.pj[++kc.pjSeen]; if (P) kc.pj.push(P); }
+  _RPL.replay = true;
+  try {
+    while (kc.evI < R.ev.length && R.ev[kc.evI].t <= kc.rt) _rplFireLifted(kc, R.ev[kc.evI++]);
+  } finally { _RPL.replay = false; }
+  _rplWfxTick(kc, dtR * kc.rate);
+  for (const key in R.actors) {
+    const A = R.actors[key], m = _rplMeshOf(A);
+    if (!m) continue;
+    const alive = _rplPoseAt(A, kc.rt, _rplP, _rplQ);
+    if (!m.parent) scene.add(m);
+    m.visible = alive;
+    m.position.copy(_rplP); m.quaternion.copy(_rplQ);
+  }
+  _rplKcCamera(kc, dtR);
+  _rplPjDraw(kc, kc.rt);   // (v48.01) after the camera: the shot ribbons face this frame's eye
+  try { if (typeof _audioUpdateListener === 'function') _audioUpdateListener(); } catch (_) {}   // spatial sound hears the replay camera
+  if (kc.rt >= kc.t1) {
+    if (!kc.endAt) kc.endAt = now + (kc.hold || 0.4) * 1000;   // a beat on the last frame
+    else if (now >= kc.endAt) _rplKcEnd();
+  }
+}
+function _rplBoom(from, want, hull) {
+  try {
+    if (typeof worldSDF !== 'function') return;
+    _rplTmp2.copy(want).sub(from);
+    const L = _rplTmp2.length();
+    if (L <= 1) return;
+    _rplTmp2.multiplyScalar(1 / L);
+    let s = L;
+    for (let k = 1; k <= 8; k++) {
+      const d = L * k / 8;
+      if (worldSDF(from.x + _rplTmp2.x * d, from.y + _rplTmp2.y * d, from.z + _rplTmp2.z * d) > -30) { s = Math.max(hull * 0.9, d - L / 8); break; }
+    }
+    want.copy(from).addScaledVector(_rplTmp2, s);
+  } catch (_) {}
+}
+function _rplKcCamera(kc, dt) {
+  const R = kc.R, K = kc.K, cfg = kc.cfg;
+  const VA = R.actors[kc.vk], KA = kc.kk ? R.actors[kc.kk] : null;
+  _rplPoseAt(VA, Math.min(kc.rt, K.t), _rplP2, null);   // the victim, frozen where it died
+  const want = _rplCamTgt;
+  if (KA && KA.buf.length) {
+    _rplPoseAt(KA, kc.rt, _rplP, _rplQ);
+    _rplFwd.set(0, 0, 1).applyQuaternion(_rplQ);   // hull nose is local +Z
+    const hull = Math.max(60, KA.hull || 100);
+    want.copy(_rplP).addScaledVector(_rplFwd, -hull * 2.6).addScaledVector(_rplUp, hull * 0.75);
+    const L = kc.lead || cfg.lead;
+    const w = Math.max(0, Math.min(1, (kc.rt - (K.t - L * 0.75)) / Math.max(0.2, L * 0.75 - 0.15)));
+    const ws = w * w * (3 - 2 * w);
+    _rplLook.copy(_rplP).addScaledVector(_rplFwd, hull * 8).lerp(_rplP2, ws);
+    _rplBoom(_rplP, want, hull);
+  } else {
+    const a = (kc.rt - kc.t0) * 0.35;
+    want.set(_rplP2.x + Math.cos(a) * 520, _rplP2.y + 180, _rplP2.z + Math.sin(a) * 520);
+    _rplLook.copy(_rplP2);
+  }
+  if (!kc.camInit) { kc.camInit = true; kc.camPos.copy(want); kc.look = _rplLook.clone(); }
+  const k = 1 - Math.exp(-dt * 7);
+  kc.camPos.lerp(want, k);
+  kc.look.lerp(_rplLook, 1 - Math.exp(-dt * 9));
+  camera.position.copy(kc.camPos);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(kc.look);
+}
+function _rplState(prev, st) {
+  _rplLog('state ' + prev + ' > ' + st + '  round ' + (game.currentRound | 0));
+  if (st === 'playing' && prev !== 'playing') {
+    if (_RPL.kc) _rplKcEnd();
+    if (_rplEnabled()) { _RPL.cur = _rplNewRec(); _RPL.rec = true; _rplLibAdd(_RPL.cur); }
+    else { _RPL.cur = null; _RPL.rec = false; }
+    const th = _RPL.theater;
+    if (th) {
+      _RPL.theater = null;
+      if (Date.now() < (th.until || 0) && game.selectedMap === th.map) {
+        _rplLoad(th.id).then((R) => {
+          _rplLibAdd(R);
+          _rplLog('theater: opening replay ' + th.id + ' on ' + th.map);
+          if (!_rplStudioOpen(R, { t: R.t0, play: true, theater: true })) _rplFlash('THE REPLAY COULD NOT OPEN HERE');
+        }).catch((e) => _rplFlash('COULD NOT LOAD THE REPLAY: ' + String((e && e.message) || e).toUpperCase()));
+      }
+    }
+  } else if (st === 'roundEnd' && prev === 'playing') {
+    if (_RPL.cur) {
+      _RPL.cur.endT = _rplNow();
+      _RPL.cur.endBy = (typeof game.roundTimer === 'number' && game.roundTimer <= 0.05) ? 'timer' : 'play';
+      _RPL.kcAt = performance.now() + _rplCfg().delay * 1000;
+    }
+  } else if (st !== 'roundEnd' && st !== 'playing') {
+    if (_RPL.kc) _rplKcEnd();
+    if (_RPL.cur) {
+      if (!_RPL.cur.endT) _RPL.cur.endT = _rplNow();
+      _RPL.last = _RPL.cur;
+      const done = _RPL.cur;
+      setTimeout(() => _rplAutoKeep(done), 1200);   // (v48.05) every finished round is kept
+    }
+    _RPL.cur = null; _RPL.rec = false; _RPL.kcAt = 0;
+  }
+}
+function _rplFrame() {
+  const st = game.state;
+  if (st !== _RPL._st) { const p = _RPL._st; _RPL._st = st; try { _rplState(p, st); } catch (e) { console.warn('[replay] state:', e); } }
+  const now = performance.now();
+  if (_RPL.studio) {
+    try { _rplStudioFrame(now); } catch (e) { console.warn('[replay] studio frame failed - closing it:', e); try { _rplStudioClose(); } catch (_) {} }
+    return;
+  }
+  if (_RPL.kcAt && now >= _RPL.kcAt) {
+    _RPL.kcAt = 0;
+    try {
+      const R = _RPL.cur, K = R ? _rplFinalKill(R) : null;
+      _rplLog('final kill? ' + (R ? 'round ' + R.round + ' ended ' + (R.endT - R.t0).toFixed(1) + ' s by ' + (R.endBy || '?') + ', kills ' + R.kills.length +
+              ' -> ' + (K ? (K.a[1] || '?') + ' > ' + K.a[0] + ' at ' + (K.t - R.t0).toFixed(1) : 'none') : 'no recording'));
+      if (K && _rplEnabled()) _rplKcStart(R, K);
+    } catch (e) { console.warn('[replay] kill cam start failed:', e); _rplKcEnd(); }
+  }
+  if (_RPL.kc) {
+    if (_RPL.rec) { try { _rplSample(true); } catch (_) {} }
+    try { _rplKcFrame(now); } catch (e) { console.warn('[replay] kill cam frame failed:', e); _rplKcEnd(); }
+    return;
+  }
+  if (_RPL.rec) { try { _rplSample(); } catch (_) {} }
+}
+
+function _rplEnd(R) {
+  if (!R) return 0;
+  if (R.endT) return R.endT;
+  return (R === _RPL.cur) ? _rplNow() : Math.max(R.t0, R._lastT || R.t0);
+}
+function _rplLibAdd(R) {
+  const L = _RPL.lib;
+  if (L.indexOf(R) < 0) L.push(R);
+  while (L.length > 8) {
+    const i = L.findIndex(x => x !== _RPL.cur && !(_RPL.studio && _RPL.studio.R === x));
+    if (i < 0) break;
+    L.splice(i, 1);
+  }
+}
+function _rplMeta(R) {
+  return { id: R.id, when: R.when || 0, map: R.map, mapName: R.mapName || R.map, sig: R.sig, round: R.round | 0,
+           secs: +(_rplEnd(R) - R.t0).toFixed(1), kills: R.kills.length, ships: Object.keys(R.actors).length, build: R.build };
+}
+function _rplSerialize(R) {
+  const t0 = R.t0, r1 = (x) => Math.round(x * 10) / 10, r4 = (x) => Math.round(x * 10000) / 10000;
+  const actors = {};
+  for (const k in R.actors) {
+    const A = R.actors[k], b = A.buf, o = new Array(b.length);
+    for (let i = 0; i < b.length; i++) { const f = i % 9; o[i] = (f === 0) ? r4(b[i] - t0) : (f <= 3 ? r1(b[i]) : (f <= 7 ? r4(b[i]) : b[i])); }
+    actors[k] = { lo: A.lo, team: A.team, name: A.name, hull: A.hull, skin: A.skin || null, stride: 't,x,y,z,qx,qy,qz,qw,alive', buf: o,
+                  sx: (A.sx || []).map((v, i) => (i % 3 === 0) ? r4(v - t0) : v) };   // (v48.01) t, shield, doomed
+  }
+  return { lssReplay: 1, id: R.id, when: R.when || 0, build: R.build, mode: R.mode, map: R.map, mapName: R.mapName || R.map,
+           sig: R.sig, seed: R.seed, round: R.round, secs: r4(_rplEnd(R) - t0), actors: actors,
+           events: R.ev.map(e => ({ t: r4(e.t - t0), k: e.k, a: e.a })),
+           projectiles: Object.keys(R.pj).map(id => ({ c: R.pj[id].c, s: R.pj[id].s, buf: R.pj[id].buf.map((v, i) => (i % 4 === 0) ? r4(v - t0) : r1(v)) })),
+           worldFx: Object.keys(R.wf || {}).map(id => {
+             const W = R.wf[id];
+             return { k: W.k, t0: r4(W.t0 - t0), t1: r4(W.t1 - t0), p: W.p ? W.p.map(r1) : null, d: W.d ? W.d.map(r4) : null,
+                      len: W.len, r: W.r, team: W.team, own: W.own, grp: W.grp, dur: W.dur,
+                      sx: W.sx.map((v, i) => (i % 2 === 0) ? r4(v - t0) : v) };
+           }) };
+}
+function _rplDeserialize(o) {
+  if (!o || o.lssReplay !== 1 || !o.actors || !Array.isArray(o.events)) throw new Error('not an LSS replay file');
+  const R = { id: o.id || _rplNewId(), when: o.when || 0, t0: 0, endT: +o.secs || 0.05, pa: 0, round: o.round | 0, map: o.map,
+              mapName: o.mapName || o.map, sig: o.sig || String(o.map || '?'), mode: o.mode, seed: o.seed, build: o.build,
+              actors: {}, ev: [], kills: [], pj: {}, pid: 0, _lastT: 0, _trimAt: 0, saved: false, savedSecs: 0 };
+  for (const k in o.actors) {
+    const A = o.actors[k] || {};
+    R.actors[k] = { key: k, lo: A.lo || null, team: A.team, name: A.name || k, hull: A.hull || 100, skin: A.skin || null,
+                    buf: Array.isArray(A.buf) ? A.buf : [], sx: Array.isArray(A.sx) ? A.sx : [] };
+  }
+  for (const e of o.events) {
+    if (!e || typeof e.t !== 'number') continue;
+    const x = { t: e.t, k: e.k, a: Array.isArray(e.a) ? e.a : [] };
+    R.ev.push(x);
+    if (x.k === 'kill') R.kills.push(x);
+  }
+  (o.projectiles || []).forEach((P, i) => { if (P && Array.isArray(P.buf)) R.pj[i + 1] = { c: P.c, s: P.s || 1, buf: P.buf }; });
+  R.pid = (o.projectiles || []).length;
+  R.wf = {};
+  (o.worldFx || []).forEach((W, i) => {
+    if (!W || !_RPL_WFX[W.k] || typeof W.t0 !== 'number') return;
+    R.wf[i + 1] = { k: W.k, t0: W.t0, t1: +W.t1 || W.t0, p: W.p || null, d: W.d || null, len: W.len || 0, r: W.r || 0,
+                    team: (W.team != null) ? W.team : null, own: W.own || null, grp: (W.grp != null) ? W.grp : null,
+                    dur: W.dur || 0, sx: Array.isArray(W.sx) ? W.sx : [] };
+  });
+  R.wid = (o.worldFx || []).length;
+  return R;
+}
+function _rplExport(R) {
+  const txt = JSON.stringify(_rplSerialize(R));
+  try {
+    const blob = new Blob([txt], { type: 'application/json' });
+    const a = document.createElement('a');
+    const safe = String(R.mapName || R.map || 'map').replace(/[^a-z0-9]+/gi, '_').replace(/^_|_$/g, '').toLowerCase() || 'map';
+    const d = new Date(R.when || Date.now());
+    const stamp = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '_' +
+                  String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'lss_replay_' + safe + '_r' + (R.round | 0) + '_' + stamp + '.json';
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { try { URL.revokeObjectURL(a.href); a.remove(); } catch (_) {} }, 1500);
+  } catch (e) { return String(e); }
+  return txt.length;
+}
+const _RPL_IDB = { p: null };
+function _rplIdb() {
+  if (_RPL_IDB.p) return _RPL_IDB.p;
+  _RPL_IDB.p = new Promise((res, rej) => {
+    try {
+      const rq = indexedDB.open('lss-replays', 1);
+      rq.onupgradeneeded = () => {
+        const db = rq.result;
+        if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('rec')) db.createObjectStore('rec', { keyPath: 'id' });
+      };
+      rq.onsuccess = () => res(rq.result);
+      rq.onerror = () => rej(rq.error);
+      rq.onblocked = () => rej(new Error('replay store blocked'));
+    } catch (e) { rej(e); }
+  });
+  _RPL_IDB.p.catch(() => { _RPL_IDB.p = null; });
+  return _RPL_IDB.p;
+}
+function _rplIdbDo(stores, mode, fn) {
+  return _rplIdb().then(db => new Promise((res, rej) => {
+    const tx = db.transaction(stores, mode);
+    let out;
+    try { out = fn(tx); } catch (e) { rej(e); return; }
+    tx.oncomplete = () => res(out && out.result !== undefined ? out.result : out);
+    tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error || new Error('aborted'));
+  }));
+}
+function _rplSave(R, auto) {
+  const o = _rplSerialize(R), m = _rplMeta(R);
+  m.auto = !!auto;
+  return _rplIdbDo(['meta', 'rec'], 'readwrite', (tx) => { tx.objectStore('rec').put(o); tx.objectStore('meta').put(m); })
+    .then(() => { R.saved = true; R.savedSecs = m.secs; R.auto = !!auto; return m; });
+}
+function _rplSavedList() { return _rplIdbDo(['meta'], 'readonly', (tx) => tx.objectStore('meta').getAll()).then(a => Array.isArray(a) ? a : []); }
+function _rplLoad(id) {
+  return _rplIdb().then(db => new Promise((res, rej) => {
+    const tx = db.transaction(['rec', 'meta'], 'readonly');
+    const a = tx.objectStore('rec').get(id), b = tx.objectStore('meta').get(id);
+    tx.oncomplete = () => {
+      try {
+        const R = _rplDeserialize(a.result);
+        R.saved = true; R.savedSecs = +(R.endT).toFixed(1); R.auto = !!(b.result && b.result.auto);
+        res(R);
+      } catch (e) { rej(e); }
+    };
+    tx.onerror = () => rej(tx.error);
+    tx.onabort = () => rej(tx.error || new Error('aborted'));
+  }));
+}
+function _rplKeepN() {
+  try { const k = window.__replayKeep; if (typeof k === 'number' && k >= 0) return Math.floor(k); } catch (_) {}
+  return 12;
+}
+function _rplAutoKeep(R) {
+  try {
+    if (!R || (_rplEnd(R) - R.t0) < 5 || !Object.keys(R.actors).length) return;
+    const N = _rplKeepN();
+    if (N <= 0 && !(R.saved && !R.auto)) return;
+    const pinned = !!(R.saved && !R.auto);
+    _rplSave(R, !pinned).then(() => {
+      _rplLog('kept round ' + R.round + ' (' + (pinned ? 'pinned' : 'recent') + ')');
+      if (pinned) return;
+      return _rplSavedList().then(list => {
+        const auto = list.filter(m => m && m.auto).sort((a, b) => (b.when || 0) - (a.when || 0));
+        const drop = auto.slice(N);
+        return Promise.all(drop.map(m => _rplDel(m.id).then(() => {
+          const x = _RPL.lib.find(r => r.id === m.id); if (x) { x.saved = false; x.savedSecs = 0; x.auto = false; }
+        })));
+      });
+    }).then(() => { try { _rplLibRefresh(); } catch (_) {} })
+      .catch((e) => { _rplLog('keep failed: ' + String((e && e.message) || e)); });
+  } catch (_) {}
+}
+function _rplPin(id) {
+  const R = _RPL.lib.find(x => x.id === id);
+  if (R) { _rplStudioSaveR(R, null); return; }
+  _rplIdbDo(['meta'], 'readwrite', (tx) => {
+    const st = tx.objectStore('meta'), rq = st.get(id);
+    rq.onsuccess = () => { const m = rq.result; if (m) { m.auto = false; st.put(m); } };
+  }).then(() => { _rplFlash('REPLAY SAVED IN THIS BROWSER'); _rplLibRefresh(); })
+    .catch(e => _rplFlash('SAVE FAILED: ' + String((e && e.message) || e).toUpperCase()));
+}
+function _rplDel(id) { return _rplIdbDo(['meta', 'rec'], 'readwrite', (tx) => { tx.objectStore('rec').delete(id); tx.objectStore('meta').delete(id); }); }
+function _rplInStore(R) { return !!(R && R.saved && R.savedSecs >= (_rplEnd(R) - R.t0) - 0.5); }
+function _rplIsSaved(R) { return _rplInStore(R) && !R.auto; }
+
+const _RPL_SPEEDS = [0.1, 0.25, 0.5, 1, 2, 4];
+const _RPL_CAMS = ['chase', 'pov', 'orbit', 'ghost'];
+const _RPL_CAM_NAMES = { chase: 'CHASE', pov: 'COCKPIT', orbit: 'ORBIT', ghost: 'GHOST' };
+function _rplStudioCan() {
+  try {
+    if (typeof isXRPresenting === 'function' && isXRPresenting()) return { ok: false, why: 'THE REPLAY STUDIO IS FLAT-SCREEN ONLY' };
+    if (typeof LSS === 'undefined' || LSS.MODE !== 'classic') return { ok: false, why: 'REPLAYS ARE RECORDED IN ELIMINATION' };
+    if (typeof net !== 'undefined' && net && net.active) return { ok: false, why: 'THE REPLAY STUDIO OPENS IN SOLO MATCHES (IT PAUSES THE MATCH)' };
+    if (game.state !== 'playing' && game.state !== 'roundEnd') return { ok: false, why: 'OPEN THE REPLAY STUDIO DURING A ROUND' };
+    if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return { ok: false, why: 'WAIT FOR THE FLY-IN' };
+    return { ok: true, why: '' };
+  } catch (e) { return { ok: false, why: String(e) }; }
+}
+function _rplOrder(R) {
+  const ks = Object.keys(R.actors).filter(k => R.actors[k].buf.length >= 9);
+  const meTeam = R.actors.me ? R.actors.me.team : null;
+  const seat = (k) => { const n = parseInt(k.slice(1), 10); return isFinite(n) ? n : 0; };
+  ks.sort((a, b) => {
+    if (a === 'me') return -1; if (b === 'me') return 1;
+    const ta = (R.actors[a].team === meTeam) ? 0 : 1, tb = (R.actors[b].team === meTeam) ? 0 : 1;
+    if (ta !== tb) return ta - tb;
+    if (a[0] !== b[0]) return a < b ? -1 : 1;
+    return seat(a) - seat(b);
+  });
+  return ks;
+}
+function _rplPuppet(st, key) {
+  const A = st.R.actors[key];
+  try {
+    const lo = A.lo;
+    if (!lo || typeof LOADOUTS === 'undefined' || !LOADOUTS[lo]) return;
+    const ch = CHASSIS[LOADOUTS[lo].chassis]; if (!ch) return;
+    const col = (key === 'me') ? 0xff4444 : ((A.team === LSS.TEAM_FLEET_A) ? 0xff4444 : 0x44bb44);
+    const skin = A.skin || null;
+    let m = (!skin && typeof _botShipPoolTake === 'function') ? _botShipPoolTake(lo + '|' + col + '|') : null;
+    if (!m) m = createShipMesh(ch, col, lo, skin || undefined);
+    if (!m) return;
+    const owner = { loadoutKey: lo, chassis: ch, skinId: skin, mesh: m, alive: true, _rplPuppet: true };
+    scene.add(m);
+    if (m.userData && m.userData.isProceduralFallback) { try { swapToModelMeshWhenReady(owner, col); } catch (_) {} }
+    st.pup[key] = { owner: owner, A: A, alive: false, label: null };
+  } catch (e) { console.warn('[replay] puppet ' + key + ' failed:', e); }
+}
+function _rplPuppetFree(P) {
+  const o = P.owner; o.alive = false;   // a GLB swap still in flight bails on this (swapToModelMeshWhenReady's isDead)
+  const m = o.mesh; if (!m) return;
+  try { P.shMesh = null; _stripHullHugClones(m); if (P.sh) _clearShipShieldEmissive(m); P.sh = null; } catch (_) {}
+  try { if (P.cloak) { P.cloak = false; _setShipMeshOpacity(m, 1.0); } } catch (_) {}
+  try {
+    const pooled = !o.skinId && typeof _botShipPoolPut === 'function' && _botShipPoolPut({ mesh: m });
+    if (!pooled) _disposeShipGroup(m);
+  } catch (_) { try { if (m.parent) m.parent.remove(m); } catch (__) {} }
+  try { if (P.label && P.label.parentNode) P.label.parentNode.removeChild(P.label); } catch (_) {}
+}
+function _rplClearInput() {
+  try {
+    if (input.keys) for (const k in input.keys) input.keys[k] = false;
+    input.mouseDown = false; input.rightMouseDown = false; input.mouseDX = 0; input.mouseDY = 0;
+  } catch (_) {}
+}
+function _rplStudioOpen(R, opts) {
+  opts = opts || {};
+  if (!R || _RPL.studio) return false;
+  if (!opts.theater && !opts.dev) { _rplFlash('REPLAYS ARE WATCHED FROM THE MAIN MENU'); return false; }
+  const can = _rplStudioCan();
+  if (!can.ok) { _rplFlash(can.why); return false; }
+  if (!opts.force && R.sig && R.sig !== _rplLevelSig()) { _rplFlash('RECORDED ON ' + String(R.mapName || R.map).toUpperCase() + ' - START A SOLO MATCH THERE TO WATCH IT'); return false; }
+  if (!_rplOrder(R).length) { _rplFlash('NOTHING RECORDED IN THAT ROUND YET'); return false; }
+  if (_RPL.kc) _rplKcEnd();
+  _RPL.kcAt = 0;
+  try { if (typeof settingsOpen !== 'undefined' && settingsOpen) closeSettings(); } catch (_) {}
+  try { _clockPause('studio', true); } catch (_) {}   // (v48.01) the round clocks stand still under it
+  _adsReset();   // (v48.05) never through the scope the pilot was holding
+  _rplEnsureUI();
+  const st = _RPL.studio = {
+    R: null, t0: 0, t1: 0, rt: 0, playing: true, rate: 1, sp: 3, cam: 'chase', follow: null, order: [], pup: {}, pj: [], pmPool: [],
+    evI: 0, hidden: [], keys: {}, drag: null, mdx: 0, mdy: 0, wheel: 0, jump: true, wfx: [], theater: !!opts.theater,
+    camPos: new THREE.Vector3(), camLook: new THREE.Vector3(), camInit: false, chAz: 0, chEl: 0, zoom: 1,
+    orbAz: 0.7, orbEl: 0.32, orbDist: 0, gPos: new THREE.Vector3(), gYaw: 0, gPitch: 0, gInit: false, gSpeedExp: 0,
+    gt0: game.time, wall0: Date.now(), last: performance.now(), sound: true, uiOff: false, libOpen: false, scrubbing: false,
+    gpPrev: [], padScrub: 0, pad: { lx: 0, ly: 0, rx: 0, ry: 0, up: false, dn: false, fast: false },
+    toastT: 0, uiT: 0, timeTxt: '', ui: null,
+  };
+  _rplClearFx();
+  const hide = (m) => { if (m && m.isObject3D) { st.hidden.push({ m: m, vis: m.visible }); m.visible = false; } };
+  try { if (player && player.mesh) hide(player.mesh); } catch (_) {}
+  for (const e of (game.entities || [])) {
+    try { if (e && e.mesh && (e.loadoutKey || e.peerId) && !e.isEarthLife && !e.isHubTraffic && e._owCity == null) hide(e.mesh); } catch (_) {}
+  }
+  for (const p of (game.projectiles || [])) {
+    try { for (const k in p) { const v = p[k]; if (v && v.isObject3D && v.parent) hide(v); } } catch (_) {}
+  }
+  for (const e of (game.worldEffects || [])) {
+    try {
+      for (const k in e) {
+        const v = e[k];
+        if (v && v.isObject3D && v.parent) hide(v);
+        else if (Array.isArray(v)) for (const m of v) if (m && m.isObject3D && m.parent) hide(m);
+      }
+    } catch (_) {}
+  }
+  try { const pad = _rplPadRaw(); if (pad) for (let i = 0; i < 17; i++) { const b = pad.buttons[i]; st.gpPrev[i] = !!(b && (b.pressed || b.value > 0.5)); } } catch (_) {}
+  _rplStudioLoad(st, R, opts);
+  _rplStudioListen(true);
+  try { document.body.classList.add('lss-replay'); } catch (_) {}
+  try { if (document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
+  _rplClearInput();
+  try { window.__studioN = (window.__studioN | 0) + 1; } catch (_) {}
+  _rplLog('studio open: round ' + R.round + (R === _RPL.cur ? ' (live)' : '') + ' in ' + game.state);
+  return true;
+}
+function _rplStudioLoad(st, R, opts) {
+  opts = opts || {};
+  for (const key in st.pup) _rplPuppetFree(st.pup[key]);
+  st.pup = {};
+  _rplPjFree(st);
+  _rplWfxFreeAll(st);   // (v48.06)
+  _rplClearFx();
+  st.R = R;
+  st.t0 = R.t0;
+  let tEnd = _rplEnd(R);
+  for (const k in R.actors) { const b = R.actors[k].buf; if (b.length >= 9) tEnd = Math.max(tEnd, b[b.length - 9]); }
+  st.t1 = Math.max(R.t0 + 0.05, tEnd);
+  st.order = _rplOrder(R);
+  for (const key of st.order) _rplPuppet(st, key);
+  st.follow = (opts.follow && R.actors[opts.follow]) ? opts.follow : (R.actors.me ? 'me' : st.order[0]);
+  st.cam = (opts.cam && _RPL_CAMS.indexOf(opts.cam) >= 0) ? opts.cam : st.cam;
+  st.pj = Object.keys(R.pj).map(k => R.pj[k]);
+  st.playing = (opts.play !== false);
+  st.camInit = false; st.gInit = false;
+  _rplStudioSeek(st, (opts.t != null) ? opts.t : Math.max(st.t0, st.t1 - 10));
+  _rplStudioUI(st);
+}
+function _rplStudioClose() {
+  const st = _RPL.studio; if (!st) return;
+  _RPL.studio = null;
+  _rplStudioListen(false);
+  for (const key in st.pup) _rplPuppetFree(st.pup[key]);
+  _rplPjFree(st);
+  _rplWfxFreeAll(st);   // (v48.06)
+  _rplClearFx(st);
+  for (const h of st.hidden) { try { h.m.visible = h.vis; } catch (_) {} }
+  try { if (_RPL.cur) _RPL.cur.pa += Math.max(0, game.time - st.gt0); } catch (_) {}
+  try {
+    const dW = _clockPause('studio', false);
+    _rplLog('studio closed after ' + ((Date.now() - st.wall0) / 1000).toFixed(1) + ' s (round clocks moved on ' + (dW / 1000).toFixed(1) + ' s)');
+  } catch (_) {}
+  try { document.body.classList.remove('lss-replay'); } catch (_) {}
+  try { if (st.ui && st.ui.root) { st.ui.root.classList.remove('lib'); st.ui.root.classList.remove('ui-off'); } } catch (_) {}
+  _rplClearInput();
+  try {
+    if (game.state === 'playing' && player && player.shipState !== 'dead' && typeof _safeRequestPointerLock === 'function') _safeRequestPointerLock();
+  } catch (_) {}
+}
+function _rplStudioExit() {
+  const st = _RPL.studio; if (!st) return;
+  const toMenu = !!st.theater;
+  _rplStudioClose();
+  if (toMenu) {
+    _rplLog('theater: back to the main menu');
+    try { returnToMainMenu({ hard: true }); } catch (_) { try { location.reload(); } catch (__) {} }
+  }
+}
+function _rplStudioSeek(st, t, quiet) {
+  const R = st.R;
+  st.rt = Math.max(st.t0, Math.min(st.t1, t));
+  if (!quiet) _rplClearFx();
+  let lo = 0, hi = R.ev.length;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (R.ev[mid].t < st.rt) lo = mid + 1; else hi = mid; }
+  st.evI = lo;
+  st.jump = true;
+}
+function _rplStudioSeekBy(st, d) { _rplStudioSeek(st, st.rt + d); }
+function _rplStudioPlay() {
+  const st = _RPL.studio; if (!st) return;
+  if (!st.playing && st.rt >= st.t1 - 0.02) _rplStudioSeek(st, st.t0);   // play at the end = from the top
+  st.playing = !st.playing;
+  _rplStudioUIRefresh(st);
+}
+function _rplStudioSpeed(st, d) {
+  st.sp = Math.max(0, Math.min(_RPL_SPEEDS.length - 1, st.sp + d));
+  st.rate = _RPL_SPEEDS[st.sp];
+  _rplStudioUIRefresh(st);
+}
+function _rplStudioSetCam(st, mode) {
+  if (_RPL_CAMS.indexOf(mode) < 0) return;
+  st.cam = mode; st.camInit = false;
+  if (mode === 'ghost') st.gInit = false;
+  _rplStudioUIRefresh(st);
+}
+function _rplStudioCamCycle(st, d) { const i = _RPL_CAMS.indexOf(st.cam); _rplStudioSetCam(st, _RPL_CAMS[(i + d + _RPL_CAMS.length) % _RPL_CAMS.length]); }
+function _rplStudioFollow(st, key) {
+  if (!st.R.actors[key]) return;
+  st.follow = key; st.camInit = false;
+  if (st.cam === 'ghost') st.cam = 'chase';   // picking a ship means "show me that ship"
+  _rplStudioUIRefresh(st);
+}
+function _rplStudioCycle(st, d) {
+  const o = st.order; if (!o.length) return;
+  const i = o.indexOf(st.follow);
+  _rplStudioFollow(st, o[(i + d + o.length) % o.length]);
+}
+function _rplStudioKill(st, d) {
+  const K = st.R.kills; if (!K.length) return;
+  const lead = _RPL_K.lead;
+  let pick = null;
+  if (d > 0) { for (let i = 0; i < K.length; i++) if (K[i].t - lead > st.rt + 0.05) { pick = K[i]; break; } }
+  else { for (let i = K.length - 1; i >= 0; i--) if (K[i].t - lead < st.rt - 0.5) { pick = K[i]; break; } }
+  if (!pick) { _rplFlash(d > 0 ? 'NO MORE KILLS' : 'NO EARLIER KILL'); return; }
+  _rplStudioSeek(st, pick.t - lead);
+  const who = (pick.a[1] && st.R.actors[pick.a[1]]) ? pick.a[1] : pick.a[0];
+  if (st.cam !== 'ghost' && who && st.R.actors[who]) { st.follow = who; st.camInit = false; }
+  st.playing = true;
+  _rplStudioUIRefresh(st);
+}
+function _rplStudioToast(st, e) {
+  const el = st.ui && st.ui.toast; if (!el) return;
+  const R = st.R, KA = e.a[1] ? R.actors[e.a[1]] : null, VA = R.actors[e.a[0]];
+  el.textContent = '';
+  const add = (txt, col, cls) => { const s = document.createElement('span'); s.textContent = txt; if (col) s.style.color = col; if (cls) s.className = cls; el.appendChild(s); };
+  if (KA) { add(KA.name, _rplClassCol(KA.lo)); add('▶', null, 'ar'); }
+  else add('✕ ', '#ff5a5a');
+  add(VA ? VA.name : '?', VA ? _rplClassCol(VA.lo) : null);
+  el.classList.add('on');
+  st.toastT = performance.now() + 2600;
+}
+function _rplStudioFrame(now) {
+  const st = _RPL.studio, R = st.R;
+  const dtR = Math.min(0.1, Math.max(0, (now - st.last) / 1000)); st.last = now;
+  for (let i = 0; i < st.hidden.length; i++) st.hidden[i].m.visible = false;
+  if (st.padScrub) {
+    _rplStudioSeek(st, st.rt + dtR * st.padScrub * 8, true);
+  } else if (st.playing && !st.scrubbing) {
+    st.rt = Math.min(st.t1, st.rt + dtR * st.rate);
+    const snd = st.sound && st.rate >= 0.5 && st.rate <= 2;
+    _RPL.replay = true;
+    try {
+      while (st.evI < R.ev.length && R.ev[st.evI].t <= st.rt) {
+        const e = R.ev[st.evI++];
+        if (e.k === 'kill') { _rplStudioToast(st, e); continue; }
+        if (!snd && (e.k === 's2' || e.k === 's3')) continue;
+        _rplFireLifted(st, e);   // (v48.04) any world effect it leaves goes to the studio's own list
+      }
+    } finally { _RPL.replay = false; }
+    if (st.rt >= st.t1) { st.playing = false; _rplStudioUIRefresh(st); }
+  }
+  const dtRep = (st.playing && !st.scrubbing && !st.padScrub) ? dtR * st.rate : 0;
+  for (const key in st.pup) {
+    const P = st.pup[key], m = P.owner.mesh;
+    if (!m) continue;
+    const alive = _rplPoseAt(P.A, st.rt, _rplP, _rplQ);
+    P.alive = alive;
+    if (!m.parent) scene.add(m);
+    m.visible = alive && !(st.cam === 'pov' && key === st.follow);
+    m.position.copy(_rplP); m.quaternion.copy(_rplQ);
+    if (!alive) continue;
+    try {
+      _rplPoseAt(P.A, st.rt - 0.05, _rplP2, null);
+      const spd = _rplP.distanceTo(_rplP2) * 20;
+      const ch = P.owner.chassis || {};
+      const S = _rplStateAt(P.A, st.rt);
+      _rplPuppetShield(P, S.sh);
+      const clk = !!(S.dm & 2);
+      if (P.cloak !== clk) { P.cloak = clk; try { _setShipMeshOpacity(m, clk ? _RPL_CLOAK_OP : 1.0); } catch (_) {} }
+      animateShipMesh(m, spd, ch.flightSpeed || ch.maxSpeed || 400, false, Math.max(dtRep, 1e-4), !!(S.dm & 1));
+    } catch (_) {}
+  }
+  _rplWfxReplay(st, st.rt, dtRep);   // (v48.06) the traps, walls, gas, flame chains standing at the playhead
+  _rplStudioCamera(st, dtR);
+  camera.updateMatrixWorld();
+  _rplPjDraw(st, st.rt);   // after the camera: the ribbons face THIS frame's eye
+  _rplStudioLabels(st);
+  _rplStudioUIFrame(st, now);
+  try { if (typeof _audioUpdateListener === 'function') _audioUpdateListener(); } catch (_) {}
+}
+function _rplStudioCamera(st, dt) {
+  const R = st.R;
+  const A = (st.follow && R.actors[st.follow]) ? R.actors[st.follow] : null;
+  const mode = (!A && st.cam !== 'ghost') ? 'ghost' : st.cam;
+  const lookX = st.mdx * 0.005 + st.pad.rx * dt * 2.4, lookY = st.mdy * 0.005 + st.pad.ry * dt * 2.4;
+  st.mdx = 0; st.mdy = 0;
+  const wheel = st.wheel; st.wheel = 0;
+  if (mode === 'ghost') {
+    if (!st.gInit) {
+      st.gInit = true;
+      st.gPos.copy(camera.position);
+      _rplEuler.setFromQuaternion(camera.quaternion, 'YXZ');
+      st.gYaw = _rplEuler.y; st.gPitch = _rplEuler.x;
+    }
+    st.gYaw -= lookX;
+    st.gPitch = Math.max(-1.5, Math.min(1.5, st.gPitch - lookY));
+    _rplEuler.set(st.gPitch, st.gYaw, 0, 'YXZ');
+    _rplQ.setFromEuler(_rplEuler);
+    if (wheel) st.gSpeedExp = Math.max(-6, Math.min(6, st.gSpeedExp - wheel));
+    const K = st.keys;
+    let f = 0, r = 0, u = 0;
+    if (K.w || K.arrowup) f -= 1; if (K.s || K.arrowdown) f += 1;
+    if (K.a) r -= 1; if (K.d) r += 1;
+    if (K.e) u += 1; if (K.q) u -= 1;
+    f += st.pad.ly; r += st.pad.lx;
+    if (st.pad.up) u += 1; if (st.pad.dn) u -= 1;
+    const sp = 900 * ((K.shift || st.pad.fast) ? 3.5 : 1) * Math.pow(1.3, st.gSpeedExp);
+    _rplTmp.set(r, u, f);
+    if (_rplTmp.lengthSq() > 1) _rplTmp.normalize();
+    _rplTmp.multiplyScalar(sp * dt).applyQuaternion(_rplQ);
+    st.gPos.add(_rplTmp);
+    camera.position.copy(st.gPos);
+    camera.quaternion.copy(_rplQ);
+    return;
+  }
+  st.gInit = false;   // the ghost starts from wherever the camera is when it is next picked
+  _rplPoseAt(A, st.rt, _rplP, _rplQ);
+  const hull = Math.max(60, A.hull || 100);
+  if (mode === 'pov') {
+    camera.position.copy(_rplP);
+    camera.quaternion.copy(_rplQ).multiply(_rplFlipY);
+    st.camInit = false;
+    return;
+  }
+  const want = _rplCamTgt;
+  if (mode === 'orbit') {
+    st.orbAz -= lookX;
+    st.orbEl = Math.max(-1.35, Math.min(1.35, st.orbEl + lookY));
+    if (!st.orbDist) st.orbDist = hull * 5;
+    if (wheel) st.orbDist *= Math.pow(1.15, wheel);
+    st.orbDist *= Math.pow(2, st.pad.ly * dt);
+    st.orbDist = Math.max(hull * 1.4, Math.min(hull * 80, st.orbDist));
+    const ce = Math.cos(st.orbEl);
+    want.set(Math.sin(st.orbAz) * ce, Math.sin(st.orbEl), Math.cos(st.orbAz) * ce).multiplyScalar(st.orbDist).add(_rplP);
+    _rplLook.copy(_rplP);
+  } else {
+    st.chAz -= lookX;
+    st.chEl = Math.max(-1.2, Math.min(1.2, st.chEl + lookY));
+    if (wheel) st.zoom *= Math.pow(1.15, wheel);
+    st.zoom *= Math.pow(2, st.pad.ly * dt);
+    st.zoom = Math.max(0.35, Math.min(8, st.zoom));
+    _rplFwd.set(0, 0, 1).applyQuaternion(_rplQ);
+    _rplTmp.copy(_rplFwd).multiplyScalar(-hull * 2.6).addScaledVector(_rplUp, hull * 0.75).multiplyScalar(st.zoom);
+    if (st.chAz || st.chEl) {
+      _rplQa.setFromAxisAngle(_rplUp, st.chAz);
+      _rplTmp.applyQuaternion(_rplQa);
+      _rplRight.crossVectors(_rplTmp, _rplUp);
+      if (_rplRight.lengthSq() > 1e-6) { _rplRight.normalize(); _rplQb.setFromAxisAngle(_rplRight, st.chEl); _rplTmp.applyQuaternion(_rplQb); }
+    }
+    want.copy(_rplP).add(_rplTmp);
+    _rplLook.copy(_rplP).addScaledVector(_rplFwd, hull * 4);
+    _rplBoom(_rplP, want, hull);
+  }
+  if (!st.camInit || st.jump) { st.camInit = true; st.jump = false; st.camPos.copy(want); st.camLook.copy(_rplLook); }
+  else {
+    st.camPos.lerp(want, 1 - Math.exp(-dt * (mode === 'orbit' ? 14 : 7)));
+    st.camLook.lerp(_rplLook, 1 - Math.exp(-dt * 10));
+  }
+  camera.position.copy(st.camPos);
+  camera.up.set(0, 1, 0);
+  camera.lookAt(st.camLook);
+}
+function _rplStudioLabels(st) {
+  const box = st.ui && st.ui.labels; if (!box) return;
+  const w = window.innerWidth, h = window.innerHeight;
+  for (const key in st.pup) {
+    const P = st.pup[key];
+    let el = P.label;
+    if (!el) {
+      el = P.label = document.createElement('div');
+      el.className = 'rst-lbl';
+      el.textContent = P.A.name;
+      el.style.color = _rplClassCol(P.A.lo);
+      box.appendChild(el);
+    }
+    const m = P.owner.mesh;
+    let show = !st.uiOff && P.alive && !!m && !(st.cam === 'pov' && key === st.follow);
+    if (show) {
+      _rplTmp3.copy(m.position);
+      _rplTmp3.y += Math.max(40, P.A.hull || 100) * 0.55;
+      _rplTmp3.project(camera);
+      if (_rplTmp3.z > 1 || _rplTmp3.z < -1 || Math.abs(_rplTmp3.x) > 1.05 || Math.abs(_rplTmp3.y) > 1.05) show = false;
+      else el.style.transform = 'translate(' + ((_rplTmp3.x * 0.5 + 0.5) * w).toFixed(1) + 'px,' + ((0.5 - _rplTmp3.y * 0.5) * h).toFixed(1) + 'px) translate(-50%,-100%)';
+    }
+    const disp = show ? '' : 'none';
+    if (el.style.display !== disp) el.style.display = disp;
+    const f = (key === st.follow);
+    if (el._f !== f) { el._f = f; el.classList.toggle('f', f); }
+  }
+}
+function _rplStudioUI(st) {
+  const root = _rplStudioRoot();
+  _rplStudioUIFill(st, root);
+}
+function _rplStudioRoot() {
+  _rplEnsureUI();
+  let root = document.getElementById('rpl-st');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'rpl-st';
+    root.innerHTML =
+      '<div class="rst-lbls"></div><div class="rst-toast"></div>' +
+      '<div class="rst-top"><div class="rst-title">REPLAY STUDIO<span class="rst-sub"></span></div>' +
+      '<div class="rst-btns"><button type="button" data-a="lib">LIBRARY</button><button type="button" data-a="save" class="rst-save">SAVE</button>' +
+      '<button type="button" data-a="export">EXPORT</button><button type="button" data-a="close">EXIT</button></div></div>' +
+      '<div class="rst-actors"></div>' +
+      '<div class="rst-bottom"><div class="rst-row">' +
+      '<button type="button" data-a="prev" title="previous kill (P)">&#9664; KILL</button>' +
+      '<button type="button" data-a="play" class="rst-play" title="play / pause (SPACE)">&#9654;</button>' +
+      '<button type="button" data-a="next" title="next kill (N)">KILL &#9654;</button>' +
+      '<span class="rst-time"></span>' +
+      '<div class="rst-track"><div class="bar"></div><div class="fill"></div><div class="mks"></div><div class="head"></div></div></div>' +
+      '<div class="rst-row"><div class="rst-seg rst-sp"></div><div class="rst-seg rst-cam"></div>' +
+      '<button type="button" data-a="sound" class="rst-snd">SOUND</button><span class="rst-hint"></span></div></div>' +
+      '<div class="rst-lib"><div class="rst-lib-h"><span class="t">REPLAYS</span>' +
+      '<button type="button" data-a="import">IMPORT FILE</button><button type="button" data-a="libclose">CLOSE</button></div>' +
+      '<div class="rst-lib-l"></div>' +
+      '<div class="rst-lib-f">Every round this session is kept here. SAVE keeps one in this browser; EXPORT writes a .json file ' +
+      '(share it, or hand it to Claude as a bug report). A replay plays on the map it was flown on.</div>' +
+      '<input type="file" accept=".json,application/json" style="display:none"></div>';
+    document.body.appendChild(root);
+    root.querySelector('.rst-sp').innerHTML = _RPL_SPEEDS.map((s, i) => '<button type="button" data-a="speed" data-v="' + i + '">' + (s < 1 ? String(s).replace(/^0/, '') : s) + '&times;</button>').join('');
+    root.querySelector('.rst-cam').innerHTML = _RPL_CAMS.map(c => '<button type="button" data-a="cam" data-v="' + c + '">' + _RPL_CAM_NAMES[c] + '</button>').join('');
+    root.addEventListener('click', _rplStudioClick);
+    for (const t of ['mousedown', 'mouseup', 'click', 'dblclick', 'pointerdown', 'pointerup', 'contextmenu', 'touchstart', 'touchend']) {
+      root.addEventListener(t, (ev) => ev.stopPropagation());
+    }
+    const trk = root.querySelector('.rst-track');
+    const seekAt = (ev, quiet) => {
+      const s = _RPL.studio; if (!s) return;
+      const r = trk.getBoundingClientRect();
+      const u = Math.max(0, Math.min(1, (ev.clientX - r.left) / Math.max(1, r.width)));
+      _rplStudioSeek(s, s.t0 + u * (s.t1 - s.t0), quiet);
+    };
+    trk.addEventListener('pointerdown', (ev) => {
+      const s = _RPL.studio; if (!s) return;
+      s.scrubbing = true;
+      try { trk.setPointerCapture(ev.pointerId); } catch (_) {}
+      seekAt(ev, true);
+      ev.preventDefault();
+    });
+    trk.addEventListener('pointermove', (ev) => { const s = _RPL.studio; if (s && s.scrubbing) seekAt(ev, true); });
+    const end = (ev) => { const s = _RPL.studio; if (!s || !s.scrubbing) return; s.scrubbing = false; seekAt(ev, false); };
+    trk.addEventListener('pointerup', end);
+    trk.addEventListener('pointercancel', end);
+    root.querySelector('.rst-lib input[type=file]').addEventListener('change', (ev) => {
+      const f = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (f) _rplImportFile(f);
+    });
+  }
+  return root;
+}
+function _rplStudioUIFill(st, root) {
+  const R = st.R;
+  st.ui = {
+    root: root, labels: root.querySelector('.rst-lbls'), toast: root.querySelector('.rst-toast'), time: root.querySelector('.rst-time'),
+    fill: root.querySelector('.rst-track .fill'), head: root.querySelector('.rst-track .head'), actors: root.querySelector('.rst-actors'),
+    play: root.querySelector('.rst-play'), save: root.querySelector('.rst-save'), hint: root.querySelector('.rst-hint'),
+    lib: root.querySelector('.rst-lib-l'),
+  };
+  st.ui.labels.textContent = '';
+  root.querySelector('.rst-sub').textContent = String(R.mapName || R.map || '').toUpperCase() + '  ·  ROUND ' + (R.round | 0) +
+    ((R === _RPL.cur) ? '  ·  THIS ROUND' : '');
+  try { root.querySelector('.rst-btns [data-a="close"]').textContent = st.theater ? 'MAIN MENU' : 'EXIT'; } catch (_) {}
+  st.ui.actors.textContent = '';
+  for (const key of st.order) {
+    const A = R.actors[key];
+    const b = document.createElement('button');
+    b.type = 'button'; b.dataset.a = 'follow'; b.dataset.v = key;
+    const sw = document.createElement('span'); sw.className = 'sw'; sw.style.background = _rplClassCol(A.lo);
+    const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = A.name;
+    const tm = document.createElement('span'); tm.className = 'tm';
+    tm.textContent = (key === 'me') ? 'YOU' : ((R.actors.me && A.team === R.actors.me.team) ? 'ALLY' : 'ENEMY');
+    b.appendChild(sw); b.appendChild(nm); b.appendChild(tm);
+    st.ui.actors.appendChild(b);
+  }
+  const mks = root.querySelector('.rst-track .mks');
+  mks.textContent = '';
+  const span = Math.max(0.05, st.t1 - st.t0);
+  for (const e of R.kills) {
+    if (e.t < st.t0 || e.t > st.t1) continue;
+    const m = document.createElement('div');
+    m.className = 'mk';
+    m.style.left = (100 * (e.t - st.t0) / span).toFixed(3) + '%';
+    const KA = e.a[1] ? R.actors[e.a[1]] : null, VA = R.actors[e.a[0]];
+    m.title = (KA ? KA.name + ' ▶ ' : '') + (VA ? VA.name : '?') + '  @ ' + _rplFmt(e.t - st.t0);
+    mks.appendChild(m);
+  }
+  root.classList.toggle('ui-off', !!st.uiOff);
+  root.classList.toggle('lib', !!st.libOpen);
+  _rplStudioUIRefresh(st);
+}
+function _rplStudioUIRefresh(st) {
+  const ui = st && st.ui; if (!ui) return;
+  ui.play.innerHTML = st.playing ? '&#10074;&#10074;' : '&#9654;';
+  for (const b of ui.root.querySelectorAll('.rst-sp button')) b.classList.toggle('on', +b.dataset.v === st.sp);
+  for (const b of ui.root.querySelectorAll('.rst-cam button')) b.classList.toggle('on', b.dataset.v === st.cam);
+  for (const b of ui.actors.querySelectorAll('button')) b.classList.toggle('on', b.dataset.v === st.follow && st.cam !== 'ghost');
+  ui.root.querySelector('.rst-snd').classList.toggle('on', !!st.sound);
+  const sv = _rplIsSaved(st.R);
+  ui.save.textContent = sv ? 'SAVED ✓' : 'SAVE';
+  ui.save.disabled = sv;
+  let pad = false;
+  try { pad = !!(typeof input !== 'undefined' && input.gpConnected); } catch (_) {}
+  ui.hint.textContent = pad
+    ? 'A PLAY  ·  B EXIT  ·  X VIEW  ·  Y NEXT KILL  ·  LB/RB SHIP  ·  LT/RT SCRUB  ·  D-PAD SEEK / SPEED  ·  START LIBRARY  ·  BACK HIDE UI'
+    : 'SPACE PLAY  ·  ←→ SEEK  ·  ↑↓ SPEED  ·  [ ] SHIP  ·  1-4 VIEW  ·  N / P KILL  ·  GHOST: WASD QE + DRAG  ·  H HIDE UI  ·  ESC EXIT';
+}
+function _rplStudioUIFrame(st, now) {
+  const ui = st.ui; if (!ui) return;
+  const span = Math.max(0.05, st.t1 - st.t0);
+  const u = Math.max(0, Math.min(1, (st.rt - st.t0) / span));
+  const pct = (100 * u).toFixed(2) + '%';
+  if (ui._pct !== pct) { ui._pct = pct; ui.fill.style.width = pct; ui.head.style.left = pct; }
+  const tt = _rplFmt(st.rt - st.t0) + ' / ' + _rplFmt(span) + ((st.rate !== 1) ? '  ' + _RPL_SPEEDS[st.sp] + '×' : '');
+  if (st.timeTxt !== tt) { st.timeTxt = tt; ui.time.textContent = tt; }
+  if (st.toastT && now > st.toastT) { st.toastT = 0; ui.toast.classList.remove('on'); }
+  if (now >= st.uiT) {
+    st.uiT = now + 200;
+    for (const b of ui.actors.querySelectorAll('button')) {
+      const P = st.pup[b.dataset.v];
+      const dead = P ? !P.alive : !_rplPoseAt(st.R.actors[b.dataset.v], st.rt, _rplTmp2, null);
+      if (b._dead !== dead) { b._dead = dead; b.classList.toggle('dead', dead); }
+    }
+  }
+}
+function _rplStudioUIToggle(st) {
+  st.uiOff = !st.uiOff;
+  if (st.ui) st.ui.root.classList.toggle('ui-off', st.uiOff);
+}
+function _rplStudioClick(ev) {
+  const b = ev.target && ev.target.closest ? ev.target.closest('button') : null;
+  if (!b || !b.dataset || !b.dataset.a) return;
+  const a = b.dataset.a, v = b.dataset.v, id = b.dataset.id;
+  const st = _RPL.studio;
+  switch (a) {
+    case 'theater': _rplTheaterFromLib(id); try { b.blur(); } catch (_) {} return;
+    case 'lsave': { const R = _RPL.lib.find(x => x.id === id); if (R) _rplStudioSaveR(R, b); try { b.blur(); } catch (_) {} return; }
+    case 'pin': _rplPin(id); try { b.blur(); } catch (_) {} return;   // (v48.05) a kept round, saved for good
+    case 'del': _rplStudioDelete(id); try { b.blur(); } catch (_) {} return;
+    case 'import': { const inp = document.querySelector('#rpl-st .rst-lib input[type=file]'); if (inp) inp.click(); try { b.blur(); } catch (_) {} return; }
+    case 'libclose': if (st) _rplStudioLib(false); else _rplLibStandalone(false); try { b.blur(); } catch (_) {} return;
+    case 'export': if (id || !st) { _rplStudioExportR(null, id); try { b.blur(); } catch (_) {} return; } break;
+  }
+  if (!st) return;
+  switch (a) {
+    case 'play': _rplStudioPlay(); break;
+    case 'prev': _rplStudioKill(st, -1); break;
+    case 'next': _rplStudioKill(st, 1); break;
+    case 'speed': st.sp = Math.max(0, Math.min(_RPL_SPEEDS.length - 1, +v | 0)); st.rate = _RPL_SPEEDS[st.sp]; _rplStudioUIRefresh(st); break;
+    case 'cam': _rplStudioSetCam(st, v); break;
+    case 'follow': _rplStudioFollow(st, v); break;
+    case 'sound': st.sound = !st.sound; _rplStudioUIRefresh(st); break;
+    case 'close': _rplStudioExit(); break;
+    case 'lib': _rplStudioLib(true); break;
+    case 'save': _rplStudioSaveR(st.R, b); break;
+    case 'export': _rplStudioExportR(st.R, null); break;
+    case 'watch': _rplStudioWatch(id); break;
+  }
+  try { b.blur(); } catch (_) {}   // a focused button would take the next SPACE as a click
+}
+function _rplLibRefresh() {
+  const st = _RPL.studio;
+  if (st) { _rplStudioUIRefresh(st); if (st.libOpen) _rplLibRender(st); }
+  if (_RPL.libSolo) _rplLibRender(_RPL.libSolo);
+}
+function _rplStudioSaveR(R, btn) {
+  if (!R) return;
+  if (btn) { btn.disabled = true; btn.textContent = 'SAVING...'; }
+  _rplSave(R).then(() => {
+    _rplLibRefresh();
+    _rplFlash('REPLAY SAVED IN THIS BROWSER');
+  }).catch((e) => {
+    console.warn('[replay] save failed:', e);
+    if (btn) { btn.disabled = false; btn.textContent = 'SAVE'; }
+    _rplFlash('SAVE FAILED: ' + String((e && e.message) || e).toUpperCase());
+  });
+}
+function _rplStudioExportR(R, id) {
+  if (R) { _rplExport(R); return; }
+  const inMem = _RPL.lib.find(x => x.id === id);
+  if (inMem) { _rplExport(inMem); return; }
+  _rplLoad(id).then(_rplExport).catch(e => _rplFlash('EXPORT FAILED: ' + String((e && e.message) || e).toUpperCase()));
+}
+function _rplStudioWatch(id) {
+  const st = _RPL.studio; if (!st) return;
+  const go = (R) => {
+    const s = _RPL.studio; if (!s) return;
+    if (R.sig && R.sig !== _rplLevelSig()) { _rplTheaterGo(R); return; }
+    if (_RPL.lib.indexOf(R) < 0) _rplLibAdd(R);
+    s.libOpen = false;
+    _rplStudioLoad(s, R, { play: true, t: R.t0 });
+  };
+  const inMem = _RPL.lib.find(x => x.id === id);
+  if (inMem) { go(inMem); return; }
+  _rplLoad(id).then(go).catch(e => _rplFlash('COULD NOT LOAD IT: ' + String((e && e.message) || e).toUpperCase()));
+}
+function _rplStudioDelete(id) {
+  let ok = false;
+  try { ok = window.confirm('Delete this saved replay from this browser?'); } catch (_) {}
+  if (!ok) return;
+  _rplDel(id).then(() => {
+    const R = _RPL.lib.find(x => x.id === id);
+    if (R) { R.saved = false; R.savedSecs = 0; }
+    _rplLibRefresh();
+  }).catch(e => _rplFlash('DELETE FAILED: ' + String((e && e.message) || e).toUpperCase()));
+}
+function _rplImportFile(file) {
+  const rd = new FileReader();
+  rd.onload = () => {
+    try {
+      const R = _rplDeserialize(JSON.parse(String(rd.result)));
+      const dup = _RPL.lib.findIndex(x => x.id === R.id);
+      if (dup >= 0) _RPL.lib.splice(dup, 1);
+      _rplLibAdd(R);
+      _rplFlash('IMPORTED: ' + String(R.mapName || R.map).toUpperCase() + ' ROUND ' + (R.round | 0));
+      _rplLibRefresh();
+    } catch (e) { _rplFlash('NOT A REPLAY FILE: ' + String((e && e.message) || e).toUpperCase()); }
+  };
+  rd.onerror = () => _rplFlash('COULD NOT READ THAT FILE');
+  rd.readAsText(file);
+}
+function _rplStudioLib(on) {
+  const st = _RPL.studio; if (!st) return;
+  st.libOpen = !!on;
+  try { if (st.ui) st.ui.root.querySelector('.rst-lib-h .t').textContent = 'REPLAYS'; } catch (_) {}
+  if (on) { st.wasPlaying = st.playing; st.playing = false; _rplLibRender(st); }
+  else if (st.wasPlaying) { st.playing = true; st.wasPlaying = false; }
+  if (st.ui) st.ui.root.classList.toggle('lib', st.libOpen);
+  _rplStudioUIRefresh(st);
+}
+function _rplLibStandalone(on) {
+  if (!on) {
+    const S = _RPL.libSolo; if (!S) return;
+    _RPL.libSolo = null;
+    try { document.body.classList.remove('lss-replay-lib'); if (!_RPL.studio) S.root.classList.remove('lib'); } catch (_) {}
+    try { window.removeEventListener('keydown', _rplLibSoloKey, true); } catch (_) {}
+    return;
+  }
+  if (_RPL.studio) { _rplStudioLib(true); return; }
+  if (_RPL.libSolo) { _rplLibRender(_RPL.libSolo); return; }
+  const root = _rplStudioRoot();
+  try { root.querySelector('.rst-lib-h .t').textContent = 'REPLAY STUDIO'; } catch (_) {}   // (v48.07) the TOOLS link's name
+  const S = _RPL.libSolo = { R: null, libOpen: true, solo: true, root: root, ui: { root: root, lib: root.querySelector('.rst-lib-l') } };
+  root.classList.add('lib');
+  document.body.classList.add('lss-replay-lib');
+  try { window.addEventListener('keydown', _rplLibSoloKey, true); } catch (_) {}
+  _rplLibRender(S);
+}
+function _rplLibSoloKey(e) {
+  if (e.key !== 'Escape') return;
+  e.stopImmediatePropagation(); e.preventDefault();
+  _rplLibStandalone(false);
+}
+function _rplLibRender(st) {
+  const box = st.ui && st.ui.lib; if (!box) return;
+  const solo = !!st.solo;
+  const sig = solo ? null : _rplLevelSig();
+  const row = (m, R) => {
+    const it = document.createElement('div');
+    it.className = 'rst-it';
+    const d = document.createElement('div'); d.className = 'd';
+    const n = document.createElement('div'); n.className = 'n';
+    n.textContent = String(m.mapName || m.map || '?').toUpperCase() + '  ·  ROUND ' + (m.round | 0) + (R && R === _RPL.cur ? '  ·  THIS ROUND' : '');
+    const mm = document.createElement('div'); mm.className = 'm';
+    const when = m.when ? new Date(m.when) : null;
+    mm.textContent = _rplFmt(m.secs) + '  ·  ' + m.kills + (m.kills === 1 ? ' KILL' : ' KILLS') + '  ·  ' + m.ships + ' SHIPS' +
+      (when ? '  ·  ' + when.toLocaleDateString() + ' ' + when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '') +
+      (m.build ? '  ·  v' + m.build : '');
+    d.appendChild(n); d.appendChild(mm);
+    const b = document.createElement('div'); b.className = 'b';
+    const btn = (txt, a, dis, title) => { const x = document.createElement('button'); x.type = 'button'; x.textContent = txt; x.dataset.a = a; x.dataset.id = m.id; if (dis) x.disabled = true; if (title) x.title = title; b.appendChild(x); return x; };
+    const here = !solo && (m.sig || m.map) === sig;
+    const block = _rplTheaterBlock(m);
+    if (st.R && st.R.id === m.id) btn('WATCHING', 'watch', true).classList.add('on');
+    else if (here) btn('WATCH', 'watch');
+    else btn(solo ? 'WATCH' : 'LOAD MAP & WATCH', 'theater', !!block,
+             block ? block.toLowerCase() : 'Builds ' + (m.mapName || m.map) + ' in a solo match and opens this replay on it');
+    if (R) { const sv = _rplIsSaved(R); btn(sv ? 'SAVED ✓' : 'SAVE', 'lsave', sv); }
+    else if (m.auto) btn('SAVE', 'pin', false, 'Kept automatically with the last ' + _rplKeepN() + ' rounds - SAVE keeps it for good');   // (v48.05)
+    btn('EXPORT', 'export');
+    if (!R || R.saved) btn('DELETE', 'del');
+    it.appendChild(d); it.appendChild(b);
+    return it;
+  };
+  box.textContent = '';
+  const sec = (t) => { const s = document.createElement('div'); s.className = 'rst-lib-sec'; s.textContent = t; box.appendChild(s); };
+  const ses = _RPL.lib.filter(R => (_rplEnd(R) - R.t0) > 1).slice().reverse();
+  sec(solo ? 'THIS SESSION (IMPORTED AND RECENT)' : 'THIS SESSION');
+  if (!ses.length) { const e = document.createElement('div'); e.className = 'rst-it'; e.textContent = solo ? 'NONE - IMPORT A FILE, OR PICK A SAVED ONE BELOW' : 'NO ROUNDS YET'; box.appendChild(e); }
+  for (const R of ses) box.appendChild(row(_rplMeta(R), R));
+  const seen = {}; for (const R of ses) seen[R.id] = true;
+  const savedSec = document.createElement('div');
+  box.appendChild(savedSec);
+  _rplSavedList().then(list => {
+    list = list.filter(m => m && m.id && !seen[m.id]).sort((a, b) => (b.when || 0) - (a.when || 0));
+    const pinned = list.filter(m => !m.auto), recent = list.filter(m => m.auto);
+    savedSec.textContent = '';
+    const head = (t) => { const s = document.createElement('div'); s.className = 'rst-lib-sec'; s.textContent = t; savedSec.appendChild(s); };
+    const none = (t) => { const e = document.createElement('div'); e.className = 'rst-it'; e.textContent = t; savedSec.appendChild(e); };
+    head('SAVED IN THIS BROWSER');
+    if (!pinned.length) none(ses.some(R => _rplIsSaved(R)) ? 'NOTHING ELSE - THIS SESSION’S SAVED ROUNDS ARE LISTED ABOVE' : 'NONE SAVED');
+    for (const m of pinned) savedSec.appendChild(row(m, null));
+    const N = _rplKeepN();
+    head('RECENT ROUNDS - KEPT AUTOMATICALLY (THE LAST ' + N + ')');
+    if (!recent.length) none(N > 0 ? 'NONE YET - EVERY ROUND IS KEPT A MOMENT AFTER IT ENDS' : 'OFF (window.__replayKeep = 0)');
+    for (const m of recent) savedSec.appendChild(row(m, null));
+  }).catch(e => { savedSec.textContent = 'THE BROWSER STORE IS UNAVAILABLE (' + String((e && e.message) || e) + ')'; });
+}
+const _RPL_WATCH_KEY = 'lss_rpl_watch';
+function _rplTheaterBlock(m) {
+  if (!m || !m.map) return 'NOTHING TO LOAD';
+  if (String(m.sig || '').indexOf('#r') >= 0) return 'THAT MAP RE-ROLLS EVERY ROUND - ITS LEVEL CANNOT BE REBUILT FOR A REPLAY YET';
+  if (String(m.map).indexOf('gmaps') === 0) return 'A CUSTOM LOCATION REPLAY CANNOT RELOAD ITS PLACE YET';
+  try { if (typeof MAP_DATA !== 'undefined' && !MAP_DATA[m.map]) return 'THIS BUILD HAS NO MAP ' + String(m.map).toUpperCase(); } catch (_) {}
+  try { if (typeof net !== 'undefined' && net && net.active) return 'THE THEATER RUNS SOLO - LEAVE THE ROOM FIRST'; } catch (_) {}
+  return '';
+}
+function _rplTheaterFromLib(id) {
+  const inMem = _RPL.lib.find(x => x.id === id);
+  if (inMem) { _rplTheaterGo(inMem); return; }
+  _rplSavedList().then(list => {
+    const m = list.find(x => x && x.id === id);
+    if (m) _rplTheaterGo(m); else _rplFlash('THAT REPLAY IS NOT IN THIS BROWSER ANY MORE');
+  }).catch(e => _rplFlash('COULD NOT READ THE BROWSER STORE: ' + String((e && e.message) || e).toUpperCase()));
+}
+function _rplTheaterGo(x) {
+  const why = _rplTheaterBlock(x);
+  if (why) { _rplFlash(why); return; }
+  const inMenu = (game.state === 'select' && !_RPL.studio);
+  if (!inMenu) {
+    let ok = false;
+    try {
+      ok = window.confirm('Load ' + (x.mapName || x.map) + ' to watch this replay?\n\nThe game reloads into a solo match on that map, ' +
+                          'with the replay open. This session’s unsaved rounds will be lost.');
+    } catch (_) {}
+    if (!ok) return;
+  }
+  const w = { id: x.id, map: x.map, name: x.mapName || x.map, at: Date.now() };
+  const go = () => {
+    if (inMenu) { _rplLibStandalone(false); _rplTheaterRun(w); return; }
+    try { sessionStorage.setItem(_RPL_WATCH_KEY, JSON.stringify(w)); } catch (_) {}
+    try { returnToMainMenu({ hard: true }); } catch (_) { try { location.reload(); } catch (__) {} }
+  };
+  if (!x.ev || _rplInStore(x)) go();
+  else _rplSave(x, !(x.saved && !x.auto)).then(go).catch(e => _rplFlash('COULD NOT STORE IT FOR THE TRIP: ' + String((e && e.message) || e).toUpperCase()));
+}
+async function _rplTheaterRun(w) {
+  const W = (ms) => new Promise(r => setTimeout(r, ms));
+  _rplLog('theater: building ' + w.map + ' for replay ' + w.id);
+  try {
+    for (let i = 0; i < 150 && game.state !== 'select'; i++) await W(100);
+    if (game.state !== 'select') { _rplFlash('THE THEATER STARTS FROM THE MAIN MENU'); return; }
+    _RPL.theater = Object.assign({ until: Date.now() + 120000 }, w);
+    startSolo();
+    for (let i = 0; i < 60 && !document.getElementById('ship-preview-confirm'); i++) await W(100);
+    await W(500);
+    try { if (typeof LSS !== 'undefined' && LSS.MODE !== 'classic') _lssPickRoomMode('classic'); } catch (_) {}
+    await W(300);
+    selectMap(w.map);
+    await W(300);
+    if (game.selectedMap !== w.map) { _RPL.theater = null; _rplFlash('COULD NOT PICK ' + String(w.name || w.map).toUpperCase()); return; }
+    if (!_lssConfirmed()) { const cf = document.getElementById('ship-preview-confirm'); if (cf) cf.click(); }
+    for (let i = 0; i < 100 && !_lssLaunchReady(); i++) await W(100);
+    const ln = document.getElementById('ship-preview-launch');
+    if (ln) ln.click();
+    _rplFlash('LOADING ' + String(w.name || w.map).toUpperCase() + ' FOR THE REPLAY');
+  } catch (e) { _RPL.theater = null; console.warn('[replay] theater failed:', e); }
+}
+function _rplTheaterBoot() {
+  let w = null;
+  try { w = JSON.parse(sessionStorage.getItem(_RPL_WATCH_KEY) || 'null'); sessionStorage.removeItem(_RPL_WATCH_KEY); } catch (_) {}
+  if (!w || !w.id || !w.map || Date.now() - (w.at || 0) > 5 * 60 * 1000) return;
+  setTimeout(() => { _rplTheaterRun(w); }, 1200);
+}
+function _rplStudioKey(e) {
+  const st = _RPL.studio; if (!st) return;
+  const k = (typeof e.key === 'string') ? e.key.toLowerCase() : '';
+  if (/^f\d+$/.test(k)) return;   // F5 / F11 / F12 stay the browser's
+  e.stopImmediatePropagation();
+  e.preventDefault();
+  if (e.type === 'keyup') { st.keys[k] = false; return; }
+  st.keys[k] = true;
+  if (st.libOpen) { if (k === 'escape' || k === 'l') _rplStudioLib(false); return; }
+  const rep = e.repeat;
+  switch (k) {
+    case ' ': case 'k': if (!rep) _rplStudioPlay(); break;
+    case 'arrowleft': _rplStudioSeekBy(st, e.shiftKey ? -1 : -5); break;
+    case 'arrowright': _rplStudioSeekBy(st, e.shiftKey ? 1 : 5); break;
+    case 'arrowup': if (!rep && st.cam !== 'ghost') _rplStudioSpeed(st, 1); break;
+    case 'arrowdown': if (!rep && st.cam !== 'ghost') _rplStudioSpeed(st, -1); break;
+    case ',': st.playing = false; _rplStudioSeek(st, st.rt - 0.05, true); _rplStudioUIRefresh(st); break;
+    case '.': st.playing = false; _rplStudioSeek(st, st.rt + 0.05, true); _rplStudioUIRefresh(st); break;
+    case 'home': _rplStudioSeek(st, st.t0); break;
+    case 'end': _rplStudioSeek(st, st.t1); break;
+    case 'n': if (!rep) _rplStudioKill(st, 1); break;
+    case 'p': if (!rep) _rplStudioKill(st, -1); break;
+    case '[': if (!rep) _rplStudioCycle(st, -1); break;
+    case ']': case 'tab': if (!rep) _rplStudioCycle(st, (k === 'tab' && e.shiftKey) ? -1 : 1); break;
+    case '1': _rplStudioSetCam(st, 'chase'); break;
+    case '2': _rplStudioSetCam(st, 'pov'); break;
+    case '3': _rplStudioSetCam(st, 'orbit'); break;
+    case '4': _rplStudioSetCam(st, 'ghost'); break;
+    case 'c': if (!rep) _rplStudioCamCycle(st, 1); break;
+    case 'h': if (!rep) _rplStudioUIToggle(st); break;
+    case 'm': if (!rep) { st.sound = !st.sound; _rplStudioUIRefresh(st); } break;
+    case 'l': if (!rep) _rplStudioLib(true); break;
+    case 'escape': if (!rep) _rplStudioExit(); break;
+  }
+}
+function _rplStudioPointer(e) {
+  const st = _RPL.studio; if (!st) return;
+  const ui = st.ui && st.ui.root;
+  if (!st.drag && ui && e.target && ui.contains(e.target) && e.target !== ui) return;   // the panel's own controls
+  if (st.libOpen && e.type !== 'pointermove' && e.type !== 'pointerup' && e.type !== 'mousemove' && e.type !== 'mouseup') {
+    e.stopImmediatePropagation(); if (e.cancelable) e.preventDefault(); return;
+  }
+  e.stopImmediatePropagation();
+  switch (e.type) {
+    case 'pointerdown': st.drag = { x: e.clientX, y: e.clientY, id: e.pointerId }; if (e.cancelable) e.preventDefault(); break;
+    case 'pointermove': if (st.drag && (st.drag.id == null || st.drag.id === e.pointerId)) { st.mdx += e.clientX - st.drag.x; st.mdy += e.clientY - st.drag.y; st.drag.x = e.clientX; st.drag.y = e.clientY; } break;
+    case 'pointerup': case 'pointercancel': st.drag = null; break;
+    case 'wheel': st.wheel += (e.deltaY > 0) ? 1 : (e.deltaY < 0 ? -1 : 0); if (e.cancelable) e.preventDefault(); break;
+    default: if (e.cancelable) e.preventDefault(); break;   // mousedown / click / contextmenu / touch*: not the game's
+  }
+}
+function _rplStudioLock() {
+  try { if (_RPL.studio && document.pointerLockElement && document.exitPointerLock) document.exitPointerLock(); } catch (_) {}
+}
+const _RPL_PTR_EVENTS = ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'mousedown', 'mouseup', 'click', 'dblclick',
+                         'contextmenu', 'wheel', 'touchstart', 'touchmove', 'touchend'];
+function _rplStudioListen(on) {
+  const f = on ? 'addEventListener' : 'removeEventListener';
+  try {
+    window[f]('keydown', _rplStudioKey, true);
+    window[f]('keyup', _rplStudioKey, true);
+    for (const t of _RPL_PTR_EVENTS) window[f](t, _rplStudioPointer, { capture: true, passive: false });
+    document[f]('pointerlockchange', _rplStudioLock);
+  } catch (_) {}
+}
+function _rplStudioPad(gp) {
+  const st = _RPL.studio; if (!st || !gp) return;
+  const bt = gp.buttons || [], ax = gp.axes || [];
+  const now = [];
+  for (let i = 0; i < 17; i++) now[i] = !!(bt[i] && (bt[i].pressed || bt[i].value > 0.5));
+  const P = st.gpPrev;
+  const E = (i) => now[i] && !P[i];
+  st.gpPrev = now;
+  const val = (i) => (bt[i] ? (+bt[i].value || (bt[i].pressed ? 1 : 0)) : 0);
+  const dz = (v) => (Math.abs(v) < 0.18 ? 0 : (v - Math.sign(v) * 0.18) / 0.82);
+  if (st.libOpen) {
+    st.pad.lx = st.pad.ly = st.pad.rx = st.pad.ry = 0; st.padScrub = 0; st.pad.up = st.pad.dn = false;
+    if (E(1) || E(9)) _rplStudioLib(false);   // A clicks through the virtual cursor
+    return;
+  }
+  if (E(1)) { _rplStudioExit(); return; }
+  if (E(0)) _rplStudioPlay();
+  if (E(2)) _rplStudioCamCycle(st, 1);
+  if (E(3)) _rplStudioKill(st, 1);
+  if (st.cam !== 'ghost') { if (E(4)) _rplStudioCycle(st, -1); if (E(5)) _rplStudioCycle(st, 1); }
+  if (E(8)) _rplStudioUIToggle(st);
+  if (E(9)) _rplStudioLib(true);
+  if (E(12)) _rplStudioSpeed(st, 1);
+  if (E(13)) _rplStudioSpeed(st, -1);
+  if (E(14)) _rplStudioSeekBy(st, -5);
+  if (E(15)) _rplStudioSeekBy(st, 5);
+  const sc = val(7) - val(6);
+  st.padScrub = (Math.abs(sc) > 0.08) ? sc * Math.abs(sc) : 0;   // squared: a light squeeze creeps, a full pull flies
+  st.pad.lx = dz(ax[0] || 0); st.pad.ly = dz(ax[1] || 0);
+  st.pad.rx = dz(ax[2] || 0); st.pad.ry = dz(ax[3] || 0);
+  try { if (input.invertLookY) st.pad.ry = -st.pad.ry; } catch (_) {}
+  st.pad.up = (st.cam === 'ghost') && now[5];
+  st.pad.dn = (st.cam === 'ghost') && now[4];
+  st.pad.fast = now[10];
+}
+function _rplStudioLoop(timestamp) {
+  const dt = game.deltaTime || 0.016, k = _rplTimeK();
+  if (game.sandwichTerrain && game.sandwichTerrain.ON) {
+    try { _swU.uTime.value += dt; _swU.uCam.value.set(camera.position.x, camera.position.y, camera.position.z); } catch (_) {}
+    try { _swUpdateHubWater(); } catch (_) {}
+    try { _swRippleTick(dt); } catch (_) {}
+    try { _swUpdateUnderwater(); } catch (_) {}
+    try { _birdFlockTick(dt); } catch (_) {}
+    try { _fishSchoolTick(dt); } catch (_) {}
+    try { _hubCityFrame(dt); } catch (_) {}
+    try { _wxFrame(dt); } catch (_) {}
+    try { _hzDuskLights(); } catch (_) {}
+  }
+  try { updateParticles(dt * k); } catch (_) {}
+  try { updateEffects(dt * k); } catch (_) {}
+  try { if (_RPL.studio) _rplWfxTick(_RPL.studio, dt * k); } catch (_) {}   // (v48.04) the replay's own world effects
+  try { updateDynamicLights(); } catch (_) {}
+  if (typeof document !== 'undefined' && document.hidden) return;
+  try { _lssPrimeTick(2); } catch (_) {}
+  renderFrame();
+  try { _gpuKeepWarmTick(timestamp); } catch (_) {}
+}
+if (typeof window !== 'undefined') window.__replay = {
+  info: function () {
+    const R = _RPL.cur || _RPL.last; if (!R) return 'no recording';
+    const secs = (_rplEnd(R) - R.t0);
+    return { recording: !!_RPL.rec, round: R.round, map: R.map, sig: R.sig, secs: +secs.toFixed(1), actors: Object.keys(R.actors),
+             worldFx: Object.keys(R.wf || {}).map(id => R.wf[id].k),
+             samples: Object.values(R.actors).reduce((s, A) => s + A.buf.length / 9, 0), events: R.ev.length,
+             projectiles: Object.keys(R.pj).length, kills: R.kills.map(e => [+(e.t - R.t0).toFixed(1), e.a[1] || '?', e.a[0]]),
+             killcams: (window.__killcamN | 0), playing: !!_RPL.kc, studio: !!_RPL.studio, lib: _RPL.lib.length, pa: +(R.pa || 0).toFixed(2) };
+  },
+  dump: function (which) {
+    const R = (which === 'last') ? _RPL.last : (_RPL.cur || _RPL.last); if (!R) return 'no recording';
+    const n = _rplExport(R);
+    return (typeof n === 'number') ? { bytes: n } : n;
+  },
+  kc: function () {
+    const R = _RPL.cur || _RPL.last; if (!R || !R.kills.length) return 'no kill recorded';
+    _RPL.rec = false;
+    return _rplKcStart(R, R.kills[R.kills.length - 1]);
+  },
+  stop: function () { _rplKcEnd(); _rplStudioClose(); return true; },
+  studio: function (which, opts) {
+    const R = (typeof which === 'string' && which !== 'last' && which !== 'cur') ? _RPL.lib.find(x => x.id === which)
+            : (which === 'last' ? _RPL.last : (_RPL.cur || _RPL.last));
+    if (!R) return 'no recording';
+    return _rplStudioOpen(R, Object.assign({ t: Math.max(R.t0, _rplEnd(R) - 10), play: true, dev: true }, opts || {}));
+  },
+  close: function () { _rplStudioClose(); return true; },
+  log: function () { return (_RPL.log || []).slice(); },
+  seek: function (sec) { const s = _RPL.studio; if (!s) return 'studio closed'; _rplStudioSeek(s, s.t0 + (+sec || 0)); return +(s.rt - s.t0).toFixed(2); },
+  cam: function (m) { const s = _RPL.studio; if (!s) return 'studio closed'; _rplStudioSetCam(s, m); return s.cam; },
+  follow: function (k) { const s = _RPL.studio; if (!s) return 'studio closed'; _rplStudioFollow(s, k); return s.follow; },
+  rate: function (r) {
+    const s = _RPL.studio; if (!s) return 'studio closed';
+    let bi = 0; for (let i = 0; i < _RPL_SPEEDS.length; i++) if (Math.abs(_RPL_SPEEDS[i] - r) < Math.abs(_RPL_SPEEDS[bi] - r)) bi = i;
+    s.sp = bi; s.rate = _RPL_SPEEDS[bi]; _rplStudioUIRefresh(s); return s.rate;
+  },
+  play: function (on) { const s = _RPL.studio; if (!s) return 'studio closed'; if (!!on !== s.playing) _rplStudioPlay(); return s.playing; },
+  theater: function (id) { _rplTheaterFromLib(id); return 'going'; },
+  library: function (on) { _rplLibStandalone(on !== false); return !!_RPL.libSolo; },
+  lib: function () { return _RPL.lib.map(R => Object.assign(_rplMeta(R), { saved: _rplIsSaved(R), live: R === _RPL.cur })); },
+  saved: function () { return _rplSavedList(); },
+  save: function (id) { const R = id ? _RPL.lib.find(x => x.id === id) : (_RPL.cur || _RPL.last); return R ? _rplSave(R) : 'no recording'; },
+  st: function () {
+    const s = _RPL.studio; if (!s) return 'studio closed';
+    return { id: s.R.id, rt: +(s.rt - s.t0).toFixed(2), len: +(s.t1 - s.t0).toFixed(2), playing: s.playing, rate: s.rate, cam: s.cam,
+             follow: s.follow, puppets: Object.keys(s.pup).length, shotsDrawn: (s.pmPool || []).filter(sl => sl.vis).length,
+             shields: Object.keys(s.pup).filter(k => s.pup[k].sh).map(k => k + ':' + s.pup[k].sh),
+             cloaked: Object.keys(s.pup).filter(k => s.pup[k].cloak),
+             worldFx: Object.keys(s.wv || {}).map(id => s.R.wf[id] ? s.R.wf[id].k : '?'),
+             evI: s.evI, ev: s.R.ev.length, lib: s.libOpen, hidden: s.hidden.length,
+             cam3: [Math.round(camera.position.x), Math.round(camera.position.y), Math.round(camera.position.z)] };
+  },
+};
 function renderFrame() {
   _lssCameraDepthForFov();
   try { if (_XR_COVER.preview && _xrCoverPreviewFrame()) return; } catch (_) {}
@@ -16068,6 +18284,7 @@ function renderFrame() {
   try { if (typeof _shipLightsFrame === 'function') _shipLightsFrame(); } catch (_) {}
   try { if (typeof _ghostHullSync === 'function') _ghostHullSync(); } catch (_) {}
   try { _orbitCamApply(); } catch (_) {}   // (v44.81) dev orbit camera; one property read when off
+  try { _rplFrame(); } catch (_) {}        // (v47.97) the replay recorder / final kill cam: samples, or poses + owns the camera
   if (renderer.xr.isPresenting) {
     if (!renderFrame._xrLogged) {
       renderFrame._xrLogged = true;
@@ -38496,7 +40713,7 @@ class Bot {
       this.velocity.addScaledVector(this.targetDir, 600);
     } else if (coreName === 'Mega Stun Bolt') {
       _cue('stun_core_zap');
-      try { if (typeof _spawnSlayerCoreStormFX === 'function') _spawnSlayerCoreStormFX(this.position, null); } catch (_) {}
+      try { if (typeof _spawnSlayerCoreStormFX === 'function') _spawnSlayerCoreStormFX(this.position, null, true); } catch (_) {}
     } else if (coreName === 'Mega Laser') {
       _cue('laser_core_beam');
     } else if (coreName === 'Mega Tracker Rockets') {
@@ -54482,7 +56699,7 @@ function updateEffects(dt) {
   }
 }
 
-function _spawnSlayerCoreStormFX(pos, ownerPeerId) {
+function _spawnSlayerCoreStormFX(pos, ownerPeerId, burstOnly) {
   const SLAYER_GREEN = LSS.CLASS_COLORS.SLAYER;
   for (let i = 0; i < 6; i++) {
     const ang = (i / 6) * Math.PI * 2 + Math.random() * 0.5;
@@ -54494,6 +56711,7 @@ function _spawnSlayerCoreStormFX(pos, ownerPeerId) {
     );
     spawnLightningBolt(pos.clone(), endPos, SLAYER_GREEN, 0.45, 2, 3);
   }
+  if (burstOnly) return;
   game.worldEffects.push({
     type: 'slayer_core_damage_fx',
     position: pos.clone(),
@@ -54603,6 +56821,7 @@ function _shipShieldColor(loadoutKey) {
 }
 
 function spawnDamageSmoke(pos, healthPct) {
+  if (_RPL.kc || _RPL.studio) return;   // (v47.97) see emitDamageState
   if (healthPct > 0.5) return;
   const intensity = 1 - (healthPct / 0.5); 
   
@@ -58811,6 +61030,7 @@ function _ghostSeatWanted() {
   if (typeof game === 'undefined' || !game || typeof player === 'undefined' || !player) return false;
   const _vr = (typeof isXRPresenting === 'function') && isXRPresenting();
   if (typeof _cinematic !== 'undefined' && _cinematic && _cinematic.active) return false;
+  if (_RPL.kc || _RPL.studio) return false;   // (v47.97) the kill cam shows your hull from outside - solid, not the seat's ghost shell
   if (game.thirdPerson && !_vr) return (!!game._tpGhost || (game._adsGhostZ || 0) > 0.002) && _ghostHullKnobs(_ghostZoomSolidity()).on;   // (v44.27)
   if (!game._cockpit3dLive) return false;
   return _ghostHullKnobs().on;
@@ -59241,6 +61461,15 @@ function _lssApplyShipRig(dt) {
   }
 }
 
+function _adsReset() {
+  try {
+    game._adsZoom = 0; game._adsDolly = 0; game._adsGhostZ = 0; game._adsMag = 0; game._adsDouble = false;
+    if (game._adsTap) { game._adsTap.held = false; game._adsTap.dbl = false; game._adsTap.mag = 0; }
+    const base = (typeof input !== 'undefined' && input && typeof input.fovDeg === 'number') ? input.fovDeg : 90;
+    if (camera.fov !== base) { camera.fov = base; camera.updateProjectionMatrix(); }
+    if (typeof _adsShipOverlaySet === 'function') _adsShipOverlaySet(false);
+  } catch (_) {}
+}
 function _adsLookScale() {
   try {
     if ((typeof isXRPresenting === 'function') && isXRPresenting()) return 1;
@@ -65866,6 +68095,21 @@ function pollGamepad() {
   input._hubShipRPrev = _shipNextDown;
   input.gpLB = !!(gp.buttons[4] && (gp.buttons[4].pressed || gp.buttons[4].value > input.triggerThreshold));
   input.gpRB = !!(gp.buttons[5] && (gp.buttons[5].pressed || gp.buttons[5].value > input.triggerThreshold));
+
+  if (_RPL.studio) {
+    try { _rplStudioPad(gp); } catch (_) {}
+    try { _gpCursorTick(gp, !!(_RPL.studio && _RPL.studio.libOpen)); } catch (_) {}
+    return;
+  }
+  if (_RPL.libSolo) {
+    try {
+      const _b1 = !!(gp.buttons[1] && gp.buttons[1].pressed), _b9 = !!(gp.buttons[9] && gp.buttons[9].pressed);
+      if ((_b1 && !_RPL.libSolo.b1) || (_b9 && !_RPL.libSolo.b9)) { _rplLibStandalone(false); }
+      else { _RPL.libSolo.b1 = _b1; _RPL.libSolo.b9 = _b9; }
+    } catch (_) {}
+    try { _gpCursorTick(gp, true); } catch (_) {}
+    return;
+  }
 
   const _shipSelect = _hudEl('ship-select');   // (v38.61) cached; this runs every frame a pad is connected
   const _matchStartingNav = !!(
@@ -75341,6 +77585,7 @@ function buildSettingsPage() {
 
 function openSettings() {
   settingsOpen = true;
+  try { _clockPause('settings', true); } catch (_) {}   // (v48.01) a solo match's clocks stand still with it
   const overlay = document.getElementById('settings-overlay');
   overlay.classList.add('open');
   overlay.style.display = '';
@@ -75351,6 +77596,7 @@ function openSettings() {
 
 function closeSettings() {
   settingsOpen = false;
+  try { _clockPause('settings', false); } catch (_) {}   // (v48.01) see _clockPause
   const overlay = document.getElementById('settings-overlay');
   overlay.classList.remove('open');
   overlay.style.display = 'none';
@@ -83197,6 +85443,8 @@ function gameLoop(timestamp) {
 
   _xrResetDollyAtFrameStart();
 
+  if (_RPL.kc && game.state !== 'roundEnd' && game.state !== 'playing') { try { _rplKcEnd(); } catch (_) {} }
+  if (_RPL.rec && game.state !== 'roundEnd' && game.state !== 'playing') _RPL.rec = false;
   if (!game.lastTime) game.lastTime = timestamp;
   game.deltaTime = Math.min(0.05, (timestamp - game.lastTime) / 1000);
   game.lastTime = timestamp;
@@ -83345,7 +85593,13 @@ function gameLoop(timestamp) {
   }      
 
   pollGamepad();
-  __pmark('prelude+input'); 
+  __pmark('prelude+input');
+
+  if (_RPL.studio) {
+    try { _rplStudioLoop(timestamp); }
+    catch (e) { console.warn('[replay] studio loop failed - closing it:', e); try { _rplStudioClose(); } catch (_) {} }
+    return;
+  }
 
   if (scoreboardVisible) {
     const _sbFrozen = (game.state === 'roundEnd' || game.state === 'matchEnd');
@@ -83391,7 +85645,8 @@ function gameLoop(timestamp) {
 
   updatePlayerStasis(dt);
   updateWorldEffects(dt);
-  if (deathCam.active) {
+  if (_RPL.kc) {
+  } else if (deathCam.active) {
     updateDeathCam(dt);
   } else {
     updatePlayerMovement(dt);
@@ -83704,9 +85959,9 @@ function gameLoop(timestamp) {
   updateOrganics(dt);
   __pmark('dynObj+monsters+organics'); 
 
-  updateParticles(dt);
-  __pmark('particles'); 
-  updateEffects(dt);
+  updateParticles(dt * _rplTimeK());
+  __pmark('particles');
+  updateEffects(dt * _rplTimeK());
   try {
     const _rcRace = (typeof _isCircuitRace === 'function' && _isCircuitRace());
     if (_rcRace) { try { _raceCircuitNetTick(dt); } catch (_) {} try { _raceCircuitRespawnTick(dt); } catch (_) {} }
@@ -93112,6 +95367,7 @@ function _livingTeammates() {
 }
 
 function startDeathCam(attacker) {
+  _adsReset();   // (v48.05) the ghost cam never runs the ship rig, so a zoom held at death would stay on
   deathCam.active   = true;
   deathCam.target   = player.position.clone();
   deathCam.killerName = (attacker && attacker.loadout && attacker.loadout.name) ? attacker.loadout.name : '';
@@ -93185,6 +95441,67 @@ respawnPlayer = function() {
   deathCam.active = false;
   _origRespawnPlayer();
 };
+
+(function _rplInstallTaps() {
+  try {
+    spawnExplosion = _rplTap(spawnExplosion, 'ex', [0, 1, 2, 3, 4]);
+    spawnFXBurst = _rplTap(spawnFXBurst, 'fx', [0, 1, 2, 3, 4]);
+    spawnLightningBolt = _rplTap(spawnLightningBolt, 'lb', [0, 1, 2, 3, 4, 5, 6]);
+    _spawnSingleTracer = _rplTap(_spawnSingleTracer, 'st', [0, 1, 2, 3, 4, 6]);   // (from, to, color, width, tailMul, beamPin)
+    _spawnRailgunSpiral = _rplTap(_spawnRailgunSpiral, 'rs', [0, 1, 2]);
+    spawnPelletBurst = _rplTap(spawnPelletBurst, 'pb', [0, 1, 2]);
+    spawnImpactSparks = _rplTap(spawnImpactSparks, 'is', [0, 1]);
+    spawnHitFire = _rplTap(spawnHitFire, 'hf', [0, 1, 3]);                          // (pos, colour, scale) - the entity it follows is not replayable
+    spawnHullBurst = _rplTap(spawnHullBurst, 'hb', [0, 1, 2]);
+    emitChassisMuzzleFlash = _rplTap(emitChassisMuzzleFlash, 'mf', [0, 1, 2]);      // `mine` dropped: a replay is never the local cockpit's shot
+    spawnShieldHit = _rplTap(spawnShieldHit, 'sh', [0, 1, 2]);
+    const _ps3 = playSpatialSound;
+    playSpatialSound = function (type, worldPos, opts) {
+      if (_RPL.rec && !_RPL.replay && !_RPL.sndNest) _rplEv('s3', type, worldPos, opts);
+      _RPL.sndNest++;
+      try { return _ps3.apply(this, arguments); } finally { _RPL.sndNest--; }
+    };
+    const _ps2 = playSound;
+    playSound = function (type) {
+      if (_RPL.rec && !_RPL.replay && !_RPL.sndNest && _RPL_SND2.test(String(type))) _rplEv('s2', type);
+      return _ps2.apply(this, arguments);
+    };
+    const _bd = Bot.prototype.die;
+    Bot.prototype.die = function (attacker) {
+      const was = this.alive;
+      const r = _bd.apply(this, arguments);
+      try { if (was && !this.alive && _RPL.rec) _rplDeath(this, attacker); } catch (_) {}
+      return r;
+    };
+    const _nd = NetworkPlayer.prototype.die;
+    NetworkPlayer.prototype.die = function (attacker) {
+      const was = this.alive !== false;
+      const r = _nd.apply(this, arguments);
+      try { if (was && _RPL.rec) _rplDeath(this, attacker); } catch (_) {}
+      return r;
+    };
+    const _pd = playerDie;
+    playerDie = function (attacker) {
+      const was = !!(player && player.shipState !== 'dead');
+      const r = _pd.apply(this, arguments);
+      try { if (was && _RPL.rec) _rplDeath(player, attacker); } catch (_) {}
+      return r;
+    };
+    const _hn = handleNetEvent;
+    handleNetEvent = function (evt, fromPeerId) {
+      try { if (evt && evt.type === 'kill' && _RPL.rec) _rplKillNote(fromPeerId, evt); } catch (_) {}
+      return _hn.apply(this, arguments);
+    };
+    const _smo = _setShipMeshOpacity;
+    _setShipMeshOpacity = function (root, opacity) {
+      try { if (root && root.userData) root.userData._rplOp = opacity; } catch (_) {}
+      return _smo.apply(this, arguments);
+    };
+    const _lb = document.getElementById('lobby-replays-btn');
+    if (_lb) _lb.addEventListener('click', () => { try { _rplLibStandalone(true); } catch (e) { console.warn('[replay] library failed:', e); } });
+    setTimeout(() => { try { _rplTheaterBoot(); } catch (e) { console.warn('[replay] theater boot failed:', e); } }, 0);
+  } catch (e) { console.warn('[replay] taps failed to install:', e); }
+})();
 
 
 initAudio();
