@@ -7746,3 +7746,87 @@ Owner: *"monsters should be affected by tether traps, stun bolt, and energy syph
   **0**, then **41** once the tether expired.
 - ⚠ Verified directly: the control hook, and the TETHER call site end to end. The Stun Bolt and
   Energy Syphon call sites are wired to the same `_monSlow` but were not fired in a live match.
+
+
+### v47.72-47.74 - Custom Location elimination: the bots hunted traffic, and the fleets spawned from the wrong patch
+
+Owner: *"the bots seemed to be very focused on the traffic ships... part of the problem is that we
+spawned too far apart that the bots on either team didn't see each other or me"*.
+
+**Jump:** `if (b.isEarthLife) continue;` (in `_acquireCombatTarget`) · `_openSkyHunt` ·
+`function _lssEarthTeamEnds` · `spawnReady()` / `cityKnown()` / `clearTopWorld` (LSSEarthWorld) ·
+`_clearTopLocal` (LSSEarthTiles) · `_bfStart` · `[lss-earth] drop point` (the log)
+
+**Four causes, and the owner's own theory was half of it.**
+
+- **⭐⭐⭐ NEAREST HOSTILE WINS, AND EARTH LIFE IS HOSTILE TO EVERYONE.** `_acquireCombatTarget` has
+  no range limit and no notion of a combatant: it takes the nearest entity on another team. `_elSpawn`
+  gives traffic, carriers and monsters `team: 9300` and seeds 22 of them around the player, so the
+  freighter next door always beat an enemy fleet kilometres away - and at 230-540 u/s it dragged the
+  bot across the city. **MEASURED over Toronto: 8 samples across two rounds, every live bot on BOTH
+  fleets targeting `earth:traffic`, every time.** v47.54 had written the symptom down (*"a bot was just
+  going around shooting city ships and monsters"*) and left the line open. Earth life never fires
+  back, and bots only exist over Earth in match modes (free flight / endless / campaign never call
+  `spawnBots`), so it is simply skipped. Stray fire and AoE (`_enemiesWithin`) still hit it.
+  **After: 0 bot targets on Earth life in 46 samples (32 Toronto, 14 Montreal), with all 25
+  entities up.**
+- **⭐⭐⭐ `navigateToEnemyTerritory` PARKS A BOT ON ITS OWN END.** When the player is the target and
+  a building blocks LOS, the fallbacks are a squad sighting (Fleet B only) and memory; then this
+  function, which scores the NEAREST corridor point and gives its -500 to `nav.team !== goal` - the
+  bot's OWN side, the reverse of its comment (the line dates to the first commit). On Custom
+  Location the only tagged points ARE the two ends, so the bot flew home and sat. `_openSkyHunt`
+  replaces it on a gmaps WORLD level only: aim at the target's position blurred by 25% of the range
+  (120..900 u), re-rolled per `findTarget`. Firing stays LOS-gated. **MEASURED with the owner AFK on
+  purpose: the enemy fleet crossed 2,400 u and killed the parked ship with no LOS at spawn.**
+  **⚠ OPEN: the inverted bonus still applies on every ARENA. Left alone deliberately - it changes
+  arena bot behaviour nobody has reported.**
+- **⭐⭐⭐ ON A COLD LOCATION, THE WHOLE ROUND WAS PLACED FROM THE HORIZON PATCH.** Placement awaited
+  `tiles.ready` raced against 25 s - but `ready` is the WHOLE 3x3, corners included. **MEASURED cold
+  Toronto: Overpass region 21.0 s, core 38.1 s, all nine 65.9 s.** The race lost, no near patch
+  existed, `spawnPoints` fell through `_any()` to `_far` - built with `buildings: false` - and every
+  spawn came off rings 4x too wide (radii 11,372 / 17,690 / 24,008 vs 2,843 / 4,422 / 6,002), **ends
+  8,298 u apart** at y 150-550 that had never been tested against a building. Round 2 (world kept,
+  centre long since in) came out at 3,103 u, y ~1,750 over the roofs - which is why it looked
+  intermittent. Now a streamed world waits on `spawnReady()` (centre patch + its city, or a verdict
+  that there is none, or Overpass refused) for up to **40 s** - inside the curtain's 45 s ceiling,
+  whose clock only starts at the first `hideLoadingOverlay` after shader warmup, and the curtain was
+  already holding for the same patch through `_building`. Warm Toronto: **ready after 7,884 ms**.
+  - **The late-backfill sweep now serves the drop point's patch first** (`_bfStart`). It walked
+    `_patches` in registration order, so a bare centre patch could be fifth in a one-at-a-time queue.
+  - **⚠ "STOP WAITING" IS NOT "THE CLEARANCE CAN SEE THE CITY".** `spawnReady` goes true on an
+    Overpass refusal; `cityKnown` does not. Placement asks `cityKnown` for its altitude. **MEASURED
+    cold Montreal: Overpass took 41.7 s, so at 40 s there was no city** - the ends took the **300 m
+    floor** (y 2,122) and, once the city landed, cleared its real roofs (1,237 / 1,037 u) by 885 /
+    1,084. Terrain-only clearance would have put both fleets at 282, inside those towers. The ring
+    points get the same floor in `LSSEarthWorld.spawnPoints` (assault's ends still come off the ring).
+- **⭐⭐ THE SEPARATION KNOB COULD NEVER BE HONOURED.** v47.51 picked end B as "the ring point
+  closest to 3,000 u from A", and the ring holds 8 points per radius, 45 deg apart - so it could only
+  ever land on the ring's own spacing (8,298 cold, 3,103 warm). `_lssEarthTeamEnds` now BUILDS the two
+  ends at `window.__earthTeamSep` (default **2,400**, the arena's number - it is in WORLD UNITS; it
+  had been documented as metres) either side of the DROP POINT, then lifts each above the tallest roof
+  within 140 m via `clearTopWorld` - `spawnPoints`' own clearance test, lifted into
+  `_clearTopLocal` so both share it. v47.51's "never invent a coordinate" was right while that test
+  only existed inside the ring generator.
+  - **⚠ THE AXIS MUST AGREE ACROSS PEERS.** Every client builds its own ends, and anything chosen
+    from BUILDINGS differs when one client's Overpass failed. So x/z come only from the location: an
+    INTEGER hash of lat/lng picks one of 8 axes (`Math.sin` is not bit-identical across engines).
+    Only the altitude reads local data. Knob `window.__earthTeamAxis` (degrees).
+  - **One common altitude** for both ends, and **the champion is lifted too** - v47.53's mean-of-ends
+    altitude sits inside any tower taller than the ends' roofline. Over Toronto the drop point is City
+    Hall: `mid roof 697` = 99.6 m, the east tower. Log: `BUILT axis 0 deg, ends y 1312 over roofs
+    1052/697, mid roof 697`. Same ends every round (deterministic), kept or rebuilt.
+- **⚠ `strip.py` DOES NOT CHANGE THE CACHE-BUSTER.** Re-stripping under the same `LSS_BUILD` leaves
+  the pane on the cached `lss.js?v=` - bump for every cut you intend to load, not only for deploys.
+- **⚠ WHILE MEASURING, THE OWNER WAS FLYING.** A parked ship logged 5 kills in two rounds, credited to
+  `player` through `updateAbilities` - PYRO's Fire Shield cone. It was the owner (*"i owned the bots
+  with pyro's fire"*), and round 1 was AFK on purpose. Unfocused page + no keys held is not proof of
+  no pilot - the round boundary is.
+- **⚠ OPEN - "a traffic ship was named slayer", "a pyro and a puncture city ship" (47.73, Montreal).**
+  Traffic is built with `loadout: { name: 'TRAFFIC' }` and nothing reassigns it (audited: every
+  `.loadout =` site); traffic hulls are `HOARD_SHIPS` keys, lowercase, colliding with no class key;
+  `spawnBots` builds no hoard-hulled Bots; the ship pool keys by the key the hull was built with.
+  Leading theory: the callout's LOS (`raycastLevel`) knows terrain and buildings but NOT earth-life
+  hulls, so a class bot behind a freighter shows its tag ON the freighter - newly common now that
+  traffic survives and shares the fleets' airspace. A passive probe (camera->bot segment vs every
+  earth-life sphere, 10 Hz, `window.__tagAuditLog`) was installed in the pane to confirm before
+  changing the callout.

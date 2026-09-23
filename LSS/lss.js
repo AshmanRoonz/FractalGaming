@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "47.71";
+const LSS_BUILD = "47.74";
 try {
   const _st = /[?&]safetop=(\d{1,3})/.exec(location.search);
   if (_st) {
@@ -38093,6 +38093,7 @@ class Bot {
     for (const b of game.entities) {
       if (!b || b === this || !b.alive || b.team === _side) continue;
       if (b.isHubTraffic && this._owCity != null) continue;   // (v38.78) a city fleet leaves the freighters alone
+      if (b.isEarthLife) continue;
       let d2 = this.position.distanceToSquared(b.position);
       if (b.isOwCarrier && this._owCity != null) d2 *= 6.25;   // (v38.81) a carrier counts as 2.5x farther: fighters pick fighters and pilots first
       if (d2 < bestScore) { bestScore = d2; best = b; }
@@ -38149,6 +38150,7 @@ class Bot {
 
         if (targetPos) {
           this.aiTarget = targetPos;
+        } else if (this._openSkyHunt(player.position, dist)) {
         } else {
           this.navigateToEnemyTerritory();
         }
@@ -38168,6 +38170,18 @@ class Bot {
     } else {
       this.navigateToEnemyTerritory();
     }
+  }
+
+  _openSkyHunt(pos, dist) {
+    try {
+      if (typeof _lssGmaps === 'undefined' || !_lssGmaps || !_lssGmaps.active || _lssGmaps.overlayOnly) return false;
+      if (!pos) return false;
+      const r = Math.max(120, Math.min(900, (dist || 0) * 0.25));
+      this.aiTarget = new THREE.Vector3(pos.x + (Math.random() - 0.5) * 2 * r,
+                                        pos.y + (Math.random() - 0.5) * 0.8 * r,
+                                        pos.z + (Math.random() - 0.5) * 2 * r);
+      return true;
+    } catch (_) { return false; }
   }
 
   navigateToEnemyTerritory() {
@@ -94077,19 +94091,7 @@ class LSSEarthTiles {
       const a = (i / N) * Math.PI * 2;
       const rr = 0.45 + 0.5 * ((i % 3) / 2);
       const x = Math.cos(a) * rx * rr, z = Math.sin(a) * rz * rr;
-      let top = this.heightAt(x, z);
-      const g = this._cgrid;
-      if (g) {
-        const i0 = Math.max(0, ((x - clear - g.X0) / g.cell) | 0);
-        const i1 = Math.min(g.gx - 1, ((x + clear - g.X0) / g.cell) | 0);
-        const j0 = Math.max(0, ((z - clear - g.Z0) / g.cell) | 0);
-        const j1 = Math.min(g.gz - 1, ((z + clear - g.Z0) / g.cell) | 0);
-        for (let j = j0; j <= j1; j++) for (let ii = i0; ii <= i1; ii++) {
-          const list = g.cells[j * g.gx + ii];
-          if (!list) continue;
-          for (let k = 0; k < list.length; k++) if (list[k].top > top) top = list[k].top;
-        }
-      }
+      const top = this._clearTopLocal(x, z, clear);
       out.push({
         x: x * sc + X.ox,
         y: (top * sc + X.oy) + 260,   // clearance above the tallest roof
@@ -94098,6 +94100,42 @@ class LSSEarthTiles {
       });
     }
     return out;
+  }
+
+  /**
+   * (v47.72) THE ROOF CLEARANCE TEST, AT ANY POINT - lifted out of spawnPoints so a spawn can be
+   * PLACED where it is wanted and then validated, instead of chosen from whatever the ring offers.
+   * The highest surface within `clear` metres of (x, z): the terrain under the point plus every
+   * building prism top in the collision-grid cells that box touches. LOCAL metres in and out.
+   * `bldOnly` skips the terrain - for a neighbouring patch that owns buildings near the point but
+   * whose DEM window does not hold it (its heightAt would clamp to its own edge).
+   */
+  _clearTopLocal(x, z, clear, bldOnly) {
+    let top = bldOnly ? -Infinity : this.heightAt(x, z);
+    const g = this._cgrid;
+    if (g) {
+      const i0 = Math.max(0, ((x - clear - g.X0) / g.cell) | 0);
+      const i1 = Math.min(g.gx - 1, ((x + clear - g.X0) / g.cell) | 0);
+      const j0 = Math.max(0, ((z - clear - g.Z0) / g.cell) | 0);
+      const j1 = Math.min(g.gz - 1, ((z + clear - g.Z0) / g.cell) | 0);
+      for (let j = j0; j <= j1; j++) for (let ii = i0; ii <= i1; ii++) {
+        const list = g.cells[j * g.gx + ii];
+        if (!list) continue;
+        for (let k = 0; k < list.length; k++) if (list[k].top > top) top = list[k].top;
+      }
+    }
+    return top;
+  }
+  /** (v47.72) `_clearTopLocal` in the WORLD frame: world x/z in, world y out, NaN if nothing is known. */
+  clearTopWorld(wx, wz, clearM, bldOnly) {
+    const X = this._xf();
+    const t = this._clearTopLocal((wx - X.ox) / X.s, (wz - X.oz) / X.s, clearM || 140, bldOnly);
+    return isFinite(t) ? t * X.s + X.oy : NaN;
+  }
+  /** (v47.72) The drop point in the WORLD frame - LOCAL (0,0) is the lat/lng the level was built on. */
+  originWorld() {
+    const X = this._xf();
+    return { x: X.ox, y: X.oy, z: X.oz };
   }
 
   /**
@@ -95269,6 +95307,34 @@ class LSSEarthWorld {
    * and an Overpass query; firing a 3x3 at once is how you get rate-limited on
    * the first flight.
    */
+  /**
+   * (v47.72) One step of the late-backfill sweep in streamUpdate, lifted out verbatim so the sweep
+   * can offer the drop point's patch first. Returns true when it STARTED a backfill (the old loop's
+   * `break`), false when this patch needs nothing (its `continue`s).
+   */
+  _bfStart(pk, p) {
+    if (p.__bfKey === this._bldRegionKey) return false;
+    if (p._bldBusy) return false;   // (v46.76) mid-build; it will have its city
+    if (p._bldList && p._bldList.length && (p.__bldComplete || !this._bldCompleteFor(pk))) { p.__bfKey = this._bldRegionKey; return false; }
+    const n = this._bldCellCount ? (this._bldCellCount.get(pk) || 0) : 1;
+    if (!n) { p.__bfKey = this._bldRegionKey; return false; }
+    p.__bfKey = this._bldRegionKey;
+    this._bfBusy = true;
+    (async () => {
+      try {
+        if (p._bldList && p._bldList.length) p._clearBuildings();   // (v46.76) a tall-only set, being completed
+        p.__bldComplete = this._bldCompleteFor(pk);
+        p.prefetchedWays = this._waysFor(this._bldWays, pk);
+        await p._loadBuildings();
+        if (this._glow !== null && typeof p.setWindowGlow === 'function') p.setWindowGlow(this._glow);
+        this.stats.buildings = 0;
+        for (const q of this._patches.values()) this.stats.buildings += (q.stats.buildings || 0);
+      } catch (e) { console.warn('[lss-earth-world] late backfill', pk, 'failed:', e); }
+      finally { this._bfBusy = false; }
+    })();
+    return true;
+  }
+
   streamUpdate(focus) {
     if (this._disposed || !focus || !this.origin) return;
     {
@@ -95284,27 +95350,10 @@ class LSSEarthWorld {
     }
     if (this._disposed) return;
     if (this._bldWays && this._bldWays.length && this._bldRegionKey && !this._bfBusy) {
-      for (const [pk, p] of this._patches.entries()) {
-        if (p.__bfKey === this._bldRegionKey) continue;
-        if (p._bldBusy) continue;   // (v46.76) mid-build; it will have its city
-        if (p._bldList && p._bldList.length && (p.__bldComplete || !this._bldCompleteFor(pk))) { p.__bfKey = this._bldRegionKey; continue; }
-        const n = this._bldCellCount ? (this._bldCellCount.get(pk) || 0) : 1;
-        if (!n) { p.__bfKey = this._bldRegionKey; continue; }
-        p.__bfKey = this._bldRegionKey;
-        this._bfBusy = true;
-        (async () => {
-          try {
-            if (p._bldList && p._bldList.length) p._clearBuildings();   // (v46.76) a tall-only set, being completed
-            p.__bldComplete = this._bldCompleteFor(pk);
-            p.prefetchedWays = this._waysFor(this._bldWays, pk);
-            await p._loadBuildings();
-            if (this._glow !== null && typeof p.setWindowGlow === 'function') p.setWindowGlow(this._glow);
-            this.stats.buildings = 0;
-            for (const q of this._patches.values()) this.stats.buildings += (q.stats.buildings || 0);
-          } catch (e) { console.warn('[lss-earth-world] late backfill', pk, 'failed:', e); }
-          finally { this._bfBusy = false; }
-        })();
-        break;
+      const _k0 = this._k00 || (this._k00 = this._key(0, 0));
+      const _p0 = this._patches.get(_k0);
+      if (!(_p0 && this._bfStart(_k0, _p0))) {
+        for (const [pk, p] of this._patches.entries()) { if (this._bfStart(pk, p)) break; }
       }
     }
     if (!this._farReady) return;
@@ -95394,7 +95443,77 @@ class LSSEarthWorld {
   /** Spawn points from the patch at the world origin — see LSSEarthTiles.spawnPoints. */
   spawnPoints(n, clearM) {
     const p = this._patches.get(this._key(0, 0)) || this._any();
-    return (p && typeof p.spawnPoints === 'function') ? p.spawnPoints(n, clearM) : [];
+    const pts = (p && typeof p.spawnPoints === 'function') ? p.spawnPoints(n, clearM) : [];
+    if (pts.length && !this.cityKnown()) {
+      const f = 300 * this._unitsPerMetre();
+      for (const q of pts) {
+        let g = 0;
+        try { const v = this.groundYWorld(q.x, q.z); if (isFinite(v)) g = v; } catch (_) {}
+        if (q.y < g + f) q.y = g + f;
+      }
+    }
+    return pts;
+  }
+
+  /**
+   * ⭐⭐ (v47.72) IS THE GROUND UNDER THE DROP POINT READY TO SPAWN ON? The level build used to
+   * place everyone after `await ready` raced against 25 s - but `ready` is the WHOLE 3x3 including
+   * the corners, and a cold location misses that by a mile. MEASURED over Toronto: Overpass region
+   * 21.0 s, core boot 38.1 s, all nine 65.9 s. So the race timed out with NO near patch built,
+   * `spawnPoints` fell through `_any()` to the HORIZON patch, and the whole round was placed off it:
+   * rings four times wider (radii 11,372 / 17,690 / 24,008 instead of 2,843 / 4,422 / 6,002), team
+   * ends 8,298 u apart, and - because the horizon patch is built with `buildings: false` - spawn
+   * heights of 150-550 that had never been tested against a single building. Round 2 of the same
+   * session (world kept, centre patch long since in) came out at 3,103 u and y ~1,750 over the
+   * downtown roofs. A cold first visit is the COMMON case for Custom Location, so this was most
+   * launches.
+   * Ready means the centre patch exists AND either the city under it is KNOWN (`cityKnown`) or
+   * Overpass refused - the backfill takes over from there, and nobody should wait on a retry.
+   * ⚠ "Stop waiting" is not "the clearance is trustworthy": after a refusal the city is still
+   *   unknown, which is why placement asks `cityKnown()` separately for its altitude floor.
+   */
+  spawnReady() {
+    if (this.cityKnown()) return true;
+    return !!this._patches.get(this._key(0, 0)) && (this._bldFail | 0) > 0;
+  }
+  /**
+   * (v47.72) Can the clearance test at the drop point SEE the city? True when the centre patch has
+   * its buildings (the `_bldList && _cgrid` test `_raceCircuitEarthPoll` uses), or when the region
+   * answered with no ways at all - genuine wilderness, nothing to clear.
+   */
+  cityKnown() {
+    const p = this._patches.get(this._key(0, 0));
+    if (!p) return false;
+    if (p._cgrid && p._bldList && p._bldList.length) return true;
+    return this._bldRegionKey != null && ((this.stats.regionWays | 0) === 0);
+  }
+  /**
+   * (v47.72) See LSSEarthTiles.clearTopWorld. The OWNING near patch answers for the terrain and its
+   * own buildings; any neighbour whose cell the clearance box crosses adds its buildings too -
+   * ownership is by cell (v46.03), so a tower just over the line lives in the neighbour's grid.
+   * ⚠ NaN, NOT the horizon patch, when no near patch owns the point. `_far` has no building grid,
+   *   so its answer would be bare terrain - the exact hole the note on spawnReady describes.
+   */
+  clearTopWorld(wx, wz, clearM) {
+    const own = this._patchAt(wx, wz);
+    if (!own) return NaN;
+    let top = own.clearTopWorld(wx, wz, clearM);
+    const pad = (clearM || 140) * this._unitsPerMetre();
+    const seen = [own];
+    for (const d of [[-pad, -pad], [pad, -pad], [-pad, pad], [pad, pad]]) {
+      const p = this._patchAt(wx + d[0], wz + d[1]);
+      if (!p || seen.indexOf(p) >= 0) continue;
+      seen.push(p);
+      const v = p.clearTopWorld(wx, wz, clearM, true);
+      if (isFinite(v) && !(v <= top)) top = v;
+    }
+    return top;
+  }
+  /** (v47.72) The drop point in the WORLD frame - every patch shares one projection origin. */
+  originWorld() {
+    const p = this._patches.get(this._key(0, 0)) || this._far;
+    if (p && typeof p.originWorld === 'function') return p.originWorld();
+    return { x: this.group.position.x, y: this.group.position.y, z: this.group.position.z };
   }
 
   /**
@@ -95620,6 +95739,40 @@ async function _lssGmapsLoadModule() {
     }
   })();
   return _lssGmaps.loadingPromise;
+}
+
+function _lssEarthTeamEnds(tiles, level, sep, bldKnown) {
+  try {
+    if (!tiles || typeof tiles.clearTopWorld !== 'function') return null;
+    const o = (typeof tiles.originWorld === 'function') ? tiles.originWorld() : { x: 0, y: 0, z: 0 };
+    const la = Math.round(((level && level.lat) || 0) * 1e5) | 0;
+    const ln = Math.round(((level && level.lng) || 0) * 1e5) | 0;
+    let h = (Math.imul(la ^ 0x27d4eb2d, 0x165667b1) ^ Math.imul(ln ^ 0x61c88647, 0x2c1b3c6d)) >>> 0;
+    h ^= h >>> 15; h = Math.imul(h, 0x85ebca6b) >>> 0; h ^= h >>> 13;
+    let deg = ((h >>> 0) % 8) * 22.5;
+    try {
+      const k = (typeof window !== 'undefined') ? window.__earthTeamAxis : null;
+      if (typeof k === 'number' && isFinite(k)) deg = k;
+    } catch (_) {}
+    const th = deg * Math.PI / 180, ux = Math.cos(th), uz = Math.sin(th);
+    const half = Math.max(300, Math.min(10000, sep || 2400)) / 2;
+    const ax = o.x + ux * half, az = o.z + uz * half;
+    const bx = o.x - ux * half, bz = o.z - uz * half;
+    const ta = tiles.clearTopWorld(ax, az), tb = tiles.clearTopWorld(bx, bz);
+    const tm = tiles.clearTopWorld(o.x, o.z);
+    if (!isFinite(ta) || !isFinite(tb)) return null;
+    let sea = -Infinity;
+    try { if (typeof tiles.seaLevelWorld === 'function') { const s = tiles.seaLevelWorld(); if (isFinite(s)) sea = s; } } catch (_) {}
+    const LIFT = 260;
+    let y = Math.max(ta, tb, sea) + LIFT;
+    if (bldKnown === false) y = Math.max(y, Math.max(ta, tb) + 300 * ((level && level.scale) || 7));
+    const ym = Math.max(y, (isFinite(tm) ? Math.max(tm, sea) : -Infinity) + LIFT);
+    return { a: { x: ax, y, z: az, team: 'A' }, b: { x: bx, y, z: bz, team: 'B' },
+             mid: { x: o.x, y: ym, z: o.z }, deg, tops: [ta, tb, tm], bldKnown: bldKnown !== false };
+  } catch (e) {
+    console.warn('[lss-earth] team ends could not be built:', e);
+    return null;
+  }
 }
 
 async function _lssGmapsBuildLevel(level) {
@@ -95871,10 +96024,20 @@ async function _lssGmapsBuildLevel(level) {
     _lssGmaps._spawnPlaced = false;   // the curtain waits on this; see hideLoadingOverlay
     try { game._launchCurtainFree = false; } catch (_) {}   // (v47.33) this world holds its own curtain again
     try {
-      await Promise.race([
-        tiles.ready,
-        new Promise((r) => setTimeout(r, (typeof level.loadTimeoutMs === 'number') ? level.loadTimeoutMs : 25000))
-      ]);
+      if (typeof tiles.spawnReady === 'function') {
+        const _gmW0 = performance.now();
+        const _gmWMax = (typeof level.loadTimeoutMs === 'number') ? level.loadTimeoutMs : 40000;
+        while (!tiles.spawnReady() && !_gmStale() && (performance.now() - _gmW0) < _gmWMax) {
+          await new Promise((r) => setTimeout(r, 100));
+        }
+        console.log('[lss-earth] drop point', tiles.spawnReady() ? 'ready' : 'NOT ready', 'for spawns after',
+                    Math.round(performance.now() - _gmW0), 'ms');
+      } else {
+        await Promise.race([
+          tiles.ready,
+          new Promise((r) => setTimeout(r, (typeof level.loadTimeoutMs === 'number') ? level.loadTimeoutMs : 25000))
+        ]);
+      }
     } catch (_) {}
     if (_gmStale()) {
       console.warn('[lss-gmaps] build is stale (seq ' + _gmSeq + ' -> ' + (game._buildSeq | 0) +
@@ -95931,7 +96094,7 @@ async function _lssGmapsBuildLevel(level) {
             for (const q of _sp) q.team = null;                  // the middle stays neutral
             const _d3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
             const _SEP = (typeof window !== 'undefined' && typeof window.__earthTeamSep === 'number'
-                          && window.__earthTeamSep > 0) ? window.__earthTeamSep : 3000;
+                          && window.__earthTeamSep > 0) ? window.__earthTeamSep : 2400;
             const _CLR = (typeof window !== 'undefined' && typeof window.__earthTeamClump === 'number'
                           && window.__earthTeamClump > 0) ? window.__earthTeamClump : 900;
             let _anA = _byP2[0];   // an extreme, so both ends sit in open air rather than mid-cloud
@@ -95953,13 +96116,25 @@ async function _lssGmapsBuildLevel(level) {
               }
               return out;
             };
-            const _ea = _clump(_anA, null), _eb = _clump(_anB, _ea);
+            let _ea, _eb, _mid = null, _endsBuilt = null;
+            try {
+              const _bldKnown = (typeof tiles.cityKnown === 'function') ? !!tiles.cityKnown() : true;
+              _endsBuilt = _lssEarthTeamEnds(tiles, level, _SEP, _bldKnown);
+            } catch (_) { _endsBuilt = null; }
+            if (_endsBuilt) {
+              _sp.push(_endsBuilt.a, _endsBuilt.b);
+              _ea = [_endsBuilt.a]; _eb = [_endsBuilt.b]; _mid = _endsBuilt.mid;
+            } else {
+              _ea = _clump(_anA, null); _eb = _clump(_anB, _ea);
+              console.warn('[lss-earth] team ends fell back to the spawn ring - the drop point could not be cleared');
+            }
             for (const q of _ea) q.team = 'A';
             for (const q of _eb) q.team = 'B';
             const _ctr2 = (arr) => { let x=0,y=0,z=0; for (const q of arr) { x+=q.x; y+=q.y; z+=q.z; }
                                      return { x:x/arr.length, y:y/arr.length, z:z/arr.length }; };
             const _c1 = _ctr2(_ea), _c2 = _ctr2(_eb);
-            const _cm = { x: (_c1.x + _c2.x) / 2, y: (_c1.y + _c2.y) / 2, z: (_c1.z + _c2.z) / 2 };
+            const _cm = _mid ? { x: _mid.x, y: _mid.y, z: _mid.z }
+                             : { x: (_c1.x + _c2.x) / 2, y: (_c1.y + _c2.y) / 2, z: (_c1.z + _c2.z) / 2 };
             game.sdfRoomData = [
               { id: 'spawn_a', team: 'A', side: 'A', x: _c1.x, y: _c1.y, z: _c1.z, r: 420 },
               { id: 'spawn_b', team: 'B', side: 'B', x: _c2.x, y: _c2.y, z: _c2.z, r: 420 },
@@ -95971,7 +96146,12 @@ async function _lssGmapsBuildLevel(level) {
                           'apart', Math.round(Math.hypot(_c1.x - _c2.x, _c1.z - _c2.z)),
                           '| spans', _span(_ea) + '/' + _span(_eb),
                           '| champion at', Math.round(_cm.x), Math.round(_cm.y), Math.round(_cm.z),
-                          '=', Math.round(Math.hypot(_c1.x - _cm.x, _c1.z - _cm.z)), 'from each end');
+                          '=', Math.round(Math.hypot(_c1.x - _cm.x, _c1.z - _cm.z)), 'from each end',
+                          _endsBuilt ? ('| BUILT axis ' + _endsBuilt.deg + ' deg, ends y ' + Math.round(_c1.y) +
+                                        ' over roofs ' + Math.round(_endsBuilt.tops[0]) + '/' + Math.round(_endsBuilt.tops[1]) +
+                                        ', mid roof ' + Math.round(_endsBuilt.tops[2]) +
+                                        (_endsBuilt.bldKnown ? '' : ' (NO CITY YET - 300 m floor)'))
+                                     : '| RING fallback');
             } catch (_) {}
           }
           try {
