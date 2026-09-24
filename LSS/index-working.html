@@ -6860,7 +6860,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.28";
+const LSS_BUILD = "48.30";
 // (v47.97) THE REPLAY RECORDER'S STATE (the machinery is at `function _rplFrame`, before renderFrame).
 // Declared HERE, at the top of the boot scope, because the one-line taps in the effect spawners read it
 // and a spawner can run during boot (the prebakes spawn effects to warm them) - a const read before its
@@ -51507,7 +51507,15 @@ const CYBER = {
   botShips: ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'],
 };
 // (v37.91) fetch the hull NOW, while the player is still on ship select
-function _cyberPrefetch() { try { _carrierPreload(); } catch (_) {} }
+// (v48.29) ...and the Champion Shell's Sphere.glb with it. The objective spawns sealed in that shell
+// the moment the round opens, and nothing else loads it in this mode: _monPrimeWanted and
+// updateMonsters both stand down on freeflight, and startCyberpunkCity never had the preload that
+// startRace / startAssault carry. So round 1 always spawned the violet fallback husk. Each preload in
+// its own try: a thrown carrier load must not cost the shell its head start, or the reverse.
+function _cyberPrefetch() {
+  try { _carrierPreload(); } catch (_) {}
+  try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
+}
 // (v37.94) Decide WHERE the match is and stand the player there before the world is prebaked.
 // Until this existed the mode placed you only when its lineup ran - after free flight had spawned
 // you at the hub's default point and after the world had been baked around THAT point. So the first
@@ -82411,6 +82419,11 @@ function _updateMonsterSummon(dt) {
 }
 
 function updateMonsters(dt) {
+  // (v48.29) Did the per-monster tick loop below run this frame? The Champion Shell rides in
+  // game.monsters and this loop is its ONLY ticker, but every early return below skips it - so the
+  // caller (the shell re-add block after `updateMonsters(dt)` in the main update) ticks the shell
+  // itself whenever this reads false. Cleared first, set only just before the loop.
+  updateMonsters._ticked = false;
   // Skip entirely on Potato quality: six 20-45 MB GLBs are exactly the
   // load that preset exists to avoid.
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
@@ -82474,6 +82487,7 @@ function updateMonsters(dt) {
     _monsterRoundReset();
   }
   if (typeof _updateMonsterSummon === 'function') _updateMonsterSummon(dt);
+  updateMonsters._ticked = true;   // (v48.29) see the top of this function
   for (let i = 0; i < game.monsters.length; i++) {
     const m = game.monsters[i];
     if (m.alive) m.update(dt);
@@ -115592,6 +115606,10 @@ function _lssSyncCyberToTag(tag) {
                         msalt: (Math.random() * 1e9) | 0 };
       }
       try { if (typeof net !== 'undefined' && net) net.cyber = true; } catch (_) {}
+      // (v48.29) the lobby arrows and a peer's decree arm the mode HERE, not through
+      // startCyberpunkCity, so the head start on the carrier + shell models has to come from here too
+      // or a lobby-picked match opens on the violet placeholder shell.
+      try { if (typeof _cyberPrefetch === 'function') _cyberPrefetch(); } catch (_) {}
     } else {
       // the full teardown, not just two nulls - it also drops the cine lights and the carrier
       try { if (typeof _lssClearModeSetup === 'function') _lssClearModeSetup(); } catch (_) {}
@@ -116422,15 +116440,23 @@ function _lssAdoptRoomMode(mode) {
 // NOT EXIST in this file - so the typeof-guarded call was a silent no-op and the owner would have
 // been switched with no explanation at all. The lobby status line is what every other lobby message
 // uses, and _owBanner is the in-world surface if we are past the menu.
+// (v48.29) ...and in the MODE'S NAME, not its tag. `String(mode).toUpperCase()` printed the wire tag,
+// so the banner under "LAST SHIP SAILING: CYBERPUNK CITY" read CYBERPUNK, and ELIMINATION / EXHIBITION
+// read CLASSIC / FREEFLIGHT - words that appear nowhere else a player can see. _lssModeDisplayName
+// maps a TAG (it is the same table as _ssModeName, the caption renderer), and a tag is what every
+// caller holds - _lssRoomModeOr calls this BEFORE the mode is applied, so reading the live state
+// through _ssModeName would name the mode being left.
 function _lssSayRoomMode(mode) {
+  let _name = String(mode).toUpperCase();
+  try { if (typeof _lssModeDisplayName === 'function') _name = _lssModeDisplayName(mode); } catch (_) {}
   try {
     const el = document.getElementById('lobby-status');
     if (el) {
-      el.textContent = 'ROOM IS PLAYING ' + String(mode).toUpperCase() + ' — JOINED THAT';
+      el.textContent = 'ROOM IS PLAYING ' + _name + ' — JOINED THAT';
       el.style.color = '#ffd36e';
     }
   } catch (_) {}
-  try { if (typeof _owBanner === 'function') _owBanner('ROOM MODE', String(mode).toUpperCase()); } catch (_) {}
+  try { if (typeof _owBanner === 'function') _owBanner('ROOM MODE', _name); } catch (_) {}
 }
 
 // (v43.22) A HUMAN PRESSED A MODE BUTTON. This is the read-only resolve PLUS the stamp that says so,
@@ -116501,6 +116527,54 @@ function _ssPerkArrows() {
     next.classList.toggle('on', overflows);
     prev.disabled = grid.scrollLeft <= 1;
     next.disabled = grid.scrollLeft >= grid.scrollWidth - grid.clientWidth - 1;
+  } catch (_) {}
+}
+
+// ⭐⭐ (v48.29) A BANNER OVER THE SHIP PICKER SITS BETWEEN THE MASTHEAD AND THE SHIP'S NAME.
+// Owner: "in the ship selection screen/lobby, Mode name text when changing modes is over top the
+// ship name, it needs to go above the ship name but below the title".
+// That text is #ov-banner - `_lssSayRoomMode` raises ROOM MODE / <mode> on every mode-arrow press -
+// and #ov-banner is `position: fixed; top: 18%`: a height chosen for the flight HUD that knows nothing
+// about the picker, whose name plate is placed by BREAKPOINT instead (#ship-hero top 40 / 112 / 46 /
+// 40). MEASURED at 1187x688: masthead 12..37, ship name 112..153, banner 92..156 - forty-one pixels
+// of banner printed across VORTEX. At 1920 wide the same 18% falls under the name, onto the spec rows.
+// So while the picker is up the banner is placed by MEASUREMENT, like everything else on this screen:
+// centred in the band from the masthead's bottom to the name's top. Where that band is too thin to
+// hold it - every window over 1200 wide, where v43.50 put the name right under the masthead on purpose
+// ("name up closer to the level of the title") - the NAME steps down to make room for exactly as long
+// as the banner is up, and the spec band follows it because it already hangs off the name.
+// ⚠ THE PLACEMENT LIVES IN _ssSpreadRails (step 1c), NOT HERE. The masthead re-fits itself ~520 ms
+//   after a mode change (_ssModeLabel: the digitize has to finish before the fit can be measured) and
+//   may STACK onto two lines then, so a band measured at banner time is the OLD masthead's. This only
+//   records that a banner is up, and until when; every rails pass re-derives where it goes.
+// ⚠ A function property, not a top-level const: _ssSpreadRails can run from boot-time paths, and a
+//   const read before its line would be the v39.02 TDZ crash. Function declarations are hoisted.
+// Live knob: window.__ssBanner = { gap: 6 } (px between the banner and the masthead / the name).
+function _ssBannerHold(el, secs) {
+  const st = _ssBannerHold._st || (_ssBannerHold._st = { el: null, until: 0, t: null });
+  try {
+    const ms = Math.max(0.2, (typeof secs === 'number' && secs > 0) ? secs : 3) * 1000;
+    if (st.t) { clearTimeout(st.t); st.t = null; }
+    // Back to the sheet's own 18% first, every time: a banner that fires once the picker has gone
+    // must not inherit the last picker placement. The rails pass below re-places it if the picker is up.
+    if (el) el.style.removeProperty('top');
+    st.el = el || null;
+    st.until = performance.now() + ms;
+    st.t = setTimeout(_ssBannerRelease, ms + 40);   // just past the ovBanner fade
+    _ssSpreadRails();
+  } catch (_) {}
+}
+function _ssBannerRelease() {
+  try {
+    const st = _ssBannerHold._st;
+    if (st) { if (st.t) { clearTimeout(st.t); st.t = null; } st.el = null; st.until = 0; }
+    const ban = document.getElementById('ov-banner');
+    if (ban) ban.style.removeProperty('top');
+    // Directly, not only through the rails pass: that pass returns early while the picker is hidden,
+    // and a name left stepped down would be waiting there the next time it opens.
+    const hero = document.getElementById('ship-hero');
+    if (hero) hero.style.removeProperty('top');
+    _ssSpreadRails();
   } catch (_) {}
 }
 
@@ -116592,6 +116666,40 @@ function _ssSpreadRails() {
         if (cR > bandR) dx = bandR - cR;
         if (cL + dx < bandL) dx = bandL - cL;
         ml.style.setProperty('--ssm-dx', Math.round(dx) + 'px');
+      }
+    } catch (_) {}
+
+    // ---- 1c. (v48.29) A BANNER OVER THE PICKER: between the masthead and the ship's name - see
+    // _ssBannerHold for the why. AFTER 1b, because the band's top is the masthead's bottom and 1b is
+    // what just decided whether the masthead is one line or two; BEFORE 2, because the spec band is
+    // anchored to the name's bottom there, so a name stepped down here takes the spec rows with it.
+    // Same discipline as the column's top in 1: removeProperty first, so every pass re-derives from
+    // the sheet and nothing ratchets. A name is only ever pushed DOWN, and only while a banner is up.
+    try {
+      const hero = document.getElementById('ship-hero');
+      const hn = document.getElementById('ship-hero-name');
+      const H = _ssBannerHold._st;
+      const ban = H ? H.el : null;
+      if (hero) hero.style.removeProperty('top');
+      if (ban) ban.style.removeProperty('top');
+      if (ban && hero && hn && vis(hn) && performance.now() < H.until && !sel.classList.contains('lss-launching')) {
+        const ml = document.getElementById('ss-mode-label');
+        const K = window.__ssBanner || {};
+        const gap = (K.gap != null && isFinite(+K.gap)) ? +K.gap : 6;
+        const top0 = (ml && vis(ml)) ? ml.getBoundingClientRect().bottom : EDGE;
+        const bh = ban.getBoundingClientRect().height;   // both lines are nowrap: stable while it types in
+        const nameT = hn.getBoundingClientRect().top;
+        const need = top0 + gap + bh + gap;              // where the name has to start for the band to hold it
+        let mid = (top0 + nameT) / 2;                    // centred in the band when it fits
+        if (need > nameT) {
+          // The sheet's `top` plus the shortfall - relative, so it holds whatever #ship-hero's
+          // containing block is, and whichever breakpoint set the sheet's number.
+          const base = parseFloat(getComputedStyle(hero).top) || 0;
+          hero.style.setProperty('top', Math.round(base + (need - nameT)) + 'px', 'important');
+          mid = top0 + gap + bh / 2;
+        }
+        // #ov-banner is translate(-50%, -50%), so `top` is its CENTRE line.
+        ban.style.setProperty('top', Math.round(mid) + 'px', 'important');
       }
     } catch (_) {}
 
@@ -128521,6 +128629,10 @@ const Overlays = (() => {
       ln.style.animation = 'none'; void ln.offsetWidth; ln.style.animation = '';
       ln.style.animationDuration = _bd + 's';
     });
+    // (v48.29) Over the ship picker it goes between the masthead and the ship's name, not at the
+    // sheet's 18% - see _ssBannerHold. Every banner, not just ROOM MODE: any banner over the picker
+    // would land in the same place. A no-op placement (the sheet's own) when the picker is not up.
+    try { _ssBannerHold(el, _bd); } catch (_) {}
   }
 
   return { damageVignette, warp, underwater, killStreak, countdown, medal, abilityFlash, respawn, hideRespawn, banner };   // (v40.57) endCountdown retired with #ov-countdown; launchCountdown calls _cdClear() instead
@@ -129899,6 +130011,82 @@ function _lblHullR(o) {
   } catch (_) { return _fallback(); }
 }
 
+// ⭐⭐ (v48.29) A TAG BELONGS TO A HULL YOU CAN SEE - SO ANOTHER SHIP IN FRONT OF IT HIDES IT.
+// Owner, solo elimination: "round two elimination, i saw a slayer ship named syphon on its callout tag".
+// ⚠ NOT A WRONG HULL, AS FAR AS ANYTHING MEASURED SAYS. A solo two-round audit of every bot (name vs
+//   the hull its group was built for, `_poolKey`; mesh ownership; mesh-to-entity offset; stray pooled
+//   hulls in the scene) came back clean in round 1 AND round 2, and no code path hands a bot a hull that
+//   is not its own. What the callout path DOES do is draw a ship's tag through every other ship: the
+//   LOS gate above has only ever asked the LEVEL (raycastLevel: SDF, level boxes, carrier / city hulls)
+//   and the rock clusters - v40.59 says it in as many words: "terrain and hulls were never in this
+//   function". So a SYPHON flying straight on behind a SLAYER puts its bracket on the SLAYER's hull,
+//   and the squad nav (v47.75: regroup, fan out, SUPPORT) is precisely what parks a wingman there.
+//   Same shape as the open Custom Location report "a traffic ship was named slayer" (a freighter is a
+//   hull the LOS never saw either).
+// The rule: when another ship's hull sits on the CAMERA's line to this ship's centre - in front of it,
+// within `k` of that ship's measured half-extent - this tag is occluded, and it goes down through the
+// same soft gate as a wall (hold, then drop; earn the way back), so a ship crossing behind another
+// does not blink. From the CAMERA, not the pilot: this is about what is drawn in front on screen, and
+// in the chase cam the two differ. The local pilot's own hull is not an occluder (you know your ship).
+// Knob: window.__tagOcc = { on: true, k: 0.6, pad: 20 } - `on: false` restores the old see-through tags.
+const _lblOccCam = new THREE.Vector3();
+function _lblHullOccluded(ent) {
+  try {
+    const K = (typeof window !== 'undefined' && window.__tagOcc) || {};
+    if (K.on === false || !ent || !ent.position || typeof camera === 'undefined' || !camera) return false;
+    const k = (K.k != null && isFinite(+K.k)) ? +K.k : 0.6;
+    const pad = (K.pad != null && isFinite(+K.pad)) ? +K.pad : 20;
+    camera.getWorldPosition(_lblOccCam);
+    const cx = _lblOccCam.x, cy = _lblOccCam.y, cz = _lblOccCam.z;
+    let dx = ent.position.x - cx, dy = ent.position.y - cy, dz = ent.position.z - cz;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d < 1) return false;
+    dx /= d; dy /= d; dz /= d;
+    const E = game.entities || [];
+    for (let i = 0; i < E.length; i++) {
+      const o = E[i];
+      if (!o || o === ent || !o.alive || !o.position) continue;
+      const om = o.mesh;
+      if (!om || om.visible === false || !om.parent) continue;   // an occluder has to be drawn too
+      const ox = o.position.x - cx, oy = o.position.y - cy, oz = o.position.z - cz;
+      const tp = ox * dx + oy * dy + oz * dz;
+      if (tp <= 0 || tp >= d - pad) continue;                    // behind the camera, or not in FRONT of ent
+      const px = ox - dx * tp, py = oy - dy * tp, pz = oz - dz * tp;
+      const r = _lblHullR(o) * k;
+      if (px * px + py * py + pz * pz < r * r) return true;
+    }
+  } catch (_) {}
+  return false;
+}
+// (v48.29) ...AND IF A SHIP EVER IS WEARING THE WRONG HULL, SAY SO. Nothing measured has caught it, so
+// this is the net for next time rather than a fix: at the LOS rate, compare the hull the group was
+// built for (`_poolKey`, written by buildModelShipMesh) with the ship the tag names, and for a Bot check
+// that the group still points back at IT (`userData.bot` - the pool re-points it on every hand-out, so a
+// hull shared by two bots shows up here). One console line per new finding, kept in
+// window.__tagAuditLog (last 40) for the owner's F8 / a pasted report.
+function _lblTagAudit(ent) {
+  try {
+    const m = ent && ent.mesh;
+    if (!m || !m.userData) return;
+    const pk = m.userData._poolKey;
+    const want = ent.hoardModelKey || ent.loadoutKey;
+    let why = null;
+    if (pk && want && pk.indexOf(want + '|') !== 0) why = 'wearing a ' + pk.split('|')[0] + ' hull';
+    else if (m.userData.bot && m.userData.bot !== ent && _lssIsBot(ent)) {
+      const b = m.userData.bot;
+      why = 'flying a hull that belongs to ' + b.id + ':' + b.loadoutKey;
+    }
+    if (why === (ent._tagAuditWhy || null)) return;
+    ent._tagAuditWhy = why;
+    if (!why) return;
+    const rec = { t: +((game && game.time) || 0).toFixed(1), round: (game && game.currentRound) | 0, state: game && game.state,
+                  id: ent.id, name: (ent.loadout && ent.loadout.name) || null, key: ent.loadoutKey || null, why: why };
+    const L = (window.__tagAuditLog || (window.__tagAuditLog = []));
+    L.push(rec); if (L.length > 40) L.shift();
+    console.warn('[tag-audit] ' + rec.name + ' (' + rec.id + ') is ' + why + ' - round ' + rec.round + ', ' + rec.state);
+  } catch (_) {}
+}
+
 function updateEnemyHealthBars() {
   if (!hbarPool.initialized) initHbarPool(24, 8);
 
@@ -129930,7 +130118,11 @@ function updateEnemyHealthBars() {
     // had this test (_lockShown: "(!o.mesh || o.mesh.visible)"); the callout never did, which is why a
     // hidden-but-alive entity kept its tag. Belt and braces with the _cloaked write above: either one
     // alone fixes the reported ghost, and anything else that hides a hull without saying so is covered.
-    if (ent.mesh && ent.mesh.visible === false) return;
+    // (v48.29) ...and a hull that is not IN THE SCENE is not being drawn either. `visible` alone missed
+    // it: Bot.die, the bot ship pool and the kill cam's hand-back all take a hull out of the scene with
+    // `parent.remove` and leave `visible` true, so any live entity left in that state wore a tag over
+    // empty space - and whatever ship happened to be flying there wore the name.
+    if (ent.mesh && (ent.mesh.visible === false || !ent.mesh.parent)) return;
     ent._lblHeld = false;   // (v40.55) set by _lblSoftGate below; the draw point only clears the hold clock when NO gate held
     // (v40.61) what the LAST frame actually drew, which is the only thing that makes a hold
     // legitimate (see _lblSoftGate). Cleared here and set again only where the div is shown, so
@@ -129980,8 +130172,10 @@ function updateEnemyHealthBars() {
       // carrier so shots would stop at it; this test then found the hull between the player and
       // the hull, marked it occluded, and the carrier never got a tag at all.
       const wallDist = raycastLevel(player.position, toEnt, dist + 50, true, !!ent.isCarrier);
-      ent._hbLosBlocked = (wallDist < dist - 30) || _losBlockedByClusters(player.position, toEnt, dist);
+      ent._hbLosBlocked = (wallDist < dist - 30) || _losBlockedByClusters(player.position, toEnt, dist) ||
+                          _lblHullOccluded(ent);   // (v48.29) another SHIP in front of it - see _lblHullOccluded
       ent._hbLosTime = now;
+      _lblTagAudit(ent);   // (v48.29) at the LOS rate, not per frame: is it wearing its own hull?
     }
     // (v40.55) SOFT, and this is the loud one. _hbLosBlocked is re-raycast at ~15 Hz (see
     // HBAR_LOS_INTERVAL) and flips as a ship grazes cover, so the tag blinked at up to 15 Hz AND
@@ -132410,11 +132604,25 @@ function gameLoop(timestamp) {
   // un-shootable (field stuck, v32.74) and stopped rendering the real model (v32.73).
   // Re-add it whenever a rebuild dropped it, and tick its swap on that re-add frame
   // (updateMonsters' loop ticks it every following frame).
+  // ⭐⭐ (v48.29) ...EXCEPT IN THE MODES WHERE THAT LOOP NEVER RUNS. Owner: "In Cyberpunk City mode,
+  // there was a purple shell while attacking in the first round, it wasn't the shell sphere.glb".
+  // "Every following frame" was only true for classic and race. updateMonsters returns before its
+  // loop on `LSS.MODE === 'freeflight' || 'assault'` (and on potato and noMonsters maps), and
+  // CYBERPUNK CITY *is* freeflight - so there the shell was never ticked at all: no late swap to the
+  // real Sphere.glb, no spin, and `_hitFxTimer` never counted down, so only its first hit ever
+  // sparked. Cyberpunk also never preloaded the model (see _cyberPrefetch), so round 1 always built
+  // the violet fallback husk and then wore it for the whole round; round 2 came up right only
+  // because round 1's spawn had kicked the load. Assault got away with it because startAssault
+  // preloads - it still had the dead spin and the one-spark hits.
+  // So tick it here whenever the loop did not: the re-add frame, as before, and every frame of a mode
+  // that skips the loop. `updateMonsters._ticked` is set just before that loop, so this can never
+  // double-tick the modes that do run it.
   if (game && game.championShell && game.championShell.alive) {
     const _sh = game.championShell;
     if (!game.monsters) game.monsters = [];
-    if (game.monsters.indexOf(_sh) < 0) {
-      game.monsters.push(_sh);
+    const _shWasIn = game.monsters.indexOf(_sh) >= 0;
+    if (!_shWasIn) game.monsters.push(_sh);
+    if (!_shWasIn || !updateMonsters._ticked) {
       if (typeof _sh.update === 'function') { try { _sh.update(dt); } catch (_) {} }
     }
   }

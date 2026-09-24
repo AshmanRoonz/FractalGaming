@@ -9,7 +9,7 @@ function _bootLSS() {
 
 
 
-const LSS_BUILD = "48.28";
+const LSS_BUILD = "48.30";
 const _RPL = { rec: false, replay: false, cur: null, last: null, kc: null, kcAt: 0, _st: null, nest: 0, sndNest: 0, studio: null, lib: [],
                theater: null, libSolo: null };
 try {
@@ -30270,7 +30270,10 @@ const CYBER = {
   capture: 12,        // seconds an attacker must hold the field to win
   botShips: ['VORTEX', 'PYRO', 'TRACKER', 'SLAYER', 'PUNCTURE', 'SYPHON', 'BLASTER'],
 };
-function _cyberPrefetch() { try { _carrierPreload(); } catch (_) {} }
+function _cyberPrefetch() {
+  try { _carrierPreload(); } catch (_) {}
+  try { if (typeof _preloadChampionShellModel === 'function') _preloadChampionShellModel(); } catch (_) {}
+}
 function _cyberPrePlace() {
   const C = (typeof game !== 'undefined' && game) ? game._cyber : null;
   if (!C || !C.armed || C.started || C.prePlaced) return;
@@ -52449,6 +52452,7 @@ function _updateMonsterSummon(dt) {
 }
 
 function updateMonsters(dt) {
+  updateMonsters._ticked = false;
   if (typeof QUALITY !== 'undefined' && QUALITY.isPotato && QUALITY.isPotato()) return;
   if (!game || (game.state !== 'playing' && game.state !== 'warmup' && game.state !== 'roundEnd')) return;
   if (typeof LSS !== 'undefined' && (LSS.MODE === 'freeflight' || LSS.MODE === 'assault')) return;
@@ -52480,6 +52484,7 @@ function updateMonsters(dt) {
     _monsterRoundReset();
   }
   if (typeof _updateMonsterSummon === 'function') _updateMonsterSummon(dt);
+  updateMonsters._ticked = true;   // (v48.29) see the top of this function
   for (let i = 0; i < game.monsters.length; i++) {
     const m = game.monsters[i];
     if (m.alive) m.update(dt);
@@ -73854,6 +73859,7 @@ function _lssSyncCyberToTag(tag) {
                         msalt: (Math.random() * 1e9) | 0 };
       }
       try { if (typeof net !== 'undefined' && net) net.cyber = true; } catch (_) {}
+      try { if (typeof _cyberPrefetch === 'function') _cyberPrefetch(); } catch (_) {}
     } else {
       try { if (typeof _lssClearModeSetup === 'function') _lssClearModeSetup(); } catch (_) {}
       try { if (typeof game !== 'undefined' && game) game._cyber = null; } catch (_) {}
@@ -74316,14 +74322,16 @@ function _lssAdoptRoomMode(mode) {
   } catch (_) {}
 }
 function _lssSayRoomMode(mode) {
+  let _name = String(mode).toUpperCase();
+  try { if (typeof _lssModeDisplayName === 'function') _name = _lssModeDisplayName(mode); } catch (_) {}
   try {
     const el = document.getElementById('lobby-status');
     if (el) {
-      el.textContent = 'ROOM IS PLAYING ' + String(mode).toUpperCase() + ' — JOINED THAT';
+      el.textContent = 'ROOM IS PLAYING ' + _name + ' — JOINED THAT';
       el.style.color = '#ffd36e';
     }
   } catch (_) {}
-  try { if (typeof _owBanner === 'function') _owBanner('ROOM MODE', String(mode).toUpperCase()); } catch (_) {}
+  try { if (typeof _owBanner === 'function') _owBanner('ROOM MODE', _name); } catch (_) {}
 }
 
 try {
@@ -74359,6 +74367,30 @@ function _ssPerkArrows() {
     next.classList.toggle('on', overflows);
     prev.disabled = grid.scrollLeft <= 1;
     next.disabled = grid.scrollLeft >= grid.scrollWidth - grid.clientWidth - 1;
+  } catch (_) {}
+}
+
+function _ssBannerHold(el, secs) {
+  const st = _ssBannerHold._st || (_ssBannerHold._st = { el: null, until: 0, t: null });
+  try {
+    const ms = Math.max(0.2, (typeof secs === 'number' && secs > 0) ? secs : 3) * 1000;
+    if (st.t) { clearTimeout(st.t); st.t = null; }
+    if (el) el.style.removeProperty('top');
+    st.el = el || null;
+    st.until = performance.now() + ms;
+    st.t = setTimeout(_ssBannerRelease, ms + 40);   // just past the ovBanner fade
+    _ssSpreadRails();
+  } catch (_) {}
+}
+function _ssBannerRelease() {
+  try {
+    const st = _ssBannerHold._st;
+    if (st) { if (st.t) { clearTimeout(st.t); st.t = null; } st.el = null; st.until = 0; }
+    const ban = document.getElementById('ov-banner');
+    if (ban) ban.style.removeProperty('top');
+    const hero = document.getElementById('ship-hero');
+    if (hero) hero.style.removeProperty('top');
+    _ssSpreadRails();
   } catch (_) {}
 }
 
@@ -74417,6 +74449,31 @@ function _ssSpreadRails() {
         if (cR > bandR) dx = bandR - cR;
         if (cL + dx < bandL) dx = bandL - cL;
         ml.style.setProperty('--ssm-dx', Math.round(dx) + 'px');
+      }
+    } catch (_) {}
+
+    try {
+      const hero = document.getElementById('ship-hero');
+      const hn = document.getElementById('ship-hero-name');
+      const H = _ssBannerHold._st;
+      const ban = H ? H.el : null;
+      if (hero) hero.style.removeProperty('top');
+      if (ban) ban.style.removeProperty('top');
+      if (ban && hero && hn && vis(hn) && performance.now() < H.until && !sel.classList.contains('lss-launching')) {
+        const ml = document.getElementById('ss-mode-label');
+        const K = window.__ssBanner || {};
+        const gap = (K.gap != null && isFinite(+K.gap)) ? +K.gap : 6;
+        const top0 = (ml && vis(ml)) ? ml.getBoundingClientRect().bottom : EDGE;
+        const bh = ban.getBoundingClientRect().height;   // both lines are nowrap: stable while it types in
+        const nameT = hn.getBoundingClientRect().top;
+        const need = top0 + gap + bh + gap;              // where the name has to start for the band to hold it
+        let mid = (top0 + nameT) / 2;                    // centred in the band when it fits
+        if (need > nameT) {
+          const base = parseFloat(getComputedStyle(hero).top) || 0;
+          hero.style.setProperty('top', Math.round(base + (need - nameT)) + 'px', 'important');
+          mid = top0 + gap + bh / 2;
+        }
+        ban.style.setProperty('top', Math.round(mid) + 'px', 'important');
       }
     } catch (_) {}
 
@@ -83723,6 +83780,7 @@ const Overlays = (() => {
       ln.style.animation = 'none'; void ln.offsetWidth; ln.style.animation = '';
       ln.style.animationDuration = _bd + 's';
     });
+    try { _ssBannerHold(el, _bd); } catch (_) {}
   }
 
   return { damageVignette, warp, underwater, killStreak, countdown, medal, abilityFlash, respawn, hideRespawn, banner };   // (v40.57) endCountdown retired with #ov-countdown; launchCountdown calls _cdClear() instead
@@ -84870,6 +84928,58 @@ function _lblHullR(o) {
   } catch (_) { return _fallback(); }
 }
 
+const _lblOccCam = new THREE.Vector3();
+function _lblHullOccluded(ent) {
+  try {
+    const K = (typeof window !== 'undefined' && window.__tagOcc) || {};
+    if (K.on === false || !ent || !ent.position || typeof camera === 'undefined' || !camera) return false;
+    const k = (K.k != null && isFinite(+K.k)) ? +K.k : 0.6;
+    const pad = (K.pad != null && isFinite(+K.pad)) ? +K.pad : 20;
+    camera.getWorldPosition(_lblOccCam);
+    const cx = _lblOccCam.x, cy = _lblOccCam.y, cz = _lblOccCam.z;
+    let dx = ent.position.x - cx, dy = ent.position.y - cy, dz = ent.position.z - cz;
+    const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    if (d < 1) return false;
+    dx /= d; dy /= d; dz /= d;
+    const E = game.entities || [];
+    for (let i = 0; i < E.length; i++) {
+      const o = E[i];
+      if (!o || o === ent || !o.alive || !o.position) continue;
+      const om = o.mesh;
+      if (!om || om.visible === false || !om.parent) continue;   // an occluder has to be drawn too
+      const ox = o.position.x - cx, oy = o.position.y - cy, oz = o.position.z - cz;
+      const tp = ox * dx + oy * dy + oz * dz;
+      if (tp <= 0 || tp >= d - pad) continue;                    // behind the camera, or not in FRONT of ent
+      const px = ox - dx * tp, py = oy - dy * tp, pz = oz - dz * tp;
+      const r = _lblHullR(o) * k;
+      if (px * px + py * py + pz * pz < r * r) return true;
+    }
+  } catch (_) {}
+  return false;
+}
+function _lblTagAudit(ent) {
+  try {
+    const m = ent && ent.mesh;
+    if (!m || !m.userData) return;
+    const pk = m.userData._poolKey;
+    const want = ent.hoardModelKey || ent.loadoutKey;
+    let why = null;
+    if (pk && want && pk.indexOf(want + '|') !== 0) why = 'wearing a ' + pk.split('|')[0] + ' hull';
+    else if (m.userData.bot && m.userData.bot !== ent && _lssIsBot(ent)) {
+      const b = m.userData.bot;
+      why = 'flying a hull that belongs to ' + b.id + ':' + b.loadoutKey;
+    }
+    if (why === (ent._tagAuditWhy || null)) return;
+    ent._tagAuditWhy = why;
+    if (!why) return;
+    const rec = { t: +((game && game.time) || 0).toFixed(1), round: (game && game.currentRound) | 0, state: game && game.state,
+                  id: ent.id, name: (ent.loadout && ent.loadout.name) || null, key: ent.loadoutKey || null, why: why };
+    const L = (window.__tagAuditLog || (window.__tagAuditLog = []));
+    L.push(rec); if (L.length > 40) L.shift();
+    console.warn('[tag-audit] ' + rec.name + ' (' + rec.id + ') is ' + why + ' - round ' + rec.round + ', ' + rec.state);
+  } catch (_) {}
+}
+
 function updateEnemyHealthBars() {
   if (!hbarPool.initialized) initHbarPool(24, 8);
 
@@ -84893,7 +85003,7 @@ function updateEnemyHealthBars() {
   _lblFrameId++;   // (v40.55) one stamp per frame; a slot left unstamped below is unused and gets hidden
   const _processShipForLabel = (ent) => {
     if (!ent || !ent.alive || !ent.position || !ent.loadout) return;
-    if (ent.mesh && ent.mesh.visible === false) return;
+    if (ent.mesh && (ent.mesh.visible === false || !ent.mesh.parent)) return;
     ent._lblHeld = false;   // (v40.55) set by _lblSoftGate below; the draw point only clears the hold clock when NO gate held
     ent._lblUpPrev = !!ent._lblUp;
     ent._lblUp = false;
@@ -84915,8 +85025,10 @@ function updateEnemyHealthBars() {
     if (ent._hbLosTime == null || now - ent._hbLosTime >= HBAR_LOS_INTERVAL) {
       const toEnt = _hbTmpA.subVectors(ent.position, player.position).normalize();
       const wallDist = raycastLevel(player.position, toEnt, dist + 50, true, !!ent.isCarrier);
-      ent._hbLosBlocked = (wallDist < dist - 30) || _losBlockedByClusters(player.position, toEnt, dist);
+      ent._hbLosBlocked = (wallDist < dist - 30) || _losBlockedByClusters(player.position, toEnt, dist) ||
+                          _lblHullOccluded(ent);   // (v48.29) another SHIP in front of it - see _lblHullOccluded
       ent._hbLosTime = now;
+      _lblTagAudit(ent);   // (v48.29) at the LOS rate, not per frame: is it wearing its own hull?
     }
     if (!_lblSoftGate(ent, !ent._hbLosBlocked, now)) { return; }
     if (ent._lblDown) {
@@ -86346,8 +86458,9 @@ function gameLoop(timestamp) {
   if (game && game.championShell && game.championShell.alive) {
     const _sh = game.championShell;
     if (!game.monsters) game.monsters = [];
-    if (game.monsters.indexOf(_sh) < 0) {
-      game.monsters.push(_sh);
+    const _shWasIn = game.monsters.indexOf(_sh) >= 0;
+    if (!_shWasIn) game.monsters.push(_sh);
+    if (!_shWasIn || !updateMonsters._ticked) {
       if (typeof _sh.update === 'function') { try { _sh.update(dt); } catch (_) {} }
     }
   }
